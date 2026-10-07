@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"net/http"
 	"os"
@@ -39,6 +40,9 @@ import (
 	"github.com/unicitynetwork/bft-core/keyvaluedb/boltdb"
 	"github.com/unicitynetwork/bft-core/network"
 	"github.com/unicitynetwork/bft-core/network/protocol/certification"
+	"github.com/unicitynetwork/bft-core/q3active"
+	"github.com/unicitynetwork/bft-core/q3delivery"
+	"github.com/unicitynetwork/bft-core/q3shard"
 	"github.com/unicitynetwork/bft-core/registrygenesis"
 	"github.com/unicitynetwork/bft-core/registryproof"
 	rctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
@@ -300,6 +304,8 @@ type shardNodeRunFlags struct {
 	ArchiveReplicas      []string
 	ArchivePrune         bool
 	TrustHistoryProfile2 bool
+	Q3Lane               bool // the Q3 acceptance lane: this node's own verified V3 runtime from the pinned genesis
+	Q3JournalDB          string
 	Restore              bool
 	RestoreTipUC         string
 	RestoreTipTR         string
@@ -416,6 +422,12 @@ protocol and docs/engine-api-adapter-plan.md for how this command's pieces fit t
 		"advance the certified frontier and prune acknowledged journal history; requires --archive-store")
 	cmd.Flags().BoolVar(&flags.TrustHistoryProfile2, "trust-history-profile-2", false,
 		"verify old-set handoff commit proofs before admitting successor trust epochs; requires --execution-journal")
+	cmd.Flags().BoolVar(&flags.Q3Lane, "q3-lane", false,
+		"run the Q3 acceptance lane: follow V3 root epochs through this node's own verified runtime (requires --trust-history-profile-2)")
+	cmd.Flags().StringVar(&flags.Q3JournalDB, "q3-journal-db", "",
+		fmt.Sprintf("Q3 install journal database (default: %s)", filepath.Join("$UBFT_HOME", q3JournalDBFileName)))
+	_ = cmd.Flags().MarkHidden("q3-lane")
+	_ = cmd.Flags().MarkHidden("q3-journal-db")
 	cmd.Flags().StringVar(&flags.CertifiedRecordStore, "certified-record-store", "",
 		"path of the certified-block record store (#14); empty leaves it off. Requires --executor engine-api and a SealRegistry shard configuration. The record is reloaded and reported at startup, and the witness of every block the round commits is captured over --eth-url and published; none of it changes voting")
 	cmd.Flags().IntVar(&flags.CertifiedRecordRetain, "certified-record-retain", defaultCertifiedRecordRetain,
@@ -463,6 +475,9 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 	}
 	if flags.TrustHistoryProfile2 && flags.ExecutionJournal == "" {
 		return errors.New("--trust-history-profile-2 requires --execution-journal")
+	}
+	if flags.Q3Lane && !flags.TrustHistoryProfile2 {
+		return errors.New("--q3-lane requires --trust-history-profile-2")
 	}
 	if flags.EVMTransitionFile != "" && flags.Executor != "engine-api" {
 		return errors.New("--engine-epoch-transition requires --executor=engine-api")
@@ -626,6 +641,12 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 	}
 	var executionID [32]byte
 	var handoffFollower *shardnode.HandoffFollower
+	var q3rt *q3active.Runtime
+	var q3Admit headAdmitter
+	var q3Trust *q3shard.Q3TrustStore
+	var q3Follower *q3shard.Q3Follower
+	var epochTrust shardEpochTrust
+	var catcher shardCatchUp
 	if flags.ExecutionJournal != "" {
 		adapter, ok := executor.(*engineapi.Adapter)
 		if !ok || !origin.Valid() {
@@ -646,9 +667,31 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 		}
 		trustBaseStore = historical
 		historicalTrust = historical
+		epochTrust = historical
 		verifierContext.TrustBases = historical
 		if flags.TrustHistoryProfile2 {
 			verifierContext.EpochAuthority = historical
+		}
+		if flags.Q3Lane {
+			// The shard node (the EVM pair's Go) trusts its own verification from the pinned genesis: a verified Q3 history and install
+			// journal of its own, and a trust store that serves a V3 epoch only once the journal completed it.
+			journalDB, jErr := flags.initDB(flags.Q3JournalDB, q3JournalDBFileName)
+			if jErr != nil {
+				return jErr
+			}
+			if closer, ok := journalDB.(io.Closer); ok {
+				defer closer.Close()
+			}
+			if q3rt, jErr = q3active.New(q3active.Config{DB: journalDB, Genesis: trustBases[0]}); jErr != nil {
+				return fmt.Errorf("q3 runtime: %w", jErr)
+			}
+			if q3Admit, jErr = wireQ3Pair(executor, q3rt, uint64(shardConf.NetworkID), origin.Valid(), [32]byte(origin.BlockHash())); jErr != nil {
+				return jErr
+			}
+			q3Trust = q3shard.NewQ3TrustStore(historical, q3rt)
+			trustBaseStore, epochTrust = q3Trust, q3Trust
+			verifierContext.TrustBases = q3Trust
+			verifierContext.EpochAuthority = q3Trust
 		}
 	}
 	if origin.Valid() && flags.Executor == "engine-api" {
@@ -738,8 +781,8 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 		recordCtx := certifiedstore.Context{NetworkID: shardConf.NetworkID, PartitionID: shardConf.PartitionID, ShardID: shardConf.ShardID, FullShardConfHash: confHash, Registry: origin.ProofContext(), TrustBases: trustBaseStore}
 		journalCtx := configuredprogress.Context{Origin: origin, ExecutionConfigV2: executionID, Observation: rootinput.ObservationContextV2{NetworkID: shardConf.NetworkID, PartitionID: shardConf.PartitionID, ShardID: shardConf.ShardID, ShardConfHash: confHash, ConfForEpoch: node.ShardConfForEpoch, RootEpoch: trustBases[0].GetEpoch(), TrustBases: trustBaseStore}, Record: recordCtx}
 		if flags.TrustHistoryProfile2 {
-			journalCtx.Observation.EpochAuthority = historicalTrust
-			journalCtx.Record.EpochAuthority = historicalTrust
+			journalCtx.Observation.EpochAuthority = epochTrust
+			journalCtx.Record.EpochAuthority = epochTrust
 		}
 		var archiveLocal *archive.Store
 		var archiveSubject archive.Context
@@ -806,7 +849,7 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 		}
 		restoringHandoffHistory := flags.TrustHistoryProfile2
 		var restoredHandoffTerminals []handoffTerminalCertificate
-		if flags.TrustHistoryProfile2 {
+		if flags.TrustHistoryProfile2 && q3rt == nil {
 			currentRoots := make([]libp2ppeer.ID, 0, len(bootNodes))
 			for _, root := range bootNodes {
 				currentRoots = append(currentRoots, root.ID)
@@ -906,9 +949,84 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 					return bundle, err
 				}
 			}
+			catcher = v2CatchUp{handoffFollower}
+		}
+		if q3rt != nil {
+			currentRoots := make([]libp2ppeer.ID, 0, len(bootNodes))
+			for _, root := range bootNodes {
+				currentRoots = append(currentRoots, root.ID)
+			}
+			installer := &shardQ3Installer{
+				Partition: shardConf.PartitionID, Shard: shardConf.ShardID, AnchorEpoch: trustBases[0].GetEpoch(), AnchorConf: confHash,
+				Trust:   q3Trust.Verified().GetByEpoch,
+				Signing: q3rt.Signing,
+				Terminal: func(ctx context.Context, verified handoffdelivery.Verified) error {
+					terminalCtx, err := configuredprogress.TerminalContext(journalCtx, verified.Shard.ShardConfHash, verified.Shard.TR.Epoch)
+					if err != nil {
+						return fmt.Errorf("handoff terminal certificate context: %w", err)
+					}
+					// the terminal certificate belongs to the epoch this handoff ends: verified from the history, not from what the journal has admitted
+					terminalCtx.Observation.TrustBases = q3Trust.Verified()
+					terminalCtx.Record.TrustBases = q3Trust.Verified()
+					terminal, err := rootinput.AuthenticateObservationV2(ctx, terminalCtx.Observation, verified.Shard.UC, verified.Shard.TR)
+					if err != nil {
+						return fmt.Errorf("authenticating handoff terminal certificate: %w", err)
+					}
+					if restoringHandoffHistory {
+						uc, tr := *verified.Shard.UC, *verified.Shard.TR
+						restoredHandoffTerminals = append(restoredHandoffTerminals, handoffTerminalCertificate{uc: &uc, tr: &tr})
+						return nil
+					}
+					prepared, _, err := journalStore.PrepareObservation(ctx, terminalCtx, terminal)
+					if err != nil {
+						return fmt.Errorf("preparing handoff terminal certificate: %w", err)
+					}
+					if _, _, err := journalStore.CommitObservation(prepared); err != nil {
+						return fmt.Errorf("persisting handoff terminal certificate: %w", err)
+					}
+					return nil
+				},
+				Transition: verifierContext.InstallVerifiedTransition,
+				InstallAssignment: func(view handoffdelivery.Bundle, step handoff.AssignmentStep) error {
+					return installVerifiedAssignment(node, activePeers, view, step)
+				},
+				NoteJoiner: func(view handoffdelivery.Bundle, step handoff.AssignmentStep) error {
+					return noteJoinerStep(signing, view, step, node.ShardConfForEpoch)
+				},
+				InstallEVMTransition: executor.(*engineapi.Adapter).InstallEpochTransition,
+				Activate:             q3Trust.ActivateQ3,
+				Log: func(epoch uint64) {
+					flags.observe.Logger().Info("handoff activated", "rootEpoch", epoch, "q3", true)
+				},
+			}
+			apply := installer.Apply
+			sink := &shardQ3Sink{verify: apply, holds: func(epoch uint64) bool {
+				current, ok := q3Trust.CurrentRootEpoch()
+				return ok && current >= epoch
+			}}
+			if err := q3rt.Attach(q3active.Participants{Root: sink, Safety: q3rt.Trust(nil), Shard: q3Trust.Guarded(), Authority: q3rt.Trust(nil)}); err != nil {
+				return fmt.Errorf("q3 runtime: %w", err)
+			}
+			q3Follower = &q3shard.Q3Follower{Runtime: q3rt, AnchorEpoch: trustBases[0].GetEpoch(), CurrentRoots: currentRoots,
+				Fetch: func(ctx context.Context, id libp2ppeer.ID, epoch uint64) (q3active.Bundle, error) {
+					return q3delivery.Request(ctx, peer, id, epoch)
+				}}
+			catcher = q3Follower
 		}
 		var restoreLineage func(context.Context) error
-		if handoffFollower != nil {
+		if q3rt != nil {
+			// the journal completes or restores every staged activation (re-applying the shard's volatile installs in epoch order) before
+			// the journal admission opens
+			restoreLineage = func(ctx context.Context) error {
+				if err := q3rt.Recover(ctx); err != nil {
+					return fmt.Errorf("q3 runtime recovery: %w", err)
+				}
+				if !flags.Restore {
+					restoringHandoffHistory = false
+				}
+				return nil
+			}
+		} else if handoffFollower != nil {
 			restoreLineage = func(ctx context.Context) error {
 				if err := handoffFollower.Restore(ctx); err != nil {
 					return err
@@ -928,6 +1046,12 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 			nil); startupErr != nil {
 			flags.observe.Logger().Error("profile2 handoff terminal repair failed", "error", startupErr)
 			return startupErr
+		}
+		if q3Admit != nil {
+			// everything the restart replayed is verified; the execution client's head is admitted from this node's own derivation
+			if err := admitRestartedHead(ctx, q3Admit); err != nil {
+				return err
+			}
 		}
 		// A plain restart of a joiner: the persisted verified steps were replayed above; bind the key of the latest one that names this
 		// node, or refuse. (A restore does the same after its catch-up, below.)
@@ -979,7 +1103,7 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 				if err := peer.BootstrapConnect(ctx, flags.observe.Logger()); err != nil {
 					return fmt.Errorf("restore bootstrap connect: %w", err)
 				}
-				if _, err := handoffFollower.CatchUp(ctx, uc.GetRootEpoch()); err != nil {
+				if err := catcher.CatchUp(ctx, uc.GetRootEpoch()); err != nil {
 					return err
 				}
 				// Every step up to the pinned epoch is verified and installed: the set is rebuilt. The configured replicas are validated
@@ -994,7 +1118,7 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 				if err != nil {
 					return err
 				}
-				return checkRestoreTrustBodyID(pin, historicalTrust, uc.GetRootEpoch())
+				return checkRestoreTrustBodyID(pin, epochTrust, uc.GetRootEpoch())
 			}
 			restoreArchive := func(ctx context.Context) error {
 				genesis, genesisErr := executor.GenesisBlock(ctx)
@@ -1108,8 +1232,8 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 		readOperatorStatus = func(statusCtx context.Context) (archivewiring.OperatorStatus, error) {
 			rootEpoch := trustBases[0].GetEpoch()
 			var activated []uint64
-			if historicalTrust != nil {
-				if active, ok := historicalTrust.CurrentRootEpoch(); ok && active >= rootEpoch {
+			if epochTrust != nil {
+				if active, ok := epochTrust.CurrentRootEpoch(); ok && active >= rootEpoch {
 					rootEpoch = active
 					for epoch := trustBases[0].GetEpoch() + 1; epoch <= active; epoch++ {
 						activated = append(activated, epoch)
@@ -1191,6 +1315,9 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 	g.Go(func() error { return serveShardNodeRPC(gctx, flags, node, readOperatorStatus) })
 	if handoffFollower != nil {
 		g.Go(func() error { return handoffFollower.Run(gctx) })
+	}
+	if q3Follower != nil {
+		g.Go(func() error { return q3Follower.Run(gctx) })
 	}
 	return g.Wait()
 }

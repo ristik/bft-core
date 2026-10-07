@@ -30,6 +30,8 @@ import (
 	"github.com/unicitynetwork/bft-core/network"
 	"github.com/unicitynetwork/bft-core/network/protocol/abdrc"
 	"github.com/unicitynetwork/bft-core/observability"
+	"github.com/unicitynetwork/bft-core/q3active"
+	"github.com/unicitynetwork/bft-core/q3delivery"
 	"github.com/unicitynetwork/bft-core/rootchain"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/frontiertransport"
@@ -62,6 +64,8 @@ type (
 		TrustHistoryDBFile  string
 		Profile2            bool
 		InstallHandoffEpoch uint64
+		Q3Lane              bool // the Q3 acceptance lane: a verified Q3 history, the install journal and the V3 handoff pipeline
+		Q3JournalDBFile     string
 
 		BlockRate        uint32
 		MaxRequests      uint   // certification request channel capacity
@@ -123,12 +127,15 @@ func rootNodeRunCmd(baseFlags *baseFlags) *cobra.Command {
 		fmt.Sprintf("path to the orchestration database (default: %s)", filepath.Join("$UBFT_HOME", orchestrationDBFileName)))
 	cmd.Flags().BoolVar(&flags.Profile2, "profile-2", false, "run the version-2 root handoff network profile")
 	cmd.Flags().Uint64Var(&flags.InstallHandoffEpoch, "install-handoff-epoch", 0, "fetch and verify this successor epoch before starting profile-2 consensus")
+	cmd.Flags().BoolVar(&flags.Q3Lane, "q3-lane", false, "run the Q3 acceptance lane: verified Q3 history, install journal and V3 handoffs (requires --profile-2)")
+	cmd.Flags().StringVar(&flags.Q3JournalDBFile, "q3-journal-db", "",
+		fmt.Sprintf("Q3 install journal database (default: %s)", filepath.Join("$UBFT_HOME", q3JournalDBFileName)))
 	cmd.Flags().StringVar(&flags.TrustHistoryDBFile, "trust-history-db", "",
 		fmt.Sprintf("profile-2 trust history database (default: %s)", filepath.Join("$UBFT_HOME", rootTrustHistoryDBFileName)))
 
 	cmd.Flags().Uint32Var(&flags.BlockRate, "block-rate", consensus.BlockRate, "block rate (consensus parameter)")
 
-	hideFlags(cmd, "block-rate")
+	hideFlags(cmd, "block-rate", "q3-lane", "q3-journal-db")
 	return cmd
 }
 
@@ -226,6 +233,28 @@ func rootNodeRun(ctx context.Context, flags *rootNodeRunFlags) error {
 	consensusParams := consensus.NewConsensusParams()
 	consensusParams.BlockRate = time.Duration(flags.BlockRate) * time.Millisecond
 	var options []consensus.Option
+	if flags.Q3Lane && !flags.Profile2 {
+		return errors.New("q3-lane requires profile 2")
+	}
+	var q3rt *q3active.Runtime
+	if flags.Q3Lane {
+		journalDB, openErr := flags.initDB(flags.Q3JournalDBFile, q3JournalDBFileName)
+		if openErr != nil {
+			return openErr
+		}
+		if closer, ok := journalDB.(io.Closer); ok {
+			defer closer.Close()
+		}
+		if q3rt, err = newRootQ3Runtime(journalDB, trustBase); err != nil {
+			return err
+		}
+		// the first trust base is the pinned genesis the verified history is rooted in; the store accepts a V3 epoch's projection only
+		// for a configuration that history holds
+		if err = trustBaseStore.BindSigningAuthority(q3rt); err != nil {
+			return fmt.Errorf("q3 runtime: %w", err)
+		}
+		options = append(options, consensus.WithQ3(q3rt))
+	}
 	if flags.Profile2 {
 		consensusParams.NetworkProfileVersion = storage.ProfileHandoff
 		rootHistoryDB, openErr := flags.initDB(flags.TrustHistoryDBFile, rootTrustHistoryDBFileName)
@@ -274,6 +303,16 @@ func rootNodeRun(ctx context.Context, flags *rootNodeRunFlags) error {
 	if err != nil {
 		return fmt.Errorf("failed initiate distributed consensus manager: %w", err)
 	}
+	if q3rt != nil {
+		if err = attachRootQ3(ctx, q3rt, cm); err != nil {
+			return err
+		}
+		server, srvErr := q3delivery.NewServer(q3BundleProvider{cm: cm, rt: q3rt})
+		if srvErr != nil {
+			return srvErr
+		}
+		server.Register(host)
+	}
 	if frontierServing {
 		stopFrontier, serveErr := serveRootFrontier(ctx, log, host, cm, shardConfs)
 		if serveErr != nil {
@@ -302,7 +341,12 @@ func rootNodeRun(ctx context.Context, flags *rootNodeRunFlags) error {
 		if err != nil {
 			return err
 		}
-		for epoch := cm.InstalledRootEpoch() + 1; epoch <= flags.InstallHandoffEpoch; epoch++ {
+		if q3rt != nil {
+			if err := installQ3Epochs(ctx, host, peers, q3rt, cm, flags.InstallHandoffEpoch); err != nil {
+				return err
+			}
+		}
+		for epoch := cm.InstalledRootEpoch() + 1; q3rt == nil && epoch <= flags.InstallHandoffEpoch; epoch++ {
 			var installed bool
 			for _, root := range peers {
 				bundle, fetchErr := handoffdelivery.Request(ctx, host, root.ID, epoch)
@@ -353,6 +397,9 @@ func rootNodeRun(ctx context.Context, flags *rootNodeRunFlags) error {
 			mux.HandleFunc("POST /api/v1/handoff/intent", rootHandoffIntentHandler(cm))
 			mux.HandleFunc("POST /api/v1/handoff/endorse", rootHandoffEndorseHandler(cm))
 			mux.HandleFunc("POST /api/v1/handoff/evm-assignment/context", rootHandoffEVMContextHandler(cm))
+			if q3rt != nil {
+				mux.HandleFunc("POST /api/v1/handoff/q3-candidate", rootQ3CandidateHandler(cm))
+			}
 			mux.HandleFunc("POST /api/v1/handoff/abort", rootHandoffAbortHandler(cm))
 			mux.HandleFunc("POST /api/v1/handoff/abort/status", rootHandoffAbortStatusHandler(cm))
 		}

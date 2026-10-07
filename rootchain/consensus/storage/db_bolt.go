@@ -39,6 +39,9 @@ var (
 	// successor body it authorizes; it is committed-history input for the
 	// derived EVM configuration, never a local schedule.
 	keyHandoffCandidate = []byte("handoff/candidate/")
+	// keyHandoffReceipts retains the verified readiness receipts of a V3 successor body's members, by body identity: the evidence the
+	// activation's proof envelope needs beside the body and the candidate.
+	keyHandoffReceipts = []byte("handoff/receipts/")
 )
 
 func handoffMetadataKey(prefix, id []byte) []byte {
@@ -115,6 +118,41 @@ func (db BoltDB) HandoffCandidate(id []byte) ([]byte, error) {
 			return ErrHandoffRecord
 		}
 		data = bytes.Clone(b.Get(handoffMetadataKey(keyHandoffCandidate, id)))
+		return nil
+	})
+	return data, err
+}
+
+// StoreHandoffReceipts retains the verified readiness receipts of a V3 successor body. Rewriting different bytes under the same body id
+// is refused.
+func (db BoltDB) StoreHandoffReceipts(id, receipts []byte) error {
+	if len(id) != 32 || len(receipts) == 0 || len(receipts) > 1<<20 {
+		return ErrHandoffRecord
+	}
+	return db.db.Update(func(tx *bbolt.Tx) error {
+		b := tx.Bucket(bucketMetadata)
+		if b == nil {
+			return ErrHandoffRecord
+		}
+		key := handoffMetadataKey(keyHandoffReceipts, id)
+		if existing := b.Get(key); existing != nil && !bytes.Equal(existing, receipts) {
+			return ErrHandoffRecord
+		}
+		return b.Put(key, receipts)
+	})
+}
+
+func (db BoltDB) HandoffReceipts(id []byte) ([]byte, error) {
+	if len(id) != 32 {
+		return nil, ErrHandoffRecord
+	}
+	var data []byte
+	err := db.db.View(func(tx *bbolt.Tx) error {
+		b := tx.Bucket(bucketMetadata)
+		if b == nil {
+			return ErrHandoffRecord
+		}
+		data = bytes.Clone(b.Get(handoffMetadataKey(keyHandoffReceipts, id)))
 		return nil
 	})
 	return data, err

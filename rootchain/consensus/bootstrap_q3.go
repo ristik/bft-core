@@ -129,6 +129,13 @@ func (x *ConsensusManager) InstallVerifiedEpoch(entry q3format.Entry, proof hand
 	if err != nil {
 		return nil, err
 	}
+	// the activated epoch is the old committee of any further handoff: its authority is the verified entry's, never a V2 body's
+	if x.q3 != nil {
+		bodyID := entry.BodyID()
+		if err := x.blockStore.ConfigureHandoffV3Authority(newTrust, bodyID[:], x.q3.FreezeRules()); err != nil {
+			return nil, fmt.Errorf("handoff authority of the activated epoch: %w", err)
+		}
+	}
 	reqVerifier, err := NewIRChangeReqVerifier(x.params, x.blockStore)
 	if err != nil {
 		return nil, fmt.Errorf("successor request verifier: %w", err)
@@ -212,4 +219,14 @@ func sameCommittee(a, b *basetypes.RootTrustBaseV1) bool {
 		}
 	}
 	return true
+}
+
+// configureV3Authority makes the epoch of a verified Q3 activation the old committee of a further handoff, from the verified history.
+func configureV3Authority(bs *storage.BlockStore, q3 Q3Authority, tb *basetypes.RootTrustBaseV1, epoch uint64) error {
+	entry, ok := q3.Activated(epoch)
+	if !ok {
+		return ErrNotVerifiedEpoch
+	}
+	bodyID := entry.BodyID()
+	return bs.ConfigureHandoffV3Authority(tb, bodyID[:], q3.FreezeRules())
 }

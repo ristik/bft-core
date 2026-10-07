@@ -16,6 +16,7 @@ import (
 	"github.com/unicitynetwork/bft-core/keyvaluedb/memorydb"
 	"github.com/unicitynetwork/bft-core/network"
 	"github.com/unicitynetwork/bft-core/network/protocol/abdrc"
+	"github.com/unicitynetwork/bft-core/q3active"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/storage"
 	tbstore "github.com/unicitynetwork/bft-core/rootchain/consensus/trustbase"
 	"github.com/unicitynetwork/bft-core/rootchain/partitions"
@@ -40,7 +41,11 @@ type planFixture struct {
 }
 
 // newPlanFixture is a four-validator root with a designated EVM shard and a next trust base that replaces one member.
-func newPlanFixture(t *testing.T) *planFixture {
+func newPlanFixture(t *testing.T) *planFixture { return newPlanFixtureOpts(t, false) }
+
+// newPlanFixtureOpts is newPlanFixture, optionally wired to a verified Q3 history (a runtime over the genesis trust base), which is what
+// lets the manager plan, endorse and order V3 handoffs.
+func newPlanFixtureOpts(t *testing.T, withQ3 bool) *planFixture {
 	ctx := context.Background()
 	node := testutils.NewTestNode(t)
 	others := []*testutils.TestNode{testutils.NewTestNode(t), testutils.NewTestNode(t), testutils.NewTestNode(t)}
@@ -65,7 +70,15 @@ func newPlanFixture(t *testing.T) *planFixture {
 	params := *NewConsensusParams()
 	params.NetworkProfileVersion = storage.ProfileHandoff
 	mockNet := testnetwork.NewRootMockNetwork()
-	cm, err := NewConsensusManager(node.PeerConf.ID, store, orchestration, mockNet, node.Signer, db, obs, WithConsensusParams(params), WithRecoveryProfile2(history))
+	opts := []Option{WithConsensusParams(params), WithRecoveryProfile2(history)}
+	var rt *q3active.Runtime
+	if withQ3 {
+		rt, err = q3active.New(q3active.Config{DB: memorydb.New(), Genesis: old})
+		require.NoError(t, err)
+		require.NoError(t, store.BindSigningAuthority(rt))
+		opts = append(opts, WithQ3(rt))
+	}
+	cm, err := NewConsensusManager(node.PeerConf.ID, store, orchestration, mockNet, node.Signer, db, obs, opts...)
 	require.NoError(t, err)
 	nodeVerifier, err := node.Signer.Verifier()
 	require.NoError(t, err)

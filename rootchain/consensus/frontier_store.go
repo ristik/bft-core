@@ -101,6 +101,20 @@ func (s *frontierPersistentStore) HandoffBody(id []byte) ([]byte, error) {
 	return nil, storage.ErrAssignmentHistory
 }
 
+func (s *frontierPersistentStore) StoreHandoffReceipts(id, receipts []byte) error {
+	if store, ok := s.PersistentStore.(interface{ StoreHandoffReceipts([]byte, []byte) error }); ok {
+		return store.StoreHandoffReceipts(id, receipts)
+	}
+	return storage.ErrHandoffRecord
+}
+
+func (s *frontierPersistentStore) HandoffReceipts(id []byte) ([]byte, error) {
+	if store, ok := s.PersistentStore.(interface{ HandoffReceipts([]byte) ([]byte, error) }); ok {
+		return store.HandoffReceipts(id)
+	}
+	return nil, storage.ErrHandoffRecord
+}
+
 func (s *frontierPersistentStore) StoreHandoffCandidate(id, candidate []byte) error {
 	if store, ok := s.PersistentStore.(interface{ StoreHandoffCandidate([]byte, []byte) error }); ok {
 		return store.StoreHandoffCandidate(id, candidate)

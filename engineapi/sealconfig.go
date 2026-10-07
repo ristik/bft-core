@@ -28,6 +28,7 @@ type sealConfigWire struct {
 	Elasticity        uint64 `json:"elasticity"`
 	ChangeDenominator uint64 `json:"changeDenominator"`
 	FeeCollector      string `json:"feeCollector"`
+	pairConfigWire
 }
 
 // CheckedExecutionConfigIdentity binds the checked companion settings to the
@@ -105,6 +106,9 @@ func (a *Adapter) readExecutionConfig(ctx context.Context, legacy [32]byte) (m2c
 	}
 	if got.Version != 1 {
 		return m2contract.ExecutionConfigV2{}, ErrSealConfigVersion
+	}
+	if err := a.pair.checkPins(got.pairConfigWire); err != nil {
+		return m2contract.ExecutionConfigV2{}, err
 	}
 	if !common.IsHexAddress(got.FeeCollector) {
 		return m2contract.ExecutionConfigV2{}, ErrSealConfigCollector

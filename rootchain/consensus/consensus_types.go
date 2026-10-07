@@ -6,6 +6,7 @@ import (
 
 	"github.com/unicitynetwork/bft-core/network/protocol/abdrc"
 	"github.com/unicitynetwork/bft-core/q3format"
+	"github.com/unicitynetwork/bft-core/rootchain/consensus/storage"
 	"github.com/unicitynetwork/bft-core/trusthistorystore"
 )
 
@@ -79,6 +80,10 @@ type Q3Authority interface {
 	// Lineage is the recovery history a StateMsg is verified against: the base's record for the genesis epoch and the verified
 	// history's own exact-weight projection for an activated one.
 	Lineage(base abdrc.HistoricalTrustBases) abdrc.HistoricalTrustBases
+	// FreezeRules is the V3 rule set the old committee applies when it endorses and orders the Freeze of a V3 successor.
+	FreezeRules() storage.V3FreezeRules
+	// ProtocolConfig is the protocol tuple a V3 body this chain plans carries: its network and root genesis from the verified history.
+	ProtocolConfig() (q3format.ProtocolConfig, error)
 }
 
 // WithQ3 gives the manager the verified Q3 history. Without it nothing changes.

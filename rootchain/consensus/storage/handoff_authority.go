@@ -51,6 +51,7 @@ type FreezeCompanion struct {
 	Parent     []byte
 	Candidate  []byte
 	Preimage   []byte // nil for the legacy root-only companion
+	Receipts   []byte // readiness receipts of the successor members; version 3 only
 	Signatures map[string]hex.Bytes
 }
 
@@ -84,6 +85,15 @@ func ParseFreezeCompanion(raw []byte) (FreezeCompanion, error) {
 			return out, ErrHandoffRecord
 		}
 		return FreezeCompanion{Version: 2, Body: v.Body, Parent: v.Parent, Candidate: v.Candidate, Preimage: v.Preimage, Signatures: v.Signatures}, nil
+	case freezeV3Version:
+		var v FreezeV3Authorization
+		if err := types.Cbor.Unmarshal(raw, &v); err != nil || len(v.Signatures) == 0 || len(v.Receipts) == 0 {
+			return out, ErrHandoffRecord
+		}
+		if canonical, err := v.Bytes(); err != nil || !bytes.Equal(canonical, raw) {
+			return out, ErrHandoffRecord
+		}
+		return FreezeCompanion{Version: freezeV3Version, Body: v.Body, Parent: v.Parent, Candidate: v.Candidate, Preimage: v.Preimage, Receipts: v.Receipts, Signatures: v.Signatures}, nil
 	}
 	return out, ErrHandoffRecord
 }
@@ -114,6 +124,10 @@ type v1HandoffAuthority struct {
 	trust       *types.RootTrustBaseV1
 	predecessor []byte
 	link        []byte
+	// priorVersion is the body version of the epoch this authority is the committee of (1 for the genesis, 3 for a verified V3
+	// activation); v3 is the rule set of a version-3 freeze and nil where none is enabled.
+	priorVersion uint64
+	v3           V3FreezeRules
 }
 
 // ConfigureHandoffAuthority installs the independently authenticated old v1
@@ -142,7 +156,7 @@ func (x *BlockStore) ConfigureHandoffAuthority(tb *types.RootTrustBaseV1) error 
 	if err != nil {
 		return err
 	}
-	x.handoffAuth = &v1HandoffAuthority{trust: &owned, predecessor: predecessor, link: link}
+	x.handoffAuth = &v1HandoffAuthority{trust: &owned, predecessor: predecessor, link: link, priorVersion: 1}
 	return nil
 }
 
@@ -176,7 +190,7 @@ func (x *BlockStore) ConfigureHandoffV2Authority(tb *types.RootTrustBaseV1, prio
 		}
 	}
 	predecessor := bytes.Clone(prior.BodyID[:])
-	x.handoffAuth = &v1HandoffAuthority{trust: projection, predecessor: predecessor, link: predecessor}
+	x.handoffAuth = &v1HandoffAuthority{trust: projection, predecessor: predecessor, link: predecessor, priorVersion: 2}
 	return nil
 }
 
@@ -192,6 +206,12 @@ func (a *v1HandoffAuthority) VerifyFreeze(r evmroot.OrderedHandoffRecord, compan
 	}
 	proof, err := ParseFreezeCompanion(companion)
 	if err != nil {
+		return nil, ErrHandoffRecord
+	}
+	if proof.Version == freezeV3Version {
+		return a.verifyFreezeV3(r, proof)
+	}
+	if a.priorVersion == freezeV3Version { // a V3 epoch's committee orders V3 successors only
 		return nil, ErrHandoffRecord
 	}
 	body, err := decodeD3Body(proof.Body)

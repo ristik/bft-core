@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"sort"
 
 	abcrypto "github.com/unicitynetwork/bft-go-base/crypto"
 )
@@ -130,4 +131,44 @@ func readReceipts(r *reader) ([]Receipt, error) {
 		out = append(out, rc)
 	}
 	return out, a.err
+}
+
+// EncodeReceipts is the canonical encoding of a set of receipts, strictly ordered by node id, as the freeze companion and the retained
+// evidence carry them.
+func EncodeReceipts(rs []Receipt) ([]byte, error) {
+	if len(rs) == 0 || len(rs) > MaxMembers {
+		return nil, fmt.Errorf("%w: %d receipts", ErrFormat, len(rs))
+	}
+	sorted := append([]Receipt(nil), rs...)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i].NodeID < sorted[j].NodeID })
+	for i := range sorted {
+		if i > 0 && sorted[i-1].NodeID == sorted[i].NodeID {
+			return nil, fmt.Errorf("%w: %q", ErrReceiptDuplicate, sorted[i].NodeID)
+		}
+		if len(sorted[i].NodeID) > maxText || len(sorted[i].Signature) > maxSignature {
+			return nil, fmt.Errorf("%w: oversize receipt", ErrTooLarge)
+		}
+	}
+	return enc(receiptItems(sorted)...), nil
+}
+
+// DecodeReceipts accepts exactly one canonical encoding of a receipt set: bounded, strictly ordered by node id, nothing trailing.
+func DecodeReceipts(raw []byte) ([]Receipt, error) {
+	if len(raw) == 0 {
+		return nil, fmt.Errorf("%w: no receipts", ErrFormat)
+	}
+	r, err := parse(raw, MaxMembers*(maxText+maxSignature+16))
+	if err != nil {
+		return nil, err
+	}
+	// parse yields the outer array's reader; the receipts are its items, one [nodeId, signature] pair each
+	wrapped := &reader{items: []any{r.items}}
+	out, err := readReceipts(wrapped)
+	if err != nil {
+		return nil, err
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("%w: no receipts", ErrFormat)
+	}
+	return out, nil
 }

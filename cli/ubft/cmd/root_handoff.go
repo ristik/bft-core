@@ -20,6 +20,7 @@ import (
 	"github.com/unicitynetwork/bft-core/evmassign"
 	"github.com/unicitynetwork/bft-core/network/protocol/abdrc"
 	"github.com/unicitynetwork/bft-go-base/types"
+	basehex "github.com/unicitynetwork/bft-go-base/types/hex"
 )
 
 type rootHandoffOperator interface {
@@ -38,6 +39,9 @@ type rootHandoffPlanRequest struct {
 	// EVMAssignment asks for an EVM-only assignment change (H3). The root members of NextTrustBase must be
 	// the installed ones; combining a root and an EVM membership change is refused.
 	EVMAssignment *evmassign.Proposal `json:"evmAssignment,omitempty"`
+	// Q3Receipts, when present, makes the plan a V3 plan: NextTrustBase's stakes are the exact weights of the successor committee,
+	// and these are the readiness receipts of every member for the candidate the q3-candidate endpoint derived (q3format.EncodeReceipts).
+	Q3Receipts basehex.Bytes `json:"q3Receipts,omitempty"`
 }
 
 func localOperatorRequest(w http.ResponseWriter, r *http.Request) bool {
@@ -65,7 +69,18 @@ func rootHandoffPlanHandler(operator rootHandoffOperator) http.HandlerFunc {
 			return
 		}
 		// The plan names no EVM parent: the root binds it when the Prepare is ordered.
-		plan, err := operator.PlanHandoff(request.NextTrustBase, request.EVMAssignment)
+		var plan abdrc.HandoffApprovalMsg
+		var err error
+		if len(request.Q3Receipts) != 0 {
+			planner, ok := operator.(rootHandoffQ3Planner)
+			if !ok {
+				http.Error(w, "this root is not running the Q3 lane", http.StatusUnprocessableEntity)
+				return
+			}
+			plan, err = planner.PlanHandoffV3(request.NextTrustBase, request.EVMAssignment, request.Q3Receipts)
+		} else {
+			plan, err = operator.PlanHandoff(request.NextTrustBase, request.EVMAssignment)
+		}
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusUnprocessableEntity)
 			return

@@ -59,6 +59,10 @@ type SealCompanion struct {
 	RootInput  data   `json:"rootInput"`
 	Witnesses  []data `json:"witnesses"`
 	Provenance string `json:"provenance"`
+
+	// Pair is the canonical pair binding (pairbinding.go). It is the receiving pair's own, set only on the request to the local execution
+	// client; it is never part of the disseminated block, so a decoded or encoded dissemination companion never carries one.
+	Pair data `json:"-"`
 }
 
 // SealCompanionWitnessCount is the exact number of witness entries bft-core writes and accepts: two.
@@ -144,11 +148,13 @@ func (c SealCompanion) MarshalJSON() ([]byte, error) {
 		RootInput  data   `json:"rootInput"`
 		Witnesses  []data `json:"witnesses"`
 		Provenance string `json:"provenance"`
+		pairWire
 	}{
 		B1Update:   c.B1Update,
 		RootInput:  c.RootInput,
 		Witnesses:  witnesses,
 		Provenance: c.Provenance,
+		pairWire:   pairWire{PairBinding: c.Pair},
 	})
 }
 
@@ -167,6 +173,9 @@ type SealBuildInput struct {
 	B1Update    data   `json:"b1Update,omitempty"`
 	RootInput   data   `json:"rootInput"`
 	Transitions []data `json:"transitions"`
+
+	// Pair is the canonical pair binding for this build job (pairbinding.go); empty for a client without one.
+	Pair data `json:"-"`
 }
 
 // MarshalJSON normalizes a nil transitions slice to an empty array, for the
@@ -181,10 +190,12 @@ func (s SealBuildInput) MarshalJSON() ([]byte, error) {
 		B1Update    data   `json:"b1Update,omitempty"`
 		RootInput   data   `json:"rootInput"`
 		Transitions []data `json:"transitions"`
+		pairWire
 	}{
 		B1Update:    s.B1Update,
 		RootInput:   s.RootInput,
 		Transitions: transitions,
+		pairWire:    pairWire{PairBinding: s.Pair},
 	})
 }
 

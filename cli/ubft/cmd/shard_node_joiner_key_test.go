@@ -324,7 +324,7 @@ func TestTheJoinersKeyIsBoundOnlyAfterTheReplayOfThePersistedSteps(t *testing.T)
 			switch callName(call) {
 			case "runProfile2JournalStartup":
 				startup = call
-			case "handoffFollower.CatchUp":
+			case "catcher.CatchUp":
 				catchUp = call
 			case "finishJoinerKey":
 				binds = append(binds, call)

@@ -307,6 +307,15 @@ func (x *BlockStore) Add(block *rctypes.BlockData, verifier IRChangeReqVerifier)
 				return nil, fmt.Errorf("retaining verified successor body: %w", err)
 			}
 		}
+		if len(companion.Receipts) != 0 {
+			archive, ok := x.storage.(interface{ StoreHandoffReceipts([]byte, []byte) error })
+			if !ok {
+				return nil, fmt.Errorf("%w: receipt retention unavailable", ErrHandoffRecord)
+			}
+			if err := archive.StoreHandoffReceipts(record.NextBodyID, companion.Receipts); err != nil {
+				return nil, fmt.Errorf("retaining verified readiness receipts: %w", err)
+			}
+		}
 		if len(companion.Preimage) != 0 {
 			archive, ok := x.storage.(interface{ StoreHandoffCandidate([]byte, []byte) error })
 			if !ok {
@@ -416,6 +425,15 @@ func (x *BlockStore) HandoffBody(id []byte) ([]byte, error) {
 		return nil, ErrHandoffRecord
 	}
 	return archive.HandoffBody(id)
+}
+
+// HandoffReceipts returns the retained readiness receipts of a V3 successor body, or nil.
+func (x *BlockStore) HandoffReceipts(id []byte) ([]byte, error) {
+	archive, ok := x.storage.(interface{ HandoffReceipts([]byte) ([]byte, error) })
+	if !ok {
+		return nil, ErrHandoffRecord
+	}
+	return archive.HandoffReceipts(id)
 }
 
 // HandoffCandidate returns the retained H3 candidate preimage for a successor
