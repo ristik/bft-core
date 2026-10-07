@@ -320,6 +320,8 @@ func wireQ3Pair(executor any, rt *q3active.Runtime, network uint64, origin regis
 	}
 	adapter.EnablePair(q3PairConfig(rt, network, [32]byte(origin.BlockHash())))
 	return adapter, nil
+}
+
 // shardQ3StageRequest hands the shard node the V3 candidate its entity's operator is about to attest readiness for.
 type shardQ3StageRequest struct {
 	Body      basehex.Bytes `json:"body"`
