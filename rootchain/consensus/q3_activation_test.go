@@ -20,9 +20,9 @@ import (
 )
 
 // Slice D2 of Q3 #50: a real in-process activation at a committed boundary, through the verified history and the durable install
-// journal, into real root managers with real stores. The committee after the boundary weighs 6,1,1,1 (W=9, quorum 7). The skewed
-// multi-node harness of #401 and the weighted leader selector of #403 are not merged, so the rounds below are driven through the
-// manager handlers over the mock network, with the leader schedule the manager has today (uniform).
+// journal, into real root managers with real stores. The committee after the boundary weighs 6,1,1,1 (W=9, quorum 7). These rounds
+// are driven through the manager handlers over the mock network, with the uniform leader schedule; the skewed multi-node harness
+// (#401) and the weighted leader selector (#403) are merged, and the real heavy-validator restart evidence is the D2b-2 slice's.
 
 func (c *q3Cluster) heavy() *q3Replica { return c.replicas[0] }
 

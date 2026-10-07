@@ -1,4 +1,4 @@
-package q3compat
+package q3ready
 
 import (
 	"bytes"

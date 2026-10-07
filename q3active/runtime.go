@@ -15,7 +15,6 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"github.com/unicitynetwork/bft-core/evmroot"
 	"github.com/unicitynetwork/bft-core/handoff"
 	"github.com/unicitynetwork/bft-core/internal/weightvalidation"
 	"github.com/unicitynetwork/bft-core/keyvaluedb"
@@ -59,19 +58,10 @@ type Consumer interface {
 	BoundTo(authority any) bool
 }
 
-// LegacyV2 is one legacy V2 epoch of the chain before the first V3 activation, with its old-committee proof, as the existing
-// trust-history store retains them. The runtime replays them from the genesis, so the legacy part of the history is verified too.
-type LegacyV2 struct {
-	Body  evmroot.TrustBaseBodyV2
-	Proof []byte
-}
-
-// Config opens a runtime: the install journal's durable store, the trusted genesis trust base the history is rooted in, and the
-// legacy part of the chain.
+// Config opens a runtime: the install journal's durable store and the trusted genesis trust base the history is rooted in.
 type Config struct {
 	DB      keyvaluedb.KeyValueDB
 	Genesis *types.RootTrustBaseV1
-	Legacy  []LegacyV2
 }
 
 // Participants are the five installers. They exist only after the runtime does (the manager takes the runtime as its gate and
@@ -96,7 +86,7 @@ type Runtime struct {
 // ErrNotAttached is returned when an activation or recovery is asked before the participants were attached.
 var ErrNotAttached = errors.New("q3active: participants are not attached")
 
-// New opens the journal, then rebuilds the verified history from the genesis, the legacy V2 links and every staged bundle, each
+// New opens the journal, then rebuilds the verified history from the genesis and every staged bundle, each
 // authenticated in turn. A staged bundle the history does not authenticate refuses the start. After Attach, Recover must run
 // before anything is admitted: until then no activated epoch is usable.
 func New(cfg Config) (*Runtime, error) {
@@ -118,11 +108,6 @@ func New(cfg Config) (*Runtime, error) {
 	h, err := q3format.NewHistory(cfg.Genesis)
 	if err != nil {
 		return nil, err
-	}
-	for _, l := range cfg.Legacy {
-		if h, err = h.WithV2(l.Body, l.Proof); err != nil {
-			return nil, fmt.Errorf("%w: legacy epoch %d: %w", ErrHistory, l.Body.Epoch, err)
-		}
 	}
 	staged, err := j.Staged()
 	if err != nil {

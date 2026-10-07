@@ -1,11 +1,16 @@
-package q3compat
+// Package q3ready is candidate-bound readiness for the Q3 handoff: no successor candidate is proposed unless every successor
+// validator entity has checked its own BFT node, its delegated shard/authority service and its paired execution client against
+// the candidate, and signed a receipt that names the network, genesis, predecessor, attempt, candidate, body and tuple.
+//
+// It negotiates nothing. A deployment has one protocol; a report is an accountable declaration by a co-hosted service, never an
+// input to the verified q3format.History, which remains the only authority for a configuration.
+package q3ready
 
 import (
 	"bytes"
 	"context"
 	"errors"
 	"fmt"
-	"slices"
 
 	"github.com/unicitynetwork/bft-core/q3format"
 	abcrypto "github.com/unicitynetwork/bft-go-base/crypto"
@@ -13,27 +18,46 @@ import (
 
 var (
 	// ErrNotReady is returned when a component of an entity does not support the candidate; no receipt is signed.
-	ErrNotReady = errors.New("q3compat: entity is not ready for the candidate")
+	ErrNotReady = errors.New("q3ready: entity is not ready for the candidate")
 	// ErrReadinessRefused is returned when a candidate may not be proposed: some successor member has no valid receipt.
-	ErrReadinessRefused = errors.New("q3compat: readiness refused")
-	// ErrComponent is returned when a component's report names another chain, candidate or protocol than the one attested.
-	ErrComponent = errors.New("q3compat: component report does not match the candidate")
+	ErrReadinessRefused = errors.New("q3ready: readiness refused")
+	// ErrComponent is returned when a component's report names another chain or candidate than the one attested.
+	ErrComponent = errors.New("q3ready: component report does not match the candidate")
 	// ErrProbe is returned when a component cannot be asked at all.
-	ErrProbe = errors.New("q3compat: component unavailable")
+	ErrProbe = errors.New("q3ready: component unavailable")
+	// ErrExecutionIdentity is returned when the execution client's genesis or code hash is not the pinned one.
+	ErrExecutionIdentity = errors.New("q3ready: execution client genesis or code is not the pinned one")
 )
 
-// ServiceReport is what a BFT node or a delegated shard/authority service reports about itself: the chain it is bound to, the
-// peer protocols it runs and the candidate it has staged. It is a claim by a co-hosted service, not an attestation.
+// ServiceReport is what a BFT node or a delegated shard/authority service reports about itself: the chain it is bound to and
+// the candidate it has staged. It is a claim by a co-hosted service, not an attestation.
 type ServiceReport struct {
-	Network   uint64
-	Genesis   [32]byte
-	Protocols []string
-	Staged    [32]byte // the candidate digest the service has staged
+	Network uint64
+	Genesis [32]byte
+	Staged  [32]byte // the candidate digest the service has staged
 }
 
 // Service is one of the entity's own services.
 type Service interface {
 	Report(ctx context.Context) (ServiceReport, error)
+}
+
+// ExecutionReport is the paired execution client's loaded identity: its genesis and code hash.
+type ExecutionReport struct{ GenesisHash, CodeHash []byte }
+
+// ExecutionPin is the genesis and code hash the operator pinned locally for the execution client. The pin is never taken from the
+// report under test: that would compare a value with itself.
+type ExecutionPin struct{ GenesisHash, CodeHash []byte }
+
+// Check refuses a report that is not the pinned identity, and a missing pin.
+func (p ExecutionPin) Check(r ExecutionReport) error {
+	switch {
+	case len(p.GenesisHash) == 0 || len(p.CodeHash) == 0:
+		return fmt.Errorf("%w: no pin configured", ErrExecutionIdentity)
+	case !bytes.Equal(r.GenesisHash, p.GenesisHash) || !bytes.Equal(r.CodeHash, p.CodeHash):
+		return ErrExecutionIdentity
+	}
+	return nil
 }
 
 // Execution is the paired execution client, queried for its loaded identity.
@@ -53,7 +77,7 @@ type Entity struct {
 // the receipt with the entity's root key. Any component failure, in any order, yields no receipt. Pre-Commit readiness attests
 // staged candidate support; the installed activation proof does not exist yet and is not asked for. The receipt is an
 // accountable declaration, not remote attestation and not a promise of future uptime.
-func (e Entity) Attest(ctx context.Context, rc q3format.ReceiptContext, cfg q3format.ProtocolConfig, want ExecutionRequirement, signer abcrypto.Signer) (q3format.Receipt, error) {
+func (e Entity) Attest(ctx context.Context, rc q3format.ReceiptContext, cfg q3format.ProtocolConfig, want ExecutionPin, signer abcrypto.Signer) (q3format.Receipt, error) {
 	if err := cfg.Validate(); err != nil {
 		return q3format.Receipt{}, err
 	}
@@ -71,7 +95,7 @@ func (e Entity) Attest(ctx context.Context, rc q3format.ReceiptContext, cfg q3fo
 		if err != nil {
 			return q3format.Receipt{}, fmt.Errorf("%w: %s: %w: %v", ErrNotReady, c.name, ErrProbe, err)
 		}
-		if err := checkService(r, rc, cfg); err != nil {
+		if err := checkService(r, rc); err != nil {
 			return q3format.Receipt{}, fmt.Errorf("%w: %s: %w", ErrNotReady, c.name, err)
 		}
 	}
@@ -82,18 +106,16 @@ func (e Entity) Attest(ctx context.Context, rc q3format.ReceiptContext, cfg q3fo
 	if err != nil {
 		return q3format.Receipt{}, fmt.Errorf("%w: execution client: %w: %v", ErrNotReady, ErrProbe, err)
 	}
-	if err := want.Check(x, cfg); err != nil {
+	if err := want.Check(x); err != nil {
 		return q3format.Receipt{}, fmt.Errorf("%w: execution client: %w", ErrNotReady, err)
 	}
 	return q3format.SignReceipt(rc, e.NodeID, signer)
 }
 
-func checkService(r ServiceReport, rc q3format.ReceiptContext, cfg q3format.ProtocolConfig) error {
+func checkService(r ServiceReport, rc q3format.ReceiptContext) error {
 	switch {
 	case r.Network != rc.Network || r.Genesis != rc.Genesis:
 		return fmt.Errorf("%w: bound to another network or genesis", ErrComponent)
-	case !slices.Contains(r.Protocols, cfg.RequiredPeerProtocol):
-		return fmt.Errorf("%w: %q not supported", ErrProtocol, cfg.RequiredPeerProtocol)
 	case !bytes.Equal(r.Staged[:], rc.CandidateDigest[:]):
 		return fmt.Errorf("%w: staged candidate %x, want %x", ErrComponent, r.Staged, rc.CandidateDigest)
 	}

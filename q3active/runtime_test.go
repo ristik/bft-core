@@ -292,11 +292,6 @@ func TestStagedBundlesAreAuthenticatedAtStart(t *testing.T) {
 		_, ok := rt.Activated(2)
 		require.True(t, ok)
 	})
-	t.Run("a legacy link that does not verify", func(t *testing.T) {
-		p := newProcess(t, f)
-		_, err := q3active.New(q3active.Config{DB: p.DB, Genesis: f.Old, Legacy: []q3active.LegacyV2{{Proof: []byte("x")}}})
-		require.ErrorIs(t, err, q3active.ErrHistory)
-	})
 	t.Run("an incomplete configuration", func(t *testing.T) {
 		_, err := q3active.New(q3active.Config{})
 		require.ErrorIs(t, err, q3install.ErrComponents)

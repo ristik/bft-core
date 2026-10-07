@@ -35,7 +35,7 @@ WEIGHTS = [6, 1, 1, 1]
 NETWORK, GENESIS, EPOCH, A_MIN = 5, bytes([7]) * 32, 2, 20
 PRIOR_ID = bytes([0x11]) * 32
 
-config = [1, NETWORK, GENESIS, 2, 2, "D3", "mirrored-root-v1", "unit-v1", "q3/1", "q3/1", 2]
+config = [1, NETWORK, GENESIS, 2, 2, "D3", "mirrored-root-v1", "unit-v1"]
 config_enc = enc(["UNICITY_Q3_PROTOCOL_CONFIG", config])
 to_v3 = lambda version, ident: sha(enc(["UNICITY_TRUSTBASE_TO_V3", NETWORK, 1, version, ident]))
 predecessor = to_v3(1, PRIOR_ID)
@@ -52,7 +52,7 @@ envelope = enc(["UNICITY_Q3_EXECUTION_PROOF", 1, bytes([0x01]) * 8, [b"t1", b"t2
 print(json.dumps({
     "configEncoding": config_enc.hex(), "configIdentity": sha(config_enc).hex(),
     "bodyEncoding": body_enc.hex(), "bodyIdentity": body_id.hex(),
-    "predecessorFromV1": predecessor.hex(), "predecessorFromV2": to_v3(2, PRIOR_ID).hex(),
+    "predecessorFromV1": predecessor.hex(),
     "receiptMessage": receipt.hex(), "receiptMessageHash": sha(receipt).hex(),
     "envelope": envelope.hex(),
 }, indent=2))

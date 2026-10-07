@@ -2,7 +2,6 @@ package q3format
 
 import (
 	"bytes"
-	"context"
 	"crypto"
 	"errors"
 	"fmt"
@@ -11,10 +10,7 @@ import (
 	"github.com/unicitynetwork/bft-core/handoff"
 	"github.com/unicitynetwork/bft-core/internal/quorumweight"
 	"github.com/unicitynetwork/bft-core/internal/weightvalidation"
-	"github.com/unicitynetwork/bft-core/m2contract"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/votesig"
-	"github.com/unicitynetwork/bft-core/trustactivation"
-	"github.com/unicitynetwork/bft-core/trusthistorystore"
 	"github.com/unicitynetwork/bft-go-base/types"
 	"github.com/unicitynetwork/bft-go-base/types/hex"
 )
@@ -45,8 +41,8 @@ var (
 // MaxOldCommitProof bounds one old-commit proof, as trustactivation does.
 const MaxOldCommitProof = 1 << 20
 
-// Entry is one verified epoch of the history. It can be built only by NewHistory, WithV2 or WithV3, each of which
-// authenticates it; a caller cannot construct an activation.
+// Entry is one verified epoch of the history. It can be built only by NewHistory or WithV3, each of which authenticates it; a
+// caller cannot construct an activation.
 type Entry struct {
 	epoch, start, version, scheme uint64
 	earliest                      uint64 // the body's A_min
@@ -55,7 +51,6 @@ type Entry struct {
 	bodyID, commitID, anchorID    [32]byte
 	priorID                       [32]byte
 	tb                            *types.RootTrustBaseV1 // verifier projection of this epoch's committee
-	v2                            *evmroot.TrustBaseBodyV2
 	// handoff and genesis are what the old committee's verified commit derived, kept for a V3 entry so that an installer takes
 	// them from the verified history and never from a caller-built record.
 	handoff *evmroot.VerifiedHandoff
@@ -139,7 +134,7 @@ type History struct {
 	entries []Entry
 }
 
-// NewHistory starts a history at the existing genesis trust base: epoch 1, self-signed by a unit committee. Its network is the
+// NewHistory starts a history at the deployment's genesis trust base: epoch 1, self-signed by a unit committee. Its network is the
 // authority's, and the root-genesis identity is its hash including signatures. No later bootstrap anchor exists.
 func NewHistory(genesis *types.RootTrustBaseV1) (*History, error) {
 	if err := weightvalidation.RootTrustBase(genesis, weightvalidation.ModeUnit); err != nil {
@@ -177,18 +172,6 @@ func cloneTrustBase(tb *types.RootTrustBaseV1) *types.RootTrustBaseV1 {
 		}
 	}
 	return &c
-}
-
-// cloneBodyV2 is a deep copy of a V2 body: its member slice, keys and byte fields.
-func cloneBodyV2(b evmroot.TrustBaseBodyV2) evmroot.TrustBaseBodyV2 {
-	members := make(evmroot.WeightSet, len(b.Members))
-	for i, m := range b.Members {
-		m.ConsensusKey = bytes.Clone(m.ConsensusKey)
-		members[i] = m
-	}
-	b.Members = members
-	b.StateSummary, b.ChangeRecordHash, b.PredecessorHash = bytes.Clone(b.StateSummary), bytes.Clone(b.ChangeRecordHash), bytes.Clone(b.PredecessorHash)
-	return b
 }
 
 // Network and Genesis are the authority a body's network and tuple are checked against.
@@ -288,6 +271,20 @@ func projection(members evmroot.WeightSet, network, epoch, start, threshold uint
 	return quorumweight.NewTrustBase(types.NetworkID(network), nodes, types.WithEpoch(epoch), types.WithEpochStart(start), types.WithQuorumThreshold(threshold))
 }
 
+// verifyCommit verifies the commit proof of an activation of the epoch after prior under prior's own rule: its committee, weights
+// and threshold from the verified entry, and its signing scheme from the history's explicit record of that epoch (scheme 1 for the
+// genesis epoch, the tuple's scheme for an activated one). An epoch whose scheme has no verifier is ErrScheme, never scheme 1.
+func (h *History) verifyCommit(prior Entry, p handoff.OldCommitProof) (handoff.VerifiedRecord, error) {
+	cfg, err := h.Signing(prior.epoch)
+	if err != nil {
+		return handoff.VerifiedRecord{}, err
+	}
+	if cfg.Scheme != votesig.SchemeLegacy && cfg.Scheme != votesig.SchemeDomainBound {
+		return handoff.VerifiedRecord{}, fmt.Errorf("%w: scheme %d", ErrScheme, cfg.Scheme)
+	}
+	return handoff.VerifyOldCommitProofSigning(p, prior.tb, cfg)
+}
+
 // WithV3 appends one V3 epoch. An activation is minted only from a record the previous epoch's committee committed: the
 // previous epoch's keys, weights and scheme come solely from this history, the commit proof and its control leaf are verified
 // under them, and only then are the record's body, predecessor, boundary and candidate compared with the presented link. The
@@ -313,14 +310,11 @@ func (h *History) WithV3(l Link) (*History, error) {
 	if want, err := prior.Hash(); err != nil || !bytes.Equal(want, b.PredecessorHash) {
 		return nil, fmt.Errorf("%w: body predecessor is not the tip's", ErrPrior)
 	}
-	if tip.scheme != 1 {
-		return nil, fmt.Errorf("%w: scheme %d", ErrScheme, tip.scheme)
-	}
 	p, err := decodeProof(l.Proof)
 	if err != nil {
 		return nil, err
 	}
-	v, err := handoff.VerifyOldCommitProof(p, tip.tb)
+	v, err := h.verifyCommit(tip, p)
 	if err != nil {
 		return nil, errors.Join(ErrActivation, err)
 	}
@@ -376,46 +370,4 @@ func bindCandidate(b BodyV3, r evmroot.OrderedHandoffRecord, ev Evidence) error 
 		return fmt.Errorf("%w: candidate context", ErrBinding)
 	}
 	return nil
-}
-
-// WithV2 appends one legacy V2 epoch through the existing verifier (trustactivation), so that a chain that already took V2
-// handoffs can reach its first V3 link. V2 weights are unit and no V3 epoch can be followed by a V2 one.
-func (h *History) WithV2(body evmroot.TrustBaseBodyV2, proof []byte) (*History, error) {
-	body = cloneBodyV2(body) // the retained body and the authority used below are owned by the history, not the caller
-	tip := h.Tip()
-	if tip.version == BodyVersion {
-		return nil, fmt.Errorf("%w: a V2 epoch cannot follow V3", ErrHistory)
-	}
-	for _, m := range body.Members {
-		if m.Weight != 1 {
-			return nil, fmt.Errorf("%w: %w", ErrHistory, m2contract.ErrNonUnitWeight)
-		}
-	}
-	p, err := decodeProof(proof)
-	if err != nil {
-		return nil, err
-	}
-	id := body.Identity()
-	prior := trusthistorystore.Record{Epoch: tip.epoch, Start: tip.start, V2: tip.v2, BodyID: tip.bodyID}
-	if tip.version == 1 {
-		prior.V1 = tip.tb
-	}
-	in := m2contract.TrustInterval{Body: body, Activation: evmroot.ActivatedTrustBase{BodyIdentity: id[:], EpochStart: p.Record.ActivationRound, ActivationCommitID: p.Record.ID()}}
-	if err := (trustactivation.Verifier{}).VerifyActivation(context.Background(), prior, in, proof); err != nil {
-		return nil, errors.Join(ErrActivation, err)
-	}
-	if p.Record.ActivationRound < body.EarliestActivation { // trustactivation does not check A_min; the V3 path does
-		return nil, fmt.Errorf("%w: A*=%d before A_min=%d", ErrBinding, p.Record.ActivationRound, body.EarliestActivation)
-	}
-	if p.Record.ActivationRound <= tip.start {
-		return nil, fmt.Errorf("%w: A*=%d does not follow the epoch start %d", ErrBinding, p.Record.ActivationRound, tip.start)
-	}
-	tb, err := trustactivation.Project(trusthistorystore.Record{Epoch: body.Epoch, Start: p.Record.ActivationRound, V2: &body})
-	if err != nil {
-		return nil, errors.Join(ErrHistory, err)
-	}
-	e := Entry{epoch: body.Epoch, start: p.Record.ActivationRound, earliest: body.EarliestActivation, version: 2, scheme: 1, priorVersion: tip.version, priorID: tip.bodyID,
-		bodyID: id, tb: tb, v2: &body}
-	copy(e.commitID[:], p.Record.ID())
-	return h.extend(e), nil
 }

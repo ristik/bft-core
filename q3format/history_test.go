@@ -9,9 +9,9 @@ import (
 	"github.com/unicitynetwork/bft-core/evmroot"
 	"github.com/unicitynetwork/bft-core/handoff"
 	testtrustbase "github.com/unicitynetwork/bft-core/internal/testutils/trustbase"
-	"github.com/unicitynetwork/bft-core/m2contract"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/storage"
 	rctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
+	"github.com/unicitynetwork/bft-core/rootchain/consensus/votesig"
 	abcrypto "github.com/unicitynetwork/bft-go-base/crypto"
 	"github.com/unicitynetwork/bft-go-base/types"
 	"github.com/unicitynetwork/bft-go-base/types/hex"
@@ -55,8 +55,15 @@ func genesisTB(t *testing.T, s signers, start uint64) *types.RootTrustBaseV1 {
 	return tb
 }
 
-// commitProof builds an old-committee commit proof for rec, signed by the named members of tb.
+// commitProof builds a legacy (scheme 1) old-committee commit proof for rec, signed by the named members of tb.
 func commitProof(t *testing.T, tb *types.RootTrustBaseV1, s signers, rec evmroot.OrderedHandoffRecord, signedBy ...string) handoff.OldCommitProof {
+	t.Helper()
+	return commitProofCfg(t, tb, s, rec, votesig.Config{}, signedBy...)
+}
+
+// commitProofCfg builds the commit proof by the rule of the old epoch's signing configuration: for scheme 2 a domain-bound
+// certificate whose vote signatures are over PV and whose seal signatures are the same signers' over the native seal bytes.
+func commitProofCfg(t *testing.T, tb *types.RootTrustBaseV1, s signers, rec evmroot.OrderedHandoffRecord, cfg votesig.Config, signedBy ...string) handoff.OldCommitProof {
 	t.Helper()
 	net := tb.NetworkID
 	parent, err := storage.NewGenesisBlock(net, crypto.SHA256, storage.ProfileHandoff)
@@ -81,12 +88,34 @@ func commitProof(t *testing.T, tb *types.RootTrustBaseV1, s signers, rec evmroot
 	require.NoError(t, err)
 	stamp := types.NewTimestamp()
 	vote := &rctypes.RoundInfo{Version: 1, RoundNumber: 5, Epoch: rec.Epoch, Timestamp: stamp, ParentRoundNumber: 4, CurrentRootHash: tree.RootHash()}
+	seal := &types.UnicitySeal{Version: 1, NetworkID: net, RootChainRoundNumber: 4, Epoch: rec.Epoch, Timestamp: stamp, Hash: tree.RootHash()}
+	qc := &rctypes.QuorumCert{VoteInfo: vote, LedgerCommitInfo: seal, Signatures: map[string]hex.Bytes{}}
+	if cfg.Scheme == votesig.SchemeDomainBound {
+		vote.Timestamp = 0 // a scheme 2 vote info carries no timestamp
+		vi := votesig.VoteInfo{Epoch: vote.Epoch, Round: vote.RoundNumber, Parent: vote.ParentRoundNumber}
+		copy(vi.Exec[:], vote.CurrentRootHash)
+		vh, err := cfg.VoteInfoHash(vi)
+		require.NoError(t, err)
+		seal.PreviousHash = vh[:]
+		pv, sealBytes, _, err := rctypes.DomainBoundStatement(cfg, vote, seal, true)
+		require.NoError(t, err)
+		qc.Scheme, qc.SealSignatures = votesig.SchemeDomainBound, map[string]hex.Bytes{}
+		for _, id := range signedBy {
+			var err error
+			if qc.Signatures[id], err = s[id].SignBytes(pv); err != nil {
+				t.Fatal(err)
+			}
+			if qc.SealSignatures[id], err = s[id].SignBytes(sealBytes); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return handoff.OldCommitProof{Profile: evmroot.D4Profile, Record: rec, Control: control, ControlPath: path, CommitQC: qc}
+	}
 	voteHash, err := vote.Hash(crypto.SHA256)
 	require.NoError(t, err)
-	seal := &types.UnicitySeal{Version: 1, NetworkID: net, RootChainRoundNumber: 4, Epoch: rec.Epoch, Timestamp: stamp, Hash: tree.RootHash(), PreviousHash: voteHash}
+	seal.PreviousHash = voteHash
 	signed, err := seal.SigBytes()
 	require.NoError(t, err)
-	qc := &rctypes.QuorumCert{VoteInfo: vote, LedgerCommitInfo: seal, Signatures: map[string]hex.Bytes{}}
 	for _, id := range signedBy {
 		sig, err := s[id].SignBytes(signed)
 		require.NoError(t, err)
@@ -131,8 +160,13 @@ func (w *world) link(sp spec) Link {
 		sp.aMin = 20
 	}
 	if sp.signedBy == nil {
-		sp.signedBy = []string{"a", "b", "c"}
+		sp.signedBy = []string{"a", "b", "c"} // a unit committee of four: three reach the threshold
+		if tip.epoch > 1 {
+			sp.signedBy = []string{"n1", "n2"} // weights (6,1,1,1), threshold 7: the heavy member and one light one
+		}
 	}
+	oldCfg, err := w.h.Signing(tip.epoch)
+	require.NoError(t, err)
 	next := sp.committee
 	if next == nil {
 		next = newSigners(t, "n1", "n2", "n3", "n4")
@@ -161,7 +195,7 @@ func (w *world) link(sp spec) Link {
 	if sp.record != nil {
 		sp.record(&rec)
 	}
-	p := commitProof(t, tip.tb, w.signers[tip.epoch], rec, sp.signedBy...)
+	p := commitProofCfg(t, tip.tb, w.signers[tip.epoch], rec, oldCfg, sp.signedBy...)
 	if sp.proof != nil {
 		sp.proof(&p)
 	}
@@ -365,17 +399,77 @@ func TestActivationNeedsAStartAfterTheEpochStart(t *testing.T) {
 	require.ErrorIs(t, err, ErrBinding, "A* equal to the epoch start is not after it")
 }
 
-func TestNoFallbackToSchemeOne(t *testing.T) {
+// A second handoff is verified by the first activated epoch's own rule: scheme 2, weighted, strict about both signature maps.
+// Every refusal differs from the accepted control in one thing only.
+func TestSuccessiveHandoffUnderSchemeTwo(t *testing.T) {
 	w := newWorld(t, 0)
 	w.h = w.append(spec{})
 	require.Equal(t, uint64(2), w.h.Tip().Scheme())
-	l := w.link(spec{aMin: 21, activate: 40, signedBy: []string{"n1", "n2"}})
-	_, err := w.h.WithV3(l)
-	require.ErrorIs(t, err, ErrScheme, "a scheme-2 epoch has no commit verifier yet, and scheme 1 is not substituted")
-	_, err = w.h.WithV2(evmroot.TrustBaseBodyV2{}, nil)
-	require.ErrorIs(t, err, ErrHistory, "no V2 epoch follows V3")
+
+	l := w.link(spec{aMin: 30, activate: 40, committee: newSigners(t, "n1", "n2", "n3", "n4")})
+	h, err := w.h.WithV3(l)
+	require.NoError(t, err, "acceptance control: heavy plus one light is weight 7 of 9")
+	require.Equal(t, [3]uint64{3, 40, 2}, [3]uint64{h.Tip().Epoch(), h.Tip().Start(), h.Tip().Scheme()})
+	require.Equal(t, w.h.Tip().BodyID(), [32]byte(l.Body.PredecessorHash), "a V3 predecessor is named by its body identity directly")
+	require.Equal(t, uint64(3), h.Tip().Version())
+	epoch2, err := h.ForEpoch(2)
+	require.NoError(t, err)
+	require.Equal(t, w.h.Tip().Claim(), epoch2.Claim(), "the earlier epoch is untouched")
+	l.Claim = h.Tip().Claim()
+	again, err := h.VerifyEnvelope(Envelope{Links: []Link{l}})
+	require.NoError(t, err, "a retained link is checked under the same rule")
+	require.Equal(t, h.Tip().Claim(), again.Tip().Claim())
+
+	refuse := func(name string, sp spec, want ...error) {
+		t.Run(name, func(t *testing.T) {
+			sp.aMin, sp.activate = 30, 40
+			_, err := w.h.WithV3(w.link(sp))
+			require.ErrorIs(t, err, ErrActivation)
+			for _, e := range want {
+				require.ErrorIs(t, err, e)
+			}
+		})
+	}
+	refuse("heavy alone is weight 6 of 7", spec{signedBy: []string{"n1"}}, handoff.ErrProof)
+	refuse("three light members are weight 3", spec{signedBy: []string{"n2", "n3", "n4"}}, handoff.ErrProof)
+	refuse("a signature of the wrong member", spec{signedBy: []string{"n1", "n2"}, proof: func(p *handoff.OldCommitProof) {
+		p.CommitQC.Signatures["n2"], p.CommitQC.Signatures["n3"] = p.CommitQC.Signatures["n3"], p.CommitQC.Signatures["n2"]
+	}}, handoff.ErrProof)
+	refuse("the seal signatures are missing", spec{proof: func(p *handoff.OldCommitProof) { p.CommitQC.SealSignatures = nil }}, handoff.ErrProof)
+	refuse("the signer sets differ", spec{signedBy: []string{"n1", "n2", "n3"}, proof: func(p *handoff.OldCommitProof) {
+		delete(p.CommitQC.SealSignatures, "n3")
+	}}, handoff.ErrProof, votesig.ErrSignerSets)
+	refuse("a legacy-form certificate of a scheme 2 epoch", spec{proof: func(p *handoff.OldCommitProof) { p.CommitQC.Scheme = votesig.SchemeLegacy }}, handoff.ErrProof, votesig.ErrScheme)
+	t.Run("the unit committee of the genesis epoch cannot sign for epoch 2", func(t *testing.T) {
+		l := w.link(spec{aMin: 30, activate: 40, signedBy: []string{"n1", "n2"}})
+		l.Proof = oldEpochProof(t, w, l)
+		_, err := w.h.WithV3(l)
+		require.ErrorIs(t, err, ErrActivation)
+	})
+	t.Run("a forged proof for a retained link is a conflict", func(t *testing.T) {
+		bad := l
+		p, err := decodeProof(l.Proof)
+		require.NoError(t, err)
+		p.CommitQC.Signatures = map[string]hex.Bytes{"n1": p.CommitQC.Signatures["n1"]}
+		p.CommitQC.SealSignatures = map[string]hex.Bytes{"n1": p.CommitQC.SealSignatures["n1"]}
+		bad.Proof, err = types.Cbor.Marshal(p)
+		require.NoError(t, err)
+		_, err = h.VerifyEnvelope(Envelope{Links: []Link{bad}})
+		require.ErrorIs(t, err, ErrConflict)
+		require.ErrorIs(t, err, ErrActivation)
+	})
 }
 
+// oldEpochProof is the link's proof re-signed in scheme 1 by the genesis committee, which is not epoch 2's committee.
+func oldEpochProof(t *testing.T, w *world, l Link) []byte {
+	t.Helper()
+	p, err := decodeProof(l.Proof)
+	require.NoError(t, err)
+	q := commitProof(t, w.h.Tip().tb, w.signers[1], p.Record, "a", "b", "c")
+	raw, err := types.Cbor.Marshal(q)
+	require.NoError(t, err)
+	return raw
+}
 func TestStartingAHistory(t *testing.T) {
 	s := newSigners(t, "a", "b", "c", "d")
 	g := genesisTB(t, s, 0)
@@ -404,74 +498,18 @@ func TestStartingAHistory(t *testing.T) {
 	require.Equal(t, uint64(testNetwork), h.Network())
 }
 
-// v2 is a V2 successor of the world's tip, unit weights of a new committee, with its commit proof signed by signedBy.
-func (w *world) v2(second signers, aMin, activate uint64, signedBy ...string) (evmroot.TrustBaseBodyV2, []byte) {
-	t, tip := w.t, w.h.Tip()
-	var members evmroot.WeightSet
-	for _, id := range []string{"e", "f", "g", "h"} {
-		members = append(members, evmroot.Member{StakingID: id, NodeID: id, ConsensusKey: second.key(t, id), Weight: 1})
-	}
-	pred := tip.bodyID[:]
-	if tip.version == 1 {
-		var err error
-		pred, err = evmroot.FirstV2PredecessorHash(evmroot.V1Anchor{Version: 1, NetworkID: testNetwork, Epoch: 1, HashIncludingSigs: tip.bodyID[:]})
-		require.NoError(t, err)
-	}
-	body := evmroot.TrustBaseBodyV2{Version: 2, NetworkID: testNetwork, Epoch: tip.epoch + 1, EarliestActivation: aMin, Members: members, RootThreshold: 3,
-		StateSummary: fill(1), ChangeRecordHash: fill(2), PredecessorHash: pred}
-	id := body.Identity()
-	rec := evmroot.OrderedHandoffRecord{Network: testNetwork, Epoch: tip.epoch, Attempt: 1, OrderedRound: 4, ActivationRound: activate, PredecessorBodyID: tip.bodyID[:],
-		NextBodyID: id[:], FrozenID: fill(3), SuccessorTRHash: fill(4), Kind: "commit"}
-	raw, err := types.Cbor.Marshal(commitProof(t, tip.tb, w.signers[tip.epoch], rec, signedBy...))
-	require.NoError(t, err)
-	w.signers[tip.epoch+1] = second
-	return body, raw
-}
-
-// A chain that already took a V2 handoff reaches its first V3 link through the existing verifier.
-func TestV2ThenV3(t *testing.T) {
+// A previous epoch whose scheme has no verifier here is refused, never verified as scheme 1.
+func TestAnUnverifiableSchemeIsRefusedNotDefaulted(t *testing.T) {
 	w := newWorld(t, 0)
-	second := newSigners(t, "e", "f", "g", "h")
-	v2, raw := w.v2(second, 10, 12, "a", "b", "c")
-	h, err := w.h.WithV2(v2, raw)
-	require.NoError(t, err)
-	require.Equal(t, [3]uint64{2, 12, 1}, [3]uint64{h.Tip().Epoch(), h.Tip().Start(), h.Tip().Scheme()})
-	require.Equal(t, uint64(2), h.Tip().Version())
-
-	t.Run("refusals", func(t *testing.T) {
-		_, err := w.h.WithV2(v2, nil)
-		require.ErrorIs(t, err, ErrTooLarge)
-		bad := v2
-		bad.Members = append(evmroot.WeightSet(nil), v2.Members...)
-		bad.Members[0].Weight = 2
-		_, err = w.h.WithV2(bad, raw)
-		require.ErrorIs(t, err, m2contract.ErrNonUnitWeight)
-		bad = v2
-		bad.PredecessorHash = fill(9)
-		_, err = w.h.WithV2(bad, raw)
-		require.ErrorIs(t, err, ErrActivation)
-		_, short := w.v2(second, 10, 12, "a", "b")
-		_, err = w.h.WithV2(v2, short)
-		require.ErrorIs(t, err, ErrActivation, "two of four unit signers are not a quorum")
-		late := newWorld(t, 12)
-		body, proof := late.v2(newSigners(t, "e", "f", "g", "h"), 10, 12, "a", "b", "c")
-		_, err = late.h.WithV2(body, proof)
-		require.ErrorIs(t, err, ErrBinding, "A* must follow the epoch start")
-	})
-
-	// the first V3 link over a V2 prior uses the tagged V2 predecessor
-	w.h = h
-	l := w.link(spec{signedBy: []string{"e", "f", "g"}, activate: 40, aMin: 30})
-	prior, err := Prior{Network: testNetwork, Epoch: 2, BodyVersion: 2, Identity: func() []byte { id := v2.Identity(); return id[:] }()}.Hash()
-	require.NoError(t, err)
-	require.Equal(t, prior, l.Body.PredecessorHash)
-	_, err = h.WithV3(w.link(spec{signedBy: []string{"e", "f", "g"}, body: func(b *BodyV3) { b.Epoch = 2 }}))
-	require.ErrorIs(t, err, ErrHistory, "an epoch that does not follow the tip, neither a gap nor a V3 repeat")
-	require.NotErrorIs(t, err, ErrMissingHistory)
-	h3, err := h.WithV3(l)
-	require.NoError(t, err)
-	require.Equal(t, [3]uint64{3, 40, 2}, [3]uint64{h3.Tip().Epoch(), h3.Tip().Start(), h3.Tip().Scheme()})
-	g1, _ := h3.ForEpoch(1)
-	g2, _ := h3.ForEpoch(2)
-	require.Equal(t, [2]uint64{1, 1}, [2]uint64{g1.Scheme(), g2.Scheme()})
+	w.h = w.append(spec{})
+	l := w.link(spec{aMin: 30, activate: 40})
+	_, err := w.h.WithV3(l)
+	require.NoError(t, err, "acceptance control")
+	odd := w.h.Tip()
+	cfg := *odd.config
+	cfg.SigningScheme = 3
+	odd.config = &cfg
+	odds := &History{network: w.h.network, genesis: w.h.genesis, entries: []Entry{w.h.entries[0], odd}}
+	_, err = odds.verifyCommit(odd, handoff.OldCommitProof{})
+	require.ErrorIs(t, err, ErrScheme)
 }
