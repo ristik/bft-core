@@ -412,6 +412,8 @@ func TestManagerOffersTheCollectorTheViewOfTheNextProposal(t *testing.T) {
 	x.recovery = &recoveryState{triggerMsg: &abdrc.TimeoutMsg{}, toRound: 42, sent: time.Now()}
 	n := len(res.rounds)
 	_, enabled, err = x.RequestView(1, shard1)
+	require.ErrorIs(t, err, ErrViewRecovery)
+	require.ErrorIs(t, err, storage.ErrAssignmentHistory)
 	require.ErrorContains(t, err, "node is in recovery")
 	require.True(t, enabled)
 	require.Len(t, res.rounds, n, "a node in recovery resolves nothing")

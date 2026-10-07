@@ -742,7 +742,7 @@ func (x *ConsensusManager) RequestView(partition types.PartitionID, shard types.
 		return nil, false, nil
 	}
 	if x.recovery.InRecovery() {
-		return nil, true, fmt.Errorf("node is in recovery: %s", x.recovery)
+		return nil, true, fmt.Errorf("%w: %w: node is in recovery: %s", ErrViewRecovery, storage.ErrAssignmentHistory, x.recovery)
 	}
 	view, err := x.viewResolver.ResolveView(partition, shard, x.pacemaker.GetCurrentRound()+1, storage.PurposeCollect)
 	return view, true, err
@@ -941,6 +941,10 @@ func (x *ConsensusManager) bufferedWeight() (uint64, error) {
 }
 
 // ErrVoteEpoch is returned for a vote or timeout vote whose epoch is not the epoch the voting weights are taken from.
+// ErrViewRecovery refuses a request view while the node is in recovery. It is an unavailable-view refusal (also
+// storage.ErrAssignmentHistory), never a fallback to the legacy dispatch.
+var ErrViewRecovery = errors.New("request view unavailable: node is in recovery")
+
 var ErrVoteEpoch = errors.New("vote epoch differs from the weighting epoch")
 
 // checkWeightEpoch refuses a vote for another epoch than the current trust base: its author would be weighed by a

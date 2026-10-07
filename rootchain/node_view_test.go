@@ -21,6 +21,7 @@ import (
 	"github.com/unicitynetwork/bft-core/rootchain/consensus"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/storage"
 	rctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
+	"github.com/unicitynetwork/bft-core/rootchain/consensus/zkverifier"
 	"github.com/unicitynetwork/bft-core/rootchain/testutils"
 	abcrypto "github.com/unicitynetwork/bft-go-base/crypto"
 	"github.com/unicitynetwork/bft-go-base/types"
@@ -455,6 +456,7 @@ func TestCollectorDispatchesTheProofFromTheView(t *testing.T) {
 		v := f.view()
 		req := f.request(0, v, 9, nil) // no proof attached
 		err := f.submit(req)
+		require.ErrorIs(t, err, zkverifier.ErrInvalidProofFormat)
 		require.ErrorContains(t, err, "ZK proof verification failed", "the view's policy decides: a missing proof is refused")
 		require.Equal(t, 1, f.sentCount(), "with CertStatusProofInvalid")
 		require.Empty(t, f.certs())
