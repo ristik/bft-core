@@ -3,6 +3,7 @@
 # The `ci` workflow's compose and chaos jobs run `--executor fake`, which models no execution at
 # all — they cannot say anything about the Engine API path. This workflow is the counterpart that
 # runs the Go adapter against the APPROVED PINNED execution client.
+# The owner limits automatic runs to execution-related changes to reduce noise.
 #
 # Named separately and deliberately: a green `ci` run must never be read as real-execution
 # evidence, and this job's name says which it is. Fault scenarios are NOT run here; they are the
@@ -19,6 +20,23 @@ on:
   pull_request:
     branches:
       - integration/enshrined-evm
+      - main
+    paths:
+      - 'engineapi/**'
+      - 'shardnode/**'
+      - 'rootchain/**'
+      - 'network/**'
+      - 'cli/**'
+      - 'scripts/reth-*.sh'
+      - 'scripts/lib/reth-*.sh'
+      - 'scripts/evmtx/**'
+      - 'scripts/Dockerfile'
+      - '*-evm*.sh'
+      - 'docker-compose.evm.yml'
+      - 'go.mod'
+      - 'go.sum'
+      - 'Makefile'
+      - '.github/workflows/reth-smoke.yml'
   workflow_dispatch:
     inputs:
       inject_failure:

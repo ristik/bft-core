@@ -118,12 +118,12 @@ func TestFrozenEVMShardSelectionRejectsIsolatedMutations(t *testing.T) {
 	other := types.PartitionShardID{PartitionID: 10}
 	base := func() (ShardStates, map[types.PartitionShardID]*types.PartitionDescriptionRecord) {
 		return ShardStates{States: map[types.PartitionShardID]*ShardInfo{
-			evm:   {IR: &types.InputRecord{BlockHash: bytes.Clone(parent)}},
-			agg:   {IR: &types.InputRecord{BlockHash: bytes.Repeat([]byte{1}, 32)}},
-			other: {IR: &types.InputRecord{BlockHash: bytes.Repeat([]byte{2}, 32)}},
-		}}, map[types.PartitionShardID]*types.PartitionDescriptionRecord{
-			evm: {PartitionTypeID: 8}, agg: {PartitionTypeID: 9}, other: {PartitionTypeID: 9},
-		}
+				evm:   {IR: &types.InputRecord{BlockHash: bytes.Clone(parent)}},
+				agg:   {IR: &types.InputRecord{BlockHash: bytes.Repeat([]byte{1}, 32)}},
+				other: {IR: &types.InputRecord{BlockHash: bytes.Repeat([]byte{2}, 32)}},
+			}}, map[types.PartitionShardID]*types.PartitionDescriptionRecord{
+				evm: {PartitionTypeID: 8}, agg: {PartitionTypeID: 9}, other: {PartitionTypeID: 9},
+			}
 	}
 	state, configs := base()
 	key, err := frozenShard(state, configs, parent)

@@ -13,7 +13,7 @@ import (
 
 // LightClientVerifierFFI wraps the Rust FFI library for light client proof verification
 type LightClientVerifierFFI struct {
-	enabled   bool
+	enabled bool
 	chainID uint64
 }
 
