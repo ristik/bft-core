@@ -77,6 +77,5 @@ func (x *ConsensusManager) Q3ActivationEvidence(epoch uint64) (q3format.Link, *a
 	return link, head, candidate, nil
 }
 
-
 // SafetyModule is the manager's safety module: the participant a q3active.Runtime requires to be bound to its history.
 func (x *ConsensusManager) SafetyModule() *SafetyModule { return x.safety }
