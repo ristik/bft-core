@@ -1610,6 +1610,9 @@ func (x *ConsensusManager) onStateResponse(ctx context.Context, rsp *abdrc.State
 		if err := x.safety.validateVoteTimestamp(prop.Block); err != nil {
 			return fmt.Errorf("recovery proposal timestamp: %w", err)
 		}
+		// Live execution and signing can write again. Preserve conservative fault
+		// handling for failures after admission, including the recovered vote path.
+		recoveryWriteStarted = true
 		// the proposal was verified when it was received, so try and execute it now
 		// Every proposal must carry a QC or TC for previous round
 		// Process QC first, update round
