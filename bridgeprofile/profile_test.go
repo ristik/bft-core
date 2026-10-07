@@ -39,6 +39,11 @@ func retToken(t testing.TB, f *Fixture, n uint64, transfers int) (*History, []*s
 	return h, keys, rcpt
 }
 
+// mj is a lock justification for the fixture with a structural proof.
+func mj(f *Fixture, chain uint64, vault, zero [20]byte, n uint64) []byte {
+	return MintJustification(chain, vault, zero, n, f.StructuralProof(n))
+}
+
 func roundTrip(t testing.TB, h *History) []byte {
 	t.Helper()
 	b := h.Bytes()
@@ -191,7 +196,7 @@ func TestPolicyDecodeRejections(t *testing.T) {
 func envelopeFor(t *testing.T, f *Fixture, leaves int) *Envelope {
 	e := &Envelope{PolicyBody: f.Policy.Bytes(), History: []byte{1, 2, 3},
 		Anchors: []Anchor{{Partition: f.Policy.Partition, Shard: EmptyPrefixShard, ShardConfHash: f.Policy.ShardConf,
-			ExpectedStateRoot: H([]byte("root")), ExpectedIRHash: H([]byte("ir")), UC: []byte{9, 9}}}}
+			ExpectedStateRoot: H([]byte("root")), ExpectedIRHash: H([]byte("ir")), UC: []byte{9, 9}, InputRecord: []byte{7}}}}
 	for i := 0; i < leaves; i++ {
 		e.LeafProofs = append(e.LeafProofs, LeafProof{Bitmap: H([]byte{byte(i)}), Siblings: [][32]byte{H([]byte{1}), H([]byte{2})}})
 	}
@@ -459,6 +464,11 @@ type mutation struct {
 func ret(cfg *Cfg, b []byte) (*Result, error)  { return VerifyReturn(cfg, b) }
 func mint(cfg *Cfg, b []byte) (*Result, error) { return VerifyMint(cfg, b) }
 
+// valueRaw is a value envelope for the fixture asset with an arbitrary amount item.
+func valueRaw(f *Fixture, amount []byte) []byte {
+	return CTag(TagValue, CArr(CUint(1), CArr(CArr(CBytes(f.Cfg.Aid[:]), amount)), CNull))
+}
+
 func TestHistoryProfileRejections(t *testing.T) {
 	cases := []mutation{
 		{"wrong network", func(h *History, f *Fixture) { h.Mint.Network++ }, ErrMintShape, ret},
@@ -471,30 +481,51 @@ func TestHistoryProfileRejections(t *testing.T) {
 		}, ErrMintJustif, ret},
 		{"wrong chain", func(h *History, f *Fixture) {
 			c := f.Cfg
-			h.Mint.Justification = MintJustification(c.ChainID+1, c.Vault, c.ZeroAddress, 5)
+			h.Mint.Justification = mj(f, c.ChainID+1, c.Vault, c.ZeroAddress, 5)
 		}, ErrMintJustif, ret},
 		{"wrong vault", func(h *History, f *Fixture) {
 			c := f.Cfg
 			v := c.Vault
 			v[0] ^= 1
-			h.Mint.Justification = MintJustification(c.ChainID, v, c.ZeroAddress, 5)
+			h.Mint.Justification = mj(f, c.ChainID, v, c.ZeroAddress, 5)
 		}, ErrMintJustif, ret},
 		{"zero nonce", func(h *History, f *Fixture) {
 			c := f.Cfg
-			h.Mint.Justification = MintJustification(c.ChainID, c.Vault, c.ZeroAddress, 0)
+			h.Mint.Justification = mj(f, c.ChainID, c.Vault, c.ZeroAddress, 0)
 		}, ErrMintJustif, ret},
 		{"junk justification", func(h *History, f *Fixture) { h.Mint.Justification = []byte{0x01} }, ErrMintJustif, ret},
 		{"salt not derived for nonce", func(h *History, f *Fixture) {
 			c := f.Cfg
-			h.Mint.Justification = MintJustification(c.ChainID, c.Vault, c.ZeroAddress, 6) // salt is for nonce 5
+			h.Mint.Justification = mj(f, c.ChainID, c.Vault, c.ZeroAddress, 6) // salt is for nonce 5
 		}, ErrMintSalt, ret},
 		{"salt changed", func(h *History, f *Fixture) { h.Mint.Salt[0] ^= 1 }, ErrMintSalt, ret},
 		{"null data", func(h *History, f *Fixture) { h.Mint.Data = nil }, ErrMintData, ret},
-		{"wrong asset", func(h *History, f *Fixture) { a := f.Cfg.Aid; a[0] ^= 1; h.Mint.Data = MintData(a, amt) }, ErrMintData, ret},
-		{"zero amount", func(h *History, f *Fixture) { h.Mint.Data = CArr(CBytes(f.Cfg.Aid[:]), CBytes(nil)) }, ErrMintData, ret},
-		{"leading-zero amount", func(h *History, f *Fixture) { h.Mint.Data = CArr(CBytes(f.Cfg.Aid[:]), CBytes([]byte{0, 1})) }, ErrMintData, ret},
-		{"extra data field", func(h *History, f *Fixture) {
-			h.Mint.Data = CArr(CBytes(f.Cfg.Aid[:]), CAmount(amt), CBytes(nil))
+		{"wrong asset", func(h *History, f *Fixture) { a := f.Cfg.Aid; a[0] ^= 1; h.Mint.Data = ValueData(a, amt) }, ErrMintData, ret},
+		{"zero amount", func(h *History, f *Fixture) { h.Mint.Data = valueRaw(f, CBytes(nil)) }, ErrMintData, ret},
+		{"leading-zero amount", func(h *History, f *Fixture) { h.Mint.Data = valueRaw(f, CBytes([]byte{0, 1})) }, ErrMintData, ret},
+		{"oversized amount", func(h *History, f *Fixture) { h.Mint.Data = valueRaw(f, CBytes(bytes.Repeat([]byte{1}, 33))) }, ErrMintData, ret},
+		{"pre-3.0 bare payload", func(h *History, f *Fixture) {
+			h.Mint.Data = CArr(CBytes(f.Cfg.Aid[:]), CAmount(amt))
+		}, ErrMintData, ret},
+		{"extra asset field", func(h *History, f *Fixture) {
+			h.Mint.Data = CTag(TagValue, CArr(CUint(1), CArr(CArr(CBytes(f.Cfg.Aid[:]), CAmount(amt), CBytes(nil))), CNull))
+		}, ErrMintData, ret},
+		{"two assets", func(h *History, f *Fixture) {
+			e := CArr(CBytes(f.Cfg.Aid[:]), CAmount(amt))
+			h.Mint.Data = CTag(TagValue, CArr(CUint(1), CArr(e, e), CNull))
+		}, ErrMintData, ret},
+		{"no asset", func(h *History, f *Fixture) { h.Mint.Data = CTag(TagValue, CArr(CUint(1), CArr(), CNull)) }, ErrMintData, ret},
+		{"memo present", func(h *History, f *Fixture) {
+			h.Mint.Data = CTag(TagValue, CArr(CUint(1), CArr(CArr(CBytes(f.Cfg.Aid[:]), CAmount(amt))), CBytes([]byte{1})))
+		}, ErrMintData, ret},
+		{"value version 2", func(h *History, f *Fixture) {
+			h.Mint.Data = CTag(TagValue, CArr(CUint(2), CArr(CArr(CBytes(f.Cfg.Aid[:]), CAmount(amt))), CNull))
+		}, ErrMintData, ret},
+		{"value wrong tag", func(h *History, f *Fixture) {
+			h.Mint.Data = CTag(TagValue+1, CArr(CUint(1), CArr(CArr(CBytes(f.Cfg.Aid[:]), CAmount(amt))), CNull))
+		}, ErrMintData, ret},
+		{"asset id 31 bytes", func(h *History, f *Fixture) {
+			h.Mint.Data = CTag(TagValue, CArr(CUint(1), CArr(CArr(CBytes(f.Cfg.Aid[:31]), CAmount(amt))), CNull))
 		}, ErrMintData, ret},
 		{"intermediate data", func(h *History, f *Fixture) { h.Transfers[0].Data = []byte{1} }, ErrTransferData, ret},
 		{"intermediate empty data is not null", func(h *History, f *Fixture) { h.Transfers[1].Data = []byte{} }, ErrTransferData, ret},
@@ -660,9 +691,9 @@ func TestRepeatedSID(t *testing.T) {
 	src := SignaturePredicate(k[0].PubKey().SerializeCompressed())
 	raw := h.Transfers[0].Bytes()
 	cd := h.CDs[0]
-	_, err = checkStep(src, cd.SourceHash, raw, &cd, k[0].PubKey(), seen)
+	_, err = checkStep(src, cd.SourceHash, raw, NoDeadline, &cd, h.Times[0], k[0].PubKey(), seen)
 	require.NoError(t, err)
-	_, err = checkStep(src, cd.SourceHash, raw, &cd, k[0].PubKey(), seen)
+	_, err = checkStep(src, cd.SourceHash, raw, NoDeadline, &cd, h.Times[0], k[0].PubKey(), seen)
 	require.ErrorIs(t, err, ErrRepeatedSID)
 }
 
@@ -688,13 +719,13 @@ func TestCfgBindingOfRelation(t *testing.T) {
 	other = *f.Cfg
 	other.Aid[0] ^= 1
 	_, err = VerifyReturn(&other, b)
-	require.Error(t, err)
-	// A different cfg changes cfg-derived salt, so the same bytes are rejected
-	// even when the justification matches.
+	require.ErrorIs(t, err, ErrLockProofCfg)
+	// A different cfg changes the cfg the embedded proof is bound to, so the
+	// same bytes are rejected even when chain, vault and nonce match.
 	other = *f.Cfg
 	other.B1ProfileHash[0] ^= 1
 	_, err = VerifyReturn(&other, b)
-	require.ErrorIs(t, err, ErrMintSalt)
+	require.ErrorIs(t, err, ErrLockProofCfg)
 }
 
 func TestDecodeRejections(t *testing.T) {
@@ -721,21 +752,21 @@ func TestDecodeRejections(t *testing.T) {
 	_, err = DecodeHistory([]byte{0x98, 0x02})
 	require.ErrorIs(t, err, ErrNonCanonical)
 	// wrong version literal inside the first transaction
-	badVer := bytes.Replace(good, h.Mint.Bytes(), CTag(TagMint, CArr(CUint(2), CUint(uint64(h.Mint.Network)), h.Mint.Recipient.Bytes(),
-		CBytes(h.Mint.Salt[:]), CBytes(h.Mint.Type[:]), CNullOr(h.Mint.Justification), CNullOr(h.Mint.Data))), 1)
+	badVer := bytes.Replace(good, h.Mint.Bytes(), CTag(TagMint, CArr(CUint(3), CUint(uint64(h.Mint.Network)), h.Mint.Recipient.Bytes(),
+		CBytes(h.Mint.Salt[:]), CBytes(h.Mint.Type[:]), CNullOr(h.Mint.Justification), CNullOr(h.Mint.Data), CNull)), 1)
 	_, err = DecodeHistory(badVer)
 	require.ErrorIs(t, err, ErrVersion)
 	// extra field in a transfer
 	t0 := h.Transfers[0].Bytes()
-	ex := CTag(TagTransfer, CArr(CUint(1), h.Transfers[0].Recipient.Bytes(), CBytes(h.Transfers[0].Mask[:]), CNull, CNull))
+	ex := CTag(TagTransfer, CArr(CUint(2), h.Transfers[0].Recipient.Bytes(), CBytes(h.Transfers[0].Mask[:]), CNull, CNull, CNull))
 	_, err = DecodeHistory(bytes.Replace(good, t0, ex, 1))
 	require.ErrorIs(t, err, ErrShape)
 	// wrong mask length
-	sm := CTag(TagTransfer, CArr(CUint(1), h.Transfers[0].Recipient.Bytes(), CBytes(h.Transfers[0].Mask[:31]), CNull))
+	sm := CTag(TagTransfer, CArr(CUint(2), h.Transfers[0].Recipient.Bytes(), CBytes(h.Transfers[0].Mask[:31]), CNull, CNull))
 	_, err = DecodeHistory(bytes.Replace(good, t0, sm, 1))
 	require.ErrorIs(t, err, ErrLength)
 	// wrong tag
-	wt := CTag(TagTransfer+1, CArr(CUint(1), h.Transfers[0].Recipient.Bytes(), CBytes(h.Transfers[0].Mask[:]), CNull))
+	wt := CTag(TagTransfer+1, CArr(CUint(2), h.Transfers[0].Recipient.Bytes(), CBytes(h.Transfers[0].Mask[:]), CNull, CNull))
 	_, err = DecodeHistory(bytes.Replace(good, t0, wt, 1))
 	require.ErrorIs(t, err, ErrTag)
 	// predicate: wrong engine, unknown type, bad key

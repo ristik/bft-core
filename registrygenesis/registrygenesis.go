@@ -41,6 +41,7 @@ import (
 	"github.com/ethereum/go-ethereum/trie"
 	"github.com/ethereum/go-ethereum/triedb"
 	"github.com/holiman/uint256"
+	"github.com/unicitynetwork/bft-core/b1state"
 	"github.com/unicitynetwork/bft-core/registryproof"
 	bfttypes "github.com/unicitynetwork/bft-go-base/types"
 )
@@ -103,9 +104,10 @@ type Record struct {
 	BaseConfigHash   common.Hash
 	ShardEpoch       uint64
 	RootEpoch        uint64
-	// Layout is the registry layout version G commits to: 1 or, for the assignment-aware registry, 2.
+	// Layout selects a historical commitment (1/2) or the fresh B1 preimage.
 	// Zero is read as 1, so every v1 record keeps its bytes.
-	Layout uint64
+	Layout                       uint64
+	RootGenesisID, B1ProfileHash common.Hash
 }
 
 func (g Record) layoutVersion() uint64 {
@@ -120,8 +122,12 @@ func (g Record) clone() Record {
 	return g
 }
 
-// Encode is CBOR(G): deterministic CBOR of the twelve-element array of §5.1.
+// Encode is CBOR(G). Historical deployments preserve the twelve-field §5.1
+// array; FreshB1 binds root genesis and profile in thirteen fields with no layout word.
 func (g Record) Encode() ([]byte, error) {
+	if g.Layout == registryproof.FreshB1 {
+		return bfttypes.Cbor.Marshal([]any{genesisDomain, g.NetworkID, g.PartitionID, g.ShardID, g.ChainID, g.SystemAddress.Bytes(), g.RegistryAddress.Bytes(), g.RegistryCodeHash.Bytes(), g.BaseConfigHash.Bytes(), g.ShardEpoch, g.RootEpoch, g.RootGenesisID.Bytes(), g.B1ProfileHash.Bytes()})
+	}
 	return bfttypes.Cbor.Marshal([]any{
 		genesisDomain, g.layoutVersion(),
 		g.NetworkID, g.PartitionID, g.ShardID, g.ChainID,
@@ -176,6 +182,8 @@ type Genesis struct {
 	fullConfigCBOR    []byte
 	fullShardConfHash common.Hash
 	storage           map[string]common.Hash
+	dynamic           map[common.Hash]common.Hash
+	dynamicProofs     map[common.Hash][][]byte
 	storageRoot       common.Hash
 	stateRoot         common.Hash
 	header            []byte
@@ -200,7 +208,7 @@ func Generate(config *bfttypes.PartitionDescriptionRecord, pins Pins, art Artifa
 	if err := pins.check(); err != nil {
 		return nil, err
 	}
-	art = Artifact{RuntimeCode: bytes.Clone(art.RuntimeCode), CodeHash: art.CodeHash, Layout: art.Layout}
+	art = Artifact{RuntimeCode: bytes.Clone(art.RuntimeCode), CodeHash: art.CodeHash, Layout: art.Layout, b1: art.b1}
 	if err := art.check(); err != nil {
 		return nil, err
 	}
@@ -208,6 +216,9 @@ func Generate(config *bfttypes.PartitionDescriptionRecord, pins Pins, art Artifa
 		return nil, fmt.Errorf("%w: artifact code hash %s is not the pinned %s", ErrPins, art.CodeHash, pins.RegistryCodeHash)
 	}
 	evm.ExtraData = bytes.Clone(evm.ExtraData)
+	if art.b1 != nil && evm.GasLimit != art.b1.profile.MaxGas {
+		return nil, ErrEVMParams
+	}
 	if err := evm.check(); err != nil {
 		return nil, err
 	}
@@ -232,8 +243,13 @@ func Generate(config *bfttypes.PartitionDescriptionRecord, pins Pins, art Artifa
 		RegistryCodeHash: pins.RegistryCodeHash, BaseConfigHash: baseHash,
 		ShardEpoch: base.Epoch, RootEpoch: pins.RootEpoch,
 	}
-	if art.layout() == registryproof.LayoutVersion2 {
-		g.Layout = registryproof.LayoutVersion2
+	if art.layout() == registryproof.LayoutVersion2 || art.layout() == registryproof.FreshB1 {
+		g.Layout = art.layout()
+		if art.b1 != nil {
+			g.RootGenesisID = common.Hash(art.b1.profile.RootGenesisID)
+			h, _ := art.b1.profile.Hash()
+			g.B1ProfileHash = common.Hash(h)
+		}
 	}
 	enc, err := g.Encode()
 	if err != nil {
@@ -263,7 +279,7 @@ func Generate(config *bfttypes.PartitionDescriptionRecord, pins Pins, art Artifa
 		"assignment.rootEpoch": wordUint(g.RootEpoch),
 		"phase":                wordUint(2),
 	}
-	if art.layout() == registryproof.LayoutVersion2 {
+	if art.layout() == registryproof.LayoutVersion2 || art.layout() == registryproof.FreshB1 {
 		// The genesis configuration hash stays immutable in config.shardConfHash; the active assignment
 		// hash starts equal to it and only a privileged acknowledgement changes it.
 		words["assignment.activeConfHash"] = fullHash
@@ -272,6 +288,33 @@ func Generate(config *bfttypes.PartitionDescriptionRecord, pins Pins, art Artifa
 	out := &Genesis{
 		baseConfigHash: baseHash, record: g, recordCBOR: enc, genesisCommitment: commitment,
 		fullConfigCBOR: fullCBOR, fullShardConfHash: fullHash, storage: words, pins: pins,
+	}
+	if art.layout() == registryproof.FreshB1 {
+		if art.b1 == nil {
+			return nil, ErrArtifact
+		}
+		delete(words, "layoutVersion")
+		bw, err := b1state.GenesisWords(art.b1.profile, art.b1.genesis)
+		if err != nil {
+			return nil, err
+		}
+		out.dynamic = make(map[common.Hash]common.Hash)
+		names, _ := registryproof.SlotNamesFor(registryproof.FreshB1)
+		for k, v := range bw {
+			found := false
+			for _, n := range names {
+				if k == b1state.FixedSlot(n) {
+					if _, exists := words[n]; !exists {
+						words[n] = common.Hash(v)
+					}
+					found = true
+					break
+				}
+			}
+			if !found {
+				out.dynamic[common.Hash(k)] = common.Hash(v)
+			}
+		}
 	}
 	// Step 5.
 	if err := out.buildEVMGenesis(chainID, art, evm); err != nil {
@@ -344,6 +387,17 @@ func (g *Genesis) buildEVMGenesis(chainID uint64, art Artifact, evm EVMParams) e
 			}
 		}
 	}
+	for key, w := range g.dynamic {
+		if w != (common.Hash{}) {
+			v, err := rlp.EncodeToBytes(common.TrimLeftZeroes(w[:]))
+			if err != nil {
+				return err
+			}
+			if err = storage.Update(crypto.Keccak256(key[:]), v); err != nil {
+				return err
+			}
+		}
+	}
 	g.storageRoot = storage.Hash()
 
 	account, err := rlp.EncodeToBytes(&types.StateAccount{
@@ -378,7 +432,15 @@ func (g *Genesis) buildEVMGenesis(chainID uint64, art Artifact, evm EVMParams) e
 		g.evidence.StorageProofs[i] = p
 	}
 
-	g.genesisJSON, err = genesisJSON(chainID, evm, &allocation{address: g.pins.RegistryAddress, code: art.RuntimeCode, words: g.storage, layout: art.layout()})
+	g.dynamicProofs = make(map[common.Hash][][]byte)
+	for key := range g.dynamic {
+		var p nodeList
+		if err := storage.Prove(crypto.Keccak256(key[:]), &p); err != nil {
+			return err
+		}
+		g.dynamicProofs[key] = p
+	}
+	g.genesisJSON, err = genesisJSON(chainID, evm, &allocation{address: g.pins.RegistryAddress, code: art.RuntimeCode, words: g.storage, layout: art.layout(), dynamic: g.dynamic})
 	return err
 }
 
@@ -576,6 +638,7 @@ type allocation struct {
 	code    []byte
 	words   map[string]common.Hash
 	layout  uint64
+	dynamic map[common.Hash]common.Hash
 }
 
 func genesisJSON(chainID uint64, evm EVMParams, a *allocation) ([]byte, error) {
@@ -593,6 +656,11 @@ func genesisJSON(chainID uint64, evm EVMParams, a *allocation) ([]byte, error) {
 					return nil, err
 				}
 				storage[k.Hex()] = w.Hex()
+			}
+		}
+		for k, v := range a.dynamic {
+			if v != (common.Hash{}) {
+				storage[k.Hex()] = v.Hex()
 			}
 		}
 		alloc[a.address.Hex()] = allocAccount{Balance: "0x0", Code: hexutil.Encode(a.code), Storage: storage}

@@ -132,3 +132,30 @@ func BenchmarkPolicyAndEnvelope(b *testing.B) {
 		}
 	})
 }
+
+// BenchmarkLockProof measures the full offline embedded-proof verification
+// (weighted UC, PDR, header, account and storage MPT).
+func BenchmarkLockProof(b *testing.B) {
+	e := newEnv(b)
+	h, _ := e.backedToken(b, 5, amt, []*secp256k1.PrivateKey{KeyFromSeed("bench-lock")})
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		if err := VerifyMintBacking(e.F.Cfg, h, e.Trust, e.Pin); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+// BenchmarkKernelReturn measures the ABI entry point on a 16-transfer return.
+func BenchmarkKernelReturn(b *testing.B) {
+	f := fix()
+	h := benchHistory(b, f, 16)
+	in, err := EncodeKernelInput(OpReturn, f.Cfg.Bytes(), h.Bytes())
+	require.NoError(b, err)
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		if _, err := Kernel(in); err != nil {
+			b.Fatal(err)
+		}
+	}
+}

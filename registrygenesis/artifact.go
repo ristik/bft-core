@@ -8,6 +8,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/crypto"
+	"github.com/unicitynetwork/bft-core/b1registry"
 	"github.com/unicitynetwork/bft-core/registryproof"
 )
 
@@ -31,9 +32,10 @@ var pinnedArtifactV2JSON []byte
 type Artifact struct {
 	RuntimeCode []byte
 	CodeHash    common.Hash
-	// Layout is the registry layout the code implements: 1 (the historical v1) or 2 (assignment-aware).
+	// Layout selects a historical reader (1/2) or the inactive FreshB1 allocation.
 	// Zero is read as 1.
 	Layout uint64
+	b1     *b1GenesisConfig
 }
 
 func (a Artifact) layout() uint64 {
@@ -44,6 +46,17 @@ func (a Artifact) layout() uint64 {
 }
 
 func (a Artifact) check() error {
+	if a.layout() == registryproof.FreshB1 {
+		if a.b1 == nil {
+			return ErrArtifact
+		}
+		if err := b1registry.ValidateProfile(a.b1.profile); err != nil {
+			return err
+		}
+		if a.CodeHash != common.Hash(a.b1.profile.RuntimeHash) {
+			return ErrArtifact
+		}
+	}
 	if len(a.RuntimeCode) == 0 {
 		return fmt.Errorf("%w: runtime code is empty", ErrArtifact)
 	}

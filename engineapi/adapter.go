@@ -17,6 +17,7 @@ import (
 
 	"github.com/unicitynetwork/bft-go-base/types"
 
+	"github.com/unicitynetwork/bft-core/b1paired"
 	"github.com/unicitynetwork/bft-core/handoff"
 	"github.com/unicitynetwork/bft-core/handoffdelivery"
 	"github.com/unicitynetwork/bft-core/network/protocol/certification"
@@ -77,8 +78,11 @@ type Adapter struct {
 // the seal companion's witnesses from the authorization this round was built
 // on rather than from anything ureth returns.
 type buildContext struct {
-	payloadID data
-	parent    shardnode.BlockRef
+	payloadID    data
+	b1Update     []byte
+	b1Input      []byte
+	b1Commitment [32]byte
+	parent       shardnode.BlockRef
 	// certificate and technicalRecord are the authenticated, owned copies
 	// rootinput.Derive produced. Seal encodes exactly these as the two companion
 	// witnesses — the certificate the block binds and the record it commits to.
@@ -103,6 +107,8 @@ type Config struct {
 // VerifierContext holds the verifier-owned identity and trust pins for v2 derivation.
 // Round and the certified parent come from RoundParams on every call.
 type VerifierContext struct {
+	// B1 is configured only by inactive acceptance fixtures until PR4.
+	B1             *b1paired.Config
 	NetworkID      types.NetworkID
 	PartitionID    types.PartitionID
 	ShardID        types.ShardID
@@ -633,7 +639,7 @@ func (a *Adapter) deriveV2(ctx context.Context, p shardnode.RoundParams, uc *typ
 		}
 	}
 	derived, err := rootinput.DeriveV2(rootinput.ContextV2{
-		Genesis: a.verifier.GenesisOrigin, Parent: snapshot,
+		Context: ctx, B1: a.verifier.B1, Genesis: a.verifier.GenesisOrigin, Parent: snapshot,
 		Round: p.Round, ParentHash: p.Parent.Hash,
 		TransitionsPending: pendingTransition, Transition: transition,
 	}, o)
@@ -705,7 +711,8 @@ func (a *Adapter) buildDerived(ctx context.Context, p shardnode.RoundParams, der
 	id := shardnode.BuildID(hex.EncodeToString(*resp.PayloadID))
 	a.mu.Lock()
 	a.pending[id] = buildContext{
-		payloadID:       *resp.PayloadID,
+		payloadID: *resp.PayloadID,
+		b1Update:  bytes.Clone(derived.B1Update), b1Input: bytes.Clone(derived.Encoded), b1Commitment: derived.Commitment,
 		parent:          p.Parent,
 		certificate:     derived.Observation.Certificate(),
 		technicalRecord: derived.Observation.TechnicalRecord(),
@@ -719,7 +726,7 @@ func sealBuildInput(derived rootinput.ResultV2) SealBuildInput {
 	for i, transition := range derived.Input.Transitions {
 		transitions[i] = data(bytes.Clone(transition))
 	}
-	return SealBuildInput{RootInput: data(bytes.Clone(derived.Encoded)), Transitions: transitions}
+	return SealBuildInput{RootInput: data(bytes.Clone(derived.Encoded)), Transitions: transitions, B1Update: data(bytes.Clone(derived.B1Update))}
 }
 
 // Seal retrieves the built payload. An empty user transaction list still
@@ -741,6 +748,9 @@ func (a *Adapter) Seal(ctx context.Context, id shardnode.BuildID) (shardnode.Blo
 		return shardnode.Block{}, fmt.Errorf("engineapi: getPayloadWithSealV1: %w", err)
 	}
 
+	if len(bc.b1Update) > 0 && (uint64(resp.ExecutionPayload.GasLimit) != a.verifier.B1.Profile.MaxGas || !bytes.Equal(resp.SealCompanion.B1Update, bc.b1Update) || !bytes.Equal(resp.SealCompanion.RootInput, bc.b1Input) || !bytes.Equal(resp.ExecutionPayload.ExtraData, bc.b1Commitment[:])) {
+		return shardnode.Block{}, ErrCompanionBinding
+	}
 	// Even an empty user transaction list is a real execution payload: system contracts
 	// (including the beacon-root update) may change state, and M1 must advance EVM
 	// height through idle periods. The payload still needs its normal seal companion.
@@ -765,6 +775,7 @@ func (a *Adapter) Seal(ctx context.Context, id shardnode.BuildID) (shardnode.Blo
 			slog.String("commitment", fmt.Sprintf("%x", resp.ExecutionPayload.ExtraData)))
 	}
 	return EncodeBlockWithSealCompanion(resp.ExecutionPayload, &SealCompanion{
+		B1Update:   resp.SealCompanion.B1Update,
 		RootInput:  resp.SealCompanion.RootInput,
 		Witnesses:  witnesses,
 		Provenance: resp.SealCompanion.Provenance,
@@ -833,7 +844,10 @@ func (a *Adapter) CheckBlockBinding(ctx context.Context, b shardnode.Block, p sh
 	}
 	attrs := DeriveAttributesV2(input.Input, ParentHeader{Timestamp: uint64(parentHeader.Timestamp)}, a.feeCollector)
 	payload := envelope.ExecutionPayload
-	if !bytes.Equal(envelope.SealCompanion.RootInput, input.Encoded) || !bytes.Equal(payload.ExtraData, input.Commitment[:]) {
+	if a.verifier.B1 != nil && uint64(payload.GasLimit) != a.verifier.B1.Profile.MaxGas {
+		return b1paired.ErrAdmission
+	}
+	if !bytes.Equal(envelope.SealCompanion.B1Update, input.B1Update) || !bytes.Equal(envelope.SealCompanion.RootInput, input.Encoded) || !bytes.Equal(payload.ExtraData, input.Commitment[:]) {
 		return ErrCompanionBinding
 	}
 	if b.Number != uint64(payload.BlockNumber) || !bytes.Equal(b.Hash, payload.BlockHash[:]) || !bytes.Equal(b.ParentHash, payload.ParentHash[:]) || !bytes.Equal(b.StateRoot, payload.StateRoot[:]) || !bytes.Equal(p.Parent.Hash, payload.ParentHash[:]) || b.Number != p.Parent.Number+1 {
@@ -874,6 +888,9 @@ func (a *Adapter) CheckBlockBinding(ctx context.Context, b shardnode.Block, p sh
 // before asking the execution client to execute. The follower never re-selects from its own inbox.
 func (a *Adapter) Verify(ctx context.Context, b shardnode.Block, p shardnode.RoundParams) (shardnode.Status, error) {
 	if len(b.Raw) == 0 {
+		if a.verifier != nil && a.verifier.B1 != nil {
+			return shardnode.StatusInvalid, ErrCompanionMissing
+		}
 		// Quiet block: must be exactly the parent's Number/StateRoot,
 		// unchanged. Nothing to execute — see Seal's quiet case above,
 		// which this mirrors, including deliberately NOT checking b.Hash
@@ -923,6 +940,9 @@ func (a *Adapter) Verify(ctx context.Context, b shardnode.Block, p shardnode.Rou
 		return shardnode.StatusInvalid, fmt.Errorf("%w: round %d", ErrCompanionMissing, p.Round)
 	}
 	companion := envelope.SealCompanion
+	if a.verifier.B1 != nil && uint64(envelope.ExecutionPayload.GasLimit) != a.verifier.B1.Profile.MaxGas {
+		return shardnode.StatusInvalid, b1paired.ErrAdmission
+	}
 
 	// Witnesses[0] and witnesses[1] are the bound certificate and the record it commits to, in the
 	// canonical-CBOR encoding this repository already uses for both. A wrong length, a decode
@@ -947,7 +967,7 @@ func (a *Adapter) Verify(ctx context.Context, b shardnode.Block, p shardnode.Rou
 	// sharper than a field-by-field comparison: a substituted transition, a swapped record, a wrong
 	// origin or a wrong parent all fail on the encoding itself. It also pins that the companion's
 	// rootInput is the canonical encoding and not merely a decodable variant.
-	if !bytes.Equal(companion.RootInput, derived.Encoded) {
+	if !bytes.Equal(companion.B1Update, derived.B1Update) || !bytes.Equal(companion.RootInput, derived.Encoded) {
 		return shardnode.StatusInvalid, fmt.Errorf("%w: round %d: companion rootInput %x is not the canonical derivation %x",
 			ErrCompanionBinding, p.Round, companion.RootInput, derived.Encoded)
 	}

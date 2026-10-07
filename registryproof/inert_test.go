@@ -41,7 +41,8 @@ func TestOnlyReviewedPackagesImportTheReader(t *testing.T) {
 		// registrygenesis, registrywitness and certifiedstore each have their own guard naming who may import
 		// them. recordwiring is reached only through the shard-node command's opt-in record store, which its
 		// own guard enforces, and internal/testutils/certifiedchain is test fixture code.
-		if strings.HasPrefix(rel, "registryproof"+string(filepath.Separator)) ||
+		if strings.HasPrefix(rel, filepath.Join("internal", "testutils", "b1fixture")+string(filepath.Separator)) ||
+			strings.HasPrefix(rel, "registryproof"+string(filepath.Separator)) ||
 			strings.HasPrefix(rel, "registrygenesis"+string(filepath.Separator)) ||
 			strings.HasPrefix(rel, "registrywitness"+string(filepath.Separator)) ||
 			strings.HasPrefix(rel, "certifiedstore"+string(filepath.Separator)) ||
@@ -76,6 +77,7 @@ func TestOnlyReviewedPackagesImportTheReader(t *testing.T) {
 		filepath.Join("parentwitness", "provider.go"),
 		filepath.Join("parentwitness", "verify.go"),
 		filepath.Join("parentwitness", "wire.go"),
+		filepath.Join("rootinput", "b1.go"),
 		filepath.Join("rootinput", "v2.go"),
 	}, importers, "only reviewed proof consumers may import %s", importPath)
 }

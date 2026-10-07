@@ -54,7 +54,7 @@ func TestV2LayoutMatchesTheArtifactOrderAndKeys(t *testing.T) {
 	n, err := FieldCountFor(1)
 	require.NoError(t, err)
 	require.Equal(t, FieldCount, n)
-	_, err = FieldCountFor(3)
+	_, err = FieldCountFor(FreshB1 + 1)
 	require.ErrorIs(t, err, ErrContext)
 }
 

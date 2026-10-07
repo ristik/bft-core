@@ -34,8 +34,8 @@ func NewFixture(chainID uint64, aggPartition uint32, aggConf [32]byte) *Fixture 
 	c.TokenVerifierCodeHash = H([]byte("fixture-verifier-code"))
 	c.SemanticProfileHash = H([]byte("fixture-semantic-profile"))
 	c.B1ProfileHash = H([]byte("fixture-b1-profile"))
-	c.Ty = DeriveType(c.Network, c.ExecutionGenesis, c.Vault)
-	c.Aid = DeriveAsset(c.Network, c.ExecutionGenesis)
+	c.Ty = DeriveType(c.Network, c.RootGenesis, c.ExecutionGenesis, c.ChainID)
+	c.Aid = DeriveAsset(c.Network, c.RootGenesis, c.ExecutionGenesis, c.ChainID)
 	pol := Policy{Partition: aggPartition, ShardConf: aggConf}
 	c.AggregatorPolicyHash = pol.Hash()
 	return &Fixture{Cfg: &c, Policy: pol}
@@ -56,24 +56,55 @@ func sigPred(k *secp256k1.PrivateKey) Predicate {
 	return SignaturePredicate(k.PubKey().SerializeCompressed())
 }
 
+// BaseTime is the reference time of a fixture history's mint; transfer i is
+// certified at BaseTime+10*i seconds. Fixture times are small and fixed so a
+// vector never depends on a clock.
+const BaseTime uint64 = 1_700_000_000
+
+// StructuralProof is a deterministic placeholder LockProof bound to the
+// fixture's cfg. It satisfies the kernel's structural scan and cfg binding and
+// authenticates nothing; real evidence is built by LockFixture.
+func (f *Fixture) StructuralProof(n uint64) *LockProof {
+	d := func(label string) []byte { h := H(append([]byte(label), CUint(n)...)); return h[:] }
+	return &LockProof{Cfg: f.Cfg.Hash(), TrustBaseID: H([]byte("fixture-trust-base-id")),
+		PDR: d("pdr"), UC: d("uc"), Header: d("header"),
+		AccountNodes: [][]byte{d("account-node")}, StorageNodes: [][]byte{d("storage-node")}}
+}
+
+// BuildOpts selects the optional parts of a built history; the zero value is
+// the null-deadline default with a structural proof.
+type BuildOpts struct {
+	Proof        *LockProof
+	MintDeadline Deadline
+}
+
 // BuildToken builds a lock-backed token for nonce n and amount whose first
 // owner is keys[0], transferred through keys[1:], with no burn.
 func (f *Fixture) BuildToken(n uint64, amount *big.Int, keys []*secp256k1.PrivateKey) (*History, error) {
+	return f.BuildTokenWith(n, amount, keys, BuildOpts{})
+}
+
+// BuildTokenWith is BuildToken with explicit options.
+func (f *Fixture) BuildTokenWith(n uint64, amount *big.Int, keys []*secp256k1.PrivateKey, o BuildOpts) (*History, error) {
 	cfg := f.Cfg
 	ch := cfg.Hash()
 	salt := DeriveSalt(ch, n)
 	id := DeriveTokenID(salt, cfg.Network)
+	if o.Proof == nil {
+		o.Proof = f.StructuralProof(n)
+	}
 	m := MintTx{Network: cfg.Network, Recipient: sigPred(keys[0]), Salt: salt, Type: cfg.Ty,
-		Justification: MintJustification(cfg.ChainID, cfg.Vault, cfg.ZeroAddress, n), Data: MintData(cfg.Aid, amount)}
+		Justification: MintJustification(cfg.ChainID, cfg.Vault, cfg.ZeroAddress, n, o.Proof), Data: ValueData(cfg.Aid, amount),
+		Deadline: o.MintDeadline}
 	mk, err := MinterKey(id)
 	if err != nil {
 		return nil, err
 	}
 	h0 := MintSourceHash(id)
 	raw := m.Bytes()
-	cd := Certification{Source: sigPred(mk), SourceHash: h0, TxHash: H(raw)}
+	cd := Certification{Source: sigPred(mk), SourceHash: h0, TxHash: H(raw), Deadline: m.Deadline}
 	cd.Unlock = SignUnlock(mk, cd.SourceHash, cd.TxHash)
-	h := &History{Mint: m, MintCD: cd, mintRaw: raw}
+	h := &History{Mint: m, MintCD: cd, MintTime: BaseTime, mintRaw: raw}
 	state := ResultState(h0, id[:])
 	owner := keys[0]
 	for i := 1; i < len(keys); i++ {
@@ -106,10 +137,11 @@ func (h *History) appendTransfer(state *[32]byte, owner *secp256k1.PrivateKey, n
 	mask := H(append(append([]byte("mask"), h.Mint.Salt[:]...), CUint(i)...))
 	t := TransferTx{Recipient: next, Mask: mask, Data: data}
 	raw := t.Bytes()
-	cd := Certification{Source: sigPred(owner), SourceHash: *state, TxHash: H(raw)}
+	cd := Certification{Source: sigPred(owner), SourceHash: *state, TxHash: H(raw), Deadline: t.Deadline}
 	cd.Unlock = SignUnlock(owner, cd.SourceHash, cd.TxHash)
 	h.Transfers = append(h.Transfers, t)
 	h.CDs = append(h.CDs, cd)
+	h.Times = append(h.Times, BaseTime+10*uint64(len(h.Transfers)))
 	h.transfersRaw = append(h.transfersRaw, raw)
 	*state = ResultState(*state, mask[:])
 	return nil
@@ -137,12 +169,12 @@ func (h *History) Resign(owners []*secp256k1.PrivateKey) error {
 		return err
 	}
 	h0 := MintSourceHash(id)
-	h.MintCD = Certification{Source: sigPred(mk), SourceHash: h0, TxHash: H(h.mintRaw)}
+	h.MintCD = Certification{Source: sigPred(mk), SourceHash: h0, TxHash: H(h.mintRaw), Deadline: h.Mint.Deadline}
 	h.MintCD.Unlock = SignUnlock(mk, h.MintCD.SourceHash, h.MintCD.TxHash)
 	state := ResultState(h0, id[:])
 	h.CDs = h.CDs[:0]
 	for i := range h.Transfers {
-		cd := Certification{Source: sigPred(owners[i]), SourceHash: state, TxHash: H(h.transfersRaw[i])}
+		cd := Certification{Source: sigPred(owners[i]), SourceHash: state, TxHash: H(h.transfersRaw[i]), Deadline: h.Transfers[i].Deadline}
 		cd.Unlock = SignUnlock(owners[i], cd.SourceHash, cd.TxHash)
 		h.CDs = append(h.CDs, cd)
 		state = ResultState(state, h.Transfers[i].Mask[:])

@@ -247,6 +247,11 @@ func registryAccount(g *Genesis, art Artifact) importedAccount {
 			s[k] = v
 		}
 	}
+	for k, v := range g.dynamic {
+		if v != (common.Hash{}) {
+			s[k] = v
+		}
+	}
 	return importedAccount{balance: new(big.Int), code: bytes.Clone(art.RuntimeCode), storage: s}
 }
 func accountsEqual(a, b importedAccount) bool {

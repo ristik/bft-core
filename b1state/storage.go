@@ -62,7 +62,7 @@ func clearEntry(store func([32]byte, [32]byte), e Entry) {
 }
 
 // GenesisWords includes explicit pre-first-import zero origin words, distinct
-// from assigned root epoch. PR3 supplies the complete final allocation.
+// from assigned root epoch. registrygenesis adds the pinned operational allocation.
 func GenesisWords(p Profile, genesis Entry) (map[[32]byte][32]byte, error) {
 	h, err := p.Hash()
 	if err != nil {
@@ -115,4 +115,14 @@ func (c *Changes) WriteAllowance() (uint64, error) {
 		gas += price
 	}
 	return gas, nil
+}
+
+// EntryStorage exports every addressed metadata/member word, including zeros.
+func EntryStorage(e Entry) (map[[32]byte][32]byte, error) {
+	if err := e.Validate(); err != nil {
+		return nil, err
+	}
+	out := make(map[[32]byte][32]byte)
+	putEntry(func(k, v [32]byte) { out[k] = v }, e)
+	return out, nil
 }

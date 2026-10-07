@@ -277,6 +277,8 @@ func authenticateObservationV2(ctx context.Context, c ObservationContextV2, uc *
 // ContextV2 binds an authenticated observation to trusted genesis and one exact verified parent witness.
 // ParentHash is a caller-owned authenticated continuity premise, as in v1; Snapshot alone does not certify it.
 type ContextV2 struct {
+	Context            context.Context
+	B1                 *B1Config
 	Genesis            registrygenesis.GenesisOrigin
 	Parent             registryproof.Snapshot
 	Round              uint64
@@ -288,6 +290,7 @@ type ContextV2 struct {
 }
 
 type ResultV2 struct {
+	B1Update    []byte
 	Input       evmroot.RootInputV2
 	Encoded     []byte
 	Commitment  evmroot.Hash32
@@ -317,7 +320,7 @@ func DeriveV2(c ContextV2, o VerifiedObservationV2) (ResultV2, error) {
 		return ResultV2{}, fmt.Errorf("%w: observation and genesis origin name different deployment contexts", ErrV2Context)
 	}
 	f := c.Parent.Fields()
-	layout2 := f.Layout == registryproof.LayoutVersion2
+	layout2 := (f.Layout == registryproof.LayoutVersion2 || f.Layout == registryproof.FreshB1)
 	genesisConf := c.Genesis.FullShardConfHash().Bytes()
 	activeConf := genesisConf
 	var activeShardEpoch uint64
@@ -405,10 +408,46 @@ func DeriveV2(c ContextV2, o VerifiedObservationV2) (ResultV2, error) {
 	if c.TransitionsPending {
 		ri.Transitions = [][]byte{boundTransition}
 	}
+	var b1Update []byte
+	if f.Layout == registryproof.FreshB1 {
+		if c.B1 == nil {
+			return ResultV2{}, ErrB1Admission
+		}
+		callCtx := c.Context
+		if callCtx == nil {
+			callCtx = context.Background()
+		}
+		projected, err := c.B1.Derive(callCtx, c.Parent, o)
+		if err != nil {
+			return ResultV2{}, err
+		}
+		b1Update = bytes.Clone(projected.Update)
+		ri.B1UpdateHash = bytes.Clone(projected.Hash[:])
+	} else if c.B1 != nil {
+		return ResultV2{}, ErrB1Admission
+	}
 	if err := ri.Validate(); err != nil {
 		return ResultV2{}, fmt.Errorf("%w: %v", ErrV2Shape, err)
 	}
-	return ResultV2{Input: ri, Encoded: ri.Encode(), Commitment: ri.ExtraData(), Observation: o.clone()}, nil
+	encoded := ri.Encode()
+	if c.B1 != nil {
+		ucBytes, err := types.Cbor.Marshal(o.uc)
+		if err != nil {
+			return ResultV2{}, err
+		}
+		trBytes, err := types.Cbor.Marshal(o.tr)
+		if err != nil {
+			return ResultV2{}, err
+		}
+		other := uint64(len(encoded) + len(ucBytes) + len(trBytes))
+		for _, t := range ri.Transitions {
+			other += uint64(len(t))
+		}
+		if other > c.B1.Profile.OtherCompanionBytes || uint64(len(b1Update)) > c.B1.Profile.CompanionBytes-other {
+			return ResultV2{}, ErrB1Admission
+		}
+	}
+	return ResultV2{B1Update: b1Update, Input: ri, Encoded: encoded, Commitment: ri.ExtraData(), Observation: o.clone()}, nil
 }
 
 func (o VerifiedObservationV2) clone() VerifiedObservationV2 {
@@ -427,4 +466,22 @@ func cloneOriginV2(o evmroot.RootOriginV2) evmroot.RootOriginV2 {
 	o.IR.Hash = bytes.Clone(o.IR.Hash)
 	o.IR.BlockHash = bytes.Clone(o.IR.BlockHash)
 	return o
+}
+
+// VerifyRootCommittee rechecks the owned observation under another local
+// authenticated committee, preserving all original shard/config bindings.
+// B1 uses this to bind observation authentication to its own verified history.
+func (o VerifiedObservationV2) VerifyRootCommittee(tb *types.RootTrustBaseV1) error {
+	if !o.Valid() || tb == nil || tb.Epoch != o.rootEpoch || uint64(tb.NetworkID) != uint64(o.network) {
+		return ErrUnauthenticated
+	}
+	raw, _ := types.Cbor.Marshal(o.shard)
+	var shard types.ShardID
+	if err := shard.UnmarshalCBOR(raw); err != nil {
+		return errors.Join(ErrUnauthenticated, err)
+	}
+	if err := o.uc.Verify(quorumweight.Checked(tb), crypto.SHA256, o.partition, shard, o.conf); err != nil {
+		return errors.Join(ErrUnauthenticated, err)
+	}
+	return nil
 }

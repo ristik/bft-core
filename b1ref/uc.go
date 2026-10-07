@@ -409,3 +409,31 @@ func ucFolds(c *claim) error {
 	}
 	return nil
 }
+
+// UCShape is what the strict structural scan of one standalone certificate found.
+type UCShape struct {
+	// PathSteps is the unicity tree path length plus the shard tree sibling count the native gas schedule charges.
+	PathSteps uint64
+	// SigLens are the byte lengths of the seal signatures, in canonical map order.
+	SigLens []int
+}
+
+// ScanUC applies exactly the native bounded certificate scan to raw: the byte cap, the strict CBOR token and depth bounds, every
+// field's shape and sublimit (summary, shard depth, siblings, steps, signatures, node ids), the native decoder and the byte-exact
+// re-encoding. It performs no cryptography and allocates only within those bounds. Callers that accept a narrower codec (the SDK's)
+// intersect it with this result.
+func ScanUC(raw []byte) (UCShape, error) {
+	var c claim
+	if len(raw) > MaxUCBytes {
+		return UCShape{}, ErrUCTooLarge
+	}
+	tokens := 0
+	if err := decodeUC(&c, raw, &tokens); err != nil {
+		return UCShape{}, err
+	}
+	shape := UCShape{PathSteps: c.pathSteps}
+	for i := 1; c.sigs != nil && i < len(c.sigs.kids); i += 2 {
+		shape.SigLens = append(shape.SigLens, len(c.sigs.kids[i].data))
+	}
+	return shape, nil
+}
