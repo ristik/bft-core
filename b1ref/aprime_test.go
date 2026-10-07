@@ -58,3 +58,43 @@ func TestCallerScannerRejectsSignatureShape(t *testing.T) {
 		t.Fatal("missing signature format cases", count)
 	}
 }
+
+// certFrame wraps one UC payload in a valid single-claim call frame. The UC is
+// last, so slicing the frame with cap=len leaves the payload with no spare
+// capacity: reads past its end panic instead of silently succeeding.
+func certFrame(uc []byte) []byte {
+	f := []byte{1, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0x80}
+	f = append(f, make([]byte, 96)...)
+	f = append(f, byte(len(uc)>>24), byte(len(uc)>>16), byte(len(uc)>>8), byte(len(uc)))
+	f = append(f, uc...)
+	return f[:len(f):len(f)]
+}
+
+func TestCallerScannerEmptyUC(t *testing.T) {
+	if _, err := scanCertCall(certFrame(nil), false); !errors.Is(err, ErrTruncated) {
+		t.Fatal(err)
+	}
+}
+
+func TestCallerScannerTightCapacityTruncation(t *testing.T) {
+	for name, uc := range map[string][]byte{
+		"bytes-inline":    {0x45, 1, 2, 3},
+		"text-inline":     {0x65, 'a', 'b', 'c'},
+		"bytes-no-body":   {0x58, 32},
+		"text-no-body":    {0x78, 32},
+		"bytes-one-short": {0x43, 1, 2},
+	} {
+		if _, err := scanCertCall(certFrame(uc), false); !errors.Is(err, ErrTruncated) {
+			t.Fatalf("%s: %v", name, err)
+		}
+	}
+}
+
+func TestCallerScannerDuplicateBeforeDecode(t *testing.T) {
+	// {1:0, 2:0, 1:0}: the later duplicate key is found by the allocation-free
+	// pass, before the shape reader or any decoder sees the UC.
+	uc := []byte{0xa3, 0x01, 0x00, 0x02, 0x00, 0x01, 0x00}
+	if _, err := scanCertCall(certFrame(uc), false); !errors.Is(err, ErrDuplicateMapKey) {
+		t.Fatal(err)
+	}
+}
