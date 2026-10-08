@@ -133,18 +133,26 @@ func TestAuthorityAdvanceRejectsIsolatedInvalidContexts(t *testing.T) {
 // advances into it; a weight outside the bound is still refused.
 func TestAuthorityAdvancesIntoABoundedWeightConfiguration(t *testing.T) {
 	for name, tc := range map[string]struct {
-		stake uint64
-		ok    bool
-	}{"a bounded weight": {6, true}, "zero": {0, false}} {
+		shardStake, rootStake uint64
+		ok                    bool
+	}{
+		"bounded weights in both": {6, 6, true},
+		"a zero shard weight":     {0, 6, false},
+		"a zero root weight":      {6, 0, false},
+	} {
 		t.Run(name, func(t *testing.T) {
 			f := newFixture(t, 1)
 			a := f.pending(t)
 			conf := ownConf(t, a)
 			require.NoError(t, a.CompleteEnrollment(conf))
 			next := *conf
-			next.Validators = []*types.NodeInfo{{NodeID: conf.Validators[0].NodeID, SigKey: bytes.Clone(conf.Validators[0].SigKey), Stake: tc.stake}}
+			next.Validators = []*types.NodeInfo{{NodeID: conf.Validators[0].NodeID, SigKey: bytes.Clone(conf.Validators[0].SigKey), Stake: tc.shardStake}}
 			next.Epoch++
-			err := a.AdvanceEpoch(t.Context(), &next, successorTrust(f, 2))
+			tb := successorTrust(f, 2)
+			// the successor trust base is weighted too: the heavy entity's root node carries a stake of its own
+			tb.RootNodes = []*types.NodeInfo{{NodeID: tb.RootNodes[0].NodeID, SigKey: bytes.Clone(tb.RootNodes[0].SigKey), Stake: tc.rootStake}}
+			tb.QuorumThreshold = max(tc.rootStake*2/3+1, 1)
+			err := a.AdvanceEpoch(t.Context(), &next, tb)
 			if tc.ok {
 				require.NoError(t, err)
 				require.EqualValues(t, next.Epoch, a.Enrollment().ShardEpoch)
