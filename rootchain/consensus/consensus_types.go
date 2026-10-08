@@ -95,9 +95,9 @@ func WithQ3(a Q3Authority) Option {
 	return func(c *Optional) { c.Q3 = a }
 }
 
-// WitnessFetcher retrieves a control witness by its SHA-256 from the given peers, in order. A returned witness has been checked against
+// WitnessFetcher retrieves a control witness of at most maxBytes by its SHA-256 from the given peers, in order. A returned witness has been checked against
 // the hash.
-type WitnessFetcher func(ctx context.Context, hash [32]byte, peers []peer.ID) ([]byte, error)
+type WitnessFetcher func(ctx context.Context, hash [32]byte, peers []peer.ID, maxBytes int) ([]byte, error)
 
 // WithWitnessFetcher lets the manager fetch the witnesses of a block's controls from the other root nodes before it executes the block.
 // Without it a block whose witnesses are not already retained is refused as unavailable.

@@ -7,6 +7,9 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	"github.com/unicitynetwork/bft-core/rootchain/consensus/storage"
+	rctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
+	"github.com/unicitynetwork/bft-core/rootchain/evmstate"
 	"github.com/unicitynetwork/bft-go-base/types"
 )
 
@@ -118,4 +121,11 @@ func TestEnablePosClosureAcceptsACommitteeOfSeveralRootNodes(t *testing.T) {
 		err := enablePosClosure(nil, nil, nil, &types.RootTrustBaseV1{NetworkID: 5, RootNodes: nodes(n)}, nil, path, false)
 		require.ErrorIs(t, err, ErrGenesisIdentities, "%d root nodes", n)
 	}
+}
+
+func TestThePullBoundOfAnEVMWitnessIsTheExecutorsBound(t *testing.T) {
+	require.Equal(t, evmstate.MaxWitnessBytes, storage.MaxEVMWitnessBytes, "a witness the executor would refuse is never fetched or kept")
+	require.Equal(t, storage.MaxEVMWitnessBytes, storage.WitnessBound(rctypes.OpRetirement))
+	require.Equal(t, storage.MaxEVMWitnessBytes, storage.WitnessBound(rctypes.OpRejectResult))
+	require.Equal(t, storage.MaxWitnessBytes, storage.WitnessBound(rctypes.OpCloseLiability), "a closure bundle keeps its own bound")
 }
