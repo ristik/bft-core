@@ -110,10 +110,11 @@ func TestConfigIsExactlyTheQ3Tuple(t *testing.T) {
 	g := arr32(7)
 	require.NoError(t, Q3Config(5, g).Validate(), "acceptance control")
 	for name, mutate := range map[string]func(*ProtocolConfig){
-		"revision":         func(c *ProtocolConfig) { c.Revision = 2 },
+		"revision":         func(c *ProtocolConfig) { c.Revision = 1 },
 		"signingScheme":    func(c *ProtocolConfig) { c.SigningScheme = 1 },
 		"voteCodec":        func(c *ProtocolConfig) { c.VoteCodec = 1 },
 		"quorumProfile":    func(c *ProtocolConfig) { c.QuorumProfile = "D2" },
+		"leaderPolicy":     func(c *ProtocolConfig) { c.LeaderPolicy = "legacy" },
 		"evmRequestPolicy": func(c *ProtocolConfig) { c.EVMRequestPolicy = "unit-v1" },
 		"aggregatorPolicy": func(c *ProtocolConfig) { c.AggregatorPolicy = "weighted-v1" },
 	} {

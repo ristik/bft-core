@@ -208,6 +208,19 @@ func (h *History) Signing(epoch uint64) (votesig.Config, error) {
 	return votesig.Config{Scheme: e.config.SigningScheme, Network: e.config.Network, Genesis: e.config.Genesis}, nil
 }
 
+// LeaderPolicy is the leader selection policy of an epoch's rounds: "legacy" for a verified legacy epoch, the tuple's policy for a
+// verified V3 epoch. An epoch the history does not hold is ErrUnknownEpoch, never "legacy".
+func (h *History) LeaderPolicy(epoch uint64) (string, error) {
+	e, err := h.ForEpoch(epoch)
+	if err != nil {
+		return "", err
+	}
+	if e.config == nil {
+		return LeaderPolicyLegacy, nil
+	}
+	return e.config.LeaderPolicy, nil
+}
+
 // ForRound is the entry whose interval [A*, next A*) holds round.
 func (h *History) ForRound(round uint64) (Entry, error) {
 	for i := len(h.entries) - 1; i >= 0; i-- {
