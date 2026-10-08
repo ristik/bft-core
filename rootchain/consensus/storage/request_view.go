@@ -691,7 +691,9 @@ func viewDispatch(v IRChangeReqVerifier) RequestViewVerifier {
 }
 
 // resolveExecutionView resolves the view a block executes the shard's requests under, from the verified state the block is
-// being executed on (parent) and the committed history, never from the last committed ShardInfo.
+// being executed on (parent) and the committed history, never from the last committed ShardInfo. The parent carries the committed
+// LastCR pair of its ancestry (see ShardInfo.LastCR), so the previous UC of the view is the latest committed response, repeat UCs
+// included, whichever block of the pipeline the parent is.
 func resolveExecutionView(vv RequestViewVerifier, parent *ShardInfo, parentID []byte, round uint64, hashAlg crypto.Hash) (*RequestRoundView, error) {
 	return ResolveParentView(vv.RequestHistory(), vv.PendingChange(parent.PartitionID, parent.ShardID), parent, parentID, round, hashAlg, PurposeExecute, nil)
 }
