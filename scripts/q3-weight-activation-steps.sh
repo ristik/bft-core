@@ -161,7 +161,7 @@ q3_candidate() {
   [ "$(jq -c '[.[].stake] | sort' "$Q3_DIR/cand-validators.json")" = "$(echo "$Q3_WEIGHTS" | tr ' ' '\n' | sort -n | paste -sd, - | sed 's/^/[/;s/$/]/')" ] || { echo "assignment stakes differ from $Q3_WEIGHTS" >&2; return 1; }
   [ "$(jq -r --arg id "$(jq -r .nodeId test-nodes/auth1/node-info.json)" '.[] | select(.nodeId == $id) | .stake' "$Q3_DIR/cand-validators.json")" = "$(q3_weight_of 1)" ] || { echo "entity 1 does not carry weight $(q3_weight_of 1)" >&2; return 1; }
   q3_check_weights set "$Q3_DIR/root-weights.json" "$Q3_TOTAL_WEIGHT" "$Q3_ROOT_QUORUM" >/dev/null || return 1
-  q3_check_weights set "$Q3_DIR/evm-weights.json" "$Q3_TOTAL_WEIGHT" "$Q3_EVM_QUORUM" >/dev/null || return 1
+  q3_check_weights set-evm "$Q3_DIR/evm-weights.json" "$Q3_TOTAL_WEIGHT" "$Q3_EVM_QUORUM" >/dev/null || return 1
 }
 
 q3_receipts() { # exactly one receipt per successor entity, from its root key

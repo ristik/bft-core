@@ -49,7 +49,7 @@ q3_assert_refusal() { # logfile sentinel what: the sentinel text appears in the 
 # ---- weights: the committed record's signer weights against the design's totals --------------------------------------------------------------
 # q3_assert_weights <signers.json> <expected total> <expected quorum>: the file is [{"nodeId":..,"weight":n},...] (the whole epoch's set for a
 # "set" file, or the signers of a certificate). Prints the signed total. Each property is its own exit code so the self-test isolates them.
-q3_check_weights() { # mode(set|cert) file W Q
+q3_check_weights() { # mode(set|set-evm|cert) file W Q
   python3 - "$@" <<'PY'
 import json, sys
 mode, path, W, Q = sys.argv[1], sys.argv[2], int(sys.argv[3]), int(sys.argv[4])
@@ -59,9 +59,11 @@ ids = [r["nodeId"] for r in rows]
 if len(set(ids)) != len(ids): sys.exit("duplicate signer identity")
 if any(w <= 0 for w in ws): sys.exit("non-positive weight")
 total = sum(ws)
-if mode == "set":
+if mode in ("set", "set-evm"):
     if total != W: sys.exit(f"epoch weight total {total} != {W}")
-    if (2 * total) // 3 + 1 != Q: sys.exit(f"threshold for total {total} is not {Q}")
+    # the root quorum is floor(2W/3)+1; the EVM shard's request quorum is the majority floor(W/2)+1 (the two are never substitutes)
+    want = (2 * total) // 3 + 1 if mode == "set" else total // 2 + 1
+    if want != Q: sys.exit(f"{'root' if mode == 'set' else 'EVM request'} threshold for total {total} is {want}, not {Q}")
 else:
     if total < Q: sys.exit(f"signed weight {total} is below the quorum {Q}")
 print(total)
@@ -162,7 +164,9 @@ q3_selftest() {
   # weights: the design's 6,1,1,1 numbers, and one mutation per property
   echo '[{"nodeId":"a","weight":6},{"nodeId":"b","weight":1},{"nodeId":"c","weight":1},{"nodeId":"d","weight":1}]' >"$t/set.json"
   q3_st "weights: set 6,1,1,1 is W=9 with Q=7" q3_check_weights set "$t/set.json" "$Q3_TOTAL_WEIGHT" "$Q3_ROOT_QUORUM"
-  q3_st_neg "weights: the same set is not Q=5" q3_check_weights set "$t/set.json" "$Q3_TOTAL_WEIGHT" "$Q3_EVM_QUORUM"
+  q3_st_neg "weights: the same set is not root Q=5" q3_check_weights set "$t/set.json" "$Q3_TOTAL_WEIGHT" "$Q3_EVM_QUORUM"
+  q3_st "weights: the same set is EVM request Q=5 (majority)" q3_check_weights set-evm "$t/set.json" "$Q3_TOTAL_WEIGHT" "$Q3_EVM_QUORUM"
+  q3_st_neg "weights: the same set is not EVM request Q=7" q3_check_weights set-evm "$t/set.json" "$Q3_TOTAL_WEIGHT" "$Q3_ROOT_QUORUM"
   echo '[{"nodeId":"a","weight":5},{"nodeId":"b","weight":1},{"nodeId":"c","weight":1},{"nodeId":"d","weight":1}]' >"$t/bad.json"
   q3_st_neg "weights: total 8 is refused" q3_check_weights set "$t/bad.json" "$Q3_TOTAL_WEIGHT" "$Q3_ROOT_QUORUM"
   echo '[{"nodeId":"a","weight":6},{"nodeId":"b","weight":1}]' >"$t/cert.json"
