@@ -223,6 +223,20 @@ func (x *BlockStore) Witness(hash [32]byte) ([]byte, error) {
 	return data, err
 }
 
+// TrialExecute executes a proposed block on its parent's state exactly as Add would and discards the result: a leader uses it to learn
+// whether an optional control it would include makes the block invalid before it signs the proposal. Nothing is stored.
+func (x *BlockStore) TrialExecute(block *rctypes.BlockData, verifier IRChangeReqVerifier) error {
+	parent, err := x.blockTree.FindBlock(block.GetParentRound())
+	if err != nil {
+		return fmt.Errorf("trial: parent round %d: %w", block.GetParentRound(), err)
+	}
+	x.lock.RLock()
+	svc := x.pos
+	x.lock.RUnlock()
+	_, err = parent.extendWithAuthority(block, verifier, x.orchestration, x.hash, x.log, x.handoffAuth, x, svc)
+	return err
+}
+
 // HasWitness reports whether the witness with this hash is retained.
 func (x *BlockStore) HasWitness(hash [32]byte) bool {
 	store, ok := x.storage.(WitnessStore)

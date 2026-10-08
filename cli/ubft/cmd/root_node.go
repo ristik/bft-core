@@ -439,6 +439,9 @@ func rootNodeRun(ctx context.Context, flags *rootNodeRunFlags) error {
 				rootQ3API{Status: cm.Q3Status, Rt: q3rt, Bundle: q3BundleProvider{cm: cm, rt: q3rt}.Q3Bundle, State: cm.GetState,
 					Trust: func(epoch uint64) (*types.RootTrustBaseV1, error) { return trustBaseStore.GetByEpoch(epoch) }}.register(mux)
 			}
+			if flags.PosDeploymentFile != "" {
+				mux.HandleFunc("POST /api/v1/pos/control", rootPosControlHandler(cm))
+			}
 			mux.HandleFunc("POST /api/v1/handoff/abort", rootHandoffAbortHandler(cm))
 			mux.HandleFunc("POST /api/v1/handoff/abort/status", rootHandoffAbortStatusHandler(cm))
 		}
