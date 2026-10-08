@@ -15,6 +15,8 @@ import (
 	libp2ppeer "github.com/libp2p/go-libp2p/core/peer"
 	"os"
 	"sort"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -70,6 +72,8 @@ type b1ProfileFile struct {
 	ElectionContract *common.Address           `json:"electionContract,omitempty"`
 	ElectGas         uint64                    `json:"electGas,omitempty"`
 	ElectMeasurement *b1state.ElectMeasurement `json:"electMeasurement,omitempty"`
+	// ElectCaps are the deployed contracts' ceilings (manifest limits.vMax / limits.lMax, election nMax) the measurement is taken at.
+	ElectCaps *b1state.ElectCaps `json:"electCaps,omitempty"`
 }
 
 func (f b1ProfileFile) profile() b1state.Profile {
@@ -113,40 +117,56 @@ func b1ProfileFileOf(p b1state.Profile) b1ProfileFile {
 
 // readB1Profile reads a profile file strictly (unknown fields are refused) and validates it against the pinned registry.
 func readB1Profile(path string) (b1state.Profile, error) {
+	p, _, err := readB1ProfileFile(path)
+	return p, err
+}
+
+// readB1ProfileFile is readB1Profile that also returns the decoded file (the recorded measurement and caps).
+func readB1ProfileFile(path string) (b1state.Profile, b1ProfileFile, error) {
 	raw, err := os.ReadFile(path) // #nosec G304 -- operator-supplied config path, same trust level as --shard-conf
 	if err != nil {
-		return b1state.Profile{}, fmt.Errorf("reading the b1 profile %q: %w", path, err)
+		return b1state.Profile{}, b1ProfileFile{}, fmt.Errorf("reading the b1 profile %q: %w", path, err)
 	}
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.DisallowUnknownFields()
 	var f b1ProfileFile
 	if err := dec.Decode(&f); err != nil {
-		return b1state.Profile{}, fmt.Errorf("decoding the b1 profile %q: %w", path, err)
+		return b1state.Profile{}, b1ProfileFile{}, fmt.Errorf("decoding the b1 profile %q: %w", path, err)
 	}
 	if dec.More() {
-		return b1state.Profile{}, fmt.Errorf("decoding the b1 profile %q: trailing data", path)
+		return b1state.Profile{}, b1ProfileFile{}, fmt.Errorf("decoding the b1 profile %q: trailing data", path)
 	}
 	p := f.profile()
 	if err := checkRecordedElectGas(f); err != nil {
-		return b1state.Profile{}, fmt.Errorf("%w: %v", ErrB1Profile, err)
+		return b1state.Profile{}, b1ProfileFile{}, fmt.Errorf("%w: %v", ErrB1Profile, err)
 	}
 	if err := b1registry.ValidateProfile(p); err != nil {
-		return b1state.Profile{}, fmt.Errorf("%w: %v", ErrB1Profile, err)
+		return b1state.Profile{}, b1ProfileFile{}, fmt.Errorf("%w: %v", ErrB1Profile, err)
 	}
-	return p, nil
+	return p, f, nil
 }
 
 // checkRecordedElectGas refuses an election price that is not exactly the recorded measurement pinned with the margin, and a recorded
 // measurement without an election hook to price: the price is derived from a measurement, never a hand-typed constant.
 func checkRecordedElectGas(f b1ProfileFile) error {
 	if f.ElectionContract == nil {
-		if f.ElectGas != 0 || f.ElectMeasurement != nil {
-			return errors.New("an election price or measurement without an election contract")
+		if f.ElectGas != 0 || f.ElectMeasurement != nil || f.ElectCaps != nil {
+			return errors.New("an election price, measurement or caps without an election contract")
 		}
 		return nil
 	}
 	if f.ElectMeasurement == nil {
 		return errors.New("the election price has no recorded measurement (it is derived, never typed)")
+	}
+	if f.ElectCaps == nil {
+		return errors.New("the election price has no recorded deployment caps (vMax, lMax, nMax)")
+	}
+	if err := f.ElectCaps.Valid(); err != nil {
+		return fmt.Errorf("the recorded election caps: %w", err)
+	}
+	if !f.ElectMeasurement.AtCaps(*f.ElectCaps) {
+		return fmt.Errorf("the recorded measurement (V=%d L=%d C=%d) is not at the deployed caps (vMax=%d lMax=%d nMax=%d)",
+			f.ElectMeasurement.V, f.ElectMeasurement.L, f.ElectMeasurement.C, f.ElectCaps.VMax, f.ElectCaps.LMax, f.ElectCaps.NMax)
 	}
 	want, err := b1state.ElectGasFor(*f.ElectMeasurement)
 	if err != nil {
@@ -221,6 +241,7 @@ type b1Hooks struct {
 	HookRecordGas    uint64
 	ElectionContract [20]byte
 	Measurement      *b1state.ElectMeasurement
+	Caps             *b1state.ElectCaps
 }
 
 // readElectMeasurement reads a measurement file strictly.
@@ -241,10 +262,29 @@ func readElectMeasurement(path string) (b1state.ElectMeasurement, error) {
 	return m, nil
 }
 
-func parseB1Hooks(custody string, h uint32, recordGas uint64, election, measurement string) (b1Hooks, error) {
+// parseElectCaps reads "vMax,lMax,nMax".
+func parseElectCaps(s string) (b1state.ElectCaps, error) {
+	var c b1state.ElectCaps
+	parts := strings.Split(s, ",")
+	if len(parts) != 3 {
+		return c, fmt.Errorf("--elect-caps %q: want vMax,lMax,nMax", s)
+	}
+	var v [3]uint32
+	for i, p := range parts {
+		n, err := strconv.ParseUint(strings.TrimSpace(p), 10, 32)
+		if err != nil {
+			return c, fmt.Errorf("--elect-caps %q: %w", s, err)
+		}
+		v[i] = uint32(n)
+	}
+	c = b1state.ElectCaps{VMax: v[0], LMax: v[1], NMax: v[2]}
+	return c, c.Valid()
+}
+
+func parseB1Hooks(custody string, h uint32, recordGas uint64, election, measurement, caps string) (b1Hooks, error) {
 	var out b1Hooks
 	if custody == "" {
-		if h != 0 || recordGas != 0 || election != "" || measurement != "" {
+		if h != 0 || recordGas != 0 || election != "" || measurement != "" || caps != "" {
 			return out, errors.New("hook pins without --records-custody")
 		}
 		return out, nil
@@ -254,9 +294,9 @@ func parseB1Hooks(custody string, h uint32, recordGas uint64, election, measurem
 	}
 	out.RecordsCustody, out.HRecords, out.HookRecordGas = common.HexToAddress(custody), h, recordGas
 	switch {
-	case election == "" && measurement == "":
-	case election == "" || measurement == "":
-		return out, errors.New("--election and --elect-measurement go together")
+	case election == "" && measurement == "" && caps == "":
+	case election == "" || measurement == "" || caps == "":
+		return out, errors.New("--election, --elect-measurement and --elect-caps go together")
 	case !common.IsHexAddress(election):
 		return out, fmt.Errorf("--election %q is not an address", election)
 	default:
@@ -264,7 +304,15 @@ func parseB1Hooks(custody string, h uint32, recordGas uint64, election, measurem
 		if err != nil {
 			return out, err
 		}
-		out.ElectionContract, out.Measurement = common.HexToAddress(election), &m
+		c, err := parseElectCaps(caps)
+		if err != nil {
+			return out, err
+		}
+		if !m.AtCaps(c) {
+			return out, fmt.Errorf("the measurement (V=%d L=%d C=%d) is not at the deployed caps (vMax=%d lMax=%d nMax=%d): measure at the caps the manifest is set to",
+				m.V, m.L, m.C, c.VMax, c.LMax, c.NMax)
+		}
+		out.ElectionContract, out.Measurement, out.Caps = common.HexToAddress(election), &m, &c
 	}
 	return out, nil
 }
@@ -275,32 +323,25 @@ func engineAPICheckElectGasCmd() *cobra.Command {
 		Use:   "check-elect-gas",
 		Short: "Refuse a profile whose pinned election price is below a fresh worst-case measurement",
 		Long: `The genesis check of the election hook's price: the profile must carry the measurement its price was pinned from (x1.25, rounded
-up), and the price must still cover a fresh measurement (unicity-pos-contracts script/measure-elect.sh V L C) of the same or a smaller
-(V, L, C). Run it before genesis and whenever the contracts change.`,
+up), the measurement must have been taken at exactly the deployed caps (the manifest's vMax and lMax, the election's nMax) and the price
+must still cover a fresh measurement at those same caps (unicity-pos-contracts script/measure-elect.sh V L C). A fresh measurement of any
+other (V, L, C) is refused. Run it before genesis and whenever the contracts change.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if profilePath == "" || freshPath == "" {
 				return errors.New("--b1-profile and --measurement are required")
 			}
-			p, err := readB1Profile(profilePath)
+			p, f, err := readB1ProfileFile(profilePath)
 			if err != nil {
 				return err
 			}
-			raw, err := os.ReadFile(profilePath) // #nosec G304 -- operator-supplied config path
-			if err != nil {
-				return err
-			}
-			var f b1ProfileFile
-			if err := json.Unmarshal(raw, &f); err != nil {
-				return err
-			}
-			if f.ElectMeasurement == nil {
-				return fmt.Errorf("%w: the profile has no election measurement", ErrB1Profile)
+			if f.ElectMeasurement == nil || f.ElectCaps == nil {
+				return fmt.Errorf("%w: the profile has no election measurement or deployment caps", ErrB1Profile)
 			}
 			fresh, err := readElectMeasurement(freshPath)
 			if err != nil {
 				return err
 			}
-			if err := b1state.CheckElectGas(p, *f.ElectMeasurement, fresh); err != nil {
+			if err := b1state.CheckElectGas(p, *f.ElectCaps, *f.ElectMeasurement, fresh); err != nil {
 				return err
 			}
 			fmt.Fprintf(cmd.OutOrStdout(), "election price %d covers the fresh measurement %d (recorded %d for V=%d L=%d C=%d, margin x1.25)\n",
@@ -316,7 +357,7 @@ up), and the price must still cover a fresh measurement (unicity-pos-contracts s
 func engineAPIB1ProfileCmd(baseFlags *baseFlags) *cobra.Command {
 	var trustBasePath, out string
 	var wCert, capacity, genesisUCTime uint64
-	var recordsCustody, electionContract, electMeasurementPath string
+	var recordsCustody, electionContract, electMeasurementPath, electCapsFlag string
 	var hRecords uint32
 	var hookRecordGas uint64
 	flags := &shardConfFlags{}
@@ -345,7 +386,7 @@ unicity-pos-contracts script/measure-elect.sh, and the profile file records the 
 			if err != nil {
 				return err
 			}
-			hooks, err := parseB1Hooks(recordsCustody, hRecords, hookRecordGas, electionContract, electMeasurementPath)
+			hooks, err := parseB1Hooks(recordsCustody, hRecords, hookRecordGas, electionContract, electMeasurementPath, electCapsFlag)
 			if err != nil {
 				return err
 			}
@@ -354,7 +395,7 @@ unicity-pos-contracts script/measure-elect.sh, and the profile file records the 
 				return err
 			}
 			file := b1ProfileFileOf(p)
-			file.ElectMeasurement = hooks.Measurement
+			file.ElectMeasurement, file.ElectCaps = hooks.Measurement, hooks.Caps
 			enc, err := json.MarshalIndent(file, "", "  ")
 			if err != nil {
 				return err
@@ -366,8 +407,7 @@ unicity-pos-contracts script/measure-elect.sh, and the profile file records the 
 			w := cmd.OutOrStdout()
 			fmt.Fprintf(w, "wrote %s\n", out)
 			fmt.Fprintf(w, "profile hash:    %s\n", hexutil.Encode(hash[:]))
-			fmt.Fprintf(w, "ureth flags:     --unicity.network-id=%d --unicity.root-genesis-id=%s --unicity.chain-id=%d --unicity.profile-hash=%s --unicity.w-cert=%d --unicity.max-gas=%d --unicity.system-gas=%d\n",
-				p.Network, hexutil.Encode(p.RootGenesisID[:]), p.ExecutionChainID, hexutil.Encode(hash[:]), p.WCert, p.MaxGas, p.SystemGas)
+			fmt.Fprintf(w, "ureth flags:     %s\n", urethFlags(p, hash))
 			return nil
 		},
 	}
@@ -381,6 +421,7 @@ unicity-pos-contracts script/measure-elect.sh, and the profile file records the 
 	cmd.Flags().Uint64Var(&hookRecordGas, "hook-record-gas", 0, "gross gas reserved per applied record (needs --records-custody)")
 	cmd.Flags().StringVar(&electionContract, "election", "", "the ElectionPolicy module whose elect(origin) the hook calls (needs the records hook and --elect-measurement)")
 	cmd.Flags().StringVar(&electMeasurementPath, "elect-measurement", "", "the worst-case election measurement JSON from unicity-pos-contracts script/measure-elect.sh; pins ElectGas = ceil(gas x 1.25)")
+	cmd.Flags().StringVar(&electCapsFlag, "elect-caps", "", "vMax,lMax,nMax the contracts manifest is deployed with (limits.vMax, limits.lMax, election nMax); the measurement must be taken at exactly these caps. Devnet/testnet: 16,2,8")
 	cmd.Flags().Uint64Var(&genesisUCTime, "genesis-uc-time", 1000, "the pinned genesis UC time recorded in the registry (records.ucTime) before any import; a DEV value")
 	return cmd
 }
@@ -537,4 +578,19 @@ func validateB1RunFlags(flags *shardNodeRunFlags) error {
 		return errors.New("registry layout 3 is the fresh-B1 layout and requires --b1-profile")
 	}
 	return nil
+}
+
+// urethFlags are the flags that pin the paired ureth to the profile: the B1 bindings, and every mandatory hook the profile (and so its
+// hash) commits to. A ureth started without a hook flag the hash commits to would run a different chain under the same hash.
+func urethFlags(p b1state.Profile, hash [32]byte) string {
+	s := fmt.Sprintf("--unicity.network-id=%d --unicity.root-genesis-id=%s --unicity.chain-id=%d --unicity.profile-hash=%s --unicity.w-cert=%d --unicity.max-gas=%d --unicity.system-gas=%d",
+		p.Network, hexutil.Encode(p.RootGenesisID[:]), p.ExecutionChainID, hexutil.Encode(hash[:]), p.WCert, p.MaxGas, p.SystemGas)
+	if p.RecordsCustody != ([20]byte{}) {
+		s += fmt.Sprintf(" --unicity.records-custody=%s --unicity.h-records=%d --unicity.hook-record-gas=%d",
+			strings.ToLower(common.Address(p.RecordsCustody).Hex()), p.HRecords, p.HookRecordGas)
+	}
+	if p.ElectionContract != ([20]byte{}) {
+		s += fmt.Sprintf(" --unicity.election=%s --unicity.elect-gas=%d", strings.ToLower(common.Address(p.ElectionContract).Hex()), p.ElectGas)
+	}
+	return s
 }
