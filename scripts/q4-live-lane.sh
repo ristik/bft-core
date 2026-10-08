@@ -42,6 +42,7 @@ if [ "${Q4_LANE_LOCKED:-0}" != 1 ]; then
 fi
 cd "$REPO_ROOT"
 mkdir -p "$EVIDENCE_DIR"
+export Q4_EVIDENCE_DIR="$EVIDENCE_DIR"
 [ "$(git rev-parse HEAD)" = "$Q4_BFT_COMMIT" ] || fail "HEAD is not the pinned Q4_BFT_COMMIT"
 [ -z "$(git status --porcelain --untracked-files=no)" ] || fail "tracked files are modified: prebuilt or dirty development builds are not acceptance evidence"
 [ -x build/ubft ] || fail "build/ubft is missing (make build)"
