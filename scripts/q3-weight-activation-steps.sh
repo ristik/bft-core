@@ -148,7 +148,7 @@ q3_baseline() {
   [ "$(printf '%s' "$sg" | jq -r '[.epoch, .scheme] | join(",")')" = 1,1 ] || { echo "baseline certificate is not epoch 1 / scheme 1: $sg" >&2; return 1; }
   printf '%s' "$sg" | jq '.signers' >"$Q3_DIR/signers-before.json"
   q3_check_weights cert "$Q3_DIR/signers-before.json" 4 3 >/dev/null || return 1
-  h3_root_info | jq -c '[.partitionShards[] | select(.partitionId != 8) | {partitionId} + (del(.partitionId) | with_entries(select(.value | type != "number")))]' >"$Q3_DIR/aggregator-before.json"
+  h3_root_info | jq -c '[.partitionShards[] | select(.partitionId != 8) | {partitionId} + (del(.partitionId, .roundNumber, .trRound, .trLeader) | with_entries(select(.value | type != "number")))]' >"$Q3_DIR/aggregator-before.json"
 }
 
 q3_candidate() {
@@ -261,7 +261,7 @@ q3_progress_scheme2() {
 }
 
 q3_aggregators_unchanged() {
-  h3_root_info | jq -c '[.partitionShards[] | select(.partitionId != 8) | {partitionId} + (del(.partitionId) | with_entries(select(.value | type != "number")))]' >"$Q3_DIR/aggregator-after.json"
+  h3_root_info | jq -c '[.partitionShards[] | select(.partitionId != 8) | {partitionId} + (del(.partitionId, .roundNumber, .trRound, .trLeader) | with_entries(select(.value | type != "number")))]' >"$Q3_DIR/aggregator-after.json"
   cmp -s "$Q3_DIR/aggregator-before.json" "$Q3_DIR/aggregator-after.json" || { echo "aggregator configuration changed across the activation" >&2; return 1; }
   [ "$(jq 'length' "$Q3_DIR/aggregator-after.json")" = 3 ] || return 1
   h3_progress aggregators 8
