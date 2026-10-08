@@ -162,6 +162,14 @@ func TestCheckRefusesEachDeliberateCorruption(t *testing.T) {
 		{"attempt without an outcome", tamper(func(b *Bundle) { b.Events[1].Kind = "hold" }), ErrNoOutcome},
 		{"attempt without the serialized message", tamper(func(b *Bundle) { b.Events[0].Raw = nil }), ErrNoRaw},
 		{"bytes do not decode", tamper(func(b *Bundle) { b.Events[0].Raw = []byte{0xff, 0x00} }), ErrDecode},
+		{"timeout with a corrupted signature", tamper(func(b *Bundle) {
+			var m abdrc.TimeoutMsg
+			require.NoError(t, types.Cbor.Unmarshal(b.Events[len(b.Events)-2].Raw, &m))
+			m.Signature[0] ^= 0xff
+			raw, err := types.Cbor.Marshal(&m)
+			require.NoError(t, err)
+			b.Events[len(b.Events)-2].Raw, b.Events[len(b.Events)-1].Raw = raw, raw
+		}), ErrMalformedCount},
 		{"claimed round differs from the bytes", tamper(func(b *Bundle) { b.Events[0].Round = 77 }), ErrClaim},
 		{"claimed author differs from the bytes", tamper(func(b *Bundle) { b.Events[0].Author = "id-a" }), ErrClaim},
 		{"epoch outside the manifest", tamper(func(b *Bundle) { b.Epochs[0].Epoch = 3 }), ErrUnknownEpoch},
@@ -251,4 +259,61 @@ func TestCheckClassifiesEquivocation(t *testing.T) {
 	heavy.Class = OutsideAssumptions
 	require.NoError(t, Check(heavy).Err(), "Byzantine weight 7 is outside the assumptions and is labelled so")
 	require.Equal(t, OutsideAssumptions, Check(heavy).ComputedClass)
+}
+
+// proposal is a signed proposal for round 6 by H carrying a QC of round 5 whose signers are the given members.
+func (s *signerSet) proposal(t *testing.T, author string, round uint64, qcSigners ...string) []byte {
+	info := &drctypes.RoundInfo{Version: 1, RoundNumber: round - 1, ParentRoundNumber: round - 2, Epoch: 2, Timestamp: 1111, CurrentRootHash: bytes.Repeat([]byte{7}, 32)}
+	h, err := info.Hash(crypto.SHA256)
+	require.NoError(t, err)
+	sigs := map[string]hex.Bytes{}
+	for _, n := range qcSigners {
+		sigs["id-"+n] = []byte{1, 2, 3} // the checker weighs the signers; it does not re-verify a carried QC's signatures
+	}
+	qc := &drctypes.QuorumCert{VoteInfo: info, LedgerCommitInfo: &types.UnicitySeal{Version: 1, PreviousHash: h}, Signatures: sigs}
+	p := &abdrc.ProposalMsg{Block: &drctypes.BlockData{Version: 1, Author: "id-" + author, Round: round, Epoch: 2, Timestamp: 1112, Payload: &drctypes.Payload{}, Qc: qc}}
+	require.NoError(t, p.Sign(s.signers[author]))
+	raw, err := types.Cbor.Marshal(p)
+	require.NoError(t, err)
+	return raw
+}
+
+func TestCheckProposals(t *testing.T) {
+	s := newSigners(t)
+	build := func(raw []byte) *Bundle {
+		b := &Bundle{Version: Version, Scenario: "synthetic", Coverage: "ORACLE-ONLY", Class: InBound, Epochs: []Epoch{s.epoch(t, 2)}}
+		send(b, "proposal", 2, 6, "H", raw)
+		return b
+	}
+	rep := Check(build(s.proposal(t, "H", 6, "H", "a")))
+	require.NoError(t, rep.Err())
+	require.Equal(t, 1, rep.Proposals)
+	require.Equal(t, 1, rep.Certificates, "the carried QC was weighed: 6+1 = 7 of 7")
+
+	require.ErrorIs(t, Check(build(s.proposal(t, "H", 6, "H"))).Err(), ErrCertificate, "a carried QC below the quorum weight")
+	require.ErrorIs(t, Check(build(s.proposal(t, "H", 6, "H", "ghost"))).Err(), ErrCertificate, "a carried QC signed by a non-member")
+
+	// the signature of another member over the same block
+	forged := build(s.proposal(t, "H", 6, "H", "a"))
+	var p abdrc.ProposalMsg
+	require.NoError(t, types.Cbor.Unmarshal(forged.Events[0].Raw, &p))
+	p.Signature[0] ^= 0xff
+	raw, err := types.Cbor.Marshal(&p)
+	require.NoError(t, err)
+	forged.Events[0].Raw, forged.Events[1].Raw = raw, raw
+	require.ErrorIs(t, Check(forged).Err(), ErrSignature)
+
+	// a proposal whose round does not follow the certificate it carries (signed by the author, so only the round is wrong)
+	skip := &drctypes.BlockData{Version: 1, Author: "id-H", Round: 9, Epoch: 2, Timestamp: 1112, Payload: &drctypes.Payload{}, Qc: &drctypes.QuorumCert{
+		VoteInfo:         &drctypes.RoundInfo{Version: 1, RoundNumber: 5, ParentRoundNumber: 4, Epoch: 2, Timestamp: 1, CurrentRootHash: bytes.Repeat([]byte{7}, 32)},
+		LedgerCommitInfo: &types.UnicitySeal{Version: 1}, Signatures: map[string]hex.Bytes{"id-H": {1}, "id-a": {1}}}}
+	bb, err := skip.Bytes()
+	require.NoError(t, err)
+	sig, err := s.signers["H"].SignBytes(bb)
+	require.NoError(t, err)
+	raw, err = types.Cbor.Marshal(&abdrc.ProposalMsg{Block: skip, Signature: sig})
+	require.NoError(t, err)
+	b := &Bundle{Version: Version, Scenario: "synthetic", Class: InBound, Epochs: []Epoch{s.epoch(t, 2)}}
+	send(b, "proposal", 2, 9, "H", raw)
+	require.ErrorIs(t, Check(b).Err(), ErrProposalRound)
 }
