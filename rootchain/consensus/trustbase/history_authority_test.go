@@ -30,6 +30,18 @@ func (h historyOf) Signing(epoch uint64) (votesig.Config, error) {
 	return votesig.Config{}, errNotHeld
 }
 
+// LeaderPolicy is the policy of the same committed tuple: the weighted one for a domain-bound epoch, legacy for scheme 1.
+func (h historyOf) LeaderPolicy(epoch uint64) (string, error) {
+	c, ok := h[epoch]
+	switch {
+	case !ok:
+		return "", errNotHeld
+	case c.Scheme == votesig.SchemeDomainBound:
+		return LeaderPolicyWeightedV1, nil
+	}
+	return LeaderPolicyLegacy, nil
+}
+
 type pointerHistory struct{ historyOf }
 
 func legacy() votesig.Config { return votesig.Config{Scheme: votesig.SchemeLegacy, Network: 5} }
@@ -171,10 +183,15 @@ func successorOf(t *testing.T, old *types.RootTrustBaseV1, epoch uint64) *types.
 
 // activateSigningCalls are the positions of the calls of a method named ActivateSigning in f.
 func activateSigningCalls(fset *token.FileSet, f *ast.File) []string {
+	return methodCalls(fset, f, "ActivateSigning")
+}
+
+// methodCalls are the positions of the calls of a method named name in f.
+func methodCalls(fset *token.FileSet, f *ast.File, name string) []string {
 	var out []string
 	ast.Inspect(f, func(n ast.Node) bool {
 		if call, ok := n.(*ast.CallExpr); ok {
-			if sel, ok := call.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == "ActivateSigning" {
+			if sel, ok := call.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == name {
 				out = append(out, fset.Position(call.Pos()).String())
 			}
 		}
@@ -208,6 +225,31 @@ func TestNoProductionCallerOfActivateSigning(t *testing.T) {
 		return nil
 	}))
 	require.Empty(t, callers, "ActivateSigning has a production caller")
+}
+
+func TestNoProductionCallerOfActivateLeaderPolicy(t *testing.T) {
+	root, err := filepath.Abs("../../..")
+	require.NoError(t, err)
+	var callers []string
+	fset := token.NewFileSet()
+	require.NoError(t, filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() && (d.Name() == ".git" || d.Name() == "vendor" || d.Name() == "node_modules") {
+			return filepath.SkipDir
+		}
+		if d.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+			return nil
+		}
+		f, err := parser.ParseFile(fset, path, nil, 0)
+		if err != nil {
+			return nil
+		}
+		callers = append(callers, methodCalls(fset, f, "ActivateLeaderPolicy")...)
+		return nil
+	}))
+	require.Empty(t, callers, "ActivateLeaderPolicy has a production caller: the committed ProtocolConfig is the one activation")
 }
 
 func TestTheCallerScanSeesACall(t *testing.T) {

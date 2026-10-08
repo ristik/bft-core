@@ -198,6 +198,10 @@ func (r *Runtime) complete(epoch uint64) {
 // is the trustbase.SigningAuthority a trust-base store is bound to; Admit is what gates signing.
 func (r *Runtime) Signing(epoch uint64) (votesig.Config, error) { return r.History().Signing(epoch) }
 
+// LeaderPolicy is the leader selection policy of an epoch, from the verified history: the same committed tuple as Signing. An epoch
+// the history does not hold is an error.
+func (r *Runtime) LeaderPolicy(epoch uint64) (string, error) { return r.History().LeaderPolicy(epoch) }
+
 // Admit is the signer admission check for an epoch: a verified legacy epoch is admitted, an unknown epoch is refused (never
 // scheme 1 by default), and an activated epoch only once its journal is complete and recovered.
 func (r *Runtime) Admit(epoch uint64) error {

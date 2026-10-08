@@ -226,11 +226,15 @@ func engineAPIGenesis(flags *engineAPIGenesisFlags, changed func(string) bool, o
 		return fmt.Errorf("engine-api genesis requires exactly one --shard-conf, got %d", len(shardConfs))
 	}
 	shardConf := shardConfs[0]
-	if flags.RegistryLayout == registryproof.LayoutVersion2 {
-		// The launch (assignment-aware) genesis always requires coupled validator-set changes: the parameter is part of the
-		// hashed full configuration, so every root validator enforces it. An explicit opt-out is a mistake, not a choice.
+	if flags.RegistryLayout == registryproof.LayoutVersion2 || flags.B1Profile != "" {
+		// Both launch geneses, the assignment-aware layout 2 and the fresh-B1 layout 3, always require coupled validator-set changes: the
+		// parameter is part of the hashed full configuration, so every root validator enforces it. An explicit opt-out is a mistake, not a choice.
+		layout := flags.RegistryLayout
+		if flags.B1Profile != "" {
+			layout = b1RegistryLayout
+		}
 		if v, set := shardConf.PartitionParams[evmassign.CouplingParam]; set && v != "true" {
-			return fmt.Errorf("a registry layout 2 genesis requires %s=true, the shard conf says %q", evmassign.CouplingParam, v)
+			return fmt.Errorf("a registry layout %d genesis requires %s=true, the shard conf says %q", layout, evmassign.CouplingParam, v)
 		}
 		if shardConf.PartitionParams == nil {
 			shardConf.PartitionParams = map[string]string{}

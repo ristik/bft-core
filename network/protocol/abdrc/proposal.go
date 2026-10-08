@@ -14,6 +14,10 @@ import (
 
 var (
 	errSignerIsNil = errors.New("signer is nil")
+	// ErrRoundEvidence is returned for a proposal whose round is not the successor of the round of the certificate it carries. It is
+	// checked before any signature or leader lookup: the weighted leader selector costs work proportional to the distance to the
+	// round it is asked for, so a round must be justified by a certificate before it is looked up.
+	ErrRoundEvidence = errors.New("proposal round does not follow its certificate")
 )
 
 type ProposalMsg struct {
@@ -40,7 +44,7 @@ func (x *ProposalMsg) IsValid() error {
 	// proposal round must follow last round Qc or Tc
 	highestCertifiedRound := max(x.Block.GetParentRound(), x.getLastTcRound())
 	if x.Block.Round-1 != highestCertifiedRound {
-		return fmt.Errorf("proposed block round %d does not follow attached quorum certificate round %d", x.Block.Round, highestCertifiedRound)
+		return fmt.Errorf("proposed block round %d does not follow attached quorum certificate round %d: %w", x.Block.Round, highestCertifiedRound, ErrRoundEvidence)
 	}
 	// if previous round was timeout, then new proposal Block QC must be the same as TC high QC
 	// this is the common round from where we will extend the blockchain. verify this too?

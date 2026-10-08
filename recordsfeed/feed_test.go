@@ -73,13 +73,17 @@ func (c chain) cutOf(t *testing.T, round, refTime uint64) (Cut, evmroot.RootOrig
 type fakeRemote struct {
 	cut        Cut
 	cutErr     error
+	askedFor   []CutKey
 	records    []rootrecords.Record
 	recordsErr error
 	calls      int
 	tamper     func(from uint64, batch []rootrecords.Record) []rootrecords.Record
 }
 
-func (f *fakeRemote) Cut(context.Context, uint64) (Cut, error) { return f.cut, f.cutErr }
+func (f *fakeRemote) Cut(_ context.Context, key CutKey) (Cut, error) {
+	f.askedFor = append(f.askedFor, key)
+	return f.cut, f.cutErr
+}
 
 func (f *fakeRemote) Records(_ context.Context, from uint64, max int) ([]rootrecords.Record, error) {
 	f.calls++
@@ -338,3 +342,30 @@ func TestACachedLogThatDisagreesWithTheAuthenticatedTipIsRefused(t *testing.T) {
 
 // The route is what a pair's B1 config consumes.
 var _ rootinput.RecordsSource = (*Source)(nil)
+
+// The request names the committed block the way the origin does: network, root epoch, root round and tree root. A round alone names
+// nothing a shard can verify (rounds overlap across epochs).
+func TestTheSourceAsksForTheCutTheOriginNames(t *testing.T) {
+	c := buildChain(t, 3)
+	cut, origin := c.cutOf(t, 110, 1_600)
+	remote := &fakeRemote{cut: cut, records: c.records}
+	_, err := NewSource(remote).Cursor(context.Background(), origin)
+	require.NoError(t, err)
+	require.Len(t, remote.askedFor, 1)
+	want := CutKey{Network: origin.NetworkID, Epoch: origin.RootEpoch, Round: origin.RootRound}
+	copy(want.TreeRoot[:], origin.UnicityTreeRoot)
+	require.Equal(t, want, remote.askedFor[0])
+}
+
+func TestACutOfAnotherNetworkIsNotAuthenticated(t *testing.T) {
+	c := buildChain(t, 3)
+	cut, origin := c.cutOf(t, 110, 1_600)
+	origin.NetworkID++ // the tree root is the origin's, but the origin names another network
+	_, _, err := VerifyCut(cut, origin)
+	require.ErrorIs(t, err, ErrAuth)
+}
+
+func TestACutKeyNeedsATreeRootOfTheRightWidth(t *testing.T) {
+	_, err := KeyOf(evmroot.RootOriginV2{RootRound: 1, UnicityTreeRoot: []byte{1}})
+	require.ErrorIs(t, err, ErrAuth)
+}

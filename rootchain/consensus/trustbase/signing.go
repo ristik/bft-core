@@ -29,10 +29,12 @@ type signingRegistry struct {
 	authority SigningAuthority
 }
 
-// SigningAuthority is the verified history that decides each epoch's signing configuration (q3format.History, retained durably
-// by q3active). Its answer for an unknown epoch must be an error.
+// SigningAuthority is the verified history that decides each epoch's protocol configuration: its signing configuration and its
+// leader policy, the members of one committed tuple (q3format.History, retained durably by q3active). Its answer for an unknown
+// epoch must be an error.
 type SigningAuthority interface {
 	Signing(epoch uint64) (votesig.Config, error)
+	LeaderPolicy(epoch uint64) (string, error)
 }
 
 // sameAuthority is identity of a comparable authority; a value of an uncomparable type is never the same one, so binding it twice is

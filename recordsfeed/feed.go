@@ -52,10 +52,27 @@ type Cut struct {
 	Path    *types.UnicityTreeCertificate
 }
 
+// CutKey names the committed root block a cut belongs to as the origin the shard holds does: network, root epoch, root round and the
+// root of the block's unicity tree. Rounds overlap across epochs, so a round alone is no request.
+type CutKey struct {
+	Network, Epoch, Round uint64
+	TreeRoot              [32]byte
+}
+
+// KeyOf derives the cut key from an authenticated origin.
+func KeyOf(origin evmroot.RootOriginV2) (CutKey, error) {
+	if len(origin.UnicityTreeRoot) != 32 {
+		return CutKey{}, fmt.Errorf("%w: origin tree root width", ErrAuth)
+	}
+	key := CutKey{Network: origin.NetworkID, Epoch: origin.RootEpoch, Round: origin.RootRound}
+	copy(key.TreeRoot[:], origin.UnicityTreeRoot)
+	return key, nil
+}
+
 // Remote is a root, or several, that serve cuts and records.
 type Remote interface {
-	// Cut returns the cut of the committed root block of the given round.
-	Cut(ctx context.Context, round uint64) (Cut, error)
+	// Cut returns the cut of the committed root block the key names.
+	Cut(ctx context.Context, key CutKey) (Cut, error)
 	// Records returns up to max records from the given index (fewer at the end of the log).
 	Records(ctx context.Context, from uint64, max int) ([]rootrecords.Record, error)
 }
@@ -69,6 +86,9 @@ func VerifyCut(cut Cut, origin evmroot.RootOriginV2) (rootrecords.State, rootrec
 	root, err := handoff.ControlRoot(cut.Control, cut.Path)
 	if err != nil || !bytes.Equal(root, origin.UnicityTreeRoot) {
 		return rootrecords.State{}, rootrecords.Cursor{}, fmt.Errorf("%w: the control leaf does not lead to the origin's tree root", ErrAuth)
+	}
+	if cut.Control.Network != origin.NetworkID {
+		return rootrecords.State{}, rootrecords.Cursor{}, fmt.Errorf("%w: the control state belongs to network %d, the origin to %d", ErrAuth, cut.Control.Network, origin.NetworkID)
 	}
 	if len(cut.Control.Pos) == 0 {
 		return rootrecords.State{}, rootrecords.Cursor{}, fmt.Errorf("%w: the control state carries no source state", ErrAuth)
@@ -120,7 +140,11 @@ func (s *Source) Cursor(ctx context.Context, origin evmroot.RootOriginV2) (rootr
 }
 
 func (s *Source) cursorFrom(ctx context.Context, remote Remote, origin evmroot.RootOriginV2) (rootrecords.Cursor, error) {
-	cut, err := remote.Cut(ctx, origin.RootRound)
+	key, err := KeyOf(origin)
+	if err != nil {
+		return rootrecords.Cursor{}, err
+	}
+	cut, err := remote.Cut(ctx, key)
 	if err != nil {
 		return rootrecords.Cursor{}, errors.Join(ErrUnavailable, err)
 	}

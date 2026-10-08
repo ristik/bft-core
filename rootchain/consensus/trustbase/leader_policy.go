@@ -19,8 +19,10 @@ var ErrLeaderPolicyHistory = errors.New("leader policy history")
 
 // leaderPolicyRegistry is the history of the epochs that activated a leader policy, the same per-epoch dispatch as the signing
 // registry: the policy is a property of the root epoch and is meant to change at the same boundary as the epoch's weights and
-// signing scheme. An epoch with no activation at or below it is legacy. Nothing in production installs an activation yet, so
-// every epoch resolves to the legacy policy.
+// signing scheme. An epoch with no activation at or below it is legacy. A store bound to the verified history (BindSigningAuthority)
+// takes every epoch's policy from it, as it does the signing configuration: the committed ProtocolConfig of the epoch is the one
+// activation, and ActivateLeaderPolicy is refused. Production has no caller of ActivateLeaderPolicy
+// (TestNoProductionCallerOfActivateLeaderPolicy); it is the seam for tests of the selection rules.
 type leaderPolicyRegistry struct {
 	byEpoch map[uint64]string
 }
@@ -37,6 +39,9 @@ func (s *TrustBaseStore) ActivateLeaderPolicy(epoch uint64, policy string) error
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.signing.authority != nil {
+		return fmt.Errorf("%w: the store takes its policies from the verified history", ErrLeaderPolicyHistory)
+	}
 	if s.leaderPolicy.byEpoch == nil {
 		s.leaderPolicy.byEpoch = make(map[uint64]string)
 	}
@@ -64,6 +69,13 @@ func (s *TrustBaseStore) LeaderPolicy(epoch uint64) (string, error) {
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	if a := s.signing.authority; a != nil {
+		policy, err := a.LeaderPolicy(epoch)
+		if err != nil {
+			return "", fmt.Errorf("%w: epoch %d: %w", ErrLeaderPolicyHistory, epoch, err)
+		}
+		return policy, nil
+	}
 	policy, found, latest := LeaderPolicyLegacy, false, uint64(0)
 	for e, p := range s.leaderPolicy.byEpoch {
 		if e <= epoch && (!found || e > latest) {

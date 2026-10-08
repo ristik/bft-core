@@ -782,11 +782,27 @@ func serveWitnesses(host *network.Peer, cm *consensus.ConsensusManager) func() {
 	return func() { host.RemoveProtocolHandler(poswitness.ProtocolID) }
 }
 
+// rootRecordFetcher fetches source-log records from the other roots of the current trust base, in the order the trust base lists them.
+type rootRecordFetcher struct {
+	host *network.Peer
+	cm   *consensus.ConsensusManager
+}
+
+func (f rootRecordFetcher) Records(ctx context.Context, from uint64, max int) ([]rootrecords.Record, error) {
+	var others []peer.ID
+	for _, id := range f.cm.Validators() {
+		if id != f.host.ID() {
+			others = append(others, id)
+		}
+	}
+	return recordsfeed.P2PRemote{Opener: recordsfeed.FromLibp2p(f.host), Roots: others}.Records(ctx, from, max)
+}
+
 // recordsSource adapts the consensus manager to the records feed's server.
 type recordsSource struct{ cm *consensus.ConsensusManager }
 
-func (s recordsSource) ControlCut(round uint64) (recordsfeed.Cut, error) {
-	cut, err := s.cm.ControlCut(round)
+func (s recordsSource) ControlCut(key recordsfeed.CutKey) (recordsfeed.Cut, error) {
+	cut, err := s.cm.ControlCut(storage.CutKey{Network: key.Network, Epoch: key.Epoch, Round: key.Round, TreeRoot: key.TreeRoot})
 	if err != nil {
 		return recordsfeed.Cut{}, err
 	}
@@ -806,15 +822,22 @@ func serveRootRecords(log *slog.Logger, host *network.Peer, cm *consensus.Consen
 		return nil, err
 	}
 	if len(eligible) == 0 {
-		log.Warn("root records feed disabled: the configured shards have no usable validator set")
-		return func() {}, nil
+		log.Warn("the configured shards have no usable validator set: the records feed serves the other roots only")
 	}
 	allowed := make(map[peer.ID]struct{}, len(eligible))
 	for _, id := range eligible {
 		allowed[id] = struct{}{}
 	}
-	server := recordsfeed.NewServer(recordsSource{cm}, func(id peer.ID) bool { _, ok := allowed[id]; return ok })
+	// The other roots of the trust base are served too: a root that installs an epoch checkpoint without the source log it commits
+	// fetches the missing prefix from them (storage.BlockStore.SetRecordFetcher), verifying every record against the checkpoint.
+	server := recordsfeed.NewServer(recordsSource{cm}, func(id peer.ID) bool {
+		if _, ok := allowed[id]; ok {
+			return true
+		}
+		return slices.Contains(cm.Validators(), id)
+	})
 	host.RegisterProtocolHandler(recordsfeed.ProtocolID, server.Handler)
+	cm.SetRecordFetcher(rootRecordFetcher{host: host, cm: cm})
 	log.Info("root records feed enabled", "validators", len(eligible))
 	return func() { host.RemoveProtocolHandler(recordsfeed.ProtocolID) }, nil
 }

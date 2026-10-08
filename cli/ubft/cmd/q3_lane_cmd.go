@@ -225,7 +225,7 @@ func writeQ3CandidateDir(dir string, resp rootQ3CandidateResponse) error {
 	cfg := body.Config
 	if err := writeJSONFile(filepath.Join(dir, "config.json"), map[string]any{
 		"revision": cfg.Revision, "network": cfg.Network, "genesis": "0x" + hex.EncodeToString(cfg.Genesis[:]), "signingScheme": cfg.SigningScheme,
-		"voteCodec": cfg.VoteCodec, "quorumProfile": cfg.QuorumProfile, "evmRequestPolicy": cfg.EVMRequestPolicy, "aggregatorPolicy": cfg.AggregatorPolicy,
+		"voteCodec": cfg.VoteCodec, "quorumProfile": cfg.QuorumProfile, "leaderPolicy": cfg.LeaderPolicy, "evmRequestPolicy": cfg.EVMRequestPolicy, "aggregatorPolicy": cfg.AggregatorPolicy,
 		"attempt": resp.Attempt, "activationRound": resp.ActivationRound}); err != nil {
 		return err
 	}
