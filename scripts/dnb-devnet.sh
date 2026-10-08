@@ -12,7 +12,7 @@ set -euo pipefail
 cd "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source helper.sh
 
-validators=4 rootValidators=4 partitionID=8 chainID=${DNB_CHAIN_ID:-31337}
+validators=4 rootValidators=4 partitionID=8 aggPartition=9 chainID=${DNB_CHAIN_ID:-31337}
 rethEngineBase=18551 rethEthBase=18545 rethP2PBase=30401
 : "${URETH_BIN:?set URETH_BIN to the pinned unicity-reth}"
 fee=${DNB_FEE_COLLECTOR:-0x000000000000000000000000000000000000dead}
@@ -23,6 +23,7 @@ rpc() { curl -sS --max-time 10 -X POST "$1" -H "Content-Type: application/json" 
 
 down() {
   for p in test-nodes/reth*/pid; do [ -f "$p" ] && stop_pidfile "$p" 'unicity-reth|reth.* node' || true; done
+  [ -f test-nodes/agg/pid ] && stop_pidfile test-nodes/agg/pid 'aggregator' || true
   stop_evm_validators 2>/dev/null || true
   stop_root_nodes 2>/dev/null || true
 }
@@ -56,6 +57,15 @@ PY
   cp test-nodes/evm-full-shard-conf.json "$conf"
   ureth_flags=$(sed -n 's/^ureth flags: *//p' test-nodes/b1-profile.out)
 
+  if [ "${DNB_AGG:-1}" = 1 ]; then
+    info "aggregator shard configuration (partition $aggPartition, full range)"
+    build/ubft shard-node init --home test-nodes/agg -g >/dev/null
+    build/ubft shard-conf generate --home test-nodes/aggconf --network-id 3 --partition-id "$aggPartition" --partition-type-id "$aggPartition" \
+      --shard-id 0x80 --epoch 0 --epoch-start 1 --t2-timeout 5000 --partition-params proof_type=aggregator_rsmt_v1 \
+      --node-info test-nodes/agg/node-info.json >/dev/null
+    cp "test-nodes/aggconf/shard-conf-${aggPartition}_0.json" "test-nodes/shard-conf-${aggPartition}_0.json"
+  fi
+
   info "start one ureth per validator"
   for i in $(seq 1 "$validators"); do
     mkdir -p "test-nodes/reth$i"
@@ -81,12 +91,33 @@ PY
   info "reth clients up and peered"
 
   info "start roots and shard validators (fresh-B1 pair admission)"
+  export EVM_ARCHIVE_ROOT=test-nodes/archives; mkdir -p "$EVM_ARCHIVE_ROOT"
   export EVM_GENESIS_FILE=test-nodes/evm-genesis-finalized.json EVM_FULL_SHARD_CONF=$conf EVM_B1_PROFILE=test-nodes/b1-profile.json EVM_ENGINE_FEE_COLLECTOR=$fee
   for i in $(seq 1 "$validators"); do
     export "EVM_ENGINE_URL_$i=http://127.0.0.1:$((rethEngineBase + i - 1))" "EVM_ETH_URL_$i=http://127.0.0.1:$((rethEthBase + i - 1))"
   done
   ./start-evm.sh -r -a -e engine-api -v "$validators" >test-nodes/start-evm.log 2>&1
+  if [ "${DNB_AGG:-1}" = 1 ]; then start_agg; fi
   info "up; roots rpc 127.0.0.1:25866, reth eth $rethEthBase.., engine $rethEngineBase.."
+}
+
+# aggregator-go (SDK3 leaf protocol) as a BFT shard of the live root chain. Needs AGG_BIN, and MongoDB with a replica set at AGG_MONGO.
+start_agg() {
+  : "${AGG_BIN:?set AGG_BIN to the pinned aggregator-go binary}"
+  : "${AGG_MONGO:=mongodb://127.0.0.1:27117/aggregator?replicaSet=rs0&directConnection=true}"
+  local boot
+  boot=$(boot_node test-nodes/root1 "$rootPortStart")
+  mkdir -p test-nodes/agg/logs
+  env PORT=${AGG_PORT:-3001} HOST=127.0.0.1 ENABLE_DOCS=false ENABLE_CORS=true \
+    MONGODB_URI="$AGG_MONGO" MONGODB_DATABASE="dnb_agg_$(date +%s)" DISABLE_HIGH_AVAILABILITY=true USE_REDIS_FOR_COMMITMENTS=false \
+    SMT_BACKEND=memory SHARDING_MODE=standalone LOG_LEVEL=info LOG_FORMAT=text LOG_ENABLE_JSON=false LOG_FILE_PATH="$PWD/test-nodes/agg/logs/aggregator.log" \
+    SIGNING_KEY_FILE="$PWD/test-nodes/agg/keys.json" BFT_ENABLED=true BFT_ADDRESS=/ip4/127.0.0.1/tcp/29101 BFT_RPC_ADDRESS=http://127.0.0.1:25866 \
+    BFT_SHARD_CONF_FILE="$PWD/test-nodes/shard-conf-${aggPartition}_0.json" BFT_TRUST_BASE_FILES="$PWD/test-nodes/trust-base.json" \
+    BFT_BOOTSTRAP_ADDRESSES="$boot" \
+    "$AGG_BIN" >test-nodes/agg/stdout.log 2>&1 &
+  echo $! >test-nodes/agg/pid
+  for _ in $(seq 1 60); do curl -fsS "http://127.0.0.1:${AGG_PORT:-3001}/health" >/dev/null 2>&1 && { info "aggregator-go up on ${AGG_PORT:-3001}"; return; }; sleep 1; done
+  tail -20 test-nodes/agg/stdout.log >&2; echo "aggregator did not become healthy" >&2; exit 1
 }
 
 status() {
@@ -96,4 +127,23 @@ status() {
   curl -fsS http://127.0.0.1:25866/api/v1/roundInfo 2>/dev/null | python3 -c "import sys,json;d=json.load(sys.stdin);print('root round',d['roundNumber'])" || echo "root rpc down"
 }
 
-case "${1:-}" in up) up ;; down) down ;; status) status ;; *) echo "usage: $0 up|down|status" >&2; exit 2 ;; esac
+# Deploys the TokenVerifier and the BridgeVault (unicity-pos-contracts script/BridgeDeploy.s.sol, which refuses a vault whose rootGenesis,
+# executionGenesis or b1ProfileHash differ from the genesis') on the running devnet. Needs CONTRACTS (a checkout with the script), forge, DNB_TOOL.
+vault() {
+  : "${CONTRACTS:?set CONTRACTS to a unicity-pos-contracts checkout with script/BridgeDeploy.s.sol}" "${DNB_TOOL:?set DNB_TOOL to the built dnb-tool}"
+  local dep=$CONTRACTS/script/bridge-deploy key=${DNB_DEPLOYER_KEY:-0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80}
+  "$DNB_TOOL" deployment --identities test-nodes/genesis-identities.json --agg-conf "test-nodes/shard-conf-${aggPartition}_0.json" --out test-nodes/bridge-deployment.json
+  cp test-nodes/genesis-identities.json "$dep/genesis.json"; cp test-nodes/bridge-deployment.json "$dep/deployment.json"
+  (cd "$CONTRACTS" && BRIDGE_GENESIS=script/bridge-deploy/genesis.json BRIDGE_DEPLOYMENT=script/bridge-deploy/deployment.json \
+     forge script script/BridgeDeploy.s.sol --rpc-url "http://127.0.0.1:$rethEthBase" --private-key "$key" --broadcast --slow) | tee test-nodes/vault-deploy.log
+  python3 - "$CONTRACTS" <<'PY'
+import json, sys
+run = json.load(open(sys.argv[1] + "/broadcast/BridgeDeploy.s.sol/31337/run-latest.json"))
+addr = {t["contractName"]: t["contractAddress"] for t in run["transactions"] if t.get("contractName") in ("BridgeVault", "TokenVerifier")}
+json.dump(addr, open("test-nodes/bridge-addresses.json", "w"), indent=2)
+print(addr)
+PY
+  rm -f "$dep/genesis.json" "$dep/deployment.json"
+}
+
+case "${1:-}" in vault) vault ;; up) up ;; down) down ;; status) status ;; *) echo "usage: $0 up|down|status" >&2; exit 2 ;; esac
