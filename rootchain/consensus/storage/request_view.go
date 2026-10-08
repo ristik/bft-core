@@ -460,27 +460,62 @@ func ResolveRequestContext(q RequestQuery, snap *RequestSnapshot) (*RequestRound
 	return v, nil
 }
 
-// expectedTR is the technical record the round's requests build on. While the shard still runs the epoch before the active
-// assignment (the committed state lags the activation) the successor record is derived from the frozen parent state, or taken
-// from the parent when it has already installed the assignment, and its digest must be the committed one. Otherwise it is the
-// last certified record, whose epoch must be the assignment's.
+// expectedTR is the technical record the round's requests build on, for the assignment idx of the snapshot's chain.
+//
+// While the shard's last certified record is the assignment's predecessor epoch, two states of the parent exist:
+//
+//   - predecessor: the parent has not installed the assignment yet (the committed state lags the activation, or the round is only
+//     collected). The successor record is derived from the frozen parent and its COMPLETE digest must be the committed one: this is
+//     the authentication of the initial round, epoch, leader and rolled fee/stat commitments, exactly as at installation.
+//   - installed: the parent has installed the assignment (its record is of the assignment's epoch and its configuration is the
+//     selected one) but the successor epoch has not been certified yet. The record then moves with every root timeout (round and
+//     leader), so the immutable Freeze digest is no longer comparable to it as a whole. The parent is the exact verified execution
+//     parent and its record has authenticated ancestry from the committed initial one; what is checked is the part that is not a
+//     function of the root's timeouts: the epoch and configuration, and the fee and statistics commitments against the accumulators
+//     the parent itself owns (installation rolls them once, a timeout changes neither, an executed request changes them only after the
+//     existing proof checks). Round and leader are the parent's: never a request's, a clock's or a latest-tip lookup's.
+//
+// Otherwise it is the last certified record, whose epoch must be the assignment's.
 func expectedTR(snap *RequestSnapshot, idx int) (certification.TechnicalRecord, error) {
 	act, p := snap.chain[idx], snap.parent
 	switch {
-	case idx > 0 && p.lastTR.Epoch+1 == act.pdr.Epoch:
-		tr := cloneTR(p.tr)
-		if tr.Epoch+1 == act.pdr.Epoch {
+	case idx > 0 && act.pdr.Epoch > 0 && p.lastTR.Epoch == act.pdr.Epoch-1:
+		switch {
+		case p.tr.Epoch == act.pdr.Epoch-1: // predecessor
 			derived, err := successorTechnicalRecordWith(snap.frozen, act.pdr, snap.hashAlg, resetMembers)
 			if err != nil {
-				return tr, errors.Join(ErrAssignmentHistory, err)
+				return derived, errors.Join(ErrAssignmentHistory, err)
 			}
-			tr = derived
+			digest, err := derived.Hash()
+			if err != nil || !bytes.Equal(digest, act.trHash) {
+				return derived, fmt.Errorf("%w: successor technical record %x, committed %x", quorumweight.ErrRequestContext, digest, act.trHash)
+			}
+			return derived, nil
+		case p.tr.Epoch == act.pdr.Epoch: // installed
+			if !bytes.Equal(p.confHash, act.confHash) {
+				return p.tr, fmt.Errorf("%w: parent is under configuration %x, the selected assignment is %x", quorumweight.ErrRequestContext, p.confHash, act.confHash)
+			}
+			stat, err := snap.frozen.statHash(crypto.SHA256)
+			if err != nil {
+				return p.tr, errors.Join(quorumweight.ErrRequestContext, fmt.Errorf("hashing the parent's statistics: %w", err))
+			}
+			fees, err := snap.frozen.feeHash(crypto.SHA256)
+			if err != nil {
+				return p.tr, errors.Join(quorumweight.ErrRequestContext, fmt.Errorf("hashing the parent's fees: %w", err))
+			}
+			if !bytes.Equal(stat, p.tr.StatHash) {
+				return p.tr, fmt.Errorf("%w: installed technical record carries statistics %x, the parent's are %x", quorumweight.ErrRequestContext, p.tr.StatHash, stat)
+			}
+			if !bytes.Equal(fees, p.tr.FeeHash) {
+				return p.tr, fmt.Errorf("%w: installed technical record carries fees %x, the parent's are %x", quorumweight.ErrRequestContext, p.tr.FeeHash, fees)
+			}
+			if p.tr.Round <= p.lastTR.Round {
+				return p.tr, fmt.Errorf("%w: installed technical record round %d does not follow the last certified round %d", quorumweight.ErrRequestContext, p.tr.Round, p.lastTR.Round)
+			}
+			return cloneTR(p.tr), nil
+		default:
+			return p.tr, fmt.Errorf("%w: technical record epoch %d is neither the predecessor nor the assignment's (%d)", ErrStaleRequestContext, p.tr.Epoch, act.pdr.Epoch)
 		}
-		digest, err := tr.Hash()
-		if err != nil || !bytes.Equal(digest, act.trHash) {
-			return tr, fmt.Errorf("%w: successor technical record %x, committed %x", quorumweight.ErrRequestContext, digest, act.trHash)
-		}
-		return tr, nil
 	case p.lastTR.Epoch == act.pdr.Epoch:
 		return cloneTR(p.lastTR), nil
 	}
