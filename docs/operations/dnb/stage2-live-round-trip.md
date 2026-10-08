@@ -63,7 +63,7 @@ Evidence: [`evidence/cycle2-after-restarts.log`](evidence/cycle2-after-restarts.
 
 ## Stage 4 (after #479, #471/#477 and ureth #59/#61): restart of everything, budgets, root liveness
 
-Evidence: [`evidence/stage4-run.log`](evidence/stage4-run.log). Pins changed: ureth `9d61e63762a1b0863a3d54519e8de55310748f87` (#61, sha256 `7b…` of the pinned binary in /private/tmp/dnb-unicity-reth-9d61e637), bft-core integration at #479 plus this branch.
+Evidence: [`evidence/stage4-run.log`](evidence/stage4-run.log). Pins changed: ureth `9d61e63762a1b0863a3d54519e8de55310748f87` (#61, sha256 `d8dfcfcb97abe7d3c7166a72e83e1a4870b5c973f6af3c7e1d9549a8f914fb53`, /private/tmp/dnb-unicity-reth-9d61e637), bft-core integration at #479 plus this branch.
 
 * **Root liveness.** With non-decreasing seal timestamps (#479) the root no longer stalls: two devnet runs of 25+ minutes passed round 796 and 822 with **0** `exceeds voter clock skew`
   rejections (the unfixed rule stopped at round 163). The final run logged 0 as well.
