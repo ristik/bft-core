@@ -131,6 +131,8 @@ export URETH_PIN_NETWORK_ID=3
 # the lane runs on the fresh-B1 stack: one profile (ubft engine-api b1-profile) is the source of the registry genesis (layout 3), ureth's --unicity.*
 # bindings and the shard nodes' Update admission (scripts/reth-paired-devnet.sh), and the registry slots are read under the layout-3 names
 export Q3_B1=${Q3_B1:-1}
+# the install restarts keep rootchain.db in place (the durable control cuts of #488 live there), like an operator's restart
+export M2_KEEP_ROOT_DB=${M2_KEEP_ROOT_DB:-1}
 [ "$Q3_B1" != 1 ] || export H3_SLOT_LAYOUT=3
 # every shard node exposes its operator endpoint (the readiness check asks it what it has staged)
 export EVM_OPERATOR_STATUS_RPC=1

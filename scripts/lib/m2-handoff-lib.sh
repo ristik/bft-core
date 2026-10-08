@@ -88,7 +88,13 @@ m2_archive_root_state() {
   mkdir -p "$archive"
   for file in rootchain.db trustbase.db root-trust-history.db orchestration.db; do
     if [ -e "test-nodes/root${node}/$file" ]; then
-      mv "test-nodes/root${node}/$file" "$archive/$file" || return 1
+      # M2_KEEP_ROOT_DB=1: a restart into the install epoch keeps the root's block and record store (rootchain.db) in place and archives only a copy,
+      # as an operator's restart does; the durable control-cut store (#488) lives there and the shard nodes' restart admission needs it.
+      if [ "$file" = rootchain.db ] && [ "${M2_KEEP_ROOT_DB:-0}" = 1 ]; then
+        cp -R "test-nodes/root${node}/$file" "$archive/$file" || return 1
+      else
+        mv "test-nodes/root${node}/$file" "$archive/$file" || return 1
+      fi
     fi
   done
 }
