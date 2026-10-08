@@ -18,6 +18,7 @@ import (
 
 	"github.com/unicitynetwork/bft-core/network/protocol/abdrc"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/leader"
+	"github.com/unicitynetwork/bft-core/rootchain/consensus/q4replay"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/storage"
 	drctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
 )
@@ -53,6 +54,10 @@ type q4Run struct {
 	blocks map[int]map[uint64]q4Block
 	chains map[int]map[uint64]q4Block
 	faults []error
+	// windows are the progress and stall expectations of the run, judged offline by the replay checker against the frozen deadline.
+	windows []q4replay.Window
+	// report is the replay checker's verdict on the exported run, set by finish.
+	report *q4replay.Report
 }
 
 var (
@@ -292,6 +297,7 @@ func (run *q4Run) waitRecovery(ctx context.Context, m q4Mark, n int, names ...st
 func (run *q4Run) requireRecovery(m q4Mark, n int, names ...string) (first, nth time.Duration) {
 	run.t.Helper()
 	require.NoError(run.t, run.waitRecovery(context.Background(), m, n, names...), "post-fault recovery within %s", run.man.Deadline)
+	run.recordWindow(q4replay.Window{Name: "recovery", Expect: "progress", Nodes: names, StartMs: m.At.UnixMilli(), MinCommits: n})
 	for _, i := range run.idx(names...) {
 		obs := run.commitsSince(i, m)
 		first, nth = max(first, obs[0].At.Sub(m.At)), max(nth, obs[n-1].At.Sub(m.At))
@@ -324,10 +330,12 @@ func (run *q4Run) requireStalled(names ...string) map[int]q4State {
 		}
 		return time.Since(stableSince) >= q4Quiesce
 	}, 60*time.Second, 50*time.Millisecond, "pre-issued evidence drains")
+	from := time.Now()
 	time.Sleep(q4StallWindow)
 	for _, i := range indices {
 		require.Equal(run.t, last[i], run.state(i), "%s: no fresh QC, TC advance or commit below the quorum", run.r.Entities[i].Name)
 	}
+	run.recordWindow(q4replay.Window{Name: "stall", Expect: "stall", Nodes: names, StartMs: from.UnixMilli(), EndMs: time.Now().UnixMilli()})
 	return last
 }
 
@@ -439,6 +447,10 @@ func (run *q4Run) finish(bad ...uint64) q4Trace {
 	require.Empty(run.t, tr.HonestDoubleSigns(views, run.byz), "no honest double signing")
 	if len(run.byz) == 0 { // the harness's wire observer does not check signatures: with injected forgeries only the oracle above decides
 		run.c.requireNoDoubleSign()
+	}
+	run.report = run.export(tr, len(bad))
+	if len(run.man.Byzantine) == 0 {
+		require.NoError(run.t, run.report.ExpectEquivocators(), "the checker finds no equivocator in a run with no Byzantine identity")
 	}
 	return tr
 }
@@ -814,6 +826,7 @@ func TestQ4FaultByzantine(t *testing.T) {
 			}
 			tr := run.finish(bad...)
 			equivocators := tr.Equivocators(map[uint64]q4EpochView{1: q4View(r, 1)})
+			require.NoError(t, run.report.ExpectEquivocators(row.byz...), "the offline checker, from the bytes, finds exactly the declared Byzantine members equivocating")
 			require.Len(t, equivocators, len(row.byz), "exactly the declared Byzantine authors equivocated")
 			for _, n := range row.byz {
 				require.Contains(t, equivocators, r.Entities[r.Index(n)].ID.String())
