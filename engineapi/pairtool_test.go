@@ -60,17 +60,7 @@ func (c pairChain) serve(t *testing.T, eth *mockReth) {
 	t.Helper()
 	enc, err := c.binding.Encode()
 	require.NoError(t, err)
-	eth.on("eth_getBlockByNumber", func(r json.RawMessage) (any, *rpcError) {
-		var args []any
-		_ = json.Unmarshal(r, &args)
-		if len(args) > 0 && args[0] == "finalized" { // the block before the retained one is the finalized one: the retained block is an uncertified tip
-			fin := map[string]any{}
-			for k, v := range c.header {
-				fin[k] = v
-			}
-			fin["number"] = "0x4"
-			return fin, nil
-		}
+	eth.on("eth_getBlockByNumber", func(json.RawMessage) (any, *rpcError) {
 		return c.header, nil
 	})
 	eth.on("unicity_getSealCompanionV1", func(json.RawMessage) (any, *rpcError) {

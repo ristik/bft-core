@@ -68,7 +68,9 @@ func main() {
 	bodyID, err := archiveTrustBodyID(archiveDir, bestEpoch, tb)
 	if err != nil {
 		// A Q3 activation is not archived as a handoff-delivery bundle: the lane names the body identity of the epoch it activated
-		// (H4_RESTORE_BODY_IDS="<epoch>=<64 hex>[,<epoch>=<64 hex>...]"), the one the restored node then checks against the history it rebuilds.
+		// (H4_RESTORE_BODY_IDS="<epoch>=<64 hex>[,<epoch>=<64 hex>...]"). It is an operator anchor, not a trust decision: after catch-up the restored
+		// node compares it with the BodyID of the verified current history for the tip UC's root epoch (checkRestoreTrustBodyID in
+		// cli/ubft/cmd/shard_node_run.go) and refuses to start with ErrTrustBodyIDMismatch if they differ.
 		named, ok := namedBodyID(os.Getenv("H4_RESTORE_BODY_IDS"), bestEpoch)
 		if !ok {
 			panic(err)
