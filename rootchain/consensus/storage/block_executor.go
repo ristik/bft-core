@@ -12,6 +12,7 @@ import (
 	"github.com/unicitynetwork/bft-core/evmassign"
 	"github.com/unicitynetwork/bft-core/evmroot"
 	"github.com/unicitynetwork/bft-core/internal/quorumweight"
+	"github.com/unicitynetwork/bft-core/internal/weightvalidation"
 
 	"github.com/unicitynetwork/bft-core/network/protocol/abdrc"
 	"github.com/unicitynetwork/bft-core/network/protocol/certification"
@@ -158,10 +159,10 @@ func NewRootBlock(block *abdrc.CommittedBlock, hash crypto.Hash, orchestration O
 }
 
 func (x *ExecutedBlock) Extend(newBlock *rctypes.BlockData, verifier IRChangeReqVerifier, orchestration Orchestration, hash crypto.Hash, log *slog.Logger) (*ExecutedBlock, error) {
-	return x.extendWithAuthority(newBlock, verifier, orchestration, hash, log, nil, nil)
+	return x.extendWithAuthority(newBlock, verifier, orchestration, hash, log, nil, nil, nil)
 }
 
-func (x *ExecutedBlock) extendWithAuthority(newBlock *rctypes.BlockData, verifier IRChangeReqVerifier, orchestration Orchestration, hash crypto.Hash, log *slog.Logger, authority handoffAuthority, candidates candidateSource) (*ExecutedBlock, error) {
+func (x *ExecutedBlock) extendWithAuthority(newBlock *rctypes.BlockData, verifier IRChangeReqVerifier, orchestration Orchestration, hash crypto.Hash, log *slog.Logger, authority handoffAuthority, candidates candidateSource, services *PosServices) (*ExecutedBlock, error) {
 	bootstrapChild := isEpochAnchorRoot(x)
 	if bootstrapChild && (newBlock.Anchor == nil || !bytes.Equal(newBlock.Anchor.GenesisID, x.BlockData.Anchor.GenesisID) ||
 		newBlock.Anchor.Slot != x.GetRound() || newBlock.Epoch != x.BlockData.Epoch) {
@@ -217,7 +218,7 @@ func (x *ExecutedBlock) extendWithAuthority(newBlock *rctypes.BlockData, verifie
 		}
 		parentState.States = states
 		parentState.Control = &evmroot.ControlState{Network: parentState.Control.Network,
-			Epoch: newBlock.Epoch, PredecessorBodyID: bytes.Clone(record.NextBodyID), Phase: "idle"}
+			Epoch: newBlock.Epoch, PredecessorBodyID: bytes.Clone(record.NextBodyID), Phase: "idle", Pos: parentState.Control.Pos}
 	}
 	nextShardState, err := parentState.nextBlock(shardConfs, hash)
 	if err != nil {
@@ -229,6 +230,13 @@ func (x *ExecutedBlock) extendWithAuthority(newBlock *rctypes.BlockData, verifie
 		for shard := range nextShardState.States {
 			nextShardState.Changed[shard] = struct{}{}
 		}
+	}
+	pos, err := loadPos(nextShardState.Control)
+	if err != nil {
+		return nil, err
+	}
+	if err := pos.block(newBlock.Epoch, newBlock.Round); err != nil {
+		return nil, err
 	}
 	// Apply the ordered control record before shard requests. A freeze takes
 	// effect in its own block, for leaders and for every voter replaying it.
@@ -279,10 +287,15 @@ func (x *ExecutedBlock) extendWithAuthority(newBlock *rctypes.BlockData, verifie
 					if want != nil && !bytes.Equal(want, committed.SuccessorTRHash) {
 						return nil, errors.Join(ErrHandoffRecord, ErrAssignmentHistory)
 					}
+					// H is ordered here: the successor's offset is fixed now and an assignment handoff waits for its EVM acknowledgement
+					if err := pos.commit(committed, want != nil); err != nil {
+						return nil, err
+					}
 				}
 			}
 			nextShardState.Control = control
 		}
+		pos.store(nextShardState.Control)
 	} else if len(newBlock.Payload.HandoffRecords) > 0 {
 		return nil, ErrNetworkProfile
 	}
@@ -302,6 +315,8 @@ func (x *ExecutedBlock) extendWithAuthority(newBlock *rctypes.BlockData, verifie
 			log.Info(fmt.Sprintf("no validators in shard config (shard has been removed?) %s", shardKey))
 			continue
 		}
+		// a committed assignment handoff waits for this shard's certified acknowledgement: its IR epoch catches up with the installed one
+		awaiting := pos.pendingAck() && si.TR.Epoch != si.IR.Epoch
 
 		if vv := viewDispatch(verifier); vv != nil {
 			// View-aware branch: the request is judged under the view resolved from the state this block executes on and the
@@ -340,6 +355,19 @@ func (x *ExecutedBlock) extendWithAuthority(newBlock *rctypes.BlockData, verifie
 			}
 		}
 
+		if awaiting && si.IR.Epoch == si.TR.Epoch {
+			evm, found, err := frozenEVMShard(nextShardState, shardConfs)
+			if err != nil {
+				return nil, err
+			}
+			if pos.acknowledges(awaiting, si.IR.Epoch, si.TR.Epoch, shardKey, evm, found) {
+				// the acknowledgement is certified in this block: project it at this block's progress and committed time
+				if err := pos.ack(candidates, newBlock.Round, newBlock.Timestamp, si.IR.Epoch); err != nil {
+					return nil, err
+				}
+			}
+		}
+
 		// timeout IR change request do not have BCR
 		var req *certification.BlockCertificationRequest
 		if len(irChReq.Requests) > 0 {
@@ -351,6 +379,14 @@ func (x *ExecutedBlock) extendWithAuthority(newBlock *rctypes.BlockData, verifie
 
 		nextShardState.Changed[shardKey] = struct{}{}
 	}
+	// the P85 controls follow the certifications, in payload order
+	if err := pos.controls(newBlock, services); err != nil {
+		return nil, err
+	}
+	if nextShardState.Control != nil {
+		pos.store(nextShardState.Control) // an acknowledgement or a control changes the state the control digest commits
+	}
+	nextShardState.Records = pos.records
 	ut, _, err := nextShardState.UnicityTree(hash)
 	if err != nil {
 		return nil, fmt.Errorf("creating UnicityTree: %w", err)
@@ -361,6 +397,16 @@ func (x *ExecutedBlock) extendWithAuthority(newBlock *rctypes.BlockData, verifie
 		RootHash:   ut.RootHash(),
 		ShardState: nextShardState,
 	}, nil
+}
+
+// freezeAssignmentRules are the validator weight rules the successor assignment of a Freeze companion is judged under: the unit rules for
+// the legacy and V2 companions, the bounded weights for a V3 one (the authority already admitted it under them: a weighted rotation out of
+// a unit epoch carries stakes the unit rules refuse).
+func freezeAssignmentRules(version uint64) evmassign.Rules {
+	if version == freezeV3Version {
+		return weightvalidation.EVMRules(weightvalidation.ModeWeighted)
+	}
+	return evmassign.UnitRules
 }
 
 // verifyFreezeAssignment runs the EVM-state-dependent half of freeze
@@ -412,7 +458,7 @@ func verifyFreezeAssignment(companion []byte, si *ShardInfo, installed *types.Pa
 	if candidate.Supersedes == nil && pending {
 		return ErrAssignmentAckPending
 	}
-	if err := evmassign.VerifyInstalled(candidate, succ, installed, currentRoot); err != nil {
+	if err := evmassign.VerifyInstalledWith(freezeAssignmentRules(fc.Version), candidate, succ, installed, currentRoot); err != nil {
 		return errors.Join(ErrHandoffRecord, err)
 	}
 	if err := verifyShardChanges(candidate, states, shardConfs); err != nil {

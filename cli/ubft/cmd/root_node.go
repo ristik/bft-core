@@ -58,14 +58,15 @@ type (
 		shardConfFlags
 		p2pFlags
 
-		RootDBFile          string // path to Bolt storage file
-		TrustBaseDBFile     string
-		OrchestrationDBFile string
-		TrustHistoryDBFile  string
-		Profile2            bool
-		InstallHandoffEpoch uint64
-		Q3Lane              bool // the Q3 acceptance lane: a verified Q3 history, the install journal and the V3 handoff pipeline
-		Q3JournalDBFile     string
+		RootDBFile            string // path to Bolt storage file
+		TrustBaseDBFile       string
+		OrchestrationDBFile   string
+		GenesisIdentitiesFile string
+		TrustHistoryDBFile    string
+		Profile2              bool
+		InstallHandoffEpoch   uint64
+		Q3Lane                bool // the Q3 acceptance lane: a verified Q3 history, the install journal and the V3 handoff pipeline
+		Q3JournalDBFile       string
 
 		BlockRate        uint32
 		MaxRequests      uint   // certification request channel capacity
@@ -123,6 +124,8 @@ func rootNodeRunCmd(baseFlags *baseFlags) *cobra.Command {
 		fmt.Sprintf("path to the root database (default: %s)", filepath.Join("$UBFT_HOME", rootDBFileName)))
 	cmd.Flags().StringVar(&flags.TrustBaseDBFile, "trust-base-db", "",
 		fmt.Sprintf("path to the trust base database (default: %s)", filepath.Join("$UBFT_HOME", trustBaseDBFileName)))
+	cmd.Flags().StringVar(&flags.GenesisIdentitiesFile, "genesis-identities", "",
+		"proof-of-authority genesis: JSON identity records of the genesis committee of the coupled EVM shard (`ubft genesis-identities generate`), recorded once as the incumbent baseline that the first coupled handoff's authorization names as K; a different set than the recorded one is refused")
 	cmd.Flags().StringVar(&flags.OrchestrationDBFile, "orchestration-db", "",
 		fmt.Sprintf("path to the orchestration database (default: %s)", filepath.Join("$UBFT_HOME", orchestrationDBFileName)))
 	cmd.Flags().BoolVar(&flags.Profile2, "profile-2", false, "run the version-2 root handoff network profile")
@@ -218,6 +221,11 @@ func rootNodeRun(ctx context.Context, flags *rootNodeRunFlags) error {
 	}
 	if err := loadShardConfs(orchestration, flags.Profile2, shardConfs); err != nil {
 		return err
+	}
+	if flags.GenesisIdentitiesFile != "" {
+		if err := seedGenesisIdentities(orchestration, trustBase, shardConfs, flags.GenesisIdentitiesFile); err != nil {
+			return fmt.Errorf("recording the genesis committee identities: %w", err)
+		}
 	}
 
 	signer, err := keyConf.Signer()
@@ -362,6 +370,13 @@ func rootNodeRun(ctx context.Context, flags *rootNodeRunFlags) error {
 			if !installed {
 				return fmt.Errorf("no root peer served verified handoff epoch %d", epoch)
 			}
+		}
+	}
+
+	if q3rt != nil {
+		// after the activations this process installed: a root that installs epoch 2 at this very start holds its first activation only now
+		if err = selectRootQ3RequestHistory(q3rt, cm, orchestration, uint64(trustBase.GetNetworkID())); err != nil {
+			return err
 		}
 	}
 

@@ -5,12 +5,15 @@ import (
 	"crypto"
 	"crypto/sha256"
 	"errors"
+	"sort"
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	"github.com/unicitynetwork/bft-core/evmassign"
 	"github.com/unicitynetwork/bft-core/evmroot"
 	testtrustbase "github.com/unicitynetwork/bft-core/internal/testutils/trustbase"
 	rctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
+	"github.com/unicitynetwork/bft-core/rootchain/testutils"
 	abcrypto "github.com/unicitynetwork/bft-go-base/crypto"
 	"github.com/unicitynetwork/bft-go-base/types"
 	"github.com/unicitynetwork/bft-go-base/types/hex"
@@ -273,4 +276,21 @@ func freezeBlock(t *testing.T, s *BlockStore, round uint64, records [][]byte) *r
 	require.NoError(t, err)
 	return &rctypes.BlockData{Version: 2, Round: round, Epoch: 1, Payload: &rctypes.Payload{Version: 2, HandoffRecords: records},
 		Qc: &rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{RoundNumber: round - 1, Epoch: 1, CurrentRootHash: parent.RootHash}}}
+}
+
+// A V3 companion's successor assignment is judged under the bounded weights; the legacy and V2 companions keep the unit rules. Freeze
+// admission used the unit rules for every companion, so a weighted rotation out of a unit epoch was refused at block execution.
+func TestFreezeAssignmentRulesFollowTheCompanionVersion(t *testing.T) {
+	_, nodes := testutils.CreateTestNodes(t, 2)
+	sort.Slice(nodes, func(i, j int) bool { return nodes[i].NodeID < nodes[j].NodeID }) // an assignment's validators are strictly ordered
+	nodes[0].Stake, nodes[1].Stake = 6, 1
+	weighted := &types.PartitionDescriptionRecord{Version: 1, NetworkID: 5, PartitionID: 8, PartitionTypeID: 8, TypeIDLen: 8, UnitIDLen: 256, T2Timeout: 2500000000,
+		Epoch: 1, Validators: nodes}
+	require.NoError(t, evmassign.ValidateAssignmentWith(freezeAssignmentRules(freezeV3Version), weighted), "a V3 companion admits the weighted successor")
+	for _, version := range []uint64{1, 2} {
+		require.ErrorIs(t, evmassign.ValidateAssignmentWith(freezeAssignmentRules(version), weighted), evmassign.ErrAssignment, "version %d keeps the unit rules", version)
+	}
+	zero := *weighted
+	zero.Validators = []*types.NodeInfo{{NodeID: nodes[0].NodeID, SigKey: nodes[0].SigKey, Stake: 0}, nodes[1]}
+	require.ErrorIs(t, evmassign.ValidateAssignmentWith(freezeAssignmentRules(freezeV3Version), &zero), evmassign.ErrAssignment, "the bound still holds")
 }
