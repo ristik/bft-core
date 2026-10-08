@@ -120,8 +120,13 @@ type (
 		v3Planned        atomic.Pointer[V3Candidate] // the last candidate PlanV3Candidate derived: the exact body the members declared readiness for
 		q3Staged         atomic.Pointer[Q3Staged]    // the V3 candidate this validator last derived for its operator
 		epochAnchor      *drctypes.EpochAnchor
-		handoffMu        sync.Mutex
-		handoffPlans     map[[32]byte]*pendingHandoff
+		primaryWitness   atomic.Pointer[PrimaryWitnessSource] // the execution client's side of a primary candidate's EVM proof
+		primaryCache     primaryCache
+		// approvalSink and judgeHook are test seams: where a released parked approval goes, and the intake's proof judgement
+		approvalSink func(*abdrc.HandoffApprovalMsg) error
+		judgeHook    func(*abdrc.HandoffApprovalMsg) error
+		handoffMu    sync.Mutex
+		handoffPlans map[[32]byte]*pendingHandoff
 		// handoffIntent is the operator plan this validator holds for the leader to order a Prepare for: unsigned, naming no parent.
 		handoffIntent *abdrc.HandoffApprovalMsg
 		handoffAborts map[handoffAbortKey]*pendingHandoffAbort
