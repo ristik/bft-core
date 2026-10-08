@@ -37,8 +37,10 @@ var (
 	ErrPrimaryIdentities = errors.Join(ErrPrimaryProof, errors.New("identity records differ from the proven primary commitment"))
 	// ErrPrimaryPoP reports a missing, misplaced or invalid EVM possession proof, or a proof set the proven slot does not commit to.
 	ErrPrimaryPoP = errors.Join(ErrPrimaryProof, errors.New("possession proofs differ from the proven slots"))
-	// ErrCoverageLost reports a result a member of which lost its coverage or eligibility after the snapshot: a primary that was
-	// published must not pass Prepare after a slash, an exclusion or a retirement.
+	// ErrCoverageLost reports a result a member of which lost its coverage after the snapshot: a primary that was published must not pass
+	// Prepare after a slash or an exclusion. A retirement requested after the snapshot is NOT a loss (the exposure lots stay encumbered
+	// until their references close, so the committed weight is still backed): the proven word is the same whether or not anyone called
+	// reconcileCandidate.
 	ErrCoverageLost = errors.Join(ErrPrimaryProof, errors.New("a member lost its coverage after the snapshot"))
 	// ErrPrimaryRecovery reports a recovery authorization that is not the one the proven K commitment covers.
 	ErrPrimaryRecovery = errors.Join(ErrPrimaryProof, errors.New("recovery authorization differs from the proven K commitment"))
