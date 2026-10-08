@@ -10,6 +10,7 @@ import (
 
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/stretchr/testify/require"
+	abcrypto "github.com/unicitynetwork/bft-go-base/crypto"
 	"github.com/unicitynetwork/bft-go-base/types"
 
 	"github.com/unicitynetwork/bft-core/evmassign"
@@ -66,6 +67,10 @@ type q3Replica struct {
 	// with fsync on, the stores a restart claims to read back
 	link    RootNet
 	durable bool
+	// wrapStore and wrapSigner, when set, put a test decorator around the node's durable store and signing key (Q4 crash cuts and
+	// commit observation); the decorator must embed the store it wraps so that its optional capabilities survive
+	wrapStore  func(storage.BoltDB) PersistentStore
+	wrapSigner func(abcrypto.Signer) abcrypto.Signer
 }
 
 func newQ3Replica(t *testing.T, f *q3fixture.Fixture, node *testutils.TestNode) *q3Replica {
@@ -128,7 +133,15 @@ func (r *q3Replica) open(withQ3 bool) error {
 	if r.link != nil {
 		rootNet = r.link
 	}
-	manager, err := NewConsensusManager(r.id(), trust, orchestration, rootNet, r.node.Signer, db, obs, opts...)
+	var store PersistentStore = db
+	if r.wrapStore != nil {
+		store = r.wrapStore(db)
+	}
+	signer := r.node.Signer
+	if r.wrapSigner != nil {
+		signer = r.wrapSigner(signer)
+	}
+	manager, err := NewConsensusManager(r.id(), trust, orchestration, rootNet, signer, store, obs, opts...)
 	if err != nil {
 		r.release()
 		return err

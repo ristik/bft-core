@@ -868,9 +868,15 @@ if [ "${M2_PROFILE2:-0}" = 1 ] && [ "${POST_M2A_SKIP_HANDOFF:-0}" != 1 ]; then
   fi
   handoffScript=scripts/m2-profile2-handoffs.sh
   if [ "${H3_ASSIGNMENT_LANE:-0}" = 1 ]; then handoffScript=scripts/h3-assignment-steps.sh; fi
+  if [ "${Q4_LIVE_LANE:-0}" = 1 ]; then handoffScript=scripts/q4-live-steps.sh; fi
   if ! source "$handoffScript"; then
     fail "profile-2 two-handoff lane failed"
     exit 1
+  fi
+  if [ "${Q4_LIVE_LANE:-0}" = 1 ]; then
+    # The Q4 lane asserts its own stalls and recoveries; a stopped or killed root would trip the D1 monitor below.
+    echo "Q4 lane failures: $failures"
+    [ "$failures" -eq 0 ] && exit 0 || exit 1
   fi
   if [ "${H3_ASSIGNMENT_LANE:-0}" = 1 ]; then
     # The H3 lane makes its own agreement checks; the D1 monitor below assumes every validator stays live.
