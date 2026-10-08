@@ -70,16 +70,19 @@ func KeyRetentionRequired(hasOutstandingEvidenceObligation, hasOutstandingRetire
 }
 
 // ConsensusMinRoundPeriodSeconds and MaxObservedRoundPeriodSeconds bracket
-// a *plausible* real time for one certified root round. They are NOT an
-// enforced pacing guarantee: the root Pacemaker.AdvanceRoundQC advances
-// immediately on a QC, so consensus does not guarantee any minimum
-// duration of a SUCCESSFUL round. They exist only to keep the round-based
-// ADVISORY number (RoundBasedAdvisorySeconds) from being nonsensical:
+// a *plausible* real time for one certified root round, in whole seconds.
+// They are NOT an enforced pacing guarantee: the root
+// Pacemaker.AdvanceRoundQC advances immediately on a QC, so consensus does
+// not guarantee any minimum duration of a SUCCESSFUL round, and the
+// observed profile runs rounds well under a second. They exist only to
+// keep the round-based ADVISORY number (RoundBasedAdvisorySeconds) from
+// being nonsensical:
 //
-//   - ConsensusMinRoundPeriodSeconds: a conservative real-time floor must
-//     be a *lower* bound on the actual per-round time, so it may not sit
-//     below the physical minimum (≈ one propagation delay + two BFT
-//     phases). A value under this is rejected.
+//   - ConsensusMinRoundPeriodSeconds: the unit of the estimate, one whole
+//     second. It is not a physical or protocol minimum (sub-second rounds
+//     occur, so a one-second estimate may already exceed a real round and
+//     the advisory number can overstate the window; it asserts nothing).
+//     A zero estimate is rejected.
 //   - MaxObservedRoundPeriodSeconds: it also may not be set arbitrarily
 //     *large* — a huge MinRoundPeriodSeconds would inflate the advisory
 //     protection window without any stronger guarantee. A value over this
@@ -90,7 +93,7 @@ func KeyRetentionRequired(hasOutstandingEvidenceObligation, hasOutstandingRetire
 // retirement-protection guarantee supplied from an enforced mechanism. A
 // policy without one is Unsupported.
 const (
-	ConsensusMinRoundPeriodSeconds uint64 = 2
+	ConsensusMinRoundPeriodSeconds uint64 = 1
 	MaxObservedRoundPeriodSeconds  uint64 = 120
 )
 

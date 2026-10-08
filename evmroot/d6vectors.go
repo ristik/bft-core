@@ -177,7 +177,7 @@ func BuildD6Vectors() D6VectorSet {
 	tooSlow := fp
 	tooSlow.MinRoundPeriodSeconds = MaxObservedRoundPeriodSeconds + 1
 	vs.Freshness = D6FreshnessCase{
-		Note:                         "The round-count arithmetic (Δ_hold rounds × a per-round estimate) is ADVISORY ONLY — Pacemaker.AdvanceRoundQC advances immediately on a QC, so consensus guarantees no minimum successful-round duration. A policy with no EnforcedRealTimeFloorSeconds is Unsupported. The staleness limit is derived from that enforced wall-clock floor, minus acquisition latency, strictly less than the floor. The advisory per-round estimate must be a conservative lower bound: in [ConsensusMinRoundPeriodSeconds, MaxObservedRoundPeriodSeconds] — a sub-minimum value or an arbitrarily large one is rejected.",
+		Note:                         "The round-count arithmetic (Δ_hold rounds × a per-round estimate) is ADVISORY ONLY — Pacemaker.AdvanceRoundQC advances immediately on a QC, so consensus guarantees no minimum successful-round duration. A policy with no EnforcedRealTimeFloorSeconds is Unsupported. The staleness limit is derived from that enforced wall-clock floor, minus acquisition latency, strictly less than the floor. The advisory per-round estimate is a whole number of seconds in [ConsensusMinRoundPeriodSeconds (1, the unit; not a physical minimum: rounds can be sub-second), MaxObservedRoundPeriodSeconds] — a zero estimate or an arbitrarily large one is rejected. The JSON names sub_physical_minimum_round_estimate_rejected and physical_min_round_seconds are kept for the vector format; they denote that lower bracket.",
 		DeltaHoldRounds:              fp.DeltaHoldRounds,
 		DeltaEvRounds:                fp.DeltaEvRounds,
 		MinRoundPeriodSeconds:        fp.MinRoundPeriodSeconds,

@@ -50,6 +50,15 @@ validators reject equal-second proposals, even though #479 changes no wire encod
 - A relative gate `T(B) >= T(A) + d` needs a separate premise `T(A) >= t_A - sigma` to prove
   even `t_cert - t_A >= d - sigma - (Delta + eps)`. Without bounded anchor staleness, neither
   a UC-time delay nor adding the 30-second tolerance proves a positive real-time hold.
+- **T2 is a root-consensus liveness parameter, not a wall-clock guarantee.** A shard's configured T2 duration is converted to a
+  threshold of root rounds (`BlockRate/2` per round) and evaluated by the root's own progress: a repeat UC is issued when the root has
+  advanced that many rounds without a certification request from the shard. Elapsed real seconds are neither measured nor promised;
+  if a deployment needs T2 to mean elapsed real time, that is a separate timing-rule change, and changing one constant is not a proof.
+- **Client request expiry (`expiresAt`, TTL) is measured in protocol time**: the authenticated UC/reference seconds of the round that
+  processes the request, with the exclusive comparison `t < deadline` against the leaf's own pinned reference time. It is not a wall
+  clock and not an EVM or round clock: during a stall or while certified time is stale, a request does not expire promptly, and a
+  service that wants a real-time timeout must define one separately without rewriting historical leaf time. The same holds for the
+  native bridge's explicit deadlines.
 - A checkpoint-staleness safety policy must use an independently enforced, authenticated
   real-time protection floor. Round-period multiplication remains advisory. #85's UC-seconds
   timeFloor cannot be treated as that enforced real-time floor without the missing premise.
