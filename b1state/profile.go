@@ -28,6 +28,12 @@ type Profile struct {
 	RecordsCustody [20]byte
 	HRecords       uint32
 	HookRecordGas  uint64
+	// ElectionContract is the ElectionPolicy module whose elect(origin) the hook calls after the records are applied (step 4), and
+	// ElectGas the gross gas the profile reserves for that one call: sized for the profile's worst case on a threshold block, so a
+	// call that exceeds it invalidates the block (there is no runtime truncation). Both are zero for a chain without the election hook;
+	// when set they are part of the profile hash and the hook needs RecordsCustody. A profile without them hashes exactly as before.
+	ElectionContract [20]byte
+	ElectGas         uint64
 }
 
 // HookReadsGas reserves the gate reads of the records hook: custody.recordCursor, registry.recordCount and recordTargetCount, and
@@ -40,7 +46,10 @@ const HookMaxRecords = 32
 // HookEnabled reports whether the profile carries the records hook.
 func (p Profile) HookEnabled() bool { return p.RecordsCustody != ([20]byte{}) }
 
-// HookEnvelopeGas is the gross gas the profile reserves for the hook: the gate reads and HRecords applied records.
+// ElectionEnabled reports whether the profile carries the election hook.
+func (p Profile) ElectionEnabled() bool { return p.ElectionContract != ([20]byte{}) }
+
+// HookEnvelopeGas is the gross gas the profile reserves for the hooks: the gate reads, HRecords applied records and the election call.
 func (p Profile) HookEnvelopeGas() (uint64, error) {
 	if !p.HookEnabled() {
 		return 0, nil
@@ -48,10 +57,17 @@ func (p Profile) HookEnvelopeGas() (uint64, error) {
 	if p.HookRecordGas != 0 && uint64(p.HRecords) > (math.MaxUint64-HookReadsGas)/p.HookRecordGas {
 		return 0, ErrOverflow
 	}
-	return HookReadsGas + uint64(p.HRecords)*p.HookRecordGas, nil
+	records := HookReadsGas + uint64(p.HRecords)*p.HookRecordGas
+	if p.ElectGas > math.MaxUint64-records {
+		return 0, ErrOverflow
+	}
+	return records + p.ElectGas, nil
 }
 
 func (p Profile) validHook() bool {
+	if p.ElectionEnabled() != (p.ElectGas != 0) || (p.ElectionEnabled() && !p.HookEnabled()) {
+		return false
+	}
 	if !p.HookEnabled() {
 		return p.HRecords == 0 && p.HookRecordGas == 0
 	}
@@ -120,7 +136,12 @@ func (p Profile) Hash() ([32]byte, error) {
 	k, c, t, _ := p.Bounds()
 	// All frozen bounds and prices are committed, including caller metering and
 	// the supported signing and quorum policies, rather than inferred locally.
-	b := array(nil, 34)
+	// A profile without the election hook hashes exactly as it did before the hook existed; one with it commits three more items.
+	items := uint64(34)
+	if p.ElectionEnabled() {
+		items += 3
+	}
+	b := array(nil, items)
 	b = textValue(b, "UNICITY_B1_PROFILE")
 	for _, v := range []uint64{uint64(p.Network), p.WCert, p.DeltaEV, p.DeltaHold, p.SystemGas, p.ForcedGas, p.MaxGas, p.OrdinaryCapacity, p.RestGas, p.CompanionBytes, p.OtherCompanionBytes, k, c, t, p.GenesisUCTime} {
 		b = uintValue(b, v)
@@ -130,6 +151,10 @@ func (p Profile) Hash() ([32]byte, error) {
 	b = bytesValue(b, p.RecordsCustody[:])
 	b = uintValue(b, uint64(p.HRecords))
 	b = uintValue(b, p.HookRecordGas)
+	if p.ElectionEnabled() {
+		b = bytesValue(b, p.ElectionContract[:])
+		b = uintValue(b, p.ElectGas)
+	}
 	for _, h := range [][32]byte{p.RuntimeHash, p.CompilerHash} {
 		b = bytesValue(b, h[:])
 	}
@@ -139,6 +164,9 @@ func (p Profile) Hash() ([32]byte, error) {
 	b = textValue(b, "scan=2000+16C;members=1000T;UC=60000+16B+64000+6000S+2000N+250P+1117700;RSMT=2000+16B+250(1+popcount);I=22100;D=7100")
 	b = textValue(b, "P85-import=scan 2000+16C_R;entries 1000N;C_R<=16384;N<=32;outcome=[system,G_pre,1,'',SHA256(rootInput)];G_pre=admit+open+import")
 	b = textValue(b, "P85-hook=after EIP-4788: one custody.applyRootRecords(min(H,available)) iff the registry holds more records than custody; reads recordCursor,recordCount,recordTargetCount,limits,recordCursor; G_hooks excluded from the outcome, included in the system total")
+	if p.ElectionEnabled() {
+		b = textValue(b, "P85-election=after the records hook: one ElectionPolicy.elect(origin) from the system caller, origin = the identity of the block's authenticated root origin, within ElectGas; it never reverts for a chain-state reason (a failed election is a stored NoCandidate); a call that errors, reverts or exhausts ElectGas invalidates the block; activation (step 3) has no module and makes no call")
+	}
 	b = textValue(b, "native-body=1,2,3;signing=1,2;quorum=total-(total-1)/3;claims=8;signatures=64/512;shard=33/256;path=32;summary=256;RSMT=4096/256/12392")
 	return sha256.Sum256(b), nil
 }

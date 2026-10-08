@@ -3,6 +3,7 @@ package b1state
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"math"
 	"reflect"
 	"testing"
@@ -508,6 +509,78 @@ func TestTheRecordsHookIsPartOfTheProfile(t *testing.T) {
 		x := with
 		change(&x)
 		if err := x.Validate(); !errors.Is(err, ErrProfile) {
+			t.Fatal(name, err)
+		}
+	}
+}
+
+func TestTheElectionHookIsPartOfTheProfile(t *testing.T) {
+	records := fixtureProfile(2)
+	records.RecordsCustody, records.HRecords, records.HookRecordGas = [20]byte{0xc1}, 3, 2_000_000
+	records.SystemGas, _ = records.RequiredSystemGas()
+	records.MaxGas = records.SystemGas + records.OrdinaryCapacity
+	if err := records.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	recordsHash, err := records.Hash()
+	if err != nil {
+		t.Fatal(err)
+	}
+	recordsGas, _ := records.RequiredSystemGas()
+
+	with := records
+	with.ElectionContract, with.ElectGas = [20]byte{0xe1}, 45_000_000
+	with.SystemGas, _ = with.RequiredSystemGas()
+	with.MaxGas = with.SystemGas + with.OrdinaryCapacity
+	if err := with.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if gas, _ := with.RequiredSystemGas(); gas != recordsGas+45_000_000 {
+		t.Fatal("the system envelope grows by exactly the election's price", gas, recordsGas)
+	}
+	if g, _ := with.HookEnvelopeGas(); g != HookReadsGas+3*2_000_000+45_000_000 {
+		t.Fatal("the hook envelope is the reads, H records and the election", g)
+	}
+	withHash, err := with.Hash()
+	if err != nil || withHash == recordsHash {
+		t.Fatal("the election hook is in the hash", err)
+	}
+	// pinned: the enabled form is a new encoding (three more items), so its hash is a fixed vector
+	if got := fmt.Sprintf("%x", withHash); got != "3292748170eab2fd906a3aeebee19963c288d83d59fa6554b954f1a7f6b5207b" {
+		t.Fatal("the profile with the election hook hashes as the pinned vector, got", got)
+	}
+	// each pin changes the hash alone
+	for name, change := range map[string]func(*Profile){
+		"contract": func(p *Profile) { p.ElectionContract[0]++ },
+		"gas":      func(p *Profile) { p.ElectGas++ },
+	} {
+		x := with
+		change(&x)
+		x.SystemGas, _ = x.RequiredSystemGas()
+		x.MaxGas = x.SystemGas + x.OrdinaryCapacity
+		h, err := x.Hash()
+		if err != nil || h == withHash || h == recordsHash {
+			t.Fatal(name, err)
+		}
+	}
+	// a profile without the election hook hashes exactly as it did before the hook existed
+	off := with
+	off.ElectionContract, off.ElectGas = [20]byte{}, 0
+	off.SystemGas, _ = off.RequiredSystemGas()
+	off.MaxGas = off.SystemGas + off.OrdinaryCapacity
+	if h, err := off.Hash(); err != nil || h != recordsHash {
+		t.Fatal("dropping the election hook restores the previous hash", err)
+	}
+	for name, change := range map[string]func(*Profile){
+		"contract without gas":       func(p *Profile) { p.ElectGas = 0 },
+		"gas without contract":       func(p *Profile) { p.ElectionContract = [20]byte{} },
+		"election without the hook":  func(p *Profile) { p.RecordsCustody, p.HRecords, p.HookRecordGas = [20]byte{}, 0, 0 },
+		"system gas below the price": func(p *Profile) { p.SystemGas-- },
+		"envelope overflows":         func(p *Profile) { p.ElectGas = ^uint64(0) },
+	} {
+		x := with
+		change(&x)
+		if err := x.Validate(); !errors.Is(err, ErrProfile) && !errors.Is(err, ErrOverflow) {
 			t.Fatal(name, err)
 		}
 	}
