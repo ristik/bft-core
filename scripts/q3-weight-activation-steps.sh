@@ -319,7 +319,7 @@ q3_heavy_crash() {
   m2_start_root 1 2 "" || return 1
   for i in 2 3 4; do m2_start_root "$i" 2 "$(m2_root_addr 1)" || return 1; done
   # the last vote the node stored before it died is held again at start under the identity it was signed with (independent of the timer path below)
-  q3_wait_grep_since 60 "$root1" "$mark" "msg=\"recovered last vote\" kind=timeout round=[0-9]+ messageID=$lastsigned" || return 1
+  q3_wait_grep_since 60 "$root1" "$mark" "msg=\"recovered last vote\" .*kind=timeout round=[0-9]+ messageID=$lastsigned" || return 1
   q3_wait_grep_since 120 "$root1" "$mark" "$(q3_pat "$Q3_PAT_RECOVERED" 2)" || return 1
   recovered=$(tail -n +"$((mark + 1))" "$root1" | grep -aE "$(q3_pat "$Q3_PAT_RECOVERED" 2)")
   q3_wait_grep_since 120 "$root1" "$mark" "$Q3_PAT_REBROADCAST" || return 1
