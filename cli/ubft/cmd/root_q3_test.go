@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"go/ast"
 	"go/parser"
@@ -12,6 +13,8 @@ import (
 
 	"github.com/stretchr/testify/require"
 	"github.com/unicitynetwork/bft-core/evmassign"
+	"github.com/unicitynetwork/bft-core/internal/testutils/q3fixture"
+	"github.com/unicitynetwork/bft-core/internal/testutils/q3process"
 	"github.com/unicitynetwork/bft-core/network/protocol/abdrc"
 	"github.com/unicitynetwork/bft-core/q3format"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus"
@@ -117,4 +120,16 @@ func TestRootNodeRunSelectsTheRequestHistoryAfterAttachingTheRuntime(t *testing.
 		require.Contains(t, first, name)
 	}
 	require.Less(t, first["attachRootQ3"], first["selectRootQ3RequestHistory"])
+}
+
+// The request history is selected only once the history holds an activation: a genesis root keeps the legacy dispatch, which is the only
+// one that can judge a shard that has not certified yet.
+func TestOnlyAnActivatedHistorySelectsTheRequestHistory(t *testing.T) {
+	f := q3fixture.New(t, q3fixture.Options{})
+	p := q3process.New(t, f)
+	rt := p.Start()
+	require.False(t, rootQ3HasActivation(rt), "a genesis history")
+	require.NoError(t, rt.Recover(context.Background()))
+	require.NoError(t, rt.Activate(context.Background(), p.Bundle()))
+	require.True(t, rootQ3HasActivation(rt), "after the activation")
 }
