@@ -19,7 +19,7 @@ Q3_EVM_QUORUM=5
 # ---- the evidence the design lists (section 5, last paragraph); the lane fails if any is missing or empty ---------------------------------
 Q3_EVIDENCE_REQUIRED="pins.txt commands.log candidate.cbor candidate-config.json v3-body-id.txt activation-record.json \
 old-commit-proof.json old-commit-signers.json activation-coordinates.txt scheme-before.txt scheme-after.txt \
-signers-root.json root-weights.json evm-weights.json frozen-parent-ack.json registry-layout.txt registry-hash.txt \
+genesis-identities.json signers-root.json root-weights.json evm-weights.json frozen-parent-ack.json registry-layout.txt registry-hash.txt \
 proof-envelope.cbor history-ids-pre-restart.txt history-ids-post-restart.txt \
 recovered-message.txt rebroadcast-trace.txt tc-trace.txt commit-trace.txt \
 pair-root-input-a.bin pair-root-input-b.bin pair-transitions-a.bin pair-transitions-b.bin pair-state-a.json pair-state-b.json pair-equality.txt \

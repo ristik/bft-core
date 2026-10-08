@@ -128,6 +128,8 @@ export Q3_PINS_FILE=$PINS
 
 # The execution clients are pinned to this deployment's chain: network id 3 (every lane's genesis) and the genesis trust base's identity.
 export URETH_PIN_NETWORK_ID=3
+# the weighted rotation (1,1,1,1 -> 6,1,1,1) must fit the continuity budget the genesis configuration commits; the DEV default admits no reweighting
+export EVM_PARTITION_PARAMS_EXTRA=${EVM_PARTITION_PARAMS_EXTRA:-continuity_max_distance=1/1}
 set +e
 EVM_JOURNAL_CANDIDATES=${EVM_JOURNAL_CANDIDATES:-256} H3_ASSIGNMENT_LANE=1 Q3_WEIGHT_LANE=1 F8_MIXED_LANE=1 M2_PROFILE2=1 SIGNING=authority \
   POST_M2A_URETH_BIN="$URETH_BIN" POST_M2A_URETH_COMMIT="$Q3_URETH_COMMIT" \

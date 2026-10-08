@@ -27,7 +27,7 @@ m2_wait_root_epoch() {
 m2_start_root() {
   local node=$1 epoch=$2 boot=$3 port pid i conf
   local -a shardConfArgs=(--shard-conf "$fullShardConf")
-  [ "${Q3_WEIGHT_LANE:-0}" != 1 ] || shardConfArgs+=(--q3-lane)   # Q3 #50: the coupled runtime (verified history, install journal, V3 handoffs)
+  [ "${Q3_WEIGHT_LANE:-0}" != 1 ] || shardConfArgs+=(--q3-lane --genesis-identities test-nodes/genesis-identities.json)   # Q3 #50: the coupled runtime (verified history, install journal, V3 handoffs)
   port=$(m2_rpc_port "$node")
   if [ "${F8_MIXED_LANE:-0}" = 1 ]; then
     for conf in test-nodes/shard-conf-f8-a-left.json test-nodes/shard-conf-f8-a-right.json test-nodes/shard-conf-f8-b-left.json; do

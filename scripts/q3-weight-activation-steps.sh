@@ -37,19 +37,33 @@ q3_validators_json() { # out ids...: sorted successor node infos with the entity
   jq -s --argjson w "{$w}" 'map({nodeId, sigKey, stake: $w[.nodeId]}) | sort_by(.nodeId)' $files >"$out"
 }
 
-# The coupled assignment (the same four entities, mirrored weights): h3_build_assignment with the mirrored stakes instead of 1.
+# The successor committee's identity records (#85 lifecycle): the genesis records of the same four entities with the mirrored weights. The
+# staking id, payee and exposure digest are the entity's own and do not change with its weight.
+q3_successor_identities() { # out ids...
+  local out=$1 id w= ; shift
+  for id in "$@"; do w+="${w:+,}\"$(h3_root_id "$id")\":$(q3_weight_of "$id")"; done
+  jq --argjson w "{$w}" 'map(.weight = $w[.rootNodeId])' "$Q3_GENESIS_IDENTITIES" >"$out"
+}
+
+# The coupled assignment (the same four entities, mirrored weights): h3_build_assignment with the mirrored stakes, the successor identity
+# records every possession proof signs, and the recovery authorization whose K is the genesis committee the root recorded at genesis.
 q3_build_assignment() { # tag ids...
   local tag=$1 id pops=; shift
   q3_validators_json "$Q3_DIR/$tag-validators.json" "$@" || return 1
   build/ubft root handoff evm-context --root-rpc "$(h3_rpc_url "$(h3_first_root)")" --out "$Q3_DIR/$tag-context.json" || return 1
+  q3_successor_identities "$Q3_DIR/$tag-identities.json" "$@" || return 1
+  q3_x build/ubft root handoff evm-authorization --context "$Q3_DIR/$tag-context.json" --incumbent "$Q3_GENESIS_IDENTITIES" \
+    --chain "${M2_CHAIN_ID:-31337}" --out "$Q3_DIR/$tag-authorization.json" || return 1
   for id in "$@"; do
     build/ubft root handoff evm-pop --context "$Q3_DIR/$tag-context.json" --validators "$Q3_DIR/$tag-validators.json" \
+      --identities "$Q3_DIR/$tag-identities.json" \
       --node-id "$(evm_validator_id "$id")" --authority-socket "test-nodes/auth$id/operator.sock" \
       --authority-credential "test-nodes/auth$id/operator.cred" >"$Q3_DIR/$tag-pop-$id.json" || return 1
     pops+="${pops:+,}$Q3_DIR/$tag-pop-$id.json"
   done
   H3_BIND_ROOTS="$*" h3_bindings_json "$Q3_DIR/$tag-bindings.json" "$@" || return 1
   build/ubft root handoff evm-assemble --context "$Q3_DIR/$tag-context.json" --validators "$Q3_DIR/$tag-validators.json" \
+    --identities "$Q3_DIR/$tag-identities.json" --authorization "$Q3_DIR/$tag-authorization.json" \
     --pops "$pops" --bindings "$Q3_DIR/$tag-bindings.json" --out "$Q3_DIR/$tag-assignment.json" || return 1
 }
 
@@ -127,6 +141,7 @@ q3_baseline() {
   registry_layout >"$Q3_DIR/registry-layout.txt"
   rpc "http://127.0.0.1:$rethEthBase" eth_getCode "[\"$H3_REGISTRY\",\"latest\"]" | pyget "['result']" | tr -d '\n' | shasum -a 256 | cut -d' ' -f1 >"$Q3_DIR/registry-hash.txt"
   q3_execution_pins || return 1
+  cp "$Q3_GENESIS_IDENTITIES" "$Q3_DIR/genesis-identities.json" || return 1
   # unit PoA on scheme 1 before the handoff, read from the root's own verified state: epoch 1, scheme 1, unit weights, W=4 / Q=3
   sg=$(q3_signers_of "$(h3_first_root)") || return 1
   printf '%s\n' "$sg" | jq -c . >"$Q3_DIR/scheme-before.txt"
@@ -429,6 +444,7 @@ q3_run_lane() {
   mkdir -p "$Q3_DIR"; : >"$Q3_DIR/commands.log"
   cp "${Q3_PINS_FILE:?}" "$Q3_DIR/pins.txt"
   H3_RESTORE_TRUST_BASE=test-nodes/trust-base.json
+  Q3_GENESIS_IDENTITIES=test-nodes/genesis-identities.json
   H3_REGISTRY=0xff00000000000000000000000000000000000002
   H3_ONLINE="1 2 3 4"; H3_ROOTS="1 2 3 4"
   M2_NEXT_NONCE=${M2_NEXT_NONCE:-4}; M2_CHAIN_ID=31337
