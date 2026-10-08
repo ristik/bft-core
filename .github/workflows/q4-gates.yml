@@ -74,7 +74,7 @@ jobs:
       - name: "Query-cost gate, CI profile (frozen per-round budget; the full envelope runs with Q4_COST_FULL=1 for acceptance)"
         run: |
           mkdir -p out
-          Q4_COST_OUT=out/cost-ci.json go test -count=1 -v ./rootchain/consensus/leader/ -run 'Q4' | tee out/cost-ci.log
+          Q4_COST_OUT="$PWD/out/cost-ci.json" go test -count=1 -v ./rootchain/consensus/leader/ -run 'Q4' | tee out/cost-ci.log
 
       - name: "Live lane helpers still parse (dry run: no lock, no process)"
         run: |

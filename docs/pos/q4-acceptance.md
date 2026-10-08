@@ -30,10 +30,11 @@ prerequisite owned by separate work (#489 left it unscoped), not a waived gate.
 ## Producing the acceptance report
 
 ```sh
-export Q4_EXPORT_DIR=$PWD/out/bundles
+mkdir -p out/bundles
+export Q4_EXPORT_DIR=$PWD/out/bundles   # absolute: go test runs in each package directory
 go test -json -count=1 ./rootchain/... ./cli/ubft/cmd/ ./cmd/... -timeout 60m \
   -run '^(TestQ4|TestQ3|TestMessageRounds|TestWeighted|TestSkewedWeight|TestTwoRestarted|TestProductionBuild|TestT2|TestPartitionTimeout|TestPacemaker|TestVoteRegister|TestOldForm|TestInstallVerified|TestNoSignature|TestCheck)' > out/tests.json
-Q4_COST_FULL=1 Q4_COST_OUT=out/cost.json go test -count=1 ./rootchain/consensus/leader/ -run Q4
+Q4_COST_FULL=1 Q4_COST_OUT="$PWD/out/cost.json" go test -count=1 ./rootchain/consensus/leader/ -run Q4
 go run ./cmd/q4report -matrix docs/pos/q4-acceptance-matrix.json -tests out/tests.json -bundles out/bundles -cost out/cost.json -out out/report.md -json out/report.json
 ```
 
@@ -48,6 +49,6 @@ row passes when the injection happened and was classified, and proves no safety 
 - **The live lane has not been run.** Every REAL-PROCESS label in the matrix is an explicit gap blocked on #50 (the devnet lock and an
   activated weighted epoch). Closure of #51 needs those rows.
 - Every in-process row is root consensus only: no EVM, no aggregator shard, restarts are close/reopen of fsynced stores (not SIGKILL, not
-  power loss). The checker does not re-verify the signatures inside a carried QC or TC (it weighs the QC's signers under their epoch).
+  power loss). The checker does not re-verify the signatures inside a carried QC (it weighs the QC's signers under their epoch); carried TCs and the HighQC inside a timeout are not weighed; equivocation is detected for votes and timeouts only, not proposals.
 - Mixed-HighQC TC is covered only by the unit-weight unit test, not weighted.
 - The execution-entry-point authentication entry gate (G2) is not touched by any Q4 test.

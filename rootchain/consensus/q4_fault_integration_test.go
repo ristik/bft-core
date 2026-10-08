@@ -6,7 +6,6 @@ import (
 	"crypto"
 	"errors"
 	"fmt"
-	"github.com/unicitynetwork/bft-core/rootchain/consensus/q4replay"
 	"github.com/unicitynetwork/bft-core/rootrecords"
 	"slices"
 	"sync"
@@ -19,6 +18,7 @@ import (
 
 	"github.com/unicitynetwork/bft-core/network/protocol/abdrc"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/leader"
+	"github.com/unicitynetwork/bft-core/rootchain/consensus/q4replay"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/storage"
 	drctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
 )

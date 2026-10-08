@@ -947,7 +947,7 @@
     {
      "label": "ENFORCED-BOUND",
      "reason": "Nothing in production bounds the epoch length or a catch-up jump to the frozen 100,000-round envelope; beyond it the lookup blocks every caller for seconds (d=1e6, n=100: about 4 s on the #489 host, about 2 s on this one) and only a checkpoint or accelerated lookup fixes that. #489 left it unscoped. This is a release prerequisite, not a waived gate.",
-     "blockedBy": "separate checkpoint/accelerated-lookup work"
+     "blockedBy": "leader-lookup fix (arch design, briefs/leader-lookup.md); stays a gap until it lands"
     }
    ]
   },
@@ -1049,7 +1049,7 @@
   },
   {
    "id": "L4",
-   "title": "Offline replay checker: independent of live counters, re-derives class, epoch, round, author, statement, signatures, equivocators, chain agreement and windows from the export",
+   "title": "Offline replay checker: independent of live counters; re-derives class, epoch, round, author and statement and verifies the signature of every vote, timeout and proposal; carried QC signers are weighed, not signature-verified; carried TCs and a timeout's HighQC are not weighed; equivocators for votes and timeouts only (not proposals); chain agreement and windows",
    "design": "Q4-C scope.",
    "required": [
     "ORACLE-ONLY",
