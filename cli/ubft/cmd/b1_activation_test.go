@@ -415,3 +415,124 @@ func TestB1RunFlags_EachRequirementIsEnforced(t *testing.T) {
 		require.NoError(t, validateB1RunFlags(&shardNodeRunFlags{RegistryLayout: 2}))
 	})
 }
+
+// ---- the election hook's price ---------------------------------------------------------------------------------------------------------
+
+func electDeployment(t *testing.T, m b1state.ElectMeasurement) (*b1Deployment, b1state.Profile, b1ProfileFile) {
+	t.Helper()
+	d := newB1Deployment(t)
+	hooks := b1Hooks{RecordsCustody: [20]byte{0xc1}, HRecords: 2, HookRecordGas: 3_000_000, ElectionContract: [20]byte{0xe1}, Measurement: &m}
+	p, err := deriveB1Profile(d.tb, d.conf, 1, 7_000_000, 1000, hooks)
+	require.NoError(t, err)
+	file := b1ProfileFileOf(p)
+	file.ElectMeasurement = &m
+	return d, p, file
+}
+
+func (d *b1Deployment) writeFile(t *testing.T, f b1ProfileFile) {
+	t.Helper()
+	enc, err := json.Marshal(f)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(d.profPath, enc, 0o644))
+}
+
+func TestB1Profile_TheElectionPriceIsTheRecordedMeasurementPinnedWithTheMargin(t *testing.T) {
+	m := b1state.ElectMeasurement{V: 16, L: 2, C: 8, Gas: 4_987_664}
+	d, p, file := electDeployment(t, m)
+	require.EqualValues(t, 6_234_580, p.ElectGas, "ceil(4,987,664 x 1.25)")
+	require.Equal(t, [20]byte{0xe1}, p.ElectionContract)
+	envelope, err := p.HookEnvelopeGas()
+	require.NoError(t, err)
+	require.Equal(t, b1state.HookReadsGas+2*3_000_000+p.ElectGas, envelope, "the price is part of the reserved system gas")
+
+	d.writeFile(t, file)
+	read, err := readB1Profile(d.profPath)
+	require.NoError(t, err)
+	require.Equal(t, p, read, "the file round-trips every pin")
+
+	// a profile file with no hooks is unchanged: none of the new keys appear
+	plain, err := json.Marshal(b1ProfileFileOf(d.profile))
+	require.NoError(t, err)
+	require.NotContains(t, string(plain), "elect")
+	require.NotContains(t, string(plain), "recordsCustody")
+}
+
+func TestB1Profile_AHandTypedOrMissingElectionPriceIsRefused(t *testing.T) {
+	m := b1state.ElectMeasurement{V: 16, L: 2, C: 8, Gas: 4_987_664}
+	for name, change := range map[string]func(*b1ProfileFile){
+		"a typed price":              func(f *b1ProfileFile) { f.ElectGas = 7_000_000 },
+		"a price one above":          func(f *b1ProfileFile) { f.ElectGas++ },
+		"the bare measurement":       func(f *b1ProfileFile) { f.ElectGas = f.ElectMeasurement.Gas },
+		"no recorded measurement":    func(f *b1ProfileFile) { f.ElectMeasurement = nil },
+		"a zero measurement":         func(f *b1ProfileFile) { f.ElectMeasurement = &b1state.ElectMeasurement{V: 16, L: 2, C: 8} },
+		"a measurement without hook": func(f *b1ProfileFile) { f.ElectionContract, f.ElectGas = nil, 0 },
+		"a price without a contract": func(f *b1ProfileFile) { f.ElectionContract, f.ElectMeasurement = nil, nil },
+	} {
+		t.Run(name, func(t *testing.T) {
+			d, _, file := electDeployment(t, m)
+			change(&file)
+			d.writeFile(t, file)
+			_, err := readB1Profile(d.profPath)
+			require.ErrorIs(t, err, ErrB1Profile)
+		})
+	}
+	d := newB1Deployment(t)
+	_, err := deriveB1Profile(d.tb, d.conf, 1, 7_000_000, 1000, b1Hooks{RecordsCustody: [20]byte{0xc1}, HRecords: 1, HookRecordGas: 1, ElectionContract: [20]byte{0xe1}})
+	require.Error(t, err, "an election without a measurement cannot be derived")
+}
+
+func TestB1Profile_TheHookFlagsGoTogether(t *testing.T) {
+	m := b1state.ElectMeasurement{V: 16, L: 2, C: 8, Gas: 4_987_664}
+	path := filepath.Join(t.TempDir(), "m.json")
+	enc, _ := json.Marshal(m)
+	require.NoError(t, os.WriteFile(path, enc, 0o644))
+	ok, err := parseB1Hooks("0x00000000000000000000000000000000000000c1", 2, 3_000_000, "0x00000000000000000000000000000000000000e1", path)
+	require.NoError(t, err)
+	require.Equal(t, m, *ok.Measurement)
+	for name, args := range map[string][]any{
+		"flags without the records hook":  {"", uint32(2), uint64(1), "", ""},
+		"election without a measurement":  {"0x00000000000000000000000000000000000000c1", uint32(2), uint64(1), "0x00000000000000000000000000000000000000e1", ""},
+		"measurement without an election": {"0x00000000000000000000000000000000000000c1", uint32(2), uint64(1), "", path},
+		"not an address":                  {"c1", uint32(2), uint64(1), "", ""},
+		"election not an address":         {"0x00000000000000000000000000000000000000c1", uint32(2), uint64(1), "e1", path},
+		"missing measurement file":        {"0x00000000000000000000000000000000000000c1", uint32(2), uint64(1), "0x00000000000000000000000000000000000000e1", path + ".none"},
+	} {
+		_, err := parseB1Hooks(args[0].(string), args[1].(uint32), args[2].(uint64), args[3].(string), args[4].(string))
+		require.Error(t, err, name)
+	}
+}
+
+func TestEngineAPICheckElectGas(t *testing.T) {
+	m := b1state.ElectMeasurement{V: 16, L: 2, C: 8, Gas: 4_987_664}
+	d, _, file := electDeployment(t, m)
+	d.writeFile(t, file)
+	write := func(x b1state.ElectMeasurement) string {
+		p := filepath.Join(t.TempDir(), "fresh.json")
+		enc, _ := json.Marshal(x)
+		require.NoError(t, os.WriteFile(p, enc, 0o644))
+		return p
+	}
+	run := func(fresh string) (string, error) {
+		cmd := engineAPICheckElectGasCmd()
+		var out bytes.Buffer
+		cmd.SetOut(&out)
+		cmd.SetArgs([]string{"--b1-profile", d.profPath, "--measurement", fresh})
+		err := cmd.Execute()
+		return out.String(), err
+	}
+	out, err := run(write(m))
+	require.NoError(t, err)
+	require.Contains(t, out, "covers the fresh measurement")
+	_, err = run(write(b1state.ElectMeasurement{V: 16, L: 2, C: 8, Gas: 6_000_000}))
+	require.NoError(t, err, "the contracts grew a little: inside the margin")
+	_, err = run(write(b1state.ElectMeasurement{V: 16, L: 2, C: 8, Gas: 6_300_000}))
+	require.ErrorIs(t, err, b1state.ErrElectGas, "the contracts grew past the margin: regenerate the profile")
+	_, err = run(write(b1state.ElectMeasurement{V: 64, L: 2, C: 8, Gas: 1_000_000}))
+	require.ErrorIs(t, err, b1state.ErrElectGas, "a larger profile than the one priced")
+
+	// a profile with no election hook has nothing to check
+	plain := newB1Deployment(t)
+	cmd := engineAPICheckElectGasCmd()
+	cmd.SetArgs([]string{"--b1-profile", plain.profPath, "--measurement", write(m)})
+	require.Error(t, cmd.Execute())
+}
