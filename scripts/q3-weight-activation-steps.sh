@@ -52,7 +52,7 @@ q3_build_assignment() { # tag ids...
   q3_validators_json "$Q3_DIR/$tag-validators.json" "$@" || return 1
   build/ubft root handoff evm-context --root-rpc "$(h3_rpc_url "$(h3_first_root)")" --out "$Q3_DIR/$tag-context.json" || return 1
   q3_successor_identities "$Q3_DIR/$tag-identities.json" "$@" || return 1
-  q3_x build/ubft root handoff evm-authorization --context "$Q3_DIR/$tag-context.json" --incumbent "$Q3_GENESIS_IDENTITIES" \
+  q3_x build/ubft root handoff evm-authorization --context "$Q3_DIR/$tag-context.json" --incumbent "${Q3_INCUMBENT:-$Q3_GENESIS_IDENTITIES}" \
     --chain "${M2_CHAIN_ID:-31337}" --out "$Q3_DIR/$tag-authorization.json" || return 1
   for id in "$@"; do
     build/ubft root handoff evm-pop --context "$Q3_DIR/$tag-context.json" --validators "$Q3_DIR/$tag-validators.json" \
@@ -64,7 +64,7 @@ q3_build_assignment() { # tag ids...
   H3_BIND_ROOTS="$*" h3_bindings_json "$Q3_DIR/$tag-bindings.json" "$@" || return 1
   build/ubft root handoff evm-assemble --context "$Q3_DIR/$tag-context.json" --validators "$Q3_DIR/$tag-validators.json" \
     --identities "$Q3_DIR/$tag-identities.json" --authorization "$Q3_DIR/$tag-authorization.json" \
-    --pops "$pops" --bindings "$Q3_DIR/$tag-bindings.json" --out "$Q3_DIR/$tag-assignment.json" || return 1
+    --pops "$pops" --bindings "$Q3_DIR/$tag-bindings.json" --out "$Q3_DIR/$tag-assignment.json" ${Q3_SUPERSEDE:+--supersede} || return 1
 }
 
 # The candidate root trust base: same members and keys, the mirrored weights (--root-weights follows the --node-info order; the V3 protocol tuple is
@@ -104,22 +104,23 @@ q3_weight_of() { echo "$Q3_WEIGHTS" | awk -v n="$1" '{print $n}'; }
 # ---- readiness: one receipt per entity, from its root key, after checking its BFT node, its shard service and its paired Ureth --------------------
 q3_readiness() { # entity out: a receipt for the staged candidate, or the typed refusal on stderr
   local i=$1 out=$2
-  q3_x build/ubft root handoff q3-readiness --candidate "$Q3_DIR/candidate.cbor" --key-conf "test-nodes/root$i/keys.json" \
+  q3_x build/ubft root handoff q3-readiness --candidate "$Q3_DIR/candidate${Q3_SUFFIX:-}.cbor" --key-conf "test-nodes/root$i/keys.json" \
     --root-rpc "$(h3_rpc_url "$i")" --shard-rpc "http://$(evm_validator_rpc_addr "$i")" --eth-url "http://127.0.0.1:$((rethEthBase + i - 1))" \
     --execution-genesis-hash "$Q3_EXEC_GENESIS" --execution-code-hash "$Q3_EXEC_CODE_HASH" --out "$out"
 }
 q3_engine_url() { echo "http://127.0.0.1:$((rethEngineBase + $1 - 1))"; }
 q3_eth_url() { echo "http://127.0.0.1:$((rethEthBase + $1 - 1))"; }
 
-q3_derive_candidate() { # the root's derivation of the V3 candidate for the current attempt
-  rm -rf "$Q3_DIR/candidate.d"
-  q3_x build/ubft root handoff q3-candidate --next-trust-base test-nodes/trust-base-epoch2.json \
-    --next-evm-assignment "$Q3_DIR/cand-assignment.json" --root-rpc "$(h3_root_rpcs)" --out-dir "$Q3_DIR/candidate.d" || return 1
-  cp "$Q3_DIR/candidate.d/candidate.cbor" "$Q3_DIR/candidate.cbor"
-  cp "$Q3_DIR/candidate.d/config.json" "$Q3_DIR/candidate-config.json"
-  cp "$Q3_DIR/candidate.d/v3-body-id.txt" "$Q3_DIR/v3-body-id.txt"
-  cp "$Q3_DIR/candidate.d/root-weights.json" "$Q3_DIR/root-weights.json"
-  cp "$Q3_DIR/candidate.d/evm-weights.json" "$Q3_DIR/evm-weights.json"
+q3_derive_candidate() { # the root's derivation of the V3 candidate for the current attempt (Q3_NEXT_EPOCH, Q3_ASSIGN_TAG, Q3_SUFFIX name the handoff; the first by default)
+  local e=${Q3_NEXT_EPOCH:-2} tag=${Q3_ASSIGN_TAG:-cand} suf=${Q3_SUFFIX:-}
+  rm -rf "$Q3_DIR/candidate${suf}.d"
+  q3_x build/ubft root handoff q3-candidate --next-trust-base "test-nodes/trust-base-epoch${e}.json" \
+    --next-evm-assignment "$Q3_DIR/$tag-assignment.json" --root-rpc "$(h3_root_rpcs)" --out-dir "$Q3_DIR/candidate${suf}.d" || return 1
+  cp "$Q3_DIR/candidate${suf}.d/candidate.cbor" "$Q3_DIR/candidate${suf}.cbor"
+  cp "$Q3_DIR/candidate${suf}.d/config.json" "$Q3_DIR/candidate-config${suf}.json"
+  cp "$Q3_DIR/candidate${suf}.d/v3-body-id.txt" "$Q3_DIR/v3-body-id${suf}.txt"
+  cp "$Q3_DIR/candidate${suf}.d/root-weights.json" "$Q3_DIR/root-weights${suf}.json"
+  cp "$Q3_DIR/candidate${suf}.d/evm-weights.json" "$Q3_DIR/evm-weights${suf}.json"
 }
 
 q3_wait_grep_since() { # seconds file first-line-after regex: the pattern appears in the file beyond the mark
@@ -167,17 +168,18 @@ q3_candidate() {
 }
 
 q3_receipts() { # exactly one receipt per successor entity, from its root key
-  local i
-  for i in 1 2 3 4; do q3_readiness "$i" "$Q3_DIR/receipt-$i.json" || return 1; done
-  [ "$(ls "$Q3_DIR"/receipt-[1-4].json | wc -l | tr -d ' ')" = 4 ]
+  local i suf=${Q3_SUFFIX:-}
+  for i in 1 2 3 4; do q3_readiness "$i" "$Q3_DIR/receipt${suf}-$i.json" || return 1; done
+  [ "$(ls "$Q3_DIR"/receipt${suf}-[1-4].json | wc -l | tr -d ' ')" = 4 ]
 }
 
 q3_attempt() { # a retry rebuilds the proofs of possession, the candidate and the receipts for the new attempt number
-  q3_build_assignment cand 1 2 3 4 || return 1
+  local e=${Q3_NEXT_EPOCH:-2} tag=${Q3_ASSIGN_TAG:-cand} suf=${Q3_SUFFIX:-}
+  q3_build_assignment "$tag" 1 2 3 4 || return 1
   q3_derive_candidate || return 1
   q3_receipts || return 1
-  q3_x build/ubft root handoff propose --next-trust-base test-nodes/trust-base-epoch2.json --next-evm-assignment "$Q3_DIR/cand-assignment.json" \
-    --root-rpc "$(h3_root_rpcs)" --readiness-receipts "$Q3_DIR/receipt-1.json,$Q3_DIR/receipt-2.json,$Q3_DIR/receipt-3.json,$Q3_DIR/receipt-4.json"
+  q3_x build/ubft root handoff propose --next-trust-base "test-nodes/trust-base-epoch${e}.json" --next-evm-assignment "$Q3_DIR/$tag-assignment.json" \
+    --root-rpc "$(h3_root_rpcs)" --readiness-receipts "$Q3_DIR/receipt${suf}-1.json,$Q3_DIR/receipt${suf}-2.json,$Q3_DIR/receipt${suf}-3.json,$Q3_DIR/receipt${suf}-4.json"
 }
 
 q3_handoff() {
@@ -299,6 +301,67 @@ q3_real_tc() {
   h3_progress after-tc 8
 }
 
+# The negative root boundary: the heavy root alone (weight 6 of W=9, Q=7) cannot form a certificate. The three light roots are killed; the heavy root
+# keeps timing out (it signs timeout votes) but no timeout certificate forms and no root round commits. With ONE light root back the weight is 7 =
+# Q and the chain commits again, so 6 fails and 7 passes at the same boundary.
+q3_root_boundary() {
+  local root1=test-nodes/root1/debug.log mark settled end i signed
+  mark=$(wc -l <"$root1")
+  for i in 2 3 4; do stop_pidfile "test-nodes/root$i/pid" 'ubft root-node run' KILL; done
+  sleep 12     # what was in flight commits or dies out; the chain is then stuck
+  settled=$(q3_signers_of 1 | jq -r .round)
+  sleep 40     # four local timeouts (10 s each) of the heavy root alone
+  end=$(q3_signers_of 1 | jq -r .round)
+  signed=$(tail -n +"$((mark + 1))" "$root1" | grep -ac 'msg="signed timeout vote"')
+  { echo "heavy root alone (weight 6 of 9, quorum 7)"; echo "last committed round after settling: $settled; after 40 s more: $end"; echo "timeout votes signed by the heavy root: $signed"
+    echo "timeout certificates formed: $(tail -n +"$((mark + 1))" "$root1" | grep -ac 'timeout quorum for round')"; } >"$Q3_DIR/root-boundary.txt"
+  [ "$end" = "$settled" ] || { echo "the heavy root alone committed rounds ($settled -> $end): weight 6 formed a certificate" >&2; return 1; }
+  [ "$signed" -ge 2 ] || { echo "the heavy root signed $signed timeout votes in 40 s: it was not running its rounds" >&2; return 1; }
+  [ "$(tail -n +"$((mark + 1))" "$root1" | grep -ac 'timeout quorum for round')" = 0 ] || { echo "a timeout certificate formed from weight 6" >&2; return 1; }
+  # one light root back: 6 + 1 = 7 >= Q
+  m2_start_root 2 2 "$(m2_root_addr 1)" || return 1
+  for i in $(seq 1 120); do
+    [ "$(q3_signers_of 1 2>/dev/null | jq -r .round 2>/dev/null)" -gt "$end" ] 2>/dev/null && break
+    sleep 1
+  done
+  [ "$(q3_signers_of 1 | jq -r .round)" -gt "$end" ] || { echo "heavy plus one light (weight 7) did not commit" >&2; return 1; }
+  echo "heavy + one light (weight 7 of 9) committed round $(q3_signers_of 1 | jq -r .round) after $end" >>"$Q3_DIR/root-boundary.txt"
+  m2_start_root 3 2 "$(m2_root_addr 1)" || return 1
+  m2_start_root 4 2 "$(m2_root_addr 1)" || return 1
+  h3_progress root-boundary-restored 8
+}
+
+# The negative EVM boundary: three light EVM validators (weight 3 of W=9, Q=5) cannot get a shard certification accepted. The heavy entity's shard node is
+# stopped (its Ureth and signing authority stay); the three lights keep sending requests and the root counts them, but never reaches consensus for the
+# EVM partition, so its certified IR does not move. With the heavy shard node back, the shard certifies again.
+q3_evm_boundary() {
+  local heavy=1 i rounds_before rounds_after consensus notyet submitted rootBoot bootnodes
+  [ "$(q3_weight_of "$heavy")" = 6 ] || { echo "entity $heavy is not the heavy one" >&2; return 1; }
+  stop_one_evm_validator "$heavy" || return 1
+  sleep 10     # a certification in flight when the heavy node stopped lands or dies out
+  rounds_before=$(h3_root_info | jq -r '.partitionShards[] | select(.partitionId == 8) | .roundNumber')
+  for i in 1 2 3 4; do q3_mark_log "test-nodes/root$i/debug.log" "boundary-root$i"; done
+  for i in 2 3 4; do q3_mark_log "test-nodes/evm$i/debug.log" "boundary-evm$i"; done
+  sleep 45
+  rounds_after=$(h3_root_info | jq -r '.partitionShards[] | select(.partitionId == 8) | .roundNumber')
+  consensus=0; notyet=0; submitted=0
+  for i in 1 2 3 4; do
+    consensus=$((consensus + $(q3_since_mark "test-nodes/root$i/debug.log" "boundary-root$i" | grep -ac 'partition 00000008 reached consensus')))
+    notyet=$((notyet + $(q3_since_mark "test-nodes/root$i/debug.log" "boundary-root$i" | grep -ac 'partition 00000008 quorum not yet reached')))
+  done
+  for i in 2 3 4; do submitted=$((submitted + $(q3_since_mark "test-nodes/evm$i/debug.log" "boundary-evm$i" | grep -ac 'submitting block certification request'))); done
+  { echo "heavy EVM entity $heavy stopped; three light EVM validators (weight 3 of 9, quorum 5) for 45 s"; echo "EVM partition IR round: $rounds_before -> $rounds_after"
+    echo "light validators' certification requests submitted: $submitted"; echo "root lines 'quorum not yet reached' for the EVM partition: $notyet"; echo "root lines 'reached consensus' for the EVM partition: $consensus"; } >"$Q3_DIR/evm-boundary.txt"
+  [ "$submitted" -ge 1 ] || { echo "the light validators submitted no certification request" >&2; return 1; }
+  [ "$notyet" -ge 1 ] || { echo "the roots counted no request of the light validators" >&2; return 1; }
+  [ "$consensus" = 0 ] || { echo "the roots reached consensus on the EVM partition from weight 3" >&2; return 1; }
+  [ "$rounds_after" = "$rounds_before" ] || { echo "the EVM partition certified a state ($rounds_before -> $rounds_after) from weight 3" >&2; return 1; }
+  rootBoot=$(m2_root_addr 1) || return 1
+  bootnodes=$(evm_bootnodes_for_peers "$rootBoot" "$heavy" $(m2_online_validators)) || return 1
+  start_one_evm_validator "$heavy" 4 "$partitionID" "$rootBoot" engine-api rpc "$bootnodes" || return 1
+  h3_progress evm-boundary-restored 8
+}
+
 q3_ids() { grep -aoE 'messageID=[0-9a-f]+' | sort -u; }
 
 # The heavy-validator crash across E. The three light roots are SIGKILLed first, so the heavy root (6 < 7) alone cannot form a timeout certificate and
@@ -344,6 +407,86 @@ q3_heavy_crash() {
   # no verified history identity was lost across the restart: every pre-restart ID is still retained
   [ -z "$(comm -23 <(sort "$Q3_DIR/history-ids-pre-restart.txt") <(sort "$Q3_DIR/history-ids-post-restart.txt"))" ] || { echo "history identities lost across the restart" >&2; return 1; }
   return 0
+}
+
+# ---- a subsequent scheme-2 handoff, and the supersession of an unacknowledged one ---------------------------------------------------------------
+# Handoff 2 (root epoch 2 -> 3, the same four entities, the heavy weight moves to entity 2) is committed by the weighted epoch-2 committee under
+# scheme 2 (a heavy-plus-one-light Commit, 7 of 9) and activates, but its acknowledgement is withheld: the registry stays at shard epoch 1. Handoff 3
+# (epoch 3 -> 4, heavy weight to entity 3) is assembled with --supersede and replaces it on the same frozen parent; its folded acknowledgement takes
+# the registry from shard epoch 1 straight to 3, and the superseded assignment is never acknowledged.
+Q3_WEIGHTS_1=$Q3_WEIGHTS
+Q3_WEIGHTS_2="1 6 1 1"
+Q3_WEIGHTS_3="1 1 6 1"
+
+q3_handoff_n() { # n epoch weights supersede(0|1) incumbent: plans, endorses and commits the handoff at old epoch (epoch-1)
+  local n=$1 epoch=$2
+  Q3_WEIGHTS=$3 Q3_SUFFIX=-$n Q3_NEXT_EPOCH=$epoch Q3_ASSIGN_TAG=cand$n Q3_INCUMBENT=$5
+  if [ "$4" = 1 ]; then Q3_SUPERSEDE=1; else unset Q3_SUPERSEDE; fi
+  q3_trust_base_v3 "$epoch" || return 1
+  h3_retry_handoff $((epoch - 1)) q3_attempt || return 1
+  [ "$(jq -r .signingScheme "$Q3_DIR/candidate-config-$n.json")" = 2 ] || { echo "handoff $n does not select scheme 2" >&2; return 1; }
+  q3_check_weights set "$Q3_DIR/root-weights-$n.json" "$Q3_TOTAL_WEIGHT" "$Q3_ROOT_QUORUM" >/dev/null || return 1
+  q3_check_weights set-evm "$Q3_DIR/evm-weights-$n.json" "$Q3_TOTAL_WEIGHT" "$Q3_EVM_QUORUM" >/dev/null || return 1
+  Q3_WEIGHTS=$Q3_WEIGHTS_1; unset Q3_SUFFIX Q3_NEXT_EPOCH Q3_ASSIGN_TAG Q3_INCUMBENT Q3_SUPERSEDE
+  echo "handoff $n committed at root epoch $((epoch - 1))"
+}
+
+q3_install_n() { # epoch: the installation barrier of epoch N; no certificate of N may exist before the roots restart into it
+  local epoch=$1 prev=$(($1 - 1)) r before
+  for r in $H3_ROOTS; do
+    before=$(q3_signers_of "$r" | jq -r .epoch) || return 1
+    [ "$before" = "$prev" ] || { echo "root $r reports a certificate of epoch $before before its install restart into $epoch" >&2; return 1; }
+  done
+  h3_restart_roots "$epoch" || { echo "root restart into epoch $epoch failed" >&2; return 1; }
+  for r in $(seq 1 120); do
+    [ "$(q3_signers_of "$(h3_first_root)" 2>/dev/null | jq -r .epoch 2>/dev/null)" = "$epoch" ] && break
+    sleep 1
+  done
+  q3_signers_of "$(h3_first_root)" | jq -c . >"$Q3_DIR/first-epoch${epoch}-certificate.json"
+  [ "$(jq -r .epoch "$Q3_DIR/first-epoch${epoch}-certificate.json")" = "$epoch" ] || { echo "no epoch-$epoch certificate after the install restart" >&2; return 1; }
+  q3_history_ids "$Q3_DIR/history-ids-epoch${epoch}.txt"
+}
+
+q3_activation_n() { # n epoch: the committed activation record of epoch N; its Commit is the previous (weighted, scheme 2) committee's proof
+  local n=$1 epoch=$2 rec="$Q3_DIR/activation-record-$2.json" astar amin first total
+  q3_x build/ubft root handoff q3-activation --root-rpc "$(h3_rpc_url "$(h3_first_root)")" --epoch "$epoch" --out "$rec" || return 1
+  [ "$(jq -r .epoch "$rec")" = "$epoch" ] || { echo "activation epoch is not $epoch" >&2; return 1; }
+  [ "$(jq -r .signingScheme "$rec")" = 2 ] || { echo "activated scheme is not 2" >&2; return 1; }
+  [ "$(jq -r .v3BodyId "$rec")" = "$(tr -d '[:space:]' <"$Q3_DIR/v3-body-id-$n.txt")" ] || { echo "activation record names a different V3BodyID than candidate $n" >&2; return 1; }
+  astar=$(jq -r .activationRound "$rec"); amin=$(jq -r .minActivationRound "$rec")
+  [ "$astar" -ge "$amin" ] || { echo "A*=$astar is below A_min=$amin" >&2; return 1; }
+  first=$(jq -r .round "$Q3_DIR/first-epoch${epoch}-certificate.json")
+  [ "$first" -ge "$astar" ] || { echo "first epoch-$epoch certificate round $first is below A*=$astar" >&2; return 1; }
+  # the Commit is verified under the PREVIOUS epoch: its weighted committee (W=9, Q=7) under scheme 2
+  [ "$(jq -r '.commit.scheme' "$rec")" = 2 ] || { echo "the Commit of epoch $epoch is not a scheme-2 proof" >&2; return 1; }
+  [ "$(jq -r '.commit.epoch' "$rec")" = "$((epoch - 1))" ] || { echo "the Commit of epoch $epoch is not the previous committee's" >&2; return 1; }
+  jq '.commit.signers' "$rec" >"$Q3_DIR/old-commit-signers-$epoch.json"
+  total=$(q3_check_weights cert "$Q3_DIR/old-commit-signers-$epoch.json" "$Q3_TOTAL_WEIGHT" "$Q3_ROOT_QUORUM") || return 1
+  printf 'E=%s\nA_min=%s\nA*=%s\nactivationCommitId=%s\nv3BodyId=%s\nfirst epoch-%s certificate round=%s\nCommit signed by weight %s of %s (quorum %s) under scheme 2\n' \
+    "$epoch" "$amin" "$astar" "$(jq -r .activationCommitId "$rec")" "$(jq -r .v3BodyId "$rec")" "$epoch" "$first" "$total" "$Q3_TOTAL_WEIGHT" "$Q3_ROOT_QUORUM" >"$Q3_DIR/activation-coordinates-$epoch.txt"
+}
+
+q3_second_handoff() { q3_handoff_n 2 3 "$Q3_WEIGHTS_2" 0 "$Q3_DIR/cand-identities.json"; }
+
+q3_second_activation() {
+  q3_install_n 3 || return 1
+  q3_activation_n 2 3 || return 1
+  # activated, not acknowledged: the registry has not moved
+  h3_registry_is 1 2 || { echo "the registry moved (shard epoch $(h3_slot "$h3_slot_shard"), root epoch $(h3_slot "$h3_slot_root")) before handoff 2 was acknowledged" >&2; return 1; }
+  { echo "handoff 2 activated at root epoch 3, acknowledgement withheld"; echo "registry shard epoch $(h3_slot "$h3_slot_shard"), root epoch $(h3_slot "$h3_slot_root")"; } >"$Q3_DIR/supersession.txt"
+}
+
+q3_supersede() {
+  q3_handoff_n 3 4 "$Q3_WEIGHTS_3" 1 "$Q3_DIR/cand-identities.json" || return 1
+  q3_install_n 4 || return 1
+  q3_activation_n 3 4 || return 1
+  M2_ADVANCE_NO_REPLICA_WAIT=1 h3_advance_authorities 4 3 1 2 3 4 || { echo "authority advance to root epoch 4 / shard epoch 3 failed" >&2; return 1; }
+  local i
+  for i in $(seq 1 180); do h3_registry_is 3 4 && break; sleep 1; done
+  h3_registry_is 3 4 || { echo "registry did not reach shard epoch 3 / root epoch 4 (shard epoch $(h3_slot "$h3_slot_shard"), root epoch $(h3_slot "$h3_slot_root"))" >&2; return 1; }
+  { echo "handoff 3 (assembled with --supersede) activated at root epoch 4 and acknowledged"; echo "registry shard epoch $(h3_slot "$h3_slot_shard") (was 1; the superseded assignment, shard epoch 2, was never acknowledged), root epoch $(h3_slot "$h3_slot_root")"; } >>"$Q3_DIR/supersession.txt"
+  h3_paid 4 || { echo "post-supersession paid transaction was not certified at root epoch 4" >&2; return 1; }
+  h3_progress after-supersession 8
 }
 
 # The proof envelope for the activation (Go side; there is no Rust proof verifier any more).
@@ -470,7 +613,7 @@ q3_pair_restart_control() {
 q3_evidence_complete() { q3_evidence_check "$Q3_DIR"; }
 
 Q3_STEPS="q3_baseline q3_candidate q3_handoff q3_install_epoch2 q3_activation q3_acknowledge q3_progress_scheme2 q3_evm_request_weights \
-q3_aggregators_unchanged q3_real_tc q3_heavy_crash q3_proof_envelope q3_start_second_pair q3_second_pair q3_pair_controls q3_evidence_complete"
+q3_aggregators_unchanged q3_real_tc q3_root_boundary q3_evm_boundary q3_heavy_crash q3_proof_envelope q3_start_second_pair q3_second_pair q3_pair_controls q3_second_handoff q3_second_activation q3_supersede q3_evidence_complete"
 
 q3_run_lane() {
   local s
