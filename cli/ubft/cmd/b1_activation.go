@@ -242,7 +242,8 @@ func b1ProofFetcher(rpc registrywitness.Caller) func(context.Context, registrypr
 }
 
 // newB1PairConfig is the pair's Update admission configuration: the profile, the authority of the node's own verified root history, and
-// the proof source of its paired client.
+// the proof source of its paired client. The root-record source is attached by attachRecordsFeed (the authenticated feed from the root nodes);
+// the config deliberately carries none until then.
 func newB1PairConfig(p b1state.Profile, rt *q3active.Runtime, ethURL string, timeout time.Duration) (*b1paired.Config, error) {
 	if rt == nil {
 		return nil, fmt.Errorf("%w: no verified root history", ErrB1Profile)

@@ -1,0 +1,21 @@
+PASS bridge installed from the vault {"cfgHash":"8ee75c47402dd06cc8688c185cfae4b0ffa8bd24d0f663a3c8062cd05e558dd4","vault":"0xe7f1725e7734ce288f8367e1bb143e90bb3f0512","trustBaseId":"d5727b8b61578d0d47767ad02a36fe560fbc01119269777f629f4f1851f3ef79"}
+  tx transfer: signed at root round 268, published at 287, receipt seen at 287, block 64
+  tx transfer: signed at root round 287, published at 300, receipt seen at 300, block 67
+PASS lock executed on the running chain {"nonce":"2","blockHash":"0x1b2be711e6fef2940c209ef2a11a0aef7bcec611da19757e07d15e8b447e3523","blockNumber":"70","gasUsed":"237964"}
+PASS lock proof assembled {"bytes":2641,"sha256":"f2f7f957d0fb953c61aab4d87f2dff679712b06aa77f97dac9e96b1aa00251a3"}
+PASS lock digest equals the plug-in derivation {"digest":"ab10a386fe0e40cfd3b18da468c2344e47226ad82c2d5d74f648812e3480266c"}
+PASS mint submitted {"status":"{\"status\":\"SUCCESS\"}"}
+PASS mint certified by aggregator-go {"referenceTime":"1791438138","rootRound":"321"}
+PASS native verification of the live token {"nonce":"2","leaves":1}
+PASS transfer certified {"transitions":1}
+PASS burn certified {"transitions":2}
+PASS return proof assembled {"anchorRootRound":"333","registryClock":"325","bytes":6112,"nullifier":"7a10e6b2bc858426f87575faf5bde354c832602049b0064fa6416b6665f7caf7","leaves":3}
+PASS registry clock reached the anchor {"anchorRound":"333","registryClock":"334"}
+PASS native UC_V1 verdict on the anchor request {"registryClock":"334","returndata":"0x00000000000000000000000000000000000000000000000000000000000000010000000000000000000000000000000000000000000000000000000000000001","valid":true}
+  tx redeem(bytes)(uint256): signed at root round 339, published at 350, receipt seen at 350, block 79
+PASS redeem executed (native B1 + B2 kernels) {"gasUsed":"1848962","credited":"1000000000000000000","anchorRound":"333","clockAtExecution":"346"}
+PASS control: flipped certificate byte refused {"revertData":"0x391d1053","ucRejected":true}
+PASS control: claim by an uncredited account refused {"revertData":"0x4eb7eaec"}
+PASS control: the same burn redeemed twice is refused {"revertData":"0xd36d946d","alreadyRedeemed":true}
+  tx claim(uint256,address): signed at root round 352, published at 358, receipt seen at 358, block 81
+PASS claim paid {"gasUsed":"86224","paid":"1000000000000000000","vaultBefore":"2000000000000000000","vaultAfter":"1000000000000000000"}
