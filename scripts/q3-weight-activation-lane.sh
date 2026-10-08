@@ -128,6 +128,8 @@ export Q3_PINS_FILE=$PINS
 
 # The execution clients are pinned to this deployment's chain: network id 3 (every lane's genesis) and the genesis trust base's identity.
 export URETH_PIN_NETWORK_ID=3
+# every shard node exposes its operator endpoint (the readiness check asks it what it has staged)
+export EVM_OPERATOR_STATUS_RPC=1
 # the weighted rotation (1,1,1,1 -> 6,1,1,1) must fit the continuity budget the genesis configuration commits; the DEV default admits no reweighting
 export EVM_PARTITION_PARAMS_EXTRA=${EVM_PARTITION_PARAMS_EXTRA:-continuity_max_distance=1/1}
 set +e
