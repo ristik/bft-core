@@ -79,9 +79,13 @@ func (a *Authority) AdvanceEpoch(ctx context.Context, conf *types.PartitionDescr
 	if owned.Version != 1 || owned.Epoch != successor.Epoch || owned.NetworkID != old.NetworkID || len(owned.RootNodes) == 0 {
 		return fmt.Errorf("%w: invalid successor trust", ErrContextMismatch)
 	}
+	// bounded root weights as well: a weighted epoch's trust base carries stakes the unit rule (NodeInfo.IsValid) refuses
+	if _, err := weightvalidation.Nodes(owned.RootNodes, weightvalidation.RoleRoot, weightvalidation.ModeWeighted); err != nil {
+		return fmt.Errorf("%w: invalid successor root node: %v", ErrContextMismatch, err)
+	}
 	seen := make(map[string]bool, len(owned.RootNodes))
 	for _, node := range owned.RootNodes {
-		if err := node.IsValid(); err != nil || seen[node.NodeID] {
+		if seen[node.NodeID] {
 			return fmt.Errorf("%w: invalid successor root node", ErrContextMismatch)
 		}
 		seen[node.NodeID] = true
