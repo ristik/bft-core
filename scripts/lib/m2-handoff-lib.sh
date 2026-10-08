@@ -40,7 +40,7 @@ m2_start_root() {
   for i in $(seq 1 90); do
     build/ubft root-node run --home "test-nodes/root$node" \
       --address "/ip4/127.0.0.1/tcp/$(m2_p2p_port "$node")" \
-      "${bootArgs[@]}" --trust-base test-nodes/trust-base.json \
+      ${bootArgs[@]+"${bootArgs[@]}"} --trust-base test-nodes/trust-base.json \
       "${shardConfArgs[@]}" --profile-2 --install-handoff-epoch "$epoch" \
       --rpc-server-address "127.0.0.1:$port" --log-format text --log-level debug \
       >>"test-nodes/root$node/debug.log" 2>&1 &
