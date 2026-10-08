@@ -241,6 +241,16 @@ echo "registry artifact (layout $(registry_layout)) sha256=$(shasum -a 256 "$(re
 genesisSHA=$(shasum -a 256 test-nodes/evm-genesis.json | cut -d' ' -f1)
 echo "generated genesis sha256=$genesisSHA"
 
+# Fresh-B1 deployment (Q3_B1=1): one profile file, derived from the shard configuration and the root trust base, is the source of the registry
+# genesis (layout 3), of ureth's --unicity.* bindings and of the shard nodes' Update admission (--b1-profile), as in scripts/dnb-devnet.sh.
+b1GasLimit=30000000
+if [ "${Q3_B1:-0}" = 1 ]; then
+  build/ubft engine-api b1-profile --shard-conf "test-nodes/shard-conf-${partitionID}_0.json" --trust-base test-nodes/trust-base.json \
+    --w-cert "${Q3_B1_W_CERT:-15}" --out test-nodes/b1-profile.json | tee test-nodes/b1-profile.out || { echo "b1-profile failed" >&2; exit 1; }
+  b1GasLimit=$(python3 -c "import json;print(json.load(open('test-nodes/b1-profile.json'))['maxGas'])")
+  export EVM_B1_PROFILE=test-nodes/b1-profile.json URETH_B1_PROFILE_OUT=test-nodes/b1-profile.out URETH_BUILDER_GASLIMIT=$b1GasLimit
+fi
+
 # The generated genesis has an empty alloc, so no account can pay for gas and the shard can only
 # ever certify quiet rounds - which build no EVM block at all, leaving reth at genesis forever.
 # Fund one well-known test account so §6 can prove the adapter really builds and commits a block.
@@ -257,6 +267,8 @@ python3 - <<'PY'
 import json, subprocess
 g = json.load(open("test-nodes/evm-genesis.json"))
 g["alloc"] = json.loads(subprocess.check_output(["go", "run", "./scripts/evmtx", "-alloc"]))
+if __import__("os").environ.get("Q3_B1") == "1":
+    g["gasLimit"] = hex(json.load(open("test-nodes/b1-profile.json"))["maxGas"])
 if __import__("os").environ.get("M1_FEE_ACCOUNTING") == "1":
     # Start one wei above ureth's fixed M1 floor. B1 has ordinary gas well below target,
     # so its fee must clamp to the floor and every following idle block must hold there.
@@ -269,9 +281,15 @@ echo "funded genesis source sha256=$fundedSHA"
 # SealRegistry account and emits the full shard configuration whose hash the v2 certificate binds.
 chainSpec=test-nodes/evm-genesis-finalized-funded.json
 fullShardConf=test-nodes/evm-full-shard-conf-v2.json
+if [ "${Q3_B1:-0}" = 1 ]; then
+  build/ubft engine-api genesis --shard-conf "test-nodes/shard-conf-${partitionID}_0.json" --trust-base test-nodes/trust-base.json \
+    --b1-profile test-nodes/b1-profile.json --alloc-source test-nodes/evm-genesis-funded.json --out "$chainSpec" \
+    --full-shard-conf "$fullShardConf" --identities-out test-nodes/b1-identities.json || { echo "finalized funded B1 genesis failed" >&2; exit 1; }
+else
 build/ubft engine-api genesis --shard-conf "test-nodes/shard-conf-${partitionID}_0.json" \
   --alloc-source test-nodes/evm-genesis-funded.json --out "$chainSpec" \
   --full-shard-conf "$fullShardConf" --registry-layout "$(registry_layout)" || { echo "finalized funded genesis failed" >&2; exit 1; }
+fi
 echo "finalized funded genesis sha256=$(shasum -a 256 "$chainSpec" | cut -d' ' -f1)"
 fi
 if [ "${SIGNING:-local}" = authority ]; then
@@ -301,7 +319,7 @@ for i in $(seq 1 "$validators"); do
     --http.api eth,net,web3,admin,debug --rpc.eth-proof-window 64 \
     --port $((rethP2PBase + i - 1)) --disable-discovery \
     --ipcdisable --engine.persistence-threshold "$d2cPersistenceThreshold" \
-    --builder.gaslimit 30000000 \
+    --builder.gaslimit "${URETH_BUILDER_GASLIMIT:-30000000}" \
     ${rethStorageArgs[@]+"${rethStorageArgs[@]}"} \
     $(urethPinUnicityFlags) \
     >"test-nodes/reth$i/reth.log" 2>&1 &
@@ -868,6 +886,7 @@ if [ "${M2_PROFILE2:-0}" = 1 ] && [ "${POST_M2A_SKIP_HANDOFF:-0}" != 1 ]; then
   fi
   handoffScript=scripts/m2-profile2-handoffs.sh
   if [ "${H3_ASSIGNMENT_LANE:-0}" = 1 ]; then handoffScript=scripts/h3-assignment-steps.sh; fi
+  if [ "${Q3_WEIGHT_LANE:-0}" = 1 ]; then handoffScript=scripts/q3-weight-activation-steps.sh; fi   # Q3 #50 slice E: runs on the H3 lane's layout-2 genesis
   if [ "${Q4_LIVE_LANE:-0}" = 1 ]; then handoffScript=scripts/q4-live-steps.sh; fi
   if ! source "$handoffScript"; then
     fail "profile-2 two-handoff lane failed"
@@ -1085,7 +1104,7 @@ if [ "${M1_FEE_ACCOUNTING:-0}" = 1 ]; then
         --http --http.addr 127.0.0.1 --http.port "$rethEthBase" \
         --http.api eth,net,web3,admin,debug --rpc.eth-proof-window 64 \
         --port "$rethP2PBase" --disable-discovery --ipcdisable \
-        --engine.persistence-threshold "$d2cPersistenceThreshold" --builder.gaslimit 30000000 \
+        --engine.persistence-threshold "$d2cPersistenceThreshold" --builder.gaslimit "${URETH_BUILDER_GASLIMIT:-30000000}" \
         $(urethPinUnicityFlags) >test-nodes/reth1/reth-restart.log 2>&1 &
       echo $! >test-nodes/reth1/pid
       python3 scripts/m1-fee-accounting.py after-restart --nodes test-nodes \
