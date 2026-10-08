@@ -240,10 +240,16 @@ func rootNodeRun(ctx context.Context, flags *rootNodeRunFlags) error {
 		return err
 	}
 
-	rootNet, err := network.NewLibP2RootConsensusNetwork(host, flags.MaxRequests, defaultNetworkTimeout, obs)
+	libp2pNet, err := network.NewLibP2RootConsensusNetwork(host, flags.MaxRequests, defaultNetworkTimeout, obs)
 	if err != nil {
 		return fmt.Errorf("failed initiate root network, %w", err)
 	}
+	// a build without the q4shim tag returns the network itself
+	rootNet, stopShim, err := wrapRootNet(ctx, libp2pNet, host.ID(), signer, trustBaseStore.SigningConfig, log)
+	if err != nil {
+		return err
+	}
+	defer stopShim()
 
 	consensusParams := consensus.NewConsensusParams()
 	consensusParams.BlockRate = time.Duration(flags.BlockRate) * time.Millisecond
