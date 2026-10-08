@@ -28,6 +28,7 @@ type pubFx struct {
 	} `json:"expected"`
 	Reserved  pubReads   `json:"reserved"`
 	Published pubReads   `json:"published"`
+	Lost      pubReads   `json:"lost"`
 	Election  []pubReads `json:"electionReads"`
 	Custody   []pubReads `json:"custodyReads"`
 }
@@ -68,9 +69,12 @@ func newPrimaryWorld(t testing.TB, scenario string) primaryWorld {
 	pins.CustodyCode = [32]byte(ethcrypto.Keccak256Hash([]byte("custody code")))
 	pins.ElectionCode = [32]byte(ethcrypto.Keccak256Hash([]byte("election code")))
 	w := primaryWorld{fx: fx, pins: pins, election: map[word32]word32{}, custody: map[word32]word32{}}
-	if scenario == "reserved" {
+	switch scenario {
+	case "reserved":
 		fx.Reserved.into(t, w.election)
-	} else {
+	case "lost":
+		fx.Lost.into(t, w.election)
+	default:
 		fx.Published.into(t, w.election)
 	}
 	for _, r := range fx.Election {
@@ -116,6 +120,25 @@ func TestPrimaryFactsAreProvenFromTheCertifiedState(t *testing.T) {
 	require.Equal(t, hexWord(t, w.fx.Expected.IncumbentKeyDigest), f.IncumbentKeyDigest)
 	require.True(t, f.Open)
 	require.True(t, f.IncumbentIsLastAcked)
+}
+
+// The loss of a member's coverage after publication is its own proven word: the result stays published, and is marked lost.
+func TestACoverageLossAfterPublicationIsAProvenWord(t *testing.T) {
+	w := newPrimaryWorld(t, "lost")
+	resultID := hexWord(t, w.fx.ResultID)
+	raw, root := w.witness(t, resultID)
+	f, err := Authority{Pins: w.pins}.VerifyPrimary(raw, root, resultID)
+	require.NoError(t, err)
+	require.True(t, f.Published)
+	require.True(t, f.CoverageLost)
+	require.EqualValues(t, 4, f.PopCount, "the other packed members are untouched")
+	require.Equal(t, w.fx.Attempt, f.Attempt)
+
+	healthy := newPrimaryWorld(t, "published")
+	raw, root = healthy.witness(t, resultID)
+	f, err = Authority{Pins: healthy.pins}.VerifyPrimary(raw, root, resultID)
+	require.NoError(t, err)
+	require.False(t, f.CoverageLost)
 }
 
 func TestAReservedResultIsNotPublished(t *testing.T) {

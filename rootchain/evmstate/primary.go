@@ -79,6 +79,7 @@ func readPrimary(election, custody reader, pins Pins, resultID [32]byte, f *evma
 	f.Published = fieldUint(flags, pubPublishedOffset, 1) == 1
 	f.PopCount = uint32(fieldUint(flags, pubPopCountOffset, 4))
 	f.Attempt = fieldUint(flags, pubAttemptOffset, 8)
+	f.CoverageLost = fieldUint(flags, pubLostOffset, 1) == 1
 
 	// custody: the result's session is open over its reserved assignment, and the incumbent is still the last acknowledged assignment
 	session := mapSlot(baseSlot(custodySessions), resultID[:])
