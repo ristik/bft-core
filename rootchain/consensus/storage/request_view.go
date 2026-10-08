@@ -60,18 +60,31 @@ const (
 
 func (p RequestPurpose) valid() bool { return p >= PurposeCollect && p <= PurposeReplay }
 
-// RequestActivation is one verified committed assignment of the shard with its authorising root identity. It owns private
-// copies of everything it holds. NewRequestAnchor and ActivationFromHandoff are the only exported ways to make one.
+// RequestActivation is one verified root authorization interval of an assignment of the shard: the assignment itself with the root identity
+// (epoch, body, first round) that authorises it. For a real activation or the anchor the interval starts where the assignment is
+// installed; a continuation (RequestContinuationFromVerifiedV3) is a later root interval of the SAME assignment, issued for a root
+// activation that leaves this shard unchanged, so the exact root identity equality the resolver demands holds across it. It owns private
+// copies of everything it holds. NewRequestAnchor, ActivationFromHandoff and the V3 constructors are the only exported ways to make one.
 type RequestActivation struct {
 	pdr       *types.PartitionDescriptionRecord
 	confHash  []byte
 	ctx       *quorumweight.RequestContext
 	rootEpoch uint64
 	rootBody  []byte
-	start     uint64 // A*: first root round the assignment is in force; zero for the anchor
-	trHash    []byte // committed successor technical record digest; nil for the anchor
+	start     uint64 // A*: first root round the interval is in force; zero for the anchor
+	trHash    []byte // committed successor technical record digest of the ASSIGNMENT; nil for the anchor; a continuation carries its original
 	version   uint64 // certified protocol version
+
+	// continuation marks a root-only continuation of the preceding record's assignment; predecessorRootBody is the root body it follows.
+	continuation        bool
+	predecessorRootBody []byte
 }
+
+// PDRHash is the hash of the configuration of the assignment this interval authorises.
+func (a *RequestActivation) PDRHash() []byte { return bytes.Clone(a.confHash) }
+
+// RootBody is the body identity of the root assignment that authorises this interval.
+func (a *RequestActivation) RootBody() []byte { return bytes.Clone(a.rootBody) }
 
 func clonePDR(pdr *types.PartitionDescriptionRecord) (*types.PartitionDescriptionRecord, error) {
 	raw, err := types.Cbor.Marshal(pdr)
@@ -169,7 +182,7 @@ func NewRequestSnapshot(network uint64, hashAlg crypto.Hash, parent *ShardInfo, 
 		return nil, fmt.Errorf("%w: no verified parent state or activation history", ErrAssignmentHistory)
 	}
 	first := chain[0]
-	if first == nil || first.start != 0 {
+	if first == nil || first.start != 0 || first.continuation {
 		return nil, fmt.Errorf("%w: history does not begin at a trusted anchor", ErrAssignmentHistory)
 	}
 	for i, a := range chain {
@@ -180,7 +193,19 @@ func NewRequestSnapshot(network uint64, hashAlg crypto.Hash, parent *ShardInfo, 
 			continue
 		}
 		p := chain[i-1]
-		if a.pdr.Epoch != p.pdr.Epoch+1 || a.start <= p.start || a.rootEpoch <= p.rootEpoch || a.pdr.NetworkID != p.pdr.NetworkID {
+		if a.start <= p.start || a.rootEpoch <= p.rootEpoch || a.pdr.NetworkID != p.pdr.NetworkID {
+			return nil, fmt.Errorf("%w: activation %d does not follow activation %d", ErrAssignmentHistory, i, i-1)
+		}
+		if a.continuation {
+			// the same assignment under the next root interval: identical configuration, context, version and original commitment, the
+			// next root epoch, and the very body the previous interval was authorised by
+			if a.pdr.Epoch != p.pdr.Epoch || a.rootEpoch != p.rootEpoch+1 || p.rootEpoch == ^uint64(0) || !bytes.Equal(a.predecessorRootBody, p.rootBody) ||
+				!bytes.Equal(a.confHash, p.confHash) || a.ctx != p.ctx || a.version != p.version || !bytes.Equal(a.trHash, p.trHash) || !samePDR(a.pdr, p.pdr) {
+				return nil, fmt.Errorf("%w: continuation %d is not the continuation of activation %d", ErrAssignmentHistory, i, i-1)
+			}
+			continue
+		}
+		if p.pdr.Epoch == ^uint64(0) || a.pdr.Epoch != p.pdr.Epoch+1 {
 			return nil, fmt.Errorf("%w: activation %d does not follow activation %d", ErrAssignmentHistory, i, i-1)
 		}
 	}
@@ -224,6 +249,13 @@ func NewRequestSnapshot(network uint64, hashAlg crypto.Hash, parent *ShardInfo, 
 		chain: slices.Clone(chain), parent: shardParent{tr: cloneTR(parent.TR), lastTR: cloneTR(parent.LastCR.Technical), uc: uc, ucDigest: ucDigest,
 			rootHash: bytes.Clone(parent.RootHash), confHash: bytes.Clone(parent.ShardConfHash), pending: pend}}
 	return s, nil
+}
+
+// samePDR reports whether two configurations have the same canonical encoding.
+func samePDR(a, b *types.PartitionDescriptionRecord) bool {
+	x, errA := types.Cbor.Marshal(a)
+	y, errB := types.Cbor.Marshal(b)
+	return errA == nil && errB == nil && bytes.Equal(x, y)
 }
 
 // cloneTR is a technical record owning its hash bytes.
@@ -460,27 +492,67 @@ func ResolveRequestContext(q RequestQuery, snap *RequestSnapshot) (*RequestRound
 	return v, nil
 }
 
-// expectedTR is the technical record the round's requests build on. While the shard still runs the epoch before the active
-// assignment (the committed state lags the activation) the successor record is derived from the frozen parent state, or taken
-// from the parent when it has already installed the assignment, and its digest must be the committed one. Otherwise it is the
-// last certified record, whose epoch must be the assignment's.
+// expectedTR is the technical record the round's requests build on, for the assignment idx of the snapshot's chain.
+//
+// While the shard's last certified record is the assignment's predecessor epoch, two states of the parent exist:
+//
+//   - predecessor: the parent has not installed the assignment yet (the committed state lags the activation, or the round is only
+//     collected). The successor record is derived from the frozen parent and its COMPLETE digest must be the committed one: this is
+//     the authentication of the initial round, epoch, leader and rolled fee/stat commitments, exactly as at installation.
+//   - installed: the parent has installed the assignment (its record is of the assignment's epoch and its configuration is the
+//     selected one) but the successor epoch has not been certified yet. The record then moves with every root timeout (round and
+//     leader), so the immutable Freeze digest is no longer comparable to it as a whole. The parent is the exact verified execution
+//     parent and its record has authenticated ancestry from the committed initial one; what is checked is the part that is not a
+//     function of the root's timeouts: the epoch and configuration, and the fee and statistics commitments against the accumulators
+//     the parent itself owns (installation rolls them once, a timeout changes neither, an executed request changes them only after the
+//     existing proof checks). Round and leader are the parent's: never a request's, a clock's or a latest-tip lookup's.
+//
+// Otherwise it is the last certified record, whose epoch must be the assignment's.
 func expectedTR(snap *RequestSnapshot, idx int) (certification.TechnicalRecord, error) {
+	// a continuation is a later root interval of the same assignment, not a shard transition: the logic below runs against the original
+	// assignment, with its original commitment, however many continuations followed it
+	for idx > 0 && snap.chain[idx].continuation {
+		idx--
+	}
 	act, p := snap.chain[idx], snap.parent
 	switch {
-	case idx > 0 && p.lastTR.Epoch+1 == act.pdr.Epoch:
-		tr := cloneTR(p.tr)
-		if tr.Epoch+1 == act.pdr.Epoch {
+	case idx > 0 && act.pdr.Epoch > 0 && p.lastTR.Epoch == act.pdr.Epoch-1:
+		switch {
+		case p.tr.Epoch == act.pdr.Epoch-1: // predecessor
 			derived, err := successorTechnicalRecordWith(snap.frozen, act.pdr, snap.hashAlg, resetMembers)
 			if err != nil {
-				return tr, errors.Join(ErrAssignmentHistory, err)
+				return derived, errors.Join(ErrAssignmentHistory, err)
 			}
-			tr = derived
+			digest, err := derived.Hash()
+			if err != nil || !bytes.Equal(digest, act.trHash) {
+				return derived, fmt.Errorf("%w: successor technical record %x, committed %x", quorumweight.ErrRequestContext, digest, act.trHash)
+			}
+			return derived, nil
+		case p.tr.Epoch == act.pdr.Epoch: // installed
+			if !bytes.Equal(p.confHash, act.confHash) {
+				return p.tr, fmt.Errorf("%w: parent is under configuration %x, the selected assignment is %x", quorumweight.ErrRequestContext, p.confHash, act.confHash)
+			}
+			stat, err := snap.frozen.statHash(crypto.SHA256)
+			if err != nil {
+				return p.tr, errors.Join(quorumweight.ErrRequestContext, fmt.Errorf("hashing the parent's statistics: %w", err))
+			}
+			fees, err := snap.frozen.feeHash(crypto.SHA256)
+			if err != nil {
+				return p.tr, errors.Join(quorumweight.ErrRequestContext, fmt.Errorf("hashing the parent's fees: %w", err))
+			}
+			if !bytes.Equal(stat, p.tr.StatHash) {
+				return p.tr, fmt.Errorf("%w: installed technical record carries statistics %x, the parent's are %x", quorumweight.ErrRequestContext, p.tr.StatHash, stat)
+			}
+			if !bytes.Equal(fees, p.tr.FeeHash) {
+				return p.tr, fmt.Errorf("%w: installed technical record carries fees %x, the parent's are %x", quorumweight.ErrRequestContext, p.tr.FeeHash, fees)
+			}
+			if p.tr.Round <= p.lastTR.Round {
+				return p.tr, fmt.Errorf("%w: installed technical record round %d does not follow the last certified round %d", quorumweight.ErrRequestContext, p.tr.Round, p.lastTR.Round)
+			}
+			return cloneTR(p.tr), nil
+		default:
+			return p.tr, fmt.Errorf("%w: technical record epoch %d is neither the predecessor nor the assignment's (%d)", ErrStaleRequestContext, p.tr.Epoch, act.pdr.Epoch)
 		}
-		digest, err := tr.Hash()
-		if err != nil || !bytes.Equal(digest, act.trHash) {
-			return tr, fmt.Errorf("%w: successor technical record %x, committed %x", quorumweight.ErrRequestContext, digest, act.trHash)
-		}
-		return tr, nil
 	case p.lastTR.Epoch == act.pdr.Epoch:
 		return cloneTR(p.lastTR), nil
 	}

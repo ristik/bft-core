@@ -54,10 +54,12 @@ type ProposalEnvelope struct {
 // label. It is not a commitment field, so the set is documented but not
 // enforced here, matching the ureth side.
 type SealCompanion struct {
-	B1Update   data   `json:"b1Update"`
-	RootInput  data   `json:"rootInput"`
-	Witnesses  []data `json:"witnesses"`
-	Provenance string `json:"provenance"`
+	B1Update data `json:"b1Update"`
+	// RootRecords is the canonical root-record import companion whose SHA-256 the root input commits to (rootRecordsHash).
+	RootRecords data   `json:"rootRecords,omitempty"`
+	RootInput   data   `json:"rootInput"`
+	Witnesses   []data `json:"witnesses"`
+	Provenance  string `json:"provenance"`
 
 	// Pair is the canonical pair binding (pairbinding.go). It is the receiving pair's own, set only on the request to the local execution
 	// client; it is never part of the disseminated block, so a decoded or encoded dissemination companion never carries one.
@@ -143,17 +145,19 @@ func (c SealCompanion) MarshalJSON() ([]byte, error) {
 		witnesses = []data{}
 	}
 	return json.Marshal(struct {
-		B1Update   data   `json:"b1Update"`
-		RootInput  data   `json:"rootInput"`
-		Witnesses  []data `json:"witnesses"`
-		Provenance string `json:"provenance"`
+		B1Update    data   `json:"b1Update"`
+		RootRecords data   `json:"rootRecords,omitempty"`
+		RootInput   data   `json:"rootInput"`
+		Witnesses   []data `json:"witnesses"`
+		Provenance  string `json:"provenance"`
 		pairWire
 	}{
-		B1Update:   c.B1Update,
-		RootInput:  c.RootInput,
-		Witnesses:  witnesses,
-		Provenance: c.Provenance,
-		pairWire:   pairWire{PairBinding: pairField(c.Pair, false)},
+		B1Update:    c.B1Update,
+		RootRecords: c.RootRecords,
+		RootInput:   c.RootInput,
+		Witnesses:   witnesses,
+		Provenance:  c.Provenance,
+		pairWire:    pairWire{PairBinding: pairField(c.Pair, false)},
 	})
 }
 
@@ -170,6 +174,7 @@ func (c SealCompanion) MarshalJSON() ([]byte, error) {
 // transition is pending, never that unauthenticated data was dropped.
 type SealBuildInput struct {
 	B1Update    data   `json:"b1Update"`
+	RootRecords data   `json:"rootRecords,omitempty"`
 	RootInput   data   `json:"rootInput"`
 	Transitions []data `json:"transitions"`
 
@@ -189,11 +194,13 @@ func (s SealBuildInput) MarshalJSON() ([]byte, error) {
 	}
 	return json.Marshal(struct {
 		B1Update    data   `json:"b1Update"`
+		RootRecords data   `json:"rootRecords,omitempty"`
 		RootInput   data   `json:"rootInput"`
 		Transitions []data `json:"transitions"`
 		pairWire
 	}{
 		B1Update:    s.B1Update,
+		RootRecords: s.RootRecords,
 		RootInput:   s.RootInput,
 		Transitions: transitions,
 		pairWire:    pairWire{PairBinding: pairField(s.Pair, s.PairEmpty)},

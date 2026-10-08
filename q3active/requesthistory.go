@@ -1,6 +1,7 @@
 package q3active
 
 import (
+	"bytes"
 	"crypto"
 	"errors"
 	"fmt"
@@ -72,11 +73,14 @@ func (h *RequestHistory) RootIdentity(round uint64) (uint64, []byte, error) {
 	return e.Epoch(), id[:], nil
 }
 
-// Chain is the anchor followed by every committed assignment the verified history activated for the shard, in root-epoch order. An
-// activated epoch whose candidate is root-only changes no assignment. An activation whose candidate replaces aggregator validators
-// of the requested shard is not served (ErrRequestHistory): that history is not derived here.
+// Chain is the shard's committed request-authorization history: its anchor, then, for every root epoch the verified history activated, either the
+// real assignment the activation installs for this shard or a continuation of the assignment already in force, whose authorising root
+// identity is the activation's. A continuation is issued exactly when the activation leaves this shard unchanged: a root-only activation
+// (the commitment of its operator candidate proves it), or a coupled one whose retained candidate designates another shard and replaces none
+// of this shard's validators. A candidate that is not retained, or not the committed one, is missing history, never a reason to continue.
+// An activation that replaces the validators of this shard is not served (ErrRequestHistory): that history is not derived here.
 func (h *RequestHistory) Chain(partition types.PartitionID, shard types.ShardID) ([]*storage.RequestActivation, error) {
-	hist := h.rt.History()
+	hist := h.rt.History() // one immutable view for the whole traversal
 	genesis, err := hist.ForEpoch(1)
 	if err != nil {
 		return nil, errors.Join(ErrRequestHistory, err)
@@ -85,16 +89,22 @@ func (h *RequestHistory) Chain(partition types.PartitionID, shard types.ShardID)
 	if err != nil || pdr == nil {
 		return nil, errors.Join(ErrRequestHistory, err)
 	}
+	if pdr.PartitionID != partition || !pdr.ShardID.Equal(shard) {
+		return nil, fmt.Errorf("%w: the anchor is of shard %s-%s, not %s-%s", ErrRequestHistory, pdr.PartitionID, pdr.ShardID, partition, shard)
+	}
 	genesisID := genesis.BodyID()
 	anchor, err := storage.NewRequestAnchor(pdr, h.cfg.HashAlg, genesis.Epoch(), genesisID[:], h.cfg.Version)
 	if err != nil {
 		return nil, err
 	}
 	chain := []*storage.RequestActivation{anchor}
-	for epoch := uint64(2); ; epoch++ {
+	tip := hist.Tip().Epoch()
+	for epoch := uint64(2); epoch <= tip; epoch++ {
 		e, err := hist.ForEpoch(epoch)
 		if err != nil {
-			break // the end of the verified history
+			// a missing interior epoch is not the end of the history (defense in depth: a verified history is contiguous, so this is
+			// unreachable from a real runtime)
+			return nil, errors.Join(ErrRequestHistory, err)
 		}
 		if err := h.rt.Admit(epoch); err != nil {
 			return nil, errors.Join(ErrRequestHistory, err)
@@ -103,20 +113,22 @@ func (h *RequestHistory) Chain(partition types.PartitionID, shard types.ShardID)
 		if !ok {
 			return nil, fmt.Errorf("%w: epoch %d is not an activation", ErrRequestHistory, epoch)
 		}
+		last := chain[len(chain)-1]
 		bodyID := e.BodyID()
+		if e.RootOnly() {
+			cont, err := storage.RequestContinuationFromVerifiedV3(last, e, nil, h.cfg.HashAlg, h.cfg.Version)
+			if err != nil {
+				return nil, errors.Join(ErrRequestHistory, err)
+			}
+			chain = append(chain, cont)
+			continue
+		}
 		preimage, err := h.cfg.Candidates.HandoffCandidate(bodyID[:])
 		if err != nil {
 			return nil, errors.Join(ErrRequestHistory, err)
 		}
 		if len(preimage) == 0 {
-			if !e.RootOnly() {
-				return nil, fmt.Errorf("%w: epoch %d committed an assignment whose candidate is not retained", ErrRequestHistory, epoch)
-			}
-			continue
-		}
-		act, err := storage.ActivationFromVerifiedV3(e, v.Record, preimage, h.cfg.HashAlg, h.cfg.Version)
-		if err != nil {
-			return nil, errors.Join(ErrRequestHistory, err)
+			return nil, fmt.Errorf("%w: epoch %d committed an assignment whose candidate is not retained", ErrRequestHistory, epoch)
 		}
 		c, err := evmassign.DecodeCandidate(preimage)
 		if err != nil {
@@ -139,7 +151,21 @@ func (h *RequestHistory) Chain(partition types.PartitionID, shard types.ShardID)
 			}
 		}
 		if evm.PartitionID != partition || !evm.ShardID.Equal(shard) {
-			continue // the assignment of the designated EVM shard is not this shard's history
+			// the assignment of the designated EVM shard is not this shard's: its history continues under this root interval
+			cont, err := storage.RequestContinuationFromVerifiedV3(last, e, preimage, h.cfg.HashAlg, h.cfg.Version)
+			if err != nil {
+				return nil, errors.Join(ErrRequestHistory, err)
+			}
+			chain = append(chain, cont)
+			continue
+		}
+		// defense in depth behind the verified q3format history (contiguous and predecessor-linked): unreachable from a verified runtime
+		if !bytes.Equal(v.Record.PredecessorBodyID, last.RootBody()) {
+			return nil, fmt.Errorf("%w: epoch %d does not follow the previous root interval", ErrRequestHistory, epoch)
+		}
+		act, err := storage.ActivationFromVerifiedV3(e, v.Record, preimage, h.cfg.HashAlg, h.cfg.Version)
+		if err != nil {
+			return nil, errors.Join(ErrRequestHistory, err)
 		}
 		chain = append(chain, act)
 	}

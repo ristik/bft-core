@@ -58,6 +58,7 @@ type b1ProfileFile struct {
 	RestGas             uint64      `json:"restGas"`
 	CompanionBytes      uint64      `json:"companionBytes"`
 	OtherCompanionBytes uint64      `json:"otherCompanionBytes"`
+	GenesisUCTime       uint64      `json:"genesisUcTime"`
 }
 
 func (f b1ProfileFile) profile() b1state.Profile {
@@ -66,7 +67,7 @@ func (f b1ProfileFile) profile() b1state.Profile {
 		RuntimeHash: [32]byte(f.RuntimeHash), CompilerHash: [32]byte(f.CompilerHash),
 		WCert: f.WCert, DeltaEV: f.DeltaEV, DeltaHold: f.DeltaHold,
 		SystemGas: f.SystemGas, ForcedGas: f.ForcedGas, MaxGas: f.MaxGas, OrdinaryCapacity: f.OrdinaryCapacity,
-		RestGas: f.RestGas, CompanionBytes: f.CompanionBytes, OtherCompanionBytes: f.OtherCompanionBytes,
+		RestGas: f.RestGas, CompanionBytes: f.CompanionBytes, OtherCompanionBytes: f.OtherCompanionBytes, GenesisUCTime: f.GenesisUCTime,
 	}
 }
 
@@ -76,7 +77,7 @@ func b1ProfileFileOf(p b1state.Profile) b1ProfileFile {
 		RuntimeHash: common.Hash(p.RuntimeHash), CompilerHash: common.Hash(p.CompilerHash),
 		WCert: p.WCert, DeltaEV: p.DeltaEV, DeltaHold: p.DeltaHold,
 		SystemGas: p.SystemGas, ForcedGas: p.ForcedGas, MaxGas: p.MaxGas, OrdinaryCapacity: p.OrdinaryCapacity,
-		RestGas: p.RestGas, CompanionBytes: p.CompanionBytes, OtherCompanionBytes: p.OtherCompanionBytes,
+		RestGas: p.RestGas, CompanionBytes: p.CompanionBytes, OtherCompanionBytes: p.OtherCompanionBytes, GenesisUCTime: p.GenesisUCTime,
 	}
 }
 
@@ -121,7 +122,7 @@ func bindB1Profile(p b1state.Profile, tb *types.RootTrustBaseV1, conf *types.Par
 }
 
 // deriveB1Profile builds the profile of this deployment with the oracle's frozen envelope for the certificate window.
-func deriveB1Profile(tb *types.RootTrustBaseV1, conf *types.PartitionDescriptionRecord, wCert, ordinaryCapacity uint64) (b1state.Profile, error) {
+func deriveB1Profile(tb *types.RootTrustBaseV1, conf *types.PartitionDescriptionRecord, wCert, ordinaryCapacity, genesisUCTime uint64) (b1state.Profile, error) {
 	h, err := q3format.NewHistory(tb)
 	if err != nil {
 		return b1state.Profile{}, fmt.Errorf("the root trust base has no verifiable history: %w", err)
@@ -134,7 +135,7 @@ func deriveB1Profile(tb *types.RootTrustBaseV1, conf *types.PartitionDescription
 		Network: uint16(conf.NetworkID), RootGenesisID: h.Genesis(), ExecutionChainID: chainID,
 		RuntimeHash: [32]byte(common.HexToHash(b1registry.CodeHashHex)), CompilerHash: b1registry.CompilerHash(),
 		WCert: wCert, DeltaEV: wCert + 1, DeltaHold: wCert + 2,
-		RestGas: b1registry.MinRestGas(wCert), CompanionBytes: 1 << 20, OtherCompanionBytes: 65536, OrdinaryCapacity: ordinaryCapacity,
+		RestGas: b1registry.MinRestGas(wCert), CompanionBytes: 1 << 20, OtherCompanionBytes: 65536, OrdinaryCapacity: ordinaryCapacity, GenesisUCTime: genesisUCTime,
 	}
 	if p.SystemGas, err = p.RequiredSystemGas(); err != nil {
 		return b1state.Profile{}, err
@@ -148,7 +149,7 @@ func deriveB1Profile(tb *types.RootTrustBaseV1, conf *types.PartitionDescription
 
 func engineAPIB1ProfileCmd(baseFlags *baseFlags) *cobra.Command {
 	var trustBasePath, out string
-	var wCert, capacity uint64
+	var wCert, capacity, genesisUCTime uint64
 	flags := &shardConfFlags{}
 	cmd := &cobra.Command{
 		Use:   "b1-profile",
@@ -171,7 +172,7 @@ identity comes from the trust base's own history; the gas envelope is the frozen
 			if err != nil {
 				return err
 			}
-			p, err := deriveB1Profile(tb, confs[0], wCert, capacity)
+			p, err := deriveB1Profile(tb, confs[0], wCert, capacity, genesisUCTime)
 			if err != nil {
 				return err
 			}
@@ -196,6 +197,7 @@ identity comes from the trust base's own history; the gas envelope is the frozen
 	cmd.Flags().StringVar(&out, "out", "", "output path for the profile JSON (required)")
 	cmd.Flags().Uint64Var(&wCert, "w-cert", 1, "certificate window W_cert; the registry keeps W_cert+1 authority intervals")
 	cmd.Flags().Uint64Var(&capacity, "ordinary-capacity", 7_000_000, "ordinary transaction gas capacity of a block (the block gas limit is this plus the system reservation)")
+	cmd.Flags().Uint64Var(&genesisUCTime, "genesis-uc-time", 1000, "the pinned genesis UC time recorded in the registry (records.ucTime) before any import; a DEV value")
 	return cmd
 }
 

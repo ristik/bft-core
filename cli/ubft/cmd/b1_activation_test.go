@@ -11,6 +11,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/stretchr/testify/require"
+	"github.com/unicitynetwork/bft-core/b1registry"
 	"github.com/unicitynetwork/bft-core/b1state"
 	"github.com/unicitynetwork/bft-core/internal/testutils/certifiedchain"
 	testobserve "github.com/unicitynetwork/bft-core/internal/testutils/observability"
@@ -42,7 +43,7 @@ func newB1Deployment(t *testing.T) *b1Deployment {
 	require.NoError(t, util.WriteJsonFile(d.confPath, d.conf))
 	require.NoError(t, util.WriteJsonFile(d.tbPath, d.tb))
 	var err error
-	d.profile, err = deriveB1Profile(d.tb, d.conf, 1, 7_000_000)
+	d.profile, err = deriveB1Profile(d.tb, d.conf, 1, 7_000_000, 1000)
 	require.NoError(t, err)
 	d.writeProfile(t, d.profile)
 	// A standard genesis source whose gas limit is the profile's block gas limit.
@@ -222,7 +223,7 @@ func TestB1Origin_ARegistryOfAnotherProfileIsNotAccepted(t *testing.T) {
 	full := readFullShardConf(t, filepath.Join(d.dir, "genesis-full-shard-conf.json"))
 	other := d.profile
 	other.WCert, other.DeltaEV, other.DeltaHold = 2, 3, 4
-	other.RestGas = 1096500 + 1141500*3
+	other.RestGas = b1registry.MinRestGas(other.WCert)
 	var e error
 	other.SystemGas, e = other.RequiredSystemGas()
 	require.NoError(t, e)

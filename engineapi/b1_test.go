@@ -3,6 +3,7 @@ package engineapi
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"math/big"
 	"testing"
@@ -72,7 +73,7 @@ func TestB1BuildSealsTheLocallyDerivedUpdate(t *testing.T) {
 		if badInput {
 			input[len(input)-1] ^= 1
 		}
-		return GetPayloadWithSealV1Response{ExecutionPayload: payload, SealCompanion: SealCompanion{RootInput: input, B1Update: update, Provenance: "build"}}, nil
+		return GetPayloadWithSealV1Response{ExecutionPayload: payload, SealCompanion: SealCompanion{RootInput: input, B1Update: update, RootRecords: captured.RootRecords, Provenance: "build"}}, nil
 	})
 	var imported int
 	engine.on("engine_newPayloadWithSealV1", func(json.RawMessage) (any, *rpcError) {
@@ -85,7 +86,10 @@ func TestB1BuildSealsTheLocallyDerivedUpdate(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, want.Input.B1UpdateHash, 32)
 	require.NotEmpty(t, want.B1Update)
-	require.Equal(t, byte(0x8c), want.Encoded[0], "fresh root input has exactly twelve fields")
+	require.Equal(t, byte(0x8d), want.Encoded[0], "fresh root input has exactly thirteen fields")
+	require.Len(t, want.Input.RootRecordsHash, 32)
+	require.NotEmpty(t, want.RecordsImport, "the import is mandatory even when the batch is empty")
+	require.Equal(t, sha256.Sum256(want.RecordsImport), [32]byte(want.Input.RootRecordsHash))
 	build, err := a.Build(context.Background(), p)
 	require.NoError(t, err)
 	require.Equal(t, want.B1Update, []byte(captured.B1Update))

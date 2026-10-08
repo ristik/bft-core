@@ -3,6 +3,7 @@ package storage
 import (
 	"bytes"
 	"crypto"
+	"maps"
 	"sort"
 	"testing"
 	"time"
@@ -169,6 +170,22 @@ func (s *scenario) snapshot(parent *ShardInfo, pending *types.InputRecord) *Requ
 	snap, err := NewRequestSnapshot(fxNetwork, crypto.SHA256, parent, s.parentID, pending, s.anchor, s.succ)
 	require.NoError(s.f.t, err)
 	return snap
+}
+
+// installed is the verified parent after production installation of the successor (successorTechnicalRecord + nextEpoch, as
+// activateEVMAssignment does) followed by the given number of real root timeouts (nextRoundWith without a request) while the
+// acknowledgement is pending: epoch and configuration fixed, round and leader advancing, accumulators rolled once.
+func (s *scenario) installed(repeats int) *ShardInfo {
+	s.f.t.Helper()
+	advanced := *s.parent
+	advanced.Fees = maps.Clone(s.parent.Fees)
+	advanced.TR = s.succTR
+	next, err := advanced.nextEpochWith(s.pdr1, crypto.SHA256, resetMembers)
+	require.NoError(s.f.t, err)
+	for i := 0; i < repeats; i++ {
+		require.NoError(s.f.t, next.nextRoundWith(nil, s.pdr1, crypto.SHA256, resetMembers))
+	}
+	return next
 }
 
 func (s *scenario) query(snap *RequestSnapshot, round uint64, epoch uint64, body []byte, p RequestPurpose) RequestQuery {
@@ -385,14 +402,17 @@ func TestSuccessorTechnicalRecordMustBeTheCommittedOne(t *testing.T) {
 	_, err = s.resolve(snap, fxActivate-1, 3, fxBody0, PurposeExecute)
 	require.NoError(t, err)
 
-	// a parent that already installed some other successor record
-	moved := *s.parent
-	moved.TR = s.succTR
-	moved.TR.Round++
-	moved.ShardConfHash = s.succ.confHash
-	snap2, err := NewRequestSnapshot(fxNetwork, crypto.SHA256, &moved, s.parentID, nil, s.anchor, s.succ)
+	// an installed parent is judged by its own epoch, configuration and commitments, not by the immutable digest of the record it
+	// installed: a digest that no longer matches the (moved) record is not what is compared once installed
+	inst := s.installed(0)
+	snap2, err := NewRequestSnapshot(fxNetwork, crypto.SHA256, inst, s.parentID, nil, s.anchor, &bad)
 	require.NoError(t, err)
-	_, err = s.resolve(snap2, fxActivate, 4, fxBody1, PurposeExecute)
+	v, err := s.resolve(snap2, fxActivate, 4, fxBody1, PurposeExecute)
+	require.NoError(t, err)
+	require.Equal(t, inst.TR, v.ExpectedTR())
+
+	// but the predecessor case keeps the complete digest check, with the same bad digest
+	_, err = s.resolve(snap, fxActivate, 4, fxBody1, PurposeExecute)
 	require.ErrorIs(t, err, quorumweight.ErrRequestContext)
 }
 
@@ -420,10 +440,7 @@ func TestDelayedFirstSuccessorBlockAndRestartAtActivation(t *testing.T) {
 	require.Equal(t, late.ViewKey(), r.ViewKey())
 
 	// the executing state that already installed the assignment (record advanced, last certified record still old)
-	installed := *s.parent
-	installed.TR = s.succTR
-	installed.ShardConfHash = s.succ.confHash
-	exec := s.mustResolve(s.snapshot(&installed, nil), fxActivate+7, 4, fxBody1, PurposeExecute)
+	exec := s.mustResolve(s.snapshot(s.installed(0), nil), fxActivate+7, 4, fxBody1, PurposeExecute)
 	require.Equal(t, late.ExpectedTR(), exec.ExpectedTR())
 	require.Equal(t, late.AssignmentKey(), exec.AssignmentKey())
 
@@ -733,9 +750,8 @@ func TestViewOwnsCertifiedTechnicalRecords(t *testing.T) {
 	require.Equal(t, tr, again.ExpectedTR())
 
 	// the executing state that already installed the assignment: its record is the view's expected one
-	installed := *s.parent
-	installed.TR = cloneTR(s.succTR)
-	installed.ShardConfHash = s.succ.confHash
+	installed := *s.installed(0)
+	installed.TR = cloneTR(installed.TR)
 	isnap := s.snapshot(&installed, nil)
 	inst := s.mustResolve(isnap, fxActivate, 4, fxBody1, PurposeExecute)
 	instKey, instTR := inst.ViewKey(), inst.ExpectedTR()
@@ -836,4 +852,302 @@ func TestIsolatedWeightedRequestAnchor(t *testing.T) {
 	unit.PartitionTypeID = 1
 	_, err = NewIsolatedWeightedRequestAnchor(unit, crypto.SHA256, c, 3, fxBody0, fxVersion)
 	require.ErrorIs(t, err, quorumweight.ErrRequestContext, "a request cannot pick its own policy")
+}
+
+// The acknowledgement is pending across several root timeouts: the installed parent's record moves (round, leader) while its epoch,
+// configuration and commitments do not. The view builds on the parent's current record, keeps W=9/Q=5 and the assignment, and a fresh
+// request under the new round is accepted while the previous round's is stale.
+func TestExpectedTRPendingAckRepeatUC(t *testing.T) {
+	s := newScenario(t, []uint64{6, 1, 1, 1}, []uint64{1, 6, 1, 1}, nil)
+	var firstKey, firstAssignment []byte
+	var prev *RequestRoundView
+	var seenLeaders = map[string]bool{}
+	for repeats := 0; repeats <= 4; repeats++ {
+		inst := s.installed(repeats)
+		snap := s.snapshot(inst, nil)
+		for _, purpose := range []RequestPurpose{PurposeCollect, PurposeCertify, PurposeExecute, PurposeTimeout, PurposeReplay} {
+			round := uint64(fxActivate + 7)
+			v := s.mustResolve(snap, round, 4, fxBody1, purpose)
+			require.Equal(t, inst.TR, v.ExpectedTR(), "purpose %d builds on the parent's current record", purpose)
+			require.EqualValues(t, 9, v.Context().TotalWeight())
+			require.EqualValues(t, 5, v.Context().Threshold())
+		}
+		v := s.mustResolve(snap, fxActivate+7, 4, fxBody1, PurposeCertify)
+		seenLeaders[v.ExpectedTR().Leader] = true
+		require.EqualValues(t, s.succTR.Round+uint64(repeats), v.ExpectedTR().Round)
+		if repeats == 0 {
+			firstKey, firstAssignment = v.ViewKey(), v.AssignmentKey()
+		} else {
+			require.NotEqual(t, firstKey, v.ViewKey(), "another expected record is another view")
+			require.Equal(t, firstAssignment, v.AssignmentKey(), "the assignment does not move with the timeouts")
+			require.NotEqual(t, prev.RoundTag(), v.RoundTag())
+			// the previous round's proof is stale now; a fresh heavy-signer proof is accepted
+			stale := quorumProof(s.request(prev, 1, 1, 2))
+			_, err := v.VerifyIRChangeReq(stale, t2Rounds)
+			require.ErrorIs(t, err, ErrStaleRequestContext)
+			res, err := v.VerifyIRChangeReq(quorumProof(s.request(v, 1, 1, 2)), t2Rounds)
+			require.NoError(t, err)
+			require.Equal(t, v.ViewKey(), res.ViewKey)
+		}
+		prev = v
+
+		// restart: the same parent rebuilt into new objects with an empty cache is the same view
+		again, err := NewRequestViewCache().Resolve(s.query(snap, fxActivate+7, 4, fxBody1, PurposeCertify), s.snapshot(s.installed(repeats), nil))
+		require.NoError(t, err)
+		require.Equal(t, v.ViewKey(), again.ViewKey())
+	}
+	require.Greater(t, len(seenLeaders), 1, "the leader changed across the timeouts")
+}
+
+// Each way the installed parent can fail to be the authenticated one is refused on its own, with a typed error and no view; a refusal
+// never populates the cache, and does not evict a view already in it.
+func TestExpectedTRInstalledParentRefusals(t *testing.T) {
+	s := newScenario(t, []uint64{6, 1, 1, 1}, []uint64{1, 6, 1, 1}, nil)
+	flip := func(b []byte) []byte { c := bytes.Clone(b); c[0] ^= 1; return c }
+	for name, tc := range map[string]struct {
+		mutate func(*ShardInfo)
+		cause  error
+	}{
+		"a one-byte stat hash mismatch":              {func(si *ShardInfo) { si.TR.StatHash = flip(si.TR.StatHash) }, quorumweight.ErrRequestContext},
+		"a one-byte fee hash mismatch":               {func(si *ShardInfo) { si.TR.FeeHash = flip(si.TR.FeeHash) }, quorumweight.ErrRequestContext},
+		"a regressed round":                          {func(si *ShardInfo) { si.TR.Round = si.LastCR.Technical.Round }, quorumweight.ErrRequestContext},
+		"accumulators that moved without the record": {func(si *ShardInfo) { si.Stat.Blocks++ }, quorumweight.ErrRequestContext},
+	} {
+		t.Run(name, func(t *testing.T) {
+			inst := s.installed(2)
+			tc.mutate(inst)
+			snap, err := NewRequestSnapshot(fxNetwork, crypto.SHA256, inst, s.parentID, nil, s.anchor, s.succ)
+			require.NoError(t, err)
+			cache := NewRequestViewCache()
+			v, err := cache.Resolve(s.query(snap, fxActivate+7, 4, fxBody1, PurposeExecute), snap)
+			require.ErrorIs(t, err, tc.cause)
+			require.Nil(t, v)
+			require.Zero(t, cache.Len(), "a refusal populates nothing")
+
+			// with a good view already cached, the refusal does not disturb it
+			good := s.snapshot(s.installed(2), nil)
+			_, err = cache.Resolve(s.query(good, fxActivate+7, 4, fxBody1, PurposeExecute), good)
+			require.NoError(t, err)
+			_, err = cache.Resolve(s.query(snap, fxActivate+7, 4, fxBody1, PurposeExecute), snap)
+			require.ErrorIs(t, err, tc.cause)
+			require.Equal(t, 1, cache.Len())
+		})
+	}
+
+	// the epoch and configuration of the installed record, judged by expectedTR itself (the snapshot constructor already ties the
+	// parent's configuration to the epoch it is in)
+	snap := s.snapshot(s.installed(1), nil)
+	_, err := expectedTR(snap, 1)
+	require.NoError(t, err, "control")
+	for name, epoch := range map[string]uint64{"an unrelated epoch": 7, "a future epoch": 2} {
+		stale := *snap
+		stale.parent.tr.Epoch = epoch
+		_, err := expectedTR(&stale, 1)
+		require.ErrorIs(t, err, ErrStaleRequestContext, name)
+		snap = s.snapshot(s.installed(1), nil)
+	}
+	other := s.snapshot(s.installed(1), nil)
+	other.parent.confHash = flip(other.parent.confHash)
+	_, err = expectedTR(other, 1)
+	require.ErrorIs(t, err, quorumweight.ErrRequestContext, "a configuration other than the selected assignment's")
+}
+
+// continuationOf is what RequestContinuationFromVerifiedV3 builds, without its history proof: the previous assignment under the next root
+// interval, the configuration, the immutable context and the original commitment copied.
+func continuationOf(t *testing.T, prev *RequestActivation, rootEpoch uint64, body []byte, start uint64) *RequestActivation {
+	t.Helper()
+	pdr, err := clonePDR(prev.pdr)
+	require.NoError(t, err)
+	return &RequestActivation{pdr: pdr, confHash: bytes.Clone(prev.confHash), ctx: prev.ctx, rootEpoch: rootEpoch, rootBody: bytes.Clone(body), start: start,
+		trHash: bytes.Clone(prev.trHash), version: prev.version, continuation: true, predecessorRootBody: bytes.Clone(prev.rootBody)}
+}
+
+var fxBody2 = bytes.Repeat([]byte{0xC2}, 32)
+
+// A shard that no activation touches (an aggregator) keeps its unit assignment across root epochs: each root interval is a continuation with its
+// own authorising identity, resolved with the exact identity equality, at the same shard epoch, configuration, context and quorum.
+func TestContinuationKeepsAnUnchangedUnitShardResolvableAcrossRootIntervals(t *testing.T) {
+	f := newViewFixture(t)
+	var v0 []*types.NodeInfo
+	for i := 0; i < 4; i++ {
+		v0 = append(v0, f.member(i, i, 1))
+	}
+	pdr, _ := f.pdr(0, 1, 3, fxBody0, v0...)
+	anchor, err := newRequestActivation(pdr, crypto.SHA256, quorumweight.PolicyUnit, nil, 3, fxBody0, 0, nil, fxVersion)
+	require.NoError(t, err)
+	c1 := continuationOf(t, anchor, 4, fxBody1, fxActivate)
+	c2 := continuationOf(t, c1, 5, fxBody2, fxActivate+10)
+	s := &scenario{f: f, pdr0: pdr, anchor: anchor, succ: c1, parentID: bytes.Repeat([]byte{0x9D}, 32)}
+	s.parent = f.shardAt(pdr, f.tr(0, 5, f.shardAt(pdr, certification.TechnicalRecord{Round: 5, Leader: f.id(0)})))
+	snap, err := NewRequestSnapshot(fxNetwork, crypto.SHA256, s.parent, s.parentID, nil, anchor, c1, c2)
+	require.NoError(t, err)
+
+	type interval struct {
+		round, epoch uint64
+		body         []byte
+	}
+	var keys [][]byte
+	for _, iv := range []interval{{fxActivate - 1, 3, fxBody0}, {fxActivate, 4, fxBody1}, {fxActivate + 4, 4, fxBody1}, {fxActivate + 10, 5, fxBody2}, {fxActivate + 15, 5, fxBody2}} {
+		for _, purpose := range []RequestPurpose{PurposeCertify, PurposeExecute, PurposeTimeout} {
+			v := s.mustResolve(snap, iv.round, iv.epoch, iv.body, purpose)
+			require.EqualValues(t, 0, v.ExpectedTR().Epoch, "the shard epoch does not move with a root interval")
+			require.EqualValues(t, 4, v.Context().TotalWeight(), "PolicyUnit: W=N")
+			require.EqualValues(t, 3, v.Context().Threshold(), "Q=floor(N/2)+1")
+			_, err := v.VerifyIRChangeReq(quorumProof(s.request(v, 0, 0, 1)), t2Rounds)
+			require.ErrorIs(t, err, quorumweight.ErrQuorumNotReached, "one signer of four")
+			res, err := v.VerifyIRChangeReq(quorumProof(s.request(v, 0, 0, 1), s.request(v, 1, 1, 1), s.request(v, 2, 2, 1)), t2Rounds)
+			require.NoError(t, err, "three signers of four")
+			require.Equal(t, v.ViewKey(), res.ViewKey)
+		}
+		keys = append(keys, s.mustResolve(snap, iv.round, iv.epoch, iv.body, PurposeCertify).AssignmentKey())
+	}
+	require.NotEqual(t, keys[0], keys[1], "another root interval is another authorization")
+	require.Equal(t, keys[1], keys[2])
+	require.NotEqual(t, keys[2], keys[3])
+	require.Equal(t, keys[3], keys[4])
+
+	// exact identity equality is kept: the old root identity does not authorise a later round, and a later epoch cannot be named early
+	_, err = s.resolve(snap, fxActivate+4, 3, fxBody0, PurposeCertify)
+	require.ErrorIs(t, err, quorumweight.ErrRequestContext)
+	_, err = s.resolve(snap, fxActivate+4, 5, fxBody2, PurposeCertify)
+	require.ErrorIs(t, err, quorumweight.ErrRequestContext)
+	_, err = s.resolve(snap, fxActivate+4, 4, fxBody2, PurposeCertify)
+	require.ErrorIs(t, err, quorumweight.ErrRequestContext, "a root body of another lineage at the right epoch")
+
+	// a continuation named before its first round is collection-only; certification cannot use it early
+	early := s.mustResolve(snap, fxActivate+9, 5, fxBody2, PurposeCollect)
+	require.True(t, early.CollectionOnly())
+	_, err = s.resolve(snap, fxActivate+9, 5, fxBody2, PurposeCertify)
+	require.ErrorIs(t, err, ErrRequestNotActive)
+	// replay of the history before the boundary keeps its own root interval
+	old := s.mustResolve(snap, fxActivate-2, 3, fxBody0, PurposeReplay)
+	require.NotEqual(t, old.AssignmentKey(), keys[1])
+}
+
+// A weighted EVM assignment survives root-only epochs unchanged: the continuation keeps the original context, coupling and weights (it never
+// re-mirrors the new root committee), and #461's installed-parent rule still runs against the original assignment's commitment.
+func TestContinuationKeepsAWeightedAssignmentAndTheInstalledParentRule(t *testing.T) {
+	s := newScenario(t, []uint64{1, 1, 1, 1}, []uint64{6, 1, 1, 1}, nil)
+	cont := continuationOf(t, s.succ, 5, fxBody2, fxActivate+10)
+	inst := s.installed(3)
+	snap, err := NewRequestSnapshot(fxNetwork, crypto.SHA256, inst, s.parentID, nil, s.anchor, s.succ, cont)
+	require.NoError(t, err)
+
+	for _, round := range []uint64{fxActivate + 12, fxActivate + 30} {
+		v := s.mustResolve(snap, round, 5, fxBody2, PurposeExecute)
+		require.EqualValues(t, 9, v.Context().TotalWeight())
+		require.EqualValues(t, 5, v.Context().Threshold())
+		w, _ := v.Context().SignerWeight(s.f.id(0))
+		require.EqualValues(t, 6, w, "the heavy member stays heavy")
+		require.Equal(t, inst.TR, v.ExpectedTR(), "the pending-ack record is the installed parent's, however many continuations followed")
+		_, err := v.VerifyIRChangeReq(quorumProof(s.request(v, 0, 0, 2)), t2Rounds)
+		require.NoError(t, err, "the heavy signer alone")
+		_, err = v.VerifyIRChangeReq(quorumProof(s.request(v, 1, 1, 2), s.request(v, 2, 2, 2), s.request(v, 3, 3, 2)), t2Rounds)
+		require.ErrorIs(t, err, quorumweight.ErrQuorumNotReached, "three light signers")
+	}
+	atSucc := s.mustResolve(snap, fxActivate+2, 4, fxBody1, PurposeExecute)
+	atCont := s.mustResolve(snap, fxActivate+12, 5, fxBody2, PurposeExecute)
+	require.Equal(t, s.succ.ctx.Identity(), atCont.Context().Identity(), "the request context identity is stable")
+	require.NotEqual(t, atSucc.AssignmentKey(), atCont.AssignmentKey(), "the authorization identity is not")
+
+	// the tampered installed parent is still refused through a continuation
+	bad := s.installed(3)
+	bad.TR.FeeHash = append([]byte{bad.TR.FeeHash[0] ^ 1}, bad.TR.FeeHash[1:]...)
+	badSnap, err := NewRequestSnapshot(fxNetwork, crypto.SHA256, bad, s.parentID, nil, s.anchor, s.succ, cont)
+	require.NoError(t, err)
+	_, err = s.resolve(badSnap, fxActivate+12, 5, fxBody2, PurposeExecute)
+	require.ErrorIs(t, err, quorumweight.ErrRequestContext)
+
+	// the predecessor case: before the parent installs, the complete original digest is checked through the continuation
+	pre := s.snapshotWith(s.parent, s.anchor, s.succ, cont)
+	v := s.mustResolve(pre, fxActivate+12, 5, fxBody2, PurposeExecute)
+	require.Equal(t, s.succTR, v.ExpectedTR())
+	wrong := *s.succ
+	wrong.trHash = bytes.Repeat([]byte{7}, 32)
+	wrongCont := continuationOf(t, &wrong, 5, fxBody2, fxActivate+10)
+	badPre, err := NewRequestSnapshot(fxNetwork, crypto.SHA256, s.parent, s.parentID, nil, s.anchor, &wrong, wrongCont)
+	require.NoError(t, err)
+	_, err = s.resolve(badPre, fxActivate+12, 5, fxBody2, PurposeExecute)
+	require.ErrorIs(t, err, quorumweight.ErrRequestContext, "the original commitment, not a copy of a wrong one")
+}
+
+func (s *scenario) snapshotWith(parent *ShardInfo, chain ...*RequestActivation) *RequestSnapshot {
+	s.f.t.Helper()
+	snap, err := NewRequestSnapshot(fxNetwork, crypto.SHA256, parent, s.parentID, nil, chain...)
+	require.NoError(s.f.t, err)
+	return snap
+}
+
+// A snapshot admits a continuation only as the marked, adjacent, identical-assignment next root interval; every other repetition of a shard
+// epoch is refused, each way alone.
+func TestSnapshotRefusesAMalformedContinuationChain(t *testing.T) {
+	s := newScenario(t, []uint64{1, 1, 1, 1}, []uint64{6, 1, 1, 1}, nil)
+	mk := func() *RequestActivation { return continuationOf(t, s.succ, 5, fxBody2, fxActivate+10) }
+	build := func(chain ...*RequestActivation) error {
+		_, err := NewRequestSnapshot(fxNetwork, crypto.SHA256, s.installed(1), s.parentID, nil, chain...)
+		return err
+	}
+	require.NoError(t, build(s.anchor, s.succ, mk()), "control")
+
+	for name, mutate := range map[string]func(*RequestActivation){
+		"unmarked, so a repeated shard epoch": func(c *RequestActivation) { c.continuation = false },
+		"not the next root epoch":             func(c *RequestActivation) { c.rootEpoch = 7 },
+		"another predecessor body":            func(c *RequestActivation) { c.predecessorRootBody = bytes.Repeat([]byte{1}, 32) },
+		"a start that does not rise":          func(c *RequestActivation) { c.start = s.succ.start },
+		"another request version":             func(c *RequestActivation) { c.version++ },
+		"another original commitment":         func(c *RequestActivation) { c.trHash = bytes.Repeat([]byte{3}, 32) },
+		"another configuration": func(c *RequestActivation) {
+			c.pdr.T2Timeout++
+			c.confHash = bytes.Repeat([]byte{4}, 32)
+		},
+		"another context": func(c *RequestActivation) { c.ctx = s.anchor.ctx },
+	} {
+		c := mk()
+		mutate(c)
+		err := build(s.anchor, s.succ, c)
+		require.ErrorIs(t, err, ErrAssignmentHistory, name)
+	}
+	require.ErrorIs(t, build(continuationOf(t, s.anchor, 4, fxBody1, fxActivate)), ErrAssignmentHistory, "a history cannot begin with a continuation")
+	first := continuationOf(t, s.anchor, 4, fxBody1, fxActivate)
+	first.start, first.rootEpoch = 0, 1 // even one that looks like an anchor, followed by a valid real activation
+	require.ErrorIs(t, build(first, s.succ), ErrAssignmentHistory, "the first record is a non-continuation anchor")
+	require.ErrorIs(t, build(s.anchor, mk()), ErrAssignmentHistory, "a continuation of an assignment that is not in the chain")
+}
+
+// The interval after an acknowledgement block executes but before it is committed: real requests with fees and statistics have moved the
+// parent's accumulators and its record's FeeHash/StatHash, none of which is the install-time commitment. The view builds on the parent's
+// updated record; a one-byte change of either updated commitment is still refused, and so is accumulators that moved without the record.
+func TestExpectedTRAfterExecutedRequestsInTheInstalledState(t *testing.T) {
+	s := newScenario(t, []uint64{6, 1, 1, 1}, []uint64{1, 6, 1, 1}, nil)
+	inst := s.installed(1)
+	install := bytes.Clone(inst.TR.FeeHash)
+	req := &certification.BlockCertificationRequest{PartitionID: 1, ShardID: types.ShardID{}, NodeID: s.f.id(1), BlockSize: 100, StateSize: 50,
+		InputRecord: &types.InputRecord{Version: 1, RoundNumber: inst.TR.Round, Epoch: inst.TR.Epoch, PreviousHash: []byte{1}, Hash: []byte{2}, SumOfEarnedFees: 25}}
+	require.NoError(t, inst.nextRoundWith(req, s.pdr1, crypto.SHA256, resetMembers))
+	require.NotEqual(t, install, inst.TR.FeeHash, "premise: the executed request moved the fee commitment")
+	require.NotZero(t, inst.Stat.Blocks)
+
+	resolve := func(si *ShardInfo) (*RequestRoundView, error) {
+		snap, err := NewRequestSnapshot(fxNetwork, crypto.SHA256, si, s.parentID, nil, s.anchor, s.succ)
+		require.NoError(t, err)
+		return s.resolve(snap, fxActivate+9, 4, fxBody1, PurposeExecute)
+	}
+	v, err := resolve(inst)
+	require.NoError(t, err)
+	require.Equal(t, inst.TR, v.ExpectedTR(), "the updated record, not the install-time one")
+
+	for name, mutate := range map[string]func(*ShardInfo){
+		"the updated fee hash":                           func(si *ShardInfo) { si.TR.FeeHash[0] ^= 1 },
+		"the updated stat hash":                          func(si *ShardInfo) { si.TR.StatHash[0] ^= 1 },
+		"the install-time fee hash (a stale commitment)": func(si *ShardInfo) { si.TR.FeeHash = bytes.Clone(install) },
+		"fees that moved without the record":             func(si *ShardInfo) { si.Fees[s.f.id(1)]++ },
+	} {
+		bad := *inst
+		bad.TR = cloneTR(inst.TR)
+		bad.Fees = maps.Clone(inst.Fees)
+		mutate(&bad)
+		view, err := resolve(&bad)
+		require.ErrorIs(t, err, quorumweight.ErrRequestContext, name)
+		require.Nil(t, view, name)
+	}
 }

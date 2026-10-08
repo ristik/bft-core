@@ -162,3 +162,43 @@ func (p *Projector) ImportBatch(have uint64) (Import, error) {
 	}
 	return imp, nil
 }
+
+// The metered admission of an import companion, mirrored in ureth (records.rs): the byte cap precedes every charge, the scan charge
+// 2000+16*C_R is reserved before the structural scan, and the entry charge 1000*N before any entry is decoded. Both sides are checked
+// against the same vectors; the priced figures are admission prices subject to the maximum-work acceptance gate, not measured costs.
+const (
+	MaxImportBytes = 16384
+	ScanBaseGas    = 2000
+	ScanByteGas    = 16
+	EntryGas       = 1000
+)
+
+// ErrImportBudget reports an import companion whose admission charge does not fit the system budget that remains.
+var ErrImportBudget = errors.New("rootrecords: import admission exceeds the system budget")
+
+// ScanGas is G_R_scan for a companion of n bytes.
+func ScanGas(n int) uint64 { return ScanBaseGas + ScanByteGas*uint64(n) }
+
+// AdmissionGas is G_R_admit = G_R_scan + 1000*N for a companion of n bytes with entries entries.
+func AdmissionGas(n, entries int) uint64 { return ScanGas(n) + EntryGas*uint64(entries) }
+
+// AdmitImport admits a companion against the remaining system budget in the staged order the design fixes, returning the decoded value
+// and G_R_admit.
+func AdmitImport(raw []byte, budget uint64) (Import, uint64, error) {
+	if len(raw) > MaxImportBytes {
+		return Import{}, 0, fmt.Errorf("%w: %d bytes", ErrImport, len(raw))
+	}
+	scan := ScanGas(len(raw))
+	if scan > budget {
+		return Import{}, 0, fmt.Errorf("%w: scan charge %d of %d", ErrImportBudget, scan, budget)
+	}
+	imp, err := DecodeImport(raw)
+	if err != nil {
+		return Import{}, 0, err
+	}
+	entries := EntryGas * uint64(len(imp.Entries))
+	if entries > budget-scan {
+		return Import{}, 0, fmt.Errorf("%w: entry charge %d of %d", ErrImportBudget, entries, budget-scan)
+	}
+	return imp, scan + entries, nil
+}
