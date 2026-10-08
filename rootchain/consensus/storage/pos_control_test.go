@@ -463,12 +463,14 @@ func TestAbortClosesTheSessionOfARetainedPrimaryOnly(t *testing.T) {
 
 type fakeProposer struct {
 	build func(epoch, oe, or uint64) (rctypes.PosControl, error)
+	bytes []byte
 	calls int
 }
 
-func (p *fakeProposer) Closure(epoch, oe, or uint64) (rctypes.PosControl, error) {
+func (p *fakeProposer) Closure(epoch, oe, or uint64) (rctypes.PosControl, []byte, error) {
 	p.calls++
-	return p.build(epoch, oe, or)
+	c, err := p.build(epoch, oe, or)
+	return c, p.bytes, err
 }
 
 func TestClosureIsMandatoryInTheSuccessorsFirstOrdinaryBlock(t *testing.T) {
@@ -493,7 +495,7 @@ func TestClosureIsMandatoryInTheSuccessorsFirstOrdinaryBlock(t *testing.T) {
 		return rctypes.PosControl{Network: 5, ChainID: dep.ChainID, Custody: dep.Custody, OrderingEpoch: oe, OrderingRound: or, Op: rctypes.OpCloseLiability,
 			Close: &rctypes.CloseContext{ClosedEpoch: epoch, BundleSemanticID: facts.BundleID}, Data: data, WitnessHash: sha256.Sum256(witness)}, nil
 	}
-	proposer := &fakeProposer{build: control}
+	proposer := &fakeProposer{build: control, bytes: witness}
 	svc := &PosServices{Deployment: dep, Authority: &fakeAuthority{facts: facts}, Witnesses: fakeWitnesses{sha256.Sum256(witness): witness}, Proposer: proposer}
 
 	// the proposer sees the duty on the suffix's state: the first ordinary round of epoch 2 awaits epoch 1's closure
@@ -506,6 +508,11 @@ func TestClosureIsMandatoryInTheSuccessorsFirstOrdinaryBlock(t *testing.T) {
 	none, err := f.store.ClosureControls(5, 1, 6)
 	require.NoError(t, err)
 	require.Empty(t, none, "a suffix round of the old epoch needs none")
+	kept, err := f.store.Witness(sha256.Sum256(witness))
+	require.NoError(t, err, "the proposer retained the witness before it proposed")
+	require.Equal(t, witness, kept)
+	_, err = f.store.Witness([32]byte{9})
+	require.ErrorIs(t, err, ErrWitnessUnavailable)
 	proposer.build = func(uint64, uint64, uint64) (rctypes.PosControl, error) {
 		return rctypes.PosControl{}, errors.New("no bundle")
 	}
@@ -723,4 +730,45 @@ func TestHandoffInFlightCoversEveryPhaseThatCanReferenceAGeneration(t *testing.T
 	} {
 		require.Equal(t, c.want, handoffInFlight(c.pos, c.ctl), name)
 	}
+}
+
+func TestWitnessStoreRetainsByHashAndNeverRewrites(t *testing.T) {
+	f := newAssignmentFixture(t)
+	data := []byte("witness")
+	hash := sha256.Sum256(data)
+	require.NoError(t, f.store.StoreWitness(data))
+	require.NoError(t, f.store.StoreWitness(data), "a repeat is a no-op")
+	got, err := f.store.Witness(hash)
+	require.NoError(t, err)
+	require.Equal(t, data, got)
+	db := f.store.storage.(WitnessStore)
+	require.ErrorIs(t, db.StoreWitness(hash, []byte("other")), ErrWitnessStore, "bytes that do not hash to the key")
+	require.ErrorIs(t, db.StoreWitness(sha256.Sum256(nil), nil), ErrWitnessStore, "empty")
+	require.ErrorIs(t, f.store.StoreWitness(nil), ErrWitnessStore)
+	big := make([]byte, MaxWitnessBytes+1)
+	require.ErrorIs(t, f.store.StoreWitness(big), ErrWitnessStore, "above the bundle bound")
+	var bare BlockStore
+	bare.storage = struct{ PersistentStore }{f.store.storage}
+	require.ErrorIs(t, bare.StoreWitness(data), ErrNoWitnessStore)
+	_, err = bare.Witness(hash)
+	require.ErrorIs(t, err, ErrNoWitnessStore)
+}
+
+func TestClosureDataIsTheExactABIEncoding(t *testing.T) {
+	d := ClosureData{AssignmentID: [32]byte{1}, HRound: 0x0102030405060708, HRecordID: [32]byte{2}, TerminalRoot: [32]byte{3}, ExposureDigest: [32]byte{4}, KeyHistoryDigest: [32]byte{5}}
+	raw := d.Encode()
+	require.Len(t, raw, 192)
+	require.Equal(t, append(append([]byte(nil), d.AssignmentID[:]...), word(d.HRound)...), raw[:64])
+	require.Equal(t, d.KeyHistoryDigest[:], raw[160:])
+	got, err := DecodeClosureData(raw)
+	require.NoError(t, err)
+	require.Equal(t, d, got)
+	_, err = DecodeClosureData(raw[:191])
+	require.Error(t, err)
+	_, err = DecodeClosureData(append(raw, 0))
+	require.Error(t, err)
+	bad := append([]byte(nil), raw...)
+	bad[32] = 1
+	_, err = DecodeClosureData(bad)
+	require.Error(t, err, "high bits of the round word")
 }

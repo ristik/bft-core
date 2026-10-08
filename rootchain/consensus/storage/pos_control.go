@@ -60,7 +60,8 @@ type ClosureAuthority interface {
 // ClosureProposer builds the CloseLiability control, with its retained witness, for a closed epoch: the proposer's side of the
 // mandatory inclusion. It fails (unavailable) when the terminal bundle is not at hand, and then no ordinary block can be proposed.
 type ClosureProposer interface {
-	Closure(epoch, orderingEpoch, orderingRound uint64) (rctypes.PosControl, error)
+	// Closure returns the control and the canonical witness bytes whose SHA-256 it commits to.
+	Closure(epoch, orderingEpoch, orderingRound uint64) (rctypes.PosControl, []byte, error)
 }
 
 // WitnessSource returns the retained witness bytes by their SHA-256.
@@ -349,6 +350,48 @@ func (p *posStep) abort(candidates candidateSource, r evmroot.OrderedHandoffReco
 	return nil
 }
 
+// ClosureData is the ABI payload of a Closure record: (bytes32 assignmentID, uint64 hRound, bytes32 hRecordID, bytes32 terminalRoot,
+// bytes32 exposureDigest, bytes32 keyHistoryDigest), 192 bytes.
+type ClosureData struct {
+	AssignmentID                     [32]byte
+	HRound                           uint64
+	HRecordID, TerminalRoot          [32]byte
+	ExposureDigest, KeyHistoryDigest [32]byte
+}
+
+// Encode is the exact ABI encoding.
+func (d ClosureData) Encode() []byte {
+	out := make([]byte, 0, 192)
+	out = append(out, d.AssignmentID[:]...)
+	hr := make([]byte, 32)
+	for i := 0; i < 8; i++ {
+		hr[31-i] = byte(d.HRound >> (8 * i))
+	}
+	out = append(out, hr...)
+	out = append(out, d.HRecordID[:]...)
+	out = append(out, d.TerminalRoot[:]...)
+	out = append(out, d.ExposureDigest[:]...)
+	return append(out, d.KeyHistoryDigest[:]...)
+}
+
+// DecodeClosureData parses exactly 192 bytes with the round word's high bits zero.
+func DecodeClosureData(b []byte) (d ClosureData, err error) {
+	if len(b) != 192 {
+		return d, fmt.Errorf("closure data is %d bytes, not 192", len(b))
+	}
+	round, ok := word64(b[32:64])
+	if !ok {
+		return d, errors.New("closure data H round is not a uint64")
+	}
+	copy(d.AssignmentID[:], b[0:32])
+	d.HRound = round
+	copy(d.HRecordID[:], b[64:96])
+	copy(d.TerminalRoot[:], b[96:128])
+	copy(d.ExposureDigest[:], b[128:160])
+	copy(d.KeyHistoryDigest[:], b[160:192])
+	return d, nil
+}
+
 func word64(w []byte) (uint64, bool) {
 	if !bytes.Equal(w[:24], make([]byte, 24)) {
 		return 0, false
@@ -366,14 +409,11 @@ func (p *posStep) closeLiability(c rctypes.PosControl, block *rctypes.BlockData,
 	if !awaiting {
 		return fmt.Errorf("%w: no closure is outstanding for epoch %d", ErrPosControlRefused, epoch)
 	}
-	// ClosureData: (assignmentID, hRound, hRecordID, terminalRoot, exposureDigest, keyHistoryDigest)
-	var assignmentID, hRecordID, terminalRoot, exposureDigest, keyDigest [32]byte
-	copy(assignmentID[:], c.Data[0:32])
-	copy(hRecordID[:], c.Data[64:96])
-	copy(terminalRoot[:], c.Data[96:128])
-	copy(exposureDigest[:], c.Data[128:160])
-	copy(keyDigest[:], c.Data[160:192])
-	dataRound, _ := word64(c.Data[32:64]) // the width was checked by the control codec
+	d, err := DecodeClosureData(c.Data)
+	if err != nil {
+		return errors.Join(ErrPosControlRefused, err)
+	}
+	assignmentID, hRecordID, terminalRoot, exposureDigest, keyDigest, dataRound := d.AssignmentID, d.HRecordID, d.TerminalRoot, d.ExposureDigest, d.KeyHistoryDigest, d.HRound
 
 	witness, err := witnessOf(c, svc)
 	if err != nil {

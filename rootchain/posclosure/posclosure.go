@@ -3,13 +3,16 @@
 package posclosure
 
 import (
+	"context"
 	"crypto"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 
 	"github.com/unicitynetwork/bft-core/evmassign"
 	"github.com/unicitynetwork/bft-core/handoffdelivery"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/storage"
+	rctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/votesig"
 	"github.com/unicitynetwork/bft-go-base/types"
 )
@@ -89,3 +92,49 @@ func (a Authority) VerifyClosure(witness []byte, closedEpoch uint64) (storage.Cl
 
 var _ storage.ClosureAuthority = Authority{}
 var _ handoffdelivery.ClosureHistory = History{}
+
+// BundleSource serves the finalized terminal bundle of a handoff: the bundle that opens epoch (so closes epoch-1). The consensus manager
+// is one.
+type BundleSource interface {
+	HandoffBundle(ctx context.Context, epoch uint64) (*handoffdelivery.Bundle, error)
+}
+
+// Proposer builds the mandatory CloseLiability control a leader includes, from the root's own retained bundle. The witness is the exact
+// canonical bundle bytes; the control commits to their SHA-256 and to the closure the verifier establishes from them, and the digests
+// are derived from the frozen identity records, never read from the bundle's submitter.
+type Proposer struct {
+	Source     BundleSource
+	Authority  Authority
+	Deployment storage.PosDeployment
+}
+
+func (p Proposer) Closure(closedEpoch, orderingEpoch, orderingRound uint64) (rctypes.PosControl, []byte, error) {
+	bundle, err := p.Source.HandoffBundle(context.Background(), closedEpoch+1)
+	if err != nil || bundle == nil {
+		return rctypes.PosControl{}, nil, errors.Join(ErrHistory, fmt.Errorf("terminal bundle of epoch %d", closedEpoch), err)
+	}
+	raw, err := handoffdelivery.EncodeBundle(*bundle)
+	if err != nil {
+		return rctypes.PosControl{}, nil, err
+	}
+	ev, err := p.Authority.Verifier.Verify(raw, closedEpoch)
+	if err != nil {
+		return rctypes.PosControl{}, nil, err
+	}
+	exposure, err := evmassign.AssignmentExposureDigest(p.Deployment.Deployment, ev.AssignmentID, ev.Closed)
+	if err != nil {
+		return rctypes.PosControl{}, nil, err
+	}
+	keys, err := evmassign.KeyHistoryDigest(ev.Closed)
+	if err != nil {
+		return rctypes.PosControl{}, nil, err
+	}
+	data := storage.ClosureData{AssignmentID: ev.AssignmentID, HRound: ev.HRound, HRecordID: ev.HRecordID, TerminalRoot: ev.TerminalRoot,
+		ExposureDigest: exposure, KeyHistoryDigest: keys}
+	return rctypes.PosControl{Network: p.Deployment.RootNetwork, ChainID: p.Deployment.ChainID, Custody: p.Deployment.Custody,
+		OrderingEpoch: orderingEpoch, OrderingRound: orderingRound, Op: rctypes.OpCloseLiability,
+		Close: &rctypes.CloseContext{ClosedEpoch: closedEpoch, BundleSemanticID: ev.BundleID}, Data: data.Encode(),
+		WitnessHash: sha256.Sum256(raw)}, raw, nil
+}
+
+var _ storage.ClosureProposer = Proposer{}
