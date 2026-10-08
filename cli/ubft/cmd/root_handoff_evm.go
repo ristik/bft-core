@@ -16,6 +16,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/unicitynetwork/bft-core/evmassign"
 	"github.com/unicitynetwork/bft-core/evmroot"
+	"github.com/unicitynetwork/bft-core/internal/weightvalidation"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus"
 	"github.com/unicitynetwork/bft-core/signingauthority"
 	"github.com/unicitynetwork/bft-core/signingauthority/service"
@@ -331,7 +332,9 @@ func newEVMPoPCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if err := evmassign.ValidateAssignment(succ); err != nil {
+			// the weighted bounds, not the unit rule: the proof only proves possession, and the root judges the assignment under the mode of
+			// the epoch it is installed in (a weighted rotation from a unit epoch signs weights the unit rule would refuse)
+			if err := evmassign.ValidateAssignmentWith(weightvalidation.EVMRules(weightvalidation.ModeWeighted), succ); err != nil {
 				return err
 			}
 			if keyFile != "" && (authoritySocket != "" || authorityCredential != "") {
