@@ -71,7 +71,7 @@ jobs:
           go test -count=1 ./rootchain/consensus/ -timeout 10m \
             -run '^(TestQ4Fixture|TestQ4QuorumOracle|TestQ4Delivery|TestQ4Schedule|TestQ4LookupCallSites|TestQ4T2Gate|TestQ4AdmissionAudit|TestQ4BHandoffArithmetic)$'
 
-      - name: "Query-cost gate, CI profile (frozen per-round budget; the full envelope runs with Q4_COST_FULL=1 for acceptance)"
+      - name: "Query-cost gate (every mandatory row against the frozen budgets)"
         run: |
           mkdir -p out
           Q4_COST_OUT="$PWD/out/cost-ci.json" go test -count=1 -v ./rootchain/consensus/leader/ -run 'Q4' | tee out/cost-ci.log

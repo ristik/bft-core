@@ -38,15 +38,16 @@ type q4Site struct {
 
 var q4LookupSites = []q4Site{
 	{Func: "Run", Arg: "x.pacemaker.GetCurrentRound()", Source: "local"},
-	{Func: "handlePacemakerEvent", Arg: "currentRound + 1", Source: "local"},
+	{Func: "handlePacemakerEvent", Arg: "currentRound", Source: "local"}, // leaderAfter: the successor is overflow-checked
 	{Func: "handlePacemakerEvent", Arg: "2", Source: "local"},
-	{Func: "onPartitionIRChangeReq", Arg: "x.pacemaker.GetCurrentRound() + 1", Source: "local"},
-	{Func: "onIRChangeMsg", Arg: "x.pacemaker.GetCurrentRound() + 1", Source: "local"},
+	{Func: "onPartitionIRChangeReq", Arg: "x.pacemaker.GetCurrentRound()", Source: "local"},
+	{Func: "onIRChangeMsg", Arg: "x.pacemaker.GetCurrentRound()", Source: "local"},
 	{Func: "onTimeoutMsg", Arg: "x.pacemaker.GetCurrentRound()", Source: "local"},
-	{Func: "onProposalMsg", Arg: "x.pacemaker.GetCurrentRound() + 1", Source: "local"},
+	{Func: "onProposalMsg", Arg: "x.pacemaker.GetCurrentRound()", Source: "local"},
+	{Func: "leaderAfter", Arg: "round + 1", Source: "local"},      // reached only after the math.MaxUint64 refusal
 	{Func: "processNewRoundEvent", Arg: "round", Source: "local"}, // round := x.pacemaker.GetCurrentRound() on the line above
-	{Func: "onStateResponse", Arg: "x.pacemaker.GetCurrentRound() + 1", Source: "local"},
-	{Func: "onVoteMsg", Arg: "nextRound", Source: "message",
+	{Func: "onStateResponse", Arg: "x.pacemaker.GetCurrentRound()", Source: "local"},
+	{Func: "onVoteMsg", Arg: "vote.VoteInfo.RoundNumber", Source: "message",
 		Prerequisite: "a vote for a round ahead of the pacemaker is buffered and returns before the lookup; a stale one is refused; the author is verified under its epoch first",
 		Evidence:     []string{"TestMessageRoundsAreEvidencedBeforeTheSelectorIsAsked", "TestQ4AdmissionAudit"}},
 	{Func: "onProposalMsg", Arg: "proposal.Block.Round", Source: "message",
@@ -66,7 +67,7 @@ func q4ParseCalls(t *testing.T, path string) (out []q4Site) {
 		}
 		ast.Inspect(fd.Body, func(n ast.Node) bool {
 			if c, ok := n.(*ast.CallExpr); ok && len(c.Args) == 1 {
-				if s, ok := c.Fun.(*ast.SelectorExpr); ok && s.Sel.Name == "GetLeaderForRound" {
+				if s, ok := c.Fun.(*ast.SelectorExpr); ok && (s.Sel.Name == "GetLeaderForRound" || s.Sel.Name == "leaderAfter") {
 					var b strings.Builder
 					require.NoError(t, printer.Fprint(&b, fset, c.Args[0]))
 					out = append(out, q4Site{Func: fd.Name.Name, Arg: b.String()})
