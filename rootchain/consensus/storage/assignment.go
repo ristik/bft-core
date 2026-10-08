@@ -282,6 +282,88 @@ func ActivationFromVerifiedV3(entry VerifiedActivation, record evmroot.OrderedHa
 	return newRequestActivation(pdr, hashAlg, quorumweight.PolicyEVMWeighted, coupling, entry.Epoch(), body[:], record.ActivationRound, record.SuccessorTRHash, version)
 }
 
+// VerifiedContinuation is a VerifiedActivation that also says whether its committed candidate is the root-only operator candidate of its
+// members (q3format.Entry.RootOnly): the authenticated commitment that no shard changed.
+type VerifiedContinuation interface {
+	VerifiedActivation
+	RootOnly() bool
+}
+
+// RequestContinuationFromVerifiedV3 is the request activation of a root epoch that leaves the shard of previous unchanged: previous's
+// assignment under the next root authorization interval. It is not a new assignment or an installation. Everything but the authorising
+// root epoch, body and first round is copied from previous (the configuration, its immutable request context, the protocol version and
+// the original successor-record commitment); the context keeps its original coupling and weights: a root-only transition never
+// re-mirrors the new root committee into the EVM shard.
+//
+// The entry must be the verified history's, linked to previous (adjacent root epoch, committed predecessor equal to previous's body,
+// increasing first round, the record the entry's activation commit names). That the shard is unchanged is proved, not assumed: a
+// root-only entry's operator-candidate commitment proves it, any other entry's retained candidate must be the committed one, must
+// designate another shard and must not replace this shard's validators. Missing candidate bytes are never evidence of non-change.
+func RequestContinuationFromVerifiedV3(previous *RequestActivation, entry VerifiedContinuation, preimage []byte, hashAlg crypto.Hash, version uint64) (*RequestActivation, error) {
+	if previous == nil || entry == nil || previous.pdr == nil || version == 0 {
+		return nil, fmt.Errorf("%w: incomplete continuation", ErrAssignmentHistory)
+	}
+	v, _, ok := entry.Handoff()
+	if !ok {
+		return nil, fmt.Errorf("%w: epoch %d is not a verified activation", ErrRecordNotCommitted, entry.Epoch())
+	}
+	record := v.Record
+	commit := entry.ActivationCommitID()
+	body := entry.BodyID()
+	if !bytes.Equal(record.ID(), commit[:]) {
+		return nil, fmt.Errorf("%w: the record is not the one that activated epoch %d", ErrRecordNotCommitted, entry.Epoch())
+	}
+	if !bytes.Equal(record.NextBodyID, body[:]) || record.Epoch+1 != entry.Epoch() || record.ActivationRound != entry.Start() {
+		return nil, fmt.Errorf("%w: the record does not describe the activation of epoch %d", ErrAssignmentHistory, entry.Epoch())
+	}
+	if previous.rootEpoch == ^uint64(0) || entry.Epoch() != previous.rootEpoch+1 || record.ActivationRound <= previous.start ||
+		!bytes.Equal(record.PredecessorBodyID, previous.rootBody) || record.Network != uint64(previous.pdr.NetworkID) || version != previous.version {
+		return nil, fmt.Errorf("%w: epoch %d does not follow the root interval of the previous activation", ErrAssignmentHistory, entry.Epoch())
+	}
+	if !entry.RootOnly() {
+		if len(preimage) == 0 {
+			return nil, fmt.Errorf("%w: epoch %d: no retained candidate proves that the shard is unchanged", ErrAssignmentHistory, entry.Epoch())
+		}
+		// the candidate is authenticated exactly as for a real activation, then inspected for anything that touches this shard
+		if _, err := ActivationFromVerifiedV3(entry, record, preimage, hashAlg, version); err != nil {
+			return nil, err
+		}
+		c, err := evmassign.DecodeCandidate(preimage)
+		if err != nil {
+			return nil, errors.Join(ErrAssignmentHistory, err)
+		}
+		evm, err := c.Successor()
+		if err != nil {
+			return nil, errors.Join(ErrAssignmentHistory, err)
+		}
+		if evm.PartitionID == previous.pdr.PartitionID && evm.ShardID.Equal(previous.pdr.ShardID) {
+			return nil, fmt.Errorf("%w: epoch %d changes the assignment of this shard", ErrAssignmentHistory, entry.Epoch())
+		}
+		for _, ch := range c.Changes {
+			if ch.Kind != evmassign.ChangeReplaceShardValidators {
+				return nil, errors.Join(ErrAssignmentHistory, evmassign.ErrUnsupportedChange)
+			}
+			_, succ, err := evmassign.DecodeReplaceShardValidators(ch.Payload)
+			if err != nil {
+				return nil, errors.Join(ErrAssignmentHistory, err)
+			}
+			if succ.PartitionID == previous.pdr.PartitionID && succ.ShardID.Equal(previous.pdr.ShardID) {
+				return nil, fmt.Errorf("%w: epoch %d replaces the validators of this shard", ErrAssignmentHistory, entry.Epoch())
+			}
+		}
+	}
+	own, err := clonePDR(previous.pdr)
+	if err != nil {
+		return nil, errors.Join(ErrAssignmentHistory, err)
+	}
+	hash, err := own.Hash(hashAlg)
+	if err != nil || !bytes.Equal(hash, previous.confHash) {
+		return nil, fmt.Errorf("%w: the copied configuration is not the previous one", ErrAssignmentHistory)
+	}
+	return &RequestActivation{pdr: own, confHash: hash, ctx: previous.ctx, rootEpoch: entry.Epoch(), rootBody: bytes.Clone(body[:]), start: record.ActivationRound,
+		trHash: bytes.Clone(previous.trHash), version: previous.version, continuation: true, predecessorRootBody: bytes.Clone(previous.rootBody)}, nil
+}
+
 // DeriveActivatedConfigs is DeriveActivatedPDR plus the aggregator validator replacements the same candidate commits: it
 // returns the EVM configuration first, then one activated configuration per change (sorted as committed), all verified
 // against the record, body and preimage, with the shared provenance. The state-dependent half (each change replaces exactly the
