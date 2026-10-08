@@ -13,15 +13,17 @@ cd "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source helper.sh
 
 validators=4 rootValidators=4 partitionID=8 aggPartition=9 chainID=${DNB_CHAIN_ID:-31337}
-rethEngineBase=18551 rethEthBase=18545 rethP2PBase=30401
+rethEngineBase=18551 rethEthBase=18545 rethP2PBase=30401 rootRpcPort=25866
 : "${URETH_BIN:?set URETH_BIN to the pinned unicity-reth}"
 fee=${DNB_FEE_COLLECTOR:-0x000000000000000000000000000000000000dead}
-export M2_PROFILE2=1 SIGNING=local
+# Restarted validators vote again only with an independent signing record (#105): SIGNING=authority keeps one per validator in a separate process that is not restarted.
+export M2_PROFILE2=1 SIGNING=${DNB_SIGNING:-authority}
 
 info() { echo "dnb: $*"; }
 rpc() { curl -sS --max-time 10 -X POST "$1" -H "Content-Type: application/json" -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"$2\",\"params\":$3}"; }
 
 down() {
+  for p in test-nodes/auth*/pid; do [ -f "$p" ] && stop_pidfile "$p" 'ubft signing-authority' || true; done
   for p in test-nodes/reth*/pid; do [ -f "$p" ] && stop_pidfile "$p" 'unicity-reth|reth.* node' || true; done
   [ -f test-nodes/agg/pid ] && stop_pidfile test-nodes/agg/pid 'aggregator' || true
   stop_evm_validators 2>/dev/null || true
@@ -34,6 +36,7 @@ up() {
   info "identities and shard topology"
   init_root_nodes "$rootValidators" >/dev/null
   init_evm_validators "$validators" >/dev/null
+  if [ "$SIGNING" = authority ]; then init_evm_authorities "$validators" "$partitionID" >/dev/null; fi
   generate_evm_shard_conf "$validators" "$partitionID" "$chainID" 5000 exec >/dev/null
   conf=test-nodes/shard-conf-${partitionID}_0.json
 
@@ -55,6 +58,7 @@ PY
     --full-shard-conf test-nodes/evm-full-shard-conf.json --identities-out test-nodes/genesis-identities.json | tee test-nodes/genesis.out
   # The root chain certifies the FULL shard configuration.
   cp test-nodes/evm-full-shard-conf.json "$conf"
+  if [ "$SIGNING" = authority ]; then enroll_evm_authorities "$validators" "$partitionID" >/dev/null; info "signing authorities enrolled against the full shard configuration"; fi
   ureth_flags=$(sed -n 's/^ureth flags: *//p' test-nodes/b1-profile.out)
 
   # The root's aggregator_rsmt_v1 verifier demands an SMT consistency proof with every non-empty certification request; aggregator-go ae08165
@@ -76,7 +80,7 @@ PY
     "$URETH_BIN" node --chain test-nodes/evm-genesis-finalized.json --datadir "test-nodes/reth$i/dd" \
       --authrpc.jwtsecret "test-nodes/evm$i/jwt.hex" --authrpc.addr 127.0.0.1 --authrpc.port $((rethEngineBase + i - 1)) \
       --http --http.addr 127.0.0.1 --http.port $((rethEthBase + i - 1)) --http.api eth,net,web3,admin,debug --rpc.eth-proof-window 64 \
-      --port $((rethP2PBase + i - 1)) --disable-discovery --ipcdisable --engine.persistence-threshold 64 \
+      --port $((rethP2PBase + i - 1)) --disable-discovery --ipcdisable --engine.persistence-threshold "${DNB_PERSIST:-0}" \
       --builder.gaslimit "$(python3 -c "import json;print(json.load(open('test-nodes/b1-profile.json'))['maxGas'])")" \
       --unicity.fee-collector "$fee" $ureth_flags \
       >"test-nodes/reth$i/reth.log" 2>&1 &
@@ -110,26 +114,43 @@ restart_agg() {
   start_agg
 }
 
+start_reth() { # N: start (or restart) validator N's ureth on its datadir
+  local i=$1 ureth_flags; ureth_flags=$(sed -n 's/^ureth flags: *//p' test-nodes/b1-profile.out)
+  # shellcheck disable=SC2086
+  "$URETH_BIN" node --chain test-nodes/evm-genesis-finalized.json --datadir "test-nodes/reth$i/dd" \
+    --authrpc.jwtsecret "test-nodes/evm$i/jwt.hex" --authrpc.addr 127.0.0.1 --authrpc.port $((rethEngineBase + i - 1)) \
+    --http --http.addr 127.0.0.1 --http.port $((rethEthBase + i - 1)) --http.api eth,net,web3,admin,debug --rpc.eth-proof-window 64 \
+    --port $((rethP2PBase + i - 1)) --disable-discovery --ipcdisable --engine.persistence-threshold "${DNB_PERSIST:-0}" \
+    --builder.gaslimit "$(python3 -c "import json;print(json.load(open('test-nodes/b1-profile.json'))['maxGas'])")" \
+    --unicity.fee-collector "$fee" $ureth_flags >>"test-nodes/reth$i/reth.log" 2>&1 &
+  echo $! >"test-nodes/reth$i/pid"
+}
+wait_reth() { for _ in $(seq 1 90); do rpc "http://127.0.0.1:$((rethEthBase + $1 - 1))" eth_chainId '[]' 2>/dev/null | grep -q result && return; sleep 1; done; echo "reth $1 did not come back" >&2; return 1; }
+
 restart_validator() { # N: the shard validator and its ureth
   local i=$1
   stop_one_evm_validator "$i" || true
   stop_pidfile "test-nodes/reth$i/pid" 'unicity-reth|reth.* node' || true
   sleep 3
-  local ureth_flags; ureth_flags=$(sed -n 's/^ureth flags: *//p' test-nodes/b1-profile.out)
-  # shellcheck disable=SC2086
-  "$URETH_BIN" node --chain test-nodes/evm-genesis-finalized.json --datadir "test-nodes/reth$i/dd" \
-    --authrpc.jwtsecret "test-nodes/evm$i/jwt.hex" --authrpc.addr 127.0.0.1 --authrpc.port $((rethEngineBase + i - 1)) \
-    --http --http.addr 127.0.0.1 --http.port $((rethEthBase + i - 1)) --http.api eth,net,web3,admin,debug --rpc.eth-proof-window 64 \
-    --port $((rethP2PBase + i - 1)) --disable-discovery --ipcdisable --engine.persistence-threshold 64 \
-    --builder.gaslimit "$(python3 -c "import json;print(json.load(open('test-nodes/b1-profile.json'))['maxGas'])")" \
-    --unicity.fee-collector "$fee" $ureth_flags >>"test-nodes/reth$i/reth.log" 2>&1 &
-  echo $! >"test-nodes/reth$i/pid"
-  for _ in $(seq 1 90); do rpc "http://127.0.0.1:$((rethEthBase + i - 1))" eth_chainId '[]' 2>/dev/null | grep -q result && break; sleep 1; done
+  start_reth "$i"; wait_reth "$i"
   export EVM_ARCHIVE_ROOT=test-nodes/archives EVM_GENESIS_FILE=test-nodes/evm-genesis-finalized.json EVM_FULL_SHARD_CONF=test-nodes/shard-conf-${partitionID}_0.json EVM_B1_PROFILE=test-nodes/b1-profile.json EVM_ENGINE_FEE_COLLECTOR=$fee
   for j in $(seq 1 "$validators"); do export "EVM_ENGINE_URL_$j=http://127.0.0.1:$((rethEngineBase + j - 1))" "EVM_ETH_URL_$j=http://127.0.0.1:$((rethEthBase + j - 1))"; done
   local rootBoot; rootBoot=$(boot_node test-nodes/root1 "$rootPortStart")
   start_one_evm_validator "$i" "$validators" "$partitionID" "$rootBoot" engine-api
   info "validator $i restarted"
+}
+
+# Stops every shard validator and ureth at once (roots and aggregator keep running), then starts them all from their own state.
+restart_all_validators() {
+  for i in $(seq 1 "$validators"); do stop_one_evm_validator "$i" || true; stop_pidfile "test-nodes/reth$i/pid" 'unicity-reth|reth.* node' || true; done
+  sleep 5
+  for i in $(seq 1 "$validators"); do start_reth "$i"; done
+  for i in $(seq 1 "$validators"); do wait_reth "$i"; done
+  export EVM_ARCHIVE_ROOT=test-nodes/archives EVM_GENESIS_FILE=test-nodes/evm-genesis-finalized.json EVM_FULL_SHARD_CONF=test-nodes/shard-conf-${partitionID}_0.json EVM_B1_PROFILE=test-nodes/b1-profile.json EVM_ENGINE_FEE_COLLECTOR=$fee
+  for j in $(seq 1 "$validators"); do export "EVM_ENGINE_URL_$j=http://127.0.0.1:$((rethEngineBase + j - 1))" "EVM_ETH_URL_$j=http://127.0.0.1:$((rethEthBase + j - 1))"; done
+  local rootBoot; rootBoot=$(boot_node test-nodes/root1 "$rootPortStart")
+  for i in $(seq 1 "$validators"); do start_one_evm_validator "$i" "$validators" "$partitionID" "$rootBoot" engine-api; done
+  info "all validators restarted"
 }
 
 # aggregator-go (SDK3 leaf protocol) as a BFT shard of the live root chain. Needs AGG_BIN, and MongoDB with a replica set at AGG_MONGO.
@@ -142,7 +163,7 @@ start_agg() {
   env PORT=${AGG_PORT:-3001} HOST=127.0.0.1 ENABLE_DOCS=false ENABLE_CORS=true \
     MONGODB_URI="$AGG_MONGO" MONGODB_DATABASE="$(cat test-nodes/agg/dbname 2>/dev/null || { n=dnb_agg_$(date +%s); echo $n | tee test-nodes/agg/dbname; })" DISABLE_HIGH_AVAILABILITY=true USE_REDIS_FOR_COMMITMENTS=false \
     SMT_BACKEND=memory SHARDING_MODE=standalone LOG_LEVEL=info LOG_FORMAT=text LOG_ENABLE_JSON=false LOG_FILE_PATH="$PWD/test-nodes/agg/logs/aggregator.log" \
-    SIGNING_KEY_FILE="$PWD/test-nodes/agg/keys.json" BFT_ENABLED=true BFT_ADDRESS=/ip4/127.0.0.1/tcp/29101 BFT_RPC_ADDRESS=http://127.0.0.1:25866 \
+    SIGNING_KEY_FILE="$PWD/test-nodes/agg/keys.json" BFT_ENABLED=true BFT_ADDRESS=/ip4/127.0.0.1/tcp/29101 BFT_RPC_ADDRESS=http://127.0.0.1:$rootRpcPort \
     BFT_SHARD_CONF_FILE="$PWD/test-nodes/shard-conf-${aggPartition}_0.json" BFT_TRUST_BASE_FILES="$PWD/test-nodes/trust-base.json" \
     BFT_BOOTSTRAP_ADDRESSES="$boot" \
     "$AGG_BIN" >test-nodes/agg/stdout.log 2>&1 &
@@ -151,11 +172,20 @@ start_agg() {
   tail -20 test-nodes/agg/stdout.log >&2; echo "aggregator did not become healthy" >&2; exit 1
 }
 
+# Fails fast when the root chain is not advancing (the stall that otherwise leaves a deploy waiting for a first block forever).
+root_alive() {
+  local a b
+  a=$(curl -fsS http://127.0.0.1:$rootRpcPort/api/v1/roundInfo | python3 -c "import sys,json;print(json.load(sys.stdin)['roundNumber'])") || return 1
+  sleep 8
+  b=$(curl -fsS http://127.0.0.1:$rootRpcPort/api/v1/roundInfo | python3 -c "import sys,json;print(json.load(sys.stdin)['roundNumber'])") || return 1
+  [ "$b" -gt "$a" ] || { echo "root chain stalled at round $b (see root*/debug.log: 'voter clock skew' / 'in recovery'); a loaded host (concurrent builds) is the known trigger" >&2; return 1; }
+}
+
 status() {
   for i in $(seq 1 "$validators"); do
     printf 'reth%s block=%s\n' "$i" "$(rpc "http://127.0.0.1:$((rethEthBase + i - 1))" eth_blockNumber '[]' | python3 -c "import sys,json;print(int(json.load(sys.stdin)['result'],16))" 2>/dev/null || echo down)"
   done
-  curl -fsS http://127.0.0.1:25866/api/v1/roundInfo 2>/dev/null | python3 -c "import sys,json;d=json.load(sys.stdin);print('root round',d['roundNumber'])" || echo "root rpc down"
+  curl -fsS http://127.0.0.1:$rootRpcPort/api/v1/roundInfo 2>/dev/null | python3 -c "import sys,json;d=json.load(sys.stdin);print('root round',d['roundNumber'])" || echo "root rpc down"
 }
 
 # Deploys the TokenVerifier and the BridgeVault (unicity-pos-contracts script/BridgeDeploy.s.sol, which refuses a vault whose rootGenesis,
@@ -165,8 +195,9 @@ vault() {
   local dep=$CONTRACTS/script/bridge-deploy key=${DNB_DEPLOYER_KEY:-0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80}
   "$DNB_TOOL" deployment --identities test-nodes/genesis-identities.json --agg-conf "test-nodes/shard-conf-${aggPartition}_0.json" --out test-nodes/bridge-deployment.json
   cp test-nodes/genesis-identities.json "$dep/genesis.json"; cp test-nodes/bridge-deployment.json "$dep/deployment.json"
+  root_alive || return 1
   (cd "$CONTRACTS" && BRIDGE_GENESIS=script/bridge-deploy/genesis.json BRIDGE_DEPLOYMENT=script/bridge-deploy/deployment.json \
-     forge script script/BridgeDeploy.s.sol --rpc-url "http://127.0.0.1:$rethEthBase" --private-key "$key" --broadcast --slow) | tee test-nodes/vault-deploy.log
+     timeout "${DNB_FORGE_TIMEOUT:-600}" forge script script/BridgeDeploy.s.sol --rpc-url "http://127.0.0.1:$rethEthBase" --private-key "$key" --broadcast --slow) | tee test-nodes/vault-deploy.log
   python3 - "$CONTRACTS" <<'PY'
 import json, sys
 run = json.load(open(sys.argv[1] + "/broadcast/BridgeDeploy.s.sol/31337/run-latest.json"))
@@ -186,9 +217,9 @@ config() {
 import json
 a = json.load(open("test-nodes/bridge-addresses.json"))
 json.dump({"dir": "$PWD/test-nodes", "ethUrls": ["http://127.0.0.1:%d" % (18545 + i) for i in range($validators)], "aggUrl": "http://127.0.0.1:${AGG_PORT:-3001}",
-  "vault": a["BridgeVault"], "verifier": a["TokenVerifier"], "rootRpc": "http://127.0.0.1:25866", "chainId": $chainID, "evmPartition": $partitionID,
+  "vault": a["BridgeVault"], "verifier": a["TokenVerifier"], "rootRpc": "http://127.0.0.1:$rootRpcPort", "chainId": $chainID, "evmPartition": $partitionID,
   "aggPartition": $aggPartition, "archive": "$PWD/test-nodes/archives/evm1"}, open("test-nodes/lane-config.json", "w"), indent=2)
 PY
 }
 
-case "${1:-}" in restart-agg) restart_agg ;; restart-validator) restart_validator "${2:?validator number}" ;; all) up; vault; config ;; config) config ;; vault) vault ;; up) up ;; down) down ;; status) status ;; *) echo "usage: $0 up|down|status" >&2; exit 2 ;; esac
+case "${1:-}" in restart-agg) restart_agg ;; restart-all) restart_all_validators ;; restart-validator) restart_validator "${2:?validator number}" ;; all) up && vault && config ;; config) config ;; vault) vault ;; up) up ;; down) down ;; status) status ;; *) echo "usage: $0 up|down|status" >&2; exit 2 ;; esac

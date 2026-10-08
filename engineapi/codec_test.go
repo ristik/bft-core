@@ -38,7 +38,7 @@ func samplePayload() ExecutionPayloadV3 {
 // it compares equal after a JSON round trip.
 func sampleCompanion() *SealCompanion {
 	return &SealCompanion{
-		B1Update:   data{},
+		B1Update: data{}, RootRecords: data{},
 		RootInput:  data{0x01, 0x02, 0x03},
 		Witnesses:  []data{{0xaa, 0xbb}, {0xcc}},
 		Provenance: "build",
@@ -158,7 +158,7 @@ func TestSealCompanionVector(t *testing.T) {
 	// that order, with 0x-prefixed hex DATA. Any fourth key or a base64 byte
 	// string is a hard decode error on the other side.
 	require.Equal(t,
-		`{"b1Update":"0x","rootInput":"0x010203","witnesses":["0xaabb","0xcc"],"provenance":"build"}`,
+		`{"b1Update":"0x","records":"0x","rootInput":"0x010203","witnesses":["0xaabb","0xcc"],"provenance":"build"}`,
 		string(raw))
 }
 
@@ -168,7 +168,7 @@ func TestSealCompanionEmptyWitnessesEncodeAsArray(t *testing.T) {
 	nilWitnesses, err := json.Marshal(SealCompanion{RootInput: data{0x01}, Provenance: "build"})
 	require.NoError(t, err)
 	require.Equal(t,
-		`{"b1Update":"0x","rootInput":"0x01","witnesses":[],"provenance":"build"}`,
+		`{"b1Update":"0x","records":"0x","rootInput":"0x01","witnesses":[],"provenance":"build"}`,
 		string(nilWitnesses))
 	require.NotContains(t, string(nilWitnesses), "null")
 

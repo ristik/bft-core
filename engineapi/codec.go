@@ -55,8 +55,8 @@ type ProposalEnvelope struct {
 // enforced here, matching the ureth side.
 type SealCompanion struct {
 	B1Update data `json:"b1Update"`
-	// RootRecords is the canonical root-record import companion whose SHA-256 the root input commits to (rootRecordsHash).
-	RootRecords data   `json:"rootRecords,omitempty"`
+	// RootRecords is the canonical root-record import companion whose SHA-256 the root input commits to (rootRecordsHash); ureth wire.rs names the field "records" and requires it (empty when there is no import).
+	RootRecords data   `json:"records"`
 	RootInput   data   `json:"rootInput"`
 	Witnesses   []data `json:"witnesses"`
 	Provenance  string `json:"provenance"`
@@ -146,7 +146,7 @@ func (c SealCompanion) MarshalJSON() ([]byte, error) {
 	}
 	return json.Marshal(struct {
 		B1Update    data   `json:"b1Update"`
-		RootRecords data   `json:"rootRecords,omitempty"`
+		RootRecords data   `json:"records"`
 		RootInput   data   `json:"rootInput"`
 		Witnesses   []data `json:"witnesses"`
 		Provenance  string `json:"provenance"`
@@ -174,7 +174,7 @@ func (c SealCompanion) MarshalJSON() ([]byte, error) {
 // transition is pending, never that unauthenticated data was dropped.
 type SealBuildInput struct {
 	B1Update    data   `json:"b1Update"`
-	RootRecords data   `json:"rootRecords,omitempty"`
+	RootRecords data   `json:"records"`
 	RootInput   data   `json:"rootInput"`
 	Transitions []data `json:"transitions"`
 
@@ -194,7 +194,7 @@ func (s SealBuildInput) MarshalJSON() ([]byte, error) {
 	}
 	return json.Marshal(struct {
 		B1Update    data   `json:"b1Update"`
-		RootRecords data   `json:"rootRecords,omitempty"`
+		RootRecords data   `json:"records"`
 		RootInput   data   `json:"rootInput"`
 		Transitions []data `json:"transitions"`
 		pairWire
