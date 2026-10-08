@@ -35,6 +35,10 @@ type State struct {
 	// an assignment handoff ends (the successor's first ordinary block) and leaves with its closure. The first closure of an epoch is the
 	// only one.
 	Awaiting []Awaiting
+	// Closed are the epochs whose closure the log carries, with the H round each closed at, ascending by epoch and never pruned. A
+	// Closure record names its H round (not its epoch, which is no part of the record identity), so this list is what lets a reader of
+	// the log authenticate the closed epoch a record is served with.
+	Closed []Awaiting
 	// Retired are the (id, generation) retirement markers with the reference digest each retired with, ascending by key: a generation
 	// retires once, a repeat of the same request is no new record and a conflicting one is refused.
 	Retired []Retired
@@ -91,6 +95,7 @@ func NewState(epoch, firstRound uint64) State {
 func (s State) clone() State {
 	s.Pending = append([]PendingH(nil), s.Pending...)
 	s.Awaiting = append([]Awaiting(nil), s.Awaiting...)
+	s.Closed = append([]Awaiting(nil), s.Closed...)
 	s.Retired = append([]Retired(nil), s.Retired...)
 	s.Resolved = append([][32]byte(nil), s.Resolved...)
 	return s
@@ -241,7 +246,10 @@ func (s State) Close(epoch uint64, data []byte, round, timestamp uint64) (State,
 		return State{}, Record{}, err
 	}
 	s = s.clone()
+	closed := s.Awaiting[i]
 	s.Awaiting = append(s.Awaiting[:i], s.Awaiting[i+1:]...)
+	at := sort.Search(len(s.Closed), func(k int) bool { return s.Closed[k].Epoch >= epoch })
+	s.Closed = append(s.Closed[:at], append([]Awaiting{closed}, s.Closed[at:]...)...)
 	next, rec, err := s.append(KindClosure, data, Anchor{progress, timestamp})
 	if err != nil {
 		return State{}, Record{}, err
@@ -354,6 +362,10 @@ func (s State) Bytes() []byte {
 	for _, a := range s.Awaiting {
 		awaiting = append(awaiting, []any{a.Epoch, a.HRound})
 	}
+	closed := make([]any, 0, len(s.Closed))
+	for _, a := range s.Closed {
+		closed = append(closed, []any{a.Epoch, a.HRound})
+	}
 	retired := make([]any, 0, len(s.Retired))
 	for _, x := range s.Retired {
 		retired = append(retired, []any{x.ID, x.Generation, x.RefDigest[:]})
@@ -363,7 +375,7 @@ func (s State) Bytes() []byte {
 		resolved = append(resolved, x[:])
 	}
 	b, err := types.Cbor.Marshal([]any{stateDomain, uint64(1), s.Epoch, s.Offset, s.First, s.Frozen, s.Endpoint, s.NextEpoch, s.NextOffset, s.NextFirst,
-		pending, awaiting, retired, resolved, s.Count, s.Tip[:], s.LastProgress, s.LastTime})
+		pending, awaiting, retired, resolved, s.Count, s.Tip[:], s.LastProgress, s.LastTime, closed})
 	if err != nil {
 		panic(err) // fixed shape of scalars and byte strings
 	}
@@ -376,7 +388,7 @@ func (s State) Digest() [32]byte { return sha256.Sum256(s.Bytes()) }
 // DecodeState parses the canonical encoding and refuses anything that is not exactly that or not internally consistent.
 func DecodeState(data []byte) (State, error) {
 	var f []any
-	if err := types.Cbor.Unmarshal(data, &f); err != nil || len(f) != 18 {
+	if err := types.Cbor.Unmarshal(data, &f); err != nil || len(f) != 19 {
 		return State{}, fmt.Errorf("%w: shape", ErrState)
 	}
 	if d, ok := f[0].(string); !ok || d != stateDomain {
@@ -397,7 +409,8 @@ func DecodeState(data []byte) (State, error) {
 	await, ok4 := f[11].([]any)
 	ret, ok5 := f[12].([]any)
 	res, ok6 := f[13].([]any)
-	if !ok || !ok2 || len(tip) != 32 || !ok3 || !ok4 || !ok5 || !ok6 {
+	clo, ok7 := f[18].([]any)
+	if !ok || !ok2 || len(tip) != 32 || !ok3 || !ok4 || !ok5 || !ok6 || !ok7 {
 		return State{}, fmt.Errorf("%w: field type", ErrState)
 	}
 	s := State{Epoch: u(2), Offset: u(3), First: u(4), Frozen: frozen, Endpoint: u(6), NextEpoch: u(7), NextOffset: u(8), NextFirst: u(9),
@@ -438,6 +451,20 @@ func DecodeState(data []byte) (State, error) {
 			return State{}, fmt.Errorf("%w: awaiting field", ErrState)
 		}
 		s.Awaiting = append(s.Awaiting, a)
+	}
+	for _, cv := range clo {
+		cf, isArr := cv.([]any)
+		if !isArr || len(cf) != 2 {
+			return State{}, fmt.Errorf("%w: closed entry", ErrState)
+		}
+		var a Awaiting
+		var e1, e2 bool
+		a.Epoch, e1 = cf[0].(uint64)
+		a.HRound, e2 = cf[1].(uint64)
+		if !e1 || !e2 {
+			return State{}, fmt.Errorf("%w: closed field", ErrState)
+		}
+		s.Closed = append(s.Closed, a)
 	}
 	for _, rv := range ret {
 		rf, isArr := rv.([]any)
@@ -489,6 +516,8 @@ func (s State) consistent() error {
 		return fmt.Errorf("%w: pending handoff beyond the current epoch", ErrState)
 	case !awaitingAscending(s.Awaiting):
 		return fmt.Errorf("%w: awaiting epochs not strictly ascending", ErrState)
+	case !awaitingAscending(s.Closed):
+		return fmt.Errorf("%w: closed epochs not strictly ascending", ErrState)
 	case !resolvedAscending(s.Resolved):
 		return fmt.Errorf("%w: resolved results not strictly ascending", ErrState)
 	case !retiredAscending(s.Retired):
@@ -524,4 +553,15 @@ func resolvedAscending(r [][32]byte) bool {
 		}
 	}
 	return true
+}
+
+// ClosedEpochOf is the closed epoch a Closure of the given H round belongs to: the epoch of the closed entry that closed at that round.
+// An epoch closes once and an H round ends one epoch, so the answer is unique; false when the log has closed no epoch at that round.
+func (s State) ClosedEpochOf(hRound uint64) (uint64, bool) {
+	for _, c := range s.Closed {
+		if c.HRound == hRound {
+			return c.Epoch, true
+		}
+	}
+	return 0, false
 }

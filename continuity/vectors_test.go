@@ -206,7 +206,7 @@ func cases() []vCase {
 			for k := rng.Intn(4); k > 0 && len(s) > 1; k-- {
 				switch rng.Intn(4) {
 				case 0:
-					s = append(s[: len(s)-1 : len(s)-1])
+					s = s[: len(s)-1 : len(s)-1]
 				case 1:
 					s = append(s, vMember{ID: uint64(100 + rng.Intn(50)), Binding: uint64(100 + rng.Intn(50)), Weight: uint64(1 + rng.Intn(40))})
 				case 2:

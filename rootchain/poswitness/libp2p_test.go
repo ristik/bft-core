@@ -36,15 +36,15 @@ func TestWitnessesOverTwoRealHosts(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	got, err := Fetch(ctx, FromLibp2p(voter), []peer.ID{author.ID()}, held)
+	got, err := Fetch(ctx, FromLibp2p(voter), []peer.ID{author.ID()}, held, MaxWitnessBytes)
 	require.NoError(t, err)
 	require.Equal(t, big, got, "a multi-megabyte witness arrives whole")
 
 	absent := sha256.Sum256([]byte("nobody holds this"))
-	_, err = Fetch(ctx, FromLibp2p(voter), []peer.ID{author.ID()}, absent)
+	_, err = Fetch(ctx, FromLibp2p(voter), []peer.ID{author.ID()}, absent, MaxWitnessBytes)
 	require.ErrorIs(t, err, ErrUnavailable, "a witness the peer does not hold")
 
 	// a peer outside the allow-list is reset, however many times it asks
-	_, err = Fetch(ctx, FromLibp2p(stranger), []peer.ID{author.ID()}, held)
+	_, err = Fetch(ctx, FromLibp2p(stranger), []peer.ID{author.ID()}, held, MaxWitnessBytes)
 	require.ErrorIs(t, err, ErrUnavailable)
 }

@@ -248,11 +248,11 @@ in production, and there is no migration (greenroom, one format).
   timestamp of the verified root certificate's `RootOrigin` (`ReferenceTime`), imported on one lineage (network, then epoch and round) and
   never backwards; a record cannot be ordered before a time was imported. `rootrecords/testdata/records-vectors.json` is produced by this
   projection and replayed verbatim by the custody contracts' tests.
-- **UC time is quorum-approved wall-clock time.** The seal timestamp is the root proposer's wall clock, approved by the voting quorum.
-  Root consensus bounds it by a monotonic rule against the parent and a 30 s voter clock skew (ristik/bft-core#445, merged in
-  ristik/bft-core#447; see Root UC time below), so the time custody gates exits on is a bounded, quorum-attested measure, not an
-  operator or EVM value. The importer additionally keeps it monotonic on one lineage; that check is defence in depth and does not
-  replace the root rule.
+- **UC time is an authenticated physical-time annotation.** An honest proposer uses the later of its clock and the authenticated
+  parent time; equal seconds are valid. Root consensus enforces non-decrease and a 30 s live voter future bound (#479). The
+  bound relative to UTC depends on honest-clock accuracy; it supplies no past-time bound. Custody consumes UC time, not EVM time.
+  A UC-time delay alone does not prove a real-time hold after retirement without an anchor-freshness premise (see Root UC time below).
+  The importer also enforces non-decrease on one lineage; this is defence in depth and does not replace the root rule.
 - **Root payload and P85 controls (`rootchain/consensus/types`).** The profile-2 root payload is exactly the definite four-element tuple
   `[2, Requests, HandoffRecords, PosControls]`; every collection is a definite array (empty is `80`, never null), so the empty payload is
   `8402808080`. The retired three-element form, a null or indefinite collection, other arities or tags and any non-canonical encoding
@@ -302,30 +302,65 @@ in production, and there is no migration (greenroom, one format).
   above and the vectors are what it must match. The Closure and Retirement digest words (exposure, key history, reference digest) are
   contract-derived and opaque labels in the vectors.
 
-## Root UC time (#445)
+## Root UC time (#445, corrected by #479)
 
-Live root voting requires a proposal timestamp strictly greater than its executed
-QC parent's timestamp and at most `MaxClockSkew` (DEV: 30 seconds) ahead of the
-voter's local clock. Proposers use `max(now, parent+1)`, including TC rounds and
-restart/recovery; epoch anchors retain the old checkpoint time. New scheme 2 votes and QCs authenticate the timestamp through an appended
-VoteInfo field. Recovery compares executed times against verified QCs and the
-committed head against its signed native seal before installing a time floor.
-Old timestamp-less QCs retain their exact historical verification bytes, but
-need a separate signed commit seal to authenticate a block time. UC sealing
-uses the committed block time. Importers keep their monotonic checks.
+The protocol provides a strictly ordered committed history with an authenticated, non-decreasing physical-time annotation.
+Consensus position determines ordering; timestamps support time-based predicates. Timestamp advancement is independent of block
+production rate. Certified timestamps have a bounded future offset under explicit honest-clock assumptions, while freshness and
+eventual time advancement depend on consensus progress.
 
-Clock checks apply only to live voting, never certified-history verification or
-catch-up replay. There is no past-time cutoff, to preserve delayed recovery.
-Whole-second strict increases may force voting to wait for wall clocks under
-subsecond production. The root specification's UC seal timestamp section records
-the rationale and pinned Aptos references; this DEV rule requires validators to
-upgrade together.
+[ADR 0013](../adr/0013-root-time-semantics.md) records the decision. The semi-formal specification and proof arguments are in
+[UC seal timestamps](../pos/specification/bft.tex) (`sec:root-time-semantics`).
 
-The timestamp-bound scheme 2 extension uses a five-field wire VoteInfo and a
-seven-field signed VoteInfo preimage. Old four/six-field encodings remain valid
-history; old readers refuse the new arity. DEV validators must upgrade together.
-A completed replay followed by a live timestamp refusal leaves frontier serving
-unfaulted; it is not an incomplete or uncertain recovery write.
+For a block `B`, let `P(B)` be its authenticated parent, `R(B)` its consensus position under epoch/round ordering, and `T(B)` its
+nonzero Unix timestamp in whole seconds. `C_v(t)` is voter `v`'s clock reading at real time `t`; `Delta = 30 seconds` in DEV.
+
+- Positions strictly advance on the selected committed lineage. Round gaps can include timeouts; they measure neither elapsed
+  seconds nor a count of committed blocks. Hashes and ancestry still identify the particular block.
+- In addition to ordinary consensus checks, a live voter requires `T(B) >= T(P(B))` and `T(B) <= C_v(t_vote) + Delta`.
+  Implement the future check by comparing before subtracting, without overflowing unsigned arithmetic.
+- An honest proposer uses `T(B) = max(C_p(t_propose), T(P(B)))`. Several rounds may share a second.
+- `P(B)` is the locally executed QC parent, not the block committed by its ledger commit info. A timeout certificate does not
+  reset that floor. Epoch anchors retain the authenticated old committed checkpoint time. Restart, recovery and clock rollback
+  do not authorize lowering it; missing parent state prevents voting.
+
+The guarantees are conditional and distinct:
+
+1. **Order and non-decrease:** underlying consensus safety orders the committed lineage; induction over validated parent edges
+   gives `T(A) <= T(B)` for every ancestor `A` of `B`. Handoffs preserve the checkpoint floor. Legacy history needs its own
+   monotonicity premise; authenticating a timestamp alone does not prove how it was chosen.
+2. **Future bound:** assume a certificate includes an honest signer enforcing this live rule and honest clocks satisfy
+   `C_v(t) <= t + eps`, including clock error and second quantization. At certificate formation time `t_cert`, that signer voted
+   at `t_v <= t_cert`, so `T(B) <= C_v(t_v) + Delta <= t_cert + eps + Delta`. This also bounds time at later commitment or
+   observation, but supplies no unconditional UTC claim and no past-time/freshness bound. Genesis, synthetic anchors and
+   differently certified legacy history do not acquire a fresh live-time guarantee merely through import.
+3. **No rate-induced inflation:** along an honestly proposed parent chain,
+   `T(B_n) = max(T(B_0), C_p1(t_1), ..., C_pn(t_n))`. No term grows with block count. An inherited future floor may persist;
+   honest proposers do not amplify it. Byzantine proposals are still constrained by honest voters' future bound.
+4. **Conditional timestamp liveness:** if enough honest voting weight to form a quorum has both
+   `T(P(B)) <= C_v(t_vote) + Delta` and `C_p(t_propose) <= C_v(t_vote) + Delta`, both arguments of the maximum are admissible.
+   Timestamp checks then impose no minimum block interval. Full liveness still needs the underlying network, leader and state
+   availability assumptions. A too-future floor or clock rollback can pause voting until clocks catch up; never lower the floor
+   to force progress.
+
+**Deadline semantics.** `T(B) >= D` implies only `t_cert >= D - (Delta + eps)` under the future-bound premises. An absolute
+wall-time gate must account for that tolerance. `T(B) < D` does not prove real-time certification before `D`. A relative gate
+`T(B) >= T(A) + d` does not alone establish `d` real seconds since anchor certification: with a separate anchor-freshness
+premise `T(A) >= t_A - sigma`, it establishes only `t_cert - t_A >= d - sigma - (Delta + eps)`. Without that premise no positive
+relative real-time hold follows. Do not derive withdrawal or checkpoint-protection guarantees by converting rounds into seconds,
+or by substituting the strictly increasing EVM header timestamp. No per-block time advance, bounded staleness, or time advance
+during a consensus stall is promised. Quantitative freshness requires additional progress and clock assumptions.
+
+**Authentication and recovery.** New scheme 2 votes and QCs authenticate time in an appended VoteInfo field. Recovery compares
+executed times against verified QCs and the committed head against its signed native seal before installing a floor. Historical
+four-field wire/six-field signing encodings remain valid with their original bytes; new five-field wire/seven-field signing
+encodings bind a nonzero timestamp. A timestamp-less uncommitted QC cannot authenticate a live floor; a historical committed
+block needs a separately verified native commit seal. UC sealing uses the committed block time. Current-clock checks apply to
+live voting, including recovery-triggered votes and restart retries, never certified-history verification or catch-up replay.
+A live timestamp refusal after completed replay leaves frontier serving unfaulted; it is not a recovery persistence fault.
+
+#479 changed validity, not units or encoding. Validators enforcing the former strict-increase rule reject equal timestamps;
+DEV validators must activate the rule together. The timestamp-bound wire extension also requires compatible readers.
 
 ## Amendment: PoA genesis identities and the first coupled handoff
 

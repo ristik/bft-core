@@ -33,6 +33,7 @@ type (
 		roundToNode map[uint64]*node
 		highQc      *abdrc.QuorumCert
 		blocksDB    PersistentStore
+		cuts        cutRing      // control cuts of recent commits, for the shards' authenticated record feed
 		log         *slog.Logger // optional: set by the BlockStore that owns the tree
 		m           sync.RWMutex
 	}
@@ -447,6 +448,7 @@ func (bt *BlockTree) Commit(commitQc *abdrc.QuorumCert) ([]*certification.Certif
 	}
 	// update the new root with commit QC info
 	commitNode.data.CommitQc = commitQc
+	bt.captureCut(commitNode.data)
 	// The block that first commits the handoff record is THE checkpoint of that handoff. It is captured here, once, and persisted before
 	// the block becomes the root (a later commit prunes it), so every honest root serves the same one whenever it is asked.
 	if err := bt.captureHandoffCheckpoint(bt.root.data, commitNode.data); err != nil {

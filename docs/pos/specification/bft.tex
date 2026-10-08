@@ -1746,45 +1746,145 @@ A standardization attempt of the closest appropriate signature scheme is availab
 Specifically, threshold signature schemes are avoided because of 1) accountability requirement 2) complicated and security-critical key setup, and 3) missing support of non-equal voting powers.
 
 \subsection{UC seal timestamps (DEV)}
-Rounds remain the primary consensus measure of time. The UC seal timestamp is
-quorum-approved wall-clock time in whole seconds. For an ordinary proposal with
-parent QC, the parent is the locally executed block certified by that QC (not
-necessarily the block committed by its ledger commit info). Its timestamp must
-be strictly greater than the parent's timestamp. A timeout certificate does not
-change this parent or relax the rule. Across an epoch anchor, use the retained
-old committed checkpoint timestamp as the time floor.
+\label{sec:root-time-semantics}
+\paragraph{Two coordinates.}
+Each certified block has a consensus position and an authenticated physical-time
+annotation. For a block $B$, let $P(B)$ denote its authenticated parent, $R(B)$
+its consensus position under the protocol's epoch and round ordering, and $T(B)$
+its nonzero Unix timestamp in whole seconds. Within an epoch the child round
+exceeds the parent round; across epochs the authenticated handoff establishes
+succession. Positions order the selected committed lineage. They are not elapsed
+time, a count of committed blocks, or a replacement for block hashes and ancestry:
+timeout rounds can advance without a committed block, and competing proposals
+must still be resolved by consensus. Several successive blocks may share $T$.
 
-A proposer selects $\max(\mathit{now}, \mathit{parentTime}+1)$, even after clock
-rollback, and refuses to propose if the parent timestamp cannot be incremented.
-Before issuing any live vote, including a recovery-triggered vote or a durable
-vote retry after restart, a voter rejects a timestamp more than
-\texttt{MaxClockSkew} (DEV: 30 seconds) ahead of its current local clock.
-Missing executed parent state prevents voting. New scheme 2 votes bind the proposed timestamp in the vote-info hash and carry
-it in the QC. Validators compare the executed block time with that signed time
-before recovery installs it or an incoming QC promotes it to a live parent.
-The committed head must match its signed native commit-seal time. Historical
-timestamp-less scheme 2 QCs still verify, but only an independently verified
-commit seal can authenticate their block time. A timestamp-less uncommitted QC
-is insufficient evidence for a live parent floor. No local-clock cutoff is used
-for this proof-to-time check.
+\paragraph{Live validity and proposal construction.}
+Let $C_v(t)$ be validator $v$'s Unix clock reading at real time $t$, and let
+$\Delta=30\,\mathrm{s}$ be \texttt{MaxClockSkew} in DEV. In addition to ordinary
+consensus validity and safety checks, an honest validator votes only if
+\[
+  T(B) \geq T(P(B)), \qquad
+  T(B) \leq C_v(t_{\mathrm{vote}})+\Delta.
+\]
+The implementation compares before subtracting to avoid unsigned overflow.
+An honest proposer $p$ chooses
+\[
+  T(B)=\max\{C_p(t_{\mathrm{propose}}),T(P(B))\}.
+\]
+The parent is the locally executed block certified by the proposal's parent QC,
+not necessarily the block committed by that QC's ledger commit info. A timeout
+certificate changes neither this parent time floor nor the rule. An epoch anchor
+retains the authenticated old committed checkpoint's timestamp as the floor for
+the successor. Missing executed parent state prevents voting. Clock rollback
+never authorizes lowering the floor. Live checks also apply to recovery-triggered
+votes and durable vote retries after restart.
 
-There is no past-time cutoff: delayed proposals can safely advance a recovering
-node, while a cutoff could stall it after a long outage. Local-clock checks must
-never be applied when verifying or replaying already-certified history. The
-bounds assume honest voters have reasonably synchronized clocks; they do not
-prove an absolute UTC bound. Strict increases in whole seconds can run ahead
-of wall time under subsecond production; the skew guard then withholds votes
-until clocks catch up. This is an intentional liveness tradeoff in DEV.
+New scheme 2 votes bind the timestamp in their vote-info hash and carry it in the
+QC. Before a recovered block or an incoming QC supplies a live parent, its
+executed timestamp must match its verified proof. The committed head must match
+its signed native commit seal. Historical timestamp-less scheme 2 QCs still
+verify with their original bytes; only an independently verified commit seal
+can authenticate their block time. A timestamp-less uncommitted QC alone cannot
+supply that floor. Recovery never invents, resets or clamps authenticated time.
+Current-clock admission checks do not apply when verifying or replaying
+already-certified history. Authentication of old time does not retroactively
+prove that its original signers enforced this live rule.
 
-This follows the Diem/Aptos separation of monotonic consensus time and local
-clock admission: Aptos' proposal generator documents increasing branch times,
-and its block store waits until local time reaches a proposed timestamp.
-BFT Core uses a bounded 30-second voting tolerance instead of that wait, and
-requires strict increases even for empty suffix blocks (Aptos has a
-reconfiguration exception). See the pinned implementation:
-\url{https://github.com/aptos-labs/aptos-core/blob/4ee095f5cd2b2448ba92bb06729e1c0be7be172d/consensus/src/liveness/proposal_generator.rs}
-and
-\url{https://github.com/aptos-labs/aptos-core/blob/4ee095f5cd2b2448ba92bb06729e1c0be7be172d/consensus/src/block_storage/block_store.rs}.
+\paragraph{Guarantees and assumptions.}
+These claims assume the underlying consensus safety rules, authenticated ancestry
+and handoffs, and the appropriate honest voting weight in each certificate.
+They describe one selected committed lineage, not a total order of every fork.
+\begin{enumerate}
+\item \textbf{Strict history order.} Consensus positions advance on that lineage,
+independently of whether timestamps are equal. Timestamp equality introduces no
+new ambiguity in block identity or ancestry.
+\item \textbf{Time never goes backwards.} For every ancestor $A$ of $B$,
+$T(A)\leq T(B)$. This follows by induction over validated parent edges and the
+retained checkpoint floor at handoffs. For imported legacy history the same
+claim requires its monotonicity as an explicit premise; authentication alone
+cannot establish the premise.
+\item \textbf{Conditional future bound.} Suppose a valid certificate contains an
+honest signer that enforced the live rule, and honest clocks satisfy
+$C_v(t)\leq t+\varepsilon$, where $\varepsilon$ accounts for permitted clock error
+and whole-second quantization. If the certificate for $B$ forms at real time
+$t_{\mathrm{cert}}$, that signer voted at $t_v\leq t_{\mathrm{cert}}$, hence
+\[
+ T(B)\leq C_v(t_v)+\Delta
+       \leq t_v+\varepsilon+\Delta
+       \leq t_{\mathrm{cert}}+\varepsilon+\Delta.
+\]
+The same upper bound holds at a later commit or observation time. A commit seal
+may annotate an earlier block: use that block's authenticated timestamp, not a
+new clock sample at sealing. Genesis and synthetic anchors inherit their trusted
+floor; they are not fresh live votes. Signatures alone do not establish UTC
+accuracy, freshness, or a bound for history certified under other rules.
+\item \textbf{No rate-induced inflation.} For a parent chain $B_0,\ldots,B_n$
+whose subsequent proposals follow the honest construction rule,
+\[
+ T(B_n)=\max\{T(B_0),C_{p_1}(t_1),\ldots,C_{p_n}(t_n)\}.
+\]
+There is no additive term proportional to block count. Additional blocks within
+a second do not consume future-clock tolerance. A future parent floor may
+persist, but honest proposers do not amplify it. Byzantine proposers need not
+follow this construction; they remain subject to honest voters' validity rule.
+\end{enumerate}
+
+\paragraph{Conditional timestamp liveness.}
+For an otherwise valid honest proposal, suppose enough honest voting weight to
+form a quorum has, at its respective vote times,
+\[
+ T(P(B))\leq C_v(t_{\mathrm{vote}})+\Delta, \qquad
+ C_p(t_{\mathrm{propose}})\leq C_v(t_{\mathrm{vote}})+\Delta.
+\]
+Both arguments of the proposer's maximum are then admissible to every such
+voter, so timestamp admission does not prevent the quorum. Under those
+conditions it imposes no minimum interval between blocks. This is a sufficient
+condition, not an independent consensus liveness theorem: network synchrony,
+leader progress, available parent state and ordinary consensus rules still
+apply. If the inherited floor exceeds the required voters' future bounds,
+voting may wait until their clocks catch up. Eventual catch-up additionally
+requires clocks to advance and the floor to remain finite; unreasonable clock
+skew or rollback can still delay progress.
+
+\paragraph{Limits and deadline interpretation.}
+There is no past-time cutoff. The rule does not guarantee that every block
+advances time, that a round difference measures seconds, that timestamps are
+close to creation time in both directions, or that time advances during a
+consensus stall. Honest proposals refresh time when they enter committed
+history; a quantitative freshness bound requires additional assumptions about
+that progress and clock accuracy.
+
+If a certificate satisfying the future-bound premises has $T(B)\geq D$, then
+\[
+ t_{\mathrm{cert}}\geq D-(\Delta+\varepsilon).
+\]
+An absolute wall-time gate must account for that tolerance. Conversely,
+$T(B)<D$ does not prove certification occurred before real time $D$, since the
+rule supplies no lower freshness bound. A relative gate
+$T(B)\geq T(A)+d$ does not by itself prove $d$ real seconds have elapsed since
+$A$ was certified. If a separate premise supplies
+$T(A)\geq t_A-\sigma$ at that anchor's certification time $t_A$, the derived
+bound is only
+\[
+ t_{\mathrm{cert}}-t_A\geq d-\sigma-(\Delta+\varepsilon).
+\]
+Without such an anchor-freshness premise, no positive relative real-time hold
+follows from timestamp subtraction alone. Round-denominated protection and EVM
+header timestamps cannot substitute for that premise.
+
+\paragraph{Specification statement.}
+The protocol provides a strictly ordered committed history with an
+authenticated, non-decreasing physical-time annotation. Consensus position
+determines ordering; timestamps support time-based predicates. Timestamp
+advancement is independent of block production rate. Certified timestamps have
+a bounded future offset under explicit honest-clock assumptions, while
+freshness and eventual time advancement depend on consensus progress.
+
+This rule records the non-decreasing timestamp fix in PR \#479 and supersedes
+PR \#447's strict whole-second increase. See ADR 0013 for the decision and
+consumer obligations. It changes no timestamp units or wire encoding. Existing
+validators that still require strict increase reject equal timestamps, so DEV
+validators must activate the rule together.
 
 \paragraph{Timestamp-bound scheme 2 extension.}
 For new live votes, append the nonzero proposal timestamp to the scheme 2

@@ -78,7 +78,7 @@ func TestFetchReturnsTheWitnessAnyAllowedPeerHolds(t *testing.T) {
 		"empty":  NewServer(memSource{}, allowAll),
 		"holder": NewServer(memSource{h: data}, allowAll),
 	}}
-	got, err := Fetch(context.Background(), net, []peer.ID{"gone", "empty", "holder"}, h)
+	got, err := Fetch(context.Background(), net, []peer.ID{"gone", "empty", "holder"}, h, MaxWitnessBytes)
 	require.NoError(t, err)
 	require.Equal(t, data, got)
 	require.Equal(t, []peer.ID{"gone", "empty", "holder"}, net.dialled, "peers are asked in the given order")
@@ -88,7 +88,7 @@ func TestFetchStopsAtTheFirstHolder(t *testing.T) {
 	h, data := witness(2)
 	net := &network{self: "asker", servers: map[peer.ID]*Server{
 		"a": NewServer(memSource{h: data}, allowAll), "b": NewServer(memSource{h: data}, allowAll)}}
-	_, err := Fetch(context.Background(), net, []peer.ID{"a", "b"}, h)
+	_, err := Fetch(context.Background(), net, []peer.ID{"a", "b"}, h, MaxWitnessBytes)
 	require.NoError(t, err)
 	require.Equal(t, []peer.ID{"a"}, net.dialled)
 }
@@ -104,7 +104,7 @@ func TestFetchNeverAcceptsBytesThatAreNotTheRequestedWitness(t *testing.T) {
 	require.ErrorIs(t, err, ErrWire)
 	require.Nil(t, got)
 	// and the honest path still works
-	got, err = Fetch(context.Background(), net, []peer.ID{"holder"}, h)
+	got, err = Fetch(context.Background(), net, []peer.ID{"holder"}, h, MaxWitnessBytes)
 	require.NoError(t, err)
 	require.Equal(t, data, got)
 }
@@ -122,7 +122,7 @@ func fetchOneStream(ctx context.Context, l *lyingServer, hash [32]byte) ([]byte,
 		_, _ = s.Write(l.answer)
 		_ = s.Close()
 	}()
-	return exchange(ctx, c, hash)
+	return exchange(ctx, c, hash, MaxWitnessBytes)
 }
 
 func TestFetchRefusesAnOversizedAnnouncement(t *testing.T) {
@@ -133,7 +133,7 @@ func TestFetchRefusesAnOversizedAnnouncement(t *testing.T) {
 		_, _ = s.Write([]byte{0xff, 0xff, 0xff, 0xff})
 		_ = s.Close()
 	}()
-	_, err := exchange(context.Background(), c, [32]byte{1})
+	_, err := exchange(context.Background(), c, [32]byte{1}, MaxWitnessBytes)
 	require.ErrorIs(t, err, ErrWire)
 	require.ErrorContains(t, err, "exceed the bound", "refused for its announced size, before any body is read")
 }
@@ -141,9 +141,9 @@ func TestFetchRefusesAnOversizedAnnouncement(t *testing.T) {
 func TestFetchNamesTheUnavailableWitness(t *testing.T) {
 	h, _ := witness(5)
 	net := &network{self: "asker", servers: map[peer.ID]*Server{"a": NewServer(memSource{}, allowAll)}}
-	_, err := Fetch(context.Background(), net, []peer.ID{"a", "b"}, h)
+	_, err := Fetch(context.Background(), net, []peer.ID{"a", "b"}, h, MaxWitnessBytes)
 	require.ErrorIs(t, err, ErrUnavailable)
-	_, err = Fetch(context.Background(), net, nil, h)
+	_, err = Fetch(context.Background(), net, nil, h, MaxWitnessBytes)
 	require.ErrorIs(t, err, ErrUnavailable)
 }
 
@@ -152,7 +152,7 @@ func TestTheServerServesOnlyAllowedPeers(t *testing.T) {
 	srv := NewServer(memSource{h: data}, func(p peer.ID) bool { return p == "root" })
 	for peerID, want := range map[peer.ID]bool{"root": true, "stranger": false} {
 		net := &network{self: peerID, servers: map[peer.ID]*Server{"srv": srv}}
-		_, err := Fetch(context.Background(), net, []peer.ID{"srv"}, h)
+		_, err := Fetch(context.Background(), net, []peer.ID{"srv"}, h, MaxWitnessBytes)
 		require.Equal(t, want, err == nil, peerID)
 	}
 }
@@ -206,7 +206,7 @@ func TestFetchRetriesAfterAReset(t *testing.T) {
 		go srv.Serve("asker", s)
 		return c, nil
 	})
-	got, err := Fetch(context.Background(), op, []peer.ID{"author"}, h)
+	got, err := Fetch(context.Background(), op, []peer.ID{"author"}, h, MaxWitnessBytes)
 	require.NoError(t, err)
 	require.Equal(t, data, got)
 	require.Zero(t, resets)
@@ -221,7 +221,7 @@ func TestFetchGivesUpWhenTheContextEnds(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
 	defer cancel()
 	start := time.Now()
-	_, err := Fetch(ctx, slow, []peer.ID{"slow1", "slow2", "slow3"}, h)
+	_, err := Fetch(ctx, slow, []peer.ID{"slow1", "slow2", "slow3"}, h, MaxWitnessBytes)
 	require.ErrorIs(t, err, ErrUnavailable)
 	require.Less(t, time.Since(start), 2*time.Second, "one deadline bounds the fetch over every peer and round")
 }
@@ -230,4 +230,26 @@ type openerFunc func(ctx context.Context, to peer.ID, protocol string) (Stream, 
 
 func (f openerFunc) CreateStream(ctx context.Context, to peer.ID, protocol string) (Stream, error) {
 	return f(ctx, to, protocol)
+}
+
+func TestTheCallersBoundRefusesALongerWitnessBeforeAllocatingIt(t *testing.T) {
+	h, data := witness(11)
+	net := &network{self: "asker", servers: map[peer.ID]*Server{"a": NewServer(memSource{h: data}, allowAll)}}
+	// exactly the bound is accepted, one byte less is refused as announced
+	got, err := Fetch(context.Background(), net, []peer.ID{"a"}, h, len(data))
+	require.NoError(t, err)
+	require.Equal(t, data, got)
+	_, err = Fetch(context.Background(), net, []peer.ID{"a"}, h, len(data)-1)
+	require.ErrorIs(t, err, ErrUnavailable)
+	require.ErrorContains(t, err, "exceed the bound")
+	// a bound above the protocol's own is the protocol's
+	c, s := pipePair()
+	go func() {
+		var req [32]byte
+		_, _ = s.Read(req[:])
+		_, _ = s.Write([]byte{0xff, 0xff, 0xff, 0xff})
+		_ = s.Close()
+	}()
+	_, err = exchange(context.Background(), c, [32]byte{1}, 1<<40)
+	require.ErrorContains(t, err, "exceed the bound")
 }

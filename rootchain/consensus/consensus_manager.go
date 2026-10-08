@@ -112,6 +112,8 @@ type (
 		frontier         *frontierSampler
 		recoveryProfile2 bool
 		recoveryHistory  *trusthistorystore.Store
+		posPrefetching   atomic.Int32
+		posQueue         posSubmissions              // submitted Retirement and RejectResult controls waiting for a leader
 		witnesses        WitnessFetcher              // nil: control witnesses are only what the store already holds
 		q3               Q3Authority                 // the verified Q3 history, nil when the binary does not know it
 		v3Planned        atomic.Pointer[V3Candidate] // the last candidate PlanV3Candidate derived: the exact body the members declared readiness for
@@ -609,6 +611,8 @@ func (x *ConsensusManager) handleRootNetMsg(ctx context.Context, msg any) (rErr 
 		return x.onHandoffApprovalMsg(ctx, mt)
 	case *abdrc.HandoffAbortApprovalMsg:
 		return x.onHandoffAbortApprovalMsg(mt)
+	case *abdrc.PosControlSubmissionMsg:
+		return x.onPosControlSubmission(ctx, mt)
 	}
 	return fmt.Errorf("unknown message type %T", msg)
 }
@@ -1483,22 +1487,22 @@ func (x *ConsensusManager) processNewRoundEvent(ctx context.Context) {
 		x.log.WarnContext(ctx, "cannot read proposal parent timestamp", logger.Error(err))
 		return
 	}
-	timestamp, err := proposalTimestamp(types.NewTimestamp(), parent.BlockData.Timestamp)
-	if err != nil {
-		x.log.WarnContext(ctx, "cannot advance proposal timestamp", logger.Error(err))
-		return
+	timestamp := proposalTimestamp(types.NewTimestamp(), parent.BlockData.Timestamp)
+	block := &drctypes.BlockData{
+		Version:   types.Version(profile),
+		Author:    x.id.String(),
+		Round:     round,
+		Epoch:     x.trustBase.Load().Epoch,
+		Timestamp: timestamp,
+		Payload:   payload,
+		Qc:        parentQC,
+		Anchor:    parentAnchor,
+	}
+	if profile == storage.ProfileHandoff && !oldSuffix && parentQC != nil && len(payload.PosControls) < drctypes.MaxPosControls {
+		x.orderSubmittedControl(ctx, block)
 	}
 	proposalMsg := &abdrc.ProposalMsg{
-		Block: &drctypes.BlockData{
-			Version:   types.Version(profile),
-			Author:    x.id.String(),
-			Round:     round,
-			Epoch:     x.trustBase.Load().Epoch,
-			Timestamp: timestamp,
-			Payload:   payload,
-			Qc:        parentQC,
-			Anchor:    parentAnchor,
-		},
+		Block:       block,
 		LastRoundTc: x.pacemaker.LastRoundTC(),
 	}
 	// safety makes simple sanity checks and signs if everything is ok
@@ -1932,7 +1936,7 @@ func (x *ConsensusManager) fetchWitnesses(ctx context.Context, store witnessHold
 		if peers == nil {
 			peers = x.witnessPeers(block)
 		}
-		data, err := x.witnesses(ctx, c.WitnessHash, peers)
+		data, err := x.witnesses(ctx, c.WitnessHash, peers, storage.WitnessBound(c.Op))
 		if err != nil {
 			return errors.Join(storage.ErrWitnessUnavailable, err)
 		}

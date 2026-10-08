@@ -105,7 +105,7 @@ Governance checks parameter proposals when submitted, when executed and at each 
  \item Emission plus outstanding credits never exceeds its allocated pool; rewards, treasury and bridge liabilities cannot spend one another's backing.
 \end{enumerate}
 
-The weak-subjectivity checkpoint freshness limit is a client policy measured in elapsed time, derived from the minimum real-time protection implied by configured round pacing and collateral retention. Changing pacing, churn or protection requires re-evaluating this limit. It is distinct from $W_\mathsf{cert}$ and the number of keys cached in EVM state. No safety claim relies on an unbounded epoch having a fixed duration.
+The weak-subjectivity checkpoint freshness limit is a client policy measured in elapsed time. Its safety limit must derive from an independently enforced real-time collateral-protection floor, never from round counts multiplied by a configured or observed period. Round-based estimates are advisory only; without an authenticated enforced floor the policy is unsupported. A UC-time delay does not by itself supply that floor: Sec.~\ref{sec:root-time-semantics} requires an anchor-freshness premise and an allowance for voter clock tolerance before inferring elapsed real time. Changing clock assumptions, churn or protection requires re-evaluating this limit. It is distinct from $W_\mathsf{cert}$ and the number of keys cached in EVM state. No safety claim relies on an unbounded epoch having a fixed duration.
 
 \section{Upgrade and Delivery Boundaries}\label{sec:gov-delivery}
 
