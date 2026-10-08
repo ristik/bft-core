@@ -138,10 +138,11 @@ func runPairControlOnce(ctx context.Context, engineURL string, secret Secret, et
 	if len(h.Withdrawals) != 0 {
 		return out, errors.New("engineapi: a block with withdrawals is not a block this control can rebuild")
 	}
-	rootInput, retained, err := eth.companion(ctx, h.Hash)
+	build, err := eth.retainedBuild(ctx, h.Hash)
 	if err != nil {
 		return out, err
 	}
+	rootInput, retained := build.RootInput, build.Binding
 	b, err := DecodePairBinding(retained)
 	if err != nil {
 		return out, fmt.Errorf("engineapi: the retained binding does not decode: %w", err)
@@ -213,7 +214,9 @@ func runPairControlOnce(ctx context.Context, engineURL string, secret Secret, et
 	attrs := UnicityPayloadAttributes{PayloadAttributesV3: PayloadAttributesV3{Timestamp: quantity(timestamp), PrevRandao: randao,
 		SuggestedFeeRecipient: recipient, Withdrawals: []WithdrawalV1{}, ParentBeaconBlockRoot: beacon}}
 	copy(attrs.Commitment[:], extra)
-	input := SealBuildInput{RootInput: rootInput, Transitions: transitions, Pair: evidence, PairEmpty: kind == ControlMissingEvidence}
+	// a fresh-B1 build carries the update and the root-record import its root input commits to, exactly as the retained block's build did
+	input := SealBuildInput{RootInput: rootInput, Transitions: transitions, B1Update: data(build.B1Update), RootRecords: data(build.Records),
+		Pair: evidence, PairEmpty: kind == ControlMissingEvidence}
 	engine := NewClient(engineURL, secret)
 	resp, err := engine.ForkchoiceUpdatedWithSealV1(ctx, ForkchoiceStateV1{HeadBlockHash: parentHash, SafeBlockHash: parentHash, FinalizedBlockHash: parentHash}, &attrs, input)
 	switch {

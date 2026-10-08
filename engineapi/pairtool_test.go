@@ -50,6 +50,12 @@ func newPairChain(t *testing.T) pairChain {
 	}
 }
 
+// the B1 update and the root-record import companion the retained block's build carried
+var (
+	pairB1Update = []byte{0xb1, 0x01}
+	pairRecords  = []byte{0xec, 0x02, 0x03}
+)
+
 func (c pairChain) serve(t *testing.T, eth *mockReth) {
 	t.Helper()
 	enc, err := c.binding.Encode()
@@ -69,7 +75,8 @@ func (c pairChain) serve(t *testing.T, eth *mockReth) {
 	})
 	eth.on("unicity_getSealCompanionV1", func(json.RawMessage) (any, *rpcError) {
 		return map[string]any{"status": "found", "companion": map[string]any{"rootInput": "0x" + hexString(c.rootInput),
-			"pairBinding": "0x" + hexString(enc), "witnesses": []any{}, "provenance": "build"}}, nil
+			"pairBinding": "0x" + hexString(enc), "witnesses": []any{}, "provenance": "build",
+			"b1Update": "0x" + hexString(pairB1Update), "records": "0x" + hexString(pairRecords)}}, nil
 	})
 }
 
@@ -120,8 +127,13 @@ func TestEachControlSubmitsTheRetainedBuildWithExactlyOneThingChanged(t *testing
 			// the execution client's schema (ureth#52 wire.rs): the binding field is required, and then each comparison has its own variant
 			var wire struct {
 				PairBinding *data `json:"pairBinding"`
+				B1Update    data  `json:"b1Update"`
+				Records     data  `json:"records"`
 			}
 			require.NoError(t, json.Unmarshal(args[2], &wire))
+			// the rebuild carries what the retained build carried: the update and the root-record import its root input commits to
+			require.Equal(t, data(pairB1Update), wire.B1Update)
+			require.Equal(t, data(pairRecords), wire.Records)
 			if wire.PairBinding == nil {
 				return nil, &rpcError{Code: -32602, Message: "invalid params: missing field `pairBinding`"}
 			}
