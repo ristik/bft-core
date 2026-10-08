@@ -145,6 +145,9 @@ func stallRow(fault func(c *q4bLive), stalled func(c *q4bLive) []string, heal fu
 func TestQ4BLiveA(t *testing.T) {
 	rows := []q4bRow{
 		{"no-fault control", func(t *testing.T, c *q4bLive) {
+			for _, n := range c.nodes {
+				requireWeightedEpoch(t, n.r, 2, n.r.manager.epochAnchor.Slot+1) // the 6,1,1,1 schedule is asserted here, not inherited from the Q3 tests
+			}
 			c.start(c.all()...)
 			c.warm(3, c.all()...)
 			c.requireRecovery(c.mark(), q4RecoverRound, c.all()...)
