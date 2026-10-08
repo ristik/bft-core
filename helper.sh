@@ -115,7 +115,7 @@ function start_root_nodes() {
     local profileArgs=()
     if [ "${M2_PROFILE2:-0}" = 1 ]; then
       profileArgs=(--profile-2)
-      if [ "${Q3_WEIGHT_LANE:-0}" = 1 ]; then
+      if [ "${Q3_B1:-0}" = 1 ]; then
         # Q3 #50: the coupled runtime from genesis, and the PoA genesis committee's identity records the first coupled handoff names as K
         [ -s test-nodes/genesis-identities.json ] || q3_prepare_genesis_identities || exit 1
         profileArgs+=(--q3-lane --genesis-identities test-nodes/genesis-identities.json)
@@ -542,7 +542,7 @@ function start_one_evm_validator() {
     fi
     profileArgs=(--trust-history-profile-2)
     # Q3 #50: the shard node runs the verified coupled runtime (its own verification from the pinned genesis)
-    [ "${Q3_WEIGHT_LANE:-0}" != 1 ] || profileArgs+=(--q3-lane)
+    [ "${Q3_B1:-0}" != 1 ] || profileArgs+=(--q3-lane)
   fi
 
   # The registry layout only matters to the engine-api executor; resolve it from the run's persisted file.

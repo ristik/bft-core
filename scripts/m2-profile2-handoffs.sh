@@ -1,20 +1,9 @@
 # Sourced by reth-paired-devnet.sh after the first paid certified block.
 # Uses the same four real shard validators and their running ureth instances.
 source scripts/lib/m2-handoff-lib.sh
-m2HandoffMode=${M2_HANDOFF_MODE:-}
-if [ -z "$m2HandoffMode" ]; then
-  if [ "$(registry_layout)" = 2 ]; then m2HandoffMode=config-only; else m2HandoffMode=rotate; fi
-fi
-case "$m2HandoffMode" in
-  config-only) ;;
-  rotate)
-    if [ "$(registry_layout)" = 2 ]; then
-      echo "M2_HANDOFF_MODE=rotate is refused on registry layout 2: root-only key rotation is not a coupled validator-set change (use config-only, or the H3 lane for coupled rotation)" >&2
-      return 1
-    fi ;;
-  *) echo "M2_HANDOFF_MODE must be config-only or rotate" >&2; return 1 ;;
-esac
-echo "M2 handoff mode: $m2HandoffMode (registry layout $(registry_layout))"
+# The fresh-B1 layout has one handoff: a same-members root epoch advance through the Q3 flow (V3 candidate, a readiness receipt from every entity, propose).
+# A root-only key rotation is not a coupled validator-set change and is not a mode of this lane; the coupled rotation is the H3 lane's.
+echo "M2 handoffs: same members, Q3 flow (fresh-B1 registry)"
 
 cp test-nodes/trust-base.json test-nodes/trust-base-epoch1.json
 read -r m2_epoch_slot m2_cursor_slot m2_shard_epoch_slot < <(go run ./scripts/m2slots)
@@ -43,24 +32,14 @@ if [ "${M2A_FINAL_RESTORE:-0}" = 1 ]; then
   bash scripts/h4-restore-probe.sh stop || return 1
   export M2A_VALIDATOR1_WIPED=1
 fi
-if [ "$m2HandoffMode" = config-only ]; then
-  m2_config_only_handoff 2 '1 2 3 4' \
-    'http://127.0.0.1:25866,http://127.0.0.1:25867,http://127.0.0.1:25868,http://127.0.0.1:25869' || return 1
-else
-  m2_handoff 2 4 5 '1 2 3 4' "$(m2_root_addr 4)" \
-    'http://127.0.0.1:25866,http://127.0.0.1:25867,http://127.0.0.1:25868,http://127.0.0.1:25869' || return 1
-fi
+m2_config_only_handoff 2 '1 2 3 4' \
+  'http://127.0.0.1:25866,http://127.0.0.1:25867,http://127.0.0.1:25868,http://127.0.0.1:25869' || return 1
 if [ "${F8_MIXED_LANE:-0}" = 1 ]; then
   echo "F8 mixed lane completed one root handoff while all aggregator shards remained active"
   return 0
 fi
-if [ "$m2HandoffMode" = config-only ]; then
-  m2_config_only_handoff 3 '1 2 3 4' \
-    'http://127.0.0.1:25866,http://127.0.0.1:25867,http://127.0.0.1:25868,http://127.0.0.1:25869' || return 1
-else
-  m2_handoff 3 3 6 '1 2 3 5' "$(m2_root_addr 3)" \
-    'http://127.0.0.1:25866,http://127.0.0.1:25867,http://127.0.0.1:25868,http://127.0.0.1:25870' || return 1
-fi
+m2_config_only_handoff 3 '1 2 3 4' \
+  'http://127.0.0.1:25866,http://127.0.0.1:25867,http://127.0.0.1:25868,http://127.0.0.1:25869' || return 1
 if [ "${M2A_FINAL_RESTORE:-0}" = 1 ]; then
   bash scripts/h4-restore-probe.sh restore || return 1
   ln -sf ../h4-replaced/restore.log test-nodes/evm1/debug.log
