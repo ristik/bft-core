@@ -376,7 +376,9 @@ from: the operator provisions them.
 - `ubft genesis-identities generate` writes the file. The staking id, operator payee and exposure digest of an entity are operator-assigned DEV
   values, deterministic from its root node id (the weight lives in the record, so a reweighting leaves the entity's identity and payee alone).
 - `root handoff evm-authorization` writes the recovery `Authorization` of a primary candidate: K is the incumbent committee's records (the
-  genesis file before any rotation, the previous assignment's afterwards); the base root body and assignment hash come from the context
-  `handoff evm-context` printed; the election inputs (contracts, result, snapshot, policies) are operator-assigned DEV digests.
+  genesis file before any rotation, the LAST ACKNOWLEDGED assignment's afterwards, also when a later one is activated and still waiting for its
+  acknowledgement, as in a supersession); the base root body comes from the context `handoff evm-context` printed, and the base assignment hash is
+  that of the context's `acknowledged` configuration (the shard's configuration at the epoch of its certified input record; it is `installed` when
+  nothing is pending); the election inputs (contracts, result, snapshot, policies) are operator-assigned DEV digests.
 - A weighted rotation must fit the continuity budget the genesis configuration commits (`continuity_max_m`, `continuity_max_distance`); the
   DEV default (D <= 1/4) admits no reweighting of a four-member committee, so a deployment that rotates weights sets its own bound.
