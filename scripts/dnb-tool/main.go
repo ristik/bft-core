@@ -26,7 +26,9 @@ import (
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/rlp"
 	"github.com/unicitynetwork/bft-core/archive"
+	"github.com/unicitynetwork/bft-core/b1ref"
 	"github.com/unicitynetwork/bft-core/bridgeprofile"
+	"github.com/unicitynetwork/bft-core/q3format"
 	"github.com/unicitynetwork/bft-go-base/types"
 )
 
@@ -41,6 +43,8 @@ func main() {
 		err = deployment(os.Args[2:])
 	case "trust-doc":
 		err = trustDoc(os.Args[2:])
+	case "b1check":
+		err = b1check(os.Args[2:])
 	case "pdr":
 		err = pdr(os.Args[2:])
 	case "lockproof":
@@ -304,4 +308,59 @@ func pdr(args []string) error {
 		return err
 	}
 	return os.WriteFile(*out, enc, 0o644) // #nosec G306 -- public configuration
+}
+
+// b1check evaluates a UC_V1 request with the Go reference verifier (b1ref) against the registry context of the deployment's genesis profile, at
+// a given registry clock: the first place to look when the native call answers false.
+func b1check(args []string) error {
+	fs := flag.NewFlagSet("b1check", flag.ContinueOnError)
+	req := fs.String("request", "", "UC_V1 request bytes")
+	tbPath := fs.String("trust-base", "", "root trust base")
+	profPath := fs.String("profile", "", "b1 profile JSON (hex form)")
+	clock := fs.Uint64("clock", 0, "registry clock.rootRound")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	in, err := os.ReadFile(*req)
+	if err != nil {
+		return err
+	}
+	rawTB, err := os.ReadFile(*tbPath)
+	if err != nil {
+		return err
+	}
+	var tb types.RootTrustBaseV1
+	if err := json.Unmarshal(rawTB, &tb); err != nil {
+		return err
+	}
+	rawProf, err := os.ReadFile(*profPath)
+	if err != nil {
+		return err
+	}
+	var pf struct {
+		Network uint16
+		WCert   uint64 `json:"wCert"`
+	}
+	if err := json.Unmarshal(rawProf, &pf); err != nil {
+		return err
+	}
+	h, err := q3format.NewHistory(&tb)
+	if err != nil {
+		return err
+	}
+	first, err := h.ForEpoch(1)
+	if err != nil {
+		return err
+	}
+	entries, err := h.B1Entries(first.Start())
+	if err != nil {
+		return err
+	}
+	reg := &b1ref.Registry{GenesisCommitment: [32]byte{1}, ProfileHash: [32]byte{1}, Initialized: true, Phase: 2, Network: pf.Network, WCert: pf.WCert, Origin: entries[0].Epoch, RootRound: *clock, Epochs: map[uint64]b1ref.EpochEntry{}}
+	for _, e := range entries {
+		reg.Epochs[e.Epoch] = e
+	}
+	v, err := b1ref.UC(in, reg)
+	fmt.Printf("valid=%v why=%v err=%v gas=%d (epoch entry: start=%d members=%d)\n", v.Valid, v.Why, err, v.Gas, entries[0].Start, len(entries[0].Members))
+	return nil
 }

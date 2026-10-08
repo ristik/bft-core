@@ -38,7 +38,7 @@ up() {
   conf=test-nodes/shard-conf-${partitionID}_0.json
 
   info "B1 profile, funded genesis, identities"
-  build/ubft engine-api b1-profile --shard-conf "$conf" --trust-base test-nodes/trust-base.json --out test-nodes/b1-profile.json | tee test-nodes/b1-profile.out
+  build/ubft engine-api b1-profile --shard-conf "$conf" --trust-base test-nodes/trust-base.json --w-cert "${DNB_W_CERT:-15}" --out test-nodes/b1-profile.json | tee test-nodes/b1-profile.out
   python3 - <<PY
 import json, subprocess
 p = json.load(open("test-nodes/b1-profile.json"))
@@ -57,11 +57,13 @@ PY
   cp test-nodes/evm-full-shard-conf.json "$conf"
   ureth_flags=$(sed -n 's/^ureth flags: *//p' test-nodes/b1-profile.out)
 
+  # The root's aggregator_rsmt_v1 verifier demands an SMT consistency proof with every non-empty certification request; aggregator-go ae08165
+  # produces none, so by default the aggregator partition runs on m-of-n signature verification only (DNB_AGG_PROOF_TYPE=aggregator_rsmt_v1 for rugregator).
   if [ "${DNB_AGG:-1}" = 1 ]; then
     info "aggregator shard configuration (partition $aggPartition, full range)"
     build/ubft shard-node init --home test-nodes/agg -g >/dev/null
     build/ubft shard-conf generate --home test-nodes/aggconf --network-id 3 --partition-id "$aggPartition" --partition-type-id "$aggPartition" \
-      --shard-id 0x80 --epoch 0 --epoch-start 1 --t2-timeout 5000 --partition-params proof_type=aggregator_rsmt_v1 \
+      --shard-id 0x80 --epoch 0 --epoch-start 1 --t2-timeout 5000 ${DNB_AGG_PROOF_TYPE:+--partition-params proof_type=$DNB_AGG_PROOF_TYPE} \
       --node-info test-nodes/agg/node-info.json >/dev/null
     cp "test-nodes/aggconf/shard-conf-${aggPartition}_0.json" "test-nodes/shard-conf-${aggPartition}_0.json"
   fi
@@ -160,4 +162,4 @@ json.dump({"dir": "$PWD/test-nodes", "ethUrls": ["http://127.0.0.1:%d" % (18545 
 PY
 }
 
-case "${1:-}" in config) config ;; vault) vault ;; up) up ;; down) down ;; status) status ;; *) echo "usage: $0 up|down|status" >&2; exit 2 ;; esac
+case "${1:-}" in all) up; vault; config ;; config) config ;; vault) vault ;; up) up ;; down) down ;; status) status ;; *) echo "usage: $0 up|down|status" >&2; exit 2 ;; esac
