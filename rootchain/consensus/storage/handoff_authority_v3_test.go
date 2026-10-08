@@ -5,6 +5,7 @@ import (
 	"crypto"
 	"crypto/sha256"
 	"errors"
+	"sort"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -281,6 +282,7 @@ func freezeBlock(t *testing.T, s *BlockStore, round uint64, records [][]byte) *r
 // admission used the unit rules for every companion, so a weighted rotation out of a unit epoch was refused at block execution.
 func TestFreezeAssignmentRulesFollowTheCompanionVersion(t *testing.T) {
 	_, nodes := testutils.CreateTestNodes(t, 2)
+	sort.Slice(nodes, func(i, j int) bool { return nodes[i].NodeID < nodes[j].NodeID }) // an assignment's validators are strictly ordered
 	nodes[0].Stake, nodes[1].Stake = 6, 1
 	weighted := &types.PartitionDescriptionRecord{Version: 1, NetworkID: 5, PartitionID: 8, PartitionTypeID: 8, TypeIDLen: 8, UnitIDLen: 256, T2Timeout: 2500000000,
 		Epoch: 1, Validators: nodes}
