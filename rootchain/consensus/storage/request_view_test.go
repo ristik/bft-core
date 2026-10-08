@@ -1112,7 +1112,8 @@ func TestSnapshotRefusesAMalformedContinuationChain(t *testing.T) {
 	first.start, first.rootEpoch = 0, 1 // even one that looks like an anchor, followed by a valid real activation
 	require.ErrorIs(t, build(first, s.succ), ErrAssignmentHistory, "the first record is a non-continuation anchor")
 	require.ErrorIs(t, build(s.anchor, mk()), ErrAssignmentHistory, "a continuation of an assignment that is not in the chain")
-=======
+}
+
 // The interval after an acknowledgement block executes but before it is committed: real requests with fees and statistics have moved the
 // parent's accumulators and its record's FeeHash/StatHash, none of which is the install-time commitment. The view builds on the parent's
 // updated record; a one-byte change of either updated commitment is still refused, and so is accumulators that moved without the record.
@@ -1149,5 +1150,4 @@ func TestExpectedTRAfterExecutedRequestsInTheInstalledState(t *testing.T) {
 		require.ErrorIs(t, err, quorumweight.ErrRequestContext, name)
 		require.Nil(t, view, name)
 	}
->>>>>>> q3/50-expectedtr
 }
