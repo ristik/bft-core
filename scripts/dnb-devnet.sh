@@ -80,7 +80,7 @@ PY
     "$URETH_BIN" node --chain test-nodes/evm-genesis-finalized.json --datadir "test-nodes/reth$i/dd" \
       --authrpc.jwtsecret "test-nodes/evm$i/jwt.hex" --authrpc.addr 127.0.0.1 --authrpc.port $((rethEngineBase + i - 1)) \
       --http --http.addr 127.0.0.1 --http.port $((rethEthBase + i - 1)) --http.api eth,net,web3,admin,debug --rpc.eth-proof-window 64 \
-      --port $((rethP2PBase + i - 1)) --disable-discovery --ipcdisable --engine.persistence-threshold 64 \
+      --port $((rethP2PBase + i - 1)) --disable-discovery --ipcdisable --engine.persistence-threshold "${DNB_PERSIST:-0}" \
       --builder.gaslimit "$(python3 -c "import json;print(json.load(open('test-nodes/b1-profile.json'))['maxGas'])")" \
       --unicity.fee-collector "$fee" $ureth_flags \
       >"test-nodes/reth$i/reth.log" 2>&1 &
@@ -120,7 +120,7 @@ start_reth() { # N: start (or restart) validator N's ureth on its datadir
   "$URETH_BIN" node --chain test-nodes/evm-genesis-finalized.json --datadir "test-nodes/reth$i/dd" \
     --authrpc.jwtsecret "test-nodes/evm$i/jwt.hex" --authrpc.addr 127.0.0.1 --authrpc.port $((rethEngineBase + i - 1)) \
     --http --http.addr 127.0.0.1 --http.port $((rethEthBase + i - 1)) --http.api eth,net,web3,admin,debug --rpc.eth-proof-window 64 \
-    --port $((rethP2PBase + i - 1)) --disable-discovery --ipcdisable --engine.persistence-threshold 64 \
+    --port $((rethP2PBase + i - 1)) --disable-discovery --ipcdisable --engine.persistence-threshold "${DNB_PERSIST:-0}" \
     --builder.gaslimit "$(python3 -c "import json;print(json.load(open('test-nodes/b1-profile.json'))['maxGas'])")" \
     --unicity.fee-collector "$fee" $ureth_flags >>"test-nodes/reth$i/reth.log" 2>&1 &
   echo $! >"test-nodes/reth$i/pid"
