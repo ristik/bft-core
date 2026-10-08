@@ -2,6 +2,7 @@ package storage
 
 import (
 	"bytes"
+	"crypto"
 	"crypto/sha256"
 	"errors"
 	"testing"
@@ -9,6 +10,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/unicitynetwork/bft-core/evmassign"
 	"github.com/unicitynetwork/bft-core/evmroot"
+	"github.com/unicitynetwork/bft-core/internal/testutils/logger"
 	rctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
 	"github.com/unicitynetwork/bft-core/rootrecords"
 )
@@ -442,4 +444,116 @@ func TestAbortClosesTheSessionOfARetainedPrimaryOnly(t *testing.T) {
 	require.NoError(t, off.abort(fixedCandidates{string(body): pEnc}, abort, 20, 3_000))
 	require.Empty(t, off.records)
 	require.ErrorIs(t, newStep().abort(fixedCandidates{string(body): pEnc}, abort, 20, 0), ErrPosSource, "an abort without committed time")
+}
+
+type fakeProposer struct {
+	build func(epoch, oe, or uint64) (rctypes.PosControl, error)
+	calls int
+}
+
+func (p *fakeProposer) Closure(epoch, oe, or uint64) (rctypes.PosControl, error) {
+	p.calls++
+	return p.build(epoch, oe, or)
+}
+
+func TestClosureIsMandatoryInTheSuccessorsFirstOrdinaryBlock(t *testing.T) {
+	f := newAssignmentFixture(t)
+	f.useRealOrchestration(t)
+	f.seedFees(t)
+	h := f.commitAssignment(t)
+	assignment, err := h.candidate.AssignmentID()
+	require.NoError(t, err)
+
+	dep := PosDeployment{RootNetwork: 5, Deployment: evmassign.Deployment{NetworkWord: [32]byte{1}, ChainID: [32]byte{31: 9}, Custody: [20]byte{19: 5}}}
+	closed := []evmassign.Identity{fid(1, 6), fid(2, 1)}
+	ed, err := evmassign.AssignmentExposureDigest(dep.Deployment, assignment, closed)
+	require.NoError(t, err)
+	kd, err := evmassign.KeyHistoryDigest(closed)
+	require.NoError(t, err)
+	hRec, tRoot := [32]byte{0x4a}, [32]byte{0x7e}
+	witness := []byte("bundle")
+	facts := ClosureFacts{ClosedEpoch: 1, BundleID: [32]byte{0xb0}, HRecordID: hRec, HRound: 4, TerminalRoot: tRoot, AssignmentID: assignment, Closed: closed}
+	data := append(append(append(append(append(assignment[:len(assignment):len(assignment)], word(4)...), hRec[:]...), tRoot[:]...), ed[:]...), kd[:]...)
+	control := func(epoch, oe, or uint64) (rctypes.PosControl, error) {
+		return rctypes.PosControl{Network: 5, ChainID: dep.ChainID, Custody: dep.Custody, OrderingEpoch: oe, OrderingRound: or, Op: rctypes.OpCloseLiability,
+			Close: &rctypes.CloseContext{ClosedEpoch: epoch, BundleSemanticID: facts.BundleID}, Data: data, WitnessHash: sha256.Sum256(witness)}, nil
+	}
+	proposer := &fakeProposer{build: control}
+	svc := &PosServices{Deployment: dep, Authority: &fakeAuthority{facts: facts}, Witnesses: fakeWitnesses{sha256.Sum256(witness): witness}, Proposer: proposer}
+
+	// the proposer sees the duty on the suffix's state: the first ordinary round of epoch 2 awaits epoch 1's closure
+	f.store.SetPosServices(svc)
+	cs, err := f.store.ClosureControls(5, 2, 7)
+	require.NoError(t, err)
+	require.Len(t, cs, 1)
+	require.EqualValues(t, 1, cs[0].Close.ClosedEpoch)
+	require.EqualValues(t, 7, cs[0].OrderingRound)
+	none, err := f.store.ClosureControls(5, 1, 6)
+	require.NoError(t, err)
+	require.Empty(t, none, "a suffix round of the old epoch needs none")
+	proposer.build = func(uint64, uint64, uint64) (rctypes.PosControl, error) {
+		return rctypes.PosControl{}, errors.New("no bundle")
+	}
+	_, err = f.store.ClosureControls(5, 2, 7)
+	require.ErrorIs(t, err, ErrWitnessUnavailable)
+	proposer.build = control
+	f.store.SetPosServices(&PosServices{Deployment: dep, Authority: svc.Authority, Witnesses: svc.Witnesses})
+	_, err = f.store.ClosureControls(5, 2, 7)
+	require.ErrorIs(t, err, ErrWitnessUnavailable, "the duty without anyone to build the closure")
+	none, err = f.store.ClosureControls(5, 1, 6)
+	require.NoError(t, err, "no duty at this round, so no proposer is needed")
+	require.Empty(t, none)
+	f.store.SetPosServices(nil)
+	none, err = f.store.ClosureControls(5, 2, 7)
+	require.NoError(t, err)
+	require.Empty(t, none, "no services, no duty")
+
+	anchor, err := f.store.InstallEpochAnchor(h.head, h.verified, h.genesis)
+	require.NoError(t, err)
+	s, err := New(crypto.SHA256, f.store.storage, f.orch, logger.New(t), ProfileHandoff)
+	require.NoError(t, err)
+	s.SetPosServices(svc)
+	bare := &rctypes.BlockData{Version: 2, Round: 7, Epoch: 2, Timestamp: 1_000, Payload: &rctypes.Payload{Version: 2}, Anchor: anchor}
+	_, err = s.Add(bare, nil)
+	require.ErrorIs(t, err, ErrClosureMissing)
+
+	c, err := control(1, 2, 7)
+	require.NoError(t, err)
+	with := &rctypes.BlockData{Version: 2, Round: 7, Epoch: 2, Timestamp: 1_000, Payload: &rctypes.Payload{Version: 2, PosControls: []rctypes.PosControl{c}}, Anchor: anchor}
+	_, err = s.Add(with, nil)
+	require.NoError(t, err)
+	b7 := mustBlock(t, s, 7)
+	require.Len(t, b7.ShardState.Records, 1)
+	require.Equal(t, rootrecords.KindClosure, b7.ShardState.Records[0].Kind)
+	require.Equal(t, data, b7.ShardState.Records[0].Data)
+	require.Empty(t, posOfBlock(t, b7).Awaiting)
+
+	// afterwards an empty block is fine: the duty is discharged
+	prior := b7
+	_, err = s.Add(&rctypes.BlockData{Version: 2, Round: 8, Epoch: 2, Timestamp: 1_001, Payload: &rctypes.Payload{Version: 2},
+		Qc: &rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{RoundNumber: 7, Epoch: 2, CurrentRootHash: prior.RootHash}}}, nil)
+	require.NoError(t, err)
+}
+
+func TestAnAwaitingClosureMakesAControlFreeBlockInvalidOnlyWhereTheDutyIsEnforced(t *testing.T) {
+	f := newCloseFx(t)
+	f.block.Payload.PosControls = nil
+	_, err := f.step.controls(f.block, f.svc, posEnv{})
+	require.ErrorIs(t, err, ErrClosureMissing)
+
+	// without an authority the chain is not enforcing the duty
+	f = newCloseFx(t)
+	f.block.Payload.PosControls = nil
+	f.svc.Authority = nil
+	_, err = f.step.controls(f.block, f.svc, posEnv{})
+	require.NoError(t, err)
+	f.svc = nil
+	_, err = f.step.controls(f.block, f.svc, posEnv{})
+	require.NoError(t, err)
+
+	// a block that closes one of two outstanding epochs still owes the other
+	f = newCloseFx(t)
+	f.step.state.Awaiting = append(f.step.state.Awaiting, rootrecords.Awaiting{Epoch: 2, HRound: 101})
+	require.ErrorIs(t, f.run(), ErrClosureMissing)
+	require.Len(t, f.step.records, 1, "the closure that was given is projected before the duty is judged")
 }

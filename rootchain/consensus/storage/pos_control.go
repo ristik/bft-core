@@ -22,6 +22,9 @@ var (
 	ErrPosControls = errors.New("P85 root controls are not enabled on this chain")
 	// ErrPosControlRefused reports a control that fails verification.
 	ErrPosControlRefused = errors.New("P85 root control refused")
+	// ErrClosureMissing reports a block that leaves a closed epoch's CloseLiability outstanding: the closure of every awaiting epoch is
+	// mandatory in the block whose ordinary round ends the handoff's freeze, and in every block after it.
+	ErrClosureMissing = errors.New("P85 mandatory CloseLiability missing")
 	// ErrWitnessUnavailable reports a control whose retained witness is not available: unavailable, never false, so the block cannot
 	// be voted until it is.
 	ErrWitnessUnavailable = errors.New("P85 control witness unavailable")
@@ -46,6 +49,12 @@ type ClosureFacts struct {
 // anything else (the current nominations, the successor's records, records the bundle does not commit to) makes the closure unsound.
 type ClosureAuthority interface {
 	VerifyClosure(witness []byte, closedEpoch uint64) (ClosureFacts, error)
+}
+
+// ClosureProposer builds the CloseLiability control, with its retained witness, for a closed epoch: the proposer's side of the
+// mandatory inclusion. It fails (unavailable) when the terminal bundle is not at hand, and then no ordinary block can be proposed.
+type ClosureProposer interface {
+	Closure(epoch, orderingEpoch, orderingRound uint64) (rctypes.PosControl, error)
 }
 
 // WitnessSource returns the retained witness bytes by their SHA-256.
@@ -95,7 +104,11 @@ type PosServices struct {
 	Authority  ClosureAuthority
 	Witnesses  WitnessSource
 	EVM        EVMStateAuthority
+	Proposer   ClosureProposer
 }
+
+// mandatory reports whether this chain enforces the closure duty: it has the authority to verify a closure with.
+func (s *PosServices) mandatory() bool { return s != nil && s.Authority != nil }
 
 // posEnv is the root state a control is validated against, frozen before the block's own certifications are processed.
 type posEnv struct {
@@ -114,7 +127,7 @@ const maxBlockRecords = rootrecords.MaxImport
 // controls executes the block's PosControls in payload order. It returns the control state a RejectResult replaced, or nil.
 func (p *posStep) controls(block *rctypes.BlockData, svc *PosServices, env posEnv) (*evmroot.ControlState, error) {
 	if len(block.Payload.PosControls) == 0 {
-		return nil, p.recordCap()
+		return nil, errors.Join(p.recordCap(), p.closuresDone(svc))
 	}
 	if !p.on || svc == nil || svc.Authority == nil || svc.Witnesses == nil {
 		return nil, ErrPosControls
@@ -143,7 +156,16 @@ func (p *posStep) controls(block *rctypes.BlockData, svc *PosServices, env posEn
 			return nil, fmt.Errorf("control %d: %w", i, err)
 		}
 	}
-	return replaced, p.recordCap()
+	return replaced, errors.Join(p.recordCap(), p.closuresDone(svc))
+}
+
+// closuresDone refuses a block that leaves a closure outstanding on a chain that enforces the duty. The closures come first in the
+// payload, so by the end of the controls every awaiting epoch is closed or the block is invalid.
+func (p *posStep) closuresDone(svc *PosServices) error {
+	if p.on && svc.mandatory() && len(p.state.Awaiting) > 0 {
+		return fmt.Errorf("%w: epoch %d", ErrClosureMissing, p.state.Awaiting[0].Epoch)
+	}
+	return nil
 }
 
 func (p *posStep) recordCap() error {

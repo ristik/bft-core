@@ -158,6 +158,44 @@ func (x *BlockStore) IsChangeInProgress(partition types.PartitionID, shard types
 	return nil
 }
 
+// ClosureControls are the CloseLiability controls a block proposed at round on the parent round's state must carry: one for every epoch
+// whose closure is outstanding after that block's own ordinary-round effect, oldest first. A chain without the closure duty needs none.
+func (x *BlockStore) ClosureControls(parentRound, epoch, round uint64) ([]rctypes.PosControl, error) {
+	x.lock.RLock()
+	svc := x.pos
+	x.lock.RUnlock()
+	if x.profile != ProfileHandoff || !svc.mandatory() {
+		return nil, nil
+	}
+	parent, err := x.blockTree.FindBlock(parentRound)
+	if err != nil {
+		return nil, err
+	}
+	pos, err := loadPos(parent.ShardState.Control)
+	if err != nil || !pos.on {
+		return nil, err
+	}
+	next, err := pos.state.Block(epoch, round)
+	if err != nil {
+		return nil, errors.Join(ErrPosSource, err)
+	}
+	if len(next.Awaiting) == 0 {
+		return nil, nil
+	}
+	if svc.Proposer == nil {
+		return nil, fmt.Errorf("%w: no proposer to build the closure of epoch %d", ErrWitnessUnavailable, next.Awaiting[0].Epoch)
+	}
+	controls := make([]rctypes.PosControl, 0, len(next.Awaiting))
+	for _, a := range next.Awaiting {
+		c, err := svc.Proposer.Closure(a.Epoch, epoch, round)
+		if err != nil {
+			return nil, errors.Join(ErrWitnessUnavailable, err)
+		}
+		controls = append(controls, c)
+	}
+	return controls, nil
+}
+
 // SetPosServices installs the collaborators the P85 control executor verifies controls with. It must be set before the store executes a
 // block that carries a control.
 func (x *BlockStore) SetPosServices(s *PosServices) {

@@ -1453,6 +1453,15 @@ func (x *ConsensusManager) processNewRoundEvent(ctx context.Context) {
 			}
 		}
 	}
+	if profile == storage.ProfileHandoff && !oldSuffix && parentQC != nil {
+		// a closed epoch's CloseLiability is mandatory in the first ordinary block after its freeze, and in every block until it is in
+		closures, err := x.blockStore.ClosureControls(parentQC.GetRound(), x.trustBase.Load().Epoch, round)
+		if err != nil {
+			x.log.WarnContext(ctx, "cannot build the mandatory closure of the proposal", logger.Error(err))
+			return
+		}
+		payload.PosControls = append(closures, payload.PosControls...)
+	}
 	var parentAnchor *drctypes.EpochAnchor
 	if x.epochAnchor != nil && parentQC == nil {
 		parentAnchor = x.epochAnchor
