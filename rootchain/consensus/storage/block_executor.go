@@ -12,6 +12,7 @@ import (
 	"github.com/unicitynetwork/bft-core/evmassign"
 	"github.com/unicitynetwork/bft-core/evmroot"
 	"github.com/unicitynetwork/bft-core/internal/quorumweight"
+	"github.com/unicitynetwork/bft-core/internal/weightvalidation"
 
 	"github.com/unicitynetwork/bft-core/network/protocol/abdrc"
 	"github.com/unicitynetwork/bft-core/network/protocol/certification"
@@ -363,6 +364,16 @@ func (x *ExecutedBlock) extendWithAuthority(newBlock *rctypes.BlockData, verifie
 	}, nil
 }
 
+// freezeAssignmentRules are the validator weight rules the successor assignment of a Freeze companion is judged under: the unit rules for
+// the legacy and V2 companions, the bounded weights for a V3 one (the authority already admitted it under them: a weighted rotation out of
+// a unit epoch carries stakes the unit rules refuse).
+func freezeAssignmentRules(version uint64) evmassign.Rules {
+	if version == freezeV3Version {
+		return weightvalidation.EVMRules(weightvalidation.ModeWeighted)
+	}
+	return evmassign.UnitRules
+}
+
 // verifyFreezeAssignment runs the EVM-state-dependent half of freeze
 // admission, after the authority has checked the candidate's static bindings.
 // The installed assignment is the authenticated configuration of the frozen
@@ -412,7 +423,7 @@ func verifyFreezeAssignment(companion []byte, si *ShardInfo, installed *types.Pa
 	if candidate.Supersedes == nil && pending {
 		return ErrAssignmentAckPending
 	}
-	if err := evmassign.VerifyInstalled(candidate, succ, installed, currentRoot); err != nil {
+	if err := evmassign.VerifyInstalledWith(freezeAssignmentRules(fc.Version), candidate, succ, installed, currentRoot); err != nil {
 		return errors.Join(ErrHandoffRecord, err)
 	}
 	if err := verifyShardChanges(candidate, states, shardConfs); err != nil {
