@@ -424,8 +424,15 @@ q3_pair_controls() {
 
 # Restart pair A's execution client with the SAME Engine secret its node holds (h3_start_reth draws a new one, which would cut the node off).
 q3_restart_reth_same_secret() { # entity
-  local i=$1
+  local i=$1 old waited=0
+  old=$(cat "test-nodes/reth$i/pid" 2>/dev/null)
   stop_pidfile "test-nodes/reth$i/pid" 'reth.* node' INT
+  # the old client must be GONE before a new one opens its database: it flushes on ctrl-c and holds the storage lock until it exits
+  while [ -n "$old" ] && kill -0 "$old" 2>/dev/null; do
+    waited=$((waited + 1))
+    [ "$waited" -le 180 ] || { echo "execution client $old of entity $i still running 90 s after ctrl-c" >&2; return 1; }
+    sleep 0.5
+  done
   "$URETH_BIN" node --chain "$chainSpec" --datadir "test-nodes/reth$i/dd" \
     --authrpc.jwtsecret "test-nodes/evm$i/jwt.hex" --authrpc.addr 127.0.0.1 --authrpc.port $((rethEngineBase + i - 1)) \
     --http --http.addr 127.0.0.1 --http.port $((rethEthBase + i - 1)) --http.api eth,net,web3,admin,debug \
