@@ -315,9 +315,6 @@ func rootNodeRun(ctx context.Context, flags *rootNodeRunFlags) error {
 		if err = attachRootQ3(ctx, q3rt, cm); err != nil {
 			return err
 		}
-		if err = selectRootQ3RequestHistory(q3rt, cm, orchestration, uint64(trustBase.GetNetworkID())); err != nil {
-			return err
-		}
 		server, srvErr := q3delivery.NewServer(q3BundleProvider{cm: cm, rt: q3rt})
 		if srvErr != nil {
 			return srvErr
@@ -373,6 +370,13 @@ func rootNodeRun(ctx context.Context, flags *rootNodeRunFlags) error {
 			if !installed {
 				return fmt.Errorf("no root peer served verified handoff epoch %d", epoch)
 			}
+		}
+	}
+
+	if q3rt != nil {
+		// after the activations this process installed: a root that installs epoch 2 at this very start holds its first activation only now
+		if err = selectRootQ3RequestHistory(q3rt, cm, orchestration, uint64(trustBase.GetNetworkID())); err != nil {
+			return err
 		}
 	}
 

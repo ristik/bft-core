@@ -101,7 +101,7 @@ func TestTheCandidateEndpointReturnsWhatTheMembersMustSign(t *testing.T) {
 
 // A Q3 root selects the view-aware request branch right after the runtime is attached and before it serves: without it a weighted EVM
 // assignment has no request context and every certification request of the shard is refused. A helper test cannot see the call dropped.
-func TestRootNodeRunSelectsTheRequestHistoryAfterAttachingTheRuntime(t *testing.T) {
+func TestRootNodeRunSelectsTheRequestHistoryAfterInstallingTheActivations(t *testing.T) {
 	fset := token.NewFileSet()
 	file, err := parser.ParseFile(fset, "root_node.go", nil, 0)
 	require.NoError(t, err)
@@ -116,10 +116,11 @@ func TestRootNodeRunSelectsTheRequestHistoryAfterAttachingTheRuntime(t *testing.
 		}
 		return true
 	})
-	for _, name := range []string{"attachRootQ3", "selectRootQ3RequestHistory"} {
+	for _, name := range []string{"attachRootQ3", "installQ3Epochs", "selectRootQ3RequestHistory"} {
 		require.Contains(t, first, name)
 	}
-	require.Less(t, first["attachRootQ3"], first["selectRootQ3RequestHistory"])
+	require.Less(t, first["attachRootQ3"], first["installQ3Epochs"])
+	require.Less(t, first["installQ3Epochs"], first["selectRootQ3RequestHistory"], "an activation installed at this very start counts")
 }
 
 // The request history is selected only once the history holds an activation: a genesis root keeps the legacy dispatch, which is the only
