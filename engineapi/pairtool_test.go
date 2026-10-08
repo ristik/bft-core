@@ -29,7 +29,7 @@ type pairChain struct {
 func newPairChain(t *testing.T) pairChain {
 	t.Helper()
 	transitions := [][]byte{{0xa1, 0x01}, {0xb2}}
-	rootInput, err := types.Cbor.Marshal([]any{uint64(2), uint64(5), []byte("origin"), []any{[]byte(transitions[0]), []byte(transitions[1])}})
+	rootInput, err := types.Cbor.Marshal(rootInputOf(transitions, true))
 	require.NoError(t, err)
 	th, err := TransitionsHash(transitions)
 	require.NoError(t, err)
@@ -50,14 +50,23 @@ func newPairChain(t *testing.T) pairChain {
 	}
 }
 
+// the B1 update and the root-record import companion the retained block's build carried
+var (
+	pairB1Update = []byte{0xb1, 0x01}
+	pairRecords  = []byte{0xec, 0x02, 0x03}
+)
+
 func (c pairChain) serve(t *testing.T, eth *mockReth) {
 	t.Helper()
 	enc, err := c.binding.Encode()
 	require.NoError(t, err)
-	eth.on("eth_getBlockByNumber", func(json.RawMessage) (any, *rpcError) { return c.header, nil })
+	eth.on("eth_getBlockByNumber", func(json.RawMessage) (any, *rpcError) {
+		return c.header, nil
+	})
 	eth.on("unicity_getSealCompanionV1", func(json.RawMessage) (any, *rpcError) {
 		return map[string]any{"status": "found", "companion": map[string]any{"rootInput": "0x" + hexString(c.rootInput),
-			"pairBinding": "0x" + hexString(enc), "witnesses": []any{}, "provenance": "build"}}, nil
+			"pairBinding": "0x" + hexString(enc), "witnesses": []any{}, "provenance": "build",
+			"b1Update": "0x" + hexString(pairB1Update), "records": "0x" + hexString(pairRecords)}}, nil
 	})
 }
 
@@ -108,8 +117,13 @@ func TestEachControlSubmitsTheRetainedBuildWithExactlyOneThingChanged(t *testing
 			// the execution client's schema (ureth#52 wire.rs): the binding field is required, and then each comparison has its own variant
 			var wire struct {
 				PairBinding *data `json:"pairBinding"`
+				B1Update    data  `json:"b1Update"`
+				Records     data  `json:"records"`
 			}
 			require.NoError(t, json.Unmarshal(args[2], &wire))
+			// the rebuild carries what the retained build carried: the update and the root-record import its root input commits to
+			require.Equal(t, data(pairB1Update), wire.B1Update)
+			require.Equal(t, data(pairRecords), wire.Records)
 			if wire.PairBinding == nil {
 				return nil, &rpcError{Code: -32602, Message: "invalid params: missing field `pairBinding`"}
 			}
@@ -215,4 +229,86 @@ func TestTheRestartAdmissionPresentsTheRetainedBindingAsAnImportOfTheHead(t *tes
 		return nil, &rpcError{Code: -39002, Message: "recovery admission refused: presented binding refused at 5: pair binding refused: ParentHashMismatch"}
 	})
 	require.ErrorContains(t, AdmitHeadFromRetained(context.Background(), urlOf(t, engine, true), Secret{}, urlOf(t, eth, false)), "ParentHashMismatch")
+}
+
+// The execution client refuses a build below its finalized block after the pair gate accepted the job. For the control that changes nothing
+// that answer is the gate's acceptance; for every other control the same answer means the gate did not refuse, so it is not an acceptance.
+func TestATooDeepReorgIsTheGatesAcceptanceOnlyForTheUnchangedControl(t *testing.T) {
+	c := newPairChain(t)
+	eth := newMockReth(t, Secret{})
+	c.serve(t, eth)
+	engine := newMockReth(t, Secret{})
+	engine.on("engine_forkchoiceUpdatedWithSealV1", func(json.RawMessage) (any, *rpcError) {
+		return nil, &rpcError{Code: -38006, Message: "Too deep reorg"}
+	})
+	out, err := RunPairControl(context.Background(), urlOf(t, engine, true), Secret{}, urlOf(t, eth, false), ControlAccept)
+	require.NoError(t, err)
+	require.True(t, out.Accepted)
+	require.True(t, out.GateOnly)
+	require.Contains(t, out.Detail, "Too deep reorg")
+
+	for _, kind := range []PairControl{ControlWrongParent, ControlWrongJob, ControlSubstitutedInput, ControlMissingEvidence} {
+		out, err = RunPairControl(context.Background(), urlOf(t, engine, true), Secret{}, urlOf(t, eth, false), kind)
+		require.NoError(t, err, kind)
+		require.False(t, out.Accepted, "%s: a build the gate did not refuse is a failed control", kind)
+		require.False(t, out.GateOnly, kind)
+	}
+
+	// any other engine error of the unchanged control stays a refusal
+	other := newMockReth(t, Secret{})
+	other.on("engine_forkchoiceUpdatedWithSealV1", func(json.RawMessage) (any, *rpcError) {
+		return nil, &rpcError{Code: -32602, Message: "Invalid params"}
+	})
+	out, err = RunPairControl(context.Background(), urlOf(t, other, true), Secret{}, urlOf(t, eth, false), ControlAccept)
+	require.NoError(t, err)
+	require.False(t, out.Accepted)
+}
+
+// rootInputOf is a root input of the shape the transition list is read from: the transition array is the 11th field, followed (fresh B1) by the B1
+// update hash and the root-records hash.
+func rootInputOf(transitions [][]byte, fresh bool) []any {
+	d := make([]any, len(transitions))
+	for i, t := range transitions {
+		d[i] = t
+	}
+	v := []any{uint64(2), uint64(3), uint64(8), []byte{0x80}, uint64(5), uint64(1), uint64(1), make([]byte, 32), []any{uint64(1)}, []any{uint64(5), uint64(1), "leader", []byte{1}, []byte{2}}, d}
+	if fresh {
+		v = append(v, make([]byte, 32), make([]byte, 32))
+	}
+	return v
+}
+
+func TestTheTransitionListIsTheEleventhFieldOfEveryTuple(t *testing.T) {
+	transitions := [][]byte{{0xa1, 0x01}, {0xb2}}
+	for name, fresh := range map[string]bool{"the legacy 11-field tuple": false, "the fresh B1 13-field tuple": true} {
+		raw, err := types.Cbor.Marshal(rootInputOf(transitions, fresh))
+		require.NoError(t, err, name)
+		got, err := rootInputTransitionList(raw)
+		require.NoError(t, err, name)
+		require.Equal(t, []data{{0xa1, 0x01}, {0xb2}}, got, name)
+	}
+	short, _ := types.Cbor.Marshal([]any{uint64(2), uint64(5)})
+	_, err := rootInputTransitionList(short)
+	require.ErrorContains(t, err, "transition field")
+	v := rootInputOf(transitions, true)
+	v[rootInputTransitionsField] = []byte("not an array")
+	notArray, _ := types.Cbor.Marshal(v)
+	_, err = rootInputTransitionList(notArray)
+	require.ErrorContains(t, err, "not an array")
+	v = rootInputOf(transitions, true)
+	v[rootInputTransitionsField] = []any{"text"}
+	notBytes, _ := types.Cbor.Marshal(v)
+	_, err = rootInputTransitionList(notBytes)
+	require.ErrorContains(t, err, "not a byte string")
+	// the canonical array the binding hashes comes from the same field
+	fresh, _ := types.Cbor.Marshal(rootInputOf(transitions, true))
+	legacy, _ := types.Cbor.Marshal(rootInputOf(transitions, false))
+	a, err := rootInputTransitions(fresh)
+	require.NoError(t, err)
+	b, err := rootInputTransitions(legacy)
+	require.NoError(t, err)
+	require.Equal(t, a, b)
+	th, err := TransitionsHash(transitions)
+	require.NoError(t, err)
+	require.NotZero(t, th)
 }
