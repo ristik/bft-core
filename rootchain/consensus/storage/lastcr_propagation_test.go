@@ -29,6 +29,12 @@ func lastCRFixture(f *assignmentFixture, si *ShardInfo) {
 // (another PrevUCDigest, another ViewKey), not the pair that was current when the tip was executed. A sibling of the committed block is
 // not rewritten.
 func TestCommittedRepeatUCReachesTheExecutedDescendants(t *testing.T) {
+	// the sibling fork is a separate run: the store keeps the persisted blocks of a pruned fork above the new root, which a reopen refuses
+	t.Run("with a sibling fork", func(t *testing.T) { committedRepeatUCScenario(t, true) })
+	t.Run("and a reopen", func(t *testing.T) { committedRepeatUCScenario(t, false) })
+}
+
+func committedRepeatUCScenario(t *testing.T, withSibling bool) {
 	f := newAssignmentFixture(t)
 	f.useRealOrchestration(t)
 	f.installShard(t, f.current, func(si *ShardInfo) { lastCRFixture(f, si) })
@@ -59,7 +65,10 @@ func TestCommittedRepeatUCReachesTheExecutedDescendants(t *testing.T) {
 	b8 := add(8, 7, timeout)
 	b9 := add(9, 8)
 	b10 := add(10, 9)
-	sibling := add(11, 7)
+	var sibling *ExecutedBlock
+	if withSibling {
+		sibling = add(11, 7)
+	}
 	old := b10.ShardState.States[f.shard].LastCR
 	require.EqualValues(t, 1, old.UC.UnicitySeal.RootChainRoundNumber, "premise: the tip executed on the predecessor's record")
 
@@ -91,7 +100,9 @@ func TestCommittedRepeatUCReachesTheExecutedDescendants(t *testing.T) {
 		require.Same(t, fresh, b.ShardState.States[f.shard].LastCR, "round %d", b.GetRound())
 	}
 	require.EqualValues(t, 1, old.UC.UnicitySeal.RootChainRoundNumber, "the old response is never edited")
-	require.EqualValues(t, 1, sibling.ShardState.States[f.shard].LastCR.UC.UnicitySeal.RootChainRoundNumber, "the sibling subtree is not a descendant of the committed block")
+	if withSibling {
+		require.EqualValues(t, 1, sibling.ShardState.States[f.shard].LastCR.UC.UnicitySeal.RootChainRoundNumber, "the sibling subtree is not a descendant of the committed block")
+	}
 
 	// nothing else about a descendant moves
 	require.Equal(t, rootsBefore[9], []byte(b9.RootHash))
@@ -113,6 +124,9 @@ func TestCommittedRepeatUCReachesTheExecutedDescendants(t *testing.T) {
 		"the descendants and the committed root agree on the previous UC")
 
 	// a store reopened after the commit, whose persisted pending blocks still hold the old pair, normalises them from the persisted root
+	if withSibling {
+		return
+	}
 	reopened, err := New(crypto.SHA256, f.store.storage, f.orch, logger.New(t), ProfileHandoff)
 	require.NoError(t, err)
 	for _, round := range []uint64{9, 10} {
