@@ -556,8 +556,11 @@ func TestRequestHistoryServesTheActivatedAssignmentOfItsShard(t *testing.T) {
 	})
 	t.Run("the anchor is of the requested shard", func(t *testing.T) {
 		wrong, err := rt.RequestHistory(q3active.RequestHistoryConfig{Candidates: retained, HashAlg: crypto.SHA256, Network: q3fixture.Network, Version: 1,
-			Anchor: func(types.PartitionID, types.ShardID) (*types.PartitionDescriptionRecord, error) {
-				return f.ShardConf, nil
+			// the anchor of an untouched shard, but not of the one asked for (it is not the designated shard's, which another guard refuses)
+			Anchor: func(p types.PartitionID, s types.ShardID) (*types.PartitionDescriptionRecord, error) {
+				cp := *f.ShardConf
+				cp.PartitionID = p + 1
+				return &cp, nil
 			}})
 		require.NoError(t, err)
 		_, err = wrong.Chain(q3fixture.PartitionID+1, types.ShardID{})
