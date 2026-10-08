@@ -3,6 +3,7 @@ package recordsfeed
 import (
 	"context"
 	"errors"
+	"github.com/unicitynetwork/bft-core/evmroot"
 	"net"
 	"testing"
 	"time"
@@ -18,12 +19,12 @@ import (
 )
 
 type serverFake struct {
-	cuts    map[uint64]Cut
+	cuts    map[CutKey]Cut
 	records []rootrecords.Record
 }
 
-func (s serverFake) ControlCut(round uint64) (Cut, error) {
-	if c, ok := s.cuts[round]; ok {
+func (s serverFake) ControlCut(key CutKey) (Cut, error) {
+	if c, ok := s.cuts[key]; ok {
 		return c, nil
 	}
 	return Cut{}, errors.New("pruned")
@@ -48,7 +49,7 @@ func TestTheShardDerivesTheCursorAndTheLogFromARootOverLibp2p(t *testing.T) {
 	}
 	c := buildChain(t, 300)
 	cut, origin := c.cutOf(t, 500, 9_000)
-	server := NewServer(serverFake{cuts: map[uint64]Cut{500: cut}, records: c.records}, func(id peer.ID) bool { return id == shard.ID() })
+	server := NewServer(serverFake{cuts: map[CutKey]Cut{keyOf(t, origin): cut}, records: c.records}, func(id peer.ID) bool { return id == shard.ID() })
 	root.RegisterProtocolHandler(ProtocolID, server.Handler)
 	t.Cleanup(func() { root.RemoveProtocolHandler(ProtocolID) })
 
@@ -85,7 +86,7 @@ func TestTheShardDerivesTheCursorAndTheLogFromARootOverLibp2p(t *testing.T) {
 	forged.Control = &forgedCtl
 	liar := testpeer.CreatePeer(t, testpeer.CreatePeerConfiguration(t))
 	shard.Network().Peerstore().AddAddrs(liar.ID(), liar.MultiAddresses(), peerstore.PermanentAddrTTL)
-	liarServer := NewServer(serverFake{cuts: map[uint64]Cut{500: forged}, records: c.records}, func(peer.ID) bool { return true })
+	liarServer := NewServer(serverFake{cuts: map[CutKey]Cut{keyOf(t, origin): forged}, records: c.records}, func(peer.ID) bool { return true })
 	liar.RegisterProtocolHandler(ProtocolID, liarServer.Handler)
 	t.Cleanup(func() { liar.RemoveProtocolHandler(ProtocolID) })
 	_, err = NewSource(P2PRemote{Opener: FromLibp2p(shard), Roots: []peer.ID{liar.ID()}}).Cursor(ctx, origin)
@@ -120,7 +121,7 @@ func TestTheClientAsksTheNextRootWhenOneHasNothingAndBoundsEveryResponse(t *test
 	c := buildChain(t, 3)
 	cut, origin := c.cutOf(t, 200, 5_000)
 	empty := NewServer(serverFake{}, func(peer.ID) bool { return true })
-	full := NewServer(serverFake{cuts: map[uint64]Cut{200: cut}, records: c.records}, func(peer.ID) bool { return true })
+	full := NewServer(serverFake{cuts: map[CutKey]Cut{keyOf(t, origin): cut}, records: c.records}, func(peer.ID) bool { return true })
 	src := NewSource(P2PRemote{Opener: pipeOpener{"a": empty, "b": full}, Roots: []peer.ID{"gone", "a", "b"}})
 	cursor, err := src.Cursor(context.Background(), origin)
 	require.NoError(t, err)
@@ -190,4 +191,41 @@ func TestTheServerNeverReturnsMoreThanABatchWhateverIsAsked(t *testing.T) {
 	var wire []wireRecord
 	require.NoError(t, types.Cbor.Unmarshal(body, &wire))
 	require.Len(t, wire, MaxBatch)
+}
+
+func keyOf(t *testing.T, origin evmroot.RootOriginV2) CutKey {
+	t.Helper()
+	key, err := KeyOf(origin)
+	require.NoError(t, err)
+	return key
+}
+
+// Rounds overlap across epochs: a root that holds the cut of round 500 in epoch 2 does not answer a request for round 500 in epoch 3,
+// nor one for the same round with another tree root, and never substitutes a later cut.
+func TestAnotherEpochOrTreeIsNotServedUnderTheSameRound(t *testing.T) {
+	c := buildChain(t, 3)
+	cut, origin := c.cutOf(t, 500, 9_000)
+	held := keyOf(t, origin)
+	src := serverFake{cuts: map[CutKey]Cut{held: cut}, records: c.records}
+	srv := NewServer(src, func(peer.ID) bool { return true })
+	remote := P2PRemote{Opener: pipeOpener{"a": srv}, Roots: []peer.ID{"a"}}
+
+	got, err := remote.Cut(context.Background(), held)
+	require.NoError(t, err)
+	require.Equal(t, cut.Control.Digest(), got.Control.Digest())
+
+	otherEpoch := held
+	otherEpoch.Epoch++
+	_, err = remote.Cut(context.Background(), otherEpoch)
+	require.ErrorIs(t, err, ErrUnavailable)
+
+	otherTree := held
+	otherTree.TreeRoot[0] ^= 1
+	_, err = remote.Cut(context.Background(), otherTree)
+	require.ErrorIs(t, err, ErrUnavailable)
+
+	later := held
+	later.Round++
+	_, err = remote.Cut(context.Background(), later)
+	require.ErrorIs(t, err, ErrUnavailable, "the latest cut is never substituted")
 }

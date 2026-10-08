@@ -448,32 +448,65 @@ func (bt *BlockTree) Commit(commitQc *abdrc.QuorumCert) ([]*certification.Certif
 	}
 	// update the new root with commit QC info
 	commitNode.data.CommitQc = commitQc
-	bt.captureCut(commitNode.data)
 	// The block that first commits the handoff record is THE checkpoint of that handoff. It is captured here, once, and persisted before
 	// the block becomes the root (a later commit prunes it), so every honest root serves the same one whenever it is asked.
 	if err := bt.captureHandoffCheckpoint(bt.root.data, commitNode.data); err != nil {
 		return nil, persistenceUncertain(err)
 	}
 
-	// The P85 records the newly committed blocks projected, oldest first, are retained before the commit block becomes the root: a crash
-	// in between repeats an idempotent append, never loses a record.
-	if recs := committedRecords(path); len(recs) > 0 {
-		store, ok := bt.blocksDB.(RecordStore)
-		if !ok {
-			return nil, persistenceUncertain(ErrNoRecordStore)
-		}
-		if err := store.AppendRecords(recs); err != nil {
-			return nil, persistenceUncertain(err)
-		}
-	}
-
-	if err := bt.blocksDB.WriteBlock(commitNode.data, true); err != nil {
+	// The committed block, the P85 records its path projected (oldest first) and the control cut of the block are retained together,
+	// before the block becomes the root and before any certificate it generated is visible: a crash leaves the prior state or the
+	// complete new one, and a repeat is idempotent. A block whose cut cannot be retained is not committed (persistence uncertain), so a
+	// certificate is never visible without the cut a shard needs to replay its origin.
+	if err := bt.persistCommit(commitNode.data, committedRecords(path)); err != nil {
 		return nil, persistenceUncertain(err)
 	}
 
 	bt.root = commitNode
 	propagateLastCR(commitNode)
 	return ucs, nil
+}
+
+// persistCommit stores the committed block with its records and cut. A store that can commit atomically does; one that cannot gets the
+// same three writes in the order that a crash repeats idempotently (records, cut, then the block that makes the commit visible).
+func (bt *BlockTree) persistCommit(block *ExecutedBlock, recs []rootrecords.Record) error {
+	cut, err := cutEntryOf(block)
+	if err != nil {
+		return err
+	}
+	if len(recs) > 0 {
+		if _, ok := bt.blocksDB.(RecordStore); !ok {
+			return ErrNoRecordStore
+		}
+	}
+	if cut != nil {
+		if _, ok := bt.blocksDB.(CutStore); !ok {
+			return ErrNoCutStore
+		}
+	}
+	if committer, ok := bt.blocksDB.(BlockCommitter); ok {
+		if err := committer.CommitBlock(block, recs, cut); err != nil {
+			return err
+		}
+	} else {
+		if len(recs) > 0 {
+			if err := bt.blocksDB.(RecordStore).AppendRecords(recs); err != nil {
+				return err
+			}
+		}
+		if cut != nil {
+			if err := bt.blocksDB.(CutStore).PutCut(*cut); err != nil {
+				return err
+			}
+		}
+		if err := bt.blocksDB.WriteBlock(block, true); err != nil {
+			return err
+		}
+	}
+	if cut != nil {
+		bt.cuts.put(cut.Key, ControlCut{Control: cut.Cut.Control, Path: cut.Cut.Path})
+	}
+	return nil
 }
 
 // propagateLastCR carries the committed root's latest certification responses (the UC and technical record as one pair) into the

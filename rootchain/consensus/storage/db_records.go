@@ -53,42 +53,50 @@ func (db BoltDB) AppendRecords(recs []rootrecords.Record) error {
 		if b == nil {
 			return errors.New("metadata bucket not found")
 		}
-		count, err := readRecordCount(b)
-		if err != nil {
-			return err
-		}
-		for _, r := range recs {
-			enc, err := types.Cbor.Marshal(r)
-			if err != nil {
-				return fmt.Errorf("serializing record %d: %w", r.Index, err)
-			}
-			switch {
-			case r.Index < count:
-				if !bytes.Equal(b.Get(recordKey(r.Index)), enc) {
-					return fmt.Errorf("%w: record %d differs from the retained one", ErrRecordLog, r.Index)
-				}
-				continue
-			case r.Index > count:
-				return fmt.Errorf("%w: record %d after %d retained", ErrRecordLog, r.Index, count)
-			}
-			var tip [32]byte
-			if count > 0 {
-				var last rootrecords.Record
-				if err := types.Cbor.Unmarshal(b.Get(recordKey(count-1)), &last); err != nil {
-					return fmt.Errorf("reading the retained tip: %w", err)
-				}
-				tip = last.ID
-			}
-			if r.Predecessor != tip || r.ID != rootrecords.RecordID(r.Index, r.Predecessor, r.Kind, r.Progress, r.UCTime, r.Data) {
-				return fmt.Errorf("%w: record %d does not link to the retained tip", ErrRecordLog, r.Index)
-			}
-			if err := b.Put(recordKey(r.Index), enc); err != nil {
-				return fmt.Errorf("storing record %d: %w", r.Index, err)
-			}
-			count++
-		}
-		return writeUint64(b, keyRecordCount, count)
+		return appendRecordsTx(b, recs)
 	})
+}
+
+// appendRecordsTx is AppendRecords inside an open transaction on the metadata bucket.
+func appendRecordsTx(b *bbolt.Bucket, recs []rootrecords.Record) error {
+	if len(recs) == 0 {
+		return nil
+	}
+	count, err := readRecordCount(b)
+	if err != nil {
+		return err
+	}
+	for _, r := range recs {
+		enc, err := types.Cbor.Marshal(r)
+		if err != nil {
+			return fmt.Errorf("serializing record %d: %w", r.Index, err)
+		}
+		switch {
+		case r.Index < count:
+			if !bytes.Equal(b.Get(recordKey(r.Index)), enc) {
+				return fmt.Errorf("%w: record %d differs from the retained one", ErrRecordLog, r.Index)
+			}
+			continue
+		case r.Index > count:
+			return fmt.Errorf("%w: record %d after %d retained", ErrRecordLog, r.Index, count)
+		}
+		var tip [32]byte
+		if count > 0 {
+			var last rootrecords.Record
+			if err := types.Cbor.Unmarshal(b.Get(recordKey(count-1)), &last); err != nil {
+				return fmt.Errorf("reading the retained tip: %w", err)
+			}
+			tip = last.ID
+		}
+		if r.Predecessor != tip || r.ID != rootrecords.RecordID(r.Index, r.Predecessor, r.Kind, r.Progress, r.UCTime, r.Data) {
+			return fmt.Errorf("%w: record %d does not link to the retained tip", ErrRecordLog, r.Index)
+		}
+		if err := b.Put(recordKey(r.Index), enc); err != nil {
+			return fmt.Errorf("storing record %d: %w", r.Index, err)
+		}
+		count++
+	}
+	return writeUint64(b, keyRecordCount, count)
 }
 
 // RecordCount is the number of retained records.
