@@ -283,6 +283,9 @@ func (x *ExecutedBlock) extendWithAuthority(newBlock *rctypes.BlockData, verifie
 					if err := verifyFreezeAssignment(companion, nextShardState.States[frozen], shardConfs[frozen], orchestration, authority.CurrentRoot(), nextShardState.States, shardConfs); err != nil {
 						return nil, err
 					}
+					if err := pos.refuseResolved(companion); err != nil {
+						return nil, err
+					}
 				}
 				if control.Phase == "committed" && nextShardState.Control.Phase == "endorsed" {
 					committed, err := decodeOrderedRecord(newBlock.Payload.HandoffRecords[0])
@@ -398,7 +401,7 @@ func (x *ExecutedBlock) extendWithAuthority(newBlock *rctypes.BlockData, verifie
 	}
 	// the P85 controls follow the certifications, in payload order
 	env := posEnv{Control: nextShardState.Control, LatestEVM: latestEVM, LatestEVMOK: latestEVMOK,
-		InFlight: pos.pendingAck() || (nextShardState.Control != nil && (nextShardState.Control.Phase == "prepared" || nextShardState.Control.Phase == "endorsed"))}
+		InFlight: handoffInFlight(pos, nextShardState.Control)}
 	replaced, err := pos.controls(newBlock, services, env)
 	if err != nil {
 		return nil, err

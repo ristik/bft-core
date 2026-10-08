@@ -330,7 +330,7 @@ func TestAbortThenRetryWithAnotherAssignmentInstallsOnlyTheRetry(t *testing.T) {
 	}
 	f.succ, err = evmassign.NewSuccessor(f.current, infos)
 	require.NoError(t, err)
-	retry := f.build(t, f.candidate(t))
+	retry := f.build(t, freshResult(f.candidate(t), 0x31))
 	require.NotEqual(t, first.freeze.NextBodyID, retry.freeze.NextBodyID)
 	f.addAt(t, 5, retry.prepare.Bytes())
 	f.addAt(t, 6, retry.freeze.Bytes(), retry.companion)
@@ -381,15 +381,29 @@ func mustTRHash2(t *testing.T, tr interface{ Hash() ([]byte, error) }) []byte {
 
 func (f *assignmentFixture) addAt(t *testing.T, round uint64, records ...[]byte) *ExecutedBlock {
 	t.Helper()
+	require.NoError(t, f.tryAt(t, round, records...))
+	return mustBlock(t, f.store, round)
+}
+
+// tryAt is addAt that returns the store's verdict.
+func (f *assignmentFixture) tryAt(t *testing.T, round uint64, records ...[]byte) error {
+	t.Helper()
 	parent := mustBlock(t, f.store, round-1)
 	payload := &rctypes.Payload{Version: 2}
 	if len(records) > 0 {
 		payload.HandoffRecords = records
 	}
-	_, err := f.store.Add(&rctypes.BlockData{Version: 2, Round: round, Epoch: 1, Payload: payload,
+	_, err := f.store.Add(&rctypes.BlockData{Version: 2, Round: round, Epoch: 1, Timestamp: 1_000 + round, Payload: payload,
 		Qc: &rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{RoundNumber: round - 1, Epoch: 1, CurrentRootHash: parent.RootHash}}}, nil)
-	require.NoError(t, err)
-	return mustBlock(t, f.store, round)
+	return err
+}
+
+// freshResult is the candidate under another Election result: a retry after an Abort cannot reuse the aborted result.
+func freshResult(c evmassign.Candidate, id byte) evmassign.Candidate {
+	a := *c.Authorization
+	a.ResultID = bytes.Repeat([]byte{id}, 32)
+	c.Authorization = &a
+	return c
 }
 
 func (f *assignmentFixture) abortCompanionFor(t *testing.T, r evmroot.OrderedHandoffRecord) []byte {
@@ -536,4 +550,33 @@ func candidateOf(t *testing.T, preimage []byte) evmassign.Candidate {
 	c, err := evmassign.DecodeCandidate(preimage)
 	require.NoError(t, err)
 	return c
+}
+
+func TestARetryOfAnAbortedPrimaryCannotReuseItsElectionResult(t *testing.T) {
+	f := newAssignmentFixture(t)
+	f.useRealOrchestration(t)
+	f.seedFees(t)
+	first := f.build(t, f.candidate(t))
+	require.NoError(t, f.admit(t, first))
+	abort := first.freeze
+	abort.Kind, abort.OrderedRound = "abort", 4
+	f.addAt(t, 4, abort.Bytes(), f.abortCompanionFor(t, abort))
+	require.Len(t, mustBlock(t, f.store, 4).ShardState.Records, 1, "the abort closed the result")
+
+	f.pop.Attempt = 1
+	f.base = 5
+	f.nextKeys = []evmKey{f.oldKeys[0], f.oldKeys[1], f.oldKeys[2], newEVMKey(t, "ev-h")}
+	f.replacementEVM = "ev-h"
+	infos := make([]*types.NodeInfo, 0, 4)
+	for _, k := range f.nextKeys {
+		infos = append(infos, k.info)
+	}
+	var err error
+	f.succ, err = evmassign.NewSuccessor(f.current, infos)
+	require.NoError(t, err)
+	retry := f.build(t, f.candidate(t)) // the same Authorization, hence the same result
+	f.addAt(t, 5, retry.prepare.Bytes())
+	err = f.tryAt(t, 6, retry.freeze.Bytes(), retry.companion)
+	require.ErrorIs(t, err, ErrResolvedResult)
+	require.Equal(t, "prepared", mustBlock(t, f.store, 5).ShardState.Control.Phase, "the refused freeze changed nothing")
 }

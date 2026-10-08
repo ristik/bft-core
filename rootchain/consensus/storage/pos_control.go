@@ -25,6 +25,12 @@ var (
 	// ErrClosureMissing reports a block that leaves a closed epoch's CloseLiability outstanding: the closure of every awaiting epoch is
 	// mandatory in the block whose ordinary round ends the handoff's freeze, and in every block after it.
 	ErrClosureMissing = errors.New("P85 mandatory CloseLiability missing")
+	// ErrNotLatestEVM reports a control that names an EVM state other than the one certified in the parent block.
+	ErrNotLatestEVM = errors.New("P85 control: P is not the latest EVM state certified in the parent")
+	// ErrHandoffInFlight reports a Retirement while a handoff could still reference the generation.
+	ErrHandoffInFlight = errors.New("P85 control: a handoff is in flight")
+	// ErrResolvedResult reports a primary candidate whose Election result the log already closed or acknowledged.
+	ErrResolvedResult = errors.New("P85: the election result is already resolved")
 	// ErrWitnessUnavailable reports a control whose retained witness is not available: unavailable, never false, so the block cannot
 	// be voted until it is.
 	ErrWitnessUnavailable = errors.New("P85 control witness unavailable")
@@ -193,14 +199,14 @@ func certifiedState(blockHash, stateRoot [32]byte, svc *PosServices, env posEnv)
 		return ErrPosControls
 	}
 	if !env.LatestEVMOK || blockHash != env.LatestEVM {
-		return fmt.Errorf("%w: P is not the latest EVM state certified in the parent", ErrPosControlRefused)
+		return errors.Join(ErrPosControlRefused, ErrNotLatestEVM)
 	}
 	root, err := svc.EVM.StateRoot(blockHash)
 	if err != nil {
 		return errors.Join(ErrWitnessUnavailable, err)
 	}
 	if root != stateRoot {
-		return fmt.Errorf("%w: the state root is not the certified block's", ErrPosControlRefused)
+		return errors.Join(ErrPosControlRefused, ErrNotLatestEVM, errors.New("the state root is not the certified block's"))
 	}
 	return nil
 }
@@ -213,11 +219,11 @@ func (p *posStep) retire(c rctypes.PosControl, block *rctypes.BlockData, svc *Po
 	if !ok1 || !ok2 {
 		return fmt.Errorf("%w: retirement id or generation is not a uint64", ErrPosControlRefused)
 	}
+	if env.InFlight {
+		return errors.Join(ErrPosControlRefused, ErrHandoffInFlight)
+	}
 	if err := certifiedState(c.Retire.EVMBlockHash, c.Retire.EVMStateRoot, svc, env); err != nil {
 		return err
-	}
-	if env.InFlight {
-		return fmt.Errorf("%w: a handoff is in flight; its obligations may reference the generation", ErrPosControlRefused)
 	}
 	witness, err := witnessOf(c, svc)
 	if err != nil {
@@ -331,6 +337,9 @@ func (p *posStep) abort(candidates candidateSource, r evmroot.OrderedHandoffReco
 	if c.Kind != evmassign.KindPrimary {
 		return nil
 	}
+	if p.state.IsResolved(c.ResultID()) {
+		return nil // already closed or acknowledged: a repeat projects nothing (custody would refuse it and block the log)
+	}
 	next, rec, err := p.state.SessionClosed(c.ResultID(), round, timestamp)
 	if err != nil {
 		return errors.Join(ErrPosSource, err)
@@ -405,5 +414,34 @@ func (p *posStep) closeLiability(c rctypes.PosControl, block *rctypes.BlockData,
 	}
 	p.set(next)
 	p.records = append(p.records, rec)
+	return nil
+}
+
+// handoffInFlight reports whether a handoff could still reference an identity generation: a prepared or endorsed one, a committed one
+// whose freeze has not ended or whose acknowledgement is pending.
+func handoffInFlight(p posStep, c *evmroot.ControlState) bool {
+	if p.on && (p.state.Frozen || len(p.state.Pending) > 0) {
+		return true
+	}
+	return c != nil && (c.Phase == "prepared" || c.Phase == "endorsed" || c.Phase == "committed")
+}
+
+// refuseResolved refuses a primary Freeze whose Election result the log has already resolved: its Abort would project a second
+// SessionClosed and its commit a second Ack, and custody refuses both.
+func (p *posStep) refuseResolved(companion []byte) error {
+	if !p.on || len(companion) == 0 {
+		return nil
+	}
+	fc, err := ParseFreezeCompanion(companion)
+	if err != nil || len(fc.Preimage) == 0 {
+		return nil // judged by the freeze admission itself
+	}
+	c, err := evmassign.DecodeCandidate(fc.Preimage)
+	if err != nil || c.Kind != evmassign.KindPrimary {
+		return nil
+	}
+	if p.state.IsResolved(c.ResultID()) {
+		return errors.Join(ErrHandoffRecord, ErrResolvedResult)
+	}
 	return nil
 }

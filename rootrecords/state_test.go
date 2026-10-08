@@ -421,3 +421,54 @@ func TestStateRetiredMarkersStayOrderedAndRoundTrip(t *testing.T) {
 	_, err = DecodeState(bad.Bytes())
 	require.ErrorIs(t, err, ErrState, "duplicate")
 }
+
+func TestAResultResolvesOnceWhetherClosedOrAcknowledged(t *testing.T) {
+	s := mustBlock(t, NewState(1, 1), 1, 10)
+	n, _, err := s.SessionClosed(id32(7), 12, 900)
+	require.NoError(t, err)
+	require.True(t, n.IsResolved(id32(7)))
+	require.False(t, s.IsResolved(id32(7)), "the original is untouched")
+	_, _, err = n.SessionClosed(id32(7), 13, 901)
+	require.ErrorIs(t, err, ErrResultResolved)
+	other, _, err := n.SessionClosed(id32(3), 13, 901)
+	require.NoError(t, err)
+	require.True(t, other.IsResolved(id32(3)) && other.IsResolved(id32(7)))
+	require.False(t, other.IsResolved(id32(5)))
+
+	// an acknowledged result is resolved too, and a closed one cannot be acknowledged
+	c := mustCommit(t, NewState(1, 1), 100, 2, 101, true)
+	c = mustBlock(t, c, 2, 105)
+	acked, _, err := c.Ack(110, 1_000, id32(9), id32(1), 2)
+	require.NoError(t, err)
+	require.True(t, acked.IsResolved(id32(9)))
+	_, _, err = acked.SessionClosed(id32(9), 111, 1_001)
+	require.ErrorIs(t, err, ErrResultResolved)
+	closedFirst, _, err := c.SessionClosed(id32(9), 108, 999)
+	require.NoError(t, err)
+	_, _, err = closedFirst.Ack(110, 1_000, id32(9), id32(1), 2)
+	require.ErrorIs(t, err, ErrResultResolved)
+	_, _, err = NewState(1, 1).Ack(110, 1_000, id32(9), id32(1), 2)
+	require.ErrorIs(t, err, ErrNoPending)
+}
+
+func TestStateResolvedResultsStayOrderedAndRoundTrip(t *testing.T) {
+	s := mustBlock(t, NewState(1, 1), 1, 10)
+	var err error
+	for _, b := range []byte{9, 3, 7, 5} {
+		s, _, err = s.SessionClosed(id32(b), 12, 900)
+		require.NoError(t, err)
+	}
+	var got [][32]byte
+	got = append(got, s.Resolved...)
+	require.Equal(t, [][32]byte{id32(3), id32(5), id32(7), id32(9)}, got)
+	dec, err := DecodeState(s.Bytes())
+	require.NoError(t, err)
+	require.Equal(t, s.Resolved, dec.Resolved)
+	bad := s
+	bad.Resolved = [][32]byte{id32(5), id32(3)}
+	_, err = DecodeState(bad.Bytes())
+	require.ErrorIs(t, err, ErrState, "descending")
+	bad.Resolved = [][32]byte{id32(3), id32(3)}
+	_, err = DecodeState(bad.Bytes())
+	require.ErrorIs(t, err, ErrState, "duplicate")
+}

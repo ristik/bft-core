@@ -290,9 +290,14 @@ in production, and there is no migration (greenroom, one format).
   repeat with the same digest emits nothing, another digest conflicts (`State.Retired`). RejectResult: only at a quiet control state
   (idle or aborted) with no pending primary, the next attempt of the root's own authority; the unresolved result with no competing
   session is proven at P; it emits SessionClosed and sets the control state to aborted at that attempt, so the next Prepare is the next
-  attempt. A committed D4 Abort closes the Election result only when its Freeze retained a primary candidate (the Prepare carries none,
-  so a Prepare-only Abort names no result; that open result ends by RejectResult); the abort of a recovery attempt closes nothing. At
-  most 32 records per block.
+  attempt. A committed D4 Abort closes the Election result only when its Freeze retained a primary candidate; the abort of a recovery
+  attempt closes nothing. A result resolves once (`State.Resolved`): a repeat Abort projects nothing, and a primary Freeze whose result
+  is already resolved is refused, because custody refuses a second SessionClosed or an Ack of a session that is no longer open and its
+  record cursor is strict. At most 32 records per block.
+  **Open (architecture):** a Prepare carries no candidate, so a Prepare-only Abort names no result, and the result stays open on custody.
+  RejectResult cannot end it under this attempt rule: after Prepare(N) and Abort the control state is `aborted` at attempt N, the open
+  result is bound to attempt N, and RejectResult requires attempt N+1. Either bind the result in the Prepare record, or allow
+  RejectResult at `aborted` for the aborted attempt when no candidate was frozen. Not implemented until decided.
 - **Not implemented here:** the on-chain `IRootRecords` implementation in the SealRegistry and its feed from Ureth; the reference model
   above and the vectors are what it must match. The Closure and Retirement digest words (exposure, key history, reference digest) are
   contract-derived and opaque labels in the vectors.

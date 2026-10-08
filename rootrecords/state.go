@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"math/bits"
+	"sort"
 
 	"github.com/unicitynetwork/bft-go-base/types"
 )
@@ -37,6 +38,10 @@ type State struct {
 	// Retired are the (id, generation) retirement markers with the reference digest each retired with, ascending by key: a generation
 	// retires once, a repeat of the same request is no new record and a conflicting one is refused.
 	Retired []Retired
+	// Resolved are the Election results the log has closed or acknowledged, ascending. A result resolves once: custody refuses a second
+	// SessionClosed, or an Ack, of a session that is no longer open, and its record cursor is strict, so a repeat would block every later
+	// record. The list grows by one per resolved election and is never pruned (replay needs it).
+	Resolved [][32]byte
 	// Log cursor.
 	Count                  uint64
 	Tip                    [32]byte
@@ -68,6 +73,8 @@ var (
 	ErrState = errors.New("rootrecords: invalid root source state")
 	// ErrNotAwaiting reports a closure of an epoch that has no closure outstanding: never closed by a handoff, or closed already.
 	ErrNotAwaiting = errors.New("rootrecords: no closure is outstanding for the epoch")
+	// ErrResultResolved reports a projection for an Election result the log already closed or acknowledged.
+	ErrResultResolved = errors.New("rootrecords: the election result is already resolved")
 	// ErrRetirementConflict reports a second retirement of a generation with another reference digest.
 	ErrRetirementConflict = errors.New("rootrecords: the generation retired with another reference digest")
 	// ErrRetireEarly reports a retirement anchored below the generation's last liability anchor.
@@ -85,6 +92,7 @@ func (s State) clone() State {
 	s.Pending = append([]PendingH(nil), s.Pending...)
 	s.Awaiting = append([]Awaiting(nil), s.Awaiting...)
 	s.Retired = append([]Retired(nil), s.Retired...)
+	s.Resolved = append([][32]byte(nil), s.Resolved...)
 	return s
 }
 
@@ -195,7 +203,12 @@ func (s State) Ack(round, timestamp uint64, resultID, assignmentID [32]byte, evm
 		return State{}, Record{}, err
 	}
 	at := Anchor{progress, timestamp}
-	s = s.clone()
+	if len(s.Pending) == 0 {
+		return State{}, Record{}, ErrNoPending
+	}
+	if s, err = s.resolve(resultID); err != nil {
+		return State{}, Record{}, err
+	}
 	switch len(s.Pending) {
 	case 1:
 		j := s.Pending[0]
@@ -239,7 +252,30 @@ func (s State) SessionClosed(resultID [32]byte, round, timestamp uint64) (State,
 	if err != nil {
 		return State{}, Record{}, err
 	}
-	return s.clone().append(KindSessionClosed, resultID[:], Anchor{progress, timestamp})
+	s, err = s.resolve(resultID)
+	if err != nil {
+		return State{}, Record{}, err
+	}
+	return s.append(KindSessionClosed, resultID[:], Anchor{progress, timestamp})
+}
+
+// IsResolved reports whether the log has closed or acknowledged the result.
+func (s State) IsResolved(resultID [32]byte) bool {
+	i := sort.Search(len(s.Resolved), func(i int) bool { return bytes.Compare(s.Resolved[i][:], resultID[:]) >= 0 })
+	return i < len(s.Resolved) && s.Resolved[i] == resultID
+}
+
+// resolve returns a copy of s with the result resolved, or ErrResultResolved.
+func (s State) resolve(resultID [32]byte) (State, error) {
+	if s.IsResolved(resultID) {
+		return State{}, fmt.Errorf("%w: %x", ErrResultResolved, resultID)
+	}
+	s = s.clone()
+	i := sort.Search(len(s.Resolved), func(i int) bool { return bytes.Compare(s.Resolved[i][:], resultID[:]) >= 0 })
+	s.Resolved = append(s.Resolved, [32]byte{})
+	copy(s.Resolved[i+1:], s.Resolved[i:])
+	s.Resolved[i] = resultID
+	return s, nil
 }
 
 func (s State) retiredAt(id, generation uint64) (int, bool) {
@@ -317,8 +353,12 @@ func (s State) Bytes() []byte {
 	for _, x := range s.Retired {
 		retired = append(retired, []any{x.ID, x.Generation, x.RefDigest[:]})
 	}
+	resolved := make([]any, 0, len(s.Resolved))
+	for _, x := range s.Resolved {
+		resolved = append(resolved, x[:])
+	}
 	b, err := types.Cbor.Marshal([]any{stateDomain, uint64(1), s.Epoch, s.Offset, s.First, s.Frozen, s.Endpoint, s.NextEpoch, s.NextOffset, s.NextFirst,
-		pending, awaiting, retired, s.Count, s.Tip[:], s.LastProgress, s.LastTime})
+		pending, awaiting, retired, resolved, s.Count, s.Tip[:], s.LastProgress, s.LastTime})
 	if err != nil {
 		panic(err) // fixed shape of scalars and byte strings
 	}
@@ -331,7 +371,7 @@ func (s State) Digest() [32]byte { return sha256.Sum256(s.Bytes()) }
 // DecodeState parses the canonical encoding and refuses anything that is not exactly that or not internally consistent.
 func DecodeState(data []byte) (State, error) {
 	var f []any
-	if err := types.Cbor.Unmarshal(data, &f); err != nil || len(f) != 17 {
+	if err := types.Cbor.Unmarshal(data, &f); err != nil || len(f) != 18 {
 		return State{}, fmt.Errorf("%w: shape", ErrState)
 	}
 	if d, ok := f[0].(string); !ok || d != stateDomain {
@@ -341,21 +381,22 @@ func DecodeState(data []byte) (State, error) {
 		return State{}, fmt.Errorf("%w: version", ErrState)
 	}
 	u := func(i int) uint64 { v, _ := f[i].(uint64); return v }
-	for _, i := range []int{2, 3, 4, 6, 7, 8, 9, 13, 15, 16} {
+	for _, i := range []int{2, 3, 4, 6, 7, 8, 9, 14, 16, 17} {
 		if _, ok := f[i].(uint64); !ok {
 			return State{}, fmt.Errorf("%w: field %d", ErrState, i)
 		}
 	}
 	frozen, ok := f[5].(bool)
-	tip, ok2 := f[14].([]byte)
+	tip, ok2 := f[15].([]byte)
 	pend, ok3 := f[10].([]any)
 	await, ok4 := f[11].([]any)
 	ret, ok5 := f[12].([]any)
-	if !ok || !ok2 || len(tip) != 32 || !ok3 || !ok4 || !ok5 {
+	res, ok6 := f[13].([]any)
+	if !ok || !ok2 || len(tip) != 32 || !ok3 || !ok4 || !ok5 || !ok6 {
 		return State{}, fmt.Errorf("%w: field type", ErrState)
 	}
 	s := State{Epoch: u(2), Offset: u(3), First: u(4), Frozen: frozen, Endpoint: u(6), NextEpoch: u(7), NextOffset: u(8), NextFirst: u(9),
-		Count: u(13), LastProgress: u(15), LastTime: u(16)}
+		Count: u(14), LastProgress: u(16), LastTime: u(17)}
 	copy(s.Tip[:], tip)
 	for _, pv := range pend {
 		pf, isArr := pv.([]any)
@@ -409,6 +450,15 @@ func DecodeState(data []byte) (State, error) {
 		copy(x.RefDigest[:], ref)
 		s.Retired = append(s.Retired, x)
 	}
+	for _, rv := range res {
+		id, isBytes := rv.([]byte)
+		if !isBytes || len(id) != 32 {
+			return State{}, fmt.Errorf("%w: resolved entry", ErrState)
+		}
+		var x [32]byte
+		copy(x[:], id)
+		s.Resolved = append(s.Resolved, x)
+	}
 	if err := s.consistent(); err != nil {
 		return State{}, err
 	}
@@ -434,6 +484,8 @@ func (s State) consistent() error {
 		return fmt.Errorf("%w: pending handoff beyond the current epoch", ErrState)
 	case !awaitingAscending(s.Awaiting):
 		return fmt.Errorf("%w: awaiting epochs not strictly ascending", ErrState)
+	case !resolvedAscending(s.Resolved):
+		return fmt.Errorf("%w: resolved results not strictly ascending", ErrState)
 	case !retiredAscending(s.Retired):
 		return fmt.Errorf("%w: retired markers not strictly ascending", ErrState)
 	case (s.Count == 0) != (s.Tip == [32]byte{}):
@@ -454,6 +506,15 @@ func awaitingAscending(a []Awaiting) bool {
 func retiredAscending(r []Retired) bool {
 	for i := 1; i < len(r); i++ {
 		if r[i].ID < r[i-1].ID || (r[i].ID == r[i-1].ID && r[i].Generation <= r[i-1].Generation) {
+			return false
+		}
+	}
+	return true
+}
+
+func resolvedAscending(r [][32]byte) bool {
+	for i := 1; i < len(r); i++ {
+		if bytes.Compare(r[i-1][:], r[i][:]) >= 0 {
 			return false
 		}
 	}
