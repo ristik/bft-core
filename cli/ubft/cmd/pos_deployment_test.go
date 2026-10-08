@@ -129,3 +129,33 @@ func TestThePullBoundOfAnEVMWitnessIsTheExecutorsBound(t *testing.T) {
 	require.Equal(t, storage.MaxEVMWitnessBytes, storage.WitnessBound(rctypes.OpRejectResult))
 	require.Equal(t, storage.MaxWitnessBytes, storage.WitnessBound(rctypes.OpCloseLiability), "a closure bundle keeps its own bound")
 }
+
+func TestLoadPosDeploymentPinsTheElectionOnlyAsAPair(t *testing.T) {
+	base := deploymentJSON(goodWord, "1", goodCustody)
+	with := func(extra string) string { return strings.TrimSuffix(base, "}") + "," + extra + "}" }
+	const election = `"election":"0xff00000000000000000000000000000000000003"`
+	electionCode := `"electionCodeHash":"` + goodCode + `"`
+
+	d, pins, err := loadPosDeployment(writeDeployment(t, with(election+","+electionCode)), 5)
+	require.NoError(t, err)
+	require.Equal(t, byte(0x03), d.Election[19])
+	require.Equal(t, d.Election, pins.Election, "the node and the authority judge the same address")
+	require.Equal(t, byte(0xaa), pins.ElectionCode[0])
+
+	d, pins, err = loadPosDeployment(writeDeployment(t, base), 5)
+	require.NoError(t, err)
+	require.Equal(t, [20]byte{}, d.Election, "a deployment without it does not judge primary candidates")
+	require.Equal(t, [20]byte{}, pins.Election)
+
+	zero20, zero32 := "0x"+strings.Repeat("00", 20), "0x"+strings.Repeat("00", 32)
+	for name, body := range map[string]string{
+		"an election without its code hash": with(election),
+		"a code hash without its election":  with(electionCode),
+		"a zero election":                   with(`"election":"` + zero20 + `",` + electionCode),
+		"a zero election code hash":         with(election + `,"electionCodeHash":"` + zero32 + `"`),
+		"a short election":                  with(`"election":"0x1122",` + electionCode),
+	} {
+		_, _, err := loadPosDeployment(writeDeployment(t, body), 5)
+		require.ErrorIs(t, err, ErrPosDeployment, name)
+	}
+}

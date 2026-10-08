@@ -32,6 +32,10 @@ type posDeploymentFile struct {
 	CustodyCode  string `json:"custodyCodeHash"`  // 32 bytes: keccak256 of the deployed custody code
 	Registry     string `json:"registry"`         // 20 bytes: the SealRegistry custody names as its roots
 	RegistryCode string `json:"registryCodeHash"` // 32 bytes: keccak256 of the deployed registry code
+	// Optional pair: the deployed Election module. With it the root judges a primary candidate's EVM proof (Freeze companion v4);
+	// without it a primary candidate is admitted as before. Both or neither.
+	Election     string `json:"election,omitempty"`         // 20 bytes
+	ElectionCode string `json:"electionCodeHash,omitempty"` // 32 bytes: keccak256 of the deployed election code
 }
 
 func decodeFixedHex(name, s string, n int) ([]byte, error) {
@@ -87,11 +91,27 @@ func loadPosDeployment(path string, rootNetwork uint64) (storage.PosDeployment, 
 	if err != nil {
 		return out, pins, err
 	}
+	if (f.Election == "") != (f.ElectionCode == "") {
+		return out, pins, fmt.Errorf("%w: election and electionCodeHash are pinned together", ErrPosDeployment)
+	}
+	if f.Election != "" {
+		election, err := decodeFixedHex("election", f.Election, 20)
+		if err != nil {
+			return out, pins, err
+		}
+		electionCode, err := decodeFixedHex("electionCodeHash", f.ElectionCode, 32)
+		if err != nil {
+			return out, pins, err
+		}
+		copy(out.Election[:], election)
+		copy(pins.Election[:], election)
+		copy(pins.ElectionCode[:], electionCode)
+	}
 	out.RootNetwork = rootNetwork
 	copy(out.NetworkWord[:], word)
 	copy(out.Custody[:], custody)
 	chain.FillBytes(out.ChainID[:])
-	pins = evmstate.Pins{Custody: out.Custody, NetworkWord: out.NetworkWord}
+	pins.Custody, pins.NetworkWord = out.Custody, out.NetworkWord
 	copy(pins.CustodyCode[:], custodyCode)
 	copy(pins.Registry[:], registry)
 	copy(pins.RegistryCode[:], registryCode)
@@ -115,7 +135,12 @@ func enablePosClosure(cm *consensus.ConsensusManager, orchestration *partitions.
 		return errors.Join(ErrPosDeployment, err)
 	}
 	authority := posclosure.New(posclosure.History{Partition: conf.PartitionID, Shard: conf.ShardID, TrustBases: trustBases, Orchestration: orchestration})
+	var primary storage.PrimaryAuthority
+	if dep.Election != ([20]byte{}) {
+		primary = evmstate.Authority{Pins: pins}
+	}
 	cm.SetPosServices(&storage.PosServices{
+		Primary:    primary,
 		Deployment: dep,
 		Authority:  authority,
 		Witnesses:  cm,
