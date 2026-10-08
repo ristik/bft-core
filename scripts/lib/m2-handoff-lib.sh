@@ -38,7 +38,7 @@ m2_start_root() {
   fi
   mkdir -p "test-nodes/root$node"
   for i in $(seq 1 90); do
-    build/ubft root-node run --home "test-nodes/root$node" \
+    UBFT_Q4_SHIM_DIR="${Q4_SHIM_DIR:+$Q4_SHIM_DIR/root$node}" ${Q4_ROOT_BIN:-build/ubft} root-node run --home "test-nodes/root$node" \
       --address "/ip4/127.0.0.1/tcp/$(m2_p2p_port "$node")" \
       ${bootArgs[@]+"${bootArgs[@]}"} --trust-base test-nodes/trust-base.json \
       "${shardConfArgs[@]}" --profile-2 --install-handoff-epoch "$epoch" \
