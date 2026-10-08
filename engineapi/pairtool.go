@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 
 	"github.com/unicitynetwork/bft-go-base/types"
 )
@@ -97,13 +98,32 @@ const (
 // PairControlOutcome is the execution client's answer to one control.
 type PairControlOutcome struct {
 	Accepted bool
+	// GateOnly: the pair gate accepted the job and the engine then refused the build below its finalized block (see RunPairControl).
+	GateOnly bool
 	Detail   string // the refusal text of a refused control, which carries the typed cause
 }
 
 // RunPairControl submits one build job to the pair's execution client: the job that would rebuild its latest block on that block's parent,
 // from the root input and binding it retained, with exactly one thing changed according to the control. The control that changes nothing
 // must be accepted; every other must be refused with its own cause. A job that is accepted starts a payload build the node never collects.
+//
+// The rebuild is on the latest block's parent. In steady state the latest block is the latest certified one, which the node told its execution
+// client is finalized, and the client refuses a build below its finalized block ("Too deep reorg") AFTER the pair gate has accepted the job
+// (ureth checks the binding before the build is forwarded to the engine). For the control that changes nothing that answer is therefore the
+// gate's acceptance, reported as Accepted with GateOnly set; for every other control it is a failure to be refused by the gate, so it stays a
+// refusal and the lane finds no typed cause.
 func RunPairControl(ctx context.Context, engineURL string, secret Secret, ethURL string, kind PairControl) (PairControlOutcome, error) {
+	out, err := runPairControlOnce(ctx, engineURL, secret, ethURL, kind)
+	if err == nil && kind == ControlAccept && !out.Accepted && strings.Contains(out.Detail, tooDeepReorg) {
+		out.Accepted, out.GateOnly = true, true
+	}
+	return out, err
+}
+
+// tooDeepReorg is the execution client's refusal of a build below its finalized block.
+const tooDeepReorg = "Too deep reorg"
+
+func runPairControlOnce(ctx context.Context, engineURL string, secret Secret, ethURL string, kind PairControl) (PairControlOutcome, error) {
 	var out PairControlOutcome
 	eth := NewEthClient(ethURL)
 	h, err := eth.header(ctx, "latest")

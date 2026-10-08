@@ -115,6 +115,11 @@ function start_root_nodes() {
     local profileArgs=()
     if [ "${M2_PROFILE2:-0}" = 1 ]; then
       profileArgs=(--profile-2)
+      if [ "${Q3_WEIGHT_LANE:-0}" = 1 ]; then
+        # Q3 #50: the coupled runtime from genesis, and the PoA genesis committee's identity records the first coupled handoff names as K
+        [ -s test-nodes/genesis-identities.json ] || q3_prepare_genesis_identities || exit 1
+        profileArgs+=(--q3-lane --genesis-identities test-nodes/genesis-identities.json)
+      fi
       # Under the handoff profile PUT /api/v1/configurations is refused (#329): the genesis shard
       # configurations are fixed at start, so hand every one of them over by flag.
       collect_shard_conf_args
@@ -279,6 +284,20 @@ function generate_evm_shard_conf() {
     $nodeInfoFiles
 
   echo "generated test-nodes/shard-conf-${partitionID}_0.json"
+}
+
+# q3_prepare_genesis_identities - the PoA genesis committee's identity records (#85 lifecycle), derived from the genesis trust base, the
+# coupled EVM shard's full genesis configuration and the entity bindings (root i is delegated to EVM validator i). Operator-assigned DEV
+# values; `root-node run --genesis-identities` records them as the incumbent baseline.
+function q3_prepare_genesis_identities() {
+  local n=${1:-4} i items=()
+  for i in $(seq 1 "$n"); do
+    items+=("{\"rootNodeId\":\"$(build/ubft node-id --home "test-nodes/root$i" | tail -n1)\",\"evmNodeId\":\"$(evm_validator_id "$i")\"}")
+  done
+  printf '[%s]\n' "$(IFS=,; echo "${items[*]}")" >test-nodes/genesis-bindings.json
+  build/ubft genesis-identities generate --trust-base test-nodes/trust-base.json \
+    --shard-conf "${fullShardConf:-test-nodes/evm-full-shard-conf-v2.json}" --bindings test-nodes/genesis-bindings.json \
+    --out test-nodes/genesis-identities.json
 }
 
 # --- SealRegistry layout: resolved ONCE per run, persisted in the run directory -----------------------
@@ -522,6 +541,8 @@ function start_one_evm_validator() {
       return 1
     fi
     profileArgs=(--trust-history-profile-2)
+    # Q3 #50: the shard node runs the verified coupled runtime (its own verification from the pinned genesis)
+    [ "${Q3_WEIGHT_LANE:-0}" != 1 ] || profileArgs+=(--q3-lane)
   fi
 
   # The registry layout only matters to the engine-api executor; resolve it from the run's persisted file.

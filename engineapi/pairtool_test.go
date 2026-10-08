@@ -54,7 +54,19 @@ func (c pairChain) serve(t *testing.T, eth *mockReth) {
 	t.Helper()
 	enc, err := c.binding.Encode()
 	require.NoError(t, err)
-	eth.on("eth_getBlockByNumber", func(json.RawMessage) (any, *rpcError) { return c.header, nil })
+	eth.on("eth_getBlockByNumber", func(r json.RawMessage) (any, *rpcError) {
+		var args []any
+		_ = json.Unmarshal(r, &args)
+		if len(args) > 0 && args[0] == "finalized" { // the block before the retained one is the finalized one: the retained block is an uncertified tip
+			fin := map[string]any{}
+			for k, v := range c.header {
+				fin[k] = v
+			}
+			fin["number"] = "0x4"
+			return fin, nil
+		}
+		return c.header, nil
+	})
 	eth.on("unicity_getSealCompanionV1", func(json.RawMessage) (any, *rpcError) {
 		return map[string]any{"status": "found", "companion": map[string]any{"rootInput": "0x" + hexString(c.rootInput),
 			"pairBinding": "0x" + hexString(enc), "witnesses": []any{}, "provenance": "build"}}, nil
@@ -215,4 +227,37 @@ func TestTheRestartAdmissionPresentsTheRetainedBindingAsAnImportOfTheHead(t *tes
 		return nil, &rpcError{Code: -39002, Message: "recovery admission refused: presented binding refused at 5: pair binding refused: ParentHashMismatch"}
 	})
 	require.ErrorContains(t, AdmitHeadFromRetained(context.Background(), urlOf(t, engine, true), Secret{}, urlOf(t, eth, false)), "ParentHashMismatch")
+}
+
+// The execution client refuses a build below its finalized block after the pair gate accepted the job. For the control that changes nothing
+// that answer is the gate's acceptance; for every other control the same answer means the gate did not refuse, so it is not an acceptance.
+func TestATooDeepReorgIsTheGatesAcceptanceOnlyForTheUnchangedControl(t *testing.T) {
+	c := newPairChain(t)
+	eth := newMockReth(t, Secret{})
+	c.serve(t, eth)
+	engine := newMockReth(t, Secret{})
+	engine.on("engine_forkchoiceUpdatedWithSealV1", func(json.RawMessage) (any, *rpcError) {
+		return nil, &rpcError{Code: -38006, Message: "Too deep reorg"}
+	})
+	out, err := RunPairControl(context.Background(), urlOf(t, engine, true), Secret{}, urlOf(t, eth, false), ControlAccept)
+	require.NoError(t, err)
+	require.True(t, out.Accepted)
+	require.True(t, out.GateOnly)
+	require.Contains(t, out.Detail, "Too deep reorg")
+
+	for _, kind := range []PairControl{ControlWrongParent, ControlWrongJob, ControlSubstitutedInput, ControlMissingEvidence} {
+		out, err = RunPairControl(context.Background(), urlOf(t, engine, true), Secret{}, urlOf(t, eth, false), kind)
+		require.NoError(t, err, kind)
+		require.False(t, out.Accepted, "%s: a build the gate did not refuse is a failed control", kind)
+		require.False(t, out.GateOnly, kind)
+	}
+
+	// any other engine error of the unchanged control stays a refusal
+	other := newMockReth(t, Secret{})
+	other.on("engine_forkchoiceUpdatedWithSealV1", func(json.RawMessage) (any, *rpcError) {
+		return nil, &rpcError{Code: -32602, Message: "Invalid params"}
+	})
+	out, err = RunPairControl(context.Background(), urlOf(t, other, true), Secret{}, urlOf(t, eth, false), ControlAccept)
+	require.NoError(t, err)
+	require.False(t, out.Accepted)
 }

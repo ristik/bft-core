@@ -868,6 +868,7 @@ if [ "${M2_PROFILE2:-0}" = 1 ] && [ "${POST_M2A_SKIP_HANDOFF:-0}" != 1 ]; then
   fi
   handoffScript=scripts/m2-profile2-handoffs.sh
   if [ "${H3_ASSIGNMENT_LANE:-0}" = 1 ]; then handoffScript=scripts/h3-assignment-steps.sh; fi
+  if [ "${Q3_WEIGHT_LANE:-0}" = 1 ]; then handoffScript=scripts/q3-weight-activation-steps.sh; fi   # Q3 #50 slice E: runs on the H3 lane's layout-2 genesis
   if ! source "$handoffScript"; then
     fail "profile-2 two-handoff lane failed"
     exit 1
