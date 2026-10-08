@@ -57,6 +57,10 @@ type pairCompanionLookup struct {
 		RootInput   string   `json:"rootInput"`
 		PairBinding string   `json:"pairBinding"`
 		Witnesses   []string `json:"witnesses"`
+		// B1Update and Records are the canonical B1 update and root-record import companion the root input commits to (fresh B1 profile); a
+		// historical companion has neither.
+		B1Update string `json:"b1Update"`
+		Records  string `json:"records"`
 	} `json:"companion"`
 }
 
@@ -66,6 +70,40 @@ var ErrPairCompanion = errors.New("engineapi: the execution client retains no co
 func (c *EthClient) companion(ctx context.Context, hash string) (rootInput, binding []byte, err error) {
 	rootInput, binding, _, err = c.companionWithWitnesses(ctx, hash)
 	return rootInput, binding, err
+}
+
+// retainedBuild is what a pair retained for a block that a rebuild of it must carry: the root input, the commitments' companions and the binding.
+type retainedBuild struct {
+	RootInput, Binding, B1Update, Records []byte
+}
+
+func (c *EthClient) retainedBuild(ctx context.Context, hash string) (retainedBuild, error) {
+	var l pairCompanionLookup
+	if err := c.call(ctx, "unicity_getSealCompanionV1", []any{hash}, &l); err != nil {
+		return retainedBuild{}, err
+	}
+	if l.Status != "found" {
+		return retainedBuild{}, fmt.Errorf("%w: %s (%s)", ErrPairCompanion, hash, l.Status)
+	}
+	var r retainedBuild
+	var err error
+	if r.RootInput, err = hexBytes(l.Companion.RootInput, -1); err != nil {
+		return retainedBuild{}, err
+	}
+	if r.Binding, err = hexBytes(l.Companion.PairBinding, -1); err != nil {
+		return retainedBuild{}, err
+	}
+	if l.Companion.B1Update != "" {
+		if r.B1Update, err = hexBytes(l.Companion.B1Update, -1); err != nil {
+			return retainedBuild{}, err
+		}
+	}
+	if l.Companion.Records != "" {
+		if r.Records, err = hexBytes(l.Companion.Records, -1); err != nil {
+			return retainedBuild{}, err
+		}
+	}
+	return r, nil
 }
 
 func (c *EthClient) companionWithWitnesses(ctx context.Context, hash string) (rootInput, binding []byte, witnesses []data, err error) {

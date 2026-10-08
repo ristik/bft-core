@@ -281,6 +281,18 @@ urethPinCacheEntry() {
 # configured profile rather than a lane-local one.
 urethPinUnicityFlags() {
   echo "--unicity.fee-collector ${URETH_PIN_FEE_COLLECTOR_OVERRIDE:-$URETH_PIN_FEE_COLLECTOR}"
+  # A fresh-B1 deployment: `ubft engine-api b1-profile` prints the complete set of bindings (network, root genesis, chain, profile hash, W_cert, gas).
+  if [ -n "${URETH_B1_PROFILE_OUT:-}" ] && [ -s "$URETH_B1_PROFILE_OUT" ]; then
+    sed -n 's/^ureth flags: *//p' "$URETH_B1_PROFILE_OUT" | tr ' ' '\n'
+    return 0
+  fi
+  # The paired-execution binding (ureth#52) pins the chain the client serves. A lane that runs the Q3 coupled runtime sets
+  # URETH_PIN_NETWORK_ID; the root genesis identity is then the hash of the genesis trust base the deployment was created with
+  # (`ubft trust-base id`), read from the file every node of the run loads, unless the lane pinned it itself.
+  if [ -n "${URETH_PIN_NETWORK_ID:-}" ]; then
+    echo "--unicity.network-id $URETH_PIN_NETWORK_ID"
+    echo "--unicity.root-genesis-id ${URETH_PIN_ROOT_GENESIS_ID:-$(build/ubft trust-base id --trust-base "${URETH_PIN_GENESIS_TRUST_BASE:-test-nodes/trust-base.json}")}"
+  fi
 }
 
 # urethPinObtain <cache-dir> <dest-dir>

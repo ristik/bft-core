@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 
 	"github.com/unicitynetwork/bft-go-base/types"
 )
@@ -26,15 +27,16 @@ type PairExport struct {
 	Binding     []byte
 }
 
-// rootInputTransitions is the canonical array of the transition byte strings inside a canonical root input: its last field.
+// rootInputTransitions is the canonical array of the transition byte strings inside a canonical root input: its 11th field (see
+// rootInputTransitionsField), whatever follows it.
 func rootInputTransitions(rootInput []byte) ([]byte, error) {
 	var v []any
-	if err := types.Cbor.Unmarshal(rootInput, &v); err != nil || len(v) == 0 {
-		return nil, errors.New("engineapi: the root input is not a CBOR array")
+	if err := types.Cbor.Unmarshal(rootInput, &v); err != nil || len(v) <= rootInputTransitionsField {
+		return nil, errors.New("engineapi: the root input is not a CBOR array with a transition field")
 	}
-	d, ok := v[len(v)-1].([]any)
+	d, ok := v[rootInputTransitionsField].([]any)
 	if !ok {
-		return nil, errors.New("engineapi: the root input's last field is not the transition array")
+		return nil, errors.New("engineapi: the root input's transition field is not an array")
 	}
 	items := make([]any, len(d))
 	for i, t := range d {
@@ -46,6 +48,10 @@ func rootInputTransitions(rootInput []byte) ([]byte, error) {
 	}
 	return types.Cbor.Marshal(items)
 }
+
+// rootInputTransitionsField is the position of the transition array in a canonical root input: the 11th field of every tuple (the legacy 11-field
+// tuple ends with it; the B1 tuples append the B1 update hash and the root-records hash after it).
+const rootInputTransitionsField = 10
 
 // ExportPairBlock reads what the pair at ethURL retained for the block of the given number (the latest when latest is set).
 func ExportPairBlock(ctx context.Context, ethURL string, number uint64, latest bool) (PairExport, error) {
@@ -97,13 +103,32 @@ const (
 // PairControlOutcome is the execution client's answer to one control.
 type PairControlOutcome struct {
 	Accepted bool
+	// GateOnly: the pair gate accepted the job and the engine then refused the build below its finalized block (see RunPairControl).
+	GateOnly bool
 	Detail   string // the refusal text of a refused control, which carries the typed cause
 }
 
 // RunPairControl submits one build job to the pair's execution client: the job that would rebuild its latest block on that block's parent,
 // from the root input and binding it retained, with exactly one thing changed according to the control. The control that changes nothing
 // must be accepted; every other must be refused with its own cause. A job that is accepted starts a payload build the node never collects.
+//
+// The rebuild is on the latest block's parent. In steady state the latest block is the latest certified one, which the node told its execution
+// client is finalized, and the client refuses a build below its finalized block ("Too deep reorg") AFTER the pair gate has accepted the job
+// (ureth checks the binding before the build is forwarded to the engine). For the control that changes nothing that answer is therefore the
+// gate's acceptance, reported as Accepted with GateOnly set; for every other control it is a failure to be refused by the gate, so it stays a
+// refusal and the lane finds no typed cause.
 func RunPairControl(ctx context.Context, engineURL string, secret Secret, ethURL string, kind PairControl) (PairControlOutcome, error) {
+	out, err := runPairControlOnce(ctx, engineURL, secret, ethURL, kind)
+	if err == nil && kind == ControlAccept && !out.Accepted && strings.Contains(out.Detail, tooDeepReorg) {
+		out.Accepted, out.GateOnly = true, true
+	}
+	return out, err
+}
+
+// tooDeepReorg is the execution client's refusal of a build below its finalized block.
+const tooDeepReorg = "Too deep reorg"
+
+func runPairControlOnce(ctx context.Context, engineURL string, secret Secret, ethURL string, kind PairControl) (PairControlOutcome, error) {
 	var out PairControlOutcome
 	eth := NewEthClient(ethURL)
 	h, err := eth.header(ctx, "latest")
@@ -113,10 +138,11 @@ func RunPairControl(ctx context.Context, engineURL string, secret Secret, ethURL
 	if len(h.Withdrawals) != 0 {
 		return out, errors.New("engineapi: a block with withdrawals is not a block this control can rebuild")
 	}
-	rootInput, retained, err := eth.companion(ctx, h.Hash)
+	build, err := eth.retainedBuild(ctx, h.Hash)
 	if err != nil {
 		return out, err
 	}
+	rootInput, retained := build.RootInput, build.Binding
 	b, err := DecodePairBinding(retained)
 	if err != nil {
 		return out, fmt.Errorf("engineapi: the retained binding does not decode: %w", err)
@@ -188,7 +214,9 @@ func RunPairControl(ctx context.Context, engineURL string, secret Secret, ethURL
 	attrs := UnicityPayloadAttributes{PayloadAttributesV3: PayloadAttributesV3{Timestamp: quantity(timestamp), PrevRandao: randao,
 		SuggestedFeeRecipient: recipient, Withdrawals: []WithdrawalV1{}, ParentBeaconBlockRoot: beacon}}
 	copy(attrs.Commitment[:], extra)
-	input := SealBuildInput{RootInput: rootInput, Transitions: transitions, Pair: evidence, PairEmpty: kind == ControlMissingEvidence}
+	// a fresh-B1 build carries the update and the root-record import its root input commits to, exactly as the retained block's build did
+	input := SealBuildInput{RootInput: rootInput, Transitions: transitions, B1Update: data(build.B1Update), RootRecords: data(build.Records),
+		Pair: evidence, PairEmpty: kind == ControlMissingEvidence}
 	engine := NewClient(engineURL, secret)
 	resp, err := engine.ForkchoiceUpdatedWithSealV1(ctx, ForkchoiceStateV1{HeadBlockHash: parentHash, SafeBlockHash: parentHash, FinalizedBlockHash: parentHash}, &attrs, input)
 	switch {
@@ -205,12 +233,12 @@ func RunPairControl(ctx context.Context, engineURL string, secret Secret, ethURL
 // rootInputTransitionList is the transition byte strings of a canonical root input, one per entry.
 func rootInputTransitionList(rootInput []byte) ([]data, error) {
 	var v []any
-	if err := types.Cbor.Unmarshal(rootInput, &v); err != nil || len(v) == 0 {
-		return nil, errors.New("engineapi: the root input is not a CBOR array")
+	if err := types.Cbor.Unmarshal(rootInput, &v); err != nil || len(v) <= rootInputTransitionsField {
+		return nil, errors.New("engineapi: the root input is not a CBOR array with a transition field")
 	}
-	d, ok := v[len(v)-1].([]any)
+	d, ok := v[rootInputTransitionsField].([]any)
 	if !ok {
-		return nil, errors.New("engineapi: the root input's last field is not the transition array")
+		return nil, errors.New("engineapi: the root input's transition field is not an array")
 	}
 	out := make([]data, len(d))
 	for i, t := range d {
