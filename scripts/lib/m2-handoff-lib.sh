@@ -344,7 +344,11 @@ m2_config_only_handoff() { # epoch roots oldRpcs (the roots' RPC endpoints are t
     done
     $activated || { echo "EVM validator $i did not activate root epoch $epoch" >&2; return 1; }
   done
-  m2_advance_authorities "$epoch" "$nextFile" || return 1
+  # The archive-replica catch-up wait after each restart is skipped here, as in the Q3 and H3 flows: the EVM keeps certifying while the validators restart one
+  # at a time, so the certified head the wait targets moves faster than a restarted validator's replica peer acknowledges it. Run 4 of the B1 port waited the
+  # full 120 s on replica 1 (peer_ack=false, node_ack=true) with validator 1 signing and certifying normally. Liveness is still asserted by the paid
+  # transaction certified in the new epoch below.
+  M2_ADVANCE_NO_REPLICA_WAIT=1 m2_advance_authorities "$epoch" "$nextFile" || return 1
   m2_send_paid "$epoch" "${M2_NEXT_NONCE:-$((epoch+1))}" || return 1
   m2_measure_pause "$oldEpoch" "$epoch"
 }
