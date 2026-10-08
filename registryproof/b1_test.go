@@ -14,7 +14,7 @@ func TestFreshB1FixedProofInvariants(t *testing.T) {
 	f := b1fixture.New(t, 1)
 	names, err := registryproof.SlotNamesFor(registryproof.FreshB1)
 	require.NoError(t, err)
-	require.Len(t, names, 35)
+	require.Len(t, names, 42)
 	require.NotContains(t, names, "layoutVersion")
 	for i, n := range names {
 		k, err := registryproof.SlotKeyFor(registryproof.FreshB1, i)
