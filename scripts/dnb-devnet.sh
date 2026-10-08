@@ -103,6 +103,35 @@ PY
   info "up; roots rpc 127.0.0.1:25866, reth eth $rethEthBase.., engine $rethEngineBase.."
 }
 
+# Restarts: SIGTERM one process of the running devnet and start it again from its own state.
+restart_agg() {
+  [ -f test-nodes/agg/pid ] && stop_pidfile test-nodes/agg/pid 'aggregator' || true
+  sleep 2
+  start_agg
+}
+
+restart_validator() { # N: the shard validator and its ureth
+  local i=$1
+  stop_one_evm_validator "$i" || true
+  stop_pidfile "test-nodes/reth$i/pid" 'unicity-reth|reth.* node' || true
+  sleep 3
+  local ureth_flags; ureth_flags=$(sed -n 's/^ureth flags: *//p' test-nodes/b1-profile.out)
+  # shellcheck disable=SC2086
+  "$URETH_BIN" node --chain test-nodes/evm-genesis-finalized.json --datadir "test-nodes/reth$i/dd" \
+    --authrpc.jwtsecret "test-nodes/evm$i/jwt.hex" --authrpc.addr 127.0.0.1 --authrpc.port $((rethEngineBase + i - 1)) \
+    --http --http.addr 127.0.0.1 --http.port $((rethEthBase + i - 1)) --http.api eth,net,web3,admin,debug --rpc.eth-proof-window 64 \
+    --port $((rethP2PBase + i - 1)) --disable-discovery --ipcdisable --engine.persistence-threshold 64 \
+    --builder.gaslimit "$(python3 -c "import json;print(json.load(open('test-nodes/b1-profile.json'))['maxGas'])")" \
+    --unicity.fee-collector "$fee" $ureth_flags >>"test-nodes/reth$i/reth.log" 2>&1 &
+  echo $! >"test-nodes/reth$i/pid"
+  for _ in $(seq 1 90); do rpc "http://127.0.0.1:$((rethEthBase + i - 1))" eth_chainId '[]' 2>/dev/null | grep -q result && break; sleep 1; done
+  export EVM_ARCHIVE_ROOT=test-nodes/archives EVM_GENESIS_FILE=test-nodes/evm-genesis-finalized.json EVM_FULL_SHARD_CONF=test-nodes/shard-conf-${partitionID}_0.json EVM_B1_PROFILE=test-nodes/b1-profile.json EVM_ENGINE_FEE_COLLECTOR=$fee
+  for j in $(seq 1 "$validators"); do export "EVM_ENGINE_URL_$j=http://127.0.0.1:$((rethEngineBase + j - 1))" "EVM_ETH_URL_$j=http://127.0.0.1:$((rethEthBase + j - 1))"; done
+  local rootBoot; rootBoot=$(boot_node test-nodes/root1 "$rootPortStart")
+  start_one_evm_validator "$i" "$validators" "$partitionID" "$rootBoot" engine-api
+  info "validator $i restarted"
+}
+
 # aggregator-go (SDK3 leaf protocol) as a BFT shard of the live root chain. Needs AGG_BIN, and MongoDB with a replica set at AGG_MONGO.
 start_agg() {
   : "${AGG_BIN:?set AGG_BIN to the pinned aggregator-go binary}"
@@ -111,7 +140,7 @@ start_agg() {
   boot=$(boot_node test-nodes/root1 "$rootPortStart")
   mkdir -p test-nodes/agg/logs
   env PORT=${AGG_PORT:-3001} HOST=127.0.0.1 ENABLE_DOCS=false ENABLE_CORS=true \
-    MONGODB_URI="$AGG_MONGO" MONGODB_DATABASE="dnb_agg_$(date +%s)" DISABLE_HIGH_AVAILABILITY=true USE_REDIS_FOR_COMMITMENTS=false \
+    MONGODB_URI="$AGG_MONGO" MONGODB_DATABASE="$(cat test-nodes/agg/dbname 2>/dev/null || { n=dnb_agg_$(date +%s); echo $n | tee test-nodes/agg/dbname; })" DISABLE_HIGH_AVAILABILITY=true USE_REDIS_FOR_COMMITMENTS=false \
     SMT_BACKEND=memory SHARDING_MODE=standalone LOG_LEVEL=info LOG_FORMAT=text LOG_ENABLE_JSON=false LOG_FILE_PATH="$PWD/test-nodes/agg/logs/aggregator.log" \
     SIGNING_KEY_FILE="$PWD/test-nodes/agg/keys.json" BFT_ENABLED=true BFT_ADDRESS=/ip4/127.0.0.1/tcp/29101 BFT_RPC_ADDRESS=http://127.0.0.1:25866 \
     BFT_SHARD_CONF_FILE="$PWD/test-nodes/shard-conf-${aggPartition}_0.json" BFT_TRUST_BASE_FILES="$PWD/test-nodes/trust-base.json" \
@@ -162,4 +191,4 @@ json.dump({"dir": "$PWD/test-nodes", "ethUrls": ["http://127.0.0.1:%d" % (18545 
 PY
 }
 
-case "${1:-}" in all) up; vault; config ;; config) config ;; vault) vault ;; up) up ;; down) down ;; status) status ;; *) echo "usage: $0 up|down|status" >&2; exit 2 ;; esac
+case "${1:-}" in restart-agg) restart_agg ;; restart-validator) restart_validator "${2:?validator number}" ;; all) up; vault; config ;; config) config ;; vault) vault ;; up) up ;; down) down ;; status) status ;; *) echo "usage: $0 up|down|status" >&2; exit 2 ;; esac

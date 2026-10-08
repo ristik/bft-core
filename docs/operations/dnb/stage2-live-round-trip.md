@@ -41,3 +41,22 @@ Run 2026-10-08 on the B1/B2 paired devnet of stage 1 plus aggregator-go as a BFT
    validator's pool, otherwise inclusion waits for the one validator's leader turn.
 6. Profile `maxGas` for `W_cert = 15` is 276,547,540 (system reservation 269,547,540).
 7. A previous 30-minute run stalled when the root consensus stopped ("proposal timestamp exceeds voter clock skew"); a fresh devnet did not reproduce it. Not investigated.
+
+## Stage 3 additions: refusals, restart, measured gas
+
+Evidence: [`evidence/cycle2-after-restarts.log`](evidence/cycle2-after-restarts.log), [`evidence/restart-sequence.out`](evidence/restart-sequence.out).
+
+* Refusals by `eth_call` in the live window: a flipped certificate byte → `UCRejected` (`0x391d1053`); a claim by an uncredited account → `InsufficientCredit`; the same burn redeemed
+  twice → `AlreadyRedeemed(nonce)` (`0xd36d946d`).
+* Restart: after cycle 1 the aggregator-go process (state in MongoDB) and validator 2 (its ureth and shard node) were stopped (SIGTERM) and started again from their own state.
+  All four ureth reached the same height (58 → 81 later), the restarted aggregator still served the previous token's state with its original CD and reference time
+  (`tests/live/postcheck.ts`), and a second complete cycle (lock → … → claim) passed.
+* Gas measured on the running chain (ureth, not revm): lock 272,164; redeem 1,835,321–1,887,252; claim 86,224. Block gas limit 276,547,540 (system 269,547,540, ordinary 7,000,000).
+  The redemption landed 7–13 root rounds after the anchor (window 15).
+
+## Not done
+
+* **Reorg.** The pair's chain is certified by the BFT root; no EVM fork occurs in this configuration, and no fault harness (the d2c proxies) was pointed at the bridge. Unexercised.
+* A malformed certificate's full cost (the ~6.4 M gas B1 burns on a halt) was measured in-process in PR6, not live. A flipped-byte eth_call returned a clean `UCRejected`.
+* `aggregator_rsmt_v1` with aggregator-go (finding 2), W_cert > 15, weighted or rotating root epochs, public-network conditions, arm64 CPU budgets.
+* The first 30-minute attempt stalled on root consensus (finding 7); it was not reproduced on three later fresh runs.

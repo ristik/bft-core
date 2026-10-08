@@ -1,0 +1,20 @@
+== cycle 1
+exit 1
+== restart aggregator
+dnb: aggregator-go up on 3001
+== restart validator 2
+dnb: validator 2 restarted
+reth1 block=58
+reth2 block=58
+reth3 block=58
+reth4 block=58
+root round 263
+== postcheck
+PASS postcheck: 1 states still certified with their original CD and t, latest block 78
+== cycle 2
+exit 0
+reth1 block=81
+reth2 block=81
+reth3 block=81
+reth4 block=81
+root round 359
