@@ -84,6 +84,13 @@ func enablePosClosure(cm *consensus.ConsensusManager, orchestration *partitions.
 	if poaGenesis {
 		return fmt.Errorf("%w: a proof-of-authority genesis has no custody; do not combine it with a P85 deployment", ErrPosDeployment)
 	}
+	// The closure is mandatory in the successor's first ordinary block and voters must hold the witness bytes (read by hash) before they
+	// vote. Only the proposer holds them until the pull-by-hash distribution lands, and honest nodes hold different valid bundles for one
+	// handoff, so a committee of several root nodes could not reach a quorum on the first block after a handoff. Single-root and test
+	// chains stay enabled. Remove this guard with the witness distribution slice.
+	if len(tb.RootNodes) > 1 {
+		return fmt.Errorf("%w: the closure witness is not yet distributed to voters; %d root nodes would halt at the first handoff", ErrPosDeployment, len(tb.RootNodes))
+	}
 	dep, err := loadPosDeployment(path, uint64(tb.NetworkID))
 	if err != nil {
 		return err

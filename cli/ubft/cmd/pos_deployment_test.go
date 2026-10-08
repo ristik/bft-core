@@ -77,3 +77,20 @@ func TestEnablePosClosureRefusesAProofOfAuthorityGenesisAndAnUncoupledOne(t *tes
 	err = enablePosClosure(nil, nil, nil, &types.RootTrustBaseV1{NetworkID: 5}, nil, filepath.Join(t.TempDir(), "none"), false)
 	require.ErrorIs(t, err, ErrPosDeployment)
 }
+
+func TestEnablePosClosureRefusesACommitteeThatCannotDistributeTheWitness(t *testing.T) {
+	path := writeDeployment(t, deploymentJSON(goodWord, "1", goodCustody))
+	nodes := func(n int) []*types.NodeInfo {
+		out := make([]*types.NodeInfo, n)
+		for i := range out {
+			out[i] = &types.NodeInfo{NodeID: string(rune('a' + i))}
+		}
+		return out
+	}
+	err := enablePosClosure(nil, nil, nil, &types.RootTrustBaseV1{NetworkID: 5, RootNodes: nodes(2)}, nil, path, false)
+	require.ErrorIs(t, err, ErrPosDeployment)
+	require.NotErrorIs(t, err, ErrGenesisIdentities, "refused for the committee size, before any shard is looked at")
+	// one root node passes the guard (and is then refused for the missing coupled shard, the next check)
+	err = enablePosClosure(nil, nil, nil, &types.RootTrustBaseV1{NetworkID: 5, RootNodes: nodes(1)}, nil, path, false)
+	require.ErrorIs(t, err, ErrGenesisIdentities)
+}
