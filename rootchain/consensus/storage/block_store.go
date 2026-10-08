@@ -3,6 +3,7 @@ package storage
 import (
 	"bytes"
 	"crypto"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -187,13 +188,39 @@ func (x *BlockStore) ClosureControls(parentRound, epoch, round uint64) ([]rctype
 	}
 	controls := make([]rctypes.PosControl, 0, len(next.Awaiting))
 	for _, a := range next.Awaiting {
-		c, err := svc.Proposer.Closure(a.Epoch, epoch, round)
+		c, witness, err := svc.Proposer.Closure(a.Epoch, epoch, round)
 		if err != nil {
 			return nil, errors.Join(ErrWitnessUnavailable, err)
+		}
+		// the proposer retains the witness before it proposes: its own validation of the block reads it back by hash
+		if err := x.StoreWitness(witness); err != nil {
+			return nil, err
 		}
 		controls = append(controls, c)
 	}
 	return controls, nil
+}
+
+// StoreWitness retains control witness bytes under their SHA-256.
+func (x *BlockStore) StoreWitness(data []byte) error {
+	store, ok := x.storage.(WitnessStore)
+	if !ok {
+		return ErrNoWitnessStore
+	}
+	return store.StoreWitness(sha256.Sum256(data), data)
+}
+
+// Witness is the WitnessSource of the retained control witnesses.
+func (x *BlockStore) Witness(hash [32]byte) ([]byte, error) {
+	store, ok := x.storage.(WitnessStore)
+	if !ok {
+		return nil, ErrNoWitnessStore
+	}
+	data, err := store.Witness(hash)
+	if err == nil && data == nil {
+		return nil, ErrWitnessUnavailable
+	}
+	return data, err
 }
 
 // SetPosServices installs the collaborators the P85 control executor verifies controls with. It must be set before the store executes a
