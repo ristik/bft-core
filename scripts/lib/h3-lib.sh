@@ -221,7 +221,7 @@ h3_start_reth() { # spare execution client i, peered with the running ones
     --authrpc.jwtsecret "test-nodes/evm$i/jwt.hex" --authrpc.addr 127.0.0.1 --authrpc.port $((rethEngineBase + i - 1)) \
     --http --http.addr 127.0.0.1 --http.port $((rethEthBase + i - 1)) --http.api eth,net,web3,admin,debug \
     --rpc.eth-proof-window 64 --port $((rethP2PBase + i - 1)) --disable-discovery --ipcdisable \
-    --engine.persistence-threshold "$d2cPersistenceThreshold" --builder.gaslimit 30000000 \
+    --engine.persistence-threshold "$d2cPersistenceThreshold" --builder.gaslimit "${URETH_BUILDER_GASLIMIT:-30000000}" \
     $(urethPinUnicityFlags) >"test-nodes/reth$i/reth.log" 2>&1 &
   echo $! >"test-nodes/reth$i/pid"
   for _ in $(seq 1 120); do
@@ -279,9 +279,11 @@ h3_restore_validator() {
   bootnodes=$(evm_bootnodes_for_peers "$rootBoot" "$i" $H3_ONLINE) || return 1
   # exactly two replicas: each is two array elements (the flag and the node id)
   for p in $H3_ONLINE; do [ "$p" = "$i" ] || [ "${#peers[@]}" -ge 4 ] || peers+=(--archive-replica "$(evm_validator_id "$p")"); done
+  local -a layoutArgs=(--registry-layout "$(registry_layout)")
+  [ -z "${EVM_B1_PROFILE:-}" ] || layoutArgs=(--b1-profile "$EVM_B1_PROFILE")   # a fresh-B1 deployment: the profile selects registry layout 3
   build/ubft shard-node restore --home "$evidence" --executor engine-api \
     --address "/ip4/127.0.0.1/tcp/$((evmValidatorPortStart + i - 1))" --bootnodes "$bootnodes" \
-    --trust-base "$H3_RESTORE_TRUST_BASE" --full-shard-conf "$EVM_FULL_SHARD_CONF" --registry-layout "$(registry_layout)" \
+    --trust-base "$H3_RESTORE_TRUST_BASE" --full-shard-conf "$EVM_FULL_SHARD_CONF" "${layoutArgs[@]}" \
     --genesis "$EVM_GENESIS_FILE" --engine-url "http://127.0.0.1:$((rethEngineBase+i-1))" \
     --eth-url "http://127.0.0.1:$((rethEthBase+i-1))" --jwt-secret "$evidence/jwt.hex" \
     --engine-fee-collector "$EVM_ENGINE_FEE_COLLECTOR" --execution-journal "$journal" \

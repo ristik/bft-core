@@ -137,8 +137,10 @@ q3_baseline() {
   local sg
   h3_progress baseline 8 || return 1
   h3_registry_is 0 1 || return 1
-  [ "$(registry_layout)" = 2 ] || { echo "registry layout is not 2" >&2; return 1; }
-  registry_layout >"$Q3_DIR/registry-layout.txt"
+  # the fresh-B1 registry (layout 3): the profile that defines it is the one the genesis, ureth and the shard nodes were all given
+  [ -s "${EVM_B1_PROFILE:-}" ] || { echo "no B1 profile: the lane runs on the fresh-B1 stack" >&2; return 1; }
+  { echo "layout=3 (fresh B1)"; echo "profileHash=$(python3 -c "import json;print(json.load(open('$EVM_B1_PROFILE')).get('profileHash',''))")"; echo "ureth flags: $(sed -n 's/^ureth flags: *//p' test-nodes/b1-profile.out)"; } >"$Q3_DIR/registry-layout.txt"
+  cp "$EVM_B1_PROFILE" "$Q3_DIR/b1-profile.json"
   rpc "http://127.0.0.1:$rethEthBase" eth_getCode "[\"$H3_REGISTRY\",\"latest\"]" | pyget "['result']" | tr -d '\n' | shasum -a 256 | cut -d' ' -f1 >"$Q3_DIR/registry-hash.txt"
   q3_execution_pins || return 1
   cp "$Q3_GENESIS_IDENTITIES" "$Q3_DIR/genesis-identities.json" || return 1
@@ -437,7 +439,7 @@ q3_restart_reth_same_secret() { # entity
     --authrpc.jwtsecret "test-nodes/evm$i/jwt.hex" --authrpc.addr 127.0.0.1 --authrpc.port $((rethEngineBase + i - 1)) \
     --http --http.addr 127.0.0.1 --http.port $((rethEthBase + i - 1)) --http.api eth,net,web3,admin,debug \
     --rpc.eth-proof-window 64 --port $((rethP2PBase + i - 1)) --disable-discovery --ipcdisable \
-    --engine.persistence-threshold "$d2cPersistenceThreshold" --builder.gaslimit 30000000 \
+    --engine.persistence-threshold "$d2cPersistenceThreshold" --builder.gaslimit "${URETH_BUILDER_GASLIMIT:-30000000}" \
     $(urethPinUnicityFlags) >>"test-nodes/reth$i/reth.log" 2>&1 &
   echo $! >"test-nodes/reth$i/pid"
   for _ in $(seq 1 120); do rpc "$(q3_eth_url "$i")" eth_blockNumber '[]' | grep -q '"result"' && return 0; sleep 1; done
@@ -479,8 +481,8 @@ q3_run_lane() {
   H3_REGISTRY=0xff00000000000000000000000000000000000002
   H3_ONLINE="1 2 3 4"; H3_ROOTS="1 2 3 4"
   M2_NEXT_NONCE=${M2_NEXT_NONCE:-4}; M2_CHAIN_ID=31337
-  read -r h3_slot_shard h3_slot_root h3_slot_conf h3_slot_cursor < <(go run ./scripts/h3slots)
-  echo "=== Q3 #50 weight-activation lane: layout-2 unit PoA -> mirrored weights $Q3_WEIGHTS ==="
+  read -r h3_slot_shard h3_slot_root h3_slot_conf h3_slot_cursor < <(H3_SLOT_LAYOUT=3 go run ./scripts/h3slots)
+  echo "=== Q3 #50 weight-activation lane: fresh-B1 unit PoA -> mirrored weights $Q3_WEIGHTS ==="
   for s in $Q3_STEPS; do q3_step "$s" "$s"; done
   echo "Q3 weight-activation lane: all steps PASSED"
   q3_teardown
