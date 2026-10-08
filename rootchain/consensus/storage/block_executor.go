@@ -256,7 +256,7 @@ func (x *ExecutedBlock) extendWithAuthority(newBlock *rctypes.BlockData, verifie
 	// effect in its own block, for leaders and for every voter replaying it.
 	if nextShardState.Control != nil {
 		if len(newBlock.Payload.HandoffRecords) > 2 {
-			return nil, ErrHandoffRecord
+			return nil, fmt.Errorf("%w: a block carries at most a record and its companion, got %d", ErrHandoffRecord, len(newBlock.Payload.HandoffRecords))
 		}
 		if len(newBlock.Payload.HandoffRecords) > 0 {
 			var companion []byte
@@ -691,7 +691,7 @@ func frozenShard(state ShardStates, configs map[types.PartitionShardID]*types.Pa
 	var selected types.PartitionShardID
 	found := false
 	if len(parent) != 32 {
-		return selected, ErrHandoffRecord
+		return selected, fmt.Errorf("%w: the frozen parent is not 32 bytes", ErrHandoffRecord)
 	}
 	for key, shard := range state.States {
 		if shard == nil || shard.IR == nil || !bytes.Equal(shard.IR.BlockHash, parent) {
@@ -701,18 +701,18 @@ func frozenShard(state ShardStates, configs map[types.PartitionShardID]*types.Pa
 		// aggregator that happens to present the same hash.
 		conf := configs[key]
 		if conf == nil {
-			return selected, ErrHandoffRecord
+			return selected, fmt.Errorf("%w: the shard presenting the frozen parent has no configuration", ErrHandoffRecord)
 		}
 		if conf.PartitionTypeID != evmPartitionTypeID {
 			continue
 		}
 		if found {
-			return selected, ErrHandoffRecord
+			return selected, fmt.Errorf("%w: more than one EVM shard presents the frozen parent", ErrHandoffRecord)
 		}
 		selected, found = key, true
 	}
 	if !found {
-		return selected, ErrHandoffRecord
+		return selected, fmt.Errorf("%w: no EVM shard presents the frozen parent %x", ErrHandoffRecord, parent)
 	}
 	return selected, nil
 }
