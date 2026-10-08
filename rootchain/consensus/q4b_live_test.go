@@ -39,6 +39,9 @@ func (c *q4bLive) heal(rule string, names ...string) {
 
 func (c *q4bLive) byzantine(variant string, byz []string, recipients []string) {
 	c.t.Helper()
+	c.mu.Lock()
+	c.declared = append(c.declared, byz...)
+	c.mu.Unlock()
 	for _, b := range byz {
 		require.NoError(c.t, c.nodes[c.idx(b)].shim.SetEquivocations([]q4shim.Equivocation{{Name: "byz", Recipients: c.ids(recipients...), Variant: variant, Require: true}}))
 	}
@@ -78,6 +81,7 @@ func (c *q4bLive) requireEquivocators(tr q4Trace, names ...string) {
 		have = append(have, a)
 	}
 	require.ElementsMatch(c.t, want, have, "exactly the declared Byzantine authors equivocated")
+	require.NoError(c.t, c.report.ExpectEquivocators(names...), "the offline checker, from the bytes, finds the same equivocators")
 }
 
 type q4bRow struct {

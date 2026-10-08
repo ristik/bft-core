@@ -1,0 +1,1090 @@
+{
+ "version": 1,
+ "issue": "ristik/bft-core#51",
+ "design": "briefs/q4-design-v2.md sections 1-6 (Q4-C: export/replay checker, timing and query-cost gates, CI, acceptance report)",
+ "rows": [
+  {
+   "id": "G1",
+   "title": "Real coupled activation and weighted successor (one authenticated snapshot, root-wrr-v1 from the committed tuple)",
+   "design": "Design v2 section 1, gate 1: real Q3 activation, actual (E, A*), no local selector override.",
+   "required": [
+    "IN-PROCESS",
+    "REAL-PROCESS"
+   ],
+   "evidence": [
+    {
+     "kind": "go-test",
+     "label": "IN-PROCESS",
+     "package": "./rootchain/consensus",
+     "test": "TestQ3ActivationSelectsTheWeightedLeader",
+     "scope": "root consensus only; no EVM, no aggregator shard; real activation on every replica"
+    },
+    {
+     "kind": "go-test",
+     "label": "IN-PROCESS",
+     "package": "./rootchain/consensus",
+     "test": "TestQ3ActivationRestartRebuildsTheScheduleFromAStar",
+     "scope": "restart rebuilds the schedule from A*"
+    },
+    {
+     "kind": "go-test",
+     "label": "IN-PROCESS",
+     "package": "./rootchain/consensus",
+     "test": "TestQ3ChangedWeightSuccessorResetsTheSchedule",
+     "scope": "second handoff resets at its A*"
+    },
+    {
+     "kind": "go-test",
+     "label": "IN-PROCESS",
+     "package": "./rootchain/consensus",
+     "test": "TestQ4BHandoffArithmetic",
+     "scope": "root consensus only; no EVM, no aggregator shard; A to B, independent arithmetic on both installed trust bases"
+    }
+   ],
+   "gaps": [
+    {
+     "label": "REAL-PROCESS",
+     "reason": "Activation through the coupled lane with the EVM side of the successor. BLOCKED: the REAL-PROCESS lane (scripts/q4-live-lane.sh) has not been run; it stops at exit 3 unless Q4_WEIGHTED_CHECK confirms an activated weighted epoch and it needs the devnet lock after dev2's Q3 lane closes #50",
+     "blockedBy": "#50 (Q3 lane, devnet lock)"
+    }
+   ]
+  },
+  {
+   "id": "G2",
+   "title": "Execution-entry-point authentication, retention and fresh paired replay through the accepted authority architecture",
+   "design": "Design v2 section 1, gate 2.",
+   "required": [
+    "REAL-PROCESS"
+   ],
+   "gaps": [
+    {
+     "label": "REAL-PROCESS",
+     "reason": "Not in Q4's code: it needs the accepted authority architecture (B1 lineage or the independent Rust route), a paired root/EVM replay and the live lane. No Q4 test touches it.",
+     "blockedBy": "B1 acceptance and #50"
+    }
+   ]
+  },
+  {
+   "id": "G3",
+   "title": "Scheme-2 full-message durable signing and rebroadcast, mixed-HighQC TC, live weighted restart",
+   "design": "Design v2 section 1, gate 3.",
+   "required": [
+    "IN-PROCESS",
+    "REAL-PROCESS"
+   ],
+   "evidence": [
+    {
+     "kind": "go-test",
+     "label": "IN-PROCESS",
+     "package": "./rootchain/consensus",
+     "test": "TestQ4BCrash",
+     "scope": "root consensus only; no EVM, no aggregator shard; scheme 2, 10 cuts, real manager, safety module and fsynced store, in-process close/reopen (not SIGKILL)"
+    },
+    {
+     "kind": "go-test",
+     "label": "IN-PROCESS",
+     "package": "./rootchain/consensus",
+     "test": "TestTwoRestartedNodesStillFormATCWithAllFourNodesOnline",
+     "scope": "UNIT-WEIGHT committee, not weighted: the only mixed-HighQC TC coverage; a live weighted run cannot construct it (a node enters round R only through a QC or TC of R-1)"
+    },
+    {
+     "kind": "go-test",
+     "label": "IN-PROCESS",
+     "package": "./rootchain/consensus",
+     "test": "TestSkewedWeightScheme2TCFormsAfterTwoRestarts",
+     "scope": "weighted scheme 2 TC after two restarts, in-process"
+    }
+   ],
+   "gaps": [
+    {
+     "label": "REAL-PROCESS",
+     "reason": "Weighted mixed-HighQC TC formation and SIGKILL restart with fsync are not covered by any run. BLOCKED: the REAL-PROCESS lane (scripts/q4-live-lane.sh) has not been run; it stops at exit 3 unless Q4_WEIGHTED_CHECK confirms an activated weighted epoch and it needs the devnet lock after dev2's Q3 lane closes #50",
+     "blockedBy": "#50 (Q3 lane, devnet lock)"
+    }
+   ]
+  },
+  {
+   "id": "F1",
+   "title": "Heavy root offline, A (6,1,1,1): remaining 3 and heavy alone 6 both stall, then recover",
+   "design": "Design v2 section 3 table row 1.",
+   "required": [
+    "IN-PROCESS",
+    "REAL-PROCESS"
+   ],
+   "evidence": [
+    {
+     "kind": "go-test",
+     "label": "IN-PROCESS",
+     "package": "./rootchain/consensus",
+     "test": "TestQ4Fault/A:_heavy_offline_and_heavy_alone_stall,_then_recover_when_the_missing_identities_return",
+     "scope": "root consensus only; no EVM, no aggregator shard; all four heavy placements"
+    },
+    {
+     "kind": "go-test",
+     "label": "IN-PROCESS",
+     "package": "./rootchain/consensus",
+     "test": "TestQ4BLiveA/heavy_offline_then_restart",
+     "scope": "root consensus only; no EVM, no aggregator shard; real Q3 activation, scheme 2"
+    },
+    {
+     "kind": "bundle",
+     "label": "IN-PROCESS",
+     "bundlePrefix": "TestQ4Fault_A__heavy_offline",
+     "minBundles": 8,
+     "scope": "offline replay of the exported runs"
+    }
+   ],
+   "gaps": [
+    {
+     "label": "REAL-PROCESS",
+     "reason": "Separate paired root/EVM outage. BLOCKED: the REAL-PROCESS lane (scripts/q4-live-lane.sh) has not been run; it stops at exit 3 unless Q4_WEIGHTED_CHECK confirms an activated weighted epoch and it needs the devnet lock after dev2's Q3 lane closes #50",
+     "blockedBy": "#50 (Q3 lane, devnet lock)"
+    }
+   ]
+  },
+  {
+   "id": "F2",
+   "title": "Heavy root offline, B (3,3,2,1): either heavy absent leaves 6, stall, then recover",
+   "design": "Design v2 section 3 table row 1.",
+   "required": [
+    "IN-PROCESS",
+    "REAL-PROCESS"
+   ],
+   "evidence": [
+    {
+     "kind": "go-test",
+     "label": "IN-PROCESS",
+     "package": "./rootchain/consensus",
+     "test": "TestQ4Fault/B:_the_other_light_subset_progresses,_either_heavy_offline_stalls_and_recovers",
+     "scope": "root consensus only; no EVM, no aggregator shard"
+    },
+    {
+     "kind": "go-test",
+     "label": "IN-PROCESS",
+     "package": "./rootchain/consensus",
+     "test": "TestQ4BLiveB/either_weight-3_identity_offline_leaves_6:_stalled,_then_back",
+     "scope": "root consensus only; no EVM, no aggregator shard; after a real A to B handoff"
+    }
+   ],
+   "gaps": [
+    {
+     "label": "REAL-PROCESS",
+     "reason": "BLOCKED: the REAL-PROCESS lane (scripts/q4-live-lane.sh) has not been run; it stops at exit 3 unless Q4_WEIGHTED_CHECK confirms an activated weighted epoch and it needs the devnet lock after dev2's Q3 lane closes #50",
+     "blockedBy": "#50 (Q3 lane, devnet lock)"
+    }
+   ]
+  },
+  {
+   "id": "F3",
+   "title": "One heavy equivocates (A, Byzantine weight 6 > F=2) via the isolated Byzantine signer, with the constructive certificate diagnostic",
+   "design": "Design v2 section 3 table row 2; section 3 A diagnostic.",
+   "required": [
+    "IN-PROCESS",
+    "REAL-PROCESS"
+   ],
+   "class": "OUTSIDE-ASSUMPTIONS",
+   "evidence": [
+    {
+     "kind": "go-test",
+     "label": "IN-PROCESS",
+     "package": "./rootchain/consensus",
+     "test": "TestQ4FaultByzantine/A:_Byzantine_heavy_equivocates_and_withholds,_outside_the_assumptions:_quorum_lost",
+     "scope": "root consensus only; no EVM, no aggregator shard; classification and the quorum-loss diagnostic only, no liveness claim"
+    },
+    {
+     "kind": "go-test",
+     "label": "ORACLE-ONLY",
+     "package": "./rootchain/consensus",
+     "test": "TestQ4QuorumOracle/A_heavy_equivocation:_the_constructive_certificate_pair,_declared_outside_the_assumptions",
+     "scope": "constructed certificate pair, not a real manager committing conflicting chains"
+    },
+    {
+     "kind": "go-test",
+     "label": "IN-PROCESS",
+     "package": "./rootchain/consensus",
+     "test": "TestQ4BLiveA/Byzantine_heavy_(weight_6,_OUTSIDE_the_assumptions)_equivocates:_classification_only",
+     "scope": "root consensus only; no EVM, no aggregator shard"
+    }
+   ],
+   "gaps": [
+    {
+     "label": "REAL-PROCESS",
+     "reason": "A real isolated Byzantine signer process. BLOCKED: the REAL-PROCESS lane (scripts/q4-live-lane.sh) has not been run; it stops at exit 3 unless Q4_WEIGHTED_CHECK confirms an activated weighted epoch and it needs the devnet lock after dev2's Q3 lane closes #50",
+     "blockedBy": "#50 (Q3 lane, devnet lock)"
+    }
+   ]
+  },
+  {
+   "id": "F4",
+   "title": "One heavy equivocates (B, Byzantine weight 3 > F=2); every quorum holds both heavies",
+   "design": "Design v2 section 3 table row 2.",
+   "required": [
+    "IN-PROCESS",
+    "REAL-PROCESS"
+   ],
+   "class": "OUTSIDE-ASSUMPTIONS",
+   "evidence": [
+    {
+     "kind": "go-test",
+     "label": "IN-PROCESS",
+     "package": "./rootchain/consensus",
+     "test": "TestQ4FaultByzantine/B:_Byzantine_heavy_equivocates_and_withholds,_outside_the_assumptions:_quorum_lost",
+     "scope": "root consensus only; no EVM, no aggregator shard; classification and quorum-loss diagnostic only"
+    },
+    {
+     "kind": "go-test",
+     "label": "IN-PROCESS",
+     "package": "./rootchain/consensus",
+     "test": "TestQ4BLiveB/Byzantine_heavy_(weight_3,_OUTSIDE_the_assumptions):_classification,_no_single-heavy_conflict_claim",
+     "scope": "root consensus only; no EVM, no aggregator shard"
+    }
+   ],
+   "gaps": [
+    {
+     "label": "REAL-PROCESS",
+     "reason": "BLOCKED: the REAL-PROCESS lane (scripts/q4-live-lane.sh) has not been run; it stops at exit 3 unless Q4_WEIGHTED_CHECK confirms an activated weighted epoch and it needs the devnet lock after dev2's Q3 lane closes #50",
+     "blockedBy": "#50 (Q3 lane, devnet lock)"
+    }
+   ]
+  },
+  {
+   "id": "F5",
+   "title": "In-bound equivocation or withholding, A: two Byzantine lights (weight 2), honest H+light (7) progress",
+   "design": "Design v2 section 3 table row 3.",
+   "required": [
+    "IN-PROCESS",
+    "REAL-PROCESS"
+   ],
+   "class": "IN-BOUND",
+   "evidence": [
+    {
+     "kind": "go-test",
+     "label": "IN-PROCESS",
+     "package": "./rootchain/consensus",
+     "test": "TestQ4FaultByzantine/A:_two_Byzantine_lights_equivocate,_honest_H+light_progress",
+     "scope": "root consensus only; no EVM, no aggregator shard"
+    },
+    {
+     "kind": "go-test",
+     "label": "IN-PROCESS",
+     "package": "./rootchain/consensus",
+     "test": "TestQ4BLiveA/two_Byzantine_lights_(weight_2,_in_bound)_equivocate:_honest_H+a_progress",
+     "scope": "root consensus only; no EVM, no aggregator shard; the checker finds exactly the declared equivocators from the bytes"
+    },
+    {
+     "kind": "bundle",
+     "label": "IN-PROCESS",
+     "bundlePrefix": "TestQ4FaultByzantine_A__two",
+     "minBundles": 1,
+     "scope": "offline replay: forged and mixed-statement sends flagged by reason, exact equivocator set"
+    }
+   ],
+   "gaps": [
+    {
+     "label": "REAL-PROCESS",
+     "reason": "BLOCKED: the REAL-PROCESS lane (scripts/q4-live-lane.sh) has not been run; it stops at exit 3 unless Q4_WEIGHTED_CHECK confirms an activated weighted epoch and it needs the devnet lock after dev2's Q3 lane closes #50",
+     "blockedBy": "#50 (Q3 lane, devnet lock)"
+    }
+   ]
+  },
+  {
+   "id": "F6",
+   "title": "In-bound equivocation or withholding, B: Byzantine weight 2, honest 3+3+1 (7) progress",
+   "design": "Design v2 section 3 table row 3.",
+   "required": [
+    "IN-PROCESS",
+    "REAL-PROCESS"
+   ],
+   "class": "IN-BOUND",
+   "evidence": [
+    {
+     "kind": "go-test",
+     "label": "IN-PROCESS",
+     "package": "./rootchain/consensus",
+     "test": "TestQ4FaultByzantine/B:_Byzantine_weight_2_equivocates,_honest_3+3+1_progress",
+     "scope": "root consensus only; no EVM, no aggregator shard"
+    },
+    {
+     "kind": "go-test",
+     "label": "IN-PROCESS",
+     "package": "./rootchain/consensus",
+     "test": "TestQ4BLiveB/Byzantine_weight_2_(n2,_in_bound)_equivocates:_honest_3+3+1_progress",
+     "scope": "root consensus only; no EVM, no aggregator shard"
+    }
+   ],
+   "gaps": [
+    {
+     "label": "REAL-PROCESS",
+     "reason": "BLOCKED: the REAL-PROCESS lane (scripts/q4-live-lane.sh) has not been run; it stops at exit 3 unless Q4_WEIGHTED_CHECK confirms an activated weighted epoch and it needs the devnet lock after dev2's Q3 lane closes #50",
+     "blockedBy": "#50 (Q3 lane, devnet lock)"
+    }
+   ]
+  },
+  {
+   "id": "F7",
+   "title": "Many-small (18,1x9; Q=19, F=8): eight Byzantine lights equivocate, honest H+light (19) progress",
+   "design": "Design v2 section 3, many-small paragraph.",
+   "required": [
+    "IN-PROCESS",
+    "REAL-PROCESS"
+   ],
+   "class": "IN-BOUND",
+   "evidence": [
+    {
+     "kind": "go-test",
+     "label": "IN-PROCESS",
+     "package": "./rootchain/consensus",
+     "test": "TestQ4FaultByzantine/many-small:_eight_Byzantine_lights_equivocate,_honest_H+light_progress",
+     "scope": "root consensus only; no EVM, no aggregator shard; root only, EVM coverage absent (request Q=14 not exercised)"
+    },
+    {
+     "kind": "go-test",
+     "label": "IN-PROCESS",
+     "package": "./rootchain/consensus",
+     "test": "TestQ4Fault/no-fault_controls_at_the_same_load",
+     "scope": "includes the many-small no-fault control"
+    }
+   ],
+   "gaps": [
+    {
+     "label": "REAL-PROCESS",
+     "reason": "Many-small coupled evidence with all ten entities. BLOCKED: the REAL-PROCESS lane (scripts/q4-live-lane.sh) has not been run; it stops at exit 3 unless Q4_WEIGHTED_CHECK confirms an activated weighted epoch and it needs the devnet lock after dev2's Q3 lane closes #50",
+     "blockedBy": "#50 (Q3 lane, devnet lock)"
+    }
+   ]
+  },
+  {
+   "id": "F8",
+   "title": "#399 outage control (3,2,2,2,2; Q=8): heavy offline leaves exactly Q, TCs then ordinary commits",
+   "design": "Design v2 section 3, #399 outage control.",
+   "required": [
+    "IN-PROCESS",
+    "REAL-PROCESS"
+   ],
+   "evidence": [
+    {
+     "kind": "go-test",
+     "label": "IN-PROCESS",
+     "package": "./rootchain/consensus",
+     "test": "TestQ4Fault/#399_outage_control:_heavy_offline_with_exactly_the_quorum_left",
+     "scope": "root consensus only; no EVM, no aggregator shard"
+    },
+    {
+     "kind": "go-test",
+     "label": "IN-PROCESS",
+     "package": "./rootchain/consensus",
+     "test": "TestWeightedLeaderHeavyOfflineWithQuorumLeftHasABoundedGap",
+     "scope": "root consensus only; no EVM, no aggregator shard"
+    }
+   ],
+   "gaps": [
+    {
+     "label": "REAL-PROCESS",
+     "reason": "The actual coupled EVM assignment is not recorded. BLOCKED: the REAL-PROCESS lane (scripts/q4-live-lane.sh) has not been run; it stops at exit 3 unless Q4_WEIGHTED_CHECK confirms an activated weighted epoch and it needs the devnet lock after dev2's Q3 lane closes #50",
+     "blockedBy": "#50 (Q3 lane, devnet lock)"
+    }
+   ]
+  },
+  {
+   "id": "F9",
+   "title": "Light bidirectional partition: A two lights isolated progress, all three stall; B isolate 1 progresses, isolate 2 progresses, both stall; heal without rollback",
+   "design": "Design v2 section 3 table row 4.",
+   "required": [
+    "IN-PROCESS",
+    "REAL-PROCESS"
+   ],
+   "evidence": [
+    {
+     "kind": "go-test",
+     "label": "IN-PROCESS",
+     "package": "./rootchain/consensus",
+     "test": "TestQ4Fault/light_partitions_and_delays,_then_heal_by_releasing_the_stale_traffic",
+     "scope": "root consensus only; no EVM, no aggregator shard; A and B rows, stale traffic released, no rollback of the committed head"
+    },
+    {
+     "kind": "go-test",
+     "label": "IN-PROCESS",
+     "package": "./rootchain/consensus",
+     "test": "TestQ4BLiveA/two_isolated_lights:_H+a_(weight_7)_progress,_heal",
+     "scope": "root consensus only; no EVM, no aggregator shard"
+    },
+    {
+     "kind": "go-test",
+     "label": "IN-PROCESS",
+     "package": "./rootchain/consensus",
+     "test": "TestQ4BLiveA/all_three_lights_isolated:_6|3_stalled,_heal",
+     "scope": "root consensus only; no EVM, no aggregator shard"
+    },
+    {
+     "kind": "go-test",
+     "label": "IN-PROCESS",
+     "package": "./rootchain/consensus",
+     "test": "TestQ4BLiveB/n2+d_isolated_(weight_3):_h1+h2_(6)_stalled,_heal",
+     "scope": "root consensus only; no EVM, no aggregator shard"
+    },
+    {
+     "kind": "go-test",
+     "label": "IN-PROCESS",
+     "package": "./rootchain/consensus",
+     "test": "TestQ4BLiveB/d_isolated_(weight_1):_8_progresses,_heal",
+     "scope": "root consensus only; no EVM, no aggregator shard"
+    }
+   ],
+   "gaps": [
+    {
+     "label": "REAL-PROCESS",
+     "reason": "Separate coupled EVM variant. BLOCKED: the REAL-PROCESS lane (scripts/q4-live-lane.sh) has not been run; it stops at exit 3 unless Q4_WEIGHTED_CHECK confirms an activated weighted epoch and it needs the devnet lock after dev2's Q3 lane closes #50",
+     "blockedBy": "#50 (Q3 lane, devnet lock)"
+    }
+   ]
+  },
+  {
+   "id": "F10",
+   "title": "Delay, reorder, duplicate and release: proposals, votes, PT, QC/TC, next collector; delay two lights progresses, delay H loses quorum until release",
+   "design": "Design v2 section 3 table row 5.",
+   "required": [
+    "IN-PROCESS",
+    "REAL-PROCESS"
+   ],
+   "evidence": [
+    {
+     "kind": "go-test",
+     "label": "IN-PROCESS",
+     "package": "./rootchain/consensus",
+     "test": "TestQ4Delivery",
+     "scope": "the deterministic delivery adapter: directional, hold/duplicate/release orders, triggers, immutable payloads, replay of decisions"
+    },
+    {
+     "kind": "go-test",
+     "label": "IN-PROCESS",
+     "package": "./rootchain/consensus",
+     "test": "TestQ4BLiveA/heavy_delayed:_quorum_lost_until_release",
+     "scope": "root consensus only; no EVM, no aggregator shard"
+    },
+    {
+     "kind": "go-test",
+     "label": "IN-PROCESS",
+     "package": "./rootchain/consensus",
+     "test": "TestQ4BLiveA/lights_delayed_(weight_3):_H_alone_(6)_stalls,_release",
+     "scope": "root consensus only; no EVM, no aggregator shard"
+    },
+    {
+     "kind": "go-test",
+     "label": "IN-PROCESS",
+     "package": "./rootchain/consensus",
+     "test": "TestQ4BLiveB/one_heavy_delayed:_6_until_release",
+     "scope": "root consensus only; no EVM, no aggregator shard"
+    },
+    {
+     "kind": "go-test",
+     "label": "IN-PROCESS",
+     "package": "./rootchain/consensus",
+     "test": "TestQ4BLiveB/first_successor_proposal_held:_release,_commits_resume",
+     "scope": "root consensus only; no EVM, no aggregator shard; the first successor proposal after the handoff"
+    },
+    {
+     "kind": "go-test",
+     "label": "IN-PROCESS",
+     "package": "./rootchain/consensus/q4shim",
+     "test": "",
+     "scope": "the live shim: every rule dimension, orders, duplicate, triggers, equivocation variants, control validation"
+    }
+   ],
+   "gaps": [
+    {
+     "label": "REAL-PROCESS",
+     "reason": "Delay of shard requests (needs the aggregator shards) and the live shim on libp2p. BLOCKED: the REAL-PROCESS lane (scripts/q4-live-lane.sh) has not been run; it stops at exit 3 unless Q4_WEIGHTED_CHECK confirms an activated weighted epoch and it needs the devnet lock after dev2's Q3 lane closes #50",
+     "blockedBy": "#50 (Q3 lane, devnet lock)"
+    }
+   ]
+  },
+  {
+   "id": "F11",
+   "title": "Restart mid-round: heavy, then quorum-wide, over the same fsynced stores",
+   "design": "Design v2 section 3 table row 6.",
+   "required": [
+    "IN-PROCESS",
+    "REAL-PROCESS"
+   ],
+   "evidence": [
+    {
+     "kind": "go-test",
+     "label": "IN-PROCESS",
+     "package": "./rootchain/consensus",
+     "test": "TestQ4Fault/restarts:_heavy,_then_the_whole_quorum,_over_the_same_fsynced_stores",
+     "scope": "root consensus only; no EVM, no aggregator shard; in-process close/reopen"
+    },
+    {
+     "kind": "go-test",
+     "label": "IN-PROCESS",
+     "package": "./rootchain/consensus",
+     "test": "TestQ4BLiveB/quorum-wide_restart_recovers_from_the_retained_stores",
+     "scope": "root consensus only; no EVM, no aggregator shard; scheme 2 after a real handoff"
+    }
+   ],
+   "gaps": [
+    {
+     "label": "REAL-PROCESS",
+     "reason": "SIGKILL with fsync of a light and of the heavy root. BLOCKED: the REAL-PROCESS lane (scripts/q4-live-lane.sh) has not been run; it stops at exit 3 unless Q4_WEIGHTED_CHECK confirms an activated weighted epoch and it needs the devnet lock after dev2's Q3 lane closes #50",
+     "blockedBy": "#50 (Q3 lane, devnet lock)"
+    }
+   ]
+  },
+  {
+   "id": "F12",
+   "title": "Crash cuts: before signing, between paired signatures, after sign before save, after save before send; byte-for-byte rebroadcast of a durable decision",
+   "design": "Design v2 section 3 crash cuts.",
+   "required": [
+    "IN-PROCESS",
+    "REAL-PROCESS"
+   ],
+   "evidence": [
+    {
+     "kind": "go-test",
+     "label": "IN-PROCESS",
+     "package": "./rootchain/consensus",
+     "test": "TestQ4BCrash",
+     "scope": "root consensus only; no EVM, no aggregator shard; 10 cuts on the real manager, safety module and BoltDB; the vote post-save cuts check no second statement but not rebroadcast (rev note 3)"
+    }
+   ],
+   "gaps": [
+    {
+     "label": "REAL-PROCESS",
+     "reason": "SIGKILL cuts; vote rebroadcast after a durable save; advanced and mixed-HighQC TC. BLOCKED: the REAL-PROCESS lane (scripts/q4-live-lane.sh) has not been run; it stops at exit 3 unless Q4_WEIGHTED_CHECK confirms an activated weighted epoch and it needs the devnet lock after dev2's Q3 lane closes #50",
+     "blockedBy": "#50 (Q3 lane, devnet lock)"
+    }
+   ]
+  },
+  {
+   "id": "F13",
+   "title": "No honest double-sign and no finality conflict in any row; zero conflicting finality within bound",
+   "design": "Design v2 section 3 general rule.",
+   "required": [
+    "IN-PROCESS"
+   ],
+   "evidence": [
+    {
+     "kind": "bundle",
+     "label": "IN-PROCESS",
+     "bundlePrefix": "TestQ4Fault",
+     "minBundles": 40,
+     "scope": "every exported Q4-A run re-checked offline: signatures, equivocator set, chain agreement"
+    },
+    {
+     "kind": "bundle",
+     "label": "IN-PROCESS",
+     "bundlePrefix": "TestQ4BLive",
+     "minBundles": 15,
+     "scope": "every exported Q4-B run"
+    },
+    {
+     "kind": "bundle",
+     "label": "IN-PROCESS",
+     "bundlePrefix": "TestQ4BCrash",
+     "minBundles": 8,
+     "scope": "every exported crash row"
+    }
+   ]
+  },
+  {
+   "id": "F14",
+   "title": "Admission negatives: wrong epoch/domain/policy, unknown signer, bad signature, stale traffic add zero live weight",
+   "design": "Design v2 section 3, retained admission negatives.",
+   "required": [
+    "IN-PROCESS",
+    "REAL-PROCESS"
+   ],
+   "evidence": [
+    {
+     "kind": "go-test",
+     "label": "ORACLE-ONLY",
+     "package": "./rootchain/consensus",
+     "test": "TestQ4QuorumOracle/evidence_checks_refuse_every_tampering_and_each_is_detected_for_its_own_reason",
+     "scope": ""
+    },
+    {
+     "kind": "go-test",
+     "label": "IN-PROCESS",
+     "package": "./rootchain/consensus",
+     "test": "TestOldFormMessagesOfTheActivatedEpochAreRefused",
+     "scope": "activated epoch refuses old-form messages"
+    },
+    {
+     "kind": "go-test",
+     "label": "IN-PROCESS",
+     "package": "./rootchain/consensus",
+     "test": "TestInstallVerifiedEpochRefusals",
+     "scope": "atomic installation refusals"
+    },
+    {
+     "kind": "go-test",
+     "label": "IN-PROCESS",
+     "package": "./rootchain/consensus",
+     "test": "TestNoSignatureIsMadeBeforeTheJournalIsComplete",
+     "scope": "no signing before the journal is complete"
+    }
+   ],
+   "gaps": [
+    {
+     "label": "REAL-PROCESS",
+     "reason": "Authentication-refusal representative on a live network. BLOCKED: the REAL-PROCESS lane (scripts/q4-live-lane.sh) has not been run; it stops at exit 3 unless Q4_WEIGHTED_CHECK confirms an activated weighted epoch and it needs the devnet lock after dev2's Q3 lane closes #50",
+     "blockedBy": "#50 (Q3 lane, devnet lock)"
+    }
+   ]
+  },
+  {
+   "id": "F15",
+   "title": "Oracle arithmetic: exhaustive A/B quorums and pairs, minimum intersection 2Q-W=5 (B: 6, both heavies in every quorum), single-heavy impossibility",
+   "design": "Design v2 section 3 required oracle arithmetic.",
+   "required": [
+    "ORACLE-ONLY"
+   ],
+   "evidence": [
+    {
+     "kind": "go-test",
+     "label": "ORACLE-ONLY",
+     "package": "./rootchain/consensus",
+     "test": "TestQ4QuorumOracle/exhaustive_A_and_B_quorums_and_pairs",
+     "scope": ""
+    },
+    {
+     "kind": "go-test",
+     "label": "ORACLE-ONLY",
+     "package": "./rootchain/consensus",
+     "test": "TestQ4QuorumOracle/equivocation_is_told_from_an_identical_rebroadcast",
+     "scope": ""
+    },
+    {
+     "kind": "go-test",
+     "label": "ORACLE-ONLY",
+     "package": "./rootchain/consensus",
+     "test": "TestQ4QuorumOracle/the_oracle_detects_each_deliberate_corruption_of_a_trace",
+     "scope": ""
+    }
+   ]
+  },
+  {
+   "id": "F16",
+   "title": "Canonical fixtures: explicit identity/weight vectors, role keys, A to B turnover (one of four, retained weight 8)",
+   "design": "Design v2 section 2.",
+   "required": [
+    "ORACLE-ONLY",
+    "IN-PROCESS"
+   ],
+   "evidence": [
+    {
+     "kind": "go-test",
+     "label": "ORACLE-ONLY",
+     "package": "./rootchain/consensus",
+     "test": "TestQ4Fixture",
+     "scope": ""
+    },
+    {
+     "kind": "go-test",
+     "label": "IN-PROCESS",
+     "package": "./rootchain/consensus",
+     "test": "TestQ4BHandoffArithmetic",
+     "scope": "root consensus only; no EVM, no aggregator shard; installed on every replica"
+    }
+   ]
+  },
+  {
+   "id": "F17",
+   "title": "Handoff A to B live: successor proposal flow on a running chain, coupled EVM side, EVM rows with request Q=5",
+   "design": "Design v2 section 2 and section 6.",
+   "required": [
+    "IN-PROCESS",
+    "REAL-PROCESS"
+   ],
+   "evidence": [
+    {
+     "kind": "go-test",
+     "label": "IN-PROCESS",
+     "package": "./rootchain/consensus",
+     "test": "TestQ4BLiveB/no-fault_control,_schedule_is_root-wrr-v1_from_A*",
+     "scope": "root consensus only; no EVM, no aggregator shard; the schedule asserted from A*"
+    },
+    {
+     "kind": "go-test",
+     "label": "IN-PROCESS",
+     "package": "./rootchain/consensus",
+     "test": "TestQ4BLiveB/the_carried_identities_alone_(d_never_started)_are_a_quorum:_3+3+2=8",
+     "scope": "root consensus only; no EVM, no aggregator shard"
+    }
+   ],
+   "gaps": [
+    {
+     "label": "REAL-PROCESS",
+     "reason": "The handoff proposal flow on a running chain and the EVM request-quorum rows. BLOCKED: the REAL-PROCESS lane (scripts/q4-live-lane.sh) has not been run; it stops at exit 3 unless Q4_WEIGHTED_CHECK confirms an activated weighted epoch and it needs the devnet lock after dev2's Q3 lane closes #50",
+     "blockedBy": "#50 (Q3 lane, devnet lock)"
+    }
+   ]
+  },
+  {
+   "id": "T1",
+   "title": "T2 boundary: eligible exactly at elapsed >= uint64(T2/(BlockRate/2))+1, one round below not, per-shard independent T2 (2.5/5/7.5 s), EVM test T2 >= 5 s",
+   "design": "Design v2 section 4, first paragraph.",
+   "required": [
+    "IN-PROCESS",
+    "REAL-PROCESS"
+   ],
+   "evidence": [
+    {
+     "kind": "go-test",
+     "label": "IN-PROCESS",
+     "package": "./rootchain/consensus",
+     "test": "TestQ4T2Gate",
+     "scope": "PartitionTimeoutGenerator at the frozen T2 values and two block rates"
+    },
+    {
+     "kind": "go-test",
+     "label": "IN-PROCESS",
+     "package": "./rootchain/consensus",
+     "test": "TestT2TimeoutsUnderViewsAreElapsedRoundsOfTheViewsPreviousUC",
+     "scope": "Q2: authenticated view, stale-target refusal, pending/pipeline/control/no-UC exclusions, weights never enter"
+    },
+    {
+     "kind": "go-test",
+     "label": "IN-PROCESS",
+     "package": "./rootchain/consensus",
+     "test": "TestPartitionTimeoutGenerator_IndependentShardT2",
+     "scope": "independent shards"
+    }
+   ],
+   "gaps": [
+    {
+     "label": "REAL-PROCESS",
+     "reason": "EVM pause/resume with three aggregators certifying changing state roots, and the in-flight EVM leader across a root rotation. BLOCKED: the REAL-PROCESS lane (scripts/q4-live-lane.sh) has not been run; it stops at exit 3 unless Q4_WEIGHTED_CHECK confirms an activated weighted epoch and it needs the devnet lock after dev2's Q3 lane closes #50",
+     "blockedBy": "#50 (Q3 lane, devnet lock)"
+    }
+   ]
+  },
+  {
+   "id": "T2",
+   "title": "Root quorum loss: wall time cannot create a root-certified retry; explicit stall assertions",
+   "design": "Design v2 section 4, second paragraph.",
+   "required": [
+    "IN-PROCESS",
+    "REAL-PROCESS"
+   ],
+   "evidence": [
+    {
+     "kind": "go-test",
+     "label": "IN-PROCESS",
+     "package": "./rootchain/consensus",
+     "test": "TestQ4BLiveA/all_three_lights_isolated:_6|3_stalled,_heal",
+     "scope": "root consensus only; no EVM, no aggregator shard; stall window judged offline against the commit observations"
+    },
+    {
+     "kind": "go-test",
+     "label": "IN-PROCESS",
+     "package": "./rootchain/consensus",
+     "test": "TestQ4Fault/A:_heavy_offline_and_heavy_alone_stall,_then_recover_when_the_missing_identities_return",
+     "scope": "root consensus only; no EVM, no aggregator shard"
+    },
+    {
+     "kind": "bundle",
+     "label": "IN-PROCESS",
+     "bundlePrefix": "TestQ4BLiveA_all_three",
+     "minBundles": 1,
+     "scope": "stall window recomputed offline: zero ordinary commits"
+    }
+   ],
+   "gaps": [
+    {
+     "label": "REAL-PROCESS",
+     "reason": "Local T2 expiry, root epoch/round, shard round and EVM height recorded separately. BLOCKED: the REAL-PROCESS lane (scripts/q4-live-lane.sh) has not been run; it stops at exit 3 unless Q4_WEIGHTED_CHECK confirms an activated weighted epoch and it needs the devnet lock after dev2's Q3 lane closes #50",
+     "blockedBy": "#50 (Q3 lane, devnet lock)"
+    }
+   ]
+  },
+  {
+   "id": "T3",
+   "title": "Timeout amplification by weight: <=F does not amplify, >F can, <Q cannot form a TC; invalid/duplicate/mixed-epoch traffic cannot advance",
+   "design": "Design v2 section 4.",
+   "required": [
+    "IN-PROCESS"
+   ],
+   "evidence": [
+    {
+     "kind": "go-test",
+     "label": "IN-PROCESS",
+     "package": "./rootchain/consensus",
+     "test": "TestPacemakerTimeoutAmplificationIsByWeight",
+     "scope": "pacemaker and vote register, unit level"
+    },
+    {
+     "kind": "go-test",
+     "label": "IN-PROCESS",
+     "package": "./rootchain/consensus",
+     "test": "TestVoteRegisterTCFormsFromHeavyPlusOneLightMinorityByCount",
+     "scope": "unit level"
+    },
+    {
+     "kind": "go-test",
+     "label": "IN-PROCESS",
+     "package": "./rootchain/consensus",
+     "test": "TestVoteRegisterRefusesUnknownAuthorAndOverflow",
+     "scope": "unit level"
+    }
+   ]
+  },
+  {
+   "id": "T4",
+   "title": "root-wrr-v1 exact-priority replay: A, B and many-small schedules, restart/jump replay, epoch reset, conservative triple windows",
+   "design": "Design v2 section 4.",
+   "required": [
+    "ORACLE-ONLY",
+    "IN-PROCESS"
+   ],
+   "evidence": [
+    {
+     "kind": "go-test",
+     "label": "ORACLE-ONLY",
+     "package": "./rootchain/consensus",
+     "test": "TestQ4Schedule",
+     "scope": "independent reference schedule and conservative windows"
+    },
+    {
+     "kind": "go-test",
+     "label": "IN-PROCESS",
+     "package": "./rootchain/consensus",
+     "test": "TestWeightedLeaderRestartKeepsTheScheduleAndCommits",
+     "scope": "root consensus only; no EVM, no aggregator shard"
+    },
+    {
+     "kind": "go-test",
+     "label": "IN-PROCESS",
+     "package": "./rootchain/consensus",
+     "test": "TestWeightedLeaderSuccessorEpochDispatch",
+     "scope": "root consensus only; no EVM, no aggregator shard"
+    },
+    {
+     "kind": "go-test",
+     "label": "IN-PROCESS",
+     "package": "./rootchain/consensus",
+     "test": "TestQ3ChangedWeightSuccessorResetsTheSchedule",
+     "scope": "root consensus only; no EVM, no aggregator shard"
+    },
+    {
+     "kind": "go-test",
+     "label": "IN-PROCESS",
+     "package": "./rootchain/consensus/leader",
+     "test": "TestWeightedCallbacksDoNotChangeTheSchedule",
+     "scope": "selector unit"
+    }
+   ]
+  },
+  {
+   "id": "Q1",
+   "title": "#399 query-cost gate 1: authenticate epoch and round evidence before the expensive lookup on every route",
+   "design": "Design v2 section 4, first #399 bullet.",
+   "required": [
+    "STATIC",
+    "IN-PROCESS"
+   ],
+   "evidence": [
+    {
+     "kind": "go-test",
+     "label": "STATIC",
+     "package": "./rootchain/consensus",
+     "test": "TestQ4LookupCallSites",
+     "scope": "every production caller of GetLeaderForRound is in an audited table with its prerequisite; a new caller fails the test"
+    },
+    {
+     "kind": "go-test",
+     "label": "IN-PROCESS",
+     "package": "./rootchain/consensus",
+     "test": "TestQ4AdmissionAudit",
+     "scope": "a validly signed far-future vote, timeout and proposal reach the selector with distance 0"
+    },
+    {
+     "kind": "go-test",
+     "label": "IN-PROCESS",
+     "package": "./rootchain/consensus",
+     "test": "TestMessageRoundsAreEvidencedBeforeTheSelectorIsAsked",
+     "scope": "probe selector: unjustified proposal rounds, future vote and timeout never ask for the message round"
+    },
+    {
+     "kind": "go-test",
+     "label": "IN-PROCESS",
+     "package": "./rootchain/consensus",
+     "test": "TestQ3ActivationRestartRebuildsTheScheduleFromAStar",
+     "scope": "startup and recovery build at a known start"
+    }
+   ]
+  },
+  {
+   "id": "Q2",
+   "title": "#399 query-cost gate 2: supported-scale cold restart, old uncached query and concurrent callers, within frozen budgets",
+   "design": "Design v2 section 4, second #399 bullet.",
+   "required": [
+    "MEASURED",
+    "ENFORCED-BOUND"
+   ],
+   "evidence": [
+    {
+     "kind": "go-test",
+     "label": "MEASURED",
+     "package": "./rootchain/consensus/leader",
+     "test": "TestQ4QueryCostGate",
+     "scope": "CI profile n=100 d=1e4 against the frozen per-round budget; the full profile (n<=100, d<=1e5, plus d=1e6 measured only) runs with Q4_COST_FULL=1"
+    },
+    {
+     "kind": "go-test",
+     "label": "MEASURED",
+     "package": "./rootchain/consensus/leader",
+     "test": "TestQ4QueryCostScalesWithDistanceNotMembersAlone",
+     "scope": ""
+    },
+    {
+     "kind": "cost",
+     "label": "MEASURED",
+     "scope": "the full-profile measurements file"
+    }
+   ],
+   "gaps": [
+    {
+     "label": "ENFORCED-BOUND",
+     "reason": "Nothing in production bounds the epoch length or a catch-up jump to the frozen 100,000-round envelope; beyond it the lookup blocks every caller for seconds (d=1e6, n=100: about 4 s on the #489 host, about 2 s on this one) and only a checkpoint or accelerated lookup fixes that. #489 left it unscoped. This is a release prerequisite, not a waived gate.",
+     "blockedBy": "separate checkpoint/accelerated-lookup work"
+    }
+   ]
+  },
+  {
+   "id": "Q3",
+   "title": "Timing: frozen deadlines, first/third commit latency, max commit gap, TC count, no-fault control at the same load, in-bound deadline failure fails the lane",
+   "design": "Design v2 section 4, last paragraph.",
+   "required": [
+    "IN-PROCESS",
+    "REAL-PROCESS"
+   ],
+   "evidence": [
+    {
+     "kind": "bundle",
+     "label": "IN-PROCESS",
+     "bundlePrefix": "TestQ4BLive",
+     "minBundles": 15,
+     "scope": "progress windows recomputed offline from the commit observations against the frozen 120 s deadline; first/third commit latency and max gap reported per window"
+    },
+    {
+     "kind": "bundle",
+     "label": "IN-PROCESS",
+     "bundlePrefix": "TestQ4Fault",
+     "minBundles": 40,
+     "scope": "same for Q4-A"
+    },
+    {
+     "kind": "go-test",
+     "label": "IN-PROCESS",
+     "package": "./rootchain/consensus",
+     "test": "TestQ4Fault/no-fault_controls_at_the_same_load",
+     "scope": "control at the same host load"
+    }
+   ],
+   "gaps": [
+    {
+     "label": "REAL-PROCESS",
+     "reason": "EVM recovery latency, and the deadlines frozen in a lane manifest. BLOCKED: the REAL-PROCESS lane (scripts/q4-live-lane.sh) has not been run; it stops at exit 3 unless Q4_WEIGHTED_CHECK confirms an activated weighted epoch and it needs the devnet lock after dev2's Q3 lane closes #50",
+     "blockedBy": "#50 (Q3 lane, devnet lock)"
+    }
+   ]
+  },
+  {
+   "id": "L1",
+   "title": "Live representatives: crash, partition, delay and authentication-refusal on real processes through the shim and F8 callbacks",
+   "design": "Design v2 section 6.",
+   "required": [
+    "REAL-PROCESS"
+   ],
+   "gaps": [
+    {
+     "label": "REAL-PROCESS",
+     "reason": "scripts/q4-live-lane.sh --dry-run passes (syntax, control documents, python checker on a real shim trace); a real run is untested against a network. BLOCKED: the REAL-PROCESS lane (scripts/q4-live-lane.sh) has not been run; it stops at exit 3 unless Q4_WEIGHTED_CHECK confirms an activated weighted epoch and it needs the devnet lock after dev2's Q3 lane closes #50",
+     "blockedBy": "#50 (Q3 lane, devnet lock)"
+    }
+   ]
+  },
+  {
+   "id": "L2",
+   "title": "Retained scenario artifacts: source/toolchain/binary/contract pins, per-epoch keys and weights, signed proposals/PV/PT/QC/TC, injection and delivery traces, durable decisions, logs",
+   "design": "Design v2 section 6 retained evidence.",
+   "required": [
+    "IN-PROCESS",
+    "REAL-PROCESS"
+   ],
+   "evidence": [
+    {
+     "kind": "bundle",
+     "label": "IN-PROCESS",
+     "bundlePrefix": "TestQ4",
+     "minBundles": 60,
+     "scope": "exported bundles carry the epoch membership, keys and weights, the full serialized message trace, committed chains and windows; the in-process runs' pins are the commit under test"
+    }
+   ],
+   "gaps": [
+    {
+     "label": "REAL-PROCESS",
+     "reason": "Binary, contract and companion-repo pins and the logs of a real run. BLOCKED: the REAL-PROCESS lane (scripts/q4-live-lane.sh) has not been run; it stops at exit 3 unless Q4_WEIGHTED_CHECK confirms an activated weighted epoch and it needs the devnet lock after dev2's Q3 lane closes #50",
+     "blockedBy": "#50 (Q3 lane, devnet lock)"
+    }
+   ]
+  },
+  {
+   "id": "L3",
+   "title": "The shim is a library behind a build tag; the production binary does not link it",
+   "design": "Q4-B review, shim isolation.",
+   "required": [
+    "STATIC"
+   ],
+   "evidence": [
+    {
+     "kind": "go-test",
+     "label": "STATIC",
+     "package": "./cli/ubft/cmd",
+     "test": "TestProductionBuildHasNoQ4Shim",
+     "scope": "go list -deps of the untagged binary"
+    }
+   ]
+  },
+  {
+   "id": "L4",
+   "title": "Offline replay checker: independent of live counters, re-derives class, epoch, round, author, statement, signatures, equivocators, chain agreement and windows from the export",
+   "design": "Q4-C scope.",
+   "required": [
+    "ORACLE-ONLY",
+    "IN-PROCESS"
+   ],
+   "evidence": [
+    {
+     "kind": "go-test",
+     "label": "ORACLE-ONLY",
+     "package": "./rootchain/consensus/q4replay",
+     "test": "TestCheckRefusesEachDeliberateCorruption",
+     "scope": "26 deliberate corruptions each refused for its own reason"
+    },
+    {
+     "kind": "go-test",
+     "label": "ORACLE-ONLY",
+     "package": "./rootchain/consensus/q4replay",
+     "test": "TestCheckCountsDeclaredInjections",
+     "scope": ""
+    },
+    {
+     "kind": "go-test",
+     "label": "ORACLE-ONLY",
+     "package": "./rootchain/consensus/q4replay",
+     "test": "TestCheckClassifiesEquivocation",
+     "scope": ""
+    },
+    {
+     "kind": "bundle",
+     "label": "IN-PROCESS",
+     "bundlePrefix": "TestQ4",
+     "minBundles": 60,
+     "scope": "every exported run checks clean"
+    }
+   ]
+  }
+ ]
+}
