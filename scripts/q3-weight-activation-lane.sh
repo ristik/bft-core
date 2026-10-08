@@ -134,10 +134,9 @@ export Q3_B1=${Q3_B1:-1}
 [ "$Q3_B1" != 1 ] || export H3_SLOT_LAYOUT=3
 # every shard node exposes its operator endpoint (the readiness check asks it what it has staged)
 export EVM_OPERATOR_STATUS_RPC=1
-# the weighted rotation (1,1,1,1 -> 6,1,1,1) must fit the continuity budget the genesis configuration commits; the DEV default admits no reweighting
-# The fresh-B1 genesis (layout 3) does not add the coupling parameter that the layout-2 genesis adds itself, so the shard configuration names it: coupled
-# validator-set changes (the whole point of this lane) are enforced by every root from the genesis.
-export EVM_PARTITION_PARAMS_EXTRA=${EVM_PARTITION_PARAMS_EXTRA:-continuity_max_distance=1/1,validator_coupling=true}
+# the weighted rotation (1,1,1,1 -> 6,1,1,1) must fit the continuity budget the genesis configuration commits; the DEV default admits no reweighting.
+# (The coupling parameter is the genesis tool's own default for every launch genesis since #486.)
+export EVM_PARTITION_PARAMS_EXTRA=${EVM_PARTITION_PARAMS_EXTRA:-continuity_max_distance=1/1}
 set +e
 EVM_JOURNAL_CANDIDATES=${EVM_JOURNAL_CANDIDATES:-256} H3_ASSIGNMENT_LANE=1 Q3_WEIGHT_LANE=1 F8_MIXED_LANE=1 M2_PROFILE2=1 SIGNING=authority \
   POST_M2A_URETH_BIN="$URETH_BIN" POST_M2A_URETH_COMMIT="$Q3_URETH_COMMIT" \

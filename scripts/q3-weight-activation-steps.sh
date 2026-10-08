@@ -311,7 +311,7 @@ q3_real_tc() {
 # keeps timing out (it signs timeout votes) but no timeout certificate forms and no root round commits. With ONE light root back the weight is 7 =
 # Q and the chain commits again, so 6 fails and 7 passes at the same boundary.
 q3_root_boundary() {
-  local root1=test-nodes/root1/debug.log mark mark2 settled end i signed timeouts formed
+  local root1=test-nodes/root1/debug.log mark mark2 settled end i signed timeouts formed committed
   mark=$(wc -l <"$root1")
   for i in 2 3 4; do stop_pidfile "test-nodes/root$i/pid" 'ubft root-node run' KILL; done
   sleep 12     # what was in flight commits or dies out; the chain is then stuck
@@ -326,13 +326,18 @@ q3_root_boundary() {
   # it signs its timeout vote once for the stuck round and sends the same vote again at every local timeout
   [ "$signed" -ge 1 ] && [ "$timeouts" -ge 3 ] || { echo "the heavy root signed $signed timeout votes with $timeouts local timeouts in 52 s: it was not running its rounds" >&2; return 1; }
   [ "$(tail -n +"$((mark + 1))" "$root1" | grep -ac 'timeout quorum for round')" = 0 ] || { echo "a timeout certificate formed from weight 6" >&2; return 1; }
-  # one light root back: 6 + 1 = 7 >= Q. The two other roots stay down, so half of the leaders are dead and no round can commit (a commit needs
-  # consecutive live leaders); what weight 7 shows is the timeout certificate that the heavy root alone could not form.
+  # one light root back: 6 + 1 = 7 >= Q. The two other roots stay down, and the weighted proposer-priority selector (#489) gives the heavy root about
+  # two thirds of the rounds, so consecutive live leaders occur and rounds COMMIT; the timeout certificates that bridge the dead leaders are counted too.
   mark2=$(wc -l <"$root1")
   m2_start_root 2 2 "$(m2_root_addr 1)" || return 1
-  q3_wait_grep_since 120 "$root1" "$mark2" 'timeout quorum for round [0-9]+ achieved' || { echo "heavy plus one light (weight 7) formed no timeout certificate" >&2; return 1; }
+  for i in $(seq 1 180); do
+    [ "$(q3_signers_of 1 2>/dev/null | jq -r .round 2>/dev/null)" -gt "$end" ] 2>/dev/null && break
+    sleep 1
+  done
+  committed=$(q3_signers_of 1 | jq -r .round)
   formed=$(tail -n +"$((mark2 + 1))" "$root1" | grep -ac 'timeout quorum for round')
-  echo "heavy + one light root (weight 7 of 9): $formed timeout certificates formed in the next window, the first at $(tail -n +"$((mark2 + 1))" "$root1" | grep -a 'timeout quorum for round' | head -1 | sed -n 's/.*for round \([0-9]*\) achieved.*/round \1/p')" >>"$Q3_DIR/root-boundary.txt"
+  echo "heavy + one light root (weight 7 of 9): committed round $committed (was stuck at $end), $formed timeout certificates in the window" >>"$Q3_DIR/root-boundary.txt"
+  [ "$committed" -gt "$end" ] || { echo "heavy plus one light (weight 7) did not commit a round ($end -> $committed)" >&2; return 1; }
   m2_start_root 3 2 "$(m2_root_addr 1)" || return 1
   m2_start_root 4 2 "$(m2_root_addr 1)" || return 1
   h3_progress root-boundary-restored 8
@@ -496,15 +501,17 @@ q3_supersede() {
   h3_progress after-supersession 8
 }
 
-# The leader schedule of the activated epoch, REPORTED and not asserted: with mirrored weights (6,1,1,1) a weight-aware proposer-priority selector (#403,
-# policy root-wrr-v1) gives the heavy root about 6/9 of the rounds, the legacy selector about a quarter each. Which one the epoch uses is a property of
-# the lane's deployment (no activation installs a leader policy yet), so the evidence file states what the root logs show.
+# The leader schedule of the activated epoch: with mirrored weights (6,1,1,1) the proposer-priority selector of a weighted epoch (#403, activated by #489)
+# gives the heavy root about 6/9 of the rounds; the legacy selector gave a quarter each. The evidence file states what the root logs show, and the
+# step fails when the heavy root's share is not weight-proportional.
 q3_leader_schedule() {
-  local astar; astar=$(jq -r .activationRound "$Q3_DIR/activation-record.json")
-  python3 - "$Q3_DIR/leader-schedule.txt" "$astar" "$(q3_weight_of 1)" "$Q3_WEIGHTS" test-nodes/root1/debug.log test-nodes/root2/debug.log test-nodes/root3/debug.log test-nodes/root4/debug.log <<'PY'
+  # epoch 2 only: from its activation round to the activation round of epoch 3 (the heavy weight moves to another entity there)
+  local astar end; astar=$(jq -r .activationRound "$Q3_DIR/activation-record.json")
+  end=$(jq -r '.activationRound // empty' "$Q3_DIR/activation-record-3.json" 2>/dev/null); end=${end:-999999999}
+  python3 - "$Q3_DIR/leader-schedule.txt" "$astar" "$end" "$(q3_weight_of 1)" "$Q3_WEIGHTS" test-nodes/root1/debug.log test-nodes/root2/debug.log test-nodes/root3/debug.log test-nodes/root4/debug.log <<'PY'
 import re, sys, collections
-out, astar, w1, weights, *logs = sys.argv[1:]
-astar = int(astar); weights = [int(x) for x in weights.split()]
+out, astar, end, w1, weights, *logs = sys.argv[1:]
+astar = int(astar); end = int(end); weights = [int(x) for x in weights.split()]
 ids = {}
 for i, path in enumerate(logs, 1):
     for line in open(path, errors="replace"):
@@ -517,11 +524,11 @@ for line in open(logs[0], errors="replace"):
     m = re.search(r"next leader <peer.ID (16\*\w+)>.* round=(\d+)", line)
     if m and "minimum required duration" in line:
         r = int(m.group(2))
-        if r >= astar and r not in seen:
+        if astar <= r < end and r not in seen:
             seen.add(r)
             counts[ids.get(m.group(1), m.group(1))] += 1
 total = sum(counts.values())
-lines = [f"leader of the {total} rounds from A*={astar} (next leader after each round, root 1's log):"]
+lines = [f"leader of the {total} rounds of epoch 2, from A*={astar} to {end} (next leader after each round, root 1's log):"]
 for i, w in enumerate(weights, 1):
     n = counts.get(i, 0)
     lines.append(f"  root {i}: weight {w}/{sum(weights)} = {100 * w // sum(weights)}%, led {n} rounds = {100 * n // max(total, 1)}%")
@@ -530,6 +537,9 @@ verdict = "weight-proportional (proposer-priority, root-wrr-v1)" if heavy >= 0.5
 lines.append(f"selector in effect: {verdict}")
 open(out, "w").write("\n".join(lines) + "\n")
 print("\n".join(lines))
+# since #489 a weighted epoch uses the proposer-priority selector: the heavy root (weight 6 of 9) leads about two thirds of the rounds
+if not (0.5 <= heavy <= 0.8):
+    sys.exit("the heavy root led %d%% of the rounds: the schedule is not weight-proportional" % int(100 * heavy))
 PY
 }
 
