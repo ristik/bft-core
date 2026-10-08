@@ -5,7 +5,6 @@ import (
 	gocrypto "crypto"
 	"errors"
 	"fmt"
-	"math"
 
 	"github.com/unicitynetwork/bft-core/network/protocol/abdrc"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/storage"
@@ -16,8 +15,9 @@ import (
 )
 
 var (
-	ErrTimestampNotIncreasing     = errors.New("proposal timestamp does not exceed parent timestamp")
-	ErrTimestampTooFarAhead       = errors.New("proposal timestamp exceeds voter clock skew")
+	ErrTimestampNotIncreasing = errors.New("proposal timestamp is below parent timestamp")
+	ErrTimestampTooFarAhead   = errors.New("proposal timestamp exceeds voter clock skew")
+	// ErrTimestampOverflow is retained for callers that match it; the non-decreasing rule never increments a timestamp, so nothing returns it.
 	ErrTimestampOverflow          = errors.New("parent timestamp cannot be incremented")
 	ErrTimestampParentUnavailable = errors.New("parent timestamp unavailable")
 	ErrAlreadyVotedForRound       = errors.New("already voted for round")
@@ -222,12 +222,11 @@ func WithParentTimestamp(lookup func(uint64) (uint64, error)) SafetyOption {
 	return func(s *SafetyModule) { s.parentTime = lookup }
 }
 
-// proposalTimestamp fails closed at uint64 overflow instead of wrapping to zero.
-func proposalTimestamp(now, parent uint64) (uint64, error) {
-	if parent == math.MaxUint64 {
-		return 0, ErrTimestampOverflow
-	}
-	return max(now, parent+1), nil
+// proposalTimestamp is the seal time a proposer proposes: its wall clock, never below the parent's. UC seal times are whole seconds and
+// non-decreasing, so several rounds may share a second; a strictly increasing rule would force rounds shorter than a second to run the
+// seal time ahead of the wall clock until every voter's skew bound refused the proposal.
+func proposalTimestamp(now, parent uint64) uint64 {
+	return max(now, parent)
 }
 
 // validateVoteTimestamp is only for live voting, never certified history verification.
@@ -244,7 +243,8 @@ func (s *SafetyModule) validateVoteTimestamp(block *drctypes.BlockData) error {
 	} else {
 		return ErrTimestampParentUnavailable
 	}
-	if block.Timestamp <= parent {
+	// Non-decreasing: equal to the parent is valid (see proposalTimestamp); only a decrease is refused.
+	if block.Timestamp < parent {
 		return ErrTimestampNotIncreasing
 	}
 	now := s.now()

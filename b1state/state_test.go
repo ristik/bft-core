@@ -181,11 +181,11 @@ func TestUpdateStagedDebitAndCanonical(t *testing.T) {
 			}
 		})
 	}
-	if used, err := SystemGas(100, 20, 30, 10, 40); err != nil || used != 100 {
+	if used, err := SystemGas(100, 20, 30, 10, 30, 10); err != nil || used != 100 {
 		t.Fatal(used, err)
 	}
-	for _, gs := range [][4]uint64{{101, 0, 0, 0}, {20, 81, 0, 0}, {20, 30, 51, 0}, {20, 30, 10, 41}, {math.MaxUint64, 1, 0, 0}} {
-		if _, err := SystemGas(100, gs[0], gs[1], gs[2], gs[3]); !errors.Is(err, ErrBudget) {
+	for _, gs := range [][5]uint64{{101, 0, 0, 0, 0}, {20, 81, 0, 0, 0}, {20, 30, 51, 0, 0}, {20, 30, 10, 41, 0}, {20, 30, 10, 30, 11}, {math.MaxUint64, 1, 0, 0, 0}} {
+		if _, err := SystemGas(100, gs[0], gs[1], gs[2], gs[3], gs[4]); !errors.Is(err, ErrBudget) {
 			t.Fatal(err)
 		}
 	}
@@ -450,6 +450,65 @@ func TestExactCandidateBindings(t *testing.T) {
 		change(&bad)
 		if err := u.CheckBindings(bad); !errors.Is(err, ErrBinding) {
 			t.Fatal(err)
+		}
+	}
+}
+
+func TestTheRecordsHookIsPartOfTheProfile(t *testing.T) {
+	base := fixtureProfile(2)
+	baseHash, err := base.Hash()
+	if err != nil {
+		t.Fatal(err)
+	}
+	baseGas, _ := base.RequiredSystemGas()
+	if g, _ := base.HookEnvelopeGas(); g != 0 {
+		t.Fatal("a chain without custody reserves no hook gas", g)
+	}
+
+	with := base
+	with.RecordsCustody, with.HRecords, with.HookRecordGas = [20]byte{0xc1}, 3, 2_000_000
+	with.SystemGas, _ = with.RequiredSystemGas()
+	with.MaxGas = with.SystemGas + with.OrdinaryCapacity
+	if err := with.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if g, _ := with.HookEnvelopeGas(); g != HookReadsGas+3*2_000_000 {
+		t.Fatal("envelope is the gate reads plus H records", g)
+	}
+	if gas, _ := with.RequiredSystemGas(); gas != baseGas+HookReadsGas+3*2_000_000 {
+		t.Fatal("the system envelope grows by exactly the hook envelope", gas, baseGas)
+	}
+	withHash, err := with.Hash()
+	if err != nil || withHash == baseHash {
+		t.Fatal("the hook is in the hash", err)
+	}
+	// each of the three pins changes the hash alone
+	for name, change := range map[string]func(*Profile){
+		"custody":    func(p *Profile) { p.RecordsCustody[0]++ },
+		"H":          func(p *Profile) { p.HRecords++ },
+		"record gas": func(p *Profile) { p.HookRecordGas++ },
+	} {
+		x := with
+		change(&x)
+		x.SystemGas, _ = x.RequiredSystemGas()
+		x.MaxGas = x.SystemGas + x.OrdinaryCapacity
+		h, err := x.Hash()
+		if err != nil || h == withHash {
+			t.Fatal(name, err)
+		}
+	}
+	for name, change := range map[string]func(*Profile){
+		"H zero with custody":        func(p *Profile) { p.HRecords = 0 },
+		"H above custody's ceiling":  func(p *Profile) { p.HRecords = HookMaxRecords + 1 },
+		"no record gas":              func(p *Profile) { p.HookRecordGas = 0 },
+		"H without custody":          func(p *Profile) { p.RecordsCustody = [20]byte{} },
+		"record gas without custody": func(p *Profile) { p.RecordsCustody, p.HRecords = [20]byte{}, 0 },
+		"system gas below the hook":  func(p *Profile) { p.SystemGas-- },
+	} {
+		x := with
+		change(&x)
+		if err := x.Validate(); !errors.Is(err, ErrProfile) {
+			t.Fatal(name, err)
 		}
 	}
 }
