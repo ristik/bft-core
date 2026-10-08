@@ -310,3 +310,24 @@ func newQuorumCertificate(t *testing.T, voteInfo *drctypes.RoundInfo, commitHash
 		Signatures:       map[string]hex.Bytes{},
 	}, nil
 }
+
+// A round far beyond the certificate a proposal carries is refused by the structural check, before any signature, trust base or
+// leader lookup: Verify with no trust base store never gets past it.
+func TestProposalMsg_RoundEvidenceIsCheckedFirst(t *testing.T) {
+	block := func(round uint64) *drctypes.BlockData {
+		return &drctypes.BlockData{
+			Author: "test", Round: round, Timestamp: 1670314583525, Payload: &drctypes.Payload{},
+			Qc: &drctypes.QuorumCert{
+				VoteInfo:         testutils.NewDummyRootRoundInfo(7),
+				LedgerCommitInfo: testutils.NewDummyCommitInfo(t, gocrypto.SHA256, testutils.NewDummyRootRoundInfo(7)),
+				Signatures:       map[string]hex.Bytes{"test": {0, 1, 2, 3}},
+			},
+		}
+	}
+	for name, round := range map[string]uint64{"one round too far": 9, "far future": 1 << 60, "the maximum": ^uint64(0)} {
+		x := &ProposalMsg{Block: block(round)}
+		require.ErrorIs(t, x.IsValid(), ErrRoundEvidence, name)
+		require.ErrorIs(t, x.Verify(nil), ErrRoundEvidence, name)
+	}
+	require.NoError(t, (&ProposalMsg{Block: block(8)}).IsValid(), "control: the successor of the certified round")
+}

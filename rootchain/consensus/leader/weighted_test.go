@@ -538,9 +538,9 @@ func BenchmarkQ4Selector(b *testing.B) {
 		}
 		return nodes
 	}
-	for _, n := range []int{10, 100} {
+	for _, n := range []int{4, 10, 100} {
 		nodes := members(n)
-		for _, d := range []uint64{1_000, 10_000, 100_000} {
+		for _, d := range []uint64{1_000, 10_000, 100_000, 1_000_000} {
 			b.Run(fmt.Sprintf("cold-restart/n=%d/d=%d", n, d), func(b *testing.B) {
 				b.ReportAllocs()
 				for i := 0; i < b.N; i++ {

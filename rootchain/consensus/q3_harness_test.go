@@ -66,9 +66,6 @@ type q3Replica struct {
 	// with fsync on, the stores a restart claims to read back
 	link    RootNet
 	durable bool
-	// weightedLeader activates the weighted leader policy (#403) for epoch 2 at every start that finds the epoch installed: the policy is
-	// the operator's startup configuration, not durable state
-	weightedLeader bool
 }
 
 func newQ3Replica(t *testing.T, f *q3fixture.Fixture, node *testutils.TestNode) *q3Replica {
@@ -112,11 +109,6 @@ func (r *q3Replica) open(withQ3 bool) error {
 		require.NoError(t, trust.Store(r.f.Old))
 	}
 	r.trust = trust
-	if r.weightedLeader {
-		if _, err := trust.GetByEpoch(2); err == nil {
-			require.NoError(t, trust.ActivateLeaderPolicy(2, tbstore.LeaderPolicyWeightedV1))
-		}
-	}
 	historyID := sha256.Sum256([]byte("q3-activation-integration"))
 	history, err := trusthistorystore.Open(context.Background(), r.historyDB, r.f.Old, historyID, trustactivation.Verifier{})
 	require.NoError(t, err)
