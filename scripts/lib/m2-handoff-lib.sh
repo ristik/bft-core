@@ -85,7 +85,15 @@ m2_archive_root_state() {
   mkdir -p "$archive"
   for file in rootchain.db trustbase.db root-trust-history.db orchestration.db; do
     if [ -e "test-nodes/root${node}/$file" ]; then
-      mv "test-nodes/root${node}/$file" "$archive/$file" || return 1
+      # rootchain.db is archived as a COPY and stays in place: it holds the durable control-cut store and the root-record log (#488), which the
+      # restart admission of every shard node needs after the install, and the successor epoch extends the same record log. Moving it aside makes
+      # the restarted root a root that never saw the old epoch's origins ("the root does not hold it"). M2_ARCHIVE_MOVE_ROOT_DB=1 restores the old
+      # behaviour (a fresh store at the install), for a test that wants exactly that.
+      if [ "$file" = rootchain.db ] && [ "${M2_ARCHIVE_MOVE_ROOT_DB:-0}" != 1 ]; then
+        cp -R "test-nodes/root${node}/$file" "$archive/$file" || return 1
+      else
+        mv "test-nodes/root${node}/$file" "$archive/$file" || return 1
+      fi
     fi
   done
 }
