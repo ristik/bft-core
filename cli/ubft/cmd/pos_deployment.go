@@ -9,11 +9,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/ethereum/go-ethereum/rpc"
 	"math/big"
 	"os"
 	"strings"
 
+	"github.com/ethereum/go-ethereum/rpc"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/storage"
 	"github.com/unicitynetwork/bft-core/rootchain/evmstate"
@@ -33,7 +33,10 @@ type posDeploymentFile struct {
 	CustodyCode  string `json:"custodyCodeHash"`  // 32 bytes: keccak256 of the deployed custody code
 	Registry     string `json:"registry"`         // 20 bytes: the SealRegistry custody names as its roots
 	RegistryCode string `json:"registryCodeHash"` // 32 bytes: keccak256 of the deployed registry code
-	// Optional pair: the deployed Election module. With it the root judges a primary candidate's EVM proof (Freeze companion v4);
+	// Optional pair: the deployed Election module. CONSENSUS-CRITICAL: every root of the chain must pin the same pair (and run an
+	// execution client for --pos-evm-rpc), because it decides whether a primary candidate's Freeze must carry the EVM proof; roots that
+	// differ judge the same block differently.
+	// With it the root judges a primary candidate's EVM proof (Freeze companion v4);
 	// without it a primary candidate is admitted as before. Both or neither.
 	Election     string `json:"election,omitempty"`         // 20 bytes
 	ElectionCode string `json:"electionCodeHash,omitempty"` // 32 bytes: keccak256 of the deployed election code

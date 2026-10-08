@@ -119,7 +119,8 @@ type (
 		v3Planned        atomic.Pointer[V3Candidate] // the last candidate PlanV3Candidate derived: the exact body the members declared readiness for
 		q3Staged         atomic.Pointer[Q3Staged]    // the V3 candidate this validator last derived for its operator
 		epochAnchor      *drctypes.EpochAnchor
-		primaryWitness   atomic.Pointer[PrimaryWitnessSource] // builds the storage-proof witness of a primary candidate at the frozen parent
+		primaryWitness   atomic.Pointer[PrimaryWitnessSource] // the execution client's side of a primary candidate's EVM proof
+		primaryCache     primaryCache
 		handoffMu        sync.Mutex
 		handoffPlans     map[[32]byte]*pendingHandoff
 		// handoffIntent is the operator plan this validator holds for the leader to order a Prepare for: unsigned, naming no parent.

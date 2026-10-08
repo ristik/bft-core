@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math/big"
 	"sort"
 	"time"
 
@@ -87,9 +88,11 @@ type RPCProofSource struct {
 	BlockHash [32]byte
 }
 
+// eth_getProof answers keys and values as hex quantities ("0x0", odd lengths allowed) or as 32-byte words, depending on the client; both
+// parse as numbers.
 type rpcSlot struct {
-	Key   hexutil.Bytes   `json:"key"`
-	Value hexutil.Bytes   `json:"value"`
+	Key   hexutil.Big     `json:"key"`
+	Value hexutil.Big     `json:"value"`
 	Proof []hexutil.Bytes `json:"proof"`
 }
 
@@ -119,10 +122,11 @@ func (s RPCProofSource) Proof(addr [20]byte, slots [][32]byte) ([][]byte, []Slot
 	}
 	proofs := make([]SlotProof, len(slots))
 	for i, sp := range out.StorageProof {
-		if len(sp.Value) > 32 || !bytes.Equal(bytes.TrimLeft(sp.Key, "\x00"), bytes.TrimLeft(slots[i][:], "\x00")) {
+		key, value := sp.Key.ToInt(), sp.Value.ToInt()
+		if value.BitLen() > 256 || key.Cmp(new(big.Int).SetBytes(slots[i][:])) != 0 {
 			return nil, nil, fmt.Errorf("%w: storage proof %d answers another slot", ErrBuild, i)
 		}
-		copy(proofs[i].Value[32-len(sp.Value):], sp.Value)
+		value.FillBytes(proofs[i].Value[:])
 		for _, n := range sp.Proof {
 			proofs[i].Proofs = append(proofs[i].Proofs, n)
 		}

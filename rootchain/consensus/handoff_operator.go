@@ -727,23 +727,6 @@ func (x *ConsensusManager) verifyApprovalAssignment(msg *abdrc.HandoffApprovalMs
 	return c, nil
 }
 
-// checkPrimaryPoPs requires the EVM possession proofs exactly where the chain will judge them: a primary candidate on a chain with the
-// election pinned carries a well-formed list, and nothing else carries one. Their signatures are checked at Freeze admission against the
-// state the election published.
-func (x *ConsensusManager) checkPrimaryPoPs(msg *abdrc.HandoffApprovalMsg, c evmassign.Candidate) error {
-	judged := len(msg.CandidatePreimage) != 0 && c.Kind == evmassign.KindPrimary && x.blockStore.PosServices().RequiresPrimaryProof()
-	if !judged {
-		if len(msg.PrimaryPoPs) != 0 {
-			return errors.Join(ErrHandoffApproval, storage.ErrPrimaryProofUnexpected)
-		}
-		return nil
-	}
-	if _, err := evmassign.DecodePoPs(msg.PrimaryPoPs); err != nil {
-		return errors.Join(ErrHandoffApproval, storage.ErrPrimaryProofMissing, err)
-	}
-	return nil
-}
-
 // checkPlanBody is everything about a plan, an unsigned intent or a signed approval alike, that needs neither a signature nor EVM
 // state: the body against this chain's epoch and predecessor, the candidate preimage, and the summaries that tie the body to the
 // attempt and the candidate. Nothing in it names a frozen parent: the root binds that at the Prepare.
@@ -886,6 +869,7 @@ func (x *ConsensusManager) endorseHandoffAtState(ctx context.Context, plan abdrc
 		return ErrHandoffApproval
 	}
 	plan.Signer = x.id.String()
+	x.prefetchForPlan(plan.CandidatePreimage, plan.FrozenParent)
 	if len(plan.CandidatePreimage) != 0 {
 		if err := x.verifyEndorsedAssignmentInstalled(plan, body.assignmentRules(), state); err != nil {
 			return err
