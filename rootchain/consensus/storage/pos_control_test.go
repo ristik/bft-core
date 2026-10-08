@@ -111,16 +111,21 @@ func TestCloseLiabilityProjectsOnceFromAVerifiedBundle(t *testing.T) {
 func TestCloseLiabilityRefusals(t *testing.T) {
 	flip := func(b []byte, i int) []byte { c := append([]byte(nil), b...); c[i] ^= 1; return c }
 	cases := map[string]func(f *closeFx){
-		"another network":                              func(f *closeFx) { f.ctl.Network++ },
-		"another chain":                                func(f *closeFx) { f.ctl.ChainID[31]++ },
-		"another custody":                              func(f *closeFx) { f.ctl.Custody[19]++ },
-		"another ordering round":                       func(f *closeFx) { f.ctl.OrderingRound++ },
-		"another ordering epoch":                       func(f *closeFx) { f.ctl.OrderingEpoch++ },
-		"an epoch no handoff ended":                    func(f *closeFx) { f.ctl.Close.ClosedEpoch = 5 },
-		"a bundle of another epoch":                    func(f *closeFx) { f.auth.facts.ClosedEpoch = 3 },
-		"another bundle":                               func(f *closeFx) { f.ctl.Close.BundleSemanticID[0]++ },
-		"another assignment":                           func(f *closeFx) { f.ctl.Data = flip(f.ctl.Data, 0) },
-		"another H round":                              func(f *closeFx) { f.ctl.Data = flip(f.ctl.Data, 63) },
+		"another network":           func(f *closeFx) { f.ctl.Network++ },
+		"another chain":             func(f *closeFx) { f.ctl.ChainID[31]++ },
+		"another custody":           func(f *closeFx) { f.ctl.Custody[19]++ },
+		"another ordering round":    func(f *closeFx) { f.ctl.OrderingRound++ },
+		"another ordering epoch":    func(f *closeFx) { f.ctl.OrderingEpoch++ },
+		"an epoch no handoff ended": func(f *closeFx) { f.ctl.Close.ClosedEpoch = 5 },
+		"a bundle of another epoch": func(f *closeFx) { f.auth.facts.ClosedEpoch = 3 },
+		"another bundle":            func(f *closeFx) { f.ctl.Close.BundleSemanticID[0]++ },
+		"another assignment":        func(f *closeFx) { f.ctl.Data = flip(f.ctl.Data, 0) },
+		"another H round":           func(f *closeFx) { f.ctl.Data = flip(f.ctl.Data, 63) },
+		"a bundle of another H round than the control and the root": func(f *closeFx) { f.auth.facts.HRound = 101 },
+		"a control and a bundle that agree on a round the root did not record": func(f *closeFx) {
+			f.ctl.Data = append(append(append([]byte(nil), f.ctl.Data[:32]...), word(101)...), f.ctl.Data[64:]...)
+			f.auth.facts.HRound = 101
+		},
 		"another H record":                             func(f *closeFx) { f.ctl.Data = flip(f.ctl.Data, 64) },
 		"another terminal root":                        func(f *closeFx) { f.ctl.Data = flip(f.ctl.Data, 96) },
 		"a forged exposure digest":                     func(f *closeFx) { f.ctl.Data = flip(f.ctl.Data, 128) },

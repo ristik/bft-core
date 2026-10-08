@@ -38,6 +38,10 @@ type ClosureFacts struct {
 
 // ClosureAuthority verifies the retained canonical bundle bytes of a closed epoch against the historical authority of that epoch
 // (terminal proof, state availability) and returns the facts. It is a pure function of the witness and committed history.
+//
+// Closed and AssignmentID must be the frozen identity records, and the assignment hash, of the assignment H terminates, authenticated by
+// the verified bundle: the executor derives the closure's exposure and key-history digests from Closed, so an authority that reports
+// anything else (the current nominations, the successor's records, records the bundle does not commit to) makes the closure unsound.
 type ClosureAuthority interface {
 	VerifyClosure(witness []byte, closedEpoch uint64) (ClosureFacts, error)
 }
