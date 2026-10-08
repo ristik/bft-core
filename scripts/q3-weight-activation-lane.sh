@@ -131,14 +131,14 @@ export URETH_PIN_NETWORK_ID=3
 # the lane runs on the fresh-B1 stack: one profile (ubft engine-api b1-profile) is the source of the registry genesis (layout 3), ureth's --unicity.*
 # bindings and the shard nodes' Update admission (scripts/reth-paired-devnet.sh), and the registry slots are read under the layout-3 names
 export Q3_B1=${Q3_B1:-1}
-# the install restarts keep rootchain.db in place (the durable control cuts of #488 live there), like an operator's restart
-export M2_KEEP_ROOT_DB=${M2_KEEP_ROOT_DB:-1}
 [ "$Q3_B1" != 1 ] || export H3_SLOT_LAYOUT=3
 # every shard node exposes its operator endpoint (the readiness check asks it what it has staged)
 export EVM_OPERATOR_STATUS_RPC=1
 # the weighted rotation (1,1,1,1 -> 6,1,1,1) must fit the continuity budget the genesis configuration commits; the DEV default admits no reweighting.
 # (The coupling parameter is the genesis tool's own default for every launch genesis since #486.)
-export EVM_PARTITION_PARAMS_EXTRA=${EVM_PARTITION_PARAMS_EXTRA:-continuity_max_distance=1/1}
+# The later handoffs move the heavy weight from one entity to another (6,1,1,1 -> 1,6,1,1 -> 1,1,6,1): the normalized weight distance of such a swap is 10/9, above 1/1,
+# so the genesis configuration commits a budget of 2/1 (the largest distance two committees of the same total can have).
+export EVM_PARTITION_PARAMS_EXTRA=${EVM_PARTITION_PARAMS_EXTRA:-continuity_max_distance=2/1}
 set +e
 EVM_JOURNAL_CANDIDATES=${EVM_JOURNAL_CANDIDATES:-256} H3_ASSIGNMENT_LANE=1 Q3_WEIGHT_LANE=1 F8_MIXED_LANE=1 M2_PROFILE2=1 SIGNING=authority \
   POST_M2A_URETH_BIN="$URETH_BIN" POST_M2A_URETH_COMMIT="$Q3_URETH_COMMIT" \
