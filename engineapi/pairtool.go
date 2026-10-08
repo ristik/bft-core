@@ -27,15 +27,16 @@ type PairExport struct {
 	Binding     []byte
 }
 
-// rootInputTransitions is the canonical array of the transition byte strings inside a canonical root input: its last field.
+// rootInputTransitions is the canonical array of the transition byte strings inside a canonical root input: its 11th field (see
+// rootInputTransitionsField), whatever follows it.
 func rootInputTransitions(rootInput []byte) ([]byte, error) {
 	var v []any
-	if err := types.Cbor.Unmarshal(rootInput, &v); err != nil || len(v) == 0 {
-		return nil, errors.New("engineapi: the root input is not a CBOR array")
+	if err := types.Cbor.Unmarshal(rootInput, &v); err != nil || len(v) <= rootInputTransitionsField {
+		return nil, errors.New("engineapi: the root input is not a CBOR array with a transition field")
 	}
-	d, ok := v[len(v)-1].([]any)
+	d, ok := v[rootInputTransitionsField].([]any)
 	if !ok {
-		return nil, errors.New("engineapi: the root input's last field is not the transition array")
+		return nil, errors.New("engineapi: the root input's transition field is not an array")
 	}
 	items := make([]any, len(d))
 	for i, t := range d {
@@ -47,6 +48,10 @@ func rootInputTransitions(rootInput []byte) ([]byte, error) {
 	}
 	return types.Cbor.Marshal(items)
 }
+
+// rootInputTransitionsField is the position of the transition array in a canonical root input: the 11th field of every tuple (the legacy 11-field
+// tuple ends with it; the B1 tuples append the B1 update hash and the root-records hash after it).
+const rootInputTransitionsField = 10
 
 // ExportPairBlock reads what the pair at ethURL retained for the block of the given number (the latest when latest is set).
 func ExportPairBlock(ctx context.Context, ethURL string, number uint64, latest bool) (PairExport, error) {
@@ -225,12 +230,12 @@ func runPairControlOnce(ctx context.Context, engineURL string, secret Secret, et
 // rootInputTransitionList is the transition byte strings of a canonical root input, one per entry.
 func rootInputTransitionList(rootInput []byte) ([]data, error) {
 	var v []any
-	if err := types.Cbor.Unmarshal(rootInput, &v); err != nil || len(v) == 0 {
-		return nil, errors.New("engineapi: the root input is not a CBOR array")
+	if err := types.Cbor.Unmarshal(rootInput, &v); err != nil || len(v) <= rootInputTransitionsField {
+		return nil, errors.New("engineapi: the root input is not a CBOR array with a transition field")
 	}
-	d, ok := v[len(v)-1].([]any)
+	d, ok := v[rootInputTransitionsField].([]any)
 	if !ok {
-		return nil, errors.New("engineapi: the root input's last field is not the transition array")
+		return nil, errors.New("engineapi: the root input's transition field is not an array")
 	}
 	out := make([]data, len(d))
 	for i, t := range d {

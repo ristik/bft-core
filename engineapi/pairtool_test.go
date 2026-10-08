@@ -29,7 +29,7 @@ type pairChain struct {
 func newPairChain(t *testing.T) pairChain {
 	t.Helper()
 	transitions := [][]byte{{0xa1, 0x01}, {0xb2}}
-	rootInput, err := types.Cbor.Marshal([]any{uint64(2), uint64(5), []byte("origin"), []any{[]byte(transitions[0]), []byte(transitions[1])}})
+	rootInput, err := types.Cbor.Marshal(rootInputOf(transitions, true))
 	require.NoError(t, err)
 	th, err := TransitionsHash(transitions)
 	require.NoError(t, err)
@@ -260,4 +260,53 @@ func TestATooDeepReorgIsTheGatesAcceptanceOnlyForTheUnchangedControl(t *testing.
 	out, err = RunPairControl(context.Background(), urlOf(t, other, true), Secret{}, urlOf(t, eth, false), ControlAccept)
 	require.NoError(t, err)
 	require.False(t, out.Accepted)
+}
+
+// rootInputOf is a root input of the shape the transition list is read from: the transition array is the 11th field, followed (fresh B1) by the B1
+// update hash and the root-records hash.
+func rootInputOf(transitions [][]byte, fresh bool) []any {
+	d := make([]any, len(transitions))
+	for i, t := range transitions {
+		d[i] = t
+	}
+	v := []any{uint64(2), uint64(3), uint64(8), []byte{0x80}, uint64(5), uint64(1), uint64(1), make([]byte, 32), []any{uint64(1)}, []any{uint64(5), uint64(1), "leader", []byte{1}, []byte{2}}, d}
+	if fresh {
+		v = append(v, make([]byte, 32), make([]byte, 32))
+	}
+	return v
+}
+
+func TestTheTransitionListIsTheEleventhFieldOfEveryTuple(t *testing.T) {
+	transitions := [][]byte{{0xa1, 0x01}, {0xb2}}
+	for name, fresh := range map[string]bool{"the legacy 11-field tuple": false, "the fresh B1 13-field tuple": true} {
+		raw, err := types.Cbor.Marshal(rootInputOf(transitions, fresh))
+		require.NoError(t, err, name)
+		got, err := rootInputTransitionList(raw)
+		require.NoError(t, err, name)
+		require.Equal(t, []data{{0xa1, 0x01}, {0xb2}}, got, name)
+	}
+	short, _ := types.Cbor.Marshal([]any{uint64(2), uint64(5)})
+	_, err := rootInputTransitionList(short)
+	require.ErrorContains(t, err, "transition field")
+	v := rootInputOf(transitions, true)
+	v[rootInputTransitionsField] = []byte("not an array")
+	notArray, _ := types.Cbor.Marshal(v)
+	_, err = rootInputTransitionList(notArray)
+	require.ErrorContains(t, err, "not an array")
+	v = rootInputOf(transitions, true)
+	v[rootInputTransitionsField] = []any{"text"}
+	notBytes, _ := types.Cbor.Marshal(v)
+	_, err = rootInputTransitionList(notBytes)
+	require.ErrorContains(t, err, "not a byte string")
+	// the canonical array the binding hashes comes from the same field
+	fresh, _ := types.Cbor.Marshal(rootInputOf(transitions, true))
+	legacy, _ := types.Cbor.Marshal(rootInputOf(transitions, false))
+	a, err := rootInputTransitions(fresh)
+	require.NoError(t, err)
+	b, err := rootInputTransitions(legacy)
+	require.NoError(t, err)
+	require.Equal(t, a, b)
+	th, err := TransitionsHash(transitions)
+	require.NoError(t, err)
+	require.NotZero(t, th)
 }
