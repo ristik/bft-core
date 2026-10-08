@@ -28,6 +28,7 @@ import (
 	"github.com/unicitynetwork/bft-core/registryproof"
 	"github.com/unicitynetwork/bft-core/registrywitness"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/zkverifier"
+	"github.com/unicitynetwork/bft-core/rootrecords"
 	"github.com/unicitynetwork/bft-go-base/types"
 )
 
@@ -245,7 +246,7 @@ func newB1PairConfig(p b1state.Profile, rt *q3active.Runtime, ethURL string, tim
 	if rt == nil {
 		return nil, fmt.Errorf("%w: no verified root history", ErrB1Profile)
 	}
-	return &b1paired.Config{Profile: p, Authority: rt.B1Authority(), Proofs: b1ProofFetcher(registrywitness.NewHTTPCaller(ethURL, timeout))}, nil
+	return &b1paired.Config{Profile: p, Authority: rt.B1Authority(), Proofs: b1ProofFetcher(registrywitness.NewHTTPCaller(ethURL, timeout)), Records: emptyRootRecords{ucTime: p.GenesisUCTime}}, nil
 }
 
 // b1IdentitiesFile is the genesis tool's identity document the vault deployment is checked against
@@ -341,4 +342,17 @@ func validateB1RunFlags(flags *shardNodeRunFlags) error {
 		return errors.New("registry layout 3 is the fresh-B1 layout and requires --b1-profile")
 	}
 	return nil
+}
+
+// emptyRootRecords is the root-record source of a deployment whose root chain projects no P85 source state (proof of authority, no custody
+// contract): the retained log is empty, so every block's mandatory import is the empty batch at the profile's pinned genesis UC time. A
+// deployment with a root source state needs a source that reads the root's retained log instead; this one must not be used there.
+type emptyRootRecords struct{ ucTime uint64 }
+
+func (emptyRootRecords) Record(uint64) (rootrecords.Record, error) {
+	return rootrecords.Record{}, errors.New("the root-record source log is empty")
+}
+
+func (e emptyRootRecords) Cursor(context.Context, uint64) (rootrecords.Cursor, error) {
+	return rootrecords.Cursor{UCTime: e.ucTime}, nil
 }
