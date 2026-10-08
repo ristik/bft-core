@@ -27,6 +27,32 @@ type OldCommitProof struct {
 	OptionalQC  *rctypes.QuorumCert
 }
 
+// ControlRoot is the unicity tree root the control leaf of this control state and its path lead to: the root a certificate or a commit
+// seal of the block that carried the control must name.
+func ControlRoot(control *evmroot.ControlState, certificate *types.UnicityTreeCertificate) ([]byte, error) {
+	if control == nil || certificate == nil || certificate.Partition != evmroot.D4ControlPartition || certificate.Version != 1 {
+		return nil, ErrProof
+	}
+	hasher := abhash.New(crypto.SHA256.New())
+	hasher.Write(control.Digest())
+	leafHash, err := hasher.Sum()
+	if err != nil {
+		return nil, ErrProof
+	}
+	path := []*imt.PathItem{imt.NewPathItem(evmroot.D4ControlPartition.Bytes(), leafHash)}
+	for _, step := range certificate.HashSteps {
+		if step == nil || step.Key == evmroot.D4ControlPartition {
+			return nil, ErrProof
+		}
+		path = append(path, step.ToIMTPathItem())
+	}
+	root, err := imt.IndexTreeOutput(path, evmroot.D4ControlPartition.Bytes(), crypto.SHA256)
+	if err != nil {
+		return nil, ErrProof
+	}
+	return root, nil
+}
+
 // verifyOldQC verifies a commit QC of the old epoch by that epoch's own rule: cfg is the old epoch's signing configuration, and the
 // certificate must be in the wire form it requires. A zero configuration is the legacy one.
 func verifyOldQC(qc *rctypes.QuorumCert, tb *types.RootTrustBaseV1, cfg votesig.Config) error {
@@ -89,26 +115,9 @@ func VerifyOldCommitProofSigning(p OldCommitProof, tb *types.RootTrustBaseV1, cf
 			return VerifiedRecord{}, ErrProof
 		}
 	}
-	if p.ControlPath == nil || p.ControlPath.Partition != evmroot.D4ControlPartition || p.ControlPath.Version != 1 {
-		return VerifiedRecord{}, ErrProof
-	}
-	digest := p.Control.Digest()
-	hasher := abhash.New(crypto.SHA256.New())
-	hasher.Write(digest)
-	leafHash, err := hasher.Sum()
+	root, err := ControlRoot(&p.Control, p.ControlPath)
 	if err != nil {
-		return VerifiedRecord{}, ErrProof
-	}
-	path := []*imt.PathItem{imt.NewPathItem(evmroot.D4ControlPartition.Bytes(), leafHash)}
-	for _, step := range p.ControlPath.HashSteps {
-		if step == nil || step.Key == evmroot.D4ControlPartition {
-			return VerifiedRecord{}, ErrProof
-		}
-		path = append(path, step.ToIMTPathItem())
-	}
-	root, err := imt.IndexTreeOutput(path, evmroot.D4ControlPartition.Bytes(), crypto.SHA256)
-	if err != nil {
-		return VerifiedRecord{}, ErrProof
+		return VerifiedRecord{}, err
 	}
 	qc := p.CommitQC
 	if qc == nil || qc.VoteInfo == nil || qc.LedgerCommitInfo == nil {
@@ -142,7 +151,7 @@ func VerifyOldCommitProofSigning(p OldCommitProof, tb *types.RootTrustBaseV1, cf
 	copy(out.RecordID[:], p.Record.ID())
 	out.OrderRound, out.CommitSealRound = p.Record.OrderedRound, c
 	copy(out.StateRoot[:], root)
-	copy(out.ControlDigest[:], digest)
+	copy(out.ControlDigest[:], p.Control.Digest())
 	out.SignerEpoch = p.Record.Epoch
 	return out, nil
 }

@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	"github.com/unicitynetwork/bft-core/evmroot"
 	"github.com/unicitynetwork/bft-core/internal/testutils/b1fixture"
 	"github.com/unicitynetwork/bft-core/rootinput"
 	"github.com/unicitynetwork/bft-core/rootrecords"
@@ -26,7 +27,7 @@ func (f fakeRecords) Record(i uint64) (rootrecords.Record, error) {
 	return f.log[i], nil
 }
 
-func (f fakeRecords) Cursor(context.Context, uint64) (rootrecords.Cursor, error) {
+func (f fakeRecords) Cursor(context.Context, evmroot.RootOriginV2) (rootrecords.Cursor, error) {
 	return f.cursor, f.cursorErr
 }
 
