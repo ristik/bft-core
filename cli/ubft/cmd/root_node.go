@@ -62,17 +62,18 @@ type (
 		shardConfFlags
 		p2pFlags
 
-		RootDBFile            string // path to Bolt storage file
-		TrustBaseDBFile       string
-		OrchestrationDBFile   string
-		GenesisIdentitiesFile string
-		PosDeploymentFile     string
-		PosEVMRPC             string
-		TrustHistoryDBFile    string
-		Profile2              bool
-		InstallHandoffEpoch   uint64
-		Q3Lane                bool // the Q3 acceptance lane: a verified Q3 history, the install journal and the V3 handoff pipeline
-		Q3JournalDBFile       string
+		RootDBFile               string // path to Bolt storage file
+		TrustBaseDBFile          string
+		OrchestrationDBFile      string
+		GenesisIdentitiesFile    string
+		PosGenesisIdentitiesFile string
+		PosDeploymentFile        string
+		PosEVMRPC                string
+		TrustHistoryDBFile       string
+		Profile2                 bool
+		InstallHandoffEpoch      uint64
+		Q3Lane                   bool // the Q3 acceptance lane: a verified Q3 history, the install journal and the V3 handoff pipeline
+		Q3JournalDBFile          string
 
 		BlockRate        uint32
 		MaxRequests      uint   // certification request channel capacity
@@ -132,6 +133,8 @@ func rootNodeRunCmd(baseFlags *baseFlags) *cobra.Command {
 		fmt.Sprintf("path to the trust base database (default: %s)", filepath.Join("$UBFT_HOME", trustBaseDBFileName)))
 	cmd.Flags().StringVar(&flags.GenesisIdentitiesFile, "genesis-identities", "",
 		"proof-of-authority genesis: JSON identity records of the genesis committee of the coupled EVM shard (`ubft genesis-identities generate`), recorded once as the incumbent baseline that the first coupled handoff's authorization names as K; a different set than the recorded one is refused")
+	cmd.Flags().StringVar(&flags.PosGenesisIdentitiesFile, "pos-genesis-identities", "",
+		"proof-of-stake: JSON identity records of the genesis committee as the custody genesis seeded them (`ubft pos-relayer genesis`), recorded once as the incumbent baseline K of the first coupled handoff; needs --pos-deployment, refused together with --genesis-identities")
 	cmd.Flags().StringVar(&flags.PosDeploymentFile, "pos-deployment", "",
 		"proof-of-stake: JSON pinning the custody deployment (networkWord, chainId, custody). Turns on the P85 control executor and the mandatory CloseLiability duty (profile 2 only); refused together with --genesis-identities")
 	cmd.Flags().StringVar(&flags.PosEVMRPC, "pos-evm-rpc", "",
@@ -232,8 +235,11 @@ func rootNodeRun(ctx context.Context, flags *rootNodeRunFlags) error {
 	if err := loadShardConfs(orchestration, flags.Profile2, shardConfs); err != nil {
 		return err
 	}
-	if flags.GenesisIdentitiesFile != "" {
-		if err := seedGenesisIdentities(orchestration, trustBase, shardConfs, flags.GenesisIdentitiesFile); err != nil {
+	if flags.PosGenesisIdentitiesFile != "" && (flags.PosDeploymentFile == "" || flags.GenesisIdentitiesFile != "") {
+		return fmt.Errorf("%w: --pos-genesis-identities needs --pos-deployment and excludes --genesis-identities", ErrPosDeployment)
+	}
+	if file := cmpOr(flags.GenesisIdentitiesFile, flags.PosGenesisIdentitiesFile); file != "" {
+		if err := seedGenesisIdentities(orchestration, trustBase, shardConfs, file); err != nil {
 			return fmt.Errorf("recording the genesis committee identities: %w", err)
 		}
 	}
@@ -843,4 +849,12 @@ func serveRootRecords(log *slog.Logger, host *network.Peer, cm *consensus.Consen
 	cm.SetRecordFetcher(rootRecordFetcher{host: host, cm: cm})
 	log.Info("root records feed enabled", "validators", len(eligible))
 	return func() { host.RemoveProtocolHandler(recordsfeed.ProtocolID) }, nil
+}
+
+// cmpOr returns the one non-empty path (the callers have refused both).
+func cmpOr(a, b string) string {
+	if a != "" {
+		return a
+	}
+	return b
 }
