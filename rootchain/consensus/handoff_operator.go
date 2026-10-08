@@ -1305,7 +1305,27 @@ type EVMAssignmentContext struct {
 	Predecessor hex.Bytes                         `json:"predecessor"`
 	Attempt     uint64                            `json:"attempt"`
 	Installed   *types.PartitionDescriptionRecord `json:"installed"`
-	Pending     bool                              `json:"acknowledgementPending"`
+	// Acknowledged is the configuration of the last ACKNOWLEDGED assignment: the shard configuration at the epoch of its certified input record.
+	// It is Installed when nothing is pending; while an activated assignment waits for its acknowledgement it is the one before it. The recovery
+	// authorization of a primary or a supersession is based on this assignment (K is the committee of the last acknowledged assignment), never on
+	// the pending one.
+	Acknowledged *types.PartitionDescriptionRecord `json:"acknowledged"`
+	Pending      bool                              `json:"acknowledgementPending"`
+}
+
+// acknowledgedShardConfig is the shard's configuration at the epoch its certified input record has acknowledged.
+func acknowledgedShardConfig(orchestration Orchestration, shard abdrc.ShardInfo) (*types.PartitionDescriptionRecord, error) {
+	history, ok := orchestration.(interface {
+		ShardConfigByEpoch(partition types.PartitionID, shard types.ShardID, epoch uint64) (*types.PartitionDescriptionRecord, error)
+	})
+	if !ok || shard.IR == nil {
+		return nil, ErrHandoffApproval
+	}
+	conf, err := history.ShardConfigByEpoch(shard.Partition, shard.Shard, shard.IR.Epoch)
+	if err != nil || conf == nil {
+		return nil, errors.Join(ErrHandoffApproval, err)
+	}
+	return conf, nil
 }
 
 // EVMAssignmentContext reports the possession-proof context for the next handoff. A successor key holder signs
@@ -1327,6 +1347,10 @@ func (x *ConsensusManager) EVMAssignmentContext() (EVMAssignmentContext, error) 
 	if err != nil {
 		return EVMAssignmentContext{}, err
 	}
+	acknowledged, err := acknowledgedShardConfig(x.orchestration, shard)
+	if err != nil {
+		return EVMAssignmentContext{}, err
+	}
 	return EVMAssignmentContext{Network: uint64(x.orchestration.NetworkID()), Predecessor: predecessor, Attempt: attempt,
-		Installed: installed, Pending: pendingAssignmentAck(shard)}, nil
+		Installed: installed, Acknowledged: acknowledged, Pending: pendingAssignmentAck(shard)}, nil
 }

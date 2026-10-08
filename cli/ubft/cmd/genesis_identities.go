@@ -242,10 +242,10 @@ const (
 )
 
 // poaAuthorization is the recovery Authorization the operator publishes with a primary candidate over the given incumbent committee K: K
-// itself, the root body and assignment hash it is based on (read from the context the root reports), and operator-assigned digests for
+// itself, the root body and the acknowledged assignment hash it is based on (read from the context the root reports), and operator-assigned digests for
 // the election inputs a proof-of-stake deployment would read from its contracts.
 func poaAuthorization(c consensus.EVMAssignmentContext, chain uint64, incumbent []evmassign.Identity) (*evmassign.Authorization, error) {
-	if c.Installed == nil || len(c.Predecessor) != evmassign.DigestLen {
+	if c.Acknowledged == nil || len(c.Predecessor) != evmassign.DigestLen {
 		return nil, fmt.Errorf("%w: the context is incomplete", ErrGenesisIdentities)
 	}
 	k := append([]evmassign.Identity(nil), incumbent...)
@@ -254,7 +254,9 @@ func poaAuthorization(c consensus.EVMAssignmentContext, chain uint64, incumbent 
 	if err != nil {
 		return nil, err
 	}
-	base, err := evmassign.AssignmentHash(c.Installed, kd)
+	// K is the committee of the last ACKNOWLEDGED assignment, and the base is that assignment: while a later one is activated and waiting for its
+	// acknowledgement (a supersession's case) the installed configuration is the pending one, which the verifier does not take as the base.
+	base, err := evmassign.AssignmentHash(c.Acknowledged, kd)
 	if err != nil {
 		return nil, err
 	}
