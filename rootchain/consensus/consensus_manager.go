@@ -112,6 +112,7 @@ type (
 		frontier         *frontierSampler
 		recoveryProfile2 bool
 		recoveryHistory  *trusthistorystore.Store
+		witnesses        WitnessFetcher              // nil: control witnesses are only what the store already holds
 		q3               Q3Authority                 // the verified Q3 history, nil when the binary does not know it
 		v3Planned        atomic.Pointer[V3Candidate] // the last candidate PlanV3Candidate derived: the exact body the members declared readiness for
 		q3Staged         atomic.Pointer[Q3Staged]    // the V3 candidate this validator last derived for its operator
@@ -368,6 +369,7 @@ func NewConsensusManager(
 		frontier:         frontier,
 		recoveryProfile2: optional.RecoveryProfile2,
 		recoveryHistory:  optional.RecoveryHistory,
+		witnesses:        optional.Witnesses,
 		q3:               optional.Q3,
 		epochAnchor:      installedAnchor,
 		log:              log,
@@ -509,6 +511,7 @@ func (x *ConsensusManager) Run(ctx context.Context) error {
 			}
 			highRound = max(highRound, x.epochAnchor.Slot)
 		}
+		logRecoveredVote(ctx, x.log, vote)
 		x.pacemaker.Reset(ctx, highRound, lastTC, vote)
 
 		// Now that we have a better idea of current round, let's see if we need to update our trust base.
@@ -1163,6 +1166,10 @@ func (x *ConsensusManager) onProposalMsg(ctx context.Context, proposal *abdrc.Pr
 	// Process QC first, update round
 	x.processQC(ctx, proposal.Block.Qc)
 	x.processTC(ctx, proposal.LastRoundTc)
+	// the witnesses of the block's controls are not in the proposal: fetch what is missing from the root nodes, the author first
+	if err := x.fetchWitnesses(ctx, x.blockStore, proposal.Block); err != nil {
+		return fmt.Errorf("proposal controls: %w", err)
+	}
 	// execute proposed payload
 	start := time.Now()
 	execStateId, err := x.blockStore.Add(proposal.Block, x.irReqVerifier)
@@ -1178,6 +1185,7 @@ func (x *ConsensusManager) onProposalMsg(ctx context.Context, proposal *abdrc.Pr
 		// wait for timeout, if others make progress this node will need to recover
 		return fmt.Errorf("failed to sign vote: %w", err)
 	}
+	x.log.InfoContext(ctx, "signed vote", "round", proposal.Block.Round, "messageID", voteMessageID(voteMsg))
 	if err = x.blockStore.StoreLastVote(voteMsg); err != nil {
 		x.log.WarnContext(ctx, "vote store failed", logger.Error(err))
 	}
@@ -1613,6 +1621,8 @@ func (x *ConsensusManager) onStateResponse(ctx context.Context, rsp *abdrc.State
 	if err != nil {
 		return fmt.Errorf("verifier construction failed: %w", err)
 	}
+	// the replacement store executes the recovery blocks and then the live ones: it needs the control collaborators of the one it replaces
+	blockStore.SetPosServices(x.blockStore.PosServices())
 	recoveryRound := blockStore.GetHighQc().GetRound()
 	if a := blockStore.RootAnchor(); a != nil && recoveryRound < a.Slot {
 		recoveryRound = a.Slot
@@ -1631,6 +1641,9 @@ func (x *ConsensusManager) onStateResponse(ctx context.Context, rsp *abdrc.State
 			}
 			x.pacemaker.AdvanceRoundQC(ctx, block.Qc)
 			x.updateTrustBase()
+		}
+		if err = x.fetchWitnesses(ctx, blockStore, block); err != nil {
+			return fmt.Errorf("recovery block %d controls: %w", i, err)
 		}
 		if _, err = blockStore.Add(block, reqVerifier); err != nil {
 			return fmt.Errorf("failed to add recovery block %d: %w", i, err)
@@ -1682,7 +1695,9 @@ func (x *ConsensusManager) onStateResponse(ctx context.Context, rsp *abdrc.State
 		if block, err := x.blockStore.Block(prop.Block.Round); err != nil {
 			// Block not found, was not sent with recovery info
 			// execute proposed payload
-			stateHash, err = x.blockStore.Add(prop.Block, x.irReqVerifier)
+			if err = x.fetchWitnesses(ctx, x.blockStore, prop.Block); err == nil {
+				stateHash, err = x.blockStore.Add(prop.Block, x.irReqVerifier)
+			}
 			if err != nil {
 				// wait for timeout, if others make progress this node will need to recover
 				// cannot send vote, so just return and wait for local timeout or new proposal (and try to recover then)
@@ -1698,6 +1713,7 @@ func (x *ConsensusManager) onStateResponse(ctx context.Context, rsp *abdrc.State
 			// wait for timeout, if others make progress this node will need to recover
 			return fmt.Errorf("failed to sign vote: %w", err)
 		}
+		x.log.InfoContext(ctx, "signed vote", "round", prop.Block.Round, "messageID", voteMessageID(voteMsg))
 		x.pacemaker.SetVoted(voteMsg)
 		// send vote to the next leader
 		nextLeader, err := x.leaderSelector.GetLeaderForRound(x.pacemaker.GetCurrentRound() + 1)
@@ -1852,11 +1868,121 @@ var (
 
 // timeoutMessageID identifies the exact statement a timeout vote is: the SHA-256 of its canonical encoding, signature included. The same
 // recorded message recovered after a restart and broadcast again has the same identity; a different statement for the round has another.
-func timeoutMessageID(msg *abdrc.TimeoutMsg) string {
+func timeoutMessageID(msg *abdrc.TimeoutMsg) string { return messageID(msg) }
+
+// voteMessageID is the identity of a signed vote: the SHA-256 of the exact message, like timeoutMessageID.
+func voteMessageID(msg *abdrc.VoteMsg) string { return messageID(msg) }
+
+// logRecoveredVote records, with its identity, the last vote the node signed before it stopped and now holds again (a vote or a timeout
+// vote), so the lane can compare it with the identity logged when it was signed.
+func logRecoveredVote(ctx context.Context, log *slog.Logger, last any) {
+	switch v := last.(type) {
+	case *abdrc.VoteMsg:
+		if v != nil {
+			log.InfoContext(ctx, "recovered last vote", "kind", "vote", "round", v.VoteInfo.RoundNumber, "messageID", voteMessageID(v))
+		}
+	case *abdrc.TimeoutMsg:
+		if v != nil {
+			log.InfoContext(ctx, "recovered last vote", "kind", "timeout", "round", v.Timeout.Round, "messageID", timeoutMessageID(v))
+		}
+	}
+}
+
+func messageID(msg any) string {
 	raw, err := types.Cbor.Marshal(msg)
 	if err != nil {
 		return "unencodable"
 	}
 	sum := sha256.Sum256(raw)
 	return fmt.Sprintf("%x", sum)
+}
+
+// witnessHolder is the part of the block store that retains control witnesses.
+type witnessHolder interface {
+	HasWitness(hash [32]byte) bool
+	StoreWitness(data []byte) error
+}
+
+// fetchWitnesses makes the witnesses of the block's controls available to the store before the block is executed. The block's author
+// is asked first (it built the controls and retains their witnesses), then the other root nodes of the block's epoch. A witness that
+// cannot be had refuses the block as unavailable, never as invalid: the node does not vote, and asks again when it recovers.
+//
+// It runs on the consensus loop, so the whole step has one deadline, half the local timeout: a peer that trickles bytes cannot keep the
+// node from voting on, or timing out, the round. A control whose envelope cannot be valid in this block (another deployment, another
+// position, a malformed item) is refused before anything is fetched or stored, so a Byzantine author cannot make voters retain bytes
+// for a block the executor would refuse anyway.
+func (x *ConsensusManager) fetchWitnesses(ctx context.Context, store witnessHolder, block *drctypes.BlockData) error {
+	if x.witnesses == nil || block == nil || block.Payload == nil || len(block.Payload.PosControls) == 0 {
+		return nil
+	}
+	budget := 5 * time.Second
+	if x.params != nil && x.params.LocalTimeout > 0 {
+		budget = x.params.LocalTimeout / 2
+	}
+	ctx, cancel := context.WithTimeout(ctx, budget)
+	defer cancel()
+	var peers []peer.ID
+	for _, c := range block.Payload.PosControls {
+		if err := x.checkControlEnvelope(c, block); err != nil {
+			return err
+		}
+		if store.HasWitness(c.WitnessHash) {
+			continue
+		}
+		if peers == nil {
+			peers = x.witnessPeers(block)
+		}
+		data, err := x.witnesses(ctx, c.WitnessHash, peers)
+		if err != nil {
+			return errors.Join(storage.ErrWitnessUnavailable, err)
+		}
+		// the fetcher checks the hash too; the executor reads by this hash, so bytes under another key would only read as missing later
+		if sha256.Sum256(data) != c.WitnessHash {
+			return errors.Join(storage.ErrWitnessUnavailable, errors.New("the fetched bytes are not the committed witness"))
+		}
+		if err := store.StoreWitness(data); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// checkControlEnvelope is the part of a control's validity that needs neither its witness nor the root state.
+func (x *ConsensusManager) checkControlEnvelope(c drctypes.PosControl, block *drctypes.BlockData) error {
+	if err := c.Validate(); err != nil {
+		return err
+	}
+	if c.OrderingEpoch != block.Epoch || c.OrderingRound != block.Round {
+		return fmt.Errorf("%w: a control names another ordering position than its block", storage.ErrPosControlRefused)
+	}
+	var svc *storage.PosServices
+	if x.blockStore != nil {
+		svc = x.blockStore.PosServices()
+	}
+	if svc != nil &&
+		(c.Network != svc.Deployment.RootNetwork || c.ChainID != svc.Deployment.ChainID || c.Custody != svc.Deployment.Custody) {
+		return fmt.Errorf("%w: a control names another deployment", storage.ErrPosControlRefused)
+	}
+	return nil
+}
+
+// witnessPeers are the root nodes of the block's epoch other than this node, the block's author first.
+func (x *ConsensusManager) witnessPeers(block *drctypes.BlockData) []peer.ID {
+	tb := x.trustBase.Load()
+	if x.trustBaseStore != nil {
+		if stored, err := x.trustBaseStore.GetByEpoch(block.Epoch); err == nil {
+			tb = stored
+		}
+	}
+	var author, rest []peer.ID
+	for _, id := range toIDSlice(tb.RootNodes, x.log) {
+		switch {
+		case id == "" || id == x.id:
+		case id.String() == block.Author:
+			author = append(author, id)
+		default:
+			rest = append(rest, id)
+		}
+	}
+	return append(author, rest...)
 }

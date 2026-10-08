@@ -423,3 +423,6 @@ func OpenAnchor(a *Anchor) (*InputRecordView, error) {
 	}
 	return v, nil
 }
+
+// SemanticProfileJSON is the exact bytes of the development semantic-profile artifact; a deployment's semanticProfileHash is its SHA-256.
+func SemanticProfileJSON() []byte { return append([]byte(nil), semanticProfile...) }

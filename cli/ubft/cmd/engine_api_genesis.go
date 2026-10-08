@@ -10,6 +10,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/unicitynetwork/bft-core/b1state"
 	"github.com/unicitynetwork/bft-core/evmassign"
 	"github.com/unicitynetwork/bft-core/registrygenesis"
 	"github.com/unicitynetwork/bft-core/registryproof"
@@ -49,6 +50,12 @@ type engineAPIGenesisFlags struct {
 	// deployments are unchanged), 2 the assignment-aware registry an M3 launch genesis must use so the
 	// validator assignment can ever change.
 	RegistryLayout uint64
+
+	// B1Profile and TrustBase select the fresh-B1 registry (layout 3): the profile is the one `engine-api b1-profile` derived from the
+	// trust base, and IdentitiesOut receives the identity document the bridge vault deployment is checked against.
+	B1Profile     string
+	TrustBase     string
+	IdentitiesOut string
 }
 
 func newEngineAPICmd(baseFlags *baseFlags) *cobra.Command {
@@ -58,6 +65,7 @@ func newEngineAPICmd(baseFlags *baseFlags) *cobra.Command {
 	}
 	cmd.AddCommand(engineAPIGenesisCmd(baseFlags))
 	cmd.AddCommand(engineAPIExportManifestCmd())
+	cmd.AddCommand(engineAPIB1ProfileCmd(baseFlags))
 	return cmd
 }
 
@@ -145,6 +153,11 @@ source of truth and the origin is re-derivable from the finalized JSON.`,
 	cmd.Flags().Uint64Var(&flags.RegistryLayout, "registry-layout", 1,
 		"SealRegistry layout: 1 is the historical sealRegistry/v1; 2 is the assignment-aware sealRegistry/v2 an M3 launch genesis needs "+
 			"(a live chain cannot be migrated to it, and a hash repin cannot replace live contract code)")
+	cmd.Flags().StringVar(&flags.B1Profile, "b1-profile", "",
+		"fresh-B1 deployment: the profile `engine-api b1-profile` derived; allocates the B1 registry (layout 3) instead of a historical one")
+	cmd.Flags().StringVar(&flags.TrustBase, "trust-base", "", "with --b1-profile: the signed root trust base the profile was derived from")
+	cmd.Flags().StringVar(&flags.IdentitiesOut, "identities-out", "",
+		"with --b1-profile: write the genesis identity document (root genesis, execution genesis, profile hash, registry words) the bridge vault deployment is checked against")
 	if err := cmd.MarkFlagRequired("out"); err != nil {
 		panic(err)
 	}
@@ -257,21 +270,57 @@ func engineAPIGenesis(flags *engineAPIGenesisFlags, changed func(string) bool, o
 		}
 	}
 
-	art, err := registrygenesis.PinnedArtifactForLayout(flags.RegistryLayout)
-	if err != nil {
-		return fmt.Errorf("loading the pinned seal-registry artifact: %w", err)
+	var (
+		art     registrygenesis.Artifact
+		pins    registrygenesis.Pins
+		profile b1state.Profile
+	)
+	if flags.B1Profile != "" {
+		if flags.RegistryLayout != 1 && flags.RegistryLayout != b1RegistryLayout {
+			return fmt.Errorf("--b1-profile selects registry layout %d; --registry-layout %d contradicts it", b1RegistryLayout, flags.RegistryLayout)
+		}
+		flags.RegistryLayout = b1RegistryLayout
+		if flags.TrustBase == "" {
+			return fmt.Errorf("--b1-profile requires --trust-base")
+		}
+		if profile, err = readB1Profile(flags.B1Profile); err != nil {
+			return err
+		}
+		tb, err := readTrustBase(flags.TrustBase)
+		if err != nil {
+			return err
+		}
+		h, err := bindB1Profile(profile, tb, shardConf)
+		if err != nil {
+			return err
+		}
+		if art, pins, err = registrygenesis.B1Artifact(profile, h); err != nil {
+			return fmt.Errorf("binding the fresh-B1 registry: %w", err)
+		}
+		if changed("root-epoch") && flags.RootEpoch != pins.RootEpoch {
+			return fmt.Errorf("--root-epoch %d contradicts the trust base's genesis epoch %d", flags.RootEpoch, pins.RootEpoch)
+		}
+		if !changed("gas-limit") {
+			flags.GasLimit = profile.MaxGas
+		}
+	} else {
+		if flags.TrustBase != "" || flags.IdentitiesOut != "" {
+			return fmt.Errorf("--trust-base and --identities-out require --b1-profile")
+		}
+		if art, err = registrygenesis.PinnedArtifactForLayout(flags.RegistryLayout); err != nil {
+			return fmt.Errorf("loading the pinned seal-registry artifact: %w", err)
+		}
+		pins = registrygenesis.Pins{
+			RootEpoch:        flags.RootEpoch,
+			RegistryCodeHash: art.CodeHash,
+			SystemAddress:    registrygenesis.SystemAddress,
+			RegistryAddress:  registryproof.RegistryAddress,
+		}
 	}
 
 	source, err := engineAPIGenesisSource(flags, changed, chainID)
 	if err != nil {
 		return err
-	}
-
-	pins := registrygenesis.Pins{
-		RootEpoch:        flags.RootEpoch,
-		RegistryCodeHash: art.CodeHash,
-		SystemAddress:    registrygenesis.SystemAddress,
-		RegistryAddress:  registryproof.RegistryAddress,
 	}
 	prepared, err := registrygenesis.PrepareGenesisJSON(shardConf, pins, art, source, registrygenesis.DefaultGenesisJSONLimits())
 	if err != nil {
@@ -310,6 +359,16 @@ func engineAPIGenesis(flags *engineAPIGenesisFlags, changed func(string) bool, o
 	}
 
 	origin := prepared.Origin()
+	if flags.IdentitiesOut != "" {
+		doc, err := newB1Identities(profile, origin.BlockHash(), prepared.B1Words())
+		if err != nil {
+			return fmt.Errorf("encoding the identity document: %w", err)
+		}
+		if err := os.WriteFile(flags.IdentitiesOut, doc, 0o644); err != nil { // #nosec G306 -- public identities
+			return fmt.Errorf("writing %q: %w", flags.IdentitiesOut, err)
+		}
+		fmt.Fprintf(out, "wrote %s (genesis identities)\n", flags.IdentitiesOut)
+	}
 	fmt.Fprintf(out, "wrote %s (chainId=%d, shanghai+cancun at genesis, registry account at %s)\n",
 		flags.Out, chainID, registryproof.RegistryAddress)
 	fmt.Fprintf(out, "wrote %s (full shard configuration)\n", fullPath)

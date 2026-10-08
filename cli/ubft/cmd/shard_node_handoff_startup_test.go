@@ -233,7 +233,7 @@ func archivedHandoffTerminalFixture(t *testing.T) (handoffTerminalCertificate, *
 	require.NoError(t, err)
 	bodyRaw, err := rlp.EncodeToBytes(&gethtypes.Body{Transactions: gethtypes.Transactions{}, Withdrawals: []*gethtypes.Withdrawal{}})
 	require.NoError(t, err)
-	companion := []byte(`{"rootInput":"0x01","witnesses":[],"provenance":"build"}`)
+	companion := []byte(`{"b1Update":"0x","rootInput":"0x01","witnesses":[],"provenance":"build"}`)
 	originalUC := &types.UnicityCertificate{UnicitySeal: &types.UnicitySeal{Epoch: 1, RootChainRoundNumber: rootRound}}
 	originalUCraw, err := types.Cbor.Marshal(originalUC)
 	require.NoError(t, err)

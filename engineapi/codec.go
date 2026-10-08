@@ -47,15 +47,14 @@ type ProposalEnvelope struct {
 // SealCompanion is what ureth's
 // reth_unicity_execution::wire::SealCompanion deserializes. The wire contract
 // uses rootInput, witnesses and provenance for existing deployments. The
-// inactive fresh B1 profile additionally carries b1Update as hex DATA. PR4 must
-// update ureth's deny_unknown_fields decoder before activation. The legacy wire
-// bytes remain pinned by TestSealCompanionVector.
+// fresh B1 profile adds b1Update, hex DATA that is always present (0x when the
+// block has no update) because ureth's deny_unknown_fields decoder requires it.
 //
 // Provenance carries D2's "build" | "newPayload" | "devp2p" | "reexec"
 // label. It is not a commitment field, so the set is documented but not
 // enforced here, matching the ureth side.
 type SealCompanion struct {
-	B1Update data `json:"b1Update,omitempty"`
+	B1Update data `json:"b1Update"`
 	// RootRecords is the canonical root-record import companion whose SHA-256 the root input commits to (rootRecordsHash).
 	RootRecords data   `json:"rootRecords,omitempty"`
 	RootInput   data   `json:"rootInput"`
@@ -146,7 +145,7 @@ func (c SealCompanion) MarshalJSON() ([]byte, error) {
 		witnesses = []data{}
 	}
 	return json.Marshal(struct {
-		B1Update    data   `json:"b1Update,omitempty"`
+		B1Update    data   `json:"b1Update"`
 		RootRecords data   `json:"rootRecords,omitempty"`
 		RootInput   data   `json:"rootInput"`
 		Witnesses   []data `json:"witnesses"`
@@ -166,7 +165,7 @@ func (c SealCompanion) MarshalJSON() ([]byte, error) {
 // engine_forkchoiceUpdatedWithSealV1, and the JSON envelope ureth's
 // reth_unicity_execution::wire::SealBuildInput deserializes under
 // deny_unknown_fields: rootInput and transitions. Inactive fresh B1 adds
-// b1Update; the matching ureth decoder change is an activation prerequisite.
+// b1Update, always present (0x when there is no update) because ureth requires it.
 //
 // RootInput is canonical CBOR for one root input. Transitions is the outer
 // committed-body array passed to ureth's execution path. It mirrors the
@@ -174,7 +173,7 @@ func (c SealCompanion) MarshalJSON() ([]byte, error) {
 // both from the same verified parent snapshot. An empty array means no
 // transition is pending, never that unauthenticated data was dropped.
 type SealBuildInput struct {
-	B1Update    data   `json:"b1Update,omitempty"`
+	B1Update    data   `json:"b1Update"`
 	RootRecords data   `json:"rootRecords,omitempty"`
 	RootInput   data   `json:"rootInput"`
 	Transitions []data `json:"transitions"`
@@ -194,7 +193,7 @@ func (s SealBuildInput) MarshalJSON() ([]byte, error) {
 		transitions = []data{}
 	}
 	return json.Marshal(struct {
-		B1Update    data   `json:"b1Update,omitempty"`
+		B1Update    data   `json:"b1Update"`
 		RootRecords data   `json:"rootRecords,omitempty"`
 		RootInput   data   `json:"rootInput"`
 		Transitions []data `json:"transitions"`

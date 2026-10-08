@@ -1,8 +1,11 @@
 package consensus
 
 import (
+	"context"
 	"crypto"
 	"time"
+
+	"github.com/libp2p/go-libp2p/core/peer"
 
 	"github.com/unicitynetwork/bft-core/network/protocol/abdrc"
 	"github.com/unicitynetwork/bft-core/q3format"
@@ -36,6 +39,7 @@ type (
 		RecoveryProfile2 bool
 		RecoveryHistory  *trusthistorystore.Store
 		Q3               Q3Authority
+		Witnesses        WitnessFetcher
 	}
 
 	Option func(c *Optional)
@@ -89,6 +93,16 @@ type Q3Authority interface {
 // WithQ3 gives the manager the verified Q3 history. Without it nothing changes.
 func WithQ3(a Q3Authority) Option {
 	return func(c *Optional) { c.Q3 = a }
+}
+
+// WitnessFetcher retrieves a control witness by its SHA-256 from the given peers, in order. A returned witness has been checked against
+// the hash.
+type WitnessFetcher func(ctx context.Context, hash [32]byte, peers []peer.ID) ([]byte, error)
+
+// WithWitnessFetcher lets the manager fetch the witnesses of a block's controls from the other root nodes before it executes the block.
+// Without it a block whose witnesses are not already retained is refused as unavailable.
+func WithWitnessFetcher(f WitnessFetcher) Option {
+	return func(c *Optional) { c.Witnesses = f }
 }
 
 func LoadConf(opts []Option) (*Optional, error) {

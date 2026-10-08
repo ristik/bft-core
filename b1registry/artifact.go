@@ -58,13 +58,17 @@ func Runtime() ([]byte, error) {
 	return append([]byte(nil), a.RuntimeBytecode...), nil
 }
 
+// MinRestGas is the frozen G_rest allowance the profile must reserve for a certificate window: the measured base plus the per-interval
+// term for the window's wCert+1 intervals.
+func MinRestGas(wCert uint64) uint64 { return 1136500 + 1147500*(wCert+1) }
+
 // ValidateProfile enforces the measured envelope, independently of caller-supplied pins.
 func ValidateProfile(p b1state.Profile) error {
 	if err := p.Validate(); err != nil {
 		return err
 	}
 	k, _, _, _ := p.Bounds()
-	if k > MaxMeasuredK || p.RuntimeHash != [32]byte(common.HexToHash(CodeHashHex)) || p.CompilerHash != CompilerHash() || p.RestGas < 1136500+1147500*k {
+	if k > MaxMeasuredK || p.RuntimeHash != [32]byte(common.HexToHash(CodeHashHex)) || p.CompilerHash != CompilerHash() || p.RestGas < MinRestGas(p.WCert) {
 		return ErrArtifact
 	}
 	_, err := Runtime()
