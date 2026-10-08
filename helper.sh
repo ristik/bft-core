@@ -115,6 +115,7 @@ function start_root_nodes() {
     local profileArgs=()
     if [ "${M2_PROFILE2:-0}" = 1 ]; then
       profileArgs=(--profile-2)
+      [ "${Q3_WEIGHT_LANE:-0}" != 1 ] || profileArgs+=(--q3-lane)   # Q3 #50: the coupled runtime from genesis
       # Under the handoff profile PUT /api/v1/configurations is refused (#329): the genesis shard
       # configurations are fixed at start, so hand every one of them over by flag.
       collect_shard_conf_args
