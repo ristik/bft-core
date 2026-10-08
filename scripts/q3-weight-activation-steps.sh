@@ -47,8 +47,13 @@ q3_successor_identities() { # out ids...
 
 # The coupled assignment (the same four entities, mirrored weights): h3_build_assignment with the mirrored stakes, the successor identity
 # records every possession proof signs, and the recovery authorization whose K is the genesis committee the root recorded at genesis.
-q3_build_assignment() { # tag ids...
+q3_build_assignment() { # tag ids...  (Q3_RECOVERY=1: the derived recovery of the pending primary, exactly K, no validators, proofs, identities or authorization)
   local tag=$1 id pops=; shift
+  if [ -n "${Q3_RECOVERY:-}" ]; then
+    build/ubft root handoff evm-context --root-rpc "$(h3_rpc_url "$(h3_first_root)")" --out "$Q3_DIR/$tag-context.json" || return 1
+    build/ubft root handoff evm-assemble --context "$Q3_DIR/$tag-context.json" --recovery --supersede --out "$Q3_DIR/$tag-assignment.json" || return 1
+    return 0
+  fi
   q3_validators_json "$Q3_DIR/$tag-validators.json" "$@" || return 1
   build/ubft root handoff evm-context --root-rpc "$(h3_rpc_url "$(h3_first_root)")" --out "$Q3_DIR/$tag-context.json" || return 1
   q3_successor_identities "$Q3_DIR/$tag-identities.json" "$@" || return 1
@@ -424,11 +429,13 @@ q3_heavy_crash() {
 # ---- a subsequent scheme-2 handoff, and the supersession of an unacknowledged one ---------------------------------------------------------------
 # Handoff 2 (root epoch 2 -> 3, the same four entities, weights (4,3,1,1): part of the heavy weight moves to entity 2) is committed by the weighted epoch-2 committee under
 # scheme 2 (a heavy-plus-one-light Commit, 7 of 9) and activates, but its acknowledgement is withheld: the registry stays at shard epoch 1. Handoff 3
-# (epoch 3 -> 4, weights (2,5,1,1)) is assembled with --supersede and replaces it on the same frozen parent; its folded acknowledgement takes
-# the registry from shard epoch 1 straight to 3, and the superseded assignment is never acknowledged.
+# (epoch 3 -> 4) is the RECOVERY of that pending primary (assembled with --recovery --supersede): a derived candidate that is exactly K, the committee of the last
+# acknowledged assignment (6,1,1,1), on the same frozen parent. Its folded acknowledgement takes the registry from shard epoch 1 straight to 3 (the primary J and the
+# recovery K fold into one acknowledgement), and the superseded primary is never acknowledged. A supersession cannot install a new committee: a primary over a pending
+# primary is refused (evmassign.ErrPendingPrimary), and the recovery's K is the incumbent by construction.
 Q3_WEIGHTS_1=$Q3_WEIGHTS
 Q3_WEIGHTS_2="4 3 1 1"      # part of the way to a swap: distance 4/9 from (6,1,1,1)
-Q3_WEIGHTS_3="2 5 1 1"      # replaces handoff 2: 8/9 from the acknowledged committee (6,1,1,1), 4/9 from the activated (4,3,1,1); inside the budget against either
+Q3_WEIGHTS_3=$Q3_WEIGHTS_1 # the recovery returns to K, the last acknowledged committee (6,1,1,1); the epoch-4 root committee mirrors it
 Q3_WEIGHTS_SWAP="1 6 1 1"   # the full heavy-weight swap: 10/9, refused
 
 q3_handoff_n() { # n epoch weights supersede(0|1) incumbent: plans, endorses and commits the handoff at old epoch (epoch-1)
@@ -514,7 +521,7 @@ q3_continuity_refusal() {
   printf '%s\n' "$err" | grep -q 'weight distance exceeded' || { echo "the swap was refused, but not for its weight distance: $err" >&2; return 1; }
   h3_registry_is 1 2 || { echo "the registry moved while the swap was refused" >&2; return 1; }
   { echo "committed budget continuity_max_distance=$budget (normalized weight distance sum|w/W - v/V|)"
-    echo "inside the budget (accepted): handoff 1 (1,1,1,1)->(6,1,1,1) 5/6; handoff 2 (6,1,1,1)->(4,3,1,1) 4/9; handoff 3 (2,5,1,1) 8/9 from the acknowledged committee (6,1,1,1) and 4/9 from the activated one (4,3,1,1)"
+    echo "inside the budget (accepted): handoff 1 (1,1,1,1)->(6,1,1,1) 5/6; handoff 2 (6,1,1,1)->(4,3,1,1) 4/9; handoff 3 is the derived recovery to K=(6,1,1,1), the last acknowledged committee (no new committee: a primary over a pending primary is refused)"
     echo "outside the budget (refused): (6,1,1,1)->(1,6,1,1) 10/9"
     echo "refusal:"; printf '%s\n' "$err" | grep -v '^$'; } >"$out"
 }
@@ -530,14 +537,14 @@ q3_second_activation() {
 }
 
 q3_supersede() {
-  q3_handoff_n 3 4 "$Q3_WEIGHTS_3" 1 "$Q3_DIR/cand-identities.json" || return 1
+  Q3_RECOVERY=1 q3_handoff_n 3 4 "$Q3_WEIGHTS_3" 1 "$Q3_DIR/cand-identities.json" || return 1
   q3_install_n 4 || return 1
   q3_activation_n 3 4 || return 1
   M2_ADVANCE_NO_REPLICA_WAIT=1 h3_advance_authorities 4 3 1 2 3 4 || { echo "authority advance to root epoch 4 / shard epoch 3 failed" >&2; return 1; }
   local i
   for i in $(seq 1 180); do h3_registry_is 3 4 && break; sleep 1; done
   h3_registry_is 3 4 || { echo "registry did not reach shard epoch 3 / root epoch 4 (shard epoch $(h3_slot "$h3_slot_shard"), root epoch $(h3_slot "$h3_slot_root"))" >&2; return 1; }
-  { echo "handoff 3 (assembled with --supersede) activated at root epoch 4 and acknowledged"; echo "registry shard epoch $(h3_slot "$h3_slot_shard") (was 1; the superseded assignment, shard epoch 2, was never acknowledged), root epoch $(h3_slot "$h3_slot_root")"; } >>"$Q3_DIR/supersession.txt"
+  { echo "handoff 3 (the derived recovery to K, assembled with --recovery --supersede) activated at root epoch 4 and acknowledged"; echo "registry shard epoch $(h3_slot "$h3_slot_shard") (was 1; the superseded assignment, shard epoch 2, was never acknowledged), root epoch $(h3_slot "$h3_slot_root")"; } >>"$Q3_DIR/supersession.txt"
   h3_paid 4 || { echo "post-supersession paid transaction was not certified at root epoch 4" >&2; return 1; }
   h3_progress after-supersession 8
 }
