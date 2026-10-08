@@ -31,9 +31,10 @@ type vCase struct {
 	MaxM   uint64    `json:"maxM"`
 	DistN  uint64    `json:"distNum"`
 	DistD  uint64    `json:"distDen"`
-	Result *vResult  `json:"result,omitempty"`
-	// Invalid names the committee that cannot be judged ("predecessor" or "successor"), in which case there is no result.
-	Invalid string `json:"invalid,omitempty"`
+	Result vResult   `json:"result"`
+	// Invalid names the committee that cannot be judged ("predecessor" or "successor", empty otherwise), in which case the result is zero.
+	// Every field is always present: the Solidity test decodes the whole file with one parseJson.
+	Invalid string `json:"invalid"`
 }
 
 type vResult struct {
@@ -64,6 +65,12 @@ func toMembers(ms []vMember) []Member {
 }
 
 func evaluate(c vCase) vCase {
+	if c.Old == nil {
+		c.Old = []vMember{}
+	}
+	if c.New == nil {
+		c.New = []vMember{}
+	}
 	o, s := toMembers(c.Old), toMembers(c.New)
 	r, err := Check(o, s, Policy{MaxM: c.MaxM, MaxDistNum: c.DistN, MaxDistDen: c.DistD})
 	switch {
@@ -80,7 +87,7 @@ func evaluate(c vCase) vCase {
 				failed |= 1 << bit
 			}
 		}
-		c.Result = &vResult{Replaced: r.Replaced, Removed: r.Removed, Added: r.Added, M: r.M, UnchangedOld: r.UnchangedOld, UnchangedNew: r.UnchangedNew,
+		c.Result = vResult{Replaced: r.Replaced, Removed: r.Removed, Added: r.Added, M: r.M, UnchangedOld: r.UnchangedOld, UnchangedNew: r.UnchangedNew,
 			TotalOld: r.TotalOld, TotalNew: r.TotalNew, DistanceNum: r.DistanceNumerator.String(), Failed: failed}
 	}
 	return c
@@ -151,6 +158,16 @@ func cases() []vCase {
 	out = append(out, def("one heavy member replaced", heavy, []vMember{{1, 1, 4}, {2, 2, 1}, {4, 4, 1}}))
 	exact := []vMember{{1, 1, 2}, {2, 2, 2}, {3, 3, 2}}
 	out = append(out, def("unchanged weight exactly two thirds", exact, []vMember{{1, 1, 2}, {2, 2, 2}, {4, 4, 2}}))
+	// the boundary on each side alone: old exactly two thirds with the new committee well above, and the mirror
+	loose2 := func(name string, o, s []vMember) vCase {
+		c := def(name, o, s)
+		c.MaxM, c.DistN, c.DistD = 100, 1, 1
+		return c
+	}
+	out = append(out, loose2("unchanged weight exactly two thirds of the old committee only",
+		[]vMember{{1, 1, 2}, {2, 2, 2}, {3, 3, 2}}, []vMember{{1, 1, 2}, {2, 2, 2}, {4, 4, 1}}))
+	out = append(out, loose2("unchanged weight exactly two thirds of the new committee only",
+		[]vMember{{1, 1, 2}, {2, 2, 2}, {3, 3, 1}}, []vMember{{1, 1, 2}, {2, 2, 2}, {4, 4, 2}}))
 	// invalid committees
 	out = append(out, def("empty predecessor", nil, equal(3, 1, same)))
 	out = append(out, def("empty successor", equal(3, 1, same), nil))
