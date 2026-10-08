@@ -12,6 +12,7 @@ import (
 	"github.com/unicitynetwork/bft-core/network/protocol/abdrc"
 	"github.com/unicitynetwork/bft-core/q3active"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus"
+	"github.com/unicitynetwork/bft-core/rootchain/consensus/votesig"
 	"github.com/unicitynetwork/bft-go-base/types"
 )
 
@@ -125,7 +126,7 @@ func (a rootQ3API) signers() (q3SignersResponse, error) {
 	for _, n := range tb.RootNodes {
 		weights[n.NodeID] = n.Stake
 	}
-	out := q3SignersResponse{Epoch: qc.VoteInfo.Epoch, Round: qc.VoteInfo.RoundNumber, Scheme: qc.Scheme, Threshold: tb.QuorumThreshold}
+	out := q3SignersResponse{Epoch: qc.VoteInfo.Epoch, Round: qc.VoteInfo.RoundNumber, Scheme: effectiveScheme(qc.Scheme), Threshold: tb.QuorumThreshold}
 	for id := range qc.Signatures {
 		if w, ok := weights[id]; ok {
 			out.Signers = append(out.Signers, q3active.Signer{NodeID: id, Weight: w})
@@ -155,4 +156,12 @@ func q3Endpoint(f func(ctx context.Context, body json.RawMessage) (any, error)) 
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(out)
 	}
+}
+
+// effectiveScheme is the signing scheme a certificate is verified under: the wire carries no scheme for a legacy one (0), which is scheme 1.
+func effectiveScheme(wire uint64) uint64 {
+	if wire == votesig.SchemeDomainBound {
+		return votesig.SchemeDomainBound
+	}
+	return votesig.SchemeLegacy
 }

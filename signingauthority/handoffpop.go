@@ -6,6 +6,7 @@ import (
 
 	"github.com/unicitynetwork/bft-core/evmassign"
 	"github.com/unicitynetwork/bft-core/handoff"
+	"github.com/unicitynetwork/bft-core/internal/weightvalidation"
 	"github.com/unicitynetwork/bft-go-base/types"
 )
 
@@ -75,7 +76,9 @@ func (a *Authority) SignHandoffPoP(req HandoffPoPRequest) (evmassign.PoP, error)
 	case req.Context.Predecessor == [32]byte{}:
 		return evmassign.PoP{}, fmt.Errorf("%w: the context names no predecessor", ErrContextMismatch)
 	}
-	if err := evmassign.ValidateAssignment(succ); err != nil {
+	// The bounded weights, not the unit rule: a possession proof proves the key, and the root judges the assignment under the mode of the
+	// epoch it is installed in. A weighted rotation out of a unit epoch asks this authority to sign weights the unit rule would refuse.
+	if err := evmassign.ValidateAssignmentWith(weightvalidation.EVMRules(weightvalidation.ModeWeighted), succ); err != nil {
 		return evmassign.PoP{}, fmt.Errorf("%w: %v", ErrContextMismatch, err)
 	}
 	pub, err := publicKeyOf(a.signer)

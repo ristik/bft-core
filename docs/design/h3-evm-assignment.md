@@ -307,3 +307,22 @@ seven-field signed VoteInfo preimage. Old four/six-field encodings remain valid
 history; old readers refuse the new arity. DEV validators must upgrade together.
 A completed replay followed by a live timestamp refusal leaves frontier serving
 unfaulted; it is not an incomplete or uncertain recovery write.
+
+## Amendment: PoA genesis identities and the first coupled handoff
+
+The #85 lifecycle (above) needs the genesis committee's identity records as the incumbent baseline (`SetGenesisIdentities`), but nothing in
+production recorded them, so no coupled handoff could be admitted. Under proof of authority there is no staking contract to read them
+from: the operator provisions them.
+
+- `root-node run --genesis-identities <file>` records the file's identity records, once, for the one genesis shard that has
+  `validator_coupling=true`. They are verified exactly as a candidate's records are (`ValidateCoupling`, `ValidateIdentities`) against the
+  genesis trust base and that shard's genesis validators: one record per root member and per EVM validator, keys and weights equal, bound
+  one to one. The same set again (a restart) is a no-op; a different set is `ErrGenesisIdentitiesConflict`, never an overwrite. A proof-of-stake
+  genesis takes the same records from its manifest and does not use the flag.
+- `ubft genesis-identities generate` writes the file. The staking id, operator payee and exposure digest of an entity are operator-assigned DEV
+  values, deterministic from its root node id (the weight lives in the record, so a reweighting leaves the entity's identity and payee alone).
+- `root handoff evm-authorization` writes the recovery `Authorization` of a primary candidate: K is the incumbent committee's records (the
+  genesis file before any rotation, the previous assignment's afterwards); the base root body and assignment hash come from the context
+  `handoff evm-context` printed; the election inputs (contracts, result, snapshot, policies) are operator-assigned DEV digests.
+- A weighted rotation must fit the continuity budget the genesis configuration commits (`continuity_max_m`, `continuity_max_distance`); the
+  DEV default (D <= 1/4) admits no reweighting of a four-member committee, so a deployment that rotates weights sets its own bound.
