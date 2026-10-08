@@ -30,6 +30,19 @@ const (
 	custodySessions            = 35
 )
 
+// ElectionPolicy's declared layout (forge inspect ElectionPolicy storageLayout): network, custody, and the publication mapping, whose
+// struct members are one word each (primaryHash, kCommit, incumbent, incumbentExposureDigest, incumbentKeyDigest, policyDigest,
+// contractsDigest, snapshotDigest, assignmentID, popSetDigest) followed by a packed word: published (1 byte), popCount (4), attempt (8).
+const (
+	electionNetwork      = 2
+	electionCustody      = 3
+	electionPublications = 16
+
+	pubPrimaryHash, pubKCommit, pubIncumbent, pubIncumbentExposure, pubIncumbentKey = 0, 1, 2, 3, 4
+	pubPolicy, pubContracts, pubSnapshot, pubAssignment, pubPopSet, pubFlags        = 5, 6, 7, 8, 9, 10
+	pubPublishedOffset, pubPopCountOffset, pubAttemptOffset                         = 0, 1, 5
+)
+
 // member offsets inside their packed slot (bytes from the low-order end) and sizes
 const (
 	limitsLMaxOffset, limitsLMaxSize = 4, 4

@@ -14,6 +14,9 @@ type Pins struct {
 	Custody, Registry         [20]byte
 	CustodyCode, RegistryCode [32]byte
 	NetworkWord               [32]byte
+	// Election and its code hash are pinned for VerifyPrimary only.
+	Election     [20]byte
+	ElectionCode [32]byte
 }
 
 // Authority is the storage.EVMStateAuthority over Ethereum state proofs.
