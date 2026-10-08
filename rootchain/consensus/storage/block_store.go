@@ -25,7 +25,8 @@ type (
 		orchestration Orchestration
 		profile       uint64
 		handoffAuth   handoffAuthority
-		pos           *PosServices // the P85 control executor's collaborators; nil refuses every control
+		pos           *PosServices  // the P85 control executor's collaborators; nil refuses every control
+		prefixSource  RecordFetcher // where a checkpoint's missing source-log prefix is fetched from
 		lock          sync.RWMutex
 		log           *slog.Logger
 		// the attempt whose lapse was last reported (reported once)
@@ -241,8 +242,8 @@ func (x *BlockStore) TrialExecute(block *rctypes.BlockData, verifier IRChangeReq
 
 // ControlCut is the retained control cut of the committed root block of the round: its control state and the path of its leaf in that
 // block's unicity tree.
-func (x *BlockStore) ControlCut(round uint64) (ControlCut, error) {
-	return x.blockTree.ControlCut(round)
+func (x *BlockStore) ControlCut(key CutKey) (ControlCut, error) {
+	return x.blockTree.ControlCut(key)
 }
 
 // Records returns up to max records of the retained source log from the index.

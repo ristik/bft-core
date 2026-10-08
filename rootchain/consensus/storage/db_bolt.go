@@ -352,54 +352,56 @@ func (db BoltDB) WriteBlock(block *ExecutedBlock, root bool) error {
 	if err != nil {
 		return fmt.Errorf("serializing block: %w", err)
 	}
+	return db.db.Update(func(tx *bbolt.Tx) error { return writeBlockTx(tx, block, data, root) })
+}
+
+// writeBlockTx is WriteBlock inside an open transaction, with the block already serialized.
+func writeBlockTx(tx *bbolt.Tx, block *ExecutedBlock, data []byte, root bool) error {
 	key := binary.BigEndian.AppendUint64(make([]byte, 0, 8), block.GetRound())
+	b := tx.Bucket(bucketBlocks)
+	if b == nil {
+		return errNoBlocksBucket
+	}
+	if err := b.Put(key, data); err != nil {
+		return fmt.Errorf("storing block: %w", err)
+	}
 
-	return db.db.Update(func(tx *bbolt.Tx) error {
-		b := tx.Bucket(bucketBlocks)
-		if b == nil {
-			return errNoBlocksBucket
-		}
-		if err := b.Put(key, data); err != nil {
-			return fmt.Errorf("storing block: %w", err)
-		}
-
-		if !root {
-			return nil
-		}
-		if block.CommitQc == nil && !isEpochAnchorRoot(block) {
-			return errors.New("root block must have commit QC")
-		}
-		if isEpochAnchorRoot(block) {
-			// A handoff proof may arrive after the old chain has advanced beyond
-			// the fixed successor start. None of that old suffix belongs under
-			// the new anchor, regardless of its numerical round.
-			var oldKeys [][]byte
-			c := b.Cursor()
-			for k, _ := c.First(); k != nil; k, _ = c.Next() {
-				if !bytes.Equal(k, key) {
-					oldKeys = append(oldKeys, bytes.Clone(k))
-				}
-			}
-			for _, oldKey := range oldKeys {
-				if err := b.Delete(oldKey); err != nil {
-					return fmt.Errorf("delete old epoch block %x: %w", oldKey, err)
-				}
-			}
-			return nil
-		}
-
-		// we do not keep history so anything older than the root can be deleted
+	if !root {
+		return nil
+	}
+	if block.CommitQc == nil && !isEpochAnchorRoot(block) {
+		return errors.New("root block must have commit QC")
+	}
+	if isEpochAnchorRoot(block) {
+		// A handoff proof may arrive after the old chain has advanced beyond
+		// the fixed successor start. None of that old suffix belongs under
+		// the new anchor, regardless of its numerical round.
+		var oldKeys [][]byte
 		c := b.Cursor()
-		if k, _ := c.Seek(key); !bytes.Equal(k, key) {
-			return fmt.Errorf("seeking %x but landed on %x", key, k)
+		for k, _ := c.First(); k != nil; k, _ = c.Next() {
+			if !bytes.Equal(k, key) {
+				oldKeys = append(oldKeys, bytes.Clone(k))
+			}
 		}
-		for k, _ := c.Prev(); k != nil; k, _ = c.Prev() {
-			if err := c.Delete(); err != nil {
-				return fmt.Errorf("delete key %x: %w", k, err)
+		for _, oldKey := range oldKeys {
+			if err := b.Delete(oldKey); err != nil {
+				return fmt.Errorf("delete old epoch block %x: %w", oldKey, err)
 			}
 		}
 		return nil
-	})
+	}
+
+	// we do not keep history so anything older than the root can be deleted
+	c := b.Cursor()
+	if k, _ := c.Seek(key); !bytes.Equal(k, key) {
+		return fmt.Errorf("seeking %x but landed on %x", key, k)
+	}
+	for k, _ := c.Prev(); k != nil; k, _ = c.Prev() {
+		if err := c.Delete(); err != nil {
+			return fmt.Errorf("delete key %x: %w", k, err)
+		}
+	}
+	return nil
 }
 
 var errNoCertificatesBucket = errors.New("certificates bucket not found")

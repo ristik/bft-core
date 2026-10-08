@@ -6,6 +6,7 @@ import (
 	"crypto"
 	"errors"
 	"fmt"
+	"github.com/unicitynetwork/bft-core/rootrecords"
 	"slices"
 	"sync"
 	"testing"
@@ -167,6 +168,15 @@ func (run *q4Run) observeStore(i int) {
 }
 
 func (s *q4HistoryStore) WriteBlock(b *storage.ExecutedBlock, root bool) error {
+	return s.observed(b, root, func() error { return s.BoltDB.WriteBlock(b, root) })
+}
+
+// CommitBlock is the atomic commit of a block with its records and cut; the observation is the same as for the plain root write.
+func (s *q4HistoryStore) CommitBlock(b *storage.ExecutedBlock, recs []rootrecords.Record, cut *storage.CutEntry) error {
+	return s.observed(b, true, func() error { return s.BoltDB.CommitBlock(b, recs, cut) })
+}
+
+func (s *q4HistoryStore) observed(b *storage.ExecutedBlock, root bool, write func() error) error {
 	hash, err := b.BlockData.Hash(crypto.SHA256)
 	if err != nil {
 		return err
@@ -176,7 +186,7 @@ func (s *q4HistoryStore) WriteBlock(b *storage.ExecutedBlock, root bool) error {
 	// can never appear later as a post-mark commit, even if the head was not sampled.
 	s.run.mu.Lock()
 	defer s.run.mu.Unlock()
-	if err := s.BoltDB.WriteBlock(b, root); err != nil {
+	if err := write(); err != nil {
 		return err
 	}
 	s.run.recordBlock(s.index, b.GetRound(), block, root)

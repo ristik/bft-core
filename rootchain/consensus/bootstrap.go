@@ -455,9 +455,14 @@ func verifyHandoffBundle(trust *trustbase.TrustBaseStore, bundle handoffdelivery
 // and the closure proposer. It must be called before the manager starts.
 func (x *ConsensusManager) SetPosServices(s *storage.PosServices) { x.blockStore.SetPosServices(s) }
 
+// SetRecordFetcher names where an installed epoch checkpoint's missing source-log prefix is fetched from.
+func (x *ConsensusManager) SetRecordFetcher(f storage.RecordFetcher) {
+	x.blockStore.SetRecordFetcher(f)
+}
+
 // ControlCut is the retained control cut of the committed root block of the round, for the shards' authenticated record feed.
-func (x *ConsensusManager) ControlCut(round uint64) (storage.ControlCut, error) {
-	return x.blockStore.ControlCut(round)
+func (x *ConsensusManager) ControlCut(key storage.CutKey) (storage.ControlCut, error) {
+	return x.blockStore.ControlCut(key)
 }
 
 // Records returns up to max records of the retained source log from the index.

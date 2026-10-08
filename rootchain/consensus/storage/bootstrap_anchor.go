@@ -49,6 +49,11 @@ func (x *BlockStore) InstallEpochAnchor(head *abdrc.CommittedBlock, v evmroot.Ve
 	if current.BlockData.Epoch > v.Epoch {
 		return nil, errors.New("local root is beyond old handoff epoch")
 	}
+	// The checkpoint commits a source log; this root must retain exactly that prefix (fetching and verifying what it lacks) before any
+	// successor consensus starts, and every later append extends it.
+	if err := x.ensureRetainedPrefix(head.Control); err != nil {
+		return nil, err
+	}
 	oldRoot, err := NewRootBlock(head, crypto.SHA256, x.orchestration, ProfileHandoff)
 	if err != nil {
 		return nil, fmt.Errorf("reconstruct old checkpoint: %w", err)
