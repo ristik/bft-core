@@ -613,3 +613,37 @@ func TestNonCanonicalStoredValuesAndOversizeWitnessesAreRefused(t *testing.T) {
 	require.ErrorIs(t, err, ErrWitness)
 	require.NotErrorIs(t, err, ErrProof)
 }
+
+// A request for the *current* generation is no request for an older one: custody's retirement application repeats the generation check,
+// and its record cursor is strict, so a Retirement of a generation the owner did not request would block the log. The authority reports
+// Requested only for the generation the position holds; the executor refuses a Retirement whose facts say Requested is false
+// (TestRetirementRefusals/no_request_at_P).
+func TestARequestForTheCurrentGenerationIsNoRequestForAnOlderOne(t *testing.T) {
+	base := newRetirable(t, nil)
+	sc := base.sc
+	positionSlot := slotWord(mapUint(baseSlot(custodyPositions), sc.ID), positionsGenerationSlot)
+	word := base.s.custody[positionSlot]
+	require.Equal(t, sc.Generation, fieldUint(word, positionGenerationOffset, 8))
+	require.EqualValues(t, 1, word[32-positionRequestedOffset-1], "the scenario's request flag is set")
+
+	s := base.s
+	s.custody = map[word32]word32{}
+	for k, v := range base.s.custody {
+		s.custody[k] = v
+	}
+	// the identity re-registered: its position now holds generation g+1, with its own request flag set
+	next := word
+	g1 := bigWord(sc.Generation + 1)
+	copy(next[32-positionGenerationOffset-8:32-positionGenerationOffset], g1[24:])
+	s.custody[positionSlot] = next
+	w := s.world(t)
+	rc, rr := newRecorder(s.custody), newRecorder(s.registry)
+	rc.read[baseSlot(custodyNetwork)], rc.read[baseSlot(custodyRoots)] = true, true
+	var facts storage.RetirementFacts
+	require.NoError(t, readRetirement(rc, rr, sc.ID, sc.Generation, &facts))
+	raw := encode(t, accountsFor(t, w, map[[20]byte]*recorder{s.pins.Custody: rc, s.pins.Registry: rr}))
+	got, err := Authority{Pins: s.pins}.VerifyRetirement(raw, w.root, sc.ID, sc.Generation)
+	require.NoError(t, err)
+	require.False(t, got.Requested, "the retired generation is not the one with the request")
+	require.True(t, got.NotImported && got.NoLiveExposures && got.NoLotReferences && got.RecordsCaughtUp, "everything else would have passed")
+}
