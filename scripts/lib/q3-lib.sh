@@ -259,6 +259,10 @@ q3_selftest() {
     for n in $Q3_STEPS; do q3_st "steps: $n is defined" declare -F "$n"; done
   fi
 
+  # a restarted root of this lane runs the coupled Q3 runtime: without --q3-lane it takes the legacy install path and cannot fetch the Q3 bundle (runs 49 and 53), and the cold
+  # network start needs the empty-bootnode form; both live in the shared start function, which a merge of the shared helper can silently replace
+  q3_st "m2_start_root carries the Q3 runtime flags for the lane" bash -c "sed -n '/^m2_start_root()/,/^}/p' scripts/lib/m2-handoff-lib.sh | grep -q -- '--q3-lane --genesis-identities'"
+  q3_st "m2_start_root accepts an empty bootnode" bash -c "sed -n '/^m2_start_root()/,/^}/p' scripts/lib/m2-handoff-lib.sh | grep -q 'bootArgs=(--bootnodes'"
   # teardown: only this checkout's processes, matched by command AND cwd; never a pattern kill
   q3_st_neg "teardown: no pkill or killall in q3_teardown" bash -c "declare -f q3_teardown | grep -E 'pkill|killall'"
   if declare -F owned_pids >/dev/null; then
