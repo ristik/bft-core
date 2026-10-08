@@ -257,7 +257,7 @@ func newRootCmd() *cobra.Command {
 		"comma-separated readiness receipt files of every successor member (`handoff q3-readiness`): the plan is then a V3 plan, and the root refuses it unless every member declared itself ready for exactly this candidate")
 	handoff.AddCommand(propose)
 	handoff.AddCommand(newQ3CandidateCmd(), newQ3ReadinessCmd(), newQ3ActivationCmd())
-	handoff.AddCommand(newEVMContextCmd(), newEVMPoPCmd(), newEVMAssembleCmd(), newShardAssembleCmd())
+	handoff.AddCommand(newEVMContextCmd(), newEVMAuthorizationCmd(), newEVMPoPCmd(), newEVMAssembleCmd(), newShardAssembleCmd())
 	var networkID, oldEpoch, attempt uint64
 	var predecessorBodyID, nextBodyID, abortRPCs string
 	var abortTimeout time.Duration
