@@ -30,8 +30,8 @@ type Profile struct {
 	HookRecordGas  uint64
 }
 
-// HookReadsGas reserves the gate reads of the records hook: custody.recordCursor, registry.recordCount and recordTargetCount before the
-// call, custody.recordCursor after it. Each is a cold staticcall of a few thousand gas; the figure is a price with a wide margin.
+// HookReadsGas reserves the gate reads of the records hook: custody.recordCursor, registry.recordCount and recordTargetCount, and
+// custody.limits (H must fit its maxBatch) before the call, custody.recordCursor after it. Each is a cold staticcall of a few thousand gas; the figure is a price with a wide margin.
 const HookReadsGas uint64 = 150_000
 
 // HookMaxRecords is the most records one hook call may apply: custody's own maxBatch ceiling.
@@ -138,7 +138,7 @@ func (p Profile) Hash() ([32]byte, error) {
 	}
 	b = textValue(b, "scan=2000+16C;members=1000T;UC=60000+16B+64000+6000S+2000N+250P+1117700;RSMT=2000+16B+250(1+popcount);I=22100;D=7100")
 	b = textValue(b, "P85-import=scan 2000+16C_R;entries 1000N;C_R<=16384;N<=32;outcome=[system,G_pre,1,'',SHA256(rootInput)];G_pre=admit+open+import")
-	b = textValue(b, "P85-hook=after EIP-4788: one custody.applyRootRecords(min(H,available)) iff the registry holds more records than custody; reads recordCursor,recordCount,recordTargetCount,recordCursor; G_hooks excluded from the outcome, included in the system total")
+	b = textValue(b, "P85-hook=after EIP-4788: one custody.applyRootRecords(min(H,available)) iff the registry holds more records than custody; reads recordCursor,recordCount,recordTargetCount,limits,recordCursor; G_hooks excluded from the outcome, included in the system total")
 	b = textValue(b, "native-body=1,2,3;signing=1,2;quorum=total-(total-1)/3;claims=8;signatures=64/512;shard=33/256;path=32;summary=256;RSMT=4096/256/12392")
 	return sha256.Sum256(b), nil
 }
