@@ -25,8 +25,8 @@ type Profile struct {
 
 // The root-record import envelope (briefs/p85-pr1c-control-records.md section 6): the largest admission charge (2000 + 16*16384 bytes
 // + 1000*32 entries) and a bound on the gross gas of the privileged importRootRecords call for 32 maximal entries. The bound is
-// measured against the pinned runtime by ureth (crates/unicity/execution/testdata/p85-import-gas.json) with the same 3/2 safety factor
-// the registry's own G_rest uses; it is a price, not a proof.
+// measured against the pinned runtime by ureth (b1_tests::import::the_maximal_import_stays_inside_the_envelope_bound: 11,169,634 gross
+// for 32 maximal entries) with the same 3/2 safety factor the registry's own G_rest uses; it is a price, not a proof.
 const (
 	ImportAdmissionMaxGas uint64 = 2000 + 16*16384 + 1000*32
 	ImportExecutionGas    uint64 = 18_000_000
