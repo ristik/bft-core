@@ -30,6 +30,7 @@ import (
 
 	"github.com/unicitynetwork/bft-core/archive"
 	"github.com/unicitynetwork/bft-core/archivewiring"
+	"github.com/unicitynetwork/bft-core/b1state"
 	"github.com/unicitynetwork/bft-core/certifiedstore"
 	"github.com/unicitynetwork/bft-core/configuredadmission"
 	"github.com/unicitynetwork/bft-core/configuredprogress"
@@ -42,6 +43,7 @@ import (
 	"github.com/unicitynetwork/bft-core/network/protocol/certification"
 	"github.com/unicitynetwork/bft-core/q3active"
 	"github.com/unicitynetwork/bft-core/q3delivery"
+	"github.com/unicitynetwork/bft-core/q3format"
 	"github.com/unicitynetwork/bft-core/q3shard"
 	"github.com/unicitynetwork/bft-core/registrygenesis"
 	"github.com/unicitynetwork/bft-core/registryproof"
@@ -294,6 +296,9 @@ type shardNodeRunFlags struct {
 	// RegistryLayout is the layout of the deployment's SealRegistry (1 or 2); it must be the one the genesis
 	// was generated with, because G commits to it.
 	RegistryLayout uint64
+	// B1Profile enables the fresh-B1 deployment (registry layout 3): the profile `ubft engine-api b1-profile` derived. The genesis, the
+	// node's Update admission and the paired client's bindings are all checked against it.
+	B1Profile string
 
 	LUCStoreFile         string
 	ExecutionJournal     string
@@ -400,6 +405,9 @@ protocol and docs/engine-api-adapter-plan.md for how this command's pieces fit t
 			"observation's shard configuration hash to equal the genesis origin's full configuration hash")
 	cmd.Flags().Uint64Var(&flags.RegistryLayout, "registry-layout", 1,
 		"SealRegistry layout the genesis was generated with: 1 (sealRegistry/v1) or 2 (assignment-aware sealRegistry/v2)")
+	cmd.Flags().StringVar(&flags.B1Profile, "b1-profile", "",
+		"fresh-B1 deployment: the profile `ubft engine-api b1-profile` derived. Selects registry layout 3, admits the registry's committed Updates "+
+			"under it and requires --genesis, --full-shard-conf, --execution-journal and --trust-history-profile-2")
 	cmd.Flags().StringVar(&flags.ExpectedOriginIdentity, "expected-origin-identity", "",
 		"optional 0x-prefixed 32-byte expected genesis origin identity; when set, startup refuses a mismatch")
 	cmd.Flags().StringVar(&flags.JWTSecret, "jwt-secret", "",
@@ -478,6 +486,9 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 	}
 	if flags.Q3Lane && !flags.TrustHistoryProfile2 {
 		return errors.New("--q3-lane requires --trust-history-profile-2")
+	}
+	if err := validateB1RunFlags(flags); err != nil {
+		return err
 	}
 	if flags.EVMTransitionFile != "" && flags.Executor != "engine-api" {
 		return errors.New("--engine-epoch-transition requires --executor=engine-api")
@@ -596,10 +607,19 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 	// checked against it. The adapter uses this snapshot for v2 block-1 derivation.
 	var origin registrygenesis.GenesisOrigin
 	var bootstrap registryproof.Snapshot
+	var b1Profile b1state.Profile
+	var b1History *q3format.History
 	if flags.GenesisFile != "" {
 		// M1 pins one root epoch from trustBases[0]. H1/H2 multi-epoch trust bases must
 		// select the epoch bound to the genesis record instead of assuming the first.
-		origin, bootstrap, err = loadGenesisOriginLayout(shardConf, flags.GenesisFile, flags.ExpectedOriginIdentity, trustBases[0].GetEpoch(), flags.RegistryLayout)
+		if flags.B1Profile != "" {
+			if b1Profile, b1History, err = loadB1Deployment(flags.B1Profile, trustBases[0], shardConf); err != nil {
+				return err
+			}
+			origin, bootstrap, err = loadB1GenesisOrigin(shardConf, b1Profile, b1History, flags.GenesisFile, flags.ExpectedOriginIdentity)
+		} else {
+			origin, bootstrap, err = loadGenesisOriginLayout(shardConf, flags.GenesisFile, flags.ExpectedOriginIdentity, trustBases[0].GetEpoch(), flags.RegistryLayout)
+		}
 		if err != nil {
 			return err
 		}
@@ -672,6 +692,28 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 		if flags.TrustHistoryProfile2 {
 			verifierContext.EpochAuthority = historical
 		}
+		if flags.B1Profile != "" && !flags.Q3Lane {
+			// The pair's Update admission reads the node's own verified root history; a fixed-base deployment has no activation to install,
+			// so the runtime is not attached to a root and serves only the authenticated history of its pinned genesis.
+			b1Journal, jErr := flags.initDB(flags.Q3JournalDB, q3JournalDBFileName)
+			if jErr != nil {
+				return jErr
+			}
+			if closer, ok := b1Journal.(io.Closer); ok {
+				defer closer.Close()
+			}
+			b1rt, jErr := q3active.New(q3active.Config{DB: b1Journal, Genesis: trustBases[0]})
+			if jErr != nil {
+				return fmt.Errorf("b1 authority runtime: %w", jErr)
+			}
+			if verifierContext.B1, jErr = newB1PairConfig(b1Profile, b1rt, flags.EthURL, 10*time.Second); jErr != nil {
+				return jErr
+			}
+			// The execution client is the paired ureth: every build and import carries the pair binding its own gate compares.
+			if q3Admit, jErr = wireQ3Pair(executor, b1rt, uint64(shardConf.NetworkID), origin.Valid(), [32]byte(origin.BlockHash())); jErr != nil {
+				return jErr
+			}
+		}
 		if flags.Q3Lane {
 			// The shard node (the EVM pair's Go) trusts its own verification from the pinned genesis: a verified Q3 history and install
 			// journal of its own, and a trust store that serves a V3 epoch only once the journal completed it.
@@ -692,6 +734,11 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 			trustBaseStore, epochTrust = q3Trust, q3Trust
 			verifierContext.TrustBases = q3Trust
 			verifierContext.EpochAuthority = q3Trust
+			if flags.B1Profile != "" {
+				if verifierContext.B1, jErr = newB1PairConfig(b1Profile, q3rt, flags.EthURL, 10*time.Second); jErr != nil {
+					return jErr
+				}
+			}
 		}
 	}
 	if origin.Valid() && flags.Executor == "engine-api" {
@@ -1685,6 +1732,9 @@ func buildExecutor(ctx context.Context, flags *shardNodeRunFlags, shardConf *typ
 		// schedules nothing, and would pass every check above before requiring Engine methods this
 		// adapter does not call. eth_config (EIP-7910) is the standard read for it. Last, so that a
 		// mispairing or a wrong genesis is reported as that rather than as a profile difference.
+		if flags.B1Profile != "" {
+			adapter.ExpectUnicityPrecompiles()
+		}
 		if _, err := adapter.CheckExecutionProfile(ctx, wantChainID); err != nil {
 			return nil, fmt.Errorf("engine-api executor failed its startup execution-profile check "+
 				"(the execution client's chain spec is not the pinned %s profile): %w", engineapi.PinnedProfileName, err)

@@ -1,0 +1,81 @@
+{
+  "steps": [
+    {
+      "name": "bridge installed from the vault",
+      "cfgHash": "d23f599fe8826234aedbeb83e04b24f6f2b68a08ccf681339efb7d50594c3e84",
+      "vault": "0xe7f1725e7734ce288f8367e1bb143e90bb3f0512",
+      "trustBaseId": "c6a7b4eb430c403602a7f625326b2dd79702acef5f13821d00e83131f9072de9"
+    },
+    {
+      "name": "lock executed on the running chain",
+      "nonce": "1",
+      "blockHash": "0xe7a214639a530a68f46c40fb469375a6f8dd22c8d0811cf5a0fd648a68eede7e",
+      "blockNumber": "23",
+      "gasUsed": "272164"
+    },
+    {
+      "name": "lock proof assembled",
+      "bytes": 2487,
+      "sha256": "639aca518628db8ce572a23dfe47da78ce8400063fdf939861dd2edb903bd1c2"
+    },
+    {
+      "name": "lock digest equals the plug-in derivation",
+      "digest": "77c0fea39b8893dd765a6e0b22d0af0f0a747599d9bf0abc0a9375f287e8ed47"
+    },
+    {
+      "name": "mint submitted",
+      "status": "{\"status\":\"SUCCESS\"}"
+    },
+    {
+      "name": "mint certified by aggregator-go",
+      "referenceTime": "1791437675",
+      "rootRound": "122"
+    },
+    {
+      "name": "native verification of the live token",
+      "nonce": "1",
+      "leaves": 1
+    },
+    {
+      "name": "transfer certified",
+      "transitions": 1
+    },
+    {
+      "name": "burn certified",
+      "transitions": 2
+    },
+    {
+      "name": "return proof assembled",
+      "anchorRootRound": "133",
+      "registryClock": "126",
+      "bytes": 5856,
+      "nullifier": "b8c8cddb81b667de1160b7c78751ffb0d0c37c887c5c563c14fa11939aa5c9d6",
+      "leaves": 3
+    },
+    {
+      "name": "registry clock reached the anchor",
+      "anchorRound": "133",
+      "registryClock": "134"
+    },
+    {
+      "name": "native UC_V1 verdict on the anchor request",
+      "registryClock": "134",
+      "returndata": "0x00000000000000000000000000000000000000000000000000000000000000010000000000000000000000000000000000000000000000000000000000000001",
+      "valid": true
+    },
+    {
+      "name": "redeem executed (native B1 + B2 kernels)",
+      "gasUsed": "1835321",
+      "credited": "1000000000000000000",
+      "anchorRound": "133",
+      "clockAtExecution": "142"
+    },
+    {
+      "name": "claim paid",
+      "gasUsed": "86224",
+      "paid": "1000000000000000000",
+      "vaultBefore": "1000000000000000000",
+      "vaultAfter": "0"
+    }
+  ]
+}

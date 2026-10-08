@@ -1,0 +1,17 @@
+{
+  "network": 3,
+  "rootGenesisId": "0x29301d6cc59804fbc13e1b54e9af3a38d38bd65b2b0d73ad78a292288350e33d",
+  "executionChainId": 31337,
+  "runtimeHash": "0x28ebc47d5beeb45307cb92ff1521be6a5623d4e4fa1721bc13a6f755cdf0781c",
+  "compilerHash": "0x2f93eb970bd354a7878eaef2409b6a3466324740a616491c76fbba8ae4eed575",
+  "wCert": 15,
+  "deltaEv": 16,
+  "deltaHold": 17,
+  "systemGas": 269547540,
+  "forcedGas": 0,
+  "maxGas": 276547540,
+  "ordinaryCapacity": 7000000,
+  "restGas": 19360500,
+  "companionBytes": 1048576,
+  "otherCompanionBytes": 65536
+}
