@@ -3,6 +3,7 @@ package cmd
 import (
 	"bytes"
 	"context"
+	"crypto"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -13,6 +14,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/unicitynetwork/bft-core/b1registry"
 	"github.com/unicitynetwork/bft-core/b1state"
+	"github.com/unicitynetwork/bft-core/evmassign"
 	"github.com/unicitynetwork/bft-core/internal/testutils/certifiedchain"
 	testobserve "github.com/unicitynetwork/bft-core/internal/testutils/observability"
 	"github.com/unicitynetwork/bft-core/q3format"
@@ -111,6 +113,47 @@ func readFullShardConf(t *testing.T, path string) *types.PartitionDescriptionRec
 	conf, err := readShardConf(path)
 	require.NoError(t, err)
 	return conf
+}
+
+// A fresh-B1 genesis (registry layout 3) carries validator_coupling=true in the exported full configuration exactly as the layout 2 launch genesis
+// does, so every root validator refuses an uncoupled committee change on any B1 deployment; an explicit opt-out is refused.
+func TestB1Genesis_ExportsTheCouplingParameter(t *testing.T) {
+	d := newB1Deployment(t)
+	require.NotContains(t, d.conf.PartitionParams, evmassign.CouplingParam, "premise: the shard configuration does not name it")
+	_, _, _, err := d.genesis(t)
+	require.NoError(t, err)
+	full := readFullShardConf(t, filepath.Join(d.dir, "genesis-full-shard-conf.json"))
+	require.Equal(t, "true", full.PartitionParams[evmassign.CouplingParam])
+	require.True(t, evmassign.CouplingRequired(full))
+	without := *full
+	without.PartitionParams = map[string]string{}
+	for k, v := range full.PartitionParams {
+		if k != evmassign.CouplingParam {
+			without.PartitionParams[k] = v
+		}
+	}
+	a, err := full.Hash(crypto.SHA256)
+	require.NoError(t, err)
+	b, err := without.Hash(crypto.SHA256)
+	require.NoError(t, err)
+	require.NotEqual(t, a, b, "the full configuration hash commits to the parameter")
+
+	t.Run("naming it explicitly changes nothing", func(t *testing.T) {
+		d := newB1Deployment(t)
+		d.conf.PartitionParams[evmassign.CouplingParam] = "true"
+		require.NoError(t, util.WriteJsonFile(d.confPath, d.conf))
+		_, _, _, err := d.genesis(t)
+		require.NoError(t, err)
+		again := readFullShardConf(t, filepath.Join(d.dir, "genesis-full-shard-conf.json"))
+		require.Equal(t, "true", again.PartitionParams[evmassign.CouplingParam])
+	})
+	t.Run("an explicit opt-out is refused", func(t *testing.T) {
+		d := newB1Deployment(t)
+		d.conf.PartitionParams[evmassign.CouplingParam] = "false"
+		require.NoError(t, util.WriteJsonFile(d.confPath, d.conf))
+		_, _, _, err := d.genesis(t)
+		require.ErrorContains(t, err, "registry layout 3 genesis requires validator_coupling=true")
+	})
 }
 
 func TestB1Profile_RefusedWhenItDoesNotDescribeTheDeployment(t *testing.T) {
