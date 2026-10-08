@@ -260,6 +260,20 @@ q3_progress_scheme2() {
   tail -n 3 "$Q3_DIR/scheme-after.txt" >"$Q3_DIR/commit-trace.txt"
 }
 
+# The EVM shard's requests are counted by the mirrored weights (W=9, Q=5): the root's consensus lines of the weighted view carry the weight of each
+# counted request, which must reach the threshold. This is the observable evidence of the EVM request-weight quorum (the root's UC signatures are
+# the root committee's, recorded by q3_progress_scheme2).
+q3_evm_request_weights() {
+  local out="$Q3_DIR/evm-request-weights.txt" i
+  : >"$out"
+  for i in 1 2 3 4; do
+    q3_check_request_weights "$Q3_EVM_TOTAL_WEIGHT" "$Q3_EVM_QUORUM" "test-nodes/root$i/debug.log" >>"$out" 2>/dev/null || true
+  done
+  [ -s "$out" ] || { echo "no weighted EVM consensus line in any root log" >&2; return 1; }
+  # every line must verify, not only the ones that did not fail the loop above
+  q3_check_request_weights "$Q3_EVM_TOTAL_WEIGHT" "$Q3_EVM_QUORUM" test-nodes/root1/debug.log test-nodes/root2/debug.log test-nodes/root3/debug.log test-nodes/root4/debug.log >/dev/null || return 1
+}
+
 q3_aggregators_unchanged() {
   h3_root_info | jq -c '[.partitionShards[] | select(.partitionId != 8) | {partitionId} + (del(.partitionId, .roundNumber, .trRound, .trLeader) | with_entries(select(.value | type != "number")))]' >"$Q3_DIR/aggregator-after.json"
   cmp -s "$Q3_DIR/aggregator-before.json" "$Q3_DIR/aggregator-after.json" || { echo "aggregator configuration changed across the activation" >&2; return 1; }
@@ -289,19 +303,22 @@ q3_ids() { grep -aoE 'messageID=[0-9a-f]+' | sort -u; }
 # its signed timeout vote reaches no one; it is SIGKILLed right after signing (a kill that only waits for the log line races the 40 ms broadcast to the
 # lights, whose own votes would complete a certificate and consume the vote: run 23). The lights and then the heavy restart; the safety module must recover the ORIGINAL message (its identity is the SHA-256 of the exact signed
 # statement) and rebroadcast it, the TC must form, and commits must resume. No orderly stop and no retry of the module alone. Only the TIMEOUT is
-# observable: a recovered signed vote has no identified log line.
+# observable as a rebroadcast; the vote held again at start is logged with its identity ("recovered last vote") and compared with the signed one.
 q3_heavy_crash() {
-  local root1=test-nodes/root1/debug.log signed recovered rebroadcast i mark
+  local root1=test-nodes/root1/debug.log signed lastsigned recovered rebroadcast i mark
   mark=$(wc -l <"$root1")
   for i in 2 3 4; do stop_pidfile "test-nodes/root$i/pid" 'ubft root-node run' KILL; done   # the lights away: the heavy root cannot complete a certificate alone
   q3_wait_grep_since 180 "$root1" "$mark" "$(q3_pat "$Q3_PAT_SIGNED_TIMEOUT" 2)" || return 1
   stop_pidfile test-nodes/root1/pid 'ubft root-node run' KILL          # the heavy root dies right after signing
   signed=$(tail -n +"$((mark + 1))" "$root1" | grep -aE "$(q3_pat "$Q3_PAT_SIGNED_TIMEOUT" 2)" | q3_ids)
   [ -n "$signed" ] || { echo "no signed timeout identity to compare against" >&2; return 1; }
+  lastsigned=$(tail -n +"$((mark + 1))" "$root1" | grep -aE "$(q3_pat "$Q3_PAT_SIGNED_TIMEOUT" 2)" | tail -n 1 | q3_ids | sed 's/messageID=//')
   printf '%s\n' "$signed" >"$Q3_DIR/signed-before-crash.txt"
   mark=$(wc -l <"$root1")
   for i in 2 3 4; do m2_start_root "$i" 2 "$(m2_root_addr 1)" || return 1; done
   m2_start_root 1 2 "$(m2_root_addr 3)" || return 1
+  # the last vote the node stored before it died is held again at start under the identity it was signed with (independent of the timer path below)
+  q3_wait_grep_since 60 "$root1" "$mark" "msg=\"recovered last vote\" kind=timeout round=[0-9]+ messageID=$lastsigned" || return 1
   q3_wait_grep_since 120 "$root1" "$mark" "$(q3_pat "$Q3_PAT_RECOVERED" 2)" || return 1
   recovered=$(tail -n +"$((mark + 1))" "$root1" | grep -aE "$(q3_pat "$Q3_PAT_RECOVERED" 2)")
   q3_wait_grep_since 120 "$root1" "$mark" "$Q3_PAT_REBROADCAST" || return 1
@@ -437,7 +454,7 @@ q3_pair_restart_control() {
 
 q3_evidence_complete() { q3_evidence_check "$Q3_DIR"; }
 
-Q3_STEPS="q3_baseline q3_candidate q3_handoff q3_install_epoch2 q3_activation q3_acknowledge q3_progress_scheme2 \
+Q3_STEPS="q3_baseline q3_candidate q3_handoff q3_install_epoch2 q3_activation q3_acknowledge q3_progress_scheme2 q3_evm_request_weights \
 q3_aggregators_unchanged q3_real_tc q3_heavy_crash q3_proof_envelope q3_start_second_pair q3_second_pair q3_pair_controls q3_evidence_complete"
 
 q3_run_lane() {

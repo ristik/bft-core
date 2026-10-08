@@ -13,6 +13,8 @@
 Q3_WEIGHTS=${Q3_WEIGHTS:-"6 1 1 1"}        # mirrored: root entity i and its delegated EVM validator i carry the same weight
 Q3_TOTAL_WEIGHT=9
 Q3_ROOT_QUORUM=7
+Q3_EVM_TOTAL_WEIGHT=9
+Q3_EVM_QUORUM=5
 Q3_FAULT_BOUND=2
 Q3_EVM_QUORUM=5
 
@@ -21,7 +23,7 @@ Q3_EVIDENCE_REQUIRED="pins.txt commands.log candidate.cbor candidate-config.json
 old-commit-proof.json old-commit-signers.json activation-coordinates.txt scheme-before.txt scheme-after.txt \
 genesis-identities.json signers-root.json root-weights.json evm-weights.json frozen-parent-ack.json registry-layout.txt registry-hash.txt \
 proof-envelope.cbor history-ids-pre-restart.txt history-ids-post-restart.txt \
-recovered-message.txt rebroadcast-trace.txt tc-trace.txt commit-trace.txt \
+recovered-message.txt rebroadcast-trace.txt tc-trace.txt commit-trace.txt evm-request-weights.txt \
 pair-root-input-a.bin pair-root-input-b.bin pair-transitions-a.bin pair-transitions-b.bin pair-state-a.json pair-state-b.json pair-equality.txt \
 refusals-pair.log pair-restart.txt aggregator-before.json aggregator-after.json"
 
@@ -44,6 +46,37 @@ q3_assert_refusal() { # logfile sentinel what: the sentinel text appears in the 
   local log=$1 sentinel=$2 what=$3
   if grep -aqF -- "$sentinel" "$log" 2>/dev/null; then echo "refusal observed: $what: \"$sentinel\""; return 0; fi
   echo "no typed refusal for $what: \"$sentinel\" is absent from $log" >&2; return 1
+}
+
+# ---- EVM request weights: the root's own record of which shard requests it counted, and their weights under the view that counted them. -------
+# q3_check_request_weights <W> <Q> <logfile>...: every "partition 00000008 reached consensus" line of the weighted EVM view (totalWeight=W) must show
+# a matching weight of at least Q and agree with the weights it lists; prints those lines (the evidence) and fails if there are none. A heavy signer
+# alone and a set of light signers are both visible in it: only the first can reach Q here.
+q3_check_request_weights() {
+  python3 - "$@" <<'PY'
+import re, sys
+W, Q, logs = int(sys.argv[1]), int(sys.argv[2]), sys.argv[3:]
+seen = 0
+for path in logs:
+    for line in open(path, errors="replace"):
+        if "partition 00000008 reached consensus" not in line or "totalWeight=%d" % W not in line:
+            continue
+        m = re.search(r'requestWeights="?\[([^\]]*)\]"? matchingWeight=(\d+) threshold=(\d+) totalWeight=(\d+)', line)
+        if not m:
+            sys.exit("unparseable weighted consensus line: " + line.strip()[:200])
+        ws = [int(x) for x in m.group(1).split()]
+        matching, threshold, total = int(m.group(2)), int(m.group(3)), int(m.group(4))
+        if sum(ws) != matching:
+            sys.exit("listed weights %s do not sum to the matching weight %d" % (ws, matching))
+        if threshold != Q or total != W:
+            sys.exit("threshold %d / total %d, expected %d / %d" % (threshold, total, Q, W))
+        if matching < threshold:
+            sys.exit("counted weight %d is below the threshold %d" % (matching, threshold))
+        print(line.strip()[line.index("partition"):][:300])
+        seen += 1
+if not seen:
+    sys.exit("no weighted EVM consensus line found")
+PY
 }
 
 # ---- weights: the committed record's signer weights against the design's totals --------------------------------------------------------------
