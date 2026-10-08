@@ -311,6 +311,9 @@ func Test_recoverState(t *testing.T) {
 		// start the manager that was skipped in the beginning, it is behind other nodes but
 		// should receive (usually proposal) message which will trigger recovery
 		cmLate := cms[len(cms)-1]
+		// the P85 control collaborators survive the replacement of the block store that recovery performs
+		posServices := &storage.PosServices{Deployment: storage.PosDeployment{RootNetwork: 7}}
+		cmLate.SetPosServices(posServices)
 		cmCount.Add(1)
 		go func() { require.ErrorIs(t, cmLate.Run(ctx), context.Canceled); cmCount.Add(-1) }()
 		go consumeUC(ctx, cmLate)
@@ -322,6 +325,7 @@ func Test_recoverState(t *testing.T) {
 				return cmPeer.pacemaker.GetCurrentRound() == cmLate.pacemaker.GetCurrentRound()
 			},
 			2*time.Second, 25*time.Millisecond, "waiting for sleepy consensus manager to catch up with the peers")
+		require.Same(t, posServices, cmLate.blockStore.PosServices(), "the recovered block store keeps the control collaborators")
 
 		// now cut off one of the other peers from the network - this means that in order to make progress
 		// the late CM we wake up must participate in the consensus now. keep track of number of proposals
