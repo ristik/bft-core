@@ -69,7 +69,11 @@ func newQ3PairCmds() []*cobra.Command {
 				return err
 			}
 			if out.Accepted {
-				_, err = fmt.Fprintf(cmd.OutOrStdout(), "pair control %s: accepted\n", kind)
+				note := ""
+				if out.GateOnly {
+					note = " by the pair gate (the engine then refused the build below its finalized block: " + strings.TrimSpace(out.Detail) + ")"
+				}
+				_, err = fmt.Fprintf(cmd.OutOrStdout(), "pair control %s: accepted%s\n", kind, note)
 				return err
 			}
 			return fmt.Errorf("pair control %s: refused: %s", kind, strings.TrimSpace(out.Detail))
