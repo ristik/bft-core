@@ -15,6 +15,7 @@ import (
 
 	"github.com/unicitynetwork/bft-core/rootchain/consensus"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/storage"
+	"github.com/unicitynetwork/bft-core/rootchain/evmstate"
 	"github.com/unicitynetwork/bft-core/rootchain/partitions"
 	"github.com/unicitynetwork/bft-core/rootchain/posclosure"
 	"github.com/unicitynetwork/bft-go-base/types"
@@ -27,6 +28,10 @@ type posDeploymentFile struct {
 	NetworkWord string `json:"networkWord"` // 32 bytes, 0x-hex: custody.network as the manifest exports it, not re-hashed
 	ChainID     string `json:"chainId"`     // unsigned decimal or 0x-hex, at most 256 bits
 	Custody     string `json:"custody"`     // 20 bytes, 0x-hex
+	// The pinned deployed contracts the Retirement and RejectResult storage proofs are judged against.
+	CustodyCode  string `json:"custodyCodeHash"`  // 32 bytes: keccak256 of the deployed custody code
+	Registry     string `json:"registry"`         // 20 bytes: the SealRegistry custody names as its roots
+	RegistryCode string `json:"registryCodeHash"` // 32 bytes: keccak256 of the deployed registry code
 }
 
 func decodeFixedHex(name, s string, n int) ([]byte, error) {
@@ -45,35 +50,52 @@ func decodeFixedHex(name, s string, n int) ([]byte, error) {
 }
 
 // loadPosDeployment reads and validates the deployment file for the root network the trust base names.
-func loadPosDeployment(path string, rootNetwork uint64) (storage.PosDeployment, error) {
+func loadPosDeployment(path string, rootNetwork uint64) (storage.PosDeployment, evmstate.Pins, error) {
 	var out storage.PosDeployment
+	var pins evmstate.Pins
 	raw, err := os.ReadFile(path)
 	if err != nil {
-		return out, errors.Join(ErrPosDeployment, err)
+		return out, pins, errors.Join(ErrPosDeployment, err)
 	}
 	var f posDeploymentFile
 	dec := json.NewDecoder(strings.NewReader(string(raw)))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&f); err != nil {
-		return out, errors.Join(ErrPosDeployment, err)
+		return out, pins, errors.Join(ErrPosDeployment, err)
 	}
 	word, err := decodeFixedHex("networkWord", f.NetworkWord, 32)
 	if err != nil {
-		return out, err
+		return out, pins, err
 	}
 	custody, err := decodeFixedHex("custody", f.Custody, 20)
 	if err != nil {
-		return out, err
+		return out, pins, err
 	}
 	chain, ok := new(big.Int).SetString(f.ChainID, 0)
 	if !ok || chain.Sign() <= 0 || chain.BitLen() > 256 {
-		return out, fmt.Errorf("%w: chainId must be a positive integer below 2^256", ErrPosDeployment)
+		return out, pins, fmt.Errorf("%w: chainId must be a positive integer below 2^256", ErrPosDeployment)
+	}
+	custodyCode, err := decodeFixedHex("custodyCodeHash", f.CustodyCode, 32)
+	if err != nil {
+		return out, pins, err
+	}
+	registry, err := decodeFixedHex("registry", f.Registry, 20)
+	if err != nil {
+		return out, pins, err
+	}
+	registryCode, err := decodeFixedHex("registryCodeHash", f.RegistryCode, 32)
+	if err != nil {
+		return out, pins, err
 	}
 	out.RootNetwork = rootNetwork
 	copy(out.NetworkWord[:], word)
 	copy(out.Custody[:], custody)
 	chain.FillBytes(out.ChainID[:])
-	return out, nil
+	pins = evmstate.Pins{Custody: out.Custody, NetworkWord: out.NetworkWord}
+	copy(pins.CustodyCode[:], custodyCode)
+	copy(pins.Registry[:], registry)
+	copy(pins.RegistryCode[:], registryCode)
+	return out, pins, nil
 }
 
 // enablePosClosure installs the closure duty on a running manager: the controls of this deployment are executed against the closed
@@ -91,7 +113,7 @@ func enablePosClosure(cm *consensus.ConsensusManager, orchestration *partitions.
 	if len(tb.RootNodes) > 1 {
 		return fmt.Errorf("%w: the closure witness is not yet distributed to voters; %d root nodes would halt at the first handoff", ErrPosDeployment, len(tb.RootNodes))
 	}
-	dep, err := loadPosDeployment(path, uint64(tb.NetworkID))
+	dep, pins, err := loadPosDeployment(path, uint64(tb.NetworkID))
 	if err != nil {
 		return err
 	}
@@ -104,6 +126,7 @@ func enablePosClosure(cm *consensus.ConsensusManager, orchestration *partitions.
 		Deployment: dep,
 		Authority:  authority,
 		Witnesses:  cm,
+		EVM:        evmstate.Authority{Pins: pins},
 		Proposer:   posclosure.Proposer{Source: cm, Authority: authority, Deployment: dep},
 	})
 	return nil

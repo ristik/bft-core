@@ -238,13 +238,17 @@ func (x *ExecutedBlock) extendWithAuthority(newBlock *rctypes.BlockData, verifie
 	if err := pos.block(newBlock.Epoch, newBlock.Round); err != nil {
 		return nil, err
 	}
-	// P of a Retirement or RejectResult: the EVM block certified in the parent, frozen before this block's certifications
-	var latestEVM [32]byte
+	// P of a Retirement or RejectResult: the EVM state certified in the parent, frozen before this block's certifications
+	var latestRoot [32]byte
+	var latestBlock []byte
 	latestEVMOK := false
 	if pos.on {
 		if key, found, err := frozenEVMShard(nextShardState, shardConfs); err == nil && found && nextShardState.States[key] != nil &&
-			nextShardState.States[key].IR != nil && len(nextShardState.States[key].IR.BlockHash) == 32 {
-			copy(latestEVM[:], nextShardState.States[key].IR.BlockHash)
+			nextShardState.States[key].IR != nil && len(nextShardState.States[key].IR.Hash) == 32 {
+			copy(latestRoot[:], nextShardState.States[key].IR.Hash)
+			if len(nextShardState.States[key].IR.BlockHash) == 32 {
+				latestBlock = bytes.Clone(nextShardState.States[key].IR.BlockHash)
+			}
 			latestEVMOK = true
 		}
 	}
@@ -401,7 +405,7 @@ func (x *ExecutedBlock) extendWithAuthority(newBlock *rctypes.BlockData, verifie
 		nextShardState.Changed[shardKey] = struct{}{}
 	}
 	// the P85 controls follow the certifications, in payload order
-	env := posEnv{Control: nextShardState.Control, LatestEVM: latestEVM, LatestEVMOK: latestEVMOK,
+	env := posEnv{Control: nextShardState.Control, LatestEVMRoot: latestRoot, LatestEVMBlock: latestBlock, LatestEVMOK: latestEVMOK,
 		InFlight: handoffInFlight(pos, nextShardState.Control)}
 	replaced, err := pos.controls(newBlock, services, env)
 	if err != nil {

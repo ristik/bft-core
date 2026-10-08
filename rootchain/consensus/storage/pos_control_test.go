@@ -183,25 +183,25 @@ func TestControlsAreRefusedWithoutServicesOrASourceState(t *testing.T) {
 }
 
 type fakeEVM struct {
-	roots  map[[32]byte][32]byte
-	retire RetirementFacts
-	reject RejectFacts
-	err    error
-	seen   []byte
+	retire      RetirementFacts
+	reject      RejectFacts
+	err         error
+	seen        []byte
+	roots       [][32]byte
+	rejectAsked [2]any
+	retireAsked [2]uint64
 }
 
-func (e *fakeEVM) StateRoot(h [32]byte) ([32]byte, error) {
-	if r, ok := e.roots[h]; ok {
-		return r, nil
-	}
-	return [32]byte{}, errors.New("uncertified")
-}
 func (e *fakeEVM) VerifyRetirement(w []byte, root [32]byte, id, gen uint64) (RetirementFacts, error) {
 	e.seen = w
+	e.roots = append(e.roots, root)
+	e.retireAsked = [2]uint64{id, gen}
 	return e.retire, e.err
 }
-func (e *fakeEVM) VerifyReject(w []byte, root [32]byte) (RejectFacts, error) {
+func (e *fakeEVM) VerifyReject(w []byte, root [32]byte, resultID [32]byte, attempt uint64) (RejectFacts, error) {
 	e.seen = w
+	e.roots = append(e.roots, root)
+	e.rejectAsked = [2]any{resultID, attempt}
 	return e.reject, e.err
 }
 
@@ -222,13 +222,13 @@ var (
 func newEVMFx(t *testing.T, op uint64) *evmFx {
 	t.Helper()
 	witness := []byte("accounts")
-	evm := &fakeEVM{roots: map[[32]byte][32]byte{pBlock: pRoot}}
+	evm := &fakeEVM{}
 	dep := PosDeployment{RootNetwork: 7, Deployment: evmassign.Deployment{NetworkWord: [32]byte{1}, ChainID: [32]byte{31: 9}, Custody: [20]byte{19: 5}}}
 	f := &evmFx{evm: evm}
 	f.svc = &PosServices{Deployment: dep, Authority: &fakeAuthority{}, Witnesses: fakeWitnesses{sha256.Sum256(witness): witness}, EVM: evm}
 	st := rootrecords.NewState(1, 1)
 	f.step = posStep{on: true, state: st}
-	f.env = posEnv{Control: &evmroot.ControlState{Network: 7, Epoch: 1, PredecessorBodyID: bytes32(0x77), Phase: "idle"}, LatestEVM: pBlock, LatestEVMOK: true}
+	f.env = posEnv{Control: &evmroot.ControlState{Network: 7, Epoch: 1, PredecessorBodyID: bytes32(0x77), Phase: "idle"}, LatestEVMRoot: pRoot, LatestEVMBlock: pBlock[:], LatestEVMOK: true}
 	f.block = &rctypes.BlockData{Epoch: 1, Round: 50, Timestamp: 2_000, Payload: &rctypes.Payload{}}
 	f.ctl = rctypes.PosControl{Network: 7, ChainID: dep.ChainID, Custody: dep.Custody, OrderingEpoch: 1, OrderingRound: 50, Op: op, WitnessHash: sha256.Sum256(witness)}
 	switch op {
@@ -242,7 +242,7 @@ func newEVMFx(t *testing.T, op uint64) *evmFx {
 		res := [32]byte{0x5e}
 		f.ctl.Reject = &rctypes.RejectContext{PredecessorBodyID: [32]byte{0x77}, Attempt: 0, EVMBlockHash: pBlock, EVMStateRoot: pRoot}
 		f.ctl.Data = res[:]
-		evm.reject = RejectFacts{ResultID: res, PredecessorBodyID: [32]byte{0x77}, Attempt: 0, Unresolved: true, NoInstalledSession: true}
+		evm.reject = RejectFacts{ResultID: res, Attempt: 0, Unresolved: true, NoInstalledSession: true}
 	}
 	return f
 }
@@ -279,21 +279,22 @@ func mustProgress(t *testing.T, s rootrecords.State) rootrecords.State { return 
 
 func TestRetirementRefusals(t *testing.T) {
 	cases := map[string]func(f *evmFx){
-		"P is not the latest certified":        func(f *evmFx) { f.env.LatestEVM = [32]byte{0xff} },
-		"no certified EVM in the parent":       func(f *evmFx) { f.env.LatestEVMOK = false },
-		"a state root that is not the block's": func(f *evmFx) { f.ctl.Retire.EVMStateRoot[0]++ },
-		"a handoff in flight":                  func(f *evmFx) { f.env.InFlight = true },
-		"another identity":                     func(f *evmFx) { f.evm.retire.ID = 4 },
-		"another generation":                   func(f *evmFx) { f.evm.retire.Generation = 3 },
-		"a refDigest that is not custody's":    func(f *evmFx) { f.evm.retire.RefDigest[0]++ },
-		"no request at P":                      func(f *evmFx) { f.evm.retire.Requested = false },
-		"already retired in the registry":      func(f *evmFx) { f.evm.retire.NotImported = false },
-		"a live exposure":                      func(f *evmFx) { f.evm.retire.NoLiveExposures = false },
-		"a lot reference":                      func(f *evmFx) { f.evm.retire.NoLotReferences = false },
-		"records not caught up":                func(f *evmFx) { f.evm.retire.RecordsCaughtUp = false },
-		"progress below the liability anchor":  func(f *evmFx) { f.evm.retire.MaxLiabilityAnchor = 1 << 40 },
-		"the proof verifier rejects":           func(f *evmFx) { f.evm.err = errors.New("bad proof") },
-		"a witness that is not available":      func(f *evmFx) { f.ctl.WitnessHash[0]++ },
+		"P is not the latest certified":                  func(f *evmFx) { f.env.LatestEVMRoot = [32]byte{0xff} },
+		"no certified EVM in the parent":                 func(f *evmFx) { f.env.LatestEVMOK = false },
+		"a block hash that is not the certified block's": func(f *evmFx) { f.ctl.Retire.EVMBlockHash[0]++ },
+		"a state root that is not the certified one":     func(f *evmFx) { f.ctl.Retire.EVMStateRoot[0]++ },
+		"a handoff in flight":                            func(f *evmFx) { f.env.InFlight = true },
+		"another identity":                               func(f *evmFx) { f.evm.retire.ID = 4 },
+		"another generation":                             func(f *evmFx) { f.evm.retire.Generation = 3 },
+		"a refDigest that is not custody's":              func(f *evmFx) { f.evm.retire.RefDigest[0]++ },
+		"no request at P":                                func(f *evmFx) { f.evm.retire.Requested = false },
+		"already retired in the registry":                func(f *evmFx) { f.evm.retire.NotImported = false },
+		"a live exposure":                                func(f *evmFx) { f.evm.retire.NoLiveExposures = false },
+		"a lot reference":                                func(f *evmFx) { f.evm.retire.NoLotReferences = false },
+		"records not caught up":                          func(f *evmFx) { f.evm.retire.RecordsCaughtUp = false },
+		"progress below the liability anchor":            func(f *evmFx) { f.evm.retire.MaxLiabilityAnchor = 1 << 40 },
+		"the proof verifier rejects":                     func(f *evmFx) { f.evm.err = errors.New("bad proof") },
+		"a witness that is not available":                func(f *evmFx) { f.ctl.WitnessHash[0]++ },
 		"a retirement id above uint64": func(f *evmFx) {
 			f.ctl.Data[0] = 1
 			f.evm.retire.ID = 0
@@ -375,18 +376,17 @@ func TestRejectResultRefusals(t *testing.T) {
 		"a pending primary":   func(f *evmFx) { f.step.state.Pending = []rootrecords.PendingH{{Epoch: 1, HRound: 9}} },
 		"another predecessor than the control state's": func(f *evmFx) {
 			f.ctl.Reject.PredecessorBodyID[0]++
-			f.evm.reject.PredecessorBodyID[0]++
 		},
-		"a stale attempt":                      func(f *evmFx) { f.ctl.Reject.Attempt = 3 },
-		"P is not the latest certified":        func(f *evmFx) { f.env.LatestEVM = [32]byte{0xff} },
-		"a state root that is not the block's": func(f *evmFx) { f.ctl.Reject.EVMStateRoot[0]++ },
-		"another result in the proof":          func(f *evmFx) { f.evm.reject.ResultID[0]++ },
-		"another predecessor in the proof":     func(f *evmFx) { f.evm.reject.PredecessorBodyID[0]++ },
-		"another attempt in the proof":         func(f *evmFx) { f.evm.reject.Attempt = 1 },
-		"an already resolved result":           func(f *evmFx) { f.evm.reject.Unresolved = false },
-		"a competing installed session":        func(f *evmFx) { f.evm.reject.NoInstalledSession = false },
-		"the proof verifier rejects":           func(f *evmFx) { f.evm.err = errors.New("bad proof") },
-		"no handoff control state":             func(f *evmFx) { f.env.Control = nil },
+		"a stale attempt":                                func(f *evmFx) { f.ctl.Reject.Attempt = 3 },
+		"P is not the latest certified":                  func(f *evmFx) { f.env.LatestEVMRoot = [32]byte{0xff} },
+		"a block hash that is not the certified block's": func(f *evmFx) { f.ctl.Reject.EVMBlockHash[0]++ },
+		"a state root that is not the certified one":     func(f *evmFx) { f.ctl.Reject.EVMStateRoot[0]++ },
+		"another result in the proof":                    func(f *evmFx) { f.evm.reject.ResultID[0]++ },
+		"another attempt in the proof":                   func(f *evmFx) { f.evm.reject.Attempt = 1 },
+		"an already resolved result":                     func(f *evmFx) { f.evm.reject.Unresolved = false },
+		"a competing installed session":                  func(f *evmFx) { f.evm.reject.NoInstalledSession = false },
+		"the proof verifier rejects":                     func(f *evmFx) { f.evm.err = errors.New("bad proof") },
+		"no handoff control state":                       func(f *evmFx) { f.env.Control = nil },
 	}
 	for name, mut := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -651,7 +651,7 @@ func retirable() RetirementFacts {
 func TestRetirementIsJudgedAgainstTheParentsCertifiedEVMState(t *testing.T) {
 	good := bytes.Repeat([]byte{0x77}, 32)
 	root := bytes.Repeat([]byte{0x78}, 32)
-	evm := &fakeEVM{retire: retirable(), roots: map[[32]byte][32]byte{[32]byte(good): [32]byte(root)}}
+	evm := &fakeEVM{retire: retirable()}
 	s, svc, b8 := ackedEpochTwo(t, evm, 8)
 	_, err := s.Add(retirementAt(svc, b8, 9, good, root), nil)
 	require.NoError(t, err, "P is the EVM state the acknowledgement certified")
@@ -659,6 +659,7 @@ func TestRetirementIsJudgedAgainstTheParentsCertifiedEVMState(t *testing.T) {
 	require.Len(t, b9.ShardState.Records, 1)
 	require.Equal(t, rootrecords.KindRetirement, b9.ShardState.Records[0].Kind)
 	require.EqualValues(t, 1_001, b9.ShardState.Records[0].UCTime)
+	require.Equal(t, [][32]byte{[32]byte(root)}, evm.roots, "the witness was judged against the root the shard certified")
 
 	for name, c := range map[string]struct{ block, root []byte }{
 		"another state root": {good, bytes.Repeat([]byte{0xaa}, 32)},
@@ -666,7 +667,7 @@ func TestRetirementIsJudgedAgainstTheParentsCertifiedEVMState(t *testing.T) {
 		"neither":            {bytes.Repeat([]byte{0xbb}, 32), bytes.Repeat([]byte{0xaa}, 32)},
 		"the state before":   {bytes.Repeat([]byte{0}, 32), bytes.Repeat([]byte{0}, 32)},
 	} {
-		evm := &fakeEVM{retire: retirable(), roots: map[[32]byte][32]byte{[32]byte(good): [32]byte(root)}}
+		evm := &fakeEVM{retire: retirable()}
 		s, svc, b8 := ackedEpochTwo(t, evm, 8)
 		_, err := s.Add(retirementAt(svc, b8, 9, c.block, c.root), nil)
 		require.ErrorIs(t, err, ErrNotLatestEVM, name)
@@ -771,4 +772,26 @@ func TestClosureDataIsTheExactABIEncoding(t *testing.T) {
 	bad[32] = 1
 	_, err = DecodeClosureData(bad)
 	require.Error(t, err, "high bits of the round word")
+}
+
+func TestAQuietParentRoundCertifiesNoBlockHash(t *testing.T) {
+	// the parent's input record was quiet: it carries the state root but no block hash, so the control names the zero block hash
+	f := newEVMFx(t, rctypes.OpRetirement)
+	f.env.LatestEVMBlock = nil
+	f.ctl.Retire.EVMBlockHash = [32]byte{}
+	_, err := f.run()
+	require.NoError(t, err)
+	f = newEVMFx(t, rctypes.OpRetirement)
+	f.env.LatestEVMBlock = nil
+	_, err = f.run()
+	require.ErrorIs(t, err, ErrPosControlRefused, "a block hash the root never certified")
+	f = newEVMFx(t, rctypes.OpRejectResult)
+	f.env.LatestEVMBlock = nil
+	_, err = f.run()
+	require.ErrorIs(t, err, ErrPosControlRefused)
+	f.ctl.Reject.EVMBlockHash = [32]byte{}
+	_, err = f.run()
+	require.NoError(t, err)
+	require.Equal(t, [2]any{f.evm.reject.ResultID, uint64(0)}, f.evm.rejectAsked, "the verifier is asked for the control's result and attempt")
+	require.Equal(t, [][32]byte{pRoot}, f.evm.roots, "and judges the witness against the certified state root")
 }
