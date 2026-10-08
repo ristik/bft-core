@@ -31,7 +31,7 @@ func TestARootOnlyV3FreezeIsJudgedOnItsV3BodyOnACouplingChain(t *testing.T) {
 	installed := &types.PartitionDescriptionRecord{PartitionParams: map[string]string{evmassign.CouplingParam: "true"}}
 	steady := &ShardInfo{IR: &types.InputRecord{Epoch: 3}, TR: certification.TechnicalRecord{Epoch: 3}}
 	verify := func(si *ShardInfo, rules V3FreezeRules) error {
-		return verifyFreezeAssignment(companion, si, installed, nil, committee, nil, nil, rules)
+		return verifyFreezeAssignment(companion, si, installed, nil, committee, nil, nil, nil, rules)
 	}
 
 	require.NoError(t, verify(steady, rootOnlyRules{members: committee}), "the same committee in a V3 body is admitted")

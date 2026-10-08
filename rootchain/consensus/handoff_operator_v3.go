@@ -209,8 +209,23 @@ func (x *ConsensusManager) buildHandoffPlanV3FromState(next *types.RootTrustBase
 	if err := x.q3.FreezeRules().VerifyReceipts(raw, receipts, c.Attempt, c.Candidate[:]); err != nil {
 		return abdrc.HandoffApprovalMsg{}, errors.Join(ErrHandoffApproval, err)
 	}
-	return abdrc.HandoffApprovalMsg{Body: raw, Candidate: c.Candidate[:], ActivationRound: c.ActivationRound, Attempt: c.Attempt,
-		CandidatePreimage: c.CandidatePreimage, Receipts: bytes.Clone(receipts)}, nil
+	plan := abdrc.HandoffApprovalMsg{Body: raw, Candidate: c.Candidate[:], ActivationRound: c.ActivationRound, Attempt: c.Attempt,
+		CandidatePreimage: c.CandidatePreimage, Receipts: bytes.Clone(receipts)}
+	if proposal != nil && len(proposal.EVMPoPs) != 0 {
+		if plan.PrimaryPoPs, err = evmassign.EncodePoPs(proposal.EVMPoPs); err != nil {
+			return abdrc.HandoffApprovalMsg{}, errors.Join(ErrHandoffApproval, err)
+		}
+	}
+	if len(c.CandidatePreimage) != 0 {
+		decoded, err := evmassign.DecodeCandidate(c.CandidatePreimage)
+		if err != nil {
+			return abdrc.HandoffApprovalMsg{}, errors.Join(ErrHandoffApproval, err)
+		}
+		if err := x.checkPrimaryPoPs(&plan, decoded); err != nil {
+			return abdrc.HandoffApprovalMsg{}, err
+		}
+	}
+	return plan, nil
 }
 
 func (x *ConsensusManager) v3CandidateFromState(next *types.RootTrustBaseV1, state *abdrc.StateMsg, proposal *evmassign.Proposal) (V3Candidate, error) {

@@ -331,7 +331,9 @@ func (x *ConsensusManager) setHandoffIntent(plan abdrc.HandoffApprovalMsg) {
 	cloned.Body, cloned.Candidate = bytes.Clone(plan.Body), bytes.Clone(plan.Candidate)
 	cloned.CandidatePreimage = bytes.Clone(plan.CandidatePreimage)
 	cloned.Receipts = bytes.Clone(plan.Receipts)
+	cloned.PrimaryPoPs = bytes.Clone(plan.PrimaryPoPs)
 	x.handoffIntent = &cloned
+	x.prefetchFactsForPlan(plan.CandidatePreimage)
 }
 
 // retireIntent forgets the held intent once its attempt is spent: a Prepare (or an Abort) of that attempt or a later one is in the
@@ -750,7 +752,11 @@ func (x *ConsensusManager) checkPlanBody(msg *abdrc.HandoffApprovalMsg) (planBod
 	if err != nil {
 		return body, nil, err
 	}
-	if _, err := x.verifyApprovalAssignment(msg, body, predecessor, old); err != nil {
+	candidate, err := x.verifyApprovalAssignment(msg, body, predecessor, old)
+	if err != nil {
+		return body, nil, err
+	}
+	if err := x.checkPrimaryPoPsShape(msg, candidate); err != nil {
 		return body, nil, err
 	}
 	if !bytes.Equal(body.predecessorHash, link) ||
@@ -864,6 +870,10 @@ func (x *ConsensusManager) endorseHandoffAtState(ctx context.Context, plan abdrc
 		return ErrHandoffApproval
 	}
 	plan.Signer = x.id.String()
+	x.prefetchForPlan(plan.CandidatePreimage, plan.FrozenParent)
+	if err := x.warmPrimaryFacts(ctx, plan.CandidatePreimage); err != nil {
+		return err // the operator's own request may wait for the execution client; the consensus loop never does
+	}
 	if len(plan.CandidatePreimage) != 0 {
 		if err := x.verifyEndorsedAssignmentInstalled(plan, body.assignmentRules(), state); err != nil {
 			return err
@@ -982,6 +992,11 @@ func (x *ConsensusManager) onHandoffApprovalMsg(_ context.Context, msg *abdrc.Ha
 	boundParent, boundActivation, bound := x.boundPrepare(msg.Attempt)
 	if bound && (!bytes.Equal(msg.FrozenParent, boundParent) || msg.ActivationRound != boundActivation) {
 		return errors.Join(ErrHandoffApproval, ErrEndorsedParentMismatch)
+	}
+	// Last, and only for an approval whose signatures and Prepare binding already hold: the possession proofs, against cached facts (the
+	// execution client is never called here; see judgeApprovalPoPs).
+	if err := x.judgeApproval(msg); err != nil {
+		return err
 	}
 	id := plan.body.id
 	x.handoffMu.Lock()
@@ -1140,7 +1155,20 @@ func (x *ConsensusManager) handoffRecordsForRound(round uint64, parentQC *rctype
 		record.Kind = "freeze"
 		record.SuccessorTRHash = make([]byte, 32)
 		var companion []byte
-		if plan.body.version == 3 {
+		primaryProof, perr := x.primaryFreezeProof(plan, plan.plan.FrozenParent)
+		if perr != nil {
+			x.log.Warn("primary candidate's EVM proof unavailable; Freeze not ordered", "attempt", previous.Attempt, "err", perr)
+			return nil, nil
+		}
+		if primaryProof != nil {
+			if plan.body.version != 3 {
+				return nil, ErrHandoffApproval
+			}
+			companion, err = (storage.FreezeV4Authorization{Version: 4, Body: bytes.Clone(plan.plan.Body),
+				Parent: bytes.Clone(plan.plan.FrozenParent), Candidate: bytes.Clone(plan.plan.Candidate),
+				Preimage: bytes.Clone(plan.plan.CandidatePreimage), Receipts: bytes.Clone(plan.plan.Receipts), Signatures: plan.signatures,
+				Proof: primaryProof}).Bytes()
+		} else if plan.body.version == 3 {
 			companion, err = (storage.FreezeV3Authorization{Version: 3, Body: bytes.Clone(plan.plan.Body),
 				Parent: bytes.Clone(plan.plan.FrozenParent), Candidate: bytes.Clone(plan.plan.Candidate),
 				Preimage: bytes.Clone(plan.plan.CandidatePreimage), Receipts: bytes.Clone(plan.plan.Receipts), Signatures: plan.signatures}).Bytes()
