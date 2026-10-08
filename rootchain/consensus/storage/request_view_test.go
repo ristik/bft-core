@@ -951,3 +951,41 @@ func TestExpectedTRInstalledParentRefusals(t *testing.T) {
 	_, err = expectedTR(other, 1)
 	require.ErrorIs(t, err, quorumweight.ErrRequestContext, "a configuration other than the selected assignment's")
 }
+
+// The interval after an acknowledgement block executes but before it is committed: real requests with fees and statistics have moved the
+// parent's accumulators and its record's FeeHash/StatHash, none of which is the install-time commitment. The view builds on the parent's
+// updated record; a one-byte change of either updated commitment is still refused, and so is accumulators that moved without the record.
+func TestExpectedTRAfterExecutedRequestsInTheInstalledState(t *testing.T) {
+	s := newScenario(t, []uint64{6, 1, 1, 1}, []uint64{1, 6, 1, 1}, nil)
+	inst := s.installed(1)
+	install := bytes.Clone(inst.TR.FeeHash)
+	req := &certification.BlockCertificationRequest{PartitionID: 1, ShardID: types.ShardID{}, NodeID: s.f.id(1), BlockSize: 100, StateSize: 50,
+		InputRecord: &types.InputRecord{Version: 1, RoundNumber: inst.TR.Round, Epoch: inst.TR.Epoch, PreviousHash: []byte{1}, Hash: []byte{2}, SumOfEarnedFees: 25}}
+	require.NoError(t, inst.nextRoundWith(req, s.pdr1, crypto.SHA256, resetMembers))
+	require.NotEqual(t, install, inst.TR.FeeHash, "premise: the executed request moved the fee commitment")
+	require.NotZero(t, inst.Stat.Blocks)
+
+	resolve := func(si *ShardInfo) (*RequestRoundView, error) {
+		snap, err := NewRequestSnapshot(fxNetwork, crypto.SHA256, si, s.parentID, nil, s.anchor, s.succ)
+		require.NoError(t, err)
+		return s.resolve(snap, fxActivate+9, 4, fxBody1, PurposeExecute)
+	}
+	v, err := resolve(inst)
+	require.NoError(t, err)
+	require.Equal(t, inst.TR, v.ExpectedTR(), "the updated record, not the install-time one")
+
+	for name, mutate := range map[string]func(*ShardInfo){
+		"the updated fee hash":                           func(si *ShardInfo) { si.TR.FeeHash[0] ^= 1 },
+		"the updated stat hash":                          func(si *ShardInfo) { si.TR.StatHash[0] ^= 1 },
+		"the install-time fee hash (a stale commitment)": func(si *ShardInfo) { si.TR.FeeHash = bytes.Clone(install) },
+		"fees that moved without the record":             func(si *ShardInfo) { si.Fees[s.f.id(1)]++ },
+	} {
+		bad := *inst
+		bad.TR = cloneTR(inst.TR)
+		bad.Fees = maps.Clone(inst.Fees)
+		mutate(&bad)
+		view, err := resolve(&bad)
+		require.ErrorIs(t, err, quorumweight.ErrRequestContext, name)
+		require.Nil(t, view, name)
+	}
+}
