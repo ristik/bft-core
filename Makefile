@@ -67,6 +67,11 @@ build:
     # https://github.com/golang/go/issues/51279
 	cd ./cli/ubft && go build $(GO_BUILD_TAGS) -o ../../build/ubft
 
+# The Q4 fault-lane binary: ubft with the per-peer root fault shim (rootchain/consensus/q4shim) wired in. Never a production binary;
+# it is written to build/q4shim/ubft (the name stays ubft so the lanes' process matching and teardown see it) and only the Q4 live lane runs it.
+build-q4shim:
+	cd ./cli/ubft && go build -tags $(subst $(space),$(comma),$(strip $(GO_BUILD_TAGS_LIST) q4shim)) -o ../../build/q4shim/ubft
+
 # Build with ZK verifier FFI support (SP1 + light-client, requires Rust toolchain)
 build-with-ffi: build-rust-ffi
 	$(MAKE) build ZKVERIFIER_FFI=1
@@ -130,6 +135,7 @@ tools:
 	tools \
 	test \
 	build \
+	build-q4shim \
 	build-with-ffi \
 	build-with-aggregator-zk-ffi \
 	build-with-all-ffi \

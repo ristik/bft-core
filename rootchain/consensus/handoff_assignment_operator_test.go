@@ -540,3 +540,42 @@ func TestPlannerRefusesASupersessionThatWouldOverflowTheChain(t *testing.T) {
 		}
 	})
 }
+
+// The context the operator tooling derives a recovery authorization from carries the configuration of the last ACKNOWLEDGED assignment: the shard's
+// configuration at the epoch of its certified input record, which is not the latest stored one while an activated assignment waits for its
+// acknowledgement.
+func TestTheAcknowledgedConfigurationIsTheOneAtTheCertifiedEpoch(t *testing.T) {
+	later := &types.PartitionDescriptionRecord{Version: 1, NetworkID: 5, PartitionID: 8, PartitionTypeID: 8,
+		TypeIDLen: 8, UnitIDLen: 256, T2Timeout: 3 * time.Second, Epoch: 1, EpochStart: 100,
+		PartitionParams: map[string]string{"seal_registry_genesis": "g", evmassign.CouplingParam: "true", storage.ParamContinuityMaxDist: "1/2"}}
+	f := newOperatorAssignmentFixture(t)
+	shard := func(epoch uint64) abdrc.ShardInfo {
+		return abdrc.ShardInfo{Partition: 8, IR: &types.InputRecord{BlockHash: f.parent, Epoch: epoch}}
+	}
+	got, err := acknowledgedShardConfig(f.cm.orchestration, shard(0))
+	require.NoError(t, err)
+	require.Equal(t, f.current.Epoch, got.Epoch)
+	require.Equal(t, f.current.T2Timeout, got.T2Timeout)
+
+	// an epoch the orchestration does not hold is no acknowledged configuration
+	_, err = acknowledgedShardConfig(f.cm.orchestration, shard(7))
+	require.ErrorIs(t, err, ErrHandoffApproval)
+	// a shard without a certified input record has acknowledged nothing
+	_, err = acknowledgedShardConfig(f.cm.orchestration, abdrc.ShardInfo{Partition: 8})
+	require.ErrorIs(t, err, ErrHandoffApproval)
+	// an orchestration that keeps no per-epoch history cannot say
+	_, err = acknowledgedShardConfig(noEpochHistory{f.cm.orchestration}, shard(0))
+	require.ErrorIs(t, err, ErrHandoffApproval)
+
+	// with a later configuration stored, the acknowledged epoch still selects its own
+	pendingFixture := newOperatorAssignmentFixture(t, later)
+	got, err = acknowledgedShardConfig(pendingFixture.cm.orchestration, abdrc.ShardInfo{Partition: 8, IR: &types.InputRecord{Epoch: 0}})
+	require.NoError(t, err)
+	require.EqualValues(t, 0, got.Epoch, "epoch 0 is acknowledged although epoch 1 is stored")
+	got, err = acknowledgedShardConfig(pendingFixture.cm.orchestration, abdrc.ShardInfo{Partition: 8, IR: &types.InputRecord{Epoch: 1}})
+	require.NoError(t, err)
+	require.EqualValues(t, 1, got.Epoch)
+}
+
+// noEpochHistory hides everything but the consensus Orchestration interface.
+type noEpochHistory struct{ Orchestration }
