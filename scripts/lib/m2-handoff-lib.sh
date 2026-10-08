@@ -27,9 +27,6 @@ m2_wait_root_epoch() {
 m2_start_root() {
   local node=$1 epoch=$2 boot=$3 port pid i conf
   local -a shardConfArgs=(--shard-conf "$fullShardConf")
-  local -a bootArgs=()
-  [ -z "$boot" ] || bootArgs=(--bootnodes "$boot")   # the first root of a cold network has no bootnode, as at genesis
-  [ "${Q3_WEIGHT_LANE:-0}" != 1 ] || shardConfArgs+=(--q3-lane --genesis-identities test-nodes/genesis-identities.json)   # Q3 #50: the coupled runtime (verified history, install journal, V3 handoffs)
   port=$(m2_rpc_port "$node")
   if [ "${F8_MIXED_LANE:-0}" = 1 ]; then
     for conf in test-nodes/shard-conf-f8-a-left.json test-nodes/shard-conf-f8-a-right.json test-nodes/shard-conf-f8-b-left.json; do
@@ -40,7 +37,7 @@ m2_start_root() {
   for i in $(seq 1 90); do
     build/ubft root-node run --home "test-nodes/root$node" \
       --address "/ip4/127.0.0.1/tcp/$(m2_p2p_port "$node")" \
-      ${bootArgs[@]+"${bootArgs[@]}"} --trust-base test-nodes/trust-base.json \
+      --bootnodes "$boot" --trust-base test-nodes/trust-base.json \
       "${shardConfArgs[@]}" --profile-2 --install-handoff-epoch "$epoch" \
       --rpc-server-address "127.0.0.1:$port" --log-format text --log-level debug \
       >>"test-nodes/root$node/debug.log" 2>&1 &
@@ -88,11 +85,13 @@ m2_archive_root_state() {
   mkdir -p "$archive"
   for file in rootchain.db trustbase.db root-trust-history.db orchestration.db; do
     if [ -e "test-nodes/root${node}/$file" ]; then
-      # rootchain.db is archived as a COPY and stays in place: it holds the durable control-cut store and the root-record log (#488), which the
-      # restart admission of every shard node needs after the install, and the successor epoch extends the same record log. Moving it aside makes
-      # the restarted root a root that never saw the old epoch's origins ("the root does not hold it"). M2_ARCHIVE_MOVE_ROOT_DB=1 restores the old
-      # behaviour (a fresh store at the install), for a test that wants exactly that.
-      if [ "$file" = rootchain.db ] && [ "${M2_ARCHIVE_MOVE_ROOT_DB:-0}" != 1 ]; then
+      # Every store is archived as a COPY and stays in place: they are one consistent set. rootchain.db holds the committed blocks, the durable control cuts and
+      # the root-record log (#488); orchestration.db holds the configurations derived from the committed handoffs, which the block store is checked against at
+      # start (a block's stored shard configuration must be the one the derived history gives for its round); the two trust stores hold the installed epochs.
+      # Moving any of them aside leaves the others describing a root that is at another epoch, and the restart is refused ("shard ... stores configuration X,
+      # committed history derives Y"; "the root does not hold it"). An operator's restart keeps them all. M2_ARCHIVE_MOVE_STATE=1 restores the old behaviour
+      # (every store moved, a root that starts from genesis state and fetches the epochs again), for a test that wants exactly that.
+      if [ "${M2_ARCHIVE_MOVE_STATE:-0}" != 1 ]; then
         cp -R "test-nodes/root${node}/$file" "$archive/$file" || return 1
       else
         mv "test-nodes/root${node}/$file" "$archive/$file" || return 1
