@@ -206,6 +206,11 @@ func TestVerifyPrimaryRefusesEachBreakage(t *testing.T) {
 	}{
 		{"unpublished", ErrNotPublished, func(_ *Candidate, f *PrimaryFacts, _ *[]EVMPoP, _ *ElectionDeployment) { f.Published = false }},
 		{"missing stored proofs", ErrNotPublished, func(_ *Candidate, f *PrimaryFacts, _ *[]EVMPoP, _ *ElectionDeployment) { f.PopCount-- }},
+		{"a member lost its coverage after publication", ErrCoverageLost, func(_ *Candidate, f *PrimaryFacts, _ *[]EVMPoP, _ *ElectionDeployment) { f.CoverageLost = true }},
+		{"a member lost its coverage after publication", ErrCoverageLost, func(_ *Candidate, f *PrimaryFacts, _ *[]EVMPoP, _ *ElectionDeployment) { f.CoverageLost = true }},
+		{"a lost result that is also no longer open is still reported as lost", ErrCoverageLost, func(_ *Candidate, f *PrimaryFacts, _ *[]EVMPoP, _ *ElectionDeployment) {
+			f.CoverageLost, f.Open = true, false
+		}},
 		{"session closed or assignment no longer reserved", ErrStaleResult, func(_ *Candidate, f *PrimaryFacts, _ *[]EVMPoP, _ *ElectionDeployment) { f.Open = false }},
 		{"another session installed over the incumbent", ErrStaleResult, func(_ *Candidate, f *PrimaryFacts, _ *[]EVMPoP, _ *ElectionDeployment) {
 			f.IncumbentIsLastAcked = false
@@ -273,7 +278,7 @@ func TestVerifyPrimaryRefusesEachBreakage(t *testing.T) {
 			err := VerifyPrimary(c, d, facts, pops)
 			require.ErrorIs(t, err, tc.want)
 			// isolation: no other sentinel family is the reason
-			for _, other := range []error{ErrNotPublished, ErrStaleResult, ErrPrimaryBinding, ErrPrimaryIdentities, ErrPrimaryPoP, ErrPrimaryRecovery} {
+			for _, other := range []error{ErrNotPublished, ErrStaleResult, ErrCoverageLost, ErrPrimaryBinding, ErrPrimaryIdentities, ErrPrimaryPoP, ErrPrimaryRecovery} {
 				if other != tc.want {
 					require.NotErrorIs(t, err, other)
 				}
