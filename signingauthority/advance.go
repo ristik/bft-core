@@ -10,6 +10,7 @@ import (
 	"github.com/unicitynetwork/bft-go-base/types"
 
 	"github.com/unicitynetwork/bft-core/internal/quorumweight"
+	"github.com/unicitynetwork/bft-core/internal/weightvalidation"
 )
 
 // AdvanceEpoch accepts operator-provisioned successor root trust and shard
@@ -36,7 +37,9 @@ func (a *Authority) AdvanceEpoch(ctx context.Context, conf *types.PartitionDescr
 	if conf == nil || successor == nil {
 		return fmt.Errorf("%w: missing successor context", ErrContextMismatch)
 	}
-	if err := conf.IsValid(); err != nil {
+	// The bounded weights, not the unit rule (PartitionDescriptionRecord.IsValid): the authority advances through a weighted rotation, and
+	// the root has already judged the configuration under the mode of its epoch. Everything else IsValid checks is still checked.
+	if err := weightvalidation.PDR(conf, weightvalidation.RoleEVM, weightvalidation.ModeWeighted); err != nil {
 		return fmt.Errorf("%w: invalid successor configuration: %v", ErrContextMismatch, err)
 	}
 	if conf.NetworkID != old.NetworkID || conf.PartitionID != old.PartitionID || !conf.ShardID.Equal(old.ShardID) ||
