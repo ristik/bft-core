@@ -285,7 +285,7 @@ func (x *ExecutedBlock) extendWithAuthority(newBlock *rctypes.BlockData, verifie
 					return nil, err
 				}
 				if len(companion) != 0 && control.Phase == "endorsed" {
-					if err := verifyFreezeAssignment(companion, nextShardState.States[frozen], shardConfs[frozen], orchestration, authority.CurrentRoot(), nextShardState.States, shardConfs); err != nil {
+					if err := verifyFreezeAssignment(companion, nextShardState.States[frozen], shardConfs[frozen], orchestration, authority.CurrentRoot(), nextShardState.States, shardConfs, v3RulesOf(authority)); err != nil {
 						return nil, err
 					}
 					if err := pos.refuseResolved(companion); err != nil {
@@ -445,7 +445,7 @@ func freezeAssignmentRules(version uint64) evmassign.Rules {
 // The installed assignment is the authenticated configuration of the frozen
 // shard at this block, never a value the candidate supplies.
 func verifyFreezeAssignment(companion []byte, si *ShardInfo, installed *types.PartitionDescriptionRecord, orchestration Orchestration, currentRoot []evmassign.RootMember,
-	states map[types.PartitionShardID]*ShardInfo, shardConfs map[types.PartitionShardID]*types.PartitionDescriptionRecord) error {
+	states map[types.PartitionShardID]*ShardInfo, shardConfs map[types.PartitionShardID]*types.PartitionDescriptionRecord, v3 V3FreezeRules) error {
 	fc, err := ParseFreezeCompanion(companion)
 	if err != nil || si == nil || installed == nil {
 		return ErrHandoffRecord
@@ -460,15 +460,10 @@ func verifyFreezeAssignment(companion []byte, si *ShardInfo, installed *types.Pa
 		// The legacy root-only companion carries no EVM binding: on a chain that requires coupling it must not change
 		// the committee (it could otherwise add a root entity without its delegated EVM key).
 		if evmassign.CouplingRequired(installed) {
-			body, bodyErr := decodeD3Body(fc.Body)
-			if bodyErr != nil {
-				return errors.Join(ErrHandoffRecord, bodyErr)
+			next, membersErr := rootOnlySuccessorMembers(fc, v3)
+			if membersErr != nil {
+				return errors.Join(ErrHandoffRecord, membersErr)
 			}
-			next := make([]evmassign.RootMember, 0, len(body.Members))
-			for _, m := range body.Members {
-				next = append(next, evmassign.RootMember{NodeID: m.NodeID, Key: m.ConsensusKey, Weight: m.Weight})
-			}
-			sort.Slice(next, func(i, j int) bool { return next[i].NodeID < next[j].NodeID })
 			if !evmassign.SameCommittee(next, currentRoot) {
 				return errors.Join(ErrHandoffRecord, evmassign.ErrCoupling)
 			}
@@ -507,6 +502,40 @@ func verifyFreezeAssignment(companion []byte, si *ShardInfo, installed *types.Pa
 	}
 	if err := evmassign.VerifyLifecycle(candidate, lctx); err != nil {
 		return errors.Join(ErrHandoffRecord, err)
+	}
+	return nil
+}
+
+// rootOnlySuccessorMembers is the successor committee a root-only companion (no EVM binding) names, decoded as the body version its Freeze carries:
+// a version-3 body (the Q3 flow's) through the V3 rules the authority holds, any other as the legacy nine-field body. The members are in canonical order.
+func rootOnlySuccessorMembers(fc FreezeCompanion, v3 V3FreezeRules) ([]evmassign.RootMember, error) {
+	var next []evmassign.RootMember
+	if fc.Version == freezeV3Version {
+		if v3 == nil {
+			return nil, ErrFreezeV3Disabled
+		}
+		body, err := v3.VerifyBody(fc.Body)
+		if err != nil {
+			return nil, err
+		}
+		next = append(next, body.Members...)
+	} else {
+		body, err := decodeD3Body(fc.Body)
+		if err != nil {
+			return nil, err
+		}
+		for _, m := range body.Members {
+			next = append(next, evmassign.RootMember{NodeID: m.NodeID, Key: m.ConsensusKey, Weight: m.Weight})
+		}
+	}
+	sort.Slice(next, func(i, j int) bool { return next[i].NodeID < next[j].NodeID })
+	return next, nil
+}
+
+// v3RulesOf is the V3 rule set a handoff authority applies at Freeze, nil where it has none.
+func v3RulesOf(a handoffAuthority) V3FreezeRules {
+	if v1, ok := a.(*v1HandoffAuthority); ok {
+		return v1.v3
 	}
 	return nil
 }

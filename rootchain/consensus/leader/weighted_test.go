@@ -11,11 +11,11 @@ import (
 	"testing"
 
 	"github.com/libp2p/go-libp2p/core/peer"
-	p2ptest "github.com/libp2p/go-libp2p/core/test"
 	"github.com/stretchr/testify/require"
 	"github.com/unicitynetwork/bft-go-base/types"
 
 	test "github.com/unicitynetwork/bft-core/internal/testutils/peer"
+	"github.com/unicitynetwork/bft-core/internal/weightcap"
 )
 
 // committee returns the members sorted by node ID string with the given weights assigned in that order.
@@ -73,6 +73,33 @@ func referenceSchedule(nodes []*types.NodeInfo, rounds int) []int {
 		leaders = append(leaders, win)
 	}
 	return leaders
+}
+
+// referencePriorities is the independent big.Int simulation of the recurrence: the priorities, in canonical member order, after
+// each of the first rounds selections.
+func referencePriorities(nodes []*types.NodeInfo, rounds int) [][]*big.Int {
+	prio := make([]*big.Int, len(nodes))
+	total := new(big.Int)
+	for i, n := range nodes {
+		prio[i] = new(big.Int)
+		total.Add(total, new(big.Int).SetUint64(n.Stake))
+	}
+	out := make([][]*big.Int, rounds)
+	for r := range out {
+		winner := 0
+		for i, n := range nodes {
+			prio[i].Add(prio[i], new(big.Int).SetUint64(n.Stake))
+			if prio[i].Cmp(prio[winner]) > 0 {
+				winner = i
+			}
+		}
+		prio[winner].Sub(prio[winner], total)
+		out[r] = make([]*big.Int, len(nodes))
+		for i := range prio {
+			out[r][i] = new(big.Int).Set(prio[i])
+		}
+	}
+	return out
 }
 
 func indexOf(t *testing.T, nodes []*types.NodeInfo, id peer.ID) int {
@@ -145,6 +172,7 @@ func TestWeightedHeavyPlusThreeLightSchedule(t *testing.T) {
 		nodes := committee(t, weights...)
 		w, err := NewWeighted(100, nodes)
 		require.NoError(t, err)
+		refPrio := referencePriorities(nodes, 27)
 		// the lights in canonical order are a, b, c
 		var order []int // member index of H, a, b, c
 		order = append(order, heavyPos)
@@ -159,11 +187,10 @@ func TestWeightedHeavyPlusThreeLightSchedule(t *testing.T) {
 			require.NoError(t, err)
 			got.WriteByte("Habc"[slot(order, indexOf(t, nodes, id))])
 			k := int(r-100) % 9
-			w.mu.Lock()
+			// the priorities after the slot come from the independent big.Int reference, not from the selector under test
 			for j, member := range order {
-				require.EqualValues(t, table[k][j], w.prio[member].Int64(), "heavy at %d, round %d, member %d", heavyPos, r, j)
+				require.EqualValues(t, table[k][j], refPrio[int(r-100)][member].Int64(), "heavy at %d, round %d, member %d", heavyPos, r, j)
 			}
-			w.mu.Unlock()
 		}
 		require.Equal(t, strings.Repeat(hhahbchh, 3), strings.ReplaceAll(got.String(), "H", "H"), "heavy at position %d", heavyPos)
 	}
@@ -246,7 +273,8 @@ func TestWeightedResponsiveTriplesAndOfflineGap(t *testing.T) {
 }
 
 // After each selection the priorities sum to zero and stay within [-W, (n-1)W]; over any window the selections satisfy
-// W*N_i = L*w_i + p_i(start) - p_i(end); and the schedule equals the independent reference.
+// W*N_i = L*w_i - p_i(end); and the selector's schedule equals the independent reference. The priorities are the independent big.Int
+// reference's: the selector keeps none.
 func TestWeightedInvariantsAndReference(t *testing.T) {
 	rng := rand.New(rand.NewSource(399))
 	for trial := 0; trial < 300; trial++ {
@@ -262,6 +290,7 @@ func TestWeightedInvariantsAndReference(t *testing.T) {
 		require.NoError(t, err)
 		rounds := int(2*total) + 5
 		want := referenceSchedule(nodes, rounds)
+		prio := referencePriorities(nodes, rounds)
 		counts := make([]int64, n)
 		for r := 0; r < rounds; r++ {
 			id, err := w.GetLeaderForRound(w.start + uint64(r))
@@ -270,14 +299,12 @@ func TestWeightedInvariantsAndReference(t *testing.T) {
 			require.Equal(t, want[r], m, "trial %d round %d weights %v", trial, r, weights)
 			counts[m]++
 			sum := new(big.Int)
-			w.mu.Lock()
-			for i, p := range w.prio {
+			for i, p := range prio[r] {
 				sum.Add(sum, p)
-				require.True(t, p.Cmp(big.NewInt(-total)) >= 0, "priority below -W")
+				require.True(t, p.Cmp(big.NewInt(-total)) > 0, "priority not above -W")
 				require.True(t, p.Cmp(big.NewInt(int64(n-1)*total)) <= 0, "priority above (n-1)W")
 				require.Equal(t, int64(r+1)*int64(weights[i]), total*counts[i]+p.Int64(), "W*N_i = L*w_i - p_i(end) from zero")
 			}
-			w.mu.Unlock()
 			require.Zero(t, sum.Sign(), "priorities sum to zero")
 		}
 	}
@@ -305,8 +332,6 @@ func TestWeightedQueryOrderDoesNotChangeTheSchedule(t *testing.T) {
 	for _, r := range []uint64{start, start, start + 1, start + 1, start + 40, start + 39, start, start + 41, start + 120, start + 3, start + 119, start + 199, start + 7, start + 199, start + 190} {
 		check(w, r)
 	}
-	// the cache was not rewound by the older queries
-	require.EqualValues(t, start+199, w.last)
 
 	rng := rand.New(rand.NewSource(7))
 	w = fresh()
@@ -462,28 +487,42 @@ func TestWeightedRejectsInvalidInputs(t *testing.T) {
 	require.NoError(t, err)
 }
 
-func TestWeightedSingleMemberAndMaximumWeights(t *testing.T) {
+func TestWeightedSingleMemberAndBounds(t *testing.T) {
 	one := committee(t, 7)
 	w, err := NewWeighted(1, one)
 	require.NoError(t, err)
+	require.EqualValues(t, 1, w.Period(), "a single member's period is one slot")
 	for r := uint64(1); r < 20; r++ {
 		id, err := w.GetLeaderForRound(r)
 		require.NoError(t, err)
 		require.Equal(t, one[0].NodeID, id.String())
 	}
 
-	// the largest weights a uint64 holds: the total overflows 64 bits, the arithmetic is exact
-	huge := committee(t, math.MaxUint64, math.MaxUint64, 1<<40, 1)
-	w, err = NewWeighted(1, huge)
+	// the profile bound B: a total of exactly B is built, B+1 is refused before any table is allocated, and so is a member above B
+	atB := committee(t, weightcap.B-3, 1, 1, 1)
+	w, err = NewWeighted(1, atB)
 	require.NoError(t, err)
-	require.Equal(t, referenceSchedule(huge, 64), schedule(t, w, huge, 1, 64))
-	q3 := committee(t, 1<<40, 1<<40, 1<<40, 1<<40)
-	w, err = NewWeighted(1, q3)
+	require.EqualValues(t, weightcap.B, w.Period())
+	require.Equal(t, referenceSchedule(atB, 64), schedule(t, w, atB, 1, 64))
+	_, err = NewWeighted(1, committee(t, weightcap.B-2, 1, 1, 1))
+	require.ErrorIs(t, err, ErrWeightBound, "W = B+1")
+	_, err = NewWeighted(1, committee(t, weightcap.B+1))
+	require.ErrorIs(t, err, ErrWeightBound, "one member above B")
+	_, err = NewWeighted(1, committee(t, math.MaxUint64, math.MaxUint64))
+	require.ErrorIs(t, err, ErrWeightBound, "sums that would overflow 64 bits never get that far")
+	_, err = NewWeighted(1, committee(t, 1<<40, 1<<40, 1<<40, 1<<40))
+	require.ErrorIs(t, err, ErrWeightBound, "the old Q3 cap is no longer admitted")
+
+	// the member count bound
+	hundred := committee(t, slicesOf(weightcap.MaxMembers, 1)...)
+	w, err = NewWeighted(1, hundred)
 	require.NoError(t, err)
-	require.Equal(t, []int{0, 1, 2, 3, 0, 1, 2, 3}, schedule(t, w, q3, 1, 8))
+	require.EqualValues(t, weightcap.MaxMembers, w.Period())
+	_, err = NewWeighted(1, committee(t, slicesOf(weightcap.MaxMembers+1, 1)...))
+	require.ErrorIs(t, err, ErrTooManyMembers)
 }
 
-// The round counter does not wrap: a schedule that runs to the top of the round space keeps advancing.
+// The round counter does not wrap: the slot is (r - A*) mod P, with no r-A*+1 addition, so the top of the round space is a plain slot.
 func TestWeightedRoundCounterDoesNotOverflow(t *testing.T) {
 	nodes := committee(t, 2, 1, 1)
 	start := uint64(math.MaxUint64 - 5)
@@ -491,14 +530,16 @@ func TestWeightedRoundCounterDoesNotOverflow(t *testing.T) {
 	require.NoError(t, err)
 	want := referenceSchedule(nodes, 6)
 	require.Equal(t, want, schedule(t, w, nodes, start, 6), "rounds up to MaxUint64")
-	require.EqualValues(t, uint64(math.MaxUint64), w.last)
 	_, err = w.GetLeaderForRound(start - 1)
 	require.ErrorIs(t, err, ErrBeforeStart)
-	// replay of an old round after the cache reached the top
-	for r := uint64(0); r < 6; r++ {
-		id, err := w.GetLeaderForRound(start + r)
+	// a start near the bottom queried at the very top: the slot is (MaxUint64 - start) mod P, from the reference's own arithmetic
+	low, err := NewWeighted(3, nodes)
+	require.NoError(t, err)
+	wantLow := referenceSchedule(nodes, int(low.Period()))
+	for _, r := range []uint64{math.MaxUint64, math.MaxUint64 - 1, math.MaxUint64 - 7, 1 << 63} {
+		id, err := low.GetLeaderForRound(r)
 		require.NoError(t, err)
-		require.Equal(t, nodes[want[r]].NodeID, id.String())
+		require.Equal(t, wantLow[(r-3)%low.Period()], indexOf(t, nodes, id), "round %d", r)
 	}
 }
 
@@ -516,68 +557,4 @@ func TestWeightedCallbacksDoNotChangeTheSchedule(t *testing.T) {
 		require.Equal(t, nodes[want[r-1]].NodeID, id.String())
 	}
 	_ = fmt.Sprint
-}
-
-// BenchmarkQ4Selector measures the supported-scale lookup cost of the #399 selector for the Q4 query-cost gate: a cold restart or
-// catch-up (a fresh selector asked for a round d rounds past the epoch start), an old uncached query (the cache is far ahead, the
-// ring does not hold the round, so the schedule is replayed in scratch state) and concurrent callers on one selector, which share its
-// mutex. The lookup is O(n*d); the benchmark reports ns/op and allocations per lookup. The supported membership and distances are
-// not chosen here: they are frozen before acceptance, and a failing budget is a separate prerequisite, not waived by schedule density.
-func BenchmarkQ4Selector(b *testing.B) {
-	members := func(n int) []*types.NodeInfo {
-		names := make([]string, n)
-		for i := range names {
-			id, err := p2ptest.RandPeerID()
-			require.NoError(b, err)
-			names[i] = id.String()
-		}
-		sort.Strings(names)
-		nodes := make([]*types.NodeInfo, n)
-		for i := range nodes {
-			nodes[i] = &types.NodeInfo{NodeID: names[i], Stake: 1<<40 + uint64(i)} // large, unequal weights
-		}
-		return nodes
-	}
-	for _, n := range []int{4, 10, 100} {
-		nodes := members(n)
-		for _, d := range []uint64{1_000, 10_000, 100_000, 1_000_000} {
-			b.Run(fmt.Sprintf("cold-restart/n=%d/d=%d", n, d), func(b *testing.B) {
-				b.ReportAllocs()
-				for i := 0; i < b.N; i++ {
-					w, err := NewWeighted(1, nodes)
-					require.NoError(b, err)
-					_, err = w.GetLeaderForRound(1 + d)
-					require.NoError(b, err)
-				}
-			})
-			b.Run(fmt.Sprintf("old-uncached/n=%d/d=%d", n, d), func(b *testing.B) {
-				w, err := NewWeighted(1, nodes)
-				require.NoError(b, err)
-				_, err = w.GetLeaderForRound(1 + d + 2*recentRounds) // the cache is ahead; round 1+d is no longer in the ring
-				require.NoError(b, err)
-				b.ReportAllocs()
-				b.ResetTimer()
-				for i := 0; i < b.N; i++ {
-					_, err = w.GetLeaderForRound(1 + d)
-					require.NoError(b, err)
-				}
-			})
-			b.Run(fmt.Sprintf("concurrent-old-uncached/n=%d/d=%d", n, d), func(b *testing.B) {
-				w, err := NewWeighted(1, nodes)
-				require.NoError(b, err)
-				_, err = w.GetLeaderForRound(1 + d + 2*recentRounds)
-				require.NoError(b, err)
-				b.ReportAllocs()
-				b.ResetTimer()
-				b.RunParallel(func(pb *testing.PB) {
-					for pb.Next() {
-						if _, err := w.GetLeaderForRound(1 + d); err != nil {
-							b.Error(err)
-							return
-						}
-					}
-				})
-			})
-		}
-	}
 }
