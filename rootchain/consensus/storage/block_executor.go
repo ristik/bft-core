@@ -218,7 +218,7 @@ func (x *ExecutedBlock) extendWithAuthority(newBlock *rctypes.BlockData, verifie
 		}
 		parentState.States = states
 		parentState.Control = &evmroot.ControlState{Network: parentState.Control.Network,
-			Epoch: newBlock.Epoch, PredecessorBodyID: bytes.Clone(record.NextBodyID), Phase: "idle"}
+			Epoch: newBlock.Epoch, PredecessorBodyID: bytes.Clone(record.NextBodyID), Phase: "idle", Pos: parentState.Control.Pos}
 	}
 	nextShardState, err := parentState.nextBlock(shardConfs, hash)
 	if err != nil {
@@ -230,6 +230,13 @@ func (x *ExecutedBlock) extendWithAuthority(newBlock *rctypes.BlockData, verifie
 		for shard := range nextShardState.States {
 			nextShardState.Changed[shard] = struct{}{}
 		}
+	}
+	pos, err := loadPos(nextShardState.Control)
+	if err != nil {
+		return nil, err
+	}
+	if err := pos.block(newBlock.Epoch, newBlock.Round); err != nil {
+		return nil, err
 	}
 	// Apply the ordered control record before shard requests. A freeze takes
 	// effect in its own block, for leaders and for every voter replaying it.
@@ -280,10 +287,15 @@ func (x *ExecutedBlock) extendWithAuthority(newBlock *rctypes.BlockData, verifie
 					if want != nil && !bytes.Equal(want, committed.SuccessorTRHash) {
 						return nil, errors.Join(ErrHandoffRecord, ErrAssignmentHistory)
 					}
+					// H is ordered here: the successor's offset is fixed now and an assignment handoff waits for its EVM acknowledgement
+					if err := pos.commit(committed, want != nil); err != nil {
+						return nil, err
+					}
 				}
 			}
 			nextShardState.Control = control
 		}
+		pos.store(nextShardState.Control)
 	} else if len(newBlock.Payload.HandoffRecords) > 0 {
 		return nil, ErrNetworkProfile
 	}
@@ -303,6 +315,8 @@ func (x *ExecutedBlock) extendWithAuthority(newBlock *rctypes.BlockData, verifie
 			log.Info(fmt.Sprintf("no validators in shard config (shard has been removed?) %s", shardKey))
 			continue
 		}
+		// a committed assignment handoff waits for this shard's certified acknowledgement: its IR epoch catches up with the installed one
+		awaiting := pos.pendingAck() && si.TR.Epoch != si.IR.Epoch
 
 		if vv := viewDispatch(verifier); vv != nil {
 			// View-aware branch: the request is judged under the view resolved from the state this block executes on and the
@@ -341,6 +355,19 @@ func (x *ExecutedBlock) extendWithAuthority(newBlock *rctypes.BlockData, verifie
 			}
 		}
 
+		if awaiting && si.IR.Epoch == si.TR.Epoch {
+			evm, found, err := frozenEVMShard(nextShardState, shardConfs)
+			if err != nil {
+				return nil, err
+			}
+			if pos.acknowledges(awaiting, si.IR.Epoch, si.TR.Epoch, shardKey, evm, found) {
+				// the acknowledgement is certified in this block: project it at this block's progress and committed time
+				if err := pos.ack(candidates, newBlock.Round, newBlock.Timestamp, si.IR.Epoch); err != nil {
+					return nil, err
+				}
+			}
+		}
+
 		// timeout IR change request do not have BCR
 		var req *certification.BlockCertificationRequest
 		if len(irChReq.Requests) > 0 {
@@ -352,6 +379,10 @@ func (x *ExecutedBlock) extendWithAuthority(newBlock *rctypes.BlockData, verifie
 
 		nextShardState.Changed[shardKey] = struct{}{}
 	}
+	if nextShardState.Control != nil {
+		pos.store(nextShardState.Control) // an acknowledgement in a request changes the state the control digest commits
+	}
+	nextShardState.Records = pos.records
 	ut, _, err := nextShardState.UnicityTree(hash)
 	if err != nil {
 		return nil, fmt.Errorf("creating UnicityTree: %w", err)

@@ -8,6 +8,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/storage"
 	drctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
+	"github.com/unicitynetwork/bft-core/rootrecords"
 )
 
 // The frontier proxy wraps the real store of every root in default startup. Wrapping must not hide the
@@ -82,4 +83,44 @@ func TestFrontierProxyOverAStoreWithoutHandoffCapabilities(t *testing.T) {
 	})
 	require.True(t, ok)
 	require.Error(t, anchor.InstallEpochAnchorRoot(nil, nil), "the atomic anchor install has no fallback")
+}
+
+// The proxy forwards the record log of the real store (a root that runs the frontier sampler is every root in default startup), and a
+// real store without one is a latched fault, not a silent skip.
+func TestFrontierProxyForwardsTheRecordLog(t *testing.T) {
+	db, err := storage.NewBoltStorage(filepath.Join(t.TempDir(), "p.db"), storage.WithNoSync())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	sampler := &frontierSampler{}
+	proxy := &frontierPersistentStore{PersistentStore: db, sampler: sampler, reader: db}
+	var as PersistentStore = proxy
+	store, ok := as.(storage.RecordStore)
+	require.True(t, ok, "the proxy keeps the record capability of the store it wraps")
+
+	rec := rootrecords.Record{Index: 0, Kind: rootrecords.KindSessionClosed, Progress: 1, UCTime: 1, Data: make([]byte, 32)}
+	rec.ID = rootrecords.RecordID(rec.Index, rec.Predecessor, rec.Kind, rec.Progress, rec.UCTime, rec.Data)
+	require.NoError(t, store.AppendRecords([]rootrecords.Record{rec}))
+	n, err := store.RecordCount()
+	require.NoError(t, err)
+	require.EqualValues(t, 1, n)
+	got, err := store.Records(0, 5)
+	require.NoError(t, err)
+	require.Equal(t, []rootrecords.Record{rec}, got)
+	require.False(t, sampler.faulted.Load())
+
+	// an append the real store refuses latches the fault
+	bad := rec
+	bad.Progress++
+	require.ErrorIs(t, store.AppendRecords([]rootrecords.Record{bad}), storage.ErrRecordLog)
+	require.True(t, sampler.faulted.Load())
+
+	// a real store without a log
+	sampler2 := &frontierSampler{}
+	noLog := &frontierPersistentStore{PersistentStore: struct{ PersistentStore }{db}, sampler: sampler2, reader: db}
+	require.ErrorIs(t, noLog.AppendRecords([]rootrecords.Record{rec}), storage.ErrNoRecordStore)
+	require.True(t, sampler2.faulted.Load())
+	_, err = noLog.RecordCount()
+	require.ErrorIs(t, err, storage.ErrNoRecordStore)
+	_, err = noLog.Records(0, 1)
+	require.ErrorIs(t, err, storage.ErrNoRecordStore)
 }

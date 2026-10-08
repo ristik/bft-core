@@ -5,6 +5,7 @@ import (
 
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/storage"
 	drctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
+	"github.com/unicitynetwork/bft-core/rootrecords"
 )
 
 // frontierPersistentStore is installed only with the sampler. Both safety and
@@ -47,6 +48,30 @@ func (s *frontierPersistentStore) RecordSignedDecision(kind storage.DecisionKind
 		return err // a refusal, not a storage fault
 	}
 	return s.fault(err)
+}
+
+// The P85 record log is retained by the block store when a block commits; the proxy forwards it, latching a fault on a failed append,
+// and refuses (also latching) when the real store has no log, which commit then reports as a hard error.
+func (s *frontierPersistentStore) AppendRecords(recs []rootrecords.Record) error {
+	store, ok := s.PersistentStore.(storage.RecordStore)
+	if !ok {
+		return s.fault(storage.ErrNoRecordStore)
+	}
+	return s.fault(store.AppendRecords(recs))
+}
+func (s *frontierPersistentStore) RecordCount() (uint64, error) {
+	store, ok := s.PersistentStore.(storage.RecordStore)
+	if !ok {
+		return 0, storage.ErrNoRecordStore
+	}
+	return store.RecordCount()
+}
+func (s *frontierPersistentStore) Records(from uint64, max int) ([]rootrecords.Record, error) {
+	store, ok := s.PersistentStore.(storage.RecordStore)
+	if !ok {
+		return nil, storage.ErrNoRecordStore
+	}
+	return store.Records(from, max)
 }
 func (s *frontierPersistentStore) WriteBlock(block *storage.ExecutedBlock, root bool) error {
 	return s.fault(s.PersistentStore.WriteBlock(block, root))

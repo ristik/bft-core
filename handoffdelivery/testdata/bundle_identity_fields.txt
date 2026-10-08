@@ -37,6 +37,7 @@ Bundle.Proof.Control.FrozenParent hashed
 Bundle.Proof.Control.Network hashed
 Bundle.Proof.Control.OrderedRound hashed
 Bundle.Proof.Control.Phase hashed
+Bundle.Proof.Control.Pos hashed
 Bundle.Proof.Control.PredecessorBodyID hashed
 Bundle.Proof.Control.PreviousDigest hashed
 Bundle.Proof.Control.RecordBytes hashed
@@ -172,6 +173,7 @@ Bundle.Snapshot.Control.FrozenParent hashed
 Bundle.Snapshot.Control.Network hashed
 Bundle.Snapshot.Control.OrderedRound hashed
 Bundle.Snapshot.Control.Phase hashed
+Bundle.Snapshot.Control.Pos hashed
 Bundle.Snapshot.Control.PredecessorBodyID hashed
 Bundle.Snapshot.Control.PreviousDigest hashed
 Bundle.Snapshot.Control.RecordBytes hashed

@@ -15,6 +15,7 @@ import (
 	"github.com/unicitynetwork/bft-core/internal/quorumweight"
 	"github.com/unicitynetwork/bft-core/network/protocol/certification"
 	rctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
+	"github.com/unicitynetwork/bft-core/rootrecords"
 	abcrypto "github.com/unicitynetwork/bft-go-base/crypto"
 	abhash "github.com/unicitynetwork/bft-go-base/hash"
 	"github.com/unicitynetwork/bft-go-base/types"
@@ -24,6 +25,9 @@ type ShardStates struct {
 	States  map[types.PartitionShardID]*ShardInfo
 	Changed ShardSet              // shards whose state has changed
 	Control *evmroot.ControlState // present only in the handoff network profile
+	// Records are the P85 records this block projected (an acknowledgement), in log order; retained when the block commits. Omitted from
+	// the encoding when empty, so a chain that projects none keeps its byte-identical blocks.
+	Records []rootrecords.Record `cbor:",omitempty"`
 
 	// cache schemes of the block
 	schemes map[types.PartitionID]types.ShardingScheme

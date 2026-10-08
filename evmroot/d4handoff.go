@@ -105,11 +105,18 @@ type ControlState struct {
 	Phase                                 string
 	RecordBytes, PreviousDigest           []byte
 	FrozenParent                          []byte
+	// Pos is the canonical encoding of the root's P85 source state (rootrecords.State): the progress tracker, the committed handoffs
+	// awaiting their EVM acknowledgement and the cursor of the record log. It is committed by this state's digest, so a checkpoint
+	// carries it verifiably. Empty on a chain that does not project records.
+	Pos []byte `cbor:",omitempty"`
 }
 
 func (s ControlState) Bytes() []byte {
 	fields := cArray{cText("UNICITY_ROOT_HANDOFF_STATE"), cUint(1), cUint(s.Network), cUint(s.Epoch), cBytes(s.PredecessorBodyID), cUint(s.Attempt), cText(s.Phase), cUint(s.OrderedRound), cBytes(s.RecordBytes), cBytes(s.PreviousDigest)}
-	if len(s.FrozenParent) != 0 {
+	switch {
+	case len(s.Pos) != 0:
+		fields = append(fields, cBytes(s.FrozenParent), cBytes(s.Pos)) // positional: the parent slot stays even when it is empty
+	case len(s.FrozenParent) != 0:
 		fields = append(fields, cBytes(s.FrozenParent))
 	}
 	return marshalCBOR(fields)
