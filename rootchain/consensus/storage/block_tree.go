@@ -196,6 +196,8 @@ func NewBlockTree(bDB PersistentStore, orchestration Orchestration, networkProfi
 		}
 	}
 
+	// persisted pending blocks may hold LastCR copies older than the persisted root's
+	propagateLastCR(rootNode)
 	return &BlockTree{
 		roundToNode: treeNodes,
 		root:        rootNode,
@@ -468,7 +470,31 @@ func (bt *BlockTree) Commit(commitQc *abdrc.QuorumCert) ([]*certification.Certif
 	}
 
 	bt.root = commitNode
+	propagateLastCR(commitNode)
 	return ucs, nil
+}
+
+// propagateLastCR carries the committed root's latest certification responses (the UC and technical record as one pair) into the
+// matching shard entry of every surviving descendant. nextBlock copies a ShardInfo together with its then-current LastCR, so a
+// descendant executed before a commit would otherwise keep the pair of the previous commit, including across repeat UCs that change
+// neither the IR round nor the state: an execution parent must carry the current committed certificate metadata of its ancestry,
+// independently of its executing TR. Only LastCR is replaced, by reference to the (immutable) response; LastCR is not an input to the
+// unicity tree, so no state root or block identity of a descendant changes. A shard the root does not have gets nothing fabricated;
+// abandoned siblings and archived checkpoints are not descendants and are not touched.
+func propagateLastCR(root *node) {
+	committed := root.data.ShardState.States
+	var walk func(n *node)
+	walk = func(n *node) {
+		for _, c := range n.child {
+			for key, si := range c.data.ShardState.States {
+				if parent, ok := committed[key]; ok && parent.LastCR != nil {
+					si.LastCR = parent.LastCR
+				}
+			}
+			walk(c)
+		}
+	}
+	walk(root)
 }
 
 func (bt *BlockTree) CurrentState() (*rcnet.StateMsg, error) {

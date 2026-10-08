@@ -401,7 +401,10 @@ type ShardInfo struct {
 
 	Fees map[string]uint64 // per validator summary fees of the current epoch
 
-	LastCR *certification.CertificationResponse // last response sent to shard
+	// LastCR is the last response sent to the shard. Invariant: an execution parent carries the current committed certificate metadata of its
+	// ancestry (BlockTree.Commit and NewBlockTree propagate the committed root's pair into every surviving descendant), independently of its
+	// executing TR.
+	LastCR *certification.CertificationResponse
 
 	// latest change request data for creating next certificate
 	IR *types.InputRecord
