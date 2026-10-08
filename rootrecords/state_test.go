@@ -362,3 +362,113 @@ func TestStateAwaitingEncodingAndRefusals(t *testing.T) {
 	_, err = DecodeState(State{Epoch: 3, First: 1, Awaiting: []Awaiting{{Epoch: 1, HRound: 5}, {Epoch: 1, HRound: 4}}}.Bytes())
 	require.ErrorIs(t, err, ErrState, "duplicate")
 }
+
+func TestStateSessionClosedAndRetireProject(t *testing.T) {
+	s := mustBlock(t, NewState(1, 1), 1, 10) // progress 9
+	n, r, err := s.SessionClosed(id32(7), 12, 900)
+	require.NoError(t, err)
+	require.Equal(t, KindSessionClosed, r.Kind)
+	require.EqualValues(t, 11, r.Progress)
+	require.EqualValues(t, 900, r.UCTime)
+	require.EqualValues(t, 1, n.Count)
+	_, _, err = s.SessionClosed(id32(7), 12, 0)
+	require.ErrorIs(t, err, ErrNoUCTime)
+
+	ref := id32(9)
+	n, rec, err := s.Retire(5, 2, ref, 11, 12, 900)
+	require.NoError(t, err)
+	require.NotNil(t, rec)
+	require.Equal(t, KindRetirement, rec.Kind)
+	require.EqualValues(t, 11, rec.Progress, "equal to the maximum liability anchor is enough")
+	got, ok := n.IsRetired(5, 2)
+	require.True(t, ok)
+	require.Equal(t, ref, got)
+	_, ok = n.IsRetired(5, 3)
+	require.False(t, ok)
+
+	again, rec, err := n.Retire(5, 2, ref, 11, 13, 901)
+	require.NoError(t, err)
+	require.Nil(t, rec, "a repeat of the same request emits nothing")
+	require.Equal(t, n.Bytes(), again.Bytes())
+	_, _, err = n.Retire(5, 2, id32(10), 11, 13, 901)
+	require.ErrorIs(t, err, ErrRetirementConflict)
+	_, _, err = s.Retire(5, 2, ref, 12, 12, 900)
+	require.ErrorIs(t, err, ErrRetireEarly, "progress 11 is below the anchor 12")
+	_, _, err = s.Retire(5, 2, ref, 11, 12, 0)
+	require.ErrorIs(t, err, ErrNoUCTime)
+}
+
+func TestStateRetiredMarkersStayOrderedAndRoundTrip(t *testing.T) {
+	s := mustBlock(t, NewState(1, 1), 1, 10)
+	var err error
+	for _, k := range [][2]uint64{{9, 1}, {3, 5}, {3, 2}, {7, 1}} {
+		s, _, err = s.Retire(k[0], k[1], id32(byte(k[0]+k[1])), 0, 12, 900)
+		require.NoError(t, err)
+	}
+	var keys [][2]uint64
+	for _, r := range s.Retired {
+		keys = append(keys, [2]uint64{r.ID, r.Generation})
+	}
+	require.Equal(t, [][2]uint64{{3, 2}, {3, 5}, {7, 1}, {9, 1}}, keys)
+	got, err := DecodeState(s.Bytes())
+	require.NoError(t, err)
+	require.Equal(t, s.Retired, got.Retired)
+	bad := s
+	bad.Retired = []Retired{{ID: 3, Generation: 5}, {ID: 3, Generation: 2}}
+	_, err = DecodeState(bad.Bytes())
+	require.ErrorIs(t, err, ErrState, "descending")
+	bad.Retired = []Retired{{ID: 3, Generation: 2}, {ID: 3, Generation: 2}}
+	_, err = DecodeState(bad.Bytes())
+	require.ErrorIs(t, err, ErrState, "duplicate")
+}
+
+func TestAResultResolvesOnceWhetherClosedOrAcknowledged(t *testing.T) {
+	s := mustBlock(t, NewState(1, 1), 1, 10)
+	n, _, err := s.SessionClosed(id32(7), 12, 900)
+	require.NoError(t, err)
+	require.True(t, n.IsResolved(id32(7)))
+	require.False(t, s.IsResolved(id32(7)), "the original is untouched")
+	_, _, err = n.SessionClosed(id32(7), 13, 901)
+	require.ErrorIs(t, err, ErrResultResolved)
+	other, _, err := n.SessionClosed(id32(3), 13, 901)
+	require.NoError(t, err)
+	require.True(t, other.IsResolved(id32(3)) && other.IsResolved(id32(7)))
+	require.False(t, other.IsResolved(id32(5)))
+
+	// an acknowledged result is resolved too, and a closed one cannot be acknowledged
+	c := mustCommit(t, NewState(1, 1), 100, 2, 101, true)
+	c = mustBlock(t, c, 2, 105)
+	acked, _, err := c.Ack(110, 1_000, id32(9), id32(1), 2)
+	require.NoError(t, err)
+	require.True(t, acked.IsResolved(id32(9)))
+	_, _, err = acked.SessionClosed(id32(9), 111, 1_001)
+	require.ErrorIs(t, err, ErrResultResolved)
+	closedFirst, _, err := c.SessionClosed(id32(9), 108, 999)
+	require.NoError(t, err)
+	_, _, err = closedFirst.Ack(110, 1_000, id32(9), id32(1), 2)
+	require.ErrorIs(t, err, ErrResultResolved)
+	_, _, err = NewState(1, 1).Ack(110, 1_000, id32(9), id32(1), 2)
+	require.ErrorIs(t, err, ErrNoPending)
+}
+
+func TestStateResolvedResultsStayOrderedAndRoundTrip(t *testing.T) {
+	s := mustBlock(t, NewState(1, 1), 1, 10)
+	var err error
+	for _, b := range []byte{9, 3, 7, 5} {
+		s, _, err = s.SessionClosed(id32(b), 12, 900)
+		require.NoError(t, err)
+	}
+	var got [][32]byte
+	got = append(got, s.Resolved...)
+	require.Equal(t, [][32]byte{id32(3), id32(5), id32(7), id32(9)}, got)
+	dec, err := DecodeState(s.Bytes())
+	require.NoError(t, err)
+	require.Equal(t, s.Resolved, dec.Resolved)
+	bad := s
+	bad.Resolved = [][32]byte{id32(5), id32(3)}
+	_, err = DecodeState(bad.Bytes())
+	require.ErrorIs(t, err, ErrState, "descending")
+	bad.Resolved = [][32]byte{id32(3), id32(3)}
+	_, err = DecodeState(bad.Bytes())
+	require.ErrorIs(t, err, ErrState, "duplicate")
+}
