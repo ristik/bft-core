@@ -90,6 +90,14 @@ func (s *frontierPersistentStore) Witness(hash [32]byte) ([]byte, error) {
 	return store.Witness(hash)
 }
 
+func (s *frontierPersistentStore) HasWitness(hash [32]byte) (bool, error) {
+	store, ok := s.PersistentStore.(storage.WitnessStore)
+	if !ok {
+		return false, storage.ErrNoWitnessStore
+	}
+	return store.HasWitness(hash)
+}
+
 func (s *frontierPersistentStore) WriteBlock(block *storage.ExecutedBlock, root bool) error {
 	return s.fault(s.PersistentStore.WriteBlock(block, root))
 }
