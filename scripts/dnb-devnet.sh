@@ -16,12 +16,14 @@ validators=4 rootValidators=4 partitionID=8 aggPartition=9 chainID=${DNB_CHAIN_I
 rethEngineBase=18551 rethEthBase=18545 rethP2PBase=30401
 : "${URETH_BIN:?set URETH_BIN to the pinned unicity-reth}"
 fee=${DNB_FEE_COLLECTOR:-0x000000000000000000000000000000000000dead}
-export M2_PROFILE2=1 SIGNING=local
+# Restarted validators vote again only with an independent signing record (#105): SIGNING=authority keeps one per validator in a separate process that is not restarted.
+export M2_PROFILE2=1 SIGNING=${DNB_SIGNING:-authority}
 
 info() { echo "dnb: $*"; }
 rpc() { curl -sS --max-time 10 -X POST "$1" -H "Content-Type: application/json" -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"$2\",\"params\":$3}"; }
 
 down() {
+  for p in test-nodes/auth*/pid; do [ -f "$p" ] && stop_pidfile "$p" 'ubft signing-authority' || true; done
   for p in test-nodes/reth*/pid; do [ -f "$p" ] && stop_pidfile "$p" 'unicity-reth|reth.* node' || true; done
   [ -f test-nodes/agg/pid ] && stop_pidfile test-nodes/agg/pid 'aggregator' || true
   stop_evm_validators 2>/dev/null || true
@@ -34,6 +36,7 @@ up() {
   info "identities and shard topology"
   init_root_nodes "$rootValidators" >/dev/null
   init_evm_validators "$validators" >/dev/null
+  if [ "$SIGNING" = authority ]; then init_evm_authorities "$validators" "$partitionID" >/dev/null; fi
   generate_evm_shard_conf "$validators" "$partitionID" "$chainID" 5000 exec >/dev/null
   conf=test-nodes/shard-conf-${partitionID}_0.json
 
@@ -55,6 +58,7 @@ PY
     --full-shard-conf test-nodes/evm-full-shard-conf.json --identities-out test-nodes/genesis-identities.json | tee test-nodes/genesis.out
   # The root chain certifies the FULL shard configuration.
   cp test-nodes/evm-full-shard-conf.json "$conf"
+  if [ "$SIGNING" = authority ]; then enroll_evm_authorities "$validators" "$partitionID" >/dev/null; info "signing authorities enrolled against the full shard configuration"; fi
   ureth_flags=$(sed -n 's/^ureth flags: *//p' test-nodes/b1-profile.out)
 
   # The root's aggregator_rsmt_v1 verifier demands an SMT consistency proof with every non-empty certification request; aggregator-go ae08165
