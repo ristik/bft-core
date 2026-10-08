@@ -318,6 +318,10 @@ type Proposal struct {
 	// Identities and Authorization are the primary's frozen identity records and recovery authorization.
 	Identities    []Identity     `json:"identities,omitempty"`
 	Authorization *Authorization `json:"authorization,omitempty"`
+	// EVMPoPs are the members' possession proofs for the EVM-side publication (PoPDigest, signed by each member's EVM key), collected by
+	// the relayer. They travel with the plan so whichever root leads the Freeze can join them to the storage-proof witness; a chain that
+	// judges primary candidates requires them for a primary and refuses them for anything else.
+	EVMPoPs []EVMPoP `json:"evmPops,omitempty"`
 }
 
 // SignPoP signs the possession message with the successor key itself.
