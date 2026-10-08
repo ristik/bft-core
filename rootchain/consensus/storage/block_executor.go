@@ -237,6 +237,16 @@ func (x *ExecutedBlock) extendWithAuthority(newBlock *rctypes.BlockData, verifie
 	if err := pos.block(newBlock.Epoch, newBlock.Round); err != nil {
 		return nil, err
 	}
+	// P of a Retirement or RejectResult: the EVM block certified in the parent, frozen before this block's certifications
+	var latestEVM [32]byte
+	latestEVMOK := false
+	if pos.on {
+		if key, found, err := frozenEVMShard(nextShardState, shardConfs); err == nil && found && nextShardState.States[key] != nil &&
+			nextShardState.States[key].IR != nil && len(nextShardState.States[key].IR.BlockHash) == 32 {
+			copy(latestEVM[:], nextShardState.States[key].IR.BlockHash)
+			latestEVMOK = true
+		}
+	}
 	// Apply the ordered control record before shard requests. A freeze takes
 	// effect in its own block, for leaders and for every voter replaying it.
 	if nextShardState.Control != nil {
@@ -288,6 +298,14 @@ func (x *ExecutedBlock) extendWithAuthority(newBlock *rctypes.BlockData, verifie
 					}
 					// H is ordered here: the successor's offset is fixed now and an assignment handoff waits for its EVM acknowledgement
 					if err := pos.commit(committed, want != nil); err != nil {
+						return nil, err
+					}
+				}
+			}
+			if control.Phase == "aborted" {
+				// an Abort of a retained primary closes its Election result at this block's progress and committed time
+				if aborted, derr := decodeOrderedRecord(newBlock.Payload.HandoffRecords[0]); derr == nil && aborted.Kind == "abort" {
+					if err := pos.abort(candidates, aborted, newBlock.Round, newBlock.Timestamp); err != nil {
 						return nil, err
 					}
 				}
@@ -379,8 +397,14 @@ func (x *ExecutedBlock) extendWithAuthority(newBlock *rctypes.BlockData, verifie
 		nextShardState.Changed[shardKey] = struct{}{}
 	}
 	// the P85 controls follow the certifications, in payload order
-	if err := pos.controls(newBlock, services); err != nil {
+	env := posEnv{Control: nextShardState.Control, LatestEVM: latestEVM, LatestEVMOK: latestEVMOK,
+		InFlight: pos.pendingAck() || (nextShardState.Control != nil && (nextShardState.Control.Phase == "prepared" || nextShardState.Control.Phase == "endorsed"))}
+	replaced, err := pos.controls(newBlock, services, env)
+	if err != nil {
 		return nil, err
+	}
+	if replaced != nil {
+		nextShardState.Control = replaced
 	}
 	if nextShardState.Control != nil {
 		pos.store(nextShardState.Control) // an acknowledgement or a control changes the state the control digest commits

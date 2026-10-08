@@ -15,6 +15,7 @@ import (
 	"github.com/unicitynetwork/bft-core/network/protocol/certification"
 	rctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
 	"github.com/unicitynetwork/bft-core/rootchain/partitions"
+	"github.com/unicitynetwork/bft-core/rootrecords"
 	abcrypto "github.com/unicitynetwork/bft-go-base/crypto"
 	"github.com/unicitynetwork/bft-go-base/types"
 	"github.com/unicitynetwork/bft-go-base/types/hex"
@@ -306,11 +307,17 @@ func TestAbortThenRetryWithAnotherAssignmentInstallsOnlyTheRetry(t *testing.T) {
 	abort.Kind, abort.OrderedRound = "abort", 4
 	abortCompanion := f.abortCompanionFor(t, abort)
 	parent := mustBlock(t, f.store, 3)
-	_, err := f.store.Add(&rctypes.BlockData{Version: 2, Round: 4, Epoch: 1,
+	_, err := f.store.Add(&rctypes.BlockData{Version: 2, Round: 4, Epoch: 1, Timestamp: 4_000,
 		Payload: &rctypes.Payload{Version: 2, HandoffRecords: [][]byte{abort.Bytes(), abortCompanion}},
 		Qc:      &rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{RoundNumber: 3, Epoch: 1, CurrentRootHash: parent.RootHash}}}, nil)
 	require.NoError(t, err)
 	require.Equal(t, "aborted", mustBlock(t, f.store, 4).ShardState.Control.Phase)
+	closed := mustBlock(t, f.store, 4).ShardState.Records
+	require.Len(t, closed, 1, "the abort of a retained primary closes its session")
+	require.Equal(t, rootrecords.KindSessionClosed, closed[0].Kind)
+	res := candidateOf(t, first.preimage).ResultID()
+	require.Equal(t, res[:], closed[0].Data)
+	require.EqualValues(t, 4_000, closed[0].UCTime)
 
 	// Attempt 1 carries a different successor set and fresh proofs of possession.
 	f.pop.Attempt = 1
@@ -522,4 +529,11 @@ func testRogueProvenance(t *testing.T) evmassign.Provenance {
 	p, err := identityfix.Provenance(9, 2, evmassign.KindPrimary, 8)
 	require.NoError(t, err)
 	return p
+}
+
+func candidateOf(t *testing.T, preimage []byte) evmassign.Candidate {
+	t.Helper()
+	c, err := evmassign.DecodeCandidate(preimage)
+	require.NoError(t, err)
+	return c
 }

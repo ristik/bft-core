@@ -1,12 +1,14 @@
 package storage
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"errors"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 	"github.com/unicitynetwork/bft-core/evmassign"
+	"github.com/unicitynetwork/bft-core/evmroot"
 	rctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
 	"github.com/unicitynetwork/bft-core/rootrecords"
 )
@@ -89,7 +91,8 @@ func newCloseFx(t *testing.T) *closeFx {
 
 func (f *closeFx) run() error {
 	f.block.Payload.PosControls = []rctypes.PosControl{f.ctl}
-	return f.step.controls(f.block, f.svc)
+	_, err := f.step.controls(f.block, f.svc, posEnv{})
+	return err
 }
 
 func TestCloseLiabilityProjectsOnceFromAVerifiedBundle(t *testing.T) {
@@ -172,12 +175,271 @@ func TestControlsAreRefusedWithoutServicesOrASourceState(t *testing.T) {
 	f = newCloseFx(t)
 	f.block.Payload.PosControls = nil
 	f.svc = nil
-	require.NoError(t, f.step.controls(f.block, f.svc))
+	_, err := f.step.controls(f.block, f.svc, posEnv{})
+	require.NoError(t, err)
 }
 
-func TestRetirementAndRejectAreNotExecutedYet(t *testing.T) {
-	f := newCloseFx(t)
-	f.ctl.Op, f.ctl.Close = rctypes.OpRetirement, nil
-	f.ctl.Retire = &rctypes.RetireContext{}
-	require.ErrorIs(t, f.run(), ErrPosControlRefused)
+type fakeEVM struct {
+	roots  map[[32]byte][32]byte
+	retire RetirementFacts
+	reject RejectFacts
+	err    error
+	seen   []byte
+}
+
+func (e *fakeEVM) StateRoot(h [32]byte) ([32]byte, error) {
+	if r, ok := e.roots[h]; ok {
+		return r, nil
+	}
+	return [32]byte{}, errors.New("uncertified")
+}
+func (e *fakeEVM) VerifyRetirement(w []byte, root [32]byte, id, gen uint64) (RetirementFacts, error) {
+	e.seen = w
+	return e.retire, e.err
+}
+func (e *fakeEVM) VerifyReject(w []byte, root [32]byte) (RejectFacts, error) {
+	e.seen = w
+	return e.reject, e.err
+}
+
+type evmFx struct {
+	svc   *PosServices
+	evm   *fakeEVM
+	step  posStep
+	env   posEnv
+	block *rctypes.BlockData
+	ctl   rctypes.PosControl
+}
+
+var (
+	pBlock = [32]byte{0xe1}
+	pRoot  = [32]byte{0xe2}
+)
+
+func newEVMFx(t *testing.T, op uint64) *evmFx {
+	t.Helper()
+	witness := []byte("accounts")
+	evm := &fakeEVM{roots: map[[32]byte][32]byte{pBlock: pRoot}}
+	dep := PosDeployment{RootNetwork: 7, Deployment: evmassign.Deployment{NetworkWord: [32]byte{1}, ChainID: [32]byte{31: 9}, Custody: [20]byte{19: 5}}}
+	f := &evmFx{evm: evm}
+	f.svc = &PosServices{Deployment: dep, Authority: &fakeAuthority{}, Witnesses: fakeWitnesses{sha256.Sum256(witness): witness}, EVM: evm}
+	st := rootrecords.NewState(1, 1)
+	f.step = posStep{on: true, state: st}
+	f.env = posEnv{Control: &evmroot.ControlState{Network: 7, Epoch: 1, PredecessorBodyID: bytes32(0x77), Phase: "idle"}, LatestEVM: pBlock, LatestEVMOK: true}
+	f.block = &rctypes.BlockData{Epoch: 1, Round: 50, Timestamp: 2_000, Payload: &rctypes.Payload{}}
+	f.ctl = rctypes.PosControl{Network: 7, ChainID: dep.ChainID, Custody: dep.Custody, OrderingEpoch: 1, OrderingRound: 50, Op: op, WitnessHash: sha256.Sum256(witness)}
+	switch op {
+	case rctypes.OpRetirement:
+		ref := [32]byte{0xc4}
+		f.ctl.Retire = &rctypes.RetireContext{EVMBlockHash: pBlock, EVMStateRoot: pRoot}
+		f.ctl.Data = append(append(word(3), word(2)...), ref[:]...)
+		evm.retire = RetirementFacts{ID: 3, Generation: 2, RefDigest: ref, MaxLiabilityAnchor: 40, Requested: true, NotImported: true,
+			NoLiveExposures: true, NoLotReferences: true, RecordsCaughtUp: true}
+	case rctypes.OpRejectResult:
+		res := [32]byte{0x5e}
+		f.ctl.Reject = &rctypes.RejectContext{PredecessorBodyID: [32]byte{0x77}, Attempt: 0, EVMBlockHash: pBlock, EVMStateRoot: pRoot}
+		f.ctl.Data = res[:]
+		evm.reject = RejectFacts{ResultID: res, PredecessorBodyID: [32]byte{0x77}, Attempt: 0, Unresolved: true, NoInstalledSession: true}
+	}
+	return f
+}
+
+func bytes32(b byte) []byte { x := [32]byte{b}; return x[:] }
+
+func (f *evmFx) run() (*evmroot.ControlState, error) {
+	f.block.Payload.PosControls = []rctypes.PosControl{f.ctl}
+	return f.step.controls(f.block, f.svc, f.env)
+}
+
+func TestRetirementProjectsFromCertifiedCustodyState(t *testing.T) {
+	f := newEVMFx(t, rctypes.OpRetirement)
+	f.step.state = mustProgress(t, f.step.state)
+	replaced, err := f.run()
+	require.NoError(t, err)
+	require.Nil(t, replaced)
+	require.Len(t, f.step.records, 1)
+	r := f.step.records[0]
+	require.Equal(t, rootrecords.KindRetirement, r.Kind)
+	require.Equal(t, f.ctl.Data, r.Data)
+	require.EqualValues(t, 2_000, r.UCTime)
+	require.Equal(t, []byte("accounts"), f.evm.seen)
+	ref, ok := f.step.state.IsRetired(3, 2)
+	require.True(t, ok)
+	require.Equal(t, [32]byte{0xc4}, ref)
+	// the same request again returns the existing outcome and emits nothing
+	_, err = f.run()
+	require.NoError(t, err)
+	require.Len(t, f.step.records, 1)
+}
+
+func mustProgress(t *testing.T, s rootrecords.State) rootrecords.State { return s }
+
+func TestRetirementRefusals(t *testing.T) {
+	cases := map[string]func(f *evmFx){
+		"P is not the latest certified":        func(f *evmFx) { f.env.LatestEVM = [32]byte{0xff} },
+		"no certified EVM in the parent":       func(f *evmFx) { f.env.LatestEVMOK = false },
+		"a state root that is not the block's": func(f *evmFx) { f.ctl.Retire.EVMStateRoot[0]++ },
+		"a handoff in flight":                  func(f *evmFx) { f.env.InFlight = true },
+		"another identity":                     func(f *evmFx) { f.evm.retire.ID = 4 },
+		"another generation":                   func(f *evmFx) { f.evm.retire.Generation = 3 },
+		"a refDigest that is not custody's":    func(f *evmFx) { f.evm.retire.RefDigest[0]++ },
+		"no request at P":                      func(f *evmFx) { f.evm.retire.Requested = false },
+		"already retired in the registry":      func(f *evmFx) { f.evm.retire.NotImported = false },
+		"a live exposure":                      func(f *evmFx) { f.evm.retire.NoLiveExposures = false },
+		"a lot reference":                      func(f *evmFx) { f.evm.retire.NoLotReferences = false },
+		"records not caught up":                func(f *evmFx) { f.evm.retire.RecordsCaughtUp = false },
+		"progress below the liability anchor":  func(f *evmFx) { f.evm.retire.MaxLiabilityAnchor = 1 << 40 },
+		"the proof verifier rejects":           func(f *evmFx) { f.evm.err = errors.New("bad proof") },
+		"a witness that is not available":      func(f *evmFx) { f.ctl.WitnessHash[0]++ },
+		"a retirement id above uint64": func(f *evmFx) {
+			f.ctl.Data[0] = 1
+			f.evm.retire.ID = 0
+		},
+	}
+	for name, mut := range cases {
+		t.Run(name, func(t *testing.T) {
+			f := newEVMFx(t, rctypes.OpRetirement)
+			mut(f)
+			_, err := f.run()
+			require.Error(t, err)
+			if name == "a witness that is not available" {
+				require.ErrorIs(t, err, ErrWitnessUnavailable)
+			} else if name == "progress below the liability anchor" {
+				require.ErrorIs(t, err, rootrecords.ErrRetireEarly)
+			} else {
+				require.ErrorIs(t, err, ErrPosControlRefused)
+			}
+			require.Empty(t, f.step.records)
+			_, retired := f.step.state.IsRetired(3, 2)
+			require.False(t, retired)
+		})
+	}
+	t.Run("a conflicting repeat", func(t *testing.T) {
+		f := newEVMFx(t, rctypes.OpRetirement)
+		_, err := f.run()
+		require.NoError(t, err)
+		f.evm.retire.RefDigest[1]++
+		copy(f.ctl.Data[64:], f.evm.retire.RefDigest[:])
+		_, err = f.run()
+		require.ErrorIs(t, err, rootrecords.ErrRetirementConflict)
+		require.Len(t, f.step.records, 1)
+	})
+	t.Run("no EVM authority", func(t *testing.T) {
+		f := newEVMFx(t, rctypes.OpRetirement)
+		f.svc.EVM = nil
+		_, err := f.run()
+		require.ErrorIs(t, err, ErrPosControls)
+	})
+}
+
+func TestRejectResultClosesTheSessionAndMovesTheAttemptCursor(t *testing.T) {
+	f := newEVMFx(t, rctypes.OpRejectResult)
+	before := f.env.Control.Digest()
+	replaced, err := f.run()
+	require.NoError(t, err)
+	require.NotNil(t, replaced)
+	require.Equal(t, "aborted", replaced.Phase)
+	require.EqualValues(t, 0, replaced.Attempt)
+	require.EqualValues(t, 50, replaced.OrderedRound)
+	require.Equal(t, before, replaced.PreviousDigest)
+	require.Equal(t, bytes32(0x77), replaced.PredecessorBodyID)
+	require.Len(t, f.step.records, 1)
+	require.Equal(t, rootrecords.KindSessionClosed, f.step.records[0].Kind)
+	require.Equal(t, f.ctl.Data, f.step.records[0].Data)
+	require.EqualValues(t, 2_000, f.step.records[0].UCTime)
+
+	// the next attempt is attempt one, and a second rejection of attempt zero is stale
+	f.env.Control = replaced
+	_, err = f.run()
+	require.ErrorIs(t, err, ErrPosControlRefused)
+	f.ctl.Reject.Attempt, f.evm.reject.Attempt = 1, 1
+	next, err := f.run()
+	require.NoError(t, err)
+	require.EqualValues(t, 1, next.Attempt)
+}
+
+func TestRejectResultRefusals(t *testing.T) {
+	cases := map[string]func(f *evmFx){
+		"a prepared handoff":  func(f *evmFx) { f.env.Control.Phase = "prepared" },
+		"an endorsed handoff": func(f *evmFx) { f.env.Control.Phase = "endorsed" },
+		"a committed handoff": func(f *evmFx) { f.env.Control.Phase = "committed" },
+		"a pending primary":   func(f *evmFx) { f.step.state.Pending = []rootrecords.PendingH{{Epoch: 1, HRound: 9}} },
+		"another predecessor than the control state's": func(f *evmFx) {
+			f.ctl.Reject.PredecessorBodyID[0]++
+			f.evm.reject.PredecessorBodyID[0]++
+		},
+		"a stale attempt":                      func(f *evmFx) { f.ctl.Reject.Attempt = 3 },
+		"P is not the latest certified":        func(f *evmFx) { f.env.LatestEVM = [32]byte{0xff} },
+		"a state root that is not the block's": func(f *evmFx) { f.ctl.Reject.EVMStateRoot[0]++ },
+		"another result in the proof":          func(f *evmFx) { f.evm.reject.ResultID[0]++ },
+		"another predecessor in the proof":     func(f *evmFx) { f.evm.reject.PredecessorBodyID[0]++ },
+		"another attempt in the proof":         func(f *evmFx) { f.evm.reject.Attempt = 1 },
+		"an already resolved result":           func(f *evmFx) { f.evm.reject.Unresolved = false },
+		"a competing installed session":        func(f *evmFx) { f.evm.reject.NoInstalledSession = false },
+		"the proof verifier rejects":           func(f *evmFx) { f.evm.err = errors.New("bad proof") },
+		"no handoff control state":             func(f *evmFx) { f.env.Control = nil },
+	}
+	for name, mut := range cases {
+		t.Run(name, func(t *testing.T) {
+			f := newEVMFx(t, rctypes.OpRejectResult)
+			mut(f)
+			replaced, err := f.run()
+			require.Error(t, err)
+			if name == "no handoff control state" {
+				require.ErrorIs(t, err, ErrPosControls)
+			} else {
+				require.ErrorIs(t, err, ErrPosControlRefused)
+			}
+			require.Nil(t, replaced)
+			require.Empty(t, f.step.records)
+		})
+	}
+}
+
+func TestControlsInOneBlockAreCappedAtTheRecordLimit(t *testing.T) {
+	f := newEVMFx(t, rctypes.OpRetirement)
+	for i := 0; i < maxBlockRecords+1; i++ {
+		f.step.records = append(f.step.records, rootrecords.Record{})
+	}
+	f.block.Payload.PosControls = nil
+	_, err := f.step.controls(f.block, f.svc, f.env)
+	require.ErrorIs(t, err, ErrPosControlRefused)
+}
+
+func TestAbortClosesTheSessionOfARetainedPrimaryOnly(t *testing.T) {
+	f := newAssignmentFixture(t)
+	primary := f.candidate(t)
+	recovery := primary
+	recovery.Kind, recovery.PoPs, recovery.ReplacedAssignment = evmassign.KindRecovery, nil, bytes.Repeat([]byte{1}, 32)
+	pEnc, err := primary.Encode()
+	require.NoError(t, err)
+	rEnc, err := recovery.Encode()
+	require.NoError(t, err)
+	body := bytes.Repeat([]byte{4}, 32)
+	abort := evmroot.OrderedHandoffRecord{Kind: "abort", NextBodyID: body}
+	newStep := func() *posStep { return &posStep{on: true, state: rootrecords.NewState(1, 1)} }
+
+	p := newStep()
+	require.NoError(t, p.abort(fixedCandidates{string(body): pEnc}, abort, 20, 3_000))
+	require.Len(t, p.records, 1)
+	want := primary.ResultID()
+	require.Equal(t, rootrecords.KindSessionClosed, p.records[0].Kind)
+	require.Equal(t, want[:], p.records[0].Data)
+	require.EqualValues(t, 3_000, p.records[0].UCTime)
+
+	p = newStep()
+	require.NoError(t, p.abort(fixedCandidates{string(body): rEnc}, abort, 20, 3_000))
+	require.Empty(t, p.records, "the abort of a recovery attempt only advances that attempt")
+
+	p = newStep()
+	require.NoError(t, p.abort(fixedCandidates{}, abort, 20, 3_000))
+	require.Empty(t, p.records, "no retained candidate names no result")
+	require.NoError(t, p.abort(nil, abort, 20, 3_000))
+	require.Empty(t, p.records)
+
+	require.ErrorIs(t, newStep().abort(fixedCandidates{string(body): {1}}, abort, 20, 3_000), ErrPosSource)
+	off := &posStep{}
+	require.NoError(t, off.abort(fixedCandidates{string(body): pEnc}, abort, 20, 3_000))
+	require.Empty(t, off.records)
+	require.ErrorIs(t, newStep().abort(fixedCandidates{string(body): pEnc}, abort, 20, 0), ErrPosSource, "an abort without committed time")
 }
