@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/require"
 	testcertificates "github.com/unicitynetwork/bft-core/internal/testutils/certificates"
 	testtrustbase "github.com/unicitynetwork/bft-core/internal/testutils/trustbase"
+	"github.com/unicitynetwork/bft-core/internal/weightvalidation"
 	"github.com/unicitynetwork/bft-core/network/protocol/certification"
 	abcrypto "github.com/unicitynetwork/bft-go-base/crypto"
 	"github.com/unicitynetwork/bft-go-base/types"
@@ -134,31 +135,41 @@ func TestAuthorityAdvanceRejectsIsolatedInvalidContexts(t *testing.T) {
 func TestAuthorityAdvancesIntoABoundedWeightConfiguration(t *testing.T) {
 	for name, tc := range map[string]struct {
 		shardStake, rootStake uint64
-		ok                    bool
+		rootKey               []byte
+		cause                 error // nil: the advance succeeds
 	}{
-		"bounded weights in both": {6, 6, true},
-		"a zero shard weight":     {0, 6, false},
-		"a zero root weight":      {6, 0, false},
+		"bounded weights in both": {shardStake: 6, rootStake: 6},
+		"a zero shard weight":     {shardStake: 0, rootStake: 6, cause: weightvalidation.ErrWeight},
+		"a zero root weight":      {shardStake: 6, rootStake: 0, cause: weightvalidation.ErrWeight},
+		// the root-node guard on its own: a valid bounded weight, a key that is not a public key
+		"a root key that is not a key": {shardStake: 6, rootStake: 6, rootKey: []byte{1, 2, 3}, cause: weightvalidation.ErrMember},
 	} {
 		t.Run(name, func(t *testing.T) {
 			f := newFixture(t, 1)
 			a := f.pending(t)
 			conf := ownConf(t, a)
 			require.NoError(t, a.CompleteEnrollment(conf))
+			before := a.Enrollment()
 			next := *conf
 			next.Validators = []*types.NodeInfo{{NodeID: conf.Validators[0].NodeID, SigKey: bytes.Clone(conf.Validators[0].SigKey), Stake: tc.shardStake}}
 			next.Epoch++
 			tb := successorTrust(f, 2)
 			// the successor trust base is weighted too: the heavy entity's root node carries a stake of its own
-			tb.RootNodes = []*types.NodeInfo{{NodeID: tb.RootNodes[0].NodeID, SigKey: bytes.Clone(tb.RootNodes[0].SigKey), Stake: tc.rootStake}}
+			key := bytes.Clone(tb.RootNodes[0].SigKey)
+			if tc.rootKey != nil {
+				key = tc.rootKey
+			}
+			tb.RootNodes = []*types.NodeInfo{{NodeID: tb.RootNodes[0].NodeID, SigKey: key, Stake: tc.rootStake}}
 			tb.QuorumThreshold = max(tc.rootStake*2/3+1, 1)
 			err := a.AdvanceEpoch(t.Context(), &next, tb)
-			if tc.ok {
+			if tc.cause == nil {
 				require.NoError(t, err)
 				require.EqualValues(t, next.Epoch, a.Enrollment().ShardEpoch)
 				return
 			}
 			require.ErrorIs(t, err, ErrContextMismatch)
+			require.ErrorIs(t, err, tc.cause)
+			require.Equal(t, before, a.Enrollment(), "refusal must not change enrollment")
 		})
 	}
 }
