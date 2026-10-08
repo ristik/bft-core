@@ -141,6 +141,9 @@ func q4Distances(start uint64) []uint64 {
 // d~6*10^5, the top of the round space and the worst-period inputs. A row outside its budget fails the test; nothing is measured
 // only. Q4_COST_OUT=<file> keeps the measurements as JSON for the acceptance report.
 func TestQ4QueryCostGate(t *testing.T) {
+	if raceEnabled {
+		t.Skip("wall-clock budgets are not meaningful under the race detector; they run in the Q4 deterministic gates job and the normal test shards")
+	}
 	rep := q4CostReport{Profile: "bounded period table (mandatory rows)", Host: fmt.Sprintf("%s/%s %d cpu %s", runtime.GOOS, runtime.GOARCH, runtime.NumCPU(), runtime.Version())}
 	rep.Frozen.Members, rep.Frozen.TotalB = q4MaxMembers, weightcap.B
 	rep.Frozen.BudgetMs, rep.Frozen.AllocBytes, rep.Frozen.Allocs = float64(q4LatencyBudget)/1e6, q4AllocBytesBudget, q4AllocCountBudget
