@@ -44,6 +44,23 @@ func TestHandoffPoPVerifiesInTheHandoff(t *testing.T) {
 	require.False(t, a.Status().HasReservation)
 }
 
+// A weighted rotation out of a unit epoch asks the authority to sign a proof for weights the unit rule refuses; the bounded weights are
+// accepted and the proof verifies, and a weight outside the bound is still refused.
+func TestHandoffPoPSignsBoundedWeights(t *testing.T) {
+	a, req, _ := popFixture(t)
+	req.Successor.Validators[0].Stake = 6
+	pop, err := a.SignHandoffPoP(req)
+	require.NoError(t, err)
+	require.NoError(t, evmassign.VerifyPoPs(req.Context, req.Successor, []evmassign.PoP{pop}))
+
+	for name, stake := range map[string]uint64{"zero": 0, "above the member bound": 1 << 62} {
+		a, req, _ := popFixture(t)
+		req.Successor.Validators[0].Stake = stake
+		_, err := a.SignHandoffPoP(req)
+		require.ErrorIs(t, err, ErrContextMismatch, name)
+	}
+}
+
 func TestHandoffPoPRefusesAWrongDomain(t *testing.T) {
 	a, req, _ := popFixture(t)
 	for _, domain := range []string{"", "UNICITY_H3_EVM_ASSIGNMENT", "UNICITY_H3_EVM_ASSIGNMENT_POP ", "certification", "UNICITY_H3_EVM_ASSIGNMENT_POP\x00"} {
@@ -71,7 +88,7 @@ func TestHandoffPoPRefusesAWrongContext(t *testing.T) {
 			}
 		},
 		"the successor omits this node": func(r *HandoffPoPRequest, _ []byte) { r.Successor.Validators[0].NodeID = "not-this-node" },
-		"an invalid assignment":         func(r *HandoffPoPRequest, _ []byte) { r.Successor.Validators[0].Stake = 2 },
+		"an invalid assignment":         func(r *HandoffPoPRequest, _ []byte) { r.Successor.Validators[0].Stake = 0 },
 	}
 	for name, mutate := range cases {
 		t.Run(name, func(t *testing.T) {
