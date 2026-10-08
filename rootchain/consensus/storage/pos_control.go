@@ -85,18 +85,18 @@ type RetirementFacts struct {
 // RejectFacts are what certified Election and custody state at P establish about an unresolved result.
 type RejectFacts struct {
 	ResultID           [32]byte
-	PredecessorBodyID  [32]byte
 	Attempt            uint64
-	Unresolved         bool // the result is Reserved or Published, not resolved
-	NoInstalledSession bool // no competing installed session
+	Unresolved         bool // the session is open and its assignment still only reserved
+	NoInstalledSession bool // the session extends the last acknowledged assignment: no other session was installed over it
 }
 
 // EVMStateAuthority verifies EVM storage-proof witnesses against a certified state root.
+//
+// The state root is the one the root itself holds as the EVM shard's certified state hash (the input record's Hash is the EVM state
+// root), so a witness is only ever judged against a root the root already authenticated.
 type EVMStateAuthority interface {
-	// StateRoot is the state root of a certified EVM block, from retained verified history.
-	StateRoot(blockHash [32]byte) ([32]byte, error)
 	VerifyRetirement(witness []byte, stateRoot [32]byte, id, generation uint64) (RetirementFacts, error)
-	VerifyReject(witness []byte, stateRoot [32]byte) (RejectFacts, error)
+	VerifyReject(witness []byte, stateRoot [32]byte, resultID [32]byte, attempt uint64) (RejectFacts, error)
 }
 
 // PosDeployment is the custody deployment this root's controls name: the root network id, and custody's network word, chain id and address.
@@ -121,9 +121,11 @@ func (s *PosServices) mandatory() bool { return s != nil && s.Authority != nil }
 type posEnv struct {
 	// Control is the handoff control state after this block's handoff record.
 	Control *evmroot.ControlState
-	// LatestEVM is the EVM block hash certified in the parent block: the only P a Retirement or RejectResult may name.
-	LatestEVM   [32]byte
-	LatestEVMOK bool
+	// LatestEVMRoot is the EVM state root certified in the parent block (the shard input record's Hash) and LatestEVMBlock its block hash,
+	// nil when the latest round was quiet (a quiet input record carries no block hash): the only P a Retirement or RejectResult may name.
+	LatestEVMRoot  [32]byte
+	LatestEVMBlock []byte
+	LatestEVMOK    bool
 	// InFlight reports a prepared or endorsed handoff, or a committed one not yet acknowledged.
 	InFlight bool
 }
@@ -194,20 +196,20 @@ func witnessOf(c rctypes.PosControl, svc *PosServices) ([]byte, error) {
 	return witness, nil
 }
 
-// certifiedState checks that the named EVM state is the latest the parent certified and returns its authenticated root.
+// certifiedState checks that the named EVM state is the latest the parent certified. The state root is what the proofs are checked
+// against; the block hash is only named when the parent's round certified a block, and is the zero word otherwise (an unauthenticated
+// field is fixed, not free).
 func certifiedState(blockHash, stateRoot [32]byte, svc *PosServices, env posEnv) error {
 	if svc.EVM == nil {
 		return ErrPosControls
 	}
-	if !env.LatestEVMOK || blockHash != env.LatestEVM {
+	if !env.LatestEVMOK || stateRoot != env.LatestEVMRoot {
 		return errors.Join(ErrPosControlRefused, ErrNotLatestEVM)
 	}
-	root, err := svc.EVM.StateRoot(blockHash)
-	if err != nil {
-		return errors.Join(ErrWitnessUnavailable, err)
-	}
-	if root != stateRoot {
-		return errors.Join(ErrPosControlRefused, ErrNotLatestEVM, errors.New("the state root is not the certified block's"))
+	var want [32]byte
+	copy(want[:], env.LatestEVMBlock)
+	if blockHash != want {
+		return errors.Join(ErrPosControlRefused, ErrNotLatestEVM, errors.New("the block hash is not the certified block's"))
 	}
 	return nil
 }
@@ -293,15 +295,15 @@ func (p *posStep) reject(c rctypes.PosControl, block *rctypes.BlockData, svc *Po
 	if err != nil {
 		return nil, err
 	}
-	f, err := svc.EVM.VerifyReject(witness, c.Reject.EVMStateRoot)
+	f, err := svc.EVM.VerifyReject(witness, c.Reject.EVMStateRoot, resultID, c.Reject.Attempt)
 	if err != nil {
 		return nil, errors.Join(ErrPosControlRefused, err)
 	}
 	switch {
 	case f.ResultID != resultID:
 		return nil, fmt.Errorf("%w: the proof is of another result", ErrPosControlRefused)
-	case f.PredecessorBodyID != c.Reject.PredecessorBodyID || f.Attempt != c.Reject.Attempt:
-		return nil, fmt.Errorf("%w: the result is bound to another predecessor or attempt", ErrPosControlRefused)
+	case f.Attempt != c.Reject.Attempt:
+		return nil, fmt.Errorf("%w: the session is of another attempt", ErrPosControlRefused)
 	case !f.Unresolved:
 		return nil, fmt.Errorf("%w: the result is already resolved", ErrPosControlRefused)
 	case !f.NoInstalledSession:
