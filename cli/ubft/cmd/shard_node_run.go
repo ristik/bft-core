@@ -717,6 +717,10 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 			if verifierContext.B1, jErr = newB1PairConfig(b1Profile, b1rt, flags.EthURL, 10*time.Second); jErr != nil {
 				return jErr
 			}
+			// The execution client is the paired ureth: every build and import carries the pair binding its own gate compares.
+			if q3Admit, jErr = wireQ3Pair(executor, b1rt, uint64(shardConf.NetworkID), origin.Valid(), [32]byte(origin.BlockHash())); jErr != nil {
+				return jErr
+			}
 		}
 		if flags.Q3Lane {
 			// The shard node (the EVM pair's Go) trusts its own verification from the pinned genesis: a verified Q3 history and install
@@ -1736,6 +1740,9 @@ func buildExecutor(ctx context.Context, flags *shardNodeRunFlags, shardConf *typ
 		// schedules nothing, and would pass every check above before requiring Engine methods this
 		// adapter does not call. eth_config (EIP-7910) is the standard read for it. Last, so that a
 		// mispairing or a wrong genesis is reported as that rather than as a profile difference.
+		if flags.B1Profile != "" {
+			adapter.ExpectUnicityPrecompiles()
+		}
 		if _, err := adapter.CheckExecutionProfile(ctx, wantChainID); err != nil {
 			return nil, fmt.Errorf("engine-api executor failed its startup execution-profile check "+
 				"(the execution client's chain spec is not the pinned %s profile): %w", engineapi.PinnedProfileName, err)

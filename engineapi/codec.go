@@ -55,7 +55,7 @@ type ProposalEnvelope struct {
 // label. It is not a commitment field, so the set is documented but not
 // enforced here, matching the ureth side.
 type SealCompanion struct {
-	B1Update   data   `json:"b1Update,omitempty"`
+	B1Update   data   `json:"b1Update"`
 	RootInput  data   `json:"rootInput"`
 	Witnesses  []data `json:"witnesses"`
 	Provenance string `json:"provenance"`
@@ -144,7 +144,7 @@ func (c SealCompanion) MarshalJSON() ([]byte, error) {
 		witnesses = []data{}
 	}
 	return json.Marshal(struct {
-		B1Update   data   `json:"b1Update,omitempty"`
+		B1Update   data   `json:"b1Update"`
 		RootInput  data   `json:"rootInput"`
 		Witnesses  []data `json:"witnesses"`
 		Provenance string `json:"provenance"`
@@ -170,7 +170,7 @@ func (c SealCompanion) MarshalJSON() ([]byte, error) {
 // both from the same verified parent snapshot. An empty array means no
 // transition is pending, never that unauthenticated data was dropped.
 type SealBuildInput struct {
-	B1Update    data   `json:"b1Update,omitempty"`
+	B1Update    data   `json:"b1Update"`
 	RootInput   data   `json:"rootInput"`
 	Transitions []data `json:"transitions"`
 
@@ -189,7 +189,7 @@ func (s SealBuildInput) MarshalJSON() ([]byte, error) {
 		transitions = []data{}
 	}
 	return json.Marshal(struct {
-		B1Update    data   `json:"b1Update,omitempty"`
+		B1Update    data   `json:"b1Update"`
 		RootInput   data   `json:"rootInput"`
 		Transitions []data `json:"transitions"`
 		pairWire

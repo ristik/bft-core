@@ -52,13 +52,15 @@ var (
 // everything else (types.go, client.go, params.go, codec.go) is pure
 // Engine-API-facing machinery Adapter composes.
 type Adapter struct {
-	engine       *Client
-	eth          *EthClient
-	log          *slog.Logger
-	feeCollector [20]byte
-	sealPinMu    sync.Mutex
-	sealPinned   bool
-	sealID       [32]byte
+	// unicityPrecompiles: the execution profile check expects the B1/B2 native precompiles (ExpectUnicityPrecompiles).
+	unicityPrecompiles bool
+	engine             *Client
+	eth                *EthClient
+	log                *slog.Logger
+	feeCollector       [20]byte
+	sealPinMu          sync.Mutex
+	sealPinned         bool
+	sealID             [32]byte
 
 	// verifier is the derivation context the seal build path authenticates a certificate against.
 	// Nil for an adapter that only runs the non-deriving checks (the doctor command); Build refuses

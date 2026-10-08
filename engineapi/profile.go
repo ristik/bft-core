@@ -116,10 +116,30 @@ func (a *Adapter) CheckExecutionProfile(ctx context.Context, wantChainID uint64)
 	if err != nil {
 		return ExecutionProfile{}, fmt.Errorf("engineapi: reading eth_config (EIP-7910) over the plain connection: %w", err)
 	}
+	if a.unicityPrecompiles {
+		return checkProfileWith(raw, wantChainID, unicityNativePrecompiles)
+	}
 	return checkProfile(raw, wantChainID)
 }
 
+// unicityNativePrecompiles is what a B1/B2 deployment's client adds to the pinned Cancun set (ureth's Unicity EVM factory): the UC, shared-seal and
+// RSMT verifiers of B1 and the B2 native token kernel. 0x0103 (S1) stays unregistered. Nothing else may differ.
+var unicityNativePrecompiles = map[string]string{
+	"unicity-b1-Uc":     "0x0000000000000000000000000000000000000100",
+	"unicity-b1-Shared": "0x0000000000000000000000000000000000000101",
+	"unicity-b1-Member": "0x0000000000000000000000000000000000000102",
+	"unicity-b2-sdk3":   "0x0000000000000000000000000000000000000104",
+}
+
+// ExpectUnicityPrecompiles makes the profile check require exactly the B1/B2 native precompiles in addition to the pinned Cancun set. It is for a
+// fresh-B1 deployment; without it any extra precompile is refused.
+func (a *Adapter) ExpectUnicityPrecompiles() { a.unicityPrecompiles = true }
+
 func checkProfile(raw json.RawMessage, wantChainID uint64) (ExecutionProfile, error) {
+	return checkProfileWith(raw, wantChainID, nil)
+}
+
+func checkProfileWith(raw json.RawMessage, wantChainID uint64, extra map[string]string) (ExecutionProfile, error) {
 	if isJSONNull(raw) {
 		return ExecutionProfile{}, errors.New("engineapi: eth_config returned no fork configuration")
 	}
@@ -181,7 +201,17 @@ func checkProfile(raw json.RawMessage, wantChainID uint64) (ExecutionProfile, er
 		return ExecutionProfile{}, fmt.Errorf("engineapi: execution client's system contracts differ from the pinned profile (%s): %s",
 			PinnedProfileName, d)
 	}
-	if d := diffAddressSet(cur.Precompiles, pinnedProfile.precompiles); d != "" {
+	wantPrecompiles := pinnedProfile.precompiles
+	if len(extra) > 0 {
+		wantPrecompiles = make(map[string]string, len(pinnedProfile.precompiles)+len(extra))
+		for k, v := range pinnedProfile.precompiles {
+			wantPrecompiles[k] = v
+		}
+		for k, v := range extra {
+			wantPrecompiles[k] = v
+		}
+	}
+	if d := diffAddressSet(cur.Precompiles, wantPrecompiles); d != "" {
 		return ExecutionProfile{}, fmt.Errorf("engineapi: execution client's precompiles differ from the pinned profile (%s): %s",
 			PinnedProfileName, d)
 	}

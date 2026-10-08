@@ -526,7 +526,10 @@ function start_one_evm_validator() {
 
   # The registry layout only matters to the engine-api executor; resolve it from the run's persisted file.
   local layoutArgs=()
-  if [ "$executor" = engine-api ]; then
+  if [ "$executor" = engine-api ] && [ -n "${EVM_B1_PROFILE:-}" ]; then
+    # Fresh-B1 deployment (DN-B): the profile selects registry layout 3; the artifact is pinned in b1registry, not a layout file.
+    layoutArgs=(--b1-profile "$EVM_B1_PROFILE")
+  elif [ "$executor" = engine-api ]; then
     registry_layout_require || return 1
     layoutArgs=(--registry-layout "$(registry_layout)")
   fi
