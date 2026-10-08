@@ -60,3 +60,22 @@ Evidence: [`evidence/cycle2-after-restarts.log`](evidence/cycle2-after-restarts.
 * A malformed certificate's full cost (the ~6.4 M gas B1 burns on a halt) was measured in-process in PR6, not live. A flipped-byte eth_call returned a clean `UCRejected`.
 * `aggregator_rsmt_v1` with aggregator-go (finding 2), W_cert > 15, weighted or rotating root epochs, public-network conditions, arm64 CPU budgets.
 * The first 30-minute attempt stalled on root consensus (finding 7); it was not reproduced on three later fresh runs.
+
+## Stage 4 (after #479, #471/#477 and ureth #59/#61): restart of everything, budgets, root liveness
+
+Evidence: [`evidence/stage4-run.log`](evidence/stage4-run.log). Pins changed: ureth `9d61e63762a1b0863a3d54519e8de55310748f87` (#61, sha256 `7b…` of the pinned binary in /private/tmp/dnb-unicity-reth-9d61e637), bft-core integration at #479 plus this branch.
+
+* **Root liveness.** With non-decreasing seal timestamps (#479) the root no longer stalls: two devnet runs of 25+ minutes passed round 796 and 822 with **0** `exceeds voter clock skew`
+  rejections (the unfixed rule stopped at round 163). The final run logged 0 as well.
+* **Interruption between redeem and claim.** All four shard validators and all four ureth were stopped at once and started from their own state (roots, aggregator-go and the four independent
+  signing authorities kept running). Heights 32 → 34 on all four, the credit survived exactly once, the recorded nullifier survived, the old proof is refused, then claim paid.
+  Needs `SIGNING=authority` and `--engine.persistence-threshold 0`: a restarted validator with a local signing key follows but does not vote (#105), and a ureth that persists only
+  every 64 blocks loses everything on a full restart.
+* **Budgets on the running chain** (ordinary capacity 7,000,000 gas): a redemption whose certificate has a corrupted first byte (malformed CBOR head) halts B1 and burns **6,792,431** gas
+  of the submitter's 7,000,000; a corrupted middle byte (well-formed, bad signature) costs 1,753,601. A valid redemption costs about 1.85M.
+
+Findings of this stage (cross-repo wire skew, fixed here): bft-core's codec sent `rootRecords` (optional) while ureth #59 requires `records`; the engine profile check, `b1Update`, the pair
+binding and now the root-record import all needed matching fields. A B1 pair needs a `RecordsSource` since #471; this branch gives a chain with no P85 root source state an empty one
+(`emptyRootRecords`, genesis UC time). A deployment with a root source state needs a real source (not written upstream yet).
+
+Still not done: a reorg (no EVM fork occurs under BFT certification here), `aggregator_rsmt_v1` with aggregator-go.
