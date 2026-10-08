@@ -53,7 +53,7 @@ func main() {
 	// The genesis control state also carries the root's P85 source state (epoch 1, ordinary rounds from round 2, nothing pending, empty
 	// log), after the empty frozen-parent slot. Encoded here from the specification, not with rootrecords.
 	source := enc([]any{"UNICITY_P85_ROOT_SOURCE_STATE", uint64(1), uint64(1), uint64(0), uint64(2), false, uint64(0), uint64(0), uint64(0), uint64(0),
-		[]any{}, []any{}, []any{}, []any{}, uint64(0), make([]byte, 32), uint64(0), uint64(0)})
+		[]any{}, []any{}, []any{}, []any{}, uint64(0), make([]byte, 32), uint64(0), uint64(0), []any{}})
 	idle := enc([]any{"UNICITY_ROOT_HANDOFF_STATE", uint64(1), uint64(5), uint64(1), make([]byte, 32), uint64(0), "idle", uint64(0), []byte{}, []byte{}, []byte{}, source})
 	prep := control("prepared", 2, record("prepare", 2, zero, body, zero), sum(idle))
 	freeze := control("frozen", 3, record("freeze", 3, frozen, body, zero), sum(prep))
