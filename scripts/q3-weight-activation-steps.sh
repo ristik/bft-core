@@ -422,13 +422,14 @@ q3_heavy_crash() {
 }
 
 # ---- a subsequent scheme-2 handoff, and the supersession of an unacknowledged one ---------------------------------------------------------------
-# Handoff 2 (root epoch 2 -> 3, the same four entities, the heavy weight moves to entity 2) is committed by the weighted epoch-2 committee under
+# Handoff 2 (root epoch 2 -> 3, the same four entities, weights (4,3,1,1): part of the heavy weight moves to entity 2) is committed by the weighted epoch-2 committee under
 # scheme 2 (a heavy-plus-one-light Commit, 7 of 9) and activates, but its acknowledgement is withheld: the registry stays at shard epoch 1. Handoff 3
-# (epoch 3 -> 4, heavy weight to entity 3) is assembled with --supersede and replaces it on the same frozen parent; its folded acknowledgement takes
+# (epoch 3 -> 4, weights (2,5,1,1)) is assembled with --supersede and replaces it on the same frozen parent; its folded acknowledgement takes
 # the registry from shard epoch 1 straight to 3, and the superseded assignment is never acknowledged.
 Q3_WEIGHTS_1=$Q3_WEIGHTS
-Q3_WEIGHTS_2="1 6 1 1"
-Q3_WEIGHTS_3="1 1 6 1"
+Q3_WEIGHTS_2="4 3 1 1"      # part of the way to a swap: distance 4/9 from (6,1,1,1)
+Q3_WEIGHTS_3="2 5 1 1"      # replaces handoff 2: 8/9 from the acknowledged committee (6,1,1,1), 4/9 from the activated (4,3,1,1); inside the budget against either
+Q3_WEIGHTS_SWAP="1 6 1 1"   # the full heavy-weight swap: 10/9, refused
 
 q3_handoff_n() { # n epoch weights supersede(0|1) incumbent: plans, endorses and commits the handoff at old epoch (epoch-1)
   local n=$1 epoch=$2
@@ -478,6 +479,27 @@ q3_activation_n() { # n epoch: the committed activation record of epoch N; its C
     "$epoch" "$amin" "$astar" "$(jq -r .activationCommitId "$rec")" "$(jq -r .v3BodyId "$rec")" "$epoch" "$first" "$total" "$Q3_TOTAL_WEIGHT" "$Q3_ROOT_QUORUM" >"$Q3_DIR/activation-coordinates-$epoch.txt"
 }
 
+# The negative continuity row: the full heavy-weight swap (6,1,1,1 -> 1,6,1,1) has weight distance 10/9, above the committed budget 1/1, and the root refuses to derive its
+# candidate. Nothing is planned or ordered; the registry and the chain are unchanged. The positive rows are the handoffs that stay inside the budget.
+q3_continuity_refusal() {
+  local err budget out="$Q3_DIR/continuity-refusal.txt"
+  budget=$(jq -r '.partitionParams.continuity_max_distance' "$fullShardConf")
+  [ "$budget" = 1/1 ] || { echo "the genesis configuration commits continuity_max_distance=$budget, not 1/1" >&2; return 1; }
+  Q3_WEIGHTS=$Q3_WEIGHTS_SWAP Q3_SUFFIX=-swap Q3_NEXT_EPOCH=3 Q3_ASSIGN_TAG=swap Q3_INCUMBENT="$Q3_DIR/cand-identities.json"
+  q3_trust_base_v3 3 || return 1
+  q3_build_assignment swap 1 2 3 4 || return 1
+  if err=$(q3_derive_candidate 2>&1); then
+    echo "the full heavy-weight swap (distance 10/9, budget $budget) was accepted" >&2; return 1
+  fi
+  Q3_WEIGHTS=$Q3_WEIGHTS_1; unset Q3_SUFFIX Q3_NEXT_EPOCH Q3_ASSIGN_TAG Q3_INCUMBENT
+  printf '%s\n' "$err" | grep -q 'weight distance exceeded' || { echo "the swap was refused, but not for its weight distance: $err" >&2; return 1; }
+  h3_registry_is 1 2 || { echo "the registry moved while the swap was refused" >&2; return 1; }
+  { echo "committed budget continuity_max_distance=$budget (normalized weight distance sum|w/W - v/V|)"
+    echo "inside the budget (accepted): handoff 1 (1,1,1,1)->(6,1,1,1) 5/6; handoff 2 (6,1,1,1)->(4,3,1,1) 4/9; handoff 3 (2,5,1,1) 8/9 from the acknowledged committee (6,1,1,1) and 4/9 from the activated one (4,3,1,1)"
+    echo "outside the budget (refused): (6,1,1,1)->(1,6,1,1) 10/9"
+    echo "refusal:"; printf '%s\n' "$err" | grep -v '^$'; } >"$out"
+}
+
 q3_second_handoff() { q3_handoff_n 2 3 "$Q3_WEIGHTS_2" 0 "$Q3_DIR/cand-identities.json"; }
 
 q3_second_activation() {
@@ -505,7 +527,7 @@ q3_supersede() {
 # gives the heavy root about 6/9 of the rounds; the legacy selector gave a quarter each. The evidence file states what the root logs show, and the
 # step fails when the heavy root's share is not weight-proportional.
 q3_leader_schedule() {
-  # epoch 2 only: from its activation round to the activation round of epoch 3 (the heavy weight moves to another entity there)
+  # epoch 2 only: from its activation round to the activation round of epoch 3 (the weights change there)
   local astar end; astar=$(jq -r .activationRound "$Q3_DIR/activation-record.json")
   end=$(jq -r '.activationRound // empty' "$Q3_DIR/activation-record-3.json" 2>/dev/null); end=${end:-999999999}
   python3 - "$Q3_DIR/leader-schedule.txt" "$astar" "$end" "$(q3_weight_of 1)" "$Q3_WEIGHTS" test-nodes/root1/debug.log test-nodes/root2/debug.log test-nodes/root3/debug.log test-nodes/root4/debug.log <<'PY'
@@ -667,7 +689,7 @@ q3_pair_restart_control() {
 q3_evidence_complete() { q3_evidence_check "$Q3_DIR"; }
 
 Q3_STEPS="q3_baseline q3_candidate q3_handoff q3_install_epoch2 q3_activation q3_acknowledge q3_progress_scheme2 q3_evm_request_weights \
-q3_aggregators_unchanged q3_real_tc q3_root_boundary q3_evm_boundary q3_heavy_crash q3_proof_envelope q3_start_second_pair q3_second_pair q3_pair_controls q3_second_handoff q3_second_activation q3_supersede q3_leader_schedule q3_evidence_complete"
+q3_aggregators_unchanged q3_real_tc q3_root_boundary q3_evm_boundary q3_heavy_crash q3_proof_envelope q3_start_second_pair q3_second_pair q3_pair_controls q3_continuity_refusal q3_second_handoff q3_second_activation q3_supersede q3_leader_schedule q3_evidence_complete"
 
 q3_run_lane() {
   local s
