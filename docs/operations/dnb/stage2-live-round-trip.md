@@ -1,6 +1,6 @@
 # DN-B stage 2: live private round trip (lock → mint → transfer → burn → redeem → claim)
 
-Run 2026-10-08 on the B1/B2 paired devnet of stage 1 plus aggregator-go as a BFT shard. Raw evidence: [`evidence/round-trip-run.log`](evidence/round-trip-run.log),
+Run 2026-10-08 on the B1/B2 paired devnet of stage 1 plus aggregator-go as a BFT shard. Raw evidence: [`evidence/round-trip-run.txt`](evidence/round-trip-run.txt),
 [`evidence/round-trip-evidence.json`](evidence/round-trip-evidence.json), the deployment inputs beside them. The driver is
 `tests/live/lane.ts` in ristik/native-bridge-plugins (PR "DN-B live lane driver"), the bring-up is `scripts/dnb-devnet.sh all`.
 
@@ -44,7 +44,7 @@ Run 2026-10-08 on the B1/B2 paired devnet of stage 1 plus aggregator-go as a BFT
 
 ## Stage 3 additions: refusals, restart, measured gas
 
-Evidence: [`evidence/cycle2-after-restarts.log`](evidence/cycle2-after-restarts.log), [`evidence/restart-sequence.out`](evidence/restart-sequence.out).
+Evidence: [`evidence/cycle2-after-restarts.txt`](evidence/cycle2-after-restarts.txt), [`evidence/restart-sequence.out`](evidence/restart-sequence.out).
 
 * Refusals by `eth_call` in the live window: a flipped certificate byte → `UCRejected` (`0x391d1053`); a claim by an uncredited account → `InsufficientCredit`; the same burn redeemed
   twice → `AlreadyRedeemed(nonce)` (`0xd36d946d`).
@@ -63,7 +63,7 @@ Evidence: [`evidence/cycle2-after-restarts.log`](evidence/cycle2-after-restarts.
 
 ## Stage 4 (after #479, #471/#477 and ureth #59/#61): restart of everything, budgets, root liveness
 
-Evidence: [`evidence/stage4-run.log`](evidence/stage4-run.log). Pins changed: ureth `9d61e63762a1b0863a3d54519e8de55310748f87` (#61, sha256 `d8dfcfcb97abe7d3c7166a72e83e1a4870b5c973f6af3c7e1d9549a8f914fb53`, /private/tmp/dnb-unicity-reth-9d61e637), bft-core integration at #479 plus this branch.
+Evidence: [`evidence/stage4-run.txt`](evidence/stage4-run.txt). Pins changed: ureth `9d61e63762a1b0863a3d54519e8de55310748f87` (#61, sha256 `d8dfcfcb97abe7d3c7166a72e83e1a4870b5c973f6af3c7e1d9549a8f914fb53`, local build of that merge commit at /private/tmp/dnb-unicity-reth-9d61e637; the binary is identified by path and sha256, not published), bft-core integration at #479 plus this branch.
 
 * **Root liveness.** With non-decreasing seal timestamps (#479) the root no longer stalls: two devnet runs of 25+ minutes passed round 796 and 822 with **0** `exceeds voter clock skew`
   rejections (the unfixed rule stopped at round 163). The final run logged 0 as well.
@@ -72,10 +72,9 @@ Evidence: [`evidence/stage4-run.log`](evidence/stage4-run.log). Pins changed: ur
   Needs `SIGNING=authority` and `--engine.persistence-threshold 0`: a restarted validator with a local signing key follows but does not vote (#105), and a ureth that persists only
   every 64 blocks loses everything on a full restart.
 * **Budgets on the running chain** (ordinary capacity 7,000,000 gas): a redemption whose certificate has a corrupted first byte (malformed CBOR head) halts B1 and burns **6,792,431** gas
-  of the submitter's 7,000,000; a corrupted middle byte (well-formed, bad signature) costs 1,753,601. A valid redemption costs about 1.85M.
+  of the submitter's 7,000,000; a corrupted middle byte costs between 1,753,601 (an earlier run, rejected after decoding) and 6,792,453 (the latest run: the flipped byte there also halted B1); both stay inside the limit, and the probes assert `gasUsed < gasLimit` so an out-of-gas cannot pass as a revert. A valid redemption costs about 1.85M.
 
 Findings of this stage (cross-repo wire skew, fixed here): bft-core's codec sent `rootRecords` (optional) while ureth #59 requires `records`; the engine profile check, `b1Update`, the pair
-binding and now the root-record import all needed matching fields. A B1 pair needs a `RecordsSource` since #471; this branch gives a chain with no P85 root source state an empty one
-(`emptyRootRecords`, genesis UC time). A deployment with a root source state needs a real source (not written upstream yet).
+binding and now the root-record import all needed matching fields. The root-record source of a B1 pair is the authenticated feed from the root nodes (`attachRecordsFeed`, #478); the handoff root profile the devnet runs seeds a P85 source state, so the real feed applies.
 
 Still not done: a reorg (no EVM fork occurs under BFT certification here), `aggregator_rsmt_v1` with aggregator-go.

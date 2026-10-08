@@ -372,13 +372,3 @@ func TestB1RunFlags_EachRequirementIsEnforced(t *testing.T) {
 		require.NoError(t, validateB1RunFlags(&shardNodeRunFlags{RegistryLayout: 2}))
 	})
 }
-
-func TestB1PairConfig_CarriesAnEmptyRecordSourceAtTheGenesisUCTime(t *testing.T) {
-	src := emptyRootRecords{ucTime: 1000}
-	cur, err := src.Cursor(context.Background(), 77)
-	require.NoError(t, err)
-	require.Equal(t, uint64(1000), cur.UCTime)
-	require.Zero(t, cur.TargetCount)
-	_, err = src.Record(0)
-	require.Error(t, err)
-}

@@ -709,7 +709,10 @@ func (a *Adapter) buildDerived(ctx context.Context, p shardnode.RoundParams, der
 	if err != nil {
 		return "", fmt.Errorf("engineapi: looking up parent header %x: %w", parentHash32, err)
 	}
-	attrs := DeriveAttributesV2(derived.Input, ParentHeader{Timestamp: uint64(parentHeader.Timestamp)}, a.feeCollector)
+	attrs, err := DeriveAttributesV2Checked(derived.Input, ParentHeader{Timestamp: uint64(parentHeader.Timestamp)}, a.feeCollector)
+	if err != nil {
+		return "", fmt.Errorf("engineapi: build: parent %x: %w", parentHash32, err)
+	}
 
 	sealAttrs := UnicityPayloadAttributes{
 		PayloadAttributesV3: attrs,
@@ -868,7 +871,10 @@ func (a *Adapter) CheckBlockBinding(ctx context.Context, b shardnode.Block, p sh
 	if err != nil {
 		return fmt.Errorf("%w: parent header: %w", shardnode.ErrBlockBindingUnavailable, err)
 	}
-	attrs := DeriveAttributesV2(input.Input, ParentHeader{Timestamp: uint64(parentHeader.Timestamp)}, a.feeCollector)
+	attrs, err := DeriveAttributesV2Checked(input.Input, ParentHeader{Timestamp: uint64(parentHeader.Timestamp)}, a.feeCollector)
+	if err != nil {
+		return fmt.Errorf("%w: parent header: %w", shardnode.ErrBlockBindingUnavailable, err)
+	}
 	payload := envelope.ExecutionPayload
 	if a.verifier.B1 != nil && uint64(payload.GasLimit) != a.verifier.B1.Profile.MaxGas {
 		return b1paired.ErrAdmission
@@ -1017,7 +1023,10 @@ func (a *Adapter) Verify(ctx context.Context, b shardnode.Block, p shardnode.Rou
 	// fields are checked last of the checks, so a block that fails authentication is reported as an
 	// authentication failure rather than as a field divergence. A divergence stays StatusInvalid with
 	// the local warning, not an error return, exactly as before the reordering.
-	attrs := DeriveAttributesV2(derived.Input, ParentHeader{Timestamp: uint64(parentHeader.Timestamp)}, a.feeCollector)
+	attrs, err := DeriveAttributesV2Checked(derived.Input, ParentHeader{Timestamp: uint64(parentHeader.Timestamp)}, a.feeCollector)
+	if err != nil {
+		return shardnode.StatusInvalid, fmt.Errorf("engineapi: parent header timestamp: %w", err)
+	}
 	claimed := PayloadFields{
 		Timestamp:             envelope.ExecutionPayload.Timestamp,
 		PrevRandao:            envelope.ExecutionPayload.PrevRandao,

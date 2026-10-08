@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	libp2ppeer "github.com/libp2p/go-libp2p/core/peer"
 	"os"
 	"sort"
 	"time"
@@ -24,11 +25,11 @@ import (
 	"github.com/unicitynetwork/bft-core/b1state"
 	"github.com/unicitynetwork/bft-core/q3active"
 	"github.com/unicitynetwork/bft-core/q3format"
+	"github.com/unicitynetwork/bft-core/recordsfeed"
 	"github.com/unicitynetwork/bft-core/registrygenesis"
 	"github.com/unicitynetwork/bft-core/registryproof"
 	"github.com/unicitynetwork/bft-core/registrywitness"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/zkverifier"
-	"github.com/unicitynetwork/bft-core/rootrecords"
 	"github.com/unicitynetwork/bft-go-base/types"
 )
 
@@ -241,12 +242,24 @@ func b1ProofFetcher(rpc registrywitness.Caller) func(context.Context, registrypr
 }
 
 // newB1PairConfig is the pair's Update admission configuration: the profile, the authority of the node's own verified root history, and
-// the proof source of its paired client.
+// the proof source of its paired client. The root-record source is attached by attachRecordsFeed (the authenticated feed from the root nodes);
+// the config deliberately carries none until then.
 func newB1PairConfig(p b1state.Profile, rt *q3active.Runtime, ethURL string, timeout time.Duration) (*b1paired.Config, error) {
 	if rt == nil {
 		return nil, fmt.Errorf("%w: no verified root history", ErrB1Profile)
 	}
-	return &b1paired.Config{Profile: p, Authority: rt.B1Authority(), Proofs: b1ProofFetcher(registrywitness.NewHTTPCaller(ethURL, timeout)), Records: emptyRootRecords{ucTime: p.GenesisUCTime}}, nil
+	return &b1paired.Config{Profile: p, Authority: rt.B1Authority(), Proofs: b1ProofFetcher(registrywitness.NewHTTPCaller(ethURL, timeout))}, nil
+}
+
+// attachRecordsFeed gives the pair its authenticated route to the root's record log: one remote per root the node knows, asked in turn.
+// What a root serves is believed only after it verified against the unicity tree root of the certificate the pair holds, so the roots
+// are not trusted and any of them will do.
+func attachRecordsFeed(cfg *b1paired.Config, host recordsfeed.Libp2p, roots []libp2ppeer.AddrInfo) {
+	remotes := make([]recordsfeed.Remote, 0, len(roots))
+	for _, r := range roots {
+		remotes = append(remotes, recordsfeed.P2PRemote{Opener: recordsfeed.FromLibp2p(host), Roots: []libp2ppeer.ID{r.ID}})
+	}
+	cfg.Records = recordsfeed.NewSource(remotes...)
 }
 
 // b1IdentitiesFile is the genesis tool's identity document the vault deployment is checked against
@@ -342,17 +355,4 @@ func validateB1RunFlags(flags *shardNodeRunFlags) error {
 		return errors.New("registry layout 3 is the fresh-B1 layout and requires --b1-profile")
 	}
 	return nil
-}
-
-// emptyRootRecords is the root-record source of a deployment whose root chain projects no P85 source state (proof of authority, no custody
-// contract): the retained log is empty, so every block's mandatory import is the empty batch at the profile's pinned genesis UC time. A
-// deployment with a root source state needs a source that reads the root's retained log instead; this one must not be used there.
-type emptyRootRecords struct{ ucTime uint64 }
-
-func (emptyRootRecords) Record(uint64) (rootrecords.Record, error) {
-	return rootrecords.Record{}, errors.New("the root-record source log is empty")
-}
-
-func (e emptyRootRecords) Cursor(context.Context, uint64) (rootrecords.Cursor, error) {
-	return rootrecords.Cursor{UCTime: e.ucTime}, nil
 }

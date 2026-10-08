@@ -83,10 +83,12 @@ maxCheckpointStaleness = minRealTimeProtection − acquireLatency  (strictly < i
 
 `FreshnessPolicy.Supported()` is false without an enforced floor, and `Valid()`
 then returns false — the policy is **reported unsupported**, not asserted safe.
-`ConsensusMinRoundPeriodSeconds` (physical minimum: one propagation delay + two
-BFT phases) and `MaxObservedRoundPeriodSeconds` only **bracket** the *advisory*
-per-round estimate — `Valid()` rejects a `MinRoundPeriodSeconds` below the
-physical minimum **or** above the observed maximum. Vector
+`ConsensusMinRoundPeriodSeconds` (one whole second, the unit of the estimate;
+**not** a physical or protocol minimum — the observed root profile runs rounds
+under a second, so even a one-second estimate can overstate a real round) and
+`MaxObservedRoundPeriodSeconds` only **bracket** the *advisory* per-round
+estimate — `Valid()` rejects a `MinRoundPeriodSeconds` of zero **or** above the
+observed maximum. Vector
 `checkpoint_freshness_policy` (`policy_supported_by_enforced_floor: true`,
 `rounds_only_policy_reported_unsupported: true`,
 `sub_physical_minimum_round_estimate_rejected: true`,

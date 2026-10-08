@@ -2,6 +2,8 @@ package evmroot
 
 import (
 	"crypto/sha256"
+	"errors"
+	"math"
 )
 
 // DerivePrevRandao returns prevRandao = H(DOM_rho, r, n):
@@ -33,14 +35,34 @@ func domainHash(domain string, rootRound, shardRound uint64) Hash32 {
 	return sha256.Sum256(enc)
 }
 
-// DeriveTimestamp returns max(referenceTime, parentTimestamp+1) — the
-// monotone EVM header counter. referenceTime is the authorizing seal's
-// timestamp; parentTimestamp is the previous EVM block's header timestamp.
-// At sub-second shard cadence the seal timestamp alone can repeat, so the
-// +1 path keeps EVM headers strictly increasing.
-func DeriveTimestamp(referenceTime, parentTimestamp uint64) uint64 {
-	if parentTimestamp+1 > referenceTime {
-		return parentTimestamp + 1
+// ErrTimestampOverflow reports a parent timestamp at the top of the 64-bit range, whose successor cannot be represented: the derived
+// EVM header time would not be strictly greater than the parent's. The Rust derivation refuses the same input.
+var ErrTimestampOverflow = errors.New("evmroot: parent timestamp + 1 overflows")
+
+// DeriveTimestampChecked returns max(referenceTime, parentTimestamp+1) — the
+// monotone EVM header counter — or ErrTimestampOverflow when parentTimestamp+1
+// does not fit. referenceTime is the authorizing seal's timestamp (whole
+// seconds, non-decreasing, equal seconds valid); parentTimestamp is the
+// previous EVM block's header timestamp. At sub-second shard cadence the seal
+// timestamp alone repeats, so the +1 path keeps EVM headers strictly
+// increasing; that derived clock can run ahead of the root clock and does not
+// inherit its future bound.
+func DeriveTimestampChecked(referenceTime, parentTimestamp uint64) (uint64, error) {
+	if parentTimestamp == math.MaxUint64 {
+		return 0, ErrTimestampOverflow
 	}
-	return referenceTime
+	if parentTimestamp+1 > referenceTime {
+		return parentTimestamp + 1, nil
+	}
+	return referenceTime, nil
+}
+
+// DeriveTimestamp is DeriveTimestampChecked for callers that have established the parent timestamp is below the top of the range (tests
+// and fixtures). It panics on overflow rather than return a timestamp that is not above the parent's; production paths use the checked form.
+func DeriveTimestamp(referenceTime, parentTimestamp uint64) uint64 {
+	ts, err := DeriveTimestampChecked(referenceTime, parentTimestamp)
+	if err != nil {
+		panic(err)
+	}
+	return ts
 }

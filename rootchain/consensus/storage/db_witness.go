@@ -7,12 +7,28 @@ import (
 	"fmt"
 
 	"go.etcd.io/bbolt"
+
+	rctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
 )
 
 var keyWitness = []byte("p85/witness/")
 
 // MaxWitnessBytes bounds one retained control witness: the closure archive bundle bound.
 const MaxWitnessBytes = 64 << 20
+
+// MaxEVMWitnessBytes bounds the EVM storage-proof witness of a Retirement or RejectResult: evmstate.MaxWitnessBytes (briefs/p85-pr1c-
+// control-records.md section 3), which the executor enforces. A test in the node package pins the two together.
+const MaxEVMWitnessBytes = 1 << 20
+
+// WitnessBound is the largest witness a control of the given op may commit to; a pull of its witness refuses a longer one before it
+// allocates, and a larger one could not be applied anyway.
+func WitnessBound(op uint64) int {
+	switch op {
+	case rctypes.OpRetirement, rctypes.OpRejectResult:
+		return MaxEVMWitnessBytes
+	}
+	return MaxWitnessBytes
+}
 
 var (
 	// ErrWitnessStore reports a witness that cannot be retained.

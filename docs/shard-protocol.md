@@ -210,6 +210,7 @@ names what was wrong.
 perfectly well-formed but disagrees with what other honest validators
 submitted for the same round is not rejected — there's nothing malformed
 about it. It simply fails to reach quorum. The root chain's T2 timeout
+(a root-consensus liveness parameter, evaluated by the root's own progress in rounds, with no wall-clock guarantee; see ADR 0013)
 fires, a repeat UC is issued, and from the outside this looks identical to
 a network hiccup. Nothing points at which field diverged or between which
 validators.

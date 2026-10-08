@@ -152,32 +152,40 @@ func (l *Log) Append(kind Kind, data []byte, at Anchor) (Record, error) {
 
 // Verify re-derives a received sequence from its first record: sequential indexes, linked predecessors, content-derived identifiers,
 // exact payload widths and non-decreasing anchors. It is what an importer runs before trusting a projection.
-func Verify(records []Record) error {
-	var prev Record
+func Verify(records []Record) error { return VerifyAfter(nil, records) }
+
+// VerifyAfter checks records that extend a verified log whose last record is prev (nil: the log is empty): consecutive indices from the
+// one after prev, valid payloads, exact links, monotone anchors and content-derived identifiers.
+func VerifyAfter(prev *Record, records []Record) error {
+	next := uint64(0)
+	if prev != nil {
+		next = prev.Index + 1
+	}
 	for i, r := range records {
-		if r.Index != uint64(i) {
-			return fmt.Errorf("%w: position %d carries index %d", ErrIndex, i, r.Index)
+		if r.Index != next+uint64(i) {
+			return fmt.Errorf("%w: position %d carries index %d, want %d", ErrIndex, i, r.Index, next+uint64(i))
 		}
 		if err := checkPayload(r.Kind, r.Data); err != nil {
-			return fmt.Errorf("record %d: %w", i, err)
+			return fmt.Errorf("record %d: %w", r.Index, err)
 		}
-		if i > 0 {
+		if prev != nil {
 			if r.Predecessor != prev.ID {
-				return fmt.Errorf("%w: record %d", ErrPredecessor, i)
+				return fmt.Errorf("%w: record %d", ErrPredecessor, r.Index)
 			}
 			if r.Progress < prev.Progress || r.UCTime < prev.UCTime {
-				return fmt.Errorf("%w: record %d", ErrMonotonic, i)
+				return fmt.Errorf("%w: record %d", ErrMonotonic, r.Index)
 			}
 		} else if r.Predecessor != ([32]byte{}) {
 			return fmt.Errorf("%w: first record names a predecessor", ErrPredecessor)
 		}
 		if r.ClosedEpoch != 0 && r.Kind != KindClosure {
-			return fmt.Errorf("%w: record %d", ErrClosedEpoch, i)
+			return fmt.Errorf("%w: record %d", ErrClosedEpoch, r.Index)
 		}
 		if r.ID != RecordID(r.Index, r.Predecessor, r.Kind, r.Progress, r.UCTime, r.Data) {
-			return fmt.Errorf("%w: record %d", ErrRecordID, i)
+			return fmt.Errorf("%w: record %d", ErrRecordID, r.Index)
 		}
-		prev = r
+		cur := r
+		prev = &cur
 	}
 	return nil
 }

@@ -11,6 +11,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/unicitynetwork/bft-core/b1registry"
 	"github.com/unicitynetwork/bft-core/b1state"
+	"github.com/unicitynetwork/bft-core/evmroot"
 	"github.com/unicitynetwork/bft-core/internal/b1authority"
 	"github.com/unicitynetwork/bft-core/registryproof"
 	"github.com/unicitynetwork/bft-core/rootrecords"
@@ -25,8 +26,9 @@ var ErrRecordsAdmission = errors.New("rootinput: root-record import missing or i
 type RecordsSource interface {
 	rootrecords.Source
 	// Cursor is the current progress and UC time, and the length and tip of the complete source log, as of the committed root block
-	// of originRootRound. Records ordered after that block are not part of it.
-	Cursor(ctx context.Context, originRootRound uint64) (rootrecords.Cursor, error)
+	// the origin names. The origin carries what authenticates it (its unicity tree root, round, epoch and reference time), so a source
+	// can check the state it is served against it. Records ordered after that block are not part of it.
+	Cursor(ctx context.Context, origin evmroot.RootOriginV2) (rootrecords.Cursor, error)
 }
 
 // B1Config is local deployment configuration. Proofs fetches untrusted storage
@@ -170,7 +172,7 @@ func (c *B1Config) DeriveRecords(ctx context.Context, parent registryproof.Snaps
 	if f.Layout != registryproof.FreshB1 {
 		return RecordsResult{}, ErrRecordsAdmission
 	}
-	cursor, err := c.Records.Cursor(ctx, o.Origin().RootRound)
+	cursor, err := c.Records.Cursor(ctx, o.Origin())
 	if err != nil {
 		return RecordsResult{}, errors.Join(ErrRecordsAdmission, err)
 	}

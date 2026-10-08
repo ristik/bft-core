@@ -13,7 +13,7 @@ cd "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source helper.sh
 
 validators=4 rootValidators=4 partitionID=8 aggPartition=9 chainID=${DNB_CHAIN_ID:-31337}
-rethEngineBase=18551 rethEthBase=18545 rethP2PBase=30401
+rethEngineBase=18551 rethEthBase=18545 rethP2PBase=30401 rootRpcPort=25866
 : "${URETH_BIN:?set URETH_BIN to the pinned unicity-reth}"
 fee=${DNB_FEE_COLLECTOR:-0x000000000000000000000000000000000000dead}
 # Restarted validators vote again only with an independent signing record (#105): SIGNING=authority keeps one per validator in a separate process that is not restarted.
@@ -163,7 +163,7 @@ start_agg() {
   env PORT=${AGG_PORT:-3001} HOST=127.0.0.1 ENABLE_DOCS=false ENABLE_CORS=true \
     MONGODB_URI="$AGG_MONGO" MONGODB_DATABASE="$(cat test-nodes/agg/dbname 2>/dev/null || { n=dnb_agg_$(date +%s); echo $n | tee test-nodes/agg/dbname; })" DISABLE_HIGH_AVAILABILITY=true USE_REDIS_FOR_COMMITMENTS=false \
     SMT_BACKEND=memory SHARDING_MODE=standalone LOG_LEVEL=info LOG_FORMAT=text LOG_ENABLE_JSON=false LOG_FILE_PATH="$PWD/test-nodes/agg/logs/aggregator.log" \
-    SIGNING_KEY_FILE="$PWD/test-nodes/agg/keys.json" BFT_ENABLED=true BFT_ADDRESS=/ip4/127.0.0.1/tcp/29101 BFT_RPC_ADDRESS=http://127.0.0.1:25866 \
+    SIGNING_KEY_FILE="$PWD/test-nodes/agg/keys.json" BFT_ENABLED=true BFT_ADDRESS=/ip4/127.0.0.1/tcp/29101 BFT_RPC_ADDRESS=http://127.0.0.1:$rootRpcPort \
     BFT_SHARD_CONF_FILE="$PWD/test-nodes/shard-conf-${aggPartition}_0.json" BFT_TRUST_BASE_FILES="$PWD/test-nodes/trust-base.json" \
     BFT_BOOTSTRAP_ADDRESSES="$boot" \
     "$AGG_BIN" >test-nodes/agg/stdout.log 2>&1 &
@@ -175,9 +175,9 @@ start_agg() {
 # Fails fast when the root chain is not advancing (the stall that otherwise leaves a deploy waiting for a first block forever).
 root_alive() {
   local a b
-  a=$(curl -fsS http://127.0.0.1:25866/api/v1/roundInfo | python3 -c "import sys,json;print(json.load(sys.stdin)['roundNumber'])") || return 1
+  a=$(curl -fsS http://127.0.0.1:$rootRpcPort/api/v1/roundInfo | python3 -c "import sys,json;print(json.load(sys.stdin)['roundNumber'])") || return 1
   sleep 8
-  b=$(curl -fsS http://127.0.0.1:25866/api/v1/roundInfo | python3 -c "import sys,json;print(json.load(sys.stdin)['roundNumber'])") || return 1
+  b=$(curl -fsS http://127.0.0.1:$rootRpcPort/api/v1/roundInfo | python3 -c "import sys,json;print(json.load(sys.stdin)['roundNumber'])") || return 1
   [ "$b" -gt "$a" ] || { echo "root chain stalled at round $b (see root*/debug.log: 'voter clock skew' / 'in recovery'); a loaded host (concurrent builds) is the known trigger" >&2; return 1; }
 }
 
@@ -185,7 +185,7 @@ status() {
   for i in $(seq 1 "$validators"); do
     printf 'reth%s block=%s\n' "$i" "$(rpc "http://127.0.0.1:$((rethEthBase + i - 1))" eth_blockNumber '[]' | python3 -c "import sys,json;print(int(json.load(sys.stdin)['result'],16))" 2>/dev/null || echo down)"
   done
-  curl -fsS http://127.0.0.1:25866/api/v1/roundInfo 2>/dev/null | python3 -c "import sys,json;d=json.load(sys.stdin);print('root round',d['roundNumber'])" || echo "root rpc down"
+  curl -fsS http://127.0.0.1:$rootRpcPort/api/v1/roundInfo 2>/dev/null | python3 -c "import sys,json;d=json.load(sys.stdin);print('root round',d['roundNumber'])" || echo "root rpc down"
 }
 
 # Deploys the TokenVerifier and the BridgeVault (unicity-pos-contracts script/BridgeDeploy.s.sol, which refuses a vault whose rootGenesis,
@@ -217,7 +217,7 @@ config() {
 import json
 a = json.load(open("test-nodes/bridge-addresses.json"))
 json.dump({"dir": "$PWD/test-nodes", "ethUrls": ["http://127.0.0.1:%d" % (18545 + i) for i in range($validators)], "aggUrl": "http://127.0.0.1:${AGG_PORT:-3001}",
-  "vault": a["BridgeVault"], "verifier": a["TokenVerifier"], "rootRpc": "http://127.0.0.1:25866", "chainId": $chainID, "evmPartition": $partitionID,
+  "vault": a["BridgeVault"], "verifier": a["TokenVerifier"], "rootRpc": "http://127.0.0.1:$rootRpcPort", "chainId": $chainID, "evmPartition": $partitionID,
   "aggPartition": $aggPartition, "archive": "$PWD/test-nodes/archives/evm1"}, open("test-nodes/lane-config.json", "w"), indent=2)
 PY
 }

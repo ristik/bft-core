@@ -201,6 +201,8 @@ func TestDecodeStateRefusals(t *testing.T) {
 		"count without a tip":              {Epoch: 1, First: 1, Count: 2},
 		"pending beyond the current epoch": {Epoch: 1, First: 1, Pending: []PendingH{{Epoch: 1, HRound: 3, Offset: 3, First: 9, RootEpoch: 5, BodyID: id32(1)}}},
 		"tip without a count":              {Epoch: 1, First: 1, Tip: id32(1)},
+		"closed epochs descending":         {Epoch: 3, First: 1, Closed: []Awaiting{{Epoch: 2, HRound: 5}, {Epoch: 1, HRound: 4}}},
+		"closed epoch repeated":            {Epoch: 3, First: 1, Closed: []Awaiting{{Epoch: 1, HRound: 5}, {Epoch: 1, HRound: 4}}},
 	}
 	for name, st := range bad {
 		_, err := DecodeState(st.Bytes())
@@ -339,6 +341,7 @@ func TestStateCloseProjectsOnceAtTheCarryingBlock(t *testing.T) {
 	require.EqualValues(t, 104, r.Progress, "p_close: the progress of the block that carries the closure")
 	require.EqualValues(t, 1_500, r.UCTime)
 	require.Empty(t, n.Awaiting)
+	require.Equal(t, []Awaiting{{Epoch: 1, HRound: 100}}, n.Closed, "the closed epoch is kept with the H round it closed at")
 	require.EqualValues(t, 1, n.Count)
 	require.NoError(t, Verify([]Record{r}))
 	_, _, err = n.Close(1, closureData(1), 106, 1_501)
@@ -471,4 +474,32 @@ func TestStateResolvedResultsStayOrderedAndRoundTrip(t *testing.T) {
 	bad.Resolved = [][32]byte{id32(3), id32(3)}
 	_, err = DecodeState(bad.Bytes())
 	require.ErrorIs(t, err, ErrState, "duplicate")
+}
+
+func TestTheClosedEpochOfAClosureIsRecoverableFromTheStateAlone(t *testing.T) {
+	s := mustCommit(t, NewState(1, 1), 100, 2, 101, true)
+	s = mustBlock(t, s, 2, 105)
+	s = mustCommit(t, s, 150, 3, 151, true)
+	s = mustBlock(t, s, 3, 155)
+	require.Equal(t, []Awaiting{{Epoch: 1, HRound: 100}, {Epoch: 2, HRound: 150}}, s.Awaiting)
+	// the epochs close out of order: the list stays ascending
+	s, _, err := s.Close(2, closureData(2), 156, 1_600)
+	require.NoError(t, err)
+	s, _, err = s.Close(1, closureData(1), 157, 1_700)
+	require.NoError(t, err)
+	require.Equal(t, []Awaiting{{Epoch: 1, HRound: 100}, {Epoch: 2, HRound: 150}}, s.Closed)
+	for h, want := range map[uint64]uint64{100: 1, 150: 2} {
+		got, ok := s.ClosedEpochOf(h)
+		require.True(t, ok)
+		require.Equal(t, want, got, "H round %d", h)
+	}
+	_, ok := s.ClosedEpochOf(101)
+	require.False(t, ok, "no epoch closed at that round")
+	// the list is part of what the root commits
+	decoded, err := DecodeState(s.Bytes())
+	require.NoError(t, err)
+	require.Equal(t, s.Closed, decoded.Closed)
+	before := s.Digest()
+	s.Closed = s.Closed[:1]
+	require.NotEqual(t, before, s.Digest())
 }
