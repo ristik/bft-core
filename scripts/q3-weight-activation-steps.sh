@@ -305,7 +305,7 @@ q3_ids() { grep -aoE 'messageID=[0-9a-f]+' | sort -u; }
 # statement) and rebroadcast it, the TC must form, and commits must resume. No orderly stop and no retry of the module alone. Only the TIMEOUT is
 # observable as a rebroadcast; the vote held again at start is logged with its identity ("recovered last vote") and compared with the signed one.
 q3_heavy_crash() {
-  local root1=test-nodes/root1/debug.log signed lastsigned recovered rebroadcast i mark
+  local root1=test-nodes/root1/debug.log signed lastsigned recovered recov rebroadcast i mark
   mark=$(wc -l <"$root1")
   for i in 2 3 4; do stop_pidfile "test-nodes/root$i/pid" 'ubft root-node run' KILL; done   # the lights away: the heavy root cannot complete a certificate alone
   q3_wait_grep_since 180 "$root1" "$mark" "$(q3_pat "$Q3_PAT_SIGNED_TIMEOUT" 2)" || return 1
@@ -320,8 +320,11 @@ q3_heavy_crash() {
   for i in 2 3 4; do m2_start_root "$i" 2 "$(m2_root_addr 1)" || return 1; done
   # the last vote the node stored before it died is held again at start under the identity it was signed with (independent of the timer path below)
   q3_wait_grep_since 60 "$root1" "$mark" "msg=\"recovered last vote\" .*kind=timeout round=[0-9]+ messageID=$lastsigned" || return 1
-  q3_wait_grep_since 120 "$root1" "$mark" "$(q3_pat "$Q3_PAT_RECOVERED" 2)" || return 1
-  recovered=$(tail -n +"$((mark + 1))" "$root1" | grep -aE "$(q3_pat "$Q3_PAT_RECOVERED" 2)")
+  # The original message comes back by one of two paths, both with its identity: the pacemaker is reset from the stored last vote (which a node that
+  # stored its timeout vote before dying always holds), or the safety module returns the recorded timeout when no vote is held.
+  recov="msg=\"recovered last vote\" .*kind=timeout .*messageID=[0-9a-f]{64}|$(q3_pat "$Q3_PAT_RECOVERED" 2)"
+  q3_wait_grep_since 120 "$root1" "$mark" "$recov" || return 1
+  recovered=$(tail -n +"$((mark + 1))" "$root1" | grep -aE "$recov")
   q3_wait_grep_since 120 "$root1" "$mark" "$Q3_PAT_REBROADCAST" || return 1
   rebroadcast=$(tail -n +"$((mark + 1))" "$root1" | grep -aE "$Q3_PAT_REBROADCAST")
   printf '%s\n' "$recovered" >"$Q3_DIR/recovered-message.txt"
