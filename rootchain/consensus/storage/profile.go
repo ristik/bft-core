@@ -7,6 +7,8 @@ import (
 	"fmt"
 
 	"github.com/unicitynetwork/bft-core/evmroot"
+	rctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
+	"github.com/unicitynetwork/bft-core/rootrecords"
 	"github.com/unicitynetwork/bft-go-base/types"
 )
 
@@ -32,7 +34,9 @@ func profileVersion(v []uint64) (uint64, error) {
 }
 
 func initialControl(network types.NetworkID) *evmroot.ControlState {
-	return &evmroot.ControlState{Network: uint64(network), Epoch: 1, PredecessorBodyID: make([]byte, 32), Phase: "idle"}
+	// the genesis epoch's ordinary rounds follow the genesis round and count progress from offset zero
+	return &evmroot.ControlState{Network: uint64(network), Epoch: 1, PredecessorBodyID: make([]byte, 32), Phase: "idle",
+		Pos: rootrecords.NewState(1, rctypes.GenesisRootRound+1).Bytes()}
 }
 
 func checkProfile(v uint64, state ShardStates) error {
