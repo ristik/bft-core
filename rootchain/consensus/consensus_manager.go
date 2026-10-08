@@ -112,6 +112,7 @@ type (
 		frontier         *frontierSampler
 		recoveryProfile2 bool
 		recoveryHistory  *trusthistorystore.Store
+		posPrefetching   atomic.Int32
 		posQueue         posSubmissions              // submitted Retirement and RejectResult controls waiting for a leader
 		witnesses        WitnessFetcher              // nil: control witnesses are only what the store already holds
 		q3               Q3Authority                 // the verified Q3 history, nil when the binary does not know it
@@ -1939,7 +1940,7 @@ func (x *ConsensusManager) fetchWitnesses(ctx context.Context, store witnessHold
 		if peers == nil {
 			peers = x.witnessPeers(block)
 		}
-		data, err := x.witnesses(ctx, c.WitnessHash, peers)
+		data, err := x.witnesses(ctx, c.WitnessHash, peers, storage.WitnessBound(c.Op))
 		if err != nil {
 			return errors.Join(storage.ErrWitnessUnavailable, err)
 		}

@@ -7,8 +7,10 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/unicitynetwork/bft-core/network/protocol/abdrc"
+	"github.com/unicitynetwork/bft-core/rootchain/consensus/storage"
 	drctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
 )
 
@@ -19,8 +21,9 @@ const (
 	// posSubmissionTTL is how many rounds a submission waits. A Retirement or RejectResult is proved against the latest certified EVM
 	// state, so a submission that waits for long is stale anyway: the submitter proves again.
 	posSubmissionTTL = 120
-	// maxPosTrials bounds the trial executions of one proposal.
-	maxPosTrials = 4
+	// maxPosTrials bounds the trial executions of one proposal, maxPosPrefetches the witness pulls in flight.
+	maxPosTrials     = 4
+	maxPosPrefetches = 4
 )
 
 // ErrPosSubmission reports a control submission that is refused.
@@ -30,6 +33,7 @@ type posSubmission struct {
 	control drctypes.PosControl
 	signer  string
 	witness [32]byte
+	epoch   uint64
 	expires uint64
 	key     []byte
 }
@@ -109,7 +113,8 @@ func (x *ConsensusManager) SubmitPosControl(ctx context.Context, control drctype
 	if err := x.blockStore.StoreWitness(witness); err != nil {
 		return fmt.Errorf("%w: %w", ErrPosSubmission, err)
 	}
-	domain, err := abdrc.PosControlSigningBytes(control)
+	epoch := x.trustBase.Load().Epoch
+	domain, err := abdrc.PosControlSigningBytes(control, epoch)
 	if err != nil {
 		return fmt.Errorf("%w: %w", ErrPosSubmission, err)
 	}
@@ -117,7 +122,7 @@ func (x *ConsensusManager) SubmitPosControl(ctx context.Context, control drctype
 	if err != nil {
 		return fmt.Errorf("%w: signing: %w", ErrPosSubmission, err)
 	}
-	msg := &abdrc.PosControlSubmissionMsg{Control: control, Signer: x.id.String(), Signature: signature}
+	msg := &abdrc.PosControlSubmissionMsg{Control: control, Epoch: epoch, Signer: x.id.String(), Signature: signature}
 	if err := x.onPosControlSubmission(ctx, msg); err != nil {
 		return err
 	}
@@ -160,6 +165,9 @@ func (x *ConsensusManager) onPosControlSubmission(_ context.Context, msg *abdrc.
 	if err := x.checkSubmittable(msg.Control); err != nil {
 		return err
 	}
+	if msg.Epoch != x.trustBase.Load().Epoch {
+		return fmt.Errorf("%w: signed for root epoch %d, this is epoch %d", ErrPosSubmission, msg.Epoch, x.trustBase.Load().Epoch)
+	}
 	domain, err := msg.SigningBytes()
 	if err != nil {
 		return fmt.Errorf("%w: %w", ErrPosSubmission, err)
@@ -168,13 +176,59 @@ func (x *ConsensusManager) onPosControlSubmission(_ context.Context, msg *abdrc.
 		return fmt.Errorf("%w: not signed by a root validator of this epoch", ErrPosSubmission)
 	}
 	now := x.pacemaker.GetCurrentRound()
-	return x.posQueue.add(posSubmission{control: msg.Control, signer: msg.Signer, witness: msg.Control.WitnessHash,
-		expires: now + posSubmissionTTL, key: domain}, now)
+	sub := posSubmission{control: msg.Control, signer: msg.Signer, witness: msg.Control.WitnessHash, epoch: msg.Epoch,
+		expires: now + posSubmissionTTL, key: domain}
+	store := x.blockStore
+	if store.HasWitness(sub.witness) {
+		return x.posQueue.add(sub, now)
+	}
+	// The leader never pulls over the network while it builds a proposal: the witness is fetched here, off the consensus loop, and a
+	// submission whose witness could not be had is dropped (the operator submits again).
+	if x.witnesses == nil {
+		return fmt.Errorf("%w: this root cannot fetch the submitter's witness", ErrPosSubmission)
+	}
+	if x.posPrefetching.Add(1) > maxPosPrefetches {
+		x.posPrefetching.Add(-1)
+		return fmt.Errorf("%w: too many witnesses are being fetched", ErrPosSubmission)
+	}
+	if err := x.posQueue.add(sub, now); err != nil {
+		x.posPrefetching.Add(-1)
+		return err
+	}
+	go func() {
+		defer x.posPrefetching.Add(-1)
+		x.prefetchPosWitness(store, sub)
+	}()
+	return nil
 }
 
-// orderSubmittedControl appends to the block the oldest submitted control that makes it a valid block, if any. The leader pulls the
-// witness from the submitter, stamps the control with the block's position and executes the block as a trial: a control the state
-// refuses (stale EVM state, already retired, ...) is dropped, never proposed, so a bad submission cannot cost the round its proposal.
+// prefetchPosWitness pulls the witness of a queued submission from its submitter (then the other root nodes), within the same bounds
+// as the voters' pull, and drops the submission when it cannot be had. It runs off the consensus loop.
+func (x *ConsensusManager) prefetchPosWitness(store *storage.BlockStore, s posSubmission) {
+	budget := 5 * time.Second
+	if x.params != nil && x.params.LocalTimeout > 0 {
+		budget = x.params.LocalTimeout / 2
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), budget)
+	defer cancel()
+	author := &drctypes.BlockData{Author: s.signer, Epoch: s.epoch}
+	data, err := x.witnesses(ctx, s.witness, x.witnessPeers(author), storage.WitnessBound(s.control.Op))
+	if err == nil && sha256.Sum256(data) != s.witness {
+		err = errors.New("the fetched bytes are not the committed witness")
+	}
+	if err == nil {
+		err = store.StoreWitness(data)
+	}
+	if err != nil {
+		x.log.Warn("submitted control dropped: its witness cannot be had", "submitter", s.signer, "error", err)
+		x.posQueue.drop(s.key)
+	}
+}
+
+// orderSubmittedControl appends to the block the oldest submitted control that makes it a valid block, if any. Only a submission whose
+// witness is already held here is considered (nothing is pulled while a proposal is built); the leader stamps the control with the
+// block's position and executes the block as a trial: a control the state refuses (stale EVM state, already retired, ...) is dropped,
+// never proposed, so a bad submission cannot cost the round its proposal.
 func (x *ConsensusManager) orderSubmittedControl(ctx context.Context, block *drctypes.BlockData) {
 	x.orderSubmittedControlWith(ctx, block, func(b *drctypes.BlockData) error { return x.blockStore.TrialExecute(b, x.irReqVerifier) })
 }
@@ -186,14 +240,12 @@ func (x *ConsensusManager) orderSubmittedControlWith(ctx context.Context, block 
 		if trials == maxPosTrials {
 			return
 		}
+		if !x.blockStore.HasWitness(s.witness) {
+			continue // still being fetched (or dropped soon): not a candidate yet
+		}
 		trials++
 		c := s.control
 		c.OrderingEpoch, c.OrderingRound = block.Epoch, block.Round
-		probe := &drctypes.BlockData{Author: s.signer, Epoch: block.Epoch, Round: block.Round, Payload: &drctypes.Payload{PosControls: []drctypes.PosControl{c}}}
-		if err := x.fetchWitnesses(ctx, x.blockStore, probe); err != nil {
-			x.log.WarnContext(ctx, "submitted control skipped: its witness cannot be pulled", "submitter", s.signer, "error", err)
-			continue // the submitter may be unreachable for a moment: keep it until it expires
-		}
 		trial := *block
 		payload := *block.Payload
 		payload.PosControls = append(append([]drctypes.PosControl(nil), payload.PosControls...), c)

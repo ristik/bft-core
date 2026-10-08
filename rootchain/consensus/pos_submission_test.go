@@ -5,7 +5,9 @@ import (
 	"context"
 	"crypto/sha256"
 	"errors"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/stretchr/testify/require"
@@ -41,11 +43,16 @@ func retirement(witness []byte) drctypes.PosControl {
 
 func signed(t *testing.T, cm *ConsensusManager, c drctypes.PosControl) *abdrc.PosControlSubmissionMsg {
 	t.Helper()
-	domain, err := abdrc.PosControlSigningBytes(c)
+	return signedFor(t, cm, c, cm.trustBase.Load().Epoch)
+}
+
+func signedFor(t *testing.T, cm *ConsensusManager, c drctypes.PosControl, epoch uint64) *abdrc.PosControlSubmissionMsg {
+	t.Helper()
+	domain, err := abdrc.PosControlSigningBytes(c, epoch)
 	require.NoError(t, err)
 	sig, err := cm.safety.signer.SignBytes(domain)
 	require.NoError(t, err)
-	return &abdrc.PosControlSubmissionMsg{Control: c, Signer: cm.id.String(), Signature: sig}
+	return &abdrc.PosControlSubmissionMsg{Control: c, Epoch: epoch, Signer: cm.id.String(), Signature: sig}
 }
 
 func TestSubmitPosControlSignsRetainsTheWitnessAndQueues(t *testing.T) {
@@ -66,6 +73,7 @@ func TestAReceivedSubmissionIsQueuedOnlyWhenSignedByARootValidatorAndWellFormed(
 	cms := submissionCMs(t)
 	good := retirement([]byte("w"))
 	msg := signed(t, cms[0], good)
+	cms[1].witnesses = func(context.Context, [32]byte, []peer.ID, int) ([]byte, error) { return []byte("w"), nil }
 	require.NoError(t, cms[1].onPosControlSubmission(context.Background(), msg))
 	require.Equal(t, 1, cms[1].posQueue.len())
 
@@ -84,10 +92,16 @@ func TestAReceivedSubmissionIsQueuedOnlyWhenSignedByARootValidatorAndWellFormed(
 		"a signer outside the trust base": func() *abdrc.PosControlSubmissionMsg {
 			signer, err := abcrypto.NewInMemorySecp256K1Signer()
 			require.NoError(t, err)
-			domain, _ := abdrc.PosControlSigningBytes(good)
+			domain, _ := abdrc.PosControlSigningBytes(good, cms[3].trustBase.Load().Epoch)
 			sig, err := signer.SignBytes(domain)
 			require.NoError(t, err)
-			return &abdrc.PosControlSubmissionMsg{Control: good, Signer: testPeer(t).String(), Signature: sig}
+			return &abdrc.PosControlSubmissionMsg{Control: good, Epoch: cms[3].trustBase.Load().Epoch, Signer: testPeer(t).String(), Signature: sig}
+		},
+		"another epoch than this one": func() *abdrc.PosControlSubmissionMsg {
+			return signedFor(t, cms[0], good, cms[3].trustBase.Load().Epoch+1)
+		},
+		"an old epoch replayed": func() *abdrc.PosControlSubmissionMsg {
+			return signedFor(t, cms[0], good, cms[3].trustBase.Load().Epoch+7)
 		},
 		"no signature": func() *abdrc.PosControlSubmissionMsg { m := signed(t, cms[0], good); m.Signature = nil; return m },
 		"a closure control": func() *abdrc.PosControlSubmissionMsg {
@@ -107,6 +121,8 @@ func TestAReceivedSubmissionIsQueuedOnlyWhenSignedByARootValidatorAndWellFormed(
 			return signed(t, cms[0], c)
 		},
 	}
+	// every rejection below must come from the check it names, not from a root that cannot fetch: cms[3] can
+	cms[3].witnesses = func(context.Context, [32]byte, []peer.ID, int) ([]byte, error) { return []byte("w"), nil }
 	for name, build := range cases {
 		cm := cms[3]
 		require.ErrorIs(t, cm.onPosControlSubmission(context.Background(), build()), ErrPosSubmission, name)
@@ -144,7 +160,7 @@ func orderingFixture(t *testing.T, controls ...drctypes.PosControl) (*ConsensusM
 	t.Helper()
 	cms := submissionCMs(t)
 	x := cms[0]
-	x.witnesses = func(context.Context, [32]byte, []peer.ID) ([]byte, error) { return nil, errors.New("unreachable") }
+	x.witnesses = func(context.Context, [32]byte, []peer.ID, int) ([]byte, error) { return nil, errors.New("unreachable") }
 	block := &drctypes.BlockData{Epoch: 3, Round: 9, Author: x.id.String(), Payload: &drctypes.Payload{
 		PosControls: []drctypes.PosControl{{Op: 99}}}} // a closure already in the block
 	var subs []posSubmission
@@ -199,18 +215,110 @@ func TestARefusedTrialLeavesTheBlockUntouchedAndAtMostFourAreTried(t *testing.T)
 	require.Equal(t, 2, x.posQueue.len(), "the four tried are dropped, the two beyond the bound wait for the next proposal")
 }
 
-func TestASubmitterThatCannotBePulledFromKeepsItsControlQueued(t *testing.T) {
-	c := retirement([]byte("never stored"))
+// queued puts a submission straight into the queue, witness not held, as the intake does before its prefetch finished.
+func queued(t *testing.T, x *ConsensusManager, c drctypes.PosControl) posSubmission {
+	t.Helper()
+	domain, err := abdrc.PosControlSigningBytes(c, 1)
+	require.NoError(t, err)
+	s := posSubmission{control: c, signer: x.id.String(), witness: c.WitnessHash, expires: 1 << 40, key: domain}
+	require.NoError(t, x.posQueue.add(s, 0))
+	return s
+}
+
+func TestBuildingAProposalNeverPullsAWitnessOverTheNetwork(t *testing.T) {
 	cms := submissionCMs(t)
 	x := cms[0]
-	x.witnesses = func(context.Context, [32]byte, []peer.ID) ([]byte, error) {
-		return nil, errors.New("submitter offline")
-	}
-	require.NoError(t, x.onPosControlSubmission(context.Background(), signed(t, cms[1], c)))
-	block := &drctypes.BlockData{Epoch: 3, Round: 9, Author: x.id.String(), Payload: &drctypes.Payload{}}
 	called := false
-	x.orderSubmittedControlWith(context.Background(), block, func(*drctypes.BlockData) error { called = true; return nil })
-	require.False(t, called, "no trial without the witness")
+	x.witnesses = func(context.Context, [32]byte, []peer.ID, int) ([]byte, error) {
+		called = true
+		return nil, errors.New("no")
+	}
+	queued(t, x, retirement([]byte("not held")))
+	block := &drctypes.BlockData{Epoch: 3, Round: 9, Author: x.id.String(), Payload: &drctypes.Payload{}}
+	trialled := false
+	start := time.Now()
+	x.orderSubmittedControlWith(context.Background(), block, func(*drctypes.BlockData) error { trialled = true; return nil })
+	require.Less(t, time.Since(start), 50*time.Millisecond)
+	require.False(t, called, "no fetch on the consensus loop")
+	require.False(t, trialled, "a submission without its witness is no candidate")
 	require.Empty(t, block.Payload.PosControls)
-	require.Equal(t, 1, x.posQueue.len(), "an unreachable submitter is not a verdict on the control")
+	require.Equal(t, 1, x.posQueue.len(), "it waits for its prefetch")
+}
+
+func TestAnUnreachableSubmitterAddsNoLatencyToTheIntakeAndIsDropped(t *testing.T) {
+	cms := submissionCMs(t)
+	x := cms[1]
+	x.params = &Parameters{LocalTimeout: 200 * time.Millisecond} // prefetch budget 100ms
+	x.witnesses = func(ctx context.Context, _ [32]byte, _ []peer.ID, _ int) ([]byte, error) {
+		<-ctx.Done() // accepts the stream and never answers
+		return nil, ctx.Err()
+	}
+	c := retirement([]byte("never arrives"))
+	start := time.Now()
+	require.NoError(t, x.onPosControlSubmission(context.Background(), signed(t, cms[0], c)))
+	require.Less(t, time.Since(start), 50*time.Millisecond, "the intake does not wait for the pull")
+	require.Equal(t, 1, x.posQueue.len())
+	require.Eventually(t, func() bool { return x.posQueue.len() == 0 }, 3*time.Second, 10*time.Millisecond,
+		"a witness that cannot be had drops the submission")
+	require.Zero(t, x.posPrefetching.Load())
+}
+
+func TestThePrefetchStoresTheWitnessWithinTheOpsBoundAndTheSubmissionBecomesACandidate(t *testing.T) {
+	cms := submissionCMs(t)
+	x := cms[1]
+	witness := []byte("a storage proof")
+	var bound atomic.Int64
+	var asked atomic.Value
+	x.witnesses = func(_ context.Context, h [32]byte, peers []peer.ID, maxBytes int) ([]byte, error) {
+		bound.Store(int64(maxBytes))
+		asked.Store(peers)
+		return witness, nil
+	}
+	c := retirement(witness)
+	require.NoError(t, x.onPosControlSubmission(context.Background(), signed(t, cms[0], c)))
+	require.Eventually(t, func() bool { return x.blockStore.HasWitness(c.WitnessHash) }, 3*time.Second, 10*time.Millisecond)
+	require.EqualValues(t, storage.MaxEVMWitnessBytes, bound.Load(), "a Retirement witness is bounded by the EVM proof bound, not the closure's")
+	require.Equal(t, cms[0].id, asked.Load().([]peer.ID)[0], "the submitter is asked first")
+	require.Equal(t, 1, x.posQueue.len())
+	block := &drctypes.BlockData{Epoch: 3, Round: 9, Author: x.id.String(), Payload: &drctypes.Payload{}}
+	x.orderSubmittedControlWith(context.Background(), block, func(*drctypes.BlockData) error { return nil })
+	require.Len(t, block.Payload.PosControls, 1)
+
+	// bytes that are not the committed witness are never stored, and the submission goes
+	other := retirement([]byte("another proof"))
+	x.witnesses = func(context.Context, [32]byte, []peer.ID, int) ([]byte, error) { return []byte("forged"), nil }
+	require.NoError(t, x.onPosControlSubmission(context.Background(), signed(t, cms[0], other)))
+	require.Eventually(t, func() bool { return x.posQueue.len() == 1 }, 3*time.Second, 10*time.Millisecond)
+	require.False(t, x.blockStore.HasWitness(other.WitnessHash))
+}
+
+func TestWithoutAFetcherOrTheWitnessTheIntakeRefusesAndTheFetchesInFlightAreBounded(t *testing.T) {
+	cms := submissionCMs(t)
+	x := cms[1]
+	x.witnesses = nil
+	require.ErrorIs(t, x.onPosControlSubmission(context.Background(), signed(t, cms[0], retirement([]byte("w")))), ErrPosSubmission)
+	require.Zero(t, x.posQueue.len())
+
+	release := make(chan struct{})
+	x.witnesses = func(ctx context.Context, _ [32]byte, _ []peer.ID, _ int) ([]byte, error) {
+		select {
+		case <-release:
+		case <-ctx.Done():
+		}
+		return nil, errors.New("no")
+	}
+	x.params = &Parameters{LocalTimeout: 20 * time.Second}
+	for i := 0; i < maxPosPrefetches; i++ {
+		c := retirement([]byte{byte(i)})
+		c.Data[95] = byte(i)
+		signer := cms[2]
+		if i >= maxPosSubmissionsPerSigner {
+			signer = cms[3]
+		}
+		require.NoError(t, x.onPosControlSubmission(context.Background(), signed(t, signer, c)))
+	}
+	c := retirement([]byte("one too many"))
+	require.ErrorIs(t, x.onPosControlSubmission(context.Background(), signed(t, cms[3], c)), ErrPosSubmission)
+	close(release)
+	require.Eventually(t, func() bool { return x.posPrefetching.Load() == 0 && x.posQueue.len() == 0 }, 3*time.Second, 10*time.Millisecond)
 }

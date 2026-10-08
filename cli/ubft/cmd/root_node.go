@@ -305,8 +305,8 @@ func rootNodeRun(ctx context.Context, flags *rootNodeRunFlags) error {
 
 	if flags.PosDeploymentFile != "" {
 		// the witnesses of a block's controls are fetched by hash from the other root nodes before the block is executed
-		options = append(options, consensus.WithWitnessFetcher(func(ctx context.Context, hash [32]byte, peers []peer.ID) ([]byte, error) {
-			return poswitness.Fetch(ctx, poswitness.FromLibp2p(host), peers, hash)
+		options = append(options, consensus.WithWitnessFetcher(func(ctx context.Context, hash [32]byte, peers []peer.ID, maxBytes int) ([]byte, error) {
+			return poswitness.Fetch(ctx, poswitness.FromLibp2p(host), peers, hash, maxBytes)
 		}))
 	}
 	cm, err := consensus.NewConsensusManager(

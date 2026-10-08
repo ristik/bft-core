@@ -224,7 +224,8 @@ func (x *BlockStore) Witness(hash [32]byte) ([]byte, error) {
 }
 
 // TrialExecute executes a proposed block on its parent's state exactly as Add would and discards the result: a leader uses it to learn
-// whether an optional control it would include makes the block invalid before it signs the proposal. Nothing is stored.
+// whether an optional control it would include makes the block invalid before it signs the proposal. Nothing is stored. The parent
+// block is only read: extendWithAuthority builds the child on a copy of the parent's state, which Add relies on for forks as well.
 func (x *BlockStore) TrialExecute(block *rctypes.BlockData, verifier IRChangeReqVerifier) error {
 	parent, err := x.blockTree.FindBlock(block.GetParentRound())
 	if err != nil {
