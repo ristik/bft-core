@@ -12,6 +12,7 @@ import (
 	"github.com/unicitynetwork/bft-core/evmassign"
 	"github.com/unicitynetwork/bft-core/evmroot"
 	"github.com/unicitynetwork/bft-core/internal/quorumweight"
+	"github.com/unicitynetwork/bft-core/internal/weightvalidation"
 
 	"github.com/unicitynetwork/bft-core/network/protocol/abdrc"
 	"github.com/unicitynetwork/bft-core/network/protocol/certification"
@@ -158,10 +159,10 @@ func NewRootBlock(block *abdrc.CommittedBlock, hash crypto.Hash, orchestration O
 }
 
 func (x *ExecutedBlock) Extend(newBlock *rctypes.BlockData, verifier IRChangeReqVerifier, orchestration Orchestration, hash crypto.Hash, log *slog.Logger) (*ExecutedBlock, error) {
-	return x.extendWithAuthority(newBlock, verifier, orchestration, hash, log, nil, nil)
+	return x.extendWithAuthority(newBlock, verifier, orchestration, hash, log, nil, nil, nil)
 }
 
-func (x *ExecutedBlock) extendWithAuthority(newBlock *rctypes.BlockData, verifier IRChangeReqVerifier, orchestration Orchestration, hash crypto.Hash, log *slog.Logger, authority handoffAuthority, candidates candidateSource) (*ExecutedBlock, error) {
+func (x *ExecutedBlock) extendWithAuthority(newBlock *rctypes.BlockData, verifier IRChangeReqVerifier, orchestration Orchestration, hash crypto.Hash, log *slog.Logger, authority handoffAuthority, candidates candidateSource, services *PosServices) (*ExecutedBlock, error) {
 	bootstrapChild := isEpochAnchorRoot(x)
 	if bootstrapChild && (newBlock.Anchor == nil || !bytes.Equal(newBlock.Anchor.GenesisID, x.BlockData.Anchor.GenesisID) ||
 		newBlock.Anchor.Slot != x.GetRound() || newBlock.Epoch != x.BlockData.Epoch) {
@@ -378,8 +379,12 @@ func (x *ExecutedBlock) extendWithAuthority(newBlock *rctypes.BlockData, verifie
 
 		nextShardState.Changed[shardKey] = struct{}{}
 	}
+	// the P85 controls follow the certifications, in payload order
+	if err := pos.controls(newBlock, services); err != nil {
+		return nil, err
+	}
 	if nextShardState.Control != nil {
-		pos.store(nextShardState.Control) // an acknowledgement in a request changes the state the control digest commits
+		pos.store(nextShardState.Control) // an acknowledgement or a control changes the state the control digest commits
 	}
 	nextShardState.Records = pos.records
 	ut, _, err := nextShardState.UnicityTree(hash)
@@ -392,6 +397,16 @@ func (x *ExecutedBlock) extendWithAuthority(newBlock *rctypes.BlockData, verifie
 		RootHash:   ut.RootHash(),
 		ShardState: nextShardState,
 	}, nil
+}
+
+// freezeAssignmentRules are the validator weight rules the successor assignment of a Freeze companion is judged under: the unit rules for
+// the legacy and V2 companions, the bounded weights for a V3 one (the authority already admitted it under them: a weighted rotation out of
+// a unit epoch carries stakes the unit rules refuse).
+func freezeAssignmentRules(version uint64) evmassign.Rules {
+	if version == freezeV3Version {
+		return weightvalidation.EVMRules(weightvalidation.ModeWeighted)
+	}
+	return evmassign.UnitRules
 }
 
 // verifyFreezeAssignment runs the EVM-state-dependent half of freeze
@@ -443,7 +458,7 @@ func verifyFreezeAssignment(companion []byte, si *ShardInfo, installed *types.Pa
 	if candidate.Supersedes == nil && pending {
 		return ErrAssignmentAckPending
 	}
-	if err := evmassign.VerifyInstalled(candidate, succ, installed, currentRoot); err != nil {
+	if err := evmassign.VerifyInstalledWith(freezeAssignmentRules(fc.Version), candidate, succ, installed, currentRoot); err != nil {
 		return errors.Join(ErrHandoffRecord, err)
 	}
 	if err := verifyShardChanges(candidate, states, shardConfs); err != nil {
