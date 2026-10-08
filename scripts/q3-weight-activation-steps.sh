@@ -311,7 +311,7 @@ q3_real_tc() {
 # keeps timing out (it signs timeout votes) but no timeout certificate forms and no root round commits. With ONE light root back the weight is 7 =
 # Q and the chain commits again, so 6 fails and 7 passes at the same boundary.
 q3_root_boundary() {
-  local root1=test-nodes/root1/debug.log mark settled end i signed timeouts
+  local root1=test-nodes/root1/debug.log mark mark2 settled end i signed timeouts formed
   mark=$(wc -l <"$root1")
   for i in 2 3 4; do stop_pidfile "test-nodes/root$i/pid" 'ubft root-node run' KILL; done
   sleep 12     # what was in flight commits or dies out; the chain is then stuck
@@ -326,14 +326,13 @@ q3_root_boundary() {
   # it signs its timeout vote once for the stuck round and sends the same vote again at every local timeout
   [ "$signed" -ge 1 ] && [ "$timeouts" -ge 3 ] || { echo "the heavy root signed $signed timeout votes with $timeouts local timeouts in 52 s: it was not running its rounds" >&2; return 1; }
   [ "$(tail -n +"$((mark + 1))" "$root1" | grep -ac 'timeout quorum for round')" = 0 ] || { echo "a timeout certificate formed from weight 6" >&2; return 1; }
-  # one light root back: 6 + 1 = 7 >= Q
+  # one light root back: 6 + 1 = 7 >= Q. The two other roots stay down, so half of the leaders are dead and no round can commit (a commit needs
+  # consecutive live leaders); what weight 7 shows is the timeout certificate that the heavy root alone could not form.
+  mark2=$(wc -l <"$root1")
   m2_start_root 2 2 "$(m2_root_addr 1)" || return 1
-  for i in $(seq 1 120); do
-    [ "$(q3_signers_of 1 2>/dev/null | jq -r .round 2>/dev/null)" -gt "$end" ] 2>/dev/null && break
-    sleep 1
-  done
-  [ "$(q3_signers_of 1 | jq -r .round)" -gt "$end" ] || { echo "heavy plus one light (weight 7) did not commit" >&2; return 1; }
-  echo "heavy + one light (weight 7 of 9) committed round $(q3_signers_of 1 | jq -r .round) after $end" >>"$Q3_DIR/root-boundary.txt"
+  q3_wait_grep_since 120 "$root1" "$mark2" 'timeout quorum for round [0-9]+ achieved' || { echo "heavy plus one light (weight 7) formed no timeout certificate" >&2; return 1; }
+  formed=$(tail -n +"$((mark2 + 1))" "$root1" | grep -ac 'timeout quorum for round')
+  echo "heavy + one light root (weight 7 of 9): $formed timeout certificates formed in the next window, the first at $(tail -n +"$((mark2 + 1))" "$root1" | grep -a 'timeout quorum for round' | head -1 | sed -n 's/.*for round \([0-9]*\) achieved.*/round \1/p')" >>"$Q3_DIR/root-boundary.txt"
   m2_start_root 3 2 "$(m2_root_addr 1)" || return 1
   m2_start_root 4 2 "$(m2_root_addr 1)" || return 1
   h3_progress root-boundary-restored 8
