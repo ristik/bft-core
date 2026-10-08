@@ -369,6 +369,8 @@ q3_pair_export() { # pair-tag entity block-number: the pair's own retained canon
 q3_start_second_pair() {
   local a=$Q3_PAIR_A b=$Q3_PAIR_B head_a head_b i
   H3_RESTORE_TRUST_BASE=test-nodes/trust-base.json
+  # the activation of epoch 2 is not archived as a handoff-delivery bundle: the restore pin takes the body identity the lane activated
+  export H4_RESTORE_BODY_IDS="2=$(tr -d '[:space:]' <"$Q3_DIR/v3-body-id.txt")"
   h3_restore_validator "$b" "$a" || return 1
   for i in $(seq 1 240); do
     head_a=$(rpc "$(q3_eth_url "$a")" eth_blockNumber '[]' | pyget "['result']")

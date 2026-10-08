@@ -67,7 +67,13 @@ func main() {
 	}
 	bodyID, err := archiveTrustBodyID(archiveDir, bestEpoch, tb)
 	if err != nil {
-		panic(err)
+		// A Q3 activation is not archived as a handoff-delivery bundle: the lane names the body identity of the epoch it activated
+		// (H4_RESTORE_BODY_IDS="<epoch>=<64 hex>[,<epoch>=<64 hex>...]"), the one the restored node then checks against the history it rebuilds.
+		named, ok := namedBodyID(os.Getenv("H4_RESTORE_BODY_IDS"), bestEpoch)
+		if !ok {
+			panic(err)
+		}
+		bodyID = named
 	}
 	if err := os.WriteFile(prefix+".uc.cbor", bestUC, 0600); err != nil {
 		panic(err)
@@ -81,6 +87,21 @@ func main() {
 	}
 	fmt.Printf("round=%d height=%d blockHash=%s stateRoot=%s receiptsRoot=%s bodyID=0x%x\n",
 		bestRound, header.Number.Uint64(), header.Hash(), header.Root, header.ReceiptHash, bodyID)
+}
+
+func namedBodyID(spec string, epoch uint64) ([32]byte, bool) {
+	for _, item := range strings.Split(spec, ",") {
+		key, value, found := strings.Cut(strings.TrimSpace(item), "=")
+		if !found || key != fmt.Sprint(epoch) {
+			continue
+		}
+		raw, err := hex.DecodeString(strings.TrimPrefix(value, "0x"))
+		if err != nil || len(raw) != sha256.Size {
+			return [32]byte{}, false
+		}
+		return [32]byte(raw), true
+	}
+	return [32]byte{}, false
 }
 
 func preferPin(candidateV2 bool, candidateEpoch, candidateRound uint64, bestV2 bool, bestEpoch, bestRound uint64) bool {
