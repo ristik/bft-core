@@ -85,7 +85,17 @@ m2_archive_root_state() {
   mkdir -p "$archive"
   for file in rootchain.db trustbase.db root-trust-history.db orchestration.db; do
     if [ -e "test-nodes/root${node}/$file" ]; then
-      mv "test-nodes/root${node}/$file" "$archive/$file" || return 1
+      # Every store is archived as a COPY and stays in place: they are one consistent set. rootchain.db holds the committed blocks, the durable control cuts and
+      # the root-record log (#488); orchestration.db holds the configurations derived from the committed handoffs, which the block store is checked against at
+      # start (a block's stored shard configuration must be the one the derived history gives for its round); the two trust stores hold the installed epochs.
+      # Moving any of them aside leaves the others describing a root that is at another epoch, and the restart is refused ("shard ... stores configuration X,
+      # committed history derives Y"; "the root does not hold it"). An operator's restart keeps them all. M2_ARCHIVE_MOVE_STATE=1 restores the old behaviour
+      # (every store moved, a root that starts from genesis state and fetches the epochs again), for a test that wants exactly that.
+      if [ "${M2_ARCHIVE_MOVE_STATE:-0}" != 1 ]; then
+        cp -R "test-nodes/root${node}/$file" "$archive/$file" || return 1
+      else
+        mv "test-nodes/root${node}/$file" "$archive/$file" || return 1
+      fi
     fi
   done
 }

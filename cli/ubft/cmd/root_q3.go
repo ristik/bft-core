@@ -74,15 +74,11 @@ func installQ3Epochs(ctx context.Context, host handoffdelivery.Host, peers []pee
 	for epoch := cm.InstalledRootEpoch() + 1; epoch <= target; epoch++ {
 		bundle, err := provider.Q3Bundle(ctx, epoch)
 		if err != nil {
-			fetched := false
-			for _, root := range peers {
-				if bundle, err = q3delivery.Request(ctx, host, root.ID, epoch); err == nil {
-					fetched = true
-					break
-				}
-			}
-			if !fetched {
-				return fmt.Errorf("no root peer served verified activation of epoch %d: %w", epoch, errors.Join(err, errNoQ3Bundle))
+			var fetchErr error
+			if bundle, fetchErr = fetchFromRootPeers(peers, func(id peer.ID) (q3active.Bundle, error) {
+				return q3delivery.Request(ctx, host, id, epoch)
+			}); fetchErr != nil {
+				return fmt.Errorf("no root peer served verified activation of epoch %d: %w", epoch, errors.Join(fetchErr, errNoQ3Bundle))
 			}
 		}
 		if err := rt.Activate(ctx, bundle); err != nil {

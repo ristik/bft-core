@@ -385,20 +385,14 @@ func rootNodeRun(ctx context.Context, flags *rootNodeRunFlags) error {
 			}
 		}
 		for epoch := cm.InstalledRootEpoch() + 1; q3rt == nil && epoch <= flags.InstallHandoffEpoch; epoch++ {
-			var installed bool
-			for _, root := range peers {
-				bundle, fetchErr := handoffdelivery.Request(ctx, host, root.ID, epoch)
-				if fetchErr != nil {
-					continue
-				}
-				if _, installErr := cm.InstallEpochBundle(bundle); installErr != nil {
-					return fmt.Errorf("install handoff epoch %d: %w", epoch, installErr)
-				}
-				installed = true
-				break
+			bundle, fetchErr := fetchFromRootPeers(peers, func(id peer.ID) (handoffdelivery.Bundle, error) {
+				return handoffdelivery.Request(ctx, host, id, epoch)
+			})
+			if fetchErr != nil {
+				return fmt.Errorf("no root peer served verified handoff epoch %d: %w", epoch, fetchErr)
 			}
-			if !installed {
-				return fmt.Errorf("no root peer served verified handoff epoch %d", epoch)
+			if _, installErr := cm.InstallEpochBundle(bundle); installErr != nil {
+				return fmt.Errorf("install handoff epoch %d: %w", epoch, installErr)
 			}
 		}
 	}
