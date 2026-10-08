@@ -31,6 +31,13 @@ var (
 	ErrHandoffInFlight = errors.New("P85 control: a handoff is in flight")
 	// ErrResolvedResult reports a primary candidate whose Election result the log already closed or acknowledged.
 	ErrResolvedResult = errors.New("P85: the election result is already resolved")
+	// ErrPrimaryProofMissing reports a primary candidate on a chain that judges them whose Freeze companion carries no EVM proof.
+	ErrPrimaryProofMissing = errors.New("P85: the primary candidate carries no EVM proof")
+	// ErrPrimaryProofUnexpected reports an EVM proof on a Freeze this chain does not judge against the EVM (a recovery, or a chain
+	// without the election pinned).
+	ErrPrimaryProofUnexpected = errors.New("P85: the Freeze carries an EVM proof nothing would check")
+	// ErrPrimaryProofRefused reports an EVM proof that does not show the candidate's result published and current.
+	ErrPrimaryProofRefused = errors.New("P85: the primary candidate's EVM proof is refused")
 	// ErrWitnessUnavailable reports a control whose retained witness is not available: unavailable, never false, so the block cannot
 	// be voted until it is.
 	ErrWitnessUnavailable = errors.New("P85 control witness unavailable")
@@ -99,10 +106,18 @@ type EVMStateAuthority interface {
 	VerifyReject(witness []byte, stateRoot [32]byte, resultID [32]byte, attempt uint64) (RejectFacts, error)
 }
 
-// PosDeployment is the custody deployment this root's controls name: the root network id, and custody's network word, chain id and address.
+// PrimaryAuthority verifies the storage-proof witness of a published primary candidate (the election and custody state at the frozen
+// parent) against the EVM state root the root certified.
+type PrimaryAuthority interface {
+	VerifyPrimary(witness []byte, stateRoot [32]byte, resultID [32]byte) (evmassign.PrimaryFacts, error)
+}
+
+// PosDeployment is the custody deployment this root's controls name: the root network id, and custody's network word, chain id and address,
+// and the Election module (zero on a deployment whose roots do not judge primary candidates against the EVM).
 type PosDeployment struct {
 	RootNetwork uint64
 	evmassign.Deployment
+	Election [20]byte
 }
 
 // PosServices are the collaborators of the control executor. A chain without them refuses every control.
@@ -112,6 +127,14 @@ type PosServices struct {
 	Witnesses  WitnessSource
 	EVM        EVMStateAuthority
 	Proposer   ClosureProposer
+	// Primary, when set together with Deployment.Election, makes the EVM proof of a primary candidate a condition of its Freeze: the
+	// companion must be version 4 and carry a proof that evmassign.VerifyPrimary accepts against the frozen parent's state root.
+	Primary PrimaryAuthority
+}
+
+// requiresPrimaryProof reports whether Freeze admission demands the EVM proof of a primary candidate on this chain.
+func (s *PosServices) requiresPrimaryProof() bool {
+	return s != nil && s.Primary != nil && s.Deployment.Election != ([20]byte{})
 }
 
 // mandatory reports whether this chain enforces the closure duty: it has the authority to verify a closure with.

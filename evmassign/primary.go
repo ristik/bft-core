@@ -73,6 +73,7 @@ type PrimaryFacts struct {
 
 // EVMPoP is one member's possession proof for the EVM-side publication: its EVM key and a signature by it over PoPDigest.
 type EVMPoP struct {
+	_         struct{} `cbor:",toarray"`
 	ID        uint64
 	EVMKey    []byte
 	Signature []byte
