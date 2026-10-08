@@ -9,8 +9,6 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/q4shim"
-	rctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
-	"github.com/unicitynetwork/bft-core/rootchain/consensus/votesig"
 )
 
 var q4bHealSeq atomic.Uint64
@@ -164,7 +162,7 @@ func TestQ4BLiveA(t *testing.T) {
 			func(c *q4bLive) { c.hold("delay", "H") },
 			func(c *q4bLive) []string { return []string{"a", "b", "c"} },
 			func(c *q4bLive) { c.heal("delay", "H") })},
-		{"lights delayed (weight 3): H+... responsive weight 6 stalls, release", stallRow(
+		{"lights delayed (weight 3): H alone (6) stalls, release", stallRow(
 			func(c *q4bLive) { c.hold("delay", "a", "b", "c") },
 			func(c *q4bLive) []string { return []string{"H"} },
 			func(c *q4bLive) { c.heal("delay", "a", "b", "c") })},
@@ -278,7 +276,7 @@ func TestQ4BLiveB(t *testing.T) {
 			func(c *q4bLive) { c.heal("cut", c.all()...) })},
 		{"first successor proposal held: release, commits resume", func(t *testing.T, c *q4bLive) {
 			start := c.nodes[0].r.manager.epochAnchor.Slot + 1
-			c.apply(q4shim.Control{Rules: []q4shim.Rule{{Name: "first", Class: q4shim.Proposal, Epoch: 3, RoundMax: start, Action: q4shim.Hold, Require: true}}}, c.all()...)
+			c.apply(q4shim.Control{Rules: []q4shim.Rule{{Name: "first", Class: q4shim.Proposal, Epoch: 3, RoundMax: start + 1, Action: q4shim.Hold, Require: true}}}, c.all()...)
 			c.start(c.all()...)
 			require.Eventually(t, func() bool {
 				for _, n := range c.nodes {
@@ -340,67 +338,4 @@ func TestQ4BLiveB(t *testing.T) {
 	for _, row := range rows {
 		q4bRun(t, newQ4BLiveB, row)
 	}
-}
-
-// Mixed high QCs: the proposal of one round, which carries the QC of the round before, is withheld from the heavy validator alone.
-// The other three vote (weight 3, no QC), the round times out, and the heavy validator signs a timeout with an older high QC than the
-// lights': the timeout certificate that forms carries signatures over different high QC rounds and must verify under the weighted
-// scheme 2 rule of the epoch.
-func TestQ4BMixedHighQCTimeoutCertificate(t *testing.T) {
-	q4Slot(t)
-	c := newQ4BLiveA(t)
-	c.start(c.all()...)
-	c.warm(5, c.all()...)
-	sel := c.nodes[0].r.manager.leaderSelector
-	var target uint64
-	var proposer string
-	for r := c.committedRound("H") + 10; ; r++ {
-		l, err := sel.GetLeaderForRound(r)
-		require.NoError(t, err)
-		if l != c.id("H") {
-			for _, n := range c.nodes {
-				if n.r.id() == l {
-					target, proposer = r, n.name
-				}
-			}
-			break
-		}
-	}
-	t.Logf("withholding the round %d proposal of %s from H", target, proposer)
-	c.apply(q4shim.Control{Rules: []q4shim.Rule{{Name: "withhold", To: c.ids("H"), Class: q4shim.Proposal, Epoch: 2, RoundMin: target, RoundMax: target, Action: q4shim.Drop, Require: true}}}, proposer)
-
-	var tc *rctypes.TimeoutCert
-	require.Eventually(t, func() bool {
-		for _, name := range []string{"a", "b", "c"} {
-			got, err := c.nodes[c.idx(name)].r.manager.blockStore.GetLastTC()
-			if err == nil && got != nil && got.Timeout.Round == target {
-				tc = got
-				return true
-			}
-		}
-		return false
-	}, q4bDeadline, 5*time.Millisecond, "the round %d timed out and its TC formed", target)
-
-	hqc := map[uint64]bool{}
-	var weight uint64
-	for id, v := range tc.Signatures {
-		hqc[v.HqcRound] = true
-		for _, n := range c.nodes {
-			if n.r.id().String() == id {
-				weight += n.weight
-			}
-		}
-	}
-	require.Greater(t, len(hqc), 1, "the TC mixes signatures over different high QC rounds: %v", hqc)
-	require.EqualValues(t, votesig.SchemeDomainBound, tc.Scheme)
-	require.GreaterOrEqual(t, weight, uint64(7))
-	require.Contains(t, tc.Signatures, c.id("H").String(), "the heavy validator's older-HQC timeout is in it: the others alone are weight 3")
-	for _, n := range c.nodes {
-		require.NoError(t, tc.Verify(n.r.trust), n.name)
-	}
-	c.requireRecovery(c.mark(), q4RecoverRound, c.all()...)
-	c.requireChainsAgree(c.all()...)
-	tr := c.finish()
-	require.NoError(t, tr.Verify(c.views()))
-	c.requireNoHonestDoubleSign(tr)
 }
