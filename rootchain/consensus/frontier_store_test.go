@@ -2,6 +2,7 @@ package consensus
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"path/filepath"
 	"testing"
 
@@ -123,4 +124,35 @@ func TestFrontierProxyForwardsTheRecordLog(t *testing.T) {
 	require.ErrorIs(t, err, storage.ErrNoRecordStore)
 	_, err = noLog.Records(0, 1)
 	require.ErrorIs(t, err, storage.ErrNoRecordStore)
+}
+
+func TestFrontierProxyForwardsTheControlWitnesses(t *testing.T) {
+	db, err := storage.NewBoltStorage(filepath.Join(t.TempDir(), "w.db"), storage.WithNoSync())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	sampler := &frontierSampler{}
+	var as PersistentStore = &frontierPersistentStore{PersistentStore: db, sampler: sampler, reader: db}
+	store, ok := as.(storage.WitnessStore)
+	require.True(t, ok, "the proxy keeps the witness capability of the store it wraps")
+
+	data := []byte("canonical bundle")
+	hash := sha256.Sum256(data)
+	require.NoError(t, store.StoreWitness(hash, data))
+	got, err := store.Witness(hash)
+	require.NoError(t, err)
+	require.Equal(t, data, got)
+	require.False(t, sampler.faulted.Load())
+	none, err := store.Witness([32]byte{1})
+	require.NoError(t, err)
+	require.Nil(t, none)
+
+	require.ErrorIs(t, store.StoreWitness(hash, []byte("not the bundle")), storage.ErrWitnessStore)
+	require.True(t, sampler.faulted.Load(), "a refused write latches the fault")
+
+	sampler2 := &frontierSampler{}
+	bare := &frontierPersistentStore{PersistentStore: struct{ PersistentStore }{db}, sampler: sampler2, reader: db}
+	require.ErrorIs(t, bare.StoreWitness(hash, data), storage.ErrNoWitnessStore)
+	require.True(t, sampler2.faulted.Load())
+	_, err = bare.Witness(hash)
+	require.ErrorIs(t, err, storage.ErrNoWitnessStore)
 }

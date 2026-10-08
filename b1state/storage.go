@@ -75,7 +75,7 @@ func GenesisWords(p Profile, genesis Entry) (map[[32]byte][32]byte, error) {
 		return nil, ErrHistory
 	}
 	words := map[[32]byte][32]byte{}
-	for name, w := range map[string][32]byte{"b1.network": Word(uint64(p.Network)), "b1.wCert": Word(p.WCert), "b1.profileHash": h, "b1.initialized": Word(1), "b1.head": {}, "b1.count": Word(1), "clock.rootRound": {}, "origin.rootEpoch": {}, "assignment.rootEpoch": Word(genesis.Epoch), "phase": Word(2)} {
+	for name, w := range map[string][32]byte{"b1.network": Word(uint64(p.Network)), "b1.wCert": Word(p.WCert), "b1.profileHash": h, "b1.initialized": Word(1), "b1.head": {}, "b1.count": Word(1), "clock.rootRound": {}, "origin.rootEpoch": {}, "assignment.rootEpoch": Word(genesis.Epoch), "records.ucTime": Word(p.GenesisUCTime), "phase": Word(2)} {
 		words[FixedSlot(name)] = w
 	}
 	putEntry(func(slot, value [32]byte) { words[slot] = value }, genesis)

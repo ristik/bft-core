@@ -37,6 +37,8 @@ var (
 	ErrPredecessor = errors.New("rootrecords: record does not link to its predecessor")
 	// ErrRecordID reports a record identifier that is not derived from the record's content.
 	ErrRecordID = errors.New("rootrecords: record identifier does not match its content")
+	// ErrClosedEpoch reports a closed epoch on a record that is not a Closure.
+	ErrClosedEpoch = errors.New("rootrecords: only a closure names a closed epoch")
 	// ErrMonotonic reports a record whose progress or UC time is below its predecessor's.
 	ErrMonotonic = errors.New("rootrecords: progress or UC time moved backwards")
 )
@@ -53,6 +55,9 @@ type Record struct {
 	Progress    uint64
 	UCTime      uint64
 	Data        []byte
+	// ClosedEpoch is the closed root epoch a Closure belongs to (the registry stores it beside the record and keys its closure
+	// uniqueness by it); zero for every other kind. It is not part of the record identity.
+	ClosedEpoch uint64
 }
 
 // Anchor is the canonical progress and UC time a record is ordered at.
@@ -165,6 +170,9 @@ func Verify(records []Record) error {
 			}
 		} else if r.Predecessor != ([32]byte{}) {
 			return fmt.Errorf("%w: first record names a predecessor", ErrPredecessor)
+		}
+		if r.ClosedEpoch != 0 && r.Kind != KindClosure {
+			return fmt.Errorf("%w: record %d", ErrClosedEpoch, i)
 		}
 		if r.ID != RecordID(r.Index, r.Predecessor, r.Kind, r.Progress, r.UCTime, r.Data) {
 			return fmt.Errorf("%w: record %d", ErrRecordID, i)
