@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -212,7 +211,7 @@ func TestB1Genesis_RefusalsAreIsolated(t *testing.T) {
 		require.NoError(t, os.WriteFile(d.allocPath, raw, 0o644))
 		_, _, _, err = d.genesis(t)
 		require.Error(t, err)
-		require.True(t, errors.Is(err, registrygenesis.ErrContextMismatch) || errors.Is(err, registrygenesis.ErrEVMParams), "%v", err)
+		require.ErrorIs(t, err, registrygenesis.ErrEVMParams)
 	})
 }
 
@@ -336,4 +335,39 @@ func TestB1ProfileCommand_WritesTheProfileAndTheClientFlags(t *testing.T) {
 	hash, _ := got.Hash()
 	require.Contains(t, stdout.String(), "--unicity.profile-hash="+hexutil.Encode(hash[:]))
 	require.Contains(t, stdout.String(), "--unicity.root-genesis-id="+hexutil.Encode(got.RootGenesisID[:]))
+}
+
+func TestB1RunFlags_EachRequirementIsEnforced(t *testing.T) {
+	ok := func() *shardNodeRunFlags {
+		f := &shardNodeRunFlags{B1Profile: "p.json", RegistryLayout: 1, Executor: "engine-api", GenesisFile: "g.json", ExecutionJournal: "j.db", TrustHistoryProfile2: true}
+		return f
+	}
+	f := ok()
+	require.NoError(t, validateB1RunFlags(f))
+	require.EqualValues(t, b1RegistryLayout, f.RegistryLayout, "the profile selects the layout")
+
+	cases := map[string]func(f *shardNodeRunFlags){
+		"not engine-api":       func(f *shardNodeRunFlags) { f.Executor = "fake" },
+		"no genesis":           func(f *shardNodeRunFlags) { f.GenesisFile = "" },
+		"no execution journal": func(f *shardNodeRunFlags) { f.ExecutionJournal = "" },
+		"no profile-2 trust":   func(f *shardNodeRunFlags) { f.TrustHistoryProfile2 = false },
+	}
+	for name, mutate := range cases {
+		t.Run(name, func(t *testing.T) {
+			f := ok()
+			mutate(f)
+			require.ErrorContains(t, validateB1RunFlags(f), "--b1-profile requires")
+		})
+	}
+	t.Run("another layout", func(t *testing.T) {
+		f := ok()
+		f.RegistryLayout = 2
+		require.ErrorContains(t, validateB1RunFlags(f), "contradicts it")
+	})
+	t.Run("layout 3 without the profile", func(t *testing.T) {
+		require.ErrorContains(t, validateB1RunFlags(&shardNodeRunFlags{RegistryLayout: 3}), "requires --b1-profile")
+	})
+	t.Run("no profile, ordinary layout", func(t *testing.T) {
+		require.NoError(t, validateB1RunFlags(&shardNodeRunFlags{RegistryLayout: 2}))
+	})
 }

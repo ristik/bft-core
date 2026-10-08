@@ -146,4 +146,18 @@ PY
   rm -f "$dep/genesis.json" "$dep/deployment.json"
 }
 
-case "${1:-}" in vault) vault ;; up) up ;; down) down ;; status) status ;; *) echo "usage: $0 up|down|status" >&2; exit 2 ;; esac
+# Writes the lane's derived inputs next to the devnet state (SDK trust document, EVM PDR, config for the driver).
+config() {
+  : "${DNB_TOOL:?set DNB_TOOL to the built dnb-tool}"
+  "$DNB_TOOL" trust-doc --trust-base test-nodes/trust-base.json --out test-nodes/sdk-trust-base.json
+  "$DNB_TOOL" pdr --full-shard-conf test-nodes/evm-full-shard-conf.json --out test-nodes/evm-pdr.cbor
+  python3 - <<PY
+import json
+a = json.load(open("test-nodes/bridge-addresses.json"))
+json.dump({"dir": "$PWD/test-nodes", "ethUrls": ["http://127.0.0.1:%d" % (18545 + i) for i in range($validators)], "aggUrl": "http://127.0.0.1:${AGG_PORT:-3001}",
+  "vault": a["BridgeVault"], "verifier": a["TokenVerifier"], "rootRpc": "http://127.0.0.1:25866", "chainId": $chainID, "evmPartition": $partitionID,
+  "aggPartition": $aggPartition, "archive": "$PWD/test-nodes/archives/evm1"}, open("test-nodes/lane-config.json", "w"), indent=2)
+PY
+}
+
+case "${1:-}" in config) config ;; vault) vault ;; up) up ;; down) down ;; status) status ;; *) echo "usage: $0 up|down|status" >&2; exit 2 ;; esac

@@ -487,16 +487,8 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 	if flags.Q3Lane && !flags.TrustHistoryProfile2 {
 		return errors.New("--q3-lane requires --trust-history-profile-2")
 	}
-	if flags.B1Profile != "" {
-		if flags.RegistryLayout != 1 && flags.RegistryLayout != b1RegistryLayout {
-			return fmt.Errorf("--b1-profile selects registry layout %d; --registry-layout %d contradicts it", b1RegistryLayout, flags.RegistryLayout)
-		}
-		flags.RegistryLayout = b1RegistryLayout
-		if flags.Executor != "engine-api" || flags.GenesisFile == "" || flags.ExecutionJournal == "" || !flags.TrustHistoryProfile2 {
-			return errors.New("--b1-profile requires --executor=engine-api, --genesis, --execution-journal and --trust-history-profile-2")
-		}
-	} else if flags.RegistryLayout == b1RegistryLayout {
-		return errors.New("registry layout 3 is the fresh-B1 layout and requires --b1-profile")
+	if err := validateB1RunFlags(flags); err != nil {
+		return err
 	}
 	if flags.EVMTransitionFile != "" && flags.Executor != "engine-api" {
 		return errors.New("--engine-epoch-transition requires --executor=engine-api")

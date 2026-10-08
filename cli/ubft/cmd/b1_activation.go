@@ -134,7 +134,7 @@ func deriveB1Profile(tb *types.RootTrustBaseV1, conf *types.PartitionDescription
 		Network: uint16(conf.NetworkID), RootGenesisID: h.Genesis(), ExecutionChainID: chainID,
 		RuntimeHash: [32]byte(common.HexToHash(b1registry.CodeHashHex)), CompilerHash: b1registry.CompilerHash(),
 		WCert: wCert, DeltaEV: wCert + 1, DeltaHold: wCert + 2,
-		RestGas: 1096500 + 1141500*(wCert+1), CompanionBytes: 1 << 20, OtherCompanionBytes: 65536, OrdinaryCapacity: ordinaryCapacity,
+		RestGas: b1registry.MinRestGas(wCert), CompanionBytes: 1 << 20, OtherCompanionBytes: 65536, OrdinaryCapacity: ordinaryCapacity,
 	}
 	if p.SystemGas, err = p.RequiredSystemGas(); err != nil {
 		return b1state.Profile{}, err
@@ -321,4 +321,22 @@ func loadB1Deployment(path string, tb *types.RootTrustBaseV1, conf *types.Partit
 		return b1state.Profile{}, nil, err
 	}
 	return p, h, nil
+}
+
+// validateB1RunFlags refuses a --b1-profile that lacks what its checks need, and registry layout 3 without the profile that defines it.
+func validateB1RunFlags(flags *shardNodeRunFlags) error {
+	if flags.B1Profile != "" {
+		if flags.RegistryLayout != 1 && flags.RegistryLayout != b1RegistryLayout {
+			return fmt.Errorf("--b1-profile selects registry layout %d; --registry-layout %d contradicts it", b1RegistryLayout, flags.RegistryLayout)
+		}
+		flags.RegistryLayout = b1RegistryLayout
+		if flags.Executor != "engine-api" || flags.GenesisFile == "" || flags.ExecutionJournal == "" || !flags.TrustHistoryProfile2 {
+			return errors.New("--b1-profile requires --executor=engine-api, --genesis, --execution-journal and --trust-history-profile-2")
+		}
+		return nil
+	}
+	if flags.RegistryLayout == b1RegistryLayout {
+		return errors.New("registry layout 3 is the fresh-B1 layout and requires --b1-profile")
+	}
+	return nil
 }

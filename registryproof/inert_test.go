@@ -68,6 +68,7 @@ func TestOnlyReviewedPackagesImportTheReader(t *testing.T) {
 		require.True(t, scanned[want], "expected to scan %s", want)
 	}
 	require.Equal(t, []string{
+		filepath.Join("cli", "ubft", "cmd", "b1_activation.go"),
 		filepath.Join("cli", "ubft", "cmd", "engine_api_genesis.go"),
 		filepath.Join("cli", "ubft", "cmd", "shard_node_run.go"),
 		filepath.Join("configuredprogress", "codec.go"),
@@ -79,5 +80,5 @@ func TestOnlyReviewedPackagesImportTheReader(t *testing.T) {
 		filepath.Join("parentwitness", "wire.go"),
 		filepath.Join("rootinput", "b1.go"),
 		filepath.Join("rootinput", "v2.go"),
-	}, importers, "only reviewed proof consumers may import %s", importPath)
+	}, importers, "only reviewed proof consumers may import %s (cli/ubft/cmd/b1_activation.go holds the B1 origin validation and the pair's Update-admission proof source, the roles shard_node_run.go and engine_api_genesis.go hold for the other layouts)", importPath)
 }

@@ -27,7 +27,6 @@ import (
 	"github.com/ethereum/go-ethereum/rlp"
 	"github.com/unicitynetwork/bft-core/archive"
 	"github.com/unicitynetwork/bft-core/bridgeprofile"
-	"github.com/unicitynetwork/bft-core/registryproof"
 	"github.com/unicitynetwork/bft-go-base/types"
 )
 
@@ -42,6 +41,8 @@ func main() {
 		err = deployment(os.Args[2:])
 	case "trust-doc":
 		err = trustDoc(os.Args[2:])
+	case "pdr":
+		err = pdr(os.Args[2:])
 	case "lockproof":
 		err = lockProof(os.Args[2:])
 	default:
@@ -204,7 +205,13 @@ func lockProof(args []string) error {
 	if err != nil {
 		return err
 	}
-	var proof registryproof.GetProofResult
+	var proof struct {
+		Address      common.Address  `json:"address"`
+		AccountProof []hexutil.Bytes `json:"accountProof"`
+		StorageProof []struct {
+			Proof []hexutil.Bytes `json:"proof"`
+		} `json:"storageProof"`
+	}
 	if err := json.Unmarshal(raw, &proof); err != nil {
 		return err
 	}
@@ -274,4 +281,27 @@ func requestForBlock(dir string, blockHash common.Hash) (archive.Request, error)
 		return archive.Request{}, fmt.Errorf("expected one receipt-complete archive request for %s, found %d", blockHash, len(matches))
 	}
 	return matches[0], nil
+}
+
+// pdr writes the canonical CBOR of the EVM shard's full configuration: the artifact a lock proof carries and the manifest pins.
+func pdr(args []string) error {
+	fs := flag.NewFlagSet("pdr", flag.ContinueOnError)
+	in := fs.String("full-shard-conf", "", "full shard configuration JSON")
+	out := fs.String("out", "", "output path")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	raw, err := os.ReadFile(*in)
+	if err != nil {
+		return err
+	}
+	var conf types.PartitionDescriptionRecord
+	if err := json.Unmarshal(raw, &conf); err != nil {
+		return err
+	}
+	enc, err := types.Cbor.Marshal(&conf)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(*out, enc, 0o644) // #nosec G306 -- public configuration
 }

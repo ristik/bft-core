@@ -39,3 +39,6 @@ B1 0x0100/0x0101/0x0102 and B2 0x0104 registered (0x0103 stays unregistered).
 What this stage needed (found by running it, none was visible from unit tests): the execution-profile check now expects exactly the four Unicity
 precompiles on a B1 deployment; `b1Update` is always on the wire (ureth's decoder requires the field; it was `omitempty`); the pair binding is wired
 for a B1 node (`wireQ3Pair`); ureth's `--builder.gaslimit` must equal the profile's `maxGas`.
+
+Scope note: on this path the pair's `q3active` runtime is built from the pinned genesis trust base and is never attached to a root, so registry
+Update admission is fixed-base (one root epoch). Root-epoch changes and weighted epochs are for the later DN-B stages and the common SDK trust work.

@@ -15,7 +15,7 @@ import (
 const importPath = "github.com/unicitynetwork/bft-core/registrywitness"
 
 // TestOnlyLocalAdapterSourceImportsTheWitnessStore keeps the production boundary narrow:
-// only the adapter's local proof source may activate this RPC witness acquisition path.
+// only the adapter's local proof source (and the B1 pair's admission proof fetcher, which shares its JSON-RPC caller) may activate this RPC witness acquisition path.
 func TestOnlyLocalAdapterSourceImportsTheWitnessStore(t *testing.T) {
 	root, err := filepath.Abs("..")
 	require.NoError(t, err)
@@ -62,6 +62,6 @@ func TestOnlyLocalAdapterSourceImportsTheWitnessStore(t *testing.T) {
 	for _, want := range []string{"rootinput/rootinput.go", "shardnode/round.go", "cli/ubft/cmd/shard_node_run.go", "engineapi/adapter.go"} {
 		require.True(t, scanned[want], "expected to scan %s", want)
 	}
-	require.Equal(t, []string{filepath.Join("engineapi", "parent_witness_source.go")}, importers,
-		"only the local adapter source may import %s", importPath)
+	require.Equal(t, []string{filepath.Join("cli", "ubft", "cmd", "b1_activation.go"), filepath.Join("engineapi", "parent_witness_source.go")}, importers,
+		"only the local adapter source and the B1 activation file (the pair's Update-admission proof fetcher uses the same RPC caller) may import %s", importPath)
 }
