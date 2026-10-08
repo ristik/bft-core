@@ -4,6 +4,8 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
+	"math"
 )
 
 func sha256Slice(b []byte) []byte {
@@ -114,11 +116,13 @@ type RootInputVector struct {
 	SelfContained   bool   `json:"self_contained"`
 }
 
-// TimestampVector exercises max(referenceTime, parentTimestamp+1).
+// TimestampVector exercises max(referenceTime, parentTimestamp+1). Overflow marks a parent timestamp whose successor does not fit in 64
+// bits: the derivation is refused (Want is zero), as it is by the Rust derivation.
 type TimestampVector struct {
 	ReferenceTime   uint64 `json:"reference_time"`
 	ParentTimestamp uint64 `json:"parent_timestamp"`
 	Want            uint64 `json:"want"`
+	Overflow        bool   `json:"overflow"`
 }
 
 // ClockVector is the "98-to-107 observation triggers a threshold at 100
@@ -375,10 +379,15 @@ func BuildVectors() VectorSet {
 	// --- timestamps -------------------------------------------------------
 	for _, tv := range []TimestampVector{
 		{ReferenceTime: 1_726_000_000, ParentTimestamp: 1_725_999_999},
-		{ReferenceTime: 1_726_000_000, ParentTimestamp: 1_726_000_000}, // seal ts repeats -> +1 path
-		{ReferenceTime: 1_726_000_000, ParentTimestamp: 1_726_000_005}, // parent ahead
+		{ReferenceTime: 1_726_000_000, ParentTimestamp: 1_726_000_000},       // seal ts repeats -> +1 path
+		{ReferenceTime: 1_726_000_000, ParentTimestamp: 1_726_000_005},       // parent ahead
+		{ReferenceTime: math.MaxUint64, ParentTimestamp: math.MaxUint64 - 1}, // the largest representable successor
+		{ReferenceTime: math.MaxUint64, ParentTimestamp: 0},                  // reference at the top, parent at the bottom
+		{ReferenceTime: 1_726_000_000, ParentTimestamp: math.MaxUint64},      // no successor exists
+		{ReferenceTime: math.MaxUint64, ParentTimestamp: math.MaxUint64},     // not even a reference at the top helps
 	} {
-		tv.Want = DeriveTimestamp(tv.ReferenceTime, tv.ParentTimestamp)
+		ts, err := DeriveTimestampChecked(tv.ReferenceTime, tv.ParentTimestamp)
+		tv.Want, tv.Overflow = ts, errors.Is(err, ErrTimestampOverflow)
 		vs.Timestamps = append(vs.Timestamps, tv)
 	}
 

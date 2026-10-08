@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"os"
 	"testing"
 )
@@ -232,6 +233,26 @@ func TestDeriveTimestamp(t *testing.T) {
 	if got := DeriveTimestamp(1000, 1005); got != 1006 {
 		t.Errorf("parent ahead: got %d want 1006", got)
 	}
+}
+
+func TestDeriveTimestampRefusesAParentWithNoSuccessor(t *testing.T) {
+	const top = ^uint64(0)
+	for _, ref := range []uint64{0, 1_726_000_000, top} {
+		if got, err := DeriveTimestampChecked(ref, top); !errors.Is(err, ErrTimestampOverflow) || got != 0 {
+			t.Errorf("reference %d, parent at the top: got (%d, %v), want ErrTimestampOverflow", ref, got, err)
+		}
+	}
+	// the largest parent that does have a successor
+	if got, err := DeriveTimestampChecked(5, top-1); err != nil || got != top {
+		t.Errorf("parent one below the top: got (%d, %v), want (%d, nil)", got, err, top)
+	}
+	// the panicking form never returns a time that is not above the parent
+	defer func() {
+		if r := recover(); r == nil {
+			t.Error("DeriveTimestamp returned for a parent at the top of the range")
+		}
+	}()
+	DeriveTimestamp(5, top)
 }
 
 // --- certified round clock ------------------------------------------------

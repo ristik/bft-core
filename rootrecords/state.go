@@ -181,8 +181,8 @@ func (s State) Commit(h, nextEpoch, nextFirst uint64, assignment bool, bodyID [3
 
 // append links one record to the log: next index, the tip as predecessor, anchored now. The anchors may not fall below the last one.
 func (s State) append(kind Kind, data []byte, at Anchor) (State, Record, error) {
-	// Committed timestamps are strictly increasing since #445, so a record's UC time can never fall below the previous record's; if one
-	// does, the block is refused rather than its anchor rewritten.
+	// Committed timestamps never decrease (ADR 0013, #479): equal seconds are valid, so successive records may share a UC time. A record's
+	// UC time can therefore never fall below the previous record's; if one does, the block is refused rather than its anchor rewritten.
 	if at.Progress < s.LastProgress || at.UCTime < s.LastTime {
 		return State{}, Record{}, fmt.Errorf("%w: (%d,%d) after (%d,%d)", ErrMonotonic, at.Progress, at.UCTime, s.LastProgress, s.LastTime)
 	}

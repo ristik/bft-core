@@ -54,7 +54,7 @@
     }
   ],
   "checkpoint_freshness_policy": {
-    "note": "The round-count arithmetic (Δ_hold rounds × a per-round estimate) is ADVISORY ONLY — Pacemaker.AdvanceRoundQC advances immediately on a QC, so consensus guarantees no minimum successful-round duration. A policy with no EnforcedRealTimeFloorSeconds is Unsupported. The staleness limit is derived from that enforced wall-clock floor, minus acquisition latency, strictly less than the floor. The advisory per-round estimate must be a conservative lower bound: in [ConsensusMinRoundPeriodSeconds, MaxObservedRoundPeriodSeconds] — a sub-minimum value or an arbitrarily large one is rejected.",
+    "note": "The round-count arithmetic (Δ_hold rounds × a per-round estimate) is ADVISORY ONLY — Pacemaker.AdvanceRoundQC advances immediately on a QC, so consensus guarantees no minimum successful-round duration. A policy with no EnforcedRealTimeFloorSeconds is Unsupported. The staleness limit is derived from that enforced wall-clock floor, minus acquisition latency, strictly less than the floor. The advisory per-round estimate is a whole number of seconds in [ConsensusMinRoundPeriodSeconds (1, the unit; not a physical minimum: rounds can be sub-second), MaxObservedRoundPeriodSeconds] — a zero estimate or an arbitrarily large one is rejected. The JSON names sub_physical_minimum_round_estimate_rejected and physical_min_round_seconds are kept for the vector format; they denote that lower bracket.",
     "delta_hold_rounds": 20000,
     "delta_ev_rounds": 8000,
     "min_round_period_seconds": 6,
@@ -70,7 +70,7 @@
     "rounds_only_policy_reported_unsupported": true,
     "sub_physical_minimum_round_estimate_rejected": true,
     "arbitrarily_large_round_estimate_rejected": true,
-    "physical_min_round_seconds": 2,
+    "physical_min_round_seconds": 1,
     "max_observed_round_seconds": 120
   },
   "window_nesting_and_key_retention": {

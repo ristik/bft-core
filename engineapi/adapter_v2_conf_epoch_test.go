@@ -5,6 +5,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/unicitynetwork/bft-core/evmroot"
+	"math"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -335,4 +337,45 @@ func TestAdapterV2AuthenticatesALateEpochCertificateUnderItsOwnInstalledConfigur
 		err, _, _ := derive(t, map[uint64][]byte{0: bytes.Clone(genesis), 1: bytes.Clone(genesis)}, 2)
 		require.ErrorIs(t, err, rootinput.ErrUnauthenticated, "no fallback to another epoch's hash")
 	})
+}
+
+// A parent whose header time is at the top of the 64-bit range has no strictly greater EVM time: building on it, and verifying a block
+// that claims to extend it, both refuse (the Rust derivation refuses the same input); no block reaches the execution client.
+func TestAdapterV2RefusesAParentWhoseTimestampCannotBeSucceeded(t *testing.T) {
+	verifier, params, want := bootstrapAdapterFixture(t)
+	engine, eth := newMockReth(t, Secret{}), newMockReth(t, Secret{})
+	sealCalls := 0
+	payloadID := data{1, 2, 3, 4, 5, 6, 7, 8}
+	engine.on("engine_forkchoiceUpdatedWithSealV1", func(json.RawMessage) (any, *rpcError) {
+		return ForkchoiceUpdatedResponse{PayloadStatus: PayloadStatusV1{Status: PayloadStatusValid}, PayloadID: &payloadID}, nil
+	})
+	engine.on("engine_newPayloadWithSealV1", func(json.RawMessage) (any, *rpcError) {
+		sealCalls++
+		return PayloadStatusV1{Status: PayloadStatusValid}, nil
+	})
+	eth.on("eth_getBlockByHash", func(json.RawMessage) (any, *rpcError) {
+		return blockHeaderJSON{Number: 0, Hash: data32(verifier.GenesisOrigin.BlockHash()), Timestamp: quantity(math.MaxUint64)}, nil
+	})
+	a, closeFn := newTestAdapterWithVerifier(t, engine, eth, verifier)
+	defer closeFn()
+	attrs := DeriveAttributesV2(want.Input, ParentHeader{}, a.feeCollector)
+	payload := samplePayload()
+	payload.ParentHash = data32(verifier.GenesisOrigin.BlockHash())
+	payload.BlockNumber = 1
+	payload.Timestamp, payload.PrevRandao, payload.FeeRecipient, payload.Withdrawals = attrs.Timestamp, attrs.PrevRandao, attrs.SuggestedFeeRecipient, attrs.Withdrawals
+	payload.ExtraData = want.Commitment[:]
+	witnesses, err := encodeSealCompanionWitnesses(params.AuthorizingCertificate, params.AuthorizingTechnicalRecord)
+	require.NoError(t, err)
+	block, err := EncodeBlockWithSealCompanion(payload, &SealCompanion{RootInput: want.Encoded, Witnesses: witnesses, Provenance: "build"})
+	require.NoError(t, err)
+
+	_, buildErr := a.Build(context.Background(), params)
+	require.ErrorIs(t, buildErr, evmroot.ErrTimestampOverflow)
+	bindErr := a.CheckBlockBinding(context.Background(), block, params)
+	require.ErrorIs(t, bindErr, evmroot.ErrTimestampOverflow)
+	require.ErrorIs(t, bindErr, shardnode.ErrBlockBindingUnavailable, "a retriable prerequisite, as for any parent-header failure")
+	status, verifyErr := a.Verify(context.Background(), block, params)
+	require.ErrorIs(t, verifyErr, evmroot.ErrTimestampOverflow)
+	require.NotEqual(t, shardnode.StatusValid, status)
+	require.Zero(t, sealCalls, "a refused block never reaches the execution client")
 }

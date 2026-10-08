@@ -35,18 +35,42 @@ type ParentHeader struct {
 // the derivation — rootinput/wiring_contract_test.go's
 // TestWiring_TodaysRoundParamsCannotAuthenticate records that, and a guard here
 // would contradict it.
+//
+// DeriveAttributes and DeriveAttributesV2 panic when the parent's timestamp is at the top of the 64-bit range (no strictly greater EVM
+// time exists); the production paths call the Checked forms and refuse instead.
 func DeriveAttributes(ri evmroot.RootInput, parent ParentHeader) PayloadAttributesV3 {
-	return deriveAttributes(ri.Origin.RootRound, ri.Round, ri.Origin.ReferenceTime, parent, [20]byte{})
+	attrs, err := DeriveAttributesChecked(ri, parent)
+	if err != nil {
+		panic(err)
+	}
+	return attrs
 }
 
 func DeriveAttributesV2(ri evmroot.RootInputV2, parent ParentHeader, feeCollector [20]byte) PayloadAttributesV3 {
+	attrs, err := DeriveAttributesV2Checked(ri, parent, feeCollector)
+	if err != nil {
+		panic(err)
+	}
+	return attrs
+}
+
+// DeriveAttributesChecked is DeriveAttributes returning evmroot.ErrTimestampOverflow instead of panicking.
+func DeriveAttributesChecked(ri evmroot.RootInput, parent ParentHeader) (PayloadAttributesV3, error) {
+	return deriveAttributes(ri.Origin.RootRound, ri.Round, ri.Origin.ReferenceTime, parent, [20]byte{})
+}
+
+// DeriveAttributesV2Checked is DeriveAttributesV2 returning evmroot.ErrTimestampOverflow instead of panicking.
+func DeriveAttributesV2Checked(ri evmroot.RootInputV2, parent ParentHeader, feeCollector [20]byte) (PayloadAttributesV3, error) {
 	return deriveAttributes(ri.Origin.RootRound, ri.Round, ri.Origin.ReferenceTime, parent, feeCollector)
 }
 
-func deriveAttributes(rootRound, round, referenceTime uint64, parent ParentHeader, feeCollector [20]byte) PayloadAttributesV3 {
+func deriveAttributes(rootRound, round, referenceTime uint64, parent ParentHeader, feeCollector [20]byte) (PayloadAttributesV3, error) {
 	prevRandao := evmroot.DerivePrevRandao(rootRound, round)
 	beaconRoot := evmroot.DeriveBeaconRoot(rootRound, round)
-	ts := evmroot.DeriveTimestamp(referenceTime, parent.Timestamp)
+	ts, err := evmroot.DeriveTimestampChecked(referenceTime, parent.Timestamp)
+	if err != nil {
+		return PayloadAttributesV3{}, err
+	}
 
 	return PayloadAttributesV3{
 		Timestamp:             quantity(ts),
@@ -54,7 +78,7 @@ func deriveAttributes(rootRound, round, referenceTime uint64, parent ParentHeade
 		SuggestedFeeRecipient: data20(feeCollector),
 		Withdrawals:           []WithdrawalV1{},
 		ParentBeaconBlockRoot: data32(beaconRoot),
-	}
+	}, nil
 }
 
 // Verify recomputes what the leader's attributes should have been from the
@@ -67,7 +91,10 @@ func deriveAttributes(rootRound, round, referenceTime uint64, parent ParentHeade
 // exactly the file the build plan singles out as the one whose failure
 // message should name the diverging field, not just report "mismatch".
 func Verify(ri evmroot.RootInput, parent ParentHeader, attrs PayloadAttributesV3) error {
-	want := DeriveAttributes(ri, parent)
+	want, err := DeriveAttributesChecked(ri, parent)
+	if err != nil {
+		return fmt.Errorf("engineapi: round %d: %w", ri.Round, err)
+	}
 	switch {
 	case want.Timestamp != attrs.Timestamp:
 		return fmt.Errorf("engineapi: round %d timestamp diverges: got %d, want %d", ri.Round, attrs.Timestamp, want.Timestamp)
@@ -108,11 +135,19 @@ type PayloadFields struct {
 // reports as INVALID; there is no separate field to compare it against ahead of
 // that call.
 func VerifyPayloadFields(ri evmroot.RootInput, parent ParentHeader, claimed PayloadFields) error {
-	return verifyPayloadFields(ri.Round, DeriveAttributes(ri, parent), claimed)
+	want, err := DeriveAttributesChecked(ri, parent)
+	if err != nil {
+		return fmt.Errorf("engineapi: round %d: %w", ri.Round, err)
+	}
+	return verifyPayloadFields(ri.Round, want, claimed)
 }
 
 func VerifyPayloadFieldsV2(ri evmroot.RootInputV2, parent ParentHeader, feeCollector [20]byte, claimed PayloadFields) error {
-	return verifyPayloadFields(ri.Round, DeriveAttributesV2(ri, parent, feeCollector), claimed)
+	want, err := DeriveAttributesV2Checked(ri, parent, feeCollector)
+	if err != nil {
+		return fmt.Errorf("engineapi: round %d: %w", ri.Round, err)
+	}
+	return verifyPayloadFields(ri.Round, want, claimed)
 }
 
 func verifyPayloadFields(round uint64, want PayloadAttributesV3, claimed PayloadFields) error {

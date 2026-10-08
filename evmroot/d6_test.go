@@ -59,12 +59,12 @@ func TestD6_CheckpointFreshnessDerivedAndStrict(t *testing.T) {
 		t.Fatalf("staleness limit %d not strictly < enforced protection %d", stale, prot)
 	}
 
-	// A per-round estimate BELOW the physical minimum is not a conservative
-	// lower bound — rejected.
+	// A zero per-round estimate (below the one-second unit of the advisory
+	// estimate) states nothing — rejected.
 	tooFast := fp
 	tooFast.MinRoundPeriodSeconds = ConsensusMinRoundPeriodSeconds - 1
 	if tooFast.Valid() {
-		t.Fatal("a sub-physical-minimum per-round estimate was accepted")
+		t.Fatal("a zero per-round estimate was accepted")
 	}
 	// An arbitrarily LARGE per-round estimate inflates the advisory window
 	// without any stronger guarantee — also rejected.
