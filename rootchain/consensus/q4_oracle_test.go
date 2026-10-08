@@ -19,6 +19,8 @@ import (
 	"github.com/unicitynetwork/bft-core/internal/quorumweight"
 	"github.com/unicitynetwork/bft-core/network/protocol/abdrc"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/leader"
+	drctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
+	"github.com/unicitynetwork/bft-core/rootchain/consensus/votesig"
 )
 
 // Q4 #51 (A) oracle: expected verdicts are computed here with plain integers, subset enumeration and a reference schedule. The
@@ -169,6 +171,8 @@ type q4EpochView struct {
 	Epoch     uint64
 	Weights   map[string]uint64
 	Verifiers map[string]abcrypto.Verifier
+	// Cfg, when set, is the epoch's scheme 2 signing configuration: a domain-bound vote or timeout is then checked against its PV or PT.
+	Cfg *votesig.Config
 }
 
 func q4View(r *q4Roster, epoch uint64) q4EpochView {
@@ -381,7 +385,18 @@ func q4VerifyMsg(m q4Msg, views map[uint64]q4EpochView) error {
 			return fmt.Errorf("%w: %w", errQ4TraceStatement, err)
 		}
 		sig = v.Signature
-		if h, err := v.VoteInfo.Hash(crypto.SHA256); err != nil || !bytes.Equal(h, v.LedgerCommitInfo.PreviousHash) {
+		if v.Scheme == votesig.SchemeDomainBound {
+			if view.Cfg == nil {
+				return fmt.Errorf("%w: scheme 2 vote without a signing configuration", errQ4TraceStatement)
+			}
+			pv, _, _, err := drctypes.DomainBoundStatement(*view.Cfg, v.VoteInfo, v.LedgerCommitInfo, len(v.SealSignature) != 0)
+			if err != nil {
+				return fmt.Errorf("%w: %s", errQ4TraceMixed, m.Author)
+			}
+			if !bytes.Equal(pv, m.Statement) {
+				return fmt.Errorf("%w: %s", errQ4TraceStatement, m.Author)
+			}
+		} else if h, err := v.VoteInfo.Hash(crypto.SHA256); err != nil || !bytes.Equal(h, v.LedgerCommitInfo.PreviousHash) {
 			return fmt.Errorf("%w: %s", errQ4TraceMixed, m.Author)
 		}
 	default:
@@ -390,6 +405,15 @@ func q4VerifyMsg(m q4Msg, views map[uint64]q4EpochView) error {
 			return fmt.Errorf("%w: %w", errQ4TraceStatement, err)
 		}
 		sig = v.Signature
+		if v.Scheme == votesig.SchemeDomainBound {
+			if view.Cfg == nil {
+				return fmt.Errorf("%w: scheme 2 timeout without a signing configuration", errQ4TraceStatement)
+			}
+			pt, err := v.Preimage(*view.Cfg)
+			if err != nil || !bytes.Equal(pt, m.Statement) {
+				return fmt.Errorf("%w: %s", errQ4TraceStatement, m.Author)
+			}
+		}
 	}
 	if err := verifier.VerifyBytes(sig, m.Statement); err != nil {
 		return fmt.Errorf("%w: %s", errQ4TraceSignature, m.Author)
