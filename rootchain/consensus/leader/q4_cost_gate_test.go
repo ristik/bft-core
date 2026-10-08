@@ -177,6 +177,9 @@ func q4MeasureBlocked(t testing.TB, nodes []*types.NodeInfo, d uint64, callers i
 // with Q4_COST_FULL=1, the acceptance profile over the whole envelope plus the measured-only d=10^6 row. Q4_COST_OUT=<file> keeps the
 // measurements as JSON for the acceptance report.
 func TestQ4QueryCostGate(t *testing.T) {
+	if raceEnabled {
+		t.Skip("wall-clock budgets are not meaningful under the race detector; they run in the Q4 deterministic gates job and the normal test shards")
+	}
 	full := os.Getenv("Q4_COST_FULL") == "1"
 	rep := q4CostReport{Profile: "ci (n=100, d=10^4)", Host: fmt.Sprintf("%s/%s %d cpu %s", runtime.GOOS, runtime.GOARCH, runtime.NumCPU(), runtime.Version())}
 	rep.Frozen.Members, rep.Frozen.Distance = q4SupportedMembers, q4SupportedDistance
@@ -214,6 +217,9 @@ func TestQ4QueryCostGate(t *testing.T) {
 // lookup at ten times the distance costs several times as much (a regression to a constant-time lookup would silently make the
 // budgets meaningless, and a quadratic one would break them).
 func TestQ4QueryCostScalesWithDistanceNotMembersAlone(t *testing.T) {
+	if raceEnabled {
+		t.Skip("wall-clock budgets are not meaningful under the race detector; they run in the Q4 deterministic gates job and the normal test shards")
+	}
 	nodes := q4Members(t, 20)
 	small := q4Measure(t, nodes, "cold-restart", 20_000)
 	big := q4Measure(t, nodes, "cold-restart", 200_000)
