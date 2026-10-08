@@ -2,13 +2,19 @@ package cmd
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 	"github.com/unicitynetwork/bft-core/evmassign"
+	"github.com/unicitynetwork/bft-core/internal/testutils/q3fixture"
+	"github.com/unicitynetwork/bft-core/internal/testutils/q3process"
 	"github.com/unicitynetwork/bft-core/network/protocol/abdrc"
 	"github.com/unicitynetwork/bft-core/q3format"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus"
@@ -91,4 +97,40 @@ func TestTheCandidateEndpointReturnsWhatTheMembersMustSign(t *testing.T) {
 	require.Equal(t, c.Body.Encode(), []byte(got.Body))
 
 	require.Equal(t, http.StatusForbidden, postJSON(rootQ3CandidateHandler(stub), "10.0.0.5:1", rootHandoffPlanRequest{}).Code)
+}
+
+// A Q3 root selects the view-aware request branch right after the runtime is attached and before it serves: without it a weighted EVM
+// assignment has no request context and every certification request of the shard is refused. A helper test cannot see the call dropped.
+func TestRootNodeRunSelectsTheRequestHistoryAfterInstallingTheActivations(t *testing.T) {
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "root_node.go", nil, 0)
+	require.NoError(t, err)
+	first := map[string]token.Pos{}
+	ast.Inspect(file, func(n ast.Node) bool {
+		if call, ok := n.(*ast.CallExpr); ok {
+			if id, ok := call.Fun.(*ast.Ident); ok {
+				if _, seen := first[id.Name]; !seen {
+					first[id.Name] = call.Pos()
+				}
+			}
+		}
+		return true
+	})
+	for _, name := range []string{"attachRootQ3", "installQ3Epochs", "selectRootQ3RequestHistory"} {
+		require.Contains(t, first, name)
+	}
+	require.Less(t, first["attachRootQ3"], first["installQ3Epochs"])
+	require.Less(t, first["installQ3Epochs"], first["selectRootQ3RequestHistory"], "an activation installed at this very start counts")
+}
+
+// The request history is selected only once the history holds an activation: a genesis root keeps the legacy dispatch, which is the only
+// one that can judge a shard that has not certified yet.
+func TestOnlyAnActivatedHistorySelectsTheRequestHistory(t *testing.T) {
+	f := q3fixture.New(t, q3fixture.Options{})
+	p := q3process.New(t, f)
+	rt := p.Start()
+	require.False(t, rootQ3HasActivation(rt), "a genesis history")
+	require.NoError(t, rt.Recover(context.Background()))
+	require.NoError(t, rt.Activate(context.Background(), p.Bundle()))
+	require.True(t, rootQ3HasActivation(rt), "after the activation")
 }

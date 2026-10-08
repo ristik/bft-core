@@ -23,6 +23,7 @@ type (
 		orchestration Orchestration
 		profile       uint64
 		handoffAuth   handoffAuthority
+		pos           *PosServices // the P85 control executor's collaborators; nil refuses every control
 		lock          sync.RWMutex
 		log           *slog.Logger
 		// the attempt whose lapse was last reported (reported once)
@@ -157,6 +158,14 @@ func (x *BlockStore) IsChangeInProgress(partition types.PartitionID, shard types
 	return nil
 }
 
+// SetPosServices installs the collaborators the P85 control executor verifies controls with. It must be set before the store executes a
+// block that carries a control.
+func (x *BlockStore) SetPosServices(s *PosServices) {
+	x.lock.Lock()
+	defer x.lock.Unlock()
+	x.pos = s
+}
+
 func (x *BlockStore) GetDB() PersistentStore {
 	return x.storage
 }
@@ -288,7 +297,7 @@ func (x *BlockStore) Add(block *rctypes.BlockData, verifier IRChangeReqVerifier)
 		}
 	}
 	// Extend state from parent block
-	exeBlock, err := parentBlock.extendWithAuthority(block, verifier, x.orchestration, x.hash, x.log, x.handoffAuth, x)
+	exeBlock, err := parentBlock.extendWithAuthority(block, verifier, x.orchestration, x.hash, x.log, x.handoffAuth, x, x.pos)
 	if err != nil {
 		return nil, fmt.Errorf("error processing block round %v, %w", block.Round, err)
 	}

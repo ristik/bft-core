@@ -298,3 +298,67 @@ func TestDecodeStateRefusesANonShortestInteger(t *testing.T) {
 	_, err = DecodeState(enc)
 	require.NoError(t, err)
 }
+
+func closureData(epoch uint64) []byte {
+	a, h, r, e, k := id32(1), id32(2), id32(3), id32(4), id32(5)
+	return concat(a[:], word(100), h[:], r[:], e[:], k[:])
+}
+
+func TestStateAwaitsTheClosureOfAnEpochAnAssignmentHandoffEnded(t *testing.T) {
+	s := mustCommit(t, NewState(1, 1), 100, 2, 101, true)
+	require.Empty(t, s.Awaiting, "H alone ends nothing: the epoch's last block may still be ordered")
+	s = mustBlock(t, s, 1, 130) // suffix block
+	require.Empty(t, s.Awaiting)
+	s = mustBlock(t, s, 2, 105) // the first successor block
+	require.Equal(t, []Awaiting{{Epoch: 1, HRound: 100}}, s.Awaiting)
+	again := mustBlock(t, s, 2, 106)
+	require.Equal(t, s.Bytes(), again.Bytes())
+
+	// a root-only handoff ends an epoch whose assignment continues: nothing awaits
+	r := mustCommit(t, NewState(1, 1), 100, 2, 101, false)
+	r = mustBlock(t, r, 2, 105)
+	require.Empty(t, r.Awaiting)
+
+	// a primary and its recovery each end an epoch
+	k := mustCommit(t, s, 150, 3, 151, true)
+	k = mustBlock(t, k, 3, 155)
+	require.Equal(t, []Awaiting{{Epoch: 1, HRound: 100}, {Epoch: 2, HRound: 150}}, k.Awaiting)
+	round, ok := k.HRoundAwaiting(2)
+	require.True(t, ok)
+	require.EqualValues(t, 150, round)
+	_, ok = k.HRoundAwaiting(3)
+	require.False(t, ok)
+}
+
+func TestStateCloseProjectsOnceAtTheCarryingBlock(t *testing.T) {
+	s := mustCommit(t, NewState(1, 1), 100, 2, 101, true)
+	s = mustBlock(t, s, 2, 105)
+	n, r, err := s.Close(1, closureData(1), 105, 1_500)
+	require.NoError(t, err)
+	require.Equal(t, KindClosure, r.Kind)
+	require.EqualValues(t, 104, r.Progress, "p_close: the progress of the block that carries the closure")
+	require.EqualValues(t, 1_500, r.UCTime)
+	require.Empty(t, n.Awaiting)
+	require.EqualValues(t, 1, n.Count)
+	require.NoError(t, Verify([]Record{r}))
+	_, _, err = n.Close(1, closureData(1), 106, 1_501)
+	require.ErrorIs(t, err, ErrNotAwaiting, "a repeat is no second record")
+	_, _, err = s.Close(2, closureData(2), 105, 1_500)
+	require.ErrorIs(t, err, ErrNotAwaiting, "an epoch no handoff ended")
+	_, _, err = s.Close(1, closureData(1)[:191], 105, 1_500)
+	require.ErrorIs(t, err, ErrPayload)
+	_, _, err = s.Close(1, closureData(1), 105, 0)
+	require.ErrorIs(t, err, ErrNoUCTime)
+}
+
+func TestStateAwaitingEncodingAndRefusals(t *testing.T) {
+	s := mustCommit(t, NewState(1, 1), 100, 2, 101, true)
+	s = mustBlock(t, s, 2, 105)
+	got, err := DecodeState(s.Bytes())
+	require.NoError(t, err)
+	require.Equal(t, s.Awaiting, got.Awaiting)
+	_, err = DecodeState(State{Epoch: 3, First: 1, Awaiting: []Awaiting{{Epoch: 2, HRound: 5}, {Epoch: 1, HRound: 4}}}.Bytes())
+	require.ErrorIs(t, err, ErrState, "descending")
+	_, err = DecodeState(State{Epoch: 3, First: 1, Awaiting: []Awaiting{{Epoch: 1, HRound: 5}, {Epoch: 1, HRound: 4}}}.Bytes())
+	require.ErrorIs(t, err, ErrState, "duplicate")
+}

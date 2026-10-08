@@ -373,6 +373,13 @@ func rootNodeRun(ctx context.Context, flags *rootNodeRunFlags) error {
 		}
 	}
 
+	if q3rt != nil {
+		// after the activations this process installed: a root that installs epoch 2 at this very start holds its first activation only now
+		if err = selectRootQ3RequestHistory(q3rt, cm, orchestration, uint64(trustBase.GetNetworkID())); err != nil {
+			return err
+		}
+	}
+
 	node, err := rootchain.New(
 		host,
 		partitionNet,
