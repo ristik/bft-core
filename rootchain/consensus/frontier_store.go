@@ -74,6 +74,41 @@ func (s *frontierPersistentStore) Records(from uint64, max int) ([]rootrecords.R
 	return store.Records(from, max)
 }
 
+// The control cuts are retained with the commit; the proxy forwards them with the same fault latch.
+func (s *frontierPersistentStore) PutCut(e storage.CutEntry) error {
+	store, ok := s.PersistentStore.(storage.CutStore)
+	if !ok {
+		return s.fault(storage.ErrNoCutStore)
+	}
+	return s.fault(store.PutCut(e))
+}
+func (s *frontierPersistentStore) GetCut(key storage.CutKey) (storage.DurableCut, error) {
+	store, ok := s.PersistentStore.(storage.CutStore)
+	if !ok {
+		return storage.DurableCut{}, storage.ErrCutUnavailable
+	}
+	return store.GetCut(key)
+}
+
+// CommitBlock forwards the atomic commit when the real store has one; otherwise it falls back to the separate writes.
+func (s *frontierPersistentStore) CommitBlock(block *storage.ExecutedBlock, recs []rootrecords.Record, cut *storage.CutEntry) error {
+	if store, ok := s.PersistentStore.(storage.BlockCommitter); ok {
+		return s.fault(store.CommitBlock(block, recs, cut))
+	}
+	// the real store cannot commit atomically: the same writes in the order a crash repeats idempotently
+	if len(recs) > 0 {
+		if err := s.AppendRecords(recs); err != nil {
+			return err
+		}
+	}
+	if cut != nil {
+		if err := s.PutCut(*cut); err != nil {
+			return err
+		}
+	}
+	return s.WriteBlock(block, true)
+}
+
 // The control witnesses are immutable evidence retained by hash; the proxy forwards them with the same fault latch.
 func (s *frontierPersistentStore) StoreWitness(hash [32]byte, data []byte) error {
 	store, ok := s.PersistentStore.(storage.WitnessStore)

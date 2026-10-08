@@ -18,7 +18,7 @@ import (
 
 const (
 	// ProtocolID is the libp2p protocol the root serves cuts and records on.
-	ProtocolID = "/ab/p85-records/1.0.0"
+	ProtocolID = "/ab/p85-records/2.0.0"
 	// ClientDeadline bounds one request to one root, ServerDeadline one served stream.
 	ClientDeadline = 10 * time.Second
 	ServerDeadline = 15 * time.Second
@@ -26,15 +26,15 @@ const (
 	MaxPendingStreams = 32
 	MaxPendingPerPeer = 4
 
-	maxRequestBytes = 64
+	maxRequestBytes = 128
 	kindCut         = 1
 	kindRecords     = 2
 )
 
 // ServerSource is what the root serves from.
 type ServerSource interface {
-	// ControlCut is the cut of the committed block of the round; an error when the root no longer holds it.
-	ControlCut(round uint64) (Cut, error)
+	// ControlCut is the cut of the committed block the key names; an error when the root does not hold it.
+	ControlCut(key CutKey) (Cut, error)
 	// Records returns up to max records from the index of the retained source log.
 	Records(from uint64, max int) ([]rootrecords.Record, error)
 }
@@ -42,10 +42,23 @@ type ServerSource interface {
 type request struct {
 	_    struct{} `cbor:",toarray"`
 	Kind uint8
-	// Round is the committed block of a cut request; From and Max the range of a records request.
-	Round uint64
-	From  uint64
-	Max   uint32
+	// Network, Epoch, Round and TreeRoot name the committed block of a cut request (the key derived from the authenticated origin);
+	// From and Max are the range of a records request.
+	Network  uint64
+	Epoch    uint64
+	Round    uint64
+	TreeRoot []byte
+	From     uint64
+	Max      uint32
+}
+
+func (r request) cutKey() (CutKey, error) {
+	if len(r.TreeRoot) != 32 {
+		return CutKey{}, fmt.Errorf("%w: tree root width", ErrWire)
+	}
+	key := CutKey{Network: r.Network, Epoch: r.Epoch, Round: r.Round}
+	copy(key.TreeRoot[:], r.TreeRoot)
+	return key, nil
 }
 
 type wireRecord struct {
@@ -145,7 +158,11 @@ func (s *Server) Serve(from peer.ID, st Stream) {
 	var body []byte
 	switch req.Kind {
 	case kindCut:
-		cut, cerr := s.source.ControlCut(req.Round)
+		var cut Cut
+		key, cerr := req.cutKey()
+		if cerr == nil {
+			cut, cerr = s.source.ControlCut(key)
+		}
 		if cerr == nil {
 			body, err = types.Cbor.Marshal(cut)
 		} else {
@@ -292,8 +309,8 @@ func (p P2PRemote) callOne(ctx context.Context, root peer.ID, raw []byte, maxRes
 }
 
 // Cut implements Remote.
-func (p P2PRemote) Cut(ctx context.Context, round uint64) (Cut, error) {
-	body, err := p.call(ctx, request{Kind: kindCut, Round: round}, MaxCutBytes)
+func (p P2PRemote) Cut(ctx context.Context, key CutKey) (Cut, error) {
+	body, err := p.call(ctx, request{Kind: kindCut, Network: key.Network, Epoch: key.Epoch, Round: key.Round, TreeRoot: key.TreeRoot[:]}, MaxCutBytes)
 	if err != nil {
 		return Cut{}, err
 	}
