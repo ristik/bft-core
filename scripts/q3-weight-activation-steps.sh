@@ -138,10 +138,16 @@ q3_baseline() {
   local sg
   h3_progress baseline 8 || return 1
   h3_registry_is 0 1 || return 1
-  # the fresh-B1 registry (layout 3): the profile that defines it is the one the genesis, ureth and the shard nodes were all given
-  [ -s "${EVM_B1_PROFILE:-}" ] || { echo "no B1 profile: the lane runs on the fresh-B1 stack" >&2; return 1; }
-  { echo "layout=3 (fresh B1)"; echo "profileHash=$(python3 -c "import json;print(json.load(open('$EVM_B1_PROFILE')).get('profileHash',''))")"; echo "ureth flags: $(sed -n 's/^ureth flags: *//p' test-nodes/b1-profile.out)"; } >"$Q3_DIR/registry-layout.txt"
-  cp "$EVM_B1_PROFILE" "$Q3_DIR/b1-profile.json"
+  if [ "${Q3_B1:-0}" = 1 ]; then
+    # the fresh-B1 registry (layout 3): the profile that defines it is the one the genesis, ureth and the shard nodes were all given
+    [ -s "${EVM_B1_PROFILE:-}" ] || { echo "no B1 profile: the lane runs on the fresh-B1 stack" >&2; return 1; }
+    { echo "layout=3 (fresh B1)"; echo "profileHash=$(python3 -c "import json;print(json.load(open('$EVM_B1_PROFILE')).get('profileHash',''))")"; echo "ureth flags: $(sed -n 's/^ureth flags: *//p' test-nodes/b1-profile.out)"; } >"$Q3_DIR/registry-layout.txt"
+    cp "$EVM_B1_PROFILE" "$Q3_DIR/b1-profile.json"
+  else
+    [ "$(registry_layout)" = 2 ] || { echo "registry layout is not 2" >&2; return 1; }
+    registry_layout >"$Q3_DIR/registry-layout.txt"
+    cp "$Q3_DIR/registry-layout.txt" "$Q3_DIR/b1-profile.json"   # no B1 profile on the historical stack: the evidence file records the layout
+  fi
   rpc "http://127.0.0.1:$rethEthBase" eth_getCode "[\"$H3_REGISTRY\",\"latest\"]" | pyget "['result']" | tr -d '\n' | shasum -a 256 | cut -d' ' -f1 >"$Q3_DIR/registry-hash.txt"
   q3_execution_pins || return 1
   cp "$Q3_GENESIS_IDENTITIES" "$Q3_DIR/genesis-identities.json" || return 1
@@ -624,7 +630,7 @@ q3_run_lane() {
   H3_REGISTRY=0xff00000000000000000000000000000000000002
   H3_ONLINE="1 2 3 4"; H3_ROOTS="1 2 3 4"
   M2_NEXT_NONCE=${M2_NEXT_NONCE:-4}; M2_CHAIN_ID=31337
-  read -r h3_slot_shard h3_slot_root h3_slot_conf h3_slot_cursor < <(H3_SLOT_LAYOUT=3 go run ./scripts/h3slots)
+  read -r h3_slot_shard h3_slot_root h3_slot_conf h3_slot_cursor < <(H3_SLOT_LAYOUT=$([ "${Q3_B1:-0}" = 1 ] && echo 3 || echo 2) go run ./scripts/h3slots)
   echo "=== Q3 #50 weight-activation lane: fresh-B1 unit PoA -> mirrored weights $Q3_WEIGHTS ==="
   for s in $Q3_STEPS; do q3_step "$s" "$s"; done
   echo "Q3 weight-activation lane: all steps PASSED"
