@@ -92,3 +92,26 @@ func TestTheCandidateEndpointReturnsWhatTheMembersMustSign(t *testing.T) {
 
 	require.Equal(t, http.StatusForbidden, postJSON(rootQ3CandidateHandler(stub), "10.0.0.5:1", rootHandoffPlanRequest{}).Code)
 }
+
+// A Q3 root selects the view-aware request branch right after the runtime is attached and before it serves: without it a weighted EVM
+// assignment has no request context and every certification request of the shard is refused. A helper test cannot see the call dropped.
+func TestRootNodeRunSelectsTheRequestHistoryAfterAttachingTheRuntime(t *testing.T) {
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "root_node.go", nil, 0)
+	require.NoError(t, err)
+	first := map[string]token.Pos{}
+	ast.Inspect(file, func(n ast.Node) bool {
+		if call, ok := n.(*ast.CallExpr); ok {
+			if id, ok := call.Fun.(*ast.Ident); ok {
+				if _, seen := first[id.Name]; !seen {
+					first[id.Name] = call.Pos()
+				}
+			}
+		}
+		return true
+	})
+	for _, name := range []string{"attachRootQ3", "selectRootQ3RequestHistory"} {
+		require.Contains(t, first, name)
+	}
+	require.Less(t, first["attachRootQ3"], first["selectRootQ3RequestHistory"])
+}

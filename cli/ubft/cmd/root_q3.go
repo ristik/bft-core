@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"crypto"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -15,6 +16,7 @@ import (
 	"github.com/unicitynetwork/bft-core/q3active"
 	"github.com/unicitynetwork/bft-core/q3delivery"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus"
+	"github.com/unicitynetwork/bft-core/rootchain/partitions"
 	"github.com/unicitynetwork/bft-go-base/types"
 	"github.com/unicitynetwork/bft-go-base/types/hex"
 )
@@ -157,3 +159,21 @@ func rootQ3StageHandler(operator interface {
 		return struct{}{}, nil
 	})
 }
+
+// selectRootQ3RequestHistory selects the view-aware request branch from this root's verified history: a shard's requests are counted
+// under the request view of the assignment the history activated for it (weighted for a coupled V3 assignment), never under the committed
+// ShardInfo that may lag behind an activation. The anchor of a shard is its genesis configuration, the committed candidates are the
+// manager's retained ones.
+func selectRootQ3RequestHistory(rt *q3active.Runtime, cm *consensus.ConsensusManager, orchestration *partitions.Orchestration, network uint64) error {
+	h, err := rt.RequestHistory(q3active.RequestHistoryConfig{Candidates: cm,
+		Anchor: func(p types.PartitionID, s types.ShardID) (*types.PartitionDescriptionRecord, error) {
+			return orchestration.ShardConfigByEpoch(p, s, 0)
+		}, HashAlg: crypto.SHA256, Network: network, Version: q3RequestProtocolVersion})
+	if err != nil {
+		return fmt.Errorf("q3 request history: %w", err)
+	}
+	return cm.SelectRequestHistory(h)
+}
+
+// q3RequestProtocolVersion is the certified request protocol version the request contexts are labelled with.
+const q3RequestProtocolVersion = 1
