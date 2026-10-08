@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 
+	"github.com/unicitynetwork/bft-core/evmroot"
 	"github.com/unicitynetwork/bft-core/rootrecords"
 )
 
@@ -14,6 +15,6 @@ func (EmptyRecords) Record(uint64) (rootrecords.Record, error) {
 	return rootrecords.Record{}, errors.New("the source log is empty")
 }
 
-func (e EmptyRecords) Cursor(context.Context, uint64) (rootrecords.Cursor, error) {
+func (e EmptyRecords) Cursor(context.Context, evmroot.RootOriginV2) (rootrecords.Cursor, error) {
 	return rootrecords.Cursor{UCTime: e.UCTime}, nil
 }

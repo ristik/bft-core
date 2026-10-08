@@ -709,6 +709,7 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 			if verifierContext.B1, jErr = newB1PairConfig(b1Profile, b1rt, flags.EthURL, 10*time.Second); jErr != nil {
 				return jErr
 			}
+			attachRecordsFeed(verifierContext.B1, peer, bootNodes)
 			// The execution client is the paired ureth: every build and import carries the pair binding its own gate compares.
 			if q3Admit, jErr = wireQ3Pair(executor, b1rt, uint64(shardConf.NetworkID), origin.Valid(), [32]byte(origin.BlockHash())); jErr != nil {
 				return jErr
@@ -738,6 +739,7 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 				if verifierContext.B1, jErr = newB1PairConfig(b1Profile, q3rt, flags.EthURL, 10*time.Second); jErr != nil {
 					return jErr
 				}
+				attachRecordsFeed(verifierContext.B1, peer, bootNodes)
 			}
 		}
 	}

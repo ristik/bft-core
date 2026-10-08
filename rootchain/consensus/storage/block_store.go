@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"github.com/unicitynetwork/bft-core/rootrecords"
 	"log/slog"
 	"sync"
 
@@ -236,6 +237,21 @@ func (x *BlockStore) TrialExecute(block *rctypes.BlockData, verifier IRChangeReq
 	x.lock.RUnlock()
 	_, err = parent.extendWithAuthority(block, verifier, x.orchestration, x.hash, x.log, x.handoffAuth, x, svc)
 	return err
+}
+
+// ControlCut is the retained control cut of the committed root block of the round: its control state and the path of its leaf in that
+// block's unicity tree.
+func (x *BlockStore) ControlCut(round uint64) (ControlCut, error) {
+	return x.blockTree.ControlCut(round)
+}
+
+// Records returns up to max records of the retained source log from the index.
+func (x *BlockStore) Records(from uint64, max int) ([]rootrecords.Record, error) {
+	store, ok := x.storage.(RecordStore)
+	if !ok {
+		return nil, ErrNoRecordStore
+	}
+	return store.Records(from, max)
 }
 
 // HasWitness reports whether the witness with this hash is retained.

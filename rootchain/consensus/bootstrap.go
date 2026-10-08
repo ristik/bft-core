@@ -6,6 +6,7 @@ import (
 	"crypto"
 	"errors"
 	"fmt"
+	"github.com/unicitynetwork/bft-core/rootrecords"
 
 	"github.com/libp2p/go-libp2p/core/peer"
 
@@ -453,6 +454,16 @@ func verifyHandoffBundle(trust *trustbase.TrustBaseStore, bundle handoffdelivery
 // SetPosServices installs the P85 control executor's collaborators on the block store: the custody deployment, the closure authority
 // and the closure proposer. It must be called before the manager starts.
 func (x *ConsensusManager) SetPosServices(s *storage.PosServices) { x.blockStore.SetPosServices(s) }
+
+// ControlCut is the retained control cut of the committed root block of the round, for the shards' authenticated record feed.
+func (x *ConsensusManager) ControlCut(round uint64) (storage.ControlCut, error) {
+	return x.blockStore.ControlCut(round)
+}
+
+// Records returns up to max records of the retained source log from the index.
+func (x *ConsensusManager) Records(from uint64, max int) ([]rootrecords.Record, error) {
+	return x.blockStore.Records(from, max)
+}
 
 // Witness is the WitnessSource of the retained control witnesses.
 func (x *ConsensusManager) Witness(hash [32]byte) ([]byte, error) { return x.blockStore.Witness(hash) }

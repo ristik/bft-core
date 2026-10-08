@@ -5,6 +5,7 @@ import (
 	"errors"
 	"math"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 	testnetwork "github.com/unicitynetwork/bft-core/internal/testutils/network"
@@ -19,17 +20,41 @@ func TestProposalTimestamp(t *testing.T) {
 		name              string
 		now, parent, want uint64
 	}{
-		{"wall clock", 100, 80, 100}, {"same second", 100, 100, 101},
-		{"clock rollback", 90, 100, 101}, {"last representable", 0, math.MaxUint64 - 1, math.MaxUint64},
+		{"wall clock", 100, 80, 100}, {"same second repeats the parent", 100, 100, 100},
+		{"clock rollback keeps the parent", 90, 100, 100}, {"the largest parent", 0, math.MaxUint64, math.MaxUint64},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := proposalTimestamp(tc.now, tc.parent)
-			require.NoError(t, err)
-			require.Equal(t, tc.want, got)
+			require.Equal(t, tc.want, proposalTimestamp(tc.now, tc.parent))
 		})
 	}
-	_, err := proposalTimestamp(100, math.MaxUint64)
-	require.ErrorIs(t, err, ErrTimestampOverflow)
+}
+
+// The #447 stall: with a strict whole-second increase and rounds shorter than a second, the seal time ran ahead of the wall clock by one
+// second per round it was ahead, until the 30 s voter skew bound refused every proposal. Under the non-decreasing rule 250 consecutive rounds
+// at 800 ms (over three minutes of rounds, twice the 30 s bound's worth of drift) are all proposed and voted without a skew refusal, and the
+// seal time never leads the wall clock.
+func TestSubSecondRoundsNeverDriftPastTheVoterSkew(t *testing.T) {
+	r := newDecisionRig(t)
+	m, _ := r.open(r.signer, r.scheme2())
+	const period = 800 * time.Millisecond
+	start := time.Unix(1_700_000_000, 0)
+	var clock time.Time
+	m.now = func() uint64 { return uint64(clock.Unix()) }
+	times := map[uint64]uint64{0: uint64(start.Unix())}
+	WithParentTimestamp(func(round uint64) (uint64, error) { return times[round], nil })(m)
+	shared := 0
+	for round := uint64(1); round <= 250; round++ {
+		clock = start.Add(time.Duration(round) * period)
+		ts := proposalTimestamp(m.now(), times[round-1])
+		require.LessOrEqual(t, ts, m.now(), "round %d: the seal time never leads the wall clock", round)
+		block := &drctypes.BlockData{Round: round, Timestamp: ts, Qc: &drctypes.QuorumCert{VoteInfo: &drctypes.RoundInfo{RoundNumber: round - 1}}}
+		require.NoError(t, m.validateVoteTimestamp(block), "round %d", round)
+		if ts == times[round-1] {
+			shared++
+		}
+		times[round] = ts
+	}
+	require.Greater(t, shared, 40, "premise: many rounds share a second")
 }
 
 func TestVoteTimestampGuards(t *testing.T) {
@@ -48,7 +73,7 @@ func TestVoteTimestampGuards(t *testing.T) {
 				timestamp uint64
 				want      error
 			}{
-				{"equal parent", 100, ErrTimestampNotIncreasing},
+				{"equal parent", 100, nil},
 				{"before parent", 99, ErrTimestampNotIncreasing},
 				{"one ahead", 101, nil}, {"skew boundary", 130, nil},
 				{"too far ahead", 131, ErrTimestampTooFarAhead},
@@ -130,7 +155,7 @@ func TestVoteTimestampRestartRechecksClockBeforeRecordedDecision(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, vote, replay)
 	// A changed proposal must satisfy live admission before the recorded-decision retry.
-	block.Timestamp = 100
+	block.Timestamp = 99
 	_, err = restarted.MakeVote(block, hash32(2), nil, nil)
 	require.ErrorIs(t, err, ErrTimestampNotIncreasing)
 }
@@ -163,14 +188,14 @@ func TestManagerTimestampBuilderAndEarlyRefusal(t *testing.T) {
 	cm.processNewRoundEvent(ctx)
 	proposal := net.WaitRootProposal(t)
 	require.GreaterOrEqual(t, proposal.Block.Timestamp, before)
-	require.Greater(t, proposal.Block.Timestamp, parent.BlockData.Timestamp)
+	require.GreaterOrEqual(t, proposal.Block.Timestamp, parent.BlockData.Timestamp)
 	original := proposal.Block.Timestamp
 	for _, tc := range []struct {
 		name      string
 		timestamp uint64
 		want      error
 	}{
-		{"equal parent", parent.BlockData.Timestamp, ErrTimestampNotIncreasing},
+		{"before parent", parent.BlockData.Timestamp - 1, ErrTimestampNotIncreasing},
 		{"future", basetypes.NewTimestamp() + 60, ErrTimestampTooFarAhead},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -182,9 +207,11 @@ func TestManagerTimestampBuilderAndEarlyRefusal(t *testing.T) {
 			require.Error(t, err, "invalid proposal must not enter executed storage")
 		})
 	}
-	proposal.Block.Timestamp = original
+	// a proposal at exactly the parent's time is valid: several rounds may share a second
+	proposal.Block.Timestamp = parent.BlockData.Timestamp
 	require.NoError(t, proposal.Sign(node.Signer))
 	require.NoError(t, cm.onProposalMsg(ctx, proposal))
+	_ = original
 }
 
 func TestManagerTimestampRecoveryUsesReplacementStore(t *testing.T) {

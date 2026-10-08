@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	libp2ppeer "github.com/libp2p/go-libp2p/core/peer"
 	"os"
 	"sort"
 	"time"
@@ -24,6 +25,7 @@ import (
 	"github.com/unicitynetwork/bft-core/b1state"
 	"github.com/unicitynetwork/bft-core/q3active"
 	"github.com/unicitynetwork/bft-core/q3format"
+	"github.com/unicitynetwork/bft-core/recordsfeed"
 	"github.com/unicitynetwork/bft-core/registrygenesis"
 	"github.com/unicitynetwork/bft-core/registryproof"
 	"github.com/unicitynetwork/bft-core/registrywitness"
@@ -246,6 +248,17 @@ func newB1PairConfig(p b1state.Profile, rt *q3active.Runtime, ethURL string, tim
 		return nil, fmt.Errorf("%w: no verified root history", ErrB1Profile)
 	}
 	return &b1paired.Config{Profile: p, Authority: rt.B1Authority(), Proofs: b1ProofFetcher(registrywitness.NewHTTPCaller(ethURL, timeout))}, nil
+}
+
+// attachRecordsFeed gives the pair its authenticated route to the root's record log: one remote per root the node knows, asked in turn.
+// What a root serves is believed only after it verified against the unicity tree root of the certificate the pair holds, so the roots
+// are not trusted and any of them will do.
+func attachRecordsFeed(cfg *b1paired.Config, host recordsfeed.Libp2p, roots []libp2ppeer.AddrInfo) {
+	remotes := make([]recordsfeed.Remote, 0, len(roots))
+	for _, r := range roots {
+		remotes = append(remotes, recordsfeed.P2PRemote{Opener: recordsfeed.FromLibp2p(host), Roots: []libp2ppeer.ID{r.ID}})
+	}
+	cfg.Records = recordsfeed.NewSource(remotes...)
 }
 
 // b1IdentitiesFile is the genesis tool's identity document the vault deployment is checked against
