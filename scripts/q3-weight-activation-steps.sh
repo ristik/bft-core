@@ -496,6 +496,43 @@ q3_supersede() {
   h3_progress after-supersession 8
 }
 
+# The leader schedule of the activated epoch, REPORTED and not asserted: with mirrored weights (6,1,1,1) a weight-aware proposer-priority selector (#403,
+# policy root-wrr-v1) gives the heavy root about 6/9 of the rounds, the legacy selector about a quarter each. Which one the epoch uses is a property of
+# the lane's deployment (no activation installs a leader policy yet), so the evidence file states what the root logs show.
+q3_leader_schedule() {
+  local astar; astar=$(jq -r .activationRound "$Q3_DIR/activation-record.json")
+  python3 - "$Q3_DIR/leader-schedule.txt" "$astar" "$(q3_weight_of 1)" "$Q3_WEIGHTS" test-nodes/root1/debug.log test-nodes/root2/debug.log test-nodes/root3/debug.log test-nodes/root4/debug.log <<'PY'
+import re, sys, collections
+out, astar, w1, weights, *logs = sys.argv[1:]
+astar = int(astar); weights = [int(x) for x in weights.split()]
+ids = {}
+for i, path in enumerate(logs, 1):
+    for line in open(path, errors="replace"):
+        m = re.search(r"node_id=(16\*\w+)", line)
+        if m:
+            ids[m.group(1)] = i
+            break
+counts, seen = collections.Counter(), set()
+for line in open(logs[0], errors="replace"):
+    m = re.search(r"next leader <peer.ID (16\*\w+)>.* round=(\d+)", line)
+    if m and "minimum required duration" in line:
+        r = int(m.group(2))
+        if r >= astar and r not in seen:
+            seen.add(r)
+            counts[ids.get(m.group(1), m.group(1))] += 1
+total = sum(counts.values())
+lines = [f"leader of the {total} rounds from A*={astar} (next leader after each round, root 1's log):"]
+for i, w in enumerate(weights, 1):
+    n = counts.get(i, 0)
+    lines.append(f"  root {i}: weight {w}/{sum(weights)} = {100 * w // sum(weights)}%, led {n} rounds = {100 * n // max(total, 1)}%")
+heavy = counts.get(1, 0) / max(total, 1)
+verdict = "weight-proportional (proposer-priority, root-wrr-v1)" if heavy >= 0.5 else "uniform: the legacy selector (no leader policy is activated; the weights do not shape the schedule)"
+lines.append(f"selector in effect: {verdict}")
+open(out, "w").write("\n".join(lines) + "\n")
+print("\n".join(lines))
+PY
+}
+
 # The proof envelope for the activation (Go side; there is no Rust proof verifier any more).
 q3_proof_envelope() {
   q3_x build/ubft q3 proof-envelope --root-rpc "$(h3_rpc_url "$(h3_first_root)")" --epoch 2 --out "$Q3_DIR/proof-envelope.cbor" || return 1
@@ -620,7 +657,7 @@ q3_pair_restart_control() {
 q3_evidence_complete() { q3_evidence_check "$Q3_DIR"; }
 
 Q3_STEPS="q3_baseline q3_candidate q3_handoff q3_install_epoch2 q3_activation q3_acknowledge q3_progress_scheme2 q3_evm_request_weights \
-q3_aggregators_unchanged q3_real_tc q3_root_boundary q3_evm_boundary q3_heavy_crash q3_proof_envelope q3_start_second_pair q3_second_pair q3_pair_controls q3_second_handoff q3_second_activation q3_supersede q3_evidence_complete"
+q3_aggregators_unchanged q3_real_tc q3_root_boundary q3_evm_boundary q3_heavy_crash q3_proof_envelope q3_start_second_pair q3_second_pair q3_pair_controls q3_second_handoff q3_second_activation q3_supersede q3_leader_schedule q3_evidence_complete"
 
 q3_run_lane() {
   local s

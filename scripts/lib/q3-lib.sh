@@ -23,7 +23,7 @@ Q3_EVIDENCE_REQUIRED="pins.txt commands.log candidate.cbor candidate-config.json
 old-commit-proof.json old-commit-signers.json activation-coordinates.txt scheme-before.txt scheme-after.txt \
 genesis-identities.json signers-root.json root-weights.json evm-weights.json frozen-parent-ack.json registry-layout.txt b1-profile.json registry-hash.txt \
 proof-envelope.cbor history-ids-pre-restart.txt history-ids-post-restart.txt \
-recovered-message.txt rebroadcast-trace.txt tc-trace.txt commit-trace.txt evm-request-weights.txt root-boundary.txt evm-boundary.txt candidate-2.cbor candidate-3.cbor v3-body-id-2.txt v3-body-id-3.txt activation-record-3.json activation-record-4.json activation-coordinates-3.txt activation-coordinates-4.txt old-commit-signers-3.json old-commit-signers-4.json first-epoch3-certificate.json first-epoch4-certificate.json supersession.txt \
+recovered-message.txt rebroadcast-trace.txt tc-trace.txt commit-trace.txt evm-request-weights.txt root-boundary.txt evm-boundary.txt candidate-2.cbor candidate-3.cbor v3-body-id-2.txt v3-body-id-3.txt activation-record-3.json activation-record-4.json activation-coordinates-3.txt activation-coordinates-4.txt old-commit-signers-3.json old-commit-signers-4.json first-epoch3-certificate.json first-epoch4-certificate.json supersession.txt leader-schedule.txt \
 pair-root-input-a.bin pair-root-input-b.bin pair-transitions-a.bin pair-transitions-b.bin pair-state-a.json pair-state-b.json pair-equality.txt \
 refusals-pair.log pair-restart.txt aggregator-before.json aggregator-after.json"
 
