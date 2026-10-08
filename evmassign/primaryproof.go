@@ -57,3 +57,27 @@ func DecodePrimaryProof(raw []byte) (PrimaryProof, error) {
 	}
 	return p, nil
 }
+
+// EncodePoPs is the one canonical encoding of a primary candidate's EVM possession proofs, as a plan carries them before the witness exists.
+func EncodePoPs(pops []EVMPoP) ([]byte, error) {
+	if len(pops) == 0 || len(pops) > MaxPrimaryPoPs {
+		return nil, ErrPrimaryProofEncoding
+	}
+	return types.Cbor.Marshal(pops)
+}
+
+// DecodePoPs accepts exactly that encoding.
+func DecodePoPs(raw []byte) ([]EVMPoP, error) {
+	if len(raw) == 0 || len(raw) > MaxPrimaryProofBytes {
+		return nil, ErrPrimaryProofEncoding
+	}
+	var pops []EVMPoP
+	if err := types.Cbor.Unmarshal(raw, &pops); err != nil {
+		return nil, errors.Join(ErrPrimaryProofEncoding, err)
+	}
+	canonical, err := EncodePoPs(pops)
+	if err != nil || !bytes.Equal(canonical, raw) {
+		return nil, fmt.Errorf("%w: not canonical", ErrPrimaryProofEncoding)
+	}
+	return pops, nil
+}

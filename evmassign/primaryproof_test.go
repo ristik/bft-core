@@ -36,3 +36,18 @@ func TestPrimaryProofCodec(t *testing.T) {
 		require.ErrorIs(t, err, ErrPrimaryProofEncoding, name)
 	}
 }
+
+func TestPoPListCodec(t *testing.T) {
+	pops := []EVMPoP{{ID: 2, EVMKey: bytes.Repeat([]byte{2}, 33), Signature: bytes.Repeat([]byte{3}, 65)}}
+	raw, err := EncodePoPs(pops)
+	require.NoError(t, err)
+	got, err := DecodePoPs(raw)
+	require.NoError(t, err)
+	require.Equal(t, pops, got)
+	for name, bad := range map[string][]byte{"empty": nil, "trailing": append(bytes.Clone(raw), 0), "null": {0xf6}, "empty list": {0x80}} {
+		_, err := DecodePoPs(bad)
+		require.ErrorIs(t, err, ErrPrimaryProofEncoding, name)
+	}
+	_, err = EncodePoPs(make([]EVMPoP, MaxPrimaryPoPs+1))
+	require.ErrorIs(t, err, ErrPrimaryProofEncoding)
+}

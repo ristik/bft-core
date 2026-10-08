@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/ethereum/go-ethereum/rpc"
 	"math/big"
 	"os"
 	"strings"
@@ -122,13 +123,18 @@ func loadPosDeployment(path string, rootNetwork uint64) (storage.PosDeployment, 
 // epoch's own trust base and the EVM shard's installed assignment, and every block must carry the mandatory closures. It refuses a
 // proof-of-authority deployment (operator-assigned staking ids do not fit custody's uint64 ids, so the digests could never be formed).
 func enablePosClosure(cm *consensus.ConsensusManager, orchestration *partitions.Orchestration, trustBases posclosure.TrustBases,
-	tb *types.RootTrustBaseV1, shardConfs []*types.PartitionDescriptionRecord, path string, poaGenesis bool) error {
+	tb *types.RootTrustBaseV1, shardConfs []*types.PartitionDescriptionRecord, path string, poaGenesis bool, evmRPC string) error {
 	if poaGenesis {
 		return fmt.Errorf("%w: a proof-of-authority genesis has no custody; do not combine it with a P85 deployment", ErrPosDeployment)
 	}
 	dep, pins, err := loadPosDeployment(path, uint64(tb.NetworkID))
 	if err != nil {
 		return err
+	}
+	if (dep.Election != [20]byte{}) != (evmRPC != "") {
+		// Every root can lead a Freeze, so every root of a chain that judges primary candidates needs the execution client that serves
+		// the proof at the frozen parent; without an election the client would serve nothing.
+		return fmt.Errorf("%w: --pos-evm-rpc goes with, and only with, an election in the deployment", ErrPosDeployment)
 	}
 	conf, err := coupledGenesisShard(shardConfs)
 	if err != nil {
@@ -137,6 +143,11 @@ func enablePosClosure(cm *consensus.ConsensusManager, orchestration *partitions.
 	authority := posclosure.New(posclosure.History{Partition: conf.PartitionID, Shard: conf.ShardID, TrustBases: trustBases, Orchestration: orchestration})
 	var primary storage.PrimaryAuthority
 	if dep.Election != ([20]byte{}) {
+		client, err := rpc.Dial(evmRPC)
+		if err != nil {
+			return errors.Join(ErrPosDeployment, err)
+		}
+		cm.SetPrimaryWitnessSource(evmstate.RPCWitnessSource{Client: client, Pins: pins})
 		primary = evmstate.Authority{Pins: pins}
 	}
 	cm.SetPosServices(&storage.PosServices{

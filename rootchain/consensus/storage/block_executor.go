@@ -520,7 +520,7 @@ func verifyFreezeAssignment(companion []byte, si *ShardInfo, installed *types.Pa
 // frozen from the Prepare that bound the parent, so that state is the one the candidate takes effect over. A chain that does not judge
 // primary candidates refuses a companion that carries a proof nobody would check.
 func verifyPrimaryProof(fc FreezeCompanion, c evmassign.Candidate, frozen *ShardInfo, services *PosServices) error {
-	judged := services.requiresPrimaryProof() && c.Kind == evmassign.KindPrimary
+	judged := services.RequiresPrimaryProof() && c.Kind == evmassign.KindPrimary
 	if !judged {
 		if fc.Version == freezeV4Version {
 			return errors.Join(ErrHandoffRecord, ErrPrimaryProofUnexpected)

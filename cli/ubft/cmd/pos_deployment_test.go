@@ -96,13 +96,13 @@ func TestLoadPosDeploymentRefusals(t *testing.T) {
 
 func TestEnablePosClosureRefusesAProofOfAuthorityGenesisAndAnUncoupledOne(t *testing.T) {
 	path := writeDeployment(t, deploymentJSON(goodWord, "1", goodCustody))
-	err := enablePosClosure(nil, nil, nil, &types.RootTrustBaseV1{NetworkID: 5}, nil, path, true)
+	err := enablePosClosure(nil, nil, nil, &types.RootTrustBaseV1{NetworkID: 5}, nil, path, true, "")
 	require.ErrorIs(t, err, ErrPosDeployment, "operator-assigned staking ids do not fit custody")
 	require.NotErrorIs(t, err, ErrGenesisIdentities, "refused for being proof of authority, before anything else is read")
-	err = enablePosClosure(nil, nil, nil, &types.RootTrustBaseV1{NetworkID: 5}, nil, path, false)
+	err = enablePosClosure(nil, nil, nil, &types.RootTrustBaseV1{NetworkID: 5}, nil, path, false, "")
 	require.ErrorIs(t, err, ErrPosDeployment, "no genesis shard has coupled changes")
 	require.ErrorIs(t, err, ErrGenesisIdentities)
-	err = enablePosClosure(nil, nil, nil, &types.RootTrustBaseV1{NetworkID: 5}, nil, filepath.Join(t.TempDir(), "none"), false)
+	err = enablePosClosure(nil, nil, nil, &types.RootTrustBaseV1{NetworkID: 5}, nil, filepath.Join(t.TempDir(), "none"), false, "")
 	require.ErrorIs(t, err, ErrPosDeployment)
 }
 
@@ -118,7 +118,7 @@ func TestEnablePosClosureAcceptsACommitteeOfSeveralRootNodes(t *testing.T) {
 	// the witnesses are pulled by hash from the other root nodes, so the committee size is no reason to refuse: the next check, the
 	// coupled genesis shard, is the one that answers for every size
 	for _, n := range []int{1, 2, 4} {
-		err := enablePosClosure(nil, nil, nil, &types.RootTrustBaseV1{NetworkID: 5, RootNodes: nodes(n)}, nil, path, false)
+		err := enablePosClosure(nil, nil, nil, &types.RootTrustBaseV1{NetworkID: 5, RootNodes: nodes(n)}, nil, path, false, "")
 		require.ErrorIs(t, err, ErrGenesisIdentities, "%d root nodes", n)
 	}
 }
@@ -158,4 +158,15 @@ func TestLoadPosDeploymentPinsTheElectionOnlyAsAPair(t *testing.T) {
 		_, _, err := loadPosDeployment(writeDeployment(t, body), 5)
 		require.ErrorIs(t, err, ErrPosDeployment, name)
 	}
+}
+
+func TestEnablePosClosureTiesTheEVMEndpointToTheElection(t *testing.T) {
+	plain := writeDeployment(t, deploymentJSON(goodWord, "1", goodCustody))
+	pinned := writeDeployment(t, strings.TrimSuffix(deploymentJSON(goodWord, "1", goodCustody), "}")+
+		`,"election":"0xff00000000000000000000000000000000000003","electionCodeHash":"`+goodCode+`"}`)
+	tb := &types.RootTrustBaseV1{NetworkID: 5}
+	// the endpoint check comes before anything that needs a manager, so a nil one is enough to see which side refuses
+	require.ErrorIs(t, enablePosClosure(nil, nil, nil, tb, nil, pinned, false, ""), ErrPosDeployment, "an election with no endpoint")
+	require.ErrorIs(t, enablePosClosure(nil, nil, nil, tb, nil, plain, false, "http://127.0.0.1:1"), ErrPosDeployment, "an endpoint with no election")
+	require.ErrorIs(t, enablePosClosure(nil, nil, nil, tb, nil, plain, false, ""), ErrGenesisIdentities, "neither: the earlier checks stand")
 }

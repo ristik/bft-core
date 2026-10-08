@@ -132,8 +132,8 @@ type PosServices struct {
 	Primary PrimaryAuthority
 }
 
-// requiresPrimaryProof reports whether Freeze admission demands the EVM proof of a primary candidate on this chain.
-func (s *PosServices) requiresPrimaryProof() bool {
+// RequiresPrimaryProof reports whether Freeze admission demands the EVM proof of a primary candidate on this chain.
+func (s *PosServices) RequiresPrimaryProof() bool {
 	return s != nil && s.Primary != nil && s.Deployment.Election != ([20]byte{})
 }
 

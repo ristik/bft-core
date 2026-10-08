@@ -331,6 +331,7 @@ func (x *ConsensusManager) setHandoffIntent(plan abdrc.HandoffApprovalMsg) {
 	cloned.Body, cloned.Candidate = bytes.Clone(plan.Body), bytes.Clone(plan.Candidate)
 	cloned.CandidatePreimage = bytes.Clone(plan.CandidatePreimage)
 	cloned.Receipts = bytes.Clone(plan.Receipts)
+	cloned.PrimaryPoPs = bytes.Clone(plan.PrimaryPoPs)
 	x.handoffIntent = &cloned
 }
 
@@ -726,6 +727,23 @@ func (x *ConsensusManager) verifyApprovalAssignment(msg *abdrc.HandoffApprovalMs
 	return c, nil
 }
 
+// checkPrimaryPoPs requires the EVM possession proofs exactly where the chain will judge them: a primary candidate on a chain with the
+// election pinned carries a well-formed list, and nothing else carries one. Their signatures are checked at Freeze admission against the
+// state the election published.
+func (x *ConsensusManager) checkPrimaryPoPs(msg *abdrc.HandoffApprovalMsg, c evmassign.Candidate) error {
+	judged := len(msg.CandidatePreimage) != 0 && c.Kind == evmassign.KindPrimary && x.blockStore.PosServices().RequiresPrimaryProof()
+	if !judged {
+		if len(msg.PrimaryPoPs) != 0 {
+			return errors.Join(ErrHandoffApproval, storage.ErrPrimaryProofUnexpected)
+		}
+		return nil
+	}
+	if _, err := evmassign.DecodePoPs(msg.PrimaryPoPs); err != nil {
+		return errors.Join(ErrHandoffApproval, storage.ErrPrimaryProofMissing, err)
+	}
+	return nil
+}
+
 // checkPlanBody is everything about a plan, an unsigned intent or a signed approval alike, that needs neither a signature nor EVM
 // state: the body against this chain's epoch and predecessor, the candidate preimage, and the summaries that tie the body to the
 // attempt and the candidate. Nothing in it names a frozen parent: the root binds that at the Prepare.
@@ -750,7 +768,11 @@ func (x *ConsensusManager) checkPlanBody(msg *abdrc.HandoffApprovalMsg) (planBod
 	if err != nil {
 		return body, nil, err
 	}
-	if _, err := x.verifyApprovalAssignment(msg, body, predecessor, old); err != nil {
+	candidate, err := x.verifyApprovalAssignment(msg, body, predecessor, old)
+	if err != nil {
+		return body, nil, err
+	}
+	if err := x.checkPrimaryPoPs(msg, candidate); err != nil {
 		return body, nil, err
 	}
 	if !bytes.Equal(body.predecessorHash, link) ||
@@ -1140,7 +1162,20 @@ func (x *ConsensusManager) handoffRecordsForRound(round uint64, parentQC *rctype
 		record.Kind = "freeze"
 		record.SuccessorTRHash = make([]byte, 32)
 		var companion []byte
-		if plan.body.version == 3 {
+		primaryProof, perr := x.primaryFreezeProof(plan, plan.plan.FrozenParent)
+		if perr != nil {
+			x.log.Warn("primary candidate's EVM proof unavailable; Freeze not ordered", "attempt", previous.Attempt, "err", perr)
+			return nil, nil
+		}
+		if primaryProof != nil {
+			if plan.body.version != 3 {
+				return nil, ErrHandoffApproval
+			}
+			companion, err = (storage.FreezeV4Authorization{Version: 4, Body: bytes.Clone(plan.plan.Body),
+				Parent: bytes.Clone(plan.plan.FrozenParent), Candidate: bytes.Clone(plan.plan.Candidate),
+				Preimage: bytes.Clone(plan.plan.CandidatePreimage), Receipts: bytes.Clone(plan.plan.Receipts), Signatures: plan.signatures,
+				Proof: primaryProof}).Bytes()
+		} else if plan.body.version == 3 {
 			companion, err = (storage.FreezeV3Authorization{Version: 3, Body: bytes.Clone(plan.plan.Body),
 				Parent: bytes.Clone(plan.plan.FrozenParent), Candidate: bytes.Clone(plan.plan.Candidate),
 				Preimage: bytes.Clone(plan.plan.CandidatePreimage), Receipts: bytes.Clone(plan.plan.Receipts), Signatures: plan.signatures}).Bytes()
