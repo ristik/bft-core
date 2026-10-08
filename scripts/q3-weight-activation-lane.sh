@@ -77,8 +77,22 @@ mkdir -p "$EVIDENCE_DIR"
 pass "devnet lock acquired by the queued runner; evidence directory $EVIDENCE_DIR"
 
 # Ownership-checked cleanup on every exit: this checkout's processes only. A failing run keeps its test-nodes; the lock is released by the lock helper.
-cleanup() { local s=$?; ( source helper.sh; source scripts/lib/q3-lib.sh; q3_teardown ) >/dev/null 2>&1 || true; exit "$s"; }
+# The scenario runs in a child (scripts/reth-paired-devnet.sh), which restarts nodes on its own: a signal to the lane must reach it, and cleanup must wait for it to finish its own
+# teardown BEFORE the lane's, or it outlives the lane and keeps starting nodes in this checkout (and its ownership-by-directory cleanup then stops the next run's nodes).
+DEVNET_PIDFILE=
+stop_devnet() {
+  local pid i
+  [ -n "$DEVNET_PIDFILE" ] && [ -s "$DEVNET_PIDFILE" ] || return 0
+  pid=$(cat "$DEVNET_PIDFILE")
+  kill -0 "$pid" 2>/dev/null || return 0
+  kill -TERM "$pid" 2>/dev/null || true
+  for i in $(seq 1 120); do kill -0 "$pid" 2>/dev/null || return 0; sleep 1; done
+  kill -KILL "$pid" 2>/dev/null || true
+}
+cleanup() { local s=$?; stop_devnet; ( source helper.sh; source scripts/lib/q3-lib.sh; q3_teardown ) >/dev/null 2>&1 || true; exit "$s"; }
 trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 # clean build of the pinned bft-core, then the pinned Ureth
 ISOLATION_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/q3-lane.XXXXXX")
@@ -140,12 +154,17 @@ export EVM_OPERATOR_STATUS_RPC=1
 # first handoff (1,1,1,1 -> 6,1,1,1) is 5/6, the later positive handoffs stay inside it, and the full heavy-weight swap (6,1,1,1 -> 1,6,1,1: 10/9) is the negative row.
 export EVM_PARTITION_PARAMS_EXTRA=${EVM_PARTITION_PARAMS_EXTRA:-continuity_max_distance=1/1}
 set +e
-EVM_JOURNAL_CANDIDATES=${EVM_JOURNAL_CANDIDATES:-256} H3_ASSIGNMENT_LANE=1 Q3_WEIGHT_LANE=1 F8_MIXED_LANE=1 M2_PROFILE2=1 SIGNING=authority \
-  POST_M2A_URETH_BIN="$URETH_BIN" POST_M2A_URETH_COMMIT="$Q3_URETH_COMMIT" \
-  M2_RUN_LOG_DIR="$EVIDENCE_DIR/nodes" F8_LOG_DIR="$EVIDENCE_DIR/f8" \
-  bash ./scripts/reth-paired-devnet.sh 4 10 2>&1 | tee "$EVIDENCE_DIR/lane.log"
-status=${PIPESTATUS[0]}
+# a background job with its pid recorded (exec keeps the pid), so a signal to the lane stops the scenario instead of orphaning it
+DEVNET_PIDFILE="$EVIDENCE_DIR/.devnet-pid"; rm -f "$DEVNET_PIDFILE"
+( set -o pipefail
+  EVM_JOURNAL_CANDIDATES=${EVM_JOURNAL_CANDIDATES:-256} H3_ASSIGNMENT_LANE=1 Q3_WEIGHT_LANE=1 F8_MIXED_LANE=1 M2_PROFILE2=1 SIGNING=authority \
+    POST_M2A_URETH_BIN="$URETH_BIN" POST_M2A_URETH_COMMIT="$Q3_URETH_COMMIT" \
+    M2_RUN_LOG_DIR="$EVIDENCE_DIR/nodes" F8_LOG_DIR="$EVIDENCE_DIR/f8" \
+    bash -c 'echo $$ >"$0"; exec bash ./scripts/reth-paired-devnet.sh 4 10' "$DEVNET_PIDFILE" 2>&1 | tee "$EVIDENCE_DIR/lane.log" ) &
+wait "$!"
+status=$?
 set -e
+rm -f "$DEVNET_PIDFILE"
 cp -R test-nodes/q3 "$EVIDENCE_DIR/q3" 2>/dev/null || true
 for f in test-nodes/root*/debug.log test-nodes/evm*/debug.log; do
   [ -f "$f" ] && { mkdir -p "$EVIDENCE_DIR/node-logs/$(dirname "$f" | xargs basename)"; cp "$f" "$EVIDENCE_DIR/node-logs/$(dirname "$f" | xargs basename)/"; }
