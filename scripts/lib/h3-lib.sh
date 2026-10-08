@@ -346,3 +346,80 @@ h3_verify_mint() { # root epoch (trust base) shard epoch (PDR)
     --genesis-conf "$fullShardConf" --lock-contract "$contract" --mode locked >"$tmp/verify-locked.json" || return 1
   cat "$tmp/verify-locked.json"
 }
+
+# ---- progress across the root, the EVM shard and the three aggregator shards (shared by the H3 and Q3 lanes; needs f8_trace) ----
+# Both the EVM shard and the three aggregator shards must advance: certified IR round for each, root round, aggregator height.
+# Polls until every shard has advanced (an aggregator shard's authorized TR round moves with its T2 timeout, up to 7.5 s, so a fixed
+# short window is not a fair measure): up to ${2:-10}+25 s, then it reports which shard did not.
+# Per-shard progress of the root's authorized TR round between the two traces: the shards that advanced.
+h3_progress_shards() {
+  python3 - "$H3_DIR/progress-before.jsonl" "$H3_DIR/progress-after.jsonl" <<'PY'
+import json,sys
+b={}; a={}
+for path,d in ((sys.argv[1],b),(sys.argv[2],a)):
+    for line in open(path):
+        if line.strip():
+            r=json.loads(line); d[r['shard']]=r
+print(" ".join(s for s in ('a-left','a-right','b-left') if int(a[s]['authorizedTRRound'])>int(b[s]['authorizedTRRound'])))
+PY
+}
+
+# h3_progress <label> [seconds before the first look] [window seconds]. The window defaults to the pause plus 25 s; the steps right after a
+# ROOT restart pass a longer one (about 3 minutes): an aggregator shard whose subscription the restart dropped is covered again only after
+# its own inactivity re-handshake, which takes tens of seconds to minutes. H3_POST_RESTART_WINDOW (seconds) widens those steps (unset: the
+# default window, which is what the lane asserts once the root recovers promptly). That lag is MEASURED, not hidden: the time to the first TR progress
+# of each shard is written to the lane output.
+h3_progress() {
+  local label=$1 waited=0 pause=${2:-10} limit start now shard seen
+  limit=${3:-$(( pause + 25 ))}
+  local first_a=- first_r=- first_b=-
+  f8_trace >"$H3_DIR/progress-before.jsonl" || return 1
+  start=$(date +%s)
+  sleep "$pause"
+  while :; do
+    f8_trace >"$H3_DIR/progress-after.jsonl" || return 1
+    now=$(( $(date +%s) - start ))
+    seen=$(h3_progress_shards 2>/dev/null)
+    case " $seen " in *" a-left "*) [ "$first_a" = - ] && first_a=$now;; esac
+    case " $seen " in *" a-right "*) [ "$first_r" = - ] && first_r=$now;; esac
+    case " $seen " in *" b-left "*) [ "$first_b" = - ] && first_b=$now;; esac
+    if h3_progress_check "$label"; then
+      echo "progress lag [$label]: time to first TR progress a-left=${first_a}s a-right=${first_r}s b-left=${first_b}s (window ${limit}s)"
+      return 0
+    fi
+    waited=$((waited + 3))
+    if [ "$waited" -ge "$limit" ]; then
+      echo "progress lag [$label]: time to first TR progress a-left=${first_a}s a-right=${first_r}s b-left=${first_b}s (window ${limit}s; '-' = none)" >&2
+      return 1
+    fi
+    sleep 3
+  done
+}
+h3_progress_check() {
+  local label=$1
+  python3 - "$H3_DIR/progress-before.jsonl" "$H3_DIR/progress-after.jsonl" "$label" <<'PY'
+import json,sys
+b={}; a={}
+for path,d in ((sys.argv[1],b),(sys.argv[2],a)):
+    for line in open(path):
+        if line.strip():
+            r=json.loads(line); d[r['shard']]=r
+# An idle aggregator shard produces no block, so its certified IR round only moves under load (F8's own probe
+# drives that once). What must hold continuously is the root's authorized TR round for each shard (the shard is
+# covered and certified), the root round, and the EVM certifying; aggregator /health is checked by f8_trace itself.
+for shard in ('a-left','a-right','b-left'):
+    if int(a[shard]['authorizedTRRound'])<=int(b[shard]['authorizedTRRound']):
+        raise SystemExit(f"{sys.argv[3]}: aggregator {shard}: root made no TR progress for it")
+    if int(a[shard]['certifiedIRRound'])<int(b[shard]['certifiedIRRound']) or int(a[shard]['aggregatorBlockHeight'])<int(b[shard]['aggregatorBlockHeight']):
+        raise SystemExit(f"{sys.argv[3]}: aggregator {shard} went backwards")
+# While a successor assignment's acknowledgement is held (or its set is unavailable) the EVM must NOT certify: the lane then asserts
+# the roots and aggregators only (H3_EVM_STALLED=1), and the stall itself is asserted by its own step.
+import os
+if os.environ.get('H3_EVM_STALLED')!='1' and int(a['evm']['certifiedIRRound'])<=int(b['evm']['certifiedIRRound']):
+    raise SystemExit(f"{sys.argv[3]}: EVM certified no new round")
+if int(a['a-left']['rootRound'])<=int(b['a-left']['rootRound']):
+    raise SystemExit(f"{sys.argv[3]}: root round did not advance")
+print(f"{sys.argv[3]}: root round {b['a-left']['rootRound']}->{a['a-left']['rootRound']}; aggregators " +
+      ", ".join(f"{s} IR {b[s]['certifiedIRRound']}->{a[s]['certifiedIRRound']} height {b[s]['aggregatorBlockHeight']}->{a[s]['aggregatorBlockHeight']}" for s in ('a-left','a-right','b-left')))
+PY
+}
