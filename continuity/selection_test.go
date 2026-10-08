@@ -156,6 +156,9 @@ func selectionCases() []selCase {
 	dev := selConfig{NMin: 4, NTarget: 10, NMax: 32, MaxM: 4, DistNum: 1, DistDen: 4}
 	var out []selCase
 	add := func(name string, old, eligible []vMember, cfg selConfig) {
+		// the snapshot lists its identities ascending by StakingID
+		eligible = append([]vMember(nil), eligible...)
+		sortMembers(eligible)
 		out = append(out, selCase{Name: name, Old: old, Eligible: eligible, Config: cfg})
 	}
 	ten := uniform(1, 10, 5)
@@ -215,6 +218,9 @@ func selectionCases() []selCase {
 	bad = dev
 	bad.DistDen = 0
 	add("no distance denominator", ten, ten, bad)
+	bad = dev
+	bad.NMax = 8
+	add("target above the maximum", ten, ten, bad)
 	// a chain of trials: outsiders ranked just above incumbents, one after another
 	chain := uniform(1, 10, 5)
 	chain[0].Weight, chain[1].Weight, chain[2].Weight = 4, 4, 4

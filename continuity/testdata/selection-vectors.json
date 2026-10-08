@@ -1726,56 +1726,6 @@
    ],
    "eligible": [
     {
-     "id": 11,
-     "binding": 11,
-     "weight": 50
-    },
-    {
-     "id": 12,
-     "binding": 12,
-     "weight": 50
-    },
-    {
-     "id": 13,
-     "binding": 13,
-     "weight": 50
-    },
-    {
-     "id": 14,
-     "binding": 14,
-     "weight": 50
-    },
-    {
-     "id": 15,
-     "binding": 15,
-     "weight": 50
-    },
-    {
-     "id": 16,
-     "binding": 16,
-     "weight": 50
-    },
-    {
-     "id": 17,
-     "binding": 17,
-     "weight": 50
-    },
-    {
-     "id": 18,
-     "binding": 18,
-     "weight": 50
-    },
-    {
-     "id": 19,
-     "binding": 19,
-     "weight": 50
-    },
-    {
-     "id": 20,
-     "binding": 20,
-     "weight": 50
-    },
-    {
      "id": 1,
      "binding": 1,
      "weight": 5
@@ -1824,6 +1774,56 @@
      "id": 10,
      "binding": 10,
      "weight": 5
+    },
+    {
+     "id": 11,
+     "binding": 11,
+     "weight": 50
+    },
+    {
+     "id": 12,
+     "binding": 12,
+     "weight": 50
+    },
+    {
+     "id": 13,
+     "binding": 13,
+     "weight": 50
+    },
+    {
+     "id": 14,
+     "binding": 14,
+     "weight": 50
+    },
+    {
+     "id": 15,
+     "binding": 15,
+     "weight": 50
+    },
+    {
+     "id": 16,
+     "binding": 16,
+     "weight": 50
+    },
+    {
+     "id": 17,
+     "binding": 17,
+     "weight": 50
+    },
+    {
+     "id": 18,
+     "binding": 18,
+     "weight": 50
+    },
+    {
+     "id": 19,
+     "binding": 19,
+     "weight": 50
+    },
+    {
+     "id": 20,
+     "binding": 20,
+     "weight": 50
     }
    ],
    "config": {
@@ -2312,6 +2312,123 @@
     "maxM": 4,
     "distNum": 1,
     "distDen": 0
+   },
+   "reason": 1,
+   "chosen": []
+  },
+  {
+   "name": "target above the maximum",
+   "old": [
+    {
+     "id": 1,
+     "binding": 1,
+     "weight": 5
+    },
+    {
+     "id": 2,
+     "binding": 2,
+     "weight": 5
+    },
+    {
+     "id": 3,
+     "binding": 3,
+     "weight": 5
+    },
+    {
+     "id": 4,
+     "binding": 4,
+     "weight": 5
+    },
+    {
+     "id": 5,
+     "binding": 5,
+     "weight": 5
+    },
+    {
+     "id": 6,
+     "binding": 6,
+     "weight": 5
+    },
+    {
+     "id": 7,
+     "binding": 7,
+     "weight": 5
+    },
+    {
+     "id": 8,
+     "binding": 8,
+     "weight": 5
+    },
+    {
+     "id": 9,
+     "binding": 9,
+     "weight": 5
+    },
+    {
+     "id": 10,
+     "binding": 10,
+     "weight": 5
+    }
+   ],
+   "eligible": [
+    {
+     "id": 1,
+     "binding": 1,
+     "weight": 5
+    },
+    {
+     "id": 2,
+     "binding": 2,
+     "weight": 5
+    },
+    {
+     "id": 3,
+     "binding": 3,
+     "weight": 5
+    },
+    {
+     "id": 4,
+     "binding": 4,
+     "weight": 5
+    },
+    {
+     "id": 5,
+     "binding": 5,
+     "weight": 5
+    },
+    {
+     "id": 6,
+     "binding": 6,
+     "weight": 5
+    },
+    {
+     "id": 7,
+     "binding": 7,
+     "weight": 5
+    },
+    {
+     "id": 8,
+     "binding": 8,
+     "weight": 5
+    },
+    {
+     "id": 9,
+     "binding": 9,
+     "weight": 5
+    },
+    {
+     "id": 10,
+     "binding": 10,
+     "weight": 5
+    }
+   ],
+   "config": {
+    "nMin": 4,
+    "nTarget": 10,
+    "nMax": 8,
+    "maxM": 4,
+    "distNum": 1,
+    "distDen": 4
    },
    "reason": 1,
    "chosen": []
