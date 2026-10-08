@@ -223,6 +223,24 @@ func (x *BlockStore) Witness(hash [32]byte) ([]byte, error) {
 	return data, err
 }
 
+// HasWitness reports whether the witness with this hash is retained.
+func (x *BlockStore) HasWitness(hash [32]byte) bool {
+	store, ok := x.storage.(WitnessStore)
+	if !ok {
+		return false
+	}
+	has, err := store.HasWitness(hash)
+	return err == nil && has
+}
+
+// PosServices returns the installed control collaborators, nil when there are none. A store built by recovery inherits them from the one
+// it replaces.
+func (x *BlockStore) PosServices() *PosServices {
+	x.lock.RLock()
+	defer x.lock.RUnlock()
+	return x.pos
+}
+
 // SetPosServices installs the collaborators the P85 control executor verifies controls with. It must be set before the store executes a
 // block that carries a control.
 func (x *BlockStore) SetPosServices(s *PosServices) {
