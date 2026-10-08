@@ -200,13 +200,14 @@ snapshot handoff-after
 m2_measure_pause 1 2 | tee "$H6_RUN/handoff-pause.txt"
 ```
 
-`m2_archive_root_state` is the lane's successor-install step. It moves the trust
-and orchestration databases aside into a named directory and archives only a COPY
-of `rootchain.db`, which stays in place: that store holds the durable control cuts
-and the root-record log (#488) that every shard node's restart admission and the
-successor epoch need. Never move `rootchain.db` aside at an install. The helper
-must never be used to revert H or as a general restart recipe
-(`scripts/lib/m2-handoff-lib.sh:82`). Authority advancement fences
+`m2_archive_root_state` is the lane's successor-install step. It archives a COPY of
+every root store in a named directory and leaves them all in place: `rootchain.db`
+(committed blocks, durable control cuts, the root-record log of #488),
+`orchestration.db` (the configurations derived from committed handoffs, which the
+block store is checked against at start) and the two trust stores are one
+consistent set, and a restart that keeps only some of them is refused. Never move a
+root store aside at an install. The helper must never be used to revert H or as a
+general restart recipe (`scripts/lib/m2-handoff-lib.sh:82`). Authority advancement fences
 the previous sessions; verify increased generation, unchanged fingerprint and
 nondecreasing reserved round. Stop and escalate on partial advancement; do not
 hand-edit trust files or restart authorities. Finish with network.md's teardown.
