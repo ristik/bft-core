@@ -13,21 +13,22 @@ arbitrarily, and one host/disk/operator failure stops the whole testnet.** Autho
 reboot on a network you intend to keep. Design detail: [deploy/testnet/README.md](../../../deploy/testnet/README.md).
 
 ## 2. Prerequisites
-- Linux server, root access, Docker Engine with the Compose v2 plugin (versions are not pinned: record yours).
+- One Debian 12/bookworm server (the runtime glibc). It builds the images too: `images.json` records *local* image IDs.
   Plan 24 GiB RAM, 8 cores, 100 GiB SSD for N=4 (budgets, not measurements) plus off-host backup space.
-- Build host: Debian 12/bookworm (the runtime glibc). Go 1.27.1, Rust 1.97.1 (rustup), clang/libclang, make,
-  git, Python 3.11+, jq, curl. `go` must also be on the server's PATH: the generator checks `ubft` with `go version -m`.
+- Docker Engine with the Compose v2 plugin (not pinned: record versions), Go 1.27.1 (official tarball), Rust 1.97.1
+  (rustup), clang/libclang, make, git, Python 3.11+, jq, curl. Work as a non-root user in the `docker` group who
+  owns `/srv/src`; only the commands shown with `sudo` need root (they keep your PATH, so `go` is found).
 - Public: TCP 443 (and 80 only for certificate renewal), SSH for operators. Ports 8545 (RPC), 8088 (faucet) and
   9090 (Prometheus) bind host loopback only; never publish them or any validator port. Docker subnets
   172.30.88.0/24 and 172.30.89.0/24 must be free. DNS names, TLS certificates and hCaptcha keys come from the owner.
 
 ## 3. Build images from exact revisions
-`/srv/src/pkg` is this repository at this guide's commit; the other three are clean checkouts of the exact
-revisions in [pins.json](../../../deploy/testnet/pins.json). Never use `main` or a moving tag.
-
+`/srv/src/pkg` is this repository at the guide commit you were given (`main` lacks the package); the other three
+are clean checkouts of the exact revisions in [pins.json](../../../deploy/testnet/pins.json). Set `GUIDE_COMMIT` first.
 ```sh
-set -eo pipefail
-git clone https://github.com/ristik/bft-core.git /srv/src/pkg   # then check out this guide's commit
+GUIDE_COMMIT=REPLACE_WITH_GIVEN_COMMIT bash -eo pipefail <<'EOF'   # stops at the first error, keeps your shell
+git clone -b integration/enshrined-evm https://github.com/ristik/bft-core.git /srv/src/pkg
+git -C /srv/src/pkg checkout --detach "$GUIDE_COMMIT"
 for r in bft:bft-core ureth:ureth rugregator:rugregator; do n=${r%%:*}; pin=$(jq -r .$n /srv/src/pkg/deploy/testnet/pins.json)
   git clone https://github.com/ristik/${r#*:}.git /srv/src/$n-pinned && git -C /srv/src/$n-pinned fetch -q origin $pin
   git -C /srv/src/$n-pinned checkout --detach $pin; done
@@ -35,20 +36,19 @@ cd /srv/src/pkg
 python3 deploy/testnet/build-images.py --bft-source /srv/src/bft-pinned \
   --ureth-source /srv/src/ureth-pinned --rugregator-source /srv/src/rugregator-pinned
 go build -o build/tn-keygen ./deploy/testnet/keygen
+EOF
 ```
-
 Success: it prints the path of `deploy/testnet/artifacts/images.json` (pins, binary SHA-256, local image IDs).
 
 ## 4. Generate a fresh generation and start it
 ```sh
-umask 077; G=/srv/testnet/tn-$(date -u +%Y%m%d)     # name must be tn-<lowercase>, must not exist
-sudo -E python3 deploy/testnet/generate.py --out $G --validators 4 --chain-id 31337 \
+cd /srv/src/pkg; umask 077; G=/srv/testnet/tn-$(date -u +%Y%m%d)   # tn-<lowercase>, must not exist
+sudo env PATH="$PATH" python3 deploy/testnet/generate.py --out $G --validators 4 --chain-id 31337 \
   --ubft /srv/src/bft-pinned/build/ubft --captcha-sitekey SITE_KEY --captcha-secret-file /srv/secrets/hcaptcha-secret
 sudo chown -R 10001:10001 $G && cd $G && docker compose config --quiet
 SERVICES=$(docker compose config --services | sed '/^authority/d')   # authorities are already running
 docker compose up -d $SERVICES && docker compose ps
 ```
-
 The generator makes fresh root/shard/authority keys per validator, the trust base, a layout-2 genesis that funds
 **only** a new random faucet account (1000 test UCT), Engine JWTs and `manifest.json`. Success: it prints the
 block-zero hash, the manifest and `Authorities are live and enrolled. Do NOT restart them.`; `docker compose ps`
@@ -70,25 +70,23 @@ for url in m['validator_rpc_urls']:
 EOF
 for i in 1 2 3 4; do docker compose exec -T shard$i ubft shard-node certified-parent --url http://127.0.0.1:9101; done
 ```
-
 `certified-parent` prints the certified tip hash (height and root round on stderr); repeat after a minute: heights
 must rise on every shard, and `docker compose logs shard1 | grep 'certificate admitted'` keeps growing.
 Then, from a fresh browser wallet on the manifest's chain ID and `https://rpc.<domain>/`, claim at
 `https://<faucet-host>/` (200 with a tx hash) and send a native transfer. Check both:
-
 ```sh
 curl -s https://rpc.DOMAIN/ -H 'Content-Type: application/json' \
   -d '{"jsonrpc":"2.0","id":1,"method":"eth_getTransactionReceipt","params":["0xTXHASH"]}' | jq .result.status   # "0x1"
 ```
-
 and a certified shard height at or above the receipt's `blockNumber` (a receipt alone is not certification).
 The gateway allows basic `eth_*` reads, call/estimate and `eth_sendRawTransaction` only (no `eth_feeHistory`, no
 batches, 16 KiB bodies, 10 req/s per IP). Open nginx routing last.
 
 ## 6. Routine operations
+In a new shell, first: `G=/srv/testnet/tn-…; cd $G && SERVICES=$(docker compose config --services | sed '/^authority/d')`.
+
 **Restart one validator (authority stays live).** Success: the shard logs `execution journal restored`, then new
 `certificate admitted` lines, and the other shards never stop advancing.
-
 ```sh
 docker compose restart ureth2 root2 shard2 && docker compose logs --since 5m shard2 | grep -E 'journal restored|certificate admitted'
 docker compose exec -T authority2 ubft signing-authority status --operator-socket /authority/operator.sock \
@@ -97,11 +95,12 @@ docker compose exec -T authority2 ubft signing-authority status --operator-socke
 
 **Backup and restore (whole generation).** Stop public routing first. `backup` stops every non-authority service;
 restore works only while the authorities have not signed since. To resume instead, `docker compose up -d $SERVICES` in `$G`.
-
+Copy the archive **and its `.sha256` sidecar** off host (restore refuses without it). After a restore, operate only from
+the restored directory (same Compose project, authority mounts under the old `$G`); never delete `$G` while its authorities run.
 ```sh
-sudo -E python3 /srv/src/pkg/deploy/testnet/backup.py backup $G /srv/backups/$(basename $G).tar.gz
+sudo env PATH="$PATH" python3 /srv/src/pkg/deploy/testnet/backup.py backup $G /srv/backups/$(basename $G).tar.gz
 #   -> "Non-authority services stopped; authorities MUST stay live. SHA256: ..."
-sudo -E python3 /srv/src/pkg/deploy/testnet/backup.py restore /srv/testnet/tn-restored \
+sudo env PATH="$PATH" python3 /srv/src/pkg/deploy/testnet/backup.py restore /srv/testnet/tn-restored \
   /srv/backups/$(basename $G).tar.gz --live-generation $G     # -> "Restored offline. ..."
 sudo chown -R 10001:10001 /srv/testnet/tn-restored && cd /srv/testnet/tn-restored && docker compose up -d $SERVICES
 ```
@@ -115,17 +114,18 @@ and [root-handoff-abort.md](../root-handoff-abort.md), restore [M2 §3](../m2-ru
 ## 7. Reset to a fresh genesis (destroys all assets)
 Stop nginx routing; take a backup for evidence if wanted. This deletes the old generation, keys and balances.
 ```sh
-sudo -E python3 /srv/src/pkg/deploy/testnet/reset.py --old $G --lose-all-assets -- --out /srv/testnet/tn-NEWNAME \
+sudo env PATH="$PATH" python3 /srv/src/pkg/deploy/testnet/reset.py --old $G --lose-all-assets -- --out /srv/testnet/tn-NEWNAME \
   --validators 4 --chain-id 31337 --ubft /srv/src/bft-pinned/build/ubft \
   --keygen /srv/src/pkg/build/tn-keygen --captcha-sitekey SITE_KEY --captcha-secret-file /srv/secrets/hcaptcha-secret
 ```
-
 Success: `Old balances, transactions and keys destroyed. ...`. Start and verify as in sections 4–5; require a new
-block-zero hash and faucet address, and faucet 409 for the old wallet pin. Announce the reset.
+block-zero hash and faucet address. The old pin must get 409 (checked before the captcha); then announce the reset:
+`curl -s -XPOST http://127.0.0.1:8088/api/claim -d "{\"address\":\"0x$(printf %040d 1)\",\"chain_id\":31337,\"genesis_hash\":\"$(jq -r .genesis_hash $G.retired-manifest.json)\"}"`
 
 ## 8. Troubleshooting
 | Symptom / log line | Cause and fix |
 |---|---|
+| `FileNotFoundError: ... 'go'` (generate/reset) | sudo dropped your PATH: use `sudo env PATH="$PATH" …` as shown, or link `go` into `/usr/local/bin`. |
 | `build on Linux for the server, not macOS`, `source pin mismatch`, `dirty source` | Rebuild on Debian 12 from clean checkouts of pins.json. |
 | `image source pins differ`, `ubft must be built from clean pinned BFT source` | images.json or ubft come from another pin: rerun section 3. |
 | `authority startup timeout` (generator) | `docker compose logs authority1`; discard the generation (section 4 failure path). |
