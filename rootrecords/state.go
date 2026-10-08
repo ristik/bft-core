@@ -30,6 +30,10 @@ type State struct {
 	// Pending are the committed handoffs that installed an assignment and wait for the EVM to acknowledge them, oldest first, at most
 	// MaxPending (a primary and its recovery).
 	Pending []PendingH
+	// Awaiting are the closed epochs whose signing liability has no CloseLiability yet, oldest first: an epoch enters when the freeze of
+	// an assignment handoff ends (the successor's first ordinary block) and leaves with its closure. The first closure of an epoch is the
+	// only one.
+	Awaiting []Awaiting
 	// Log cursor.
 	Count                  uint64
 	Tip                    [32]byte
@@ -44,12 +48,17 @@ type PendingH struct {
 	BodyID [32]byte
 }
 
+// Awaiting is one closed epoch awaiting its CloseLiability: the epoch H ended and the round H was ordered at.
+type Awaiting struct{ Epoch, HRound uint64 }
+
 // MaxPending is the longest unacknowledged chain: a primary and its one recovery.
 const MaxPending = 2
 
 var (
 	// ErrState reports an encoded state that is not the canonical encoding of a consistent state.
 	ErrState = errors.New("rootrecords: invalid root source state")
+	// ErrNotAwaiting reports a closure of an epoch that has no closure outstanding: never closed by a handoff, or closed already.
+	ErrNotAwaiting = errors.New("rootrecords: no closure is outstanding for the epoch")
 	// ErrNoPending reports an acknowledgement with no committed assignment handoff waiting for it.
 	ErrNoPending = errors.New("rootrecords: no committed assignment handoff awaits an acknowledgement")
 )
@@ -61,6 +70,7 @@ func NewState(epoch, firstRound uint64) State {
 
 func (s State) clone() State {
 	s.Pending = append([]PendingH(nil), s.Pending...)
+	s.Awaiting = append([]Awaiting(nil), s.Awaiting...)
 	return s
 }
 
@@ -97,6 +107,10 @@ func (s State) Block(epoch, round uint64) (State, error) {
 			return State{}, err
 		}
 		s = s.clone()
+		if n := len(s.Pending); n > 0 && s.Pending[n-1].RootEpoch == s.NextEpoch {
+			// an assignment handoff ended the epoch: its signing liability waits for the CloseLiability in this first ordinary block
+			s.Awaiting = append(s.Awaiting, Awaiting{Epoch: s.Epoch, HRound: s.Pending[n-1].HRound})
+		}
 		s.Epoch, s.Offset, s.First = s.NextEpoch, s.NextOffset, s.NextFirst
 		s.Frozen, s.Endpoint, s.NextEpoch, s.NextOffset, s.NextFirst = false, 0, 0, 0, 0
 		return s, nil
@@ -182,6 +196,38 @@ func (s State) Ack(round, timestamp uint64, resultID, assignmentID [32]byte, evm
 	return State{}, Record{}, ErrNoPending
 }
 
+// Close projects the CloseLiability of an awaiting epoch: data is the exact ClosureData payload the root verified. The epoch leaves the
+// awaiting list (so a repeat is ErrNotAwaiting, never a second record) and the record is anchored at the progress of the block that
+// carries the control and that block's committed timestamp, which fixes p_close and its UC time.
+func (s State) Close(epoch uint64, data []byte, round, timestamp uint64) (State, Record, error) {
+	i := -1
+	for k, a := range s.Awaiting {
+		if a.Epoch == epoch {
+			i = k
+		}
+	}
+	if i < 0 {
+		return State{}, Record{}, fmt.Errorf("%w: epoch %d", ErrNotAwaiting, epoch)
+	}
+	progress, err := s.Progress(round)
+	if err != nil {
+		return State{}, Record{}, err
+	}
+	s = s.clone()
+	s.Awaiting = append(s.Awaiting[:i], s.Awaiting[i+1:]...)
+	return s.append(KindClosure, data, Anchor{progress, timestamp})
+}
+
+// HRoundAwaiting is the round H was ordered at for an awaiting epoch.
+func (s State) HRoundAwaiting(epoch uint64) (uint64, bool) {
+	for _, a := range s.Awaiting {
+		if a.Epoch == epoch {
+			return a.HRound, true
+		}
+	}
+	return 0, false
+}
+
 const stateDomain = "UNICITY_P85_ROOT_SOURCE_STATE"
 
 // Bytes is the canonical encoding committed by Digest.
@@ -190,8 +236,12 @@ func (s State) Bytes() []byte {
 	for _, p := range s.Pending {
 		pending = append(pending, []any{p.Epoch, p.HRound, p.Offset, p.First, p.RootEpoch, p.BodyID[:]})
 	}
+	awaiting := make([]any, 0, len(s.Awaiting))
+	for _, a := range s.Awaiting {
+		awaiting = append(awaiting, []any{a.Epoch, a.HRound})
+	}
 	b, err := types.Cbor.Marshal([]any{stateDomain, uint64(1), s.Epoch, s.Offset, s.First, s.Frozen, s.Endpoint, s.NextEpoch, s.NextOffset, s.NextFirst,
-		pending, s.Count, s.Tip[:], s.LastProgress, s.LastTime})
+		pending, awaiting, s.Count, s.Tip[:], s.LastProgress, s.LastTime})
 	if err != nil {
 		panic(err) // fixed shape of scalars and byte strings
 	}
@@ -204,7 +254,7 @@ func (s State) Digest() [32]byte { return sha256.Sum256(s.Bytes()) }
 // DecodeState parses the canonical encoding and refuses anything that is not exactly that or not internally consistent.
 func DecodeState(data []byte) (State, error) {
 	var f []any
-	if err := types.Cbor.Unmarshal(data, &f); err != nil || len(f) != 15 {
+	if err := types.Cbor.Unmarshal(data, &f); err != nil || len(f) != 16 {
 		return State{}, fmt.Errorf("%w: shape", ErrState)
 	}
 	if d, ok := f[0].(string); !ok || d != stateDomain {
@@ -214,19 +264,20 @@ func DecodeState(data []byte) (State, error) {
 		return State{}, fmt.Errorf("%w: version", ErrState)
 	}
 	u := func(i int) uint64 { v, _ := f[i].(uint64); return v }
-	for _, i := range []int{2, 3, 4, 6, 7, 8, 9, 11, 13, 14} {
+	for _, i := range []int{2, 3, 4, 6, 7, 8, 9, 12, 14, 15} {
 		if _, ok := f[i].(uint64); !ok {
 			return State{}, fmt.Errorf("%w: field %d", ErrState, i)
 		}
 	}
 	frozen, ok := f[5].(bool)
-	tip, ok2 := f[12].([]byte)
+	tip, ok2 := f[13].([]byte)
 	pend, ok3 := f[10].([]any)
-	if !ok || !ok2 || len(tip) != 32 || !ok3 {
+	await, ok4 := f[11].([]any)
+	if !ok || !ok2 || len(tip) != 32 || !ok3 || !ok4 {
 		return State{}, fmt.Errorf("%w: field type", ErrState)
 	}
 	s := State{Epoch: u(2), Offset: u(3), First: u(4), Frozen: frozen, Endpoint: u(6), NextEpoch: u(7), NextOffset: u(8), NextFirst: u(9),
-		Count: u(11), LastProgress: u(13), LastTime: u(14)}
+		Count: u(12), LastProgress: u(14), LastTime: u(15)}
 	copy(s.Tip[:], tip)
 	for _, pv := range pend {
 		pf, isArr := pv.([]any)
@@ -249,6 +300,20 @@ func DecodeState(data []byte) (State, error) {
 			}
 		}
 		s.Pending = append(s.Pending, p)
+	}
+	for _, av := range await {
+		af, isArr := av.([]any)
+		if !isArr || len(af) != 2 {
+			return State{}, fmt.Errorf("%w: awaiting entry", ErrState)
+		}
+		var a Awaiting
+		var e1, e2 bool
+		a.Epoch, e1 = af[0].(uint64)
+		a.HRound, e2 = af[1].(uint64)
+		if !e1 || !e2 {
+			return State{}, fmt.Errorf("%w: awaiting field", ErrState)
+		}
+		s.Awaiting = append(s.Awaiting, a)
 	}
 	if err := s.consistent(); err != nil {
 		return State{}, err
@@ -273,8 +338,19 @@ func (s State) consistent() error {
 		return fmt.Errorf("%w: %d pending handoffs", ErrState, len(s.Pending))
 	case len(s.Pending) > 0 && !s.Frozen && s.Pending[len(s.Pending)-1].RootEpoch > s.Epoch:
 		return fmt.Errorf("%w: pending handoff beyond the current epoch", ErrState)
+	case !awaitingAscending(s.Awaiting):
+		return fmt.Errorf("%w: awaiting epochs not strictly ascending", ErrState)
 	case (s.Count == 0) != (s.Tip == [32]byte{}):
 		return fmt.Errorf("%w: log count %d with tip %x", ErrState, s.Count, s.Tip)
 	}
 	return nil
+}
+
+func awaitingAscending(a []Awaiting) bool {
+	for i := 1; i < len(a); i++ {
+		if a[i].Epoch <= a[i-1].Epoch {
+			return false
+		}
+	}
+	return true
 }

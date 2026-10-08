@@ -951,3 +951,165 @@ func TestExpectedTRInstalledParentRefusals(t *testing.T) {
 	_, err = expectedTR(other, 1)
 	require.ErrorIs(t, err, quorumweight.ErrRequestContext, "a configuration other than the selected assignment's")
 }
+
+// continuationOf is what RequestContinuationFromVerifiedV3 builds, without its history proof: the previous assignment under the next root
+// interval, the configuration, the immutable context and the original commitment copied.
+func continuationOf(t *testing.T, prev *RequestActivation, rootEpoch uint64, body []byte, start uint64) *RequestActivation {
+	t.Helper()
+	pdr, err := clonePDR(prev.pdr)
+	require.NoError(t, err)
+	return &RequestActivation{pdr: pdr, confHash: bytes.Clone(prev.confHash), ctx: prev.ctx, rootEpoch: rootEpoch, rootBody: bytes.Clone(body), start: start,
+		trHash: bytes.Clone(prev.trHash), version: prev.version, continuation: true, predecessorRootBody: bytes.Clone(prev.rootBody)}
+}
+
+var fxBody2 = bytes.Repeat([]byte{0xC2}, 32)
+
+// A shard that no activation touches (an aggregator) keeps its unit assignment across root epochs: each root interval is a continuation with its
+// own authorising identity, resolved with the exact identity equality, at the same shard epoch, configuration, context and quorum.
+func TestContinuationKeepsAnUnchangedUnitShardResolvableAcrossRootIntervals(t *testing.T) {
+	f := newViewFixture(t)
+	var v0 []*types.NodeInfo
+	for i := 0; i < 4; i++ {
+		v0 = append(v0, f.member(i, i, 1))
+	}
+	pdr, _ := f.pdr(0, 1, 3, fxBody0, v0...)
+	anchor, err := newRequestActivation(pdr, crypto.SHA256, quorumweight.PolicyUnit, nil, 3, fxBody0, 0, nil, fxVersion)
+	require.NoError(t, err)
+	c1 := continuationOf(t, anchor, 4, fxBody1, fxActivate)
+	c2 := continuationOf(t, c1, 5, fxBody2, fxActivate+10)
+	s := &scenario{f: f, pdr0: pdr, anchor: anchor, succ: c1, parentID: bytes.Repeat([]byte{0x9D}, 32)}
+	s.parent = f.shardAt(pdr, f.tr(0, 5, f.shardAt(pdr, certification.TechnicalRecord{Round: 5, Leader: f.id(0)})))
+	snap, err := NewRequestSnapshot(fxNetwork, crypto.SHA256, s.parent, s.parentID, nil, anchor, c1, c2)
+	require.NoError(t, err)
+
+	type interval struct {
+		round, epoch uint64
+		body         []byte
+	}
+	var keys [][]byte
+	for _, iv := range []interval{{fxActivate - 1, 3, fxBody0}, {fxActivate, 4, fxBody1}, {fxActivate + 4, 4, fxBody1}, {fxActivate + 10, 5, fxBody2}, {fxActivate + 15, 5, fxBody2}} {
+		for _, purpose := range []RequestPurpose{PurposeCertify, PurposeExecute, PurposeTimeout} {
+			v := s.mustResolve(snap, iv.round, iv.epoch, iv.body, purpose)
+			require.EqualValues(t, 0, v.ExpectedTR().Epoch, "the shard epoch does not move with a root interval")
+			require.EqualValues(t, 4, v.Context().TotalWeight(), "PolicyUnit: W=N")
+			require.EqualValues(t, 3, v.Context().Threshold(), "Q=floor(N/2)+1")
+			_, err := v.VerifyIRChangeReq(quorumProof(s.request(v, 0, 0, 1)), t2Rounds)
+			require.ErrorIs(t, err, quorumweight.ErrQuorumNotReached, "one signer of four")
+			res, err := v.VerifyIRChangeReq(quorumProof(s.request(v, 0, 0, 1), s.request(v, 1, 1, 1), s.request(v, 2, 2, 1)), t2Rounds)
+			require.NoError(t, err, "three signers of four")
+			require.Equal(t, v.ViewKey(), res.ViewKey)
+		}
+		keys = append(keys, s.mustResolve(snap, iv.round, iv.epoch, iv.body, PurposeCertify).AssignmentKey())
+	}
+	require.NotEqual(t, keys[0], keys[1], "another root interval is another authorization")
+	require.Equal(t, keys[1], keys[2])
+	require.NotEqual(t, keys[2], keys[3])
+	require.Equal(t, keys[3], keys[4])
+
+	// exact identity equality is kept: the old root identity does not authorise a later round, and a later epoch cannot be named early
+	_, err = s.resolve(snap, fxActivate+4, 3, fxBody0, PurposeCertify)
+	require.ErrorIs(t, err, quorumweight.ErrRequestContext)
+	_, err = s.resolve(snap, fxActivate+4, 5, fxBody2, PurposeCertify)
+	require.ErrorIs(t, err, quorumweight.ErrRequestContext)
+	_, err = s.resolve(snap, fxActivate+4, 4, fxBody2, PurposeCertify)
+	require.ErrorIs(t, err, quorumweight.ErrRequestContext, "a root body of another lineage at the right epoch")
+
+	// a continuation named before its first round is collection-only; certification cannot use it early
+	early := s.mustResolve(snap, fxActivate+9, 5, fxBody2, PurposeCollect)
+	require.True(t, early.CollectionOnly())
+	_, err = s.resolve(snap, fxActivate+9, 5, fxBody2, PurposeCertify)
+	require.ErrorIs(t, err, ErrRequestNotActive)
+	// replay of the history before the boundary keeps its own root interval
+	old := s.mustResolve(snap, fxActivate-2, 3, fxBody0, PurposeReplay)
+	require.NotEqual(t, old.AssignmentKey(), keys[1])
+}
+
+// A weighted EVM assignment survives root-only epochs unchanged: the continuation keeps the original context, coupling and weights (it never
+// re-mirrors the new root committee), and #461's installed-parent rule still runs against the original assignment's commitment.
+func TestContinuationKeepsAWeightedAssignmentAndTheInstalledParentRule(t *testing.T) {
+	s := newScenario(t, []uint64{1, 1, 1, 1}, []uint64{6, 1, 1, 1}, nil)
+	cont := continuationOf(t, s.succ, 5, fxBody2, fxActivate+10)
+	inst := s.installed(3)
+	snap, err := NewRequestSnapshot(fxNetwork, crypto.SHA256, inst, s.parentID, nil, s.anchor, s.succ, cont)
+	require.NoError(t, err)
+
+	for _, round := range []uint64{fxActivate + 12, fxActivate + 30} {
+		v := s.mustResolve(snap, round, 5, fxBody2, PurposeExecute)
+		require.EqualValues(t, 9, v.Context().TotalWeight())
+		require.EqualValues(t, 5, v.Context().Threshold())
+		w, _ := v.Context().SignerWeight(s.f.id(0))
+		require.EqualValues(t, 6, w, "the heavy member stays heavy")
+		require.Equal(t, inst.TR, v.ExpectedTR(), "the pending-ack record is the installed parent's, however many continuations followed")
+		_, err := v.VerifyIRChangeReq(quorumProof(s.request(v, 0, 0, 2)), t2Rounds)
+		require.NoError(t, err, "the heavy signer alone")
+		_, err = v.VerifyIRChangeReq(quorumProof(s.request(v, 1, 1, 2), s.request(v, 2, 2, 2), s.request(v, 3, 3, 2)), t2Rounds)
+		require.ErrorIs(t, err, quorumweight.ErrQuorumNotReached, "three light signers")
+	}
+	atSucc := s.mustResolve(snap, fxActivate+2, 4, fxBody1, PurposeExecute)
+	atCont := s.mustResolve(snap, fxActivate+12, 5, fxBody2, PurposeExecute)
+	require.Equal(t, s.succ.ctx.Identity(), atCont.Context().Identity(), "the request context identity is stable")
+	require.NotEqual(t, atSucc.AssignmentKey(), atCont.AssignmentKey(), "the authorization identity is not")
+
+	// the tampered installed parent is still refused through a continuation
+	bad := s.installed(3)
+	bad.TR.FeeHash = append([]byte{bad.TR.FeeHash[0] ^ 1}, bad.TR.FeeHash[1:]...)
+	badSnap, err := NewRequestSnapshot(fxNetwork, crypto.SHA256, bad, s.parentID, nil, s.anchor, s.succ, cont)
+	require.NoError(t, err)
+	_, err = s.resolve(badSnap, fxActivate+12, 5, fxBody2, PurposeExecute)
+	require.ErrorIs(t, err, quorumweight.ErrRequestContext)
+
+	// the predecessor case: before the parent installs, the complete original digest is checked through the continuation
+	pre := s.snapshotWith(s.parent, s.anchor, s.succ, cont)
+	v := s.mustResolve(pre, fxActivate+12, 5, fxBody2, PurposeExecute)
+	require.Equal(t, s.succTR, v.ExpectedTR())
+	wrong := *s.succ
+	wrong.trHash = bytes.Repeat([]byte{7}, 32)
+	wrongCont := continuationOf(t, &wrong, 5, fxBody2, fxActivate+10)
+	badPre, err := NewRequestSnapshot(fxNetwork, crypto.SHA256, s.parent, s.parentID, nil, s.anchor, &wrong, wrongCont)
+	require.NoError(t, err)
+	_, err = s.resolve(badPre, fxActivate+12, 5, fxBody2, PurposeExecute)
+	require.ErrorIs(t, err, quorumweight.ErrRequestContext, "the original commitment, not a copy of a wrong one")
+}
+
+func (s *scenario) snapshotWith(parent *ShardInfo, chain ...*RequestActivation) *RequestSnapshot {
+	s.f.t.Helper()
+	snap, err := NewRequestSnapshot(fxNetwork, crypto.SHA256, parent, s.parentID, nil, chain...)
+	require.NoError(s.f.t, err)
+	return snap
+}
+
+// A snapshot admits a continuation only as the marked, adjacent, identical-assignment next root interval; every other repetition of a shard
+// epoch is refused, each way alone.
+func TestSnapshotRefusesAMalformedContinuationChain(t *testing.T) {
+	s := newScenario(t, []uint64{1, 1, 1, 1}, []uint64{6, 1, 1, 1}, nil)
+	mk := func() *RequestActivation { return continuationOf(t, s.succ, 5, fxBody2, fxActivate+10) }
+	build := func(chain ...*RequestActivation) error {
+		_, err := NewRequestSnapshot(fxNetwork, crypto.SHA256, s.installed(1), s.parentID, nil, chain...)
+		return err
+	}
+	require.NoError(t, build(s.anchor, s.succ, mk()), "control")
+
+	for name, mutate := range map[string]func(*RequestActivation){
+		"unmarked, so a repeated shard epoch": func(c *RequestActivation) { c.continuation = false },
+		"not the next root epoch":             func(c *RequestActivation) { c.rootEpoch = 7 },
+		"another predecessor body":            func(c *RequestActivation) { c.predecessorRootBody = bytes.Repeat([]byte{1}, 32) },
+		"a start that does not rise":          func(c *RequestActivation) { c.start = s.succ.start },
+		"another request version":             func(c *RequestActivation) { c.version++ },
+		"another original commitment":         func(c *RequestActivation) { c.trHash = bytes.Repeat([]byte{3}, 32) },
+		"another configuration": func(c *RequestActivation) {
+			c.pdr.T2Timeout++
+			c.confHash = bytes.Repeat([]byte{4}, 32)
+		},
+		"another context": func(c *RequestActivation) { c.ctx = s.anchor.ctx },
+	} {
+		c := mk()
+		mutate(c)
+		err := build(s.anchor, s.succ, c)
+		require.ErrorIs(t, err, ErrAssignmentHistory, name)
+	}
+	require.ErrorIs(t, build(continuationOf(t, s.anchor, 4, fxBody1, fxActivate)), ErrAssignmentHistory, "a history cannot begin with a continuation")
+	first := continuationOf(t, s.anchor, 4, fxBody1, fxActivate)
+	first.start, first.rootEpoch = 0, 1 // even one that looks like an anchor, followed by a valid real activation
+	require.ErrorIs(t, build(first, s.succ), ErrAssignmentHistory, "the first record is a non-continuation anchor")
+	require.ErrorIs(t, build(s.anchor, mk()), ErrAssignmentHistory, "a continuation of an assignment that is not in the chain")
+}
