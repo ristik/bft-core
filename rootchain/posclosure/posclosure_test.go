@@ -205,6 +205,6 @@ func testIdentity(id byte, weight uint64) evmassign.Identity {
 	sid[31] = id
 	key := make([]byte, 33)
 	key[0], key[1] = 2, id
-	return evmassign.Identity{StakingID: sid, Generation: 1, RootNodeID: "r", RootKey: key, EVMNodeID: "e", EVMKey: key, Weight: weight,
+	return evmassign.Identity{StakingID: sid, Generation: 1, RootNodeID: "r", RootKey: key, EVMNodeID: "e", EVMKey: key, Weight: weight, RawWeight: weight,
 		OperatorPayee: make([]byte, 20), ExposureDigest: make([]byte, 32)}
 }

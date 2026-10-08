@@ -96,7 +96,7 @@ func TestThePoAGenesisIdentitiesAreDerivedFromTheCommitteeAndAreValid(t *testing
 	}
 	before, after := byRoot(ids, d.tb.RootNodes[0].NodeID), byRoot(heavy, d.tb.RootNodes[0].NodeID)
 	require.EqualValues(t, 6, after.Weight)
-	before.Weight = after.Weight
+	before.Weight, before.RawWeight = after.Weight, after.RawWeight
 	require.Equal(t, before, after)
 
 	for name, tc := range map[string]struct {

@@ -45,7 +45,7 @@ func fid(i uint64, weight uint64) evmassign.Identity {
 	rk, ek := make([]byte, 33), make([]byte, 33)
 	rk[0], ek[0] = 2, 2
 	rk[1], ek[1] = byte(i), byte(i)+100
-	return evmassign.Identity{StakingID: sid, Generation: 1, RootNodeID: "r", RootKey: rk, EVMNodeID: "e", EVMKey: ek, Weight: weight, OperatorPayee: payee, ExposureDigest: ld[:]}
+	return evmassign.Identity{StakingID: sid, Generation: 1, RootNodeID: "r", RootKey: rk, EVMNodeID: "e", EVMKey: ek, Weight: weight, RawWeight: weight, OperatorPayee: payee, ExposureDigest: ld[:]}
 }
 
 type closeFx struct {

@@ -107,7 +107,7 @@ func ascendingCustodyIDs(ids []Identity) ([]uint64, error) {
 }
 
 // AssignmentExposureDigest folds the assignment's exposures in ascending identity order, each as custody records it: its exposure id,
-// identity, weight, operator payee and lot-list digest.
+// identity, committed weight q, raw weight x, operator payee and lot-list digest.
 func AssignmentExposureDigest(d Deployment, assignmentID [32]byte, ids []Identity) ([32]byte, error) {
 	cids, err := ascendingCustodyIDs(ids)
 	if err != nil {
@@ -119,7 +119,7 @@ func AssignmentExposureDigest(d Deployment, assignmentID [32]byte, ids []Identit
 			return [32]byte{}, fmt.Errorf("%w: malformed record %d", ErrCustodyDigest, cids[i])
 		}
 		eid := ExposureID(d, assignmentID, cids[i])
-		digest = keccak(digest[:], eid[:], w64(cids[i]), w64(x.Weight), wAddr(x.OperatorPayee), x.ExposureDigest)
+		digest = keccak(digest[:], eid[:], w64(cids[i]), w64(x.Weight), w64(x.RawWeight), wAddr(x.OperatorPayee), x.ExposureDigest)
 	}
 	return digest, nil
 }

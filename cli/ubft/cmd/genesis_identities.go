@@ -140,7 +140,7 @@ func poaIdentity(root evmassign.RootMember, evm *types.NodeInfo) evmassign.Ident
 	payee := poaDigest(poaPayeeDomain, []byte(root.NodeID))
 	exposure := poaDigest(poaExposureDomain, staking[:])
 	return evmassign.Identity{StakingID: staking[:evmassign.StakingIDLen], Generation: 1, RootNodeID: root.NodeID, RootKey: root.Key,
-		EVMNodeID: evm.NodeID, EVMKey: append([]byte(nil), evm.SigKey...), Weight: root.Weight, OperatorPayee: payee[:evmassign.PayeeLen],
+		EVMNodeID: evm.NodeID, EVMKey: append([]byte(nil), evm.SigKey...), Weight: root.Weight, RawWeight: root.Weight, OperatorPayee: payee[:evmassign.PayeeLen],
 		ExposureDigest: exposure[:]}
 }
 

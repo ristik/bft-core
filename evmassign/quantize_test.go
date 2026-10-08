@@ -1,6 +1,7 @@
 package evmassign
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
 	"strconv"
@@ -94,4 +95,49 @@ func TestQuantizeRefusals(t *testing.T) {
 	}
 	_, _, err = Quantize([]uint64{1, 1}, 2)
 	require.ErrorIs(t, err, ErrQuantize, "n >= B")
+}
+
+func recordsOf(raw ...uint64) []Identity {
+	q, _, err := Quantize(raw, 65536)
+	if err != nil {
+		panic(err)
+	}
+	out := make([]Identity, len(raw))
+	for i := range raw {
+		out[i] = Identity{StakingID: []byte{byte(i)}, Weight: q[i], RawWeight: raw[i]}
+	}
+	return out
+}
+
+// The committed weights of a set are the quantization of its raw weights; each refusal below differs from the control in one thing.
+func TestCheckQuantizedJudgesTheCommittedWeightsAgainstTheRawOnes(t *testing.T) {
+	heavy := recordsOf(1_000_000, 1_000_000, 1_000_000, 1_000_000)
+	require.Less(t, heavy[0].Weight, heavy[0].RawWeight, "the control is a quantized set")
+	require.NoError(t, CheckQuantized(heavy))
+	require.NoError(t, CheckQuantized(recordsOf(6, 1, 1, 1)), "below the cap q = x")
+
+	for name, mutate := range map[string]func([]Identity){
+		"a weight one above its quantization": func(ids []Identity) { ids[1].Weight++ },
+		"a weight one below it":               func(ids []Identity) { ids[1].Weight-- },
+		"the raw weight raised":               func(ids []Identity) { ids[2].RawWeight *= 2 },
+		"the raw weight lowered":              func(ids []Identity) { ids[2].RawWeight /= 2 },
+		"a zero raw weight":                   func(ids []Identity) { ids[0].RawWeight = 0 },
+	} {
+		ids := append([]Identity{}, heavy...)
+		mutate(ids)
+		require.ErrorIs(t, CheckQuantized(ids), ErrIdentity, name)
+	}
+	// q = x is the only valid record for a set within the cap
+	small := recordsOf(6, 1, 1, 1)
+	small[0].Weight = 5
+	require.ErrorIs(t, CheckQuantized(small), ErrIdentity, "a set within the cap is never reduced")
+	require.ErrorIs(t, CheckQuantized(nil), ErrIdentity, "no members")
+}
+
+func TestARecordCannotCommitMoreWeightThanItsRawWeight(t *testing.T) {
+	i := Identity{StakingID: bytes.Repeat([]byte{0}, StakingIDLen), RootNodeID: "r", EVMNodeID: "e", RootKey: bytes.Repeat([]byte{2}, KeyLen), EVMKey: bytes.Repeat([]byte{3}, KeyLen),
+		Weight: 5, RawWeight: 5, OperatorPayee: bytes.Repeat([]byte{1}, PayeeLen), ExposureDigest: bytes.Repeat([]byte{1}, DigestLen)}
+	require.NoError(t, i.valid())
+	i.RawWeight = 4
+	require.ErrorIs(t, i.valid(), ErrIdentity, "q above x")
 }

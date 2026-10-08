@@ -172,6 +172,15 @@ func VerifyPrimary(c Candidate, d ElectionDeployment, f PrimaryFacts, pops []EVM
 		return ErrPrimaryBinding
 	}
 
+	// the committed weights are the quantization of the raw weights the records commit, for J and for K (which is never re-quantized
+	// but was a quantized committee when it was elected)
+	if err := CheckQuantized(c.Identities); err != nil {
+		return errors.Join(ErrPrimaryIdentities, err)
+	}
+	if err := CheckQuantized(a.K); err != nil {
+		return errors.Join(ErrPrimaryRecovery, err)
+	}
+
 	// identity records: custody's own digests over the frozen records
 	exposure, err := AssignmentExposureDigest(d.Deployment, f.AssignmentID, c.Identities)
 	if err != nil {

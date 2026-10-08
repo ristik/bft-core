@@ -33,7 +33,7 @@ func IdentitiesWithPayee(root []evmassign.RootMember, succ *types.PartitionDescr
 		m, v := byRoot[b.RootNodeID], byEVM[b.EVMNodeID]
 		sid, payee, exp := sum("staking", b.RootNodeID), sum("payee"+payeeTag, b.RootNodeID), sum("exposure", b.RootNodeID)
 		out = append(out, evmassign.Identity{StakingID: sid[:], Generation: 1, RootNodeID: m.NodeID, RootKey: bytes.Clone(m.Key),
-			EVMNodeID: v.NodeID, EVMKey: bytes.Clone(v.SigKey), Weight: m.Weight, OperatorPayee: payee[:20], ExposureDigest: exp[:]})
+			EVMNodeID: v.NodeID, EVMKey: bytes.Clone(v.SigKey), Weight: m.Weight, RawWeight: m.Weight, OperatorPayee: payee[:20], ExposureDigest: exp[:]})
 	}
 	sort.Slice(out, func(i, j int) bool { return bytes.Compare(out[i].StakingID, out[j].StakingID) < 0 })
 	return out
