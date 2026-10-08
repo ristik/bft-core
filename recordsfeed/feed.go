@@ -89,18 +89,38 @@ func VerifyCut(cut Cut, origin evmroot.RootOriginV2) (rootrecords.State, rootrec
 
 // Source is the verified view of the root's record log of one pair: a rootinput.RecordsSource.
 type Source struct {
-	remote Remote
+	remotes []Remote
 
 	mu  sync.Mutex
 	log []rootrecords.Record
 }
 
-// NewSource returns a source that fetches from remote and retains every record it has verified.
-func NewSource(remote Remote) *Source { return &Source{remote: remote} }
+// NewSource returns a source that fetches from the remotes in order and retains every record it has verified.
+func NewSource(remotes ...Remote) *Source { return &Source{remotes: remotes} }
 
-// Cursor fetches and verifies the cut of the origin's committed block and extends the verified log to the length it authenticates.
+// Cursor fetches and verifies the cut of the origin's committed block and extends the verified log to the length it authenticates. A
+// remote that withholds, or serves what the origin does not authenticate, is skipped for the next; the cursor is returned only from a
+// remote whose cut and records both verified, and every failure is reported when none did.
 func (s *Source) Cursor(ctx context.Context, origin evmroot.RootOriginV2) (rootrecords.Cursor, error) {
-	cut, err := s.remote.Cut(ctx, origin.RootRound)
+	var errs []error
+	for _, remote := range s.remotes {
+		cursor, err := s.cursorFrom(ctx, remote, origin)
+		if err == nil {
+			return cursor, nil
+		}
+		errs = append(errs, err)
+		if ctx.Err() != nil {
+			break
+		}
+	}
+	if len(errs) == 0 {
+		errs = append(errs, ErrUnavailable)
+	}
+	return rootrecords.Cursor{}, errors.Join(errs...)
+}
+
+func (s *Source) cursorFrom(ctx context.Context, remote Remote, origin evmroot.RootOriginV2) (rootrecords.Cursor, error) {
+	cut, err := remote.Cut(ctx, origin.RootRound)
 	if err != nil {
 		return rootrecords.Cursor{}, errors.Join(ErrUnavailable, err)
 	}
@@ -108,7 +128,7 @@ func (s *Source) Cursor(ctx context.Context, origin evmroot.RootOriginV2) (rootr
 	if err != nil {
 		return rootrecords.Cursor{}, err
 	}
-	if err := s.extend(ctx, state); err != nil {
+	if err := s.extend(ctx, remote, state); err != nil {
 		return rootrecords.Cursor{}, err
 	}
 	return cursor, nil
@@ -125,7 +145,7 @@ func (s *Source) Record(index uint64) (rootrecords.Record, error) {
 }
 
 // extend verifies the records up to the state's length against its tip and retains them.
-func (s *Source) extend(ctx context.Context, state rootrecords.State) error {
+func (s *Source) extend(ctx context.Context, remote Remote, state rootrecords.State) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if state.Count == 0 {
@@ -144,7 +164,7 @@ func (s *Source) extend(ctx context.Context, state rootrecords.State) error {
 	var staged []rootrecords.Record
 	for next := uint64(len(s.log)); next < state.Count; {
 		want := min(state.Count-next, MaxBatch)
-		batch, err := s.remote.Records(ctx, next, int(want))
+		batch, err := remote.Records(ctx, next, int(want))
 		if err != nil {
 			return errors.Join(ErrUnavailable, err)
 		}

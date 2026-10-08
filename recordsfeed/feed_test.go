@@ -12,6 +12,7 @@ import (
 	"github.com/unicitynetwork/bft-go-base/types"
 
 	"github.com/unicitynetwork/bft-core/evmroot"
+	"github.com/unicitynetwork/bft-core/rootinput"
 	"github.com/unicitynetwork/bft-core/rootrecords"
 )
 
@@ -330,7 +331,10 @@ func TestACachedLogThatDisagreesWithTheAuthenticatedTipIsRefused(t *testing.T) {
 	st := b.state
 	st.Tip[0] ^= 1
 	cutB, originB := chain{state: st}.cutOf(t, 201, 9_001)
-	src.remote = &fakeRemote{cut: cutB, records: a.records}
+	src.remotes = []Remote{&fakeRemote{cut: cutB, records: a.records}}
 	_, err = src.Cursor(context.Background(), originB)
 	require.ErrorIs(t, err, ErrAuth)
 }
+
+// The route is what a pair's B1 config consumes.
+var _ rootinput.RecordsSource = (*Source)(nil)

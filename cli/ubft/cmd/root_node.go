@@ -33,6 +33,7 @@ import (
 	"github.com/unicitynetwork/bft-core/observability"
 	"github.com/unicitynetwork/bft-core/q3active"
 	"github.com/unicitynetwork/bft-core/q3delivery"
+	"github.com/unicitynetwork/bft-core/recordsfeed"
 	"github.com/unicitynetwork/bft-core/rootchain"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/frontiertransport"
@@ -40,6 +41,7 @@ import (
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/trustbase"
 	"github.com/unicitynetwork/bft-core/rootchain/partitions"
 	"github.com/unicitynetwork/bft-core/rootchain/poswitness"
+	"github.com/unicitynetwork/bft-core/rootrecords"
 	"github.com/unicitynetwork/bft-core/trustactivation"
 	"github.com/unicitynetwork/bft-core/trusthistorystore"
 )
@@ -348,6 +350,13 @@ func rootNodeRun(ctx context.Context, flags *rootNodeRunFlags) error {
 			return serveErr
 		}
 		defer stopFrontier()
+	}
+	if flags.Profile2 {
+		stopRecords, recErr := serveRootRecords(log, host, cm, shardConfs)
+		if recErr != nil {
+			return recErr
+		}
+		defer stopRecords()
 	}
 	if flags.Profile2 {
 		server, err := handoffdelivery.NewServer(cm)
@@ -768,4 +777,41 @@ func serveWitnesses(host *network.Peer, cm *consensus.ConsensusManager) func() {
 	server := poswitness.NewServer(cm, func(id peer.ID) bool { return slices.Contains(cm.Validators(), id) })
 	host.RegisterProtocolHandler(poswitness.ProtocolID, server.Handler)
 	return func() { host.RemoveProtocolHandler(poswitness.ProtocolID) }
+}
+
+// recordsSource adapts the consensus manager to the records feed's server.
+type recordsSource struct{ cm *consensus.ConsensusManager }
+
+func (s recordsSource) ControlCut(round uint64) (recordsfeed.Cut, error) {
+	cut, err := s.cm.ControlCut(round)
+	if err != nil {
+		return recordsfeed.Cut{}, err
+	}
+	return recordsfeed.Cut{Control: cut.Control, Path: cut.Path}, nil
+}
+
+func (s recordsSource) Records(from uint64, max int) ([]rootrecords.Record, error) {
+	return s.cm.Records(from, max)
+}
+
+// serveRootRecords serves the root's source-log cuts and records to the validators of the shards this root was configured with. The
+// shard pairs an EVM with the root and derives the next prefix of the log from them, verifying everything against the unicity tree
+// root of its certificate, so the service needs no trust in the node it asks.
+func serveRootRecords(log *slog.Logger, host *network.Peer, cm *consensus.ConsensusManager, shardConfs []*types.PartitionDescriptionRecord) (func(), error) {
+	eligible, err := frontierEligiblePeers(shardConfs)
+	if err != nil {
+		return nil, err
+	}
+	if len(eligible) == 0 {
+		log.Warn("root records feed disabled: the configured shards have no usable validator set")
+		return func() {}, nil
+	}
+	allowed := make(map[peer.ID]struct{}, len(eligible))
+	for _, id := range eligible {
+		allowed[id] = struct{}{}
+	}
+	server := recordsfeed.NewServer(recordsSource{cm}, func(id peer.ID) bool { _, ok := allowed[id]; return ok })
+	host.RegisterProtocolHandler(recordsfeed.ProtocolID, server.Handler)
+	log.Info("root records feed enabled", "validators", len(eligible))
+	return func() { host.RemoveProtocolHandler(recordsfeed.ProtocolID) }, nil
 }
