@@ -19,6 +19,7 @@ import (
 
 	"github.com/unicitynetwork/bft-core/internal/testutils/q3fixture"
 	"github.com/unicitynetwork/bft-core/q3active"
+	"github.com/unicitynetwork/bft-core/rootchain/consensus/q4replay"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/q4shim"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/storage"
 	rctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
@@ -274,6 +275,11 @@ type q4bLive struct {
 	chains map[int]map[uint64]q4Block
 	blocks map[int]map[uint64]q4Block
 	faults []error
+	// windows are the progress and stall expectations of the run, judged offline by the replay checker against the frozen deadline;
+	// declared are the names given a Byzantine adapter.
+	windows  []q4replay.Window
+	declared []string
+	report   *q4replay.Report // the replay checker's verdict on the exported run, set by finish
 	// the shim traces of nodes that were closed (a restart makes a new shim; the earlier one's trace stays evidence)
 	retired [][]q4shim.Event
 	retIdx  []int
@@ -549,6 +555,9 @@ func (c *q4bLive) requireRecovery(m q4bMark, n int, names ...string) (first, nth
 		}
 		return true
 	}, time.Until(deadline), 20*time.Millisecond, "%v need %d new commits within %s", names, n, q4bDeadline)
+	c.mu.Lock()
+	c.windows = append(c.windows, q4replay.Window{Name: "recovery", Expect: "progress", Nodes: names, StartMs: m.At.UnixMilli(), MinCommits: n})
+	c.mu.Unlock()
 	for _, name := range names {
 		obs := c.commitsSince(c.idx(name), m)
 		first, nth = max(first, obs[0].At.Sub(m.At)), max(nth, obs[n-1].At.Sub(m.At))
@@ -578,12 +587,16 @@ func (c *q4bLive) requireStalled(names ...string) {
 	for _, n := range names {
 		before[n] = c.state(n)
 	}
+	from := time.Now()
 	time.Sleep(q4bStall)
 	for _, n := range names {
 		after := c.state(n)
 		require.Equal(c.t, before[n].Committed, after.Committed, "%s committed during the stall", n)
 		require.Equal(c.t, before[n].HighQC, after.HighQC, "%s formed or adopted a QC during the stall", n)
 	}
+	c.mu.Lock()
+	c.windows = append(c.windows, q4replay.Window{Name: "stall", Expect: "stall", Nodes: names, StartMs: from.UnixMilli(), EndMs: time.Now().UnixMilli()})
+	c.mu.Unlock()
 }
 
 // requireChainsAgree: no two nodes committed different blocks for a common round, and the observer itself saw no conflict.
@@ -698,6 +711,10 @@ func (c *q4bLive) finish(malformed ...uint64) q4Trace {
 	require.NotEmpty(c.t, tr)
 	got := tr.Malformed(views)
 	require.ElementsMatch(c.t, malformed, got, "the oracle flags exactly the injected malformed sends")
+	c.report = c.export(tr, len(malformed))
+	if len(c.declared) == 0 {
+		require.NoError(c.t, c.report.ExpectEquivocators(), "the checker finds no equivocator in a run with no Byzantine adapter")
+	}
 	return tr
 }
 

@@ -39,6 +39,9 @@ func (c *q4bLive) heal(rule string, names ...string) {
 
 func (c *q4bLive) byzantine(variant string, byz []string, recipients []string) {
 	c.t.Helper()
+	c.mu.Lock()
+	c.declared = append(c.declared, byz...)
+	c.mu.Unlock()
 	for _, b := range byz {
 		require.NoError(c.t, c.nodes[c.idx(b)].shim.SetEquivocations([]q4shim.Equivocation{{Name: "byz", Recipients: c.ids(recipients...), Variant: variant, Require: true}}))
 	}
@@ -78,6 +81,7 @@ func (c *q4bLive) requireEquivocators(tr q4Trace, names ...string) {
 		have = append(have, a)
 	}
 	require.ElementsMatch(c.t, want, have, "exactly the declared Byzantine authors equivocated")
+	require.NoError(c.t, c.report.ExpectEquivocators(names...), "the offline checker, from the bytes, finds the same equivocators")
 }
 
 type q4bRow struct {
@@ -141,6 +145,9 @@ func stallRow(fault func(c *q4bLive), stalled func(c *q4bLive) []string, heal fu
 func TestQ4BLiveA(t *testing.T) {
 	rows := []q4bRow{
 		{"no-fault control", func(t *testing.T, c *q4bLive) {
+			for _, n := range c.nodes {
+				requireWeightedEpoch(t, n.r, 2, n.r.manager.epochAnchor.Slot+1) // the 6,1,1,1 schedule is asserted here, not inherited from the Q3 tests
+			}
 			c.start(c.all()...)
 			c.warm(3, c.all()...)
 			c.requireRecovery(c.mark(), q4RecoverRound, c.all()...)
