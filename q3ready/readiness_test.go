@@ -26,14 +26,17 @@ func (s stubExec) Report(context.Context) (ExecutionReport, error) { return s.r,
 
 var pinned = ExecutionPin{GenesisHash: fb(0x31), CodeHash: fb(0x32)}
 
-func goodExec() ExecutionReport { return ExecutionReport{GenesisHash: fb(0x31), CodeHash: fb(0x32)} }
+// goodExec is the pinned identity read on the authenticated pair connection, bound to the receipt context's network and root genesis.
+func goodExec(rc q3format.ReceiptContext) ExecutionReport {
+	return ExecutionReport{GenesisHash: fb(0x31), CodeHash: fb(0x32), Authenticated: true, PairNetwork: rc.Network, PairGenesis: rc.Genesis}
+}
 
 func goodService(rc q3format.ReceiptContext) ServiceReport {
 	return ServiceReport{Network: rc.Network, Genesis: rc.Genesis, Staged: rc.CandidateDigest, StagedBody: rc.BodyID, StagedAttempt: rc.Attempt, StagedConfig: rc.Config}
 }
 
 func goodEntity(rc q3format.ReceiptContext, id string) Entity {
-	return Entity{NodeID: id, BFT: stubService{r: goodService(rc)}, Authority: stubService{r: goodService(rc)}, Execution: stubExec{r: goodExec()}}
+	return Entity{NodeID: id, BFT: stubService{r: goodService(rc)}, Authority: stubService{r: goodService(rc)}, Execution: stubExec{r: goodExec(rc)}}
 }
 
 func TestAttest(t *testing.T) {
@@ -49,7 +52,7 @@ func TestAttest(t *testing.T) {
 		return stubService{r: s}
 	}
 	exec := func(mut func(*ExecutionReport)) Execution {
-		x := goodExec()
+		x := goodExec(rc)
 		mut(&x)
 		return stubExec{r: x}
 	}
@@ -86,9 +89,12 @@ func TestAttest(t *testing.T) {
 		f    func(*ExecutionReport)
 		want error
 	}{
-		"other genesis": {func(x *ExecutionReport) { x.GenesisHash = fb(0x77) }, ErrExecutionIdentity},
-		"other code":    {func(x *ExecutionReport) { x.CodeHash = fb(0x78) }, ErrExecutionIdentity},
-		"no identity":   {func(x *ExecutionReport) { x.GenesisHash, x.CodeHash = nil, nil }, ErrExecutionIdentity},
+		"other genesis":                          {func(x *ExecutionReport) { x.GenesisHash = fb(0x77) }, ErrExecutionIdentity},
+		"other code":                             {func(x *ExecutionReport) { x.CodeHash = fb(0x78) }, ErrExecutionIdentity},
+		"no identity":                            {func(x *ExecutionReport) { x.GenesisHash, x.CodeHash = nil, nil }, ErrExecutionIdentity},
+		"pins read on the plain connection only": {func(x *ExecutionReport) { x.Authenticated = false }, ErrComponent},
+		"pair bound to another network":          {func(x *ExecutionReport) { x.PairNetwork++ }, ErrComponent},
+		"pair bound to another root genesis":     {func(x *ExecutionReport) { x.PairGenesis = fill(0x59) }, ErrComponent},
 	} {
 		e := goodEntity(rc, "n1")
 		e.Execution = exec(mut.f)
@@ -135,16 +141,16 @@ func TestAttestChecksTheTupleItSigns(t *testing.T) {
 }
 
 func TestExecutionPinNeedsLocalPins(t *testing.T) {
-	require.NoError(t, pinned.Check(goodExec()), "acceptance control")
+	require.NoError(t, pinned.Check(goodExec(q3format.ReceiptContext{})), "acceptance control")
 	for name, w := range map[string]ExecutionPin{
 		"no genesis pin": {CodeHash: fb(0x32)},
 		"no code pin":    {GenesisHash: fb(0x31)},
 		"no pin":         {},
 	} {
-		r := goodExec()
+		r := goodExec(q3format.ReceiptContext{})
 		r.GenesisHash, r.CodeHash = nil, nil // an empty report must not match an empty pin
 		require.ErrorIs(t, w.Check(r), ErrExecutionIdentity, name)
-		require.ErrorIs(t, w.Check(goodExec()), ErrExecutionIdentity, name+" with a full report")
+		require.ErrorIs(t, w.Check(goodExec(q3format.ReceiptContext{})), ErrExecutionIdentity, name+" with a full report")
 	}
 }
 

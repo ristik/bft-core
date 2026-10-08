@@ -111,6 +111,7 @@ q3_readiness() { # entity out: a receipt for the staged candidate, or the typed 
   local i=$1 out=$2
   q3_x build/ubft root handoff q3-readiness --candidate "$Q3_DIR/candidate${Q3_SUFFIX:-}.cbor" --key-conf "test-nodes/root$i/keys.json" \
     --root-rpc "$(h3_rpc_url "$i")" --shard-rpc "http://$(evm_validator_rpc_addr "$i")" --eth-url "http://127.0.0.1:$((rethEthBase + i - 1))" \
+    --engine-url "http://127.0.0.1:$((rethEngineBase + i - 1))" --jwt-secret "test-nodes/evm$i/jwt.hex" \
     --execution-genesis-hash "$Q3_EXEC_GENESIS" --execution-code-hash "$Q3_EXEC_CODE_HASH" --out "$out"
 }
 q3_engine_url() { echo "http://127.0.0.1:$((rethEngineBase + $1 - 1))"; }

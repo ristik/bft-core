@@ -726,6 +726,22 @@ func (x *ConsensusManager) verifyApprovalAssignment(msg *abdrc.HandoffApprovalMs
 	return c, nil
 }
 
+// verifyPlanReceipts checks the readiness evidence of a V3 plan. An exact recovery K (the verified binding of its candidate preimage has
+// established the kind and exactly K) carries no receipts: collecting a new all-member certificate would give the unavailable minority a
+// veto. Every other plan needs the full receipt set.
+func (x *ConsensusManager) verifyPlanReceipts(body, receipts []byte, attempt uint64, candidate []byte, exactRecovery bool) error {
+	if exactRecovery {
+		if len(receipts) != 0 {
+			return errors.Join(ErrHandoffApproval, errors.New("an exact recovery carries no readiness receipts"))
+		}
+		return nil
+	}
+	if err := x.q3.FreezeRules().VerifyReceipts(body, receipts, attempt, candidate); err != nil {
+		return errors.Join(ErrHandoffApproval, err)
+	}
+	return nil
+}
+
 // checkPlanBody is everything about a plan, an unsigned intent or a signed approval alike, that needs neither a signature nor EVM
 // state: the body against this chain's epoch and predecessor, the candidate preimage, and the summaries that tie the body to the
 // attempt and the candidate. Nothing in it names a frozen parent: the root binds that at the Prepare.
@@ -750,7 +766,8 @@ func (x *ConsensusManager) checkPlanBody(msg *abdrc.HandoffApprovalMsg) (planBod
 	if err != nil {
 		return body, nil, err
 	}
-	if _, err := x.verifyApprovalAssignment(msg, body, predecessor, old); err != nil {
+	cand, err := x.verifyApprovalAssignment(msg, body, predecessor, old)
+	if err != nil {
 		return body, nil, err
 	}
 	if !bytes.Equal(body.predecessorHash, link) ||
@@ -760,8 +777,8 @@ func (x *ConsensusManager) checkPlanBody(msg *abdrc.HandoffApprovalMsg) (planBod
 	}
 	// V3 readiness: every successor member declared itself ready for exactly this body, attempt and candidate; a V2 plan carries none
 	if body.version == 3 {
-		if err := x.q3.FreezeRules().VerifyReceipts(msg.Body, msg.Receipts, msg.Attempt, msg.Candidate); err != nil {
-			return body, nil, errors.Join(ErrHandoffApproval, err)
+		if err := x.verifyPlanReceipts(msg.Body, msg.Receipts, msg.Attempt, msg.Candidate, len(msg.CandidatePreimage) != 0 && cand.Kind == evmassign.KindRecovery); err != nil {
+			return body, nil, err
 		}
 	} else if len(msg.Receipts) != 0 {
 		return body, nil, ErrHandoffApproval

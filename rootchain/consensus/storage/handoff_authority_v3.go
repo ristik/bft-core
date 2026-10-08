@@ -129,16 +129,28 @@ func (a *v1HandoffAuthority) verifyFreezeV3(r evmroot.OrderedHandoffRecord, proo
 		!bytes.Equal(body.ID[:], r.NextBodyID) {
 		return nil, freezeV3Refused(ErrFreezeV3Context, nil)
 	}
+	exactRecovery := false
 	if len(proof.Preimage) != 0 {
 		ctx := evmassign.BindingContext{Digest: proof.Candidate, ControlPartition: evmroot.D4ControlPartition,
 			PoPContext: evmassign.PoPContext{Network: r.Network, Attempt: r.Attempt}, Rules: weightvalidation.EVMRules(weightvalidation.ModeWeighted)}
 		copy(ctx.Predecessor[:], r.PredecessorBodyID)
 		ctx.SuccessorRoot = append(ctx.SuccessorRoot, body.Members...)
-		if _, _, err := evmassign.VerifyBinding(proof.Preimage, ctx); err != nil {
+		cand, _, err := evmassign.VerifyBinding(proof.Preimage, ctx)
+		if err != nil {
 			return nil, freezeV3Refused(ErrFreezeV3Binding, err)
 		}
+		// The exemption of an exact recovery K: the verified binding has already established the kind (no fresh proofs, the replaced
+		// assignment, exactly the authorized K) and that the body names exactly its root members. Readiness is an accountable declaration,
+		// not a safety input, and collecting a new all-member certificate would give the unavailable minority a veto, so a recovery carries
+		// none; the lifecycle rules (incumbent, lineage, one-shot allowance) are checked at the same admission. A primary, or a companion
+		// without a preimage, needs the full receipt set.
+		exactRecovery = cand.Kind == evmassign.KindRecovery
 	}
-	if err := a.v3.VerifyReceipts(proof.Body, proof.Receipts, r.Attempt, proof.Candidate); err != nil {
+	if exactRecovery {
+		if len(proof.Receipts) != 0 {
+			return nil, freezeV3Refused(ErrFreezeV3Receipts, errors.New("an exact recovery carries no readiness receipts"))
+		}
+	} else if err := a.v3.VerifyReceipts(proof.Body, proof.Receipts, r.Attempt, proof.Candidate); err != nil {
 		return nil, freezeV3Refused(ErrFreezeV3Receipts, err)
 	}
 	message, err := EndorsementBytes(r)

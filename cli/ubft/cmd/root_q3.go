@@ -133,11 +133,12 @@ type rootQ3StageRequest struct {
 	Body      hex.Bytes `json:"body"`
 	Candidate hex.Bytes `json:"candidate"`
 	Attempt   uint64    `json:"attempt"`
+	Preimage  hex.Bytes `json:"preimage,omitempty"` // the coupled candidate's canonical preimage; empty for a root-only change
 }
 
 // rootQ3StageHandler stages a candidate on this validator.
 func rootQ3StageHandler(operator interface {
-	StageV3Candidate(body []byte, candidate [32]byte, attempt uint64) error
+	StageV3Candidate(body []byte, candidate [32]byte, attempt uint64, preimage []byte) error
 }) http.HandlerFunc {
 	return q3Endpoint(func(_ context.Context, raw json.RawMessage) (any, error) {
 		var req rootQ3StageRequest
@@ -149,7 +150,7 @@ func rootQ3StageHandler(operator interface {
 		}
 		var digest [32]byte
 		copy(digest[:], req.Candidate)
-		if err := operator.StageV3Candidate(req.Body, digest, req.Attempt); err != nil {
+		if err := operator.StageV3Candidate(req.Body, digest, req.Attempt, req.Preimage); err != nil {
 			return nil, err
 		}
 		return struct{}{}, nil

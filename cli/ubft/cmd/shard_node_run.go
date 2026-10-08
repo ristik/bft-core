@@ -958,6 +958,10 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 					if err := noteJoinerStep(signing, bundle, step, node.ShardConfForEpoch); err != nil {
 						return err
 					}
+					// a staging-only joiner that this verified activation names becomes a signer now, not at its next restart
+					if err := bindInstalledJoinerKey(signing); err != nil {
+						return err
+					}
 					transition, err := handoff.TransitionFromInstalledAnchor(bundle.Proof, old, bundle.Body, anchor, verified.Shard.IRTR, step)
 					if err != nil {
 						return err
@@ -1363,7 +1367,14 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 	g.Go(func() error { return node.Run(gctx) })
 	var laneEndpoints []func(*http.ServeMux)
 	if q3rt != nil {
-		laneEndpoints = append(laneEndpoints, (&shardQ3Staging{cfg: q3rt.ProtocolConfig}).register)
+		laneEndpoints = append(laneEndpoints, (&shardQ3Staging{cfg: q3rt.ProtocolConfig, self: peer.ID().String(), tip: func() (uint64, uint64, [32]byte, error) {
+			h := q3rt.History()
+			if h == nil {
+				return 0, 0, [32]byte{}, ErrQ3StageChain
+			}
+			t := h.Tip()
+			return t.Epoch(), t.Version(), t.BodyID(), nil
+		}}).register)
 	}
 	g.Go(func() error { return serveShardNodeRPC(gctx, flags, node, readOperatorStatus, laneEndpoints...) })
 	if handoffFollower != nil {
