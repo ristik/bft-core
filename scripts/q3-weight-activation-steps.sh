@@ -311,7 +311,7 @@ q3_real_tc() {
 # keeps timing out (it signs timeout votes) but no timeout certificate forms and no root round commits. With ONE light root back the weight is 7 =
 # Q and the chain commits again, so 6 fails and 7 passes at the same boundary.
 q3_root_boundary() {
-  local root1=test-nodes/root1/debug.log mark settled end i signed
+  local root1=test-nodes/root1/debug.log mark settled end i signed timeouts
   mark=$(wc -l <"$root1")
   for i in 2 3 4; do stop_pidfile "test-nodes/root$i/pid" 'ubft root-node run' KILL; done
   sleep 12     # what was in flight commits or dies out; the chain is then stuck
@@ -319,10 +319,12 @@ q3_root_boundary() {
   sleep 40     # four local timeouts (10 s each) of the heavy root alone
   end=$(q3_signers_of 1 | jq -r .round)
   signed=$(tail -n +"$((mark + 1))" "$root1" | grep -ac 'msg="signed timeout vote"')
-  { echo "heavy root alone (weight 6 of 9, quorum 7)"; echo "last committed round after settling: $settled; after 40 s more: $end"; echo "timeout votes signed by the heavy root: $signed"
+  timeouts=$(tail -n +"$((mark + 1))" "$root1" | grep -ac 'msg="local timeout"')
+  { echo "heavy root alone (weight 6 of 9, quorum 7)"; echo "last committed round after settling: $settled; after 40 s more: $end"; echo "timeout votes signed by the heavy root: $signed (re-broadcast at each of its $timeouts local timeouts)"
     echo "timeout certificates formed: $(tail -n +"$((mark + 1))" "$root1" | grep -ac 'timeout quorum for round')"; } >"$Q3_DIR/root-boundary.txt"
   [ "$end" = "$settled" ] || { echo "the heavy root alone committed rounds ($settled -> $end): weight 6 formed a certificate" >&2; return 1; }
-  [ "$signed" -ge 2 ] || { echo "the heavy root signed $signed timeout votes in 40 s: it was not running its rounds" >&2; return 1; }
+  # it signs its timeout vote once for the stuck round and sends the same vote again at every local timeout
+  [ "$signed" -ge 1 ] && [ "$timeouts" -ge 3 ] || { echo "the heavy root signed $signed timeout votes with $timeouts local timeouts in 52 s: it was not running its rounds" >&2; return 1; }
   [ "$(tail -n +"$((mark + 1))" "$root1" | grep -ac 'timeout quorum for round')" = 0 ] || { echo "a timeout certificate formed from weight 6" >&2; return 1; }
   # one light root back: 6 + 1 = 7 >= Q
   m2_start_root 2 2 "$(m2_root_addr 1)" || return 1
