@@ -16,13 +16,14 @@ import (
 	"github.com/unicitynetwork/bft-go-base/types"
 
 	"github.com/unicitynetwork/bft-core/evmassign"
+	"github.com/unicitynetwork/bft-core/internal/weightcap"
 )
 
 const (
-	// MaxMemberWeight bounds one EVM member's weight, 2^40.
-	MaxMemberWeight uint64 = 1 << 40
-	// MaxTotalWeight bounds the total weight of an EVM request context, 2^48.
-	MaxTotalWeight uint64 = 1 << 48
+	// MaxMemberWeight bounds one EVM member's weight; MaxTotalWeight the total weight of an EVM request context. Both are the one
+	// profile bound B (internal/weightcap).
+	MaxMemberWeight uint64 = weightcap.B
+	MaxTotalWeight  uint64 = weightcap.B
 )
 
 var (

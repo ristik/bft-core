@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"log/slog"
 	"maps"
+	"math"
 	"slices"
 	"sync"
 	"sync/atomic"
@@ -624,7 +625,7 @@ func (x *ConsensusManager) handlePacemakerEvent(ctx context.Context, event paceM
 
 	switch event {
 	case pmsRoundMatured:
-		nextLeader, err := x.leaderSelector.GetLeaderForRound(currentRound + 1)
+		nextLeader, err := x.leaderAfter(currentRound)
 		if err != nil {
 			x.log.WarnContext(ctx, "could not determine next leader", logger.Error(err))
 		}
@@ -740,7 +741,7 @@ func (x *ConsensusManager) onPartitionIRChangeReq(ctx context.Context, req *IRCh
 		return fmt.Errorf("invalid IR change request from partition %s: unknown reason %v", irReq.Partition, req.Reason)
 	}
 
-	nextLeader, err := x.leaderSelector.GetLeaderForRound(x.pacemaker.GetCurrentRound() + 1)
+	nextLeader, err := x.leaderAfter(x.pacemaker.GetCurrentRound())
 	if err != nil {
 		return fmt.Errorf("failed to get next leader to forward IR change request: %w", err)
 	}
@@ -860,7 +861,7 @@ func (x *ConsensusManager) onIRChangeMsg(ctx context.Context, irChangeMsg *abdrc
 	if err := x.refuseFrozenIR(irChangeMsg.IrChangeReq); err != nil {
 		return err
 	}
-	nextLeader, err := x.leaderSelector.GetLeaderForRound(x.pacemaker.GetCurrentRound() + 1)
+	nextLeader, err := x.leaderAfter(x.pacemaker.GetCurrentRound())
 	if err != nil {
 		return fmt.Errorf("failed to get next leader to forward IR change request: %w", err)
 	}
@@ -977,13 +978,12 @@ func (x *ConsensusManager) onVoteMsg(ctx context.Context, vote *abdrc.VoteMsg) e
 
 	// Normal votes are only sent to the next leader (timeout votes are broadcast) is it us?
 	// NB! we assume vote.VoteInfo.RoundNumber == x.pacemaker.GetCurrentRound() but it also could be that VVR > CR+1
-	nextRound := vote.VoteInfo.RoundNumber + 1
-	nextLeader, err := x.leaderSelector.GetLeaderForRound(nextRound)
+	nextLeader, err := x.leaderAfter(vote.VoteInfo.RoundNumber)
 	if err != nil {
-		return fmt.Errorf("could not determine leader for round %d: %w", nextRound, err)
+		return fmt.Errorf("could not determine leader for the round after %d: %w", vote.VoteInfo.RoundNumber, err)
 	}
 	if nextLeader != x.id {
-		return fmt.Errorf("validator is not the leader for round %d", nextRound)
+		return fmt.Errorf("validator is not the leader for the round after %d", vote.VoteInfo.RoundNumber)
 	}
 
 	qc, mature, err := x.pacemaker.RegisterVote(vote, x.voteQuorumInfo())
@@ -1194,7 +1194,7 @@ func (x *ConsensusManager) onProposalMsg(ctx context.Context, proposal *abdrc.Pr
 		x.log.WarnContext(ctx, "vote store failed", logger.Error(err))
 	}
 	x.pacemaker.SetVoted(voteMsg)
-	nextLeader, err := x.leaderSelector.GetLeaderForRound(x.pacemaker.GetCurrentRound() + 1)
+	nextLeader, err := x.leaderAfter(x.pacemaker.GetCurrentRound())
 	if err != nil {
 		return fmt.Errorf("could not determine next leader to send vote: %w", err)
 	}
@@ -1375,6 +1375,20 @@ func (x *ConsensusManager) replayVoteBuffer(ctx context.Context) {
 // processNewRoundEvent handled new view event, is called when either QC or TC is reached locally and
 // triggers a new round. If this node is the leader in the new view/round, then make a proposal otherwise
 // wait for a proposal from a leader in this round/view
+// errRoundOverflow is returned when the successor of a round does not exist in uint64.
+var errRoundOverflow = errors.New("round has no successor")
+
+// leaderAfter is the leader of the round after the given one. The successor is overflow-checked before the lookup, so a round at the top
+// of the space is refused instead of wrapping to round 0. The lookup itself is O(1), read-only and allocation-free (the weighted selector
+// is a period table), so it needs no further guard; the selector asked is always the current epoch's, which is built only from verified
+// context.
+func (x *ConsensusManager) leaderAfter(round uint64) (peer.ID, error) {
+	if round == math.MaxUint64 {
+		return "", errRoundOverflow
+	}
+	return x.leaderSelector.GetLeaderForRound(round + 1)
+}
+
 func (x *ConsensusManager) processNewRoundEvent(ctx context.Context) {
 	ctx, span := x.tracer.Start(ctx, "ConsensusManager.processNewRoundEvent")
 	defer span.End()
@@ -1720,7 +1734,7 @@ func (x *ConsensusManager) onStateResponse(ctx context.Context, rsp *abdrc.State
 		x.log.InfoContext(ctx, "signed vote", "round", prop.Block.Round, "messageID", voteMessageID(voteMsg))
 		x.pacemaker.SetVoted(voteMsg)
 		// send vote to the next leader
-		nextLeader, err := x.leaderSelector.GetLeaderForRound(x.pacemaker.GetCurrentRound() + 1)
+		nextLeader, err := x.leaderAfter(x.pacemaker.GetCurrentRound())
 		if err != nil {
 			return fmt.Errorf("could not determine next leader to send vote after recovery: %w", err)
 		}
