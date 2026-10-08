@@ -66,6 +66,7 @@ func newEngineAPICmd(baseFlags *baseFlags) *cobra.Command {
 	cmd.AddCommand(engineAPIGenesisCmd(baseFlags))
 	cmd.AddCommand(engineAPIExportManifestCmd())
 	cmd.AddCommand(engineAPIB1ProfileCmd(baseFlags))
+	cmd.AddCommand(engineAPICheckElectGasCmd())
 	return cmd
 }
 
