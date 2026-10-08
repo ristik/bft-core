@@ -9,23 +9,24 @@ timing and query-cost gates, the focused CI job and the acceptance-report genera
 |---|---|---|
 | Replay bundle and checker | `rootchain/consensus/q4replay`, `cmd/q4replay` | Every deterministic Q4-A/Q4-B row ends by exporting its run (epoch membership with keys and weights, the full serialized message trace, the committed chains, the progress and stall windows with the frozen deadline) and handing the file to the checker. The checker recomputes class, epoch, round, author and signed statement of every message from its bytes, verifies every signature (scheme 1 and the scheme 2 domain-bound statements), weighs the QCs a proposal carries, derives the equivocator set, checks chain agreement across nodes and recomputes the progress and stall windows against the frozen deadline. It reads no live counter and does not use the production quorum accumulator or the selector. `Q4_EXPORT_DIR=<dir>` keeps the bundles; `go run ./cmd/q4replay check [-equivocators a,b] <bundle.json>` re-checks one. |
 | Leader-lookup call-site audit | `TestQ4LookupCallSites` | Every production call of `GetLeaderForRound` is in an audited table with the source of its round (own pacemaker round, a constant, or a message). A round a message supplies must be justified by authenticated evidence before the lookup; the two such routes (vote, proposal) name their prerequisite and the tests that exercise it. A new caller fails the test until it is audited. |
-| Query-cost gate | `rootchain/consensus/leader/q4_cost_gate_test.go` | Frozen supported envelope and budgets (below). CI runs the cheap profile; `Q4_COST_FULL=1 Q4_COST_OUT=cost.json` runs the whole envelope and measures the distance beyond it. |
+| Query-cost gate | `rootchain/consensus/leader/q4_cost_gate_test.go` | Frozen envelope and budgets (below); every mandatory row is asserted, in CI too (the rows take seconds). `Q4_COST_OUT=cost.json` keeps the measurements. |
 | T2 boundary | `TestQ4T2Gate` | Eligible exactly at `elapsed >= uint64(T2/(BlockRate/2))+1`, one round below not, three shards with T2 2.5/5/7.5 s independent. |
 | CI | `.github/workflows/q4-gates.yml` | Tagged build and vet, the deterministic rows above, the race run of shim/checker/report, the matrix consistency check, the cost gate CI profile and the live lane's `--dry-run`. The live lane is not run in CI. |
 | Acceptance report | `cmd/q4report`, `docs/pos/q4-acceptance-matrix.json` | Maps every mandatory matrix row to evidence that passed or to an explicit gap. |
 
-## Frozen query-cost envelope (2026-10-08, before acceptance)
+## Query-cost envelope (bounded lookup)
 
-Supported: committee up to 100 members, weights up to 2^40, a cold restart, catch-up jump or old uncached query up to **100,000**
-rounds past the epoch start or the cache (about 28 hours of epoch at 1 s rounds).
+The weighted leader schedule is periodic with period W/gcd(weights), so with the total committed weight bounded by one profile constant
+**B = 65,536** (`internal/weightcap`, enforced at every admission point before a weight commits) the selector holds one immutable period
+table of at most 64 KiB, built once from verified context in at most n*B steps; a lookup is O(1), read-only and allocation-free.
 
-Budget: one lookup at the envelope takes at most **2 s** (the consensus loop is blocked for it), no concurrent caller waits longer behind
-it, and a lookup allocates at most 512 KiB and 2,048 objects. Budgets scale linearly with the distance for smaller profiles (20 us per
-round), so the CI profile (n=100, d=10,000: 200 ms) keeps the same per-round budget.
-
-A distance beyond 100,000 rounds is not supported and is never passed: the full profile measures it and the report prints it. Nothing in
-production bounds the epoch length or a jump to the envelope, and no checkpoint or accelerated lookup exists, so this is a release
-prerequisite owned by separate work (#489 left it unscoped), not a waived gate.
+Supported: committees of up to 100 members, total weight up to B, every round from the epoch start to `math.MaxUint64`.
+Budget: constructor plus lookup at most **2 s**, no concurrent caller waits longer, at most 512 KiB and 2,048 allocations. These are the
+budgets frozen before the change and are not widened. `TestQ4QueryCostGate` asserts every mandatory row (n=100 at d=10^6, d~6x10^5, near
+MaxUint64, worst-period inputs; cold restart, old query, eight synchronized concurrent callers, rebuild after cache eviction); none is
+measured-only. The before-change baseline (the replaying selector: 2.0 s on the Q4-C host and 4.0 s on the #489 host at n=100, d=10^6,
+growing with d, blocking every concurrent caller; its test weights exceeded the committed-weight cap that now applies) is kept as a
+recorded constant, not re-run.
 
 ## Producing the acceptance report
 
@@ -34,7 +35,7 @@ mkdir -p out/bundles
 export Q4_EXPORT_DIR=$PWD/out/bundles   # absolute: go test runs in each package directory
 go test -json -count=1 ./rootchain/... ./cli/ubft/cmd/ ./cmd/... -timeout 60m \
   -run '^(TestQ4|TestQ3|TestMessageRounds|TestWeighted|TestSkewedWeight|TestTwoRestarted|TestProductionBuild|TestT2|TestPartitionTimeout|TestPacemaker|TestVoteRegister|TestOldForm|TestInstallVerified|TestNoSignature|TestCheck)' > out/tests.json
-Q4_COST_FULL=1 Q4_COST_OUT="$PWD/out/cost.json" go test -count=1 ./rootchain/consensus/leader/ -run Q4
+Q4_COST_OUT="$PWD/out/cost.json" go test -count=1 ./rootchain/consensus/leader/ -run Q4
 go run ./cmd/q4report -matrix docs/pos/q4-acceptance-matrix.json -tests out/tests.json -bundles out/bundles -cost out/cost.json -out out/report.md -json out/report.json
 ```
 

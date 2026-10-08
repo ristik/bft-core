@@ -234,21 +234,22 @@ func TestBodyValidation(t *testing.T) {
 		body BodyV3
 		want error
 	}{
-		"epoch 1":              {mutate(func(c *BodyV3) { c.Epoch = 1 }), ErrBody},
-		"no A_min":             {mutate(func(c *BodyV3) { c.EarliestActivation = 0 }), ErrBody},
-		"short predecessor":    {mutate(func(c *BodyV3) { c.PredecessorHash = fill(1)[:31] }), ErrBody},
-		"tuple network":        {mutate(func(c *BodyV3) { c.Config = Q3Config(6, arr32(7)) }), ErrBody},
-		"tuple value":          {mutate(func(c *BodyV3) { c.Config.SigningScheme = 1 }), ErrConfig},
-		"threshold low":        {mutate(func(c *BodyV3) { c.RootThreshold = 6 }), ErrBody},
-		"threshold high":       {mutate(func(c *BodyV3) { c.RootThreshold = 8 }), ErrBody},
-		"zero weight":          {mutate(func(c *BodyV3) { c.Members[1].Weight = 0; c.RootThreshold = 6 }), ErrBody},
-		"weight above cap":     {mutate(func(c *BodyV3) { c.Members[0].Weight = evmroot.MaxMemberWeight + 1 }), ErrBody},
-		"duplicate key":        {mutate(func(c *BodyV3) { c.Members[1].ConsensusKey = c.Members[2].ConsensusKey }), ErrBody},
-		"key off the curve":    {mutate(func(c *BodyV3) { c.Members[1].ConsensusKey = append([]byte{2}, fill(0xff)...) }), ErrBody},
-		"empty members":        {mutate(func(c *BodyV3) { c.Members = nil }), ErrBody},
-		"too many members":     {mutate(func(c *BodyV3) { c.Members = make(evmroot.WeightSet, MaxMembers+1) }), ErrTooLarge},
-		"duplicate node id":    {mutate(func(c *BodyV3) { c.Members[1].NodeID = c.Members[0].NodeID }), ErrBody},
-		"duplicate staking id": {mutate(func(c *BodyV3) { c.Members[1].StakingID = c.Members[0].StakingID }), ErrBody},
+		"epoch 1":                             {mutate(func(c *BodyV3) { c.Epoch = 1 }), ErrBody},
+		"no A_min":                            {mutate(func(c *BodyV3) { c.EarliestActivation = 0 }), ErrBody},
+		"short predecessor":                   {mutate(func(c *BodyV3) { c.PredecessorHash = fill(1)[:31] }), ErrBody},
+		"tuple network":                       {mutate(func(c *BodyV3) { c.Config = Q3Config(6, arr32(7)) }), ErrBody},
+		"tuple value":                         {mutate(func(c *BodyV3) { c.Config.SigningScheme = 1 }), ErrConfig},
+		"threshold low":                       {mutate(func(c *BodyV3) { c.RootThreshold = 6 }), ErrBody},
+		"threshold high":                      {mutate(func(c *BodyV3) { c.RootThreshold = 8 }), ErrBody},
+		"zero weight":                         {mutate(func(c *BodyV3) { c.Members[1].Weight = 0; c.RootThreshold = 6 }), ErrBody},
+		"weight above cap":                    {mutate(func(c *BodyV3) { c.Members[0].Weight = evmroot.MaxMemberWeight + 1 }), ErrBody},
+		"total above B, each member in range": {mutate(func(c *BodyV3) { c.Members[0].Weight = evmroot.MaxTotalWeight }), ErrBody},
+		"duplicate key":                       {mutate(func(c *BodyV3) { c.Members[1].ConsensusKey = c.Members[2].ConsensusKey }), ErrBody},
+		"key off the curve":                   {mutate(func(c *BodyV3) { c.Members[1].ConsensusKey = append([]byte{2}, fill(0xff)...) }), ErrBody},
+		"empty members":                       {mutate(func(c *BodyV3) { c.Members = nil }), ErrBody},
+		"too many members":                    {mutate(func(c *BodyV3) { c.Members = make(evmroot.WeightSet, MaxMembers+1) }), ErrTooLarge},
+		"duplicate node id":                   {mutate(func(c *BodyV3) { c.Members[1].NodeID = c.Members[0].NodeID }), ErrBody},
+		"duplicate staking id":                {mutate(func(c *BodyV3) { c.Members[1].StakingID = c.Members[0].StakingID }), ErrBody},
 	} {
 		require.ErrorIs(t, tc.body.Validate(), tc.want, name)
 	}
