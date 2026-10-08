@@ -285,22 +285,23 @@ q3_real_tc() {
 
 q3_ids() { grep -aoE 'messageID=[0-9a-f]+' | sort -u; }
 
-# The heavy-validator crash across E. Heavy (6) + root 2 (1) are SIGKILLed together once the heavy root has signed a timeout: the remaining weight
-# is 2 < 7, so the root halts. Both restart; the safety module must recover the ORIGINAL message (its identity is the SHA-256 of the exact signed
+# The heavy-validator crash across E. The three light roots are SIGKILLed first, so the heavy root (6 < 7) alone cannot form a timeout certificate and
+# its signed timeout vote reaches no one; it is SIGKILLed right after signing (a kill that only waits for the log line races the 40 ms broadcast to the
+# lights, whose own votes would complete a certificate and consume the vote: run 23). The lights and then the heavy restart; the safety module must recover the ORIGINAL message (its identity is the SHA-256 of the exact signed
 # statement) and rebroadcast it, the TC must form, and commits must resume. No orderly stop and no retry of the module alone. Only the TIMEOUT is
 # observable: a recovered signed vote has no identified log line.
 q3_heavy_crash() {
   local root1=test-nodes/root1/debug.log signed recovered rebroadcast i mark
   mark=$(wc -l <"$root1")
-  stop_pidfile test-nodes/root2/pid 'ubft root-node run' KILL          # a light root away: timeouts begin when it would lead
+  for i in 2 3 4; do stop_pidfile "test-nodes/root$i/pid" 'ubft root-node run' KILL; done   # the lights away: the heavy root cannot complete a certificate alone
   q3_wait_grep_since 180 "$root1" "$mark" "$(q3_pat "$Q3_PAT_SIGNED_TIMEOUT" 2)" || return 1
   stop_pidfile test-nodes/root1/pid 'ubft root-node run' KILL          # the heavy root dies right after signing
   signed=$(tail -n +"$((mark + 1))" "$root1" | grep -aE "$(q3_pat "$Q3_PAT_SIGNED_TIMEOUT" 2)" | q3_ids)
   [ -n "$signed" ] || { echo "no signed timeout identity to compare against" >&2; return 1; }
   printf '%s\n' "$signed" >"$Q3_DIR/signed-before-crash.txt"
   mark=$(wc -l <"$root1")
+  for i in 2 3 4; do m2_start_root "$i" 2 "$(m2_root_addr 1)" || return 1; done
   m2_start_root 1 2 "$(m2_root_addr 3)" || return 1
-  m2_start_root 2 2 "$(m2_root_addr 3)" || return 1
   q3_wait_grep_since 120 "$root1" "$mark" "$(q3_pat "$Q3_PAT_RECOVERED" 2)" || return 1
   recovered=$(tail -n +"$((mark + 1))" "$root1" | grep -aE "$(q3_pat "$Q3_PAT_RECOVERED" 2)")
   q3_wait_grep_since 120 "$root1" "$mark" "$Q3_PAT_REBROADCAST" || return 1
