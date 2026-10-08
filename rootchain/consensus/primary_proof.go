@@ -147,7 +147,15 @@ func (x *ConsensusManager) kickPrimaryFacts(result [32]byte) {
 			if c.factsFailed == nil {
 				c.factsFailed = map[[32]byte]time.Time{}
 			}
+			// a failure only needs remembering for the backoff: forget the old ones, so results that never publish cannot grow the map
+			for r, at := range c.factsFailed {
+				if time.Since(at) > 10*primaryWitnessRetry {
+					delete(c.factsFailed, r)
+				}
+			}
 			c.factsFailed[result] = time.Now()
+		} else {
+			delete(c.factsFailed, result)
 		}
 		c.mu.Unlock()
 		if !ok {
