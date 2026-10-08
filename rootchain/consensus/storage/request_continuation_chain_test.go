@@ -75,13 +75,13 @@ func TestEVMAssignmentIsContinuedAcrossRootOnlyEpochsThenGenuinelyReplaced(t *te
 			w, _ := fresh.Context().SignerWeight(s.f.id(0))
 			require.EqualValues(t, tc.w1[0], w)
 			_, err := fresh.VerifyIRChangeReq(oldProof, t2Rounds)
-			require.Error(t, err, "the old assignment's proofs name the old epoch and round")
+			require.ErrorIs(t, err, ErrStaleRequestContext, "the old assignment's proofs name the old epoch and round")
 			_, err = fresh.VerifyIRChangeReq(quorumProof(s.request(fresh, 0, 0, 2), s.request(fresh, 1, 1, 2), s.request(fresh, 2, 2, 2), s.request(fresh, 3, 3, 2)), t2Rounds)
 			require.NoError(t, err, "the new assignment's own proofs")
 
 			// the old root identities no longer authorise the new interval, and the new identity does not authorise the old
 			_, err = s.resolve(snap, fxActivate+1, 5, fxBody2, PurposeExecute)
-			require.Error(t, err, "the second continuation's identity at a round of the real assignment")
+			require.ErrorIs(t, err, quorumweight.ErrRequestContext, "the second continuation's identity at a round of the real assignment")
 		})
 	}
 }

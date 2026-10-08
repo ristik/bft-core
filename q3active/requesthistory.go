@@ -102,7 +102,9 @@ func (h *RequestHistory) Chain(partition types.PartitionID, shard types.ShardID)
 	for epoch := uint64(2); epoch <= tip; epoch++ {
 		e, err := hist.ForEpoch(epoch)
 		if err != nil {
-			return nil, errors.Join(ErrRequestHistory, err) // a missing interior epoch is not the end of the history
+			// a missing interior epoch is not the end of the history (defense in depth: a verified history is contiguous, so this is
+			// unreachable from a real runtime)
+			return nil, errors.Join(ErrRequestHistory, err)
 		}
 		if err := h.rt.Admit(epoch); err != nil {
 			return nil, errors.Join(ErrRequestHistory, err)
@@ -157,6 +159,7 @@ func (h *RequestHistory) Chain(partition types.PartitionID, shard types.ShardID)
 			chain = append(chain, cont)
 			continue
 		}
+		// defense in depth behind the verified q3format history (contiguous and predecessor-linked): unreachable from a verified runtime
 		if !bytes.Equal(v.Record.PredecessorBodyID, last.RootBody()) {
 			return nil, fmt.Errorf("%w: epoch %d does not follow the previous root interval", ErrRequestHistory, epoch)
 		}

@@ -160,7 +160,9 @@ func TestRequestContinuationRefusesEachBrokenLink(t *testing.T) {
 
 	t.Run("the record is not the one the entry's commit names", func(t *testing.T) {
 		wrong := [32]byte{1}
-		require.ErrorIs(t, build(contStub{VerifiedContinuation: entry, commit: &wrong}), storage.ErrRecordNotCommitted)
+		// root-only: the constructor's own check is the only one (a coupled entry would also be refused by ActivationFromVerifiedV3)
+		rootOnly := true
+		require.ErrorIs(t, build(contStub{VerifiedContinuation: entry, commit: &wrong, rootOnly: &rootOnly}), storage.ErrRecordNotCommitted)
 	})
 	for name, mutate := range map[string]func(*evmroot.OrderedHandoffRecord){
 		"a record of another next body": func(r *evmroot.OrderedHandoffRecord) { r.NextBodyID = bytes.Repeat([]byte{7}, 32) },

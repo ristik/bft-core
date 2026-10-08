@@ -356,6 +356,7 @@ func RequestContinuationFromVerifiedV3(previous *RequestActivation, entry Verifi
 	if err != nil {
 		return nil, errors.Join(ErrAssignmentHistory, err)
 	}
+	// defense in depth: a faithful clone of a configuration that hashed to previous.confHash cannot differ; unreachable from a constructed previous
 	hash, err := own.Hash(hashAlg)
 	if err != nil || !bytes.Equal(hash, previous.confHash) {
 		return nil, fmt.Errorf("%w: the copied configuration is not the previous one", ErrAssignmentHistory)
