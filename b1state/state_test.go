@@ -27,7 +27,7 @@ func fixtureEntry(epoch, start uint64) Entry {
 
 // All pins here identify synthetic fixtures, not a PR3 runtime or production profile.
 func fixtureProfile(w uint64) Profile {
-	p := Profile{Network: 3, RootGenesisID: [32]byte{1}, ExecutionChainID: 2, RuntimeHash: [32]byte{3}, CompilerHash: [32]byte{4}, WCert: w, DeltaEV: w + 1, DeltaHold: w + 2, RestGas: 100, CompanionBytes: 1000000, OtherCompanionBytes: 1024, OrdinaryCapacity: 7000000}
+	p := Profile{Network: 3, RootGenesisID: [32]byte{1}, ExecutionChainID: 2, RuntimeHash: [32]byte{3}, CompilerHash: [32]byte{4}, WCert: w, DeltaEV: w + 1, DeltaHold: w + 2, RestGas: 100, CompanionBytes: 1000000, OtherCompanionBytes: 1024, OrdinaryCapacity: 7000000, GenesisUCTime: 1000}
 	p.SystemGas, _ = p.RequiredSystemGas()
 	p.MaxGas = p.SystemGas + p.OrdinaryCapacity
 	return p
@@ -95,7 +95,7 @@ func TestProfileRefusalsAndCapacity(t *testing.T) {
 	if k != 6 || c != 102400 || tokens != 1628 {
 		t.Fatal(k, c, tokens)
 	}
-	if gas, _ := p.RequiredSystemGas(); gas != 93917700 {
+	if gas, _ := p.RequiredSystemGas(); gas != 112213844 {
 		t.Fatal(gas)
 	}
 	for _, tc := range []struct {
@@ -181,11 +181,11 @@ func TestUpdateStagedDebitAndCanonical(t *testing.T) {
 			}
 		})
 	}
-	if used, err := SystemGas(100, 20, 30, 50); err != nil || used != 100 {
+	if used, err := SystemGas(100, 20, 30, 10, 40); err != nil || used != 100 {
 		t.Fatal(used, err)
 	}
-	for _, gs := range [][3]uint64{{101, 0, 0}, {20, 81, 0}, {20, 30, 51}, {math.MaxUint64, 1, 0}} {
-		if _, err := SystemGas(100, gs[0], gs[1], gs[2]); !errors.Is(err, ErrBudget) {
+	for _, gs := range [][4]uint64{{101, 0, 0, 0}, {20, 81, 0, 0}, {20, 30, 51, 0}, {20, 30, 10, 41}, {math.MaxUint64, 1, 0, 0}} {
+		if _, err := SystemGas(100, gs[0], gs[1], gs[2], gs[3]); !errors.Is(err, ErrBudget) {
 			t.Fatal(err)
 		}
 	}

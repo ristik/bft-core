@@ -242,7 +242,12 @@ func (s State) Close(epoch uint64, data []byte, round, timestamp uint64) (State,
 	}
 	s = s.clone()
 	s.Awaiting = append(s.Awaiting[:i], s.Awaiting[i+1:]...)
-	return s.append(KindClosure, data, Anchor{progress, timestamp})
+	next, rec, err := s.append(KindClosure, data, Anchor{progress, timestamp})
+	if err != nil {
+		return State{}, Record{}, err
+	}
+	rec.ClosedEpoch = epoch
+	return next, rec, nil
 }
 
 // SessionClosed projects the closing of an Election result by a root decision (an Abort of its primary before H, or a RejectResult),

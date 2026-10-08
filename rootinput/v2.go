@@ -290,11 +290,13 @@ type ContextV2 struct {
 }
 
 type ResultV2 struct {
-	B1Update    []byte
-	Input       evmroot.RootInputV2
-	Encoded     []byte
-	Commitment  evmroot.Hash32
-	Observation VerifiedObservationV2
+	B1Update []byte
+	// RecordsImport is the canonical root-record import companion the root input commits by hash (rootRecordsHash).
+	RecordsImport []byte
+	Input         evmroot.RootInputV2
+	Encoded       []byte
+	Commitment    evmroot.Hash32
+	Observation   VerifiedObservationV2
 }
 
 func DeriveV2(c ContextV2, o VerifiedObservationV2) (ResultV2, error) {
@@ -408,7 +410,7 @@ func DeriveV2(c ContextV2, o VerifiedObservationV2) (ResultV2, error) {
 	if c.TransitionsPending {
 		ri.Transitions = [][]byte{boundTransition}
 	}
-	var b1Update []byte
+	var b1Update, recordsImport []byte
 	if f.Layout == registryproof.FreshB1 {
 		if c.B1 == nil {
 			return ResultV2{}, ErrB1Admission
@@ -423,6 +425,12 @@ func DeriveV2(c ContextV2, o VerifiedObservationV2) (ResultV2, error) {
 		}
 		b1Update = bytes.Clone(projected.Update)
 		ri.B1UpdateHash = bytes.Clone(projected.Hash[:])
+		imported, err := c.B1.DeriveRecords(callCtx, c.Parent, o)
+		if err != nil {
+			return ResultV2{}, err
+		}
+		recordsImport = bytes.Clone(imported.Import)
+		ri.RootRecordsHash = bytes.Clone(imported.Hash[:])
 	} else if c.B1 != nil {
 		return ResultV2{}, ErrB1Admission
 	}
@@ -439,7 +447,7 @@ func DeriveV2(c ContextV2, o VerifiedObservationV2) (ResultV2, error) {
 		if err != nil {
 			return ResultV2{}, err
 		}
-		other := uint64(len(encoded) + len(ucBytes) + len(trBytes))
+		other := uint64(len(encoded) + len(ucBytes) + len(trBytes) + len(recordsImport))
 		for _, t := range ri.Transitions {
 			other += uint64(len(t))
 		}
@@ -447,7 +455,7 @@ func DeriveV2(c ContextV2, o VerifiedObservationV2) (ResultV2, error) {
 			return ResultV2{}, ErrB1Admission
 		}
 	}
-	return ResultV2{B1Update: b1Update, Input: ri, Encoded: encoded, Commitment: ri.ExtraData(), Observation: o.clone()}, nil
+	return ResultV2{B1Update: b1Update, RecordsImport: recordsImport, Input: ri, Encoded: encoded, Commitment: ri.ExtraData(), Observation: o.clone()}, nil
 }
 
 func (o VerifiedObservationV2) clone() VerifiedObservationV2 {
