@@ -11,26 +11,32 @@ import "bytes"
 
 // mptVerify returns the value of key (32 bytes, hashed path) under root.
 func mptVerify(root [32]byte, key [32]byte, nodes [][]byte) ([]byte, error) {
+	v, _, err := mptWalk(root, key, nodes)
+	return v, err
+}
+
+// mptWalk is mptVerify that also reports how many supplied nodes the walk consumed. On ErrMPTAbsent that is the length of the
+// non-inclusion path, which a caller proving absence checks against len(nodes) (no node may be left unused).
+func mptWalk(root [32]byte, key [32]byte, nodes [][]byte) (val []byte, used int, err error) {
 	nib := make([]byte, 64)
 	for i, b := range key {
 		nib[2*i], nib[2*i+1] = b>>4, b&0x0f
 	}
 	if len(nodes) == 0 {
-		return nil, ErrMPTNode
+		return nil, used, ErrMPTNode
 	}
-	used := 0
 	// The root is always hash-referenced, whatever its size.
 	if keccak(nodes[0]) != root {
-		return nil, ErrMPTNode
+		return nil, used, ErrMPTNode
 	}
-	cur, err := rlpDecode(nodes[0])
-	if err != nil {
-		return nil, ErrMPTNode
+	cur, derr := rlpDecode(nodes[0])
+	if derr != nil {
+		return nil, used, ErrMPTNode
 	}
 	used = 1
 	for {
 		if !cur.list {
-			return nil, ErrMPTNode
+			return nil, used, ErrMPTNode
 		}
 		var child rlpItem
 		switch len(cur.kids) {
@@ -38,63 +44,64 @@ func mptVerify(root [32]byte, key [32]byte, nodes [][]byte) ([]byte, error) {
 			if len(nib) == 0 {
 				v := cur.kids[16]
 				if v.list || len(v.str) == 0 {
-					return nil, ErrMPTAbsent
+					return nil, used, ErrMPTAbsent
 				}
-				return finishMPT(used, len(nodes), v.str)
+				v2, e := finishMPT(used, len(nodes), v.str)
+				return v2, used, e
 			}
 			child = cur.kids[nib[0]]
 			nib = nib[1:]
 			if !child.list && len(child.str) == 0 {
-				return nil, ErrMPTAbsent
+				return nil, used, ErrMPTAbsent
 			}
 		case 2:
 			path, leaf, ok := hexPrefix(cur.kids[0])
 			if !ok {
-				return nil, ErrMPTNode
+				return nil, used, ErrMPTNode
 			}
 			if len(path) > len(nib) || !bytes.Equal(path, nib[:len(path)]) {
-				return nil, ErrMPTAbsent
+				return nil, used, ErrMPTAbsent
 			}
 			nib = nib[len(path):]
 			v := cur.kids[1]
 			if leaf {
 				if len(nib) != 0 {
-					return nil, ErrMPTPath // the leaf ends before the key does
+					return nil, used, ErrMPTPath // the leaf ends before the key does
 				}
 				if v.list || len(v.str) == 0 {
-					return nil, ErrMPTNode
+					return nil, used, ErrMPTNode
 				}
-				return finishMPT(used, len(nodes), v.str)
+				v2, e := finishMPT(used, len(nodes), v.str)
+				return v2, used, e
 			}
 			if len(path) == 0 {
-				return nil, ErrMPTNode // an extension must consume at least one nibble
+				return nil, used, ErrMPTNode // an extension must consume at least one nibble
 			}
 			child = v
 		default:
-			return nil, ErrMPTNode
+			return nil, used, ErrMPTNode
 		}
 		// Resolve the child reference.
 		switch {
 		case child.list:
 			if len(child.raw) >= 32 {
-				return nil, ErrMPTNode // a node of 32 bytes or more is hash-referenced
+				return nil, used, ErrMPTNode // a node of 32 bytes or more is hash-referenced
 			}
 			cur = child
 		case len(child.str) == 32:
 			if used >= len(nodes) {
-				return nil, ErrMPTPath // a hash reference with no supplied node
+				return nil, used, ErrMPTPath // a hash reference with no supplied node
 			}
 			n := nodes[used]
 			if len(n) < 32 || keccak(n) != [32]byte(child.str) {
-				return nil, ErrMPTNode
+				return nil, used, ErrMPTNode
 			}
-			var err error
 			if cur, err = rlpDecode(n); err != nil {
-				return nil, ErrMPTNode
+				return nil, used, ErrMPTNode
 			}
 			used++
 		default:
-			return nil, ErrMPTNode
+			return nil, used, ErrMPTNode
 		}
 	}
 }
