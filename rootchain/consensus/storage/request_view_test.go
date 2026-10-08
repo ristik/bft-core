@@ -3,6 +3,7 @@ package storage
 import (
 	"bytes"
 	"crypto"
+	"maps"
 	"sort"
 	"testing"
 	"time"
@@ -169,6 +170,22 @@ func (s *scenario) snapshot(parent *ShardInfo, pending *types.InputRecord) *Requ
 	snap, err := NewRequestSnapshot(fxNetwork, crypto.SHA256, parent, s.parentID, pending, s.anchor, s.succ)
 	require.NoError(s.f.t, err)
 	return snap
+}
+
+// installed is the verified parent after production installation of the successor (successorTechnicalRecord + nextEpoch, as
+// activateEVMAssignment does) followed by the given number of real root timeouts (nextRoundWith without a request) while the
+// acknowledgement is pending: epoch and configuration fixed, round and leader advancing, accumulators rolled once.
+func (s *scenario) installed(repeats int) *ShardInfo {
+	s.f.t.Helper()
+	advanced := *s.parent
+	advanced.Fees = maps.Clone(s.parent.Fees)
+	advanced.TR = s.succTR
+	next, err := advanced.nextEpochWith(s.pdr1, crypto.SHA256, resetMembers)
+	require.NoError(s.f.t, err)
+	for i := 0; i < repeats; i++ {
+		require.NoError(s.f.t, next.nextRoundWith(nil, s.pdr1, crypto.SHA256, resetMembers))
+	}
+	return next
 }
 
 func (s *scenario) query(snap *RequestSnapshot, round uint64, epoch uint64, body []byte, p RequestPurpose) RequestQuery {
@@ -385,14 +402,17 @@ func TestSuccessorTechnicalRecordMustBeTheCommittedOne(t *testing.T) {
 	_, err = s.resolve(snap, fxActivate-1, 3, fxBody0, PurposeExecute)
 	require.NoError(t, err)
 
-	// a parent that already installed some other successor record
-	moved := *s.parent
-	moved.TR = s.succTR
-	moved.TR.Round++
-	moved.ShardConfHash = s.succ.confHash
-	snap2, err := NewRequestSnapshot(fxNetwork, crypto.SHA256, &moved, s.parentID, nil, s.anchor, s.succ)
+	// an installed parent is judged by its own epoch, configuration and commitments, not by the immutable digest of the record it
+	// installed: a digest that no longer matches the (moved) record is not what is compared once installed
+	inst := s.installed(0)
+	snap2, err := NewRequestSnapshot(fxNetwork, crypto.SHA256, inst, s.parentID, nil, s.anchor, &bad)
 	require.NoError(t, err)
-	_, err = s.resolve(snap2, fxActivate, 4, fxBody1, PurposeExecute)
+	v, err := s.resolve(snap2, fxActivate, 4, fxBody1, PurposeExecute)
+	require.NoError(t, err)
+	require.Equal(t, inst.TR, v.ExpectedTR())
+
+	// but the predecessor case keeps the complete digest check, with the same bad digest
+	_, err = s.resolve(snap, fxActivate, 4, fxBody1, PurposeExecute)
 	require.ErrorIs(t, err, quorumweight.ErrRequestContext)
 }
 
@@ -420,10 +440,7 @@ func TestDelayedFirstSuccessorBlockAndRestartAtActivation(t *testing.T) {
 	require.Equal(t, late.ViewKey(), r.ViewKey())
 
 	// the executing state that already installed the assignment (record advanced, last certified record still old)
-	installed := *s.parent
-	installed.TR = s.succTR
-	installed.ShardConfHash = s.succ.confHash
-	exec := s.mustResolve(s.snapshot(&installed, nil), fxActivate+7, 4, fxBody1, PurposeExecute)
+	exec := s.mustResolve(s.snapshot(s.installed(0), nil), fxActivate+7, 4, fxBody1, PurposeExecute)
 	require.Equal(t, late.ExpectedTR(), exec.ExpectedTR())
 	require.Equal(t, late.AssignmentKey(), exec.AssignmentKey())
 
@@ -733,9 +750,8 @@ func TestViewOwnsCertifiedTechnicalRecords(t *testing.T) {
 	require.Equal(t, tr, again.ExpectedTR())
 
 	// the executing state that already installed the assignment: its record is the view's expected one
-	installed := *s.parent
-	installed.TR = cloneTR(s.succTR)
-	installed.ShardConfHash = s.succ.confHash
+	installed := *s.installed(0)
+	installed.TR = cloneTR(installed.TR)
 	isnap := s.snapshot(&installed, nil)
 	inst := s.mustResolve(isnap, fxActivate, 4, fxBody1, PurposeExecute)
 	instKey, instTR := inst.ViewKey(), inst.ExpectedTR()
@@ -836,4 +852,102 @@ func TestIsolatedWeightedRequestAnchor(t *testing.T) {
 	unit.PartitionTypeID = 1
 	_, err = NewIsolatedWeightedRequestAnchor(unit, crypto.SHA256, c, 3, fxBody0, fxVersion)
 	require.ErrorIs(t, err, quorumweight.ErrRequestContext, "a request cannot pick its own policy")
+}
+
+// The acknowledgement is pending across several root timeouts: the installed parent's record moves (round, leader) while its epoch,
+// configuration and commitments do not. The view builds on the parent's current record, keeps W=9/Q=5 and the assignment, and a fresh
+// request under the new round is accepted while the previous round's is stale.
+func TestExpectedTRPendingAckRepeatUC(t *testing.T) {
+	s := newScenario(t, []uint64{6, 1, 1, 1}, []uint64{1, 6, 1, 1}, nil)
+	var firstKey, firstAssignment []byte
+	var prev *RequestRoundView
+	var seenLeaders = map[string]bool{}
+	for repeats := 0; repeats <= 4; repeats++ {
+		inst := s.installed(repeats)
+		snap := s.snapshot(inst, nil)
+		for _, purpose := range []RequestPurpose{PurposeCollect, PurposeCertify, PurposeExecute, PurposeTimeout, PurposeReplay} {
+			round := uint64(fxActivate + 7)
+			v := s.mustResolve(snap, round, 4, fxBody1, purpose)
+			require.Equal(t, inst.TR, v.ExpectedTR(), "purpose %d builds on the parent's current record", purpose)
+			require.EqualValues(t, 9, v.Context().TotalWeight())
+			require.EqualValues(t, 5, v.Context().Threshold())
+		}
+		v := s.mustResolve(snap, fxActivate+7, 4, fxBody1, PurposeCertify)
+		seenLeaders[v.ExpectedTR().Leader] = true
+		require.EqualValues(t, s.succTR.Round+uint64(repeats), v.ExpectedTR().Round)
+		if repeats == 0 {
+			firstKey, firstAssignment = v.ViewKey(), v.AssignmentKey()
+		} else {
+			require.NotEqual(t, firstKey, v.ViewKey(), "another expected record is another view")
+			require.Equal(t, firstAssignment, v.AssignmentKey(), "the assignment does not move with the timeouts")
+			require.NotEqual(t, prev.RoundTag(), v.RoundTag())
+			// the previous round's proof is stale now; a fresh heavy-signer proof is accepted
+			stale := quorumProof(s.request(prev, 1, 1, 2))
+			_, err := v.VerifyIRChangeReq(stale, t2Rounds)
+			require.ErrorIs(t, err, ErrStaleRequestContext)
+			res, err := v.VerifyIRChangeReq(quorumProof(s.request(v, 1, 1, 2)), t2Rounds)
+			require.NoError(t, err)
+			require.Equal(t, v.ViewKey(), res.ViewKey)
+		}
+		prev = v
+
+		// restart: the same parent rebuilt into new objects with an empty cache is the same view
+		again, err := NewRequestViewCache().Resolve(s.query(snap, fxActivate+7, 4, fxBody1, PurposeCertify), s.snapshot(s.installed(repeats), nil))
+		require.NoError(t, err)
+		require.Equal(t, v.ViewKey(), again.ViewKey())
+	}
+	require.Greater(t, len(seenLeaders), 1, "the leader changed across the timeouts")
+}
+
+// Each way the installed parent can fail to be the authenticated one is refused on its own, with a typed error and no view; a refusal
+// never populates the cache, and does not evict a view already in it.
+func TestExpectedTRInstalledParentRefusals(t *testing.T) {
+	s := newScenario(t, []uint64{6, 1, 1, 1}, []uint64{1, 6, 1, 1}, nil)
+	flip := func(b []byte) []byte { c := bytes.Clone(b); c[0] ^= 1; return c }
+	for name, tc := range map[string]struct {
+		mutate func(*ShardInfo)
+		cause  error
+	}{
+		"a one-byte stat hash mismatch":              {func(si *ShardInfo) { si.TR.StatHash = flip(si.TR.StatHash) }, quorumweight.ErrRequestContext},
+		"a one-byte fee hash mismatch":               {func(si *ShardInfo) { si.TR.FeeHash = flip(si.TR.FeeHash) }, quorumweight.ErrRequestContext},
+		"a regressed round":                          {func(si *ShardInfo) { si.TR.Round = si.LastCR.Technical.Round }, quorumweight.ErrRequestContext},
+		"accumulators that moved without the record": {func(si *ShardInfo) { si.Stat.Blocks++ }, quorumweight.ErrRequestContext},
+	} {
+		t.Run(name, func(t *testing.T) {
+			inst := s.installed(2)
+			tc.mutate(inst)
+			snap, err := NewRequestSnapshot(fxNetwork, crypto.SHA256, inst, s.parentID, nil, s.anchor, s.succ)
+			require.NoError(t, err)
+			cache := NewRequestViewCache()
+			v, err := cache.Resolve(s.query(snap, fxActivate+7, 4, fxBody1, PurposeExecute), snap)
+			require.ErrorIs(t, err, tc.cause)
+			require.Nil(t, v)
+			require.Zero(t, cache.Len(), "a refusal populates nothing")
+
+			// with a good view already cached, the refusal does not disturb it
+			good := s.snapshot(s.installed(2), nil)
+			_, err = cache.Resolve(s.query(good, fxActivate+7, 4, fxBody1, PurposeExecute), good)
+			require.NoError(t, err)
+			_, err = cache.Resolve(s.query(snap, fxActivate+7, 4, fxBody1, PurposeExecute), snap)
+			require.ErrorIs(t, err, tc.cause)
+			require.Equal(t, 1, cache.Len())
+		})
+	}
+
+	// the epoch and configuration of the installed record, judged by expectedTR itself (the snapshot constructor already ties the
+	// parent's configuration to the epoch it is in)
+	snap := s.snapshot(s.installed(1), nil)
+	_, err := expectedTR(snap, 1)
+	require.NoError(t, err, "control")
+	for name, epoch := range map[string]uint64{"an unrelated epoch": 7, "a future epoch": 2} {
+		stale := *snap
+		stale.parent.tr.Epoch = epoch
+		_, err := expectedTR(&stale, 1)
+		require.ErrorIs(t, err, ErrStaleRequestContext, name)
+		snap = s.snapshot(s.installed(1), nil)
+	}
+	other := s.snapshot(s.installed(1), nil)
+	other.parent.confHash = flip(other.parent.confHash)
+	_, err = expectedTR(other, 1)
+	require.ErrorIs(t, err, quorumweight.ErrRequestContext, "a configuration other than the selected assignment's")
 }
