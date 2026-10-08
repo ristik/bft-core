@@ -224,6 +224,21 @@ func (x *BlockStore) Witness(hash [32]byte) ([]byte, error) {
 	return data, err
 }
 
+// TrialExecute executes a proposed block on its parent's state exactly as Add would and discards the result: a leader uses it to learn
+// whether an optional control it would include makes the block invalid before it signs the proposal. Nothing is stored. The parent
+// block is only read: extendWithAuthority builds the child on a copy of the parent's state, which Add relies on for forks as well.
+func (x *BlockStore) TrialExecute(block *rctypes.BlockData, verifier IRChangeReqVerifier) error {
+	parent, err := x.blockTree.FindBlock(block.GetParentRound())
+	if err != nil {
+		return fmt.Errorf("trial: parent round %d: %w", block.GetParentRound(), err)
+	}
+	x.lock.RLock()
+	svc := x.pos
+	x.lock.RUnlock()
+	_, err = parent.extendWithAuthority(block, verifier, x.orchestration, x.hash, x.log, x.handoffAuth, x, svc)
+	return err
+}
+
 // ControlCut is the retained control cut of the committed root block of the round: its control state and the path of its leaf in that
 // block's unicity tree.
 func (x *BlockStore) ControlCut(round uint64) (ControlCut, error) {

@@ -307,8 +307,8 @@ func rootNodeRun(ctx context.Context, flags *rootNodeRunFlags) error {
 
 	if flags.PosDeploymentFile != "" {
 		// the witnesses of a block's controls are fetched by hash from the other root nodes before the block is executed
-		options = append(options, consensus.WithWitnessFetcher(func(ctx context.Context, hash [32]byte, peers []peer.ID) ([]byte, error) {
-			return poswitness.Fetch(ctx, poswitness.FromLibp2p(host), peers, hash)
+		options = append(options, consensus.WithWitnessFetcher(func(ctx context.Context, hash [32]byte, peers []peer.ID, maxBytes int) ([]byte, error) {
+			return poswitness.Fetch(ctx, poswitness.FromLibp2p(host), peers, hash, maxBytes)
 		}))
 	}
 	cm, err := consensus.NewConsensusManager(
@@ -447,6 +447,9 @@ func rootNodeRun(ctx context.Context, flags *rootNodeRunFlags) error {
 				mux.HandleFunc("POST /api/v1/handoff/q3-stage", rootQ3StageHandler(cm))
 				rootQ3API{Status: cm.Q3Status, Rt: q3rt, Bundle: q3BundleProvider{cm: cm, rt: q3rt}.Q3Bundle, State: cm.GetState,
 					Trust: func(epoch uint64) (*types.RootTrustBaseV1, error) { return trustBaseStore.GetByEpoch(epoch) }}.register(mux)
+			}
+			if flags.PosDeploymentFile != "" {
+				mux.HandleFunc("POST /api/v1/pos/control", rootPosControlHandler(cm))
 			}
 			mux.HandleFunc("POST /api/v1/handoff/abort", rootHandoffAbortHandler(cm))
 			mux.HandleFunc("POST /api/v1/handoff/abort/status", rootHandoffAbortStatusHandler(cm))
