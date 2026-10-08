@@ -425,7 +425,7 @@ func electDeployment(t *testing.T, m b1state.ElectMeasurement) (*b1Deployment, b
 	p, err := deriveB1Profile(d.tb, d.conf, 1, 7_000_000, 1000, hooks)
 	require.NoError(t, err)
 	file := b1ProfileFileOf(p)
-	file.ElectMeasurement = &m
+	file.ElectMeasurement, file.ElectCaps = &m, &b1state.ElectCaps{VMax: 16, LMax: 2, NMax: 8}
 	return d, p, file
 }
 
@@ -466,7 +466,13 @@ func TestB1Profile_AHandTypedOrMissingElectionPriceIsRefused(t *testing.T) {
 		"no recorded measurement":    func(f *b1ProfileFile) { f.ElectMeasurement = nil },
 		"a zero measurement":         func(f *b1ProfileFile) { f.ElectMeasurement = &b1state.ElectMeasurement{V: 16, L: 2, C: 8} },
 		"a measurement without hook": func(f *b1ProfileFile) { f.ElectionContract, f.ElectGas = nil, 0 },
-		"a price without a contract": func(f *b1ProfileFile) { f.ElectionContract, f.ElectMeasurement = nil, nil },
+		"a price without a contract": func(f *b1ProfileFile) { f.ElectionContract, f.ElectMeasurement, f.ElectCaps = nil, nil, nil },
+		"caps without a contract":    func(f *b1ProfileFile) { f.ElectionContract, f.ElectGas, f.ElectMeasurement = nil, 0, nil },
+		"no recorded caps":           func(f *b1ProfileFile) { f.ElectCaps = nil },
+		"caps above the measurement": func(f *b1ProfileFile) { f.ElectCaps = &b1state.ElectCaps{VMax: 128, LMax: 2, NMax: 8} },
+		"caps below the measurement": func(f *b1ProfileFile) { f.ElectCaps = &b1state.ElectCaps{VMax: 16, LMax: 1, NMax: 8} },
+		"committee cap differs":      func(f *b1ProfileFile) { f.ElectCaps = &b1state.ElectCaps{VMax: 16, LMax: 2, NMax: 16} },
+		"caps outside the domain":    func(f *b1ProfileFile) { f.ElectCaps = &b1state.ElectCaps{VMax: 16, LMax: 3, NMax: 8} },
 	} {
 		t.Run(name, func(t *testing.T) {
 			d, _, file := electDeployment(t, m)
@@ -486,18 +492,25 @@ func TestB1Profile_TheHookFlagsGoTogether(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "m.json")
 	enc, _ := json.Marshal(m)
 	require.NoError(t, os.WriteFile(path, enc, 0o644))
-	ok, err := parseB1Hooks("0x00000000000000000000000000000000000000c1", 2, 3_000_000, "0x00000000000000000000000000000000000000e1", path)
+	ok, err := parseB1Hooks("0x00000000000000000000000000000000000000c1", 2, 3_000_000, "0x00000000000000000000000000000000000000e1", path, "16,2,8")
 	require.NoError(t, err)
 	require.Equal(t, m, *ok.Measurement)
+	require.Equal(t, b1state.ElectCaps{VMax: 16, LMax: 2, NMax: 8}, *ok.Caps)
 	for name, args := range map[string][]any{
-		"flags without the records hook":  {"", uint32(2), uint64(1), "", ""},
-		"election without a measurement":  {"0x00000000000000000000000000000000000000c1", uint32(2), uint64(1), "0x00000000000000000000000000000000000000e1", ""},
-		"measurement without an election": {"0x00000000000000000000000000000000000000c1", uint32(2), uint64(1), "", path},
-		"not an address":                  {"c1", uint32(2), uint64(1), "", ""},
-		"election not an address":         {"0x00000000000000000000000000000000000000c1", uint32(2), uint64(1), "e1", path},
-		"missing measurement file":        {"0x00000000000000000000000000000000000000c1", uint32(2), uint64(1), "0x00000000000000000000000000000000000000e1", path + ".none"},
+		"flags without the records hook":  {"", uint32(2), uint64(1), "", "", ""},
+		"election without a measurement":  {"0x00000000000000000000000000000000000000c1", uint32(2), uint64(1), "0x00000000000000000000000000000000000000e1", "", "16,2,8"},
+		"measurement without an election": {"0x00000000000000000000000000000000000000c1", uint32(2), uint64(1), "", path, "16,2,8"},
+		"not an address":                  {"c1", uint32(2), uint64(1), "", "", ""},
+		"election not an address":         {"0x00000000000000000000000000000000000000c1", uint32(2), uint64(1), "e1", path, "16,2,8"},
+		"missing measurement file":        {"0x00000000000000000000000000000000000000c1", uint32(2), uint64(1), "0x00000000000000000000000000000000000000e1", path + ".none", "16,2,8"},
+		"election without caps":           {"0x00000000000000000000000000000000000000c1", uint32(2), uint64(1), "0x00000000000000000000000000000000000000e1", path, ""},
+		"caps above the measurement":      {"0x00000000000000000000000000000000000000c1", uint32(2), uint64(1), "0x00000000000000000000000000000000000000e1", path, "128,2,8"},
+		"caps below the measurement":      {"0x00000000000000000000000000000000000000c1", uint32(2), uint64(1), "0x00000000000000000000000000000000000000e1", path, "16,1,8"},
+		"committee cap differs":           {"0x00000000000000000000000000000000000000c1", uint32(2), uint64(1), "0x00000000000000000000000000000000000000e1", path, "16,2,16"},
+		"malformed caps":                  {"0x00000000000000000000000000000000000000c1", uint32(2), uint64(1), "0x00000000000000000000000000000000000000e1", path, "16,2"},
+		"caps outside the domain":         {"0x00000000000000000000000000000000000000c1", uint32(2), uint64(1), "0x00000000000000000000000000000000000000e1", path, "16,3,8"},
 	} {
-		_, err := parseB1Hooks(args[0].(string), args[1].(uint32), args[2].(uint64), args[3].(string), args[4].(string))
+		_, err := parseB1Hooks(args[0].(string), args[1].(uint32), args[2].(uint64), args[3].(string), args[4].(string), args[5].(string))
 		require.Error(t, err, name)
 	}
 }
@@ -527,12 +540,44 @@ func TestEngineAPICheckElectGas(t *testing.T) {
 	require.NoError(t, err, "the contracts grew a little: inside the margin")
 	_, err = run(write(b1state.ElectMeasurement{V: 16, L: 2, C: 8, Gas: 6_300_000}))
 	require.ErrorIs(t, err, b1state.ErrElectGas, "the contracts grew past the margin: regenerate the profile")
-	_, err = run(write(b1state.ElectMeasurement{V: 64, L: 2, C: 8, Gas: 1_000_000}))
-	require.ErrorIs(t, err, b1state.ErrElectGas, "a larger profile than the one priced")
+	for name, fresh := range map[string]b1state.ElectMeasurement{
+		"a larger V":          {V: 64, L: 2, C: 8, Gas: 1_000_000},
+		"a smaller V":         {V: 8, L: 2, C: 8, Gas: 1_000_000},
+		"fewer lots":          {V: 16, L: 1, C: 8, Gas: 1_000_000},
+		"a smaller committee": {V: 16, L: 2, C: 4, Gas: 1_000_000},
+	} {
+		_, err = run(write(fresh))
+		require.ErrorIs(t, err, b1state.ErrElectGas, name+": not the deployed caps")
+	}
 
 	// a profile with no election hook has nothing to check
 	plain := newB1Deployment(t)
 	cmd := engineAPICheckElectGasCmd()
 	cmd.SetArgs([]string{"--b1-profile", plain.profPath, "--measurement", write(m)})
 	require.Error(t, cmd.Execute())
+}
+
+func TestTheUrethFlagsPinEveryHookTheProfileHashCommits(t *testing.T) {
+	m := b1state.ElectMeasurement{V: 16, L: 2, C: 8, Gas: 4_987_664}
+	_, p, _ := electDeployment(t, m)
+	hash, err := p.Hash()
+	require.NoError(t, err)
+	line := urethFlags(p, hash)
+	for _, want := range []string{"--unicity.records-custody=0xc100000000000000000000000000000000000000", "--unicity.h-records=2",
+		"--unicity.hook-record-gas=3000000", "--unicity.election=0xe100000000000000000000000000000000000000", "--unicity.elect-gas=6234580"} {
+		require.Contains(t, line, want)
+	}
+	d := newB1Deployment(t)
+	plainHash, err := d.profile.Hash()
+	require.NoError(t, err)
+	plain := urethFlags(d.profile, plainHash)
+	require.NotContains(t, plain, "records-custody")
+	require.NotContains(t, plain, "election")
+	// the records hook alone prints no election flags
+	records := p
+	records.ElectionContract, records.ElectGas = [20]byte{}, 0
+	rh, err := records.Hash()
+	require.NoError(t, err)
+	require.Contains(t, urethFlags(records, rh), "--unicity.records-custody")
+	require.NotContains(t, urethFlags(records, rh), "election")
 }
