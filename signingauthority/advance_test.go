@@ -129,6 +129,32 @@ func TestAuthorityAdvanceRejectsIsolatedInvalidContexts(t *testing.T) {
 	}
 }
 
+// A weighted rotation out of a unit epoch: the successor configuration carries bounded stakes the unit rule refuses, and the authority
+// advances into it; a weight outside the bound is still refused.
+func TestAuthorityAdvancesIntoABoundedWeightConfiguration(t *testing.T) {
+	for name, tc := range map[string]struct {
+		stake uint64
+		ok    bool
+	}{"a bounded weight": {6, true}, "zero": {0, false}} {
+		t.Run(name, func(t *testing.T) {
+			f := newFixture(t, 1)
+			a := f.pending(t)
+			conf := ownConf(t, a)
+			require.NoError(t, a.CompleteEnrollment(conf))
+			next := *conf
+			next.Validators = []*types.NodeInfo{{NodeID: conf.Validators[0].NodeID, SigKey: bytes.Clone(conf.Validators[0].SigKey), Stake: tc.stake}}
+			next.Epoch++
+			err := a.AdvanceEpoch(t.Context(), &next, successorTrust(f, 2))
+			if tc.ok {
+				require.NoError(t, err)
+				require.EqualValues(t, next.Epoch, a.Enrollment().ShardEpoch)
+				return
+			}
+			require.ErrorIs(t, err, ErrContextMismatch)
+		})
+	}
+}
+
 func TestAuthorityAdvanceShardEpochUnderSameRoot(t *testing.T) {
 	f := newFixture(t, 1)
 	a := f.pending(t)
