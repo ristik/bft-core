@@ -479,9 +479,28 @@ q3_activation_n() { # n epoch: the committed activation record of epoch N; its C
     "$epoch" "$amin" "$astar" "$(jq -r .activationCommitId "$rec")" "$(jq -r .v3BodyId "$rec")" "$epoch" "$first" "$total" "$Q3_TOTAL_WEIGHT" "$Q3_ROOT_QUORUM" >"$Q3_DIR/activation-coordinates-$epoch.txt"
 }
 
+# The four shard services' operator endpoints (the candidate staging and the readiness check use them): which answer, and the process behind each port. Recorded before
+# the late steps so a service that disappears is named at the step where it does, not later as a refused staging.
+q3_services_report() { # label: appends to services.txt; fails naming every entity whose endpoint does not answer
+  local label=$1 i addr down=() pid
+  { echo "== $label"
+    for i in $H3_ROOTS; do
+      addr=$(evm_validator_rpc_addr "$i")
+      pid=$(lsof -nP -iTCP:"${addr##*:}" -sTCP:LISTEN -t 2>/dev/null | head -1)
+      if curl -fsS -m 5 -X POST -H 'content-type: application/json' -d '{}' "http://$addr/api/v1/q3/status" >/dev/null 2>&1; then
+        echo "entity $i operator $addr: answers (pid ${pid:-?})"
+      else
+        echo "entity $i operator $addr: NOT answering (listener pid ${pid:-none}; node pid file: $(cat "test-nodes/evm$i/pid" 2>/dev/null || echo none), alive: $(kill -0 "$(cat "test-nodes/evm$i/pid" 2>/dev/null)" 2>/dev/null && echo yes || echo no))"
+        down+=("$i")
+      fi
+    done; } >>"$Q3_DIR/services.txt"
+  [ "${#down[@]}" -eq 0 ] || { echo "the shard operator endpoint of entity ${down[*]} does not answer at step '$label' (see $Q3_DIR/services.txt)" >&2; tail -n $((${#down[@]} + 1 + 4)) "$Q3_DIR/services.txt" >&2; return 1; }
+}
+
 # The negative continuity row: the full heavy-weight swap (6,1,1,1 -> 1,6,1,1) has weight distance 10/9, above the committed budget 1/1, and the root refuses to derive its
 # candidate. Nothing is planned or ordered; the registry and the chain are unchanged. The positive rows are the handoffs that stay inside the budget.
 q3_continuity_refusal() {
+  q3_services_report "before the continuity refusal" || return 1
   local err budget out="$Q3_DIR/continuity-refusal.txt"
   budget=$(jq -r '.partitionParams.continuity_max_distance' "$fullShardConf")
   [ "$budget" = 1/1 ] || { echo "the genesis configuration commits continuity_max_distance=$budget, not 1/1" >&2; return 1; }
@@ -500,7 +519,7 @@ q3_continuity_refusal() {
     echo "refusal:"; printf '%s\n' "$err" | grep -v '^$'; } >"$out"
 }
 
-q3_second_handoff() { q3_handoff_n 2 3 "$Q3_WEIGHTS_2" 0 "$Q3_DIR/cand-identities.json"; }
+q3_second_handoff() { q3_services_report "before handoff 2" || return 1; q3_handoff_n 2 3 "$Q3_WEIGHTS_2" 0 "$Q3_DIR/cand-identities.json"; }
 
 q3_second_activation() {
   q3_install_n 3 || return 1
@@ -633,6 +652,7 @@ q3_pair_control() { # kind sentinel-name
 }
 
 q3_pair_controls() {
+  q3_services_report "before the pair controls" || return 1
   : >"$Q3_DIR/refusals-pair.log"
   q3_x build/ubft q3 pair-control --kind accept --engine-url "$(q3_engine_url 1)" --jwt-secret test-nodes/evm1/jwt.hex --eth-url "$(q3_eth_url 1)" >"$Q3_DIR/pair-control-accept.out" 2>&1 \
     || { echo "positive control failed: the unchanged rebuild was refused: $(cat "$Q3_DIR/pair-control-accept.out")" >&2; return 1; }
