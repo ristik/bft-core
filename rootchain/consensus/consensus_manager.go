@@ -759,8 +759,41 @@ func (x *ConsensusManager) onPartitionIRChangeReq(ctx context.Context, req *IRCh
 	return nil
 }
 
-// SetViewResolver selects the view-aware branch of the leader's buffer, timeouts and proposal payload. It is not called in
-// production, which keeps the legacy dispatch.
+// SelectRequestHistory selects the view-aware branch of request collection and judgement from a committed request history: the request
+// verifier judges every certification request under the view resolved from it, and the leader's buffer, timeouts and proposal payload
+// resolve the same views. Without it a shard whose installed assignment is weighted has no request context at all (counting is refused,
+// never a fallback to counting members), so a Q3 deployment selects it at startup, before any activation.
+func (x *ConsensusManager) SelectRequestHistory(h storage.RequestHistory) error {
+	if h == nil {
+		return ErrNoRequestHistory
+	}
+	parent := func(p types.PartitionID, s types.ShardID) (*storage.ShardInfo, []byte, *types.InputRecord, error) {
+		state, err := x.blockStore.GetState()
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		id, err := state.CommittedHead.Block.Hash(crypto.SHA256)
+		return x.blockStore.ShardInfo(p, s), id, nil, err
+	}
+	resolver, err := NewRequestViewResolver(h, crypto.SHA256, parent, nil)
+	if err != nil {
+		return err
+	}
+	x.irReqVerifier.SetRequestHistory(h)
+	x.SetViewResolver(resolver)
+	return nil
+}
+
+// ErrNoRequestHistory is returned when the view-aware branch is selected without a request history.
+var ErrNoRequestHistory = errors.New("consensus: no request history to select")
+
+// HandoffCandidate is the retained candidate preimage of a committed successor body: the source a request history serves from.
+func (x *ConsensusManager) HandoffCandidate(bodyID []byte) ([]byte, error) {
+	return x.blockStore.HandoffCandidate(bodyID)
+}
+
+// SetViewResolver selects the view-aware branch of the leader's buffer, timeouts and proposal payload. Production selects it only through
+// SelectRequestHistory (a Q3 deployment); otherwise the legacy dispatch stays.
 func (x *ConsensusManager) SetViewResolver(r ViewResolver) { x.viewResolver = r }
 
 // RequestView resolves the authenticated view the node's collector admits the shard's certification requests under, for the next
