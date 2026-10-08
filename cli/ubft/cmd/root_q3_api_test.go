@@ -148,3 +148,23 @@ func TestTheRootServesTheActivationRecordHistoryAndBundleOfItsVerifiedActivation
 	require.NoError(t, err)
 	require.Equal(t, want, raw)
 }
+
+// A legacy certificate carries no scheme on the wire (0); the endpoint reports the scheme it is verified under, so a unit-epoch certificate
+// is scheme 1 and a domain-bound one scheme 2.
+func TestTheSignersEndpointReportsTheEffectiveSchemeOfALegacyCertificate(t *testing.T) {
+	for wire, want := range map[uint64]uint64{0: 1, 1: 1, 2: 2} {
+		api := rootQ3API{
+			State: func() (*abdrc.StateMsg, error) {
+				return &abdrc.StateMsg{CommittedHead: &abdrc.CommittedBlock{CommitQc: &rctypes.QuorumCert{Scheme: wire,
+					VoteInfo: &rctypes.RoundInfo{Epoch: 1, RoundNumber: 7}, Signatures: map[string]basehex.Bytes{"n1": {1}}}}}, nil
+			},
+			Trust: func(uint64) (*types.RootTrustBaseV1, error) {
+				return &types.RootTrustBaseV1{Epoch: 1, QuorumThreshold: 1, RootNodes: []*types.NodeInfo{{NodeID: "n1", Stake: 1}}}, nil
+			},
+		}
+		got, err := api.signers()
+		require.NoError(t, err)
+		require.Equal(t, want, got.Scheme, "wire scheme %d", wire)
+		require.EqualValues(t, 7, got.Round)
+	}
+}
