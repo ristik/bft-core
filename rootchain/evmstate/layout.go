@@ -40,7 +40,7 @@ const (
 
 	pubPrimaryHash, pubKCommit, pubIncumbent, pubIncumbentExposure, pubIncumbentKey = 0, 1, 2, 3, 4
 	pubPolicy, pubContracts, pubSnapshot, pubAssignment, pubPopSet, pubFlags        = 5, 6, 7, 8, 9, 10
-	pubPublishedOffset, pubPopCountOffset, pubAttemptOffset                         = 0, 1, 5
+	pubPublishedOffset, pubPopCountOffset, pubAttemptOffset, pubLostOffset          = 0, 1, 5, 13
 )
 
 // member offsets inside their packed slot (bytes from the low-order end) and sizes
