@@ -405,9 +405,11 @@ func (v *Node) countRequest(ctx context.Context, req *certification.BlockCertifi
 			for i, request := range requests {
 				requestNodeIDs[i] = request.NodeID
 			}
+			weights, matching := requestWeightEvidence(tb, requests)
 			v.log.DebugContext(ctx, fmt.Sprintf("partition %s reached consensus, new InputHash: %X", req.PartitionID, requests[0].InputRecord.Hash),
 				logger.Shard(req.PartitionID, req.ShardID), slog.Uint64("requestRound", requests[0].InputRecord.RoundNumber),
-				slog.Any("requestNodeIDs", requestNodeIDs))
+				slog.Any("requestNodeIDs", requestNodeIDs), slog.Any("requestWeights", weights), slog.Uint64("matchingWeight", matching),
+				slog.Uint64("threshold", tb.Threshold()), slog.Uint64("totalWeight", tb.TotalWeight()))
 		}
 		reason = consensus.Quorum
 	case QuorumNotPossible:
@@ -429,6 +431,21 @@ func (v *Node) countRequest(ctx context.Context, req *certification.BlockCertifi
 		return fmt.Errorf("requesting certification: %w", err)
 	}
 	return nil
+}
+
+// requestWeightEvidence is the weight each counted request carries under the view that counted it, in request order, and their sum: the
+// evidence that a shard quorum was reached by weight (a heavy signer alone, or many light ones), logged beside the node ids.
+func requestWeightEvidence(tb rctypes.RequestWeights, requests []*certification.BlockCertificationRequest) (weights []uint64, matching uint64) {
+	weights = make([]uint64, len(requests))
+	for i, r := range requests {
+		w, err := tb.SignerWeight(r.NodeID)
+		if err != nil {
+			continue // not a member under this view: it carries no weight
+		}
+		weights[i] = w
+		matching += w
+	}
+	return weights, matching
 }
 
 // handleConsensus - receives consensus results and delivers certificates to subscribers

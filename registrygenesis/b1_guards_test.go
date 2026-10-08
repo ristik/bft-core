@@ -12,7 +12,7 @@ import (
 )
 
 func TestFreshB1ArtifactGuards(t *testing.T) {
-	p := b1state.Profile{Network: 5, RootGenesisID: [32]byte{1}, ExecutionChainID: 1337, RuntimeHash: [32]byte(common.HexToHash(b1registry.CodeHashHex)), CompilerHash: b1registry.CompilerHash(), WCert: 0, DeltaEV: 1, DeltaHold: 2, RestGas: 2238000, CompanionBytes: 1 << 20, OtherCompanionBytes: 65536, OrdinaryCapacity: 7000000}
+	p := b1state.Profile{Network: 5, RootGenesisID: [32]byte{1}, ExecutionChainID: 1337, RuntimeHash: [32]byte(common.HexToHash(b1registry.CodeHashHex)), CompilerHash: b1registry.CompilerHash(), WCert: 0, DeltaEV: 1, DeltaHold: 2, RestGas: 2284000, CompanionBytes: 1 << 20, OtherCompanionBytes: 65536, OrdinaryCapacity: 7000000, GenesisUCTime: 1000}
 	p.SystemGas, _ = p.RequiredSystemGas()
 	p.MaxGas = p.SystemGas + p.OrdinaryCapacity
 	code, err := b1registry.Runtime()

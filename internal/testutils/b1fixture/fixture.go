@@ -51,7 +51,7 @@ func newFixture(t *testing.T, w, other, start uint64) *Fixture {
 	require.NoError(t, c.TrustBase.Sign(c.TrustBase.RootNodes[0].NodeID, c.Signer))
 	h, err := q3format.NewHistory(c.TrustBase)
 	require.NoError(t, err)
-	p := b1state.Profile{Network: 5, RootGenesisID: h.Genesis(), ExecutionChainID: 1337, RuntimeHash: [32]byte(common.HexToHash(b1registry.CodeHashHex)), CompilerHash: b1registry.CompilerHash(), WCert: w, DeltaEV: w + 1, DeltaHold: w + 2, RestGas: 1096500 + 1141500*(w+1), CompanionBytes: 1 << 20, OtherCompanionBytes: other, OrdinaryCapacity: 7000000}
+	p := b1state.Profile{Network: 5, RootGenesisID: h.Genesis(), ExecutionChainID: 1337, RuntimeHash: [32]byte(common.HexToHash(b1registry.CodeHashHex)), CompilerHash: b1registry.CompilerHash(), WCert: w, DeltaEV: w + 1, DeltaHold: w + 2, RestGas: 1136500 + 1147500*(w+1), CompanionBytes: 1 << 20, OtherCompanionBytes: other, OrdinaryCapacity: 7000000, GenesisUCTime: 1000}
 	p.SystemGas, err = p.RequiredSystemGas()
 	require.NoError(t, err)
 	p.MaxGas = p.SystemGas + p.OrdinaryCapacity
@@ -65,7 +65,7 @@ func newFixture(t *testing.T, w, other, start uint64) *Fixture {
 	require.NoError(t, err)
 	rt, err := q3active.New(q3active.Config{DB: memorydb.New(), Genesis: c.TrustBase})
 	require.NoError(t, err)
-	pair := &b1paired.Config{Profile: p, Authority: rt.B1Authority(), Proofs: func(_ context.Context, s registryproof.Snapshot, keys []common.Hash) ([][][]byte, error) {
+	pair := &b1paired.Config{Profile: p, Authority: rt.B1Authority(), Records: EmptyRecords{UCTime: p.GenesisUCTime}, Proofs: func(_ context.Context, s registryproof.Snapshot, keys []common.Hash) ([][][]byte, error) {
 		return g.B1Proofs(keys), nil
 	}}
 	tr := certifiedchain.Technical(0)

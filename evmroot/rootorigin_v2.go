@@ -110,6 +110,9 @@ func (o RootOriginV2) Validate() error { _, err := o.Class(); return err }
 
 var ErrB1UpdateHash = errors.New("evmroot: B1 update hash must be 32 bytes")
 
+// ErrRootRecordsHash reports a root input whose rootRecordsHash is missing next to a B1 update hash, present without one, or not 32 bytes.
+var ErrRootRecordsHash = errors.New("evmroot: rootRecordsHash must be 32 bytes and accompany the B1 update hash")
+
 // RootInputV2 is the inactive v2 tuple. It deliberately does not share v1 validation.
 type RootInputV2 struct {
 	Version, NetworkID, PartitionID        uint64
@@ -120,6 +123,9 @@ type RootInputV2 struct {
 	TE                                     TechnicalRecord
 	Transitions                            [][]byte
 	B1UpdateHash                           []byte
+	// RootRecordsHash is SHA-256 of the canonical root-record import companion (rootrecords.Import), the thirteenth field of the fresh
+	// profile. Both hashes are mandatory together: the fresh tuple has 13 fields, a legacy one 11, and nothing in between.
+	RootRecordsHash []byte
 }
 
 func (ri RootInputV2) canonicalBody() cArray {
@@ -132,6 +138,9 @@ func (ri RootInputV2) canonicalBody() cArray {
 	if ri.B1UpdateHash != nil {
 		body = append(body, cBytes(ri.B1UpdateHash))
 	}
+	if ri.RootRecordsHash != nil {
+		body = append(body, cBytes(ri.RootRecordsHash))
+	}
 	return body
 }
 func (ri RootInputV2) Encode() []byte    { return marshalCBOR(ri.canonicalBody()) }
@@ -139,6 +148,9 @@ func (ri RootInputV2) ExtraData() Hash32 { return sha256.Sum256(ri.Encode()) }
 func (ri RootInputV2) Validate() error {
 	if ri.B1UpdateHash != nil && len(ri.B1UpdateHash) != 32 {
 		return ErrB1UpdateHash
+	}
+	if (ri.B1UpdateHash == nil) != (ri.RootRecordsHash == nil) || (ri.RootRecordsHash != nil && len(ri.RootRecordsHash) != 32) {
+		return ErrRootRecordsHash
 	}
 	if ri.Version != ProfileVersionV2 {
 		return fmt.Errorf("evmroot: v2 rootInput version %d", ri.Version)

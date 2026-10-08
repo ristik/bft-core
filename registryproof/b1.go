@@ -11,7 +11,7 @@ import (
 // This deployment has one slot domain and no layoutVersion word.
 const FreshB1 uint64 = 3
 
-var layoutB1 = newLayout(FreshB1, append(b1state.OperationalSlots(), "b1.network", "b1.wCert", "b1.profileHash", "b1.initialized", "b1.head", "b1.count"), []string{"genesisCommitment", "config.shardConfHash", "assignment.epoch", "assignment.rootEpoch", "assignment.activeConfHash", "phase", "b1.network", "b1.wCert", "b1.profileHash", "b1.initialized", "b1.count"})
+var layoutB1 = newLayout(FreshB1, append(append(b1state.OperationalSlots(), b1state.RecordSlots()...), "b1.network", "b1.wCert", "b1.profileHash", "b1.initialized", "b1.head", "b1.count"), []string{"genesisCommitment", "config.shardConfHash", "assignment.epoch", "assignment.rootEpoch", "assignment.activeConfHash", "records.ucTime", "phase", "b1.network", "b1.wCert", "b1.profileHash", "b1.initialized", "b1.count"})
 
 // VerifyWords verifies additional bounded storage proofs against the account
 // storage root already authenticated by Verify. Values never come from RPC summaries.

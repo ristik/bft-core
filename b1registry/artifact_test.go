@@ -10,7 +10,7 @@ import (
 )
 
 func profile(k uint64) b1state.Profile {
-	p := b1state.Profile{Network: 5, RootGenesisID: [32]byte{1}, ExecutionChainID: 1337, RuntimeHash: [32]byte(common.HexToHash(b1registry.CodeHashHex)), CompilerHash: b1registry.CompilerHash(), WCert: k - 1, DeltaEV: k, DeltaHold: k + 1, RestGas: 1096500 + 1141500*k, CompanionBytes: 1 << 20, OtherCompanionBytes: 65536, OrdinaryCapacity: 7000000}
+	p := b1state.Profile{Network: 5, RootGenesisID: [32]byte{1}, ExecutionChainID: 1337, RuntimeHash: [32]byte(common.HexToHash(b1registry.CodeHashHex)), CompilerHash: b1registry.CompilerHash(), WCert: k - 1, DeltaEV: k, DeltaHold: k + 1, RestGas: 1136500 + 1147500*k, CompanionBytes: 1 << 20, OtherCompanionBytes: 65536, OrdinaryCapacity: 7000000, GenesisUCTime: 1000}
 	p.SystemGas, _ = p.RequiredSystemGas()
 	p.MaxGas = p.SystemGas + p.OrdinaryCapacity
 	return p

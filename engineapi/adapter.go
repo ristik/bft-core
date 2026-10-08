@@ -83,6 +83,7 @@ type Adapter struct {
 type buildContext struct {
 	payloadID    data
 	b1Update     []byte
+	b1Records    []byte
 	b1Input      []byte
 	b1Commitment [32]byte
 	parent       shardnode.BlockRef
@@ -734,7 +735,7 @@ func (a *Adapter) buildDerived(ctx context.Context, p shardnode.RoundParams, der
 	a.mu.Lock()
 	a.pending[id] = buildContext{
 		payloadID: *resp.PayloadID,
-		b1Update:  bytes.Clone(derived.B1Update), b1Input: bytes.Clone(derived.Encoded), b1Commitment: derived.Commitment,
+		b1Update:  bytes.Clone(derived.B1Update), b1Records: bytes.Clone(derived.RecordsImport), b1Input: bytes.Clone(derived.Encoded), b1Commitment: derived.Commitment,
 		parent:          p.Parent,
 		certificate:     derived.Observation.Certificate(),
 		technicalRecord: derived.Observation.TechnicalRecord(),
@@ -748,7 +749,7 @@ func sealBuildInput(derived rootinput.ResultV2) SealBuildInput {
 	for i, transition := range derived.Input.Transitions {
 		transitions[i] = data(bytes.Clone(transition))
 	}
-	return SealBuildInput{RootInput: data(bytes.Clone(derived.Encoded)), Transitions: transitions, B1Update: data(bytes.Clone(derived.B1Update))}
+	return SealBuildInput{RootInput: data(bytes.Clone(derived.Encoded)), Transitions: transitions, B1Update: data(bytes.Clone(derived.B1Update)), RootRecords: data(bytes.Clone(derived.RecordsImport))}
 }
 
 // Seal retrieves the built payload. An empty user transaction list still
@@ -770,7 +771,7 @@ func (a *Adapter) Seal(ctx context.Context, id shardnode.BuildID) (shardnode.Blo
 		return shardnode.Block{}, fmt.Errorf("engineapi: getPayloadWithSealV1: %w", err)
 	}
 
-	if len(bc.b1Update) > 0 && (uint64(resp.ExecutionPayload.GasLimit) != a.verifier.B1.Profile.MaxGas || !bytes.Equal(resp.SealCompanion.B1Update, bc.b1Update) || !bytes.Equal(resp.SealCompanion.RootInput, bc.b1Input) || !bytes.Equal(resp.ExecutionPayload.ExtraData, bc.b1Commitment[:])) {
+	if len(bc.b1Update) > 0 && (uint64(resp.ExecutionPayload.GasLimit) != a.verifier.B1.Profile.MaxGas || !bytes.Equal(resp.SealCompanion.B1Update, bc.b1Update) || !bytes.Equal(resp.SealCompanion.RootRecords, bc.b1Records) || !bytes.Equal(resp.SealCompanion.RootInput, bc.b1Input) || !bytes.Equal(resp.ExecutionPayload.ExtraData, bc.b1Commitment[:])) {
 		return shardnode.Block{}, ErrCompanionBinding
 	}
 	// Even an empty user transaction list is a real execution payload: system contracts
@@ -797,10 +798,11 @@ func (a *Adapter) Seal(ctx context.Context, id shardnode.BuildID) (shardnode.Blo
 			slog.String("commitment", fmt.Sprintf("%x", resp.ExecutionPayload.ExtraData)))
 	}
 	return EncodeBlockWithSealCompanion(resp.ExecutionPayload, &SealCompanion{
-		B1Update:   resp.SealCompanion.B1Update,
-		RootInput:  resp.SealCompanion.RootInput,
-		Witnesses:  witnesses,
-		Provenance: resp.SealCompanion.Provenance,
+		B1Update:    resp.SealCompanion.B1Update,
+		RootRecords: resp.SealCompanion.RootRecords,
+		RootInput:   resp.SealCompanion.RootInput,
+		Witnesses:   witnesses,
+		Provenance:  resp.SealCompanion.Provenance,
 	})
 }
 
@@ -869,7 +871,7 @@ func (a *Adapter) CheckBlockBinding(ctx context.Context, b shardnode.Block, p sh
 	if a.verifier.B1 != nil && uint64(payload.GasLimit) != a.verifier.B1.Profile.MaxGas {
 		return b1paired.ErrAdmission
 	}
-	if !bytes.Equal(envelope.SealCompanion.B1Update, input.B1Update) || !bytes.Equal(envelope.SealCompanion.RootInput, input.Encoded) || !bytes.Equal(payload.ExtraData, input.Commitment[:]) {
+	if !bytes.Equal(envelope.SealCompanion.B1Update, input.B1Update) || !bytes.Equal(envelope.SealCompanion.RootRecords, input.RecordsImport) || !bytes.Equal(envelope.SealCompanion.RootInput, input.Encoded) || !bytes.Equal(payload.ExtraData, input.Commitment[:]) {
 		return ErrCompanionBinding
 	}
 	if b.Number != uint64(payload.BlockNumber) || !bytes.Equal(b.Hash, payload.BlockHash[:]) || !bytes.Equal(b.ParentHash, payload.ParentHash[:]) || !bytes.Equal(b.StateRoot, payload.StateRoot[:]) || !bytes.Equal(p.Parent.Hash, payload.ParentHash[:]) || b.Number != p.Parent.Number+1 {
@@ -989,7 +991,7 @@ func (a *Adapter) Verify(ctx context.Context, b shardnode.Block, p shardnode.Rou
 	// sharper than a field-by-field comparison: a substituted transition, a swapped record, a wrong
 	// origin or a wrong parent all fail on the encoding itself. It also pins that the companion's
 	// rootInput is the canonical encoding and not merely a decodable variant.
-	if !bytes.Equal(companion.B1Update, derived.B1Update) || !bytes.Equal(companion.RootInput, derived.Encoded) {
+	if !bytes.Equal(companion.B1Update, derived.B1Update) || !bytes.Equal(companion.RootRecords, derived.RecordsImport) || !bytes.Equal(companion.RootInput, derived.Encoded) {
 		return shardnode.StatusInvalid, fmt.Errorf("%w: round %d: companion rootInput %x is not the canonical derivation %x",
 			ErrCompanionBinding, p.Round, companion.RootInput, derived.Encoded)
 	}

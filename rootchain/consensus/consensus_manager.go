@@ -509,6 +509,7 @@ func (x *ConsensusManager) Run(ctx context.Context) error {
 			}
 			highRound = max(highRound, x.epochAnchor.Slot)
 		}
+		logRecoveredVote(ctx, x.log, vote)
 		x.pacemaker.Reset(ctx, highRound, lastTC, vote)
 
 		// Now that we have a better idea of current round, let's see if we need to update our trust base.
@@ -1178,6 +1179,7 @@ func (x *ConsensusManager) onProposalMsg(ctx context.Context, proposal *abdrc.Pr
 		// wait for timeout, if others make progress this node will need to recover
 		return fmt.Errorf("failed to sign vote: %w", err)
 	}
+	x.log.InfoContext(ctx, "signed vote", "round", proposal.Block.Round, "messageID", voteMessageID(voteMsg))
 	if err = x.blockStore.StoreLastVote(voteMsg); err != nil {
 		x.log.WarnContext(ctx, "vote store failed", logger.Error(err))
 	}
@@ -1453,6 +1455,15 @@ func (x *ConsensusManager) processNewRoundEvent(ctx context.Context) {
 			}
 		}
 	}
+	if profile == storage.ProfileHandoff && !oldSuffix && parentQC != nil {
+		// a closed epoch's CloseLiability is mandatory in the first ordinary block after its freeze, and in every block until it is in
+		closures, err := x.blockStore.ClosureControls(parentQC.GetRound(), x.trustBase.Load().Epoch, round)
+		if err != nil {
+			x.log.WarnContext(ctx, "cannot build the mandatory closure of the proposal", logger.Error(err))
+			return
+		}
+		payload.PosControls = append(closures, payload.PosControls...)
+	}
 	var parentAnchor *drctypes.EpochAnchor
 	if x.epochAnchor != nil && parentQC == nil {
 		parentAnchor = x.epochAnchor
@@ -1689,6 +1700,7 @@ func (x *ConsensusManager) onStateResponse(ctx context.Context, rsp *abdrc.State
 			// wait for timeout, if others make progress this node will need to recover
 			return fmt.Errorf("failed to sign vote: %w", err)
 		}
+		x.log.InfoContext(ctx, "signed vote", "round", prop.Block.Round, "messageID", voteMessageID(voteMsg))
 		x.pacemaker.SetVoted(voteMsg)
 		// send vote to the next leader
 		nextLeader, err := x.leaderSelector.GetLeaderForRound(x.pacemaker.GetCurrentRound() + 1)
@@ -1843,7 +1855,27 @@ var (
 
 // timeoutMessageID identifies the exact statement a timeout vote is: the SHA-256 of its canonical encoding, signature included. The same
 // recorded message recovered after a restart and broadcast again has the same identity; a different statement for the round has another.
-func timeoutMessageID(msg *abdrc.TimeoutMsg) string {
+func timeoutMessageID(msg *abdrc.TimeoutMsg) string { return messageID(msg) }
+
+// voteMessageID is the identity of a signed vote: the SHA-256 of the exact message, like timeoutMessageID.
+func voteMessageID(msg *abdrc.VoteMsg) string { return messageID(msg) }
+
+// logRecoveredVote records, with its identity, the last vote the node signed before it stopped and now holds again (a vote or a timeout
+// vote), so the lane can compare it with the identity logged when it was signed.
+func logRecoveredVote(ctx context.Context, log *slog.Logger, last any) {
+	switch v := last.(type) {
+	case *abdrc.VoteMsg:
+		if v != nil {
+			log.InfoContext(ctx, "recovered last vote", "kind", "vote", "round", v.VoteInfo.RoundNumber, "messageID", voteMessageID(v))
+		}
+	case *abdrc.TimeoutMsg:
+		if v != nil {
+			log.InfoContext(ctx, "recovered last vote", "kind", "timeout", "round", v.Timeout.Round, "messageID", timeoutMessageID(v))
+		}
+	}
+}
+
+func messageID(msg any) string {
 	raw, err := types.Cbor.Marshal(msg)
 	if err != nil {
 		return "unencodable"
