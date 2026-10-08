@@ -69,3 +69,37 @@ func TestLeaderPolicyTakesTheLatestActivationAtOrBelowTheEpoch(t *testing.T) {
 		require.Equal(t, want, p, "epoch %d", epoch)
 	}
 }
+
+// A store bound to the verified history takes every epoch's leader policy from the same committed tuple as the signing
+// configuration: the activation is the history's, not a call, and an epoch the history does not hold is an error.
+func TestABoundStoreTakesTheLeaderPolicyFromTheHistory(t *testing.T) {
+	s := threeEpochStore(t)
+	require.NoError(t, s.BindSigningAuthority(historyOf{1: legacy(), 2: cfg2()}))
+
+	p, err := s.LeaderPolicy(1)
+	require.NoError(t, err)
+	require.Equal(t, LeaderPolicyLegacy, p)
+	p, err = s.LeaderPolicy(2)
+	require.NoError(t, err)
+	require.Equal(t, LeaderPolicyWeightedV1, p)
+
+	// epoch 3 has a trust base but the history does not hold it: never an implicit legacy
+	_, err = s.LeaderPolicy(3)
+	require.ErrorIs(t, err, ErrLeaderPolicyHistory)
+	require.ErrorIs(t, err, errNotHeld)
+	// and no trust base is an error whatever the history says
+	_, err = s.LeaderPolicy(4)
+	require.ErrorIs(t, err, ErrLeaderPolicyHistory)
+
+	require.ErrorIs(t, s.ActivateLeaderPolicy(2, LeaderPolicyWeightedV1), ErrLeaderPolicyHistory, "a second source would disagree")
+}
+
+// The in-memory activation seam and the bound history never both answer: an activation recorded before the bind is not consulted.
+func TestABoundStoreIgnoresARecordedInMemoryPolicy(t *testing.T) {
+	s := threeEpochStore(t)
+	require.NoError(t, s.ActivateLeaderPolicy(2, LeaderPolicyWeightedV1))
+	require.NoError(t, s.BindSigningAuthority(historyOf{1: legacy(), 2: legacy(), 3: legacy()}))
+	p, err := s.LeaderPolicy(2)
+	require.NoError(t, err)
+	require.Equal(t, LeaderPolicyLegacy, p, "the history is the only source once bound")
+}

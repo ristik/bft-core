@@ -120,3 +120,19 @@ func TestHistorySigningIsExplicitPerEpoch(t *testing.T) {
 		require.ErrorIs(t, err, ErrUnknownEpoch, "an epoch the history does not hold is never scheme 1: %d", epoch)
 	}
 }
+
+func TestHistoryLeaderPolicyIsExplicitPerEpoch(t *testing.T) {
+	w := newWorld(t, 0)
+	h := w.append(spec{})
+	legacy, err := h.LeaderPolicy(1)
+	require.NoError(t, err)
+	require.Equal(t, LeaderPolicyLegacy, legacy, "a verified legacy epoch has no tuple")
+	active, err := h.LeaderPolicy(2)
+	require.NoError(t, err)
+	require.Equal(t, LeaderPolicyWeightedV1, active, "the tuple of a V3 epoch selects the weighted proposer-priority selector")
+	require.Equal(t, Q3Config(testNetwork, h.Genesis()).LeaderPolicy, active)
+	for _, epoch := range []uint64{0, 3, 99} {
+		_, err := h.LeaderPolicy(epoch)
+		require.ErrorIs(t, err, ErrUnknownEpoch, "an epoch the history does not hold is never legacy: %d", epoch)
+	}
+}

@@ -49,7 +49,7 @@ func newQ3Live(t *testing.T) *q3Live {
 	c.cfg = votesig.Config{Scheme: votesig.SchemeDomainBound, Network: q3fixture.Network, Genesis: f.Genesis}
 	for _, n := range f.NewNodes {
 		r := newQ3Replica(t, f, n)
-		r.link, r.durable, r.weightedLeader = c.net.connect(n.PeerConf.ID), true, true
+		r.link, r.durable = c.net.connect(n.PeerConf.ID), true
 		r.mustOpen(true)
 		t.Cleanup(r.close)
 		c.replicas = append(c.replicas, r)

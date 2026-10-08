@@ -35,7 +35,7 @@ WEIGHTS = [6, 1, 1, 1]
 NETWORK, GENESIS, EPOCH, A_MIN = 5, bytes([7]) * 32, 2, 20
 PRIOR_ID = bytes([0x11]) * 32
 
-config = [1, NETWORK, GENESIS, 2, 2, "D3", "mirrored-root-v1", "unit-v1"]
+config = [2, NETWORK, GENESIS, 2, 2, "D3", "root-wrr-v1", "mirrored-root-v1", "unit-v1"]
 config_enc = enc(["UNICITY_Q3_PROTOCOL_CONFIG", config])
 to_v3 = lambda version, ident: sha(enc(["UNICITY_TRUSTBASE_TO_V3", NETWORK, 1, version, ident]))
 predecessor = to_v3(1, PRIOR_ID)
