@@ -372,3 +372,26 @@ func TestShardKeyReplacementCLIFlow(t *testing.T) {
 		require.ErrorContains(t, err, "no aggregator changes")
 	})
 }
+
+// A weighted rotation out of a unit epoch: the proof request carries stakes the unit rule refuses, and only the bounded weights are asked
+// of the key holder.
+func TestEVMPoPSignsBoundedWeightsAndRefusesOutOfBoundOnes(t *testing.T) {
+	dir := t.TempDir()
+	keys := []successorKey{newSuccessorKey(t, "ev-a"), newSuccessorKey(t, "ev-b")}
+	ctx := consensus.EVMAssignmentContext{Network: 5, Predecessor: bytes.Repeat([]byte{1}, 32), Attempt: 0, Installed: installedPDR(t)}
+	contextFile := writeJSON(t, dir, "context.json", ctx)
+	pop := func(stakeA uint64) error {
+		infos := []*types.NodeInfo{{NodeID: "ev-a", SigKey: keys[0].info.SigKey, Stake: stakeA}, {NodeID: "ev-b", SigKey: keys[1].info.SigKey, Stake: 1}}
+		validatorsFile := writeJSON(t, dir, "validators.json", infos)
+		succ, err := evmassign.NewSuccessor(ctx.Installed, infos)
+		require.NoError(t, err)
+		identitiesFile, _, _, _ := identityFixture(t, dir, ctx.Installed, succ, ctx.Predecessor)
+		cmd := newRootCmd()
+		cmd.SetOut(&bytes.Buffer{})
+		cmd.SetArgs([]string{"handoff", "evm-pop", "--context", contextFile, "--validators", validatorsFile, "--node-id", "ev-a",
+			"--key-conf", writeJSON(t, dir, "a-keys.json", keys[0].conf), "--identities", identitiesFile})
+		return cmd.Execute()
+	}
+	require.NoError(t, pop(6), "a bounded weight is signed for")
+	require.ErrorIs(t, pop(0), evmassign.ErrAssignment, "a zero weight is not")
+}
