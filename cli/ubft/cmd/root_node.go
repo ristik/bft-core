@@ -67,6 +67,7 @@ type (
 		OrchestrationDBFile   string
 		GenesisIdentitiesFile string
 		PosDeploymentFile     string
+		PosEVMRPC             string
 		TrustHistoryDBFile    string
 		Profile2              bool
 		InstallHandoffEpoch   uint64
@@ -133,6 +134,8 @@ func rootNodeRunCmd(baseFlags *baseFlags) *cobra.Command {
 		"proof-of-authority genesis: JSON identity records of the genesis committee of the coupled EVM shard (`ubft genesis-identities generate`), recorded once as the incumbent baseline that the first coupled handoff's authorization names as K; a different set than the recorded one is refused")
 	cmd.Flags().StringVar(&flags.PosDeploymentFile, "pos-deployment", "",
 		"proof-of-stake: JSON pinning the custody deployment (networkWord, chainId, custody). Turns on the P85 control executor and the mandatory CloseLiability duty (profile 2 only); refused together with --genesis-identities")
+	cmd.Flags().StringVar(&flags.PosEVMRPC, "pos-evm-rpc", "",
+		"proof-of-stake: JSON-RPC URL of the execution client that serves eth_getProof at the frozen parent; required when the deployment pins an election (the root then builds the storage-proof witness of a primary candidate's Freeze)")
 	cmd.Flags().StringVar(&flags.OrchestrationDBFile, "orchestration-db", "",
 		fmt.Sprintf("path to the orchestration database (default: %s)", filepath.Join("$UBFT_HOME", orchestrationDBFileName)))
 	cmd.Flags().BoolVar(&flags.Profile2, "profile-2", false, "run the version-2 root handoff network profile")
@@ -334,7 +337,7 @@ func rootNodeRun(ctx context.Context, flags *rootNodeRunFlags) error {
 		if !flags.Profile2 {
 			return fmt.Errorf("%w: --pos-deployment needs --profile-2", ErrPosDeployment)
 		}
-		if err = enablePosClosure(cm, orchestration, trustBaseStore, trustBase, shardConfs, flags.PosDeploymentFile, flags.GenesisIdentitiesFile != ""); err != nil {
+		if err = enablePosClosure(cm, orchestration, trustBaseStore, trustBase, shardConfs, flags.PosDeploymentFile, flags.GenesisIdentitiesFile != "", flags.PosEVMRPC); err != nil {
 			return err
 		}
 		stopWitnesses := serveWitnesses(host, cm)

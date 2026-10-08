@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"errors"
 	"path/filepath"
 	"testing"
 	"time"
@@ -824,6 +825,36 @@ func TestWrongParentEndorsementDoesNotBlockTheQuorum(t *testing.T) {
 		require.Error(t, err, "two of four is not yet a quorum")
 		require.Nil(t, ready)
 		require.Len(t, cm.handoffPlans[id].signatures, 2)
+	})
+	t.Run("the proof judgement comes last: no signature, no work", func(t *testing.T) {
+		parentBlock.ShardState.Control = prepared
+		cm.handoffPlans = nil
+		judged := 0
+		cm.judgeHook = func(*abdrc.HandoffApprovalMsg) error { judged++; return nil }
+		t.Cleanup(func() { cm.judgeHook = nil })
+
+		forged := signAs(f.others[2], f.parentHash, activation)
+		forged.Signature = bytes.Repeat([]byte{1}, len(forged.Signature))
+		require.ErrorIs(t, cm.onHandoffApprovalMsg(ctx, &forged), ErrHandoffApproval)
+		forgedAbort := signAs(f.others[2], f.parentHash, activation)
+		forgedAbort.AbortSignature = bytes.Repeat([]byte{1}, len(forgedAbort.AbortSignature))
+		require.ErrorIs(t, cm.onHandoffApprovalMsg(ctx, &forgedAbort), ErrHandoffApproval)
+		stranger := signAs(testutils.NewTestNode(t), f.parentHash, activation)
+		require.ErrorIs(t, cm.onHandoffApprovalMsg(ctx, &stranger), ErrHandoffApproval, "not a member of the old committee")
+		wrong := signAs(f.others[2], wrongParent, activation)
+		require.ErrorIs(t, cm.onHandoffApprovalMsg(ctx, &wrong), ErrEndorsedParentMismatch)
+		require.Zero(t, judged, "a bad signature or a parent other than the Prepare's costs nothing")
+
+		good := signAs(f.others[0], f.parentHash, activation)
+		require.NoError(t, cm.onHandoffApprovalMsg(ctx, &good))
+		require.Equal(t, 1, judged)
+
+		// and its refusal keeps the approval out of the plan
+		cm.judgeHook = func(*abdrc.HandoffApprovalMsg) error { return errors.Join(ErrHandoffApproval, errPrimaryFactsPending) }
+		cm.handoffPlans = nil
+		held := signAs(f.others[1], f.parentHash, activation)
+		require.ErrorIs(t, cm.onHandoffApprovalMsg(ctx, &held), errPrimaryFactsPending)
+		require.Empty(t, cm.handoffPlans)
 	})
 	t.Run("a slot taken before the Prepare was known here is not kept", func(t *testing.T) {
 		parentBlock.ShardState.Control = &idle // this validator has not committed the Prepare yet

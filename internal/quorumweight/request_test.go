@@ -347,10 +347,13 @@ func TestWeightedRequestContextRefusals(t *testing.T) {
 		require.ErrorIs(t, err, ErrZeroWeight)
 	})
 	t.Run("member cap", func(t *testing.T) {
-		p, c := coupled(t, MaxMemberWeight, 1)
+		p, c := coupled(t, MaxMemberWeight-1, 1)
 		x, err := NewWeightedRequestContext(p, crypto.SHA256, confHash(t, p), c)
 		require.NoError(t, err)
-		require.EqualValues(t, MaxMemberWeight+1, x.TotalWeight())
+		require.EqualValues(t, MaxMemberWeight, x.TotalWeight(), "a total of exactly B is admitted")
+		p, c = coupled(t, MaxMemberWeight, 1)
+		_, err = NewWeightedRequestContext(p, crypto.SHA256, confHash(t, p), c)
+		require.ErrorIs(t, err, ErrWeightCap, "W = B+1 is refused")
 		p, c = coupled(t, MaxMemberWeight+1, 1)
 		_, err = NewWeightedRequestContext(p, crypto.SHA256, confHash(t, p), c)
 		require.ErrorIs(t, err, ErrWeightCap)
@@ -358,12 +361,12 @@ func TestWeightedRequestContextRefusals(t *testing.T) {
 	t.Run("largest admissible total", func(t *testing.T) {
 		ws := make([]uint64, evmassign.MaxValidators)
 		for i := range ws {
-			ws[i] = MaxMemberWeight
+			ws[i] = MaxTotalWeight / evmassign.MaxValidators
 		}
 		p, c := coupled(t, ws...)
 		x, err := NewWeightedRequestContext(p, crypto.SHA256, confHash(t, p), c)
 		require.NoError(t, err)
-		require.EqualValues(t, evmassign.MaxValidators*MaxMemberWeight, x.TotalWeight())
+		require.EqualValues(t, evmassign.MaxValidators*(MaxTotalWeight/evmassign.MaxValidators), x.TotalWeight())
 		require.LessOrEqual(t, x.TotalWeight(), MaxTotalWeight)
 	})
 	t.Run("member count cap", func(t *testing.T) {

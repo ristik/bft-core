@@ -822,6 +822,7 @@ func TestHandoffIsolatedGuards(t *testing.T) {
 	t.Run("record_order_round", func(t *testing.T) {
 		_, err := applyHandoffRecord(initialControl(5), record("prepare", 3, 7, zero, body, zero), 5, 1, 2, testRecordAuthority{}, nil)
 		require.ErrorIs(t, err, ErrHandoffRecord)
+		require.ErrorContains(t, err, "ordered round is not this block's", "the refusal names its cause")
 	})
 	t.Run("record_phase", func(t *testing.T) {
 		_, err := applyHandoffRecord(initialControl(5), record("freeze", 2, 7, frozen, body, zero), 5, 1, 2, testRecordAuthority{}, nil)
@@ -832,6 +833,7 @@ func TestHandoffIsolatedGuards(t *testing.T) {
 		require.NoError(t, err)
 		_, err = applyHandoffRecord(prepared, record("prepare", 3, 7, zero, body, zero), 5, 1, 3, testRecordAuthority{}, nil)
 		require.ErrorIs(t, err, ErrHandoffRecord)
+		require.ErrorContains(t, err, "prepare record cannot follow phase prepared", "the refusal names its cause")
 	})
 	t.Run("terminal_outcome", func(t *testing.T) {
 		prepared, err := applyHandoffRecord(initialControl(5), record("prepare", 2, 7, zero, body, zero), 5, 1, 2, testRecordAuthority{}, nil)

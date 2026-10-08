@@ -29,4 +29,8 @@ type HandoffApprovalMsg struct {
 	// V2 plan. It is evidence the Freeze companion carries, not something an endorsement signs: every approval's receipts are checked
 	// against the body, and the first valid set a validator holds is the one its leader orders.
 	Receipts []byte
+	// PrimaryPoPs is the canonical list of EVM possession proofs (evmassign.EncodePoPs) of a primary candidate on a chain that judges
+	// its EVM proof. Evidence like Receipts: no endorsement signs it. The leader joins it to the storage-proof witness it builds at the
+	// frozen parent. Empty for a recovery or a root-only plan.
+	PrimaryPoPs []byte
 }

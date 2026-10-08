@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"math/bits"
 	"sort"
+
+	"github.com/unicitynetwork/bft-core/internal/weightcap"
 )
 
 // D3 weighted-consensus model. Reference for versioned weighted quorum,
@@ -26,8 +28,12 @@ import (
 // Record"). The per-member and total caps keep every sum and threshold
 // computation inside a checked 128-bit intermediate with room to spare.
 const (
-	MaxMemberWeight uint64 = 1 << 40 // ~1.1e12 u per member
-	MaxTotalWeight  uint64 = 1 << 48 // ~2.8e14 u total; below this, 2*W cannot overflow uint64
+	// MaxTotalWeight is the one profile bound B on a committed committee's total weight, and MaxMemberWeight on one member (it cannot
+	// exceed the total). The bound keeps every sum and threshold inside uint64 with room to spare and, more importantly, bounds the
+	// weighted leader schedule's period (internal/weightcap, briefs/leader-lookup.md). Real stake above it is quantized to fit
+	// before it is committed; nothing larger is admitted.
+	MaxMemberWeight uint64 = weightcap.B
+	MaxTotalWeight  uint64 = weightcap.B
 
 	// ConsensusKeyLen is the fixed width of a compressed secp256k1 public
 	// key — the consensus signing key bound in each member record.
