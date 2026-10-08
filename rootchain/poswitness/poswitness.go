@@ -165,7 +165,7 @@ func (s *Server) release(from peer.ID) {
 // unreachable, does not hold it, resets the stream (it is serving its limit of streams) or answers with other bytes is skipped; the
 // whole list is walked up to FetchRounds times with a growing pause, so a burst of voters that overran the author's stream limit gets
 // the witness once the first streams finish. ctx bounds the whole fetch.
-func Fetch(ctx context.Context, opener Opener, peers []peer.ID, hash [32]byte) ([]byte, error) {
+func Fetch(ctx context.Context, opener Opener, peers []peer.ID, hash [32]byte, maxBytes int) ([]byte, error) {
 	var errs []error
 	for round := 0; round < FetchRounds && len(peers) > 0; round++ {
 		if round > 0 {
@@ -178,7 +178,7 @@ func Fetch(ctx context.Context, opener Opener, peers []peer.ID, hash [32]byte) (
 			if ctx.Err() != nil {
 				return nil, errors.Join(append([]error{ErrUnavailable, ctx.Err()}, errs...)...)
 			}
-			data, err := fetchOne(ctx, opener, p, hash)
+			data, err := fetchOne(ctx, opener, p, hash, maxBytes)
 			if err == nil {
 				return data, nil
 			}
@@ -188,17 +188,18 @@ func Fetch(ctx context.Context, opener Opener, peers []peer.ID, hash [32]byte) (
 	return nil, errors.Join(append([]error{ErrUnavailable}, errs...)...)
 }
 
-func fetchOne(ctx context.Context, opener Opener, to peer.ID, hash [32]byte) ([]byte, error) {
+func fetchOne(ctx context.Context, opener Opener, to peer.ID, hash [32]byte, maxBytes int) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(ctx, ClientDeadline)
 	defer cancel()
 	st, err := opener.CreateStream(ctx, to, ProtocolID)
 	if err != nil {
 		return nil, err
 	}
-	return exchange(ctx, st, hash)
+	return exchange(ctx, st, hash, maxBytes)
 }
 
-func exchange(ctx context.Context, st Stream, hash [32]byte) ([]byte, error) {
+func exchange(ctx context.Context, st Stream, hash [32]byte, maxBytes int) ([]byte, error) {
+	maxBytes = min(max(maxBytes, 1), MaxWitnessBytes)
 	if dl, ok := ctx.Deadline(); ok {
 		if err := st.SetDeadline(dl); err != nil {
 			_ = st.Reset()
@@ -229,7 +230,7 @@ func exchange(ctx context.Context, st Stream, hash [32]byte) ([]byte, error) {
 		_ = st.Close()
 		return nil, errors.New("the peer does not hold the witness")
 	}
-	if n > MaxWitnessBytes {
+	if int64(n) > int64(maxBytes) {
 		_ = st.Reset()
 		return nil, fmt.Errorf("%w: %d bytes exceed the bound", ErrWire, n)
 	}

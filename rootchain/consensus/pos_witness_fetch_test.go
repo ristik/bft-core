@@ -66,7 +66,7 @@ func TestFetchWitnessesAsksTheAuthorFirstAndNeverItself(t *testing.T) {
 	data := []byte("a witness")
 	hash := sha256.Sum256(data)
 	var asked [][]peer.ID
-	x.witnesses = func(_ context.Context, h [32]byte, peers []peer.ID) ([]byte, error) {
+	x.witnesses = func(_ context.Context, h [32]byte, peers []peer.ID, _ int) ([]byte, error) {
 		require.Equal(t, hash, h)
 		asked = append(asked, peers)
 		return data, nil
@@ -83,7 +83,7 @@ func TestFetchWitnessesSkipsWhatIsHeldAndAsksOncePerBlock(t *testing.T) {
 	held, missing := []byte("held"), []byte("missing")
 	hh, hm := sha256.Sum256(held), sha256.Sum256(missing)
 	calls := 0
-	x.witnesses = func(_ context.Context, h [32]byte, _ []peer.ID) ([]byte, error) {
+	x.witnesses = func(_ context.Context, h [32]byte, _ []peer.ID, _ int) ([]byte, error) {
 		calls++
 		require.Equal(t, hm, h, "only the missing witness is fetched")
 		return missing, nil
@@ -101,7 +101,9 @@ func TestFetchWitnessesSkipsWhatIsHeldAndAsksOncePerBlock(t *testing.T) {
 func TestFetchWitnessesRefusesAnUnavailableWitnessAsUnavailableNotInvalid(t *testing.T) {
 	x, _, author, _ := witnessFixture(t)
 	hash := sha256.Sum256([]byte("withheld"))
-	x.witnesses = func(context.Context, [32]byte, []peer.ID) ([]byte, error) { return nil, errors.New("nobody has it") }
+	x.witnesses = func(context.Context, [32]byte, []peer.ID, int) ([]byte, error) {
+		return nil, errors.New("nobody has it")
+	}
 	store := &heldWitnesses{m: map[[32]byte][]byte{}}
 	err := x.fetchWitnesses(context.Background(), store, blockWith(author, hash))
 	require.ErrorIs(t, err, storage.ErrWitnessUnavailable)
@@ -120,7 +122,7 @@ func TestWithoutAFetcherTheStoreIsTheOnlySource(t *testing.T) {
 func TestFetchWitnessesRefusesBytesThatAreNotTheCommittedWitness(t *testing.T) {
 	x, _, author, _ := witnessFixture(t)
 	hash := sha256.Sum256([]byte("wanted"))
-	x.witnesses = func(context.Context, [32]byte, []peer.ID) ([]byte, error) { return []byte("other"), nil }
+	x.witnesses = func(context.Context, [32]byte, []peer.ID, int) ([]byte, error) { return []byte("other"), nil }
 	store := &heldWitnesses{m: map[[32]byte][]byte{}}
 	err := x.fetchWitnesses(context.Background(), store, blockWith(author, hash))
 	require.ErrorIs(t, err, storage.ErrWitnessUnavailable)
@@ -131,7 +133,7 @@ func TestFetchWitnessesRefusesAControlThatCannotBeValidBeforeFetchingAnything(t 
 	x, _, author, _ := witnessFixture(t)
 	hash := sha256.Sum256([]byte("w"))
 	fetched := false
-	x.witnesses = func(context.Context, [32]byte, []peer.ID) ([]byte, error) { fetched = true; return nil, nil }
+	x.witnesses = func(context.Context, [32]byte, []peer.ID, int) ([]byte, error) { fetched = true; return nil, nil }
 	store := &heldWitnesses{m: map[[32]byte][]byte{}}
 	for name, mutate := range map[string]func(c *rctypes.PosControl){
 		"another ordering round": func(c *rctypes.PosControl) { c.OrderingRound++ },
@@ -150,7 +152,7 @@ func TestFetchWitnessesRefusesAControlThatCannotBeValidBeforeFetchingAnything(t 
 func TestFetchWitnessesIsBoundedByOneDeadlineForTheWholeBlock(t *testing.T) {
 	x, _, author, _ := witnessFixture(t)
 	x.params = &Parameters{LocalTimeout: 200 * time.Millisecond} // budget: 100ms
-	x.witnesses = func(ctx context.Context, _ [32]byte, _ []peer.ID) ([]byte, error) {
+	x.witnesses = func(ctx context.Context, _ [32]byte, _ []peer.ID, _ int) ([]byte, error) {
 		<-ctx.Done() // a peer that accepts and trickles
 		return nil, ctx.Err()
 	}
@@ -159,4 +161,17 @@ func TestFetchWitnessesIsBoundedByOneDeadlineForTheWholeBlock(t *testing.T) {
 	err := x.fetchWitnesses(context.Background(), &heldWitnesses{m: map[[32]byte][]byte{}}, blockWith(author, hashes...))
 	require.ErrorIs(t, err, storage.ErrWitnessUnavailable)
 	require.Less(t, time.Since(start), time.Second, "three controls share one budget instead of waiting out each")
+}
+
+func TestAVotersPullIsBoundedByTheOpOfTheControl(t *testing.T) {
+	x, _, author, _ := witnessFixture(t)
+	data := []byte("a witness")
+	hash := sha256.Sum256(data)
+	var got int
+	x.witnesses = func(_ context.Context, _ [32]byte, _ []peer.ID, maxBytes int) ([]byte, error) {
+		got = maxBytes
+		return data, nil
+	}
+	require.NoError(t, x.fetchWitnesses(context.Background(), &heldWitnesses{m: map[[32]byte][]byte{}}, blockWith(author, hash)))
+	require.Equal(t, storage.MaxEVMWitnessBytes, got, "a Retirement's witness may not be longer than the executor accepts")
 }
