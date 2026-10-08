@@ -505,11 +505,15 @@ type Fields struct {
 
 	B1Initialized, B1Network, B1WCert, B1Head, B1Count uint64
 	B1ProfileHash                                      common.Hash
-	LayoutVersion                                      uint64
-	GenesisCommitment                                  common.Hash
-	ShardConfHash                                      common.Hash
-	ShardEpoch                                         uint64
-	RootEpoch                                          uint64
+	// The authenticated root-record log words (FreshB1 only): imported count and tip, the progress and UC time of the last import, the
+	// length and tip of the source log as of it, and the last round that imported.
+	RecordsCount, RecordsProgress, RecordsUCTime, RecordsTargetCount, RecordsImportedRound uint64
+	RecordsTip, RecordsTargetTip                                                           common.Hash
+	LayoutVersion                                                                          uint64
+	GenesisCommitment                                                                      common.Hash
+	ShardConfHash                                                                          common.Hash
+	ShardEpoch                                                                             uint64
+	RootEpoch                                                                              uint64
 	// Layout is the local registry reader selector, including FreshB1.
 	Layout uint64
 	// ActiveConfHash and SpanCommitment exist in layout 2 and FreshB1. ShardConfHash stays the immutable genesis hash.
@@ -566,6 +570,17 @@ func decodeFields(lay *layout, w []common.Hash) (Fields, error) {
 			dst  *uint64
 		}{"b1.count", &s.B1Count})
 		s.B1ProfileHash = at("b1.profileHash")
+		s.RecordsTip, s.RecordsTargetTip = at("records.tip"), at("records.targetTip")
+		for _, r := range []struct {
+			name string
+			dst  *uint64
+		}{{"records.count", &s.RecordsCount}, {"records.progress", &s.RecordsProgress}, {"records.ucTime", &s.RecordsUCTime},
+			{"records.targetCount", &s.RecordsTargetCount}, {"records.importedRound", &s.RecordsImportedRound}} {
+			scalars = append(scalars, struct {
+				name string
+				dst  *uint64
+			}{r.name, r.dst})
+		}
 	} else {
 		scalars = append(scalars, struct {
 			name string

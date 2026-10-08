@@ -1,14 +1,19 @@
 package storage
 
 import (
+	"bytes"
+	"crypto"
 	"crypto/sha256"
 	"errors"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 	"github.com/unicitynetwork/bft-core/evmassign"
+	"github.com/unicitynetwork/bft-core/evmroot"
+	"github.com/unicitynetwork/bft-core/internal/testutils/logger"
 	rctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
 	"github.com/unicitynetwork/bft-core/rootrecords"
+	"github.com/unicitynetwork/bft-go-base/types"
 )
 
 type fakeAuthority struct {
@@ -89,7 +94,8 @@ func newCloseFx(t *testing.T) *closeFx {
 
 func (f *closeFx) run() error {
 	f.block.Payload.PosControls = []rctypes.PosControl{f.ctl}
-	return f.step.controls(f.block, f.svc)
+	_, err := f.step.controls(f.block, f.svc, posEnv{})
+	return err
 }
 
 func TestCloseLiabilityProjectsOnceFromAVerifiedBundle(t *testing.T) {
@@ -172,12 +178,620 @@ func TestControlsAreRefusedWithoutServicesOrASourceState(t *testing.T) {
 	f = newCloseFx(t)
 	f.block.Payload.PosControls = nil
 	f.svc = nil
-	require.NoError(t, f.step.controls(f.block, f.svc))
+	_, err := f.step.controls(f.block, f.svc, posEnv{})
+	require.NoError(t, err)
 }
 
-func TestRetirementAndRejectAreNotExecutedYet(t *testing.T) {
+type fakeEVM struct {
+	retire      RetirementFacts
+	reject      RejectFacts
+	err         error
+	seen        []byte
+	roots       [][32]byte
+	rejectAsked [2]any
+	retireAsked [2]uint64
+}
+
+func (e *fakeEVM) VerifyRetirement(w []byte, root [32]byte, id, gen uint64) (RetirementFacts, error) {
+	e.seen = w
+	e.roots = append(e.roots, root)
+	e.retireAsked = [2]uint64{id, gen}
+	return e.retire, e.err
+}
+func (e *fakeEVM) VerifyReject(w []byte, root [32]byte, resultID [32]byte, attempt uint64) (RejectFacts, error) {
+	e.seen = w
+	e.roots = append(e.roots, root)
+	e.rejectAsked = [2]any{resultID, attempt}
+	return e.reject, e.err
+}
+
+type evmFx struct {
+	svc   *PosServices
+	evm   *fakeEVM
+	step  posStep
+	env   posEnv
+	block *rctypes.BlockData
+	ctl   rctypes.PosControl
+}
+
+var (
+	pBlock = [32]byte{0xe1}
+	pRoot  = [32]byte{0xe2}
+)
+
+func newEVMFx(t *testing.T, op uint64) *evmFx {
+	t.Helper()
+	witness := []byte("accounts")
+	evm := &fakeEVM{}
+	dep := PosDeployment{RootNetwork: 7, Deployment: evmassign.Deployment{NetworkWord: [32]byte{1}, ChainID: [32]byte{31: 9}, Custody: [20]byte{19: 5}}}
+	f := &evmFx{evm: evm}
+	f.svc = &PosServices{Deployment: dep, Authority: &fakeAuthority{}, Witnesses: fakeWitnesses{sha256.Sum256(witness): witness}, EVM: evm}
+	st := rootrecords.NewState(1, 1)
+	f.step = posStep{on: true, state: st}
+	f.env = posEnv{Control: &evmroot.ControlState{Network: 7, Epoch: 1, PredecessorBodyID: bytes32(0x77), Phase: "idle"}, LatestEVMRoot: pRoot, LatestEVMBlock: pBlock[:], LatestEVMOK: true}
+	f.block = &rctypes.BlockData{Epoch: 1, Round: 50, Timestamp: 2_000, Payload: &rctypes.Payload{}}
+	f.ctl = rctypes.PosControl{Network: 7, ChainID: dep.ChainID, Custody: dep.Custody, OrderingEpoch: 1, OrderingRound: 50, Op: op, WitnessHash: sha256.Sum256(witness)}
+	switch op {
+	case rctypes.OpRetirement:
+		ref := [32]byte{0xc4}
+		f.ctl.Retire = &rctypes.RetireContext{EVMBlockHash: pBlock, EVMStateRoot: pRoot}
+		f.ctl.Data = append(append(word(3), word(2)...), ref[:]...)
+		evm.retire = RetirementFacts{ID: 3, Generation: 2, RefDigest: ref, MaxLiabilityAnchor: 40, Requested: true, NotImported: true,
+			NoLiveExposures: true, NoLotReferences: true, RecordsCaughtUp: true}
+	case rctypes.OpRejectResult:
+		res := [32]byte{0x5e}
+		f.ctl.Reject = &rctypes.RejectContext{PredecessorBodyID: [32]byte{0x77}, Attempt: 0, EVMBlockHash: pBlock, EVMStateRoot: pRoot}
+		f.ctl.Data = res[:]
+		evm.reject = RejectFacts{ResultID: res, Attempt: 0, Unresolved: true, NoInstalledSession: true}
+	}
+	return f
+}
+
+func bytes32(b byte) []byte { x := [32]byte{b}; return x[:] }
+
+func (f *evmFx) run() (*evmroot.ControlState, error) {
+	f.block.Payload.PosControls = []rctypes.PosControl{f.ctl}
+	return f.step.controls(f.block, f.svc, f.env)
+}
+
+func TestRetirementProjectsFromCertifiedCustodyState(t *testing.T) {
+	f := newEVMFx(t, rctypes.OpRetirement)
+	f.step.state = mustProgress(t, f.step.state)
+	replaced, err := f.run()
+	require.NoError(t, err)
+	require.Nil(t, replaced)
+	require.Len(t, f.step.records, 1)
+	r := f.step.records[0]
+	require.Equal(t, rootrecords.KindRetirement, r.Kind)
+	require.Equal(t, f.ctl.Data, r.Data)
+	require.EqualValues(t, 2_000, r.UCTime)
+	require.Equal(t, []byte("accounts"), f.evm.seen)
+	ref, ok := f.step.state.IsRetired(3, 2)
+	require.True(t, ok)
+	require.Equal(t, [32]byte{0xc4}, ref)
+	// the same request again returns the existing outcome and emits nothing
+	_, err = f.run()
+	require.NoError(t, err)
+	require.Len(t, f.step.records, 1)
+}
+
+func mustProgress(t *testing.T, s rootrecords.State) rootrecords.State { return s }
+
+func TestRetirementRefusals(t *testing.T) {
+	cases := map[string]func(f *evmFx){
+		"P is not the latest certified":                  func(f *evmFx) { f.env.LatestEVMRoot = [32]byte{0xff} },
+		"no certified EVM in the parent":                 func(f *evmFx) { f.env.LatestEVMOK = false },
+		"a block hash that is not the certified block's": func(f *evmFx) { f.ctl.Retire.EVMBlockHash[0]++ },
+		"a state root that is not the certified one":     func(f *evmFx) { f.ctl.Retire.EVMStateRoot[0]++ },
+		"a handoff in flight":                            func(f *evmFx) { f.env.InFlight = true },
+		"another identity":                               func(f *evmFx) { f.evm.retire.ID = 4 },
+		"another generation":                             func(f *evmFx) { f.evm.retire.Generation = 3 },
+		"a refDigest that is not custody's":              func(f *evmFx) { f.evm.retire.RefDigest[0]++ },
+		"no request at P":                                func(f *evmFx) { f.evm.retire.Requested = false },
+		"already retired in the registry":                func(f *evmFx) { f.evm.retire.NotImported = false },
+		"a live exposure":                                func(f *evmFx) { f.evm.retire.NoLiveExposures = false },
+		"a lot reference":                                func(f *evmFx) { f.evm.retire.NoLotReferences = false },
+		"records not caught up":                          func(f *evmFx) { f.evm.retire.RecordsCaughtUp = false },
+		"progress below the liability anchor":            func(f *evmFx) { f.evm.retire.MaxLiabilityAnchor = 1 << 40 },
+		"the proof verifier rejects":                     func(f *evmFx) { f.evm.err = errors.New("bad proof") },
+		"a witness that is not available":                func(f *evmFx) { f.ctl.WitnessHash[0]++ },
+		"a retirement id above uint64": func(f *evmFx) {
+			f.ctl.Data[0] = 1
+			f.evm.retire.ID = 0
+		},
+	}
+	for name, mut := range cases {
+		t.Run(name, func(t *testing.T) {
+			f := newEVMFx(t, rctypes.OpRetirement)
+			mut(f)
+			_, err := f.run()
+			require.Error(t, err)
+			if name == "a witness that is not available" {
+				require.ErrorIs(t, err, ErrWitnessUnavailable)
+			} else if name == "progress below the liability anchor" {
+				require.ErrorIs(t, err, rootrecords.ErrRetireEarly)
+			} else {
+				require.ErrorIs(t, err, ErrPosControlRefused)
+			}
+			require.Empty(t, f.step.records)
+			_, retired := f.step.state.IsRetired(3, 2)
+			require.False(t, retired)
+		})
+	}
+	t.Run("a conflicting repeat", func(t *testing.T) {
+		f := newEVMFx(t, rctypes.OpRetirement)
+		_, err := f.run()
+		require.NoError(t, err)
+		f.evm.retire.RefDigest[1]++
+		copy(f.ctl.Data[64:], f.evm.retire.RefDigest[:])
+		_, err = f.run()
+		require.ErrorIs(t, err, rootrecords.ErrRetirementConflict)
+		require.Len(t, f.step.records, 1)
+	})
+	t.Run("no EVM authority", func(t *testing.T) {
+		f := newEVMFx(t, rctypes.OpRetirement)
+		f.svc.EVM = nil
+		_, err := f.run()
+		require.ErrorIs(t, err, ErrPosControls)
+	})
+}
+
+func TestRejectResultClosesTheSessionAndMovesTheAttemptCursor(t *testing.T) {
+	f := newEVMFx(t, rctypes.OpRejectResult)
+	before := f.env.Control.Digest()
+	replaced, err := f.run()
+	require.NoError(t, err)
+	require.NotNil(t, replaced)
+	require.Equal(t, "aborted", replaced.Phase)
+	require.EqualValues(t, 0, replaced.Attempt)
+	require.EqualValues(t, 50, replaced.OrderedRound)
+	require.Equal(t, before, replaced.PreviousDigest)
+	require.Equal(t, bytes32(0x77), replaced.PredecessorBodyID)
+	require.Len(t, f.step.records, 1)
+	require.Equal(t, rootrecords.KindSessionClosed, f.step.records[0].Kind)
+	require.Equal(t, f.ctl.Data, f.step.records[0].Data)
+	require.EqualValues(t, 2_000, f.step.records[0].UCTime)
+
+	// the next attempt is attempt one, and a second rejection of attempt zero is stale
+	f.env.Control = replaced
+	_, err = f.run()
+	require.ErrorIs(t, err, ErrPosControlRefused)
+	f.ctl.Reject.Attempt, f.evm.reject.Attempt = 1, 1
+	_, err = f.run()
+	require.ErrorIs(t, err, rootrecords.ErrResultResolved, "the same result is not closed twice")
+	require.Len(t, f.step.records, 1)
+	fresh := [32]byte{0x5f}
+	f.ctl.Data, f.evm.reject.ResultID = fresh[:], fresh
+	next, err := f.run()
+	require.NoError(t, err)
+	require.EqualValues(t, 1, next.Attempt)
+	require.Len(t, f.step.records, 2)
+}
+
+func TestRejectResultRefusals(t *testing.T) {
+	cases := map[string]func(f *evmFx){
+		"a prepared handoff":  func(f *evmFx) { f.env.Control.Phase = "prepared" },
+		"an endorsed handoff": func(f *evmFx) { f.env.Control.Phase = "endorsed" },
+		"a committed handoff": func(f *evmFx) { f.env.Control.Phase = "committed" },
+		"a pending primary":   func(f *evmFx) { f.step.state.Pending = []rootrecords.PendingH{{Epoch: 1, HRound: 9}} },
+		"another predecessor than the control state's": func(f *evmFx) {
+			f.ctl.Reject.PredecessorBodyID[0]++
+		},
+		"a stale attempt":                                func(f *evmFx) { f.ctl.Reject.Attempt = 3 },
+		"P is not the latest certified":                  func(f *evmFx) { f.env.LatestEVMRoot = [32]byte{0xff} },
+		"a block hash that is not the certified block's": func(f *evmFx) { f.ctl.Reject.EVMBlockHash[0]++ },
+		"a state root that is not the certified one":     func(f *evmFx) { f.ctl.Reject.EVMStateRoot[0]++ },
+		"another result in the proof":                    func(f *evmFx) { f.evm.reject.ResultID[0]++ },
+		"another attempt in the proof":                   func(f *evmFx) { f.evm.reject.Attempt = 1 },
+		"an already resolved result":                     func(f *evmFx) { f.evm.reject.Unresolved = false },
+		"a competing installed session":                  func(f *evmFx) { f.evm.reject.NoInstalledSession = false },
+		"the proof verifier rejects":                     func(f *evmFx) { f.evm.err = errors.New("bad proof") },
+		"no handoff control state":                       func(f *evmFx) { f.env.Control = nil },
+	}
+	for name, mut := range cases {
+		t.Run(name, func(t *testing.T) {
+			f := newEVMFx(t, rctypes.OpRejectResult)
+			mut(f)
+			replaced, err := f.run()
+			require.Error(t, err)
+			if name == "no handoff control state" {
+				require.ErrorIs(t, err, ErrPosControls)
+			} else {
+				require.ErrorIs(t, err, ErrPosControlRefused)
+			}
+			require.Nil(t, replaced)
+			require.Empty(t, f.step.records)
+		})
+	}
+}
+
+func TestControlsInOneBlockAreCappedAtTheRecordLimit(t *testing.T) {
+	f := newEVMFx(t, rctypes.OpRetirement)
+	for i := 0; i < maxBlockRecords+1; i++ {
+		f.step.records = append(f.step.records, rootrecords.Record{})
+	}
+	f.block.Payload.PosControls = nil
+	_, err := f.step.controls(f.block, f.svc, f.env)
+	require.ErrorIs(t, err, ErrPosControlRefused)
+}
+
+func TestAbortClosesTheSessionOfARetainedPrimaryOnly(t *testing.T) {
+	f := newAssignmentFixture(t)
+	primary := f.candidate(t)
+	recovery := primary
+	recovery.Kind, recovery.PoPs, recovery.ReplacedAssignment = evmassign.KindRecovery, nil, bytes.Repeat([]byte{1}, 32)
+	pEnc, err := primary.Encode()
+	require.NoError(t, err)
+	rEnc, err := recovery.Encode()
+	require.NoError(t, err)
+	body := bytes.Repeat([]byte{4}, 32)
+	abort := evmroot.OrderedHandoffRecord{Kind: "abort", NextBodyID: body}
+	newStep := func() *posStep { return &posStep{on: true, state: rootrecords.NewState(1, 1)} }
+
+	p := newStep()
+	require.NoError(t, p.abort(fixedCandidates{string(body): pEnc}, abort, 20, 3_000))
+	require.Len(t, p.records, 1)
+	want := primary.ResultID()
+	require.Equal(t, rootrecords.KindSessionClosed, p.records[0].Kind)
+	require.Equal(t, want[:], p.records[0].Data)
+	require.EqualValues(t, 3_000, p.records[0].UCTime)
+
+	p = newStep()
+	require.NoError(t, p.abort(fixedCandidates{string(body): rEnc}, abort, 20, 3_000))
+	require.Empty(t, p.records, "the abort of a recovery attempt only advances that attempt")
+
+	p = newStep()
+	require.NoError(t, p.abort(fixedCandidates{}, abort, 20, 3_000))
+	require.Empty(t, p.records, "no retained candidate names no result")
+	require.NoError(t, p.abort(nil, abort, 20, 3_000))
+	require.Empty(t, p.records)
+
+	// a result the log already resolved is not closed again: the repeat projects nothing and the block stays valid
+	resolved := newStep()
+	closedState, _, err := resolved.state.SessionClosed(primary.ResultID(), 15, 2_000)
+	require.NoError(t, err)
+	resolved.state = closedState
+	require.NoError(t, resolved.abort(fixedCandidates{string(body): pEnc}, abort, 20, 3_000))
+	require.Empty(t, resolved.records)
+
+	require.ErrorIs(t, newStep().abort(fixedCandidates{string(body): {1}}, abort, 20, 3_000), ErrPosSource)
+	off := &posStep{}
+	require.NoError(t, off.abort(fixedCandidates{string(body): pEnc}, abort, 20, 3_000))
+	require.Empty(t, off.records)
+	require.ErrorIs(t, newStep().abort(fixedCandidates{string(body): pEnc}, abort, 20, 0), ErrPosSource, "an abort without committed time")
+}
+
+type fakeProposer struct {
+	build func(epoch, oe, or uint64) (rctypes.PosControl, error)
+	bytes []byte
+	calls int
+}
+
+func (p *fakeProposer) Closure(epoch, oe, or uint64) (rctypes.PosControl, []byte, error) {
+	p.calls++
+	c, err := p.build(epoch, oe, or)
+	return c, p.bytes, err
+}
+
+func TestClosureIsMandatoryInTheSuccessorsFirstOrdinaryBlock(t *testing.T) {
+	f := newAssignmentFixture(t)
+	f.useRealOrchestration(t)
+	f.seedFees(t)
+	h := f.commitAssignment(t)
+	assignment, err := h.candidate.AssignmentID()
+	require.NoError(t, err)
+
+	dep := PosDeployment{RootNetwork: 5, Deployment: evmassign.Deployment{NetworkWord: [32]byte{1}, ChainID: [32]byte{31: 9}, Custody: [20]byte{19: 5}}}
+	closed := []evmassign.Identity{fid(1, 6), fid(2, 1)}
+	ed, err := evmassign.AssignmentExposureDigest(dep.Deployment, assignment, closed)
+	require.NoError(t, err)
+	kd, err := evmassign.KeyHistoryDigest(closed)
+	require.NoError(t, err)
+	hRec, tRoot := [32]byte{0x4a}, [32]byte{0x7e}
+	witness := []byte("bundle")
+	facts := ClosureFacts{ClosedEpoch: 1, BundleID: [32]byte{0xb0}, HRecordID: hRec, HRound: 4, TerminalRoot: tRoot, AssignmentID: assignment, Closed: closed}
+	data := append(append(append(append(append(assignment[:len(assignment):len(assignment)], word(4)...), hRec[:]...), tRoot[:]...), ed[:]...), kd[:]...)
+	control := func(epoch, oe, or uint64) (rctypes.PosControl, error) {
+		return rctypes.PosControl{Network: 5, ChainID: dep.ChainID, Custody: dep.Custody, OrderingEpoch: oe, OrderingRound: or, Op: rctypes.OpCloseLiability,
+			Close: &rctypes.CloseContext{ClosedEpoch: epoch, BundleSemanticID: facts.BundleID}, Data: data, WitnessHash: sha256.Sum256(witness)}, nil
+	}
+	proposer := &fakeProposer{build: control, bytes: witness}
+	svc := &PosServices{Deployment: dep, Authority: &fakeAuthority{facts: facts}, Witnesses: fakeWitnesses{sha256.Sum256(witness): witness}, Proposer: proposer}
+
+	// the proposer sees the duty on the suffix's state: the first ordinary round of epoch 2 awaits epoch 1's closure
+	f.store.SetPosServices(svc)
+	cs, err := f.store.ClosureControls(5, 2, 7)
+	require.NoError(t, err)
+	require.Len(t, cs, 1)
+	require.EqualValues(t, 1, cs[0].Close.ClosedEpoch)
+	require.EqualValues(t, 7, cs[0].OrderingRound)
+	none, err := f.store.ClosureControls(5, 1, 6)
+	require.NoError(t, err)
+	require.Empty(t, none, "a suffix round of the old epoch needs none")
+	kept, err := f.store.Witness(sha256.Sum256(witness))
+	require.NoError(t, err, "the proposer retained the witness before it proposed")
+	require.Equal(t, witness, kept)
+	_, err = f.store.Witness([32]byte{9})
+	require.ErrorIs(t, err, ErrWitnessUnavailable)
+	proposer.build = func(uint64, uint64, uint64) (rctypes.PosControl, error) {
+		return rctypes.PosControl{}, errors.New("no bundle")
+	}
+	_, err = f.store.ClosureControls(5, 2, 7)
+	require.ErrorIs(t, err, ErrWitnessUnavailable)
+	proposer.build = control
+	f.store.SetPosServices(&PosServices{Deployment: dep, Authority: svc.Authority, Witnesses: svc.Witnesses})
+	_, err = f.store.ClosureControls(5, 2, 7)
+	require.ErrorIs(t, err, ErrWitnessUnavailable, "the duty without anyone to build the closure")
+	none, err = f.store.ClosureControls(5, 1, 6)
+	require.NoError(t, err, "no duty at this round, so no proposer is needed")
+	require.Empty(t, none)
+	f.store.SetPosServices(nil)
+	none, err = f.store.ClosureControls(5, 2, 7)
+	require.NoError(t, err)
+	require.Empty(t, none, "no services, no duty")
+
+	anchor, err := f.store.InstallEpochAnchor(h.head, h.verified, h.genesis)
+	require.NoError(t, err)
+	s, err := New(crypto.SHA256, f.store.storage, f.orch, logger.New(t), ProfileHandoff)
+	require.NoError(t, err)
+	s.SetPosServices(svc)
+	bare := &rctypes.BlockData{Version: 2, Round: 7, Epoch: 2, Timestamp: 1_000, Payload: &rctypes.Payload{Version: 2}, Anchor: anchor}
+	_, err = s.Add(bare, nil)
+	require.ErrorIs(t, err, ErrClosureMissing)
+
+	c, err := control(1, 2, 7)
+	require.NoError(t, err)
+	with := &rctypes.BlockData{Version: 2, Round: 7, Epoch: 2, Timestamp: 1_000, Payload: &rctypes.Payload{Version: 2, PosControls: []rctypes.PosControl{c}}, Anchor: anchor}
+	_, err = s.Add(with, nil)
+	require.NoError(t, err)
+	b7 := mustBlock(t, s, 7)
+	require.Len(t, b7.ShardState.Records, 1)
+	require.Equal(t, rootrecords.KindClosure, b7.ShardState.Records[0].Kind)
+	require.Equal(t, data, b7.ShardState.Records[0].Data)
+	require.Empty(t, posOfBlock(t, b7).Awaiting)
+
+	// afterwards an empty block is fine: the duty is discharged
+	prior := b7
+	_, err = s.Add(&rctypes.BlockData{Version: 2, Round: 8, Epoch: 2, Timestamp: 1_001, Payload: &rctypes.Payload{Version: 2},
+		Qc: &rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{RoundNumber: 7, Epoch: 2, CurrentRootHash: prior.RootHash}}}, nil)
+	require.NoError(t, err)
+}
+
+func TestAnAwaitingClosureMakesAControlFreeBlockInvalidOnlyWhereTheDutyIsEnforced(t *testing.T) {
 	f := newCloseFx(t)
-	f.ctl.Op, f.ctl.Close = rctypes.OpRetirement, nil
-	f.ctl.Retire = &rctypes.RetireContext{}
-	require.ErrorIs(t, f.run(), ErrPosControlRefused)
+	f.block.Payload.PosControls = nil
+	_, err := f.step.controls(f.block, f.svc, posEnv{})
+	require.ErrorIs(t, err, ErrClosureMissing)
+
+	// without an authority the chain is not enforcing the duty
+	f = newCloseFx(t)
+	f.block.Payload.PosControls = nil
+	f.svc.Authority = nil
+	_, err = f.step.controls(f.block, f.svc, posEnv{})
+	require.NoError(t, err)
+	f.svc = nil
+	_, err = f.step.controls(f.block, f.svc, posEnv{})
+	require.NoError(t, err)
+
+	// a block that closes one of two outstanding epochs still owes the other
+	f = newCloseFx(t)
+	f.step.state.Awaiting = append(f.step.state.Awaiting, rootrecords.Awaiting{Epoch: 2, HRound: 101})
+	require.ErrorIs(t, f.run(), ErrClosureMissing)
+	require.Len(t, f.step.records, 1, "the closure that was given is projected before the duty is judged")
+}
+
+// ---- the executor's P wiring, through the real store ----------------------------------------------------------------------------------
+
+// ackedEpochTwo drives the real store through a committed assignment handoff, the successor's first block (with its mandatory closure) and
+// the EVM's certified acknowledgement in round 8, with the EVM authority fake installed from round 7. It returns the store, the
+// services and the acknowledgement block.
+func ackedEpochTwo(t *testing.T, evm *fakeEVM, stop uint64) (*BlockStore, *PosServices, *ExecutedBlock) {
+	t.Helper()
+	f := newAssignmentFixture(t)
+	f.useRealOrchestration(t)
+	f.seedFees(t)
+	h := f.commitAssignment(t)
+	assignment, err := h.candidate.AssignmentID()
+	require.NoError(t, err)
+	dep := PosDeployment{RootNetwork: 5, Deployment: evmassign.Deployment{NetworkWord: [32]byte{1}, ChainID: [32]byte{31: 9}, Custody: [20]byte{19: 5}}}
+	closed := []evmassign.Identity{fid(1, 6), fid(2, 1)}
+	ed, err := evmassign.AssignmentExposureDigest(dep.Deployment, assignment, closed)
+	require.NoError(t, err)
+	kd, err := evmassign.KeyHistoryDigest(closed)
+	require.NoError(t, err)
+	hRec, tRoot := [32]byte{0x4a}, [32]byte{0x7e}
+	bundle, retire := []byte("bundle"), []byte("accounts")
+	facts := ClosureFacts{ClosedEpoch: 1, BundleID: [32]byte{0xb0}, HRecordID: hRec, HRound: 4, TerminalRoot: tRoot, AssignmentID: assignment, Closed: closed}
+	data := append(append(append(append(append(assignment[:len(assignment):len(assignment)], word(4)...), hRec[:]...), tRoot[:]...), ed[:]...), kd[:]...)
+	svc := &PosServices{Deployment: dep, Authority: &fakeAuthority{facts: facts},
+		Witnesses: fakeWitnesses{sha256.Sum256(bundle): bundle, sha256.Sum256(retire): retire}, EVM: evm}
+
+	anchor, err := f.store.InstallEpochAnchor(h.head, h.verified, h.genesis)
+	require.NoError(t, err)
+	s, err := New(crypto.SHA256, f.store.storage, f.orch, logger.New(t), ProfileHandoff)
+	require.NoError(t, err)
+	s.SetPosServices(svc)
+	closure := rctypes.PosControl{Network: 5, ChainID: dep.ChainID, Custody: dep.Custody, OrderingEpoch: 2, OrderingRound: 7, Op: rctypes.OpCloseLiability,
+		Close: &rctypes.CloseContext{ClosedEpoch: 1, BundleSemanticID: facts.BundleID}, Data: data, WitnessHash: sha256.Sum256(bundle)}
+	_, err = s.Add(&rctypes.BlockData{Version: 2, Round: 7, Epoch: 2, Timestamp: 1_000, Anchor: anchor,
+		Payload: &rctypes.Payload{Version: 2, PosControls: []rctypes.PosControl{closure}}}, nil)
+	require.NoError(t, err)
+	b7 := mustBlock(t, s, 7)
+	if stop == 7 {
+		return s, svc, b7
+	}
+	pending := b7.ShardState.States[f.shard]
+	ack := &types.InputRecord{Version: 1, RoundNumber: pending.TR.Round, Epoch: pending.TR.Epoch,
+		BlockHash: bytes.Repeat([]byte{0x77}, 32), PreviousHash: pending.IR.Hash, Hash: bytes.Repeat([]byte{0x78}, 32)}
+	_, err = s.Add(&rctypes.BlockData{Version: 2, Round: 8, Epoch: 2, Timestamp: 1_000,
+		Payload: &rctypes.Payload{Version: 2, Requests: []*rctypes.IRChangeReq{{Partition: 8}}},
+		Qc:      &rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{RoundNumber: 7, Epoch: 2, CurrentRootHash: b7.RootHash}}},
+		mockIRVerifier{verify: func(uint64, *rctypes.IRChangeReq) (*types.InputRecord, error) { return ack, nil }})
+	require.NoError(t, err)
+	return s, svc, mustBlock(t, s, 8)
+}
+
+func retirementAt(svc *PosServices, parent *ExecutedBlock, round uint64, blockHash, root []byte) *rctypes.BlockData {
+	var bh, sr [32]byte
+	copy(bh[:], blockHash)
+	copy(sr[:], root)
+	ctl := rctypes.PosControl{Network: 5, ChainID: svc.Deployment.ChainID, Custody: svc.Deployment.Custody, OrderingEpoch: 2, OrderingRound: round,
+		Op: rctypes.OpRetirement, Retire: &rctypes.RetireContext{EVMBlockHash: bh, EVMStateRoot: sr},
+		Data: append(append(word(3), word(2)...), bytes.Repeat([]byte{0xc4}, 32)...), WitnessHash: sha256.Sum256([]byte("accounts"))}
+	return &rctypes.BlockData{Version: 2, Round: round, Epoch: 2, Timestamp: 1_001,
+		Payload: &rctypes.Payload{Version: 2, PosControls: []rctypes.PosControl{ctl}},
+		Qc:      &rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{RoundNumber: round - 1, Epoch: 2, CurrentRootHash: parent.RootHash}}}
+}
+
+func retirable() RetirementFacts {
+	return RetirementFacts{ID: 3, Generation: 2, RefDigest: [32]byte(bytes.Repeat([]byte{0xc4}, 32)), Requested: true, NotImported: true, NoLiveExposures: true,
+		NoLotReferences: true, RecordsCaughtUp: true}
+}
+
+func TestRetirementIsJudgedAgainstTheParentsCertifiedEVMState(t *testing.T) {
+	good := bytes.Repeat([]byte{0x77}, 32)
+	root := bytes.Repeat([]byte{0x78}, 32)
+	evm := &fakeEVM{retire: retirable()}
+	s, svc, b8 := ackedEpochTwo(t, evm, 8)
+	_, err := s.Add(retirementAt(svc, b8, 9, good, root), nil)
+	require.NoError(t, err, "P is the EVM state the acknowledgement certified")
+	b9 := mustBlock(t, s, 9)
+	require.Len(t, b9.ShardState.Records, 1)
+	require.Equal(t, rootrecords.KindRetirement, b9.ShardState.Records[0].Kind)
+	require.EqualValues(t, 1_001, b9.ShardState.Records[0].UCTime)
+	require.Equal(t, [][32]byte{[32]byte(root)}, evm.roots, "the witness was judged against the root the shard certified")
+
+	for name, c := range map[string]struct{ block, root []byte }{
+		"another state root": {good, bytes.Repeat([]byte{0xaa}, 32)},
+		"another block hash": {bytes.Repeat([]byte{0xbb}, 32), root},
+		"neither":            {bytes.Repeat([]byte{0xbb}, 32), bytes.Repeat([]byte{0xaa}, 32)},
+		"the state before":   {bytes.Repeat([]byte{0}, 32), bytes.Repeat([]byte{0}, 32)},
+	} {
+		evm := &fakeEVM{retire: retirable()}
+		s, svc, b8 := ackedEpochTwo(t, evm, 8)
+		_, err := s.Add(retirementAt(svc, b8, 9, c.block, c.root), nil)
+		require.ErrorIs(t, err, ErrNotLatestEVM, name)
+		require.NotErrorIs(t, err, ErrHandoffInFlight, name)
+	}
+}
+
+func TestRetirementIsRefusedWhileAnAcknowledgementIsOwed(t *testing.T) {
+	evm := &fakeEVM{retire: retirable()}
+	s, svc, b7 := ackedEpochTwo(t, evm, 7)
+	// the successor's first block has run; the EVM has not yet acknowledged it
+	_, err := s.Add(retirementAt(svc, b7, 8, make([]byte, 32), make([]byte, 32)), nil)
+	require.ErrorIs(t, err, ErrHandoffInFlight)
+	require.NotErrorIs(t, err, ErrNotLatestEVM)
+	require.Empty(t, evm.seen, "refused before any witness was judged")
+}
+
+func TestRetirementIsRefusedWhileAHandoffIsPrepared(t *testing.T) {
+	f := newAssignmentFixture(t)
+	f.useRealOrchestration(t)
+	f.seedFees(t)
+	built := f.build(t, f.candidate(t))
+	evm := &fakeEVM{retire: retirable()}
+	svc := &PosServices{Deployment: PosDeployment{RootNetwork: 5}, Authority: &fakeAuthority{}, Witnesses: fakeWitnesses{}, EVM: evm}
+	f.store.SetPosServices(svc)
+	f.addAt(t, 2, built.prepare.Bytes())
+	require.Equal(t, "prepared", mustBlock(t, f.store, 2).ShardState.Control.Phase)
+	b := retirementAt(svc, mustBlock(t, f.store, 2), 3, make([]byte, 32), make([]byte, 32))
+	b.Epoch, b.Qc.VoteInfo.Epoch, b.Payload.PosControls[0].OrderingEpoch = 1, 1, 1
+	_, err := f.store.Add(b, nil)
+	require.ErrorIs(t, err, ErrHandoffInFlight)
+	require.NotErrorIs(t, err, ErrNotLatestEVM)
+}
+
+func TestHandoffInFlightCoversEveryPhaseThatCanReferenceAGeneration(t *testing.T) {
+	st := rootrecords.NewState(1, 1)
+	frozen, err := st.Commit(5, 2, 9, false, [32]byte{1}) // a root-only handoff: frozen, nothing pending
+	require.NoError(t, err)
+	pending, err := st.Commit(5, 2, 9, true, [32]byte{1})
+	require.NoError(t, err)
+	pending, err = pending.Block(2, 9) // the freeze ended, the acknowledgement is pending
+	require.NoError(t, err)
+	require.False(t, pending.Frozen)
+	require.Len(t, pending.Pending, 1)
+	on := func(s rootrecords.State) posStep { return posStep{on: true, state: s} }
+	ctl := func(phase string) *evmroot.ControlState { return &evmroot.ControlState{Phase: phase} }
+	for name, c := range map[string]struct {
+		pos  posStep
+		ctl  *evmroot.ControlState
+		want bool
+	}{
+		"idle and quiet":          {on(st), ctl("idle"), false},
+		"aborted and quiet":       {on(st), ctl("aborted"), false},
+		"no control state":        {on(st), nil, false},
+		"prepared":                {on(st), ctl("prepared"), true},
+		"endorsed":                {on(st), ctl("endorsed"), true},
+		"committed":               {on(st), ctl("committed"), true},
+		"the freeze not yet over": {on(frozen), ctl("idle"), true},
+		"an acknowledgement owed": {on(pending), ctl("idle"), true},
+		"no source state":         {posStep{state: frozen}, ctl("idle"), false},
+	} {
+		require.Equal(t, c.want, handoffInFlight(c.pos, c.ctl), name)
+	}
+}
+
+func TestWitnessStoreRetainsByHashAndNeverRewrites(t *testing.T) {
+	f := newAssignmentFixture(t)
+	data := []byte("witness")
+	hash := sha256.Sum256(data)
+	require.NoError(t, f.store.StoreWitness(data))
+	require.NoError(t, f.store.StoreWitness(data), "a repeat is a no-op")
+	got, err := f.store.Witness(hash)
+	require.NoError(t, err)
+	require.Equal(t, data, got)
+	db := f.store.storage.(WitnessStore)
+	require.ErrorIs(t, db.StoreWitness(hash, []byte("other")), ErrWitnessStore, "bytes that do not hash to the key")
+	require.ErrorIs(t, db.StoreWitness(sha256.Sum256(nil), nil), ErrWitnessStore, "empty")
+	require.ErrorIs(t, f.store.StoreWitness(nil), ErrWitnessStore)
+	big := make([]byte, MaxWitnessBytes+1)
+	require.ErrorIs(t, f.store.StoreWitness(big), ErrWitnessStore, "above the bundle bound")
+	var bare BlockStore
+	bare.storage = struct{ PersistentStore }{f.store.storage}
+	require.ErrorIs(t, bare.StoreWitness(data), ErrNoWitnessStore)
+	_, err = bare.Witness(hash)
+	require.ErrorIs(t, err, ErrNoWitnessStore)
+}
+
+func TestClosureDataIsTheExactABIEncoding(t *testing.T) {
+	d := ClosureData{AssignmentID: [32]byte{1}, HRound: 0x0102030405060708, HRecordID: [32]byte{2}, TerminalRoot: [32]byte{3}, ExposureDigest: [32]byte{4}, KeyHistoryDigest: [32]byte{5}}
+	raw := d.Encode()
+	require.Len(t, raw, 192)
+	require.Equal(t, append(append([]byte(nil), d.AssignmentID[:]...), word(d.HRound)...), raw[:64])
+	require.Equal(t, d.KeyHistoryDigest[:], raw[160:])
+	got, err := DecodeClosureData(raw)
+	require.NoError(t, err)
+	require.Equal(t, d, got)
+	_, err = DecodeClosureData(raw[:191])
+	require.Error(t, err)
+	_, err = DecodeClosureData(append(raw, 0))
+	require.Error(t, err)
+	bad := append([]byte(nil), raw...)
+	bad[32] = 1
+	_, err = DecodeClosureData(bad)
+	require.Error(t, err, "high bits of the round word")
+}
+
+func TestAQuietParentRoundCertifiesNoBlockHash(t *testing.T) {
+	// the parent's input record was quiet: it carries the state root but no block hash, so the control names the zero block hash
+	f := newEVMFx(t, rctypes.OpRetirement)
+	f.env.LatestEVMBlock = nil
+	f.ctl.Retire.EVMBlockHash = [32]byte{}
+	_, err := f.run()
+	require.NoError(t, err)
+	f = newEVMFx(t, rctypes.OpRetirement)
+	f.env.LatestEVMBlock = nil
+	_, err = f.run()
+	require.ErrorIs(t, err, ErrPosControlRefused, "a block hash the root never certified")
+	f = newEVMFx(t, rctypes.OpRejectResult)
+	f.env.LatestEVMBlock = nil
+	_, err = f.run()
+	require.ErrorIs(t, err, ErrPosControlRefused)
+	f.ctl.Reject.EVMBlockHash = [32]byte{}
+	_, err = f.run()
+	require.NoError(t, err)
+	require.Equal(t, [2]any{f.evm.reject.ResultID, uint64(0)}, f.evm.rejectAsked, "the verifier is asked for the control's result and attempt")
+	require.Equal(t, [][32]byte{pRoot}, f.evm.roots, "and judges the witness against the certified state root")
 }

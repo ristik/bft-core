@@ -449,3 +449,10 @@ func verifyHandoffBundle(trust *trustbase.TrustBaseStore, bundle handoffdelivery
 	}
 	return handoffdelivery.VerifySigning(bundle, old, cfg, partition, shard, conf)
 }
+
+// SetPosServices installs the P85 control executor's collaborators on the block store: the custody deployment, the closure authority
+// and the closure proposer. It must be called before the manager starts.
+func (x *ConsensusManager) SetPosServices(s *storage.PosServices) { x.blockStore.SetPosServices(s) }
+
+// Witness is the WitnessSource of the retained control witnesses.
+func (x *ConsensusManager) Witness(hash [32]byte) ([]byte, error) { return x.blockStore.Witness(hash) }

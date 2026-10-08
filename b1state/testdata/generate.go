@@ -69,7 +69,7 @@ func main() {
 		return b
 	}
 	// Synthetic fixture pins: these do not name a real compiler/runtime/G_rest.
-	profile := []any{"UNICITY_B1_PROFILE", uint64(3), uint64(1), uint64(2), uint64(3), uint64(31409924), uint64(0), uint64(38409924), uint64(7000000), uint64(100), uint64(1000000), uint64(1024), uint64(2), uint64(36864), uint64(564), hashByte(1), uint64(2), hashByte(3), hashByte(4), uint64(64), uint64(128), uint64(16384), uint64(16), uint64(262144), uint64(24576), uint64(32768), "scan=2000+16C;members=1000T;UC=60000+16B+64000+6000S+2000N+250P+1117700;RSMT=2000+16B+250(1+popcount);I=22100;D=7100", "native-body=1,2,3;signing=1,2;quorum=total-(total-1)/3;claims=8;signatures=64/512;shard=33/256;path=32;summary=256;RSMT=4096/256/12392"}
+	profile := []any{"UNICITY_B1_PROFILE", uint64(3), uint64(1), uint64(2), uint64(3), uint64(49706068), uint64(0), uint64(56706068), uint64(7000000), uint64(100), uint64(1000000), uint64(1024), uint64(2), uint64(36864), uint64(564), uint64(1000), hashByte(1), uint64(2), hashByte(3), hashByte(4), uint64(64), uint64(128), uint64(16384), uint64(16), uint64(262144), uint64(24576), uint64(32768), "scan=2000+16C;members=1000T;UC=60000+16B+64000+6000S+2000N+250P+1117700;RSMT=2000+16B+250(1+popcount);I=22100;D=7100", "P85-import=scan 2000+16C_R;entries 1000N;C_R<=16384;N<=32;outcome=[system,G_pre,1,'',SHA256(rootInput)];G_pre=admit+open+import", "native-body=1,2,3;signing=1,2;quorum=total-(total-1)/3;claims=8;signatures=64/512;shard=33/256;path=32;summary=256;RSMT=4096/256/12392"}
 	pb := encode(profile)
 	ph := sha256.Sum256(pb)
 	id := strings.Repeat("a", 128)
@@ -80,7 +80,7 @@ func main() {
 	ub := encode(u)
 	uh := sha256.Sum256(ub)
 	genesis := map[string]string{}
-	for name, w := range map[string][]byte{"b1.network": word(3), "b1.wCert": word(1), "b1.profileHash": ph[:], "b1.initialized": word(1), "b1.head": word(0), "b1.count": word(1), "clock.rootRound": word(0), "origin.rootEpoch": word(0), "assignment.rootEpoch": word(0), "phase": word(2)} {
+	for name, w := range map[string][]byte{"b1.network": word(3), "b1.wCert": word(1), "b1.profileHash": ph[:], "b1.initialized": word(1), "b1.head": word(0), "b1.count": word(1), "clock.rootRound": word(0), "origin.rootEpoch": word(0), "assignment.rootEpoch": word(0), "records.ucTime": word(1000), "phase": word(2)} {
 		genesis[hx(fixed(name))] = hx(w)
 	}
 	entry(genesis, 0, 7, 1, id, pub)

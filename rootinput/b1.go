@@ -3,6 +3,7 @@ package rootinput
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"errors"
 	"math"
 	"sort"
@@ -12,9 +13,21 @@ import (
 	"github.com/unicitynetwork/bft-core/b1state"
 	"github.com/unicitynetwork/bft-core/internal/b1authority"
 	"github.com/unicitynetwork/bft-core/registryproof"
+	"github.com/unicitynetwork/bft-core/rootrecords"
 )
 
 var ErrB1Admission = errors.New("b1paired: missing or inconsistent authenticated pair evidence")
+
+// ErrRecordsAdmission reports a root-record import that cannot be derived or differs from the one this pair derives.
+var ErrRecordsAdmission = errors.New("rootinput: root-record import missing or inconsistent with the authenticated source log")
+
+// RecordsSource is the authenticated root-record source of one pair: the retained log and its cursor as of a committed root origin.
+type RecordsSource interface {
+	rootrecords.Source
+	// Cursor is the current progress and UC time, and the length and tip of the complete source log, as of the committed root block
+	// of originRootRound. Records ordered after that block are not part of it.
+	Cursor(ctx context.Context, originRootRound uint64) (rootrecords.Cursor, error)
+}
 
 // B1Config is local deployment configuration. Proofs fetches untrusted storage
 // proof nodes for the named verified parent; it cannot grant authority.
@@ -23,6 +36,14 @@ type B1Config struct {
 	// Authority is minted by q3active.Runtime.B1Authority.
 	Authority *b1authority.Source
 	Proofs    func(context.Context, registryproof.Snapshot, []common.Hash) ([][][]byte, error)
+	// Records derives the mandatory root-record import. A fresh profile cannot admit a block without it.
+	Records RecordsSource
+}
+type RecordsResult struct {
+	Import       []byte
+	Hash         [32]byte
+	AdmissionGas uint64
+	Entries      int
 }
 type B1Result struct {
 	Update       []byte
@@ -134,6 +155,57 @@ func (c *B1Config) Compare(ctx context.Context, parent registryproof.Snapshot, o
 	}
 	if !bytes.Equal(expected.Update, raw) || !bytes.Equal(expected.Hash[:], hash) {
 		return B1Result{}, b1state.ErrBinding
+	}
+	return expected, nil
+}
+
+// DeriveRecords derives the import this block owes: exactly the next min(32, targetCount - registryCount) records of the source log as
+// of the origin's committed root block, with the origin's anchors. Nothing is supplied by a relayer; a second pair derives the same
+// bytes from the same authenticated source and parent registry words, and the registry's own acceptance rule is checked here first.
+func (c *B1Config) DeriveRecords(ctx context.Context, parent registryproof.Snapshot, o VerifiedObservationV2) (RecordsResult, error) {
+	if c == nil || c.Records == nil || !parent.Valid() || !o.Valid() {
+		return RecordsResult{}, ErrRecordsAdmission
+	}
+	f := parent.Fields()
+	if f.Layout != registryproof.FreshB1 {
+		return RecordsResult{}, ErrRecordsAdmission
+	}
+	cursor, err := c.Records.Cursor(ctx, o.Origin().RootRound)
+	if err != nil {
+		return RecordsResult{}, errors.Join(ErrRecordsAdmission, err)
+	}
+	reg := rootrecords.Registry{Count: f.RecordsCount, Progress: f.RecordsProgress, UCTime: f.RecordsUCTime, TargetCount: f.RecordsTargetCount,
+		Tip: [32]byte(f.RecordsTip), TargetTip: [32]byte(f.RecordsTargetTip)}
+	if f.RecordsCount > 0 {
+		last, err := c.Records.Record(f.RecordsCount - 1)
+		if err != nil || last.ID != reg.Tip {
+			return RecordsResult{}, errors.Join(ErrRecordsAdmission, errors.New("the registry's tip is not the source log's record"), err)
+		}
+		reg.Last = &last
+	}
+	imp, err := rootrecords.BuildImport(c.Records, cursor, reg)
+	if err != nil {
+		return RecordsResult{}, errors.Join(ErrRecordsAdmission, err)
+	}
+	raw, err := imp.Encode()
+	if err != nil {
+		return RecordsResult{}, errors.Join(ErrRecordsAdmission, err)
+	}
+	if _, gas, err := rootrecords.AdmitImport(raw, c.Profile.SystemGas); err != nil {
+		return RecordsResult{}, errors.Join(ErrRecordsAdmission, err)
+	} else {
+		return RecordsResult{Import: raw, Hash: sha256.Sum256(raw), AdmissionGas: gas, Entries: len(imp.Entries)}, nil
+	}
+}
+
+// CompareRecords rederives on this pair for import, replay and crash recovery.
+func (c *B1Config) CompareRecords(ctx context.Context, parent registryproof.Snapshot, o VerifiedObservationV2, raw []byte, hash []byte) (RecordsResult, error) {
+	expected, err := c.DeriveRecords(ctx, parent, o)
+	if err != nil {
+		return RecordsResult{}, err
+	}
+	if !bytes.Equal(expected.Import, raw) || !bytes.Equal(expected.Hash[:], hash) {
+		return RecordsResult{}, ErrRecordsAdmission
 	}
 	return expected, nil
 }
