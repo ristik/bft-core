@@ -257,3 +257,30 @@ func TestQ3InstallPreservesSelectedRequestHistory(t *testing.T) {
 	}
 	exercise(true)
 }
+
+// Production selects the view-aware request branch from the verified history: before the selection the collector keeps the committed
+// ShardInfo (no view), after it every shard is judged under the view resolved from the history, the manager itself being the retained
+// candidate source.
+func TestSelectRequestHistorySelectsTheViewAwareBranch(t *testing.T) {
+	c := newQ3Cluster(t, q3fixture.Options{Assignment: true})
+	c.activateAll()
+	r := c.heavy()
+
+	_, enabled, err := r.manager.RequestView(q3fixture.PartitionID, types.ShardID{})
+	require.NoError(t, err)
+	require.False(t, enabled, "the legacy dispatch before the selection")
+
+	require.ErrorIs(t, r.manager.SelectRequestHistory(nil), ErrNoRequestHistory)
+
+	h, err := r.rt.RequestHistory(q3active.RequestHistoryConfig{Candidates: r.manager, Anchor: func(types.PartitionID, types.ShardID) (*types.PartitionDescriptionRecord, error) {
+		return r.f.ShardConf, nil
+	}, HashAlg: crypto.SHA256, Network: q3fixture.Network, Version: 1})
+	require.NoError(t, err)
+	require.NoError(t, r.manager.SelectRequestHistory(h))
+	require.Same(t, h, r.manager.irReqVerifier.RequestHistory(), "the request verifier judges under the same history")
+
+	view, enabled, err := r.manager.RequestView(q3fixture.PartitionID, types.ShardID{})
+	require.NoError(t, err)
+	require.True(t, enabled, "the view-aware branch is selected")
+	require.NotNil(t, view)
+}
