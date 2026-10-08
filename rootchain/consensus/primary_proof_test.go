@@ -2,6 +2,7 @@ package consensus
 
 import (
 	"bytes"
+	"context"
 	"crypto/ecdsa"
 	"errors"
 	"io"
@@ -18,17 +19,18 @@ import (
 )
 
 type fakeWitness struct {
-	mu         sync.Mutex
-	err        error
-	factsErr   error
-	facts      evmassign.PrimaryFacts
-	parent     []byte
-	builds     int
-	factsCalls int
-	release    chan struct{} // when set, a build waits for it
+	mu           sync.Mutex
+	err          error
+	factsErr     error
+	facts        evmassign.PrimaryFacts
+	parent       []byte
+	builds       int
+	factsCalls   int
+	release      chan struct{} // when set, a build waits for it
+	factsRelease chan struct{} // when set, a facts read waits for it
 }
 
-func (f *fakeWitness) PrimaryWitness(parent []byte, _ [32]byte) ([]byte, error) {
+func (f *fakeWitness) PrimaryWitness(_ context.Context, parent []byte, _ [32]byte) ([]byte, error) {
 	f.mu.Lock()
 	f.builds++
 	f.parent = parent
@@ -40,12 +42,18 @@ func (f *fakeWitness) PrimaryWitness(parent []byte, _ [32]byte) ([]byte, error) 
 	return []byte("witness"), err
 }
 
-func (f *fakeWitness) PrimaryFacts([32]byte) (evmassign.PrimaryFacts, error) {
+func (f *fakeWitness) PrimaryFacts(_ context.Context, _ [32]byte) (evmassign.PrimaryFacts, error) {
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	f.factsCalls++
-	return f.facts, f.factsErr
+	rel, facts, err := f.factsRelease, f.facts, f.factsErr
+	f.mu.Unlock()
+	if rel != nil {
+		<-rel
+	}
+	return facts, err
 }
+
+func (f *fakeWitness) factsCount() int { f.mu.Lock(); defer f.mu.Unlock(); return f.factsCalls }
 
 func (f *fakeWitness) buildCount() int { f.mu.Lock(); defer f.mu.Unlock(); return f.builds }
 
@@ -258,4 +266,109 @@ func TestAFailedWitnessBuildIsRetriedAfterTheBackoffNotEveryRound(t *testing.T) 
 	w.mu.Unlock()
 	_, _ = x.primaryProofFor(primary, pops, parent)
 	require.Eventually(t, func() bool { _, err := x.primaryProofFor(primary, pops, parent); return err == nil }, 2*time.Second, 5*time.Millisecond)
+}
+
+// The consensus loop never waits for the execution client: a facts miss returns at once with the approval parked and a background fetch
+// started, however long the client takes; when the facts land the parked approval is judged and delivered.
+func TestIntakeNeverCallsTheExecutionClientSynchronously(t *testing.T) {
+	x := managerFor(true)
+	f := newMemberFx(t, 3)
+	honest := f.pops(t, x, 7, f.keys)
+	_, set, err := evmassign.AssemblePoPs(f.c, f.dep(x), 7, honest)
+	require.NoError(t, err)
+	release := make(chan struct{})
+	src := &fakeWitness{facts: evmassign.PrimaryFacts{Published: true, Attempt: 7, PopSetDigest: set}, factsRelease: release}
+	x.SetPrimaryWitnessSource(src)
+	delivered := make(chan string, 4)
+	x.approvalSink = func(m *abdrc.HandoffApprovalMsg) error {
+		// what the loop would do with it: judge it against the (now cached) facts
+		if err := x.judgePoPs(m, f.c, mustFacts(t, x, f.c.ResultID())); err != nil {
+			return err
+		}
+		delivered <- m.Signer
+		return nil
+	}
+
+	result := f.c.ResultID()
+	msg := func(signer string) *abdrc.HandoffApprovalMsg {
+		return &abdrc.HandoffApprovalMsg{Signer: signer, PrimaryPoPs: encoded(t, honest)}
+	}
+	start := time.Now()
+	for _, who := range []string{"a", "b"} {
+		_, ok := x.cachedPrimaryFacts(result)
+		require.False(t, ok)
+		x.parkApproval(msg(who), result)
+		x.kickPrimaryFacts(result)
+	}
+	require.Less(t, time.Since(start), 500*time.Millisecond, "a blocked execution client does not hold the caller")
+	require.Eventually(t, func() bool { return src.factsCount() == 1 }, 2*time.Second, 5*time.Millisecond)
+	time.Sleep(50 * time.Millisecond)
+	require.Equal(t, 1, src.factsCount(), "one fetch in flight however many approvals arrive")
+
+	close(release)
+	got := map[string]bool{}
+	for i := 0; i < 2; i++ {
+		select {
+		case s := <-delivered:
+			got[s] = true
+		case <-time.After(2 * time.Second):
+			t.Fatal("a parked approval was lost")
+		}
+	}
+	require.Equal(t, map[string]bool{"a": true, "b": true}, got, "both honest approvals are judged when the facts land")
+	_, ok := x.cachedPrimaryFacts(result)
+	require.True(t, ok)
+	x.primaryCache.mu.Lock()
+	require.Empty(t, x.primaryCache.parked)
+	x.primaryCache.mu.Unlock()
+}
+
+func mustFacts(t *testing.T, x *ConsensusManager, result [32]byte) evmassign.PrimaryFacts {
+	f, ok := x.cachedPrimaryFacts(result)
+	require.True(t, ok)
+	return f
+}
+
+func TestParkedApprovalsAreBoundedOnePerSignerAndExpire(t *testing.T) {
+	x := managerFor(true)
+	result := [32]byte{1}
+	for i := 0; i < maxParkedApprovals*2; i++ {
+		x.parkApproval(&abdrc.HandoffApprovalMsg{Signer: string(rune('A'+i%64)) + string(rune('a'+i/64))}, result)
+	}
+	x.primaryCache.mu.Lock()
+	require.LessOrEqual(t, len(x.primaryCache.parked), maxParkedApprovals, "a flood cannot grow the set")
+	x.primaryCache.mu.Unlock()
+
+	x2 := managerFor(true)
+	x2.parkApproval(&abdrc.HandoffApprovalMsg{Signer: "s", PrimaryPoPs: []byte{1}}, result)
+	x2.parkApproval(&abdrc.HandoffApprovalMsg{Signer: "s", PrimaryPoPs: []byte{2}}, result)
+	x2.primaryCache.mu.Lock()
+	require.Len(t, x2.primaryCache.parked, 1, "one per signer: the newest replaces")
+	require.Equal(t, []byte{2}, x2.primaryCache.parked["s"].msg.PrimaryPoPs)
+	p := x2.primaryCache.parked["s"]
+	p.at = time.Now().Add(-2 * parkedApprovalTTL)
+	x2.primaryCache.parked["s"] = p
+	x2.primaryCache.mu.Unlock()
+	x2.parkApproval(&abdrc.HandoffApprovalMsg{Signer: "t"}, result)
+	x2.primaryCache.mu.Lock()
+	require.NotContains(t, x2.primaryCache.parked, "s", "an expired approval is dropped")
+	x2.primaryCache.mu.Unlock()
+}
+
+func TestAFailedFactsFetchBacksOffAndParksStay(t *testing.T) {
+	x := managerFor(true)
+	src := &fakeWitness{factsErr: errors.New("node down")}
+	x.SetPrimaryWitnessSource(src)
+	result := [32]byte{2}
+	x.parkApproval(&abdrc.HandoffApprovalMsg{Signer: "a"}, result)
+	x.kickPrimaryFacts(result)
+	require.Eventually(t, func() bool { return src.factsCount() == 1 }, 2*time.Second, 5*time.Millisecond)
+	for i := 0; i < 20; i++ {
+		x.kickPrimaryFacts(result)
+	}
+	time.Sleep(50 * time.Millisecond)
+	require.Equal(t, 1, src.factsCount(), "rounds inside the backoff do not hammer the client")
+	x.primaryCache.mu.Lock()
+	require.Len(t, x.primaryCache.parked, 1, "the approval waits for the next try")
+	x.primaryCache.mu.Unlock()
 }

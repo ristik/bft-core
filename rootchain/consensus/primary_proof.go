@@ -5,11 +5,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/unicitynetwork/bft-core/network/protocol/abdrc"
 	"sync"
 	"time"
 
 	"github.com/unicitynetwork/bft-core/evmassign"
+	"github.com/unicitynetwork/bft-core/network/protocol/abdrc"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/storage"
 )
 
@@ -18,10 +18,10 @@ import (
 type PrimaryWitnessSource interface {
 	// PrimaryWitness builds the storage-proof witness of the election and custody state at the frozen parent for a result
 	// (evmstate.BuildPrimaryWitness).
-	PrimaryWitness(frozenParent []byte, resultID [32]byte) ([]byte, error)
+	PrimaryWitness(ctx context.Context, frozenParent []byte, resultID [32]byte) ([]byte, error)
 	// PrimaryFacts reads the result's proven facts at the client's current head. A published result's attempt and possession-proof set are
 	// fixed, so they are what an arriving plan's proofs are checked against.
-	PrimaryFacts(resultID [32]byte) (evmassign.PrimaryFacts, error)
+	PrimaryFacts(ctx context.Context, resultID [32]byte) (evmassign.PrimaryFacts, error)
 }
 
 const (
@@ -30,17 +30,37 @@ const (
 	primaryWitnessRetry        = 2 * time.Second
 )
 
+type parkedApproval struct {
+	msg    *abdrc.HandoffApprovalMsg
+	result [32]byte
+	at     time.Time
+}
+
+const (
+	maxParkedApprovals = 32
+	parkedApprovalTTL  = 2 * time.Minute
+)
+
 type primaryWitnessKey struct{ parent, result [32]byte }
 
 // primaryCache holds what the proposal path reads without blocking: the witness of the one (frozen parent, result) in play, built in the
 // background, and the facts of published results (immutable once published).
+//
+// INVARIANT the facts cache depends on: the facts are read at the execution client's current head, while Freeze admission judges the result at
+// the frozen parent. That is sound because a published result's attempt and possession-proof set (the only facts used here) are written once
+// by finalizeCandidate and never change afterwards; only the `lost`/open words can, and those are judged at the parent by the admission itself.
 type primaryCache struct {
-	mu       sync.Mutex
-	facts    map[[32]byte]evmassign.PrimaryFacts
-	key      primaryWitnessKey
-	witness  []byte
-	inflight bool
-	failedAt time.Time
+	mu    sync.Mutex
+	facts map[[32]byte]evmassign.PrimaryFacts
+	// background fact fetches (single flight per result, with a backoff after a failure) and the approvals that arrived before their
+	// result's facts did, one per signer, judged when the facts land
+	factsInflight map[[32]byte]bool
+	factsFailed   map[[32]byte]time.Time
+	parked        map[string]parkedApproval
+	key           primaryWitnessKey
+	witness       []byte
+	inflight      bool
+	failedAt      time.Time
 }
 
 // SetPrimaryWitnessSource installs the source. A root of a chain that judges primary candidates needs one: to check the proofs of an
@@ -61,30 +81,124 @@ func (x *ConsensusManager) primarySource() (PrimaryWitnessSource, error) {
 	return *src, nil
 }
 
-// primaryFacts returns the published facts of a result, from the cache or the execution client. An unpublished result is not cached.
-func (x *ConsensusManager) primaryFacts(result [32]byte) (evmassign.PrimaryFacts, error) {
+// cachedPrimaryFacts is the intake's only read: the cache, never the execution client.
+func (x *ConsensusManager) cachedPrimaryFacts(result [32]byte) (evmassign.PrimaryFacts, bool) {
 	x.primaryCache.mu.Lock()
+	defer x.primaryCache.mu.Unlock()
 	f, ok := x.primaryCache.facts[result]
-	x.primaryCache.mu.Unlock()
-	if ok {
+	return f, ok
+}
+
+func (x *ConsensusManager) storePrimaryFacts(result [32]byte, f evmassign.PrimaryFacts) {
+	x.primaryCache.mu.Lock()
+	defer x.primaryCache.mu.Unlock()
+	if x.primaryCache.facts == nil || len(x.primaryCache.facts) > 8 {
+		x.primaryCache.facts = map[[32]byte]evmassign.PrimaryFacts{}
+	}
+	x.primaryCache.facts[result] = f
+}
+
+// primaryFactsSync returns the published facts of a result, from the cache or by asking the execution client in the caller's goroutine.
+// Only the operator's own endpoints use it (plan, intent, endorse): never the consensus message loop.
+func (x *ConsensusManager) primaryFactsSync(ctx context.Context, result [32]byte) (evmassign.PrimaryFacts, error) {
+	if f, ok := x.cachedPrimaryFacts(result); ok {
 		return f, nil
 	}
 	src, err := x.primarySource()
 	if err != nil {
-		return f, err
+		return evmassign.PrimaryFacts{}, err
 	}
-	if f, err = src.PrimaryFacts(result); err != nil {
+	f, err := src.PrimaryFacts(ctx, result)
+	if err != nil {
 		return f, errors.Join(storage.ErrWitnessUnavailable, err)
 	}
 	if f.Published {
-		x.primaryCache.mu.Lock()
-		if x.primaryCache.facts == nil || len(x.primaryCache.facts) > 8 {
-			x.primaryCache.facts = map[[32]byte]evmassign.PrimaryFacts{}
-		}
-		x.primaryCache.facts[result] = f
-		x.primaryCache.mu.Unlock()
+		x.storePrimaryFacts(result, f)
 	}
 	return f, nil
+}
+
+// kickPrimaryFacts starts the background fetch of a result's facts unless they are cached, in flight, or the last try just failed. When
+// they land, the approvals parked for the result are judged.
+func (x *ConsensusManager) kickPrimaryFacts(result [32]byte) {
+	src, err := x.primarySource()
+	if err != nil {
+		return
+	}
+	c := &x.primaryCache
+	c.mu.Lock()
+	if _, ok := c.facts[result]; ok || c.factsInflight[result] || time.Since(c.factsFailed[result]) < primaryWitnessRetry {
+		c.mu.Unlock()
+		return
+	}
+	if c.factsInflight == nil {
+		c.factsInflight = map[[32]byte]bool{}
+	}
+	c.factsInflight[result] = true
+	c.mu.Unlock()
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), primaryWitnessBuildTimeout)
+		defer cancel()
+		f, err := src.PrimaryFacts(ctx, result)
+		c.mu.Lock()
+		delete(c.factsInflight, result)
+		ok := err == nil && f.Published
+		if !ok {
+			if c.factsFailed == nil {
+				c.factsFailed = map[[32]byte]time.Time{}
+			}
+			c.factsFailed[result] = time.Now()
+		}
+		c.mu.Unlock()
+		if !ok {
+			x.log.Debug("the primary result's facts are not available yet", "err", err)
+			return
+		}
+		x.storePrimaryFacts(result, f)
+		x.releaseParkedApprovals(result)
+	}()
+}
+
+// parkApproval keeps an approval whose result's facts have not landed, one per signer and bounded, to be judged when they do. An honest
+// approval that arrives first is therefore not lost; a flood of them cannot grow the set.
+func (x *ConsensusManager) parkApproval(msg *abdrc.HandoffApprovalMsg, result [32]byte) {
+	c := &x.primaryCache
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.parked == nil {
+		c.parked = map[string]parkedApproval{}
+	}
+	for k, p := range c.parked {
+		if time.Since(p.at) > parkedApprovalTTL {
+			delete(c.parked, k)
+		}
+	}
+	if _, replace := c.parked[msg.Signer]; !replace && len(c.parked) >= maxParkedApprovals {
+		return
+	}
+	c.parked[msg.Signer] = parkedApproval{msg: msg, result: result, at: time.Now()}
+}
+
+func (x *ConsensusManager) releaseParkedApprovals(result [32]byte) {
+	c := &x.primaryCache
+	c.mu.Lock()
+	var release []*abdrc.HandoffApprovalMsg
+	for k, p := range c.parked {
+		if p.result == result {
+			release = append(release, p.msg)
+			delete(c.parked, k)
+		}
+	}
+	c.mu.Unlock()
+	for _, m := range release {
+		sink := x.approvalSink
+		if sink == nil {
+			sink = func(m *abdrc.HandoffApprovalMsg) error { return x.onHandoffApprovalMsg(context.Background(), m) }
+		}
+		if err := sink(m); err != nil {
+			x.log.Debug("a parked handoff approval was refused when its facts landed", "signer", m.Signer, "err", err)
+		}
+	}
 }
 
 // prefetchPrimaryWitness starts the background build of the witness for (parent, result) unless it is cached, in flight, or just failed.
@@ -109,21 +223,11 @@ func (x *ConsensusManager) prefetchPrimaryWitness(parent, result [32]byte) {
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), primaryWitnessBuildTimeout)
 		defer cancel()
-		type built struct {
+		var b struct {
 			w   []byte
 			err error
 		}
-		done := make(chan built, 1)
-		go func() {
-			w, err := src.PrimaryWitness(parent[:], result)
-			done <- built{w, err}
-		}()
-		var b built
-		select {
-		case b = <-done:
-		case <-ctx.Done():
-			b.err = ctx.Err()
-		}
+		b.w, b.err = src.PrimaryWitness(ctx, parent[:], result)
 		c.mu.Lock()
 		defer c.mu.Unlock()
 		if c.key != key {
@@ -197,11 +301,9 @@ func (x *ConsensusManager) primaryProofFor(c evmassign.Candidate, rawPoPs, froze
 	return evmassign.PrimaryProof{Witness: witness, PoPs: pops}.Encode()
 }
 
-// checkPrimaryPoPs requires the EVM possession proofs exactly where the chain will judge them, and judges them in full on arrival: a
-// primary candidate on a chain with the election pinned carries one valid proof per member, and the set is the one the election stored
-// (so no member can fix a wrong set in a plan by sending its approval first); nothing else carries any. An EVM client that cannot say is
-// a refusal for now, never an acceptance. Freeze admission re-judges everything against the frozen parent's certified state.
-func (x *ConsensusManager) checkPrimaryPoPs(msg *abdrc.HandoffApprovalMsg, c evmassign.Candidate) error {
+// checkPrimaryPoPsShape requires the EVM possession proofs exactly where the chain will judge them and nothing else: a primary candidate on a
+// chain with the election pinned carries a well-formed list, everything else carries none. It needs no EVM state.
+func (x *ConsensusManager) checkPrimaryPoPsShape(msg *abdrc.HandoffApprovalMsg, c evmassign.Candidate) error {
 	svc := x.blockStore.PosServices()
 	judged := len(msg.CandidatePreimage) != 0 && c.Kind == evmassign.KindPrimary && svc.RequiresPrimaryProof()
 	if !judged {
@@ -210,13 +312,19 @@ func (x *ConsensusManager) checkPrimaryPoPs(msg *abdrc.HandoffApprovalMsg, c evm
 		}
 		return nil
 	}
+	if _, err := evmassign.DecodePoPs(msg.PrimaryPoPs); err != nil {
+		return errors.Join(ErrHandoffApproval, storage.ErrPrimaryProofMissing, err)
+	}
+	return nil
+}
+
+// judgePoPs judges the proofs in full against the election's published facts: one valid proof per member, and the set the election stored (so
+// no member can fix a wrong set in a plan by sending its approval first). Freeze admission re-judges everything against the frozen parent.
+func (x *ConsensusManager) judgePoPs(msg *abdrc.HandoffApprovalMsg, c evmassign.Candidate, facts evmassign.PrimaryFacts) error {
+	svc := x.blockStore.PosServices()
 	pops, err := evmassign.DecodePoPs(msg.PrimaryPoPs)
 	if err != nil {
 		return errors.Join(ErrHandoffApproval, storage.ErrPrimaryProofMissing, err)
-	}
-	facts, err := x.primaryFacts(c.ResultID())
-	if err != nil {
-		return errors.Join(ErrHandoffApproval, err)
 	}
 	if !facts.Published {
 		return errors.Join(ErrHandoffApproval, evmassign.ErrNotPublished)
@@ -230,4 +338,80 @@ func (x *ConsensusManager) checkPrimaryPoPs(msg *abdrc.HandoffApprovalMsg, c evm
 		return errors.Join(ErrHandoffApproval, storage.ErrPrimaryProofRefused, evmassign.ErrPrimaryPoP)
 	}
 	return nil
+}
+
+// checkPrimaryPoPs is the operator-side check (plan, intent): shape, then the proofs against facts read in the caller's own goroutine.
+func (x *ConsensusManager) checkPrimaryPoPs(msg *abdrc.HandoffApprovalMsg, c evmassign.Candidate) error {
+	if err := x.checkPrimaryPoPsShape(msg, c); err != nil {
+		return err
+	}
+	if len(msg.PrimaryPoPs) == 0 {
+		return nil
+	}
+	facts, err := x.primaryFactsSync(context.Background(), c.ResultID())
+	if err != nil {
+		return errors.Join(ErrHandoffApproval, err)
+	}
+	return x.judgePoPs(msg, c, facts)
+}
+
+// errPrimaryFactsPending reports an approval parked until the result's facts land.
+var errPrimaryFactsPending = errors.New("the primary result's facts are being fetched; the approval is held")
+
+// judgeApprovalPoPs is the consensus loop's judgement of an arriving approval's proofs, run only AFTER its signatures and Prepare binding
+// were verified (so only a real old-committee member can cost anything). It never calls the execution client: it reads the facts cache, and
+// on a miss starts the background fetch and parks the approval to be judged when the facts land.
+func (x *ConsensusManager) judgeApprovalPoPs(msg *abdrc.HandoffApprovalMsg) error {
+	if len(msg.CandidatePreimage) == 0 || !x.blockStore.PosServices().RequiresPrimaryProof() {
+		return nil
+	}
+	c, err := evmassign.DecodeCandidate(msg.CandidatePreimage)
+	if err != nil {
+		return errors.Join(ErrHandoffApproval, err)
+	}
+	if c.Kind != evmassign.KindPrimary {
+		return nil
+	}
+	result := c.ResultID()
+	facts, ok := x.cachedPrimaryFacts(result)
+	if !ok {
+		x.parkApproval(msg, result)
+		x.kickPrimaryFacts(result)
+		return errors.Join(ErrHandoffApproval, errPrimaryFactsPending)
+	}
+	return x.judgePoPs(msg, c, facts)
+}
+
+// prefetchFactsForPlan starts the background fetch of the result's facts when the operator's own plan is held, before any approval arrives.
+func (x *ConsensusManager) prefetchFactsForPlan(preimage []byte) {
+	if len(preimage) == 0 || !x.blockStore.PosServices().RequiresPrimaryProof() {
+		return
+	}
+	if c, err := evmassign.DecodeCandidate(preimage); err == nil && c.Kind == evmassign.KindPrimary {
+		x.kickPrimaryFacts(c.ResultID())
+	}
+}
+
+// warmPrimaryFacts reads a primary plan's facts in the operator's own goroutine, so that its own approval (and every approval that follows)
+// finds them cached.
+func (x *ConsensusManager) warmPrimaryFacts(ctx context.Context, preimage []byte) error {
+	if len(preimage) == 0 || !x.blockStore.PosServices().RequiresPrimaryProof() {
+		return nil
+	}
+	c, err := evmassign.DecodeCandidate(preimage)
+	if err != nil || c.Kind != evmassign.KindPrimary {
+		return nil
+	}
+	if _, err := x.primaryFactsSync(ctx, c.ResultID()); err != nil {
+		return errors.Join(ErrHandoffApproval, err)
+	}
+	return nil
+}
+
+// judgeApproval is judgeApprovalPoPs behind a seam, so a test can observe whether and when intake reaches the proof judgement.
+func (x *ConsensusManager) judgeApproval(msg *abdrc.HandoffApprovalMsg) error {
+	if x.judgeHook != nil {
+		return x.judgeHook(msg)
+	}
+	return x.judgeApprovalPoPs(msg)
 }

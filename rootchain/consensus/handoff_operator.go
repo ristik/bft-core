@@ -333,6 +333,7 @@ func (x *ConsensusManager) setHandoffIntent(plan abdrc.HandoffApprovalMsg) {
 	cloned.Receipts = bytes.Clone(plan.Receipts)
 	cloned.PrimaryPoPs = bytes.Clone(plan.PrimaryPoPs)
 	x.handoffIntent = &cloned
+	x.prefetchFactsForPlan(plan.CandidatePreimage)
 }
 
 // retireIntent forgets the held intent once its attempt is spent: a Prepare (or an Abort) of that attempt or a later one is in the
@@ -755,7 +756,7 @@ func (x *ConsensusManager) checkPlanBody(msg *abdrc.HandoffApprovalMsg) (planBod
 	if err != nil {
 		return body, nil, err
 	}
-	if err := x.checkPrimaryPoPs(msg, candidate); err != nil {
+	if err := x.checkPrimaryPoPsShape(msg, candidate); err != nil {
 		return body, nil, err
 	}
 	if !bytes.Equal(body.predecessorHash, link) ||
@@ -870,6 +871,9 @@ func (x *ConsensusManager) endorseHandoffAtState(ctx context.Context, plan abdrc
 	}
 	plan.Signer = x.id.String()
 	x.prefetchForPlan(plan.CandidatePreimage, plan.FrozenParent)
+	if err := x.warmPrimaryFacts(ctx, plan.CandidatePreimage); err != nil {
+		return err // the operator's own request may wait for the execution client; the consensus loop never does
+	}
 	if len(plan.CandidatePreimage) != 0 {
 		if err := x.verifyEndorsedAssignmentInstalled(plan, body.assignmentRules(), state); err != nil {
 			return err
@@ -988,6 +992,11 @@ func (x *ConsensusManager) onHandoffApprovalMsg(_ context.Context, msg *abdrc.Ha
 	boundParent, boundActivation, bound := x.boundPrepare(msg.Attempt)
 	if bound && (!bytes.Equal(msg.FrozenParent, boundParent) || msg.ActivationRound != boundActivation) {
 		return errors.Join(ErrHandoffApproval, ErrEndorsedParentMismatch)
+	}
+	// Last, and only for an approval whose signatures and Prepare binding already hold: the possession proofs, against cached facts (the
+	// execution client is never called here; see judgeApprovalPoPs).
+	if err := x.judgeApproval(msg); err != nil {
+		return err
 	}
 	id := plan.body.id
 	x.handoffMu.Lock()

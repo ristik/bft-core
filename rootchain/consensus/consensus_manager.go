@@ -121,8 +121,11 @@ type (
 		epochAnchor      *drctypes.EpochAnchor
 		primaryWitness   atomic.Pointer[PrimaryWitnessSource] // the execution client's side of a primary candidate's EVM proof
 		primaryCache     primaryCache
-		handoffMu        sync.Mutex
-		handoffPlans     map[[32]byte]*pendingHandoff
+		// approvalSink and judgeHook are test seams: where a released parked approval goes, and the intake's proof judgement
+		approvalSink func(*abdrc.HandoffApprovalMsg) error
+		judgeHook    func(*abdrc.HandoffApprovalMsg) error
+		handoffMu    sync.Mutex
+		handoffPlans map[[32]byte]*pendingHandoff
 		// handoffIntent is the operator plan this validator holds for the leader to order a Prepare for: unsigned, naming no parent.
 		handoffIntent *abdrc.HandoffApprovalMsg
 		handoffAborts map[handoffAbortKey]*pendingHandoffAbort

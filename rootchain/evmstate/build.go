@@ -24,7 +24,7 @@ type SlotProof struct {
 // ProofSource serves eth_getProof-shaped answers for one fixed block (the frozen parent P): the account proof nodes of addr and the
 // proof of each requested slot. Nothing it returns is trusted: the witness it feeds is verified against the certified state root.
 type ProofSource interface {
-	Proof(addr [20]byte, slots [][32]byte) (account [][]byte, slotProofs []SlotProof, err error)
+	Proof(ctx context.Context, addr [20]byte, slots [][32]byte) (account [][]byte, slotProofs []SlotProof, err error)
 }
 
 // ClientDeadline bounds one eth_getProof call.
@@ -35,6 +35,7 @@ var ErrBuild = errors.New("evmstate: cannot build the witness")
 
 // recordingReader reads one account's slots through the source and remembers each, so the witness lists exactly what the verifier reads.
 type recordingReader struct {
+	ctx     context.Context
 	src     ProofSource
 	addr    [20]byte
 	account [][]byte
@@ -45,7 +46,7 @@ func (r *recordingReader) word(slot [32]byte) ([32]byte, error) {
 	if p, ok := r.slots[slot]; ok {
 		return p.Value, nil
 	}
-	account, proofs, err := r.src.Proof(r.addr, [][32]byte{slot})
+	account, proofs, err := r.src.Proof(r.ctx, r.addr, [][32]byte{slot})
 	if err != nil || len(proofs) != 1 {
 		return [32]byte{}, errors.Join(ErrBuild, err, fmt.Errorf("slot %x of %x: %d proofs", slot, r.addr, len(proofs)))
 	}
@@ -57,9 +58,9 @@ func (r *recordingReader) word(slot [32]byte) ([32]byte, error) {
 // BuildPrimaryWitness collects the witness evmassign.VerifyPrimary's authority reads for a result: the Election and custody accounts at
 // the source's block, with exactly the slots the verifier consumes. The slots custody is read at depend on the session the election
 // names, so they are discovered by running the same reader the verifier runs.
-func BuildPrimaryWitness(src ProofSource, pins Pins, resultID [32]byte) ([]byte, error) {
-	election := &recordingReader{src: src, addr: pins.Election, slots: map[[32]byte]SlotProof{}}
-	custody := &recordingReader{src: src, addr: pins.Custody, slots: map[[32]byte]SlotProof{}}
+func BuildPrimaryWitness(ctx context.Context, src ProofSource, pins Pins, resultID [32]byte) ([]byte, error) {
+	election := &recordingReader{ctx: ctx, src: src, addr: pins.Election, slots: map[[32]byte]SlotProof{}}
+	custody := &recordingReader{ctx: ctx, src: src, addr: pins.Custody, slots: map[[32]byte]SlotProof{}}
 	var f evmassign.PrimaryFacts
 	if err := readPrimary(election, custody, pins, resultID, &f); err != nil {
 		return nil, err
@@ -102,13 +103,13 @@ type rpcProof struct {
 }
 
 // Proof implements ProofSource.
-func (s RPCProofSource) Proof(addr [20]byte, slots [][32]byte) ([][]byte, []SlotProof, error) {
+func (s RPCProofSource) Proof(ctx context.Context, addr [20]byte, slots [][32]byte) ([][]byte, []SlotProof, error) {
 	keys := make([]string, len(slots))
 	for i := range slots {
 		keys[i] = hexutil.Encode(slots[i][:])
 	}
 	var out rpcProof
-	ctx, cancel := context.WithTimeout(context.Background(), ClientDeadline)
+	ctx, cancel := context.WithTimeout(ctx, ClientDeadline)
 	defer cancel()
 	if err := s.Client.CallContext(ctx, &out, "eth_getProof", hexutil.Encode(addr[:]), keys, map[string]string{"blockHash": hexutil.Encode(s.BlockHash[:])}); err != nil {
 		return nil, nil, errors.Join(ErrBuild, err)

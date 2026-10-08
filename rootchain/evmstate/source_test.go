@@ -1,6 +1,7 @@
 package evmstate
 
 import (
+	"context"
 	"encoding/json"
 	"math/big"
 	"net/http"
@@ -74,16 +75,16 @@ func TestTheRPCSourceBuildsTheWitnessAndTheFactsFromAClient(t *testing.T) {
 	src := RPCWitnessSource{Client: rpcWorld(t, w, head), Pins: p.pins}
 
 	want, _ := p.witness(t, resultID)
-	got, err := src.PrimaryWitness(head[:], resultID)
+	got, err := src.PrimaryWitness(context.Background(), head[:], resultID)
 	require.NoError(t, err)
 	require.Equal(t, want, got, "the witness through a client is the witness the verifier reads")
 
-	facts, err := src.PrimaryFacts(resultID)
+	facts, err := src.PrimaryFacts(context.Background(), resultID)
 	require.NoError(t, err)
 	require.True(t, facts.Published)
 	require.Equal(t, p.fx.Attempt, facts.Attempt)
 	require.Equal(t, hexWord(t, p.fx.Expected.PopSetDigest), facts.PopSetDigest)
 
-	_, err = src.PrimaryWitness(head[:5], resultID)
+	_, err = src.PrimaryWitness(context.Background(), head[:5], resultID)
 	require.ErrorIs(t, err, ErrBuild, "a frozen parent is a 32-byte block hash")
 }

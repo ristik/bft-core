@@ -1,6 +1,7 @@
 package evmstate
 
 import (
+	"context"
 	"errors"
 	"testing"
 
@@ -16,7 +17,7 @@ type worldSource struct {
 	lieSlot bool
 }
 
-func (s *worldSource) Proof(addr [20]byte, slots [][32]byte) ([][]byte, []SlotProof, error) {
+func (s *worldSource) Proof(_ context.Context, addr [20]byte, slots [][32]byte) ([][]byte, []SlotProof, error) {
 	s.calls++
 	if addr == s.failOn {
 		return nil, nil, errors.New("node unavailable")
@@ -40,7 +41,7 @@ func TestBuiltPrimaryWitnessEqualsTheReadersAndVerifies(t *testing.T) {
 		contract{addr: p.pins.Election, codeHash: p.pins.ElectionCode, storage: p.election},
 		contract{addr: p.pins.Custody, codeHash: p.pins.CustodyCode, storage: p.custody})
 
-	got, err := BuildPrimaryWitness(&worldSource{t: t, w: w}, p.pins, resultID)
+	got, err := BuildPrimaryWitness(context.Background(), &worldSource{t: t, w: w}, p.pins, resultID)
 	require.NoError(t, err)
 	require.Equal(t, want, got, "exactly the slots the verifier reads, in the canonical order")
 	f, err := Authority{Pins: p.pins}.VerifyPrimary(got, w.root, resultID)
@@ -56,11 +57,11 @@ func TestBuildPrimaryWitnessFailuresAreNotWitnesses(t *testing.T) {
 		contract{addr: p.pins.Election, codeHash: p.pins.ElectionCode, storage: p.election},
 		contract{addr: p.pins.Custody, codeHash: p.pins.CustodyCode, storage: p.custody})
 
-	_, err := BuildPrimaryWitness(&worldSource{t: t, w: w, failOn: p.pins.Custody}, p.pins, resultID)
+	_, err := BuildPrimaryWitness(context.Background(), &worldSource{t: t, w: w, failOn: p.pins.Custody}, p.pins, resultID)
 	require.ErrorIs(t, err, ErrBuild, "an unavailable account is unavailable, not an empty witness")
 
 	// A source that lies about a value yields a witness the verifier refuses: nothing the source says is trusted.
-	got, err := BuildPrimaryWitness(&worldSource{t: t, w: w, lieSlot: true}, p.pins, resultID)
+	got, err := BuildPrimaryWitness(context.Background(), &worldSource{t: t, w: w, lieSlot: true}, p.pins, resultID)
 	if err == nil {
 		_, err = Authority{Pins: p.pins}.VerifyPrimary(got, w.root, resultID)
 	}

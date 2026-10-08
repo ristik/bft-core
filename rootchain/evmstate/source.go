@@ -19,13 +19,13 @@ type RPCWitnessSource struct {
 }
 
 // PrimaryWitness implements consensus.PrimaryWitnessSource.
-func (s RPCWitnessSource) PrimaryWitness(frozenParent []byte, resultID [32]byte) ([]byte, error) {
+func (s RPCWitnessSource) PrimaryWitness(ctx context.Context, frozenParent []byte, resultID [32]byte) ([]byte, error) {
 	if len(frozenParent) != 32 {
 		return nil, fmt.Errorf("%w: frozen parent is %d bytes", ErrBuild, len(frozenParent))
 	}
 	src := RPCProofSource{Client: s.Client}
 	copy(src.BlockHash[:], frozenParent)
-	return BuildPrimaryWitness(src, s.Pins, resultID)
+	return BuildPrimaryWitness(ctx, src, s.Pins, resultID)
 }
 
 type rpcHeader struct {
@@ -36,11 +36,11 @@ type rpcHeader struct {
 // PrimaryFacts implements consensus.PrimaryWitnessSource: the result's proven facts at the client's current head. The head is whatever
 // the client says it is; the facts only filter what a root accepts into a plan, and Freeze admission re-judges the result at the
 // certified frozen parent.
-func (s RPCWitnessSource) PrimaryFacts(resultID [32]byte) (evmassign.PrimaryFacts, error) {
+func (s RPCWitnessSource) PrimaryFacts(ctx context.Context, resultID [32]byte) (evmassign.PrimaryFacts, error) {
 	var h rpcHeader
-	ctx, cancel := context.WithTimeout(context.Background(), ClientDeadline)
+	hctx, cancel := context.WithTimeout(ctx, ClientDeadline)
 	defer cancel()
-	if err := s.Client.CallContext(ctx, &h, "eth_getBlockByNumber", "latest", false); err != nil {
+	if err := s.Client.CallContext(hctx, &h, "eth_getBlockByNumber", "latest", false); err != nil {
 		return evmassign.PrimaryFacts{}, errors.Join(ErrBuild, err)
 	}
 	if len(h.Hash) != 32 || len(h.StateRoot) != 32 {
@@ -48,7 +48,7 @@ func (s RPCWitnessSource) PrimaryFacts(resultID [32]byte) (evmassign.PrimaryFact
 	}
 	src := RPCProofSource{Client: s.Client}
 	copy(src.BlockHash[:], h.Hash)
-	witness, err := BuildPrimaryWitness(src, s.Pins, resultID)
+	witness, err := BuildPrimaryWitness(ctx, src, s.Pins, resultID)
 	if err != nil {
 		return evmassign.PrimaryFacts{}, err
 	}
