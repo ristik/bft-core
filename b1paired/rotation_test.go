@@ -2,6 +2,7 @@ package b1paired_test
 
 import (
 	"context"
+	"github.com/unicitynetwork/bft-core/internal/testutils/b1fixture"
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -31,7 +32,7 @@ func TestAuthenticatedSupersessionProjectsOnlySurvivingEpochs(t *testing.T) {
 	c := certifiedchain.New(t, 5, 0)
 	for _, w := range []uint64{0, 15} {
 		t.Run(string(rune('A'+w)), func(t *testing.T) {
-			p := b1state.Profile{Network: 5, RootGenesisID: first.Genesis, ExecutionChainID: 1337, RuntimeHash: [32]byte(common.HexToHash(b1registry.CodeHashHex)), CompilerHash: b1registry.CompilerHash(), WCert: w, DeltaEV: w + 1, DeltaHold: w + 2, RestGas: 1096500 + 1141500*(w+1), CompanionBytes: 1 << 20, OtherCompanionBytes: 65536, OrdinaryCapacity: 7000000}
+			p := b1state.Profile{Network: 5, RootGenesisID: first.Genesis, ExecutionChainID: 1337, RuntimeHash: [32]byte(common.HexToHash(b1registry.CodeHashHex)), CompilerHash: b1registry.CompilerHash(), WCert: w, DeltaEV: w + 1, DeltaHold: w + 2, RestGas: 1136500 + 1147500*(w+1), CompanionBytes: 1 << 20, OtherCompanionBytes: 65536, OrdinaryCapacity: 7000000, GenesisUCTime: 1000}
 			p.SystemGas, _ = p.RequiredSystemGas()
 			p.MaxGas = p.SystemGas + p.OrdinaryCapacity
 			g, err := registrygenesis.GenerateB1(certifiedchain.Config(5), p, rt.History(), registrygenesis.EVMParams{GasLimit: p.MaxGas})
@@ -40,7 +41,7 @@ func TestAuthenticatedSupersessionProjectsOnlySurvivingEpochs(t *testing.T) {
 			require.NoError(t, err)
 			parent, err := registryproof.Verify(g.ProofContext(), g.EVMGenesisHash(), g.Evidence())
 			require.NoError(t, err)
-			pair := &b1paired.Config{Profile: p, Authority: rt.B1Authority(), Proofs: func(_ context.Context, _ registryproof.Snapshot, keys []common.Hash) ([][][]byte, error) {
+			pair := &b1paired.Config{Profile: p, Authority: rt.B1Authority(), Records: b1fixture.EmptyRecords{UCTime: p.GenesisUCTime}, Proofs: func(_ context.Context, _ registryproof.Snapshot, keys []common.Hash) ([][][]byte, error) {
 				return g.B1Proofs(keys), nil
 			}}
 			signed := func(epoch, round uint64) rootinput.VerifiedObservationV2 {

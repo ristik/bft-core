@@ -73,6 +73,23 @@ func (s *frontierPersistentStore) Records(from uint64, max int) ([]rootrecords.R
 	}
 	return store.Records(from, max)
 }
+
+// The control witnesses are immutable evidence retained by hash; the proxy forwards them with the same fault latch.
+func (s *frontierPersistentStore) StoreWitness(hash [32]byte, data []byte) error {
+	store, ok := s.PersistentStore.(storage.WitnessStore)
+	if !ok {
+		return s.fault(storage.ErrNoWitnessStore)
+	}
+	return s.fault(store.StoreWitness(hash, data))
+}
+func (s *frontierPersistentStore) Witness(hash [32]byte) ([]byte, error) {
+	store, ok := s.PersistentStore.(storage.WitnessStore)
+	if !ok {
+		return nil, storage.ErrNoWitnessStore
+	}
+	return store.Witness(hash)
+}
+
 func (s *frontierPersistentStore) WriteBlock(block *storage.ExecutedBlock, root bool) error {
 	return s.fault(s.PersistentStore.WriteBlock(block, root))
 }
