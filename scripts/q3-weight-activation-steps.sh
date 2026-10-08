@@ -315,8 +315,9 @@ q3_heavy_crash() {
   lastsigned=$(tail -n +"$((mark + 1))" "$root1" | grep -aE "$(q3_pat "$Q3_PAT_SIGNED_TIMEOUT" 2)" | tail -n 1 | q3_ids | sed 's/messageID=//')
   printf '%s\n' "$signed" >"$Q3_DIR/signed-before-crash.txt"
   mark=$(wc -l <"$root1")
+  # a cold network: the heavy root starts first without a bootnode (as at genesis), the lights follow with it as their bootnode
+  m2_start_root 1 2 "" || return 1
   for i in 2 3 4; do m2_start_root "$i" 2 "$(m2_root_addr 1)" || return 1; done
-  m2_start_root 1 2 "$(m2_root_addr 3)" || return 1
   # the last vote the node stored before it died is held again at start under the identity it was signed with (independent of the timer path below)
   q3_wait_grep_since 60 "$root1" "$mark" "msg=\"recovered last vote\" kind=timeout round=[0-9]+ messageID=$lastsigned" || return 1
   q3_wait_grep_since 120 "$root1" "$mark" "$(q3_pat "$Q3_PAT_RECOVERED" 2)" || return 1
