@@ -1477,11 +1477,7 @@ func (x *ConsensusManager) processNewRoundEvent(ctx context.Context) {
 		x.log.WarnContext(ctx, "cannot read proposal parent timestamp", logger.Error(err))
 		return
 	}
-	timestamp, err := proposalTimestamp(types.NewTimestamp(), parent.BlockData.Timestamp)
-	if err != nil {
-		x.log.WarnContext(ctx, "cannot advance proposal timestamp", logger.Error(err))
-		return
-	}
+	timestamp := proposalTimestamp(types.NewTimestamp(), parent.BlockData.Timestamp)
 	proposalMsg := &abdrc.ProposalMsg{
 		Block: &drctypes.BlockData{
 			Version:   types.Version(profile),

@@ -51,8 +51,7 @@ func TestRecoveryAuthenticatesTimestampBeforeInstallingParent(t *testing.T) {
 			require.NoError(t, recoverTo(t, root, state), "original signed history remains replayable")
 			parent, err := root.blockStore.Block(root.blockStore.GetHighQc().GetRound())
 			require.NoError(t, err)
-			_, err = proposalTimestamp(basetypes.NewTimestamp(), parent.BlockData.Timestamp)
-			require.NoError(t, err)
+			require.GreaterOrEqual(t, proposalTimestamp(basetypes.NewTimestamp(), parent.BlockData.Timestamp), parent.BlockData.Timestamp)
 		})
 	}
 }
