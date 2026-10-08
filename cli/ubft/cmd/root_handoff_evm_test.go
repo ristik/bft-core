@@ -395,3 +395,15 @@ func TestEVMPoPSignsBoundedWeightsAndRefusesOutOfBoundOnes(t *testing.T) {
 	require.NoError(t, pop(6), "a bounded weight is signed for")
 	require.ErrorIs(t, pop(0), evmassign.ErrAssignment, "a zero weight is not")
 }
+
+// A recovery is derived by the root from the committed primary and carries no validators or bindings, so the client's early coupling check has
+// nothing to compare for it; a primary with no coupled participants is still refused with the coupling sentinel.
+func TestTheEarlyCouplingCheckSkipsTheDerivedRecoveryOnly(t *testing.T) {
+	a, b := newSuccessorKey(t, "r-a"), newSuccessorKey(t, "r-b")
+	next := &types.RootTrustBaseV1{RootNodes: []*types.NodeInfo{a.info, b.info}}
+
+	require.NoError(t, checkCoupledProposal(next, &evmassign.Proposal{Kind: evmassign.KindRecovery, Supersede: true}), "the derived recovery is not checked here")
+	require.ErrorIs(t, checkCoupledProposal(next, &evmassign.Proposal{Kind: evmassign.KindPrimary}), evmassign.ErrCoupling,
+		"a primary with no coupled participants is refused")
+	require.ErrorIs(t, checkCoupledProposal(next, &evmassign.Proposal{}), evmassign.ErrCoupling, "the zero kind is a primary")
+}

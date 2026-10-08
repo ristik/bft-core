@@ -211,7 +211,7 @@ func TestTheFirstCoupledHandoffAuthorizationIsAdmittedAgainstTheRecordedBaseline
 	require.NoError(t, seedGenesisIdentities(o, d.tb, []*types.PartitionDescriptionRecord{d.conf}, d.file(t, ids)))
 
 	predecessor := bytes.Repeat([]byte{0xb0}, 32)
-	ectx := consensus.EVMAssignmentContext{Network: uint64(genesisNetwork), Predecessor: predecessor, Attempt: 0, Installed: d.conf}
+	ectx := consensus.EVMAssignmentContext{Network: uint64(genesisNetwork), Predecessor: predecessor, Attempt: 0, Installed: d.conf, Acknowledged: d.conf}
 	a, err := poaAuthorization(ectx, 31337, ids)
 	require.NoError(t, err)
 
@@ -233,10 +233,10 @@ func TestTheFirstCoupledHandoffAuthorizationIsAdmittedAgainstTheRecordedBaseline
 	require.NoError(t, err)
 	require.ErrorIs(t, evmassign.VerifyLifecycle(candidate(wrongK, predecessor), lifecycle), evmassign.ErrNotIncumbent)
 
-	// the authorization is based on another assignment: the context's installed configuration is not the acknowledged one
+	// the authorization is based on another assignment: the context's acknowledged configuration is not the recorded one
 	otherConf := *d.conf
 	otherConf.T2Timeout = 3 * time.Second
-	wrongBase, err := poaAuthorization(consensus.EVMAssignmentContext{Network: uint64(genesisNetwork), Predecessor: predecessor, Installed: &otherConf}, 31337, ids)
+	wrongBase, err := poaAuthorization(consensus.EVMAssignmentContext{Network: uint64(genesisNetwork), Predecessor: predecessor, Acknowledged: &otherConf}, 31337, ids)
 	require.NoError(t, err)
 	require.ErrorIs(t, evmassign.VerifyLifecycle(candidate(wrongBase, predecessor), lifecycle), evmassign.ErrNotIncumbent)
 
@@ -245,6 +245,50 @@ func TestTheFirstCoupledHandoffAuthorizationIsAdmittedAgainstTheRecordedBaseline
 
 	// an incomplete context yields no authorization
 	_, err = poaAuthorization(consensus.EVMAssignmentContext{Network: uint64(genesisNetwork)}, 31337, ids)
+	require.ErrorIs(t, err, ErrGenesisIdentities)
+}
+
+// A supersession is authorized while an activated assignment waits for its acknowledgement: the context then reports the pending configuration as
+// installed, and K and the base are still the LAST ACKNOWLEDGED assignment (the verifier takes nothing else). The authorization is the same with
+// or without a pending assignment, and one based on the pending configuration is refused as not based on the incumbent.
+func TestTheAuthorizationOfASupersessionIsBasedOnTheAcknowledgedAssignment(t *testing.T) {
+	d := newGenesisDeployment(t)
+	o := d.orchestration(t)
+	ids, err := poaGenesisIdentities(d.tb, d.conf, d.bindings)
+	require.NoError(t, err)
+	require.NoError(t, seedGenesisIdentities(o, d.tb, []*types.PartitionDescriptionRecord{d.conf}, d.file(t, ids)))
+	predecessor := bytes.Repeat([]byte{0xb0}, 32)
+	lifecycle, err := storage.LifecycleFor(o, 8, types.ShardID{}, 0, d.conf)
+	require.NoError(t, err)
+	successor := append([]evmassign.Identity(nil), ids...)
+	successor[0].Weight = 2
+	candidate := func(a *evmassign.Authorization) evmassign.Candidate {
+		return evmassign.Candidate{Version: evmassign.CandidateVersion, Kind: evmassign.KindPrimary, Network: uint64(genesisNetwork), Predecessor: predecessor,
+			Identities: successor, Authorization: a}
+	}
+
+	// the pending assignment: a later epoch with another configuration, activated and not acknowledged
+	pending := *d.conf
+	pending.Epoch = d.conf.Epoch + 1
+	pending.T2Timeout = 3 * time.Second
+	steady := consensus.EVMAssignmentContext{Network: uint64(genesisNetwork), Predecessor: predecessor, Installed: d.conf, Acknowledged: d.conf}
+	waiting := consensus.EVMAssignmentContext{Network: uint64(genesisNetwork), Predecessor: predecessor, Installed: &pending, Acknowledged: d.conf, Pending: true}
+
+	fromSteady, err := poaAuthorization(steady, 31337, ids)
+	require.NoError(t, err)
+	fromWaiting, err := poaAuthorization(waiting, 31337, ids)
+	require.NoError(t, err)
+	require.Equal(t, fromSteady.BaseAssignmentHash, fromWaiting.BaseAssignmentHash, "one rule: the base is the acknowledged assignment, pending or not")
+	require.NoError(t, evmassign.VerifyLifecycle(candidate(fromWaiting), lifecycle), "the authorization derived while an assignment is pending is admitted")
+
+	// the base taken from the pending configuration (the old rule) is the wrong assignment
+	basedOnPending, err := poaAuthorization(consensus.EVMAssignmentContext{Network: uint64(genesisNetwork), Predecessor: predecessor, Installed: &pending, Acknowledged: &pending}, 31337, ids)
+	require.NoError(t, err)
+	require.NotEqual(t, fromWaiting.BaseAssignmentHash, basedOnPending.BaseAssignmentHash)
+	require.ErrorIs(t, evmassign.VerifyLifecycle(candidate(basedOnPending), lifecycle), evmassign.ErrNotIncumbent)
+
+	// a context without the acknowledged configuration yields no authorization (the installed one is never a substitute)
+	_, err = poaAuthorization(consensus.EVMAssignmentContext{Network: uint64(genesisNetwork), Predecessor: predecessor, Installed: d.conf}, 31337, ids)
 	require.ErrorIs(t, err, ErrGenesisIdentities)
 }
 
@@ -267,7 +311,7 @@ func TestTheGenesisIdentitiesAndAuthorizationCommandsWriteTheFilesTheRootConsume
 	require.NoError(t, seedGenesisIdentities(d.orchestration(t), d.tb, []*types.PartitionDescriptionRecord{d.conf}, idsFile), "the generated file is the one the root accepts")
 
 	ctxFile, authFile := filepath.Join(dir, "context.json"), filepath.Join(dir, "authorization.json")
-	require.NoError(t, writeJSONFile(ctxFile, consensus.EVMAssignmentContext{Network: uint64(genesisNetwork), Predecessor: bytes.Repeat([]byte{0xb0}, 32), Installed: d.conf}))
+	require.NoError(t, writeJSONFile(ctxFile, consensus.EVMAssignmentContext{Network: uint64(genesisNetwork), Predecessor: bytes.Repeat([]byte{0xb0}, 32), Installed: d.conf, Acknowledged: d.conf}))
 	_, err = runCLI(t, "root", "handoff", "evm-authorization", "--context", ctxFile, "--incumbent", idsFile, "--chain", "31337", "--out", authFile)
 	require.NoError(t, err)
 	a, err := readAuthorization(authFile)

@@ -27,6 +27,9 @@ m2_wait_root_epoch() {
 m2_start_root() {
   local node=$1 epoch=$2 boot=$3 port pid i conf
   local -a shardConfArgs=(--shard-conf "$fullShardConf")
+  local -a bootArgs=()
+  [ -z "$boot" ] || bootArgs=(--bootnodes "$boot")   # the first root of a cold network has no bootnode, as at genesis
+  [ "${Q3_WEIGHT_LANE:-0}" != 1 ] || shardConfArgs+=(--q3-lane --genesis-identities test-nodes/genesis-identities.json)   # Q3 #50: the coupled runtime (verified history, install journal, V3 handoffs)
   port=$(m2_rpc_port "$node")
   if [ "${F8_MIXED_LANE:-0}" = 1 ]; then
     for conf in test-nodes/shard-conf-f8-a-left.json test-nodes/shard-conf-f8-a-right.json test-nodes/shard-conf-f8-b-left.json; do
@@ -37,7 +40,7 @@ m2_start_root() {
   for i in $(seq 1 90); do
     UBFT_Q4_SHIM_DIR="${Q4_SHIM_DIR:+$Q4_SHIM_DIR/root$node}" ${Q4_ROOT_BIN:-build/ubft} root-node run --home "test-nodes/root$node" \
       --address "/ip4/127.0.0.1/tcp/$(m2_p2p_port "$node")" \
-      --bootnodes "$boot" --trust-base test-nodes/trust-base.json \
+      ${bootArgs[@]+"${bootArgs[@]}"} --trust-base test-nodes/trust-base.json \
       "${shardConfArgs[@]}" --profile-2 --install-handoff-epoch "$epoch" \
       --rpc-server-address "127.0.0.1:$port" --log-format text --log-level debug \
       >>"test-nodes/root$node/debug.log" 2>&1 &

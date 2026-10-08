@@ -50,11 +50,22 @@ func rpcServer(t *testing.T, handlers map[string]func(params json.RawMessage) rp
 
 func hexOf(b []byte) string { return "0x" + hex.EncodeToString(b) }
 
+// laneRootInput is a fresh-B1 canonical root input as the tools read it: the transition array is its 11th field, followed by the B1 update hash and
+// the root-records hash (13 fields; the legacy tuple ends with the transitions).
+func laneRootInput(transitions [][]byte) []any {
+	d := make([]any, len(transitions))
+	for i, tr := range transitions {
+		d[i] = tr
+	}
+	return []any{uint64(2), uint64(3), uint64(8), []byte{0x80}, uint64(5), uint64(1), uint64(1), make([]byte, 32), []any{uint64(1)},
+		[]any{uint64(5), uint64(1), "leader", []byte{1}, []byte{2}}, d, make([]byte, 32), make([]byte, 32)}
+}
+
 // laneRetained serves one block's header and companion the way the execution client's plain endpoint does.
 func laneRetained(t *testing.T) (*httptest.Server, []byte, [][]byte) {
 	t.Helper()
 	transitions := [][]byte{{0xa1, 0x01}, {0xb2}}
-	rootInput, err := types.Cbor.Marshal([]any{uint64(2), []byte("origin"), []any{transitions[0], transitions[1]}})
+	rootInput, err := types.Cbor.Marshal(laneRootInput(transitions))
 	require.NoError(t, err)
 	th, err := engineapi.TransitionsHash(transitions)
 	require.NoError(t, err)
@@ -155,6 +166,32 @@ func TestPairControlExitsZeroOnlyForAnAcceptedControl(t *testing.T) {
 	require.Error(t, err)
 	_, err = runCLI(t, "q3", "pair-control", "--kind", "accept", "--engine-url", engine.URL, "--jwt-secret", filepath.Join(t.TempDir(), "missing"), "--eth-url", eth.URL)
 	require.Error(t, err, "no secret file")
+}
+
+// The execution client refuses a build below its finalized block ("Too deep reorg") after the pair gate has accepted the job. For the control that
+// changes nothing that answer is the gate's acceptance and the command says exactly that; for a control that changes something the same answer is
+// not an acceptance, so the command still exits non-zero and the lane finds no typed cause.
+func TestPairControlReportsTheGatesAcceptanceWhenTheEngineRefusesTheBuildBelowItsFinalizedBlock(t *testing.T) {
+	eth, _, _ := laneRetained(t)
+	jwt := filepath.Join(t.TempDir(), "jwt.hex")
+	require.NoError(t, os.WriteFile(jwt, []byte(strings.Repeat("ab", 32)), 0o600))
+	engine := rpcServer(t, map[string]func(json.RawMessage) rpcResult{
+		"engine_forkchoiceUpdatedWithSealV1": func(json.RawMessage) rpcResult { return rpcResult{err: "Too deep reorg"} },
+	})
+	args := func(kind string) []string {
+		return []string{"q3", "pair-control", "--kind", kind, "--engine-url", engine.URL, "--jwt-secret", jwt, "--eth-url", eth.URL}
+	}
+	out, err := runCLI(t, args("accept")...)
+	require.NoError(t, err, "the unchanged control is accepted by the gate")
+	require.Contains(t, out, "pair control accept: accepted by the pair gate (the engine then refused the build below its finalized block: ")
+	require.Contains(t, out, "Too deep reorg", "the engine's answer is shown")
+	require.NotContains(t, out, "refused:")
+
+	for _, kind := range []string{"wrong-parent", "wrong-job", "substituted-input", "missing-evidence"} {
+		out, err = runCLI(t, args(kind)...)
+		require.ErrorContains(t, err, "pair control "+kind+": refused", "%s: the same answer is no acceptance for a changed control", kind)
+		require.NotContains(t, out, "accepted", kind)
+	}
 }
 
 func TestPairAdmitReportsTheGatesAnswer(t *testing.T) {

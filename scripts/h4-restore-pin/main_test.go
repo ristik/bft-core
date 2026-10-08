@@ -2,6 +2,7 @@ package main
 
 import (
 	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -72,5 +73,23 @@ func TestArchiveTrustBodyIDReadsTheTipEpochBundle(t *testing.T) {
 	want := bundle.Body.Identity()
 	if got != [32]byte(want) {
 		t.Fatalf("body id = %x, want %x", got, want)
+	}
+}
+
+func TestNamedBodyIDIsTakenOnlyForItsEpochAndOnlyWhenWellFormed(t *testing.T) {
+	id := strings.Repeat("ab", 32)
+	got, ok := namedBodyID("1=00"+id[2:]+", 2="+id, 2)
+	if !ok || hex.EncodeToString(got[:]) != id {
+		t.Fatalf("epoch 2 must be taken: %x %v", got, ok)
+	}
+	for name, spec := range map[string]string{
+		"another epoch": "3=" + id, "no spec": "", "short": "2=abab", "not hex": "2=" + strings.Repeat("zz", 32), "no separator": "2" + id,
+	} {
+		if _, ok := namedBodyID(spec, 2); ok {
+			t.Fatalf("%s must not name a body identity", name)
+		}
+	}
+	if _, ok := namedBodyID("2=0x"+id, 2); !ok {
+		t.Fatal("a 0x prefix is accepted")
 	}
 }

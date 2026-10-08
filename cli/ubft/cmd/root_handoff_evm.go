@@ -79,8 +79,13 @@ func readEVMAssignment(path string) (*evmassign.Proposal, error) {
 }
 
 // checkCoupledProposal refuses before any endorsement a proposal whose EVM participants are not the coupled image of the
-// next root committee (one delegated EVM key per root entity, same weight, distinct keys).
+// next root committee (one delegated EVM key per root entity, same weight, distinct keys). A recovery is derived by the root and is not checked here.
 func checkCoupledProposal(next *types.RootTrustBaseV1, p *evmassign.Proposal) error {
+	if p.Kind == evmassign.KindRecovery {
+		// A recovery carries no validators or bindings: the root derives exactly K from the committed primary and verifies the coupling of that derived
+		// set to the next committee itself. There is nothing here to compare, and an empty set is not an uncoupled one.
+		return nil
+	}
 	root := make([]evmassign.RootMember, 0, len(next.RootNodes))
 	for _, n := range next.RootNodes {
 		if n == nil {
