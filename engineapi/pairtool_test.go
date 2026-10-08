@@ -54,7 +54,19 @@ func (c pairChain) serve(t *testing.T, eth *mockReth) {
 	t.Helper()
 	enc, err := c.binding.Encode()
 	require.NoError(t, err)
-	eth.on("eth_getBlockByNumber", func(json.RawMessage) (any, *rpcError) { return c.header, nil })
+	eth.on("eth_getBlockByNumber", func(r json.RawMessage) (any, *rpcError) {
+		var args []any
+		_ = json.Unmarshal(r, &args)
+		if len(args) > 0 && args[0] == "finalized" { // the block before the retained one is the finalized one: the retained block is an uncertified tip
+			fin := map[string]any{}
+			for k, v := range c.header {
+				fin[k] = v
+			}
+			fin["number"] = "0x4"
+			return fin, nil
+		}
+		return c.header, nil
+	})
 	eth.on("unicity_getSealCompanionV1", func(json.RawMessage) (any, *rpcError) {
 		return map[string]any{"status": "found", "companion": map[string]any{"rootInput": "0x" + hexString(c.rootInput),
 			"pairBinding": "0x" + hexString(enc), "witnesses": []any{}, "provenance": "build"}}, nil
@@ -215,4 +227,60 @@ func TestTheRestartAdmissionPresentsTheRetainedBindingAsAnImportOfTheHead(t *tes
 		return nil, &rpcError{Code: -39002, Message: "recovery admission refused: presented binding refused at 5: pair binding refused: ParentHashMismatch"}
 	})
 	require.ErrorContains(t, AdmitHeadFromRetained(context.Background(), urlOf(t, engine, true), Secret{}, urlOf(t, eth, false)), "ParentHashMismatch")
+}
+
+// The control rebuilds the latest block on its parent, which the execution client refuses below its finalized block. When the latest block is
+// the finalized one the control waits for an uncertified tip rather than sending a build that cannot be accepted; and a build refused as a too
+// deep reorg (a certification overtook the tip) is retried.
+func TestTheControlWaitsForAnUncertifiedTipAndRetriesATooDeepReorg(t *testing.T) {
+	c := newPairChain(t)
+	eth := newMockReth(t, Secret{})
+	c.serve(t, eth)
+	finalizedNumber := "0x5" // the latest block is the finalized one
+	asked := 0
+	eth.on("eth_getBlockByNumber", func(r json.RawMessage) (any, *rpcError) {
+		var args []any
+		_ = json.Unmarshal(r, &args)
+		if len(args) > 0 && args[0] == "finalized" {
+			asked++
+			if asked > 2 {
+				finalizedNumber = "0x4" // a new tip is built
+			}
+			fin := map[string]any{}
+			for k, v := range c.header {
+				fin[k] = v
+			}
+			fin["number"] = finalizedNumber
+			return fin, nil
+		}
+		return c.header, nil
+	})
+	engine := newMockReth(t, Secret{})
+	calls := 0
+	pid := data{1, 2, 3, 4, 5, 6, 7, 8}
+	engine.on("engine_forkchoiceUpdatedWithSealV1", func(json.RawMessage) (any, *rpcError) {
+		calls++
+		if calls == 1 {
+			return nil, &rpcError{Code: -38006, Message: "Too deep reorg"}
+		}
+		return ForkchoiceUpdatedResponse{PayloadStatus: PayloadStatusV1{Status: PayloadStatusValid}, PayloadID: &pid}, nil
+	})
+	out, err := RunPairControl(context.Background(), urlOf(t, engine, true), Secret{}, urlOf(t, eth, false), ControlAccept)
+	require.NoError(t, err)
+	require.True(t, out.Accepted)
+	require.Greater(t, asked, 2, "it waited while the latest block was the finalized one")
+	require.Equal(t, 2, calls, "and retried the build once after the too deep reorg, never sending one while there was no uncertified tip")
+
+	// another refusal is final, not retried
+	engine2 := newMockReth(t, Secret{})
+	calls2 := 0
+	engine2.on("engine_forkchoiceUpdatedWithSealV1", func(json.RawMessage) (any, *rpcError) {
+		calls2++
+		msg := "pair binding refused: ParentHashMismatch"
+		return ForkchoiceUpdatedResponse{PayloadStatus: PayloadStatusV1{Status: PayloadStatusInvalid, ValidationError: &msg}}, nil
+	})
+	out, err = RunPairControl(context.Background(), urlOf(t, engine2, true), Secret{}, urlOf(t, eth, false), ControlAccept)
+	require.NoError(t, err)
+	require.False(t, out.Accepted)
+	require.Equal(t, 1, calls2)
 }

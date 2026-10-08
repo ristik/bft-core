@@ -10,6 +10,8 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"strings"
+	"time"
 
 	"github.com/unicitynetwork/bft-go-base/types"
 )
@@ -104,11 +106,49 @@ type PairControlOutcome struct {
 // from the root input and binding it retained, with exactly one thing changed according to the control. The control that changes nothing
 // must be accepted; every other must be refused with its own cause. A job that is accepted starts a payload build the node never collects.
 func RunPairControl(ctx context.Context, engineURL string, secret Secret, ethURL string, kind PairControl) (PairControlOutcome, error) {
+	// The rebuild is on the latest block's parent, which the execution client refuses to build on once it is below the block it was told is
+	// finalized (a "too deep reorg"). The finalized block is the latest certified one, so the control needs an uncertified tip; the pair
+	// builds one every round, but the latest block can be the certified one at the moment the control looks. Wait for a rebuildable tip and
+	// retry the whole control when a certification overtakes it.
+	deadline := time.Now().Add(controlPatience)
+	for {
+		out, err := runPairControlOnce(ctx, engineURL, secret, ethURL, kind)
+		retry := errors.Is(err, errNoUncertifiedTip) || (err == nil && !out.Accepted && strings.Contains(out.Detail, tooDeepReorg))
+		if !retry || time.Now().After(deadline) || ctx.Err() != nil {
+			return out, err
+		}
+		select {
+		case <-ctx.Done():
+			return out, ctx.Err()
+		case <-time.After(controlRetryEvery):
+		}
+	}
+}
+
+const (
+	// controlPatience bounds how long a control waits for a tip that is not yet certified.
+	controlPatience   = 90 * time.Second
+	controlRetryEvery = 300 * time.Millisecond
+	// tooDeepReorg is the execution client's refusal of a build below its finalized block.
+	tooDeepReorg = "Too deep reorg"
+)
+
+// errNoUncertifiedTip: the latest block is the finalized one, so rebuilding it would build below the finalized block.
+var errNoUncertifiedTip = errors.New("engineapi: the latest block is the finalized one: no uncertified tip to rebuild")
+
+func runPairControlOnce(ctx context.Context, engineURL string, secret Secret, ethURL string, kind PairControl) (PairControlOutcome, error) {
 	var out PairControlOutcome
 	eth := NewEthClient(ethURL)
 	h, err := eth.header(ctx, "latest")
 	if err != nil {
 		return out, err
+	}
+	if fin, ferr := eth.header(ctx, "finalized"); ferr == nil {
+		ln, lerr := hexUint(h.Number)
+		fn, nerr := hexUint(fin.Number)
+		if lerr == nil && nerr == nil && ln <= fn {
+			return out, errNoUncertifiedTip
+		}
 	}
 	if len(h.Withdrawals) != 0 {
 		return out, errors.New("engineapi: a block with withdrawals is not a block this control can rebuild")
