@@ -911,16 +911,22 @@
      "package": "./rootchain/consensus",
      "test": "TestQ3ActivationRestartRebuildsTheScheduleFromAStar",
      "scope": "startup and recovery build at a known start"
+    },
+    {
+     "kind": "go-test",
+     "label": "IN-PROCESS",
+     "package": "./rootchain/consensus",
+     "test": "TestLeaderAfterRefusesTheSuccessorOverflow",
+     "scope": "round+1 is overflow-checked before every successor lookup"
     }
    ]
   },
   {
    "id": "Q2",
-   "title": "#399 query-cost gate 2: supported-scale cold restart, old uncached query and concurrent callers, within frozen budgets",
-   "design": "Design v2 section 4, second #399 bullet.",
+   "title": "#399 query-cost gate 2: cold restart, old query and eight concurrent callers at n=100, d=10^6, d~6x10^5, near MaxUint64 and worst-period inputs, within the frozen budgets",
+   "design": "Design v2 section 4, second #399 bullet; bounded lookup (briefs/leader-lookup.md).",
    "required": [
-    "MEASURED",
-    "ENFORCED-BOUND"
+    "MEASURED"
    ],
    "evidence": [
     {
@@ -928,26 +934,26 @@
      "label": "MEASURED",
      "package": "./rootchain/consensus/leader",
      "test": "TestQ4QueryCostGate",
-     "scope": "CI profile n=100 d=1e4 against the frozen per-round budget; the full profile (n<=100, d<=1e5, plus d=1e6 measured only) runs with Q4_COST_FULL=1"
+     "scope": "every mandatory row is asserted, none measured-only: constructor plus lookup <= 2 s, <= 512 KiB, <= 2,048 allocs; before-change baseline (2.0-4.0 s at d=1e6, growing with d) is a recorded constant, not re-run"
     },
     {
      "kind": "go-test",
      "label": "MEASURED",
      "package": "./rootchain/consensus/leader",
-     "test": "TestQ4QueryCostScalesWithDistanceNotMembersAlone",
-     "scope": ""
+     "test": "TestQ4LookupCostIsConstant",
+     "scope": "table length is W/gcd <= B and a lookup allocates nothing at any round"
+    },
+    {
+     "kind": "go-test",
+     "label": "MEASURED",
+     "package": "./rootchain/consensus/leader",
+     "test": "TestTableCacheCoalescesConcurrentColdCallers",
+     "scope": "eight concurrent cold callers on the cache cost one construction"
     },
     {
      "kind": "cost",
      "label": "MEASURED",
-     "scope": "the full-profile measurements file"
-    }
-   ],
-   "gaps": [
-    {
-     "label": "ENFORCED-BOUND",
-     "reason": "Nothing in production bounds the epoch length or a catch-up jump to the frozen 100,000-round envelope; beyond it the lookup blocks every caller for seconds (d=1e6, n=100: about 4 s on the #489 host, about 2 s on this one) and only a checkpoint or accelerated lookup fixes that. #489 left it unscoped. This is a release prerequisite, not a waived gate.",
-     "blockedBy": "leader-lookup fix (arch design, briefs/leader-lookup.md); stays a gap until it lands"
+     "scope": "the full measurements file"
     }
    ]
   },
