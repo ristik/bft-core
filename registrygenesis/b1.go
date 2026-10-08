@@ -112,3 +112,33 @@ func B1Origin(full *types.PartitionDescriptionRecord, p b1state.Profile, h *q3fo
 	art := Artifact{RuntimeCode: code, CodeHash: common.Hash(p.RuntimeHash), Layout: registryproof.FreshB1, b1: &b1GenesisConfig{p, entry[0]}}
 	return ValidateFinalizedGenesisJSON(full, generated.pins, art, finalized, expected, limits)
 }
+
+// B1Artifact binds the pinned fresh-B1 registry runtime to a complete execution profile and the
+// authenticated genesis epoch of h, and returns the pins a genesis built from it is verified under.
+// It is the same binding GenerateB1 and B1Origin make, exported for genesis tooling and nodes that
+// prepare or validate a finalized genesis JSON with an operator allocation.
+func B1Artifact(p b1state.Profile, h *q3format.History) (Artifact, Pins, error) {
+	if err := b1registry.ValidateProfile(p); err != nil {
+		return Artifact{}, Pins{}, err
+	}
+	if h == nil || h.Genesis() != p.RootGenesisID || h.Network() != uint64(p.Network) {
+		return Artifact{}, Pins{}, ErrContextMismatch
+	}
+	first, err := h.ForEpoch(1)
+	if err != nil {
+		return Artifact{}, Pins{}, err
+	}
+	entries, err := h.B1Entries(first.Start())
+	if err != nil {
+		return Artifact{}, Pins{}, err
+	}
+	if len(entries) != 1 {
+		return Artifact{}, Pins{}, ErrContextMismatch
+	}
+	code, err := b1registry.Runtime()
+	if err != nil {
+		return Artifact{}, Pins{}, err
+	}
+	art := Artifact{RuntimeCode: code, CodeHash: common.Hash(p.RuntimeHash), Layout: registryproof.FreshB1, b1: &b1GenesisConfig{p, entries[0]}}
+	return art, Pins{RootEpoch: entries[0].Epoch, RegistryCodeHash: art.CodeHash, SystemAddress: SystemAddress, RegistryAddress: registryproof.RegistryAddress}, nil
+}

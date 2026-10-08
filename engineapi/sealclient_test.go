@@ -90,7 +90,7 @@ func TestSealBuildInputVector(t *testing.T) {
 	// to null, and ureth's Vec<Bytes> will not decode null. It has to be [].
 	nilTransitions, err := json.Marshal(SealBuildInput{RootInput: data{0x01, 0x02, 0x03}})
 	require.NoError(t, err)
-	require.Equal(t, `{"rootInput":"0x010203","transitions":[]}`, string(nilTransitions))
+	require.Equal(t, `{"b1Update":"0x","rootInput":"0x010203","transitions":[]}`, string(nilTransitions))
 	require.NotContains(t, string(nilTransitions), "null")
 
 	// An explicit empty slice must encode identically.
@@ -109,7 +109,7 @@ func TestSealBuildInputVector(t *testing.T) {
 		Transitions: []data{{0xaa}, {0xbb, 0xcc}},
 	})
 	require.NoError(t, err)
-	require.Equal(t, `{"rootInput":"0xdead","transitions":["0xaa","0xbbcc"]}`, string(populated))
+	require.Equal(t, `{"b1Update":"0x","rootInput":"0xdead","transitions":["0xaa","0xbbcc"]}`, string(populated))
 }
 
 func TestForkchoiceUpdatedWithSealV1SendsMethodAndThreeParams(t *testing.T) {
@@ -142,7 +142,7 @@ func TestForkchoiceUpdatedWithSealV1SendsMethodAndThreeParams(t *testing.T) {
 	require.Contains(t, string(params[1]), `"commitment"`,
 		"the commitment must be on the wire: reth's UnicityPayloadAttributes requires it")
 
-	require.Equal(t, `{"rootInput":"0x0102","transitions":[]}`, string(params[2]))
+	require.Equal(t, `{"b1Update":"0x","rootInput":"0x0102","transitions":[]}`, string(params[2]))
 }
 
 func TestForkchoiceUpdatedWithSealV1RefusesNilAttributesWithoutCallingTheFarSide(t *testing.T) {
@@ -217,7 +217,7 @@ func TestNewPayloadWithSealV1SendsFourParamsAndNormalizesNilBlobHashes(t *testin
 		Transactions: []data{{0xaa}},
 		Withdrawals:  []WithdrawalV1{},
 	}
-	companion := SealCompanion{RootInput: data{0x01, 0x02, 0x03}, Witnesses: []data{{0xaa}, {0xbb}}, Provenance: "newPayload"}
+	companion := SealCompanion{B1Update: data{}, RootInput: data{0x01, 0x02, 0x03}, Witnesses: []data{{0xaa}, {0xbb}}, Provenance: "newPayload"}
 
 	resp, err := c.NewPayloadWithSealV1(context.Background(), payload, nil, fixedHash(0x44), companion)
 	require.NoError(t, err)

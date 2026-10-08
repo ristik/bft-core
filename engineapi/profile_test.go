@@ -168,3 +168,38 @@ func TestCheckExecutionProfile_ReadsThePlainConnection(t *testing.T) {
 		require.ErrorContains(t, err, "reading eth_config")
 	})
 }
+
+// A fresh-B1 deployment's client adds exactly the four Unicity native precompiles to the pinned Cancun set; the plain check still refuses them.
+func TestCheckProfile_UnicityPrecompilesOfAB1Deployment(t *testing.T) {
+	withNative := func(mutate func(p map[string]any)) json.RawMessage {
+		m := loadConfig(t, "eth_config_cancun_at_genesis.json")
+		p := current(m)["precompiles"].(map[string]any)
+		for k, v := range unicityNativePrecompiles {
+			p[k] = v
+		}
+		if mutate != nil {
+			mutate(p)
+		}
+		return mustJSON(t, m)
+	}
+	t.Run("expected set accepted", func(t *testing.T) {
+		_, err := checkProfileWith(withNative(nil), 31337, unicityNativePrecompiles)
+		require.NoError(t, err)
+	})
+	t.Run("the plain profile still refuses them", func(t *testing.T) {
+		_, err := checkProfile(withNative(nil), 31337)
+		require.ErrorContains(t, err, "unexpected unicity-b1-Member")
+	})
+	t.Run("a B1 deployment refuses a client without B2", func(t *testing.T) {
+		_, err := checkProfileWith(withNative(func(p map[string]any) { delete(p, "unicity-b2-sdk3") }), 31337, unicityNativePrecompiles)
+		require.ErrorContains(t, err, "missing unicity-b2-sdk3")
+	})
+	t.Run("a B1 deployment refuses a moved verifier", func(t *testing.T) {
+		_, err := checkProfileWith(withNative(func(p map[string]any) { p["unicity-b1-Uc"] = "0x0000000000000000000000000000000000000200" }), 31337, unicityNativePrecompiles)
+		require.ErrorContains(t, err, "moved unicity-b1-Uc")
+	})
+	t.Run("a B1 deployment refuses S1 at 0x0103", func(t *testing.T) {
+		_, err := checkProfileWith(withNative(func(p map[string]any) { p["unicity-s1"] = "0x0000000000000000000000000000000000000103" }), 31337, unicityNativePrecompiles)
+		require.ErrorContains(t, err, "unexpected unicity-s1")
+	})
+}

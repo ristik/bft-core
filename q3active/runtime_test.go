@@ -486,6 +486,16 @@ func TestLineageServesTheVerifiedProjectionOfAnActivatedEpoch(t *testing.T) {
 	})
 }
 
+// anchorOf serves conf as the anchor of whichever shard of its network is asked for (a fixture has one configuration, whose partition is
+// rewritten to the requested one), as a deployment serves each shard its own genesis configuration.
+func anchorOf(conf *types.PartitionDescriptionRecord) q3active.AnchorSource {
+	return func(p types.PartitionID, s types.ShardID) (*types.PartitionDescriptionRecord, error) {
+		cp := *conf
+		cp.PartitionID, cp.ShardID = p, s
+		return &cp, nil
+	}
+}
+
 type retainedCandidates map[string][]byte
 
 func (r retainedCandidates) HandoffCandidate(id []byte) ([]byte, error) { return r[string(id)], nil }
@@ -500,9 +510,7 @@ func TestRequestHistoryServesTheActivatedAssignmentOfItsShard(t *testing.T) {
 	id := f.Body.Identity()
 	config := func(c q3active.CandidateSource) q3active.RequestHistoryConfig {
 		return q3active.RequestHistoryConfig{Candidates: c, HashAlg: crypto.SHA256, Network: q3fixture.Network, Version: 1,
-			Anchor: func(types.PartitionID, types.ShardID) (*types.PartitionDescriptionRecord, error) {
-				return f.ShardConf, nil
-			}}
+			Anchor: anchorOf(f.ShardConf)}
 	}
 	retained := retainedCandidates{string(id[:]): f.Candidate}
 	hist, err := rt.RequestHistory(config(retained))
@@ -522,10 +530,41 @@ func TestRequestHistoryServesTheActivatedAssignmentOfItsShard(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, chain, 2, "the anchor and the activated assignment")
 
-	t.Run("another shard's history is its anchor alone", func(t *testing.T) {
-		chain, err := hist.Chain(q3fixture.PartitionID+1, types.ShardID{})
+	t.Run("an untouched shard's history is its anchor and a continuation of it under the activation's root identity", func(t *testing.T) {
+		other, err := hist.Chain(q3fixture.PartitionID+1, types.ShardID{})
 		require.NoError(t, err)
-		require.Len(t, chain, 1)
+		require.Len(t, other, 2)
+		epoch, body, err := hist.RootIdentity(7)
+		require.NoError(t, err)
+		require.EqualValues(t, 2, epoch)
+		require.Equal(t, id[:], body)
+		// the same configuration under the next root authorization interval: the resolver's exact identity equality holds across it
+		require.Equal(t, id[:], other[1].RootBody())
+		require.Equal(t, other[0].PDRHash(), other[1].PDRHash(), "an unchanged shard keeps its configuration")
+	})
+	t.Run("a coupled activation's continuation proves the shard unchanged from the retained candidate", func(t *testing.T) {
+		missing, err := rt.RequestHistory(config(retainedCandidates{}))
+		require.NoError(t, err)
+		_, err = missing.Chain(q3fixture.PartitionID+1, types.ShardID{})
+		require.ErrorIs(t, err, q3active.ErrRequestHistory, "missing candidate bytes are not evidence of non-change")
+		other := append([]byte(nil), f.Candidate...)
+		other[len(other)/2] ^= 1
+		bad, err := rt.RequestHistory(config(retainedCandidates{string(id[:]): other}))
+		require.NoError(t, err)
+		_, err = bad.Chain(q3fixture.PartitionID+1, types.ShardID{})
+		require.ErrorIs(t, err, storage.ErrAssignmentHistory)
+	})
+	t.Run("the anchor is of the requested shard", func(t *testing.T) {
+		wrong, err := rt.RequestHistory(q3active.RequestHistoryConfig{Candidates: retained, HashAlg: crypto.SHA256, Network: q3fixture.Network, Version: 1,
+			// the anchor of an untouched shard, but not of the one asked for (it is not the designated shard's, which another guard refuses)
+			Anchor: func(p types.PartitionID, s types.ShardID) (*types.PartitionDescriptionRecord, error) {
+				cp := *f.ShardConf
+				cp.PartitionID = p + 1
+				return &cp, nil
+			}})
+		require.NoError(t, err)
+		_, err = wrong.Chain(q3fixture.PartitionID+1, types.ShardID{})
+		require.ErrorIs(t, err, q3active.ErrRequestHistory)
 	})
 	t.Run("a committed assignment whose candidate is not retained is missing history", func(t *testing.T) {
 		missing, err := rt.RequestHistory(config(retainedCandidates{}))

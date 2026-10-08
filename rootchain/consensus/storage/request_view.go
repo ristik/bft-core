@@ -60,18 +60,31 @@ const (
 
 func (p RequestPurpose) valid() bool { return p >= PurposeCollect && p <= PurposeReplay }
 
-// RequestActivation is one verified committed assignment of the shard with its authorising root identity. It owns private
-// copies of everything it holds. NewRequestAnchor and ActivationFromHandoff are the only exported ways to make one.
+// RequestActivation is one verified root authorization interval of an assignment of the shard: the assignment itself with the root identity
+// (epoch, body, first round) that authorises it. For a real activation or the anchor the interval starts where the assignment is
+// installed; a continuation (RequestContinuationFromVerifiedV3) is a later root interval of the SAME assignment, issued for a root
+// activation that leaves this shard unchanged, so the exact root identity equality the resolver demands holds across it. It owns private
+// copies of everything it holds. NewRequestAnchor, ActivationFromHandoff and the V3 constructors are the only exported ways to make one.
 type RequestActivation struct {
 	pdr       *types.PartitionDescriptionRecord
 	confHash  []byte
 	ctx       *quorumweight.RequestContext
 	rootEpoch uint64
 	rootBody  []byte
-	start     uint64 // A*: first root round the assignment is in force; zero for the anchor
-	trHash    []byte // committed successor technical record digest; nil for the anchor
+	start     uint64 // A*: first root round the interval is in force; zero for the anchor
+	trHash    []byte // committed successor technical record digest of the ASSIGNMENT; nil for the anchor; a continuation carries its original
 	version   uint64 // certified protocol version
+
+	// continuation marks a root-only continuation of the preceding record's assignment; predecessorRootBody is the root body it follows.
+	continuation        bool
+	predecessorRootBody []byte
 }
+
+// PDRHash is the hash of the configuration of the assignment this interval authorises.
+func (a *RequestActivation) PDRHash() []byte { return bytes.Clone(a.confHash) }
+
+// RootBody is the body identity of the root assignment that authorises this interval.
+func (a *RequestActivation) RootBody() []byte { return bytes.Clone(a.rootBody) }
 
 func clonePDR(pdr *types.PartitionDescriptionRecord) (*types.PartitionDescriptionRecord, error) {
 	raw, err := types.Cbor.Marshal(pdr)
@@ -169,7 +182,7 @@ func NewRequestSnapshot(network uint64, hashAlg crypto.Hash, parent *ShardInfo, 
 		return nil, fmt.Errorf("%w: no verified parent state or activation history", ErrAssignmentHistory)
 	}
 	first := chain[0]
-	if first == nil || first.start != 0 {
+	if first == nil || first.start != 0 || first.continuation {
 		return nil, fmt.Errorf("%w: history does not begin at a trusted anchor", ErrAssignmentHistory)
 	}
 	for i, a := range chain {
@@ -180,7 +193,19 @@ func NewRequestSnapshot(network uint64, hashAlg crypto.Hash, parent *ShardInfo, 
 			continue
 		}
 		p := chain[i-1]
-		if a.pdr.Epoch != p.pdr.Epoch+1 || a.start <= p.start || a.rootEpoch <= p.rootEpoch || a.pdr.NetworkID != p.pdr.NetworkID {
+		if a.start <= p.start || a.rootEpoch <= p.rootEpoch || a.pdr.NetworkID != p.pdr.NetworkID {
+			return nil, fmt.Errorf("%w: activation %d does not follow activation %d", ErrAssignmentHistory, i, i-1)
+		}
+		if a.continuation {
+			// the same assignment under the next root interval: identical configuration, context, version and original commitment, the
+			// next root epoch, and the very body the previous interval was authorised by
+			if a.pdr.Epoch != p.pdr.Epoch || a.rootEpoch != p.rootEpoch+1 || p.rootEpoch == ^uint64(0) || !bytes.Equal(a.predecessorRootBody, p.rootBody) ||
+				!bytes.Equal(a.confHash, p.confHash) || a.ctx != p.ctx || a.version != p.version || !bytes.Equal(a.trHash, p.trHash) || !samePDR(a.pdr, p.pdr) {
+				return nil, fmt.Errorf("%w: continuation %d is not the continuation of activation %d", ErrAssignmentHistory, i, i-1)
+			}
+			continue
+		}
+		if p.pdr.Epoch == ^uint64(0) || a.pdr.Epoch != p.pdr.Epoch+1 {
 			return nil, fmt.Errorf("%w: activation %d does not follow activation %d", ErrAssignmentHistory, i, i-1)
 		}
 	}
@@ -224,6 +249,13 @@ func NewRequestSnapshot(network uint64, hashAlg crypto.Hash, parent *ShardInfo, 
 		chain: slices.Clone(chain), parent: shardParent{tr: cloneTR(parent.TR), lastTR: cloneTR(parent.LastCR.Technical), uc: uc, ucDigest: ucDigest,
 			rootHash: bytes.Clone(parent.RootHash), confHash: bytes.Clone(parent.ShardConfHash), pending: pend}}
 	return s, nil
+}
+
+// samePDR reports whether two configurations have the same canonical encoding.
+func samePDR(a, b *types.PartitionDescriptionRecord) bool {
+	x, errA := types.Cbor.Marshal(a)
+	y, errB := types.Cbor.Marshal(b)
+	return errA == nil && errB == nil && bytes.Equal(x, y)
 }
 
 // cloneTR is a technical record owning its hash bytes.
@@ -477,6 +509,11 @@ func ResolveRequestContext(q RequestQuery, snap *RequestSnapshot) (*RequestRound
 //
 // Otherwise it is the last certified record, whose epoch must be the assignment's.
 func expectedTR(snap *RequestSnapshot, idx int) (certification.TechnicalRecord, error) {
+	// a continuation is a later root interval of the same assignment, not a shard transition: the logic below runs against the original
+	// assignment, with its original commitment, however many continuations followed it
+	for idx > 0 && snap.chain[idx].continuation {
+		idx--
+	}
 	act, p := snap.chain[idx], snap.parent
 	switch {
 	case idx > 0 && act.pdr.Epoch > 0 && p.lastTR.Epoch == act.pdr.Epoch-1:
@@ -654,7 +691,9 @@ func viewDispatch(v IRChangeReqVerifier) RequestViewVerifier {
 }
 
 // resolveExecutionView resolves the view a block executes the shard's requests under, from the verified state the block is
-// being executed on (parent) and the committed history, never from the last committed ShardInfo.
+// being executed on (parent) and the committed history, never from the last committed ShardInfo. The parent carries the committed
+// LastCR pair of its ancestry (see ShardInfo.LastCR), so the previous UC of the view is the latest committed response, repeat UCs
+// included, whichever block of the pipeline the parent is.
 func resolveExecutionView(vv RequestViewVerifier, parent *ShardInfo, parentID []byte, round uint64, hashAlg crypto.Hash) (*RequestRoundView, error) {
 	return ResolveParentView(vv.RequestHistory(), vv.PendingChange(parent.PartitionID, parent.ShardID), parent, parentID, round, hashAlg, PurposeExecute, nil)
 }

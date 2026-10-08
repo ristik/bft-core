@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/url"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"time"
 
@@ -38,6 +39,7 @@ import (
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/storage"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/trustbase"
 	"github.com/unicitynetwork/bft-core/rootchain/partitions"
+	"github.com/unicitynetwork/bft-core/rootchain/poswitness"
 	"github.com/unicitynetwork/bft-core/trustactivation"
 	"github.com/unicitynetwork/bft-core/trusthistorystore"
 )
@@ -301,6 +303,12 @@ func rootNodeRun(ctx context.Context, flags *rootNodeRunFlags) error {
 		options = append(options, consensus.WithFrontierSampler(consensus.DefaultFrontierSamplerConfig(trustBase)), consensus.WithFrontierSigning())
 	}
 
+	if flags.PosDeploymentFile != "" {
+		// the witnesses of a block's controls are fetched by hash from the other root nodes before the block is executed
+		options = append(options, consensus.WithWitnessFetcher(func(ctx context.Context, hash [32]byte, peers []peer.ID) ([]byte, error) {
+			return poswitness.Fetch(ctx, poswitness.FromLibp2p(host), peers, hash)
+		}))
+	}
 	cm, err := consensus.NewConsensusManager(
 		host.ID(),
 		trustBaseStore,
@@ -321,6 +329,8 @@ func rootNodeRun(ctx context.Context, flags *rootNodeRunFlags) error {
 		if err = enablePosClosure(cm, orchestration, trustBaseStore, trustBase, shardConfs, flags.PosDeploymentFile, flags.GenesisIdentitiesFile != ""); err != nil {
 			return err
 		}
+		stopWitnesses := serveWitnesses(host, cm)
+		defer stopWitnesses()
 	}
 	if q3rt != nil {
 		if err = attachRootQ3(ctx, q3rt, cm); err != nil {
@@ -751,4 +761,11 @@ func serveRootFrontier(ctx context.Context, log *slog.Logger, host *network.Peer
 		host.RemoveProtocolHandler(frontiertransport.CutProtocolID)
 		server.Close()
 	}, nil
+}
+
+// serveWitnesses serves the retained control witnesses to the other root nodes of the current trust base.
+func serveWitnesses(host *network.Peer, cm *consensus.ConsensusManager) func() {
+	server := poswitness.NewServer(cm, func(id peer.ID) bool { return slices.Contains(cm.Validators(), id) })
+	host.RegisterProtocolHandler(poswitness.ProtocolID, server.Handler)
+	return func() { host.RemoveProtocolHandler(poswitness.ProtocolID) }
 }

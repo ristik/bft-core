@@ -109,6 +109,23 @@ func (p *PreparedGenesis) FullConfig() (*bfttypes.PartitionDescriptionRecord, er
 	}
 	return p.genesis.FullConfig()
 }
+
+// B1Words exports every fixed and dynamic registry word of a fresh-B1 genesis (empty for any other layout).
+func (p *PreparedGenesis) B1Words() map[common.Hash]common.Hash {
+	if p == nil {
+		return nil
+	}
+	return p.genesis.B1Words()
+}
+
+// Record is the genesis record G; for a fresh-B1 genesis it carries RootGenesisID and B1ProfileHash.
+func (p *PreparedGenesis) Record() Record {
+	if p == nil {
+		return Record{}
+	}
+	return p.genesis.Record()
+}
+
 func (p *PreparedGenesis) Origin() GenesisOrigin {
 	if p == nil {
 		return GenesisOrigin{}
