@@ -10,6 +10,7 @@ import (
 	"github.com/unicitynetwork/bft-go-base/types"
 
 	"github.com/unicitynetwork/bft-core/internal/quorumweight"
+	"github.com/unicitynetwork/bft-core/internal/weightvalidation"
 )
 
 // AdvanceEpoch accepts operator-provisioned successor root trust and shard
@@ -36,8 +37,10 @@ func (a *Authority) AdvanceEpoch(ctx context.Context, conf *types.PartitionDescr
 	if conf == nil || successor == nil {
 		return fmt.Errorf("%w: missing successor context", ErrContextMismatch)
 	}
-	if err := conf.IsValid(); err != nil {
-		return fmt.Errorf("%w: invalid successor configuration: %v", ErrContextMismatch, err)
+	// The bounded weights, not the unit rule (PartitionDescriptionRecord.IsValid): the authority advances through a weighted rotation, and
+	// the root has already judged the configuration under the mode of its epoch. Everything else IsValid checks is still checked.
+	if err := weightvalidation.PDR(conf, weightvalidation.RoleEVM, weightvalidation.ModeWeighted); err != nil {
+		return fmt.Errorf("%w: invalid successor configuration: %w", ErrContextMismatch, err)
 	}
 	if conf.NetworkID != old.NetworkID || conf.PartitionID != old.PartitionID || !conf.ShardID.Equal(old.ShardID) ||
 		successor.NetworkID != old.NetworkID || successor.Epoch < *old.RootEpoch || conf.Epoch < old.ShardEpoch ||
@@ -76,9 +79,13 @@ func (a *Authority) AdvanceEpoch(ctx context.Context, conf *types.PartitionDescr
 	if owned.Version != 1 || owned.Epoch != successor.Epoch || owned.NetworkID != old.NetworkID || len(owned.RootNodes) == 0 {
 		return fmt.Errorf("%w: invalid successor trust", ErrContextMismatch)
 	}
+	// bounded root weights as well: a weighted epoch's trust base carries stakes the unit rule (NodeInfo.IsValid) refuses
+	if _, err := weightvalidation.Nodes(owned.RootNodes, weightvalidation.RoleRoot, weightvalidation.ModeWeighted); err != nil {
+		return fmt.Errorf("%w: invalid successor root node: %w", ErrContextMismatch, err)
+	}
 	seen := make(map[string]bool, len(owned.RootNodes))
 	for _, node := range owned.RootNodes {
-		if err := node.IsValid(); err != nil || seen[node.NodeID] {
+		if seen[node.NodeID] {
 			return fmt.Errorf("%w: invalid successor root node", ErrContextMismatch)
 		}
 		seen[node.NodeID] = true

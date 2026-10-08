@@ -952,6 +952,7 @@ func TestExpectedTRInstalledParentRefusals(t *testing.T) {
 	require.ErrorIs(t, err, quorumweight.ErrRequestContext, "a configuration other than the selected assignment's")
 }
 
+<<<<<<< HEAD
 // continuationOf is what RequestContinuationFromVerifiedV3 builds, without its history proof: the previous assignment under the next root
 // interval, the configuration, the immutable context and the original commitment copied.
 func continuationOf(t *testing.T, prev *RequestActivation, rootEpoch uint64, body []byte, start uint64) *RequestActivation {

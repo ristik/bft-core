@@ -354,6 +354,8 @@ func (s *Server) clientOp(ctx context.Context, session signingauthority.Session,
 		}
 		authorization, err := s.authority.Reserve(ctx, session, req)
 		if err != nil {
+			// the wire carries only the refusal's class; the operator's log carries its cause (a refusal reveals no key or record)
+			s.log.Warn("refusing reservation", slog.String("err", err.Error()))
 			return nil, err
 		}
 		return types.Cbor.Marshal(authorizationPayload{
