@@ -115,11 +115,13 @@ function start_root_nodes() {
     local profileArgs=()
     if [ "${M2_PROFILE2:-0}" = 1 ]; then
       profileArgs=(--profile-2)
-      if [ "${Q3_WEIGHT_LANE:-0}" = 1 ]; then
-        # Q3 #50: the coupled runtime from genesis, and the PoA genesis committee's identity records the first coupled handoff names as K
+      if [ "${Q3_WEIGHT_LANE:-0}" = 1 ] || [ "${H3_ASSIGNMENT_LANE:-0}" = 1 ]; then
+        # the PoA genesis committee's identity records, which the first coupled handoff names as K (the incumbent baseline of the root)
         [ -s test-nodes/genesis-identities.json ] || q3_prepare_genesis_identities || exit 1
-        profileArgs+=(--q3-lane --genesis-identities test-nodes/genesis-identities.json)
+        profileArgs+=(--genesis-identities test-nodes/genesis-identities.json)
       fi
+      # Q3 #50: the coupled runtime (verified history, install journal, V3 handoffs) from genesis
+      [ "${Q3_WEIGHT_LANE:-0}" != 1 ] || profileArgs+=(--q3-lane)
       # Under the handoff profile PUT /api/v1/configurations is refused (#329): the genesis shard
       # configurations are fixed at start, so hand every one of them over by flag.
       collect_shard_conf_args

@@ -71,7 +71,6 @@ H3_BIND_ROOTS=""
 # h3_build_assignment <tag> <successor ids...>: context, one proof per successor key, assemble. No EVM parent is named anywhere:
 # the root binds it when it orders the Prepare, after the proofs.
 # Writes $H3_DIR/<tag>-assignment.json; leaves the propose exit status in $?.
-H3_SUPERSEDE=0
 
 
 # A committed H for the old epoch since the start of the retry loop, read from every root. Dropped plans are NOT a verdict on the
@@ -95,10 +94,10 @@ h3_head_after_all() { # wait until every id in $@ logs a new certificate admitte
 }
 
 # ----------------------------------------------------------------------------------------------------------------
-echo "=== H3 acceptance lane: M3-shaped genesis (layout 2) + three aggregator shards ==="
+echo "=== H3 acceptance lane: fresh-B1 genesis (registry layout 3) + three aggregator shards ==="
 echo "NOTE: every validator signs through its own signing authority (SIGNING=authority): the rotation is authority-backed."
 h3_step "baseline: EVM certifies and all three aggregator shards progress" h3_progress baseline 8
-h3_step "genesis registry is layout 2, shard epoch 0, root epoch 1" h3_registry_is 0 1
+h3_step "genesis registry is the fresh-B1 registry, shard epoch 0, root epoch 1" h3_registry_is 0 1
 
 # 1. Baseline: a configuration-only epoch advance (same committee, no EVM change): root epoch 2, shard epoch stays 0.
 h3_config_attempt() { build/ubft root handoff propose --next-trust-base test-nodes/trust-base-epoch2.json --root-rpc "$(h3_root_rpcs)"; }
@@ -128,7 +127,7 @@ h3_bad_pop() {
   local start outcomeBefore
   h3_prepare_coupled 3 4 5 || return 1
   h3_spare_authority 5 1 3 trust-base-epoch3.json || return 1
-  H3_BIND_ROOTS="1 2 3 5" h3_build_assignment bad 1 2 3 5 || return 1
+  H3_NEXT_EPOCH=3 H3_BIND_ROOTS="1 2 3 5" h3_build_assignment bad 1 2 3 5 || return 1
   python3 - "$H3_DIR/bad-assignment.json" <<'PY'
 import json,sys
 p=sys.argv[1]; d=json.load(open(p))
@@ -149,7 +148,7 @@ h3_step "EVM proposal with a bad proof of possession is refused before any Prepa
 # 3. Coupled rotation s=1 during an in-flight old proposal: root 4 -> 5 together with evm4 -> evm5. The retained evm3 is stopped
 #    and evm5 is not yet running, so the successor quorum cannot acknowledge until the root quorum restart is over.
 h3_s1_attempt() {
-  H3_AGG_CHANGE=${H3_AGG_CHANGE:-0} H3_BIND_ROOTS="1 2 3 5" h3_build_assignment s1 1 2 3 5 || return 1
+  H3_NEXT_EPOCH=3 H3_BIND_ROOTS="1 2 3 5" h3_build_assignment s1 1 2 3 5 || return 1
   h3_propose s1 3
 }
 h3_evm_s1() {
@@ -243,6 +242,8 @@ h3_ack_s1() {
   local i
   for i in $(seq 1 180); do h3_registry_is 1 3 && break; sleep 1; done
   h3_registry_is 1 3 || { echo "registry did not reach shard epoch 1 / root epoch 3" >&2; return 1; }
+  # s=1 is the last acknowledged assignment: its committee is the incumbent K of every later handoff
+  H3_INCUMBENT="$H3_DIR/s1-identities.json"
   h3_paid 3
 }
 h3_step "s=1 acknowledgement certified; paid transaction certified at root epoch 3" h3_ack_s1
@@ -272,7 +273,7 @@ h3_step "H4 restore at s=1: validator 1 restores, verifies epoch 3 and resumes s
 
 # 6. s=2 with a PoP-valid set whose successors are unavailable after H (evm6, evm7 never start).
 h3_s2_attempt() {
-  H3_BIND_ROOTS="1 2 5 6" H3_SUPERSEDE=0 h3_build_assignment s2 1 2 6 7 || return 1
+  H3_NEXT_EPOCH=4 H3_BIND_ROOTS="1 2 5 6" h3_build_assignment s2 1 2 6 7 || return 1
   h3_propose s2 4
 }
 h3_evm_s2() {
@@ -293,14 +294,16 @@ h3_s2_stalls() {
 }
 h3_step "EVM waits (no certification) while root and aggregators progress" h3_s2_stalls
 
-# 7. Supersede s=2 with s=3 at the same parent; the retired s=2 set's late ack is refused.
+# 7. Supersede s=2 on the same parent. A supersession is the derived recovery of the pending primary: exactly K, the committee of the last acknowledged
+#    assignment (s=1, evm {1,2,3,5}), and its root committee is K's coupled image, so root 6 gives way to root 3 again. The retired s=2 set's late
+#    acknowledgement is then refused.
 h3_supersede_s3() {
-  h3_prepare_coupled 5 2 7 || return 1       # root 2 -> 7, committee {1,5,6,7}
-  H3_BIND_ROOTS="1 5 6 7" H3_SUPERSEDE=1 h3_build_assignment s3 1 2 3 5 || return 1
+  h3_prepare_coupled 5 6 3 || return 1       # root 6 -> 3, committee {1,2,3,5}: the coupled image of K
+  h3_build_recovery s3 || return 1
   h3_loop_mark
   h3_propose s3 5 || return 1
   h3_wait_committed 4 || return 1
-  h3_activate_coupled 5 2 7 || return 1
+  h3_activate_coupled 5 6 3 || return 1
   # the folded acknowledgement needs the retained and returning validators' authorities at the activated scope (root epoch 5, shard epoch 3)
   H3_ONLINE="1 2 3 5"
   h3_advance_authorities 5 3 1 2 3 5 || { echo "authority advance to root epoch 5 / shard epoch 3 failed" >&2; return 1; }
@@ -309,7 +312,7 @@ h3_supersede_s3() {
   echo "registry did not reach shard epoch 3 / root epoch 5" >&2
   return 1
 }
-h3_step "coupled s=3 (root 2->7) supersedes s=2 on the same parent; folded acknowledgement certified" h3_supersede_s3
+h3_step "the derived recovery to K (root 6->3) supersedes s=2 on the same parent; folded acknowledgement certified" h3_supersede_s3
 h3_late_s2_ack_refused() {
   local id6
   id6=$(evm_validator_id 6)

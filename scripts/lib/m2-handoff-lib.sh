@@ -30,6 +30,8 @@ m2_start_root() {
   local -a bootArgs=()
   [ -z "$boot" ] || bootArgs=(--bootnodes "$boot")   # the first root of a cold network has no bootnode, as at genesis
   [ "${Q3_WEIGHT_LANE:-0}" != 1 ] || shardConfArgs+=(--q3-lane --genesis-identities test-nodes/genesis-identities.json)   # Q3 #50: the coupled runtime (verified history, install journal, V3 handoffs)
+  # H3: a root that joins (or restarts into) a later epoch needs the genesis committee's identity records as the baseline its derived history starts from
+  [ "${H3_ASSIGNMENT_LANE:-0}" != 1 ] || shardConfArgs+=(--genesis-identities test-nodes/genesis-identities.json)
   port=$(m2_rpc_port "$node")
   if [ "${F8_MIXED_LANE:-0}" = 1 ]; then
     for conf in test-nodes/shard-conf-f8-a-left.json test-nodes/shard-conf-f8-a-right.json test-nodes/shard-conf-f8-b-left.json; do

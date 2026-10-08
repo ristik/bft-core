@@ -1,7 +1,6 @@
 # Sourced by scripts/h3-assignment-steps.sh (the H3 acceptance lane) and by the T6 rehearsal's coupled-rotation step: the H3 lane helpers.
 # Definitions and defaults only: sourcing starts nothing. They need the paired-devnet context (rpc, pyget, evm_validator_id, m2_* helpers) and the
 # variables the caller sets (H3_DIR, H3_ROOTS, H3_ONLINE, H3_REGISTRY, h3_slot_*, M2_NEXT_NONCE, M2_CHAIN_ID; optionally H3_ARCHIVES, H3_RESTORE_RESTART).
-H3_SUPERSEDE=${H3_SUPERSEDE:-0}
 H3_ARCHIVES=${H3_ARCHIVES:-test-nodes/h3-archives}
 H3_LOOP_MARK=${H3_LOOP_MARK:-${H3_DIR:-test-nodes/h3}/loop-mark}
 
@@ -133,21 +132,46 @@ h3_activate_coupled() { # epoch replaced new
   m2_wait_root_epoch "$(h3_first_root)" "$epoch"
 }
 
+# The successor committee's identity records (the #85 lifecycle): deterministic from each root node id, one per root entity bound to its delegated EVM
+# validator. They are what every possession proof signs and what the next handoff names as its incumbent K once this one is acknowledged.
+h3_successor_identities() { # out epoch validators.json bindings.json
+  local out=$1 epoch=$2 vals=$3 binds=$4 conf="${1%.json}-conf.json"
+  jq --slurpfile v "$vals" '.validators = $v[0]' "$fullShardConf" >"$conf" || return 1
+  build/ubft genesis-identities generate --trust-base "test-nodes/trust-base-epoch${epoch}.json" --shard-conf "$conf" --bindings "$binds" --out "$out" >/dev/null
+}
+
+# h3_build_assignment <tag> <successor ids...>: context, the successor identity records, the recovery authorization over the incumbent K (H3_INCUMBENT: the
+# identity records of the last ACKNOWLEDGED assignment; the genesis records before any rotation), one proof per successor key over those records, assemble.
+# H3_NEXT_EPOCH names the root epoch of the successor trust base. No EVM parent is named anywhere: the root binds it when it orders the Prepare, after the
+# proofs. Writes $H3_DIR/<tag>-assignment.json and $H3_DIR/<tag>-identities.json.
+H3_INCUMBENT=${H3_INCUMBENT:-test-nodes/genesis-identities.json}
 h3_build_assignment() {
   local tag=$1 id; shift
   h3_validators_json "$H3_DIR/$tag-validators.json" "$@" || return 1
+  h3_bindings_json "$H3_DIR/$tag-bindings.json" "$@" || return 1
+  h3_successor_identities "$H3_DIR/$tag-identities.json" "${H3_NEXT_EPOCH:?H3_NEXT_EPOCH names the successor root epoch}" "$H3_DIR/$tag-validators.json" "$H3_DIR/$tag-bindings.json" || return 1
   build/ubft root handoff evm-context --root-rpc "$(h3_rpc_url "$(h3_first_root)")" --out "$H3_DIR/$tag-context.json" || return 1
+  build/ubft root handoff evm-authorization --context "$H3_DIR/$tag-context.json" --incumbent "$H3_INCUMBENT" --chain "${M2_CHAIN_ID:-31337}" \
+    --out "$H3_DIR/$tag-authorization.json" || return 1
   local pops=
   for id in "$@"; do
     build/ubft root handoff evm-pop --context "$H3_DIR/$tag-context.json" --validators "$H3_DIR/$tag-validators.json" \
+      --identities "$H3_DIR/$tag-identities.json" \
       --node-id "$(evm_validator_id "$id")" --authority-socket "test-nodes/auth$id/operator.sock" \
       --authority-credential "test-nodes/auth$id/operator.cred" >"$H3_DIR/$tag-pop-$id.json" || return 1
     pops+="${pops:+,}$H3_DIR/$tag-pop-$id.json"
   done
-  local sup=(); [ "$H3_SUPERSEDE" = 1 ] && sup=(--supersede)
-  h3_bindings_json "$H3_DIR/$tag-bindings.json" "$@" || return 1
   build/ubft root handoff evm-assemble --context "$H3_DIR/$tag-context.json" --validators "$H3_DIR/$tag-validators.json" \
-    --pops "$pops" --bindings "$H3_DIR/$tag-bindings.json" --out "$H3_DIR/$tag-assignment.json" ${sup[@]+"${sup[@]}"} || return 1
+    --identities "$H3_DIR/$tag-identities.json" --authorization "$H3_DIR/$tag-authorization.json" \
+    --pops "$pops" --bindings "$H3_DIR/$tag-bindings.json" --out "$H3_DIR/$tag-assignment.json" || return 1
+}
+
+# A supersession is the derived recovery of the pending primary: exactly K, the committee of the last acknowledged assignment, on the same frozen parent. It
+# carries no validators, bindings, proofs, identities or authorization (a primary over a pending primary is refused).
+h3_build_recovery() { # tag
+  local tag=$1
+  build/ubft root handoff evm-context --root-rpc "$(h3_rpc_url "$(h3_first_root)")" --out "$H3_DIR/$tag-context.json" || return 1
+  build/ubft root handoff evm-assemble --context "$H3_DIR/$tag-context.json" --recovery --supersede --out "$H3_DIR/$tag-assignment.json" || return 1
 }
 
 h3_propose() { # tag epoch: plans, waits for the Prepare, endorses the Prepare-bound state
