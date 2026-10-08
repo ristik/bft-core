@@ -120,7 +120,7 @@ function start_root_nodes() {
       collect_shard_conf_args
       profileArgs+=(${shardConfArgs[@]+"${shardConfArgs[@]}"})
     fi
-    build/ubft root-node run \
+    UBFT_Q4_SHIM_DIR="${Q4_SHIM_DIR:+$Q4_SHIM_DIR/root$i}" ${Q4_ROOT_BIN:-build/ubft} root-node run \
                     --home test-nodes/root$i \
                     --address "/ip4/127.0.0.1/tcp/$p2pPort" \
                     $bootNodeParam \

@@ -122,7 +122,7 @@ func (n *Net) Apply(ctx context.Context, c Control) error {
 func (n *Net) Status() Status {
 	n.mu.Lock()
 	defer n.mu.Unlock()
-	st := Status{Gen: n.gen, Self: string(n.cfg.Self), Sends: n.sends, Deliveries: n.deliveries,
+	st := Status{Gen: n.gen, Self: n.cfg.Self.String(), Sends: n.sends, Deliveries: n.deliveries,
 		Rules: map[string]int{}, Triggers: map[string]int{}, Held: map[string]int{}, Byzantine: map[string]int{}}
 	for _, r := range n.rules {
 		st.Rules[r.Name] = r.hits

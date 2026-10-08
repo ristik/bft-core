@@ -250,7 +250,7 @@ func (n *Net) observeRecv(msg any) {
 	if m.Class == Other {
 		return
 	}
-	n.record(Event{Kind: "recv", To: string(n.cfg.Self), msg: m}, m)
+	n.record(Event{Kind: "recv", To: n.cfg.Self.String(), msg: m}, m)
 }
 
 // Close stops the receive forwarder. Held messages are discarded: a closed shim is a stopped node.
@@ -308,7 +308,7 @@ func (r *ruleState) matches(self, to peer.ID, m Msg) bool {
 	switch {
 	case self == to && !r.Self:
 		return false
-	case len(r.To) > 0 && !slices.Contains(r.To, string(to)):
+	case len(r.To) > 0 && !slices.Contains(r.To, to.String()):
 		return false
 	case r.Class != "" && r.Class != m.Class, r.Epoch != 0 && r.Epoch != m.Epoch:
 		return false
@@ -360,7 +360,7 @@ func (n *Net) route(ctx context.Context, msg any, to peer.ID) error {
 	}
 	n.sends++
 	id := n.sends
-	n.record(Event{Kind: "attempt", SendID: id, From: string(n.cfg.Self), To: string(to)}, m)
+	n.record(Event{Kind: "attempt", SendID: id, From: n.cfg.Self.String(), To: to.String()}, m)
 
 	prefix := decisionPrefix(n.cfg.Self, to, m)
 	key := fmt.Sprintf("%s#%d", prefix, n.nth[prefix])
@@ -394,10 +394,10 @@ func (n *Net) route(ctx context.Context, msg any, to peer.ID) error {
 	var err error
 	switch action {
 	case Drop:
-		n.record(Event{Kind: "drop", SendID: id, From: string(n.cfg.Self), To: string(to), Rule: ruleName}, m)
+		n.record(Event{Kind: "drop", SendID: id, From: n.cfg.Self.String(), To: to.String(), Rule: ruleName}, m)
 	case Hold:
 		n.held = append(n.held, &held{id: id, to: to, m: m, rule: ruleName})
-		n.record(Event{Kind: "hold", SendID: id, From: string(n.cfg.Self), To: string(to), Rule: ruleName}, m)
+		n.record(Event{Kind: "hold", SendID: id, From: n.cfg.Self.String(), To: to.String(), Rule: ruleName}, m)
 	case Duplicate:
 		for i := 0; i < 2 && err == nil; i++ {
 			err = n.deliver(ctx, id, to, m, msg, ruleName, true)
@@ -427,11 +427,11 @@ func (n *Net) deliver(ctx context.Context, id uint64, to peer.ID, m Msg, orig an
 		}
 	}
 	if err := n.inner.Send(ctx, out, to); err != nil {
-		n.record(Event{Kind: "fault", SendID: id, To: string(to), Rule: rule, Error: err.Error()}, m)
+		n.record(Event{Kind: "fault", SendID: id, To: to.String(), Rule: rule, Error: err.Error()}, m)
 		return nil // the wrapped network refusing one receiver is not the shim's failure; it is in the trace
 	}
 	n.deliveries++
-	n.record(Event{Kind: "deliver", SendID: id, DeliveryID: n.deliveries, From: string(n.cfg.Self), To: string(to), Rule: rule}, m)
+	n.record(Event{Kind: "deliver", SendID: id, DeliveryID: n.deliveries, From: n.cfg.Self.String(), To: to.String(), Rule: rule}, m)
 	return nil
 }
 
@@ -482,7 +482,7 @@ func (n *Net) release(ctx context.Context, rule string, order Order) (int, error
 	}
 	slices.SortStableFunc(batch, orderLess(order))
 	for _, h := range batch {
-		n.record(Event{Kind: "release", SendID: h.id, To: string(h.to), Rule: rule}, h.m)
+		n.record(Event{Kind: "release", SendID: h.id, To: h.to.String(), Rule: rule}, h.m)
 		if err := n.deliver(ctx, h.id, h.to, h.m, nil, rule, true); err != nil {
 			n.fault(err)
 			return 0, err

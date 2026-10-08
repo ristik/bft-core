@@ -7,11 +7,13 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sync"
 	"testing"
 	"time"
 
+	libp2pcrypto "github.com/libp2p/go-libp2p/core/crypto"
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/stretchr/testify/require"
 	abcrypto "github.com/unicitynetwork/bft-go-base/crypto"
@@ -34,6 +36,15 @@ type fakeInner struct {
 type sentMsg struct {
 	to  peer.ID
 	msg any
+}
+
+func testPeer(t *testing.T) peer.ID {
+	t.Helper()
+	priv, _, err := libp2pcrypto.GenerateEd25519Key(nil)
+	require.NoError(t, err)
+	id, err := peer.IDFromPrivateKey(priv)
+	require.NoError(t, err)
+	return id
 }
 
 func newFakeInner() *fakeInner { return &fakeInner{in: make(chan any, 16)} }
@@ -211,7 +222,7 @@ type fixture struct {
 
 func newFixture(t *testing.T, mut ...func(*Config)) *fixture {
 	t.Helper()
-	f := &fixture{t: t, inner: newFakeInner(), self: "self", a: "peer-a", b: "peer-b", s: newSigner(t)}
+	f := &fixture{t: t, inner: newFakeInner(), self: testPeer(t), a: testPeer(t), b: testPeer(t), s: newSigner(t)}
 	cfg := Config{Self: f.self, Signing: testSigning, Signer: f.s, KeepRaw: true}
 	for _, m := range mut {
 		m(&cfg)
@@ -242,7 +253,7 @@ func TestRules(t *testing.T) {
 	ctx := context.Background()
 	t.Run("pass is the default and a trace pairs each attempt with its delivery", func(t *testing.T) {
 		f := newFixture(t)
-		f.send(boundVote(t, f.s, "self", 3), f.a, f.b)
+		f.send(boundVote(t, f.s, f.self.String(), 3), f.a, f.b)
 		require.Equal(t, []uint64{3}, f.inner.rounds(f.a))
 		require.Equal(t, []uint64{3}, f.inner.rounds(f.b))
 		require.Equal(t, []string{"attempt", "deliver", "attempt", "deliver"}, kinds(f.net.Trace()))
@@ -250,8 +261,8 @@ func TestRules(t *testing.T) {
 	})
 	t.Run("drop is directional and traced", func(t *testing.T) {
 		f := newFixture(t)
-		f.apply(Control{Rules: []Rule{{Name: "cut-a", To: []string{"peer-a"}, Class: Vote, Action: Drop, Require: true}}})
-		f.send(boundVote(t, f.s, "self", 3), f.a, f.b)
+		f.apply(Control{Rules: []Rule{{Name: "cut-a", To: []string{f.a.String()}, Class: Vote, Action: Drop, Require: true}}})
+		f.send(boundVote(t, f.s, f.self.String(), 3), f.a, f.b)
 		require.Empty(t, f.inner.rounds(f.a))
 		require.Equal(t, []uint64{3}, f.inner.rounds(f.b))
 		require.Equal(t, []string{"attempt", "drop", "attempt", "deliver"}, kinds(f.net.Trace()))
@@ -261,32 +272,32 @@ func TestRules(t *testing.T) {
 	t.Run("a rule for one class leaves the others alone", func(t *testing.T) {
 		f := newFixture(t)
 		f.apply(Control{Rules: []Rule{{Name: "votes", Class: Vote, Action: Drop}}})
-		f.send(boundTimeout(t, f.s, "self", 4), f.a)
+		f.send(boundTimeout(t, f.s, f.self.String(), 4), f.a)
 		require.Equal(t, []uint64{4}, f.inner.rounds(f.a))
 	})
 	t.Run("epoch and round bounds select", func(t *testing.T) {
 		f := newFixture(t)
 		f.apply(Control{Rules: []Rule{{Name: "window", Epoch: 2, RoundMin: 4, RoundMax: 5, Action: Drop}}})
 		for _, r := range []uint64{3, 4, 5, 6} {
-			f.send(boundVote(t, f.s, "self", r), f.a)
+			f.send(boundVote(t, f.s, f.self.String(), r), f.a)
 		}
 		require.Equal(t, []uint64{3, 6}, f.inner.rounds(f.a))
 	})
 	t.Run("self delivery is preserved unless targeted", func(t *testing.T) {
 		f := newFixture(t)
 		f.apply(Control{Rules: []Rule{{Name: "all", Action: Drop}}})
-		f.send(boundVote(t, f.s, "self", 3), f.self)
+		f.send(boundVote(t, f.s, f.self.String(), 3), f.self)
 		require.Equal(t, []uint64{3}, f.inner.rounds(f.self))
 		f.apply(Control{Rules: []Rule{{Name: "all", Action: Drop, Self: true}}})
-		f.send(boundVote(t, f.s, "self", 4), f.self)
+		f.send(boundVote(t, f.s, f.self.String(), 4), f.self)
 		require.Equal(t, []uint64{3}, f.inner.rounds(f.self))
 	})
 	t.Run("hold keeps a message until its release, in the chosen order", func(t *testing.T) {
 		for order, want := range map[Order][]uint64{FIFO: {5, 3, 4}, LIFO: {4, 3, 5}, RoundAsc: {3, 4, 5}, RoundDsc: {5, 4, 3}} {
 			f := newFixture(t)
-			f.apply(Control{Rules: []Rule{{Name: "hold", To: []string{"peer-a"}, Action: Hold}}})
+			f.apply(Control{Rules: []Rule{{Name: "hold", To: []string{f.a.String()}, Action: Hold}}})
 			for _, r := range []uint64{5, 3, 4} {
-				f.send(boundVote(t, f.s, "self", r), f.a)
+				f.send(boundVote(t, f.s, f.self.String(), r), f.a)
 			}
 			require.Empty(t, f.inner.rounds(f.a))
 			require.Equal(t, 3, f.net.Held("hold"))
@@ -295,14 +306,14 @@ func TestRules(t *testing.T) {
 			require.Equal(t, 3, n)
 			require.Equal(t, want, f.inner.rounds(f.a), "order %s", order)
 			require.Zero(t, f.net.Held("hold"))
-			f.send(boundVote(t, f.s, "self", 9), f.a)
+			f.send(boundVote(t, f.s, f.self.String(), 9), f.a)
 			require.Equal(t, append(want, 9), f.inner.rounds(f.a), "a released rule passes what it matches afterwards")
 		}
 	})
 	t.Run("a released message is the recorded bytes even if the sender mutated its message", func(t *testing.T) {
 		f := newFixture(t)
 		f.apply(Control{Rules: []Rule{{Name: "hold", Action: Hold}}})
-		v := boundVote(t, f.s, "self", 3)
+		v := boundVote(t, f.s, f.self.String(), 3)
 		recorded, err := types.Cbor.Marshal(v)
 		require.NoError(t, err)
 		f.send(v, f.a)
@@ -320,7 +331,7 @@ func TestRules(t *testing.T) {
 	t.Run("duplicate delivers the same bytes twice", func(t *testing.T) {
 		f := newFixture(t)
 		f.apply(Control{Rules: []Rule{{Name: "dup", Class: Timeout, Action: Duplicate}}})
-		f.send(boundTimeout(t, f.s, "self", 6), f.a)
+		f.send(boundTimeout(t, f.s, f.self.String(), 6), f.a)
 		got := f.inner.got()
 		require.Len(t, got, 2)
 		x, _ := types.Cbor.Marshal(got[0].msg)
@@ -334,30 +345,30 @@ func TestRules(t *testing.T) {
 			Triggers: []Trigger{{Name: "r4", Class: Vote, RoundMin: 4, Require: true}},
 			Rules:    []Rule{{Name: "after-r4", Class: Vote, Action: Drop, After: "r4", Require: true}},
 		})
-		f.send(boundVote(t, f.s, "self", 3), f.a)
-		f.send(boundVote(t, f.s, "self", 4), f.a) // fires the trigger; not itself dropped
-		f.send(boundVote(t, f.s, "self", 5), f.a)
+		f.send(boundVote(t, f.s, f.self.String(), 3), f.a)
+		f.send(boundVote(t, f.s, f.self.String(), 4), f.a) // fires the trigger; not itself dropped
+		f.send(boundVote(t, f.s, f.self.String(), 5), f.a)
 		require.Equal(t, []uint64{3, 4}, f.inner.rounds(f.a))
 		require.NoError(t, f.net.Finish())
 	})
 	t.Run("a required trigger that never fires and a required rule that never matches fail the scenario", func(t *testing.T) {
 		f := newFixture(t)
 		f.apply(Control{Triggers: []Trigger{{Name: "never", Class: Vote, RoundMin: 100, Require: true}}, Rules: []Rule{{Name: "unmatched", Epoch: 9, Action: Drop, Require: true}}})
-		f.send(boundVote(t, f.s, "self", 3), f.a)
+		f.send(boundVote(t, f.s, f.self.String(), 3), f.a)
 		err := f.net.Finish()
 		require.ErrorIs(t, err, ErrTriggerNotFired)
 		require.ErrorIs(t, err, ErrRuleNotHit)
 	})
 	t.Run("a message the shim cannot describe is passed on and fails the scenario", func(t *testing.T) {
 		f := newFixture(t, func(c *Config) { c.Signing = nil })
-		f.send(boundVote(t, f.s, "self", 3), f.a)
+		f.send(boundVote(t, f.s, f.self.String(), 3), f.a)
 		require.Equal(t, []uint64{3}, f.inner.rounds(f.a), "the message is not lost")
 		require.ErrorIs(t, f.net.Finish(), ErrStatement)
 	})
 	t.Run("the wrapped network refusing a receiver is traced, not hidden", func(t *testing.T) {
 		f := newFixture(t)
 		f.inner.fail = os.ErrClosed
-		f.send(boundVote(t, f.s, "self", 3), f.a)
+		f.send(boundVote(t, f.s, f.self.String(), 3), f.a)
 		require.Contains(t, kinds(f.net.Trace()), "fault")
 		require.NotContains(t, kinds(f.net.Trace()), "deliver")
 	})
@@ -365,15 +376,18 @@ func TestRules(t *testing.T) {
 
 func TestReplay(t *testing.T) {
 	f := newFixture(t)
-	f.apply(Control{Rules: []Rule{{Name: "cut", To: []string{"peer-a"}, Class: Vote, RoundMin: 4, Action: Drop}}})
+	f.apply(Control{Rules: []Rule{{Name: "cut", To: []string{f.a.String()}, Class: Vote, RoundMin: 4, Action: Drop}}})
 	var msgs []*abdrc.VoteMsg
 	for _, r := range []uint64{3, 4, 5} {
-		msgs = append(msgs, boundVote(t, f.s, "self", r))
+		msgs = append(msgs, boundVote(t, f.s, f.self.String(), r))
 		f.send(msgs[len(msgs)-1], f.a, f.b)
 	}
 	log := f.net.Decisions()
 
-	r := newFixture(t, func(c *Config) { c.Replay = &log })
+	r := newFixture(t)
+	r.self, r.a, r.b, r.s = f.self, f.a, f.b, f.s
+	r.net = New(r.inner, Config{Self: f.self, Signing: testSigning, Replay: &log})
+	t.Cleanup(r.net.Close)
 	for _, m := range msgs {
 		r.send(m, r.a, r.b)
 	}
@@ -381,7 +395,7 @@ func TestReplay(t *testing.T) {
 	require.Equal(t, f.inner.rounds(f.b), r.inner.rounds(r.b))
 
 	t.Run("a message the log has no decision for fails", func(t *testing.T) {
-		err := r.net.Send(context.Background(), boundVote(t, f.s, "self", 8), r.a)
+		err := r.net.Send(context.Background(), boundVote(t, f.s, f.self.String(), 8), r.a)
 		require.ErrorIs(t, err, ErrNoDecision)
 		require.ErrorIs(t, r.net.Finish(), ErrNoDecision)
 	})
@@ -390,8 +404,8 @@ func TestReplay(t *testing.T) {
 func TestEquivocation(t *testing.T) {
 	t.Run("a scheme 2 state variant is a second validly signed statement for the same round", func(t *testing.T) {
 		f := newFixture(t)
-		require.NoError(t, f.net.SetEquivocations([]Equivocation{{Name: "byz", Recipients: []string{"peer-a", "peer-b"}, Variant: "state", Require: true}}))
-		honest := boundVote(t, f.s, "self", 5)
+		require.NoError(t, f.net.SetEquivocations([]Equivocation{{Name: "byz", Recipients: []string{f.a.String(), f.b.String()}, Variant: "state", Require: true}}))
+		honest := boundVote(t, f.s, f.self.String(), 5)
 		f.send(honest, f.a)
 		got := f.inner.got()
 		require.Len(t, got, 3, "the honest vote to a, then the variants to a and b")
@@ -406,14 +420,14 @@ func TestEquivocation(t *testing.T) {
 			require.NoError(t, mustVerifier(t, f.s).VerifyBytes(s.msg.(*abdrc.VoteMsg).Signature, vm.Statement), "validly signed by the node's key")
 		}
 		require.Equal(t, 2, f.net.Sent("byz"))
-		f.send(boundVote(t, f.s, "self", 5), f.b)
+		f.send(boundVote(t, f.s, f.self.String(), 5), f.b)
 		require.Len(t, f.inner.got(), 4, "the round is answered once")
 		require.NoError(t, f.net.Finish())
 	})
 	t.Run("a legacy state variant is signed over its own seal", func(t *testing.T) {
 		f := newFixture(t)
-		require.NoError(t, f.net.SetEquivocations([]Equivocation{{Name: "byz", Recipients: []string{"peer-a"}, Variant: "state"}}))
-		f.send(legacyVote(t, f.s, "self", 5), f.b)
+		require.NoError(t, f.net.SetEquivocations([]Equivocation{{Name: "byz", Recipients: []string{f.a.String()}, Variant: "state"}}))
+		f.send(legacyVote(t, f.s, f.self.String(), 5), f.b)
 		got := f.inner.got()
 		require.Len(t, got, 2)
 		v := got[1].msg.(*abdrc.VoteMsg)
@@ -426,8 +440,8 @@ func TestEquivocation(t *testing.T) {
 	})
 	t.Run("a rebroadcast repeats the honest bytes", func(t *testing.T) {
 		f := newFixture(t)
-		require.NoError(t, f.net.SetEquivocations([]Equivocation{{Name: "byz", Recipients: []string{"peer-a"}, Variant: "rebroadcast"}}))
-		f.send(boundVote(t, f.s, "self", 5), f.b)
+		require.NoError(t, f.net.SetEquivocations([]Equivocation{{Name: "byz", Recipients: []string{f.a.String()}, Variant: "rebroadcast"}}))
+		f.send(boundVote(t, f.s, f.self.String(), 5), f.b)
 		got := f.inner.got()
 		x, _ := types.Cbor.Marshal(got[0].msg)
 		y, _ := types.Cbor.Marshal(got[1].msg)
@@ -435,7 +449,7 @@ func TestEquivocation(t *testing.T) {
 	})
 	t.Run("only the node's own votes are answered", func(t *testing.T) {
 		f := newFixture(t)
-		require.NoError(t, f.net.SetEquivocations([]Equivocation{{Name: "byz", Recipients: []string{"peer-a"}, Variant: "state"}}))
+		require.NoError(t, f.net.SetEquivocations([]Equivocation{{Name: "byz", Recipients: []string{f.a.String()}, Variant: "state"}}))
 		f.send(boundVote(t, f.s, "someone-else", 5), f.b)
 		require.Len(t, f.inner.got(), 1)
 		require.Zero(t, f.net.Sent("byz"))
@@ -443,18 +457,18 @@ func TestEquivocation(t *testing.T) {
 	})
 	t.Run("a required equivocation that never happened fails the scenario", func(t *testing.T) {
 		f := newFixture(t)
-		require.NoError(t, f.net.SetEquivocations([]Equivocation{{Name: "byz", Recipients: []string{"peer-a"}, Variant: "state", Require: true}}))
+		require.NoError(t, f.net.SetEquivocations([]Equivocation{{Name: "byz", Recipients: []string{f.a.String()}, Variant: "state", Require: true}}))
 		require.ErrorIs(t, f.net.Finish(), ErrRuleNotHit)
 	})
 	t.Run("without a signer there is no Byzantine adapter", func(t *testing.T) {
 		f := newFixture(t, func(c *Config) { c.Signer = nil })
-		require.NoError(t, f.net.SetEquivocations([]Equivocation{{Name: "byz", Recipients: []string{"peer-a"}, Variant: "state"}}))
-		err := f.net.Send(context.Background(), boundVote(t, f.s, "self", 5), f.b)
+		require.NoError(t, f.net.SetEquivocations([]Equivocation{{Name: "byz", Recipients: []string{f.a.String()}, Variant: "state"}}))
+		err := f.net.Send(context.Background(), boundVote(t, f.s, f.self.String(), 5), f.b)
 		require.ErrorIs(t, err, ErrNoSigner)
 	})
 	t.Run("an unknown variant or an empty recipient list is refused", func(t *testing.T) {
 		f := newFixture(t)
-		require.ErrorIs(t, f.net.SetEquivocations([]Equivocation{{Name: "x", Recipients: []string{"p"}, Variant: "forge"}}), ErrBadControl)
+		require.ErrorIs(t, f.net.SetEquivocations([]Equivocation{{Name: "x", Recipients: []string{f.a.String()}, Variant: "forge"}}), ErrBadControl)
 		require.ErrorIs(t, f.net.SetEquivocations([]Equivocation{{Name: "x", Variant: "state"}}), ErrBadControl)
 	})
 }
@@ -476,7 +490,7 @@ func TestControl(t *testing.T) {
 			f := newFixture(t)
 			f.apply(Control{Gen: 1, Rules: []Rule{{Name: "keep", Action: Drop}}})
 			require.ErrorIs(t, f.net.Apply(ctx, c), ErrBadControl)
-			f.send(boundVote(t, f.s, "self", 3), f.a)
+			f.send(boundVote(t, f.s, f.self.String(), 3), f.a)
 			require.Empty(t, f.inner.rounds(f.a), "the previous rules are still in force")
 			require.EqualValues(t, 1, f.net.Status().Gen)
 		})
@@ -485,7 +499,7 @@ func TestControl(t *testing.T) {
 		f := newFixture(t)
 		c := Control{Gen: 1, Rules: []Rule{{Name: "h", Action: Hold}}}
 		f.apply(c)
-		f.send(boundVote(t, f.s, "self", 3), f.a)
+		f.send(boundVote(t, f.s, f.self.String(), 3), f.a)
 		c.Gen, c.Releases = 2, []Release{{ID: "go", Rule: "h", Order: FIFO}}
 		f.apply(c)
 		f.apply(c)
@@ -495,7 +509,7 @@ func TestControl(t *testing.T) {
 		f := newFixture(t)
 		c := Control{Gen: 1, Rules: []Rule{{Name: "d", Action: Drop}}}
 		f.apply(c)
-		f.send(boundVote(t, f.s, "self", 3), f.a)
+		f.send(boundVote(t, f.s, f.self.String(), 3), f.a)
 		c.Gen = 2
 		f.apply(c)
 		require.Equal(t, 1, f.net.Hits("d"))
@@ -503,7 +517,7 @@ func TestControl(t *testing.T) {
 	t.Run("the status reports what was injected", func(t *testing.T) {
 		f := newFixture(t)
 		f.apply(Control{Gen: 7, Rules: []Rule{{Name: "h", Action: Hold}}, Triggers: []Trigger{{Name: "t"}}})
-		f.send(boundVote(t, f.s, "self", 3), f.a)
+		f.send(boundVote(t, f.s, f.self.String(), 3), f.a)
 		st := f.net.Status()
 		require.EqualValues(t, 7, st.Gen)
 		require.Equal(t, map[string]int{"h": 1}, st.Rules)
@@ -536,7 +550,7 @@ func TestWatch(t *testing.T) {
 	}
 	write(Control{Gen: 3, Rules: []Rule{{Name: "cut", Action: Drop}}})
 	require.Eventually(t, func() bool { return gen() == 3 }, 5*time.Second, 10*time.Millisecond, "the shim read the document and said so")
-	f.send(boundVote(t, f.s, "self", 3), f.a)
+	f.send(boundVote(t, f.s, f.self.String(), 3), f.a)
 	require.Empty(t, f.inner.rounds(f.a))
 
 	t.Run("an unknown field is a fault and keeps the rules", func(t *testing.T) {
@@ -561,4 +575,95 @@ func TestReceiveIsRecorded(t *testing.T) {
 	require.Equal(t, "recv", tr[len(tr)-1].Kind)
 	require.EqualValues(t, 6, tr[len(tr)-1].Round)
 	require.Equal(t, "peer-a", tr[len(tr)-1].Author)
+}
+
+// The documents the live lane's shell library writes are read by the shim's own strict decoder and installed: a field or action the
+// library invents is a failure here, before a lane is run.
+func TestLaneControlDocumentsAreReadByTheShim(t *testing.T) {
+	bash, err := exec.LookPath("bash")
+	if err != nil {
+		t.Skip("no bash")
+	}
+	dir := t.TempDir()
+	out, err := exec.Command(bash, "../../../scripts/lib/q4-lib.sh", "--selftest-docs", dir).CombinedOutput()
+	require.NoError(t, err, string(out))
+	files, err := filepath.Glob(filepath.Join(dir, "*.json"))
+	require.NoError(t, err)
+	require.Len(t, files, 4)
+	for _, file := range files {
+		t.Run(filepath.Base(file), func(t *testing.T) {
+			raw, err := os.ReadFile(file)
+			require.NoError(t, err)
+			var c Control
+			dec := json.NewDecoder(bytes.NewReader(raw))
+			dec.DisallowUnknownFields()
+			require.NoError(t, dec.Decode(&c))
+			f := newFixture(t)
+			if len(c.Releases) > 0 { // a release names a rule that exists
+				f.apply(Control{Rules: []Rule{{Name: c.Releases[0].Rule, Action: Hold}}})
+			}
+			require.NoError(t, f.net.Apply(context.Background(), c))
+		})
+	}
+}
+
+// The lane's offline trace checker (python) reads exactly what the wired shim writes: it accepts a run whose only equivocator is the
+// declared Byzantine root, and rejects the same run when the equivocator is not declared and when a delivery carries other bytes.
+func TestTraceCheckerReadsTheShimTrace(t *testing.T) {
+	py, err := exec.LookPath("python3")
+	if err != nil {
+		t.Skip("no python3")
+	}
+	write := func(t *testing.T, tamper bool) (dir string, self peer.ID) {
+		dir = t.TempDir()
+		var lines [][]byte
+		f := newFixture(t, func(c *Config) { c.Trace = func(ev Event) { b, _ := json.Marshal(ev); lines = append(lines, b) } })
+		require.NoError(t, f.net.SetEquivocations([]Equivocation{{Name: "byz", Recipients: []string{f.a.String()}, Variant: "state"}}))
+		for r := uint64(3); r < 6; r++ {
+			f.send(boundVote(t, f.s, f.self.String(), r), f.a, f.b)
+		}
+		root := filepath.Join(dir, "root1")
+		require.NoError(t, os.MkdirAll(root, 0o755))
+		var out []byte
+		for _, l := range lines {
+			if tamper {
+				var ev map[string]any
+				require.NoError(t, json.Unmarshal(l, &ev))
+				if ev["kind"] == "deliver" && ev["rawSha256"] != nil {
+					ev["rawSha256"] = "00"
+					l, _ = json.Marshal(ev)
+					tamper = false
+				}
+			}
+			out = append(out, l...)
+			out = append(out, '\n')
+		}
+		require.NoError(t, os.WriteFile(filepath.Join(root, "trace.jsonl"), out, 0o600))
+		st, err := json.Marshal(f.net.Status())
+		require.NoError(t, err)
+		require.NoError(t, os.WriteFile(filepath.Join(root, "status.json"), st, 0o600))
+		return dir, f.self
+	}
+	run := func(dir string, args ...string) (string, error) {
+		out, err := exec.Command(py, append([]string{"../../../scripts/q4-trace-check.py", dir, "--roots", "1"}, args...)...).CombinedOutput()
+		return string(out), err
+	}
+	t.Run("the declared Byzantine root is the only equivocator", func(t *testing.T) {
+		dir, self := write(t, false)
+		out, err := run(dir, "--byzantine", "1", "--peer", "1="+self.String())
+		require.NoError(t, err, out)
+		require.Contains(t, out, `"verdict": "PASS"`)
+	})
+	t.Run("an undeclared equivocator fails", func(t *testing.T) {
+		dir, self := write(t, false)
+		out, err := run(dir, "--peer", "1="+self.String())
+		require.Error(t, err)
+		require.Contains(t, out, "equivocators")
+	})
+	t.Run("a delivery with other bytes fails", func(t *testing.T) {
+		dir, self := write(t, true)
+		out, err := run(dir, "--byzantine", "1", "--peer", "1="+self.String())
+		require.Error(t, err)
+		require.Contains(t, out, "other bytes")
+	})
 }

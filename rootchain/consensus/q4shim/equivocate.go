@@ -25,7 +25,7 @@ type equivState struct {
 // rules (a rule that holds honest votes must not hold the Byzantine one). The caller holds n.mu.
 func (n *Net) equivocate(ctx context.Context, msg any, to peer.ID, m Msg) error {
 	vote, ok := msg.(*abdrc.VoteMsg)
-	if !ok || m.Author != string(n.cfg.Self) {
+	if !ok || m.Author != n.cfg.Self.String() {
 		return nil
 	}
 	for _, e := range n.equivs {
@@ -52,11 +52,15 @@ func (n *Net) equivocate(ctx context.Context, msg any, to peer.ID, m Msg) error 
 			return err
 		}
 		for _, r := range e.Recipients {
-			rid := peer.ID(r)
+			rid, err := peer.Decode(r)
+			if err != nil {
+				n.fault(fmt.Errorf("%w: recipient %q: %w", ErrBadControl, r, err))
+				continue
+			}
 			if rid == n.cfg.Self {
 				continue
 			}
-			n.record(Event{Kind: "equivocate", From: string(n.cfg.Self), To: r, Rule: e.Name}, vm)
+			n.record(Event{Kind: "equivocate", From: n.cfg.Self.String(), To: r, Rule: e.Name}, vm)
 			cp, err := Copy(vm)
 			if err != nil {
 				n.fault(err)
@@ -124,6 +128,11 @@ func (n *Net) SetEquivocations(es []Equivocation) error {
 	for _, e := range es {
 		if e.Variant != "state" && e.Variant != "rebroadcast" {
 			return fmt.Errorf("%w: equivocation %q variant %q", ErrBadControl, e.Name, e.Variant)
+		}
+		for _, r := range e.Recipients {
+			if _, err := peer.Decode(r); err != nil {
+				return fmt.Errorf("%w: equivocation %q recipient %q: %w", ErrBadControl, e.Name, r, err)
+			}
 		}
 		if len(e.Recipients) == 0 {
 			return fmt.Errorf("%w: equivocation %q has no recipients", ErrBadControl, e.Name)
