@@ -252,8 +252,15 @@ h3_ack_s1() {
   h3_advance_authorities 3 1 1 2 3 || { echo "authority advance to root epoch 3 / shard epoch 1 failed" >&2; return 1; }
   h3_enroll_authority 5 1 || { echo "enrolling the evm5 authority failed" >&2; return 1; }
   H3_RESTORE_TRUST_BASE=test-nodes/trust-base.json   # anchored at the genesis trust base: the restore catches up forward through the verified handoffs
-  h3_restore_validator 5 1 || return 1
+  h3_restore_validator 5 2 || return 1
   local i
+  # the joiner restores its EL state from the archive and must stay up and certify at the new root epoch: a restore that dies is a failure here
+  for i in $(seq 1 600); do
+    grep -Eq 'msg="certificate admitted" .*rootEpoch=3([[:space:]]|$)' "test-nodes/evm5/debug.log" && break
+    kill -0 "$(cat "test-nodes/evm5/pid")" 2>/dev/null || { echo "the restored joiner evm5 exited" >&2; tail -40 "test-nodes/evm5/debug.log" >&2; return 1; }
+    sleep 1
+  done
+  grep -Eq 'msg="certificate admitted" .*rootEpoch=3([[:space:]]|$)' "test-nodes/evm5/debug.log" || { echo "the restored joiner evm5 never certified at root epoch 3" >&2; return 1; }
   for i in $(seq 1 180); do h3_registry_is 1 3 && break; sleep 1; done
   h3_registry_is 1 3 || { echo "registry did not reach shard epoch 1 / root epoch 3" >&2; return 1; }
   # s=1 is the last acknowledged assignment: its committee is the incumbent K of every later handoff
