@@ -238,30 +238,31 @@ p85_proofs() {
 # a witness of another result would meet: the proofs are checked against the proven slots).
 # p85_expect_refusal <assignment> <sentinel text> <out>: the root refuses the plan, for that reason (a bare failure proves nothing: the first run of these
 # controls was "refused" for a malformed mutation and a lapsed Prepare, not for the proof)
-p85_expect_refusal() {
+p85_expect_refusal() { # assignment sentinel out receipts
   local out
-  if out=$(build/ubft root handoff propose --next-trust-base test-nodes/trust-base-epoch2.json --next-evm-assignment "$1" \
+  if out=$(build/ubft root handoff propose --next-trust-base test-nodes/trust-base-epoch2.json --next-evm-assignment "$1" --readiness-receipts "$4" \
       --root-rpc "$(h3_root_rpcs)" --max-attempts 1 --prepare-timeout 20s 2>&1); then echo "the plan was accepted: $out" >&2; return 1; fi
   echo "$out" >"$3"
   grep -Fq "$2" "$3" || { echo "refused, but not for \"$2\":" >&2; tail -n 4 "$3" >&2; return 1; }
 }
 
-p85_controls() {
-  local d="$Q3_DIR/ctl" out
+# The controls run inside the handoff, once the readiness receipts exist (the root judges the proofs only in a plan that carries them: without
+# receipts the plan is built by the non-V3 path, which carries no proofs at all, and both controls were "refused" for that, not for the proof).
+p85_controls() { # tag receipts
+  local tag=$1 receipts=$2 a="$Q3_DIR/$1-assignment.json" d="$Q3_DIR/ctl"
   mkdir -p "$d"
-  Q3_NEXT_EPOCH=2 Q3_WEIGHTS="1 1 1 1 1" H3_ROOTS="1 2 3 4 5" p85_build_assignment ctl published || return 1
-  # (a) no EVM proofs: refused for exactly that (the shape check names it), and the same plan with its proofs is the lane's handoff below
-  jq 'del(.evmPops)' "$Q3_DIR/ctl-assignment.json" >"$d/no-evm-pops.json"
-  p85_expect_refusal "$d/no-evm-pops.json" "the primary candidate carries no EVM proof" "$H3_DIR/control-no-proofs.txt" || return 1
+  # (a) no EVM proofs: refused for exactly that
+  jq 'del(.evmPops)' "$a" >"$d/no-evm-pops.json"
+  p85_expect_refusal "$d/no-evm-pops.json" "the primary candidate carries no EVM proof" "$H3_DIR/control-no-proofs.txt" "$receipts" || return 1
   # (b) a proof that is not the member's own: member 1 carries member 2's signature (a well-formed list, so the shape check passes and the proofs are judged)
-  jq '.evmPops[0].Signature = .evmPops[1].Signature' "$Q3_DIR/ctl-assignment.json" >"$d/wrong-evm-pop.json"
-  [ "$(jq -c '.evmPops[0].Signature' "$d/wrong-evm-pop.json")" = "$(jq -c '.evmPops[1].Signature' "$Q3_DIR/ctl-assignment.json")" ] || { echo "control (b): the mutation did not apply" >&2; return 1; }
-  p85_expect_refusal "$d/wrong-evm-pop.json" "the primary candidate's EVM proof is refused" "$H3_DIR/control-wrong-proof.txt" || return 1
+  jq '.evmPops[0].Signature = .evmPops[1].Signature' "$a" >"$d/wrong-evm-pop.json"
+  [ "$(jq -c '.evmPops[0].Signature' "$d/wrong-evm-pop.json")" = "$(jq -c '.evmPops[1].Signature' "$a")" ] || { echo "control (b): the mutation did not apply" >&2; return 1; }
+  p85_expect_refusal "$d/wrong-evm-pop.json" "the primary candidate's EVM proof is refused" "$H3_DIR/control-wrong-proof.txt" "$receipts" || return 1
 }
 
 p85_handoff() {
   H3_ROOTS="1 2 3 4 5"; H3_ONLINE="1 2 3 4 5"
-  Q3_BEFORE_READINESS=p85_joiner_restore Q3_ENTITIES="1 2 3 4 5" Q3_TOTAL_WEIGHT=5 Q3_ROOT_QUORUM=4 Q3_EVM_QUORUM=4 Q3_WEIGHTS_1="1 1 1 1 1" \
+  Q3_BEFORE_READINESS=p85_joiner_restore Q3_BEFORE_PROPOSE=p85_controls Q3_ENTITIES="1 2 3 4 5" Q3_TOTAL_WEIGHT=5 Q3_ROOT_QUORUM=4 Q3_EVM_QUORUM=4 Q3_WEIGHTS_1="1 1 1 1 1" \
     q3_handoff_n 1 2 "1 1 1 1 1" 0 "$P85_DIR/genesis-identities.json" || return 1
 }
 
@@ -376,7 +377,7 @@ for v in post.values():
 else: raise SystemExit('no NoCandidate result in the simulated attempt')" "$e"
 }
 
-P85_STEPS="p85_baseline p85_joiner_nodes p85_joiner_onboard p85_election_reserved p85_proofs p85_controls p85_handoff p85_install_activation p85_j_stalls p85_recovery p85_resolved p85_restarts"
+P85_STEPS="p85_baseline p85_joiner_nodes p85_joiner_onboard p85_election_reserved p85_proofs p85_handoff p85_install_activation p85_j_stalls p85_recovery p85_resolved p85_restarts"
 
 p85_run_lane() {
   local s

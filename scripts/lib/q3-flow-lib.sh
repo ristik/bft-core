@@ -91,6 +91,8 @@ q3_attempt() { # a retry rebuilds the proofs of possession, the candidate and th
     for i in ${Q3_ENTITIES:-1 2 3 4}; do receipts+="${receipts:+,}$Q3_DIR/receipt${suf}-$i.json"; done
     assign+=(--readiness-receipts "$receipts")
   fi
+  # a lane hook sees the complete plan inputs (the receipts exist) before the real proposal: the P85 proof controls mutate it here
+  [ -z "${Q3_BEFORE_PROPOSE:-}" ] || "$Q3_BEFORE_PROPOSE" "$tag" "$receipts" || return 1
   q3_x build/ubft root handoff propose --next-trust-base "test-nodes/trust-base-epoch${e}.json" ${assign[@]+"${assign[@]}"} \
     --root-rpc "$(h3_root_rpcs)" ${Q3_RECOVERY:+--q3}
 }
