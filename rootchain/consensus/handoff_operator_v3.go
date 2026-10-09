@@ -381,7 +381,7 @@ func (x *ConsensusManager) StageV3Candidate(body []byte, candidate [32]byte, att
 		}
 		staged = verified
 	}
-	x.storeStagedEVM(b.Epoch, staged)
+	x.storeStagedEVM(b.Epoch, staged, b.Members)
 	x.q3Staged.Store(&Q3Staged{CandidateDigest: candidate, BodyID: b.Identity(), Attempt: attempt, Config: b.Config.Identity()})
 	return nil
 }
@@ -390,13 +390,18 @@ func (x *ConsensusManager) StageV3Candidate(body []byte, candidate [32]byte, att
 type stagedEVMMembers struct {
 	epoch uint64
 	ids   map[string]struct{}
+	roots map[string]struct{} // the successor committee's roots
 }
 
-// storeStagedEVM replaces the staged members with those of the candidate just staged and VERIFIED by the caller: none for a root-only change.
-func (x *ConsensusManager) storeStagedEVM(epoch uint64, c evmassign.Candidate) {
-	members := &stagedEVMMembers{epoch: epoch, ids: map[string]struct{}{}}
+// storeStagedEVM replaces the staged members with those of the candidate just staged and VERIFIED by the caller: the EVM validators of its
+// coupled assignment (none for a root-only change) and the roots of the successor committee.
+func (x *ConsensusManager) storeStagedEVM(epoch uint64, c evmassign.Candidate, roots evmroot.WeightSet) {
+	members := &stagedEVMMembers{epoch: epoch, ids: map[string]struct{}{}, roots: map[string]struct{}{}}
 	for _, id := range c.Identities {
 		members.ids[id.EVMNodeID] = struct{}{}
+	}
+	for _, m := range roots {
+		members.roots[m.NodeID] = struct{}{}
 	}
 	x.q3StagedEVM.Store(members)
 }

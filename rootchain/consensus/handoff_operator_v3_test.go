@@ -344,17 +344,22 @@ func TestAStagedCandidatesEVMMembersAreServedUntilTheEpochIsNotTheNextOne(t *tes
 		require.True(t, root.manager.IsStagedValidator(id.EVMNodeID), "a member of the staged successor assignment: %s", id.EVMNodeID)
 	}
 	require.False(t, root.manager.IsStagedValidator("a-stranger"))
+	for _, m := range f.Body.Members {
+		require.True(t, root.manager.IsStagedRoot(m.NodeID), "a root of the staged successor committee: %s", m.NodeID)
+	}
+	require.False(t, root.manager.IsStagedRoot("a-stranger"))
 	require.Error(t, root.manager.StageV3Candidate(f.Body.Encode(), wrong, 0, f.Candidate))
 	require.True(t, root.manager.IsStagedValidator(c.Identities[0].EVMNodeID), "a refused stage leaves the earlier one")
 
 	// a root-only candidate replaces the grant with nothing
-	root.manager.storeStagedEVM(f.Body.Epoch, evmassign.Candidate{})
+	root.manager.storeStagedEVM(f.Body.Epoch, evmassign.Candidate{}, nil)
 	require.False(t, root.manager.IsStagedValidator(c.Identities[0].EVMNodeID))
+	require.False(t, root.manager.IsStagedRoot(f.Body.Members[0].NodeID))
 
 	// the grant is for the next epoch only
 	granted := evmassign.Candidate{Identities: []evmassign.Identity{{EVMNodeID: c.Identities[0].EVMNodeID}}}
-	root.manager.storeStagedEVM(f.Body.Epoch+1, granted)
+	root.manager.storeStagedEVM(f.Body.Epoch+1, granted, nil)
 	require.False(t, root.manager.IsStagedValidator(c.Identities[0].EVMNodeID), "not the next epoch")
-	root.manager.storeStagedEVM(f.Body.Epoch, granted)
+	root.manager.storeStagedEVM(f.Body.Epoch, granted, nil)
 	require.True(t, root.manager.IsStagedValidator(c.Identities[0].EVMNodeID))
 }
