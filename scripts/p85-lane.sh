@@ -49,6 +49,10 @@ trap 'exit 143' TERM
 # the single B1 layout: one B1 profile derived from the shard configuration and the root trust base; the registry slots are read under the layout-3 names;
 # every shard node exposes its operator endpoint (the readiness check asks it what it has staged)
 export Q3_B1=1 H3_SLOT_LAYOUT=3 EVM_OPERATOR_STATUS_RPC=1 P85_LANE=1 P85_CONTRACTS
+# the roots judge an assignment's committee continuity by the budget committed in the installed EVM configuration; it must be the one the election
+# was priced under (the contracts' genesis parameter): adding a unit-weight joiner to four unit-weight members is D = 2/5, over the 1/4 default
+export P85_DIST_NUM=${P85_DIST_NUM:-1} P85_DIST_DEN=${P85_DIST_DEN:-2}
+export EVM_PARTITION_PARAMS_EXTRA=${EVM_PARTITION_PARAMS_EXTRA:-continuity_max_distance=$P85_DIST_NUM/$P85_DIST_DEN}
 
 set +e
 DEVNET_PIDFILE="$EVIDENCE_DIR/.devnet-pid"; rm -f "$DEVNET_PIDFILE"
