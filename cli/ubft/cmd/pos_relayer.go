@@ -155,7 +155,7 @@ func newPosRelayerCmd() *cobra.Command {
 	assemble.Flags().StringSliceVar(&popFiles, "pop", nil, "a member's proof file from sign-pop (repeat)")
 	assemble.Flags().StringVar(&out, "out", "", "output file (default stdout)")
 
-	root.AddCommand(sign, assemble)
+	root.AddCommand(sign, assemble, newPosProposalCmd(), newPosTxCmd())
 	return root
 }
 

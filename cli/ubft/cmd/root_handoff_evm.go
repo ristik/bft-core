@@ -419,7 +419,7 @@ func newEVMPoPCmd() *cobra.Command {
 }
 
 func newEVMAssembleCmd() *cobra.Command {
-	var contextFile, validatorsFile, pops, out, bindingsFile, changesFiles, identitiesFile, authorizationFile string
+	var contextFile, validatorsFile, pops, out, bindingsFile, changesFiles, identitiesFile, authorizationFile, evmPopsFile string
 	var supersede, recovery bool
 	cmd := &cobra.Command{Use: "evm-assemble", Short: "Collect proofs of possession into a --next-evm-assignment file",
 		RunE: func(cmd *cobra.Command, _ []string) error {
@@ -505,8 +505,14 @@ func newEVMAssembleCmd() *cobra.Command {
 			if _, err := evmassign.ValidateChanges(changes, nil, aggregatorPop, evmroot.D4ControlPartition); err != nil {
 				return err
 			}
+			var evmPops []evmassign.EVMPoP
+			if evmPopsFile != "" {
+				if evmPops, err = readEVMPoPs(evmPopsFile); err != nil {
+					return err
+				}
+			}
 			return writeProposal(cmd, out, evmassign.Proposal{Kind: evmassign.KindPrimary, Validators: succ.Validators, PoPs: ordered, Supersede: supersede,
-				Bindings: bindings, Changes: changes, Identities: identities, Authorization: authorization},
+				Bindings: bindings, Changes: changes, Identities: identities, Authorization: authorization, EVMPoPs: evmPops},
 				fmt.Sprintf("assignment epoch %d for %d validators, assignment hash %s", succ.Epoch, len(succ.Validators), mustAssignmentHash(succ, identitiesDigest)))
 		}}
 	cmd.Flags().StringVar(&contextFile, "context", "", "context JSON from `handoff evm-context`")
@@ -517,6 +523,7 @@ func newEVMAssembleCmd() *cobra.Command {
 	cmd.Flags().StringVar(&bindingsFile, "bindings", "", "JSON array of {rootNodeId, evmNodeId}: the delegated EVM validator of each successor root entity")
 	cmd.Flags().StringVar(&identitiesFile, "identities", "", "JSON array of the successor's frozen identity records (operator payees included)")
 	cmd.Flags().StringVar(&authorizationFile, "authorization", "", "JSON recovery authorization (K) published with this primary")
+	cmd.Flags().StringVar(&evmPopsFile, "evm-pops", "", "the members' EVM possession proofs (`ubft pos-relayer proposal --evm-pops` writes them): carried in the plan for the Freeze's EVM proof; needed on a chain that judges primary candidates")
 	cmd.Flags().BoolVar(&recovery, "recovery", false, "derive the recovery candidate (exactly K) for the installed, unacknowledged primary; needs --supersede")
 	cmd.Flags().BoolVar(&supersede, "supersede", false, "replace the installed assignment, whose acknowledgement is still pending, on the same frozen parent")
 	_ = cmd.MarkFlagRequired("context")
@@ -545,4 +552,19 @@ func mustAssignmentHash(succ *types.PartitionDescriptionRecord, identities [32]b
 		return "unavailable"
 	}
 	return "0x" + hex.EncodeToString(h[:])
+}
+
+func readEVMPoPs(path string) ([]evmassign.EVMPoP, error) {
+	raw, err := os.ReadFile(path) // #nosec G304 -- operator supplied local file
+	if err != nil {
+		return nil, err
+	}
+	var pops []evmassign.EVMPoP
+	if err := json.Unmarshal(raw, &pops); err != nil {
+		return nil, fmt.Errorf("decoding EVM possession proofs %q: %w", path, err)
+	}
+	if _, err := evmassign.EncodePoPs(pops); err != nil {
+		return nil, fmt.Errorf("EVM possession proofs %q: %w", path, err)
+	}
+	return pops, nil
 }

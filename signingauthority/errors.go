@@ -92,3 +92,6 @@ var (
 	// authenticated or reserved.
 	ErrEnrollmentIncomplete = errors.New("signing-enrollment-incomplete")
 )
+
+// ErrNoHashSigner is an authority whose key cannot sign a 32-byte digest: the EVM possession proofs need the key's raw ECDSA over a keccak digest.
+var ErrNoHashSigner = errors.New("signing-key-cannot-sign-a-digest")

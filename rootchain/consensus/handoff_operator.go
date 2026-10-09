@@ -14,6 +14,7 @@ import (
 	"github.com/unicitynetwork/bft-core/evmroot"
 	"github.com/unicitynetwork/bft-core/internal/quorumweight"
 	"github.com/unicitynetwork/bft-core/network/protocol/abdrc"
+	"github.com/unicitynetwork/bft-core/q3format"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/storage"
 	rctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
 	"github.com/unicitynetwork/bft-go-base/types"
@@ -22,6 +23,9 @@ import (
 
 var (
 	ErrHandoffApproval = errors.New("root handoff: invalid operator approval")
+	// ErrHandoffNeedsV3Plan refuses a legacy (V2) plan in an epoch that is a V3 (weighted) epoch: its successor is a V3 body, planned
+	// with --q3 or --readiness-receipts. It is decided from the root's authenticated current epoch, never from the request.
+	ErrHandoffNeedsV3Plan = fmt.Errorf("%w: this epoch is a V3 (weighted) epoch: plan with --q3 or --readiness-receipts", ErrHandoffApproval)
 	// ErrEndorseBeforePrepare refuses an endorsement while no Prepare of the planned attempt is in this validator's committed
 	// state: validators endorse the state the Prepare froze, never a state they merely expect.
 	ErrEndorseBeforePrepare = errors.New("root handoff: endorsement requested before the handoff is prepared")
@@ -362,6 +366,11 @@ func (x *ConsensusManager) pendingIntent(attempt uint64) *abdrc.HandoffApprovalM
 }
 
 func (x *ConsensusManager) buildHandoffPlanFromState(next *types.RootTrustBaseV1, state *abdrc.StateMsg, proposal *evmassign.Proposal) (abdrc.HandoffApprovalMsg, error) {
+	// The legacy planner derives unit-stake V2 bodies; in a V3 epoch it can only fail on a member's weight (node.Stake != 1) with no
+	// diagnosis, so name the refusal first.
+	if x.currentBodyVersion() == q3format.BodyVersion {
+		return abdrc.HandoffApprovalMsg{}, ErrHandoffNeedsV3Plan
+	}
 	old := x.trustBase.Load()
 	if old == nil || next == nil || old.Epoch == ^uint64(0) || next.Epoch != old.Epoch+1 || next.NetworkID != old.NetworkID {
 		return abdrc.HandoffApprovalMsg{}, ErrHandoffApproval
