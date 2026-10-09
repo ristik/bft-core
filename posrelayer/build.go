@@ -178,6 +178,18 @@ func OpenResult(ctx context.Context, rd Reader, m Modules) ([32]byte, error) {
 
 // Build reads the published result and assembles the pipeline inputs. It refuses a result that is not published, or whose coverage was lost.
 func Build(ctx context.Context, rd Reader, m Modules, resultID [32]byte, root RootContext, names Names) (*Output, error) {
+	return build(ctx, rd, m, resultID, root, names, true)
+}
+
+// BuildReserved is Build for a result that is reserved but not yet published: the members' EVM possession proofs have to be signed over the
+// candidate before they can be submitted, and everything the candidate names (the frozen records, the exposures, the delegations, K, the
+// attempt) is already on chain at the reservation. The stored proof hashes it reports are zero for proofs not yet submitted. It still
+// refuses a result that lost a member's coverage. What a signer is shown here is judged by the root only once the result is published.
+func BuildReserved(ctx context.Context, rd Reader, m Modules, resultID [32]byte, root RootContext, names Names) (*Output, error) {
+	return build(ctx, rd, m, resultID, root, names, false)
+}
+
+func build(ctx context.Context, rd Reader, m Modules, resultID [32]byte, root RootContext, names Names, requirePublished bool) (*Output, error) {
 	b := builder{rd, m}
 	res, err := read[resultView](ctx, b, m.Election, election, "result", resultID)
 	if err != nil {
@@ -188,7 +200,7 @@ func Build(ctx context.Context, rd Reader, m Modules, resultID [32]byte, root Ro
 		return nil, err
 	}
 	switch {
-	case !pub.Published:
+	case requirePublished && !pub.Published:
 		return nil, fmt.Errorf("%w: result %x is not published (its possession proofs are not complete)", ErrBuild, resultID)
 	case pub.Lost:
 		return nil, fmt.Errorf("%w: result %x lost a member's coverage", ErrBuild, resultID)
