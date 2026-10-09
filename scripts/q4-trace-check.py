@@ -7,7 +7,11 @@ Reads <shim dir>/root<N>/trace.jsonl and status.json of every root and checks:
   * every line parses, event sequence numbers of one root strictly increase;
   * every attempt has an outcome (deliver, drop, or hold followed by release+deliver) -- a held message may remain held only if the
     status says so; nothing is lost silently;
-  * a deliver carries the exact bytes of its attempt (SHA-256 of the serialized message is equal);
+  * a deliver carries the exact bytes of its attempt (SHA-256 of the serialized message is equal); a second deliver of the same send
+    (a duplicate rule) must carry the same bytes and is counted, not treated as a new send;
+  * a release that delivers held sends out of their send order is counted as a reorder;
+  * a forge event (the authentication-refusal adapter: impersonation, unknown signer, wrong epoch/domain/scheme, bad signature, stale)
+    is counted per root and never enters the statement sets: its claimed author did not sign it;
   * for every (author, epoch, round, class) the set of distinct signed statements: more than one is an equivocation. The equivocators
     must be exactly the declared Byzantine roots (by peer id); an honest author with two statements fails;
   * with --byz-windows (JSON lines {"tag", "roots", "from", "to"}: when each row armed its Byzantine adapters and when it had cleared them) every equivocation in
@@ -51,6 +55,7 @@ def main():
     peers = {int(k): v for k, v in (p.split("=", 1) for p in a.peer)}
     byz_ids = {peers[r] for r in byz_roots}
     problems, stmts, attempts, per_root = [], collections.defaultdict(set), 0, {}
+    duplicates, reorders, forged = 0, 0, 0
     windows = []
     if a.byz_windows:
         with open(a.byz_windows) as wf:
@@ -65,7 +70,8 @@ def main():
             problems.append(f"root{r}: no trace")
             continue
         rows = load(path)
-        last, pending, held, raw = 0, {}, {}, {}
+        last, pending, held, raw, delivered = 0, {}, {}, {}, set()
+        dup_r, reorder_r, forged_r, last_release = 0, 0, collections.Counter(), {}
         for ev in rows:
             if ev["seq"] <= last and ev["seq"] != 1:
                 problems.append(f"root{r}: sequence not increasing at {ev['seq']}")
@@ -79,13 +85,29 @@ def main():
                     stmts[(ev["author"], ev["epoch"], ev["round"], ev["class"])].add(ev["statement"])
             elif k in ("drop", "deliver"):
                 key = (sid, ev.get("to"))
+                if k == "deliver" and key in delivered and key not in pending and key not in held:
+                    # the second copy of a duplicated send: the same bytes again, no new statement
+                    if raw.get(key) != ev.get("rawSha256"):
+                        problems.append(f"root{r}: duplicate of send {sid} delivered with other bytes")
+                    dup_r += 1
+                    continue
                 if key not in pending and key not in held:
                     problems.append(f"root{r}: {k} for unknown send {sid}")
                     continue
                 if k == "deliver" and raw.get(key) != ev.get("rawSha256"):
                     problems.append(f"root{r}: send {sid} delivered with other bytes")
+                if k == "deliver":
+                    delivered.add(key)
                 pending.pop(key, None)
                 held.pop(key, None)
+            elif k == "release":
+                # consecutive releases of one rule to one receiver in decreasing send order: the held traffic was reordered
+                rk = (ev.get("rule"), ev.get("to"))
+                if rk in last_release and sid < last_release[rk]:
+                    reorder_r += 1
+                last_release[rk] = sid
+            elif k == "forge":
+                forged_r[ev.get("rule") or "?"] += 1
             elif k == "hold":
                 key = (sid, ev.get("to"))
                 if pending.pop(key, None) is None:
@@ -111,7 +133,11 @@ def main():
         for f in status.get("faults", []):
             problems.append(f"root{r}: status fault: {f}")
         per_root[r] = {"held_remaining": len(held), "status_held": status.get("held", {}), "rules": status.get("rules", {}),
-                       "byzantine_sent": status.get("byzantine", {})}
+                       "byzantine_sent": status.get("byzantine", {}), "duplicates_delivered": dup_r, "reordered_releases": reorder_r,
+                       "forged": dict(forged_r), "status_forged": status.get("forged", {})}
+        duplicates += dup_r
+        reorders += reorder_r
+        forged += sum(forged_r.values())
         if not windows and r in byz_roots and not any(v > 0 for v in status.get("byzantine", {}).values()):
             problems.append(f"root{r}: declared Byzantine but its adapter sent nothing")
 
@@ -121,7 +147,7 @@ def main():
     equivocators = sorted({k[0] for k, v in stmts.items() if len(v) > 1})
     if set(equivocators) != byz_ids:
         problems.append(f"equivocators {equivocators} != declared Byzantine {sorted(byz_ids)}")
-    report = {"attempts": attempts, "decisions": len(stmts), "equivocators": equivocators, "declared_byzantine": sorted(byz_ids),
+    report = {"attempts": attempts, "decisions": len(stmts), "duplicates_delivered": duplicates, "reordered_releases": reorders, "forged": forged, "equivocators": equivocators, "declared_byzantine": sorted(byz_ids),
               "per_root": per_root, "byz_windows": [{"tag": w["tag"], "roots": sorted(w["roots"]), "equivocated": sorted(w["seen"])} for w in windows], "problems": problems, "verdict": "PASS" if not problems else "FAIL",
               "signatures_verified_offline": False}
     print(json.dumps(report, indent=1, sort_keys=True))

@@ -589,7 +589,21 @@ func TestLaneControlDocumentsAreReadByTheShim(t *testing.T) {
 	require.NoError(t, err, string(out))
 	files, err := filepath.Glob(filepath.Join(dir, "*.json"))
 	require.NoError(t, err)
-	require.Len(t, files, 4)
+	require.Len(t, files, 5)
+	shardFiles, err := filepath.Glob(filepath.Join(dir, "shard", "*.json"))
+	require.NoError(t, err)
+	require.Len(t, shardFiles, 2)
+	for _, file := range shardFiles {
+		t.Run("shard/"+filepath.Base(file), func(t *testing.T) {
+			raw, err := os.ReadFile(file)
+			require.NoError(t, err)
+			var c ShardControl
+			dec := json.NewDecoder(bytes.NewReader(raw))
+			dec.DisallowUnknownFields()
+			require.NoError(t, dec.Decode(&c))
+			require.NoError(t, newGateFixture(t).gate.Apply(context.Background(), c))
+		})
+	}
 	for _, file := range files {
 		t.Run(filepath.Base(file), func(t *testing.T) {
 			raw, err := os.ReadFile(file)

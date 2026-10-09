@@ -120,7 +120,7 @@ type Equivocation struct {
 type Event struct {
 	Seq        uint64    `json:"seq"`
 	Time       time.Time `json:"time"`
-	Kind       string    `json:"kind"` // attempt drop hold deliver release equivocate recv fault
+	Kind       string    `json:"kind"` // attempt drop hold deliver release equivocate forge recv fault
 	SendID     uint64    `json:"sendId,omitempty"`
 	DeliveryID uint64    `json:"deliveryId,omitempty"`
 	From       string    `json:"from,omitempty"`
@@ -187,6 +187,9 @@ type Net struct {
 	rules      []*ruleState
 	triggers   []*triggerState
 	equivs     []*equivState
+	forges     []*forgeState
+	ownLast    map[Class]ownMsg
+	ownPrev    map[Class]ownMsg
 	held       []*held
 	released   map[string]struct{}
 	nth        map[string]int
@@ -210,7 +213,7 @@ func New(inner Inner, cfg Config) *Net {
 		cfg.Clock = time.Now
 	}
 	return &Net{inner: inner, cfg: cfg, released: map[string]struct{}{}, nth: map[string]int{}, actions: map[string]Action{},
-		recv: make(chan any), stopRecv: make(chan struct{})}
+		ownLast: map[Class]ownMsg{}, ownPrev: map[Class]ownMsg{}, recv: make(chan any), stopRecv: make(chan struct{})}
 }
 
 // ReceivedChannel is the wrapped network's channel, with every message recorded as a Recv event on its way through. The order and
@@ -409,7 +412,10 @@ func (n *Net) route(ctx context.Context, msg any, to peer.ID) error {
 		n.fault(err)
 		return err
 	}
-	return n.equivocate(ctx, msg, to, m)
+	if err := n.equivocate(ctx, msg, to, m); err != nil {
+		return err
+	}
+	return n.forge(ctx, m)
 }
 
 // deliver hands the message to the wrapped network. A copy decoded from the recorded bytes is sent when the message is held, released
@@ -573,6 +579,11 @@ func (n *Net) Finish() error {
 	for _, e := range n.equivs {
 		if e.Require && e.sent == 0 {
 			errs = append(errs, fmt.Errorf("%w: equivocation %s", ErrRuleNotHit, e.Name))
+		}
+	}
+	for _, f := range n.forges {
+		if f.Require && f.sent == 0 {
+			errs = append(errs, fmt.Errorf("%w: forgery %s", ErrRuleNotHit, f.Name))
 		}
 	}
 	return errors.Join(errs...)

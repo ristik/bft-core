@@ -67,3 +67,42 @@ func wrapRootNet(ctx context.Context, net consensus.RootNet, self peer.ID, signe
 	}
 	return shim, stop, nil
 }
+
+// wrapPartitionNet puts the Q4 shard gate (q4shim.ShardGate) between the root node and its partition network: shard-control.json in the
+// shim directory steers it, shard-status.json and shard-trace.jsonl report it. Test and lane binaries only (-tags q4shim).
+func wrapPartitionNet(ctx context.Context, net q4shim.Inner, self peer.ID, log *slog.Logger) (q4shim.Inner, func(), error) {
+	dir := os.Getenv(q4ShimDirEnv)
+	if dir == "" {
+		return nil, nil, fmt.Errorf("q4shim build: %s is not set", q4ShimDirEnv)
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return nil, nil, err
+	}
+	traceFile, err := os.OpenFile(filepath.Join(dir, "shard-trace.jsonl"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		return nil, nil, err
+	}
+	var mu sync.Mutex
+	enc := json.NewEncoder(traceFile)
+	gate := q4shim.NewShardGate(net, self, func(ev q4shim.ShardEvent) {
+		mu.Lock()
+		defer mu.Unlock()
+		if err := enc.Encode(ev); err != nil {
+			log.Error("q4shim shard trace write failed", "error", err)
+		}
+	})
+	watchCtx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	go func() {
+		gate.Watch(watchCtx, filepath.Join(dir, "shard-control.json"), filepath.Join(dir, "shard-status.json"), 100*time.Millisecond)
+		close(done)
+	}()
+	log.Warn("Q4 SHARD GATE ACTIVE: this root node can drop and hold shard certification traffic; never a production binary", "dir", dir)
+	stop := func() {
+		cancel()
+		<-done
+		gate.Close()
+		_ = traceFile.Close()
+	}
+	return gate, stop, nil
+}
