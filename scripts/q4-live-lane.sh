@@ -171,6 +171,7 @@ status=$?
 set -e
 rm -f "$DEVNET_PIDFILE"
 echo "ubft sha256 after the devnet setup's own rebuild: $(sha256 build/ubft 2>/dev/null)" >>"$PINS"
+rm -rf "$EVIDENCE_DIR/bin"   # the shim binary (its sha256 is in pins.txt) is not kept in the evidence directory
 cp -R test-nodes/q3 "$EVIDENCE_DIR/q3" 2>/dev/null || true
 cp -R test-nodes/q4 "$EVIDENCE_DIR/q4" 2>/dev/null || true
 for f in test-nodes/root*/debug.log test-nodes/evm*/debug.log; do
