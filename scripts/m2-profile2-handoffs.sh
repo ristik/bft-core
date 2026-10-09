@@ -21,7 +21,10 @@ for initialHash in $(printf '%b' "$txHashes"); do
   done
   $initialReady || return 1
 done
-M2_NEXT_NONCE=${M2_NEXT_NONCE:-3}
+# The next nonce of the funded account is whatever the chain says it is: three seeded transactions in block 1 leave it at 3, and a lane that sent more before this
+# point (the F8 probes send one) leaves it higher.
+m2FundedNonce=$(rpc "http://127.0.0.1:$rethEthBase" eth_getTransactionCount "[\"$(go run ./scripts/evmtx -address)\",\"pending\"]" | pyget "['result']") || m2FundedNonce=
+case "$m2FundedNonce" in 0x*) M2_NEXT_NONCE=${M2_NEXT_NONCE:-$((m2FundedNonce))} ;; *) M2_NEXT_NONCE=${M2_NEXT_NONCE:-3} ;; esac
 if [ "${M2A_FINAL_RESTORE:-0}" = 1 ]; then
   m2a_head=$(rpc "http://127.0.0.1:$((rethEthBase+1))" eth_blockNumber '[]' | pyget "['result']")
   while [ -n "$m2a_head" ] && [ "$((m2a_head))" -lt 5 ]; do
