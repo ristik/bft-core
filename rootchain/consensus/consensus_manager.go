@@ -1835,13 +1835,33 @@ func (x *ConsensusManager) IsShardValidator(partition types.PartitionID, shard t
 // candidate is still the next epoch (once the epoch is installed the installed configuration answers instead). A joiner that is behind
 // needs the root's records to catch up before it can give readiness, which is before its assignment is installed.
 func (x *ConsensusManager) IsStagedValidator(nodeID string) bool {
-	staged := x.q3StagedEVM.Load()
-	tb := x.trustBase.Load()
-	if staged == nil || tb == nil || staged.epoch != tb.Epoch+1 {
+	staged := x.pendingStaged()
+	if staged == nil {
 		return false
 	}
 	_, ok := staged.ids[nodeID]
 	return ok
+}
+
+// IsStagedRoot reports whether nodeID is a root of the successor committee of the candidate staged on this root, while that candidate is the
+// next epoch: a joiner root that is not in the installed trust base yet fetches the source-log prefix it needs from the roots it follows.
+func (x *ConsensusManager) IsStagedRoot(nodeID string) bool {
+	staged := x.pendingStaged()
+	if staged == nil {
+		return false
+	}
+	_, ok := staged.roots[nodeID]
+	return ok
+}
+
+// pendingStaged is the staged candidate's members while its epoch is the next one, nil otherwise.
+func (x *ConsensusManager) pendingStaged() *stagedEVMMembers {
+	staged := x.q3StagedEVM.Load()
+	tb := x.trustBase.Load()
+	if staged == nil || tb == nil || staged.epoch != tb.Epoch+1 {
+		return nil
+	}
+	return staged
 }
 
 func (x *ConsensusManager) ShardInfo(partition types.PartitionID, shard types.ShardID) (*storage.ShardInfo, error) {

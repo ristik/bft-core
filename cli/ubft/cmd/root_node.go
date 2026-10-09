@@ -821,6 +821,8 @@ type shardMembers interface {
 	IsShardValidator(types.PartitionID, types.ShardID, string) bool
 	// IsStagedValidator is a validator of the successor assignment of the candidate staged on this root (a joiner not installed yet)
 	IsStagedValidator(string) bool
+	// IsStagedRoot is a root of the successor committee of the candidate staged on this root (a joiner root not in the installed trust base yet)
+	IsStagedRoot(string) bool
 }
 
 // recordsFeedAllowed is who the records feed serves: the validators the shard configurations named when the root started, the other roots,
@@ -861,7 +863,7 @@ func serveRootRecords(log *slog.Logger, host *network.Peer, cm *consensus.Consen
 	}
 	// The other roots of the trust base are served too: a root that installs an epoch checkpoint without the source log it commits
 	// fetches the missing prefix from them (storage.BlockStore.SetRecordFetcher), verifying every record against the checkpoint.
-	server := recordsfeed.NewServer(recordsSource{cm}, recordsFeedAllowed(allowed, shardConfs, cm, func(id peer.ID) bool { return slices.Contains(cm.Validators(), id) }))
+	server := recordsfeed.NewServer(recordsSource{cm}, recordsFeedAllowed(allowed, shardConfs, cm, func(id peer.ID) bool { return slices.Contains(cm.Validators(), id) || cm.IsStagedRoot(id.String()) }))
 	host.RegisterProtocolHandler(recordsfeed.ProtocolID, server.Handler)
 	cm.SetRecordFetcher(rootRecordFetcher{host: host, cm: cm})
 	log.Info("root records feed enabled", "validators", len(eligible))
