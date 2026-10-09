@@ -13,6 +13,8 @@ type fakeMembers map[peer.ID]bool
 // staged is the set of peers the fake root has a staged candidate for.
 var fakeStaged = map[peer.ID]bool{}
 
+func (fakeMembers) IsStagedRoot(string) bool { return false }
+
 func (fakeMembers) IsStagedValidator(nodeID string) bool {
 	id, err := peer.Decode(nodeID)
 	return err == nil && fakeStaged[id]
