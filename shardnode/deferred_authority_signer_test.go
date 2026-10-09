@@ -2,6 +2,7 @@ package shardnode
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -76,4 +77,44 @@ func TestADeferredAuthoritySignerAnswersTheRestoreProbesBeforeItsKeyIsBound(t *t
 	require.NoError(t, err)
 	require.EqualValues(t, 1, status.Generation)
 	require.NoError(t, deferred.RestoreReadiness(context.Background(), 0))
+}
+
+// A staging-only joiner is built without a session (the authority issues none before its enrollment names its key); the session is
+// provisioned when a request needs it after the key is bound, and not before.
+func TestALazyDeferredAuthoritySignerProvisionsItsSessionOnlyAfterTheKeyIsBound(t *testing.T) {
+	ctx := context.Background()
+	f := newWiringFixture(t)
+	authority, session := f.authorityFor(t)
+	calls, issued := 0, false
+	deferred, err := NewLazyDeferredAuthoritySigner(func() (SigningAuthorityClient, error) {
+		calls++
+		if !issued {
+			return nil, errors.New("no credential yet")
+		}
+		return probeClient{SigningAuthorityClient: signingauthority.NewLocalClient(authority, session), status: signingauthority.Status{Generation: 1}}, nil
+	})
+	require.NoError(t, err)
+	_, err = NewLazyDeferredAuthoritySigner(nil)
+	require.Error(t, err)
+
+	_, err = deferred.Sign(ctx, f.uc, f.tr, nil)
+	require.ErrorIs(t, err, ErrAuthorityKeyUnbound)
+	require.NoError(t, deferred.RestoreReadiness(ctx, 0), "a staging-only joiner signs nothing: nothing to be ready for")
+	_, err = deferred.RestoreStatus(ctx)
+	require.ErrorIs(t, err, ErrAuthoritySessionUnavailable)
+
+	callsBefore := calls
+	require.NoError(t, deferred.BindKey(f.authorityKey(t, authority)))
+	require.Equal(t, callsBefore, calls, "binding the key does not itself ask for a session")
+	_, err = deferred.Sign(ctx, f.uc, f.tr, nil)
+	require.ErrorIs(t, err, ErrAuthoritySessionUnavailable, "bound, session not issued yet")
+	require.ErrorIs(t, deferred.RestoreReadiness(ctx, 0), ErrAuthoritySessionUnavailable, "a bound signer needs its session")
+
+	issued = true
+	r, sub, health := f.round(t)
+	r.SetCertificationSigner(deferred)
+	require.NoError(t, r.HandleCertificate(ctx, f.uc, f.tr))
+	require.Len(t, sub.reqs, 1, "promoted: signs through the acquired session")
+	require.True(t, health.Snapshot().Voting)
+	require.NoError(t, deferred.RestoreReadiness(ctx, 0))
 }
