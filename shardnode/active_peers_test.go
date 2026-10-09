@@ -86,3 +86,36 @@ func TestActivePeersAreHeldUntilThePersistedStepsAreReplayed(t *testing.T) {
 	require.False(t, peers.Allowed(v4), "the retired validator was never authorized after the restart")
 	require.False(t, peers.Allowed(self))
 }
+
+// A staged successor assignment's validators may fetch from this node before their assignment is installed (a joiner that is behind has to
+// catch up before it can give readiness); the stage is replaced by the next one, cleared by an install, never names this node and never
+// authorizes while the set is held.
+func TestActivePeersServeTheStagedSuccessorUntilItIsInstalledOrReplaced(t *testing.T) {
+	self, v2, v3, joiner, other := newPeerID(t), newPeerID(t), newPeerID(t), newPeerID(t), newPeerID(t)
+	peers, err := NewActivePeers(self, validatorsOf(self, v2, v3))
+	require.NoError(t, err)
+
+	require.False(t, peers.Allowed(joiner))
+	require.NoError(t, peers.Stage([]string{self.String(), v2.String(), joiner.String()}))
+	require.True(t, peers.Allowed(joiner), "a staged successor member is served before its install")
+	require.True(t, peers.Allowed(v3), "the active set is untouched by a stage")
+	require.False(t, peers.Allowed(self))
+	require.False(t, peers.Allowed(other), "a peer no assignment names")
+
+	require.NoError(t, peers.Stage([]string{other.String()}))
+	require.False(t, peers.Allowed(joiner), "the next stage replaces the earlier one")
+	require.True(t, peers.Allowed(other))
+
+	require.ErrorIs(t, peers.Stage([]string{"not a peer"}), ErrActivePeersInvalid)
+	require.True(t, peers.Allowed(other), "a refused stage changes nothing")
+
+	require.NoError(t, peers.Install(1, validatorsOf(self, v2, joiner)))
+	require.False(t, peers.Allowed(other), "the install clears the stage")
+	require.True(t, peers.Allowed(joiner))
+
+	held, err := NewActivePeers(self, validatorsOf(self, v2))
+	require.NoError(t, err)
+	held.Hold()
+	require.NoError(t, held.Stage([]string{joiner.String()}))
+	require.False(t, held.Allowed(joiner), "a held set authorizes nobody, staged or not")
+}

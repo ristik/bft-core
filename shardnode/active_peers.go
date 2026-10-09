@@ -25,6 +25,11 @@ type ActivePeers struct {
 	self  peer.ID
 	epoch uint64
 	set   map[peer.ID]struct{}
+	// staged are the validators of the successor assignment this node has STAGED (the candidate its operator handed it for readiness): peers
+	// of the next assignment that are not installed yet. They may fetch the archive and records, so a joiner can catch up before its own
+	// readiness (it can only stage a candidate that is the successor of the history it has caught up to). Replaced by the next stage and
+	// cleared by the next install; never consulted for anything but inbound authorization.
+	staged map[peer.ID]struct{}
 	// held is set from process start until the persisted verified assignment steps have been replayed into the set: until then the set
 	// is only the genesis one, which may still name a validator that a later step retired. A held set authorizes nobody (a peer refused
 	// in that window retries; see archivewiring.ErrPeerNotAllowed) rather than authorizing a stale set.
@@ -78,7 +83,7 @@ func (a *ActivePeers) Install(epoch uint64, validators []*types.NodeInfo) error 
 		}
 		return nil
 	}
-	a.epoch, a.set = epoch, set
+	a.epoch, a.set, a.staged = epoch, set, nil
 	return nil
 }
 
@@ -117,8 +122,30 @@ func (a *ActivePeers) Allowed(id peer.ID) bool {
 	if a.held {
 		return false
 	}
-	_, ok := a.set[id]
+	if _, ok := a.set[id]; ok {
+		return true
+	}
+	_, ok := a.staged[id]
 	return ok
+}
+
+// Stage records the validators of a staged successor assignment as peers this node serves, in place of any earlier staged set. This node
+// itself is never in it. A peer that is not a valid peer ID is ErrActivePeersInvalid and changes nothing.
+func (a *ActivePeers) Stage(ids []string) error {
+	set := make(map[peer.ID]struct{}, len(ids))
+	for _, raw := range ids {
+		id, err := peer.Decode(raw)
+		if err != nil {
+			return fmt.Errorf("%w: node id %q: %v", ErrActivePeersInvalid, raw, err)
+		}
+		if id != a.self {
+			set[id] = struct{}{}
+		}
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.staged = set
+	return nil
 }
 
 // Peers is the active assignment's other validators, sorted, never including this node. It is what an OUTBOUND consumer addresses (block

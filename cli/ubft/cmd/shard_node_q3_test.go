@@ -5,6 +5,9 @@ import (
 	"context"
 	"crypto"
 	"errors"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -332,4 +335,66 @@ func TestTheLaneNodeWiresThePairIntoItsAdapterAndRefusesWhatCannotCarryIt(t *tes
 	require.False(t, other.PairEnabled(), "and nothing is enabled")
 	_, err = wireQ3Pair(struct{}{}, rt, 3, origin.Valid(), [32]byte(origin.BlockHash()))
 	require.ErrorIs(t, err, ErrQ3Pair, "an executor that cannot carry the binding")
+}
+
+// A staged successor assignment's members are announced to the node's archive authorization, so a joiner can catch up before its own
+// readiness; a refused stage announces nothing, and a root-only change (no preimage) names no EVM node.
+func TestStagingAnnouncesTheSuccessorAssignmentsMembers(t *testing.T) {
+	f := q3fixture.New(t, q3fixture.Options{Assignment: true})
+	c, err := evmassign.DecodeCandidate(f.Candidate)
+	require.NoError(t, err)
+	var want []string
+	for _, id := range c.Identities {
+		want = append(want, id.EVMNodeID)
+	}
+	require.NotEmpty(t, want)
+
+	var got [][]string
+	st := &shardQ3Staging{onStaged: func(ids []string) error { got = append(got, ids); return nil }}
+	require.NoError(t, st.announceStaged(shardQ3StageRequest{Preimage: f.Candidate}))
+	require.Equal(t, [][]string{want}, got)
+
+	require.NoError(t, st.announceStaged(shardQ3StageRequest{}))
+	require.Len(t, got, 1, "a root-only change names no EVM node")
+
+	require.ErrorIs(t, st.announceStaged(shardQ3StageRequest{Preimage: f.Candidate[:len(f.Candidate)-1]}), ErrQ3StageBody, "an undecodable preimage")
+	require.Len(t, got, 1)
+
+	// a refused stage (a digest that is not 32 bytes) never reaches the announcement
+	refusing := &shardQ3Staging{cfg: func() (q3format.ProtocolConfig, error) { return q3format.ProtocolConfig{}, nil }, onStaged: func([]string) error { got = append(got, nil); return nil }}
+	require.ErrorIs(t, refusing.Stage(shardQ3StageRequest{Candidate: []byte{1}, Preimage: f.Candidate}), ErrQ3StageDigest)
+	require.Len(t, got, 1)
+
+	// the hook's refusal refuses the stage's announcement
+	boom := errors.New("boom")
+	failing := &shardQ3Staging{onStaged: func([]string) error { return boom }}
+	require.ErrorIs(t, failing.announceStaged(shardQ3StageRequest{Preimage: f.Candidate}), boom)
+}
+
+// The shard node's staging is wired to the active peers' stage in production: a stage that announces nothing would leave a joiner that is
+// behind unable to catch up (the archive refuses it until its assignment is installed).
+func TestShardNodeRunWiresStagingToTheActivePeers(t *testing.T) {
+	file, err := parser.ParseFile(token.NewFileSet(), "shard_node_run.go", nil, 0)
+	require.NoError(t, err)
+	var wired string
+	ast.Inspect(file, func(n ast.Node) bool {
+		lit, ok := n.(*ast.CompositeLit)
+		if !ok {
+			return true
+		}
+		if id, ok := lit.Type.(*ast.Ident); !ok || id.Name != "shardQ3Staging" {
+			return true
+		}
+		for _, e := range lit.Elts {
+			kv, ok := e.(*ast.KeyValueExpr)
+			if !ok || kv.Key.(*ast.Ident).Name != "onStaged" {
+				continue
+			}
+			sel, ok := kv.Value.(*ast.SelectorExpr)
+			require.True(t, ok)
+			wired = sel.X.(*ast.Ident).Name + "." + sel.Sel.Name
+		}
+		return true
+	})
+	require.Equal(t, "activePeers.Stage", wired)
 }
