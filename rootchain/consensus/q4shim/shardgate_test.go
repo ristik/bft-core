@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -21,12 +22,17 @@ type gateFixture struct {
 	inner *fakeInner
 	gate  *ShardGate
 	recv  <-chan any
+	mu    sync.Mutex
 	trace []ShardEvent
 }
 
 func newGateFixture(t *testing.T) *gateFixture {
 	g := &gateFixture{t: t, inner: newFakeInner()}
-	g.gate = NewShardGate(g.inner, testPeer(t), func(ev ShardEvent) { g.trace = append(g.trace, ev) })
+	g.gate = NewShardGate(g.inner, testPeer(t), func(ev ShardEvent) {
+		g.mu.Lock()
+		defer g.mu.Unlock()
+		g.trace = append(g.trace, ev)
+	})
 	g.recv = g.gate.ReceivedChannel()
 	t.Cleanup(g.gate.Close)
 	return g
@@ -55,8 +61,15 @@ func (g *gateFixture) next() any {
 	}
 }
 
+// events is a copy of the trace so far (an inbound release is delivered by its own goroutine).
+func (g *gateFixture) events() []ShardEvent {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return append([]ShardEvent(nil), g.trace...)
+}
+
 func (g *gateFixture) kinds() (out []string) {
-	for _, e := range g.trace {
+	for _, e := range g.events() {
 		out = append(out, e.Kind)
 	}
 	return out
@@ -126,13 +139,17 @@ func TestShardGate(t *testing.T) {
 		got = g.inner.got()
 		require.Len(t, got, 2)
 		require.Equal(t, cut, got[1].to)
-		var released []string
-		for _, e := range g.trace {
-			if e.Kind == "release" || e.Kind == "deliver" {
-				released = append(released, e.Kind+"/"+e.Direction+"/"+e.Node)
+		released := func() (out []string) {
+			for _, e := range g.events() {
+				if e.Kind == "release" || e.Kind == "deliver" {
+					out = append(out, e.Kind+"/"+e.Direction+"/"+e.Node)
+				}
 			}
+			return out
 		}
-		require.ElementsMatch(t, []string{"release/in/" + cut.String(), "deliver/in/" + cut.String(), "release/out/" + cut.String(), "deliver/out/" + cut.String()}, released)
+		want := []string{"release/in/" + cut.String(), "deliver/in/" + cut.String(), "release/out/" + cut.String(), "deliver/out/" + cut.String()}
+		require.Eventually(t, func() bool { return len(released()) == len(want) }, time.Second, 10*time.Millisecond)
+		require.ElementsMatch(t, want, released())
 	})
 	t.Run("a drop loses the message and says so", func(t *testing.T) {
 		g := newGateFixture(t)
@@ -148,7 +165,7 @@ func TestShardGate(t *testing.T) {
 		require.Len(t, g.inner.got(), 1)
 		g.inner.in <- "other"
 		require.Equal(t, "other", g.next())
-		require.Empty(t, g.trace)
+		require.Empty(t, g.events())
 	})
 	t.Run("an invalid document changes nothing", func(t *testing.T) {
 		g := newGateFixture(t)
@@ -190,6 +207,6 @@ func TestShardGate(t *testing.T) {
 		var to peer.ID = testPeer(t)
 		require.NoError(t, g.gate.Send(context.Background(), response(8, 1), to))
 		require.Len(t, g.inner.got(), 1, "outbound still reaches the network (the node is stopping)")
-		require.Empty(t, g.trace)
+		require.Empty(t, g.events())
 	})
 }

@@ -392,13 +392,96 @@
      "label": "REAL-PROCESS",
      "step": "SIGKILL the heavy root: stall, restart recovers",
      "scope": "heavy offline (A): 3 of 9 left, explicit stall, restart recovers; REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss); fault rows judge the root quorum by the roots' committed round, the coupled EVM pipeline is judged in the baseline only"
-    }
-   ],
-   "gaps": [
+    },
     {
+     "kind": "lane",
      "label": "REAL-PROCESS (rest)",
-     "reason": "The separate paired root/EVM outage (EVM down while the root quorum stays) and the other three heavy placements.",
-     "blockedBy": "not exercised by the lane as written"
+     "step": "EVM-only outage: the heavy entity's EVM pair down (3 < request Q=5): EVM stalls while the roots commit; restart recovers",
+     "scope": "A: the heavy entity's shard node and Ureth stopped (orderly) while all four roots run; the EVM shard stalls by request weight and the roots keep committing; both restart over their retained stores; REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build (consensus shim and shard gate); crash model SIGKILL over the retained home (not a power loss)"
+    },
+    {
+     "kind": "lane",
+     "label": "REAL-PROCESS (rest)",
+     "step": "placement: SIGKILL the heavy root: stall, restart recovers",
+     "scope": "A with the weight-6 identity on root 2: heavy offline leaves 3 of 9, explicit stall, restart recovers; REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build (consensus shim and shard gate); crash model SIGKILL over the retained home (not a power loss)",
+     "lane": "a2"
+    },
+    {
+     "kind": "lane",
+     "label": "REAL-PROCESS (rest)",
+     "step": "placement: all lights isolated: heavy alone (6) and the lights (3) both stall, heal releases",
+     "scope": "A, heavy on root 2: heavy alone (6) stalls; REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build (consensus shim and shard gate); crash model SIGKILL over the retained home (not a power loss)",
+     "lane": "a2"
+    },
+    {
+     "kind": "lane",
+     "label": "REAL-PROCESS (rest)",
+     "step": "placement: two lights isolated: heavy and one light (7 = Q) progress, heal releases",
+     "scope": "A, heavy on root 2: the remaining heavy + light = Q progress; REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build (consensus shim and shard gate); crash model SIGKILL over the retained home (not a power loss)",
+     "lane": "a2"
+    },
+    {
+     "kind": "lane",
+     "label": "REAL-PROCESS (rest)",
+     "step": "placement: EVM-only outage: the heavy entity's EVM pair down (3 < request Q=5): EVM stalls while the roots commit; restart recovers",
+     "scope": "A, heavy on root 2: EVM-only outage of the heavy pair; REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build (consensus shim and shard gate); crash model SIGKILL over the retained home (not a power loss)",
+     "lane": "a2"
+    },
+    {
+     "kind": "lane",
+     "label": "REAL-PROCESS (rest)",
+     "step": "placement: SIGKILL the heavy root: stall, restart recovers",
+     "scope": "A with the weight-6 identity on root 3: heavy offline leaves 3 of 9, explicit stall, restart recovers; REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build (consensus shim and shard gate); crash model SIGKILL over the retained home (not a power loss)",
+     "lane": "a3"
+    },
+    {
+     "kind": "lane",
+     "label": "REAL-PROCESS (rest)",
+     "step": "placement: all lights isolated: heavy alone (6) and the lights (3) both stall, heal releases",
+     "scope": "A, heavy on root 3: heavy alone (6) stalls; REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build (consensus shim and shard gate); crash model SIGKILL over the retained home (not a power loss)",
+     "lane": "a3"
+    },
+    {
+     "kind": "lane",
+     "label": "REAL-PROCESS (rest)",
+     "step": "placement: two lights isolated: heavy and one light (7 = Q) progress, heal releases",
+     "scope": "A, heavy on root 3: the remaining heavy + light = Q progress; REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build (consensus shim and shard gate); crash model SIGKILL over the retained home (not a power loss)",
+     "lane": "a3"
+    },
+    {
+     "kind": "lane",
+     "label": "REAL-PROCESS (rest)",
+     "step": "placement: EVM-only outage: the heavy entity's EVM pair down (3 < request Q=5): EVM stalls while the roots commit; restart recovers",
+     "scope": "A, heavy on root 3: EVM-only outage of the heavy pair; REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build (consensus shim and shard gate); crash model SIGKILL over the retained home (not a power loss)",
+     "lane": "a3"
+    },
+    {
+     "kind": "lane",
+     "label": "REAL-PROCESS (rest)",
+     "step": "placement: SIGKILL the heavy root: stall, restart recovers",
+     "scope": "A with the weight-6 identity on root 4: heavy offline leaves 3 of 9, explicit stall, restart recovers; REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build (consensus shim and shard gate); crash model SIGKILL over the retained home (not a power loss)",
+     "lane": "a4"
+    },
+    {
+     "kind": "lane",
+     "label": "REAL-PROCESS (rest)",
+     "step": "placement: all lights isolated: heavy alone (6) and the lights (3) both stall, heal releases",
+     "scope": "A, heavy on root 4: heavy alone (6) stalls; REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build (consensus shim and shard gate); crash model SIGKILL over the retained home (not a power loss)",
+     "lane": "a4"
+    },
+    {
+     "kind": "lane",
+     "label": "REAL-PROCESS (rest)",
+     "step": "placement: two lights isolated: heavy and one light (7 = Q) progress, heal releases",
+     "scope": "A, heavy on root 4: the remaining heavy + light = Q progress; REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build (consensus shim and shard gate); crash model SIGKILL over the retained home (not a power loss)",
+     "lane": "a4"
+    },
+    {
+     "kind": "lane",
+     "label": "REAL-PROCESS (rest)",
+     "step": "placement: EVM-only outage: the heavy entity's EVM pair down (3 < request Q=5): EVM stalls while the roots commit; restart recovers",
+     "scope": "A, heavy on root 4: EVM-only outage of the heavy pair; REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build (consensus shim and shard gate); crash model SIGKILL over the retained home (not a power loss)",
+     "lane": "a4"
     }
    ]
   },
@@ -805,13 +888,25 @@
      "step": "B: the weight-2 and weight-1 roots isolated: the two weight-3 roots (6) stall, heal releases",
      "scope": "scenario B (3,3,2,1); REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss); fault rows judge the root quorum by the roots' committed round, the coupled EVM pipeline is judged in the baseline only",
      "lane": "b"
-    }
-   ],
-   "gaps": [
+    },
     {
+     "kind": "lane",
      "label": "REAL-PROCESS (rest)",
-     "reason": "The EVM-only partition variant (the EVM pair cut from the roots while the root quorum stays).",
-     "blockedBy": "not exercised by the lane as written"
+     "step": "EVM-only partition: the heavy entity's EVM pair cut from every root (3 < request Q=5): EVM stalls, roots commit; heal without rollback",
+     "scope": "A: the roots' shard gates hold the pair's requests/handshakes and the responses to it; heal releases both ways; the pre-cut EVM block keeps its hash; REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build (consensus shim and shard gate); crash model SIGKILL over the retained home (not a power loss)"
+    },
+    {
+     "kind": "lane",
+     "label": "REAL-PROCESS (rest)",
+     "step": "EVM-only partition: one light entity's EVM pair cut from every root (8 >= request Q=5): EVM certifies; heal without rollback",
+     "scope": "A: a light pair cut; REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build (consensus shim and shard gate); crash model SIGKILL over the retained home (not a power loss)"
+    },
+    {
+     "kind": "lane",
+     "label": "REAL-PROCESS (rest)",
+     "step": "B: the EVM pairs of both weight-3 entities cut from every root (3 < request Q=5): EVM stalls, roots commit; heal without rollback",
+     "scope": "scenario B; REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build (consensus shim and shard gate); crash model SIGKILL over the retained home (not a power loss)",
+     "lane": "b"
     }
    ]
   },
@@ -885,13 +980,39 @@
      "label": "REAL-PROCESS",
      "step": "F8 aggregator shards stay served by the weighted epoch (authorized TR rounds advance, aggregators answer)",
      "scope": "the aggregators stay served while the weighted roots run; REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss); fault rows judge the root quorum by the roots' committed round, the coupled EVM pipeline is judged in the baseline only"
-    }
-   ],
-   "gaps": [
+    },
     {
+     "kind": "lane",
      "label": "REAL-PROCESS (rest)",
-     "reason": "Reorder and duplicate on a real network, delay of shard requests, and the first successor proposal held on a real handoff.",
-     "blockedBy": "not exercised by the lane as written"
+     "step": "duplicate on the network: the lights' traffic duplicated while the heavy is held: no replayed weight (stall), then commits with every message doubled",
+     "scope": "A: every proposal, vote and timeout of the lights delivered twice; the duplicates add no weight (the stall holds) and the roots commit with them; the trace check counts the duplicates; REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build (consensus shim and shard gate); crash model SIGKILL over the retained home (not a power loss)"
+    },
+    {
+     "kind": "lane",
+     "label": "REAL-PROCESS (rest)",
+     "step": "reorder on the network: the heavy root's held traffic released last-in-first-out: recovery",
+     "scope": "A: the heavy root's held proposals, votes and timeouts released LIFO; the step asserts the trace shows the inversions; REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build (consensus shim and shard gate); crash model SIGKILL over the retained home (not a power loss)"
+    },
+    {
+     "kind": "lane",
+     "label": "REAL-PROCESS (rest)",
+     "step": "delay of shard requests: every root holds the EVM shard's certification requests: EVM stalls, roots commit; release recovers",
+     "scope": "A: the roots' shard gates hold the EVM shard's requests; REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build (consensus shim and shard gate); crash model SIGKILL over the retained home (not a power loss)"
+    },
+    {
+     "kind": "lane",
+     "label": "REAL-PROCESS (rest)",
+     "step": "F17: the first successor proposal held across the install restart into epoch 3; release, epoch 3 commits",
+     "scope": "A to B on the running chain: every root holds its epoch-3 proposals from its first start in the new epoch; the earliest epoch-3 proposal of any root is shown held (q4/first-successor-proposal.txt); REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build (consensus shim and shard gate); crash model SIGKILL over the retained home (not a power loss)"
+    },
+    {
+     "kind": "lane-file",
+     "label": "REAL-PROCESS (rest)",
+     "path": "q4/first-successor-proposal.txt",
+     "contains": [
+      "its first outcome: hold by rule succ3"
+     ],
+     "scope": "the earliest epoch-3 proposal attempt and its first outcome, from the shim traces"
     }
    ]
   },
@@ -944,13 +1065,19 @@
      "step": "B: SIGKILL each weight-3 root in turn: 6 left, stall, restart recovers",
      "scope": "scenario B (3,3,2,1); REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss); fault rows judge the root quorum by the roots' committed round, the coupled EVM pipeline is judged in the baseline only",
      "lane": "b"
-    }
-   ],
-   "gaps": [
+    },
     {
+     "kind": "lane",
      "label": "REAL-PROCESS (rest)",
-     "reason": "A quorum-wide restart on real processes (every root SIGKILLed and restarted together).",
-     "blockedBy": "not exercised by the lane as written"
+     "step": "quorum-wide restart: every root SIGKILLed and restarted together over its retained home: roots and EVM recover",
+     "scope": "A: all four roots SIGKILLed, then restarted; root commits and certified EVM blocks resume; REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build (consensus shim and shard gate); crash model SIGKILL over the retained home (not a power loss)"
+    },
+    {
+     "kind": "lane",
+     "label": "REAL-PROCESS (rest)",
+     "step": "B: quorum-wide restart: every root SIGKILLed and restarted together over its retained home: roots and EVM recover",
+     "scope": "scenario B; REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build (consensus shim and shard gate); crash model SIGKILL over the retained home (not a power loss)",
+     "lane": "b"
     }
    ]
   },
@@ -1073,13 +1200,29 @@
      "package": "./rootchain/consensus",
      "test": "TestNoSignatureIsMadeBeforeTheJournalIsComplete",
      "scope": "no signing before the journal is complete"
-    }
-   ],
-   "gaps": [
+    },
     {
+     "kind": "lane",
      "label": "REAL-PROCESS",
-     "reason": "Authentication-refusal representative on a live network. The live lane (scripts/q4-live-lane.sh, scenarios A and B on the four-entity paired devnet) has no step for this.",
-     "blockedBy": "not exercised by the live lane"
+     "step": "authentication refusals: impersonation of the heavy, unknown signer, bad signature, wrong domain, old form, wrong epoch both ways, stale: each refused, zero live weight",
+     "scope": "A: the heavy root held (live weight 3 < 7); a light root forges one message per variant next to its own timeouts/votes (the impersonation claims the heavy's weight 6); each variant's refusal is read from a receiving root's log and the committed round never moves; REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build (consensus shim and shard gate); crash model SIGKILL over the retained home (not a power loss)"
+    },
+    {
+     "kind": "lane",
+     "label": "REAL-PROCESS",
+     "step": "B: authentication refusals: impersonation of a weight-3 root, unknown signer, bad signature, wrong domain, old form, wrong epoch both ways, stale: each refused, zero live weight",
+     "scope": "scenario B: one weight-3 root held (live weight 6 < 7); the impersonation claims the held root's weight 3; REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build (consensus shim and shard gate); crash model SIGKILL over the retained home (not a power loss)",
+     "lane": "b"
+    },
+    {
+     "kind": "lane-file",
+     "label": "REAL-PROCESS",
+     "path": "q4/auth-refusals.txt",
+     "contains": [
+      "every variant refused",
+      "zero live weight"
+     ],
+     "scope": "per variant: the forger's sent count and the receiving root's refusal line"
     }
    ]
   },
@@ -1146,7 +1289,8 @@
    "required": [
     "IN-PROCESS",
     "REAL-PROCESS",
-    "REAL-PROCESS (rest)"
+    "REAL-PROCESS (rest)",
+    "REAL-PROCESS (turnover)"
    ],
    "evidence": [
     {
@@ -1180,13 +1324,73 @@
      "label": "REAL-PROCESS",
      "step": "q3_activation",
      "scope": "REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss); fault rows judge the root quorum by the roots' committed round, the coupled EVM pipeline is judged in the baseline only"
+    },
+    {
+     "kind": "lane",
+     "label": "REAL-PROCESS (rest)",
+     "step": "F17: second handoff A to B committed on the running chain (the four entities reweighted 6,1,1,1 -> 3,3,2,1)",
+     "scope": "the Q3 flow's second handoff (plan, readiness receipts, propose, commit at epoch 2) on the chain the A rows ran on; REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build (consensus shim and shard gate); crash model SIGKILL over the retained home (not a power loss)"
+    },
+    {
+     "kind": "lane",
+     "label": "REAL-PROCESS (rest)",
+     "step": "F17: the first successor proposal held across the install restart into epoch 3; release, epoch 3 commits",
+     "scope": "the successor proposal flow under a held first proposal; REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build (consensus shim and shard gate); crash model SIGKILL over the retained home (not a power loss)"
+    },
+    {
+     "kind": "lane",
+     "label": "REAL-PROCESS (rest)",
+     "step": "F17: B in effect: epoch 3 activated and acknowledged, scheme 2 certificates of 3,3,2,1, paid transaction certified",
+     "scope": "activation record of epoch 3, authority advance (root epoch 3, shard epoch 2), the weighted-epoch gate over the B weights; REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build (consensus shim and shard gate); crash model SIGKILL over the retained home (not a power loss)"
+    },
+    {
+     "kind": "lane",
+     "label": "REAL-PROCESS (rest)",
+     "step": "F17 B: the EVM pair of one weight-3 entity cut from every root (6 >= request Q=5): EVM certifies; heal without rollback",
+     "scope": "coupled EVM side after the handoff: request weight 6 >= Q=5; REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build (consensus shim and shard gate); crash model SIGKILL over the retained home (not a power loss)"
+    },
+    {
+     "kind": "lane",
+     "label": "REAL-PROCESS (rest)",
+     "step": "F17 B: the EVM pairs of both weight-3 entities cut from every root (3 < request Q=5): EVM stalls, roots commit; heal without rollback",
+     "scope": "coupled EVM side after the handoff: request weight 3 < Q=5; REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build (consensus shim and shard gate); crash model SIGKILL over the retained home (not a power loss)"
+    },
+    {
+     "kind": "lane",
+     "label": "REAL-PROCESS (rest)",
+     "step": "EVM-only outage: one light entity's EVM pair down (8 >= request Q=5): EVM certifies while the roots commit; restart",
+     "scope": "A: request Q=5 met without one light (8); REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build (consensus shim and shard gate); crash model SIGKILL over the retained home (not a power loss)"
+    },
+    {
+     "kind": "lane",
+     "label": "REAL-PROCESS (rest)",
+     "step": "EVM-only outage: the heavy entity's EVM pair down (3 < request Q=5): EVM stalls while the roots commit; restart recovers",
+     "scope": "A: request Q=5 missed without the heavy (3); REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build (consensus shim and shard gate); crash model SIGKILL over the retained home (not a power loss)"
+    },
+    {
+     "kind": "lane",
+     "label": "REAL-PROCESS (rest)",
+     "step": "B: the EVM pair of one weight-3 entity cut from every root (6 >= request Q=5): EVM certifies; heal without rollback",
+     "scope": "scenario B from activation; REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build (consensus shim and shard gate); crash model SIGKILL over the retained home (not a power loss)",
+     "lane": "b"
+    },
+    {
+     "kind": "lane-file",
+     "label": "REAL-PROCESS (rest)",
+     "path": "b-in-effect.txt",
+     "contains": [
+      "activated weighted epoch confirmed",
+      "epoch 3, scheme 2",
+      "mirrored weights 3 3 2 1"
+     ],
+     "scope": "the weighted-epoch gate after the second handoff"
     }
    ],
    "gaps": [
     {
-     "label": "REAL-PROCESS (rest)",
-     "reason": "The second handoff A to B on a running chain and the EVM request-quorum (Q=5) rows.",
-     "blockedBy": "not exercised by the lane as written"
+     "label": "REAL-PROCESS (turnover)",
+     "reason": "The design's A to B replaces coupled entity c by a new entity d (one of four changed, retained weight 8). The live A to B reweights the same four entities: the four-entity paired devnet has no fifth entity to join, so the identity turnover is not live.",
+     "blockedBy": "a joiner entity on the paired devnet (P85 slice 7 joiner run, the same blocker as L5)"
     }
    ]
   },
@@ -1301,13 +1505,28 @@
      "step": "B: one weight-3 root delayed: 6 of 9, quorum lost, explicit stall, release recovers",
      "scope": "scenario B (3,3,2,1); REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss); fault rows judge the root quorum by the roots' committed round, the coupled EVM pipeline is judged in the baseline only",
      "lane": "b"
-    }
-   ],
-   "gaps": [
+    },
     {
+     "kind": "lane",
      "label": "REAL-PROCESS (rest)",
-     "reason": "Local T2 expiry, root epoch/round, shard round and EVM height recorded separately.",
-     "blockedBy": "not exercised by the lane as written"
+     "step": "T2: root quorum lost (heavy held): local T2 expiry, root epoch/round, shard IR/TR round and EVM height recorded separately; no root-certified retry",
+     "scope": "A: heavy held (3 of 9) for more than three EVM T2 periods; samples per second in q4/t2-quorum-loss.jsonl; REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build (consensus shim and shard gate); crash model SIGKILL over the retained home (not a power loss)"
+    },
+    {
+     "kind": "lane",
+     "label": "REAL-PROCESS (rest)",
+     "step": "B T2: root quorum lost (one weight-3 root held): local T2 expiry, root epoch/round, shard IR/TR round and EVM height recorded separately; no root-certified retry",
+     "scope": "scenario B; REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build (consensus shim and shard gate); crash model SIGKILL over the retained home (not a power loss)",
+     "lane": "b"
+    },
+    {
+     "kind": "lane-file",
+     "label": "REAL-PROCESS (rest)",
+     "path": "q4/t2-quorum-loss.txt",
+     "contains": [
+      "no root-certified retry"
+     ],
+     "scope": "the summary: T2, the local expiry, each root's epoch/round and the EVM shard's IR/TR round, the EVM height, what moved"
     }
    ]
   },
@@ -1539,13 +1758,36 @@
      "label": "REAL-PROCESS",
      "step": "heavy root delayed: quorum lost, explicit stall, release recovers",
      "scope": "recovery within the deadline frozen in the lane script before the run; REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss); fault rows judge the root quorum by the roots' committed round, the coupled EVM pipeline is judged in the baseline only"
-    }
-   ],
-   "gaps": [
+    },
     {
+     "kind": "lane",
      "label": "REAL-PROCESS (rest)",
-     "reason": "First/third commit latency, maximum commit gap and EVM recovery latency as recorded numbers: the lane asserts the frozen windows but does not export latencies.",
-     "blockedBy": "not exercised by the lane as written"
+     "step": "no-fault control at the lane's load: root commit latency, gaps and TC count, EVM certifications (Q3 timing control)",
+     "scope": "A: a 30 s window before the added faults; REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build (consensus shim and shard gate); crash model SIGKILL over the retained home (not a power loss)"
+    },
+    {
+     "kind": "lane",
+     "label": "REAL-PROCESS (rest)",
+     "step": "Q3 timing: first/third commit latency, max commit gap, TC count and EVM recovery latency exported as numbers",
+     "scope": "A: every recovery assertion of the run (root-commit and evm-commit) and the control, within the frozen deadline; REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build (consensus shim and shard gate); crash model SIGKILL over the retained home (not a power loss)"
+    },
+    {
+     "kind": "lane",
+     "label": "REAL-PROCESS (rest)",
+     "step": "Q3 timing: first/third commit latency, max commit gap, TC count and EVM recovery latency exported as numbers",
+     "scope": "scenario B; REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build (consensus shim and shard gate); crash model SIGKILL over the retained home (not a power loss)",
+     "lane": "b"
+    },
+    {
+     "kind": "lane-file",
+     "label": "REAL-PROCESS (rest)",
+     "path": "q4/timing-summary.txt",
+     "contains": [
+      "control",
+      "evm-commit",
+      "root-commit"
+     ],
+     "scope": "the exported numbers per recovery (q4/timing.jsonl)"
     }
    ]
   },
@@ -1556,13 +1798,6 @@
    "required": [
     "REAL-PROCESS",
     "REAL-PROCESS (rest)"
-   ],
-   "gaps": [
-    {
-     "label": "REAL-PROCESS (rest)",
-     "reason": "An authentication-refusal representative on the live network.",
-     "blockedBy": "not exercised by the lane as written"
-    }
    ],
    "evidence": [
     {
@@ -1588,6 +1823,29 @@
      "label": "REAL-PROCESS",
      "step": "SIGKILL the heavy root: stall, restart recovers",
      "scope": "crash; REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss); fault rows judge the root quorum by the roots' committed round, the coupled EVM pipeline is judged in the baseline only"
+    },
+    {
+     "kind": "lane",
+     "label": "REAL-PROCESS (rest)",
+     "step": "authentication refusals: impersonation of the heavy, unknown signer, bad signature, wrong domain, old form, wrong epoch both ways, stale: each refused, zero live weight",
+     "scope": "A: the heavy root held (live weight 3 < 7); a light root forges one message per variant next to its own timeouts/votes (the impersonation claims the heavy's weight 6); each variant's refusal is read from a receiving root's log and the committed round never moves; REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build (consensus shim and shard gate); crash model SIGKILL over the retained home (not a power loss)"
+    },
+    {
+     "kind": "lane",
+     "label": "REAL-PROCESS (rest)",
+     "step": "B: authentication refusals: impersonation of a weight-3 root, unknown signer, bad signature, wrong domain, old form, wrong epoch both ways, stale: each refused, zero live weight",
+     "scope": "scenario B: one weight-3 root held (live weight 6 < 7); the impersonation claims the held root's weight 3; REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build (consensus shim and shard gate); crash model SIGKILL over the retained home (not a power loss)",
+     "lane": "b"
+    },
+    {
+     "kind": "lane-file",
+     "label": "REAL-PROCESS (rest)",
+     "path": "q4/auth-refusals.txt",
+     "contains": [
+      "every variant refused",
+      "zero live weight"
+     ],
+     "scope": "per variant: the forger's sent count and the receiving root's refusal line"
     }
    ]
   },
