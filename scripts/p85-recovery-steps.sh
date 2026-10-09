@@ -75,6 +75,18 @@ p85_baseline() {
   [ "$(p85_open_result)" = "0x0000000000000000000000000000000000000000000000000000000000000000" ] || { echo "an election result is already open" >&2; return 1; }
   [ "$(p85_last_acked | tr 'A-F' 'a-f')" = "$(p85_genesis_assignment)" ] || { echo "custody's last acknowledged assignment is not the genesis assignment" >&2; return 1; }
   cp "$P85_DEPLOY" "$H3_DIR/pos-deployment.json"; cp "$EVM_B1_PROFILE" "$H3_DIR/b1-profile.json"
+  p85_bounds_agree || return 1
+}
+
+# The continuity budget the roots judge an assignment by (committed in the installed EVM configuration) is the distance bound the election
+# was priced under (the contracts' genesis parameter): both are the testnet profile's P85_DIST_NUM/P85_DIST_DEN.
+p85_bounds_agree() {
+  local conf election onchain
+  conf=$(jq -r '.partitionParams.continuity_max_distance // "1/4"' "$fullShardConf")
+  election=$(p85_call "$(p85_election)" 'params()(uint32,uint32,uint32,uint64,uint64,uint64,uint64,uint64)' | awk 'NR==5{a=$1} NR==6{b=$1} END{print a"/"b}')
+  [ "$conf" = "$P85_DIST_NUM/$P85_DIST_DEN" ] && [ "$election" = "$conf" ] || {
+    echo "the distance bounds disagree: shard configuration $conf, election $election, lane $P85_DIST_NUM/$P85_DIST_DEN" >&2; return 1; }
+  echo "continuity bound D <= $conf: committed in the shard configuration and in the election's genesis parameters"
 }
 
 # The joiner's nodes. Its root key is NOT in the epoch-1 committee: a root the committee does not name is a follower and signs nothing (#515),
@@ -129,7 +141,7 @@ p85_joiner_onboard() {
   id=$(p85_join register 2>"$H3_DIR/join-register.log") || { cat "$H3_DIR/join-register.log" >&2; return 1; }
   echo "$id" >"$P85_DIR/joiner/custody-id"
   [ "$id" = 5 ] || { echo "the joiner got custody id $id, not 5" >&2; return 1; }
-  p85_join bond --id "$id" --value-wei "$P85_BOND_UNIT" || return 1
+  p85_join bond --id "$id" --value-wei "$(python3 -c "print($P85_BOND_UNIT * ${P85_JOINER_UNITS:-1})")" || return 1
   p85_join admit --id "$id" || return 1
   [ "$(p85_live_count)" = 5 ] || { echo "the election's live index holds $(p85_live_count) identities after the onboarding, not 5" >&2; return 1; }
 }
@@ -311,6 +323,44 @@ p85_restarts() {
   p85_progress after-restarts 8
 }
 
+# The election's refusal of an over-bound candidate (P85_MODE=overbound): the joiner bonds P85_JOINER_UNITS (3) units, so the only change from the
+# acceptance run is the joiner's weight: K (four unit weights) -> K plus a weight-3 joiner is D = 24/28, over the budget 1/2. The election, which
+# runs in the block hook at the cadence, must record NoCandidate for it (WeightChurn): no result opens, the attempt is recorded.
+p85_election_refused() {
+  local i cursor reason
+  for i in $(seq 1 900); do
+    cursor=$(p85_call "$(p85_election)" 'attemptCursor()(uint64)' | awk '{print $1}')
+    [ "${cursor:-0}" -ge 1 ] && break
+    [ $((i % 60)) -ne 1 ] || p85_election_clock
+    sleep 1
+  done
+  [ "${cursor:-0}" -ge 1 ] || { echo "the election never ran (cadence $P85_CADENCE_ROUNDS rounds / $P85_CADENCE_SECONDS s)" >&2; p85_election_clock >&2; return 1; }
+  [ "$(p85_open_result)" = "0x0000000000000000000000000000000000000000000000000000000000000000" ] || { echo "the over-bound candidate was reserved" >&2; return 1; }
+  p85_election_clock
+  reason=$(p85_attempt_reason) || return 1
+  [ "$reason" = 4 ] || { echo "the recorded refusal is reason $reason, not 4 (WeightChurn)" >&2; return 1; }
+  echo "the election recorded NoCandidate (WeightChurn) for the over-bound candidate; no result is open"
+}
+
+# The Reason of the election's last attempt, read from the state a simulated attempt writes: an election attempt in the system hook emits no log,
+# and the result is keyed by an origin only the hook knows, so the same attempt is replayed with a self call (electNow) at the current clock.
+p85_attempt_reason() {
+  local e r roots t p pred data
+  e=$(p85_election); roots=$(jq -r .registry "$P85_DEPLOY")
+  t=$(p85_call "$roots" 'ucTime()(uint64)' | awk '{print $1}'); p=$(p85_call "$roots" 'progress()(uint64)' | awk '{print $1}')
+  pred=$(p85_call "$(p85_custody)" 'lastAckedAssignment()(bytes32)')
+  data=$("$P85_CAST" calldata 'electNow(bytes32,uint64,uint64,bytes32)' 0x0000000000000000000000000000000000000000000000000000000000001234 "$p" "$t" "$pred")
+  curl -fsS -X POST -H 'content-type: application/json' --data "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"debug_traceCall\",\"params\":[{\"from\":\"$e\",\"to\":\"$e\",\"data\":\"$data\"},\"latest\",{\"tracer\":\"prestateTracer\",\"tracerConfig\":{\"diffMode\":true}}]}" "$(p85_eth)" |
+    python3 -c "
+import json,sys
+post=json.load(sys.stdin)['result']['post'][sys.argv[1].lower()]['storage']
+for v in post.values():
+    b=bytes.fromhex(v[2:].rjust(64,'0'))
+    if b[31]==2 and b[30]!=0:   # ResultState.NoCandidate, then its Reason
+        print(b[30]); break
+else: raise SystemExit('no NoCandidate result in the simulated attempt')" "$e"
+}
+
 P85_STEPS="p85_baseline p85_joiner_nodes p85_joiner_onboard p85_election_reserved p85_proofs p85_controls p85_handoff p85_install_activation p85_j_stalls p85_recovery p85_resolved p85_restarts"
 
 p85_run_lane() {
@@ -327,6 +377,7 @@ p85_run_lane() {
   read -r h3_slot_shard h3_slot_root h3_slot_conf h3_slot_cursor < <(H3_SLOT_LAYOUT=3 go run ./scripts/h3slots)
   echo "=== P85 recovery lane: PoS genesis (K = 4 entities) -> primary J = K + joiner -> J stalls -> derived recovery to K ==="
   echo "NOTE: every validator signs through its own signing authority, including the P85 EVM possession proofs (SignElectionPoP) and the delegation possession (SignDelegationPossession)."
+  [ "${P85_MODE:-}" != overbound ] || { P85_JOINER_UNITS=3; P85_STEPS="p85_baseline p85_joiner_nodes p85_joiner_onboard p85_election_refused"; }
   for s in $P85_STEPS; do p85_step "$s" "$s"; done
   echo "P85 recovery lane: all steps PASSED"
   q3_teardown
