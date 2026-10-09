@@ -83,6 +83,7 @@ type q3StatusResponse struct {
 	Genesis     string            `json:"genesis"`
 	Staged      *q3StagedResponse `json:"staged,omitempty"`
 	ActiveEpoch uint64            `json:"activeEpoch"`
+	Follower    bool              `json:"follower,omitempty"` // this root is not in the installed committee: it follows, stages and signs nothing
 }
 
 func (a rootQ3API) statusResponse() (q3StatusResponse, error) {
@@ -90,7 +91,7 @@ func (a rootQ3API) statusResponse() (q3StatusResponse, error) {
 	if err != nil {
 		return q3StatusResponse{}, err
 	}
-	out := q3StatusResponse{Network: st.Network, Genesis: hex.EncodeToString(st.Genesis[:]), ActiveEpoch: st.ActiveEpoch}
+	out := q3StatusResponse{Network: st.Network, Genesis: hex.EncodeToString(st.Genesis[:]), ActiveEpoch: st.ActiveEpoch, Follower: st.Follower}
 	if st.Staged != nil {
 		out.Staged = &q3StagedResponse{CandidateDigest: hex.EncodeToString(st.Staged.CandidateDigest[:]),
 			BodyID: hex.EncodeToString(st.Staged.BodyID[:]), Attempt: &st.Staged.Attempt, Config: hex.EncodeToString(st.Staged.Config[:])}

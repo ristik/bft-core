@@ -53,6 +53,7 @@ type (
 		committed CommittedLookup
 		// gate admits signing in an epoch; nil admits every epoch the signing resolver knows (the legacy behaviour).
 		gate       ActivationGate
+		members    MembershipGate
 		parentTime func(uint64) (uint64, error)
 		now        func() uint64
 	}
@@ -61,6 +62,12 @@ type (
 	// and an activated epoch whose installation is not complete, so the module signs nothing under a half-installed activation.
 	ActivationGate interface {
 		Admit(epoch uint64) error
+	}
+
+	// MembershipGate is the authenticated committee of an epoch as the module's own node sees it: Member returns nil exactly when this node
+	// is a root validator of the epoch, and ErrNotAMember otherwise (including an epoch it does not know: it fails closed).
+	MembershipGate interface {
+		Member(epoch uint64) error
 	}
 
 	// SigningResolver is the authenticated per-epoch signing configuration (trustbase.TrustBaseStore).
@@ -116,6 +123,24 @@ func isConsecutive(blockRound, round uint64) bool {
 // WithDomainBoundSigning lets the module sign the scheme 2 statements in epochs whose authenticated configuration says so.
 func WithDomainBoundSigning(r SigningResolver, committed CommittedLookup) SafetyOption {
 	return func(s *SafetyModule) { s.signing, s.committed = r, committed }
+}
+
+// ErrNotAMember is returned by every signing path of a root that the epoch's committee does not name: a joiner before its activation, or
+// a validator after its removal. Such a node is a FOLLOWER. It verifies history, catches up and stages, but it signs no vote, timeout,
+// proposal or request, and nothing it could sign would be counted; the refusal is local and derived from the authenticated trust base,
+// never from a flag, so no start-up option can make a non-member sign.
+var ErrNotAMember = errors.New("this root is not a member of the epoch's committee: it follows and signs nothing")
+
+// WithMembership makes every signing decision of the module wait for this node's membership of the epoch it signs for.
+func WithMembership(g MembershipGate) SafetyOption {
+	return func(s *SafetyModule) { s.members = g }
+}
+
+func (s *SafetyModule) member(epoch uint64) error {
+	if s.members == nil {
+		return nil
+	}
+	return s.members.Member(epoch)
 }
 
 // WithActivationGate makes every signing decision of the module wait for the verified history's admission of its epoch. With a gate
@@ -259,6 +284,9 @@ func (s *SafetyModule) MakeVote(block *drctypes.BlockData, execStateID []byte, h
 	if block == nil {
 		return nil, fmt.Errorf("block is nil")
 	}
+	if err := s.member(block.Epoch); err != nil {
+		return nil, err
+	}
 	// The overall validity of the block must be checked prior to calling this method
 	// However since we are de-referencing QC make sure it is not nil
 	if block.Qc == nil && block.Anchor == nil {
@@ -312,6 +340,11 @@ func (s *SafetyModule) MakeVote(block *drctypes.BlockData, execStateID []byte, h
 }
 
 func (s *SafetyModule) SignTimeout(tmoVote *abdrc.TimeoutMsg, lastRoundTC *drctypes.TimeoutCert) error {
+	if tmoVote != nil && tmoVote.Timeout != nil { // a root the epoch does not name refuses before anything else is looked at
+		if err := s.member(tmoVote.Timeout.Epoch); err != nil {
+			return err
+		}
+	}
 	if err := tmoVote.IsValid(); err != nil {
 		return fmt.Errorf("timeout message not valid, %w", err)
 	}
@@ -339,6 +372,9 @@ func (s *SafetyModule) SignTimeout(tmoVote *abdrc.TimeoutMsg, lastRoundTC *drcty
 // activation gate the epoch must be admitted, exactly as for a vote or timeout: a leader whose installed epoch is not completely
 // activated signs and broadcasts nothing.
 func (s *SafetyModule) Sign(epoch uint64, msg Signable) error {
+	if err := s.member(epoch); err != nil {
+		return err
+	}
 	if s.gate != nil {
 		if err := s.gate.Admit(epoch); err != nil {
 			return fmt.Errorf("epoch %d is not admitted for signing: %w", epoch, err)
