@@ -818,12 +818,15 @@ func (s recordsSource) Records(from uint64, max int) ([]rootrecords.Record, erro
 
 // shardMembers answers whether a peer is a member of a shard's installed configuration.
 type shardMembers interface {
-	IsShardValidator(types.PartitionID, types.ShardID, peer.ID) bool
+	IsShardValidator(types.PartitionID, types.ShardID, string) bool
+	// IsStagedValidator is a validator of the successor assignment of the candidate staged on this root (a joiner not installed yet)
+	IsStagedValidator(string) bool
 }
 
 // recordsFeedAllowed is who the records feed serves: the validators the shard configurations named when the root started, the other roots,
-// and the members of the INSTALLED configuration of each configured shard, which follows the assignment steps. A validator that joined by
-// an assignment after the root started (its restore needs the feed) is served without a restart of the root.
+// the members of the INSTALLED configuration of each configured shard, which follows the assignment steps, and the validators of the candidate
+// staged on this root while it is the next epoch (a joiner that is behind restores before its assignment is installed). A validator that
+// joined by an assignment after the root started is served without a restart of the root.
 func recordsFeedAllowed(static map[peer.ID]struct{}, shardConfs []*types.PartitionDescriptionRecord, members shardMembers, isRoot func(peer.ID) bool) func(peer.ID) bool {
 	return func(id peer.ID) bool {
 		if _, ok := static[id]; ok {
@@ -833,11 +836,11 @@ func recordsFeedAllowed(static map[peer.ID]struct{}, shardConfs []*types.Partiti
 			return true
 		}
 		for _, conf := range shardConfs {
-			if members.IsShardValidator(conf.PartitionID, conf.ShardID, id) {
+			if members.IsShardValidator(conf.PartitionID, conf.ShardID, id.String()) {
 				return true
 			}
 		}
-		return false
+		return members.IsStagedValidator(id.String())
 	}
 }
 

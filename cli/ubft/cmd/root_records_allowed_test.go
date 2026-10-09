@@ -10,8 +10,17 @@ import (
 
 type fakeMembers map[peer.ID]bool
 
-func (f fakeMembers) IsShardValidator(partition types.PartitionID, _ types.ShardID, id peer.ID) bool {
-	return partition == 8 && f[id]
+// staged is the set of peers the fake root has a staged candidate for.
+var fakeStaged = map[peer.ID]bool{}
+
+func (fakeMembers) IsStagedValidator(nodeID string) bool {
+	id, err := peer.Decode(nodeID)
+	return err == nil && fakeStaged[id]
+}
+
+func (f fakeMembers) IsShardValidator(partition types.PartitionID, _ types.ShardID, nodeID string) bool {
+	id, err := peer.Decode(nodeID)
+	return err == nil && partition == 8 && f[id]
 }
 
 // The records feed serves the validators named at the root's start, the other roots, and the members of each configured shard's installed
@@ -41,6 +50,14 @@ func TestRecordsFeedServesTheInstalledAssignmentsMembers(t *testing.T) {
 	require.False(t, allowed(candidate), "a candidate that is not installed is refused")
 	members[candidate] = true
 	require.True(t, allowed(candidate), "and served once the installed configuration names it")
+
+	// a validator of the candidate staged on this root is served before its assignment is installed, and not once the stage is gone
+	staged := peerIDOf(t)
+	require.False(t, allowed(staged))
+	fakeStaged[staged] = true
+	require.True(t, allowed(staged), "a staged successor's validator")
+	delete(fakeStaged, staged)
+	require.False(t, allowed(staged))
 
 	// the membership follows the installed configuration: a validator it stops naming is no longer served
 	members[joiner] = false

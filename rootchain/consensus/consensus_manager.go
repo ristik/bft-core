@@ -114,11 +114,12 @@ type (
 		recoveryProfile2 bool
 		recoveryHistory  *trusthistorystore.Store
 		posPrefetching   atomic.Int32
-		posQueue         posSubmissions              // submitted Retirement and RejectResult controls waiting for a leader
-		witnesses        WitnessFetcher              // nil: control witnesses are only what the store already holds
-		q3               Q3Authority                 // the verified Q3 history, nil when the binary does not know it
-		v3Planned        atomic.Pointer[V3Candidate] // the last candidate PlanV3Candidate derived: the exact body the members declared readiness for
-		q3Staged         atomic.Pointer[Q3Staged]    // the V3 candidate this validator last derived for its operator
+		posQueue         posSubmissions                   // submitted Retirement and RejectResult controls waiting for a leader
+		witnesses        WitnessFetcher                   // nil: control witnesses are only what the store already holds
+		q3               Q3Authority                      // the verified Q3 history, nil when the binary does not know it
+		v3Planned        atomic.Pointer[V3Candidate]      // the last candidate PlanV3Candidate derived: the exact body the members declared readiness for
+		q3Staged         atomic.Pointer[Q3Staged]         // the V3 candidate this validator last derived for its operator
+		q3StagedEVM      atomic.Pointer[stagedEVMMembers] // the EVM validators of the successor assignment of the candidate last staged here
 		epochAnchor      *drctypes.EpochAnchor
 		primaryWitness   atomic.Pointer[PrimaryWitnessSource] // the execution client's side of a primary candidate's EVM proof
 		primaryCache     primaryCache
@@ -1820,14 +1821,27 @@ func selectRandomNodeIdsFromSignatureMap(m map[string]hex.Bytes, count int) (nod
 	return nodes
 }
 
-// IsShardValidator reports whether id is a member of the shard's INSTALLED configuration: the one this root verifies the shard's requests
+// IsShardValidator reports whether nodeID (the validator's node ID, a peer ID string in production) is a member of the shard's INSTALLED configuration: the one this root verifies the shard's requests
 // under, which follows the assignment steps as they activate. A shard in recovery or unknown to the root has no members here.
-func (x *ConsensusManager) IsShardValidator(partition types.PartitionID, shard types.ShardID, id peer.ID) bool {
+func (x *ConsensusManager) IsShardValidator(partition types.PartitionID, shard types.ShardID, nodeID string) bool {
 	si, err := x.ShardInfo(partition, shard)
 	if err != nil {
 		return false
 	}
-	return si.IsMember(id.String())
+	return si.IsMember(nodeID)
+}
+
+// IsStagedValidator reports whether nodeID is an EVM validator of the successor assignment of the candidate staged on this root, while that
+// candidate is still the next epoch (once the epoch is installed the installed configuration answers instead). A joiner that is behind
+// needs the root's records to catch up before it can give readiness, which is before its assignment is installed.
+func (x *ConsensusManager) IsStagedValidator(nodeID string) bool {
+	staged := x.q3StagedEVM.Load()
+	tb := x.trustBase.Load()
+	if staged == nil || tb == nil || staged.epoch != tb.Epoch+1 {
+		return false
+	}
+	_, ok := staged.ids[nodeID]
+	return ok
 }
 
 func (x *ConsensusManager) ShardInfo(partition types.PartitionID, shard types.ShardID) (*storage.ShardInfo, error) {

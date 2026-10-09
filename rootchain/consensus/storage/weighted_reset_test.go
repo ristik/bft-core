@@ -79,7 +79,7 @@ func TestShardInfoMembershipIsTheInstalledConfigurationsForWeightedAndUnitAlike(
 	install(si, weighted)
 	require.Nil(t, si.RequestContext(), "a weighted configuration has no unit request context")
 	_, err := si.SignerWeight(f.id(0))
-	require.Error(t, err, "so SignerWeight cannot answer membership here")
+	require.ErrorIs(t, err, quorumweight.ErrRequestContext, "so SignerWeight cannot answer membership here")
 	for i := 0; i < 3; i++ {
 		require.True(t, si.IsMember(f.id(i)), "member %d of the weighted configuration", i)
 	}
