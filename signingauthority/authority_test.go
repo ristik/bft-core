@@ -447,7 +447,7 @@ func TestAuthorityOffersNoGenericSigningOrKeyImport(t *testing.T) {
 	}
 	require.ElementsMatch(t, []string{
 		"AdvanceEpoch", "Authenticate", "Close", "CompleteEnrollment", "Enrollment", "MarkUntrusted", "Release", "ReplaceSession",
-		"Reserve", "RetainResponse", "Sign", "SignHandoffPoP", "SigningPublicKey", "Status",
+		"Reserve", "RetainResponse", "Sign", "SignDelegationPossession", "SignElectionPoP", "SignHandoffPoP", "SigningPublicKey", "Status",
 	}, methods,
 		"this authority admits structured requests only: no generic signing, key import, key export or journal load")
 
@@ -464,6 +464,17 @@ func TestAuthorityOffersNoGenericSigningOrKeyImport(t *testing.T) {
 	require.True(t, ok)
 	require.Equal(t, 2, popMethod.Type.NumIn(), "SignHandoffPoP takes the receiver and one structured request")
 	require.Equal(t, reflect.TypeOf(HandoffPoPRequest{}), popMethod.Type.In(1))
+
+	// The two EVM possession signatures are as narrow: one structured request each, never a digest or bytes to sign.
+	for name, request := range map[string]reflect.Type{"SignElectionPoP": reflect.TypeOf(ElectionPoPRequest{}), "SignDelegationPossession": reflect.TypeOf(DelegationPossessionRequest{})} {
+		m, ok := at.MethodByName(name)
+		require.True(t, ok, name)
+		require.Equal(t, 2, m.Type.NumIn(), "%s takes the receiver and one structured request", name)
+		require.Equal(t, request, m.Type.In(1), name)
+		for i := 0; i < request.NumField(); i++ {
+			require.NotEqual(t, reflect.Slice, request.Field(i).Type.Kind(), "%s.%s: a request carries typed fields, not bytes to sign", name, request.Field(i).Name)
+		}
+	}
 
 	f := newFixture(t, 1)
 	t.Run("an enrollment naming a key is refused", func(t *testing.T) {

@@ -395,8 +395,8 @@ func TestTheClientOffersSigningAndReadOnlyRestoreStatus(t *testing.T) {
 	for i := 0; i < reflect.TypeOf(&OperatorClient{}).NumMethod(); i++ {
 		operatorMethods = append(operatorMethods, reflect.TypeOf(&OperatorClient{}).Method(i).Name)
 	}
-	require.ElementsMatch(t, []string{"AdvanceEpoch", "Close", "CompleteEnrollment", "Enrollment", "ReplaceSession", "SignHandoffPoP", "Status"}, operatorMethods,
-		"and the control plane signs nothing but the handoff possession proof (its own key, one domain), never a certification")
+	require.ElementsMatch(t, []string{"AdvanceEpoch", "Close", "CompleteEnrollment", "Enrollment", "ReplaceSession", "SignDelegationPossession", "SignElectionPoP", "SignHandoffPoP", "Status"}, operatorMethods,
+		"and the control plane signs nothing but the three possession messages (its own key, each recomputed from typed inputs), never a certification")
 }
 
 // rebindBounded serves the same authority through a second server whose bounds a test can reach: one
