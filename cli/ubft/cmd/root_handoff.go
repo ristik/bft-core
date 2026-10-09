@@ -42,6 +42,9 @@ type rootHandoffPlanRequest struct {
 	// Q3Receipts, when present, makes the plan a V3 plan: NextTrustBase's stakes are the exact weights of the successor committee,
 	// and these are the readiness receipts of every member for the candidate the q3-candidate endpoint derived (q3format.EncodeReceipts).
 	Q3Receipts basehex.Bytes `json:"q3Receipts,omitempty"`
+	// Q3 asks for a V3 plan without receipts: the exact recovery K needs none (the root decides by the verified candidate kind and refuses any
+	// other candidate that carries fewer than every member's receipt). With receipts it is implied.
+	Q3 bool `json:"q3,omitempty"`
 }
 
 func localOperatorRequest(w http.ResponseWriter, r *http.Request) bool {
@@ -71,7 +74,7 @@ func rootHandoffPlanHandler(operator rootHandoffOperator) http.HandlerFunc {
 		// The plan names no EVM parent: the root binds it when the Prepare is ordered.
 		var plan abdrc.HandoffApprovalMsg
 		var err error
-		if len(request.Q3Receipts) != 0 {
+		if request.Q3 || len(request.Q3Receipts) != 0 {
 			planner, ok := operator.(rootHandoffQ3Planner)
 			if !ok {
 				http.Error(w, "this root is not running the Q3 lane", http.StatusUnprocessableEntity)
@@ -186,6 +189,7 @@ func newRootCmd() *cobra.Command {
 	root := &cobra.Command{Use: "root", Short: "Root chain operator commands"}
 	handoff := &cobra.Command{Use: "handoff", Short: "Profile-2 validator handoff"}
 	var nextFile, rootRPCs, nextEVMAssignment, readinessReceipts string
+	var q3Plan bool
 	var prepareTimeout time.Duration
 	var maxAttempts int
 	propose := &cobra.Command{Use: "propose", Short: "Request old-validator endorsements for a new root trust base", Long: "Plans the handoff, has the root order a Prepare for it (which freezes the EVM and binds the frozen parent), and then collects the\n" +
@@ -210,7 +214,7 @@ func newRootCmd() *cobra.Command {
 			return errors.New("root RPC endpoints required")
 		}
 		client := &http.Client{Timeout: 5 * time.Second}
-		planRequest := rootHandoffPlanRequest{NextTrustBase: &next}
+		planRequest := rootHandoffPlanRequest{NextTrustBase: &next, Q3: q3Plan}
 		if nextEVMAssignment != "" {
 			if planRequest.EVMAssignment, err = readEVMAssignment(nextEVMAssignment); err != nil {
 				return err
@@ -255,6 +259,7 @@ func newRootCmd() *cobra.Command {
 	_ = propose.MarkFlagRequired("root-rpc")
 	propose.Flags().StringVar(&readinessReceipts, "readiness-receipts", "",
 		"comma-separated readiness receipt files of every successor member (`handoff q3-readiness`): the plan is then a V3 plan, and the root refuses it unless every member declared itself ready for exactly this candidate")
+	propose.Flags().BoolVar(&q3Plan, "q3", false, "plan as a V3 handoff without readiness receipts: only the exact recovery K takes none; the root refuses any other candidate without every member's receipt")
 	handoff.AddCommand(propose)
 	handoff.AddCommand(newQ3CandidateCmd(), newQ3ReadinessCmd(), newQ3ActivationCmd())
 	handoff.AddCommand(newEVMContextCmd(), newEVMAuthorizationCmd(), newEVMPoPCmd(), newEVMAssembleCmd(), newShardAssembleCmd())
