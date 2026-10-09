@@ -45,6 +45,7 @@ type pubIdentity struct {
 	ID            uint64   `json:"id"`
 	Generation    uint64   `json:"generation"`
 	Weight        uint64   `json:"weight"`
+	RawWeight     uint64   `json:"rawWeight"`
 	OperatorPayee string   `json:"operatorPayee"`
 	RootKey       string   `json:"rootKey"`
 	EVMKey        string   `json:"evmKey"`
@@ -76,7 +77,7 @@ func (f pubFixture) identities(t *testing.T, list []pubIdentity) []Identity {
 		ex := LotsDigest(x.LotIDs)
 		out[i] = Identity{
 			StakingID: sid[:], Generation: x.Generation, RootNodeID: "root-" + string(rune('a'+i)), RootKey: hx(t, x.RootKey),
-			EVMNodeID: "evm-" + string(rune('a'+i)), EVMKey: hx(t, x.EVMKey), Weight: x.Weight, OperatorPayee: hx(t, x.OperatorPayee), ExposureDigest: ex[:],
+			EVMNodeID: "evm-" + string(rune('a'+i)), EVMKey: hx(t, x.EVMKey), Weight: x.Weight, RawWeight: x.RawWeight, OperatorPayee: hx(t, x.OperatorPayee), ExposureDigest: ex[:],
 		}
 	}
 	return out

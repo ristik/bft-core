@@ -46,6 +46,31 @@ type selCase struct {
 	Config   selConfig `json:"config"`
 	Reason   uint8     `json:"reason"`
 	Chosen   []uint64  `json:"chosen"`
+	// ChosenWeights are the committed (quantized) weights of the chosen committee, ascending by identity: the eligible weights are the raw
+	// bonded weights x, the old committee carries the weights it was committed with, and every trial committee is judged at its own q.
+	ChosenWeights []uint64 `json:"chosenWeights"`
+}
+
+// weightCap is the profile cap B on a committee's total committed weight.
+const weightCap = 65536
+
+// refQuant is the weight quantization rule (briefs/leader-lookup.md, F2) written again here, independently of evmassign.Quantize and of the
+// Solidity library: X <= B keeps x, otherwise s = ceil(X / (B - n)) and q_i = max(1, floor(x_i / s)).
+func refQuant(x []uint64) []uint64 {
+	var total uint64
+	for _, v := range x {
+		total += v
+	}
+	out := append([]uint64(nil), x...)
+	if total <= weightCap {
+		return out
+	}
+	room := weightCap - uint64(len(x))
+	s := (total + room - 1) / room
+	for i, v := range x {
+		out[i] = max(1, v/s)
+	}
+	return out
 }
 
 // better is the strict rank order: descending weight, then ascending identity.
@@ -66,10 +91,10 @@ func churnReason(failed error) uint8 {
 }
 
 // elect is the model: it returns the chosen identities ascending, or a reason.
-func elect(c selCase) ([]uint64, uint8) {
+func elect(c selCase) ([]uint64, []uint64, uint8) {
 	cfg := c.Config
 	if cfg.NMin < 1 || cfg.NTarget < cfg.NMin || cfg.NMax < cfg.NTarget || cfg.NMax > 32 || cfg.DistDen == 0 {
-		return nil, reasonInvalidProfile
+		return nil, nil, reasonInvalidProfile
 	}
 	policy := Policy{MaxM: cfg.MaxM, MaxDistNum: cfg.DistNum, MaxDistDen: cfg.DistDen}
 	old := map[uint64]bool{}
@@ -79,7 +104,7 @@ func elect(c selCase) ([]uint64, uint8) {
 	ranked := append([]vMember(nil), c.Eligible...)
 	sort.Slice(ranked, func(i, j int) bool { return better(ranked[i], ranked[j]) })
 	if uint64(len(ranked)) < cfg.NMin {
-		return nil, reasonCardinality
+		return nil, nil, reasonCardinality
 	}
 	// the seed: the best eligible incumbents up to the target, then the best outsiders up to it
 	in := map[uint64]bool{}
@@ -101,11 +126,18 @@ func elect(c selCase) ([]uint64, uint8) {
 			}
 		}
 		sort.Slice(ms, func(i, j int) bool { return ms[i].ID < ms[j].ID })
+		raw := make([]uint64, len(ms))
+		for i, m := range ms {
+			raw[i] = m.Weight
+		}
+		for i, q := range refQuant(raw) {
+			ms[i].Weight = q
+		}
 		return toMembers(ms)
 	}
 	oldMembers := toMembers(c.Old)
 	if _, err := Check(oldMembers, committee(in), policy); err != nil {
-		return nil, churnReason(err)
+		return nil, nil, churnReason(err)
 	}
 	// each remaining outsider, once, in rank order
 	for _, x := range ranked {
@@ -137,7 +169,11 @@ func elect(c selCase) ([]uint64, uint8) {
 		out = append(out, id)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
-	return out, reasonNone
+	var weights []uint64
+	for _, m := range committee(in) {
+		weights = append(weights, m.Weight)
+	}
+	return out, weights, reasonNone
 }
 
 func sel(id, binding, weight uint64) vMember {
@@ -227,7 +263,41 @@ func selectionCases() []selCase {
 	chainElig := append(append([]vMember{}, chain...), sel(11, 11, 6), sel(12, 12, 6), sel(13, 13, 6))
 	add("several outsiders contend for the weakest seats", chain, chainElig, loose)
 
+	// raw totals above the cap B: every trial committee is judged at its own quantized weights, the old committee at the weights it was
+	// committed with
+	committed := func(raw []vMember) []vMember {
+		ws := make([]uint64, len(raw))
+		for i, m := range raw {
+			ws[i] = m.Weight
+		}
+		out := append([]vMember(nil), raw...)
+		for i, q := range refQuant(ws) {
+			out[i].Weight = q
+		}
+		return out
+	}
+	heavy := uniform(1, 10, 1_000_000) // X = 1e7, s = 153, q = 6535 each
+	add("heavy raw weights: an unchanged committee is re-elected", committed(heavy), heavy, dev)
+	heavyRicher := append(append([]vMember{}, uniform(1, 9, 1_000_000)...), sel(10, 10, 900_000), sel(11, 11, 3_000_000))
+	add("heavy raw weights: a richer outsider replaces the weakest incumbent", committed(heavy), heavyRicher, dev)
+	heavyTwo := append(append([]vMember{}, uniform(1, 8, 1_000_000)...), sel(9, 9, 500_000), sel(10, 10, 500_000), sel(11, 11, 3_000_000), sel(12, 12, 3_000_000))
+	add("heavy raw weights: two richer outsiders against the churn budget", committed(heavy), heavyTwo, dev)
+	add("heavy raw weights: two richer outsiders under a wide budget", committed(heavy), heavyTwo, loose)
+	// the boundary: the raw total of the successor is exactly B, then B+1 (every q halves)
+	atCap := []vMember{sel(1, 1, weightCap-3), sel(2, 2, 1), sel(3, 3, 1), sel(4, 4, 1)}
+	add("the raw total is exactly the cap", atCap, atCap, dev)
+	overCap := []vMember{sel(1, 1, weightCap-2), sel(2, 2, 1), sel(3, 3, 1), sel(4, 4, 1)}
+	add("the raw total is one above the cap", atCap, overCap, dev)
+	add("a committee committed under the cap meets a raw total above it", overCap, overCap, dev)
+	// a dominant member and minimum bonds
+	dominant := append([]vMember{sel(1, 1, 100_000_000)}, uniform(2, 12, 1)...)
+	add("a dominant member and minimum bonds", committed(dominant[:10]), dominant, dev)
+	// a trial that brings the raw total from above the cap to at most it, and the reverse
+	fall := append(append([]vMember{}, uniform(1, 9, 8000)...), sel(10, 10, 100), sel(11, 11, 9000))
+	add("a replacement takes the raw total across the cap", append(uniform(1, 9, 8000), sel(10, 10, 100)), fall, loose)
+
 	rng := rand.New(rand.NewSource(8585))
+	scaleRng := rand.New(rand.NewSource(8586))
 	for n := 0; n < 500; n++ {
 		size := 6 + rng.Intn(9)
 		perm := rng.Perm(30)
@@ -258,6 +328,17 @@ func selectionCases() []selCase {
 		sortMembers(e)
 		cfg := selConfig{NMin: uint64(1 + rng.Intn(4)), NTarget: uint64(size - 1 + rng.Intn(4)), NMax: 32, MaxM: uint64(2 + rng.Intn(8)),
 			DistNum: uint64(1 + rng.Intn(2)), DistDen: uint64(2 + rng.Intn(3))}
+		if n%4 == 0 {
+			// raw weights well above the cap: the eligible ones are raw, the old committee carries its quantized weights
+			scale := uint64(300 + scaleRng.Intn(6000))
+			for i := range e {
+				e[i].Weight *= scale
+			}
+			for i := range o {
+				o[i].Weight *= scale
+			}
+			o = committed(o)
+		}
 		out = append(out, selCase{Name: fmt.Sprintf("random %d", n), Old: o, Eligible: e, Config: cfg})
 	}
 	return out
@@ -272,11 +353,11 @@ func TestSelectionVectors(t *testing.T) {
 		if c.Eligible == nil {
 			c.Eligible = []vMember{}
 		}
-		chosen, reason := elect(c)
+		chosen, weights, reason := elect(c)
 		c.Reason = reason
-		c.Chosen = chosen
+		c.Chosen, c.ChosenWeights = chosen, weights
 		if c.Chosen == nil {
-			c.Chosen = []uint64{}
+			c.Chosen, c.ChosenWeights = []uint64{}, []uint64{}
 		}
 		all = append(all, c)
 	}

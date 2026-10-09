@@ -20,6 +20,7 @@ type custodyMember struct {
 	ID            uint64   `json:"id"`
 	Generation    uint64   `json:"generation"`
 	Weight        uint64   `json:"weight"`
+	RawWeight     uint64   `json:"rawWeight"`
 	OperatorPayee string   `json:"operatorPayee"`
 	RootKeyHash   string   `json:"rootKeyHash"`
 	EVMKeyHash    string   `json:"evmKeyHash"`
@@ -71,7 +72,16 @@ func TestCustodyDigestsReproduceCustodysOwn(t *testing.T) {
 	require.NoError(t, err)
 	var fx custodyFixture
 	require.NoError(t, json.Unmarshal(raw, &fx))
-	require.Len(t, fx.Scenarios, 3)
+	require.Len(t, fx.Scenarios, 4)
+	quantized := false
+	for _, sc := range fx.Scenarios {
+		for _, a := range sc.Assignments {
+			for _, m := range a.Members {
+				quantized = quantized || m.RawWeight > m.Weight
+			}
+		}
+	}
+	require.True(t, quantized, "the fixture exercises a committee committed below its raw weights")
 	var d Deployment
 	d.NetworkWord = b32(t, fx.Deployment.NetworkWord)
 	cid := new(big.Int).SetUint64(fx.Deployment.ChainID).FillBytes(make([]byte, 32))
@@ -89,7 +99,7 @@ func TestCustodyDigestsReproduceCustodysOwn(t *testing.T) {
 				sid := make([]byte, 32)
 				copy(sid[24:], w64(m.ID)[24:])
 				ld := LotsDigest(m.LotIDs)
-				ids = append(ids, Identity{StakingID: sid, Generation: m.Generation, Weight: m.Weight, OperatorPayee: unhex(t, m.OperatorPayee), ExposureDigest: ld[:]})
+				ids = append(ids, Identity{StakingID: sid, Generation: m.Generation, Weight: m.Weight, RawWeight: m.RawWeight, OperatorPayee: unhex(t, m.OperatorPayee), ExposureDigest: ld[:]})
 				uids = append(uids, m.ID)
 				rootHashes = append(rootHashes, b32(t, m.RootKeyHash))
 				evmHashes = append(evmHashes, b32(t, m.EVMKeyHash))

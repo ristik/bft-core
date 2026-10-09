@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"github.com/unicitynetwork/bft-core/internal/weightcap"
 	"sort"
 
 	"github.com/unicitynetwork/bft-core/continuity"
@@ -59,7 +60,8 @@ type Identity struct {
 	RootKey        []byte   `json:"rootKey"`
 	EVMNodeID      string   `json:"evmNodeId"`
 	EVMKey         []byte   `json:"evmKey"`
-	Weight         uint64   `json:"weight"`
+	Weight         uint64   `json:"weight"`    // the committed (quantized) weight q: voting, leader, reward, threshold and continuity
+	RawWeight      uint64   `json:"rawWeight"` // the raw bonded weight x >= q the collateral must cover; q = quant(x over the set, B)
 	OperatorPayee  []byte   `json:"operatorPayee"`
 	ExposureDigest []byte   `json:"exposureDigest"`
 }
@@ -67,7 +69,8 @@ type Identity struct {
 func (i Identity) valid() error {
 	switch {
 	case len(i.StakingID) != StakingIDLen, len(i.OperatorPayee) != PayeeLen, len(i.ExposureDigest) != DigestLen,
-		i.RootNodeID == "", i.EVMNodeID == "", len(i.RootKey) != KeyLen, len(i.EVMKey) != KeyLen, i.Weight == 0:
+		i.RootNodeID == "", i.EVMNodeID == "", len(i.RootKey) != KeyLen, len(i.EVMKey) != KeyLen, i.Weight == 0,
+		i.RawWeight < i.Weight:
 		return fmt.Errorf("%w: malformed record %x", ErrIdentity, i.StakingID)
 	case isZero(i.OperatorPayee), isZero(i.ExposureDigest):
 		return fmt.Errorf("%w: zero operator payee or exposure digest for %x", ErrIdentity, i.StakingID)
@@ -78,7 +81,7 @@ func (i Identity) valid() error {
 func isZero(b []byte) bool { return bytes.Equal(b, make([]byte, len(b))) }
 
 func (i Identity) fields() []any {
-	return []any{i.StakingID, i.Generation, i.RootNodeID, i.RootKey, i.EVMNodeID, i.EVMKey, i.Weight, i.OperatorPayee, i.ExposureDigest}
+	return []any{i.StakingID, i.Generation, i.RootNodeID, i.RootKey, i.EVMNodeID, i.EVMKey, i.Weight, i.RawWeight, i.OperatorPayee, i.ExposureDigest}
 }
 
 // IdentitiesDigest commits to the ordered identity records, operator payees included. It is carried in PoPContext, so it enters
@@ -151,6 +154,26 @@ func ValidateIdentities(ids []Identity, root []RootMember, succ *types.Partition
 		}
 		if !bound[[2]string{i.RootNodeID, i.EVMNodeID}] {
 			return fmt.Errorf("%w: %x has no binding between its root and EVM node", ErrIdentity, i.StakingID)
+		}
+	}
+	return CheckQuantized(ids)
+}
+
+// CheckQuantized requires the committed weights of a committee to be the quantization of its raw weights under the profile cap B:
+// q = quant(x over the set). The root, ureth and the contracts evaluate the same pure function, so a record whose q was not derived from
+// the x it commits is a projection mismatch and is refused.
+func CheckQuantized(ids []Identity) error {
+	raw := make([]uint64, len(ids))
+	for n, i := range ids {
+		raw[n] = i.RawWeight
+	}
+	q, _, err := Quantize(raw, weightcap.B)
+	if err != nil {
+		return fmt.Errorf("%w: raw weights cannot be quantized: %v", ErrIdentity, err)
+	}
+	for n, i := range ids {
+		if i.Weight != q[n] {
+			return fmt.Errorf("%w: %x commits weight %d, the quantization of its raw weight %d is %d", ErrIdentity, i.StakingID, i.Weight, i.RawWeight, q[n])
 		}
 	}
 	return nil

@@ -32,6 +32,14 @@ Evidence.
   collateral confers no extra voting power.
 - `W = Σ bᵥ` over the active assignment.
 - **Per-member cap** `MaxMemberWeight = 2⁴⁰`, **total cap** `MaxTotalWeight = 2⁴⁸`.
+
+> **Amended (bounded weighted leader lookup, Part 2).** The one profile cap on a committee's total committed weight is now
+> `B = 65,536` (`internal/weightcap`), for the member cap too; the 2⁴⁰ / 2⁴⁸ figures above are the pre-amendment arithmetic. A PoS
+> committee's committed weight `q` is derived from the raw bonded weights `x` by `q = quant(x, n, B)` ([P85 weight
+> quantization](p85-weight-quantization.md)). **Safety premise:** BFT safety assumes the Byzantine *committed q-weight* is below
+> one third, not that the Byzantine raw stake is. For any member subset `S`, `|q(S)/Q − x(S)/X| < 2n/Q` (`Q = Σq`, `X = Σx`); with
+> `Q > (B+1)/2 − n` (about 32,700 at `n = 64`) a subset's share moves by under 0.4%. Every "less than one third of the stake"
+> statement about a PoS deployment is to be read as a statement about `q`.
   Below the total cap, `2·W` cannot overflow `uint64`, so every threshold
   computation stays exact in a checked wide intermediate. A weight of `0` is not
   a member. Membership identities are unique.

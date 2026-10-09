@@ -36,6 +36,7 @@ type identity struct {
 	ID         uint64   `json:"id"`
 	Generation uint64   `json:"generation"`
 	Weight     uint64   `json:"weight"`
+	RawWeight  uint64   `json:"rawWeight"`
 	Payee      string   `json:"operatorPayee"`
 	RootKey    string   `json:"rootKey"`
 	EVMKey     string   `json:"evmKey"`
@@ -141,7 +142,7 @@ func Load(t testing.TB, path string) *Published {
 			new(big.Int).SetUint64(x.ID).FillBytes(sid[24:])
 			ex := evmassign.LotsDigest(x.LotIDs)
 			out[i] = evmassign.Identity{StakingID: sid[:], Generation: x.Generation, RootNodeID: "root-" + string(rune('a'+i)), RootKey: unhex(t, x.RootKey),
-				EVMNodeID: "evm-" + string(rune('a'+i)), EVMKey: unhex(t, x.EVMKey), Weight: x.Weight, OperatorPayee: unhex(t, x.Payee), ExposureDigest: ex[:]}
+				EVMNodeID: "evm-" + string(rune('a'+i)), EVMKey: unhex(t, x.EVMKey), Weight: x.Weight, RawWeight: x.RawWeight, OperatorPayee: unhex(t, x.Payee), ExposureDigest: ex[:]}
 		}
 		return out
 	}
