@@ -221,17 +221,24 @@ m2_block_number() { # hash
   return 1
 }
 
+# m2_replica_brief <validator>: what the validator's operator status endpoint answers, one line (each replica's acknowledged height and error, or the HTTP
+# code and body of a refusal), for the wait's progress output.
+m2_replica_brief() {
+  local out code body
+  out=$(curl -sS -m 8 -w '\n%{http_code}' "http://$(evm_validator_rpc_addr "$1")/api/v1/operator/status" 2>&1) || { printf 'v%s: curl failed: %s\n' "$1" "$(echo "$out" | tr '\n' ' ' | cut -c1-200)"; return 0; }
+  code=${out##*$'\n'}; body=${out%$'\n'*}
+  if [ "$code" = 200 ]; then
+    printf 'v%s: %s\n' "$1" "$(printf '%s' "$body" | jq -c '[.replicas[]? | {r: .replica[-6:], h: .lastAcknowledgedHeight, e: (.error // "")}]' 2>&1 | cut -c1-240)"
+  else
+    printf 'v%s: HTTP %s %s\n' "$1" "$code" "$(printf '%s' "$body" | tr '\n' ' ' | cut -c1-200)"
+  fi
+}
+
 # m2_replica_acked <publisher> <replica peer id> <height>: succeeds when the publisher's operator status shows that replica durably acknowledged a block at or above
 # <height> and reports no transfer error for it. The status heights come from the durable frontier acknowledgements (archivewiring.OperatorStatus.Replicas).
 m2_replica_acked() {
-  build/ubft shard-node status --url "http://$(evm_validator_rpc_addr "$1")" 2>/dev/null |
+  curl -fsS -m 8 "http://$(evm_validator_rpc_addr "$1")/api/v1/operator/status" 2>/dev/null |
     jq -e --arg r "$2" --argjson h "$3" '[.replicas[] | select(.replica == $r)] | (length > 0) and all(.lastAcknowledgedHeight >= $h and ((.error // "") == ""))' >/dev/null 2>&1
-}
-
-# m2_replica_brief <validator>: the validator's operator-status summary line (it lists each replica's acknowledged height and error), for the wait's progress output.
-m2_replica_brief() {
-  printf 'v%s: ' "$1"
-  build/ubft shard-node status --url "http://$(evm_validator_rpc_addr "$1")" 2>&1 >/dev/null </dev/null | tail -1 | grep -o 'replica .*' | cut -c1-260 || echo "status unavailable"
 }
 
 # m2_wait_archive_replica_catchup <validator> <unused> [head]: waits until the restarted validator is caught up as an archive replica through a certified head. The head
