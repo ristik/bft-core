@@ -2,6 +2,7 @@
 // (docs/pos/q4-acceptance-matrix.json) to the evidence that passed or to an explicit gap.
 //
 //	q4report -matrix docs/pos/q4-acceptance-matrix.json -tests run.json[,run2.json] [-bundles dir] [-cost cost.json] [-src .] [-out report.md] [-json report.json] [-require-complete]
+//	q4report ... -lane <live lane evidence dir>   # kind lane / lane-file items read the Q4 live lane's own lane.log and files
 //	q4report -static -matrix docs/pos/q4-acceptance-matrix.json -src .      # CI: the matrix itself is consistent; nothing is claimed as run
 //
 // Evidence is never assumed. A go-test item counts only if the `go test -json` results name that test with action pass; a test that
@@ -48,7 +49,10 @@ type Row struct {
 
 // Evidence is one item. Kind go-test: Package and Test name a result of `go test -json` (Test empty = the package passed). Kind
 // bundle: the replay bundles whose file name starts with BundlePrefix (at least MinBundles of them) must exist and check clean.
-// Kind cost: the query-cost measurements file must show every supported row within budget.
+// Kind cost: the query-cost measurements file must show every supported row within budget. Kind lane: the live lane's evidence directory
+// (-lane) must show the named step (Step, as printed by the lane: q3_* or the Q4 step title) with its PASS line, from a run whose recorded
+// mode is a clean-build evidence run (a development override is never evidence). Kind lane-file: Path, relative to that directory, exists
+// and is not empty.
 type Evidence struct {
 	Kind         string `json:"kind"`
 	Label        string `json:"label"`
@@ -56,6 +60,8 @@ type Evidence struct {
 	Test         string `json:"test,omitempty"`
 	BundlePrefix string `json:"bundlePrefix,omitempty"`
 	MinBundles   int    `json:"minBundles,omitempty"`
+	Step         string `json:"step,omitempty"`  // kind lane: the lane step name
+	Path         string `json:"path,omitempty"`  // kind lane-file: a file of the lane's evidence directory
 	Scope        string `json:"scope,omitempty"` // what the item covers and omits, in words
 }
 
@@ -88,6 +94,7 @@ type Report struct {
 	Counts   map[string]int `json:"counts"`
 	Bundles  BundleStats    `json:"bundles"`
 	Cost     *CostStats     `json:"cost,omitempty"`
+	Lane     *LaneStats     `json:"lane,omitempty"`
 	Closable bool           `json:"closable"`
 	Static   bool           `json:"static,omitempty"`
 	Problems []string       `json:"problems,omitempty"`
@@ -101,6 +108,13 @@ type BundleStats struct {
 	Signed   int      `json:"signedVerified"`
 	Injected int      `json:"injectedMalformedFlagged"`
 	Failed   []string `json:"failed,omitempty"`
+}
+
+// LaneStats is the live lane run the report read.
+type LaneStats struct {
+	Dir      string `json:"dir"`
+	Mode     string `json:"mode"`
+	Evidence bool   `json:"evidence"` // a clean-build evidence run
 }
 
 // CostStats reads the query-cost gate measurements.
@@ -138,6 +152,7 @@ func run(args []string, out, errOut *os.File) int {
 	tests := fs.String("tests", "", "comma separated `go test -json` result files")
 	bundles := fs.String("bundles", "", "directory of exported replay bundles")
 	cost := fs.String("cost", "", "query-cost measurements (Q4_COST_OUT of TestQ4QueryCostGate)")
+	lane := fs.String("lane", "", "evidence directory of a Q4 live lane run (lane.log, run-mode.txt, pins.txt, q3/, q4/)")
 	src := fs.String("src", ".", "source tree root, to detect stale selectors")
 	md := fs.String("out", "", "write the markdown report here (default stdout)")
 	js := fs.String("json", "", "write the JSON report here")
@@ -146,7 +161,7 @@ func run(args []string, out, errOut *os.File) int {
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
-	rep, err := Build(*matrix, splitList(*tests), *bundles, *cost, *src, *static)
+	rep, err := Build(*matrix, splitList(*tests), *bundles, *cost, *src, *static, *lane)
 	if err != nil {
 		fmt.Fprintln(errOut, err)
 		return 2
@@ -245,7 +260,7 @@ func declared(root string) (map[string]map[string]bool, error) {
 var sanitize = regexp.MustCompile(`[^A-Za-z0-9._-]+`)
 
 // Build evaluates the matrix against the inputs.
-func Build(matrixPath string, testFiles []string, bundleDir, costPath, srcRoot string, static bool) (*Report, error) {
+func Build(matrixPath string, testFiles []string, bundleDir, costPath, srcRoot string, static bool, laneDir string) (*Report, error) {
 	raw, err := os.ReadFile(matrixPath)
 	if err != nil {
 		return nil, err
@@ -318,6 +333,18 @@ func Build(matrixPath string, testFiles []string, bundleDir, costPath, srcRoot s
 		}
 	}
 
+	var laneLog, laneMode string
+	if laneDir != "" {
+		raw, err := os.ReadFile(filepath.Join(laneDir, "lane.log"))
+		if err != nil {
+			return nil, err
+		}
+		laneLog = string(raw)
+		if raw, err := os.ReadFile(filepath.Join(laneDir, "run-mode.txt")); err == nil {
+			laneMode = strings.TrimSpace(string(raw))
+		}
+		rep.Lane = &LaneStats{Dir: laneDir, Mode: laneMode, Evidence: strings.HasPrefix(strings.TrimPrefix(laneMode, "Q4 run mode: "), "clean build (evidence run")}
+	}
 	seen := map[string]bool{}
 	for _, row := range m.Rows {
 		if seen[row.ID] {
@@ -375,6 +402,27 @@ func Build(matrixPath string, testFiles []string, bundleDir, costPath, srcRoot s
 					r.Status, r.Detail = "FAIL", fmt.Sprintf("%d of %d supported rows within budget", rep.Cost.Within, rep.Cost.Supported)
 				default:
 					r.Status, r.Detail = "PASS", fmt.Sprintf("%d supported rows within budget (%s)", rep.Cost.Supported, costData.Profile)
+				}
+			case "lane", "lane-file":
+				switch {
+				case ev.Kind == "lane" && !laneStepDeclared(srcRoot, ev.Step):
+					r.Status, r.Detail = "STALE", "the lane scripts declare no step "+ev.Step
+				case laneDir == "":
+					r.Status = "NOT-RUN"
+				case !rep.Lane.Evidence:
+					r.Status, r.Detail = "FAIL", "the lane ran as: "+laneMode+" (a development override is not evidence)"
+				case ev.Kind == "lane-file":
+					if fi, err := os.Stat(filepath.Join(laneDir, filepath.FromSlash(ev.Path))); err == nil && fi.Size() > 0 {
+						r.Status = "PASS"
+					} else {
+						r.Status, r.Detail = "NOT-RUN", ev.Path+" is missing or empty"
+					}
+				case regexp.MustCompile(`(?m)^\s*PASS: ` + regexp.QuoteMeta(ev.Step) + `\s*$`).MatchString(laneLog):
+					r.Status = "PASS"
+				case regexp.MustCompile(`(?m)^\s*FAIL: ` + regexp.QuoteMeta(ev.Step) + `\b`).MatchString(laneLog):
+					r.Status = "FAIL"
+				default:
+					r.Status, r.Detail = "NOT-RUN", "the lane log has no PASS line for the step"
 				}
 			default:
 				r.Status, r.Detail = "STALE", "unknown evidence kind "+ev.Kind
@@ -467,6 +515,9 @@ func Markdown(r *Report) string {
 	}
 	fmt.Fprintf(&b, "Replay bundles re-checked offline by the independent checker: %d, clean %d, %d attempts, %d signatures verified, %d deliberately injected malformed sends flagged by their own reason.\n\n",
 		r.Bundles.Checked, r.Bundles.Clean, r.Bundles.Attempts, r.Bundles.Signed, r.Bundles.Injected)
+	if r.Lane != nil {
+		fmt.Fprintf(&b, "Live lane evidence: `%s`, run mode: %s.\n\n", r.Lane.Dir, orDash(r.Lane.Mode))
+	}
 	if r.Cost != nil {
 		fmt.Fprintf(&b, "Query-cost gate (%s, %s): %d of %d supported rows within the frozen budgets.", r.Cost.Profile, r.Cost.Host, r.Cost.Within, r.Cost.Supported)
 		for _, raw := range r.Cost.Outside {
@@ -502,6 +553,10 @@ func Markdown(r *Report) string {
 				what = "bundles " + res.BundlePrefix + "*"
 			case "cost":
 				what = "query-cost measurements"
+			case "lane":
+				what = "live lane step " + res.Step
+			case "lane-file":
+				what = "live lane file " + res.Path
 			}
 			if res.Package != "" {
 				what = res.Package + " " + what
@@ -531,4 +586,16 @@ func detail(s string) string {
 		return ""
 	}
 	return " (" + s + ")"
+}
+
+// laneStepDeclared: the step name is one the lane scripts declare (a Q3 step function or a Q4 step title), so a renamed step makes its evidence stale
+// instead of silently missing.
+func laneStepDeclared(srcRoot, step string) bool {
+	for _, f := range []string{"scripts/q4-live-steps.sh", "scripts/q3-weight-activation-steps.sh"} {
+		raw, err := os.ReadFile(filepath.Join(srcRoot, f))
+		if err == nil && strings.Contains(string(raw), step) {
+			return true
+		}
+	}
+	return false
 }

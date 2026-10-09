@@ -39,13 +39,60 @@
      "package": "./rootchain/consensus",
      "test": "TestQ4BHandoffArithmetic",
      "scope": "root consensus only; no EVM, no aggregator shard; A to B, independent arithmetic on both installed trust bases"
-    }
-   ],
-   "gaps": [
+    },
     {
+     "kind": "lane",
      "label": "REAL-PROCESS",
-     "reason": "Activation through the coupled lane with the EVM side of the successor. BLOCKED: the REAL-PROCESS lane (scripts/q4-live-lane.sh) has not been run; it stops at exit 3 unless Q4_WEIGHTED_CHECK confirms an activated weighted epoch and it needs the devnet lock after dev2's Q3 lane closes #50",
-     "blockedBy": "#50 (Q3 lane, devnet lock)"
+     "step": "q3_baseline",
+     "scope": "REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss)"
+    },
+    {
+     "kind": "lane",
+     "label": "REAL-PROCESS",
+     "step": "q3_candidate",
+     "scope": "REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss)"
+    },
+    {
+     "kind": "lane",
+     "label": "REAL-PROCESS",
+     "step": "q3_handoff",
+     "scope": "REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss)"
+    },
+    {
+     "kind": "lane",
+     "label": "REAL-PROCESS",
+     "step": "q3_install_epoch2",
+     "scope": "REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss)"
+    },
+    {
+     "kind": "lane",
+     "label": "REAL-PROCESS",
+     "step": "q3_activation",
+     "scope": "REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss)"
+    },
+    {
+     "kind": "lane",
+     "label": "REAL-PROCESS",
+     "step": "q3_acknowledge",
+     "scope": "REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss)"
+    },
+    {
+     "kind": "lane",
+     "label": "REAL-PROCESS",
+     "step": "q3_progress_scheme2",
+     "scope": "REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss)"
+    },
+    {
+     "kind": "lane-file",
+     "label": "REAL-PROCESS",
+     "path": "q3/activation-record.json",
+     "scope": "the committed activation record of the weighted epoch"
+    },
+    {
+     "kind": "lane-file",
+     "label": "REAL-PROCESS",
+     "path": "weighted-check.txt",
+     "scope": "the gate: command, output and exit, read from the root's verified state"
     }
    ]
   },
@@ -70,7 +117,8 @@
    "design": "Design v2 section 1, gate 3.",
    "required": [
     "IN-PROCESS",
-    "REAL-PROCESS"
+    "REAL-PROCESS",
+    "REAL-PROCESS (rest)"
    ],
    "evidence": [
     {
@@ -93,13 +141,19 @@
      "package": "./rootchain/consensus",
      "test": "TestSkewedWeightScheme2TCFormsAfterTwoRestarts",
      "scope": "weighted scheme 2 TC after two restarts, in-process"
+    },
+    {
+     "kind": "lane",
+     "label": "REAL-PROCESS",
+     "step": "SIGKILL the heavy root: stall, restart recovers",
+     "scope": "weighted restart over the retained home; REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss)"
     }
    ],
    "gaps": [
     {
-     "label": "REAL-PROCESS",
-     "reason": "Weighted mixed-HighQC TC formation and SIGKILL restart with fsync are not covered by any run. BLOCKED: the REAL-PROCESS lane (scripts/q4-live-lane.sh) has not been run; it stops at exit 3 unless Q4_WEIGHTED_CHECK confirms an activated weighted epoch and it needs the devnet lock after dev2's Q3 lane closes #50",
-     "blockedBy": "#50 (Q3 lane, devnet lock)"
+     "label": "REAL-PROCESS (rest)",
+     "reason": "Mixed-HighQC TC formation and vote/timeout rebroadcast after a durable save on real processes (the SIGKILL cut points are not selectable from outside the process).",
+     "blockedBy": "not exercised by the lane as written"
     }
    ]
   },
@@ -109,7 +163,8 @@
    "design": "Design v2 section 3 table row 1.",
    "required": [
     "IN-PROCESS",
-    "REAL-PROCESS"
+    "REAL-PROCESS",
+    "REAL-PROCESS (rest)"
    ],
    "evidence": [
     {
@@ -132,13 +187,19 @@
      "bundlePrefix": "TestQ4Fault_A__heavy_offline",
      "minBundles": 8,
      "scope": "offline replay of the exported runs"
+    },
+    {
+     "kind": "lane",
+     "label": "REAL-PROCESS",
+     "step": "SIGKILL the heavy root: stall, restart recovers",
+     "scope": "heavy offline (A): 3 of 9 left, explicit stall, restart recovers; REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss)"
     }
    ],
    "gaps": [
     {
-     "label": "REAL-PROCESS",
-     "reason": "Separate paired root/EVM outage. BLOCKED: the REAL-PROCESS lane (scripts/q4-live-lane.sh) has not been run; it stops at exit 3 unless Q4_WEIGHTED_CHECK confirms an activated weighted epoch and it needs the devnet lock after dev2's Q3 lane closes #50",
-     "blockedBy": "#50 (Q3 lane, devnet lock)"
+     "label": "REAL-PROCESS (rest)",
+     "reason": "The separate paired root/EVM outage (EVM down while the root quorum stays) and the other three heavy placements.",
+     "blockedBy": "not exercised by the lane as written"
     }
    ]
   },
@@ -277,13 +338,24 @@
      "bundlePrefix": "TestQ4FaultByzantine_A__two",
      "minBundles": 1,
      "scope": "offline replay: forged and mixed-statement sends flagged by reason, exact equivocator set"
-    }
-   ],
-   "gaps": [
+    },
     {
+     "kind": "lane",
      "label": "REAL-PROCESS",
-     "reason": "BLOCKED: the REAL-PROCESS lane (scripts/q4-live-lane.sh) has not been run; it stops at exit 3 unless Q4_WEIGHTED_CHECK confirms an activated weighted epoch and it needs the devnet lock after dev2's Q3 lane closes #50",
-     "blockedBy": "#50 (Q3 lane, devnet lock)"
+     "step": "two Byzantine lights (weight 2) equivocate: honest 7 progresses",
+     "scope": "A, in bound; REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss)"
+    },
+    {
+     "kind": "lane",
+     "label": "REAL-PROCESS",
+     "step": "offline trace check: attempts have outcomes, equivocators are exactly the declared Byzantine roots",
+     "scope": "exact declared equivocators from the shim traces; signatures are not re-verified by the lane's python checker; REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss)"
+    },
+    {
+     "kind": "lane-file",
+     "label": "REAL-PROCESS",
+     "path": "q4/trace-report.json",
+     "scope": ""
     }
    ]
   },
@@ -391,7 +463,8 @@
    "design": "Design v2 section 3 table row 4.",
    "required": [
     "IN-PROCESS",
-    "REAL-PROCESS"
+    "REAL-PROCESS",
+    "REAL-PROCESS (rest)"
    ],
    "evidence": [
     {
@@ -428,13 +501,19 @@
      "package": "./rootchain/consensus",
      "test": "TestQ4BLiveB/d_isolated_(weight_1):_8_progresses,_heal",
      "scope": "root consensus only; no EVM, no aggregator shard"
+    },
+    {
+     "kind": "lane",
+     "label": "REAL-PROCESS",
+     "step": "one light root isolated (held both ways): 8 of 9 progresses, heal releases",
+     "scope": "A: one light isolated both ways; REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss)"
     }
    ],
    "gaps": [
     {
-     "label": "REAL-PROCESS",
-     "reason": "Separate coupled EVM variant. BLOCKED: the REAL-PROCESS lane (scripts/q4-live-lane.sh) has not been run; it stops at exit 3 unless Q4_WEIGHTED_CHECK confirms an activated weighted epoch and it needs the devnet lock after dev2's Q3 lane closes #50",
-     "blockedBy": "#50 (Q3 lane, devnet lock)"
+     "label": "REAL-PROCESS (rest)",
+     "reason": "Two and three isolated lights, the B isolations, and the EVM-only partition variant.",
+     "blockedBy": "not exercised by the lane as written"
     }
    ]
   },
@@ -444,7 +523,8 @@
    "design": "Design v2 section 3 table row 5.",
    "required": [
     "IN-PROCESS",
-    "REAL-PROCESS"
+    "REAL-PROCESS",
+    "REAL-PROCESS (rest)"
    ],
    "evidence": [
     {
@@ -488,13 +568,25 @@
      "package": "./rootchain/consensus/q4shim",
      "test": "",
      "scope": "the live shim: every rule dimension, orders, duplicate, triggers, equivocation variants, control validation"
+    },
+    {
+     "kind": "lane",
+     "label": "REAL-PROCESS",
+     "step": "heavy root delayed: quorum lost, explicit stall, release recovers",
+     "scope": "A: the heavy root delayed; REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss)"
+    },
+    {
+     "kind": "lane",
+     "label": "REAL-PROCESS",
+     "step": "F8 callbacks: EVM stop/resume with the root quorum intact, in-flight EVM proposal across root rotation",
+     "scope": "F8 EVM pause/resume; REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss)"
     }
    ],
    "gaps": [
     {
-     "label": "REAL-PROCESS",
-     "reason": "Delay of shard requests (needs the aggregator shards) and the live shim on libp2p. BLOCKED: the REAL-PROCESS lane (scripts/q4-live-lane.sh) has not been run; it stops at exit 3 unless Q4_WEIGHTED_CHECK confirms an activated weighted epoch and it needs the devnet lock after dev2's Q3 lane closes #50",
-     "blockedBy": "#50 (Q3 lane, devnet lock)"
+     "label": "REAL-PROCESS (rest)",
+     "reason": "Reorder and duplicate on a real network, delay of shard requests, and the first successor proposal held on a real handoff.",
+     "blockedBy": "not exercised by the lane as written"
     }
    ]
   },
@@ -504,7 +596,8 @@
    "design": "Design v2 section 3 table row 6.",
    "required": [
     "IN-PROCESS",
-    "REAL-PROCESS"
+    "REAL-PROCESS",
+    "REAL-PROCESS (rest)"
    ],
    "evidence": [
     {
@@ -520,13 +613,25 @@
      "package": "./rootchain/consensus",
      "test": "TestQ4BLiveB/quorum-wide_restart_recovers_from_the_retained_stores",
      "scope": "root consensus only; no EVM, no aggregator shard; scheme 2 after a real handoff"
+    },
+    {
+     "kind": "lane",
+     "label": "REAL-PROCESS",
+     "step": "SIGKILL a light root and restart over the retained home",
+     "scope": "REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss)"
+    },
+    {
+     "kind": "lane",
+     "label": "REAL-PROCESS",
+     "step": "SIGKILL the heavy root: stall, restart recovers",
+     "scope": "REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss)"
     }
    ],
    "gaps": [
     {
-     "label": "REAL-PROCESS",
-     "reason": "SIGKILL with fsync of a light and of the heavy root. BLOCKED: the REAL-PROCESS lane (scripts/q4-live-lane.sh) has not been run; it stops at exit 3 unless Q4_WEIGHTED_CHECK confirms an activated weighted epoch and it needs the devnet lock after dev2's Q3 lane closes #50",
-     "blockedBy": "#50 (Q3 lane, devnet lock)"
+     "label": "REAL-PROCESS (rest)",
+     "reason": "A quorum-wide restart on real processes, and the B restarts.",
+     "blockedBy": "not exercised by the lane as written"
     }
    ]
   },
@@ -536,7 +641,8 @@
    "design": "Design v2 section 3 crash cuts.",
    "required": [
     "IN-PROCESS",
-    "REAL-PROCESS"
+    "REAL-PROCESS",
+    "REAL-PROCESS (rest)"
    ],
    "evidence": [
     {
@@ -545,13 +651,25 @@
      "package": "./rootchain/consensus",
      "test": "TestQ4BCrash",
      "scope": "root consensus only; no EVM, no aggregator shard; 10 cuts on the real manager, safety module and BoltDB; the vote post-save cuts check no second statement but not rebroadcast (rev note 3)"
+    },
+    {
+     "kind": "lane",
+     "label": "REAL-PROCESS",
+     "step": "SIGKILL a light root and restart over the retained home",
+     "scope": "REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss)"
+    },
+    {
+     "kind": "lane",
+     "label": "REAL-PROCESS",
+     "step": "SIGKILL the heavy root: stall, restart recovers",
+     "scope": "REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss)"
     }
    ],
    "gaps": [
     {
-     "label": "REAL-PROCESS",
-     "reason": "SIGKILL cuts; vote rebroadcast after a durable save; advanced and mixed-HighQC TC. BLOCKED: the REAL-PROCESS lane (scripts/q4-live-lane.sh) has not been run; it stops at exit 3 unless Q4_WEIGHTED_CHECK confirms an activated weighted epoch and it needs the devnet lock after dev2's Q3 lane closes #50",
-     "blockedBy": "#50 (Q3 lane, devnet lock)"
+     "label": "REAL-PROCESS (rest)",
+     "reason": "Crash CUTS (before signing, between the paired signatures, after sign before save, after save before send) are IN-PROCESS only: a SIGKILL from outside cannot choose the cut.",
+     "blockedBy": "not exercised by the lane as written"
     }
    ]
   },
@@ -694,7 +812,8 @@
    "design": "Design v2 section 2 and section 6.",
    "required": [
     "IN-PROCESS",
-    "REAL-PROCESS"
+    "REAL-PROCESS",
+    "REAL-PROCESS (rest)"
    ],
    "evidence": [
     {
@@ -710,13 +829,31 @@
      "package": "./rootchain/consensus",
      "test": "TestQ4BLiveB/the_carried_identities_alone_(d_never_started)_are_a_quorum:_3+3+2=8",
      "scope": "root consensus only; no EVM, no aggregator shard"
+    },
+    {
+     "kind": "lane",
+     "label": "REAL-PROCESS",
+     "step": "q3_candidate",
+     "scope": "the handoff proposal flow on a running chain, unit PoA to the coupled weighted set; REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss)"
+    },
+    {
+     "kind": "lane",
+     "label": "REAL-PROCESS",
+     "step": "q3_handoff",
+     "scope": "REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss)"
+    },
+    {
+     "kind": "lane",
+     "label": "REAL-PROCESS",
+     "step": "q3_activation",
+     "scope": "REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss)"
     }
    ],
    "gaps": [
     {
-     "label": "REAL-PROCESS",
-     "reason": "The handoff proposal flow on a running chain and the EVM request-quorum rows. BLOCKED: the REAL-PROCESS lane (scripts/q4-live-lane.sh) has not been run; it stops at exit 3 unless Q4_WEIGHTED_CHECK confirms an activated weighted epoch and it needs the devnet lock after dev2's Q3 lane closes #50",
-     "blockedBy": "#50 (Q3 lane, devnet lock)"
+     "label": "REAL-PROCESS (rest)",
+     "reason": "The second handoff A to B on a running chain and the EVM request-quorum (Q=5) rows.",
+     "blockedBy": "not exercised by the lane as written"
     }
    ]
   },
@@ -749,13 +886,12 @@
      "package": "./rootchain/consensus",
      "test": "TestPartitionTimeoutGenerator_IndependentShardT2",
      "scope": "independent shards"
-    }
-   ],
-   "gaps": [
+    },
     {
+     "kind": "lane",
      "label": "REAL-PROCESS",
-     "reason": "EVM pause/resume with three aggregators certifying changing state roots, and the in-flight EVM leader across a root rotation. BLOCKED: the REAL-PROCESS lane (scripts/q4-live-lane.sh) has not been run; it stops at exit 3 unless Q4_WEIGHTED_CHECK confirms an activated weighted epoch and it needs the devnet lock after dev2's Q3 lane closes #50",
-     "blockedBy": "#50 (Q3 lane, devnet lock)"
+     "step": "F8 callbacks: EVM stop/resume with the root quorum intact, in-flight EVM proposal across root rotation",
+     "scope": "three aggregators certify changing state roots with EVM paused; the in-flight EVM proposal certifies across a root rotation; REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss)"
     }
    ]
   },
@@ -765,7 +901,8 @@
    "design": "Design v2 section 4, second paragraph.",
    "required": [
     "IN-PROCESS",
-    "REAL-PROCESS"
+    "REAL-PROCESS",
+    "REAL-PROCESS (rest)"
    ],
    "evidence": [
     {
@@ -788,13 +925,25 @@
      "bundlePrefix": "TestQ4BLiveA_all_three",
      "minBundles": 1,
      "scope": "stall window recomputed offline: zero ordinary commits"
+    },
+    {
+     "kind": "lane",
+     "label": "REAL-PROCESS",
+     "step": "heavy root delayed: quorum lost, explicit stall, release recovers",
+     "scope": "no certified progress while the quorum is lost; REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss)"
+    },
+    {
+     "kind": "lane",
+     "label": "REAL-PROCESS",
+     "step": "SIGKILL the heavy root: stall, restart recovers",
+     "scope": "REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss)"
     }
    ],
    "gaps": [
     {
-     "label": "REAL-PROCESS",
-     "reason": "Local T2 expiry, root epoch/round, shard round and EVM height recorded separately. BLOCKED: the REAL-PROCESS lane (scripts/q4-live-lane.sh) has not been run; it stops at exit 3 unless Q4_WEIGHTED_CHECK confirms an activated weighted epoch and it needs the devnet lock after dev2's Q3 lane closes #50",
-     "blockedBy": "#50 (Q3 lane, devnet lock)"
+     "label": "REAL-PROCESS (rest)",
+     "reason": "Local T2 expiry, root epoch/round, shard round and EVM height recorded separately.",
+     "blockedBy": "not exercised by the lane as written"
     }
    ]
   },
@@ -963,7 +1112,8 @@
    "design": "Design v2 section 4, last paragraph.",
    "required": [
     "IN-PROCESS",
-    "REAL-PROCESS"
+    "REAL-PROCESS",
+    "REAL-PROCESS (rest)"
    ],
    "evidence": [
     {
@@ -986,13 +1136,25 @@
      "package": "./rootchain/consensus",
      "test": "TestQ4Fault/no-fault_controls_at_the_same_load",
      "scope": "control at the same host load"
+    },
+    {
+     "kind": "lane",
+     "label": "REAL-PROCESS",
+     "step": "baseline: weighted epoch commits (F8 trace and EVM IR)",
+     "scope": "REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss)"
+    },
+    {
+     "kind": "lane",
+     "label": "REAL-PROCESS",
+     "step": "heavy root delayed: quorum lost, explicit stall, release recovers",
+     "scope": "recovery within the deadline frozen in the lane script before the run; REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss)"
     }
    ],
    "gaps": [
     {
-     "label": "REAL-PROCESS",
-     "reason": "EVM recovery latency, and the deadlines frozen in a lane manifest. BLOCKED: the REAL-PROCESS lane (scripts/q4-live-lane.sh) has not been run; it stops at exit 3 unless Q4_WEIGHTED_CHECK confirms an activated weighted epoch and it needs the devnet lock after dev2's Q3 lane closes #50",
-     "blockedBy": "#50 (Q3 lane, devnet lock)"
+     "label": "REAL-PROCESS (rest)",
+     "reason": "First/third commit latency, maximum commit gap and EVM recovery latency as recorded numbers: the lane asserts the frozen windows but does not export latencies.",
+     "blockedBy": "not exercised by the lane as written"
     }
    ]
   },
@@ -1001,13 +1163,40 @@
    "title": "Live representatives: crash, partition, delay and authentication-refusal on real processes through the shim and F8 callbacks",
    "design": "Design v2 section 6.",
    "required": [
-    "REAL-PROCESS"
+    "REAL-PROCESS",
+    "REAL-PROCESS (rest)"
    ],
    "gaps": [
     {
+     "label": "REAL-PROCESS (rest)",
+     "reason": "An authentication-refusal representative on the live network.",
+     "blockedBy": "not exercised by the lane as written"
+    }
+   ],
+   "evidence": [
+    {
+     "kind": "lane",
      "label": "REAL-PROCESS",
-     "reason": "scripts/q4-live-lane.sh --dry-run passes (syntax, control documents, python checker on a real shim trace); a real run is untested against a network. BLOCKED: the REAL-PROCESS lane (scripts/q4-live-lane.sh) has not been run; it stops at exit 3 unless Q4_WEIGHTED_CHECK confirms an activated weighted epoch and it needs the devnet lock after dev2's Q3 lane closes #50",
-     "blockedBy": "#50 (Q3 lane, devnet lock)"
+     "step": "one light root isolated (held both ways): 8 of 9 progresses, heal releases",
+     "scope": "partition; REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss)"
+    },
+    {
+     "kind": "lane",
+     "label": "REAL-PROCESS",
+     "step": "heavy root delayed: quorum lost, explicit stall, release recovers",
+     "scope": "delay; REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss)"
+    },
+    {
+     "kind": "lane",
+     "label": "REAL-PROCESS",
+     "step": "SIGKILL a light root and restart over the retained home",
+     "scope": "crash; REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss)"
+    },
+    {
+     "kind": "lane",
+     "label": "REAL-PROCESS",
+     "step": "SIGKILL the heavy root: stall, restart recovers",
+     "scope": "crash; REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss)"
     }
    ]
   },
@@ -1026,13 +1215,30 @@
      "bundlePrefix": "TestQ4",
      "minBundles": 60,
      "scope": "exported bundles carry the epoch membership, keys and weights, the full serialized message trace, committed chains and windows; the in-process runs' pins are the commit under test"
-    }
-   ],
-   "gaps": [
+    },
     {
+     "kind": "lane-file",
      "label": "REAL-PROCESS",
-     "reason": "Binary, contract and companion-repo pins and the logs of a real run. BLOCKED: the REAL-PROCESS lane (scripts/q4-live-lane.sh) has not been run; it stops at exit 3 unless Q4_WEIGHTED_CHECK confirms an activated weighted epoch and it needs the devnet lock after dev2's Q3 lane closes #50",
-     "blockedBy": "#50 (Q3 lane, devnet lock)"
+     "path": "pins.txt",
+     "scope": "source, toolchain, binary and execution-client pins"
+    },
+    {
+     "kind": "lane-file",
+     "label": "REAL-PROCESS",
+     "path": "SHA256SUMS",
+     "scope": "checksums of the retained artifacts"
+    },
+    {
+     "kind": "lane-file",
+     "label": "REAL-PROCESS",
+     "path": "weighted-check.txt",
+     "scope": ""
+    },
+    {
+     "kind": "lane-file",
+     "label": "REAL-PROCESS",
+     "path": "q3/activation-record.json",
+     "scope": ""
     }
    ]
   },

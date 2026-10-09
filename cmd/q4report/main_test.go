@@ -61,7 +61,7 @@ func TestReportMapsRowsToEvidenceOrExplicitGaps(t *testing.T) {
 			Gaps: []Gap{{Label: "REAL-PROCESS", Reason: "lane not run", BlockedBy: "#50"}}},
 		{ID: "R3", Title: "gap", Required: []string{"REAL-PROCESS"}, Gaps: []Gap{{Label: "REAL-PROCESS", Reason: "lane not run"}}},
 	}
-	rep, err := Build(f.matrix(t, rows...), []string{results}, f.bundles, "", f.src, false)
+	rep, err := Build(f.matrix(t, rows...), []string{results}, f.bundles, "", f.src, false, "")
 	require.NoError(t, err)
 	require.Empty(t, rep.Problems)
 	require.Equal(t, map[string]int{"COMPLETE": 1, "PARTIAL": 1, "GAP": 1}, rep.Counts)
@@ -71,7 +71,7 @@ func TestReportMapsRowsToEvidenceOrExplicitGaps(t *testing.T) {
 	require.Contains(t, md, "**GAP [REAL-PROCESS]** lane not run (blocked by #50)")
 
 	only := []Row{rows[0]}
-	rep, err = Build(f.matrix(t, only...), []string{results}, f.bundles, "", f.src, false)
+	rep, err = Build(f.matrix(t, only...), []string{results}, f.bundles, "", f.src, false, "")
 	require.NoError(t, err)
 	require.True(t, rep.Closable)
 	require.Contains(t, Markdown(rep), "satisfied")
@@ -94,18 +94,18 @@ func TestReportRefusesEveryUnaccountedRow(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			rep, err := Build(f.matrix(t, tc.row), []string{results}, f.bundles, "", f.src, false)
+			rep, err := Build(f.matrix(t, tc.row), []string{results}, f.bundles, "", f.src, false, "")
 			require.NoError(t, err)
 			require.Len(t, rep.Problems, 1)
 			require.Contains(t, rep.Problems[0], tc.want)
 			require.False(t, rep.Closable)
 		})
 	}
-	_, err := Build(f.matrix(t, Row{ID: "D"}, Row{ID: "D"}), nil, "", "", f.src, false)
+	_, err := Build(f.matrix(t, Row{ID: "D"}, Row{ID: "D"}), nil, "", "", f.src, false, "")
 	require.ErrorContains(t, err, "duplicate row id")
 	raw := `{"version":1,"rows":[{"id":"X","surprise":true}]}`
 	require.NoError(t, os.WriteFile(filepath.Join(f.dir, "u.json"), []byte(raw), 0o644))
-	_, err = Build(filepath.Join(f.dir, "u.json"), nil, "", "", f.src, false)
+	_, err = Build(filepath.Join(f.dir, "u.json"), nil, "", "", f.src, false, "")
 	require.Error(t, err, "an unknown matrix field is refused")
 }
 
@@ -128,15 +128,15 @@ func TestReportRechecksBundlesOffline(t *testing.T) {
 	ev := func(prefix string, min int) Row {
 		return Row{ID: "B", Required: []string{"IN-PROCESS"}, Evidence: []Evidence{{Kind: "bundle", Label: "IN-PROCESS", BundlePrefix: prefix, MinBundles: min}}}
 	}
-	rep, err := Build(f.matrix(t, ev("TestRow", 2)), nil, f.bundles, "", f.src, false)
+	rep, err := Build(f.matrix(t, ev("TestRow", 2)), nil, f.bundles, "", f.src, false, "")
 	require.NoError(t, err)
 	require.Empty(t, rep.Problems)
 	require.Equal(t, 2, rep.Bundles.Clean)
-	rep, err = Build(f.matrix(t, ev("TestRow", 3)), nil, f.bundles, "", f.src, false)
+	rep, err = Build(f.matrix(t, ev("TestRow", 3)), nil, f.bundles, "", f.src, false, "")
 	require.NoError(t, err)
 	require.Contains(t, strings.Join(rep.Problems, "\n"), "evidence was not run", "fewer bundles than the matrix requires")
 	writeBundle(t, f.bundles, "TestRow_three", true)
-	rep, err = Build(f.matrix(t, ev("TestRow", 2)), nil, f.bundles, "", f.src, false)
+	rep, err = Build(f.matrix(t, ev("TestRow", 2)), nil, f.bundles, "", f.src, false, "")
 	require.NoError(t, err)
 	require.NotEmpty(t, rep.Bundles.Failed)
 	require.Contains(t, strings.Join(rep.Problems, "\n"), "TestRow_three.json")
@@ -152,14 +152,14 @@ func TestReportReadsTheQueryCostMeasurements(t *testing.T) {
 		return path
 	}
 	row := Row{ID: "Q", Required: []string{"MEASURED"}, Evidence: []Evidence{{Kind: "cost", Label: "MEASURED"}}}
-	rep, err := Build(f.matrix(t, row), nil, "", write(costRow{Kind: "cold-restart", Supported: true, Within: true}, costRow{Kind: "cold-restart", Distance: 1_000_000, Ms: 4000, BudgetMs: 2000}), f.src, false)
+	rep, err := Build(f.matrix(t, row), nil, "", write(costRow{Kind: "cold-restart", Supported: true, Within: true}, costRow{Kind: "cold-restart", Distance: 1_000_000, Ms: 4000, BudgetMs: 2000}), f.src, false, "")
 	require.NoError(t, err)
 	require.Empty(t, rep.Problems)
 	require.Contains(t, Markdown(rep), "Outside the frozen envelope, measured only")
-	rep, err = Build(f.matrix(t, row), nil, "", write(costRow{Kind: "cold-restart", Supported: true, Within: false}), f.src, false)
+	rep, err = Build(f.matrix(t, row), nil, "", write(costRow{Kind: "cold-restart", Supported: true, Within: false}), f.src, false, "")
 	require.NoError(t, err)
 	require.Contains(t, strings.Join(rep.Problems, "\n"), "failed or is stale")
-	rep, err = Build(f.matrix(t, row), nil, "", "", f.src, false)
+	rep, err = Build(f.matrix(t, row), nil, "", "", f.src, false, "")
 	require.NoError(t, err)
 	require.Contains(t, strings.Join(rep.Problems, "\n"), "was not run", "no measurements, no evidence")
 }
@@ -167,17 +167,17 @@ func TestReportReadsTheQueryCostMeasurements(t *testing.T) {
 func TestStaticModeChecksTheMatrixAndClaimsNothing(t *testing.T) {
 	f := newFixture(t)
 	rows := []Row{{ID: "R", Required: []string{"IN-PROCESS"}, Evidence: []Evidence{test("TestA", "IN-PROCESS")}}}
-	rep, err := Build(f.matrix(t, rows...), nil, "", "", f.src, true)
+	rep, err := Build(f.matrix(t, rows...), nil, "", "", f.src, true, "")
 	require.NoError(t, err)
 	require.Empty(t, rep.Problems, "evidence that was not run is not a problem in the static check")
 	require.False(t, rep.Closable, "and the static check never reports closure")
 	require.Contains(t, Markdown(rep), "not assessed")
 	rows[0].Evidence = []Evidence{test("TestGone", "IN-PROCESS")}
-	rep, err = Build(f.matrix(t, rows...), nil, "", "", f.src, true)
+	rep, err = Build(f.matrix(t, rows...), nil, "", "", f.src, true, "")
 	require.NoError(t, err)
 	require.NotEmpty(t, rep.Problems, "a stale selector is still caught")
 	rows[0] = Row{ID: "R", Required: []string{"IN-PROCESS", "REAL-PROCESS"}, Evidence: []Evidence{test("TestA", "IN-PROCESS")}}
-	rep, err = Build(f.matrix(t, rows...), nil, "", "", f.src, true)
+	rep, err = Build(f.matrix(t, rows...), nil, "", "", f.src, true, "")
 	require.NoError(t, err)
 	require.NotEmpty(t, rep.Problems, "and so is a hole")
 }
@@ -210,4 +210,53 @@ func newKey() ([]byte, error) {
 		return nil, err
 	}
 	return v.MarshalPublicKey()
+}
+
+func writeLane(t *testing.T, dir, mode, log string) {
+	require.NoError(t, os.MkdirAll(dir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "lane.log"), []byte(log), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "run-mode.txt"), []byte("Q4 run mode: "+mode+"\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "pins.txt"), []byte("bft-core commit: x\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "empty.txt"), nil, 0o644))
+}
+
+func TestReportReadsTheLiveLaneEvidence(t *testing.T) {
+	f := newFixture(t)
+	lane := filepath.Join(f.dir, "lane")
+	log := "--- Q3 step: q3_activation\n  PASS: q3_activation\n--- Q4 step: heavy root delayed\n  PASS: heavy root delayed\n--- Q4 step: failing row\n  FAIL: failing row\n"
+	step := func(name string) Row {
+		return Row{ID: "L", Required: []string{"REAL-PROCESS"}, Evidence: []Evidence{{Kind: "lane", Label: "REAL-PROCESS", Step: name}}}
+	}
+	file := func(path string) Row {
+		return Row{ID: "F", Required: []string{"REAL-PROCESS"}, Evidence: []Evidence{{Kind: "lane-file", Label: "REAL-PROCESS", Path: path}}}
+	}
+	build := func(row Row) *Report {
+		rep, err := Build(f.matrix(t, row), nil, "", "", f.src, false, lane)
+		require.NoError(t, err)
+		return rep
+	}
+
+	require.NoError(t, os.MkdirAll(filepath.Join(f.src, "scripts"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(f.src, "scripts", "q4-live-steps.sh"), []byte("q4_step \"heavy root delayed\" x\nq4_step \"failing row\" y\nq4_step \"never ran\" z\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(f.src, "scripts", "q3-weight-activation-steps.sh"), []byte("q3_activation() { :; }\n"), 0o644))
+	writeLane(t, lane, "clean build (evidence run)", log)
+	require.Contains(t, strings.Join(build(step("a step nobody declares")).Problems, "\n"), "failed or is stale")
+	require.Empty(t, build(step("q3_activation")).Problems)
+	require.Empty(t, build(step("heavy root delayed")).Problems)
+	require.Empty(t, build(file("pins.txt")).Problems)
+	require.Contains(t, strings.Join(build(step("failing row")).Problems, "\n"), "failed or is stale")
+	require.Contains(t, strings.Join(build(step("never ran")).Problems, "\n"), "was not run", "no PASS line, no evidence")
+	require.Contains(t, strings.Join(build(file("empty.txt")).Problems, "\n"), "was not run", "an empty file is no evidence")
+	require.Contains(t, strings.Join(build(file("missing.txt")).Problems, "\n"), "was not run")
+
+	// a development override is never evidence, whatever its log says
+	writeLane(t, lane, "DEVELOPMENT OVERRIDE: prebuilt ureth /x: NOT EVIDENCE", log)
+	rep := build(step("q3_activation"))
+	require.Contains(t, strings.Join(rep.Problems, "\n"), "failed or is stale")
+	require.False(t, rep.Lane.Evidence)
+
+	// no lane directory given: lane items are not run
+	rep, err := Build(f.matrix(t, step("q3_activation")), nil, "", "", f.src, false, "")
+	require.NoError(t, err)
+	require.Contains(t, strings.Join(rep.Problems, "\n"), "was not run")
 }
