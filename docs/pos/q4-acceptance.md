@@ -45,6 +45,18 @@ gap remains (that is the #51 closure check), 2 a read error. A row can claim a c
 fails the run. Outcome (pass/fail) stays separate from the assumption class (`IN-BOUND`, `OUTSIDE-ASSUMPTIONS`): an outside-the-assumptions
 row passes when the injection happened and was classified, and proves no safety guarantee.
 
+## The live lane run
+
+```sh
+Q4_BFT_COMMIT=$(git rev-parse HEAD) Q4_URETH_COMMIT=<merged ureth commit> RUGREGATOR_BIN=<F8 pin binary> RUGREGATOR_SOURCE=<F8 pin checkout> scripts/q4-live-lane.sh
+# a ureth built beforehand from a fresh private target at exactly that commit: Q4_URETH_BIN=<it> Q4_URETH_FRESH_BUILD=1 (anything else is a development override and no evidence)
+```
+
+One devnet run (queued on `briefs/devnet-lock.sh`): the Q3 weight-activation flow on the fresh-B1 stack (unit PoA to mirrored weights 6,1,1,1, scheme 2,
+root-wrr-v1), then the Q4 rows through the roots' q4shim build. The gate `Q4_WEIGHTED_CHECK` defaults to `q4_weighted_epoch_check`, a function of the Q3
+flow library that reads the activated epoch from the root's own verified state; its command, output and exit status are kept in `weighted-check.txt`.
+`q4report -lane <evidence dir>` then maps the lane's PASS lines and files to the matrix rows.
+
 ## What is not covered
 
 - **The live lane has not been run.** Every REAL-PROCESS label in the matrix is an explicit gap blocked on #50 (the devnet lock and an
