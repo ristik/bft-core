@@ -151,7 +151,7 @@ q4_row_byzantine_lights() {  # two lights (weight 2 <= F) also send a conflictin
   q4_commits_advance "$Q4_HEAVY_ROOT" "$Q4_RECOVER_SECONDS" 3 || return 1
   for r in $byz; do [ "$(jq -r '.byzantine.byz // 0' "$Q4_SHIM_DIR/root$r/status.json")" -gt 0 ] || { echo "root$r sent nothing Byzantine" >&2; return 1; }; done
   Q4_BYZ_ROOTS=$(echo $byz | tr ' ' ',')
-  for r in $byz; do q4_clear "$r"; done
+  Q4_BYZ_LIST=$byz   # the adapters stay armed until the trace check has read their counters (clearing a control document resets them)
 }
 
 # The F8 callbacks (f8_slow_stop_resume_evm: EVM stopped, aggregators certify new state roots, resumed; f8_inflight_evm_probe) ran in the lane's preamble, in the
@@ -174,7 +174,10 @@ q4_row_f8_follow() {
 q4_row_trace_check() {
   local roots; roots=$(echo $Q4_ROOTS | tr ' ' ',')
   # a SIGKILLed root's torn last trace line is dropped by the checker's loader only if it is the final line
-  python3 scripts/q4-trace-check.py "$Q4_SHIM_DIR" --roots "$roots" ${Q4_BYZ_ROOTS:+--byzantine "$Q4_BYZ_ROOTS"} $(q4_peer_args) | tee "$Q4_DIR/trace-report.json" | jq -e '.verdict == "PASS"' >/dev/null
+  local verdict=0 r
+  python3 scripts/q4-trace-check.py "$Q4_SHIM_DIR" --roots "$roots" ${Q4_BYZ_ROOTS:+--byzantine "$Q4_BYZ_ROOTS"} $(q4_peer_args) | tee "$Q4_DIR/trace-report.json" | jq -e '.verdict == "PASS"' >/dev/null || verdict=1
+  for r in ${Q4_BYZ_LIST:-}; do q4_clear "$r" || true; done
+  return "$verdict"
 }
 
 # the Q3 flow's own initialisation (what q3_run_lane does before its steps) and the activation prefix; each step is the Q3 step, with its Q3 evidence under $Q3_DIR
