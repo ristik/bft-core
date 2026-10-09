@@ -29,14 +29,14 @@ source scripts/lib/q3-flow-lib.sh
 source scripts/lib/p85-lib.sh
 
 p85_pass() { echo "  PASS: $*"; }
-p85_die() {
+p85_step_die() {
   local i
   echo "  FAIL: $*" >&2
   for i in 1 2 3 4 5; do [ -f "test-nodes/root$i/debug.log" ] && { echo "--- tail of root$i/debug.log" >&2; tail -n 6 "test-nodes/root$i/debug.log" | cut -c1-300 >&2; }; done
   q3_teardown
   exit 1
 }
-p85_step() { local name=$1; shift; echo "--- P85 step: $name"; "$@" || p85_die "$name"; p85_pass "$name"; }
+p85_step() { local name=$1; shift; echo "--- P85 step: $name"; "$@" || p85_step_die "$name"; p85_pass "$name"; }
 
 # ---- chain reads (cast) -------------------------------------------------------------------------------------------------------------------------
 P85_DEPLOY=$P85_DIR/pos-deployment.json
