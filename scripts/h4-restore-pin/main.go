@@ -6,7 +6,9 @@ import (
 	"crypto"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -18,14 +20,29 @@ import (
 	"github.com/unicitynetwork/bft-go-base/util"
 )
 
+// Refusals of the tool, each named so a caller (and a test) can tell a missing input from a broken one.
+var (
+	errUsage          = errors.New("usage: h4-restore-pin ARCHIVE TRUST_BASE OUTPUT_PREFIX")
+	errNoCertifiedPin = errors.New("no certified block pin in archive")
+	errNoTrustBodyID  = errors.New("no archived verified-trust body identity")
+)
+
 func main() {
-	if len(os.Args) != 4 {
-		panic("usage: h4-restore-pin ARCHIVE TRUST_BASE OUTPUT_PREFIX")
+	if err := run(os.Args[1:], os.Getenv, os.Stdout); err != nil {
+		fmt.Fprintf(os.Stderr, "h4-restore-pin: %v\n", err)
+		os.Exit(1)
 	}
-	archiveDir, trustPath, prefix := os.Args[1], os.Args[2], os.Args[3]
+}
+
+// run extracts the pin and writes <prefix>.uc.cbor and <prefix>.tr.cbor, printing the pin line to out. Missing input is an error, never a panic.
+func run(args []string, getenv func(string) string, out io.Writer) error {
+	if len(args) != 3 {
+		return errUsage
+	}
+	archiveDir, trustPath, prefix := args[0], args[1], args[2]
 	entries, err := os.ReadDir(archiveDir)
 	if err != nil {
-		panic(err)
+		return fmt.Errorf("reading the archive: %w", err)
 	}
 	var bestUC, bestTR, bestHeader []byte
 	var bestRound uint64
@@ -59,11 +76,11 @@ func main() {
 		}
 	}
 	if bestRound == 0 {
-		panic("no certified block pin in archive")
+		return errNoCertifiedPin
 	}
 	tb, err := util.ReadJsonFile(trustPath, &types.RootTrustBaseV1{})
 	if err != nil {
-		panic(err)
+		return fmt.Errorf("reading the trust base: %w", err)
 	}
 	bodyID, err := archiveTrustBodyID(archiveDir, bestEpoch, tb)
 	if err != nil {
@@ -71,24 +88,25 @@ func main() {
 		// (H4_RESTORE_BODY_IDS="<epoch>=<64 hex>[,<epoch>=<64 hex>...]"). It is an operator anchor, not a trust decision: after catch-up the restored
 		// node compares it with the BodyID of the verified current history for the tip UC's root epoch (checkRestoreTrustBodyID in
 		// cli/ubft/cmd/shard_node_run.go) and refuses to start with ErrTrustBodyIDMismatch if they differ.
-		named, ok := namedBodyID(os.Getenv("H4_RESTORE_BODY_IDS"), bestEpoch)
+		named, ok := namedBodyID(getenv("H4_RESTORE_BODY_IDS"), bestEpoch)
 		if !ok {
-			panic(err)
+			return fmt.Errorf("%w: neither the archive nor H4_RESTORE_BODY_IDS names epoch %d: %w", errNoTrustBodyID, bestEpoch, err)
 		}
 		bodyID = named
 	}
 	if err := os.WriteFile(prefix+".uc.cbor", bestUC, 0600); err != nil {
-		panic(err)
+		return fmt.Errorf("writing the pin: %w", err)
 	}
 	if err := os.WriteFile(prefix+".tr.cbor", bestTR, 0600); err != nil {
-		panic(err)
+		return fmt.Errorf("writing the pin: %w", err)
 	}
 	var header gethtypes.Header
 	if err := rlp.DecodeBytes(bestHeader, &header); err != nil {
-		panic(err)
+		return fmt.Errorf("decoding the pinned header: %w", err)
 	}
-	fmt.Printf("round=%d height=%d blockHash=%s stateRoot=%s receiptsRoot=%s bodyID=0x%x\n",
+	_, err = fmt.Fprintf(out, "round=%d height=%d blockHash=%s stateRoot=%s receiptsRoot=%s bodyID=0x%x\n",
 		bestRound, header.Number.Uint64(), header.Hash(), header.Root, header.ReceiptHash, bodyID)
+	return err
 }
 
 func namedBodyID(spec string, epoch uint64) ([32]byte, bool) {
@@ -142,7 +160,7 @@ func archiveTrustBodyID(archiveDir string, epoch uint64, anchor *types.RootTrust
 		}
 		return [32]byte(bundle.Body.Identity()), nil
 	}
-	return [32]byte{}, fmt.Errorf("no archived verified-trust body identity for epoch %d", epoch)
+	return [32]byte{}, fmt.Errorf("%w for epoch %d", errNoTrustBodyID, epoch)
 }
 
 func archiveRecordDirectory(name string) bool {

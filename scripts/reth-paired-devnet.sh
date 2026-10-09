@@ -913,7 +913,7 @@ if [ "${M2_PROFILE2:-0}" = 1 ] && [ "${POST_M2A_SKIP_HANDOFF:-0}" != 1 ]; then
   fi
   if [ "${F8_MIXED_LANE:-0}" = 1 ]; then
     f8_trace || { fail "aggregator shards lost root coverage after handoff"; exit 1; }
-    pass "one root handoff replaced validator keys and certified paid transactions"
+    pass "one root handoff (same members, Q3 flow) certified paid transactions"
     pass "all three aggregator shards remained live through the root handoff"
   else
     pass "two profile-2 handoffs (same members, Q3 flow) certified paid transactions"

@@ -71,7 +71,11 @@ h3_advance_authorities() { # root epoch, shard epoch, ids...
   local retained=() joiners=() i
   for i in "$@"; do if [ "$i" -ge 5 ] || [[ " ${H3_RESTORE_RESTART:-} " == *" $i "* ]]; then joiners+=("$i"); else retained+=("$i"); fi; done
   if [ "${#retained[@]}" -gt 0 ]; then
-    M2_ADVANCE_TOLERATE_STOPPED=1 M2_ADVANCE_NO_REPLICA_WAIT=1 m2_advance_authorities "$rootEpoch" "trust-base-epoch${rootEpoch}.json" "$pdr" "${retained[*]}" || return 1
+    # The archive-replica catch-up wait (m2_advance_authorities) is the rule for every lane, and this helper serves the lanes that hold validators down on
+    # purpose (the H3 lane; the T6 coupled rotation, where the retired validator is stopped and the joiner has not started): their replicas cannot
+    # acknowledge, so it skips unless the caller asks for the wait. A lane that keeps every validator online asks with M2_ADVANCE_NO_REPLICA_WAIT=0 (Q3).
+    M2_ADVANCE_TOLERATE_STOPPED=1 M2_ADVANCE_NO_REPLICA_WAIT=${M2_ADVANCE_NO_REPLICA_WAIT:-1} \
+      m2_advance_authorities "$rootEpoch" "trust-base-epoch${rootEpoch}.json" "$pdr" "${retained[*]}" || return 1
   fi
   # A joiner's genesis configuration does not name it, so a plain start of its node is refused: it comes back by RESTORING (its signing key
   # is bound from the verified handoff history), under its advanced authority.

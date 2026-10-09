@@ -223,23 +223,42 @@ var ErrAuthorityKeyConflict = errors.New("shardnode: the signing authority's exp
 
 /*
 DeferredAuthoritySigner is an authority signer whose expected key is not known when the node starts: a JOINER, whose key appears only
-in a shard configuration the genesis one precedes. The client is provisioned as for NewAuthoritySigner; the expected key is bound later,
-once, from a configuration the node has VERIFIED (the activated assignment of a verified handoff bundle), and never from the authority's
-own answer. Until it is bound the signer refuses every request (ErrAuthorityKeyUnbound); once bound it is exactly NewAuthoritySigner's.
-It keeps the record-keeping property of that signer: the restore readiness and status probes need the client only.
+in a shard configuration the genesis one precedes. The expected key is bound later, once, from a configuration the node has VERIFIED (the
+activated assignment of a verified handoff bundle), and never from the authority's own answer. Until it is bound the signer refuses every
+request (ErrAuthorityKeyUnbound); once bound it is exactly NewAuthoritySigner's.
+
+A STAGING-ONLY joiner (no key bound) signs nothing, so it needs no session: the authority issues none before its enrollment names its key,
+and that configuration exists only after the Commit. The client is therefore provisioned lazily (NewLazyDeferredAuthoritySigner): the
+session is acquired when a request needs it, which for a signature is only after the key is bound. A signer built with a client
+(NewDeferredAuthoritySigner) has it from the start. The restore probes use the client when there is one; a staging-only joiner with no
+session yet has nothing to probe: its readiness is trivially met (it signs nothing) and its status reports the missing session.
 */
 type DeferredAuthoritySigner struct {
-	mu     sync.Mutex
-	client SigningAuthorityClient
-	bound  *authoritySigner
-	key    []byte
+	mu        sync.Mutex
+	client    SigningAuthorityClient
+	provision func() (SigningAuthorityClient, error)
+	bound     *authoritySigner
+	key       abcrypto.Verifier
+	raw       []byte
 }
+
+// ErrAuthoritySessionUnavailable is a lazily provisioned signer whose session could not be acquired (no credential has been issued yet).
+var ErrAuthoritySessionUnavailable = errors.New("shardnode: no signing authority session is available")
 
 func NewDeferredAuthoritySigner(client SigningAuthorityClient) (*DeferredAuthoritySigner, error) {
 	if client == nil {
 		return nil, fmt.Errorf("shardnode: no signing authority client")
 	}
 	return &DeferredAuthoritySigner{client: client}, nil
+}
+
+// NewLazyDeferredAuthoritySigner is NewDeferredAuthoritySigner without a session at construction: provision is called when a request needs
+// the client (and again after a failure), so a staging-only joiner starts before any session exists.
+func NewLazyDeferredAuthoritySigner(provision func() (SigningAuthorityClient, error)) (*DeferredAuthoritySigner, error) {
+	if provision == nil {
+		return nil, fmt.Errorf("shardnode: no signing authority client provisioner")
+	}
+	return &DeferredAuthoritySigner{provision: provision}, nil
 }
 
 // BindKey fixes the expected key. Binding the same key again is a no-op; a different one is ErrAuthorityKeyConflict.
@@ -253,29 +272,76 @@ func (d *DeferredAuthoritySigner) BindKey(key abcrypto.Verifier) error {
 	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	if d.bound != nil {
-		if !bytes.Equal(d.key, raw) {
+	if d.key != nil {
+		if !bytes.Equal(d.raw, raw) {
 			return ErrAuthorityKeyConflict
 		}
 		return nil
 	}
-	d.bound, d.key = &authoritySigner{client: d.client, authorityKey: key}, bytes.Clone(raw)
+	d.key, d.raw = key, bytes.Clone(raw)
 	return nil
 }
 
 // Bound reports whether the expected key has been bound.
-func (d *DeferredAuthoritySigner) Bound() bool { return d.current() != nil }
-
-func (d *DeferredAuthoritySigner) current() *authoritySigner {
+func (d *DeferredAuthoritySigner) Bound() bool {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	return d.bound
+	return d.key != nil
+}
+
+// clientLocked is the client, provisioning it when it is lazy and not yet there.
+func (d *DeferredAuthoritySigner) clientLocked() (SigningAuthorityClient, error) {
+	if d.client != nil {
+		return d.client, nil
+	}
+	if d.provision == nil {
+		return nil, ErrAuthoritySessionUnavailable
+	}
+	c, err := d.provision()
+	if err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrAuthoritySessionUnavailable, err)
+	}
+	d.client = c
+	return c, nil
+}
+
+// current is the bound signer, nil while the key is unbound. Binding the key is what promotes a staging-only joiner: the session is
+// acquired here, on the first request after the bind.
+func (d *DeferredAuthoritySigner) current() (*authoritySigner, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.key == nil {
+		return nil, nil
+	}
+	if d.bound == nil {
+		c, err := d.clientLocked()
+		if err != nil {
+			return nil, err
+		}
+		d.bound = &authoritySigner{client: c, authorityKey: d.key}
+	}
+	return d.bound, nil
+}
+
+// probeSigner is the signer the restore probes use. stagingOnly is true for a joiner with no key bound and no session yet: there is
+// nothing to probe, and it signs nothing.
+func (d *DeferredAuthoritySigner) probeSigner() (probe *authoritySigner, stagingOnly bool, err error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	c, err := d.clientLocked()
+	if err != nil {
+		return nil, d.key == nil, err
+	}
+	return &authoritySigner{client: c}, false, nil
 }
 
 func (d *DeferredAuthoritySigner) signsOnlyWhatAnIndependentRecordAdmits() {}
 
 func (d *DeferredAuthoritySigner) Sign(ctx context.Context, uc *types.UnicityCertificate, tr *certification.TechnicalRecord, proposed *certification.BlockCertificationRequest) (*certification.BlockCertificationRequest, error) {
-	s := d.current()
+	s, err := d.current()
+	if err != nil {
+		return nil, err
+	}
 	if s == nil {
 		return nil, ErrAuthorityKeyUnbound
 	}
@@ -283,9 +349,20 @@ func (d *DeferredAuthoritySigner) Sign(ctx context.Context, uc *types.UnicityCer
 }
 
 func (d *DeferredAuthoritySigner) RestoreReadiness(ctx context.Context, round uint64) error {
-	return (&authoritySigner{client: d.client}).RestoreReadiness(ctx, round)
+	probe, stagingOnly, err := d.probeSigner()
+	if stagingOnly {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	return probe.RestoreReadiness(ctx, round)
 }
 
 func (d *DeferredAuthoritySigner) RestoreStatus(ctx context.Context) (signingauthority.Status, error) {
-	return (&authoritySigner{client: d.client}).RestoreStatus(ctx)
+	probe, _, err := d.probeSigner()
+	if err != nil {
+		return signingauthority.Status{}, err
+	}
+	return probe.RestoreStatus(ctx)
 }
