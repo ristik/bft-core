@@ -907,7 +907,7 @@ if [ "${M2_PROFILE2:-0}" = 1 ] && [ "${POST_M2A_SKIP_HANDOFF:-0}" != 1 ]; then
     pass "one root handoff replaced validator keys and certified paid transactions"
     pass "all three aggregator shards remained live through the root handoff"
   else
-    pass "two profile-2 handoffs replaced validator keys and certified paid transactions"
+    pass "two profile-2 handoffs (same members, Q3 flow) certified paid transactions"
   fi
 elif [ "${M2_PROFILE2:-0}" = 1 ] && [ "${POST_M2A_SKIP_HANDOFF:-0}" = 1 ]; then
   pass "T4 audit lane skipped the optional profile-2 root handoffs"
