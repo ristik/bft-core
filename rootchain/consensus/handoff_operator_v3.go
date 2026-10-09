@@ -154,6 +154,9 @@ type Q3Status struct {
 	Genesis     [32]byte
 	Staged      *Q3Staged
 	ActiveEpoch uint64
+	// Follower is true while the installed epoch's committee does not name this node: it follows, verifies, catches up and stages, and its
+	// safety module refuses every signature (ErrNotAMember). It is derived from the authenticated trust base, never set by a flag.
+	Follower bool
 }
 
 // Q3Status reports the chain this node's verified history is rooted in, the staged candidate and the installed epoch.
@@ -165,7 +168,12 @@ func (x *ConsensusManager) Q3Status() (Q3Status, error) {
 	if err != nil {
 		return Q3Status{}, err
 	}
-	return Q3Status{Network: cfg.Network, Genesis: cfg.Genesis, Staged: x.q3Staged.Load(), ActiveEpoch: x.InstalledRootEpoch()}, nil
+	installed := x.InstalledRootEpoch()
+	follower := false
+	if x.safety != nil && x.safety.members != nil {
+		follower = x.safety.member(installed) != nil
+	}
+	return Q3Status{Network: cfg.Network, Genesis: cfg.Genesis, Staged: x.q3Staged.Load(), ActiveEpoch: installed, Follower: follower}, nil
 }
 
 // ErrV3CandidateSuperseded is returned when the candidate the members signed readiness for is not the one this validator would derive any
