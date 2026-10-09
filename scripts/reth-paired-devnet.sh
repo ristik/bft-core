@@ -245,8 +245,15 @@ echo "generated genesis sha256=$genesisSHA"
 # genesis (layout 3), of ureth's --unicity.* bindings and of the shard nodes' Update admission (--b1-profile), as in scripts/dnb-devnet.sh.
 b1GasLimit=30000000
 if [ "${Q3_B1:-0}" = 1 ]; then
+  p85ProfileArgs=()
+  if [ "${P85_LANE:-0}" = 1 ]; then   # proof of stake (briefs/p85-recovery-lane.md): the contracts' genesis state is allocated, the profile pins the hooks
+    source scripts/lib/p85-lib.sh
+    p85_prepare_genesis || { echo "p85 genesis preparation failed" >&2; exit 1; }
+    p85ProfileArgs=($(p85_profile_args))
+  fi
   build/ubft engine-api b1-profile --shard-conf "test-nodes/shard-conf-${partitionID}_0.json" --trust-base test-nodes/trust-base.json \
-    --w-cert "${Q3_B1_W_CERT:-15}" --out test-nodes/b1-profile.json | tee test-nodes/b1-profile.out || { echo "b1-profile failed" >&2; exit 1; }
+    --w-cert "${Q3_B1_W_CERT:-15}" --out test-nodes/b1-profile.json ${p85ProfileArgs[@]+"${p85ProfileArgs[@]}"} | tee test-nodes/b1-profile.out || { echo "b1-profile failed" >&2; exit 1; }
+  if [ "${P85_LANE:-0}" = 1 ]; then p85_write_pos_deployment test-nodes/b1-profile.json || exit 1; fi
   b1GasLimit=$(python3 -c "import json;print(json.load(open('test-nodes/b1-profile.json'))['maxGas'])")
   export EVM_B1_PROFILE=test-nodes/b1-profile.json URETH_B1_PROFILE_OUT=test-nodes/b1-profile.out URETH_BUILDER_GASLIMIT=$b1GasLimit
 fi
@@ -275,6 +282,7 @@ if __import__("os").environ.get("M1_FEE_ACCOUNTING") == "1":
     g["baseFeePerGas"] = "0xf4241"  # 1,000,001 wei; production floor is 1,000,000 wei
 json.dump(g, open("test-nodes/evm-genesis-funded.json", "w"), indent=2)
 PY
+if [ "${P85_LANE:-0}" = 1 ]; then p85_merge_alloc test-nodes/evm-genesis-funded.json || exit 1; fi
 fundedSHA=$(shasum -a 256 test-nodes/evm-genesis-funded.json | cut -d' ' -f1)
 echo "funded genesis source sha256=$fundedSHA"
 # The funding edit replaces alloc, so finalize it again through U5a. That inserts the pinned
@@ -888,6 +896,7 @@ if [ "${M2_PROFILE2:-0}" = 1 ] && [ "${POST_M2A_SKIP_HANDOFF:-0}" != 1 ]; then
   if [ "${H3_ASSIGNMENT_LANE:-0}" = 1 ]; then handoffScript=scripts/h3-assignment-steps.sh; fi
   if [ "${Q3_WEIGHT_LANE:-0}" = 1 ]; then handoffScript=scripts/q3-weight-activation-steps.sh; fi   # Q3 #50 slice E: runs on the H3 lane's layout-2 genesis
   if [ "${Q4_LIVE_LANE:-0}" = 1 ]; then handoffScript=scripts/q4-live-steps.sh; fi
+  if [ "${P85_LANE:-0}" = 1 ]; then handoffScript=scripts/p85-recovery-steps.sh; fi
   if ! source "$handoffScript"; then
     fail "profile-2 two-handoff lane failed"
     exit 1
