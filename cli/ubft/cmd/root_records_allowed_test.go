@@ -36,6 +36,12 @@ func TestRecordsFeedServesTheInstalledAssignmentsMembers(t *testing.T) {
 	other := recordsFeedAllowed(static, []*types.PartitionDescriptionRecord{{PartitionID: 9}}, fakeMembers{installedButOtherShard: true}, func(peer.ID) bool { return false })
 	require.False(t, other(installedButOtherShard))
 
+	// a candidate whose assignment is not installed yet is refused until it is
+	candidate := peerIDOf(t)
+	require.False(t, allowed(candidate), "a candidate that is not installed is refused")
+	members[candidate] = true
+	require.True(t, allowed(candidate), "and served once the installed configuration names it")
+
 	// the membership follows the installed configuration: a validator it stops naming is no longer served
 	members[joiner] = false
 	require.False(t, allowed(joiner))

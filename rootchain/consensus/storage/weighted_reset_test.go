@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	"github.com/unicitynetwork/bft-go-base/types"
 
 	"github.com/unicitynetwork/bft-core/internal/quorumweight"
 )
@@ -59,4 +60,42 @@ func TestAWeightedEVMConfigurationHasNoUnitRequestContext(t *testing.T) {
 		require.NotNil(t, u.RequestContext())
 		require.EqualValues(t, 3, u.TotalWeight())
 	})
+}
+
+// Membership of the installed configuration is answered from the installed verifiers, so it holds for a weighted EVM assignment (which has
+// no unit request context, and so no SignerWeight) as for a unit one; a candidate the installed configuration does not name is not a member
+// until its assignment is installed.
+func TestShardInfoMembershipIsTheInstalledConfigurationsForWeightedAndUnitAlike(t *testing.T) {
+	f := newViewFixture(t)
+	install := func(si *ShardInfo, conf *types.PartitionDescriptionRecord) {
+		t.Helper()
+		h, err := conf.Hash(crypto.SHA256)
+		require.NoError(t, err)
+		si.resetFeeList(conf)
+		require.NoError(t, si.resetTrustBase(conf, crypto.SHA256, h))
+	}
+	weighted, _ := f.pdr(1, 7, 2, fxBody0, f.member(0, 0, 6), f.member(1, 1, 1), f.member(2, 2, 1))
+	si := &ShardInfo{}
+	install(si, weighted)
+	require.Nil(t, si.RequestContext(), "a weighted configuration has no unit request context")
+	_, err := si.SignerWeight(f.id(0))
+	require.Error(t, err, "so SignerWeight cannot answer membership here")
+	for i := 0; i < 3; i++ {
+		require.True(t, si.IsMember(f.id(i)), "member %d of the weighted configuration", i)
+	}
+	require.False(t, si.IsMember(f.id(3)), "a candidate that is not installed is refused")
+
+	// the successor assignment (the candidate joins, member 2 leaves) is installed: membership follows it, not before
+	next, _ := f.pdr(1, 7, 3, fxBody0, f.member(0, 0, 6), f.member(1, 1, 1), f.member(3, 3, 1))
+	install(si, next)
+	require.True(t, si.IsMember(f.id(3)), "the joiner once its assignment is installed")
+	require.False(t, si.IsMember(f.id(2)), "a validator the installed configuration stopped naming")
+
+	unit, _ := f.pdr(1, 7, 2, fxBody0, f.member(0, 0, 1), f.member(1, 1, 1), f.member(2, 2, 1))
+	u := &ShardInfo{}
+	install(u, unit)
+	require.NotNil(t, u.RequestContext())
+	require.True(t, u.IsMember(f.id(2)))
+	require.False(t, u.IsMember(f.id(3)))
+	require.False(t, (&ShardInfo{}).IsMember(f.id(0)), "nothing is installed yet")
 }

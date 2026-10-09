@@ -1811,8 +1811,7 @@ func (x *ConsensusManager) IsShardValidator(partition types.PartitionID, shard t
 	if err != nil {
 		return false
 	}
-	_, err = si.SignerWeight(id.String())
-	return err == nil
+	return si.IsMember(id.String())
 }
 
 func (x *ConsensusManager) ShardInfo(partition types.PartitionID, shard types.ShardID) (*storage.ShardInfo, error) {
