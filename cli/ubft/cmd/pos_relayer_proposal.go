@@ -135,6 +135,11 @@ func newPosProposalCmd() *cobra.Command {
 					return err
 				}
 			}
+			for name, v := range map[string]string{"result-id.txt": fmt.Sprintf("0x%x", out.ResultID), "attempt.txt": fmt.Sprint(out.Attempt)} {
+				if err := os.WriteFile(filepath.Join(outDir, name), []byte(v+"\n"), 0o600); err != nil {
+					return err
+				}
+			}
 			digest, _ := evmassign.IdentitiesDigest(out.Identities)
 			cmd.PrintErrf("result 0x%x (election attempt %d): %d members, identities digest 0x%x\n", out.ResultID, out.Attempt, len(out.Identities), digest)
 			return nil

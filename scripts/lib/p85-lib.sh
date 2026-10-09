@@ -16,8 +16,8 @@ P85_BOND_UNIT=${P85_BOND_UNIT:-100000000000000000000}   # 100 UCT in base units:
 P85_GENESIS_UNITS=${P85_GENESIS_UNITS:-1}          # bond units per genesis identity (unit weights, like the PoA lanes)
 P85_H_RECORDS=${P85_H_RECORDS:-2}
 P85_HOOK_RECORD_GAS=${P85_HOOK_RECORD_GAS:-3000000}
-P85_CADENCE_ROUNDS=${P85_CADENCE_ROUNDS:-60}       # the election is due this many ordinary rounds after the last acknowledged rotation...
-P85_CADENCE_SECONDS=${P85_CADENCE_SECONDS:-30}     # ...and this many UC seconds
+P85_CADENCE_ROUNDS=${P85_CADENCE_ROUNDS:-400}      # the election is due this many ordinary rounds after the last acknowledged rotation (the joiner is onboarded first)...
+P85_CADENCE_SECONDS=${P85_CADENCE_SECONDS:-300}    # ...and this many UC seconds
 P85_REGISTRY=0xff00000000000000000000000000000000000002
 P85_TREASURY=0x00000000000000000000000000000000000000ee
 
@@ -66,12 +66,28 @@ print(json.dumps({
 PY
 }
 
+P85_CAST=${P85_CAST:-$HOME/.foundry/bin/cast}
+P85_JOINER_FUND_WEI=${P85_JOINER_FUND_WEI:-300000000000000000000}   # 3 bond units: the joiner's bond and the gas of its transactions
+
+# The joiner entity's EVM-side account (owner of its custody identity; it also pays the relayer transactions of the lane). It is funded in the
+# genesis alloc, so the lane needs no faucet. Its root/EVM keys are the nodes' own (written by the lane when the joiner's nodes exist).
+p85_joiner_prepare() {
+  local d=$P85_DIR/joiner
+  mkdir -p "$d"
+  [ -s "$d/owner.key" ] || { printf '0x%s\n' "$(openssl rand -hex 32)" >"$d/owner.key"; chmod 600 "$d/owner.key"; }
+  "$P85_CAST" wallet address --private-key "$(cat "$d/owner.key")" >"$d/owner.addr" || p85_die "cast is not available (P85_CAST)" || return 1
+  printf '0x%s\n' "$(printf 'p85-lane/withdrawal/joiner' | shasum -a 256 | cut -c1-40)" >"$d/withdrawal.addr"
+  printf '0x%s\n' "$(printf 'p85-lane/payee/joiner' | shasum -a 256 | cut -c1-40)" >"$d/payee.addr"
+}
+
 p85_merge_alloc() {
   local src=$1
   [ -s "$P85_DIR/genesis/alloc.json" ] || return 0
-  python3 - "$src" "$P85_DIR/genesis/alloc.json" <<'PY'
+  p85_joiner_prepare || return 1
+  python3 - "$src" "$P85_DIR/genesis/alloc.json" "$(cat "$P85_DIR/joiner/owner.addr")" "$P85_JOINER_FUND_WEI" <<'PY'
 import json, sys
 g = json.load(open(sys.argv[1])); extra = json.load(open(sys.argv[2]))
+extra[sys.argv[3]] = {"balance": hex(int(sys.argv[4]))}
 for addr, acct in extra.items():
     if addr in g["alloc"] or addr.lower() in {k.lower() for k in g["alloc"]}:
         sys.exit(f"alloc already has {addr}")
