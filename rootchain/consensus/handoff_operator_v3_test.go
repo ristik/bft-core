@@ -278,3 +278,39 @@ func TestAValidatorStagesAnotherValidatorsCandidateOnlyForItsOwnChain(t *testing
 	require.NoError(t, err)
 	require.Equal(t, cand.Candidate, st.Staged.CandidateDigest, "a refused candidate does not replace the staged one")
 }
+
+// activeV3Epoch is a Q3 history whose installed epoch is a V3 (weighted) epoch: the only thing the planner asks of it.
+type activeV3Epoch struct{ Q3Authority }
+
+func (activeV3Epoch) Activated(uint64) (q3format.Entry, bool) { return q3format.Entry{}, true }
+
+// A plan request that is neither Q3 nor carries receipts is a V2 plan. In a V3 epoch it is refused by name, decided from the root's
+// authenticated epoch; the same request in a unit-stake, non-V3 epoch still plans. Only the epoch kind differs between the two.
+func TestAV2PlanInAV3EpochIsRefusedByName(t *testing.T) {
+	f := newPlanFixture(t)
+	state := certifiedParentState(t, f)
+	next := f.next
+
+	t.Run("a unit-stake non-V3 epoch plans V2", func(t *testing.T) {
+		plan, err := f.cm.buildHandoffPlanFromState(&next, state, nil)
+		require.NoError(t, err)
+		require.NotEmpty(t, plan.Body)
+	})
+
+	t.Run("a V3 epoch refuses the same request by name", func(t *testing.T) {
+		current := *f.cm.trustBase.Load()
+		defer f.cm.trustBase.Store(&current)
+		later := current
+		later.Epoch = 2 // epoch 1 is the genesis epoch, never V3
+		f.cm.trustBase.Store(&later)
+		f.cm.q3 = activeV3Epoch{}
+		defer func() { f.cm.q3 = nil }()
+		require.EqualValues(t, q3format.BodyVersion, f.cm.currentBodyVersion())
+		_, err := f.cm.buildHandoffPlanFromState(&next, state, nil)
+		require.ErrorIs(t, err, ErrHandoffNeedsV3Plan)
+		require.ErrorIs(t, err, ErrHandoffApproval, "the named refusal is still an approval refusal")
+		_, err = f.cm.PlanHandoff(&next, nil)
+		require.ErrorIs(t, err, ErrHandoffNeedsV3Plan, "the operator entry point refuses before it registers any intent")
+		require.Nil(t, f.cm.pendingIntent(0))
+	})
+}
