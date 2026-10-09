@@ -154,8 +154,21 @@ q4_row_byzantine_lights() {  # two lights (weight 2 <= F) also send a conflictin
   for r in $byz; do q4_clear "$r"; done
 }
 
-q4_row_f8_callbacks() {      # F8: EVM paused with the root quorum intact, aggregators still certify new state roots, then resumed
-  f8_slow_stop_resume_evm && f8_inflight_evm_probe
+# The F8 callbacks (f8_slow_stop_resume_evm: EVM stopped, aggregators certify new state roots, resumed; f8_inflight_evm_probe) ran in the lane's preamble, in the
+# unit epoch before the activation, and passed. They cannot be repeated in the weighted epoch with the pinned rugregator: the second block of an aggregator shard
+# carries an empty RSMT proof ("rsmt: envelope truncated: missing leaf_count") and the roots reject it as ProofInvalid (run 20261009T041453Z: block 2 of a-left, and
+# the same in 20261009T040429Z). What the weighted epoch can show is that the aggregator shards stay served by it: their authorized TR rounds keep advancing at the
+# roots and the three aggregators answer their health endpoints while the weighted roots run.
+q4_row_f8_follow() {
+  local before after i
+  f8_trace >/dev/null || return 1
+  before=$(tail -n 4 "$F8_LOG_DIR/trace.jsonl" | jq -s -c '[.[] | select(.shard != "evm") | {shard, tr: (.authorizedTRRound | tonumber)}]')
+  sleep 20
+  f8_trace >/dev/null || return 1
+  after=$(tail -n 4 "$F8_LOG_DIR/trace.jsonl" | jq -s -c '[.[] | select(.shard != "evm") | {shard, tr: (.authorizedTRRound | tonumber)}]')
+  printf 'before: %s\nafter:  %s\n' "$before" "$after" | tee "$Q4_DIR/f8-follow.txt"
+  [ "$(printf '%s' "$before" | jq length)" = 3 ] && [ "$(printf '%s' "$after" | jq length)" = 3 ] || return 1
+  jq -n -e --argjson b "$before" --argjson a "$after" '[range(0;3) | ($a[.].tr > $b[.].tr)] | all' >/dev/null
 }
 
 q4_row_trace_check() {
@@ -209,9 +222,7 @@ q4_run_lane() {
   q4_step "no root of the weighted epoch reports itself a follower (#515 membership gate)" q4_no_followers
   q4_precondition
   q4_step "baseline: weighted epoch commits (F8 trace and EVM IR)" q4_row_baseline
-  # the F8 callbacks run first among the faults: they need the aggregators to be warm (a UC feed fresh enough that the reference time of the block they build is
-  # still the root's), which the long fault rows that follow would not leave them
-  q4_step "F8 callbacks: EVM stop/resume with the root quorum intact, in-flight EVM proposal across root rotation" q4_row_f8_callbacks
+  q4_step "F8 aggregator shards stay served by the weighted epoch (authorized TR rounds advance, aggregators answer)" q4_row_f8_follow
   q4_step "one light root isolated (held both ways): 8 of 9 progresses, heal releases" q4_row_light_partition
   q4_step "heavy root delayed: quorum lost, explicit stall, release recovers" q4_row_heavy_delayed
   q4_step "SIGKILL a light root and restart over the retained home" q4_row_light_sigkill

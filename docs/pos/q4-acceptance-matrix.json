@@ -594,8 +594,8 @@
     {
      "kind": "lane",
      "label": "REAL-PROCESS",
-     "step": "F8 callbacks: EVM stop/resume with the root quorum intact, in-flight EVM proposal across root rotation",
-     "scope": "F8 EVM pause/resume; REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss)"
+     "step": "F8 aggregator shards stay served by the weighted epoch (authorized TR rounds advance, aggregators answer)",
+     "scope": "the aggregators stay served while the weighted roots run; REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss)"
     }
    ],
    "gaps": [
@@ -879,7 +879,8 @@
    "design": "Design v2 section 4, first paragraph.",
    "required": [
     "IN-PROCESS",
-    "REAL-PROCESS"
+    "REAL-PROCESS",
+    "REAL-PROCESS (unit epoch)"
    ],
    "evidence": [
     {
@@ -904,10 +905,26 @@
      "scope": "independent shards"
     },
     {
+     "kind": "lane-file",
+     "label": "REAL-PROCESS (unit epoch)",
+     "path": "lane.log",
+     "scope": "the F8 callbacks (EVM stopped with the root quorum intact, the three aggregators certify new state roots, EVM resumed; the in-flight EVM proposal certifies across a root rotation) in the lane preamble: unit PoA epoch, before the activation",
+     "contains": [
+      "PASS: aggregators continued through delayed/stopped EVM; reconnect and in-flight EVM proposal passed"
+     ]
+    },
+    {
      "kind": "lane",
      "label": "REAL-PROCESS",
-     "step": "F8 callbacks: EVM stop/resume with the root quorum intact, in-flight EVM proposal across root rotation",
-     "scope": "three aggregators certify changing state roots with EVM paused; the in-flight EVM proposal certifies across a root rotation; REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss)"
+     "step": "F8 aggregator shards stay served by the weighted epoch (authorized TR rounds advance, aggregators answer)",
+     "scope": "after the activation: the aggregator shards stay served by the weighted epoch (not a new certified block); REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss)"
+    }
+   ],
+   "gaps": [
+    {
+     "label": "REAL-PROCESS",
+     "reason": "The F8 callbacks cannot be repeated in the weighted epoch with the pinned rugregator (dd5b1406): the second block of an aggregator shard carries an empty RSMT proof ('rsmt: envelope truncated: missing leaf_count') and the roots reject it as ProofInvalid, so the aggregators cannot certify a new state root after their first block in this stack. Observed twice (lane runs 20261009T040429Z, T041453Z), independent of the Q4 rows; needs the F8 owner (rugregator proof for a non-first block, or the root verifier).",
+     "blockedBy": "F8 / rugregator second-block proof"
     }
    ]
   },

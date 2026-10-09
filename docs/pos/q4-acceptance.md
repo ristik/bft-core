@@ -63,6 +63,7 @@ Before any fault the lane also checks that the selector in effect is the weighte
   activated weighted epoch). Closure of #51 needs those rows.
 - Every in-process row is root consensus only: no EVM, no aggregator shard, restarts are close/reopen of fsynced stores (not SIGKILL, not
   power loss). The checker does not re-verify the signatures inside a carried QC (it weighs the QC's signers under their epoch); carried TCs and the HighQC inside a timeout are not weighed; equivocation is detected for votes and timeouts only, not proposals.
+- **The F8 callbacks (EVM stop/resume, aggregators certifying new state roots) are evidenced only in the lane preamble, in the unit epoch.** They cannot be repeated in the weighted epoch with the pinned rugregator: the second block of an aggregator shard carries an empty RSMT proof ("missing leaf_count") and the roots reject it as ProofInvalid. In the weighted epoch the lane shows only that the aggregator shards stay served (their authorized TR rounds advance and the aggregators answer). Row T1 carries the explicit gap.
 - No non-member or removed-validator root runs in the live lane (all four roots stay members): the follower signing nothing and catching up on a real network is an explicit gap (row L5), blocked on the P85 slice 7 joiner run or an A to B removal handoff.
 - Mixed-HighQC TC is covered only by the unit-weight unit test, not weighted.
 - The execution-entry-point authentication entry gate (G2) is not touched by any Q4 test.
