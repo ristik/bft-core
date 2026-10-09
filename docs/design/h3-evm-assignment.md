@@ -231,6 +231,11 @@ in production, and there is no migration (greenroom, one format).
   chain, its head and the committed recovery count from that, so a restart, a new attempt or an abort cannot reset the allowance and an
   uncommitted retry consumes none. One committed recovery per frozen parent (`ErrRecoveryUsed`); no primary may replace a committed primary
   (`ErrPendingPrimary`); the unacknowledged chain is at most two (`ErrSpan`, `handoff.MaxSupersessionSpan = 2`).
+- **Weights are quantized (`q`), raw stake is committed beside it.** A primary candidate's identity records carry the committed weight
+  `q` and the raw bonded weight `x`; `q = quant(x over the set, B = 65,536)` is checked at admission (`evmassign.CheckQuantized`, for J and
+  for K; K is never re-quantized) and both enter the identities and exposure digests. BFT safety then assumes the Byzantine committed
+  q-weight is below one third (a subset's share differs from its raw share by less than `2n/Q`, under 0.4% at the cap); see
+  [P85 weight quantization](p85-weight-quantization.md).
 - **NodeID encoding for custody.** Root chain NodeIDs stay libp2p peer-ID strings here. The custody contracts treat them as opaque
   `bytes32`, so the one canonical image is `evmassign.NodeIDWord(id) = keccak256(utf8(id))`: derived at the boundary, never carried or
   signed in place of the string, injective up to collisions, and tied to the key by the key hash that sits beside it in every signed

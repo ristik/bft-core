@@ -1,7 +1,9 @@
 # P85 weight quantization (bounded weighted leader lookup, Part 2)
 
-Design: `briefs/leader-lookup.md` as amended by `briefs/leader-lookup-review.md` (F1-F3, A1, A5). Status: the pure function and its vectors are
-implemented in all three places; the election, custody, root projection and ureth cap follow in the slices listed at the end.
+Design: `briefs/leader-lookup.md` as amended by `briefs/leader-lookup-review.md` (F1-F3, A1, A5). Status: implemented in the contracts
+(election, custody), the root (`evmassign`) and ureth; the security premise is also stated in
+[the weighted trust-base note](d3-weighted-consensus-trust-base.md), [the H3 amendment](h3-evm-assignment.md) and the
+[fault model](../pos/poa-fault-model.md).
 
 ## The rule
 
@@ -46,6 +48,6 @@ record's commitments. Coverage (`EligibilityReader.covered/stillCovered`) and `S
 
 ## Slices
 
-1. (this) the pure function, vectors, ureth cap on the committed total, this note.
-2. contracts: per-trial quantization in the selection, `rawWeight` in Frozen/ReserveMember/exposure, custody check on `x`, genesis cap, regenerated fixtures.
-3. bft-core: `Identity.RawWeight`, digests, derivation check (`Weight == quant(RawWeight...)`), `VerifyPrimary`, fixtures; the caps themselves are Part 1.
+1. The pure function, vectors, ureth cap on the committed total, this note (bft-core#501, ureth#67, contracts#22).
+2. contracts#23: per-trial quantization in the selection, `rawWeight` in Frozen/ReserveMember/exposure, custody check on `x`, genesis cap (per member in custody, total in the factory), regenerated fixtures, and the election price measured as the larger of the plain and the heavy (raw total above B) scenario.
+3. bft-core#508: `Identity.RawWeight`, digests, `CheckQuantized` (`ValidateIdentities`, `VerifyPrimary`), fixtures; the caps themselves are Part 1 (`internal/weightcap`).
