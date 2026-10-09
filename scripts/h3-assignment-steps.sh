@@ -244,6 +244,9 @@ h3_ack_s1() {
   # Each validator names the next two in pool order, and the product refuses a replica pair change that keeps no acknowledging replica:
   # the default pool gave 1->2,3  2->3,4  3->4,1; this pool gives 1->2,3  2->3,5  3->5,1, each retaining one (evm5 joins: 5->1,2).
   export EVM_ARCHIVE_REPLICA_POOL="1 2 3 5"
+  # evm3 was held down through the Commit: it restarts before it has installed s=1, so it may only name members of the installed s=0 and s=1
+  # sets (1 and 2), which retains one of its former pair (4,1)
+  export EVM_ARCHIVE_REPLICAS_3="1 2"
   # The retained validators' authorities (1 and 2 running, 3 held down) advance to the activated scope (root epoch 3, shard epoch 1)
   # and their nodes restart with the new sessions; the joiner's authority is enrolled against the activated configuration.
   h3_advance_authorities 3 1 1 2 3 || { echo "authority advance to root epoch 3 / shard epoch 1 failed" >&2; return 1; }
