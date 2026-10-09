@@ -166,7 +166,11 @@ h3_evm_s1() {
   local i tx
   # keep an old-epoch proposal in flight: submit a paid tx to every validator, then propose before it certifies
   for i in 1 2 3 4; do
-    tx=$(go run ./scripts/evmtx -send -eth-url "http://127.0.0.1:$((rethEthBase+i-1))" -chain-id 31337 -nonce "$M2_NEXT_NONCE" 2>&1) || { echo "in-flight tx to validator $i failed (nonce $M2_NEXT_NONCE): $tx" >&2; return 1; }
+    tx=$(go run ./scripts/evmtx -send -eth-url "http://127.0.0.1:$((rethEthBase+i-1))" -chain-id 31337 -nonce "$M2_NEXT_NONCE" 2>&1) || {
+      # the same transaction may already have reached this validator by gossip and been included (the nonce is then used): only a later validator, and only that refusal
+      if [ "$i" != 1 ] && echo "$tx" | grep -q "nonce too low"; then echo "in-flight tx: validator $i already has nonce $M2_NEXT_NONCE (gossiped and included)"; continue; fi
+      echo "in-flight tx to validator $i failed (nonce $M2_NEXT_NONCE): $tx" >&2; return 1
+    }
   done
   M2_NEXT_NONCE=$((M2_NEXT_NONCE + 1))
   h3_q3_handoff s1 3 "1 2 3 5" || return 1   # the Q3 flow: candidate, the four successor members' readiness (evm5's among them), plan, Commit
