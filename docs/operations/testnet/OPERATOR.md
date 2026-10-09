@@ -107,8 +107,8 @@ sudo chown -R 10001:10001 /srv/testnet/tn-restored && cd /srv/testnet/tn-restore
 
 **Not yet supported in the container stack (record as such, do not improvise):** coupled validator rotation,
 operator Abort of a rotation attempt, and archive restore of a *single* validator. No tooling creates a successor
-pod. Native procedures: rotation [H6 §3](../h6/scenarios.md#3-coupled-key-rotation-stalled-successors-and-archive-backed-restore)
-and [H3](../h3-evm-assignment-runbook.md), Abort [H6 §2](../h6/scenarios.md#2-abort-before-h-retry-then-refuse-abort-after-h)
+pod. Native procedures: rotation [H6 §1](../h6/scenarios.md#1-coupled-key-rotation-joiners-stalled-successors-and-supersession-h3)
+and [H3](../h3-evm-assignment-runbook.md), Abort [H6 §6](../h6/scenarios.md#6-abort-before-and-after-h)
 and [root-handoff-abort.md](../root-handoff-abort.md), restore [M2 §3](../m2-runbook.md#3-replace-a-validator-after-complete-disk-loss); H6 is validated on macOS x86_64 only.
 
 ## 7. Reset to a fresh genesis (destroys all assets)
@@ -135,7 +135,7 @@ block-zero hash and faucet address. The old pin must get 409 (checked before the
 | faucet `/healthz` 503 `Check RPC, identity, backend, balance and daily budget` | `docker compose logs --tail=100 signer faucet relay`; refill or wait out the 24 h budget ([faucet README](../../../deploy/testnet/faucet/README.md)). |
 | Every public client gets 429 `rate limit` | nginx is not the trusted proxy peer (172.30.88.1 faucet, 172.30.89.1 rpc), so all clients share one bucket: fix the peer. |
 | `Pool overlaps with other one on this address space` | 172.30.88/89.0/24 in use: free them (the subnets are fixed in generate.py). |
-| Handoff or archive-restore refusals | See the [H6 table](../h6/evidence.md#troubleshooting-stop-at-the-first-unexplained-refusal). |
+| Handoff or archive-restore refusals | See the [H6 table](../h6/evidence.md#refusals-stop-at-the-first-unexplained-one). |
 
 ## 9. Rehearsal evidence to record
 - Operator name, date, this guide's commit, host specs, Docker/Compose versions, `images.json`, `manifest.json`.
