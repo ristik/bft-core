@@ -134,12 +134,25 @@ p85_joiner_onboard() {
   [ "$(p85_live_count)" = 5 ] || { echo "the election's live index holds $(p85_live_count) identities after the onboarding, not 5" >&2; return 1; }
 }
 
+# the election's clock and anchors, for the lane output while it waits (and when it never reserves)
+p85_election_clock() {
+  local roots; roots=$(jq -r .registry "$P85_DEPLOY")
+  echo "election clock: progress=$(p85_call "$roots" 'progress()(uint64)' 2>&1 | awk '{print $1}') ucTime=$(p85_call "$roots" 'ucTime()(uint64)' 2>&1 | awk '{print $1}')" \
+    "recordCount=$(p85_call "$roots" 'recordCount()(uint64)' 2>&1 | awk '{print $1}') custodyCursor=$(p85_call "$(p85_custody)" 'recordCursor()(uint64)' 2>&1 | awk '{print $1}')" \
+    "thresholds=$(p85_call "$(p85_election)" 'thresholds()(uint256,uint256)' 2>&1 | tr '\n' ' ')" \
+    "anchors=$(p85_call "$(p85_election)" 'anchorProgress()(uint64)' 2>&1 | awk '{print $1}')/$(p85_call "$(p85_election)" 'anchorTime()(uint64)' 2>&1 | awk '{print $1}')" \
+    "attempt=$(p85_call "$(p85_election)" 'attemptProgress()(uint64)' 2>&1 | awk '{print $1}')/$(p85_call "$(p85_election)" 'attemptTime()(uint64)' 2>&1 | awk '{print $1}')" \
+    "liveCount=$(p85_live_count)"
+}
+
 p85_election_reserved() {
   local i r
   for i in $(seq 1 600); do
     r=$(p85_open_result); [ "$r" != "0x0000000000000000000000000000000000000000000000000000000000000000" ] && break
+    [ $((i % 60)) -ne 1 ] || p85_election_clock
     sleep 1
   done
+  [ "$r" != "0x0000000000000000000000000000000000000000000000000000000000000000" ] || p85_election_clock >&2
   [ "$r" != "0x0000000000000000000000000000000000000000000000000000000000000000" ] || { echo "the election never reserved a result (cadence $P85_CADENCE_ROUNDS rounds / $P85_CADENCE_SECONDS s)" >&2; return 1; }
   echo "$r" >"$H3_DIR/result-id.txt"
   [ "$(p85_result_state "$r")" = 1 ] || { echo "the open result is not Reserved" >&2; return 1; }
