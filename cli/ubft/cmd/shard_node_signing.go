@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -109,29 +110,46 @@ func buildCertificationSigning(flags *shardNodeSigningFlags, keyConf *KeyConf, s
 		// A joiner starts (restoring, or restarting) before the genesis configuration names it: the authority's expected key comes from the
 		// activated assignment of a verified, installed handoff bundle (catch-up on a restore; the persisted steps replayed on a restart),
 		// never from a flag. deriveKey is set only when there is verified handoff history to derive it from.
-		credential, err := readCredentialFile(flags.SigningAuthorityCredential)
-		if err != nil {
-			return nil, fmt.Errorf("loading the signing authority credential: %w", err)
-		}
+		// The session is not needed to stage, and the authority issues none before its enrollment names its key (which happens after the
+		// Commit), so the credential is read when a request needs it: after a verified install binds the key. A node whose key is bound at
+		// start (a restart after the install) reads it at its first request, and fails that request, not its start, when it is missing.
 		timeout := flags.SigningAuthorityTimeout
 		if timeout <= 0 {
 			timeout = shardConf.T2Timeout
 		}
-		client, err := service.NewClient(service.ClientConfig{
-			Dial: service.UnixDialer(flags.SigningAuthoritySocket), Credential: credential, Timeout: timeout,
+		var (
+			provisionedMu sync.Mutex
+			provisioned   *service.Client
+		)
+		deferred, err := shardnode.NewLazyDeferredAuthoritySigner(func() (shardnode.SigningAuthorityClient, error) {
+			credential, err := readCredentialFile(flags.SigningAuthorityCredential)
+			if err != nil {
+				return nil, fmt.Errorf("loading the signing authority credential: %w", err)
+			}
+			client, err := service.NewClient(service.ClientConfig{
+				Dial: service.UnixDialer(flags.SigningAuthoritySocket), Credential: credential, Timeout: timeout,
+			})
+			if err != nil {
+				return nil, err
+			}
+			provisionedMu.Lock()
+			provisioned = client
+			provisionedMu.Unlock()
+			return client, nil
 		})
 		if err != nil {
-			return nil, err
-		}
-		deferred, err := shardnode.NewDeferredAuthoritySigner(client)
-		if err != nil {
-			_ = client.Close()
 			return nil, err
 		}
 		return &certificationSigning{
 			authority: deferred, deferred: deferred, nodeID: nodeID.String(), localKey: localSigningKeyBytes(keyConf),
 			describe: fmt.Sprintf("signing authority at %s, key to be bound from the verified handoff history", flags.SigningAuthoritySocket),
-			close:    func() { _ = client.Close() },
+			close: func() {
+				provisionedMu.Lock()
+				defer provisionedMu.Unlock()
+				if provisioned != nil {
+					_ = provisioned.Close()
+				}
+			},
 		}, nil
 	}
 	if named == nil {
