@@ -816,6 +816,31 @@ func (s recordsSource) Records(from uint64, max int) ([]rootrecords.Record, erro
 	return s.cm.Records(from, max)
 }
 
+// shardMembers answers whether a peer is a member of a shard's installed configuration.
+type shardMembers interface {
+	IsShardValidator(types.PartitionID, types.ShardID, peer.ID) bool
+}
+
+// recordsFeedAllowed is who the records feed serves: the validators the shard configurations named when the root started, the other roots,
+// and the members of the INSTALLED configuration of each configured shard, which follows the assignment steps. A validator that joined by
+// an assignment after the root started (its restore needs the feed) is served without a restart of the root.
+func recordsFeedAllowed(static map[peer.ID]struct{}, shardConfs []*types.PartitionDescriptionRecord, members shardMembers, isRoot func(peer.ID) bool) func(peer.ID) bool {
+	return func(id peer.ID) bool {
+		if _, ok := static[id]; ok {
+			return true
+		}
+		if isRoot(id) {
+			return true
+		}
+		for _, conf := range shardConfs {
+			if members.IsShardValidator(conf.PartitionID, conf.ShardID, id) {
+				return true
+			}
+		}
+		return false
+	}
+}
+
 // serveRootRecords serves the root's source-log cuts and records to the validators of the shards this root was configured with. The
 // shard pairs an EVM with the root and derives the next prefix of the log from them, verifying everything against the unicity tree
 // root of its certificate, so the service needs no trust in the node it asks.
@@ -833,12 +858,7 @@ func serveRootRecords(log *slog.Logger, host *network.Peer, cm *consensus.Consen
 	}
 	// The other roots of the trust base are served too: a root that installs an epoch checkpoint without the source log it commits
 	// fetches the missing prefix from them (storage.BlockStore.SetRecordFetcher), verifying every record against the checkpoint.
-	server := recordsfeed.NewServer(recordsSource{cm}, func(id peer.ID) bool {
-		if _, ok := allowed[id]; ok {
-			return true
-		}
-		return slices.Contains(cm.Validators(), id)
-	})
+	server := recordsfeed.NewServer(recordsSource{cm}, recordsFeedAllowed(allowed, shardConfs, cm, func(id peer.ID) bool { return slices.Contains(cm.Validators(), id) }))
 	host.RegisterProtocolHandler(recordsfeed.ProtocolID, server.Handler)
 	cm.SetRecordFetcher(rootRecordFetcher{host: host, cm: cm})
 	log.Info("root records feed enabled", "validators", len(eligible))
