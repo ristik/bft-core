@@ -27,7 +27,8 @@ m2_wait_root_epoch() {
 m2_start_root() {
   local node=$1 epoch=$2 boot=$3 port pid i conf
   local -a shardConfArgs=(--shard-conf "$fullShardConf")
-  local -a bootArgs=()
+  local -a bootArgs=() installArgs=()
+  [ "$epoch" -lt 2 ] || installArgs=(--install-handoff-epoch "$epoch")   # the flag is refused below epoch 2: a root started at the genesis epoch (the joiner's follower) takes none
   [ -z "$boot" ] || bootArgs=(--bootnodes "$boot")   # the first root of a cold network has no bootnode, as at genesis
   if [ "${Q3_B1:-0}" = 1 ] && [ "${P85_LANE:-0}" != 1 ]; then shardConfArgs+=(--q3-lane --genesis-identities test-nodes/genesis-identities.json); fi   # Q3 #50: the coupled runtime (verified history, install journal, V3 handoffs)
   if [ "${P85_LANE:-0}" = 1 ]; then   # a restarted root of the proof-of-stake lane runs the same coupled runtime and P85 executor
@@ -45,7 +46,7 @@ m2_start_root() {
     UBFT_Q4_SHIM_DIR="${Q4_SHIM_DIR:+$Q4_SHIM_DIR/root$node}" ${Q4_ROOT_BIN:-build/ubft} root-node run --home "test-nodes/root$node" \
       --address "/ip4/127.0.0.1/tcp/$(m2_p2p_port "$node")" \
       ${bootArgs[@]+"${bootArgs[@]}"} --trust-base test-nodes/trust-base.json \
-      "${shardConfArgs[@]}" --profile-2 --install-handoff-epoch "$epoch" \
+      "${shardConfArgs[@]}" --profile-2 ${installArgs[@]+"${installArgs[@]}"} \
       --rpc-server-address "127.0.0.1:$port" --log-format text --log-level debug \
       >>"test-nodes/root$node/debug.log" 2>&1 &
     pid=$!
