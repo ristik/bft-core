@@ -377,11 +377,12 @@ func (s *shardQ3Staging) Stage(req shardQ3StageRequest) error {
 	if err := s.checkStaged(body, digest, req); err != nil {
 		return err
 	}
+	// announced and recorded under one lock, so two concurrent stages cannot leave the grant of one and the status of the other
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if err := s.announceStaged(req); err != nil {
 		return err
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	s.staged, s.body, s.config, s.attempt = &digest, body.Identity(), body.Config.Identity(), req.Attempt
 	return nil
 }

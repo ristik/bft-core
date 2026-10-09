@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto"
+	"crypto/sha256"
 	"errors"
 	"go/ast"
 	"go/parser"
@@ -13,6 +14,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/unicitynetwork/bft-core/engineapi"
 	"github.com/unicitynetwork/bft-core/evmassign"
+	"github.com/unicitynetwork/bft-core/evmroot"
 	"github.com/unicitynetwork/bft-core/handoff"
 	"github.com/unicitynetwork/bft-core/handoffdelivery"
 	"github.com/unicitynetwork/bft-core/internal/testutils/q3fixture"
@@ -397,4 +399,107 @@ func TestShardNodeRunWiresStagingToTheActivePeers(t *testing.T) {
 		return true
 	})
 	require.Equal(t, "activePeers.Stage", wired)
+}
+
+// stageFixture is a staging node whose checkStaged runs in full (a tip and a self are set) and a request that passes it: the coupled
+// candidate of the Q3 fixture, a body that is the tip's successor with the change record the digest and attempt determine, naming self.
+type stageFixture struct {
+	st      *shardQ3Staging
+	good    shardQ3StageRequest
+	body    q3format.BodyV3
+	tipID   [32]byte
+	tip     [3]uint64
+	members []string
+	called  *[][]string
+}
+
+func newStageFixture(t *testing.T) stageFixture {
+	t.Helper()
+	f := q3fixture.New(t, q3fixture.Options{Assignment: true})
+	c, err := evmassign.DecodeCandidate(f.Candidate)
+	require.NoError(t, err)
+	var members []string
+	for _, id := range c.Identities {
+		members = append(members, id.EVMNodeID)
+	}
+	require.GreaterOrEqual(t, len(members), 2)
+	digest := sha256.Sum256(f.Candidate)
+	tipID := [32]byte{7}
+	tipEpoch, tipVersion := uint64(4), uint64(1)
+	body := f.Body
+	body.Epoch = tipEpoch + 1
+	prior, err := q3format.Prior{Network: body.Network, Epoch: tipEpoch, BodyVersion: tipVersion, Identity: tipID[:]}.Hash()
+	require.NoError(t, err)
+	body.PredecessorHash = prior
+	body.ChangeRecordHash = evmroot.D4CandidateContextHash(body.Network, tipID[:], 1, digest[:], body.EarliestActivation)
+	var called [][]string
+	st := &shardQ3Staging{
+		cfg:      func() (q3format.ProtocolConfig, error) { return body.Config, nil },
+		tip:      func() (uint64, uint64, [32]byte, error) { return tipEpoch, tipVersion, tipID, nil },
+		self:     members[0],
+		onStaged: func(ids []string) error { called = append(called, ids); return nil },
+	}
+	return stageFixture{st: st, body: body, tipID: tipID, tip: [3]uint64{tipEpoch, tipVersion}, members: members, called: &called,
+		good: shardQ3StageRequest{Body: body.Encode(), Candidate: digest[:], Preimage: f.Candidate, Attempt: 1}}
+}
+
+// Through Stage with the checks running in full, each refusal differs from the accepted stage in one thing, carries its sentinel, and never
+// reaches the announcement (a refused candidate grants no archive or journal access: both authorize through ActivePeers, which only the
+// announcement writes). The control is the accepted stage: it announces its successor members and is recorded.
+func TestARefusedStageNeverAnnouncesItsMembers(t *testing.T) {
+	x := newStageFixture(t)
+	refused := func(name string, req shardQ3StageRequest, want error) {
+		t.Helper()
+		before := len(*x.called)
+		err := x.st.Stage(req)
+		require.ErrorIs(t, err, want, name)
+		require.Len(t, *x.called, before, "%s: a refused stage announced its members", name)
+		status, serr := x.st.status()
+		require.NoError(t, serr)
+		require.Nil(t, status.Staged, "%s: nothing is staged", name)
+	}
+
+	wrongPreimage := x.good
+	wrongPreimage.Preimage = append(bytes.Clone(x.good.Preimage), 0)
+	refused("preimage is not the candidate", wrongPreimage, ErrQ3StageDigest)
+
+	notSuccessor := x.body
+	notSuccessor.PredecessorHash = bytes.Repeat([]byte{0xee}, len(x.body.PredecessorHash))
+	req := x.good
+	req.Body = notSuccessor.Encode()
+	refused("body is not the tip's successor", req, ErrQ3StageChain)
+
+	badRecord := x.body
+	badRecord.ChangeRecordHash = bytes.Repeat([]byte{0xdd}, len(x.body.ChangeRecordHash))
+	req = x.good
+	req.Body = badRecord.Encode()
+	refused("change record mismatch", req, ErrQ3StageBody)
+
+	otherCalled := 0
+	other := &shardQ3Staging{cfg: x.st.cfg, tip: x.st.tip, self: "not-a-member-of-the-successor", onStaged: func([]string) error { otherCalled++; return nil }}
+	require.ErrorIs(t, other.Stage(x.good), ErrQ3StageBody, "the successor assignment does not name this node")
+	require.Zero(t, otherCalled)
+
+	attempt := x.good
+	attempt.Attempt = 2 // the change record binds the attempt
+	refused("a different attempt than the change record binds", attempt, ErrQ3StageBody)
+
+	// the control: the unchanged request is accepted, announces exactly the successor's members once, and is recorded
+	require.NoError(t, x.st.Stage(x.good))
+	require.Equal(t, [][]string{x.members}, *x.called)
+	status, err := x.st.status()
+	require.NoError(t, err)
+	require.NotNil(t, status.Staged)
+}
+
+// A failing announcement fails the stage with its error and records nothing: a stage whose grant could not be applied is not a staged
+// candidate.
+func TestAFailingAnnouncementFailsTheStageAndLeavesItUnstaged(t *testing.T) {
+	x := newStageFixture(t)
+	boom := errors.New("boom")
+	x.st.onStaged = func([]string) error { return boom }
+	require.ErrorIs(t, x.st.Stage(x.good), boom)
+	status, err := x.st.status()
+	require.NoError(t, err)
+	require.Nil(t, status.Staged, "a stage whose announcement failed is not staged")
 }
