@@ -29,7 +29,7 @@ m2_start_root() {
   local -a shardConfArgs=(--shard-conf "$fullShardConf")
   local -a bootArgs=()
   [ -z "$boot" ] || bootArgs=(--bootnodes "$boot")   # the first root of a cold network has no bootnode, as at genesis
-  [ "${Q3_WEIGHT_LANE:-0}" != 1 ] || shardConfArgs+=(--q3-lane --genesis-identities test-nodes/genesis-identities.json)   # Q3 #50: the coupled runtime (verified history, install journal, V3 handoffs)
+  [ "${Q3_B1:-0}" != 1 ] || shardConfArgs+=(--q3-lane --genesis-identities test-nodes/genesis-identities.json)   # Q3 #50: the coupled runtime (verified history, install journal, V3 handoffs)
   port=$(m2_rpc_port "$node")
   if [ "${F8_MIXED_LANE:-0}" = 1 ]; then
     for conf in test-nodes/shard-conf-f8-a-left.json test-nodes/shard-conf-f8-a-right.json test-nodes/shard-conf-f8-b-left.json; do
@@ -181,6 +181,17 @@ PY
 
 # The authority survives each shard restart. Advance one key at a time and wait for
 # a durable replica acknowledgement before moving to the next configured peer.
+# A validator is somebody's archive replica only if another validator names it (helper.sh archive_replicas_of). One nobody names has no peer that ever logs an
+# acknowledgement for it, so waiting for one cannot succeed. The wait never targets the restarted validator itself: it reads the other validators' logs.
+m2_is_archive_replica() { # validator
+  local k
+  for k in $(seq 1 "$validators"); do
+    [ "$k" = "$1" ] && continue
+    case " $(archive_replicas_of "$k" "$validators") " in *" $1 "*) return 0 ;; esac
+  done
+  return 1
+}
+
 m2_wait_archive_replica_catchup() {
   local target=$1 startLine=$2 targetId latestHash source i targetLog peerAck nodeAck
   targetId=$(evm_validator_id "$target") || return 1
@@ -259,7 +270,9 @@ m2_advance_authorities() {
       bootnodes=$(evm_bootnodes_for_peers "$rootBoot" "$i" $onlineValidators) || return 1
       startLine=$(wc -l < "test-nodes/evm$i/debug.log")
       start_one_evm_validator "$i" "$validators" "$partitionID" "$rootBoot" engine-api rpc "$bootnodes" || return 1
-      [ "${M2_ADVANCE_NO_REPLICA_WAIT:-0}" = 1 ] || m2_wait_archive_replica_catchup "$i" "$startLine" || return 1
+      if [ "${M2_ADVANCE_NO_REPLICA_WAIT:-0}" != 1 ] && m2_is_archive_replica "$i"; then
+        m2_wait_archive_replica_catchup "$i" "$startLine" || return 1
+      fi
     fi
     rm -f "test-nodes/post-m2a-evidence/restarting/$i"
     echo "authority $i advanced to root epoch $epoch"
@@ -292,142 +305,37 @@ m2_latest_certified_parent() {
   printf '%s\n' "$expectedHash"
 }
 
-m2_handoff() {
-  local epoch=$1 replace=$2 new=$3 previous=$4 oldBoot=$5 oldRpcs=$6
-  local nextFile="trust-base-epoch${epoch}.json"
-  build/ubft root-node init --home "test-nodes/root$new" -g >/dev/null || return 1
-  generate_log_configuration "test-nodes/root$new/"
-  m2_next_trust_base "$epoch" "$replace" "$new" "$previous" "$nextFile" || return 1
-  if [ "${F8_MIXED_LANE:-0}" = 1 ] && [ "${H3_ASSIGNMENT_LANE:-0}" != 1 ]; then
-    local logStart outcome waitStep activated committed=false oldEpoch=$((epoch-1))
-    for attempt in $(seq 1 30); do
-      logStart=$(wc -l < test-nodes/root1/debug.log)
-      if ! build/ubft root handoff propose --next-trust-base "test-nodes/$nextFile" --root-rpc "$oldRpcs"; then
-        sleep 1
-        continue
-      fi
-      for waitStep in $(seq 1 90); do
-        outcome=$(tail -n +"$((logStart+1))" test-nodes/root1/debug.log |
-          grep -E "msg=\\\"root handoff outcome\\\" .*rootEpoch=$oldEpoch([[:space:]]|$)" | tail -1 || true)
-        [[ "$outcome" = *phase=committed* ]] && { committed=true; break; }
-        [[ "$outcome" = *phase=aborted* || "$outcome" = *phase=lapsed* ]] && break
-        sleep 1
-      done
-      $committed && break
-      [[ "$outcome" = *phase=aborted* || "$outcome" = *phase=lapsed* ]] && echo "F8 handoff attempt $attempt aborted or lapsed; retrying with the next attempt"
-    done
-    $committed || { echo "F8 root handoff did not commit after retries" >&2; return 1; }
-    for i in $(seq 1 "$validators"); do
-      activated=false
-      for waitStep in $(seq 1 90); do
-        if grep -Eq "msg=\\\"handoff activated\\\" rootEpoch=$epoch([[:space:]]|$)" "test-nodes/evm$i/debug.log"; then
-          activated=true; break
-        fi
-        sleep 1
-      done
-      $activated || { echo "EVM validator $i did not activate root epoch $epoch" >&2; return 1; }
-    done
-    echo "F8 root handoff epoch $epoch committed and activated while aggregators remained live"
-    return 0
+# The fresh-B1 layout has one handoff flow, the Q3 flow (scripts/lib/q3-flow-lib.sh): the root's V3 candidate for the next committee, one readiness receipt
+# from every successor entity (its root key, after checking its BFT node, shard service and paired Ureth), then the proposal that carries the receipts. A
+# same-members handoff changes the root epoch and nothing else: no EVM assignment is built or named (Q3_NO_ASSIGNMENT). The unit weights keep scheme 2's
+# arithmetic at W=4, root quorum 3.
+m2_b1_prepare() { # roots
+  local roots=$1 n
+  n=$(echo "$roots" | wc -w | tr -d ' ')
+  if [ -z "${M2_B1_READY:-}" ]; then
+    source scripts/lib/h3-lib.sh
+    source scripts/lib/q3-lib.sh
+    source scripts/lib/q3-flow-lib.sh
+    Q3_DIR=${Q3_DIR:-test-nodes/q3}
+    H3_DIR=$Q3_DIR
+    H3_LOOP_MARK=$H3_DIR/loop-mark
+    H3_REGISTRY=0xff00000000000000000000000000000000000002
+    mkdir -p "$Q3_DIR"; : >>"$Q3_DIR/commands.log"; : >>"$Q3_DIR/pins.txt"
+    q3_execution_pins || return 1
+    M2_B1_READY=1
   fi
-  # Root validators enforce the ordered freeze and bind the frozen parent at the Prepare: the operator names no parent and only
-  # retries (next attempt) if a Prepare lapsed or an attempt was aborted.
-  local waitStep oldEpoch=$((epoch-1)) outcome logStart
-  local committed=false
-  for i in $(seq 1 30); do
-    logStart=$(wc -l < test-nodes/root1/debug.log)
-    if ! build/ubft root handoff propose --next-trust-base "test-nodes/$nextFile" --root-rpc "$oldRpcs"; then
-      sleep 1
-      continue
-    fi
-    for waitStep in $(seq 1 60); do
-      outcome=$(tail -n +"$((logStart+1))" test-nodes/root1/debug.log |
-        grep -E "msg=\"root handoff outcome\" .*rootEpoch=$oldEpoch([[:space:]]|$)" | tail -1 || true)
-      if [[ "$outcome" = *phase=committed* ]]; then committed=true; break; fi
-      if [[ "$outcome" = *phase=aborted* || "$outcome" = *phase=lapsed* ]]; then
-        echo "root handoff aborted or its Prepare lapsed; retrying with the next attempt"
-        break
-      fi
-      sleep 1
-    done
-    $committed && break
-    [ -n "$outcome" ] || return 1
-  done
-  $committed || return 1
-  # The replacement first proves that the old committee really committed H.
-  m2_start_root "$new" "$epoch" "$oldBoot" || return 1
-  for i in $previous; do
-    [ "$i" = "$replace" ] && continue
-    stop_pidfile "test-nodes/root$i/pid" 'ubft root-node' || return 1
-    for waitPort in $(seq 1 50); do
-      lsof -nP -iTCP:"$(m2_rpc_port "$i")" -sTCP:LISTEN >/dev/null 2>&1 || break
-      sleep 0.2
-    done
-    m2_archive_root_state "$i" "$epoch" || return 1
-    m2_start_root "$i" "$epoch" "$oldBoot" || return 1
-  done
-  stop_pidfile "test-nodes/root$replace/pid" 'ubft root-node' || return 1
-  m2_wait_root_epoch 1 "$epoch" || return 1
-  for i in $(m2_online_validators); do
-    local activated=false waitStep
-    for waitStep in $(seq 1 90); do
-      if grep -Eq "msg=\"handoff activated\" rootEpoch=$epoch([[:space:]]|$)" "test-nodes/evm$i/debug.log"; then
-        activated=true; break
-      fi
-      sleep 1
-    done
-    $activated || return 1
-  done
-  m2_advance_authorities "$epoch" "$nextFile" || return 1
-  if [ "$epoch" = 2 ]; then
-    m2_send_paid "$epoch" "${M2_NEXT_NONCE:-$((epoch+1))}" || return 1
-  fi
-  m2_wait_certified_idle "$epoch" || return 1
-  m2_measure_pause "$((epoch-1))" "$epoch"
+  H3_ROOTS=$roots; H3_ONLINE=$roots; Q3_ENTITIES=$roots
+  Q3_WEIGHTS=; for _ in $roots; do Q3_WEIGHTS+="${Q3_WEIGHTS:+ }1"; done
+  Q3_TOTAL_WEIGHT=$n; Q3_ROOT_QUORUM=$((2 * n / 3 + 1)); Q3_EVM_TOTAL_WEIGHT=$n; Q3_EVM_QUORUM=$((n / 2 + 1))
 }
 
-# --- Coupled configuration-only epoch advance (#328) -----------------------------------------------------
-# The same root committee with the same keys moves to the next root epoch; the EVM assignment (shard epoch) is
-# unchanged. No successor key signs a proof of possession, so it works with SIGNING=authority: the signing
-# authority still advances its epoch, validators restart under it, and restore/archive behaviour is exercised
-# above the authority high-water mark. A key-replacing coupled rotation needs successor PoPs (SIGNING=local) and
-# is covered by the H3 acceptance lane, not here.
-m2_same_members_trust_base() {
-  local epoch=$1 roots=$2 out=$3 i infos=()
-  for i in $roots; do infos+=(--node-info "test-nodes/root$i/node-info.json"); done
-  build/ubft trust-base generate --home test-nodes --network-id 3 --epoch "$epoch" \
-    --epoch-start "$((epoch * 100000))" --previous-trust-base "test-nodes/trust-base-epoch$((epoch-1)).json" \
-    --output-file-name "$out" "${infos[@]}" >/dev/null || return 1
-  for i in $roots; do
-    build/ubft trust-base sign --home "test-nodes/root$i" --trust-base "test-nodes/$out" >/dev/null || return 1
-  done
-}
-
-m2_config_only_handoff() { # epoch roots oldRpcs
-  local epoch=$1 roots=$2 oldRpcs=$3 oldEpoch=$(($1-1)) nextFile="trust-base-epoch$1.json"
-  local i logStart outcome waitStep committed=false first boot prev activated
+m2_config_only_handoff() { # epoch roots oldRpcs (the roots' RPC endpoints are the flow's own, h3_root_rpcs)
+  local epoch=$1 roots=$2 oldEpoch=$(($1-1)) nextFile="trust-base-epoch$1.json"
+  local i waitStep first boot prev activated
   first=$(echo "$roots" | awk '{print $1}')
-  m2_same_members_trust_base "$epoch" "$roots" "$nextFile" || return 1
-  for i in $(seq 1 30); do
-    logStart=$(wc -l < "test-nodes/root$first/debug.log")
-    if ! build/ubft root handoff propose --next-trust-base "test-nodes/$nextFile" --root-rpc "$oldRpcs"; then
-      sleep 1; continue
-    fi
-    outcome=
-    for waitStep in $(seq 1 90); do
-      outcome=$(tail -n +"$((logStart+1))" "test-nodes/root$first/debug.log" |
-        grep -E "msg=\"root handoff outcome\" .*rootEpoch=$oldEpoch([[:space:]]|$)" | tail -1 || true)
-      [[ "$outcome" = *phase=committed* ]] && { committed=true; break; }
-      # An aborted attempt, or one whose Prepare lapsed (#336: no Freeze in time), is dead: re-plan now instead of sitting out the wait.
-      if [[ "$outcome" = *phase=aborted* || "$outcome" = *phase=lapsed* ]]; then
-        echo "config-only handoff attempt ended ${outcome##*phase=}; retrying with the next attempt"
-        break
-      fi
-      sleep 1
-    done
-    $committed && break
-  done
-  $committed || { echo "config-only handoff to epoch $epoch did not commit" >&2; return 1; }
+  m2_b1_prepare "$roots" || return 1
+  Q3_NEXT_EPOCH=$epoch Q3_SUFFIX=-m2e$epoch Q3_NO_ASSIGNMENT=1 q3_trust_base_v3 "$epoch" || return 1
+  Q3_NEXT_EPOCH=$epoch Q3_SUFFIX=-m2e$epoch Q3_NO_ASSIGNMENT=1 h3_retry_handoff "$oldEpoch" q3_attempt || { echo "same-members handoff to epoch $epoch did not commit" >&2; return 1; }
   # Every root restarts on the install epoch; each fetches and verifies the committed bundle.
   for i in $roots; do
     prev=$(echo "$roots" | tr ' ' '\n' | grep -vx "$i" | head -1)
@@ -453,9 +361,6 @@ m2_config_only_handoff() { # epoch roots oldRpcs
   m2_send_paid "$epoch" "${M2_NEXT_NONCE:-$((epoch+1))}" || return 1
   m2_measure_pause "$oldEpoch" "$epoch"
 }
-
-# M2_HANDOFF_MODE: config-only (default on registry layout 2) or rotate (key-replacing, layout 1 only: layout 2
-# enforces coupled validator-set changes, which this root-only rotation is not).
 
 # The #261 comparison needs both paid and idle certified blocks on each side of
 # the handoff. Do not infer idleness from an empty mempool or a short interval:
