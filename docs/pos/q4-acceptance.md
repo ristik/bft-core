@@ -63,6 +63,9 @@ Before any fault the lane also checks that the selector in effect is the weighte
 
 - **Scenarios.** The live lane runs the committees A (6,1,1,1) and B (3,3,2,1) on the four-entity paired devnet. The many-small committee (18,1x9, ten entities, row F7) and the #399
   outage control (3,2,2,2,2, five entities, row F8) cannot be built live: the devnet and the Q3 flow address exactly four entities. Both rows keep an explicit REAL-PROCESS gap.
+- **Fault-row progress is the root committed round.** The coupled EVM pipeline is judged in the baseline only: the EVM certified round also needs the EVM nodes' durable archive
+  acknowledgements, and an EVM node whose paired root is cut off cannot verify the blocks it is asked to acknowledge, so the EVM round can stand still while the roots correctly keep their quorum
+  (scenario A run `q4-live-20261009T062325Z`: two lights isolated, EVM round stuck at 45 while the roots kept committing). The EVM pipeline under a root fault is not asserted.
 - **Heavy equivocators (F3, F4)** are outside the assumptions: the live rows show that the equivocation happened (the root's own adapter counted its conflicting signed votes)
   and that the independent checker classifies exactly the declared roots as equivocators; they claim no liveness or safety.
 - **G2** is evidenced by the Q3 lane's paired authentication (`-lanes q3=<dir>`): a second pair restored through the archive path reaching equal commitments, the five pair

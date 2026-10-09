@@ -73,6 +73,36 @@ q4_stalled() {
   echo "root$root EVM IR constant at $base for ${limit}s"
 }
 
+# The fault rows judge the ROOT quorum, so progress there is the root's committed head round (roundInfo.roundNumber: it rises only when a root block commits, an empty block after a
+# timeout certificate included, and it cannot rise without a quorum certificate or a timeout certificate of weight >= Q). The coupled EVM pipeline is judged in the baseline only: its
+# certified round also needs the EVM nodes' durable archive acknowledgements, and an EVM node whose paired root is cut off cannot verify the blocks it is asked to acknowledge, so the
+# EVM round can stand still while the roots (correctly) keep their quorum.
+# q4_root_advance <root> <seconds> <n>: the root's committed round rose by at least n within the window
+q4_root_advance() {
+  local root=$1 limit=$2 n=$3 base now i
+  base=$(q4_round "$root") || return 1
+  for i in $(seq 1 "$limit"); do
+    now=$(q4_round "$root") || return 1
+    [ $((now - base)) -ge "$n" ] && { echo "root$root committed round $base -> $now in ${i}s"; return 0; }
+    sleep 1
+  done
+  echo "root$root committed round stayed at $now (from $base) for ${limit}s" >&2
+  return 1
+}
+
+# q4_root_stalled <root> <seconds>: no block commits at all: the committed round is constant for the window
+q4_root_stalled() {
+  local root=$1 limit=$2 base now i
+  sleep 5   # pre-issued evidence drains
+  base=$(q4_round "$root") || return 1
+  for i in $(seq 1 "$limit"); do
+    sleep 1
+    now=$(q4_round "$root") || return 1
+    [ "$now" = "$base" ] || { echo "root$root committed round moved $base -> $now during the stall window" >&2; return 1; }
+  done
+  echo "root$root committed round constant at $base for ${limit}s"
+}
+
 q4_restart_root() {
   local node=$1
   m2_start_root "$node" "$Q4_EPOCH" "$(boot_node test-nodes/root1 "$rootPortStart")"
@@ -132,11 +162,11 @@ q4_row_isolate() {
   observer=${others%% *}
   q4_partition "$rule" "$iso" "$others" || return 1
   case "$expect" in
-    progress) q4_commits_advance "$observer" "$Q4_RECOVER_SECONDS" 3 || return 1 ;;
-    stall) q4_stalled "$observer" "$Q4_STALL_SECONDS" || return 1 ;;
+    progress) q4_root_advance "$observer" "$Q4_RECOVER_SECONDS" 3 || return 1 ;;
+    stall) q4_root_stalled "$observer" "$Q4_STALL_SECONDS" || return 1 ;;
   esac
   q4_heal "$rule" "$Q4_ROOTS" || return 1
-  q4_commits_advance "${iso%% *}" "$Q4_RECOVER_SECONDS" 3
+  q4_root_advance "${iso%% *}" "$Q4_RECOVER_SECONDS" 3
 }
 q4_row_light_partition() { q4_row_isolate progress "$(q4_lights | head -n 1)"; }   # A: 6+1+1 = 8 of 9
 q4_row_two_lights_partition() { q4_row_isolate progress $(q4_lights | tail -n 2); }   # A: heavy + one light = 7 = Q
@@ -148,17 +178,17 @@ q4_row_b_lights_both() { q4_row_isolate stall 3 4; }   # B: weight 2+1 isolated,
 q4_row_heavy_delayed() {     # the heavy root's traffic held: the lights are weight 3 of 9, quorum lost until release
   q4_delay_outbound delay "$Q4_HEAVY_ROOT" || return 1
   local light; light=$(q4_lights | head -n 1)
-  q4_stalled "$light" "$Q4_STALL_SECONDS" || return 1
+  q4_root_stalled "$light" "$Q4_STALL_SECONDS" || return 1
   q4_heal delay "$Q4_HEAVY_ROOT" || return 1
-  q4_commits_advance "$light" "$Q4_RECOVER_SECONDS" 3
+  q4_root_advance "$light" "$Q4_RECOVER_SECONDS" 3
 }
 
 q4_row_light_sigkill() {     # SIGKILL a light root: the rest keep the quorum; restart over the retained home
   local light; light=$(q4_lights | head -n 1)
   q4_kill9 "$light" || return 1
-  q4_commits_advance "$Q4_HEAVY_ROOT" "$Q4_RECOVER_SECONDS" 3 || return 1
+  q4_root_advance "$Q4_HEAVY_ROOT" "$Q4_RECOVER_SECONDS" 3 || return 1
   q4_restart_root "$light" || return 1
-  q4_commits_advance "$light" "$Q4_RECOVER_SECONDS" 3
+  q4_root_advance "$light" "$Q4_RECOVER_SECONDS" 3
 }
 
 q4_row_heavy_sigkill() {     # SIGKILL each heavy root in turn: A 3 of 9 left, B 6 of 9 left: explicit stall; restart over the retained home recovers
@@ -166,9 +196,9 @@ q4_row_heavy_sigkill() {     # SIGKILL each heavy root in turn: A 3 of 9 left, B
   for heavy in $Q4_HEAVY_ROOTS; do
     observer=$(q4_without "$heavy" | head -n 1)
     q4_kill9 "$heavy" || return 1
-    q4_stalled "$observer" "$Q4_STALL_SECONDS" || return 1
+    q4_root_stalled "$observer" "$Q4_STALL_SECONDS" || return 1
     q4_restart_root "$heavy" || return 1
-    q4_commits_advance "$heavy" "$Q4_RECOVER_SECONDS" 3 || return 1
+    q4_root_advance "$heavy" "$Q4_RECOVER_SECONDS" 3 || return 1
   done
 }
 
@@ -196,7 +226,7 @@ q4_row_byzantine_lights() {  # IN BOUND (weight <= F=2): A two lights (1+1), B t
   local byz
   if [ "$Q4_SCENARIO" = A ]; then byz=$(q4_lights | tail -n 2 | tr '\n' ' '); else byz=3; fi
   q4_byz_arm $byz || return 1
-  q4_commits_advance "$Q4_HEAVY_ROOT" "$Q4_RECOVER_SECONDS" 3
+  q4_root_advance "$Q4_HEAVY_ROOT" "$Q4_RECOVER_SECONDS" 3
 }
 
 # OUTSIDE THE ASSUMPTIONS (heavy weight 6 or 3 > F=2): no liveness claim at all. What the row shows is that the equivocation is real (the root's own adapter counted its

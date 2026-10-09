@@ -44,43 +44,43 @@
      "kind": "lane",
      "label": "REAL-PROCESS",
      "step": "q3_baseline",
-     "scope": "REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss)"
+     "scope": "REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss); fault rows judge the root quorum by the roots' committed round, the coupled EVM pipeline is judged in the baseline only"
     },
     {
      "kind": "lane",
      "label": "REAL-PROCESS",
      "step": "q3_candidate",
-     "scope": "REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss)"
+     "scope": "REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss); fault rows judge the root quorum by the roots' committed round, the coupled EVM pipeline is judged in the baseline only"
     },
     {
      "kind": "lane",
      "label": "REAL-PROCESS",
      "step": "q3_handoff",
-     "scope": "REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss)"
+     "scope": "REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss); fault rows judge the root quorum by the roots' committed round, the coupled EVM pipeline is judged in the baseline only"
     },
     {
      "kind": "lane",
      "label": "REAL-PROCESS",
      "step": "q3_install_epoch2",
-     "scope": "REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss)"
+     "scope": "REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss); fault rows judge the root quorum by the roots' committed round, the coupled EVM pipeline is judged in the baseline only"
     },
     {
      "kind": "lane",
      "label": "REAL-PROCESS",
      "step": "q3_activation",
-     "scope": "REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss)"
+     "scope": "REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss); fault rows judge the root quorum by the roots' committed round, the coupled EVM pipeline is judged in the baseline only"
     },
     {
      "kind": "lane",
      "label": "REAL-PROCESS",
      "step": "q3_acknowledge",
-     "scope": "REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss)"
+     "scope": "REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss); fault rows judge the root quorum by the roots' committed round, the coupled EVM pipeline is judged in the baseline only"
     },
     {
      "kind": "lane",
      "label": "REAL-PROCESS",
      "step": "q3_progress_scheme2",
-     "scope": "REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss)"
+     "scope": "REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss); fault rows judge the root quorum by the roots' committed round, the coupled EVM pipeline is judged in the baseline only"
     },
     {
      "kind": "lane-file",
@@ -102,7 +102,7 @@
      "kind": "lane",
      "label": "REAL-PROCESS",
      "step": "leader selector in effect: weight-proportional root-wrr-v1 over the epoch's rounds",
-     "scope": "the roots' own logs: the heavy root leads about two thirds of the epoch's rounds, not the uniform rotation of the legacy selector; REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss)"
+     "scope": "the roots' own logs: the heavy root leads about two thirds of the epoch's rounds, not the uniform rotation of the legacy selector; REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss); fault rows judge the root quorum by the roots' committed round, the coupled EVM pipeline is judged in the baseline only"
     },
     {
      "kind": "lane-file",
@@ -114,49 +114,49 @@
      "kind": "lane",
      "label": "REAL-PROCESS",
      "step": "q3_baseline",
-     "scope": "scenario B (3,3,2,1); REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss)",
+     "scope": "scenario B (3,3,2,1); REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss); fault rows judge the root quorum by the roots' committed round, the coupled EVM pipeline is judged in the baseline only",
      "lane": "b"
     },
     {
      "kind": "lane",
      "label": "REAL-PROCESS",
      "step": "q3_candidate",
-     "scope": "scenario B (3,3,2,1); REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss)",
+     "scope": "scenario B (3,3,2,1); REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss); fault rows judge the root quorum by the roots' committed round, the coupled EVM pipeline is judged in the baseline only",
      "lane": "b"
     },
     {
      "kind": "lane",
      "label": "REAL-PROCESS",
      "step": "q3_handoff",
-     "scope": "scenario B (3,3,2,1); REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss)",
+     "scope": "scenario B (3,3,2,1); REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss); fault rows judge the root quorum by the roots' committed round, the coupled EVM pipeline is judged in the baseline only",
      "lane": "b"
     },
     {
      "kind": "lane",
      "label": "REAL-PROCESS",
      "step": "q3_install_epoch2",
-     "scope": "scenario B (3,3,2,1); REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss)",
+     "scope": "scenario B (3,3,2,1); REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss); fault rows judge the root quorum by the roots' committed round, the coupled EVM pipeline is judged in the baseline only",
      "lane": "b"
     },
     {
      "kind": "lane",
      "label": "REAL-PROCESS",
      "step": "q3_activation",
-     "scope": "scenario B (3,3,2,1); REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss)",
+     "scope": "scenario B (3,3,2,1); REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss); fault rows judge the root quorum by the roots' committed round, the coupled EVM pipeline is judged in the baseline only",
      "lane": "b"
     },
     {
      "kind": "lane",
      "label": "REAL-PROCESS",
      "step": "q3_acknowledge",
-     "scope": "scenario B (3,3,2,1); REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss)",
+     "scope": "scenario B (3,3,2,1); REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss); fault rows judge the root quorum by the roots' committed round, the coupled EVM pipeline is judged in the baseline only",
      "lane": "b"
     },
     {
      "kind": "lane",
      "label": "REAL-PROCESS",
      "step": "q3_progress_scheme2",
-     "scope": "scenario B (3,3,2,1); REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss)",
+     "scope": "scenario B (3,3,2,1); REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss); fault rows judge the root quorum by the roots' committed round, the coupled EVM pipeline is judged in the baseline only",
      "lane": "b"
     },
     {
@@ -181,7 +181,7 @@
      "kind": "lane",
      "label": "REAL-PROCESS",
      "step": "leader selector in effect: weight-proportional root-wrr-v1 over the epoch's rounds",
-     "scope": "scenario B (3,3,2,1); B: the roots' own logs: the schedule follows 3,3,2,1 (each root within three rounds of its weight share); REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss)",
+     "scope": "scenario B (3,3,2,1); B: the roots' own logs: the schedule follows 3,3,2,1 (each root within three rounds of its weight share); REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss); fault rows judge the root quorum by the roots' committed round, the coupled EVM pipeline is judged in the baseline only",
      "lane": "b"
     },
     {
@@ -345,7 +345,7 @@
      "kind": "lane",
      "label": "REAL-PROCESS",
      "step": "SIGKILL the heavy root: stall, restart recovers",
-     "scope": "weighted restart over the retained home; REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss)"
+     "scope": "weighted restart over the retained home; REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss); fault rows judge the root quorum by the roots' committed round, the coupled EVM pipeline is judged in the baseline only"
     }
    ],
    "gaps": [
@@ -391,7 +391,7 @@
      "kind": "lane",
      "label": "REAL-PROCESS",
      "step": "SIGKILL the heavy root: stall, restart recovers",
-     "scope": "heavy offline (A): 3 of 9 left, explicit stall, restart recovers; REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss)"
+     "scope": "heavy offline (A): 3 of 9 left, explicit stall, restart recovers; REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss); fault rows judge the root quorum by the roots' committed round, the coupled EVM pipeline is judged in the baseline only"
     }
    ],
    "gaps": [
@@ -429,14 +429,14 @@
      "kind": "lane",
      "label": "REAL-PROCESS",
      "step": "B: SIGKILL each weight-3 root in turn: 6 left, stall, restart recovers",
-     "scope": "scenario B (3,3,2,1); either weight-3 root offline leaves 6: explicit stall, restart recovers; REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss)",
+     "scope": "scenario B (3,3,2,1); either weight-3 root offline leaves 6: explicit stall, restart recovers; REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss); fault rows judge the root quorum by the roots' committed round, the coupled EVM pipeline is judged in the baseline only",
      "lane": "b"
     },
     {
      "kind": "lane",
      "label": "REAL-PROCESS",
      "step": "baseline: weighted epoch commits (F8 trace and EVM IR)",
-     "scope": "scenario B (3,3,2,1); the no-fault control; REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss)",
+     "scope": "scenario B (3,3,2,1); the no-fault control; REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss); fault rows judge the root quorum by the roots' committed round, the coupled EVM pipeline is judged in the baseline only",
      "lane": "b"
     }
    ]
@@ -476,13 +476,13 @@
      "kind": "lane",
      "label": "REAL-PROCESS",
      "step": "the heavy root (weight 6 > F) equivocates, outside the assumptions: the equivocation is real, the checker classifies it",
-     "scope": "outside the assumptions: no liveness claim; the root's own adapter counted its conflicting signed votes; REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss)"
+     "scope": "outside the assumptions: no liveness claim; the root's own adapter counted its conflicting signed votes; REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss); fault rows judge the root quorum by the roots' committed round, the coupled EVM pipeline is judged in the baseline only"
     },
     {
      "kind": "lane",
      "label": "REAL-PROCESS",
      "step": "offline trace check: attempts have outcomes, equivocators are exactly the declared Byzantine roots",
-     "scope": "A: exact declared equivocators from the shim traces; signatures are not re-verified by the lane's python checker; REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss)"
+     "scope": "A: exact declared equivocators from the shim traces; signatures are not re-verified by the lane's python checker; REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss); fault rows judge the root quorum by the roots' committed round, the coupled EVM pipeline is judged in the baseline only"
     },
     {
      "kind": "lane-file",
@@ -520,14 +520,14 @@
      "kind": "lane",
      "label": "REAL-PROCESS",
      "step": "B: a weight-3 root (> F) equivocates, outside the assumptions: the equivocation is real, the checker classifies it",
-     "scope": "scenario B (3,3,2,1); outside the assumptions: no liveness claim; the root's own adapter counted its conflicting signed votes; REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss)",
+     "scope": "scenario B (3,3,2,1); outside the assumptions: no liveness claim; the root's own adapter counted its conflicting signed votes; REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss); fault rows judge the root quorum by the roots' committed round, the coupled EVM pipeline is judged in the baseline only",
      "lane": "b"
     },
     {
      "kind": "lane",
      "label": "REAL-PROCESS",
      "step": "offline trace check: attempts have outcomes, equivocators are exactly the declared Byzantine roots",
-     "scope": "scenario B (3,3,2,1); exact declared equivocators from the shim traces; signatures are not re-verified by the lane's python checker; REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss)",
+     "scope": "scenario B (3,3,2,1); exact declared equivocators from the shim traces; signatures are not re-verified by the lane's python checker; REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss); fault rows judge the root quorum by the roots' committed round, the coupled EVM pipeline is judged in the baseline only",
      "lane": "b"
     },
     {
@@ -574,13 +574,13 @@
      "kind": "lane",
      "label": "REAL-PROCESS",
      "step": "two Byzantine lights (weight 2) equivocate: honest 7 progresses",
-     "scope": "A, in bound; REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss)"
+     "scope": "A, in bound; REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss); fault rows judge the root quorum by the roots' committed round, the coupled EVM pipeline is judged in the baseline only"
     },
     {
      "kind": "lane",
      "label": "REAL-PROCESS",
      "step": "offline trace check: attempts have outcomes, equivocators are exactly the declared Byzantine roots",
-     "scope": "exact declared equivocators from the shim traces; signatures are not re-verified by the lane's python checker; REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss)"
+     "scope": "exact declared equivocators from the shim traces; signatures are not re-verified by the lane's python checker; REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss); fault rows judge the root quorum by the roots' committed round, the coupled EVM pipeline is judged in the baseline only"
     },
     {
      "kind": "lane-file",
@@ -618,14 +618,14 @@
      "kind": "lane",
      "label": "REAL-PROCESS",
      "step": "B: the weight-2 root (= F, in bound) equivocates: honest 3+3+1 progress",
-     "scope": "scenario B (3,3,2,1); Byzantine weight 2 = F, in bound; REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss)",
+     "scope": "scenario B (3,3,2,1); Byzantine weight 2 = F, in bound; REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss); fault rows judge the root quorum by the roots' committed round, the coupled EVM pipeline is judged in the baseline only",
      "lane": "b"
     },
     {
      "kind": "lane",
      "label": "REAL-PROCESS",
      "step": "offline trace check: attempts have outcomes, equivocators are exactly the declared Byzantine roots",
-     "scope": "scenario B (3,3,2,1); exact declared equivocators from the shim traces; signatures are not re-verified by the lane's python checker; REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss)",
+     "scope": "scenario B (3,3,2,1); exact declared equivocators from the shim traces; signatures are not re-verified by the lane's python checker; REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss); fault rows judge the root quorum by the roots' committed round, the coupled EVM pipeline is judged in the baseline only",
      "lane": "b"
     },
     {
@@ -751,39 +751,39 @@
      "kind": "lane",
      "label": "REAL-PROCESS",
      "step": "one light root isolated (held both ways): 8 of 9 progresses, heal releases",
-     "scope": "A: one light isolated both ways; REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss)"
+     "scope": "A: one light isolated both ways; REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss); fault rows judge the root quorum by the roots' committed round, the coupled EVM pipeline is judged in the baseline only"
     },
     {
      "kind": "lane",
      "label": "REAL-PROCESS",
      "step": "two lights isolated: heavy and one light (7 = Q) progress, heal releases",
-     "scope": "A: two lights; REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss)"
+     "scope": "A: two lights; REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss); fault rows judge the root quorum by the roots' committed round, the coupled EVM pipeline is judged in the baseline only"
     },
     {
      "kind": "lane",
      "label": "REAL-PROCESS",
      "step": "all lights isolated: heavy alone (6) and the lights (3) both stall, heal releases",
-     "scope": "A: all three lights; REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss)"
+     "scope": "A: all three lights; REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss); fault rows judge the root quorum by the roots' committed round, the coupled EVM pipeline is judged in the baseline only"
     },
     {
      "kind": "lane",
      "label": "REAL-PROCESS",
      "step": "B: the weight-1 root isolated: 8 of 9 progresses, heal releases",
-     "scope": "scenario B (3,3,2,1); REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss)",
+     "scope": "scenario B (3,3,2,1); REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss); fault rows judge the root quorum by the roots' committed round, the coupled EVM pipeline is judged in the baseline only",
      "lane": "b"
     },
     {
      "kind": "lane",
      "label": "REAL-PROCESS",
      "step": "B: the weight-2 root isolated: 7 = Q progresses, heal releases",
-     "scope": "scenario B (3,3,2,1); REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss)",
+     "scope": "scenario B (3,3,2,1); REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss); fault rows judge the root quorum by the roots' committed round, the coupled EVM pipeline is judged in the baseline only",
      "lane": "b"
     },
     {
      "kind": "lane",
      "label": "REAL-PROCESS",
      "step": "B: the weight-2 and weight-1 roots isolated: the two weight-3 roots (6) stall, heal releases",
-     "scope": "scenario B (3,3,2,1); REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss)",
+     "scope": "scenario B (3,3,2,1); REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss); fault rows judge the root quorum by the roots' committed round, the coupled EVM pipeline is judged in the baseline only",
      "lane": "b"
     }
    ],
@@ -851,20 +851,20 @@
      "kind": "lane",
      "label": "REAL-PROCESS",
      "step": "heavy root delayed: quorum lost, explicit stall, release recovers",
-     "scope": "A: the heavy root delayed; REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss)"
+     "scope": "A: the heavy root delayed; REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss); fault rows judge the root quorum by the roots' committed round, the coupled EVM pipeline is judged in the baseline only"
     },
     {
      "kind": "lane",
      "label": "REAL-PROCESS",
      "step": "B: one weight-3 root delayed: 6 of 9, quorum lost, explicit stall, release recovers",
-     "scope": "scenario B (3,3,2,1); one heavy delayed: 6 until release; REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss)",
+     "scope": "scenario B (3,3,2,1); one heavy delayed: 6 until release; REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss); fault rows judge the root quorum by the roots' committed round, the coupled EVM pipeline is judged in the baseline only",
      "lane": "b"
     },
     {
      "kind": "lane",
      "label": "REAL-PROCESS",
      "step": "F8 aggregator shards stay served by the weighted epoch (authorized TR rounds advance, aggregators answer)",
-     "scope": "the aggregators stay served while the weighted roots run; REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss)"
+     "scope": "the aggregators stay served while the weighted roots run; REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss); fault rows judge the root quorum by the roots' committed round, the coupled EVM pipeline is judged in the baseline only"
     }
    ],
    "gaps": [
@@ -903,26 +903,26 @@
      "kind": "lane",
      "label": "REAL-PROCESS",
      "step": "SIGKILL a light root and restart over the retained home",
-     "scope": "REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss)"
+     "scope": "REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss); fault rows judge the root quorum by the roots' committed round, the coupled EVM pipeline is judged in the baseline only"
     },
     {
      "kind": "lane",
      "label": "REAL-PROCESS",
      "step": "SIGKILL the heavy root: stall, restart recovers",
-     "scope": "REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss)"
+     "scope": "REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss); fault rows judge the root quorum by the roots' committed round, the coupled EVM pipeline is judged in the baseline only"
     },
     {
      "kind": "lane",
      "label": "REAL-PROCESS",
      "step": "B: SIGKILL the weight-2 root and restart over the retained home",
-     "scope": "scenario B (3,3,2,1); REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss)",
+     "scope": "scenario B (3,3,2,1); REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss); fault rows judge the root quorum by the roots' committed round, the coupled EVM pipeline is judged in the baseline only",
      "lane": "b"
     },
     {
      "kind": "lane",
      "label": "REAL-PROCESS",
      "step": "B: SIGKILL each weight-3 root in turn: 6 left, stall, restart recovers",
-     "scope": "scenario B (3,3,2,1); REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss)",
+     "scope": "scenario B (3,3,2,1); REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss); fault rows judge the root quorum by the roots' committed round, the coupled EVM pipeline is judged in the baseline only",
      "lane": "b"
     }
    ],
@@ -955,26 +955,26 @@
      "kind": "lane",
      "label": "REAL-PROCESS",
      "step": "SIGKILL a light root and restart over the retained home",
-     "scope": "REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss)"
+     "scope": "REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss); fault rows judge the root quorum by the roots' committed round, the coupled EVM pipeline is judged in the baseline only"
     },
     {
      "kind": "lane",
      "label": "REAL-PROCESS",
      "step": "SIGKILL the heavy root: stall, restart recovers",
-     "scope": "REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss)"
+     "scope": "REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss); fault rows judge the root quorum by the roots' committed round, the coupled EVM pipeline is judged in the baseline only"
     },
     {
      "kind": "lane",
      "label": "REAL-PROCESS",
      "step": "B: SIGKILL the weight-2 root and restart over the retained home",
-     "scope": "scenario B (3,3,2,1); REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss)",
+     "scope": "scenario B (3,3,2,1); REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss); fault rows judge the root quorum by the roots' committed round, the coupled EVM pipeline is judged in the baseline only",
      "lane": "b"
     },
     {
      "kind": "lane",
      "label": "REAL-PROCESS",
      "step": "B: SIGKILL each weight-3 root in turn: 6 left, stall, restart recovers",
-     "scope": "scenario B (3,3,2,1); REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss)",
+     "scope": "scenario B (3,3,2,1); REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss); fault rows judge the root quorum by the roots' committed round, the coupled EVM pipeline is judged in the baseline only",
      "lane": "b"
     }
    ],
@@ -1147,19 +1147,19 @@
      "kind": "lane",
      "label": "REAL-PROCESS",
      "step": "q3_candidate",
-     "scope": "the handoff proposal flow on a running chain, unit PoA to the coupled weighted set; REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss)"
+     "scope": "the handoff proposal flow on a running chain, unit PoA to the coupled weighted set; REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss); fault rows judge the root quorum by the roots' committed round, the coupled EVM pipeline is judged in the baseline only"
     },
     {
      "kind": "lane",
      "label": "REAL-PROCESS",
      "step": "q3_handoff",
-     "scope": "REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss)"
+     "scope": "REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss); fault rows judge the root quorum by the roots' committed round, the coupled EVM pipeline is judged in the baseline only"
     },
     {
      "kind": "lane",
      "label": "REAL-PROCESS",
      "step": "q3_activation",
-     "scope": "REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss)"
+     "scope": "REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss); fault rows judge the root quorum by the roots' committed round, the coupled EVM pipeline is judged in the baseline only"
     }
    ],
    "gaps": [
@@ -1214,7 +1214,7 @@
      "kind": "lane",
      "label": "REAL-PROCESS",
      "step": "F8 aggregator shards stay served by the weighted epoch (authorized TR rounds advance, aggregators answer)",
-     "scope": "after the activation: the aggregator shards stay served by the weighted epoch (not a new certified block); REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss)"
+     "scope": "after the activation: the aggregator shards stay served by the weighted epoch (not a new certified block); REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss); fault rows judge the root quorum by the roots' committed round, the coupled EVM pipeline is judged in the baseline only"
     }
    ],
    "gaps": [
@@ -1260,26 +1260,26 @@
      "kind": "lane",
      "label": "REAL-PROCESS",
      "step": "heavy root delayed: quorum lost, explicit stall, release recovers",
-     "scope": "no certified progress while the quorum is lost; REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss)"
+     "scope": "no certified progress while the quorum is lost; REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss); fault rows judge the root quorum by the roots' committed round, the coupled EVM pipeline is judged in the baseline only"
     },
     {
      "kind": "lane",
      "label": "REAL-PROCESS",
      "step": "SIGKILL the heavy root: stall, restart recovers",
-     "scope": "REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss)"
+     "scope": "REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss); fault rows judge the root quorum by the roots' committed round, the coupled EVM pipeline is judged in the baseline only"
     },
     {
      "kind": "lane",
      "label": "REAL-PROCESS",
      "step": "B: the weight-2 and weight-1 roots isolated: the two weight-3 roots (6) stall, heal releases",
-     "scope": "scenario B (3,3,2,1); REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss)",
+     "scope": "scenario B (3,3,2,1); REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss); fault rows judge the root quorum by the roots' committed round, the coupled EVM pipeline is judged in the baseline only",
      "lane": "b"
     },
     {
      "kind": "lane",
      "label": "REAL-PROCESS",
      "step": "B: one weight-3 root delayed: 6 of 9, quorum lost, explicit stall, release recovers",
-     "scope": "scenario B (3,3,2,1); REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss)",
+     "scope": "scenario B (3,3,2,1); REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss); fault rows judge the root quorum by the roots' committed round, the coupled EVM pipeline is judged in the baseline only",
      "lane": "b"
     }
    ],
@@ -1371,7 +1371,7 @@
      "kind": "lane",
      "label": "REAL-PROCESS",
      "step": "leader selector in effect: weight-proportional root-wrr-v1 over the epoch's rounds",
-     "scope": "root-wrr-v1 observed on real processes over the activated epoch (A only; the exact-priority replay and restart/jump cases stay in-process); REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss)"
+     "scope": "root-wrr-v1 observed on real processes over the activated epoch (A only; the exact-priority replay and restart/jump cases stay in-process); REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss); fault rows judge the root quorum by the roots' committed round, the coupled EVM pipeline is judged in the baseline only"
     },
     {
      "kind": "lane-file",
@@ -1383,7 +1383,7 @@
      "kind": "lane",
      "label": "REAL-PROCESS",
      "step": "leader selector in effect: weight-proportional root-wrr-v1 over the epoch's rounds",
-     "scope": "scenario B (3,3,2,1); root-wrr-v1 observed on real processes over the activated epoch (B); REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss)",
+     "scope": "scenario B (3,3,2,1); root-wrr-v1 observed on real processes over the activated epoch (B); REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss); fault rows judge the root quorum by the roots' committed round, the coupled EVM pipeline is judged in the baseline only",
      "lane": "b"
     },
     {
@@ -1512,13 +1512,13 @@
      "kind": "lane",
      "label": "REAL-PROCESS",
      "step": "baseline: weighted epoch commits (F8 trace and EVM IR)",
-     "scope": "REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss)"
+     "scope": "REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss); fault rows judge the root quorum by the roots' committed round, the coupled EVM pipeline is judged in the baseline only"
     },
     {
      "kind": "lane",
      "label": "REAL-PROCESS",
      "step": "heavy root delayed: quorum lost, explicit stall, release recovers",
-     "scope": "recovery within the deadline frozen in the lane script before the run; REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss)"
+     "scope": "recovery within the deadline frozen in the lane script before the run; REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss); fault rows judge the root quorum by the roots' committed round, the coupled EVM pipeline is judged in the baseline only"
     }
    ],
    "gaps": [
@@ -1549,25 +1549,25 @@
      "kind": "lane",
      "label": "REAL-PROCESS",
      "step": "one light root isolated (held both ways): 8 of 9 progresses, heal releases",
-     "scope": "partition; REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss)"
+     "scope": "partition; REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss); fault rows judge the root quorum by the roots' committed round, the coupled EVM pipeline is judged in the baseline only"
     },
     {
      "kind": "lane",
      "label": "REAL-PROCESS",
      "step": "heavy root delayed: quorum lost, explicit stall, release recovers",
-     "scope": "delay; REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss)"
+     "scope": "delay; REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss); fault rows judge the root quorum by the roots' committed round, the coupled EVM pipeline is judged in the baseline only"
     },
     {
      "kind": "lane",
      "label": "REAL-PROCESS",
      "step": "SIGKILL a light root and restart over the retained home",
-     "scope": "crash; REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss)"
+     "scope": "crash; REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss); fault rows judge the root quorum by the roots' committed round, the coupled EVM pipeline is judged in the baseline only"
     },
     {
      "kind": "lane",
      "label": "REAL-PROCESS",
      "step": "SIGKILL the heavy root: stall, restart recovers",
-     "scope": "crash; REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss)"
+     "scope": "crash; REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss); fault rows judge the root quorum by the roots' committed round, the coupled EVM pipeline is judged in the baseline only"
     }
    ]
   },
@@ -1719,7 +1719,7 @@
      "kind": "lane",
      "label": "REAL-PROCESS",
      "step": "no root of the weighted epoch reports itself a follower (#515 membership gate)",
-     "scope": "A: all four roots are members of the weighted epoch; none reports follower, so the membership gate is in the signing path and admits every member; REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss)"
+     "scope": "A: all four roots are members of the weighted epoch; none reports follower, so the membership gate is in the signing path and admits every member; REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss); fault rows judge the root quorum by the roots' committed round, the coupled EVM pipeline is judged in the baseline only"
     },
     {
      "kind": "lane-file",
@@ -1731,7 +1731,7 @@
      "kind": "lane",
      "label": "REAL-PROCESS",
      "step": "no root of the weighted epoch reports itself a follower (#515 membership gate)",
-     "scope": "scenario B (3,3,2,1); B: all four roots are members of the weighted epoch; REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss)",
+     "scope": "scenario B (3,3,2,1); B: all four roots are members of the weighted epoch; REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss); fault rows judge the root quorum by the roots' committed round, the coupled EVM pipeline is judged in the baseline only",
      "lane": "b"
     },
     {
