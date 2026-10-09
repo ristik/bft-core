@@ -81,10 +81,10 @@ print(f"p85: {len(extra)} P85 accounts added to the genesis alloc")
 PY
 }
 
-# p85_root_flags <node> <eth rpc url>: the flags of a root of the lane. The coupled Q3 runtime from genesis (V3 weighted handoffs), the P85
-# control executor with the election pinned, and the genesis committee's records as K. --pos-evm-rpc is required by an election-pinned chain.
+# p85_root_flags <node> <eth rpc url>: the flags of a root of the lane. The P85
+# control executor with the election pinned (--q3-lane is added by the caller), and the genesis committee's records as K. --pos-evm-rpc is required by an election-pinned chain.
 p85_root_flags() {
-  echo --q3-lane --pos-deployment "$P85_DIR/pos-deployment.json" --pos-genesis-identities "$P85_DIR/genesis-identities.json" --pos-evm-rpc "$2"
+  echo --pos-deployment "$P85_DIR/pos-deployment.json" --pos-genesis-identities "$P85_DIR/genesis-identities.json" --pos-evm-rpc "$2"
 }
 
 p85_selftest() {

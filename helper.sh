@@ -117,8 +117,12 @@ function start_root_nodes() {
       profileArgs=(--profile-2)
       if [ "${Q3_B1:-0}" = 1 ]; then
         # Q3 #50: the coupled runtime from genesis, and the PoA genesis committee's identity records the first coupled handoff names as K
-        [ -s test-nodes/genesis-identities.json ] || q3_prepare_genesis_identities || exit 1
-        profileArgs+=(--q3-lane --genesis-identities test-nodes/genesis-identities.json)
+        if [ "${P85_LANE:-0}" = 1 ]; then
+          profileArgs+=(--q3-lane)   # the genesis committee's records are the contracts' (--pos-genesis-identities below)
+        else
+          [ -s test-nodes/genesis-identities.json ] || q3_prepare_genesis_identities || exit 1
+          profileArgs+=(--q3-lane --genesis-identities test-nodes/genesis-identities.json)
+        fi
       fi
       if [ "${P85_LANE:-0}" = 1 ]; then
         # proof of stake (briefs/p85-recovery-lane.md): the coupled runtime, the P85 control executor and the genesis committee as K
