@@ -188,31 +188,45 @@ func applyHandoffRecord(previous *evmroot.ControlState, data []byte, network, ep
 		return nil, err
 	}
 	if r.Network != network || r.Epoch != epoch || r.OrderedRound != round || previous.Network != network || previous.Epoch != epoch {
-		return nil, ErrHandoffRecord
+		return nil, fmt.Errorf("%w: %s", ErrHandoffRecord, "the record's network, epoch or ordered round is not this block's")
 	}
 	if previous.Phase == "committed" && r.Kind == "abort" {
 		return nil, errors.Join(ErrHandoffRecord, ErrAbortAfterH)
 	}
-	if authority == nil || !bytes.Equal(r.PredecessorBodyID, authority.Predecessor()) || previous.Phase == "committed" {
-		return nil, ErrHandoffRecord
+	if authority == nil {
+		return nil, fmt.Errorf("%w: %s", ErrHandoffRecord, "no handoff authority")
+	}
+	if !bytes.Equal(r.PredecessorBodyID, authority.Predecessor()) {
+		return nil, fmt.Errorf("%w: %s", ErrHandoffRecord, "the record's predecessor body is not the root's current body")
+	}
+	if previous.Phase == "committed" {
+		return nil, fmt.Errorf("%w: %s", ErrHandoffRecord, "the epoch change is already committed")
 	}
 	// A Prepare whose freeze lapsed is dead (the EVM certifies again); a fresh Prepare may follow it, with the next attempt number,
 	// once the cooldown has passed. A Freeze for the lapsed attempt is refused below.
 	lapsed := PrepareLapsed(previous, round)
 	if lapsed && r.Kind == "prepare" && !PrepareMayFollowLapse(previous, round) {
-		return nil, ErrHandoffRecord
+		return nil, fmt.Errorf("%w: %s", ErrHandoffRecord, "a Prepare may not follow a lapsed one before the cooldown has passed")
 	}
 	if (previous.Phase == "idle" || previous.Phase == "aborted") && r.Kind == "freeze" {
 		return nil, errors.Join(ErrHandoffRecord, ErrFreezeBeforePrepare)
 	}
 	if previous.Phase == "idle" || previous.Phase == "aborted" || (lapsed && r.Kind == "prepare") {
-		if r.Kind != "prepare" || len(companion) != 0 ||
-			(previous.Phase == "idle" && r.Attempt != 0) ||
-			(previous.Phase != "idle" && (previous.Attempt == ^uint64(0) || r.Attempt != previous.Attempt+1)) {
-			return nil, ErrHandoffRecord
+		if r.Kind != "prepare" {
+			return nil, fmt.Errorf("%w: %s", ErrHandoffRecord, "only a Prepare may open an attempt (got "+r.Kind+")")
 		}
-		if bytes.Equal(r.NextBodyID, make([]byte, 32)) || r.ActivationRound < r.OrderedRound {
-			return nil, ErrHandoffRecord
+		if len(companion) != 0 {
+			return nil, fmt.Errorf("%w: %s", ErrHandoffRecord, "a Prepare carries no companion")
+		}
+		if (previous.Phase == "idle" && r.Attempt != 0) ||
+			(previous.Phase != "idle" && (previous.Attempt == ^uint64(0) || r.Attempt != previous.Attempt+1)) {
+			return nil, fmt.Errorf("%w: %s", ErrHandoffRecord, fmt.Sprintf("the Prepare's attempt %d does not follow the previous attempt %d from phase %s", r.Attempt, previous.Attempt, previous.Phase))
+		}
+		if bytes.Equal(r.NextBodyID, make([]byte, 32)) {
+			return nil, fmt.Errorf("%w: %s", ErrHandoffRecord, "the Prepare names no next body")
+		}
+		if r.ActivationRound < r.OrderedRound {
+			return nil, fmt.Errorf("%w: %s", ErrHandoffRecord, "the Prepare's activation round is below its ordered round")
 		}
 		if r.ActivationRound < r.OrderedRound+prepareActivationFloor {
 			return nil, errors.Join(ErrHandoffRecord, ErrPrepareActivationFloor)
@@ -220,7 +234,7 @@ func applyHandoffRecord(previous *evmroot.ControlState, data []byte, network, ep
 		return &evmroot.ControlState{Network: network, Epoch: epoch, PredecessorBodyID: bytes.Clone(r.PredecessorBodyID), Attempt: r.Attempt, Phase: "prepared", OrderedRound: round, RecordBytes: bytes.Clone(data), PreviousDigest: previous.Digest()}, nil
 	}
 	if !bytes.Equal(r.PredecessorBodyID, previous.PredecessorBodyID) || r.Attempt != previous.Attempt {
-		return nil, ErrHandoffRecord
+		return nil, fmt.Errorf("%w: %s", ErrHandoffRecord, "the record is not of the open attempt")
 	}
 	old, err := decodeOrderedRecord(previous.RecordBytes)
 	if err != nil {
@@ -231,14 +245,14 @@ func applyHandoffRecord(previous *evmroot.ControlState, data []byte, network, ep
 	switch r.Kind {
 	case "freeze":
 		if previous.Phase != "prepared" || lapsed || !bytes.Equal(r.NextBodyID, old.NextBodyID) || bytes.Equal(r.FrozenID, make([]byte, 32)) || r.ActivationRound != old.ActivationRound {
-			return nil, ErrHandoffRecord
+			return nil, fmt.Errorf("%w: %s", ErrHandoffRecord, fmt.Sprintf("the Freeze does not match its Prepare (phase %s, lapsed %t)", previous.Phase, lapsed))
 		}
 		frozenParent, err = authority.VerifyFreeze(r, companion)
 		if err != nil {
 			return nil, errors.Join(ErrHandoffRecord, err)
 		}
 		if len(frozenParent) != 32 {
-			return nil, ErrHandoffRecord
+			return nil, fmt.Errorf("%w: %s", ErrHandoffRecord, "the Freeze names no frozen parent")
 		}
 		// The frozen parent is the one the root bound when it ordered the Prepare, not one the operator or the endorsers chose.
 		if !bytes.Equal(frozenParent, previous.FrozenParent) {
@@ -247,20 +261,20 @@ func applyHandoffRecord(previous *evmroot.ControlState, data []byte, network, ep
 		phase = "endorsed"
 	case "commit":
 		if len(companion) != 0 || previous.Phase != "endorsed" || len(frozenParent) != 32 || !r.Valid() || !bytes.Equal(r.FrozenID, old.FrozenID) || !bytes.Equal(r.NextBodyID, old.NextBodyID) || r.ActivationRound < old.ActivationRound || bytes.Equal(r.SuccessorTRHash, make([]byte, 32)) {
-			return nil, ErrHandoffRecord
+			return nil, fmt.Errorf("%w: %s", ErrHandoffRecord, fmt.Sprintf("the Commit does not match its Freeze (phase %s)", previous.Phase))
 		}
 		phase = "committed"
 	case "abort":
 		if previous.Phase != "prepared" && previous.Phase != "endorsed" ||
 			!bytes.Equal(r.NextBodyID, old.NextBodyID) || r.ActivationRound != old.ActivationRound {
-			return nil, ErrHandoffRecord
+			return nil, fmt.Errorf("%w: %s", ErrHandoffRecord, fmt.Sprintf("the Abort does not match its Prepare (phase %s)", previous.Phase))
 		}
-		if authority.VerifyAbort(r, companion) != nil {
-			return nil, ErrHandoffRecord
+		if err := authority.VerifyAbort(r, companion); err != nil {
+			return nil, errors.Join(ErrHandoffRecord, err)
 		}
 		phase = "aborted"
 	default:
-		return nil, ErrHandoffRecord
+		return nil, fmt.Errorf("%w: a %s record cannot follow phase %s", ErrHandoffRecord, r.Kind, previous.Phase)
 	}
 	return &evmroot.ControlState{Network: network, Epoch: epoch, PredecessorBodyID: bytes.Clone(r.PredecessorBodyID), Attempt: r.Attempt, Phase: phase, OrderedRound: round, RecordBytes: bytes.Clone(data), PreviousDigest: previous.Digest(), FrozenParent: frozenParent}, nil
 }

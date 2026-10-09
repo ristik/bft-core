@@ -256,7 +256,7 @@ func (x *ExecutedBlock) extendWithAuthority(newBlock *rctypes.BlockData, verifie
 	// effect in its own block, for leaders and for every voter replaying it.
 	if nextShardState.Control != nil {
 		if len(newBlock.Payload.HandoffRecords) > 2 {
-			return nil, ErrHandoffRecord
+			return nil, fmt.Errorf("%w: a block carries at most a record and its companion, got %d", ErrHandoffRecord, len(newBlock.Payload.HandoffRecords))
 		}
 		if len(newBlock.Payload.HandoffRecords) > 0 {
 			var companion []byte
@@ -285,7 +285,7 @@ func (x *ExecutedBlock) extendWithAuthority(newBlock *rctypes.BlockData, verifie
 					return nil, err
 				}
 				if len(companion) != 0 && control.Phase == "endorsed" {
-					if err := verifyFreezeAssignment(companion, nextShardState.States[frozen], shardConfs[frozen], orchestration, authority.CurrentRoot(), nextShardState.States, shardConfs); err != nil {
+					if err := verifyFreezeAssignment(companion, nextShardState.States[frozen], shardConfs[frozen], orchestration, authority.CurrentRoot(), nextShardState.States, shardConfs, services, v3RulesOf(authority)); err != nil {
 						return nil, err
 					}
 					if err := pos.refuseResolved(companion); err != nil {
@@ -434,7 +434,7 @@ func (x *ExecutedBlock) extendWithAuthority(newBlock *rctypes.BlockData, verifie
 // the legacy and V2 companions, the bounded weights for a V3 one (the authority already admitted it under them: a weighted rotation out of
 // a unit epoch carries stakes the unit rules refuse).
 func freezeAssignmentRules(version uint64) evmassign.Rules {
-	if version == freezeV3Version {
+	if weightedCompanion(version) {
 		return weightvalidation.EVMRules(weightvalidation.ModeWeighted)
 	}
 	return evmassign.UnitRules
@@ -445,7 +445,7 @@ func freezeAssignmentRules(version uint64) evmassign.Rules {
 // The installed assignment is the authenticated configuration of the frozen
 // shard at this block, never a value the candidate supplies.
 func verifyFreezeAssignment(companion []byte, si *ShardInfo, installed *types.PartitionDescriptionRecord, orchestration Orchestration, currentRoot []evmassign.RootMember,
-	states map[types.PartitionShardID]*ShardInfo, shardConfs map[types.PartitionShardID]*types.PartitionDescriptionRecord) error {
+	states map[types.PartitionShardID]*ShardInfo, shardConfs map[types.PartitionShardID]*types.PartitionDescriptionRecord, services *PosServices, v3 V3FreezeRules) error {
 	fc, err := ParseFreezeCompanion(companion)
 	if err != nil || si == nil || installed == nil {
 		return ErrHandoffRecord
@@ -460,15 +460,10 @@ func verifyFreezeAssignment(companion []byte, si *ShardInfo, installed *types.Pa
 		// The legacy root-only companion carries no EVM binding: on a chain that requires coupling it must not change
 		// the committee (it could otherwise add a root entity without its delegated EVM key).
 		if evmassign.CouplingRequired(installed) {
-			body, bodyErr := decodeD3Body(fc.Body)
-			if bodyErr != nil {
-				return errors.Join(ErrHandoffRecord, bodyErr)
+			next, membersErr := rootOnlySuccessorMembers(fc, v3)
+			if membersErr != nil {
+				return errors.Join(ErrHandoffRecord, membersErr)
 			}
-			next := make([]evmassign.RootMember, 0, len(body.Members))
-			for _, m := range body.Members {
-				next = append(next, evmassign.RootMember{NodeID: m.NodeID, Key: m.ConsensusKey, Weight: m.Weight})
-			}
-			sort.Slice(next, func(i, j int) bool { return next[i].NodeID < next[j].NodeID })
 			if !evmassign.SameCommittee(next, currentRoot) {
 				return errors.Join(ErrHandoffRecord, evmassign.ErrCoupling)
 			}
@@ -500,6 +495,9 @@ func verifyFreezeAssignment(companion []byte, si *ShardInfo, installed *types.Pa
 			return err
 		}
 	}
+	if err := verifyPrimaryProof(fc, candidate, si, services); err != nil {
+		return err
+	}
 	// The kind rules run over the committed history the supersession evidence was just checked against.
 	lctx, err := LifecycleFor(orchestration, si.PartitionID, si.ShardID, si.IR.Epoch, installed)
 	if err != nil {
@@ -507,6 +505,77 @@ func verifyFreezeAssignment(companion []byte, si *ShardInfo, installed *types.Pa
 	}
 	if err := evmassign.VerifyLifecycle(candidate, lctx); err != nil {
 		return errors.Join(ErrHandoffRecord, err)
+	}
+	return nil
+}
+
+// rootOnlySuccessorMembers is the successor committee a root-only companion (no EVM binding) names, decoded as the body version its Freeze carries:
+// a version-3 body (the Q3 flow's) through the V3 rules the authority holds, any other as the legacy nine-field body. The members are in canonical order.
+func rootOnlySuccessorMembers(fc FreezeCompanion, v3 V3FreezeRules) ([]evmassign.RootMember, error) {
+	var next []evmassign.RootMember
+	if fc.Version == freezeV3Version {
+		if v3 == nil {
+			return nil, ErrFreezeV3Disabled
+		}
+		body, err := v3.VerifyBody(fc.Body)
+		if err != nil {
+			return nil, err
+		}
+		next = append(next, body.Members...)
+	} else {
+		body, err := decodeD3Body(fc.Body)
+		if err != nil {
+			return nil, err
+		}
+		for _, m := range body.Members {
+			next = append(next, evmassign.RootMember{NodeID: m.NodeID, Key: m.ConsensusKey, Weight: m.Weight})
+		}
+	}
+	sort.Slice(next, func(i, j int) bool { return next[i].NodeID < next[j].NodeID })
+	return next, nil
+}
+
+// v3RulesOf is the V3 rule set a handoff authority applies at Freeze, nil where it has none.
+func v3RulesOf(a handoffAuthority) V3FreezeRules {
+	if v1, ok := a.(*v1HandoffAuthority); ok {
+		return v1.v3
+	}
+	return nil
+}
+
+// verifyPrimaryProof is the EVM-state half of a primary candidate's admission on a chain that judges it: the companion carries the
+// proof, and it shows the Election result published, still the open reservation over the acknowledged assignment, with every member's
+// possession and the identity records the candidate names, against the state root the root certified for the frozen shard. The EVM is
+// frozen from the Prepare that bound the parent, so that state is the one the candidate takes effect over. A chain that does not judge
+// primary candidates refuses a companion that carries a proof nobody would check.
+func verifyPrimaryProof(fc FreezeCompanion, c evmassign.Candidate, frozen *ShardInfo, services *PosServices) error {
+	judged := services.RequiresPrimaryProof() && c.Kind == evmassign.KindPrimary
+	if !judged {
+		if fc.Version == freezeV4Version {
+			return errors.Join(ErrHandoffRecord, ErrPrimaryProofUnexpected)
+		}
+		return nil
+	}
+	if fc.Version != freezeV4Version {
+		return errors.Join(ErrHandoffRecord, ErrPrimaryProofMissing)
+	}
+	if frozen == nil || frozen.IR == nil || len(frozen.IR.Hash) != 32 {
+		return errors.Join(ErrHandoffRecord, ErrPrepareNoEVMParent)
+	}
+	proof, err := evmassign.DecodePrimaryProof(fc.Proof)
+	if err != nil {
+		return errors.Join(ErrHandoffRecord, err)
+	}
+	result := c.ResultID()
+	var root [32]byte
+	copy(root[:], frozen.IR.Hash)
+	facts, err := services.Primary.VerifyPrimary(proof.Witness, root, result)
+	if err != nil {
+		return errors.Join(ErrHandoffRecord, ErrPrimaryProofRefused, err)
+	}
+	dep := evmassign.ElectionDeployment{Deployment: services.Deployment.Deployment, Election: services.Deployment.Election}
+	if err := evmassign.VerifyPrimary(c, dep, facts, proof.PoPs); err != nil {
+		return errors.Join(ErrHandoffRecord, ErrPrimaryProofRefused, err)
 	}
 	return nil
 }
@@ -651,7 +720,7 @@ func frozenShard(state ShardStates, configs map[types.PartitionShardID]*types.Pa
 	var selected types.PartitionShardID
 	found := false
 	if len(parent) != 32 {
-		return selected, ErrHandoffRecord
+		return selected, fmt.Errorf("%w: the frozen parent is not 32 bytes", ErrHandoffRecord)
 	}
 	for key, shard := range state.States {
 		if shard == nil || shard.IR == nil || !bytes.Equal(shard.IR.BlockHash, parent) {
@@ -661,18 +730,18 @@ func frozenShard(state ShardStates, configs map[types.PartitionShardID]*types.Pa
 		// aggregator that happens to present the same hash.
 		conf := configs[key]
 		if conf == nil {
-			return selected, ErrHandoffRecord
+			return selected, fmt.Errorf("%w: the shard presenting the frozen parent has no configuration", ErrHandoffRecord)
 		}
 		if conf.PartitionTypeID != evmPartitionTypeID {
 			continue
 		}
 		if found {
-			return selected, ErrHandoffRecord
+			return selected, fmt.Errorf("%w: more than one EVM shard presents the frozen parent", ErrHandoffRecord)
 		}
 		selected, found = key, true
 	}
 	if !found {
-		return selected, ErrHandoffRecord
+		return selected, fmt.Errorf("%w: no EVM shard presents the frozen parent %x", ErrHandoffRecord, parent)
 	}
 	return selected, nil
 }

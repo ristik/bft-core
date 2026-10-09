@@ -51,7 +51,8 @@ type FreezeCompanion struct {
 	Parent     []byte
 	Candidate  []byte
 	Preimage   []byte // nil for the legacy root-only companion
-	Receipts   []byte // readiness receipts of the successor members; version 3 only
+	Receipts   []byte // readiness receipts of the successor members; versions 3 and 4
+	Proof      []byte // the primary candidate's EVM proof; version 4 only
 	Signatures map[string]hex.Bytes
 }
 
@@ -96,6 +97,15 @@ func ParseFreezeCompanion(raw []byte) (FreezeCompanion, error) {
 			return out, ErrHandoffRecord
 		}
 		return FreezeCompanion{Version: freezeV3Version, Body: v.Body, Parent: v.Parent, Candidate: v.Candidate, Preimage: v.Preimage, Receipts: v.Receipts, Signatures: v.Signatures}, nil
+	case freezeV4Version:
+		var v FreezeV4Authorization
+		if err := types.Cbor.Unmarshal(raw, &v); err != nil || len(v.Signatures) == 0 || len(v.Receipts) == 0 || len(v.Preimage) == 0 || len(v.Proof) == 0 {
+			return out, ErrHandoffRecord
+		}
+		if canonical, err := v.Bytes(); err != nil || !bytes.Equal(canonical, raw) {
+			return out, ErrHandoffRecord
+		}
+		return FreezeCompanion{Version: freezeV4Version, Body: v.Body, Parent: v.Parent, Candidate: v.Candidate, Preimage: v.Preimage, Receipts: v.Receipts, Signatures: v.Signatures, Proof: v.Proof}, nil
 	}
 	return out, ErrHandoffRecord
 }
@@ -210,7 +220,7 @@ func (a *v1HandoffAuthority) VerifyFreeze(r evmroot.OrderedHandoffRecord, compan
 	if err != nil {
 		return nil, ErrHandoffRecord
 	}
-	if proof.Version == freezeV3Version {
+	if weightedCompanion(proof.Version) {
 		return a.verifyFreezeV3(r, proof)
 	}
 	if a.priorVersion == freezeV3Version { // a V3 epoch's committee orders V3 successors only

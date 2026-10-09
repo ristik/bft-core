@@ -62,8 +62,12 @@ func TestWeightedAcceptsTheCoupledFixture(t *testing.T) {
 	require.NoError(t, RootTrustBase(trustBase(t, n, 7), ModeWeighted))
 	require.NoError(t, PDR(pdr(n), RoleEVM, ModeWeighted))
 	require.NoError(t, EVMSet(n, ModeWeighted))
-	big := members(t, evmroot.MaxMemberWeight, 1)
-	require.NoError(t, EVMSet(big, ModeWeighted), "a member at the cap is allowed")
+	big := members(t, evmroot.MaxMemberWeight-1, 1)
+	require.NoError(t, EVMSet(big, ModeWeighted), "a total of exactly B is allowed")
+	over := members(t, evmroot.MaxMemberWeight, 1)
+	require.Error(t, EVMSet(over, ModeWeighted), "W = B+1 is refused")
+	_, err = Nodes(over, RoleRoot, ModeWeighted)
+	require.ErrorIs(t, err, ErrTotalWeight, "W = B+1 is refused at the root too, before anything commits it")
 }
 
 func TestWeightedRefusals(t *testing.T) {
@@ -83,15 +87,15 @@ func TestWeightedRefusals(t *testing.T) {
 		require.ErrorIs(t, err, ErrWeight)
 	})
 	t.Run("total above the cap", func(t *testing.T) {
-		w := make([]uint64, 257) // 257 * 2^40 > 2^48, each member at the cap
+		w := make([]uint64, 65) // 65 * 1024 = B + 1024 > B, each member in range
 		for i := range w {
-			w[i] = evmroot.MaxMemberWeight
+			w[i] = 1024
 		}
 		n := members(t, w...)
 		_, err := Nodes(n, RoleRoot, ModeWeighted)
 		require.ErrorIs(t, err, ErrTotalWeight)
 		require.NotErrorIs(t, err, ErrWeight, "each member alone is in range")
-		_, err = Nodes(n[:256], RoleRoot, ModeWeighted)
+		_, err = Nodes(n[:64], RoleRoot, ModeWeighted)
 		require.NoError(t, err, "exactly the cap is allowed")
 	})
 	t.Run("duplicate node id", func(t *testing.T) {
