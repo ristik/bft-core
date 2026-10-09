@@ -55,7 +55,11 @@ func (e Envelope) Encode() ([]byte, error) {
 	}
 	links := make([]any, len(e.Links))
 	for i, l := range e.Links {
-		links[i] = []any{l.Body.Encode(), l.Claim.items(), evidenceItems(l.Evidence), l.Proof, receiptItems(l.Receipts)}
+		preimage := l.Preimage
+		if preimage == nil {
+			preimage = []byte{} // an absent preimage is the empty byte string, never null
+		}
+		links[i] = []any{l.Body.Encode(), l.Claim.items(), evidenceItems(l.Evidence), preimage, l.Proof, receiptItems(l.Receipts)}
 	}
 	var block any
 	if len(e.BlockID) != 0 {
@@ -90,7 +94,7 @@ func DecodeEnvelope(raw []byte) (Envelope, error) {
 	e.BlockID = r.optBytes(digestLen)
 	links := r.array(MaxLinks)
 	for i := 0; i < links.len() && links.err == nil; i++ {
-		l, err := readLink(links.sub(5))
+		l, err := readLink(links.sub(6))
 		if err != nil {
 			return Envelope{}, err
 		}
@@ -124,6 +128,7 @@ func readLink(f *reader) (Link, error) {
 	copy(l.Claim.PriorID[:], c.bytes(digestLen, 0))
 	ev := f.sub(3)
 	l.Evidence = Evidence{Summary: ev.bytes(-1, maxEvidence), FrozenParent: ev.bytes(-1, maxEvidence), CandidateDigest: ev.bytes(-1, maxEvidence)}
+	l.Preimage = f.bytes(-1, maxPreimage)
 	l.Proof = f.bytes(-1, MaxOldCommitProof)
 	var err error
 	if l.Receipts, err = readReceipts(f); f.err == nil && err != nil {
@@ -171,7 +176,10 @@ func (h *History) retained(e, prior Entry, l Link) error {
 	if err := bindCandidate(l.Body, p.Record, l.Evidence); err != nil {
 		return errors.Join(ErrConflict, err)
 	}
-	if err := VerifyReceipts(l.Body, ContextFor(l.Body, p.Record.Attempt, [32]byte(l.Evidence.CandidateDigest)), l.Receipts); err != nil {
+	if !bytes.Equal(l.Preimage, e.preimage) {
+		return conflict("candidate preimage")
+	}
+	if err := readiness(l.Body, p.Record.Attempt, l.Evidence, l.Preimage, prior.preimage, l.Receipts); err != nil {
 		return errors.Join(ErrConflict, err)
 	}
 	return nil

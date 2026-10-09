@@ -88,7 +88,9 @@ func ParseFreezeCompanion(raw []byte) (FreezeCompanion, error) {
 		return FreezeCompanion{Version: 2, Body: v.Body, Parent: v.Parent, Candidate: v.Candidate, Preimage: v.Preimage, Signatures: v.Signatures}, nil
 	case freezeV3Version:
 		var v FreezeV3Authorization
-		if err := types.Cbor.Unmarshal(raw, &v); err != nil || len(v.Signatures) == 0 || len(v.Receipts) == 0 {
+		// readiness receipts are required of every V3 companion except an exact recovery K, which carries a preimage and no receipts; which
+		// of the two a companion is gets decided by the decoded preimage in verifyFreezeV3, never here
+		if err := types.Cbor.Unmarshal(raw, &v); err != nil || len(v.Signatures) == 0 || (len(v.Receipts) == 0 && len(v.Preimage) == 0) {
 			return out, ErrHandoffRecord
 		}
 		if canonical, err := v.Bytes(); err != nil || !bytes.Equal(canonical, raw) {

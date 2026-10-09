@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/unicitynetwork/bft-core/engineapi"
 	"github.com/unicitynetwork/bft-core/evmassign"
 	"github.com/unicitynetwork/bft-core/q3active"
 	"github.com/unicitynetwork/bft-core/q3format"
@@ -302,6 +303,10 @@ type ethExecution struct {
 	url      string
 	registry string
 	client   *http.Client
+	// engineURL and secret are the pair's JWT-authenticated Engine endpoint: the network and root genesis its pair binding is bound to are
+	// read there, never from a plain eth_* answer alone.
+	engineURL string
+	secret    engineapi.Secret
 }
 
 func (e ethExecution) call(ctx context.Context, method string, params []any, out any) error {
@@ -352,7 +357,11 @@ func (e ethExecution) Report(ctx context.Context) (q3ready.ExecutionReport, erro
 		return q3ready.ExecutionReport{}, errors.New("the execution client serves no registry code")
 	}
 	sum := sha256.Sum256(raw)
-	return q3ready.ExecutionReport{GenesisHash: genesis, CodeHash: sum[:]}, nil
+	pins, err := engineapi.ReadPairPins(ctx, e.engineURL, e.secret)
+	if err != nil {
+		return q3ready.ExecutionReport{}, fmt.Errorf("the authenticated pair connection: %w", err)
+	}
+	return q3ready.ExecutionReport{GenesisHash: genesis, CodeHash: sum[:], Authenticated: true, PairNetwork: pins.NetworkID, PairGenesis: pins.RootGenesisID}, nil
 }
 
 func parsePin32(name, s string) ([]byte, error) {
@@ -364,7 +373,7 @@ func parsePin32(name, s string) ([]byte, error) {
 }
 
 func newQ3ReadinessCmd() *cobra.Command {
-	var candidateFile, keyFile, rootRPC, shardRPC, ethURL, registry, genesisPin, codePin, out string
+	var candidateFile, keyFile, rootRPC, shardRPC, ethURL, engineURL, jwtFile, registry, genesisPin, codePin, out string
 	cmd := &cobra.Command{Use: "q3-readiness", Short: "Sign this validator entity's readiness receipt for a V3 candidate",
 		Long: "Run by a successor member's operator. The entity's BFT node and its shard service must each report the chain and have the\n" +
 			"candidate staged, and the paired execution client must be the genesis and registry code the operator pinned (the pins are\n" +
@@ -407,6 +416,10 @@ func newQ3ReadinessCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			secret, err := readJWTSecret(jwtFile)
+			if err != nil {
+				return err
+			}
 			client := &http.Client{Timeout: 10 * time.Second}
 			if err := stageOnRoot(cmd.Context(), client, rootRPC, cand); err != nil {
 				return fmt.Errorf("bft node: %w", err)
@@ -415,7 +428,7 @@ func newQ3ReadinessCmd() *cobra.Command {
 				return fmt.Errorf("shard service: %w", err)
 			}
 			entity := q3ready.Entity{NodeID: id.String(), BFT: httpQ3Service{url: rootRPC, client: client}, Authority: httpQ3Service{url: shardRPC, client: client},
-				Execution: ethExecution{url: ethURL, registry: registry, client: client}}
+				Execution: ethExecution{url: ethURL, registry: registry, client: client, engineURL: engineURL, secret: secret}}
 			receipt, err := entity.Attest(cmd.Context(), rc, body.Config, q3ready.ExecutionPin{GenesisHash: genesis, CodeHash: code}, signer)
 			if err != nil {
 				return err
@@ -427,11 +440,13 @@ func newQ3ReadinessCmd() *cobra.Command {
 	cmd.Flags().StringVar(&rootRPC, "root-rpc", "", "this entity's root node RPC URL")
 	cmd.Flags().StringVar(&shardRPC, "shard-rpc", "", "this entity's shard node RPC URL")
 	cmd.Flags().StringVar(&ethURL, "eth-url", "", "this entity's execution client plain endpoint")
+	cmd.Flags().StringVar(&engineURL, "engine-url", "", "this entity's execution client JWT-authenticated Engine endpoint (the pair pins are read here)")
+	cmd.Flags().StringVar(&jwtFile, "jwt-secret", "", "the Engine endpoint's JWT secret file")
 	cmd.Flags().StringVar(&registry, "registry-address", "0xff00000000000000000000000000000000000002", "the seal registry contract whose code the execution pin names")
 	cmd.Flags().StringVar(&genesisPin, "execution-genesis-hash", "", "the pinned execution genesis block hash")
 	cmd.Flags().StringVar(&codePin, "execution-code-hash", "", "the pinned SHA-256 of the registry contract code")
 	cmd.Flags().StringVar(&out, "out", "", "receipt file to write")
-	for _, f := range []string{"candidate", "key-conf", "root-rpc", "shard-rpc", "eth-url", "execution-genesis-hash", "execution-code-hash", "out"} {
+	for _, f := range []string{"candidate", "key-conf", "root-rpc", "shard-rpc", "eth-url", "engine-url", "jwt-secret", "execution-genesis-hash", "execution-code-hash", "out"} {
 		_ = cmd.MarkFlagRequired(f)
 	}
 	return cmd
@@ -440,7 +455,7 @@ func newQ3ReadinessCmd() *cobra.Command {
 // stageOnRoot hands the entity's root node the candidate another validator derived. The root refuses a body that is not the next epoch of
 // its own chain.
 func stageOnRoot(ctx context.Context, client *http.Client, rootRPC string, cand q3CandidateFile) error {
-	body, err := json.Marshal(rootQ3StageRequest{Body: cand.Body, Candidate: cand.Candidate[:], Attempt: cand.Attempt})
+	body, err := json.Marshal(rootQ3StageRequest{Body: cand.Body, Candidate: cand.Candidate[:], Attempt: cand.Attempt, Preimage: cand.Preimage})
 	if err != nil {
 		return err
 	}
@@ -452,7 +467,7 @@ func stageOnRoot(ctx context.Context, client *http.Client, rootRPC string, cand 
 
 // stageOnShard hands the shard service the candidate it will report as staged. The shard node refuses a body of another chain.
 func stageOnShard(ctx context.Context, client *http.Client, shardRPC string, cand q3CandidateFile) error {
-	body, err := json.Marshal(shardQ3StageRequest{Body: cand.Body, Candidate: cand.Candidate[:], Attempt: cand.Attempt})
+	body, err := json.Marshal(shardQ3StageRequest{Body: cand.Body, Candidate: cand.Candidate[:], Attempt: cand.Attempt, Preimage: cand.Preimage})
 	if err != nil {
 		return err
 	}

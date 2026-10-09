@@ -131,7 +131,7 @@ func TestAJoinersKeyIsBoundFromTheVerifiedActivatedConfiguration(t *testing.T) {
 		bad.NewActiveConfHash[0] ^= 1
 		require.ErrorIs(t, noteJoinerStep(s, f.bundle, bad, installedHash(f)), ErrJoinerConf)
 		require.NoError(t, finishJoinerKey(&certificationSigning{}), "(not deferred)")
-		require.ErrorIs(t, finishJoinerKey(s), ErrJoinerUnnamed, "nothing was recorded")
+		requireStagingOnly(t, s, "nothing was recorded")
 	})
 	t.Run("a hash that is not the one INSTALLED for the epoch is refused and binds nothing", func(t *testing.T) {
 		s := deferredSigning(t, f.self)
@@ -139,7 +139,7 @@ func TestAJoinersKeyIsBoundFromTheVerifiedActivatedConfiguration(t *testing.T) {
 		require.ErrorIs(t, noteJoinerStep(s, f.bundle, f.step, wrong), ErrJoinerConf)
 		missing := func(uint64) ([]byte, bool) { return nil, false }
 		require.ErrorIs(t, noteJoinerStep(s, f.bundle, f.step, missing), ErrJoinerConf, "no installed configuration for the epoch")
-		require.ErrorIs(t, finishJoinerKey(s), ErrJoinerUnnamed)
+		requireStagingOnly(t, s, "")
 	})
 	t.Run("an epoch other than the step's is refused", func(t *testing.T) {
 		s := deferredSigning(t, f.self)
@@ -151,12 +151,12 @@ func TestAJoinersKeyIsBoundFromTheVerifiedActivatedConfiguration(t *testing.T) {
 		g := newJoinerFixture(t, false)
 		s := deferredSigning(t, g.self)
 		require.NoError(t, noteJoinerStep(s, g.bundle, g.step, installedHash(g)))
-		require.ErrorIs(t, finishJoinerKey(s), ErrJoinerUnnamed)
+		requireStagingOnly(t, s, "")
 	})
 	t.Run("a root-only bundle, and a signer that is not deferred, are left alone", func(t *testing.T) {
 		s := deferredSigning(t, f.self)
 		require.NoError(t, noteJoinerStep(s, handoffdelivery.Bundle{}, f.step, installedHash(f)))
-		require.ErrorIs(t, finishJoinerKey(s), ErrJoinerUnnamed)
+		requireStagingOnly(t, s, "")
 		require.NoError(t, noteJoinerStep(&certificationSigning{nodeID: f.self}, f.bundle, f.step, installedHash(f)), "a node the genesis configuration names has no deferred signer")
 		require.NoError(t, noteJoinerStep(nil, f.bundle, f.step, installedHash(f)))
 	})
@@ -183,7 +183,7 @@ func TestShardNodeRunBindsTheJoinersKeyFromTheInstalledAssignment(t *testing.T) 
 func TestAPlainRestartOfAJoinerNeedsAnInstalledStepThatNamesIt(t *testing.T) {
 	f := newJoinerFixture(t, true)
 	s := deferredSigning(t, f.self)
-	require.ErrorIs(t, finishJoinerKey(s), ErrJoinerUnnamed, "before any step is replayed")
+	requireStagingOnly(t, s, "before any step is replayed")
 	require.NoError(t, noteJoinerStep(s, f.bundle, f.step, installedHash(f)), "the replay of the persisted step")
 	require.NoError(t, finishJoinerKey(s))
 	require.True(t, s.deferred.Bound())
@@ -191,7 +191,7 @@ func TestAPlainRestartOfAJoinerNeedsAnInstalledStepThatNamesIt(t *testing.T) {
 	notNamed := newJoinerFixture(t, false)
 	other := deferredSigning(t, notNamed.self)
 	require.NoError(t, noteJoinerStep(other, notNamed.bundle, notNamed.step, installedHash(notNamed)))
-	require.ErrorIs(t, finishJoinerKey(other), ErrJoinerUnnamed, "every replayed step lacks this node")
+	requireStagingOnly(t, other, "every replayed step lacks this node")
 
 	require.NoError(t, finishJoinerKey(nil))
 	require.NoError(t, finishJoinerKey(&certificationSigning{}), "a node the genesis configuration names")
@@ -254,7 +254,7 @@ func TestAJoinersInstalledConfigurationNamingTheLocalKeyIsRefused(t *testing.T) 
 	s := deferredSigning(t, f.self)
 	s.localKey = pubOf(t, f.key)
 	require.ErrorIs(t, noteJoinerStep(s, f.bundle, f.step, installedHash(f)), ErrJoinerLocalKey)
-	require.ErrorIs(t, finishJoinerKey(s), ErrJoinerUnnamed, "nothing was recorded")
+	requireStagingOnly(t, s, "nothing was recorded")
 }
 
 // The key is bound at BOTH points where the replay completes: after the persisted steps of a plain start, and after the catch-up of a restore.
@@ -386,4 +386,29 @@ func TestTheJoinersKeyIsBoundOnlyAfterTheReplayOfThePersistedSteps(t *testing.T)
 		}
 		return true
 	})
+}
+
+// requireStagingOnly: an unnamed deferred joiner starts (finishJoinerKey is no error), is marked staging-only, binds nothing, and its
+// signer refuses every certification request.
+func requireStagingOnly(t *testing.T, s *certificationSigning, msg string) {
+	t.Helper()
+	require.NoError(t, finishJoinerKey(s), msg)
+	require.True(t, s.stagingOnly, msg)
+	require.False(t, s.deferred.Bound(), msg)
+	_, err := s.deferred.Sign(context.Background(), nil, nil, nil)
+	require.ErrorIs(t, err, shardnode.ErrAuthorityKeyUnbound, msg)
+}
+
+// A staging-only joiner becomes a signer when a verified install names it, without a restart.
+func TestAStagingOnlyJoinerBindsWhenAVerifiedInstallNamesIt(t *testing.T) {
+	f := newJoinerFixture(t, true)
+	s := deferredSigning(t, f.self)
+	requireStagingOnly(t, s, "before the activation")
+	require.NoError(t, bindInstalledJoinerKey(s), "nothing recorded: still staging-only")
+	require.False(t, s.deferred.Bound())
+	require.NoError(t, noteJoinerStep(s, f.bundle, f.step, installedHash(f)))
+	require.NoError(t, bindInstalledJoinerKey(s))
+	require.True(t, s.deferred.Bound())
+	require.False(t, s.stagingOnly)
+	require.NoError(t, bindInstalledJoinerKey(nil))
 }
