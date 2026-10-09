@@ -24,6 +24,7 @@ import (
 	testobserve "github.com/unicitynetwork/bft-core/internal/testutils/observability"
 	testtrustbase "github.com/unicitynetwork/bft-core/internal/testutils/trustbase"
 	"github.com/unicitynetwork/bft-core/network/protocol/certification"
+	"github.com/unicitynetwork/bft-core/shardnode"
 	"github.com/unicitynetwork/bft-core/signingauthority"
 	"github.com/unicitynetwork/bft-core/signingauthority/service"
 )
@@ -167,6 +168,42 @@ func TestShardNodeSigningSelection(t *testing.T) {
 		defer named.close()
 		require.Nil(t, named.deferred)
 		// and a plain run with no verified handoff history to derive it from is still refused
+		_, err = buildCertificationSigning(flags, keyConf, confNaming("some-other-node", authorityKey), false)
+		require.ErrorContains(t, err, "does not name this node")
+	})
+
+	t.Run("a staging-only joiner starts with no session, and acquires it only once its key is bound", func(t *testing.T) {
+		pending := filepath.Join(home, "pending.cred") // the authority issues no session before its enrollment names its key
+		flags := &shardNodeSigningFlags{SigningAuthoritySocket: socket, SigningAuthorityCredential: pending}
+		unnamed := confNaming("some-other-node", authorityKey)
+		signing, err := buildCertificationSigning(flags, keyConf, unnamed, true)
+		require.NoError(t, err, "staging-only needs no credential")
+		defer signing.close()
+		require.NotNil(t, signing.deferred)
+		_, err = signing.authority.Sign(context.Background(), nil, nil, nil)
+		require.ErrorIs(t, err, shardnode.ErrAuthorityKeyUnbound, "it signs nothing")
+		restorer, ok := signing.authority.(interface {
+			RestoreReadiness(context.Context, uint64) error
+		})
+		require.True(t, ok)
+		require.NoError(t, restorer.RestoreReadiness(context.Background(), 0), "the restore start check is met: it signs nothing")
+
+		// promotion: a verified install binds the key; the session is needed from then on and is read when a request needs it
+		require.NoError(t, signing.deferred.BindKey(authorityVerifier))
+		_, err = signing.authority.Sign(context.Background(), nil, nil, nil)
+		require.ErrorIs(t, err, shardnode.ErrAuthoritySessionUnavailable, "bound, but no session has been issued yet")
+		require.Error(t, restorer.RestoreReadiness(context.Background(), 0))
+		require.NoError(t, writeCredentialFile(pending, credential, false))
+		_, err = signing.authority.Sign(context.Background(), nil, nil, nil)
+		require.Error(t, err)
+		require.NotErrorIs(t, err, shardnode.ErrAuthoritySessionUnavailable, "the session was acquired")
+		require.NotErrorIs(t, err, shardnode.ErrAuthorityKeyUnbound)
+	})
+
+	t.Run("a node that is not staging-only still needs its credential at start", func(t *testing.T) {
+		flags := &shardNodeSigningFlags{SigningAuthoritySocket: socket, SigningAuthorityCredential: filepath.Join(home, "absent.cred")}
+		_, err := buildCertificationSigning(flags, keyConf, conf, true)
+		require.ErrorContains(t, err, "loading the signing authority credential")
 		_, err = buildCertificationSigning(flags, keyConf, confNaming("some-other-node", authorityKey), false)
 		require.ErrorContains(t, err, "does not name this node")
 	})
