@@ -33,7 +33,7 @@ func idRec(id uint64, weight uint64, payee byte, lots []uint64, rootKey, evmKey 
 	copy(sid[24:], w64(id)[24:])
 	ld := LotsDigest(lots)
 	return Identity{StakingID: sid, Generation: 1, RootNodeID: "r", RootKey: bytes.Repeat([]byte{rootKey}, KeyLen), EVMNodeID: "e",
-		EVMKey: bytes.Repeat([]byte{evmKey}, KeyLen), Weight: weight, OperatorPayee: bytes.Repeat([]byte{payee}, PayeeLen), ExposureDigest: ld[:]}
+		EVMKey: bytes.Repeat([]byte{evmKey}, KeyLen), Weight: weight, RawWeight: weight, OperatorPayee: bytes.Repeat([]byte{payee}, PayeeLen), ExposureDigest: ld[:]}
 }
 
 func TestLotsDigestIsKeccakOfAbiEncodedUint256Array(t *testing.T) {
@@ -66,12 +66,12 @@ func TestAssignmentExposureDigestMatchesAbiEncode(t *testing.T) {
 	d := dep()
 	asg := k256([]byte("assignment"))
 	ids := []Identity{idRec(1, 6, 0xa1, []uint64{1, 2}, 0x11, 0x21), idRec(7, 1, 0xa2, []uint64{5}, 0x12, 0x22)}
-	args := abiArgs(t, "bytes32", "bytes32", "uint64", "uint64", "address", "bytes32")
+	args := abiArgs(t, "bytes32", "bytes32", "uint64", "uint64", "uint64", "address", "bytes32")
 	digest := k256([]byte("unicity.p85.exposure-digest"))
 	for _, x := range ids {
 		cid, err := CustodyID(x.StakingID)
 		require.NoError(t, err)
-		enc, err := args.Pack(digest, [32]byte(ExposureID(d, asg, cid)), cid, x.Weight, common.BytesToAddress(x.OperatorPayee), [32]byte(x.ExposureDigest))
+		enc, err := args.Pack(digest, [32]byte(ExposureID(d, asg, cid)), cid, x.Weight, x.RawWeight, common.BytesToAddress(x.OperatorPayee), [32]byte(x.ExposureDigest))
 		require.NoError(t, err)
 		digest = k256(enc)
 	}
