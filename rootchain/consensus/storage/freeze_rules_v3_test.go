@@ -45,7 +45,7 @@ func TestFreezeExecutionJudgesAV3CompanionsAssignmentUnderTheBoundedWeights(t *t
 
 	run := func(companion []byte) error {
 		return storage.VerifyFreezeAssignmentForTest(companion, state, f.ShardConf, nil, current,
-			map[types.PartitionShardID]*storage.ShardInfo{}, map[types.PartitionShardID]*types.PartitionDescriptionRecord{})
+			map[types.PartitionShardID]*storage.ShardInfo{}, map[types.PartitionShardID]*types.PartitionDescriptionRecord{}, nil, nil)
 	}
 	err = run(v2)
 	require.ErrorIs(t, err, storage.ErrHandoffRecord)

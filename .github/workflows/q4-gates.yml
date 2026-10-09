@@ -1,0 +1,91 @@
+name: q4-gates
+
+# Q4 #51 (C): the cheap, deterministic Q4 rows, run when the paths they cover change. They are additional to go-ci's full-suite
+# shards (which still run the long in-process fault rows, TestQ4Fault* and TestQ4BLive*/TestQ4BCrash, once per PR).
+#
+# Deliberately NOT here: the live lane (scripts/q4-live-lane.sh). It needs the pinned ureth and rugregator builds, the devnet lock and an
+# activated weighted epoch, and it stops BLOCKED without them; a PR check must never imply live coverage that did not run. This job only
+# proves the lane's helpers and control documents still parse (`--dry-run`).
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    branches:
+      - integration/enshrined-evm
+      - main
+    paths:
+      - 'rootchain/consensus/**'
+      - 'cli/ubft/**'
+      - 'cmd/q4replay/**'
+      - 'cmd/q4report/**'
+      - 'scripts/q4-*'
+      - 'scripts/lib/q4-lib.sh'
+      - 'docs/pos/q4-*'
+      - 'Makefile'
+      - 'go.mod'
+      - 'go.sum'
+      - '.github/workflows/q4-gates.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  gates:
+    name: Q4 deterministic gates
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+          cache-dependency-path: go.sum
+
+      - name: "The q4shim build tag compiles and vets (the tagged seam is not covered by go-ci)"
+        run: |
+          go vet -tags q4shim ./cli/ubft/... ./rootchain/consensus/q4shim/...
+          make build-q4shim
+
+      - name: "Tagged and untagged seam tests (the production binary does not link the shim)"
+        run: |
+          go test -count=1 ./cli/ubft/cmd/ -run 'Q4|ProductionBuild'
+          go test -count=1 -tags q4shim ./cli/ubft/cmd/ -run 'Q4|ProductionBuild'
+
+      - name: "Shim, replay checker and report generator (race detector)"
+        run: go test -race -count=1 ./rootchain/consensus/q4shim/... ./rootchain/consensus/q4replay/... ./cmd/q4replay/... ./cmd/q4report/...
+
+      - name: "Acceptance matrix is consistent (no hole, no stale selector, no unknown field)"
+        run: go run ./cmd/q4report -static -matrix docs/pos/q4-acceptance-matrix.json -src . -out /dev/null
+
+      - name: "Deterministic rows - fixtures, oracle, delivery adapter, schedule, call-site audit, T2 boundary, admission audit"
+        run: |
+          go test -count=1 ./rootchain/consensus/ -timeout 10m \
+            -run '^(TestQ4Fixture|TestQ4QuorumOracle|TestQ4Delivery|TestQ4Schedule|TestQ4LookupCallSites|TestQ4T2Gate|TestQ4AdmissionAudit|TestQ4BHandoffArithmetic)$'
+
+      - name: "Query-cost gate (every mandatory row against the frozen budgets)"
+        run: |
+          mkdir -p out
+          Q4_COST_OUT="$PWD/out/cost-ci.json" go test -count=1 -v ./rootchain/consensus/leader/ -run 'Q4' | tee out/cost-ci.log
+
+      - name: "Live lane helpers still parse (dry run: no lock, no process)"
+        run: |
+          sudo apt-get install -y jq >/dev/null 2>&1 || true
+          scripts/q4-live-lane.sh --dry-run
+
+      - name: "Upload evidence"
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: q4-gates
+          path: out
+          if-no-files-found: ignore
+          retention-days: 7

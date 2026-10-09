@@ -68,7 +68,11 @@ q4_precondition() {
     echo "BLOCKED: Q4_WEIGHTED_CHECK is not set; the weighted rows need an activated weighted epoch (Q3 coupled activation)" >&2
     q4_teardown; exit 3
   fi
-  eval "$Q4_WEIGHTED_CHECK" || { echo "BLOCKED: the chain is not in an activated weighted epoch" >&2; q4_teardown; exit 3; }
+  # The gate is a caller-supplied command: the evidence keeps the command text, its output and its exit status, so the gate can be audited.
+  local out rc gate_file=${Q4_EVIDENCE_DIR:-.}/weighted-check.txt
+  out=$(eval "$Q4_WEIGHTED_CHECK" 2>&1) && rc=0 || rc=$?
+  { printf '# command: %s\n# exit: %s\n' "$Q4_WEIGHTED_CHECK" "$rc"; printf '%s\n' "$out"; } > "$gate_file"
+  [ "$rc" -eq 0 ] || { echo "BLOCKED: the chain is not in an activated weighted epoch (see $gate_file)" >&2; q4_teardown; exit 3; }
 }
 
 q4_peer_args() { local r; for r in $Q4_ROOTS; do printf -- '--peer %s=%s ' "$r" "$(q4_peer "$r")"; done; }

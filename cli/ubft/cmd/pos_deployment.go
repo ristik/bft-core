@@ -13,6 +13,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/ethereum/go-ethereum/rpc"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/storage"
 	"github.com/unicitynetwork/bft-core/rootchain/evmstate"
@@ -32,6 +33,13 @@ type posDeploymentFile struct {
 	CustodyCode  string `json:"custodyCodeHash"`  // 32 bytes: keccak256 of the deployed custody code
 	Registry     string `json:"registry"`         // 20 bytes: the SealRegistry custody names as its roots
 	RegistryCode string `json:"registryCodeHash"` // 32 bytes: keccak256 of the deployed registry code
+	// Optional pair: the deployed Election module. CONSENSUS-CRITICAL: every root of the chain must pin the same pair (and run an
+	// execution client for --pos-evm-rpc), because it decides whether a primary candidate's Freeze must carry the EVM proof; roots that
+	// differ judge the same block differently.
+	// With it the root judges a primary candidate's EVM proof (Freeze companion v4);
+	// without it a primary candidate is admitted as before. Both or neither.
+	Election     string `json:"election,omitempty"`         // 20 bytes
+	ElectionCode string `json:"electionCodeHash,omitempty"` // 32 bytes: keccak256 of the deployed election code
 }
 
 func decodeFixedHex(name, s string, n int) ([]byte, error) {
@@ -87,11 +95,27 @@ func loadPosDeployment(path string, rootNetwork uint64) (storage.PosDeployment, 
 	if err != nil {
 		return out, pins, err
 	}
+	if (f.Election == "") != (f.ElectionCode == "") {
+		return out, pins, fmt.Errorf("%w: election and electionCodeHash are pinned together", ErrPosDeployment)
+	}
+	if f.Election != "" {
+		election, err := decodeFixedHex("election", f.Election, 20)
+		if err != nil {
+			return out, pins, err
+		}
+		electionCode, err := decodeFixedHex("electionCodeHash", f.ElectionCode, 32)
+		if err != nil {
+			return out, pins, err
+		}
+		copy(out.Election[:], election)
+		copy(pins.Election[:], election)
+		copy(pins.ElectionCode[:], electionCode)
+	}
 	out.RootNetwork = rootNetwork
 	copy(out.NetworkWord[:], word)
 	copy(out.Custody[:], custody)
 	chain.FillBytes(out.ChainID[:])
-	pins = evmstate.Pins{Custody: out.Custody, NetworkWord: out.NetworkWord}
+	pins.Custody, pins.NetworkWord = out.Custody, out.NetworkWord
 	copy(pins.CustodyCode[:], custodyCode)
 	copy(pins.Registry[:], registry)
 	copy(pins.RegistryCode[:], registryCode)
@@ -102,7 +126,7 @@ func loadPosDeployment(path string, rootNetwork uint64) (storage.PosDeployment, 
 // epoch's own trust base and the EVM shard's installed assignment, and every block must carry the mandatory closures. It refuses a
 // proof-of-authority deployment (operator-assigned staking ids do not fit custody's uint64 ids, so the digests could never be formed).
 func enablePosClosure(cm *consensus.ConsensusManager, orchestration *partitions.Orchestration, trustBases posclosure.TrustBases,
-	tb *types.RootTrustBaseV1, shardConfs []*types.PartitionDescriptionRecord, path string, poaGenesis bool) error {
+	tb *types.RootTrustBaseV1, shardConfs []*types.PartitionDescriptionRecord, path string, poaGenesis bool, evmRPC string) error {
 	if poaGenesis {
 		return fmt.Errorf("%w: a proof-of-authority genesis has no custody; do not combine it with a P85 deployment", ErrPosDeployment)
 	}
@@ -110,12 +134,27 @@ func enablePosClosure(cm *consensus.ConsensusManager, orchestration *partitions.
 	if err != nil {
 		return err
 	}
+	if (dep.Election != [20]byte{}) != (evmRPC != "") {
+		// Every root can lead a Freeze, so every root of a chain that judges primary candidates needs the execution client that serves
+		// the proof at the frozen parent; without an election the client would serve nothing.
+		return fmt.Errorf("%w: --pos-evm-rpc goes with, and only with, an election in the deployment", ErrPosDeployment)
+	}
 	conf, err := coupledGenesisShard(shardConfs)
 	if err != nil {
 		return errors.Join(ErrPosDeployment, err)
 	}
 	authority := posclosure.New(posclosure.History{Partition: conf.PartitionID, Shard: conf.ShardID, TrustBases: trustBases, Orchestration: orchestration})
+	var primary storage.PrimaryAuthority
+	if dep.Election != ([20]byte{}) {
+		client, err := rpc.Dial(evmRPC)
+		if err != nil {
+			return errors.Join(ErrPosDeployment, err)
+		}
+		cm.SetPrimaryWitnessSource(evmstate.RPCWitnessSource{Client: client, Pins: pins})
+		primary = evmstate.Authority{Pins: pins}
+	}
 	cm.SetPosServices(&storage.PosServices{
+		Primary:    primary,
 		Deployment: dep,
 		Authority:  authority,
 		Witnesses:  cm,
