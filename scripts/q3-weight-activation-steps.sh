@@ -42,7 +42,9 @@ q3_validators_json() { # out ids...: sorted successor node infos with the entity
 q3_successor_identities() { # out ids...
   local out=$1 id w= ; shift
   for id in "$@"; do w+="${w:+,}\"$(h3_root_id "$id")\":$(q3_weight_of "$id")"; done
-  jq --argjson w "{$w}" 'map(.weight = $w[.rootNodeId])' "$Q3_GENESIS_IDENTITIES" >"$out"
+  # the committed weight q is the quantization of the raw bonded weight x (#508: rawWeight >= weight, and q = quant(x over the set, B)); with the mirrored weights well
+  # inside the profile cap B the quantization is the identity, so both carry the mirrored weight
+  jq --argjson w "{$w}" 'map(.weight = $w[.rootNodeId] | .rawWeight = $w[.rootNodeId])' "$Q3_GENESIS_IDENTITIES" >"$out"
 }
 
 # The coupled assignment (the same four entities, mirrored weights): h3_build_assignment with the mirrored stakes, the successor identity
