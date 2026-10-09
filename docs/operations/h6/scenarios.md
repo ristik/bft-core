@@ -17,7 +17,12 @@ make build        # build/ubft; the lanes run their other tools (evmtx, the F7 p
 - **Rugregator** (the aggregator in the H3/F8 lanes) at the pin in `scripts/f8-rugregator-pin.sh`: `RUGREGATOR_SOURCE` the checkout,
   `RUGREGATOR_BIN` its `aggregator` binary.
 - The lanes default their lock lookup to a developer-workspace helper that is not in this repository. On a host you own set the lane's
-  `*_LANE_LOCKED=1` (below); on a shared host run it under `scripts/h6/devnet-lock.sh` first. Never set the flag without one of the two.
+  `*_LANE_LOCKED=1` (below). On a shared host run the lane under `scripts/h6/devnet-lock.sh`, which takes `OWNER COMMAND [ARG...]` and needs
+  `H6_BASE`, an absolute, writable directory that every operator sharing the fixture ports uses (the lock is `$H6_BASE/.h6-devnet-lock`);
+  it does not set any `*_LANE_LOCKED` itself, so pass it in the command:
+  `H6_BASE=/abs/shared/dir bash scripts/h6/devnet-lock.sh "$USER" env H3_LANE_LOCKED=1 H3_EVIDENCE_DIR=/abs/fresh/dir bash scripts/h6/run-h3.sh`
+  (the same form works with `M2_LANE_LOCKED=1 M2_EVIDENCE_DIR=... bash scripts/m2-lane.sh` and `T6_LOCKED=1 ... bash scripts/t6-rehearsal.sh`).
+  Never set a `*_LANE_LOCKED` flag without a lock held or a host of your own.
 - Evidence goes where the lane's `*_EVIDENCE_DIR` says; choose a fresh absolute directory outside the checkout (the lane deletes `test-nodes/`).
 
 Record the commit of this checkout (`git rev-parse HEAD`), the Ureth and rugregator commits and the binary SHA-256s next to the
