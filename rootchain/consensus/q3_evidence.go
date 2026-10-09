@@ -59,16 +59,22 @@ func q3ActivationEvidence(src q3EvidenceSource, epoch uint64) (q3format.Link, *a
 		return none, nil, nil, fmt.Errorf("%w: the retained body is not the committed one", ErrNoQ3Evidence)
 	}
 	rawReceipts, err := src.HandoffReceipts(record.NextBodyID)
-	if err != nil || len(rawReceipts) == 0 {
-		return none, nil, nil, fmt.Errorf("%w: no retained readiness receipts", ErrNoQ3Evidence)
-	}
-	receipts, err := q3format.DecodeReceipts(rawReceipts)
 	if err != nil {
-		return none, nil, nil, errors.Join(ErrNoQ3Evidence, err)
+		return none, nil, nil, fmt.Errorf("%w: no retained readiness receipts", ErrNoQ3Evidence)
 	}
 	candidate, err := src.HandoffCandidate(record.NextBodyID)
 	if err != nil {
 		return none, nil, nil, errors.Join(ErrNoQ3Evidence, err)
+	}
+	// An exact recovery K retained no receipts; the link then carries its preimage, from which the history re-derives the exemption. Every
+	// other activation needs the retained receipt set.
+	var receipts []q3format.Receipt
+	if len(rawReceipts) != 0 {
+		if receipts, err = q3format.DecodeReceipts(rawReceipts); err != nil {
+			return none, nil, nil, errors.Join(ErrNoQ3Evidence, err)
+		}
+	} else if len(candidate) == 0 {
+		return none, nil, nil, fmt.Errorf("%w: no retained readiness receipts", ErrNoQ3Evidence)
 	}
 	var digest []byte
 	if len(candidate) != 0 {
@@ -85,7 +91,7 @@ func q3ActivationEvidence(src q3EvidenceSource, epoch uint64) (q3format.Link, *a
 	if err != nil {
 		return none, nil, nil, err
 	}
-	link := q3format.Link{Body: body, Proof: proof, Receipts: receipts,
+	link := q3format.Link{Body: body, Proof: proof, Receipts: receipts, Preimage: append([]byte(nil), candidate...),
 		Evidence: q3format.Evidence{Summary: body.StateSummary, FrozenParent: append([]byte(nil), head.Control.FrozenParent...), CandidateDigest: digest}}
 	return link, head, candidate, nil
 }

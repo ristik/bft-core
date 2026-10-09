@@ -45,8 +45,14 @@ type Service interface {
 	Report(ctx context.Context) (ServiceReport, error)
 }
 
-// ExecutionReport is the paired execution client's loaded identity: its genesis and code hash.
-type ExecutionReport struct{ GenesisHash, CodeHash []byte }
+// ExecutionReport is the paired execution client's loaded identity: its genesis and code hash, and the network and root genesis its pair
+// binding is bound to as read on its JWT-authenticated Engine endpoint (Authenticated is false for a report that was not).
+type ExecutionReport struct {
+	GenesisHash, CodeHash []byte
+	Authenticated         bool
+	PairNetwork           uint64
+	PairGenesis           [32]byte
+}
 
 // ExecutionPin is the genesis and code hash the operator pinned locally for the execution client. The pin is never taken from the
 // report under test: that would compare a value with itself.
@@ -76,6 +82,11 @@ type Entity struct {
 	Execution Execution
 }
 
+// What a receipt attests (briefs/joiner-readiness-review.md B3): that this entity's own BFT node has verified the history up to the
+// predecessor, that every component has staged exactly this candidate, and that its paired execution client is the pinned one and bound,
+// on its authenticated connection, to this chain. It is given before Prepare, so it cannot attest the frozen parent: catching up through
+// the frozen parent is a post-Freeze obligation that gates only this entity's own installation and acknowledgement, never the receipt.
+//
 // Attest checks every component of the entity against the candidate that rc binds and, only when all of them support it, signs
 // the receipt with the entity's root key. Any component failure, in any order, yields no receipt. Pre-Commit readiness attests
 // staged candidate support; the installed activation proof does not exist yet and is not asked for. The receipt is an
@@ -114,6 +125,14 @@ func (e Entity) Attest(ctx context.Context, rc q3format.ReceiptContext, cfg q3fo
 	}
 	if err := want.Check(x); err != nil {
 		return q3format.Receipt{}, fmt.Errorf("%w: execution client: %w", ErrNotReady, err)
+	}
+	// The pair is what a receipt vouches for, so the pins are read on the authenticated pair connection (the Engine endpoint's JWT), never
+	// from a plain eth_* answer alone: the execution client must be bound to this candidate's network and root genesis.
+	switch {
+	case !x.Authenticated:
+		return q3format.Receipt{}, fmt.Errorf("%w: execution client: %w: the pair pins were not read on the authenticated connection", ErrNotReady, ErrComponent)
+	case x.PairNetwork != rc.Network || x.PairGenesis != rc.Genesis:
+		return q3format.Receipt{}, fmt.Errorf("%w: execution client: %w: its pair is bound to another network or genesis", ErrNotReady, ErrComponent)
 	}
 	return q3format.SignReceipt(rc, e.NodeID, signer)
 }
