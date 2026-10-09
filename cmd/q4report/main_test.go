@@ -269,3 +269,39 @@ func TestReportReadsTheLiveLaneEvidence(t *testing.T) {
 	require.NoError(t, err)
 	require.Contains(t, strings.Join(rep.Problems, "\n"), "was not run")
 }
+
+func TestReportReadsNamedLiveLaneRuns(t *testing.T) {
+	f := newFixture(t)
+	a, b := filepath.Join(f.dir, "a"), filepath.Join(f.dir, "b")
+	writeLane(t, a, "clean build (evidence run)", "  PASS: q3_activation\n")
+	writeLane(t, b, "clean build (evidence run)", "  PASS: q3_pair_controls\n")
+	// a Q3 lane records "Q3 run mode: ", which is as much a run mode as the Q4 lane's
+	require.NoError(t, os.WriteFile(filepath.Join(b, "run-mode.txt"), []byte("Q3 run mode: clean build (evidence run; Ureth built by the operator)\n"), 0o644))
+	require.NoError(t, os.MkdirAll(filepath.Join(f.src, "scripts"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(f.src, "scripts", "q3-weight-activation-steps.sh"), []byte("q3_activation() { :; }\nq3_pair_controls() { :; }\n"), 0o644))
+	row := func(lane, step string) Row {
+		return Row{ID: "N", Required: []string{"REAL-PROCESS"}, Evidence: []Evidence{{Kind: "lane", Label: "REAL-PROCESS", Lane: lane, Step: step}}}
+	}
+	build := func(r Row, named ...string) (*Report, error) {
+		return Build(f.matrix(t, r), nil, "", "", f.src, false, a, named...)
+	}
+	rep, err := build(row("q3", "q3_pair_controls"), "q3="+b)
+	require.NoError(t, err)
+	require.Empty(t, rep.Problems)
+	require.Len(t, rep.Lanes, 2)
+	require.True(t, rep.Lanes[1].Evidence)
+	rep, err = build(row("", "q3_pair_controls"), "q3="+b)
+	require.NoError(t, err)
+	require.Contains(t, strings.Join(rep.Problems, "\n"), "was not run", "the default run has no such step: a named run does not leak into it")
+	rep, err = build(row("q3", "q3_pair_controls"))
+	require.NoError(t, err)
+	require.Contains(t, strings.Join(rep.Problems, "\n"), "was not run", "an item naming a lane that was not given is not run")
+	_, err = build(row("q3", "q3_pair_controls"), "q3")
+	require.Error(t, err)
+	_, err = build(row("q3", "q3_pair_controls"), "q3="+b, "q3="+a)
+	require.Error(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(b, "run-mode.txt"), []byte("Q3 run mode: DEVELOPMENT OVERRIDE: NOT EVIDENCE\n"), 0o644))
+	rep, err = build(row("q3", "q3_pair_controls"), "q3="+b)
+	require.NoError(t, err)
+	require.Contains(t, strings.Join(rep.Problems, "\n"), "failed or is stale", "a named run is held to the same evidence rule")
+}

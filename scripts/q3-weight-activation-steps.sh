@@ -430,8 +430,8 @@ q3_supersede() {
 }
 
 # The leader schedule of the activated epoch: with mirrored weights (6,1,1,1) the proposer-priority selector of a weighted epoch (#403, activated by #489)
-# gives the heavy root about 6/9 of the rounds; the legacy selector gave a quarter each. The evidence file states what the root logs show, and the
-# step fails when the heavy root's share is not weight-proportional.
+# gives the heavy root about 6/9 of the rounds ((3,3,2,1): 3/9, 3/9, 2/9, 1/9); the legacy selector gave a quarter each. The evidence file states what the root logs
+# show, and the step fails when a root's share is not weight-proportional.
 q3_leader_schedule() {
   # epoch 2 only: from its activation round to the activation round of epoch 3 (the weights change there)
   local astar end; astar=$(jq -r .activationRound "$Q3_DIR/activation-record.json")
@@ -460,14 +460,19 @@ lines = [f"leader of the {total} rounds of epoch 2, from A*={astar} to {end} (ne
 for i, w in enumerate(weights, 1):
     n = counts.get(i, 0)
     lines.append(f"  root {i}: weight {w}/{sum(weights)} = {100 * w // sum(weights)}%, led {n} rounds = {100 * n // max(total, 1)}%")
-heavy = counts.get(1, 0) / max(total, 1)
-verdict = "weight-proportional (proposer-priority, root-wrr-v1)" if heavy >= 0.5 else "uniform: the legacy selector (no leader policy is activated; the weights do not shape the schedule)"
+shares = [counts.get(i, 0) / max(total, 1) for i in range(1, len(weights) + 1)]
+want = [w / sum(weights) for w in weights]
+# the proposer-priority selector is exact over a window of this size: every root within three rounds of its weight share (a uniform selector is far from it for both
+# committees, (6,1,1,1) and (3,3,2,1))
+tol = max(3 / max(total, 1), 0.06)
+proportional = all(abs(a - b) <= tol for a, b in zip(shares, want))
+verdict = "weight-proportional (proposer-priority, root-wrr-v1)" if proportional else "NOT weight-proportional (uniform: the legacy selector, or a schedule that does not follow the weights)"
 lines.append(f"selector in effect: {verdict}")
 open(out, "w").write("\n".join(lines) + "\n")
 print("\n".join(lines))
-# since #489 a weighted epoch uses the proposer-priority selector: the heavy root (weight 6 of 9) leads about two thirds of the rounds
-if not (0.5 <= heavy <= 0.8):
-    sys.exit("the heavy root led %d%% of the rounds: the schedule is not weight-proportional" % int(100 * heavy))
+# since #489 a weighted epoch uses the proposer-priority selector: every root leads its weight share of the rounds
+if not proportional:
+    sys.exit("the leaders of the rounds are not weight-proportional: shares %s, weights %s" % ([round(x, 2) for x in shares], [round(x, 2) for x in want]))
 PY
 }
 

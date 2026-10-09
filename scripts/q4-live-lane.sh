@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Q4 #51 live lane (briefs/q4-design-v2.md section 6) on the fresh-B1 stack: REAL-PROCESS representatives of the weighted fault matrix on the paired devnet with F8's
 # three aggregator shards, through the root fault shim (build/q4shim/ubft) and F8's callbacks. ONE devnet run: the Q3 weight-activation flow first (fresh-B1 unit
-# PoA -> ONE coupled handoff to mirrored weights 6,1,1,1: scheme 2, weighted EVM requests, root-wrr-v1), then the Q4 fault rows in the activated weighted epoch.
+# PoA -> ONE coupled handoff to mirrored weights 6,1,1,1 (scenario A) or 3,3,2,1 (scenario B): scheme 2, weighted EVM requests, root-wrr-v1), then the Q4 fault rows in the activated weighted epoch.
 # The gate (Q4_WEIGHTED_CHECK) is a function of the Q3 flow library that reads the activated epoch from the root's own verified state; the evidence keeps its
 # command, output and exit status. Serialized with every other devnet run by briefs/devnet-lock.sh.
 #
@@ -17,7 +17,10 @@ SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 REPO_ROOT=$(cd "$SCRIPT_DIR/.." && pwd)
 AGRE_ROOT=$(cd "$REPO_ROOT/.." && pwd)
 LOCK_SCRIPT=$AGRE_ROOT/briefs/devnet-lock.sh
-EVIDENCE_DIR=${Q4_EVIDENCE_DIR:-$AGRE_ROOT/briefs/devnet-runs/q4-live-$(date -u +%Y%m%dT%H%M%SZ)}
+# Q4_SCENARIO picks the activated committee: A (6,1,1,1, the default) or B (3,3,2,1); each is its own run, its own evidence directory and its own lane.log
+export Q4_SCENARIO=${Q4_SCENARIO:-A}
+case "$Q4_SCENARIO" in A | B) ;; *) printf 'FAIL: Q4_SCENARIO must be A or B\n' >&2; exit 1 ;; esac
+EVIDENCE_DIR=${Q4_EVIDENCE_DIR:-$AGRE_ROOT/briefs/devnet-runs/q4-live$([ "$Q4_SCENARIO" = A ] || printf -- '-%s' "$Q4_SCENARIO")-$(date -u +%Y%m%dT%H%M%SZ)}
 pass() { printf 'PASS: %s\n' "$1"; }
 fail() { printf 'FAIL: %s\n' "$1" >&2; exit 1; }
 sha256() { if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}'; else shasum -a 256 "$1" | awk '{print $1}'; fi; }
@@ -77,7 +80,7 @@ for v in $REQUIRED_PINS; do [ -n "${!v:-}" ] || fail "set $v (no defaults: the l
 
 if [ "${Q4_LANE_LOCKED:-0}" != 1 ]; then
   [ -x "$LOCK_SCRIPT" ] || fail "devnet lock helper is missing at $LOCK_SCRIPT"
-  exec "$LOCK_SCRIPT" "Q4 #51 live lane (dev3)" env Q4_LANE_LOCKED=1 Q4_EVIDENCE_DIR="$EVIDENCE_DIR" "$0" "$@"
+  exec "$LOCK_SCRIPT" "Q4 #51 live lane, scenario $Q4_SCENARIO (dev3)" env Q4_LANE_LOCKED=1 Q4_SCENARIO="$Q4_SCENARIO" Q4_EVIDENCE_DIR="$EVIDENCE_DIR" "$0" "$@"
 fi
 mkdir -p "$EVIDENCE_DIR"
 export Q4_EVIDENCE_DIR="$EVIDENCE_DIR"

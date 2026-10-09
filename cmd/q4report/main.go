@@ -60,6 +60,7 @@ type Evidence struct {
 	Test         string `json:"test,omitempty"`
 	BundlePrefix string `json:"bundlePrefix,omitempty"`
 	MinBundles   int    `json:"minBundles,omitempty"`
+	Lane         string `json:"lane,omitempty"` // kinds lane and lane-file: the named lane run (-lanes name=dir) the item reads; empty is the -lane run
 	Step         string `json:"step,omitempty"` // kind lane: the lane step name
 	Path         string `json:"path,omitempty"` // kind lane-file: a file of the lane's evidence directory
 	// Contains, for a lane-file, are lines the file must contain (e.g. the gate's command and exit status).
@@ -97,6 +98,7 @@ type Report struct {
 	Bundles  BundleStats    `json:"bundles"`
 	Cost     *CostStats     `json:"cost,omitempty"`
 	Lane     *LaneStats     `json:"lane,omitempty"`
+	Lanes    []*LaneStats   `json:"lanes,omitempty"` // every live lane run read: the default one and the named ones
 	Closable bool           `json:"closable"`
 	Static   bool           `json:"static,omitempty"`
 	Problems []string       `json:"problems,omitempty"`
@@ -114,6 +116,7 @@ type BundleStats struct {
 
 // LaneStats is the live lane run the report read.
 type LaneStats struct {
+	Name     string `json:"name,omitempty"`
 	Dir      string `json:"dir"`
 	Mode     string `json:"mode"`
 	Evidence bool   `json:"evidence"` // a clean-build evidence run
@@ -158,6 +161,7 @@ func run(args []string, out, errOut *os.File) int {
 	bundles := fs.String("bundles", "", "directory of exported replay bundles")
 	cost := fs.String("cost", "", "query-cost measurements (Q4_COST_OUT of TestQ4QueryCostGate)")
 	lane := fs.String("lane", "", "evidence directory of a Q4 live lane run (lane.log, run-mode.txt, pins.txt, q3/, q4/)")
+	lanes := fs.String("lanes", "", "comma separated name=dir evidence directories of further live lane runs (scenario B, the Q3 lane), read by items that name them")
 	src := fs.String("src", ".", "source tree root, to detect stale selectors")
 	md := fs.String("out", "", "write the markdown report here (default stdout)")
 	js := fs.String("json", "", "write the JSON report here")
@@ -166,7 +170,7 @@ func run(args []string, out, errOut *os.File) int {
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
-	rep, err := Build(*matrix, splitList(*tests), *bundles, *cost, *src, *static, *lane)
+	rep, err := Build(*matrix, splitList(*tests), *bundles, *cost, *src, *static, *lane, splitList(*lanes)...)
 	if err != nil {
 		fmt.Fprintln(errOut, err)
 		return 2
@@ -265,7 +269,7 @@ func declared(root string) (map[string]map[string]bool, error) {
 var sanitize = regexp.MustCompile(`[^A-Za-z0-9._-]+`)
 
 // Build evaluates the matrix against the inputs.
-func Build(matrixPath string, testFiles []string, bundleDir, costPath, srcRoot string, static bool, laneDir string) (*Report, error) {
+func Build(matrixPath string, testFiles []string, bundleDir, costPath, srcRoot string, static bool, laneDir string, named ...string) (*Report, error) {
 	raw, err := os.ReadFile(matrixPath)
 	if err != nil {
 		return nil, err
@@ -338,17 +342,43 @@ func Build(matrixPath string, testFiles []string, bundleDir, costPath, srcRoot s
 		}
 	}
 
-	var laneLog, laneMode string
-	if laneDir != "" {
-		raw, err := os.ReadFile(filepath.Join(laneDir, "lane.log"))
+	// the live lane runs the report reads: the default run (laneDir) and the named ones (name=dir)
+	type laneRun struct {
+		stats *LaneStats
+		log   string
+	}
+	runs := map[string]*laneRun{}
+	readLane := func(name, dir string) error {
+		raw, err := os.ReadFile(filepath.Join(dir, "lane.log"))
 		if err != nil {
+			return err
+		}
+		mode := ""
+		if raw, err := os.ReadFile(filepath.Join(dir, "run-mode.txt")); err == nil {
+			mode = strings.TrimSpace(string(raw))
+		}
+		stats := &LaneStats{Name: name, Dir: dir, Mode: mode, Evidence: strings.HasPrefix(laneRunModeBody(mode), "clean build (evidence run"), Attested: strings.Contains(mode, "built by the operator")}
+		runs[name] = &laneRun{stats: stats, log: string(raw)}
+		rep.Lanes = append(rep.Lanes, stats)
+		return nil
+	}
+	if laneDir != "" {
+		if err := readLane("", laneDir); err != nil {
 			return nil, err
 		}
-		laneLog = string(raw)
-		if raw, err := os.ReadFile(filepath.Join(laneDir, "run-mode.txt")); err == nil {
-			laneMode = strings.TrimSpace(string(raw))
+		rep.Lane = runs[""].stats
+	}
+	for _, kv := range named {
+		name, dir, ok := strings.Cut(kv, "=")
+		if !ok || name == "" || dir == "" {
+			return nil, fmt.Errorf("-lanes: %q is not name=dir", kv)
 		}
-		rep.Lane = &LaneStats{Dir: laneDir, Mode: laneMode, Evidence: strings.HasPrefix(strings.TrimPrefix(laneMode, "Q4 run mode: "), "clean build (evidence run"), Attested: strings.Contains(laneMode, "built by the operator")}
+		if _, dup := runs[name]; dup {
+			return nil, fmt.Errorf("-lanes: duplicate lane %q", name)
+		}
+		if err := readLane(name, dir); err != nil {
+			return nil, err
+		}
 	}
 	seen := map[string]bool{}
 	for _, row := range m.Rows {
@@ -412,12 +442,12 @@ func Build(matrixPath string, testFiles []string, bundleDir, costPath, srcRoot s
 				switch {
 				case ev.Kind == "lane" && !laneStepDeclared(srcRoot, ev.Step):
 					r.Status, r.Detail = "STALE", "the lane scripts declare no step "+ev.Step
-				case laneDir == "":
+				case runs[ev.Lane] == nil:
 					r.Status = "NOT-RUN"
-				case !rep.Lane.Evidence:
-					r.Status, r.Detail = "FAIL", "the lane ran as: "+laneMode+" (a development override is not evidence)"
+				case !runs[ev.Lane].stats.Evidence:
+					r.Status, r.Detail = "FAIL", "the lane ran as: "+runs[ev.Lane].stats.Mode+" (a development override is not evidence)"
 				case ev.Kind == "lane-file":
-					path := filepath.Join(laneDir, filepath.FromSlash(ev.Path))
+					path := filepath.Join(runs[ev.Lane].stats.Dir, filepath.FromSlash(ev.Path))
 					raw, err := os.ReadFile(path)
 					switch {
 					case err != nil || len(raw) == 0:
@@ -430,9 +460,9 @@ func Build(matrixPath string, testFiles []string, bundleDir, costPath, srcRoot s
 							}
 						}
 					}
-				case regexp.MustCompile(`(?m)^\s*PASS: ` + regexp.QuoteMeta(ev.Step) + `\s*$`).MatchString(laneLog):
+				case regexp.MustCompile(`(?m)^\s*PASS: ` + regexp.QuoteMeta(ev.Step) + `\s*$`).MatchString(runs[ev.Lane].log):
 					r.Status = "PASS"
-				case regexp.MustCompile(`(?m)^\s*FAIL: ` + regexp.QuoteMeta(ev.Step) + `\b`).MatchString(laneLog):
+				case regexp.MustCompile(`(?m)^\s*FAIL: ` + regexp.QuoteMeta(ev.Step) + `\b`).MatchString(runs[ev.Lane].log):
 					r.Status = "FAIL"
 				default:
 					r.Status, r.Detail = "NOT-RUN", "the lane log has no PASS line for the step"
@@ -528,12 +558,16 @@ func Markdown(r *Report) string {
 	}
 	fmt.Fprintf(&b, "Replay bundles re-checked offline by the independent checker: %d, clean %d, %d attempts, %d signatures verified, %d deliberately injected malformed sends flagged by their own reason.\n\n",
 		r.Bundles.Checked, r.Bundles.Clean, r.Bundles.Attempts, r.Bundles.Signed, r.Bundles.Injected)
-	if r.Lane != nil {
+	for _, l := range r.Lanes {
 		attested := ""
-		if r.Lane.Attested {
+		if l.Attested {
 			attested = " The execution client binary is the operator's attestation of a fresh private build at the pinned commit."
 		}
-		fmt.Fprintf(&b, "Live lane evidence: `%s`, run mode: %s.%s\n\n", r.Lane.Dir, orDash(r.Lane.Mode), attested)
+		name := "Live lane evidence"
+		if l.Name != "" {
+			name += " (" + l.Name + ")"
+		}
+		fmt.Fprintf(&b, "%s: `%s`, run mode: %s.%s\n\n", name, l.Dir, orDash(l.Mode), attested)
 	}
 	if r.Cost != nil {
 		fmt.Fprintf(&b, "Query-cost gate (%s, %s): %d of %d supported rows within the frozen budgets.", r.Cost.Profile, r.Cost.Host, r.Cost.Within, r.Cost.Supported)
@@ -603,6 +637,14 @@ func detail(s string) string {
 		return ""
 	}
 	return " (" + s + ")"
+}
+
+// laneRunModeBody is a lane's recorded run mode without its "Q3 run mode: " / "Q4 run mode: " prefix.
+func laneRunModeBody(mode string) string {
+	if _, rest, ok := strings.Cut(mode, " run mode: "); ok {
+		return rest
+	}
+	return mode
 }
 
 // laneStepDeclared: the step name is one the lane scripts declare as a step (a Q3 step function definition or a Q4 step title in a q4_step call), so a

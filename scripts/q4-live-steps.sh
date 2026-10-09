@@ -10,6 +10,15 @@
 # The activation prefix is the Q3 flow library's: the same fresh-B1 unit PoA -> one coupled handoff to mirrored weights 6,1,1,1 that scripts/q3-weight-activation-steps.sh
 # runs (candidate, readiness receipts from every entity, propose, install, activation record, authority advance, scheme 2 progress), so the weighted epoch the Q4 rows
 # run in is established by exactly the flow whose evidence closed Q3, in this same devnet.
+# The scenario picks the activated committee (the Q3 flow's mirrored weights, root i = entity i, W=9, Q=7, F=2): A (6,1,1,1) or B (3,3,2,1). The four-entity paired devnet
+# is the only topology the Q3 flow builds, so the many-small (18,1x9) and the #399 outage control (3,2,2,2,2) committees are not live scenarios.
+Q4_SCENARIO=${Q4_SCENARIO:-A}
+case "$Q4_SCENARIO" in
+  A) Q3_WEIGHTS="6 1 1 1"; Q4_HEAVY_ROOTS="1" ;;
+  B) Q3_WEIGHTS="3 3 2 1"; Q4_HEAVY_ROOTS="1 2" ;;
+  *) echo "Q4_SCENARIO must be A or B, not $Q4_SCENARIO" >&2; return 2 2>/dev/null || exit 2 ;;
+esac
+export Q3_WEIGHTS Q4_SCENARIO
 export Q3_LANE_DEFINE_ONLY=1
 source scripts/q3-weight-activation-steps.sh
 unset Q3_LANE_DEFINE_ONLY
@@ -17,11 +26,13 @@ source scripts/lib/q4-lib.sh
 
 Q4_DIR=test-nodes/q4
 Q4_ROOTS=${Q4_ROOTS:-"1 2 3 4"}
-Q4_HEAVY_ROOT=${Q4_HEAVY_ROOT:-1}   # the weight-6 root of the activated 6,1,1,1 epoch
+Q4_HEAVY_ROOT=${Q4_HEAVY_ROOT:-${Q4_HEAVY_ROOTS%% *}}   # A: the weight-6 root of 6,1,1,1; B: the first weight-3 root of 3,3,2,1 (Q4_HEAVY_ROOTS lists them all)
+q4_is_heavy() { case " $Q4_HEAVY_ROOTS " in *" $1 "*) return 0 ;; esac; return 1; }
 Q4_EPOCH=${Q4_EPOCH:-2}   # the installed epoch the Q3 flow activates, for restarts (--install-handoff-epoch)
 Q4_STALL_SECONDS=${Q4_STALL_SECONDS:-20}
 Q4_RECOVER_SECONDS=${Q4_RECOVER_SECONDS:-120}   # frozen before the run; never widened after a stall
-q4_lights() { local r; for r in $Q4_ROOTS; do [ "$r" = "$Q4_HEAVY_ROOT" ] || echo "$r"; done; }
+q4_lights() { local r; for r in $Q4_ROOTS; do q4_is_heavy "$r" || echo "$r"; done; }
+q4_without() { local r x skip; for r in $Q4_ROOTS; do skip=0; for x in "$@"; do [ "$x" = "$r" ] && skip=1; done; [ "$skip" = 1 ] || echo "$r"; done; }
 
 q4_pass() { echo "  PASS: $*"; }
 q4_teardown() {
@@ -109,15 +120,27 @@ q4_peer_args() { local r; for r in $Q4_ROOTS; do printf -- '--peer %s=%s ' "$r" 
 # ---- the rows ----
 q4_row_baseline() { f8_trace >/dev/null && q4_commits_advance "$Q4_HEAVY_ROOT" 60 3; }
 
-q4_row_light_partition() {   # one light isolated both ways: 6+1+1 = 8 of 9 progresses; heal releases the stale traffic
-  local light others
-  light=$(q4_lights | head -n 1)
-  others=$(for r in $Q4_ROOTS; do [ "$r" = "$light" ] || echo "$r"; done | tr '\n' ' ')
-  q4_partition cut "$light" "$others" || return 1
-  q4_commits_advance "$Q4_HEAVY_ROOT" "$Q4_RECOVER_SECONDS" 3 || return 1
+# q4_row_isolate <progress|stall> <roots...>: the named roots isolated from the rest (held both ways); the larger side either keeps committing or explicitly stalls, and a
+# heal releases the stale traffic so that an isolated root commits again.
+q4_row_isolate() {
+  local expect=$1; shift
+  local iso="$*" others observer
+  others=$(q4_without "$@" | tr '\n' ' ')
+  observer=${others%% *}
+  q4_partition cut "$iso" "$others" || return 1
+  case "$expect" in
+    progress) q4_commits_advance "$observer" "$Q4_RECOVER_SECONDS" 3 || return 1 ;;
+    stall) q4_stalled "$observer" "$Q4_STALL_SECONDS" || return 1 ;;
+  esac
   q4_heal cut "$Q4_ROOTS" || return 1
-  q4_commits_advance "$light" "$Q4_RECOVER_SECONDS" 3
+  q4_commits_advance "${iso%% *}" "$Q4_RECOVER_SECONDS" 3
 }
+q4_row_light_partition() { q4_row_isolate progress "$(q4_lights | head -n 1)"; }   # A: 6+1+1 = 8 of 9
+q4_row_two_lights_partition() { q4_row_isolate progress $(q4_lights | tail -n 2); }   # A: heavy + one light = 7 = Q
+q4_row_all_lights_partition() { q4_row_isolate stall $(q4_lights); }   # A: 6 | 3, B: 6 | 3 with one light folded in: neither side has Q
+q4_row_b_light_one() { q4_row_isolate progress 4; }   # B: weight 1 isolated, 8 progress
+q4_row_b_light_two() { q4_row_isolate progress 3; }   # B: weight 2 isolated, 7 = Q progress
+q4_row_b_lights_both() { q4_row_isolate stall 3 4; }   # B: weight 2+1 isolated, the two weight-3 roots (6) stall
 
 q4_row_heavy_delayed() {     # the heavy root's traffic held: the lights are weight 3 of 9, quorum lost until release
   q4_delay_outbound delay "$Q4_HEAVY_ROOT" || return 1
@@ -135,24 +158,47 @@ q4_row_light_sigkill() {     # SIGKILL a light root: the rest keep the quorum; r
   q4_commits_advance "$light" "$Q4_RECOVER_SECONDS" 3
 }
 
-q4_row_heavy_sigkill() {     # SIGKILL the heavy root: 3 of 9 left, explicit stall; restart over the retained home recovers
-  local light; light=$(q4_lights | head -n 1)
-  q4_kill9 "$Q4_HEAVY_ROOT" || return 1
-  q4_stalled "$light" "$Q4_STALL_SECONDS" || return 1
-  q4_restart_root "$Q4_HEAVY_ROOT" || return 1
+q4_row_heavy_sigkill() {     # SIGKILL each heavy root in turn: A 3 of 9 left, B 6 of 9 left: explicit stall; restart over the retained home recovers
+  local heavy observer
+  for heavy in $Q4_HEAVY_ROOTS; do
+    observer=$(q4_without "$heavy" | head -n 1)
+    q4_kill9 "$heavy" || return 1
+    q4_stalled "$observer" "$Q4_STALL_SECONDS" || return 1
+    q4_restart_root "$heavy" || return 1
+    q4_commits_advance "$heavy" "$Q4_RECOVER_SECONDS" 3 || return 1
+  done
+}
+
+# q4_byz_arm <roots...>: the named roots also send a conflicting signed vote per round to every other root; the adapters stay armed until the trace check has read their
+# counters (clearing a control document resets them). Fails unless every named root's adapter reports having sent.
+q4_byz_arm() {
+  local r others
+  for r in "$@"; do
+    others=$(q4_without "$r" | tr '\n' ' ')
+    q4_byzantine "$r" state "$others" || return 1
+  done
+  local i
+  for r in "$@"; do
+    for i in $(seq 1 60); do
+      [ "$(jq -r '.byzantine.byz // 0' "$Q4_SHIM_DIR/root$r/status.json")" -gt 0 ] && break
+      sleep 1
+    done
+    [ "$(jq -r '.byzantine.byz // 0' "$Q4_SHIM_DIR/root$r/status.json")" -gt 0 ] || { echo "root$r sent nothing Byzantine" >&2; return 1; }
+  done
+  Q4_BYZ_ROOTS=$(echo ${Q4_BYZ_LIST:-} "$@" | tr ' ' ',' | sed 's/^,//')
+  Q4_BYZ_LIST="${Q4_BYZ_LIST:-} $*"
+}
+
+q4_row_byzantine_lights() {  # IN BOUND (weight <= F=2): A two lights (1+1), B the weight-2 root; the honest weight 7 progresses
+  local byz
+  if [ "$Q4_SCENARIO" = A ]; then byz=$(q4_lights | tail -n 2 | tr '\n' ' '); else byz=3; fi
+  q4_byz_arm $byz || return 1
   q4_commits_advance "$Q4_HEAVY_ROOT" "$Q4_RECOVER_SECONDS" 3
 }
 
-q4_row_byzantine_lights() {  # two lights (weight 2 <= F) also send a conflicting signed vote per round; the honest weight 7 progresses
-  local byz honest
-  byz=$(q4_lights | tail -n 2 | tr '\n' ' ')
-  honest=$(for r in $Q4_ROOTS; do case " $byz " in *" $r "*) ;; *) echo "$r";; esac; done | tr '\n' ' ')
-  for r in $byz; do q4_byzantine "$r" state "$honest" || return 1; done
-  q4_commits_advance "$Q4_HEAVY_ROOT" "$Q4_RECOVER_SECONDS" 3 || return 1
-  for r in $byz; do [ "$(jq -r '.byzantine.byz // 0' "$Q4_SHIM_DIR/root$r/status.json")" -gt 0 ] || { echo "root$r sent nothing Byzantine" >&2; return 1; }; done
-  Q4_BYZ_ROOTS=$(echo $byz | tr ' ' ',')
-  Q4_BYZ_LIST=$byz   # the adapters stay armed until the trace check has read their counters (clearing a control document resets them)
-}
+# OUTSIDE THE ASSUMPTIONS (heavy weight 6 or 3 > F=2): no liveness claim at all. What the row shows is that the equivocation is real (the root's own adapter counted its
+# conflicting signed votes) and that the independent checker classifies exactly the declared roots as equivocators with no conflicting commit anywhere (the trace check).
+q4_row_byzantine_heavy() { q4_byz_arm "$Q4_HEAVY_ROOT"; }
 
 # The F8 callbacks (f8_slow_stop_resume_evm: EVM stopped, aggregators certify new state roots, resumed; f8_inflight_evm_probe) ran in the lane's preamble, in the
 # unit epoch before the activation, and passed. They cannot be repeated in the weighted epoch with the pinned rugregator: the second block of an aggregator shard
@@ -187,7 +233,7 @@ Q4_PRE_FAULT_STEPS="q4_leader_schedule q4_no_followers"
 q4_activate_weighted_epoch() {
   local s
   q3_lane_init
-  echo "=== Q4 live lane: fresh-B1 unit PoA -> mirrored weights $Q3_WEIGHTS (the Q3 flow), then the Q4 fault rows ==="
+  echo "=== Q4 live lane, scenario $Q4_SCENARIO: fresh-B1 unit PoA -> mirrored weights $Q3_WEIGHTS (the Q3 flow), then the Q4 fault rows ==="
   for s in $Q4_ACTIVATION_STEPS; do q3_step "$s" "$s"; done
 }
 
@@ -226,11 +272,25 @@ q4_run_lane() {
   q4_precondition
   q4_step "baseline: weighted epoch commits (F8 trace and EVM IR)" q4_row_baseline
   q4_step "F8 aggregator shards stay served by the weighted epoch (authorized TR rounds advance, aggregators answer)" q4_row_f8_follow
-  q4_step "one light root isolated (held both ways): 8 of 9 progresses, heal releases" q4_row_light_partition
-  q4_step "heavy root delayed: quorum lost, explicit stall, release recovers" q4_row_heavy_delayed
-  q4_step "SIGKILL a light root and restart over the retained home" q4_row_light_sigkill
-  q4_step "SIGKILL the heavy root: stall, restart recovers" q4_row_heavy_sigkill
-  q4_step "two Byzantine lights (weight 2) equivocate: honest 7 progresses" q4_row_byzantine_lights
+  if [ "$Q4_SCENARIO" = A ]; then
+    q4_step "one light root isolated (held both ways): 8 of 9 progresses, heal releases" q4_row_light_partition
+    q4_step "two lights isolated: heavy and one light (7 = Q) progress, heal releases" q4_row_two_lights_partition
+    q4_step "all lights isolated: heavy alone (6) and the lights (3) both stall, heal releases" q4_row_all_lights_partition
+    q4_step "heavy root delayed: quorum lost, explicit stall, release recovers" q4_row_heavy_delayed
+    q4_step "SIGKILL a light root and restart over the retained home" q4_row_light_sigkill
+    q4_step "SIGKILL the heavy root: stall, restart recovers" q4_row_heavy_sigkill
+    q4_step "two Byzantine lights (weight 2) equivocate: honest 7 progresses" q4_row_byzantine_lights
+    q4_step "the heavy root (weight 6 > F) equivocates, outside the assumptions: the equivocation is real, the checker classifies it" q4_row_byzantine_heavy
+  else
+    q4_step "B: the weight-1 root isolated: 8 of 9 progresses, heal releases" q4_row_b_light_one
+    q4_step "B: the weight-2 root isolated: 7 = Q progresses, heal releases" q4_row_b_light_two
+    q4_step "B: the weight-2 and weight-1 roots isolated: the two weight-3 roots (6) stall, heal releases" q4_row_b_lights_both
+    q4_step "B: one weight-3 root delayed: 6 of 9, quorum lost, explicit stall, release recovers" q4_row_heavy_delayed
+    q4_step "B: SIGKILL the weight-2 root and restart over the retained home" q4_row_light_sigkill
+    q4_step "B: SIGKILL each weight-3 root in turn: 6 left, stall, restart recovers" q4_row_heavy_sigkill
+    q4_step "B: the weight-2 root (= F, in bound) equivocates: honest 3+3+1 progress" q4_row_byzantine_lights
+    q4_step "B: a weight-3 root (> F) equivocates, outside the assumptions: the equivocation is real, the checker classifies it" q4_row_byzantine_heavy
+  fi
   q4_step "offline trace check: attempts have outcomes, equivocators are exactly the declared Byzantine roots" q4_row_trace_check
   echo "Q4 live lane: all steps PASSED"
   q4_teardown
