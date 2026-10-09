@@ -112,3 +112,26 @@ func TestThePoSGenesisPlanRefusalsAreIsolated(t *testing.T) {
 		require.Error(t, err, name)
 	}
 }
+
+// A genesis committee is never quantized (K is exact from the first record), so a plan whose total weight exceeds the cap B is refused,
+// and the one just within it is accepted: the only difference between the two is the total.
+func TestThePoSGenesisPlanIsWithinTheWeightCap(t *testing.T) {
+	for units, ok := range map[uint64]bool{16_384: true, 16_385: false} { // 4 members: 65,536 = B, 65,540 > B
+		d := newGenesisDeployment(t)
+		for i := range d.tb.RootNodes {
+			d.tb.RootNodes[i].Stake, d.conf.Validators[i].Stake = units, units
+		}
+		plan := posPlan(d)
+		for i := range plan.Identities {
+			plan.Identities[i].BondUnits = units
+		}
+		ids, _, _, err := buildPosGenesis(plan, d.tb, d.conf)
+		if ok {
+			require.NoError(t, err, "units %d", units)
+			require.Equal(t, units, ids[0].Weight)
+			require.Equal(t, units, ids[0].RawWeight)
+		} else {
+			require.ErrorIs(t, err, evmassign.ErrIdentity, "units %d", units)
+		}
+	}
+}

@@ -268,7 +268,7 @@ func buildPosGenesis(plan posGenesisPlan, tb *types.RootTrustBaseV1, conf *types
 		binary.BigEndian.PutUint64(staking[evmassign.StakingIDLen-8:], p.StakingID)
 		lots := evmassign.LotsDigest(p.LotIDs)
 		ids = append(ids, evmassign.Identity{StakingID: staking, Generation: 1, RootNodeID: p.RootNodeID, RootKey: rootKey, EVMNodeID: p.EVMNodeID,
-			EVMKey: evmKey, Weight: p.BondUnits, OperatorPayee: payee, ExposureDigest: lots[:]})
+			EVMKey: evmKey, Weight: p.BondUnits, RawWeight: p.BondUnits, OperatorPayee: payee, ExposureDigest: lots[:]})
 		rw, err1 := evmassign.NodeIDWord(p.RootNodeID)
 		ew, err2 := evmassign.NodeIDWord(p.EVMNodeID)
 		if err := errors.Join(err1, err2); err != nil {
