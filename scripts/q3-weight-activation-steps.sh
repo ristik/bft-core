@@ -39,6 +39,7 @@ q3_validators_json() { # out ids...: sorted successor node infos with the entity
 
 # The successor committee's identity records (#85 lifecycle): the genesis records of the same four entities with the mirrored weights. The
 # staking id, payee and exposure digest are the entity's own and do not change with its weight.
+# (the mirrored weight is also the raw bonded weight: the total is far below the profile bound B, so q = x and the identity record commits rawWeight = weight)
 q3_successor_identities() { # out ids...
   local out=$1 id w= ; shift
   for id in "$@"; do w+="${w:+,}\"$(h3_root_id "$id")\":$(q3_weight_of "$id")"; done
@@ -431,8 +432,8 @@ q3_supersede() {
 }
 
 # The leader schedule of the activated epoch: with mirrored weights (6,1,1,1) the proposer-priority selector of a weighted epoch (#403, activated by #489)
-# gives the heavy root about 6/9 of the rounds; the legacy selector gave a quarter each. The evidence file states what the root logs show, and the
-# step fails when the heavy root's share is not weight-proportional.
+# gives the heavy root about 6/9 of the rounds ((3,3,2,1): 3/9, 3/9, 2/9, 1/9); the legacy selector gave a quarter each. The evidence file states what the root logs
+# show, and the step fails when a root's share is not weight-proportional.
 q3_leader_schedule() {
   # epoch 2 only: from its activation round to the activation round of epoch 3 (the weights change there)
   local astar end; astar=$(jq -r .activationRound "$Q3_DIR/activation-record.json")
@@ -461,14 +462,19 @@ lines = [f"leader of the {total} rounds of epoch 2, from A*={astar} to {end} (ne
 for i, w in enumerate(weights, 1):
     n = counts.get(i, 0)
     lines.append(f"  root {i}: weight {w}/{sum(weights)} = {100 * w // sum(weights)}%, led {n} rounds = {100 * n // max(total, 1)}%")
-heavy = counts.get(1, 0) / max(total, 1)
-verdict = "weight-proportional (proposer-priority, root-wrr-v1)" if heavy >= 0.5 else "uniform: the legacy selector (no leader policy is activated; the weights do not shape the schedule)"
+shares = [counts.get(i, 0) / max(total, 1) for i in range(1, len(weights) + 1)]
+want = [w / sum(weights) for w in weights]
+# the proposer-priority selector is exact over a window of this size: every root within three rounds of its weight share (a uniform selector is far from it for both
+# committees, (6,1,1,1) and (3,3,2,1))
+tol = max(3 / max(total, 1), 0.06)
+proportional = all(abs(a - b) <= tol for a, b in zip(shares, want))
+verdict = "weight-proportional (proposer-priority, root-wrr-v1)" if proportional else "NOT weight-proportional (uniform: the legacy selector, or a schedule that does not follow the weights)"
 lines.append(f"selector in effect: {verdict}")
 open(out, "w").write("\n".join(lines) + "\n")
 print("\n".join(lines))
-# since #489 a weighted epoch uses the proposer-priority selector: the heavy root (weight 6 of 9) leads about two thirds of the rounds
-if not (0.5 <= heavy <= 0.8):
-    sys.exit("the heavy root led %d%% of the rounds: the schedule is not weight-proportional" % int(100 * heavy))
+# since #489 a weighted epoch uses the proposer-priority selector: every root leads its weight share of the rounds
+if not proportional:
+    sys.exit("the leaders of the rounds are not weight-proportional: shares %s, weights %s" % ([round(x, 2) for x in shares], [round(x, 2) for x in want]))
 PY
 }
 
@@ -599,8 +605,8 @@ q3_evidence_complete() { q3_evidence_check "$Q3_DIR"; }
 Q3_STEPS="q3_baseline q3_candidate q3_handoff q3_install_epoch2 q3_activation q3_acknowledge q3_progress_scheme2 q3_evm_request_weights \
 q3_aggregators_unchanged q3_real_tc q3_root_boundary q3_evm_boundary q3_heavy_crash q3_proof_envelope q3_start_second_pair q3_second_pair q3_pair_controls q3_continuity_refusal q3_second_handoff q3_second_activation q3_supersede q3_leader_schedule q3_evidence_complete"
 
-q3_run_lane() {
-  local s
+# The lane's initialisation: the evidence directory, the pins copy and the variables every step reads. Shared with the Q4 live lane so the two cannot drift.
+q3_lane_init() {
   mkdir -p "$Q3_DIR"; : >"$Q3_DIR/commands.log"
   cp "${Q3_PINS_FILE:?}" "$Q3_DIR/pins.txt"
   H3_RESTORE_TRUST_BASE=test-nodes/trust-base.json
@@ -609,6 +615,11 @@ q3_run_lane() {
   H3_ONLINE="1 2 3 4"; H3_ROOTS="1 2 3 4"
   M2_NEXT_NONCE=${M2_NEXT_NONCE:-4}; M2_CHAIN_ID=31337
   read -r h3_slot_shard h3_slot_root h3_slot_conf h3_slot_cursor < <(H3_SLOT_LAYOUT=$([ "${Q3_B1:-0}" = 1 ] && echo 3 || echo 2) go run ./scripts/h3slots)
+}
+
+q3_run_lane() {
+  local s
+  q3_lane_init
   echo "=== Q3 #50 weight-activation lane: fresh-B1 unit PoA -> mirrored weights $Q3_WEIGHTS ==="
   for s in $Q3_STEPS; do q3_step "$s" "$s"; done
   echo "Q3 weight-activation lane: all steps PASSED"

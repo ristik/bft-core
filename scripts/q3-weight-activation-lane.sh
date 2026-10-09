@@ -97,7 +97,7 @@ trap 'exit 143' TERM
 # clean build of the pinned bft-core, then the pinned Ureth
 ISOLATION_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/q3-lane.XXXXXX")
 remove_isolation_root() { [ -n "${ISOLATION_ROOT:-}" ] && [ -d "$ISOLATION_ROOT" ] || return 0; chmod -R u+w "$ISOLATION_ROOT" 2>/dev/null || true; rm -rf "$ISOLATION_ROOT"; }
-trap 'remove_isolation_root; cleanup' EXIT
+trap 's=$?; remove_isolation_root; (exit $s); cleanup' EXIT   # the lane's own exit status reaches cleanup (a plain rm would have replaced it with 0)
 avail=$(df -Pk "$ISOLATION_ROOT" | awk 'NR==2 {print $4}')
 [ "$avail" -ge 5500000 ] || fail "only $avail KiB free; the clean Ureth build needs 5.5 GiB"
 rm -rf build/ubft test-nodes
