@@ -78,11 +78,11 @@ h3_q3_start_joiner() { # entity shardEpoch rootEpoch trustFile
 h3_q3_wait_joiner() { # entity
   local i=$1 n
   for n in $(seq 1 60); do
-    if curl -fsS "$(h3_rpc_url "$i")/api/v1/q3/status" 2>/dev/null | jq -e '.follower == true' >/dev/null 2>&1; then return 0; fi
+    if curl -fsS -m 5 -X POST -H 'content-type: application/json' -d '{}' "$(h3_rpc_url "$i")/api/v1/q3/status" 2>/dev/null | jq -e '.follower == true' >/dev/null 2>&1; then return 0; fi
     sleep 1
   done
   echo "joiner root $i never reported itself a follower (q3/status)" >&2
-  curl -sS "$(h3_rpc_url "$i")/api/v1/q3/status" >&2 || true
+  curl -sS -m 5 -X POST -H 'content-type: application/json' -d '{}' "$(h3_rpc_url "$i")/api/v1/q3/status" >&2 || true
   return 1
 }
 
