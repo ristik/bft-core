@@ -60,9 +60,11 @@ type Evidence struct {
 	Test         string `json:"test,omitempty"`
 	BundlePrefix string `json:"bundlePrefix,omitempty"`
 	MinBundles   int    `json:"minBundles,omitempty"`
-	Step         string `json:"step,omitempty"`  // kind lane: the lane step name
-	Path         string `json:"path,omitempty"`  // kind lane-file: a file of the lane's evidence directory
-	Scope        string `json:"scope,omitempty"` // what the item covers and omits, in words
+	Step         string `json:"step,omitempty"` // kind lane: the lane step name
+	Path         string `json:"path,omitempty"` // kind lane-file: a file of the lane's evidence directory
+	// Contains, for a lane-file, are lines the file must contain (e.g. the gate's command and exit status).
+	Contains []string `json:"contains,omitempty"`
+	Scope    string   `json:"scope,omitempty"` // what the item covers and omits, in words
 }
 
 // Gap is an explicit, reasoned absence of evidence for one required label.
@@ -115,6 +117,9 @@ type LaneStats struct {
 	Dir      string `json:"dir"`
 	Mode     string `json:"mode"`
 	Evidence bool   `json:"evidence"` // a clean-build evidence run
+	// Attested is true when the run's execution client was a prebuilt binary the operator attested to have built from a fresh private target at the pinned commit
+	// (Q4_URETH_FRESH_BUILD=1) rather than one the lane built itself: still an evidence run, but on the operator's word for that one artifact.
+	Attested bool `json:"attested,omitempty"`
 }
 
 // CostStats reads the query-cost gate measurements.
@@ -343,7 +348,7 @@ func Build(matrixPath string, testFiles []string, bundleDir, costPath, srcRoot s
 		if raw, err := os.ReadFile(filepath.Join(laneDir, "run-mode.txt")); err == nil {
 			laneMode = strings.TrimSpace(string(raw))
 		}
-		rep.Lane = &LaneStats{Dir: laneDir, Mode: laneMode, Evidence: strings.HasPrefix(strings.TrimPrefix(laneMode, "Q4 run mode: "), "clean build (evidence run")}
+		rep.Lane = &LaneStats{Dir: laneDir, Mode: laneMode, Evidence: strings.HasPrefix(strings.TrimPrefix(laneMode, "Q4 run mode: "), "clean build (evidence run"), Attested: strings.Contains(laneMode, "built by the operator")}
 	}
 	seen := map[string]bool{}
 	for _, row := range m.Rows {
@@ -412,10 +417,18 @@ func Build(matrixPath string, testFiles []string, bundleDir, costPath, srcRoot s
 				case !rep.Lane.Evidence:
 					r.Status, r.Detail = "FAIL", "the lane ran as: "+laneMode+" (a development override is not evidence)"
 				case ev.Kind == "lane-file":
-					if fi, err := os.Stat(filepath.Join(laneDir, filepath.FromSlash(ev.Path))); err == nil && fi.Size() > 0 {
-						r.Status = "PASS"
-					} else {
+					path := filepath.Join(laneDir, filepath.FromSlash(ev.Path))
+					raw, err := os.ReadFile(path)
+					switch {
+					case err != nil || len(raw) == 0:
 						r.Status, r.Detail = "NOT-RUN", ev.Path+" is missing or empty"
+					default:
+						r.Status = "PASS"
+						for _, want := range ev.Contains {
+							if !strings.Contains(string(raw), want) {
+								r.Status, r.Detail = "FAIL", ev.Path+" does not contain "+want
+							}
+						}
 					}
 				case regexp.MustCompile(`(?m)^\s*PASS: ` + regexp.QuoteMeta(ev.Step) + `\s*$`).MatchString(laneLog):
 					r.Status = "PASS"
@@ -516,7 +529,11 @@ func Markdown(r *Report) string {
 	fmt.Fprintf(&b, "Replay bundles re-checked offline by the independent checker: %d, clean %d, %d attempts, %d signatures verified, %d deliberately injected malformed sends flagged by their own reason.\n\n",
 		r.Bundles.Checked, r.Bundles.Clean, r.Bundles.Attempts, r.Bundles.Signed, r.Bundles.Injected)
 	if r.Lane != nil {
-		fmt.Fprintf(&b, "Live lane evidence: `%s`, run mode: %s.\n\n", r.Lane.Dir, orDash(r.Lane.Mode))
+		attested := ""
+		if r.Lane.Attested {
+			attested = " The execution client binary is the operator's attestation of a fresh private build at the pinned commit."
+		}
+		fmt.Fprintf(&b, "Live lane evidence: `%s`, run mode: %s.%s\n\n", r.Lane.Dir, orDash(r.Lane.Mode), attested)
 	}
 	if r.Cost != nil {
 		fmt.Fprintf(&b, "Query-cost gate (%s, %s): %d of %d supported rows within the frozen budgets.", r.Cost.Profile, r.Cost.Host, r.Cost.Within, r.Cost.Supported)
@@ -588,12 +605,14 @@ func detail(s string) string {
 	return " (" + s + ")"
 }
 
-// laneStepDeclared: the step name is one the lane scripts declare (a Q3 step function or a Q4 step title), so a renamed step makes its evidence stale
-// instead of silently missing.
+// laneStepDeclared: the step name is one the lane scripts declare as a step (a Q3 step function definition or a Q4 step title in a q4_step call), so a
+// renamed step makes its evidence stale instead of silently missing; a surviving mention in a comment does not count.
 func laneStepDeclared(srcRoot, step string) bool {
+	q4 := regexp.MustCompile(`(?m)^\s*q4_step "` + regexp.QuoteMeta(step) + `"`)
+	q3 := regexp.MustCompile(`(?m)^` + regexp.QuoteMeta(step) + `\(\) \{`)
 	for _, f := range []string{"scripts/q4-live-steps.sh", "scripts/q3-weight-activation-steps.sh"} {
 		raw, err := os.ReadFile(filepath.Join(srcRoot, f))
-		if err == nil && strings.Contains(string(raw), step) {
+		if err == nil && (q4.Match(raw) || q3.Match(raw)) {
 			return true
 		}
 	}

@@ -237,10 +237,11 @@ func TestReportReadsTheLiveLaneEvidence(t *testing.T) {
 	}
 
 	require.NoError(t, os.MkdirAll(filepath.Join(f.src, "scripts"), 0o755))
-	require.NoError(t, os.WriteFile(filepath.Join(f.src, "scripts", "q4-live-steps.sh"), []byte("q4_step \"heavy root delayed\" x\nq4_step \"failing row\" y\nq4_step \"never ran\" z\n"), 0o644))
-	require.NoError(t, os.WriteFile(filepath.Join(f.src, "scripts", "q3-weight-activation-steps.sh"), []byte("q3_activation() { :; }\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(f.src, "scripts", "q4-live-steps.sh"), []byte("  q4_step \"heavy root delayed\" x\n  q4_step \"failing row\" y\n  q4_step \"never ran\" z\n# q4_step \"only in a comment\" w\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(f.src, "scripts", "q3-weight-activation-steps.sh"), []byte("q3_activation() { :; }\n# q3_commented() { :; }\n"), 0o644))
 	writeLane(t, lane, "clean build (evidence run)", log)
 	require.Contains(t, strings.Join(build(step("a step nobody declares")).Problems, "\n"), "failed or is stale")
+	require.Contains(t, strings.Join(build(step("only in a comment")).Problems, "\n"), "failed or is stale", "a mention in a comment does not declare a step")
 	require.Empty(t, build(step("q3_activation")).Problems)
 	require.Empty(t, build(step("heavy root delayed")).Problems)
 	require.Empty(t, build(file("pins.txt")).Problems)
@@ -248,6 +249,14 @@ func TestReportReadsTheLiveLaneEvidence(t *testing.T) {
 	require.Contains(t, strings.Join(build(step("never ran")).Problems, "\n"), "was not run", "no PASS line, no evidence")
 	require.Contains(t, strings.Join(build(file("empty.txt")).Problems, "\n"), "was not run", "an empty file is no evidence")
 	require.Contains(t, strings.Join(build(file("missing.txt")).Problems, "\n"), "was not run")
+
+	// a lane-file can be required to contain lines: the gate must have been the default function and have exited 0
+	require.NoError(t, os.WriteFile(filepath.Join(lane, "gate.txt"), []byte("# command: q4_weighted_epoch_check\n# exit: 0\nok\n"), 0o644))
+	gate := func(contains ...string) Row {
+		return Row{ID: "G", Required: []string{"REAL-PROCESS"}, Evidence: []Evidence{{Kind: "lane-file", Label: "REAL-PROCESS", Path: "gate.txt", Contains: contains}}}
+	}
+	require.Empty(t, build(gate("# command: q4_weighted_epoch_check", "# exit: 0")).Problems)
+	require.Contains(t, strings.Join(build(gate("# command: true")).Problems, "\n"), "failed or is stale", "an overridden gate is not the evidence")
 
 	// a development override is never evidence, whatever its log says
 	writeLane(t, lane, "DEVELOPMENT OVERRIDE: prebuilt ureth /x: NOT EVIDENCE", log)

@@ -597,8 +597,8 @@ q3_evidence_complete() { q3_evidence_check "$Q3_DIR"; }
 Q3_STEPS="q3_baseline q3_candidate q3_handoff q3_install_epoch2 q3_activation q3_acknowledge q3_progress_scheme2 q3_evm_request_weights \
 q3_aggregators_unchanged q3_real_tc q3_root_boundary q3_evm_boundary q3_heavy_crash q3_proof_envelope q3_start_second_pair q3_second_pair q3_pair_controls q3_continuity_refusal q3_second_handoff q3_second_activation q3_supersede q3_leader_schedule q3_evidence_complete"
 
-q3_run_lane() {
-  local s
+# The lane's initialisation: the evidence directory, the pins copy and the variables every step reads. Shared with the Q4 live lane so the two cannot drift.
+q3_lane_init() {
   mkdir -p "$Q3_DIR"; : >"$Q3_DIR/commands.log"
   cp "${Q3_PINS_FILE:?}" "$Q3_DIR/pins.txt"
   H3_RESTORE_TRUST_BASE=test-nodes/trust-base.json
@@ -607,6 +607,11 @@ q3_run_lane() {
   H3_ONLINE="1 2 3 4"; H3_ROOTS="1 2 3 4"
   M2_NEXT_NONCE=${M2_NEXT_NONCE:-4}; M2_CHAIN_ID=31337
   read -r h3_slot_shard h3_slot_root h3_slot_conf h3_slot_cursor < <(H3_SLOT_LAYOUT=$([ "${Q3_B1:-0}" = 1 ] && echo 3 || echo 2) go run ./scripts/h3slots)
+}
+
+q3_run_lane() {
+  local s
+  q3_lane_init
   echo "=== Q3 #50 weight-activation lane: fresh-B1 unit PoA -> mirrored weights $Q3_WEIGHTS ==="
   for s in $Q3_STEPS; do q3_step "$s" "$s"; done
   echo "Q3 weight-activation lane: all steps PASSED"

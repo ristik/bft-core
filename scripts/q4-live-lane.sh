@@ -26,6 +26,8 @@ DRY_RUN=${Q4_LANE_DRY_RUN:-0}
 for a in "$@"; do case "$a" in --dry-run) DRY_RUN=1 ;; *) fail "unknown argument: $a" ;; esac; done
 
 cd "$REPO_ROOT"
+# the lane's EXIT trap: capture the body's status FIRST (a cleanup step that succeeds would otherwise replace it with 0 and hide a failure or the BLOCKED exit 3)
+LANE_EXIT_TRAP='s=$?; remove_isolation_root; (exit $s); cleanup'
 REQUIRED_PINS="Q4_BFT_COMMIT Q4_URETH_COMMIT RUGREGATOR_BIN RUGREGATOR_SOURCE"
 
 if [ "$DRY_RUN" = 1 ]; then
@@ -42,7 +44,7 @@ if [ "$DRY_RUN" = 1 ]; then
   echo "--- required pins (a real run refuses if any is unset; there are no defaults)"
   for v in $REQUIRED_PINS; do printf '  %-20s %s\n' "$v" "${!v:-<unset>}"; done
   echo "--- the activation prefix (the Q3 flow library, fresh-B1 stack) and the Q4 rows, in order"
-  for s in $Q4_ACTIVATION_STEPS; do printf '  %s\n' "$s"; done
+  for s in $Q4_ACTIVATION_STEPS $Q4_PRE_FAULT_STEPS; do printf '  %s\n' "$s"; done
   grep -o 'q4_step "[^"]*"' scripts/q4-live-steps.sh | sed 's/^q4_step /  /'
   echo "--- the weighted-epoch gate: Q4_WEIGHTED_CHECK=${Q4_WEIGHTED_CHECK:-q4_weighted_epoch_check} (a function of the Q3 flow library; its command, output and exit are kept in weighted-check.txt)"
   echo "--- self-tests"
@@ -53,7 +55,13 @@ if [ "$DRY_RUN" = 1 ]; then
   q3_selftest || status=1
   bash -n scripts/q4-live-steps.sh scripts/q4-live-lane.sh scripts/lib/q4-lib.sh scripts/lib/q3-lib.sh scripts/lib/q3-flow-lib.sh && echo "  bash -n: ok" || status=1
   python3 scripts/q4-trace-check.py --help >/dev/null && echo "  trace checker runs" || status=1
-  [ -x "$LOCK_SCRIPT" ] && echo "  devnet lock helper present: $LOCK_SCRIPT (not taken)" || { echo "  devnet lock helper MISSING: $LOCK_SCRIPT" >&2; status=1; }
+  # information only: the helper lives beside the checkout (briefs/), not in it; a real run refuses without it
+  [ -x "$LOCK_SCRIPT" ] && echo "  devnet lock helper present: $LOCK_SCRIPT (not taken)" || echo "  devnet lock helper not present at $LOCK_SCRIPT (information only; a real run refuses without it)"
+  # the lane's exit status must survive its own EXIT cleanup (a body that fails with 1 or is BLOCKED with 3 must leave the lane with exactly that status)
+  for want in 0 1 3; do
+    got=$(bash -c 'cleanup() { local s=$?; exit "$s"; }; remove_isolation_root() { :; }; trap "$1" EXIT; exit "$2"' _ "$LANE_EXIT_TRAP" "$want" >/dev/null 2>&1; echo $?)
+    [ "$got" = "$want" ] && echo "  exit-status self-test: a body exiting $want leaves the lane with $got: ok" || { echo "  exit-status self-test: a body exiting $want left the lane with $got" >&2; status=1; }
+  done
   [ "$status" -eq 0 ] && echo "Q4 live lane dry run: OK (the devnet lane itself was NOT run)" || echo "Q4 live lane dry run: FAILED" >&2
   exit "$status"
 fi
@@ -90,7 +98,7 @@ stop_devnet() {
 cleanup() { local s=$?; stop_devnet; ( source helper.sh; source scripts/lib/q3-lib.sh; q3_teardown ) >/dev/null 2>&1 || true; exit "$s"; }
 ISOLATION_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/q4-lane.XXXXXX")
 remove_isolation_root() { [ -n "${ISOLATION_ROOT:-}" ] && [ -d "$ISOLATION_ROOT" ] || return 0; chmod -R u+w "$ISOLATION_ROOT" 2>/dev/null || true; rm -rf "$ISOLATION_ROOT"; }
-trap 'remove_isolation_root; cleanup' EXIT
+trap "$LANE_EXIT_TRAP" EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 avail=$(df -Pk "$ISOLATION_ROOT" | awk 'NR==2 {print $4}')
@@ -120,6 +128,8 @@ else
   urethPinVerifyBinary "$URETH_BIN" "$Q4_URETH_COMMIT" || fail "built ureth does not report the pinned commit"
 fi
 export URETH_BIN
+# the weighted-epoch gate is the Q3 flow library's function: any other command is a development override and the run is no evidence
+if [ -n "${Q4_WEIGHTED_CHECK:-}" ] && [ "$Q4_WEIGHTED_CHECK" != q4_weighted_epoch_check ]; then RUN_MODE="DEVELOPMENT OVERRIDE: weighted-epoch gate '$Q4_WEIGHTED_CHECK' replaces q4_weighted_epoch_check: NOT EVIDENCE"; fi
 printf 'Q4 run mode: %s\n' "$RUN_MODE" | tee "$EVIDENCE_DIR/run-mode.txt"
 
 PINS=$EVIDENCE_DIR/pins.txt

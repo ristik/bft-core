@@ -68,7 +68,7 @@ q4_restart_root() {
 }
 
 # The gate, from the Q3 flow library: the root's OWN verified state is a quorum certificate of the activated epoch under scheme 2, every signer carries its mirrored weight, and
-# the committed activation record names scheme 2. Nothing is read from logs or from the process under test beyond its verified Q3 endpoints.
+# the committed activation record names scheme 2 and the committed tuple (the candidate config the root derived) names leader policy root-wrr-v1. Nothing is read from logs or from the process under test beyond its verified Q3 endpoints.
 q4_weighted_epoch_check() {
   local root sg act signers
   root=$(h3_first_root) || return 1
@@ -86,6 +86,7 @@ PY
   rm -f "$signers"
   act=$(mktemp); build/ubft root handoff q3-activation --root-rpc "$(h3_rpc_url "$root")" --epoch "$Q4_EPOCH" --out "$act" >/dev/null || { rm -f "$act"; return 1; }
   jq -e --argjson e "$Q4_EPOCH" '.epoch == $e and .signingScheme == 2' "$act" >/dev/null || { echo "the committed activation record of epoch $Q4_EPOCH is not scheme 2" >&2; rm -f "$act"; return 1; }
+  [ "$(jq -r .leaderPolicy "$Q3_DIR/candidate-config.json" 2>/dev/null)" = root-wrr-v1 ] || { echo "the committed tuple's leader policy is not root-wrr-v1: $(jq -c . "$Q3_DIR/candidate-config.json" 2>&1)" >&2; return 1; }
   echo "activated weighted epoch confirmed from root$root: epoch $Q4_EPOCH, scheme 2, signed weight $(printf '%s' "$sg" | jq -r '[.signers[].weight] | add'), mirrored weights $Q3_WEIGHTS"
   cp "$act" "${Q4_EVIDENCE_DIR:-.}/weighted-check-activation.json" 2>/dev/null; rm -f "$act"
 }
@@ -165,23 +166,47 @@ q4_row_trace_check() {
 
 # the Q3 flow's own initialisation (what q3_run_lane does before its steps) and the activation prefix; each step is the Q3 step, with its Q3 evidence under $Q3_DIR
 Q4_ACTIVATION_STEPS="q3_baseline q3_candidate q3_handoff q3_install_epoch2 q3_activation q3_acknowledge q3_progress_scheme2"
+# after the activation prefix and before any fault: the leader selector in effect (the Q3 step, over a window of rounds) and the follower status of every root
+Q4_PRE_FAULT_STEPS="q4_leader_schedule q4_no_followers"
 q4_activate_weighted_epoch() {
   local s
-  mkdir -p "$Q3_DIR"; : >"$Q3_DIR/commands.log"
-  cp "${Q3_PINS_FILE:?}" "$Q3_DIR/pins.txt"
-  H3_RESTORE_TRUST_BASE=test-nodes/trust-base.json
-  Q3_GENESIS_IDENTITIES=test-nodes/genesis-identities.json
-  H3_REGISTRY=0xff00000000000000000000000000000000000002
-  H3_ONLINE="1 2 3 4"; H3_ROOTS="1 2 3 4"
-  M2_NEXT_NONCE=${M2_NEXT_NONCE:-4}; M2_CHAIN_ID=31337
-  read -r h3_slot_shard h3_slot_root h3_slot_conf h3_slot_cursor < <(H3_SLOT_LAYOUT=3 go run ./scripts/h3slots)
+  q3_lane_init
   echo "=== Q4 live lane: fresh-B1 unit PoA -> mirrored weights $Q3_WEIGHTS (the Q3 flow), then the Q4 fault rows ==="
   for s in $Q4_ACTIVATION_STEPS; do q3_step "$s" "$s"; done
+}
+
+# The selector in effect is part of the weighted epoch the rows run in: enough epoch-2 rounds to judge the schedule, then the Q3 step that measures who led them
+# (weight-proportional root-wrr-v1, not the legacy uniform selector) from the roots' own logs.
+q4_leader_window() {
+  local astar round i
+  astar=$(jq -r .activationRound "$Q3_DIR/activation-record.json") || return 1
+  for i in $(seq 1 180); do
+    round=$(q3_signers_of "$(h3_first_root)" | jq -r .round) || return 1
+    [ $((round - astar)) -ge 45 ] && return 0
+    sleep 1
+  done
+  echo "fewer than 45 rounds of epoch $Q4_EPOCH after A*=$astar within 180 s" >&2
+  return 1
+}
+q4_leader_schedule() { q4_leader_window && q3_leader_schedule; }
+
+# #515: every root of the weighted epoch is a member of its committee, so none reports itself a follower and the membership gate in the signing path admits it.
+q4_no_followers() {
+  local r st
+  : >"$Q4_DIR/followers.txt"
+  for r in $H3_ROOTS; do
+    st=$(curl -fsS -X POST -H 'content-type: application/json' -d '{}' "$(h3_rpc_url "$r")/api/v1/q3/status") || return 1
+    printf 'root%s: %s\n' "$r" "$(printf '%s' "$st" | jq -c .)" >>"$Q4_DIR/followers.txt"
+    [ "$(printf '%s' "$st" | jq -r '.follower // false')" = false ] || { echo "root$r reports itself a follower in the weighted epoch: $st" >&2; return 1; }
+    [ "$(printf '%s' "$st" | jq -r .activeEpoch)" = "$Q4_EPOCH" ] || { echo "root$r is not at the installed epoch $Q4_EPOCH: $st" >&2; return 1; }
+  done
 }
 
 q4_run_lane() {
   mkdir -p "$Q4_DIR"
   q4_activate_weighted_epoch
+  q4_step "leader selector in effect: weight-proportional root-wrr-v1 over the epoch's rounds" q4_leader_schedule
+  q4_step "no root of the weighted epoch reports itself a follower (#515 membership gate)" q4_no_followers
   q4_precondition
   q4_step "baseline: weighted epoch commits (F8 trace and EVM IR)" q4_row_baseline
   q4_step "one light root isolated (held both ways): 8 of 9 progresses, heal releases" q4_row_light_partition

@@ -55,7 +55,7 @@ Q4_BFT_COMMIT=$(git rev-parse HEAD) Q4_URETH_COMMIT=<merged ureth commit> RUGREG
 One devnet run (queued on `briefs/devnet-lock.sh`): the Q3 weight-activation flow on the fresh-B1 stack (unit PoA to mirrored weights 6,1,1,1, scheme 2,
 root-wrr-v1), then the Q4 rows through the roots' q4shim build. The gate `Q4_WEIGHTED_CHECK` defaults to `q4_weighted_epoch_check`, a function of the Q3
 flow library that reads the activated epoch from the root's own verified state; its command, output and exit status are kept in `weighted-check.txt`.
-`q4report -lane <evidence dir>` then maps the lane's PASS lines and files to the matrix rows.
+Before any fault the lane also checks that the selector in effect is the weighted one (`q3_leader_schedule` over at least 45 rounds of the epoch, and the committed tuple names `root-wrr-v1`) and that no root reports itself a follower (#515). A gate other than the default function makes the run a development override. `q4report -lane <evidence dir>` then maps the lane's PASS lines and files to the matrix rows.
 
 ## What is not covered
 
@@ -63,5 +63,6 @@ flow library that reads the activated epoch from the root's own verified state; 
   activated weighted epoch). Closure of #51 needs those rows.
 - Every in-process row is root consensus only: no EVM, no aggregator shard, restarts are close/reopen of fsynced stores (not SIGKILL, not
   power loss). The checker does not re-verify the signatures inside a carried QC (it weighs the QC's signers under their epoch); carried TCs and the HighQC inside a timeout are not weighed; equivocation is detected for votes and timeouts only, not proposals.
+- No non-member or removed-validator root runs in the live lane (all four roots stay members): the follower signing nothing and catching up on a real network is an explicit gap (row L5), blocked on the P85 slice 7 joiner run or an A to B removal handoff.
 - Mixed-HighQC TC is covered only by the unit-weight unit test, not weighted.
 - The execution-entry-point authentication entry gate (G2) is not touched by any Q4 test.

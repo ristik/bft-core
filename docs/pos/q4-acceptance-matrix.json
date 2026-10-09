@@ -92,7 +92,23 @@
      "kind": "lane-file",
      "label": "REAL-PROCESS",
      "path": "weighted-check.txt",
-     "scope": "the gate: command, output and exit, read from the root's verified state"
+     "scope": "the gate: the default function, its output and exit 0, read from the root's verified state and the committed tuple",
+     "contains": [
+      "# command: q4_weighted_epoch_check",
+      "# exit: 0"
+     ]
+    },
+    {
+     "kind": "lane",
+     "label": "REAL-PROCESS",
+     "step": "leader selector in effect: weight-proportional root-wrr-v1 over the epoch's rounds",
+     "scope": "the roots' own logs: the heavy root leads about two thirds of the epoch's rounds, not the uniform rotation of the legacy selector; REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss)"
+    },
+    {
+     "kind": "lane-file",
+     "label": "REAL-PROCESS",
+     "path": "q3/leader-schedule.txt",
+     "scope": "the measured schedule"
     }
    ]
   },
@@ -984,7 +1000,8 @@
    "design": "Design v2 section 4.",
    "required": [
     "ORACLE-ONLY",
-    "IN-PROCESS"
+    "IN-PROCESS",
+    "REAL-PROCESS"
    ],
    "evidence": [
     {
@@ -1021,6 +1038,18 @@
      "package": "./rootchain/consensus/leader",
      "test": "TestWeightedCallbacksDoNotChangeTheSchedule",
      "scope": "selector unit"
+    },
+    {
+     "kind": "lane",
+     "label": "REAL-PROCESS",
+     "step": "leader selector in effect: weight-proportional root-wrr-v1 over the epoch's rounds",
+     "scope": "root-wrr-v1 observed on real processes over the activated epoch (A only; the exact-priority replay and restart/jump cases stay in-process); REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss)"
+    },
+    {
+     "kind": "lane-file",
+     "label": "REAL-PROCESS",
+     "path": "q3/leader-schedule.txt",
+     "scope": ""
     }
    ]
   },
@@ -1232,7 +1261,11 @@
      "kind": "lane-file",
      "label": "REAL-PROCESS",
      "path": "weighted-check.txt",
-     "scope": ""
+     "scope": "",
+     "contains": [
+      "# command: q4_weighted_epoch_check",
+      "# exit: 0"
+     ]
     },
     {
      "kind": "lane-file",
@@ -1295,6 +1328,44 @@
      "bundlePrefix": "TestQ4",
      "minBundles": 60,
      "scope": "every exported run checks clean"
+    }
+   ]
+  },
+  {
+   "id": "L5",
+   "title": "Follower roots (#515): a root the committee does not name follows, stages and signs nothing; every member is admitted by the gate",
+   "design": "Q3 joiner readiness (S1), #515.",
+   "required": [
+    "IN-PROCESS",
+    "REAL-PROCESS",
+    "REAL-PROCESS (non-member)"
+   ],
+   "evidence": [
+    {
+     "kind": "go-test",
+     "label": "IN-PROCESS",
+     "package": "./rootchain/consensus",
+     "test": "TestAJoinerRootFollowsStagesSignsNothingAndIsPromotedAfterInstall",
+     "scope": "root consensus only; no EVM, no aggregator shard; real manager over a verified history: starts, reports follower, stages, refuses vote/timeout/proposal signatures, promoted after install, removed validator becomes a follower"
+    },
+    {
+     "kind": "lane",
+     "label": "REAL-PROCESS",
+     "step": "no root of the weighted epoch reports itself a follower (#515 membership gate)",
+     "scope": "A: all four roots are members of the weighted epoch; none reports follower, so the membership gate is in the signing path and admits every member; REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss)"
+    },
+    {
+     "kind": "lane-file",
+     "label": "REAL-PROCESS",
+     "path": "q4/followers.txt",
+     "scope": ""
+    }
+   ],
+   "gaps": [
+    {
+     "label": "REAL-PROCESS (non-member)",
+     "reason": "No non-member or removed-validator root runs in this lane (all four roots stay committee members): the follower signing nothing and catching up on a real network needs the P85 slice 7 joiner run or an A to B removal handoff.",
+     "blockedBy": "slice 7 joiner run / removal handoff lane"
     }
    ]
   }
