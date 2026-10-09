@@ -463,6 +463,27 @@ function start_evm_validators() {
 # $5 executor: "fake" or "engine-api"
 # $6 "rpc" (optional) - see start_evm_validators
 # $7 optional prevalidated comma-separated boot nodes for offline-peer lanes
+# archive_replica_pool <validators>: the candidates for archive replicas, in order. EVM_ARCHIVE_REPLICA_POOL overrides it after a validator-set change
+# (a retired validator is not a valid replica of the installed assignment).
+function archive_replica_pool() {
+  echo ${EVM_ARCHIVE_REPLICA_POOL:-$(seq 1 "$1")}
+}
+
+# archive_replicas_of <validator> <validators>: the two archive replicas this validator names (the product takes exactly two peer IDs): the next two
+# candidates after it in pool order, wrapping, never itself; a validator outside the pool takes the first two. With the default pool every validator
+# is a replica of exactly two others (1->2,3  2->3,4  3->4,1  4->1,2), so none is left out and none carries more than its share.
+function archive_replicas_of() {
+  local i=$1 pool=($(archive_replica_pool "$2")) k start=0 n out=() c=0
+  n=${#pool[@]}
+  for k in $(seq 0 $((n - 1))); do [ "${pool[$k]}" = "$i" ] && start=$((k + 1)); done
+  for k in $(seq 0 $((n - 1))); do
+    [ "${pool[$(((start + k) % n))]}" = "$i" ] && continue
+    out+=("${pool[$(((start + k) % n))]}")
+    c=$((c + 1)); [ "$c" -lt 2 ] || break
+  done
+  echo "${out[*]}"
+}
+
 function start_one_evm_validator() {
   local i=$1 n=$2 partitionID=$3 rootBoot=$4 executor=$5 exposeRPC=${6:-}
   local port=$((evmValidatorPortStart + i - 1))
@@ -508,13 +529,12 @@ function start_one_evm_validator() {
 	  # whole acknowledgement window.
 	  executorArgs+=(--archive-store "$EVM_ARCHIVE_ROOT/evm$i" --archive-prune --journal-candidates "${EVM_JOURNAL_CANDIDATES:-32}")
 	  # EVM_ARCHIVE_REPLICA_POOL (ids) names the candidates after a validator-set change: a retired validator is not a valid replica
-	  # of the installed assignment, and the node refuses to start naming one.
-	  for j in ${EVM_ARCHIVE_REPLICA_POOL:-$(seq 2 "$n")}; do
-	    [ "$j" = "$i" ] && continue
+	  # of the installed assignment, and the node refuses to start naming one. By default every validator but the publisher itself is a
+	  # candidate (the product takes exactly two replica peer IDs and restricts nothing else), so each validator serves as a replica too.
+	  for j in $(archive_replicas_of "$i" "$n"); do
 	    peerID=$(evm_validator_id "$j") || return 1
 	    executorArgs+=(--archive-replica "$peerID")
 	    replicaCount=$((replicaCount + 1))
-	    [ "$replicaCount" -lt 2 ] || break
 	  done
 	fi
   fi

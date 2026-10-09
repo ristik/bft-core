@@ -181,11 +181,14 @@ PY
 
 # The authority survives each shard restart. Advance one key at a time and wait for
 # a durable replica acknowledgement before moving to the next configured peer.
-# A validator is somebody's archive replica only if it is in the replica pool start_one_evm_validator draws from (helper.sh: EVM_ARCHIVE_REPLICA_POOL, by
-# default validators 2..n). Validator 1 is nobody's replica: no peer ever logs an acknowledgement for it, so waiting for one cannot succeed.
+# A validator is somebody's archive replica only if another validator names it (helper.sh archive_replicas_of). One nobody names has no peer that ever logs an
+# acknowledgement for it, so waiting for one cannot succeed. The wait never targets the restarted validator itself: it reads the other validators' logs.
 m2_is_archive_replica() { # validator
-  local j
-  for j in ${EVM_ARCHIVE_REPLICA_POOL:-$(seq 2 "$validators")}; do [ "$j" = "$1" ] && return 0; done
+  local k
+  for k in $(seq 1 "$validators"); do
+    [ "$k" = "$1" ] && continue
+    case " $(archive_replicas_of "$k" "$validators") " in *" $1 "*) return 0 ;; esac
+  done
   return 1
 }
 
