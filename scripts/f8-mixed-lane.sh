@@ -262,6 +262,68 @@ print('all three aggregator shards certified new state roots and rounds while EV
 PY
 }
 
+# f8_certify_new_roots <seed-base>: every aggregator shard certifies a NEW state root: one distinct signed request per shard (scripts/f8-request, seeds
+# base, base+1, base+2), then the certified state root and the aggregator's block height of each shard advance. The roots verify the rsmt proof of every
+# state-changing block after the first (the first has no previous state root and is skipped), so this is the check that the aggregators' proofs verify:
+# since the mark, the roots logged `Verifying ZK proof` for the aggregator partitions with a non-empty proof and no `ZK proof verification failed` at all.
+# Runs in any epoch (the Q4 lane runs it in the weighted one).
+f8_certify_new_roots() {
+  local base=${1:?seed base} i name port req response r d before="$F8_LOG_DIR/new-roots-before.json" after="$F8_LOG_DIR/new-roots-after.json" mark=()
+  local -a submitted=(false false false)
+  for r in test-nodes/root*/debug.log; do mark+=("$r:$(wc -l <"$r" | tr -d ' ')"); done
+  f8_trace >/dev/null || return 1
+  python3 - "$F8_LOG_DIR/trace.jsonl" "$before" <<'PY' || return 1
+import json,sys
+rows=[json.loads(l) for l in open(sys.argv[1]) if l.strip()]
+latest={r['shard']:r for r in rows if r['shard'] in ('a-left','a-right','b-left')}
+if len(latest)!=3: raise SystemExit('missing trace rows for the three aggregator shards')
+json.dump(latest,open(sys.argv[2],'w'),sort_keys=True)
+PY
+  go run ./scripts/f8-request -check >/dev/null || return 1
+  for _ in $(seq 1 90); do
+    d=true
+    for i in 0 1 2; do
+      [ "${submitted[$i]}" = true ] && continue
+      port=${F8_HTTP_PORTS[$i]}
+      req=$(go run ./scripts/f8-request -seed "$((base + i))") || return 1
+      response=$(curl -fsS -H 'content-type: application/json' \
+        -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"certification_request\",\"params\":\"$req\"}" "http://127.0.0.1:$port/") || return 1
+      if echo "$response" | jq -e '.result.status == "SUCCESS"' >/dev/null; then
+        submitted[$i]=true; echo "submitted a new state-changing request to ${F8_NAMES[$i]} (seed $((base + i)))"
+      elif echo "$response" | jq -e '.error.message == "SERVICE_NOT_READY"' >/dev/null; then d=false
+      else echo "${F8_NAMES[$i]} rejected the new-root request: $response" >&2; return 1; fi
+    done
+    [ "$d" = true ] && break
+    sleep 1
+  done
+  for i in 0 1 2; do [ "${submitted[$i]}" = true ] || { echo "${F8_NAMES[$i]} accepted no new-root request" >&2; return 1; }; done
+  for _ in $(seq 1 120); do
+    f8_trace >/dev/null || return 1
+    if python3 - "$F8_LOG_DIR/trace.jsonl" "$before" "$after" <<'PY'
+import json,sys
+rows=[json.loads(l) for l in open(sys.argv[1]) if l.strip()]
+before=json.load(open(sys.argv[2]))
+latest={r['shard']:r for r in rows if r['shard'] in before}
+ok=len(latest)==3 and all(int(latest[n]['aggregatorBlockHeight'])>int(before[n]['aggregatorBlockHeight']) and latest[n]['stateRoot']!=before[n]['stateRoot'] for n in before)
+if ok: json.dump(latest,open(sys.argv[3],'w'),sort_keys=True)
+raise SystemExit(0 if ok else 1)
+PY
+    then break; fi
+    sleep 1
+  done
+  [ -s "$after" ] || { echo "the aggregator shards did not certify new state roots" >&2; return 1; }
+  # the roots' own account of the proofs since the mark
+  local verified=0 failed=0 entry file from
+  for entry in "${mark[@]}"; do
+    file=${entry%:*}; from=${entry##*:}
+    failed=$((failed + $(tail -n +"$((from + 1))" "$file" | grep -c 'ZK proof verification failed' || true)))
+    verified=$((verified + $(tail -n +"$((from + 1))" "$file" | grep 'Verifying ZK proof' | grep 'verifier_type=aggregator_rsmt_v1' | grep -vc 'proof_size=0 ' || true)))
+  done
+  [ "$failed" = 0 ] || { echo "the roots rejected $failed aggregator proof(s) (ZK proof verification failed)" >&2; return 1; }
+  [ "$verified" -ge 3 ] || { echo "the roots verified only $verified non-empty aggregator rsmt proofs; expected one per shard at least" >&2; return 1; }
+  echo "all three aggregator shards certified new state roots; the roots verified $verified aggregator rsmt proofs and rejected none"
+}
+
 f8_reconnect_probe() {
   # A-right uses the non-default 0xc0 shard ID, so this exercises the configurable
   # shard identity on both initial connect and reconnect.
