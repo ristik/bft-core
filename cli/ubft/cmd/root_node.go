@@ -846,6 +846,21 @@ func recordsFeedAllowed(static map[peer.ID]struct{}, shardConfs []*types.Partiti
 	}
 }
 
+// recordsFeedRoot is what the feed's server asks of the root node: the installed trust base's roots, the installed and staged shard
+// members and the staged successor committee's roots.
+type recordsFeedRoot interface {
+	shardMembers
+	Validators() peer.IDSlice
+}
+
+// recordsServerAllowed is the production authorization of the records feed: the roots of the installed trust base AND of the staged
+// successor committee (a joiner root fetches its checkpoint's prefix from the roots it follows), plus recordsFeedAllowed's shard validators.
+func recordsServerAllowed(static map[peer.ID]struct{}, shardConfs []*types.PartitionDescriptionRecord, cm recordsFeedRoot) func(peer.ID) bool {
+	return recordsFeedAllowed(static, shardConfs, cm, func(id peer.ID) bool {
+		return slices.Contains(cm.Validators(), id) || cm.IsStagedRoot(id.String())
+	})
+}
+
 // serveRootRecords serves the root's source-log cuts and records to the validators of the shards this root was configured with. The
 // shard pairs an EVM with the root and derives the next prefix of the log from them, verifying everything against the unicity tree
 // root of its certificate, so the service needs no trust in the node it asks.
@@ -863,7 +878,7 @@ func serveRootRecords(log *slog.Logger, host *network.Peer, cm *consensus.Consen
 	}
 	// The other roots of the trust base are served too: a root that installs an epoch checkpoint without the source log it commits
 	// fetches the missing prefix from them (storage.BlockStore.SetRecordFetcher), verifying every record against the checkpoint.
-	server := recordsfeed.NewServer(recordsSource{cm}, recordsFeedAllowed(allowed, shardConfs, cm, func(id peer.ID) bool { return slices.Contains(cm.Validators(), id) || cm.IsStagedRoot(id.String()) }))
+	server := recordsfeed.NewServer(recordsSource{cm}, recordsServerAllowed(allowed, shardConfs, cm))
 	host.RegisterProtocolHandler(recordsfeed.ProtocolID, server.Handler)
 	cm.SetRecordFetcher(rootRecordFetcher{host: host, cm: cm})
 	log.Info("root records feed enabled", "validators", len(eligible))
