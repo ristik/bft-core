@@ -17,6 +17,7 @@ P85_GENESIS_UNITS=${P85_GENESIS_UNITS:-1}          # bond units per genesis iden
 P85_H_RECORDS=${P85_H_RECORDS:-2}
 P85_HOOK_RECORD_GAS=${P85_HOOK_RECORD_GAS:-3000000}
 P85_CADENCE_ROUNDS=${P85_CADENCE_ROUNDS:-400}      # the election is due this many ordinary rounds after the last acknowledged rotation (the joiner is onboarded first)...
+P85_DIST_NUM=${P85_DIST_NUM:-1}; P85_DIST_DEN=${P85_DIST_DEN:-2}   # the election's weight-distance bound D <= 1/2: adding one unit-weight joiner to four unit-weight members is D = 2/5, over the default 1/4 (WeightChurn, a NoCandidate)
 P85_CADENCE_SECONDS=${P85_CADENCE_SECONDS:-300}    # ...and this many UC seconds
 P85_REGISTRY=0xff00000000000000000000000000000000000002
 P85_TREASURY=0x00000000000000000000000000000000000000ee
@@ -37,7 +38,7 @@ p85_prepare_genesis() {
   read -r -a caps <<<"$P85_CAPS"
   local word="0x$(printf 'unicity.p85.lane.network' | shasum -a 256 | cut -d' ' -f1)"
   ( cd "$P85_CONTRACTS" && P85_NETWORK_WORD=$word P85_CHAIN_ID=$chain P85_ROOTS=$P85_REGISTRY P85_TREASURY=$P85_TREASURY \
-      P85_V_MAX=${caps[0]} P85_L_MAX=${caps[1]} P85_N_MAX=${caps[2]} P85_CADENCE_ROUNDS=$P85_CADENCE_ROUNDS P85_CADENCE_SECONDS=$P85_CADENCE_SECONDS \
+      P85_V_MAX=${caps[0]} P85_L_MAX=${caps[1]} P85_N_MAX=${caps[2]} P85_CADENCE_ROUNDS=$P85_CADENCE_ROUNDS P85_CADENCE_SECONDS=$P85_CADENCE_SECONDS P85_DIST_NUM=$P85_DIST_NUM P85_DIST_DEN=$P85_DIST_DEN \
       script/p85-genesis.sh "$OLDPWD/$P85_DIR/contracts-genesis.json" "$OLDPWD/$P85_DIR/genesis" ) || return 1
   ( cd "$P85_CONTRACTS" && script/measure-elect.sh "${caps[0]}" "${caps[1]}" "${caps[2]}" ) >"$P85_DIR/elect-measurement.json" || p85_die "the election measurement failed" || return 1
   echo "p85: genesis prepared in $P85_DIR (assignment $(cat "$P85_DIR/genesis-assignment.txt"), measurement $(cat "$P85_DIR/elect-measurement.json"))"
