@@ -209,9 +209,11 @@ q4_run_lane() {
   q4_step "no root of the weighted epoch reports itself a follower (#515 membership gate)" q4_no_followers
   q4_precondition
   q4_step "baseline: weighted epoch commits (F8 trace and EVM IR)" q4_row_baseline
+  # the F8 callbacks run first among the faults: they need the aggregators to be warm (a UC feed fresh enough that the reference time of the block they build is
+  # still the root's), which the long fault rows that follow would not leave them
+  q4_step "F8 callbacks: EVM stop/resume with the root quorum intact, in-flight EVM proposal across root rotation" q4_row_f8_callbacks
   q4_step "one light root isolated (held both ways): 8 of 9 progresses, heal releases" q4_row_light_partition
   q4_step "heavy root delayed: quorum lost, explicit stall, release recovers" q4_row_heavy_delayed
-  q4_step "F8 callbacks: EVM stop/resume with the root quorum intact, in-flight EVM proposal across root rotation" q4_row_f8_callbacks
   q4_step "SIGKILL a light root and restart over the retained home" q4_row_light_sigkill
   q4_step "SIGKILL the heavy root: stall, restart recovers" q4_row_heavy_sigkill
   q4_step "two Byzantine lights (weight 2) equivocate: honest 7 progresses" q4_row_byzantine_lights
