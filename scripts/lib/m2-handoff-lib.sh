@@ -182,7 +182,7 @@ PY
 # The authority survives each shard restart. Advance one key at a time and wait for
 # a durable replica acknowledgement before moving to the next configured peer.
 # A validator is somebody's archive replica only if another validator names it (helper.sh archive_replicas_of). One nobody names has no peer that ever logs an
-# acknowledgement for it, so waiting for one cannot succeed. The wait never targets the restarted validator itself: it reads the other validators' logs.
+# acknowledgement for it, so waiting for one cannot succeed. The wait reads the other validators' operator status (the publishers that name the restarted one) and the restarted validator's own.
 m2_is_archive_replica() { # validator
   local k
   # Replication exists only where the devnet enabled the archive (EVM_ARCHIVE_ROOT: the H3 lane and the Q3 lane built on it, the M2a restore, the F7 mode). A lane
@@ -287,8 +287,9 @@ m2_wait_archive_replica_catchup() {
 
 # Advance the authorities (default 1..4) to the successor scope: root trust `trustFile` and shard configuration `$3` (default the genesis
 # full configuration: a root-only advance). `$4` lists the validators to advance. M2_ADVANCE_TOLERATE_STOPPED=1 lets a validator whose node
-# is already stopped be advanced and restarted (the H3 lane holds validators down on purpose); M2_ADVANCE_NO_REPLICA_WAIT=1 skips the
-# archive-replica catch-up wait after each restart (replicas that are down on purpose cannot acknowledge).
+# is already stopped be advanced and restarted (the H3 lane holds validators down on purpose). Unless M2_ADVANCE_NO_REPLICA_WAIT=1, once EVERY listed authority
+# has advanced it waits for each restarted archive replica to catch up through the certified head taken at its restart (m2_wait_archive_replica_catchup); a
+# lane that holds validators down on purpose skips it (replicas that are down cannot acknowledge).
 m2_advance_authorities() {
   local epoch=$1 trustFile=$2 conf=${3:-$fullShardConf} ids=${4:-1 2 3 4} i offline rootBoot onlineValidators bootnodes startLine
   local -a catchups=()
