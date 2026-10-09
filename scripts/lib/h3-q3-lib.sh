@@ -65,8 +65,7 @@ h3_q3_start_joiner() { # entity shardEpoch rootEpoch trustFile
   h3_spare_identity "$i" || return 1
   [ -f "test-nodes/reth$i/pid" ] && kill -0 "$(cat "test-nodes/reth$i/pid")" 2>/dev/null || h3_start_reth "$i" || return 1
   h3_spare_authority "$i" "$shardEpoch" "$rootEpoch" "$trust" || return 1
-  build/ubft signing-authority replace-session --operator-socket "test-nodes/auth$i/operator.sock" \
-    --operator-credential "test-nodes/auth$i/operator.cred" --out "test-nodes/auth$i/client.cred" || return 1
+  # no session yet: the authority issues none before the Commit enrolls it, and a staging-only node signs nothing (the restore after the Commit takes one)
   # the follower root: no install epoch (it is not a member of any installed epoch yet), the committee's roots as bootnodes
   m2_start_root "$i" "" "$(m2_root_addr "$(h3_first_root)")" || return 1
   bootnodes=$(evm_bootnodes_for_peers "$(m2_root_addr "$(h3_first_root)")" "$i" $H3_ONLINE) || return 1
