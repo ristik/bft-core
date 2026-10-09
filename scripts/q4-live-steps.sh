@@ -237,7 +237,7 @@ q4_byz_end() {
   done
   for r in "$@"; do q4_clear "$r" || return 1; done
   jq -n -c --arg tag "$tag" --arg from "$Q4_BYZ_FROM" --arg to "$(q4_now)" --arg roots "$*" '{tag: $tag, roots: ($roots | split(" ") | map(tonumber)), from: $from, to: $to}' >>"$Q4_DIR/byz-windows.jsonl" || return 1
-  Q4_BYZ_ROOTS=$(echo ${Q4_BYZ_ROOTS//,/ } "$@" | tr ' ' ',' | sed 's/^,//')
+  Q4_BYZ_ROOTS=$(echo $(echo ${Q4_BYZ_ROOTS:-} | tr ',' ' ') "$@" | tr ' ' ',' | sed 's/^,//')
 }
 
 q4_row_byzantine_lights() {  # IN BOUND (weight <= F=2): A two lights (1+1), B the weight-2 root; the honest weight 7 progresses
