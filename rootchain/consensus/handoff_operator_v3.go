@@ -363,6 +363,7 @@ func (x *ConsensusManager) StageV3Candidate(body []byte, candidate [32]byte, att
 	if !self {
 		return fmt.Errorf("%w: this node is not a member of the successor committee", ErrHandoffApproval)
 	}
+	var staged evmassign.Candidate // the verified coupled candidate (zero for a root-only change)
 	if len(preimage) == 0 {
 		operator, err := evmroot.D4OperatorCandidateDigest(b.Members)
 		if err != nil || operator != candidate {
@@ -374,10 +375,33 @@ func (x *ConsensusManager) StageV3Candidate(body []byte, candidate [32]byte, att
 			return err
 		}
 		msg := &abdrc.HandoffApprovalMsg{Body: body, Candidate: candidate[:], Attempt: attempt, CandidatePreimage: preimage}
-		if _, err := x.verifyApprovalAssignment(msg, pb, predecessor, old); err != nil {
+		verified, err := x.verifyApprovalAssignment(msg, pb, predecessor, old)
+		if err != nil {
 			return err
 		}
+		staged = verified
 	}
+	x.storeStagedEVM(b.Epoch, staged, b.Members)
 	x.q3Staged.Store(&Q3Staged{CandidateDigest: candidate, BodyID: b.Identity(), Attempt: attempt, Config: b.Config.Identity()})
 	return nil
+}
+
+// stagedEVMMembers are the EVM validators the staged candidate's successor assignment names, for the body epoch they would be installed at.
+type stagedEVMMembers struct {
+	epoch uint64
+	ids   map[string]struct{}
+	roots map[string]struct{} // the successor committee's roots
+}
+
+// storeStagedEVM replaces the staged members with those of the candidate just staged and VERIFIED by the caller: the EVM validators of its
+// coupled assignment (none for a root-only change) and the roots of the successor committee.
+func (x *ConsensusManager) storeStagedEVM(epoch uint64, c evmassign.Candidate, roots evmroot.WeightSet) {
+	members := &stagedEVMMembers{epoch: epoch, ids: map[string]struct{}{}, roots: map[string]struct{}{}}
+	for _, id := range c.Identities {
+		members.ids[id.EVMNodeID] = struct{}{}
+	}
+	for _, m := range roots {
+		members.roots[m.NodeID] = struct{}{}
+	}
+	x.q3StagedEVM.Store(members)
 }
