@@ -331,6 +331,9 @@ func NewConsensusManager(
 		})}
 	if optional.Q3 != nil {
 		safetyOptions = append(safetyOptions, WithActivationGate(optional.Q3))
+		// a Q3 deployment's committee is the authenticated trust base of the epoch: a node it does not name (a joiner before its activation, a
+		// validator after its removal) is a follower and signs nothing
+		safetyOptions = append(safetyOptions, WithMembership(committeeMembership{store: trustBaseStore, id: nodeID.String()}))
 	}
 	safetyModule, err := NewSafetyModule(trustBase.GetNetworkID(), nodeID.String(), signer, store, safetyOptions...)
 	if err != nil {
@@ -2008,4 +2011,24 @@ func (x *ConsensusManager) witnessPeers(block *drctypes.BlockData) []peer.ID {
 		}
 	}
 	return append(author, rest...)
+}
+
+// committeeMembership is the module's membership gate over the authenticated trust base store: this node is a member of an epoch exactly
+// when the epoch's trust base names it as a root node. An epoch the store does not hold fails closed.
+type committeeMembership struct {
+	store *trustbase.TrustBaseStore
+	id    string
+}
+
+func (c committeeMembership) Member(epoch uint64) error {
+	tb, err := c.store.GetByEpoch(epoch)
+	if err != nil {
+		return fmt.Errorf("%w: epoch %d: %w", ErrNotAMember, epoch, err)
+	}
+	for _, n := range tb.RootNodes {
+		if n.NodeID == c.id {
+			return nil
+		}
+	}
+	return fmt.Errorf("%w: epoch %d", ErrNotAMember, epoch)
 }
