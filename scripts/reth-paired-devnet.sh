@@ -743,7 +743,7 @@ cp "$fullShardConf" "test-nodes/shard-conf-${partitionID}_0.json"
 if [ "${F8_MIXED_LANE:-0}" = 1 ]; then f8_prepare; fi
 # Both the standalone H4 probe and the M2a final lane need persistent archive
 # publication before they stop validator 1; M2a restores it after Handoff 2.
-if [ "${H3_ASSIGNMENT_LANE:-0}" = 1 ]; then
+if [ "${H3_ASSIGNMENT_LANE:-0}" = 1 ] || [ "${P85_LANE:-0}" = 1 ]; then   # the P85 joiner restores from a retained validator's archive (as the H3 joiner)
   export EVM_ARCHIVE_ROOT=test-nodes/h3-archives
   mkdir -p "$EVM_ARCHIVE_ROOT"
 elif [ "${H4_RESTORE_PROBE:-0}" = 1 ] || [ "${M2A_FINAL_RESTORE:-0}" = 1 ]; then
