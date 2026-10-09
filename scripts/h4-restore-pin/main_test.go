@@ -3,15 +3,21 @@ package main
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
+	"io/fs"
+	"math/big"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	gethtypes "github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/rlp"
 	"github.com/unicitynetwork/bft-core/evmroot"
 	"github.com/unicitynetwork/bft-core/handoffdelivery"
 	"github.com/unicitynetwork/bft-go-base/types"
+	"github.com/unicitynetwork/bft-go-base/util"
 )
 
 func TestArchiveRecordDirectorySupportsV1AndV2(t *testing.T) {
@@ -91,5 +97,83 @@ func TestNamedBodyIDIsTakenOnlyForItsEpochAndOnlyWhenWellFormed(t *testing.T) {
 	}
 	if _, ok := namedBodyID("2=0x"+id, 2); !ok {
 		t.Fatal("a 0x prefix is accepted")
+	}
+}
+
+// pinFixture is an archive with one certified record at root epoch `rootEpoch` and a genesis (epoch 1) trust base; it returns the paths.
+func pinFixture(t *testing.T, rootEpoch uint64) (archive, trustBase, prefix string) {
+	t.Helper()
+	root := t.TempDir()
+	archive = filepath.Join(root, "archive")
+	record := filepath.Join(archive, strings.Repeat("ab", 32))
+	if err := os.MkdirAll(record, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	uc := types.UnicityCertificate{
+		InputRecord: &types.InputRecord{RoundNumber: 5, BlockHash: make([]byte, 32)},
+		UnicitySeal: &types.UnicitySeal{Epoch: rootEpoch, RootChainRoundNumber: 9},
+	}
+	ucRaw, err := types.Cbor.Marshal(uc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	headerRaw, err := rlp.EncodeToBytes(&gethtypes.Header{Number: big.NewInt(4)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, raw := range map[string][]byte{"resulting-uc": ucRaw, "resulting-tr": {1}, "header": headerRaw} {
+		if err := os.WriteFile(filepath.Join(record, hex.EncodeToString([]byte(name))+".chunk"), raw, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	trustBase = filepath.Join(root, "trust-base.json")
+	if err := util.WriteJsonFile(trustBase, &types.RootTrustBaseV1{Epoch: 1}); err != nil {
+		t.Fatal(err)
+	}
+	return archive, trustBase, filepath.Join(root, "pin")
+}
+
+// Missing input is a named error, not a panic: each refusal is its own sentinel, so a caller can tell them apart.
+func TestRunRefusesMissingInputWithNamedErrors(t *testing.T) {
+	noEnv := func(string) string { return "" }
+	var out strings.Builder
+
+	if err := run([]string{"only-one"}, noEnv, &out); !errors.Is(err, errUsage) {
+		t.Fatalf("wrong argument count: %v", err)
+	}
+	if err := run([]string{filepath.Join(t.TempDir(), "absent"), "tb.json", "pin"}, noEnv, &out); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("absent archive: %v", err)
+	}
+	empty := t.TempDir()
+	if err := run([]string{empty, "tb.json", filepath.Join(empty, "pin")}, noEnv, &out); !errors.Is(err, errNoCertifiedPin) {
+		t.Fatalf("archive with no certified record: %v", err)
+	}
+
+	// the case that panicked: the newest record is at root epoch 2, a Q3 activation the archive holds no bundle for
+	archive, trustBase, prefix := pinFixture(t, 2)
+	err := run([]string{archive, trustBase, prefix}, noEnv, &out)
+	if !errors.Is(err, errNoTrustBodyID) {
+		t.Fatalf("missing body identity: %v", err)
+	}
+	if !strings.Contains(err.Error(), "epoch 2") {
+		t.Fatalf("the refusal does not name the epoch: %v", err)
+	}
+	if _, statErr := os.Stat(prefix + ".uc.cbor"); statErr == nil {
+		t.Fatal("a refused run wrote a pin")
+	}
+	// naming another epoch's identity does not help; naming this epoch's does, and the pin is written
+	other := func(string) string { return "3=" + strings.Repeat("ab", 32) }
+	if err := run([]string{archive, trustBase, prefix}, other, &out); !errors.Is(err, errNoTrustBodyID) {
+		t.Fatalf("an identity named for another epoch: %v", err)
+	}
+	named := func(string) string { return "2=" + strings.Repeat("ab", 32) }
+	if err := run([]string{archive, trustBase, prefix}, named, &out); err != nil {
+		t.Fatalf("named identity: %v", err)
+	}
+	if !strings.Contains(out.String(), "bodyID=0x"+strings.Repeat("ab", 32)) {
+		t.Fatalf("pin line: %q", out.String())
+	}
+	if _, statErr := os.Stat(prefix + ".uc.cbor"); statErr != nil {
+		t.Fatalf("the pin was not written: %v", statErr)
 	}
 }
