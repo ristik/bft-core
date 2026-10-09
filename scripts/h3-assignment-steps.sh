@@ -153,7 +153,7 @@ PY
   if Q3_ASSIGNMENT_BUILT=1 q3_attempt >"$H3_DIR/bad-propose.out" 2>&1; then echo "root accepted a proposal with a corrupted PoP" >&2; unset Q3_NEXT_EPOCH Q3_ASSIGN_TAG Q3_SUFFIX Q3_ENTITIES Q3_INCUMBENT; return 1; fi
   unset Q3_NEXT_EPOCH Q3_ASSIGN_TAG Q3_SUFFIX Q3_ENTITIES Q3_INCUMBENT
   cat "$H3_DIR/bad-propose.out"
-  grep -Eq "EVM proof is refused|possession proofs differ" "$H3_DIR/bad-propose.out" || { echo "the refusal does not name the proofs of possession" >&2; return 1; }
+  grep -Eq "invalid proof of possession|possession proofs differ" "$H3_DIR/bad-propose.out" || { echo "the refusal does not name the proofs of possession" >&2; return 1; }
   # refused at plan time, before any intent, Prepare or endorsement: nothing was ordered and the epoch did not move
   ! tail -n +"$((start+1))" "test-nodes/root$(h3_first_root)/debug.log" | grep -Eqi 'handoff (prepare|freeze|endorse)' || return 1
   [ "$(h3_root_info | jq -r '.epochNumber')" = 2 ]
