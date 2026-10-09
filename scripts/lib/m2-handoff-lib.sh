@@ -238,16 +238,18 @@ m2_replica_brief() {
 }
 
 # m2_replica_acked <publisher> <replica peer id> <height>: succeeds when the publisher's operator status shows that replica durably acknowledged a block at or above
-# <height> and reports no transfer error for it. The status heights come from the durable frontier acknowledgements (archivewiring.OperatorStatus.Replicas).
+# <height> (archivewiring.OperatorStatus.Replicas: the heights come from the durable frontier acknowledgements). The replica's "error" field is NOT gated on: it is the
+# publisher's latest process-local transfer diagnostic, not state, and it stays non-empty (archive stream resets, verifier refusals) in a busy lane while the acknowledged
+# height keeps advancing (Q3 run 59: heights 74-75 against a head of 14, with a refusal text on most replicas). It is printed by m2_replica_brief while the wait is pending.
 m2_replica_acked() {
   curl -fsS -m 8 "http://$(evm_validator_rpc_addr "$1")/api/v1/operator/status" 2>/dev/null |
-    jq -e --arg r "$2" --argjson h "$3" '[.replicas[] | select(.replica == $r)] | (length > 0) and all(.lastAcknowledgedHeight >= $h and ((.error // "") == ""))' >/dev/null 2>&1
+    jq -e --arg r "$2" --argjson h "$3" '[.replicas[] | select(.replica == $r)] | (length > 0) and all(.lastAcknowledgedHeight >= $h)' >/dev/null 2>&1
 }
 
 # m2_wait_archive_replica_catchup <validator> <unused> [head]: waits until the restarted validator is caught up as an archive replica through a certified head. The head
 # is the newest certified block when the validator was restarted (computed now if omitted). Caught up means two things, both read from the nodes' durable operator
 # status (not from a log line, which is emitted only when a publisher had to retry records a replica was behind on, so a replica that never fell behind never logs it):
-#   peer: every online validator that names this one as a replica reports that replica's last acknowledged height at or above the head's height, with no error;
+#   peer: every online validator that names this one as a replica reports that replica's last acknowledged height at or above the head's height;
 #   node: this validator's own two replicas have acknowledged that height too, i.e. it resumed replicating.
 # The second argument is kept for callers that still pass the log position of the restart.
 m2_wait_archive_replica_catchup() {
