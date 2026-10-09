@@ -67,6 +67,9 @@ const (
 	opAdvanceEpoch       op = 105
 	// opSignHandoffPoP asks for the handoff possession proof the authority's own key owes a coupled handoff. Operator channel only.
 	opSignHandoffPoP op = 106
+	// opSignElectionPoP and opSignDelegationPossession ask for the two EVM possession signatures of the P85 contracts. Operator channel only.
+	opSignElectionPoP          op = 107
+	opSignDelegationPossession op = 108
 )
 
 func (o op) servedToClient() bool {
@@ -79,7 +82,7 @@ func (o op) servedToClient() bool {
 
 func (o op) servedToOperator() bool {
 	switch o {
-	case opReplaceSession, opStatus, opEnrollment, opCompleteEnrollment, opAdvanceEpoch, opSignHandoffPoP:
+	case opReplaceSession, opStatus, opEnrollment, opCompleteEnrollment, opAdvanceEpoch, opSignHandoffPoP, opSignElectionPoP, opSignDelegationPossession:
 		return true
 	}
 	return false
@@ -109,6 +112,10 @@ func (o op) String() string {
 		return "advance-epoch"
 	case opSignHandoffPoP:
 		return "sign-handoff-pop"
+	case opSignElectionPoP:
+		return "sign-election-pop"
+	case opSignDelegationPossession:
+		return "sign-delegation-possession"
 	}
 	return fmt.Sprintf("unknown(%d)", uint64(o))
 }
@@ -214,6 +221,36 @@ type handoffPoPPayload struct {
 	NodeID      string
 	// Identities is the digest of the successor's frozen identity records (operator payees included) the proof signs.
 	Identities []byte
+}
+
+// electionPoPPayload is the structured request of opSignElectionPoP: the primary candidate (canonical encoding), the election deployment
+// and the attempt. The digest is recomputed by the authority.
+type electionPoPPayload struct {
+	_           struct{} `cbor:",toarray"`
+	Candidate   []byte
+	NetworkWord []byte
+	ChainID     []byte
+	Custody     []byte
+	Election    []byte
+	Attempt     uint64
+}
+
+// delegationPayload is the structured request of opSignDelegationPossession: the admitDelegation payload and the election it is for.
+type delegationPayload struct {
+	_               struct{} `cbor:",toarray"`
+	Network         []byte
+	Chain           []byte
+	Election        []byte
+	Id              uint64
+	Generation      uint64
+	RootNodeID      []byte
+	RootKey         []byte
+	EvmNodeID       []byte
+	EvmKey          []byte
+	OperatorPayee   []byte
+	RoleNonce       uint64
+	DelegationNonce uint64
+	Expiry          uint64
 }
 
 type advanceEpochPayload struct {

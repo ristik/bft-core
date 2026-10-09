@@ -67,12 +67,22 @@ func TestAPlanWithReceiptsIsAV3PlanAndOnlyALaneRootAcceptsIt(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &plan))
 	require.Equal(t, []byte("receipts"), plan.Receipts, "the plan carries the receipts to the intent and endorse endpoints")
 
+	// a V3 plan without receipts is asked for explicitly (the exact recovery K carries none); the V2 planner is still not asked
+	rec = postJSON(h, "127.0.0.1:1", rootHandoffPlanRequest{NextTrustBase: &types.RootTrustBaseV1{}, Q3: true})
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Equal(t, 2, stub.v3Plans, "q3 without receipts: the V3 plan")
+	require.Empty(t, stub.v3Receipt)
+	require.Equal(t, 1, stub.planCalls)
+
 	// a root that is not running the lane has no V3 planner
 	plain := &handoffOperatorStub{}
 	rec = postJSON(rootHandoffPlanHandler(plain), "127.0.0.1:1", rootHandoffPlanRequest{NextTrustBase: &types.RootTrustBaseV1{}, Q3Receipts: []byte("receipts")})
 	require.Equal(t, http.StatusUnprocessableEntity, rec.Code)
 	require.Contains(t, rec.Body.String(), "not running the Q3 lane")
 	require.Zero(t, plain.planCalls, "a V3 request is never downgraded to a V2 plan")
+	rec = postJSON(rootHandoffPlanHandler(plain), "127.0.0.1:1", rootHandoffPlanRequest{NextTrustBase: &types.RootTrustBaseV1{}, Q3: true})
+	require.Equal(t, http.StatusUnprocessableEntity, rec.Code)
+	require.Zero(t, plain.planCalls, "nor is a receipt-less one")
 
 	rec = postJSON(h, "10.0.0.5:1", rootHandoffPlanRequest{NextTrustBase: &types.RootTrustBaseV1{}, Q3Receipts: []byte("receipts")})
 	require.Equal(t, http.StatusForbidden, rec.Code, "the operator endpoint is local only")
