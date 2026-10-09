@@ -124,6 +124,43 @@ func (o *OperatorClient) SignHandoffPoP(ctx context.Context, req signingauthorit
 	return pop, nil
 }
 
+// SignElectionPoP asks the authority for the EVM possession proof its own key owes a primary candidate (see signingauthority.SignElectionPoP).
+func (o *OperatorClient) SignElectionPoP(ctx context.Context, req signingauthority.ElectionPoPRequest) (evmassign.EVMPoP, error) {
+	cand, err := req.Candidate.Encode()
+	if err != nil {
+		return evmassign.EVMPoP{}, err
+	}
+	d := req.Deployment
+	payload, err := types.Cbor.Marshal(electionPoPPayload{Candidate: cand, NetworkWord: d.NetworkWord[:], ChainID: d.ChainID[:], Custody: d.Custody[:],
+		Election: d.Election[:], Attempt: req.Attempt})
+	if err != nil {
+		return evmassign.EVMPoP{}, err
+	}
+	answer, err := o.ex.call(ctx, opSignElectionPoP, payload)
+	if err != nil {
+		return evmassign.EVMPoP{}, err
+	}
+	var pop evmassign.EVMPoP
+	if err := types.Cbor.Unmarshal(answer, &pop); err != nil {
+		return evmassign.EVMPoP{}, fmt.Errorf("decoding the election possession proof: %w", err)
+	}
+	return pop, nil
+}
+
+// SignDelegationPossession asks the authority for the signature its own key owes an admitDelegation payload (see
+// signingauthority.SignDelegationPossession).
+func (o *OperatorClient) SignDelegationPossession(ctx context.Context, req signingauthority.DelegationPossessionRequest) ([]byte, error) {
+	r := req.Request
+	b := r.Binding
+	payload, err := types.Cbor.Marshal(delegationPayload{Network: req.Network[:], Chain: req.Chain[:], Election: req.Election[:], Id: r.Id,
+		Generation: r.Generation, RootNodeID: b.RootNodeID[:], RootKey: b.RootKey, EvmNodeID: b.EvmNodeID[:], EvmKey: b.EvmKey,
+		OperatorPayee: b.OperatorPayee[:], RoleNonce: r.RoleNonce, DelegationNonce: r.DelegationNonce, Expiry: r.Expiry})
+	if err != nil {
+		return nil, err
+	}
+	return o.ex.call(ctx, opSignDelegationPossession, payload)
+}
+
 // Status reports what the authority is holding.
 func (o *OperatorClient) Status(ctx context.Context) (signingauthority.Status, error) {
 	answer, err := o.ex.call(ctx, opStatus, nil)

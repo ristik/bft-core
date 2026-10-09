@@ -440,6 +440,58 @@ func (s *Server) operatorOp(ctx context.Context, operation op, payload []byte) (
 			slog.String("node", wire.NodeID), slog.Uint64("successorEpoch", succ.Epoch), slog.Uint64("attempt", wire.Attempt),
 			slog.String("predecessor", fmt.Sprintf("%x", wire.Predecessor)), slog.String("identities", fmt.Sprintf("%x", wire.Identities)))
 		return types.Cbor.Marshal(pop)
+	case opSignElectionPoP:
+		var wire electionPoPPayload
+		if err := types.Cbor.Unmarshal(payload, &wire); err != nil {
+			return nil, fmt.Errorf("%w: election possession proof request: %v", errMalformed, err)
+		}
+		if len(wire.NetworkWord) != 32 || len(wire.ChainID) != 32 || len(wire.Custody) != 20 || len(wire.Election) != 20 {
+			return nil, fmt.Errorf("%w: the deployment names a 32-byte network word and chain id and 20-byte addresses", errMalformed)
+		}
+		cand, err := evmassign.DecodeCandidate(wire.Candidate)
+		if err != nil {
+			return nil, fmt.Errorf("%w: candidate: %v", errMalformed, err)
+		}
+		request := signingauthority.ElectionPoPRequest{Candidate: cand, Attempt: wire.Attempt}
+		copy(request.Deployment.NetworkWord[:], wire.NetworkWord)
+		copy(request.Deployment.ChainID[:], wire.ChainID)
+		copy(request.Deployment.Custody[:], wire.Custody)
+		copy(request.Deployment.Election[:], wire.Election)
+		pop, err := s.authority.SignElectionPoP(request)
+		if err != nil {
+			s.log.Warn("refusing an election possession proof", slog.String("err", err.Error()))
+			return nil, err
+		}
+		s.log.Info("signed an election possession proof", slog.Uint64("id", pop.ID), slog.Uint64("attempt", wire.Attempt),
+			slog.String("election", fmt.Sprintf("%x", wire.Election)))
+		return types.Cbor.Marshal(pop)
+	case opSignDelegationPossession:
+		var wire delegationPayload
+		if err := types.Cbor.Unmarshal(payload, &wire); err != nil {
+			return nil, fmt.Errorf("%w: delegation possession request: %v", errMalformed, err)
+		}
+		if len(wire.Network) != 32 || len(wire.Chain) != 32 || len(wire.Election) != 20 || len(wire.RootNodeID) != 32 ||
+			len(wire.EvmNodeID) != 32 || len(wire.OperatorPayee) != 20 {
+			return nil, fmt.Errorf("%w: malformed delegation request", errMalformed)
+		}
+		var request signingauthority.DelegationPossessionRequest
+		copy(request.Network[:], wire.Network)
+		copy(request.Chain[:], wire.Chain)
+		copy(request.Election[:], wire.Election)
+		r := &request.Request
+		r.Id, r.Generation, r.RoleNonce, r.DelegationNonce, r.Expiry = wire.Id, wire.Generation, wire.RoleNonce, wire.DelegationNonce, wire.Expiry
+		copy(r.Binding.RootNodeID[:], wire.RootNodeID)
+		copy(r.Binding.EvmNodeID[:], wire.EvmNodeID)
+		copy(r.Binding.OperatorPayee[:], wire.OperatorPayee)
+		r.Binding.RootKey, r.Binding.EvmKey = wire.RootKey, wire.EvmKey
+		sig, err := s.authority.SignDelegationPossession(request)
+		if err != nil {
+			s.log.Warn("refusing a delegation possession signature", slog.String("err", err.Error()))
+			return nil, err
+		}
+		s.log.Info("signed a delegation possession", slog.Uint64("id", wire.Id), slog.Uint64("generation", wire.Generation),
+			slog.Uint64("delegationNonce", wire.DelegationNonce), slog.String("election", fmt.Sprintf("%x", wire.Election)))
+		return sig, nil
 	case opCompleteEnrollment:
 		var conf types.PartitionDescriptionRecord
 		if err := types.Cbor.Unmarshal(payload, &conf); err != nil {
