@@ -609,20 +609,25 @@ q4_first_successor_held() {
     sleep 1
   done
   [ "$hits" -gt 0 ] || { echo "no root attempted an epoch-3 proposal within 120 s" >&2; return 1; }
+  # A root that installed epoch 3 holds the new epoch's anchor as its committed head (roundInfo reports epoch 3 from the restart on) and answers the
+  # signers query with an error until a quorum certificate of epoch 3 exists. While every successor proposal is held, no root may report an epoch-3
+  # certificate and no root's committed round may move.
+  local e rounds0 rounds1
+  rounds0=$(for r in $H3_ROOTS; do q4_round "$r"; done | tr '\n' ' ')
   sleep 10
-  # a root that installed epoch 3 and holds no epoch-3 certificate yet answers the signers query with an error (no committed quorum certificate of
-  # its epoch): only a certificate that names epoch 3 is a failure here; the committed head stays in epoch 2
-  local e
+  rounds1=$(for r in $H3_ROOTS; do q4_round "$r"; done | tr '\n' ' ')
+  [ "$rounds0" = "$rounds1" ] || { echo "committed rounds moved ($rounds0-> $rounds1) while every successor proposal was held" >&2; return 1; }
   for r in $H3_ROOTS; do
     e=$(q3_signers_of "$r" 2>/dev/null | jq -r .epoch 2>/dev/null)
     [ "$e" != 3 ] || { echo "root $r reached an epoch-3 certificate while every successor proposal was held" >&2; return 1; }
-    e=$(curl -fsS "http://127.0.0.1:$(m2_rpc_port "$r")/api/v1/roundInfo" | jq -r .epochNumber) || return 1
-    [ "$e" = 2 ] || { echo "root $r committed head is at epoch $e while every successor proposal was held" >&2; return 1; }
   done
+  echo "while held: committed rounds constant at $rounds1for 10 s, no epoch-3 certificate at any root"
   python3 - "$Q4_SHIM_DIR" $H3_ROOTS <<'PY' | tee "$Q4_DIR/first-successor-proposal.txt" || return 1
 import json, os, sys
 first = None
 for r in sys.argv[2:]:
+    # a proposal's copy to its own author is never subject to a rule (the shim leaves self-sends alone): only the sends to other roots count
+    me = json.load(open(os.path.join(sys.argv[1], f"root{r}", "status.json"))).get("self")
     evs = []
     for line in open(os.path.join(sys.argv[1], f"root{r}", "trace.jsonl")):
         try:
@@ -630,7 +635,7 @@ for r in sys.argv[2:]:
         except ValueError:
             pass
     for i, ev in enumerate(evs):
-        if ev.get("kind") == "attempt" and ev.get("class") == "proposal" and ev.get("epoch") == 3:
+        if ev.get("kind") == "attempt" and ev.get("class") == "proposal" and ev.get("epoch") == 3 and ev.get("to") != me:
             nxt = next((e for e in evs[i + 1:] if e.get("sendId") == ev["sendId"] and e.get("to") == ev["to"]), None)
             if first is None or ev["time"] < first[0]:
                 first = (ev["time"], r, ev["round"], nxt and nxt.get("kind"), nxt and nxt.get("rule"))
