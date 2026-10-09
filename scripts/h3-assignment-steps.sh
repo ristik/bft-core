@@ -5,13 +5,19 @@
 # configuration, retained validators' authorities advance (`advance-epoch`) at each activation, and a restored validator restores
 # through its surviving authority (a local-key restore is refused by design).
 # Design: briefs/h3-evm-assignment-design.md section 8 as amended: validator-set changes are always coupled (root entity and its
-# delegated EVM validator). Root epochs: 1 genesis, 2 configuration-only advance, 3 coupled s=1, 4 coupled s=2, 5 coupled s=3. EVM validators: evm1-4 genesis; evm5-7 spare identities that appear only in successor sets.
+# delegated EVM validator). Every epoch change goes through the Q3 flow (candidate, readiness receipts of every successor member, plan, install
+# restart); a joiner (evm5, evm6 and their roots) is started and gives its readiness BEFORE the Commit (briefs/joiner-readiness-review.md).
+# Root epochs: 1 genesis, 2 configuration-only advance, 3 coupled s=1 (4->5), 4 coupled s=2 (3->6, J={1,2,5,6}), 5 the derived recovery to K = the s=1 set
+# {1,2,3,5} (root 6->3), which supersedes s=2. EVM validators: evm1-4 genesis; evm5, evm6 spare identities that appear only in successor sets.
 source scripts/lib/m2-handoff-lib.sh
 source scripts/lib/h3-lib.sh
+source scripts/lib/q3-lib.sh
+source scripts/lib/q3-flow-lib.sh
+source scripts/lib/h3-q3-lib.sh
 H3_DIR=test-nodes/h3
 mkdir -p "$H3_DIR"
 cp test-nodes/trust-base.json test-nodes/trust-base-epoch1.json
-read -r h3_slot_shard h3_slot_root h3_slot_conf h3_slot_cursor < <(go run ./scripts/h3slots)
+read -r h3_slot_shard h3_slot_root h3_slot_conf h3_slot_cursor < <(H3_SLOT_LAYOUT=$([ "${Q3_B1:-0}" = 1 ] && echo 3 || echo 2) go run ./scripts/h3slots)
 H3_REGISTRY=0xff00000000000000000000000000000000000002
 H3_ONLINE="1 2 3 4"
 H3_ROOTS="1 2 3 4"
@@ -100,10 +106,9 @@ h3_step "baseline: EVM certifies and all three aggregator shards progress" h3_pr
 h3_step "genesis registry is the fresh-B1 registry, shard epoch 0, root epoch 1" h3_registry_is 0 1
 
 # 1. Baseline: a configuration-only epoch advance (same committee, no EVM change): root epoch 2, shard epoch stays 0.
-h3_config_attempt() { build/ubft root handoff propose --next-trust-base test-nodes/trust-base-epoch2.json --root-rpc "$(h3_root_rpcs)"; }
 h3_config_only() {
-  h3_same_members_trust_base 2 || return 1
-  h3_retry_handoff 1 h3_config_attempt || return 1
+  h3_q3_init || return 1
+  h3_q3_config_handoff 2 || return 1
   h3_restart_roots 2 || { echo "root restart into epoch 2 failed" >&2; return 1; }
   echo "roots restarted into epoch 2" >&2
   # the F8 lane keeps certifying empty EVM blocks, so the "latest head" the replica wait targets moves faster than the peers acknowledge it
@@ -121,13 +126,20 @@ h3_has_coupling_param() { jq -e '.partitionParams.validator_coupling == "true"' 
 h3_step "the genesis EVM configuration requires coupled validator-set changes (validator_coupling=true)" h3_has_coupling_param
 
 # 2. An EVM proposal with a bad PoP is refused before freeze.
-build/ubft shard-node init --home test-nodes/evm5 -g >/dev/null 2>&1 || true
-h3_spare_identity 5; h3_spare_identity 6; h3_spare_identity 7
+h3_spare_identity 5; h3_spare_identity 6
+# The joiner evm5 and its root 5 start now, before any Commit: its root follows the committee and signs nothing, its shard node is staging-only, and
+# its paired execution client is pinned. Its readiness receipt is one of the four the s=1 plan needs.
+h3_join_s1() {
+  build/ubft root-node init --home test-nodes/root5 -g >/dev/null 2>&1 || true
+  generate_log_configuration "test-nodes/root5/"
+  h3_q3_trust_base 3 "1 2 3 5" || return 1
+  h3_q3_start_joiner 5 1 3 test-nodes/trust-base-epoch3.json
+}
+h3_step "joiner evm5 and root 5 start before the Commit: root follower, shard node staging-only, execution client paired" h3_join_s1
 h3_bad_pop() {
-  local start outcomeBefore
-  h3_prepare_coupled 3 4 5 || return 1
-  h3_spare_authority 5 1 3 trust-base-epoch3.json || return 1
-  H3_NEXT_EPOCH=3 H3_BIND_ROOTS="1 2 3 5" h3_build_assignment bad 1 2 3 5 || return 1
+  local start
+  Q3_NEXT_EPOCH=3 Q3_ASSIGN_TAG=bad Q3_SUFFIX=-bad Q3_ENTITIES="1 2 3 5" Q3_INCUMBENT=$H3_INCUMBENT
+  q3_build_assignment bad 1 2 3 5 || return 1
   python3 - "$H3_DIR/bad-assignment.json" <<'PY'
 import json,sys
 p=sys.argv[1]; d=json.load(open(p))
@@ -137,8 +149,11 @@ d['pops'][-1]['signature']='0x'+sig.hex()
 json.dump(d,open(p,'w'))
 PY
   start=$(wc -l <"test-nodes/root$(h3_first_root)/debug.log")
-  if h3_propose bad 3 >"$H3_DIR/bad-propose.out" 2>&1; then echo "root accepted a proposal with a corrupted PoP" >&2; return 1; fi
+  # the candidate and every successor member's readiness are as for a good proposal; the root refuses the PLAN on the proofs of possession
+  if Q3_ASSIGNMENT_BUILT=1 q3_attempt >"$H3_DIR/bad-propose.out" 2>&1; then echo "root accepted a proposal with a corrupted PoP" >&2; unset Q3_NEXT_EPOCH Q3_ASSIGN_TAG Q3_SUFFIX Q3_ENTITIES Q3_INCUMBENT; return 1; fi
+  unset Q3_NEXT_EPOCH Q3_ASSIGN_TAG Q3_SUFFIX Q3_ENTITIES Q3_INCUMBENT
   cat "$H3_DIR/bad-propose.out"
+  grep -Eq "EVM proof is refused|possession proofs differ" "$H3_DIR/bad-propose.out" || { echo "the refusal does not name the proofs of possession" >&2; return 1; }
   # refused at plan time, before any intent, Prepare or endorsement: nothing was ordered and the epoch did not move
   ! tail -n +"$((start+1))" "test-nodes/root$(h3_first_root)/debug.log" | grep -Eqi 'handoff (prepare|freeze|endorse)' || return 1
   [ "$(h3_root_info | jq -r '.epochNumber')" = 2 ]
@@ -147,22 +162,17 @@ h3_step "EVM proposal with a bad proof of possession is refused before any Prepa
 
 # 3. Coupled rotation s=1 during an in-flight old proposal: root 4 -> 5 together with evm4 -> evm5. The retained evm3 is stopped
 #    and evm5 is not yet running, so the successor quorum cannot acknowledge until the root quorum restart is over.
-h3_s1_attempt() {
-  H3_NEXT_EPOCH=3 H3_BIND_ROOTS="1 2 3 5" h3_build_assignment s1 1 2 3 5 || return 1
-  h3_propose s1 3
-}
 h3_evm_s1() {
   local i tx
-  h3_start_reth 5 || return 1
-  h3_prepare_coupled 3 4 5 || return 1
   # keep an old-epoch proposal in flight: submit a paid tx to every validator, then propose before it certifies
   for i in 1 2 3 4; do
     tx=$(go run ./scripts/evmtx -send -eth-url "http://127.0.0.1:$((rethEthBase+i-1))" -chain-id 31337 -nonce "$M2_NEXT_NONCE" 2>&1) || { echo "in-flight tx to validator $i failed (nonce $M2_NEXT_NONCE): $tx" >&2; return 1; }
   done
   M2_NEXT_NONCE=$((M2_NEXT_NONCE + 1))
-  h3_retry_handoff 2 h3_s1_attempt || return 1
+  h3_q3_handoff s1 3 "1 2 3 5" || return 1   # the Q3 flow: candidate, the four successor members' readiness (evm5's among them), plan, Commit
   stop_one_evm_validator 3 || return 1       # hold the acknowledgement: only evm1 and evm2 remain of {1,2,3,5}
   stop_one_evm_validator 4 || return 1       # evm4 is retired; its old process is stopped here
+  stop_one_evm_validator 5 || return 1       # the staging-only joiner has given its readiness; its EVM state comes from the post-install restore
   echo "H committed at old epoch 2; successor quorum is held below threshold"
 }
 h3_step "coupled rotation s=1 (root 4->5, evm4->evm5) committed with an old proposal in flight; ack held" h3_evm_s1
@@ -170,7 +180,7 @@ h3_step "coupled rotation s=1 (root 4->5, evm4->evm5) committed with an old prop
 h3_root_quorum_restart() {
   local row0 row1
   row0=$(h3_evm_row | jq -c '{round: .roundNumber, tr: .trRound}')
-  h3_activate_coupled 3 4 5 || return 1       # the root quorum restarts (new root 5 first), the replaced root 4 stops
+  h3_q3_activate_coupled 3 4 5 || return 1    # the root quorum restarts into the install epoch (follower root 5 first), the replaced root 4 stops
   H3_EVM_STALLED=1 h3_progress "after root quorum restart (ack still held)" 10 "${H3_POST_RESTART_WINDOW:-}" || return 1
   h3_registry_is 0 2 || return 1             # the successor set has not acknowledged: registry is still at the old shard epoch
   row1=$(h3_evm_row | jq -c '{round: .roundNumber, tr: .trRound}')
@@ -271,19 +281,24 @@ h3_restore_s1() {
 }
 h3_step "H4 restore at s=1: validator 1 restores, verifies epoch 3 and resumes signing" h3_restore_s1
 
-# 6. s=2 with a PoP-valid set whose successors are unavailable after H (evm6, evm7 never start).
-h3_s2_attempt() {
-  H3_NEXT_EPOCH=4 H3_BIND_ROOTS="1 2 5 6" h3_build_assignment s2 1 2 6 7 || return 1
-  h3_propose s2 4
+# 6. s=2 = J = {1,2,5,6}: root 3 -> 6 with evm3 -> evm6 (the joiner), evm5 carried over from s=1. The joiner starts and gives its readiness BEFORE the Commit like
+#    every successor member; AFTER the Commit enough of J's carried-over EVM weight is stopped to leave J below its quorum (Q=3 of 4): the joiner evm6 AND the
+#    carried-over evm5, so evm1 and evm2 alone remain. Stopping only the joiner would leave {1,2,5} = Q and J would acknowledge (the continuity rule keeps most
+#    of J carried over from K, so a joiner alone can never block it). K's own quorum {1,2,3} stays up: the recovery needs it.
+h3_join_s2() {
+  build/ubft root-node init --home test-nodes/root6 -g >/dev/null 2>&1 || true
+  generate_log_configuration "test-nodes/root6/"
+  h3_q3_trust_base 4 "1 2 5 6" || return 1
+  h3_q3_start_joiner 6 2 4 test-nodes/trust-base-epoch4.json
 }
+h3_step "joiner evm6 and root 6 start before the s=2 Commit" h3_join_s2
 h3_evm_s2() {
-  h3_prepare_coupled 4 3 6 || return 1       # root 3 -> 6, committee {1,2,5,6}
-  h3_spare_authority 6 2 4 trust-base-epoch4.json || return 1
-  h3_spare_authority 7 2 4 trust-base-epoch4.json || return 1
-  h3_retry_handoff 3 h3_s2_attempt || return 1
-  h3_activate_coupled 4 3 6 || return 1
+  h3_q3_handoff s2 4 "1 2 5 6" || return 1   # candidate, the four successor members' readiness (evm6's among them), plan, Commit
+  stop_one_evm_validator 6 || return 1       # the joiner fails after the Commit ...
+  stop_one_evm_validator 5 || return 1       # ... and so does a carried-over member: J keeps evm1 and evm2, below its quorum of 3
+  h3_q3_activate_coupled 4 3 6 || return 1
 }
-h3_step "coupled s=2 (root 3->6; PoP-valid; evm6/evm7 unavailable) committed at H" h3_evm_s2
+h3_step "coupled s=2 (root 3->6, J={1,2,5,6}) committed with all readiness; evm5 and evm6 fail after the Commit" h3_evm_s2
 h3_s2_stalls() {
   local base
   base=$(h3_evm_row | jq -r '.roundNumber')
@@ -295,17 +310,13 @@ h3_s2_stalls() {
 h3_step "EVM waits (no certification) while root and aggregators progress" h3_s2_stalls
 
 # 7. Supersede s=2 on the same parent. A supersession is the derived recovery of the pending primary: exactly K, the committee of the last acknowledged
-#    assignment (s=1, evm {1,2,3,5}), and its root committee is K's coupled image, so root 6 gives way to root 3 again. The retired s=2 set's late
-#    acknowledgement is then refused.
+#    assignment (s=1, evm {1,2,3,5}), and its root committee is K's coupled image, so root 6 gives way to root 3 again. It needs no readiness (K is the
+#    committee the chain already acknowledged). The retired s=2 set's late acknowledgement is then refused.
 h3_supersede_s3() {
-  h3_prepare_coupled 5 6 3 || return 1       # root 6 -> 3, committee {1,2,3,5}: the coupled image of K
-  h3_build_recovery s3 || return 1
-  h3_loop_mark
-  h3_propose s3 5 || return 1
-  h3_wait_committed 4 || return 1
-  h3_activate_coupled 5 6 3 || return 1
+  h3_q3_handoff s3 5 "1 2 3 5" recovery || return 1   # root 6 -> 3, committee {1,2,3,5}: the coupled image of K
+  h3_q3_activate_coupled 5 6 3 || return 1
   # the folded acknowledgement needs the retained and returning validators' authorities at the activated scope (root epoch 5, shard epoch 3)
-  H3_ONLINE="1 2 3 5"
+  H3_ONLINE="1 2 3"
   h3_advance_authorities 5 3 1 2 3 5 || { echo "authority advance to root epoch 5 / shard epoch 3 failed" >&2; return 1; }
   local i
   for i in $(seq 1 180); do h3_registry_is 3 5 && return 0; sleep 1; done
@@ -317,7 +328,7 @@ h3_late_s2_ack_refused() {
   local id6
   id6=$(evm_validator_id 6)
   H3_RESTORE_TRUST_BASE=test-nodes/trust-base.json   # anchored at the genesis trust base: the restore catches up forward through the verified handoffs
-  H3_ONLINE="1 2 3 5"
+  H3_ONLINE="1 2 3"
   h3_mark
   h3_enroll_authority 6 2 || { echo "enrolling the evm6 authority against the s=2 configuration failed" >&2; return 1; }
   h3_restore_validator 6 1 || true            # the s=2 key tries to acknowledge late
@@ -327,7 +338,7 @@ h3_late_s2_ack_refused() {
 h3_step "s=2's late acknowledgement does not succeed (refused at the root when the node reaches one, otherwise at the archive: the output says which)" h3_late_s2_ack_refused
 h3_final() {
   stop_one_evm_validator 6 2>/dev/null || true
-  H3_ONLINE="1 2 3 5"
+  H3_ONLINE="1 2 3"
   h3_paid 5 && h3_mint 5 && h3_verify_mint 5 3
 }
 h3_step "certify and verify a paid mint under s=3 (epoch-5 trust base, s=3 PDR)" h3_final
