@@ -185,6 +185,9 @@ PY
 # acknowledgement for it, so waiting for one cannot succeed. The wait never targets the restarted validator itself: it reads the other validators' logs.
 m2_is_archive_replica() { # validator
   local k
+  # Replication exists only where the devnet enabled the archive (EVM_ARCHIVE_ROOT: the H3 lane and the Q3 lane built on it, the M2a restore, the F7 mode). A lane
+  # without it (the F8 mixed lane) names no replicas at all, the nodes' operator status lists none, and there is no catch-up to wait for.
+  [ -n "${EVM_ARCHIVE_ROOT:-}" ] || return 1
   for k in $(seq 1 "$validators"); do
     [ "$k" = "$1" ] && continue
     case " $(archive_replicas_of "$k" "$validators") " in *" $1 "*) return 0 ;; esac
