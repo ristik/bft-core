@@ -187,7 +187,9 @@ func TestPublicationFixtureIsReproduced(t *testing.T) {
 		require.Equal(t, h32(t, p.Digest), digest, "member %d", cids[i])
 	}
 	require.Equal(t, h32(t, f.Expected.PopSetDigest), PoPSetDigest(cids, sigs))
-	require.Equal(t, facts.PrimaryHash, PrimaryHash(d, facts.ResultID, facts.AssignmentID, facts.Incumbent, facts.SnapshotDigest, exposure, keys, facts.PopSetDigest, facts.Attempt))
+	bindings, err := BindingsDigest(ids)
+	require.NoError(t, err)
+	require.Equal(t, facts.PrimaryHash, PrimaryHash(d, facts.ResultID, facts.AssignmentID, facts.Incumbent, facts.SnapshotDigest, exposure, keys, facts.PopSetDigest, bindings, facts.Attempt))
 	require.Equal(t, facts.KCommit, KCommit(d, facts.ResultID, facts.SnapshotDigest, facts.Incumbent, facts.IncumbentExposureDigest, facts.IncumbentKeyDigest, facts.PolicyDigest, facts.ContractsDigest))
 }
 
@@ -229,6 +231,17 @@ func TestVerifyPrimaryRefusesEachBreakage(t *testing.T) {
 			c.Authorization.Contracts = flip(c.Authorization.Contracts)
 		}},
 		{"proven assignment is not the result's", ErrPrimaryBinding, func(_ *Candidate, f *PrimaryFacts, _ *[]EVMPoP, _ *ElectionDeployment) { f.AssignmentID[0] ^= 1 }},
+		// the relayer is untrusted and the possession proofs, keys and exposures do not mention node ids: only the frozen delegation records
+		// the primary commitment covers bind the names a candidate carries
+		{"a member's root node id is renamed", ErrPrimaryIdentities, func(c *Candidate, _ *PrimaryFacts, _ *[]EVMPoP, _ *ElectionDeployment) {
+			c.Identities[1].RootNodeID += "-renamed"
+		}},
+		{"a member's EVM node id is renamed", ErrPrimaryIdentities, func(c *Candidate, _ *PrimaryFacts, _ *[]EVMPoP, _ *ElectionDeployment) {
+			c.Identities[2].EVMNodeID = "someone-else"
+		}},
+		{"two members swap their node ids", ErrPrimaryIdentities, func(c *Candidate, _ *PrimaryFacts, _ *[]EVMPoP, _ *ElectionDeployment) {
+			c.Identities[0].RootNodeID, c.Identities[1].RootNodeID = c.Identities[1].RootNodeID, c.Identities[0].RootNodeID
+		}},
 		{"a member's weight differs", ErrPrimaryIdentities, func(c *Candidate, _ *PrimaryFacts, _ *[]EVMPoP, _ *ElectionDeployment) { c.Identities[1].Weight++ }},
 		{"a member's payee differs", ErrPrimaryIdentities, func(c *Candidate, _ *PrimaryFacts, _ *[]EVMPoP, _ *ElectionDeployment) {
 			c.Identities[1].OperatorPayee = flip(c.Identities[1].OperatorPayee)
