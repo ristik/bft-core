@@ -66,6 +66,9 @@ Before any fault the lane also checks that the selector in effect is the weighte
 - **Fault-row progress is the root committed round.** The coupled EVM pipeline is judged in the baseline only: the EVM certified round also needs the EVM nodes' durable archive
   acknowledgements, and an EVM node whose paired root is cut off cannot verify the blocks it is asked to acknowledge, so the EVM round can stand still while the roots correctly keep their quorum
   (scenario A run `q4-live-20261009T062325Z`: two lights isolated, EVM round stuck at 45 while the roots kept committing). The EVM pipeline under a root fault is not asserted.
+- **Each Byzantine row arms exactly its own roots and clears them before it ends.** The lane records when each row armed and cleared its adapters (`q4/byz-windows.jsonl`);
+  the trace check holds every equivocation in the traces to the window of its own root and requires every armed root to have equivocated inside its window, so the heavy
+  equivocator (F3, F4) runs alone and the in-bound row's equivocators (F5, F6) are not running during it.
 - **Heavy equivocators (F3, F4)** are outside the assumptions: the live rows show that the equivocation happened (the root's own adapter counted its conflicting signed votes)
   and that the independent checker classifies exactly the declared roots as equivocators; they claim no liveness or safety.
 - **G2** is evidenced by the Q3 lane's paired authentication (`-lanes q3=<dir>`): a second pair restored through the archive path reaching equal commitments, the five pair

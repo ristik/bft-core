@@ -202,36 +202,62 @@ q4_row_heavy_sigkill() {     # SIGKILL each heavy root in turn: A 3 of 9 left, B
   done
 }
 
-# q4_byz_arm <roots...>: the named roots also send a conflicting signed vote per round to every other root; the adapters stay armed until the trace check has read their
-# counters (clearing a control document resets them). Fails unless every named root's adapter reports having sent.
+q4_now() { python3 -c 'import datetime; print(datetime.datetime.now().astimezone().isoformat(timespec="microseconds"))'; }
+q4_byz_sent() { jq -r '[.byzantine // {} | .[]] | add // 0' "$Q4_SHIM_DIR/root$1/status.json"; }
+
+# A Byzantine row arms exactly its own roots and clears them before it ends, so the live Byzantine set of a row is the one the row claims and no row leaks into the next:
+#   q4_byz_begin; q4_byz_arm <roots...>; ...the row's own assertion...; q4_byz_end <tag> <roots...>
+# q4_byz_arm: the named roots also send a conflicting signed vote per round to every other root, and each has sent one. q4_byz_end: the live set is exactly the named roots
+# (every other root's adapter has sent nothing), then the roots are cleared and the row's window [begin, end] is recorded; the trace check holds every equivocation in the
+# traces to those windows.
+q4_byz_begin() { Q4_BYZ_FROM=$(q4_now); }
 q4_byz_arm() {
-  local r others
+  local r others i
   for r in "$@"; do
     others=$(q4_without "$r" | tr '\n' ' ')
     q4_byzantine "$r" state "$others" || return 1
   done
-  local i
   for r in "$@"; do
     for i in $(seq 1 60); do
-      [ "$(jq -r '.byzantine.byz // 0' "$Q4_SHIM_DIR/root$r/status.json")" -gt 0 ] && break
+      [ "$(q4_byz_sent "$r")" -gt 0 ] && break
       sleep 1
     done
-    [ "$(jq -r '.byzantine.byz // 0' "$Q4_SHIM_DIR/root$r/status.json")" -gt 0 ] || { echo "root$r sent nothing Byzantine" >&2; return 1; }
+    [ "$(q4_byz_sent "$r")" -gt 0 ] || { echo "root$r sent nothing Byzantine" >&2; return 1; }
   done
-  Q4_BYZ_ROOTS=$(echo ${Q4_BYZ_LIST:-} "$@" | tr ' ' ',' | sed 's/^,//')
-  Q4_BYZ_LIST="${Q4_BYZ_LIST:-} $*"
+}
+q4_byz_end() {
+  local tag=$1 r in_set; shift
+  for r in $Q4_ROOTS; do
+    in_set=0; for x in "$@"; do [ "$x" = "$r" ] && in_set=1; done
+    if [ "$in_set" = 1 ]; then
+      [ "$(q4_byz_sent "$r")" -gt 0 ] || { echo "root$r was to equivocate in row $tag and sent nothing" >&2; return 1; }
+    else
+      [ "$(q4_byz_sent "$r")" = 0 ] || { echo "root$r equivocates during row $tag but is not in its Byzantine set ($*)" >&2; return 1; }
+    fi
+  done
+  for r in "$@"; do q4_clear "$r" || return 1; done
+  jq -n -c --arg tag "$tag" --arg from "$Q4_BYZ_FROM" --arg to "$(q4_now)" --arg roots "$*" '{tag: $tag, roots: ($roots | split(" ") | map(tonumber)), from: $from, to: $to}' >>"$Q4_DIR/byz-windows.jsonl" || return 1
+  Q4_BYZ_ROOTS=$(echo ${Q4_BYZ_ROOTS//,/ } "$@" | tr ' ' ',' | sed 's/^,//')
 }
 
 q4_row_byzantine_lights() {  # IN BOUND (weight <= F=2): A two lights (1+1), B the weight-2 root; the honest weight 7 progresses
   local byz
   if [ "$Q4_SCENARIO" = A ]; then byz=$(q4_lights | tail -n 2 | tr '\n' ' '); else byz=3; fi
+  q4_byz_begin
   q4_byz_arm $byz || return 1
-  q4_root_advance "$Q4_HEAVY_ROOT" "$Q4_RECOVER_SECONDS" 3
+  q4_root_advance "$Q4_HEAVY_ROOT" "$Q4_RECOVER_SECONDS" 3 || return 1
+  q4_byz_end lights $byz
 }
 
-# OUTSIDE THE ASSUMPTIONS (heavy weight 6 or 3 > F=2): no liveness claim at all. What the row shows is that the equivocation is real (the root's own adapter counted its
-# conflicting signed votes) and that the independent checker classifies exactly the declared roots as equivocators with no conflicting commit anywhere (the trace check).
-q4_row_byzantine_heavy() { q4_byz_arm "$Q4_HEAVY_ROOT"; }
+# OUTSIDE THE ASSUMPTIONS (heavy weight 6 or 3 > F=2), alone (the in-bound row has cleared its adapters): no liveness claim at all. What the row shows is that the
+# equivocation is real (the root's own adapter counted its conflicting signed votes, and the traces hold them inside this row's window) and that the independent checker
+# classifies exactly the declared roots as equivocators (the trace check).
+q4_row_byzantine_heavy() {
+  q4_byz_begin
+  q4_byz_arm "$Q4_HEAVY_ROOT" || return 1
+  sleep 10   # several rounds of equivocation, not only the first vote
+  q4_byz_end heavy "$Q4_HEAVY_ROOT"
+}
 
 # The F8 callbacks (f8_slow_stop_resume_evm: EVM stopped, aggregators certify new state roots, resumed; f8_inflight_evm_probe) ran in the lane's preamble, in the
 # unit epoch before the activation, and passed. They cannot be repeated in the weighted epoch with the pinned rugregator: the second block of an aggregator shard
@@ -252,11 +278,10 @@ q4_row_f8_follow() {
 
 q4_row_trace_check() {
   local roots; roots=$(echo $Q4_ROOTS | tr ' ' ',')
-  # a SIGKILLed root's torn last trace line is dropped by the checker's loader only if it is the final line
-  local verdict=0 r
-  python3 scripts/q4-trace-check.py "$Q4_SHIM_DIR" --roots "$roots" ${Q4_BYZ_ROOTS:+--byzantine "$Q4_BYZ_ROOTS"} $(q4_peer_args) | tee "$Q4_DIR/trace-report.json" | jq -e '.verdict == "PASS"' >/dev/null || verdict=1
-  for r in ${Q4_BYZ_LIST:-}; do q4_clear "$r" || true; done
-  return "$verdict"
+  # a SIGKILLed root's torn last trace line is dropped by the checker's loader only if it is the final line. The declared Byzantine set is the union of the rows' sets; the
+  # windows hold every equivocation in the traces to the row that armed it.
+  python3 scripts/q4-trace-check.py "$Q4_SHIM_DIR" --roots "$roots" ${Q4_BYZ_ROOTS:+--byzantine "$Q4_BYZ_ROOTS"} --byz-windows "$Q4_DIR/byz-windows.jsonl" $(q4_peer_args) \
+    | tee "$Q4_DIR/trace-report.json" | jq -e '.verdict == "PASS"' >/dev/null
 }
 
 # the Q3 flow's own initialisation (what q3_run_lane does before its steps) and the activation prefix; each step is the Q3 step, with its Q3 evidence under $Q3_DIR
@@ -299,6 +324,7 @@ q4_no_followers() {
 
 q4_run_lane() {
   mkdir -p "$Q4_DIR"
+  : >"$Q4_DIR/byz-windows.jsonl"
   q4_activate_weighted_epoch
   q4_step "leader selector in effect: weight-proportional root-wrr-v1 over the epoch's rounds" q4_leader_schedule
   q4_step "no root of the weighted epoch reports itself a follower (#515 membership gate)" q4_no_followers
@@ -313,7 +339,7 @@ q4_run_lane() {
     q4_step "SIGKILL a light root and restart over the retained home" q4_row_light_sigkill
     q4_step "SIGKILL the heavy root: stall, restart recovers" q4_row_heavy_sigkill
     q4_step "two Byzantine lights (weight 2) equivocate: honest 7 progresses" q4_row_byzantine_lights
-    q4_step "the heavy root (weight 6 > F) equivocates, outside the assumptions: the equivocation is real, the checker classifies it" q4_row_byzantine_heavy
+    q4_step "the heavy root (weight 6 > F) equivocates alone, outside the assumptions: the equivocation is real, the checker classifies it" q4_row_byzantine_heavy
   else
     q4_step "B: the weight-1 root isolated: 8 of 9 progresses, heal releases" q4_row_b_light_one
     q4_step "B: the weight-2 root isolated: 7 = Q progresses, heal releases" q4_row_b_light_two
@@ -322,7 +348,7 @@ q4_run_lane() {
     q4_step "B: SIGKILL the weight-2 root and restart over the retained home" q4_row_light_sigkill
     q4_step "B: SIGKILL each weight-3 root in turn: 6 left, stall, restart recovers" q4_row_heavy_sigkill
     q4_step "B: the weight-2 root (= F, in bound) equivocates: honest 3+3+1 progress" q4_row_byzantine_lights
-    q4_step "B: a weight-3 root (> F) equivocates, outside the assumptions: the equivocation is real, the checker classifies it" q4_row_byzantine_heavy
+    q4_step "B: a weight-3 root (> F) equivocates alone, outside the assumptions: the equivocation is real, the checker classifies it" q4_row_byzantine_heavy
   fi
   q4_step "offline trace check: attempts have outcomes, equivocators are exactly the declared Byzantine roots" q4_row_trace_check
   echo "Q4 live lane: all steps PASSED"

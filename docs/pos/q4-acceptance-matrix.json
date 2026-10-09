@@ -475,20 +475,26 @@
     {
      "kind": "lane",
      "label": "REAL-PROCESS",
-     "step": "the heavy root (weight 6 > F) equivocates, outside the assumptions: the equivocation is real, the checker classifies it",
-     "scope": "outside the assumptions: no liveness claim; the root's own adapter counted its conflicting signed votes; REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss); fault rows judge the root quorum by the roots' committed round, the coupled EVM pipeline is judged in the baseline only"
+     "step": "the heavy root (weight 6 > F) equivocates alone, outside the assumptions: the equivocation is real, the checker classifies it",
+     "scope": "outside the assumptions: no liveness claim; the heavy root equivocates ALONE (the in-bound row cleared its adapters first), its own adapter counted its conflicting signed votes; REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss); fault rows judge the root quorum by the roots' committed round, the coupled EVM pipeline is judged in the baseline only"
     },
     {
      "kind": "lane",
      "label": "REAL-PROCESS",
      "step": "offline trace check: attempts have outcomes, equivocators are exactly the declared Byzantine roots",
-     "scope": "A: exact declared equivocators from the shim traces; signatures are not re-verified by the lane's python checker; REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss); fault rows judge the root quorum by the roots' committed round, the coupled EVM pipeline is judged in the baseline only"
+     "scope": "A: exact declared equivocators from the shim traces, every equivocation inside the window of the row that armed it; signatures are not re-verified by the lane's python checker; REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss); fault rows judge the root quorum by the roots' committed round, the coupled EVM pipeline is judged in the baseline only"
     },
     {
      "kind": "lane-file",
      "label": "REAL-PROCESS",
      "path": "q4/trace-report.json",
      "scope": ""
+    },
+    {
+     "kind": "lane-file",
+     "label": "REAL-PROCESS",
+     "path": "q4/byz-windows.jsonl",
+     "scope": "A: when each Byzantine row armed and cleared its adapters"
     }
    ]
   },
@@ -519,15 +525,15 @@
     {
      "kind": "lane",
      "label": "REAL-PROCESS",
-     "step": "B: a weight-3 root (> F) equivocates, outside the assumptions: the equivocation is real, the checker classifies it",
-     "scope": "scenario B (3,3,2,1); outside the assumptions: no liveness claim; the root's own adapter counted its conflicting signed votes; REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss); fault rows judge the root quorum by the roots' committed round, the coupled EVM pipeline is judged in the baseline only",
+     "step": "B: a weight-3 root (> F) equivocates alone, outside the assumptions: the equivocation is real, the checker classifies it",
+     "scope": "scenario B (3,3,2,1); outside the assumptions: no liveness claim; the weight-3 root equivocates ALONE (the in-bound row cleared its adapter first), its own adapter counted its conflicting signed votes; REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss); fault rows judge the root quorum by the roots' committed round, the coupled EVM pipeline is judged in the baseline only",
      "lane": "b"
     },
     {
      "kind": "lane",
      "label": "REAL-PROCESS",
      "step": "offline trace check: attempts have outcomes, equivocators are exactly the declared Byzantine roots",
-     "scope": "scenario B (3,3,2,1); exact declared equivocators from the shim traces; signatures are not re-verified by the lane's python checker; REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss); fault rows judge the root quorum by the roots' committed round, the coupled EVM pipeline is judged in the baseline only",
+     "scope": "scenario B (3,3,2,1); exact declared equivocators from the shim traces, every equivocation inside the window of the row that armed it; signatures are not re-verified by the lane's python checker; REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss); fault rows judge the root quorum by the roots' committed round, the coupled EVM pipeline is judged in the baseline only",
      "lane": "b"
     },
     {
@@ -535,6 +541,13 @@
      "label": "REAL-PROCESS",
      "path": "q4/trace-report.json",
      "scope": "",
+     "lane": "b"
+    },
+    {
+     "kind": "lane-file",
+     "label": "REAL-PROCESS",
+     "path": "q4/byz-windows.jsonl",
+     "scope": "B: when each Byzantine row armed and cleared its adapters",
      "lane": "b"
     }
    ]
@@ -625,7 +638,7 @@
      "kind": "lane",
      "label": "REAL-PROCESS",
      "step": "offline trace check: attempts have outcomes, equivocators are exactly the declared Byzantine roots",
-     "scope": "scenario B (3,3,2,1); exact declared equivocators from the shim traces; signatures are not re-verified by the lane's python checker; REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss); fault rows judge the root quorum by the roots' committed round, the coupled EVM pipeline is judged in the baseline only",
+     "scope": "scenario B (3,3,2,1); exact declared equivocators from the shim traces, every equivocation inside the window of the row that armed it; signatures are not re-verified by the lane's python checker; REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss); fault rows judge the root quorum by the roots' committed round, the coupled EVM pipeline is judged in the baseline only",
      "lane": "b"
     },
     {
@@ -633,6 +646,13 @@
      "label": "REAL-PROCESS",
      "path": "q4/trace-report.json",
      "scope": "",
+     "lane": "b"
+    },
+    {
+     "kind": "lane-file",
+     "label": "REAL-PROCESS",
+     "path": "q4/byz-windows.jsonl",
+     "scope": "B: when each Byzantine row armed and cleared its adapters",
      "lane": "b"
     }
    ]

@@ -666,4 +666,48 @@ func TestTraceCheckerReadsTheShimTrace(t *testing.T) {
 		require.Error(t, err)
 		require.Contains(t, out, "other bytes")
 	})
+	// the per-row Byzantine windows: when each row armed its adapters and when it had cleared them
+	window := func(t *testing.T, dir string, roots []int, shift time.Duration, width time.Duration) string {
+		raw, err := os.ReadFile(filepath.Join(dir, "root1", "trace.jsonl"))
+		require.NoError(t, err)
+		var first time.Time
+		for _, l := range bytes.Split(bytes.TrimSpace(raw), []byte("\n")) {
+			var ev struct {
+				Kind string    `json:"kind"`
+				Time time.Time `json:"time"`
+			}
+			require.NoError(t, json.Unmarshal(l, &ev))
+			if ev.Kind == "equivocate" {
+				first = ev.Time
+				break
+			}
+		}
+		require.False(t, first.IsZero(), "the fixture produced no equivocation")
+		start := first.Add(shift)
+		line, err := json.Marshal(map[string]any{"tag": "row", "roots": roots, "from": start.Format(time.RFC3339Nano), "to": start.Add(width).Format(time.RFC3339Nano)})
+		require.NoError(t, err)
+		path := filepath.Join(dir, "windows.jsonl")
+		require.NoError(t, os.WriteFile(path, append(line, '\n'), 0o600))
+		return path
+	}
+	t.Run("an equivocation inside the window armed for its root passes", func(t *testing.T) {
+		dir, self := write(t, false)
+		out, err := run(dir, "--byzantine", "1", "--peer", "1="+self.String(), "--byz-windows", window(t, dir, []int{1}, -time.Second, time.Hour))
+		require.NoError(t, err, out)
+		require.Contains(t, out, `"verdict": "PASS"`)
+		require.Contains(t, out, `"equivocated"`)
+	})
+	t.Run("an equivocation by a root the window did not arm fails", func(t *testing.T) {
+		dir, self := write(t, false)
+		out, err := run(dir, "--byzantine", "1", "--peer", "1="+self.String(), "--byz-windows", window(t, dir, []int{2}, -time.Second, time.Hour))
+		require.Error(t, err)
+		require.Contains(t, out, "outside every window armed for it")
+		require.Contains(t, out, "armed but equivocated nothing")
+	})
+	t.Run("an equivocation after its window was cleared fails", func(t *testing.T) {
+		dir, self := write(t, false)
+		out, err := run(dir, "--byzantine", "1", "--peer", "1="+self.String(), "--byz-windows", window(t, dir, []int{1}, -time.Hour, time.Minute))
+		require.Error(t, err)
+		require.Contains(t, out, "outside every window armed for it")
+	})
 }
