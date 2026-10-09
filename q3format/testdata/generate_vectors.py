@@ -46,7 +46,7 @@ body_id = sha(body_enc)
 ATTEMPT, CANDIDATE = 3, bytes([0x44]) * 32
 receipt = enc(["UNICITY_Q3_READINESS_V1", 1, NETWORK, GENESIS, predecessor, ATTEMPT, CANDIDATE, body_id, sha(config_enc), "n1"])
 
-LINK = [body_enc, [EPOCH, 25, body_id, bytes([0x99]) * 32, 1, PRIOR_ID], [bytes([0x55]) * 32, bytes([0x66]) * 32, bytes([0x44]) * 32], bytes([0xab]) * 16, []]
+LINK = [body_enc, [EPOCH, 25, body_id, bytes([0x99]) * 32, 1, PRIOR_ID], [bytes([0x55]) * 32, bytes([0x66]) * 32, bytes([0x44]) * 32], bytes([0xcd]) * 24, bytes([0xab]) * 16, []]
 envelope = enc(["UNICITY_Q3_EXECUTION_PROOF", 1, bytes([0x01]) * 8, [b"t1", b"t2"], bytes([0x88]) * 32, None, [LINK]])
 
 print(json.dumps({

@@ -60,6 +60,9 @@ type Entry struct {
 	rootOnly bool
 	// body is the canonical encoding of the V3 body the committed record names: SHA-256 of it is the committed NextBodyID.
 	body []byte
+	// preimage is the canonical candidate preimage the committed digest names (empty for a root-only entry). The next link's recovery
+	// exemption chains to it: a recovery replaces exactly this primary.
+	preimage []byte
 }
 
 // RootOnly reports whether the committed record binds exactly the root-only operator candidate of this entry's members. It is
@@ -258,12 +261,14 @@ type Evidence struct {
 	Summary, FrozenParent, CandidateDigest []byte
 }
 
-// Link is everything one V3 activation needs beyond the history: the body, the evidence its candidate rests on, the old
-// committee's commit proof (canonical OldCommitProof bytes), the readiness receipts of every successor member, and the claim
-// the sender makes about the result.
+// Link is everything one V3 activation needs beyond the history: the body, the evidence its candidate rests on, the canonical
+// candidate preimage (empty for a root-only change; it selects the readiness evidence, see readiness), the old committee's commit
+// proof (canonical OldCommitProof bytes), the readiness receipts of every successor member (none for a verified exact recovery),
+// and the claim the sender makes about the result.
 type Link struct {
 	Body     BodyV3
 	Evidence Evidence
+	Preimage []byte
 	Proof    []byte
 	Receipts []Receipt
 	Claim    Claim
@@ -351,7 +356,7 @@ func (h *History) WithV3(l Link) (*History, error) {
 	if err := bindCandidate(b, r, l.Evidence); err != nil {
 		return nil, err
 	}
-	if err := VerifyReceipts(b, ContextFor(b, r.Attempt, [32]byte(l.Evidence.CandidateDigest)), l.Receipts); err != nil {
+	if err := readiness(b, r.Attempt, l.Evidence, l.Preimage, tip.preimage, l.Receipts); err != nil {
 		return nil, err
 	}
 	operator, err := evmroot.D4OperatorCandidateDigest(b.Members)
@@ -370,7 +375,7 @@ func (h *History) WithV3(l Link) (*History, error) {
 	verified := evmroot.VerifiedHandoff{RecordID: bytes.Clone(v.RecordID[:]), Root: bytes.Clone(v.StateRoot[:]), ControlDigest: bytes.Clone(v.ControlDigest[:]),
 		OrderRound: v.OrderRound, CommitSealRound: v.CommitSealRound, Epoch: v.SignerEpoch, Record: r}
 	e := Entry{epoch: b.Epoch, start: r.ActivationRound, earliest: b.EarliestActivation, version: BodyVersion, scheme: cfg.SigningScheme, priorVersion: tip.version, priorID: tip.bodyID,
-		config: &cfg, bodyID: id, commitID: v.RecordID, tb: tb, handoff: &verified, genesis: &anchor, rootOnly: rootOnly, body: b.Encode()}
+		config: &cfg, bodyID: id, commitID: v.RecordID, tb: tb, handoff: &verified, genesis: &anchor, rootOnly: rootOnly, body: b.Encode(), preimage: bytes.Clone(l.Preimage)}
 	copy(e.anchorID[:], anchor.ID())
 	return h.extend(e), nil
 }

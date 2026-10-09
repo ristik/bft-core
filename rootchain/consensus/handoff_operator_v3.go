@@ -206,8 +206,16 @@ func (x *ConsensusManager) buildHandoffPlanV3FromState(next *types.RootTrustBase
 		c = *staged
 	}
 	raw := c.Body.Encode()
-	if err := x.q3.FreezeRules().VerifyReceipts(raw, receipts, c.Attempt, c.Candidate[:]); err != nil {
-		return abdrc.HandoffApprovalMsg{}, errors.Join(ErrHandoffApproval, err)
+	exactRecovery := false
+	if len(c.CandidatePreimage) != 0 {
+		cand, err := evmassign.DecodeCandidate(c.CandidatePreimage)
+		if err != nil {
+			return abdrc.HandoffApprovalMsg{}, errors.Join(ErrHandoffApproval, err)
+		}
+		exactRecovery = cand.Kind == evmassign.KindRecovery
+	}
+	if err := x.verifyPlanReceipts(raw, receipts, c.Attempt, c.Candidate[:], exactRecovery); err != nil {
+		return abdrc.HandoffApprovalMsg{}, err
 	}
 	plan := abdrc.HandoffApprovalMsg{Body: raw, Candidate: c.Candidate[:], ActivationRound: c.ActivationRound, Attempt: c.Attempt,
 		CandidatePreimage: c.CandidatePreimage, Receipts: bytes.Clone(receipts)}
@@ -306,10 +314,14 @@ func (x *ConsensusManager) v3CandidateFromState(next *types.RootTrustBaseV1, sta
 }
 
 // StageV3Candidate records a candidate another of this chain's validators derived (PlanV3Candidate) as the one this validator's operator
-// is about to have the entity attest readiness for. It checks what needs no signature and no EVM state: the body is a valid V3 body of
-// this chain's protocol tuple, the next epoch of the one installed here. The plan itself is checked in full, against this validator's own
-// state, when it is endorsed; staging only reports what this node holds.
-func (x *ConsensusManager) StageV3Candidate(body []byte, candidate [32]byte, attempt uint64) error {
+// is about to have the entity attest readiness for. It is the whole of a joiner's pre-activation work on the root side, and checks
+// everything that needs no signature and no EVM state, against this node's own verified history: the body is a valid V3 body of this chain's
+// protocol tuple, the next epoch of the one installed here, naming this node's installed tip as its predecessor; the candidate digest is the
+// operator digest of the body's members (no preimage) or the SHA-256 of the canonical preimage, whose binding to the body's members is
+// verified in full; the body's change record is the one that digest, the attempt and the earliest activation determine; and this node is
+// itself a member of the successor, since only a successor member stages for its own readiness. Staging never signs and never activates:
+// the plan itself is checked again in full, against this validator's own state, when it is endorsed.
+func (x *ConsensusManager) StageV3Candidate(body []byte, candidate [32]byte, attempt uint64, preimage []byte) error {
 	if x.q3 == nil {
 		return fmt.Errorf("%w: no Q3 history", ErrHandoffApproval)
 	}
@@ -324,6 +336,39 @@ func (x *ConsensusManager) StageV3Candidate(body []byte, candidate [32]byte, att
 	old := x.trustBase.Load()
 	if old == nil || b.Config != cfg || b.Network != uint64(old.NetworkID) || b.Epoch != old.Epoch+1 {
 		return fmt.Errorf("%w: the candidate is not the next epoch of this chain", ErrHandoffApproval)
+	}
+	predecessor, err := x.handoffPredecessor()
+	if err != nil {
+		return err
+	}
+	link, err := x.planPredecessorLink(q3format.BodyVersion, predecessor)
+	if err != nil || !bytes.Equal(b.PredecessorHash, link) {
+		return fmt.Errorf("%w: the body does not name this node's installed tip as its predecessor", ErrHandoffApproval)
+	}
+	if !bytes.Equal(b.ChangeRecordHash, evmroot.D4CandidateContextHash(b.Network, predecessor, attempt, candidate[:], b.EarliestActivation)) {
+		return fmt.Errorf("%w: the body's change record is not the one this candidate and attempt determine", ErrHandoffApproval)
+	}
+	self := false
+	for _, m := range b.Members {
+		self = self || m.NodeID == x.id.String()
+	}
+	if !self {
+		return fmt.Errorf("%w: this node is not a member of the successor committee", ErrHandoffApproval)
+	}
+	if len(preimage) == 0 {
+		operator, err := evmroot.D4OperatorCandidateDigest(b.Members)
+		if err != nil || operator != candidate {
+			return fmt.Errorf("%w: without a preimage the candidate must be the operator digest of the body's members", ErrHandoffApproval)
+		}
+	} else {
+		pb, err := x.decodePlanBody(body)
+		if err != nil {
+			return err
+		}
+		msg := &abdrc.HandoffApprovalMsg{Body: body, Candidate: candidate[:], Attempt: attempt, CandidatePreimage: preimage}
+		if _, err := x.verifyApprovalAssignment(msg, pb, predecessor, old); err != nil {
+			return err
+		}
 	}
 	x.q3Staged.Store(&Q3Staged{CandidateDigest: candidate, BodyID: b.Identity(), Attempt: attempt, Config: b.Config.Identity()})
 	return nil

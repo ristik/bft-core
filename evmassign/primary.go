@@ -21,6 +21,8 @@ var (
 	evmPoPDomain            = ethcrypto.Keccak256Hash([]byte("unicity.p85.assignment-pop"))
 	popSetDomain            = ethcrypto.Keccak256Hash([]byte("unicity.p85.pop-set"))
 	primaryDomain           = ethcrypto.Keccak256Hash([]byte("unicity.p85.primary-commitment"))
+	bindingDomain           = ethcrypto.Keccak256Hash([]byte("unicity.p85.delegation-binding"))
+	bindingsDomain          = ethcrypto.Keccak256Hash([]byte("unicity.p85.frozen-bindings"))
 	kCommitDomain           = ethcrypto.Keccak256Hash([]byte("unicity.p85.recovery-authorization"))
 )
 
@@ -113,9 +115,9 @@ func PoPSetDigest(ids []uint64, sigs [][]byte) [32]byte {
 }
 
 // PrimaryHash is the commitment finalizeCandidate writes.
-func PrimaryHash(d ElectionDeployment, resultID, assignmentID, incumbent, snapshot, exposureDigest, keyDigest, popSet [32]byte, attempt uint64) [32]byte {
+func PrimaryHash(d ElectionDeployment, resultID, assignmentID, incumbent, snapshot, exposureDigest, keyDigest, popSet, bindings [32]byte, attempt uint64) [32]byte {
 	return keccak(primaryDomain[:], d.NetworkWord[:], d.ChainID[:], wAddr(d.Custody[:]), wAddr(d.Election[:]), resultID[:], assignmentID[:],
-		incumbent[:], w64(attempt), snapshot[:], exposureDigest[:], keyDigest[:], popSet[:])
+		incumbent[:], w64(attempt), snapshot[:], exposureDigest[:], keyDigest[:], popSet[:], bindings[:])
 }
 
 // KCommit is the mandatory recovery-authorization commitment written when the result is reserved.
@@ -215,7 +217,13 @@ func VerifyPrimary(c Candidate, d ElectionDeployment, f PrimaryFacts, pops []EVM
 	if popSet != f.PopSetDigest {
 		return fmt.Errorf("%w: the proof set is not the stored one", ErrPrimaryPoP)
 	}
-	if PrimaryHash(d, resultID, f.AssignmentID, f.Incumbent, snapshot, exposure, keys, popSet, f.Attempt) != f.PrimaryHash {
+	// the frozen delegation records: the root and EVM node ids, keys and payee of every member, recomputed from the records shown. The
+	// relayer is untrusted, so the names a candidate carries are bound here and nowhere else.
+	bindings, err := BindingsDigest(c.Identities)
+	if err != nil {
+		return errors.Join(ErrPrimaryIdentities, err)
+	}
+	if PrimaryHash(d, resultID, f.AssignmentID, f.Incumbent, snapshot, exposure, keys, popSet, bindings, f.Attempt) != f.PrimaryHash {
 		return ErrPrimaryIdentities
 	}
 
@@ -233,4 +241,40 @@ func VerifyPrimary(c Candidate, d ElectionDeployment, f PrimaryFacts, pops []EVM
 		return ErrPrimaryRecovery
 	}
 	return nil
+}
+
+// BindingHash is ElectionPolicy's binding hash of one member's delegation record, recomputed from the identity record: the custody id and
+// generation, the root and EVM node-id words (keccak256 of the node ids), the key hashes and the operator payee.
+func BindingHash(m Identity) ([32]byte, error) {
+	id, err := CustodyID(m.StakingID)
+	if err != nil {
+		return [32]byte{}, err
+	}
+	rootWord, err1 := NodeIDWord(m.RootNodeID)
+	evmWord, err2 := NodeIDWord(m.EVMNodeID)
+	if err := errors.Join(err1, err2); err != nil {
+		return [32]byte{}, err
+	}
+	if len(m.RootKey) != KeyLen || len(m.EVMKey) != KeyLen || len(m.OperatorPayee) != PayeeLen {
+		return [32]byte{}, fmt.Errorf("%w: malformed record %d", ErrIdentity, id)
+	}
+	return keccak(bindingDomain[:], w64(id), w64(m.Generation), rootWord[:], keccak256Bytes(m.RootKey), evmWord[:], keccak256Bytes(m.EVMKey),
+		wAddr(m.OperatorPayee)), nil
+}
+
+// BindingsDigest folds the members' binding hashes in ascending identity order, as finalizeCandidate does.
+func BindingsDigest(ids []Identity) ([32]byte, error) {
+	cids, err := ascendingCustodyIDs(ids)
+	if err != nil {
+		return [32]byte{}, err
+	}
+	d := bindingsDomain
+	for i, m := range ids {
+		h, err := BindingHash(m)
+		if err != nil {
+			return [32]byte{}, err
+		}
+		d = keccak(d[:], w64(cids[i]), h[:])
+	}
+	return d, nil
 }

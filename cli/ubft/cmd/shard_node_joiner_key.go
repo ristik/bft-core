@@ -12,8 +12,11 @@ import (
 	"github.com/unicitynetwork/bft-core/handoffdelivery"
 )
 
-// ErrJoinerUnnamed is a node the genesis configuration does not name, with no installed assignment step that does.
-var ErrJoinerUnnamed = errors.New("no installed assignment step names this node: the genesis configuration does not, so there is no authority key to verify responses under")
+// ErrJoinerUnnamed is the status of a deferred node that no installed assignment step names yet: it is a staging-only joiner. It is not a
+// startup failure any more. Before its activation a joiner must be able to run (to follow, to verify history and to stage the candidate it
+// will declare readiness for), and it signs nothing: the deferred authority signer refuses every request (shardnode.ErrAuthorityKeyUnbound)
+// until a VERIFIED installed step names it and bindInstalledJoinerKey binds that key.
+var ErrJoinerUnnamed = errors.New("no installed assignment step names this node yet: it is a staging-only joiner and signs nothing")
 
 // ErrJoinerLocalKey is an installed configuration that names this node with the key of its LOCAL key configuration, not a signing
 // authority's key (the same guard as for a node the genesis configuration names).
@@ -22,16 +25,28 @@ var ErrJoinerLocalKey = errors.New("an installed configuration names this node's
 // finishJoinerKey binds the joiner's expected key ONCE, after the verified installed steps have all been replayed (the persisted ones on
 // a start, then the caught-up ones on a restore: the same point at which the archive peer hold is released), from the LATEST installed
 // step that names this node. Binding as each step is replayed would bind the oldest key first and make a later rotation impossible.
-// With no installed step naming the node it refuses (ErrJoinerUnnamed): the node is a validator of no epoch it knows. A signer that is
-// not deferred is untouched.
+// With no installed step naming the node it stays unbound and STAGING-ONLY (stagingOnly, ErrJoinerUnnamed is its description): the signer
+// refuses every certification request, the node may stage and report a candidate, and a later verified install binds the key
+// (bindInstalledJoinerKey). A signer that is not deferred is untouched.
 func finishJoinerKey(signing *certificationSigning) error {
 	if signing == nil || signing.deferred == nil {
 		return nil
 	}
 	if signing.joinerKey == nil {
-		return ErrJoinerUnnamed
+		signing.stagingOnly = true
+		return nil
 	}
+	signing.stagingOnly = false
 	return signing.deferred.BindKey(signing.joinerKey)
+}
+
+// bindInstalledJoinerKey is finishJoinerKey for the live install of an activation after the node started: once noteJoinerStep has recorded the
+// key a verified step gives this node, a staging-only joiner becomes a signer. It is a no-op while no step names the node.
+func bindInstalledJoinerKey(signing *certificationSigning) error {
+	if signing == nil || signing.deferred == nil || signing.joinerKey == nil {
+		return nil
+	}
+	return finishJoinerKey(signing)
 }
 
 // ErrJoinerConf is an activated assignment configuration that is not the one installed for its shard epoch.

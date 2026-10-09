@@ -280,3 +280,19 @@ func AdmitHeadFromRetained(ctx context.Context, engineURL string, secret Secret,
 	}
 	return NewClient(engineURL, secret).call(ctx, "engine_admitParentV1", []any{data(presented)}, nil)
 }
+
+// ReadPairPins asks the execution client's authenticated Engine endpoint for its pair pins. A client that reports none is refused: it
+// would fail every paired build on the missing binding anyway, and the refusal names the cause.
+func ReadPairPins(ctx context.Context, engineURL string, secret Secret) (PairPins, error) {
+	var got sealConfigWire
+	if err := NewClient(engineURL, secret).call(ctx, "engine_sealConfigV1", []any{}, &got); err != nil {
+		return PairPins{}, fmt.Errorf("%w: %v", ErrSealConfigUnavailable, err)
+	}
+	if got.Version != 1 {
+		return PairPins{}, ErrSealConfigVersion
+	}
+	if got.NetworkID == nil || got.RootGenesisID == nil {
+		return PairPins{}, fmt.Errorf("%w: sealConfigV1 reports no pins", ErrPairPins)
+	}
+	return PairPins{NetworkID: *got.NetworkID, RootGenesisID: [32]byte(*got.RootGenesisID)}, nil
+}
