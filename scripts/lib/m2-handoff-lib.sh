@@ -185,6 +185,9 @@ PY
 # acknowledgement for it, so waiting for one cannot succeed. The wait never targets the restarted validator itself: it reads the other validators' logs.
 m2_is_archive_replica() { # validator
   local k
+  # Replication exists only where the devnet enabled the archive (EVM_ARCHIVE_ROOT: the H3 lane and the Q3 lane built on it, the M2a restore, the F7 mode). A lane
+  # without it (the F8 mixed lane) names no replicas at all, the nodes' operator status lists none, and there is no catch-up to wait for.
+  [ -n "${EVM_ARCHIVE_ROOT:-}" ] || return 1
   for k in $(seq 1 "$validators"); do
     [ "$k" = "$1" ] && continue
     case " $(archive_replicas_of "$k" "$validators") " in *" $1 "*) return 0 ;; esac
@@ -192,11 +195,9 @@ m2_is_archive_replica() { # validator
   return 1
 }
 
-m2_wait_archive_replica_catchup() {
-  local target=$1 startLine=$2 targetId latestHash source i targetLog peerAck nodeAck
-  targetId=$(evm_validator_id "$target") || return 1
-  targetLog="test-nodes/evm$target/debug.log"
-  latestHash=$(python3 - $(m2_online_validators) <<'PY'
+# The newest certified block (by root round) any online validator has admitted: the head a restarted replica must acknowledge.
+m2_latest_certified_hash() {
+  python3 - $(m2_online_validators) <<'PY'
 from pathlib import Path
 import re,sys
 best=(-1,'')
@@ -211,32 +212,74 @@ for node in sys.argv[1:]:
             best=(int(round_.group(1)),block.group(1))
 print(best[1])
 PY
-  )
+}
+
+# The number of a certified block, read from any online validator's execution client.
+m2_block_number() { # hash
+  local k n
+  for k in $(m2_online_validators); do
+    n=$(rpc "http://127.0.0.1:$((rethEthBase + k - 1))" eth_getBlockByHash "[\"0x$1\",false]" | pyget "['result']['number']") || continue
+    if [ -n "$n" ] && [ "$n" != None ]; then echo $((n)); return 0; fi
+  done
+  return 1
+}
+
+# m2_replica_brief <validator>: what the validator's operator status endpoint answers, one line (each replica's acknowledged height and error, or the HTTP
+# code and body of a refusal), for the wait's progress output.
+m2_replica_brief() {
+  local out code body
+  out=$(curl -sS -m 8 -w '\n%{http_code}' "http://$(evm_validator_rpc_addr "$1")/api/v1/operator/status" 2>&1) || { printf 'v%s: curl failed: %s\n' "$1" "$(echo "$out" | tr '\n' ' ' | cut -c1-200)"; return 0; }
+  code=${out##*$'\n'}; body=${out%$'\n'*}
+  if [ "$code" = 200 ]; then
+    printf 'v%s: %s\n' "$1" "$(printf '%s' "$body" | jq -c '[.replicas[]? | {r: .replica[-6:], h: .lastAcknowledgedHeight, e: (.error // "")}]' 2>&1 | cut -c1-240)"
+  else
+    printf 'v%s: HTTP %s %s\n' "$1" "$code" "$(printf '%s' "$body" | tr '\n' ' ' | cut -c1-200)"
+  fi
+}
+
+# m2_replica_acked <publisher> <replica peer id> <height>: succeeds when the publisher's operator status shows that replica durably acknowledged a block at or above
+# <height> and reports no transfer error for it. The status heights come from the durable frontier acknowledgements (archivewiring.OperatorStatus.Replicas).
+m2_replica_acked() {
+  curl -fsS -m 8 "http://$(evm_validator_rpc_addr "$1")/api/v1/operator/status" 2>/dev/null |
+    jq -e --arg r "$2" --argjson h "$3" '[.replicas[] | select(.replica == $r)] | (length > 0) and all(.lastAcknowledgedHeight >= $h and ((.error // "") == ""))' >/dev/null 2>&1
+}
+
+# m2_wait_archive_replica_catchup <validator> <unused> [head]: waits until the restarted validator is caught up as an archive replica through a certified head. The head
+# is the newest certified block when the validator was restarted (computed now if omitted). Caught up means two things, both read from the nodes' durable operator
+# status (not from a log line, which is emitted only when a publisher had to retry records a replica was behind on, so a replica that never fell behind never logs it):
+#   peer: every online validator that names this one as a replica reports that replica's last acknowledged height at or above the head's height, with no error;
+#   node: this validator's own two replicas have acknowledged that height too, i.e. it resumed replicating.
+# The second argument is kept for callers that still pass the log position of the restart.
+m2_wait_archive_replica_catchup() {
+  local target=$1 latestHash=${3:-} source i targetId peerAck nodeAck publishers r headNumber
+  targetId=$(evm_validator_id "$target") || return 1
+  [ -n "$latestHash" ] || latestHash=$(m2_latest_certified_hash)
   [ -n "$latestHash" ] || { echo "cannot find a certified archive head before restarting validator $target" >&2; return 1; }
-  echo "waiting for archive replica $target ($targetId) to acknowledge certified head $latestHash"
+  headNumber=$(m2_block_number "$latestHash") || { echo "cannot read the height of certified head $latestHash" >&2; return 1; }
+  echo "waiting for archive replica $target ($targetId) to acknowledge certified head $latestHash (height $headNumber)"
   for i in $(seq 1 120); do
-    peerAck=false
-    nodeAck=false
+    peerAck=true; nodeAck=true; publishers=0
     for source in $(m2_online_validators); do
       [ "$source" = "$target" ] && continue
-      if grep -Fq "msg=\"archive replica ack catch-up\" replica=$targetId block=$latestHash" "test-nodes/evm$source/debug.log" 2>/dev/null; then
-        peerAck=true
-        break
-      fi
+      case " $(archive_replicas_of "$source" "$validators") " in
+        *" $target "*) publishers=$((publishers + 1)); m2_replica_acked "$source" "$targetId" "$headNumber" || peerAck=false ;;
+      esac
     done
-    if tail -n +"$((startLine+1))" "$targetLog" 2>/dev/null | grep -F 'msg="archive replica ack catch-up"' >/dev/null; then
-      nodeAck=true
-    fi
+    [ "$publishers" -gt 0 ] || peerAck=false
+    for r in $(archive_replicas_of "$target" "$validators"); do
+      m2_replica_acked "$target" "$(evm_validator_id "$r")" "$headNumber" || nodeAck=false
+    done
     if $peerAck && $nodeAck; then
-      echo "archive replica $target caught up through $latestHash and resumed replication"
+      echo "archive replica $target caught up through $latestHash (height $headNumber) and resumed replication"
       return 0
     fi
     if [ $((i % 15)) -eq 0 ]; then
-      echo "still waiting for archive replica $target after ${i}s (peer_ack=$peerAck node_ack=$nodeAck)"
+      echo "still waiting for archive replica $target after ${i}s (peer_ack=$peerAck over $publishers publishers, node_ack=$nodeAck)"
+      for source in $(m2_online_validators); do m2_replica_brief "$source"; done
     fi
     sleep 1
   done
-  echo "archive replica $target did not resume with a current peer acknowledgment within 120s" >&2
+  echo "archive replica $target did not catch up through certified head $headNumber within 120s" >&2
   return 1
 }
 
@@ -246,6 +289,7 @@ PY
 # archive-replica catch-up wait after each restart (replicas that are down on purpose cannot acknowledge).
 m2_advance_authorities() {
   local epoch=$1 trustFile=$2 conf=${3:-$fullShardConf} ids=${4:-1 2 3 4} i offline rootBoot onlineValidators bootnodes startLine
+  local -a catchups=()
   [ "${SIGNING:-local}" = authority ] || return 0
   rootBoot=$(m2_root_addr 1) || return 1
   onlineValidators=$(m2_online_validators)
@@ -270,12 +314,18 @@ m2_advance_authorities() {
       bootnodes=$(evm_bootnodes_for_peers "$rootBoot" "$i" $onlineValidators) || return 1
       startLine=$(wc -l < "test-nodes/evm$i/debug.log")
       start_one_evm_validator "$i" "$validators" "$partitionID" "$rootBoot" engine-api rpc "$bootnodes" || return 1
-      if [ "${M2_ADVANCE_NO_REPLICA_WAIT:-0}" != 1 ] && m2_is_archive_replica "$i"; then
-        m2_wait_archive_replica_catchup "$i" "$startLine" || return 1
-      fi
+      [ "${M2_ADVANCE_NO_REPLICA_WAIT:-0}" = 1 ] || ! m2_is_archive_replica "$i" || catchups+=("$i:$startLine:$(m2_latest_certified_hash)")
     fi
     rm -f "test-nodes/post-m2a-evidence/restarting/$i"
     echo "authority $i advanced to root epoch $epoch"
+  done
+  # The replica catch-up is waited for after EVERY authority has advanced, not after each restart: until the other validators' authorities are at the
+  # new root epoch they refuse to sign in it ("signing-context-mismatch"), so with the EVM certifying a restarted validator cannot catch up while the
+  # rest are still on the old scope, and waiting for it before advancing them would wait for itself.
+  local entry rest
+  for entry in ${catchups[@]+"${catchups[@]}"}; do
+    i=${entry%%:*}; rest=${entry#*:}
+    m2_wait_archive_replica_catchup "$i" "${rest%%:*}" "${rest#*:}" || return 1
   done
 }
 

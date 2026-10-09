@@ -170,7 +170,7 @@ q3_activation() {
 
 q3_acknowledge() {
   local i
-  M2_ADVANCE_NO_REPLICA_WAIT=1 h3_advance_authorities 2 1 1 2 3 4 || { echo "authority advance to root epoch 2 / shard epoch 1 failed" >&2; return 1; }
+  h3_advance_authorities 2 1 1 2 3 4 || { echo "authority advance to root epoch 2 / shard epoch 1 failed" >&2; return 1; }
   for i in $(seq 1 180); do h3_registry_is 1 2 && break; sleep 1; done
   h3_registry_is 1 2 || { echo "registry did not reach shard epoch 1 / root epoch 2" >&2; return 1; }
   # the frozen parent and the acknowledgement are recorded BEFORE any user transaction of the new epoch
@@ -419,7 +419,7 @@ q3_supersede() {
   Q3_RECOVERY=1 q3_handoff_n 3 4 "$Q3_WEIGHTS_3" 1 "$Q3_DIR/cand-identities.json" || return 1
   q3_install_n 4 || return 1
   q3_activation_n 3 4 || return 1
-  M2_ADVANCE_NO_REPLICA_WAIT=1 h3_advance_authorities 4 3 1 2 3 4 || { echo "authority advance to root epoch 4 / shard epoch 3 failed" >&2; return 1; }
+  h3_advance_authorities 4 3 1 2 3 4 || { echo "authority advance to root epoch 4 / shard epoch 3 failed" >&2; return 1; }
   local i
   for i in $(seq 1 180); do h3_registry_is 3 4 && break; sleep 1; done
   h3_registry_is 3 4 || { echo "registry did not reach shard epoch 3 / root epoch 4 (shard epoch $(h3_slot "$h3_slot_shard"), root epoch $(h3_slot "$h3_slot_root"))" >&2; return 1; }
