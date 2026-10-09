@@ -24,6 +24,7 @@ import (
 	ethcrypto "github.com/ethereum/go-ethereum/crypto"
 	"github.com/spf13/cobra"
 	"github.com/unicitynetwork/bft-core/evmassign"
+	"github.com/unicitynetwork/bft-core/signingauthority"
 	"github.com/unicitynetwork/bft-go-base/types"
 )
 
@@ -82,7 +83,7 @@ func electionDeployment(path string) (evmassign.ElectionDeployment, error) {
 func newPosRelayerCmd() *cobra.Command {
 	root := &cobra.Command{Use: "pos-relayer", Short: "operator tooling for a primary candidate's EVM possession proofs"}
 
-	var candidate, deployment, keyFile, out string
+	var candidate, deployment, keyFile, out, authoritySocket, authorityCredential string
 	var attempt uint64
 	sign := &cobra.Command{
 		Use:   "sign-pop",
@@ -96,13 +97,31 @@ func newPosRelayerCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			key, err := readEVMKey(keyFile)
-			if err != nil {
-				return err
-			}
-			p, err := evmassign.SignEVMPoP(key, c, d, attempt)
-			if err != nil {
-				return err
+			var p evmassign.EVMPoP
+			switch {
+			case keyFile != "" && (authoritySocket != "" || authorityCredential != ""):
+				return errBothKeyHolders
+			case authoritySocket != "" || authorityCredential != "":
+				if authoritySocket == "" || authorityCredential == "" {
+					return fmt.Errorf("%w: --authority-socket needs --authority-credential", ErrPosRelayer)
+				}
+				// the validator's key never leaves its signing authority: it recomputes the possession digest from the typed candidate
+				op, err := openOperator(authoritySocket, authorityCredential)
+				if err != nil {
+					return err
+				}
+				defer func() { _ = op.Close() }()
+				if p, err = op.SignElectionPoP(cmd.Context(), signingauthority.ElectionPoPRequest{Candidate: c, Deployment: d, Attempt: attempt}); err != nil {
+					return fmt.Errorf("the signing authority refused the possession proof: %w", err)
+				}
+			default:
+				key, err := readEVMKey(keyFile)
+				if err != nil {
+					return err
+				}
+				if p, err = evmassign.SignEVMPoP(key, c, d, attempt); err != nil {
+					return err
+				}
 			}
 			return writeRelayerJSON(out, toPoPJSON(p))
 		},
@@ -110,6 +129,8 @@ func newPosRelayerCmd() *cobra.Command {
 	sign.Flags().StringVar(&candidate, "candidate", "", "the primary candidate (canonical encoding, hex or raw)")
 	sign.Flags().StringVar(&deployment, "pos-deployment", "", "the P85 deployment file, with the election pinned")
 	sign.Flags().StringVar(&keyFile, "evm-key-file", "", "file holding the member's EVM secret key as 32 bytes of hex")
+	sign.Flags().StringVar(&authoritySocket, "authority-socket", "", "operator socket of the signing authority that holds the member's key (instead of --evm-key-file)")
+	sign.Flags().StringVar(&authorityCredential, "authority-credential", "", "operator credential of that authority")
 	sign.Flags().Uint64Var(&attempt, "attempt", 0, "the attempt the election reserved the result under")
 	sign.Flags().StringVar(&out, "out", "", "output file (default stdout)")
 

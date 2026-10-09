@@ -1,6 +1,7 @@
 package posrelayer
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"errors"
@@ -78,10 +79,30 @@ func BondCalldata(id uint64) ([]byte, error) { return writes.Pack("bond", id) }
 
 // Joiner is an identity that is not yet in the system: its owner, root and EVM keys, withdrawal and payee addresses, and its two peer ids.
 type Joiner struct {
-	OwnerKey, RootKey, EVMKey *ecdsa.PrivateKey
-	Withdrawal, Payee         [20]byte
-	RootNodeID, EVMNodeID     string
-	Expiry                    uint64 // UC seconds the delegation is valid until
+	OwnerKey, RootKey     *ecdsa.PrivateKey
+	EVM                   EVMPossessor
+	Withdrawal, Payee     [20]byte
+	RootNodeID, EVMNodeID string
+	Expiry                uint64 // UC seconds the delegation is valid until
+}
+
+// EVMPossessor holds a joiner's EVM key: it names the key and signs the delegation possession (P85 v5 section 2). A validator whose key
+// lives in a signing authority uses the authority's SignDelegationPossession, which recomputes the digest itself; LocalEVM signs with a key
+// the operator holds.
+type EVMPossessor interface {
+	PublicKey() []byte
+	Possess(ctx context.Context, network, chain [32]byte, election [20]byte, r DelegationRequest) ([]byte, error)
+}
+
+type localEVM struct{ key *ecdsa.PrivateKey }
+
+// LocalEVM is an EVMPossessor over a key the operator holds (the contracts' own tests, devnets with local signing).
+func LocalEVM(key *ecdsa.PrivateKey) EVMPossessor { return localEVM{key} }
+
+func (l localEVM) PublicKey() []byte { return compressed(l.key) }
+
+func (l localEVM) Possess(_ context.Context, network, chain [32]byte, election [20]byte, r DelegationRequest) ([]byte, error) {
+	return signDigest(l.key, evmassign.DelegationDigest(network, chain, election, r))
 }
 
 func compressed(k *ecdsa.PrivateKey) []byte { return ethcrypto.CompressPubkey(&k.PublicKey) }
@@ -108,30 +129,19 @@ func RegisterDigest(network [32]byte, chainID *big.Int, custodyAddr, owner, with
 		ethcrypto.Keccak256(rootKey), word(nonce))
 }
 
-// DelegationRequest is the payload admitDelegation takes.
-type DelegationRequest struct {
-	Id         uint64
-	Generation uint64
-	Binding    struct {
-		RootNodeID    [32]byte
-		RootKey       []byte
-		EvmNodeID     [32]byte
-		EvmKey        []byte
-		OperatorPayee ethcommon.Address
-	}
-	RoleNonce       uint64
-	DelegationNonce uint64
-	Expiry          uint64
+// DelegationRequest is the payload admitDelegation takes (evmassign's: the authority signs the same type).
+type DelegationRequest = evmassign.DelegationRequest
+
+func chainWord(chainID *big.Int) [32]byte {
+	var w [32]byte
+	chainID.FillBytes(w[:])
+	return w
 }
 
 // DelegationDigest is what both the owner and the EVM key sign (ElectionPolicy.delegationDigest), computed here so that the signature never
 // depends on what an RPC says the digest is.
 func DelegationDigest(network [32]byte, chainID *big.Int, election [20]byte, r DelegationRequest) [32]byte {
-	domain := ethcrypto.Keccak256Hash([]byte("unicity.p85.admitDelegation"))
-	chain := chainID.FillBytes(make([]byte, 32))
-	return ethcrypto.Keccak256Hash(domain[:], network[:], chain, addrWord(election), word(r.Id), word(r.Generation), r.Binding.RootNodeID[:],
-		ethcrypto.Keccak256(r.Binding.RootKey), r.Binding.EvmNodeID[:], ethcrypto.Keccak256(r.Binding.EvmKey), addrWord(r.Binding.OperatorPayee),
-		word(r.RoleNonce), word(r.DelegationNonce), word(r.Expiry))
+	return evmassign.DelegationDigest(network, chainWord(chainID), election, r)
 }
 
 func (j Joiner) request(id uint64) (DelegationRequest, error) {
@@ -143,7 +153,7 @@ func (j Joiner) request(id uint64) (DelegationRequest, error) {
 	var r DelegationRequest
 	r.Id, r.Generation, r.Expiry = id, 1, j.Expiry
 	r.Binding.RootNodeID, r.Binding.RootKey = rw, compressed(j.RootKey)
-	r.Binding.EvmNodeID, r.Binding.EvmKey = ew, compressed(j.EVMKey)
+	r.Binding.EvmNodeID, r.Binding.EvmKey = ew, j.EVM.PublicKey()
 	r.Binding.OperatorPayee = ethcommon.Address(j.Payee)
 	return r, nil
 }
@@ -206,7 +216,7 @@ func (j Joiner) AdmitCalldata(ctx context.Context, rd Reader, m Modules, chainID
 		return nil, fmt.Errorf("%w: the election's delegation digest is not the one computed here", ErrBuild)
 	}
 	ownerSig, err1 := signDigest(j.OwnerKey, digest)
-	evmSig, err2 := signDigest(j.EVMKey, digest)
+	evmSig, err2 := j.EVM.Possess(ctx, network, chainWord(chainID), m.Election, r)
 	if err := errors.Join(err1, err2); err != nil {
 		return nil, err
 	}
@@ -286,4 +296,25 @@ func (s Sender) Send(ctx context.Context, to [20]byte, value *big.Int, data []by
 		}
 	}
 	return tx.Hash(), fmt.Errorf("transaction %s was not mined within %s", tx.Hash(), wait)
+}
+
+// DecodeAdmit reads admitDelegation calldata back: the request and the two signatures (for tests and for an operator checking what a
+// joiner's transaction carries).
+func DecodeAdmit(data []byte) (r DelegationRequest, ownerSig, evmSig []byte, err error) {
+	if len(data) < 4 || !bytes.Equal(data[:4], writes.Methods["admitDelegation"].ID) {
+		return r, nil, nil, fmt.Errorf("%w: not admitDelegation calldata", ErrBuild)
+	}
+	out, err := writes.Methods["admitDelegation"].Inputs.Unpack(data[4:])
+	if err != nil {
+		return r, nil, nil, err
+	}
+	if len(out) != 3 {
+		return r, nil, nil, fmt.Errorf("%w: admitDelegation takes three arguments", ErrBuild)
+	}
+	if r, err = decode[DelegationRequest](out[0]); err != nil {
+		return r, nil, nil, err
+	}
+	ownerSig, _ = out[1].([]byte)
+	evmSig, _ = out[2].([]byte)
+	return r, ownerSig, evmSig, nil
 }

@@ -108,7 +108,7 @@ func TestRelayerCalldataIsByteIdenticalToTheContractsTests(t *testing.T) {
 	})
 
 	j := f.RelayerWrites.Joiner
-	joiner := Joiner{OwnerKey: key(t, j.OwnerKey), RootKey: key(t, j.RootKey), EVMKey: key(t, j.EvmKey),
+	joiner := Joiner{OwnerKey: key(t, j.OwnerKey), RootKey: key(t, j.RootKey), EVM: LocalEVM(key(t, j.EvmKey)),
 		RootNodeID: j.RootNodeId, EVMNodeID: j.EvmNodeId, Expiry: j.Expiry}
 	copy(joiner.Withdrawal[:], mustHex(t, j.Withdrawal))
 	copy(joiner.Payee[:], mustHex(t, j.Payee))
