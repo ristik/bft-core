@@ -67,7 +67,7 @@ p85_sender_key() { echo "$P85_DIR/joiner/owner.key"; }   # funded in the genesis
 
 # ---- steps ------------------------------------------------------------------------------------------------------------------------------------
 p85_baseline() {
-  h3_progress baseline 8 || return 1
+  p85_progress baseline 8 || return 1
   [ -s "${EVM_B1_PROFILE:-}" ] || { echo "no B1 profile: the lane runs on the fresh-B1 stack" >&2; return 1; }
   h3_registry_is 0 1 || return 1
   q3_execution_pins || return 1
@@ -295,7 +295,7 @@ p85_restarts() {
   stop_one_evm_validator 1 2>/dev/null || true
   M2_ADVANCE_NO_REPLICA_WAIT=1 h3_advance_authorities 3 2 1 || return 1
   h3_paid 3 || { echo "post-restart paid transaction was not certified" >&2; return 1; }
-  h3_progress after-restarts 8
+  p85_progress after-restarts 8
 }
 
 P85_STEPS="p85_baseline p85_joiner_nodes p85_joiner_onboard p85_election_reserved p85_proofs p85_controls p85_handoff p85_install_activation p85_j_stalls p85_recovery p85_resolved p85_restarts"

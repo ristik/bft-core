@@ -115,3 +115,21 @@ p85_selftest() {
   rm -rf "$t"
   return $ok
 }
+
+# p85_progress <label> [seconds before the second look] [window]: the lane has no aggregator shards (h3_progress needs them), so progress is the
+# root round and the EVM shard's certified IR round (partition 8) both advancing, polled for up to the window.
+p85_progress() {
+  local label=$1 pause=${2:-10} limit=${3:-35} q='[.roundNumber, (.partitionShards[] | select(.partitionId==8) | .roundNumber)] | @tsv'
+  local r0 e0 r1 e1 waited=0
+  read -r r0 e0 < <(h3_root_info | jq -r "$q") || return 1
+  sleep "$pause"
+  while :; do
+    read -r r1 e1 < <(h3_root_info | jq -r "$q") || return 1
+    if [ "$r1" -gt "$r0" ] && [ "$e1" -gt "$e0" ]; then
+      echo "  progress $label: root round $r0 -> $r1, EVM certified IR round $e0 -> $e1"; return 0
+    fi
+    waited=$((waited + 2)); [ "$waited" -lt "$limit" ] || break
+    sleep 2
+  done
+  echo "  no progress $label: root round $r0 -> $r1, EVM certified IR round $e0 -> $e1" >&2; return 1
+}
