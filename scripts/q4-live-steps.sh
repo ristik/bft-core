@@ -124,15 +124,18 @@ q4_row_baseline() { f8_trace >/dev/null && q4_commits_advance "$Q4_HEAVY_ROOT" 6
 # heal releases the stale traffic so that an isolated root commits again.
 q4_row_isolate() {
   local expect=$1; shift
-  local iso="$*" others observer
+  local iso="$*" others observer rule
+  # one rule name per isolation: the shim keeps a rule's hit counters AND its retired flag across control documents that reuse its name, and a release retires the rule, so
+  # a reused name would pass its traffic untouched while the old hit count still satisfied q4_heal's "something was held" check
+  rule=cut$(printf '%s' "$iso" | tr -d ' ')
   others=$(q4_without "$@" | tr '\n' ' ')
   observer=${others%% *}
-  q4_partition cut "$iso" "$others" || return 1
+  q4_partition "$rule" "$iso" "$others" || return 1
   case "$expect" in
     progress) q4_commits_advance "$observer" "$Q4_RECOVER_SECONDS" 3 || return 1 ;;
     stall) q4_stalled "$observer" "$Q4_STALL_SECONDS" || return 1 ;;
   esac
-  q4_heal cut "$Q4_ROOTS" || return 1
+  q4_heal "$rule" "$Q4_ROOTS" || return 1
   q4_commits_advance "${iso%% *}" "$Q4_RECOVER_SECONDS" 3
 }
 q4_row_light_partition() { q4_row_isolate progress "$(q4_lights | head -n 1)"; }   # A: 6+1+1 = 8 of 9
