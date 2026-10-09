@@ -818,7 +818,7 @@ func (s recordsSource) Records(from uint64, max int) ([]rootrecords.Record, erro
 
 // shardMembers answers whether a peer is a member of a shard's installed configuration.
 type shardMembers interface {
-	IsShardValidator(types.PartitionID, types.ShardID, peer.ID) bool
+	IsShardValidator(types.PartitionID, types.ShardID, string) bool
 }
 
 // recordsFeedAllowed is who the records feed serves: the validators the shard configurations named when the root started, the other roots,
@@ -833,7 +833,7 @@ func recordsFeedAllowed(static map[peer.ID]struct{}, shardConfs []*types.Partiti
 			return true
 		}
 		for _, conf := range shardConfs {
-			if members.IsShardValidator(conf.PartitionID, conf.ShardID, id) {
+			if members.IsShardValidator(conf.PartitionID, conf.ShardID, id.String()) {
 				return true
 			}
 		}

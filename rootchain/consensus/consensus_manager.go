@@ -1820,14 +1820,14 @@ func selectRandomNodeIdsFromSignatureMap(m map[string]hex.Bytes, count int) (nod
 	return nodes
 }
 
-// IsShardValidator reports whether id is a member of the shard's INSTALLED configuration: the one this root verifies the shard's requests
+// IsShardValidator reports whether nodeID (the validator's node ID, a peer ID string in production) is a member of the shard's INSTALLED configuration: the one this root verifies the shard's requests
 // under, which follows the assignment steps as they activate. A shard in recovery or unknown to the root has no members here.
-func (x *ConsensusManager) IsShardValidator(partition types.PartitionID, shard types.ShardID, id peer.ID) bool {
+func (x *ConsensusManager) IsShardValidator(partition types.PartitionID, shard types.ShardID, nodeID string) bool {
 	si, err := x.ShardInfo(partition, shard)
 	if err != nil {
 		return false
 	}
-	return si.IsMember(id.String())
+	return si.IsMember(nodeID)
 }
 
 func (x *ConsensusManager) ShardInfo(partition types.PartitionID, shard types.ShardID) (*storage.ShardInfo, error) {

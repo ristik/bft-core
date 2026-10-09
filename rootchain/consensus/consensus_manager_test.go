@@ -29,6 +29,7 @@ import (
 	testcertificates "github.com/unicitynetwork/bft-core/internal/testutils/certificates"
 	testnetwork "github.com/unicitynetwork/bft-core/internal/testutils/network"
 	testobservability "github.com/unicitynetwork/bft-core/internal/testutils/observability"
+	"github.com/unicitynetwork/bft-core/internal/testutils/q3fixture"
 	"github.com/unicitynetwork/bft-core/internal/testutils/trustbase"
 	"github.com/unicitynetwork/bft-core/keyvaluedb/memorydb"
 	"github.com/unicitynetwork/bft-core/network"
@@ -1458,9 +1459,72 @@ func Test_ConsensusManager_RestoreVote(t *testing.T) {
 func Test_ConsensusManager_IsShardValidator(t *testing.T) {
 	cm, rootNode, shardNodes := initConsensusManager(t, testnetwork.NewRootMockNetwork())
 	for _, n := range shardNodes {
-		require.True(t, cm.IsShardValidator(partitionID, shardID, n.PeerConf.ID), "a member of the installed configuration")
+		require.True(t, cm.IsShardValidator(partitionID, shardID, n.PeerConf.ID.String()), "a member of the installed configuration")
 	}
-	require.False(t, cm.IsShardValidator(partitionID, shardID, rootNode.PeerConf.ID), "a root is not a member of the shard")
-	require.False(t, cm.IsShardValidator(partitionID, shardID, testutils.NewTestNode(t).PeerConf.ID), "a stranger")
-	require.False(t, cm.IsShardValidator(partitionID+1, shardID, shardNodes[0].PeerConf.ID), "an unknown shard has no members")
+	require.False(t, cm.IsShardValidator(partitionID, shardID, rootNode.PeerConf.ID.String()), "a root is not a member of the shard")
+	require.False(t, cm.IsShardValidator(partitionID, shardID, testutils.NewTestNode(t).PeerConf.ID.String()), "a stranger")
+	require.False(t, cm.IsShardValidator(partitionID+1, shardID, shardNodes[0].PeerConf.ID.String()), "an unknown shard has no members")
+}
+
+// The root serves the members of the INSTALLED configuration, and a weighted EVM assignment (which installs members and verifiers and no
+// unit request context) is installed like any other: its members are validators, the pre-boundary candidate is not until the assignment is
+// installed, and a validator the assignment does not name never is. Reverting IsShardValidator to SignerWeight fails the weighted half.
+func TestIsShardValidatorFollowsAWeightedAssignmentsInstall(t *testing.T) {
+	c := newQ3Cluster(t, q3fixture.Options{Assignment: true})
+	anchor := c.activateAll()
+	r := c.replicas[0]
+	key := types.PartitionShardID{PartitionID: q3fixture.PartitionID, ShardID: types.ShardID{}.Key()}
+	oldConf, err := r.orchestration.ShardConfigs(anchor.Slot)
+	require.NoError(t, err)
+	newConf, err := r.orchestration.ShardConfigs(anchor.Slot + 1)
+	require.NoError(t, err)
+	named := func(conf *types.PartitionDescriptionRecord) map[string]bool {
+		out := map[string]bool{}
+		for _, v := range conf.Validators {
+			out[v.NodeID] = true
+		}
+		return out
+	}
+	was, now := named(oldConf[key]), named(newConf[key])
+	var candidates []string // named by the successor assignment, not by the installed one
+	for id := range now {
+		if !was[id] {
+			candidates = append(candidates, id)
+		}
+	}
+	require.NotEmpty(t, candidates, "the successor assignment names a validator the installed one does not")
+	member := func(id string) bool { return r.manager.IsShardValidator(q3fixture.PartitionID, types.ShardID{}, id) }
+	for id := range was {
+		require.True(t, member(id), "a member of the installed (retired) configuration")
+	}
+	for _, id := range candidates {
+		require.False(t, member(id), "a candidate whose assignment is not installed yet is refused")
+	}
+
+	// the first block past the boundary installs the weighted assignment on the shard (no unit request context); the committed state takes it
+	parent, err := r.manager.blockStore.Block(anchor.Slot)
+	require.NoError(t, err)
+	block := &drctypes.BlockData{Version: 2, Epoch: 2, Round: 7, Anchor: anchor, Payload: &drctypes.Payload{Version: 2}}
+	executed, err := parent.Extend(block, r.manager.irReqVerifier, r.orchestration, crypto.SHA256, r.manager.log)
+	require.NoError(t, err)
+	weighted := executed.ShardState.States[key]
+	require.Nil(t, weighted.RequestContext(), "a weighted configuration has no unit request context")
+	committed, err := r.manager.ShardInfo(q3fixture.PartitionID, types.ShardID{})
+	require.NoError(t, err)
+	var root *storage.ExecutedBlock // the committed root: the block whose state the manager's ShardInfo is
+	for round := uint64(0); round <= anchor.Slot && root == nil; round++ {
+		if b, err := r.manager.blockStore.Block(round); err == nil && b.ShardState.States[key] == committed {
+			root = b
+		}
+	}
+	require.NotNil(t, root, "the committed root block")
+	root.ShardState.States[key] = weighted
+
+	for id := range now {
+		require.True(t, member(id), "a member of the installed weighted assignment")
+	}
+	for id := range was {
+		require.Equal(t, now[id], member(id), "a validator the assignment dropped is refused")
+	}
+	require.False(t, r.manager.IsShardValidator(q3fixture.PartitionID, types.ShardID{}, testutils.NewTestNode(t).PeerConf.ID.String()), "a peer no assignment names")
 }

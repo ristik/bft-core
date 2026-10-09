@@ -10,8 +10,9 @@ import (
 
 type fakeMembers map[peer.ID]bool
 
-func (f fakeMembers) IsShardValidator(partition types.PartitionID, _ types.ShardID, id peer.ID) bool {
-	return partition == 8 && f[id]
+func (f fakeMembers) IsShardValidator(partition types.PartitionID, _ types.ShardID, nodeID string) bool {
+	id, err := peer.Decode(nodeID)
+	return err == nil && partition == 8 && f[id]
 }
 
 // The records feed serves the validators named at the root's start, the other roots, and the members of each configured shard's installed
