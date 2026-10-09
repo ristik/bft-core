@@ -69,15 +69,11 @@ h3_evm_certifies_after() { # a certified EVM IR round above $1 within $2 seconds
 
 
 
-# Coupled committee changes: every handoff that changes the EVM assignment also replaces one root entity. H3_BIND_ROOTS lists
-# the successor root indices in the same order as the successor EVM validator indices passed to h3_build_assignment: root i is
-# the entity whose delegated EVM validator is evm j at the same position.
-H3_BIND_ROOTS=""
-
-# h3_build_assignment <tag> <successor ids...>: context, one proof per successor key, assemble. No EVM parent is named anywhere:
-# the root binds it when it orders the Prepare, after the proofs.
-# Writes $H3_DIR/<tag>-assignment.json; leaves the propose exit status in $?.
-
+# Coupled committee changes: every handoff that changes the EVM assignment also replaces one root entity. The assignment is built by the Q3
+# flow's q3_build_assignment (h3-q3-lib.sh: context, authority-made proofs of possession, identities, authorization, assemble; the exact recovery K
+# is derived from the root's context and carries none of them): its successor ids are EVM validator indices, and H3_BIND_ROOTS lists the successor
+# root indices in the same order, so root i is the entity whose delegated EVM validator is evm j at the same position. No EVM parent is named
+# anywhere: the root binds it when it orders the Prepare.
 
 # A committed H for the old epoch since the start of the retry loop, read from every root. Dropped plans are NOT a verdict on the
 # current attempt: a root keeps older endorsed plans cached and logs "dropped" whenever it leads a round in which one is stale, so
@@ -136,7 +132,7 @@ h3_join_s1() {
   h3_q3_start_joiner 5 1 3 trust-base-epoch3.json
 }
 h3_step "joiner evm5 and root 5 start before the Commit: root follower, shard node staging-only, execution client paired" h3_join_s1
-h3_bad_pop() {
+h3_bad_pop_body() {
   local start
   Q3_NEXT_EPOCH=3 Q3_ASSIGN_TAG=bad Q3_SUFFIX=-bad Q3_ENTITIES="1 2 3 5" Q3_INCUMBENT=$H3_INCUMBENT
   q3_build_assignment bad 1 2 3 5 || return 1
@@ -157,6 +153,13 @@ PY
   # refused at plan time, before any intent, Prepare or endorsement: nothing was ordered and the epoch did not move
   ! tail -n +"$((start+1))" "test-nodes/root$(h3_first_root)/debug.log" | grep -Eqi 'handoff (prepare|freeze|endorse)' || return 1
   [ "$(h3_root_info | jq -r '.epochNumber')" = 2 ]
+}
+# the per-handoff Q3_* settings of the body never outlive it, whatever path it returns by
+h3_bad_pop() {
+  local rc
+  h3_bad_pop_body; rc=$?
+  unset Q3_NEXT_EPOCH Q3_ASSIGN_TAG Q3_SUFFIX Q3_ENTITIES Q3_INCUMBENT
+  return $rc
 }
 h3_step "EVM proposal with a bad proof of possession is refused before any Prepare" h3_bad_pop
 
@@ -366,7 +369,7 @@ h3_late_s2_ack_refused() {
   h3_enroll_authority 6 2 || { echo "enrolling the evm6 authority against the s=2 configuration failed" >&2; return 1; }
   h3_restore_validator 6 1 || true            # the s=2 key tries to acknowledge late
   h3_assert_rejected "$id6" "late s=2 acknowledgement from evm6" 480 test-nodes/evm6/debug.log || return 1
-  h3_registry_is 3 5                          # the registry shows s=3's folded acknowledgement, not s=2's
+  h3_registry_is 3 5                          # the registry shows the recovery K's folded acknowledgement (shard epoch 3), not s=2's
 }
 h3_step "s=2's late acknowledgement does not succeed (refused at the root when the node reaches one, otherwise at the archive: the output says which)" h3_late_s2_ack_refused
 h3_final() {
@@ -374,7 +377,7 @@ h3_final() {
   H3_ONLINE="1 2 3"
   h3_paid 5 && h3_mint 5 && h3_verify_mint 5 3
 }
-h3_step "certify and verify a paid mint under s=3 (epoch-5 trust base, s=3 PDR)" h3_final
+h3_step "certify and verify a paid mint under the recovery K (epoch-5 trust base, shard epoch 3 PDR)" h3_final
 h3_step "aggregators progressed through the whole lane" h3_progress final 8
 echo "H3 acceptance lane: all steps PASSED"
 # A green lane stops what it started too: the joiners' and restored nodes are not known to the devnet's own cleanup, and a process left running
