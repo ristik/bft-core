@@ -850,6 +850,11 @@ func (x *ConsensusManager) stateHistory() abdrc.HistoricalTrustBases {
 	return x.recoveryHistory
 }
 
+// recoveryVerifier is the verifier of the replacement block store of a recovery: the manager's own, with its request history already carried.
+func (x *ConsensusManager) recoveryVerifier(store *storage.BlockStore) (*IRChangeReqVerifier, error) {
+	return newRecoveryVerifier(x.params, store, x.irReqVerifier)
+}
+
 // newRecoveryVerifier is the verifier of a recovery's replacement block store, with the request history of the verifier it replaces already carried: the recovery
 // blocks are executed with it, and a verifier without the history judges them under the legacy dispatch.
 func newRecoveryVerifier(params *Parameters, store *storage.BlockStore, replaced *IRChangeReqVerifier) (*IRChangeReqVerifier, error) {
@@ -1655,7 +1660,7 @@ func (x *ConsensusManager) onStateResponse(ctx context.Context, rsp *abdrc.State
 	}
 	// create new verifier; it executes the recovery blocks below, so it must already select the view-aware branch (a weighted EVM assignment has no unit
 	// request context on its ShardInfo: under the legacy dispatch every change request of that shard is refused, and the recovering node never catches up)
-	reqVerifier, err := newRecoveryVerifier(x.params, blockStore, x.irReqVerifier)
+	reqVerifier, err := x.recoveryVerifier(blockStore)
 	if err != nil {
 		return fmt.Errorf("verifier construction failed: %w", err)
 	}
