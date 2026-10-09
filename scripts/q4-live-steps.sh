@@ -621,7 +621,7 @@ q4_first_successor_held() {
     e=$(q3_signers_of "$r" 2>/dev/null | jq -r .epoch 2>/dev/null)
     [ "$e" != 3 ] || { echo "root $r reached an epoch-3 certificate while every successor proposal was held" >&2; return 1; }
   done
-  echo "while held: committed rounds constant at $rounds1for 10 s, no epoch-3 certificate at any root"
+  echo "while held: committed rounds constant at ${rounds1}for 10 s, no epoch-3 certificate at any root"
   python3 - "$Q4_SHIM_DIR" $H3_ROOTS <<'PY' | tee "$Q4_DIR/first-successor-proposal.txt" || return 1
 import json, os, sys
 first = None
