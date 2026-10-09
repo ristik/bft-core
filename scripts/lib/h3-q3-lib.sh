@@ -44,7 +44,11 @@ h3_q3_handoff() { # tag epoch "successor entities" [recovery]
   if [ -n "$recovery" ]; then Q3_RECOVERY=1; Q3_SUPERSEDE=1; else unset Q3_RECOVERY Q3_SUPERSEDE; fi
   h3_retry_handoff $((epoch - 1)) q3_attempt; rc=$?
   unset Q3_NEXT_EPOCH Q3_ASSIGN_TAG Q3_SUFFIX Q3_ENTITIES Q3_INCUMBENT Q3_RECOVERY Q3_SUPERSEDE
-  return $rc
+  [ "$rc" = 0 ] || return $rc
+  # A Q3 activation is not archived as a bundle: the restore pin (scripts/h4-restore-pin) is told this epoch's V3 body identity, an operator
+  # anchor the restored node compares with its verified history (it refuses to start on a mismatch)
+  H4_RESTORE_BODY_IDS="${H4_RESTORE_BODY_IDS:+$H4_RESTORE_BODY_IDS,}$epoch=$(tr -d '[:space:]' <"$H3_DIR/v3-body-id-$tag.txt")"
+  export H4_RESTORE_BODY_IDS
 }
 
 # The same-members configuration-only handoff: no EVM assignment, the committee and its unit weights unchanged.
