@@ -362,9 +362,6 @@ m2_config_only_handoff() { # epoch roots oldRpcs (the roots' RPC endpoints are t
   m2_measure_pause "$oldEpoch" "$epoch"
 }
 
-# M2_HANDOFF_MODE: config-only (default on registry layout 2) or rotate (key-replacing, layout 1 only: layout 2
-# enforces coupled validator-set changes, which this root-only rotation is not).
-
 # The #261 comparison needs both paid and idle certified blocks on each side of
 # the handoff. Do not infer idleness from an empty mempool or a short interval:
 # require a zero-transaction EL block that the active BFT node admitted in this
