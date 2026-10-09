@@ -578,6 +578,13 @@ func weightedEVM(conf *types.PartitionDescriptionRecord) bool {
 	return slices.ContainsFunc(conf.Validators, func(v *types.NodeInfo) bool { return v != nil && v.Stake != 1 })
 }
 
+// IsMember reports whether nodeID is a member of the INSTALLED configuration, by the installed verifiers. Unlike SignerWeight it does not
+// need a unit request context, so it answers for a weighted EVM assignment too (which installs members and verifiers and no context).
+func (si *ShardInfo) IsMember(nodeID string) bool {
+	_, ok := si.trustBase[nodeID]
+	return ok
+}
+
 // RequestContext is the immutable request quorum context of the installed configuration (nil until resetTrustBase ran).
 func (si *ShardInfo) RequestContext() *quorumweight.RequestContext { return si.requestCtx }
 
