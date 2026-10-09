@@ -25,6 +25,10 @@ f8_require_pin() {
   local rev
   rev=$(git -C "$F8_SRC" rev-parse HEAD)
   [ "$rev" = "$F8_PIN" ] || { echo "rugregator pin mismatch: $rev != $F8_PIN" >&2; return 1; }
+  # The aggregator partitions run proof_type=aggregator_rsmt_v1, so the aggregator must attach the envelope: the pinned binary reads
+  # AGGREGATOR_CONSISTENCY_PROOF_MODE (default off, a null proof). A binary that does not know that setting would send no proof and the root would
+  # reject every state-changing block after the first (the first is verified against no previous state root and skipped).
+  "$F8_BIN" --help 2>&1 | grep -q 'AGGREGATOR_CONSISTENCY_PROOF_MODE' || { echo "RUGREGATOR_BIN does not read AGGREGATOR_CONSISTENCY_PROOF_MODE" >&2; return 1; }
   echo "rugregator commit=$rev binary_sha256=$(shasum -a 256 "$F8_BIN" | awk '{print $1}')"
 }
 
@@ -69,7 +73,7 @@ f8_start_one() {
     AGGREGATOR_SIG_KEY="$sig" AGGREGATOR_DB_PATH="$home/db" \
     AGGREGATOR_SMT_BACKEND=disk AGGREGATOR_ROUND_DURATION_MS=1000 \
     AGGREGATOR_FAKE_STATE_TRANSITIONS=false AGGREGATOR_UC_TIMEOUT_MS=30000 \
-    AGGREGATOR_BATCH_LIMIT=100000 AGGREGATOR_CONSISTENCY_PROOFS=true RUST_LOG=debug \
+    AGGREGATOR_BATCH_LIMIT=100000 AGGREGATOR_CONSISTENCY_PROOF_MODE=rsmt RUST_LOG=debug \
     "$F8_BIN" >>"$F8_LOG_DIR/${name}.log" 2>&1 &
   F8_PIDS[$i]=$!
   echo "${F8_PIDS[$i]}" >"$home/pid"
