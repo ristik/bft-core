@@ -240,9 +240,10 @@ stop_one_evm_validator 4 2>/dev/null || true
 # 4. Acknowledge with s=1: restart retained evm3 and restore evm5; certify the ack and a paid mint.
 h3_ack_s1() {
   H3_ONLINE="1 2 3 5"
-  # After s=1 evm4 is retired: a node refuses to start naming it as an archive replica (#365), so the restarts below name the s=1
-  # candidates (evm5 joins; evm1 is never a replica candidate, as in the default pool).
-  export EVM_ARCHIVE_REPLICA_POOL="2 3 5"
+  # After s=1 evm4 is retired: a node refuses to start naming it as an archive replica (#365), so the restarts below name the s=1 set.
+  # Each validator names the next two in pool order, and the product refuses a replica pair change that keeps no acknowledging replica:
+  # the default pool gave 1->2,3  2->3,4  3->4,1; this pool gives 1->2,3  2->3,5  3->5,1, each retaining one (evm5 joins: 5->1,2).
+  export EVM_ARCHIVE_REPLICA_POOL="1 2 3 5"
   # The retained validators' authorities (1 and 2 running, 3 held down) advance to the activated scope (root epoch 3, shard epoch 1)
   # and their nodes restart with the new sessions; the joiner's authority is enrolled against the activated configuration.
   h3_advance_authorities 3 1 1 2 3 || { echo "authority advance to root epoch 3 / shard epoch 1 failed" >&2; return 1; }
@@ -289,13 +290,15 @@ h3_join_s2() {
   build/ubft root-node init --home test-nodes/root6 -g >/dev/null 2>&1 || true
   generate_log_configuration "test-nodes/root6/"
   h3_q3_trust_base 4 "1 2 5 6" || return 1
-  h3_q3_start_joiner 6 2 4 trust-base-epoch4.json
+  # s=2 set {1,2,5,6}: 1->2,5  2->5,6  5->6,1 (each retains one replica of the s=1 pairs)
+  EVM_ARCHIVE_REPLICA_POOL="1 2 5 6" h3_q3_start_joiner 6 2 4 trust-base-epoch4.json
 }
 h3_step "joiner evm6 and root 6 start before the s=2 Commit" h3_join_s2
 h3_evm_s2() {
   h3_q3_handoff s2 4 "1 2 5 6" || return 1   # candidate, the four successor members' readiness (evm6's among them), plan, Commit
   stop_one_evm_validator 6 || return 1       # the joiner fails after the Commit ...
   stop_one_evm_validator 5 || return 1       # ... and so does a carried-over member: J keeps evm1 and evm2, below its quorum of 3
+  export EVM_ARCHIVE_REPLICA_POOL="1 2 5 6"
   h3_q3_activate_coupled 4 3 6 || return 1
 }
 h3_step "coupled s=2 (root 3->6, J={1,2,5,6}) committed with all readiness; evm5 and evm6 fail after the Commit" h3_evm_s2
@@ -314,6 +317,7 @@ h3_step "EVM waits (no certification) while root and aggregators progress" h3_s2
 #    committee the chain already acknowledged). The retired s=2 set's late acknowledgement is then refused.
 h3_supersede_s3() {
   h3_q3_handoff s3 5 "1 2 3 5" recovery || return 1   # root 6 -> 3, committee {1,2,3,5}: the coupled image of K
+  export EVM_ARCHIVE_REPLICA_POOL="1 2 3 5"   # back to the s=1 pairs: 1->2,3  2->3,5  3->5,1  5->1,2
   h3_q3_activate_coupled 5 6 3 || return 1
   # the folded acknowledgement needs the retained and returning validators' authorities at the activated scope (root epoch 5, shard epoch 3)
   H3_ONLINE="1 2 3"
