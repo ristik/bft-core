@@ -247,13 +247,17 @@ func (n *Net) observeRecv(msg any) {
 	m, err := Describe(msg, n.cfg.Signing)
 	n.mu.Lock()
 	defer n.mu.Unlock()
-	if err != nil {
-		n.fault(fmt.Errorf("describing a received message: %w", err))
-	}
 	if m.Class == Other {
 		return
 	}
-	n.record(Event{Kind: "recv", To: n.cfg.Self.String(), msg: m}, m)
+	ev := Event{Kind: "recv", To: n.cfg.Self.String(), msg: m}
+	if err != nil {
+		// What another node sent is not the shim's to vouch for: a message whose statement cannot be derived here (an epoch this node has no
+		// configuration for, a forged or malformed message) is the node's to refuse. It is recorded with the reason, not as a harness fault;
+		// the shim's own sends stay held to Describe.
+		ev.Error = fmt.Sprintf("describing a received message: %v", err)
+	}
+	n.record(ev, m)
 }
 
 // Close stops the receive forwarder. Held messages are discarded: a closed shim is a stopped node.
