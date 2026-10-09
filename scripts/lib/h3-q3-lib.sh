@@ -66,8 +66,8 @@ h3_q3_start_joiner() { # entity shardEpoch rootEpoch trustFile
   [ -f "test-nodes/reth$i/pid" ] && kill -0 "$(cat "test-nodes/reth$i/pid")" 2>/dev/null || h3_start_reth "$i" || return 1
   h3_spare_authority "$i" "$shardEpoch" "$rootEpoch" "$trust" || return 1
   # no session yet: the authority issues none before the Commit enrolls it, and a staging-only node signs nothing (the restore after the Commit takes one)
-  # the follower root: no install epoch (it is not a member of any installed epoch yet), the committee's roots as bootnodes
-  m2_start_root "$i" "" "$(m2_root_addr "$(h3_first_root)")" || return 1
+  # the follower root: it catches up to the installed epoch (the one before its own, verified from the genesis trust base) without being a member of it; the committee's roots are its bootnodes
+  m2_start_root "$i" "$((rootEpoch - 1))" "$(m2_root_addr "$(h3_first_root)")" || return 1
   bootnodes=$(evm_bootnodes_for_peers "$(m2_root_addr "$(h3_first_root)")" "$i" $H3_ONLINE) || return 1
   export "EVM_ENGINE_URL_$i=http://127.0.0.1:$((rethEngineBase + i - 1))" "EVM_ETH_URL_$i=http://127.0.0.1:$((rethEthBase + i - 1))"
   start_one_evm_validator "$i" "$validators" "$partitionID" "$(m2_root_addr "$(h3_first_root)")" engine-api rpc "$bootnodes" || return 1
