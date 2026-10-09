@@ -16,6 +16,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 	"github.com/unicitynetwork/bft-core/evmassign"
+	"github.com/unicitynetwork/bft-core/posrelayer"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus"
 	"github.com/unicitynetwork/bft-core/rootchain/evmstate/evmstatetest"
 	"github.com/unicitynetwork/bft-go-base/types"
@@ -25,9 +26,9 @@ const publicationFixture = "../../../rootchain/evmstate/testdata/publication.jso
 
 func letter(id uint64) string { return string(rune('a' + id - 1)) }
 
-// electionRPC serves eth_call from what the real modules answered (the contracts' publication fixture). The contracts hold only
-// keccak256(peer id) for a node id and the fixture's own words were never derived from peer ids, so the delegations' two node-id words are
-// replaced by the words of the test's peer ids ("r-a", "ev-a", ...); nothing else in an answer is touched.
+// electionRPC serves eth_call from what the real modules answered (the contracts' publication fixture): the genesis entities' node-id words
+// are keccak256 of "root-a", "evm-a", ..., the names the tests below give the same peers.
+
 func electionRPC(t *testing.T) (*httptest.Server, map[string]int) {
 	raw, err := os.ReadFile(publicationFixture)
 	require.NoError(t, err)
@@ -39,19 +40,6 @@ func electionRPC(t *testing.T) (*httptest.Server, map[string]int) {
 	for _, c := range fx.RelayerReads {
 		ret, err := hex.DecodeString(strings.TrimPrefix(c.Ret, "0x"))
 		require.NoError(t, err)
-		data, err := hex.DecodeString(strings.TrimPrefix(c.Data, "0x"))
-		require.NoError(t, err)
-		if len(data) == 4+64 && len(ret) > 160 && bytes.Equal(data[4:4+24], make([]byte, 24)) { // delegation(id, generation)
-			id := binary.BigEndian.Uint64(data[4+24 : 4+32])
-			off := int(binary.BigEndian.Uint64(ret[24:32]))
-			rootWord, evmWord := ret[off:off+32], ret[off+64:off+96]
-			newRoot, err := evmassign.NodeIDWord("r-" + letter(id))
-			require.NoError(t, err)
-			newEVM, err := evmassign.NodeIDWord("ev-" + letter(id))
-			require.NoError(t, err)
-			copy(rootWord, newRoot[:])
-			copy(evmWord, newEVM[:])
-		}
 		reads[strings.ToLower(c.To)+strings.ToLower(c.Data)] = ret
 	}
 	asked := map[string]int{}
@@ -62,7 +50,14 @@ func electionRPC(t *testing.T) (*httptest.Server, map[string]int) {
 			Params []json.RawMessage `json:"params"`
 		}
 		require.NoError(t, json.NewDecoder(r.Body).Decode(&req))
+		if req.Method == "eth_blockNumber" { // the command pins one block for all its reads
+			_ = json.NewEncoder(w).Encode(map[string]any{"jsonrpc": "2.0", "id": req.ID, "result": "0x2a"})
+			return
+		}
 		require.Equal(t, "eth_call", req.Method)
+		var blockTag string
+		require.NoError(t, json.Unmarshal(req.Params[1], &blockTag))
+		require.Equal(t, "0x2a", blockTag, "every read is at the pinned block")
 		var call struct{ To, Data string }
 		require.NoError(t, json.Unmarshal(req.Params[0], &call))
 		key := strings.ToLower(call.To) + strings.ToLower(call.Data)
@@ -90,7 +85,7 @@ func TestPosRelayerProposalFeedsTheHandoffPipelineAndVerifyPrimaryAcceptsIt(t *t
 	k := p.Candidate.Authorization.K
 	var infos []*types.NodeInfo
 	for i, x := range k {
-		infos = append(infos, &types.NodeInfo{NodeID: "ev-" + letter(uint64(i+1)), SigKey: x.EVMKey, Stake: x.Weight})
+		infos = append(infos, &types.NodeInfo{NodeID: "evm-" + letter(uint64(i+1)), SigKey: x.EVMKey, Stake: x.Weight})
 	}
 	pdr := &types.PartitionDescriptionRecord{Version: 1, NetworkID: 5, PartitionID: 8, PartitionTypeID: 8, TypeIDLen: 8, UnitIDLen: 256,
 		T2Timeout: 5 * time.Second, Epoch: 0, EpochStart: 1, Validators: infos}
@@ -103,7 +98,7 @@ func TestPosRelayerProposalFeedsTheHandoffPipelineAndVerifyPrimaryAcceptsIt(t *t
 		"election": "0x" + hex.EncodeToString(p.Pins.Election[:]), "electionCodeHash": "0x" + strings.Repeat("cc", 32)})
 	var ids []string
 	for i := range k {
-		ids = append(ids, "r-"+letter(uint64(i+1)), "ev-"+letter(uint64(i+1)))
+		ids = append(ids, "root-"+letter(uint64(i+1)), "evm-"+letter(uint64(i+1)))
 	}
 	popsFile := writeJSON(t, dir, "assembled-pops.json", map[string]any{"evmPops": func() []popJSON {
 		var out []popJSON
@@ -148,7 +143,7 @@ func TestPosRelayerProposalFeedsTheHandoffPipelineAndVerifyPrimaryAcceptsIt(t *t
 		conf.SigKey.PrivateKey = scalar
 		keyFile := writeJSON(t, dir, "k"+letter(uint64(i+1))+".json", conf)
 		popFile := filepath.Join(dir, "pop-"+letter(uint64(i+1))+".json")
-		res, err := run("root", "handoff", "evm-pop", "--context", contextFile, "--validators", validators, "--node-id", "ev-"+letter(uint64(i+1)),
+		res, err := run("root", "handoff", "evm-pop", "--context", contextFile, "--validators", validators, "--node-id", "evm-"+letter(uint64(i+1)),
 			"--key-conf", keyFile, "--identities", filepath.Join(out, "identities.json"))
 		require.NoError(t, err, res)
 		require.NoError(t, os.WriteFile(popFile, []byte(res), 0o600))
@@ -177,13 +172,12 @@ func TestPosRelayerProposalFeedsTheHandoffPipelineAndVerifyPrimaryAcceptsIt(t *t
 		outBad := filepath.Join(dir, "bad")
 		_, err := run("pos-relayer", "proposal", "--eth-rpc", srv.URL, "--pos-deployment", deployment, "--context", contextFile,
 			"--node-ids", strings.Join(ids, ","), "--evm-pops", badFile, "--out-dir", outBad)
-		require.Error(t, err)
+		require.ErrorIs(t, err, posrelayer.ErrBuild)
 		require.NoDirExists(t, outBad)
 	})
 	t.Run("without the peer ids the node-id words cannot be resolved", func(t *testing.T) {
 		_, err := run("pos-relayer", "proposal", "--eth-rpc", srv.URL, "--pos-deployment", deployment, "--context", contextFile, "--out-dir", filepath.Join(dir, "none"))
-		require.Error(t, err)
-		require.Contains(t, err.Error(), "node id")
+		require.ErrorIs(t, err, posrelayer.ErrUnknownNode)
 	})
 	t.Run("a deployment without the election cannot be read", func(t *testing.T) {
 		plain := writeDeployment(t, deploymentJSON(goodWord, "1", goodCustody))
