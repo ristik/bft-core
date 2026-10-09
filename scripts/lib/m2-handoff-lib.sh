@@ -181,6 +181,14 @@ PY
 
 # The authority survives each shard restart. Advance one key at a time and wait for
 # a durable replica acknowledgement before moving to the next configured peer.
+# A validator is somebody's archive replica only if it is in the replica pool start_one_evm_validator draws from (helper.sh: EVM_ARCHIVE_REPLICA_POOL, by
+# default validators 2..n). Validator 1 is nobody's replica: no peer ever logs an acknowledgement for it, so waiting for one cannot succeed.
+m2_is_archive_replica() { # validator
+  local j
+  for j in ${EVM_ARCHIVE_REPLICA_POOL:-$(seq 2 "$validators")}; do [ "$j" = "$1" ] && return 0; done
+  return 1
+}
+
 m2_wait_archive_replica_catchup() {
   local target=$1 startLine=$2 targetId latestHash source i targetLog peerAck nodeAck
   targetId=$(evm_validator_id "$target") || return 1
@@ -259,7 +267,9 @@ m2_advance_authorities() {
       bootnodes=$(evm_bootnodes_for_peers "$rootBoot" "$i" $onlineValidators) || return 1
       startLine=$(wc -l < "test-nodes/evm$i/debug.log")
       start_one_evm_validator "$i" "$validators" "$partitionID" "$rootBoot" engine-api rpc "$bootnodes" || return 1
-      [ "${M2_ADVANCE_NO_REPLICA_WAIT:-0}" = 1 ] || m2_wait_archive_replica_catchup "$i" "$startLine" || return 1
+      if [ "${M2_ADVANCE_NO_REPLICA_WAIT:-0}" != 1 ] && m2_is_archive_replica "$i"; then
+        m2_wait_archive_replica_catchup "$i" "$startLine" || return 1
+      fi
     fi
     rm -f "test-nodes/post-m2a-evidence/restarting/$i"
     echo "authority $i advanced to root epoch $epoch"
@@ -344,11 +354,7 @@ m2_config_only_handoff() { # epoch roots oldRpcs (the roots' RPC endpoints are t
     done
     $activated || { echo "EVM validator $i did not activate root epoch $epoch" >&2; return 1; }
   done
-  # The archive-replica catch-up wait after each restart is skipped here, as in the Q3 and H3 flows: the EVM keeps certifying while the validators restart one
-  # at a time, so the certified head the wait targets moves faster than a restarted validator's replica peer acknowledges it. Run 4 of the B1 port waited the
-  # full 120 s on replica 1 (peer_ack=false, node_ack=true) with validator 1 signing and certifying normally. Liveness is still asserted by the paid
-  # transaction certified in the new epoch below.
-  M2_ADVANCE_NO_REPLICA_WAIT=1 m2_advance_authorities "$epoch" "$nextFile" || return 1
+  m2_advance_authorities "$epoch" "$nextFile" || return 1
   m2_send_paid "$epoch" "${M2_NEXT_NONCE:-$((epoch+1))}" || return 1
   m2_measure_pause "$oldEpoch" "$epoch"
 }
