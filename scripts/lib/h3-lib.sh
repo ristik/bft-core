@@ -268,12 +268,11 @@ h3_restore_validator() {
   rm -rf "$H3_ARCHIVES/evm$i" "$journal" "$journal"-*
   mkdir -p "$evidence"
   # the authority (not the node) holds the signing key: a fresh session for the restored node, the old client being gone
-  # (a staging-only joiner, H3_STAGING_JOINER=1: its authority is still pending, issues no session, and the node needs none until a verified
-  # install binds its key; the credential is read lazily, #520)
-  if ! build/ubft signing-authority replace-session --operator-socket "test-nodes/auth$i/operator.sock" \
-      --operator-credential "test-nodes/auth$i/operator.cred" --out "test-nodes/auth$i/client.cred"; then
-    [ "${H3_STAGING_JOINER:-0}" = 1 ] || return 1
-    echo "joiner $i: no session yet (staging-only)"
+  # A staging-only joiner (H3_STAGING_JOINER=1, #520) takes no session before the Commit: its authority is pending and issues none, and the node reads
+  # the credential lazily, when a verified install binds its key. The restore after the Commit enrolls the authority and takes the session.
+  if [ "${H3_STAGING_JOINER:-0}" != 1 ]; then
+    build/ubft signing-authority replace-session --operator-socket "test-nodes/auth$i/operator.sock" \
+      --operator-credential "test-nodes/auth$i/operator.cred" --out "test-nodes/auth$i/client.cred" || return 1
   fi
   cp "test-nodes/evm$i/jwt.hex" "$evidence/jwt.hex" 2>/dev/null || openssl rand -hex 32 >"$evidence/jwt.hex"
   stop_one_evm_validator "$i" 2>/dev/null || true
