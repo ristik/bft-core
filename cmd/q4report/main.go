@@ -2,6 +2,7 @@
 // (docs/pos/q4-acceptance-matrix.json) to the evidence that passed or to an explicit gap.
 //
 //	q4report -matrix docs/pos/q4-acceptance-matrix.json -tests run.json[,run2.json] [-bundles dir] [-cost cost.json] [-src .] [-out report.md] [-json report.json] [-require-complete]
+//	q4report ... -lane <live lane evidence dir>   # kind lane / lane-file items read the Q4 live lane's own lane.log and files
 //	q4report -static -matrix docs/pos/q4-acceptance-matrix.json -src .      # CI: the matrix itself is consistent; nothing is claimed as run
 //
 // Evidence is never assumed. A go-test item counts only if the `go test -json` results name that test with action pass; a test that
@@ -48,7 +49,10 @@ type Row struct {
 
 // Evidence is one item. Kind go-test: Package and Test name a result of `go test -json` (Test empty = the package passed). Kind
 // bundle: the replay bundles whose file name starts with BundlePrefix (at least MinBundles of them) must exist and check clean.
-// Kind cost: the query-cost measurements file must show every supported row within budget.
+// Kind cost: the query-cost measurements file must show every supported row within budget. Kind lane: the live lane's evidence directory
+// (-lane) must show the named step (Step, as printed by the lane: q3_* or the Q4 step title) with its PASS line, from a run whose recorded
+// mode is a clean-build evidence run (a development override is never evidence). Kind lane-file: Path, relative to that directory, exists
+// and is not empty.
 type Evidence struct {
 	Kind         string `json:"kind"`
 	Label        string `json:"label"`
@@ -56,7 +60,12 @@ type Evidence struct {
 	Test         string `json:"test,omitempty"`
 	BundlePrefix string `json:"bundlePrefix,omitempty"`
 	MinBundles   int    `json:"minBundles,omitempty"`
-	Scope        string `json:"scope,omitempty"` // what the item covers and omits, in words
+	Lane         string `json:"lane,omitempty"` // kinds lane and lane-file: the named lane run (-lanes name=dir) the item reads; empty is the -lane run
+	Step         string `json:"step,omitempty"` // kind lane: the lane step name
+	Path         string `json:"path,omitempty"` // kind lane-file: a file of the lane's evidence directory
+	// Contains, for a lane-file, are lines the file must contain (e.g. the gate's command and exit status).
+	Contains []string `json:"contains,omitempty"`
+	Scope    string   `json:"scope,omitempty"` // what the item covers and omits, in words
 }
 
 // Gap is an explicit, reasoned absence of evidence for one required label.
@@ -88,6 +97,8 @@ type Report struct {
 	Counts   map[string]int `json:"counts"`
 	Bundles  BundleStats    `json:"bundles"`
 	Cost     *CostStats     `json:"cost,omitempty"`
+	Lane     *LaneStats     `json:"lane,omitempty"`
+	Lanes    []*LaneStats   `json:"lanes,omitempty"` // every live lane run read: the default one and the named ones
 	Closable bool           `json:"closable"`
 	Static   bool           `json:"static,omitempty"`
 	Problems []string       `json:"problems,omitempty"`
@@ -101,6 +112,17 @@ type BundleStats struct {
 	Signed   int      `json:"signedVerified"`
 	Injected int      `json:"injectedMalformedFlagged"`
 	Failed   []string `json:"failed,omitempty"`
+}
+
+// LaneStats is the live lane run the report read.
+type LaneStats struct {
+	Name     string `json:"name,omitempty"`
+	Dir      string `json:"dir"`
+	Mode     string `json:"mode"`
+	Evidence bool   `json:"evidence"` // a clean-build evidence run
+	// Attested is true when the run's execution client was a prebuilt binary the operator attested to have built from a fresh private target at the pinned commit
+	// (Q4_URETH_FRESH_BUILD=1) rather than one the lane built itself: still an evidence run, but on the operator's word for that one artifact.
+	Attested bool `json:"attested,omitempty"`
 }
 
 // CostStats reads the query-cost gate measurements.
@@ -138,6 +160,8 @@ func run(args []string, out, errOut *os.File) int {
 	tests := fs.String("tests", "", "comma separated `go test -json` result files")
 	bundles := fs.String("bundles", "", "directory of exported replay bundles")
 	cost := fs.String("cost", "", "query-cost measurements (Q4_COST_OUT of TestQ4QueryCostGate)")
+	lane := fs.String("lane", "", "evidence directory of a Q4 live lane run (lane.log, run-mode.txt, pins.txt, q3/, q4/)")
+	lanes := fs.String("lanes", "", "comma separated name=dir evidence directories of further live lane runs (scenario B, the Q3 lane), read by items that name them")
 	src := fs.String("src", ".", "source tree root, to detect stale selectors")
 	md := fs.String("out", "", "write the markdown report here (default stdout)")
 	js := fs.String("json", "", "write the JSON report here")
@@ -146,7 +170,7 @@ func run(args []string, out, errOut *os.File) int {
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
-	rep, err := Build(*matrix, splitList(*tests), *bundles, *cost, *src, *static)
+	rep, err := Build(*matrix, splitList(*tests), *bundles, *cost, *src, *static, *lane, splitList(*lanes)...)
 	if err != nil {
 		fmt.Fprintln(errOut, err)
 		return 2
@@ -245,7 +269,7 @@ func declared(root string) (map[string]map[string]bool, error) {
 var sanitize = regexp.MustCompile(`[^A-Za-z0-9._-]+`)
 
 // Build evaluates the matrix against the inputs.
-func Build(matrixPath string, testFiles []string, bundleDir, costPath, srcRoot string, static bool) (*Report, error) {
+func Build(matrixPath string, testFiles []string, bundleDir, costPath, srcRoot string, static bool, laneDir string, named ...string) (*Report, error) {
 	raw, err := os.ReadFile(matrixPath)
 	if err != nil {
 		return nil, err
@@ -318,6 +342,44 @@ func Build(matrixPath string, testFiles []string, bundleDir, costPath, srcRoot s
 		}
 	}
 
+	// the live lane runs the report reads: the default run (laneDir) and the named ones (name=dir)
+	type laneRun struct {
+		stats *LaneStats
+		log   string
+	}
+	runs := map[string]*laneRun{}
+	readLane := func(name, dir string) error {
+		raw, err := os.ReadFile(filepath.Join(dir, "lane.log"))
+		if err != nil {
+			return err
+		}
+		mode := ""
+		if raw, err := os.ReadFile(filepath.Join(dir, "run-mode.txt")); err == nil {
+			mode = strings.TrimSpace(string(raw))
+		}
+		stats := &LaneStats{Name: name, Dir: dir, Mode: mode, Evidence: strings.HasPrefix(laneRunModeBody(mode), "clean build (evidence run"), Attested: strings.Contains(mode, "built by the operator")}
+		runs[name] = &laneRun{stats: stats, log: string(raw)}
+		rep.Lanes = append(rep.Lanes, stats)
+		return nil
+	}
+	if laneDir != "" {
+		if err := readLane("", laneDir); err != nil {
+			return nil, err
+		}
+		rep.Lane = runs[""].stats
+	}
+	for _, kv := range named {
+		name, dir, ok := strings.Cut(kv, "=")
+		if !ok || name == "" || dir == "" {
+			return nil, fmt.Errorf("-lanes: %q is not name=dir", kv)
+		}
+		if _, dup := runs[name]; dup {
+			return nil, fmt.Errorf("-lanes: duplicate lane %q", name)
+		}
+		if err := readLane(name, dir); err != nil {
+			return nil, err
+		}
+	}
 	seen := map[string]bool{}
 	for _, row := range m.Rows {
 		if seen[row.ID] {
@@ -375,6 +437,35 @@ func Build(matrixPath string, testFiles []string, bundleDir, costPath, srcRoot s
 					r.Status, r.Detail = "FAIL", fmt.Sprintf("%d of %d supported rows within budget", rep.Cost.Within, rep.Cost.Supported)
 				default:
 					r.Status, r.Detail = "PASS", fmt.Sprintf("%d supported rows within budget (%s)", rep.Cost.Supported, costData.Profile)
+				}
+			case "lane", "lane-file":
+				switch {
+				case ev.Kind == "lane" && !laneStepDeclared(srcRoot, ev.Step):
+					r.Status, r.Detail = "STALE", "the lane scripts declare no step "+ev.Step
+				case runs[ev.Lane] == nil:
+					r.Status = "NOT-RUN"
+				case !runs[ev.Lane].stats.Evidence:
+					r.Status, r.Detail = "FAIL", "the lane ran as: "+runs[ev.Lane].stats.Mode+" (a development override is not evidence)"
+				case ev.Kind == "lane-file":
+					path := filepath.Join(runs[ev.Lane].stats.Dir, filepath.FromSlash(ev.Path))
+					raw, err := os.ReadFile(path)
+					switch {
+					case err != nil || len(raw) == 0:
+						r.Status, r.Detail = "NOT-RUN", ev.Path+" is missing or empty"
+					default:
+						r.Status = "PASS"
+						for _, want := range ev.Contains {
+							if !strings.Contains(string(raw), want) {
+								r.Status, r.Detail = "FAIL", ev.Path+" does not contain "+want
+							}
+						}
+					}
+				case regexp.MustCompile(`(?m)^\s*PASS: ` + regexp.QuoteMeta(ev.Step) + `\s*$`).MatchString(runs[ev.Lane].log):
+					r.Status = "PASS"
+				case regexp.MustCompile(`(?m)^\s*FAIL: ` + regexp.QuoteMeta(ev.Step) + `\b`).MatchString(runs[ev.Lane].log):
+					r.Status = "FAIL"
+				default:
+					r.Status, r.Detail = "NOT-RUN", "the lane log has no PASS line for the step"
 				}
 			default:
 				r.Status, r.Detail = "STALE", "unknown evidence kind "+ev.Kind
@@ -467,6 +558,17 @@ func Markdown(r *Report) string {
 	}
 	fmt.Fprintf(&b, "Replay bundles re-checked offline by the independent checker: %d, clean %d, %d attempts, %d signatures verified, %d deliberately injected malformed sends flagged by their own reason.\n\n",
 		r.Bundles.Checked, r.Bundles.Clean, r.Bundles.Attempts, r.Bundles.Signed, r.Bundles.Injected)
+	for _, l := range r.Lanes {
+		attested := ""
+		if l.Attested {
+			attested = " The execution client binary is the operator's attestation of a fresh private build at the pinned commit."
+		}
+		name := "Live lane evidence"
+		if l.Name != "" {
+			name += " (" + l.Name + ")"
+		}
+		fmt.Fprintf(&b, "%s: `%s`, run mode: %s.%s\n\n", name, l.Dir, orDash(l.Mode), attested)
+	}
 	if r.Cost != nil {
 		fmt.Fprintf(&b, "Query-cost gate (%s, %s): %d of %d supported rows within the frozen budgets.", r.Cost.Profile, r.Cost.Host, r.Cost.Within, r.Cost.Supported)
 		for _, raw := range r.Cost.Outside {
@@ -502,6 +604,10 @@ func Markdown(r *Report) string {
 				what = "bundles " + res.BundlePrefix + "*"
 			case "cost":
 				what = "query-cost measurements"
+			case "lane":
+				what = "live lane step " + res.Step
+			case "lane-file":
+				what = "live lane file " + res.Path
 			}
 			if res.Package != "" {
 				what = res.Package + " " + what
@@ -531,4 +637,26 @@ func detail(s string) string {
 		return ""
 	}
 	return " (" + s + ")"
+}
+
+// laneRunModeBody is a lane's recorded run mode without its "Q3 run mode: " / "Q4 run mode: " prefix.
+func laneRunModeBody(mode string) string {
+	if _, rest, ok := strings.Cut(mode, " run mode: "); ok {
+		return rest
+	}
+	return mode
+}
+
+// laneStepDeclared: the step name is one the lane scripts declare as a step (a Q3 step function definition or a Q4 step title in a q4_step call), so a
+// renamed step makes its evidence stale instead of silently missing; a surviving mention in a comment does not count.
+func laneStepDeclared(srcRoot, step string) bool {
+	q4 := regexp.MustCompile(`(?m)^\s*q4_step "` + regexp.QuoteMeta(step) + `"`)
+	q3 := regexp.MustCompile(`(?m)^` + regexp.QuoteMeta(step) + `\(\) \{`)
+	for _, f := range []string{"scripts/q4-live-steps.sh", "scripts/q3-weight-activation-steps.sh"} {
+		raw, err := os.ReadFile(filepath.Join(srcRoot, f))
+		if err == nil && (q4.Match(raw) || q3.Match(raw)) {
+			return true
+		}
+	}
+	return false
 }

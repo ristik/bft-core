@@ -344,13 +344,16 @@ type shardQ3Staging struct {
 	// tip is the installed tip of this node's verified history (its epoch, body version and body identity) and self this node's EVM node
 	// identity. Both are set in production; staging then checks the body against the node's own history and the candidate against its own
 	// binding, and a staging-only joiner (no installed step names it yet) is held to exactly the same checks as a validator.
-	tip     func() (epoch, version uint64, id [32]byte, err error)
-	self    string
-	mu      sync.Mutex
-	staged  *[32]byte
-	body    [32]byte
-	config  [32]byte
-	attempt uint64
+	tip  func() (epoch, version uint64, id [32]byte, err error)
+	self string
+	// onStaged is told the EVM node IDs of the staged successor assignment after a stage is accepted (production: the archive and records
+	// authorization of the active peers, so a joiner that is behind can catch up before it gives its own readiness).
+	onStaged func(evmNodeIDs []string) error
+	mu       sync.Mutex
+	staged   *[32]byte
+	body     [32]byte
+	config   [32]byte
+	attempt  uint64
 }
 
 // Stage records the candidate if its body is a valid V3 body of this node's chain.
@@ -374,10 +377,29 @@ func (s *shardQ3Staging) Stage(req shardQ3StageRequest) error {
 	if err := s.checkStaged(body, digest, req); err != nil {
 		return err
 	}
+	if err := s.announceStaged(req); err != nil {
+		return err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.staged, s.body, s.config, s.attempt = &digest, body.Identity(), body.Config.Identity(), req.Attempt
 	return nil
+}
+
+// announceStaged tells onStaged the members of the candidate's successor assignment. A root-only change (no preimage) names no EVM node.
+func (s *shardQ3Staging) announceStaged(req shardQ3StageRequest) error {
+	if s.onStaged == nil || len(req.Preimage) == 0 {
+		return nil
+	}
+	c, err := evmassign.DecodeCandidate(req.Preimage)
+	if err != nil {
+		return errors.Join(ErrQ3StageBody, err)
+	}
+	ids := make([]string, 0, len(c.Identities))
+	for _, id := range c.Identities {
+		ids = append(ids, id.EVMNodeID)
+	}
+	return s.onStaged(ids)
 }
 
 // checkStaged is everything about a candidate this node can verify without the root's signatures or any EVM state: that the candidate
