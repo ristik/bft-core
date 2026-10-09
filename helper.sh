@@ -120,6 +120,11 @@ function start_root_nodes() {
         [ -s test-nodes/genesis-identities.json ] || q3_prepare_genesis_identities || exit 1
         profileArgs+=(--q3-lane --genesis-identities test-nodes/genesis-identities.json)
       fi
+      if [ "${P85_LANE:-0}" = 1 ]; then
+        # proof of stake (briefs/p85-recovery-lane.md): the coupled runtime, the P85 control executor and the genesis committee as K
+        source scripts/lib/p85-lib.sh
+        profileArgs+=($(p85_root_flags "$i" "http://127.0.0.1:$((rethEthBase + i - 1))"))
+      fi
       # Under the handoff profile PUT /api/v1/configurations is refused (#329): the genesis shard
       # configurations are fixed at start, so hand every one of them over by flag.
       collect_shard_conf_args
@@ -542,7 +547,7 @@ function start_one_evm_validator() {
     fi
     profileArgs=(--trust-history-profile-2)
     # Q3 #50: the shard node runs the verified coupled runtime (its own verification from the pinned genesis)
-    [ "${Q3_WEIGHT_LANE:-0}" != 1 ] || profileArgs+=(--q3-lane)
+    [ "${Q3_WEIGHT_LANE:-0}" != 1 ] && [ "${P85_LANE:-0}" != 1 ] || profileArgs+=(--q3-lane)
   fi
 
   # The registry layout only matters to the engine-api executor; resolve it from the run's persisted file.

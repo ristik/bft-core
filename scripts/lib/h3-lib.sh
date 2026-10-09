@@ -290,7 +290,7 @@ h3_restore_validator() {
     --archive-store "$H3_ARCHIVES/evm$i" --archive-prune --trust-history-profile-2 --journal-candidates "${EVM_JOURNAL_CANDIDATES:-32}" \
     --signing-authority-socket "test-nodes/auth$i/client.sock" --signing-authority-credential "test-nodes/auth$i/client.cred" \
     "${peers[@]}" --tip-uc "$evidence/tip.uc.cbor" --tip-tr "$evidence/tip.tr.cbor" --trust-body-id "$bodyID" \
-    $([ "${Q3_WEIGHT_LANE:-0}" != 1 ] || echo --q3-lane --rpc-server-address "$(evm_validator_rpc_addr "$i")") \
+    $([ "${Q3_WEIGHT_LANE:-0}" != 1 ] && [ "${P85_LANE:-0}" != 1 ] || echo --q3-lane --rpc-server-address "$(evm_validator_rpc_addr "$i")") \
     --log-format text --log-level info >>"$evidence/debug.log" 2>&1 &
   echo $! >"$evidence/pid"
 }
