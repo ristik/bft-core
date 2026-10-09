@@ -211,38 +211,58 @@ print(best[1])
 PY
 }
 
-# m2_wait_archive_replica_catchup <validator> <startLine> [head]: the head is the newest certified block when the validator was restarted (computed now if omitted):
-# the peers acknowledge the head of the moment the replica reconnected, so a caller that waits later passes the head it took at the restart.
+# The number of a certified block, read from any online validator's execution client.
+m2_block_number() { # hash
+  local k n
+  for k in $(m2_online_validators); do
+    n=$(rpc "http://127.0.0.1:$((rethEthBase + k - 1))" eth_getBlockByHash "[\"0x$1\",false]" | pyget "['result']['number']") || continue
+    if [ -n "$n" ] && [ "$n" != None ]; then echo $((n)); return 0; fi
+  done
+  return 1
+}
+
+# m2_replica_acked <publisher> <replica peer id> <height>: succeeds when the publisher's operator status shows that replica durably acknowledged a block at or above
+# <height> and reports no transfer error for it. The status heights come from the durable frontier acknowledgements (archivewiring.OperatorStatus.Replicas).
+m2_replica_acked() {
+  build/ubft shard-node status --url "http://$(evm_validator_rpc_addr "$1")" 2>/dev/null |
+    jq -e --arg r "$2" --argjson h "$3" '[.replicas[] | select(.replica == $r)] | (length > 0) and all(.lastAcknowledgedHeight >= $h and ((.error // "") == ""))' >/dev/null 2>&1
+}
+
+# m2_wait_archive_replica_catchup <validator> <unused> [head]: waits until the restarted validator is caught up as an archive replica through a certified head. The head
+# is the newest certified block when the validator was restarted (computed now if omitted). Caught up means two things, both read from the nodes' durable operator
+# status (not from a log line, which is emitted only when a publisher had to retry records a replica was behind on, so a replica that never fell behind never logs it):
+#   peer: every online validator that names this one as a replica reports that replica's last acknowledged height at or above the head's height, with no error;
+#   node: this validator's own two replicas have acknowledged that height too, i.e. it resumed replicating.
+# The second argument is kept for callers that still pass the log position of the restart.
 m2_wait_archive_replica_catchup() {
-  local target=$1 startLine=$2 latestHash=${3:-} source i targetLog targetId peerAck nodeAck
+  local target=$1 latestHash=${3:-} source i targetId peerAck nodeAck publishers r headNumber
   targetId=$(evm_validator_id "$target") || return 1
-  targetLog="test-nodes/evm$target/debug.log"
   [ -n "$latestHash" ] || latestHash=$(m2_latest_certified_hash)
   [ -n "$latestHash" ] || { echo "cannot find a certified archive head before restarting validator $target" >&2; return 1; }
-  echo "waiting for archive replica $target ($targetId) to acknowledge certified head $latestHash"
+  headNumber=$(m2_block_number "$latestHash") || { echo "cannot read the height of certified head $latestHash" >&2; return 1; }
+  echo "waiting for archive replica $target ($targetId) to acknowledge certified head $latestHash (height $headNumber)"
   for i in $(seq 1 120); do
-    peerAck=false
-    nodeAck=false
+    peerAck=true; nodeAck=true; publishers=0
     for source in $(m2_online_validators); do
       [ "$source" = "$target" ] && continue
-      if grep -Fq "msg=\"archive replica ack catch-up\" replica=$targetId block=$latestHash" "test-nodes/evm$source/debug.log" 2>/dev/null; then
-        peerAck=true
-        break
-      fi
+      case " $(archive_replicas_of "$source" "$validators") " in
+        *" $target "*) publishers=$((publishers + 1)); m2_replica_acked "$source" "$targetId" "$headNumber" || peerAck=false ;;
+      esac
     done
-    if tail -n +"$((startLine+1))" "$targetLog" 2>/dev/null | grep -F 'msg="archive replica ack catch-up"' >/dev/null; then
-      nodeAck=true
-    fi
+    [ "$publishers" -gt 0 ] || peerAck=false
+    for r in $(archive_replicas_of "$target" "$validators"); do
+      m2_replica_acked "$target" "$(evm_validator_id "$r")" "$headNumber" || nodeAck=false
+    done
     if $peerAck && $nodeAck; then
-      echo "archive replica $target caught up through $latestHash and resumed replication"
+      echo "archive replica $target caught up through $latestHash (height $headNumber) and resumed replication"
       return 0
     fi
     if [ $((i % 15)) -eq 0 ]; then
-      echo "still waiting for archive replica $target after ${i}s (peer_ack=$peerAck node_ack=$nodeAck)"
+      echo "still waiting for archive replica $target after ${i}s (peer_ack=$peerAck over $publishers publishers, node_ack=$nodeAck)"
     fi
     sleep 1
   done
-  echo "archive replica $target did not resume with a current peer acknowledgment within 120s" >&2
+  echo "archive replica $target did not catch up through certified head $headNumber within 120s" >&2
   return 1
 }
 
