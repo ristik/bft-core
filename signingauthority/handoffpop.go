@@ -57,42 +57,8 @@ func (a *Authority) SignHandoffPoP(req HandoffPoPRequest) (evmassign.PoP, error)
 	}
 	enroll := a.enroll
 	succ := req.Successor
-	switch {
-	case succ == nil:
-		return evmassign.PoP{}, fmt.Errorf("%w: no successor binding", ErrContextMismatch)
-	case req.NodeID != enroll.NodeID:
-		return evmassign.PoP{}, fmt.Errorf("%w: this authority signs for node %s, not %s", ErrContextMismatch, enroll.NodeID, req.NodeID)
-	case req.Context.Network != uint64(enroll.NetworkID) || succ.NetworkID != enroll.NetworkID:
-		return evmassign.PoP{}, fmt.Errorf("%w: another network", ErrContextMismatch)
-	case succ.PartitionID != enroll.PartitionID || !succ.ShardID.Equal(enroll.ShardID):
-		return evmassign.PoP{}, fmt.Errorf("%w: another partition or shard", ErrContextMismatch)
-	case !popEpochInRange(enroll.ShardEpoch, succ.Epoch):
-		// A retained validator is enrolled at the installed shard epoch and proves for the next one, or, when it supersedes an
-		// unacknowledged chain of assignments, for one up to the supersession span ahead (the successor's epoch follows the latest
-		// installed technical record, not the acknowledged one); a joining validator's authority is enrolled (possibly still pending)
-		// for the successor epoch itself, which no installed configuration names yet. A proof is a forward commitment, so nothing
-		// further ahead is signed: a compromised operator channel cannot pre-sign far-future proofs.
-		return evmassign.PoP{}, fmt.Errorf("%w: the successor is shard epoch %d, this authority is enrolled for %d (a proof covers the enrolled epoch and the next %d)", ErrContextMismatch, succ.Epoch, enroll.ShardEpoch, handoff.MaxSupersessionSpan)
-	case req.Context.Predecessor == [32]byte{}:
-		return evmassign.PoP{}, fmt.Errorf("%w: the context names no predecessor", ErrContextMismatch)
-	}
-	// The bounded weights, not the unit rule: a possession proof proves the key, and the root judges the assignment under the mode of the
-	// epoch it is installed in. A weighted rotation out of a unit epoch asks this authority to sign weights the unit rule would refuse.
-	if err := evmassign.ValidateAssignmentWith(weightvalidation.EVMRules(weightvalidation.ModeWeighted), succ); err != nil {
-		return evmassign.PoP{}, fmt.Errorf("%w: %v", ErrContextMismatch, err)
-	}
-	pub, err := publicKeyOf(a.signer)
-	if err != nil {
+	if err := a.checkPoPBinding(succ, req.NodeID, req.Context); err != nil {
 		return evmassign.PoP{}, err
-	}
-	named := false
-	for _, v := range succ.Validators {
-		if v.NodeID == enroll.NodeID {
-			named = bytes.Equal(v.SigKey, pub)
-		}
-	}
-	if !named {
-		return evmassign.PoP{}, fmt.Errorf("%w: the successor does not name this node with this authority's key", ErrContextMismatch)
 	}
 	return evmassign.SignPoP(a.signer, req.Context, succ, enroll.NodeID)
 }
@@ -105,4 +71,48 @@ func popEpochInRange(enrolled, successor uint64) bool {
 		return true
 	}
 	return successor > enrolled && successor-enrolled <= handoff.MaxSupersessionSpan
+}
+
+// checkPoPBinding is what both possession proofs check before the key signs: the authority's immutable enrollment against the candidate
+// binding and the attempt context. The caller holds a.mu.
+func (a *Authority) checkPoPBinding(succ *types.PartitionDescriptionRecord, nodeID string, ctx evmassign.PoPContext) error {
+	enroll := a.enroll
+	switch {
+	case succ == nil:
+		return fmt.Errorf("%w: no successor binding", ErrContextMismatch)
+	case nodeID != enroll.NodeID:
+		return fmt.Errorf("%w: this authority signs for node %s, not %s", ErrContextMismatch, enroll.NodeID, nodeID)
+	case ctx.Network != uint64(enroll.NetworkID) || succ.NetworkID != enroll.NetworkID:
+		return fmt.Errorf("%w: another network", ErrContextMismatch)
+	case succ.PartitionID != enroll.PartitionID || !succ.ShardID.Equal(enroll.ShardID):
+		return fmt.Errorf("%w: another partition or shard", ErrContextMismatch)
+	case !popEpochInRange(enroll.ShardEpoch, succ.Epoch):
+		// A retained validator is enrolled at the installed shard epoch and proves for the next one, or, when it supersedes an
+		// unacknowledged chain of assignments, for one up to the supersession span ahead (the successor's epoch follows the latest
+		// installed technical record, not the acknowledged one); a joining validator's authority is enrolled (possibly still pending)
+		// for the successor epoch itself, which no installed configuration names yet. A proof is a forward commitment, so nothing
+		// further ahead is signed: a compromised operator channel cannot pre-sign far-future proofs.
+		return fmt.Errorf("%w: the successor is shard epoch %d, this authority is enrolled for %d (a proof covers the enrolled epoch and the next %d)", ErrContextMismatch, succ.Epoch, enroll.ShardEpoch, handoff.MaxSupersessionSpan)
+	case ctx.Predecessor == [32]byte{}:
+		return fmt.Errorf("%w: the context names no predecessor", ErrContextMismatch)
+	}
+	// The bounded weights, not the unit rule: a possession proof proves the key, and the root judges the assignment under the mode of the
+	// epoch it is installed in. A weighted rotation out of a unit epoch asks this authority to sign weights the unit rule would refuse.
+	if err := evmassign.ValidateAssignmentWith(weightvalidation.EVMRules(weightvalidation.ModeWeighted), succ); err != nil {
+		return fmt.Errorf("%w: %v", ErrContextMismatch, err)
+	}
+	pub, err := publicKeyOf(a.signer)
+	if err != nil {
+		return err
+	}
+	named := false
+	for _, v := range succ.Validators {
+		if v.NodeID == enroll.NodeID {
+			named = bytes.Equal(v.SigKey, pub)
+		}
+	}
+	if !named {
+		return fmt.Errorf("%w: the successor does not name this node with this authority's key", ErrContextMismatch)
+	}
+	return nil
 }
