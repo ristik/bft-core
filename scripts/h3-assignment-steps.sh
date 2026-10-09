@@ -163,15 +163,27 @@ h3_step "EVM proposal with a bad proof of possession is refused before any Prepa
 # 3. Coupled rotation s=1 during an in-flight old proposal: root 4 -> 5 together with evm4 -> evm5. The retained evm3 is stopped
 #    and evm5 is not yet running, so the successor quorum cannot acknowledge until the root quorum restart is over.
 h3_evm_s1() {
-  local i tx
+  local i tx firstTx= gossiped= n receipt status
   # keep an old-epoch proposal in flight: submit a paid tx to every validator, then propose before it certifies
   for i in 1 2 3 4; do
     tx=$(go run ./scripts/evmtx -send -eth-url "http://127.0.0.1:$((rethEthBase+i-1))" -chain-id 31337 -nonce "$M2_NEXT_NONCE" 2>&1) || {
       # the same transaction may already have reached this validator by gossip and been included (the nonce is then used): only a later validator, and only that refusal
-      if [ "$i" != 1 ] && echo "$tx" | grep -q "nonce too low"; then echo "in-flight tx: validator $i already has nonce $M2_NEXT_NONCE (gossiped and included)"; continue; fi
+      if [ "$i" != 1 ] && echo "$tx" | grep -q "nonce too low"; then echo "in-flight tx: validator $i already has nonce $M2_NEXT_NONCE (gossiped and included)"; gossiped=1; continue; fi
       echo "in-flight tx to validator $i failed (nonce $M2_NEXT_NONCE): $tx" >&2; return 1
     }
+    [ -n "$firstTx" ] || firstTx=$tx
   done
+  # the tolerance holds only if the transaction itself was included: its receipt, by hash, with status 1 (a lost transaction cannot pass)
+  if [ -n "$gossiped" ]; then
+    for n in $(seq 1 120); do
+      receipt=$(rpc "http://127.0.0.1:$((rethEthBase))" eth_getTransactionReceipt "[\"$firstTx\"]")
+      status=$(echo "$receipt" | pyget "['result']['status']")
+      [ "$status" = 0x1 ] && break
+      sleep 1
+    done
+    [ "$status" = 0x1 ] || { echo "the gossiped in-flight transaction $firstTx has no successful receipt on validator 1's execution client" >&2; return 1; }
+    echo "in-flight tx $firstTx included (receipt status 1)"
+  fi
   M2_NEXT_NONCE=$((M2_NEXT_NONCE + 1))
   h3_q3_handoff s1 3 "1 2 3 5" || return 1   # the Q3 flow: candidate, the four successor members' readiness (evm5's among them), plan, Commit
   stop_one_evm_validator 3 || return 1       # hold the acknowledgement: only evm1 and evm2 remain of {1,2,3,5}
