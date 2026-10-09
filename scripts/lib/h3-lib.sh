@@ -292,7 +292,8 @@ h3_restore_validator() {
   rm -rf "$H3_ARCHIVES/evm$i" "$journal" "$journal"-*
   mkdir -p "$evidence"
   # the authority (not the node) holds the signing key: a fresh session for the restored node, the old client being gone
-  build/ubft signing-authority replace-session --operator-socket "test-nodes/auth$i/operator.sock" \
+  # (a joiner restoring before its Commit has a pending authority, which issues no session before its enrollment names its key: H3_RESTORE_NO_SESSION=1)
+  [ -n "${H3_RESTORE_NO_SESSION:-}" ] || build/ubft signing-authority replace-session --operator-socket "test-nodes/auth$i/operator.sock" \
     --operator-credential "test-nodes/auth$i/operator.cred" --out "test-nodes/auth$i/client.cred" || return 1
   cp "test-nodes/evm$i/jwt.hex" "$evidence/jwt.hex" 2>/dev/null || openssl rand -hex 32 >"$evidence/jwt.hex"
   stop_one_evm_validator "$i" 2>/dev/null || true

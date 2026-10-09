@@ -60,8 +60,8 @@ h3_q3_config_handoff() { # epoch
 
 # A joiner's stack before its Commit: its execution client (paired and pinned), its signing authority (pending at the successor scope), its root as
 # a follower of the committee, and its shard node, staging-only. Idempotent.
-h3_q3_start_joiner() { # entity shardEpoch rootEpoch trustFile
-  local i=$1 shardEpoch=$2 rootEpoch=$3 trust=$4 bootnodes
+h3_q3_start_joiner() { # entity shardEpoch rootEpoch trustFile [restoreFromReplica]
+  local i=$1 shardEpoch=$2 rootEpoch=$3 trust=$4 replica=${5:-} bootnodes
   if [ ! -f "test-nodes/root$i/node-info.json" ]; then
     build/ubft root-node init --home "test-nodes/root$i" -g >/dev/null || return 1
     generate_log_configuration "test-nodes/root$i/"
@@ -74,7 +74,13 @@ h3_q3_start_joiner() { # entity shardEpoch rootEpoch trustFile
   m2_start_root "$i" "$((rootEpoch - 1))" "$(m2_root_addr "$(h3_first_root)")" || return 1
   bootnodes=$(evm_bootnodes_for_peers "$(m2_root_addr "$(h3_first_root)")" "$i" $H3_ONLINE) || return 1
   export "EVM_ENGINE_URL_$i=http://127.0.0.1:$((rethEngineBase + i - 1))" "EVM_ETH_URL_$i=http://127.0.0.1:$((rethEthBase + i - 1))"
-  start_one_evm_validator "$i" "$validators" "$partitionID" "$(m2_root_addr "$(h3_first_root)")" engine-api rpc "$bootnodes" || return 1
+  if [ -n "$replica" ]; then
+    # a joiner of a later assignment must carry the verified history of the earlier ones (a fresh node knows only the genesis tip and would refuse
+    # a candidate that is not its successor): it starts as a restore from a surviving validator's archive, still staging-only
+    H3_RESTORE_NO_SESSION=1 H3_RESTORE_TRUST_BASE=test-nodes/trust-base.json h3_restore_validator "$i" "$replica" || return 1
+  else
+    start_one_evm_validator "$i" "$validators" "$partitionID" "$(m2_root_addr "$(h3_first_root)")" engine-api rpc "$bootnodes" || return 1
+  fi
   h3_q3_wait_joiner "$i"
 }
 

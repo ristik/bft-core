@@ -301,7 +301,7 @@ h3_join_s2() {
   generate_log_configuration "test-nodes/root6/"
   h3_q3_trust_base 4 "1 2 5 6" || return 1
   # s=2 set {1,2,5,6}: 1->2,5  2->5,6  5->6,1 (each retains one replica of the s=1 pairs)
-  EVM_ARCHIVE_REPLICA_POOL="1 2 5 6" h3_q3_start_joiner 6 2 4 trust-base-epoch4.json
+  EVM_ARCHIVE_REPLICA_POOL="1 2 5 6" H3_ONLINE="1 2 5" h3_q3_start_joiner 6 2 4 trust-base-epoch4.json 1
 }
 h3_step "joiner evm6 and root 6 start before the s=2 Commit" h3_join_s2
 h3_evm_s2() {
