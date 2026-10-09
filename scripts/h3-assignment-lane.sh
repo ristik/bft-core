@@ -3,8 +3,9 @@
 # fresh-B1 genesis (the one registry layout, validator_coupling=true) with F8's three aggregator shards; a configuration-only epoch
 # advance as the baseline, a refused bad-PoP coupled proposal, a coupled rotation (root entity and its delegated EVM validator)
 # during an in-flight old proposal with a held acknowledgement and a root quorum restart, retired-key rejection (hard
-# assertions), the F7 inclusion proof verified offline with the new-epoch trust base, the H4 restore at s=1, and a coupled s=2 ->
-# s=3 supersession whose late ack is refused. Every step prints PASS or FAIL; the first FAIL exits nonzero. Every validator signs through
+# assertions), the F7 inclusion proof verified offline with the new-epoch trust base, the H4 restore at s=1, a coupled s=2 whose joiner
+# is behind the chain (it restores from an archive and gives readiness before the Commit), and the derived recovery K (the s=1 set) that supersedes
+# s=2 and whose late s=2 acknowledgement is refused (at the root when the node reaches one, otherwise at the archive: the log says which). Every step prints PASS or FAIL; the first FAIL exits nonzero. Every validator signs through
 # its own signing authority (SIGNING=authority, the only mode): joiners' proofs of possession are signed on the operator channel,
 # retained validators' authorities advance at each activation and a restored validator restores through its surviving authority.
 #
