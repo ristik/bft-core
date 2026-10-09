@@ -7,14 +7,18 @@
 # GATE: the rows are weighted-epoch rows. They run only when the lane's chain is in an activated weighted epoch (Q3 coupled activation,
 # scheme 2, root-wrr-v1); Q4_WEIGHTED_CHECK is a command that exits 0 exactly then (the Q3 lane supplies it; it prints the active
 # epoch's weights). Without it the lane stops BLOCKED (exit 3) before any fault, never as a pass on a unit-weight chain.
-source scripts/lib/m2-handoff-lib.sh
+# The activation prefix is the Q3 flow library's: the same fresh-B1 unit PoA -> one coupled handoff to mirrored weights 6,1,1,1 that scripts/q3-weight-activation-steps.sh
+# runs (candidate, readiness receipts from every entity, propose, install, activation record, authority advance, scheme 2 progress), so the weighted epoch the Q4 rows
+# run in is established by exactly the flow whose evidence closed Q3, in this same devnet.
+export Q3_LANE_DEFINE_ONLY=1
+source scripts/q3-weight-activation-steps.sh
+unset Q3_LANE_DEFINE_ONLY
 source scripts/lib/q4-lib.sh
 
 Q4_DIR=test-nodes/q4
-mkdir -p "$Q4_DIR"
 Q4_ROOTS=${Q4_ROOTS:-"1 2 3 4"}
 Q4_HEAVY_ROOT=${Q4_HEAVY_ROOT:-1}   # the weight-6 root of the activated 6,1,1,1 epoch
-Q4_EPOCH=${Q4_EPOCH:?Q4_EPOCH: the installed epoch number, for restarts (--install-handoff-epoch)}
+Q4_EPOCH=${Q4_EPOCH:-2}   # the installed epoch the Q3 flow activates, for restarts (--install-handoff-epoch)
 Q4_STALL_SECONDS=${Q4_STALL_SECONDS:-20}
 Q4_RECOVER_SECONDS=${Q4_RECOVER_SECONDS:-120}   # frozen before the run; never widened after a stall
 q4_lights() { local r; for r in $Q4_ROOTS; do [ "$r" = "$Q4_HEAVY_ROOT" ] || echo "$r"; done; }
@@ -62,6 +66,30 @@ q4_restart_root() {
   local node=$1
   m2_start_root "$node" "$Q4_EPOCH" "$(boot_node test-nodes/root1 "$rootPortStart")"
 }
+
+# The gate, from the Q3 flow library: the root's OWN verified state is a quorum certificate of the activated epoch under scheme 2, every signer carries its mirrored weight, and
+# the committed activation record names scheme 2. Nothing is read from logs or from the process under test beyond its verified Q3 endpoints.
+q4_weighted_epoch_check() {
+  local root sg act signers
+  root=$(h3_first_root) || return 1
+  sg=$(q3_signers_of "$root") || return 1
+  [ "$(printf '%s' "$sg" | jq -r '[.epoch, .scheme, .quorum] | join(",")')" = "$Q4_EPOCH,2,true" ] || { echo "root$root is not at a scheme-2 quorum certificate of epoch $Q4_EPOCH: $sg" >&2; return 1; }
+  signers=$(mktemp); printf '%s' "$sg" | jq '.signers' >"$signers"
+  q3_check_weights cert "$signers" "$Q3_TOTAL_WEIGHT" "$Q3_ROOT_QUORUM" >/dev/null || { rm -f "$signers"; return 1; }
+  python3 - "$signers" "$Q3_WEIGHTS" "$(for i in $H3_ROOTS; do printf '%s ' "$(h3_root_id "$i")"; done)" <<'PY' || { rm -f "$signers"; return 1; }
+import json, sys
+signers = json.load(open(sys.argv[1])); weights = sys.argv[2].split(); ids = sys.argv[3].split()
+want = dict(zip(ids, map(int, weights)))
+bad = [s for s in signers if want.get(s["nodeId"]) != int(s["weight"])]
+if bad: sys.exit(f"signer weights differ from the mirrored weights {want}: {bad}")
+PY
+  rm -f "$signers"
+  act=$(mktemp); build/ubft root handoff q3-activation --root-rpc "$(h3_rpc_url "$root")" --epoch "$Q4_EPOCH" --out "$act" >/dev/null || { rm -f "$act"; return 1; }
+  jq -e --argjson e "$Q4_EPOCH" '.epoch == $e and .signingScheme == 2' "$act" >/dev/null || { echo "the committed activation record of epoch $Q4_EPOCH is not scheme 2" >&2; rm -f "$act"; return 1; }
+  echo "activated weighted epoch confirmed from root$root: epoch $Q4_EPOCH, scheme 2, signed weight $(printf '%s' "$sg" | jq -r '[.signers[].weight] | add'), mirrored weights $Q3_WEIGHTS"
+  cp "$act" "${Q4_EVIDENCE_DIR:-.}/weighted-check-activation.json" 2>/dev/null; rm -f "$act"
+}
+Q4_WEIGHTED_CHECK=${Q4_WEIGHTED_CHECK:-q4_weighted_epoch_check}
 
 q4_precondition() {
   if [ -z "${Q4_WEIGHTED_CHECK:-}" ]; then
@@ -135,13 +163,35 @@ q4_row_trace_check() {
   python3 scripts/q4-trace-check.py "$Q4_SHIM_DIR" --roots "$roots" ${Q4_BYZ_ROOTS:+--byzantine "$Q4_BYZ_ROOTS"} $(q4_peer_args) | tee "$Q4_DIR/trace-report.json" | jq -e '.verdict == "PASS"' >/dev/null
 }
 
-q4_precondition
-q4_step "baseline: weighted epoch commits (F8 trace and EVM IR)" q4_row_baseline
-q4_step "one light root isolated (held both ways): 8 of 9 progresses, heal releases" q4_row_light_partition
-q4_step "heavy root delayed: quorum lost, explicit stall, release recovers" q4_row_heavy_delayed
-q4_step "F8 callbacks: EVM stop/resume with the root quorum intact, in-flight EVM proposal across root rotation" q4_row_f8_callbacks
-q4_step "SIGKILL a light root and restart over the retained home" q4_row_light_sigkill
-q4_step "SIGKILL the heavy root: stall, restart recovers" q4_row_heavy_sigkill
-q4_step "two Byzantine lights (weight 2) equivocate: honest 7 progresses" q4_row_byzantine_lights
-q4_step "offline trace check: attempts have outcomes, equivocators are exactly the declared Byzantine roots" q4_row_trace_check
-echo "Q4 live lane: all steps PASSED"
+# the Q3 flow's own initialisation (what q3_run_lane does before its steps) and the activation prefix; each step is the Q3 step, with its Q3 evidence under $Q3_DIR
+Q4_ACTIVATION_STEPS="q3_baseline q3_candidate q3_handoff q3_install_epoch2 q3_activation q3_acknowledge q3_progress_scheme2"
+q4_activate_weighted_epoch() {
+  local s
+  mkdir -p "$Q3_DIR"; : >"$Q3_DIR/commands.log"
+  cp "${Q3_PINS_FILE:?}" "$Q3_DIR/pins.txt"
+  H3_RESTORE_TRUST_BASE=test-nodes/trust-base.json
+  Q3_GENESIS_IDENTITIES=test-nodes/genesis-identities.json
+  H3_REGISTRY=0xff00000000000000000000000000000000000002
+  H3_ONLINE="1 2 3 4"; H3_ROOTS="1 2 3 4"
+  M2_NEXT_NONCE=${M2_NEXT_NONCE:-4}; M2_CHAIN_ID=31337
+  read -r h3_slot_shard h3_slot_root h3_slot_conf h3_slot_cursor < <(H3_SLOT_LAYOUT=3 go run ./scripts/h3slots)
+  echo "=== Q4 live lane: fresh-B1 unit PoA -> mirrored weights $Q3_WEIGHTS (the Q3 flow), then the Q4 fault rows ==="
+  for s in $Q4_ACTIVATION_STEPS; do q3_step "$s" "$s"; done
+}
+
+q4_run_lane() {
+  mkdir -p "$Q4_DIR"
+  q4_activate_weighted_epoch
+  q4_precondition
+  q4_step "baseline: weighted epoch commits (F8 trace and EVM IR)" q4_row_baseline
+  q4_step "one light root isolated (held both ways): 8 of 9 progresses, heal releases" q4_row_light_partition
+  q4_step "heavy root delayed: quorum lost, explicit stall, release recovers" q4_row_heavy_delayed
+  q4_step "F8 callbacks: EVM stop/resume with the root quorum intact, in-flight EVM proposal across root rotation" q4_row_f8_callbacks
+  q4_step "SIGKILL a light root and restart over the retained home" q4_row_light_sigkill
+  q4_step "SIGKILL the heavy root: stall, restart recovers" q4_row_heavy_sigkill
+  q4_step "two Byzantine lights (weight 2) equivocate: honest 7 progresses" q4_row_byzantine_lights
+  q4_step "offline trace check: attempts have outcomes, equivocators are exactly the declared Byzantine roots" q4_row_trace_check
+  echo "Q4 live lane: all steps PASSED"
+  q4_teardown
+}
+[ "${Q4_LANE_DEFINE_ONLY:-0}" = 1 ] || q4_run_lane
