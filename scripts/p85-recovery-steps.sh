@@ -91,7 +91,7 @@ p85_joiner_nodes() {
   h3_spare_authority 5 1 2 trust-base-epoch2.json || return 1
   boot=$(m2_root_addr 1)
   m2_start_root 5 1 "$boot" || { echo "the joiner's root did not start as a follower" >&2; return 1; }
-  H3_RESTORE_TRUST_BASE=test-nodes/trust-base.json h3_restore_validator 5 1 || return 1
+  H3_STAGING_JOINER=1 H3_RESTORE_TRUST_BASE=test-nodes/trust-base.json h3_restore_validator 5 1 || return 1
   H3_ONLINE="1 2 3 4 5"
   local i st=""
   for i in $(seq 1 60); do
