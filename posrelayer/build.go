@@ -258,6 +258,26 @@ func Build(ctx context.Context, rd Reader, m Modules, resultID [32]byte, root Ro
 	return out, nil
 }
 
+// decodeExposure reads the exposures getter's tuple with checked assertions.
+func decodeExposure(o []any) (exposureView, error) {
+	var e exposureView
+	var ok [8]bool
+	e.AssignmentID, ok[0] = o[0].([32]byte)
+	e.ID, ok[1] = o[1].(uint64)
+	e.Generation, ok[2] = o[2].(uint64)
+	e.Weight, ok[3] = o[3].(uint64)
+	e.RawWeight, ok[4] = o[4].(uint64)
+	e.RootKeyHash, ok[5] = o[5].([32]byte)
+	e.EvmKeyHash, ok[6] = o[6].([32]byte)
+	e.OperatorPayee, ok[7] = o[7].(ethcommon.Address)
+	for i, good := range ok {
+		if !good {
+			return exposureView{}, fmt.Errorf("%w: exposures word %d has an unexpected type", ErrBuild, i)
+		}
+	}
+	return e, nil
+}
+
 type committee struct {
 	ids      []evmassign.Identity
 	bindings [][32]byte
@@ -280,8 +300,15 @@ func (b builder) identities(ctx context.Context, assignmentID [32]byte, names Na
 		if len(o) != 10 {
 			return committee{}, fmt.Errorf("%w: exposures returned %d words", ErrBuild, len(o))
 		}
-		e := exposureView{AssignmentID: o[0].([32]byte), ID: o[1].(uint64), Generation: o[2].(uint64), Weight: o[3].(uint64), RawWeight: o[4].(uint64),
-			RootKeyHash: o[5].([32]byte), EvmKeyHash: o[6].([32]byte), OperatorPayee: o[7].(ethcommon.Address)}
+		e, err := decodeExposure(o)
+		if err != nil {
+			return committee{}, err
+		}
+		if len(out.ids) > 0 {
+			if prev, _ := evmassign.CustodyID(out.ids[len(out.ids)-1].StakingID); e.ID <= prev {
+				return committee{}, fmt.Errorf("%w: custody reported the exposures of %x out of identity order", ErrBuild, assignmentID)
+			}
+		}
 		if e.AssignmentID != assignmentID {
 			return committee{}, fmt.Errorf("%w: exposure %x belongs to another assignment", ErrBuild, eid)
 		}
@@ -328,14 +355,33 @@ func (b builder) identities(ctx context.Context, assignmentID [32]byte, names Na
 	return out, nil
 }
 
-// RPCReader is a Reader over an execution client's eth_call at the latest block.
-type RPCReader struct{ Client *rpc.Client }
+// RPCReader is a Reader over an execution client's eth_call. All calls are made at one block: Pin reads the head once and the reader keeps
+// it, so a build of ~4N+4 reads describes one state and an operator never sees a refusal that only a block boundary explains.
+type RPCReader struct {
+	Client *rpc.Client
+	// Block is the block every call is made at ("latest" when empty: only for callers that accept a moving head).
+	Block string
+}
+
+// Pin returns a reader that reads at the current head.
+func (r RPCReader) Pin(ctx context.Context) (RPCReader, error) {
+	var head hexutil.Uint64
+	if err := r.Client.CallContext(ctx, &head, "eth_blockNumber"); err != nil {
+		return r, err
+	}
+	r.Block = hexutil.EncodeUint64(uint64(head))
+	return r, nil
+}
 
 // Call implements Reader.
 func (r RPCReader) Call(ctx context.Context, to [20]byte, data []byte) ([]byte, error) {
 	var out hexutil.Bytes
 	arg := map[string]any{"to": ethcommon.Address(to), "data": hexutil.Bytes(data)}
-	if err := r.Client.CallContext(ctx, &out, "eth_call", arg, "latest"); err != nil {
+	block := r.Block
+	if block == "" {
+		block = "latest"
+	}
+	if err := r.Client.CallContext(ctx, &out, "eth_call", arg, block); err != nil {
 		return nil, err
 	}
 	return out, nil

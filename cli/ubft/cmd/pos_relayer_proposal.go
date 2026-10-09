@@ -78,7 +78,10 @@ func newPosProposalCmd() *cobra.Command {
 			defer client.Close()
 			ctx, cancel := context.WithTimeout(cmd.Context(), 60*time.Second)
 			defer cancel()
-			rd := posrelayer.RPCReader{Client: client}
+			rd, err := posrelayer.RPCReader{Client: client}.Pin(ctx)
+			if err != nil {
+				return errors.Join(ErrPosRelayer, err)
+			}
 			mods := posrelayer.Modules{Election: dep.Election, Custody: dep.Custody}
 			var result [32]byte
 			if resultHex != "" {
