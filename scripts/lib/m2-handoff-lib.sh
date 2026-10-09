@@ -228,6 +228,12 @@ m2_replica_acked() {
     jq -e --arg r "$2" --argjson h "$3" '[.replicas[] | select(.replica == $r)] | (length > 0) and all(.lastAcknowledgedHeight >= $h and ((.error // "") == ""))' >/dev/null 2>&1
 }
 
+# m2_replica_brief <validator>: the validator's operator-status summary line (it lists each replica's acknowledged height and error), for the wait's progress output.
+m2_replica_brief() {
+  printf 'v%s: ' "$1"
+  build/ubft shard-node status --url "http://$(evm_validator_rpc_addr "$1")" 2>&1 >/dev/null </dev/null | tail -1 | grep -o 'replica .*' | cut -c1-260 || echo "status unavailable"
+}
+
 # m2_wait_archive_replica_catchup <validator> <unused> [head]: waits until the restarted validator is caught up as an archive replica through a certified head. The head
 # is the newest certified block when the validator was restarted (computed now if omitted). Caught up means two things, both read from the nodes' durable operator
 # status (not from a log line, which is emitted only when a publisher had to retry records a replica was behind on, so a replica that never fell behind never logs it):
@@ -259,6 +265,7 @@ m2_wait_archive_replica_catchup() {
     fi
     if [ $((i % 15)) -eq 0 ]; then
       echo "still waiting for archive replica $target after ${i}s (peer_ack=$peerAck over $publishers publishers, node_ack=$nodeAck)"
+      for source in $(m2_online_validators); do m2_replica_brief "$source"; done
     fi
     sleep 1
   done
