@@ -110,6 +110,10 @@ mkdir -p build
 GOFLAGS=-mod=readonly go build -o build/ubft ./cli/ubft || fail "clean ubft build failed"
 make build-q4shim >/dev/null || fail "make build-q4shim"
 [ -x build/q4shim/ubft ] || fail "build/q4shim/ubft is missing"
+# the devnet setup (setup-evm-nodes.sh) runs `make clean build`, which removes build/ and rebuilds only the production binary: the shim binary is kept outside it
+# (its name stays ubft, so the lanes' process matching and ownership-checked teardown see it)
+mkdir -p "$EVIDENCE_DIR/bin"
+cp build/q4shim/ubft "$EVIDENCE_DIR/bin/ubft"
 pass "clean ubft and q4shim builds at $Q4_BFT_COMMIT"
 
 # shellcheck source=/dev/null
@@ -137,7 +141,7 @@ PINS=$EVIDENCE_DIR/pins.txt
   echo "run mode: $RUN_MODE"
   echo "bft-core commit: $Q4_BFT_COMMIT"
   echo "ubft sha256: $(sha256 build/ubft)"
-  echo "ubft-q4shim sha256: $(sha256 build/q4shim/ubft)"
+  echo "ubft-q4shim sha256: $(sha256 "$EVIDENCE_DIR/bin/ubft")"
   echo "bft-go-base: $(go list -m -f '{{.Version}}' github.com/unicitynetwork/bft-go-base)"
   echo "ureth commit: $Q4_URETH_COMMIT"
   echo "ureth binary sha256: $(sha256 "$URETH_BIN")"
@@ -153,7 +157,7 @@ export Q3_PINS_FILE=$PINS
 export URETH_PIN_NETWORK_ID=3 Q3_B1=1 H3_SLOT_LAYOUT=3 EVM_OPERATOR_STATUS_RPC=1
 export EVM_PARTITION_PARAMS_EXTRA=${EVM_PARTITION_PARAMS_EXTRA:-continuity_max_distance=1/1}
 # the roots run the q4shim binary from their first start; the shim directory is outside test-nodes (the devnet setup owns that tree)
-export Q4_SHIM_DIR=$EVIDENCE_DIR/shim Q4_ROOT_BIN=$PWD/build/q4shim/ubft
+export Q4_SHIM_DIR=$EVIDENCE_DIR/shim Q4_ROOT_BIN=$EVIDENCE_DIR/bin/ubft
 mkdir -p "$Q4_SHIM_DIR"
 set +e
 DEVNET_PIDFILE="$EVIDENCE_DIR/.devnet-pid"; rm -f "$DEVNET_PIDFILE"
@@ -166,6 +170,7 @@ wait "$!"
 status=$?
 set -e
 rm -f "$DEVNET_PIDFILE"
+echo "ubft sha256 after the devnet setup's own rebuild: $(sha256 build/ubft 2>/dev/null)" >>"$PINS"
 cp -R test-nodes/q3 "$EVIDENCE_DIR/q3" 2>/dev/null || true
 cp -R test-nodes/q4 "$EVIDENCE_DIR/q4" 2>/dev/null || true
 for f in test-nodes/root*/debug.log test-nodes/evm*/debug.log; do
