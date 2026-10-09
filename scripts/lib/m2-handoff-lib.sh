@@ -192,11 +192,9 @@ m2_is_archive_replica() { # validator
   return 1
 }
 
-m2_wait_archive_replica_catchup() {
-  local target=$1 startLine=$2 targetId latestHash source i targetLog peerAck nodeAck
-  targetId=$(evm_validator_id "$target") || return 1
-  targetLog="test-nodes/evm$target/debug.log"
-  latestHash=$(python3 - $(m2_online_validators) <<'PY'
+# The newest certified block (by root round) any online validator has admitted: the head a restarted replica must acknowledge.
+m2_latest_certified_hash() {
+  python3 - $(m2_online_validators) <<'PY'
 from pathlib import Path
 import re,sys
 best=(-1,'')
@@ -211,7 +209,15 @@ for node in sys.argv[1:]:
             best=(int(round_.group(1)),block.group(1))
 print(best[1])
 PY
-  )
+}
+
+# m2_wait_archive_replica_catchup <validator> <startLine> [head]: the head is the newest certified block when the validator was restarted (computed now if omitted):
+# the peers acknowledge the head of the moment the replica reconnected, so a caller that waits later passes the head it took at the restart.
+m2_wait_archive_replica_catchup() {
+  local target=$1 startLine=$2 latestHash=${3:-} source i targetLog targetId peerAck nodeAck
+  targetId=$(evm_validator_id "$target") || return 1
+  targetLog="test-nodes/evm$target/debug.log"
+  [ -n "$latestHash" ] || latestHash=$(m2_latest_certified_hash)
   [ -n "$latestHash" ] || { echo "cannot find a certified archive head before restarting validator $target" >&2; return 1; }
   echo "waiting for archive replica $target ($targetId) to acknowledge certified head $latestHash"
   for i in $(seq 1 120); do
@@ -246,6 +252,7 @@ PY
 # archive-replica catch-up wait after each restart (replicas that are down on purpose cannot acknowledge).
 m2_advance_authorities() {
   local epoch=$1 trustFile=$2 conf=${3:-$fullShardConf} ids=${4:-1 2 3 4} i offline rootBoot onlineValidators bootnodes startLine
+  local -a catchups=()
   [ "${SIGNING:-local}" = authority ] || return 0
   rootBoot=$(m2_root_addr 1) || return 1
   onlineValidators=$(m2_online_validators)
@@ -270,12 +277,18 @@ m2_advance_authorities() {
       bootnodes=$(evm_bootnodes_for_peers "$rootBoot" "$i" $onlineValidators) || return 1
       startLine=$(wc -l < "test-nodes/evm$i/debug.log")
       start_one_evm_validator "$i" "$validators" "$partitionID" "$rootBoot" engine-api rpc "$bootnodes" || return 1
-      if [ "${M2_ADVANCE_NO_REPLICA_WAIT:-0}" != 1 ] && m2_is_archive_replica "$i"; then
-        m2_wait_archive_replica_catchup "$i" "$startLine" || return 1
-      fi
+      [ "${M2_ADVANCE_NO_REPLICA_WAIT:-0}" = 1 ] || ! m2_is_archive_replica "$i" || catchups+=("$i:$startLine:$(m2_latest_certified_hash)")
     fi
     rm -f "test-nodes/post-m2a-evidence/restarting/$i"
     echo "authority $i advanced to root epoch $epoch"
+  done
+  # The replica catch-up is waited for after EVERY authority has advanced, not after each restart: until the other validators' authorities are at the
+  # new root epoch they refuse to sign in it ("signing-context-mismatch"), so with the EVM certifying a restarted validator cannot catch up while the
+  # rest are still on the old scope, and waiting for it before advancing them would wait for itself.
+  local entry rest
+  for entry in ${catchups[@]+"${catchups[@]}"}; do
+    i=${entry%%:*}; rest=${entry#*:}
+    m2_wait_archive_replica_catchup "$i" "${rest%%:*}" "${rest#*:}" || return 1
   done
 }
 
