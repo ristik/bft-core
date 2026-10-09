@@ -133,7 +133,7 @@ h3_join_s1() {
   build/ubft root-node init --home test-nodes/root5 -g >/dev/null 2>&1 || true
   generate_log_configuration "test-nodes/root5/"
   h3_q3_trust_base 3 "1 2 3 5" || return 1
-  h3_q3_start_joiner 5 1 3 test-nodes/trust-base-epoch3.json
+  h3_q3_start_joiner 5 1 3 trust-base-epoch3.json
 }
 h3_step "joiner evm5 and root 5 start before the Commit: root follower, shard node staging-only, execution client paired" h3_join_s1
 h3_bad_pop() {
@@ -289,7 +289,7 @@ h3_join_s2() {
   build/ubft root-node init --home test-nodes/root6 -g >/dev/null 2>&1 || true
   generate_log_configuration "test-nodes/root6/"
   h3_q3_trust_base 4 "1 2 5 6" || return 1
-  h3_q3_start_joiner 6 2 4 test-nodes/trust-base-epoch4.json
+  h3_q3_start_joiner 6 2 4 trust-base-epoch4.json
 }
 h3_step "joiner evm6 and root 6 start before the s=2 Commit" h3_join_s2
 h3_evm_s2() {
