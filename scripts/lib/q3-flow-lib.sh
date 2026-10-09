@@ -81,10 +81,14 @@ q3_attempt() { # a retry rebuilds the proofs of possession, the candidate and th
     assign=(--next-evm-assignment "$Q3_DIR/$tag-assignment.json")
   fi
   q3_derive_candidate || return 1
-  q3_receipts || return 1
-  for i in ${Q3_ENTITIES:-1 2 3 4}; do receipts+="${receipts:+,}$Q3_DIR/receipt${suf}-$i.json"; done
+  # an exact recovery (Q3_RECOVERY=1) carries no receipts: the product refuses a recovery that has them
+  if [ -z "${Q3_RECOVERY:-}" ]; then
+    q3_receipts || return 1
+    for i in ${Q3_ENTITIES:-1 2 3 4}; do receipts+="${receipts:+,}$Q3_DIR/receipt${suf}-$i.json"; done
+    assign+=(--readiness-receipts "$receipts")
+  fi
   q3_x build/ubft root handoff propose --next-trust-base "test-nodes/trust-base-epoch${e}.json" ${assign[@]+"${assign[@]}"} \
-    --root-rpc "$(h3_root_rpcs)" --readiness-receipts "$receipts"
+    --root-rpc "$(h3_root_rpcs)"
 }
 
 q3_history_ids() { # out: the verified history identities retained by the first root
