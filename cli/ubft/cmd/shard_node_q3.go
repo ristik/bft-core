@@ -334,12 +334,18 @@ type shardQ3StageRequest struct {
 	Body      basehex.Bytes `json:"body"`
 	Candidate basehex.Bytes `json:"candidate"`
 	Attempt   uint64        `json:"attempt"`
+	Preimage  basehex.Bytes `json:"preimage,omitempty"` // the coupled candidate's canonical preimage; empty for a root-only change
 }
 
 // shardQ3Staging is the shard node's side of the readiness check: it reports the chain its own verified history is rooted in and the
 // candidate it has been handed, which it accepts only for that chain. It is a report by a co-hosted service, not an attestation.
 type shardQ3Staging struct {
-	cfg     func() (q3format.ProtocolConfig, error)
+	cfg func() (q3format.ProtocolConfig, error)
+	// tip is the installed tip of this node's verified history (its epoch, body version and body identity) and self this node's EVM node
+	// identity. Both are set in production; staging then checks the body against the node's own history and the candidate against its own
+	// binding, and a staging-only joiner (no installed step names it yet) is held to exactly the same checks as a validator.
+	tip     func() (epoch, version uint64, id [32]byte, err error)
+	self    string
 	mu      sync.Mutex
 	staged  *[32]byte
 	body    [32]byte
@@ -365,9 +371,54 @@ func (s *shardQ3Staging) Stage(req shardQ3StageRequest) error {
 	}
 	var digest [32]byte
 	copy(digest[:], req.Candidate)
+	if err := s.checkStaged(body, digest, req); err != nil {
+		return err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.staged, s.body, s.config, s.attempt = &digest, body.Identity(), body.Config.Identity(), req.Attempt
+	return nil
+}
+
+// checkStaged is everything about a candidate this node can verify without the root's signatures or any EVM state: that the candidate
+// digest is the preimage's (or the root-only operator digest of the body's members), that the body is the next epoch of the tip of this
+// node's own verified history with the change record that digest and attempt determine, and, for a coupled change, that the successor
+// assignment names this node.
+func (s *shardQ3Staging) checkStaged(body q3format.BodyV3, digest [32]byte, req shardQ3StageRequest) error {
+	if len(req.Preimage) == 0 {
+		operator, err := evmroot.D4OperatorCandidateDigest(body.Members)
+		if err != nil || operator != digest {
+			return fmt.Errorf("%w: without a preimage the candidate is the operator digest of the body's members", ErrQ3StageDigest)
+		}
+	} else if sum := sha256.Sum256(req.Preimage); sum != digest {
+		return fmt.Errorf("%w: the preimage is not the candidate", ErrQ3StageDigest)
+	}
+	if s.tip != nil {
+		epoch, version, id, err := s.tip()
+		if err != nil {
+			return err
+		}
+		prior, err := q3format.Prior{Network: body.Network, Epoch: epoch, BodyVersion: version, Identity: id[:]}.Hash()
+		if err != nil || body.Epoch != epoch+1 || !bytes.Equal(body.PredecessorHash, prior) {
+			return fmt.Errorf("%w: the body is not the successor of this node's verified tip", ErrQ3StageChain)
+		}
+		if !bytes.Equal(body.ChangeRecordHash, evmroot.D4CandidateContextHash(body.Network, id[:], req.Attempt, digest[:], body.EarliestActivation)) {
+			return fmt.Errorf("%w: the body's change record is not the one the candidate and attempt determine", ErrQ3StageBody)
+		}
+	}
+	if len(req.Preimage) != 0 && s.self != "" {
+		c, err := evmassign.DecodeCandidate(req.Preimage)
+		if err != nil {
+			return errors.Join(ErrQ3StageBody, err)
+		}
+		named := false
+		for _, id := range c.Identities {
+			named = named || id.EVMNodeID == s.self
+		}
+		if !named {
+			return fmt.Errorf("%w: the successor assignment does not name this node (%s)", ErrQ3StageBody, s.self)
+		}
+	}
 	return nil
 }
 

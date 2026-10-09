@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -58,7 +59,9 @@ func laneCommittee(t *testing.T) ([]laneEntity, q3format.BodyV3, q3CandidateFile
 		Config: q3format.Q3Config(5, genesis)}
 	require.NoError(t, body.Validate())
 	cand := q3CandidateFile{Body: body.Encode(), Attempt: 1, ActivationRound: 40}
-	cand.Candidate = sha256.Sum256([]byte("candidate"))
+	operator, err := evmroot.D4OperatorCandidateDigest(members) // a root-only change: the candidate is the operator digest of the members
+	require.NoError(t, err)
+	cand.Candidate = operator
 	return ents, body, cand
 }
 
@@ -152,15 +155,18 @@ type laneServices struct {
 	genesis          string
 	code             string
 	rootRefuses      bool
+	engine           *httptest.Server // the pair's JWT-authenticated Engine endpoint
+	pairNetwork      uint64
+	pairGenesis      [32]byte
 	rootBody         [32]byte
 	rootAttempt      uint64
 	rootConfig       [32]byte
 }
 
-type stageFunc func(body []byte, candidate [32]byte, attempt uint64) error
+type stageFunc func(body []byte, candidate [32]byte, attempt uint64, preimage []byte) error
 
-func (f stageFunc) StageV3Candidate(body []byte, candidate [32]byte, attempt uint64) error {
-	return f(body, candidate, attempt)
+func (f stageFunc) StageV3Candidate(body []byte, candidate [32]byte, attempt uint64, preimage []byte) error {
+	return f(body, candidate, attempt, preimage)
 }
 
 // newShardStagingServer is a shard node's staging endpoints for the given chain; reportAs edits the staged record the node reports.
@@ -188,7 +194,7 @@ func newLaneServices(t *testing.T, body q3format.BodyV3, staged [32]byte) *laneS
 	t.Helper()
 	s := &laneServices{rootStaged: &staged, genesis: "0x" + hex.EncodeToString(bytes.Repeat([]byte{0x52}, 32)), code: "0x6001600155"}
 	rootMux := http.NewServeMux()
-	rootMux.HandleFunc("POST /api/v1/handoff/q3-stage", rootQ3StageHandler(stageFunc(func(b []byte, digest [32]byte, attempt uint64) error {
+	rootMux.HandleFunc("POST /api/v1/handoff/q3-stage", rootQ3StageHandler(stageFunc(func(b []byte, digest [32]byte, attempt uint64, _ []byte) error {
 		if s.rootRefuses {
 			return errors.New("the candidate is not the next epoch of this chain")
 		}
@@ -214,6 +220,17 @@ func newLaneServices(t *testing.T, body q3format.BodyV3, staged [32]byte) *laneS
 	}))
 	s.root = httptest.NewServer(rootMux)
 	s.shard = newShardStagingServer(body.Config, nil)
+	s.pairNetwork, s.pairGenesis = body.Network, body.Config.Genesis
+	s.engine = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct{ Method string }
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		if !strings.HasPrefix(r.Header.Get("Authorization"), "Bearer ") || req.Method != "engine_sealConfigV1" {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		_, _ = fmt.Fprintf(w, `{"jsonrpc":"2.0","id":1,"result":{"version":1,"feeCollector":"0x0000000000000000000000000000000000000001","networkId":%d,"rootGenesisId":"0x%s"}}`,
+			s.pairNetwork, hex.EncodeToString(s.pairGenesis[:]))
+	}))
 	s.eth = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var req struct{ Method string }
 		_ = json.NewDecoder(r.Body).Decode(&req)
@@ -226,15 +243,23 @@ func newLaneServices(t *testing.T, body q3format.BodyV3, staged [32]byte) *laneS
 			_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"error":{"message":"unsupported"}}`))
 		}
 	}))
-	t.Cleanup(func() { s.root.Close(); s.shard.Close(); s.eth.Close() })
+	t.Cleanup(func() { s.root.Close(); s.shard.Close(); s.eth.Close(); s.engine.Close() })
 	return s
+}
+
+// jwtSecretFile writes a 32-byte hex JWT secret.
+func jwtSecretFile(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "jwt.hex")
+	require.NoError(t, os.WriteFile(path, []byte(hex.EncodeToString(bytes.Repeat([]byte{0x7a}, 32))), 0o600))
+	return path
 }
 
 func runReadiness(t *testing.T, ent laneEntity, candidate string, s *laneServices, genesisPin, codePin, out string) error {
 	t.Helper()
 	cmd := New(testobserve.NewFactory(t))
 	cmd.baseCmd.SetArgs([]string{"root", "handoff", "q3-readiness", "--candidate", candidate, "--key-conf", filepath.Join(ent.home, "keys.json"),
-		"--root-rpc", s.root.URL, "--shard-rpc", s.shard.URL, "--eth-url", s.eth.URL,
+		"--root-rpc", s.root.URL, "--shard-rpc", s.shard.URL, "--eth-url", s.eth.URL, "--engine-url", s.engine.URL, "--jwt-secret", jwtSecretFile(t),
 		"--execution-genesis-hash", genesisPin, "--execution-code-hash", codePin, "--out", out})
 	return cmd.Execute(context.Background())
 }
@@ -278,6 +303,8 @@ func TestEveryMembersReadinessReceiptVerifiesAndEachRefusalWritesNoReceipt(t *te
 		_, statErr := os.Stat(out)
 		require.True(t, os.IsNotExist(statErr), "%s: no receipt is written", name)
 	}
+	refused("the pair is bound to another network", q3ready.ErrComponent, func(s *laneServices) { s.pairNetwork++ }, genesisPin, codePin)
+	refused("the pair is bound to another root genesis", q3ready.ErrComponent, func(s *laneServices) { s.pairGenesis[0] ^= 1 }, genesisPin, codePin)
 	refused("the root refuses the candidate", ErrQ3StageRefused, func(s *laneServices) { s.rootRefuses = true }, genesisPin, codePin)
 	refused("execution genesis is not the pinned one", q3ready.ErrExecutionIdentity, func(s *laneServices) {
 		s.genesis = "0x" + hex.EncodeToString(bytes.Repeat([]byte{0x53}, 32))

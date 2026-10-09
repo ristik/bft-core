@@ -68,25 +68,15 @@ func (r *recorded) Call(_ context.Context, to [20]byte, data []byte) ([]byte, er
 	return ret, nil
 }
 
-// namesOf names the node-id words the recorded delegations hold ("root-a", "evm-a", ...), the way the fixture's identity records name them.
-func namesOf(t *testing.T, r *recorded) Names {
-	n := Names{}
-	i := 0
-	for key, ret := range r.reads {
-		data := key[len("0x")+40:] // after the address
-		if !strings.HasPrefix(data, "0x"+hex.EncodeToString(election.Methods["delegation"].ID)) {
-			continue
-		}
-		out, err := election.Unpack("delegation", ret)
-		require.NoError(t, err)
-		d, err := decode[delegationView](out[0])
-		require.NoError(t, err)
-		if _, ok := n[d.RootNodeID]; !ok {
-			n[d.RootNodeID] = "root-" + string(rune('a'+i))
-			n[d.EvmNodeID] = "evm-" + string(rune('a'+i))
-			i++
-		}
+// namesOf names the node-id words the recorded delegations hold: the fixture's genesis entities are "root-a", "evm-a", ... and the contracts
+// committed keccak256 of those names (the root recomputes the frozen binding hash from them, so a different name is a different primary).
+func namesOf(t *testing.T, _ *recorded) Names {
+	var ids []string
+	for i := 0; i < 8; i++ {
+		ids = append(ids, "root-"+string(rune('a'+i)), "evm-"+string(rune('a'+i)))
 	}
+	n, err := NewNames(ids)
+	require.NoError(t, err)
 	return n
 }
 
@@ -197,6 +187,16 @@ func TestATamperedBuilderOutputIsRefusedByTheRealVerifyPrimary(t *testing.T) {
 }
 
 // firstExposure adds delta to word w of the first exposure the builder reads (the primary's first member), leaving every other answer intact.
+// tamperPublication flips one bit of the word-th word of the publication read.
+func tamperPublication(word int) func(to [20]byte, data, ret []byte) []byte {
+	return func(_ [20]byte, data, ret []byte) []byte {
+		if bytes.HasPrefix(data, election.Methods["publication"].ID) {
+			ret[32*word+31] ^= 1
+		}
+		return ret
+	}
+}
+
 func firstExposure(w int, delta byte) func(to [20]byte, data, ret []byte) []byte {
 	done := false
 	return func(_ [20]byte, data, ret []byte) []byte {
@@ -248,10 +248,9 @@ func TestTheBuilderRefusesWhatItCannotBuild(t *testing.T) {
 			return ret
 		}, want: ErrBuild},
 		"a node id the operator did not name": {names: func(n Names) Names {
-			for w := range n {
-				delete(n, w)
-				break
-			}
+			w, err := evmassign.NodeIDWord("root-a") // the first genesis entity's root node
+			require.NoError(t, err)
+			delete(n, w)
 			return n
 		}, want: ErrUnknownNode},
 		"an unpublished result": {tamper: func(_ [20]byte, data, ret []byte) []byte {
@@ -266,6 +265,22 @@ func TestTheBuilderRefusesWhatItCannotBuild(t *testing.T) {
 			}
 			return ret
 		}, want: ErrBuild},
+		// each of the next four is an isolated tamper of one read: the record shown is internally valid and only this relation is broken
+		"a publication that names another assignment than the result": {tamper: tamperPublication(8), want: ErrBuild},
+		"a publication that names another incumbent than the result":  {tamper: tamperPublication(2), want: ErrBuild},
+		"fewer frozen members than exposures": {tamper: func(_ [20]byte, data, ret []byte) []byte {
+			if bytes.HasPrefix(data, election.Methods["frozenMembers"].ID) {
+				ret[32+31]-- // the array's length word: the last member is not reported
+			}
+			return ret
+		}, want: ErrBuild},
+		"a delegation other than the one the election froze": {tamper: func(_ [20]byte, data, ret []byte) []byte {
+			if bytes.HasPrefix(data, election.Methods["frozenMembers"].ID) {
+				ret[32*6+31] ^= 1 // the first member's frozen bindingHash (after the offset and length words and four fields)
+			}
+			return ret
+		}, want: ErrBuild},
+		"an exposure of another assignment":                             {tamper: firstExposure(0, 1), want: ErrBuild},
 		"an exposure whose weight is not the election's frozen one":     {tamper: firstExposure(3, 1), want: ErrBuild},
 		"an exposure whose raw weight is not the election's frozen one": {tamper: firstExposure(4, 1), want: ErrBuild},
 	} {
@@ -282,6 +297,22 @@ func TestTheBuilderRefusesWhatItCannotBuild(t *testing.T) {
 			require.ErrorIs(t, err, tc.want)
 		})
 	}
+	// custody reports the exposures out of identity order: refused by name, not by the later comparison with the frozen record
+	t.Run("exposures out of identity order", func(t *testing.T) {
+		r, m := newRecorded(t)
+		r.tamper = func(_ [20]byte, data, ret []byte) []byte {
+			if bytes.HasPrefix(data, custody.Methods["assignmentExposures"].ID) {
+				a, b := 64, 64+32 // the first two array elements (after the offset and length words)
+				for i := 0; i < 32; i++ {
+					ret[a+i], ret[b+i] = ret[b+i], ret[a+i]
+				}
+			}
+			return ret
+		}
+		_, err := Build(context.Background(), r, m, p.ResultID, rootContext(t, p.Candidate.Authorization.K), namesOf(t, r))
+		require.ErrorIs(t, err, ErrBuild)
+		require.ErrorContains(t, err, "out of identity order")
+	})
 	// an incomplete root context
 	r, m := newRecorded(t)
 	_, err := Build(context.Background(), r, m, p.ResultID, RootContext{}, namesOf(t, r))

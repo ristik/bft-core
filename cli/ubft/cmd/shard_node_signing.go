@@ -45,7 +45,9 @@ type certificationSigning struct {
 	// deferred is set instead of a fixed expected key when a RESTORING node's shard configuration does not name it yet (a joiner): the
 	// key is bound from the verified handoff history (noteJoinerStep, finishJoinerKey), and the signer signs nothing until then.
 	deferred *shardnode.DeferredAuthoritySigner
-	nodeID   string
+	// stagingOnly is true while a deferred signer has no installed step naming this node: it follows and stages, and signs nothing.
+	stagingOnly bool
+	nodeID      string
 	// joinerKey is the key the LATEST verified installed step that names this node gives it, recorded as the steps are replayed and bound
 	// once (finishJoinerKey) when the replay is complete. localKey is the key configuration's own signing key, which no installed
 	// configuration may name for a node signed by an authority.

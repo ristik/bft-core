@@ -32,7 +32,7 @@ func rawEnvelope(e Envelope, mutate func(f []any)) []byte {
 	}
 	links := make([]any, len(e.Links))
 	for i, l := range e.Links {
-		links[i] = []any{l.Body.Encode(), l.Claim.items(), evidenceItems(l.Evidence), l.Proof, receiptItems(l.Receipts)}
+		links[i] = []any{l.Body.Encode(), l.Claim.items(), evidenceItems(l.Evidence), append([]byte{}, l.Preimage...), l.Proof, receiptItems(l.Receipts)}
 	}
 	var block any
 	if len(e.BlockID) != 0 {
@@ -189,8 +189,9 @@ func TestEnvelopeDecodeRefusals(t *testing.T) {
 			"transitions":    func(f []any) { f[3] = make([]any, MaxTransitions+1) },
 			"one transition": func(f []any) { f[3] = []any{make([]byte, maxTransition+1)} },
 			"links":          func(f []any) { f[6] = make([]any, MaxLinks+1) },
-			"proof":          func(f []any) { f[6].([]any)[0].([]any)[3] = make([]byte, MaxOldCommitProof+1) },
-			"receipts":       func(f []any) { f[6].([]any)[0].([]any)[4] = make([]any, MaxMembers+1) },
+			"preimage":       func(f []any) { f[6].([]any)[0].([]any)[3] = make([]byte, maxPreimage+1) },
+			"proof":          func(f []any) { f[6].([]any)[0].([]any)[4] = make([]byte, MaxOldCommitProof+1) },
+			"receipts":       func(f []any) { f[6].([]any)[0].([]any)[5] = make([]any, MaxMembers+1) },
 			"evidence":       func(f []any) { f[6].([]any)[0].([]any)[2].([]any)[0] = make([]byte, maxEvidence+1) },
 			"body":           func(f []any) { f[6].([]any)[0].([]any)[0] = make([]byte, maxBodyLen+1) },
 			"target parent":  func(f []any) { f[4] = fill(1)[:31] },
@@ -207,14 +208,15 @@ func TestEnvelopeDecodeRefusals(t *testing.T) {
 	t.Run("shape", func(t *testing.T) {
 		for name, mutate := range map[string]func([]any){
 			"six fields":    func(f []any) { f[6] = nil },
-			"link of six":   func(f []any) { l := f[6].([]any); l[0] = append(l[0].([]any), uint64(0)) },
+			"link of seven": func(f []any) { l := f[6].([]any); l[0] = append(l[0].([]any), uint64(0)) },
 			"claim of 7":    func(f []any) { l := f[6].([]any)[0].([]any); l[1] = append(l[1].([]any), uint64(0)) },
 			"evidence of 4": func(f []any) { l := f[6].([]any)[0].([]any); l[2] = append(l[2].([]any), []byte{1}) },
 			"claim arity":   func(f []any) { l := f[6].([]any)[0].([]any); l[1] = l[1].([]any)[:5] },
-			"link arity":    func(f []any) { f[6].([]any)[0] = f[6].([]any)[0].([]any)[:4] },
-			"proof kind":    func(f []any) { f[6].([]any)[0].([]any)[3] = "x" },
+			"link arity":    func(f []any) { f[6].([]any)[0] = f[6].([]any)[0].([]any)[:5] },
+			"preimage kind": func(f []any) { f[6].([]any)[0].([]any)[3] = "x" },
+			"proof kind":    func(f []any) { f[6].([]any)[0].([]any)[4] = "x" },
 			"claim kind":    func(f []any) { f[6].([]any)[0].([]any)[1].([]any)[0] = "x" },
-			"receipt kind":  func(f []any) { f[6].([]any)[0].([]any)[4] = []any{[]any{uint64(1), []byte{1}}} },
+			"receipt kind":  func(f []any) { f[6].([]any)[0].([]any)[5] = []any{[]any{uint64(1), []byte{1}}} },
 		} {
 			_, err := DecodeEnvelope(rawEnvelope(e, mutate))
 			require.ErrorIs(t, err, ErrFormat, name)

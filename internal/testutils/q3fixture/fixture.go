@@ -73,6 +73,8 @@ type Options struct {
 	// primary (exactly K, no fresh proofs), the root committee is K's (the committee After replaced) and Installed must be the
 	// primary's configuration. The only replacement of a committed primary.
 	Recovery bool
+	// WithRecoveryReceipts makes a recovery carry a full receipt set anyway (a negative fixture: the exemption carries none).
+	WithRecoveryReceipts bool
 	// Params are extra partition parameters of the genesis configuration (the continuity budget, say).
 	Params map[string]string
 }
@@ -314,12 +316,15 @@ func New(t *testing.T, o Options) *Fixture {
 
 	ctx := q3format.ContextFor(body, attempt, [32]byte(f.Evidence.CandidateDigest))
 	for i, m := range f.Members {
+		if o.Recovery && !o.WithRecoveryReceipts {
+			break // an exact recovery K needs no readiness receipts and carries none
+		}
 		r, err := q3format.SignReceipt(ctx, m.NodeID, f.NewNodes[i].Signer)
 		require.NoError(t, err)
 		f.Receipts = append(f.Receipts, r)
 	}
 	sort.Slice(f.Receipts, func(a, b int) bool { return f.Receipts[a].NodeID < f.Receipts[b].NodeID }) // the envelope orders them by node id
-	f.Link = q3format.Link{Body: body, Evidence: f.Evidence, Proof: f.ProofBytes, Receipts: f.Receipts}
+	f.Link = q3format.Link{Body: body, Evidence: f.Evidence, Preimage: bytes.Clone(f.Candidate), Proof: f.ProofBytes, Receipts: f.Receipts}
 	threshold := oldTB.QuorumThreshold
 	var signed uint64
 	for _, n := range f.OldNodes[:o.SignedBy] {
@@ -329,7 +334,7 @@ func New(t *testing.T, o Options) *Fixture {
 			}
 		}
 	}
-	if signed < threshold {
+	if signed < threshold || (o.Recovery && o.MutateCandidate != nil) { // a mutated recovery is a negative fixture: the layer under test, not this builder, refuses it
 		// a commit below the old threshold authenticates nothing: the claim is what an honest history would derive for the record
 		f.Claim = q3format.Claim{Epoch: bodyEpoch, Start: activate, BodyID: bodyID, PriorVersion: oldVersion}
 		copy(f.Claim.CommitID[:], record.ID())
