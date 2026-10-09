@@ -69,7 +69,11 @@ q3_derive_candidate() { # the root's derivation of the V3 candidate for the curr
 
 q3_receipts() { # exactly one receipt per successor entity, from its root key
   local i suf=${Q3_SUFFIX:-} n=0
-  for i in ${Q3_ENTITIES:-1 2 3 4}; do q3_readiness "$i" "$Q3_DIR/receipt${suf}-$i.json" || return 1; n=$((n + 1)); done
+  for i in ${Q3_ENTITIES:-1 2 3 4}; do
+    # a lane hook runs before an entity's turn (H3: a joiner that is behind restores from the archive once the incumbents before it have staged)
+    [ -z "${Q3_BEFORE_READINESS:-}" ] || "$Q3_BEFORE_READINESS" "$i" || return 1
+    q3_readiness "$i" "$Q3_DIR/receipt${suf}-$i.json" || return 1; n=$((n + 1))
+  done
   [ "$(ls "$Q3_DIR"/receipt${suf}-*.json | wc -l | tr -d ' ')" = "$n" ]
 }
 

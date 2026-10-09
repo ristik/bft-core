@@ -103,7 +103,6 @@ p85_joiner_nodes() {
   h3_spare_authority 5 1 2 trust-base-epoch2.json || return 1
   boot=$(m2_root_addr 1)
   m2_start_root 5 1 "$boot" || { echo "the joiner's root did not start as a follower" >&2; return 1; }
-  H3_STAGING_JOINER=1 H3_RESTORE_TRUST_BASE=test-nodes/trust-base.json h3_restore_validator 5 1 || return 1
   H3_ONLINE="1 2 3 4 5"
   local i st=""
   for i in $(seq 1 60); do
@@ -117,7 +116,16 @@ p85_joiner_nodes() {
   # existing recovery path when the install epoch names it, so its round is recorded here, not asserted to move (dev2's H3 joiner path asserts
   # the follower status and the staging-only shard node, as above).
   echo "joiner root round $(curl -fsS "$(h3_rpc_url 5)/api/v1/roundInfo" 2>/dev/null | jq -r '.roundNumber // empty'), follower=true" | tee "$H3_DIR/joiner-root-round.txt"
-  kill -0 "$(cat test-nodes/evm5/pid)" 2>/dev/null || { echo "the staging-only joiner shard node (evm5) is not running" >&2; return 1; }
+}
+
+# The joiner is far behind the chain (the election takes hundreds of rounds), so its shard node restores from a retained validator's archive, and the
+# archive serves it only once the incumbents have staged the candidate that names it (#527): at its readiness turn, after entities 1..4. It is
+# restored staging-only (no session before the Commit, #520) and gives its readiness from there.
+p85_joiner_restore() { # entity
+  [ "$1" = 5 ] || return 0
+  H3_ONLINE="1 2 3 4 5" H3_STAGING_JOINER=1 H3_RESTORE_TRUST_BASE=test-nodes/trust-base.json h3_restore_validator 5 1 || return 1
+  local i
+  for i in $(seq 1 120); do kill -0 "$(cat test-nodes/evm5/pid)" 2>/dev/null || { echo "the restored joiner shard node (evm5) exited" >&2; tail -20 test-nodes/evm5/debug.log >&2; return 1; }; sleep 1; done
 }
 
 # Write the joiner identity file (the node keys are the nodes' own) and onboard it through the live contracts.
@@ -228,25 +236,32 @@ p85_proofs() {
 
 # The root refuses a primary plan without the EVM possession proofs and one with a proof the election did not store (the same Freeze admission
 # a witness of another result would meet: the proofs are checked against the proven slots).
+# p85_expect_refusal <assignment> <sentinel text> <out>: the root refuses the plan, for that reason (a bare failure proves nothing: the first run of these
+# controls was "refused" for a malformed mutation and a lapsed Prepare, not for the proof)
+p85_expect_refusal() {
+  local out
+  if out=$(build/ubft root handoff propose --next-trust-base test-nodes/trust-base-epoch2.json --next-evm-assignment "$1" \
+      --root-rpc "$(h3_root_rpcs)" --max-attempts 1 --prepare-timeout 20s 2>&1); then echo "the plan was accepted: $out" >&2; return 1; fi
+  echo "$out" >"$3"
+  grep -Fq "$2" "$3" || { echo "refused, but not for \"$2\":" >&2; tail -n 4 "$3" >&2; return 1; }
+}
+
 p85_controls() {
   local d="$Q3_DIR/ctl" out
   mkdir -p "$d"
   Q3_NEXT_EPOCH=2 Q3_WEIGHTS="1 1 1 1 1" H3_ROOTS="1 2 3 4 5" p85_build_assignment ctl published || return 1
-  # (a) no EVM proofs
+  # (a) no EVM proofs: refused for exactly that (the shape check names it), and the same plan with its proofs is the lane's handoff below
   jq 'del(.evmPops)' "$Q3_DIR/ctl-assignment.json" >"$d/no-evm-pops.json"
-  if out=$(build/ubft root handoff propose --next-trust-base test-nodes/trust-base-epoch2.json --next-evm-assignment "$d/no-evm-pops.json" \
-      --root-rpc "$(h3_root_rpcs)" --max-attempts 1 --prepare-timeout 20s 2>&1); then echo "the plan without the EVM possession proofs was accepted: $out" >&2; return 1; fi
-  echo "$out" | tail -n 2 >"$H3_DIR/control-no-proofs.txt"
-  # (b) a proof that is not the stored one
-  jq '.evmPops[0].signature = .evmPops[1].signature' "$Q3_DIR/ctl-assignment.json" >"$d/wrong-evm-pop.json"
-  if out=$(build/ubft root handoff propose --next-trust-base test-nodes/trust-base-epoch2.json --next-evm-assignment "$d/wrong-evm-pop.json" \
-      --root-rpc "$(h3_root_rpcs)" --max-attempts 1 --prepare-timeout 20s 2>&1); then echo "the plan with a wrong EVM possession proof was accepted: $out" >&2; return 1; fi
-  echo "$out" | tail -n 2 >"$H3_DIR/control-wrong-proof.txt"
+  p85_expect_refusal "$d/no-evm-pops.json" "the primary candidate carries no EVM proof" "$H3_DIR/control-no-proofs.txt" || return 1
+  # (b) a proof that is not the member's own: member 1 carries member 2's signature (a well-formed list, so the shape check passes and the proofs are judged)
+  jq '.evmPops[0].Signature = .evmPops[1].Signature' "$Q3_DIR/ctl-assignment.json" >"$d/wrong-evm-pop.json"
+  [ "$(jq -c '.evmPops[0].Signature' "$d/wrong-evm-pop.json")" = "$(jq -c '.evmPops[1].Signature' "$Q3_DIR/ctl-assignment.json")" ] || { echo "control (b): the mutation did not apply" >&2; return 1; }
+  p85_expect_refusal "$d/wrong-evm-pop.json" "the primary candidate's EVM proof is refused" "$H3_DIR/control-wrong-proof.txt" || return 1
 }
 
 p85_handoff() {
   H3_ROOTS="1 2 3 4 5"; H3_ONLINE="1 2 3 4 5"
-  Q3_ENTITIES="1 2 3 4 5" Q3_TOTAL_WEIGHT=5 Q3_ROOT_QUORUM=4 Q3_EVM_QUORUM=4 Q3_WEIGHTS_1="1 1 1 1 1" \
+  Q3_BEFORE_READINESS=p85_joiner_restore Q3_ENTITIES="1 2 3 4 5" Q3_TOTAL_WEIGHT=5 Q3_ROOT_QUORUM=4 Q3_EVM_QUORUM=4 Q3_WEIGHTS_1="1 1 1 1 1" \
     q3_handoff_n 1 2 "1 1 1 1 1" 0 "$P85_DIR/genesis-identities.json" || return 1
 }
 
