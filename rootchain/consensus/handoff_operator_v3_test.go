@@ -4,10 +4,13 @@ import (
 	"bytes"
 	"context"
 	"crypto"
+	"crypto/sha256"
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	"github.com/unicitynetwork/bft-core/evmassign"
 	"github.com/unicitynetwork/bft-core/evmroot"
+	"github.com/unicitynetwork/bft-core/internal/testutils/q3fixture"
 	"github.com/unicitynetwork/bft-core/network/protocol/abdrc"
 	"github.com/unicitynetwork/bft-core/q3format"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/storage"
@@ -313,4 +316,45 @@ func TestAV2PlanInAV3EpochIsRefusedByName(t *testing.T) {
 		require.ErrorIs(t, err, ErrHandoffNeedsV3Plan, "the operator entry point refuses before it registers any intent")
 		require.Nil(t, f.cm.pendingIntent(0))
 	})
+}
+
+// A root serves its records to the EVM validators of the candidate staged on it while that candidate is the next epoch (a joiner that is
+// behind catches up before its assignment is installed): exactly the candidate's verified members, none for a refused stage, replaced by
+// the next stage, and none once the epoch the candidate would install is no longer the next one.
+func TestAStagedCandidatesEVMMembersAreServedUntilTheEpochIsNotTheNextOne(t *testing.T) {
+	f := q3fixture.New(t, q3fixture.Options{Assignment: true})
+	root := newQ3Replica(t, f, f.NewNodes[0]) // a root of the successor committee
+	root.mustOpen(true)
+	t.Cleanup(root.close)
+	require.NoError(t, root.rt.Recover(context.Background()))
+	c, err := evmassign.DecodeCandidate(f.Candidate)
+	require.NoError(t, err)
+	require.NotEmpty(t, c.Identities)
+	digest := sha256.Sum256(f.Candidate)
+
+	for _, id := range c.Identities {
+		require.False(t, root.manager.IsStagedValidator(id.EVMNodeID), "nothing is staged yet")
+	}
+	wrong := sha256.Sum256([]byte("not the candidate"))
+	require.Error(t, root.manager.StageV3Candidate(f.Body.Encode(), wrong, 0, f.Candidate))
+	require.False(t, root.manager.IsStagedValidator(c.Identities[0].EVMNodeID), "a refused stage serves nobody")
+
+	require.NoError(t, root.manager.StageV3Candidate(f.Body.Encode(), digest, 0, f.Candidate))
+	for _, id := range c.Identities {
+		require.True(t, root.manager.IsStagedValidator(id.EVMNodeID), "a member of the staged successor assignment: %s", id.EVMNodeID)
+	}
+	require.False(t, root.manager.IsStagedValidator("a-stranger"))
+	require.Error(t, root.manager.StageV3Candidate(f.Body.Encode(), wrong, 0, f.Candidate))
+	require.True(t, root.manager.IsStagedValidator(c.Identities[0].EVMNodeID), "a refused stage leaves the earlier one")
+
+	// a root-only candidate replaces the grant with nothing
+	root.manager.storeStagedEVM(f.Body.Epoch, evmassign.Candidate{})
+	require.False(t, root.manager.IsStagedValidator(c.Identities[0].EVMNodeID))
+
+	// the grant is for the next epoch only
+	granted := evmassign.Candidate{Identities: []evmassign.Identity{{EVMNodeID: c.Identities[0].EVMNodeID}}}
+	root.manager.storeStagedEVM(f.Body.Epoch+1, granted)
+	require.False(t, root.manager.IsStagedValidator(c.Identities[0].EVMNodeID), "not the next epoch")
+	root.manager.storeStagedEVM(f.Body.Epoch, granted)
+	require.True(t, root.manager.IsStagedValidator(c.Identities[0].EVMNodeID))
 }
