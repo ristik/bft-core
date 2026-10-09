@@ -39,10 +39,11 @@ q3_validators_json() { # out ids...: sorted successor node infos with the entity
 
 # The successor committee's identity records (#85 lifecycle): the genesis records of the same four entities with the mirrored weights. The
 # staking id, payee and exposure digest are the entity's own and do not change with its weight.
+# (the mirrored weight is also the raw bonded weight: the total is far below the profile bound B, so q = x and the identity record commits rawWeight = weight)
 q3_successor_identities() { # out ids...
   local out=$1 id w= ; shift
   for id in "$@"; do w+="${w:+,}\"$(h3_root_id "$id")\":$(q3_weight_of "$id")"; done
-  jq --argjson w "{$w}" 'map(.weight = $w[.rootNodeId])' "$Q3_GENESIS_IDENTITIES" >"$out"
+  jq --argjson w "{$w}" 'map(.weight = $w[.rootNodeId] | .rawWeight = $w[.rootNodeId])' "$Q3_GENESIS_IDENTITIES" >"$out"
 }
 
 # The coupled assignment (the same four entities, mirrored weights): h3_build_assignment with the mirrored stakes, the successor identity
