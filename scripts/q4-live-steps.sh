@@ -610,8 +610,14 @@ q4_first_successor_held() {
   done
   [ "$hits" -gt 0 ] || { echo "no root attempted an epoch-3 proposal within 120 s" >&2; return 1; }
   sleep 10
+  # a root that installed epoch 3 and holds no epoch-3 certificate yet answers the signers query with an error (no committed quorum certificate of
+  # its epoch): only a certificate that names epoch 3 is a failure here; the committed head stays in epoch 2
+  local e
   for r in $H3_ROOTS; do
-    [ "$(q3_signers_of "$r" | jq -r .epoch)" = 2 ] || { echo "root $r reached an epoch-3 certificate while every successor proposal was held" >&2; return 1; }
+    e=$(q3_signers_of "$r" 2>/dev/null | jq -r .epoch 2>/dev/null)
+    [ "$e" != 3 ] || { echo "root $r reached an epoch-3 certificate while every successor proposal was held" >&2; return 1; }
+    e=$(curl -fsS "http://127.0.0.1:$(m2_rpc_port "$r")/api/v1/roundInfo" | jq -r .epochNumber) || return 1
+    [ "$e" = 2 ] || { echo "root $r committed head is at epoch $e while every successor proposal was held" >&2; return 1; }
   done
   python3 - "$Q4_SHIM_DIR" $H3_ROOTS <<'PY' | tee "$Q4_DIR/first-successor-proposal.txt" || return 1
 import json, os, sys
