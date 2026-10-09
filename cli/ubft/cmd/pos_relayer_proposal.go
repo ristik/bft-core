@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -81,9 +82,9 @@ func newPosProposalCmd() *cobra.Command {
 			mods := posrelayer.Modules{Election: dep.Election, Custody: dep.Custody}
 			var result [32]byte
 			if resultHex != "" {
-				b, err := hexBytes("result-id", resultHex, 32)
-				if err != nil {
-					return err
+				b, err := hex.DecodeString(strings.TrimPrefix(resultHex, "0x"))
+				if err != nil || len(b) != 32 {
+					return fmt.Errorf("%w: --result-id must be 32 bytes of hex", ErrPosRelayer)
 				}
 				copy(result[:], b)
 			} else if result, err = posrelayer.OpenResult(ctx, rd, mods); err != nil || result == ([32]byte{}) {
@@ -98,9 +99,6 @@ func newPosProposalCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if err := os.MkdirAll(outDir, 0o750); err != nil {
-				return err
-			}
 			files := map[string]any{"identities.json": out.Identities, "authorization.json": out.Authorization, "validators.json": out.Validators, "bindings.json": out.Bindings}
 			if popsFile != "" {
 				pops, err := readPoPFiles(popsFile)
@@ -112,6 +110,10 @@ func newPosProposalCmd() *cobra.Command {
 					return err
 				}
 				files["evm-pops.json"] = ordered
+			}
+			// everything is checked before anything is written
+			if err := os.MkdirAll(outDir, 0o750); err != nil {
+				return err
 			}
 			for name, v := range files {
 				raw, err := json.MarshalIndent(v, "", "  ")
