@@ -38,6 +38,8 @@ echo "bft-core head=$(git rev-parse HEAD) ureth=$H3_URETH_COMMIT ubft sha256=$(s
 # layout-3 names
 export Q3_B1=${Q3_B1:-1}
 [ "$Q3_B1" != 1 ] || export H3_SLOT_LAYOUT=3
+# the Q3 flow talks to every entity's shard node (staging, readiness): the nodes serve their operator RPC
+export EVM_OPERATOR_STATUS_RPC=1
 # the rotations replace one root entity (distance 1/2 between four equal-weight committees) and two EVM validators (distance 1): the genesis configuration
 # commits a budget that admits them; the DEV default (1/4) admits no replacement of a four-member committee
 export EVM_PARTITION_PARAMS_EXTRA=${EVM_PARTITION_PARAMS_EXTRA:-continuity_max_distance=1/1}
