@@ -1453,3 +1453,14 @@ func Test_ConsensusManager_RestoreVote(t *testing.T) {
 	require.EqualValues(t, "test", lastTimeoutMsg.Author)
 	require.EqualValues(t, 1, lastTimeoutMsg.LastTC.GetRound())
 }
+
+// A shard's validators, as the root's installed configuration names them, are the members; no other peer is, and an unknown shard has none.
+func Test_ConsensusManager_IsShardValidator(t *testing.T) {
+	cm, rootNode, shardNodes := initConsensusManager(t, testnetwork.NewRootMockNetwork())
+	for _, n := range shardNodes {
+		require.True(t, cm.IsShardValidator(partitionID, shardID, n.PeerConf.ID), "a member of the installed configuration")
+	}
+	require.False(t, cm.IsShardValidator(partitionID, shardID, rootNode.PeerConf.ID), "a root is not a member of the shard")
+	require.False(t, cm.IsShardValidator(partitionID, shardID, testutils.NewTestNode(t).PeerConf.ID), "a stranger")
+	require.False(t, cm.IsShardValidator(partitionID+1, shardID, shardNodes[0].PeerConf.ID), "an unknown shard has no members")
+}
