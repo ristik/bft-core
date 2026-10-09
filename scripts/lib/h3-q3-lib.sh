@@ -76,12 +76,27 @@ h3_q3_start_joiner() { # entity shardEpoch rootEpoch trustFile [restoreFromRepli
   export "EVM_ENGINE_URL_$i=http://127.0.0.1:$((rethEngineBase + i - 1))" "EVM_ETH_URL_$i=http://127.0.0.1:$((rethEthBase + i - 1))"
   if [ -n "$replica" ]; then
     # a joiner of a later assignment must carry the verified history of the earlier ones (a fresh node knows only the genesis tip and would refuse
-    # a candidate that is not its successor): it starts as a restore from a surviving validator's archive, still staging-only
-    H3_RESTORE_NO_SESSION=1 H3_RESTORE_TRUST_BASE=test-nodes/trust-base.json h3_restore_validator "$i" "$replica" || return 1
-  else
-    start_one_evm_validator "$i" "$validators" "$partitionID" "$(m2_root_addr "$(h3_first_root)")" engine-api rpc "$bootnodes" || return 1
+    # a candidate that is not its successor): its shard node starts as a restore from a surviving validator's archive, which serves it only once
+    # the incumbents have staged the candidate that names it (h3_q3_joiner_shard_restore, at its readiness turn)
+    h3_q3_wait_joiner "$i"; return
   fi
+  start_one_evm_validator "$i" "$validators" "$partitionID" "$(m2_root_addr "$(h3_first_root)")" engine-api rpc "$bootnodes" || return 1
   h3_q3_wait_joiner "$i"
+}
+
+# The staging-only restore of a lagging joiner's shard node, from a surviving validator's archive; idempotent (a retried attempt finds it up).
+h3_q3_joiner_shard_restore() { # entity replica
+  local i=$1 replica=$2
+  if [ -f "test-nodes/evm$i/pid" ] && kill -0 "$(cat "test-nodes/evm$i/pid")" 2>/dev/null; then return 0; fi
+  H3_RESTORE_NO_SESSION=1 H3_RESTORE_TRUST_BASE=test-nodes/trust-base.json h3_restore_validator "$i" "$replica" || return 1
+  local n
+  for n in $(seq 1 600); do
+    curl -fsS -m 5 -X POST -H 'content-type: application/json' -d '{}' "http://$(evm_validator_rpc_addr "$i")/api/v1/q3/status" >/dev/null 2>&1 && return 0
+    kill -0 "$(cat "test-nodes/evm$i/pid")" 2>/dev/null || { echo "the restoring joiner evm$i exited" >&2; tail -30 "test-nodes/evm$i/debug.log" >&2; return 1; }
+    sleep 1
+  done
+  echo "the restoring joiner evm$i never served its status" >&2
+  return 1
 }
 
 # The joiner's own status reports it as a follower / staging-only: the root says follower, the shard node answers its status endpoint.

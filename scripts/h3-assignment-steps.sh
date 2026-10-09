@@ -305,7 +305,10 @@ h3_join_s2() {
 }
 h3_step "joiner evm6 and root 6 start before the s=2 Commit" h3_join_s2
 h3_evm_s2() {
-  h3_q3_handoff s2 4 "1 2 5 6" || return 1   # candidate, the four successor members' readiness (evm6's among them), plan, Commit
+  # the joiner evm6 is behind (it holds the genesis tip only): at its readiness turn, after evm1, evm2 and evm5 have staged the candidate that names it,
+  # its shard node restores from evm1's archive, which now serves it
+  h3_s2_joiner_restore() { [ "$1" != 6 ] || EVM_ARCHIVE_REPLICA_POOL="1 2 5 6" H3_ONLINE="1 2 5" h3_q3_joiner_shard_restore 6 1; }
+  Q3_BEFORE_READINESS=h3_s2_joiner_restore h3_q3_handoff s2 4 "1 2 5 6" || return 1   # candidate, the four successor members' readiness (evm6's among them), plan, Commit
   stop_one_evm_validator 6 || return 1       # the joiner fails after the Commit ...
   stop_one_evm_validator 5 || return 1       # ... and so does a carried-over member: J keeps evm1 and evm2, below its quorum of 3
   export EVM_ARCHIVE_REPLICA_POOL="1 2 5 6"
