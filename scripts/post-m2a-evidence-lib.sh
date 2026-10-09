@@ -66,6 +66,14 @@ print(f"evidence bootstrap EOA={signer}; test treasury={treasury_signer or manif
 PY
   build/ubft engine-api export-manifest --manifest test-nodes/post-m2a-allocation-build-v1.json \
     --out test-nodes/post-m2a-allocation-build-v1.exported.json || return 1
+  if [ "${Q3_B1:-0}" = 1 ]; then
+    # the fresh-B1 genesis: one profile (derived from the shard configuration and the root trust base) selects the registry (layout 3) and the block gas limit
+    build/ubft engine-api genesis --shard-conf "test-nodes/shard-conf-${partitionID}_0.json" --trust-base test-nodes/trust-base.json \
+      --b1-profile test-nodes/b1-profile.json --manifest test-nodes/post-m2a-allocation-build-v1.exported.json \
+      --out test-nodes/evm-genesis-finalized-funded.json \
+      --full-shard-conf test-nodes/evm-full-shard-conf-v2.json --identities-out test-nodes/b1-identities.json || return 1
+    return 0
+  fi
   build/ubft engine-api genesis --shard-conf "test-nodes/shard-conf-${partitionID}_0.json" \
     --manifest test-nodes/post-m2a-allocation-build-v1.exported.json \
     --out test-nodes/evm-genesis-finalized-funded.json \

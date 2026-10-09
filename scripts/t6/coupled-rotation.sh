@@ -1,14 +1,20 @@
 #!/usr/bin/env bash
-# T6 rehearsal: one real, key-replacing coupled rotation (shard epoch 0 -> 1) after the placeholder rehearsal's own checks, reusing the H3
-# lane's authority helpers (scripts/lib/h3-lib.sh). Sourced by reth-paired-devnet.sh in the T6 lane when T6_COUPLED_ROTATION=1.
+# T6 rehearsal: one real, key-replacing coupled rotation (shard epoch 0 -> 1) after the placeholder rehearsal's own checks, on the fresh-B1 layout through
+# the Q3 flow, reusing the H3 lane's helpers (scripts/lib/h3-lib.sh, h3-q3-lib.sh, q3-flow-lib.sh). Sourced by reth-paired-devnet.sh in the T6 lane when
+# T6_COUPLED_ROTATION=1.
 #
-# The rotation retires one validator (evm4, with its root entity) and adds a joiner (evm5, with its root entity): authority-backed proofs of
-# possession (the joiner's authority signs on the operator channel), the root handoff with the operators' endorsements, the root quorum restart,
-# the retained validators' authorities advancing to the activated scope, the joiner's authority enrolled and the joiner restored through it,
-# the successor set's acknowledgement (the registry reaches shard epoch 1), and a paid mint under the new set verified offline.
+# The rotation retires one validator (evm4, with its root entity) and adds a joiner (evm5, with its root entity). The joiner's root starts as a follower
+# and its shard node staging-only BEFORE the Commit; the four successor members give readiness receipts (candidate staged on each entity's own root and
+# shard), authority-backed proofs of possession (the joiner's authority signs on the operator channel), the root handoff with the operators'
+# endorsements, the root quorum restart into the install epoch, the retained validators' authorities advancing to the activated scope, the joiner's authority
+# enrolled and the joiner restored through it, the successor set's acknowledgement (the registry reaches shard epoch 1), and a paid mint under the new set
+# verified offline. A failure of any step FAILS the step (return 1); nothing here aborts the sourcing shell except the documented test hook.
 
 source scripts/lib/m2-handoff-lib.sh
 source scripts/lib/h3-lib.sh
+source scripts/lib/q3-lib.sh
+source scripts/lib/q3-flow-lib.sh
+source scripts/lib/h3-q3-lib.sh
 
 # The rotation starts processes the devnet's own cleanup does not know (the joiner's node, authority, execution client and root): stop them.
 t6_rotation_teardown() {
@@ -24,17 +30,24 @@ t6_rotation_teardown() {
   return 0
 }
 
-t6_rotation_attempt() {
-  H3_BIND_ROOTS="1 2 3 5" H3_SUPERSEDE=0 h3_build_assignment s1 1 2 3 5 || return 1
-  h3_propose s1 "$T6_ROTATION_NEXT_EPOCH"
+# Every Q3 activation of the lane so far: the restore pin names the V3 body identity of the tip's root epoch (a Q3 activation is not archived as a bundle).
+t6_body_ids() {
+  local f n ids=
+  for f in test-nodes/q3/v3-body-id-m2e*.txt; do
+    [ -f "$f" ] || continue
+    n=${f##*m2e}; n=${n%.txt}
+    ids+="${ids:+,}$n=$(tr -d '[:space:]' <"$f")"
+  done
+  echo "$ids"
 }
 
 t6_coupled_rotation_s1() {
-  local cur next i
+  local cur next ids
   # the lane's own state at this point: four roots and four validators, validator 1 running through the H4 restore command
   H3_DIR=test-nodes/h3; mkdir -p "$H3_DIR"
   H3_ROOTS="1 2 3 4"; H3_ONLINE="1 2 3 4"
-  H3_ARCHIVES=${EVM_ARCHIVE_ROOT:?}
+  H3_ARCHIVES=${EVM_ARCHIVE_ROOT:-}
+  [ -n "$H3_ARCHIVES" ] || { echo "T6 coupled rotation: EVM_ARCHIVE_ROOT is not set" >&2; return 1; }
   H3_REGISTRY=0xff00000000000000000000000000000000000002
   H3_LOOP_MARK=$H3_DIR/loop-mark
   M2_CHAIN_ID=${POST_M2A_CHAIN_ID:-1337}
@@ -42,10 +55,13 @@ t6_coupled_rotation_s1() {
   # base, the restore catches up forward through the verified handoffs
   H3_RESTORE_TRUST_BASE=test-nodes/trust-base.json
   H3_RESTORE_RESTART="1"          # the retained validator that is running through `restore` comes back by restoring, not by a plain start
-  read -r h3_slot_shard h3_slot_root h3_slot_conf h3_slot_cursor < <(go run ./scripts/h3slots) || return 1
+  read -r h3_slot_shard h3_slot_root h3_slot_conf h3_slot_cursor < <(H3_SLOT_LAYOUT=3 go run ./scripts/h3slots) || return 1
   cur=$(h3_root_info | jq -r '.epochNumber') || return 1
+  [ -n "$cur" ] && [ "$cur" != null ] || { echo "T6 coupled rotation: the root epoch is unreadable" >&2; return 1; }
   next=$((cur + 1)); T6_ROTATION_NEXT_EPOCH=$next
   echo "T6 coupled rotation: root epoch $cur -> $next, shard epoch 0 -> 1; evm4 (root 4) retires, evm5 (root 5) joins"
+  ids=$(t6_body_ids)
+  [ -z "$ids" ] || export H4_RESTORE_BODY_IDS="${H4_RESTORE_BODY_IDS:+$H4_RESTORE_BODY_IDS,}$ids"
 
   # The H4 restore of validator 1 wiped its home and ran from test-nodes/h4-replaced, keeping the identity there: put it back, so the node id
   # can be read and the validator can be restored into its own home again.
@@ -55,28 +71,34 @@ t6_coupled_rotation_s1() {
     [ -f test-nodes/evm1/logger-config.yaml ] || cp test-nodes/evm2/logger-config.yaml test-nodes/evm1/logger-config.yaml 2>/dev/null || true
     [ -f test-nodes/evm1/jwt.hex ] || cp test-nodes/h4-replaced/jwt.hex test-nodes/evm1/jwt.hex 2>/dev/null || true
   fi
-  h3_spare_identity 5 || return 1
-  h3_prepare_coupled "$next" 4 5 || return 1
-  h3_spare_authority 5 1 "$next" "trust-base-epoch${next}.json" || return 1
-  h3_start_reth 5 || return 1
+  h3_q3_init || return 1
+
+  # the joiner starts BEFORE the Commit: its root a follower of the committee, its shard node staging-only, its execution client paired and pinned
+  build/ubft root-node init --home test-nodes/root5 -g >/dev/null 2>&1 || true
+  generate_log_configuration "test-nodes/root5/"
+  h3_q3_trust_base "$next" "1 2 3 5" || return 1
+  h3_q3_start_joiner 5 1 "$next" "trust-base-epoch${next}.json" || return 1
   # Test hook (documented, off by default): T6_TEST_FAIL_AFTER_AUTH5=return fails this step, =abort aborts the shell (as an unbound variable
   # does under set -u), right after the joiner's authority and execution client started: the run must still stop them and exit.
   case "${T6_TEST_FAIL_AFTER_AUTH5:-}" in return) return 1 ;; abort) exit 1 ;; esac
-  h3_retry_handoff "$cur" t6_rotation_attempt || return 1
+
+  h3_q3_handoff s1 "$next" "1 2 3 5" || return 1   # the Q3 flow: candidate, the four successor members' readiness, plan, Commit
   echo "T6 coupled rotation: H committed at root epoch $cur"
 
-  # the validator running through the H4 restore command and the retired validator stop here; the roots restart on the install epoch
+  # the validator running through the H4 restore command, the retired validator and the staging-only joiner stop here; the roots restart on the install epoch
   stop_pidfile test-nodes/h4-replaced/pid 'ubft shard-node restore' || true
   stop_one_evm_validator 4 || return 1
-  h3_activate_coupled "$next" 4 5 || return 1
+  stop_one_evm_validator 5 || return 1
+  h3_q3_activate_coupled "$next" 4 5 || return 1
 
   H3_ONLINE="1 2 3 5"
-  # the retired evm4 is no longer a valid archive replica: the restarted retained validators name members of the successor set
-  export EVM_ARCHIVE_REPLICA_POOL="2 3 5"
+  # the retired evm4 is no longer a valid archive replica: the restarted retained validators name members of the successor set; each keeps one
+  # acknowledging replica of its former pair (1->2,3  2->3,5  3->5,1, and 5->1,2)
+  export EVM_ARCHIVE_REPLICA_POOL="1 2 3 5"
   h3_advance_authorities "$next" 1 1 2 3 || { echo "authority advance to root epoch $next / shard epoch 1 failed" >&2; return 1; }
   h3_enroll_authority 5 1 || { echo "enrolling the evm5 authority failed" >&2; return 1; }
   h3_restore_validator 5 2 || return 1
-  for i in $(seq 1 180); do h3_registry_is 1 "$next" && break; sleep 1; done
+  for _ in $(seq 1 180); do h3_registry_is 1 "$next" && break; sleep 1; done
   h3_registry_is 1 "$next" || { echo "registry did not reach shard epoch 1 / root epoch $next" >&2; return 1; }
   echo "T6 coupled rotation: the successor set acknowledged (registry: shard epoch 1, root epoch $next)"
 

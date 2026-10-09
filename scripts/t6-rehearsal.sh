@@ -10,11 +10,12 @@ EVIDENCE_DIR=${T6_EVIDENCE_DIR:-$AGRE_ROOT/briefs/devnet-runs/t6-rehearsal-$(dat
 T6_BFT_COMMIT=${T6_BFT_COMMIT:-$(git -C "$SOURCE_ROOT" rev-parse HEAD)}
 T6_BFT_REMOTE=${T6_BFT_REMOTE:-$(git -C "$SOURCE_ROOT" remote get-url origin)}
 T6_BFT_REF=${T6_BFT_REF:-t6/rehearsal-harness}
-T6_URETH_COMMIT=${T6_URETH_COMMIT:-b4e7cb0ace07eee70e753241e0139c4d42b516d4}
+# the Ureth carrying the fresh-B1 profile (the one the H3, M2 and F8 lanes run)
+T6_URETH_COMMIT=${T6_URETH_COMMIT:-9623b82748ad02ea4038d3d1ce7391f1cfe1c856}
 T6_URETH_REMOTE=${T6_URETH_REMOTE:-https://github.com/ristik/ureth.git}
 T6_CONTRACTS_COMMIT=${T6_CONTRACTS_COMMIT:-e7eb3216549b772a9e1df2b1214976d7dd9e6e62}
-# The layout-2 SealRegistry (ureth #47 and later) is built from contracts ce3e40b4; the four allocation contracts keep their e7eb3216 source commit.
-T6_REGISTRY_CONTRACTS_COMMIT=${T6_REGISTRY_CONTRACTS_COMMIT:-ce3e40b479de0a0ef8787d8830ba77189aa11171}
+# The four allocation contracts are rebuilt from their e7eb3216 source commit. The registry is not: the fresh-B1 registry (layout 3) is generated in code
+# from the profile, and T6 verifies the deployed genesis against an independent regeneration (b1genesis --verify), not against a contracts rebuild.
 T6_CONTRACTS_REMOTE=${T6_CONTRACTS_REMOTE:-https://github.com/ristik/unicity-pos-contracts.git}
 T6_RUST_TOOLCHAIN=${T6_RUST_TOOLCHAIN:-1.97.1}
 
@@ -23,7 +24,7 @@ if [ "${T6_LOCKED:-0}" != 1 ]; then
   exec "$LOCK_SCRIPT" "T6 placeholder-manifest rehearsal" env \
     T6_LOCKED=1 T6_EVIDENCE_DIR="$EVIDENCE_DIR" T6_BFT_COMMIT="$T6_BFT_COMMIT" \
     T6_BFT_REMOTE="$T6_BFT_REMOTE" T6_BFT_REF="$T6_BFT_REF" T6_URETH_COMMIT="$T6_URETH_COMMIT" \
-    T6_URETH_REMOTE="$T6_URETH_REMOTE" T6_CONTRACTS_COMMIT="$T6_CONTRACTS_COMMIT" T6_REGISTRY_CONTRACTS_COMMIT="$T6_REGISTRY_CONTRACTS_COMMIT" \
+    T6_URETH_REMOTE="$T6_URETH_REMOTE" T6_CONTRACTS_COMMIT="$T6_CONTRACTS_COMMIT" \
     T6_CONTRACTS_REMOTE="$T6_CONTRACTS_REMOTE" T6_RUST_TOOLCHAIN="$T6_RUST_TOOLCHAIN" \
     "$SCRIPT_PATH" "$@"
 fi
@@ -163,7 +164,8 @@ build_bft_tools() {
   go build -o build/f7-mintproof-extract ./scripts/f7-mintproof-extract
   go build -o build/f7-mintproof-verify ./scripts/f7-mintproof-verify
   go build -o build/evmtx ./scripts/evmtx
-  pass "fresh ubft, F7 extractor/verifier, and transaction signer compiled with isolated Go caches"
+  go build -o build/b1genesis ./scripts/b1genesis
+  pass "fresh ubft, F7 extractor/verifier, transaction signer and B1 genesis verifier compiled with isolated Go caches"
 }
 
 install_pinned_foundry() {
@@ -200,16 +202,7 @@ build_pinned_contracts() {
     --manifest "$FRESH_REPO/registrygenesis/testdata/allocation-build-v1.example.json" \
     --bft-root "$FRESH_REPO" --contracts-root "$FRESH_CONTRACTS" \
     --contracts-commit "$T6_CONTRACTS_COMMIT" --skip-registry | tee "$EVIDENCE_DIR/contracts-rebuild.log"
-  # The registry the genesis embeds (layout 2) is rebuilt from its own pinned contracts commit.
-  git -C "$FRESH_CONTRACTS" checkout --detach "$T6_REGISTRY_CONTRACTS_COMMIT" >>"$EVIDENCE_DIR/contracts-clone.log" 2>&1
-  git -C "$FRESH_CONTRACTS" submodule update --init --recursive >>"$EVIDENCE_DIR/contracts-clone.log" 2>&1
-  [ "$(git -C "$FRESH_CONTRACTS" rev-parse HEAD)" = "$T6_REGISTRY_CONTRACTS_COMMIT" ] || return 1
-  (cd "$FRESH_CONTRACTS" && forge build --force)
-  python3 "$FRESH_REPO/scripts/t6/verify-contract-build.py" \
-    --manifest "$FRESH_REPO/registrygenesis/testdata/allocation-build-v1.example.json" \
-    --bft-root "$FRESH_REPO" --contracts-root "$FRESH_CONTRACTS" \
-    --contracts-commit "$T6_REGISTRY_CONTRACTS_COMMIT" --registry-layout 2 --registry-only | tee -a "$EVIDENCE_DIR/contracts-rebuild.log"
-  printf 'contracts commit=%s\nregistry contracts commit=%s\nforge version=%s\n' "$T6_CONTRACTS_COMMIT" "$T6_REGISTRY_CONTRACTS_COMMIT" "$(forge --version | head -1)" >>"$EVIDENCE_DIR/source-pin.txt"
+  printf 'contracts commit=%s\nforge version=%s\n' "$T6_CONTRACTS_COMMIT" "$(forge --version | head -1)" >>"$EVIDENCE_DIR/source-pin.txt"
 }
 
 build_pinned_ureth() {
@@ -278,6 +271,8 @@ build_pinned_ureth() {
 run_paired_t6() {
   cd "$FRESH_REPO"
   require_free_kb 2500000 "paired T6 network rehearsal" || return 1
+  # the single B1 layout: one profile derived from the shard configuration and the root trust base, registry layout 3, the Q3 flow for every handoff
+  export Q3_B1=1 H3_SLOT_LAYOUT=3 EVM_OPERATOR_STATUS_RPC=1
   export POST_M2A_MODE=t6 POST_M2A_CHAIN_ID=1337
   export POST_M2A_URETH_BIN="$URETH_BIN" POST_M2A_URETH_COMMIT="$T6_URETH_COMMIT"
   export M2_PROFILE2=1 SIGNING=authority M2A_FINAL_RESTORE=1
@@ -287,6 +282,17 @@ run_paired_t6() {
   bash ./scripts/reth-paired-devnet.sh 4 20 2>&1 | tee "$EVIDENCE_DIR/paired-lane.log"
   grep -q "T6 coupled rotation s=1: authority-backed" "$EVIDENCE_DIR/paired-lane.log" || [ "${T6_COUPLED_ROTATION:-1}" != 1 ] || { fail "the coupled rotation step did not pass"; return 1; }
   pass "paired network completed placeholder claims, WUCT wrap/unwrap, treasury withdrawal, handoffs, restore, finality checks, and a coupled key-replacing rotation"
+}
+
+# The deployed genesis (the chain spec every execution client ran) carries exactly the registry the pinned source generates: regenerated by the freshly built
+# b1genesis from the profile, the root trust base and the full shard configuration the chain was made from, then compared (code and every storage word).
+verify_b1_registry() {
+  cd "$FRESH_REPO"
+  local out=$EVIDENCE_DIR/b1-registry-verify.txt
+  build/b1genesis --verify test-nodes/evm-genesis-finalized-funded.json --profile test-nodes/b1-profile.json \
+    --root-genesis test-nodes/trust-base.json --shard-conf "test-nodes/shard-conf-8_0.json" 2>&1 | tee "$out"
+  [ "${PIPESTATUS[0]}" = 0 ] && grep -q 'the deployed registry account matches the regeneration' "$out" || { fail "the deployed registry differs from its regeneration"; return 1; }
+  cp test-nodes/b1-profile.json "$EVIDENCE_DIR/b1-profile.json"
 }
 
 extract_verify_f7() {
@@ -420,6 +426,7 @@ run_step "isolated pinned Foundry release install" install_pinned_foundry
 run_step "contracts e7eb3216 source rebuild and manifest artifact match" build_pinned_contracts
 run_step "source, binary, and manifest pins" write_prerehearsal_pins
 run_step "paired T6 rehearsal with handoffs and documented restore" run_paired_t6
+run_step "deployed B1 registry equals its independent regeneration (code and storage)" verify_b1_registry
 run_step "retain and recheck pre-handoff offline F7 bundle" extract_verify_f7
 run_step "evidence and SHA-256 manifest" collect_evidence
 run_step "isolated build cleanup and final evidence hashes" cleanup_isolated_build
