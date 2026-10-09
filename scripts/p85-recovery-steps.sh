@@ -151,7 +151,8 @@ p85_election_reserved() {
 # One assignment (the plan's EVM part) for entities 1..5, built from the election's own records. mode: reserved (before the proofs are
 # submitted) or published (with the stored proofs). The H3 possession proofs are signed by each member's signing authority.
 p85_build_assignment() { # tag mode
-  local tag=$1 mode=$2 id pops= d="$Q3_DIR/$tag-proposal" extra=()
+  local tag=$1 mode=$2 id pops= d extra=()
+  d="$Q3_DIR/$tag-proposal"
   local ids; ids=$(p85_node_ids)
   build/ubft root handoff evm-context --root-rpc "$(h3_rpc_url "$(h3_first_root)")" --out "$Q3_DIR/$tag-context.json" || return 1
   [ "$mode" = reserved ] && extra+=(--reserved)
