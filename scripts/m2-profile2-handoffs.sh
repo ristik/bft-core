@@ -1,20 +1,9 @@
 # Sourced by reth-paired-devnet.sh after the first paid certified block.
 # Uses the same four real shard validators and their running ureth instances.
 source scripts/lib/m2-handoff-lib.sh
-m2HandoffMode=${M2_HANDOFF_MODE:-}
-if [ -z "$m2HandoffMode" ]; then
-  if [ "$(registry_layout)" = 2 ]; then m2HandoffMode=config-only; else m2HandoffMode=rotate; fi
-fi
-case "$m2HandoffMode" in
-  config-only) ;;
-  rotate)
-    if [ "$(registry_layout)" = 2 ]; then
-      echo "M2_HANDOFF_MODE=rotate is refused on registry layout 2: root-only key rotation is not a coupled validator-set change (use config-only, or the H3 lane for coupled rotation)" >&2
-      return 1
-    fi ;;
-  *) echo "M2_HANDOFF_MODE must be config-only or rotate" >&2; return 1 ;;
-esac
-echo "M2 handoff mode: $m2HandoffMode (registry layout $(registry_layout))"
+# The fresh-B1 layout has one handoff: a same-members root epoch advance through the Q3 flow (V3 candidate, a readiness receipt from every entity, propose).
+# A root-only key rotation is not a coupled validator-set change and is not a mode of this lane; the coupled rotation is the H3 lane's.
+echo "M2 handoffs: same members, Q3 flow (fresh-B1 registry)"
 
 cp test-nodes/trust-base.json test-nodes/trust-base-epoch1.json
 read -r m2_epoch_slot m2_cursor_slot m2_shard_epoch_slot < <(go run ./scripts/m2slots)
@@ -40,48 +29,47 @@ if [ "${M2A_FINAL_RESTORE:-0}" = 1 ]; then
     m2a_head=$(rpc "http://127.0.0.1:$((rethEthBase+1))" eth_blockNumber '[]' | pyget "['result']")
   done
   m2_wait_certified_idle 1 || return 1
-  bash scripts/h4-restore-probe.sh stop || return 1
-  export M2A_VALIDATOR1_WIPED=1
 fi
-if [ "$m2HandoffMode" = config-only ]; then
-  m2_config_only_handoff 2 '1 2 3 4' \
-    'http://127.0.0.1:25866,http://127.0.0.1:25867,http://127.0.0.1:25868,http://127.0.0.1:25869' || return 1
-else
-  m2_handoff 2 4 5 '1 2 3 4' "$(m2_root_addr 4)" \
-    'http://127.0.0.1:25866,http://127.0.0.1:25867,http://127.0.0.1:25868,http://127.0.0.1:25869' || return 1
-fi
+m2_config_only_handoff 2 '1 2 3 4' \
+  'http://127.0.0.1:25866,http://127.0.0.1:25867,http://127.0.0.1:25868,http://127.0.0.1:25869' || return 1
 if [ "${F8_MIXED_LANE:-0}" = 1 ]; then
   echo "F8 mixed lane completed one root handoff while all aggregator shards remained active"
   return 0
 fi
-if [ "$m2HandoffMode" = config-only ]; then
-  m2_config_only_handoff 3 '1 2 3 4' \
-    'http://127.0.0.1:25866,http://127.0.0.1:25867,http://127.0.0.1:25868,http://127.0.0.1:25869' || return 1
-else
-  m2_handoff 3 3 6 '1 2 3 5' "$(m2_root_addr 3)" \
-    'http://127.0.0.1:25866,http://127.0.0.1:25867,http://127.0.0.1:25868,http://127.0.0.1:25870' || return 1
-fi
+m2_config_only_handoff 3 '1 2 3 4' \
+  'http://127.0.0.1:25866,http://127.0.0.1:25867,http://127.0.0.1:25868,http://127.0.0.1:25869' || return 1
 if [ "${M2A_FINAL_RESTORE:-0}" = 1 ]; then
-  bash scripts/h4-restore-probe.sh restore || return 1
-  ln -sf ../h4-replaced/restore.log test-nodes/evm1/debug.log
-  restoreLog=test-nodes/h4-replaced/restore.log
+  # M2a final restore on the fresh-B1 layout. A V3 handoff needs a readiness receipt from EVERY successor entity, so validator 1 is wiped after the second
+  # handoff (not before the first): it comes back from nothing but its signing authority, the genesis trust base and a surviving validator's archive, and
+  # must verify BOTH activations (root epochs 2 and 3) on the way, since the activations are not archived as bundles and the restore pin names the V3 body.
+  evidence=test-nodes/h4-replaced
+  mkdir -p "$evidence"
+  build/ubft signing-authority status --operator-socket test-nodes/auth1/operator.sock \
+    --operator-credential test-nodes/auth1/operator.cred >"$evidence/authority-before.json" || return 1
+  H3_ARCHIVES=test-nodes/h4-archives
+  H3_RESTORE_TRUST_BASE=test-nodes/trust-base.json
+  H3_ONLINE="2 3 4"
+  export H4_RESTORE_BODY_IDS="3=$(tr -d '[:space:]' <"$Q3_DIR/v3-body-id-m2e3.txt")"
+  export M2A_VALIDATOR1_WIPED=1
+  h3_restore_validator 1 2 || return 1
+  restoreLog=test-nodes/evm1/debug.log
   restored=false
-  # H4_RESTORE_WAIT_SECONDS (default 180): a restore that replays many blocks needs longer (H4_WAIT_BLOCKS runs)
-  for waitStep in $(seq 1 "${H4_RESTORE_WAIT_SECONDS:-180}"); do
+  # H4_RESTORE_WAIT_SECONDS (default 180): a restore that replays many blocks needs longer
+  for waitStep in $(seq 1 "${H4_RESTORE_WAIT_SECONDS:-300}"); do
     if grep -Eq 'handoff activated.*rootEpoch=2' "$restoreLog" &&
        grep -Eq 'handoff activated.*rootEpoch=3' "$restoreLog" &&
        grep -q 'submitting block certification request' "$restoreLog" &&
        grep -Eq 'msg="certificate admitted" .*rootEpoch=3([[:space:]]|$)' "$restoreLog"; then
       restored=true; break
     fi
-    if ! kill -0 "$(cat test-nodes/h4-replaced/pid)" 2>/dev/null; then
+    if ! kill -0 "$(cat test-nodes/evm1/pid)" 2>/dev/null; then
       echo 'restored validator exited before catch-up' >&2; tail -60 "$restoreLog" >&2; return 1
     fi
     sleep 1
   done
   $restored || { echo 'restore did not verify both handoff epochs and resume signing' >&2; tail -60 "$restoreLog" >&2; return 1; }
   build/ubft signing-authority status --operator-socket test-nodes/auth1/operator.sock \
-    --operator-credential test-nodes/auth1/operator.cred >test-nodes/h4-replaced/authority-after.json || return 1
+    --operator-credential test-nodes/auth1/operator.cred >"$evidence/authority-after.json" || return 1
   before=$(python3 -c 'import json;print(json.load(open("test-nodes/h4-replaced/authority-before.json"))["reservedRound"])')
   after=$(python3 -c 'import json;print(json.load(open("test-nodes/h4-replaced/authority-after.json"))["reservedRound"])')
   [ "$after" -gt "$before" ] || { echo "restored signer did not advance authority high-water: $before -> $after" >&2; return 1; }
