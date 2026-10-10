@@ -1377,7 +1377,7 @@
     {
      "kind": "lane-file",
      "label": "REAL-PROCESS (rest)",
-     "path": "b-in-effect.txt",
+     "path": "q4/b-in-effect.txt",
      "contains": [
       "activated weighted epoch confirmed",
       "epoch 3, scheme 2",
