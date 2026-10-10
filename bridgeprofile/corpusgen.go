@@ -48,6 +48,18 @@ type gen struct {
 	fs     *FixtureSet
 	cases  map[string][]Case
 	failed error
+	// quad certifies aggregator shards with a four-member committee (the DN-B shape: four signatures per seal); nil outside those cases.
+	quad *AggregatorWorld
+	// useQuad selects it for certifiedWith, extraN adds that many unrelated leaves to every shard tree (deeper paths).
+	useQuad bool
+	extraN  int
+}
+
+func (g *gen) agg() *AggregatorWorld {
+	if g.useQuad {
+		return g.quad
+	}
+	return g.d.Agg
 }
 
 func (g *gen) add(c Case) {
@@ -944,7 +956,10 @@ func (g *gen) certifiedWith(transfers int, assign func(i int, l Leaf) ShardRound
 		return nil, err
 	}
 	extra := []Leaf{{SID: H([]byte("other-1")), Value: H([]byte("v1"))}, {SID: H([]byte("other-2")), Value: H([]byte("v2"))}}
-	cert, err := g.d.Agg.CertifyAssigned(res.Leaves, extra, assign)
+	for i := 0; i < g.extraN; i++ {
+		extra = append(extra, Leaf{SID: H([]byte(fmt.Sprint("load-", i))), Value: H([]byte("lv"))})
+	}
+	cert, err := g.agg().CertifyAssigned(res.Leaves, extra, assign)
 	if err != nil {
 		return nil, err
 	}
@@ -1319,8 +1334,35 @@ func (g *gen) proof() {
 			}
 		}
 	}
-	perLeaf("compose-anchors-3", "three leaves, each certified by its own UC: three anchors, real-size certificates", 1)
-	perLeaf("compose-anchors-max", "MaxAnchors leaves, each certified by its own UC: exactly MaxAnchors anchors", MaxAnchors-2)
+	perLeaf("compose-anchors-3", "three leaves, each certified by its own UC: three anchors (one-signature fixture certificates)", 1)
+	perLeaf("compose-anchors-max", "MaxAnchors leaves, each certified by its own UC: exactly MaxAnchors anchors (one-signature fixture certificates)", MaxAnchors-2)
+	// The DN-B committee shape: four validators, so four signatures per seal.
+	quadAuth, err := NewCommittee("dnb-aggregator-committee", 4)
+	g.must(err)
+	quadTB, err := quadAuth.TrustBase(DevNetwork, 1)
+	g.must(err)
+	g.quad = &AggregatorWorld{PDRs: d.Agg.PDRs, Auth: quadAuth, TB: quadTB}
+	g.useQuad = true
+	perLeaf("compose-anchors-3-dnb", "three leaves, three anchors, each certificate with the DN-B committee's four signatures: accepted at the transaction budget", 1)
+	perLeaf("compose-anchors-max-dnb", "MaxAnchors anchors, each certificate with four signatures (DN-B committee shape): accepted at the transaction budget", MaxAnchors-2)
+	// The gate decides for real certificates too: four four-signature anchors with sixteen leaves, a long history and deep paths do not fit.
+	g.extraN = 4000
+	if hc, err := g.certifiedWith(MaxLeaves-2, func(i int, l Leaf) ShardRound { return ShardRound{BaseTime + 1000, 100 + uint64(i%2)} }); err == nil {
+		eb := envOf(hc.h, hc.cert, nil)
+		g.must(func() error {
+			if len(hc.cert.Anchors) != MaxAnchors {
+				return fmt.Errorf("load case has %d anchors, want %d", len(hc.cert.Anchors), MaxAnchors)
+			}
+			if gt, e := GateOf(f.Cfg, OpReturn, eb, 1<<62); e != nil || gt.Total() <= TxGasBudget {
+				return fmt.Errorf("load case does not exceed the budget: %v %v", gt, e)
+			}
+			return nil
+		}())
+		add("compose-anchors-max-dnb-load-over-budget", "four anchors with four signatures each, sixteen leaves, deep paths: over the gate at the transaction budget", eb, claimsOf(hc.cert.Anchors...), "return")
+	} else {
+		g.must(err)
+	}
+	g.useQuad, g.extraN = false, 0
 	perLeaf("compose-anchors-over-max", "MaxAnchors+1 leaves, each certified by its own UC", MaxAnchors-1)
 	// Four anchors of certificates carrying 64 seal signatures each (the native maximum): structurally
 	// admitted, priced out by the gate before any B1 call.

@@ -17,7 +17,7 @@ func fitGas(envelopeBytes, semanticBytes, anchors, ucBytes int, sigs, steps uint
 }
 
 // TestGateDecidesEachBundle pins what the 7,000,000 budget admits under the parser ceilings: two anchors at
-// every cap still fit (6,976,692), four real-size certificates fit, four maximum-size ones do not, and five
+// every cap still fit (6,976,692), four DN-B-shape certificates fit, four maximum-size ones do not, and five
 // can never fit however small the certificates are (so A_max=4 is a ceiling the gate need not defend).
 func TestGateDecidesEachBundle(t *testing.T) {
 	const sigs, steps = 64, 1 + MaxUnicitySteps
@@ -28,9 +28,9 @@ func TestGateDecidesEachBundle(t *testing.T) {
 	typical := fitGas(8<<10, 2<<10, 2, 4<<10, 5, 8, MaxLeaves, 8)
 	t.Logf("typical bundle (two 4 KiB UCs, 5 sigs, 8 steps): %d", typical)
 	require.LessOrEqual(t, typical, TxGasBudget)
-	// Real DN-B certificates: about 1.5 KB, four signatures, one shard sibling.
-	real4 := fitGas(12<<10, 4<<10, MaxAnchors, 1536, 4, 1, MaxLeaves, 8)
-	t.Logf("four real-size UCs, 16 leaves, 8-sibling paths: %d", real4)
+	// DN-B committee shape (measured in compose-anchors-max-dnb): 811-byte certificates, four signatures, one shard sibling.
+	real4 := fitGas(12<<10, 4<<10, MaxAnchors, 811, 4, 1, MaxLeaves, 8)
+	t.Logf("four DN-B-shape UCs, 16 leaves, 8-sibling paths: %d", real4)
 	require.LessOrEqual(t, real4, TxGasBudget)
 	require.Greater(t, fitGas(MaxEnvelopeBytes, MaxSemanticBytes, 3, MaxAnchorUCBytes, sigs, steps, MaxLeaves, MaxRSMTSiblings), TxGasBudget)
 	require.Greater(t, fitGas(MaxEnvelopeBytes, MaxSemanticBytes, MaxAnchors, MaxAnchorUCBytes, sigs, steps, MaxLeaves, MaxRSMTSiblings), TxGasBudget)
