@@ -78,7 +78,10 @@ type stackEntry struct {
 // Leaves in env.Leaves MUST already be sorted by plain key order (RSMT v6a:
 // rsmt_sort_key(k) = k), with no duplicates. The verifier performs a single
 // linear pre-check to enforce this invariant.
-func Verify(env *Envelope, oldRoot, newRoot Root) error {
+//
+// referenceTime is the round's reference time (InputRecord.Timestamp). The envelope's leaves declare transaction hashes; the value hashed for
+// each new leaf (opcode L) is LeafValue(declared hash, referenceTime). Preserved leaves opened by O_L keep their stored value verbatim.
+func Verify(env *Envelope, oldRoot, newRoot Root, referenceTime uint64) error {
 	if env == nil {
 		return errors.New("rsmt: nil envelope")
 	}
@@ -125,7 +128,8 @@ func Verify(env *Envelope, oldRoot, newRoot Root) error {
 			}
 			leaf := &env.Leaves[bi]
 			bi++
-			lh := HashLeaf(leaf.Key, leaf.Value)
+			stored := LeafValue(leaf.Value, referenceTime)
+			lh := HashLeaf(leaf.Key, stored[:])
 			stack = append(stack, stackEntry{
 				post: lh, postSet: true,
 				adv: advice{set: true, depth: 256, region: leaf.Key},

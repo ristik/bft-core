@@ -25,7 +25,8 @@ func TestCrossLanguageFixtures(t *testing.T) {
 	}
 
 	var doc struct {
-		Fixtures []struct {
+		ReferenceTime uint64 `json:"reference_time"`
+		Fixtures      []struct {
 			Name     string `json:"name"`
 			PrevRoot string `json:"prev_root"`
 			NewRoot  string `json:"new_root"`
@@ -34,6 +35,9 @@ func TestCrossLanguageFixtures(t *testing.T) {
 	}
 	if err := json.Unmarshal(raw, &doc); err != nil {
 		t.Fatalf("parse fixtures.json: %v", err)
+	}
+	if doc.ReferenceTime == 0 {
+		t.Fatal("fixtures.json carries no reference_time: regenerate it with the pinned rugregator's dump_envelope_fixtures")
 	}
 	if len(doc.Fixtures) == 0 {
 		t.Fatal("no fixtures loaded")
@@ -68,7 +72,7 @@ func TestCrossLanguageFixtures(t *testing.T) {
 			if err != nil {
 				t.Fatalf("new_root: %v", err)
 			}
-			if err := Verify(env, prev, newR); err != nil {
+			if err := Verify(env, prev, newR, doc.ReferenceTime); err != nil {
 				t.Fatalf("Verify(%s): %v", f.Name, err)
 			}
 
