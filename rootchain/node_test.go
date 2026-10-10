@@ -1332,6 +1332,9 @@ func newMockShardInfo(t *testing.T, nodeID string, nodeSigningPubKey []byte, cer
 // member of the installed configuration. The root refuses it at the handshake (no response, no subscription) and refuses its certification request
 // (the late acknowledgement), each by the typed membership error; the same request, signed by the same key, is valid against the superseded set,
 // and a validator K keeps is served throughout. Each refusal differs from its control in the installed configuration only.
+// Scope: the mock consensus manager has no RequestViewSource, so this pins the handshake and the committed-ShardInfo request path. Under an
+// activated view the request goes through collectUnderView, whose membership refusal is pinned in node_view_test.go
+// (TestCollectorRefusesStaleRequests, "an unknown signer ...") and in rootchain/consensus/storage/handoff_supersession_test.go.
 func Test_aSupersededSetsValidatorIsRefusedByTheRootOnceTheRecoveryIsInstalled(t *testing.T) {
 	nwPeer := network.Peer{}
 	nopObs := testobservability.NOPObservability()
@@ -1389,7 +1392,10 @@ func Test_aSupersededSetsValidatorIsRefusedByTheRootOnceTheRecoveryIsInstalled(t
 	require.Equal(t, 2, sends)
 	require.Contains(t, subscribed(), joiner)
 
-	// K installed
+	// K installed; the joiner's quota is drained, so that a refresh by a refused handshake or request would show
+	node.subscription.mu.Lock()
+	node.subscription.subs[partitionShard{certResp.Partition, certResp.Shard.Key()}][joiner] = 0
+	node.subscription.mu.Unlock()
 	installed = recovery
 	before := sends
 	err = node.onHandshake(t.Context(), handshakeOf(joiner))
@@ -1398,6 +1404,7 @@ func Test_aSupersededSetsValidatorIsRefusedByTheRootOnceTheRecoveryIsInstalled(t
 	require.Equal(t, before, sends, "the superseded validator receives no certificate at the handshake")
 	err = node.onBlockCertificationRequest(t.Context(), &request)
 	require.ErrorIs(t, err, storage.ErrNodeNotInTrustBase, "the late acknowledgement is refused by membership")
+	require.Zero(t, subscribed()[joiner], "neither refusal re-subscribes the superseded validator")
 	require.NoError(t, node.onHandshake(t.Context(), handshakeOf(kept)), "a validator K keeps is still served")
 	require.NoError(t, node.onHandshake(t.Context(), handshakeOf(other)), "and K's other member")
 	require.Equal(t, before+3, sends, "one rejection for the refused request (its last certificate) and a response to each of the two members")
