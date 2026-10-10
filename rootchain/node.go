@@ -487,73 +487,32 @@ func (v *Node) verifyZKProof(ctx context.Context, req *certification.BlockCertif
 	if target.viewed && ir.Epoch != target.epoch {
 		return fmt.Errorf("proof for shard epoch %d, the view's is %d: %w", ir.Epoch, target.epoch, storage.ErrStaleRequestContext)
 	}
-	verifier, err := v.zkRegistry.GetVerifier(target.partition, target.shard, target.epoch, target.params)
-	if err != nil {
-		return fmt.Errorf("getting verifier for partition %s: %w", target.partition, err)
-	}
-
-	if !verifier.IsEnabled() {
-		// m-of-n mode - no ZK proof verification
-		return nil
-	}
-
-	// Get state roots from InputRecord
-	previousStateRoot := ir.PreviousHash
-	newStateRoot := ir.Hash
-
-	// Skip verification for sync UCs and genesis blocks:
-	// 1. Sync UCs: both hashes are null/empty (handshake/subscription requests)
-	// 2. Genesis block: previousHash is null/empty (first genesis block is sent from heaven)
-	if len(previousStateRoot) == 0 && len(newStateRoot) == 0 {
-		v.log.DebugContext(ctx, "Skipping ZK proof verification for sync UC",
-			logger.Shard(req.PartitionID, req.ShardID))
-		return nil
-	}
-	if len(previousStateRoot) == 0 {
-		v.log.InfoContext(ctx, "Skipping ZK proof verification for genesis block",
-			logger.Shard(req.PartitionID, req.ShardID))
-		return nil
-	}
-
-	proofType := string(verifier.ProofType())
+	proofTarget := zkverifier.Target{Partition: target.partition, Shard: target.shard, Epoch: target.epoch, Params: target.params}
+	start := time.Now()
+	outcome, verifyErr := v.zkRegistry.VerifyRequest(req, proofTarget)
+	elapsed := time.Since(start)
 	proofSize := len(req.ZkProof)
 
-	v.log.DebugContext(ctx, "Verifying ZK proof",
-		logger.Shard(req.PartitionID, req.ShardID),
-		slog.String("verifier_type", proofType),
-		slog.Int("proof_size", proofSize),
-		slog.Uint64("round", ir.RoundNumber))
-
-	// Verify proof: previousStateRoot -> newStateRoot transition with block hash
-	blockHash := ir.BlockHash
-	start := time.Now()
-	var verifyErr error
-	if rt, ok := verifier.(zkverifier.ReferenceTimeVerifier); ok {
-		// the stored leaf values bind the round's reference time, which is the request's input record timestamp
-		verifyErr = rt.VerifyProofAt(req.ZkProof, previousStateRoot, newStateRoot, blockHash, ir.Timestamp)
-	} else {
-		verifyErr = verifier.VerifyProof(req.ZkProof, previousStateRoot, newStateRoot, blockHash)
-	}
-	elapsed := time.Since(start)
-
-	if verifyErr != nil {
+	switch {
+	case verifyErr != nil:
 		v.log.WarnContext(ctx, "ZK proof verification failed",
 			logger.Shard(req.PartitionID, req.ShardID),
-			slog.String("verifier_type", proofType),
 			slog.Int("proof_size", proofSize),
 			slog.Duration("verification_time", elapsed),
 			slog.Uint64("round", ir.RoundNumber),
 			logger.Error(verifyErr))
-		return fmt.Errorf("ZK proof verification failed: %w", verifyErr)
+		return verifyErr
+	case outcome == zkverifier.SkippedSync:
+		v.log.DebugContext(ctx, "Skipping ZK proof verification for sync UC", logger.Shard(req.PartitionID, req.ShardID))
+	case outcome == zkverifier.SkippedGenesis:
+		v.log.InfoContext(ctx, "Skipping ZK proof verification for genesis block", logger.Shard(req.PartitionID, req.ShardID))
+	case outcome == zkverifier.Verified:
+		v.log.InfoContext(ctx, "ZK proof verified successfully",
+			logger.Shard(req.PartitionID, req.ShardID),
+			slog.Int("proof_size", proofSize),
+			slog.Uint64("num_leaves", req.BlockSize),
+			slog.Duration("verification_time", elapsed),
+			slog.Uint64("round", ir.RoundNumber))
 	}
-
-	v.log.InfoContext(ctx, "ZK proof verified successfully",
-		logger.Shard(req.PartitionID, req.ShardID),
-		slog.String("verifier_type", proofType),
-		slog.Int("proof_size", proofSize),
-		slog.Uint64("num_leaves", req.BlockSize),
-		slog.Duration("verification_time", elapsed),
-		slog.Uint64("round", ir.RoundNumber))
-
 	return nil
 }
