@@ -387,7 +387,10 @@ func CheckPolicyBody(cfg *Cfg, env *Envelope) (Policy, error) {
 	if pol.Partition == cfg.EVMPartition {
 		return Policy{}, ErrPolicyPartition
 	}
-	if len(env.Anchors) == 0 || len(env.Anchors) > MaxAnchors {
+	if len(env.Anchors) > MaxAnchors {
+		return Policy{}, ErrTooManyPaths
+	}
+	if len(env.Anchors) == 0 {
 		return Policy{}, ErrPolicyAnchors
 	}
 	return pol, nil
@@ -407,7 +410,10 @@ func PlanAnchors(pol Policy, env *Envelope, sids [][32]byte) (*AnchorPlan, error
 	if len(env.LeafProofs) != len(sids) {
 		return nil, ErrPolicyLeafCount
 	}
-	if len(env.Anchors) == 0 || len(env.Anchors) > MaxAnchors || len(env.Anchors) > len(sids) {
+	if len(env.Anchors) > MaxAnchors {
+		return nil, ErrTooManyPaths
+	}
+	if len(env.Anchors) == 0 || len(env.Anchors) > len(sids) {
 		return nil, ErrPolicyAnchors
 	}
 	rowOf := make([]int, len(env.Anchors))

@@ -122,6 +122,8 @@ func computeGate(envelopeBytes int, kernelRequest uint64, env *Envelope, pol Pol
 		g.RSMT += gas
 		g.Steps += steps
 	}
+	// Unreachable at the profile bounds (at most MaxAnchors*(1+MaxUnicitySteps) + MaxLeaves*MaxRSMTSiblings
+	// steps); kept so that a later profile that raises the bounds cannot silently outgrow MaxPathSteps.
 	if g.Steps > MaxPathSteps {
 		return Gate{}, ErrTooManyPaths
 	}

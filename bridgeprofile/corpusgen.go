@@ -1268,10 +1268,11 @@ func (g *gen) proof() {
 	add("compose-bitmap-popcount", "a bitmap that disagrees with the sibling count", envFrom(func(e *Envelope) { e.LeafProofs[1].Bitmap[0] ^= 0x80 }), claims, "return")
 	add("compose-anchors-swapped", "the anchors not in first-use order", envFrom(func(e *Envelope) { e.Anchors[0], e.Anchors[1] = e.Anchors[1], e.Anchors[0] }), claims, "return")
 	add("compose-duplicate-anchor", "the first anchor's UC twice: byte-identical UCs are one anchor", envFrom(func(e *Envelope) { e.Anchors[1] = e.Anchors[0] }), claims, "return")
-	add("compose-unused-anchor", "a third anchor no leaf uses", envFrom(func(e *Envelope) {
-		u := e.Anchors[0]
-		u.UC = append(bytes.Clone(u.UC), 0)
-		e.Anchors = append(e.Anchors, u)
+	add("compose-anchor-wrong-sibling-count-zero", "an anchor UC with no shard-tree sibling under depth 1", envFrom(func(e *Envelope) {
+		e.Anchors[0].UC = ucWithSiblings(g, e.Anchors[0].UC, 0)
+	}), claims, "return")
+	add("compose-anchor-wrong-sibling-count-two", "an anchor UC with two shard-tree siblings under depth 1", envFrom(func(e *Envelope) {
+		e.Anchors[0].UC = ucWithSiblings(g, e.Anchors[0].UC, 2)
 	}), claims, "return")
 	add("compose-single-anchor-two-shards", "only the first anchor for leaves of both shards", envFrom(func(e *Envelope) {
 		e.Anchors = e.Anchors[:1]
@@ -1343,6 +1344,13 @@ func (g *gen) proof() {
 	other := Leaf{SID: sidIn(1-d.Agg.Row(mres.Leaves[0].SID), 7), Value: H([]byte("o"))}
 	oc, err := d.Agg.Certify([]Leaf{other}, nil, BaseTime+1000, 100)
 	g.must(err)
+	// A=2 at the bound: the mint's one leaf, its anchor, and a second anchor (another UC of the same
+	// shard) that no leaf uses.
+	add("compose-unused-anchor", "a second, distinct anchor no leaf uses (A=2, within the bound)", envOf(mt, mc, func(e *Envelope) {
+		u := e.Anchors[0]
+		u.UC = append(bytes.Clone(u.UC), 0)
+		e.Anchors = append(e.Anchors, u)
+	}), claimsOf(append(mc.Anchors, func() Anchor { u := mc.Anchors[0]; u.UC = append(bytes.Clone(u.UC), 0); return u }())...), "mint")
 	add("compose-mint-wrong-anchor", "the mint carries the other shard's anchor", envOf(mt, mc, func(e *Envelope) { e.Anchors = oc.Anchors }), claimsOf(oc.Anchors...), "mint")
 	// Gate components: exact budget accepts, one less refuses.
 	eb := envFrom(nil)
@@ -1470,4 +1478,18 @@ func (g *gen) shortSigUC(uc []byte) []byte {
 	b, err := types.Cbor.Marshal(&c)
 	g.must(err)
 	return b
+}
+
+// ucWithSiblings re-encodes a certificate with `n` shard-tree siblings. The signatures no longer verify, which
+// is the point: the gate refuses the shape before any B1 call.
+func ucWithSiblings(g *gen, uc []byte, n int) []byte {
+	var c types.UnicityCertificate
+	g.must(types.Cbor.Unmarshal(uc, &c))
+	c.ShardTreeCertificate.SiblingHashes = make([][]byte, n)
+	for i := range c.ShardTreeCertificate.SiblingHashes {
+		c.ShardTreeCertificate.SiblingHashes[i] = bytes.Repeat([]byte{byte(i + 1)}, 32)
+	}
+	out, err := types.Cbor.Marshal(&c)
+	g.must(err)
+	return out
 }
