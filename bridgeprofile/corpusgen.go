@@ -454,7 +454,9 @@ func (g *gen) policy() {
 		e.LeafProofs[0].AnchorIndex, e.LeafProofs[1].AnchorIndex = 1, 0
 	}), both)
 	addEnvSIDs("envelope-leaf-index-out-of-range", "second leaf names anchor 2", bothEnv(func(e *Envelope) { e.LeafProofs[1].AnchorIndex = 2 }), both)
-	addEnv("envelope-five-anchors", "five anchors: one over MaxAnchors", envFor(func(e *Envelope) { e.Anchors = append(e.Anchors, anchorOf(0, 2), anchorOf(0, 3), anchorOf(0, 4), anchorOf(0, 5)) }), 2)
+	addEnv("envelope-five-anchors", "five anchors: one over MaxAnchors", envFor(func(e *Envelope) {
+		e.Anchors = append(e.Anchors, anchorOf(0, 2), anchorOf(0, 3), anchorOf(0, 4), anchorOf(0, 5))
+	}), 2)
 	addEnv("envelope-three-anchors", "three anchors for two leaves", envFor(func(e *Envelope) { e.Anchors = append(e.Anchors, anchorOf(0, 2), anchorOf(0, 3)) }), 2)
 	addEnv("envelope-no-anchors", "no anchors", envFor(func(e *Envelope) { e.Anchors = nil }), 2)
 	addEnv("envelope-leaf-index", "second leaf names anchor 1 though only anchor 0 exists", envFor(func(e *Envelope) { e.LeafProofs[1].AnchorIndex = 1 }), 2)
