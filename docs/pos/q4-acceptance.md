@@ -34,7 +34,7 @@ recorded constant, not re-run.
 mkdir -p out/bundles
 export Q4_EXPORT_DIR=$PWD/out/bundles   # absolute: go test runs in each package directory
 go test -json -count=1 ./rootchain/... ./cli/ubft/cmd/ ./cmd/... -timeout 60m \
-  -run '^(TestQ4|TestQ3|TestMessageRounds|TestWeighted|TestSkewedWeight|TestTwoRestarted|TestProductionBuild|TestT2|TestPartitionTimeout|TestPacemaker|TestVoteRegister|TestOldForm|TestInstallVerified|TestNoSignature|TestCheck)' > out/tests.json
+  -run '^(TestQ4|TestQ3|TestMessageRounds|TestWeighted|TestSkewedWeight|TestTwoRestarted|TestProductionBuild|TestT2|TestPartitionTimeout|TestPacemaker|TestVoteRegister|TestOldForm|TestInstallVerified|TestNoSignature|TestCheck|TestLeaderAfter|TestTableCache|TestAJoinerRoot)' > out/tests.json
 Q4_COST_OUT="$PWD/out/cost.json" go test -count=1 ./rootchain/consensus/leader/ -run Q4
 go run ./cmd/q4report -matrix docs/pos/q4-acceptance-matrix.json -tests out/tests.json -bundles out/bundles -cost out/cost.json \
   -lane <scenario A evidence dir> -lanes b=<scenario B evidence dir>,a2=<heavy on root 2>,a3=<heavy on root 3>,a4=<heavy on root 4>,q3=<Q3 weight-activation lane evidence dir> \
@@ -100,6 +100,6 @@ Before any fault the lane also checks that the selector in effect is the weighte
   controls, retention and restart. Rollback below the finalized pair head is not exercised live.
 - Every in-process row is root consensus only: no EVM, no aggregator shard, restarts are close/reopen of fsynced stores (not SIGKILL, not
   power loss). The checker does not re-verify the signatures inside a carried QC (it weighs the QC's signers under their epoch); carried TCs and the HighQC inside a timeout are not weighed; equivocation is detected for votes and timeouts only, not proposals.
-- **The F8 callbacks (EVM stop/resume, aggregators certifying new state roots) are evidenced only in the lane preamble, in the unit epoch.** They cannot be repeated in the weighted epoch with the pinned rugregator: the second block of an aggregator shard carries an empty RSMT proof ("missing leaf_count") and the roots reject it as ProofInvalid. In the weighted epoch the lane shows only that the aggregator shards stay served (their authorized TR rounds advance and the aggregators answer). Row T1 carries the explicit gap.
+- **The F8 EVM stop/resume callbacks are evidenced only in the lane preamble, in the unit epoch.** In the weighted epoch the lane shows that the aggregator shards stay served (their authorized TR rounds advance and the aggregators answer) and that each of the three shards certifies a new state root whose non-empty `aggregator_rsmt_v1` proof the weighted roots verify (row T1; the proof of a non-first block was empty before #539/#541 and #532). The lane does not stop the EVM in the weighted epoch.
 - No non-member or removed-validator root runs in the live lane (all four roots stay members): the follower signing nothing and catching up on a real network is an explicit gap (row L5), blocked on the P85 slice 7 joiner run or an A to B removal handoff.
 - Mixed-HighQC TC is covered only by the unit-weight unit test, not weighted.

@@ -1439,13 +1439,22 @@
      "label": "REAL-PROCESS",
      "step": "F8 aggregator shards stay served by the weighted epoch (authorized TR rounds advance, aggregators answer)",
      "scope": "after the activation: the aggregator shards stay served by the weighted epoch (not a new certified block); REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss); fault rows judge the root quorum by the roots' committed round, the coupled EVM pipeline is judged in the baseline only"
-    }
-   ],
-   "gaps": [
+    },
     {
+     "kind": "lane",
      "label": "REAL-PROCESS",
-     "reason": "The F8 callbacks cannot be repeated in the weighted epoch with the pinned rugregator (dd5b1406): the second block of an aggregator shard carries an empty RSMT proof ('rsmt: envelope truncated: missing leaf_count') and the roots reject it as ProofInvalid, so the aggregators cannot certify a new state root after their first block in this stack. Observed twice (lane runs 20261009T040429Z, T041453Z), independent of the Q4 rows; needs the F8 owner (rugregator proof for a non-first block, or the root verifier).",
-     "blockedBy": "F8 / rugregator second-block proof"
+     "step": "F8 aggregator shards certify new state roots in the weighted epoch; the roots verify their rsmt proofs (T1)",
+     "scope": "after the activation: each of the three aggregator shards certifies a new state root on a non-first block and the weighted roots verify a non-empty aggregator_rsmt_v1 proof for it, none rejected (the proof that was empty before #539/#541 and #532: the rsmt new-leaf values are derived from the declared transaction hash and IR.Timestamp, and the lane's aggregators attach the proof, AGGREGATOR_CONSISTENCY_PROOF_MODE=rsmt on the disk SMT backend). The EVM stop/resume callbacks are not repeated in the weighted epoch: they stay the unit-epoch item above"
+    },
+    {
+     "kind": "lane-file",
+     "label": "REAL-PROCESS",
+     "path": "q4/f8-new-roots.txt",
+     "contains": [
+      "all three aggregator shards certified new state roots; the roots verified a non-empty aggregator rsmt proof for each",
+      "and rejected none"
+     ],
+     "scope": "the step's own record: the three state-changing requests and the distinct (partition, shard) pairs whose non-empty proofs the roots verified"
     }
    ]
   },
