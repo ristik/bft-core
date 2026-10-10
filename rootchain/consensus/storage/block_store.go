@@ -137,10 +137,11 @@ func (x *BlockStore) ProcessTc(tc *rctypes.TimeoutCert) (rErr error) {
 		// store DB error and continue
 		rErr = fmt.Errorf("TC write failed: %w", err)
 	}
-	// Remove proposal/block for TC round if it exists, since quorum voted for timeout.
-	// It will never be committed, hence it can be removed immediately.
+	// Set the proposal/block of the TC round aside, if it exists: a quorum voted for timeout, but the same roots may have voted for
+	// the block before timing out, and a vote delayed past the TC can still complete a QC for it. Dropping the block then leaves every
+	// root unable to process that QC and unable to recover it from a peer.
 	// It is fine if the block is not found, it does not matter anyway
-	if err := x.blockTree.RemoveLeaf(tc.GetRound()); err != nil {
+	if err := x.blockTree.SetAsideLeaf(tc.GetRound()); err != nil {
 		return errors.Join(rErr, fmt.Errorf("removing timeout block %v: %w", tc.GetRound(), err))
 	}
 	return rErr
