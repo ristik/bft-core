@@ -125,15 +125,15 @@ p85_joiner_restore() { # entity
   [ "$1" = 5 ] || return 0
   H3_ONLINE="1 2 3 4 5" H3_STAGING_JOINER=1 H3_RESTORE_TRUST_BASE=test-nodes/trust-base.json h3_restore_validator 5 1 || return 1
   # The restore fetches the whole certified history through the incumbents' archive streams, which are limited while they catch replicas up (it
-  # retries up to 150 s per record and logs nothing until it finishes): the node serves its operator API only once restored, so wait for that
+  # retries up to 150 s per record and logs nothing until it finishes; in run 14 it took ~40 min for ~1400 records at ~40 records/min): the node serves its operator API only once restored, so wait for that
   # (not a fixed interval, which staged the candidate on a node that was still restoring), then watch it stays up.
   local i up=0
-  for i in $(seq 1 600); do
+  for i in $(seq 1 2400); do
     kill -0 "$(cat test-nodes/evm5/pid)" 2>/dev/null || { echo "the restored joiner shard node (evm5) exited" >&2; tail -20 test-nodes/evm5/debug.log >&2; return 1; }
     grep -aq "execution journal restored" test-nodes/evm5/debug.log && { up=1; break; }
     sleep 1
   done
-  [ "$up" = 1 ] || { echo "the joiner's archive restore did not finish in 600 s" >&2; tail -20 test-nodes/evm5/debug.log >&2; return 1; }
+  [ "$up" = 1 ] || { echo "the joiner's archive restore did not finish in 2400 s" >&2; tail -20 test-nodes/evm5/debug.log >&2; return 1; }
   for i in $(seq 1 30); do kill -0 "$(cat test-nodes/evm5/pid)" 2>/dev/null || { echo "the restored joiner shard node (evm5) exited" >&2; tail -20 test-nodes/evm5/debug.log >&2; return 1; }; sleep 1; done
 }
 
