@@ -1331,6 +1331,88 @@ func newMockShardInfo(t *testing.T, nodeID string, nodeSigningPubKey []byte, cer
 	return si
 }
 
+// After a supersession installs the exact recovery K, a validator of the superseded set that K does not name (the H3 lane's evm6) is no longer a
+// member of the installed configuration. The root refuses it at the handshake (no response, no subscription) and refuses its certification request
+// (the late acknowledgement), each by the typed membership error; the same request, signed by the same key, is valid against the superseded set,
+// and a validator K keeps is served throughout. Each refusal differs from its control in the installed configuration only.
+// Scope: the mock consensus manager has no RequestViewSource, so this pins the handshake and the committed-ShardInfo request path. Under an
+// activated view the request goes through collectUnderView, whose membership refusal is pinned in node_view_test.go
+// (TestCollectorRefusesStaleRequests, "an unknown signer ...") and in rootchain/consensus/storage/handoff_supersession_test.go.
+func Test_aSupersededSetsValidatorIsRefusedByTheRootOnceTheRecoveryIsInstalled(t *testing.T) {
+	nwPeer := network.Peer{}
+	nopObs := testobservability.NOPObservability()
+	kept, joiner, other := generateNodeID(t), generateNodeID(t), generateNodeID(t)
+	_, keptVerifier := testsig.CreateSignerAndVerifier(t)
+	joinerSigner, joinerVerifier := testsig.CreateSignerAndVerifier(t)
+	_, otherVerifier := testsig.CreateSignerAndVerifier(t)
+	pub := func(v abcrypto.Verifier) []byte {
+		raw, err := v.MarshalPublicKey()
+		require.NoError(t, err)
+		return raw
+	}
+	certResp := validCertificationResponse(t)
+	certResp.UC.UnicitySeal = &types.UnicitySeal{Timestamp: types.NewTimestamp()}
+	require.NoError(t, certResp.SetTechnicalRecord(certification.TechnicalRecord{Round: 3864, Epoch: 2, Leader: kept.String(), StatHash: []byte("state hash"), FeeHash: []byte("fee hash")}))
+	conf := func(epoch uint64, validators ...*types.NodeInfo) *storage.ShardInfo {
+		si, err := storage.NewShardInfo(&types.PartitionDescriptionRecord{
+			Version: 1, NetworkID: 5, PartitionID: certResp.Partition, T2Timeout: 2000 * time.Millisecond, Epoch: epoch, Validators: validators,
+		}, crypto.SHA256)
+		require.NoError(t, err)
+		si.LastCR = &certResp
+		return si
+	}
+	superseded := conf(2, &types.NodeInfo{NodeID: kept.String(), SigKey: pub(keptVerifier), Stake: 1},
+		&types.NodeInfo{NodeID: joiner.String(), SigKey: pub(joinerVerifier), Stake: 1}) // the s=2 set: the joiner is a member
+	recovery := conf(3, &types.NodeInfo{NodeID: kept.String(), SigKey: pub(keptVerifier), Stake: 1},
+		&types.NodeInfo{NodeID: other.String(), SigKey: pub(otherVerifier), Stake: 1}) // K: the joiner is not named
+
+	installed := superseded
+	sends := 0
+	partNet := mockPartitionNet{send: func(ctx context.Context, msg any, receivers ...p2peer.ID) error { sends++; return nil }}
+	cm := mockConsensusManager{shardInfo: func(types.PartitionID, types.ShardID) (*storage.ShardInfo, error) { return installed, nil }}
+	node, err := New(&nwPeer, partNet, cm, nopObs)
+	require.NoError(t, err)
+	subscribed := func() map[p2peer.ID]int {
+		node.subscription.mu.RLock()
+		defer node.subscription.mu.RUnlock()
+		return maps.Clone(node.subscription.subs[partitionShard{certResp.Partition, certResp.Shard.Key()}])
+	}
+	handshakeOf := func(id p2peer.ID) *handshake.Handshake {
+		return &handshake.Handshake{PartitionID: certResp.Partition, ShardID: certResp.Shard, NodeID: id.String()}
+	}
+	// a request of the joiner's key that is valid against the superseded set: the lane's late acknowledgement
+	request := certification.BlockCertificationRequest{
+		PartitionID: certResp.Partition, ShardID: certResp.Shard, NodeID: joiner.String(),
+		InputRecord: &types.InputRecord{Version: 1, PreviousHash: nil, Hash: []byte{1}, BlockHash: []byte{2}, SummaryValue: []byte{3}, RoundNumber: 3864, Epoch: 2, Timestamp: certResp.UC.UnicitySeal.Timestamp},
+		BlockSize:   1, StateSize: 1,
+	}
+	require.NoError(t, request.Sign(joinerSigner))
+	require.NoError(t, superseded.ValidRequest(&request), "control: the request is valid for the superseded set")
+
+	// controls, superseded set installed: both members are served
+	require.NoError(t, node.onHandshake(t.Context(), handshakeOf(joiner)))
+	require.NoError(t, node.onHandshake(t.Context(), handshakeOf(kept)))
+	require.Equal(t, 2, sends)
+	require.Contains(t, subscribed(), joiner)
+
+	// K installed; the joiner's quota is drained, so that a refresh by a refused handshake or request would show
+	node.subscription.mu.Lock()
+	node.subscription.subs[partitionShard{certResp.Partition, certResp.Shard.Key()}][joiner] = 0
+	node.subscription.mu.Unlock()
+	installed = recovery
+	before := sends
+	err = node.onHandshake(t.Context(), handshakeOf(joiner))
+	require.ErrorIs(t, err, storage.ErrNodeNotInTrustBase)
+	require.ErrorContains(t, err, "node ID is not in active validator set")
+	require.Equal(t, before, sends, "the superseded validator receives no certificate at the handshake")
+	err = node.onBlockCertificationRequest(t.Context(), &request)
+	require.ErrorIs(t, err, storage.ErrNodeNotInTrustBase, "the late acknowledgement is refused by membership")
+	require.Zero(t, subscribed()[joiner], "neither refusal re-subscribes the superseded validator")
+	require.NoError(t, node.onHandshake(t.Context(), handshakeOf(kept)), "a validator K keeps is still served")
+	require.NoError(t, node.onHandshake(t.Context(), handshakeOf(other)), "and K's other member")
+	require.Equal(t, before+3, sends, "one rejection for the refused request (its last certificate) and a response to each of the two members")
+}
+
 // The stored leaf values of an aggregator's tree bind the round's reference time, which is the request's input record timestamp: the root
 // verifies the proof under that timestamp and under no other.
 func Test_theRootVerifiesAnRSMTProofUnderTheRequestsTimestamp(t *testing.T) {
