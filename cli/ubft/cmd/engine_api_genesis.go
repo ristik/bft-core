@@ -424,6 +424,20 @@ func defaultFullShardConfPath(out string) string {
 	return strings.TrimSuffix(out, ext) + "-full-shard-conf.json"
 }
 
+// withGasLimit is a standard genesis JSON with its gasLimit replaced; every other field is carried through unchanged.
+func withGasLimit(genesis []byte, gasLimit uint64) ([]byte, error) {
+	var doc map[string]json.RawMessage
+	if err := json.Unmarshal(genesis, &doc); err != nil {
+		return nil, fmt.Errorf("reading the compiled manifest genesis: %w", err)
+	}
+	limit, err := json.Marshal(fmt.Sprintf("0x%x", gasLimit))
+	if err != nil {
+		return nil, err
+	}
+	doc["gasLimit"] = limit
+	return json.Marshal(doc)
+}
+
 // engineAPIGenesisSource returns the standard genesis JSON to prepare from: the operator's file when
 // --alloc-source is given, otherwise this command's own template.
 //
@@ -447,6 +461,10 @@ func engineAPIGenesisSource(flags *engineAPIGenesisFlags, changed func(string) b
 		compiled, err := registrygenesis.CompileAllocationManifest(data, chainID)
 		if err != nil {
 			return nil, fmt.Errorf("compiling --manifest %q: %w", flags.Manifest, err)
+		}
+		if flags.B1Profile != "" {
+			// A fresh-B1 genesis carries the profile's block gas limit (flags.GasLimit holds it by now); the manifest does not name one
+			return withGasLimit(compiled, flags.GasLimit)
 		}
 		return compiled, nil
 	}
