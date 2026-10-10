@@ -273,9 +273,9 @@ run_paired_t6() {
   require_free_kb 2500000 "paired T6 network rehearsal" || return 1
   # the single B1 layout: one profile derived from the shard configuration and the root trust base, registry layout 3, the Q3 flow for every handoff
   export Q3_B1=1 H3_SLOT_LAYOUT=3 EVM_OPERATOR_STATUS_RPC=1
-  # the rotation replaces one root entity and one EVM validator of four equal-weight committees (distance 1/2): the genesis configuration commits a budget that
-  # admits it (the DEV default, 1/4, admits no replacement); the same as the H3 lane
-  export EVM_PARTITION_PARAMS_EXTRA=${EVM_PARTITION_PARAMS_EXTRA:-continuity_max_distance=1/1}
+  # the testnet profile's churn budget (owner decision 19, briefs/p85-churn-bound-note.md): D <= 1/2, committed in the genesis configuration (the DEV default,
+  # 1/4, admits no replacement of one of four). The rotation replaces one of four (D = 1/2) and the lane shows a candidate beyond the budget refused.
+  export EVM_PARTITION_PARAMS_EXTRA=${EVM_PARTITION_PARAMS_EXTRA:-continuity_max_distance=1/2}
   export POST_M2A_MODE=t6 POST_M2A_CHAIN_ID=1337
   export POST_M2A_URETH_BIN="$URETH_BIN" POST_M2A_URETH_COMMIT="$T6_URETH_COMMIT"
   export M2_PROFILE2=1 SIGNING=authority M2A_FINAL_RESTORE=1

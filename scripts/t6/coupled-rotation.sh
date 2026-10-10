@@ -41,6 +41,20 @@ t6_body_ids() {
   echo "$ids"
 }
 
+# A candidate outside the committed churn budget is refused at the candidate, naming the weight distance, and nothing moves: the epoch is unchanged.
+t6_over_bound_refused() { # next-epoch
+  local next=$1 out=$H3_DIR/over-bound.out epoch rc
+  h3_q3_trust_base "$next" "1 2" || return 1
+  Q3_NEXT_EPOCH=$next Q3_ASSIGN_TAG=over Q3_SUFFIX=-over Q3_ENTITIES="1 2" Q3_INCUMBENT=$H3_INCUMBENT
+  if ! q3_attempt >"$out" 2>&1; then rc=0; else rc=1; fi
+  unset Q3_NEXT_EPOCH Q3_ASSIGN_TAG Q3_SUFFIX Q3_ENTITIES Q3_INCUMBENT
+  [ "$rc" = 0 ] || { echo "T6: the over-budget candidate (two of four members kept) was not refused" >&2; cat "$out" >&2; return 1; }
+  grep -q "weight distance exceeded" "$out" || { echo "T6: the over-budget refusal does not name the weight distance" >&2; cat "$out" >&2; return 1; }
+  epoch=$(h3_root_info | jq -r '.epochNumber')
+  [ "$epoch" = "$((next - 1))" ] || { echo "T6: the root epoch moved to $epoch on a refused candidate" >&2; return 1; }
+  echo "T6 coupled rotation: a candidate keeping two of four members (D=1 > 1/2) was refused: weight distance exceeded"
+}
+
 t6_coupled_rotation_s1() {
   local cur next ids
   # the lane's own state at this point: four roots and four validators, validator 1 running through the H4 restore command
@@ -72,6 +86,10 @@ t6_coupled_rotation_s1() {
     [ -f test-nodes/evm1/jwt.hex ] || cp test-nodes/h4-replaced/jwt.hex test-nodes/evm1/jwt.hex 2>/dev/null || true
   fi
   h3_q3_init || return 1
+
+  # The testnet profile's churn budget is D <= 1/2 (owner decision 19, briefs/p85-churn-bound-note.md), committed in the genesis configuration: the rotation
+  # below replaces one of four (D = 1/2, within it), and a candidate that keeps only two of the four members (D = 1) is refused with the distance named.
+  t6_over_bound_refused "$next" || return 1
 
   # the joiner starts BEFORE the Commit: its root a follower of the committee, its shard node staging-only, its execution client paired and pinned
   build/ubft root-node init --home test-nodes/root5 -g >/dev/null 2>&1 || true
