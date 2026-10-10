@@ -15,6 +15,10 @@
 //	4       ...   leaves:          leaf_count × { key[32] || value_len (u16 BE) || value[value_len] }
 //	...     ...   opcode stream    (flat bytes, runs to end of buffer)
 //
+// The leaves' values are DECLARED transaction hashes. The tree stores LeafValue(txHash, tau) for each new leaf (opcode L), with tau the
+// round's reference time, InputRecord.Timestamp; the verifier derives the stored value and hashes that (rugregator 7f566ea, checked against
+// the pinned dd5b1406a17fdeb415799045c5e81609619a870a). Preserved leaves opened by O_L carry their stored value and are hashed as given.
+//
 // Leaves must be pre-sorted by plain key order (RSMT v6a: rsmt_sort_key(k)
 // = k, since keys are read as big-endian bit strings), this package does
 // not reorder them.

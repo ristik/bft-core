@@ -1,6 +1,7 @@
 package rootchain
 
 import (
+	"bytes"
 	"context"
 	"crypto"
 	"errors"
@@ -609,7 +610,10 @@ func TestInvalidRSMTRootClaimsDoNotBlockAnotherShard(t *testing.T) {
 	oldKey[0], newKey[0] = 0x00, 0x80
 	oldValue, newValue := []byte("old"), []byte("new")
 	oldLeaf := rsmt.HashLeaf(oldKey, oldValue)
-	newLeaf := rsmt.HashLeaf(newKey, newValue)
+	// the tree stores the new leaf's value derived from the declared one and the round's reference time (the requests' timestamp)
+	stamp := types.NewTimestamp()
+	newStored := rsmt.LeafValue(newValue, stamp)
+	newLeaf := rsmt.HashLeaf(newKey, newStored[:])
 	newRoot := rsmt.HashNode(oldLeaf, newLeaf, 0, rsmt.PrefixRegion(oldKey, 0))
 	proofStream := append([]byte{0x04}, oldKey[:]...) // O_L(old key, old value)
 	proofStream = append(proofStream, 0, byte(len(oldValue)))
@@ -648,7 +652,6 @@ func TestInvalidRSMTRootClaimsDoNotBlockAnotherShard(t *testing.T) {
 			makeShardInfo := func(id types.ShardID, root []byte) *storage.ShardInfo {
 				t.Helper()
 				const partition = types.PartitionID(9)
-				stamp := types.NewTimestamp()
 				lastInput := &types.InputRecord{
 					Version: 1, PreviousHash: test.RandomBytes(32), Hash: append([]byte(nil), root...),
 					BlockHash: test.RandomBytes(32), SummaryValue: []byte{1}, RoundNumber: 3864,
@@ -1326,4 +1329,35 @@ func newMockShardInfo(t *testing.T, nodeID string, nodeSigningPubKey []byte, cer
 	require.NoError(t, err)
 	si.LastCR = &certResp
 	return si
+}
+
+// The stored leaf values of an aggregator's tree bind the round's reference time, which is the request's input record timestamp: the root
+// verifies the proof under that timestamp and under no other.
+func Test_theRootVerifiesAnRSMTProofUnderTheRequestsTimestamp(t *testing.T) {
+	node, err := New(&network.Peer{}, mockPartitionNet{}, mockConsensusManager{}, testobservability.NOPObservability())
+	require.NoError(t, err)
+	const tau = 1_755_000_000
+	kOld, kNew := [32]byte{0x00}, [32]byte{0x80}
+	vOld, declared := []byte("stored value of the earlier round"), bytes.Repeat([]byte{0x77}, 32)
+	hOld := rsmt.HashLeaf(kOld, vOld)
+	stored := rsmt.LeafValue(declared, tau)
+	hNew := rsmt.HashLeaf(kNew, stored[:])
+	newRoot := rsmt.HashNode(hOld, hNew, 0, rsmt.PrefixRegion(kOld, 0))
+	// post-order: the preserved leaf opened (O_L), the new leaf (L), the junction N(0)
+	proof := append([]byte{0x04}, kOld[:]...)
+	proof = append(proof, byte(len(vOld)>>8), byte(len(vOld)))
+	proof = append(proof, vOld...)
+	proof = append(proof, 0x01, 0x02, 0x00)
+	env, err := rsmt.EncodeEnvelope([]rsmt.Leaf{{Key: kNew, Value: declared}}, proof)
+	require.NoError(t, err)
+
+	target := zkTarget{partition: 9, params: map[string]string{"proof_type": "aggregator_rsmt_v1"}}
+	req := func(timestamp uint64) *certification.BlockCertificationRequest {
+		return &certification.BlockCertificationRequest{PartitionID: 9, ZkProof: env, InputRecord: &types.InputRecord{
+			PreviousHash: hOld[:], Hash: newRoot[:], BlockHash: []byte{1}, Timestamp: timestamp, RoundNumber: 7}}
+	}
+	require.NoError(t, node.verifyZKProof(t.Context(), req(tau), target), "the proof of the round's own reference time verifies")
+	err = node.verifyZKProof(t.Context(), req(tau+1), target)
+	require.ErrorIs(t, err, zkverifier.ErrProofVerificationFailed, "another timestamp is not the round's reference time")
+	require.ErrorIs(t, node.verifyZKProof(t.Context(), req(0), target), zkverifier.ErrProofVerificationFailed)
 }

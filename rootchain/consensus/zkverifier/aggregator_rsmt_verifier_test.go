@@ -9,11 +9,19 @@ import (
 	"github.com/unicitynetwork/bft-go-base/types"
 )
 
+// tau is the reference time the tests build their rounds under; the tree stores rsmt.LeafValue(declared, tau).
+const tau = 1_755_000_000
+
+func newLeafHash(k [32]byte, declared []byte) [32]byte {
+	stored := rsmt.LeafValue(declared, tau)
+	return rsmt.HashLeaf(k, stored[:])
+}
+
 func TestAggregatorRSMTVerifier_SingleLeafIntoEmptyTree(t *testing.T) {
 	var k [32]byte
 	k[0] = 0x05
 	v := []byte("hello")
-	leafHash := rsmt.HashLeaf(k, v)
+	leafHash := newLeafHash(k, v)
 
 	env, err := rsmt.EncodeEnvelope(
 		[]rsmt.Leaf{{Key: k, Value: v}},
@@ -32,23 +40,32 @@ func TestAggregatorRSMTVerifier_SingleLeafIntoEmptyTree(t *testing.T) {
 	}
 
 	// Genesis-to-first-leaf: prev nil, new = hashLeaf.
-	if err := ver.VerifyProof(env, nil, leafHash[:], nil); err != nil {
+	if err := ver.VerifyProofAt(env, nil, leafHash[:], nil, tau); err != nil {
 		t.Fatalf("VerifyProof: %v", err)
 	}
 
+	// The reference time is part of the statement: any other one is refused, and so is a call that supplies none.
+	if err := ver.VerifyProofAt(env, nil, leafHash[:], nil, tau+1); !errors.Is(err, ErrProofVerificationFailed) {
+		t.Fatalf("another reference time: got %v, want ErrProofVerificationFailed", err)
+	}
+	if err := ver.VerifyProof(env, nil, leafHash[:], nil); !errors.Is(err, ErrReferenceTimeRequired) {
+		t.Fatalf("no reference time: got %v, want ErrReferenceTimeRequired", err)
+	}
+	var _ ReferenceTimeVerifier = ver
+
 	// Wrong new root.
 	bad := make([]byte, 32)
-	if err := ver.VerifyProof(env, nil, bad, nil); !errors.Is(err, ErrProofVerificationFailed) {
+	if err := ver.VerifyProofAt(env, nil, bad, nil, tau); !errors.Is(err, ErrProofVerificationFailed) {
 		t.Fatalf("wrong root: got %v, want ErrProofVerificationFailed", err)
 	}
 
 	// Malformed envelope.
-	if err := ver.VerifyProof([]byte{0x00}, nil, leafHash[:], nil); !errors.Is(err, ErrInvalidProofFormat) {
+	if err := ver.VerifyProofAt([]byte{0x00}, nil, leafHash[:], nil, tau); !errors.Is(err, ErrInvalidProofFormat) {
 		t.Fatalf("malformed envelope: got %v, want ErrInvalidProofFormat", err)
 	}
 
 	// Wrong-length previous root.
-	if err := ver.VerifyProof(env, []byte{1, 2, 3}, leafHash[:], nil); !errors.Is(err, ErrInvalidProofFormat) {
+	if err := ver.VerifyProofAt(env, []byte{1, 2, 3}, leafHash[:], nil, tau); !errors.Is(err, ErrInvalidProofFormat) {
 		t.Fatalf("bad prev root length: got %v, want ErrInvalidProofFormat", err)
 	}
 }
@@ -60,8 +77,8 @@ func TestAggregatorRSMTVerifier_TwoLeaves(t *testing.T) {
 	v0 := []byte("v0")
 	v1 := []byte("v1")
 
-	h0 := rsmt.HashLeaf(k0, v0)
-	h1 := rsmt.HashLeaf(k1, v1)
+	h0 := newLeafHash(k0, v0)
+	h1 := newLeafHash(k1, v1)
 	region := rsmt.PrefixRegion(k0, 0)
 	newRoot := rsmt.HashNode(h0, h1, 0, region)
 
@@ -80,7 +97,7 @@ func TestAggregatorRSMTVerifier_TwoLeaves(t *testing.T) {
 	}
 
 	ver := NewAggregatorRSMTVerifier()
-	if err := ver.VerifyProof(env, nil, newRoot[:], nil); err != nil {
+	if err := ver.VerifyProofAt(env, nil, newRoot[:], nil, tau); err != nil {
 		t.Fatalf("VerifyProof: %v", err)
 	}
 }
