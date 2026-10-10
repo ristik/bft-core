@@ -3,12 +3,14 @@
 package main
 
 import (
+	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
 	"path/filepath"
 
+	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/unicitynetwork/bft-core/b1registry"
 	"github.com/unicitynetwork/bft-core/b1state"
 	"github.com/unicitynetwork/bft-core/q3format"
@@ -27,9 +29,10 @@ func run() error {
 	root := flag.String("root-genesis", "", "pinned self-signed RootTrustBaseV1 JSON")
 	shard := flag.String("shard-conf", "", "unbound PartitionDescriptionRecord JSON")
 	out := flag.String("out", "", "new output directory")
+	verify := flag.String("verify", "", "instead of --out: the DEPLOYED genesis JSON (the chain spec the clients run) to compare with the regeneration, registry code and every storage word")
 	flag.Parse()
-	if *profile == "" || *root == "" || *shard == "" || *out == "" {
-		return fmt.Errorf("--profile, --root-genesis, --shard-conf and --out are required")
+	if *profile == "" || *root == "" || *shard == "" || (*out == "") == (*verify == "") {
+		return fmt.Errorf("--profile, --root-genesis and --shard-conf are required, and exactly one of --out and --verify")
 	}
 	read := func(path string, v any) error {
 		b, err := os.ReadFile(path)
@@ -50,6 +53,13 @@ func run() error {
 	if err := read(*shard, &conf); err != nil {
 		return err
 	}
+	suppliedCommitment, hasCommitment := "", false
+	if *verify != "" {
+		// the deployed chain's configuration is the FULL one (it carries the genesis commitment); the regeneration starts from its base, and the
+		// commitment it carried is compared with the regenerated one below
+		suppliedCommitment, hasCommitment = conf.PartitionParams[registrygenesis.GenesisParam]
+		delete(conf.PartitionParams, registrygenesis.GenesisParam)
+	}
 	h, err := q3format.NewHistory(&tb)
 	if err != nil {
 		return err
@@ -61,6 +71,14 @@ func run() error {
 	full, err := g.FullConfig()
 	if err != nil {
 		return err
+	}
+	if *verify != "" {
+		// the commitment hashes the derived record (ids, addresses, code hash, base configuration hash, root genesis id and the B1 profile hash), not the
+		// genesis bytes (a base configuration without the parameter has nothing to compare): a profile that differs from the one the chain committed to in fields that change neither would otherwise pass
+		if want := hex.EncodeToString(g.GenesisCommitment().Bytes()); hasCommitment && suppliedCommitment != want {
+			return fmt.Errorf("%w: supplied %q, regenerated %s", ErrCommitment, suppliedCommitment, want)
+		}
+		return verifyFile(g, full, p, h, *verify)
 	}
 	origin, err := registrygenesis.B1Origin(full, p, h, g.GenesisJSON(), nil, registrygenesis.GenesisJSONLimits{})
 	if err != nil {
@@ -88,5 +106,25 @@ func run() error {
 			return err
 		}
 	}
+	return nil
+}
+
+// verifyFile is --verify: the independent comparison of the deployed registry account with the regeneration, then the node's own validation of the
+// whole finalized genesis against the authenticated root genesis and the profile (registrygenesis.B1Origin), both of which must pass.
+func verifyFile(g *registrygenesis.Genesis, full *types.PartitionDescriptionRecord, p b1state.Profile, h *q3format.History, path string) error {
+	deployed, err := os.ReadFile(path) // #nosec G304 -- operator-supplied path
+	if err != nil {
+		return err
+	}
+	words, err := verifyDeployed(g, p.RuntimeHash, deployed)
+	if err != nil {
+		return err
+	}
+	if _, err := registrygenesis.B1Origin(full, p, h, deployed, nil, registrygenesis.DefaultGenesisJSONLimits()); err != nil {
+		return fmt.Errorf("b1genesis verify: the deployed genesis does not validate against the root genesis and the profile: %w", err)
+	}
+	code, _ := b1registry.Runtime()
+	fmt.Printf("b1genesis verify: the deployed registry account matches the regeneration (code %d bytes keccak %s, %d storage words, none extra or missing); the whole genesis validates as the B1 origin\n",
+		len(code), crypto.Keccak256Hash(code).Hex(), words)
 	return nil
 }
