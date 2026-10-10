@@ -11,8 +11,10 @@ import (
 type Outcome int
 
 const (
+	// Refused is the zero value: the request was not accepted (the error says why), never to be read as a pass.
+	Refused Outcome = iota
 	// Verified - the configured proof of the transition checked out.
-	Verified Outcome = iota
+	Verified
 	// Disabled - the shard's configuration names no proof (m-of-n mode); the aggregator's signatures are the whole predicate.
 	Disabled
 	// SkippedSync - both roots are empty: a handshake or subscription request, no transition.
@@ -20,6 +22,13 @@ const (
 	// SkippedGenesis - the previous root is empty: the first state-changing block is sent from heaven.
 	SkippedGenesis
 )
+
+// Result is what VerifyRequest did: the Outcome and the proof type of the configuration the request was judged under (empty when no verifier
+// was reached).
+type Result struct {
+	Outcome   Outcome
+	ProofType ProofType
+}
 
 // Target is the configuration a request's proof is judged under: the shard, its epoch and the partition parameters in force.
 type Target struct {
@@ -34,23 +43,24 @@ type Target struct {
 // another's word that the proof held. The proof is checked against the request's own roots, block hash and reference time (the input
 // record's timestamp, which the signature covers). Disabled, sync and genesis requests are the explicit exceptions; a T2 repeat carries no
 // requests, so there is nothing to check.
-func (r *Registry) VerifyRequest(req *certification.BlockCertificationRequest, t Target) (Outcome, error) {
+func (r *Registry) VerifyRequest(req *certification.BlockCertificationRequest, t Target) (Result, error) {
 	ir := req.InputRecord
 	if ir == nil {
-		return Verified, fmt.Errorf("input record is nil")
+		return Result{}, fmt.Errorf("input record is nil")
 	}
 	verifier, err := r.GetVerifier(t.Partition, t.Shard, t.Epoch, t.Params)
 	if err != nil {
-		return Verified, fmt.Errorf("getting verifier for partition %s: %w", t.Partition, err)
+		return Result{}, fmt.Errorf("getting verifier for partition %s: %w", t.Partition, err)
 	}
+	proofType := verifier.ProofType()
 	if !verifier.IsEnabled() {
-		return Disabled, nil
+		return Result{Outcome: Disabled, ProofType: proofType}, nil
 	}
 	if len(ir.PreviousHash) == 0 && len(ir.Hash) == 0 {
-		return SkippedSync, nil
+		return Result{Outcome: SkippedSync, ProofType: proofType}, nil
 	}
 	if len(ir.PreviousHash) == 0 {
-		return SkippedGenesis, nil
+		return Result{Outcome: SkippedGenesis, ProofType: proofType}, nil
 	}
 	if rt, ok := verifier.(ReferenceTimeVerifier); ok {
 		// the stored leaf values bind the round's reference time, which is the request's input record timestamp
@@ -59,7 +69,7 @@ func (r *Registry) VerifyRequest(req *certification.BlockCertificationRequest, t
 		err = verifier.VerifyProof(req.ZkProof, ir.PreviousHash, ir.Hash, ir.BlockHash)
 	}
 	if err != nil {
-		return Verified, fmt.Errorf("ZK proof verification failed: %w", err)
+		return Result{Outcome: Refused, ProofType: proofType}, fmt.Errorf("ZK proof verification failed: %w", err)
 	}
-	return Verified, nil
+	return Result{Outcome: Verified, ProofType: proofType}, nil
 }

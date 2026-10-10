@@ -33,8 +33,13 @@ type proofTransition struct {
 }
 
 func newProofTransition(t *testing.T, tau uint64) proofTransition {
+	return newProofTransitionOf(t, tau, 0x80)
+}
+
+// newProofTransitionOf inserts the leaf of key first byte newKey: another key is another transition from the same previous root.
+func newProofTransitionOf(t *testing.T, tau uint64, newKey byte) proofTransition {
 	t.Helper()
-	kOld, kNew := [32]byte{0x00}, [32]byte{0x80}
+	kOld, kNew := [32]byte{0x00}, [32]byte{newKey}
 	vOld, declared := []byte("stored value of the earlier round"), bytes.Repeat([]byte{0x77}, 32)
 	hOld := rsmt.HashLeaf(kOld, vOld)
 	stored := rsmt.LeafValue(declared, tau)

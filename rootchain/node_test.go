@@ -6,7 +6,9 @@ import (
 	"crypto"
 	"errors"
 	"fmt"
+	"log/slog"
 	"maps"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -1442,4 +1444,38 @@ func Test_theRootVerifiesAnRSMTProofUnderTheRequestsTimestamp(t *testing.T) {
 	err = node.verifyZKProof(t.Context(), req(tau+1), target)
 	require.ErrorIs(t, err, zkverifier.ErrProofVerificationFailed, "another timestamp is not the round's reference time")
 	require.ErrorIs(t, node.verifyZKProof(t.Context(), req(0), target), zkverifier.ErrProofVerificationFailed)
+}
+
+// The lanes (scripts/f8-mixed-lane.sh) count the roots' verified proofs per shard from this line: its text, the verifier's type and the proof size.
+func Test_theRootLogsEachCheckedProofForTheLanes(t *testing.T) {
+	node, err := New(&network.Peer{}, mockPartitionNet{}, mockConsensusManager{}, testobservability.NOPObservability())
+	require.NoError(t, err)
+	var out bytes.Buffer
+	node.log = slog.New(slog.NewTextHandler(&out, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	const tau = 1_755_000_000
+	valid := bytes.Repeat([]byte{0x77}, 32)
+	kOld, kNew := [32]byte{0x00}, [32]byte{0x80}
+	vOld := []byte("stored value of the earlier round")
+	hOld := rsmt.HashLeaf(kOld, vOld)
+	stored := rsmt.LeafValue(valid, tau)
+	newRoot := rsmt.HashNode(hOld, rsmt.HashLeaf(kNew, stored[:]), 0, rsmt.PrefixRegion(kOld, 0))
+	proof := append([]byte{0x04}, kOld[:]...)
+	proof = append(proof, byte(len(vOld)>>8), byte(len(vOld)))
+	proof = append(proof, vOld...)
+	proof = append(proof, 0x01, 0x02, 0x00)
+	env, err := rsmt.EncodeEnvelope([]rsmt.Leaf{{Key: kNew, Value: valid}}, proof)
+	require.NoError(t, err)
+	req := &certification.BlockCertificationRequest{PartitionID: 9, ZkProof: env, InputRecord: &types.InputRecord{
+		PreviousHash: hOld[:], Hash: newRoot[:], BlockHash: []byte{1}, Timestamp: tau, RoundNumber: 7}}
+	require.NoError(t, node.verifyZKProof(t.Context(), req, zkTarget{partition: 9, params: map[string]string{"proof_type": "aggregator_rsmt_v1"}}))
+	line := ""
+	for _, l := range strings.Split(out.String(), "\n") {
+		if strings.Contains(l, "Verifying ZK proof") {
+			line = l
+		}
+	}
+	require.NotEmpty(t, line, "the line the lanes count")
+	require.Contains(t, line, "verifier_type=aggregator_rsmt_v1")
+	require.Contains(t, line, fmt.Sprintf("proof_size=%d", len(env)))
+	require.Contains(t, line, "shard.partition=9")
 }

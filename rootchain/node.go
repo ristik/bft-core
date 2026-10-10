@@ -489,26 +489,38 @@ func (v *Node) verifyZKProof(ctx context.Context, req *certification.BlockCertif
 	}
 	proofTarget := zkverifier.Target{Partition: target.partition, Shard: target.shard, Epoch: target.epoch, Params: target.params}
 	start := time.Now()
-	outcome, verifyErr := v.zkRegistry.VerifyRequest(req, proofTarget)
+	res, verifyErr := v.zkRegistry.VerifyRequest(req, proofTarget)
 	elapsed := time.Since(start)
 	proofSize := len(req.ZkProof)
+	proofType := string(res.ProofType)
 
 	switch {
-	case verifyErr != nil:
+	case res.Outcome == zkverifier.SkippedSync:
+		v.log.DebugContext(ctx, "Skipping ZK proof verification for sync UC", logger.Shard(req.PartitionID, req.ShardID))
+	case res.Outcome == zkverifier.SkippedGenesis:
+		v.log.InfoContext(ctx, "Skipping ZK proof verification for genesis block", logger.Shard(req.PartitionID, req.ShardID))
+	case res.Outcome == zkverifier.Verified || (res.ProofType != "" && verifyErr != nil):
+		// the proof was checked: the line the lanes count (scripts/f8-mixed-lane.sh), with the verifier's type and the proof's size
+		v.log.DebugContext(ctx, "Verifying ZK proof",
+			logger.Shard(req.PartitionID, req.ShardID),
+			slog.String("verifier_type", proofType),
+			slog.Int("proof_size", proofSize),
+			slog.Uint64("round", ir.RoundNumber))
+	}
+	if verifyErr != nil {
 		v.log.WarnContext(ctx, "ZK proof verification failed",
 			logger.Shard(req.PartitionID, req.ShardID),
+			slog.String("verifier_type", proofType),
 			slog.Int("proof_size", proofSize),
 			slog.Duration("verification_time", elapsed),
 			slog.Uint64("round", ir.RoundNumber),
 			logger.Error(verifyErr))
 		return verifyErr
-	case outcome == zkverifier.SkippedSync:
-		v.log.DebugContext(ctx, "Skipping ZK proof verification for sync UC", logger.Shard(req.PartitionID, req.ShardID))
-	case outcome == zkverifier.SkippedGenesis:
-		v.log.InfoContext(ctx, "Skipping ZK proof verification for genesis block", logger.Shard(req.PartitionID, req.ShardID))
-	case outcome == zkverifier.Verified:
+	}
+	if res.Outcome == zkverifier.Verified {
 		v.log.InfoContext(ctx, "ZK proof verified successfully",
 			logger.Shard(req.PartitionID, req.ShardID),
+			slog.String("verifier_type", proofType),
 			slog.Int("proof_size", proofSize),
 			slog.Uint64("num_leaves", req.BlockSize),
 			slog.Duration("verification_time", elapsed),
