@@ -371,17 +371,20 @@ import json, sys
 path, summary, t2ms, expiries = sys.argv[1], sys.argv[2], int(sys.argv[3]), int(sys.argv[4])
 rows = [json.loads(l) for l in open(path) if l.strip()]
 span = rows[-1]["elapsed_s"] - rows[0]["elapsed_s"]
-first = {r["root"]: r for r in rows[0]["roots"]}
-moved = []
+# progress is a value above the highest any root held when the window opened; a lagging root catching up to an
+# already-certified round is not a retry
+def vals(r):
+    return {"epoch": int(r["epoch"]), "round": int(r["round"]), "EVM ir": int(r["evm"]["ir"]), "EVM tr": int(r["evm"]["tr"])}
+first = {r["root"]: vals(r) for r in rows[0]["roots"]}
+top = {k: max(v[k] for v in first.values()) for k in ("epoch", "round", "EVM ir", "EVM tr")}
+moved, caught = [], set()
 for row in rows[1:]:
     for r in row["roots"]:
-        f = first[r["root"]]
-        for k in ("epoch", "round"):
-            if r[k] != f[k]:
-                moved.append(f"root{r['root']} {k} {f[k]} -> {r[k]} at {row['elapsed_s']:.1f}s")
-        for k in ("ir", "tr"):
-            if r["evm"][k] != f["evm"][k]:
-                moved.append(f"root{r['root']} EVM {k} {f['evm'][k]} -> {r['evm'][k]} at {row['elapsed_s']:.1f}s")
+        for k, v in vals(r).items():
+            if v > top[k]:
+                moved.append(f"root{r['root']} {k} {top[k]} -> {v} at {row['elapsed_s']:.1f}s")
+            elif v != first[r["root"]][k]:
+                caught.add(f"root{r['root']} {k} {first[r['root']][k]} -> {v}")
     if row["evm_height"] != rows[0]["evm_height"]:
         moved.append(f"EVM height {rows[0]['evm_height']} -> {row['evm_height']} at {row['elapsed_s']:.1f}s")
 lines = [f"root quorum lost for {span:.1f}s of samples (after a 5 s drain); EVM T2 = {t2ms} ms: the local T2 expiry fell at most {t2ms / 1000:.1f}s into the window,",
@@ -389,6 +392,8 @@ lines = [f"root quorum lost for {span:.1f}s of samples (after a 5 s drain); EVM 
 for r in rows[0]["roots"]:
     lines.append(f"  root{r['root']}: epoch {r['epoch']}, committed round {r['round']}; EVM shard IR round {r['evm']['ir']}, TR round {r['evm']['tr']}")
 lines.append(f"  EVM height {rows[0]['evm_height']}")
+if caught:
+    lines.append("caught up to values already held by another root (not progress): " + "; ".join(sorted(set(caught))))
 lines.append("moved during the window: " + ("; ".join(moved) if moved else "nothing (no root round, no EVM IR/TR round, no EVM block): no root-certified retry"))
 open(summary, "w").write("\n".join(lines) + "\n")
 print("\n".join(lines))
