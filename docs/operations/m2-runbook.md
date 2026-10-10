@@ -7,8 +7,8 @@ Cross-epoch full-disk restore and archive-replica maintenance are specifically
 pending. Do not use the test harness against production data.
 
 For a fresh private network and the H6 rehearsal sequence, start with the
-[H6 operator guide](h6/README.md). It provides pinned builds, setup, configuration,
-lifecycle commands and the independent-operator evidence checklist.
+[testnet operator guide](testnet/OPERATOR.md) (the H6 rehearsal; pinned builds, setup, lifecycle commands, evidence) and
+the native lanes in [H6](h6/README.md) for rotation, restore and activation.
 
 This runbook uses commands and observations present in the merged `ubft` CLIs,
 paired-devnet scripts, and F9 report tool. Replace every `REPLACE_*` value before
@@ -64,18 +64,13 @@ does not implement authentication.
 ## Supported-version matrix
 
 This matrix is a conservative deployment rule, not a rolling-upgrade guarantee.
-The available evidence is pinned to exact artifacts: the final M2a run used BFT
-script tree `6e300cc1` and Ureth `055a314f759f78f045d55ceddfeb7e14b3b6a2f7`
-(historical evidence; a registry-layout-1 client). On current integration the supported
-execution client is the H3 Ureth `5f3bb7e4ee9f82e70630e5c4b73783e7a392a7d3` with registry
-layout 2: a layout-1 client such as `055a314f` refuses the H3-era epoch transition
-(`invalid epoch transition encoding`, shown by an unmodified-integration control run), and
-there is no migration of an already initialized chain. The profile-2 lane on integration is run
-with `H4_URETH_BIN`/`H4_URETH_COMMIT` set to the H3 Ureth and is then a configuration-only
-lane (`M2_HANDOFF_MODE` defaults to `config-only` on layout 2);
-this H6 implementation is based on BFT integration
-`dc8dd9aaa37e21e7c00a33819cb1110f24e9a58b`. `urethPinVerifyBinary` checks the
-Ureth executable against its chosen commit before launch.
+The available evidence is pinned to exact artifacts. The supported chain is the fresh-B1 layout (registry layout 3:
+`--b1-profile`, the one layout; there is no migration of an earlier chain, and an older registry client refuses
+its epoch transition with `invalid epoch transition encoding`). The M2 lane (`scripts/m2-lane.sh`, `Q3_B1=1`) runs the paired
+execution client pinned by its wrapper (`M2_URETH_BIN`/`M2_URETH_COMMIT`; the repo default is `URETH_PIN_COMMIT` in
+`scripts/lib/reth-pin.sh`) and its handoffs go through the Q3 flow ([H3 runbook section 4](h3-evm-assignment-runbook.md#4-candidate-joiners-readiness-propose)),
+same members and weights, no EVM assignment change. `urethPinVerifyBinary` checks the Ureth executable against its chosen
+commit before launch.
 
 | Component | Compatibility rule supported by code/evidence | Deployment rule | Gap |
 |---|---|---|---|
@@ -163,9 +158,15 @@ frozen parent) and only then are the endorsements collected, over the Prepare-bo
 the call, and `--frozen-parent` / `--certified-parent-status-url` no longer exist. Record the Prepare-bound parent from the root log
 (`root handoff outcome` / the committed record) for the evidence.
 
+On a fresh-B1 chain every handoff is a V3 handoff: first derive the candidate with `root handoff q3-candidate --next-trust-base ...`
+(no `--next-evm-assignment` for a same-members change), collect one `q3-readiness` receipt per successor entity, and pass them
+with `--readiness-receipts` (commands: [H3 runbook section 4](h3-evm-assignment-runbook.md#4-candidate-joiners-readiness-propose)).
+A plain `propose` without receipts is refused, except `propose --q3` for the exact recovery.
+
 ```sh
 build/ubft root handoff propose \
   --next-trust-base REPLACE_NEXT_TRUST_BASE_JSON \
+  --readiness-receipts REPLACE_RECEIPT_1,REPLACE_RECEIPT_2,REPLACE_RECEIPT_3,REPLACE_RECEIPT_4 \
   --root-rpc REPLACE_OLD_ROOT_RPC_1,REPLACE_OLD_ROOT_RPC_2,REPLACE_OLD_ROOT_RPC_3
 ```
 
@@ -289,11 +290,13 @@ Retain the CLI's committed Abort record ID and ordered round with the exact
 target. A timeout is pending/unknown. A `too late` response means H committed;
 stop and do not retry. After observing committed Abort, retry the same network
 and predecessor at `attempt+1`, with new approvals and the same successor trust
-base. Run `propose` again; the root binds the frozen parent anew at the next Prepare:
+base. Derive the candidate and the receipts again for the new attempt, then run `propose` again; the root binds the frozen parent anew
+at the next Prepare:
 
 ```sh
 build/ubft root handoff propose \
   --next-trust-base REPLACE_NEXT_TRUST_BASE_JSON \
+  --readiness-receipts REPLACE_RECEIPT_1,REPLACE_RECEIPT_2,REPLACE_RECEIPT_3,REPLACE_RECEIPT_4 \
   --root-rpc REPLACE_OLD_ROOT_RPC_1,REPLACE_OLD_ROOT_RPC_2,REPLACE_OLD_ROOT_RPC_3
 ```
 
@@ -375,12 +378,18 @@ forward from that anchor; a later-epoch trust base is refused before anything is
 built or written (`restore trust anchor is not the genesis root epoch`, naming
 both epochs). The current BodyID stays mandatory in `--trust-body-id`.
 
+A Q3 activation is not archived as a handoff bundle, so `h4-restore-pin` cannot read its V3 body identity from the archive: name
+it for the tip's root epoch from the activation record (`H4_RESTORE_BODY_IDS="<epoch>=<64 hex>[,...]"`; the lane keeps each one in its
+`v3-body-id-*.txt`). It is an operator anchor, not a trust decision: after catch-up the restored node compares it with the BodyID of
+its verified history and refuses to start if they differ. Without it the tool stops with `no archived verified-trust body identity`.
+
 ```sh
 build/ubft shard-node restore --home REPLACE_NEW_EMPTY_NODE_HOME --executor engine-api \
   --address REPLACE_SHARD_P2P_MULTIADDRESS --bootnodes REPLACE_CURRENT_ROOT_AND_SHARD_BOOTNODES \
   --trust-base REPLACE_GENESIS_TRUST_BASE_JSON \
   --full-shard-conf REPLACE_FINALIZED_FULL_SHARD_CONF_JSON \
   --genesis REPLACE_FINALIZED_GENESIS_JSON \
+  --b1-profile REPLACE_B1_PROFILE_JSON \
   --engine-url REPLACE_ENGINE_API_URL --eth-url REPLACE_ETH_RPC_URL \
   --jwt-secret REPLACE_SURVIVING_JWT_FILE \
   --engine-fee-collector REPLACE_FEE_COLLECTOR_ADDRESS \

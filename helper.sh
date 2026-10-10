@@ -473,7 +473,10 @@ function archive_replica_pool() {
 # candidates after it in pool order, wrapping, never itself; a validator outside the pool takes the first two. With the default pool every validator
 # is a replica of exactly two others (1->2,3  2->3,4  3->4,1  4->1,2), so none is left out and none carries more than its share.
 function archive_replicas_of() {
-  local i=$1 pool=($(archive_replica_pool "$2")) k start=0 n out=() c=0
+  local i=$1 pool=($(archive_replica_pool "$2")) k start=0 n out=() c=0 pinned="EVM_ARCHIVE_REPLICAS_$1"
+  # a lane may name one validator's replicas outright: a validator restarting before it has installed the latest assignment (H3's evm3, held
+  # down through the Commit) may only name members of the assignment it has installed
+  if [ -n "${!pinned:-}" ]; then echo "${!pinned}"; return 0; fi
   n=${#pool[@]}
   for k in $(seq 0 $((n - 1))); do [ "${pool[$k]}" = "$i" ] && start=$((k + 1)); done
   for k in $(seq 0 $((n - 1))); do
