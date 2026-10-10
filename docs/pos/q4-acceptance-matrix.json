@@ -1444,7 +1444,7 @@
      "kind": "lane",
      "label": "REAL-PROCESS",
      "step": "F8 aggregator shards certify new state roots in the weighted epoch; the roots verify their rsmt proofs (T1)",
-     "scope": "after the activation: each of the three aggregator shards certifies a new state root on a non-first block and the root that receives its certification request (one root of the weighted epoch, not each root in consensus; the step name and its record say \"the roots\") verifies a non-empty aggregator_rsmt_v1 proof for it, none rejected (the proof that was empty before #539/#541 and #532: the rsmt new-leaf values are derived from the declared transaction hash and IR.Timestamp, and the lane's aggregators attach the proof, AGGREGATOR_CONSISTENCY_PROOF_MODE=rsmt on the disk SMT backend). The EVM stop/resume callbacks are not repeated in the weighted epoch: they stay the unit-epoch item above"
+     "scope": "after the activation: each of the three aggregator shards certifies a new state root on a non-first block and a non-empty aggregator_rsmt_v1 proof is verified for it, none rejected. The recorded run is on a head before #547: it shows the check at intake, by the root that receives the certification request (one root of the weighted epoch, not each root in consensus; the step name and its record say \"the roots\"). That every voting root re-verifies the configured proof before it votes (#545, fixed by #547) is covered by #547's tests (TestProposalExecutionRefusesABadProof, TestNoQuorumChangeChecksTheProofsOfItsRequests, TestLegacyChangeWithSeveralRequestsChecksEachProof, TestVerifyIRChangeReqJudgesTheConfiguredProof, TestVerifyIRChangeReqViewJudgesTheConfiguredProof), not by this run (the proof that was empty before #539/#541 and #532: the rsmt new-leaf values are derived from the declared transaction hash and IR.Timestamp, and the lane's aggregators attach the proof, AGGREGATOR_CONSISTENCY_PROOF_MODE=rsmt on the disk SMT backend). The EVM stop/resume callbacks are not repeated in the weighted epoch: they stay the unit-epoch item above"
     },
     {
      "kind": "lane-file",
@@ -1454,7 +1454,7 @@
       "all three aggregator shards certified new state roots; the roots verified a non-empty aggregator rsmt proof for each",
       "and rejected none"
      ],
-     "scope": "the step's own record: the three state-changing requests and the distinct (partition, shard) pairs whose non-empty proofs the receiving root verified (read from every root's log; one root logs them)"
+     "scope": "the step's own record: the three state-changing requests and the distinct (partition, shard) pairs whose non-empty proofs the receiving root verified (read from every root's log; on the recorded pre-#547 head one root logs them)"
     }
    ]
   },
