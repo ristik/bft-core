@@ -259,11 +259,13 @@ q4_row_byzantine_heavy() {
   q4_byz_end heavy "$Q4_HEAVY_ROOT"
 }
 
-# The F8 callbacks (f8_slow_stop_resume_evm: EVM stopped, aggregators certify new state roots, resumed; f8_inflight_evm_probe) ran in the lane's preamble, in the
-# unit epoch before the activation, and passed. They cannot be repeated in the weighted epoch with the pinned rugregator: the second block of an aggregator shard
-# carries an empty RSMT proof ("rsmt: envelope truncated: missing leaf_count") and the roots reject it as ProofInvalid (run 20261009T041453Z: block 2 of a-left, and
-# the same in 20261009T040429Z). What the weighted epoch can show is that the aggregator shards stay served by it: their authorized TR rounds keep advancing at the
-# roots and the three aggregators answer their health endpoints while the weighted roots run.
+# The F8 callbacks (f8_slow_stop_resume_evm: EVM stopped, aggregators certify new state roots, resumed; f8_inflight_evm_probe) run in the lane's preamble, in the
+# unit epoch before the activation. In the weighted epoch two checks: the aggregator shards stay served by it (their authorized TR rounds keep advancing at the
+# roots and the three aggregators answer their health endpoints), and each of them certifies a NEW state root with an rsmt proof the weighted roots verify
+# (q4_row_f8_new_roots: the second state-changing block, the one that failed as ProofInvalid with an empty envelope before the lane set the aggregators'
+# AGGREGATOR_CONSISTENCY_PROOF_MODE; the first block has no previous state root and is not verified).
+q4_row_f8_new_roots() { f8_certify_new_roots 100 | tee "$Q4_DIR/f8-new-roots.txt"; [ "${PIPESTATUS[0]}" = 0 ]; }
+
 q4_row_f8_follow() {
   local before after i
   f8_trace >/dev/null || return 1
@@ -331,6 +333,7 @@ q4_run_lane() {
   q4_precondition
   q4_step "baseline: weighted epoch commits (F8 trace and EVM IR)" q4_row_baseline
   q4_step "F8 aggregator shards stay served by the weighted epoch (authorized TR rounds advance, aggregators answer)" q4_row_f8_follow
+  q4_step "F8 aggregator shards certify new state roots in the weighted epoch; the roots verify their rsmt proofs (T1)" q4_row_f8_new_roots
   if [ "$Q4_SCENARIO" = A ]; then
     q4_step "one light root isolated (held both ways): 8 of 9 progresses, heal releases" q4_row_light_partition
     q4_step "two lights isolated: heavy and one light (7 = Q) progress, heal releases" q4_row_two_lights_partition

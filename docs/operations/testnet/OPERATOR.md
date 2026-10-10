@@ -22,6 +22,11 @@ reboot on a network you intend to keep. Design detail: [deploy/testnet/README.md
   9090 (Prometheus) bind host loopback only; never publish them or any validator port. Docker subnets
   172.30.88.0/24 and 172.30.89.0/24 must be free. DNS names, TLS certificates and hCaptcha keys come from the owner.
 
+**Keep root RPC private.** The root RPC address has no operator authentication, including the
+`/api/v1/handoff/*` endpoints and `PUT /api/v1/trustbases`. Bind it to loopback or an isolated operator network;
+never publish it or proxy it through the public JSON-RPC gateway. Authentication is tracked in
+[#533](https://github.com/ristik/bft-core/issues/533).
+
 ## 3. Build images from exact revisions
 `/srv/src/pkg` is this repository at the guide commit you were given (`main` lacks the package); the other three
 are clean checkouts of the exact revisions in [pins.json](../../../deploy/testnet/pins.json). Set `GUIDE_COMMIT` first.
@@ -110,6 +115,14 @@ operator Abort of a rotation attempt, and archive restore of a *single* validato
 pod. Native procedures: rotation [H6 §3](../h6/scenarios.md#3-coupled-key-rotation-stalled-successors-and-archive-backed-restore)
 and [H3](../h3-evm-assignment-runbook.md), Abort [H6 §2](../h6/scenarios.md#2-abort-before-h-retry-then-refuse-abort-after-h)
 and [root-handoff-abort.md](../root-handoff-abort.md), restore [M2 §3](../m2-runbook.md#3-replace-a-validator-after-complete-disk-loss); H6 is validated on macOS x86_64 only.
+
+**Turnover policy (PoS election profile).** Normal handoffs should replace only a small subset of validators.
+The election measures normalized L1 weight distance `D = Σ|newWeight/newTotal − oldWeight/oldTotal|`;
+`D/2` is total variation, and replacing k of n unit-weight members with new identities gives `D = 2k/n`.
+The production default `D <= 1/4` is a conservative safety recommendation, not a fixed protocol rule;
+the testnet PoS profile uses `D <= 1/2`. The configured distance gate and other continuity checks remain enforced;
+no additional headcount-turnover gate is introduced. Emergency supersession to the exact authorized recovery
+committee K exists in PoA and PoS and must be rehearsed on testnet; it is not routine turnover.
 
 ## 7. Reset to a fresh genesis (destroys all assets)
 Stop nginx routing; take a backup for evidence if wanted. This deletes the old generation, keys and balances.
