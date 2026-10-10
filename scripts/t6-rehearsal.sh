@@ -275,7 +275,8 @@ run_paired_t6() {
   export Q3_B1=1 H3_SLOT_LAYOUT=3 EVM_OPERATOR_STATUS_RPC=1
   # the rotation replaces one root entity and one EVM validator of four equal-weight committees (distance 1/2): the genesis configuration commits a budget that
   # admits it (the DEV default, 1/4, admits no replacement); the same as the H3 lane
-  export EVM_PARTITION_PARAMS_EXTRA=${EVM_PARTITION_PARAMS_EXTRA:-continuity_max_distance=1/1}  export POST_M2A_MODE=t6 POST_M2A_CHAIN_ID=1337
+  export EVM_PARTITION_PARAMS_EXTRA=${EVM_PARTITION_PARAMS_EXTRA:-continuity_max_distance=1/1}
+  export POST_M2A_MODE=t6 POST_M2A_CHAIN_ID=1337
   export POST_M2A_URETH_BIN="$URETH_BIN" POST_M2A_URETH_COMMIT="$T6_URETH_COMMIT"
   export M2_PROFILE2=1 SIGNING=authority M2A_FINAL_RESTORE=1
   export M2_RUN_LOG_DIR="$EVIDENCE_DIR/paired-node-logs"
