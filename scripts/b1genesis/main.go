@@ -3,6 +3,7 @@
 package main
 
 import (
+	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -52,8 +53,11 @@ func run() error {
 	if err := read(*shard, &conf); err != nil {
 		return err
 	}
+	suppliedCommitment, hasCommitment := "", false
 	if *verify != "" {
-		// the deployed chain's configuration is the FULL one (it carries the genesis commitment); the regeneration starts from its base
+		// the deployed chain's configuration is the FULL one (it carries the genesis commitment); the regeneration starts from its base, and the
+		// commitment it carried is compared with the regenerated one below
+		suppliedCommitment, hasCommitment = conf.PartitionParams[registrygenesis.GenesisParam]
 		delete(conf.PartitionParams, registrygenesis.GenesisParam)
 	}
 	h, err := q3format.NewHistory(&tb)
@@ -69,6 +73,11 @@ func run() error {
 		return err
 	}
 	if *verify != "" {
+		// the commitment hashes the derived record (ids, addresses, code hash, base configuration hash, root genesis id and the B1 profile hash), not the
+		// genesis bytes (a base configuration without the parameter has nothing to compare): a profile that differs from the one the chain committed to in fields that change neither would otherwise pass
+		if want := hex.EncodeToString(g.GenesisCommitment().Bytes()); hasCommitment && suppliedCommitment != want {
+			return fmt.Errorf("%w: supplied %q, regenerated %s", ErrCommitment, suppliedCommitment, want)
+		}
 		return verifyFile(g, full, p, h, *verify)
 	}
 	origin, err := registrygenesis.B1Origin(full, p, h, g.GenesisJSON(), nil, registrygenesis.GenesisJSONLimits{})

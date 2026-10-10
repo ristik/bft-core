@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"flag"
+	"github.com/unicitynetwork/bft-core/registrygenesis"
 	"os"
 	"path/filepath"
 	"strings"
@@ -50,7 +51,7 @@ func TestOfflineExportBindsFreshAllocationAndRefusesOverwrite(t *testing.T) {
 	require.ErrorIs(t, run(), os.ErrExist)
 }
 
-// deployedMutations edits the registry account of a genesis JSON: each case changes exactly one thing.
+// mutateRegistry edits the registry account of a genesis JSON: each case changes exactly one thing.
 func mutateRegistry(t *testing.T, genesis []byte, edit func(code *string, storage map[string]string, acct map[string]any)) []byte {
 	t.Helper()
 	var spec map[string]any
@@ -133,6 +134,29 @@ func TestVerifyComparesTheDeployedRegistryAccountWithTheRegeneration(t *testing.
 			require.ErrorIs(t, err, c.want)
 		})
 	}
+	// two keys that resolve to the registry address, the second tampered: refused every time (the result must not depend on map order)
+	t.Run("the registry address allocated under two keys", func(t *testing.T) {
+		var spec map[string]any
+		require.NoError(t, json.Unmarshal(genesis, &spec))
+		alloc := spec["alloc"].(map[string]any)
+		for k, v := range alloc {
+			if strings.EqualFold(strings.TrimPrefix(k, "0x"), "ff00000000000000000000000000000000000002") {
+				tampered := map[string]any{}
+				for ak, av := range v.(map[string]any) {
+					tampered[ak] = av
+				}
+				tampered["code"] = "0x00"
+				alloc["0x"+strings.ToUpper(strings.TrimPrefix(k, "0x"))] = tampered
+				break
+			}
+		}
+		raw, err := json.Marshal(spec)
+		require.NoError(t, err)
+		for i := 0; i < 200; i++ {
+			_, err = verifyDeployed(f.Genesis, f.Pair.Profile.RuntimeHash, raw)
+			require.ErrorIs(t, err, ErrDeployedAliased)
+		}
+	})
 	t.Run("the registry account absent", func(t *testing.T) {
 		var spec map[string]any
 		require.NoError(t, json.Unmarshal(genesis, &spec))
@@ -181,6 +205,14 @@ func TestVerifyFlagThroughTheCommand(t *testing.T) {
 	}
 	require.NoError(t, invoke("--profile", profile, "--root-genesis", root, "--shard-conf", shard, "--verify", good))
 	require.ErrorIs(t, invoke("--profile", profile, "--root-genesis", root, "--shard-conf", shard, "--verify", bad), ErrDeployedCode)
+	// the supplied full configuration's genesis commitment must be the regenerated one (it hashes the record, which includes the B1 profile hash, not the genesis bytes)
+	wrong := *full
+	wrong.PartitionParams = map[string]string{}
+	for k, v := range full.PartitionParams {
+		wrong.PartitionParams[k] = v
+	}
+	wrong.PartitionParams[registrygenesis.GenesisParam] = strings.Repeat("ab", 32)
+	require.ErrorIs(t, invoke("--profile", profile, "--root-genesis", root, "--shard-conf", write("wrong-commitment.json", wrong), "--verify", good), ErrCommitment)
 	require.Error(t, invoke("--profile", profile, "--root-genesis", root, "--shard-conf", shard), "neither --out nor --verify")
 	require.Error(t, invoke("--profile", profile, "--root-genesis", root, "--shard-conf", shard, "--verify", good, "--out", filepath.Join(dir, "x")), "both")
 }
