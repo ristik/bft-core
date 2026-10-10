@@ -428,6 +428,9 @@ func (bt *BlockTree) FindBlock(round uint64) (*ExecutedBlock, error) {
 			n := newNode(b)
 			parent.addChild(n)
 			bt.roundToNode[round] = n
+			if bt.log != nil {
+				bt.log.Info("re-attached the block of a timed-out round: a QC or a child refers to it", "round", round)
+			}
 			return b, nil
 		}
 	}
