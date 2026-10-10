@@ -54,6 +54,9 @@ if [ "${M2A_FINAL_RESTORE:-0}" = 1 ]; then
   H3_ONLINE="2 3 4"
   export H4_RESTORE_BODY_IDS="3=$(tr -d '[:space:]' <"$Q3_DIR/v3-body-id-m2e3.txt")"
   export M2A_VALIDATOR1_WIPED=1
+  # Observers (the T6 finality monitor) must know validator 1 is expected to be unreachable from now until the restore is verified: the marker the
+  # h4-restore-probe stop stage writes, and below the restored node's log in the place the monitor reads it (restore.log).
+  echo 'H4_STOPPING' >"$evidence/stopping.txt"
   h3_restore_validator 1 2 || return 1
   restoreLog=test-nodes/evm1/debug.log
   restored=false
@@ -71,6 +74,7 @@ if [ "${M2A_FINAL_RESTORE:-0}" = 1 ]; then
     sleep 1
   done
   $restored || { echo 'restore did not verify both handoff epochs and resume signing' >&2; tail -60 "$restoreLog" >&2; return 1; }
+  cp "$restoreLog" "$evidence/restore.log"
   build/ubft signing-authority status --operator-socket test-nodes/auth1/operator.sock \
     --operator-credential test-nodes/auth1/operator.cred >"$evidence/authority-after.json" || return 1
   before=$(python3 -c 'import json;print(json.load(open("test-nodes/h4-replaced/authority-before.json"))["reservedRound"])')
