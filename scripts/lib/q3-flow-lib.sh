@@ -39,7 +39,14 @@ PY
 # ---- the root's verified Q3 endpoints (local operator API) --------------------------------------------------------------------------------------
 q3_signers_of() { curl -fsS -X POST -H 'content-type: application/json' -d '{}' "$(h3_rpc_url "$1")/api/v1/q3/signers"; }   # {epoch,round,scheme,signers,signedTotal,threshold,quorum}
 
-q3_weight_of() { echo "$Q3_WEIGHTS" | awk -v n="$1" '{print $n}'; }
+q3_weight_of() { # entity: the weight at its position in Q3_ENTITIES (the entities of the handoff in hand, default 1 2 3 4)
+  local k=1 e
+  for e in ${Q3_ENTITIES:-1 2 3 4}; do
+    [ "$e" != "$1" ] || { echo "$Q3_WEIGHTS" | awk -v n="$k" '{print $n}'; return 0; }
+    k=$((k + 1))
+  done
+  return 1
+}
 
 # ---- readiness: one receipt per entity, from its root key, after checking its BFT node, its shard service and its paired Ureth --------------------
 q3_readiness() { # entity out: a receipt for the staged candidate, or the typed refusal on stderr
@@ -69,7 +76,11 @@ q3_derive_candidate() { # the root's derivation of the V3 candidate for the curr
 
 q3_receipts() { # exactly one receipt per successor entity, from its root key
   local i suf=${Q3_SUFFIX:-} n=0
-  for i in ${Q3_ENTITIES:-1 2 3 4}; do q3_readiness "$i" "$Q3_DIR/receipt${suf}-$i.json" || return 1; n=$((n + 1)); done
+  for i in ${Q3_ENTITIES:-1 2 3 4}; do
+    # a lane hook runs before an entity's turn (H3: a joiner that is behind restores from the archive once the incumbents before it have staged)
+    [ -z "${Q3_BEFORE_READINESS:-}" ] || "$Q3_BEFORE_READINESS" "$i" || return 1
+    q3_readiness "$i" "$Q3_DIR/receipt${suf}-$i.json" || return 1; n=$((n + 1))
+  done
   [ "$(ls "$Q3_DIR"/receipt${suf}-*.json | wc -l | tr -d ' ')" = "$n" ]
 }
 
@@ -77,7 +88,7 @@ q3_attempt() { # a retry rebuilds the proofs of possession, the candidate and th
   local e=${Q3_NEXT_EPOCH:-2} tag=${Q3_ASSIGN_TAG:-cand} suf=${Q3_SUFFIX:-} i receipts=
   local -a assign=()
   if [ -z "${Q3_NO_ASSIGNMENT:-}" ]; then
-    q3_build_assignment "$tag" ${Q3_ENTITIES:-1 2 3 4} || return 1
+    [ -n "${Q3_ASSIGNMENT_BUILT:-}" ] || q3_build_assignment "$tag" ${Q3_ENTITIES:-1 2 3 4} || return 1   # Q3_ASSIGNMENT_BUILT=1: a negative test's mutated assignment
     assign=(--next-evm-assignment "$Q3_DIR/$tag-assignment.json")
   fi
   q3_derive_candidate || return 1
