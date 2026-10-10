@@ -454,6 +454,7 @@ func (g *gen) policy() {
 		e.LeafProofs[0].AnchorIndex, e.LeafProofs[1].AnchorIndex = 1, 0
 	}), both)
 	addEnvSIDs("envelope-leaf-index-out-of-range", "second leaf names anchor 2", bothEnv(func(e *Envelope) { e.LeafProofs[1].AnchorIndex = 2 }), both)
+	addEnv("envelope-five-anchors", "five anchors: one over MaxAnchors", envFor(func(e *Envelope) { e.Anchors = append(e.Anchors, anchorOf(0, 2), anchorOf(0, 3), anchorOf(0, 4), anchorOf(0, 5)) }), 2)
 	addEnv("envelope-three-anchors", "three anchors for two leaves", envFor(func(e *Envelope) { e.Anchors = append(e.Anchors, anchorOf(0, 2), anchorOf(0, 3)) }), 2)
 	addEnv("envelope-no-anchors", "no anchors", envFor(func(e *Envelope) { e.Anchors = nil }), 2)
 	addEnv("envelope-leaf-index", "second leaf names anchor 1 though only anchor 0 exists", envFor(func(e *Envelope) { e.LeafProofs[1].AnchorIndex = 1 }), 2)
@@ -548,8 +549,8 @@ func (g *gen) policy() {
 		b, _ := e0.Encode()
 		return b
 	}
-	addBytes("envelope-size-262144", "envelope of exactly MaxEnvelopeBytes", sized(0), 2)
-	addBytes("envelope-size-262176", "envelope one word over MaxEnvelopeBytes", sized(32), 2)
+	addBytes("envelope-size-65536", "envelope of exactly MaxEnvelopeBytes", sized(0), 2)
+	addBytes("envelope-size-65568", "envelope one word over MaxEnvelopeBytes", sized(32), 2)
 }
 
 // histories: the relation cases (mint and return) and the return terminal.
@@ -1316,8 +1317,21 @@ func (g *gen) proof() {
 			}
 		}
 	}
+	perLeaf("compose-anchors-3", "three leaves, each certified by its own UC: three anchors, real-size certificates", 1)
 	perLeaf("compose-anchors-max", "MaxAnchors leaves, each certified by its own UC: exactly MaxAnchors anchors", MaxAnchors-2)
 	perLeaf("compose-anchors-over-max", "MaxAnchors+1 leaves, each certified by its own UC", MaxAnchors-1)
+	// Four anchors of certificates carrying 64 seal signatures each (the native maximum): structurally
+	// admitted, priced out by the gate before any B1 call.
+	if hc, err := g.certifiedWith(MaxAnchors-2, func(i int, l Leaf) ShardRound { return ShardRound{BaseTime + 1000, 100 + uint64(i)} }); err == nil {
+		eb := envOf(hc.h, hc.cert, func(e *Envelope) {
+			for i := range e.Anchors {
+				e.Anchors[i].UC = ucWithSigs(g, e.Anchors[i].UC, 64)
+			}
+		})
+		add("compose-anchors-max-heavy-over-budget", "MaxAnchors anchors whose certificates carry 64 signatures each: over the gate at the transaction budget", eb, claimsOf(hc.cert.Anchors...), "return")
+	} else {
+		g.must(err)
+	}
 	big65, err := g.certified(MaxLeaves - 2)
 	g.must(err)
 	if err == nil {
@@ -1488,6 +1502,21 @@ func ucWithSiblings(g *gen, uc []byte, n int) []byte {
 	c.ShardTreeCertificate.SiblingHashes = make([][]byte, n)
 	for i := range c.ShardTreeCertificate.SiblingHashes {
 		c.ShardTreeCertificate.SiblingHashes[i] = bytes.Repeat([]byte{byte(i + 1)}, 32)
+	}
+	out, err := types.Cbor.Marshal(&c)
+	g.must(err)
+	return out
+}
+
+// ucWithSigs re-encodes a certificate whose seal carries n signature entries (dummy values past the first).
+// The signatures no longer verify: the gate prices the shape before any B1 call.
+func ucWithSigs(g *gen, uc []byte, n int) []byte {
+	var c types.UnicityCertificate
+	g.must(types.Cbor.Unmarshal(uc, &c))
+	for i := 0; len(c.UnicitySeal.Signatures) < n; i++ {
+		sig := bytes.Repeat([]byte{byte(i + 1)}, 65)
+		sig[64] = 0
+		c.UnicitySeal.Signatures[fmt.Sprintf("dummy-node-%02d", i)] = sig
 	}
 	out, err := types.Cbor.Marshal(&c)
 	g.must(err)

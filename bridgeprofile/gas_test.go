@@ -16,17 +16,24 @@ func fitGas(envelopeBytes, semanticBytes, anchors, ucBytes int, sigs, steps uint
 		uint64(anchors)*uc + uint64(leaves)*rs + GasReserve
 }
 
-// TestWorstAdmittedBundleFitsBudget proves the named bounds are consistent with
-// the budget: a bundle at every cap (and the signature and step caps of the
-// native scan) still passes the gate, so BudgetExceeded is never a surprise at
-// the bounds.
-func TestWorstAdmittedBundleFitsBudget(t *testing.T) {
-	worst := fitGas(MaxEnvelopeBytes, MaxSemanticBytes, MaxAnchors, MaxAnchorUCBytes, 64, 1+MaxUnicitySteps, MaxLeaves, MaxRSMTSiblings)
-	t.Logf("worst admitted bundle: %d of %d", worst, TxGasBudget)
-	require.LessOrEqual(t, worst, TxGasBudget)
-	typical := fitGas(8<<10, 2<<10, MaxAnchors, 4<<10, 5, 8, MaxLeaves, 8)
-	t.Logf("typical bundle (4 KiB UC, 5 sigs, 8 steps): %d", typical)
+// TestGateDecidesEachBundle pins what the 7,000,000 budget admits under the parser ceilings: two anchors at
+// every cap still fit (6,976,692), four real-size certificates fit, four maximum-size ones do not, and five
+// can never fit however small the certificates are (so A_max=4 is a ceiling the gate need not defend).
+func TestGateDecidesEachBundle(t *testing.T) {
+	const sigs, steps = 64, 1 + MaxUnicitySteps
+	worst2 := fitGas(MaxEnvelopeBytes, MaxSemanticBytes, 2, MaxAnchorUCBytes, sigs, steps, MaxLeaves, MaxRSMTSiblings)
+	t.Logf("two anchors at every cap: %d of %d", worst2, TxGasBudget)
+	require.Equal(t, uint64(6_976_692), worst2)
+	require.LessOrEqual(t, worst2, TxGasBudget)
+	typical := fitGas(8<<10, 2<<10, 2, 4<<10, 5, 8, MaxLeaves, 8)
+	t.Logf("typical bundle (two 4 KiB UCs, 5 sigs, 8 steps): %d", typical)
 	require.LessOrEqual(t, typical, TxGasBudget)
-	// One more anchor or leaf than the bounds would not fit at worst sizes.
-	require.Greater(t, fitGas(MaxEnvelopeBytes, MaxSemanticBytes, MaxAnchors+1, MaxAnchorUCBytes, 64, 1+MaxUnicitySteps, MaxLeaves+8, MaxRSMTSiblings), TxGasBudget)
+	// Real DN-B certificates: about 1.5 KB, four signatures, one shard sibling.
+	real4 := fitGas(12<<10, 4<<10, MaxAnchors, 1536, 4, 1, MaxLeaves, 8)
+	t.Logf("four real-size UCs, 16 leaves, 8-sibling paths: %d", real4)
+	require.LessOrEqual(t, real4, TxGasBudget)
+	require.Greater(t, fitGas(MaxEnvelopeBytes, MaxSemanticBytes, 3, MaxAnchorUCBytes, sigs, steps, MaxLeaves, MaxRSMTSiblings), TxGasBudget)
+	require.Greater(t, fitGas(MaxEnvelopeBytes, MaxSemanticBytes, MaxAnchors, MaxAnchorUCBytes, sigs, steps, MaxLeaves, MaxRSMTSiblings), TxGasBudget)
+	// Five of the smallest conceivable certificates (one signature, one step, 400 bytes) already exceed it.
+	require.Greater(t, fitGas(4<<10, 1<<10, MaxAnchors+1, 400, 1, 1, MaxAnchors+1, 0), TxGasBudget)
 }

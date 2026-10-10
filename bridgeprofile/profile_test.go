@@ -441,7 +441,7 @@ func TestCheckPolicySharded(t *testing.T) {
 		many[i], idx[i], sids[i] = spec{0, byte(i + 1)}, uint16(i), s0
 	}
 	_, _, err = CheckPolicy(f.Cfg, env(many, idx...), sids)
-	require.ErrorIs(t, err, ErrPolicyAnchors)
+	require.ErrorIs(t, err, ErrTooManyPaths)
 	_, _, err = CheckPolicy(f.Cfg, env(many[:MaxAnchors], idx[:MaxAnchors]...), sids[:MaxAnchors])
 	require.NoError(t, err)
 }

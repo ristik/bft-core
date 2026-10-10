@@ -1,8 +1,8 @@
 package bridgeprofile
 
 // The profile-v3 bounds are named parameters, defined only here and mirrored by
-// profile-v3.json limits. They are sized so that every admitted bundle fits the
-// 7,000,000 ordinary-capacity gate (gas.go) at worst admitted sizes; a later
+// profile-v3.json limits. They bound the parsers; the 7,000,000 ordinary-capacity gate (gas.go)
+// admits or refuses each bundle (two anchors at the maximum sizes pass, five can never pass); a later
 // profile version raises them together with the budget.
 //
 // DEV-DEFAULT safety ceilings of design section "Plug-in verification" and
@@ -18,7 +18,7 @@ const (
 	MaxPathSteps     = 2048
 	MaxPolicyBytes   = 512
 	MaxAmountBytes   = 32
-	MaxAnchors       = 2 // profile parameter: distinct UC anchors (raise in a later profile version)
+	MaxAnchors       = 4 // profile parameter: distinct UC anchors, a parser ceiling; the gas gate (gas.go) decides each bundle
 
 	// Embedded lock evidence (J). Cumulative and checked before allocation or crypto.
 	MaxJustificationBytes = 64 << 10
