@@ -17,6 +17,15 @@ REPO = HERE.parents[1]
 PINS = json.loads((HERE / 'pins.json').read_text())
 FEE = '0x00000000000000000000000000000000000000fe'
 
+# The testnet profile's churn budget (owner decision 19, briefs/p85-churn-bound-note.md): D <= 1/2, the full normalized weight distance between consecutive
+# committees. A small committee needs it: replacing one of four equal-weight validators is D = 1/2 (the DEV default, 1/4, admits none). The strict-third turnover
+# and the two-thirds overlap gates still apply, so two of four are refused. It is committed in the EVM shard configuration at genesis
+# (rootchain/consensus/storage ContinuityPolicy reads continuity_max_distance as "num/den").
+EVM_CONTINUITY_MAX_DISTANCE = '1/2'
+
+def evm_partition_params(chain_id):
+    return f'proof_type=exec,chain_id={chain_id},continuity_max_distance={EVM_CONTINUITY_MAX_DISTANCE}'
+
 def write(path, obj):
     path.write_text(json.dumps(obj, indent=2) + '\n')
 
@@ -180,7 +189,7 @@ def main():
                         time.sleep(.1)
                 else: raise RuntimeError('authority startup timeout')
             cli('shard-conf','generate','--home',home,'--network-id','3','--partition-id','8','--partition-type-id','8',
-                '--shard-id','0x80','--epoch-start','1','--t2-timeout','5000','--partition-params',f'proof_type=exec,chain_id={a.chain_id}',
+                '--shard-id','0x80','--epoch-start','1','--t2-timeout','5000','--partition-params',evm_partition_params(a.chain_id),
                 *sum((['--node-info',out/f'validator{i}/auth/node-info.json'] for i in range(1,a.validators+1)),[]))
             # Build a standard template with ubft, then finalize funding + unique generation entropy.
             cli('engine-api','genesis','--shard-conf',home/'shard-conf-8_0.json','--registry-layout','2','--out',home/'template.json')
