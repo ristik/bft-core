@@ -2,6 +2,7 @@ package bridgeprofile
 
 import (
 	gocrypto "crypto"
+	"fmt"
 	"math/big"
 
 	"github.com/decred/dcrd/dcrec/secp256k1/v4"
@@ -50,19 +51,27 @@ func NewDeployment() (*Deployment, error) {
 	if err != nil {
 		return nil, err
 	}
-	aggPDR := FixturePDR(DevNetwork, DevAggPart, DevChainID, "agg")
-	aggConf, err := aggPDR.Hash(gocrypto.SHA256)
-	if err != nil {
-		return nil, err
+	// The DN-B topology: one aggregator partition, depth 1, shards 40 and c0.
+	left, right := types.ShardID{}.Split()
+	var aggPDRs []*types.PartitionDescriptionRecord
+	var confs [][32]byte
+	for i, sh := range []types.ShardID{left, right} {
+		pdr := FixtureShardPDR(DevNetwork, DevAggPart, sh, DevChainID, fmt.Sprint("agg-", i))
+		aggConf, err := pdr.Hash(gocrypto.SHA256)
+		if err != nil {
+			return nil, err
+		}
+		var conf [32]byte
+		copy(conf[:], aggConf)
+		aggPDRs = append(aggPDRs, pdr)
+		confs = append(confs, conf)
 	}
-	var conf [32]byte
-	copy(conf[:], aggConf)
-	f := NewFixture(DevChainID, DevAggPart, conf)
+	f := NewFixture(DevChainID, DevAggPart, confs...)
 	evm := FixturePDR(DevNetwork, DevEVMPart, DevChainID, "evm")
 	w := &LockWorld{Vault: f.Cfg.Vault, VaultCodeHash: H([]byte("fixture-vault-runtime")), Locks: map[uint64][32]byte{}, Filler: 5}
 	return &Deployment{F: f, Auth: auth, TB: tb, Trust: trust, EVMPDR: evm,
 		Pin: &DeploymentPin{Genesis: evm, VaultCodeHash: w.VaultCodeHash}, World: w,
-		Agg: &AggregatorWorld{PDR: aggPDR, Auth: auth, TB: tb}}, nil
+		Agg: &AggregatorWorld{PDRs: aggPDRs, Auth: auth, TB: tb}}, nil
 }
 
 // LockDigestFor is the digest the vault stores for a mint of amount to p0.

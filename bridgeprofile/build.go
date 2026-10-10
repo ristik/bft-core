@@ -19,7 +19,7 @@ type Fixture struct {
 
 // NewFixture builds the DEV fixture Cfg from literal inputs. The aggregator
 // partition differs from the EVM partition.
-func NewFixture(chainID uint64, aggPartition uint32, aggConf [32]byte) *Fixture {
+func NewFixture(chainID uint64, aggPartition uint32, aggConfs ...[32]byte) *Fixture {
 	var c Cfg
 	c.Network = 3
 	c.RootGenesis = H([]byte("fixture-root-genesis"))
@@ -36,7 +36,7 @@ func NewFixture(chainID uint64, aggPartition uint32, aggConf [32]byte) *Fixture 
 	c.B1ProfileHash = H([]byte("fixture-b1-profile"))
 	c.Ty = DeriveType(c.Network, c.RootGenesis, c.ExecutionGenesis, c.ChainID)
 	c.Aid = DeriveAsset(c.Network, c.RootGenesis, c.ExecutionGenesis, c.ChainID)
-	pol := Policy{Partition: aggPartition, ShardConf: aggConf}
+	pol := NewPolicy(aggPartition, aggConfs...)
 	c.AggregatorPolicyHash = pol.Hash()
 	return &Fixture{Cfg: &c, Policy: pol}
 }

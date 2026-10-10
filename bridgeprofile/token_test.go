@@ -110,13 +110,15 @@ func TestTokenCumulativePathSteps(t *testing.T) {
 			for j := range proofs[i].Bitmap {
 				proofs[i].Bitmap[j] = 0xff
 			}
-			proofs[i].Siblings = make([][32]byte, 256)
+			// The real UC carries one shard-tree sibling: 255 path siblings make 256 steps per proof.
+			proofs[i].Bitmap[31] = 0x7f
+			proofs[i].Siblings = make([][32]byte, 255)
 			proofs[i].UC = realUC
 		}
 		_, err = DecodeToken(TokenFromHistory(h, proofs).Bytes())
 		return err
 	}
-	require.NoError(t, build(7), "eight proofs of 256 siblings: exactly 2048 steps")
+	require.NoError(t, build(7), "eight proofs of 256 steps: exactly 2048")
 	require.ErrorIs(t, build(8), ErrTooManyPaths)
 }
 

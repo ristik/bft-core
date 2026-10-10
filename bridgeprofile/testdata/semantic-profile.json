@@ -1,6 +1,6 @@
 {
-  "artifactVersion": 2,
-  "nativeBridgeProtocolVersion": 2,
+  "artifactVersion": 3,
+  "nativeBridgeProtocolVersion": 3,
   "sdkVersion": "3.0.1",
   "status": "development-provisional-unactivated",
   "identityFamily": "unicity-native",
@@ -38,13 +38,20 @@
     "cborDepth": 16,
     "rlpDepth": 16,
     "cborItems": 32768,
-    "semanticBytes": 131072,
-    "envelopeBytes": 262144,
-    "transfers": 64,
-    "leaves": 65,
+    "semanticBytes": 16384,
+    "envelopeBytes": 65536,
+    "transfers": 15,
+    "leaves": 16,
     "pathSteps": 2048,
-    "policyBytes": 128,
-    "aggregatorAnchors": 1
+    "policyBytes": 512,
+    "aggregatorAnchors": 2,
+    "aggregatorDepthMax": 1,
+    "anchorUcBytes": 8192,
+    "irBytes": 512,
+    "rsmtSiblingsPerLeaf": 32,
+    "unicityStepsPerUc": 32,
+    "txGasBudget": 7000000,
+    "gasReserve": 1000000
   },
   "normativeArtifacts": [
     "protocol/interop.md",
@@ -73,13 +80,24 @@
     "full-B1-SDK-seal-acceptance-parity"
   ],
   "normativeArtifactSha256": {
-    "protocol/interop.md": "07c8ee9602037d86caf0b0fa4d66832abfba0cbd0a793cb02dda7d6ed002080e",
-    "protocol/abi.json": "73714a4a6e143049e96c01997436b9316707f4fe45e43f536d82cf2dc5d6a654",
-    "protocol/manifest.schema.json": "7bd3919e0492634912dbdfd21891665d1da7a00c207a1f2f63d5888ba23be8b0",
-    "protocol/sdk-trust-base.md": "4240485c09d0d5c2e86e3e5d88e79b08314d37a309229cf8970d5a21f3fc8b2e"
+    "protocol/interop.md": "75fab362d51798a84c14250806b7bfeb8d752130490df587b1da7edc22b8e7f2",
+    "protocol/abi.json": "6542807a68f62f05c21402fea86d370a27239f05a5eeb0c675e01bc8c9935e26",
+    "protocol/manifest.schema.json": "256bfd1d454ef4b15b089d9d34b6def96a760f698e8ec8fbc95a1c6dcdf29b01",
+    "protocol/sdk-trust-base.md": "ec3b55554f01ac1530a950814e6a92c40a5fe6f7d53e9f58d7e04a40d6af0731"
   },
   "networkId": {
     "minimum": 1,
     "maximum": 65535
-  }
+  },
+  "aggregatorPolicy": {
+    "domain": "UNICITY_BR_AGG_SHARDED",
+    "version": 1,
+    "depths": [
+      0,
+      1
+    ],
+    "anchors": "one-per-distinct-uc-first-use-order",
+    "verification": "single-claim-0x0100-per-anchor"
+  },
+  "limitsNote": "Named profile parameters shared by contract, oracle and plug-ins; a later profile version may raise them."
 }
