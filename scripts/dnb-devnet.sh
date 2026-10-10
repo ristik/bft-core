@@ -20,6 +20,9 @@ case "$aggShards" in 1) aggShardIDs=(0x80) ;; 2) aggShardIDs=(0x40 0xc0) ;; *) e
 # agg_dir K (1-based) is test-nodes/agg for one shard (the layout of the single-shard lane) and test-nodes/agg1, agg2 for two.
 agg_dir() { if [ "$aggShards" = 1 ]; then echo test-nodes/agg; else echo "test-nodes/agg$1"; fi; }
 agg_conf() { if [ "$aggShards" = 1 ]; then echo "test-nodes/shard-conf-${aggPartition}_0.json"; else echo "test-nodes/shard-conf-${aggPartition}_0-s$1.json"; fi; }
+# aggregator-go (internal/config/config.go Validate): a shard conf with a non-empty shard ID REQUIRES SHARDING_MODE=bft-shard (with BFT_ENABLED,
+# the shard's own conf/PDR and signing key, and SHARDING_CHILD_SHARD_ID unset); the empty shard 0x80 of a one-shard partition REQUIRES standalone.
+agg_mode() { if [ "$aggShards" = 1 ]; then echo standalone; else echo bft-shard; fi; }
 agg_port() { echo $((${AGG_PORT:-3001} + $1 - 1)); }
 rethEngineBase=18551 rethEthBase=18545 rethP2PBase=30401 rootRpcPort=25866
 : "${URETH_BIN:?set URETH_BIN to the pinned unicity-reth}"
@@ -176,7 +179,7 @@ start_agg() { # K (1-based): one aggregator-go shard
   mkdir -p "$d/logs"
   env PORT=$port HOST=127.0.0.1 ENABLE_DOCS=false ENABLE_CORS=true \
     MONGODB_URI="$AGG_MONGO" MONGODB_DATABASE="$(cat "$d/dbname" 2>/dev/null || { n=dnb_agg${k}_$(date +%s); echo $n | tee "$d/dbname"; })" DISABLE_HIGH_AVAILABILITY=true USE_REDIS_FOR_COMMITMENTS=false \
-    SMT_BACKEND=memory SHARDING_MODE=standalone LOG_LEVEL=info LOG_FORMAT=text LOG_ENABLE_JSON=false LOG_FILE_PATH="$PWD/$d/logs/aggregator.log" \
+    SMT_BACKEND=memory SHARDING_MODE=$(agg_mode) LOG_LEVEL=info LOG_FORMAT=text LOG_ENABLE_JSON=false LOG_FILE_PATH="$PWD/$d/logs/aggregator.log" \
     SIGNING_KEY_FILE="$PWD/$d/keys.json" BFT_ENABLED=true BFT_ADDRESS=/ip4/127.0.0.1/tcp/$((29100 + k)) BFT_RPC_ADDRESS=http://127.0.0.1:$rootRpcPort \
     BFT_SHARD_CONF_FILE="$PWD/$(agg_conf "$k")" BFT_TRUST_BASE_FILES="$PWD/test-nodes/trust-base.json" \
     BFT_BOOTSTRAP_ADDRESSES="$boot" \
