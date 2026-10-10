@@ -1367,7 +1367,7 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 	g.Go(func() error { return node.Run(gctx) })
 	var laneEndpoints []func(*http.ServeMux)
 	if q3rt != nil {
-		laneEndpoints = append(laneEndpoints, (&shardQ3Staging{cfg: q3rt.ProtocolConfig, self: peer.ID().String(), tip: func() (uint64, uint64, [32]byte, error) {
+		laneEndpoints = append(laneEndpoints, (&shardQ3Staging{cfg: q3rt.ProtocolConfig, self: peer.ID().String(), onStaged: activePeers.Stage, tip: func() (uint64, uint64, [32]byte, error) {
 			h := q3rt.History()
 			if h == nil {
 				return 0, 0, [32]byte{}, ErrQ3StageChain

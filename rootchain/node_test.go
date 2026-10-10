@@ -1,6 +1,7 @@
 package rootchain
 
 import (
+	"bytes"
 	"context"
 	"crypto"
 	"errors"
@@ -609,7 +610,10 @@ func TestInvalidRSMTRootClaimsDoNotBlockAnotherShard(t *testing.T) {
 	oldKey[0], newKey[0] = 0x00, 0x80
 	oldValue, newValue := []byte("old"), []byte("new")
 	oldLeaf := rsmt.HashLeaf(oldKey, oldValue)
-	newLeaf := rsmt.HashLeaf(newKey, newValue)
+	// the tree stores the new leaf's value derived from the declared one and the round's reference time (the requests' timestamp)
+	stamp := types.NewTimestamp()
+	newStored := rsmt.LeafValue(newValue, stamp)
+	newLeaf := rsmt.HashLeaf(newKey, newStored[:])
 	newRoot := rsmt.HashNode(oldLeaf, newLeaf, 0, rsmt.PrefixRegion(oldKey, 0))
 	proofStream := append([]byte{0x04}, oldKey[:]...) // O_L(old key, old value)
 	proofStream = append(proofStream, 0, byte(len(oldValue)))
@@ -648,7 +652,6 @@ func TestInvalidRSMTRootClaimsDoNotBlockAnotherShard(t *testing.T) {
 			makeShardInfo := func(id types.ShardID, root []byte) *storage.ShardInfo {
 				t.Helper()
 				const partition = types.PartitionID(9)
-				stamp := types.NewTimestamp()
 				lastInput := &types.InputRecord{
 					Version: 1, PreviousHash: test.RandomBytes(32), Hash: append([]byte(nil), root...),
 					BlockHash: test.RandomBytes(32), SummaryValue: []byte{1}, RoundNumber: 3864,
@@ -1326,4 +1329,117 @@ func newMockShardInfo(t *testing.T, nodeID string, nodeSigningPubKey []byte, cer
 	require.NoError(t, err)
 	si.LastCR = &certResp
 	return si
+}
+
+// After a supersession installs the exact recovery K, a validator of the superseded set that K does not name (the H3 lane's evm6) is no longer a
+// member of the installed configuration. The root refuses it at the handshake (no response, no subscription) and refuses its certification request
+// (the late acknowledgement), each by the typed membership error; the same request, signed by the same key, is valid against the superseded set,
+// and a validator K keeps is served throughout. Each refusal differs from its control in the installed configuration only.
+// Scope: the mock consensus manager has no RequestViewSource, so this pins the handshake and the committed-ShardInfo request path. Under an
+// activated view the request goes through collectUnderView, whose membership refusal is pinned in node_view_test.go
+// (TestCollectorRefusesStaleRequests, "an unknown signer ...") and in rootchain/consensus/storage/handoff_supersession_test.go.
+func Test_aSupersededSetsValidatorIsRefusedByTheRootOnceTheRecoveryIsInstalled(t *testing.T) {
+	nwPeer := network.Peer{}
+	nopObs := testobservability.NOPObservability()
+	kept, joiner, other := generateNodeID(t), generateNodeID(t), generateNodeID(t)
+	_, keptVerifier := testsig.CreateSignerAndVerifier(t)
+	joinerSigner, joinerVerifier := testsig.CreateSignerAndVerifier(t)
+	_, otherVerifier := testsig.CreateSignerAndVerifier(t)
+	pub := func(v abcrypto.Verifier) []byte {
+		raw, err := v.MarshalPublicKey()
+		require.NoError(t, err)
+		return raw
+	}
+	certResp := validCertificationResponse(t)
+	certResp.UC.UnicitySeal = &types.UnicitySeal{Timestamp: types.NewTimestamp()}
+	require.NoError(t, certResp.SetTechnicalRecord(certification.TechnicalRecord{Round: 3864, Epoch: 2, Leader: kept.String(), StatHash: []byte("state hash"), FeeHash: []byte("fee hash")}))
+	conf := func(epoch uint64, validators ...*types.NodeInfo) *storage.ShardInfo {
+		si, err := storage.NewShardInfo(&types.PartitionDescriptionRecord{
+			Version: 1, NetworkID: 5, PartitionID: certResp.Partition, T2Timeout: 2000 * time.Millisecond, Epoch: epoch, Validators: validators,
+		}, crypto.SHA256)
+		require.NoError(t, err)
+		si.LastCR = &certResp
+		return si
+	}
+	superseded := conf(2, &types.NodeInfo{NodeID: kept.String(), SigKey: pub(keptVerifier), Stake: 1},
+		&types.NodeInfo{NodeID: joiner.String(), SigKey: pub(joinerVerifier), Stake: 1}) // the s=2 set: the joiner is a member
+	recovery := conf(3, &types.NodeInfo{NodeID: kept.String(), SigKey: pub(keptVerifier), Stake: 1},
+		&types.NodeInfo{NodeID: other.String(), SigKey: pub(otherVerifier), Stake: 1}) // K: the joiner is not named
+
+	installed := superseded
+	sends := 0
+	partNet := mockPartitionNet{send: func(ctx context.Context, msg any, receivers ...p2peer.ID) error { sends++; return nil }}
+	cm := mockConsensusManager{shardInfo: func(types.PartitionID, types.ShardID) (*storage.ShardInfo, error) { return installed, nil }}
+	node, err := New(&nwPeer, partNet, cm, nopObs)
+	require.NoError(t, err)
+	subscribed := func() map[p2peer.ID]int {
+		node.subscription.mu.RLock()
+		defer node.subscription.mu.RUnlock()
+		return maps.Clone(node.subscription.subs[partitionShard{certResp.Partition, certResp.Shard.Key()}])
+	}
+	handshakeOf := func(id p2peer.ID) *handshake.Handshake {
+		return &handshake.Handshake{PartitionID: certResp.Partition, ShardID: certResp.Shard, NodeID: id.String()}
+	}
+	// a request of the joiner's key that is valid against the superseded set: the lane's late acknowledgement
+	request := certification.BlockCertificationRequest{
+		PartitionID: certResp.Partition, ShardID: certResp.Shard, NodeID: joiner.String(),
+		InputRecord: &types.InputRecord{Version: 1, PreviousHash: nil, Hash: []byte{1}, BlockHash: []byte{2}, SummaryValue: []byte{3}, RoundNumber: 3864, Epoch: 2, Timestamp: certResp.UC.UnicitySeal.Timestamp},
+		BlockSize:   1, StateSize: 1,
+	}
+	require.NoError(t, request.Sign(joinerSigner))
+	require.NoError(t, superseded.ValidRequest(&request), "control: the request is valid for the superseded set")
+
+	// controls, superseded set installed: both members are served
+	require.NoError(t, node.onHandshake(t.Context(), handshakeOf(joiner)))
+	require.NoError(t, node.onHandshake(t.Context(), handshakeOf(kept)))
+	require.Equal(t, 2, sends)
+	require.Contains(t, subscribed(), joiner)
+
+	// K installed; the joiner's quota is drained, so that a refresh by a refused handshake or request would show
+	node.subscription.mu.Lock()
+	node.subscription.subs[partitionShard{certResp.Partition, certResp.Shard.Key()}][joiner] = 0
+	node.subscription.mu.Unlock()
+	installed = recovery
+	before := sends
+	err = node.onHandshake(t.Context(), handshakeOf(joiner))
+	require.ErrorIs(t, err, storage.ErrNodeNotInTrustBase)
+	require.ErrorContains(t, err, "node ID is not in active validator set")
+	require.Equal(t, before, sends, "the superseded validator receives no certificate at the handshake")
+	err = node.onBlockCertificationRequest(t.Context(), &request)
+	require.ErrorIs(t, err, storage.ErrNodeNotInTrustBase, "the late acknowledgement is refused by membership")
+	require.Zero(t, subscribed()[joiner], "neither refusal re-subscribes the superseded validator")
+	require.NoError(t, node.onHandshake(t.Context(), handshakeOf(kept)), "a validator K keeps is still served")
+	require.NoError(t, node.onHandshake(t.Context(), handshakeOf(other)), "and K's other member")
+	require.Equal(t, before+3, sends, "one rejection for the refused request (its last certificate) and a response to each of the two members")
+}
+
+// The stored leaf values of an aggregator's tree bind the round's reference time, which is the request's input record timestamp: the root
+// verifies the proof under that timestamp and under no other.
+func Test_theRootVerifiesAnRSMTProofUnderTheRequestsTimestamp(t *testing.T) {
+	node, err := New(&network.Peer{}, mockPartitionNet{}, mockConsensusManager{}, testobservability.NOPObservability())
+	require.NoError(t, err)
+	const tau = 1_755_000_000
+	kOld, kNew := [32]byte{0x00}, [32]byte{0x80}
+	vOld, declared := []byte("stored value of the earlier round"), bytes.Repeat([]byte{0x77}, 32)
+	hOld := rsmt.HashLeaf(kOld, vOld)
+	stored := rsmt.LeafValue(declared, tau)
+	hNew := rsmt.HashLeaf(kNew, stored[:])
+	newRoot := rsmt.HashNode(hOld, hNew, 0, rsmt.PrefixRegion(kOld, 0))
+	// post-order: the preserved leaf opened (O_L), the new leaf (L), the junction N(0)
+	proof := append([]byte{0x04}, kOld[:]...)
+	proof = append(proof, byte(len(vOld)>>8), byte(len(vOld)))
+	proof = append(proof, vOld...)
+	proof = append(proof, 0x01, 0x02, 0x00)
+	env, err := rsmt.EncodeEnvelope([]rsmt.Leaf{{Key: kNew, Value: declared}}, proof)
+	require.NoError(t, err)
+
+	target := zkTarget{partition: 9, params: map[string]string{"proof_type": "aggregator_rsmt_v1"}}
+	req := func(timestamp uint64) *certification.BlockCertificationRequest {
+		return &certification.BlockCertificationRequest{PartitionID: 9, ZkProof: env, InputRecord: &types.InputRecord{
+			PreviousHash: hOld[:], Hash: newRoot[:], BlockHash: []byte{1}, Timestamp: timestamp, RoundNumber: 7}}
+	}
+	require.NoError(t, node.verifyZKProof(t.Context(), req(tau), target), "the proof of the round's own reference time verifies")
+	err = node.verifyZKProof(t.Context(), req(tau+1), target)
+	require.ErrorIs(t, err, zkverifier.ErrProofVerificationFailed, "another timestamp is not the round's reference time")
+	require.ErrorIs(t, node.verifyZKProof(t.Context(), req(0), target), zkverifier.ErrProofVerificationFailed)
 }
