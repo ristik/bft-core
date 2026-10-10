@@ -111,6 +111,8 @@ t6_coupled_rotation_s1() {
   # T6_TEST_SKIP_OVER_BOUND=1 (development iterations only, never evidence): omit the refused candidate, to tell its effects from the rotation's
   [ -n "${T6_TEST_SKIP_OVER_BOUND:-}" ] || t6_over_bound_refused "$next" || return 1
 
+  # the verified history the root holds before the rotation (the stage refusal names the shard node's own tip to compare with)
+  q3_history_ids "$Q3_DIR/history-before-s1.txt" && sed "s/^/root history: /" "$Q3_DIR/history-before-s1.txt"
   h3_q3_handoff s1 "$next" "1 2 3 5" || return 1   # the Q3 flow: candidate, the four successor members' readiness, plan, Commit
   echo "T6 coupled rotation: H committed at root epoch $cur"
 
