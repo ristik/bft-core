@@ -22,6 +22,7 @@ t6_rotation_teardown() {
   # a pid file's value is signalled only if that process is this checkout's and matches the command (stop_pidfile; a reused pid is not)
   stop_pidfile test-nodes/evm5/pid 'ubft shard-node (run|restore)' INT
   stop_pidfile test-nodes/auth5/pid 'ubft signing-authority run' INT
+  stop_pidfile test-nodes/auth6/pid 'ubft signing-authority run' INT
   stop_pidfile test-nodes/reth5/pid 'reth.* node' INT
   stop_pidfile test-nodes/root5/pid 'ubft root-node run' INT
   for p in $(owned_pids 'ubft root-node run|ubft shard-node (run|restore)|ubft signing-authority run|reth.* node'); do
@@ -42,17 +43,26 @@ t6_body_ids() {
 }
 
 # A candidate outside the committed churn budget is refused at the candidate, naming the weight distance, and nothing moves: the epoch is unchanged.
+# Two of four members replaced by new identities (entities 5 and 6 for 3 and 4): 4 -> 4 with unit weights is D = 1 > 1/2. The turnover gate (3*2 >= 4) and
+# the overlap gate refuse it as well, but the exact reason asserted is the distance, and the refusal comes from the continuity rule and from nothing earlier
+# (a shape, binding or proof failure would not name it). The candidate is the first call of the flow: no readiness, plan or Commit follows.
 t6_over_bound_refused() { # next-epoch
   local next=$1 out=$H3_DIR/over-bound.out epoch rc
-  h3_q3_trust_base "$next" "1 2" || return 1
-  Q3_NEXT_EPOCH=$next Q3_ASSIGN_TAG=over Q3_SUFFIX=-over Q3_ENTITIES="1 2" Q3_INCUMBENT=$H3_INCUMBENT
+  build/ubft root-node init --home test-nodes/root6 -g >/dev/null 2>&1 || true
+  generate_log_configuration "test-nodes/root6/"
+  h3_q3_trust_base "$next" "1 2 5 6" || return 1
+  h3_spare_identity 6 || return 1
+  h3_spare_authority 6 1 "$next" "trust-base-epoch${next}.json" || return 1
+  Q3_NEXT_EPOCH=$next Q3_ASSIGN_TAG=over Q3_SUFFIX=-over Q3_ENTITIES="1 2 5 6" Q3_INCUMBENT=$H3_INCUMBENT
   if ! q3_attempt >"$out" 2>&1; then rc=0; else rc=1; fi
   unset Q3_NEXT_EPOCH Q3_ASSIGN_TAG Q3_SUFFIX Q3_ENTITIES Q3_INCUMBENT
-  [ "$rc" = 0 ] || { echo "T6: the over-budget candidate (two of four members kept) was not refused" >&2; cat "$out" >&2; return 1; }
-  grep -q "weight distance exceeded" "$out" || { echo "T6: the over-budget refusal does not name the weight distance" >&2; cat "$out" >&2; return 1; }
+  [ "$rc" = 0 ] || { echo "T6: the over-budget candidate (two of four members replaced) was not refused" >&2; cat "$out" >&2; return 1; }
+  # D = sum |w*V-v*W| / (V*W): two removed and two added, each |4-0| = 4, so 16 over V*W = 16
+  grep -qF 'continuity: weight distance exceeded: sum |w*V-v*W|=16 over V*W' "$out" || {
+    echo "T6: the over-budget refusal is not the weight distance 16 over V*W" >&2; cat "$out" >&2; return 1; }
   epoch=$(h3_root_info | jq -r '.epochNumber')
   [ "$epoch" = "$((next - 1))" ] || { echo "T6: the root epoch moved to $epoch on a refused candidate" >&2; return 1; }
-  echo "T6 coupled rotation: a candidate keeping two of four members (D=1 > 1/2) was refused: weight distance exceeded"
+  echo "T6 coupled rotation: a candidate replacing two of four members (D=1 > 1/2) was refused: weight distance exceeded"
 }
 
 t6_coupled_rotation_s1() {
@@ -87,10 +97,6 @@ t6_coupled_rotation_s1() {
   fi
   h3_q3_init || return 1
 
-  # The testnet profile's churn budget is D <= 1/2 (owner decision 19, briefs/p85-churn-bound-note.md), committed in the genesis configuration: the rotation
-  # below replaces one of four (D = 1/2, within it), and a candidate that keeps only two of the four members (D = 1) is refused with the distance named.
-  t6_over_bound_refused "$next" || return 1
-
   # the joiner starts BEFORE the Commit: its root a follower of the committee, its shard node staging-only, its execution client paired and pinned
   build/ubft root-node init --home test-nodes/root5 -g >/dev/null 2>&1 || true
   generate_log_configuration "test-nodes/root5/"
@@ -99,6 +105,10 @@ t6_coupled_rotation_s1() {
   # Test hook (documented, off by default): T6_TEST_FAIL_AFTER_AUTH5=return fails this step, =abort aborts the shell (as an unbound variable
   # does under set -u), right after the joiner's authority and execution client started: the run must still stop them and exit.
   case "${T6_TEST_FAIL_AFTER_AUTH5:-}" in return) return 1 ;; abort) exit 1 ;; esac
+
+  # The testnet profile's churn budget is D <= 1/2 (owner decision 19, briefs/p85-churn-bound-note.md), committed in the genesis configuration: the rotation
+  # below replaces one of four (D = 1/2, within it), and a candidate that replaces two of four (D = 1) is refused with the distance named.
+  t6_over_bound_refused "$next" || return 1
 
   h3_q3_handoff s1 "$next" "1 2 3 5" || return 1   # the Q3 flow: candidate, the four successor members' readiness, plan, Commit
   echo "T6 coupled rotation: H committed at root epoch $cur"
