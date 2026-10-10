@@ -108,7 +108,8 @@ t6_coupled_rotation_s1() {
 
   # The testnet profile's churn budget is D <= 1/2 (owner decision 19, briefs/p85-churn-bound-note.md), committed in the genesis configuration: the rotation
   # below replaces one of four (D = 1/2, within it), and a candidate that replaces two of four (D = 1) is refused with the distance named.
-  t6_over_bound_refused "$next" || return 1
+  # T6_TEST_SKIP_OVER_BOUND=1 (development iterations only, never evidence): omit the refused candidate, to tell its effects from the rotation's
+  [ -n "${T6_TEST_SKIP_OVER_BOUND:-}" ] || t6_over_bound_refused "$next" || return 1
 
   h3_q3_handoff s1 "$next" "1 2 3 5" || return 1   # the Q3 flow: candidate, the four successor members' readiness, plan, Commit
   echo "T6 coupled rotation: H committed at root epoch $cur"
