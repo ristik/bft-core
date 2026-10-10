@@ -267,6 +267,8 @@ PY
 # state-changing block after the first (the first has no previous state root and is skipped), so this is the check that the aggregators' proofs verify:
 # since the mark, the roots logged `Verifying ZK proof` for the aggregator partitions with a non-empty proof and no `ZK proof verification failed` at all.
 # Runs in any epoch (the Q4 lane runs it in the weighted one).
+# The generated StateIDs are NOT routed to a shard's prefix: the pinned rugregator does not enforce StateID-prefix membership (the same reason
+# F8_LOAD_REQUEST is accepted by every shard). A pin that does enforce it rejects these requests ("rejected the new-root request" below), not a proof.
 f8_certify_new_roots() {
   local base=${1:?seed base} i name port req response r d before="$F8_LOG_DIR/new-roots-before.json" after="$F8_LOG_DIR/new-roots-after.json" mark=()
   local -a submitted=(false false false)
@@ -286,7 +288,8 @@ PY
       [ "${submitted[$i]}" = true ] && continue
       port=${F8_HTTP_PORTS[$i]}
       req=$(go run ./scripts/f8-request -seed "$((base + i))") || return 1
-      response=$(curl -fsS -H 'content-type: application/json' \
+      # no -f: a not-ready service may answer with a non-2xx status and an error body, which is retried below; a transport failure is not
+      response=$(curl -sS -H 'content-type: application/json' \
         -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"certification_request\",\"params\":\"$req\"}" "http://127.0.0.1:$port/") || return 1
       if echo "$response" | jq -e '.result.status == "SUCCESS"' >/dev/null; then
         submitted[$i]=true; echo "submitted a new state-changing request to ${F8_NAMES[$i]} (seed $((base + i)))"
@@ -313,15 +316,19 @@ PY
   done
   [ -s "$after" ] || { echo "the aggregator shards did not certify new state roots" >&2; return 1; }
   # the roots' own account of the proofs since the mark
-  local verified=0 failed=0 entry file from
+  # one verified proof PER SHARD: the distinct (partition, shard id) pairs of the non-empty aggregator rsmt proofs the roots verified
+  local failed=0 entry file from shards=""
   for entry in "${mark[@]}"; do
     file=${entry%:*}; from=${entry##*:}
     failed=$((failed + $(tail -n +"$((from + 1))" "$file" | grep -c 'ZK proof verification failed' || true)))
-    verified=$((verified + $(tail -n +"$((from + 1))" "$file" | grep 'Verifying ZK proof' | grep 'verifier_type=aggregator_rsmt_v1' | grep -vc 'proof_size=0 ' || true)))
+    shards+=$(tail -n +"$((from + 1))" "$file" | grep 'Verifying ZK proof' | grep 'verifier_type=aggregator_rsmt_v1' | grep -v 'proof_size=0 ' \
+      | grep -o 'shard.partition=[0-9]* shard.id=[^ ]*' || true)$'\n'
   done
   [ "$failed" = 0 ] || { echo "the roots rejected $failed aggregator proof(s) (ZK proof verification failed)" >&2; return 1; }
-  [ "$verified" -ge 3 ] || { echo "the roots verified only $verified non-empty aggregator rsmt proofs; expected one per shard at least" >&2; return 1; }
-  echo "all three aggregator shards certified new state roots; the roots verified $verified aggregator rsmt proofs and rejected none"
+  shards=$(printf '%s\n' "$shards" | sed '/^$/d' | sort -u)
+  [ "$(printf '%s\n' "$shards" | sed '/^$/d' | wc -l | tr -d ' ')" -ge 3 ] || {
+    echo "the roots verified non-empty aggregator rsmt proofs for only these shards (need all three): ${shards:-none}" >&2; return 1; }
+  echo "all three aggregator shards certified new state roots; the roots verified a non-empty aggregator rsmt proof for each ($(printf '%s' "$shards" | tr '\n' ';')) and rejected none"
 }
 
 f8_reconnect_probe() {
