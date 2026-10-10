@@ -113,7 +113,7 @@ func BenchmarkUnlock(b *testing.B) {
 func BenchmarkPolicyAndEnvelope(b *testing.B) {
 	f := fix()
 	e := &Envelope{PolicyBody: f.Policy.Bytes(), History: make([]byte, 4096),
-		Anchors: []Anchor{{Partition: f.Policy.Partition, Shard: EmptyPrefixShard, ShardConfHash: f.Policy.ShardConf, UC: make([]byte, 4096)}}}
+		Anchors: []Anchor{{Partition: f.Policy.Partition, Shard: EmptyPrefixShard, ShardConfHash: f.Policy.Shards[0].Conf, UC: make([]byte, 4096)}}}
 	for i := 0; i < MaxLeaves; i++ {
 		e.LeafProofs = append(e.LeafProofs, LeafProof{Siblings: make([][32]byte, 16)})
 	}
@@ -126,7 +126,7 @@ func BenchmarkPolicyAndEnvelope(b *testing.B) {
 			if err != nil {
 				b.Fatal(err)
 			}
-			if _, err := CheckPolicy(f.Cfg, d, MaxLeaves); err != nil {
+			if _, _, err := CheckPolicy(f.Cfg, d, sidsN(0, MaxLeaves)); err != nil {
 				b.Fatal(err)
 			}
 		}

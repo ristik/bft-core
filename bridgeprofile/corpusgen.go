@@ -48,6 +48,18 @@ type gen struct {
 	fs     *FixtureSet
 	cases  map[string][]Case
 	failed error
+	// quad certifies aggregator shards with a four-member committee (the DN-B shape: four signatures per seal); nil outside those cases.
+	quad *AggregatorWorld
+	// useQuad selects it for certifiedWith, extraN adds that many unrelated leaves to every shard tree (deeper paths).
+	useQuad bool
+	extraN  int
+}
+
+func (g *gen) agg() *AggregatorWorld {
+	if g.useQuad {
+		return g.quad
+	}
+	return g.d.Agg
 }
 
 func (g *gen) add(c Case) {
@@ -318,22 +330,79 @@ func (g *gen) unlock() {
 	}
 }
 
+// sidIn is a state ID in the shard of the given policy row (top bit = row at
+// depth 1); n distinguishes IDs.
+func sidIn(row int, n int) [32]byte {
+	var sid [32]byte
+	sid[0] = byte(row) << 7
+	sid[31], sid[30] = byte(n), byte(n>>8)
+	return sid
+}
+
+func sidsN(row, n int) [][32]byte {
+	out := make([][32]byte, n)
+	for i := range out {
+		out[i] = sidIn(row, i+1)
+	}
+	return out
+}
+
+func hexSIDs(sids [][32]byte) string {
+	h := make([]string, len(sids))
+	for i, s := range sids {
+		h[i] = h32(s)
+	}
+	return strings.Join(h, ",")
+}
+
 func (g *gen) policy() {
 	f := g.d.F
 	pb := f.Policy.Bytes()
+	confs := [2][32]byte{f.Policy.Shards[0].Conf, f.Policy.Shards[1].Conf}
 	ap := func(id, desc string, body []byte) {
 		g.add(Case{ID: id, Family: "policy", Op: "policy-decode", Description: desc, Input: hx(body)})
 	}
-	ap("policy-valid", "the canonical policy body", pb)
+	ap("policy-valid", "the canonical depth 1 policy: shards 40 and c0 in increasing order", pb)
+	ap("policy-valid-depth0", "the canonical depth 0 policy: the one shard 80", NewPolicy(f.Policy.Partition, confs[0]).Bytes())
 	ap("policy-trailing", "one trailing byte", append(bytes.Clone(pb), 0))
-	ap("policy-empty-bstr-shard", "empty byte string instead of native 0x80", replaceOnce(pb, []byte{0x41, 0x80}, []byte{0x40}))
-	ap("policy-nonminimal-partition", "partition 11 as 0x180b", replaceOnce(pb, []byte{0x0b, 0x41}, []byte{0x18, 0x0b, 0x41}))
-	ap("policy-oversized", "over 128 bytes", append(bytes.Clone(pb), make([]byte, MaxPolicyBytes)...))
+	ap("policy-old-domain", "the retired one-shard domain UNICITY_BR_AGG_ONE",
+		replaceOnce(pb, CBytes([]byte(policyDomain)), CBytes([]byte("UNICITY_BR_AGG_ONE"))))
+	ap("policy-version-2", "literal version 2", replaceOnce(pb, append(CBytes([]byte(policyDomain)), 0x01), append(CBytes([]byte(policyDomain)), 0x02)))
+	ap("policy-partition-zero", "partition 0", NewPolicy(0, confs[0], confs[1]).Bytes())
+	ap("policy-nonminimal-partition", "partition 11 as 0x180b", replaceOnce(pb, []byte{0x0b, 0x01}, []byte{0x18, 0x0b, 0x01}))
+	ap("policy-depth-2", "depth 2 with four rows", CArr(CBytes([]byte(policyDomain)), CUint(1), CUint(uint64(f.Policy.Partition)), CUint(2),
+		CArr(CArr(CBytes([]byte{0x20}), CBytes(confs[0][:])), CArr(CBytes([]byte{0x60}), CBytes(confs[0][:])),
+			CArr(CBytes([]byte{0xa0}), CBytes(confs[1][:])), CArr(CBytes([]byte{0xe0}), CBytes(confs[1][:])))))
+	row := func(id []byte, conf [32]byte) []byte { return CArr(CBytes(id), CBytes(conf[:])) }
+	withRows := func(depth uint64, rows ...[]byte) []byte {
+		return CArr(CBytes([]byte(policyDomain)), CUint(1), CUint(uint64(f.Policy.Partition)), CUint(depth), CArr(rows...))
+	}
+	ap("policy-depth0-two-rows", "depth 0 with two rows", withRows(0, row([]byte{0x80}, confs[0]), row([]byte{0x80}, confs[1])))
+	ap("policy-depth1-one-row", "depth 1 with only shard 40: a hole", withRows(1, row([]byte{0x40}, confs[0])))
+	ap("policy-depth1-reordered", "depth 1 rows in decreasing shard order", withRows(1, row([]byte{0xc0}, confs[1]), row([]byte{0x40}, confs[0])))
+	ap("policy-depth1-duplicate", "depth 1 naming shard 40 twice (overlap and hole)", withRows(1, row([]byte{0x40}, confs[0]), row([]byte{0x40}, confs[1])))
+	ap("policy-depth1-shard-80", "depth 1 with the root shard 80 and c0 (overlap)", withRows(1, row([]byte{0x80}, confs[0]), row([]byte{0xc0}, confs[1])))
+	ap("policy-empty-bstr-shard", "empty byte string instead of a native shard", withRows(0, row(nil, confs[0])))
+	ap("policy-short-conf", "31-byte configuration hash", withRows(0, CArr(CBytes([]byte{0x80}), CBytes(confs[0][:31]))))
+	ap("policy-extra-field", "a sixth top-level field", CArr(CBytes([]byte(policyDomain)), CUint(1), CUint(uint64(f.Policy.Partition)), CUint(1),
+		CArr(row([]byte{0x40}, confs[0]), row([]byte{0xc0}, confs[1])), CUint(0)))
+	ap("policy-row-extra-field", "a third field in a row", withRows(0, CArr(CBytes([]byte{0x80}), CBytes(confs[0][:]), CUint(0))))
+	ap("policy-nonminimal-depth", "depth 1 as 0x1801", CArr(CBytes([]byte(policyDomain)), CUint(1), CUint(uint64(f.Policy.Partition)), []byte{0x18, 0x01},
+		CArr(row([]byte{0x40}, confs[0]), row([]byte{0xc0}, confs[1]))))
+	ap("policy-oversized", "over 512 bytes", append(bytes.Clone(pb), make([]byte, MaxPolicyBytes)...))
 
+	// Default envelope: two leaves in shard 40, one anchor equal to that shard's tuple.
+	// Every anchor carries its own UC bytes: byte-identical UCs are one anchor.
+	anchorOf := func(row int, n ...byte) Anchor {
+		u := byte(1)
+		if len(n) > 0 {
+			u = n[0]
+		}
+		return Anchor{Partition: f.Policy.Partition, Shard: f.Policy.Shards[row].ID, ShardConfHash: f.Policy.Shards[row].Conf,
+			ExpectedStateRoot: H([]byte{byte(row), 'r', u}), ExpectedIRHash: H([]byte{byte(row), 'i', u}), UC: []byte{9, u}, InputRecord: []byte{7, 7}}
+	}
 	envFor := func(mutate func(e *Envelope)) *Envelope {
-		e := &Envelope{PolicyBody: pb, History: []byte{1, 2, 3},
-			Anchors: []Anchor{{Partition: f.Policy.Partition, Shard: EmptyPrefixShard, ShardConfHash: f.Policy.ShardConf,
-				ExpectedStateRoot: H([]byte("root")), ExpectedIRHash: H([]byte("ir")), UC: []byte{9, 9}, InputRecord: []byte{7, 7}}},
+		e := &Envelope{PolicyBody: pb, History: []byte{1, 2, 3}, Anchors: []Anchor{anchorOf(0)},
 			LeafProofs: []LeafProof{
 				{Bitmap: H([]byte{0}), Siblings: [][32]byte{H([]byte{1}), H([]byte{2})}},
 				{Bitmap: H([]byte{1}), Siblings: [][32]byte{H([]byte{3})}}}}
@@ -342,26 +411,67 @@ func (g *gen) policy() {
 		}
 		return e
 	}
-	addBytes := func(id, desc string, b []byte, leaves int) {
-		g.add(Case{ID: id, Family: "policy", Op: "envelope-policy", Cfg: "dev", Description: desc, Input: hx(b), Aux: map[string]string{"leaves": strconv.Itoa(leaves)}})
+	addSIDs := func(id, desc string, b []byte, sids [][32]byte) {
+		g.add(Case{ID: id, Family: "policy", Op: "envelope-policy", Cfg: "dev", Description: desc, Input: hx(b), Aux: map[string]string{"sids": hexSIDs(sids)}})
 	}
-	addEnv := func(id, desc string, e *Envelope, leaves int) {
+	addBytes := func(id, desc string, b []byte, leaves int) { addSIDs(id, desc, b, sidsN(0, leaves)) }
+	addEnvSIDs := func(id, desc string, e *Envelope, sids [][32]byte) {
 		b, err := e.Encode()
 		g.must(err)
-		addBytes(id, desc, b, leaves)
+		addSIDs(id, desc, b, sids)
 	}
-	addEnv("envelope-valid", "one anchor equal to the authenticated tuple with its IR opening, two leaves at index 0", envFor(nil), 2)
+	addEnv := func(id, desc string, e *Envelope, leaves int) { addEnvSIDs(id, desc, e, sidsN(0, leaves)) }
+	both := [][32]byte{sidIn(0, 1), sidIn(1, 1)}
+	bothEnv := func(mut func(e *Envelope)) *Envelope {
+		return envFor(func(e *Envelope) {
+			e.Anchors = []Anchor{anchorOf(0, 1), anchorOf(1, 2)}
+			e.LeafProofs = e.LeafProofs[:2]
+			e.LeafProofs[0].AnchorIndex, e.LeafProofs[1].AnchorIndex = 0, 1
+			if mut != nil {
+				mut(e)
+			}
+		})
+	}
+	addEnv("envelope-valid", "one anchor whose claim fields are the shard 40 policy row, two leaves in shard 40 at index 0", envFor(nil), 2)
+	addEnvSIDs("envelope-valid-two-shards", "leaves in both shards: two anchors in first-use order, indices 0 and 1", bothEnv(nil), both)
+	addEnvSIDs("envelope-valid-two-anchors-one-shard", "two different UCs of shard 40 are two anchors, first used by leaf 0 and leaf 1",
+		envFor(func(e *Envelope) {
+			e.Anchors = []Anchor{anchorOf(0, 1), anchorOf(0, 2)}
+			e.LeafProofs[1].AnchorIndex = 1
+		}), sidsN(0, 2))
+	addEnvSIDs("envelope-valid-anchor-reuse", "leaves 0 and 2 share the first anchor; the byte-identical UC is one anchor",
+		bothEnv(func(e *Envelope) {
+			e.LeafProofs = append(e.LeafProofs, LeafProof{Bitmap: H([]byte{2}), Siblings: [][32]byte{H([]byte{4})}, AnchorIndex: 0})
+		}), [][32]byte{sidIn(0, 1), sidIn(1, 1), sidIn(0, 2)})
+	addEnvSIDs("envelope-valid-one-shard-c0", "all leaves in shard c0: the one anchor is the c0 tuple at index 0",
+		envFor(func(e *Envelope) { e.Anchors = []Anchor{anchorOf(1)} }), sidsN(1, 2))
 	addEnv("envelope-missing-policy", "empty policy body", envFor(func(e *Envelope) { e.PolicyBody = nil }), 2)
 	addEnv("envelope-other-partition-policy", "a well formed policy for another partition", envFor(func(e *Envelope) {
-		e.PolicyBody = Policy{Partition: 12, ShardConf: f.Policy.ShardConf}.Bytes()
+		e.PolicyBody = NewPolicy(12, confs[0], confs[1]).Bytes()
+	}), 2)
+	addEnv("envelope-depth0-policy", "a well formed depth 0 policy that Cfg does not pin", envFor(func(e *Envelope) {
+		e.PolicyBody = NewPolicy(f.Policy.Partition, confs[0]).Bytes()
 	}), 2)
 	addEnv("envelope-trailing-policy", "policy body with a trailing byte", envFor(func(e *Envelope) { e.PolicyBody = append(bytes.Clone(pb), 0) }), 2)
 	addEnv("envelope-partition", "anchor partition changed", envFor(func(e *Envelope) { e.Anchors[0].Partition++ }), 2)
-	addEnv("envelope-shard", "anchor shard changed", envFor(func(e *Envelope) { e.Anchors[0].Shard = []byte{0x81} }), 2)
+	addEnv("envelope-shard", "anchor shard changed to 80", envFor(func(e *Envelope) { e.Anchors[0].Shard = []byte{0x80} }), 2)
 	addEnv("envelope-conf", "anchor configuration changed", envFor(func(e *Envelope) { e.Anchors[0].ShardConfHash[0] ^= 1 }), 2)
-	addEnv("envelope-two-anchors", "two identical anchors", envFor(func(e *Envelope) { e.Anchors = append(e.Anchors, e.Anchors[0]) }), 2)
+	addEnvSIDs("envelope-anchor-of-other-shard", "leaves in shard 40 carrying the c0 anchor", envFor(func(e *Envelope) { e.Anchors = []Anchor{anchorOf(1)} }), sidsN(0, 2))
+	addEnv("envelope-two-identical-anchors", "two anchors with byte-identical UCs: the duplicate is rejected, never a second anchor", envFor(func(e *Envelope) { e.Anchors = append(e.Anchors, e.Anchors[0]); e.LeafProofs[1].AnchorIndex = 1 }), 2)
+	addEnv("envelope-unused-anchor", "a second anchor (shard c0) that no leaf uses", envFor(func(e *Envelope) { e.Anchors = append(e.Anchors, anchorOf(1, 2)) }), 2)
+	addEnvSIDs("envelope-missing-anchor", "leaves in both shards with only the shard 40 anchor", envFor(func(e *Envelope) { e.LeafProofs[1].AnchorIndex = 0 }), both)
+	addEnvSIDs("envelope-anchors-reordered", "anchor table not in first-use order: leaf 0 (shard 40) names the c0 anchor", bothEnv(func(e *Envelope) { e.Anchors[0], e.Anchors[1] = e.Anchors[1], e.Anchors[0] }), both)
+	addEnvSIDs("envelope-anchors-duplicated-shard", "the second anchor names shard 40 for a c0 leaf", bothEnv(func(e *Envelope) { e.Anchors[1] = anchorOf(0, 2) }), both)
+	addEnvSIDs("envelope-leaf-index-swapped", "each leaf names the other shard's anchor", bothEnv(func(e *Envelope) {
+		e.LeafProofs[0].AnchorIndex, e.LeafProofs[1].AnchorIndex = 1, 0
+	}), both)
+	addEnvSIDs("envelope-leaf-index-out-of-range", "second leaf names anchor 2", bothEnv(func(e *Envelope) { e.LeafProofs[1].AnchorIndex = 2 }), both)
+	addEnv("envelope-five-anchors", "five anchors: one over MaxAnchors", envFor(func(e *Envelope) {
+		e.Anchors = append(e.Anchors, anchorOf(0, 2), anchorOf(0, 3), anchorOf(0, 4), anchorOf(0, 5))
+	}), 2)
+	addEnv("envelope-three-anchors", "three anchors for two leaves", envFor(func(e *Envelope) { e.Anchors = append(e.Anchors, anchorOf(0, 2), anchorOf(0, 3)) }), 2)
 	addEnv("envelope-no-anchors", "no anchors", envFor(func(e *Envelope) { e.Anchors = nil }), 2)
-	addEnv("envelope-leaf-index", "second leaf names anchor 1", envFor(func(e *Envelope) { e.LeafProofs[1].AnchorIndex = 1 }), 2)
+	addEnv("envelope-leaf-index", "second leaf names anchor 1 though only anchor 0 exists", envFor(func(e *Envelope) { e.LeafProofs[1].AnchorIndex = 1 }), 2)
 	addEnv("envelope-too-few-leaves", "obligation count above the supplied leaf proofs", envFor(nil), 3)
 	addEnv("envelope-too-many-leaves", "obligation count below the supplied leaf proofs", envFor(nil), 1)
 	addEnv("envelope-empty-input-record", "anchor with an empty IR opening still frames; the composition rejects it", envFor(func(e *Envelope) { e.Anchors[0].InputRecord = nil }), 2)
@@ -419,15 +529,23 @@ func (g *gen) policy() {
 	addBytes("envelope-offset-uc-u64max", "anchor uc offset is 2^64-1", putWord(base, anchT+5*32, u64max), 2)
 	addBytes("envelope-offset-input-record-u64max", "anchor inputRecord offset is 2^64-1", putWord(base, anchT+6*32, u64max), 2)
 	addBytes("envelope-offset-sibling-near-max", "first leaf sibling offset is 2^64-32", putWord(base, leafT(0)+64, new(big.Int).SetUint64(1<<64-32)), 2)
-	anchors := func(n int) *Envelope {
+	manyAnchors := func(n int) (*Envelope, int) {
 		return envFor(func(e *Envelope) {
-			for len(e.Anchors) < n {
-				e.Anchors = append(e.Anchors, e.Anchors[0])
+			e.Anchors, e.LeafProofs = nil, nil
+			for i := 0; i < n; i++ {
+				e.Anchors = append(e.Anchors, anchorOf(0, byte(i+1)))
+				e.LeafProofs = append(e.LeafProofs, LeafProof{Bitmap: H([]byte{byte(i)}), AnchorIndex: uint16(i)})
 			}
-		})
+		}), n
 	}
-	addEnv("envelope-anchors-8", "eight anchors pass the count bound and fail the one-anchor policy", anchors(8), 2)
-	addEnv("envelope-anchors-9", "nine anchors exceed MaxAnchors", anchors(9), 2)
+	for _, n := range []int{MaxAnchors, MaxAnchors + 1} {
+		e, leaves := manyAnchors(n)
+		if n == MaxAnchors {
+			addEnv("envelope-anchors-max", "MaxAnchors distinct UCs of one shard, each used by one leaf", e, leaves)
+		} else {
+			addEnv("envelope-anchors-over-max", "one more anchor than MaxAnchors", e, leaves)
+		}
+	}
 	leaves := func(n int) *Envelope {
 		return envFor(func(e *Envelope) {
 			e.LeafProofs = nil
@@ -436,8 +554,8 @@ func (g *gen) policy() {
 			}
 		})
 	}
-	addEnv("envelope-leaves-65", "sixty-five leaves, the maximum history", leaves(65), 65)
-	addEnv("envelope-leaves-66", "sixty-six leaves exceed MaxLeaves", leaves(66), 66)
+	addEnv("envelope-leaves-max", "MaxLeaves leaves, the maximum history", leaves(MaxLeaves), MaxLeaves)
+	addEnv("envelope-leaves-over-max", "MaxLeaves+1 leaves exceed MaxLeaves", leaves(MaxLeaves+1), MaxLeaves+1)
 	sized := func(extra int) []byte {
 		e0 := envFor(func(e *Envelope) { e.History = nil })
 		b0, _ := e0.Encode()
@@ -445,8 +563,8 @@ func (g *gen) policy() {
 		b, _ := e0.Encode()
 		return b
 	}
-	addBytes("envelope-size-262144", "envelope of exactly MaxEnvelopeBytes", sized(0), 2)
-	addBytes("envelope-size-262176", "envelope one word over MaxEnvelopeBytes", sized(32), 2)
+	addBytes("envelope-size-65536", "envelope of exactly MaxEnvelopeBytes", sized(0), 2)
+	addBytes("envelope-size-65568", "envelope one word over MaxEnvelopeBytes", sized(32), 2)
 }
 
 // histories: the relation cases (mint and return) and the return terminal.
@@ -754,7 +872,7 @@ func (g *gen) wire() {
 		tadd("token-certificate-"+mutation.name, "isolated certificate intersection: "+mutation.name, replaceOnce(tbts, p0, pr(CUint(1), cd0, CUint(tok.MintProof.T), CBytes(path), uc)))
 	}
 	for _, n := range []int{224, 225} {
-		uc, err := certificateWithSteps(uc0, 32)
+		uc, err := certificateWithSteps(uc0, 31) // the real UC carries one shard-tree sibling
 		g.must(err)
 		keys := make([]*secp256k1.PrivateKey, 8)
 		for i := range keys {
@@ -814,6 +932,13 @@ type certifiedHistory struct {
 // certified builds a return history with `transfers` ordinary transfers and
 // the aggregator certificate over its leaves at an IR time after every t.
 func (g *gen) certified(transfers int) (*certifiedHistory, error) {
+	return g.certifiedWith(transfers, func(int, Leaf) ShardRound { return ShardRound{BaseTime + 1000, 100} })
+}
+
+// certifiedWith is certified with each leaf certified at the round the callback
+// names: leaves of a shard at one round share a UC, at different rounds they
+// are certified by different UCs.
+func (g *gen) certifiedWith(transfers int, assign func(i int, l Leaf) ShardRound) (*certifiedHistory, error) {
 	f := g.d.F
 	keys := make([]*secp256k1.PrivateKey, transfers+1)
 	for i := range keys {
@@ -831,7 +956,10 @@ func (g *gen) certified(transfers int) (*certifiedHistory, error) {
 		return nil, err
 	}
 	extra := []Leaf{{SID: H([]byte("other-1")), Value: H([]byte("v1"))}, {SID: H([]byte("other-2")), Value: H([]byte("v2"))}}
-	cert, err := g.d.Agg.Certify(res.Leaves, extra, BaseTime+1000, 100)
+	for i := 0; i < g.extraN; i++ {
+		extra = append(extra, Leaf{SID: H([]byte(fmt.Sprint("load-", i))), Value: H([]byte("lv"))})
+	}
+	cert, err := g.agg().CertifyAssigned(res.Leaves, extra, assign)
 	if err != nil {
 		return nil, err
 	}
@@ -1069,6 +1197,14 @@ func (g *gen) lock() {
 	}
 }
 
+func claimsOf(as ...Anchor) string {
+	c := make([]string, len(as))
+	for i, a := range as {
+		c[i] = claimOf(a)
+	}
+	return strings.Join(c, ";")
+}
+
 func (g *gen) proof() {
 	d := g.d
 	f := d.F
@@ -1077,9 +1213,11 @@ func (g *gen) proof() {
 	if err != nil {
 		return
 	}
-	claims := claimOf(cp.cert.Anchor)
-	envFrom := func(mut func(e *Envelope)) []byte {
-		e := &Envelope{PolicyBody: f.Policy.Bytes(), History: cp.h.Bytes(), Anchors: []Anchor{cp.cert.Anchor}, LeafProofs: append([]LeafProof{}, cp.cert.Proofs...)}
+	g.must(requireTwoShards(cp.res.Leaves, d.Agg))
+	anchors := cp.cert.Anchors
+	claims := claimsOf(anchors...)
+	envOf := func(h *History, cert *CertifiedLeaves, mut func(e *Envelope)) []byte {
+		e := &Envelope{PolicyBody: f.Policy.Bytes(), History: h.Bytes(), Anchors: append([]Anchor{}, cert.Anchors...), LeafProofs: append([]LeafProof{}, cert.Proofs...)}
 		if mut != nil {
 			mut(e)
 		}
@@ -1087,31 +1225,44 @@ func (g *gen) proof() {
 		g.must(err)
 		return b
 	}
+	envFrom := func(mut func(e *Envelope)) []byte { return envOf(cp.h, cp.cert, mut) }
 	add := func(id, desc string, env []byte, claims string, op string) {
 		g.add(Case{ID: id, Family: "proof", Op: "compose", Cfg: "dev", Description: desc, Input: hx(env),
 			Aux: map[string]string{"operation": op, "claims": claims}})
 	}
-	add("compose-valid-return", "an authenticated anchor, its IR opening, every leaf proven under it", envFrom(nil), claims, "return")
-	add("compose-anchor-not-admitted", "B1 does not authenticate the anchor", envFrom(nil), "", "return")
-	add("compose-expected-ir-hash", "expected IR hash not the authenticated one", envFrom(func(e *Envelope) { e.Anchors[0].ExpectedIRHash[0] ^= 1 }), claims, "return")
-	// IR opening attacks.
-	ir := cp.cert.Anchor.InputRecord
-	lie := rewriteIRBytes(ir, func(r *types.InputRecord) { r.Timestamp = 1 << 60 })
-	add("compose-false-opening", "an opening with a huge timestamp for the same expected hash", envFrom(func(e *Envelope) { e.Anchors[0].InputRecord = lie }), claims, "return")
-	add("compose-empty-opening", "no opening", envFrom(func(e *Envelope) { e.Anchors[0].InputRecord = nil }), claims, "return")
-	// Time bound: IR time at and just before the latest t.
+	add("compose-valid-return", "one anchor per distinct UC in first-use order, each authenticated, every leaf proven under its own anchor's root", envFrom(nil), claims, "return")
+	add("compose-anchor-not-admitted", "B1 does not authenticate any anchor", envFrom(nil), "", "return")
+	add("compose-final-anchor-not-admitted", "B1 authenticates the first anchor but not the last", envFrom(nil), claimsOf(anchors[0]), "return")
+	add("compose-first-anchor-not-admitted", "B1 authenticates the last anchor but not the first", envFrom(nil), claimsOf(anchors[1]), "return")
+	add("compose-expected-ir-hash", "last anchor's expected IR hash not the authenticated one", envFrom(func(e *Envelope) { e.Anchors[1].ExpectedIRHash[0] ^= 1 }), claims, "return")
+	// IR opening attacks on one anchor.
+	lie := rewriteIRBytes(anchors[1].InputRecord, func(r *types.InputRecord) { r.Timestamp = 1 << 60 })
+	add("compose-false-opening", "an opening with a huge timestamp for the same expected hash", envFrom(func(e *Envelope) { e.Anchors[1].InputRecord = lie }), claims, "return")
+	add("compose-empty-opening", "no opening on the last anchor", envFrom(func(e *Envelope) { e.Anchors[1].InputRecord = nil }), claims, "return")
+	// Time bound: each leaf against its OWN anchor's IR time. Row of each leaf.
 	maxT := BaseTime + 10*uint64(4)
+	times := func(late, early int, lateT, earlyT uint64) func(int) ShardRound {
+		return func(row int) ShardRound {
+			if row == late {
+				return ShardRound{lateT, uint64(100 + row)}
+			}
+			return ShardRound{earlyT, uint64(100 + row)}
+		}
+	}
+	extra := []Leaf{{SID: sidIn(0, 900), Value: H([]byte("v1"))}, {SID: sidIn(1, 900), Value: H([]byte("v2"))}}
 	for _, c := range []struct {
 		id, desc string
-		t        uint64
-	}{{"compose-ir-time-equals-latest-t", "IR timestamp equals the latest t", maxT}, {"compose-ir-time-before-latest-t", "IR timestamp one second before the latest t", maxT - 1}} {
-		extra := []Leaf{{SID: H([]byte("other-1")), Value: H([]byte("v1"))}}
-		cert, err := d.Agg.Certify(cp.res.Leaves, extra, c.t, 100)
+		round    func(int) ShardRound
+	}{
+		{"compose-ir-time-equals-latest-t", "both IR timestamps equal the latest t", times(0, 1, maxT, maxT)},
+		{"compose-ir-time-before-latest-t", "both IR timestamps one second before the latest t", times(0, 1, maxT-1, maxT-1)},
+		{"compose-mixed-rounds-and-times", "different root rounds and later IR timestamps per shard, all at least the leaves' t", times(0, 1, BaseTime+5000, BaseTime+1000)},
+		{"compose-late-shard-covers-other-shard-leaf", "shard 40's IR time is late but shard c0's is before the latest t of a c0 leaf", times(0, 1, BaseTime+5000, BaseTime+11)},
+		{"compose-early-shard-other-late", "shard c0's IR time is late but shard 40's is before the latest t of a 40 leaf", times(1, 0, BaseTime+5000, BaseTime+11)},
+	} {
+		cert, err := d.Agg.CertifyRounds(cp.res.Leaves, extra, c.round)
 		g.must(err)
-		e := &Envelope{PolicyBody: f.Policy.Bytes(), History: cp.h.Bytes(), Anchors: []Anchor{cert.Anchor}, LeafProofs: cert.Proofs}
-		b, err := e.Encode()
-		g.must(err)
-		add(c.id, c.desc, b, claimOf(cert.Anchor), "return")
+		add(c.id, c.desc, envOf(cp.h, cert, nil), claimsOf(cert.Anchors...), "return")
 	}
 	// Leaf confusion.
 	confused := make([]Leaf, len(cp.res.Leaves))
@@ -1120,37 +1271,173 @@ func (g *gen) proof() {
 	}
 	cc, err := d.Agg.Certify(confused, nil, BaseTime+1000, 100)
 	g.must(err)
-	eb, _ := (&Envelope{PolicyBody: f.Policy.Bytes(), History: cp.h.Bytes(), Anchors: []Anchor{cc.Anchor}, LeafProofs: cc.Proofs}).Encode()
-	add("compose-txhash-as-leaf-value", "the tree commits txHash alone as the value", eb, claimOf(cc.Anchor), "return")
+	add("compose-txhash-as-leaf-value", "the tree commits txHash alone as the value", envOf(cp.h, cc, nil), claimsOf(cc.Anchors...), "return")
+	// Two leaves of one shard and two of the other: swapping within a shard keeps the index but breaks the path.
 	add("compose-paths-swapped", "the first two paths swapped", envFrom(func(e *Envelope) { e.LeafProofs[0], e.LeafProofs[1] = e.LeafProofs[1], e.LeafProofs[0] }), claims, "return")
 	add("compose-corrupt-path", "one sibling corrupted", envFrom(func(e *Envelope) {
 		s := append([][32]byte{}, e.LeafProofs[1].Siblings...)
 		s[0][0] ^= 1
 		e.LeafProofs[1].Siblings = s
 	}), claims, "return")
+	add("compose-path-under-other-anchor", "a leaf's path presented with the other shard's anchor index", envFrom(func(e *Envelope) {
+		e.LeafProofs[0].AnchorIndex = 1 - e.LeafProofs[0].AnchorIndex
+	}), claims, "return")
 	add("compose-too-few-paths", "one path missing", envFrom(func(e *Envelope) { e.LeafProofs = e.LeafProofs[:2] }), claims, "return")
-	// Refresh: same leaves under a later anchor keep their original t.
-	later, err := d.Agg.Certify(cp.res.Leaves, []Leaf{{SID: H([]byte("newer")), Value: H([]byte("n"))}}, BaseTime+1000+3600, 900)
+	add("compose-bitmap-popcount", "a bitmap that disagrees with the sibling count", envFrom(func(e *Envelope) { e.LeafProofs[1].Bitmap[0] ^= 0x80 }), claims, "return")
+	add("compose-anchors-swapped", "the anchors not in first-use order", envFrom(func(e *Envelope) { e.Anchors[0], e.Anchors[1] = e.Anchors[1], e.Anchors[0] }), claims, "return")
+	add("compose-duplicate-anchor", "the first anchor's UC twice: byte-identical UCs are one anchor", envFrom(func(e *Envelope) { e.Anchors[1] = e.Anchors[0] }), claims, "return")
+	add("compose-anchor-wrong-sibling-count-zero", "an anchor UC with no shard-tree sibling under depth 1", envFrom(func(e *Envelope) {
+		e.Anchors[0].UC = ucWithSiblings(g, e.Anchors[0].UC, 0)
+	}), claims, "return")
+	add("compose-anchor-wrong-sibling-count-two", "an anchor UC with two shard-tree siblings under depth 1", envFrom(func(e *Envelope) {
+		e.Anchors[0].UC = ucWithSiblings(g, e.Anchors[0].UC, 2)
+	}), claims, "return")
+	add("compose-single-anchor-two-shards", "only the first anchor for leaves of both shards", envFrom(func(e *Envelope) {
+		e.Anchors = e.Anchors[:1]
+		for i := range e.LeafProofs {
+			e.LeafProofs[i].AnchorIndex = 0
+		}
+	}), claims, "return")
+	add("compose-foreign-conf", "last anchor's configuration is not the policy's", envFrom(func(e *Envelope) { e.Anchors[1].ShardConfHash[0] ^= 1 }), claims, "return")
+	// Refresh: same leaves under later anchors keep their original t.
+	later, err := d.Agg.Certify(cp.res.Leaves, []Leaf{{SID: sidIn(0, 901), Value: H([]byte("n"))}, {SID: sidIn(1, 901), Value: H([]byte("n"))}}, BaseTime+1000+3600, 900)
 	g.must(err)
-	eb, _ = (&Envelope{PolicyBody: f.Policy.Bytes(), History: cp.h.Bytes(), Anchors: []Anchor{later.Anchor}, LeafProofs: later.Proofs}).Encode()
-	add("compose-refresh-later-anchor", "the same leaves proven under a later admitted root keep their original t", eb, claimOf(later.Anchor), "return")
+	// Several UCs per shard, even at the same root round: separate anchors, no convergence needed.
+	twoUC, err := g.certifiedWith(3, func(i int, l Leaf) ShardRound { return ShardRound{BaseTime + 1000 + uint64(i%2), 100 + uint64(i%2)} })
+	g.must(err)
+	if err == nil {
+		add("compose-two-ucs-per-shard", "leaves of one shard certified by different UCs: separate anchors, each authenticated", envOf(twoUC.h, twoUC.cert, nil), claimsOf(twoUC.cert.Anchors...), "return")
+		add("compose-two-ucs-final-not-admitted", "the last of several anchors is not authenticated", envOf(twoUC.h, twoUC.cert, nil), claimsOf(twoUC.cert.Anchors[:len(twoUC.cert.Anchors)-1]...), "return")
+	}
+	gateCases := func(prefix string, eb []byte) {
+		gt, err := GateOf(f.Cfg, OpReturn, eb, 1<<62)
+		g.must(err)
+		if err != nil {
+			return
+		}
+		for _, c := range []struct {
+			id     string
+			budget uint64
+		}{{prefix + "-exact", gt.Total()}, {prefix + "-minus-one", gt.Total() - 1}} {
+			g.add(Case{ID: c.id, Family: "proof", Op: "gate", Cfg: "dev", Description: "the gate total of " + prefix + " against its exact budget and one less", Input: hx(eb),
+				Aux: map[string]string{"operation": "return", "budget": strconv.FormatUint(c.budget, 10)}})
+		}
+	}
+	perLeaf := func(id, desc string, transfers int) {
+		c, err := g.certifiedWith(transfers, func(i int, l Leaf) ShardRound { return ShardRound{BaseTime + 1000, 100 + uint64(i)} })
+		g.must(err)
+		if err == nil {
+			eb := envOf(c.h, c.cert, nil)
+			add(id, desc, eb, claimsOf(c.cert.Anchors...), "return")
+			if len(c.cert.Anchors) <= MaxAnchors {
+				gateCases("gate-"+id, eb)
+			}
+		}
+	}
+	perLeaf("compose-anchors-3", "three leaves, each certified by its own UC: three anchors (one-signature fixture certificates)", 1)
+	perLeaf("compose-anchors-max", "MaxAnchors leaves, each certified by its own UC: exactly MaxAnchors anchors (one-signature fixture certificates)", MaxAnchors-2)
+	// The DN-B committee shape: four validators, so four signatures per seal.
+	quadAuth, err := NewCommittee("dnb-aggregator-committee", 4)
+	g.must(err)
+	quadTB, err := quadAuth.TrustBase(DevNetwork, 1)
+	g.must(err)
+	g.quad = &AggregatorWorld{PDRs: d.Agg.PDRs, Auth: quadAuth, TB: quadTB}
+	g.useQuad = true
+	perLeaf("compose-anchors-3-dnb", "three leaves, three anchors, each certificate with the DN-B committee's four signatures: accepted at the transaction budget", 1)
+	perLeaf("compose-anchors-max-dnb", "MaxAnchors anchors, each certificate with four signatures (DN-B committee shape): accepted at the transaction budget", MaxAnchors-2)
+	// The gate decides for real certificates too: four four-signature anchors with sixteen leaves, a long history and deep paths do not fit.
+	g.extraN = 4000
+	if hc, err := g.certifiedWith(MaxLeaves-2, func(i int, l Leaf) ShardRound { return ShardRound{BaseTime + 1000, 100 + uint64(i%2)} }); err == nil {
+		eb := envOf(hc.h, hc.cert, nil)
+		g.must(func() error {
+			if len(hc.cert.Anchors) != MaxAnchors {
+				return fmt.Errorf("load case has %d anchors, want %d", len(hc.cert.Anchors), MaxAnchors)
+			}
+			if gt, e := GateOf(f.Cfg, OpReturn, eb, 1<<62); e != nil || gt.Total() <= TxGasBudget {
+				return fmt.Errorf("load case does not exceed the budget: %v %v", gt, e)
+			}
+			return nil
+		}())
+		add("compose-anchors-max-dnb-load-over-budget", "four anchors with four signatures each, sixteen leaves, deep paths: over the gate at the transaction budget", eb, claimsOf(hc.cert.Anchors...), "return")
+	} else {
+		g.must(err)
+	}
+	g.useQuad, g.extraN = false, 0
+	perLeaf("compose-anchors-over-max", "MaxAnchors+1 leaves, each certified by its own UC", MaxAnchors-1)
+	// Four anchors of certificates carrying 64 seal signatures each (the native maximum): structurally
+	// admitted, priced out by the gate before any B1 call.
+	if hc, err := g.certifiedWith(MaxAnchors-2, func(i int, l Leaf) ShardRound { return ShardRound{BaseTime + 1000, 100 + uint64(i)} }); err == nil {
+		eb := envOf(hc.h, hc.cert, func(e *Envelope) {
+			for i := range e.Anchors {
+				e.Anchors[i].UC = ucWithSigs(g, e.Anchors[i].UC, 64)
+			}
+		})
+		add("compose-anchors-max-heavy-over-budget", "MaxAnchors anchors whose certificates carry 64 signatures each: over the gate at the transaction budget", eb, claimsOf(hc.cert.Anchors...), "return")
+	} else {
+		g.must(err)
+	}
+	big65, err := g.certified(MaxLeaves - 2)
+	g.must(err)
+	if err == nil {
+		eb := envOf(big65.h, big65.cert, nil)
+		add("compose-leaves-max-two-anchors", "MaxLeaves leaves in two shards under one UC per shard", eb, claimsOf(big65.cert.Anchors...), "return")
+		gateCases("gate-compose-leaves-max-two-anchors", eb)
+	}
+	add("compose-refresh-later-anchor", "the same leaves proven under later admitted roots keep their original t", envOf(cp.h, later, nil), claimsOf(later.Anchors...), "return")
 	hs := *cp.h
 	hs.Times = append([]uint64{}, cp.h.Times...)
 	for i := range hs.Times {
 		hs.Times[i] = BaseTime + 1000 + 3600
 	}
 	hs.MintTime = BaseTime + 1000 + 3600
-	eb, _ = (&Envelope{PolicyBody: f.Policy.Bytes(), History: hs.Bytes(), Anchors: []Anchor{later.Anchor}, LeafProofs: later.Proofs}).Encode()
-	add("compose-refresh-rewritten-t", "a refresh that substitutes the new certificate's timestamp for t", eb, claimOf(later.Anchor), "return")
-	// Mint operation.
+	add("compose-refresh-rewritten-t", "a refresh that substitutes the new certificate's timestamp for t", envOf(&hs, later, nil), claimsOf(later.Anchors...), "return")
+	// Mint operation: one leaf, one anchor, the shard of its SID.
 	mt, err := f.BuildToken(5, big.NewInt(1_000_000_007), cp.keys[:1])
 	g.must(err)
 	mres, err := VerifyMint(f.Cfg, mt.Bytes())
 	g.must(err)
 	mc, err := d.Agg.Certify(mres.Leaves, nil, BaseTime+1000, 100)
 	g.must(err)
-	eb, _ = (&Envelope{PolicyBody: f.Policy.Bytes(), History: mt.Bytes(), Anchors: []Anchor{mc.Anchor}, LeafProofs: mc.Proofs}).Encode()
-	add("compose-valid-mint", "a mint composed against its certified leaf", eb, claimOf(mc.Anchor), "mint")
+	add("compose-valid-mint", "a mint composed against its certified leaf and the one anchor of its shard", envOf(mt, mc, nil), claimsOf(mc.Anchors...), "mint")
+	other := Leaf{SID: sidIn(1-d.Agg.Row(mres.Leaves[0].SID), 7), Value: H([]byte("o"))}
+	oc, err := d.Agg.Certify([]Leaf{other}, nil, BaseTime+1000, 100)
+	g.must(err)
+	// A=2 at the bound: the mint's one leaf, its anchor, and a second anchor (another UC of the same
+	// shard) that no leaf uses.
+	add("compose-unused-anchor", "a second, distinct anchor no leaf uses (A=2, within the bound)", envOf(mt, mc, func(e *Envelope) {
+		u := e.Anchors[0]
+		u.UC = append(bytes.Clone(u.UC), 0)
+		e.Anchors = append(e.Anchors, u)
+	}), claimsOf(append(mc.Anchors, func() Anchor { u := mc.Anchors[0]; u.UC = append(bytes.Clone(u.UC), 0); return u }())...), "mint")
+	add("compose-mint-wrong-anchor", "the mint carries the other shard's anchor", envOf(mt, mc, func(e *Envelope) { e.Anchors = oc.Anchors }), claimsOf(oc.Anchors...), "mint")
+	// Gate components: exact budget accepts, one less refuses.
+	eb := envFrom(nil)
+	gt, err := GateOf(f.Cfg, OpReturn, eb, TxGasBudget)
+	g.must(err)
+	if err == nil {
+		for _, c := range []struct {
+			id, desc string
+			budget   uint64
+		}{{"gate-exact-budget", "the gate total equals the budget", gt.Total()}, {"gate-budget-minus-one", "one gas under the gate total", gt.Total() - 1}, {"gate-full-budget", "the 7,000,000 transaction budget", TxGasBudget}} {
+			g.add(Case{ID: c.id, Family: "proof", Op: "gate", Cfg: "dev", Description: c.desc, Input: hx(eb),
+				Aux: map[string]string{"operation": "return", "budget": strconv.FormatUint(c.budget, 10)}})
+		}
+	}
+	mb := envOf(mt, mc, nil)
+	g.add(Case{ID: "gate-mint", Family: "proof", Op: "gate", Cfg: "dev", Description: "the gate of a one-leaf one-anchor mint", Input: hx(mb),
+		Aux: map[string]string{"operation": "mint"}})
+}
+
+// requireTwoShards fails the generation unless the leaves occupy both shards.
+func requireTwoShards(leaves []Leaf, w *AggregatorWorld) error {
+	seen := map[int]bool{}
+	for _, l := range leaves {
+		seen[w.Row(l.SID)] = true
+	}
+	if len(seen) != len(w.PDRs) {
+		return fmt.Errorf("fixture history does not occupy every shard")
+	}
+	return nil
 }
 
 func rewriteIRBytes(raw []byte, mut func(r *types.InputRecord)) []byte {
@@ -1249,4 +1536,33 @@ func (g *gen) shortSigUC(uc []byte) []byte {
 	b, err := types.Cbor.Marshal(&c)
 	g.must(err)
 	return b
+}
+
+// ucWithSiblings re-encodes a certificate with `n` shard-tree siblings. The signatures no longer verify, which
+// is the point: the gate refuses the shape before any B1 call.
+func ucWithSiblings(g *gen, uc []byte, n int) []byte {
+	var c types.UnicityCertificate
+	g.must(types.Cbor.Unmarshal(uc, &c))
+	c.ShardTreeCertificate.SiblingHashes = make([][]byte, n)
+	for i := range c.ShardTreeCertificate.SiblingHashes {
+		c.ShardTreeCertificate.SiblingHashes[i] = bytes.Repeat([]byte{byte(i + 1)}, 32)
+	}
+	out, err := types.Cbor.Marshal(&c)
+	g.must(err)
+	return out
+}
+
+// ucWithSigs re-encodes a certificate whose seal carries n signature entries (dummy values past the first).
+// The signatures no longer verify: the gate prices the shape before any B1 call.
+func ucWithSigs(g *gen, uc []byte, n int) []byte {
+	var c types.UnicityCertificate
+	g.must(types.Cbor.Unmarshal(uc, &c))
+	for i := 0; len(c.UnicitySeal.Signatures) < n; i++ {
+		sig := bytes.Repeat([]byte{byte(i + 1)}, 65)
+		sig[64] = 0
+		c.UnicitySeal.Signatures[fmt.Sprintf("dummy-node-%02d", i)] = sig
+	}
+	out, err := types.Cbor.Marshal(&c)
+	g.must(err)
+	return out
 }

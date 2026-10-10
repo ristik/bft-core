@@ -68,7 +68,7 @@ type identities struct {
 func deployment(args []string) error {
 	fs := flag.NewFlagSet("deployment", flag.ContinueOnError)
 	idPath := fs.String("identities", "", "genesis identity document")
-	aggConfPath := fs.String("agg-conf", "", "the aggregator shard's configuration as registered with the root chain")
+	aggConfPath := fs.String("agg-conf", "", "the aggregator shard configurations as registered with the root chain: one file, or a comma-separated list in increasing shard-id order")
 	evmPartition := fs.Uint64("evm-partition", 8, "EVM partition id")
 	network := fs.Uint64("network", 3, "network id")
 	out := fs.String("out", "", "output path")
@@ -86,20 +86,33 @@ func deployment(args []string) error {
 	if err := json.Unmarshal(raw, &id); err != nil {
 		return err
 	}
-	rawConf, err := os.ReadFile(*aggConfPath)
-	if err != nil {
-		return err
+	// One registered shard configuration per policy row, in increasing shard-id
+	// byte order (a depth-1 deployment lists the 0x40 shard, then 0xc0).
+	var confs [][32]byte
+	var partition uint32
+	for i, path := range strings.Split(*aggConfPath, ",") {
+		rawConf, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		var conf types.PartitionDescriptionRecord
+		if err := json.Unmarshal(rawConf, &conf); err != nil {
+			return fmt.Errorf("decoding the aggregator shard configuration %s: %w", path, err)
+		}
+		h, err := conf.Hash(stdcrypto.SHA256)
+		if err != nil {
+			return err
+		}
+		if i == 0 {
+			partition = uint32(conf.PartitionID)
+		} else if partition != uint32(conf.PartitionID) {
+			return fmt.Errorf("shard configuration %s belongs to partition %d, not %d", path, conf.PartitionID, partition)
+		}
+		var c [32]byte
+		copy(c[:], h)
+		confs = append(confs, c)
 	}
-	var conf types.PartitionDescriptionRecord
-	if err := json.Unmarshal(rawConf, &conf); err != nil {
-		return fmt.Errorf("decoding the aggregator shard configuration: %w", err)
-	}
-	h, err := conf.Hash(stdcrypto.SHA256)
-	if err != nil {
-		return err
-	}
-	pol := bridgeprofile.Policy{Partition: uint32(conf.PartitionID)}
-	copy(pol.ShardConf[:], h)
+	pol := bridgeprofile.NewPolicy(partition, confs...)
 	semantic := sha256.Sum256(bridgeprofile.SemanticProfileJSON())
 	doc := map[string]any{
 		"network":             *network,

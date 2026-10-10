@@ -122,7 +122,7 @@ func TestCertificateSDKIntersectionSentinels(t *testing.T) {
 
 func TestCertificateCumulativeUnicitySteps(t *testing.T) {
 	e := newEnv(t)
-	raw, err := certificateWithSteps(e.composed(t, 2, irTimeOK).cert.InclusionProofs()[0].UC, 32)
+	raw, err := certificateWithSteps(e.composed(t, 2, irTimeOK).cert.InclusionProofs()[0].UC, 31)
 	require.NoError(t, err)
 	var steps uint64
 	for i := 0; i < 64; i++ {
@@ -135,7 +135,7 @@ func TestCertificateCumulativeUnicitySteps(t *testing.T) {
 
 func TestTokenCombinedPathBudget(t *testing.T) {
 	e := newEnv(t)
-	raw, err := certificateWithSteps(e.composed(t, 2, irTimeOK).cert.InclusionProofs()[0].UC, 32)
+	raw, err := certificateWithSteps(e.composed(t, 2, irTimeOK).cert.InclusionProofs()[0].UC, 31)
 	require.NoError(t, err)
 	h, err := e.F.BuildToken(5, amt, manyKeys(8))
 	require.NoError(t, err)

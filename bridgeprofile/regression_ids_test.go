@@ -60,10 +60,10 @@ var priorCaseIDs = []string{
 	"envelope-offset-sibling-near-max",
 	"envelope-anchors-8",
 	"envelope-anchors-9",
-	"envelope-leaves-65",
-	"envelope-leaves-66",
-	"envelope-size-262144",
-	"envelope-size-262176",
+	"envelope-leaves-max",
+	"envelope-leaves-over-max",
+	"envelope-size-65536",
+	"envelope-size-65568",
 	"return-negative-integer",
 	"return-negative-integer-nonminimal",
 	"prepare-valid",
@@ -128,4 +128,4 @@ var priorCaseIDs = []string{
 }
 
 // priorCaseRename maps the prior IDs that changed to their replacement.
-var priorCaseRename = map[string]string{"derive-n160": "derive-n47"}
+var priorCaseRename = map[string]string{"derive-n160": "derive-n256", "envelope-two-anchors": "envelope-valid-two-anchors-one-shard", "envelope-anchors-8": "envelope-anchors-max", "envelope-anchors-9": "envelope-anchors-over-max"}
