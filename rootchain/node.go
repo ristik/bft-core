@@ -527,7 +527,13 @@ func (v *Node) verifyZKProof(ctx context.Context, req *certification.BlockCertif
 	// Verify proof: previousStateRoot -> newStateRoot transition with block hash
 	blockHash := ir.BlockHash
 	start := time.Now()
-	verifyErr := verifier.VerifyProof(req.ZkProof, previousStateRoot, newStateRoot, blockHash)
+	var verifyErr error
+	if rt, ok := verifier.(zkverifier.ReferenceTimeVerifier); ok {
+		// the stored leaf values bind the round's reference time, which is the request's input record timestamp
+		verifyErr = rt.VerifyProofAt(req.ZkProof, previousStateRoot, newStateRoot, blockHash, ir.Timestamp)
+	} else {
+		verifyErr = verifier.VerifyProof(req.ZkProof, previousStateRoot, newStateRoot, blockHash)
+	}
 	elapsed := time.Since(start)
 
 	if verifyErr != nil {
