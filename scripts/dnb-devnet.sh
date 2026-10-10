@@ -103,6 +103,8 @@ PY
     done
   fi
 
+  # DNB_PREP_ONLY=1: stop here, after every offline input exists (a lane dry run that starts no process and takes no port).
+  if [ -n "${DNB_PREP_ONLY:-}" ]; then info "prep only: genesis, profile, identities and aggregator shard configurations generated"; return 0; fi
   info "start one ureth per validator"
   for i in $(seq 1 "$validators"); do
     mkdir -p "test-nodes/reth$i"
