@@ -67,7 +67,7 @@ a light entity's EVM pair (shard node and Ureth stopped while every root runs; r
 without rollback: the pre-cut EVM block keeps its hash), the delay of the EVM shard's requests, duplication of the lights' traffic while the heavy is held (no replayed
 weight), a last-in-first-out release of the heavy's held traffic (reorder), the authentication-refusal representatives (`q4/auth-refusals.txt`), a quorum-wide SIGKILL
 and restart, and then the second handoff A to B on the same running chain with the first successor proposal held (`q4/first-successor-proposal.txt`), B in effect
-(`b-in-effect.txt`) and the EVM request-Q=5 rows under B. Scenario B adds its T2 record, EVM cuts, authentication refusals and quorum-wide restart. Every progress
+(`q4/b-in-effect.txt`) and the EVM request-Q=5 rows under B. Scenario B adds its T2 record, EVM cuts, authentication refusals and quorum-wide restart. Every progress
 assertion exports its latencies (`q4/timing.jsonl`, `q4/timing-summary.txt`: first and n-th increment, the largest gap, the TCs in the window), next to a no-fault
 control window at the same load.
 
@@ -100,6 +100,6 @@ Before any fault the lane also checks that the selector in effect is the weighte
   controls, retention and restart. Rollback below the finalized pair head is not exercised live.
 - Every in-process row is root consensus only: no EVM, no aggregator shard, restarts are close/reopen of fsynced stores (not SIGKILL, not
   power loss). The checker does not re-verify the signatures inside a carried QC (it weighs the QC's signers under their epoch); carried TCs and the HighQC inside a timeout are not weighed; equivocation is detected for votes and timeouts only, not proposals.
-- **The F8 EVM stop/resume callbacks are evidenced only in the lane preamble, in the unit epoch.** In the weighted epoch the lane shows that the aggregator shards stay served (their authorized TR rounds advance and the aggregators answer) and that each of the three shards certifies a new state root whose non-empty `aggregator_rsmt_v1` proof the weighted roots verify (row T1; the proof of a non-first block was empty before #539/#541 and #532). The lane does not stop the EVM in the weighted epoch.
+- **The F8 EVM stop/resume callbacks are evidenced only in the lane preamble, in the unit epoch.** In the weighted epoch the lane shows that the aggregator shards stay served (their authorized TR rounds advance and the aggregators answer) and that each of the three shards certifies a new state root whose non-empty `aggregator_rsmt_v1` proof the root that receives the certification request verifies (row T1; one root, not each root in consensus: the step name and its record say "the roots"; the proof of a non-first block was empty before #539/#541 and #532). The lane does not stop the EVM in the weighted epoch.
 - No non-member or removed-validator root runs in the live lane (all four roots stay members): the follower signing nothing and catching up on a real network is an explicit gap (row L5), blocked on the P85 slice 7 joiner run or an A to B removal handoff.
 - Mixed-HighQC TC is covered only by the unit-weight unit test, not weighted.

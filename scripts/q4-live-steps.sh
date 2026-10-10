@@ -542,8 +542,8 @@ q4_refusal_pattern() {
     impersonate | bad-signature | wrong-domain) echo 'signature verification (failed|error)' ;;
     unknown-signer) echo 'is not part of the trust base' ;;
     old-form) echo 'is scheme 1, epoch [0-9]+ requires scheme 2' ;;
-    old-epoch) echo 'message epoch [0-9]+, trust base epoch [0-9]+|is scheme [12], epoch [0-9]+ requires|invalid (timeout )?vote' ;;
-    future-epoch) echo 'failed to get trust base for (timeout|vote) verification|epoch [0-9]+ (is )?not found|no signing configuration|invalid (timeout )?vote' ;;
+    old-epoch) echo 'vote epoch differs from the weighting epoch: message epoch [0-9]+, trust base epoch [0-9]+' ;;
+    future-epoch) echo 'failed to get trust base for (timeout|vote) verification, epoch [0-9]+: trust base not found' ;;
     stale) echo 'stale (timeout )?vote for round' ;;
   esac
 }

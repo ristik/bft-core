@@ -1205,13 +1205,13 @@
      "kind": "lane",
      "label": "REAL-PROCESS",
      "step": "authentication refusals: impersonation of the heavy, unknown signer, bad signature, wrong domain, old form, wrong epoch both ways, stale: each refused, zero live weight",
-     "scope": "A: the heavy root held (live weight 3 < 7); a light root forges one message per variant next to its own timeouts/votes (the impersonation claims the heavy's weight 6); each variant's refusal is read from a receiving root's log and the committed round never moves; REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build (consensus shim and shard gate); crash model SIGKILL over the retained home (not a power loss)"
+     "scope": "A: the heavy root held (live weight 3 < 7); a light root forges one message per variant next to its own timeouts (all eight forged representatives are timeout messages: the roots are stalled, so no votes flow and the live lane forges no vote) (the impersonation claims the heavy's weight 6); each variant's refusal is read from a receiving root's log and the committed round never moves; REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build (consensus shim and shard gate); crash model SIGKILL over the retained home (not a power loss)"
     },
     {
      "kind": "lane",
      "label": "REAL-PROCESS",
      "step": "B: authentication refusals: impersonation of a weight-3 root, unknown signer, bad signature, wrong domain, old form, wrong epoch both ways, stale: each refused, zero live weight",
-     "scope": "scenario B: one weight-3 root held (live weight 6 < 7); the impersonation claims the held root's weight 3; REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build (consensus shim and shard gate); crash model SIGKILL over the retained home (not a power loss)",
+     "scope": "scenario B: one weight-3 root held (live weight 6 < 7); the impersonation claims the held root's weight 3; all eight forged representatives are timeout messages; REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build (consensus shim and shard gate); crash model SIGKILL over the retained home (not a power loss)",
      "lane": "b"
     },
     {
@@ -1444,7 +1444,7 @@
      "kind": "lane",
      "label": "REAL-PROCESS",
      "step": "F8 aggregator shards certify new state roots in the weighted epoch; the roots verify their rsmt proofs (T1)",
-     "scope": "after the activation: each of the three aggregator shards certifies a new state root on a non-first block and the weighted roots verify a non-empty aggregator_rsmt_v1 proof for it, none rejected (the proof that was empty before #539/#541 and #532: the rsmt new-leaf values are derived from the declared transaction hash and IR.Timestamp, and the lane's aggregators attach the proof, AGGREGATOR_CONSISTENCY_PROOF_MODE=rsmt on the disk SMT backend). The EVM stop/resume callbacks are not repeated in the weighted epoch: they stay the unit-epoch item above"
+     "scope": "after the activation: each of the three aggregator shards certifies a new state root on a non-first block and the root that receives its certification request (one root of the weighted epoch, not each root in consensus; the step name and its record say \"the roots\") verifies a non-empty aggregator_rsmt_v1 proof for it, none rejected (the proof that was empty before #539/#541 and #532: the rsmt new-leaf values are derived from the declared transaction hash and IR.Timestamp, and the lane's aggregators attach the proof, AGGREGATOR_CONSISTENCY_PROOF_MODE=rsmt on the disk SMT backend). The EVM stop/resume callbacks are not repeated in the weighted epoch: they stay the unit-epoch item above"
     },
     {
      "kind": "lane-file",
@@ -1454,7 +1454,7 @@
       "all three aggregator shards certified new state roots; the roots verified a non-empty aggregator rsmt proof for each",
       "and rejected none"
      ],
-     "scope": "the step's own record: the three state-changing requests and the distinct (partition, shard) pairs whose non-empty proofs the roots verified"
+     "scope": "the step's own record: the three state-changing requests and the distinct (partition, shard) pairs whose non-empty proofs the receiving root verified (read from every root's log; one root logs them)"
     }
    ]
   },
@@ -1837,13 +1837,13 @@
      "kind": "lane",
      "label": "REAL-PROCESS (rest)",
      "step": "authentication refusals: impersonation of the heavy, unknown signer, bad signature, wrong domain, old form, wrong epoch both ways, stale: each refused, zero live weight",
-     "scope": "A: the heavy root held (live weight 3 < 7); a light root forges one message per variant next to its own timeouts/votes (the impersonation claims the heavy's weight 6); each variant's refusal is read from a receiving root's log and the committed round never moves; REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build (consensus shim and shard gate); crash model SIGKILL over the retained home (not a power loss)"
+     "scope": "A: the heavy root held (live weight 3 < 7); a light root forges one message per variant next to its own timeouts (all eight forged representatives are timeout messages: the roots are stalled, so no votes flow and the live lane forges no vote) (the impersonation claims the heavy's weight 6); each variant's refusal is read from a receiving root's log and the committed round never moves; REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build (consensus shim and shard gate); crash model SIGKILL over the retained home (not a power loss)"
     },
     {
      "kind": "lane",
      "label": "REAL-PROCESS (rest)",
      "step": "B: authentication refusals: impersonation of a weight-3 root, unknown signer, bad signature, wrong domain, old form, wrong epoch both ways, stale: each refused, zero live weight",
-     "scope": "scenario B: one weight-3 root held (live weight 6 < 7); the impersonation claims the held root's weight 3; REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build (consensus shim and shard gate); crash model SIGKILL over the retained home (not a power loss)",
+     "scope": "scenario B: one weight-3 root held (live weight 6 < 7); the impersonation claims the held root's weight 3; all eight forged representatives are timeout messages; REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build (consensus shim and shard gate); crash model SIGKILL over the retained home (not a power loss)",
      "lane": "b"
     },
     {
