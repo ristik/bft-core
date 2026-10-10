@@ -24,7 +24,7 @@ m2_wait_root_epoch() {
   return 1
 }
 
-m2_start_root() {
+m2_start_root() { # node installEpoch bootnode  (an empty install epoch starts a root that is not yet a member: a follower of the committee, as a joiner does before its Commit)
   local node=$1 epoch=$2 boot=$3 port pid i conf
   local -a shardConfArgs=(--shard-conf "$fullShardConf")
   local -a bootArgs=()
@@ -41,7 +41,7 @@ m2_start_root() {
     UBFT_Q4_SHIM_DIR="${Q4_SHIM_DIR:+$Q4_SHIM_DIR/root$node}" ${Q4_ROOT_BIN:-build/ubft} root-node run --home "test-nodes/root$node" \
       --address "/ip4/127.0.0.1/tcp/$(m2_p2p_port "$node")" \
       ${bootArgs[@]+"${bootArgs[@]}"} --trust-base test-nodes/trust-base.json \
-      "${shardConfArgs[@]}" --profile-2 --install-handoff-epoch "$epoch" \
+      "${shardConfArgs[@]}" --profile-2 ${epoch:+--install-handoff-epoch "$epoch"} \
       --rpc-server-address "127.0.0.1:$port" --log-format text --log-level debug \
       >>"test-nodes/root$node/debug.log" 2>&1 &
     pid=$!
