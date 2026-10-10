@@ -2,6 +2,8 @@ package zkverifier
 
 import (
 	"fmt"
+	"sort"
+	"strings"
 	"sync"
 
 	"github.com/unicitynetwork/bft-go-base/types"
@@ -12,6 +14,10 @@ type registryCacheKey struct {
 	PartitionID types.PartitionID
 	ShardID     string // ShardID.Key()
 	Epoch       uint64
+	// Params is the canonical form of the partition parameters the verifier was built from: the choice is a function of the arguments only, so
+	// two roots that reach the same key with different parameters (one ran through an epoch change, another restarted after it) cannot judge a
+	// request differently
+	Params string
 }
 
 // Registry manages ZK verifiers for partitions, caching them by partition+shard+epoch.
@@ -39,6 +45,7 @@ func (r *Registry) GetVerifier(partitionID types.PartitionID, shardID types.Shar
 		PartitionID: partitionID,
 		ShardID:     shardID.Key(),
 		Epoch:       epoch,
+		Params:      canonicalParams(params),
 	}
 
 	// Check cache first
@@ -117,17 +124,15 @@ func (r *Registry) createVerifier(params map[string]string) (ZKVerifier, error) 
 	}
 }
 
-// InvalidateCache removes the cached verifier for the given partition+shard+epoch.
+// InvalidateCache removes the cached verifiers (whatever their parameters) for the given partition+shard+epoch.
 // Call this when partition configuration changes.
 func (r *Registry) InvalidateCache(partitionID types.PartitionID, shardID types.ShardID, epoch uint64) {
-	key := registryCacheKey{
-		PartitionID: partitionID,
-		ShardID:     shardID.Key(),
-		Epoch:       epoch,
-	}
-
 	r.mu.Lock()
-	delete(r.cache, key)
+	for key := range r.cache {
+		if key.PartitionID == partitionID && key.ShardID == shardID.Key() && key.Epoch == epoch {
+			delete(r.cache, key)
+		}
+	}
 	r.mu.Unlock()
 }
 
@@ -136,4 +141,18 @@ func (r *Registry) ClearCache() {
 	r.mu.Lock()
 	r.cache = make(map[registryCacheKey]ZKVerifier)
 	r.mu.Unlock()
+}
+
+// canonicalParams is the parameters as one string independent of map order.
+func canonicalParams(params map[string]string) string {
+	keys := make([]string, 0, len(params))
+	for k := range params {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	var b strings.Builder
+	for _, k := range keys {
+		fmt.Fprintf(&b, "%d:%s=%d:%s;", len(k), k, len(params[k]), params[k])
+	}
+	return b.String()
 }

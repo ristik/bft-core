@@ -161,3 +161,25 @@ func TestRegistry_GetVerifier_LightClientMissingChainID(t *testing.T) {
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "chain_id required")
 }
+
+// The verifier is a function of its arguments only: the same partition, shard and epoch with other parameters is another verifier, whichever
+// call filled the cache first (a root that ran through an epoch change and one restarted after it judge a request alike).
+func TestRegistry_GetVerifier_SameKeyOtherParamsIsAnotherVerifier(t *testing.T) {
+	none := map[string]string{ParamProofType: string(ProofTypeNone)}
+	rsmt := map[string]string{ParamProofType: string(ProofTypeAggregatorRSMTv1)}
+	for name, order := range map[string][]map[string]string{"none first": {none, rsmt}, "rsmt first": {rsmt, none}} {
+		t.Run(name, func(t *testing.T) {
+			r := NewRegistry()
+			for _, params := range order {
+				v, err := r.GetVerifier(1, types.ShardID{}, 4, params)
+				require.NoError(t, err)
+				require.Equal(t, ParseProofTypeFromParams(params) == ProofTypeAggregatorRSMTv1, v.IsEnabled(), "params %v", params)
+			}
+			// and each is still cached under its own parameters
+			a, _ := r.GetVerifier(1, types.ShardID{}, 4, rsmt)
+			b, _ := r.GetVerifier(1, types.ShardID{}, 4, map[string]string{ParamProofType: string(ProofTypeAggregatorRSMTv1)})
+			require.Same(t, a, b)
+		})
+	}
+	require.NotEqual(t, canonicalParams(map[string]string{"a": "b=c"}), canonicalParams(map[string]string{"a=b": "c"}), "no ambiguity between keys and values")
+}

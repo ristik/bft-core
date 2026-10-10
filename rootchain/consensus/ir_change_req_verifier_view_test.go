@@ -27,12 +27,21 @@ type viewTarget struct {
 
 func newViewTarget(t *testing.T, round uint64, purpose storage.RequestPurpose) *viewTarget {
 	t.Helper()
+	return newViewTargetWith(t, round, purpose, nil, nil)
+}
+
+// newViewTargetWith is newViewTarget with the shard's partition parameters and, when given, the root its previous state has.
+func newViewTargetWith(t *testing.T, round uint64, purpose storage.RequestPurpose, params map[string]string, rootHash []byte) *viewTarget {
+	t.Helper()
 	nodes, infos := testutils.CreateTestNodes(t, 3)
 	pdr := &types.PartitionDescriptionRecord{Version: 1, NetworkID: 5, PartitionID: 1, PartitionTypeID: 1, ShardID: types.ShardID{},
-		UnitIDLen: 256, TypeIDLen: 32, T2Timeout: 2500 * time.Millisecond, Validators: infos}
+		UnitIDLen: 256, TypeIDLen: 32, T2Timeout: 2500 * time.Millisecond, Validators: infos, PartitionParams: params}
 	si, err := storage.NewShardInfo(pdr, crypto.SHA256)
 	require.NoError(t, err)
 	si.RootHash = bytes.Repeat([]byte{0x5C}, 32)
+	if rootHash != nil {
+		si.RootHash = rootHash
+	}
 	ir := &types.InputRecord{Version: 1, RoundNumber: si.TR.Round, PreviousHash: []byte{1}, Hash: si.RootHash, BlockHash: []byte{2}, SummaryValue: []byte{3}, Timestamp: 1000}
 	si.LastCR = &certification.CertificationResponse{Partition: 1, Technical: si.TR, UC: types.UnicityCertificate{Version: 1, InputRecord: ir,
 		UnicitySeal: &types.UnicitySeal{Version: 1, NetworkID: 5, RootChainRoundNumber: 10, Timestamp: 1000, Hash: []byte{4}}}}
