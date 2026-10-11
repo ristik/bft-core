@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"os"
@@ -9,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	"github.com/unicitynetwork/bft-core/b1state"
 	"github.com/unicitynetwork/bft-core/internal/testutils/b1fixture"
 	"github.com/unicitynetwork/bft-core/internal/testutils/certifiedchain"
 )
@@ -183,4 +185,32 @@ func TestVerifyFlagThroughTheCommand(t *testing.T) {
 	require.ErrorIs(t, invoke("--profile", profile, "--root-genesis", root, "--shard-conf", shard, "--verify", bad), ErrDeployedCode)
 	require.Error(t, invoke("--profile", profile, "--root-genesis", root, "--shard-conf", shard), "neither --out nor --verify")
 	require.Error(t, invoke("--profile", profile, "--root-genesis", root, "--shard-conf", shard, "--verify", good, "--out", filepath.Join(dir, "x")), "both")
+}
+
+// The profile file `ubft engine-api b1-profile` writes (0x-hex hashes) is read as the same profile as the array form of b1state.Profile.
+func TestReadProfileAcceptsTheUbftHexFile(t *testing.T) {
+	f := b1fixture.New(t, 0)
+	dir := t.TempDir()
+	arrays, err := json.Marshal(f.Pair.Profile)
+	require.NoError(t, err)
+	p := f.Pair.Profile
+	hexFile, err := json.Marshal(map[string]any{
+		"network": p.Network, "rootGenesisId": "0x" + hex.EncodeToString(p.RootGenesisID[:]), "executionChainId": p.ExecutionChainID,
+		"runtimeHash": "0x" + hex.EncodeToString(p.RuntimeHash[:]), "compilerHash": "0x" + hex.EncodeToString(p.CompilerHash[:]),
+		"wCert": p.WCert, "deltaEv": p.DeltaEV, "deltaHold": p.DeltaHold, "systemGas": p.SystemGas, "forcedGas": p.ForcedGas, "maxGas": p.MaxGas,
+		"ordinaryCapacity": p.OrdinaryCapacity, "restGas": p.RestGas, "companionBytes": p.CompanionBytes,
+		"otherCompanionBytes": p.OtherCompanionBytes, "genesisUcTime": p.GenesisUCTime,
+	})
+	require.NoError(t, err)
+	for name, raw := range map[string][]byte{"arrays": arrays, "hex": hexFile} {
+		path := filepath.Join(dir, name+".json")
+		require.NoError(t, os.WriteFile(path, raw, 0600))
+		var got b1state.Profile
+		require.NoError(t, readProfile(path, &got), name)
+		hashWant, err := p.Hash()
+		require.NoError(t, err)
+		hashGot, err := got.Hash()
+		require.NoError(t, err)
+		require.Equal(t, hashWant, hashGot, name)
+	}
 }

@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/unicitynetwork/bft-core/b1registry"
 	"github.com/unicitynetwork/bft-core/b1state"
@@ -24,7 +25,7 @@ func main() {
 	}
 }
 func run() error {
-	profile := flag.String("profile", "", "complete b1state.Profile JSON (hashes are 32-byte arrays)")
+	profile := flag.String("profile", "", "complete b1state.Profile JSON: hashes as 32-byte arrays, or the 0x-hex file `ubft engine-api b1-profile` writes")
 	root := flag.String("root-genesis", "", "pinned self-signed RootTrustBaseV1 JSON")
 	shard := flag.String("shard-conf", "", "unbound PartitionDescriptionRecord JSON")
 	out := flag.String("out", "", "new output directory")
@@ -43,7 +44,7 @@ func run() error {
 	var p b1state.Profile
 	var tb types.RootTrustBaseV1
 	var conf types.PartitionDescriptionRecord
-	if err := read(*profile, &p); err != nil {
+	if err := readProfile(*profile, &p); err != nil {
 		return err
 	}
 	if err := read(*root, &tb); err != nil {
@@ -117,5 +118,52 @@ func verifyFile(g *registrygenesis.Genesis, full *types.PartitionDescriptionReco
 	code, _ := b1registry.Runtime()
 	fmt.Printf("b1genesis verify: the deployed registry account matches the regeneration (code %d bytes keccak %s, %d storage words, none extra or missing); the whole genesis validates as the B1 origin\n",
 		len(code), crypto.Keccak256Hash(code).Hex(), words)
+	return nil
+}
+
+// readProfile reads a profile in either JSON form: b1state.Profile's own (hashes as arrays of numbers), or the file `ubft engine-api b1-profile`
+// writes (0x-prefixed hex hashes and addresses, the recorded election measurement and caps beside the fields).
+func readProfile(path string, p *b1state.Profile) error {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	if json.Unmarshal(b, p) == nil {
+		return nil
+	}
+	var f struct {
+		Network             uint16          `json:"network"`
+		RootGenesisID       common.Hash     `json:"rootGenesisId"`
+		ExecutionChainID    uint64          `json:"executionChainId"`
+		RuntimeHash         common.Hash     `json:"runtimeHash"`
+		CompilerHash        common.Hash     `json:"compilerHash"`
+		WCert               uint64          `json:"wCert"`
+		DeltaEV             uint64          `json:"deltaEv"`
+		DeltaHold           uint64          `json:"deltaHold"`
+		SystemGas           uint64          `json:"systemGas"`
+		ForcedGas           uint64          `json:"forcedGas"`
+		MaxGas              uint64          `json:"maxGas"`
+		OrdinaryCapacity    uint64          `json:"ordinaryCapacity"`
+		RestGas             uint64          `json:"restGas"`
+		CompanionBytes      uint64          `json:"companionBytes"`
+		OtherCompanionBytes uint64          `json:"otherCompanionBytes"`
+		GenesisUCTime       uint64          `json:"genesisUcTime"`
+		RecordsCustody      common.Address  `json:"recordsCustody"`
+		HRecords            uint32          `json:"hRecords"`
+		HookRecordGas       uint64          `json:"hookRecordGas"`
+		ElectionContract    common.Address  `json:"electionContract"`
+		ElectGas            uint64          `json:"electGas"`
+		ElectMeasurement    json.RawMessage `json:"electMeasurement"`
+		ElectCaps           json.RawMessage `json:"electCaps"`
+	}
+	if err := json.Unmarshal(b, &f); err != nil {
+		return fmt.Errorf("the profile %s is in neither JSON form: %w", path, err)
+	}
+	*p = b1state.Profile{Network: f.Network, RootGenesisID: f.RootGenesisID, ExecutionChainID: f.ExecutionChainID,
+		RuntimeHash: f.RuntimeHash, CompilerHash: f.CompilerHash, WCert: f.WCert, DeltaEV: f.DeltaEV, DeltaHold: f.DeltaHold,
+		SystemGas: f.SystemGas, ForcedGas: f.ForcedGas, MaxGas: f.MaxGas, OrdinaryCapacity: f.OrdinaryCapacity, RestGas: f.RestGas,
+		CompanionBytes: f.CompanionBytes, OtherCompanionBytes: f.OtherCompanionBytes, GenesisUCTime: f.GenesisUCTime,
+		RecordsCustody: f.RecordsCustody, HRecords: f.HRecords, HookRecordGas: f.HookRecordGas,
+		ElectionContract: f.ElectionContract, ElectGas: f.ElectGas}
 	return nil
 }
