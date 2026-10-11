@@ -350,3 +350,26 @@ func TestARecapturedCheckpointIsComparedBySignatureStrippedIdentity(t *testing.T
 		require.Equal(t, stored, after, "the first copy is what is served")
 	})
 }
+
+// The install of the epoch anchor replaces the committed root by a synthetic one without a commit certificate; the stored canonical
+// checkpoint must still be served after it, and after a restart over the same store (P85 run 23: the closure of epoch 1 is built after
+// the install restart).
+func TestTheCheckpointIsServedAfterTheEpochAnchorIsInstalled(t *testing.T) {
+	f := newAssignmentFixture(t)
+	f.useRealOrchestration(t)
+	f.seedFees(t)
+	h := f.commitAssignment(t)
+	_, _, rec, err := f.store.HandoffCheckpoint()
+	require.NoError(t, err, "before the install")
+	raw, err := f.store.storage.(interface{ HandoffCheckpoint(uint64) ([]byte, error) }).HandoffCheckpoint(rec.Epoch + 1)
+	require.NoError(t, err)
+	require.NotEmpty(t, raw, "the checkpoint is stored")
+	_, err = f.store.InstallEpochAnchor(h.head, h.verified, h.genesis)
+	require.NoError(t, err)
+	_, _, _, err = f.store.HandoffCheckpoint()
+	require.NoError(t, err, "after the install")
+	s, err := New(crypto.SHA256, f.store.storage, f.orch, logger.New(t), ProfileHandoff)
+	require.NoError(t, err)
+	_, _, _, err = s.HandoffCheckpoint()
+	require.NoError(t, err, "after the restart")
+}

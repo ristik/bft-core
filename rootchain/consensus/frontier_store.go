@@ -16,6 +16,25 @@ type frontierPersistentStore struct {
 	reader  frontierSafetyReader
 }
 
+// The optional store capabilities the root code asserts for on the block store or GetDB (`x.(...)`): the proxy must have each, or the
+// assertion fails silently and the feature behind it is a no-op. A compile error here is the loud form of that loss.
+var _ interface {
+	StoreHandoffBody([]byte, []byte) error
+	HandoffBody([]byte) ([]byte, error)
+	StoreHandoffReceipts([]byte, []byte) error
+	HandoffReceipts([]byte) ([]byte, error)
+	StoreHandoffCandidate([]byte, []byte) error
+	HandoffCandidate([]byte) ([]byte, error)
+	StoreHandoffCheckpoint(uint64, []byte) error
+	HandoffCheckpoint(uint64) ([]byte, error)
+	handoffBundleArchive
+	epochAnchorSafetyStore
+	InstallEpochAnchorRoot(*storage.ExecutedBlock, *drctypes.EpochAnchor) error
+	storage.RecordStore
+	storage.CutStore
+	storage.BlockCommitter
+} = (*frontierPersistentStore)(nil)
+
 func (s *frontierPersistentStore) fault(err error) error {
 	if err != nil {
 		s.sampler.latchFault()
@@ -212,6 +231,22 @@ func (s *frontierPersistentStore) HandoffCandidate(id []byte) ([]byte, error) {
 		return store.HandoffCandidate(id)
 	}
 	return nil, nil // callers treat a store with no candidates as having none
+}
+
+// StoreHandoffCheckpoint and HandoffCheckpoint forward the canonical handoff checkpoint. Without them the block tree sees no checkpoint
+// retention, captures nothing, and serves the current root, which is the committing block only until the next commit.
+func (s *frontierPersistentStore) StoreHandoffCheckpoint(epoch uint64, data []byte) error {
+	if store, ok := s.PersistentStore.(interface{ StoreHandoffCheckpoint(uint64, []byte) error }); ok {
+		return store.StoreHandoffCheckpoint(epoch, data)
+	}
+	return storage.ErrHandoffRecord
+}
+
+func (s *frontierPersistentStore) HandoffCheckpoint(epoch uint64) ([]byte, error) {
+	if store, ok := s.PersistentStore.(interface{ HandoffCheckpoint(uint64) ([]byte, error) }); ok {
+		return store.HandoffCheckpoint(epoch)
+	}
+	return nil, storage.ErrHandoffRecord
 }
 
 func (s *frontierPersistentStore) StoreHandoffBundle(epoch uint64, data []byte) error {

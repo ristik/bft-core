@@ -37,7 +37,7 @@ go test -json -count=1 ./rootchain/... ./cli/ubft/cmd/ ./cmd/... -timeout 60m \
   -run '^(TestQ4|TestQ3|TestMessageRounds|TestWeighted|TestSkewedWeight|TestTwoRestarted|TestProductionBuild|TestT2|TestPartitionTimeout|TestPacemaker|TestVoteRegister|TestOldForm|TestInstallVerified|TestNoSignature|TestCheck|TestLeaderAfter|TestTableCache|TestAJoinerRoot)' > out/tests.json
 Q4_COST_OUT="$PWD/out/cost.json" go test -count=1 ./rootchain/consensus/leader/ -run Q4
 go run ./cmd/q4report -matrix docs/pos/q4-acceptance-matrix.json -tests out/tests.json -bundles out/bundles -cost out/cost.json \
-  -lane <scenario A evidence dir> -lanes b=<scenario B evidence dir>,a2=<heavy on root 2>,a3=<heavy on root 3>,a4=<heavy on root 4>,q3=<Q3 weight-activation lane evidence dir>,g2=<scenario A run with the G2 rollback step>,g2b=<scenario B run with the G2 rollback step> \
+  -lane <scenario A evidence dir> -lanes b=<scenario B evidence dir>,a2=<heavy on root 2>,a3=<heavy on root 3>,a4=<heavy on root 4>,q3=<Q3 weight-activation lane evidence dir>,g2=<scenario A run with the G2 rollback step>,g2b=<scenario B run with the G2 rollback step>,b3=<B3 two-shard live lane evidence dir> \
   -out out/report.md -json out/report.json
 ```
 
@@ -46,6 +46,15 @@ gap remains (that is the #51 closure check), 2 a read error. A row can claim a c
 `ORACLE-ONLY`, `MEASURED`, `STATIC`) only through passed evidence carrying it; a required label with neither evidence nor a reasoned gap
 fails the run. Outcome (pass/fail) stays separate from the assumption class (`IN-BOUND`, `OUTSIDE-ASSUMPTIONS`): an outside-the-assumptions
 row passes when the injection happened and was classified, and proves no safety guarantee.
+
+## G2's native UC verification (owner decision §20)
+
+G2's last gap, "native UC cryptographic verification where used", is the B1 precompile (`0x0100`, UC_V1) verifying a real Unicity Certificate inside
+ureth on a live devnet. The owner confirmed this reading (owner question Q6, answered 2026-10-11, `briefs/owner-decisions-2026-10-07.md` §20: verification in the EVM of
+certificates and tokens sharing the system's root of trust, by enshrined host-level builtins), so the row has no gap on it. The evidence is the B3 two-shard live lane (ristik/native-bridge-plugins
+`tests/live`, `scripts/dnb-devnet.sh` with `DNB_AGG_SHARDS=2`): the named lane `b3` reads that run's `rows.log` (a two-anchor redemption that made two `0x0100` calls whose
+B1 verdicts at the execution block are valid), `lane.log` and `ureth-attestation.json` (the cited run's rows exit was 1 on one unrelated gas-1 assertion; its run mode was recorded after the run, not by the runner). Its evidence directory must carry `run-mode.txt` beginning
+`B3 run mode: clean build (evidence run` like the Q4 lane's, or the report refuses it as a development run.
 
 ## The live lane run
 
@@ -101,8 +110,8 @@ Before any fault the lane also checks that the selector in effect is the weighte
   certification requests (only the requests: the nodes' handshakes pass, so their subscriptions at the roots stay alive), so a sealed block carrying a paid transaction, verified VALID by all four execution clients, is not certified; a different block on the same
   parent is certified after the release, every pair holds it, `finalized` never decreases and the transaction has one receipt. This is rollback to the finalized head.
   A pair never un-commits (a block becomes canonical and final in one step, only with its UC), and a build below the finalized head is refused (the Q3 pair controls).
-  Still open: "native UC cryptographic verification where used" is not evidenced. The working reading (owner question Q6, not yet confirmed) is the B1 precompile
-  (`0x0100`, UC_V1) verifying a real certificate inside the execution client on a live devnet; the row stays PARTIAL until a passing B3 two-shard live lane run is cited.
+  "Native UC cryptographic verification where used" is the B1 precompile (`0x0100`, UC_V1) verifying a real certificate inside the execution client on a live devnet (owner
+  decision §20); it is evidenced by the B3 two-shard live lane (named lane `b3`, see "G2's native UC verification").
 - Every in-process row is root consensus only: no EVM, no aggregator shard, restarts are close/reopen of fsynced stores (not SIGKILL, not
   power loss). The checker does not re-verify the signatures inside a carried QC (it weighs the QC's signers under their epoch); carried TCs and the HighQC inside a timeout are not weighed; equivocation is detected for votes and timeouts only, not proposals.
 - **The F8 EVM stop/resume callbacks are evidenced only in the lane preamble, in the unit epoch.** In the weighted epoch the lane shows that the aggregator shards stay served (their authorized TR rounds advance and the aggregators answer) and that each of the three shards certifies a new state root whose non-empty `aggregator_rsmt_v1` proof the root that receives the certification request verifies (row T1; the recorded run is on a head before #547 and shows the check at intake, by one root, not by each root in consensus: the step name and its record say "the roots"; that every voting root re-verifies the proof before it votes is #545, fixed by #547 and covered by its tests, not by this run; the same step also passes on a post-#547 head (`-lanes g2=<dir>`), where still only the receiving root logs the check, because the re-verification before voting writes no log line; the proof of a non-first block was empty before #539/#541 and #532). The lane does not stop the EVM in the weighted epoch.

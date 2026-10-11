@@ -108,14 +108,26 @@ type Proposer struct {
 	Deployment storage.PosDeployment
 }
 
-func (p Proposer) Closure(closedEpoch, orderingEpoch, orderingRound uint64) (rctypes.PosControl, []byte, error) {
+// WitnessSource is a BundleSource that serves the canonical witness itself, whatever the body version of the handoff.
+type WitnessSource interface {
+	ClosureWitness(ctx context.Context, epoch uint64) ([]byte, error)
+}
+
+func (p Proposer) witness(closedEpoch uint64) ([]byte, error) {
+	if src, ok := p.Source.(WitnessSource); ok {
+		return src.ClosureWitness(context.Background(), closedEpoch+1)
+	}
 	bundle, err := p.Source.HandoffBundle(context.Background(), closedEpoch+1)
 	if err != nil || bundle == nil {
-		return rctypes.PosControl{}, nil, errors.Join(ErrHistory, fmt.Errorf("terminal bundle of epoch %d", closedEpoch), err)
+		return nil, errors.Join(ErrHistory, err)
 	}
-	raw, err := handoffdelivery.EncodeBundle(*bundle)
+	return handoffdelivery.EncodeBundle(*bundle)
+}
+
+func (p Proposer) Closure(closedEpoch, orderingEpoch, orderingRound uint64) (rctypes.PosControl, []byte, error) {
+	raw, err := p.witness(closedEpoch)
 	if err != nil {
-		return rctypes.PosControl{}, nil, err
+		return rctypes.PosControl{}, nil, errors.Join(ErrHistory, fmt.Errorf("terminal bundle of epoch %d", closedEpoch), err)
 	}
 	ev, err := p.Authority.Verifier.Verify(raw, closedEpoch)
 	if err != nil {

@@ -437,6 +437,7 @@ func rootNodeRun(ctx context.Context, flags *rootNodeRunFlags) error {
 		if flags.RPCServerAddress == "" {
 			return nil // do not kill the group!
 		}
+		warnIfRPCExposed(log, "root", flags.RPCServerAddress)
 
 		mux := http.NewServeMux()
 		if pr := flags.observe.PrometheusRegisterer(); pr != nil {

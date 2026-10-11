@@ -289,7 +289,7 @@ func (x *ConsensusManager) HandoffBundle(_ context.Context, epoch uint64) (*hand
 	}
 	head, path, record, err := x.blockStore.HandoffCheckpoint()
 	if err != nil || record.Epoch+1 != epoch {
-		return nil, handoffdelivery.ErrBundle
+		return nil, errors.Join(handoffdelivery.ErrBundle, fmt.Errorf("handoff checkpoint into epoch %d (record epoch %d)", epoch, record.Epoch), err)
 	}
 	rawBody, err := x.blockStore.HandoffBody(record.NextBodyID)
 	if err != nil {
@@ -308,7 +308,7 @@ func (x *ConsensusManager) HandoffBundle(_ context.Context, epoch uint64) (*hand
 		Candidate: candidate}
 	old, err := x.trustBaseStore.GetByEpoch(record.Epoch)
 	if err != nil || len(head.ShardInfo) == 0 {
-		return nil, handoffdelivery.ErrBundle
+		return nil, errors.Join(handoffdelivery.ErrBundle, errors.New("trust base of the old epoch or the checkpoint's shard entries unavailable"), err)
 	}
 	first := head.ShardInfo[0]
 	if _, err := verifyHandoffBundle(x.trustBaseStore, bundle, old, first.Partition, first.Shard, first.ShardConfHash); err != nil {
@@ -324,6 +324,27 @@ func (x *ConsensusManager) HandoffBundle(_ context.Context, epoch uint64) (*hand
 		}
 	}
 	return &bundle, nil
+}
+
+// ClosureWitness is the canonical witness of the terminal handoff into epoch: the V3 witness of a Q3 root (whose activation is not a V2
+// bundle), the encoded V2 bundle otherwise.
+func (x *ConsensusManager) ClosureWitness(ctx context.Context, epoch uint64) ([]byte, error) {
+	if x.q3 == nil {
+		bundle, err := x.HandoffBundle(ctx, epoch)
+		if err != nil {
+			return nil, err
+		}
+		return handoffdelivery.EncodeBundle(*bundle)
+	}
+	link, head, candidate, err := x.Q3ActivationEvidence(epoch)
+	if err != nil {
+		return nil, err
+	}
+	var proof handoff.OldCommitProof
+	if err := basetypes.Cbor.Unmarshal(link.Proof, &proof); err != nil {
+		return nil, fmt.Errorf("retained commit proof: %w", err)
+	}
+	return handoffdelivery.EncodeWitnessV3(handoffdelivery.WitnessV3{Proof: proof, Body: link.Body.Encode(), Snapshot: head, Candidate: candidate})
 }
 
 func (x *ConsensusManager) matchesInstalledAnchor(a *rctypes.EpochAnchor) bool {

@@ -202,13 +202,6 @@
     "REAL-PROCESS (rest)",
     "REAL-PROCESS (native UC check)"
    ],
-   "gaps": [
-    {
-     "label": "REAL-PROCESS (native UC check)",
-     "reason": "'Native UC cryptographic verification where used' is not evidenced here. Working reading (owner question Q6, 2026-10-11, not yet confirmed by the owner): it is the B1 precompile (0x0100, UC_V1) verifying a real Unicity Certificate inside the execution client on a live devnet, which the B3 two-shard live lane exercises. No Q4 lane step is aimed at it; the gap closes by citing a passing evidence-grade B3 live lane run, which does not exist yet. The rollback half of this gap is evidenced by the G2 rollback step below (rollback to the finalized head) and by the Q3 pair controls (a build below the finalized head is refused: the unchanged rebuild passes the pair gate and the engine answers 'Too deep reorg', which the tool reports as acceptance of the gate, not of a built payload). A pair never un-commits: a block is made canonical and final in one step, only with its UC.",
-     "blockedBy": "a passing evidence-grade B3 two-shard live lane run (B1 0x0100 UC_V1 verification live); owner question Q6"
-    }
-   ],
    "evidence": [
     {
      "kind": "lane",
@@ -370,6 +363,38 @@
       "\"problems\": []"
      ],
      "scope": "the judge's verdict, from the pairs' RPC samples and the shard nodes' logs (sealed, verified VALID, certificate admitted) (scenario B run)"
+    },
+    {
+     "kind": "lane-file",
+     "label": "REAL-PROCESS (native UC check)",
+     "lane": "b3",
+     "path": "rows.log",
+     "contains": [
+      "PASS gas: reference redemption (two anchors) {\"anchors\":2,\"leaves\":3,\"gasUsed\":\"3112129\",\"gateTotal\":3864866,\"credited\":\"1000000000000000000\",\"nativeCalls\":{\"uc\":2",
+      "\"verdictAtBlock\":\"1/valid\""
+     ],
+     "scope": "a redemption with two anchors executed on the chain made two 0x0100 calls and the B1 verdict of each anchor's UC_V1 request at the execution block is valid; the B1 precompile 0x0100 (UC_V1) verifying a real Unicity Certificate inside ureth on a live devnet: the B3 two-shard lane (owner decision §20 of briefs/owner-decisions-2026-10-07.md, Q6 answered 2026-10-11: native UC cryptographic verification is verification in the EVM of certificates and tokens sharing the system's root of trust, provided by enshrined host-level builtins; this is the reading the evidence answers). ; cited for the UC verification rows only: the run's rows exit was 1 because one unrelated gas-1 assertion failed in it (since revised) (B3 two-shard live lane run)"
+    },
+    {
+     "kind": "lane-file",
+     "label": "REAL-PROCESS (native UC check)",
+     "lane": "b3",
+     "path": "lane.log",
+     "contains": [
+      "PASS claim paid"
+     ],
+     "scope": "the lane's one-anchor round trip (lock, mint, transfer, burn, redeem through the native UC and RSMT calls, claim) passed; the B1 precompile 0x0100 (UC_V1) verifying a real Unicity Certificate inside ureth on a live devnet: the B3 two-shard lane (owner decision §20 of briefs/owner-decisions-2026-10-07.md, Q6 answered 2026-10-11: native UC cryptographic verification is verification in the EVM of certificates and tokens sharing the system's root of trust, provided by enshrined host-level builtins; this is the reading the evidence answers). (B3 two-shard live lane run)"
+    },
+    {
+     "kind": "lane-file",
+     "label": "REAL-PROCESS (native UC check)",
+     "lane": "b3",
+     "path": "ureth-attestation.json",
+     "contains": [
+      "efee0f8a24ee118ea1b5e89e38601bae99992143313c54fccac4fde517b5022a",
+      "47f5146b59c01e2180aa66b250ec87330231658d"
+     ],
+     "scope": "the attested ureth the lane ran (sha256 and reported commit, provenance directory recorded); the B1 precompile 0x0100 (UC_V1) verifying a real Unicity Certificate inside ureth on a live devnet: the B3 two-shard lane (owner decision §20 of briefs/owner-decisions-2026-10-07.md, Q6 answered 2026-10-11: native UC cryptographic verification is verification in the EVM of certificates and tokens sharing the system's root of trust, provided by enshrined host-level builtins; this is the reading the evidence answers). ; the run mode in the evidence directory was recorded after the run from the attestation, not by the runner (B3 two-shard live lane run)"
     }
    ]
   },
