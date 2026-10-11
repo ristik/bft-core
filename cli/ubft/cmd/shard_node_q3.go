@@ -423,7 +423,7 @@ func (s *shardQ3Staging) checkStaged(body q3format.BodyV3, digest [32]byte, req 
 		}
 		prior, err := q3format.Prior{Network: body.Network, Epoch: epoch, BodyVersion: version, Identity: id[:]}.Hash()
 		if err != nil || body.Epoch != epoch+1 || !bytes.Equal(body.PredecessorHash, prior) {
-			return fmt.Errorf("%w: the body is not the successor of this node's verified tip", ErrQ3StageChain)
+			return fmt.Errorf("%w: the body (epoch %d) is not the successor of this node's verified tip (epoch %d, body version %d, body %x)", ErrQ3StageChain, body.Epoch, epoch, version, id[:8])
 		}
 		if !bytes.Equal(body.ChangeRecordHash, evmroot.D4CandidateContextHash(body.Network, id[:], req.Attempt, digest[:], body.EarliestActivation)) {
 			return fmt.Errorf("%w: the body's change record is not the one the candidate and attempt determine", ErrQ3StageBody)

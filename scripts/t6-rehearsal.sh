@@ -10,20 +10,39 @@ EVIDENCE_DIR=${T6_EVIDENCE_DIR:-$AGRE_ROOT/briefs/devnet-runs/t6-rehearsal-$(dat
 T6_BFT_COMMIT=${T6_BFT_COMMIT:-$(git -C "$SOURCE_ROOT" rev-parse HEAD)}
 T6_BFT_REMOTE=${T6_BFT_REMOTE:-$(git -C "$SOURCE_ROOT" remote get-url origin)}
 T6_BFT_REF=${T6_BFT_REF:-t6/rehearsal-harness}
-T6_URETH_COMMIT=${T6_URETH_COMMIT:-b4e7cb0ace07eee70e753241e0139c4d42b516d4}
+# the Ureth the run is pinned to: 47f5146b (briefs/builds/ureth-47f5146b/), a descendant of the 9623b827 the H3, M2 and F8 lanes ran; an ATTESTED build of the pin is accepted (T6_URETH_ATTESTED)
+T6_URETH_COMMIT=${T6_URETH_COMMIT:-47f5146b59c01e2180aa66b250ec87330231658d}
 T6_URETH_REMOTE=${T6_URETH_REMOTE:-https://github.com/ristik/ureth.git}
 T6_CONTRACTS_COMMIT=${T6_CONTRACTS_COMMIT:-e7eb3216549b772a9e1df2b1214976d7dd9e6e62}
-# The layout-2 SealRegistry (ureth #47 and later) is built from contracts ce3e40b4; the four allocation contracts keep their e7eb3216 source commit.
-T6_REGISTRY_CONTRACTS_COMMIT=${T6_REGISTRY_CONTRACTS_COMMIT:-ce3e40b479de0a0ef8787d8830ba77189aa11171}
+# The four allocation contracts are rebuilt from their e7eb3216 source commit. The registry is not: the fresh-B1 registry (layout 3) is generated in code
+# from the profile, and T6 verifies the deployed genesis against an independent regeneration (b1genesis --verify), not against a contracts rebuild.
 T6_CONTRACTS_REMOTE=${T6_CONTRACTS_REMOTE:-https://github.com/ristik/unicity-pos-contracts.git}
 T6_RUST_TOOLCHAIN=${T6_RUST_TOOLCHAIN:-1.97.1}
+
+# Preflight, before the devnet lock is taken: everything this harness will exec that is not built or fetched into the isolated checkout must exist now, so a
+# missing tool costs no lock slot. (Binaries the run builds itself are built where they are used; see verify_b1_registry.)
+t6_preflight() {
+  local missing=() c
+  for c in git go jq curl python3 awk tee lsof openssl make pgrep mktemp; do command -v "$c" >/dev/null 2>&1 || missing+=("$c"); done
+  command -v sha256sum >/dev/null 2>&1 || command -v shasum >/dev/null 2>&1 || missing+=("sha256sum|shasum")
+  [ -x "$LOCK_SCRIPT" ] || missing+=("$LOCK_SCRIPT")
+  [ -z "${T6_URETH_BIN:-}" ] || [ -x "$T6_URETH_BIN" ] || missing+=("T6_URETH_BIN=$T6_URETH_BIN")
+  [ -z "${T6_URETH_ATTESTED:-}" ] || [ -x "$T6_URETH_ATTESTED" ] || missing+=("T6_URETH_ATTESTED=$T6_URETH_ATTESTED")
+  for c in cli/ubft scripts/f7-mintproof-extract scripts/f7-mintproof-verify scripts/evmtx scripts/b1genesis; do
+    [ -d "$SOURCE_ROOT/$c" ] || missing+=("source $c")
+  done
+  if [ "${#missing[@]}" -ne 0 ]; then echo "FAIL: preflight: missing: ${missing[*]}" >&2; exit 1; fi
+  (cd "$SOURCE_ROOT" && go build -o /dev/null ./scripts/b1genesis ./scripts/evmtx ./scripts/f7-mintproof-extract ./scripts/f7-mintproof-verify) \
+    || { echo "FAIL: preflight: the harness's helper tools do not compile" >&2; exit 1; }
+}
+[ "${T6_LOCKED:-0}" = 1 ] || t6_preflight
 
 if [ "${T6_LOCKED:-0}" != 1 ]; then
   [ -x "$LOCK_SCRIPT" ] || { echo "FAIL: devnet lock helper missing at $LOCK_SCRIPT" >&2; exit 1; }
   exec "$LOCK_SCRIPT" "T6 placeholder-manifest rehearsal" env \
     T6_LOCKED=1 T6_EVIDENCE_DIR="$EVIDENCE_DIR" T6_BFT_COMMIT="$T6_BFT_COMMIT" \
     T6_BFT_REMOTE="$T6_BFT_REMOTE" T6_BFT_REF="$T6_BFT_REF" T6_URETH_COMMIT="$T6_URETH_COMMIT" \
-    T6_URETH_REMOTE="$T6_URETH_REMOTE" T6_CONTRACTS_COMMIT="$T6_CONTRACTS_COMMIT" T6_REGISTRY_CONTRACTS_COMMIT="$T6_REGISTRY_CONTRACTS_COMMIT" \
+    T6_URETH_REMOTE="$T6_URETH_REMOTE" T6_CONTRACTS_COMMIT="$T6_CONTRACTS_COMMIT" \
     T6_CONTRACTS_REMOTE="$T6_CONTRACTS_REMOTE" T6_RUST_TOOLCHAIN="$T6_RUST_TOOLCHAIN" \
     "$SCRIPT_PATH" "$@"
 fi
@@ -40,6 +59,12 @@ FAILURE=0
 # checked against the pin but skips the cold build, and marks the run as NOT EVIDENCE everywhere it is recorded.
 T6_RUN_MODE="clean build (evidence run)"
 if [ -n "${T6_URETH_BIN:-}" ]; then T6_RUN_MODE="DEVELOPMENT OVERRIDE: prebuilt Ureth ${T6_URETH_BIN}: NOT EVIDENCE"; fi
+# An ATTESTED prebuilt Ureth is evidence-grade: T6_URETH_ATTESTED (the binary), T6_URETH_ATTESTED_SHA256 (its expected digest) and T6_URETH_ATTESTED_PROVENANCE
+# (a briefs/builds/ureth-<commit>/ directory whose commit.txt is the pin and whose sha256.txt names the same digest) must all agree with the file and the pin.
+if [ -n "${T6_URETH_ATTESTED:-}" ]; then
+  [ -z "${T6_URETH_BIN:-}" ] || { echo "FAIL: T6_URETH_ATTESTED and T6_URETH_BIN are exclusive" >&2; exit 1; }
+  T6_RUN_MODE="attested prebuilt Ureth ${T6_URETH_ATTESTED} sha256=${T6_URETH_ATTESTED_SHA256:-?} (provenance ${T6_URETH_ATTESTED_PROVENANCE:-?}); everything else from a clean build (evidence run)"
+fi
 printf 'T6 run mode: %s\n' "$T6_RUN_MODE" | tee "$EVIDENCE_DIR/run-mode.txt"
 
 pass() { printf 'PASS: %s\n' "$*"; }
@@ -163,7 +188,8 @@ build_bft_tools() {
   go build -o build/f7-mintproof-extract ./scripts/f7-mintproof-extract
   go build -o build/f7-mintproof-verify ./scripts/f7-mintproof-verify
   go build -o build/evmtx ./scripts/evmtx
-  pass "fresh ubft, F7 extractor/verifier, and transaction signer compiled with isolated Go caches"
+  go build -o build/b1genesis ./scripts/b1genesis
+  pass "fresh ubft, F7 extractor/verifier, transaction signer and B1 genesis verifier compiled with isolated Go caches"
 }
 
 install_pinned_foundry() {
@@ -200,21 +226,31 @@ build_pinned_contracts() {
     --manifest "$FRESH_REPO/registrygenesis/testdata/allocation-build-v1.example.json" \
     --bft-root "$FRESH_REPO" --contracts-root "$FRESH_CONTRACTS" \
     --contracts-commit "$T6_CONTRACTS_COMMIT" --skip-registry | tee "$EVIDENCE_DIR/contracts-rebuild.log"
-  # The registry the genesis embeds (layout 2) is rebuilt from its own pinned contracts commit.
-  git -C "$FRESH_CONTRACTS" checkout --detach "$T6_REGISTRY_CONTRACTS_COMMIT" >>"$EVIDENCE_DIR/contracts-clone.log" 2>&1
-  git -C "$FRESH_CONTRACTS" submodule update --init --recursive >>"$EVIDENCE_DIR/contracts-clone.log" 2>&1
-  [ "$(git -C "$FRESH_CONTRACTS" rev-parse HEAD)" = "$T6_REGISTRY_CONTRACTS_COMMIT" ] || return 1
-  (cd "$FRESH_CONTRACTS" && forge build --force)
-  python3 "$FRESH_REPO/scripts/t6/verify-contract-build.py" \
-    --manifest "$FRESH_REPO/registrygenesis/testdata/allocation-build-v1.example.json" \
-    --bft-root "$FRESH_REPO" --contracts-root "$FRESH_CONTRACTS" \
-    --contracts-commit "$T6_REGISTRY_CONTRACTS_COMMIT" --registry-layout 2 --registry-only | tee -a "$EVIDENCE_DIR/contracts-rebuild.log"
-  printf 'contracts commit=%s\nregistry contracts commit=%s\nforge version=%s\n' "$T6_CONTRACTS_COMMIT" "$T6_REGISTRY_CONTRACTS_COMMIT" "$(forge --version | head -1)" >>"$EVIDENCE_DIR/source-pin.txt"
+  printf 'contracts commit=%s\nforge version=%s\n' "$T6_CONTRACTS_COMMIT" "$(forge --version | head -1)" >>"$EVIDENCE_DIR/source-pin.txt"
 }
 
 build_pinned_ureth() {
   cd "$FRESH_REPO"
   local pathBeforeCargo=$PATH rustupBin
+  if [ -n "${T6_URETH_ATTESTED:-}" ]; then
+    # an attested build: the digest the operator supplied, the one the provenance records and the file's own must be one, and the provenance names the pin
+    local want=${T6_URETH_ATTESTED_SHA256:?T6_URETH_ATTESTED_SHA256 is required} prov=${T6_URETH_ATTESTED_PROVENANCE:?T6_URETH_ATTESTED_PROVENANCE is required}
+    [ -x "$T6_URETH_ATTESTED" ] || { fail "T6_URETH_ATTESTED=$T6_URETH_ATTESTED is not an executable file"; return 1; }
+    [ "$(sha256 "$T6_URETH_ATTESTED")" = "$want" ] || { fail "the attested Ureth's sha256 is not $want"; return 1; }
+    [ "$(tr -d '[:space:]' <"$prov/commit.txt")" = "$T6_URETH_COMMIT" ] || { fail "the provenance $prov does not name the pinned commit $T6_URETH_COMMIT"; return 1; }
+    grep -q "^$want " "$prov/sha256.txt" || { fail "the provenance $prov does not record sha256 $want"; return 1; }
+    . scripts/lib/reth-pin.sh
+    urethPinVerifyBinary "$T6_URETH_ATTESTED" "$T6_URETH_COMMIT" || { fail "the attested Ureth does not report the pinned commit $T6_URETH_COMMIT"; return 1; }
+    cp "$T6_URETH_ATTESTED" "$ISOLATION_ROOT/bin/unicity-reth"
+    URETH_BIN=$ISOLATION_ROOT/bin/unicity-reth
+    export URETH_BIN
+    printf 'ureth commit=%s\nureth binary=%s\nureth binary sha256=%s\nureth provenance=%s\n' "$T6_URETH_COMMIT" "$URETH_BIN" "$(sha256 "$URETH_BIN")" "$prov" >>"$EVIDENCE_DIR/source-pin.txt"
+    "$URETH_BIN" --version >"$EVIDENCE_DIR/ureth-version.txt" 2>&1
+    cp "$prov"/*.txt "$EVIDENCE_DIR/" 2>/dev/null || true
+    { go version; rustc --version 2>&1 || true; cargo --version 2>&1 || true; } >"$EVIDENCE_DIR/compiler-toolchains.txt"
+    printf 'RUN MODE: %s\n' "$T6_RUN_MODE" >>"$EVIDENCE_DIR/source-pin.txt"
+    return 0
+  fi
   if [ -n "${T6_URETH_BIN:-}" ]; then
     # DEVELOPMENT iterations only: a prebuilt binary whose reported commit equals the pin replaces the cold build. It is verified, never trusted,
     # and the run is recorded as NOT EVIDENCE (run-mode.txt, source-pin.txt, run-summary.md).
@@ -278,6 +314,11 @@ build_pinned_ureth() {
 run_paired_t6() {
   cd "$FRESH_REPO"
   require_free_kb 2500000 "paired T6 network rehearsal" || return 1
+  # the single B1 layout: one profile derived from the shard configuration and the root trust base, registry layout 3, the Q3 flow for every handoff
+  export Q3_B1=1 H3_SLOT_LAYOUT=3 EVM_OPERATOR_STATUS_RPC=1
+  # the testnet profile's churn budget (owner decision 19, briefs/p85-churn-bound-note.md): D <= 1/2, committed in the genesis configuration (the DEV default,
+  # 1/4, admits no replacement of one of four). The rotation replaces one of four (D = 1/2) and the lane shows a candidate beyond the budget refused.
+  export EVM_PARTITION_PARAMS_EXTRA=${EVM_PARTITION_PARAMS_EXTRA:-continuity_max_distance=1/2}
   export POST_M2A_MODE=t6 POST_M2A_CHAIN_ID=1337
   export POST_M2A_URETH_BIN="$URETH_BIN" POST_M2A_URETH_COMMIT="$T6_URETH_COMMIT"
   export M2_PROFILE2=1 SIGNING=authority M2A_FINAL_RESTORE=1
@@ -287,6 +328,19 @@ run_paired_t6() {
   bash ./scripts/reth-paired-devnet.sh 4 20 2>&1 | tee "$EVIDENCE_DIR/paired-lane.log"
   grep -q "T6 coupled rotation s=1: authority-backed" "$EVIDENCE_DIR/paired-lane.log" || [ "${T6_COUPLED_ROTATION:-1}" != 1 ] || { fail "the coupled rotation step did not pass"; return 1; }
   pass "paired network completed placeholder claims, WUCT wrap/unwrap, treasury withdrawal, handoffs, restore, finality checks, and a coupled key-replacing rotation"
+}
+
+# The deployed genesis (the chain spec every execution client ran) carries exactly the registry the pinned source generates: regenerated by the freshly built
+# b1genesis from the profile, the root trust base and the full shard configuration the chain was made from, then compared (code and every storage word).
+verify_b1_registry() {
+  cd "$FRESH_REPO"
+  local out=$EVIDENCE_DIR/b1-registry-verify.txt
+  # the paired lane's setup runs `make clean build`, which removes every auxiliary binary the tool build made: rebuild the verifier here
+  mkdir -p build && go build -o build/b1genesis ./scripts/b1genesis || { fail "could not build the B1 genesis verifier"; return 1; }
+  build/b1genesis --verify test-nodes/evm-genesis-finalized-funded.json --profile test-nodes/b1-profile.json \
+    --root-genesis test-nodes/trust-base.json --shard-conf "test-nodes/shard-conf-8_0.json" 2>&1 | tee "$out"
+  [ "${PIPESTATUS[0]}" = 0 ] && grep -q 'the deployed registry account matches the regeneration' "$out" || { fail "the deployed registry differs from its regeneration"; return 1; }
+  cp test-nodes/b1-profile.json "$EVIDENCE_DIR/b1-profile.json"
 }
 
 extract_verify_f7() {
@@ -420,6 +474,7 @@ run_step "isolated pinned Foundry release install" install_pinned_foundry
 run_step "contracts e7eb3216 source rebuild and manifest artifact match" build_pinned_contracts
 run_step "source, binary, and manifest pins" write_prerehearsal_pins
 run_step "paired T6 rehearsal with handoffs and documented restore" run_paired_t6
+run_step "deployed B1 registry equals its independent regeneration (code and storage)" verify_b1_registry
 run_step "retain and recheck pre-handoff offline F7 bundle" extract_verify_f7
 run_step "evidence and SHA-256 manifest" collect_evidence
 run_step "isolated build cleanup and final evidence hashes" cleanup_isolated_build
