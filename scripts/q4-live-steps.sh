@@ -770,16 +770,23 @@ ok = set(old) - set(new) == {out} and set(new) - set(old) == {inn} and ko >= qo 
 sys.exit(0 if ok else "the turnover is not one-of-four with a retained quorum in both maps")
 PY
   H3_ONLINE="1 2 3 4"
+  # the joiner's restore is anchored at the genesis trust base and catches up through the verified handoffs; the activation of epoch 2 is not archived
+  # as a bundle, so the restore pin is told its V3 body identity (as the Q3 lane's second pair is)
+  H3_RESTORE_TRUST_BASE=test-nodes/trust-base.json
+  export H4_RESTORE_BODY_IDS="2=$(tr -d '[:space:]' <"$Q3_DIR/v3-body-id.txt")"
   if [ ! -f "test-nodes/root$in/node-info.json" ]; then
     build/ubft root-node init --home "test-nodes/root$in" -g >/dev/null || return 1
     generate_log_configuration "test-nodes/root$in/"
   fi
   # the successor trust base: roots 1 2 3 and the joiner's with the B weights, signed by them (the replaced root does not sign)
-  Q3_WEIGHTS=$Q4_B_WEIGHTS h3_q3_trust_base "$next" "$Q4_B_ENTITIES" || return 1
+  Q3_WEIGHTS=$Q4_B_WEIGHTS h3_q3_trust_base "$next" "$Q4_B_ENTITIES" || { echo "the successor trust base was not built" >&2; return 1; }
   # the joiner before the Commit: its root a follower of the epoch-2 committee, its authority pending at the successor scope, its execution client
   # paired; it is a later joiner (one activation precedes it), so its shard node comes up by a staging-only restore at its readiness turn
-  Q4_JOINER_MARK=$(wc -l <"test-nodes/root$in/debug.log" 2>/dev/null | tr -d ' '); Q4_JOINER_MARK=${Q4_JOINER_MARK:-0}
-  EVM_ARCHIVE_REPLICA_POOL="1 2 3 $in" H3_ONLINE="1 2 3" h3_q3_start_joiner "$in" 2 "$next" "trust-base-epoch${next}.json" 2 || return 1
+  [ -n "${Q4_JOINER_MARK:-}" ] || { Q4_JOINER_MARK=$(wc -l <"test-nodes/root$in/debug.log" 2>/dev/null | tr -d ' '); Q4_JOINER_MARK=${Q4_JOINER_MARK:-0}; }
+  # (a joiner whose root already answers as a follower is left as it is: the root's start is not idempotent, and a development retry re-enters here)
+  if [ "$(q4_status_of "$in" 2>/dev/null | jq -r .follower 2>/dev/null)" != true ]; then
+    EVM_ARCHIVE_REPLICA_POOL="1 2 3 $in" H3_ONLINE="1 2 3" h3_q3_start_joiner "$in" 2 "$next" "trust-base-epoch${next}.json" 2 || { echo "the joiner's stack did not start" >&2; return 1; }
+  fi
   echo "joiner entity $in started before the Commit: root$in follows the epoch-2 committee"
 
   Q3_WEIGHTS=$Q4_B_WEIGHTS; Q3_SUFFIX=-2; Q3_NEXT_EPOCH=$next; Q3_ASSIGN_TAG=cand2; Q3_INCUMBENT=$Q3_DIR/cand-identities.json; Q3_ENTITIES=$Q4_B_ENTITIES
