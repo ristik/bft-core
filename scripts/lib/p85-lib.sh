@@ -11,7 +11,11 @@
 #   p85_selftest            offline checks of the above that need no node and no forge
 
 P85_DIR=${P85_DIR:-test-nodes/p85}
-P85_CAPS=${P85_CAPS:-16,2,8}                       # manifest limits.vMax, limits.lMax, election nMax: the measurement is taken at exactly these
+# manifest limits.vMax, limits.lMax, election nMax: the election price AND the records hook's per-record reservation are measured at exactly these. 16,1,6 is what
+# the 3,000,000 per record (P85_HOOK_RECORD_GAS) covers with the 1.25 margin: the RecoveryAck that applies a pending closure costs 2,281,165 cold for 6 members of
+# one lot, but 3,629,888 for 8 members of 2 lots (contracts docs/p85/HOOK_GAS.md). Until the owner decides between raising the limit and keeping lower caps (Q12),
+# the lane declares caps its limit covers; `b1-profile --hook-measurement` refuses any pair it does not.
+P85_CAPS=${P85_CAPS:-16,1,6}
 P85_BOND_UNIT=${P85_BOND_UNIT:-100000000000000000000}   # 100 UCT in base units: one weight unit
 P85_GENESIS_UNITS=${P85_GENESIS_UNITS:-1}          # bond units per genesis identity (unit weights, like the PoA lanes)
 P85_H_RECORDS=${P85_H_RECORDS:-2}
@@ -42,6 +46,7 @@ p85_prepare_genesis() {
       P85_V_MAX=${caps[0]} P85_L_MAX=${caps[1]} P85_N_MAX=${caps[2]} P85_CADENCE_ROUNDS=$P85_CADENCE_ROUNDS P85_CADENCE_SECONDS=$P85_CADENCE_SECONDS P85_DIST_NUM=$P85_DIST_NUM P85_DIST_DEN=$P85_DIST_DEN \
       script/p85-genesis.sh "$OLDPWD/$P85_DIR/contracts-genesis.json" "$OLDPWD/$P85_DIR/genesis" ) || return 1
   ( cd "$P85_CONTRACTS" && script/measure-elect.sh "${caps[0]}" "${caps[1]}" "${caps[2]}" ) >"$P85_DIR/elect-measurement.json" || p85_die "the election measurement failed" || return 1
+  ( cd "$P85_CONTRACTS" && script/measure-hook-gas.sh "${caps[0]}" "${caps[1]}" "${caps[2]}" ack stage closure recovery ) >"$P85_DIR/hook-measurement.jsonl" || p85_die "the records hook measurement failed" || return 1
   echo "p85: genesis prepared in $P85_DIR (assignment $(cat "$P85_DIR/genesis-assignment.txt"), measurement $(cat "$P85_DIR/elect-measurement.json"))"
 }
 
@@ -74,13 +79,21 @@ p85_assert_full_conf() { # the full configuration the real genesis wrote must be
   cmp -s "$1" "$P85_DIR/reconcile/full-shard-conf.json" || p85_die "the full shard configuration changed after the genesis assignment was fixed (the P85 accounts moved seal_registry_genesis?)" || return 1
 }
 
+# The profile's per-record reservation against a FRESH cold measurement of the worst record at the deployed caps (contracts script/measure-hook-gas.sh):
+# refused when the contracts grew past the margin. The same rule `b1-profile --hook-measurement` applies at generation.
+p85_check_hook_gas() { # profile
+  local caps; IFS=, read -r -a caps <<<"$P85_CAPS"
+  ( cd "$P85_CONTRACTS" && script/measure-hook-gas.sh "${caps[0]}" "${caps[1]}" "${caps[2]}" ack stage closure recovery ) >"$P85_DIR/hook-measurement-fresh.jsonl" || p85_die "the fresh hook measurement failed" || return 1
+  build/ubft engine-api check-hook-gas --b1-profile "$1" --measurement "$P85_DIR/hook-measurement-fresh.jsonl" || p85_die "the hook reservation does not cover the fresh measurement" || return 1
+}
+
 p85_json() { python3 -c "import json,sys;print(json.load(open('$1'))$2)"; }
 
 p85_profile_args() {
   local d=$P85_DIR/genesis/deployment.json
   [ -s "$d" ] || p85_die "no deployment: run p85_prepare_genesis" || return 1
   echo --records-custody "$(p85_json "$d" "['custody']")" --h-records "$P85_H_RECORDS" --hook-record-gas "$P85_HOOK_RECORD_GAS" \
-    --election "$(p85_json "$d" "['election']")" --elect-measurement "$P85_DIR/elect-measurement.json" --elect-caps "$P85_CAPS"
+    --election "$(p85_json "$d" "['election']")" --elect-measurement "$P85_DIR/elect-measurement.json" --hook-measurement "$P85_DIR/hook-measurement.jsonl" --elect-caps "$P85_CAPS"
 }
 
 p85_write_pos_deployment() {
