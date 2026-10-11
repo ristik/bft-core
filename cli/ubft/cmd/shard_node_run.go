@@ -1184,7 +1184,8 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 				}
 				restorer := &archivewiring.ArchiveRestore{Journal: journalStore, Context: journalCtx, JournalLimits: limits,
 					Archive: archiveLocal, Subject: archiveSubject, Replicas: archiveReplicas, Host: archiveHost,
-					Limits: archiveTransportLimits, Adapter: executor.(*engineapi.Adapter), Genesis: genesis, TipUC: uc, TipTR: tr}
+					Limits: archiveTransportLimits, Adapter: executor.(*engineapi.Adapter), Genesis: genesis, TipUC: uc, TipTR: tr,
+					Log: flags.observe.Logger()}
 				return restorer.Restore(ctx)
 			}
 			var repairRestoredHandoffs func(context.Context) error

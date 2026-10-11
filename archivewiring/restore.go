@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -36,11 +37,40 @@ type ArchiveRestore struct {
 	Host          shardnode.EvidenceHost
 	Limits        Limits
 	// Retry bounds the wait for a replica that cannot serve a record right now (zero value: DefaultFetchRetry).
-	Retry   FetchRetry
+	Retry FetchRetry
+	// Log, when set, receives the restore's progress: a line at most every restoreProgressEvery while records are fetched and while
+	// they are replayed, and one between the two phases. A long restore is otherwise silent until its first replayed block.
+	Log     *slog.Logger
 	Adapter RestoreExecutor
 	Genesis shardnode.BlockRef
 	TipUC   *types.UnicityCertificate
 	TipTR   *certification.TechnicalRecord
+}
+
+// restorePutBatch is how many authenticated records the restore retains with one shared set of device flushes.
+const restorePutBatch = 16
+
+// restoreProgressEvery is the least time between two progress lines of one phase.
+const restoreProgressEvery = 10 * time.Second
+
+type restoreProgress struct{ started, last time.Time }
+
+// note logs the phase's progress if restoreProgressEvery has passed since its last line (or since the phase started).
+func (p *restoreProgress) note(log *slog.Logger, msg string, done, total int, height uint64) {
+	if log == nil {
+		return
+	}
+	since := p.last
+	if since.IsZero() {
+		since = p.started
+	}
+	if time.Since(since) < restoreProgressEvery {
+		return
+	}
+	p.last = time.Now()
+	elapsed := time.Since(p.started)
+	log.Info(msg, "done", done, "of", total, "height", height, "elapsed", elapsed.Round(time.Second).String(),
+		"perBlockMs", elapsed.Milliseconds()/int64(max(done, 1)))
 }
 
 // SingleEpochRestore is kept for callers of the original single-epoch route.
@@ -114,12 +144,18 @@ func (r *ArchiveRestore) Restore(ctx context.Context) error {
 		return err
 	}
 	var reverse []restoredBlock
+	var pendingQ []archive.Request
+	var pendingRec []*archive.Record
+	progress := restoreProgress{started: time.Now()}
+	var fetching, retaining time.Duration // where the first phase's time went: the replicas (fetch and verification) or the local store
 	current := target
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
+		fetchStarted := time.Now()
 		q, rec, result, _, header, err := r.fetchChecked(ctx, current)
+		fetching += time.Since(fetchStarted)
 		if err != nil {
 			return fmt.Errorf("%w: block %x: %w", ErrRestore, current, err)
 		}
@@ -129,14 +165,25 @@ func (r *ArchiveRestore) Restore(ctx context.Context) error {
 		if len(reverse) > 0 && reverse[len(reverse)-1].height != header.Number.Uint64()+1 {
 			return fmt.Errorf("%w: archive block height gap", ErrRestore)
 		}
-		if err := r.Archive.Put(q, rec); err != nil {
-			return fmt.Errorf("%w: retaining authenticated block: %v", ErrRestore, err)
-		}
+		// Each record is authenticated above; they are retained in batches, which share the store's device flushes (the flushes, not
+		// the fetch or the verification, are what a long restore spends its time on). Nothing below reads a record back before the
+		// last batch is durable.
+		pendingQ, pendingRec = append(pendingQ, q), append(pendingRec, rec)
 		reverse = append(reverse, restoredBlock{q: q, height: header.Number.Uint64(), state: [32]byte(header.Root)})
-		if header.Number.Uint64() == 1 {
-			if !bytes.Equal(header.ParentHash[:], r.Genesis.Hash) {
-				return fmt.Errorf("%w: archive does not reach configured genesis", ErrRestore)
+		last := header.Number.Uint64() == 1
+		if last && !bytes.Equal(header.ParentHash[:], r.Genesis.Hash) {
+			return fmt.Errorf("%w: archive does not reach configured genesis", ErrRestore)
+		}
+		if last || len(pendingQ) == restorePutBatch {
+			putStarted := time.Now()
+			if err := r.Archive.PutBatch(pendingQ, pendingRec); err != nil {
+				return fmt.Errorf("%w: retaining authenticated blocks: %v", ErrRestore, err)
 			}
+			retaining += time.Since(putStarted)
+			pendingQ, pendingRec = pendingQ[:0], pendingRec[:0]
+		}
+		progress.note(r.Log, "fetching and retaining archive records", len(reverse), int(reverse[0].height), header.Number.Uint64())
+		if last {
 			break
 		}
 		if header.Number.Uint64() == 0 || header.ParentHash == common.Hash(current) {
@@ -144,6 +191,11 @@ func (r *ArchiveRestore) Restore(ctx context.Context) error {
 		}
 		current = [32]byte(header.ParentHash)
 	}
+	if r.Log != nil {
+		r.Log.Info("archive records fetched and retained; replaying", "blocks", len(reverse), "elapsed", time.Since(progress.started).Round(time.Millisecond).String(),
+			"fetchAndVerify", fetching.Round(time.Millisecond).String(), "retain", retaining.Round(time.Millisecond).String())
+	}
+	progress = restoreProgress{started: time.Now()}
 	parent := r.Genesis
 	var firstUC *types.UnicityCertificate
 	var firstTR *certification.TechnicalRecord
@@ -184,6 +236,7 @@ func (r *ArchiveRestore) Restore(ctx context.Context) error {
 		}
 		parent = shardnode.BlockRef{Number: block.Number, Hash: block.Hash, StateRoot: block.StateRoot}
 		targetUC, targetTR, targetBlock = resulting, resultingTR, block
+		progress.note(r.Log, "replaying archive records", len(reverse)-i, len(reverse), block.Number)
 	}
 	if !bytes.Equal(parent.StateRoot, r.TipUC.InputRecord.Hash) {
 		return fmt.Errorf("%w: replayed state differs from pinned tip", ErrRestore)
