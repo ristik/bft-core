@@ -37,7 +37,7 @@ go test -json -count=1 ./rootchain/... ./cli/ubft/cmd/ ./cmd/... -timeout 60m \
   -run '^(TestQ4|TestQ3|TestMessageRounds|TestWeighted|TestSkewedWeight|TestTwoRestarted|TestProductionBuild|TestT2|TestPartitionTimeout|TestPacemaker|TestVoteRegister|TestOldForm|TestInstallVerified|TestNoSignature|TestCheck|TestLeaderAfter|TestTableCache|TestAJoinerRoot)' > out/tests.json
 Q4_COST_OUT="$PWD/out/cost.json" go test -count=1 ./rootchain/consensus/leader/ -run Q4
 go run ./cmd/q4report -matrix docs/pos/q4-acceptance-matrix.json -tests out/tests.json -bundles out/bundles -cost out/cost.json \
-  -lane <scenario A evidence dir> -lanes b=<scenario B evidence dir>,a2=<heavy on root 2>,a3=<heavy on root 3>,a4=<heavy on root 4>,q3=<Q3 weight-activation lane evidence dir> \
+  -lane <scenario A evidence dir> -lanes b=<scenario B evidence dir>,a2=<heavy on root 2>,a3=<heavy on root 3>,a4=<heavy on root 4>,q3=<Q3 weight-activation lane evidence dir>,g2=<scenario A run with the G2 rollback step> \
   -out out/report.md -json out/report.json
 ```
 
@@ -97,7 +97,11 @@ Before any fault the lane also checks that the selector in effect is the weighte
 - **Heavy equivocators (F3, F4)** are outside the assumptions: the live rows show that the equivocation happened (the root's own adapter counted its conflicting signed votes)
   and that the independent checker classifies exactly the declared roots as equivocators; they claim no liveness or safety.
 - **G2** is evidenced by the Q3 lane's paired authentication (`-lanes q3=<dir>`): a second pair restored through the archive path reaching equal commitments, the five pair
-  controls, retention and restart. Rollback below the finalized pair head is not exercised live.
+  controls, retention and restart. Rollback is evidenced by the lane's G2 step (`-lanes g2=<dir>`; the step runs in scenarios A and B): the roots hold the EVM shard's
+  certification requests, so a sealed block carrying a paid transaction, verified VALID by all four execution clients, is not certified; a different block on the same
+  parent is certified after the release, every pair holds it, `finalized` never decreases and the transaction has one receipt. This is rollback to the finalized head.
+  A pair never un-commits (a block becomes canonical and final in one step, only with its UC), and a build below the finalized head is refused (the Q3 pair controls).
+  Still open: "native UC cryptographic verification where used" is not separately evidenced; the design does not name the component.
 - Every in-process row is root consensus only: no EVM, no aggregator shard, restarts are close/reopen of fsynced stores (not SIGKILL, not
   power loss). The checker does not re-verify the signatures inside a carried QC (it weighs the QC's signers under their epoch); carried TCs and the HighQC inside a timeout are not weighed; equivocation is detected for votes and timeouts only, not proposals.
 - **The F8 EVM stop/resume callbacks are evidenced only in the lane preamble, in the unit epoch.** In the weighted epoch the lane shows that the aggregator shards stay served (their authorized TR rounds advance and the aggregators answer) and that each of the three shards certifies a new state root whose non-empty `aggregator_rsmt_v1` proof the root that receives the certification request verifies (row T1; the recorded run is on a head before #547 and shows the check at intake, by one root, not by each root in consensus: the step name and its record say "the roots"; that every voting root re-verifies the proof before it votes is #545, fixed by #547 and covered by its tests, not by this run; the proof of a non-first block was empty before #539/#541 and #532). The lane does not stop the EVM in the weighted epoch.

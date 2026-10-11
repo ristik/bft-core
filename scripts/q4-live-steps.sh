@@ -476,6 +476,72 @@ q4_row_shard_requests_delayed() {
   q4_commits_advance "$observer" "$Q4_RECOVER_SECONDS" 3
 }
 
+# G2 (rollback on a live pair). A pair never un-commits: a block is made canonical and final only with its certificate. So the rollback is this: every
+# root holds the EVM shard's certification requests past the shard's T2; the round's block, sealed by the leader and executed (verified VALID) by every
+# pair, cannot be certified; the roots' repeat certificate starts a fresh attempt and a DIFFERENT block is built on the same parent. A paid transaction
+# is submitted under the hold, so an abandoned block carries it. While held every pair's latest and finalized block stay the parent; after the release
+# the pairs agree on one certified block at the height, no pair has an abandoned block canonical, finalized never went back, the transaction is in a
+# certified block once (the sender's nonce advances by one), and two pairs export the same root input, transitions and state for the certified block.
+# The judge is scripts/q4-g2-rollback.py; its samples and verdict are q4/g2-rollback/.
+q4_g2_urls() { local i; for i in 1 2 3 4; do printf '%s ' "http://127.0.0.1:$((rethEthBase + i - 1))"; done; }
+q4_g2_sample() { # phase t0: one line of every pair's latest and finalized block
+  python3 scripts/q4-g2-rollback.py heads $(q4_g2_urls) | jq -c --arg p "$1" --arg e "$(q4_dt "$(q4_t)" "$2")" '{phase: $p, elapsed_s: ($e | tonumber), pairs: .}' >>"$Q4_DIR/g2-rollback/samples.jsonl"
+}
+q4_row_g2_rollback() {
+  local dir=$Q4_DIR/g2-rollback rule=g2hold$Q4_EPOCH observer=$Q4_HEAVY_ROOT i t0 logs=() urls=() head parent height sender nonce tx sent kids n=0 pair
+  rm -rf "$dir"; mkdir -p "$dir"
+  q4_shard_hold "$rule" "$Q4_ROOTS" in 8 || return 1
+  sleep 3   # requests already past the gate are answered; from here nothing the shard builds can be certified
+  t0=$(q4_t)
+  for i in 1 2 3 4; do logs+=("test-nodes/evm$i/debug.log:$(wc -l <"test-nodes/evm$i/debug.log" | tr -d ' ')"); urls+=(--url "http://127.0.0.1:$((rethEthBase + i - 1))"); done
+  head=$(python3 scripts/q4-g2-rollback.py heads $(q4_g2_urls)) || return 1
+  [ "$(printf '%s' "$head" | jq -r '[.[] | .latest.hash, .finalized.hash] | unique | length')" = 1 ] || { echo "the pairs do not agree on one finalized head under the hold: $head" >&2; return 1; }
+  parent=$(printf '%s' "$head" | jq -r '.[0].latest.hash'); height=$(( $(printf '%s' "$head" | jq -r '.[0].latest.number') + 1 ))
+  sender=$(go run ./scripts/evmtx -address) || return 1
+  nonce=$(printf '%d' "$(rpc "http://127.0.0.1:$rethEthBase" eth_getTransactionCount "[\"$sender\",\"latest\"]" | pyget "['result']")") || return 1
+  [ -z "${M2_NEXT_NONCE:-}" ] || [ "$M2_NEXT_NONCE" = "$nonce" ] || { echo "the lane's next nonce $M2_NEXT_NONCE is not the sender's $nonce" >&2; return 1; }
+  for i in 1 2 3 4; do
+    sent=$(go run ./scripts/evmtx -send -eth-url "http://127.0.0.1:$((rethEthBase + i - 1))" -chain-id "${M2_CHAIN_ID:-31337}" -nonce "$nonce" 2>&1) || { echo "evmtx failed on pair $i: $sent" >&2; return 1; }
+    [ -z "${tx:-}" ] || [ "$tx" = "$sent" ] || { echo "the pairs disagree on the transaction hash: $tx vs $sent" >&2; return 1; }
+    tx=$sent
+  done
+  echo "certification requests of the EVM shard held at every root; parent $((height - 1)) $parent; transaction $tx (sender $sender nonce $nonce) submitted under the hold"
+  # held until a second attempt on the same parent exists (the first is then abandoned for certain) and one that every pair executed carries the transaction
+  for i in $(seq 1 "$Q4_RECOVER_SECONDS"); do
+    q4_g2_sample held "$t0" || return 1
+    kids=$(python3 scripts/q4-g2-rollback.py children --parent "$parent" "${logs[@]}") || return 1
+    n=$(printf '%s' "$kids" | jq 'length')
+    [ "$n" -ge 2 ] && [ "$(printf '%s' "$kids" | jq '[.[:-1][] | select(.userTransactions >= 1 and (.verifiedValidBy | length) == 4)] | length')" -ge 1 ] && break
+    sleep 1
+  done
+  [ "$n" -ge 2 ] || { echo "only $n block(s) sealed on the parent within ${Q4_RECOVER_SECONDS}s of the hold" >&2; return 1; }
+  q4_root_advance "$observer" "$Q4_RECOVER_SECONDS" 1 || return 1   # the roots keep their quorum throughout
+  q4_g2_sample held "$t0" || return 1
+  q4_shard_release "$rule" "$Q4_ROOTS" in || return 1
+  q4_commits_advance "$observer" "$Q4_RECOVER_SECONDS" 3 || return 1
+  for i in $(seq 1 "$Q4_RECOVER_SECONDS"); do
+    q4_g2_sample released "$t0" || return 1
+    [ "$(tail -n 1 "$dir/samples.jsonl" | jq --argjson h "$height" '[.pairs[] | select(.finalized.number >= $h)] | length')" = 4 ] && break
+    sleep 1
+  done
+  for i in $(seq 1 60); do   # the transaction's certified block on every pair
+    [ "$(for pair in 1 2 3 4; do rpc "http://127.0.0.1:$((rethEthBase + pair - 1))" eth_getTransactionReceipt "[\"$tx\"]" | pyget "['result']['status']"; done | grep -c 0x1)" = 4 ] && break
+    sleep 1
+  done
+  q4_g2_sample released "$t0" || return 1
+  python3 scripts/q4-g2-rollback.py judge --dir "$dir" --parent "$parent" --height "$height" --tx "$tx" --sender "$sender" --nonce "$nonce" \
+    "${urls[@]}" $(printf -- '--log %s ' "${logs[@]}") | tee "$dir/summary.txt"
+  [ "${PIPESTATUS[0]}" = 0 ] || return 1
+  [ -z "${M2_NEXT_NONCE:-}" ] || M2_NEXT_NONCE=$((nonce + 1))
+  # two pairs' own retained bytes for the certified block are identical (the Q3 pair equality, here for the block that replaced the abandoned one)
+  for pair in a:1 b:4; do
+    build/ubft q3 pair-export --eth-url "$(q3_eth_url "${pair#*:}")" --block-number "$height" --root-input-out "$dir/pair-root-input-${pair%:*}.bin" \
+      --transitions-out "$dir/pair-transitions-${pair%:*}.bin" --state-out "$dir/pair-state-${pair%:*}.json" || return 1
+  done
+  q3_pair_equal "$dir" || return 1
+  echo "pairs 1 and 4 export identical root input, transitions and state for block $height" | tee -a "$dir/summary.txt"
+}
+
 # F10 (duplicate; no replayed weight): the heavy root's traffic is held (quorum lost) while every other root's traffic is DUPLICATED on the network:
 # each vote and timeout of the lights arrives twice and must count once, so the stall holds; then the duplication goes on while the heavy is released,
 # and the roots commit with every message doubled.
@@ -796,6 +862,7 @@ q4_run_lane() {
     q4_step "EVM-only partition: the heavy entity's EVM pair cut from every root (3 < request Q=5): EVM stalls, roots commit; heal without rollback" q4_row_evm_cut stall "$Q4_HEAVY_ROOT"
     q4_step "EVM-only partition: one light entity's EVM pair cut from every root (8 >= request Q=5): EVM certifies; heal without rollback" q4_row_evm_cut progress "$(q4_lights | tail -n 1)"
     q4_step "delay of shard requests: every root holds the EVM shard's certification requests: EVM stalls, roots commit; release recovers" q4_row_shard_requests_delayed
+    q4_step "G2 rollback: an executed EVM block is abandoned uncertified and a different block is certified on its parent; finalized never moves back, the transaction lands once" q4_row_g2_rollback
     q4_step "duplicate on the network: the lights' traffic duplicated while the heavy is held: no replayed weight (stall), then commits with every message doubled" q4_row_duplicates
     q4_step "reorder on the network: the heavy root's held traffic released last-in-first-out: recovery" q4_row_reorder
     q4_step "authentication refusals: impersonation of the heavy, unknown signer, bad signature, wrong domain, old form, wrong epoch both ways, stale: each refused, zero live weight" q4_row_auth_refusals
@@ -817,6 +884,7 @@ q4_run_lane() {
     q4_step "B T2: root quorum lost (one weight-3 root held): local T2 expiry, root epoch/round, shard IR/TR round and EVM height recorded separately; no root-certified retry" q4_row_t2_quorum_loss
     q4_step "B: the EVM pair of one weight-3 entity cut from every root (6 >= request Q=5): EVM certifies; heal without rollback" q4_row_evm_cut progress 1
     q4_step "B: the EVM pairs of both weight-3 entities cut from every root (3 < request Q=5): EVM stalls, roots commit; heal without rollback" q4_row_evm_cut stall 1 2
+    q4_step "B G2 rollback: an executed EVM block is abandoned uncertified and a different block is certified on its parent; finalized never moves back, the transaction lands once" q4_row_g2_rollback
     q4_step "B: authentication refusals: impersonation of a weight-3 root, unknown signer, bad signature, wrong domain, old form, wrong epoch both ways, stale: each refused, zero live weight" q4_row_auth_refusals
     q4_step "B: quorum-wide restart: every root SIGKILLed and restarted together over its retained home: roots and EVM recover" q4_row_quorum_restart
   fi

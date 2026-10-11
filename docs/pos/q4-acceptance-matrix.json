@@ -199,13 +199,14 @@
    "design": "Design v2 section 1, gate 2. The accepted authority architecture is the Q3 v3 delta paired authentication (each pair's own Go verification of the authenticated lineage, bound to the exact execution block, parent and root input, and an independent paired replay); the independent Rust lineage route is not used.",
    "required": [
     "REAL-PROCESS",
-    "REAL-PROCESS (rest)"
+    "REAL-PROCESS (rest)",
+    "REAL-PROCESS (native UC check)"
    ],
    "gaps": [
     {
-     "label": "REAL-PROCESS (rest)",
-     "reason": "Rollback below the pair's finalized head is not exercised on a live pair: DN-B lists reorg as not done, and the Q3 lane's positive pair control is gate-only (the gate accepts the unchanged rebuild; the engine then answers 'Too deep reorg' because the build is below its finalized block, which the tool reports as acceptance of the gate, not of a built payload). The pair-restart evidence covers restart and retention, not rollback. 'Native UC cryptographic verification where used' is not separately evidenced here.",
-     "blockedBy": "live reorg below the finalized head (DN-B follow-up)"
+     "label": "REAL-PROCESS (native UC check)",
+     "reason": "'Native UC cryptographic verification where used' is not separately evidenced here: the design does not name the component it refers to (the shard node's own UC check under the weighted trust base, or a check inside the execution client), and no lane step is aimed at it. The rollback half of this gap is evidenced by the G2 rollback step below (rollback to the finalized head) and by the Q3 pair controls (a build below the finalized head is refused: the unchanged rebuild passes the pair gate and the engine answers 'Too deep reorg', which the tool reports as acceptance of the gate, not of a built payload). A pair never un-commits: a block is made canonical and final in one step, only with its UC.",
+     "blockedBy": "a decision on what 'native UC cryptographic verification' refers to"
     }
    ],
    "evidence": [
@@ -307,6 +308,37 @@
      "lane": "q3",
      "path": "q3/pair-state-b.json",
      "scope": "pair B state; REAL-PROCESS (Q3 lane run, B1 stack; scenario A weights 6,1,1,1)"
+    },
+    {
+     "kind": "lane",
+     "label": "REAL-PROCESS (rest)",
+     "lane": "g2",
+     "step": "G2 rollback: an executed EVM block is abandoned uncertified and a different block is certified on its parent; finalized never moves back, the transaction lands once",
+     "scope": "rollback to the finalized head on live pairs: every root holds the EVM shard's certification requests, so the block the leader sealed (carrying a paid transaction, verified VALID by all four execution clients) is not certified; while held every pair's latest and finalized stay at the parent; after the release a different block on the same parent is certified and all four pairs hold it; the abandoned block is canonical on none; the transaction has one receipt and the sender's nonce advances by one. Not a rollback below the finalized head (that is refused; Q3 pair controls). REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build (consensus shim and shard gate); scenario A weights 6,1,1,1"
+    },
+    {
+     "kind": "lane-file",
+     "label": "REAL-PROCESS (rest)",
+     "lane": "g2",
+     "path": "q4/g2-rollback/summary.txt",
+     "contains": [
+      "verified VALID by 4 of 4 pairs, certificate admitted by none",
+      "finalized never decreased",
+      "one receipt",
+      "4 pairs agree on the certified block",
+      "export identical root input, transitions and state"
+     ],
+     "scope": "the step's own record: parent, abandoned and certified blocks, the held samples, the transaction, the pair equality of two pairs for the certified block"
+    },
+    {
+     "kind": "lane-file",
+     "label": "REAL-PROCESS (rest)",
+     "lane": "g2",
+     "path": "q4/g2-rollback/verdict.json",
+     "contains": [
+      "\"problems\": []"
+     ],
+     "scope": "the judge's verdict, from the pairs' RPC samples and the shard nodes' logs (sealed, verified VALID, certificate admitted)"
     }
    ]
   },
