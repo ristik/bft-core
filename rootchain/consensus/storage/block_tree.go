@@ -647,6 +647,11 @@ func (bt *BlockTree) captureHandoffCheckpoint(old, next *ExecutedBlock) error {
 	}
 	store, ok := bt.blocksDB.(handoffCheckpointStore)
 	if !ok {
+		// A store that cannot retain it (tests) serves the current root instead; on a root that must serve it later this is a defect, so
+		// it is not silent (P85 run 22: a wrapper hid the capability and no root held the checkpoint).
+		if bt.log != nil {
+			bt.log.Warn("the block store retains no handoff checkpoint: the handoff into the next epoch will be served from whatever root is current", "epoch", record.Epoch+1)
+		}
 		return nil
 	}
 	head, path, err := checkpointOf(next)
@@ -755,9 +760,11 @@ func (bt *BlockTree) HandoffCheckpoint() (*rcnet.CommittedBlock, *basetypes.Unic
 	defer bt.m.Unlock()
 	root := bt.root.data
 	record, ok := committedRecord(root)
-	if !ok || root.CommitQc == nil {
+	if !ok {
 		return nil, nil, evmroot.OrderedHandoffRecord{}, ErrHandoffRecord
 	}
+	// An installed epoch anchor is a synthetic root without a commit certificate (the install clears it): the stored canonical checkpoint is
+	// still the handoff's, and is what a root serves after its own install restart. Only the fallback below needs the root's certificate.
 	if store, ok := bt.blocksDB.(handoffCheckpointStore); ok {
 		raw, err := store.HandoffCheckpoint(record.Epoch + 1)
 		if err != nil {
@@ -775,6 +782,9 @@ func (bt *BlockTree) HandoffCheckpoint() (*rcnet.CommittedBlock, *basetypes.Unic
 			return stored.Block, stored.Path, record, nil
 		}
 		return nil, nil, evmroot.OrderedHandoffRecord{}, fmt.Errorf("%w: this root holds no canonical checkpoint for the handoff into epoch %d", ErrHandoffRecord, record.Epoch+1)
+	}
+	if root.CommitQc == nil {
+		return nil, nil, evmroot.OrderedHandoffRecord{}, ErrHandoffRecord
 	}
 	head, path, err := checkpointOf(root)
 	if err != nil {

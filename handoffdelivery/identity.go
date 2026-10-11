@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"sort"
 
+	"github.com/unicitynetwork/bft-core/handoff"
+	"github.com/unicitynetwork/bft-core/network/protocol/abdrc"
 	rctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
 	"github.com/unicitynetwork/bft-go-base/types"
 )
@@ -26,16 +28,16 @@ func SemanticIdentity(b Bundle) ([32]byte, error) {
 	return identityOf(&c)
 }
 
-// identityOf strips the per-root parts from c, which it changes, and hashes what is left.
-func identityOf(c *Bundle) ([32]byte, error) {
+// stripSignatures removes the per-root parts of a proof and its snapshot, and puts the snapshot's shard entries in canonical order.
+func stripSignatures(proof *handoff.OldCommitProof, s *abdrc.CommittedBlock) {
 	strip := func(qc *rctypes.QuorumCert) {
 		if qc != nil {
 			qc.Signatures, qc.SealSignatures = nil, nil
 		}
 	}
-	strip(c.Proof.CommitQC)
-	strip(c.Proof.OptionalQC)
-	if s := c.Snapshot; s != nil {
+	strip(proof.CommitQC)
+	strip(proof.OptionalQC)
+	if s != nil {
 		strip(s.Qc)
 		strip(s.CommitQc)
 		for i := range s.ShardInfo {
@@ -51,6 +53,11 @@ func identityOf(c *Bundle) ([32]byte, error) {
 			return shardKey(a.Shard) < shardKey(b.Shard)
 		})
 	}
+}
+
+// identityOf strips the per-root parts from c, which it changes, and hashes what is left.
+func identityOf(c *Bundle) ([32]byte, error) {
+	stripSignatures(&c.Proof, c.Snapshot)
 	// the stripped form is not a canonical persisted shape, so it is encoded directly rather than through EncodeBundle
 	stripped, err := types.Cbor.Marshal(c)
 	if err != nil {
