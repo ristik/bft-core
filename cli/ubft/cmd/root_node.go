@@ -462,7 +462,10 @@ func rootNodeRun(ctx context.Context, flags *rootNodeRunFlags) error {
 				mux.HandleFunc("POST /api/v1/handoff/q3-candidate", rootQ3CandidateHandler(cm))
 				mux.HandleFunc("POST /api/v1/handoff/q3-stage", rootQ3StageHandler(cm))
 				rootQ3API{Status: cm.Q3Status, Rt: q3rt, Bundle: q3BundleProvider{cm: cm, rt: q3rt}.Q3Bundle, State: cm.GetState,
-					Trust: func(epoch uint64) (*types.RootTrustBaseV1, error) { return trustBaseStore.GetByEpoch(epoch) }}.register(mux)
+					Trust: func(epoch uint64) (*types.RootTrustBaseV1, error) { return trustBaseStore.GetByEpoch(epoch) },
+					ShardConfig: func(partition types.PartitionID, epoch uint64) (*types.PartitionDescriptionRecord, error) {
+						return orchestration.ShardConfigByEpoch(partition, types.ShardID{}, epoch)
+					}}.register(mux)
 			}
 			if flags.PosDeploymentFile != "" {
 				mux.HandleFunc("POST /api/v1/pos/control", rootPosControlHandler(cm))
