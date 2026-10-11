@@ -17,7 +17,7 @@ import (
 
 const Source = "ristik/unicity-pos-contracts@30bc153a5cbbc42622dda13ab9603cfe08978853:artifacts/seal-registry.json"
 const CodeHashHex = "0x1c660647c1dc27aff97d9e9d5315e2ff60208ea8446253164d831c3ae0cd2611"
-const MaxMeasuredK uint64 = 16
+const MaxMeasuredK uint64 = 31 // measured by ureth b1_profile at W_cert 0,1,3,7,15 and 30 (owner-decisions section 23)
 
 var ErrArtifact = errors.New("b1registry: registry artifact or profile differs from pin")
 
