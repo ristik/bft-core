@@ -226,7 +226,9 @@ def main():
                 # The first pass runs on the base configuration (the full one does not exist yet): provisional, its id is replaced after the reconciling finalization.
                 genesis=pos.Genesis(home,ubft,a.pos_contracts.resolve(),REPO,out.name,a.chain_id,tuple(map(int,EVM_CONTINUITY_MAX_DISTANCE.split('/'))),(a.pos_cadence_rounds,a.pos_cadence_seconds))
                 genesis.check_tools(PINS['contracts'])
-                genesis.plan(trust,home/'shard-conf-8_0.json')
+                # Owner, withdrawal and payee keys for every genesis identity, generated here and never shipped in network/ (the addresses are in pos-plan.json).
+                owners=json.loads(subprocess.check_output([str(a.keygen.resolve()),'owners',str(home/'pos-owner-keys'),str(a.validators)],text=True))
+                genesis.plan(trust,home/'shard-conf-8_0.json',owners)
                 genesis.prepare(home/'shard-conf-8_0.json',provisional=True)
             profile_out=cli('engine-api','b1-profile','--shard-conf',home/'shard-conf-8_0.json','--trust-base',trust,'--w-cert',W_CERT,'--out',home/'b1-profile.json',
                 *(pos.profile_args(genesis.deployment,genesis.dir/'elect-measurement.json') if genesis else []))
@@ -286,6 +288,7 @@ def main():
             for name,src in (('pos-genesis-identities.json','genesis-identities.json'),('pos-plan.json','plan.json'),('pos-contracts-genesis.json','contracts-genesis.json')):
                 shutil.copy2(genesis.dir/src,out/'network'/name)
             (out/'network/pos-genesis-assignment.txt').write_text(genesis.assignment+'\n')
+            genesis.alloc_code_hashes(json.loads((home/'genesis.json').read_text()))
         shutil.copy2(home/'agg-conf/shard-conf-9_0.json',out/'network/aggregator-conf.json')
         for i in range(1,a.validators+1):
             val=out/f'validator{i}'
@@ -296,6 +299,7 @@ def main():
             for kind in ('ureth','archive','jwt'): (val/kind).mkdir()
             (val/'jwt/jwt.hex').write_text(secrets.token_hex(32)+'\n')
         shutil.move(str(home/'faucet-secrets'),out/'faucet-secrets')
+        if genesis: shutil.move(str(home/'pos-owner-keys'),out/'pos-owner-keys')   # private host material, like faucet-secrets: not mounted, not in network/
         shutil.copy2(a.captcha_secret_file,out/'faucet-secrets/hcaptcha-secret')
         (out/'claims').mkdir()
         (out/'metrics').mkdir()
@@ -316,7 +320,7 @@ def main():
         manifest={'offline_validation_only':a.offline_validation,'generation':out.name,'chain_id':a.chain_id,'genesis_hash':'0x'+block,'validators':a.validators,
             'faucet_address':next(iter(alloc)), 'artifacts':records,
             'pos':({'genesis_assignment':genesis.assignment,'first_pass_assignment':genesis.first,'custody':genesis.deployment['custody'],'election':genesis.deployment['election'],
-                    'contracts':PINS['contracts'],'cadence_rounds':a.pos_cadence_rounds,'cadence_seconds':a.pos_cadence_seconds} if genesis else None),
+                    'contracts':PINS['contracts'],'owner_keys':'pos-owner-keys','cadence_rounds':a.pos_cadence_rounds,'cadence_seconds':a.pos_cadence_seconds} if genesis else None),
             'authority_status':{str(i):json.loads(authority(i,'status','--operator-socket',out/f'validator{i}/auth/operator.sock','--operator-credential',out/f'validator{i}/auth/operator.cred')) for i in range(1,a.validators+1)} if not a.offline_validation else {},
             'config_sha256':{f.name:hashlib.sha256(f.read_bytes()).hexdigest() for f in (out/'network').glob('*.json')}}
         write(out/'manifest.json',manifest)
