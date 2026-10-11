@@ -111,7 +111,10 @@ PY
 }
 
 P85_CAST=${P85_CAST:-$HOME/.foundry/bin/cast}
-P85_JOINER_FUND_WEI=${P85_JOINER_FUND_WEI:-300000000000000000000}   # 3 bond units: the joiner's bond and the gas of its transactions
+# the joiner bonds P85_JOINER_UNITS units (3 in the over-bound mode, which refuses a candidate that heavy), and is funded with those plus two more units for the
+# gas of its transactions (the default mode: 1 + 2 = 3 units, as before). Decided here, before the genesis alloc, from the mode.
+P85_JOINER_UNITS=${P85_JOINER_UNITS:-$([ "${P85_MODE:-}" = overbound ] && echo 3 || echo 1)}
+P85_JOINER_FUND_WEI=${P85_JOINER_FUND_WEI:-$(python3 -c "print($P85_BOND_UNIT * ($P85_JOINER_UNITS + 2))")}
 
 # The joiner entity's EVM-side account (owner of its custody identity; it also pays the relayer transactions of the lane). It is funded in the
 # genesis alloc, so the lane needs no faucet. Its root/EVM keys are the nodes' own (written by the lane when the joiner's nodes exist).

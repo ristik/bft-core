@@ -11,6 +11,7 @@ from unittest.mock import patch
 import gateway
 import generate
 import pos
+import handoff
 
 class FakeRelay:
     def __init__(self): self.calls=[]
@@ -185,6 +186,18 @@ class ProofOfStake(unittest.TestCase):
         d=pos.Genesis.__new__(pos.Genesis);d.deployment={'custody':'0xaa','custodyCodeHash':'0xdead','election':'0xaa','electionCodeHash':'0xabcd'}
         with patch('pos.subprocess.run',return_value=R):
             with self.assertRaisesRegex(pos.PosError,'custody code'): d.alloc_code_hashes(genesis)
+
+class Handoff(unittest.TestCase):
+    def test_the_install_override_adds_the_flag_to_every_root_and_nothing_else(self):
+        compose={'services':{'root1':{'entrypoint':['ubft','root-node','run'],'volumes':['x']},'root2':{'entrypoint':['ubft','root-node','run']},
+                             'shard1':{'entrypoint':['ubft','shard-node']},'root':{'entrypoint':['x']}}}
+        override=handoff.install_override(compose,2)
+        self.assertEqual(override,{'services':{'root1':{'entrypoint':['ubft','root-node','run','--install-handoff-epoch','2']},
+                                                'root2':{'entrypoint':['ubft','root-node','run','--install-handoff-epoch','2']}}})
+        self.assertEqual(compose['services']['root1']['entrypoint'],['ubft','root-node','run'],'the generated compose file is not modified')
+        with self.assertRaisesRegex(ValueError,'below epoch 2'): handoff.install_override(compose,1)
+        with self.assertRaisesRegex(ValueError,'already installs'): handoff.install_override({'services':{'root1':{'entrypoint':['a','--install-handoff-epoch','2']}}},3)
+        with self.assertRaisesRegex(ValueError,'no root'): handoff.install_override({'services':{'shard1':{'entrypoint':['a']}}},2)
 
 class PublicRPC(unittest.TestCase):
     def setUp(self):
