@@ -27,7 +27,21 @@ t6_preflight() {
   command -v sha256sum >/dev/null 2>&1 || command -v shasum >/dev/null 2>&1 || missing+=("sha256sum|shasum")
   [ -x "$LOCK_SCRIPT" ] || missing+=("$LOCK_SCRIPT")
   [ -z "${T6_URETH_BIN:-}" ] || [ -x "$T6_URETH_BIN" ] || missing+=("T6_URETH_BIN=$T6_URETH_BIN")
-  [ -z "${T6_URETH_ATTESTED:-}" ] || [ -x "$T6_URETH_ATTESTED" ] || missing+=("T6_URETH_ATTESTED=$T6_URETH_ATTESTED")
+  if [ -n "${T6_URETH_ATTESTED:-}" ]; then
+    # the attested build's whole check, before the lock: the binary, the digest the operator supplied, and a provenance that names the pin and the digest
+    local got
+    [ -x "$T6_URETH_ATTESTED" ] || missing+=("T6_URETH_ATTESTED=$T6_URETH_ATTESTED")
+    [ -n "${T6_URETH_ATTESTED_SHA256:-}" ] || missing+=("T6_URETH_ATTESTED_SHA256")
+    [ -n "${T6_URETH_ATTESTED_PROVENANCE:-}" ] || missing+=("T6_URETH_ATTESTED_PROVENANCE")
+    if [ -x "$T6_URETH_ATTESTED" ] && [ -n "${T6_URETH_ATTESTED_SHA256:-}" ]; then
+      got=$( (sha256sum "$T6_URETH_ATTESTED" 2>/dev/null || shasum -a 256 "$T6_URETH_ATTESTED" 2>/dev/null) | awk '{print $1}')
+      [ "$got" = "$T6_URETH_ATTESTED_SHA256" ] || missing+=("attested sha256 ($got is not $T6_URETH_ATTESTED_SHA256)")
+    fi
+    if [ -n "${T6_URETH_ATTESTED_PROVENANCE:-}" ]; then
+      [ "$(tr -d '[:space:]' <"$T6_URETH_ATTESTED_PROVENANCE/commit.txt" 2>/dev/null)" = "$T6_URETH_COMMIT" ] || missing+=("provenance commit.txt is not the pin $T6_URETH_COMMIT")
+      grep -q "^${T6_URETH_ATTESTED_SHA256:-?} " "$T6_URETH_ATTESTED_PROVENANCE/sha256.txt" 2>/dev/null || missing+=("provenance sha256.txt does not record ${T6_URETH_ATTESTED_SHA256:-?}")
+    fi
+  fi
   for c in cli/ubft scripts/f7-mintproof-extract scripts/f7-mintproof-verify scripts/evmtx scripts/b1genesis; do
     [ -d "$SOURCE_ROOT/$c" ] || missing+=("source $c")
   done
@@ -65,6 +79,8 @@ if [ -n "${T6_URETH_ATTESTED:-}" ]; then
   [ -z "${T6_URETH_BIN:-}" ] || { echo "FAIL: T6_URETH_ATTESTED and T6_URETH_BIN are exclusive" >&2; exit 1; }
   T6_RUN_MODE="attested prebuilt Ureth ${T6_URETH_ATTESTED} sha256=${T6_URETH_ATTESTED_SHA256:-?} (provenance ${T6_URETH_ATTESTED_PROVENANCE:-?}); everything else from a clean build (evidence run)"
 fi
+# The over-bound step omitted (a development hook of the rotation) is a run that did not show the refusal: never evidence, whatever the Ureth.
+if [ -n "${T6_TEST_SKIP_OVER_BOUND:-}" ]; then T6_RUN_MODE="DEVELOPMENT OVERRIDE: the over-budget refusal step is skipped (T6_TEST_SKIP_OVER_BOUND): NOT EVIDENCE; $T6_RUN_MODE"; fi
 printf 'T6 run mode: %s\n' "$T6_RUN_MODE" | tee "$EVIDENCE_DIR/run-mode.txt"
 
 pass() { printf 'PASS: %s\n' "$*"; }
@@ -246,7 +262,7 @@ build_pinned_ureth() {
     export URETH_BIN
     printf 'ureth commit=%s\nureth binary=%s\nureth binary sha256=%s\nureth provenance=%s\n' "$T6_URETH_COMMIT" "$URETH_BIN" "$(sha256 "$URETH_BIN")" "$prov" >>"$EVIDENCE_DIR/source-pin.txt"
     "$URETH_BIN" --version >"$EVIDENCE_DIR/ureth-version.txt" 2>&1
-    cp "$prov"/*.txt "$EVIDENCE_DIR/" 2>/dev/null || true
+    mkdir -p "$EVIDENCE_DIR/ureth-provenance" && cp "$prov"/*.txt "$EVIDENCE_DIR/ureth-provenance/"
     { go version; rustc --version 2>&1 || true; cargo --version 2>&1 || true; } >"$EVIDENCE_DIR/compiler-toolchains.txt"
     printf 'RUN MODE: %s\n' "$T6_RUN_MODE" >>"$EVIDENCE_DIR/source-pin.txt"
     return 0
