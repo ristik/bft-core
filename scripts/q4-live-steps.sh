@@ -1155,7 +1155,9 @@ q4_run_lane() {
       q4_step "F17: second handoff A to B committed on the running chain (the four entities reweighted 6,1,1,1 -> 3,3,2,1)" q4_handoff_ab
     fi
     q4_step "F17: the first successor proposal held across the install restart into epoch 3; release, epoch 3 commits" q4_first_successor_held
-    [ "$Q4_TURNOVER" != 1 ] || q4_step "L5: the removed validator's root, restarted into epoch 3, follows and signs nothing while the new committee commits; the joiner's root is a member and signs" q4_removed_validator_follows
+    if [ "$Q4_TURNOVER" = 1 ]; then
+      q4_step "L5: the removed validator's root, restarted into epoch 3, follows and signs nothing while the new committee commits; the joiner's root is a member and signs" q4_removed_validator_follows
+    fi
     q4_step "F17: B in effect: epoch 3 activated and acknowledged, scheme 2 certificates of 3,3,2,1, paid transaction certified" q4_b_in_effect
     q4_step "F17 B: the EVM pair of one weight-3 entity cut from every root (6 >= request Q=5): EVM certifies; heal without rollback" q4_row_evm_cut progress 1
     q4_step "F17 B: the EVM pairs of both weight-3 entities cut from every root (3 < request Q=5): EVM stalls, roots commit; heal without rollback" q4_row_evm_cut stall 1 2
