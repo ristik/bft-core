@@ -9,6 +9,9 @@
 # restart); a joiner (evm5, evm6 and their roots) is started and gives its readiness BEFORE the Commit (briefs/joiner-readiness-review.md).
 # Root epochs: 1 genesis, 2 configuration-only advance, 3 coupled s=1 (4->5), 4 coupled s=2 (3->6, J={1,2,5,6}), 5 the derived recovery to K = the s=1 set
 # {1,2,3,5} (root 6->3), which supersedes s=2. EVM validators: evm1-4 genesis; evm5, evm6 spare identities that appear only in successor sets.
+# It starts, stops and restores nodes, so it starts only under the runner's lock flag AND the lane flag, sourced by the paired devnet: sourced anywhere else
+# it does nothing and defines nothing.
+if [ "${H3_LANE_LOCKED:-0}" != 1 ] || [ "${H3_ASSIGNMENT_LANE:-0}" != 1 ] || [ "${PAIRED_DEVNET_STEPS:-0}" != 1 ]; then return 0; fi
 source scripts/lib/m2-handoff-lib.sh
 source scripts/lib/h3-lib.sh
 source scripts/lib/q3-lib.sh
@@ -17,12 +20,15 @@ source scripts/lib/h3-q3-lib.sh
 H3_DIR=test-nodes/h3
 mkdir -p "$H3_DIR"
 cp test-nodes/trust-base.json test-nodes/trust-base-epoch1.json
-read -r h3_slot_shard h3_slot_root h3_slot_conf h3_slot_cursor < <(H3_SLOT_LAYOUT=$([ "${Q3_B1:-0}" = 1 ] && echo 3 || echo 2) go run ./scripts/h3slots)
+read -r h3_slot_shard h3_slot_root h3_slot_conf h3_slot_cursor < <(H3_SLOT_LAYOUT=3 go run ./scripts/h3slots)
 H3_REGISTRY=0xff00000000000000000000000000000000000002
 H3_ONLINE="1 2 3 4"
 H3_ROOTS="1 2 3 4"
-# the paired-devnet seeding leaves the funded sender at nonce 4 (run6c: "nonce too low: next nonce 4, tx nonce 3")
-M2_NEXT_NONCE=${M2_NEXT_NONCE:-4}
+# The next nonce of the funded account is whatever the chain says it is (the seeding and the F8 probes before this point send transactions); a count the
+# node cannot give is a failure, not a guess.
+h3FundedNonce=$(rpc "http://127.0.0.1:$rethEthBase" eth_getTransactionCount "[\"$(go run ./scripts/evmtx -address)\",\"pending\"]" | pyget "['result']") || h3FundedNonce=
+case "$h3FundedNonce" in 0x*) M2_NEXT_NONCE=${M2_NEXT_NONCE:-$((h3FundedNonce))} ;; *) echo "FAIL: the funded account's nonce could not be read from validator 1 (got '$h3FundedNonce')" >&2; return 1 ;; esac
+echo "H3 lane: the funded account's next nonce is $M2_NEXT_NONCE (read from the chain)"
 M2_CHAIN_ID=31337
 
 h3_pass() { echo "  PASS: $*"; }

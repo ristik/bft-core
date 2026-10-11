@@ -1,5 +1,8 @@
 # Sourced by reth-paired-devnet.sh after the first paid certified block.
 # Uses the same four real shard validators and their running ureth instances.
+# It plans handoffs, restarts nodes and wipes a validator, so it starts only when the paired devnet (the runner, under its caller's devnet lock) sources it:
+# sourced anywhere else it does nothing and defines nothing.
+if [ "${M2_PROFILE2:-0}" != 1 ] || [ "${PAIRED_DEVNET_STEPS:-0}" != 1 ]; then return 0; fi
 source scripts/lib/m2-handoff-lib.sh
 # The fresh-B1 layout has one handoff: a same-members root epoch advance through the Q3 flow (V3 candidate, a readiness receipt from every entity, propose).
 # A root-only key rotation is not a coupled validator-set change and is not a mode of this lane; the coupled rotation is the H3 lane's.

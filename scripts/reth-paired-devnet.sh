@@ -763,7 +763,6 @@ elif [ "$postM2aMode" = f7 ]; then
   mkdir -p "$EVM_ARCHIVE_ROOT"
 fi
 export EVM_GENESIS_FILE="$chainSpec"
-if [ "${H3_ASSIGNMENT_LANE:-0}" = 1 ]; then export EVM_REGISTRY_LAYOUT=2; fi
 export EVM_FULL_SHARD_CONF="test-nodes/shard-conf-${partitionID}_0.json"
 export EVM_ENGINE_FEE_COLLECTOR="${POST_M2A_FEE_COLLECTOR:-$URETH_PIN_FEE_COLLECTOR}"
 if [ -n "$postM2aMode" ]; then export EVM_OPERATOR_STATUS_RPC=1; fi
@@ -903,10 +902,12 @@ if [ "${M2_PROFILE2:-0}" = 1 ] && [ "${POST_M2A_SKIP_HANDOFF:-0}" != 1 ]; then
   fi
   handoffScript=scripts/m2-profile2-handoffs.sh
   if [ "${H3_ASSIGNMENT_LANE:-0}" = 1 ]; then handoffScript=scripts/h3-assignment-steps.sh; fi
-  if [ "${Q3_WEIGHT_LANE:-0}" = 1 ]; then handoffScript=scripts/q3-weight-activation-steps.sh; fi   # Q3 #50 slice E: runs on the H3 lane's layout-2 genesis
+  if [ "${Q3_WEIGHT_LANE:-0}" = 1 ]; then handoffScript=scripts/q3-weight-activation-steps.sh; fi   # Q3 #50 slice E
   if [ "${Q4_LIVE_LANE:-0}" = 1 ]; then handoffScript=scripts/q4-live-steps.sh; fi
   if [ "${P85_LANE:-0}" = 1 ]; then handoffScript=scripts/p85-recovery-steps.sh; fi
   if [ "${H6_ABORT_LANE:-0}" = 1 ]; then handoffScript=scripts/h6/abort-rehearsal-steps.sh; fi
+  # the steps files act on the devnet at source time: they start only when this script, the runner, says so (and each lane adds its own flags)
+  PAIRED_DEVNET_STEPS=1
   if ! source "$handoffScript"; then
     fail "profile-2 two-handoff lane failed"
     exit 1
