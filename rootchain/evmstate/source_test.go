@@ -6,6 +6,7 @@ import (
 	"math/big"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common/hexutil"
@@ -109,4 +110,28 @@ func TestTheRPCSourceBuildsTheWitnessAndTheFactsFromAClient(t *testing.T) {
 
 	_, err = src.PrimaryWitness(context.Background(), head[:5], resultID)
 	require.ErrorIs(t, err, ErrBuild, "a frozen parent is a 32-byte block hash")
+}
+
+func TestRPCNumberRefusesWhatIsNotAHexNumberAndAcceptsEveryPaddingOfOne(t *testing.T) {
+	for _, bad := range []string{"0x", "", "5", "0x" + strings.Repeat("1", 65), "0xzz", "0x-5", "0x+5", "0x 5", "0x5\n"} {
+		var n rpcNumber
+		raw, err := json.Marshal(bad)
+		require.NoError(t, err)
+		require.ErrorIs(t, json.Unmarshal(raw, &n), ErrBuild, "%q", bad)
+	}
+	var n rpcNumber
+	require.ErrorIs(t, json.Unmarshal([]byte("5"), &n), ErrBuild, "a JSON number is not a hex string")
+	val := func(s string) *big.Int {
+		var n rpcNumber
+		raw, err := json.Marshal(s)
+		require.NoError(t, err)
+		require.NoError(t, json.Unmarshal(raw, &n), "%q", s)
+		return (*big.Int)(&n)
+	}
+	require.Zero(t, val("0x0").Sign())
+	require.Equal(t, int64(0x123), val("0x123").Int64(), "an odd-length quantity")
+	padded := "0x" + strings.Repeat("0", 61) + "123"
+	require.Len(t, padded, 66)
+	require.Equal(t, 0, val(padded).Cmp(val("0x123")), "a 64-digit padded word is the same number as its minimal form")
+	require.Equal(t, 0, val("0x1F").Cmp(val("0x1f")), "digits are case-insensitive")
 }
