@@ -75,10 +75,15 @@ h6_abort() { # name: leaves h6-<name>/abort.out and abort.status; returns the CL
 }
 h6_x() { printf '%s\n' "$*" >>"$Q3_DIR/commands.log"; "$@"; }
 
-# the roots' own record of the Abort, bound to this attempt by the log mark h3_mark took before the helper planned it
+# the roots' own record of the Abort: the committed outcome line (phase=aborted, with the root round the Abort was ordered at), bound to this attempt by the
+# log mark h3_mark took before the helper planned it. ("root handoff outcome phase=aborted" is the automatic abort's line, not the operator Abort's.)
 h6_abort_logged() { # name
-  h3_since_mark | grep -h "root handoff abort ordered" | sort -u >"$(h6_dir "$1")/roots-abort-ordered.log"
-  [ -s "$(h6_dir "$1")/roots-abort-ordered.log" ]
+  local dir; dir=$(h6_dir "$1")
+  h3_since_mark | grep -h "root handoff outcome.*phase=aborted" | sed 's/^time=[^ ]* //' | sort -u >"$dir/roots-abort-ordered.log"
+  [ -s "$dir/roots-abort-ordered.log" ] || return 1
+  # every root that logged it names the round the CLI printed
+  local round; round=$(sed -n 's/.*ordered at round \([0-9]*\);.*/\1/p' "$dir/abort.out" | head -1)
+  [ -n "$round" ] && ! grep -v "rootRound=$round " "$dir/roots-abort-ordered.log" | grep -q .
 }
 
 # ---- the freeze, observed (docs/operations/root-handoff-abort.md: it starts at the Prepare and lapses by itself after 24 root rounds) ----------------
