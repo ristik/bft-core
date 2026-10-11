@@ -117,7 +117,7 @@ func TestFreshnessRequesterIsActivatedByProductionStartup(t *testing.T) {
 	rootSel := selectors(parseFile(t, filepath.Join(root, "cli", "ubft", "cmd", "root_node.go")))
 	for _, want := range []string{
 		"consensus.WithFrontierSampler", "consensus.WithFrontierSigning", "consensus.ValidateFrontierProfile", "consensus.ValidateFrontierSigner",
-		"frontiertransport.FrontierProtocolID", "frontiertransport.CutProtocolID", "frontiertransport.NewServer",
+		"frontiertransport.FrontierProtocolID", "frontiertransport.CutProtocolID", "frontiertransport.NewServerFor",
 	} {
 		require.True(t, rootSel[want], "root-node run must reference %s", want)
 	}
