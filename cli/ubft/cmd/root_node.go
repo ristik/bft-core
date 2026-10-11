@@ -181,10 +181,16 @@ func rootNodeRun(ctx context.Context, flags *rootNodeRunFlags) error {
 	if err != nil {
 		return fmt.Errorf("creating host: %w", err)
 	}
-	partitionNet, err := network.NewLibP2PRootChainNetwork(host, flags.MaxRequests, defaultNetworkTimeout, obs)
+	libp2pPartitionNet, err := network.NewLibP2PRootChainNetwork(host, flags.MaxRequests, defaultNetworkTimeout, obs)
 	if err != nil {
 		return fmt.Errorf("partition network initialization failed: %w", err)
 	}
+	// a build without the q4shim tag returns the network itself
+	partitionNet, stopShardGate, err := wrapPartitionNet(ctx, libp2pPartitionNet, host.ID(), log)
+	if err != nil {
+		return err
+	}
+	defer stopShardGate()
 
 	rootStore, err := storage.NewBoltStorage(flags.PathWithDefault(flags.RootDBFile, rootDBFileName))
 	if err != nil {

@@ -612,3 +612,21 @@ func TestB1Genesis_AManifestCompilesIntoTheFreshB1Genesis(t *testing.T) {
 	_, _, err = loadB1GenesisOrigin(full, d.profile, h, genesisPath, "")
 	require.NoError(t, err, "the node's own validation accepts the artifact")
 }
+
+// scripts/b1genesis reads the profile file this writer produces: the golden file it tests against is exactly the writer's output for this profile
+// (hooks included), so a change of the writer's format fails here before it can break the genesis verifier.
+func TestB1ProfileFileMatchesTheGenesisToolsGolden(t *testing.T) {
+	h := func(b byte, tail byte) (out [32]byte) { out[0], out[1], out[31] = b, b, tail; return }
+	p := b1state.Profile{Network: 3, RootGenesisID: h(0x29, 0x01), ExecutionChainID: 31337, RuntimeHash: h(0x28, 0x02), CompilerHash: h(0x2f, 0x03),
+		WCert: 15, DeltaEV: 16, DeltaHold: 17, SystemGas: 269547540, ForcedGas: 5, MaxGas: 276547540, OrdinaryCapacity: 7000000, RestGas: 19360500,
+		CompanionBytes: 1048576, OtherCompanionBytes: 65536, GenesisUCTime: 1700000000,
+		RecordsCustody: common.HexToAddress("0x0c0571"), HRecords: 8, HookRecordGas: 120000, ElectionContract: common.HexToAddress("0xe1ec7"), ElectGas: 4200000}
+	got, err := json.Marshal(b1ProfileFileOf(p))
+	require.NoError(t, err)
+	want, err := os.ReadFile(filepath.Join("..", "..", "..", "scripts", "b1genesis", "testdata", "ubft-b1-profile-hooks.json"))
+	require.NoError(t, err)
+	var a, b map[string]any
+	require.NoError(t, json.Unmarshal(got, &a))
+	require.NoError(t, json.Unmarshal(want, &b))
+	require.Equal(t, b, a)
+}

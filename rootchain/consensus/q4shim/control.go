@@ -18,6 +18,7 @@ type Control struct {
 	Rules        []Rule         `json:"rules,omitempty"`
 	Triggers     []Trigger      `json:"triggers,omitempty"`
 	Equivocation []Equivocation `json:"equivocation,omitempty"`
+	Forgery      []Forgery      `json:"forgery,omitempty"`
 	Releases     []Release      `json:"releases,omitempty"`
 }
 
@@ -31,6 +32,7 @@ type Status struct {
 	Triggers   map[string]int `json:"triggers"`  // trigger name -> times fired
 	Held       map[string]int `json:"held"`      // rule name -> messages held now
 	Byzantine  map[string]int `json:"byzantine"` // equivocation name -> messages sent
+	Forged     map[string]int `json:"forged"`    // forgery name -> messages sent
 	Faults     []string       `json:"faults,omitempty"`
 }
 
@@ -85,6 +87,9 @@ func (n *Net) Apply(ctx context.Context, c Control) error {
 	if err := n.SetEquivocations(c.Equivocation); err != nil {
 		return err
 	}
+	if err := n.SetForgeries(c.Forgery); err != nil {
+		return err
+	}
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	old := n.rules
@@ -123,7 +128,7 @@ func (n *Net) Status() Status {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	st := Status{Gen: n.gen, Self: n.cfg.Self.String(), Sends: n.sends, Deliveries: n.deliveries,
-		Rules: map[string]int{}, Triggers: map[string]int{}, Held: map[string]int{}, Byzantine: map[string]int{}}
+		Rules: map[string]int{}, Triggers: map[string]int{}, Held: map[string]int{}, Byzantine: map[string]int{}, Forged: map[string]int{}}
 	for _, r := range n.rules {
 		st.Rules[r.Name] = r.hits
 	}
@@ -135,6 +140,9 @@ func (n *Net) Status() Status {
 	}
 	for _, e := range n.equivs {
 		st.Byzantine[e.Name] = e.sent
+	}
+	for _, f := range n.forges {
+		st.Forged[f.Name] = f.sent
 	}
 	for _, f := range n.faults {
 		st.Faults = append(st.Faults, f.Error())

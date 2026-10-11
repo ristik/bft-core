@@ -33,6 +33,7 @@ import (
 	rctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
 	"github.com/unicitynetwork/bft-core/rootchain/partitions"
 	"github.com/unicitynetwork/bft-core/rootchain/testutils"
+	"github.com/unicitynetwork/bft-core/rootrecords"
 	"github.com/unicitynetwork/bft-core/shardnode"
 	"github.com/unicitynetwork/bft-core/trustactivation"
 	"github.com/unicitynetwork/bft-core/trusthistorystore"
@@ -242,6 +243,8 @@ func newWeightedAnchorReplicas(t *testing.T, weights []uint64, commitSealRound u
 type anchorOptions struct {
 	weights []uint64
 	syncDB  bool
+	// pos is the P85 source state the anchor's control carries: the old epoch's freeze after an assignment handoff.
+	pos *rootrecords.State
 }
 
 func newAnchorReplicasWith(t *testing.T, opts anchorOptions, commitSealRound uint64, frozenParent ...[]byte) (map[peer.ID]*anchorReplica, *rctypes.EpochAnchor, time.Time) {
@@ -315,6 +318,9 @@ func newAnchorReplicasWith(t *testing.T, opts anchorOptions, commitSealRound uin
 		SuccessorTRHash: successorTRHash, Kind: "commit"}
 	control := evmroot.ControlState{Network: 5, Epoch: 1, OrderedRound: 4, PredecessorBodyID: oldID,
 		Phase: "committed", RecordBytes: record.Bytes(), PreviousDigest: bytes.Repeat([]byte{4}, 32), FrozenParent: parent}
+	if opts.pos != nil {
+		control.Pos = opts.pos.Bytes()
+	}
 	shardKey := types.PartitionShardID{PartitionID: partitionID, ShardID: shardID.Key()}
 	state := storage.ShardStates{States: map[types.PartitionShardID]*storage.ShardInfo{shardKey: shardState},
 		Changed: storage.ShardSet{shardKey: {}}, Control: &control}
@@ -621,4 +627,76 @@ func firstReplica(replicas map[peer.ID]*anchorReplica) *anchorReplica {
 		return replica
 	}
 	return nil
+}
+
+type fixedClosure struct{ calls []uint64 }
+
+func (f *fixedClosure) Closure(epoch, orderingEpoch, orderingRound uint64) (rctypes.PosControl, []byte, error) {
+	f.calls = append(f.calls, epoch)
+	witness := []byte("terminal bundle of epoch 1")
+	return rctypes.PosControl{OrderingEpoch: orderingEpoch, OrderingRound: orderingRound, Op: rctypes.OpCloseLiability,
+		Close: &rctypes.CloseContext{ClosedEpoch: epoch}, Data: make([]byte, 192), WitnessHash: sha256.Sum256(witness)}, witness, nil
+}
+
+// The first block of the successor epoch has no parent QC, only the anchor, and it is exactly the block whose ordinary round ends the
+// freeze: the leader must put the closed epoch's CloseLiability in it (run 19 of the P85 lane: every root refused the leader's first
+// proposal with ErrClosureMissing and the epoch never certified).
+func TestTheFirstLeaderOfAnAnchoredEpochIncludesTheMandatoryClosure(t *testing.T) {
+	pos := rootrecords.State{Epoch: 1, First: 1, Frozen: true, Endpoint: 3, NextEpoch: 2, NextOffset: 4, NextFirst: 7,
+		Pending: []rootrecords.PendingH{{Epoch: 1, HRound: 4, Offset: 4, First: 7, RootEpoch: 2}}}
+	replicas, anchor, _ := newAnchorReplicasWith(t, anchorOptions{pos: &pos}, 4)
+	ctx := context.Background()
+	firstLeader, err := firstReplica(replicas).manager.leaderSelector.GetLeaderForRound(anchor.Slot + 1)
+	require.NoError(t, err)
+	proposer := &fixedClosure{}
+	for _, replica := range replicas {
+		replica.manager.SetPosServices(&storage.PosServices{Deployment: testDeployment, Authority: noAuthority{}, Proposer: proposer})
+	}
+	replicas[firstLeader].manager.processNewRoundEvent(ctx)
+	proposal := replicas[firstLeader].net.WaitRootProposal(t)
+	require.Equal(t, anchor, proposal.Block.Anchor, "the first block of the epoch is proposed on the anchor")
+	require.Len(t, proposal.Block.Payload.PosControls, 1)
+	require.Equal(t, rctypes.OpCloseLiability, proposal.Block.Payload.PosControls[0].Op)
+	require.EqualValues(t, 1, proposal.Block.Payload.PosControls[0].Close.ClosedEpoch)
+	require.EqualValues(t, proposal.Block.Round, proposal.Block.Payload.PosControls[0].OrderingRound)
+	require.Equal(t, []uint64{1}, proposer.calls)
+}
+
+// The path run 19 took: the epoch's first round times out, so the first block is proposed at anchor.Slot+2 on the anchor, with the timeout
+// certificate. The closure is ordered at that round, not at the one after the parent.
+func TestTheFirstLeaderAfterATimeoutOfAnAnchoredEpochIncludesTheMandatoryClosure(t *testing.T) {
+	pos := rootrecords.State{Epoch: 1, First: 1, Frozen: true, Endpoint: 3, NextEpoch: 2, NextOffset: 4, NextFirst: 7,
+		Pending: []rootrecords.PendingH{{Epoch: 1, HRound: 4, Offset: 4, First: 7, RootEpoch: 2}}}
+	replicas, anchor, _ := newAnchorReplicasWith(t, anchorOptions{pos: &pos}, 4)
+	ctx := context.Background()
+	firstLeader, err := firstReplica(replicas).manager.leaderSelector.GetLeaderForRound(anchor.Slot + 1)
+	require.NoError(t, err)
+	nextLeader, err := firstReplica(replicas).manager.leaderSelector.GetLeaderForRound(anchor.Slot + 2)
+	require.NoError(t, err)
+	proposer := &fixedClosure{}
+	for _, replica := range replicas {
+		replica.manager.SetPosServices(&storage.PosServices{Deployment: testDeployment, Authority: noAuthority{}, Proposer: proposer})
+	}
+	for id, replica := range replicas {
+		if id != firstLeader {
+			replica.manager.onLocalTimeout(ctx)
+		}
+	}
+	for id, replica := range replicas {
+		if id == firstLeader {
+			continue
+		}
+		messages := replica.net.SentMessages(network.ProtocolRootTimeout)
+		require.Len(t, messages, len(replicas))
+		require.NoError(t, replicas[nextLeader].manager.onTimeoutMsg(ctx, messages[0].Message.(*abdrc.TimeoutMsg)))
+	}
+	proposal := replicas[nextLeader].net.WaitRootProposal(t)
+	require.Equal(t, anchor, proposal.Block.Anchor)
+	require.NotNil(t, proposal.LastRoundTc)
+	require.EqualValues(t, anchor.Slot+2, proposal.Block.Round)
+	require.Len(t, proposal.Block.Payload.PosControls, 1)
+	c := proposal.Block.Payload.PosControls[0]
+	require.Equal(t, rctypes.OpCloseLiability, c.Op)
+	require.EqualValues(t, 1, c.Close.ClosedEpoch)
+	require.Equal(t, proposal.Block.Round, c.OrderingRound, "ordered at the block's own round, not the round after its parent")
 }

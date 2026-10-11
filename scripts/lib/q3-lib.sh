@@ -264,7 +264,7 @@ q3_selftest() {
   q3_st "m2_start_root carries the Q3 runtime flags for the lane" bash -c "sed -n '/^m2_start_root()/,/^}/p' scripts/lib/m2-handoff-lib.sh | grep -q -- '--q3-lane --genesis-identities'"
   q3_st "m2_start_root accepts an empty bootnode" bash -c "sed -n '/^m2_start_root()/,/^}/p' scripts/lib/m2-handoff-lib.sh | grep -q 'bootArgs=(--bootnodes'"
   # teardown: only this checkout's processes, matched by command AND cwd; never a pattern kill
-  q3_st_neg "teardown: no pkill or killall in q3_teardown" bash -c "declare -f q3_teardown | grep -E 'pkill|killall'"
+  q3_st_neg "teardown: no pkill or killall in q3_teardown" bash -c "declare -f q3_teardown | grep -E 'pkill|killall'"   # global-kill-ok: a grep for the words, not a kill
   if declare -F owned_pids >/dev/null; then
     mkdir -p "$t/mine" "$t/other"
     local mine other
