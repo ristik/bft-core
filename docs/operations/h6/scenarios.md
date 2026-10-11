@@ -96,7 +96,20 @@ it is a manual procedure and counts only with a named independent operator's rec
 
 ## 6. Abort before and after H
 
-[root-handoff-abort.md](../root-handoff-abort.md) is the procedure. The manual rehearsal helper `scripts/h6/prepare-handoff.py`
-plans a V2 handoff, which a fresh-B1 chain refuses by name (`ErrHandoffNeedsV3Plan`), so **the manual Abort rehearsal is not available
-on this layout until the helper is ported to the Q3 flow** (tracked separately). Do not use it, and do not substitute the H3 lane's
-"late acknowledgement refused", which is a different assertion. Record Abort as not rehearsed.
+[root-handoff-abort.md](../root-handoff-abort.md) is the procedure. The rehearsal helper `scripts/h6/prepare-handoff.py` plans the **Q3 handoff**
+(a V3 plan with one `q3-readiness` receipt per successor entity; a V2 plan is refused by name, `ErrHandoffNeedsV3Plan`), has one old root
+endorse, and leaves the exact target on disk for `root handoff abort`; with `--endorse-all` it lets H commit and expects `too_late`.
+
+Per attempt, on a running Q3 devnet (a lane's functions: `q3_derive_candidate` for the candidate, `q3_receipts` for the receipts):
+
+```sh
+python3 scripts/h6/prepare-handoff.py --old-trust-base test-nodes/trust-base-epoch1.json --next-trust-base test-nodes/trust-base-epoch2.json \
+  --receipts RECEIPT_1.json,...,RECEIPT_N.json --v3-body-id v3-body-id.txt --root-rpc URL1,...,URLN --out EVIDENCE_DIR [--endorse-all] [--dry-run]
+# then, immediately (a Prepare lapses after 24 root rounds): the documented ubft root handoff abort with EVIDENCE_DIR/target.json
+```
+
+`--dry-run` checks every input (successor is the next epoch of the old trust base, exactly one receipt per successor entity, loopback URLs, one
+RPC per old member, and that one endorsement cannot reach the old quorum) and contacts nothing. Checked in process, with no devnet:
+`python3 -m unittest discover -s scripts/h6 -p test_prepare_handoff.py` (fake roots) and `go test ./cli/ubft/cmd -run TestPrepareHandoffHelper`
+(the real operator routes). **A live Abort before and after H is still not rehearsed** until a lane run records it; do not substitute the H3
+lane's "late acknowledgement refused", which is a different assertion.
