@@ -549,7 +549,23 @@ func newQ3Cmd() *cobra.Command {
 			}
 			return writeJSONFile(out, resp.Signers)
 		}}
-	for _, c := range []*cobra.Command{history, envelope, signers} {
+	var shardPartition uint32
+	shardConf := &cobra.Command{Use: "shard-conf", Short: "The shard configuration a root holds for a shard epoch (the file `signing-authority advance-epoch --shard-conf` takes)",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			var resp json.RawMessage
+			if err := firstPost(cmd.Context(), splitList(rootRPCs), "/api/v1/q3/shard-conf", q3ShardConfRequest{Partition: shardPartition, Epoch: epoch}, &resp); err != nil {
+				return err
+			}
+			var check types.PartitionDescriptionRecord
+			if err := json.Unmarshal(resp, &check); err != nil {
+				return fmt.Errorf("the root returned a configuration that does not decode: %w", err)
+			}
+			return os.WriteFile(out, append(bytes.TrimSpace(resp), '\n'), 0o600)
+		}}
+	shardConf.Flags().Uint64Var(&epoch, "epoch", 0, "the shard epoch")
+	shardConf.Flags().Uint32Var(&shardPartition, "partition", 8, "partition id")
+	_ = shardConf.MarkFlagRequired("epoch")
+	for _, c := range []*cobra.Command{history, envelope, signers, shardConf} {
 		common(c)
 		q3.AddCommand(c)
 	}
