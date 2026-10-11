@@ -697,6 +697,12 @@ func (x *ConsensusManager) onLocalTimeout(ctx context.Context) {
 			x.log.WarnContext(ctx, "failed to read the recorded timeout", logger.Error(err))
 			return
 		}
+		if recorded == nil {
+			// A legacy epoch records no decision, but the node stores every timeout vote it sends as its last vote. A recovery
+			// resets the pacemaker without handing that vote over and can come back to the round it was signed in, with a newer
+			// HighQC: the stored vote is this node's statement for the round and is sent again, as it is after a restart.
+			recorded = x.storedTimeoutVote(ctx, timeout.Epoch, timeout.Round)
+		}
 		if recorded != nil {
 			timeoutVoteMsg = recorded
 			x.log.InfoContext(ctx, "recovered recorded timeout vote", "epoch", timeout.Epoch, "round", timeout.Round, "messageID", timeoutMessageID(recorded))
@@ -730,6 +736,22 @@ func (x *ConsensusManager) onLocalTimeout(ctx context.Context) {
 		x.log.WarnContext(ctx, "error on broadcasting timeout vote", logger.Error(err))
 	}
 	x.voteCnt.Add(ctx, 1, attrSetVoteForTC)
+}
+
+// storedTimeoutVote is the timeout vote this node stored as its last vote, if it is its own vote for exactly this epoch and round;
+// nil otherwise (no last vote, a vote for a proposal, another round). A store that cannot be read yields nil with a warning: the
+// caller then signs under the safety rules as before.
+func (x *ConsensusManager) storedTimeoutVote(ctx context.Context, epoch, round uint64) *abdrc.TimeoutMsg {
+	last, err := x.blockStore.ReadLastVote()
+	if err != nil {
+		x.log.WarnContext(ctx, "failed to read the last vote", logger.Error(err))
+		return nil
+	}
+	vote, ok := last.(*abdrc.TimeoutMsg)
+	if !ok || vote == nil || vote.Timeout == nil || vote.Timeout.Round != round || vote.Timeout.Epoch != epoch || vote.Author != x.id.String() {
+		return nil
+	}
+	return vote
 }
 
 // onPartitionIRChangeReq handle partition change requests. Received from go routine handling
