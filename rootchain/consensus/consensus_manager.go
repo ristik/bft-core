@@ -723,8 +723,13 @@ func (x *ConsensusManager) onLocalTimeout(ctx context.Context) {
 			}
 			x.log.InfoContext(ctx, "signed timeout vote", "epoch", timeout.Epoch, "round", timeout.Round, "messageID", timeoutMessageID(timeoutVoteMsg))
 		}
+		// A vote is stored before it leaves the node, and not sent if it cannot be: after a restart or a recovery the stored vote
+		// is what the node sends again for the round, so a vote on the wire with no stored copy could be followed by a different
+		// one. Nothing is remembered either: the next local timeout tries again (and, in a scheme 2 epoch, finds its recorded
+		// decision).
 		if err := x.blockStore.StoreLastVote(timeoutVoteMsg); err != nil {
-			x.log.WarnContext(ctx, "failed to store timeout vote", logger.Error(err))
+			x.log.WarnContext(ctx, "timeout vote not sent: storing it failed", logger.Error(err))
+			return
 		}
 		x.pacemaker.SetTimeoutVote(timeoutVoteMsg)
 	}
@@ -1248,8 +1253,9 @@ func (x *ConsensusManager) onProposalMsg(ctx context.Context, proposal *abdrc.Pr
 		return fmt.Errorf("failed to sign vote: %w", err)
 	}
 	x.log.InfoContext(ctx, "signed vote", "round", proposal.Block.Round, "messageID", voteMessageID(voteMsg))
+	// stored before it is sent, and not sent if it cannot be stored (see onLocalTimeout); the round then ends by timeout
 	if err = x.blockStore.StoreLastVote(voteMsg); err != nil {
-		x.log.WarnContext(ctx, "vote store failed", logger.Error(err))
+		return fmt.Errorf("vote not sent: storing it failed: %w", err)
 	}
 	x.pacemaker.SetVoted(voteMsg)
 	nextLeader, err := x.leaderAfter(x.pacemaker.GetCurrentRound())
@@ -1794,6 +1800,10 @@ func (x *ConsensusManager) onStateResponse(ctx context.Context, rsp *abdrc.State
 			return fmt.Errorf("failed to sign vote: %w", err)
 		}
 		x.log.InfoContext(ctx, "signed vote", "round", prop.Block.Round, "messageID", voteMessageID(voteMsg))
+		// the vote signed after a recovery is stored like any other before it is sent (it was not stored at all)
+		if err = x.blockStore.StoreLastVote(voteMsg); err != nil {
+			return fmt.Errorf("vote not sent after recovery: storing it failed: %w", err)
+		}
 		x.pacemaker.SetVoted(voteMsg)
 		// send vote to the next leader
 		nextLeader, err := x.leaderAfter(x.pacemaker.GetCurrentRound())
