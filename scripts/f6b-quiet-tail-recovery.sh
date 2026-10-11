@@ -85,7 +85,7 @@ refuseStaleListeners $(seq -s" " "$rethEngineBase" $((rethEngineBase + validator
 stale=$(pgrep -f 'ubft shard-node run' 2>/dev/null || true)
 if [ -n "$stale" ]; then
   echo "refusing to start: shard-node processes are already running (pids: $(echo $stale | tr '\n' ' '))" >&2
-  echo "  pkill -f 'ubft shard-node run'" >&2
+  echo "  stop them from the checkout that started them (./stop-evm.sh -a there); do not kill them by name" >&2
   exit 1
 fi
 
@@ -97,14 +97,12 @@ cleanup() {
     echo "$failures CHECK(S) FAILED — no run artifact was written" >&2
     trap - EXIT
     ./stop-evm.sh -a >/dev/null 2>&1 || true
-    pkill -f 'ubft shard-node run' 2>/dev/null
     for i in $(seq 1 "$validators"); do
       [ -f "test-nodes/reth$i/pid" ] && kill "$(cat "test-nodes/reth$i/pid")" 2>/dev/null
     done
     exit 1
   fi
   ./stop-evm.sh -a >/dev/null 2>&1 || true
-  pkill -f 'ubft shard-node run' 2>/dev/null
   for i in $(seq 1 "$validators"); do
     [ -f "test-nodes/reth$i/pid" ] && kill "$(cat "test-nodes/reth$i/pid")" 2>/dev/null
   done
