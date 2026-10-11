@@ -66,7 +66,52 @@ func TestALocalTimeoutAfterARecoveryResendsTheTimeoutVoteAlreadySignedForTheRoun
 	require.Equal(t, firstID, timeoutMessageID(second), "one timeout vote per round: the stored one is sent again (it carried high QC round %d; a newly signed one would carry %d)",
 		first.Timeout.GetHqcRound(), cm.blockStore.GetHighQc().GetRound())
 
-	// in the next round the stored vote is of an older round and a new one is signed
-	cm.pacemaker.Reset(ctx, 3, nil, nil)
+	// once the stored round has passed, the stored vote is of an older round and a new one is signed for the new round
+	tc3 := &drctypes.TimeoutCert{Timeout: &drctypes.Timeout{Round: 3, Epoch: genesisQC.VoteInfo.Epoch, HighQc: qc2}}
+	cm.pacemaker.Reset(ctx, cm.blockStore.GetHighQc().GetRound(), tc3, nil)
 	require.EqualValues(t, 4, cm.pacemaker.GetCurrentRound())
+	cm.onLocalTimeout(ctx)
+	next := testutils.MockAwaitMessage[*abdrc.TimeoutMsg](t, mockNet, network.ProtocolRootTimeout)
+	require.EqualValues(t, 4, next.Timeout.Round, "a new vote for the new round, not the stored one of round 3")
+	require.NotEqual(t, firstID, timeoutMessageID(next))
+	stored, err := cm.blockStore.ReadLastVote()
+	require.NoError(t, err)
+	require.Equal(t, timeoutMessageID(next), timeoutMessageID(stored.(*abdrc.TimeoutMsg)), "and it is now the stored last vote")
+}
+
+// storedTimeoutVote returns the stored last vote only when it is this root's own timeout vote for exactly the epoch and round asked
+// for. The epoch matters most: rounds start again in a new epoch, and a vote of the previous epoch with the same round number, sent
+// in place of a new one, would leave the root never signing for that round.
+func TestStoredTimeoutVoteIsOnlyThisRootsVoteForExactlyTheEpochAndRound(t *testing.T) {
+	cm, _, _ := initConsensusManager(t, testnetwork.NewRootMockNetwork())
+	ctx := context.Background()
+	self := cm.id.String()
+	timeoutVote := func(epoch, round uint64, author string) *abdrc.TimeoutMsg {
+		return &abdrc.TimeoutMsg{Timeout: &drctypes.Timeout{Epoch: epoch, Round: round, HighQc: cm.blockStore.GetHighQc()}, Author: author, Signature: []byte{1}}
+	}
+
+	require.Nil(t, cm.storedTimeoutVote(ctx, 1, 7), "an empty store")
+
+	require.NoError(t, cm.blockStore.StoreLastVote(timeoutVote(1, 7, self)))
+	got := cm.storedTimeoutVote(ctx, 1, 7)
+	require.NotNil(t, got, "this root's timeout vote for the epoch and round")
+	require.EqualValues(t, 7, got.Timeout.Round)
+	require.EqualValues(t, 1, got.Timeout.Epoch)
+	require.Equal(t, self, got.Author)
+	for name, ask := range map[string][2]uint64{
+		"another round, later":   {1, 8},
+		"another round, earlier": {1, 6},
+		"another epoch, later":   {2, 7},
+		"another epoch, earlier": {0, 7},
+	} {
+		require.Nil(t, cm.storedTimeoutVote(ctx, ask[0], ask[1]), name)
+	}
+
+	require.NoError(t, cm.blockStore.StoreLastVote(timeoutVote(1, 7, "another-root")))
+	require.Nil(t, cm.storedTimeoutVote(ctx, 1, 7), "another author's vote")
+
+	require.NoError(t, cm.blockStore.StoreLastVote(timeoutVote(1, 7, self)))
+	require.NotNil(t, cm.storedTimeoutVote(ctx, 1, 7), "(premise for the next case: the timeout vote is back)")
+	require.NoError(t, cm.blockStore.StoreLastVote(&abdrc.VoteMsg{VoteInfo: &drctypes.RoundInfo{RoundNumber: 7, Epoch: 1}, Author: self}))
+	require.Nil(t, cm.storedTimeoutVote(ctx, 1, 7), "a vote for a proposal of the same round is not a timeout vote")
 }
