@@ -92,6 +92,7 @@ p85_bounds_agree() {
 # The joiner's nodes. Its root key is NOT in the epoch-1 committee: a root the committee does not name is a follower and signs nothing (#515),
 # and its shard node comes up by RESTORING from a retained validator's archive, staging-only until a verified install names it (#507).
 p85_joiner_nodes() {
+  rm -f "$H3_DIR/joiner-restored"
   local boot
   if [ ! -f test-nodes/root5/node-info.json ]; then
     build/ubft root-node init --home test-nodes/root5 -g >/dev/null || return 1
