@@ -14,6 +14,7 @@ import gateway
 import generate
 import pos
 import metrics_relay
+import handoff
 
 class FakeRelay:
     def __init__(self): self.calls=[]
@@ -115,6 +116,8 @@ class ProofOfStake(unittest.TestCase):
                 with self.assertRaisesRegex(pos.PosError,'modified'): genesis.check_tools(head)
             with patch('pos.shutil.which',return_value=None):
                 with self.assertRaisesRegex(pos.PosError,'forge'): genesis.check_tools(head)
+            with patch('pos.shutil.which',side_effect=lambda t:'/bin/forge' if t=='forge' else None):
+                with self.assertRaisesRegex(pos.PosError,'cast'): genesis.check_tools(head)
     def test_the_genesis_is_prepared_again_from_the_full_configuration_when_the_ids_differ(self):
         with tempfile.TemporaryDirectory() as tmp:
             genesis=pos.Genesis(Path(tmp)/'work','ubft',tmp,generate.REPO,'tn-x',1,(1,2))
@@ -198,7 +201,7 @@ class EntityNamespace(unittest.TestCase):
         cfg,_=self.cfg();services=cfg['services']
         for i in (1,2,3,4):
             holder=services['pod%d'%i]
-            self.assertEqual(holder['networks'],{'validators':{'aliases':['root%d'%i,'shard%d'%i]}})
+            self.assertEqual(holder['networks'],{'validators':{'aliases':['root%d'%i,'shard%d'%i]}});self.assertIs(holder['init'],True)
             for name in ('root%d'%i,'shard%d'%i,'metrics%d'%i):
                 self.assertEqual(services[name]['network_mode'],'service:pod%d'%i);self.assertNotIn('networks',services[name])
             for name in ('authority%d'%i,'ureth%d'%i):
@@ -257,6 +260,18 @@ class MetricsRelay(unittest.TestCase):
         self.request('GET','/root/metrics',{'Origin':'http://evil','Content-Type':'application/json','X-Forwarded-For':'127.0.0.1','Cookie':'a=b'})
         headers={k.lower() for k in self.seen[0][1]}
         self.assertFalse(headers&{'origin','content-type','x-forwarded-for','cookie'},headers)
+
+class Handoff(unittest.TestCase):
+    def test_the_install_override_adds_the_flag_to_every_root_and_nothing_else(self):
+        compose={'services':{'root1':{'entrypoint':['ubft','root-node','run'],'volumes':['x']},'root2':{'entrypoint':['ubft','root-node','run']},
+                             'shard1':{'entrypoint':['ubft','shard-node']},'root':{'entrypoint':['x']}}}
+        override=handoff.install_override(compose,2)
+        self.assertEqual(override,{'services':{'root1':{'entrypoint':['ubft','root-node','run','--install-handoff-epoch','2']},
+                                                'root2':{'entrypoint':['ubft','root-node','run','--install-handoff-epoch','2']}}})
+        self.assertEqual(compose['services']['root1']['entrypoint'],['ubft','root-node','run'],'the generated compose file is not modified')
+        with self.assertRaisesRegex(ValueError,'below epoch 2'): handoff.install_override(compose,1)
+        with self.assertRaisesRegex(ValueError,'already installs'): handoff.install_override({'services':{'root1':{'entrypoint':['a','--install-handoff-epoch','2']}}},3)
+        with self.assertRaisesRegex(ValueError,'no root'): handoff.install_override({'services':{'shard1':{'entrypoint':['a']}}},2)
 
 class PublicRPC(unittest.TestCase):
     def setUp(self):

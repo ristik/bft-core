@@ -8,9 +8,11 @@ implemented (owner decision for now: documentation and the warning only).
 ## How to keep it private
 
 1. **Bind to loopback**: `--rpc-server-address 127.0.0.1:PORT`. Operators then reach it over SSH (`ssh -L`) or from the host.
-2. **Containers**: the testnet binds `0.0.0.0` *inside* the container on an internal Docker network (`deploy/testnet`); that is acceptable only
-   while the port is not published to the host or the internet (`ports:` absent, no host networking). The start-up WARN fires there and is
-   expected; anything else that reaches that Docker network can call the endpoints.
+2. **Containers**: the testnet binds `127.0.0.1` (root 8002, shard 9101) and the root and shard node of each validator entity share one network namespace
+   (`deploy/testnet`: a holder container per entity), so nothing else on the Docker network can reach either listener, guarded or not; operators exec into the
+   entity (`docker compose exec`). The start-up WARN must therefore NOT appear there: if it does, the binding is wrong. Prometheus reads the two metrics documents
+   through a relay in the namespace that serves only those exact GET paths. (A package that binds `0.0.0.0` on a shared network would expose every endpoint
+   below, the unguarded writes included, to anything on that network.)
 3. **Firewall**: if the port must be reachable by other machines of the operator set (cross-host root clusters), allow only their addresses
    (security group / `iptables`), and put them on a private network, not the public one.
 4. **No reverse proxy in front of it, and never behind the public JSON-RPC gateway.** The handoff and Q3 operator endpoints decide "local" from the
