@@ -112,6 +112,8 @@ class ProofOfStake(unittest.TestCase):
                 with self.assertRaisesRegex(pos.PosError,'modified'): genesis.check_tools(head)
             with patch('pos.shutil.which',return_value=None):
                 with self.assertRaisesRegex(pos.PosError,'forge'): genesis.check_tools(head)
+            with patch('pos.shutil.which',side_effect=lambda t:'/bin/forge' if t=='forge' else None):
+                with self.assertRaisesRegex(pos.PosError,'cast'): genesis.check_tools(head)
     def test_the_genesis_is_prepared_again_from_the_full_configuration_when_the_ids_differ(self):
         with tempfile.TemporaryDirectory() as tmp:
             genesis=pos.Genesis(Path(tmp)/'work','ubft',tmp,generate.REPO,'tn-x',1,(1,2))
