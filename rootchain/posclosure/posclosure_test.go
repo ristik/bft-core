@@ -49,6 +49,10 @@ func (o *fakeOrch) AcknowledgedIdentities(_ types.PartitionID, _ types.ShardID, 
 	return []evmassign.Identity{{Weight: 3}}, [32]byte{0xa7}, o.idsErr
 }
 
+func (o *fakeOrch) CustodyAssignmentID(types.PartitionID, types.ShardID, uint64) ([32]byte, error) {
+	return [32]byte{0xa7}, o.idsErr
+}
+
 func TestHistoryReadsTheClosedEpochAndTheConfigurationInstalledAtH(t *testing.T) {
 	conf := &types.PartitionDescriptionRecord{Version: 1, PartitionID: 8, PartitionTypeID: 1, TypeIDLen: 8, UnitIDLen: 256, NetworkID: 5, Epoch: 3, EpochStart: 9}
 	tbs, orch := &fakeTB{tb: &types.RootTrustBaseV1{Epoch: 2}}, &fakeOrch{conf: conf}

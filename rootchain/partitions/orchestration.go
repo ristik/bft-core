@@ -691,6 +691,51 @@ func (o *Orchestration) SetGenesisIdentities(partitionID types.PartitionID, shar
 	})
 }
 
+// CustodyAssignmentID is the identifier custody keys the shard epoch's assignment by. The genesis assignment and a recovery are keyed by
+// their assignment hash (AcknowledgedIdentities' second value); a primary election result is keyed by PrimaryAssignmentID(result), which the
+// contracts derive from the result id alone. The P85 closure of an epoch must name the custody's key, or custody does not know the
+// assignment it closes (P85 run 27: J's closure named J's hash while custody held J under its result-derived id).
+func (o *Orchestration) CustodyAssignmentID(partitionID types.PartitionID, shardID types.ShardID, epoch uint64) ([32]byte, error) {
+	var none [32]byte
+	_, hash, err := o.AcknowledgedIdentities(partitionID, shardID, epoch)
+	if err != nil {
+		return none, err
+	}
+	conf, err := o.ShardConfigByEpoch(partitionID, shardID, epoch)
+	if err != nil || conf == nil {
+		return none, errors.Join(ErrNoBaseline, err)
+	}
+	out := hash
+	err = o.db.View(func(tx *bolt.Tx) error {
+		raw := tx.Bucket(derivedBucketName).Get(derivedKey(conf))
+		if raw == nil {
+			return nil // the genesis baseline
+		}
+		p, err := evmassign.DecodeProvenance(raw)
+		if err != nil {
+			return ErrDerivedConflict
+		}
+		c, err := evmassign.DecodeCandidate(p.Preimage)
+		if err != nil {
+			return ErrDerivedConflict
+		}
+		out = custodyAssignmentOf(c, hash)
+		return nil
+	})
+	if err != nil {
+		return none, err
+	}
+	return out, nil
+}
+
+// custodyAssignmentOf is the key custody holds a committed candidate's assignment under: a primary's is derived from its election result.
+func custodyAssignmentOf(c evmassign.Candidate, hash [32]byte) [32]byte {
+	if c.Kind != evmassign.KindRecovery && c.Authorization != nil {
+		return evmassign.PrimaryAssignmentID(c.ResultID())
+	}
+	return hash
+}
+
 // AcknowledgedIdentities returns the identity records of the acknowledged assignment of the shard at shard epoch epoch, with that
 // assignment's hash: from the retained committed candidate when the epoch was derived by a handoff, otherwise from the genesis
 // baseline when epoch is the genesis one.
