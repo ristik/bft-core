@@ -42,6 +42,7 @@ cd /srv/src/pkg
 python3 deploy/testnet/build-images.py --bft-source /srv/src/bft-pinned \
   --ureth-source /srv/src/ureth-pinned --rugregator-source /srv/src/rugregator-pinned
 go build -o build/tn-keygen ./deploy/testnet/keygen
+go build -C /srv/src/bft-pinned -o build/b1genesis ./scripts/b1genesis   # the independent genesis-registry regeneration, from the pinned source
 EOF
 ```
 Success: it prints the path of `deploy/testnet/artifacts/images.json` (pins, binary SHA-256, local image IDs).
@@ -50,12 +51,13 @@ Success: it prints the path of `deploy/testnet/artifacts/images.json` (pins, bin
 ```sh
 cd /srv/src/pkg; umask 077; G=/srv/testnet/tn-$(date -u +%Y%m%d)   # tn-<lowercase>, must not exist
 sudo env PATH="$PATH" python3 deploy/testnet/generate.py --out $G --validators 4 --chain-id 31337 \
-  --ubft /srv/src/bft-pinned/build/ubft --captcha-sitekey SITE_KEY --captcha-secret-file /srv/secrets/hcaptcha-secret
+  --ubft /srv/src/bft-pinned/build/ubft --b1genesis /srv/src/bft-pinned/build/b1genesis --captcha-sitekey SITE_KEY --captcha-secret-file /srv/secrets/hcaptcha-secret
 sudo chown -R 10001:10001 $G && cd $G && docker compose config --quiet
 SERVICES=$(docker compose config --services | sed '/^authority/d')   # authorities are already running
 docker compose up -d $SERVICES && docker compose ps
 ```
-The generator makes fresh root/shard/authority keys per validator, the trust base, a layout-2 genesis that funds
+The roots and shard nodes serve the Q3 operator endpoints, which accept loopback peers only: reach them with `docker compose exec` inside the container, as the examples below do.
+The generator makes fresh root/shard/authority keys per validator, the trust base, a B1 genesis (registry layout 3 from one `b1-profile`, checked by `b1genesis --verify`) that funds
 **only** a new random faucet account (1000 test UCT), Engine JWTs and `manifest.json`. Success: it prints the
 block-zero hash, the manifest and `Authorities are live and enrolled. Do NOT restart them.`; `docker compose ps`
 shows nothing restarting. On failure: `docker compose down`, delete the directory, retry under a new name.
@@ -129,7 +131,7 @@ committee K exists in PoA and PoS and must be rehearsed on testnet; it is not ro
 Stop nginx routing; take a backup for evidence if wanted. This deletes the old generation, keys and balances.
 ```sh
 sudo env PATH="$PATH" python3 /srv/src/pkg/deploy/testnet/reset.py --old $G --lose-all-assets -- --out /srv/testnet/tn-NEWNAME \
-  --validators 4 --chain-id 31337 --ubft /srv/src/bft-pinned/build/ubft \
+  --validators 4 --chain-id 31337 --ubft /srv/src/bft-pinned/build/ubft --b1genesis /srv/src/bft-pinned/build/b1genesis \
   --keygen /srv/src/pkg/build/tn-keygen --captcha-sitekey SITE_KEY --captcha-secret-file /srv/secrets/hcaptcha-secret
 ```
 Success: `Old balances, transactions and keys destroyed. ...`. Start and verify as in sections 4–5; require a new
@@ -141,7 +143,8 @@ block-zero hash and faucet address. The old pin must get 409 (checked before the
 |---|---|
 | `FileNotFoundError: ... 'go'` (generate/reset) | sudo dropped your PATH: use `sudo env PATH="$PATH" …` as shown, or link `go` into `/usr/local/bin`. |
 | `build on Linux for the server, not macOS`, `source pin mismatch`, `dirty source` | Rebuild on Debian 12 from clean checkouts of pins.json. |
-| `image source pins differ`, `ubft must be built from clean pinned BFT source` | images.json or ubft come from another pin: rerun section 3. |
+| `image source pins differ`, `ubft must be built from clean pinned BFT source` (also `b1genesis`) | images.json or ubft come from another pin: rerun section 3. |
+| `b1genesis --verify: the genesis registry differs from its regeneration` (generator) | Nothing was started that matters yet: discard the generation; the pinned `ubft` and `b1genesis` must be the same revision. |
 | `authority startup timeout` (generator) | `docker compose logs authority1`; discard the generation (section 4 failure path). |
 | `authorityN` exited, or `keyLost`/`faulted` in its status | That validator's signing key is gone. No repair exists: keep N−1 running, plan a reset (section 7). |
 | `keep ALL authorities live and ALL other services stopped` | backup/restore precondition: `docker compose stop` the listed non-authority services. |
