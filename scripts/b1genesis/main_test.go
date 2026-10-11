@@ -246,3 +246,23 @@ func TestReadProfileAcceptsTheUbftHexFile(t *testing.T) {
 		require.Equal(t, hashWant, hashGot, name)
 	}
 }
+
+// The file the real writer produces (the golden is cmd's TestB1ProfileFileMatchesTheGenesisToolsGolden), hooks included: every field reaches the profile.
+func TestReadProfileReadsTheWritersFileWithHooks(t *testing.T) {
+	var p b1state.Profile
+	require.NoError(t, readProfile(filepath.Join("testdata", "ubft-b1-profile-hooks.json"), &p))
+	require.Equal(t, uint16(3), p.Network)
+	require.Equal(t, byte(0x29), p.RootGenesisID[0])
+	require.Equal(t, byte(0x01), p.RootGenesisID[31])
+	require.Equal(t, byte(0x02), p.RuntimeHash[31])
+	require.Equal(t, byte(0x03), p.CompilerHash[31])
+	require.Equal(t, uint64(1700000000), p.GenesisUCTime)
+	require.Equal(t, uint64(5), p.ForcedGas)
+	require.True(t, p.HookEnabled())
+	require.True(t, p.ElectionEnabled())
+	require.Equal(t, [3]byte{0x0c, 0x05, 0x71}, [3]byte(p.RecordsCustody[17:]))
+	require.Equal(t, [3]byte{0x0e, 0x1e, 0xc7}, [3]byte(p.ElectionContract[17:]))
+	require.Equal(t, uint32(8), p.HRecords)
+	require.Equal(t, uint64(120000), p.HookRecordGas)
+	require.Equal(t, uint64(4200000), p.ElectGas)
+}
