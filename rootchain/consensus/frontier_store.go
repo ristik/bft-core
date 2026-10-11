@@ -158,8 +158,8 @@ func (s *frontierPersistentStore) WriteBlock(block *storage.ExecutedBlock, root 
 func (s *frontierPersistentStore) WriteVote(vote any) error {
 	return s.fault(s.PersistentStore.WriteVote(vote))
 }
-func (s *frontierPersistentStore) WriteTC(tc *drctypes.TimeoutCert) error {
-	return s.fault(s.PersistentStore.WriteTC(tc))
+func (s *frontierPersistentStore) WriteTC(tc *drctypes.TimeoutCert, dropBlock bool) error {
+	return s.fault(s.PersistentStore.WriteTC(tc, dropBlock))
 }
 func (s *frontierPersistentStore) ReadSafetySnapshot() (storage.SafetySnapshot, error) {
 	return s.reader.ReadSafetySnapshot()

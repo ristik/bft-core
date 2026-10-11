@@ -41,7 +41,8 @@ type (
 		WriteVote(vote any) error
 		ReadLastVote() (msg any, err error)
 
-		WriteTC(tc *rctypes.TimeoutCert) error
+		// WriteTC stores the last timeout certificate and, with dropBlock, deletes the block of its round with it
+		WriteTC(tc *rctypes.TimeoutCert, dropBlock bool) error
 		ReadLastTC() (*rctypes.TimeoutCert, error)
 	}
 
@@ -132,17 +133,19 @@ func (x *BlockStore) ProcessTc(tc *rctypes.TimeoutCert) (rErr error) {
 	if tc == nil {
 		return fmt.Errorf("error tc is nil")
 	}
-	// persist last known TC
-	if err := x.storage.WriteTC(tc); err != nil {
-		// store DB error and continue
-		rErr = fmt.Errorf("TC write failed: %w", err)
-	}
 	// Set the proposal/block of the TC round aside, if it exists: a quorum voted for timeout, but the same roots may have voted for
 	// the block before timing out, and a vote delayed past the TC can still complete a QC for it. Dropping the block then leaves every
 	// root unable to process that QC and unable to recover it from a peer.
 	// It is fine if the block is not found, it does not matter anyway
-	if err := x.blockTree.SetAsideLeaf(tc.GetRound()); err != nil {
-		return errors.Join(rErr, fmt.Errorf("removing timeout block %v: %w", tc.GetRound(), err))
+	setAside, treeErr := x.blockTree.SetAsideLeaf(tc.GetRound())
+	// Persist the last known TC. The database drops the round's block only if the tree let go of it just now: the tree keeps a block
+	// that has a child (this root already holds the proposal carrying its QC), and what the tree keeps a restart must find.
+	if err := x.storage.WriteTC(tc, setAside); err != nil {
+		// store DB error and continue
+		rErr = fmt.Errorf("TC write failed: %w", err)
+	}
+	if treeErr != nil {
+		return errors.Join(rErr, fmt.Errorf("removing timeout block %v: %w", tc.GetRound(), treeErr))
 	}
 	return rErr
 }

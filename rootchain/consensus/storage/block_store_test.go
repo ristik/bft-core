@@ -435,7 +435,7 @@ func (mps mockPersistentStore) WriteVote(vote any) error {
 	return mps.writeVote(vote)
 }
 
-func (mps mockPersistentStore) WriteTC(tc *rctypes.TimeoutCert) error {
+func (mps mockPersistentStore) WriteTC(tc *rctypes.TimeoutCert, _ bool) error {
 	return mps.writeTC(tc)
 }
 

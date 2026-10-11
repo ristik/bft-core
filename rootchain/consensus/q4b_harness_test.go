@@ -199,11 +199,11 @@ func (s *q4bStore) WriteVote(v any) error {
 	return s.BoltDB.WriteVote(v)
 }
 
-func (s *q4bStore) WriteTC(tc *rctypes.TimeoutCert) error {
+func (s *q4bStore) WriteTC(tc *rctypes.TimeoutCert, dropBlock bool) error {
 	if err := s.dead(); err != nil {
 		return err
 	}
-	return s.BoltDB.WriteTC(tc)
+	return s.BoltDB.WriteTC(tc, dropBlock)
 }
 
 func (s *q4bStore) SetHighestVotedRound(r uint64) error {
