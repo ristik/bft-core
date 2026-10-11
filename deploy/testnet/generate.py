@@ -221,8 +221,13 @@ def main():
             write(home/'funded.json',funded_base_genesis(a.chain_id,max_gas,alloc,secrets.token_hex(32)))
             identity=cli('engine-api','genesis','--shard-conf',home/'shard-conf-8_0.json','--trust-base',trust,'--b1-profile',home/'b1-profile.json',
                 '--alloc-source',home/'funded.json','--out',home/'genesis.json','--full-shard-conf',home/'full-shard-conf.json',
-                '--identities-out',home/'genesis-identities.json')
+                '--identities-out',home/'b1-identities.json')
             print(identity)
+            # The roots' committee identity records (a JSON array, what `root-node run --genesis-identities` takes): the PoA genesis committee, root i delegated
+            # to EVM validator i, as scripts/lib/h3-lib.sh makes them. b1-identities.json is the B1 identity document (an object) the bridge deployment is checked against.
+            write(home/'genesis-bindings.json',[{'rootNodeId':roots[i],'evmNodeId':evms[i]} for i in range(a.validators)])
+            cli('genesis-identities','generate','--trust-base',trust,'--shard-conf',home/'full-shard-conf.json','--bindings',home/'genesis-bindings.json',
+                '--out',home/'genesis-identities.json')
             # The deployed registry must be exactly what the pinned source regenerates from the profile, the trust base and the base shard configuration.
             verified=subprocess.run([str(a.b1genesis.resolve()),'--verify',str(home/'genesis.json'),'--profile',str(home/'b1-profile.json'),
                 '--root-genesis',str(trust),'--shard-conf',str(home/'full-shard-conf.json')],text=True,capture_output=True)
@@ -247,7 +252,7 @@ def main():
         cli('shard-conf','generate','--home',home/'agg-conf','--network-id','3','--partition-id','9','--partition-type-id','9',
             '--shard-id','0x80','--epoch','0','--epoch-start','1','--t2-timeout','5000',
             '--partition-params','proof_type=aggregator_rsmt_v1','--node-info',out/'aggregator/node-info.json')
-        for name in ('trust-base.json','full-shard-conf.json','genesis.json','b1-profile.json','genesis-identities.json'):
+        for name in ('trust-base.json','full-shard-conf.json','genesis.json','b1-profile.json','genesis-identities.json','b1-identities.json'):
             shutil.copy2(home/name,out/'network'/name)
         shutil.copy2(home/'agg-conf/shard-conf-9_0.json',out/'network/aggregator-conf.json')
         for i in range(1,a.validators+1):

@@ -56,6 +56,7 @@ sudo chown -R 10001:10001 $G && cd $G && docker compose config --quiet
 SERVICES=$(docker compose config --services | sed '/^authority/d')   # authorities are already running
 docker compose up -d $SERVICES && docker compose ps
 ```
+The roots and shard nodes serve the Q3 operator endpoints, which accept loopback peers only: reach them with `docker compose exec` inside the container, as the examples below do.
 The generator makes fresh root/shard/authority keys per validator, the trust base, a B1 genesis (registry layout 3 from one `b1-profile`, checked by `b1genesis --verify`) that funds
 **only** a new random faucet account (1000 test UCT), Engine JWTs and `manifest.json`. Success: it prints the
 block-zero hash, the manifest and `Authorities are live and enrolled. Do NOT restart them.`; `docker compose ps`

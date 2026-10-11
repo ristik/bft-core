@@ -47,7 +47,10 @@ with tempfile.TemporaryDirectory(prefix='tnops-validation-',dir='/tmp') as tmp:
         verify[2]=str(generation/'network/genesis.json')
         ok=subprocess.run(verify,text=True,capture_output=True)
         assert ok.returncode==0 and 'the deployed registry account matches the regeneration' in ok.stdout, ok.stdout+ok.stderr
-        assert (generation/'network/genesis-identities.json').is_file()
+        # the roots take the committee's identity RECORDS (an array), not the B1 identity document (an object)
+        records=json.loads((generation/'network/genesis-identities.json').read_text())
+        assert isinstance(records,list) and len(records)==3, records
+        assert isinstance(json.loads((generation/'network/b1-identities.json').read_text()),dict)
         registry=[k for k,v in genesis['alloc'].items() if v.get('storage')]
         assert len(registry)==1, registry
         word=next(iter(genesis['alloc'][registry[0]]['storage']))
