@@ -83,8 +83,8 @@ class ProofOfStake(unittest.TestCase):
         d={'networkWord':'0xaa','chainId':31337,'custody':'0xc','custodyCodeHash':'0xch','election':'0xe','electionCodeHash':'0xeh'}
         self.assertEqual(pos.deployment_of(d,{'runtimeHash':'0xrh'}),{'networkWord':'0xaa','chainId':'31337','custody':'0xc','custodyCodeHash':'0xch',
             'registry':pos.REGISTRY,'registryCodeHash':'0xrh','election':'0xe','electionCodeHash':'0xeh'})
-        args=pos.profile_args(d,'/m.json','/h.jsonl')
-        self.assertEqual((args[args.index('--records-custody')+1],args[args.index('--election')+1],args[args.index('--elect-caps')+1]),('0xc','0xe','16,1,6'))
+        args=pos.profile_args(d,'/m.json')
+        self.assertEqual((args[args.index('--records-custody')+1],args[args.index('--election')+1],args[args.index('--elect-caps')+1]),('0xc','0xe','16,2,8'))
     def test_the_topology_runs_the_roots_on_the_pos_flags_and_not_the_poa_records(self):
         with tempfile.TemporaryDirectory() as tmp:
             out=Path(tmp)/'tn-fixture';out.mkdir();(out/'aggregator').mkdir()

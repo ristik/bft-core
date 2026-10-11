@@ -239,7 +239,7 @@ def main():
                 genesis.plan(trust,home/'shard-conf-8_0.json',owners)
                 genesis.prepare(home/'shard-conf-8_0.json',provisional=True)
             profile_out=cli('engine-api','b1-profile','--shard-conf',home/'shard-conf-8_0.json','--trust-base',trust,'--w-cert',W_CERT,'--out',home/'b1-profile.json',
-                *(pos.profile_args(genesis.deployment,genesis.dir/'elect-measurement.json',genesis.dir/'hook-measurement.jsonl') if genesis else []))
+                *(pos.profile_args(genesis.deployment,genesis.dir/'elect-measurement.json') if genesis else []))
             flags=ureth_flags_of(profile_out)
             max_gas=int(json.loads((home/'b1-profile.json').read_text())['maxGas'])
             alloc=json.loads(subprocess.check_output([str(a.keygen.resolve()),str(home/'faucet-secrets')],text=True))

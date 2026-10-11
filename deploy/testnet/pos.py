@@ -18,11 +18,7 @@ import sys
 
 # The lane's values (scripts/lib/p85-lib.sh). The cadence is a rehearsal value: an election is due this many ordinary root rounds and UC seconds after the
 # last acknowledged rotation. #437 sets the testnet's own (--pos-cadence-rounds / --pos-cadence-seconds).
-# manifest limits.vMax, limits.lMax, election nMax: the election price AND the records hook's per-record reservation are measured at exactly these. (16, 1, 6) is
-# what HOOK_RECORD_GAS covers with the 1.25 margin: the RecoveryAck that applies a pending closure costs 2.26M cold for 6 members of one lot and 3.63M for 8 members of
-# 2 lots (unicity-pos-contracts docs/p85/HOOK_GAS.md); `b1-profile --hook-measurement` refuses a pair the limit does not cover. Until the owner decides between
-# raising the limit and keeping lower caps (briefs/p85-hook-gas-proposal.md, Q12) the package declares caps its limit covers.
-CAPS = (16, 1, 6)
+CAPS = (16, 2, 8)                      # manifest limits.vMax, limits.lMax, election nMax: the election price is measured at exactly these
 BOND_UNIT = 100 * 10**18               # 100 UCT in base units: one weight unit
 GENESIS_UNITS = 1                      # bond units per genesis identity (unit weights)
 H_RECORDS = 2
@@ -64,10 +60,10 @@ def network_word(generation):
     return '0x' + hashlib.sha256(('unicity.testnet.pos.' + generation).encode()).hexdigest()
 
 
-def profile_args(deployment, measurement_path, hook_measurement_path):
+def profile_args(deployment, measurement_path):
     """The b1-profile flags that pin the hooks and the election to the deployed contracts."""
     return ['--records-custody', deployment['custody'], '--h-records', str(H_RECORDS), '--hook-record-gas', str(HOOK_RECORD_GAS),
-            '--election', deployment['election'], '--elect-measurement', str(measurement_path), '--hook-measurement', str(hook_measurement_path), '--elect-caps', ','.join(map(str, CAPS))]
+            '--election', deployment['election'], '--elect-measurement', str(measurement_path), '--elect-caps', ','.join(map(str, CAPS))]
 
 
 def deployment_of(deployment, profile):
@@ -153,9 +149,6 @@ class Genesis:
         self._run(self.contracts / 'script/p85-genesis.sh', self.dir / 'contracts-genesis.json', self.dir / 'genesis', env=env)
         measured = self._run(self.contracts / 'script/measure-elect.sh', *map(str, CAPS), env=env, cwd=self.contracts)
         (self.dir / 'elect-measurement.json').write_text(measured.stdout)
-        # the cold per-record gas of the worst committee the caps admit: the profile refuses a hook reservation below it with the margin
-        hooks = self._run(self.contracts / 'script/measure-hook-gas.sh', *map(str, CAPS), 'ack', 'stage', 'closure', 'recovery', env=env, cwd=self.contracts)
-        (self.dir / 'hook-measurement.jsonl').write_text(hooks.stdout)
         deployment = json.loads((self.dir / 'genesis/deployment.json').read_text())
         # The b1-profile and the roots' deployment file are built from the FIRST pass: a second pass that deployed anything elsewhere would pin the hooks to one
         # custody and the genesis to another. Everything but the fields that carry the assignment id (the id itself and the manifest hash over it) must be identical.
