@@ -40,6 +40,9 @@ func decodeWitnessV3(raw []byte) (WitnessV3, bool) {
 	if err := types.Cbor.Unmarshal(raw, &w); err != nil || w.Tag != witnessV3Tag {
 		return WitnessV3{}, false
 	}
+	if canonical, err := types.Cbor.Marshal(w); err != nil || !bytes.Equal(canonical, raw) {
+		return WitnessV3{}, false // only the canonical bytes are a witness: one witness, one encoding
+	}
 	return w, true
 }
 
@@ -92,16 +95,11 @@ func (v ClosureVerifier) verifyV3(w WitnessV3, closedEpoch uint64) (ClosureEvide
 	if _, err := VerifySnapshot(w.Proof, verified, w.Snapshot, v.Partition, v.Shard, confHash); err != nil {
 		return fail(err)
 	}
-	c, err := decodeWitnessV3Copy(w)
+	id, err := witnessV3Identity(w)
 	if err != nil {
 		return fail(err)
 	}
-	stripSignatures(&c.Proof, c.Snapshot)
-	stripped, err := types.Cbor.Marshal(c)
-	if err != nil {
-		return fail(err)
-	}
-	return ClosureEvidence{ClosedEpoch: closedEpoch, BundleID: sha256.Sum256(stripped), HRecordID: verified.RecordID, HRound: verified.OrderRound,
+	return ClosureEvidence{ClosedEpoch: closedEpoch, BundleID: id, HRecordID: verified.RecordID, HRound: verified.OrderRound,
 		TerminalRoot: verified.StateRoot, AssignmentID: assignmentID, Closed: ids}, nil
 }
 
@@ -116,4 +114,19 @@ func decodeWitnessV3Copy(w WitnessV3) (WitnessV3, error) {
 		return WitnessV3{}, ErrBundle
 	}
 	return c, nil
+}
+
+// witnessV3Identity is the digest of what the witness commits to without the signature sets (each root holds the quorum it happened to
+// collect) and the order of the snapshot's shard entries.
+func witnessV3Identity(w WitnessV3) ([32]byte, error) {
+	c, err := decodeWitnessV3Copy(w)
+	if err != nil {
+		return [32]byte{}, err
+	}
+	stripSignatures(&c.Proof, c.Snapshot)
+	stripped, err := types.Cbor.Marshal(c)
+	if err != nil {
+		return [32]byte{}, err
+	}
+	return sha256.Sum256(stripped), nil
 }
