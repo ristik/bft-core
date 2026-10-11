@@ -121,11 +121,13 @@ q4_shard_hits() { jq -r --arg r "$2" '.rules[$r] // 0' "$Q4_SHIM_DIR/root$1/shar
 
 # q4_shard_hold <rule> <roots> <directions: "in", "out" or "in out"> <partition> [shard node ids...]: every named root holds that traffic (rule <rule>-<direction>);
 # no node id means every shard node of the partition. In: the node's certification requests and handshakes; out: the root's certification responses to it.
+# Q4_SHARD_TYPES (space-separated: request, handshake, response) narrows the rule to those message types; unset, every type of the direction.
 q4_shard_hold() {
-  local rule=$1 roots=$2 dirs=$3 part=$4 r d n nodes= rules=
+  local rule=$1 roots=$2 dirs=$3 part=$4 r d n nodes= rules= types=
   shift 4
   for n in "$@"; do nodes+="'$n',"; done
-  for d in $dirs; do rules+="{'name':'$rule-$d','direction':'$d','partition':$part,${nodes:+'nodes':[${nodes%,}],}'action':'hold','require':true},"; done
+  for n in ${Q4_SHARD_TYPES:-}; do types+="'$n',"; done
+  for d in $dirs; do rules+="{'name':'$rule-$d','direction':'$d','partition':$part,${nodes:+'nodes':[${nodes%,}],}${types:+'types':[${types%,}],}'action':'hold','require':true},"; done
   for r in $roots; do q4_shard_ctl "$r" "{'rules':[${rules%,}]}" || return 1; done
 }
 

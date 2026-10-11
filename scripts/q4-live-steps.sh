@@ -493,7 +493,7 @@ q4_row_g2_rollback() {
   rm -rf "$dir"; mkdir -p "$dir"
   # the log marks are taken before the hold, so every block sealed on the parent during the settle below is listed
   for i in 1 2 3 4; do logs+=("test-nodes/evm$i/debug.log:$(wc -l <"test-nodes/evm$i/debug.log" | tr -d ' ')"); urls+=(--url "http://127.0.0.1:$((rethEthBase + i - 1))"); done
-  q4_shard_hold "$rule" "$Q4_ROOTS" in 8 || return 1
+  Q4_SHARD_TYPES=request q4_shard_hold "$rule" "$Q4_ROOTS" in 8 || return 1
   sleep 3   # requests already past the gate are answered; from here nothing the shard builds can be certified
   t0=$(q4_t)
   head=$(python3 scripts/q4-g2-rollback.py heads $(q4_g2_urls)) || return 1
@@ -510,8 +510,9 @@ q4_row_g2_rollback() {
   echo "certification requests of the EVM shard held at every root; parent $((height - 1)) $parent; transaction $tx (sender $sender nonce $nonce) submitted under the hold"
   # held until a block on the parent that every pair executed carries the transaction, and then until every root has issued two more repeat
   # certificates for the shard (its TR round moved on by 2): the block's request is for a round the roots have left, so it can no longer be
-  # certified. The hold also holds the shard nodes' handshakes, so their subscriptions at the roots can lapse and a further attempt under the
-  # hold is not guaranteed; the step does not wait for one.
+  # certified. Only the requests are held (Q4_SHARD_TYPES=request): the nodes' handshakes pass, so a node whose subscription at a root has
+  # run out (two responses without a request) subscribes again and keeps receiving the repeat certificates. The step does not wait for a
+  # further attempt under the hold.
   for i in $(seq 1 "$Q4_RECOVER_SECONDS"); do
     q4_g2_sample held "$t0" || return 1
     kids=$(python3 scripts/q4-g2-rollback.py children --parent "$parent" "${logs[@]}") || return 1
