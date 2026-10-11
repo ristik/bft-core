@@ -32,8 +32,10 @@ m2_start_root() { # node installEpoch bootnode  (an empty install epoch starts a
   [ -z "$boot" ] || bootArgs=(--bootnodes "$boot")   # the first root of a cold network has no bootnode, as at genesis
   if [ "${Q3_B1:-0}" = 1 ] && [ "${P85_LANE:-0}" != 1 ]; then shardConfArgs+=(--q3-lane --genesis-identities test-nodes/genesis-identities.json); fi   # Q3 #50: the coupled runtime (verified history, install journal, V3 handoffs)
   if [ "${P85_LANE:-0}" = 1 ]; then   # a restarted root of the proof-of-stake lane runs the same coupled runtime and P85 executor
-    source scripts/lib/p85-lib.sh
-    shardConfArgs+=(--q3-lane $(p85_root_flags "$node" "http://127.0.0.1:${rethEthBase:-18545}"))
+    # the flags come from the P85 library (its steps file sources it), called through a name the lane exports: the other lanes that source this
+    # file (the Q4 dry run resolves every command by name) need not carry the P85 library
+    declare -F "${M2_ROOT_FLAGS_FN:-}" >/dev/null || { echo "m2_start_root: the P85 lane's M2_ROOT_FLAGS_FN is not a defined function" >&2; return 1; }
+    shardConfArgs+=(--q3-lane $("$M2_ROOT_FLAGS_FN" "$node" "http://127.0.0.1:${rethEthBase:-18545}"))
   fi
   port=$(m2_rpc_port "$node")
   if [ "${F8_MIXED_LANE:-0}" = 1 ]; then

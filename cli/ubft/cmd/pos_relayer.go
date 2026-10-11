@@ -16,7 +16,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/unicitynetwork/bft-core/registrygenesis"
 	"math/big"
 	"os"
 	"sort"
@@ -320,10 +319,13 @@ func buildPosGenesis(plan posGenesisPlan, tb *types.RootTrustBaseV1, conf *types
 // requireFullShardConf refuses a shard configuration that is not the FULL one (the base plus seal_registry_genesis): that is the configuration the
 // roots install, so it alone has the genesis assignment id the first CloseLiability will name. A custody deployed with the id of the base
 // configuration does not know that assignment, and the shard halts at the first closure (P85 runs 25 and 26).
+// sealRegistryGenesisParam is registrygenesis.GenesisParam; the generator package is not imported by production code (registrygenesis' own guard test).
+const sealRegistryGenesisParam = "seal_registry_genesis"
+
 func requireFullShardConf(conf *types.PartitionDescriptionRecord) error {
-	if conf == nil || conf.PartitionParams[registrygenesis.GenesisParam] == "" {
+	if conf == nil || conf.PartitionParams[sealRegistryGenesisParam] == "" {
 		return fmt.Errorf("%w: the shard configuration carries no %s: it is the base configuration, whose genesis assignment id is not the one the roots close; pass the full configuration `ubft engine-api genesis --full-shard-conf` wrote",
-			ErrPosRelayer, registrygenesis.GenesisParam)
+			ErrPosRelayer, sealRegistryGenesisParam)
 	}
 	return nil
 }
