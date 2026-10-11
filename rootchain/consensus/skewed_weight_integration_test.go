@@ -3,6 +3,7 @@ package consensus
 import (
 	"bytes"
 	"context"
+	"crypto"
 	"crypto/sha256"
 	"fmt"
 	"path/filepath"
@@ -939,6 +940,10 @@ func TestSkewedWeightScheme2TCFormsAfterTwoRestarts(t *testing.T) {
 		restarted, err := NewSafetyModule(old.network, old.peerID, old.signer, reopened, WithDomainBoundSigning(r.store, old.committed))
 		require.NoError(t, err)
 		r.manager.safety = restarted
+		// the block store is over the reopened file too: a vote is stored as the last vote before it is sent, and one that cannot be
+		// stored is not sent (bft-core#585), so a manager left on the closed handle would send nothing
+		r.manager.blockStore, err = storage.New(crypto.SHA256, reopened, r.manager.orchestration, r.manager.log, storage.ProfileHandoff)
+		require.NoError(t, err)
 		r.manager.pacemaker.timeoutVote = nil
 		r.manager.epochAnchor = nil // what it would build now is not the statement it recorded
 		r.net.ResetSentMessages(network.ProtocolRootTimeout)
