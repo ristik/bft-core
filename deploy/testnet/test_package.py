@@ -10,6 +10,7 @@ from unittest.mock import patch
 
 import gateway
 import generate
+import pos
 
 class FakeRelay:
     def __init__(self): self.calls=[]
@@ -32,7 +33,7 @@ class B1Layout(unittest.TestCase):
     def test_the_package_is_on_the_single_b1_layout(self):
         source=(generate.HERE/'generate.py').read_text()
         self.assertNotIn('registry-layout',source)
-        self.assertEqual(source.count("'--b1-profile'"),2)   # genesis and the shard nodes: one profile is the source of both
+        self.assertEqual(source.count("'--b1-profile'"),3)   # the genesis, the PoS profile's reconciling genesis, and the shard nodes: one profile is the source of all
         self.assertEqual(generate.ureth_flags_of('x\nureth flags: --unicity.a 1 --unicity.b 0xab\ny\n'),['--unicity.a','1','--unicity.b','0xab'])
         for bad in ('', 'ureth flags:\n', 'ureth flags: --a\nureth flags: --b\n'):
             with self.assertRaises(ValueError): generate.ureth_flags_of(bad)
@@ -43,6 +44,8 @@ class B1Layout(unittest.TestCase):
         workflow=(generate.REPO/'.github/workflows/testnet-package.yml').read_text()
         self.assertIn('ref: '+generate.PINS['bft'],workflow)
         self.assertIn('./scripts/b1genesis',workflow)
+        self.assertIn('ref: '+generate.PINS['contracts'],workflow)   # the PoS profile's contracts checkout
+        self.assertIn('--pos-contracts pinned-contracts',workflow)
     def test_the_topology_follows_the_profile(self):
         with tempfile.TemporaryDirectory() as tmp:
             out=Path(tmp)/'tn-fixture';out.mkdir();(out/'aggregator').mkdir()
@@ -58,6 +61,88 @@ class B1Layout(unittest.TestCase):
                 self.assertIn('--q3-lane',shard);self.assertNotIn('--registry-layout',shard)
                 root=svc['root%d'%i]['entrypoint']
                 self.assertIn('--q3-lane',root);self.assertEqual(root[root.index('--genesis-identities')+1],'/network/genesis-identities.json')
+
+class ProofOfStake(unittest.TestCase):
+    ID1='0x'+'11'*32
+    ID2='0x'+'22'*32
+    def test_the_assignment_id_is_read_from_the_single_line_the_tool_prints(self):
+        self.assertEqual(pos.assignment_id('x\ngenesis assignment id '+self.ID1+'\n'),self.ID1)
+        for bad in ('','genesis assignment id 0x12\n','genesis assignment id %s\ngenesis assignment id %s\n'%(self.ID1,self.ID2)):
+            with self.assertRaises(pos.PosError): pos.assignment_id(bad)
+    def test_the_pos_accounts_never_overwrite_the_funding(self):
+        g={'alloc':{'ABCD':{'balance':'0x1'}}}
+        self.assertEqual(pos.merge_alloc(g,{'0x1234':{'code':'0x00'}})['alloc']['0x1234'],{'code':'0x00'})
+        for clash in ('0xabcd','0xABCD','abcd'):
+            with self.assertRaises(pos.PosError): pos.merge_alloc({'alloc':{'ABCD':{}}},{clash:{}})
+    def test_the_deployment_file_and_profile_flags_follow_the_contracts_deployment(self):
+        d={'networkWord':'0xaa','chainId':31337,'custody':'0xc','custodyCodeHash':'0xch','election':'0xe','electionCodeHash':'0xeh'}
+        self.assertEqual(pos.deployment_of(d,{'runtimeHash':'0xrh'}),{'networkWord':'0xaa','chainId':'31337','custody':'0xc','custodyCodeHash':'0xch',
+            'registry':pos.REGISTRY,'registryCodeHash':'0xrh','election':'0xe','electionCodeHash':'0xeh'})
+        args=pos.profile_args(d,'/m.json')
+        self.assertEqual((args[args.index('--records-custody')+1],args[args.index('--election')+1],args[args.index('--elect-caps')+1]),('0xc','0xe','16,2,8'))
+    def test_the_topology_runs_the_roots_on_the_pos_flags_and_not_the_poa_records(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out=Path(tmp)/'tn-fixture';out.mkdir();(out/'aggregator').mkdir()
+            (out/'aggregator/keys.json').write_text(json.dumps({'authKey':{'privateKey':'0x01'},'sigKey':{'privateKey':'0x02'}}))
+            images={k:'sha256:'+'a'*64 for k in ['node','rpc','guard','signer']}
+            ids={'root':['r%d'%i for i in range(3)],'evm':['e%d'%i for i in range(3)]}
+            for with_pos in (False,True):
+                cfg=generate.topology(out,3,ids,images,'captcha',(),30000000,with_pos)
+                for i in (1,2,3):
+                    root=cfg['services']['root%d'%i]['entrypoint']
+                    self.assertIn('--q3-lane',root);self.assertIn('--profile-2',root)
+                    if with_pos:
+                        self.assertEqual(root[root.index('--pos-deployment')+1],'/network/pos-deployment.json')
+                        self.assertEqual(root[root.index('--pos-genesis-identities')+1],'/network/pos-genesis-identities.json')
+                        self.assertEqual(root[root.index('--pos-evm-rpc')+1],'http://ureth%d:8545'%i)
+                        self.assertNotIn('--genesis-identities',root)
+                    else:
+                        self.assertNotIn('--pos-deployment',root);self.assertIn('--genesis-identities',root)
+    def test_the_contracts_checkout_must_be_clean_at_the_pin(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo=Path(tmp)/'contracts';(repo/'script').mkdir(parents=True);(repo/'script/p85-genesis.sh').write_text('#!/bin/sh\n')
+            git=lambda *a:subprocess.run(['git','-C',str(repo),*a],check=True,capture_output=True,text=True)
+            git('init','-q');git('-c','user.name=t','-c','user.email=t@t','add','-A');git('-c','user.name=t','-c','user.email=t@t','commit','-qm','x')
+            head=git('rev-parse','HEAD').stdout.strip()
+            genesis=pos.Genesis(Path(tmp)/'work','ubft',repo,generate.REPO,'tn-x',1,(1,2))
+            with patch('pos.shutil.which',return_value='/bin/forge'):
+                genesis.check_tools(head)
+                with self.assertRaisesRegex(pos.PosError,'pinned commit'): genesis.check_tools('0'*40)
+                (repo/'script/dirty').write_text('x')
+                with self.assertRaisesRegex(pos.PosError,'modified'): genesis.check_tools(head)
+            with patch('pos.shutil.which',return_value=None):
+                with self.assertRaisesRegex(pos.PosError,'forge'): genesis.check_tools(head)
+    def test_the_genesis_is_prepared_again_from_the_full_configuration_when_the_ids_differ(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            genesis=pos.Genesis(Path(tmp)/'work','ubft',tmp,generate.REPO,'tn-x',1,(1,2))
+            calls=[]
+            def run(*args,**kw):
+                class R: stderr='genesis assignment id '+self.ID2
+                return R
+            def prepare(conf,provisional):
+                calls.append((str(conf),provisional));genesis.assignment=self.ID2;return genesis.assignment
+            genesis.assignment=genesis.first=self.ID1;genesis.trust_base=Path('tb')
+            with patch.object(genesis,'_run',side_effect=run),patch.object(genesis,'prepare',side_effect=prepare):
+                self.assertEqual(genesis.reconcile('full.json'),self.ID2)
+            self.assertEqual(calls,[('full.json',False)])
+            genesis.assignment=self.ID2;calls.clear()
+            with patch.object(genesis,'_run',side_effect=run),patch.object(genesis,'prepare',side_effect=prepare):
+                genesis.reconcile('full.json')
+            self.assertEqual(calls,[],'an id that already is the full configuration\'s is not prepared again')
+            genesis.assignment=self.ID1
+            with patch.object(genesis,'_run',side_effect=run),patch.object(genesis,'prepare',side_effect=lambda c,provisional:setattr(genesis,'assignment',self.ID1)):
+                with self.assertRaisesRegex(pos.PosError,'carries'): genesis.reconcile('full.json')
+    def test_verify_refuses_a_changed_full_configuration_and_an_unconfirmed_id(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            a,b=Path(tmp)/'a.json',Path(tmp)/'b.json';a.write_text('1');b.write_text('2')
+            genesis=pos.Genesis(Path(tmp)/'work','ubft',tmp,generate.REPO,'tn-x',1,(1,2));genesis.assignment=self.ID1;genesis.trust_base=Path('tb')
+            class R: stderr="genesis assignment %s is the full shard configuration's\n"%self.ID1
+            with patch.object(genesis,'_run',return_value=R):
+                with self.assertRaisesRegex(pos.PosError,'changed after'): genesis.verify(a,b)
+                self.assertEqual(genesis.verify(a,a),self.ID1)
+            class Other: stderr="genesis assignment %s is the full shard configuration's\n"%self.ID2
+            with patch.object(genesis,'_run',return_value=Other):
+                with self.assertRaisesRegex(pos.PosError,'did not confirm'): genesis.verify(a,a)
 
 class PublicRPC(unittest.TestCase):
     def setUp(self):

@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"errors"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/unicitynetwork/bft-go-base/types"
@@ -436,5 +438,161 @@ func TestPutBatchMakesAPartlyPublishedBatchDurableBeforeReturningTheError(t *tes
 	}
 	if indexed := indexedCount(s); indexed != 4 {
 		t.Fatalf("%d records indexed after the second put, want 4", indexed)
+	}
+}
+
+// A put writes and syncs its files without the store's lock: a read of another record does not wait for them.
+func TestGetDoesNotWaitForAPutsFileSyncs(t *testing.T) {
+	qs, recs := batchFixture(t, 2)
+	s, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Put(qs[0], recs[0]); err != nil {
+		t.Fatal(err)
+	}
+	entered, release := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	s.disk = &diskOps{
+		syncFile: func(f *os.File) error { once.Do(func() { close(entered) }); <-release; return f.Sync() },
+		syncDir:  syncDir, rename: os.Rename,
+	}
+	putDone := make(chan error, 1)
+	go func() { putDone <- s.Put(qs[1], recs[1]) }()
+	<-entered // the put is inside its file syncs and stays there
+
+	got := make(chan error, 1)
+	go func() { _, err := s.Get(qs[0]); got <- err }()
+	select {
+	case err := <-got:
+		if err != nil {
+			t.Fatalf("reading a stored record during another record's put: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Get waited for a put that is syncing its files")
+	}
+	if _, err := s.Get(qs[1]); !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("the record being put is not readable yet: %v", err)
+	}
+	close(release)
+	if err := <-putDone; err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Get(qs[1]); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// The publication still happens under the lock: between a record's rename and the store directory's sync no reader sees it, so
+// nothing is read back that a crash could still lose.
+func TestARecordIsNotReadableBeforeTheStoreDirectoryIsSynced(t *testing.T) {
+	q, r := fixture()
+	s, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	renamed, release := make(chan struct{}), make(chan struct{})
+	s.disk = &diskOps{
+		syncFile: (*os.File).Sync,
+		syncDir: func(dir string) error {
+			if dir == s.dir {
+				close(renamed) // the store directory is synced after the rename: the record is in place, not yet durable
+				<-release
+			}
+			return syncDir(dir)
+		},
+		rename: os.Rename,
+	}
+	putDone := make(chan error, 1)
+	go func() { putDone <- s.Put(q, r) }()
+	<-renamed
+	read := make(chan error, 1)
+	go func() { _, err := s.Get(q); read <- err }()
+	select {
+	case err := <-read:
+		t.Fatalf("Get returned (%v) while the publication was not durable", err)
+	case <-time.After(300 * time.Millisecond):
+	}
+	close(release)
+	if err := <-putDone; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-read; err != nil {
+		t.Fatalf("after the sync the record is readable: %v", err)
+	}
+}
+
+// Two puts of one record staged at the same time: the first to publish stores it, the second finds it stored and identical and
+// publishes nothing. If the second's content differs it is refused, as a later put of a stored record always was.
+func TestConcurrentPutsOfOneRecord(t *testing.T) {
+	for _, differ := range []bool{false, true} {
+		q, r := fixture()
+		other := *r
+		if differ {
+			other.Body = []byte("changed")
+		}
+		s, err := Open(t.TempDir())
+		if err != nil {
+			t.Fatal(err)
+		}
+		log := &opLog{}
+		log.install(s)
+		// both puts are held in their file syncs until both are there: each has staged the record before either publishes
+		inner := *s.disk
+		var mu sync.Mutex
+		stagedDirs := map[string]bool{}
+		both := make(chan struct{})
+		s.disk.syncFile = func(f *os.File) error {
+			mu.Lock()
+			if dir := filepath.Dir(f.Name()); !stagedDirs[dir] {
+				stagedDirs[dir] = true
+				if len(stagedDirs) == 2 {
+					close(both)
+				}
+			}
+			mu.Unlock()
+			select {
+			case <-both:
+			case <-time.After(10 * time.Second):
+				t.Error("the two puts did not stage at the same time")
+			}
+			return inner.syncFile(f)
+		}
+		errs := make(chan error, 2)
+		for _, rec := range []*Record{r, &other} {
+			go func() { errs <- s.Put(q, rec) }()
+		}
+		e1, e2 := <-errs, <-errs
+		stored, err := s.Get(q)
+		if err != nil {
+			t.Fatalf("differ=%v: the record is stored once: %v", differ, err)
+		}
+		if left := leftovers(t, s); len(left) != 0 {
+			t.Fatalf("differ=%v: temporary directories left: %v", differ, left)
+		}
+		if got := log.count("rename"); got > 1 {
+			t.Fatalf("differ=%v: %d publications of one record", differ, got)
+		}
+		if !differ {
+			if e1 != nil || e2 != nil {
+				t.Fatalf("identical concurrent puts: %v, %v", e1, e2)
+			}
+			continue
+		}
+		// one of the two is stored; the other is refused, whichever order they published in
+		refused := 0
+		for _, e := range []error{e1, e2} {
+			if errors.Is(e, ErrInvalid) {
+				refused++
+			} else if e != nil {
+				t.Fatalf("unexpected error: %v", e)
+			}
+		}
+		if refused != 1 {
+			t.Fatalf("exactly one of two differing puts is refused, got %d (%v, %v)", refused, e1, e2)
+		}
+		if !bytes.Equal(stored.Body, r.Body) && !bytes.Equal(stored.Body, other.Body) {
+			t.Fatal("the stored record is neither of the two")
+		}
 	}
 }

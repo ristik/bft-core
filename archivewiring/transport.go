@@ -169,6 +169,13 @@ func (s *Server) handle(stream libp2pnetwork.Stream) {
 			s.rejectNamed(stream, id, err)
 			return
 		}
+		if errors.Is(err, ErrPendingLimit) {
+			// The peer is authorized and this replica is busy. It is told so by name, like the refusal above and for the same
+			// reason: a bare reset reaches the client as a transport failure it cannot tell from a broken connection, and it then
+			// backs off as for one. Named, the caller can wait briefly for a slot (ArchiveRestore's FetchRetry.Busy).
+			s.rejectNamed(stream, id, err)
+			return
+		}
 		s.reject(stream, id, "unknown", err, false)
 		return
 	}
