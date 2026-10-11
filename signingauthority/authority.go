@@ -13,6 +13,7 @@ import (
 
 	"github.com/unicitynetwork/bft-core/handoff"
 	"github.com/unicitynetwork/bft-core/internal/quorumweight"
+	"github.com/unicitynetwork/bft-core/internal/weightvalidation"
 	"github.com/unicitynetwork/bft-core/network/protocol/certification"
 	abcrypto "github.com/unicitynetwork/bft-go-base/crypto"
 	"github.com/unicitynetwork/bft-go-base/types"
@@ -251,7 +252,9 @@ func (a *Authority) CompleteEnrollment(conf *types.PartitionDescriptionRecord) e
 	if conf == nil {
 		return fmt.Errorf("%w: no shard configuration", ErrContextMismatch)
 	}
-	if err := conf.IsValid(); err != nil {
+	// The bounded weights, not the unit rule (PartitionDescriptionRecord.IsValid), as AdvanceEpoch: a joiner's authority is enrolled against the
+	// configuration of a weighted epoch, which the root has already judged under the mode of its epoch. Everything else IsValid checks is still checked.
+	if err := weightvalidation.PDR(conf, weightvalidation.RoleEVM, weightvalidation.ModeWeighted); err != nil {
 		return fmt.Errorf("%w: the shard configuration is not valid: %w", ErrContextMismatch, err)
 	}
 	switch {

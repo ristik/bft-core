@@ -107,6 +107,33 @@ func TestAPendingAuthorityAdmitsNothingUntilItsConfigurationIsStated(t *testing.
 	require.NoError(t, signed.IsValid(verifier), "the response verifies under the configuration the authority completed")
 }
 
+// A joiner enters a weighted epoch: its authority is enrolled against a configuration whose validators hold bounded weights other than one.
+func TestAJoinersEnrollmentCompletesAgainstAWeightedConfiguration(t *testing.T) {
+	f := newFixture(t, 1)
+	other, err := abcrypto.NewInMemorySecp256K1Signer()
+	require.NoError(t, err)
+	otherVerifier, err := other.Verifier()
+	require.NoError(t, err)
+	otherKey, err := otherVerifier.MarshalPublicKey()
+	require.NoError(t, err)
+
+	a := f.pending(t)
+	conf := ownConf(t, a)
+	conf.Validators = append([]*types.NodeInfo{{NodeID: "validator-heavy", SigKey: otherKey, Stake: 3}}, conf.Validators...)
+	require.Error(t, conf.IsValid(), "the unit rule refuses this configuration: the test would not tell the two rules apart otherwise")
+	require.NoError(t, a.CompleteEnrollment(conf))
+	want, err := conf.Hash(gocrypto.SHA256)
+	require.NoError(t, err)
+	require.Equal(t, want, a.Enrollment().ShardConfHash)
+
+	// a zero weight is outside the bounded rule too
+	b := f.pending(t)
+	zero := ownConf(t, b)
+	zero.Validators = append([]*types.NodeInfo{{NodeID: "validator-heavy", SigKey: otherKey, Stake: 0}}, zero.Validators...)
+	require.ErrorIs(t, b.CompleteEnrollment(zero), ErrContextMismatch)
+	require.Empty(t, b.Enrollment().ShardConfHash)
+}
+
 func TestCompletingAnEnrollmentChecksTheConfigurationAgainstTheAuthority(t *testing.T) {
 	f := newFixture(t, 1)
 	other, err := abcrypto.NewInMemorySecp256K1Signer()
