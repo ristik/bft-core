@@ -29,8 +29,8 @@ func lastCRFixture(f *assignmentFixture, si *ShardInfo) {
 // (another PrevUCDigest, another ViewKey), not the pair that was current when the tip was executed. A sibling of the committed block is
 // not rewritten.
 func TestCommittedRepeatUCReachesTheExecutedDescendants(t *testing.T) {
-	// the sibling fork is a separate run: the store keeps the persisted blocks of a pruned fork above the new root, which a reopen refuses
-	t.Run("with a sibling fork", func(t *testing.T) { committedRepeatUCScenario(t, true) })
+	// the store keeps the persisted blocks of a pruned fork above the new root; the reopen drops them (#474)
+	t.Run("with a sibling fork and a reopen", func(t *testing.T) { committedRepeatUCScenario(t, true) })
 	t.Run("and a reopen", func(t *testing.T) { committedRepeatUCScenario(t, false) })
 }
 
@@ -124,13 +124,15 @@ func committedRepeatUCScenario(t *testing.T, withSibling bool) {
 		"the descendants and the committed root agree on the previous UC")
 
 	// a store reopened after the commit, whose persisted pending blocks still hold the old pair, normalises them from the persisted root
-	if withSibling {
-		return
-	}
 	reopened, err := New(crypto.SHA256, f.store.storage, f.orch, logger.New(t), ProfileHandoff)
 	require.NoError(t, err)
 	for _, round := range []uint64{9, 10} {
 		require.EqualValues(t, 8, mustBlock(t, reopened, round).ShardState.States[f.shard].LastCR.UC.UnicitySeal.RootChainRoundNumber, "round %d", round)
+	}
+	if withSibling {
+		// the sibling 11 (parent 7, below the committed 8) is persisted but belongs to a pruned fork: the reopen starts without it
+		_, err := reopened.blockTree.FindBlock(11)
+		require.Error(t, err, "the abandoned fork is not part of the reopened tree")
 	}
 }
 
