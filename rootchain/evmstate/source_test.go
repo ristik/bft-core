@@ -16,6 +16,11 @@ import (
 // rpcWorld serves a world over JSON-RPC the way an execution client does: the head header, and eth_getProof at a block hash, with slot
 // keys and values as minimal hex quantities (the shape that trips a byte-string decoder).
 func rpcWorld(t *testing.T, w *world, head [32]byte) *rpc.Client {
+	return rpcWorldForm(t, w, head, false)
+}
+
+// rpcWorldForm answers keys and values as minimal quantities, or (padded) as zero-padded 32-byte words as the lane's client does.
+func rpcWorldForm(t *testing.T, w *world, head [32]byte, padded bool) *rpc.Client {
 	srv := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
 		var req struct {
 			ID     json.RawMessage   `json:"id"`
@@ -46,8 +51,11 @@ func rpcWorld(t *testing.T, w *world, head [32]byte) *rpc.Client {
 				for _, n := range w.slotProof(t, a, slot) {
 					nodes = append(nodes, hexutil.Encode(n))
 				}
-				sp = append(sp, map[string]any{"key": hexutil.EncodeBig(new(big.Int).SetBytes(slot[:])),
-					"value": hexutil.EncodeBig(new(big.Int).SetBytes(v[:])), "proof": nodes})
+				key, value := hexutil.EncodeBig(new(big.Int).SetBytes(slot[:])), hexutil.EncodeBig(new(big.Int).SetBytes(v[:]))
+				if padded {
+					key, value = hexutil.Encode(slot[:]), hexutil.Encode(v[:])
+				}
+				sp = append(sp, map[string]any{"key": key, "value": value, "proof": nodes})
 			}
 			var account []string
 			for _, n := range w.accountProof(t, a) {
@@ -63,6 +71,20 @@ func rpcWorld(t *testing.T, w *world, head [32]byte) *rpc.Client {
 	require.NoError(t, err)
 	t.Cleanup(c.Close)
 	return c
+}
+
+func TestTheRPCSourceBuildsTheWitnessFromAClientThatAnswersPaddedWords(t *testing.T) {
+	p := newPrimaryWorld(t, "published")
+	resultID := hexWord(t, p.fx.ResultID)
+	w := buildWorld(t,
+		contract{addr: p.pins.Election, codeHash: p.pins.ElectionCode, storage: p.election},
+		contract{addr: p.pins.Custody, codeHash: p.pins.CustodyCode, storage: p.custody})
+	head := word32{0xaa}
+	src := RPCWitnessSource{Client: rpcWorldForm(t, w, head, true), Pins: p.pins}
+	want, _ := p.witness(t, resultID)
+	got, err := src.PrimaryWitness(context.Background(), head[:], resultID)
+	require.NoError(t, err, "the lane's execution client answers zero-padded 32-byte keys and values (run 16: hexutil.Big refused them)")
+	require.Equal(t, want, got)
 }
 
 func TestTheRPCSourceBuildsTheWitnessAndTheFactsFromAClient(t *testing.T) {
