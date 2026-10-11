@@ -401,12 +401,42 @@ func writeBlockTx(tx *bbolt.Tx, block *ExecutedBlock, data []byte, root bool) er
 			return fmt.Errorf("delete key %x: %w", k, err)
 		}
 	}
+	// Above the root only its descendants remain, as in the block tree, which prunes by ancestry: a sibling fork with a higher round
+	// number than the new root has lost its ancestor to the loop above, and a store that kept it would not load at the next start
+	// ("cannot add block for round N, parent block M not found"). Keys ascend with the round and a parent's round is below its
+	// child's, so one pass decides each block after its parent.
+	reachable := map[uint64]struct{}{block.GetRound(): {}}
+	var abandoned [][]byte
+	c = b.Cursor()
+	for k, v := c.Seek(key); k != nil; k, v = c.Next() {
+		if bytes.Equal(k, key) {
+			continue
+		}
+		var stored ExecutedBlock
+		if err := types.Cbor.Unmarshal(v, &stored); err != nil {
+			return fmt.Errorf("reading block %x above the new root: %w", k, err)
+		}
+		if _, ok := reachable[stored.GetParentRound()]; ok {
+			reachable[stored.GetRound()] = struct{}{}
+		} else {
+			abandoned = append(abandoned, bytes.Clone(k))
+		}
+	}
+	for _, k := range abandoned {
+		if err := b.Delete(k); err != nil {
+			return fmt.Errorf("delete abandoned block %x: %w", k, err)
+		}
+	}
 	return nil
 }
 
 var errNoCertificatesBucket = errors.New("certificates bucket not found")
 
-func (db BoltDB) WriteTC(tc *rctypes.TimeoutCert) error {
+// WriteTC stores the timeout certificate as the last one. With dropBlock it also deletes the block of the certificate's round, in
+// the same transaction. The caller says so only when its block tree has let go of that block: a block the tree still holds (it has a
+// child, because this root already has the proposal that carries its QC) must stay, or the next start finds a child whose parent
+// the database has deleted and refuses to load ("cannot add block for round N, parent block N-1 not found").
+func (db BoltDB) WriteTC(tc *rctypes.TimeoutCert, dropBlock bool) error {
 	data, err := types.Cbor.Marshal(tc)
 	if err != nil {
 		return fmt.Errorf("serializing TimeoutCert: %w", err)
@@ -421,7 +451,9 @@ func (db BoltDB) WriteTC(tc *rctypes.TimeoutCert) error {
 		if err := b.Put(keyTimeoutCert, data); err != nil {
 			return err
 		}
-		// if there is block for the round deleted it
+		if !dropBlock {
+			return nil
+		}
 		if b = tx.Bucket(bucketBlocks); b == nil {
 			return errNoBlocksBucket
 		}
