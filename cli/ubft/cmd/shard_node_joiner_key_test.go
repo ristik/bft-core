@@ -118,6 +118,24 @@ func TestAJoinersKeyIsBoundFromTheVerifiedActivatedConfiguration(t *testing.T) {
 		require.True(t, boundTo(t, s, strangerKey), "bound: another key conflicts")
 		require.NoError(t, s.deferred.BindKey(f.key), "and it is the key the configuration names")
 	})
+	t.Run("a live install after the replay binds the key at once; during the replay it binds nothing", func(t *testing.T) {
+		s := deferredSigning(t, f.self)
+		// the replay: a step that names the node is recorded, and the live hook leaves the bind to finishJoinerKey
+		require.NoError(t, noteJoinerStep(s, f.bundle, f.step, installedHash(f)))
+		require.NoError(t, bindLiveJoinerKey(s))
+		require.False(t, s.deferred.Bound(), "nothing is bound while the persisted steps are replayed")
+
+		// a joiner whose replay named it nowhere is staging-only; the activation that names it arrives live
+		live := deferredSigning(t, f.self)
+		require.NoError(t, finishJoinerKey(live))
+		requireStagingOnly(t, live, "the replay named this node nowhere")
+		require.NoError(t, noteJoinerStep(live, f.bundle, f.step, installedHash(f)))
+		require.False(t, live.deferred.Bound(), "recording the step alone does not bind: this is the state the Q4 turnover lane found a joiner stuck in")
+		require.NoError(t, bindLiveJoinerKey(live))
+		require.True(t, boundTo(t, live, strangerKey), "bound by the live install")
+		require.False(t, live.stagingOnly)
+		require.NoError(t, bindLiveJoinerKey(nil))
+	})
 	t.Run("replaying the step (restore, then catch-up) is harmless", func(t *testing.T) {
 		s := deferredSigning(t, f.self)
 		require.NoError(t, noteJoinerStep(s, f.bundle, f.step, installedHash(f)))
