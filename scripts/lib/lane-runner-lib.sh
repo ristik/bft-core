@@ -2,7 +2,7 @@
 # Definitions only: sourcing this file starts nothing and creates nothing. The caller sets REPO_ROOT, AGRE_ROOT and LANE (a short name for messages).
 #
 #   lane_preflight <ureth binary> <ureth commit> <dev run 0|1> [provenance dir]   before the lock, and again under it
-#   lane_rugregator_preflight                                                       the F8 rugregator pin (RUGREGATOR_BIN, RUGREGATOR_SOURCE)
+#   lane_rugregator_preflight <dev run 0|1> [provenance dir]                        the F8 rugregator pin: the checkout AND the binary
 #   lane_selftest_steps <steps file> <function that must NOT be defined> <VAR=1>... the steps file starts only with every flag set
 #   lane_selftest_defines <library>... -- <function>...                             the libraries define only
 #   lane_begin <evidence dir>            under the lock: run mode, heads, the sleep/wake record, the signal trap
@@ -50,12 +50,24 @@ lane_preflight() {
   LANE_RUN_MODE="RUN MODE: evidence run: attested prebuilt Ureth $bin sha256=$got commit=$reported (provenance $LANE_PROVENANCE); everything else from this checkout at $head"
 }
 
-# lane_rugregator_preflight: the binary and the checkout it was built from, at the F8 pin (scripts/f8-rugregator-pin.sh, sourced by the caller).
+# lane_rugregator_preflight <dev run 0|1> [provenance dir]: the rugregator checkout at the F8 pin (scripts/f8-rugregator-pin.sh, sourced by the caller)
+# and, for an evidence run, the BINARY itself. The binary does not report its commit, so a checkout at the pin says nothing about a binary built at
+# another time: the provenance directory (commit.txt, sha256.txt; default briefs/builds/rugregator-<pin>) must record the pin and this very binary.
+# (Runs f8-b1-20261012-r1 and h3-b1-20261012-r1 were lost to a stale binary beside a correct checkout.) Sets LANE_RUGREGATOR_SHA256.
 lane_rugregator_preflight() {
+  local dev=${1:-0} provenance=${2:-} attested
   [ -n "${F8_RUGREGATOR_PIN:-}" ] || lane_fail "$LANE preflight: the rugregator pin is not loaded"
   [ -n "${RUGREGATOR_BIN:-}" ] && [ -x "$RUGREGATOR_BIN" ] || lane_fail "$LANE preflight: set RUGREGATOR_BIN to the binary built from $F8_RUGREGATOR_PIN"
   [ -n "${RUGREGATOR_SOURCE:-}" ] && [ -d "$RUGREGATOR_SOURCE" ] || lane_fail "$LANE preflight: set RUGREGATOR_SOURCE to the pinned rugregator checkout"
   [ "$(git -C "$RUGREGATOR_SOURCE" rev-parse HEAD)" = "$F8_RUGREGATOR_PIN" ] || lane_fail "$LANE preflight: RUGREGATOR_SOURCE is not at the pinned revision $F8_RUGREGATOR_PIN"
+  LANE_RUGREGATOR_SHA256=$(lane_sha256 "$RUGREGATOR_BIN")
+  [ "$dev" != 1 ] || return 0
+  provenance=${provenance:-$AGRE_ROOT/briefs/builds/rugregator-${F8_RUGREGATOR_PIN:0:8}}
+  [ -s "$provenance/sha256.txt" ] && [ -s "$provenance/commit.txt" ] || lane_fail "$LANE preflight: no rugregator provenance at $provenance (commit.txt, sha256.txt)"
+  [ "$(tr -d '[:space:]' <"$provenance/commit.txt")" = "$F8_RUGREGATOR_PIN" ] || lane_fail "$LANE preflight: the rugregator provenance commit.txt is not $F8_RUGREGATOR_PIN"
+  attested=$(awk '{print $1; exit}' "$provenance/sha256.txt")
+  [ "$LANE_RUGREGATOR_SHA256" = "$attested" ] || lane_fail "$LANE preflight: RUGREGATOR_BIN sha256 $LANE_RUGREGATOR_SHA256 is not the recorded $attested (provenance $provenance)"
+  LANE_RUGREGATOR_PROVENANCE=$provenance
 }
 
 # lane_selftest_defines <library>... -- <function>...: sourced in an empty directory the libraries define the named functions, leave no file and no process.
@@ -111,9 +123,10 @@ lane_begin() {
   lane_pass "devnet lock acquired by the queued runner; evidence directory $dir"
   echo "$LANE_RUN_MODE" | tee "$dir/run-mode.txt"
   [ -z "$LANE_PROVENANCE" ] || cp -R "$LANE_PROVENANCE" "$dir/ureth-provenance"
+  [ -z "${LANE_RUGREGATOR_PROVENANCE:-}" ] || cp -R "$LANE_RUGREGATOR_PROVENANCE" "$dir/rugregator-provenance"
   # the machine's own sleep/wake record around the run: a run across a suspend is not evidence, and this shows it without reading the machine later
   { date -u +%FT%TZ; pmset -g log 2>/dev/null; } | gzip >"$dir/pmset-before.log.gz" || true
-  echo "bft-core head=$(git -C "$REPO_ROOT" rev-parse HEAD) branch=$(git -C "$REPO_ROOT" rev-parse --abbrev-ref HEAD) ureth=$LANE_URETH_COMMIT ubft sha256=$(lane_sha256 "$REPO_ROOT/build/ubft")${F8_RUGREGATOR_PIN:+ rugregator=$F8_RUGREGATOR_PIN}" | tee "$dir/heads.txt"
+  echo "bft-core head=$(git -C "$REPO_ROOT" rev-parse HEAD) branch=$(git -C "$REPO_ROOT" rev-parse --abbrev-ref HEAD) ureth=$LANE_URETH_COMMIT ubft sha256=$(lane_sha256 "$REPO_ROOT/build/ubft")${LANE_RUGREGATOR_SHA256:+ rugregator=$F8_RUGREGATOR_PIN rugregator sha256=$LANE_RUGREGATOR_SHA256}" | tee "$dir/heads.txt"
   LANE_EVIDENCE_DIR=$dir
   trap lane_stop_devnet EXIT
   trap 'exit 130' INT

@@ -42,8 +42,8 @@ selftest() {
 }
 preflight() {
   lane_preflight "${H3_URETH_BIN:-}" "$H3_URETH_COMMIT" "${H3_DEV_RUN:-0}" "${H3_URETH_ATTESTED_PROVENANCE:-}"
-  lane_rugregator_preflight
-  lane_pass "$LANE preflight: tools, lock helper, Ureth $LANE_URETH_COMMIT, rugregator $F8_RUGREGATOR_PIN, build/ubft; $LANE_RUN_MODE"
+  lane_rugregator_preflight "${H3_DEV_RUN:-0}" "${RUGREGATOR_ATTESTED_PROVENANCE:-}"
+  lane_pass "$LANE preflight: tools, lock helper, Ureth $LANE_URETH_COMMIT, rugregator $F8_RUGREGATOR_PIN (binary sha256 $LANE_RUGREGATOR_SHA256), build/ubft; $LANE_RUN_MODE"
 }
 
 case "${1:-}" in
