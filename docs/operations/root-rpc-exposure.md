@@ -29,26 +29,32 @@ authentication.
 | `PUT /api/v1/trustbases` | **none** | Stores a trust base. The store accepts only one that extends the previous epoch's (`quorumweight.VerifyTrustBase`: signed by the previous quorum), for an epoch not yet stored, so a stranger cannot install a forged trust base; they can pre-store a *valid* one early (it is what the committee will install anyway) and probe the store. Not a grant of authority, but it is a write: keep it private. |
 | `PUT /api/v1/configurations` | none; under profile 2 it refuses every write (403) | Without profile 2 (legacy lab setups only): adds a shard configuration to this node. Not used by the testnet or the lanes. |
 | `GET /api/v1/trustbases`, `GET /api/v1/roundInfo`, `/api/v1/metrics` | none | Read-only: trust bases (public), the node's round/state summary, Prometheus metrics (operational detail: peer ids, round timings). |
-| `POST /api/v1/handoff/plan` | loopback peer | Asks this validator to build and submit a handoff plan. A plan carries the operators' endorsements/receipts and is verified by consensus: without them it is refused. A caller can cause load and refused-plan noise, not an unauthorised handoff. |
+| `POST /api/v1/handoff/plan` | loopback peer | Asks this validator to build, **sign** (the plan and its abort domain, with its own key) and submit a handoff plan. A plan carries the operators' endorsements/receipts and is verified by consensus: without them it is refused. A caller can cause signatures over a plan this validator derives from its own state, load and refused-plan noise, not an unauthorised handoff. |
 | `POST /api/v1/handoff/intent`, `/endorse`, `/evm-assignment/context` | loopback peer | Register a plan another validator built, submit an endorsement, build the EVM assignment context. Verified against the root's own state and signatures; useless without valid operator signatures. |
 | `POST /api/v1/handoff/q3-candidate` | loopback peer | Returns the V3 candidate this validator derives from its committed state. Registers nothing. |
 | `POST /api/v1/handoff/q3-stage` | loopback peer | Stages a candidate that is consistent with the root's own state (**no signatures are checked at staging**). Staging sets the grant of the records feed for the staged successor: a caller can give feed read access to any peer id, or replace a real joiner's grant until it is staged again (#527). The feed serves certified, non-secret data. An abandoned candidate keeps its grant until the next stage or install. |
-| `POST /api/v1/handoff/abort`, `/abort/status` | loopback peer | Submits an abort of an in-flight handoff, if the root's own state allows one (a handoff in the freeze/prepare window). A caller able to reach it can **delay** a handoff; it cannot make one commit. |
+| `POST /api/v1/handoff/abort`, `/abort/status` | loopback peer | `SubmitHandoffAbort` makes **this validator sign an abort approval** for the pending handoff with its own key (`handoff_operator.go`) and feed it to the approval handler. A caller that gets past the guard on enough validators to reach the abort quorum **aborts the attempt** (not only delays it); it cannot make a handoff commit. |
 | `POST /api/v1/q3/status`, `/activation`, `/bundle`, `/history`, `/signers` | loopback peer | Read-only views of the verified Q3 history and the latest certificate signers. |
 | `POST /api/v1/pos/control` (only with `--proof-of-stake`) | loopback peer | Offers a Retirement or RejectResult control for ordering; the root checks it against its own state like any other control. |
 
 Shard node (`--rpc-server-address`): `GET /api/v1/health` and `/api/v1/metrics` are read-only; `GET /api/v1/operator/status` is the archive/operator
-status. The Q3 lane endpoints (`POST /api/v1/q3/stage`, `/q3/status`) are **not** loopback-guarded: staging checks the candidate against the node's verified
-history and its own identity (no signatures), and a stranger who can reach it can make the node stage a *valid* candidate early or refuse one with a
-consistency error (the lanes' stage refusals come from here). It cannot activate anything: activation needs the committed record and the verified bundle.
+status. The Q3 lane endpoints (`POST /api/v1/q3/stage`, `/q3/status`) are **loopback-guarded like the root's** (`shardQ3Staging.register` wraps both in `q3Endpoint`,
+which starts with `localOperatorRequest`; `TestShardQ3EndpointsRefuseANonLoopbackPeer`). Staging checks the candidate against the node's verified history and its
+own identity (no signatures): a caller that passes the guard can make the node stage a *valid* candidate early or refuse one with a consistency error (the lanes'
+stage refusals come from here); it cannot activate anything (activation needs the committed record and the verified bundle). The health and metrics
+endpoints are the unguarded ones. The proxy caveat above applies here too.
+
+The effects of the plan, abort and pos-control rows are from reading the handlers, not from tests.
 
 ## What is NOT exposed by these endpoints
 
-No private key, session or signing capability is reachable through either RPC; signing authorities have their own operator socket and credential
-(`signing-authority`), unrelated to these ports. The risks above are availability, early/probing writes of *valid* data, and information
-disclosure of operational metadata.
+No key material is disclosed through either RPC and nothing arbitrary can be signed: the signing authority has its own operator socket and credential
+(`signing-authority`), unrelated to these ports. But the guarded root endpoints do make the validator **sign fixed message types over its own committed state**:
+`handoff/plan` (the plan and its abort domain), `handoff/endorse` (an endorsement of a Prepare-bound state) and `handoff/abort` (an abort approval). That is why
+the loopback check must not be defeated by a proxy: whoever passes it can have this validator sign those messages. The remaining risks are availability,
+early/probing writes of *valid* data, and disclosure of operational metadata.
 
 ## If authentication is added later (#533 option)
 
-All write endpoints (`PUT /trustbases`, the handoff and Q3 staging endpoints, the shard node's staging endpoint) would take the same operator
+All write endpoints (`PUT /trustbases` and the loopback-guarded handoff and Q3 endpoints of both nodes) would take the same operator
 credential check together; until then this page and the start-up warning are the control.

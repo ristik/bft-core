@@ -3,6 +3,9 @@ package cmd
 import (
 	"bytes"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -27,4 +30,18 @@ func TestWarnIfRPCExposedWarnsOnlyForANetworkBind(t *testing.T) {
 	require.Contains(t, buf.String(), "level=WARN")
 	require.Contains(t, buf.String(), "address=0.0.0.0:26662")
 	require.Contains(t, buf.String(), "root RPC address is not loopback")
+}
+
+// docs/operations/root-rpc-exposure.md says the shard node's Q3 endpoints are loopback-guarded: this keeps it true.
+func TestShardQ3EndpointsRefuseANonLoopbackPeer(t *testing.T) {
+	mux := http.NewServeMux()
+	(&shardQ3Staging{}).register(mux)
+	for _, path := range []string{"/api/v1/q3/stage", "/api/v1/q3/status"} {
+		req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(`{}`))
+		req.Header.Set("Content-Type", "application/json")
+		req.RemoteAddr = "192.0.2.1:1234"
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, req)
+		require.Equal(t, http.StatusForbidden, rec.Code, path)
+	}
 }
