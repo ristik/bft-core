@@ -37,6 +37,16 @@ selftest() {
   rm -rf "$tmp"
   [ "$ok" = 1 ] || fail "selftest: sourcing the libraries defined something missing or started something"
   pass "selftest: the libraries define only (every step function present; no file, no process at source time)"
+  # the steps file starts nothing when sourced without BOTH the runner's lock flag and the lane flag (sourced in an empty directory: nothing runs, nothing is
+  # created, no function is defined); with both it does start (it fails on its first library, which is absent there)
+  tmp=$(mktemp -d)
+  for flags in "" "H6_LANE_LOCKED=1" "H6_ABORT_LANE=1" "H6_LANE_LOCKED=0 H6_ABORT_LANE=1" "H6_LANE_LOCKED=1 H6_ABORT_LANE=0"; do
+    ( cd "$tmp" && env $flags bash -c 'source "$0"; rc=$?; [ "$rc" = 0 ] && [ -z "$(type -t h6_abort_before_h)" ] && [ -z "$(jobs -p)" ]' "$REPO_ROOT/scripts/h6/abort-rehearsal-steps.sh" ) || { rm -rf "$tmp"; fail "selftest: the steps file ran, or defined something, when sourced with [$flags]"; }
+  done
+  [ -z "$(ls -A "$tmp")" ] || { rm -rf "$tmp"; fail "selftest: sourcing the steps file without both flags created a file"; }
+  if ( cd "$tmp" && env H6_LANE_LOCKED=1 H6_ABORT_LANE=1 bash -c 'source "$0"' "$REPO_ROOT/scripts/h6/abort-rehearsal-steps.sh" ) >/dev/null 2>&1; then rm -rf "$tmp"; fail "selftest: the steps file did not start with both flags"; fi
+  rm -rf "$tmp"
+  pass "selftest: the steps file starts only with H6_LANE_LOCKED=1 and H6_ABORT_LANE=1 (five other flag combinations start nothing and define nothing)"
   grep -q 'H6_ABORT_LANE' scripts/reth-paired-devnet.sh && grep -q 'abort-rehearsal-steps.sh' scripts/reth-paired-devnet.sh || fail "selftest: the paired devnet does not select the rehearsal steps"
   python3 -m unittest discover -s scripts/h6 -p test_prepare_handoff.py >/dev/null 2>&1 || fail "selftest: the helper's checks fail (scripts/h6/test_prepare_handoff.py)"
   rm -rf scripts/h6/__pycache__
@@ -132,6 +142,10 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 
 export Q3_B1=1 H3_SLOT_LAYOUT=3 EVM_OPERATOR_STATUS_RPC=1
+# the steps start only under the runner's lock flag and the lane flag (the wrapper passes the first through its environment)
+export H6_LANE_LOCKED=1
+# the machine's own sleep/wake record around the run, so a suspended clock is visible in the evidence rather than read off the machine later
+{ date -u +%FT%TZ; pmset -g log 2>/dev/null; } | gzip >"$EVIDENCE_DIR/pmset-before.log.gz" || true
 
 set +e
 DEVNET_PIDFILE="$EVIDENCE_DIR/.devnet-pid"; rm -f "$DEVNET_PIDFILE"
@@ -146,16 +160,24 @@ set -e
 rm -f "$DEVNET_PIDFILE"
 # the state is kept for offline replay: test-nodes stays where it is; the evidence below is a copy
 cp -R test-nodes/q3 "$EVIDENCE_DIR/q3" 2>/dev/null || true
+{ date -u +%FT%TZ; pmset -g log 2>/dev/null; } | gzip >"$EVIDENCE_DIR/pmset-after.log.gz" || true
 for n in root1 root2 root3 root4 evm1 evm2 evm3 evm4; do [ -f "test-nodes/$n/debug.log" ] && cp "test-nodes/$n/debug.log" "$EVIDENCE_DIR/$n-debug.log"; done
+for n in 1 2 3 4; do
+  for f in "test-nodes/auth$n"/*.log "test-nodes/reth$n/reth.log"; do [ -f "$f" ] && cp "$f" "$EVIDENCE_DIR/$(echo "$f" | sed 's#^test-nodes/##; s#/#-#g')"; done
+done
 echo "state kept in $REPO_ROOT/test-nodes (nodes stopped by their own teardown); evidence copy in $EVIDENCE_DIR" | tee "$EVIDENCE_DIR/state.txt"
 if [ "$status" -ne 0 ] || grep -q '^ *FAIL:' "$EVIDENCE_DIR/lane.log"; then
   fail "H6 Abort rehearsal failed (exit $status); see $EVIDENCE_DIR/lane.log"
 fi
 grep -q 'H6 Abort rehearsal: Abort before H committed' "$EVIDENCE_DIR/lane.log" || fail "lane ended without both rehearsed Aborts"
 q3=$EVIDENCE_DIR/q3
-for f in target.json status.json abort.out abort.status; do
+for f in plan/target.json plan/status.json abort.out abort.status; do
   [ -s "$q3/h6-before-h/$f" ] && [ -s "$q3/h6-after-h/$f" ] || fail "missing evidence $f"
 done
+for f in freeze-before.txt freeze-during.json freeze-window.json freeze-after.txt roots-abort-ordered.log; do
+  [ -s "$q3/h6-before-h/$f" ] || fail "missing freeze evidence $f"
+done
 [ "$(cat "$q3/h6-before-h/abort.status")" = 0 ] && [ "$(cat "$q3/h6-after-h/abort.status")" != 0 ] || fail "the Abort exit statuses are not (committed, refused)"
-[ "$(jq -r .state "$q3/h6-before-h/status.json")" = pending ] && [ "$(jq -r .state "$q3/h6-after-h/status.json")" = too_late ] || fail "the pre-Abort control states are not (pending, too_late)"
+[ "$(jq -r .state "$q3/h6-before-h/plan/status.json")" = pending ] && [ "$(jq -r .state "$q3/h6-after-h/plan/status.json")" = too_late ] || fail "the pre-Abort control states are not (pending, too_late)"
+(cd "$EVIDENCE_DIR" && find . -type f ! -name SHA256SUMS ! -name '.devnet-pid' | LC_ALL=C sort | xargs shasum -a 256 >SHA256SUMS)
 pass "H6 Abort rehearsal complete; evidence in $EVIDENCE_DIR"
