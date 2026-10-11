@@ -275,14 +275,17 @@ type peerState struct {
 type Server struct {
 	limits   Limits
 	handlers Handlers
-	ctx      context.Context
-	cancel   context.CancelFunc
-	mu       sync.Mutex
-	peers    map[peer.ID]*peerState
-	total    int
-	streams  map[Stream]struct{}
-	closed   bool
-	wg       sync.WaitGroup
+	// allowed, when set, is asked for every request whether the peer is eligible now (NewServerFor); nil means the fixed set of
+	// NewServer, whose members are exactly the keys of peers.
+	allowed func(peer.ID) bool
+	ctx     context.Context
+	cancel  context.CancelFunc
+	mu      sync.Mutex
+	peers   map[peer.ID]*peerState
+	total   int
+	streams map[Stream]struct{}
+	closed  bool
+	wg      sync.WaitGroup
 }
 
 func NewServer(parent context.Context, eligible []peer.ID, limits Limits, handlers Handlers) (*Server, error) {
@@ -299,6 +302,19 @@ func NewServer(parent context.Context, eligible []peer.ID, limits Limits, handle
 	}
 	ctx, cancel := context.WithCancel(parent)
 	return &Server{limits: limits, handlers: handlers, ctx: ctx, cancel: cancel, peers: peers, streams: make(map[Stream]struct{}, limits.MaxPendingStreams)}, nil
+}
+
+// NewServerFor is NewServer for an eligible set that changes while the server runs: allowed is asked on every request, so a peer
+// admitted after the server started is served and one that is no longer eligible is refused, without a restart. allowed is called
+// without the server's lock held and must be safe for concurrent use. Each eligible peer has its own request budget, created when it
+// first asks; at most limits.MaxEligiblePeers budgets are kept, an idle peer's being dropped once it has refilled.
+func NewServerFor(parent context.Context, allowed func(peer.ID) bool, limits Limits, handlers Handlers) (*Server, error) {
+	if parent == nil || allowed == nil || handlers.Frontier == nil || handlers.Cut == nil || limits.validate() != nil {
+		return nil, ErrBounds
+	}
+	ctx, cancel := context.WithCancel(parent)
+	return &Server{limits: limits, handlers: handlers, allowed: allowed, ctx: ctx, cancel: cancel, peers: make(map[peer.ID]*peerState),
+		streams: make(map[Stream]struct{}, limits.MaxPendingStreams)}, nil
 }
 
 func (s *Server) FrontierHandler(st libp2pnetwork.Stream) {
@@ -369,13 +385,33 @@ func (s *Server) serve(from peer.ID, st Stream, handler func(context.Context, []
 }
 
 func (s *Server) admit(id peer.ID, st Stream) bool {
+	eligible := s.allowed == nil || (id != "" && s.allowed(id)) // asked before the lock: the answer comes from another component
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	p := s.peers[id]
+	now := time.Now()
+	if s.allowed != nil {
+		if !eligible {
+			// no longer (or never) eligible: refused, and its budget is forgotten once nothing of it is being served
+			if p != nil && p.pending == 0 {
+				delete(s.peers, id)
+			}
+			return false
+		}
+		if p == nil && !s.closed {
+			if len(s.peers) >= s.limits.MaxEligiblePeers {
+				s.dropRefilled(now)
+			}
+			if len(s.peers) >= s.limits.MaxEligiblePeers {
+				return false
+			}
+			p = &peerState{tokens: float64(s.limits.Burst), last: now}
+			s.peers[id] = p
+		}
+	}
 	if s.closed || p == nil || s.total >= s.limits.MaxPendingStreams || p.pending >= s.limits.MaxPendingStreamsPerPeer {
 		return false
 	}
-	now := time.Now()
 	p.tokens = math.Min(float64(s.limits.Burst), p.tokens+now.Sub(p.last).Seconds()*s.limits.RequestsPerSecond)
 	p.last = now
 	if p.tokens < 1 {
@@ -387,6 +423,16 @@ func (s *Server) admit(id peer.ID, st Stream) bool {
 	s.streams[st] = struct{}{}
 	s.wg.Add(1)
 	return true
+}
+
+// dropRefilled forgets the budgets of peers with nothing being served whose tokens have refilled completely: a budget in that state
+// is the one a new peer starts with, so dropping it changes nothing for its peer. Called with the lock held.
+func (s *Server) dropRefilled(now time.Time) {
+	for id, p := range s.peers {
+		if p.pending == 0 && p.tokens+now.Sub(p.last).Seconds()*s.limits.RequestsPerSecond >= float64(s.limits.Burst) {
+			delete(s.peers, id)
+		}
+	}
 }
 
 func (s *Server) release(id peer.ID, st Stream) {

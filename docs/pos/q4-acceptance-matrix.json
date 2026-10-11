@@ -202,13 +202,6 @@
     "REAL-PROCESS (rest)",
     "REAL-PROCESS (native UC check)"
    ],
-   "gaps": [
-    {
-     "label": "REAL-PROCESS (native UC check)",
-     "reason": "'Native UC cryptographic verification where used' is not evidenced here. Working reading (owner question Q6, 2026-10-11, not yet confirmed by the owner): it is the B1 precompile (0x0100, UC_V1) verifying a real Unicity Certificate inside the execution client on a live devnet, which the B3 two-shard live lane exercises. No Q4 lane step is aimed at it; the gap closes by citing a passing evidence-grade B3 live lane run, which does not exist yet. The rollback half of this gap is evidenced by the G2 rollback step below (rollback to the finalized head) and by the Q3 pair controls (a build below the finalized head is refused: the unchanged rebuild passes the pair gate and the engine answers 'Too deep reorg', which the tool reports as acceptance of the gate, not of a built payload). A pair never un-commits: a block is made canonical and final in one step, only with its UC.",
-     "blockedBy": "a passing evidence-grade B3 two-shard live lane run (B1 0x0100 UC_V1 verification live); owner question Q6"
-    }
-   ],
    "evidence": [
     {
      "kind": "lane",
@@ -370,6 +363,38 @@
       "\"problems\": []"
      ],
      "scope": "the judge's verdict, from the pairs' RPC samples and the shard nodes' logs (sealed, verified VALID, certificate admitted) (scenario B run)"
+    },
+    {
+     "kind": "lane-file",
+     "label": "REAL-PROCESS (native UC check)",
+     "lane": "b3",
+     "path": "rows.log",
+     "contains": [
+      "PASS gas: reference redemption (two anchors) {\"anchors\":2,\"leaves\":3,\"gasUsed\":\"3112129\",\"gateTotal\":3864866,\"credited\":\"1000000000000000000\",\"nativeCalls\":{\"uc\":2",
+      "\"verdictAtBlock\":\"1/valid\""
+     ],
+     "scope": "a redemption with two anchors executed on the chain made two 0x0100 calls and the B1 verdict of each anchor's UC_V1 request at the execution block is valid; the B1 precompile 0x0100 (UC_V1) verifying a real Unicity Certificate inside ureth on a live devnet: the B3 two-shard lane (owner decision §20 of briefs/owner-decisions-2026-10-07.md, Q6 answered 2026-10-11: native UC cryptographic verification is verification in the EVM of certificates and tokens sharing the system's root of trust, provided by enshrined host-level builtins; this is the reading the evidence answers). ; cited for the UC verification rows only: the run's rows exit was 1 because one unrelated gas-1 assertion failed in it (since revised) (B3 two-shard live lane run)"
+    },
+    {
+     "kind": "lane-file",
+     "label": "REAL-PROCESS (native UC check)",
+     "lane": "b3",
+     "path": "lane.log",
+     "contains": [
+      "PASS claim paid"
+     ],
+     "scope": "the lane's one-anchor round trip (lock, mint, transfer, burn, redeem through the native UC and RSMT calls, claim) passed; the B1 precompile 0x0100 (UC_V1) verifying a real Unicity Certificate inside ureth on a live devnet: the B3 two-shard lane (owner decision §20 of briefs/owner-decisions-2026-10-07.md, Q6 answered 2026-10-11: native UC cryptographic verification is verification in the EVM of certificates and tokens sharing the system's root of trust, provided by enshrined host-level builtins; this is the reading the evidence answers). (B3 two-shard live lane run)"
+    },
+    {
+     "kind": "lane-file",
+     "label": "REAL-PROCESS (native UC check)",
+     "lane": "b3",
+     "path": "ureth-attestation.json",
+     "contains": [
+      "efee0f8a24ee118ea1b5e89e38601bae99992143313c54fccac4fde517b5022a",
+      "47f5146b59c01e2180aa66b250ec87330231658d"
+     ],
+     "scope": "the attested ureth the lane ran (sha256 and reported commit, provenance directory recorded); the B1 precompile 0x0100 (UC_V1) verifying a real Unicity Certificate inside ureth on a live devnet: the B3 two-shard lane (owner decision §20 of briefs/owner-decisions-2026-10-07.md, Q6 answered 2026-10-11: native UC cryptographic verification is verification in the EVM of certificates and tokens sharing the system's root of trust, provided by enshrined host-level builtins; this is the reading the evidence answers). ; the run mode in the evidence directory was recorded after the run from the attestation, not by the runner (B3 two-shard live lane run)"
     }
    ]
   },
@@ -1447,13 +1472,65 @@
       "mirrored weights 3 3 2 1"
      ],
      "scope": "the weighted-epoch gate after the second handoff"
-    }
-   ],
-   "gaps": [
+    },
     {
+     "kind": "lane",
      "label": "REAL-PROCESS (turnover)",
-     "reason": "The design's A to B replaces coupled entity c by a new entity d (one of four changed, retained weight 8). The live A to B reweights the same four entities: the four-entity paired devnet has no fifth entity to join, so the identity turnover is not live.",
-     "blockedBy": "a joiner entity on the paired devnet (P85 slice 7 joiner run, the same blocker as L5)"
+     "lane": "to",
+     "step": "F17 turnover: second handoff A to B committed on the running chain: entity c replaced by a new entity d (6,1,1,1 -> 3,3,2,1), the retained three hold 8 of 9 in both maps",
+     "scope": "the design's A to B: the joiner's root, authority and execution client start before the Commit; the successor trust base is signed by roots 1 2 3 and the joiner's; the retained three give readiness, the joiner after a staging-only restore; the committed candidate names the joiner and not the replaced entity on both sides; scenario A run with the identity turnover (Q4_TURNOVER=1): on the chain the A fault rows ran on, coupled entity 4 (root and EVM validator) is replaced by a new coupled entity 5, 6,1,1,1 -> 3,3,2,1. Outside the claim: the three aggregator shards keep their earlier root list and trust base and are not checked after B; REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build (consensus shim and shard gate); crash model SIGKILL over the retained home (not a power loss)"
+    },
+    {
+     "kind": "lane-file",
+     "label": "REAL-PROCESS (turnover)",
+     "lane": "to",
+     "path": "q4/turnover-arithmetic.txt",
+     "scope": "the lane's own arithmetic of the turnover: one of four identities changed, the retained three hold 8 of 9 (Q=7) in both maps; the weight distance (72/81 = 8/9) is asserted against the continuity budget the genesis configuration commits (1/1); scenario A run with the identity turnover (Q4_TURNOVER=1): on the chain the A fault rows ran on, coupled entity 4 (root and EVM validator) is replaced by a new coupled entity 5, 6,1,1,1 -> 3,3,2,1. Outside the claim: the three aggregator shards keep their earlier root list and trust base and are not checked after B",
+     "contains": [
+      "replaced: entity 4",
+      "retained entities",
+      "old weight 8 >= 7, new weight 8 >= 7",
+      "within the budget"
+     ]
+    },
+    {
+     "kind": "lane",
+     "label": "REAL-PROCESS (turnover)",
+     "lane": "to",
+     "step": "F17: the first successor proposal held across the install restart into epoch 3; release, epoch 3 commits",
+     "scope": "the install restart with the joiner's root first and the replaced root last; the hold rule is on the successor committee's roots; scenario A run with the identity turnover (Q4_TURNOVER=1): on the chain the A fault rows ran on, coupled entity 4 (root and EVM validator) is replaced by a new coupled entity 5, 6,1,1,1 -> 3,3,2,1. Outside the claim: the three aggregator shards keep their earlier root list and trust base and are not checked after B; REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build (consensus shim and shard gate); crash model SIGKILL over the retained home (not a power loss)"
+    },
+    {
+     "kind": "lane",
+     "label": "REAL-PROCESS (turnover)",
+     "lane": "to",
+     "step": "F17: B in effect: epoch 3 activated and acknowledged, scheme 2 certificates of 3,3,2,1, paid transaction certified",
+     "scope": "the retained validators' authorities advance, the joiner's authority is enrolled against the weighted configuration and its shard node restored with a session; the joiner's EVM validator is counted by a root and admits a certificate of root epoch 3 before the paid transaction; scenario A run with the identity turnover (Q4_TURNOVER=1): on the chain the A fault rows ran on, coupled entity 4 (root and EVM validator) is replaced by a new coupled entity 5, 6,1,1,1 -> 3,3,2,1. Outside the claim: the three aggregator shards keep their earlier root list and trust base and are not checked after B; REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build (consensus shim and shard gate); crash model SIGKILL over the retained home (not a power loss)"
+    },
+    {
+     "kind": "lane-file",
+     "label": "REAL-PROCESS (turnover)",
+     "lane": "to",
+     "path": "q4/b-evm-joiner.txt",
+     "scope": "the joiner's EVM validator takes part in epoch 3: a root's consensus line of the EVM shard lists its request, and its own journal admits a certificate of root epoch 3; scenario A run with the identity turnover (Q4_TURNOVER=1): on the chain the A fault rows ran on, coupled entity 4 (root and EVM validator) is replaced by a new coupled entity 5, 6,1,1,1 -> 3,3,2,1. Outside the claim: the three aggregator shards keep their earlier root list and trust base and are not checked after B",
+     "contains": [
+      "is counted by root",
+      "rootEpoch=3"
+     ]
+    },
+    {
+     "kind": "lane",
+     "label": "REAL-PROCESS (turnover)",
+     "lane": "to",
+     "step": "F17 B: the EVM pair of one weight-3 entity cut from every root (6 >= request Q=5): EVM certifies; heal without rollback",
+     "scope": "coupled EVM side after the turnover: request weight 6 >= Q=5; scenario A run with the identity turnover (Q4_TURNOVER=1): on the chain the A fault rows ran on, coupled entity 4 (root and EVM validator) is replaced by a new coupled entity 5, 6,1,1,1 -> 3,3,2,1. Outside the claim: the three aggregator shards keep their earlier root list and trust base and are not checked after B; REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build (consensus shim and shard gate); crash model SIGKILL over the retained home (not a power loss)"
+    },
+    {
+     "kind": "lane",
+     "label": "REAL-PROCESS (turnover)",
+     "lane": "to",
+     "step": "F17 B: the EVM pairs of both weight-3 entities cut from every root (3 < request Q=5): EVM stalls, roots commit; heal without rollback",
+     "scope": "coupled EVM side after the turnover: request weight 3 < Q=5; scenario A run with the identity turnover (Q4_TURNOVER=1): on the chain the A fault rows ran on, coupled entity 4 (root and EVM validator) is replaced by a new coupled entity 5, 6,1,1,1 -> 3,3,2,1. Outside the claim: the three aggregator shards keep their earlier root list and trust base and are not checked after B; REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build (consensus shim and shard gate); crash model SIGKILL over the retained home (not a power loss)"
     }
    ]
   },
@@ -2108,13 +2185,34 @@
      "path": "q4/followers.txt",
      "scope": "",
      "lane": "b"
-    }
-   ],
-   "gaps": [
+    },
     {
+     "kind": "lane",
      "label": "REAL-PROCESS (non-member)",
-     "reason": "No non-member or removed-validator root runs in this lane (all four roots stay committee members): the follower signing nothing and catching up on a real network needs the P85 slice 7 joiner run or an A to B removal handoff.",
-     "blockedBy": "slice 7 joiner run / removal handoff lane"
+     "lane": "to",
+     "step": "L5: the joiner's root, running beside the epoch-2 committee through the handoff that names it, follows and signs nothing before its install",
+     "scope": "a root the epoch-2 committee does not name runs beside it through the handoff that names it: it reports follower, its membership gate refuses its signatures, it signs no vote, timeout or proposal. The refused signatures are its own timeout votes only: a follower receives no consensus messages, so it is never asked to vote on a proposal. Limit (#550): a follower root does not track the committee's rounds (its committed round stays where it was); the joiner becomes a member by its install restart, not by catching up while running; scenario A run with the identity turnover (Q4_TURNOVER=1): on the chain the A fault rows ran on, coupled entity 4 (root and EVM validator) is replaced by a new coupled entity 5, 6,1,1,1 -> 3,3,2,1. Outside the claim: the three aggregator shards keep their earlier root list and trust base and are not checked after B; REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build (consensus shim and shard gate); crash model SIGKILL over the retained home (not a power loss)"
+    },
+    {
+     "kind": "lane",
+     "label": "REAL-PROCESS (non-member)",
+     "lane": "to",
+     "step": "L5: the removed validator's root, restarted into epoch 3, follows and signs nothing while the new committee commits; the joiner's root is a member and signs",
+     "scope": "the replaced entity's root, restarted into epoch 3 over its retained home and kept running: it reports follower and signs nothing while the new committee commits, and its identity is not among the signers of the committee's epoch-3 certificate read at the first root (one certificate, at the round the record names); the joiner's root is then a member and signs. The replaced entity's EVM validator is stopped. Limit (#550): a follower root does not track the committee's rounds (its committed round stays where it was); the joiner becomes a member by its install restart, not by catching up while running; scenario A run with the identity turnover (Q4_TURNOVER=1): on the chain the A fault rows ran on, coupled entity 4 (root and EVM validator) is replaced by a new coupled entity 5, 6,1,1,1 -> 3,3,2,1. Outside the claim: the three aggregator shards keep their earlier root list and trust base and are not checked after B; REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build (consensus shim and shard gate); crash model SIGKILL over the retained home (not a power loss)"
+    },
+    {
+     "kind": "lane-file",
+     "label": "REAL-PROCESS (non-member)",
+     "lane": "to",
+     "path": "q4/non-members.txt",
+     "scope": "both non-members' records: follower status, refused signatures counted from the root's log, zero signed votes, timeouts and proposals; the removed root's identity absent from an epoch-3 certificate; scenario A run with the identity turnover (Q4_TURNOVER=1): on the chain the A fault rows ran on, coupled entity 4 (root and EVM validator) is replaced by a new coupled entity 5, 6,1,1,1 -> 3,3,2,1. Outside the claim: the three aggregator shards keep their earlier root list and trust base and are not checked after B",
+     "contains": [
+      "the joiner before its install",
+      "the removed validator after the install",
+      "signed votes, timeouts and proposals: 0",
+      "is not among its signers",
+      "a member of epoch 3"
+     ]
     }
    ]
   }

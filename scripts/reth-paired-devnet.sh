@@ -901,6 +901,7 @@ if [ "${M2_PROFILE2:-0}" = 1 ] && [ "${POST_M2A_SKIP_HANDOFF:-0}" != 1 ]; then
   if [ "${Q3_WEIGHT_LANE:-0}" = 1 ]; then handoffScript=scripts/q3-weight-activation-steps.sh; fi   # Q3 #50 slice E: runs on the H3 lane's layout-2 genesis
   if [ "${Q4_LIVE_LANE:-0}" = 1 ]; then handoffScript=scripts/q4-live-steps.sh; fi
   if [ "${P85_LANE:-0}" = 1 ]; then handoffScript=scripts/p85-recovery-steps.sh; fi
+  if [ "${H6_ABORT_LANE:-0}" = 1 ]; then handoffScript=scripts/h6/abort-rehearsal-steps.sh; fi
   if ! source "$handoffScript"; then
     fail "profile-2 two-handoff lane failed"
     exit 1
@@ -925,6 +926,8 @@ if [ "${M2_PROFILE2:-0}" = 1 ] && [ "${POST_M2A_SKIP_HANDOFF:-0}" != 1 ]; then
     f8_trace || { fail "aggregator shards lost root coverage after handoff"; exit 1; }
     pass "one root handoff (same members, Q3 flow) certified paid transactions"
     pass "all three aggregator shards remained live through the root handoff"
+  elif [ "${H6_ABORT_LANE:-0}" = 1 ]; then
+    pass "H6 Abort rehearsal: Abort before H committed and attempt+1 installed; Abort after H refused and the handoff installed"
   else
     pass "two profile-2 handoffs (same members, Q3 flow) certified paid transactions"
   fi

@@ -760,30 +760,48 @@ func frontierEligiblePeers(shardConfs []*types.PartitionDescriptionRecord) ([]pe
 	return eligible, nil
 }
 
-// serveRootFrontier registers the root-bootstrap frontier and cut protocols for the validators of
-// the shards this root was configured with. The eligible set is fixed when the root starts: a shard
-// configuration added later through the RPC server is served after the next restart.
+// frontierAllowed is who the root's frontier service serves: the members of the INSTALLED configuration of each configured shard, which
+// follows the assignment steps as they activate, and the validators of the candidate staged on this root while it is the next epoch (a
+// joiner bootstraps its view of the root before its assignment is installed, as it does with the records feed). Unlike the start-time
+// set it replaces, it admits a validator that joined by an assignment after the root started, and it stops serving one that an
+// assignment removed.
+func frontierAllowed(shardConfs []*types.PartitionDescriptionRecord, members shardMembers) func(peer.ID) bool {
+	return func(id peer.ID) bool {
+		for _, conf := range shardConfs {
+			if members.IsShardValidator(conf.PartitionID, conf.ShardID, id.String()) {
+				return true
+			}
+		}
+		return members.IsStagedValidator(id.String())
+	}
+}
+
+// serveRootFrontier registers the root-bootstrap frontier and cut protocols for the validators of the shards this root was
+// configured with. Who is a validator is asked of the consensus manager on every request (frontierAllowed), so the service follows
+// the installed assignment without a restart of the root. A shard configuration added later through the RPC server is still served
+// only after the next restart: the set of shards is fixed here, their members are not.
 func serveRootFrontier(ctx context.Context, log *slog.Logger, host *network.Peer, cm *consensus.ConsensusManager, shardConfs []*types.PartitionDescriptionRecord) (func(), error) {
 	limits := consensus.DefaultFrontierServerLimits()
-	eligible, err := frontierEligiblePeers(shardConfs)
+	// the configurations are still checked as before: a validator whose node ID is not a peer ID is a configuration error
+	configured, err := frontierEligiblePeers(shardConfs)
 	if err != nil {
 		return nil, err
 	}
-	if len(eligible) == 0 || len(eligible) > limits.MaxEligiblePeers {
-		log.Warn("root frontier service disabled: the configured shards have no usable validator set", "validators", len(eligible))
+	if len(shardConfs) == 0 {
+		log.Warn("root frontier service disabled: this root is configured with no shard")
 		return func() {}, nil
 	}
 	handlers, err := cm.FrontierHandlers()
 	if err != nil {
 		return nil, err
 	}
-	server, err := frontiertransport.NewServer(ctx, eligible, limits, handlers)
+	server, err := frontiertransport.NewServerFor(ctx, frontierAllowed(shardConfs, cm), limits, handlers)
 	if err != nil {
 		return nil, fmt.Errorf("frontier service: %w", err)
 	}
 	host.RegisterProtocolHandler(frontiertransport.FrontierProtocolID, server.FrontierHandler)
 	host.RegisterProtocolHandler(frontiertransport.CutProtocolID, server.CutHandler)
-	log.Info("root frontier service enabled", "validators", len(eligible))
+	log.Info("root frontier service enabled", "shards", len(shardConfs), "configuredValidators", len(configured))
 	return func() {
 		host.RemoveProtocolHandler(frontiertransport.FrontierProtocolID)
 		host.RemoveProtocolHandler(frontiertransport.CutProtocolID)

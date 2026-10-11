@@ -20,7 +20,7 @@ generator enrolls keys inside the long-lived Docker authorities, never in a
 throwaway init process. Full host/daemon loss requires a fresh testnet reset.
 The one aggregator uses the existing F8 RSMT profile, partition 9/full range;
 EVM is partition 8/full range. This is PoA with profile-2 authenticated history,
-layout-2 registry and no bridge or staking allocation. The registry bytecode and
+the single B1 registry (layout 3, one `ubft engine-api b1-profile` shared by genesis, ureth and the shard nodes) and no bridge or staking allocation. The registry bytecode and
 engine protocol are supplied by the pinned BFT/ureth builds.
 
 The generated `compose.yaml` is JSON (valid YAML), default N=4, configurable N=3..32.
@@ -110,7 +110,7 @@ the error, then deliberately `docker compose down` and discard that incomplete
 generation before retrying a new name.
 
 Generator initializes and signs the trust base using ubft, enrolls independent
-signing authorities using existing CLI commands, finalizes layout-2 genesis and
+signing authorities using existing CLI commands, finalizes the B1 genesis (verified against an independent `b1genesis --verify` regeneration before anything starts) and
 funds **only a random dedicated faucet account** with 1000 disposable UCT. Its V3
 keystore and random password stay in private files. It creates no known Hardhat
 allocation. Engine JWTs and reset entropy are fresh. The printed block-zero hash

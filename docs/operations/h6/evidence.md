@@ -40,7 +40,7 @@ old-epoch to new-epoch log gap only: keep that number, and do not substitute it 
 | Archive-backed restore | H3 retained-node loss and the M2 lane restore: pin UC/TR, genesis anchor, body identity per Q3 activation, replay log, equal block, state and receipt roots, the same authority lifetime, a greater reserved round. |
 | Interrupted handoff | H3: the EVM stalls after a committed H while roots and aggregators move; the derived recovery K extends it; the late acknowledgement is refused. |
 | Execution-version activation | Manual procedure (scenarios.md section 5) with its anchors; no lane exists. |
-| Abort before and after H | Not rehearsed on this layout until the manual helper is ported (scenarios.md section 6); record as such. |
+| Abort before and after H | The Q3 helper exists and is checked in process (scenarios.md section 6); not rehearsed live until a lane run records it. |
 | Interruption objectives | Observer data, boundaries and PIDs, per-node and cluster durations against the approved objectives. |
 | Certified history verifiable | Saved receipts and roots unchanged; archived UC/TR and handoff chain; the F7 proof re-verified offline by the second operator. |
 | No certified monetary reorg | Fixed-height comparisons and a monotonic finalized observer; preserve the stopped state if recovery cannot be proved. |
