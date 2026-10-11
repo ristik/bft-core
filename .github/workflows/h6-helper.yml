@@ -1,0 +1,19 @@
+name: h6-helper
+on:
+  pull_request:
+    paths: ['scripts/h6/**', 'q3format/receipt*.go', '.github/workflows/h6-helper.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  helper:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - run: python3 -m unittest discover -s scripts/h6 -p test_prepare_handoff.py -v
+      - run: go test ./cli/ubft/cmd -run TestPrepareHandoffHelper -count=1
