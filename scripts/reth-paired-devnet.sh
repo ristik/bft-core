@@ -282,7 +282,10 @@ if __import__("os").environ.get("M1_FEE_ACCOUNTING") == "1":
     g["baseFeePerGas"] = "0xf4241"  # 1,000,001 wei; production floor is 1,000,000 wei
 json.dump(g, open("test-nodes/evm-genesis-funded.json", "w"), indent=2)
 PY
-if [ "${P85_LANE:-0}" = 1 ]; then p85_merge_alloc test-nodes/evm-genesis-funded.json || exit 1; fi
+if [ "${P85_LANE:-0}" = 1 ]; then
+  p85_reconcile_genesis_assignment test-nodes/evm-genesis-funded.json || exit 1   # before the P85 accounts are added: the genesis assignment id comes from the full configuration
+  p85_merge_alloc test-nodes/evm-genesis-funded.json || exit 1
+fi
 fundedSHA=$(shasum -a 256 test-nodes/evm-genesis-funded.json | cut -d' ' -f1)
 echo "funded genesis source sha256=$fundedSHA"
 # The funding edit replaces alloc, so finalize it again through U5a. That inserts the pinned
@@ -299,6 +302,7 @@ build/ubft engine-api genesis --shard-conf "test-nodes/shard-conf-${partitionID}
   --full-shard-conf "$fullShardConf" --registry-layout "$(registry_layout)" || { echo "finalized funded genesis failed" >&2; exit 1; }
 fi
 echo "finalized funded genesis sha256=$(shasum -a 256 "$chainSpec" | cut -d' ' -f1)"
+if [ "${P85_LANE:-0}" = 1 ]; then p85_assert_full_conf "$fullShardConf" || exit 1; fi
 fi
 if [ "${SIGNING:-local}" = authority ]; then
   # The full configuration is the one the root chain will certify, so enroll against it rather

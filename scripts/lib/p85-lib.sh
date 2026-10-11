@@ -28,7 +28,7 @@ p85_prepare_genesis() {
   [ -s test-nodes/trust-base.json ] && [ -s "test-nodes/shard-conf-${partitionID:-8}_0.json" ] || p85_die "run setup-evm-nodes.sh first" || return 1
   [ -n "${P85_CONTRACTS:-}" ] && [ -x "$P85_CONTRACTS/script/p85-genesis.sh" ] || p85_die "P85_CONTRACTS must name a unicity-pos-contracts checkout" || return 1
   command -v forge >/dev/null || p85_die "forge is not on PATH" || return 1
-  local conf=test-nodes/shard-conf-${partitionID:-8}_0.json chain
+  local conf=${P85_GENESIS_CONF:-test-nodes/shard-conf-${partitionID:-8}_0.json} chain
   chain=$(python3 -c "import json;print(json.load(open('$conf'))['partitionParams']['chain_id'])" 2>/dev/null) || chain=${chainID:-31337}
   mkdir -p "$P85_DIR"
   python3 scripts/p85-genesis-plan.py test-nodes/trust-base.json "$conf" "$P85_BOND_UNIT" "$P85_GENESIS_UNITS" >"$P85_DIR/plan.json" || return 1
@@ -42,6 +42,33 @@ p85_prepare_genesis() {
       script/p85-genesis.sh "$OLDPWD/$P85_DIR/contracts-genesis.json" "$OLDPWD/$P85_DIR/genesis" ) || return 1
   ( cd "$P85_CONTRACTS" && script/measure-elect.sh "${caps[0]}" "${caps[1]}" "${caps[2]}" ) >"$P85_DIR/elect-measurement.json" || p85_die "the election measurement failed" || return 1
   echo "p85: genesis prepared in $P85_DIR (assignment $(cat "$P85_DIR/genesis-assignment.txt"), measurement $(cat "$P85_DIR/elect-measurement.json"))"
+}
+
+# The custody genesis names the assignment hash of the genesis shard configuration over the genesis identity records. The roots derive the same hash
+# from the configuration they install: the FULL one (the base plus seal_registry_genesis), which `engine-api genesis` writes only after the funded
+# genesis exists. A hash taken from the base configuration is another assignment, and custody then does not know the one the root closes (P85
+# runs 25 and 26: the closure of epoch 1 reverted AssignmentNotActive in every block). So: finalize once without the P85 accounts, take the id
+# from that full configuration, prepare the contracts genesis with it, and (p85_assert_full_conf) check that the real genesis wrote the same file.
+p85_assignment_of() { # shard-conf -> the genesis assignment id of that configuration over the lane's identities
+  local d=$P85_DIR/reconcile; mkdir -p "$d"
+  build/ubft pos-relayer genesis --plan "$P85_DIR/plan.json" --trust-base test-nodes/trust-base.json --shard-conf "$1" \
+    --out-identities "$d/identities.json" --out-contracts "$d/contracts.json" 2>&1 | sed -n 's/^genesis assignment id //p'
+}
+p85_reconcile_genesis_assignment() { # the funded genesis source (without the P85 accounts)
+  local d=$P85_DIR/reconcile have want; mkdir -p "$d"
+  build/ubft engine-api genesis --shard-conf "test-nodes/shard-conf-${partitionID:-8}_0.json" --trust-base test-nodes/trust-base.json \
+    --b1-profile test-nodes/b1-profile.json --alloc-source "$1" --out "$d/genesis.json" --full-shard-conf "$d/full-shard-conf.json" \
+    --identities-out "$d/b1-identities.json" >/dev/null || p85_die "the reconciling finalization failed" || return 1
+  have=$(grep -o '0x[0-9a-fA-F]\{64\}' "$P85_DIR/genesis-assignment.txt" | head -1)
+  want=$(p85_assignment_of "$d/full-shard-conf.json")
+  [[ "$want" =~ ^0x[0-9a-f]{64}$ ]] || p85_die "no assignment id for the full configuration" || return 1
+  if [ "$have" = "$want" ]; then echo "p85: the genesis assignment $have is the full configuration's"; return 0; fi
+  echo "p85: the genesis assignment of the base configuration ($have) is not the installed full configuration's ($want): preparing the genesis again from the full configuration"
+  P85_GENESIS_CONF=$d/full-shard-conf.json p85_prepare_genesis || return 1
+  [ "$(grep -o '0x[0-9a-fA-F]\{64\}' "$P85_DIR/genesis-assignment.txt" | head -1)" = "$want" ] || p85_die "the prepared genesis does not carry $want" || return 1
+}
+p85_assert_full_conf() { # the full configuration the real genesis wrote must be the one the id was taken from
+  cmp -s "$1" "$P85_DIR/reconcile/full-shard-conf.json" || p85_die "the full shard configuration changed after the genesis assignment was fixed (the P85 accounts moved seal_registry_genesis?)" || return 1
 }
 
 p85_json() { python3 -c "import json,sys;print(json.load(open('$1'))$2)"; }
