@@ -29,6 +29,11 @@ export Q3_LANE_DEFINE_ONLY=1
 source scripts/q3-weight-activation-steps.sh
 unset Q3_LANE_DEFINE_ONLY
 source scripts/lib/q4-lib.sh
+# the joiner helpers of the H3/T6 lanes (h3_q3_trust_base, h3_q3_start_joiner, h3_q3_joiner_shard_restore, h3_q3_wait_joiner) for the turnover.
+# That library also defines the H3 flavour of q3_build_assignment (unit weights); the Q3 lane's weighted one stays the lane's.
+eval "$(declare -f q3_build_assignment | sed '1s/^q3_build_assignment/q4_q3_build_assignment_weighted/')"
+source scripts/lib/h3-q3-lib.sh
+eval "$(declare -f q4_q3_build_assignment_weighted | sed '1s/^q4_q3_build_assignment_weighted/q3_build_assignment/')"
 
 Q4_DIR=test-nodes/q4
 Q4_ROOTS=${Q4_ROOTS:-"1 2 3 4"}
@@ -47,7 +52,30 @@ q4_teardown() {
   return 0
 }
 q4_die() { echo "  FAIL: $*" >&2; q4_teardown; exit 1; }
-q4_step() { local name=$1; shift; Q4_CUR_STEP=$name; echo "--- Q4 step: $name"; "$@" || q4_die "$name"; q4_pass "$name"; }
+# Q4_DEV_RETRY=1 (development only, never evidence): a failed step does not tear the devnet down at once. The lane waits up to Q4_DEV_RETRY_SECONDS
+# (default 900) for test-nodes/q4/retry (re-source this file, so an edited step is picked up, and run the step again on the kept chain) or
+# test-nodes/q4/abort. The lane's own state survives the re-source. One lock slot then serves several fixes of the same step.
+q4_dev_retry() {
+  [ "${Q4_DEV_RETRY:-0}" = 1 ] || return 1
+  local i w=$Q3_WEIGHTS e=${Q4_EPOCH:-} hs=$Q4_HEAVY_ROOTS h=$Q4_HEAVY_ROOT hr=$H3_ROOTS qr=$Q4_ROOTS ents=${Q3_ENTITIES:-} dir=$Q4_DIR
+  echo "DEVELOPMENT (NOT EVIDENCE): step failed, devnet kept: touch $Q4_DIR/retry to re-source the steps and run it again, $Q4_DIR/abort to stop (${Q4_DEV_RETRY_SECONDS:-900}s)"
+  rm -f "${Q4_DIR:?}/retry" "${Q4_DIR:?}/abort"
+  for i in $(seq 1 "${Q4_DEV_RETRY_SECONDS:-900}"); do
+    [ ! -f "$Q4_DIR/abort" ] || return 1
+    if [ -f "$Q4_DIR/retry" ]; then
+      rm -f "${Q4_DIR:?}/retry"
+      Q4_LANE_DEFINE_ONLY=1 source scripts/q4-live-steps.sh || return 1
+      Q3_WEIGHTS=$w; Q4_EPOCH=$e; Q4_HEAVY_ROOTS=$hs; Q4_HEAVY_ROOT=$h; H3_ROOTS=$hr; Q4_ROOTS=$qr; Q4_DIR=$dir
+      if [ -n "$ents" ]; then Q3_ENTITIES=$ents; else unset Q3_ENTITIES; fi
+      echo "DEVELOPMENT: steps re-sourced; running the step again"
+      return 0
+    fi
+    sleep 1
+  done
+  echo "DEVELOPMENT: no retry within ${Q4_DEV_RETRY_SECONDS:-900}s" >&2
+  return 1
+}
+q4_step() { local name=$1; shift; Q4_CUR_STEP=$name; echo "--- Q4 step: $name"; until "$@"; do echo "  step failed: $name" >&2; q4_dev_retry || q4_die "$name"; done; q4_pass "$name"; }
 
 q4_round() { curl -fsS "http://127.0.0.1:$(m2_rpc_port "$1")/api/v1/roundInfo" | jq -r '.roundNumber'; }
 # the certified IR round of the EVM shard (partition 8): moves only when a block is certified, never by a timeout certificate alone
@@ -1068,5 +1096,27 @@ q4_run_lane() {
   q4_step "offline trace check: attempts have outcomes, equivocators are exactly the declared Byzantine roots" q4_row_trace_check
   echo "Q4 live lane: all steps PASSED"
   q4_teardown
+}
+# q4_unresolved <function>...: every command name a function body calls, transitively through the lane's own functions, that is neither a function,
+# a builtin nor a program on PATH. Read from `declare -f` (one command per line): the first word of each line and of each list or substitution.
+# Leading `NAME=value` words of a command are skipped (the command is the word after them).
+# The dry run uses it, so a helper that is not sourced is found without a devnet.
+q4_unresolved() {
+  local -a todo=("$@"); local seen=" " fn w
+  while [ "${#todo[@]}" -gt 0 ]; do
+    fn=${todo[0]}; todo=("${todo[@]:1}")
+    case "$seen" in *" $fn "*) continue ;; esac
+    seen+="$fn "
+    declare -F "$fn" >/dev/null || { echo "$fn"; continue; }
+    for w in $(declare -f "$fn" | sed '1,2d;$d' | awk "/<<'?PY'?/ {skip=1; print; next} /^PY\$/ {skip=0; next} !skip" \
+      | sed -E -e ':a' -e 's/(^[[:space:]]*|[;&|(][[:space:]]*|(^|[[:space:]])(if|then|do|else|elif|while|until|!)[[:space:]]+)[A-Za-z_][A-Za-z0-9_]*=("[^"]*"|\$\([^)]*\)|[^[:space:];|&]*)[[:space:]]+/\1/' -e 'ta' \
+      | grep -oE "(^[[:space:]]*|[;&|(][[:space:]]*|(^|[[:space:]])\\{[[:space:]]+|\\$\\([[:space:]]*|(^|[[:space:]])(if|then|else|elif|do|while|until|!)[[:space:]]+)[A-Za-z_][A-Za-z0-9_]*=?" \
+      | grep -v '=$' | grep -oE '[A-Za-z_][A-Za-z0-9_]*$' | grep -E '_' | grep -vE '^[A-Z0-9_]+$' | sort -u); do
+      case "$w" in *_*) ;; *) continue ;; esac
+      if declare -F "$w" >/dev/null; then todo+=("$w"); elif ! type -t "$w" >/dev/null 2>&1; then
+        case "$seen" in *" $w "*) ;; *) seen+="$w "; echo "$w (called by $fn)" ;; esac
+      fi
+    done
+  done
 }
 [ "${Q4_LANE_DEFINE_ONLY:-0}" = 1 ] || q4_run_lane

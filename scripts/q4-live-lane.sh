@@ -23,7 +23,7 @@ export Q4_SCENARIO=${Q4_SCENARIO:-A}
 export Q4_HEAVY_AT=${Q4_HEAVY_AT:-1}
 # Q4_TURNOVER=1 (scenario A, heavy at root 1): the second handoff A to B replaces coupled entity 4 by a new entity 5 (the design's identity turnover, F17) and
 # keeps the replaced root running as a removed validator (L5). Q4_DEV_SKIP_FAULT_ROWS=1 skips scenario A's fault rows before the handoff: development only.
-export Q4_TURNOVER=${Q4_TURNOVER:-0} Q4_DEV_SKIP_FAULT_ROWS=${Q4_DEV_SKIP_FAULT_ROWS:-0}
+export Q4_TURNOVER=${Q4_TURNOVER:-0} Q4_DEV_SKIP_FAULT_ROWS=${Q4_DEV_SKIP_FAULT_ROWS:-0} Q4_DEV_RETRY=${Q4_DEV_RETRY:-0}
 [ "$Q4_TURNOVER" != 1 ] || [ "$Q4_SCENARIO/$Q4_HEAVY_AT" = A/1 ] || { printf 'FAIL: Q4_TURNOVER=1 needs scenario A with the heavy at root 1\n' >&2; exit 1; }
 case "$Q4_SCENARIO/$Q4_HEAVY_AT" in A/[1-4] | B/1) ;; *) printf 'FAIL: Q4_SCENARIO must be A (Q4_HEAVY_AT 1..4) or B (Q4_HEAVY_AT 1)\n' >&2; exit 1 ;; esac
 Q4_RUN_TAG=$([ "$Q4_SCENARIO" = A ] || printf -- '-%s' "$Q4_SCENARIO")$([ "$Q4_HEAVY_AT" = 1 ] || printf -- '-A%s' "$Q4_HEAVY_AT")
@@ -58,6 +58,12 @@ if [ "$DRY_RUN" = 1 ]; then
   grep -o 'q4_step "[^"]*"' scripts/q4-live-steps.sh | sed 's/^q4_step /  /'
   echo "--- the weighted-epoch gate: Q4_WEIGHTED_CHECK=${Q4_WEIGHTED_CHECK:-q4_weighted_epoch_check} (a function of the Q3 flow library; its command, output and exit are kept in weighted-check.txt)"
   echo "--- self-tests"
+  # every command the lane's steps call resolves (a helper whose library is not sourced is found here, not on the devnet); the control proves the check sees one
+  missing=$(q4_unresolved q4_run_lane q4_handoff_ab q4_handoff_ab_turnover q4_removed_validator_follows q4_first_successor_held q4_b_in_effect q4_run_placement_rows q4_teardown q4_joiner_restore q4_dev_retry)
+  q4_resolver_control() { Q4_X=1 q4_no_such_helper_for_the_selftest 1 || return 1; }
+  if [ -n "$missing" ]; then echo "  unresolved commands in the lane's steps:"; echo "$missing" | sed 's/^/    /'; status=1
+  elif [ "$(q4_unresolved q4_resolver_control)" != "q4_no_such_helper_for_the_selftest (called by q4_resolver_control)" ]; then echo "  the resolver did not report its control"; status=1
+  else echo "  every command the lane's steps call resolves (control reported)"; fi
   d=$(mktemp -d); trap 'rm -rf "$d"' EXIT
   q4_selftest_docs "$d"
   [ "$(ls "$d"/*.json | wc -l)" -eq 5 ] && [ "$(ls "$d"/shard/*.json | wc -l)" -eq 2 ] || { echo "self-test: the control documents were not written" >&2; status=1; }
@@ -144,6 +150,7 @@ fi
 export URETH_BIN
 # the weighted-epoch gate is the Q3 flow library's function: any other command is a development override and the run is no evidence
 if [ -n "${Q4_WEIGHTED_CHECK:-}" ] && [ "$Q4_WEIGHTED_CHECK" != q4_weighted_epoch_check ]; then RUN_MODE="DEVELOPMENT OVERRIDE: weighted-epoch gate '$Q4_WEIGHTED_CHECK' replaces q4_weighted_epoch_check: NOT EVIDENCE"; fi
+[ "$Q4_DEV_RETRY" != 1 ] || RUN_MODE="DEVELOPMENT OVERRIDE: failed steps may be edited and re-run on the kept chain (Q4_DEV_RETRY=1): NOT EVIDENCE"
 [ "$Q4_DEV_SKIP_FAULT_ROWS" != 1 ] || RUN_MODE="DEVELOPMENT OVERRIDE: scenario A's fault rows before the handoff are skipped (Q4_DEV_SKIP_FAULT_ROWS=1): NOT EVIDENCE"
 printf 'Q4 run mode: %s\n' "$RUN_MODE" | tee "$EVIDENCE_DIR/run-mode.txt"
 [ "$Q4_TURNOVER" != 1 ] || echo "Q4 second handoff: identity turnover (entity 4 replaced by entity 5)" | tee -a "$EVIDENCE_DIR/run-mode.txt"
