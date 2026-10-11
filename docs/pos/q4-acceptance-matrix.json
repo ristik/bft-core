@@ -314,7 +314,7 @@
      "label": "REAL-PROCESS (rest)",
      "lane": "g2",
      "step": "G2 rollback: an executed EVM block is abandoned uncertified and a different block is certified on its parent; finalized never moves back, the transaction lands once",
-     "scope": "rollback to the finalized head on live pairs: every root holds the EVM shard's certification requests, so the block the leader sealed (carrying a paid transaction, verified VALID by all four execution clients) is not certified; while held every pair's latest and finalized stay at the parent; after the release a different block on the same parent is certified and all four pairs hold it; the abandoned block is canonical on none; the transaction has one receipt and the sender's nonce advances by one. Not a rollback below the finalized head (that is refused; Q3 pair controls). REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build (consensus shim and shard gate); scenario A weights 6,1,1,1"
+     "scope": "rollback to the finalized head on live pairs: every root holds the EVM shard's certification requests (requests only; the nodes' handshakes pass), so the block the leader sealed (carrying a paid transaction, verified VALID by all four execution clients) is not certified; while held every pair's latest and finalized stay at the parent; after the release a different block on the same parent is certified and all four pairs hold it; the abandoned block is canonical on none; the transaction has one receipt and the sender's nonce advances by one. Not a rollback below the finalized head (that is refused; Q3 pair controls). REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build (consensus shim and shard gate); scenario A weights 6,1,1,1"
     },
     {
      "kind": "lane-file",
@@ -339,6 +339,37 @@
       "\"problems\": []"
      ],
      "scope": "the judge's verdict, from the pairs' RPC samples and the shard nodes' logs (sealed, verified VALID, certificate admitted)"
+    },
+    {
+     "kind": "lane",
+     "label": "REAL-PROCESS (rest)",
+     "lane": "g2b",
+     "step": "B G2 rollback: an executed EVM block is abandoned uncertified and a different block is certified on its parent; finalized never moves back, the transaction lands once",
+     "scope": "rollback to the finalized head on live pairs: every root holds the EVM shard's certification requests (requests only; the nodes' handshakes pass), so the block the leader sealed (carrying a paid transaction, verified VALID by all four execution clients) is not certified; while held every pair's latest and finalized stay at the parent; after the release a different block on the same parent is certified and all four pairs hold it; the abandoned block is canonical on none; the transaction has one receipt and the sender's nonce advances by one. Not a rollback below the finalized head (that is refused; Q3 pair controls). REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build (consensus shim and shard gate); scenario B weights 3,3,2,1"
+    },
+    {
+     "kind": "lane-file",
+     "label": "REAL-PROCESS (rest)",
+     "lane": "g2b",
+     "path": "q4/g2-rollback/summary.txt",
+     "contains": [
+      "verified VALID by 4 of 4 pairs, certificate admitted by none",
+      "finalized never decreased",
+      "one receipt",
+      "4 pairs agree on the certified block",
+      "export identical root input, transitions and state"
+     ],
+     "scope": "the step's own record: parent, abandoned and certified blocks, the held samples, the transaction, the pair equality of two pairs for the certified block (scenario B run)"
+    },
+    {
+     "kind": "lane-file",
+     "label": "REAL-PROCESS (rest)",
+     "lane": "g2b",
+     "path": "q4/g2-rollback/verdict.json",
+     "contains": [
+      "\"problems\": []"
+     ],
+     "scope": "the judge's verdict, from the pairs' RPC samples and the shard nodes' logs (sealed, verified VALID, certificate admitted) (scenario B run)"
     }
    ]
   },
