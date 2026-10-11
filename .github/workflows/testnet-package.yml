@@ -25,9 +25,10 @@ jobs:
       - run: python3 -m unittest discover -s deploy/testnet/faucet -v
       - uses: actions/checkout@v4
         with:
-          ref: 446a78cbd6cd18b476f4f433571594b304f45b6e
+          ref: 48af5f61d1177922331d1dcdbb34f6adecf5e7ca
           path: pinned-bft
       - run: make -C pinned-bft build
+      - run: go build -C pinned-bft -o /tmp/tn-b1genesis ./scripts/b1genesis
       - run: go build -o /tmp/tn-keygen ./deploy/testnet/keygen
       - uses: actions/checkout@v4
         with:
@@ -41,6 +42,6 @@ jobs:
           workspaces: pinned-rugregator
       - run: cargo build --locked -p uni-aggregator --bin aggregator
         working-directory: pinned-rugregator
-      - run: python3 deploy/testnet/validate-generation.py --ubft pinned-bft/build/ubft --keygen /tmp/tn-keygen --check-prometheus --aggregator pinned-rugregator/target/debug/aggregator
+      - run: python3 deploy/testnet/validate-generation.py --ubft pinned-bft/build/ubft --keygen /tmp/tn-keygen --b1genesis /tmp/tn-b1genesis --check-prometheus --aggregator pinned-rugregator/target/debug/aggregator
       - run: docker build -f deploy/testnet/Dockerfile.rpc deploy/testnet -t testnet-rpc:test
       - run: docker run --rm --entrypoint python3 testnet-rpc:test -c 'import gateway; assert "eth_sign" not in gateway.PUBLIC'
