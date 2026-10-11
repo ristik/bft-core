@@ -5,6 +5,8 @@
               -> "<index> <kind> <progress> <ucTime> <data word 0> <data word 1>"
   assignment  stdin: the return of custody.assignments(bytes32) (the public getter: sixteen static words, the exposure list omitted)
               -> one line of JSON
+  result      stdin: the return of election.result(bytes32) (ten static words) -> one line of JSON
+  session     stdin: the return of custody.session(bytes32) (five static words) -> one line of JSON
   word        stdin: one ABI word (or a call that returns one) -> the integer
   selftest    exercises the decoders on hand-built encodings
 """
@@ -52,6 +54,17 @@ def assignment(hexstr):
     return json.dumps(out, sort_keys=True)
 
 
+RESULT_FIELDS = ["state", "reason", "attempt", "progress", "ucTime", "policyID", "origin", "predecessor", "assignmentID", "snapshotDigest"]
+SESSION_FIELDS = ["state", "assignmentID", "lineage", "attempt", "incumbentAssignmentID"]
+
+
+def fixed(hexstr, fields, hashes):
+    w = words(hexstr)
+    if len(w) != len(fields):
+        raise SystemExit("%d words, want %d" % (len(w), len(fields)))
+    return json.dumps({n: ("0x" + x) if n in hashes else num(x) for n, x in zip(fields, w)}, sort_keys=True)
+
+
 def selftest():
     def word(v):
         return "%064x" % v
@@ -64,6 +77,10 @@ def selftest():
     enc = "0x" + "".join(word(v) for v in vals)
     j = json.loads(assignment(enc))
     assert j["state"] == 2 and j["pClose"] == 140 and j["tClose"] == 1100 and j["closed"] == 1 and j["policyID"] == 3, j
+    r = json.loads(fixed("0x" + "".join(word(v) for v in [1, 0, 2, 900, 5000, 1, 7, 8, 9, 10]), RESULT_FIELDS, ("origin", "predecessor", "assignmentID", "snapshotDigest")))
+    assert r["state"] == 1 and r["attempt"] == 2 and r["progress"] == 900 and r["predecessor"].endswith("08"), r
+    sess = json.loads(fixed("0x" + "".join(word(v) for v in [4, 1, 2, 3, 4]), SESSION_FIELDS, ("assignmentID", "lineage", "incumbentAssignmentID")))
+    assert sess["state"] == 4 and sess["attempt"] == 3, sess
     for bad in ("0x", "0x12"):
         try:
             record(bad)
@@ -81,6 +98,10 @@ if __name__ == "__main__":
         print(record(sys.stdin.read()))
     elif cmd == "assignment":
         print(assignment(sys.stdin.read()))
+    elif cmd == "result":
+        print(fixed(sys.stdin.read(), RESULT_FIELDS, ("origin", "predecessor", "assignmentID", "snapshotDigest")))
+    elif cmd == "session":
+        print(fixed(sys.stdin.read(), SESSION_FIELDS, ("assignmentID", "lineage", "incumbentAssignmentID")))
     elif cmd == "word":
         print(num(words(sys.stdin.read())[0]))
     else:

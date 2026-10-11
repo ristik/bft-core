@@ -38,7 +38,12 @@ p85_step_die() {
   q3_teardown
   exit 1
 }
-p85_step() { local name=$1; shift; echo "--- P85 step: $name"; "$@" || p85_step_die "$name"; p85_pass "$name"; }
+p85_step() {
+  local name=$1; shift; echo "--- P85 step: $name"
+  "$@" || { p85_view "$name:failed" || true; p85_step_die "$name"; }
+  p85_view "$name" || true   # the election/custody view at the end of every step, kept with the run (reth state is not)
+  p85_pass "$name"
+}
 
 # ---- chain reads (cast) -------------------------------------------------------------------------------------------------------------------------
 P85_DEPLOY=$P85_DIR/pos-deployment.json
@@ -371,6 +376,32 @@ p85_recovery_attempt_loop() {
   p85_paid 3 || { echo "post-recovery paid transaction was not certified at root epoch 3" >&2; return 1; }
 }
 
+# One JSON line per call into $H3_DIR/views.jsonl: the election and custody state a later offline reading needs (the execution clients' databases are not
+# kept). Best-effort: a dead devnet leaves a line with the error, never a failed step.
+p85_view() { # label
+  local open=null res=null sess=null r thr
+  r=$(cat "$H3_DIR/result-id.txt" 2>/dev/null)
+  python3 - "$1" "$(date -u +%FT%TZ)" "$(p85_open_result 2>&1 | tail -n1)" "$(p85_call "$(p85_election)" 'attemptCursor()(uint64)' 2>&1 | awk '{print $1}')" \
+    "$(p85_last_acked 2>&1 | tail -n1)" "$(p85_cursor 2>&1 | tail -n1)" "$(p85_log_count 2>&1 | tail -n1)" "$(p85_log_target 2>&1 | tail -n1)" \
+    "$(p85_call "$(p85_election)" 'thresholds()(uint256,uint256)' 2>&1 | tr '\n' ' ')" \
+    "$(p85_call "$(p85_registry)" 'progress()(uint64)' 2>&1 | awk '{print $1}')" "$(p85_call "$(p85_registry)" 'ucTime()(uint64)' 2>&1 | awk '{print $1}')" \
+    "$([ -n "$r" ] && p85_call "$(p85_election)" 'result(bytes32)' "$r" 2>/dev/null | p85_dec result 2>&1)" \
+    "$([ -n "$r" ] && p85_call "$(p85_custody)" 'session(bytes32)' "$r" 2>/dev/null | p85_dec session 2>&1)" \
+    "$(o=$(p85_open_result 2>/dev/null); if [ -n "$o" ] && [ "$o" != 0x0000000000000000000000000000000000000000000000000000000000000000 ]; then p85_call "$(p85_election)" 'result(bytes32)' "$o" 2>/dev/null | p85_dec result 2>&1; fi)" \
+    >>"$H3_DIR/views.jsonl" <<'PY'
+import json, sys
+keys = ["label", "time", "openResult", "attemptCursor", "lastAcked", "custodyCursor", "recordCount", "recordTarget", "thresholds", "registryProgress",
+        "registryUcTime", "resultView", "sessionView", "openResultView"]
+row = dict(zip(keys, sys.argv[1:]))
+for k in ("resultView", "sessionView", "openResultView"):
+    try:
+        row[k] = json.loads(row[k]) if row.get(k) else None
+    except ValueError:
+        pass
+print(json.dumps(row, sort_keys=True))
+PY
+}
+
 # ---- read-only chain state (the decoders are scripts/p85/chain_decode.py; no state is written) -----------------------------------------------
 p85_registry() { jq -r .registry "$P85_DEPLOY"; }
 p85_dec() { python3 -I scripts/p85/chain_decode.py "$@"; }
@@ -412,12 +443,42 @@ p85_resolved() {
   local r i log; r=$(cat "$H3_DIR/result-id.txt"); log="$H3_DIR/registry-log.txt"
   for i in $(seq 1 180); do [ "$(p85_result_state "$r")" = 4 ] && break; sleep 1; done
   [ "$(p85_result_state "$r")" = 4 ] || { echo "the result is in state $(p85_result_state "$r"), not Recovered" >&2; p85_stuck_report; return 1; }
-  # this result is resolved. A LATER election may already be open: the hook's boundary was gated while this result was unresolved and is due the
-  # moment it resolves, so a different open result is legitimate (its id is recorded); the resolved result itself must not be the open one.
+  # The resolved result is no longer the open one. The election's boundary is gated while a result is unresolved and its thresholds are measured
+  # from the last attempt (recovery moves no anchor), so a LATER election may open right after the resolution: that is accepted only when it is
+  # positively one (Reserved, a strictly later attempt than the resolved result's, started from K, at a progress and UC time not before the
+  # RecoveryAck's anchors). Anything else is a finding.
   local open; open=$(p85_open_result) || return 1
   [ "$open" != "$r" ] || { echo "the resolved result $r is still the open one" >&2; return 1; }
-  echo "open result after the resolution: $open ($([ "$open" = 0x0000000000000000000000000000000000000000000000000000000000000000 ] && echo none || echo "a later election"))"
   echo "$open" >"$H3_DIR/open-result-after-resolution.txt"
+  if [ "$open" = 0x0000000000000000000000000000000000000000000000000000000000000000 ]; then
+    echo "open result after the resolution: none"
+  else
+    p85_log_dump >"$H3_DIR/registry-log.txt" || return 1
+    p85_scenario_ids "$H3_DIR/registry-log.txt" || return 1
+    local ack_anchor; ack_anchor=$(awk -v r="$r" '$2==3 && tolower($5)==tolower(r){print $3, $4}' "$H3_DIR/registry-log.txt")
+    local old new; old=$(p85_call "$(p85_election)" 'result(bytes32)' "$r" | p85_dec result) || return 1
+    new=$(p85_call "$(p85_election)" 'result(bytes32)' "$open" | p85_dec result) || return 1
+    echo "$new" >"$H3_DIR/open-result-after-resolution.json"
+    python3 - "$old" "$new" "$ack_anchor" "$P85_K" "$(p85_call "$(p85_election)" 'attemptCursor()(uint64)' | awk '{print $1}')" <<'PY' || return 1
+import json, sys
+old, new = json.loads(sys.argv[1]), json.loads(sys.argv[2])
+ack_p, ack_t = (int(x) for x in sys.argv[3].split())
+k, cursor = sys.argv[4].lower(), int(sys.argv[5])
+checks = [
+    (new["state"] == 1, "the open result is not Reserved: state %d" % new["state"]),
+    (new["attempt"] > old["attempt"], "attempt %d is not after the resolved result's %d" % (new["attempt"], old["attempt"])),
+    (new["attempt"] == cursor, "attempt %d is not the election's attempt cursor %d" % (new["attempt"], cursor)),
+    (new["predecessor"].lower() == k, "it does not start from K (%s), but from %s" % (k, new["predecessor"])),
+    (new["progress"] >= ack_p and new["ucTime"] >= ack_t, "it was opened at (%d,%d), before the RecoveryAck's anchors (%d,%d)" % (new["progress"], new["ucTime"], ack_p, ack_t)),
+    (new["assignmentID"] != old["assignmentID"], "it names the resolved result's assignment"),
+]
+bad = [m for ok, m in checks if not ok]
+if bad:
+    sys.exit("the open result after the resolution is not a later election: " + "; ".join(bad))
+print("open result after the resolution: a later election, attempt %d (resolved %d), opened at (%d,%d) from K, RecoveryAck at (%d,%d)" %
+      (new["attempt"], old["attempt"], new["progress"], new["ucTime"], ack_p, ack_t))
+PY
+  fi
   p85_last_acked >"$H3_DIR/last-acked-after-recovery.txt"
   # the root order the pending path exists for: both closures strictly before the RecoveryAck of this result
   p85_log_dump >"$log" || return 1
