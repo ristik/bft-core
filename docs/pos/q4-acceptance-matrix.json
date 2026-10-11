@@ -205,8 +205,8 @@
    "gaps": [
     {
      "label": "REAL-PROCESS (native UC check)",
-     "reason": "'Native UC cryptographic verification where used' is not separately evidenced here: the design does not name the component it refers to (the shard node's own UC check under the weighted trust base, or a check inside the execution client), and no lane step is aimed at it. The rollback half of this gap is evidenced by the G2 rollback step below (rollback to the finalized head) and by the Q3 pair controls (a build below the finalized head is refused: the unchanged rebuild passes the pair gate and the engine answers 'Too deep reorg', which the tool reports as acceptance of the gate, not of a built payload). A pair never un-commits: a block is made canonical and final in one step, only with its UC.",
-     "blockedBy": "a decision on what 'native UC cryptographic verification' refers to"
+     "reason": "'Native UC cryptographic verification where used' is not evidenced here. Working reading (owner question Q6, 2026-10-11, not yet confirmed by the owner): it is the B1 precompile (0x0100, UC_V1) verifying a real Unicity Certificate inside the execution client on a live devnet, which the B3 two-shard live lane exercises. No Q4 lane step is aimed at it; the gap closes by citing a passing evidence-grade B3 live lane run, which does not exist yet. The rollback half of this gap is evidenced by the G2 rollback step below (rollback to the finalized head) and by the Q3 pair controls (a build below the finalized head is refused: the unchanged rebuild passes the pair gate and the engine answers 'Too deep reorg', which the tool reports as acceptance of the gate, not of a built payload). A pair never un-commits: a block is made canonical and final in one step, only with its UC.",
+     "blockedBy": "a passing evidence-grade B3 two-shard live lane run (B1 0x0100 UC_V1 verification live); owner question Q6"
     }
    ],
    "evidence": [

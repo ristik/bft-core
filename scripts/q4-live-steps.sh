@@ -488,12 +488,13 @@ q4_g2_sample() { # phase t0: one line of every pair's latest and finalized block
   python3 scripts/q4-g2-rollback.py heads $(q4_g2_urls) | jq -c --arg p "$1" --arg e "$(q4_dt "$(q4_t)" "$2")" '{phase: $p, elapsed_s: ($e | tonumber), pairs: .}' >>"$Q4_DIR/g2-rollback/samples.jsonl"
 }
 q4_row_g2_rollback() {
-  local dir=$Q4_DIR/g2-rollback rule=g2hold$Q4_EPOCH observer=$Q4_HEAVY_ROOT i t0 logs=() urls=() head parent height sender nonce tx sent kids n=0 pair
+  local dir=$Q4_DIR/g2-rollback rule=g2hold$Q4_EPOCH observer=$Q4_HEAVY_ROOT i t0 logs=() urls=() head parent height sender nonce tx sent kids n=0 carried=0 pair
   rm -rf "$dir"; mkdir -p "$dir"
+  # the log marks are taken before the hold, so every block sealed on the parent during the settle below is listed
+  for i in 1 2 3 4; do logs+=("test-nodes/evm$i/debug.log:$(wc -l <"test-nodes/evm$i/debug.log" | tr -d ' ')"); urls+=(--url "http://127.0.0.1:$((rethEthBase + i - 1))"); done
   q4_shard_hold "$rule" "$Q4_ROOTS" in 8 || return 1
   sleep 3   # requests already past the gate are answered; from here nothing the shard builds can be certified
   t0=$(q4_t)
-  for i in 1 2 3 4; do logs+=("test-nodes/evm$i/debug.log:$(wc -l <"test-nodes/evm$i/debug.log" | tr -d ' ')"); urls+=(--url "http://127.0.0.1:$((rethEthBase + i - 1))"); done
   head=$(python3 scripts/q4-g2-rollback.py heads $(q4_g2_urls)) || return 1
   [ "$(printf '%s' "$head" | jq -r '[.[] | .latest.hash, .finalized.hash] | unique | length')" = 1 ] || { echo "the pairs do not agree on one finalized head under the hold: $head" >&2; return 1; }
   parent=$(printf '%s' "$head" | jq -r '.[0].latest.hash'); height=$(( $(printf '%s' "$head" | jq -r '.[0].latest.number') + 1 ))
@@ -511,10 +512,12 @@ q4_row_g2_rollback() {
     q4_g2_sample held "$t0" || return 1
     kids=$(python3 scripts/q4-g2-rollback.py children --parent "$parent" "${logs[@]}") || return 1
     n=$(printf '%s' "$kids" | jq 'length')
-    [ "$n" -ge 2 ] && [ "$(printf '%s' "$kids" | jq '[.[:-1][] | select(.userTransactions >= 1 and (.verifiedValidBy | length) == 4)] | length')" -ge 1 ] && break
+    carried=$(printf '%s' "$kids" | jq '[.[:-1][] | select(.userTransactions >= 1 and (.verifiedValidBy | length) == 4)] | length')
+    [ "$n" -ge 2 ] && [ "$carried" -ge 1 ] && break
     sleep 1
   done
   [ "$n" -ge 2 ] || { echo "only $n block(s) sealed on the parent within ${Q4_RECOVER_SECONDS}s of the hold" >&2; return 1; }
+  [ "$carried" -ge 1 ] || { echo "$n blocks sealed on the parent within ${Q4_RECOVER_SECONDS}s of the hold, but none before the last carries the transaction and was verified VALID by all four pairs" >&2; return 1; }
   q4_root_advance "$observer" "$Q4_RECOVER_SECONDS" 1 || return 1   # the roots keep their quorum throughout
   q4_g2_sample held "$t0" || return 1
   q4_shard_release "$rule" "$Q4_ROOTS" in || return 1

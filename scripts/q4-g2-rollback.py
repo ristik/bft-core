@@ -201,7 +201,8 @@ def judge(a):
     print(f"while held ({len(held)} samples) every pair's latest and finalized stayed {height - 1}; finalized never decreased over {len(samples)} samples")
     if receipts:
         n, h, st = sorted(receipts)[0]
-        print(f"transaction {a.tx}: one receipt, block {n} {h}, status {st}; sender nonce {a.nonce} -> {a.nonce + 1} on every pair")
+        where = "the block certified on the parent" if h == certified_hash else "a later certified block, not the one certified on the parent"
+        print(f"transaction {a.tx}: one receipt, block {n} {h} ({where}), status {st}; sender nonce {a.nonce} -> {a.nonce + 1} on every pair")
     for p in problems:
         print("PROBLEM: " + p, file=sys.stderr)
     if not problems:
