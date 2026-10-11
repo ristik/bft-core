@@ -701,6 +701,12 @@ func (x *ConsensusManager) onLocalTimeout(ctx context.Context) {
 				x.id.String(),
 				x.pacemaker.LastRoundTC())
 			if err := x.safety.SignTimeout(timeoutVoteMsg, x.pacemaker.LastRoundTC()); err != nil {
+				if errors.Is(err, ErrNotAMember) {
+					// a follower (a joiner root before its activation, a removed one after it) signs nothing and its timer fires every round
+					// time: that is its state, not a failure (#550), so it is a debug line
+					x.log.DebugContext(ctx, "follower: no timeout vote, this root is not a member of the epoch's committee", logger.Error(err))
+					return
+				}
 				x.log.WarnContext(ctx, "failed to sign timeout", logger.Error(err))
 				return
 			}
