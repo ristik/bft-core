@@ -10,8 +10,8 @@ EVIDENCE_DIR=${T6_EVIDENCE_DIR:-$AGRE_ROOT/briefs/devnet-runs/t6-rehearsal-$(dat
 T6_BFT_COMMIT=${T6_BFT_COMMIT:-$(git -C "$SOURCE_ROOT" rev-parse HEAD)}
 T6_BFT_REMOTE=${T6_BFT_REMOTE:-$(git -C "$SOURCE_ROOT" remote get-url origin)}
 T6_BFT_REF=${T6_BFT_REF:-t6/rehearsal-harness}
-# the Ureth carrying the fresh-B1 profile (the one the H3, M2 and F8 lanes run)
-T6_URETH_COMMIT=${T6_URETH_COMMIT:-9623b82748ad02ea4038d3d1ce7391f1cfe1c856}
+# the Ureth the run is pinned to: 47f5146b (briefs/builds/ureth-47f5146b/), a descendant of the 9623b827 the H3, M2 and F8 lanes ran; an ATTESTED build of the pin is accepted (T6_URETH_ATTESTED)
+T6_URETH_COMMIT=${T6_URETH_COMMIT:-47f5146b59c01e2180aa66b250ec87330231658d}
 T6_URETH_REMOTE=${T6_URETH_REMOTE:-https://github.com/ristik/ureth.git}
 T6_CONTRACTS_COMMIT=${T6_CONTRACTS_COMMIT:-e7eb3216549b772a9e1df2b1214976d7dd9e6e62}
 # The four allocation contracts are rebuilt from their e7eb3216 source commit. The registry is not: the fresh-B1 registry (layout 3) is generated in code
@@ -27,6 +27,7 @@ t6_preflight() {
   command -v sha256sum >/dev/null 2>&1 || command -v shasum >/dev/null 2>&1 || missing+=("sha256sum|shasum")
   [ -x "$LOCK_SCRIPT" ] || missing+=("$LOCK_SCRIPT")
   [ -z "${T6_URETH_BIN:-}" ] || [ -x "$T6_URETH_BIN" ] || missing+=("T6_URETH_BIN=$T6_URETH_BIN")
+  [ -z "${T6_URETH_ATTESTED:-}" ] || [ -x "$T6_URETH_ATTESTED" ] || missing+=("T6_URETH_ATTESTED=$T6_URETH_ATTESTED")
   for c in cli/ubft scripts/f7-mintproof-extract scripts/f7-mintproof-verify scripts/evmtx scripts/b1genesis; do
     [ -d "$SOURCE_ROOT/$c" ] || missing+=("source $c")
   done
@@ -58,6 +59,12 @@ FAILURE=0
 # checked against the pin but skips the cold build, and marks the run as NOT EVIDENCE everywhere it is recorded.
 T6_RUN_MODE="clean build (evidence run)"
 if [ -n "${T6_URETH_BIN:-}" ]; then T6_RUN_MODE="DEVELOPMENT OVERRIDE: prebuilt Ureth ${T6_URETH_BIN}: NOT EVIDENCE"; fi
+# An ATTESTED prebuilt Ureth is evidence-grade: T6_URETH_ATTESTED (the binary), T6_URETH_ATTESTED_SHA256 (its expected digest) and T6_URETH_ATTESTED_PROVENANCE
+# (a briefs/builds/ureth-<commit>/ directory whose commit.txt is the pin and whose sha256.txt names the same digest) must all agree with the file and the pin.
+if [ -n "${T6_URETH_ATTESTED:-}" ]; then
+  [ -z "${T6_URETH_BIN:-}" ] || { echo "FAIL: T6_URETH_ATTESTED and T6_URETH_BIN are exclusive" >&2; exit 1; }
+  T6_RUN_MODE="attested prebuilt Ureth ${T6_URETH_ATTESTED} sha256=${T6_URETH_ATTESTED_SHA256:-?} (provenance ${T6_URETH_ATTESTED_PROVENANCE:-?}); everything else from a clean build (evidence run)"
+fi
 printf 'T6 run mode: %s\n' "$T6_RUN_MODE" | tee "$EVIDENCE_DIR/run-mode.txt"
 
 pass() { printf 'PASS: %s\n' "$*"; }
@@ -225,6 +232,25 @@ build_pinned_contracts() {
 build_pinned_ureth() {
   cd "$FRESH_REPO"
   local pathBeforeCargo=$PATH rustupBin
+  if [ -n "${T6_URETH_ATTESTED:-}" ]; then
+    # an attested build: the digest the operator supplied, the one the provenance records and the file's own must be one, and the provenance names the pin
+    local want=${T6_URETH_ATTESTED_SHA256:?T6_URETH_ATTESTED_SHA256 is required} prov=${T6_URETH_ATTESTED_PROVENANCE:?T6_URETH_ATTESTED_PROVENANCE is required}
+    [ -x "$T6_URETH_ATTESTED" ] || { fail "T6_URETH_ATTESTED=$T6_URETH_ATTESTED is not an executable file"; return 1; }
+    [ "$(sha256 "$T6_URETH_ATTESTED")" = "$want" ] || { fail "the attested Ureth's sha256 is not $want"; return 1; }
+    [ "$(tr -d '[:space:]' <"$prov/commit.txt")" = "$T6_URETH_COMMIT" ] || { fail "the provenance $prov does not name the pinned commit $T6_URETH_COMMIT"; return 1; }
+    grep -q "^$want " "$prov/sha256.txt" || { fail "the provenance $prov does not record sha256 $want"; return 1; }
+    . scripts/lib/reth-pin.sh
+    urethPinVerifyBinary "$T6_URETH_ATTESTED" "$T6_URETH_COMMIT" || { fail "the attested Ureth does not report the pinned commit $T6_URETH_COMMIT"; return 1; }
+    cp "$T6_URETH_ATTESTED" "$ISOLATION_ROOT/bin/unicity-reth"
+    URETH_BIN=$ISOLATION_ROOT/bin/unicity-reth
+    export URETH_BIN
+    printf 'ureth commit=%s\nureth binary=%s\nureth binary sha256=%s\nureth provenance=%s\n' "$T6_URETH_COMMIT" "$URETH_BIN" "$(sha256 "$URETH_BIN")" "$prov" >>"$EVIDENCE_DIR/source-pin.txt"
+    "$URETH_BIN" --version >"$EVIDENCE_DIR/ureth-version.txt" 2>&1
+    cp "$prov"/*.txt "$EVIDENCE_DIR/" 2>/dev/null || true
+    { go version; rustc --version 2>&1 || true; cargo --version 2>&1 || true; } >"$EVIDENCE_DIR/compiler-toolchains.txt"
+    printf 'RUN MODE: %s\n' "$T6_RUN_MODE" >>"$EVIDENCE_DIR/source-pin.txt"
+    return 0
+  fi
   if [ -n "${T6_URETH_BIN:-}" ]; then
     # DEVELOPMENT iterations only: a prebuilt binary whose reported commit equals the pin replaces the cold build. It is verified, never trusted,
     # and the run is recorded as NOT EVIDENCE (run-mode.txt, source-pin.txt, run-summary.md).
