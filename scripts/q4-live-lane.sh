@@ -21,6 +21,10 @@ LOCK_SCRIPT=$AGRE_ROOT/briefs/devnet-lock.sh
 export Q4_SCENARIO=${Q4_SCENARIO:-A}
 # Q4_HEAVY_AT=2..4 (scenario A): the weight-6 identity on root k, a placement run with the placement rows only (F1's other heavy placements)
 export Q4_HEAVY_AT=${Q4_HEAVY_AT:-1}
+# Q4_TURNOVER=1 (scenario A, heavy at root 1): the second handoff A to B replaces coupled entity 4 by a new entity 5 (the design's identity turnover, F17) and
+# keeps the replaced root running as a removed validator (L5). Q4_DEV_SKIP_FAULT_ROWS=1 skips scenario A's fault rows before the handoff: development only.
+export Q4_TURNOVER=${Q4_TURNOVER:-0} Q4_DEV_SKIP_FAULT_ROWS=${Q4_DEV_SKIP_FAULT_ROWS:-0}
+[ "$Q4_TURNOVER" != 1 ] || [ "$Q4_SCENARIO/$Q4_HEAVY_AT" = A/1 ] || { printf 'FAIL: Q4_TURNOVER=1 needs scenario A with the heavy at root 1\n' >&2; exit 1; }
 case "$Q4_SCENARIO/$Q4_HEAVY_AT" in A/[1-4] | B/1) ;; *) printf 'FAIL: Q4_SCENARIO must be A (Q4_HEAVY_AT 1..4) or B (Q4_HEAVY_AT 1)\n' >&2; exit 1 ;; esac
 Q4_RUN_TAG=$([ "$Q4_SCENARIO" = A ] || printf -- '-%s' "$Q4_SCENARIO")$([ "$Q4_HEAVY_AT" = 1 ] || printf -- '-A%s' "$Q4_HEAVY_AT")
 EVIDENCE_DIR=${Q4_EVIDENCE_DIR:-$AGRE_ROOT/briefs/devnet-runs/q4-live$Q4_RUN_TAG-$(date -u +%Y%m%dT%H%M%SZ)}
@@ -140,7 +144,9 @@ fi
 export URETH_BIN
 # the weighted-epoch gate is the Q3 flow library's function: any other command is a development override and the run is no evidence
 if [ -n "${Q4_WEIGHTED_CHECK:-}" ] && [ "$Q4_WEIGHTED_CHECK" != q4_weighted_epoch_check ]; then RUN_MODE="DEVELOPMENT OVERRIDE: weighted-epoch gate '$Q4_WEIGHTED_CHECK' replaces q4_weighted_epoch_check: NOT EVIDENCE"; fi
+[ "$Q4_DEV_SKIP_FAULT_ROWS" != 1 ] || RUN_MODE="DEVELOPMENT OVERRIDE: scenario A's fault rows before the handoff are skipped (Q4_DEV_SKIP_FAULT_ROWS=1): NOT EVIDENCE"
 printf 'Q4 run mode: %s\n' "$RUN_MODE" | tee "$EVIDENCE_DIR/run-mode.txt"
+[ "$Q4_TURNOVER" != 1 ] || echo "Q4 second handoff: identity turnover (entity 4 replaced by entity 5)" | tee -a "$EVIDENCE_DIR/run-mode.txt"
 
 PINS=$EVIDENCE_DIR/pins.txt
 {
