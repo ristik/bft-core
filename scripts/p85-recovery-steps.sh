@@ -179,11 +179,24 @@ p85_election_clock() {
     "liveCount=$(p85_live_count)"
 }
 
+# every root and EVM validator this run started is still alive: a lane step that waits (the election's cadence, the joiner's restore) must fail at once,
+# naming the process, when the devnet was stopped under it, not spend its whole timeout on a dead chain (run 18: killed by someone else 2 min in)
+p85_devnet_alive() {
+  local f i pid dead=0
+  for f in test-nodes/root1/pid test-nodes/root2/pid test-nodes/root3/pid test-nodes/root4/pid test-nodes/evm1/pid test-nodes/evm2/pid test-nodes/evm3/pid test-nodes/evm4/pid; do
+    [ -f "$f" ] || continue
+    pid=$(cat "$f" 2>/dev/null)
+    kill -0 "$pid" 2>/dev/null || { echo "the devnet was stopped under the lane: $f (pid $pid) is gone; last log line: $(grep -a . "$(dirname "$f")/debug.log" | tail -1 | cut -c1-200)" >&2; dead=1; }
+  done
+  return $dead
+}
+
 p85_election_reserved() {
   local i r
   for i in $(seq 1 600); do
     r=$(p85_open_result); [ "$r" != "0x0000000000000000000000000000000000000000000000000000000000000000" ] && break
     [ $((i % 60)) -ne 1 ] || p85_election_clock
+    [ $((i % 10)) -ne 0 ] || p85_devnet_alive || return 1
     sleep 1
   done
   [ "$r" != "0x0000000000000000000000000000000000000000000000000000000000000000" ] || p85_election_clock >&2
