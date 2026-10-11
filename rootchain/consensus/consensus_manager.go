@@ -1504,22 +1504,26 @@ func (x *ConsensusManager) processNewRoundEvent(ctx context.Context) {
 			}
 		}
 	}
-	if profile == storage.ProfileHandoff && !oldSuffix && parentQC != nil {
+	var parentAnchor *drctypes.EpochAnchor
+	if x.epochAnchor != nil && parentQC == nil {
+		parentAnchor = x.epochAnchor
+	}
+	// the parent of the epoch's first block is its anchor, which has no QC: the closure duty starts exactly there
+	var parentRound uint64
+	switch {
+	case parentAnchor != nil:
+		parentRound = parentAnchor.Slot
+	case parentQC != nil:
+		parentRound = parentQC.GetRound()
+	}
+	if profile == storage.ProfileHandoff && !oldSuffix && (parentQC != nil || parentAnchor != nil) {
 		// a closed epoch's CloseLiability is mandatory in the first ordinary block after its freeze, and in every block until it is in
-		closures, err := x.blockStore.ClosureControls(parentQC.GetRound(), x.trustBase.Load().Epoch, round)
+		closures, err := x.blockStore.ClosureControls(parentRound, x.trustBase.Load().Epoch, round)
 		if err != nil {
 			x.log.WarnContext(ctx, "cannot build the mandatory closure of the proposal", logger.Error(err))
 			return
 		}
 		payload.PosControls = append(closures, payload.PosControls...)
-	}
-	var parentAnchor *drctypes.EpochAnchor
-	if x.epochAnchor != nil && parentQC == nil {
-		parentAnchor = x.epochAnchor
-	}
-	parentRound := parentQC.GetRound()
-	if parentAnchor != nil {
-		parentRound = parentAnchor.Slot
 	}
 	parent, err := x.blockStore.Block(parentRound)
 	if err != nil {
