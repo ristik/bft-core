@@ -27,6 +27,25 @@ case "$reported" in *[!0-9a-f]*|"") fail "M2_URETH_BIN reports no commit" ;; esa
 M2_URETH_COMMIT=$reported
 export M2_URETH_COMMIT URETH_PIN_COMMIT=$reported
 
+# An evidence run names its attested binary: the provenance directory (commit.txt, sha256.txt) must record this very commit and this very binary, and the
+# checkout must be clean with build/ubft built from its HEAD. Checked here, before the lock. P85_DEV_RUN=1 is a development run: it skips them and says so.
+if [ "${P85_DEV_RUN:-0}" = 1 ]; then
+  RUN_MODE="DEVELOPMENT RUN, NOT EVIDENCE: the binary and the checkout are not verified against a provenance record (P85_DEV_RUN=1)"
+else
+  PROVENANCE=${M2_URETH_ATTESTED_PROVENANCE:-$AGRE_ROOT/briefs/builds/ureth-${M2_URETH_COMMIT:0:8}}
+  [ -s "$PROVENANCE/sha256.txt" ] && [ -s "$PROVENANCE/commit.txt" ] || fail "no attested provenance at $PROVENANCE (commit.txt, sha256.txt): set M2_URETH_ATTESTED_PROVENANCE, or P85_DEV_RUN=1 for a development run"
+  [ "$(tr -d '[:space:]' <"$PROVENANCE/commit.txt")" = "$M2_URETH_COMMIT" ] || fail "the provenance commit.txt is not $M2_URETH_COMMIT"
+  attested=$(awk '{print $1; exit}' "$PROVENANCE/sha256.txt")
+  got=$(shasum -a 256 "$M2_URETH_BIN" | cut -d' ' -f1)
+  [ "$got" = "$attested" ] || fail "M2_URETH_BIN sha256 $got is not the attested $attested (provenance $PROVENANCE)"
+  [ -z "$(git -C "$REPO_ROOT" status --porcelain --untracked-files=no)" ] || fail "the checkout has uncommitted changes: an evidence run needs a clean one"
+  [ -x "$REPO_ROOT/build/ubft" ] || fail "build/ubft is missing (make build)"
+  head=$(git -C "$REPO_ROOT" rev-parse HEAD)
+  go version -m "$REPO_ROOT/build/ubft" | grep -q "vcs.revision=$head" || fail "build/ubft is not built from HEAD $head (make build)"
+  ! go version -m "$REPO_ROOT/build/ubft" | grep -q 'vcs.modified=true' || fail "build/ubft was built from a modified tree"
+  RUN_MODE="RUN MODE: evidence run: attested prebuilt Ureth $M2_URETH_BIN sha256=$got commit=$M2_URETH_COMMIT (provenance $PROVENANCE); everything else from this checkout at $head"
+fi
+
 if [ "${P85_LANE_LOCKED:-0}" != 1 ]; then
   [ -x "$LOCK_SCRIPT" ] || fail "devnet lock helper is missing at $LOCK_SCRIPT"
   exec "$LOCK_SCRIPT" "p85-recovery" env P85_LANE_LOCKED=1 P85_EVIDENCE_DIR="$EVIDENCE_DIR" "$0" "$@"
@@ -37,6 +56,9 @@ pass "devnet lock acquired by the queued runner; evidence directory $EVIDENCE_DI
 # the pids of this run (the lock wrapper that holds the lock, and this runner): scripts/p85-stop.sh stops THIS run from them, never by a name pattern
 printf '%s %s\n' "$PPID" "$$" >"$EVIDENCE_DIR/.runner-pids"
 [ -x build/ubft ] || fail "build/ubft is missing (make build)"
+echo "$RUN_MODE" | tee "$EVIDENCE_DIR/run-mode.txt"
+[ -z "${PROVENANCE:-}" ] || cp -R "$PROVENANCE" "$EVIDENCE_DIR/ureth-provenance"
+{ date -u +%FT%TZ; pmset -g log 2>/dev/null; } | gzip >"$EVIDENCE_DIR/pmset-before.log.gz" || true
 echo "bft-core head=$(git rev-parse HEAD) ureth=$M2_URETH_COMMIT ubft sha256=$(shasum -a 256 build/ubft | cut -d' ' -f1)" | tee "$EVIDENCE_DIR/heads.txt"
 
 # A signal to the lane stops the scenario child and waits for its own teardown (an orphaned child keeps restarting nodes in this checkout).
@@ -78,6 +100,8 @@ cp -R test-nodes/p85 "$EVIDENCE_DIR/p85" 2>/dev/null || true
 # databases and public node info, the trust bases, the lane's flow directories; not the execution clients' data, the authorities' credentials or keys
 rsync -a --exclude 'reth*/' --exclude 'evm*/' --exclude 'auth*/' --exclude '*.log' --exclude 'keys.json' --exclude '*.sock' --exclude '*.cred' \
   --exclude 'jwt.hex' --exclude 'p85/' test-nodes/ "$EVIDENCE_DIR/state/" 2>/dev/null || true
+{ date -u +%FT%TZ; pmset -g log 2>/dev/null; } | gzip >"$EVIDENCE_DIR/pmset-after.log.gz" || true
+(cd "$EVIDENCE_DIR" && find . -type f ! -name SHA256SUMS ! -name '.devnet-pid' | LC_ALL=C sort | xargs shasum -a 256 >SHA256SUMS) || true
 if [ "$status" -ne 0 ] || grep -q '^ *FAIL:' "$EVIDENCE_DIR/lane.log"; then
   fail "P85 recovery lane failed (exit $status); see $EVIDENCE_DIR/lane.log"
 fi

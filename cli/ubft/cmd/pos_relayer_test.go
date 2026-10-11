@@ -150,6 +150,7 @@ func TestTheGenesisAssignmentMustBeTheFullShardConfigurationsOrTheToolingRefuses
 	}
 
 	require.ErrorIs(t, requireFullShardConf(base), ErrPosRelayer, "the base configuration has no seal_registry_genesis")
+	require.ErrorContains(t, requireFullShardConf(base), "carries no seal_registry_genesis", "refused for the missing parameter, not for another reason")
 	require.NoError(t, requireFullShardConf(&full))
 	require.ErrorIs(t, requireFullShardConf(nil), ErrPosRelayer)
 
@@ -162,10 +163,12 @@ func TestTheGenesisAssignmentMustBeTheFullShardConfigurationsOrTheToolingRefuses
 	require.NoError(t, verifyPosGenesis(plan, d.tb, &full, fullOut), "the id of the full configuration verifies")
 	err = verifyPosGenesis(plan, d.tb, &full, baseOut)
 	require.ErrorIs(t, err, ErrPosRelayer, "a contracts genesis prepared from the base configuration is refused")
+	require.ErrorContains(t, err, "custody would not know the assignment the first closure names", "refused for the id mismatch")
 	require.Contains(t, err.Error(), baseOut.AssignmentID)
 	require.Contains(t, err.Error(), fullOut.AssignmentID)
 	tampered := fullOut
 	tampered.AssignmentID = "0x" + strings.Repeat("00", 32)
 	require.ErrorIs(t, verifyPosGenesis(plan, d.tb, &full, tampered), ErrPosRelayer)
+	require.ErrorContains(t, verifyPosGenesis(plan, d.tb, base, baseOut), "carries no seal_registry_genesis")
 	require.ErrorIs(t, verifyPosGenesis(plan, d.tb, base, baseOut), ErrPosRelayer, "a genesis that agrees with the BASE configuration is still refused: it is not the one the roots install")
 }

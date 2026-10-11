@@ -237,7 +237,12 @@ rootValidators=3
 if [ "${M2_PROFILE2:-0}" = 1 ]; then rootValidators=4; fi
 ./setup-evm-nodes.sh -r "$rootValidators" -v "$validators" -c "$postM2aChainID" >/dev/null || { echo "setup failed" >&2; exit 1; }
 registry_layout_require || exit 1
-echo "registry artifact (layout $(registry_layout)) sha256=$(shasum -a 256 "$(registry_artifact)" | cut -d' ' -f1)"
+if [ "${Q3_B1:-0}" = 1 ]; then
+  # the stock generated genesis is built with the legacy registry artifact; the fresh-B1 profile below replaces the registry (layout 3)
+  echo "base genesis registry artifact (layout $(registry_layout), replaced by the B1 profile's registry genesis below) sha256=$(shasum -a 256 "$(registry_artifact)" | cut -d' ' -f1)"
+else
+  echo "registry artifact (layout $(registry_layout)) sha256=$(shasum -a 256 "$(registry_artifact)" | cut -d' ' -f1)"
+fi
 genesisSHA=$(shasum -a 256 test-nodes/evm-genesis.json | cut -d' ' -f1)
 echo "generated genesis sha256=$genesisSHA"
 
