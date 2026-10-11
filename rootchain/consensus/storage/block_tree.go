@@ -647,6 +647,11 @@ func (bt *BlockTree) captureHandoffCheckpoint(old, next *ExecutedBlock) error {
 	}
 	store, ok := bt.blocksDB.(handoffCheckpointStore)
 	if !ok {
+		// A store that cannot retain it (tests) serves the current root instead; on a root that must serve it later this is a defect, so
+		// it is not silent (P85 run 22: a wrapper hid the capability and no root held the checkpoint).
+		if bt.log != nil {
+			bt.log.Warn("the block store retains no handoff checkpoint: the handoff into the next epoch will be served from whatever root is current", "epoch", record.Epoch+1)
+		}
 		return nil
 	}
 	head, path, err := checkpointOf(next)

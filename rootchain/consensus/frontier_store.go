@@ -16,6 +16,25 @@ type frontierPersistentStore struct {
 	reader  frontierSafetyReader
 }
 
+// The optional store capabilities the root code asserts for on the block store or GetDB (`x.(...)`): the proxy must have each, or the
+// assertion fails silently and the feature behind it is a no-op. A compile error here is the loud form of that loss.
+var _ interface {
+	StoreHandoffBody([]byte, []byte) error
+	HandoffBody([]byte) ([]byte, error)
+	StoreHandoffReceipts([]byte, []byte) error
+	HandoffReceipts([]byte) ([]byte, error)
+	StoreHandoffCandidate([]byte, []byte) error
+	HandoffCandidate([]byte) ([]byte, error)
+	StoreHandoffCheckpoint(uint64, []byte) error
+	HandoffCheckpoint(uint64) ([]byte, error)
+	handoffBundleArchive
+	epochAnchorSafetyStore
+	InstallEpochAnchorRoot(*storage.ExecutedBlock, *drctypes.EpochAnchor) error
+	storage.RecordStore
+	storage.CutStore
+	storage.BlockCommitter
+} = (*frontierPersistentStore)(nil)
+
 func (s *frontierPersistentStore) fault(err error) error {
 	if err != nil {
 		s.sampler.latchFault()
