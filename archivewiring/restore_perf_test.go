@@ -2,9 +2,11 @@ package archivewiring
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"os"
 	"strconv"
+	"sync"
 	"testing"
 	"time"
 
@@ -161,4 +163,33 @@ type lineWriter struct{ lines *[]string }
 func (w lineWriter) Write(b []byte) (int, error) {
 	*w.lines = append(*w.lines, string(b))
 	return len(b), nil
+}
+
+// A batch the local store fails to retain stops the restore: it returns ErrRestore and the execution client is never driven. The
+// failing batch is the first one (the tip's side), so a restore that ignored the failure would go on, retain the rest, and replay
+// from height 1.
+func TestArchiveRestoreStopsWhenABatchIsNotRetained(t *testing.T) {
+	n := restorePutBatch + 5
+	restore, executor, _, _, qs, _ := newTwoReplicaRestore(t, n)
+	failure := errors.New("injected store failure")
+	var once sync.Once
+	restore.Archive.Fault = func(point string) (err error) {
+		if point == "before-publish" {
+			once.Do(func() { err = failure })
+		}
+		return err
+	}
+	err := restore.Restore(context.Background())
+	require.ErrorIs(t, err, ErrRestore)
+	require.ErrorContains(t, err, failure.Error(), "the store's failure is what the restore reports")
+	require.Len(t, executor.blocks, 1, "no block was given to the execution client to verify")
+	require.EqualValues(t, 0, executor.head.Number, "and its head is still genesis")
+	require.True(t, sameBlockRef(executor.head, executor.finalized))
+	stored := 0
+	for _, q := range qs {
+		if _, err := restore.Archive.Get(q); err == nil {
+			stored++
+		}
+	}
+	require.Zero(t, stored, "the restore stopped at the failed batch: nothing of it, and no later batch, was retained")
 }

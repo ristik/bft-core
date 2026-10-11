@@ -23,6 +23,7 @@ type Store struct {
 	dir           string
 	mu            sync.Mutex
 	Fault         func(string) error
+	disk          *diskOps // nil: the real operations (see diskOps)
 	rounds        map[string]map[uint64][]Request
 	receiptRounds map[string]map[uint64][]Request
 }
@@ -124,15 +125,41 @@ func archiveMagic(v2 bool) string {
 	return "ARCHIVE1"
 }
 
+// fault calls the Fault hook, if one is set, at a named point of a put: "after-chunk" (each chunk written) and "before-publish"
+// (before each record's rename). An error from the hook fails the put there.
+func (s *Store) fault(point string) error {
+	if s.Fault == nil {
+		return nil
+	}
+	return s.Fault(point)
+}
+
+// diskOps are the operations a put's durability rests on. The store's are the real ones; a test replaces them to observe the order
+// in which a put issues them and to fail one. syncFile and syncDir are called concurrently.
+type diskOps struct {
+	syncFile func(*os.File) error
+	syncDir  func(dir string) error
+	rename   func(from, to string) error
+}
+
+var realDiskOps = diskOps{syncFile: (*os.File).Sync, syncDir: syncDir, rename: os.Rename}
+
+func (s *Store) ops() diskOps {
+	if s.disk != nil {
+		return *s.disk
+	}
+	return realDiskOps
+}
+
 // syncDirs syncs the directories concurrently and reports every failure.
-func syncDirs(dirs []string) error {
+func (s *Store) syncDirs(dirs []string) error {
 	errs := make([]error, len(dirs))
 	var wg sync.WaitGroup
 	for i, dir := range dirs {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			errs[i] = syncDir(dir)
+			errs[i] = s.ops().syncDir(dir)
 		}()
 	}
 	wg.Wait()
@@ -181,14 +208,14 @@ func writeUnsynced(open *[]*os.File, path string, b []byte) error {
 
 // syncAndCloseAll syncs the files concurrently and closes each. It returns only after every sync has returned, and reports every
 // failure of a sync or a close: the caller publishes nothing unless all of them succeeded.
-func syncAndCloseAll(files []*os.File) error {
+func (s *Store) syncAndCloseAll(files []*os.File) error {
 	errs := make([]error, len(files))
 	var wg sync.WaitGroup
 	for i, h := range files {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			err := h.Sync()
+			err := s.ops().syncFile(h)
 			if closeErr := h.Close(); err == nil {
 				err = closeErr
 			}
@@ -206,7 +233,9 @@ func (s *Store) Put(q Request, rec *Record) error {
 	return s.PutBatch([]Request{q}, []*Record{rec})
 }
 
-// MaxPutBatch bounds one PutBatch: its records are held in memory and their files are open together until they are synced.
+// MaxPutBatch bounds one PutBatch: its records are held in memory and their files are open together until they are synced. A record
+// has nine fields, its extensions (at most sixteen) and a manifest, so a full batch can hold up to 832 files open at once; the
+// restore uses batches of 16.
 const MaxPutBatch = 32
 
 // staged is one record of a batch written to its temporary directory, not yet synced or published.
@@ -301,10 +330,8 @@ func (s *Store) PutBatch(qs []Request, recs []*Record) error {
 			put32(&manifest, uint32(len(f[k])))
 			d := sha256.Sum256(f[k])
 			manifest.Write(d[:])
-			if s.Fault != nil {
-				if er := s.Fault("after-chunk"); er != nil {
-					return er
-				}
+			if er := s.fault("after-chunk"); er != nil {
+				return er
 			}
 		}
 		d := sha256.Sum256(manifest.Bytes())
@@ -321,36 +348,38 @@ func (s *Store) PutBatch(qs []Request, recs []*Record) error {
 	// stage are issued together, so one device flush can serve them, instead of one after another.
 	synced := open
 	open = nil
-	if err := syncAndCloseAll(synced); err != nil {
+	if err := s.syncAndCloseAll(synced); err != nil {
 		return err
 	}
 	dirs := make([]string, len(batch))
 	for i, st := range batch {
 		dirs[i] = st.tmp
 	}
-	if err := syncDirs(dirs); err != nil {
+	if err := s.syncDirs(dirs); err != nil {
 		return err
 	}
+	// Publication. If a rename fails part way, the records renamed before it are already visible to Get: they are made durable and
+	// indexed like the rest before the error is returned, so a failed batch leaves no record that is readable but neither synced
+	// nor indexed.
+	var publishErr error
+	published := 0
 	for _, st := range batch {
-		if s.Fault != nil {
-			if err := s.Fault("before-publish"); err != nil {
-				return err
-			}
+		if publishErr = s.fault("before-publish"); publishErr != nil {
+			break
 		}
-		if err := os.Rename(st.tmp, st.final); err != nil {
-			return err
+		if publishErr = s.ops().rename(st.tmp, st.final); publishErr != nil {
+			break
 		}
+		published++
 	}
 	// the publications (and, for records that were already stored, their earlier ones) are durable once the store directory is
-	if err := syncDir(s.dir); err != nil {
-		return err
-	}
-	if s.rounds != nil {
-		for _, st := range batch {
+	storeErr := s.ops().syncDir(s.dir)
+	if storeErr == nil && s.rounds != nil {
+		for _, st := range batch[:published] {
 			s.indexRecord(st.q, st.rec)
 		}
 	}
-	return nil
+	return errors.Join(publishErr, storeErr)
 }
 
 // Get refuses missing or damaged chunks as a whole. It never returns partial
