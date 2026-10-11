@@ -3,6 +3,7 @@ package service
 import (
 	"bytes"
 	"context"
+	"log/slog"
 	"net"
 	"path/filepath"
 	"testing"
@@ -40,7 +41,8 @@ func TestAPendingAuthorityIsCompletedThroughTheOperatorEndpoint(t *testing.T) {
 
 	operatorCredential, err := NewCredential()
 	require.NoError(t, err)
-	server, err := NewServer(authority, Config{OperatorCredential: operatorCredential})
+	var sink syncBuffer
+	server, err := NewServer(authority, Config{OperatorCredential: operatorCredential, Log: slog.New(slog.NewTextHandler(&sink, &slog.HandlerOptions{Level: slog.LevelInfo}))})
 	require.NoError(t, err)
 	t.Cleanup(server.Close)
 	dir := socketDir(t)
@@ -136,6 +138,13 @@ func TestAPendingAuthorityIsCompletedThroughTheOperatorEndpoint(t *testing.T) {
 	advanced, _, err := operator.Enrollment(ctx)
 	require.NoError(t, err)
 	require.Equal(t, uint64(2), *advanced.RootEpoch)
+	require.Contains(t, sink.String(), "epoch advanced", "a successful advance is logged, with the scope the authority now holds")
+	require.Contains(t, sink.String(), "rootEpoch=2")
+	require.Contains(t, sink.String(), "shardConfHash=")
+	sink.Reset()
+	require.ErrorIs(t, operator.AdvanceEpoch(ctx, conf, &nextTrust), signingauthority.ErrContextMismatch, "the same scope again is refused")
+	require.Contains(t, sink.String(), "refusing epoch advance")
+	require.NotContains(t, sink.String(), "epoch advanced")
 	newCredential, err := operator.ReplaceSession(ctx)
 	require.NoError(t, err)
 	newClient, err := NewClient(ClientConfig{Dial: UnixDialer(clientPath), Credential: newCredential, Timeout: 10 * time.Second})
