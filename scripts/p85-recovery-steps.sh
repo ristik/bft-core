@@ -387,13 +387,15 @@ p85_view() { # label
     "$(p85_call "$(p85_registry)" 'progress()(uint64)' 2>&1 | awk '{print $1}')" "$(p85_call "$(p85_registry)" 'ucTime()(uint64)' 2>&1 | awk '{print $1}')" \
     "$([ -n "$r" ] && p85_call "$(p85_election)" 'result(bytes32)' "$r" 2>/dev/null | p85_dec result 2>&1)" \
     "$([ -n "$r" ] && p85_call "$(p85_custody)" 'session(bytes32)' "$r" 2>/dev/null | p85_dec session 2>&1)" \
+    "$(p85_call "$(p85_election)" 'lastAttemptResult()(bytes32)' 2>&1 | tail -n1)" \
+    "$(l=$(p85_call "$(p85_election)" 'lastAttemptResult()(bytes32)' 2>/dev/null); if [[ "$l" =~ ^0x[0-9a-fA-F]{64}$ ]] && [ "$l" != 0x0000000000000000000000000000000000000000000000000000000000000000 ]; then p85_call "$(p85_election)" 'result(bytes32)' "$l" 2>/dev/null | p85_dec result 2>&1; fi)" \
     "$(o=$(p85_open_result 2>/dev/null); if [ -n "$o" ] && [ "$o" != 0x0000000000000000000000000000000000000000000000000000000000000000 ]; then p85_call "$(p85_election)" 'result(bytes32)' "$o" 2>/dev/null | p85_dec result 2>&1; fi)" \
     >>"$H3_DIR/views.jsonl" <<'PY'
 import json, sys
 keys = ["label", "time", "openResult", "attemptCursor", "lastAcked", "custodyCursor", "recordCount", "recordTarget", "thresholds", "registryProgress",
-        "registryUcTime", "resultView", "sessionView", "openResultView"]
+        "registryUcTime", "resultView", "sessionView", "lastAttemptResult", "lastAttemptView", "openResultView"]
 row = dict(zip(keys, sys.argv[1:]))
-for k in ("resultView", "sessionView", "openResultView"):
+for k in ("resultView", "sessionView", "lastAttemptView", "openResultView"):
     try:
         row[k] = json.loads(row[k]) if row.get(k) else None
     except ValueError:
@@ -598,6 +600,25 @@ p85_election_refused() {
 # The Reason of the election's last attempt, read from the state a simulated attempt writes: an election attempt in the system hook emits no log,
 # and the result is keyed by an origin only the hook knows, so the same attempt is replayed with a self call (electNow) at the current clock.
 p85_attempt_reason() {
+  # the election records the result of its last attempt in `lastAttemptResult` (contracts: the hook emits no log a client can read): its Reason is then a
+  # plain read. A deployment without that view (an older contracts checkout) is replayed below.
+  local last res
+  if last=$(p85_call "$(p85_election)" 'lastAttemptResult()(bytes32)' 2>/dev/null) && [[ "$last" =~ ^0x[0-9a-fA-F]{64}$ ]] \
+    && [ "$last" != 0x0000000000000000000000000000000000000000000000000000000000000000 ]; then
+    res=$(p85_call "$(p85_election)" 'result(bytes32)' "$last" | p85_dec result) || return 1
+    python3 - "$res" <<'PY'
+import json, sys
+r = json.loads(sys.argv[1])
+if r["state"] != 2:   # ResultState.NoCandidate
+    raise SystemExit("the last attempt is not a NoCandidate result: state %d" % r["state"])
+print(r["reason"])
+PY
+    return
+  fi
+  p85_attempt_reason_replayed
+}
+
+p85_attempt_reason_replayed() {
   local e r roots t p pred data
   e=$(p85_election); roots=$(jq -r .registry "$P85_DEPLOY")
   t=$(p85_call "$roots" 'ucTime()(uint64)' | awk '{print $1}'); p=$(p85_call "$roots" 'progress()(uint64)' | awk '{print $1}')
