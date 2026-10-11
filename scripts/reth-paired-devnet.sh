@@ -910,6 +910,12 @@ if [ "${M2_PROFILE2:-0}" = 1 ] && [ "${POST_M2A_SKIP_HANDOFF:-0}" != 1 ]; then
     echo "Q4 lane failures: $failures"
     [ "$failures" -eq 0 ] && exit 0 || exit 1
   fi
+  if [ "${P85_LANE:-0}" = 1 ]; then
+    # The P85 lane asserts its own stalls and recoveries and tears its devnet down when its steps pass: the D1 monitor below would watch a stopped
+    # devnet (run 31: every step passed, then the monitor waited out its timeout on dead validators).
+    echo "P85 lane failures: $failures"
+    [ "$failures" -eq 0 ] && exit 0 || exit 1
+  fi
   if [ "${H3_ASSIGNMENT_LANE:-0}" = 1 ]; then
     # The H3 lane makes its own agreement checks; the D1 monitor below assumes every validator stays live.
     echo "H3 lane failures: $failures"
