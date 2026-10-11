@@ -156,3 +156,38 @@ func TestAMissingIncumbentBaselineIsAnInvalidConfiguration(t *testing.T) {
 	other := identityfix.Identities([]evmassign.RootMember{{NodeID: "r-z", Key: bytes.Repeat([]byte{9}, 33), Weight: 1}}, h.genesis, []evmassign.Binding{{RootNodeID: "r-z", EVMNodeID: "ev-a"}})
 	require.ErrorIs(t, o.SetGenesisIdentities(8, types.ShardID{}, other), partitions.ErrDerivedConflict)
 }
+
+// Custody keys the genesis assignment and a recovery by their assignment hash and a primary election result by PrimaryAssignmentID(result); the
+// closure of an epoch names custody's key (P85 run 27). Read from a real Orchestration store through the same installs the lifecycle tests use.
+func TestCustodyAssignmentIDOfARealStoreFollowsTheCommittedCandidateKind(t *testing.T) {
+	h := newLifecycleHistory(t)
+	o := h.open(t)
+	require.NoError(t, o.AddShardConfig(h.genesis))
+	require.NoError(t, o.SetGenesisIdentities(h.genesis.PartitionID, h.genesis.ShardID, h.ids))
+
+	hashOf := func(epoch uint64) [32]byte {
+		_, hash, err := o.AcknowledgedIdentities(8, types.ShardID{}, epoch)
+		require.NoError(t, err)
+		return hash
+	}
+	custodyOf := func(epoch uint64) [32]byte {
+		id, err := o.CustodyAssignmentID(8, types.ShardID{}, epoch)
+		require.NoError(t, err)
+		return id
+	}
+	require.Equal(t, hashOf(0), custodyOf(0), "the genesis assignment is keyed by its hash")
+
+	j := h.install(t, o, h.genesis, evmassign.KindPrimary, 1, 7, false)
+	ctx, err := LifecycleFor(o, 8, types.ShardID{}, 0, h.genesis)
+	require.NoError(t, err)
+	require.NotNil(t, ctx.Head.Candidate.Authorization, "the primary candidate carries its election authorization")
+	result := ctx.Head.Candidate.ResultID()
+	require.Equal(t, evmassign.PrimaryAssignmentID(result), custodyOf(1), "a primary is keyed by the id the contracts derive from its result")
+	require.NotEqual(t, hashOf(1), custodyOf(1), "and that is not its assignment hash")
+
+	h.install(t, o, j, evmassign.KindRecovery, 2, 9, true)
+	require.Equal(t, hashOf(2), custodyOf(2), "a recovery re-installs K under its assignment hash")
+	_, err = o.CustodyAssignmentID(8, types.ShardID{}, 9)
+	require.Error(t, err, "an epoch the store does not know has no assignment")
+	require.NoError(t, o.Close())
+}

@@ -275,18 +275,20 @@ func (bt *BlockTree) RemoveLeaf(round uint64) error {
 
 // SetAsideLeaf removes the leaf of a timed-out round from the tree and keeps its block: a QC for the round can still form from
 // votes delayed past the timeout certificate, and FindBlock then re-attaches it.
-func (bt *BlockTree) SetAsideLeaf(round uint64) error {
+// It reports whether it set a block aside: false when the tree does not hold the round, and false with an error when it holds the
+// round and keeps it (the block has a child).
+func (bt *BlockTree) SetAsideLeaf(round uint64) (bool, error) {
 	bt.m.Lock()
 	defer bt.m.Unlock()
 	n, err := bt.removeLeaf(round)
 	if err != nil || n == nil {
-		return err
+		return false, err
 	}
 	if bt.timedOut == nil {
 		bt.timedOut = map[uint64]*ExecutedBlock{}
 	}
 	bt.timedOut[round] = n.data
-	return nil
+	return true, nil
 }
 
 // removeLeaf detaches the leaf node of round and returns it (nil when the tree does not hold the round)
@@ -424,6 +426,11 @@ func (bt *BlockTree) FindBlock(round uint64) (*ExecutedBlock, error) {
 	// goes back under its parent, provided no commit has pruned the parent since
 	if b, found := bt.timedOut[round]; found {
 		if parent, ok := bt.roundToNode[b.GetParentRound()]; ok {
+			// its timeout certificate deleted it from the database: it is stored again before it is back in the tree, so a block that
+			// extends it never has a parent the database lacks
+			if err := bt.blocksDB.WriteBlock(b, false); err != nil {
+				return nil, fmt.Errorf("storing the re-attached block of round %d: %w", round, err)
+			}
 			delete(bt.timedOut, round)
 			n := newNode(b)
 			parent.addChild(n)

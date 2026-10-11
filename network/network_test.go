@@ -262,10 +262,14 @@ func Test_LibP2PNetwork_SendMsgs(t *testing.T) {
 		for i := 1; i <= 4; i++ {
 			msgQueue.PushBack(&testStrMsg{Info: fmt.Sprintf("make a test message that is a bit longer to simulate real messages: test message %v", i)})
 		}
-		// NB! All messages are sent successfully? - actually, no 3 messages get dropped.
-		// Since all messages were successfully added to the out buffer and also received,
-		// but later dropped - there is no error here.
-		require.NoError(t, nw1.SendMsgs(context.Background(), msgQueue, peer2.ID()))
+		// The receiver takes the first message and, having no room for the second, stops reading and resets the stream. What the
+		// sender sees depends on which happens first. If its four small writes are buffered before the reset arrives, SendMsgs
+		// returns nil although three messages are dropped. If the reset arrives while it is still writing, the write fails with
+		// "stream reset" (bft-core#519: this test required nil and failed whenever the reset won). Both are correct behaviour of the
+		// sender; what the code guarantees, and what is asserted, is that exactly the first message is delivered.
+		if err := nw1.SendMsgs(context.Background(), msgQueue, peer2.ID()); err != nil {
+			require.ErrorContains(t, err, "stream write error", "the only failure the sender may see is its write meeting the receiver's reset")
+		}
 		// wait for messages received
 		require.Eventually(t, func() bool { return len(nw2.receivedMsgs) == 1 }, test.WaitDuration, test.WaitTick)
 		// message one
