@@ -101,7 +101,9 @@ t6_coupled_rotation_s1() {
   build/ubft root-node init --home test-nodes/root5 -g >/dev/null 2>&1 || true
   generate_log_configuration "test-nodes/root5/"
   h3_q3_trust_base "$next" "1 2 3 5" || return 1
-  h3_q3_start_joiner 5 1 "$next" "trust-base-epoch${next}.json" || return 1
+  # evm5 is a LATER joiner (two Q3 activations already precede it): a fresh node holds the genesis tip only and would refuse a candidate that is not its
+  # successor, so its shard node starts as a restore from evm2's archive at its readiness turn (as the H3 lane's s=2 joiner does)
+  EVM_ARCHIVE_REPLICA_POOL="1 2 3 5" H3_ONLINE="1 2 3" h3_q3_start_joiner 5 1 "$next" "trust-base-epoch${next}.json" 2 || return 1
   # Test hook (documented, off by default): T6_TEST_FAIL_AFTER_AUTH5=return fails this step, =abort aborts the shell (as an unbound variable
   # does under set -u), right after the joiner's authority and execution client started: the run must still stop them and exit.
   case "${T6_TEST_FAIL_AFTER_AUTH5:-}" in return) return 1 ;; abort) exit 1 ;; esac
@@ -113,7 +115,8 @@ t6_coupled_rotation_s1() {
 
   # the verified history the root holds before the rotation (the stage refusal names the shard node's own tip to compare with)
   q3_history_ids "$Q3_DIR/history-before-s1.txt" && sed "s/^/root history: /" "$Q3_DIR/history-before-s1.txt"
-  h3_q3_handoff s1 "$next" "1 2 3 5" || return 1   # the Q3 flow: candidate, the four successor members' readiness, plan, Commit
+  t6_joiner_restore() { [ "$1" != 5 ] || EVM_ARCHIVE_REPLICA_POOL="1 2 3 5" H3_ONLINE="1 2 3" h3_q3_joiner_shard_restore 5 2; }
+  Q3_BEFORE_READINESS=t6_joiner_restore h3_q3_handoff s1 "$next" "1 2 3 5" || return 1   # the Q3 flow: candidate, the four successor members' readiness, plan, Commit
   echo "T6 coupled rotation: H committed at root epoch $cur"
 
   # the validator running through the H4 restore command, the retired validator and the staging-only joiner stop here; the roots restart on the install epoch
