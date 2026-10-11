@@ -37,7 +37,7 @@ go test -json -count=1 ./rootchain/... ./cli/ubft/cmd/ ./cmd/... -timeout 60m \
   -run '^(TestQ4|TestQ3|TestMessageRounds|TestWeighted|TestSkewedWeight|TestTwoRestarted|TestProductionBuild|TestT2|TestPartitionTimeout|TestPacemaker|TestVoteRegister|TestOldForm|TestInstallVerified|TestNoSignature|TestCheck|TestLeaderAfter|TestTableCache|TestAJoinerRoot)' > out/tests.json
 Q4_COST_OUT="$PWD/out/cost.json" go test -count=1 ./rootchain/consensus/leader/ -run Q4
 go run ./cmd/q4report -matrix docs/pos/q4-acceptance-matrix.json -tests out/tests.json -bundles out/bundles -cost out/cost.json \
-  -lane <scenario A evidence dir> -lanes b=<scenario B evidence dir>,a2=<heavy on root 2>,a3=<heavy on root 3>,a4=<heavy on root 4>,q3=<Q3 weight-activation lane evidence dir>,g2=<scenario A run with the G2 rollback step>,g2b=<scenario B run with the G2 rollback step> \
+  -lane <scenario A evidence dir> -lanes b=<scenario B evidence dir>,a2=<heavy on root 2>,a3=<heavy on root 3>,a4=<heavy on root 4>,q3=<Q3 weight-activation lane evidence dir>,g2=<scenario A run with the G2 rollback step>,g2b=<scenario B run with the G2 rollback step>,b3=<B3 two-shard live lane evidence dir> \
   -out out/report.md -json out/report.json
 ```
 
@@ -46,6 +46,15 @@ gap remains (that is the #51 closure check), 2 a read error. A row can claim a c
 `ORACLE-ONLY`, `MEASURED`, `STATIC`) only through passed evidence carrying it; a required label with neither evidence nor a reasoned gap
 fails the run. Outcome (pass/fail) stays separate from the assumption class (`IN-BOUND`, `OUTSIDE-ASSUMPTIONS`): an outside-the-assumptions
 row passes when the injection happened and was classified, and proves no safety guarantee.
+
+## G2's native UC verification (owner question Q6)
+
+G2's last gap, "native UC cryptographic verification where used", is read as the B1 precompile (`0x0100`, UC_V1) verifying a real Unicity Certificate inside
+ureth on a live devnet (a working reading, not yet confirmed by the owner). It is evidenced, but **G2 stays PARTIAL until the owner answers Q6**: the required label
+`OWNER-CONFIRMED (Q6 reading of native UC verification)` carries a gap with no evidence, to be deleted with its gap on a yes. The evidence is the B3 two-shard live lane (ristik/native-bridge-plugins
+`tests/live`, `scripts/dnb-devnet.sh` with `DNB_AGG_SHARDS=2`): the named lane `b3` reads that run's `rows.log` (a two-anchor redemption that made two `0x0100` calls whose
+B1 verdicts at the execution block are valid), `lane.log` and `ureth-attestation.json` (the cited run's rows exit was 1 on one unrelated gas-1 assertion; its run mode was recorded after the run, not by the runner). Its evidence directory must carry `run-mode.txt` beginning
+`B3 run mode: clean build (evidence run` like the Q4 lane's, or the report refuses it as a development run.
 
 ## The live lane run
 
