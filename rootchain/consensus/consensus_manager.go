@@ -543,6 +543,11 @@ func (x *ConsensusManager) Run(ctx context.Context) error {
 		if x.frontier != nil && !x.frontier.faulted.Load() {
 			x.frontier.eligible.Store(true)
 		}
+		// The first round of an anchored epoch is entered with neither a QC nor a TC, and the pacemaker's maturity event belongs to the
+		// leader of the NEXT round, so nothing else makes its leader propose: the epoch would begin with a round timeout (#559).
+		if x.epochAnchor != nil && x.pacemaker.GetCurrentRound() == x.epochAnchor.Slot+1 {
+			x.processNewRoundEvent(ctx)
+		}
 		return x.loop(ctx)
 	})
 
