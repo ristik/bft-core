@@ -255,9 +255,15 @@ func compute(t *testing.T) (scenario, publication) {
 	// custody keys the genesis assignment by the id it was deployed with; the root's is the assignment hash of the FULL genesis
 	// configuration (ubft pos-relayer genesis / verify-genesis guard that the two are the same value). Here it is the fixture's.
 	s.genesis = h32(t, p.IncumbentAssignmentID)
-	// a primary assignment is keyed by its election result: the root derives the id, it does not use the assignment hash
-	s.primary = evmassign.PrimaryAssignmentID(s.result)
-	// a recovery re-installs the incumbent slate under the root's assignment hash of K, which custody learns from the RecoveryAck
+	// a primary assignment is keyed by its election result, not by its assignment hash. Which of the two the root names is the
+	// root's own rule, so J's id is READ from it: a store in which a primary candidate naming this result is committed.
+	var jHash, kRule, kHash [32]byte
+	s.primary, jHash, kRule, kHash = rootsCustodyIDs(t, s.result)
+	require.NotEqual(t, jHash, s.primary, "the root names a primary by its result-derived id, which is not its assignment hash")
+	// a recovery re-installs the incumbent slate under the root's assignment hash of K, which custody learns from the RecoveryAck.
+	// The rule is checked on the store (a recovery epoch IS keyed by its hash); the VALUE in the vectors is a label, because that
+	// hash covers the store's shard configuration and this fixture has none of its own (README, "Coverage").
+	require.Equal(t, kHash, kRule, "the root names a recovery by its assignment hash")
 	s.recovery = label("xrepo/recovery-assignment-hash-of-K")
 
 	g, j := identities(t, p.IncumbentIdentities), identities(t, p.Identities)

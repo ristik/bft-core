@@ -15,6 +15,9 @@ when either side moves.
 - `check.py` compares the copies. Each repository pins a commit of the other (`fixtures.json` here, `xrepo/bft-core-pin.json` there)
   and its CI runs `check.py` against a checkout at that commit.
 
+The `heads` job (after a merge to `integration/enshrined-evm`) and the contracts' `xrepo-heads` workflow (on `main` and daily) compare the
+two branch heads instead of the pins, because a pin may name a pull-request commit whose counterpart never merged.
+
 So a change on either side fails that side's own test first, and after regenerating, fails the copy check until the other repository
 has the new file and the pin is moved.
 
@@ -46,8 +49,8 @@ Producer -> consumer pairs that are pinned (file in `fixtures.json`):
 | Record envelope, record id, payload shapes, closure repeat/conflict | Go -> contracts | before, with the Closure and Retirement digest words REPLACED by custody's own in the replay |
 | Registry import calls and companions | Go -> contracts | before |
 | Continuity and selection | Go -> contracts | before |
-| **Closure of the genesis assignment: id and digests the root derives, accepted verbatim** | Go -> contracts | this suite |
-| **Closure of a primary assignment named by its result-derived id (not its assignment hash), Reserved (staged) and Active** | Go -> contracts | this suite |
+| **Closure of the genesis assignment: digests the root derives under the genesis id, accepted verbatim** (the id in the scenario is the contracts' fixture value; that the root DERIVES the deployed id is the genesis row below, with its own plan) | Go -> contracts | this suite |
+| **Closure of a primary assignment named by its result-derived id (not its assignment hash), Reserved (staged) and Active.** J's id is read from the root's rule: a primary candidate naming the fixture's result is committed into a real `Orchestration` store and the scenario uses `CustodyAssignmentID` of that epoch (`roots_rule_test.go`), so a root that names a primary by its hash (run 27, #577) fails the golden test | Go -> contracts | this suite |
 | **RecoveryAck: the recovery assignment id the root announces, J's and K's offsets, rounds and epochs; K's digests under K's own id** | Go -> contracts | this suite |
 | **Ack and SessionClosed payloads and their effect** | Go -> contracts | this suite |
 | **Custody's resulting state (ids, digests, states, H rounds, closure anchors, offsets, session outcome) equals the root's model** | contracts -> Go | this suite |
@@ -66,6 +69,7 @@ Not covered:
   has no Solidity consumer. Not part of this suite.
 - **The registry (SealRegistry) as the record source.** The replay uses the test record source (`MockRootRecords`), as the other
   custody tests do; the registry import is pinned separately (root-records-import-vectors.json).
+- **The value of the recovery assignment id.** The rule is checked on the store (a recovery epoch is keyed by its assignment hash), but the id in the vectors is a label: K's hash covers the shard configuration, and the contracts' fixture has identities and a result, not a root shard configuration. Custody takes K's id from the RecoveryAck as an opaque word, so the pair that matters (K's digests under the announced id) is covered.
 - **A second election after the first resolves**, more than one pending handoff besides primary plus recovery, and key rotation
   through an Ack.
 - **ureth.** The execution client's hook is a third consumer of several of these files; it is not checked here.
