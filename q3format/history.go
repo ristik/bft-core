@@ -395,3 +395,9 @@ func bindCandidate(b BodyV3, r evmroot.OrderedHandoffRecord, ev Evidence) error 
 	}
 	return nil
 }
+
+// BindCandidate is bindCandidate for a verifier that holds the body, the committed record and the evidence but no history: the
+// P85 closure verifier, which judges the closed epoch's terminal handoff against its own committee.
+func BindCandidate(b BodyV3, r evmroot.OrderedHandoffRecord, ev Evidence) error {
+	return bindCandidate(b, r, ev)
+}

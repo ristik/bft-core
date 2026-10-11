@@ -43,6 +43,9 @@ type ClosureVerifier struct {
 // ordered. The committee that signed the committed record must be the closed epoch's (the proof verifier binds the record's epoch to the
 // trust base it is given), so a bundle of another handoff, or one signed by a later committee, is not a closure of this epoch.
 func (v ClosureVerifier) Verify(witness []byte, closedEpoch uint64) (ClosureEvidence, error) {
+	if w, ok := decodeWitnessV3(witness); ok {
+		return v.verifyV3(w, closedEpoch)
+	}
 	bundle, err := DecodeBundle(witness)
 	if err != nil {
 		return ClosureEvidence{}, errors.Join(ErrClosure, err)
