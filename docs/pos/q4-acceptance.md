@@ -37,7 +37,7 @@ go test -json -count=1 ./rootchain/... ./cli/ubft/cmd/ ./cmd/... -timeout 60m \
   -run '^(TestQ4|TestQ3|TestMessageRounds|TestWeighted|TestSkewedWeight|TestTwoRestarted|TestProductionBuild|TestT2|TestPartitionTimeout|TestPacemaker|TestVoteRegister|TestOldForm|TestInstallVerified|TestNoSignature|TestCheck|TestLeaderAfter|TestTableCache|TestAJoinerRoot)' > out/tests.json
 Q4_COST_OUT="$PWD/out/cost.json" go test -count=1 ./rootchain/consensus/leader/ -run Q4
 go run ./cmd/q4report -matrix docs/pos/q4-acceptance-matrix.json -tests out/tests.json -bundles out/bundles -cost out/cost.json \
-  -lane <scenario A evidence dir> -lanes b=<scenario B evidence dir>,a2=<heavy on root 2>,a3=<heavy on root 3>,a4=<heavy on root 4>,q3=<Q3 weight-activation lane evidence dir>,g2=<scenario A run with the G2 rollback step>,g2b=<scenario B run with the G2 rollback step>,b3=<B3 two-shard live lane evidence dir> \
+  -lane <scenario A evidence dir> -lanes b=<scenario B evidence dir>,a2=<heavy on root 2>,a3=<heavy on root 3>,a4=<heavy on root 4>,q3=<Q3 weight-activation lane evidence dir>,g2=<scenario A run with the G2 rollback step>,g2b=<scenario B run with the G2 rollback step>,b3=<B3 two-shard live lane evidence dir>,to=<scenario A run with the identity turnover, Q4_TURNOVER=1> \
   -out out/report.md -json out/report.json
 ```
 
@@ -93,8 +93,10 @@ Before any fault the lane also checks that the selector in effect is the weighte
   archive acknowledgements, and an EVM node whose paired root is cut off cannot verify the blocks it is asked to acknowledge, so the EVM round can stand still while the roots
   correctly keep their quorum (scenario A run `q4-live-20261009T062325Z`: two lights isolated, EVM round stuck at 45 while the roots kept committing). The EVM pipeline is
   judged in the baseline, in the EVM-only rows (roots intact) and in the recoveries that require certified EVM blocks (quorum-wide restart, EVM outage and cut heals).
-- **The A to B handoff reweights the same four entities.** The design's A to B replaces coupled entity c by a new entity d; the four-entity devnet has no fifth entity,
-  so the live handoff is (6,1,1,1) to (3,3,2,1) over the same identities and the identity turnover stays an explicit gap (F17, `REAL-PROCESS (turnover)`).
+- **The A to B handoff is run in two forms.** The base scenario A run reweights the same four entities, (6,1,1,1) to (3,3,2,1). The run with `Q4_TURNOVER=1`
+  (lane `to`) is the design's A to B: coupled entity 4 (root and EVM validator) is replaced by a new coupled entity 5 on the chain the A rows ran on (F17,
+  `REAL-PROCESS (turnover)`). The three aggregator shards keep their earlier root list and trust base in that run and are not checked after B: the turnover claim
+  is for the roots and the EVM shard.
 - **The EVM-only partition is a cut at the roots.** The roots' shard gates hold the pair's certification traffic both ways; the EVM nodes' peer-to-peer links among
   themselves and their RPC paths stay up. The EVM outage is an orderly stop of the pair (shard node and Ureth), not a SIGKILL.
 - **Authentication refusals are representatives, one per variant, sent next to the forger's own timeouts and votes** while the heavy (A) or one weight-3 root (B) is held, so
@@ -115,5 +117,6 @@ Before any fault the lane also checks that the selector in effect is the weighte
 - Every in-process row is root consensus only: no EVM, no aggregator shard, restarts are close/reopen of fsynced stores (not SIGKILL, not
   power loss). The checker does not re-verify the signatures inside a carried QC (it weighs the QC's signers under their epoch); carried TCs and the HighQC inside a timeout are not weighed; equivocation is detected for votes and timeouts only, not proposals.
 - **The F8 EVM stop/resume callbacks are evidenced only in the lane preamble, in the unit epoch.** In the weighted epoch the lane shows that the aggregator shards stay served (their authorized TR rounds advance and the aggregators answer) and that each of the three shards certifies a new state root whose non-empty `aggregator_rsmt_v1` proof the root that receives the certification request verifies (row T1; the recorded run is on a head before #547 and shows the check at intake, by one root, not by each root in consensus: the step name and its record say "the roots"; that every voting root re-verifies the proof before it votes is #545, fixed by #547 and covered by its tests, not by this run; the same step also passes on a post-#547 head (`-lanes g2=<dir>`), where still only the receiving root logs the check, because the re-verification before voting writes no log line; the proof of a non-first block was empty before #539/#541 and #532). The lane does not stop the EVM in the weighted epoch.
-- No non-member or removed-validator root runs in the live lane (all four roots stay members): the follower signing nothing and catching up on a real network is an explicit gap (row L5), blocked on the P85 slice 7 joiner run or an A to B removal handoff.
+- Non-member roots run only in the turnover run (lane `to`, row L5): the joiner's root before its install and the replaced entity's root after it each report follower
+  and sign nothing. A follower root does not track the committee's rounds (#550): the joiner becomes a member by its install restart, not by catching up while running.
 - Mixed-HighQC TC is covered only by the unit-weight unit test, not weighted.

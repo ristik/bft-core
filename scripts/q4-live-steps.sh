@@ -29,6 +29,13 @@ export Q3_LANE_DEFINE_ONLY=1
 source scripts/q3-weight-activation-steps.sh
 unset Q3_LANE_DEFINE_ONLY
 source scripts/lib/q4-lib.sh
+# the joiner helpers of the H3/T6 lanes (h3_q3_trust_base, h3_q3_start_joiner, h3_q3_joiner_shard_restore, h3_q3_wait_joiner) for the turnover.
+# That library also defines the H3 flavour of q3_build_assignment (unit weights); the Q3 lane's weighted one stays the lane's.
+eval "$(declare -f q3_build_assignment | sed '1s/^q3_build_assignment/q4_q3_build_assignment_weighted/')"
+source scripts/lib/h3-q3-lib.sh
+eval "$(declare -f q4_q3_build_assignment_weighted | sed '1s/^q4_q3_build_assignment_weighted/q3_build_assignment/')"
+# the validators that are up are the lane's H3_ONLINE (the library's fixed 1..4 names a stopped validator and omits the joiner under the turnover)
+m2_online_validators() { echo "${H3_ONLINE:-1 2 3 4}"; }
 
 Q4_DIR=test-nodes/q4
 Q4_ROOTS=${Q4_ROOTS:-"1 2 3 4"}
@@ -47,7 +54,32 @@ q4_teardown() {
   return 0
 }
 q4_die() { echo "  FAIL: $*" >&2; q4_teardown; exit 1; }
-q4_step() { local name=$1; shift; Q4_CUR_STEP=$name; echo "--- Q4 step: $name"; "$@" || q4_die "$name"; q4_pass "$name"; }
+# Q4_DEV_RETRY=1 (development only, never evidence): a failed step does not tear the devnet down at once. The lane waits up to Q4_DEV_RETRY_SECONDS
+# (default 900) for test-nodes/q4/retry (re-source this file, so an edited step is picked up, and run the step again on the kept chain) or
+# test-nodes/q4/abort. The lane's own state survives the re-source. One lock slot then serves several fixes of the same step.
+# A step that restarts processes (q4_first_successor_held) is not the same experiment on its second pass: its retry tells whether the fix parses and
+# gets further, not what a first pass would have shown.
+q4_dev_retry() {
+  [ "${Q4_DEV_RETRY:-0}" = 1 ] || return 1
+  local i w=$Q3_WEIGHTS w1=${Q3_WEIGHTS_1:-} e=${Q4_EPOCH:-} hs=$Q4_HEAVY_ROOTS h=$Q4_HEAVY_ROOT hr=$H3_ROOTS qr=$Q4_ROOTS ents=${Q3_ENTITIES:-} dir=$Q4_DIR
+  echo "DEVELOPMENT (NOT EVIDENCE): step failed, devnet kept: touch $Q4_DIR/retry to re-source the steps and run it again, $Q4_DIR/abort to stop (${Q4_DEV_RETRY_SECONDS:-900}s)"
+  rm -f "${Q4_DIR:?}/retry" "${Q4_DIR:?}/abort"
+  for i in $(seq 1 "${Q4_DEV_RETRY_SECONDS:-900}"); do
+    [ ! -f "$Q4_DIR/abort" ] || return 1
+    if [ -f "$Q4_DIR/retry" ]; then
+      rm -f "${Q4_DIR:?}/retry"
+      Q4_LANE_DEFINE_ONLY=1 source scripts/q4-live-steps.sh || return 1
+      Q3_WEIGHTS=$w; Q3_WEIGHTS_1=$w1; Q4_EPOCH=$e; Q4_HEAVY_ROOTS=$hs; Q4_HEAVY_ROOT=$h; H3_ROOTS=$hr; Q4_ROOTS=$qr; Q4_DIR=$dir
+      if [ -n "$ents" ]; then Q3_ENTITIES=$ents; else unset Q3_ENTITIES; fi
+      echo "DEVELOPMENT: steps re-sourced; running the step again"
+      return 0
+    fi
+    sleep 1
+  done
+  echo "DEVELOPMENT: no retry within ${Q4_DEV_RETRY_SECONDS:-900}s" >&2
+  return 1
+}
+q4_step() { local name=$1; shift; Q4_CUR_STEP=$name; echo "--- Q4 step: $name"; until "$@"; do echo "  step failed: $name" >&2; q4_dev_retry || q4_die "$name"; done; q4_pass "$name"; }
 
 q4_round() { curl -fsS "http://127.0.0.1:$(m2_rpc_port "$1")/api/v1/roundInfo" | jq -r '.roundNumber'; }
 # the certified IR round of the EVM shard (partition 8): moves only when a block is certified, never by a timeout certificate alone
@@ -367,10 +399,14 @@ PY
   done
   local evmExpiries=0
   for i in 1 2 3 4; do evmExpiries=$((evmExpiries + $(tail -n +"$((${marks[$((i - 1))]} + 1))" "test-nodes/evm$i/debug.log" | grep -ac 'inactivity timeout exceeded' || true))); done
-  python3 - "$out" "$summary" "$t2ms" "$evmExpiries" <<'PY' || return 1
+  # the certificates the sampled execution client's validator admitted in the window, as "height rootRound": a block certified by a root round that was
+  # already committed when the window opened (the held heavy root's last certificate, delivered late on the validator's re-subscription) is not a retry
+  tail -n +"$((${marks[0]} + 1))" test-nodes/evm1/debug.log | grep -a 'msg="certificate admitted"' | sed -n 's/.* height=\([0-9]*\) .* rootRound=\([0-9]*\) .*/\1 \2/p' >"$Q4_DIR/t2-admitted.txt"
+  python3 - "$out" "$summary" "$t2ms" "$evmExpiries" "$Q4_DIR/t2-admitted.txt" <<'PY' || return 1
 import json, sys
 path, summary, t2ms, expiries = sys.argv[1], sys.argv[2], int(sys.argv[3]), int(sys.argv[4])
 rows = [json.loads(l) for l in open(path) if l.strip()]
+admitted = {int(h): int(rr) for h, rr in (l.split() for l in open(sys.argv[5]) if l.strip())}
 span = rows[-1]["elapsed_s"] - rows[0]["elapsed_s"]
 # progress is a value above the highest any root held when the window opened; a lagging root catching up to an
 # already-certified round is not a retry
@@ -387,15 +423,19 @@ for row in rows[1:]:
             elif v != first[r["root"]][k]:
                 caught.add(f"root{r['root']} {k} {first[r['root']][k]} -> {v}")
     if row["evm_height"] != rows[0]["evm_height"]:
-        moved.append(f"EVM height {rows[0]['evm_height']} -> {row['evm_height']} at {row['elapsed_s']:.1f}s")
+        by = admitted.get(row["evm_height"])
+        if by is not None and by <= top["round"]:
+            caught.add(f"EVM height {rows[0]['evm_height']} -> {row['evm_height']} by the certificate of root round {by}, committed before the window opened (highest committed round then: {top['round']})")
+        else:
+            moved.append(f"EVM height {rows[0]['evm_height']} -> {row['evm_height']} at {row['elapsed_s']:.1f}s" + (f" (root round {by})" if by is not None else " (no admitted certificate found)"))
 lines = [f"root quorum lost for {span:.1f}s of samples (after a 5 s drain); EVM T2 = {t2ms} ms: the local T2 expiry fell at most {t2ms / 1000:.1f}s into the window,",
          f"the window ran {span - t2ms / 1000:.1f}s past it ({span / (t2ms / 1000):.1f} T2 periods); EVM nodes' local inactivity expiries logged in the window: {expiries}"]
 for r in rows[0]["roots"]:
     lines.append(f"  root{r['root']}: epoch {r['epoch']}, committed round {r['round']}; EVM shard IR round {r['evm']['ir']}, TR round {r['evm']['tr']}")
 lines.append(f"  EVM height {rows[0]['evm_height']}")
 if caught:
-    lines.append("caught up to values already held by another root (not progress): " + "; ".join(sorted(set(caught))))
-lines.append("moved during the window: " + ("; ".join(moved) if moved else "nothing (no root round, no EVM IR/TR round, no EVM block): no root-certified retry"))
+    lines.append("caught up to values already certified when the window opened (not progress): " + "; ".join(sorted(set(caught))))
+lines.append("moved during the window: " + ("; ".join(moved) if moved else "nothing beyond what was certified before the window (no new root round, EVM IR/TR round or EVM block): no root-certified retry"))
 open(summary, "w").write("\n".join(lines) + "\n")
 print("\n".join(lines))
 if span < 3 * t2ms / 1000:
@@ -488,13 +528,28 @@ q4_g2_urls() { local i; for i in 1 2 3 4; do printf '%s ' "http://127.0.0.1:$((r
 q4_g2_sample() { # phase t0: one line of every pair's latest and finalized block
   python3 scripts/q4-g2-rollback.py heads $(q4_g2_urls) | jq -c --arg p "$1" --arg e "$(q4_dt "$(q4_t)" "$2")" '{phase: $p, elapsed_s: ($e | tonumber), pairs: .}' >>"$Q4_DIR/g2-rollback/samples.jsonl"
 }
+# After the request hold is armed a request the roots had already admitted is still certified, some root rounds later (4.7 s in one run, which a fixed
+# 3 s wait missed: the step then anchored on a parent that was about to be superseded). Wait until the first pair's head has not moved for
+# Q4_G2_SETTLE_SECONDS (default 12, several times the certification latency), at most 90 s.
+q4_g2_settle() {
+  local h prev="" still=0 i
+  for i in $(seq 1 90); do
+    h=$(q4_evm_height 1) || return 1
+    if [ "$h" = "$prev" ]; then still=$((still + 1)); else still=0; prev=$h; fi
+    [ "$still" -ge "${Q4_G2_SETTLE_SECONDS:-12}" ] && return 0
+    sleep 1
+  done
+  echo "the EVM head kept moving for 90 s under the request hold (last height $prev)" >&2
+  return 1
+}
 q4_row_g2_rollback() {
   local dir=$Q4_DIR/g2-rollback rule=g2hold$Q4_EPOCH observer=$Q4_HEAVY_ROOT i t0 logs=() urls=() head parent height sender nonce tx sent kids n=0 carried=0 tr0 tr=0 pair
   rm -rf "$dir"; mkdir -p "$dir"
   # the log marks are taken before the hold, so every block sealed on the parent during the settle below is listed
   for i in 1 2 3 4; do logs+=("test-nodes/evm$i/debug.log:$(wc -l <"test-nodes/evm$i/debug.log" | tr -d ' ')"); urls+=(--url "http://127.0.0.1:$((rethEthBase + i - 1))"); done
   Q4_SHARD_TYPES=request q4_shard_hold "$rule" "$Q4_ROOTS" in 8 || return 1
-  sleep 3   # requests already past the gate are answered; from here nothing the shard builds can be certified
+  # requests already past the gate are still answered: the parent is taken only once the head has stood still, so nothing the shard builds on it can be certified
+  q4_g2_settle || return 1
   t0=$(q4_t)
   head=$(python3 scripts/q4-g2-rollback.py heads $(q4_g2_urls)) || return 1
   [ "$(printf '%s' "$head" | jq -r '[.[] | .latest.hash, .finalized.hash] | unique | length')" = 1 ] || { echo "the pairs do not agree on one finalized head under the hold: $head" >&2; return 1; }
@@ -674,22 +729,202 @@ q4_row_auth_refusals() {
 Q4_B_WEIGHTS="3 3 2 1"
 q4_handoff_ab() { q3_handoff_n 2 3 "$Q4_B_WEIGHTS" 0 "$Q3_DIR/cand-identities.json"; }
 
+# ---- F17 turnover and L5 non-members (Q4_TURNOVER=1) ---------------------------------------------------------------------------------------------
+# The design's A to B (v2 section 2): old {H:6,a:1,b:1,c:1} -> new {H:3,a:3,b:2,d:1}. Coupled entity c (root and EVM validator 4, Q4_OUT) is replaced by a
+# new coupled entity d (5, Q4_IN); H, a, b (entities 1 2 3) are retained and hold 8 of 9 in the old map and 8 of 9 in the new one (Q=7 in both). The
+# joiner's stack comes from the H3/T6 helpers (scripts/lib/h3-q3-lib.sh): d's root runs as a follower and its shard node staging-only BEFORE the Commit.
+# After the Commit d's root restarts into epoch 3 first, the retained roots follow, and c's root is restarted into epoch 3 as well and kept running: it
+# is then a removed validator, a root the committee does not name.
+# L5 (non-member, live): d's root before the Commit and c's root after the install each report follower, are refused every signature by their own
+# membership gate and sign nothing; c's identity is in no epoch-3 certificate. What is NOT shown: a follower tracking the committee's rounds (#550: a root
+# the committee does not name receives no consensus message; it reaches the new epoch through its install restart, not by catching up round by round).
+Q4_TURNOVER=${Q4_TURNOVER:-0}
+Q4_OUT=4; Q4_IN=5
+Q4_B_ENTITIES="1 2 3 $Q4_IN"
+
+# The successor identity records under a turnover: the retained entities keep their own records (staking id, payee, exposure digest) with the new
+# weights; the joiner has no earlier record, so its record is generated for the successor set (as the H3 lane does), with its weight. Outside a
+# turnover this is the Q3 lane's function unchanged.
+eval "$(declare -f q3_successor_identities | sed '1s/^q3_successor_identities/q3_successor_identities_same/')"
+q3_successor_identities() { # out ids...
+  [ -n "${Q4_TURNOVER_ACTIVE:-}" ] || { q3_successor_identities_same "$@"; return; }
+  local out=$1 tag=${1%-identities.json} id w=; shift
+  for id in "$@"; do w+="${w:+,}\"$(h3_root_id "$id")\":$(q3_weight_of "$id")"; done
+  H3_BIND_ROOTS="$*" h3_bindings_json "$tag-bindings.json" "$@" || return 1
+  h3_successor_identities "$tag-identities-generated.json" "${Q3_NEXT_EPOCH:?}" "$tag-validators.json" "$tag-bindings.json" || return 1
+  jq --argjson w "{$w}" --slurpfile old "${Q3_INCUMBENT:?}" '
+    ($old[0] | map({key: .rootNodeId, value: .}) | from_entries) as $kept
+    | map(($kept[.rootNodeId] // .) | .weight = $w[.rootNodeId] | .rawWeight = $w[.rootNodeId])' "$tag-identities-generated.json" >"$out" || return 1
+  [ "$(jq 'length' "$out")" = "$#" ] && [ "$(jq '[.[] | select(.weight == null)] | length' "$out")" = 0 ] || { echo "successor identity records do not cover the successor set: $out" >&2; return 1; }
+}
+
+q4_status_of() { curl -fsS -m 5 -X POST -H 'content-type: application/json' -d '{}' "$(h3_rpc_url "$1")/api/v1/q3/status"; }
+# q4_non_member <root> <epoch> <mark> <label>: the root reports follower, its membership gate refused at least one signature in that epoch since the log
+# mark, and it signed nothing since the mark
+q4_non_member() {
+  local root=$1 epoch=$2 mark=$3 label=$4 log="test-nodes/root$1/debug.log" refused signed st
+  st=$(q4_status_of "$root") || { echo "root$root does not answer its status" >&2; return 1; }
+  [ "$(printf '%s' "$st" | jq -r .follower)" = true ] || { echo "root$root does not report follower ($label): $st" >&2; return 1; }
+  refused=$(tail -n +"$((mark + 1))" "$log" | grep -ac "it follows and signs nothing: epoch $epoch" || true)
+  signed=$(tail -n +"$((mark + 1))" "$log" | grep -acE 'msg="(signed vote|signed timeout vote|broadcast proposal|broadcast timeout vote)"' || true)
+  [ "$refused" -gt 0 ] || { echo "root$root logged no refused signature in epoch $epoch ($label): the membership gate was not reached" >&2; return 1; }
+  [ "$signed" = 0 ] || { echo "root$root signed or broadcast $signed consensus message(s) as a non-member ($label)" >&2; return 1; }
+  echo "root$root ($(h3_root_id "$root")) $label: reports follower; $refused signature(s) refused by its membership gate in epoch $epoch; signed votes, timeouts and proposals: 0; committed round $(q4_round "$root" 2>/dev/null || echo '?')" | tee -a "$Q4_DIR/non-members.txt"
+}
+
+# The joiner's staging-only restore at its readiness turn. The restore fetches every block from the pinned tip back to genesis from the two replicas
+# before it replays any, and serves its status only after the replay: the wait grows with the chain (about 10 minutes at height 414 in the first
+# development run), so the budget is Q4_JOINER_RESTORE_SECONDS and the wait prints what the restore has retained so far.
+q4_joiner_restore() {
+  [ "$1" = "$Q4_IN" ] || return 0
+  local i=$Q4_IN n t0=$SECONDS
+  if ! { [ -f "test-nodes/evm$i/pid" ] && kill -0 "$(cat "test-nodes/evm$i/pid")" 2>/dev/null; }; then
+    EVM_ARCHIVE_REPLICA_POOL="1 2 3 $i" H3_ONLINE="1 2 3" H3_RESTORE_NO_SESSION=1 H3_RESTORE_TRUST_BASE=test-nodes/trust-base.json H3_RESTORE_LOG_LEVEL=debug \
+      h3_restore_validator "$i" 2 || return 1
+  fi
+  for n in $(seq 1 "${Q4_JOINER_RESTORE_SECONDS:-2700}"); do
+    if curl -fsS -m 5 -X POST -H 'content-type: application/json' -d '{}' "http://$(evm_validator_rpc_addr "$i")/api/v1/q3/status" >/dev/null 2>&1; then
+      echo "joiner evm$i restored and serving its status after $((SECONDS - t0))s (archive $(du -sk "$H3_ARCHIVES/evm$i" 2>/dev/null | cut -f1) KiB)"
+      return 0
+    fi
+    kill -0 "$(cat "test-nodes/evm$i/pid")" 2>/dev/null || { echo "the restoring joiner evm$i exited after $((SECONDS - t0))s" >&2; tail -30 "test-nodes/evm$i/debug.log" | cut -c1-400 >&2; return 1; }
+    [ $((n % 60)) != 0 ] || echo "joiner evm$i restoring: $((SECONDS - t0))s, archive $(du -sk "$H3_ARCHIVES/evm$i" 2>/dev/null | cut -f1) KiB, log lines $(wc -l <"test-nodes/evm$i/debug.log" | tr -d ' '), source height $(grep -a 'certificate admitted' test-nodes/evm1/debug.log | tail -1 | grep -o 'height=[0-9]*')"
+    sleep 1
+  done
+  echo "the restoring joiner evm$i never served its status within ${Q4_JOINER_RESTORE_SECONDS:-2700}s" >&2; tail -30 "test-nodes/evm$i/debug.log" | cut -c1-400 >&2
+  return 1
+}
+
+q4_handoff_ab_turnover() {
+  local next=3 in=$Q4_IN out=$Q4_OUT rc=0 i
+  : >"$Q4_DIR/non-members.txt"
+  # the retained weight in both maps, from the lane's own numbers (old: Q3_WEIGHTS over 1 2 3 4; new: Q4_B_WEIGHTS over Q4_B_ENTITIES)
+  # (and the turnover's weight distance against the budget the genesis configuration commits, which the product enforces when it derives the candidate)
+  local budget; budget=$(jq -r '.partitionParams.continuity_max_distance' "$fullShardConf") || return 1
+  python3 - "$Q3_WEIGHTS" "$Q4_B_WEIGHTS" "$Q4_B_ENTITIES" "$out" "$in" "$budget" <<'PY' | tee "$Q4_DIR/turnover-arithmetic.txt" || return 1
+import sys
+old = dict(zip("1 2 3 4".split(), map(int, sys.argv[1].split())))
+new = dict(zip(sys.argv[3].split(), map(int, sys.argv[2].split())))
+out, inn = sys.argv[4], sys.argv[5]
+kept = [e for e in old if e in new]
+W, V = sum(old.values()), sum(new.values())
+qo, qn = 2 * W // 3 + 1, 2 * V // 3 + 1
+ko, kn = sum(old[e] for e in kept), sum(new[e] for e in kept)
+dist = sum(abs(old.get(e, 0) * V - new.get(e, 0) * W) for e in set(old) | set(new))
+print(f"old map (root epoch 2): {old}, W={W}, Q={qo}")
+print(f"new map (root epoch 3): {new}, V={V}, Q={qn}")
+print(f"replaced: entity {out} (weight {old[out]}) by entity {inn} (weight {new[inn]}); changed identities 1 of {len(old)}")
+print(f"retained entities {kept}: old weight {ko} >= {qo}, new weight {kn} >= {qn}")
+num, den = (int(x) for x in sys.argv[6].split("/"))
+print(f"weight distance sum|w*V-v*W| = {dist} over V*W = {V * W}; committed budget continuity_max_distance = {num}/{den}: {'within' if dist * den <= num * V * W else 'ABOVE'} the budget")
+ok = set(old) - set(new) == {out} and set(new) - set(old) == {inn} and ko >= qo and kn >= qn and 3 * 1 < len(old)
+if not ok:
+    sys.exit("the turnover is not one-of-four with a retained quorum in both maps")
+sys.exit(0 if dist * den <= num * V * W else "the turnover's weight distance is above the committed budget")
+PY
+  H3_ONLINE="1 2 3 4"
+  # the joiner's restore is anchored at the genesis trust base and catches up through the verified handoffs; the activation of epoch 2 is not archived
+  # as a bundle, so the restore pin is told its V3 body identity (as the Q3 lane's second pair is)
+  H3_RESTORE_TRUST_BASE=test-nodes/trust-base.json
+  export H4_RESTORE_BODY_IDS="2=$(tr -d '[:space:]' <"$Q3_DIR/v3-body-id.txt")"
+  if [ ! -f "test-nodes/root$in/node-info.json" ]; then
+    build/ubft root-node init --home "test-nodes/root$in" -g >/dev/null || return 1
+    generate_log_configuration "test-nodes/root$in/"
+  fi
+  # the successor trust base: roots 1 2 3 and the joiner's with the B weights, signed by them (the replaced root does not sign)
+  Q3_WEIGHTS=$Q4_B_WEIGHTS h3_q3_trust_base "$next" "$Q4_B_ENTITIES" || { echo "the successor trust base was not built" >&2; return 1; }
+  # the joiner before the Commit: its root a follower of the epoch-2 committee, its authority pending at the successor scope, its execution client
+  # paired; it is a later joiner (one activation precedes it), so its shard node comes up by a staging-only restore at its readiness turn
+  [ -n "${Q4_JOINER_MARK:-}" ] || { Q4_JOINER_MARK=$(wc -l <"test-nodes/root$in/debug.log" 2>/dev/null | tr -d ' '); Q4_JOINER_MARK=${Q4_JOINER_MARK:-0}; }
+  # (a joiner whose root already answers as a follower is left as it is: the root's start is not idempotent, and a development retry re-enters here)
+  if [ "$(q4_status_of "$in" 2>/dev/null | jq -r .follower 2>/dev/null)" != true ]; then
+    EVM_ARCHIVE_REPLICA_POOL="1 2 3 $in" H3_ONLINE="1 2 3" h3_q3_start_joiner "$in" 2 "$next" "trust-base-epoch${next}.json" 2 || { echo "the joiner's stack did not start" >&2; return 1; }
+  fi
+  echo "joiner entity $in started before the Commit: root$in follows the epoch-2 committee"
+
+  Q3_WEIGHTS=$Q4_B_WEIGHTS; Q3_SUFFIX=-2; Q3_NEXT_EPOCH=$next; Q3_ASSIGN_TAG=cand2; Q3_INCUMBENT=$Q3_DIR/cand-identities.json; Q3_ENTITIES=$Q4_B_ENTITIES
+  Q4_TURNOVER_ACTIVE=1; unset Q3_SUPERSEDE
+  Q3_BEFORE_READINESS=q4_joiner_restore h3_retry_handoff $((next - 1)) q3_attempt || rc=1
+  if [ "$rc" = 0 ]; then
+    [ "$(jq -r .signingScheme "$Q3_DIR/candidate-config-2.json")" = 2 ] || { echo "the turnover handoff does not select scheme 2" >&2; rc=1; }
+    q3_check_weights set "$Q3_DIR/root-weights-2.json" "$Q3_TOTAL_WEIGHT" "$Q3_ROOT_QUORUM" >/dev/null || rc=1
+    q3_check_weights set-evm "$Q3_DIR/evm-weights-2.json" "$Q3_TOTAL_WEIGHT" "$Q3_EVM_QUORUM" >/dev/null || rc=1
+    # the committed candidate names the joiner and not the replaced entity, on both sides
+    for i in root evm; do
+      if [ "$i" = root ]; then set -- "$(h3_root_id "$in")" "$(h3_root_id "$out")"; else set -- "$(evm_validator_id "$in")" "$(evm_validator_id "$out")"; fi
+      jq -e --arg a "$1" --arg b "$2" '(map(.nodeId) | index($a)) != null and (map(.nodeId) | index($b)) == null' "$Q3_DIR/$i-weights-2.json" >/dev/null || {
+        echo "the $i weights of the committed candidate do not replace entity $out by entity $in: $(jq -c . "$Q3_DIR/$i-weights-2.json")" >&2; rc=1; }
+    done
+  fi
+  Q3_WEIGHTS=$Q3_WEIGHTS_1; unset Q3_SUFFIX Q3_NEXT_EPOCH Q3_ASSIGN_TAG Q3_INCUMBENT Q3_ENTITIES Q4_TURNOVER_ACTIVE
+  [ "$rc" = 0 ] || return 1
+  echo "handoff 2 (turnover) committed at root epoch $((next - 1)): entity $out out, entity $in in"
+}
+# L5, the joiner before its install: a follower of epoch 2 that signed nothing while the committee planned and committed the handoff that names it.
+# Its own step: the handoff step is not re-enterable after its Commit.
+q4_joiner_follows() {
+  [ -n "${Q4_JOINER_MARK:-}" ] || { echo "the joiner was not started by the turnover handoff" >&2; return 1; }
+  q4_non_member "$Q4_IN" 2 "$Q4_JOINER_MARK" "the joiner before its install (epoch 2 committee, handoff committed)"
+}
+
+# After the turnover's install restart: the replaced entity's root, restarted into epoch 3 over its retained home, is a removed validator. Its EVM
+# validator is stopped (the successor assignment does not name it). The committee commits without it.
+q4_removed_validator_follows() {
+  local out=$Q4_OUT base now i ids
+  [ -n "${Q4_OUT_MARK:-}" ] || { echo "the replaced root was not restarted by the turnover install" >&2; return 1; }
+  base=$(q4_round "$(h3_first_root)") || return 1
+  for i in $(seq 1 "$Q4_RECOVER_SECONDS"); do   # at least one local timeout of the removed root (its refused signature) while the committee commits
+    now=$(q4_round "$(h3_first_root)") || return 1
+    [ "$now" -ge $((base + 5)) ] && tail -n +"$((Q4_OUT_MARK + 1))" "test-nodes/root$out/debug.log" | grep -aq 'it follows and signs nothing: epoch 3' && break
+    sleep 1
+  done
+  [ "$now" -ge $((base + 5)) ] || { echo "the epoch-3 committee did not commit 5 rounds beside the removed root ($base -> $now)" >&2; return 1; }
+  q4_non_member "$out" 3 "$Q4_OUT_MARK" "the removed validator after the install (epoch 3 committee committed rounds $base -> $now beside it)" || return 1
+  # no epoch-3 certificate names it: the signers of the committee's current certificate, read from a member root's verified state
+  ids=$(q3_signers_of "$(h3_first_root)") || return 1
+  [ "$(printf '%s' "$ids" | jq -r .epoch)" = 3 ] || { echo "the first root's certificate is not of epoch 3" >&2; return 1; }
+  printf '%s' "$ids" | jq -e --arg id "$(h3_root_id "$out")" '[.. | strings] | index($id) == null' >/dev/null || { echo "the removed root's identity is in an epoch-3 certificate: $ids" >&2; return 1; }
+  echo "epoch-3 certificate at round $(printf '%s' "$ids" | jq -r .round): the removed root's identity is not among its signers" | tee -a "$Q4_DIR/non-members.txt"
+  # the joiner is now a member: it no longer reports follower and it signs
+  [ "$(q4_status_of "$Q4_IN" | jq -r .follower)" != true ] || { echo "the joiner's root still reports follower in epoch 3" >&2; return 1; }
+  grep -aq 'msg="signed vote"' <(tail -n +"$((Q4_IN_MARK + 1))" "test-nodes/root$Q4_IN/debug.log") || { echo "the joiner's root signed no vote in epoch 3" >&2; return 1; }
+  echo "root$Q4_IN ($(h3_root_id "$Q4_IN")) after the install: a member of epoch 3, no longer a follower, signs votes" | tee -a "$Q4_DIR/non-members.txt"
+}
+
 q4_first_successor_held() {
-  local r i hits=0 before t0
+  local r i hits=0 before t0 successors=$H3_ROOTS
+  [ "$Q4_TURNOVER" != 1 ] || successors=$Q4_B_ENTITIES
   for r in $H3_ROOTS; do
     before=$(q3_signers_of "$r" | jq -r .epoch) || return 1
     [ "$before" = 2 ] || { echo "root $r reports a certificate of epoch $before before its install restart into 3" >&2; return 1; }
+  done
+  # the rule goes to every root that can propose in epoch 3: the successor committee (under the turnover the joiner's root, not the replaced one)
+  for r in $successors; do
     q4_ctl "$r" "{'rules':[{'name':'succ3','class':'proposal','epoch':3,'action':'hold','require':true}]}" || return 1
   done
+  if [ "$Q4_TURNOVER" = 1 ]; then
+    # the replaced entity's EVM validator and the joiner's staging-only shard node stop before the roots install the successor set (the joiner's
+    # comes back by the post-install restore, with a session, in "B in effect")
+    stop_pidfile "test-nodes/evm$Q4_OUT/pid" 'ubft shard-node (run|restore)' INT || return 1
+    stop_pidfile "test-nodes/evm$Q4_IN/pid" 'ubft shard-node (run|restore)' INT || return 1
+  fi
   # h3_restart_roots' restart loop without its final wait: the committed head cannot reach epoch 3 while every successor proposal is held
-  local prev
-  for r in $H3_ROOTS; do
+  local prev order=$H3_ROOTS
+  # under the turnover the new root restarts first (h3_q3_activate_coupled's order), the retained roots follow, and the replaced root comes last: it is
+  # restarted into epoch 3 too and stays up as a removed validator (L5), holding no rule (it is not a member and proposes nothing)
+  [ "$Q4_TURNOVER" != 1 ] || order="$Q4_IN 1 2 3 $Q4_OUT"
+  for r in $order; do
     prev=$(echo "$H3_ROOTS" | tr ' ' '\n' | grep -vx "$r" | head -1)
     stop_pidfile "test-nodes/root$r/pid" 'ubft root-node' || return 1
     for _ in $(seq 1 50); do lsof -nP -iTCP:"$(m2_rpc_port "$r")" -sTCP:LISTEN >/dev/null 2>&1 || break; sleep 0.2; done
     m2_archive_root_state "$r" 3 || return 1
+    [ "$r" != "${Q4_OUT:-}" ] || [ "$Q4_TURNOVER" != 1 ] || Q4_OUT_MARK=$(wc -l <"test-nodes/root$r/debug.log" | tr -d ' ')
+    [ "$r" != "${Q4_IN:-}" ] || [ "$Q4_TURNOVER" != 1 ] || Q4_IN_MARK=$(wc -l <"test-nodes/root$r/debug.log" | tr -d ' ')
     m2_start_root "$r" 3 "$(m2_root_addr "$prev")" || { echo "root $r did not restart into epoch 3" >&2; return 1; }
   done
+  # from here the committee is the successor set: the lane's root lists follow it (the replaced root stays up, outside them)
+  # (the offline trace check still reads every root that ever ran: the Byzantine rows of epoch 2 armed the replaced root)
+  if [ "$Q4_TURNOVER" = 1 ]; then Q4_TRACE_ROOTS="1 2 3 $Q4_OUT $Q4_IN"; H3_ROOTS=$Q4_B_ENTITIES; Q4_ROOTS=$Q4_B_ENTITIES; fi
   for i in $(seq 1 120); do
     hits=0; for r in $H3_ROOTS; do hits=$((hits + $(q4_hits "$r" succ3))); done
     [ "$hits" -gt 0 ] && break
@@ -748,21 +983,65 @@ PY
 q4_b_in_effect() {
   local i
   q3_activation_n 2 3 || return 1
+  if [ "$Q4_TURNOVER" = 1 ]; then
+    # the retained validators' authorities advance to the activated scope; the joiner's authority is enrolled against it and the joiner's shard node
+    # is restored through it from a retained validator's archive (the replaced validator is no longer a valid replica)
+    # (online: the retained three until the joiner's restore; the joiner's shard node and the replaced one are stopped)
+    H3_ONLINE="1 2 3"; export EVM_ARCHIVE_REPLICA_POOL=$Q4_B_ENTITIES; Q3_ENTITIES=$Q4_B_ENTITIES
+    export H4_RESTORE_BODY_IDS="2=$(tr -d '[:space:]' <"$Q3_DIR/v3-body-id.txt"),3=$(tr -d '[:space:]' <"$Q3_DIR/v3-body-id-2.txt")"
+    H3_RESTORE_TRUST_BASE=test-nodes/trust-base.json
+    # no wait for replica acknowledgements: validators 2 and 3 name the joiner as a replica and it is down until its restore below
+    M2_ADVANCE_NO_REPLICA_WAIT=1 H3_RESTORE_RESTART= h3_advance_authorities 3 2 1 2 3 || { echo "authority advance to root epoch 3 / shard epoch 2 failed" >&2; return 1; }
+    h3_enroll_authority "$Q4_IN" 2 || { echo "enrolling the joiner's authority failed" >&2; return 1; }
+    H3_RESTORE_LOG_LEVEL=debug h3_restore_validator "$Q4_IN" 2 || { echo "the joiner's shard node was not restored" >&2; return 1; }
+  else
   M2_ADVANCE_NO_REPLICA_WAIT=0 h3_advance_authorities 3 2 1 2 3 4 || { echo "authority advance to root epoch 3 / shard epoch 2 failed" >&2; return 1; }
+  fi
   for i in $(seq 1 180); do h3_registry_is 2 3 && break; sleep 1; done
   h3_registry_is 2 3 || { echo "registry did not reach shard epoch 2 / root epoch 3" >&2; return 1; }
   # from here the lane's own view of the committee is B: the weighted-epoch gate, the heavy roots and the restart epoch follow it
   Q3_WEIGHTS=$Q4_B_WEIGHTS; Q4_EPOCH=3; Q4_HEAVY_ROOTS="1 2"; Q4_HEAVY_ROOT=1
   Q4_GATE_CANDIDATE=$Q3_DIR/candidate-config-2.json q4_weighted_epoch_check | tee "$Q4_DIR/b-in-effect.txt" || return 1
+  # under the turnover the joiner's EVM validator has caught up and takes part before the paid transaction goes to every online validator, it included
+  if [ "$Q4_TURNOVER" = 1 ]; then q4_evm_joiner_participates || return 1; H3_ONLINE=$Q4_B_ENTITIES; fi
   h3_paid 3 || { echo "post-handoff paid transaction was not certified at root epoch 3" >&2; return 1; }
   q3_evm_request_weights_since_b
+}
+
+# Under the turnover the joiner's EVM validator is restored after the install. B in effect on the EVM side means it takes part: a root counts its
+# certification request in an epoch-3 consensus of the EVM shard, and its own journal admits a certificate of root epoch 3.
+q4_evm_joiner_participates() {
+  local id line="" n r
+  id=$(evm_validator_id "$Q4_IN") || return 1
+  for n in $(seq 1 "${Q4_JOINER_RESTORE_SECONDS:-2700}"); do
+    for r in $H3_ROOTS; do
+      line=$(grep -a 'partition 00000008 reached consensus' "test-nodes/root$r/debug.log" | grep -a "requestNodeIDs=\"\[[^]]*$id" | tail -n 1)
+      [ -z "$line" ] || break
+    done
+    [ -n "$line" ] && grep -Eaq 'msg="certificate admitted" .*rootEpoch=3([[:space:]]|$)' "test-nodes/evm$Q4_IN/debug.log" && break
+    kill -0 "$(cat "test-nodes/evm$Q4_IN/pid")" 2>/dev/null || { echo "the joiner's EVM validator exited" >&2; tail -30 "test-nodes/evm$Q4_IN/debug.log" | cut -c1-400 >&2; return 1; }
+    # a joiner that admits certificates of the new epoch and still refuses to sign for want of a bound key will not start signing by waiting
+    if [ $((n % 15)) = 0 ] && grep -Eaq 'msg="certificate admitted" .*rootEpoch=3([[:space:]]|$)' "test-nodes/evm$Q4_IN/debug.log" &&
+       [ "$(tail -n 400 "test-nodes/evm$Q4_IN/debug.log" | grep -ac "expected key is not bound yet")" -ge 5 ]; then
+      echo "the joiner's EVM validator admits epoch-3 certificates and abstains from every vote: its signing key is not bound" >&2; return 1
+    fi
+    [ $((n % 60)) != 0 ] || echo "waiting for the joiner's EVM validator to take part: ${n}s, log lines $(wc -l <"test-nodes/evm$Q4_IN/debug.log" | tr -d ' ')"
+    sleep 1
+  done
+  [ -n "$line" ] || { echo "no root counted a certification request of the joiner's EVM validator $id" >&2; tail -30 "test-nodes/evm$Q4_IN/debug.log" | cut -c1-400 >&2; return 1; }
+  grep -Eaq 'msg="certificate admitted" .*rootEpoch=3([[:space:]]|$)' "test-nodes/evm$Q4_IN/debug.log" || { echo "the joiner's EVM validator admitted no certificate of root epoch 3" >&2; return 1; }
+  { echo "the joiner's EVM validator $id is counted by root$r: ${line#*msg=}" | cut -c1-600
+    echo "evm$Q4_IN: $(grep -Ea 'msg="certificate admitted" .*rootEpoch=3([[:space:]]|$)' "test-nodes/evm$Q4_IN/debug.log" | tail -n 1 | sed 's/.*msg=//' | cut -c1-200)"; } | tee "$Q4_DIR/b-evm-joiner.txt"
 }
 
 # the roots' weighted EVM consensus lines since the handoff verify against the B weights (W=9, Q=5)
 q3_evm_request_weights_since_b() {
   local out=$Q4_DIR/b-evm-request-weights.txt i
   : >"$out"
-  for i in 1 2 3 4; do q3_check_request_weights "$Q3_EVM_TOTAL_WEIGHT" "$Q3_EVM_QUORUM" "test-nodes/root$i/debug.log" >>"$out" 2>/dev/null || true; done
+  # every root of the committee must show checked lines: a root whose lines fail the check is not dropped silently
+  for i in $H3_ROOTS; do
+    q3_check_request_weights "$Q3_EVM_TOTAL_WEIGHT" "$Q3_EVM_QUORUM" "test-nodes/root$i/debug.log" >>"$out" || { echo "root $i: its weighted EVM consensus lines do not verify (or it has none)" >&2; return 1; }
+  done
   [ -s "$out" ] || { echo "no weighted EVM consensus line in any root log" >&2; return 1; }
 }
 
@@ -799,10 +1078,14 @@ PY
 }
 
 q4_row_trace_check() {
-  local roots; roots=$(echo $Q4_ROOTS | tr ' ' ',')
+  local list=${Q4_TRACE_ROOTS:-$Q4_ROOTS} roots r peers=() windows=(--byz-windows "$Q4_DIR/byz-windows.jsonl")
+  roots=$(echo $list | tr ' ' ',')
+  for r in $list; do peers+=(--peer "$r=$(q4_peer "$r")"); done
+  # a development run that skips the fault rows armed no Byzantine adapter and wrote no windows file
+  [ "${Q4_DEV_SKIP_FAULT_ROWS:-0}" != 1 ] || [ -f "$Q4_DIR/byz-windows.jsonl" ] || windows=()
   # a SIGKILLed root's torn last trace line is dropped by the checker's loader only if it is the final line. The declared Byzantine set is the union of the rows' sets; the
   # windows hold every equivocation in the traces to the row that armed it.
-  python3 scripts/q4-trace-check.py "$Q4_SHIM_DIR" --roots "$roots" ${Q4_BYZ_ROOTS:+--byzantine "$Q4_BYZ_ROOTS"} --byz-windows "$Q4_DIR/byz-windows.jsonl" $(q4_peer_args) \
+  python3 scripts/q4-trace-check.py "$Q4_SHIM_DIR" --roots "$roots" ${Q4_BYZ_ROOTS:+--byzantine "$Q4_BYZ_ROOTS"} ${windows[@]+"${windows[@]}"} "${peers[@]}" \
     | tee "$Q4_DIR/trace-report.json" | jq -e '.verdict == "PASS"' >/dev/null
 }
 
@@ -864,6 +1147,7 @@ q4_run_lane() {
   q4_step "F8 aggregator shards stay served by the weighted epoch (authorized TR rounds advance, aggregators answer)" q4_row_f8_follow
   q4_step "F8 aggregator shards certify new state roots in the weighted epoch; the roots verify their rsmt proofs (T1)" q4_row_f8_new_roots
   if [ "$Q4_SCENARIO" = A ]; then
+   if [ "${Q4_DEV_SKIP_FAULT_ROWS:-0}" = 1 ]; then echo "DEVELOPMENT OVERRIDE: scenario A's fault rows before the handoff are skipped: NOT EVIDENCE"; else
     q4_step "one light root isolated (held both ways): 8 of 9 progresses, heal releases" q4_row_light_partition
     q4_step "two lights isolated: heavy and one light (7 = Q) progress, heal releases" q4_row_two_lights_partition
     q4_step "all lights isolated: heavy alone (6) and the lights (3) both stall, heal releases" q4_row_all_lights_partition
@@ -883,8 +1167,17 @@ q4_run_lane() {
     q4_step "reorder on the network: the heavy root's held traffic released last-in-first-out: recovery" q4_row_reorder
     q4_step "authentication refusals: impersonation of the heavy, unknown signer, bad signature, wrong domain, old form, wrong epoch both ways, stale: each refused, zero live weight" q4_row_auth_refusals
     q4_step "quorum-wide restart: every root SIGKILLed and restarted together over its retained home: roots and EVM recover" q4_row_quorum_restart
-    q4_step "F17: second handoff A to B committed on the running chain (the four entities reweighted 6,1,1,1 -> 3,3,2,1)" q4_handoff_ab
+   fi
+    if [ "$Q4_TURNOVER" = 1 ]; then
+      q4_step "F17 turnover: second handoff A to B committed on the running chain: entity c replaced by a new entity d (6,1,1,1 -> 3,3,2,1), the retained three hold 8 of 9 in both maps" q4_handoff_ab_turnover
+      q4_step "L5: the joiner's root, running beside the epoch-2 committee through the handoff that names it, follows and signs nothing before its install" q4_joiner_follows
+    else
+      q4_step "F17: second handoff A to B committed on the running chain (the four entities reweighted 6,1,1,1 -> 3,3,2,1)" q4_handoff_ab
+    fi
     q4_step "F17: the first successor proposal held across the install restart into epoch 3; release, epoch 3 commits" q4_first_successor_held
+    if [ "$Q4_TURNOVER" = 1 ]; then
+      q4_step "L5: the removed validator's root, restarted into epoch 3, follows and signs nothing while the new committee commits; the joiner's root is a member and signs" q4_removed_validator_follows
+    fi
     q4_step "F17: B in effect: epoch 3 activated and acknowledged, scheme 2 certificates of 3,3,2,1, paid transaction certified" q4_b_in_effect
     q4_step "F17 B: the EVM pair of one weight-3 entity cut from every root (6 >= request Q=5): EVM certifies; heal without rollback" q4_row_evm_cut progress 1
     q4_step "F17 B: the EVM pairs of both weight-3 entities cut from every root (3 < request Q=5): EVM stalls, roots commit; heal without rollback" q4_row_evm_cut stall 1 2
@@ -909,4 +1202,29 @@ q4_run_lane() {
   echo "Q4 live lane: all steps PASSED"
   q4_teardown
 }
-[ "${Q4_LANE_DEFINE_ONLY:-0}" = 1 ] || q4_run_lane
+# q4_unresolved <function>...: every command name a function body calls, transitively through the lane's own functions, that is neither a function,
+# a builtin nor a program on PATH. Read from `declare -f` (one command per line): the first word of each line and of each list or substitution.
+# Leading `NAME=value` words of a command are skipped (the command is the word after them).
+# The dry run uses it, so a helper that is not sourced is found without a devnet.
+q4_unresolved() {
+  local -a todo=("$@"); local seen=" " fn w
+  while [ "${#todo[@]}" -gt 0 ]; do
+    fn=${todo[0]}; todo=("${todo[@]:1}")
+    case "$seen" in *" $fn "*) continue ;; esac
+    seen+="$fn "
+    declare -F "$fn" >/dev/null || { echo "$fn"; continue; }
+    for w in $(declare -f "$fn" | sed '1,2d;$d' | awk "/<<'?PY'?/ {skip=1; print; next} /^PY\$/ {skip=0; next} !skip" \
+      | sed -E -e ':a' -e 's/(^[[:space:]]*|[;&|(][[:space:]]*|(^|[[:space:]])(if|then|do|else|elif|while|until|!)[[:space:]]+)[A-Za-z_][A-Za-z0-9_]*=("[^"]*"|\$\([^)]*\)|[^[:space:];|&]*)[[:space:]]+/\1/' -e 'ta' \
+      | grep -oE "(^[[:space:]]*|[;&|(][[:space:]]*|(^|[[:space:]])\\{[[:space:]]+|\\$\\([[:space:]]*|(^|[[:space:]])(if|then|else|elif|do|while|until|!)[[:space:]]+)[A-Za-z_][A-Za-z0-9_]*=?" \
+      | grep -v '=$' | grep -oE '[A-Za-z_][A-Za-z0-9_]*$' | grep -E '_' | grep -vE '^[A-Z0-9_]+$' | sort -u); do
+      case "$w" in *_*) ;; *) continue ;; esac
+      if declare -F "$w" >/dev/null; then todo+=("$w"); elif ! type -t "$w" >/dev/null 2>&1; then
+        case "$seen" in *" $w "*) ;; *) seen+="$w "; echo "$w (called by $fn)" ;; esac
+      fi
+    done
+  done
+}
+# Sourcing this file defines the lane and runs nothing. The lane itself starts only in the queued runner's process tree: scripts/q4-live-lane.sh
+# sets Q4_LANE_LOCKED=1 when it holds the devnet lock, and its devnet script is what sources this file there.
+q4_lane_may_run() { [ "${Q4_LANE_LOCKED:-0}" = 1 ] && [ "${Q4_LIVE_LANE:-0}" = 1 ] && [ "${Q4_LANE_DEFINE_ONLY:-0}" != 1 ]; }
+if q4_lane_may_run; then q4_run_lane; fi
