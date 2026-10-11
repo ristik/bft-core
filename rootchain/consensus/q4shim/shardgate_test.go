@@ -107,6 +107,20 @@ func TestShardGate(t *testing.T) {
 		g.apply(ShardControl{Gen: 3, Rules: []ShardRule{{Name: "delay", Direction: In, Partition: 8, Action: Hold}}, Releases: []Release{{ID: "r1", Rule: "delay"}}})
 		require.Nil(t, g.next(), "a release id is performed once")
 	})
+	t.Run("a rule with message types holds only those: requests are held while the same node's handshakes pass", func(t *testing.T) {
+		g := newGateFixture(t)
+		g.apply(ShardControl{Gen: 1, Rules: []ShardRule{{Name: "req", Direction: In, Partition: 8, Types: []string{"request"}, Action: Hold, Require: true}}})
+		g.inner.in <- request(8, "n1", 4)
+		g.inner.in <- &handshake.Handshake{PartitionID: 8, NodeID: "n1"}
+		require.IsType(t, &handshake.Handshake{}, g.next(), "the handshake passes")
+		require.Nil(t, g.next(), "the request is held")
+		require.Equal(t, 1, g.gate.Status().Held["req"])
+		g.apply(ShardControl{Gen: 2, Rules: []ShardRule{{Name: "req", Direction: In, Partition: 8, Types: []string{"request"}, Action: Hold}}, Releases: []Release{{ID: "r1", Rule: "req", Order: FIFO}}})
+		require.Equal(t, request(8, "n1", 4), g.next())
+	})
+	t.Run("an unknown message type is refused", func(t *testing.T) {
+		require.ErrorIs(t, validateShard(ShardControl{Rules: []ShardRule{{Name: "x", Direction: In, Types: []string{"vote"}, Action: Hold}}}), ErrBadControl)
+	})
 	t.Run("a LIFO release reorders the held messages", func(t *testing.T) {
 		g := newGateFixture(t)
 		g.apply(ShardControl{Rules: []ShardRule{{Name: "r", Direction: In, Action: Hold}}})

@@ -50,12 +50,13 @@ const (
 )
 
 // ShardRule selects shard traffic: Partition 0 is any partition, empty Nodes any shard node (in: the request's node identifier; out:
-// the receiving peer). Action is pass, drop or hold.
+// the receiving peer), empty Types any message type (in: "request", "handshake"; out: "response"). Action is pass, drop or hold.
 type ShardRule struct {
 	Name      string            `json:"name"`
 	Direction string            `json:"direction"`
 	Partition types.PartitionID `json:"partition,omitempty"`
 	Nodes     []string          `json:"nodes,omitempty"`
+	Types     []string          `json:"types,omitempty"`
 	Action    Action            `json:"action"`
 	Require   bool              `json:"require,omitempty"`
 }
@@ -143,6 +144,8 @@ func (r *shardRuleState) matches(dir string, d shardMsg, node string) bool {
 	case r.Partition != 0 && r.Partition != d.partition:
 		return false
 	case len(r.Nodes) > 0 && !slices.Contains(r.Nodes, node):
+		return false
+	case len(r.Types) > 0 && !slices.Contains(r.Types, d.typ):
 		return false
 	}
 	return true
@@ -267,6 +270,11 @@ func validateShard(c ShardControl) error {
 		names[r.Name] = struct{}{}
 		if r.Direction != In && r.Direction != Out {
 			return fmt.Errorf("%w: shard rule %q has direction %q", ErrBadControl, r.Name, r.Direction)
+		}
+		for _, typ := range r.Types {
+			if typ != "request" && typ != "handshake" && typ != "response" {
+				return fmt.Errorf("%w: shard rule %q has message type %q", ErrBadControl, r.Name, typ)
+			}
 		}
 		switch r.Action {
 		case Pass, Drop, Hold:
