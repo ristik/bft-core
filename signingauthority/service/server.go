@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/subtle"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -411,6 +412,10 @@ func (s *Server) operatorOp(ctx context.Context, operation op, payload []byte) (
 			s.log.Warn("refusing epoch advance", slog.String("err", err.Error()))
 			return nil, err
 		}
+		// a successful advance leaves a line too: the kept logs then show the scope an authority holds (P85 run 30 diagnosis)
+		enrolled := s.authority.Enrollment()
+		s.log.Info("epoch advanced", slog.Uint64("shardEpoch", enrolled.ShardEpoch), slog.Uint64("rootEpoch", uint64(derefEpoch(enrolled.RootEpoch))),
+			slog.String("shardConfHash", hex.EncodeToString(enrolled.ShardConfHash)))
 		s.hasSession = false
 		s.credential = nil
 		return nil, nil
@@ -668,4 +673,11 @@ func (l *claimedListener) Close() error {
 		err = lockErr
 	}
 	return err
+}
+
+func derefEpoch(e *uint64) uint64 {
+	if e == nil {
+		return 0
+	}
+	return *e
 }

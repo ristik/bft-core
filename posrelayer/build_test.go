@@ -344,3 +344,34 @@ func TestCheckPoPsOrdersAndChecksAgainstTheStoredHashes(t *testing.T) {
 	_, err = CheckPoPs(out, stranger)
 	require.ErrorIs(t, err, ErrBuild, "another key")
 }
+
+// A reserved result is built for signing (the members' EVM proofs are signed over the candidate before they can be submitted); a published
+// build still refuses it, and a lost one is refused either way.
+func TestBuildReservedBuildsAnUnpublishedResultAndStillRefusesALostOne(t *testing.T) {
+	p := evmstatetest.Load(t, fixturePath)
+	root := rootContext(t, p.Candidate.Authorization.K)
+	unpublished := func(_ [20]byte, data, ret []byte) []byte {
+		if bytes.HasPrefix(data, election.Methods["publication"].ID) {
+			ret[32*10+31] = 0
+		}
+		return ret
+	}
+	r, m := newRecorded(t)
+	r.tamper = unpublished
+	_, err := Build(context.Background(), r, m, p.ResultID, root, namesOf(t, r))
+	require.ErrorIs(t, err, ErrBuild)
+	out, err := BuildReserved(context.Background(), r, m, p.ResultID, root, namesOf(t, r))
+	require.NoError(t, err)
+	require.Equal(t, p.Candidate.Identities, out.Identities, "the same records as the published build")
+
+	r, m = newRecorded(t)
+	r.tamper = func(to [20]byte, data, ret []byte) []byte {
+		ret = unpublished(to, data, ret)
+		if bytes.HasPrefix(data, election.Methods["publication"].ID) {
+			ret[32*13+31] = 1 // lost
+		}
+		return ret
+	}
+	_, err = BuildReserved(context.Background(), r, m, p.ResultID, root, namesOf(t, r))
+	require.ErrorIs(t, err, ErrBuild)
+}

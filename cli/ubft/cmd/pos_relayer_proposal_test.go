@@ -5,6 +5,8 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
+	ethcrypto "github.com/ethereum/go-ethereum/crypto"
 	"github.com/spf13/cobra"
 	"net/http"
 	"net/http/httptest"
@@ -24,12 +26,19 @@ import (
 
 const publicationFixture = "../../../rootchain/evmstate/testdata/publication.json"
 
+func mustHexBytes(t *testing.T, s string) []byte {
+	b, err := hex.DecodeString(strings.TrimPrefix(s, "0x"))
+	require.NoError(t, err)
+	return b
+}
+
 func letter(id uint64) string { return string(rune('a' + id - 1)) }
 
 // electionRPC serves eth_call from what the real modules answered (the contracts' publication fixture): the genesis entities' node-id words
 // are keccak256 of "root-a", "evm-a", ..., the names the tests below give the same peers.
 
-func electionRPC(t *testing.T) (*httptest.Server, map[string]int) {
+func electionRPC(t *testing.T, unpublished ...bool) (*httptest.Server, map[string]int) {
+	publication := ethcrypto.Keccak256([]byte("publication(bytes32)"))[:4]
 	raw, err := os.ReadFile(publicationFixture)
 	require.NoError(t, err)
 	var fx struct {
@@ -40,6 +49,9 @@ func electionRPC(t *testing.T) (*httptest.Server, map[string]int) {
 	for _, c := range fx.RelayerReads {
 		ret, err := hex.DecodeString(strings.TrimPrefix(c.Ret, "0x"))
 		require.NoError(t, err)
+		if len(unpublished) > 0 && unpublished[0] && bytes.HasPrefix(mustHexBytes(t, c.Data), publication) {
+			ret[32*10+31] = 0 // published = false: the result is reserved, its proofs not yet submitted
+		}
 		reads[strings.ToLower(c.To)+strings.ToLower(c.Data)] = ret
 	}
 	asked := map[string]int{}
@@ -184,4 +196,107 @@ func TestPosRelayerProposalFeedsTheHandoffPipelineAndVerifyPrimaryAcceptsIt(t *t
 		_, err := run("pos-relayer", "proposal", "--eth-rpc", srv.URL, "--pos-deployment", plain, "--context", contextFile, "--out-dir", filepath.Join(dir, "none2"))
 		require.ErrorIs(t, err, ErrPosRelayer)
 	})
+}
+
+// Before the result is published the members cannot have submitted their EVM possession proofs, yet they sign them over the candidate. The
+// relayer's pre-publication path: `proposal --reserved` -> H3 proofs -> `evm-assemble` -> `pos-relayer candidate` -> `pos-relayer sign-pop`
+// per member. Signatures are deterministic, so the proofs signed here are byte-identical to the ones the contracts' fixture stored and
+// the election accepted.
+func TestPosRelayerSignsTheEVMProofsOverTheCandidateBeforePublication(t *testing.T) {
+	p := evmstatetest.Load(t, publicationFixture)
+	dir := t.TempDir()
+	srv, _ := electionRPC(t, true)
+	k := p.Candidate.Authorization.K
+	var infos []*types.NodeInfo
+	for i, x := range k {
+		infos = append(infos, &types.NodeInfo{NodeID: "evm-" + letter(uint64(i+1)), SigKey: x.EVMKey, Stake: x.Weight})
+	}
+	pdr := &types.PartitionDescriptionRecord{Version: 1, NetworkID: 5, PartitionID: 8, PartitionTypeID: 8, TypeIDLen: 8, UnitIDLen: 256,
+		T2Timeout: 5 * time.Second, Epoch: 0, EpochStart: 1, Validators: infos}
+	ctx := consensus.EVMAssignmentContext{Network: 5, Predecessor: bytes.Repeat([]byte{1}, 32), Attempt: 2, Installed: pdr, Acknowledged: pdr}
+	contextFile := writeJSON(t, dir, "context.json", ctx)
+	deployment := writeJSON(t, dir, "pos-deployment.json", map[string]string{
+		"networkWord": "0x" + hex.EncodeToString(p.Pins.NetworkWord[:]), "chainId": "31337",
+		"custody": "0x" + hex.EncodeToString(p.Pins.Custody[:]), "custodyCodeHash": "0x" + strings.Repeat("aa", 32),
+		"registry": "0xff00000000000000000000000000000000000002", "registryCodeHash": "0x" + strings.Repeat("bb", 32),
+		"election": "0x" + hex.EncodeToString(p.Pins.Election[:]), "electionCodeHash": "0x" + strings.Repeat("cc", 32)})
+	var ids []string
+	var rootNodes []*types.NodeInfo
+	for i, x := range p.Candidate.Identities {
+		ids = append(ids, "root-"+letter(uint64(i+1)), "evm-"+letter(uint64(i+1)))
+		rootNodes = append(rootNodes, &types.NodeInfo{NodeID: x.RootNodeID, SigKey: x.RootKey, Stake: x.Weight})
+	}
+	run := func(args ...string) (string, error) {
+		var buf bytes.Buffer
+		var cmd *cobra.Command
+		if args[0] == "pos-relayer" {
+			cmd, args = newPosRelayerCmd(), args[1:]
+		} else {
+			cmd, args = newRootCmd(), args[1:]
+		}
+		cmd.SetOut(&buf)
+		cmd.SetErr(&buf)
+		cmd.SetArgs(args)
+		err := cmd.Execute()
+		return buf.String(), err
+	}
+	out := filepath.Join(dir, "proposal")
+
+	t.Run("a published build refuses the unpublished result; --reserved builds it", func(t *testing.T) {
+		_, err := run("pos-relayer", "proposal", "--eth-rpc", srv.URL, "--pos-deployment", deployment, "--context", contextFile,
+			"--node-ids", strings.Join(ids, ","), "--out-dir", filepath.Join(dir, "refused"))
+		require.ErrorIs(t, err, posrelayer.ErrBuild)
+		log, err := run("pos-relayer", "proposal", "--reserved", "--eth-rpc", srv.URL, "--pos-deployment", deployment, "--context", contextFile,
+			"--node-ids", strings.Join(ids, ","), "--out-dir", out)
+		require.NoError(t, err, log)
+	})
+	validators := filepath.Join(out, "validators.json")
+	var proofFiles, keyFiles []string
+	for i := range k {
+		conf, err := generateKeys()
+		require.NoError(t, err)
+		scalar := make([]byte, 32)
+		binary.BigEndian.PutUint64(scalar[24:], uint64(0x3000+i))
+		conf.SigKey.PrivateKey = scalar
+		keyFile := writeJSON(t, dir, "k"+letter(uint64(i+1))+".json", conf)
+		keyFiles = append(keyFiles, filepath.Join(dir, "evmkey-"+letter(uint64(i+1))))
+		require.NoError(t, os.WriteFile(keyFiles[i], []byte(hex.EncodeToString(scalar)), 0o600))
+		popFile := filepath.Join(dir, "pop-"+letter(uint64(i+1))+".json")
+		res, err := run("root", "handoff", "evm-pop", "--context", contextFile, "--validators", validators, "--node-id", "evm-"+letter(uint64(i+1)),
+			"--key-conf", keyFile, "--identities", filepath.Join(out, "identities.json"))
+		require.NoError(t, err, res)
+		require.NoError(t, os.WriteFile(popFile, []byte(res), 0o600))
+		proofFiles = append(proofFiles, popFile)
+	}
+	assignment := filepath.Join(dir, "assignment.json")
+	res, err := run("root", "handoff", "evm-assemble", "--context", contextFile, "--validators", validators, "--pops", strings.Join(proofFiles, ","),
+		"--bindings", filepath.Join(out, "bindings.json"), "--identities", filepath.Join(out, "identities.json"),
+		"--authorization", filepath.Join(out, "authorization.json"), "--out", assignment)
+	require.NoError(t, err, res)
+	nextTB := writeJSON(t, dir, "trust-base-epoch2.json", &types.RootTrustBaseV1{RootNodes: rootNodes})
+	candidateFile := filepath.Join(dir, "candidate.hex")
+	res, err = run("pos-relayer", "candidate", "--context", contextFile, "--assignment", assignment, "--next-trust-base", nextTB, "--out", candidateFile)
+	require.NoError(t, err, res)
+
+	var signed []popJSON
+	for i := range k {
+		popOut := filepath.Join(dir, "evmpop-"+letter(uint64(i+1))+".json")
+		res, err := run("pos-relayer", "sign-pop", "--candidate", candidateFile, "--pos-deployment", deployment,
+			"--attempt", fmt.Sprint(p.Facts.Attempt), "--evm-key-file", keyFiles[i], "--out", popOut)
+		require.NoError(t, err, res)
+		raw, err := os.ReadFile(popOut)
+		require.NoError(t, err)
+		var j popJSON
+		require.NoError(t, json.Unmarshal(raw, &j))
+		signed = append(signed, j)
+		got, err := j.pop()
+		require.NoError(t, err)
+		require.Equal(t, p.PoPs[i], got, "member %d: the proof signed over the candidate is the one the election stored", i)
+	}
+	// and they are what the published build accepts, ordered
+	pubSrv, _ := electionRPC(t)
+	popsFile := writeJSON(t, dir, "collected.json", map[string]any{"evmPops": signed})
+	log, err := run("pos-relayer", "proposal", "--eth-rpc", pubSrv.URL, "--pos-deployment", deployment, "--context", contextFile,
+		"--node-ids", strings.Join(ids, ","), "--evm-pops", popsFile, "--out-dir", filepath.Join(dir, "published"))
+	require.NoError(t, err, log)
 }

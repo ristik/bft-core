@@ -23,6 +23,7 @@ import (
 // bindings, and writes the files `root handoff evm-pop` and `evm-assemble` read. It is an untrusted tool: the root re-verifies every word at
 // the last certified EVM state.
 func newPosProposalCmd() *cobra.Command {
+	var reserved bool
 	var ethRPC, deployment, contextFile, resultHex, nodeIDsFlag, trustBase, shardConf, popsFile, outDir string
 	cmd := &cobra.Command{
 		Use:   "proposal",
@@ -97,7 +98,14 @@ func newPosProposalCmd() *cobra.Command {
 			if !chain.IsUint64() {
 				return fmt.Errorf("%w: the chain id does not fit 64 bits", ErrPosRelayer)
 			}
-			out, err := posrelayer.Build(ctx, rd, mods, result, posrelayer.RootContext{Network: c.Network, Chain: chain.Uint64(), Predecessor: c.Predecessor,
+			buildFn := posrelayer.Build
+			if reserved {
+				if popsFile != "" {
+					return fmt.Errorf("%w: --reserved builds for signing the proofs; give --evm-pops once the result is published", ErrPosRelayer)
+				}
+				buildFn = posrelayer.BuildReserved
+			}
+			out, err := buildFn(ctx, rd, mods, result, posrelayer.RootContext{Network: c.Network, Chain: chain.Uint64(), Predecessor: c.Predecessor,
 				Acknowledged: c.Acknowledged}, names)
 			if err != nil {
 				return err
@@ -127,6 +135,11 @@ func newPosProposalCmd() *cobra.Command {
 					return err
 				}
 			}
+			for name, v := range map[string]string{"result-id.txt": fmt.Sprintf("0x%x", out.ResultID), "attempt.txt": fmt.Sprint(out.Attempt)} {
+				if err := os.WriteFile(filepath.Join(outDir, name), []byte(v+"\n"), 0o600); err != nil {
+					return err
+				}
+			}
 			digest, _ := evmassign.IdentitiesDigest(out.Identities)
 			cmd.PrintErrf("result 0x%x (election attempt %d): %d members, identities digest 0x%x\n", out.ResultID, out.Attempt, len(out.Identities), digest)
 			return nil
@@ -140,6 +153,7 @@ func newPosProposalCmd() *cobra.Command {
 	cmd.Flags().StringVar(&trustBase, "trust-base", "", "a root trust base whose node ids are known")
 	cmd.Flags().StringVar(&shardConf, "shard-conf", "", "a shard configuration whose validators' node ids are known")
 	cmd.Flags().StringVar(&popsFile, "evm-pops", "", "the collected EVM possession proofs (`pos-relayer assemble` output): checked against the election's stored hashes and written, ordered, as evm-pops.json")
+	cmd.Flags().BoolVar(&reserved, "reserved", false, "build for a result that is reserved but not yet published (to sign the members' EVM possession proofs over the candidate)")
 	cmd.Flags().StringVar(&outDir, "out-dir", "", "directory for the files")
 	for _, f := range []string{"eth-rpc", "pos-deployment", "context", "out-dir"} {
 		_ = cmd.MarkFlagRequired(f)

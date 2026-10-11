@@ -17,13 +17,15 @@ import (
 	"github.com/ethereum/go-ethereum/rpc"
 	"github.com/spf13/cobra"
 	"github.com/unicitynetwork/bft-core/posrelayer"
+	"github.com/unicitynetwork/bft-core/signingauthority"
+	"github.com/unicitynetwork/bft-core/signingauthority/service"
 )
 
 // joinerFile is a joiner's identity as the operator keeps it: three secp256k1 keys (hex), two addresses and two peer ids.
 type joinerFile struct {
 	OwnerKey   string `json:"ownerKey"`
 	RootKey    string `json:"rootKey"`
-	EVMKey     string `json:"evmKey"`
+	EVMKey     string `json:"evmKey,omitempty"` // absent when the EVM key lives in a signing authority (--evm-authority-socket)
 	Withdrawal string `json:"withdrawal"`
 	Payee      string `json:"payee"`
 	RootNodeID string `json:"rootNodeId"`
@@ -47,6 +49,28 @@ func readKeyFile(path string) (*ecdsa.PrivateKey, error) {
 	return readECDSA(string(raw))
 }
 
+// authorityEVM is a joiner's EVM key held by its signing authority: the delegation possession is the authority's SignDelegationPossession,
+// which recomputes the digest from the payload and signs only that.
+type authorityEVM struct {
+	op  *service.OperatorClient
+	key []byte
+}
+
+func (a authorityEVM) PublicKey() []byte { return a.key }
+
+func (a authorityEVM) Possess(ctx context.Context, network, chain [32]byte, election [20]byte, r posrelayer.DelegationRequest) ([]byte, error) {
+	return a.op.SignDelegationPossession(ctx, signingauthority.DelegationPossessionRequest{Network: network, Chain: chain, Election: election, Request: r})
+}
+
+// openOperator dials a signing authority's operator channel.
+func openOperator(socket, credentialPath string) (*service.OperatorClient, error) {
+	credential, err := readCredentialFile(credentialPath)
+	if err != nil {
+		return nil, fmt.Errorf("loading the authority operator credential: %w", err)
+	}
+	return service.NewOperatorClient(service.ClientConfig{Dial: service.UnixDialer(socket), Credential: credential, Timeout: 15 * time.Second})
+}
+
 func readJoiner(path string) (posrelayer.Joiner, error) {
 	raw, err := os.ReadFile(path) // #nosec G304 -- operator supplied local file
 	if err != nil {
@@ -65,8 +89,13 @@ func readJoiner(path string) (posrelayer.Joiner, error) {
 	if j.RootKey, e = readECDSA(f.RootKey); e != nil {
 		errs = append(errs, e)
 	}
-	if j.EVMKey, e = readECDSA(f.EVMKey); e != nil {
-		errs = append(errs, e)
+	if f.EVMKey != "" {
+		var k *ecdsa.PrivateKey
+		if k, e = readECDSA(f.EVMKey); e != nil {
+			errs = append(errs, e)
+		} else {
+			j.EVM = posrelayer.LocalEVM(k)
+		}
 	}
 	w, e1 := hexutil.Decode(f.Withdrawal)
 	p, e2 := hexutil.Decode(f.Payee)
@@ -213,7 +242,7 @@ func newPosTxCmd() *cobra.Command {
 	_ = finalize.MarkFlagRequired("result-id")
 
 	var jenv txEnv
-	var joinerPath, valueWei string
+	var joinerPath, valueWei, evmSocket, evmCredential string
 	var idFlag uint64
 	join := &cobra.Command{
 		Use:   "join register|bond|admit",
@@ -223,6 +252,27 @@ func newPosTxCmd() *cobra.Command {
 			j, err := readJoiner(joinerPath)
 			if err != nil {
 				return err
+			}
+			if evmSocket != "" || evmCredential != "" {
+				if j.EVM != nil {
+					return errBothKeyHolders
+				}
+				if evmSocket == "" || evmCredential == "" {
+					return fmt.Errorf("%w: --evm-authority-socket needs --evm-authority-credential", ErrPosRelayer)
+				}
+				op, err := openOperator(evmSocket, evmCredential)
+				if err != nil {
+					return err
+				}
+				defer func() { _ = op.Close() }()
+				_, key, err := op.Enrollment(cmd.Context())
+				if err != nil {
+					return fmt.Errorf("%w: the authority's key: %v", ErrPosRelayer, err)
+				}
+				j.EVM = authorityEVM{op: op, key: key}
+			}
+			if j.EVM == nil {
+				return fmt.Errorf("%w: the joiner has no EVM key: give evmKey in the joiner file or --evm-authority-socket", ErrPosRelayer)
 			}
 			sender := j.OwnerKey
 			if jenv.senderKey != "" {
@@ -276,6 +326,8 @@ func newPosTxCmd() *cobra.Command {
 	join.Flags().StringVar(&joinerPath, "joiner", "", "the joiner's identity file (ownerKey, rootKey, evmKey, withdrawal, payee, rootNodeId, evmNodeId, expiry)")
 	join.Flags().Uint64Var(&idFlag, "id", 0, "the joiner's custody id (register prints it)")
 	join.Flags().StringVar(&valueWei, "value-wei", "", "bond: the stake in wei")
+	join.Flags().StringVar(&evmSocket, "evm-authority-socket", "", "operator socket of the signing authority that holds the joiner's EVM key (instead of evmKey in the joiner file)")
+	join.Flags().StringVar(&evmCredential, "evm-authority-credential", "", "operator credential of that authority")
 	_ = join.MarkFlagRequired("joiner")
 
 	root.AddCommand(submit, finalize, join)
