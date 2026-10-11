@@ -14,6 +14,7 @@ import gateway
 import generate
 import pos
 import metrics_relay
+import handoff_ops
 
 class FakeRelay:
     def __init__(self): self.calls=[]
@@ -257,6 +258,94 @@ class MetricsRelay(unittest.TestCase):
         self.request('GET','/root/metrics',{'Origin':'http://evil','Content-Type':'application/json','X-Forwarded-For':'127.0.0.1','Cookie':'a=b'})
         headers={k.lower() for k in self.seen[0][1]}
         self.assertFalse(headers&{'origin','content-type','x-forwarded-for','cookie'},headers)
+
+class HandoffWrapper(unittest.TestCase):
+    class Fake:
+        """A transport that records every call. `endorse_script[entity]` is the list of (status, body) the entity answers, last one repeating."""
+        def __init__(self,entities,plans=None,endorse_script=None):
+            self.calls=[];self.entities=entities;self.plans=list(plans or [b'PLAN-1']);self.script=endorse_script or {}
+        def post(self,entity,path,body,timeout=10):
+            self.calls.append((entity,path,body))
+            if path.endswith('/plan'): return 200,self.plans.pop(0) if len(self.plans)>1 else self.plans[0]
+            if path.endswith('/intent'): return 204,b''
+            answers=self.script.get(entity,[(204,b'')]);index=sum(1 for c in self.calls if c[0]==entity and c[1].endswith('/endorse'))-1
+            return answers[min(index,len(answers)-1)]
+    def wrapper(self,fake,rows,**kw):
+        clock=[0.0]
+        def sleep(s): clock[0]+=s
+        return handoff_ops.Wrapper(fake,[1,2,3,4],rows.append,sleep=sleep,now=lambda:clock[0],**kw)
+    def test_one_plan_from_the_first_entity_the_same_bytes_as_every_intent_then_endorsements_of_that_plan(self):
+        fake=self.Fake([1,2,3,4]);rows=[]
+        self.assertEqual(self.wrapper(fake,rows).propose(b'REQUEST'),4)
+        plans=[c for c in fake.calls if c[1].endswith('/plan')];intents=[c for c in fake.calls if c[1].endswith('/intent')];endorsements=[c for c in fake.calls if c[1].endswith('/endorse')]
+        self.assertEqual([(c[0],c[2]) for c in plans],[(1,b'REQUEST')])
+        self.assertEqual(sorted((c[0],c[2]) for c in intents),[(2,b'PLAN-1'),(3,b'PLAN-1'),(4,b'PLAN-1')])
+        self.assertEqual(sorted((c[0],c[2]) for c in endorsements),[(e,b'PLAN-1') for e in (1,2,3,4)])
+        self.assertEqual(fake.calls.index(plans[0]),0,'the plan precedes every intent and endorsement')
+        self.assertEqual([r['event'] for r in rows],['plan','intent','endorse'])
+        self.assertEqual(rows[0]['plan_sha256'],handoff_ops.sha(b'PLAN-1'));self.assertEqual(rows[0]['request_sha256'],handoff_ops.sha(b'REQUEST'))
+    def test_an_endorsement_refused_before_the_prepare_is_retried_until_it_is_prepared(self):
+        fake=self.Fake([1,2,3,4],endorse_script={2:[(409,b'endorsed before the handoff is prepared')]*2+[(204,b'')]})
+        self.assertEqual(self.wrapper(fake,[]).propose(b'R'),4)
+        self.assertEqual(sum(1 for c in fake.calls if c[0]==2 and c[1].endswith('/endorse')),3)
+    def test_a_prepare_that_never_comes_is_refused_after_the_timeout_and_a_quorum_is_two_thirds_plus_one(self):
+        never=[(409,b'before the handoff is prepared')]
+        fake=self.Fake([1,2,3,4],endorse_script={3:never,4:never})   # 2 of 4 < 4*2//3+1 = 3
+        with self.assertRaisesRegex(handoff_ops.HandoffError,'only 2/4'): self.wrapper(fake,[],prepare_timeout=5).propose(b'R')
+        fake=self.Fake([1,2,3,4],endorse_script={4:never})           # 3 of 4 is a quorum
+        self.assertEqual(self.wrapper(fake,[],prepare_timeout=5).propose(b'R'),3)
+    def test_a_lapsed_prepare_replans_a_new_attempt_and_is_bounded(self):
+        lapsed=[(409,b"the Prepare's freeze has lapsed")]
+        fake=self.Fake([1,2,3,4],plans=[b'PLAN-1',b'PLAN-2'],endorse_script={e:lapsed for e in (1,2,3,4)})
+        rows=[]
+        with self.assertRaises(handoff_ops.HandoffLapsed): self.wrapper(fake,rows,max_attempts=2).propose(b'R')
+        self.assertEqual(sum(1 for c in fake.calls if c[1].endswith('/plan')),2,'two attempts, no more')
+        self.assertEqual([r['event'] for r in rows].count('lapsed'),2)
+        # an attempt that lapses once and then succeeds: the second plan's bytes are what the second round distributes
+        fake=self.Fake([1,2,3,4],plans=[b'PLAN-1',b'PLAN-2'])
+        original=fake.post
+        state={'n':0}
+        def post(entity,path,body,timeout=10):
+            if path.endswith('/endorse') and body==b'PLAN-1': return 409,b"the Prepare's freeze has lapsed"
+            return original(entity,path,body,timeout)
+        fake.post=post
+        self.assertEqual(self.wrapper(fake,[]).propose(b'R'),4)
+        self.assertEqual([c[2] for c in fake.calls if c[1].endswith('/intent')][-3:],[b'PLAN-2']*3)
+    def test_a_root_that_refuses_the_intent_stops_the_attempt_before_any_endorsement(self):
+        fake=self.Fake([1,2,3,4]);original=fake.post
+        fake.post=lambda e,p,b,timeout=10:(422,b'no') if (e==3 and p.endswith('/intent')) else original(e,p,b,timeout)
+        with self.assertRaisesRegex(handoff_ops.HandoffError,'validator 3 refused the plan'): self.wrapper(fake,[]).propose(b'R')
+        self.assertFalse([c for c in fake.calls if c[1].endswith('/endorse')])
+    def test_the_helper_runs_inside_the_entity_namespace_without_privileges_and_the_abort_is_dispatched_to_each_root(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg,out=EntityNamespace.cfg(self,3);generate.write(out/'compose.yaml',cfg)
+            transport=handoff_ops.DockerTransport(out)
+            self.assertEqual(transport.entities,[1,2,3])
+            with patch.object(transport,'holder',return_value='CID2'):
+                command=transport.command(2,'/api/v1/handoff/intent',10)
+            self.assertIn('container:CID2',command);self.assertIn('--read-only',command);self.assertEqual(command[command.index('--cap-drop')+1],'ALL')
+            self.assertNotIn('-v',command);self.assertNotIn('--volume',command);self.assertNotIn('--privileged',command)
+            self.assertEqual(command[-2:],['http://127.0.0.1:8002/api/v1/handoff/intent','10'])
+            commands=handoff_ops.abort_commands(out,[1,2,3],['--network','3','--old-epoch','1'])
+            self.assertEqual(sorted(commands),[1,2,3])
+            self.assertEqual(commands[2][-2:],['--root-rpc','http://127.0.0.1:8002'])
+            self.assertIn('root2',commands[2]);self.assertEqual(commands[2].count('--root-rpc'),1)
+
+class HandoffHelper(unittest.TestCase):
+    def test_the_helper_posts_json_and_reports_status_then_body_including_refusals(self):
+        seen=[]
+        class H(http.server.BaseHTTPRequestHandler):
+            def do_POST(h):
+                body=h.rfile.read(int(h.headers['Content-Length']));seen.append((h.path,h.headers['Content-Type'],body,h.headers.get('Origin')))
+                status=204 if h.path.endswith('/ok') else 409;data=b'' if status==204 else b'before the handoff is prepared'
+                h.send_response(status);h.send_header('Content-Length',str(len(data)));h.end_headers();h.wfile.write(data)
+            def log_message(h,*a): pass
+        server=http.server.HTTPServer(('127.0.0.1',0),H);threading.Thread(target=server.serve_forever,daemon=True).start();self.addCleanup(server.shutdown)
+        base='http://127.0.0.1:%d'%server.server_address[1]
+        run=lambda path,data:subprocess.run(['python3','-c',handoff_ops.HELPER,base+path,'5'],input=data,capture_output=True)
+        ok=run('/ok',b'{"a":1}');self.assertEqual(ok.stdout,b'204\n')
+        refused=run('/no',b'{}');self.assertEqual(refused.stdout,b'409\nbefore the handoff is prepared')
+        self.assertEqual(seen[0],('/ok','application/json',b'{"a":1}',None))
 
 class PublicRPC(unittest.TestCase):
     def setUp(self):
