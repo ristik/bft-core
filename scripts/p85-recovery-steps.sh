@@ -57,6 +57,13 @@ p85_result_state() { # result -> the ResultState enum value (1 Reserved, 3 Ackno
 }
 p85_last_acked() { p85_call "$(p85_custody)" "lastAckedAssignment()(bytes32)"; }
 p85_live_count() { p85_call "$(p85_election)" "liveCount()(uint32)" | awk '{print $1}'; }
+# The paid transaction of a step takes the funded account's next nonce from the chain: the lane seeds three (0-2) and no other step sends one, so a
+# fixed start of 4 (the M2/H3 lanes' value, after a paid block) leaves a gap that is never mined (run 28: "not certified" while the shard built blocks).
+p85_chain_nonce() {
+  local addr; addr=$(go run ./scripts/evmtx -address) || return 1
+  "$P85_CAST" nonce --rpc-url "http://127.0.0.1:$((rethEthBase + $(echo "${H3_ONLINE:-1}" | awk '{print $1}') - 1))" "$addr" || return 1
+}
+p85_paid() { M2_NEXT_NONCE=$(p85_chain_nonce) || return 1; h3_paid "$1"; }
 p85_eth_block() { "$P85_CAST" block-number --rpc-url "$(p85_eth)"; }
 p85_evm_round() { h3_evm_row | jq -r '.roundNumber'; }
 
@@ -361,7 +368,7 @@ p85_recovery_attempt_loop() {
   for i in $(seq 1 180); do h3_registry_is 2 3 && break; sleep 1; done
   h3_registry_is 2 3 || { echo "registry did not reach shard epoch 2 / root epoch 3 (shard epoch $(h3_slot "$h3_slot_shard"), root epoch $(h3_slot "$h3_slot_root"))" >&2; return 1; }
   H3_ONLINE="1 2 3"
-  h3_paid 3 || { echo "post-recovery paid transaction was not certified at root epoch 3" >&2; return 1; }
+  p85_paid 3 || { echo "post-recovery paid transaction was not certified at root epoch 3" >&2; return 1; }
 }
 
 # ---- read-only chain state (the decoders are scripts/p85/chain_decode.py; no state is written) -----------------------------------------------
@@ -470,7 +477,7 @@ p85_restarts() {
   H3_ROOTS="1 2 3 4" h3_restart_roots 3 || return 1
   stop_one_evm_validator 1 2>/dev/null || true
   M2_ADVANCE_NO_REPLICA_WAIT=1 h3_advance_authorities 3 2 1 || return 1
-  h3_paid 3 || { echo "post-restart paid transaction was not certified" >&2; return 1; }
+  p85_paid 3 || { echo "post-restart paid transaction was not certified" >&2; return 1; }
   p85_progress after-restarts 8
   # nothing the restart could reset: no assignment, anchor, cursor or log entry changed (records ordered since may only have been appended)
   p85_log_dump >"$log" || return 1
