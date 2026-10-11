@@ -28,6 +28,37 @@ class ChurnBudget(unittest.TestCase):
         self.assertEqual(source.count("evm_partition_params(a.chain_id)"),1)
         self.assertNotIn("f'proof_type=exec,chain_id=",source.split('def main')[1])
 
+class B1Layout(unittest.TestCase):
+    def test_the_package_is_on_the_single_b1_layout(self):
+        source=(generate.HERE/'generate.py').read_text()
+        self.assertNotIn('registry-layout',source)
+        self.assertEqual(source.count("'--b1-profile'"),2)   # genesis and the shard nodes: one profile is the source of both
+        self.assertEqual(generate.ureth_flags_of('x\nureth flags: --unicity.a 1 --unicity.b 0xab\ny\n'),['--unicity.a','1','--unicity.b','0xab'])
+        for bad in ('', 'ureth flags:\n', 'ureth flags: --a\nureth flags: --b\n'):
+            with self.assertRaises(ValueError): generate.ureth_flags_of(bad)
+    def test_the_genesis_carries_the_profile_gas_limit_and_the_funding(self):
+        g=generate.funded_base_genesis(1337,60000000,{'ab':{'balance':'0x1'}},'cd'*32)
+        self.assertEqual((g['config']['chainId'],int(g['gasLimit'],16),g['alloc'],g['extraData']),(1337,60000000,{'ab':{'balance':'0x1'}},'0x'+'cd'*32))
+    def test_the_workflow_builds_the_pinned_source_and_the_verifier(self):
+        workflow=(generate.REPO/'.github/workflows/testnet-package.yml').read_text()
+        self.assertIn('ref: '+generate.PINS['bft'],workflow)
+        self.assertIn('./scripts/b1genesis',workflow)
+    def test_the_topology_follows_the_profile(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out=Path(tmp)/'tn-fixture';out.mkdir();(out/'aggregator').mkdir()
+            (out/'aggregator/keys.json').write_text(json.dumps({'authKey':{'privateKey':'0x01'},'sigKey':{'privateKey':'0x02'}}))
+            images={k:'sha256:'+'a'*64 for k in ['node','rpc','guard','signer']}
+            cfg=generate.topology(out,3,{'root':['r%d'%i for i in range(3)],'evm':['e%d'%i for i in range(3)]},images,'captcha',['--unicity.network-id','3'],123456)
+            for i in (1,2,3):
+                svc=cfg['services']
+                self.assertEqual(svc['ureth%d'%i]['entrypoint'][-2:],['--unicity.network-id','3'])
+                self.assertEqual(svc['ureth%d'%i]['entrypoint'][svc['ureth%d'%i]['entrypoint'].index('--builder.gaslimit')+1],'123456')
+                shard=svc['shard%d'%i]['entrypoint']
+                self.assertEqual(shard[shard.index('--b1-profile')+1],'/network/b1-profile.json')
+                self.assertIn('--q3-lane',shard);self.assertNotIn('--registry-layout',shard)
+                root=svc['root%d'%i]['entrypoint']
+                self.assertIn('--q3-lane',root);self.assertEqual(root[root.index('--genesis-identities')+1],'/network/genesis-identities.json')
+
 class PublicRPC(unittest.TestCase):
     def setUp(self):
         self.relay=FakeRelay()

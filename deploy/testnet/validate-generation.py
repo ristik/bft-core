@@ -12,6 +12,7 @@ HERE=Path(__file__).resolve().parent
 p=argparse.ArgumentParser(description=__doc__)
 p.add_argument('--ubft',required=True,type=Path)
 p.add_argument('--keygen',required=True,type=Path)
+p.add_argument('--b1genesis',required=True,type=Path)
 p.add_argument('--check-prometheus',action='store_true')
 p.add_argument('--aggregator',type=Path,help='CI native nonempty-batch certification probe')
 a=p.parse_args()
@@ -25,7 +26,7 @@ with tempfile.TemporaryDirectory(prefix='tnops-validation-',dir='/tmp') as tmp:
     for i in range(2):
         generation=base/f'tn-ceremony-{i}'
         subprocess.run([sys.executable,str(HERE/'generate.py'),'--out',str(generation),'--validators','3',
-            '--ubft',str(a.ubft.resolve()),'--keygen',str(a.keygen.resolve()),'--images',str(images),
+            '--ubft',str(a.ubft.resolve()),'--keygen',str(a.keygen.resolve()),'--b1genesis',str(a.b1genesis.resolve()),'--images',str(images),
             '--offline-validation','--captcha-sitekey','fixture','--captcha-secret-file',str(base/'captcha')],check=True,stdout=subprocess.DEVNULL)
         subprocess.run(['docker','compose','-f',str(generation/'compose.yaml'),'--profile','OFFLINE-VALIDATION-DO-NOT-START','config','--quiet'],check=True)
         if a.check_prometheus:
@@ -40,6 +41,24 @@ with tempfile.TemporaryDirectory(prefix='tnops-validation-',dir='/tmp') as tmp:
         assert len(network['validator_rpc_urls'])==3
         genesis=json.loads((generation/'network/genesis.json').read_text())
         assert 'f39fd6e51aad88f6f4ce6ab8827279cfffb92266' not in str(genesis['alloc']).lower()
+        # The deployed registry is the single B1 layout: an independent regeneration agrees with the shipped files, and refuses a changed storage word.
+        verify=[str(a.b1genesis.resolve()),'--verify',None,'--profile',str(generation/'network/b1-profile.json'),
+            '--root-genesis',str(generation/'network/trust-base.json'),'--shard-conf',str(generation/'network/full-shard-conf.json')]
+        verify[2]=str(generation/'network/genesis.json')
+        ok=subprocess.run(verify,text=True,capture_output=True)
+        assert ok.returncode==0 and 'the deployed registry account matches the regeneration' in ok.stdout, ok.stdout+ok.stderr
+        # the roots take the committee's identity RECORDS (an array), not the B1 identity document (an object)
+        records=json.loads((generation/'network/genesis-identities.json').read_text())
+        assert isinstance(records,list) and len(records)==3, records
+        assert isinstance(json.loads((generation/'network/b1-identities.json').read_text()),dict)
+        registry=[k for k,v in genesis['alloc'].items() if v.get('storage')]
+        assert len(registry)==1, registry
+        word=next(iter(genesis['alloc'][registry[0]]['storage']))
+        genesis['alloc'][registry[0]]['storage'][word]='0x'+'ff'*32
+        (base/f'tampered-{i}.json').write_text(json.dumps(genesis))
+        verify[2]=str(base/f'tampered-{i}.json')
+        bad=subprocess.run(verify,text=True,capture_output=True)
+        assert bad.returncode!=0 and 'matches the regeneration' not in bad.stdout, 'a changed registry word was accepted'
         keys=[]
         for val in range(1,4):
             for kind in ('root','evm'):
