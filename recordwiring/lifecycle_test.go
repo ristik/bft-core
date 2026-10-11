@@ -229,10 +229,23 @@ func TestCertifiedRecordLifecycle(t *testing.T) {
 		OnResult: func(res recordwiring.CaptureResult) { recoveryResults <- res },
 	})
 	require.NoError(t, err)
+	// The capturer's loop is started only after the recovered certificate has been handled (below). ObserveCommit just queues the
+	// commit, so nothing is lost; but a loop already running could publish the record while HandleCertificate was still deciding
+	// whether to build, and then the leader, correctly, would build and sign. The test asserts the other order, so it makes that
+	// order certain instead of hoping the handler wins the race (bft-core#571: it lost it once in CI, "Should be empty, but was [5]").
 	recoveryCtx, stopRecovery := context.WithCancel(ctx)
 	recoveryDone := make(chan struct{})
-	go func() { defer close(recoveryDone); _ = capRecovery.Run(recoveryCtx) }()
-	defer func() { stopRecovery(); <-recoveryDone }()
+	recoveryStarted := false
+	startRecoveryCapturer := func() {
+		recoveryStarted = true
+		go func() { defer close(recoveryDone); _ = capRecovery.Run(recoveryCtx) }()
+	}
+	defer func() {
+		stopRecovery()
+		if recoveryStarted {
+			<-recoveryDone
+		}
+	}()
 	r.SetCommitObserver(capRecovery)
 
 	// The first quiet certificate starts the fetch and refuses the round; nothing is committed.
@@ -244,6 +257,8 @@ func TestCertifiedRecordLifecycle(t *testing.T) {
 	// capturer is about to publish it. The record has not caught up yet, so this leader correctly
 	// declines on readiness rather than building on a parent it cannot yet explain.
 	require.NoError(t, r.HandleCertificate(ctx, grandchildUC, grandchildTR))
+	require.Empty(t, sub.rounds(), "the record had not caught up when the recovered certificate was handled")
+	startRecoveryCapturer()
 	select {
 	case res := <-recoveryResults:
 		require.Equal(t, recordwiring.CapturePublished, res.Outcome, "%v", res.Err)
