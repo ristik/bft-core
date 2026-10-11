@@ -1485,11 +1485,12 @@
      "label": "REAL-PROCESS (turnover)",
      "lane": "to",
      "path": "q4/turnover-arithmetic.txt",
-     "scope": "the lane's own arithmetic of the turnover: one of four identities changed, the retained three hold 8 of 9 (Q=7) in both maps; the weight distance is printed, not asserted against the committed budget (the product enforces it); scenario A run with the identity turnover (Q4_TURNOVER=1): on the chain the A fault rows ran on, coupled entity 4 (root and EVM validator) is replaced by a new coupled entity 5, 6,1,1,1 -> 3,3,2,1. Outside the claim: the three aggregator shards keep their earlier root list and trust base and are not checked after B",
+     "scope": "the lane's own arithmetic of the turnover: one of four identities changed, the retained three hold 8 of 9 (Q=7) in both maps; the weight distance (72/81 = 8/9) is asserted against the continuity budget the genesis configuration commits (1/1); scenario A run with the identity turnover (Q4_TURNOVER=1): on the chain the A fault rows ran on, coupled entity 4 (root and EVM validator) is replaced by a new coupled entity 5, 6,1,1,1 -> 3,3,2,1. Outside the claim: the three aggregator shards keep their earlier root list and trust base and are not checked after B",
      "contains": [
       "replaced: entity 4",
       "retained entities",
-      "old weight 8 >= 7, new weight 8 >= 7"
+      "old weight 8 >= 7, new weight 8 >= 7",
+      "within the budget"
      ]
     },
     {
@@ -2190,14 +2191,14 @@
      "label": "REAL-PROCESS (non-member)",
      "lane": "to",
      "step": "L5: the joiner's root, running beside the epoch-2 committee through the handoff that names it, follows and signs nothing before its install",
-     "scope": "a root the epoch-2 committee does not name runs beside it through the handoff that names it: it reports follower, its membership gate refuses its signatures, it signs no vote, timeout or proposal. Limit (#550): a follower root does not track the committee's rounds (its committed round stays where it was); the joiner becomes a member by its install restart, not by catching up while running; scenario A run with the identity turnover (Q4_TURNOVER=1): on the chain the A fault rows ran on, coupled entity 4 (root and EVM validator) is replaced by a new coupled entity 5, 6,1,1,1 -> 3,3,2,1. Outside the claim: the three aggregator shards keep their earlier root list and trust base and are not checked after B; REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build (consensus shim and shard gate); crash model SIGKILL over the retained home (not a power loss)"
+     "scope": "a root the epoch-2 committee does not name runs beside it through the handoff that names it: it reports follower, its membership gate refuses its signatures, it signs no vote, timeout or proposal. The refused signatures are its own timeout votes only: a follower receives no consensus messages, so it is never asked to vote on a proposal. Limit (#550): a follower root does not track the committee's rounds (its committed round stays where it was); the joiner becomes a member by its install restart, not by catching up while running; scenario A run with the identity turnover (Q4_TURNOVER=1): on the chain the A fault rows ran on, coupled entity 4 (root and EVM validator) is replaced by a new coupled entity 5, 6,1,1,1 -> 3,3,2,1. Outside the claim: the three aggregator shards keep their earlier root list and trust base and are not checked after B; REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build (consensus shim and shard gate); crash model SIGKILL over the retained home (not a power loss)"
     },
     {
      "kind": "lane",
      "label": "REAL-PROCESS (non-member)",
      "lane": "to",
      "step": "L5: the removed validator's root, restarted into epoch 3, follows and signs nothing while the new committee commits; the joiner's root is a member and signs",
-     "scope": "the replaced entity's root, restarted into epoch 3 over its retained home and kept running: it reports follower and signs nothing while the new committee commits, and no epoch-3 certificate names it; the joiner's root is then a member and signs. The replaced entity's EVM validator is stopped. Limit (#550): a follower root does not track the committee's rounds (its committed round stays where it was); the joiner becomes a member by its install restart, not by catching up while running; scenario A run with the identity turnover (Q4_TURNOVER=1): on the chain the A fault rows ran on, coupled entity 4 (root and EVM validator) is replaced by a new coupled entity 5, 6,1,1,1 -> 3,3,2,1. Outside the claim: the three aggregator shards keep their earlier root list and trust base and are not checked after B; REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build (consensus shim and shard gate); crash model SIGKILL over the retained home (not a power loss)"
+     "scope": "the replaced entity's root, restarted into epoch 3 over its retained home and kept running: it reports follower and signs nothing while the new committee commits, and its identity is not among the signers of the committee's epoch-3 certificate read at the first root (one certificate, at the round the record names); the joiner's root is then a member and signs. The replaced entity's EVM validator is stopped. Limit (#550): a follower root does not track the committee's rounds (its committed round stays where it was); the joiner becomes a member by its install restart, not by catching up while running; scenario A run with the identity turnover (Q4_TURNOVER=1): on the chain the A fault rows ran on, coupled entity 4 (root and EVM validator) is replaced by a new coupled entity 5, 6,1,1,1 -> 3,3,2,1. Outside the claim: the three aggregator shards keep their earlier root list and trust base and are not checked after B; REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build (consensus shim and shard gate); crash model SIGKILL over the retained home (not a power loss)"
     },
     {
      "kind": "lane-file",
