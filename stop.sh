@@ -24,7 +24,7 @@ function stop() {
   # build/ubft from the checkout's root), so a process is stopped only if its working directory is this checkout
   local here pid cwd PID=""
   here=$(pwd -P)
-  for pid in $(ps -eaf | grep "$program" | grep -v grep | awk '{print $2}'); do
+  for pid in $(ps -eaf | grep "$program" | grep -v grep | awk '{print $2}'); do   # global-kill-ok: each pid is kept only if its working directory is this checkout
     if [ -d "/proc/$pid" ]; then
       cwd=$(readlink "/proc/$pid/cwd" 2>/dev/null)
     else
