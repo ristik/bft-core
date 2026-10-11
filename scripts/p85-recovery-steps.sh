@@ -276,7 +276,7 @@ p85_controls() { # tag receipts
 
 p85_handoff() {
   H3_ROOTS="1 2 3 4 5"; H3_ONLINE="1 2 3 4 5"
-  Q3_BEFORE_READINESS=p85_joiner_restore Q3_BEFORE_PROPOSE=p85_controls Q3_ENTITIES="1 2 3 4 5" Q3_TOTAL_WEIGHT=5 Q3_ROOT_QUORUM=4 Q3_EVM_QUORUM=4 Q3_WEIGHTS_1="1 1 1 1 1" \
+  Q3_BEFORE_READINESS=p85_joiner_restore Q3_BEFORE_PROPOSE=p85_controls Q3_ENTITIES="1 2 3 4 5" Q3_TOTAL_WEIGHT=5 Q3_ROOT_QUORUM=4 Q3_EVM_QUORUM=3 Q3_WEIGHTS_1="1 1 1 1 1" \
     q3_handoff_n 1 2 "1 1 1 1 1" 0 "$P85_DIR/genesis-identities.json" || return 1
 }
 
