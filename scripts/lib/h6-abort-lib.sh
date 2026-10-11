@@ -89,16 +89,16 @@ h6_root_round() { h3_root_info | jq -r .roundNumber; }
 
 # before the Prepare: the EVM is advancing (so "stood still" later means something)
 h6_evm_advancing() { # dir
-  local r0 r1; r0=$(h6_evm_round) || return 1; sleep 4; r1=$(h6_evm_round) || return 1
-  printf 'evm round %s -> %s over 4 s, before the Prepare\n' "$r0" "$r1" >"$1/freeze-before.txt"
+  local r0 r1; r0=$(h6_evm_round) || return 1; sleep 8; r1=$(h6_evm_round) || return 1
+  printf 'evm round %s -> %s over 8 s, before the Prepare\n' "$r0" "$r1" >"$1/freeze-before.txt"
   [ "$r1" -gt "$r0" ]
 }
 
 # between the Prepare and the Abort: the root advances, the EVM does not
 h6_evm_frozen() { # dir
-  local e0 e1 q0 q1; e0=$(h6_evm_round) && q0=$(h6_root_round) || return 1; sleep 3; e1=$(h6_evm_round) && q1=$(h6_root_round) || return 1
+  local e0 e1 q0 q1; e0=$(h6_evm_round) && q0=$(h6_root_round) || return 1; sleep 8; e1=$(h6_evm_round) && q1=$(h6_root_round) || return 1
   jq -n --argjson e0 "$e0" --argjson e1 "$e1" --argjson q0 "$q0" --argjson q1 "$q1" '{evmRoundBefore:$e0,evmRoundAfter:$e1,rootRoundBefore:$q0,rootRoundAfter:$q1}' >"$1/freeze-during.json"
-  [ "$e1" = "$e0" ] && [ "$q1" -gt "$q0" ]
+  [ "$e1" = "$e0" ] && [ "$((q1 - q0))" -ge 5 ]   # EVM rounds take up to about 3 s: a still EVM over 8 s while the root advanced five rounds is a freeze, not chance
 }
 
 # after the Abort: the EVM advances again, within 30 s
@@ -112,7 +112,7 @@ h6_evm_unfrozen() { # dir
 h6_freeze_window() { # dir
   local prepared aborted; prepared=$(jq -r '.orderedRound' "$1/plan/status.json"); aborted=$(sed -n 's/.*ordered at round \([0-9]*\);.*/\1/p' "$1/abort.out" | head -1)
   [ -n "$prepared" ] && [ "$prepared" != null ] && [ -n "$aborted" ] || { echo "no Prepare or Abort round on record" >&2; return 1; }
-  jq -n --argjson p "$prepared" --argjson a "$aborted" '{prepareRound:$p,abortRound:$a,difference:($a-$p),lapseWindow:24}' >"$1/freeze-window.json"
+  jq -n --argjson p "$prepared" --argjson a "$aborted" '{pendingRecordOrderedRound:$p,abortRound:$a,difference:($a-$p),lapseWindow:24,note:"the ordered round of the pending control record: not earlier than the Prepare"}' >"$1/freeze-window.json"
   [ "$((aborted - prepared))" -lt 24 ] || { echo "the Abort came $((aborted - prepared)) rounds after the Prepare: the freeze may have lapsed by itself" >&2; return 1; }
   ! h3_since_mark | grep -q "root handoff outcome.*phase=lapsed" || { echo "the roots logged a lapse of this attempt" >&2; return 1; }
 }
