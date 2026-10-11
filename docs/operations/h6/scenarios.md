@@ -71,11 +71,18 @@ pin it prints. Require `all steps PASSED`. It is the evidence that a weighted ep
 
 ## 4. Monetary history and fresh-build cross-check (T6)
 
-`scripts/t6-rehearsal.sh` builds a clean isolated BFT/Ureth/contracts toolchain, compiles the fixture allocation, exercises claims,
-WUCT deposit and withdrawal and treasury withdrawal, performs configuration-only handoffs and a cross-epoch restore, and watches wallet
-finality. Run it with `T6_LOCKED=1` and `T6_EVIDENCE_DIR=/abs/fresh/dir` (same lock rule) and the pins its header names. On failure
-it keeps its checkout and partial evidence; on success it removes the build checkout. Check its final summary and every evidence row.
-T6 still uses the older (layout-2 era) handoff helpers and has not been ported to or run on the B1 layout: it is not B1 evidence until it is.
+`scripts/t6-rehearsal.sh` builds a clean isolated BFT/contracts toolchain and runs the single B1 layout (Q3 flow, layout-3 slots, operator
+endpoint, fresh-B1 genesis). It compiles the fixture allocation, exercises claims, WUCT deposit and withdrawal and treasury withdrawal,
+performs configuration-only Q3 handoffs and a cross-epoch restore of a validator, then a coupled key-replacing rotation (evm4 and its root
+retire, evm5 and its root join; the joiner, which sits behind the chain's two earlier activations, restores its shard node from a survivor's
+archive at its readiness turn) after showing an over-budget candidate (two of four replaced, D = 1 > 1/2) refused with the weight distance
+named, and finally compares the deployed registry with an independent regeneration (`b1genesis --verify`). It watches wallet finality
+throughout. Run it with `T6_LOCKED=1` and `T6_EVIDENCE_DIR=/abs/fresh/dir` (same lock rule) and the pins its header names. For Ureth,
+either the cold source build, or an ATTESTED prebuilt binary (`T6_URETH_ATTESTED`, `T6_URETH_ATTESTED_SHA256`, `T6_URETH_ATTESTED_PROVENANCE`:
+the digest, the provenance directory's commit and digest and the binary's reported commit must all agree with the pin); `T6_URETH_BIN` and
+`T6_TEST_SKIP_OVER_BOUND` are development overrides and mark the run NOT EVIDENCE. The preflight checks every tool before the devnet lock is
+taken. On failure it keeps its checkout and partial evidence; on success it removes the build checkout. Check its final summary and every
+evidence row; `run-mode.txt` says which mode ran. Evidence: `briefs/devnet-runs/t6-rehearsal-20261011T044434Z` (attested Ureth 47f5146b, #534).
 
 ## 5. Ureth execution-version activation
 
