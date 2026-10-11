@@ -412,7 +412,12 @@ p85_resolved() {
   local r i log; r=$(cat "$H3_DIR/result-id.txt"); log="$H3_DIR/registry-log.txt"
   for i in $(seq 1 180); do [ "$(p85_result_state "$r")" = 4 ] && break; sleep 1; done
   [ "$(p85_result_state "$r")" = 4 ] || { echo "the result is in state $(p85_result_state "$r"), not Recovered" >&2; p85_stuck_report; return 1; }
-  [ "$(p85_open_result)" = "0x0000000000000000000000000000000000000000000000000000000000000000" ] || { echo "a result is still open" >&2; return 1; }
+  # this result is resolved. A LATER election may already be open: the hook's boundary was gated while this result was unresolved and is due the
+  # moment it resolves, so a different open result is legitimate (its id is recorded); the resolved result itself must not be the open one.
+  local open; open=$(p85_open_result) || return 1
+  [ "$open" != "$r" ] || { echo "the resolved result $r is still the open one" >&2; return 1; }
+  echo "open result after the resolution: $open ($([ "$open" = 0x0000000000000000000000000000000000000000000000000000000000000000 ] && echo none || echo "a later election"))"
+  echo "$open" >"$H3_DIR/open-result-after-resolution.txt"
   p85_last_acked >"$H3_DIR/last-acked-after-recovery.txt"
   # the root order the pending path exists for: both closures strictly before the RecoveryAck of this result
   p85_log_dump >"$log" || return 1
