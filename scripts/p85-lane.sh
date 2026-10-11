@@ -28,6 +28,8 @@ fi
 cd "$REPO_ROOT"
 mkdir -p "$EVIDENCE_DIR"
 pass "devnet lock acquired by the queued runner; evidence directory $EVIDENCE_DIR"
+# the pids of this run (the lock wrapper that holds the lock, and this runner): scripts/p85-stop.sh stops THIS run from them, never by a name pattern
+printf '%s %s\n' "$PPID" "$$" >"$EVIDENCE_DIR/.runner-pids"
 [ -x build/ubft ] || fail "build/ubft is missing (make build)"
 echo "bft-core head=$(git rev-parse HEAD) ureth=$M2_URETH_COMMIT ubft sha256=$(shasum -a 256 build/ubft | cut -d' ' -f1)" | tee "$EVIDENCE_DIR/heads.txt"
 
