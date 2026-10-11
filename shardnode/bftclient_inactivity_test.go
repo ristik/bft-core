@@ -82,11 +82,13 @@ func TestALapsedCertificateFeedIsRenewedAfterTheInactivityTimeout(t *testing.T) 
 	require.Eventually(t, func() bool { return len(net.sent()) >= 3 }, 10*inactivity, heartbeat/2, "the node never subscribed again")
 	sent := net.sent()
 	gap := sent[2].Sub(sent[1])
-	require.GreaterOrEqual(t, gap, inactivity, "not before the inactivity timeout")
+	// (the node keeps the time of its last response in whole milliseconds, so the comparison allows for that truncation)
+	const clockGrain = 2 * time.Millisecond
+	require.GreaterOrEqual(t, gap+clockGrain, inactivity, "not before the inactivity timeout: %s after the previous handshake", gap)
 	require.Less(t, gap, inactivity+2*time.Second, "and soon after it (the margin is for a loaded test machine): the timeout is the bound on a lapsed feed")
 
 	// each answer restarts the clock: the node asks once per timeout while the feed stays lapsed, not once per heartbeat
 	require.Eventually(t, func() bool { return len(net.sent()) >= 4 }, 10*inactivity, heartbeat/2)
 	sent = net.sent()
-	require.GreaterOrEqual(t, sent[3].Sub(sent[2]), inactivity)
+	require.GreaterOrEqual(t, sent[3].Sub(sent[2])+clockGrain, inactivity, "%s after the previous handshake", sent[3].Sub(sent[2]))
 }
