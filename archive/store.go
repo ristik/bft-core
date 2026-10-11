@@ -123,6 +123,22 @@ func archiveMagic(v2 bool) string {
 	}
 	return "ARCHIVE1"
 }
+
+// syncDirs syncs the directories concurrently and reports every failure.
+func syncDirs(dirs []string) error {
+	errs := make([]error, len(dirs))
+	var wg sync.WaitGroup
+	for i, dir := range dirs {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			errs[i] = syncDir(dir)
+		}()
+	}
+	wg.Wait()
+	return errors.Join(errs...)
+}
+
 func syncDir(dir string) error {
 	f, err := os.Open(dir)
 	if err != nil {
@@ -152,120 +168,187 @@ func readBounded(path string, limit int64) ([]byte, error) {
 	return b, nil
 }
 
+// writeUnsynced creates path exclusively, writes b and leaves the file open in *open for syncAndCloseAll.
+func writeUnsynced(open *[]*os.File, path string, b []byte) error {
+	h, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+	if err != nil {
+		return err
+	}
+	*open = append(*open, h)
+	_, err = h.Write(b)
+	return err
+}
+
+// syncAndCloseAll syncs the files concurrently and closes each. It returns only after every sync has returned, and reports every
+// failure of a sync or a close: the caller publishes nothing unless all of them succeeded.
+func syncAndCloseAll(files []*os.File) error {
+	errs := make([]error, len(files))
+	var wg sync.WaitGroup
+	for i, h := range files {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			err := h.Sync()
+			if closeErr := h.Close(); err == nil {
+				err = closeErr
+			}
+			errs[i] = err
+		}()
+	}
+	wg.Wait()
+	return errors.Join(errs...)
+}
+
 // Put publishes chunks only after every chunk and the checksummed manifest
 // have been synced. A failed pre-publication write leaves at most an ignored
 // temporary directory. Existing records are immutable.
 func (s *Store) Put(q Request, rec *Record) error {
+	return s.PutBatch([]Request{q}, []*Record{rec})
+}
+
+// MaxPutBatch bounds one PutBatch: its records are held in memory and their files are open together until they are synced.
+const MaxPutBatch = 32
+
+// staged is one record of a batch written to its temporary directory, not yet synced or published.
+type staged struct {
+	q     Request
+	rec   *Record
+	tmp   string
+	final string
+}
+
+// PutBatch is Put for several records with the device flushes shared: every file of every record is written, then all files are
+// synced together, then all temporary directories, then each record is published by its rename and the store directory is synced
+// once. The rule of Put holds for each record: nothing of it is published before every one of its chunks, its manifest and its
+// directory have been synced, and PutBatch returns nil only when every record is durable. On an error some records of the batch may
+// already be published (each of them whole and immutable); the rest leave at most ignored temporary directories, and the caller may
+// put them again. A record that is already stored must be identical, as with Put.
+func (s *Store) PutBatch(qs []Request, recs []*Record) error {
+	if len(qs) != len(recs) || len(qs) == 0 || len(qs) > MaxPutBatch {
+		return ErrInvalid
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	f, err := allFields(rec)
-	if err != nil {
-		return err
-	}
-	if !bytes.Equal(crypto.Keccak256(rec.Header), q.BlockHash[:]) {
-		return ErrInvalid
-	}
-	loc, err := location(q, recordV2(rec))
-	if err != nil {
-		return err
-	}
-	final := filepath.Join(s.dir, loc)
-	if _, err = os.Stat(final); err == nil {
-		old, e := s.getVersion(q, recordV2(rec))
-		if e != nil {
-			return e
+	var open []*os.File // written, not yet synced; closed here if PutBatch returns before syncAndCloseAll takes them
+	var batch []staged
+	defer func() {
+		for _, h := range open {
+			_ = h.Close()
 		}
-		a, _ := EncodeResponse(Response{q, OK, old})
-		b, _ := EncodeResponse(Response{q, OK, rec})
-		if !bytes.Equal(a, b) {
+		for _, st := range batch {
+			_ = os.RemoveAll(st.tmp) // already renamed away when the record was published
+		}
+	}()
+	inBatch := make(map[string][]byte, len(qs))
+	for i, q := range qs {
+		rec := recs[i]
+		f, err := allFields(rec)
+		if err != nil {
+			return err
+		}
+		if !bytes.Equal(crypto.Keccak256(rec.Header), q.BlockHash[:]) {
 			return ErrInvalid
 		}
-		return syncDir(s.dir)
-	} else if !os.IsNotExist(err) {
-		return err
-	}
-	tmp, err := os.MkdirTemp(s.dir, ".writing-")
-	if err != nil {
-		return err
-	}
-	defer os.RemoveAll(tmp)
-	keys := make([]string, 0, len(f))
-	for k := range f {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	var manifest bytes.Buffer
-	manifest.Write([]byte(archiveMagic(recordV2(rec))))
-	qb, _ := EncodeRequest(q)
-	putBytes(&manifest, qb)
-	manifest.WriteByte(byte(len(keys)))
-	for _, k := range keys {
-		if len(k) > 64 || len(k) == 0 {
-			return ErrInvalid
+		loc, err := location(q, recordV2(rec))
+		if err != nil {
+			return err
 		}
-		p := filepath.Join(tmp, fileName(k))
-		h, er := os.OpenFile(p, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
-		if er != nil {
-			return er
+		final := filepath.Join(s.dir, loc)
+		encoded, _ := EncodeResponse(Response{q, OK, rec})
+		if earlier, dup := inBatch[final]; dup {
+			if !bytes.Equal(earlier, encoded) {
+				return ErrInvalid
+			}
+			continue
 		}
-		_, er = h.Write(f[k])
-		if er == nil {
-			er = h.Sync()
+		inBatch[final] = encoded
+		if _, err = os.Stat(final); err == nil {
+			old, e := s.getVersion(q, recordV2(rec))
+			if e != nil {
+				return e
+			}
+			a, _ := EncodeResponse(Response{q, OK, old})
+			if !bytes.Equal(a, encoded) {
+				return ErrInvalid
+			}
+			continue
+		} else if !os.IsNotExist(err) {
+			return err
 		}
-		closeErr := h.Close()
-		if er != nil {
-			return er
+		tmp, err := os.MkdirTemp(s.dir, ".writing-")
+		if err != nil {
+			return err
 		}
-		if closeErr != nil {
-			return closeErr
+		batch = append(batch, staged{q: q, rec: rec, tmp: tmp, final: final})
+		keys := make([]string, 0, len(f))
+		for k := range f {
+			keys = append(keys, k)
 		}
-		putBytes(&manifest, []byte(k))
-		put32(&manifest, uint32(len(f[k])))
-		d := sha256.Sum256(f[k])
-		manifest.Write(d[:])
-		if s.Fault != nil {
-			if er = s.Fault("after-chunk"); er != nil {
+		sort.Strings(keys)
+		var manifest bytes.Buffer
+		manifest.Write([]byte(archiveMagic(recordV2(rec))))
+		qb, _ := EncodeRequest(q)
+		putBytes(&manifest, qb)
+		manifest.WriteByte(byte(len(keys)))
+		for _, k := range keys {
+			if len(k) > 64 || len(k) == 0 {
+				return ErrInvalid
+			}
+			if er := writeUnsynced(&open, filepath.Join(tmp, fileName(k)), f[k]); er != nil {
 				return er
 			}
+			putBytes(&manifest, []byte(k))
+			put32(&manifest, uint32(len(f[k])))
+			d := sha256.Sum256(f[k])
+			manifest.Write(d[:])
+			if s.Fault != nil {
+				if er := s.Fault("after-chunk"); er != nil {
+					return er
+				}
+			}
 		}
-	}
-	d := sha256.Sum256(manifest.Bytes())
-	expected, err := ManifestDigest(q, rec)
-	if err != nil || d != expected {
-		return ErrInvalid
-	}
-	manifest.Write(d[:])
-	h, err := os.OpenFile(filepath.Join(tmp, "manifest"), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
-	if err != nil {
-		return err
-	}
-	_, err = h.Write(manifest.Bytes())
-	if err == nil {
-		err = h.Sync()
-	}
-	closeErr := h.Close()
-	if err != nil {
-		return err
-	}
-	if closeErr != nil {
-		return closeErr
-	}
-	if err = syncDir(tmp); err != nil {
-		return err
-	}
-	if s.Fault != nil {
-		if err = s.Fault("before-publish"); err != nil {
+		d := sha256.Sum256(manifest.Bytes())
+		expected, err := ManifestDigest(q, rec)
+		if err != nil || d != expected {
+			return ErrInvalid
+		}
+		manifest.Write(d[:])
+		if err = writeUnsynced(&open, filepath.Join(tmp, "manifest"), manifest.Bytes()); err != nil {
 			return err
 		}
 	}
-	if err = os.Rename(tmp, final); err != nil {
+	// Every chunk and manifest is synced before its directory is, and every directory before any publication below. The syncs of one
+	// stage are issued together, so one device flush can serve them, instead of one after another.
+	synced := open
+	open = nil
+	if err := syncAndCloseAll(synced); err != nil {
 		return err
 	}
+	dirs := make([]string, len(batch))
+	for i, st := range batch {
+		dirs[i] = st.tmp
+	}
+	if err := syncDirs(dirs); err != nil {
+		return err
+	}
+	for _, st := range batch {
+		if s.Fault != nil {
+			if err := s.Fault("before-publish"); err != nil {
+				return err
+			}
+		}
+		if err := os.Rename(st.tmp, st.final); err != nil {
+			return err
+		}
+	}
+	// the publications (and, for records that were already stored, their earlier ones) are durable once the store directory is
 	if err := syncDir(s.dir); err != nil {
 		return err
 	}
 	if s.rounds != nil {
-		s.indexRecord(q, rec)
+		for _, st := range batch {
+			s.indexRecord(st.q, st.rec)
+		}
 	}
 	return nil
 }
