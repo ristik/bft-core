@@ -52,6 +52,7 @@ q4_step() { local name=$1; shift; Q4_CUR_STEP=$name; echo "--- Q4 step: $name"; 
 q4_round() { curl -fsS "http://127.0.0.1:$(m2_rpc_port "$1")/api/v1/roundInfo" | jq -r '.roundNumber'; }
 # the certified IR round of the EVM shard (partition 8): moves only when a block is certified, never by a timeout certificate alone
 q4_evm_ir() { curl -fsS "http://127.0.0.1:$(m2_rpc_port "${1:-1}")/api/v1/roundInfo" | jq -r '.partitionShards[] | select(.partitionId==8) | .roundNumber'; }
+q4_evm_tr() { curl -fsS "http://127.0.0.1:$(m2_rpc_port "${1:-1}")/api/v1/roundInfo" | jq -r '.partitionShards[] | select(.partitionId==8) | .trRound'; }
 
 # ---- timing (design v2 section 4, last paragraph): every progress assertion is polled every 0.25 s and its latencies are exported as numbers to
 # q4/timing.jsonl: the time to the first and to the n-th (third) increment after the assertion starts, the largest gap between two increments, and the
@@ -488,7 +489,7 @@ q4_g2_sample() { # phase t0: one line of every pair's latest and finalized block
   python3 scripts/q4-g2-rollback.py heads $(q4_g2_urls) | jq -c --arg p "$1" --arg e "$(q4_dt "$(q4_t)" "$2")" '{phase: $p, elapsed_s: ($e | tonumber), pairs: .}' >>"$Q4_DIR/g2-rollback/samples.jsonl"
 }
 q4_row_g2_rollback() {
-  local dir=$Q4_DIR/g2-rollback rule=g2hold$Q4_EPOCH observer=$Q4_HEAVY_ROOT i t0 logs=() urls=() head parent height sender nonce tx sent kids n=0 carried=0 pair
+  local dir=$Q4_DIR/g2-rollback rule=g2hold$Q4_EPOCH observer=$Q4_HEAVY_ROOT i t0 logs=() urls=() head parent height sender nonce tx sent kids n=0 carried=0 tr0 tr=0 pair
   rm -rf "$dir"; mkdir -p "$dir"
   # the log marks are taken before the hold, so every block sealed on the parent during the settle below is listed
   for i in 1 2 3 4; do logs+=("test-nodes/evm$i/debug.log:$(wc -l <"test-nodes/evm$i/debug.log" | tr -d ' ')"); urls+=(--url "http://127.0.0.1:$((rethEthBase + i - 1))"); done
@@ -507,17 +508,28 @@ q4_row_g2_rollback() {
     tx=$sent
   done
   echo "certification requests of the EVM shard held at every root; parent $((height - 1)) $parent; transaction $tx (sender $sender nonce $nonce) submitted under the hold"
-  # held until a second attempt on the same parent exists (the first is then abandoned for certain) and one that every pair executed carries the transaction
+  # held until a block on the parent that every pair executed carries the transaction, and then until every root has issued two more repeat
+  # certificates for the shard (its TR round moved on by 2): the block's request is for a round the roots have left, so it can no longer be
+  # certified. The hold also holds the shard nodes' handshakes, so their subscriptions at the roots can lapse and a further attempt under the
+  # hold is not guaranteed; the step does not wait for one.
   for i in $(seq 1 "$Q4_RECOVER_SECONDS"); do
     q4_g2_sample held "$t0" || return 1
     kids=$(python3 scripts/q4-g2-rollback.py children --parent "$parent" "${logs[@]}") || return 1
     n=$(printf '%s' "$kids" | jq 'length')
-    carried=$(printf '%s' "$kids" | jq '[.[:-1][] | select(.userTransactions >= 1 and (.verifiedValidBy | length) == 4)] | length')
-    [ "$n" -ge 2 ] && [ "$carried" -ge 1 ] && break
+    carried=$(printf '%s' "$kids" | jq '[.[] | select(.userTransactions >= 1 and (.verifiedValidBy | length) == 4)] | length')
+    [ "$carried" -ge 1 ] && break
     sleep 1
   done
-  [ "$n" -ge 2 ] || { echo "only $n block(s) sealed on the parent within ${Q4_RECOVER_SECONDS}s of the hold" >&2; return 1; }
-  [ "$carried" -ge 1 ] || { echo "$n blocks sealed on the parent within ${Q4_RECOVER_SECONDS}s of the hold, but none before the last carries the transaction and was verified VALID by all four pairs" >&2; return 1; }
+  [ "$carried" -ge 1 ] || { echo "$n block(s) sealed on the parent within ${Q4_RECOVER_SECONDS}s of the hold, none carries the transaction and was verified VALID by all four pairs" >&2; return 1; }
+  tr0=$(for i in $Q4_ROOTS; do q4_evm_tr "$i" || exit 1; done | sort -n | tail -n 1) || return 1
+  for i in $(seq 1 "$Q4_RECOVER_SECONDS"); do
+    q4_g2_sample held "$t0" || return 1
+    tr=$(for pair in $Q4_ROOTS; do q4_evm_tr "$pair" || exit 1; done | sort -n | head -n 1) || return 1
+    [ "$tr" -ge $((tr0 + 2)) ] && break
+    sleep 1
+  done
+  [ "$tr" -ge $((tr0 + 2)) ] || { echo "the roots did not move the EVM shard's TR round from $tr0 to $((tr0 + 2)) within ${Q4_RECOVER_SECONDS}s (now $tr): no repeat certificates under the hold" >&2; return 1; }
+  echo "a block carrying the transaction was executed by all four pairs under the hold; the roots moved the shard's TR round $tr0 -> $tr without certifying it"
   q4_root_advance "$observer" "$Q4_RECOVER_SECONDS" 1 || return 1   # the roots keep their quorum throughout
   q4_g2_sample held "$t0" || return 1
   q4_shard_release "$rule" "$Q4_ROOTS" in || return 1
