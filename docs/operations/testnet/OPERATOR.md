@@ -25,7 +25,7 @@ reboot on a network you intend to keep. Design detail: [deploy/testnet/README.md
 **Keep root RPC private.** The root (and shard node) RPC address has no operator authentication of its own: `PUT /api/v1/trustbases` is
 unguarded and the `/api/v1/handoff/*` and `/api/v1/q3/*` endpoints only require a loopback TCP peer, which a reverse proxy on the same host defeats.
 Bind it to loopback or an isolated operator network (the containers' internal Docker network, port not published); never publish it or
-proxy it through the public JSON-RPC gateway. The start-up `WARN` "RPC address is not loopback" is expected inside the testnet containers.
+proxy it through the public JSON-RPC gateway. The operator listeners bind to `127.0.0.1`, so the start-up `WARN` "the root RPC address is not loopback ..." must NOT appear in a root or shard log: if it does, the generation is misconfigured, do not start it (`docker compose logs root1 shard1 | grep -i "not loopback"` must print nothing).
 What each endpoint can do if reached: [root-rpc-exposure.md](../root-rpc-exposure.md) ([#533](https://github.com/ristik/bft-core/issues/533)).
 
 ## 3. Build images from exact revisions
@@ -56,7 +56,7 @@ sudo chown -R 10001:10001 $G && cd $G && docker compose config --quiet
 SERVICES=$(docker compose config --services | sed '/^authority/d')   # authorities are already running
 docker compose up -d $SERVICES && docker compose ps
 ```
-The roots and shard nodes serve the Q3 operator endpoints, which accept loopback peers only: reach them with `docker compose exec` inside the container, as the examples below do.
+The roots and shard nodes serve the Q3/handoff operator endpoints, which accept loopback TCP peers only, and their operator listeners now **bind to 127.0.0.1** (8002 root, 9101 shard): nothing on the shared Docker network can reach them, including their unguarded write endpoints. Each validator entity's root and shard node share one network namespace, owned by a small holder container `pod<i>` (it carries the DNS names `root<i>` and `shard<i>`; a `metrics<i>` relay in it serves only `/root/metrics` and `/shard/metrics` to Prometheus). Reach the operator endpoints with `docker compose exec root<i>` / `shard<i>` (either one: both see the same loopback), as the examples below do. **Lifecycle:** never restart `pod<i>` alone (the containers in its namespace would be left with a dead one): `docker compose up -d --force-recreate pod<i> root<i> shard<i> metrics<i>`. Recreating only `root<i>` (the install restart) or restarting only `shard<i>` is safe, and the install override of `handoff.py install-override` replaces only the root's entrypoint, so the recreated root stays in the entity's namespace. **After a host reboot or a Docker daemon restart** a container that joins another's namespace can fail to start before its holder is up: recover with the same `--force-recreate pod<i> root<i> shard<i> metrics<i>` (never the authorities), and include it in the rehearsal checks beside the root recreation. The holder runs under `init: true`, so stopping it does not wait out the grace period. Authorities stay outside (unix sockets) and are never recreated.
 The generator makes fresh root/shard/authority keys per validator, the trust base, a B1 genesis (registry layout 3 from one `b1-profile`, checked by `b1genesis --verify`) that funds
 **only** a new random faucet account (1000 test UCT), Engine JWTs and `manifest.json`. Success: it prints the
 block-zero hash, the manifest and `Authorities are live and enrolled. Do NOT restart them.`; `docker compose ps`
