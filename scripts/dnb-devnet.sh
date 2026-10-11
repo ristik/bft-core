@@ -27,18 +27,25 @@ agg_port() { echo $((${AGG_PORT:-3001} + $1 - 1)); }
 rethEngineBase=18551 rethEthBase=18545 rethP2PBase=30401 rootRpcPort=25866
 : "${URETH_BIN:?set URETH_BIN to the pinned unicity-reth}"
 # The binary is attested, never built here: URETH_SHA256 (the attested file hash) and URETH_COMMIT (the full commit its --version reports)
-# are REQUIRED for the two-shard lane and checked in `up` before anything starts; the result is kept in test-nodes/ureth-attestation.json.
+# and URETH_PROVENANCE (the build's provenance directory: commit.txt is the pin, sha256.txt records the digest, as for the T6 harness) are
+# REQUIRED for the two-shard lane and checked in `up` and again before any restart; a missing or mismatching record fails closed. The result,
+# with the provenance path, is kept in test-nodes/ureth-attestation.json.
 verify_ureth() {
   local sha ver commit
   sha=$(shasum -a 256 "$URETH_BIN" | cut -d' ' -f1)
   ver=$("$URETH_BIN" --version 2>&1) || true
   commit=$(printf '%s\n' "$ver" | sed -n 's/^Commit SHA: //p' | head -1)
-  if [ "$aggShards" = 2 ]; then : "${URETH_SHA256:?set URETH_SHA256 to the attested sha256 of URETH_BIN}" "${URETH_COMMIT:?set URETH_COMMIT to the attested full ureth commit}"; fi
+  if [ "$aggShards" = 2 ]; then : "${URETH_SHA256:?set URETH_SHA256 to the attested sha256 of URETH_BIN}" "${URETH_COMMIT:?set URETH_COMMIT to the attested full ureth commit}" "${URETH_PROVENANCE:?set URETH_PROVENANCE to the build provenance directory}"; fi
+  if [ -n "${URETH_PROVENANCE:-}" ]; then
+    [ -f "$URETH_PROVENANCE/commit.txt" ] && [ -f "$URETH_PROVENANCE/sha256.txt" ] || { echo "URETH_PROVENANCE $URETH_PROVENANCE lacks commit.txt or sha256.txt" >&2; exit 1; }
+    [ "$(tr -d '[:space:]' <"$URETH_PROVENANCE/commit.txt")" = "${URETH_COMMIT:-}" ] || { echo "provenance $URETH_PROVENANCE does not name commit ${URETH_COMMIT:-<unset>}" >&2; exit 1; }
+    grep -q "^$sha " "$URETH_PROVENANCE/sha256.txt" || { echo "provenance $URETH_PROVENANCE does not record sha256 $sha" >&2; exit 1; }
+  fi
   if [ -n "${URETH_SHA256:-}" ] && [ "$sha" != "$URETH_SHA256" ]; then echo "URETH_BIN sha256 $sha != attested $URETH_SHA256" >&2; exit 1; fi
   if [ -n "${URETH_COMMIT:-}" ] && [ "$commit" != "$URETH_COMMIT" ]; then echo "URETH_BIN reports commit '$commit' != attested $URETH_COMMIT" >&2; exit 1; fi
-  python3 - "$URETH_BIN" "$sha" "$commit" "$ver" <<'PY'
+  python3 - "$URETH_BIN" "$sha" "$commit" "$ver" "${URETH_PROVENANCE:-}" <<'PY'
 import json, sys
-json.dump({"path": sys.argv[1], "sha256": sys.argv[2], "commit": sys.argv[3], "version": sys.argv[4]}, open("test-nodes/ureth-attestation.json", "w"), indent=2)
+json.dump({"path": sys.argv[1], "sha256": sys.argv[2], "commit": sys.argv[3], "version": sys.argv[4], "provenance": sys.argv[5]}, open("test-nodes/ureth-attestation.json", "w"), indent=2)
 PY
   info "ureth $commit sha256 $sha verified"
 }
@@ -163,6 +170,7 @@ wait_reth() { for _ in $(seq 1 90); do rpc "http://127.0.0.1:$((rethEthBase + $1
 
 restart_validator() { # N: the shard validator and its ureth
   local i=$1
+  verify_ureth
   stop_one_evm_validator "$i" || true
   stop_pidfile "test-nodes/reth$i/pid" 'unicity-reth|reth.* node' || true
   sleep 3
@@ -176,6 +184,7 @@ restart_validator() { # N: the shard validator and its ureth
 
 # Stops every shard validator and ureth at once (roots and aggregator keep running), then starts them all from their own state.
 restart_all_validators() {
+  verify_ureth
   for i in $(seq 1 "$validators"); do stop_one_evm_validator "$i" || true; stop_pidfile "test-nodes/reth$i/pid" 'unicity-reth|reth.* node' || true; done
   sleep 5
   for i in $(seq 1 "$validators"); do start_reth "$i"; done
@@ -258,4 +267,4 @@ json.dump({"dir": "$PWD/test-nodes", "ethUrls": ["http://127.0.0.1:%d" % (18545 
 PY
 }
 
-case "${1:-}" in restart-agg) restart_agg "${2:-}" ;; restart-all) restart_all_validators ;; restart-validator) restart_validator "${2:?validator number}" ;; all) up && vault && config ;; config) config ;; vault) vault ;; up) up ;; down) down ;; status) status ;; *) echo "usage: $0 up|down|status" >&2; exit 2 ;; esac
+case "${1:-}" in restart-agg) restart_agg "${2:-}" ;; restart-all) restart_all_validators ;; restart-validator) restart_validator "${2:?validator number}" ;; all) up && { [ -n "${DNB_PREP_ONLY:-}" ] || { vault && config; }; } ;; config) config ;; vault) vault ;; up) up ;; down) down ;; status) status ;; *) echo "usage: $0 up|down|status" >&2; exit 2 ;; esac
