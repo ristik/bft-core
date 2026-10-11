@@ -45,6 +45,76 @@ the UC: `CertStatusOK` means the wrapped `UC` is newly certified;
 (see §8) and the wrapped `UC` is the last-good certificate to resync from —
 not an error about the certified chain itself.
 
+### The certificate feed is a metered subscription
+
+A root does not send every certificate to every validator forever. Each root
+keeps, per validator, a subscription worth **two** `CertificationResponse`s
+(`responsesPerSubscription`, `rootchain/subscription.go`). Every certificate
+the root sends to the validator spends one. The subscription is refilled to two
+by exactly two things, both of them a message *from* that validator that the
+root accepted:
+
+- a `Handshake`, which the root also answers at once with its latest
+  certificate, outside the quota;
+- a `BlockCertificationRequest` that passed the root's checks.
+
+Each root counts on its own. A validator needs a given certificate from one
+root only, so it keeps receiving every certificate as long as at least one root
+still has it subscribed.
+
+What keeps a validator subscribed:
+
+1. **It votes.** A validator that submits a request every round refills every
+   root that receives the request, as a side effect.
+2. **It does not vote, and says so.** After a certificate it submitted nothing
+   for, the shard node sends a handshake (`renewSubscriptionIfIdle`,
+   `shardnode/bftclient.go`). A non-voting validator (restored and not yet
+   allowed to sign, or a joiner whose key is not bound yet) therefore renews
+   once per certified round.
+3. **The long stop.** If no `CertificationResponse` has arrived for
+   `InactivityTimeout` (30 s by default, `--inactivity-timeout`), the node
+   handshakes again, whatever it believes about its subscription.
+
+What a validator can miss, and for how long. The second mechanism trusts the
+node's own submission: a node that submitted a request assumes the request
+refilled its subscription. If its requests do not reach the roots, nothing
+refills, and after two more certificates from each root the feed stops. (A
+request that reaches a root and is rejected is answered directly with the
+root's last certificate, so that case is not silent.) The node then receives nothing until the long
+stop fires. So:
+
+- The miss is **bounded by `InactivityTimeout`**, per lapse. It is not
+  permanent: the handshake is always answered with the root's latest
+  certificate, and the node then obtains the certified blocks it did not see
+  from its peers before it takes part again (its log says `certified execution
+  remains unready ... awaits peer catch-up` meanwhile).
+- Within that window the node is not in the rounds whose certificates it did
+  not receive. It does not open them, does not verify their blocks, and logs
+  nothing for them.
+- Which validators receive a given certificate can differ from root to root
+  and from round to round, because each root's count depends on what that
+  validator received from it before.
+
+This was observed on the devnet with every certification request of a shard
+deliberately held at every root while the roots kept issuing repeat
+certificates (bft-core#558): one validator missed two repeat certificates
+about a minute apart, re-subscribed on its inactivity timer in between, and
+took part in the rounds after each handshake. It is the quota working as
+designed, not a dissemination fault. In normal operation a validator's
+requests reach the roots and the first mechanism holds.
+
+A deployment whose `T2` is short compared with `InactivityTimeout` should know
+the consequence: a validator whose requests are being lost can sit out several
+repeat-certificate rounds before it re-subscribes. Lowering
+`--inactivity-timeout` shortens that at the cost of more handshakes on a quiet
+feed.
+
+One related effect is not about delivery. A shard node handles
+`CertificationResponse`s one at a time, and handling one can wait for the
+round leader's block. A certificate that arrives during that wait is admitted
+only when the wait ends, so its `certificate admitted` log line can trail the
+root's send by seconds.
+
 ## 2. InputRecord field mapping
 
 | Field | Value | Notes |
