@@ -71,7 +71,7 @@ def topology(out, n, ids, images, captcha, ureth_flags=(), max_gas=30000000, wit
         # restart) or restarting the shard does not take the namespace down. Different entities stay in different namespaces; the authority (unix sockets), the
         # execution client and every other service keep their own.
         service('pod%d'%i, node, ['sleep','infinity'], memory='16m', cpu=0.05,
-            networks={'validators':{'aliases':['root%d'%i,'shard%d'%i]}})
+            networks={'validators':{'aliases':['root%d'%i,'shard%d'%i]}}, init=True)   # sleep as PID 1 would ignore SIGTERM
         service('metrics%d'%i, images['rpc'], ['python3','-u','metrics_relay.py'], memory='64m', cpu=0.1, pod='pod%d'%i)
         service('root%d'%i, node, ['ubft','root-node','run','--home','/state','--address','/ip4/0.0.0.0/tcp/8000',
             '--bootnodes', ','.join('/dns4/root%d/tcp/8000/p2p/%s' % (j,ids['root'][j-1]) for j in range(1,n+1) if j!=i),

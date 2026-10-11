@@ -107,8 +107,9 @@ class Genesis:
         return done
 
     def check_tools(self, pinned):
-        if shutil.which('forge') is None:
-            raise PosError('forge is not on PATH (the contracts genesis is built by the pinned unicity-pos-contracts)')
+        for tool in ('forge', 'cast'):
+            if shutil.which(tool) is None:
+                raise PosError(f'{tool} is not on PATH (foundry, pinned v1.8.1: forge builds the contracts genesis, cast hashes the deployed code)')
         if not (self.contracts / 'script/p85-genesis.sh').is_file():
             raise PosError(f'{self.contracts} is not a unicity-pos-contracts checkout (no script/p85-genesis.sh)')
         head = self._run('git', '-C', self.contracts, 'rev-parse', 'HEAD').stdout.strip()

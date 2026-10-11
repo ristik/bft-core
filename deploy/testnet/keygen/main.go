@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 
 	"github.com/ethereum/go-ethereum/accounts/keystore"
 	"github.com/ethereum/go-ethereum/crypto"
@@ -20,8 +21,17 @@ func main() {
 		owners(os.Args[2], os.Args[3])
 		return
 	}
+	if len(os.Args) == 3 && os.Args[1] == "address" {
+		// the address of a hex private key file, read from the file so the key never appears in a process list
+		raw, err := os.ReadFile(os.Args[2])
+		must(err)
+		key, err := crypto.HexToECDSA(strings.TrimPrefix(strings.TrimSpace(string(raw)), "0x"))
+		must(err)
+		fmt.Println(crypto.PubkeyToAddress(key.PublicKey).Hex())
+		return
+	}
 	if len(os.Args) != 2 {
-		panic("usage: keygen <new private directory> | keygen owners <new private directory> <identities>")
+		panic("usage: keygen <new private directory> | keygen address <key file> | keygen owners <new private directory> <identities>")
 	}
 	dir := os.Args[1]
 	must(os.Mkdir(dir, 0700))
