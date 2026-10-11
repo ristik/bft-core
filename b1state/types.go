@@ -13,7 +13,7 @@ import (
 )
 
 const (
-	MaxMembers     = 64
+	MaxMembers     = 16
 	MaxNodeIDBytes = 128
 	MaxEntryBytes  = 16384
 	EntryWords     = 11

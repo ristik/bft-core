@@ -158,10 +158,10 @@ func (p Profile) Hash() ([32]byte, error) {
 	for _, h := range [][32]byte{p.RuntimeHash, p.CompilerHash} {
 		b = bytesValue(b, h[:])
 	}
-	for _, v := range []uint64{64, 128, 16384, 16, 262144, 24576, 32768} {
+	for _, v := range []uint64{16, 128, 16384, 16, 262144, 24576, 32768} {
 		b = uintValue(b, v)
 	}
-	b = textValue(b, "scan=2000+16C;members=1000T;UC=60000+16B+64000+6000S+2000N+250P+1117700;RSMT=2000+16B+250(1+popcount);I=22100;D=7100")
+	b = textValue(b, "scan=2000+16C;members=1000T;UC=60000+16B+16000+6000S+2000N+250P+14700;RSMT=2000+16B+250(1+popcount);I=22100;D=7100")
 	b = textValue(b, "P85-import=scan 2000+16C_R;entries 1000N;C_R<=16384;N<=32;outcome=[system,G_pre,1,'',SHA256(rootInput)];G_pre=admit+open+import")
 	b = textValue(b, "P85-hook=after EIP-4788: one custody.applyRootRecords(min(H,available)) iff the registry holds more records than custody; reads recordCursor,recordCount,recordTargetCount,limits,recordCursor; G_hooks excluded from the outcome, included in the system total")
 	if p.ElectionEnabled() {
