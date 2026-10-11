@@ -1,7 +1,8 @@
 {
-  "bft": "48af5f61d1177922331d1dcdbb34f6adecf5e7ca",
+  "bft": "d7286aa35a63849f35cdf9fe6f1ae3abba6ad95c",
   "ureth": "47f5146b59c01e2180aa66b250ec87330231658d",
   "rugregator": "dd5b1406a17fdeb415799045c5e81609619a870a",
   "runtime": "debian:bookworm-slim@sha256:7c7b2c966bc9ee8cedfeef67e0e279108992c77681fa595db4a9d65c06ccc587",
-  "python": "python:3.13.12-alpine3.22@sha256:41351b07080ccfaa27bf38dde20de79ee6a0ac74a58c00c6d7a7d96ac4e69716"
+  "python": "python:3.13.12-alpine3.22@sha256:41351b07080ccfaa27bf38dde20de79ee6a0ac74a58c00c6d7a7d96ac4e69716",
+  "contracts": "18290d1a9f1f2d365709bc47a8b25f5e67f7d91a"
 }

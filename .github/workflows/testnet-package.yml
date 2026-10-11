@@ -25,7 +25,7 @@ jobs:
       - run: python3 -m unittest discover -s deploy/testnet/faucet -v
       - uses: actions/checkout@v4
         with:
-          ref: 48af5f61d1177922331d1dcdbb34f6adecf5e7ca
+          ref: d7286aa35a63849f35cdf9fe6f1ae3abba6ad95c
           path: pinned-bft
       - run: make -C pinned-bft build
       - run: go build -C pinned-bft -o /tmp/tn-b1genesis ./scripts/b1genesis
@@ -42,6 +42,16 @@ jobs:
           workspaces: pinned-rugregator
       - run: cargo build --locked -p uni-aggregator --bin aggregator
         working-directory: pinned-rugregator
-      - run: python3 deploy/testnet/validate-generation.py --ubft pinned-bft/build/ubft --keygen /tmp/tn-keygen --b1genesis /tmp/tn-b1genesis --check-prometheus --aggregator pinned-rugregator/target/debug/aggregator
+      - uses: actions/checkout@v4
+        with:
+          repository: ristik/unicity-pos-contracts
+          ref: 18290d1a9f1f2d365709bc47a8b25f5e67f7d91a
+          path: pinned-contracts
+          submodules: recursive
+      - uses: foundry-rs/foundry-toolchain@v1
+        with:
+          # the contracts' own CI pin: the registry's runtime bytecode and code hash are protocol surface
+          version: v1.8.1
+      - run: python3 deploy/testnet/validate-generation.py --ubft pinned-bft/build/ubft --keygen /tmp/tn-keygen --b1genesis /tmp/tn-b1genesis --check-prometheus --aggregator pinned-rugregator/target/debug/aggregator --pos-contracts pinned-contracts
       - run: docker build -f deploy/testnet/Dockerfile.rpc deploy/testnet -t testnet-rpc:test
       - run: docker run --rm --entrypoint python3 testnet-rpc:test -c 'import gateway; assert "eth_sign" not in gateway.PUBLIC'

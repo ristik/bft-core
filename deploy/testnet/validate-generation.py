@@ -14,6 +14,7 @@ p.add_argument('--ubft',required=True,type=Path)
 p.add_argument('--keygen',required=True,type=Path)
 p.add_argument('--b1genesis',required=True,type=Path)
 p.add_argument('--check-prometheus',action='store_true')
+p.add_argument('--pos-contracts',type=Path,help='a clean unicity-pos-contracts checkout at the pin (forge on PATH): also generate and probe the proof-of-stake profile')
 p.add_argument('--aggregator',type=Path,help='CI native nonempty-batch certification probe')
 a=p.parse_args()
 with tempfile.TemporaryDirectory(prefix='tnops-validation-',dir='/tmp') as tmp:
@@ -73,6 +74,17 @@ with tempfile.TemporaryDirectory(prefix='tnops-validation-',dir='/tmp') as tmp:
             probe=importlib.util.module_from_spec(spec);spec.loader.exec_module(probe)
             probe.validate(generation,a.ubft.resolve(),a.aggregator.resolve())
         generations.append(manifest)
+    if a.pos_contracts:
+        import importlib.util
+        generation=base/'tn-ceremony-pos'
+        subprocess.run([sys.executable,str(HERE/'generate.py'),'--out',str(generation),'--validators','4',
+            '--ubft',str(a.ubft.resolve()),'--keygen',str(a.keygen.resolve()),'--b1genesis',str(a.b1genesis.resolve()),'--images',str(images),
+            '--offline-validation','--captcha-sitekey','fixture','--captcha-secret-file',str(base/'captcha'),
+            '--pos','--pos-contracts',str(a.pos_contracts.resolve())],check=True,stdout=subprocess.DEVNULL)
+        subprocess.run(['docker','compose','-f',str(generation/'compose.yaml'),'--profile','OFFLINE-VALIDATION-DO-NOT-START','config','--quiet'],check=True)
+        spec=importlib.util.spec_from_file_location('pos_probe',HERE/'validate-pos.py')
+        probe=importlib.util.module_from_spec(spec);spec.loader.exec_module(probe)
+        print(json.dumps(probe.validate(generation,a.ubft.resolve()),indent=2))
     assert generations[0]['genesis_hash']!=generations[1]['genesis_hash']
     assert generations[0]['faucet_address']!=generations[1]['faucet_address']
     print(json.dumps({'validation':'offline fixtures; optional native aggregator probe; no deployable cluster',
