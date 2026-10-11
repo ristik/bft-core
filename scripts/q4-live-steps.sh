@@ -399,10 +399,14 @@ PY
   done
   local evmExpiries=0
   for i in 1 2 3 4; do evmExpiries=$((evmExpiries + $(tail -n +"$((${marks[$((i - 1))]} + 1))" "test-nodes/evm$i/debug.log" | grep -ac 'inactivity timeout exceeded' || true))); done
-  python3 - "$out" "$summary" "$t2ms" "$evmExpiries" <<'PY' || return 1
+  # the certificates the sampled execution client's validator admitted in the window, as "height rootRound": a block certified by a root round that was
+  # already committed when the window opened (the held heavy root's last certificate, delivered late on the validator's re-subscription) is not a retry
+  tail -n +"$((${marks[0]} + 1))" test-nodes/evm1/debug.log | grep -a 'msg="certificate admitted"' | sed -n 's/.* height=\([0-9]*\) .* rootRound=\([0-9]*\) .*/\1 \2/p' >"$Q4_DIR/t2-admitted.txt"
+  python3 - "$out" "$summary" "$t2ms" "$evmExpiries" "$Q4_DIR/t2-admitted.txt" <<'PY' || return 1
 import json, sys
 path, summary, t2ms, expiries = sys.argv[1], sys.argv[2], int(sys.argv[3]), int(sys.argv[4])
 rows = [json.loads(l) for l in open(path) if l.strip()]
+admitted = {int(h): int(rr) for h, rr in (l.split() for l in open(sys.argv[5]) if l.strip())}
 span = rows[-1]["elapsed_s"] - rows[0]["elapsed_s"]
 # progress is a value above the highest any root held when the window opened; a lagging root catching up to an
 # already-certified round is not a retry
@@ -419,15 +423,19 @@ for row in rows[1:]:
             elif v != first[r["root"]][k]:
                 caught.add(f"root{r['root']} {k} {first[r['root']][k]} -> {v}")
     if row["evm_height"] != rows[0]["evm_height"]:
-        moved.append(f"EVM height {rows[0]['evm_height']} -> {row['evm_height']} at {row['elapsed_s']:.1f}s")
+        by = admitted.get(row["evm_height"])
+        if by is not None and by <= top["round"]:
+            caught.add(f"EVM height {rows[0]['evm_height']} -> {row['evm_height']} by the certificate of root round {by}, committed before the window opened (highest committed round then: {top['round']})")
+        else:
+            moved.append(f"EVM height {rows[0]['evm_height']} -> {row['evm_height']} at {row['elapsed_s']:.1f}s" + (f" (root round {by})" if by is not None else " (no admitted certificate found)"))
 lines = [f"root quorum lost for {span:.1f}s of samples (after a 5 s drain); EVM T2 = {t2ms} ms: the local T2 expiry fell at most {t2ms / 1000:.1f}s into the window,",
          f"the window ran {span - t2ms / 1000:.1f}s past it ({span / (t2ms / 1000):.1f} T2 periods); EVM nodes' local inactivity expiries logged in the window: {expiries}"]
 for r in rows[0]["roots"]:
     lines.append(f"  root{r['root']}: epoch {r['epoch']}, committed round {r['round']}; EVM shard IR round {r['evm']['ir']}, TR round {r['evm']['tr']}")
 lines.append(f"  EVM height {rows[0]['evm_height']}")
 if caught:
-    lines.append("caught up to values already held by another root (not progress): " + "; ".join(sorted(set(caught))))
-lines.append("moved during the window: " + ("; ".join(moved) if moved else "nothing (no root round, no EVM IR/TR round, no EVM block): no root-certified retry"))
+    lines.append("caught up to values already certified when the window opened (not progress): " + "; ".join(sorted(set(caught))))
+lines.append("moved during the window: " + ("; ".join(moved) if moved else "nothing beyond what was certified before the window (no new root round, EVM IR/TR round or EVM block): no root-certified retry"))
 open(summary, "w").write("\n".join(lines) + "\n")
 print("\n".join(lines))
 if span < 3 * t2ms / 1000:
