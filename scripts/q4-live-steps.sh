@@ -528,13 +528,28 @@ q4_g2_urls() { local i; for i in 1 2 3 4; do printf '%s ' "http://127.0.0.1:$((r
 q4_g2_sample() { # phase t0: one line of every pair's latest and finalized block
   python3 scripts/q4-g2-rollback.py heads $(q4_g2_urls) | jq -c --arg p "$1" --arg e "$(q4_dt "$(q4_t)" "$2")" '{phase: $p, elapsed_s: ($e | tonumber), pairs: .}' >>"$Q4_DIR/g2-rollback/samples.jsonl"
 }
+# After the request hold is armed a request the roots had already admitted is still certified, some root rounds later (4.7 s in one run, which a fixed
+# 3 s wait missed: the step then anchored on a parent that was about to be superseded). Wait until the first pair's head has not moved for
+# Q4_G2_SETTLE_SECONDS (default 12, several times the certification latency), at most 90 s.
+q4_g2_settle() {
+  local h prev="" still=0 i
+  for i in $(seq 1 90); do
+    h=$(q4_evm_height 1) || return 1
+    if [ "$h" = "$prev" ]; then still=$((still + 1)); else still=0; prev=$h; fi
+    [ "$still" -ge "${Q4_G2_SETTLE_SECONDS:-12}" ] && return 0
+    sleep 1
+  done
+  echo "the EVM head kept moving for 90 s under the request hold (last height $prev)" >&2
+  return 1
+}
 q4_row_g2_rollback() {
   local dir=$Q4_DIR/g2-rollback rule=g2hold$Q4_EPOCH observer=$Q4_HEAVY_ROOT i t0 logs=() urls=() head parent height sender nonce tx sent kids n=0 carried=0 tr0 tr=0 pair
   rm -rf "$dir"; mkdir -p "$dir"
   # the log marks are taken before the hold, so every block sealed on the parent during the settle below is listed
   for i in 1 2 3 4; do logs+=("test-nodes/evm$i/debug.log:$(wc -l <"test-nodes/evm$i/debug.log" | tr -d ' ')"); urls+=(--url "http://127.0.0.1:$((rethEthBase + i - 1))"); done
   Q4_SHARD_TYPES=request q4_shard_hold "$rule" "$Q4_ROOTS" in 8 || return 1
-  sleep 3   # requests already past the gate are answered; from here nothing the shard builds can be certified
+  # requests already past the gate are still answered: the parent is taken only once the head has stood still, so nothing the shard builds on it can be certified
+  q4_g2_settle || return 1
   t0=$(q4_t)
   head=$(python3 scripts/q4-g2-rollback.py heads $(q4_g2_urls)) || return 1
   [ "$(printf '%s' "$head" | jq -r '[.[] | .latest.hash, .finalized.hash] | unique | length')" = 1 ] || { echo "the pairs do not agree on one finalized head under the hold: $head" >&2; return 1; }
