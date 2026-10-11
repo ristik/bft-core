@@ -240,10 +240,11 @@ const MaxPutBatch = 32
 
 // staged is one record of a batch written to its temporary directory, not yet synced or published.
 type staged struct {
-	q     Request
-	rec   *Record
-	tmp   string
-	final string
+	q       Request
+	rec     *Record
+	tmp     string
+	final   string
+	encoded []byte
 }
 
 // PutBatch is Put for several records with the device flushes shared: every file of every record is written, then all files are
@@ -256,8 +257,6 @@ func (s *Store) PutBatch(qs []Request, recs []*Record) error {
 	if len(qs) != len(recs) || len(qs) == 0 || len(qs) > MaxPutBatch {
 		return ErrInvalid
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	var open []*os.File // written, not yet synced; closed here if PutBatch returns before syncAndCloseAll takes them
 	var batch []staged
 	defer func() {
@@ -291,24 +290,16 @@ func (s *Store) PutBatch(qs []Request, recs []*Record) error {
 			continue
 		}
 		inBatch[final] = encoded
-		if _, err = os.Stat(final); err == nil {
-			old, e := s.getVersion(q, recordV2(rec))
-			if e != nil {
-				return e
-			}
-			a, _ := EncodeResponse(Response{q, OK, old})
-			if !bytes.Equal(a, encoded) {
-				return ErrInvalid
-			}
-			continue
-		} else if !os.IsNotExist(err) {
+		if exists, err := s.storedSame(q, rec, final, encoded); err != nil {
 			return err
+		} else if exists {
+			continue
 		}
 		tmp, err := os.MkdirTemp(s.dir, ".writing-")
 		if err != nil {
 			return err
 		}
-		batch = append(batch, staged{q: q, rec: rec, tmp: tmp, final: final})
+		batch = append(batch, staged{q: q, rec: rec, tmp: tmp, final: final, encoded: encoded})
 		keys := make([]string, 0, len(f))
 		for k := range f {
 			keys = append(keys, k)
@@ -361,25 +352,63 @@ func (s *Store) PutBatch(qs []Request, recs []*Record) error {
 	// Publication. If a rename fails part way, the records renamed before it are already visible to Get: they are made durable and
 	// indexed like the rest before the error is returned, so a failed batch leaves no record that is readable but neither synced
 	// nor indexed.
+	//
+	// Everything above ran without the store's lock: writing and syncing a record's files is most of a put's time, and a reader, or
+	// another writer staging its own records, has no reason to wait for it. The lock is taken for the publication only, so that a
+	// record is never visible to Get before the store directory is synced, as before.
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	var publishErr error
-	published := 0
+	var published []staged
 	for _, st := range batch {
 		if publishErr = s.fault("before-publish"); publishErr != nil {
 			break
 		}
+		// another put may have published the same record while this one was being staged: it must be identical, and then there
+		// is nothing to publish (the staged copy is removed on return)
+		var exists bool
+		if exists, publishErr = s.storedSameLocked(st.q, st.rec, st.final, st.encoded); publishErr != nil {
+			break
+		} else if exists {
+			continue
+		}
 		if publishErr = s.ops().rename(st.tmp, st.final); publishErr != nil {
 			break
 		}
-		published++
+		published = append(published, st)
 	}
 	// the publications (and, for records that were already stored, their earlier ones) are durable once the store directory is
 	storeErr := s.ops().syncDir(s.dir)
 	if storeErr == nil && s.rounds != nil {
-		for _, st := range batch[:published] {
+		for _, st := range published {
 			s.indexRecord(st.q, st.rec)
 		}
 	}
 	return errors.Join(publishErr, storeErr)
+}
+
+// storedSame reports whether the record is already stored, which it may only be with identical content (ErrInvalid otherwise).
+func (s *Store) storedSame(q Request, rec *Record, final string, encoded []byte) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.storedSameLocked(q, rec, final, encoded)
+}
+
+func (s *Store) storedSameLocked(q Request, rec *Record, final string, encoded []byte) (bool, error) {
+	if _, err := os.Stat(final); os.IsNotExist(err) {
+		return false, nil
+	} else if err != nil {
+		return false, err
+	}
+	old, err := s.getVersion(q, recordV2(rec))
+	if err != nil {
+		return false, err
+	}
+	a, _ := EncodeResponse(Response{q, OK, old})
+	if !bytes.Equal(a, encoded) {
+		return false, ErrInvalid
+	}
+	return true, nil
 }
 
 // Get refuses missing or damaged chunks as a whole. It never returns partial
