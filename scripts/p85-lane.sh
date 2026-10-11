@@ -74,6 +74,10 @@ status=$?
 set -e
 rm -f "$DEVNET_PIDFILE"
 cp -R test-nodes/p85 "$EVIDENCE_DIR/p85" 2>/dev/null || true
+# what the lane's helpers read, kept so a failure can be replayed offline (go run ./scripts/h3-pdr, the weight checks, the trust-base tools): the roots'
+# databases and public node info, the trust bases, the lane's flow directories; not the execution clients' data, the authorities' credentials or keys
+rsync -a --exclude 'reth*/' --exclude 'evm*/' --exclude 'auth*/' --exclude '*.log' --exclude 'keys.json' --exclude '*.sock' --exclude '*.cred' \
+  --exclude 'jwt.hex' --exclude 'p85/' test-nodes/ "$EVIDENCE_DIR/state/" 2>/dev/null || true
 if [ "$status" -ne 0 ] || grep -q '^ *FAIL:' "$EVIDENCE_DIR/lane.log"; then
   fail "P85 recovery lane failed (exit $status); see $EVIDENCE_DIR/lane.log"
 fi

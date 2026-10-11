@@ -15,7 +15,7 @@
 #   proofs          `proposal --reserved` -> H3 proofs -> candidate -> every member's authority signs the EVM possession proof -> submit -> finalize
 #   controls        the plan without the EVM proofs, and with a proof the election did not store, is refused by the root
 #   handoff         readiness receipts (the joiner's too), the V3 plan with the v4 Freeze companion, H commits; install; activation
-#   J stalls        the joiner and one retained member go down (their EVM services; their roots stay for the root quorum): J (3 of 5) cannot certify
+#   J stalls        the joiner and two retained members (5, 3, 4) lose their EVM services (their roots stay for the root quorum): J (2 of 5, EVM quorum 3) cannot certify
 #   recovery        the derived recovery (exact K, no receipts, supersedes J) commits, the roots return to K's entities, K (3 of 4) resumes
 #   resolved        custody/election: the result is Recovered, K is the last acknowledged assignment, the session closed
 #   restarts        every root and one validator restart; certification continues
@@ -27,6 +27,8 @@ source scripts/lib/h3-lib.sh
 source scripts/lib/q3-lib.sh
 source scripts/lib/q3-flow-lib.sh
 source scripts/lib/p85-lib.sh
+# the paid transactions and the authority restarts go to the validators that are up (m2_online_validators is otherwise a fixed list)
+m2_online_validators() { echo "${H3_ONLINE:-1 2 3 4}"; }
 
 p85_pass() { echo "  PASS: $*"; }
 p85_step_die() {
@@ -44,12 +46,18 @@ p85_eth() { echo "http://127.0.0.1:$rethEthBase"; }
 p85_custody() { jq -r .custody "$P85_DEPLOY"; }
 p85_election() { jq -r .election "$P85_DEPLOY"; }
 p85_call() { "$P85_CAST" call --rpc-url "$(p85_eth)" "$@"; }
-p85_open_result() { p85_call "$(p85_election)" "openResult()(bytes32)"; }
+# a call that fails or answers anything but a bytes32 is an error, never a value (run 21: an empty answer from a dead devnet read as "a result is open")
+p85_open_result() {
+  local out; out=$(p85_call "$(p85_election)" "openResult()(bytes32)") || return 1
+  [[ "$out" =~ ^0x[0-9a-fA-F]{64}$ ]] || return 1
+  echo "$out"
+}
 p85_result_state() { # result -> the ResultState enum value (1 Reserved, 3 Acknowledged, 4 Recovered)
   "$P85_CAST" call --rpc-url "$(p85_eth)" "$(p85_election)" "result(bytes32)" "$1" | python3 -c "import sys;print(int(sys.stdin.read().strip()[2:66],16))"
 }
 p85_last_acked() { p85_call "$(p85_custody)" "lastAckedAssignment()(bytes32)"; }
 p85_live_count() { p85_call "$(p85_election)" "liveCount()(uint32)" | awk '{print $1}'; }
+p85_eth_block() { "$P85_CAST" block-number --rpc-url "$(p85_eth)"; }
 p85_evm_round() { h3_evm_row | jq -r '.roundNumber'; }
 
 P85_ENTITY_IDS=""   # the peer ids the contracts' node-id words are resolved with (they hold only keccak256 of them)
@@ -194,9 +202,10 @@ p85_devnet_alive() {
 p85_election_reserved() {
   local i r
   for i in $(seq 1 600); do
-    r=$(p85_open_result); [ "$r" != "0x0000000000000000000000000000000000000000000000000000000000000000" ] && break
+    p85_devnet_alive || return 1
+    r=$(p85_open_result) || r=0x0000000000000000000000000000000000000000000000000000000000000000
+    [ "$r" != "0x0000000000000000000000000000000000000000000000000000000000000000" ] && break
     [ $((i % 60)) -ne 1 ] || p85_election_clock
-    [ $((i % 10)) -ne 0 ] || p85_devnet_alive || return 1
     sleep 1
   done
   [ "$r" != "0x0000000000000000000000000000000000000000000000000000000000000000" ] || p85_election_clock >&2
@@ -296,26 +305,34 @@ p85_handoff() {
 p85_install_activation() {
   H3_ROOTS="1 2 3 4 5"
   q3_install_n 2 || return 1
-  Q3_TOTAL_WEIGHT=5 Q3_ROOT_QUORUM=4 q3_activation_n 1 2 || return 1
+  Q3_TOTAL_WEIGHT=4 Q3_ROOT_QUORUM=3 q3_activation_n 1 2 || return 1   # epoch 2's Commit is K's (W=4, quorum 3)
   # activated, not acknowledged: the registry has not moved, and custody's last acknowledged assignment is still K's
   h3_registry_is 0 1 || h3_registry_is 0 2 || { echo "the registry moved before J was acknowledged" >&2; return 1; }
 }
 
-# The joiner and one retained member lose their EVM service (processes of the pair; the roots stay: the root quorum must remain to order the
-# recovery). The retained members advance into J's scope and cannot certify without them.
+# J = K + joiner has five unit-weight validators and the EVM request quorum is a majority, floor(5/2)+1 = 3 (the 4 of the root quorum is another
+# number). The joiner (5) and two retained members (3, 4) lose their EVM service, so J has 2 of 5 and cannot certify; the roots stay (the root
+# quorum must remain to order the recovery). Entity 3 loses only its shard node: its reth and signing authority stay up, so the recovery
+# step brings it back into K's scope (K = {1,2,3} of 4 = its quorum 3). Entities 4 and 5 lose everything (an authority's key lives in memory).
 p85_j_stalls() {
-  local i before after
+  local i before after pdr
   for i in 4 5; do
     stop_one_evm_validator "$i" 2>/dev/null || true
     stop_pidfile "test-nodes/reth$i/pid" 'reth.* node' 2>/dev/null || true
     stop_pidfile "test-nodes/auth$i/pid" 'ubft signing-authority run' 2>/dev/null || true
   done
-  H3_ONLINE="1 2 3"
-  M2_ADVANCE_NO_REPLICA_WAIT=1 h3_advance_authorities 2 1 1 2 3 || { echo "authority advance of the retained members into J's scope failed" >&2; return 1; }
-  before=$(p85_evm_round); sleep 45; after=$(p85_evm_round)
-  [ "$after" -le "$((before + 1))" ] || { echo "J certified rounds ($before -> $after) with 3 of its 5 validators" >&2; return 1; }
-  [ "$(p85_last_acked | tr 'A-F' 'a-f')" != "" ] && [ "$(p85_result_state "$(cat "$H3_DIR/result-id.txt")")" = 1 ] || { echo "the result is no longer reserved" >&2; return 1; }
-  echo "EVM round $before -> $after in 45 s with 3 of 5 validators of J" >"$H3_DIR/j-stalls.txt"
+  stop_one_evm_validator 3 2>/dev/null || true
+  H3_ONLINE="1 2"
+  M2_ADVANCE_NO_REPLICA_WAIT=1 h3_advance_authorities 2 1 1 2 || { echo "authority advance of the retained members into J's scope failed" >&2; return 1; }
+  # entity 3's authority is advanced into J's scope too, but its node stays down
+  pdr=$(h3_pdr_file 1) || return 1
+  build/ubft signing-authority advance-epoch --operator-socket "test-nodes/auth3/operator.sock" --operator-credential "test-nodes/auth3/operator.cred" \
+    --trust-base test-nodes/trust-base-epoch2.json --shard-conf "$pdr" || { echo "authority 3 advance into J's scope failed" >&2; return 1; }
+  before=$(p85_eth_block); sleep 45; after=$(p85_eth_block)
+  [ "$after" -le "$((before + 1))" ] || { echo "J certified blocks ($before -> $after) with 2 of its 5 validators (majority quorum 3)" >&2; return 1; }
+  [ "$(p85_last_acked | tr 'A-F' 'a-f')" = "$(p85_genesis_assignment | tr 'A-F' 'a-f')" ] || { echo "custody moved off the genesis assignment: J was acknowledged" >&2; return 1; }
+  [ "$(p85_result_state "$(cat "$H3_DIR/result-id.txt")")" = 1 ] || { echo "the result is no longer reserved" >&2; return 1; }
+  echo "EVM round $before -> $after in 45 s with 2 of 5 validators of J" >"$H3_DIR/j-stalls.txt"
 }
 
 p85_recovery() {
@@ -338,7 +355,7 @@ p85_recovery_attempt_loop() {
   H3_ROOTS="1 2 3 4 5"
   q3_install_n 3 || return 1
   H3_ROOTS="1 2 3 4"
-  Q3_TOTAL_WEIGHT=4 Q3_ROOT_QUORUM=3 q3_activation_n 2 3 2>/dev/null || true
+  Q3_TOTAL_WEIGHT=5 Q3_ROOT_QUORUM=4 q3_activation_n 2 3 || return 1   # epoch 3's Commit is J's (W=5, quorum 4)
   M2_ADVANCE_NO_REPLICA_WAIT=1 h3_advance_authorities 3 2 1 2 3 || { echo "authority advance into the recovery's scope failed" >&2; return 1; }
   local i
   for i in $(seq 1 180); do h3_registry_is 2 3 && break; sleep 1; done
@@ -350,7 +367,7 @@ p85_recovery_attempt_loop() {
 p85_resolved() {
   local r; r=$(cat "$H3_DIR/result-id.txt")
   local i
-  for i in $(seq 1 60); do [ "$(p85_result_state "$r")" = 4 ] && break; sleep 1; done
+  for i in $(seq 1 180); do [ "$(p85_result_state "$r")" = 4 ] && break; sleep 1; done
   [ "$(p85_result_state "$r")" = 4 ] || { echo "the result is in state $(p85_result_state "$r"), not Recovered" >&2; return 1; }
   [ "$(p85_open_result)" = "0x0000000000000000000000000000000000000000000000000000000000000000" ] || { echo "a result is still open" >&2; return 1; }
   p85_last_acked >"$H3_DIR/last-acked-after-recovery.txt"

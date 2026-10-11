@@ -33,7 +33,7 @@ m2_start_root() { # node installEpoch bootnode  (an empty install epoch starts a
   if [ "${Q3_B1:-0}" = 1 ] && [ "${P85_LANE:-0}" != 1 ]; then shardConfArgs+=(--q3-lane --genesis-identities test-nodes/genesis-identities.json); fi   # Q3 #50: the coupled runtime (verified history, install journal, V3 handoffs)
   if [ "${P85_LANE:-0}" = 1 ]; then   # a restarted root of the proof-of-stake lane runs the same coupled runtime and P85 executor
     source scripts/lib/p85-lib.sh
-    shardConfArgs+=(--q3-lane $(p85_root_flags "$node" "http://127.0.0.1:$((rethEthBase + node - 1))"))
+    shardConfArgs+=(--q3-lane $(p85_root_flags "$node" "http://127.0.0.1:${rethEthBase:-18545}"))
   fi
   port=$(m2_rpc_port "$node")
   if [ "${F8_MIXED_LANE:-0}" = 1 ]; then
