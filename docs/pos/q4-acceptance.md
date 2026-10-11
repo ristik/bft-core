@@ -50,9 +50,10 @@ row passes when the injection happened and was classified, and proves no safety 
 ## G2's native UC verification (owner question Q6)
 
 G2's last gap, "native UC cryptographic verification where used", is read as the B1 precompile (`0x0100`, UC_V1) verifying a real Unicity Certificate inside
-ureth on a live devnet (a working reading, not yet confirmed by the owner). It is evidenced by the B3 two-shard live lane (ristik/native-bridge-plugins
+ureth on a live devnet (a working reading, not yet confirmed by the owner). It is evidenced, but **G2 stays PARTIAL until the owner answers Q6**: the required label
+`OWNER-CONFIRMED (Q6 reading of native UC verification)` carries a gap with no evidence, to be deleted with its gap on a yes. The evidence is the B3 two-shard live lane (ristik/native-bridge-plugins
 `tests/live`, `scripts/dnb-devnet.sh` with `DNB_AGG_SHARDS=2`): the named lane `b3` reads that run's `rows.log` (a two-anchor redemption that made two `0x0100` calls whose
-B1 verdicts at the execution block are valid), `lane.log` and `ureth-attestation.json`. Its evidence directory must carry `run-mode.txt` beginning
+B1 verdicts at the execution block are valid), `lane.log` and `ureth-attestation.json` (the cited run's rows exit was 1 on one unrelated gas-1 assertion; its run mode was recorded after the run, not by the runner). Its evidence directory must carry `run-mode.txt` beginning
 `B3 run mode: clean build (evidence run` like the Q4 lane's, or the report refuses it as a development run.
 
 ## The live lane run
