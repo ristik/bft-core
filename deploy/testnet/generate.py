@@ -23,13 +23,31 @@ FEE = '0x00000000000000000000000000000000000000fe'
 # (rootchain/consensus/storage ContinuityPolicy reads continuity_max_distance as "num/den").
 EVM_CONTINUITY_MAX_DISTANCE = '1/2'
 
+# The one B1 profile (`ubft engine-api b1-profile`) is the source of the registry genesis (layout 3), the ureth --unicity.* bindings and the shard
+# nodes' Update admission, exactly as scripts/dnb-devnet.sh and the Q3 lanes use it. W_cert is the lanes' value.
+W_CERT = 15
+
+def ureth_flags_of(profile_output):
+    """The `ureth flags:` line `engine-api b1-profile` prints: the bindings that pin the paired client to the profile."""
+    lines = [l.split(':', 1)[1].split() for l in profile_output.splitlines() if l.startswith('ureth flags:')]
+    if len(lines) != 1 or not lines[0]: raise ValueError('b1-profile printed no single "ureth flags:" line')
+    return lines[0]
+
+def funded_base_genesis(chain_id, max_gas, alloc, entropy):
+    """The standard genesis the registry is allocated into: the lanes' chain configuration, the profile's block gas limit and the package's funding."""
+    return {'config': {'chainId': chain_id, 'homesteadBlock': 0, 'eip150Block': 0, 'eip155Block': 0, 'eip158Block': 0, 'byzantiumBlock': 0,
+        'constantinopleBlock': 0, 'petersburgBlock': 0, 'istanbulBlock': 0, 'berlinBlock': 0, 'londonBlock': 0, 'mergeNetsplitBlock': 0,
+        'shanghaiTime': 0, 'cancunTime': 0, 'terminalTotalDifficulty': 0, 'terminalTotalDifficultyPassed': True},
+        'nonce': '0x0', 'timestamp': '0x0', 'extraData': '0x' + entropy, 'gasLimit': hex(max_gas), 'difficulty': '0x0',
+        'mixHash': '0x' + '00' * 32, 'coinbase': '0x' + '00' * 20, 'baseFeePerGas': '0x3b9aca00', 'alloc': alloc}
+
 def evm_partition_params(chain_id):
     return f'proof_type=exec,chain_id={chain_id},continuity_max_distance={EVM_CONTINUITY_MAX_DISTANCE}'
 
 def write(path, obj):
     path.write_text(json.dumps(obj, indent=2) + '\n')
 
-def topology(out, n, ids, images, captcha):
+def topology(out, n, ids, images, captcha, ureth_flags=(), max_gas=30000000):
     """JSON is a YAML subset, accepted directly by Docker Compose."""
     services = {}
     def service(name, image, command, mounts=(), memory='256m', cpu=0.5, networks=None, **extra):
@@ -47,7 +65,8 @@ def topology(out, n, ids, images, captcha):
         common = ['--trust-base', '/network/trust-base.json']
         service('root%d'%i, node, ['ubft','root-node','run','--home','/state','--address','/ip4/0.0.0.0/tcp/8000',
             '--bootnodes', ','.join('/dns4/root%d/tcp/8000/p2p/%s' % (j,ids['root'][j-1]) for j in range(1,n+1) if j!=i),
-            '--profile-2','--shard-conf','/network/full-shard-conf.json','--shard-conf','/network/aggregator-conf.json',
+            '--profile-2','--q3-lane','--genesis-identities','/network/genesis-identities.json',
+            '--shard-conf','/network/full-shard-conf.json','--shard-conf','/network/aggregator-conf.json',
             '--rpc-server-address','0.0.0.0:8002','--metrics','prometheus'] + common,
             ['./validator%d/root:/state'%i,network], memory='384m')
         service('authority%d'%i, node, ['ubft','signing-authority','run','--home','/authority',
@@ -61,7 +80,7 @@ def topology(out, n, ids, images, captcha):
             '--authrpc.jwtsecret','/jwt/jwt.hex','--authrpc.addr','0.0.0.0','--authrpc.port','8551',
             '--http','--http.addr','0.0.0.0','--http.port','8545','--http.api','eth,net,web3',
             '--rpc.eth-proof-window','64','--disable-discovery','--ipcdisable',
-            '--engine.persistence-threshold','64','--builder.gaslimit','30000000','--unicity.fee-collector',FEE],
+            '--engine.persistence-threshold','64','--builder.gaslimit',str(max_gas),'--unicity.fee-collector',FEE,*ureth_flags],
             ['./validator%d/ureth:/state'%i,'./validator%d/jwt:/jwt:ro'%i,network], memory='1536m',cpu=1.0)
         peers = root_boot + ''.join(',/dns4/shard%d/tcp/9000/p2p/%s'%(j,ids['evm'][j-1]) for j in range(1,n+1) if j!=i)
         replicas = [x for j,x in enumerate(ids['evm'],1) if j!=i][:2]
@@ -69,7 +88,7 @@ def topology(out, n, ids, images, captcha):
             '--address','/ip4/0.0.0.0/tcp/9000','--bootnodes',peers,
             '--full-shard-conf','/network/full-shard-conf.json','--genesis','/network/genesis.json',
             '--engine-url','http://ureth%d:8551'%i,'--eth-url','http://ureth%d:8545'%i,
-            '--jwt-secret','/jwt/jwt.hex','--engine-fee-collector',FEE,'--registry-layout','2',
+            '--jwt-secret','/jwt/jwt.hex','--engine-fee-collector',FEE,'--b1-profile','/network/b1-profile.json','--q3-lane',
             '--execution-journal','/state/execution-journal.db','--archive-store','/archive',
             '--archive-prune','--journal-candidates','32','--trust-history-profile-2','--rpc-server-address','0.0.0.0:9101','--metrics','prometheus',
             '--signing-authority-socket','/authority/client.sock','--signing-authority-credential','/authority/client.cred']
@@ -107,6 +126,7 @@ def main():
     p.add_argument('--validators',type=int,default=4)
     p.add_argument('--chain-id',type=int,default=31337)
     p.add_argument('--ubft',type=Path,default=REPO/'build/ubft')
+    p.add_argument('--b1genesis',type=Path,default=REPO/'build/b1genesis',help='scripts/b1genesis built from the pinned BFT source: independent regeneration of the genesis registry')
     p.add_argument('--keygen',type=Path,default=REPO/'build/tn-keygen')
     p.add_argument('--images',type=Path,default=HERE/'artifacts/images.json')
     p.add_argument('--offline-validation',action='store_true',help='native ceremony with fixture images; output CANNOT be deployed')
@@ -123,9 +143,10 @@ def main():
     if any(not re.fullmatch(r'sha256:[0-9a-f]{64}',records['images'].get(k,'')) for k in ('node','guard','signer','rpc')):
         p.error('images must be immutable local image IDs from build-images.py')
     ubft=str(a.ubft.resolve())
-    version=subprocess.check_output(['go','version','-m',ubft],text=True)
-    if 'vcs.revision='+PINS['bft'] not in version or 'vcs.modified=true' in version:
-        p.error('ubft must be built from clean pinned BFT source')
+    for tool in (ubft,str(a.b1genesis.resolve())):
+        version=subprocess.check_output(['go','version','-m',tool],text=True)
+        if 'vcs.revision='+PINS['bft'] not in version or 'vcs.modified=true' in version:
+            p.error(f'{Path(tool).name} must be built from clean pinned BFT source')
     if not a.offline_validation:
         if os.geteuid()!=0: p.error('live generation must run as root on Linux to assign UID 10001 ownership')
         subprocess.run(['docker','info'],check=True,stdout=subprocess.DEVNULL)
@@ -191,16 +212,23 @@ def main():
             cli('shard-conf','generate','--home',home,'--network-id','3','--partition-id','8','--partition-type-id','8',
                 '--shard-id','0x80','--epoch-start','1','--t2-timeout','5000','--partition-params',evm_partition_params(a.chain_id),
                 *sum((['--node-info',out/f'validator{i}/auth/node-info.json'] for i in range(1,a.validators+1)),[]))
-            # Build a standard template with ubft, then finalize funding + unique generation entropy.
-            cli('engine-api','genesis','--shard-conf',home/'shard-conf-8_0.json','--registry-layout','2','--out',home/'template.json')
-            template=json.loads((home/'template.json').read_text())
+            # One B1 profile, then a genesis allocated from it (registry layout 3), funded with the package's random faucet and unique entropy.
+            trust=home/'trust-base.json'
+            profile_out=cli('engine-api','b1-profile','--shard-conf',home/'shard-conf-8_0.json','--trust-base',trust,'--w-cert',W_CERT,'--out',home/'b1-profile.json')
+            flags=ureth_flags_of(profile_out)
+            max_gas=int(json.loads((home/'b1-profile.json').read_text())['maxGas'])
             alloc=json.loads(subprocess.check_output([str(a.keygen.resolve()),str(home/'faucet-secrets')],text=True))
-            template['alloc']=alloc
-            template['extraData']='0x'+secrets.token_hex(32)
-            write(home/'funded.json',template)
-            identity=cli('engine-api','genesis','--shard-conf',home/'shard-conf-8_0.json','--registry-layout','2',
-                '--alloc-source',home/'funded.json','--out',home/'genesis.json','--full-shard-conf',home/'full-shard-conf.json')
+            write(home/'funded.json',funded_base_genesis(a.chain_id,max_gas,alloc,secrets.token_hex(32)))
+            identity=cli('engine-api','genesis','--shard-conf',home/'shard-conf-8_0.json','--trust-base',trust,'--b1-profile',home/'b1-profile.json',
+                '--alloc-source',home/'funded.json','--out',home/'genesis.json','--full-shard-conf',home/'full-shard-conf.json',
+                '--identities-out',home/'genesis-identities.json')
             print(identity)
+            # The deployed registry must be exactly what the pinned source regenerates from the profile, the trust base and the base shard configuration.
+            verified=subprocess.run([str(a.b1genesis.resolve()),'--verify',str(home/'genesis.json'),'--profile',str(home/'b1-profile.json'),
+                '--root-genesis',str(trust),'--shard-conf',str(home/'full-shard-conf.json')],text=True,capture_output=True)
+            if verified.returncode!=0 or 'the deployed registry account matches the regeneration' not in verified.stdout:
+                raise RuntimeError('b1genesis --verify: the genesis registry differs from its regeneration\n'+verified.stdout+verified.stderr)
+            print(verified.stdout)
             block=re.search(r'block hash:\s+(?:0x)?([a-fA-F0-9]{64})',identity).group(1)
             shutil.copy2(home/'full-shard-conf.json',out/'network/full-shard-conf.json')
             if not a.offline_validation: os.chown(out/'network/full-shard-conf.json',10001,10001)
@@ -219,7 +247,7 @@ def main():
         cli('shard-conf','generate','--home',home/'agg-conf','--network-id','3','--partition-id','9','--partition-type-id','9',
             '--shard-id','0x80','--epoch','0','--epoch-start','1','--t2-timeout','5000',
             '--partition-params','proof_type=aggregator_rsmt_v1','--node-info',out/'aggregator/node-info.json')
-        for name in ('trust-base.json','full-shard-conf.json','genesis.json'):
+        for name in ('trust-base.json','full-shard-conf.json','genesis.json','b1-profile.json','genesis-identities.json'):
             shutil.copy2(home/name,out/'network'/name)
         shutil.copy2(home/'agg-conf/shard-conf-9_0.json',out/'network/aggregator-conf.json')
         for i in range(1,a.validators+1):
@@ -247,7 +275,7 @@ def main():
         network.update(chain_id=a.chain_id,genesis_hash='0x'+block,funding_address=next(iter(alloc)),
             validator_rpc_urls=[f'http://ureth{i}:8545' for i in range(1,a.validators+1)],captcha_sitekey=a.captcha_sitekey)
         write(out/'network/network.json',network)
-        write(out/'compose.yaml',topology(out,a.validators,{'root':roots,'evm':evms},records['images'],a.captcha_sitekey))
+        write(out/'compose.yaml',topology(out,a.validators,{'root':roots,'evm':evms},records['images'],a.captcha_sitekey,flags,max_gas))
         manifest={'offline_validation_only':a.offline_validation,'generation':out.name,'chain_id':a.chain_id,'genesis_hash':'0x'+block,'validators':a.validators,
             'faucet_address':next(iter(alloc)), 'artifacts':records,
             'authority_status':{str(i):json.loads(authority(i,'status','--operator-socket',out/f'validator{i}/auth/operator.sock','--operator-credential',out/f'validator{i}/auth/operator.cred')) for i in range(1,a.validators+1)} if not a.offline_validation else {},
