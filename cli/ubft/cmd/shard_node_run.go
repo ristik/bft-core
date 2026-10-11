@@ -1044,7 +1044,11 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 					return installVerifiedAssignment(node, activePeers, view, step)
 				},
 				NoteJoiner: func(view handoffdelivery.Bundle, step handoff.AssignmentStep) error {
-					return noteJoinerStep(signing, view, step, node.ShardConfForEpoch)
+					if err := noteJoinerStep(signing, view, step, node.ShardConfForEpoch); err != nil {
+						return err
+					}
+					// a staging-only joiner that this verified activation names becomes a signer now, not at its next restart
+					return bindLiveJoinerKey(signing)
 				},
 				InstallEVMTransition: executor.(*engineapi.Adapter).InstallEpochTransition,
 				Activate:             q3Trust.ActivateQ3,

@@ -48,7 +48,10 @@ type certificationSigning struct {
 	deferred *shardnode.DeferredAuthoritySigner
 	// stagingOnly is true while a deferred signer has no installed step naming this node: it follows and stages, and signs nothing.
 	stagingOnly bool
-	nodeID      string
+	// replayed is true once the verified installed steps of the start (or the restore's catch-up) have all been replayed and
+	// finishJoinerKey has run: from then on an install is a live one, and a step that names this node binds its key at once.
+	replayed bool
+	nodeID   string
 	// joinerKey is the key the LATEST verified installed step that names this node gives it, recorded as the steps are replayed and bound
 	// once (finishJoinerKey) when the replay is complete. localKey is the key configuration's own signing key, which no installed
 	// configuration may name for a node signed by an authority.
