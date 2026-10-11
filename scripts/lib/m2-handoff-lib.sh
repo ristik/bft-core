@@ -383,12 +383,17 @@ m2_b1_prepare() { # roots
 }
 
 m2_config_only_handoff() { # epoch roots oldRpcs (the roots' RPC endpoints are the flow's own, h3_root_rpcs)
-  local epoch=$1 roots=$2 oldEpoch=$(($1-1)) nextFile="trust-base-epoch$1.json"
-  local i waitStep first boot prev activated
-  first=$(echo "$roots" | awk '{print $1}')
+  local epoch=$1 roots=$2 oldEpoch=$(($1-1))
   m2_b1_prepare "$roots" || return 1
   Q3_NEXT_EPOCH=$epoch Q3_SUFFIX=-m2e$epoch Q3_NO_ASSIGNMENT=1 q3_trust_base_v3 "$epoch" || return 1
   Q3_NEXT_EPOCH=$epoch Q3_SUFFIX=-m2e$epoch Q3_NO_ASSIGNMENT=1 h3_retry_handoff "$oldEpoch" q3_attempt || { echo "same-members handoff to epoch $epoch did not commit" >&2; return 1; }
+  m2_install_epoch "$epoch" "$roots"
+}
+
+m2_install_epoch() { # epoch roots: after the handoff to this epoch committed, the roots restart into it, the validators activate it, the authorities advance and a paid transaction certifies
+  local epoch=$1 roots=$2 oldEpoch=$(($1-1)) nextFile="trust-base-epoch$1.json"
+  local i waitStep first boot prev activated
+  first=$(echo "$roots" | awk '{print $1}')
   # Every root restarts on the install epoch; each fetches and verifies the committed bundle.
   for i in $roots; do
     prev=$(echo "$roots" | tr ' ' '\n' | grep -vx "$i" | head -1)

@@ -111,5 +111,5 @@ python3 scripts/h6/prepare-handoff.py --old-trust-base test-nodes/trust-base-epo
 `--dry-run` checks every input (successor is the next epoch of the old trust base, exactly one receipt per successor entity, loopback URLs, one
 RPC per old member, and that one endorsement cannot reach the old quorum) and contacts nothing. Checked in process, with no devnet:
 `python3 -m unittest discover -s scripts/h6 -p test_prepare_handoff.py` (fake roots) and `go test ./cli/ubft/cmd -run TestPrepareHandoffHelper`
-(the real operator routes). **A live Abort before and after H is still not rehearsed** until a lane run records it; do not substitute the H3
+(the real operator routes). The live rehearsal is one lane, `scripts/h6/abort-rehearsal-lane.sh` (`--selftest` and `--prep-only` need no devnet; the run needs the attested Ureth of the pin): Abort before H (committed Abort record, a paid transaction shows the EVM unfroze, attempt+1 installs), then Abort after H (refused "too late", the handoff still installs). **It is not recorded as rehearsed until a run's `lane.log` and `q3/h6-*` evidence say so;** do not substitute the H3
 lane's "late acknowledgement refused", which is a different assertion.
