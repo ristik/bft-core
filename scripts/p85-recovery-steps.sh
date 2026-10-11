@@ -364,23 +364,131 @@ p85_recovery_attempt_loop() {
   h3_paid 3 || { echo "post-recovery paid transaction was not certified at root epoch 3" >&2; return 1; }
 }
 
-p85_resolved() {
-  local r; r=$(cat "$H3_DIR/result-id.txt")
-  local i
-  for i in $(seq 1 180); do [ "$(p85_result_state "$r")" = 4 ] && break; sleep 1; done
-  [ "$(p85_result_state "$r")" = 4 ] || { echo "the result is in state $(p85_result_state "$r"), not Recovered" >&2; return 1; }
-  [ "$(p85_open_result)" = "0x0000000000000000000000000000000000000000000000000000000000000000" ] || { echo "a result is still open" >&2; return 1; }
-  p85_last_acked >"$H3_DIR/last-acked-after-recovery.txt"
-  [ "$(tr 'A-F' 'a-f' <"$H3_DIR/last-acked-after-recovery.txt")" = "$(p85_genesis_assignment)" ] || echo "note: last acknowledged assignment differs from the genesis assignment (the recovery re-installs K under a new assignment id)" >&2
+# ---- read-only chain state (the decoders are scripts/p85/chain_decode.py; no state is written) -----------------------------------------------
+p85_registry() { jq -r .registry "$P85_DEPLOY"; }
+p85_dec() { python3 -I scripts/p85/chain_decode.py "$@"; }
+p85_assignment() { p85_call "$(p85_custody)" 'assignments(bytes32)' "$1" | p85_dec assignment; }   # one JSON line
+p85_log_count() { p85_call "$(p85_registry)" 'recordCount()(uint64)' | awk '{print $1}'; }
+p85_log_target() { p85_call "$(p85_registry)" 'recordTargetCount()(uint64)' | awk '{print $1}'; }
+p85_cursor() { p85_call "$(p85_custody)" 'recordCursor()(uint64)' | awk '{print $1}'; }
+p85_session_state() { p85_call "$(p85_custody)" 'session(bytes32)' "$1" | p85_dec word; }
+p85_log_dump() { # every registry record, one line each: "index kind progress ucTime word0 word1" (kinds: 1 SessionClosed, 2 Ack, 3 RecoveryAck, 4 Closure)
+  local n i; n=$(p85_log_count) || return 1
+  for i in $(seq 0 $((n - 1))); do p85_call "$(p85_registry)" 'recordAt(uint64)' "$i" | p85_dec record || return 1; done
+}
+# The three assignments of the scenario from the log itself: G the genesis one, K the recovery assignment (word 1 of the RecoveryAck), J the
+# one the other closure names. Sets P85_G, P85_J, P85_K and prints nothing.
+p85_scenario_ids() { # log-dump-file
+  local f=$1 g; g=$(p85_genesis_assignment)
+  P85_G=$g
+  P85_K=$(awk '$2==3{print $6; exit}' "$f" | tr 'A-F' 'a-f')
+  P85_J=$(awk -v g="$g" '$2==4 && tolower($5)!=g {print $5; exit}' "$f" | tr 'A-F' 'a-f')
+  [ -n "$P85_K" ] && [ "$P85_K" != "-" ] && [ -n "$P85_J" ] || { echo "the log has no RecoveryAck and a closure of an assignment other than the genesis one" >&2; return 1; }
+}
+# one JSON object of everything a restart must not change: the three assignments, the cursor, the log count and target, the last acknowledged
+p85_snapshot() { # log-dump-file
+  local f=$1
+  python3 - "$(p85_assignment "$P85_G")" "$(p85_assignment "$P85_J")" "$(p85_assignment "$P85_K")" "$(p85_cursor)" "$(p85_log_count)" "$(p85_log_target)" "$(p85_last_acked)" <<'PY'
+import json, sys
+g, j, k, cursor, count, target, acked = sys.argv[1:8]
+print(json.dumps({"G": json.loads(g), "J": json.loads(j), "K": json.loads(k), "cursor": int(cursor), "count": int(count), "target": int(target),
+                  "lastAcked": acked.strip().lower()}, sort_keys=True))
+PY
+}
+p85_stuck_report() { # what a stuck cursor looks like (run 25: the records hook reverted and the cursor never moved)
+  local c n; c=$(p85_cursor 2>/dev/null); n=$(p85_log_count 2>/dev/null)
+  echo "recordCursor=$c recordCount=$n recordTargetCount=$(p85_log_target 2>/dev/null); record at the cursor: $(p85_call "$(p85_registry)" 'recordAt(uint64)' "${c:-0}" 2>/dev/null | p85_dec record 2>/dev/null)" >&2
+  grep -a "applyRootRecords" test-nodes/reth1/reth.log 2>/dev/null | tail -n 1 | cut -c1-300 >&2
 }
 
+p85_resolved() {
+  local r i log; r=$(cat "$H3_DIR/result-id.txt"); log="$H3_DIR/registry-log.txt"
+  for i in $(seq 1 180); do [ "$(p85_result_state "$r")" = 4 ] && break; sleep 1; done
+  [ "$(p85_result_state "$r")" = 4 ] || { echo "the result is in state $(p85_result_state "$r"), not Recovered" >&2; p85_stuck_report; return 1; }
+  [ "$(p85_open_result)" = "0x0000000000000000000000000000000000000000000000000000000000000000" ] || { echo "a result is still open" >&2; return 1; }
+  p85_last_acked >"$H3_DIR/last-acked-after-recovery.txt"
+  # the root order the pending path exists for: both closures strictly before the RecoveryAck of this result
+  p85_log_dump >"$log" || return 1
+  p85_scenario_ids "$log" || return 1
+  python3 - "$log" "$P85_G" "$P85_J" "$P85_K" "$r" <<'PY' || return 1
+import sys
+rows = [l.split() for l in open(sys.argv[1]) if l.strip()]
+g, j, k, result = (x.lower() for x in sys.argv[2:6])
+def idx(kind, w0=None):
+    for r in rows:
+        if int(r[1]) == kind and (w0 is None or r[4].lower() == w0):
+            return int(r[0])
+    sys.exit("no record of kind %d%s in the log" % (kind, "" if w0 is None else " for " + w0))
+cg, cj, ack = idx(4, g), idx(4, j), idx(3, result)
+if not (cg < ack and cj < ack):
+    sys.exit("the closures (G@%d, J@%d) are not both before the RecoveryAck@%d" % (cg, cj, ack))
+print("log order: Closure(G)@%d Closure(J)@%d RecoveryAck@%d" % (cg, cj, ack))
+PY
+  local ack_row; ack_row=$(awk -v r="$r" '$2==3 && tolower($5)==tolower(r)' "$log")
+  [ -n "$ack_row" ] || { echo "no RecoveryAck of $r in the log" >&2; return 1; }
+  # K is what custody last acknowledged, and neither the genesis assignment nor J
+  [ "$(tr 'A-F' 'a-f' <"$H3_DIR/last-acked-after-recovery.txt")" = "$P85_K" ] || { echo "last acknowledged $(cat "$H3_DIR/last-acked-after-recovery.txt") is not the RecoveryAck's assignment $P85_K" >&2; return 1; }
+  [ "$P85_K" != "$P85_G" ] && [ "$P85_K" != "$P85_J" ] || { echo "K equals G or J" >&2; return 1; }
+  # J was materialized by the recovery and closed with the CLOSURE's own anchors, never the RecoveryAck's; G closed at its own; K is open
+  python3 - "$log" "$(p85_assignment "$P85_G")" "$(p85_assignment "$P85_J")" "$(p85_assignment "$P85_K")" "$P85_G" "$P85_J" <<'PY' || return 1
+import json, sys
+rows = [l.split() for l in open(sys.argv[1]) if l.strip()]
+g, j, k = (json.loads(x) for x in sys.argv[2:5])
+gid, jid = sys.argv[5].lower(), sys.argv[6].lower()
+def closure(a):
+    return next(r for r in rows if int(r[1]) == 4 and r[4].lower() == a)
+cg, cj = closure(gid), closure(jid)
+ack = next(r for r in rows if int(r[1]) == 3)
+checks = [
+    (j["state"] == 2 and j["offsetSet"] == 1 and j["hKnown"] == 1, "J is not Active with offsets and H: %r" % j),
+    (j["closed"] == 1, "J is not closed"),
+    ((j["pClose"], j["tClose"]) == (int(cj[2]), int(cj[3])), "J closed at (%d,%d), not at its closure's anchors (%s,%s)" % (j["pClose"], j["tClose"], cj[2], cj[3])),
+    ((j["pClose"], j["tClose"]) != (int(ack[2]), int(ack[3])) or (cj[2], cj[3]) == (ack[2], ack[3]), "J carries the RecoveryAck's anchors"),
+    (g["closed"] == 1 and (g["pClose"], g["tClose"]) == (int(cg[2]), int(cg[3])), "G is not closed at its closure's anchors: %r" % g),
+    (k["state"] == 2 and k["closed"] == 0 and k["offsetSet"] == 1, "K is not Active and open: %r" % k),
+]
+bad = [m for ok, m in checks if not ok]
+if bad:
+    sys.exit("; ".join(bad))
+print("J closed at (%d,%d) = its closure; G at (%d,%d); K open" % (j["pClose"], j["tClose"], g["pClose"], g["tClose"]))
+PY
+  # reconciliation is complete: the cursor, the log and its target agree and the session is Recovered
+  local c n t; c=$(p85_cursor); n=$(p85_log_count); t=$(p85_log_target)
+  [ "$c" = "$n" ] && [ "$n" = "$t" ] || { echo "reconciliation incomplete: cursor=$c count=$n target=$t" >&2; return 1; }
+  [ "$(p85_session_state "$r")" = 4 ] || { echo "custody's session of $r is not Recovered" >&2; return 1; }
+  p85_snapshot "$log" >"$H3_DIR/state-after-resolution.json"
+}
+
+# This step restarts after the resolution. It does NOT cover a restart at the pending boundary (the few blocks between J's closure and the
+# RecoveryAck cannot be hit by a timed restart); that is the contract split test's job.
 p85_restarts() {
+  local log="$H3_DIR/registry-log.txt" before after
   H3_ROOTS="1 2 3 4 5"
+  p85_log_dump >"$log" || return 1
+  p85_scenario_ids "$log" || return 1
+  before=$(p85_snapshot "$log") || return 1
   H3_ROOTS="1 2 3 4" h3_restart_roots 3 || return 1
   stop_one_evm_validator 1 2>/dev/null || true
   M2_ADVANCE_NO_REPLICA_WAIT=1 h3_advance_authorities 3 2 1 || return 1
   h3_paid 3 || { echo "post-restart paid transaction was not certified" >&2; return 1; }
   p85_progress after-restarts 8
+  # nothing the restart could reset: no assignment, anchor, cursor or log entry changed (records ordered since may only have been appended)
+  p85_log_dump >"$log" || return 1
+  after=$(p85_snapshot "$log") || return 1
+  python3 - "$before" "$after" <<'PY' || return 1
+import json, sys
+b, a = (json.loads(x) for x in sys.argv[1:3])
+for key in ("G", "J", "K", "lastAcked"):
+    if b[key] != a[key]:
+        sys.exit("%s changed across the restart: %r -> %r" % (key, b[key], a[key]))
+for key in ("cursor", "count", "target"):
+    if a[key] < b[key]:
+        sys.exit("%s went backwards across the restart: %d -> %d" % (key, b[key], a[key]))
+if not (a["cursor"] == a["count"] == a["target"]):
+    sys.exit("reconciliation incomplete after the restart: %r" % {k: a[k] for k in ("cursor", "count", "target")})
+print("state identical across the restart: G, J (pClose %d tClose %d), K, lastAcked; cursor %d -> %d" % (b["J"]["pClose"], b["J"]["tClose"], b["cursor"], a["cursor"]))
+PY
+  printf '%s\n%s\n' "$before" "$after" >"$H3_DIR/state-across-restart.json"
 }
 
 # The election's refusal of an over-bound candidate (P85_MODE=overbound): the joiner bonds P85_JOINER_UNITS (3) units, so the only change from the
