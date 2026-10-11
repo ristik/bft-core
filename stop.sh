@@ -4,6 +4,7 @@ set -e
 
 # run from the checkout's root: stops the ubft processes of THIS checkout only (see stop below)
 cd "$(dirname "$0")"
+source helper.sh
 
 function stop() {
   local program=""
@@ -20,20 +21,12 @@ function stop() {
     ;;
   esac
 
-  # only this checkout's processes: the command line names "$program" for every checkout on the machine (nodes are started as
-  # build/ubft from the checkout's root), so a process is stopped only if its working directory is this checkout
-  local here pid cwd PID=""
-  here=$(pwd -P)
-  for pid in $(ps -eaf | grep "$program" | grep -v grep | awk '{print $2}'); do   # global-kill-ok: each pid is kept only if its working directory is this checkout
-    if [ -d "/proc/$pid" ]; then
-      cwd=$(readlink "/proc/$pid/cwd" 2>/dev/null)
-    else
-      cwd=$(lsof -a -p "$pid" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | head -1)
-    fi
-    [ "$cwd" = "$here" ] && PID="$PID $pid"
-  done
-  if [ -n "$PID" ]; then
-    echo "killing$PID"
+  # only this checkout's processes (helper.sh: owned_pids): the command line names "$program" for every checkout on the machine
+  # (nodes are started as build/ubft from the checkout's root), so a process is stopped only if its working directory is this checkout
+  local PID
+  PID=$(owned_pids "$program" | tr '\n' ' ')
+  if [ -n "${PID// /}" ]; then
+    echo "killing ${PID% }"
     kill $PID
     return 0
   fi

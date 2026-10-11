@@ -117,4 +117,4 @@ jobs:
         if: always()
         run: |
           ./stop-evm.sh -a || true
-          pkill -f 'reth node' || true
+          pkill -f 'reth node' || true   # global-kill-ok: single-tenant CI runner, nothing else runs on it

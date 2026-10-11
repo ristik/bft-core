@@ -6,9 +6,10 @@
 # that way. Processes are stopped only by this checkout's pid files or working directory (helper.sh: owned_pid, stop_pidfile,
 # stop_evm_validators, stop_root_nodes).
 #
-# Flagged, on any non-comment line of a *.sh file under scripts/ or the repo root:
-#   - pkill or killall as a command;
-#   - a pipeline or substitution that feeds ps or pgrep output into kill (ps ... | grep ... | kill, kill $(pgrep ...), pgrep ... | xargs kill);
+# Flagged, on any non-comment line of a *.sh file under scripts/ or the repo root, or of a workflow under .github/workflows/:
+#   - pkill, killall or fuser -k as a command, also inside a command line handed to bash -c, sh -c, ssh or eval;
+#   - a pipeline or substitution that feeds ps, pgrep, pidof or lsof output into kill (ps ... | grep ... | kill, kill $(pgrep ...),
+#     lsof -ti :port | xargs kill);
 #   - a process listing filtered by name (ps ... | grep ...) without -p <pid>, whatever follows: the kill may be on the next line.
 # A line that is safe for a stated reason carries the marker `global-kill-ok: <reason>` in a trailing comment.
 #
@@ -29,10 +30,13 @@ scan() {
       sub(/[ \t]#.*$/, "", code)
       bad = 0
       if (code ~ /(^|[;&|({ \t])(pkill|killall)([ \t]|$)/) bad = 1
-      # ps or pgrep output reaching kill on the same line; the unquoted text is checked for the commands, the full line for the flow
-      if (line ~ /(^|[^a-zA-Z_])(ps|pgrep)[ \t].*(\|[ \t]*(xargs[ \t]+)?kill([ \t]|$))/) bad = 1
-      if (line ~ /(^|[^a-zA-Z_])kill[ \t][^;|&]*\$\(([^)]*[^a-zA-Z_])?(ps|pgrep)[ \t]/) bad = 1
-      if (line ~ /(^|[^a-zA-Z_])kill[ \t][^;|&]*`([^`]*[^a-zA-Z_])?(ps|pgrep)[ \t]/) bad = 1
+      if (code ~ /(^|[;&|({ \t])fuser[ \t]+(-[a-zA-Z]*[ \t]+)*-[a-zA-Z]*k/) bad = 1
+      # a command line handed to another shell is a command even though it is quoted
+      if (code ~ /(^|[;&|({ \t])((ba)?sh[ \t]+-c|ssh|eval)([ \t]|$)/ && line ~ /(^|[^a-zA-Z_])(pkill|killall)([ \t]|$)/) bad = 1
+      # ps, pgrep, pidof or lsof output reaching kill on the same line; the unquoted text is checked for the commands, the full line for the flow
+      if (line ~ /(^|[^a-zA-Z_])(ps|pgrep|pidof|lsof)[ \t].*(\|[ \t]*(xargs[ \t]+)?kill([ \t]|$))/) bad = 1
+      if (line ~ /(^|[^a-zA-Z_])kill[ \t][^;|&]*\$\(([^)]*[^a-zA-Z_])?(ps|pgrep|pidof|lsof)[ \t]/) bad = 1
+      if (line ~ /(^|[^a-zA-Z_])kill[ \t][^;|&]*`([^`]*[^a-zA-Z_])?(ps|pgrep|pidof|lsof)[ \t]/) bad = 1
       # a process listing filtered by name (ps ... | grep ...), whatever is done with it later: the form stop.sh had, with the kill on
       # the next line. A ps of one given pid (-p) is not a listing.
       if (match(line, /(^|[^a-zA-Z_])ps[ \t][^|]*\|[ \t]*grep/) && substr(line, RSTART, RLENGTH) !~ /[ \t]-p[ \t]/) bad = 1
@@ -48,24 +52,15 @@ if [ "${1:-}" = "--selftest" ]; then
     if [ -n "$(scan "$dir/case.sh")" ]; then got=bad; else got=ok; fi
     if [ "$got" = "$1" ]; then echo "ok: $2"; else echo "FAIL: $2 (wanted $1, got $got): $3"; fails=$((fails + 1)); fi
   }
-  expect bad "pkill by pattern" "pkill -f 'ubft shard-node run' 2>/dev/null"
-  expect bad "pkill after another command" "./stop-evm.sh -a || true; pkill -f 'reth node'"
-  expect bad "killall" "  killall ubft"
-  expect bad "ps | grep | kill through xargs" "ps -eaf | grep 'build/ubft' | grep -v grep | awk '{print \$2}' | xargs kill"
-  expect bad "kill of a ps substitution" "kill \$(ps -eaf | grep build/ubft | awk '{print \$2}')"
-  expect bad "kill of a pgrep substitution" "kill -9 \$(pgrep -f 'ubft root-node')"
-  expect bad "kill of a backquoted pgrep" "kill \`pgrep -f ubft\`"
-  expect bad "pgrep | xargs kill" "pgrep -f 'ubft root-node' | xargs kill"
-  expect bad "a ps listing filtered by name, the kill on a later line (stop.sh before the fix)" "PID=\$(ps -eaf | grep \"\$program\" | grep -v grep | awk '{print \$2}')"
-  expect ok "ps of one pid filtered" "ps -o command= -p \"\$pid\" 2>/dev/null | grep -qE -- \"\$pattern\" || return 1"
-  expect ok "a comment that names pkill" "# never pkill: see helper.sh"
-  expect ok "an echo that prints the word" "echo \"do not pkill these\" >&2"
-  expect ok "a grep for the word" "declare -f q3_teardown | grep -E 'pkill|killall'"
-  expect ok "kill of a recorded pid" "kill \"\$(cat test-nodes/root1/pid)\""
-  expect ok "pgrep without kill" "stale=\$(pgrep -f 'ubft shard-node run' 2>/dev/null || true)"
-  expect ok "kill of an owned pid" "for p in \$(owned_pids 'ubft root-node'); do kill \"\$p\"; done"
-  expect ok "a marked line" "pkill -f 'reth node'   # global-kill-ok: single-tenant CI runner"
-  expect bad "a marker without a reason" "pkill -f 'reth node'   # global-kill-ok: "
+  # the cases are data, not shell: scripts/testdata/check-no-global-kill.cases, one per line as <bad|ok>|<name>|<the script line>
+  cases="$(dirname "${BASH_SOURCE[0]}")/testdata/check-no-global-kill.cases"
+  n=0
+  while IFS= read -r c; do
+    case "$c" in ''|'#'*) continue ;; esac
+    want=${c%%|*}; rest=${c#*|}
+    expect "$want" "${rest%%|*}" "${rest#*|}"; n=$((n + 1))
+  done <"$cases"
+  [ "$n" -ge 20 ] || { echo "only $n self-test cases read from $cases" >&2; exit 1; }
   [ "$fails" = 0 ] || { echo "$fails self-test case(s) failed" >&2; exit 1; }
   echo "check-no-global-kill self-test passed"
   exit 0
@@ -73,7 +68,8 @@ fi
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 files=()
-while IFS= read -r f; do files+=("$f"); done < <(git ls-files '*.sh' | grep -E '^(scripts/.*|[^/]+)$')
+# tracked and not yet tracked alike: a new script is scanned before it is committed
+while IFS= read -r f; do files+=("$f"); done < <(git ls-files --cached --others --exclude-standard '*.sh' '.github/workflows/*.yml' | grep -E '^(scripts/.*\.sh|[^/]+\.sh|\.github/workflows/.*)$' | sort -u)
 found=$(scan "${files[@]}")
 if [ -n "$found" ]; then
   echo "$found"
@@ -81,4 +77,4 @@ if [ -n "$found" ]; then
   echo "(helper.sh: stop_pidfile, stop_evm_validators, stop_root_nodes, owned_pids); see scripts/check-no-global-kill.sh" >&2
   exit 1
 fi
-echo "no machine-wide process kill in ${#files[@]} scripts"
+echo "no machine-wide process kill in ${#files[@]} scripts and workflows"

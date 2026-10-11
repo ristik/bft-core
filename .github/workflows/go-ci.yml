@@ -93,7 +93,7 @@ jobs:
             echo 'Run gofmt on the files listed above.' >&2
             exit 1
           fi
-      - name: No machine-wide process kill in scripts (pkill, killall, ps | grep | kill)
+      - name: No machine-wide process kill in scripts and workflows
         if: needs.changes.outputs.go == 'true'
         run: |
           scripts/check-no-global-kill.sh --selftest
