@@ -132,6 +132,7 @@ no balance at genesis (a genesis balance would change the supply the bond accoun
 bonds when rehearsing, e.g. `cast send OWNER --value 1ether --keystore ... --rpc-url $R`. Which custody calls each key makes is the contracts' interface, not this package's.
 Without `--pos` nothing of this exists.
 
+**Status: the PoS smoke below has not yet been executed on containers** (no Linux images/host yet; the CI probe starts native roots only). Treat everything it lists as untested on a package until its evidence is recorded.
 A different id fails with both ids printed; do not start such a package. Start as in section 4. **PoS smoke** (after `docker compose up -d`; the chain RPC is the gateway's, `cast` from
 `foundry`; `REG=0xff00000000000000000000000000000000000002`, `CUSTODY` and `ELECTION` are in `network/pos-deployment.json`):
 ```sh

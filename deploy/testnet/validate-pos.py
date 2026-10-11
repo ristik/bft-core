@@ -29,7 +29,7 @@ def code_of(genesis, address):
     return found[0]['code']
 
 
-def statics(generation, ubft):
+def statics(generation, ubft, keygen):
     net = generation / 'network'
     manifest = json.loads((generation / 'manifest.json').read_text())
     info = manifest['pos']
@@ -58,7 +58,7 @@ def statics(generation, ubft):
         code_of(genesis, deployment[module])
         # which code, not only that there is some: the deployment file's hash is the keccak of the runtime code the genesis carries
         assert pos.code_hash(genesis, deployment[module]) == deployment[module + 'CodeHash'].lower(), f'{module}: the genesis code is not the deployment file\'s code hash'
-    owner_keys(generation, net, manifest)
+    owner_keys(generation, net, manifest, keygen)
     assert deployment['custody'] == info['custody'] and deployment['election'] == info['election']
     compose = json.loads((generation / 'compose.yaml').read_text())
     for i in range(1, manifest['validators'] + 1):
@@ -70,7 +70,7 @@ def statics(generation, ubft):
     return manifest
 
 
-def owner_keys(generation, net, manifest):
+def owner_keys(generation, net, manifest, keygen):
     """Every genesis identity has owner, withdrawal and payee keys held in the generation's private directory (never under network/), and the plan names their addresses."""
     keys = generation / manifest['pos']['owner_keys']
     assert keys.is_dir() and not (net / 'pos-owner-keys').exists() and not list(net.rglob('*.key')), 'owner keys are shipped with the network files'
@@ -82,7 +82,7 @@ def owner_keys(generation, net, manifest):
         for role in ('owner', 'withdrawal', 'payee'):
             path = keys / f'identity-{row["stakingId"]}' / f'{role}.key'
             assert path.stat().st_mode & 0o077 == 0, f'{path.name} is readable by others'
-            derived = subprocess.run(['cast', 'wallet', 'address', '--private-key', '0x' + path.read_text().strip()], text=True, capture_output=True)
+            derived = subprocess.run([str(keygen), 'address', str(path)], text=True, capture_output=True)   # the key is read from the file, never passed in argv
             assert derived.returncode == 0 and derived.stdout.strip().lower() == row[role].lower(), f'identity {row["stakingId"]} {role}: the plan does not name the key\'s address'
             seen.add(row[role].lower())
     assert len(seen) == 3 * manifest['validators'], 'two roles share an address'
@@ -136,8 +136,8 @@ def roots_start(generation, ubft, base_port=24000):
             log.close()
 
 
-def validate(generation, ubft):
-    manifest = statics(generation, ubft)
+def validate(generation, ubft, keygen):
+    manifest = statics(generation, ubft, keygen)
     started = roots_start(generation, ubft)
     return {'pos_genesis_ids_agree': 'PASS', 'genesis_assignment': manifest['pos']['genesis_assignment'],
             'base_configuration_assignment_refused': manifest['pos']['first_pass_assignment'], **started}

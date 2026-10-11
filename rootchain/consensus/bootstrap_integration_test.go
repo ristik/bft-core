@@ -245,6 +245,8 @@ type anchorOptions struct {
 	syncDB  bool
 	// pos is the P85 source state the anchor's control carries: the old epoch's freeze after an assignment handoff.
 	pos *rootrecords.State
+	// store, when set, wraps each replica's database as the manager's persistent store (a test that makes a write fail)
+	store func(storage.BoltDB) PersistentStore
 }
 
 func newAnchorReplicasWith(t *testing.T, opts anchorOptions, commitSealRound uint64, frozenParent ...[]byte) (map[peer.ID]*anchorReplica, *rctypes.EpochAnchor, time.Time) {
@@ -399,9 +401,13 @@ func newAnchorReplicasWith(t *testing.T, opts anchorOptions, commitSealRound uin
 		net := testnetwork.NewRootMockNetwork()
 		params := *NewConsensusParams()
 		params.NetworkProfileVersion = storage.ProfileHandoff
-		manager, err := NewConsensusManager(node.PeerConf.ID, trust, orchestration, net, node.Signer, db, obs, WithConsensusParams(params), WithRecoveryProfile2(history))
+		var rcDB PersistentStore = db
+		if opts.store != nil {
+			rcDB = opts.store(db)
+		}
+		manager, err := NewConsensusManager(node.PeerConf.ID, trust, orchestration, net, node.Signer, rcDB, obs, WithConsensusParams(params), WithRecoveryProfile2(history))
 		require.NoError(t, err)
-		manager.blockStore, err = storage.NewFromState(crypto.SHA256, head, db, orchestration, obs.Logger(), storage.ProfileHandoff)
+		manager.blockStore, err = storage.NewFromState(crypto.SHA256, head, rcDB, orchestration, obs.Logger(), storage.ProfileHandoff)
 		require.NoError(t, err)
 		installed, err := manager.InstallEpochGenesis(proof, head, body)
 		require.NoError(t, err)
