@@ -16,10 +16,10 @@ func profile(k uint64) b1state.Profile {
 	return p
 }
 func TestMeasuredProfileBoundaries(t *testing.T) {
-	for k := uint64(1); k <= 16; k++ {
+	for k := uint64(1); k <= 31; k++ {
 		require.NoError(t, b1registry.ValidateProfile(profile(k)))
 	}
-	p := profile(17)
+	p := profile(32)
 	require.ErrorIs(t, b1registry.ValidateProfile(p), b1registry.ErrArtifact)
 	for _, tc := range []struct {
 		name   string
