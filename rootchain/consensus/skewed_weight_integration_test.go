@@ -3,6 +3,7 @@ package consensus
 import (
 	"bytes"
 	"context"
+	"crypto"
 	"crypto/sha256"
 	"fmt"
 	"path/filepath"
@@ -711,7 +712,13 @@ func TestSkewedWeightRestartMidRoundKeepsOneDecisionAndNeverDoubleSigns(t *testi
 // skewedAnchorCluster is the anchor cluster whose epoch-1 committee is 6,1,1,1 and that signs epoch 2 with scheme 2.
 func skewedAnchorCluster(t *testing.T) (c *anchorCluster, heavy string) {
 	t.Helper()
-	replicas, anchor, _ := newAnchorReplicasWith(t, anchorOptions{weights: skewedStakes, syncDB: true}, 4)
+	return skewedAnchorClusterWith(t, anchorOptions{weights: skewedStakes, syncDB: true})
+}
+
+// skewedAnchorClusterWith is skewedAnchorCluster over the given replica options.
+func skewedAnchorClusterWith(t *testing.T, opts anchorOptions) (c *anchorCluster, heavy string) {
+	t.Helper()
+	replicas, anchor, _ := newAnchorReplicasWith(t, opts, 4)
 	for _, r := range replicas {
 		require.NoError(t, r.store.ActivateSigning(2, domainBoundConfig()))
 	}
@@ -933,6 +940,10 @@ func TestSkewedWeightScheme2TCFormsAfterTwoRestarts(t *testing.T) {
 		restarted, err := NewSafetyModule(old.network, old.peerID, old.signer, reopened, WithDomainBoundSigning(r.store, old.committed))
 		require.NoError(t, err)
 		r.manager.safety = restarted
+		// the block store is over the reopened file too: a vote is stored as the last vote before it is sent, and one that cannot be
+		// stored is not sent (bft-core#585), so a manager left on the closed handle would send nothing
+		r.manager.blockStore, err = storage.New(crypto.SHA256, reopened, r.manager.orchestration, r.manager.log, storage.ProfileHandoff)
+		require.NoError(t, err)
 		r.manager.pacemaker.timeoutVote = nil
 		r.manager.epochAnchor = nil // what it would build now is not the statement it recorded
 		r.net.ResetSentMessages(network.ProtocolRootTimeout)

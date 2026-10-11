@@ -109,7 +109,7 @@ sudo env PATH="$PATH:$HOME/.foundry/bin" python3 deploy/testnet/generate.py --ou
   --ubft /srv/src/bft-pinned/build/ubft --b1genesis /srv/src/bft-pinned/build/b1genesis --captcha-sitekey SITE_KEY --captcha-secret-file /srv/secrets/hcaptcha-secret \
   --pos --pos-contracts /srv/src/contracts-pinned
 ```
-The generator refuses a contracts checkout that is not clean at the pin. It prints `pos: the genesis assignment of the base configuration (…) is not the full configuration's (…)`
+The generator refuses a contracts checkout that is not clean at the pin (the contracts' `p85-genesis.sh` writes a temporary directory inside that checkout and removes it on exit: after a failed run `git status` there may briefly show it; remove it by hand and rerun). It prints `pos: the genesis assignment of the base configuration (…) is not the full configuration's (…)`
 when it had to prepare the contracts genesis again (it always does: the base id is never the deployed one). Success adds to the manifest a `pos` block (`genesis_assignment`,
 `first_pass_assignment`, the custody and election addresses, the cadence) and to `network/`: `pos-deployment.json`, `pos-genesis-identities.json`, `pos-plan.json`,
 `pos-contracts-genesis.json`, `pos-genesis-assignment.txt`. **Cadence:** the election is due 400 ordinary root rounds and 300 UC seconds after the last acknowledged rotation
@@ -122,6 +122,17 @@ N=$G/network; /srv/src/bft-pinned/build/ubft pos-relayer verify-genesis --plan $
   --shard-conf $N/full-shard-conf.json --contracts-genesis $N/pos-contracts-genesis.json
 # genesis assignment 0x… is the full shard configuration's   (it must equal $(cat $N/pos-genesis-assignment.txt) and manifest.pos.genesis_assignment)
 ```
+**Owner keys.** The lane's plan derives each genesis identity's `owner`, `withdrawal` and `payee` addresses from the root node id by hash: addresses nobody holds the key of, so
+no identity could top up, exit, withdraw or claim a reward. The package's ceremony instead generates, per identity, three fresh secp256k1 keys (`tn-keygen owners`) and puts
+their addresses in `pos-plan.json` (public: the assignment id does not depend on them, `verify-genesis` recomputes from that plan). The keys are in
+`$G/pos-owner-keys/identity-<stakingId>/{owner,withdrawal,payee}.key` (hex, mode 0600, directory 0700), generated at ceremony time, never in `network/`, never mounted into a
+container and never committed. Handling is that of `faucet-secrets/`: private host material; `backup.py` archives the whole generation (mode-0600 archive), so keep the archive
+as private as the directory; the section 4 `chown -R 10001` makes them readable only by that uid, so `sudo chown -R "$USER" $G/pos-owner-keys` before use. The owners hold
+no balance at genesis (a genesis balance would change the supply the bond accounting is audited against): fund the owner of an identity from the faucet account for gas and
+bonds when rehearsing, e.g. `cast send OWNER --value 1ether --keystore ... --rpc-url $R`. Which custody calls each key makes is the contracts' interface, not this package's.
+Without `--pos` nothing of this exists.
+
+**Status: the PoS smoke below has not yet been executed on containers** (no Linux images/host yet; the CI probe starts native roots only). Treat everything it lists as untested on a package until its evidence is recorded.
 A different id fails with both ids printed; do not start such a package. Start as in section 4. **PoS smoke** (after `docker compose up -d`; the chain RPC is the gateway's, `cast` from
 `foundry`; `REG=0xff00000000000000000000000000000000000002`, `CUSTODY` and `ELECTION` are in `network/pos-deployment.json`):
 ```sh

@@ -11,6 +11,7 @@ from unittest.mock import patch
 import gateway
 import generate
 import pos
+import handoff
 
 class FakeRelay:
     def __init__(self): self.calls=[]
@@ -112,6 +113,8 @@ class ProofOfStake(unittest.TestCase):
                 with self.assertRaisesRegex(pos.PosError,'modified'): genesis.check_tools(head)
             with patch('pos.shutil.which',return_value=None):
                 with self.assertRaisesRegex(pos.PosError,'forge'): genesis.check_tools(head)
+            with patch('pos.shutil.which',side_effect=lambda t:'/bin/forge' if t=='forge' else None):
+                with self.assertRaisesRegex(pos.PosError,'cast'): genesis.check_tools(head)
     def test_the_genesis_is_prepared_again_from_the_full_configuration_when_the_ids_differ(self):
         with tempfile.TemporaryDirectory() as tmp:
             genesis=pos.Genesis(Path(tmp)/'work','ubft',tmp,generate.REPO,'tn-x',1,(1,2))
@@ -143,6 +146,58 @@ class ProofOfStake(unittest.TestCase):
             class Other: stderr="genesis assignment %s is the full shard configuration's\n"%self.ID2
             with patch.object(genesis,'_run',return_value=Other):
                 with self.assertRaisesRegex(pos.PosError,'did not confirm'): genesis.verify(a,a)
+
+    def test_a_second_contracts_genesis_that_deploys_elsewhere_is_refused(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            genesis=pos.Genesis(Path(tmp)/'work','ubft',tmp,generate.REPO,'tn-x',1,(1,2));genesis.trust_base=Path('tb')
+            deployed={'custody':'0xc','custodyCodeHash':'0x1','election':'0xe','electionCodeHash':'0x2','assignmentId':self.ID1}
+            def run(*args,**kw):
+                class R: stderr='genesis assignment id '+self.ID1;stdout='{}'
+                if str(args[0]).endswith('p85-genesis.sh'):
+                    (genesis.dir/'genesis').mkdir(exist_ok=True);(genesis.dir/'genesis/deployment.json').write_text(json.dumps(deployed))
+                return R
+            with patch.object(genesis,'_run',side_effect=run):
+                genesis.prepare('base.json',provisional=True)
+                deployed['assignmentId']=self.ID2;deployed['manifestHash']='0x9'   # the id and the manifest hash over it may differ
+                genesis.prepare('full.json',provisional=False)
+                deployed['custody']='0xd'                  # an address may not
+                with self.assertRaisesRegex(pos.PosError,'custody'): genesis.prepare('full.json',provisional=False)
+    def test_the_owner_keys_replace_the_hash_derived_addresses_and_must_cover_every_identity(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            genesis=pos.Genesis(Path(tmp)/'work','ubft',tmp,generate.REPO,'tn-x',1,(1,2))
+            tb,conf=Path(tmp)/'tb.json',Path(tmp)/'conf.json'
+            tb.write_text(json.dumps({'rootNodes':[{'nodeId':'r1','sigKey':'k1'},{'nodeId':'r2','sigKey':'k2'}]}))
+            conf.write_text(json.dumps({'validators':[{'nodeId':'e1','sigKey':'q1'},{'nodeId':'e2','sigKey':'q2'}]}))
+            owners=[{'stakingId':i,'owner':'0xo%d'%i,'withdrawal':'0xw%d'%i,'payee':'0xp%d'%i} for i in (1,2)]
+            genesis.plan(tb,conf,owners)
+            rows=json.loads((genesis.dir/'plan.json').read_text())['identities']
+            self.assertEqual([(r['owner'],r['withdrawal'],r['payee'],r['rootNodeId']) for r in rows],[('0xo1','0xw1','0xp1','r1'),('0xo2','0xw2','0xp2','r2')])
+            other=pos.Genesis(Path(tmp)/'work2','ubft',tmp,generate.REPO,'tn-x',1,(1,2))
+            with self.assertRaisesRegex(pos.PosError,'one to one'): other.plan(tb,conf,owners[:1])
+            hashed=pos.Genesis(Path(tmp)/'work3','ubft',tmp,generate.REPO,'tn-x',1,(1,2));hashed.plan(tb,conf)
+            self.assertNotEqual(json.loads((hashed.dir/'plan.json').read_text())['identities'][0]['owner'],'0xo1')
+    def test_the_code_hash_is_taken_from_the_code_the_genesis_carries(self):
+        genesis={'alloc':{'0xAA':{'code':'0x6001'},'0xbb':{'balance':'0x1'}}}
+        class R: returncode=0;stdout='0xABCD\n';stderr=''
+        with patch('pos.subprocess.run',return_value=R) as run:
+            self.assertEqual(pos.code_hash(genesis,'0xaa'),'0xabcd');self.assertEqual(run.call_args[0][0],['cast','keccak','0x6001'])
+        for address in ('0xbb','0xcc'):
+            with self.assertRaisesRegex(pos.PosError,'no code'): pos.code_hash(genesis,address)
+        d=pos.Genesis.__new__(pos.Genesis);d.deployment={'custody':'0xaa','custodyCodeHash':'0xdead','election':'0xaa','electionCodeHash':'0xabcd'}
+        with patch('pos.subprocess.run',return_value=R):
+            with self.assertRaisesRegex(pos.PosError,'custody code'): d.alloc_code_hashes(genesis)
+
+class Handoff(unittest.TestCase):
+    def test_the_install_override_adds_the_flag_to_every_root_and_nothing_else(self):
+        compose={'services':{'root1':{'entrypoint':['ubft','root-node','run'],'volumes':['x']},'root2':{'entrypoint':['ubft','root-node','run']},
+                             'shard1':{'entrypoint':['ubft','shard-node']},'root':{'entrypoint':['x']}}}
+        override=handoff.install_override(compose,2)
+        self.assertEqual(override,{'services':{'root1':{'entrypoint':['ubft','root-node','run','--install-handoff-epoch','2']},
+                                                'root2':{'entrypoint':['ubft','root-node','run','--install-handoff-epoch','2']}}})
+        self.assertEqual(compose['services']['root1']['entrypoint'],['ubft','root-node','run'],'the generated compose file is not modified')
+        with self.assertRaisesRegex(ValueError,'below epoch 2'): handoff.install_override(compose,1)
+        with self.assertRaisesRegex(ValueError,'already installs'): handoff.install_override({'services':{'root1':{'entrypoint':['a','--install-handoff-epoch','2']}}},3)
+        with self.assertRaisesRegex(ValueError,'no root'): handoff.install_override({'services':{'shard1':{'entrypoint':['a']}}},2)
 
 class PublicRPC(unittest.TestCase):
     def setUp(self):

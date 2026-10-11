@@ -36,6 +36,18 @@ class PosError(RuntimeError):
     pass
 
 
+def code_hash(genesis, address):
+    """keccak-256 of the runtime code the genesis alloc carries at `address` (`cast keccak`: the Python standard library has no keccak)."""
+    want = address.lower().removeprefix('0x')
+    found = [v for k, v in genesis['alloc'].items() if k.lower().removeprefix('0x') == want]
+    if len(found) != 1 or len(found[0].get('code', '0x')) <= 2:
+        raise PosError(f'no code at {address} in the genesis alloc')
+    done = subprocess.run(['cast', 'keccak', found[0]['code']], text=True, capture_output=True)
+    if done.returncode != 0:
+        raise PosError('cast keccak failed: ' + done.stderr)
+    return done.stdout.strip().lower()
+
+
 def assignment_id(stderr):
     """The id `ubft pos-relayer genesis` prints on stderr."""
     found = ASSIGNMENT.findall(stderr)
@@ -95,8 +107,9 @@ class Genesis:
         return done
 
     def check_tools(self, pinned):
-        if shutil.which('forge') is None:
-            raise PosError('forge is not on PATH (the contracts genesis is built by the pinned unicity-pos-contracts)')
+        for tool in ('forge', 'cast'):
+            if shutil.which(tool) is None:
+                raise PosError(f'{tool} is not on PATH (foundry, pinned v1.8.1: forge builds the contracts genesis, cast hashes the deployed code)')
         if not (self.contracts / 'script/p85-genesis.sh').is_file():
             raise PosError(f'{self.contracts} is not a unicity-pos-contracts checkout (no script/p85-genesis.sh)')
         head = self._run('git', '-C', self.contracts, 'rev-parse', 'HEAD').stdout.strip()
@@ -104,9 +117,22 @@ class Genesis:
         if head != pinned or dirty:
             raise PosError(f'the contracts checkout must be clean at the pinned commit {pinned} (it is at {head}{"; modified" if dirty else ""})')
 
-    def plan(self, trust_base, conf):
-        """One bonded identity per root/EVM pair, in the order the trust base and the shard configuration list their nodes."""
+    def plan(self, trust_base, conf, owners=None):
+        """One bonded identity per root/EVM pair, in the order the trust base and the shard configuration list their nodes.
+
+        The lane's script derives the owner, withdrawal and payee addresses from the root node id by hash: addresses nobody holds the key of. `owners` (the output of
+        `tn-keygen owners`: one record of the three addresses per staking id) replaces them with addresses whose keys the ceremony generated, so that top-up, exit,
+        withdrawal and a reward claim can be rehearsed. The ids do not depend on them (verify-genesis recomputes from this plan)."""
         out = subprocess.check_output([sys.executable, str(self.repo / 'scripts/p85-genesis-plan.py'), str(trust_base), str(conf), str(BOND_UNIT), str(GENESIS_UNITS)], text=True)
+        if owners is not None:
+            document = json.loads(out)
+            by_id = {row['stakingId']: row for row in owners}
+            if sorted(by_id) != [row['stakingId'] for row in document['identities']]:
+                raise PosError('the owner keys do not cover the genesis identities one to one')
+            for row in document['identities']:
+                for role in ('owner', 'withdrawal', 'payee'):
+                    row[role] = by_id[row['stakingId']][role]
+            out = json.dumps(document, indent=1) + '\n'
         (self.dir / 'plan.json').write_text(out)
         self.trust_base = Path(trust_base)
 
@@ -123,8 +149,23 @@ class Genesis:
         self._run(self.contracts / 'script/p85-genesis.sh', self.dir / 'contracts-genesis.json', self.dir / 'genesis', env=env)
         measured = self._run(self.contracts / 'script/measure-elect.sh', *map(str, CAPS), env=env, cwd=self.contracts)
         (self.dir / 'elect-measurement.json').write_text(measured.stdout)
-        self.deployment = json.loads((self.dir / 'genesis/deployment.json').read_text())
+        deployment = json.loads((self.dir / 'genesis/deployment.json').read_text())
+        # The b1-profile and the roots' deployment file are built from the FIRST pass: a second pass that deployed anything elsewhere would pin the hooks to one
+        # custody and the genesis to another. Everything but the fields that carry the assignment id (the id itself and the manifest hash over it) must be identical.
+        if getattr(self, 'deployment', None) is not None:
+            moved = sorted(k for k in set(deployment) | set(self.deployment) if 'ssignment' not in k and k != 'manifestHash' and deployment.get(k) != self.deployment.get(k))
+            if moved:
+                raise PosError('the second contracts genesis differs from the first in ' + ', '.join(moved) + ': the profile and the roots would pin another deployment')
+        self.deployment = deployment
         return self.assignment
+
+    def alloc_code_hashes(self, genesis):
+        """The custody and election code hashes the deployment file records must be those of the code the genesis carries (the keccak of the runtime code)."""
+        for module in ('custody', 'election'):
+            want = self.deployment[module + 'CodeHash']
+            have = code_hash(genesis, self.deployment[module])
+            if want.lower() != have:
+                raise PosError(f'{module} code in the genesis hashes to {have}, the deployment records {want}')
 
     def reconcile(self, full_conf):
         """The id the roots will close is the full configuration's: when the first pass (base configuration) differs, prepare again from the full one."""
