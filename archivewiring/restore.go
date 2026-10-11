@@ -425,10 +425,27 @@ type FetchRetry struct {
 	Initial time.Duration // first backoff
 	Max     time.Duration // backoff ceiling
 	Total   time.Duration // total wait before the restore fails with archive.ErrUnavailable
+	// Busy is the wait after a replica answered that it is busy (its stream limit). It is flat, not doubled: a busy replica frees a
+	// slot when one of its exchanges ends, which is about one store write away, and a restore that backs off for seconds loses every
+	// slot to the publishers that keep asking. Zero means DefaultFetchRetry.Busy.
+	Busy time.Duration
 }
 
 // DefaultFetchRetry waits up to 150s per record (the restore lanes allow 180s end to end).
-var DefaultFetchRetry = FetchRetry{Initial: 200 * time.Millisecond, Max: 5 * time.Second, Total: 150 * time.Second}
+var DefaultFetchRetry = FetchRetry{Initial: 200 * time.Millisecond, Max: 5 * time.Second, Total: 150 * time.Second, Busy: 100 * time.Millisecond}
+
+func (p FetchRetry) busy() time.Duration {
+	if p.Busy > 0 {
+		return p.Busy
+	}
+	return DefaultFetchRetry.Busy
+}
+
+// replicaBusy: the last replica asked refused for a stream limit, which it says by name (StreamResetError with ErrPendingLimit or
+// ErrPeerLimit). Any other failure, a bare reset included, keeps the doubling backoff.
+func replicaBusy(err error) bool {
+	return errors.Is(err, ErrPendingLimit) || errors.Is(err, ErrPeerLimit)
+}
 
 func (p FetchRetry) orDefault() FetchRetry {
 	if p == (FetchRetry{}) {
@@ -463,7 +480,11 @@ func (r *ArchiveRestore) retryFetch(ctx context.Context, what string, attempt fu
 			return fmt.Errorf("%w: %s still unavailable from both replicas after %d attempts over %s (replicas saturated, refusing this node, or missing the record): %w",
 				archive.ErrUnavailable, what, tries, policy.Total, err)
 		}
+		busy := replicaBusy(err)
 		wait := min(delay, remaining)
+		if busy {
+			wait = min(policy.busy(), remaining)
+		}
 		timer := time.NewTimer(wait)
 		select {
 		case <-ctx.Done():
@@ -471,7 +492,9 @@ func (r *ArchiveRestore) retryFetch(ctx context.Context, what string, attempt fu
 			return ctx.Err()
 		case <-timer.C:
 		}
-		delay = min(delay*2, policy.Max)
+		if !busy {
+			delay = min(delay*2, policy.Max)
+		}
 	}
 }
 
