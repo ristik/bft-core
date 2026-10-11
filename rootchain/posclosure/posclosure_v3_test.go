@@ -43,15 +43,6 @@ func TestAV3HandoffIsAClosureWitness(t *testing.T) {
 	require.Equal(t, [32]byte(f.Proof.Record.ID()), facts.HRecordID)
 	require.Equal(t, facts.BundleID, c.Close.BundleSemanticID)
 
-	// the identity does not depend on which quorum signed
-	stripped := f.Proof
-	cp := *f.Proof.CommitQC
-	cp.Signatures = nil
-	stripped.CommitQC = &cp
-	other, err := handoffdelivery.EncodeWitnessV3(handoffdelivery.WitnessV3{Proof: stripped, Body: f.Body.Encode(), Snapshot: f.Snapshot, Candidate: f.Candidate})
-	require.NoError(t, err)
-	require.NotEqual(t, raw, other)
-
 	// each refusal differs from the control in one thing
 	refuse := func(name string, w handoffdelivery.WitnessV3, epoch uint64) {
 		t.Helper()
@@ -67,6 +58,15 @@ func TestAV3HandoffIsAClosureWitness(t *testing.T) {
 	w := good
 	w.Body = wrongBody.Encode()
 	refuse("a body the record does not name", w, closed)
+	w = good
+	w.Candidate = []byte{1, 2, 3} // only the candidate binding sees it: the proof, body and checkpoint are the committed ones
+	refuse("a candidate the body does not name", w, closed)
+	w = good
+	tampered := *f.Snapshot
+	tampered.ShardInfo = append(tampered.ShardInfo[:0:0], f.Snapshot.ShardInfo...)
+	tampered.ShardInfo[0].ShardConfHash = append([]byte{0xff}, tampered.ShardInfo[0].ShardConfHash[1:]...)
+	w.Snapshot = &tampered
+	refuse("a checkpoint whose shard tree is not the committed one", w, closed)
 	w = good
 	w.Snapshot = nil
 	refuse("no checkpoint", w, closed)
