@@ -19,6 +19,23 @@ T6_CONTRACTS_COMMIT=${T6_CONTRACTS_COMMIT:-e7eb3216549b772a9e1df2b1214976d7dd9e6
 T6_CONTRACTS_REMOTE=${T6_CONTRACTS_REMOTE:-https://github.com/ristik/unicity-pos-contracts.git}
 T6_RUST_TOOLCHAIN=${T6_RUST_TOOLCHAIN:-1.97.1}
 
+# Preflight, before the devnet lock is taken: everything this harness will exec that is not built or fetched into the isolated checkout must exist now, so a
+# missing tool costs no lock slot. (Binaries the run builds itself are built where they are used; see verify_b1_registry.)
+t6_preflight() {
+  local missing=() c
+  for c in git go jq curl python3 awk tee lsof openssl make pgrep mktemp; do command -v "$c" >/dev/null 2>&1 || missing+=("$c"); done
+  command -v sha256sum >/dev/null 2>&1 || command -v shasum >/dev/null 2>&1 || missing+=("sha256sum|shasum")
+  [ -x "$LOCK_SCRIPT" ] || missing+=("$LOCK_SCRIPT")
+  [ -z "${T6_URETH_BIN:-}" ] || [ -x "$T6_URETH_BIN" ] || missing+=("T6_URETH_BIN=$T6_URETH_BIN")
+  for c in cli/ubft scripts/f7-mintproof-extract scripts/f7-mintproof-verify scripts/evmtx scripts/b1genesis; do
+    [ -d "$SOURCE_ROOT/$c" ] || missing+=("source $c")
+  done
+  if [ "${#missing[@]}" -ne 0 ]; then echo "FAIL: preflight: missing: ${missing[*]}" >&2; exit 1; fi
+  (cd "$SOURCE_ROOT" && go build -o /dev/null ./scripts/b1genesis ./scripts/evmtx ./scripts/f7-mintproof-extract ./scripts/f7-mintproof-verify) \
+    || { echo "FAIL: preflight: the harness's helper tools do not compile" >&2; exit 1; }
+}
+[ "${T6_LOCKED:-0}" = 1 ] || t6_preflight
+
 if [ "${T6_LOCKED:-0}" != 1 ]; then
   [ -x "$LOCK_SCRIPT" ] || { echo "FAIL: devnet lock helper missing at $LOCK_SCRIPT" >&2; exit 1; }
   exec "$LOCK_SCRIPT" "T6 placeholder-manifest rehearsal" env \
@@ -292,6 +309,8 @@ run_paired_t6() {
 verify_b1_registry() {
   cd "$FRESH_REPO"
   local out=$EVIDENCE_DIR/b1-registry-verify.txt
+  # the paired lane's setup runs `make clean build`, which removes every auxiliary binary the tool build made: rebuild the verifier here
+  mkdir -p build && go build -o build/b1genesis ./scripts/b1genesis || { fail "could not build the B1 genesis verifier"; return 1; }
   build/b1genesis --verify test-nodes/evm-genesis-finalized-funded.json --profile test-nodes/b1-profile.json \
     --root-genesis test-nodes/trust-base.json --shard-conf "test-nodes/shard-conf-8_0.json" 2>&1 | tee "$out"
   [ "${PIPESTATUS[0]}" = 0 ] && grep -q 'the deployed registry account matches the regeneration' "$out" || { fail "the deployed registry differs from its regeneration"; return 1; }
