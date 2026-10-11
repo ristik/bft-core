@@ -784,7 +784,9 @@ q4_handoff_ab_turnover() {
   local next=3 in=$Q4_IN out=$Q4_OUT rc=0 i
   : >"$Q4_DIR/non-members.txt"
   # the retained weight in both maps, from the lane's own numbers (old: Q3_WEIGHTS over 1 2 3 4; new: Q4_B_WEIGHTS over Q4_B_ENTITIES)
-  python3 - "$Q3_WEIGHTS" "$Q4_B_WEIGHTS" "$Q4_B_ENTITIES" "$out" "$in" <<'PY' | tee "$Q4_DIR/turnover-arithmetic.txt" || return 1
+  # (and the turnover's weight distance against the budget the genesis configuration commits, which the product enforces when it derives the candidate)
+  local budget; budget=$(jq -r '.partitionParams.continuity_max_distance' "$fullShardConf") || return 1
+  python3 - "$Q3_WEIGHTS" "$Q4_B_WEIGHTS" "$Q4_B_ENTITIES" "$out" "$in" "$budget" <<'PY' | tee "$Q4_DIR/turnover-arithmetic.txt" || return 1
 import sys
 old = dict(zip("1 2 3 4".split(), map(int, sys.argv[1].split())))
 new = dict(zip(sys.argv[3].split(), map(int, sys.argv[2].split())))
@@ -798,9 +800,12 @@ print(f"old map (root epoch 2): {old}, W={W}, Q={qo}")
 print(f"new map (root epoch 3): {new}, V={V}, Q={qn}")
 print(f"replaced: entity {out} (weight {old[out]}) by entity {inn} (weight {new[inn]}); changed identities 1 of {len(old)}")
 print(f"retained entities {kept}: old weight {ko} >= {qo}, new weight {kn} >= {qn}")
-print(f"weight distance sum|w*V-v*W| = {dist} over V*W = {V * W}")
+num, den = (int(x) for x in sys.argv[6].split("/"))
+print(f"weight distance sum|w*V-v*W| = {dist} over V*W = {V * W}; committed budget continuity_max_distance = {num}/{den}: {'within' if dist * den <= num * V * W else 'ABOVE'} the budget")
 ok = set(old) - set(new) == {out} and set(new) - set(old) == {inn} and ko >= qo and kn >= qn and 3 * 1 < len(old)
-sys.exit(0 if ok else "the turnover is not one-of-four with a retained quorum in both maps")
+if not ok:
+    sys.exit("the turnover is not one-of-four with a retained quorum in both maps")
+sys.exit(0 if dist * den <= num * V * W else "the turnover's weight distance is above the committed budget")
 PY
   H3_ONLINE="1 2 3 4"
   # the joiner's restore is anchored at the genesis trust base and catches up through the verified handoffs; the activation of epoch 2 is not archived
