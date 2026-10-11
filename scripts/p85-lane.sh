@@ -19,7 +19,13 @@ export PATH="$HOME/.foundry/bin:$PATH"
 command -v forge >/dev/null && command -v cast >/dev/null || fail "forge and cast must be installed"
 [ -n "${M2_URETH_BIN:-}" ] && [ -x "$M2_URETH_BIN" ] || fail "set M2_URETH_BIN to a ureth build carrying the fresh-B1 profile (--unicity.* bindings)"
 [ -n "${M2_URETH_COMMIT:-}" ] || fail "set M2_URETH_COMMIT to the ureth source commit"
-"$M2_URETH_BIN" --version 2>&1 | grep -Fq "Commit SHA: $M2_URETH_COMMIT" || fail "M2_URETH_BIN does not report the commit $M2_URETH_COMMIT"
+# the pin helpers compare commits for equality: resolve the given commit (full or abbreviated) to the full one the binary reports, here,
+# before the lock is taken, so a pin the lane's later steps would refuse costs no lock slot
+reported=$("$M2_URETH_BIN" --version 2>&1 | sed -n 's/^Commit SHA: //p' | head -1)
+case "$reported" in *[!0-9a-f]*|"") fail "M2_URETH_BIN reports no commit" ;; esac
+[ "${#reported}" = 40 ] && [ "${reported#"$M2_URETH_COMMIT"}" != "$reported" ] || fail "M2_URETH_BIN does not report the commit $M2_URETH_COMMIT (it reports $reported)"
+M2_URETH_COMMIT=$reported
+export M2_URETH_COMMIT URETH_PIN_COMMIT=$reported
 
 if [ "${P85_LANE_LOCKED:-0}" != 1 ]; then
   [ -x "$LOCK_SCRIPT" ] || fail "devnet lock helper is missing at $LOCK_SCRIPT"
