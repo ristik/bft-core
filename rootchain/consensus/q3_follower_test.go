@@ -98,3 +98,27 @@ func TestAJoinerRootFollowsStagesSignsNothingAndIsPromotedAfterInstall(t *testin
 		refusesToSign(t, removed, 2)
 	})
 }
+
+// A follower is outside the send set of the committee's broadcasts (proposals and timeouts go to Validators(), the installed trust base's
+// roots) and recovery starts only on a message from a peer, so before its activation a joiner root receives nothing and cannot learn that it is
+// behind (#550); the install puts it into the send set. This pins the send set, not the catch-up itself.
+func TestAJoinerRootIsOutsideTheSendSetUntilTheActivationIsInstalled(t *testing.T) {
+	f := q3fixture.New(t, q3fixture.Options{})
+	ctx := context.Background()
+	joiner := newQ3Replica(t, f, f.NewNodes[3])
+	joiner.mustOpen(true)
+	t.Cleanup(joiner.close)
+	require.NoError(t, joiner.rt.Recover(ctx))
+	member := newQ3Replica(t, f, f.NewNodes[0])
+	member.mustOpen(true)
+	t.Cleanup(member.close)
+	require.NoError(t, member.rt.Recover(ctx))
+
+	require.NotContains(t, member.manager.Validators(), joiner.id(), "the committee does not send to the joiner before the activation")
+	require.NotContains(t, joiner.manager.Validators(), joiner.id())
+	require.Contains(t, member.manager.Validators(), member.id())
+
+	require.NoError(t, joiner.rt.Activate(ctx, joiner.bundle()))
+	require.Contains(t, joiner.manager.Validators(), joiner.id(), "installed, the joiner is in its own send set")
+	require.Contains(t, joiner.manager.Validators(), member.id())
+}
