@@ -123,6 +123,9 @@ p85_joiner_nodes() {
 # restored staging-only (no session before the Commit, #520) and gives its readiness from there.
 p85_joiner_restore() { # entity
   [ "$1" = 5 ] || return 0
+  # a refused attempt is retried and rebuilds the receipts: the joiner that restored (and still runs) is not restored again, which costs ~30 min
+  # (run 15 looped on it)
+  if [ -e "$H3_DIR/joiner-restored" ] && kill -0 "$(cat test-nodes/evm5/pid 2>/dev/null)" 2>/dev/null; then return 0; fi
   H3_ONLINE="1 2 3 4 5" H3_STAGING_JOINER=1 H3_RESTORE_TRUST_BASE=test-nodes/trust-base.json h3_restore_validator 5 1 || return 1
   # The restore fetches the whole certified history through the incumbents' archive streams, which are limited while they catch replicas up (it
   # retries up to 150 s per record and logs nothing until it finishes; in run 14 it took ~40 min for ~1400 records at ~40 records/min): the node serves its operator API only once restored, so wait for that
@@ -135,6 +138,7 @@ p85_joiner_restore() { # entity
   done
   [ "$up" = 1 ] || { echo "the joiner's archive restore did not finish in 2400 s" >&2; tail -20 test-nodes/evm5/debug.log >&2; return 1; }
   for i in $(seq 1 30); do kill -0 "$(cat test-nodes/evm5/pid)" 2>/dev/null || { echo "the restored joiner shard node (evm5) exited" >&2; tail -20 test-nodes/evm5/debug.log >&2; return 1; }; sleep 1; done
+  touch "$H3_DIR/joiner-restored"
 }
 
 # Write the joiner identity file (the node keys are the nodes' own) and onboard it through the live contracts.
