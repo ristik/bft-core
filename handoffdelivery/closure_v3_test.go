@@ -5,6 +5,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 	"github.com/unicitynetwork/bft-core/internal/testutils/q3fixture"
+	"github.com/unicitynetwork/bft-go-base/types"
 )
 
 // Two roots hold the same handoff with different quorum subsets: one witness identity. A non-canonical encoding is not a witness.
@@ -35,4 +36,12 @@ func TestTheV3WitnessIdentityDoesNotDependOnWhichQuorumSigned(t *testing.T) {
 	require.True(t, ok)
 	_, ok = decodeWitnessV3(append(append([]byte{}, raw...), 0))
 	require.False(t, ok, "trailing bytes are not canonical")
+
+	// bytes that decode to the same witness but are not what the encoder writes: the array header in its longer form
+	require.Equal(t, byte(0x85), raw[0], "a five-element definite array")
+	longer := append([]byte{0x98, 0x05}, raw[1:]...)
+	var decoded WitnessV3
+	require.NoError(t, types.Cbor.Unmarshal(longer, &decoded), "it does decode")
+	_, ok = decodeWitnessV3(longer)
+	require.False(t, ok, "but it is not the canonical encoding, so it is not a witness")
 }
