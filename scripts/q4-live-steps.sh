@@ -992,6 +992,11 @@ q4_evm_joiner_participates() {
     done
     [ -n "$line" ] && grep -Eaq 'msg="certificate admitted" .*rootEpoch=3([[:space:]]|$)' "test-nodes/evm$Q4_IN/debug.log" && break
     kill -0 "$(cat "test-nodes/evm$Q4_IN/pid")" 2>/dev/null || { echo "the joiner's EVM validator exited" >&2; tail -30 "test-nodes/evm$Q4_IN/debug.log" | cut -c1-400 >&2; return 1; }
+    # a joiner that admits certificates of the new epoch and still refuses to sign for want of a bound key will not start signing by waiting
+    if [ $((n % 15)) = 0 ] && grep -Eaq 'msg="certificate admitted" .*rootEpoch=3([[:space:]]|$)' "test-nodes/evm$Q4_IN/debug.log" &&
+       [ "$(tail -n 400 "test-nodes/evm$Q4_IN/debug.log" | grep -ac "expected key is not bound yet")" -ge 5 ]; then
+      echo "the joiner's EVM validator admits epoch-3 certificates and abstains from every vote: its signing key is not bound" >&2; return 1
+    fi
     [ $((n % 60)) != 0 ] || echo "waiting for the joiner's EVM validator to take part: ${n}s, log lines $(wc -l <"test-nodes/evm$Q4_IN/debug.log" | tr -d ' ')"
     sleep 1
   done
