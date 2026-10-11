@@ -546,7 +546,7 @@ func TestTheElectionHookIsPartOfTheProfile(t *testing.T) {
 		t.Fatal("the election hook is in the hash", err)
 	}
 	// pinned: the enabled form is a new encoding (three more items), so its hash is a fixed vector
-	if got := fmt.Sprintf("%x", withHash); got != "3292748170eab2fd906a3aeebee19963c288d83d59fa6554b954f1a7f6b5207b" {
+	if got := fmt.Sprintf("%x", withHash); got != "1fd78058d9d15a1139b2eef8ea6159f2df97c7f629ebb2c2d822f78829f285ff" {
 		t.Fatal("the profile with the election hook hashes as the pinned vector, got", got)
 	}
 	// each pin changes the hash alone

@@ -109,17 +109,17 @@ func TestUpdateMaximumProjectionAndMembers(t *testing.T) {
 	p := fixtureProfile(5)
 	u := maximalUpdate(p)
 	k, _, _, _ := p.Bounds()
-	if uint64(len(u.NewEntries)) != k || len(u.NewEntries[k-1].Members) != 64 {
+	if uint64(len(u.NewEntries)) != k || len(u.NewEntries[k-1].Members) != MaxMembers {
 		t.Fatal("fixture is not maximal")
 	}
 	got, _, err := Admit(u.Bytes(), p, math.MaxUint64)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if uint64(len(got.NewEntries)) != k || len(got.NewEntries[k-1].Members) != 64 {
+	if uint64(len(got.NewEntries)) != k || len(got.NewEntries[k-1].Members) != MaxMembers {
 		t.Fatal("decoded shape differs")
 	}
-	// One more entry, or a 65th member, is an encoding refusal.
+	// One more entry, or a member past the ceiling, is an encoding refusal.
 	tooMany := maximalUpdate(p)
 	tooMany.NewEntries = append(tooMany.NewEntries, fixtureEntry(k+1, tooMany.OriginRound))
 	if _, _, err := Admit(tooMany.Bytes(), p, math.MaxUint64); !errors.Is(err, ErrEncoding) {

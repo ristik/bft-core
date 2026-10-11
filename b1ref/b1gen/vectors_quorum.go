@@ -58,17 +58,17 @@ func (g *gen) quorum(seed string) {
 	flipped.seal.sigs[0] = entry{flipped.seal.sigs[0].key, sig}
 	g.ok("quorum.sig.v-ignored", fam, opUC, "wrong recovery byte (0/1 swapped) is ignored like the native verifier", newRequest(claimOf(flipped)).wire(), pre, shapeOf(flipped), "", &flipped.seal, nil)
 
-	// maximal authority: 64 members, exact threshold 43.
-	big64 := newFixture(seed+"/64", 64)
-	bp := big64.pre()
-	bu := func(n int) ucSpec { return big64.build("a", big64.round, big64.vals[:n], false).get(1, "") }
+	// maximal authority: 16 members (the profile ceiling), exact threshold 11.
+	big := newFixture(seed+"/16", 16)
+	bp := big.pre()
+	bu := func(n int) ucSpec { return big.build("a", big.round, big.vals[:n], false).get(1, "") }
 	for _, c := range []struct {
 		id, desc, want string
 		n              int
 	}{
-		{"quorum.max.exact", "64 members, exactly the threshold of 43 signatures", "", 43},
-		{"quorum.max.short", "64 members, 42 signatures", "ErrQuorum", 42},
-		{"quorum.max.all", "64 members, 64 signatures (maximum)", "", 64},
+		{"quorum.max.exact", "16 members, exactly the threshold of 11 signatures", "", 11},
+		{"quorum.max.short", "16 members, 10 signatures", "ErrQuorum", 10},
+		{"quorum.max.all", "16 members, 16 signatures (maximum)", "", 16},
 	} {
 		x := bu(c.n)
 		g.ok(c.id, fam, opUC, c.desc, newRequest(claimOf(x)).wire(), bp, shapeOf(x), c.want, &x.seal, nil)

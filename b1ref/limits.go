@@ -5,7 +5,7 @@ const (
 	MaxCallBytes      = 262144
 	MaxUCBytes        = 24576
 	MaxClaims         = 8
-	MaxMembers        = 64
+	MaxMembers        = 16
 	MaxSigsPerSeal    = 64
 	MaxSigEntries     = 512 // parsed signature entries per shared call
 	MaxNodeIDBytes    = 128
@@ -32,12 +32,17 @@ const (
 	gasPerSig      = 6000
 	gasPerClaim    = 2000
 	gasPerPathStep = 250
+	gasPerRead     = 100 // every registry word is priced warm
+	// RegistryWords is what a ceiling-sized call may read: 8 common words, 11 epoch words, 8 words per member.
+	RegistryWords = 8 + 11 + 8*MaxMembers
 )
 
-// UCGas is the charge of UC_V1/SHARED_SEAL_V1: 60000 + 16*B + 64000 + 6000*S + 2000*N + 250*P + 1117700.
+// UCGas is the charge of UC_V1/SHARED_SEAL_V1: 60000 + 16*B + 16000 + 6000*S + 2000*N + 250*P + 14700, i.e. 90700 + 16*B + ...
+// (repriced by owner-decisions section 22: 1000 per member of the 16-member ceiling, and the 147 registry words of a ceiling-sized entry
+// priced warm at 100 each; the price depends on the request only, never on warmth, state or any cache).
 // Operands are pre-scanned and bounded by the caller profile.
 func UCGas(b, s, n, p uint64) uint64 {
-	return ucBaseGas + gasPerByte*b + gasPerMember*MaxMembers + gasPerSig*s + gasPerClaim*n + gasPerPathStep*p + 1117700
+	return ucBaseGas + gasPerByte*b + gasPerMember*MaxMembers + gasPerSig*s + gasPerClaim*n + gasPerPathStep*p + gasPerRead*RegistryWords
 }
 
 // RSMTGas is the charge of RSMT_MEMBER_V1: 2000 + 16*B + 250*(1+popcount(bitmap)).
