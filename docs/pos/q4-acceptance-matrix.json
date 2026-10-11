@@ -1487,6 +1487,24 @@
       "and rejected none"
      ],
      "scope": "the step's own record: the three state-changing requests and the distinct (partition, shard) pairs whose non-empty proofs the receiving root verified (read from every root's log; on the recorded pre-#547 head one root logs them)"
+    },
+    {
+     "kind": "lane",
+     "label": "REAL-PROCESS",
+     "lane": "g2",
+     "step": "F8 aggregator shards certify new state roots in the weighted epoch; the roots verify their rsmt proofs (T1)",
+     "scope": "the same step on a head that includes #547 (the scenario A run with the G2 step, -lanes g2=<dir>): the three aggregator shards certify new state roots and a non-empty aggregator_rsmt_v1 proof is verified for each, none rejected. In this run too only the root that receives the certification request logs the check: #547's re-verification before voting (rootchain/consensus/ir_change_req_verifier.go) writes no log line, so the lane cannot show it per voting root; it is covered by #547's tests"
+    },
+    {
+     "kind": "lane-file",
+     "label": "REAL-PROCESS",
+     "lane": "g2",
+     "path": "q4/f8-new-roots.txt",
+     "contains": [
+      "all three aggregator shards certified new state roots; the roots verified a non-empty aggregator rsmt proof for each",
+      "and rejected none"
+     ],
+     "scope": "the step's record in the post-#547 run"
     }
    ]
   },
