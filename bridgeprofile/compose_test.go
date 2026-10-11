@@ -45,7 +45,7 @@ func (e *env) composed(t testing.TB, transfers int, irTime uint64) *composition 
 	cert, err := e.Agg.Certify(res.Leaves, extra, irTime, 100)
 	require.NoError(t, err)
 	c := &composition{e: e, h: h, keys: keys, res: res, cert: cert}
-	c.env = &Envelope{PolicyBody: e.F.Policy.Bytes(), History: h.Bytes(), Anchors: []Anchor{cert.Anchor}, LeafProofs: cert.Proofs}
+	c.env = &Envelope{PolicyBody: e.F.Policy.Bytes(), History: h.Bytes(), Anchors: cert.Anchors, LeafProofs: cert.Proofs}
 	return c
 }
 
@@ -70,7 +70,7 @@ func TestComposeAcceptsCertifiedHistory(t *testing.T) {
 	require.NoError(t, err)
 	cert, err := e.Agg.Certify(mres.Leaves, nil, irTimeOK, 100)
 	require.NoError(t, err)
-	env := &Envelope{PolicyBody: e.F.Policy.Bytes(), History: mintOnly.Bytes(), Anchors: []Anchor{cert.Anchor}, LeafProofs: cert.Proofs}
+	env := &Envelope{PolicyBody: e.F.Policy.Bytes(), History: mintOnly.Bytes(), Anchors: cert.Anchors, LeafProofs: cert.Proofs}
 	b, err := env.Encode()
 	require.NoError(t, err)
 	_, err = Compose(e.F.Cfg, OpMint, b, RefB1{TB: e.TB})
@@ -166,6 +166,10 @@ func TestComposeOpeningShapes(t *testing.T) {
 			cp.env.Anchors[0].InputRecord = ir
 			cp.env.Anchors[0].ExpectedIRHash = H(ir)
 			_, err := cp.run(t, permissiveB1{RefB1{TB: e.TB}})
+			if name == "oversize" {
+				require.ErrorIs(t, err, ErrInputTooLarge, "bounded by the gate before any B1 call")
+				return
+			}
 			require.ErrorIs(t, err, ErrIRShape)
 		})
 	}
@@ -243,13 +247,15 @@ func TestComposeAnchorAndLeafRejections(t *testing.T) {
 		}
 		cert, err := e.Agg.Certify(confused, nil, irTimeOK, 100)
 		require.NoError(t, err)
-		cp.env.Anchors, cp.env.LeafProofs = []Anchor{cert.Anchor}, cert.Proofs
+		cp.env.Anchors, cp.env.LeafProofs = cert.Anchors, cert.Proofs
 		_, err = cp.run(t, RefB1{TB: e.TB})
 		require.ErrorIs(t, err, ErrLeafProof)
 	})
 	t.Run("paths in the wrong order", func(t *testing.T) {
 		cp := e.composed(t, 2, irTimeOK)
-		cp.env.LeafProofs[0], cp.env.LeafProofs[1] = cp.env.LeafProofs[1], cp.env.LeafProofs[0]
+		p0, p1 := cp.env.LeafProofs[0], cp.env.LeafProofs[1]
+		p0.Bitmap, p0.Siblings, p1.Bitmap, p1.Siblings = p1.Bitmap, p1.Siblings, p0.Bitmap, p0.Siblings
+		cp.env.LeafProofs[0], cp.env.LeafProofs[1] = p0, p1
 		_, err := cp.run(t, RefB1{TB: e.TB})
 		require.ErrorIs(t, err, ErrLeafProof)
 	})
@@ -273,7 +279,7 @@ func TestComposeRefreshPreservesReferenceTimes(t *testing.T) {
 	require.NoError(t, err)
 	later, err := e.Agg.Certify(cp.res.Leaves, []Leaf{{SID: H([]byte("newer")), Value: H([]byte("n"))}}, irTimeOK+3600, 900)
 	require.NoError(t, err)
-	cp.env.Anchors, cp.env.LeafProofs = []Anchor{later.Anchor}, later.Proofs
+	cp.env.Anchors, cp.env.LeafProofs = later.Anchors, later.Proofs
 	res, err := cp.run(t, RefB1{TB: e.TB})
 	require.NoError(t, err)
 	for i, l := range res.Leaves {

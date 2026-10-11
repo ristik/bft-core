@@ -14,7 +14,6 @@ import (
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/unicitynetwork/bft-core/b1registry"
 	"github.com/unicitynetwork/bft-core/registrygenesis"
-	"github.com/unicitynetwork/bft-core/registryproof"
 )
 
 // Refusals of the deployed-genesis comparison, each named so a lane (and a test) can tell them apart.
@@ -24,6 +23,8 @@ var (
 	ErrDeployedAccount = errors.New("b1genesis verify: the deployed registry account has a nonce or balance")
 	ErrDeployedCode    = errors.New("b1genesis verify: the deployed registry code differs from the pinned runtime")
 	ErrDeployedStorage = errors.New("b1genesis verify: the deployed registry storage differs from the regeneration")
+	ErrDeployedAliased = errors.New("b1genesis verify: the deployed genesis allocates the registry address under more than one key")
+	ErrCommitment      = errors.New("b1genesis verify: the supplied shard configuration's genesis commitment is not the regenerated one")
 	ErrRegeneratedCode = errors.New("b1genesis verify: the pinned runtime is not the one the profile commits to")
 )
 
@@ -67,16 +68,23 @@ func verifyDeployed(g *registrygenesis.Genesis, profileRuntimeHash [32]byte, dep
 	if err := json.Unmarshal(deployed, &spec); err != nil {
 		return 0, fmt.Errorf("%w: %v", ErrDeployedGenesis, err)
 	}
+	// the address comes from the same regeneration as the words; every alloc key that resolves to it is counted (keys are case-variants of one
+	// address), and exactly one account must carry it: which of several would be read must never depend on map order
+	registry := g.Record().RegistryAddress
 	var acct *deployedAccount
+	matches := 0
 	for k, v := range spec.Alloc {
-		if common.HexToAddress(k) == registryproof.RegistryAddress {
+		if common.HexToAddress(k) == registry {
 			v := v
 			acct = &v
-			break
+			matches++
 		}
 	}
-	if acct == nil {
-		return 0, fmt.Errorf("%w: %s", ErrDeployedAbsent, registryproof.RegistryAddress)
+	switch {
+	case matches == 0:
+		return 0, fmt.Errorf("%w: %s", ErrDeployedAbsent, registry)
+	case matches > 1:
+		return 0, fmt.Errorf("%w: %s under %d keys", ErrDeployedAliased, registry, matches)
 	}
 	if bal, ok := new(big.Int).SetString(strings.TrimPrefix(acct.Balance, "0x"), 16); acct.Balance != "" && (!ok || bal.Sign() != 0) {
 		return 0, fmt.Errorf("%w: balance %s", ErrDeployedAccount, acct.Balance)

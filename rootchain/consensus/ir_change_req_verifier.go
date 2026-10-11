@@ -3,15 +3,21 @@ package consensus
 import (
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
+	"github.com/unicitynetwork/bft-core/network/protocol/certification"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/storage"
 	drctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
+	"github.com/unicitynetwork/bft-core/rootchain/consensus/zkverifier"
 	"github.com/unicitynetwork/bft-go-base/types"
 )
 
 // ErrDuplicateChangeReq is shared with the storage view verifier, so both refuse with one identity.
 var ErrDuplicateChangeReq = storage.ErrDuplicateChangeReq
+
+// ErrProofInvalid refuses an IR change whose carried request has a configured consistency proof that does not hold.
+var ErrProofInvalid = errors.New("configured proof of a carried request does not hold")
 
 type (
 	State interface {
@@ -25,6 +31,10 @@ type (
 		state  State
 		// history, when set, selects the view-aware branch (Q2-C). Production leaves it nil: legacy dispatch stays selected.
 		history storage.RequestHistory
+		// proofs judges the configured consistency proof of every shard request an IR change carries: a voting root does not take the
+		// receiving root's word that it held (a Byzantine receiving root could skip its own check)
+		proofs     *zkverifier.Registry
+		proofsOnce sync.Once
 	}
 
 	PartitionTimeoutGenerator struct {
@@ -70,7 +80,31 @@ func (x *IRChangeReqVerifier) VerifyIRChangeReqView(view *storage.RequestRoundVi
 	if x.params.NetworkProfileVersion == 2 && irChReq.Partition == drctypes.ControlPartition {
 		return nil, drctypes.ErrControlPartition
 	}
-	return view.VerifyIRChangeReq(irChReq, t2TimeoutToRootRounds(view.T2Timeout(), x.params.BlockRate/2))
+	vr, err := view.VerifyIRChangeReq(irChReq, t2TimeoutToRootRounds(view.T2Timeout(), x.params.BlockRate/2))
+	if err != nil {
+		return nil, err
+	}
+	pdr, err := view.PDR()
+	if err != nil {
+		return nil, fmt.Errorf("the PDR of the request view: %w", err)
+	}
+	target := zkverifier.Target{Partition: irChReq.Partition, Shard: irChReq.Shard, Epoch: view.ExpectedTR().Epoch, Params: pdr.GetPartitionParams()}
+	for _, req := range irChReq.Requests {
+		if err := x.verifyProof(req, target); err != nil {
+			return nil, err
+		}
+	}
+	return vr, nil
+}
+
+// verifyProof is the intake's configured-proof check on a request carried by an IR change. The work is bounded: an IR change carries
+// at most one request per member (checked before this), and every verifier bounds its own input.
+func (x *IRChangeReqVerifier) verifyProof(req *certification.BlockCertificationRequest, target zkverifier.Target) error {
+	x.proofsOnce.Do(func() { x.proofs = zkverifier.NewRegistry() })
+	if _, err := x.proofs.VerifyRequest(req, target); err != nil {
+		return fmt.Errorf("%w: request of %s: %w", ErrProofInvalid, req.NodeID, err)
+	}
+	return nil
 }
 
 func (x *IRChangeReqVerifier) VerifyIRChangeReq(rootRound uint64, irChReq *drctypes.IRChangeReq) (*types.InputRecord, error) {
@@ -93,6 +127,13 @@ func (x *IRChangeReqVerifier) VerifyIRChangeReq(rootRound uint64, irChReq *drcty
 	inputRecord, err := irChReq.Verify(si, &luc, rootRound, t2TimeoutToRootRounds(si.T2Timeout, x.params.BlockRate/2))
 	if err != nil {
 		return nil, fmt.Errorf("certification request verification failed: %w", err)
+	}
+	// the configured consistency proof of every carried request, as the receiving root checked it
+	target := zkverifier.Target{Partition: irChReq.Partition, Shard: irChReq.Shard, Epoch: si.IR.Epoch, Params: si.PartitionParams}
+	for _, req := range irChReq.Requests {
+		if err := x.verifyProof(req, target); err != nil {
+			return nil, err
+		}
 	}
 	// verify that there are no pending changes in the pipeline for any of the updated partitions
 	if ir := x.state.IsChangeInProgress(irChReq.Partition, irChReq.Shard); ir != nil {

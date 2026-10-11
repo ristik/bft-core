@@ -93,6 +93,58 @@ q4_byzantine() {
 
 q4_clear() { q4_ctl "$1" "{}"; }
 
+# q4_forge <root> <name> <variant> <recipient roots> [impersonated root]: the root sends, next to each own vote and timeout of a round, one forged
+# message the recipients must refuse (q4shim.Forgery: impersonate, unknown-signer, bad-signature, wrong-domain, old-form, old-epoch, future-epoch, stale)
+q4_forge() {
+  local root=$1 name=$2 variant=$3 recipients=$4 imp=${5:-} r list impField=
+  list=$(for r in $recipients; do printf '"%s",' "$(q4_peer "$r")"; done)
+  [ -z "$imp" ] || impField=",'impersonate':'$(q4_peer "$imp")'"
+  q4_ctl "$root" "{'forgery':[{'name':'$name','recipients':[${list%,}],'variant':'$variant'$impField,'require':true}]}"
+}
+q4_forged() { jq -r --arg n "$2" '.forged[$n] // 0' "$Q4_SHIM_DIR/root$1/status.json"; }
+
+# ---- the shard gate (q4shim.ShardGate) of each root: shard-control.json (written here), shard-status.json and shard-trace.jsonl (written by the gate)
+q4_shard_ctl() {
+  local root=$1 body=$2 dir gen f i
+  dir="$Q4_SHIM_DIR/root$root"; f="$dir/.sgen"
+  mkdir -p "$dir"
+  gen=$(( $(cat "$f" 2>/dev/null || echo 0) + 1 )); echo "$gen" >"$f"
+  q4_doc "$gen" "$body" >"$dir/shard-control.json.tmp" && mv "$dir/shard-control.json.tmp" "$dir/shard-control.json"
+  for i in $(seq 1 100); do
+    [ "$(jq -r '.gen // 0' "$dir/shard-status.json" 2>/dev/null || echo 0)" = "$gen" ] && return 0
+    sleep 0.2
+  done
+  echo "root$root shard gate did not read control generation $gen" >&2
+  return 1
+}
+q4_shard_hits() { jq -r --arg r "$2" '.rules[$r] // 0' "$Q4_SHIM_DIR/root$1/shard-status.json"; }
+
+# q4_shard_hold <rule> <roots> <directions: "in", "out" or "in out"> <partition> [shard node ids...]: every named root holds that traffic (rule <rule>-<direction>);
+# no node id means every shard node of the partition. In: the node's certification requests and handshakes; out: the root's certification responses to it.
+q4_shard_hold() {
+  local rule=$1 roots=$2 dirs=$3 part=$4 r d n nodes= rules=
+  shift 4
+  for n in "$@"; do nodes+="'$n',"; done
+  for d in $dirs; do rules+="{'name':'$rule-$d','direction':'$d','partition':$part,${nodes:+'nodes':[${nodes%,}],}'action':'hold','require':true},"; done
+  for r in $roots; do q4_shard_ctl "$r" "{'rules':[${rules%,}]}" || return 1; done
+}
+
+# q4_shard_release <rule> <roots> <directions> [order]: every root delivers what the rule held (fifo or lifo) and retires it; fails if no root's rule matched
+# anything (the fault was not injected)
+q4_shard_release() {
+  local rule=$1 roots=$2 dirs=$3 order=${4:-fifo} r d total=0 rules rels
+  for r in $roots; do
+    rules=; rels=
+    for d in $dirs; do
+      total=$((total + $(q4_shard_hits "$r" "$rule-$d")))
+      rules+="{'name':'$rule-$d','direction':'$d','action':'pass'},"
+      rels+="{'id':'$rule-$d-$r','rule':'$rule-$d','order':'$order'},"
+    done
+    q4_shard_ctl "$r" "{'rules':[${rules%,}],'releases':[${rels%,}]}" || return 1
+  done
+  [ "$total" -gt 0 ] || { echo "shard rule $rule matched no message on any root: nothing was injected" >&2; return 1; }
+}
+
 # process faults: SIGKILL (not a power loss) and restart over the retained home
 q4_kill9() { local pid; pid=$(cat "test-nodes/root$1/pid") && kill -9 "$pid"; }
 
@@ -103,6 +155,10 @@ q4_selftest_docs() {
   q4_doc 2 "{'rules':[{'name':'cut','action':'pass'}],'releases':[{'id':'r1','rule':'cut','order':'fifo'}]}" >"$dir/release.json"
   q4_doc 3 "{'equivocation':[{'name':'byz','recipients':['12D3KooWL87szaxU9JaLbSKmHMTfuTg6xgcbUs8L4KH4JRn6Ujc9'],'variant':'state','require':true}]}" >"$dir/byzantine.json"
   q4_doc 4 "{'rules':[{'name':'late','class':'timeout','epoch':2,'action':'drop','after':'t'}],'triggers':[{'name':'t','class':'vote'}]}" >"$dir/after.json"
+  q4_doc 5 "{'forgery':[{'name':'imp','recipients':['12D3KooWL87szaxU9JaLbSKmHMTfuTg6xgcbUs8L4KH4JRn6Ujc9'],'variant':'impersonate','impersonate':'12D3KooWL87szaxU9JaLbSKmHMTfuTg6xgcbUs8L4KH4JRn6Ujc9','require':true}],'rules':[{'name':'dup','action':'duplicate'}]}" >"$dir/forge.json"
+  mkdir -p "$dir/shard"
+  q4_doc 1 "{'rules':[{'name':'cut-in','direction':'in','partition':8,'nodes':['n1'],'action':'hold','require':true},{'name':'cut-out','direction':'out','partition':8,'action':'hold'}]}" >"$dir/shard/hold.json"
+  q4_doc 2 "{'rules':[{'name':'cut-in','direction':'in','action':'pass'}],'releases':[{'id':'r','rule':'cut-in','order':'lifo'}]}" >"$dir/shard/release.json"
 }
 
 if [ "${1:-}" = "--selftest-docs" ]; then

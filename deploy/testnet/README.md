@@ -53,7 +53,7 @@ and the [faucet evidence](faucet/evidence/README.md). The BFT pin includes the m
 faucet. Fetch three separate clean source checkouts at those commits; never use
 `main`, a moving tag or the old fake-executor docker-compose.evm.yml for this stack.
 Build on Debian 12/bookworm (the runtime ABI); building on a newer glibc host
-can produce incompatible ELF files. Build requirements and Go/Rust versions follow [H6 build](../../docs/operations/h6/build.md).
+can produce incompatible ELF files. Build requirements and Go/Rust versions are in [the operator guide](../../docs/operations/testnet/OPERATOR.md#2-prerequisites).
 Linux packaging is new groundwork; H6's native macOS evidence does not validate it.
 
 From this PR's repository root, on the target Linux build host:

@@ -31,7 +31,16 @@ func NewAggregatorRSMTVerifier() *AggregatorRSMTVerifier {
 // An empty previousStateRoot (len == 0) is reserved for genesis / sync UCs
 // and is filtered out earlier in Node.verifyZKProof, so both roots are
 // expected to be 32 bytes here in practice.
-func (v *AggregatorRSMTVerifier) VerifyProof(proof []byte, previousStateRoot []byte, newStateRoot []byte, _ []byte) error {
+//
+// The stored leaf values depend on the round's reference time, so the verification needs it: callers go through VerifyProofAt. VerifyProof
+// refuses rather than verify against a guessed reference time.
+func (v *AggregatorRSMTVerifier) VerifyProof(_ []byte, _ []byte, _ []byte, _ []byte) error {
+	return ErrReferenceTimeRequired
+}
+
+// VerifyProofAt is VerifyProof with the round's reference time (InputRecord.Timestamp), from which the stored values of the new leaves are
+// derived (rsmt.LeafValue).
+func (v *AggregatorRSMTVerifier) VerifyProofAt(proof []byte, previousStateRoot []byte, newStateRoot []byte, _ []byte, referenceTime uint64) error {
 	env, err := rsmt.DecodeEnvelope(proof)
 	if err != nil {
 		return fmt.Errorf("%w: %v", ErrInvalidProofFormat, err)
@@ -44,7 +53,7 @@ func (v *AggregatorRSMTVerifier) VerifyProof(proof []byte, previousStateRoot []b
 	if err != nil {
 		return fmt.Errorf("%w: new state root: %v", ErrInvalidProofFormat, err)
 	}
-	if err := rsmt.Verify(env, oldRoot, newRoot); err != nil {
+	if err := rsmt.Verify(env, oldRoot, newRoot, referenceTime); err != nil {
 		return fmt.Errorf("%w: %v", ErrProofVerificationFailed, err)
 	}
 	return nil

@@ -116,17 +116,41 @@ func (a *Authority) TrustBaseWith(network types.NetworkID, epoch, epochStart uin
 	return tb, nil
 }
 
+// ShardInput is one shard's certified state in a root round: its
+// configuration and input record.
+type ShardInput struct {
+	PDR *types.PartitionDescriptionRecord
+	IR  *types.InputRecord
+}
+
 // Certify returns a unicity certificate over ir for the shard configuration
-// pdr, sealed at rootRound in root epoch epoch.
+// pdr, sealed at rootRound in root epoch epoch. The shard is the only shard of
+// its partition.
 func (a *Authority) Certify(network types.NetworkID, epoch, rootRound uint64, ir *types.InputRecord, pdr *types.PartitionDescriptionRecord) (*types.UnicityCertificate, error) {
-	confHash, err := pdr.Hash(gocrypto.SHA256)
-	if err != nil {
-		return nil, err
-	}
+	return a.CertifyShards(network, epoch, rootRound, []ShardInput{{PDR: pdr, IR: ir}}, 0)
+}
+
+// CertifyShards seals one root round over every shard of one partition (a
+// complete uniform shard tree, inputs in increasing shard order) and returns
+// the unicity certificate of inputs[target], with its shard-tree siblings.
+func (a *Authority) CertifyShards(network types.NetworkID, epoch, rootRound uint64, inputs []ShardInput, target int) (*types.UnicityCertificate, error) {
 	trHash := H([]byte("fixture-technical-record"))
-	tree, err := types.CreateShardTree(types.ShardingScheme{}, []types.ShardTreeInput{
-		{Shard: pdr.ShardID, IR: ir, TRHash: trHash[:], ShardConfHash: confHash},
-	}, gocrypto.SHA256)
+	var scheme types.ShardingScheme
+	var ins []types.ShardTreeInput
+	confs := make([][]byte, len(inputs))
+	for i, in := range inputs {
+		confHash, err := in.PDR.Hash(gocrypto.SHA256)
+		if err != nil {
+			return nil, err
+		}
+		confs[i] = confHash
+		if len(inputs) > 1 {
+			scheme = append(scheme, in.PDR.ShardID)
+		}
+		ins = append(ins, types.ShardTreeInput{Shard: in.PDR.ShardID, IR: in.IR, TRHash: trHash[:], ShardConfHash: confHash})
+	}
+	pdr, ir, confHash := inputs[target].PDR, inputs[target].IR, confs[target]
+	tree, err := types.CreateShardTree(scheme, ins, gocrypto.SHA256)
 	if err != nil {
 		return nil, err
 	}
@@ -160,9 +184,14 @@ func (a *Authority) Certify(network types.NetworkID, epoch, rootRound uint64, ir
 
 // FixturePDR is a one-validator shard configuration for partition p of network n.
 func FixturePDR(network types.NetworkID, partition types.PartitionID, chainID uint64, validatorSeed string) *types.PartitionDescriptionRecord {
+	return FixtureShardPDR(network, partition, types.ShardID{}, chainID, validatorSeed)
+}
+
+// FixtureShardPDR is FixturePDR for one shard of a sharded partition.
+func FixtureShardPDR(network types.NetworkID, partition types.PartitionID, shard types.ShardID, chainID uint64, validatorSeed string) *types.PartitionDescriptionRecord {
 	k := KeyFromSeed("validator:" + validatorSeed).PubKey().SerializeCompressed()
 	return &types.PartitionDescriptionRecord{
-		Version: 1, NetworkID: network, PartitionID: partition, T2Timeout: 5 * time.Second,
+		Version: 1, NetworkID: network, PartitionID: partition, ShardID: shard, T2Timeout: 5 * time.Second,
 		PartitionParams: map[string]string{"chainId": fmt.Sprint(chainID)}, Epoch: 0,
 		Validators: []*types.NodeInfo{{NodeID: "validator-1", SigKey: k, Stake: 1}},
 	}
@@ -326,64 +355,144 @@ func (n *rnode) proof(key [32]byte) (bm [32]byte, sibs [][32]byte) {
 	return
 }
 
-// AggregatorWorld certifies sets of leaves under an aggregator root.
+// AggregatorWorld certifies sets of leaves under the shards of one aggregator
+// partition. PDRs holds the shard configurations in increasing shard order
+// (one for depth 0, two for depth 1).
 type AggregatorWorld struct {
-	PDR  *types.PartitionDescriptionRecord
+	PDRs []*types.PartitionDescriptionRecord
 	Auth *Authority
 	TB   *types.RootTrustBaseV1
 }
 
-// CertifiedLeaves is an anchor and one membership path per requested leaf.
+// CertifiedLeaves is one anchor per distinct complete UC in first-use leaf
+// order and one membership path per requested leaf, whose AnchorIndex names the
+// anchor that certifies it.
 type CertifiedLeaves struct {
-	Anchor Anchor
-	Proofs []LeafProof
+	Anchors []Anchor
+	Rows    []int // policy row of each anchor
+	Proofs  []LeafProof
 }
 
-// Certify builds the RSMT over leaves (sid -> v), certifies its root with an
-// input record carrying irTime as the timestamp, and returns the anchor and the
-// ordered paths. Leaves not in the request may be added with extra.
+// Row is the policy row (shard) a state ID belongs to: the top bit at depth 1.
+func (w *AggregatorWorld) Row(sid [32]byte) int {
+	if len(w.PDRs) == 1 {
+		return 0
+	}
+	return int(sid[0] >> 7)
+}
+
+// ShardRound names the root round and IR timestamp one certification is made at.
+type ShardRound struct {
+	IRTime, RootRound uint64
+}
+
+// Certify builds, for every shard that owns a requested leaf, the RSMT over
+// that shard's leaves (leaves plus extra), certifies its root with an input
+// record carrying irTime as the timestamp in root round rootRound, and returns
+// the anchors (first use order) and the ordered paths.
 func (w *AggregatorWorld) Certify(leaves []Leaf, extra []Leaf, irTime, rootRound uint64) (*CertifiedLeaves, error) {
-	all := append(append([]Leaf{}, leaves...), extra...)
-	kv := make([]rsmtKV, len(all))
-	for i, l := range all {
-		kv[i] = rsmtKV{l.SID, l.Value}
+	return w.CertifyRounds(leaves, extra, func(int) ShardRound { return ShardRound{irTime, rootRound} })
+}
+
+// CertifyRounds is Certify with an independent round and timestamp per shard
+// row, so one history can carry anchors of different seals.
+func (w *AggregatorWorld) CertifyRounds(leaves []Leaf, extra []Leaf, round func(row int) ShardRound) (*CertifiedLeaves, error) {
+	return w.CertifyAssigned(leaves, extra, func(_ int, l Leaf) ShardRound { return round(w.Row(l.SID)) })
+}
+
+// CertifyAssigned certifies each leaf in the round the callback names. Leaves
+// of one shard certified at the same round share one tree and one UC; leaves of
+// one shard at different rounds are certified by different UCs even when the
+// rounds are equal in every other respect (each UC covers its own tree), so a
+// shard may contribute many anchors. extra leaves enter every tree of their shard.
+func (w *AggregatorWorld) CertifyAssigned(leaves []Leaf, extra []Leaf, assign func(i int, l Leaf) ShardRound) (*CertifiedLeaves, error) {
+	type group struct {
+		row   int
+		round ShardRound
+		kv    []rsmtKV
 	}
-	sort.Slice(kv, func(i, j int) bool { return bytes.Compare(kv[i].key[:], kv[j].key[:]) < 0 })
-	root := rsmtBuild(kv)
-	ir := &types.InputRecord{Version: 1, RoundNumber: rootRound, Epoch: w.PDR.Epoch, PreviousHash: sl(H([]byte("agg-previous-state"))),
-		Hash: root.hash[:], SummaryValue: []byte{}, Timestamp: irTime, BlockHash: sl(H([]byte("agg-block")))}
-	uc, err := w.Auth.Certify(w.TB.GetNetworkID(), w.TB.GetEpoch(), rootRound, ir, w.PDR)
-	if err != nil {
-		return nil, err
+	var groups []*group
+	which := make([]int, len(leaves))
+	for i, l := range leaves {
+		row, r := w.Row(l.SID), assign(i, l)
+		g := -1
+		for k, c := range groups {
+			if c.row == row && c.round == r {
+				g = k
+			}
+		}
+		if g < 0 {
+			g = len(groups)
+			groups = append(groups, &group{row: row, round: r})
+		}
+		groups[g].kv = append(groups[g].kv, rsmtKV{l.SID, l.Value})
+		which[i] = g
 	}
-	ucb, err := types.Cbor.Marshal(uc)
-	if err != nil {
-		return nil, err
+	for _, g := range groups {
+		for _, l := range extra {
+			if w.Row(l.SID) == g.row {
+				g.kv = append(g.kv, rsmtKV{l.SID, l.Value})
+			}
+		}
+		sort.Slice(g.kv, func(i, j int) bool { return bytes.Compare(g.kv[i].key[:], g.kv[j].key[:]) < 0 })
 	}
-	irb, err := ir.Bytes()
-	if err != nil {
-		return nil, err
+	out := &CertifiedLeaves{}
+	roots := make([]*rnode, len(groups))
+	for k, g := range groups {
+		roots[k] = rsmtBuild(g.kv)
+		// Every shard needs an input record for the shard tree; the other shards
+		// carry a placeholder state no requested leaf depends on.
+		irs := make([]*types.InputRecord, len(w.PDRs))
+		for row := range w.PDRs {
+			hash := H([]byte(fmt.Sprint("agg-empty-shard-state-", row)))
+			if row == g.row {
+				hash = roots[k].hash
+			}
+			irs[row] = &types.InputRecord{Version: 1, RoundNumber: g.round.RootRound, Epoch: w.PDRs[row].Epoch, PreviousHash: sl(H([]byte("agg-previous-state"))),
+				Hash: hash[:], SummaryValue: []byte{}, Timestamp: g.round.IRTime, BlockHash: sl(H([]byte("agg-block")))}
+		}
+		inputs := make([]ShardInput, len(w.PDRs))
+		for i := range w.PDRs {
+			inputs[i] = ShardInput{PDR: w.PDRs[i], IR: irs[i]}
+		}
+		uc, err := w.Auth.CertifyShards(w.TB.GetNetworkID(), w.TB.GetEpoch(), g.round.RootRound, inputs, g.row)
+		if err != nil {
+			return nil, err
+		}
+		ucb, err := types.Cbor.Marshal(uc)
+		if err != nil {
+			return nil, err
+		}
+		irb, err := irs[g.row].Bytes()
+		if err != nil {
+			return nil, err
+		}
+		pdr := w.PDRs[g.row]
+		conf, err := pdr.Hash(gocrypto.SHA256)
+		if err != nil {
+			return nil, err
+		}
+		a := Anchor{Partition: uint32(pdr.PartitionID), Shard: pdr.ShardID.Bytes(),
+			ExpectedStateRoot: [32]byte(irs[g.row].Hash), ExpectedIRHash: H(irb), UC: ucb, InputRecord: irb}
+		copy(a.ShardConfHash[:], conf)
+		out.Anchors = append(out.Anchors, a)
+		out.Rows = append(out.Rows, g.row)
 	}
-	conf, err := w.PDR.Hash(gocrypto.SHA256)
-	if err != nil {
-		return nil, err
-	}
-	out := &CertifiedLeaves{Anchor: Anchor{Partition: uint32(w.PDR.PartitionID), Shard: EmptyPrefixShard,
-		ExpectedStateRoot: root.hash, ExpectedIRHash: H(irb), UC: ucb, InputRecord: irb}}
-	copy(out.Anchor.ShardConfHash[:], conf)
-	for _, l := range leaves {
-		bm, sibs := root.proof(l.SID)
-		out.Proofs = append(out.Proofs, LeafProof{Bitmap: bm, Siblings: sibs})
+	// Anchors are numbered by first use in leaf order, not by group creation: group
+	// creation already follows first use, so the two coincide.
+	for i, l := range leaves {
+		bm, sibs := roots[which[i]].proof(l.SID)
+		out.Proofs = append(out.Proofs, LeafProof{AnchorIndex: uint16(which[i]), Bitmap: bm, Siblings: sibs})
 	}
 	return out, nil
 }
 
 // InclusionProofs returns one SDK inclusion proof per leaf of a history in
-// order (mint first), carrying the shared anchor certificate.
+// order (mint first), each carrying the certificate of its own shard.
 func (c *CertifiedLeaves) InclusionProofs() []InclusionProof {
 	out := make([]InclusionProof, len(c.Proofs))
 	for i, p := range c.Proofs {
-		out[i] = InclusionProof{Bitmap: p.Bitmap, Siblings: p.Siblings, UC: c.Anchor.UC}
+		out[i] = InclusionProof{Bitmap: p.Bitmap, Siblings: p.Siblings, UC: c.Anchors[p.AnchorIndex].UC}
 	}
 	return out
 }

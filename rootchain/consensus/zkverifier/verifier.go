@@ -8,6 +8,8 @@ import (
 var (
 	// ErrProofVerificationFailed is returned when proof verification fails
 	ErrProofVerificationFailed = errors.New("proof verification failed")
+	// ErrReferenceTimeRequired - the proof type is bound to the round reference time and was offered without one
+	ErrReferenceTimeRequired = errors.New("proof verification needs the round reference time")
 	// ErrInvalidProofFormat is returned when proof data is malformed
 	ErrInvalidProofFormat = errors.New("invalid proof format")
 	// ErrVerifierNotConfigured is returned when no verifier is configured
@@ -54,6 +56,13 @@ type ZKVerifier interface {
 
 	// IsEnabled returns true if verification is enabled
 	IsEnabled() bool
+}
+
+// ReferenceTimeVerifier is a ZKVerifier whose proofs are bound to the round's reference time (InputRecord.Timestamp). A node verifies such a
+// proof with VerifyProofAt; its plain VerifyProof must refuse (ErrReferenceTimeRequired).
+type ReferenceTimeVerifier interface {
+	ZKVerifier
+	VerifyProofAt(proof []byte, previousStateRoot []byte, newStateRoot []byte, blockHash []byte, referenceTime uint64) error
 }
 
 // Config holds ZK verifier configuration

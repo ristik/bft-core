@@ -15,10 +15,12 @@ type B1 interface {
 }
 
 // Compose is the composing verifier of design section 6 as an executable
-// oracle: framing and budgets, Cfg and the single policy anchor, the kernel
-// result, B1 anchor authentication, only then the IR opening and its time
-// comparison, then one 0x0102 call per ordered leaf with the same
-// authenticated root. Any failure rejects the whole proof.
+// oracle: framing and budgets, Cfg and policy body, the kernel result, the
+// anchor table the exported leaves require, the direct-call gas gate, then B1
+// authentication of every anchor (one single-claim call each), each anchor's
+// IR opening and its time comparison for the leaves routed to it, then one
+// 0x0102 call per ordered leaf against that leaf's own anchor root. Any
+// failure rejects the whole proof.
 func Compose(cfg *Cfg, op uint8, envelope []byte, b1 B1) (*Result, error) {
 	if op != OpMint && op != OpReturn {
 		return nil, ErrBadOperation
@@ -30,7 +32,8 @@ func Compose(cfg *Cfg, op uint8, envelope []byte, b1 B1) (*Result, error) {
 	if err != nil {
 		return nil, err
 	}
-	if _, err := CheckPolicyAnchor(cfg, env); err != nil {
+	pol, err := CheckPolicyBody(cfg, env)
+	if err != nil {
 		return nil, err
 	}
 	var res *Result
@@ -42,24 +45,37 @@ func Compose(cfg *Cfg, op uint8, envelope []byte, b1 B1) (*Result, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := CheckLeafProofs(env, len(res.Leaves)); err != nil {
-		return nil, err
+	sids := make([][32]byte, len(res.Leaves))
+	for i, l := range res.Leaves {
+		sids[i] = l.SID
 	}
-	a := &env.Anchors[0]
-	if err := b1.AuthenticateAnchor(a); err != nil {
-		return nil, ErrAnchorAuth
-	}
-	// The opening is trusted only now: B1 has authenticated the pair it hashes to.
-	ir, err := OpenAnchor(a)
+	plan, err := PlanAnchors(pol, env, sids)
 	if err != nil {
 		return nil, err
 	}
-	for _, l := range res.Leaves {
-		if l.ReferenceTime > ir.Timestamp {
+	if _, err := computeGate(len(envelope), KernelRequestBytes(len(cfg.Bytes()), len(env.History)), env, pol, TxGasBudget); err != nil {
+		return nil, err
+	}
+	times := make([]uint64, len(env.Anchors))
+	for j := range env.Anchors {
+		a := &env.Anchors[j]
+		if err := b1.AuthenticateAnchor(a); err != nil {
+			return nil, ErrAnchorAuth
+		}
+		// The opening is trusted only now: B1 has authenticated the pair it hashes to.
+		ir, err := OpenAnchor(a)
+		if err != nil {
+			return nil, err
+		}
+		times[j] = ir.Timestamp
+	}
+	for i, l := range res.Leaves {
+		if l.ReferenceTime > times[plan.LeafAnchor[i]] {
 			return nil, ErrIRTime
 		}
 	}
 	for i, l := range res.Leaves {
+		a := &env.Anchors[plan.LeafAnchor[i]]
 		if err := b1.VerifyMember(a.ExpectedStateRoot, l.SID, l.Value, env.LeafProofs[i]); err != nil {
 			return nil, ErrLeafProof
 		}

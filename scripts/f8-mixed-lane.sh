@@ -25,6 +25,10 @@ f8_require_pin() {
   local rev
   rev=$(git -C "$F8_SRC" rev-parse HEAD)
   [ "$rev" = "$F8_PIN" ] || { echo "rugregator pin mismatch: $rev != $F8_PIN" >&2; return 1; }
+  # The aggregator partitions run proof_type=aggregator_rsmt_v1, so the aggregator must attach the envelope: the pinned binary reads
+  # AGGREGATOR_CONSISTENCY_PROOF_MODE (default off, a null proof). A binary that does not know that setting would send no proof and the root would
+  # reject every state-changing block after the first (the first is verified against no previous state root and skipped).
+  "$F8_BIN" --help 2>&1 | grep -q 'AGGREGATOR_CONSISTENCY_PROOF_MODE' || { echo "RUGREGATOR_BIN does not read AGGREGATOR_CONSISTENCY_PROOF_MODE" >&2; return 1; }
   echo "rugregator commit=$rev binary_sha256=$(shasum -a 256 "$F8_BIN" | awk '{print $1}')"
 }
 
@@ -69,7 +73,7 @@ f8_start_one() {
     AGGREGATOR_SIG_KEY="$sig" AGGREGATOR_DB_PATH="$home/db" \
     AGGREGATOR_SMT_BACKEND=disk AGGREGATOR_ROUND_DURATION_MS=1000 \
     AGGREGATOR_FAKE_STATE_TRANSITIONS=false AGGREGATOR_UC_TIMEOUT_MS=30000 \
-    AGGREGATOR_BATCH_LIMIT=100000 AGGREGATOR_CONSISTENCY_PROOFS=true RUST_LOG=debug \
+    AGGREGATOR_BATCH_LIMIT=100000 AGGREGATOR_CONSISTENCY_PROOF_MODE=rsmt RUST_LOG=debug \
     "$F8_BIN" >>"$F8_LOG_DIR/${name}.log" 2>&1 &
   F8_PIDS[$i]=$!
   echo "${F8_PIDS[$i]}" >"$home/pid"
@@ -256,6 +260,75 @@ for shard in before:
         raise SystemExit(f'{shard}: certified state root did not advance during EVM stop')
 print('all three aggregator shards certified new state roots and rounds while EVM was stopped; TR and root rounds advanced across pause/resume')
 PY
+}
+
+# f8_certify_new_roots <seed-base>: every aggregator shard certifies a NEW state root: one distinct signed request per shard (scripts/f8-request, seeds
+# base, base+1, base+2), then the certified state root and the aggregator's block height of each shard advance. The roots verify the rsmt proof of every
+# state-changing block after the first (the first has no previous state root and is skipped), so this is the check that the aggregators' proofs verify:
+# since the mark, the roots logged `Verifying ZK proof` for the aggregator partitions with a non-empty proof and no `ZK proof verification failed` at all.
+# Runs in any epoch (the Q4 lane runs it in the weighted one).
+# The generated StateIDs are NOT routed to a shard's prefix: the pinned rugregator does not enforce StateID-prefix membership (the same reason
+# F8_LOAD_REQUEST is accepted by every shard). A pin that does enforce it rejects these requests ("rejected the new-root request" below), not a proof.
+f8_certify_new_roots() {
+  local base=${1:?seed base} i name port req response r d before="$F8_LOG_DIR/new-roots-before.json" after="$F8_LOG_DIR/new-roots-after.json" mark=()
+  local -a submitted=(false false false)
+  for r in test-nodes/root*/debug.log; do mark+=("$r:$(wc -l <"$r" | tr -d ' ')"); done
+  f8_trace >/dev/null || return 1
+  python3 - "$F8_LOG_DIR/trace.jsonl" "$before" <<'PY' || return 1
+import json,sys
+rows=[json.loads(l) for l in open(sys.argv[1]) if l.strip()]
+latest={r['shard']:r for r in rows if r['shard'] in ('a-left','a-right','b-left')}
+if len(latest)!=3: raise SystemExit('missing trace rows for the three aggregator shards')
+json.dump(latest,open(sys.argv[2],'w'),sort_keys=True)
+PY
+  go run ./scripts/f8-request -check >/dev/null || return 1
+  for _ in $(seq 1 90); do
+    d=true
+    for i in 0 1 2; do
+      [ "${submitted[$i]}" = true ] && continue
+      port=${F8_HTTP_PORTS[$i]}
+      req=$(go run ./scripts/f8-request -seed "$((base + i))") || return 1
+      # no -f: a not-ready service may answer with a non-2xx status and an error body, which is retried below; a transport failure is not
+      response=$(curl -sS -H 'content-type: application/json' \
+        -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"certification_request\",\"params\":\"$req\"}" "http://127.0.0.1:$port/") || return 1
+      if echo "$response" | jq -e '.result.status == "SUCCESS"' >/dev/null; then
+        submitted[$i]=true; echo "submitted a new state-changing request to ${F8_NAMES[$i]} (seed $((base + i)))"
+      elif echo "$response" | jq -e '.error.message == "SERVICE_NOT_READY"' >/dev/null; then d=false
+      else echo "${F8_NAMES[$i]} rejected the new-root request: $response" >&2; return 1; fi
+    done
+    [ "$d" = true ] && break
+    sleep 1
+  done
+  for i in 0 1 2; do [ "${submitted[$i]}" = true ] || { echo "${F8_NAMES[$i]} accepted no new-root request" >&2; return 1; }; done
+  for _ in $(seq 1 120); do
+    f8_trace >/dev/null || return 1
+    if python3 - "$F8_LOG_DIR/trace.jsonl" "$before" "$after" <<'PY'
+import json,sys
+rows=[json.loads(l) for l in open(sys.argv[1]) if l.strip()]
+before=json.load(open(sys.argv[2]))
+latest={r['shard']:r for r in rows if r['shard'] in before}
+ok=len(latest)==3 and all(int(latest[n]['aggregatorBlockHeight'])>int(before[n]['aggregatorBlockHeight']) and latest[n]['stateRoot']!=before[n]['stateRoot'] for n in before)
+if ok: json.dump(latest,open(sys.argv[3],'w'),sort_keys=True)
+raise SystemExit(0 if ok else 1)
+PY
+    then break; fi
+    sleep 1
+  done
+  [ -s "$after" ] || { echo "the aggregator shards did not certify new state roots" >&2; return 1; }
+  # the roots' own account of the proofs since the mark
+  # one verified proof PER SHARD: the distinct (partition, shard id) pairs of the non-empty aggregator rsmt proofs the roots verified
+  local failed=0 entry file from shards=""
+  for entry in "${mark[@]}"; do
+    file=${entry%:*}; from=${entry##*:}
+    failed=$((failed + $(tail -n +"$((from + 1))" "$file" | grep -c 'ZK proof verification failed' || true)))
+    shards+=$(tail -n +"$((from + 1))" "$file" | grep 'Verifying ZK proof' | grep 'verifier_type=aggregator_rsmt_v1' | grep -v 'proof_size=0 ' \
+      | grep -o 'shard.partition=[0-9]* shard.id=[^ ]*' || true)$'\n'
+  done
+  [ "$failed" = 0 ] || { echo "the roots rejected $failed aggregator proof(s) (ZK proof verification failed)" >&2; return 1; }
+  shards=$(printf '%s\n' "$shards" | sed '/^$/d' | sort -u)
+  [ "$(printf '%s\n' "$shards" | sed '/^$/d' | wc -l | tr -d ' ')" -ge 3 ] || {
+    echo "the roots verified non-empty aggregator rsmt proofs for only these shards (need all three): ${shards:-none}" >&2; return 1; }
+  echo "all three aggregator shards certified new state roots; the roots verified a non-empty aggregator rsmt proof for each ($(printf '%s' "$shards" | tr '\n' ';')) and rejected none"
 }
 
 f8_reconnect_probe() {

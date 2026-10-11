@@ -3,6 +3,7 @@ package evmstate
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math/big"
@@ -89,11 +90,34 @@ type RPCProofSource struct {
 	BlockHash [32]byte
 }
 
-// eth_getProof answers keys and values as hex quantities ("0x0", odd lengths allowed) or as 32-byte words, depending on the client; both
-// parse as numbers.
+// rpcNumber is a hex number of at most 256 bits with leading zeros allowed: eth_getProof answers keys and values as hex quantities ("0x0",
+// odd lengths allowed) or as zero-padded 32-byte words, depending on the client (the one the lane runs answers the padded words for the 32-byte
+// keys it is asked for), and hexutil.Big refuses the padded form.
+type rpcNumber big.Int
+
+func (n *rpcNumber) UnmarshalJSON(b []byte) error {
+	var s string
+	if err := json.Unmarshal(b, &s); err != nil {
+		return errors.Join(ErrBuild, err)
+	}
+	if len(s) < 3 || s[:2] != "0x" || len(s) > 2+64 {
+		return fmt.Errorf("%w: %q is not a hex number of at most 256 bits", ErrBuild, s)
+	}
+	// big.Int.SetString(.., 16) would also take a sign: only hex digits are numbers here
+	for _, c := range s[2:] {
+		if !(c >= '0' && c <= '9' || c >= 'a' && c <= 'f' || c >= 'A' && c <= 'F') {
+			return fmt.Errorf("%w: %q is not hex", ErrBuild, s)
+		}
+	}
+	if _, ok := (*big.Int)(n).SetString(s[2:], 16); !ok {
+		return fmt.Errorf("%w: %q is not hex", ErrBuild, s)
+	}
+	return nil
+}
+
 type rpcSlot struct {
-	Key   hexutil.Big     `json:"key"`
-	Value hexutil.Big     `json:"value"`
+	Key   rpcNumber       `json:"key"`
+	Value rpcNumber       `json:"value"`
 	Proof []hexutil.Bytes `json:"proof"`
 }
 
@@ -123,7 +147,7 @@ func (s RPCProofSource) Proof(ctx context.Context, addr [20]byte, slots [][32]by
 	}
 	proofs := make([]SlotProof, len(slots))
 	for i, sp := range out.StorageProof {
-		key, value := sp.Key.ToInt(), sp.Value.ToInt()
+		key, value := (*big.Int)(&sp.Key), (*big.Int)(&sp.Value)
 		if value.BitLen() > 256 || key.Cmp(new(big.Int).SetBytes(slots[i][:])) != 0 {
 			return nil, nil, fmt.Errorf("%w: storage proof %d answers another slot", ErrBuild, i)
 		}
