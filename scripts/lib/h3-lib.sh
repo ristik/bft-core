@@ -320,7 +320,7 @@ h3_restore_validator() {
     --signing-authority-socket "test-nodes/auth$i/client.sock" --signing-authority-credential "test-nodes/auth$i/client.cred" \
     "${peers[@]}" --tip-uc "$evidence/tip.uc.cbor" --tip-tr "$evidence/tip.tr.cbor" --trust-body-id "$bodyID" \
     $([ "${Q3_B1:-0}" != 1 ] || echo --q3-lane --rpc-server-address "$(evm_validator_rpc_addr "$i")") \
-    --log-format text --log-level info >>"$evidence/debug.log" 2>&1 &
+    --log-format text --log-level "${H3_RESTORE_LOG_LEVEL:-info}" >>"$evidence/debug.log" 2>&1 &
   echo $! >"$evidence/pid"
 }
 

@@ -59,11 +59,15 @@ if [ "$DRY_RUN" = 1 ]; then
   echo "--- the weighted-epoch gate: Q4_WEIGHTED_CHECK=${Q4_WEIGHTED_CHECK:-q4_weighted_epoch_check} (a function of the Q3 flow library; its command, output and exit are kept in weighted-check.txt)"
   echo "--- self-tests"
   # every command the lane's steps call resolves (a helper whose library is not sourced is found here, not on the devnet); the control proves the check sees one
-  missing=$(q4_unresolved q4_run_lane q4_handoff_ab q4_handoff_ab_turnover q4_removed_validator_follows q4_first_successor_held q4_b_in_effect q4_run_placement_rows q4_teardown q4_joiner_restore q4_dev_retry)
+  missing=$(q4_unresolved q4_run_lane q4_handoff_ab q4_handoff_ab_turnover q4_removed_validator_follows q4_first_successor_held q4_b_in_effect q4_run_placement_rows q4_teardown q4_joiner_restore q4_joiner_follows q4_evm_joiner_participates q4_row_trace_check q4_dev_retry)
   q4_resolver_control() { Q4_X=1 q4_no_such_helper_for_the_selftest 1 || return 1; }
   if [ -n "$missing" ]; then echo "  unresolved commands in the lane's steps:"; echo "$missing" | sed 's/^/    /'; status=1
   elif [ "$(q4_unresolved q4_resolver_control)" != "q4_no_such_helper_for_the_selftest (called by q4_resolver_control)" ]; then echo "  the resolver did not report its control"; status=1
   else echo "  every command the lane's steps call resolves (control reported)"; fi
+  # sourcing the steps file starts nothing: the lane runs only under the runner's lock flag, inside its devnet script, and never when define-only
+  if q4_lane_may_run || (Q4_LANE_LOCKED=1 Q4_LIVE_LANE=1 Q4_LANE_DEFINE_ONLY=1; q4_lane_may_run) || (Q4_LANE_LOCKED=0 Q4_LIVE_LANE=1; q4_lane_may_run) || ! (Q4_LANE_LOCKED=1 Q4_LIVE_LANE=1; q4_lane_may_run); then
+    echo "  the lane's run guard is wrong"; status=1
+  else echo "  the steps file runs nothing when sourced without the runner's lock flag"; fi
   d=$(mktemp -d); trap 'rm -rf "$d"' EXIT
   q4_selftest_docs "$d"
   [ "$(ls "$d"/*.json | wc -l)" -eq 5 ] && [ "$(ls "$d"/shard/*.json | wc -l)" -eq 2 ] || { echo "self-test: the control documents were not written" >&2; status=1; }
