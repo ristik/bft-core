@@ -382,8 +382,17 @@ func TestProvidesAndDiscoverNodes(t *testing.T) {
 	// package the same way the Subscriptions leak did. Nothing here is asserting how
 	// *fast* discovery converges, only that it does, so waiting longer costs a slow
 	// machine some seconds and costs a fast one nothing.
+	//
+	// Raising the budget was still not enough (bft-core#519: peer2 and peer3 knew each other's address after 32 s and had not
+	// dialled). What this test is about is Advertise and Discover over a populated routing table, not how the DHT's gossip comes to
+	// dial a peer it has heard of. So the peers that have not met are connected explicitly: a DHT peer is added to the routing table
+	// when its connection is identified, which is an event, not a wait on gossip. The wait below then only covers that event.
+	for _, pair := range [][2]*Peer{{peer3, peer1}, {peer3, peer2}, {peer2, peer1}} {
+		require.NoError(t, pair[0].host.Connect(ctx, peer.AddrInfo{ID: pair[1].ID(), Addrs: pair[1].MultiAddresses()}))
+	}
 	requireRoutingTable(t, peer2, "peer2", 3, 8*test.WaitDuration, all)
 	requireRoutingTable(t, peer1, "peer1", 3, 8*test.WaitDuration, all)
+	requireRoutingTable(t, peer3, "peer3", 3, 8*test.WaitDuration, all)
 	testTopic := "ab/test/test_topic"
 	require.NoError(t, peer2.Advertise(ctx, testTopic))
 	require.NoError(t, peer1.Advertise(ctx, testTopic))

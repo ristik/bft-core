@@ -30,6 +30,8 @@ type TrustBases interface {
 type Orchestration interface {
 	ShardConfig(partition types.PartitionID, shard types.ShardID, rootRound uint64) (*types.PartitionDescriptionRecord, error)
 	AcknowledgedIdentities(partition types.PartitionID, shard types.ShardID, epoch uint64) ([]evmassign.Identity, [32]byte, error)
+	// CustodyAssignmentID is the key custody holds that epoch's assignment under (a primary result's is derived from its result id).
+	CustodyAssignmentID(partition types.PartitionID, shard types.ShardID, epoch uint64) ([32]byte, error)
 }
 
 // History implements handoffdelivery.ClosureHistory over the root's stores for the EVM shard.
@@ -64,7 +66,11 @@ func (h History) Assignment(orderRound uint64) ([]byte, []evmassign.Identity, [3
 	if err != nil {
 		return nil, nil, none, errors.Join(ErrHistory, err)
 	}
-	ids, assignment, err := h.Orchestration.AcknowledgedIdentities(h.Partition, h.Shard, conf.Epoch)
+	ids, _, err := h.Orchestration.AcknowledgedIdentities(h.Partition, h.Shard, conf.Epoch)
+	if err != nil {
+		return nil, nil, none, errors.Join(ErrHistory, err)
+	}
+	assignment, err := h.Orchestration.CustodyAssignmentID(h.Partition, h.Shard, conf.Epoch)
 	if err != nil {
 		return nil, nil, none, errors.Join(ErrHistory, err)
 	}
