@@ -83,11 +83,17 @@ request that reaches a root and is rejected is answered directly with the
 root's last certificate, so that case is not silent.) The node then receives nothing until the long
 stop fires. So:
 
-- The miss is **bounded by `InactivityTimeout`**, per lapse. It is not
-  permanent: the handshake is always answered with the root's latest
-  certificate, and the node then obtains the certified blocks it did not see
-  from its peers before it takes part again (its log says `certified execution
-  remains unready ... awaits peer catch-up` meanwhile).
+- The miss is **bounded by `InactivityTimeout`**, per lapse, and is not
+  permanent. Two bounds are meant, and they differ:
+  - `InactivityTimeout` plus one heartbeat bounds the time until the node next
+    **holds the latest certificate**: the handshake is always answered with
+    the root's latest certificate, and a node whose handshake or its answer is
+    lost repeats it on the next heartbeat.
+  - Being **back in the rounds** needs more: the roots do not re-send the
+    certificates in between, so the node must obtain the certified blocks it
+    skipped from a peer that serves them. That has no time bound of its own.
+    Until it happens the node stays unready, and its `certified execution
+    remains unready ... awaits peer catch-up` log line and metric show it.
 - Within that window the node is not in the rounds whose certificates it did
   not receive. It does not open them, does not verify their blocks, and logs
   nothing for them.
@@ -105,7 +111,9 @@ requests reach the roots and the first mechanism holds.
 
 A deployment whose `T2` is short compared with `InactivityTimeout` should know
 the consequence: a validator whose requests are being lost can sit out several
-repeat-certificate rounds before it re-subscribes. Lowering
+repeat-certificate rounds before it re-subscribes. While it is out, its
+weight is missing from the shard's request quorum, so several validators
+lapsing together can stall the shard for up to the timeout. Lowering
 `--inactivity-timeout` shortens that at the cost of more handshakes on a quiet
 feed.
 
