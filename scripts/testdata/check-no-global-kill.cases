@@ -1,0 +1,26 @@
+# Cases for scripts/check-no-global-kill.sh --selftest: <bad|ok>|<name>|<the script line, verbatim>
+bad|pkill by pattern|pkill -f 'ubft shard-node run' 2>/dev/null
+bad|pkill after another command|./stop-evm.sh -a || true; pkill -f 'reth node'
+bad|killall|  killall ubft
+bad|fuser -k|fuser -k 26662/tcp
+bad|pkill handed to bash -c|bash -c "pkill -f 'ubft root-node'"
+bad|pkill handed to ssh|ssh host 'pkill -f ubft'
+bad|ps, grep, kill through xargs|ps -eaf | grep 'build/ubft' | grep -v grep | awk '{print $2}' | xargs kill
+bad|kill of a ps substitution|kill $(ps -eaf | grep build/ubft | awk '{print $2}')
+bad|kill of a pgrep substitution|kill -9 $(pgrep -f 'ubft root-node')
+bad|kill of a backquoted pgrep|kill `pgrep -f ubft`
+bad|pgrep into xargs kill|pgrep -f 'ubft root-node' | xargs kill
+bad|kill of a pidof substitution|kill $(pidof ubft)
+bad|lsof by port into xargs kill|lsof -ti :26662 | xargs kill
+bad|a ps listing filtered by name, the kill on a later line (stop.sh before the fix)|  PID=$(ps -eaf | grep "$program"  | grep -v grep | awk '{print $2}')
+bad|a marker without a reason|pkill -f 'reth node'   # global-kill-ok: 
+bad|a workflow run line|          pkill -f 'reth node' || true
+ok|a comment that names pkill|# never pkill: see helper.sh
+ok|an echo that prints the word|echo "do not pkill these" >&2
+ok|a grep for the word|declare -f q3_teardown | grep -E 'pkill|killall'
+ok|kill of a recorded pid|kill "$(cat test-nodes/root1/pid)"
+ok|pgrep without kill|stale=$(pgrep -f 'ubft shard-node run' 2>/dev/null || true)
+ok|kill of an owned pid|for p in $(owned_pids 'ubft root-node'); do kill "$p"; done
+ok|ps of one pid filtered|ps -o command= -p "$pid" 2>/dev/null | grep -qE -- "$pattern" || return 1
+ok|lsof for a working directory, no kill|lsof -a -p "$1" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | head -1
+ok|a marked line|pkill -f 'reth node'   # global-kill-ok: single-tenant CI runner
