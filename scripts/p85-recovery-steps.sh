@@ -442,4 +442,10 @@ p85_run_lane() {
   echo "P85 recovery lane: all steps PASSED"
   q3_teardown
 }
-[ "${P85_LANE_DEFINE_ONLY:-0}" = 1 ] || p85_run_lane
+# Sourcing this file only defines the steps. The lane runs when the runner (scripts/p85-lane.sh, under the devnet lock) asks for it, and only while
+# the lock is that runner's: a shell that sources the file to read or test the functions must not start, restart or tear down any node.
+p85_lane_may_run() {
+  [ "${P85_LANE_LOCKED:-0}" = 1 ] && [ "${P85_LANE_DEFINE_ONLY:-0}" != 1 ] || return 1
+  [ "$(cat "${DEVNET_LOCK_DIR:-$PWD/../.devnet-lock}/owner" 2>/dev/null)" = "p85-recovery" ]
+}
+if p85_lane_may_run; then p85_run_lane; fi
