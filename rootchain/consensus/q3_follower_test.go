@@ -1,8 +1,10 @@
 package consensus
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
+	"log/slog"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -97,4 +99,30 @@ func TestAJoinerRootFollowsStagesSignsNothingAndIsPromotedAfterInstall(t *testin
 		require.True(t, st.Follower)
 		refusesToSign(t, removed, 2)
 	})
+}
+
+// A follower's local timer fires every round time and it signs nothing: that is its state, not a failure, so it is no WARN (#550: a joiner root
+// logged "failed to sign timeout" every 10 s for the whole election).
+func TestAFollowerRootsLocalTimeoutIsNotAWarning(t *testing.T) {
+	f := q3fixture.New(t, q3fixture.Options{})
+	joiner := newQ3Replica(t, f, f.NewNodes[3])
+	joiner.mustOpen(true)
+	t.Cleanup(joiner.close)
+	require.NoError(t, joiner.rt.Recover(context.Background()))
+	var buf bytes.Buffer
+	joiner.manager.log = slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	joiner.manager.onLocalTimeout(context.Background())
+	out := buf.String()
+	require.Contains(t, out, "follower: no timeout vote")
+	require.NotContains(t, out, "level=WARN")
+	require.Nil(t, joiner.manager.pacemaker.GetTimeoutVote(), "nothing was signed or recorded")
+	// a member's refusal for another reason stays a warning: the follower case is the sentinel only
+	member := newQ3Replica(t, f, f.NewNodes[0])
+	member.mustOpen(true)
+	t.Cleanup(member.close)
+	require.NoError(t, member.rt.Recover(context.Background()))
+	buf.Reset()
+	member.manager.log = slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	member.manager.onLocalTimeout(context.Background())
+	require.NotContains(t, buf.String(), "follower: no timeout vote")
 }

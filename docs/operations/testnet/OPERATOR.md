@@ -22,10 +22,11 @@ reboot on a network you intend to keep. Design detail: [deploy/testnet/README.md
   9090 (Prometheus) bind host loopback only; never publish them or any validator port. Docker subnets
   172.30.88.0/24 and 172.30.89.0/24 must be free. DNS names, TLS certificates and hCaptcha keys come from the owner.
 
-**Keep root RPC private.** The root RPC address has no operator authentication, including the
-`/api/v1/handoff/*` endpoints and `PUT /api/v1/trustbases`. Bind it to loopback or an isolated operator network;
-never publish it or proxy it through the public JSON-RPC gateway. Authentication is tracked in
-[#533](https://github.com/ristik/bft-core/issues/533).
+**Keep root RPC private.** The root (and shard node) RPC address has no operator authentication of its own: `PUT /api/v1/trustbases` is
+unguarded and the `/api/v1/handoff/*` and `/api/v1/q3/*` endpoints only require a loopback TCP peer, which a reverse proxy on the same host defeats.
+Bind it to loopback or an isolated operator network (the containers' internal Docker network, port not published); never publish it or
+proxy it through the public JSON-RPC gateway. The start-up `WARN` "RPC address is not loopback" is expected inside the testnet containers.
+What each endpoint can do if reached: [root-rpc-exposure.md](../root-rpc-exposure.md) ([#533](https://github.com/ristik/bft-core/issues/533)).
 
 ## 3. Build images from exact revisions
 `/srv/src/pkg` is this repository at the guide commit you were given (`main` lacks the package); the other three

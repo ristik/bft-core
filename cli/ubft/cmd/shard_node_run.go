@@ -1402,6 +1402,9 @@ func serveShardNodeRPC(ctx context.Context, flags *shardNodeRunFlags, node *shar
 	if flags.RPCServerAddress == "" {
 		return nil // do not kill the errgroup
 	}
+	if len(extra) != 0 { // the lane endpoints (Q3 staging) are operator endpoints without authentication
+		warnIfRPCExposed(flags.observe.Logger(), "shard node", flags.RPCServerAddress)
+	}
 
 	mux := http.NewServeMux()
 	if pr := flags.observe.PrometheusRegisterer(); pr != nil {
