@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"path/filepath"
+	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -47,12 +49,38 @@ func TestFrontierProxyKeepsTheHandoffStoreCapabilities(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, []byte{7, 7, 7}, bundle)
 
+	// The canonical checkpoint: without it the block tree captures none and serves the current root, which stops being the committing
+	// block at the next commit (P85 run 22: no terminal bundle of epoch 1 after the install restart).
+	checkpoints, ok := proxy.(interface {
+		StoreHandoffCheckpoint(uint64, []byte) error
+		HandoffCheckpoint(uint64) ([]byte, error)
+	})
+	require.True(t, ok)
+	require.NoError(t, checkpoints.StoreHandoffCheckpoint(2, []byte{5, 5}))
+	checkpoint, err := checkpoints.HandoffCheckpoint(2)
+	require.NoError(t, err)
+	require.Equal(t, []byte{5, 5}, checkpoint)
+
 	_, ok = proxy.(interface {
 		InstallEpochAnchorRoot(*storage.ExecutedBlock, *drctypes.EpochAnchor) error
 	})
 	require.True(t, ok)
 	_, ok = proxy.(epochAnchorSafetyStore)
 	require.True(t, ok)
+}
+
+// Every handoff retention method of the real store is forwarded by the proxy: a method added to the store and not to the proxy is
+// invisible to the asserting callers, which then behave as on a store without it.
+func TestFrontierProxyForwardsEveryHandoffMethodOfTheStore(t *testing.T) {
+	real, proxy := reflect.TypeOf(storage.BoltDB{}), reflect.TypeOf(&frontierPersistentStore{})
+	for i := 0; i < real.NumMethod(); i++ {
+		name := real.Method(i).Name
+		if !strings.Contains(name, "Handoff") {
+			continue
+		}
+		_, ok := proxy.MethodByName(name)
+		require.Truef(t, ok, "frontierPersistentStore does not forward %s", name)
+	}
 }
 
 // A store without the capability behaves as the asserting callers behave when their assertion fails.

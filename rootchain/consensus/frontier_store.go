@@ -214,6 +214,22 @@ func (s *frontierPersistentStore) HandoffCandidate(id []byte) ([]byte, error) {
 	return nil, nil // callers treat a store with no candidates as having none
 }
 
+// StoreHandoffCheckpoint and HandoffCheckpoint forward the canonical handoff checkpoint. Without them the block tree sees no checkpoint
+// retention, captures nothing, and serves the current root, which is the committing block only until the next commit.
+func (s *frontierPersistentStore) StoreHandoffCheckpoint(epoch uint64, data []byte) error {
+	if store, ok := s.PersistentStore.(interface{ StoreHandoffCheckpoint(uint64, []byte) error }); ok {
+		return store.StoreHandoffCheckpoint(epoch, data)
+	}
+	return storage.ErrHandoffRecord
+}
+
+func (s *frontierPersistentStore) HandoffCheckpoint(epoch uint64) ([]byte, error) {
+	if store, ok := s.PersistentStore.(interface{ HandoffCheckpoint(uint64) ([]byte, error) }); ok {
+		return store.HandoffCheckpoint(epoch)
+	}
+	return nil, storage.ErrHandoffRecord
+}
+
 func (s *frontierPersistentStore) StoreHandoffBundle(epoch uint64, data []byte) error {
 	if store, ok := s.PersistentStore.(handoffBundleArchive); ok {
 		return store.StoreHandoffBundle(epoch, data)
