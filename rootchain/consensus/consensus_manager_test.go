@@ -69,6 +69,11 @@ func readResult(ch <-chan *certification.CertificationResponse, timeout time.Dur
 }
 
 func initConsensusManager(t *testing.T, rootNet RootNet, opts ...Option) (*ConsensusManager, *testutils.TestNode, []*testutils.TestNode) {
+	return initConsensusManagerOver(t, rootNet, nil, opts...)
+}
+
+// initConsensusManagerOver is initConsensusManager with the root's database wrapped by store (nil: the database itself).
+func initConsensusManagerOver(t *testing.T, rootNet RootNet, store func(storage.BoltDB) PersistentStore, opts ...Option) (*ConsensusManager, *testutils.TestNode, []*testutils.TestNode) {
 	rootNode := testutils.NewTestNode(t)
 	shardNodes, shardNodeInfos := testutils.CreateTestNodes(t, 3)
 	trustBase := trustbase.NewTrustBaseFromSigners(t, map[string]abcrypto.Signer{
@@ -94,6 +99,10 @@ func initConsensusManager(t *testing.T, rootNet RootNet, opts ...Option) (*Conse
 		rootNode.PeerConf.ID.String(): rootNode.Signer,
 	}
 	rootDB, orchestration := createStorage(t, shardConf, rootSigners, observe)
+	rcDB := rootDB
+	if store != nil {
+		rcDB = store(rootDB.(storage.BoltDB))
+	}
 
 	trustBaseStore, err := tbstore.NewTrustBaseStore(memorydb.New(), observe.Logger())
 	require.NoError(t, err)
@@ -105,7 +114,7 @@ func initConsensusManager(t *testing.T, rootNet RootNet, opts ...Option) (*Conse
 		orchestration,
 		rootNet,
 		rootNode.Signer,
-		rootDB,
+		rcDB,
 		observe,
 		opts...,
 	)
