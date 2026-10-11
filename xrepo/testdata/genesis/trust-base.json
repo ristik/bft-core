@@ -1,0 +1,33 @@
+{
+  "version": 0,
+  "networkId": 5,
+  "epoch": 1,
+  "epochStartRound": 0,
+  "rootNodes": [
+    {
+      "nodeId": "16Uiu2HAmLk2t8UoSvT3mARiPed5wCPuaKRUbRHSKdFHxiT11mmTH",
+      "sigKey": "0x029d4ab52d4d9c734e57f462b552db0d9bea7e0a32cae62ce5891aa0d663c37dbf",
+      "stake": 1
+    },
+    {
+      "nodeId": "16Uiu2HAkv7SiHUh45mPuJBjauGPvCzqvSMbSLJdHxS5n3WNHiFok",
+      "sigKey": "0x02f7d5c92d343c45a58c45163d5e8e7e5b57937dba77b049f0b8c32ca974eb3578",
+      "stake": 1
+    },
+    {
+      "nodeId": "16Uiu2HAmHmQeQBS5nH3biJ4gTudg6ZoxmBUDL3eoiFa9qWLEd7td",
+      "sigKey": "0x028163ff94f35a6ea9a969e2f2dc0e6f09ae55afa67f2041dc3b26fcbd66a7fbed",
+      "stake": 1
+    },
+    {
+      "nodeId": "16Uiu2HAmJn2zbSiZN6HaPwDGbrEf63QsJboeX12JnYwxNVrxsv6G",
+      "sigKey": "0x03e2a6de4625e9008476d5009430b910b3abdb0f2dd8bfa9c0055164035a1ffa40",
+      "stake": 1
+    }
+  ],
+  "quorumThreshold": 3,
+  "stateHash": "",
+  "changeRecordHash": "",
+  "previousEntryHash": "",
+  "signatures": null
+}

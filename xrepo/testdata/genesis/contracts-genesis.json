@@ -1,0 +1,46 @@
+{
+  "assignmentId": "0x826f2883c683897d028c2ef3e8d248de765628aac0621fde9ba7d82d038b927b",
+  "bondUnit": "100000000000000000000",
+  "identities": [
+    {
+      "owner": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1",
+      "withdrawal": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb1",
+      "rootKey": "0x029d4ab52d4d9c734e57f462b552db0d9bea7e0a32cae62ce5891aa0d663c37dbf",
+      "evmKey": "0x03828a9bfc111fc57cc1e6eb9a80ded4eed10fb8d797d93aa22cd84e95ffc77f02",
+      "rootNodeId": "0x8b6c6d1ff4fbca44a29ee84c845aa840aac94cbf224b8d5441ec30b01ae504d7",
+      "evmNodeId": "0xdb4130b970a458ddd6ba2a52e9b09eb806d771a728020ac8757a4f33a63a04b3",
+      "payee": "0xccccccccccccccccccccccccccccccccccccccc1",
+      "bond": "100000000000000000000"
+    },
+    {
+      "owner": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa2",
+      "withdrawal": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb2",
+      "rootKey": "0x02f7d5c92d343c45a58c45163d5e8e7e5b57937dba77b049f0b8c32ca974eb3578",
+      "evmKey": "0x021b013e9607ea8cf95de3e50bae76c181367d39665323e59e6dfce4fcbb857ac7",
+      "rootNodeId": "0x0496ec05724561c5facc12b58dfee9a84129812faa1c4e713c811fb287e32b3b",
+      "evmNodeId": "0x596c924d7207c71fa05f5a9182a7ec96abb19fce45230a93ebec3cdd1cca965d",
+      "payee": "0xccccccccccccccccccccccccccccccccccccccc2",
+      "bond": "100000000000000000000"
+    },
+    {
+      "owner": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa3",
+      "withdrawal": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb3",
+      "rootKey": "0x028163ff94f35a6ea9a969e2f2dc0e6f09ae55afa67f2041dc3b26fcbd66a7fbed",
+      "evmKey": "0x022d09e683e9a426076dfe5e843d3e835ed4a37c82e70f12e5ff6f63e4b48dccd7",
+      "rootNodeId": "0xe61714dbe41ff5ace32b0adc85dcc4c9c590e23b5cdf8e638aa8cebc29f99e9a",
+      "evmNodeId": "0x18c5ad99bc89fd84046f6c172588321f57e39e4ea8761b63ad45e0454924c706",
+      "payee": "0xccccccccccccccccccccccccccccccccccccccc3",
+      "bond": "100000000000000000000"
+    },
+    {
+      "owner": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa4",
+      "withdrawal": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb4",
+      "rootKey": "0x03e2a6de4625e9008476d5009430b910b3abdb0f2dd8bfa9c0055164035a1ffa40",
+      "evmKey": "0x028f4d03721ae348027761259f0dd54fab32ac854b7663835a21c1798cd5af6651",
+      "rootNodeId": "0xc8bebb1bc09dd74bb76b4e12b4fee7db9e1c5ec858d212274d5efc7cdbcb514d",
+      "evmNodeId": "0x45b21bcd6f0a95e83637d750130f47114b8fb273382d4c12a4d0bac95a5fec37",
+      "payee": "0xccccccccccccccccccccccccccccccccccccccc4",
+      "bond": "100000000000000000000"
+    }
+  ]
+}

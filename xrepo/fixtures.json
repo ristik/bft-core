@@ -1,0 +1,33 @@
+{
+  "format": "UNICITY_XREPO_FIXTURES/v1",
+  "contracts": {
+    "repo": "https://github.com/ristik/unicity-pos-contracts",
+    "commit": "18290d1a9f1f2d365709bc47a8b25f5e67f7d91a"
+  },
+  "fixtures": [
+    {"producer": "contracts", "contracts": "test/p85/fixtures/publication.json", "bftCore": ["evmassign/testdata/publication.json", "rootchain/evmstate/testdata/publication.json"],
+     "pair": "election result, primary assignment id, identity records, exposure/key digests, possession proofs, publication slots -> evmassign.VerifyPrimary, evmstate, posrelayer, xrepo"},
+    {"producer": "contracts", "contracts": "test/p85/fixtures/custody-digests.json", "bftCore": ["evmassign/testdata/custody-digests.json"],
+     "pair": "custody's exposure ids, exposure digests, key digests and exposure chains (genesis, primary, quantized, recovery) -> evmassign digests"},
+    {"producer": "contracts", "contracts": "test/p85/fixtures/quant-vectors.json", "bftCore": ["evmassign/testdata/quant-vectors.json"],
+     "pair": "weight quantization -> evmassign.Quantize"},
+    {"producer": "contracts", "contracts": "test/p85/fixtures/state-slots.json", "bftCore": ["rootchain/evmstate/testdata/state-slots.json"],
+     "pair": "custody storage slots of the getters the root proves -> evmstate layout"},
+    {"producer": "contracts", "contracts": "test/p85/fixtures/registry-state-slots.json", "bftCore": ["rootchain/evmstate/testdata/registry-state-slots.json"],
+     "pair": "registry storage slots -> evmstate layout"},
+    {"producer": "contracts", "contracts": "test/p85/fixtures/xrepo-custody-view.json", "bftCore": ["xrepo/testdata/custody-view.json"],
+     "pair": "custody's state after applying the root's records (ids, digests, states, H rounds, closure anchors, offsets, session outcome) -> xrepo"},
+    {"producer": "bft-core", "contracts": "test/p85/fixtures/xrepo-go-records.json", "bftCore": ["xrepo/testdata/go-records.json"],
+     "pair": "the root's Closure, RecoveryAck, Ack and SessionClosed records with real ids and digests -> custody.applyRootRecords, verbatim (XRepoRecords.t.sol)"},
+    {"producer": "bft-core", "contracts": "test/p85/fixtures/xrepo-genesis-input.json", "bftCore": ["xrepo/testdata/genesis/contracts-genesis.json"],
+     "pair": "pos-relayer genesis --out-contracts (genesis assignment id of the FULL configuration, identities) -> script/P85Genesis.s.sol (XRepoGenesis.t.sol)"},
+    {"producer": "bft-core", "contracts": "test/p85/fixtures/root-records-vectors.json", "bftCore": ["rootrecords/testdata/records-vectors.json"],
+     "pair": "record envelope, ids, payload shapes, closure repeat/conflict cases -> AuthenticatedRecords.t.sol (digest words replaced there)"},
+    {"producer": "bft-core", "contracts": "test/p85/fixtures/root-records-import-vectors.json", "bftCore": ["rootrecords/testdata/import-vectors.json"],
+     "pair": "registry import calls, companions, rootRecordsHash -> RootRecordsImport.t.sol"},
+    {"producer": "bft-core", "contracts": "test/p85/fixtures/continuity-vectors.json", "bftCore": ["continuity/testdata/continuity-vectors.json"],
+     "pair": "continuity checks -> Continuity.sol port"},
+    {"producer": "bft-core", "contracts": "test/p85/fixtures/selection-vectors.json", "bftCore": ["continuity/testdata/selection-vectors.json"],
+     "pair": "committee selection -> Selection.sol port"}
+  ]
+}
