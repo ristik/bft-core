@@ -32,6 +32,7 @@ func finishJoinerKey(signing *certificationSigning) error {
 	if signing == nil || signing.deferred == nil {
 		return nil
 	}
+	signing.replayed = true
 	if signing.joinerKey == nil {
 		signing.stagingOnly = true
 		return nil
@@ -47,6 +48,16 @@ func bindInstalledJoinerKey(signing *certificationSigning) error {
 		return nil
 	}
 	return finishJoinerKey(signing)
+}
+
+// bindLiveJoinerKey is bindInstalledJoinerKey for an installer that also replays the persisted steps through the same call (the Q3
+// installer): during the replay it binds nothing (the latest step's key is bound once, by finishJoinerKey); after it, a live install
+// whose verified step names this node makes the staging-only joiner a signer at once, not at its next restart.
+func bindLiveJoinerKey(signing *certificationSigning) error {
+	if signing == nil || !signing.replayed {
+		return nil
+	}
+	return bindInstalledJoinerKey(signing)
 }
 
 // ErrJoinerConf is an activated assignment configuration that is not the one installed for its shard epoch.
