@@ -50,7 +50,12 @@ h3_spare_authority() { # id shardEpoch rootEpoch trustFile
 # The activated configuration of the EVM shard at a shard epoch, from the derived index of the first root (after the handoff activated).
 h3_pdr_file() { # shard epoch -> path
   local out="$H3_DIR/pdr-$1.json"
-  go run ./scripts/h3-pdr --orchestration "test-nodes/root$(h3_first_root)/orchestration.db" --epoch "$1" >"$out" || return 1
+  if [ "${Q3_B1:-0}" = 1 ]; then
+    # the root serves it to a local operator (the Q3 runtime: q3/shard-conf), as an operator of a container package must obtain it: no store file is read
+    build/ubft q3 shard-conf --root-rpc "$(h3_rpc_url "$(h3_first_root)")" --epoch "$1" --out "$out" || return 1
+  else
+    go run ./scripts/h3-pdr --orchestration "test-nodes/root$(h3_first_root)/orchestration.db" --epoch "$1" >"$out" || return 1   # roots without the Q3 runtime serve no such endpoint
+  fi
   echo "$out"
 }
 
