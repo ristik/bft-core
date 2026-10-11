@@ -210,7 +210,7 @@ stale=$(owned_pids 'ubft shard-node (run|restore)')
 if [ -n "$stale" ]; then
   echo "refusing to start: this checkout's shard-node processes are already running (pids: $(echo $stale | tr '\n' ' '))" >&2
   echo "their logs would mix with this run's evidence. stop them first:" >&2
-  echo "  pkill -f 'ubft shard-node run'" >&2
+  echo "  ./stop-evm.sh -a" >&2
   exit 1
 fi
 
