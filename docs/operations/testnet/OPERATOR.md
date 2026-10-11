@@ -90,6 +90,54 @@ and a certified shard height at or above the receipt's `blockNumber` (a receipt 
 The gateway allows basic `eth_*` reads, call/estimate and `eth_sendRawTransaction` only (no `eth_feeHistory`, no
 batches, 16 KiB bodies, 10 req/s per IP). Open nginx routing last.
 
+## 5a. Proof-of-stake profile (groundwork for the isolated PoS rehearsal, [#437](https://github.com/ristik/bft-core/issues/437))
+The package can generate the PoS genesis instead of the PoA one: the contracts' genesis state (custody, election, evidence, selection, policy, reader) is allocated into
+the EVM genesis, the b1-profile pins the records hook and the election to them, and the roots run on the P85 flags (`--pos-deployment`, `--pos-genesis-identities`,
+`--pos-evm-rpc`; they replace `--genesis-identities`). It is the P85 lane's genesis (`scripts/lib/p85-lib.sh`), with the lane's rule: **the custody names the genesis
+assignment id of the FULL shard configuration**, never of the base one. A custody deployed with the base configuration's id halts the shard at the first
+`CloseLiability` (the roots close the full configuration's id; P85 runs 25 and 26). The generator therefore finalizes once without the PoS accounts, takes the id from
+that full configuration, builds the contracts genesis from it, merges the accounts, finalizes for real and runs `ubft pos-relayer verify-genesis` on the result.
+
+Extra prerequisites: a clean checkout of `unicity-pos-contracts` at `contracts` in [pins.json](../../../deploy/testnet/pins.json) with its submodules, and `forge` v1.8.1 on
+PATH (the contracts' own CI pin: the registry's bytecode and code hash are protocol surface). Build `ubft` from the pinned `bft` revision, which must contain
+`pos-relayer verify-genesis`.
+```sh
+git clone https://github.com/ristik/unicity-pos-contracts.git /srv/src/contracts-pinned && cd /srv/src/contracts-pinned
+git checkout --detach "$(jq -r .contracts /srv/src/pkg/deploy/testnet/pins.json)" && git submodule update --init --recursive
+cd /srv/src/pkg; umask 077; G=/srv/testnet/tn-pos-$(date -u +%Y%m%d)
+sudo env PATH="$PATH:$HOME/.foundry/bin" python3 deploy/testnet/generate.py --out $G --validators 4 --chain-id 31337 \
+  --ubft /srv/src/bft-pinned/build/ubft --b1genesis /srv/src/bft-pinned/build/b1genesis --captcha-sitekey SITE_KEY --captcha-secret-file /srv/secrets/hcaptcha-secret \
+  --pos --pos-contracts /srv/src/contracts-pinned
+```
+The generator refuses a contracts checkout that is not clean at the pin. It prints `pos: the genesis assignment of the base configuration (…) is not the full configuration's (…)`
+when it had to prepare the contracts genesis again (it always does: the base id is never the deployed one). Success adds to the manifest a `pos` block (`genesis_assignment`,
+`first_pass_assignment`, the custody and election addresses, the cadence) and to `network/`: `pos-deployment.json`, `pos-genesis-identities.json`, `pos-plan.json`,
+`pos-contracts-genesis.json`, `pos-genesis-assignment.txt`. **Cadence:** the election is due 400 ordinary root rounds and 300 UC seconds after the last acknowledged rotation
+(`--pos-cadence-rounds`, `--pos-cadence-seconds`): the P85 lane's rehearsal values, not a testnet decision; set the rehearsal's own before generating. The weight-distance
+bound is the package's churn budget (1/2), committed in the shard configuration and in the contracts.
+
+**Verify the ids once more on the shipped files, before `docker compose up`** (the generator did it; this is the independent check, and it needs no node):
+```sh
+N=$G/network; /srv/src/bft-pinned/build/ubft pos-relayer verify-genesis --plan $N/pos-plan.json --trust-base $N/trust-base.json \
+  --shard-conf $N/full-shard-conf.json --contracts-genesis $N/pos-contracts-genesis.json
+# genesis assignment 0x… is the full shard configuration's   (it must equal $(cat $N/pos-genesis-assignment.txt) and manifest.pos.genesis_assignment)
+```
+A different id fails with both ids printed; do not start such a package. Start as in section 4. **PoS smoke** (after `docker compose up -d`; the chain RPC is the gateway's, `cast` from
+`foundry`; `REG=0xff00000000000000000000000000000000000002`, `CUSTODY` and `ELECTION` are in `network/pos-deployment.json`):
+```sh
+R=http://127.0.0.1:8545; D=$G/network/pos-deployment.json; CUSTODY=$(jq -r .custody $D); ELECTION=$(jq -r .election $D)
+for a in $REG $CUSTODY $ELECTION; do cast code $a --rpc-url $R | wc -c; done                       # all three non-trivial (code is in the genesis)
+cast call $REG 'progress()(uint64)' --rpc-url $R; sleep 60; cast call $REG 'progress()(uint64)' --rpc-url $R   # the clock ticks: must rise
+cast call $ELECTION 'thresholds()(uint256,uint256)' --rpc-url $R                                   # (cadence rounds, cadence seconds) past the anchors
+cast call $REG 'recordCount()(uint64)' --rpc-url $R; cast call $CUSTODY 'recordCursor()(uint64)' --rpc-url $R   # equal: custody has applied every root record
+docker compose logs root1 | grep -ci 'revert\|AssignmentNotActive'                                    # 0
+```
+Expect `progress` to rise while shard heights rise (section 5), `recordCursor == recordCount` after each epoch boundary, and no `AssignmentNotActive` anywhere. The first closure-bearing
+epoch boundary needs a handoff (the P85 lane's recovery steps, `scripts/p85-recovery-steps.sh`); this package's CI cannot run it, so the rehearsal does. The CI probe
+(`validate-pos.py`, in `testnet-package`) proves what needs no EVM node: the ids agree and a contracts genesis of the base configuration's id is refused naming both, the EVM
+genesis carries the contracts' code at the deployed addresses, the deployment file pins the profile's registry code hash, and the four roots start from the generated entrypoints on
+the P85 flags and certify rounds. It does **not** start the EVM shard, so it says nothing about the first blocks or the election clock: that is this smoke.
+
 ## 6. Routine operations
 In a new shell, first: `G=/srv/testnet/tn-…; cd $G && SERVICES=$(docker compose config --services | sed '/^authority/d')`.
 

@@ -12,6 +12,8 @@ import subprocess
 import tempfile
 import time
 
+import pos
+
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[1]
 PINS = json.loads((HERE / 'pins.json').read_text())
@@ -47,7 +49,7 @@ def evm_partition_params(chain_id):
 def write(path, obj):
     path.write_text(json.dumps(obj, indent=2) + '\n')
 
-def topology(out, n, ids, images, captcha, ureth_flags=(), max_gas=30000000):
+def topology(out, n, ids, images, captcha, ureth_flags=(), max_gas=30000000, with_pos=False):
     """JSON is a YAML subset, accepted directly by Docker Compose."""
     services = {}
     def service(name, image, command, mounts=(), memory='256m', cpu=0.5, networks=None, **extra):
@@ -65,7 +67,7 @@ def topology(out, n, ids, images, captcha, ureth_flags=(), max_gas=30000000):
         common = ['--trust-base', '/network/trust-base.json']
         service('root%d'%i, node, ['ubft','root-node','run','--home','/state','--address','/ip4/0.0.0.0/tcp/8000',
             '--bootnodes', ','.join('/dns4/root%d/tcp/8000/p2p/%s' % (j,ids['root'][j-1]) for j in range(1,n+1) if j!=i),
-            '--profile-2','--q3-lane','--genesis-identities','/network/genesis-identities.json',
+            '--profile-2','--q3-lane'] + (pos.root_flags(i) if with_pos else ['--genesis-identities','/network/genesis-identities.json']) + [
             '--shard-conf','/network/full-shard-conf.json','--shard-conf','/network/aggregator-conf.json',
             '--rpc-server-address','0.0.0.0:8002','--metrics','prometheus'] + common,
             ['./validator%d/root:/state'%i,network], memory='384m')
@@ -130,9 +132,14 @@ def main():
     p.add_argument('--keygen',type=Path,default=REPO/'build/tn-keygen')
     p.add_argument('--images',type=Path,default=HERE/'artifacts/images.json')
     p.add_argument('--offline-validation',action='store_true',help='native ceremony with fixture images; output CANNOT be deployed')
+    p.add_argument('--pos',action='store_true',help='the proof-of-stake profile: the contracts genesis (custody, election, evidence) in the EVM genesis, the roots on the P85 flags')
+    p.add_argument('--pos-contracts',type=Path,help='a clean unicity-pos-contracts checkout at the pinned commit (needs forge on PATH)')
+    p.add_argument('--pos-cadence-rounds',type=int,default=pos.CADENCE_ROUNDS,help='election cadence: ordinary root rounds after the last acknowledged rotation')
+    p.add_argument('--pos-cadence-seconds',type=int,default=pos.CADENCE_SECONDS,help='election cadence: UC seconds after the last acknowledged rotation')
     p.add_argument('--captcha-sitekey',required=True)
     p.add_argument('--captcha-secret-file',required=True,type=Path)
     a=p.parse_args()
+    if a.pos and a.pos_contracts is None: p.error('--pos needs --pos-contracts')
     if not 3 <= a.validators <= 32 or not 0 < a.chain_id < 2**53:
         p.error('validators must be 3..32; chain ID must be 1..2^53-1')
     out=a.out.resolve()
@@ -214,17 +221,35 @@ def main():
                 *sum((['--node-info',out/f'validator{i}/auth/node-info.json'] for i in range(1,a.validators+1)),[]))
             # One B1 profile, then a genesis allocated from it (registry layout 3), funded with the package's random faucet and unique entropy.
             trust=home/'trust-base.json'
-            profile_out=cli('engine-api','b1-profile','--shard-conf',home/'shard-conf-8_0.json','--trust-base',trust,'--w-cert',W_CERT,'--out',home/'b1-profile.json')
+            genesis=None
+            if a.pos:
+                # The first pass runs on the base configuration (the full one does not exist yet): provisional, its id is replaced after the reconciling finalization.
+                genesis=pos.Genesis(home,ubft,a.pos_contracts.resolve(),REPO,out.name,a.chain_id,tuple(map(int,EVM_CONTINUITY_MAX_DISTANCE.split('/'))),(a.pos_cadence_rounds,a.pos_cadence_seconds))
+                genesis.check_tools(PINS['contracts'])
+                genesis.plan(trust,home/'shard-conf-8_0.json')
+                genesis.prepare(home/'shard-conf-8_0.json',provisional=True)
+            profile_out=cli('engine-api','b1-profile','--shard-conf',home/'shard-conf-8_0.json','--trust-base',trust,'--w-cert',W_CERT,'--out',home/'b1-profile.json',
+                *(pos.profile_args(genesis.deployment,genesis.dir/'elect-measurement.json') if genesis else []))
             flags=ureth_flags_of(profile_out)
             max_gas=int(json.loads((home/'b1-profile.json').read_text())['maxGas'])
             alloc=json.loads(subprocess.check_output([str(a.keygen.resolve()),str(home/'faucet-secrets')],text=True))
             write(home/'funded.json',funded_base_genesis(a.chain_id,max_gas,alloc,secrets.token_hex(32)))
+            if genesis:
+                # The id of the custody genesis is the FULL configuration's: finalize once without the PoS accounts, take the id from that configuration, then add the accounts.
+                cli('engine-api','genesis','--shard-conf',home/'shard-conf-8_0.json','--trust-base',trust,'--b1-profile',home/'b1-profile.json',
+                    '--alloc-source',home/'funded.json','--out',genesis.dir/'reconcile-genesis.json','--full-shard-conf',genesis.dir/'reconcile-full-shard-conf.json',
+                    '--identities-out',genesis.dir/'reconcile-b1-identities.json')
+                genesis.reconcile(genesis.dir/'reconcile-full-shard-conf.json')
+                funded=json.loads((home/'funded.json').read_text())
+                write(home/'funded.json',pos.merge_alloc(funded,json.loads((genesis.dir/'genesis/alloc.json').read_text())))
             identity=cli('engine-api','genesis','--shard-conf',home/'shard-conf-8_0.json','--trust-base',trust,'--b1-profile',home/'b1-profile.json',
                 '--alloc-source',home/'funded.json','--out',home/'genesis.json','--full-shard-conf',home/'full-shard-conf.json',
                 '--identities-out',home/'b1-identities.json')
             print(identity)
             # The roots' committee identity records (a JSON array, what `root-node run --genesis-identities` takes): the PoA genesis committee, root i delegated
             # to EVM validator i, as scripts/lib/h3-lib.sh makes them. b1-identities.json is the B1 identity document (an object) the bridge deployment is checked against.
+            if genesis:
+                genesis.verify(home/'full-shard-conf.json',genesis.dir/'reconcile-full-shard-conf.json')
             write(home/'genesis-bindings.json',[{'rootNodeId':roots[i],'evmNodeId':evms[i]} for i in range(a.validators)])
             cli('genesis-identities','generate','--trust-base',trust,'--shard-conf',home/'full-shard-conf.json','--bindings',home/'genesis-bindings.json',
                 '--out',home/'genesis-identities.json')
@@ -252,8 +277,15 @@ def main():
         cli('shard-conf','generate','--home',home/'agg-conf','--network-id','3','--partition-id','9','--partition-type-id','9',
             '--shard-id','0x80','--epoch','0','--epoch-start','1','--t2-timeout','5000',
             '--partition-params','proof_type=aggregator_rsmt_v1','--node-info',out/'aggregator/node-info.json')
-        for name in ('trust-base.json','full-shard-conf.json','genesis.json','b1-profile.json','genesis-identities.json','b1-identities.json'):
+        # The PoS roots take pos-genesis-identities.json instead (the two flags exclude each other): the PoA records are not shipped beside them.
+        for name in ('trust-base.json','full-shard-conf.json','genesis.json','b1-profile.json','b1-identities.json')+(() if genesis else ('genesis-identities.json',)):
             shutil.copy2(home/name,out/'network'/name)
+        if genesis:
+            # What the roots start with, and what an operator needs to run `pos-relayer verify-genesis` again on the shipped files.
+            write(out/'network/pos-deployment.json',pos.deployment_of(genesis.deployment,json.loads((home/'b1-profile.json').read_text())))
+            for name,src in (('pos-genesis-identities.json','genesis-identities.json'),('pos-plan.json','plan.json'),('pos-contracts-genesis.json','contracts-genesis.json')):
+                shutil.copy2(genesis.dir/src,out/'network'/name)
+            (out/'network/pos-genesis-assignment.txt').write_text(genesis.assignment+'\n')
         shutil.copy2(home/'agg-conf/shard-conf-9_0.json',out/'network/aggregator-conf.json')
         for i in range(1,a.validators+1):
             val=out/f'validator{i}'
@@ -280,9 +312,11 @@ def main():
         network.update(chain_id=a.chain_id,genesis_hash='0x'+block,funding_address=next(iter(alloc)),
             validator_rpc_urls=[f'http://ureth{i}:8545' for i in range(1,a.validators+1)],captcha_sitekey=a.captcha_sitekey)
         write(out/'network/network.json',network)
-        write(out/'compose.yaml',topology(out,a.validators,{'root':roots,'evm':evms},records['images'],a.captcha_sitekey,flags,max_gas))
+        write(out/'compose.yaml',topology(out,a.validators,{'root':roots,'evm':evms},records['images'],a.captcha_sitekey,flags,max_gas,bool(genesis)))
         manifest={'offline_validation_only':a.offline_validation,'generation':out.name,'chain_id':a.chain_id,'genesis_hash':'0x'+block,'validators':a.validators,
             'faucet_address':next(iter(alloc)), 'artifacts':records,
+            'pos':({'genesis_assignment':genesis.assignment,'first_pass_assignment':genesis.first,'custody':genesis.deployment['custody'],'election':genesis.deployment['election'],
+                    'contracts':PINS['contracts'],'cadence_rounds':a.pos_cadence_rounds,'cadence_seconds':a.pos_cadence_seconds} if genesis else None),
             'authority_status':{str(i):json.loads(authority(i,'status','--operator-socket',out/f'validator{i}/auth/operator.sock','--operator-credential',out/f'validator{i}/auth/operator.cred')) for i in range(1,a.validators+1)} if not a.offline_validation else {},
             'config_sha256':{f.name:hashlib.sha256(f.read_bytes()).hexdigest() for f in (out/'network').glob('*.json')}}
         write(out/'manifest.json',manifest)
