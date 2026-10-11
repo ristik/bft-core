@@ -98,10 +98,16 @@ type rpcNumber big.Int
 func (n *rpcNumber) UnmarshalJSON(b []byte) error {
 	var s string
 	if err := json.Unmarshal(b, &s); err != nil {
-		return err
+		return errors.Join(ErrBuild, err)
 	}
 	if len(s) < 3 || s[:2] != "0x" || len(s) > 2+64 {
 		return fmt.Errorf("%w: %q is not a hex number of at most 256 bits", ErrBuild, s)
+	}
+	// big.Int.SetString(.., 16) would also take a sign: only hex digits are numbers here
+	for _, c := range s[2:] {
+		if !(c >= '0' && c <= '9' || c >= 'a' && c <= 'f' || c >= 'A' && c <= 'F') {
+			return fmt.Errorf("%w: %q is not hex", ErrBuild, s)
+		}
 	}
 	if _, ok := (*big.Int)(n).SetString(s[2:], 16); !ok {
 		return fmt.Errorf("%w: %q is not hex", ErrBuild, s)
