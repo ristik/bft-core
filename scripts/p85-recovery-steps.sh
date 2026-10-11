@@ -532,6 +532,19 @@ PY
   p85_snapshot "$log" >"$H3_DIR/state-after-resolution.json"
 }
 
+# Stops a validator's shard node and starts it again in the SAME scope. Its authority keeps its enrolled scope (root epoch 3, shard epoch 2 since
+# p85_recovery): an advance-epoch into that same scope is refused (signing-context-mismatch, run 30), so only the session is replaced.
+p85_restart_validator() { # id
+  local i=$1 rootBoot bootnodes
+  rootBoot=$(m2_root_addr "$(h3_first_root)") || return 1
+  stop_one_evm_validator "$i" || return 1
+  build/ubft signing-authority replace-session --operator-socket "test-nodes/auth$i/operator.sock" --operator-credential "test-nodes/auth$i/operator.cred" \
+    --out "test-nodes/auth$i/client.cred" || return 1
+  bootnodes=$(evm_bootnodes_for_peers "$rootBoot" "$i" $H3_ONLINE) || return 1
+  start_one_evm_validator "$i" "$validators" "$partitionID" "$rootBoot" engine-api rpc "$bootnodes" || return 1
+  echo "validator $i restarted in its scope"
+}
+
 # This step restarts after the resolution. It does NOT cover a restart at the pending boundary (the few blocks between J's closure and the
 # RecoveryAck cannot be hit by a timed restart); that is the contract split test's job.
 p85_restarts() {
@@ -541,8 +554,7 @@ p85_restarts() {
   p85_scenario_ids "$log" || return 1
   before=$(p85_snapshot "$log") || return 1
   H3_ROOTS="1 2 3 4" h3_restart_roots 3 || return 1
-  stop_one_evm_validator 1 2>/dev/null || true
-  M2_ADVANCE_NO_REPLICA_WAIT=1 h3_advance_authorities 3 2 1 || return 1
+  p85_restart_validator 1 || return 1
   p85_paid 3 || { echo "post-restart paid transaction was not certified" >&2; return 1; }
   p85_progress after-restarts 8
   # nothing the restart could reset: no assignment, anchor, cursor or log entry changed (records ordered since may only have been appended)
