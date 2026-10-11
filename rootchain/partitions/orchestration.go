@@ -695,6 +695,8 @@ func (o *Orchestration) SetGenesisIdentities(partitionID types.PartitionID, shar
 // their assignment hash (AcknowledgedIdentities' second value); a primary election result is keyed by PrimaryAssignmentID(result), which the
 // contracts derive from the result id alone. The P85 closure of an epoch must name the custody's key, or custody does not know the
 // assignment it closes (P85 run 27: J's closure named J's hash while custody held J under its result-derived id).
+// A committed candidate without an authorization is not a P85 election result: custody holds no assignment for it, and its closure would
+// revert whatever id it named; the P85 profile admits only elected primaries and their recoveries (see evmassign.VerifyPrimary).
 func (o *Orchestration) CustodyAssignmentID(partitionID types.PartitionID, shardID types.ShardID, epoch uint64) ([32]byte, error) {
 	var none [32]byte
 	_, hash, err := o.AcknowledgedIdentities(partitionID, shardID, epoch)

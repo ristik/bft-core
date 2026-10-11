@@ -49,8 +49,9 @@ func (o *fakeOrch) AcknowledgedIdentities(_ types.PartitionID, _ types.ShardID, 
 	return []evmassign.Identity{{Weight: 3}}, [32]byte{0xa7}, o.idsErr
 }
 
+// the custody key is NOT the assignment hash (0xa7): a History that took the hash for the closure would be caught
 func (o *fakeOrch) CustodyAssignmentID(types.PartitionID, types.ShardID, uint64) ([32]byte, error) {
-	return [32]byte{0xa7}, o.idsErr
+	return [32]byte{0xc5}, o.idsErr
 }
 
 func TestHistoryReadsTheClosedEpochAndTheConfigurationInstalledAtH(t *testing.T) {
@@ -72,7 +73,7 @@ func TestHistoryReadsTheClosedEpochAndTheConfigurationInstalledAtH(t *testing.T)
 	require.Equal(t, []uint64{4}, orch.rounds)
 	require.Equal(t, []uint64{3}, orch.epochs, "the identities of the configuration's own shard epoch")
 	require.Equal(t, []evmassign.Identity{{Weight: 3}}, ids)
-	require.Equal(t, [32]byte{0xa7}, assignment)
+	require.Equal(t, [32]byte{0xc5}, assignment, "the closure names custody's key, not the assignment hash the identities come with")
 
 	boom := errors.New("gone")
 	for name, run := range map[string]func() error{
