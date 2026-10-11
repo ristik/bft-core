@@ -1,19 +1,24 @@
 package bridgeprofile
 
+// The profile-v3 bounds are named parameters, defined only here and mirrored by
+// profile-v3.json limits. They bound the parsers; the 7,000,000 ordinary-capacity gate (gas.go)
+// admits or refuses each bundle (two anchors at the maximum sizes pass, five can never pass); a later
+// profile version raises them together with the budget.
+//
 // DEV-DEFAULT safety ceilings of design section "Plug-in verification" and
 // "B2 projection". They are test ceilings, not a claim that the maximum fits a
 // block. Limits are intersected, never additive entitlements.
 const (
-	MaxTransfers     = 64 // transfers including the final burn
-	MaxLeaves        = MaxTransfers + 1
-	MaxSemanticBytes = 128 << 10 // history projection and Cfg input; room for J plus 65 leaves
-	MaxEnvelopeBytes = 256 << 10
+	MaxTransfers     = 15       // transfers including the final burn
+	MaxLeaves        = 16       // profile parameter: B2 leaves (raise in a later profile version)
+	MaxSemanticBytes = 16 << 10 // history projection and Cfg input
+	MaxEnvelopeBytes = 64 << 10
 	MaxCBORDepth     = 16
 	MaxCBORItems     = 32768
 	MaxPathSteps     = 2048
-	MaxPolicyBytes   = 128
+	MaxPolicyBytes   = 512
 	MaxAmountBytes   = 32
-	MaxAnchors       = 8 // B1 ceiling; the enabled policy admits exactly one
+	MaxAnchors       = 4 // profile parameter: distinct UC anchors, a parser ceiling; the gas gate (gas.go) decides each bundle
 
 	// Embedded lock evidence (J). Cumulative and checked before allocation or crypto.
 	MaxJustificationBytes = 64 << 10
@@ -28,6 +33,9 @@ const (
 	// MaxInputRecordBytes bounds the canonical native InputRecord opening of an
 	// anchor: tag(39002,[1,round,epoch,prev,hash,summary<=256,time,block,fees,eth]).
 	MaxInputRecordBytes = 512
+	MaxAnchorUCBytes    = 8 << 10 // bridge cap on an anchor UC, tighter than B1's 24 KiB
+	MaxRSMTSiblings     = 32
+	MaxUnicitySteps     = 32
 	MaxSummaryBytes     = 256
 
 	// SDK token (oracle-side strict decode only; the kernel never sees a token).
@@ -39,7 +47,7 @@ const (
 // distinct from the SDK Token.VERSION and from the external bridge's own
 // protocol version. Any byte or derivation change bumps it together with the
 // semantic profile; there is no version dispatch in the parsers.
-const NativeBridgeProtoVersion = 2
+const NativeBridgeProtoVersion = 3
 
 // Fixed protocol bytes adopted from the pinned SDKs v3.0.1. Tags are unchanged
 // from the pre-3.0 profile; versions and arities are not.

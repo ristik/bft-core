@@ -24,7 +24,7 @@ m2_wait_root_epoch() {
   return 1
 }
 
-m2_start_root() {
+m2_start_root() { # node installEpoch bootnode  (an empty install epoch starts a root that is not yet a member: a follower of the committee, as a joiner does before its Commit)
   local node=$1 epoch=$2 boot=$3 port pid i conf
   local -a shardConfArgs=(--shard-conf "$fullShardConf")
   local -a bootArgs=() installArgs=()

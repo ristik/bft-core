@@ -661,3 +661,42 @@ func TestTheFirstLeaderOfAnAnchoredEpochIncludesTheMandatoryClosure(t *testing.T
 	require.EqualValues(t, proposal.Block.Round, proposal.Block.Payload.PosControls[0].OrderingRound)
 	require.Equal(t, []uint64{1}, proposer.calls)
 }
+
+// The path run 19 took: the epoch's first round times out, so the first block is proposed at anchor.Slot+2 on the anchor, with the timeout
+// certificate. The closure is ordered at that round, not at the one after the parent.
+func TestTheFirstLeaderAfterATimeoutOfAnAnchoredEpochIncludesTheMandatoryClosure(t *testing.T) {
+	pos := rootrecords.State{Epoch: 1, First: 1, Frozen: true, Endpoint: 3, NextEpoch: 2, NextOffset: 4, NextFirst: 7,
+		Pending: []rootrecords.PendingH{{Epoch: 1, HRound: 4, Offset: 4, First: 7, RootEpoch: 2}}}
+	replicas, anchor, _ := newAnchorReplicasWith(t, anchorOptions{pos: &pos}, 4)
+	ctx := context.Background()
+	firstLeader, err := firstReplica(replicas).manager.leaderSelector.GetLeaderForRound(anchor.Slot + 1)
+	require.NoError(t, err)
+	nextLeader, err := firstReplica(replicas).manager.leaderSelector.GetLeaderForRound(anchor.Slot + 2)
+	require.NoError(t, err)
+	proposer := &fixedClosure{}
+	for _, replica := range replicas {
+		replica.manager.SetPosServices(&storage.PosServices{Deployment: testDeployment, Authority: noAuthority{}, Proposer: proposer})
+	}
+	for id, replica := range replicas {
+		if id != firstLeader {
+			replica.manager.onLocalTimeout(ctx)
+		}
+	}
+	for id, replica := range replicas {
+		if id == firstLeader {
+			continue
+		}
+		messages := replica.net.SentMessages(network.ProtocolRootTimeout)
+		require.Len(t, messages, len(replicas))
+		require.NoError(t, replicas[nextLeader].manager.onTimeoutMsg(ctx, messages[0].Message.(*abdrc.TimeoutMsg)))
+	}
+	proposal := replicas[nextLeader].net.WaitRootProposal(t)
+	require.Equal(t, anchor, proposal.Block.Anchor)
+	require.NotNil(t, proposal.LastRoundTc)
+	require.EqualValues(t, anchor.Slot+2, proposal.Block.Round)
+	require.Len(t, proposal.Block.Payload.PosControls, 1)
+	c := proposal.Block.Payload.PosControls[0]
+	require.Equal(t, rctypes.OpCloseLiability, c.Op)
+	require.EqualValues(t, 1, c.Close.ClosedEpoch)
+	require.Equal(t, proposal.Block.Round, c.OrderingRound, "ordered at the block's own round, not the round after its parent")
+}

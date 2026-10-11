@@ -589,7 +589,21 @@ func TestLaneControlDocumentsAreReadByTheShim(t *testing.T) {
 	require.NoError(t, err, string(out))
 	files, err := filepath.Glob(filepath.Join(dir, "*.json"))
 	require.NoError(t, err)
-	require.Len(t, files, 4)
+	require.Len(t, files, 5)
+	shardFiles, err := filepath.Glob(filepath.Join(dir, "shard", "*.json"))
+	require.NoError(t, err)
+	require.Len(t, shardFiles, 2)
+	for _, file := range shardFiles {
+		t.Run("shard/"+filepath.Base(file), func(t *testing.T) {
+			raw, err := os.ReadFile(file)
+			require.NoError(t, err)
+			var c ShardControl
+			dec := json.NewDecoder(bytes.NewReader(raw))
+			dec.DisallowUnknownFields()
+			require.NoError(t, dec.Decode(&c))
+			require.NoError(t, newGateFixture(t).gate.Apply(context.Background(), c))
+		})
+	}
 	for _, file := range files {
 		t.Run(filepath.Base(file), func(t *testing.T) {
 			raw, err := os.ReadFile(file)
@@ -710,4 +724,31 @@ func TestTraceCheckerReadsTheShimTrace(t *testing.T) {
 		require.Error(t, err)
 		require.Contains(t, out, "outside every window armed for it")
 	})
+}
+
+// A received message whose statement this node cannot derive (here: an epoch it has no configuration for, as a forged future-epoch timeout
+// is) is passed on untouched and recorded with the reason; it is the node's to refuse, not a fault of the shim. A send that cannot be
+// described stays a fault.
+func TestUndescribableReceiveIsRecordedNotAFault(t *testing.T) {
+	f := newFixture(t, func(c *Config) { c.Signing = forgeSigning })
+	m := boundTimeout(t, f.s, "peer-a", 6)
+	m.Timeout.Epoch = 3
+	f.inner.in <- m
+	select {
+	case got := <-f.net.ReceivedChannel():
+		require.Same(t, m, got)
+	case <-time.After(5 * time.Second):
+		t.Fatal("nothing received")
+	}
+	tr := f.net.Trace()
+	last := tr[len(tr)-1]
+	require.Equal(t, "recv", last.Kind)
+	require.EqualValues(t, 3, last.Epoch)
+	require.Contains(t, last.Error, "describing a received message")
+	require.Empty(t, f.net.Faults())
+	require.NoError(t, f.net.Finish())
+
+	err := f.net.Send(context.Background(), m, f.a)
+	require.NoError(t, err, "an undescribable send is passed on")
+	require.NotEmpty(t, f.net.Faults(), "and is a fault of the run")
 }

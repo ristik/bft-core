@@ -581,3 +581,52 @@ func TestTheUrethFlagsPinEveryHookTheProfileHashCommits(t *testing.T) {
 	require.Contains(t, urethFlags(records, rh), "--unicity.records-custody")
 	require.NotContains(t, urethFlags(records, rh), "election")
 }
+
+// The allocation manifest (T1/T4/T6 geneses) compiles into the fresh-B1 genesis too: the genesis carries the profile's block gas limit, the manifest's
+// funded and contract accounts survive, and the node's own validation of the artifact accepts it.
+func TestB1Genesis_AManifestCompilesIntoTheFreshB1Genesis(t *testing.T) {
+	d := newB1Deployment(t)
+	manifestPath := filepath.Join(t.TempDir(), "allocation-build.json")
+	baseManifest, err := os.ReadFile(filepath.Join("..", "..", "..", "registrygenesis", "testdata", "allocation-build-v1.example.json"))
+	require.NoError(t, err)
+	manifestBytes, err := registrygenesis.ExportAllocationManifest(baseManifest)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(manifestPath, manifestBytes, 0o600))
+	genesisPath := filepath.Join(d.dir, "manifest-genesis.json")
+	_, err = runEngineAPIGenesis(t, "--shard-conf", d.confPath, "--trust-base", d.tbPath, "--b1-profile", d.profPath, "--manifest", manifestPath,
+		"--out", genesisPath, "--identities-out", filepath.Join(d.dir, "manifest-identities.json"))
+	require.NoError(t, err)
+	doc := readFinalizedGenesis(t, genesisPath)
+	require.Contains(t, doc.Alloc, "0x1000000000000000000000000000000000000001", "the manifest's funded account survives")
+	require.NotEmpty(t, doc.Alloc["0x9b137463d4e7986d7f535f9b79e28b4ef1938e9b"].Code, "and its exported contract code")
+	var raw struct {
+		GasLimit string `json:"gasLimit"`
+	}
+	b, err := os.ReadFile(genesisPath)
+	require.NoError(t, err)
+	require.NoError(t, json.Unmarshal(b, &raw))
+	require.Equal(t, hexutil.EncodeUint64(d.profile.MaxGas), raw.GasLimit, "the genesis carries the profile's block gas limit")
+	full := readFullShardConf(t, filepath.Join(d.dir, "manifest-genesis-full-shard-conf.json"))
+	h, err := bindB1Profile(d.profile, d.tb, full)
+	require.NoError(t, err)
+	_, _, err = loadB1GenesisOrigin(full, d.profile, h, genesisPath, "")
+	require.NoError(t, err, "the node's own validation accepts the artifact")
+}
+
+// scripts/b1genesis reads the profile file this writer produces: the golden file it tests against is exactly the writer's output for this profile
+// (hooks included), so a change of the writer's format fails here before it can break the genesis verifier.
+func TestB1ProfileFileMatchesTheGenesisToolsGolden(t *testing.T) {
+	h := func(b byte, tail byte) (out [32]byte) { out[0], out[1], out[31] = b, b, tail; return }
+	p := b1state.Profile{Network: 3, RootGenesisID: h(0x29, 0x01), ExecutionChainID: 31337, RuntimeHash: h(0x28, 0x02), CompilerHash: h(0x2f, 0x03),
+		WCert: 15, DeltaEV: 16, DeltaHold: 17, SystemGas: 269547540, ForcedGas: 5, MaxGas: 276547540, OrdinaryCapacity: 7000000, RestGas: 19360500,
+		CompanionBytes: 1048576, OtherCompanionBytes: 65536, GenesisUCTime: 1700000000,
+		RecordsCustody: common.HexToAddress("0x0c0571"), HRecords: 8, HookRecordGas: 120000, ElectionContract: common.HexToAddress("0xe1ec7"), ElectGas: 4200000}
+	got, err := json.Marshal(b1ProfileFileOf(p))
+	require.NoError(t, err)
+	want, err := os.ReadFile(filepath.Join("..", "..", "..", "scripts", "b1genesis", "testdata", "ubft-b1-profile-hooks.json"))
+	require.NoError(t, err)
+	var a, b map[string]any
+	require.NoError(t, json.Unmarshal(got, &a))
+	require.NoError(t, json.Unmarshal(want, &b))
+	require.Equal(t, b, a)
+}

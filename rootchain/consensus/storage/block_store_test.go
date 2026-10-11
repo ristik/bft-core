@@ -442,3 +442,88 @@ func (mps mockPersistentStore) WriteTC(tc *rctypes.TimeoutCert) error {
 func (mps mockPersistentStore) ReadLastTC() (*rctypes.TimeoutCert, error) {
 	return mps.readLastTC()
 }
+
+// A round can get both a TC and a QC: the roots vote for the block, then time out, and a vote delayed past the TC completes the QC.
+// The TC must not cost the block, or no root can process that QC (nor recover it: no peer holds the block either).
+func TestBlockStore_LateQcAfterTc(t *testing.T) {
+	irVer := mockIRVerifier{verify: func(uint64, *rctypes.IRChangeReq) (*types.InputRecord, error) {
+		return nil, errors.New("no IR changes in this test")
+	}}
+	// a QC that commits its parent names the parent's round and root hash; any other QC leaves the commit info empty
+	qcFor := func(round, parent uint64, rh []byte, commits *ExecutedBlock) *rctypes.QuorumCert {
+		qc := &rctypes.QuorumCert{
+			VoteInfo:         &rctypes.RoundInfo{RoundNumber: round, ParentRoundNumber: parent, CurrentRootHash: rh},
+			LedgerCommitInfo: &types.UnicitySeal{Version: 1},
+		}
+		if commits != nil {
+			qc.LedgerCommitInfo.RootChainRoundNumber = commits.GetRound()
+			qc.LedgerCommitInfo.Hash = commits.RootHash
+		}
+		return qc
+	}
+	add := func(t *testing.T, bs *BlockStore, round uint64, qc *rctypes.QuorumCert) []byte {
+		t.Helper()
+		_, err := bs.ProcessQc(qc)
+		require.NoError(t, err)
+		rh, err := bs.Add(&rctypes.BlockData{Round: round, Payload: &rctypes.Payload{}, Qc: qc}, irVer)
+		require.NoError(t, err)
+		return rh
+	}
+	tcFor := func(round uint64) *rctypes.TimeoutCert {
+		return &rctypes.TimeoutCert{Timeout: &rctypes.Timeout{Round: round}}
+	}
+	// genesis (round 1) <- 2 <- 3; round 3 times out
+	setup := func(t *testing.T) (*BlockStore, []byte, []byte) {
+		bs := initBlockStoreFromGenesis(t, nil)
+		rh2 := add(t, bs, 2, bs.GetHighQc())
+		rh3 := add(t, bs, 3, qcFor(2, 1, rh2, nil))
+		require.NoError(t, bs.ProcessTc(tcFor(3)))
+		require.NotContains(t, roundsOf(bs.blockTree.GetAllUncommittedNodes()), uint64(3), "the timed-out block is off the tree")
+		return bs, rh2, rh3
+	}
+
+	t.Run("late QC for the timed-out round is processed and extended", func(t *testing.T) {
+		bs, _, rh3 := setup(t)
+		qc3 := qcFor(3, 2, rh3, nil)
+		_, err := bs.ProcessQc(qc3)
+		require.NoError(t, err, "the late QC finds its block")
+		require.EqualValues(t, 3, bs.GetHighQc().GetRound())
+		b, err := bs.Block(3)
+		require.NoError(t, err)
+		require.EqualValues(t, 3, b.GetRound())
+		// the next leader extends the late QC
+		_, err = bs.Add(&rctypes.BlockData{Round: 4, Payload: &rctypes.Payload{}, Qc: qc3}, irVer)
+		require.NoError(t, err)
+		require.Contains(t, roundsOf(bs.blockTree.GetAllUncommittedNodes()), uint64(3))
+	})
+
+	t.Run("a repeated TC is harmless", func(t *testing.T) {
+		bs, _, rh3 := setup(t)
+		require.NoError(t, bs.ProcessTc(tcFor(3)))
+		_, err := bs.ProcessQc(qcFor(3, 2, rh3, nil))
+		require.NoError(t, err)
+	})
+
+	t.Run("a commit past the timed-out round prunes it", func(t *testing.T) {
+		bs, rh2, _ := setup(t)
+		// the next leader extends round 2 under the TC: 2 <- 4 <- 5, and the QC of 5 commits 4
+		rh4 := add(t, bs, 4, qcFor(2, 1, rh2, nil))
+		add(t, bs, 5, qcFor(4, 2, rh4, nil))
+		b4, err := bs.Block(4)
+		require.NoError(t, err)
+		_, err = bs.ProcessQc(qcFor(5, 4, nil, b4))
+		require.NoError(t, err)
+		require.EqualValues(t, 4, bs.blockTree.Root().GetRound())
+		require.Empty(t, bs.blockTree.timedOut)
+		_, err = bs.Block(3)
+		require.ErrorContains(t, err, "block for round 3 not found")
+	})
+}
+
+func roundsOf(blocks []*ExecutedBlock) []uint64 {
+	rounds := make([]uint64, 0, len(blocks))
+	for _, b := range blocks {
+		rounds = append(rounds, b.GetRound())
+	}
+	return rounds
+}

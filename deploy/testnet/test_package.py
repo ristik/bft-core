@@ -17,6 +17,17 @@ class FakeRelay:
         self.calls.append((method,params))
         return {'jsonrpc':'2.0','id':1,'result':'0x1'}
 
+class ChurnBudget(unittest.TestCase):
+    def test_the_generated_evm_configuration_commits_the_testnet_churn_budget(self):
+        params=dict(item.split('=',1) for item in generate.evm_partition_params(1337).split(','))
+        self.assertEqual(params,{'proof_type':'exec','chain_id':'1337','continuity_max_distance':'1/2'})
+        num,den=params['continuity_max_distance'].split('/')
+        self.assertEqual((int(num),int(den)),(1,2))
+    def test_the_generator_passes_exactly_those_params_to_shard_conf_generate(self):
+        source=(generate.HERE/'generate.py').read_text()
+        self.assertEqual(source.count("evm_partition_params(a.chain_id)"),1)
+        self.assertNotIn("f'proof_type=exec,chain_id=",source.split('def main')[1])
+
 class PublicRPC(unittest.TestCase):
     def setUp(self):
         self.relay=FakeRelay()

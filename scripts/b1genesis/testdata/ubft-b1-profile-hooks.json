@@ -1,0 +1,23 @@
+{
+  "network": 3,
+  "rootGenesisId": "0x2929000000000000000000000000000000000000000000000000000000000001",
+  "executionChainId": 31337,
+  "runtimeHash": "0x2828000000000000000000000000000000000000000000000000000000000002",
+  "compilerHash": "0x2f2f000000000000000000000000000000000000000000000000000000000003",
+  "wCert": 15,
+  "deltaEv": 16,
+  "deltaHold": 17,
+  "systemGas": 269547540,
+  "forcedGas": 5,
+  "maxGas": 276547540,
+  "ordinaryCapacity": 7000000,
+  "restGas": 19360500,
+  "companionBytes": 1048576,
+  "otherCompanionBytes": 65536,
+  "genesisUcTime": 1700000000,
+  "recordsCustody": "0x00000000000000000000000000000000000c0571",
+  "hRecords": 8,
+  "hookRecordGas": 120000,
+  "electionContract": "0x00000000000000000000000000000000000e1ec7",
+  "electGas": 4200000
+}

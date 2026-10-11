@@ -51,6 +51,18 @@ func TestBlockTreeRejectsAnchorCommitBeforeMutation(t *testing.T) {
 	require.Len(t, bt.roundToNode, 1)
 }
 
+// A set-aside block whose parent is no longer in the tree is not re-attached: the lookup fails instead of hanging it off nothing.
+func TestBlockTree_SetAsideBlockWithoutParentIsNotRestored(t *testing.T) {
+	root := newNode(&ExecutedBlock{BlockData: &drctypes.BlockData{Round: 4}})
+	orphan := &ExecutedBlock{BlockData: &drctypes.BlockData{Round: 5, Qc: &drctypes.QuorumCert{VoteInfo: &drctypes.RoundInfo{RoundNumber: 2}}}}
+	bt := &BlockTree{root: root, roundToNode: map[uint64]*node{4: root}, timedOut: map[uint64]*ExecutedBlock{5: orphan}}
+	b, err := bt.FindBlock(5)
+	require.ErrorContains(t, err, "block for round 5 not found")
+	require.Nil(t, b)
+	require.Empty(t, root.child)
+	require.Len(t, bt.roundToNode, 1)
+}
+
 func hexToBytes(hexStr string) []byte {
 	b, err := hex.DecodeString(hexStr)
 	if err != nil {

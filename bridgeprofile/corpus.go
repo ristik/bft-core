@@ -76,21 +76,28 @@ type CaseFile struct {
 	Cases   []Case `json:"cases"`
 }
 
+// ShardJSON is one policy row: the native shard ID (hex) and its configuration hash.
+type ShardJSON struct {
+	ShardID  string `json:"shardId"`
+	ConfHash string `json:"shardConfHash"`
+}
+
 // FixtureJSON publishes one instantiated deployment fixture.
 type FixtureJSON struct {
-	Name                string `json:"name"`
-	ChainID             string `json:"chainId"`
-	AggregatorPartition uint32 `json:"aggregatorPartition"`
-	AggregatorShardConf string `json:"aggregatorShardConfHash"`
-	EVMPartition        uint32 `json:"evmPartition"`
-	EVMShard            string `json:"evmShard"`
-	Cfg                 string `json:"cfg"`
-	CfgHash             string `json:"cfgHash"`
-	PolicyBody          string `json:"policyBody"`
-	PolicyHash          string `json:"policyHash"`
-	Vault               string `json:"vault"`
-	Ty                  string `json:"ty"`
-	Aid                 string `json:"aid"`
+	Name                string      `json:"name"`
+	ChainID             string      `json:"chainId"`
+	AggregatorPartition uint32      `json:"aggregatorPartition"`
+	AggregatorDepth     int         `json:"aggregatorDepth"`
+	AggregatorShards    []ShardJSON `json:"aggregatorShards"`
+	EVMPartition        uint32      `json:"evmPartition"`
+	EVMShard            string      `json:"evmShard"`
+	Cfg                 string      `json:"cfg"`
+	CfgHash             string      `json:"cfgHash"`
+	PolicyBody          string      `json:"policyBody"`
+	PolicyHash          string      `json:"policyHash"`
+	Vault               string      `json:"vault"`
+	Ty                  string      `json:"ty"`
+	Aid                 string      `json:"aid"`
 }
 
 // PinJSON is a deployment pin.
@@ -112,8 +119,12 @@ type FixtureSet struct {
 
 func fixtureJSON(name string, f *Fixture) FixtureJSON {
 	c := f.Cfg
+	var shards []ShardJSON
+	for _, r := range f.Policy.Shards {
+		shards = append(shards, ShardJSON{ShardID: hx(r.ID), ConfHash: h32(r.Conf)})
+	}
 	return FixtureJSON{Name: name, ChainID: strconv.FormatUint(c.ChainID, 10), AggregatorPartition: f.Policy.Partition,
-		AggregatorShardConf: h32(f.Policy.ShardConf), EVMPartition: c.EVMPartition, EVMShard: hx(c.EVMShard),
+		AggregatorDepth: int(f.Policy.Depth), AggregatorShards: shards, EVMPartition: c.EVMPartition, EVMShard: hx(c.EVMShard),
 		Cfg: hx(c.Bytes()), CfgHash: h32(c.Hash()), PolicyBody: hx(f.Policy.Bytes()), PolicyHash: h32(f.Policy.Hash()),
 		Vault: hx(c.Vault[:]), Ty: h32(c.Ty), Aid: h32(c.Aid)}
 }
@@ -145,7 +156,7 @@ var reasons = []struct {
 	{"ErrReturnAmount", ErrReturnAmount}, {"ErrReturnRecip", ErrReturnRecip}, {"ErrLockInput", ErrLockInput},
 	{"ErrZeroDigest", ErrZeroDigest}, {"ErrDeadlineMismatch", ErrDeadlineMismatch}, {"ErrDeadlineExpired", ErrDeadlineExpired},
 	{"ErrIROpening", ErrIROpening}, {"ErrIRShape", ErrIRShape}, {"ErrIRState", ErrIRState}, {"ErrIRTime", ErrIRTime},
-	{"ErrAnchorAuth", ErrAnchorAuth}, {"ErrLeafProof", ErrLeafProof},
+	{"ErrGasBudget", ErrGasBudget}, {"ErrPathBitmap", ErrPathBitmap}, {"ErrAnchorAuth", ErrAnchorAuth}, {"ErrLeafProof", ErrLeafProof},
 	{"ErrTrustBaseDigest", ErrTrustBaseDigest}, {"ErrEpochMismatch", ErrEpochMismatch}, {"ErrTrustConfig", ErrTrustConfig}, {"ErrLockUC", ErrLockUC},
 	{"ErrLockPDR", ErrLockPDR}, {"ErrLockHeader", ErrLockHeader}, {"ErrLockAccount", ErrLockAccount},
 	{"ErrLockCodeHash", ErrLockCodeHash}, {"ErrLockStorage", ErrLockStorage}, {"ErrLockDigest", ErrLockDigest},
@@ -386,10 +397,19 @@ func Replay(fs *FixtureSet, c Case) Expect {
 		if err != nil {
 			return errExpect(err)
 		}
-		leaves, _ := strconv.Atoi(c.Aux["leaves"])
+		var sids [][32]byte
+		for _, h := range strings.Split(c.Aux["sids"], ",") {
+			if h == "" {
+				continue
+			}
+			b, _ := hex.DecodeString(h)
+			var sid [32]byte
+			copy(sid[:], b)
+			sids = append(sids, sid)
+		}
 		env, err := DecodeEnvelope(in)
 		if err == nil {
-			_, err = CheckPolicy(cfg, env, leaves)
+			_, _, err = CheckPolicy(cfg, env, sids)
 		}
 		if err != nil {
 			return errExpect(err)
@@ -477,6 +497,25 @@ func Replay(fs *FixtureSet, c Case) Expect {
 			return errExpect(err)
 		}
 		return okValues("value", hx(v))
+	case "gate":
+		cfg, err := cfgOf()
+		if err != nil {
+			return errExpect(err)
+		}
+		op := uint8(OpReturn)
+		if c.Aux["operation"] == "mint" {
+			op = OpMint
+		}
+		budget := TxGasBudget
+		if v, ok := c.Aux["budget"]; ok {
+			budget, _ = strconv.ParseUint(v, 10, 64)
+		}
+		g, err := GateOf(cfg, op, in, budget)
+		if err != nil {
+			return errExpect(err)
+		}
+		return okValues("intrinsic", u64s(g.Intrinsic), "b2", u64s(g.B2), "uc", u64s(g.UC), "rsmt", u64s(g.RSMT),
+			"steps", u64s(g.Steps), "total", u64s(g.Total()))
 	case "compose":
 		cfg, err := cfgOf()
 		if err != nil {
@@ -498,3 +537,5 @@ func Replay(fs *FixtureSet, c Case) Expect {
 
 // ExpectJSON renders an Expect for comparison.
 func ExpectJSON(e Expect) string { b, _ := json.Marshal(e); return string(b) }
+
+func u64s(v uint64) string { return strconv.FormatUint(v, 10) }
