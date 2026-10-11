@@ -65,7 +65,7 @@ def validate(generation, ubft, aggregator):
                 arg = arg.replace('/state',str(generation/f'validator{i}/root'))
                 arg = arg.replace('/network',str(generation/'network'))
                 arg = re.sub(r'/dns4/root(\d+)/tcp/8000',lambda m:f'/ip4/127.0.0.1/tcp/{23000+int(m[1])}',arg)
-                command[j] = arg.replace('/ip4/0.0.0.0/tcp/8000',f'/ip4/127.0.0.1/tcp/{23000+i}').replace('0.0.0.0:8002',f'127.0.0.1:{23100+i}')
+                command[j] = arg.replace('/ip4/0.0.0.0/tcp/8000',f'/ip4/127.0.0.1/tcp/{23000+i}').replace('127.0.0.1:8002',f'127.0.0.1:{23100+i}')
             launch(f'root{i}',command)
         env = {k:v for k,v in os.environ.items() if not k.startswith('AGGREGATOR_')}
         env.update(cfg['services']['aggregator']['environment'])
