@@ -9,17 +9,23 @@ package cmd
 // inputs, and everything is checked again at Freeze admission against the proven EVM state.
 
 import (
+	"bytes"
 	"crypto/ecdsa"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math/big"
 	"os"
+	"sort"
 	"strings"
 
 	ethcrypto "github.com/ethereum/go-ethereum/crypto"
 	"github.com/spf13/cobra"
 	"github.com/unicitynetwork/bft-core/evmassign"
+	"github.com/unicitynetwork/bft-core/signingauthority"
+	"github.com/unicitynetwork/bft-go-base/types"
 )
 
 // ErrPosRelayer reports a relayer input that cannot be used.
@@ -77,7 +83,7 @@ func electionDeployment(path string) (evmassign.ElectionDeployment, error) {
 func newPosRelayerCmd() *cobra.Command {
 	root := &cobra.Command{Use: "pos-relayer", Short: "operator tooling for a primary candidate's EVM possession proofs"}
 
-	var candidate, deployment, keyFile, out string
+	var candidate, deployment, keyFile, out, authoritySocket, authorityCredential string
 	var attempt uint64
 	sign := &cobra.Command{
 		Use:   "sign-pop",
@@ -91,13 +97,31 @@ func newPosRelayerCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			key, err := readEVMKey(keyFile)
-			if err != nil {
-				return err
-			}
-			p, err := evmassign.SignEVMPoP(key, c, d, attempt)
-			if err != nil {
-				return err
+			var p evmassign.EVMPoP
+			switch {
+			case keyFile != "" && (authoritySocket != "" || authorityCredential != ""):
+				return errBothKeyHolders
+			case authoritySocket != "" || authorityCredential != "":
+				if authoritySocket == "" || authorityCredential == "" {
+					return fmt.Errorf("%w: --authority-socket needs --authority-credential", ErrPosRelayer)
+				}
+				// the validator's key never leaves its signing authority: it recomputes the possession digest from the typed candidate
+				op, err := openOperator(authoritySocket, authorityCredential)
+				if err != nil {
+					return err
+				}
+				defer func() { _ = op.Close() }()
+				if p, err = op.SignElectionPoP(cmd.Context(), signingauthority.ElectionPoPRequest{Candidate: c, Deployment: d, Attempt: attempt}); err != nil {
+					return fmt.Errorf("the signing authority refused the possession proof: %w", err)
+				}
+			default:
+				key, err := readEVMKey(keyFile)
+				if err != nil {
+					return err
+				}
+				if p, err = evmassign.SignEVMPoP(key, c, d, attempt); err != nil {
+					return err
+				}
 			}
 			return writeRelayerJSON(out, toPoPJSON(p))
 		},
@@ -105,6 +129,8 @@ func newPosRelayerCmd() *cobra.Command {
 	sign.Flags().StringVar(&candidate, "candidate", "", "the primary candidate (canonical encoding, hex or raw)")
 	sign.Flags().StringVar(&deployment, "pos-deployment", "", "the P85 deployment file, with the election pinned")
 	sign.Flags().StringVar(&keyFile, "evm-key-file", "", "file holding the member's EVM secret key as 32 bytes of hex")
+	sign.Flags().StringVar(&authoritySocket, "authority-socket", "", "operator socket of the signing authority that holds the member's key (instead of --evm-key-file)")
+	sign.Flags().StringVar(&authorityCredential, "authority-credential", "", "operator credential of that authority")
 	sign.Flags().Uint64Var(&attempt, "attempt", 0, "the attempt the election reserved the result under")
 	sign.Flags().StringVar(&out, "out", "", "output file (default stdout)")
 
@@ -155,7 +181,7 @@ func newPosRelayerCmd() *cobra.Command {
 	assemble.Flags().StringSliceVar(&popFiles, "pop", nil, "a member's proof file from sign-pop (repeat)")
 	assemble.Flags().StringVar(&out, "out", "", "output file (default stdout)")
 
-	root.AddCommand(sign, assemble, newPosProposalCmd(), newPosTxCmd())
+	root.AddCommand(sign, assemble, newPosProposalCmd(), newPosCandidateCmd(), newPosTxCmd(), newPosGenesisCmd(), newPosVerifyGenesisCmd())
 	return root
 }
 
@@ -185,4 +211,237 @@ func writeRelayerJSON(path string, v any) error {
 		return err
 	}
 	return os.WriteFile(path, append(raw, '\n'), 0o600)
+}
+
+// ---- genesis ----------------------------------------------------------------------------------------------------------------------------------
+
+// posGenesisPlan is the operator's plan of the proof-of-stake genesis committee: who is bonded, with which keys, and into which lots. The
+// custody genesis seeds one lot per identity in order (lot ids 1..N), which is what makes the exposure digests computable before the
+// contracts exist.
+type posGenesisPlan struct {
+	BondUnit   string               `json:"bondUnit"` // base units of one weight unit, decimal (custody's bondUnit)
+	Identities []posGenesisIdentity `json:"identities"`
+}
+
+type posGenesisIdentity struct {
+	StakingID  uint64   `json:"stakingId"` // custody's id: 1..N in manifest order
+	Owner      string   `json:"owner"`     // 20-byte hex addresses
+	Withdrawal string   `json:"withdrawal"`
+	Payee      string   `json:"payee"`
+	BondUnits  uint64   `json:"bondUnits"` // the genesis weight: bond / bondUnit
+	RootNodeID string   `json:"rootNodeId"`
+	RootKey    string   `json:"rootKey"` // 33-byte compressed secp256k1, hex
+	EVMNodeID  string   `json:"evmNodeId"`
+	EVMKey     string   `json:"evmKey"`
+	LotIDs     []uint64 `json:"lotIds"`
+}
+
+// contractsGenesis is the file unicity-pos-contracts script/p85-genesis.sh reads.
+type contractsGenesis struct {
+	AssignmentID string                     `json:"assignmentId"`
+	BondUnit     string                     `json:"bondUnit"`
+	Identities   []contractsGenesisIdentity `json:"identities"`
+}
+
+type contractsGenesisIdentity struct {
+	Owner      string `json:"owner"`
+	Withdrawal string `json:"withdrawal"`
+	RootKey    string `json:"rootKey"`
+	EVMKey     string `json:"evmKey"`
+	RootNodeID string `json:"rootNodeId"` // keccak256(utf8(peer id)), the word custody stores
+	EVMNodeID  string `json:"evmNodeId"`
+	Payee      string `json:"payee"`
+	Bond       string `json:"bond"` // base units, decimal
+}
+
+func hexBytes(name, s string, n int) ([]byte, error) {
+	b, err := hex.DecodeString(strings.TrimPrefix(s, "0x"))
+	if err != nil || (n > 0 && len(b) != n) {
+		return nil, fmt.Errorf("%w: %s must be %d bytes of hex", ErrPosRelayer, name, n)
+	}
+	return b, nil
+}
+
+// buildPosGenesis derives the root-side identity records of the genesis committee (the baseline K the first coupled handoff names), the
+// genesis assignment id (the assignment hash of the installed genesis shard configuration over those records), and the contracts script's
+// input. Identities are validated against the genesis trust base and shard configuration exactly as a later candidate's are.
+func buildPosGenesis(plan posGenesisPlan, tb *types.RootTrustBaseV1, conf *types.PartitionDescriptionRecord) ([]evmassign.Identity, [32]byte, contractsGenesis, error) {
+	var zero [32]byte
+	unit, ok := new(big.Int).SetString(plan.BondUnit, 10)
+	if !ok || unit.Sign() <= 0 {
+		return nil, zero, contractsGenesis{}, fmt.Errorf("%w: bondUnit must be a positive decimal", ErrPosRelayer)
+	}
+	var ids []evmassign.Identity
+	out := contractsGenesis{BondUnit: plan.BondUnit}
+	for i, p := range plan.Identities {
+		if p.StakingID != uint64(i+1) || p.BondUnits == 0 || len(p.LotIDs) == 0 {
+			return nil, zero, out, fmt.Errorf("%w: identity %d: custody numbers genesis identities 1..N in order, with a bond and lots", ErrPosRelayer, i)
+		}
+		rootKey, err1 := hexBytes("rootKey", p.RootKey, evmassign.KeyLen)
+		evmKey, err2 := hexBytes("evmKey", p.EVMKey, evmassign.KeyLen)
+		payee, err3 := hexBytes("payee", p.Payee, evmassign.PayeeLen)
+		owner, err4 := hexBytes("owner", p.Owner, 20)
+		wd, err5 := hexBytes("withdrawal", p.Withdrawal, 20)
+		if err := errors.Join(err1, err2, err3, err4, err5); err != nil {
+			return nil, zero, out, err
+		}
+		staking := make([]byte, evmassign.StakingIDLen)
+		binary.BigEndian.PutUint64(staking[evmassign.StakingIDLen-8:], p.StakingID)
+		lots := evmassign.LotsDigest(p.LotIDs)
+		ids = append(ids, evmassign.Identity{StakingID: staking, Generation: 1, RootNodeID: p.RootNodeID, RootKey: rootKey, EVMNodeID: p.EVMNodeID,
+			EVMKey: evmKey, Weight: p.BondUnits, RawWeight: p.BondUnits, OperatorPayee: payee, ExposureDigest: lots[:]})
+		rw, err1 := evmassign.NodeIDWord(p.RootNodeID)
+		ew, err2 := evmassign.NodeIDWord(p.EVMNodeID)
+		if err := errors.Join(err1, err2); err != nil {
+			return nil, zero, out, errors.Join(ErrPosRelayer, err)
+		}
+		bond := new(big.Int).Mul(unit, new(big.Int).SetUint64(p.BondUnits))
+		out.Identities = append(out.Identities, contractsGenesisIdentity{Owner: "0x" + hex.EncodeToString(owner), Withdrawal: "0x" + hex.EncodeToString(wd),
+			RootKey: "0x" + hex.EncodeToString(rootKey), EVMKey: "0x" + hex.EncodeToString(evmKey), RootNodeID: "0x" + hex.EncodeToString(rw[:]),
+			EVMNodeID: "0x" + hex.EncodeToString(ew[:]), Payee: "0x" + hex.EncodeToString(payee), Bond: bond.String()})
+	}
+	sort.Slice(ids, func(i, j int) bool { return bytes.Compare(ids[i].StakingID, ids[j].StakingID) < 0 })
+	if err := checkGenesisIdentities(ids, tb, conf); err != nil {
+		return nil, zero, out, err
+	}
+	digest, err := evmassign.IdentitiesDigest(ids)
+	if err != nil {
+		return nil, zero, out, err
+	}
+	assignment, err := evmassign.AssignmentHash(conf, digest)
+	if err != nil {
+		return nil, zero, out, err
+	}
+	out.AssignmentID = "0x" + hex.EncodeToString(assignment[:])
+	return ids, assignment, out, nil
+}
+
+// requireFullShardConf refuses a shard configuration that is not the FULL one (the base plus seal_registry_genesis): that is the configuration the
+// roots install, so it alone has the genesis assignment id the first CloseLiability will name. A custody deployed with the id of the base
+// configuration does not know that assignment, and the shard halts at the first closure (P85 runs 25 and 26).
+// sealRegistryGenesisParam is registrygenesis.GenesisParam; the generator package is not imported by production code (registrygenesis' own guard test).
+const sealRegistryGenesisParam = "seal_registry_genesis"
+
+func requireFullShardConf(conf *types.PartitionDescriptionRecord) error {
+	if conf == nil || conf.PartitionParams[sealRegistryGenesisParam] == "" {
+		return fmt.Errorf("%w: the shard configuration carries no %s: it is the base configuration, whose genesis assignment id is not the one the roots close; pass the full configuration `ubft engine-api genesis --full-shard-conf` wrote",
+			ErrPosRelayer, sealRegistryGenesisParam)
+	}
+	return nil
+}
+
+// verifyPosGenesis checks a contracts genesis input against the final full shard configuration: its assignment id must be the one the plan yields
+// over that configuration.
+func verifyPosGenesis(plan posGenesisPlan, tb *types.RootTrustBaseV1, full *types.PartitionDescriptionRecord, contracts contractsGenesis) error {
+	if err := requireFullShardConf(full); err != nil {
+		return err
+	}
+	_, _, want, err := buildPosGenesis(plan, tb, full)
+	if err != nil {
+		return err
+	}
+	if !strings.EqualFold(want.AssignmentID, contracts.AssignmentID) {
+		return fmt.Errorf("%w: the contracts genesis names assignment %s, the full shard configuration's is %s: custody would not know the assignment the first closure names",
+			ErrPosRelayer, contracts.AssignmentID, want.AssignmentID)
+	}
+	return nil
+}
+
+func newPosVerifyGenesisCmd() *cobra.Command {
+	var planPath, trustBasePath, shardConfPath, contractsPath string
+	cmd := &cobra.Command{
+		Use:   "verify-genesis",
+		Short: "check a contracts genesis input against the final full shard configuration",
+		Long: "Recomputes the genesis assignment id from the plan and the FULL shard configuration (the one `ubft engine-api genesis --full-shard-conf` wrote and the\n" +
+			"roots install) and refuses a contracts genesis whose assignment id differs: custody would be deployed without the assignment the first closure names.",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			var plan posGenesisPlan
+			var contracts contractsGenesis
+			for path, into := range map[string]any{planPath: &plan, contractsPath: &contracts} {
+				raw, err := os.ReadFile(path) // #nosec G304 -- operator supplied local file
+				if err != nil {
+					return errors.Join(ErrPosRelayer, err)
+				}
+				if err := json.Unmarshal(raw, into); err != nil {
+					return errors.Join(ErrPosRelayer, err)
+				}
+			}
+			tb, err := readTrustBase(trustBasePath)
+			if err != nil {
+				return err
+			}
+			conf, err := readShardConf(shardConfPath)
+			if err != nil {
+				return err
+			}
+			if err := verifyPosGenesis(plan, tb, conf, contracts); err != nil {
+				return err
+			}
+			cmd.PrintErrf("genesis assignment %s is the full shard configuration's\n", contracts.AssignmentID)
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&planPath, "plan", "", "the genesis plan (JSON)")
+	cmd.Flags().StringVar(&trustBasePath, "trust-base", "", "the genesis root trust base")
+	cmd.Flags().StringVar(&shardConfPath, "shard-conf", "", "the FULL shard configuration (base plus seal_registry_genesis)")
+	cmd.Flags().StringVar(&contractsPath, "contracts-genesis", "", "the contracts genesis input written by `pos-relayer genesis --out-contracts`")
+	for _, f := range []string{"plan", "trust-base", "shard-conf", "contracts-genesis"} {
+		_ = cmd.MarkFlagRequired(f)
+	}
+	return cmd
+}
+
+func newPosGenesisCmd() *cobra.Command {
+	var planPath, trustBasePath, shardConfPath, identitiesOut, contractsOut string
+	var provisional bool
+	cmd := &cobra.Command{
+		Use:   "genesis",
+		Short: "derive the proof-of-stake genesis committee's root-side identity records and the contracts genesis input from one plan",
+		Long: "The plan names the bonded genesis identities (custody numbers them 1..N and seeds one lot each). The command writes the identity\n" +
+			"records `root-node run --pos-genesis-identities` records as the incumbent K, and the file unicity-pos-contracts script/p85-genesis.sh\n" +
+			"deploys the genesis state from, whose assignment id is the assignment hash of the genesis shard configuration over those records.\n" +
+			"The records are checked against the genesis trust base and shard configuration like any candidate's.",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			raw, err := os.ReadFile(planPath) // #nosec G304 -- operator supplied local file
+			if err != nil {
+				return errors.Join(ErrPosRelayer, err)
+			}
+			var plan posGenesisPlan
+			if err := json.Unmarshal(raw, &plan); err != nil {
+				return errors.Join(ErrPosRelayer, err)
+			}
+			tb, err := readTrustBase(trustBasePath)
+			if err != nil {
+				return err
+			}
+			conf, err := readShardConf(shardConfPath)
+			if err != nil {
+				return err
+			}
+			if !provisional {
+				if err := requireFullShardConf(conf); err != nil {
+					return err
+				}
+			}
+			ids, assignment, out, err := buildPosGenesis(plan, tb, conf)
+			if err != nil {
+				return err
+			}
+			if err := writeJSONFile(identitiesOut, ids); err != nil {
+				return err
+			}
+			cmd.PrintErrf("genesis assignment id 0x%x\n", assignment)
+			return writeRelayerJSON(contractsOut, out)
+		},
+	}
+	cmd.Flags().StringVar(&planPath, "plan", "", "the genesis plan (JSON)")
+	cmd.Flags().StringVar(&trustBasePath, "trust-base", "", "the genesis root trust base")
+	cmd.Flags().StringVar(&shardConfPath, "shard-conf", "", "the coupled EVM shard's genesis (full) shard configuration")
+	cmd.Flags().StringVar(&identitiesOut, "out-identities", "", "root-side identity records (for --pos-genesis-identities)")
+	cmd.Flags().StringVar(&contractsOut, "out-contracts", "", "input of unicity-pos-contracts script/p85-genesis.sh")
+	cmd.Flags().BoolVar(&provisional, "provisional", false, "accept the base shard configuration (a first pass whose assignment id is NOT for deployment; `verify-genesis` against the full configuration decides)")
+	for _, f := range []string{"plan", "trust-base", "shard-conf", "out-identities", "out-contracts"} {
+		_ = cmd.MarkFlagRequired(f)
+	}
+	return cmd
 }

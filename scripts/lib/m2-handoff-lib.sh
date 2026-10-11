@@ -27,9 +27,16 @@ m2_wait_root_epoch() {
 m2_start_root() { # node installEpoch bootnode  (an empty install epoch starts a root that is not yet a member: a follower of the committee, as a joiner does before its Commit)
   local node=$1 epoch=$2 boot=$3 port pid i conf
   local -a shardConfArgs=(--shard-conf "$fullShardConf")
-  local -a bootArgs=()
+  local -a bootArgs=() installArgs=()
+  [ "$epoch" -lt 2 ] || installArgs=(--install-handoff-epoch "$epoch")   # the flag is refused below epoch 2: a root started at the genesis epoch (the joiner's follower) takes none
   [ -z "$boot" ] || bootArgs=(--bootnodes "$boot")   # the first root of a cold network has no bootnode, as at genesis
-  [ "${Q3_B1:-0}" != 1 ] || shardConfArgs+=(--q3-lane --genesis-identities test-nodes/genesis-identities.json)   # Q3 #50: the coupled runtime (verified history, install journal, V3 handoffs)
+  if [ "${Q3_B1:-0}" = 1 ] && [ "${P85_LANE:-0}" != 1 ]; then shardConfArgs+=(--q3-lane --genesis-identities test-nodes/genesis-identities.json); fi   # Q3 #50: the coupled runtime (verified history, install journal, V3 handoffs)
+  if [ "${P85_LANE:-0}" = 1 ]; then   # a restarted root of the proof-of-stake lane runs the same coupled runtime and P85 executor
+    # the flags come from the P85 library (its steps file sources it), called through a name the lane exports: the other lanes that source this
+    # file (the Q4 dry run resolves every command by name) need not carry the P85 library
+    declare -F "${M2_ROOT_FLAGS_FN:-}" >/dev/null || { echo "m2_start_root: the P85 lane's M2_ROOT_FLAGS_FN is not a defined function" >&2; return 1; }
+    shardConfArgs+=(--q3-lane $("$M2_ROOT_FLAGS_FN" "$node" "http://127.0.0.1:${rethEthBase:-18545}"))
+  fi
   port=$(m2_rpc_port "$node")
   if [ "${F8_MIXED_LANE:-0}" = 1 ]; then
     for conf in test-nodes/shard-conf-f8-a-left.json test-nodes/shard-conf-f8-a-right.json test-nodes/shard-conf-f8-b-left.json; do
@@ -41,7 +48,7 @@ m2_start_root() { # node installEpoch bootnode  (an empty install epoch starts a
     UBFT_Q4_SHIM_DIR="${Q4_SHIM_DIR:+$Q4_SHIM_DIR/root$node}" ${Q4_ROOT_BIN:-build/ubft} root-node run --home "test-nodes/root$node" \
       --address "/ip4/127.0.0.1/tcp/$(m2_p2p_port "$node")" \
       ${bootArgs[@]+"${bootArgs[@]}"} --trust-base test-nodes/trust-base.json \
-      "${shardConfArgs[@]}" --profile-2 ${epoch:+--install-handoff-epoch "$epoch"} \
+      "${shardConfArgs[@]}" --profile-2 ${installArgs[@]+"${installArgs[@]}"} \
       --rpc-server-address "127.0.0.1:$port" --log-format text --log-level debug \
       >>"test-nodes/root$node/debug.log" 2>&1 &
     pid=$!
