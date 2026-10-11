@@ -127,7 +127,7 @@ function start_root_nodes() {
       if [ "${P85_LANE:-0}" = 1 ]; then
         # proof of stake (briefs/p85-recovery-lane.md): the coupled runtime, the P85 control executor and the genesis committee as K
         source scripts/lib/p85-lib.sh
-        profileArgs+=($(p85_root_flags "$i" "http://127.0.0.1:$((rethEthBase + i - 1))"))
+        profileArgs+=($(p85_root_flags "$i" "http://127.0.0.1:$((${rethEthBase:-18545} + i - 1))"))
       fi
       # Under the handoff profile PUT /api/v1/configurations is refused (#329): the genesis shard
       # configurations are fixed at start, so hand every one of them over by flag.
