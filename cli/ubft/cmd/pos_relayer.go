@@ -16,6 +16,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/unicitynetwork/bft-core/registrygenesis"
 	"math/big"
 	"os"
 	"sort"
@@ -181,7 +182,7 @@ func newPosRelayerCmd() *cobra.Command {
 	assemble.Flags().StringSliceVar(&popFiles, "pop", nil, "a member's proof file from sign-pop (repeat)")
 	assemble.Flags().StringVar(&out, "out", "", "output file (default stdout)")
 
-	root.AddCommand(sign, assemble, newPosProposalCmd(), newPosCandidateCmd(), newPosTxCmd(), newPosGenesisCmd())
+	root.AddCommand(sign, assemble, newPosProposalCmd(), newPosCandidateCmd(), newPosTxCmd(), newPosGenesisCmd(), newPosVerifyGenesisCmd())
 	return root
 }
 
@@ -316,8 +317,81 @@ func buildPosGenesis(plan posGenesisPlan, tb *types.RootTrustBaseV1, conf *types
 	return ids, assignment, out, nil
 }
 
+// requireFullShardConf refuses a shard configuration that is not the FULL one (the base plus seal_registry_genesis): that is the configuration the
+// roots install, so it alone has the genesis assignment id the first CloseLiability will name. A custody deployed with the id of the base
+// configuration does not know that assignment, and the shard halts at the first closure (P85 runs 25 and 26).
+func requireFullShardConf(conf *types.PartitionDescriptionRecord) error {
+	if conf == nil || conf.PartitionParams[registrygenesis.GenesisParam] == "" {
+		return fmt.Errorf("%w: the shard configuration carries no %s: it is the base configuration, whose genesis assignment id is not the one the roots close; pass the full configuration `ubft engine-api genesis --full-shard-conf` wrote",
+			ErrPosRelayer, registrygenesis.GenesisParam)
+	}
+	return nil
+}
+
+// verifyPosGenesis checks a contracts genesis input against the final full shard configuration: its assignment id must be the one the plan yields
+// over that configuration.
+func verifyPosGenesis(plan posGenesisPlan, tb *types.RootTrustBaseV1, full *types.PartitionDescriptionRecord, contracts contractsGenesis) error {
+	if err := requireFullShardConf(full); err != nil {
+		return err
+	}
+	_, _, want, err := buildPosGenesis(plan, tb, full)
+	if err != nil {
+		return err
+	}
+	if !strings.EqualFold(want.AssignmentID, contracts.AssignmentID) {
+		return fmt.Errorf("%w: the contracts genesis names assignment %s, the full shard configuration's is %s: custody would not know the assignment the first closure names",
+			ErrPosRelayer, contracts.AssignmentID, want.AssignmentID)
+	}
+	return nil
+}
+
+func newPosVerifyGenesisCmd() *cobra.Command {
+	var planPath, trustBasePath, shardConfPath, contractsPath string
+	cmd := &cobra.Command{
+		Use:   "verify-genesis",
+		Short: "check a contracts genesis input against the final full shard configuration",
+		Long: "Recomputes the genesis assignment id from the plan and the FULL shard configuration (the one `ubft engine-api genesis --full-shard-conf` wrote and the\n" +
+			"roots install) and refuses a contracts genesis whose assignment id differs: custody would be deployed without the assignment the first closure names.",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			var plan posGenesisPlan
+			var contracts contractsGenesis
+			for path, into := range map[string]any{planPath: &plan, contractsPath: &contracts} {
+				raw, err := os.ReadFile(path) // #nosec G304 -- operator supplied local file
+				if err != nil {
+					return errors.Join(ErrPosRelayer, err)
+				}
+				if err := json.Unmarshal(raw, into); err != nil {
+					return errors.Join(ErrPosRelayer, err)
+				}
+			}
+			tb, err := readTrustBase(trustBasePath)
+			if err != nil {
+				return err
+			}
+			conf, err := readShardConf(shardConfPath)
+			if err != nil {
+				return err
+			}
+			if err := verifyPosGenesis(plan, tb, conf, contracts); err != nil {
+				return err
+			}
+			cmd.PrintErrf("genesis assignment %s is the full shard configuration's\n", contracts.AssignmentID)
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&planPath, "plan", "", "the genesis plan (JSON)")
+	cmd.Flags().StringVar(&trustBasePath, "trust-base", "", "the genesis root trust base")
+	cmd.Flags().StringVar(&shardConfPath, "shard-conf", "", "the FULL shard configuration (base plus seal_registry_genesis)")
+	cmd.Flags().StringVar(&contractsPath, "contracts-genesis", "", "the contracts genesis input written by `pos-relayer genesis --out-contracts`")
+	for _, f := range []string{"plan", "trust-base", "shard-conf", "contracts-genesis"} {
+		_ = cmd.MarkFlagRequired(f)
+	}
+	return cmd
+}
+
 func newPosGenesisCmd() *cobra.Command {
 	var planPath, trustBasePath, shardConfPath, identitiesOut, contractsOut string
+	var provisional bool
 	cmd := &cobra.Command{
 		Use:   "genesis",
 		Short: "derive the proof-of-stake genesis committee's root-side identity records and the contracts genesis input from one plan",
@@ -342,6 +416,11 @@ func newPosGenesisCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			if !provisional {
+				if err := requireFullShardConf(conf); err != nil {
+					return err
+				}
+			}
 			ids, assignment, out, err := buildPosGenesis(plan, tb, conf)
 			if err != nil {
 				return err
@@ -358,6 +437,7 @@ func newPosGenesisCmd() *cobra.Command {
 	cmd.Flags().StringVar(&shardConfPath, "shard-conf", "", "the coupled EVM shard's genesis (full) shard configuration")
 	cmd.Flags().StringVar(&identitiesOut, "out-identities", "", "root-side identity records (for --pos-genesis-identities)")
 	cmd.Flags().StringVar(&contractsOut, "out-contracts", "", "input of unicity-pos-contracts script/p85-genesis.sh")
+	cmd.Flags().BoolVar(&provisional, "provisional", false, "accept the base shard configuration (a first pass whose assignment id is NOT for deployment; `verify-genesis` against the full configuration decides)")
 	for _, f := range []string{"plan", "trust-base", "shard-conf", "out-identities", "out-contracts"} {
 		_ = cmd.MarkFlagRequired(f)
 	}

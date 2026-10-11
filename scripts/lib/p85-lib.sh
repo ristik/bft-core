@@ -32,7 +32,8 @@ p85_prepare_genesis() {
   chain=$(python3 -c "import json;print(json.load(open('$conf'))['partitionParams']['chain_id'])" 2>/dev/null) || chain=${chainID:-31337}
   mkdir -p "$P85_DIR"
   python3 scripts/p85-genesis-plan.py test-nodes/trust-base.json "$conf" "$P85_BOND_UNIT" "$P85_GENESIS_UNITS" >"$P85_DIR/plan.json" || return 1
-  build/ubft pos-relayer genesis --plan "$P85_DIR/plan.json" --trust-base test-nodes/trust-base.json --shard-conf "$conf" \
+  # the first pass runs on the base configuration (the full one does not exist yet): provisional, its id is replaced by p85_reconcile_genesis_assignment
+  build/ubft pos-relayer genesis ${P85_GENESIS_CONF:---provisional} --plan "$P85_DIR/plan.json" --trust-base test-nodes/trust-base.json --shard-conf "$conf" \
     --out-identities "$P85_DIR/genesis-identities.json" --out-contracts "$P85_DIR/contracts-genesis.json" 2>"$P85_DIR/genesis-assignment.txt" || return 1
   local IFS=, caps
   read -r -a caps <<<"$P85_CAPS"
@@ -68,6 +69,8 @@ p85_reconcile_genesis_assignment() { # the funded genesis source (without the P8
   [ "$(grep -o '0x[0-9a-fA-F]\{64\}' "$P85_DIR/genesis-assignment.txt" | head -1)" = "$want" ] || p85_die "the prepared genesis does not carry $want" || return 1
 }
 p85_assert_full_conf() { # the full configuration the real genesis wrote must be the one the id was taken from
+  build/ubft pos-relayer verify-genesis --plan "$P85_DIR/plan.json" --trust-base test-nodes/trust-base.json --shard-conf "$1" \
+    --contracts-genesis "$P85_DIR/contracts-genesis.json" 2>&1 | tail -n 1 || return 1
   cmp -s "$1" "$P85_DIR/reconcile/full-shard-conf.json" || p85_die "the full shard configuration changed after the genesis assignment was fixed (the P85 accounts moved seal_registry_genesis?)" || return 1
 }
 

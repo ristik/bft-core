@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"encoding/hex"
+	"github.com/unicitynetwork/bft-core/registrygenesis"
 	"os"
 	"path/filepath"
 	"strings"
@@ -134,4 +135,37 @@ func TestThePoSGenesisPlanIsWithinTheWeightCap(t *testing.T) {
 			require.ErrorIs(t, err, evmassign.ErrIdentity, "units %d", units)
 		}
 	}
+}
+
+// A custody deployed with the genesis assignment id of the BASE shard configuration does not know the assignment the roots close (their
+// installed configuration is the full one): the shard halts at the first CloseLiability (P85 runs 25 and 26). The tooling refuses both ways.
+func TestTheGenesisAssignmentMustBeTheFullShardConfigurationsOrTheToolingRefuses(t *testing.T) {
+	d := newGenesisDeployment(t)
+	plan := posPlan(d)
+	base := d.conf
+	full := *base
+	full.PartitionParams = map[string]string{registrygenesis.GenesisParam: strings.Repeat("ab", 32)}
+	for k, v := range base.PartitionParams {
+		full.PartitionParams[k] = v
+	}
+
+	require.ErrorIs(t, requireFullShardConf(base), ErrPosRelayer, "the base configuration has no seal_registry_genesis")
+	require.NoError(t, requireFullShardConf(&full))
+	require.ErrorIs(t, requireFullShardConf(nil), ErrPosRelayer)
+
+	_, fromBase, baseOut, err := buildPosGenesis(plan, d.tb, base)
+	require.NoError(t, err)
+	_, fromFull, fullOut, err := buildPosGenesis(plan, d.tb, &full)
+	require.NoError(t, err)
+	require.NotEqual(t, fromBase, fromFull, "the two configurations are two assignments: that is the footgun")
+
+	require.NoError(t, verifyPosGenesis(plan, d.tb, &full, fullOut), "the id of the full configuration verifies")
+	err = verifyPosGenesis(plan, d.tb, &full, baseOut)
+	require.ErrorIs(t, err, ErrPosRelayer, "a contracts genesis prepared from the base configuration is refused")
+	require.Contains(t, err.Error(), baseOut.AssignmentID)
+	require.Contains(t, err.Error(), fullOut.AssignmentID)
+	tampered := fullOut
+	tampered.AssignmentID = "0x" + strings.Repeat("00", 32)
+	require.ErrorIs(t, verifyPosGenesis(plan, d.tb, &full, tampered), ErrPosRelayer)
+	require.ErrorIs(t, verifyPosGenesis(plan, d.tb, base, baseOut), ErrPosRelayer, "a genesis that agrees with the BASE configuration is still refused: it is not the one the roots install")
 }
