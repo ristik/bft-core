@@ -1,4 +1,6 @@
 import http.client
+import http.server
+import shutil
 import json
 import os
 import subprocess
@@ -11,6 +13,7 @@ from unittest.mock import patch
 import gateway
 import generate
 import pos
+import metrics_relay
 
 class FakeRelay:
     def __init__(self): self.calls=[]
@@ -183,6 +186,77 @@ class ProofOfStake(unittest.TestCase):
         d=pos.Genesis.__new__(pos.Genesis);d.deployment={'custody':'0xaa','custodyCodeHash':'0xdead','election':'0xaa','electionCodeHash':'0xabcd'}
         with patch('pos.subprocess.run',return_value=R):
             with self.assertRaisesRegex(pos.PosError,'custody code'): d.alloc_code_hashes(genesis)
+
+class EntityNamespace(unittest.TestCase):
+    def cfg(self,n=4):
+        tmp=tempfile.mkdtemp();self.addCleanup(shutil.rmtree,tmp)
+        out=Path(tmp)/'tn-fixture';out.mkdir();(out/'aggregator').mkdir()
+        (out/'aggregator/keys.json').write_text(json.dumps({'authKey':{'privateKey':'0x01'},'sigKey':{'privateKey':'0x02'}}))
+        images={k:'sha256:'+'a'*64 for k in ['node','rpc','guard','signer']}
+        return generate.topology(out,n,{'root':['r%d'%i for i in range(n)],'evm':['e%d'%i for i in range(n)]},images,'captcha'),out
+    def test_root_and_shard_of_one_entity_share_one_namespace_and_other_entities_do_not(self):
+        cfg,_=self.cfg();services=cfg['services']
+        for i in (1,2,3,4):
+            holder=services['pod%d'%i]
+            self.assertEqual(holder['networks'],{'validators':{'aliases':['root%d'%i,'shard%d'%i]}})
+            for name in ('root%d'%i,'shard%d'%i,'metrics%d'%i):
+                self.assertEqual(services[name]['network_mode'],'service:pod%d'%i);self.assertNotIn('networks',services[name])
+            for name in ('authority%d'%i,'ureth%d'%i):
+                self.assertNotIn('network_mode',services[name]);self.assertEqual(services[name]['networks'],['validators'])
+        joined=[n for n,s in services.items() if 'network_mode' in s]
+        self.assertEqual(sorted(joined),sorted(f'{k}{i}' for k in ('root','shard','metrics') for i in (1,2,3,4)))
+        self.assertEqual([n for n,s in services.items() if isinstance(s.get('networks'),dict)],['pod1','pod2','pod3','pod4'])
+        for name,svc in services.items():
+            if name.startswith(('pod','root','shard','metrics','authority','ureth')): self.assertNotIn('ports',svc)
+    def test_the_operator_listeners_bind_to_loopback_and_nothing_else_serves_them(self):
+        cfg,_=self.cfg(3)
+        for i in (1,2,3):
+            root=cfg['services']['root%d'%i]['entrypoint'];shard=cfg['services']['shard%d'%i]['entrypoint']
+            self.assertEqual(root[root.index('--rpc-server-address')+1],'127.0.0.1:8002')
+            self.assertEqual(shard[shard.index('--rpc-server-address')+1],'127.0.0.1:9101')
+        text=json.dumps(cfg)
+        self.assertNotIn('0.0.0.0:8002',text);self.assertNotIn('0.0.0.0:9101',text)
+    def test_prometheus_scrapes_the_relay_not_the_loopback_listeners(self):
+        source=Path(generate.__file__).read_text()
+        self.assertIn("'/root/metrics'",source);self.assertIn("'/shard/metrics'",source);self.assertNotIn("f'root{i}:8002'",source);self.assertNotIn("f'shard{i}:9101'",source)
+    def test_compose_accepts_the_namespace_topology(self):
+        if shutil.which('docker') is None: self.skipTest('no docker CLI')
+        cfg,out=self.cfg(3);generate.write(out/'compose.yaml',cfg)
+        done=subprocess.run(['docker','compose','-f',str(out/'compose.yaml'),'config','--format','json'],capture_output=True,text=True)
+        self.assertEqual(done.returncode,0,done.stderr)
+        rendered=json.loads(done.stdout)['services']
+        self.assertEqual(rendered['root1']['network_mode'],'service:pod1')
+        self.assertEqual(rendered['pod1']['networks']['validators']['aliases'],['root1','shard1'])
+
+class MetricsRelay(unittest.TestCase):
+    def setUp(self):
+        seen=self.seen=[]
+        class Upstream(http.server.BaseHTTPRequestHandler):
+            def do_GET(h):
+                seen.append((h.path,dict(h.headers)));body=b'metric 1\n'
+                h.send_response(200);h.send_header('Content-Length',str(len(body)));h.end_headers();h.wfile.write(body)
+            def log_message(h,*a): pass
+        self.up=http.server.HTTPServer(('127.0.0.1',0),Upstream);threading.Thread(target=self.up.serve_forever,daemon=True).start()
+        self.addCleanup(self.up.shutdown)
+        base='http://127.0.0.1:%d'%self.up.server_address[1]
+        patcher=patch.object(metrics_relay,'ROUTES',{'/root/metrics':base+'/api/v1/metrics','/shard/metrics':base+'/api/v1/metrics'});patcher.start();self.addCleanup(patcher.stop)
+        self.relay=http.server.ThreadingHTTPServer(('127.0.0.1',0),metrics_relay.Handler);threading.Thread(target=self.relay.serve_forever,daemon=True).start()
+        self.addCleanup(self.relay.shutdown)
+    def request(self,method,path,headers=None,body=None):
+        conn=http.client.HTTPConnection('127.0.0.1',self.relay.server_address[1],timeout=3);conn.request(method,path,body,headers or {})
+        r=conn.getresponse();data=r.read();conn.close();return r.status,data
+    def test_only_the_two_metrics_paths_by_get_reach_the_node(self):
+        self.assertEqual(self.request('GET','/root/metrics'),(200,b'metric 1\n'))
+        self.assertEqual(self.request('GET','/shard/metrics')[0],200)
+        for path in ('/','/api/v1/metrics','/api/v1/handoff/plan','/root/metrics?x=1','/root/metrics/','/ROOT/metrics','/root/metrics/..','/root/../api/v1/handoff/abort','/q3/status'):
+            self.assertEqual(self.request('GET',path)[0],404,path)
+        for method in ('POST','PUT','DELETE','PATCH','OPTIONS'):
+            self.assertEqual(self.request(method,'/root/metrics',{'Content-Type':'application/json'},'{}')[0],405,method)
+        self.assertEqual([p for p,_ in self.seen],['/api/v1/metrics']*2,'only the fixed metrics URL was ever requested')
+    def test_nothing_the_client_sends_reaches_the_node(self):
+        self.request('GET','/root/metrics',{'Origin':'http://evil','Content-Type':'application/json','X-Forwarded-For':'127.0.0.1','Cookie':'a=b'})
+        headers={k.lower() for k in self.seen[0][1]}
+        self.assertFalse(headers&{'origin','content-type','x-forwarded-for','cookie'},headers)
 
 class PublicRPC(unittest.TestCase):
     def setUp(self):
