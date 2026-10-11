@@ -137,7 +137,7 @@ q3_install_n() { # epoch: the installation barrier of epoch N; no certificate of
   q3_history_ids "$Q3_DIR/history-ids-epoch${epoch}.txt"
 }
 
-q3_activation_n() { # n epoch: the committed activation record of epoch N; its Commit is the previous (weighted, scheme 2) committee's proof
+q3_activation_n() { # n epoch: the committed activation record of epoch N; its Commit is the previous committee's proof, by default weighted (scheme 2); Q3_COMMIT_SCHEME=1 when the previous committee is the genesis one (legacy)
   local n=$1 epoch=$2 rec="$Q3_DIR/activation-record-$2.json" astar amin first total
   q3_x build/ubft root handoff q3-activation --root-rpc "$(h3_rpc_url "$(h3_first_root)")" --epoch "$epoch" --out "$rec" || return 1
   [ "$(jq -r .epoch "$rec")" = "$epoch" ] || { echo "activation epoch is not $epoch" >&2; return 1; }
@@ -148,10 +148,10 @@ q3_activation_n() { # n epoch: the committed activation record of epoch N; its C
   first=$(jq -r .round "$Q3_DIR/first-epoch${epoch}-certificate.json")
   [ "$first" -ge "$astar" ] || { echo "first epoch-$epoch certificate round $first is below A*=$astar" >&2; return 1; }
   # the Commit is verified under the PREVIOUS epoch: its weighted committee (W=9, Q=7) under scheme 2
-  [ "$(jq -r '.commit.scheme' "$rec")" = 2 ] || { echo "the Commit of epoch $epoch is not a scheme-2 proof" >&2; return 1; }
+  [ "$(jq -r '.commit.scheme' "$rec")" = "${Q3_COMMIT_SCHEME:-2}" ] || { echo "the Commit of epoch $epoch is not a scheme-${Q3_COMMIT_SCHEME:-2} proof" >&2; return 1; }
   [ "$(jq -r '.commit.epoch' "$rec")" = "$((epoch - 1))" ] || { echo "the Commit of epoch $epoch is not the previous committee's" >&2; return 1; }
   jq '.commit.signers' "$rec" >"$Q3_DIR/old-commit-signers-$epoch.json"
   total=$(q3_check_weights cert "$Q3_DIR/old-commit-signers-$epoch.json" "$Q3_TOTAL_WEIGHT" "$Q3_ROOT_QUORUM") || return 1
-  printf 'E=%s\nA_min=%s\nA*=%s\nactivationCommitId=%s\nv3BodyId=%s\nfirst epoch-%s certificate round=%s\nCommit signed by weight %s of %s (quorum %s) under scheme 2\n' \
-    "$epoch" "$amin" "$astar" "$(jq -r .activationCommitId "$rec")" "$(jq -r .v3BodyId "$rec")" "$epoch" "$first" "$total" "$Q3_TOTAL_WEIGHT" "$Q3_ROOT_QUORUM" >"$Q3_DIR/activation-coordinates-$epoch.txt"
+  printf 'E=%s\nA_min=%s\nA*=%s\nactivationCommitId=%s\nv3BodyId=%s\nfirst epoch-%s certificate round=%s\nCommit signed by weight %s of %s (quorum %s) under scheme %s\n' \
+    "$epoch" "$amin" "$astar" "$(jq -r .activationCommitId "$rec")" "$(jq -r .v3BodyId "$rec")" "$epoch" "$first" "$total" "$Q3_TOTAL_WEIGHT" "$Q3_ROOT_QUORUM" "${Q3_COMMIT_SCHEME:-2}" >"$Q3_DIR/activation-coordinates-$epoch.txt"
 }

@@ -305,7 +305,7 @@ p85_handoff() {
 p85_install_activation() {
   H3_ROOTS="1 2 3 4 5"
   q3_install_n 2 || return 1
-  Q3_TOTAL_WEIGHT=4 Q3_ROOT_QUORUM=3 q3_activation_n 1 2 || return 1   # epoch 2's Commit is K's (W=4, quorum 3)
+  Q3_COMMIT_SCHEME=1 Q3_TOTAL_WEIGHT=4 Q3_ROOT_QUORUM=3 q3_activation_n 1 2 || return 1   # epoch 2's Commit is the genesis K's (legacy scheme 1, W=4, quorum 3)
   # activated, not acknowledged: the registry has not moved, and custody's last acknowledged assignment is still K's
   h3_registry_is 0 1 || h3_registry_is 0 2 || { echo "the registry moved before J was acknowledged" >&2; return 1; }
 }
