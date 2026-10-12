@@ -32,6 +32,7 @@ selftest() {
   lane_pass "$LANE selftest: no script stops processes by name"
 }
 preflight() {
+  LANE_HOLDS_LOCK=${M2_LANE_LOCKED:-0}
   lane_preflight "${M2_URETH_BIN:-}" "$M2_URETH_COMMIT" "${M2_DEV_RUN:-0}" "${M2_URETH_ATTESTED_PROVENANCE:-}"
   lane_pass "$LANE preflight: tools, lock helper, Ureth $LANE_URETH_COMMIT, build/ubft; $LANE_RUN_MODE"
 }

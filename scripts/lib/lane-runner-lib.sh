@@ -23,7 +23,8 @@ lane_sha256() { if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | a
 lane_preflight() {
   local bin=$1 commit=$2 dev=${3:-0} provenance=${4:-} missing=() c reported got attested head
   for c in git go jq curl python3 awk tee lsof openssl make mktemp rsync; do command -v "$c" >/dev/null 2>&1 || missing+=("$c"); done
-  [ -x "$AGRE_ROOT/briefs/devnet-lock.sh" ] || missing+=("$AGRE_ROOT/briefs/devnet-lock.sh")
+  # the lock helper is needed only to TAKE the lock: a caller that already holds it, or a dedicated host (LANE_HOLDS_LOCK=1), needs none
+  [ "${LANE_HOLDS_LOCK:-0}" = 1 ] || [ -x "$AGRE_ROOT/briefs/devnet-lock.sh" ] || missing+=("$AGRE_ROOT/briefs/devnet-lock.sh")
   [ -n "$bin" ] && [ -x "$bin" ] || missing+=("the Ureth binary (a build carrying the fresh-B1 profile)")
   [ -n "$commit" ] || missing+=("the Ureth source commit")
   [ -x "$REPO_ROOT/build/ubft" ] || missing+=("build/ubft (make build)")

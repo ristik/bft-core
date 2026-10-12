@@ -34,6 +34,7 @@ selftest() {
   lane_pass "$LANE selftest: no script stops processes by name"
 }
 preflight() {
+  LANE_HOLDS_LOCK=${F8_LANE_LOCKED:-0}
   lane_preflight "${F8_URETH_BIN:-}" "$F8_URETH_COMMIT" "${F8_DEV_RUN:-0}" "${F8_URETH_ATTESTED_PROVENANCE:-}"
   lane_rugregator_preflight "${F8_DEV_RUN:-0}" "${RUGREGATOR_ATTESTED_PROVENANCE:-}"
   lane_pass "$LANE preflight: tools, lock helper, Ureth $LANE_URETH_COMMIT, rugregator $F8_RUGREGATOR_PIN (binary sha256 $LANE_RUGREGATOR_SHA256), build/ubft; $LANE_RUN_MODE"
