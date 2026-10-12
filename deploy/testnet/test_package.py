@@ -92,6 +92,10 @@ class ProofOfStake(unittest.TestCase):
         self.assertEqual(pos.CAPS,(16,1,6))
         self.assertLessEqual(2_281_165*125//100,pos.HOOK_RECORD_GAS)
         self.assertGreater(3_629_888*125//100,pos.HOOK_RECORD_GAS)
+    def test_pos_refuses_more_validators_than_the_caps_cover_before_any_key(self):
+        done=subprocess.run([sys.executable,str(Path(__file__).parent/'generate.py'),'--out','/nonexistent/tn-x','--validators',str(pos.CAPS[2]+1),'--ubft','x','--keygen','x','--b1genesis','x',
+            '--images','x','--captcha-sitekey','a','--captcha-secret-file','x','--pos','--pos-contracts','x'],text=True,capture_output=True)
+        self.assertEqual(done.returncode,2);self.assertIn('cover at most %d genesis identities'%pos.CAPS[2],done.stderr)
     def test_genesis_weights_default_to_one_and_nothing_else_is_buildable(self):
         self.assertEqual(pos.genesis_weights(4),[1,1,1,1]);self.assertEqual(pos.genesis_weights(3,['1','1','1']),[1,1,1])
         for bad,why in ((['1','1'],'one per identity'),(['0','1','1'],'positive'),(['2','1','1'],'stake == 1'),(['1','1','4'],'elected by a handoff')):
