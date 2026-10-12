@@ -61,6 +61,9 @@ func TestShardConfEndpointAndCommandReturnTheConfigurationTheRootHoldsForAShardE
 		written, err := os.ReadFile(out)
 		require.NoError(t, err)
 		require.JSONEq(t, string(wantJSON), string(written))
+		var encoded bytes.Buffer
+		require.NoError(t, json.NewEncoder(&encoded).Encode(want))
+		require.Equal(t, encoded.String(), string(written), "the same bytes `go run ./scripts/h3-pdr` printed (json.Encoder of the same value)")
 		var decoded types.PartitionDescriptionRecord
 		require.NoError(t, json.Unmarshal(written, &decoded))
 		require.Equal(t, want.EpochStart, decoded.EpochStart)
