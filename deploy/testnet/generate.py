@@ -142,12 +142,18 @@ def main():
     p.add_argument('--offline-validation',action='store_true',help='native ceremony with fixture images; output CANNOT be deployed')
     p.add_argument('--pos',action='store_true',help='the proof-of-stake profile: the contracts genesis (custody, election, evidence) in the EVM genesis, the roots on the P85 flags')
     p.add_argument('--pos-contracts',type=Path,help='a clean unicity-pos-contracts checkout at the pinned commit (needs forge on PATH)')
+    p.add_argument('--pos-weights',default=None,help='proof-of-stake genesis weights, comma separated, one per validator (default all 1; the genesis rules accept only 1, see pos.genesis_weights)')
     p.add_argument('--pos-cadence-rounds',type=int,default=pos.CADENCE_ROUNDS,help='election cadence: ordinary root rounds after the last acknowledged rotation')
     p.add_argument('--pos-cadence-seconds',type=int,default=pos.CADENCE_SECONDS,help='election cadence: UC seconds after the last acknowledged rotation')
     p.add_argument('--captcha-sitekey',required=True)
     p.add_argument('--captcha-secret-file',required=True,type=Path)
     a=p.parse_args()
     if a.pos and a.pos_contracts is None: p.error('--pos needs --pos-contracts')
+    if a.pos_weights is not None and not a.pos: p.error('--pos-weights needs --pos')
+    weights=None
+    if a.pos:
+        try: weights=pos.genesis_weights(a.validators,None if a.pos_weights is None else a.pos_weights.split(','))   # refused before any key is generated
+        except (pos.PosError,ValueError) as e: p.error(str(e))
     if not 3 <= a.validators <= 32 or not 0 < a.chain_id < 2**53:
         p.error('validators must be 3..32; chain ID must be 1..2^53-1')
     out=a.out.resolve()
@@ -236,10 +242,11 @@ def main():
                 genesis.check_tools(PINS['contracts'])
                 # Owner, withdrawal and payee keys for every genesis identity, generated here and never shipped in network/ (the addresses are in pos-plan.json).
                 owners=json.loads(subprocess.check_output([str(a.keygen.resolve()),'owners',str(home/'pos-owner-keys'),str(a.validators)],text=True))
-                genesis.plan(trust,home/'shard-conf-8_0.json',owners)
+                genesis.plan(trust,home/'shard-conf-8_0.json',owners,weights)
                 genesis.prepare(home/'shard-conf-8_0.json',provisional=True)
             profile_out=cli('engine-api','b1-profile','--shard-conf',home/'shard-conf-8_0.json','--trust-base',trust,'--w-cert',W_CERT,'--out',home/'b1-profile.json',
-                *(pos.profile_args(genesis.deployment,genesis.dir/'elect-measurement.json') if genesis else []))
+                *(pos.profile_args(genesis.deployment,{'election':genesis.dir/'elect-measurement.json','hook':genesis.dir/'hook-measurement.jsonl'}) if genesis else []))
+            if genesis: print(genesis.check_hook_gas(home/'b1-profile.json'))
             flags=ureth_flags_of(profile_out)
             max_gas=int(json.loads((home/'b1-profile.json').read_text())['maxGas'])
             alloc=json.loads(subprocess.check_output([str(a.keygen.resolve()),str(home/'faucet-secrets')],text=True))

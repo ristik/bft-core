@@ -94,7 +94,7 @@ batches, 16 KiB bodies, 10 req/s per IP). Open nginx routing last.
 `ubft root handoff propose` calls every old root's operator endpoint from one process, which the namespace layout above forbids from outside an entity. `deploy/testnet/handoff_ops.py propose $G --ubft $UBFT --next-trust-base F [--next-evm-assignment F] [--readiness-receipts F,F] [--q3]` does the same phases from the host: it builds ONE plan request with the pinned `ubft root handoff plan-request` (the code `propose` uses), posts it to entity 1's root, distributes that exact plan as every other root's intent and asks every root to endorse it (retrying "before the handoff is prepared", re-planning a lapsed Prepare up to `--max-attempts`), each HTTP call made by a one-shot read-only helper container joined to that entity's namespace (`docker run --network container:<pod<i>>`; no mounts, no capabilities, no Docker socket in any node). It logs the request, plan and attempt hashes to `$G/handoff/log.jsonl`. Manual Abort: `handoff_ops.py abort $G -- --network N --old-epoch E ...` runs `ubft root handoff abort` by `docker compose exec` in each root (one local `--root-rpc` each) and collects the results. Readiness receipts need no wrapper: `docker compose exec root<i> ubft root handoff q3-readiness --root-rpc http://127.0.0.1:8002 --shard-rpc http://127.0.0.1:9101 ...` (in the root: it holds the entity's keys.json and now mounts that entity's Engine JWT read-only) (both are loopback in the shared namespace). **None of this has run on containers**; unit tests drive the wrapper against a fake transport and the helper against a local server.
 
 ## 5a. Proof-of-stake profile (groundwork for the isolated PoS rehearsal, [#437](https://github.com/ristik/bft-core/issues/437))
-The package can generate the PoS genesis instead of the PoA one: the contracts' genesis state (custody, election, evidence, selection, policy, reader) is allocated into
+The package can generate the PoS genesis instead of the PoA one: the contracts' genesis state (factory, custody and its genesis implementation `genesisImpl`, election, evidence, selection, policy, reader) is allocated into
 the EVM genesis, the b1-profile pins the records hook and the election to them, and the roots run on the P85 flags (`--pos-deployment`, `--pos-genesis-identities`,
 `--pos-evm-rpc`; they replace `--genesis-identities`). It is the P85 lane's genesis (`scripts/lib/p85-lib.sh`), with the lane's rule: **the custody names the genesis
 assignment id of the FULL shard configuration**, never of the base one. A custody deployed with the base configuration's id halts the shard at the first
@@ -118,6 +118,15 @@ when it had to prepare the contracts genesis again (it always does: the base id 
 `pos-contracts-genesis.json`, `pos-genesis-assignment.txt`. **Cadence:** the election is due 400 ordinary root rounds and 300 UC seconds after the last acknowledged rotation
 (`--pos-cadence-rounds`, `--pos-cadence-seconds`): the P85 lane's rehearsal values, not a testnet decision; set the rehearsal's own before generating. The weight-distance
 bound is the package's churn budget (1/2), committed in the shard configuration and in the contracts.
+
+**Caps and hook gas.** The election and the records hook are priced at the caps `vMax,lMax,nMax` = 16,1,6 (`pos.CAPS`; the lane's too). The generator measures the cold
+worst record of the records hook at them (`script/measure-hook-gas.sh`, passed to `b1-profile --hook-measurement`, which refuses a per-record reservation below 1.25 x
+the largest figure) and checks the finished profile against a second, fresh measurement (`ubft engine-api check-hook-gas`). 16,2,8 is refused: its RecoveryAck costs
+3,629,888 cold against the 3,000,000 reservation; raising the limit or keeping lower caps is the owner's decision (Q12), not a package default.
+
+**Weights.** `--pos-weights 1,1,1,1` (one per validator, trust-base order; default all 1) is the genesis weight of each identity: the bond units in the contracts genesis, the
+root member's weight and the EVM validator's weight, which must agree. The genesis rules only build 1: the shard configuration takes unit-stake validators (`node must have
+stake == 1`), so the generator refuses any other value before it generates a key, and says so. An unequal committee comes from a handoff whose candidate carries the weights.
 
 **Verify the ids once more on the shipped files, before `docker compose up`** (the generator did it; this is the independent check, and it needs no node):
 ```sh
