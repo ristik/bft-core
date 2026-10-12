@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -421,11 +422,16 @@ func TestB1RunFlags_EachRequirementIsEnforced(t *testing.T) {
 func electDeployment(t *testing.T, m b1state.ElectMeasurement) (*b1Deployment, b1state.Profile, b1ProfileFile) {
 	t.Helper()
 	d := newB1Deployment(t)
-	hooks := b1Hooks{RecordsCustody: [20]byte{0xc1}, HRecords: 2, HookRecordGas: 3_000_000, ElectionContract: [20]byte{0xe1}, Measurement: &m}
+	// the worst record measured cold at the caps is 2,400,000: with the margin that is exactly the 3,000,000 the deployment reserves
+	hm := b1state.HookMeasurement{V: 16, L: 2, C: 8, Gas: 2_400_000, Kind: "recovery"}
+	caps := b1state.ElectCaps{VMax: 16, LMax: 2, NMax: 8}
+	hooks := b1Hooks{RecordsCustody: [20]byte{0xc1}, HRecords: 2, HookRecordGas: 3_000_000, ElectionContract: [20]byte{0xe1}, Measurement: &m,
+		HookMeasurement: &hm, HookCaps: &caps}
 	p, err := deriveB1Profile(d.tb, d.conf, 1, 7_000_000, 1000, hooks)
 	require.NoError(t, err)
 	file := b1ProfileFileOf(p)
-	file.ElectMeasurement, file.ElectCaps = &m, &b1state.ElectCaps{VMax: 16, LMax: 2, NMax: 8}
+	file.ElectMeasurement, file.ElectCaps = &m, &caps
+	file.HookMeasurement, file.HookCaps = &hm, &caps
 	return d, p, file
 }
 
@@ -492,7 +498,8 @@ func TestB1Profile_TheHookFlagsGoTogether(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "m.json")
 	enc, _ := json.Marshal(m)
 	require.NoError(t, os.WriteFile(path, enc, 0o644))
-	ok, err := parseB1Hooks("0x00000000000000000000000000000000000000c1", 2, 3_000_000, "0x00000000000000000000000000000000000000e1", path, "16,2,8")
+	hookPath := writeHookLines(t, 16, 2, 8, 2_400_000)
+	ok, err := parseB1Hooks("0x00000000000000000000000000000000000000c1", 2, 3_000_000, "0x00000000000000000000000000000000000000e1", path, "16,2,8", hookPath)
 	require.NoError(t, err)
 	require.Equal(t, m, *ok.Measurement)
 	require.Equal(t, b1state.ElectCaps{VMax: 16, LMax: 2, NMax: 8}, *ok.Caps)
@@ -510,7 +517,7 @@ func TestB1Profile_TheHookFlagsGoTogether(t *testing.T) {
 		"malformed caps":                  {"0x00000000000000000000000000000000000000c1", uint32(2), uint64(1), "0x00000000000000000000000000000000000000e1", path, "16,2"},
 		"caps outside the domain":         {"0x00000000000000000000000000000000000000c1", uint32(2), uint64(1), "0x00000000000000000000000000000000000000e1", path, "16,3,8"},
 	} {
-		_, err := parseB1Hooks(args[0].(string), args[1].(uint32), args[2].(uint64), args[3].(string), args[4].(string), args[5].(string))
+		_, err := parseB1Hooks(args[0].(string), args[1].(uint32), args[2].(uint64), args[3].(string), args[4].(string), args[5].(string), hookPath)
 		require.Error(t, err, name)
 	}
 }
@@ -629,4 +636,138 @@ func TestB1ProfileFileMatchesTheGenesisToolsGolden(t *testing.T) {
 	require.NoError(t, json.Unmarshal(got, &a))
 	require.NoError(t, json.Unmarshal(want, &b))
 	require.Equal(t, b, a)
+}
+
+// writeHookLines writes the JSON lines of script/measure-hook-gas.sh for one (V, L, C): the four record kinds and the two election kinds. The largest record is the
+// recovery at `recovery`.
+func writeHookLines(t *testing.T, v, l, c uint32, recovery uint64) string {
+	t.Helper()
+	lines := ""
+	for _, k := range []struct {
+		kind string
+		gas  uint64
+	}{{"ack", recovery / 10}, {"stage", 188_794}, {"closure", recovery / 3}, {"recovery", recovery}, {"elect", recovery * 2}, {"elect-heavy", recovery * 3}} {
+		lines += fmt.Sprintf("{\"kind\":%q,\"v\":%d,\"l\":%d,\"c\":%d,\"cold_gas\":%d}\n", k.kind, v, l, c, k.gas)
+	}
+	path := filepath.Join(t.TempDir(), "hook.jsonl")
+	require.NoError(t, os.WriteFile(path, []byte(lines), 0o644))
+	return path
+}
+
+func TestHookMeasurement_TheLargestRecordIsKeptAndAPartialFileIsRefused(t *testing.T) {
+	m, err := readHookMeasurement(writeHookLines(t, 16, 2, 8, 3_629_888))
+	require.NoError(t, err)
+	require.Equal(t, b1state.HookMeasurement{V: 16, L: 2, C: 8, Gas: 3_629_888, Kind: "recovery"}, m, "the election kinds are not records and do not count")
+
+	dir := t.TempDir()
+	write := func(name, body string) string {
+		p := filepath.Join(dir, name)
+		require.NoError(t, os.WriteFile(p, []byte(body), 0o644))
+		return p
+	}
+	full := func(skip string) string {
+		out := ""
+		for _, k := range []string{"ack", "stage", "closure", "recovery"} {
+			if k != skip {
+				out += fmt.Sprintf("{\"kind\":%q,\"v\":16,\"l\":2,\"c\":8,\"cold_gas\":100000}\n", k)
+			}
+		}
+		return out
+	}
+	_, err = readHookMeasurement(write("no-recovery", full("recovery")))
+	require.ErrorContains(t, err, `no "recovery" record`, "the largest record cannot be left out")
+	_, err = readHookMeasurement(write("mixed", full("")+"{\"kind\":\"ack\",\"v\":32,\"l\":4,\"c\":10,\"cold_gas\":100000}\n"))
+	require.ErrorContains(t, err, "mixes caps")
+	_, err = readHookMeasurement(write("failed", full("")+"{\"kind\":\"elect\",\"v\":16,\"l\":2,\"c\":8,\"error\":\"no measurement\"}\n"))
+	require.ErrorContains(t, err, "is not a measurement")
+	_, err = readHookMeasurement(write("unknown field", "{\"kind\":\"ack\",\"v\":16,\"l\":2,\"c\":8,\"cold_gas\":1,\"x\":1}\n"))
+	require.Error(t, err)
+	_, err = readHookMeasurement(write("outside the domain", "{\"kind\":\"ack\",\"v\":16,\"l\":3,\"c\":8,\"cold_gas\":1}\n"))
+	require.Error(t, err)
+	_, err = readHookMeasurement(filepath.Join(dir, "missing"))
+	require.Error(t, err)
+}
+
+// The guard: the records hook's per-record reservation must cover the cold worst case at the deployment's caps with the margin. With the values merged
+// before this guard (3,000,000 at 16/2/8, where the RecoveryAck with a pending closure is 3,629,888 cold) the profile is refused.
+func TestB1Profile_TheHookReservationMustCoverTheMeasuredWorstRecordWithTheMargin(t *testing.T) {
+	d := newB1Deployment(t)
+	caps := b1state.ElectCaps{VMax: 16, LMax: 2, NMax: 8}
+	derive := func(gas uint64, hm *b1state.HookMeasurement, hc *b1state.ElectCaps) error {
+		_, err := deriveB1Profile(d.tb, d.conf, 1, 7_000_000, 1000, b1Hooks{RecordsCustody: [20]byte{0xc1}, HRecords: 2, HookRecordGas: gas, HookMeasurement: hm, HookCaps: hc})
+		return err
+	}
+	lane := b1state.HookMeasurement{V: 16, L: 2, C: 8, Gas: 3_629_888, Kind: "recovery"}
+	err := derive(3_000_000, &lane, &caps)
+	require.ErrorIs(t, err, b1state.ErrHookGas, "the lane's own caps with its 3,000,000 per record")
+	require.ErrorContains(t, err, "needs at least 4537360", "the message names the number to pin")
+	require.ErrorContains(t, err, "3629888")
+	require.NoError(t, derive(4_537_360, &lane, &caps), "exactly the measurement with the margin")
+	require.ErrorIs(t, derive(4_537_359, &lane, &caps), b1state.ErrHookGas, "one below it")
+	covered := b1state.HookMeasurement{V: 16, L: 1, C: 6, Gas: 2_281_165, Kind: "recovery"}
+	require.NoError(t, derive(3_000_000, &covered, &b1state.ElectCaps{VMax: 16, LMax: 1, NMax: 6}), "6 members of one lot fit 3,000,000 with the margin")
+
+	require.Error(t, derive(4_537_360, nil, &caps), "no measurement")
+	require.Error(t, derive(4_537_360, &lane, nil), "no caps")
+	require.ErrorIs(t, derive(4_537_360, &lane, &b1state.ElectCaps{VMax: 16, LMax: 2, NMax: 16}), b1state.ErrHookGas, "a measurement not at the deployed caps")
+	require.ErrorIs(t, derive(4_537_360, &lane, &b1state.ElectCaps{VMax: 16, LMax: 1, NMax: 8}), b1state.ErrHookGas)
+
+	// the file: a profile edited to a lower reservation, or stripped of its measurement, is refused when read
+	m := b1state.ElectMeasurement{V: 16, L: 2, C: 8, Gas: 4_987_664}
+	dd, _, file := electDeployment(t, m)
+	dd.writeFile(t, file)
+	_, err = readB1Profile(dd.profPath)
+	require.NoError(t, err, "the control: 3,000,000 against a recorded 2,400,000")
+	for name, change := range map[string]func(*b1ProfileFile){
+		"a lower reservation":     func(f *b1ProfileFile) { f.HookRecordGas = 2_999_999 },
+		"no recorded measurement": func(f *b1ProfileFile) { f.HookMeasurement = nil },
+		"no recorded caps":        func(f *b1ProfileFile) { f.HookCaps = nil },
+		"a larger recorded record": func(f *b1ProfileFile) {
+			f.HookMeasurement = &b1state.HookMeasurement{V: 16, L: 2, C: 8, Gas: 3_629_888, Kind: "recovery"}
+		},
+		"caps that moved": func(f *b1ProfileFile) { f.HookCaps = &b1state.ElectCaps{VMax: 16, LMax: 2, NMax: 7} },
+		"a measurement without a hook": func(f *b1ProfileFile) {
+			f.RecordsCustody, f.ElectionContract, f.HRecords, f.HookRecordGas, f.ElectGas = nil, nil, 0, 0, 0
+			f.ElectMeasurement, f.ElectCaps = nil, nil
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			dx, _, fx := electDeployment(t, m)
+			change(&fx)
+			dx.writeFile(t, fx)
+			_, err := readB1Profile(dx.profPath)
+			require.ErrorIs(t, err, ErrB1Profile)
+		})
+	}
+}
+
+func TestEngineAPICheckHookGas(t *testing.T) {
+	m := b1state.ElectMeasurement{V: 16, L: 2, C: 8, Gas: 4_987_664}
+	d, _, file := electDeployment(t, m)
+	d.writeFile(t, file)
+	run := func(fresh string) (string, error) {
+		cmd := engineAPICheckHookGasCmd()
+		var out bytes.Buffer
+		cmd.SetOut(&out)
+		cmd.SetArgs([]string{"--b1-profile", d.profPath, "--measurement", fresh})
+		err := cmd.Execute()
+		return out.String(), err
+	}
+	out, err := run(writeHookLines(t, 16, 2, 8, 2_400_000))
+	require.NoError(t, err)
+	require.Contains(t, out, "covers the fresh recovery record")
+	_, err = run(writeHookLines(t, 16, 2, 8, 2_399_000))
+	require.NoError(t, err, "the contracts got a little cheaper")
+	_, err = run(writeHookLines(t, 16, 2, 8, 2_400_001))
+	require.ErrorIs(t, err, b1state.ErrHookGas, "the contracts grew past the margin: raise the reservation and regenerate the profile")
+	_, err = run(writeHookLines(t, 16, 2, 8, 3_629_888))
+	require.ErrorIs(t, err, b1state.ErrHookGas)
+	for name, c := range map[string][3]uint32{"a larger V": {64, 2, 8}, "fewer lots": {16, 1, 8}, "a smaller committee": {16, 2, 4}} {
+		_, err = run(writeHookLines(t, c[0], c[1], c[2], 1_000_000))
+		require.ErrorIs(t, err, b1state.ErrHookGas, name+": not the deployed caps")
+	}
+	plain := newB1Deployment(t)
+	cmd := engineAPICheckHookGasCmd()
+	cmd.SetArgs([]string{"--b1-profile", plain.profPath, "--measurement", writeHookLines(t, 16, 2, 8, 1_000_000)})
+	require.Error(t, cmd.Execute(), "a profile with no records hook has nothing to check")
 }

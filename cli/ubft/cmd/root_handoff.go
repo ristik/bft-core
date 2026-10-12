@@ -441,9 +441,9 @@ func newPlanRequestCmd() *cobra.Command {
 			return os.WriteFile(out, append(request, '\n'), 0o600)
 		}}
 	cmd.Flags().StringVar(&nextFile, "next-trust-base", "", "next epoch trust base JSON")
-	cmd.Flags().StringVar(&nextEVMAssignment, "next-evm-assignment", "", "coupled validator assignment change (as `propose`)")
-	cmd.Flags().StringVar(&readinessReceipts, "readiness-receipts", "", "comma-separated readiness receipt files (as `propose`)")
-	cmd.Flags().BoolVar(&q3Plan, "q3", false, "plan as a V3 handoff without readiness receipts (as `propose`)")
+	cmd.Flags().StringVar(&nextEVMAssignment, "next-evm-assignment", "", "coupled validator assignment change (as for propose)")
+	cmd.Flags().StringVar(&readinessReceipts, "readiness-receipts", "", "comma-separated readiness receipt files (as for propose)")
+	cmd.Flags().BoolVar(&q3Plan, "q3", false, "plan as a V3 handoff without readiness receipts (as for propose)")
 	cmd.Flags().StringVar(&out, "out", "", "the request file to write")
 	_ = cmd.MarkFlagRequired("next-trust-base")
 	_ = cmd.MarkFlagRequired("out")
