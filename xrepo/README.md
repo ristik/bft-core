@@ -74,6 +74,15 @@ Not covered:
   through an Ack.
 - **ureth.** The execution client's hook is a third consumer of several of these files; it is not checked here.
 
+## When the other repository's main moves
+
+A merge to unicity-pos-contracts `main` that regenerates a contracts-produced fixture (`publication.json` changes whenever the deployed code does)
+makes the copies here stale, and blocks every open paired PR, until someone syncs. **The author of the producing change syncs, in the same sitting, in
+this order:** (1) merge the producer's change; (2) in the consuming repository, copy the file (`check.py --sync`), make its tests pass and move its pin
+to the producer's MERGED commit, and merge that; (3) in the producer's repository, move its pin to the consumer's merged commit. The same holds in the
+other direction for a file this repository produces. A paired PR that is open when this happens is updated from both mains first and then synced the
+same way; its two halves merge one right after the other, contracts first, so that no third change lands between them.
+
 ## Changing a shared word
 
 1. Change the producer and regenerate its file (the producer's test names the flag).
