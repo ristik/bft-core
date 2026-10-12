@@ -2,7 +2,7 @@ package bridgeprofile
 
 // The profile-v3 bounds are named parameters, defined only here and mirrored by
 // profile-v3.json limits. They bound the parsers; the 7,000,000 ordinary-capacity gate (gas.go)
-// admits or refuses each bundle (two anchors at the maximum sizes pass, five can never pass); a later
+// admits or refuses each bundle (after the repricing of owner-decisions section 22 realistic bundles pass at eight anchors, the maximum envelope no longer fits); a later
 // profile version raises them together with the budget.
 //
 // DEV-DEFAULT safety ceilings of design section "Plug-in verification" and
