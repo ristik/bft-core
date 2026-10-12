@@ -52,9 +52,10 @@ def write(path, obj):
 def topology(out, n, ids, images, captcha, ureth_flags=(), max_gas=30000000, with_pos=False):
     """JSON is a YAML subset, accepted directly by Docker Compose."""
     services = {}
-    def service(name, image, command, mounts=(), memory='256m', cpu=0.5, networks=None, **extra):
-        services[name] = dict(image=image, entrypoint=command, volumes=list(mounts),
-            networks=networks or ['validators'], restart='unless-stopped',
+    def service(name, image, command, mounts=(), memory='256m', cpu=0.5, networks=None, pod=None, **extra):
+        # `pod`: the service joins the network namespace of that holder (network_mode), so it has no networks or DNS name of its own
+        attach = {'network_mode':'service:'+pod} if pod else {'networks':networks or ['validators']}
+        services[name] = dict(image=image, entrypoint=command, volumes=list(mounts), **attach, restart='unless-stopped',
             mem_limit=memory, cpus=cpu, pids_limit=128, read_only=True,
             cap_drop=['ALL'], security_opt=['no-new-privileges:true'],
             stop_grace_period='60s', tmpfs=['/tmp:size=64m,mode=1777'], logging={'driver': 'json-file', 'options': {'max-size':'10m', 'max-file':'3'}}, **extra)
@@ -65,12 +66,19 @@ def topology(out, n, ids, images, captcha, ureth_flags=(), max_gas=30000000, wit
         auth = './validator%d/auth:/authority' % i
         evm = './validator%d/evm:/state' % i
         common = ['--trust-base', '/network/trust-base.json']
+        # One network namespace per validator ENTITY for its root and its shard node: the operator endpoints of both accept loopback peers only, so the existing
+        # q3-readiness (which needs both) runs inside the entity's namespace. The holder owns the namespace and the DNS names, so recreating a root (the install
+        # restart) or restarting the shard does not take the namespace down. Different entities stay in different namespaces; the authority (unix sockets), the
+        # execution client and every other service keep their own.
+        service('pod%d'%i, node, ['sleep','infinity'], memory='16m', cpu=0.05,
+            networks={'validators':{'aliases':['root%d'%i,'shard%d'%i]}}, init=True)   # sleep as PID 1 would ignore SIGTERM
+        service('metrics%d'%i, images['rpc'], ['python3','-u','metrics_relay.py'], memory='64m', cpu=0.1, pod='pod%d'%i)
         service('root%d'%i, node, ['ubft','root-node','run','--home','/state','--address','/ip4/0.0.0.0/tcp/8000',
             '--bootnodes', ','.join('/dns4/root%d/tcp/8000/p2p/%s' % (j,ids['root'][j-1]) for j in range(1,n+1) if j!=i),
             '--profile-2','--q3-lane'] + (pos.root_flags(i) if with_pos else ['--genesis-identities','/network/genesis-identities.json']) + [
             '--shard-conf','/network/full-shard-conf.json','--shard-conf','/network/aggregator-conf.json',
-            '--rpc-server-address','0.0.0.0:8002','--metrics','prometheus'] + common,
-            ['./validator%d/root:/state'%i,network], memory='384m')
+            '--rpc-server-address','127.0.0.1:8002','--metrics','prometheus'] + common,
+            ['./validator%d/root:/state'%i,network,'./validator%d/jwt:/jwt:ro'%i], memory='384m', pod='pod%d'%i)   # the entity's Engine JWT, read-only: q3-readiness runs in the root (it holds the entity's keys.json) and checks its own Engine endpoint
         service('authority%d'%i, node, ['ubft','signing-authority','run','--home','/authority',
             '--client-socket','/authority/client.sock','--operator-socket','/authority/operator.sock',
             '--operator-credential','/authority/operator.cred','--authority-id','paired-evm-%d'%i,
@@ -92,10 +100,10 @@ def topology(out, n, ids, images, captcha, ureth_flags=(), max_gas=30000000, wit
             '--engine-url','http://ureth%d:8551'%i,'--eth-url','http://ureth%d:8545'%i,
             '--jwt-secret','/jwt/jwt.hex','--engine-fee-collector',FEE,'--b1-profile','/network/b1-profile.json','--q3-lane',
             '--execution-journal','/state/execution-journal.db','--archive-store','/archive',
-            '--archive-prune','--journal-candidates','32','--trust-history-profile-2','--rpc-server-address','0.0.0.0:9101','--metrics','prometheus',
+            '--archive-prune','--journal-candidates','32','--trust-history-profile-2','--rpc-server-address','127.0.0.1:9101','--metrics','prometheus',
             '--signing-authority-socket','/authority/client.sock','--signing-authority-credential','/authority/client.cred']
             + common + sum((['--archive-replica',x] for x in replicas), []),
-            [evm,auth,network,'./validator%d/jwt:/jwt:ro'%i,'./validator%d/archive:/archive'%i],memory='512m',cpu=0.75)
+            [evm,auth,network,'./validator%d/jwt:/jwt:ro'%i,'./validator%d/archive:/archive'%i],memory='512m',cpu=0.75,pod='pod%d'%i)
     keys = json.loads((out/'aggregator/keys.json').read_text())
     # Runtime secrets are supplied through a private env file, not Compose's public manifest.
     env = {'AGGREGATOR_LISTEN':'0.0.0.0:8080','AGGREGATOR_BFT_MODE':'live','AGGREGATOR_PARTITION_ID':'9',
@@ -305,9 +313,10 @@ def main():
         (out/'metrics').mkdir()
         (out/'monitoring').mkdir()
         write(out/'monitoring/prometheus.json', {'global':{'scrape_interval':'15s'},'rule_files':['/etc/prometheus/alerts.json'],
-            'scrape_configs':[{'job_name':'root','metrics_path':'/api/v1/metrics',
-                'static_configs':[{'targets':[f'root{i}:8002' for i in range(1,a.validators+1)]}]},
-                {'job_name':'shard','metrics_path':'/api/v1/metrics','static_configs':[{'targets':[f'shard{i}:9101' for i in range(1,a.validators+1)]}]},
+            # the operator listeners are loopback-only: the pod's metrics relay serves the two metrics documents (exact paths, GET) on 9102
+            'scrape_configs':[{'job_name':'root','metrics_path':'/root/metrics',
+                'static_configs':[{'targets':[f'pod{i}:9102' for i in range(1,a.validators+1)]}]},
+                {'job_name':'shard','metrics_path':'/shard/metrics','static_configs':[{'targets':[f'pod{i}:9102' for i in range(1,a.validators+1)]}]},
                 {'job_name':'rpc','static_configs':[{'targets':['rpc:9090']}]}]})
         write(out/'monitoring/alerts.json', {'groups':[{'name':'testnet','rules':[
             {'alert':'TestnetTargetDown','expr':'up == 0','for':'1m','labels':{'severity':'page'},'annotations':{'summary':'Testnet target unavailable; contact duty operator'}},

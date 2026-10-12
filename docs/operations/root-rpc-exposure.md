@@ -8,9 +8,11 @@ implemented (owner decision for now: documentation and the warning only).
 ## How to keep it private
 
 1. **Bind to loopback**: `--rpc-server-address 127.0.0.1:PORT`. Operators then reach it over SSH (`ssh -L`) or from the host.
-2. **Containers**: the testnet binds `0.0.0.0` *inside* the container on an internal Docker network (`deploy/testnet`); that is acceptable only
-   while the port is not published to the host or the internet (`ports:` absent, no host networking). The start-up WARN fires there and is
-   expected; anything else that reaches that Docker network can call the endpoints.
+2. **Containers**: the testnet binds `127.0.0.1` (root 8002, shard 9101) and the root and shard node of each validator entity share one network namespace
+   (`deploy/testnet`: a holder container per entity), so nothing else on the Docker network can reach either listener, guarded or not; operators exec into the
+   entity (`docker compose exec`). The start-up WARN must therefore NOT appear there: if it does, the binding is wrong. Prometheus reads the two metrics documents
+   through a relay in the namespace that serves only those exact GET paths. (A package that binds `0.0.0.0` on a shared network would expose every endpoint
+   below, the unguarded writes included, to anything on that network.)
 3. **Firewall**: if the port must be reachable by other machines of the operator set (cross-host root clusters), allow only their addresses
    (security group / `iptables`), and put them on a private network, not the public one.
 4. **No reverse proxy in front of it, and never behind the public JSON-RPC gateway.** The handoff and Q3 operator endpoints decide "local" from the
@@ -34,7 +36,7 @@ authentication.
 | `POST /api/v1/handoff/q3-candidate` | loopback peer | Returns the V3 candidate this validator derives from its committed state. Registers nothing. |
 | `POST /api/v1/handoff/q3-stage` | loopback peer | Stages a candidate that is consistent with the root's own state (**no signatures are checked at staging**). Staging sets the grant of the records feed for the staged successor: a caller can give feed read access to any peer id, or replace a real joiner's grant until it is staged again (#527). The feed serves certified, non-secret data. An abandoned candidate keeps its grant until the next stage or install. |
 | `POST /api/v1/handoff/abort`, `/abort/status` | loopback peer | `SubmitHandoffAbort` makes **this validator sign an abort approval** for the pending handoff with its own key (`handoff_operator.go`) and feed it to the approval handler. A caller that gets past the guard on enough validators to reach the abort quorum **aborts the attempt** (not only delays it); it cannot make a handoff commit. |
-| `POST /api/v1/q3/status`, `/activation`, `/bundle`, `/history`, `/signers` | loopback peer | Read-only views of the verified Q3 history and the latest certificate signers. |
+| `POST /api/v1/q3/status`, `/activation`, `/bundle`, `/history`, `/signers`, `/shard-conf` | loopback peer | Read-only views of the verified Q3 history, the latest certificate signers, and (`/shard-conf`) the shard configuration the root's index holds for a partition's shard epoch (genesis and those derived from committed handoffs; a shard configuration holds no secret). |
 | `POST /api/v1/pos/control` (only with `--proof-of-stake`) | loopback peer | Offers a Retirement or RejectResult control for ordering; the root checks it against its own state like any other control. |
 
 Shard node (`--rpc-server-address`): `GET /api/v1/health` and `/api/v1/metrics` are read-only; `GET /api/v1/operator/status` is the archive/operator

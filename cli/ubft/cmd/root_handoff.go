@@ -196,46 +196,24 @@ func newRootCmd() *cobra.Command {
 		"old validators' endorsements of that Prepare-bound state. The plan names no EVM parent. Endorsements are refused until the Prepare\n" +
 		"is committed, so this command waits for it (--prepare-timeout); a Prepare that gets no Freeze within the lapse window is dead and the\n" +
 		"command must be run again for the next attempt.", RunE: func(cmd *cobra.Command, _ []string) error {
-		raw, err := os.ReadFile(nextFile)
-		if err != nil {
-			return err
-		}
-		var next types.RootTrustBaseV1
-		if err = json.Unmarshal(raw, &next); err != nil {
-			return err
-		}
 		var endpoints []string
 		for _, endpoint := range strings.Split(rootRPCs, ",") {
 			if endpoint = strings.TrimRight(strings.TrimSpace(endpoint), "/"); endpoint != "" {
 				endpoints = append(endpoints, endpoint)
 			}
 		}
+		request, epoch, err := buildPlanRequest(nextFile, nextEVMAssignment, readinessReceipts, q3Plan)
+		if err != nil {
+			return err
+		}
 		if len(endpoints) == 0 {
 			return errors.New("root RPC endpoints required")
 		}
 		client := &http.Client{Timeout: 5 * time.Second}
-		planRequest := rootHandoffPlanRequest{NextTrustBase: &next, Q3: q3Plan}
-		if nextEVMAssignment != "" {
-			if planRequest.EVMAssignment, err = readEVMAssignment(nextEVMAssignment); err != nil {
-				return err
-			}
-			if err = checkCoupledProposal(&next, planRequest.EVMAssignment); err != nil {
-				return err
-			}
-		}
-		if readinessReceipts != "" {
-			if planRequest.Q3Receipts, err = readQ3Receipts(splitList(readinessReceipts)); err != nil {
-				return err
-			}
-		}
-		request, err := json.Marshal(planRequest)
-		if err != nil {
-			return err
-		}
 		for attemptNo := 1; ; attemptNo++ {
 			accepted, err := proposeOnce(cmd.Context(), client, endpoints, request, prepareTimeout, attemptNo > 1)
 			if err == nil {
-				_, err = fmt.Fprintf(cmd.OutOrStdout(), "submitted %d root endorsements for epoch %d\n", accepted, next.Epoch)
+				_, err = fmt.Fprintf(cmd.OutOrStdout(), "submitted %d root endorsements for epoch %d\n", accepted, epoch)
 				return err
 			}
 			if !errors.Is(err, ErrHandoffLapsed) {
@@ -260,7 +238,7 @@ func newRootCmd() *cobra.Command {
 	propose.Flags().StringVar(&readinessReceipts, "readiness-receipts", "",
 		"comma-separated readiness receipt files of every successor member (`handoff q3-readiness`): the plan is then a V3 plan, and the root refuses it unless every member declared itself ready for exactly this candidate")
 	propose.Flags().BoolVar(&q3Plan, "q3", false, "plan as a V3 handoff without readiness receipts: only the exact recovery K takes none; the root refuses any other candidate without every member's receipt")
-	handoff.AddCommand(propose)
+	handoff.AddCommand(propose, newPlanRequestCmd())
 	handoff.AddCommand(newQ3CandidateCmd(), newQ3ReadinessCmd(), newQ3ActivationCmd())
 	handoff.AddCommand(newEVMContextCmd(), newEVMAuthorizationCmd(), newEVMPoPCmd(), newEVMAssembleCmd(), newShardAssembleCmd())
 	var networkID, oldEpoch, attempt uint64
@@ -416,6 +394,60 @@ func handoffPost(ctx context.Context, client *http.Client, url string, body []by
 		return json.NewDecoder(io.LimitReader(response.Body, 1<<20)).Decode(out)
 	}
 	return nil
+}
+
+// buildPlanRequest is the plan request `propose` sends to the first root: the next trust base, the coupled EVM assignment (checked against it), and the
+// readiness receipts as the V3 plan's encoded bytes. It does no network I/O, so an operator wrapper that cannot run `propose` in one process (the roots'
+// loopback-only endpoints are in different namespaces) builds the same request with `handoff plan-request` and performs the plan, intent and endorse phases itself.
+func buildPlanRequest(nextFile, nextEVMAssignment, readinessReceipts string, q3Plan bool) ([]byte, uint64, error) {
+	raw, err := os.ReadFile(nextFile) // #nosec G304 -- operator supplied local file
+	if err != nil {
+		return nil, 0, err
+	}
+	var next types.RootTrustBaseV1
+	if err = json.Unmarshal(raw, &next); err != nil {
+		return nil, 0, err
+	}
+	planRequest := rootHandoffPlanRequest{NextTrustBase: &next, Q3: q3Plan}
+	if nextEVMAssignment != "" {
+		if planRequest.EVMAssignment, err = readEVMAssignment(nextEVMAssignment); err != nil {
+			return nil, 0, err
+		}
+		if err = checkCoupledProposal(&next, planRequest.EVMAssignment); err != nil {
+			return nil, 0, err
+		}
+	}
+	if readinessReceipts != "" {
+		if planRequest.Q3Receipts, err = readQ3Receipts(splitList(readinessReceipts)); err != nil {
+			return nil, 0, err
+		}
+	}
+	request, err := json.Marshal(planRequest)
+	return request, next.Epoch, err
+}
+
+func newPlanRequestCmd() *cobra.Command {
+	var nextFile, nextEVMAssignment, readinessReceipts, out string
+	var q3Plan bool
+	cmd := &cobra.Command{Use: "plan-request", Short: "Write the plan request `propose` would send (no network)",
+		Long: "Builds and checks the plan request of a handoff exactly as `propose` does and writes it to --out. It contacts no node. A wrapper that\n" +
+			"runs the plan, intent and endorse phases itself (each inside one validator's network namespace) sends this file to the first root's\n" +
+			"/api/v1/handoff/plan, the returned plan to every other root's /intent, and then to every root's /endorse.",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			request, _, err := buildPlanRequest(nextFile, nextEVMAssignment, readinessReceipts, q3Plan)
+			if err != nil {
+				return err
+			}
+			return os.WriteFile(out, append(request, '\n'), 0o600)
+		}}
+	cmd.Flags().StringVar(&nextFile, "next-trust-base", "", "next epoch trust base JSON")
+	cmd.Flags().StringVar(&nextEVMAssignment, "next-evm-assignment", "", "coupled validator assignment change (as for propose)")
+	cmd.Flags().StringVar(&readinessReceipts, "readiness-receipts", "", "comma-separated readiness receipt files (as for propose)")
+	cmd.Flags().BoolVar(&q3Plan, "q3", false, "plan as a V3 handoff without readiness receipts (as for propose)")
+	cmd.Flags().StringVar(&out, "out", "", "the request file to write")
+	_ = cmd.MarkFlagRequired("next-trust-base")
+	_ = cmd.MarkFlagRequired("out")
+	return cmd
 }
 
 // ErrHandoffLapsed is the typed outcome of a propose whose Prepare lapsed: no Freeze followed in time, the EVM certifies again and the

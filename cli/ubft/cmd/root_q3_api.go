@@ -24,6 +24,9 @@ type rootQ3API struct {
 	Bundle func(ctx context.Context, epoch uint64) (q3active.Bundle, error)
 	State  func() (*abdrc.StateMsg, error)
 	Trust  func(epoch uint64) (*types.RootTrustBaseV1, error)
+	// ShardConfig is the shard configuration this root's derived index holds for a shard epoch of the (whole-partition) shard of a partition: the file an
+	// authority is advanced into (`signing-authority advance-epoch --shard-conf`). Nil: the endpoint refuses.
+	ShardConfig func(partition types.PartitionID, epoch uint64) (*types.PartitionDescriptionRecord, error)
 }
 
 func (a rootQ3API) register(mux *http.ServeMux) {
@@ -55,6 +58,25 @@ func (a rootQ3API) register(mux *http.ServeMux) {
 		return q3HistoryResponse{Entries: entries}, err
 	}))
 	mux.HandleFunc("POST /api/v1/q3/signers", q3Endpoint(func(context.Context, json.RawMessage) (any, error) { return a.signers() }))
+	mux.HandleFunc("POST /api/v1/q3/shard-conf", q3Endpoint(func(_ context.Context, raw json.RawMessage) (any, error) {
+		var in q3ShardConfRequest
+		if err := json.Unmarshal(raw, &in); err != nil {
+			return nil, err
+		}
+		if a.ShardConfig == nil {
+			return nil, errors.New("this root serves no shard configurations")
+		}
+		pdr, err := a.ShardConfig(types.PartitionID(in.Partition), in.Epoch)
+		if err != nil || pdr == nil {
+			return nil, fmt.Errorf("no configuration for partition %d shard epoch %d: %v", in.Partition, in.Epoch, err)
+		}
+		return pdr, nil
+	}))
+}
+
+type q3ShardConfRequest struct {
+	Partition uint32 `json:"partition"`
+	Epoch     uint64 `json:"epoch"`
 }
 
 type q3EpochRequest struct {
