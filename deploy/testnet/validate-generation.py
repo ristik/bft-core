@@ -85,6 +85,9 @@ with tempfile.TemporaryDirectory(prefix='tnops-validation-',dir='/tmp') as tmp:
         spec=importlib.util.spec_from_file_location('pos_probe',HERE/'validate-pos.py')
         probe=importlib.util.module_from_spec(spec);spec.loader.exec_module(probe)
         print(json.dumps(probe.validate(generation,a.ubft.resolve(),a.keygen.resolve()),indent=2))
+        spec=importlib.util.spec_from_file_location('handoff_probe',HERE/'validate-handoff.py')
+        dry=importlib.util.module_from_spec(spec);spec.loader.exec_module(dry)
+        print(json.dumps(dry.validate(generation,a.ubft.resolve()),indent=2))
     assert generations[0]['genesis_hash']!=generations[1]['genesis_hash']
     assert generations[0]['faucet_address']!=generations[1]['faucet_address']
     print(json.dumps({'validation':'offline fixtures; optional native aggregator probe; no deployable cluster',

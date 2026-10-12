@@ -207,6 +207,7 @@ class EntityNamespace(unittest.TestCase):
                 self.assertEqual(services[name]['network_mode'],'service:pod%d'%i);self.assertNotIn('networks',services[name])
             for name in ('authority%d'%i,'ureth%d'%i):
                 self.assertNotIn('network_mode',services[name]);self.assertEqual(services[name]['networks'],['validators'])
+        for i in (1,2,3,4): self.assertIn('./validator%d/jwt:/jwt:ro'%i,services['root%d'%i]['volumes'],'readiness runs in the root with only this entity\'s JWT')
         joined=[n for n,s in services.items() if 'network_mode' in s]
         self.assertEqual(sorted(joined),sorted(f'{k}{i}' for k in ('root','shard','metrics') for i in (1,2,3,4)))
         self.assertEqual([n for n,s in services.items() if isinstance(s.get('networks'),dict)],['pod1','pod2','pod3','pod4'])
@@ -361,6 +362,21 @@ class Handoff(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,'below epoch 2'): handoff.install_override(compose,1)
         with self.assertRaisesRegex(ValueError,'already installs'): handoff.install_override({'services':{'root1':{'entrypoint':['a','--install-handoff-epoch','2']}}},3)
         with self.assertRaisesRegex(ValueError,'no root'): handoff.install_override({'services':{'shard1':{'entrypoint':['a']}}},2)
+
+class HandoffDryForm(unittest.TestCase):
+    def load(self):
+        import importlib.util
+        spec=importlib.util.spec_from_file_location('validate_handoff',Path(__file__).parent/'validate-handoff.py')
+        module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module);return module
+    def test_the_flag_reader_and_the_cli_check_name_a_missing_command_or_flag(self):
+        dry=self.load()
+        self.assertEqual(dry.flags_of("Flags:\n  -h, --help   help\n      --next-trust-base string   x\n  -o, --out string  y\n"),{'help','next-trust-base','out'})
+        with tempfile.TemporaryDirectory() as tmp:
+            fake=Path(tmp)/'ubft'
+            fake.write_text("#!/bin/sh\ncase \"$*\" in\n *known*) printf 'Flags:\\n      --a  x\\n      --b  y\\n';;\n *) exit 1;;\nesac\n");fake.chmod(0o755)
+            self.assertEqual(dry.check_cli(fake,{'known cmd':['a','b']}),1)
+            with self.assertRaisesRegex(AssertionError,'lacks --c'): dry.check_cli(fake,{'known cmd':['a','c']})
+            with self.assertRaisesRegex(AssertionError,'does not exist'): dry.check_cli(fake,{'other cmd':['a']})
 
 class PublicRPC(unittest.TestCase):
     def setUp(self):

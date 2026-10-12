@@ -78,7 +78,7 @@ def topology(out, n, ids, images, captcha, ureth_flags=(), max_gas=30000000, wit
             '--profile-2','--q3-lane'] + (pos.root_flags(i) if with_pos else ['--genesis-identities','/network/genesis-identities.json']) + [
             '--shard-conf','/network/full-shard-conf.json','--shard-conf','/network/aggregator-conf.json',
             '--rpc-server-address','127.0.0.1:8002','--metrics','prometheus'] + common,
-            ['./validator%d/root:/state'%i,network], memory='384m', pod='pod%d'%i)
+            ['./validator%d/root:/state'%i,network,'./validator%d/jwt:/jwt:ro'%i], memory='384m', pod='pod%d'%i)   # the entity's Engine JWT, read-only: q3-readiness runs in the root (it holds the entity's keys.json) and checks its own Engine endpoint
         service('authority%d'%i, node, ['ubft','signing-authority','run','--home','/authority',
             '--client-socket','/authority/client.sock','--operator-socket','/authority/operator.sock',
             '--operator-credential','/authority/operator.cred','--authority-id','paired-evm-%d'%i,
