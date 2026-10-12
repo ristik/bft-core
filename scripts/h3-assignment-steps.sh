@@ -373,7 +373,11 @@ h3_late_s2_ack_refused() {
   H3_ONLINE="1 2 3"
   h3_mark
   h3_enroll_authority 6 2 || { echo "enrolling the evm6 authority against the s=2 configuration failed" >&2; return 1; }
+  rm -f test-nodes/evm6/pin.txt               # an earlier restore of this node left one: this restore must compute its own
   h3_restore_validator 6 1 || true            # the s=2 key tries to acknowledge late
+  # the restore is expected to END in a refusal, but it must have STARTED: a restore whose own tooling failed (run h3-b1-20261012-r2: the Go build cache
+  # was cleaned under `go run ./scripts/h4-restore-pin`) refuses nothing, and waiting for a refusal would report the wrong cause
+  [ -s test-nodes/evm6/pin.txt ] || { echo "the late restore of evm6 did not start (no restore pin was computed; see the tooling error above): nothing was refused" >&2; return 1; }
   h3_assert_rejected "$id6" "late s=2 acknowledgement from evm6" 480 test-nodes/evm6/debug.log || return 1
   h3_registry_is 3 5                          # the registry shows the recovery K's folded acknowledgement (shard epoch 3), not s=2's
 }
