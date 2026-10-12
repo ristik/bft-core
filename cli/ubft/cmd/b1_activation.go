@@ -74,6 +74,10 @@ type b1ProfileFile struct {
 	ElectMeasurement *b1state.ElectMeasurement `json:"electMeasurement,omitempty"`
 	// ElectCaps are the deployed contracts' ceilings (manifest limits.vMax / limits.lMax, election nMax) the measurement is taken at.
 	ElectCaps *b1state.ElectCaps `json:"electCaps,omitempty"`
+	// HookMeasurement is the largest cold per-record gas measured at HookCaps (b1state.HookMeasurement); HookRecordGas is refused below it with the margin.
+	HookMeasurement *b1state.HookMeasurement `json:"hookMeasurement,omitempty"`
+	// HookCaps are the deployed contracts' ceilings the hook measurement is taken at (the same values as ElectCaps when the election is pinned too).
+	HookCaps *b1state.ElectCaps `json:"hookCaps,omitempty"`
 }
 
 func (f b1ProfileFile) profile() b1state.Profile {
@@ -140,6 +144,9 @@ func readB1ProfileFile(path string) (b1state.Profile, b1ProfileFile, error) {
 	if err := checkRecordedElectGas(f); err != nil {
 		return b1state.Profile{}, b1ProfileFile{}, fmt.Errorf("%w: %v", ErrB1Profile, err)
 	}
+	if err := checkRecordedHookGas(f, p); err != nil {
+		return b1state.Profile{}, b1ProfileFile{}, fmt.Errorf("%w: %v", ErrB1Profile, err)
+	}
 	if err := b1registry.ValidateProfile(p); err != nil {
 		return b1state.Profile{}, b1ProfileFile{}, fmt.Errorf("%w: %v", ErrB1Profile, err)
 	}
@@ -174,6 +181,25 @@ func checkRecordedElectGas(f b1ProfileFile) error {
 	}
 	if f.ElectGas != want {
 		return fmt.Errorf("the election price %d is not the recorded measurement %d pinned with the margin (%d)", f.ElectGas, f.ElectMeasurement.Gas, want)
+	}
+	return nil
+}
+
+// checkRecordedHookGas refuses a records hook whose per-record reservation is not covered by the recorded cold measurement of the worst committee the
+// deployment's caps admit (with the margin), a hook without such a measurement, and a measurement without a hook.
+func checkRecordedHookGas(f b1ProfileFile, p b1state.Profile) error {
+	if f.RecordsCustody == nil {
+		if f.HookMeasurement != nil || f.HookCaps != nil {
+			return errors.New("a hook measurement or caps without a records hook")
+		}
+		return nil
+	}
+	if f.HookMeasurement == nil || f.HookCaps == nil {
+		return errors.New("the records hook has no recorded cold measurement of its worst record or no deployment caps (--hook-measurement)")
+	}
+	if err := b1state.CheckHookRecordGas(p, *f.HookCaps, *f.HookMeasurement); err != nil {
+		return fmt.Errorf("hookRecordGas %d against the measured %s record %d at V=%d L=%d C=%d: %w", p.HookRecordGas, f.HookMeasurement.Kind,
+			f.HookMeasurement.Gas, f.HookMeasurement.V, f.HookMeasurement.L, f.HookMeasurement.C, err)
 	}
 	return nil
 }
@@ -214,6 +240,16 @@ func deriveB1Profile(tb *types.RootTrustBaseV1, conf *types.PartitionDescription
 	}
 	for _, h := range hooks {
 		p.RecordsCustody, p.HRecords, p.HookRecordGas = h.RecordsCustody, h.HRecords, h.HookRecordGas
+		if p.HookEnabled() {
+			if h.HookMeasurement == nil || h.HookCaps == nil {
+				return b1state.Profile{}, errors.New("the records hook needs the cold measurement of its worst record (--hook-measurement) and the deployment caps (--elect-caps)")
+			}
+			if err := b1state.CheckHookRecordGas(p, *h.HookCaps, *h.HookMeasurement); err != nil {
+				min, _ := b1state.MinHookRecordGas(*h.HookMeasurement)
+				return b1state.Profile{}, fmt.Errorf("--hook-record-gas %d: the measured cold %s record at V=%d L=%d C=%d is %d; the reservation needs at least %d (x1.25): %w",
+					p.HookRecordGas, h.HookMeasurement.Kind, h.HookMeasurement.V, h.HookMeasurement.L, h.HookMeasurement.C, h.HookMeasurement.Gas, min, err)
+			}
+		}
 		p.ElectionContract = h.ElectionContract
 		if p.ElectionContract != ([20]byte{}) {
 			if h.Measurement == nil {
@@ -242,6 +278,8 @@ type b1Hooks struct {
 	ElectionContract [20]byte
 	Measurement      *b1state.ElectMeasurement
 	Caps             *b1state.ElectCaps
+	HookMeasurement  *b1state.HookMeasurement
+	HookCaps         *b1state.ElectCaps
 }
 
 // readElectMeasurement reads a measurement file strictly.
@@ -281,10 +319,10 @@ func parseElectCaps(s string) (b1state.ElectCaps, error) {
 	return c, c.Valid()
 }
 
-func parseB1Hooks(custody string, h uint32, recordGas uint64, election, measurement, caps string) (b1Hooks, error) {
+func parseB1Hooks(custody string, h uint32, recordGas uint64, election, measurement, caps, hookMeasurement string) (b1Hooks, error) {
 	var out b1Hooks
 	if custody == "" {
-		if h != 0 || recordGas != 0 || election != "" || measurement != "" || caps != "" {
+		if h != 0 || recordGas != 0 || election != "" || measurement != "" || caps != "" || hookMeasurement != "" {
 			return out, errors.New("hook pins without --records-custody")
 		}
 		return out, nil
@@ -293,10 +331,28 @@ func parseB1Hooks(custody string, h uint32, recordGas uint64, election, measurem
 		return out, fmt.Errorf("--records-custody %q is not an address", custody)
 	}
 	out.RecordsCustody, out.HRecords, out.HookRecordGas = common.HexToAddress(custody), h, recordGas
+	// The records hook's reservation is checked against the cold measurement of its worst record at the deployment's caps, whatever else is pinned.
+	if hookMeasurement == "" || caps == "" {
+		return out, errors.New("--records-custody needs --hook-measurement (script/measure-hook-gas.sh at the deployment's caps) and --elect-caps (vMax,lMax,nMax)")
+	}
+	hc, err := parseElectCaps(caps)
+	if err != nil {
+		return out, err
+	}
+	hm, err := readHookMeasurement(hookMeasurement)
+	if err != nil {
+		return out, err
+	}
+	if !hm.AtCaps(hc) {
+		return out, fmt.Errorf("the hook measurement (V=%d L=%d C=%d) is not at the deployed caps (vMax=%d lMax=%d nMax=%d): measure at the caps the manifest is set to",
+			hm.V, hm.L, hm.C, hc.VMax, hc.LMax, hc.NMax)
+	}
+	out.HookMeasurement, out.HookCaps = &hm, &hc
 	switch {
-	case election == "" && measurement == "" && caps == "":
-	case election == "" || measurement == "" || caps == "":
-		return out, errors.New("--election, --elect-measurement and --elect-caps go together")
+	case election == "" && measurement == "":
+		// no election: --elect-caps still names the deployment's caps for the records hook's measurement
+	case election == "" || measurement == "":
+		return out, errors.New("--election and --elect-measurement go together (and need --elect-caps)")
 	case !common.IsHexAddress(election):
 		return out, fmt.Errorf("--election %q is not an address", election)
 	default:
@@ -315,6 +371,99 @@ func parseB1Hooks(custody string, h uint32, recordGas uint64, election, measurem
 		out.ElectionContract, out.Measurement, out.Caps = common.HexToAddress(election), &m, &c
 	}
 	return out, nil
+}
+
+// readHookMeasurement reads the JSON lines of unicity-pos-contracts script/measure-hook-gas.sh ({"kind","v","l","c","cold_gas"}) and reduces them to the largest cold
+// record. The record kinds that scale with the committee (ack, stage, closure, recovery) must all be present, so a partial file cannot hide the largest; the
+// election kinds are not records and are ignored; every line must be at the same (V, L, C).
+func readHookMeasurement(path string) (b1state.HookMeasurement, error) {
+	var best b1state.HookMeasurement
+	raw, err := os.ReadFile(path) // #nosec G304 -- operator-supplied config path
+	if err != nil {
+		return best, fmt.Errorf("reading the hook measurement %q: %w", path, err)
+	}
+	need := map[string]bool{"ack": false, "stage": false, "closure": false, "recovery": false}
+	var first *b1state.HookMeasurement
+	for i, line := range strings.Split(strings.TrimSpace(string(raw)), "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		dec := json.NewDecoder(strings.NewReader(line))
+		dec.DisallowUnknownFields()
+		var l struct {
+			Kind    string `json:"kind"`
+			V       uint32 `json:"v"`
+			L       uint32 `json:"l"`
+			C       uint32 `json:"c"`
+			ColdGas uint64 `json:"cold_gas"`
+			Error   string `json:"error"`
+		}
+		if err := dec.Decode(&l); err != nil || dec.More() {
+			return best, fmt.Errorf("the hook measurement %q line %d: %v", path, i+1, err)
+		}
+		if l.Error != "" || l.ColdGas == 0 {
+			return best, fmt.Errorf("the hook measurement %q line %d (%s) is not a measurement: %q", path, i+1, l.Kind, l.Error)
+		}
+		if _, record := need[l.Kind]; !record {
+			continue // elect, elect-heavy
+		}
+		need[l.Kind] = true
+		m := b1state.HookMeasurement{V: l.V, L: l.L, C: l.C, Gas: l.ColdGas, Kind: l.Kind}
+		if err := m.Valid(); err != nil {
+			return best, fmt.Errorf("the hook measurement %q line %d: %w", path, i+1, err)
+		}
+		if first == nil {
+			first = &m
+		} else if m.V != first.V || m.L != first.L || m.C != first.C {
+			return best, fmt.Errorf("the hook measurement %q mixes caps (V=%d L=%d C=%d and V=%d L=%d C=%d)", path, first.V, first.L, first.C, m.V, m.L, m.C)
+		}
+		if m.Gas > best.Gas {
+			best = m
+		}
+	}
+	for _, k := range []string{"ack", "stage", "closure", "recovery"} {
+		if !need[k] {
+			return best, fmt.Errorf("the hook measurement %q has no %q record: all four kinds are needed so the largest cannot be left out", path, k)
+		}
+	}
+	return best, nil
+}
+
+func engineAPICheckHookGasCmd() *cobra.Command {
+	var profilePath, freshPath string
+	cmd := &cobra.Command{
+		Use:   "check-hook-gas",
+		Short: "Refuse a profile whose per-record hook gas is below a fresh cold measurement of its worst record, with the margin",
+		Long: `The genesis check of the records hook's reservation: the profile must carry the cold measurement of its worst record, taken at exactly the deployed
+caps (the manifest's vMax and lMax, the election's nMax), and hookRecordGas must be at least that measurement with the margin (x1.25, rounded up); the same
+must hold for a fresh measurement at those caps (unicity-pos-contracts script/measure-hook-gas.sh V L C). A fresh measurement of other caps is refused.
+Run it before genesis and whenever the contracts change.`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if profilePath == "" || freshPath == "" {
+				return errors.New("--b1-profile and --measurement are required")
+			}
+			p, f, err := readB1ProfileFile(profilePath)
+			if err != nil {
+				return err
+			}
+			if f.HookMeasurement == nil || f.HookCaps == nil {
+				return fmt.Errorf("%w: the profile has no hook measurement or deployment caps", ErrB1Profile)
+			}
+			fresh, err := readHookMeasurement(freshPath)
+			if err != nil {
+				return err
+			}
+			if err := b1state.CheckHookGas(p, *f.HookCaps, *f.HookMeasurement, fresh); err != nil {
+				return err
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "hook record gas %d covers the fresh %s record %d x1.25 (recorded %d for V=%d L=%d C=%d)\n",
+				p.HookRecordGas, fresh.Kind, fresh.Gas, f.HookMeasurement.Gas, f.HookMeasurement.V, f.HookMeasurement.L, f.HookMeasurement.C)
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&profilePath, "b1-profile", "", "the profile file (required)")
+	cmd.Flags().StringVar(&freshPath, "measurement", "", "a fresh measurement (the JSON lines of measure-hook-gas.sh) (required)")
+	return cmd
 }
 
 func engineAPICheckElectGasCmd() *cobra.Command {
@@ -357,7 +506,7 @@ other (V, L, C) is refused. Run it before genesis and whenever the contracts cha
 func engineAPIB1ProfileCmd(baseFlags *baseFlags) *cobra.Command {
 	var trustBasePath, out string
 	var wCert, capacity, genesisUCTime uint64
-	var recordsCustody, electionContract, electMeasurementPath, electCapsFlag string
+	var recordsCustody, electionContract, electMeasurementPath, electCapsFlag, hookMeasurementPath string
 	var hRecords uint32
 	var hookRecordGas uint64
 	flags := &shardConfFlags{}
@@ -386,7 +535,7 @@ unicity-pos-contracts script/measure-elect.sh, and the profile file records the 
 			if err != nil {
 				return err
 			}
-			hooks, err := parseB1Hooks(recordsCustody, hRecords, hookRecordGas, electionContract, electMeasurementPath, electCapsFlag)
+			hooks, err := parseB1Hooks(recordsCustody, hRecords, hookRecordGas, electionContract, electMeasurementPath, electCapsFlag, hookMeasurementPath)
 			if err != nil {
 				return err
 			}
@@ -396,6 +545,7 @@ unicity-pos-contracts script/measure-elect.sh, and the profile file records the 
 			}
 			file := b1ProfileFileOf(p)
 			file.ElectMeasurement, file.ElectCaps = hooks.Measurement, hooks.Caps
+			file.HookMeasurement, file.HookCaps = hooks.HookMeasurement, hooks.HookCaps
 			enc, err := json.MarshalIndent(file, "", "  ")
 			if err != nil {
 				return err
@@ -421,6 +571,7 @@ unicity-pos-contracts script/measure-elect.sh, and the profile file records the 
 	cmd.Flags().Uint64Var(&hookRecordGas, "hook-record-gas", 0, "gross gas reserved per applied record (needs --records-custody)")
 	cmd.Flags().StringVar(&electionContract, "election", "", "the ElectionPolicy module whose elect(origin) the hook calls (needs the records hook and --elect-measurement)")
 	cmd.Flags().StringVar(&electMeasurementPath, "elect-measurement", "", "the worst-case election measurement JSON from unicity-pos-contracts script/measure-elect.sh; pins ElectGas = ceil(gas x 1.25)")
+	cmd.Flags().StringVar(&hookMeasurementPath, "hook-measurement", "", "the cold measurement of the records hook's worst record: the JSON lines of unicity-pos-contracts script/measure-hook-gas.sh V L C at the deployment's caps (required with --records-custody); --hook-record-gas is refused below the largest figure x1.25")
 	cmd.Flags().StringVar(&electCapsFlag, "elect-caps", "", "vMax,lMax,nMax the contracts manifest is deployed with (limits.vMax, limits.lMax, election nMax); the measurement must be taken at exactly these caps. Devnet/testnet: 16,2,8")
 	cmd.Flags().Uint64Var(&genesisUCTime, "genesis-uc-time", 1000, "the pinned genesis UC time recorded in the registry (records.ucTime) before any import; a DEV value")
 	return cmd
