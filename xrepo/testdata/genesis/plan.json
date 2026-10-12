@@ -1,0 +1,61 @@
+{
+  "bondUnit": "100000000000000000000",
+  "identities": [
+    {
+      "stakingId": 1,
+      "owner": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1",
+      "withdrawal": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb1",
+      "payee": "0xccccccccccccccccccccccccccccccccccccccc1",
+      "bondUnits": 1,
+      "rootNodeId": "16Uiu2HAmLk2t8UoSvT3mARiPed5wCPuaKRUbRHSKdFHxiT11mmTH",
+      "rootKey": "0x029d4ab52d4d9c734e57f462b552db0d9bea7e0a32cae62ce5891aa0d663c37dbf",
+      "evmNodeId": "16Uiu2HAkyP4DyjFKzjGokrTJSb2GN2eQJohw3tVcA7hLi6y8xAAj",
+      "evmKey": "0x03828a9bfc111fc57cc1e6eb9a80ded4eed10fb8d797d93aa22cd84e95ffc77f02",
+      "lotIds": [
+        1
+      ]
+    },
+    {
+      "stakingId": 2,
+      "owner": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa2",
+      "withdrawal": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb2",
+      "payee": "0xccccccccccccccccccccccccccccccccccccccc2",
+      "bondUnits": 1,
+      "rootNodeId": "16Uiu2HAkv7SiHUh45mPuJBjauGPvCzqvSMbSLJdHxS5n3WNHiFok",
+      "rootKey": "0x02f7d5c92d343c45a58c45163d5e8e7e5b57937dba77b049f0b8c32ca974eb3578",
+      "evmNodeId": "16Uiu2HAm8xCjbJDi5EWaTJc3LPy7WqM9MZzvLkCMo2eHpJm1j5Mi",
+      "evmKey": "0x021b013e9607ea8cf95de3e50bae76c181367d39665323e59e6dfce4fcbb857ac7",
+      "lotIds": [
+        2
+      ]
+    },
+    {
+      "stakingId": 3,
+      "owner": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa3",
+      "withdrawal": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb3",
+      "payee": "0xccccccccccccccccccccccccccccccccccccccc3",
+      "bondUnits": 1,
+      "rootNodeId": "16Uiu2HAmHmQeQBS5nH3biJ4gTudg6ZoxmBUDL3eoiFa9qWLEd7td",
+      "rootKey": "0x028163ff94f35a6ea9a969e2f2dc0e6f09ae55afa67f2041dc3b26fcbd66a7fbed",
+      "evmNodeId": "16Uiu2HAmByix4TM3F9D37nmXWHPfUgJH51Qr8SfmchoS52VvyNMF",
+      "evmKey": "0x022d09e683e9a426076dfe5e843d3e835ed4a37c82e70f12e5ff6f63e4b48dccd7",
+      "lotIds": [
+        3
+      ]
+    },
+    {
+      "stakingId": 4,
+      "owner": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa4",
+      "withdrawal": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb4",
+      "payee": "0xccccccccccccccccccccccccccccccccccccccc4",
+      "bondUnits": 1,
+      "rootNodeId": "16Uiu2HAmJn2zbSiZN6HaPwDGbrEf63QsJboeX12JnYwxNVrxsv6G",
+      "rootKey": "0x03e2a6de4625e9008476d5009430b910b3abdb0f2dd8bfa9c0055164035a1ffa40",
+      "evmNodeId": "16Uiu2HAmRTP1rds5MMZCemH6GKY5E2EYBwSG7DB6zepdeAe9Z4pZ",
+      "evmKey": "0x028f4d03721ae348027761259f0dd54fab32ac854b7663835a21c1798cd5af6651",
+      "lotIds": [
+        4
+      ]
+    }
+  ]
+}
