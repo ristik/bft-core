@@ -1,0 +1,447 @@
+{
+ "format": "UNICITY_XREPO_GO_RECORDS/v1",
+ "note": "Produced by bft-core (XREPO_UPDATE=1 go test ./xrepo) from the contracts' publication fixture. The records are what the root's projection emits with the ids and digests the root derives; custody must accept them verbatim. Do not edit by hand.",
+ "resultId": "0x8af64e9c9da34531f1b91bc18e5af8072c8466349b20661352626317852d39fd",
+ "genesisAssignmentId": "0x7971fcee127203c6ef4962db14f70a41fc493629f4cad9e836906b6fc5c3fa63",
+ "primaryAssignmentId": "0xd6812f6e3b074d067bf0090459d11e6d77489494d543988a68036ab236fc4a10",
+ "recoveryAssignmentId": "0xf516dedb103c1c03aae5220b52636ebd92c9b0a405215ce21873d8ff4b062b37",
+ "recoveryRootEpoch": 3,
+ "recoveryEvmEpoch": 2,
+ "branches": [
+  {
+   "name": "recovery",
+   "records": [
+    {
+     "index": 0,
+     "recordId": "0x04bafefc05e11587946d06820ba3640a72cfb2943baf8dd6f63e3becae147f91",
+     "predecessor": "0x0000000000000000000000000000000000000000000000000000000000000000",
+     "kind": 4,
+     "kindName": "Closure",
+     "progress": 100100,
+     "ucTime": 604900,
+     "data": "0x7971fcee127203c6ef4962db14f70a41fc493629f4cad9e836906b6fc5c3fa6300000000000000000000000000000000000000000000000000000000000187045834a60d78e10756a78ed1e37a81143c96ddbe48750e5fc9479ed808674636843e16b3c350f06c4407cf24b8a79986cd44f6eecc69e8af923f07cc467f8e57efee0eaea4daeb80b2446dcf8cb198a14f9be38947ea5527285cbe7e67b2cdc5eab6de14d06e769e9dd8337609efbe3adf6725a93cdacb3116de9f6edb4f2bedfd"
+    },
+    {
+     "index": 1,
+     "recordId": "0x32e12ef10ef2c074dc098438528dce264fdf2ba173d18c91f3c1c58460552182",
+     "predecessor": "0x04bafefc05e11587946d06820ba3640a72cfb2943baf8dd6f63e3becae147f91",
+     "kind": 4,
+     "kindName": "Closure",
+     "progress": 100141,
+     "ucTime": 604910,
+     "data": "0xd6812f6e3b074d067bf0090459d11e6d77489494d543988a68036ab236fc4a10000000000000000000000000000000000000000000000000000000000001873617cb45d38b3d85aeb00c232daba2faf3deccb3da69dae6f002d98a15a7c1c48aa2d08626507dd23e7c7126091f02d8b373c764d005b69bf6e8498a96d149c850ed42b8e2c02490d3cab4831d06551a49d07db575782ed6af44e1c50d2e3a4852b6de14d06e769e9dd8337609efbe3adf6725a93cdacb3116de9f6edb4f2bedfd"
+    },
+    {
+     "index": 2,
+     "recordId": "0x254577c4f4d25887f4e03c240159269846311db19750627b40669b06fd6d195a",
+     "predecessor": "0x32e12ef10ef2c074dc098438528dce264fdf2ba173d18c91f3c1c58460552182",
+     "kind": 3,
+     "kindName": "RecoveryAck",
+     "progress": 100146,
+     "ucTime": 604920,
+     "data": "0x8af64e9c9da34531f1b91bc18e5af8072c8466349b20661352626317852d39fdf516dedb103c1c03aae5220b52636ebd92c9b0a405215ce21873d8ff4b062b370000000000000000000000000000000000000000000000000000000000018704000000000000000000000000000000000000000000000000000000000001870e0000000000000000000000000000000000000000000000000000000000018736000000000000000000000000000000000000000000000000000000000001872d000000000000000000000000000000000000000000000000000000000001874000000000000000000000000000000000000000000000000000000000000000030000000000000000000000000000000000000000000000000000000000000002"
+    },
+    {
+     "index": 3,
+     "recordId": "0x87ba52a440ca4bcef0555c2f4b9bdd875dcddc6e10b6b640d91f46fac2d173b1",
+     "predecessor": "0x254577c4f4d25887f4e03c240159269846311db19750627b40669b06fd6d195a",
+     "kind": 4,
+     "kindName": "Closure",
+     "progress": 100182,
+     "ucTime": 604930,
+     "data": "0xf516dedb103c1c03aae5220b52636ebd92c9b0a405215ce21873d8ff4b062b370000000000000000000000000000000000000000000000000000000000018768cbb47772531df75f1649932efaf4f790ddc3ad91a23cf9356c8d121a1c18f5425843d279ec1248ecef72dd0d8b8add2492d489f24f48be625653bf056035732feaf9b677dee3e78916998b041656d04c0a9848f90a894bddf45e8da917b2031cb6de14d06e769e9dd8337609efbe3adf6725a93cdacb3116de9f6edb4f2bedfd"
+    }
+   ],
+   "steps": [
+    {
+     "afterRecords": 1,
+     "lastAckedAssignment": "0x7971fcee127203c6ef4962db14f70a41fc493629f4cad9e836906b6fc5c3fa63",
+     "pendingAssignment": "0x0000000000000000000000000000000000000000000000000000000000000000",
+     "sessionState": "open",
+     "assignments": [
+      {
+       "role": "genesis",
+       "assignmentId": "0x7971fcee127203c6ef4962db14f70a41fc493629f4cad9e836906b6fc5c3fa63",
+       "exposureDigest": "0xee0eaea4daeb80b2446dcf8cb198a14f9be38947ea5527285cbe7e67b2cdc5ea",
+       "keyDigest": "0xb6de14d06e769e9dd8337609efbe3adf6725a93cdacb3116de9f6edb4f2bedfd",
+       "state": "active",
+       "closed": true,
+       "pending": false,
+       "hRound": 100100,
+       "pClose": 100100,
+       "tClose": 604900,
+       "offset": 0,
+       "firstRound": 1,
+       "rootEpoch": 1
+      },
+      {
+       "role": "primary",
+       "assignmentId": "0xd6812f6e3b074d067bf0090459d11e6d77489494d543988a68036ab236fc4a10",
+       "exposureDigest": "0xed42b8e2c02490d3cab4831d06551a49d07db575782ed6af44e1c50d2e3a4852",
+       "keyDigest": "0xb6de14d06e769e9dd8337609efbe3adf6725a93cdacb3116de9f6edb4f2bedfd",
+       "state": "reserved",
+       "closed": false,
+       "pending": false,
+       "hRound": 0,
+       "pClose": 0,
+       "tClose": 0,
+       "offset": 0,
+       "firstRound": 0,
+       "rootEpoch": 2
+      }
+     ]
+    },
+    {
+     "afterRecords": 2,
+     "lastAckedAssignment": "0x7971fcee127203c6ef4962db14f70a41fc493629f4cad9e836906b6fc5c3fa63",
+     "pendingAssignment": "0xd6812f6e3b074d067bf0090459d11e6d77489494d543988a68036ab236fc4a10",
+     "sessionState": "open",
+     "assignments": [
+      {
+       "role": "genesis",
+       "assignmentId": "0x7971fcee127203c6ef4962db14f70a41fc493629f4cad9e836906b6fc5c3fa63",
+       "exposureDigest": "0xee0eaea4daeb80b2446dcf8cb198a14f9be38947ea5527285cbe7e67b2cdc5ea",
+       "keyDigest": "0xb6de14d06e769e9dd8337609efbe3adf6725a93cdacb3116de9f6edb4f2bedfd",
+       "state": "active",
+       "closed": true,
+       "pending": false,
+       "hRound": 100100,
+       "pClose": 100100,
+       "tClose": 604900,
+       "offset": 0,
+       "firstRound": 1,
+       "rootEpoch": 1
+      },
+      {
+       "role": "primary",
+       "assignmentId": "0xd6812f6e3b074d067bf0090459d11e6d77489494d543988a68036ab236fc4a10",
+       "exposureDigest": "0xed42b8e2c02490d3cab4831d06551a49d07db575782ed6af44e1c50d2e3a4852",
+       "keyDigest": "0xb6de14d06e769e9dd8337609efbe3adf6725a93cdacb3116de9f6edb4f2bedfd",
+       "state": "reserved",
+       "closed": false,
+       "pending": true,
+       "hRound": 100150,
+       "pClose": 100141,
+       "tClose": 604910,
+       "offset": 0,
+       "firstRound": 0,
+       "rootEpoch": 2
+      }
+     ]
+    },
+    {
+     "afterRecords": 3,
+     "lastAckedAssignment": "0xf516dedb103c1c03aae5220b52636ebd92c9b0a405215ce21873d8ff4b062b37",
+     "pendingAssignment": "0x0000000000000000000000000000000000000000000000000000000000000000",
+     "sessionState": "recovered",
+     "assignments": [
+      {
+       "role": "genesis",
+       "assignmentId": "0x7971fcee127203c6ef4962db14f70a41fc493629f4cad9e836906b6fc5c3fa63",
+       "exposureDigest": "0xee0eaea4daeb80b2446dcf8cb198a14f9be38947ea5527285cbe7e67b2cdc5ea",
+       "keyDigest": "0xb6de14d06e769e9dd8337609efbe3adf6725a93cdacb3116de9f6edb4f2bedfd",
+       "state": "active",
+       "closed": true,
+       "pending": false,
+       "hRound": 100100,
+       "pClose": 100100,
+       "tClose": 604900,
+       "offset": 0,
+       "firstRound": 1,
+       "rootEpoch": 1
+      },
+      {
+       "role": "primary",
+       "assignmentId": "0xd6812f6e3b074d067bf0090459d11e6d77489494d543988a68036ab236fc4a10",
+       "exposureDigest": "0xed42b8e2c02490d3cab4831d06551a49d07db575782ed6af44e1c50d2e3a4852",
+       "keyDigest": "0xb6de14d06e769e9dd8337609efbe3adf6725a93cdacb3116de9f6edb4f2bedfd",
+       "state": "active",
+       "closed": true,
+       "pending": false,
+       "hRound": 100150,
+       "pClose": 100141,
+       "tClose": 604910,
+       "offset": 100100,
+       "firstRound": 100110,
+       "rootEpoch": 2
+      },
+      {
+       "role": "recovery",
+       "assignmentId": "0xf516dedb103c1c03aae5220b52636ebd92c9b0a405215ce21873d8ff4b062b37",
+       "exposureDigest": "0xeaf9b677dee3e78916998b041656d04c0a9848f90a894bddf45e8da917b2031c",
+       "keyDigest": "0xb6de14d06e769e9dd8337609efbe3adf6725a93cdacb3116de9f6edb4f2bedfd",
+       "state": "active",
+       "closed": false,
+       "pending": false,
+       "hRound": 0,
+       "pClose": 0,
+       "tClose": 0,
+       "offset": 100141,
+       "firstRound": 100160,
+       "rootEpoch": 3
+      }
+     ]
+    },
+    {
+     "afterRecords": 4,
+     "lastAckedAssignment": "0xf516dedb103c1c03aae5220b52636ebd92c9b0a405215ce21873d8ff4b062b37",
+     "pendingAssignment": "0x0000000000000000000000000000000000000000000000000000000000000000",
+     "sessionState": "recovered",
+     "assignments": [
+      {
+       "role": "genesis",
+       "assignmentId": "0x7971fcee127203c6ef4962db14f70a41fc493629f4cad9e836906b6fc5c3fa63",
+       "exposureDigest": "0xee0eaea4daeb80b2446dcf8cb198a14f9be38947ea5527285cbe7e67b2cdc5ea",
+       "keyDigest": "0xb6de14d06e769e9dd8337609efbe3adf6725a93cdacb3116de9f6edb4f2bedfd",
+       "state": "active",
+       "closed": true,
+       "pending": false,
+       "hRound": 100100,
+       "pClose": 100100,
+       "tClose": 604900,
+       "offset": 0,
+       "firstRound": 1,
+       "rootEpoch": 1
+      },
+      {
+       "role": "primary",
+       "assignmentId": "0xd6812f6e3b074d067bf0090459d11e6d77489494d543988a68036ab236fc4a10",
+       "exposureDigest": "0xed42b8e2c02490d3cab4831d06551a49d07db575782ed6af44e1c50d2e3a4852",
+       "keyDigest": "0xb6de14d06e769e9dd8337609efbe3adf6725a93cdacb3116de9f6edb4f2bedfd",
+       "state": "active",
+       "closed": true,
+       "pending": false,
+       "hRound": 100150,
+       "pClose": 100141,
+       "tClose": 604910,
+       "offset": 100100,
+       "firstRound": 100110,
+       "rootEpoch": 2
+      },
+      {
+       "role": "recovery",
+       "assignmentId": "0xf516dedb103c1c03aae5220b52636ebd92c9b0a405215ce21873d8ff4b062b37",
+       "exposureDigest": "0xeaf9b677dee3e78916998b041656d04c0a9848f90a894bddf45e8da917b2031c",
+       "keyDigest": "0xb6de14d06e769e9dd8337609efbe3adf6725a93cdacb3116de9f6edb4f2bedfd",
+       "state": "active",
+       "closed": true,
+       "pending": false,
+       "hRound": 100200,
+       "pClose": 100182,
+       "tClose": 604930,
+       "offset": 100141,
+       "firstRound": 100160,
+       "rootEpoch": 3
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "ack",
+   "records": [
+    {
+     "index": 0,
+     "recordId": "0x04bafefc05e11587946d06820ba3640a72cfb2943baf8dd6f63e3becae147f91",
+     "predecessor": "0x0000000000000000000000000000000000000000000000000000000000000000",
+     "kind": 4,
+     "kindName": "Closure",
+     "progress": 100100,
+     "ucTime": 604900,
+     "data": "0x7971fcee127203c6ef4962db14f70a41fc493629f4cad9e836906b6fc5c3fa6300000000000000000000000000000000000000000000000000000000000187045834a60d78e10756a78ed1e37a81143c96ddbe48750e5fc9479ed808674636843e16b3c350f06c4407cf24b8a79986cd44f6eecc69e8af923f07cc467f8e57efee0eaea4daeb80b2446dcf8cb198a14f9be38947ea5527285cbe7e67b2cdc5eab6de14d06e769e9dd8337609efbe3adf6725a93cdacb3116de9f6edb4f2bedfd"
+    },
+    {
+     "index": 1,
+     "recordId": "0xb4f52dd136805d83c1f4d7839c2a14f5981944fabbe005c16015e32eaa286800",
+     "predecessor": "0x04bafefc05e11587946d06820ba3640a72cfb2943baf8dd6f63e3becae147f91",
+     "kind": 2,
+     "kindName": "Ack",
+     "progress": 100102,
+     "ucTime": 604905,
+     "data": "0x8af64e9c9da34531f1b91bc18e5af8072c8466349b20661352626317852d39fd00000000000000000000000000000000000000000000000000000000000187040000000000000000000000000000000000000000000000000000000000018704000000000000000000000000000000000000000000000000000000000001870e"
+    },
+    {
+     "index": 2,
+     "recordId": "0xa62abf5d8b752e10462b61445401aa2ea9db28d651acf1ff2dda2aa9be21492e",
+     "predecessor": "0xb4f52dd136805d83c1f4d7839c2a14f5981944fabbe005c16015e32eaa286800",
+     "kind": 4,
+     "kindName": "Closure",
+     "progress": 100141,
+     "ucTime": 604910,
+     "data": "0xd6812f6e3b074d067bf0090459d11e6d77489494d543988a68036ab236fc4a10000000000000000000000000000000000000000000000000000000000001873617cb45d38b3d85aeb00c232daba2faf3deccb3da69dae6f002d98a15a7c1c48aa2d08626507dd23e7c7126091f02d8b373c764d005b69bf6e8498a96d149c850ed42b8e2c02490d3cab4831d06551a49d07db575782ed6af44e1c50d2e3a4852b6de14d06e769e9dd8337609efbe3adf6725a93cdacb3116de9f6edb4f2bedfd"
+    }
+   ],
+   "steps": [
+    {
+     "afterRecords": 1,
+     "lastAckedAssignment": "0x7971fcee127203c6ef4962db14f70a41fc493629f4cad9e836906b6fc5c3fa63",
+     "pendingAssignment": "0x0000000000000000000000000000000000000000000000000000000000000000",
+     "sessionState": "open",
+     "assignments": [
+      {
+       "role": "genesis",
+       "assignmentId": "0x7971fcee127203c6ef4962db14f70a41fc493629f4cad9e836906b6fc5c3fa63",
+       "exposureDigest": "0xee0eaea4daeb80b2446dcf8cb198a14f9be38947ea5527285cbe7e67b2cdc5ea",
+       "keyDigest": "0xb6de14d06e769e9dd8337609efbe3adf6725a93cdacb3116de9f6edb4f2bedfd",
+       "state": "active",
+       "closed": true,
+       "pending": false,
+       "hRound": 100100,
+       "pClose": 100100,
+       "tClose": 604900,
+       "offset": 0,
+       "firstRound": 1,
+       "rootEpoch": 1
+      },
+      {
+       "role": "primary",
+       "assignmentId": "0xd6812f6e3b074d067bf0090459d11e6d77489494d543988a68036ab236fc4a10",
+       "exposureDigest": "0xed42b8e2c02490d3cab4831d06551a49d07db575782ed6af44e1c50d2e3a4852",
+       "keyDigest": "0xb6de14d06e769e9dd8337609efbe3adf6725a93cdacb3116de9f6edb4f2bedfd",
+       "state": "reserved",
+       "closed": false,
+       "pending": false,
+       "hRound": 0,
+       "pClose": 0,
+       "tClose": 0,
+       "offset": 0,
+       "firstRound": 0,
+       "rootEpoch": 2
+      }
+     ]
+    },
+    {
+     "afterRecords": 2,
+     "lastAckedAssignment": "0xd6812f6e3b074d067bf0090459d11e6d77489494d543988a68036ab236fc4a10",
+     "pendingAssignment": "0x0000000000000000000000000000000000000000000000000000000000000000",
+     "sessionState": "acked",
+     "assignments": [
+      {
+       "role": "genesis",
+       "assignmentId": "0x7971fcee127203c6ef4962db14f70a41fc493629f4cad9e836906b6fc5c3fa63",
+       "exposureDigest": "0xee0eaea4daeb80b2446dcf8cb198a14f9be38947ea5527285cbe7e67b2cdc5ea",
+       "keyDigest": "0xb6de14d06e769e9dd8337609efbe3adf6725a93cdacb3116de9f6edb4f2bedfd",
+       "state": "active",
+       "closed": true,
+       "pending": false,
+       "hRound": 100100,
+       "pClose": 100100,
+       "tClose": 604900,
+       "offset": 0,
+       "firstRound": 1,
+       "rootEpoch": 1
+      },
+      {
+       "role": "primary",
+       "assignmentId": "0xd6812f6e3b074d067bf0090459d11e6d77489494d543988a68036ab236fc4a10",
+       "exposureDigest": "0xed42b8e2c02490d3cab4831d06551a49d07db575782ed6af44e1c50d2e3a4852",
+       "keyDigest": "0xb6de14d06e769e9dd8337609efbe3adf6725a93cdacb3116de9f6edb4f2bedfd",
+       "state": "active",
+       "closed": false,
+       "pending": false,
+       "hRound": 0,
+       "pClose": 0,
+       "tClose": 0,
+       "offset": 100100,
+       "firstRound": 100110,
+       "rootEpoch": 2
+      }
+     ]
+    },
+    {
+     "afterRecords": 3,
+     "lastAckedAssignment": "0xd6812f6e3b074d067bf0090459d11e6d77489494d543988a68036ab236fc4a10",
+     "pendingAssignment": "0x0000000000000000000000000000000000000000000000000000000000000000",
+     "sessionState": "acked",
+     "assignments": [
+      {
+       "role": "genesis",
+       "assignmentId": "0x7971fcee127203c6ef4962db14f70a41fc493629f4cad9e836906b6fc5c3fa63",
+       "exposureDigest": "0xee0eaea4daeb80b2446dcf8cb198a14f9be38947ea5527285cbe7e67b2cdc5ea",
+       "keyDigest": "0xb6de14d06e769e9dd8337609efbe3adf6725a93cdacb3116de9f6edb4f2bedfd",
+       "state": "active",
+       "closed": true,
+       "pending": false,
+       "hRound": 100100,
+       "pClose": 100100,
+       "tClose": 604900,
+       "offset": 0,
+       "firstRound": 1,
+       "rootEpoch": 1
+      },
+      {
+       "role": "primary",
+       "assignmentId": "0xd6812f6e3b074d067bf0090459d11e6d77489494d543988a68036ab236fc4a10",
+       "exposureDigest": "0xed42b8e2c02490d3cab4831d06551a49d07db575782ed6af44e1c50d2e3a4852",
+       "keyDigest": "0xb6de14d06e769e9dd8337609efbe3adf6725a93cdacb3116de9f6edb4f2bedfd",
+       "state": "active",
+       "closed": true,
+       "pending": false,
+       "hRound": 100150,
+       "pClose": 100141,
+       "tClose": 604910,
+       "offset": 100100,
+       "firstRound": 100110,
+       "rootEpoch": 2
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "name": "session-closed",
+   "records": [
+    {
+     "index": 0,
+     "recordId": "0xeff3a2668b5b7f17f10bbe3bf15be5a2d0a027b2e1f417c5eaa428755aa3163e",
+     "predecessor": "0x0000000000000000000000000000000000000000000000000000000000000000",
+     "kind": 1,
+     "kindName": "SessionClosed",
+     "progress": 100099,
+     "ucTime": 604900,
+     "data": "0x8af64e9c9da34531f1b91bc18e5af8072c8466349b20661352626317852d39fd"
+    }
+   ],
+   "steps": [
+    {
+     "afterRecords": 1,
+     "lastAckedAssignment": "0x7971fcee127203c6ef4962db14f70a41fc493629f4cad9e836906b6fc5c3fa63",
+     "pendingAssignment": "0x0000000000000000000000000000000000000000000000000000000000000000",
+     "sessionState": "closed",
+     "assignments": [
+      {
+       "role": "genesis",
+       "assignmentId": "0x7971fcee127203c6ef4962db14f70a41fc493629f4cad9e836906b6fc5c3fa63",
+       "exposureDigest": "0xee0eaea4daeb80b2446dcf8cb198a14f9be38947ea5527285cbe7e67b2cdc5ea",
+       "keyDigest": "0xb6de14d06e769e9dd8337609efbe3adf6725a93cdacb3116de9f6edb4f2bedfd",
+       "state": "active",
+       "closed": false,
+       "pending": false,
+       "hRound": 0,
+       "pClose": 0,
+       "tClose": 0,
+       "offset": 0,
+       "firstRound": 1,
+       "rootEpoch": 1
+      },
+      {
+       "role": "primary",
+       "assignmentId": "0xd6812f6e3b074d067bf0090459d11e6d77489494d543988a68036ab236fc4a10",
+       "exposureDigest": "0xed42b8e2c02490d3cab4831d06551a49d07db575782ed6af44e1c50d2e3a4852",
+       "keyDigest": "0xb6de14d06e769e9dd8337609efbe3adf6725a93cdacb3116de9f6edb4f2bedfd",
+       "state": "aborted",
+       "closed": false,
+       "pending": false,
+       "hRound": 0,
+       "pClose": 0,
+       "tClose": 0,
+       "offset": 0,
+       "firstRound": 0,
+       "rootEpoch": 2
+      }
+     ]
+    }
+   ]
+  }
+ ]
+}
