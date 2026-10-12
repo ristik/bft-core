@@ -28,6 +28,13 @@ make build        # build/ubft; the lanes run their other tools (evmtx, the F7 p
 Record the commit of this checkout (`git rev-parse HEAD`), the Ureth and rugregator commits and the binary SHA-256s next to the
 evidence; the lane prints its own in `heads.txt`.
 
+The H3, M2 and F8 lanes check their inputs before they start anything (`--prep-only` runs only that; `--selftest` needs no binaries). A run is
+evidence only with a clean checkout whose `build/ubft` is built from `HEAD`, and with binaries that match a provenance record: a directory holding
+`commit.txt` and `sha256.txt` for Ureth (`<LANE>_URETH_ATTESTED_PROVENANCE`, default `../briefs/builds/ureth-<commit>`) and, for H3 and F8, one for the
+rugregator binary (`RUGREGATOR_ATTESTED_PROVENANCE`, default `../briefs/builds/rugregator-<pin>`; the binary does not report its commit, so the
+checkout's revision alone proves nothing about it). `<LANE>_DEV_RUN=1` skips the provenance and clean-checkout checks and writes
+`DEVELOPMENT RUN, NOT EVIDENCE` into `run-mode.txt`. `<LANE>_URETH_COMMIT` defaults to the pin in `scripts/lib/lane-runner-lib.sh`.
+
 ## 1. Coupled key rotation, joiners, stalled successors and supersession (H3)
 
 ```sh
