@@ -155,51 +155,45 @@ func TestCfgRoundTripAndStrictness(t *testing.T) {
 }
 
 func TestPolicyExactBytes(t *testing.T) {
-	c0 := unhex(t, "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff")
-	c1 := unhex(t, "ffeeddccbbaa99887766554433221100ffeeddccbbaa99887766554433221100")
-	var a, b [32]byte
-	copy(a[:], c0)
-	copy(b[:], c1)
-	domain := hex.EncodeToString([]byte("UNICITY_BR_AGG_SHARDED"))
-	row := func(id string, c []byte) string { return "82" + "41" + id + "5820" + hex.EncodeToString(c) }
-	for _, tc := range []struct {
-		name string
-		p    Policy
-		want string
-	}{
-		{"depth0", NewPolicy(11, a), "85" + "56" + domain + "01" + "0b" + "00" + "81" + row("80", c0)},
-		{"depth1", NewPolicy(11, a, b), "85" + "56" + domain + "01" + "0b" + "01" + "82" + row("40", c0) + row("c0", c1)},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			require.Equal(t, tc.want, hex.EncodeToString(tc.p.Bytes()))
-			require.LessOrEqual(t, len(tc.p.Bytes()), MaxPolicyBytes)
-			got, err := DecodePolicy(tc.p.Bytes())
-			require.NoError(t, err)
-			require.Equal(t, tc.p, got)
-		})
-	}
+	domain := hex.EncodeToString([]byte("UNICITY_BR_AGG_PARTITION"))
+	p := NewPolicy(11)
+	require.Equal(t, "83"+"58"+"18"+domain+"02"+"0b", hex.EncodeToString(p.Bytes()))
+	require.Equal(t, 29, len(p.Bytes()), "the contract's 29-byte policy body")
+	got, err := DecodePolicy(p.Bytes())
+	require.NoError(t, err)
+	require.Equal(t, p, got)
 }
 
-func TestPolicyShardRouting(t *testing.T) {
-	p := NewPolicy(11, [32]byte{1}, [32]byte{2})
-	var lo, hi [32]byte
-	lo[0], hi[0] = 0x7f, 0x80
-	require.Equal(t, 0, p.ShardIndex(lo))
-	require.Equal(t, 1, p.ShardIndex(hi))
-	p0 := NewPolicy(11, [32]byte{1})
-	require.Equal(t, 0, p0.ShardIndex(hi))
-	require.Equal(t, []byte{0x80}, p0.Shards[0].ID)
-	require.Equal(t, [][]byte{{0x40}, {0xc0}}, [][]byte{p.Shards[0].ID, p.Shards[1].ID})
+// TestShardPrefix: the depth of a canonical native shard ID and the state-ID prefix it names (contract section 6).
+func TestShardPrefix(t *testing.T) {
+	for _, tc := range []struct {
+		shard []byte
+		depth int
+		ok    bool
+	}{
+		{[]byte{0x80}, 0, true}, {[]byte{0x40}, 1, true}, {[]byte{0xc0}, 1, true}, {[]byte{0x60}, 2, true}, {[]byte{0x08}, 4, true},
+		{append(make([]byte, 32), 0x80), 256, true}, {append(make([]byte, 32), 0x40), 0, false}, {[]byte{0x00}, 0, false}, {nil, 0, false},
+		{append(make([]byte, 33), 0x80), 0, false},
+	} {
+		d, ok := ShardDepth(tc.shard)
+		require.Equal(t, tc.ok, ok, "%x", tc.shard)
+		if ok {
+			require.Equal(t, tc.depth, d, "%x", tc.shard)
+		}
+	}
+	var lo, hi, mid [32]byte
+	lo[0], hi[0], mid[0] = 0x3f, 0xc1, 0x5f
+	require.True(t, InShard([]byte{0x80}, lo) && InShard([]byte{0x80}, hi), "the root shard holds every state ID")
+	require.True(t, InShard([]byte{0x40}, lo) && !InShard([]byte{0x40}, hi))
+	require.True(t, InShard([]byte{0xc0}, hi) && !InShard([]byte{0xc0}, lo))
+	require.True(t, InShard([]byte{0x60}, mid) && !InShard([]byte{0x60}, lo), "depth 2: shard 01 holds 0x5f, not 0x3f")
+	require.False(t, InShard([]byte{0x00}, lo), "a noncanonical shard holds nothing")
 }
 
 func TestPolicyDecodeRejections(t *testing.T) {
-	var a, b [32]byte
-	a[0], b[0] = 1, 2
-	good := NewPolicy(11, a, b).Bytes()
-	row := func(id []byte, c [32]byte) []byte { return CArr(CBytes(id), CBytes(c[:])) }
-	mk := func(version, part, depth uint64, rows ...[]byte) []byte {
-		return CArr(CBytes([]byte(policyDomain)), CUint(version), CUint(part), CUint(depth), CArr(rows...))
-	}
+	good := NewPolicy(11).Bytes()
+	mk := func(items ...[]byte) []byte { return CArr(items...) }
+	dom := CBytes([]byte(policyDomain))
 	cases := []struct {
 		name string
 		b    []byte
@@ -207,21 +201,15 @@ func TestPolicyDecodeRejections(t *testing.T) {
 	}{
 		{"trailing", append(append([]byte{}, good...), 0), ErrTrailing},
 		{"oversized", append(append([]byte{}, good...), make([]byte, MaxPolicyBytes)...), ErrInputTooLarge},
-		{"old domain", bytes.Replace(good, []byte(policyDomain), []byte("UNICITY_BR_AGG_ONEXXXXXXXXX"[:len(policyDomain)]), 1), ErrShape},
-		{"version 2", mk(2, 11, 1, row([]byte{0x40}, a), row([]byte{0xc0}, b)), ErrVersion},
-		{"partition zero", mk(1, 0, 1, row([]byte{0x40}, a), row([]byte{0xc0}, b)), ErrIntRange},
-		{"partition over u32", mk(1, 1<<32, 1, row([]byte{0x40}, a), row([]byte{0xc0}, b)), ErrIntRange},
-		{"depth 2", mk(1, 11, 2, row([]byte{0x20}, a), row([]byte{0x60}, a), row([]byte{0xa0}, b), row([]byte{0xe0}, b)), ErrShape},
-		{"depth 0 two rows", mk(1, 11, 0, row([]byte{0x80}, a), row([]byte{0x80}, b)), ErrShape},
-		{"depth 1 hole", mk(1, 11, 1, row([]byte{0x40}, a)), ErrShape},
-		{"depth 1 reordered", mk(1, 11, 1, row([]byte{0xc0}, b), row([]byte{0x40}, a)), ErrShape},
-		{"depth 1 duplicate", mk(1, 11, 1, row([]byte{0x40}, a), row([]byte{0x40}, b)), ErrShape},
-		{"depth 1 root shard overlap", mk(1, 11, 1, row([]byte{0x80}, a), row([]byte{0xc0}, b)), ErrShape},
-		{"empty shard", mk(1, 11, 0, row(nil, a)), ErrShape},
-		{"short conf", mk(1, 11, 0, CArr(CBytes([]byte{0x80}), CBytes(a[:31]))), ErrLength},
-		{"row extra field", mk(1, 11, 0, CArr(CBytes([]byte{0x80}), CBytes(a[:]), CUint(0))), ErrShape},
-		{"extra field", append([]byte{0x86}, append(append([]byte{}, good[1:]...), 0xf6)...), ErrShape},
-		{"nonminimal depth", CArr(CBytes([]byte(policyDomain)), CUint(1), CUint(11), []byte{0x18, 0x01}, CArr(row([]byte{0x40}, a), row([]byte{0xc0}, b))), ErrNonCanonical},
+		{"protocol-3 sharded body", mk(CBytes([]byte("UNICITY_BR_AGG_SHARDED")), CUint(1), CUint(11), CUint(0), CArr(CArr(CBytes([]byte{0x80}), CBytes(make([]byte, 32))))), ErrShape},
+		{"other domain", mk(CBytes([]byte("UNICITY_BR_AGG_ONE")), CUint(2), CUint(11)), ErrShape},
+		{"version 1", mk(dom, CUint(1), CUint(11)), ErrVersion},
+		{"version 3", mk(dom, CUint(3), CUint(11)), ErrVersion},
+		{"partition zero", mk(dom, CUint(2), CUint(0)), ErrIntRange},
+		{"partition over u32", mk(dom, CUint(2), CUint(1<<32)), ErrIntRange},
+		{"extra field", mk(dom, CUint(2), CUint(11), CArr()), ErrShape},
+		{"missing partition", mk(dom, CUint(2)), ErrShape},
+		{"nonminimal partition", mk(dom, CUint(2), []byte{0x18, 0x0b}), ErrNonCanonical},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -232,7 +220,7 @@ func TestPolicyDecodeRejections(t *testing.T) {
 }
 
 func envelopeFor(t *testing.T, f *Fixture, leaves int) *Envelope {
-	row := f.Policy.Shards[0]
+	row := f.Shards[0]
 	e := &Envelope{PolicyBody: f.Policy.Bytes(), History: []byte{1, 2, 3},
 		Anchors: []Anchor{{Partition: f.Policy.Partition, Shard: row.ID, ShardConfHash: row.Conf,
 			ExpectedStateRoot: H([]byte("root")), ExpectedIRHash: H([]byte("ir")), UC: []byte{9, 9}, InputRecord: []byte{7}}}}
@@ -312,7 +300,7 @@ func TestCheckPolicy(t *testing.T) {
 	require.ErrorIs(t, err, ErrPolicyHash)
 
 	// A well-formed policy for another partition: hash mismatch, not tuple.
-	other := NewPolicy(12, f.Policy.Shards[0].Conf)
+	other := NewPolicy(12)
 	e = ok()
 	e.PolicyBody = other.Bytes()
 	_, _, err = CheckPolicy(f.Cfg, e, sids(2))
@@ -334,17 +322,26 @@ func TestCheckPolicy(t *testing.T) {
 	_, _, err = CheckPolicy(&nc, e, sids(2))
 	require.ErrorIs(t, err, ErrTrailing)
 
-	// Caller table attempting to choose its own admission.
-	for name, mut := range map[string]func(a *Anchor){
-		"partition": func(a *Anchor) { a.Partition++ },
-		"shard":     func(a *Anchor) { a.Shard = []byte{0x81} },
-		"conf":      func(a *Anchor) { a.ShardConfHash[0] ^= 1 },
+	// Caller table attempting to choose its own admission: another partition or a noncanonical shard is a tuple error; a shard
+	// the leaves are not in is a leaf-index error; the configuration hash is the UC's to authenticate (B1), not the policy's.
+	for name, tc := range map[string]struct {
+		mut  func(a *Anchor)
+		want error
+	}{
+		"partition":     {func(a *Anchor) { a.Partition++ }, ErrPolicyTuple},
+		"noncanonical":  {func(a *Anchor) { a.Shard = []byte{0x40, 0x00} }, ErrPolicyTuple},
+		"foreign shard": {func(a *Anchor) { a.Shard = []byte{0x81} }, ErrPolicyLeafIndex},
+		"conf":          {func(a *Anchor) { a.ShardConfHash[0] ^= 1 }, nil},
 	} {
 		t.Run(name, func(t *testing.T) {
 			e := ok()
-			mut(&e.Anchors[0])
+			tc.mut(&e.Anchors[0])
 			_, _, err := CheckPolicy(f.Cfg, e, sids(2))
-			require.ErrorIs(t, err, ErrPolicyTuple)
+			if tc.want == nil {
+				require.NoError(t, err)
+				return
+			}
+			require.ErrorIs(t, err, tc.want)
 		})
 	}
 	e = ok()
@@ -377,7 +374,7 @@ func TestCheckPolicySharded(t *testing.T) {
 	f := NewFixture(31337, 11, [32]byte{1}, [32]byte{2})
 	// Every anchor carries its own UC bytes (byte-identical UCs are one anchor).
 	anchor := func(row int, uc byte) Anchor {
-		return Anchor{Partition: 11, Shard: f.Policy.Shards[row].ID, ShardConfHash: f.Policy.Shards[row].Conf, UC: []byte{uc}}
+		return Anchor{Partition: 11, Shard: f.Shards[row].ID, ShardConfHash: f.Shards[row].Conf, UC: []byte{uc}}
 	}
 	type spec struct {
 		row int
@@ -428,11 +425,33 @@ func TestCheckPolicySharded(t *testing.T) {
 			require.ErrorIs(t, err, tc.want)
 		})
 	}
-	// Policy-row tuple checks still reject a foreign shard row.
+	// A root-shard anchor holds every state ID; a noncanonical shard or another partition is refused.
 	e := env([]spec{{0, 1}}, 0)
 	e.Anchors[0].Shard = []byte{0x80}
 	_, _, err = CheckPolicy(f.Cfg, e, [][32]byte{s0})
+	require.NoError(t, err)
+	e.Anchors[0].Shard = []byte{0x00}
+	_, _, err = CheckPolicy(f.Cfg, e, [][32]byte{s0})
 	require.ErrorIs(t, err, ErrPolicyTuple)
+	e = env([]spec{{0, 1}}, 0)
+	e.Anchors[0].Partition = 12
+	_, _, err = CheckPolicy(f.Cfg, e, [][32]byte{s0})
+	require.ErrorIs(t, err, ErrPolicyTuple)
+	// A parent shard before a split and its child after it in one history (contract section 6).
+	e = env([]spec{{0, 1}}, 0, 1)
+	child := e.Anchors[0]
+	child.Shard, child.UC = []byte{0x60}, []byte{2}
+	e.Anchors = append(e.Anchors, child)
+	var s01 [32]byte
+	s01[0] = 0x5f
+	_, plan, err = CheckPolicy(f.Cfg, e, [][32]byte{s01, s01})
+	require.NoError(t, err)
+	require.Equal(t, []int{0, 1}, plan.LeafAnchor)
+	e.LeafProofs[1].AnchorIndex = 0
+	e.Anchors = e.Anchors[:1]
+	e.Anchors[0].Shard = []byte{0x20} // shard 00: a leaf with prefix 01 is not in it
+	_, _, err = CheckPolicy(f.Cfg, e, [][32]byte{s01, s01})
+	require.ErrorIs(t, err, ErrPolicyLeafIndex)
 	// The anchor bound is a named profile parameter.
 	many := make([]spec, MaxAnchors+1)
 	idx := make([]uint16, MaxAnchors+1)

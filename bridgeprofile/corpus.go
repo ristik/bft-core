@@ -120,11 +120,12 @@ type FixtureSet struct {
 func fixtureJSON(name string, f *Fixture) FixtureJSON {
 	c := f.Cfg
 	var shards []ShardJSON
-	for _, r := range f.Policy.Shards {
+	for _, r := range f.Shards {
 		shards = append(shards, ShardJSON{ShardID: hx(r.ID), ConfHash: h32(r.Conf)})
 	}
+	depth, _ := ShardDepth(f.Shards[0].ID)
 	return FixtureJSON{Name: name, ChainID: strconv.FormatUint(c.ChainID, 10), AggregatorPartition: f.Policy.Partition,
-		AggregatorDepth: int(f.Policy.Depth), AggregatorShards: shards, EVMPartition: c.EVMPartition, EVMShard: hx(c.EVMShard),
+		AggregatorDepth: depth, AggregatorShards: shards, EVMPartition: c.EVMPartition, EVMShard: hx(c.EVMShard),
 		Cfg: hx(c.Bytes()), CfgHash: h32(c.Hash()), PolicyBody: hx(f.Policy.Bytes()), PolicyHash: h32(f.Policy.Hash()),
 		Vault: hx(c.Vault[:]), Ty: h32(c.Ty), Aid: h32(c.Aid)}
 }
