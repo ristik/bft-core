@@ -274,7 +274,7 @@ func TestGasParity(t *testing.T) {
 
 // TestMaxGas pins the design's worst-case figures.
 func TestMaxGas(t *testing.T) {
-	if g := b1ref.UCGas(262144, 64, 8, 2304); g != 6_412_004 {
+	if g := b1ref.UCGas(262144, 64, 8, 2304); g != 5_261_004 {
 		t.Fatalf("UC worst case %d", g)
 	}
 	if g := b1ref.RSMTGas(12392, 256); g != 264_522 {

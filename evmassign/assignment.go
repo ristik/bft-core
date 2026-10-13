@@ -58,8 +58,8 @@ const EVMPartitionTypeID types.PartitionTypeID = 8
 
 const (
 	// MaxValidators bounds the successor set so the candidate stays far below
-	// the 1 MiB freeze companion limit.
-	MaxValidators = 64
+	// the 1 MiB freeze companion limit; it equals the B1 registry member ceiling (b1state.MaxMembers), so every validator set a root epoch can carry is admissible as a B1 entry.
+	MaxValidators = 16
 	// KeyLen is the compressed secp256k1 signing key width.
 	KeyLen = 33
 

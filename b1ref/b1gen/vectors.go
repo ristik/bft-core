@@ -27,7 +27,7 @@ type gen struct{ m *Manifest }
 type shape struct{ sigs, claims, steps int }
 
 func (s shape) gas(reqLen int) uint64 {
-	return 60000 + 16*uint64(reqLen) + 1000*64 + 1117700 + 6000*uint64(s.sigs) + 2000*uint64(s.claims) + 250*uint64(s.steps)
+	return 60000 + 16*uint64(reqLen) + 1000*16 + 100*(8+11+8*16) + 6000*uint64(s.sigs) + 2000*uint64(s.claims) + 250*uint64(s.steps)
 }
 
 func shapeOf(ucs ...ucSpec) shape {

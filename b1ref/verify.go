@@ -139,11 +139,16 @@ func evalSeal(call *certCall, reg *Registry) error {
 	if r > reg.RootRound {
 		return ErrFuture
 	}
-	if reg.RootRound-r > reg.WCert {
+	if certificateTooOld(reg.RootRound, r, reg.WCert) {
 		return ErrStale
 	}
 	return verifySignatures(call, entry)
 }
+
+// certificateTooOld is the one place the certificate age rule lives: a certificate of root round r is refused when the current root round is more than the
+// profile's W_cert past it. The window also sizes the registry's retained history (b1state.Profile.Bounds) and nothing else reads it; if the age rule is
+// replaced (owner question Q14, briefs/b1-any-age-by-signatures.md) these two are what change, behind the profile parameter.
+func certificateTooOld(rootRound, r, wCert uint64) bool { return rootRound-r > wCert }
 
 var curveN = ethcrypto.S256().Params().N
 
