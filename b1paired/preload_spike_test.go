@@ -7,6 +7,7 @@ package b1paired_test
 import (
 	"bytes"
 	"context"
+	stdcrypto "crypto"
 	"math/big"
 	"strings"
 	"testing"
@@ -36,6 +37,7 @@ import (
 )
 
 type threeEpochs struct {
+	second *q3fixture.Fixture
 	p      b1state.Profile
 	g      *registrygenesis.Genesis
 	origin registrygenesis.GenesisOrigin
@@ -92,7 +94,7 @@ func newThreeEpochs(t *testing.T, w uint64) *threeEpochs {
 		require.NoError(t, err)
 		return o
 	}
-	return &threeEpochs{p, g, origin, parent, pair, obs, rt}
+	return &threeEpochs{second, p, g, origin, parent, pair, obs, rt}
 }
 
 // The block a stalled shard builds after the root moved from epoch 1 to 3 carries the shard's authorizing UC, whose seal is in epoch 3
@@ -283,4 +285,96 @@ func mustEntryWords(t *testing.T, e *threeEpochs) map[[32]byte][32]byte {
 	w, err := b1state.EntryStorage(history[1])
 	require.NoError(t, err)
 	return w
+}
+
+// The acknowledgement of a supersession folded over two assignment steps (primary + supersession, MaxSupersessionSpan = 2), derived through the
+// real path on the ORIGINAL frozen parent: the folded transition names shard epochs 0 -> 2 and a configuration hash that is not the genesis one,
+// the observation is epoch 3's certificate over that configuration, and the one B1 update installs the two consecutive entries (root epochs 2 and
+// 3) read from the authenticated root history, closing the old tip once. The frozen-parent check is unchanged.
+func TestSpikeSpanTwoSupersessionAcknowledgementInstallsBothEntriesInOneBlock(t *testing.T) {
+	e := newThreeEpochs(t, 15)
+	full, err := e.g.FullConfig()
+	require.NoError(t, err)
+	withParam := func(v string) *types.PartitionDescriptionRecord {
+		c := *full
+		c.PartitionParams = map[string]string{}
+		for k, x := range full.PartitionParams {
+			c.PartitionParams[k] = x
+		}
+		c.PartitionParams["spike.assignment"] = v
+		return &c
+	}
+	conf := func(c *types.PartitionDescriptionRecord) [32]byte {
+		h, err := c.Hash(stdcrypto.SHA256)
+		require.NoError(t, err)
+		return [32]byte(h)
+	}
+	full2 := withParam("2")
+	conf0, conf1, conf2 := [32]byte(e.g.FullShardConfHash()), conf(withParam("1")), conf(full2)
+	frozen := e.parent.ParentHash()
+	step := func(oldRoot, oldShard uint64, from, to [32]byte, id byte) handoff.EVMTransition {
+		var tr handoff.EVMTransition
+		tr.OldRootEpoch, tr.NewRootEpoch = oldRoot, oldRoot+1
+		tr.OldShardEpoch, tr.NewShardEpoch = oldShard, oldShard+1
+		tr.OldActiveConfHash, tr.NewActiveConfHash = from, to
+		tr.NextBodyID, tr.GenesisID = [32]byte{1}, [32]byte{2}
+		tr.Ack.FrozenID, tr.Ack.CommitID = [32]byte{3}, [32]byte{id}
+		copy(tr.Ack.FrozenParent[:], frozen.Bytes()) // every folded step froze the same parent
+		tr.Ack.SuccessorParent = tr.Ack.FrozenParent
+		tr.Ack.SuccessorTR, tr.Ack.EVMRound = [32]byte{5}, 1
+		return tr
+	}
+	s1, s2 := step(1, 0, conf0, conf1, 4), step(2, 1, conf1, conf2, 5)
+	folded, err := handoff.FoldTransitions([]handoff.EVMTransition{s1, s2})
+	require.NoError(t, err)
+	require.EqualValues(t, 2, folded.SupersessionSpan)
+	encoded, err := folded.Encode()
+	require.NoError(t, err)
+
+	// the observation: epoch 3's certificate over the second assignment's configuration, shard epoch 2
+	tr := certifiedchain.Technical(0)
+	tr.Round, tr.Epoch = 1, 2
+	chain := certifiedchain.New(t, 5, 0)
+	uc := chain.CertifyFor(full2, e.second.NewNodes[0].Signer, &types.InputRecord{Version: 1}, tr, 15)
+	uc.UnicitySeal.NetworkID = 5
+	uc.UnicitySeal.Epoch = 3
+	uc.UnicitySeal.Signatures = nil
+	for _, node := range e.second.NewNodes[:2] {
+		require.NoError(t, uc.UnicitySeal.Sign(node.PeerConf.ID.String(), node.Signer))
+	}
+	o, err := rootinput.AuthenticateHistoricalObservationV2(context.Background(), rootinput.ObservationContextV2{NetworkID: 5, PartitionID: 8, ShardConfHash: conf2[:], RootEpoch: 3, EpochAuthority: installedEpoch(3), TrustBases: e.rt.Trust(nil)}, uc, tr)
+	require.NoError(t, err)
+
+	c := rootinput.ContextV2{Context: context.Background(), B1: e.pair, Genesis: e.origin, Parent: e.parent, Round: 1, ParentHash: frozen.Bytes(), TransitionsPending: true, Transition: encoded}
+	res, err := rootinput.DeriveV2(c, o)
+	require.NoError(t, err)
+	require.Equal(t, [][]byte{encoded}, res.Input.Transitions)
+	update, _, err := b1state.Admit(res.B1Update, e.p, e.p.SystemGas)
+	require.NoError(t, err)
+	var got []uint64
+	for _, n := range update.NewEntries {
+		got = append(got, n.Epoch)
+	}
+	require.Equal(t, []uint64{2, 3}, got, "both missed epochs are installed by the one acknowledgement block")
+	require.EqualValues(t, 1, update.PriorTipEpoch)
+	require.NotNil(t, update.OldTipEnd)
+	require.EqualValues(t, 7, *update.OldTipEnd, "the old tip is closed once, at the first successor's start")
+	require.Equal(t, [32]byte(frozen), update.ParentHash, "built on the original frozen parent")
+
+	// the same acknowledgement on any other parent is refused: the frozen-parent check stands
+	other := e.parentWith(t, func() map[common.Hash]common.Hash {
+		w := e.g.B1Words()
+		w[common.Hash(b1state.FixedSlot("round.authorized"))] = common.Hash(b1state.Word(1))
+		w[common.Hash(b1state.FixedSlot("outcomes.round"))] = common.Hash(b1state.Word(1))
+		w[common.Hash(b1state.FixedSlot("outcomes.commitment"))] = common.Hash{9}
+		return w
+	}(), 1)
+	c.Parent, c.ParentHash = other, other.ParentHash().Bytes()
+	_, err = rootinput.DeriveV2(c, o)
+	require.ErrorIs(t, err, rootinput.ErrV2Context)
+
+	// span 3 cannot be folded (the root refuses the chain too: storage.CheckSupersessionChainLength)
+	s3 := step(3, 2, conf2, conf(withParam("3")), 6)
+	_, err = handoff.FoldTransitions([]handoff.EVMTransition{s1, s2, s3})
+	require.ErrorIs(t, err, handoff.ErrBoundary)
 }
