@@ -23,9 +23,10 @@ type Words map[[32]byte][32]byte
 
 func (w Words) Word(slot [32]byte) ([32]byte, error) { return w[slot], nil }
 
-// Pins are what the native verifier is built with, not read from state: the profile hash this deployment's registry must carry.
+// Pins are what the native verifier is built with, from authenticated deployment configuration, never from the registry words
+// they check or the caller: the genesis commitment and the profile hash this deployment's registry must carry (contract section 1).
 type Pins struct {
-	ProfileHash [32]byte
+	GenesisCommitment, ProfileHash [32]byte
 }
 
 // RegistryFormat is the b1.format word of the any-age layout.
@@ -97,11 +98,12 @@ func readCommon(st State, pins Pins) (*common, error) {
 	}
 	phase, initialized, network, format, g, tip, ready, o, origin := vals[0], vals[1], vals[2], vals[3], vals[4], vals[5], vals[6], vals[7], vals[8]
 	switch {
-	case w[0] == [32]byte{}, phase != 1 && phase != 2, initialized != 1, network == 0 || network > 0xffff,
+	case pins.GenesisCommitment == [32]byte{} || w[0] != pins.GenesisCommitment, phase != 1 && phase != 2, initialized != 1, network == 0 || network > 0xffff,
 		pins.ProfileHash == [32]byte{} || w[4] != pins.ProfileHash, format != RegistryFormat, ready > 1, g > tip:
 		return nil, ErrRegistryCommon
 	}
-	if ready == 1 && (origin < g || origin > tip) {
+	// no preload (contract section 1): a ready registry's usable origin is its import tip
+	if ready == 1 && (origin < g || origin != tip) {
 		return nil, ErrRegistryCommon
 	}
 	if ready == 0 && (origin != 0 || o != 0) {
@@ -179,9 +181,10 @@ func loadEpoch(st State, c *common, e uint64) (*epochAuth, error) {
 	if sum, err := ent.TotalWeight(); err != nil || sum != total {
 		return nil, ErrRegistryInvalidEpoch
 	}
-	// interval invariants of admitted state at the usable origin (section 3)
+	// interval invariants of admitted state at the usable origin (section 3): every epoch below U is closed by O, and the usable
+	// epoch, the import tip, is open
 	switch {
-	case ent.Start > c.o, e < c.origin && ent.End == nil, e < c.origin && *ent.End > c.o, e == c.origin && ent.End != nil && *ent.End <= c.o:
+	case ent.Start > c.o, e < c.origin && ent.End == nil, e < c.origin && *ent.End > c.o, e == c.origin && ent.End != nil:
 		return nil, ErrRegistryInvalidEpoch
 	}
 	threshold, err := b1state.Threshold(total)

@@ -14,7 +14,7 @@ func (g *gen) anyAge(seed string) {
 	run := func(id, desc string, s Seal, pre PreState, want string) {
 		g.ok(id, fam, desc, one(s), pre, want, nil, nil)
 	}
-	pre, preloaded := h.Pre(), h.Preloaded()
+	pre, closed := h.Pre(), h.Closed()
 
 	run("time.genesis-epoch.ok", "genesis epoch 0, about 10^6 rounds old", hseal(0, 500, "a"), pre, "")
 	run("time.closed.start.ok", "closed epoch, r = start", hseal(1, 1000, "a"), pre, "")
@@ -24,10 +24,16 @@ func (g *gen) anyAge(seed string) {
 	run("time.same-members.predecessor-round", "same members as the predecessor, r in the predecessor's interval", hseal(5, 4500, "a"), pre, "ErrBeforeStart")
 	run("time.origin.at-O.ok", "usable epoch, r = O", hseal(8, O, "a"), pre, "")
 	run("time.origin.future", "usable epoch, r = O+1", hseal(8, O+1, "a"), pre, "ErrFuture")
-	run("time.preloaded.not-usable", "imported epoch above the usable origin", hseal(9, O+600, "a"), preloaded, "ErrEpochNotUsable")
-	run("time.preloaded.origin-closed.ok", "usable epoch closed by a preloaded successor above O, r = O", hseal(8, O, "a"), preloaded, "")
-	run("time.preloaded.origin-closed.future", "usable epoch closed above O, O < r < end", hseal(8, O+100, "a"), preloaded, "ErrFuture")
+	g.registry("time.import-tip-above-origin", fam, "an imported epoch above the usable origin while ready (I != U): impossible without preload",
+		one(hseal(9, O+600, "a")), closed, "ErrRegistryCommon")
+	closedTip := closed
+	closedTip.ImportedTip, closedTip.Epochs = 8, closed.Epochs[:len(closed.Epochs)-1]
+	g.registry("time.usable-tip-closed", fam, "the usable tip closed above O (I = U): impossible without preload",
+		one(hseal(8, O, "a")), closedTip, "ErrRegistryInvalidEpoch")
 	run("time.past-tip", "epoch above the imported tip: false, no entry read", hseal(1<<40, O, "a"), pre, "ErrEpochNotUsable")
+	run("time.scheme-1.ok", "an old scheme 1 epoch", hseal(2, 2500, "a"), pre, "")
+	run("time.scheme-2.ok", "a scheme 2 epoch", hseal(6, 6500, "a"), pre, "")
+	g.ok("time.schemes.mixed.ok", fam, "scheme 1 and scheme 2 epochs in one batch", req(claimOf(h.uc(hseal(2, 2500, "a"), 1, "")), claimOf(h.uc(hseal(6, 6500, "a"), 1, ""))), pre, "", nil, nil)
 	run("time.wrong-set", "seal of epoch 3 signed by the next set (node04 is not a member of epoch 3)",
 		Seal{Epoch: 3, Round: 3500, Variant: "a", Signers: []int{1, 2, 4}}, pre, "ErrUnknownSigner")
 	run("time.quorum-short", "two of four signatures", Seal{Epoch: 6, Round: 6500, Variant: "a", Signers: []int{1, 2}}, pre, "ErrQuorum")
@@ -66,6 +72,7 @@ func (g *gen) registryFamily(seed string) {
 		func(p *PreState) { p.override(entrySlot(5, 0), w64(2)) }, "")
 
 	common("reg.common.genesis-commitment", "genesisCommitment zero", func(p *PreState) { p.GenesisCommitment = hex32([32]byte{}) })
+	common("reg.common.genesis-commitment-pin", "genesisCommitment nonzero but not the deployment pin", func(p *PreState) { p.GenesisCommitment = hex32(flip32(h32(p.GenesisCommitment))) })
 	common("reg.common.phase-3", "phase 3", func(p *PreState) { p.Phase = 3 })
 	common("reg.common.uninitialized", "b1.initialized 0", func(p *PreState) { set(p, "b1.initialized", w64(0)) })
 	common("reg.common.network-zero", "network 0", func(p *PreState) { p.Network = 0 })
@@ -75,6 +82,7 @@ func (g *gen) registryFamily(seed string) {
 	common("reg.common.ready-2", "b1.originReady 2", func(p *PreState) { set(p, "b1.originReady", w64(2)) })
 	common("reg.common.genesis-above-tip", "g > I", func(p *PreState) { p.GenesisEpoch = 9 })
 	common("reg.common.origin-above-tip", "U > I", func(p *PreState) { p.Origin, p.ImportedTip = 9, 8 })
+	common("reg.common.tip-above-origin", "I > U while ready (no preload)", func(p *PreState) { p.ImportedTip = 9 })
 	common("reg.common.not-ready-origin", "not ready but U != 0", func(p *PreState) { p.OriginReady, p.ClockRound = false, 0 })
 	common("reg.common.clock-high-bytes", "clock.rootRound with a nonzero high byte", func(p *PreState) {
 		w := w64(HistoryClock)

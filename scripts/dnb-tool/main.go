@@ -375,7 +375,7 @@ func b1check(args []string) error {
 	if len(in) > 0 && in[0] == 1 {
 		in = append([]byte{2}, in[1:]...)
 	}
-	v, err := b1ref.Cert(in, model.Words(), b1ref.Pins{ProfileHash: model.ProfileHash})
+	v, err := b1ref.Cert(in, model.Words(), b1ref.Pins{GenesisCommitment: model.GenesisCommitment, ProfileHash: model.ProfileHash})
 	fmt.Printf("valid=%v why=%v err=%v gas=%d (epoch entry: start=%d members=%d)\n", v.Valid, v.Why, err, v.Gas, entries[0].Start, len(entries[0].Members))
 	return nil
 }

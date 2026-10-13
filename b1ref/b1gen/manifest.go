@@ -43,19 +43,21 @@ type SlotWord struct {
 // PreState is a vector's registry state. The typed fields describe it; Storage is what every implementation reads: every
 // nonzero word at the registry address, sorted by slot, after Overrides. PinnedProfileHash is what the verifier is built with.
 type PreState struct {
-	Network           uint16       `json:"network"`
-	Phase             uint64       `json:"phase"`
-	GenesisCommitment string       `json:"genesisCommitment"`
-	ProfileHash       string       `json:"profileHash"`
-	PinnedProfileHash string       `json:"pinnedProfileHash"`
-	GenesisEpoch      uint64       `json:"genesisEpoch"`
-	ImportedTip       uint64       `json:"importedTipEpoch"`
-	OriginReady       bool         `json:"originReady"`
-	Origin            uint64       `json:"originEpoch"`
-	ClockRound        uint64       `json:"clockRound"`
-	Epochs            []EpochWords `json:"epochs"`
-	Overrides         []SlotWord   `json:"overrides,omitempty"`
-	Storage           []SlotWord   `json:"storage"`
+	Network           uint16 `json:"network"`
+	Phase             uint64 `json:"phase"`
+	GenesisCommitment string `json:"genesisCommitment"`
+	// PinnedGenesisCommitment and PinnedProfileHash are the verifier's deployment pins, not storage.
+	PinnedGenesisCommitment string       `json:"pinnedGenesisCommitment"`
+	ProfileHash             string       `json:"profileHash"`
+	PinnedProfileHash       string       `json:"pinnedProfileHash"`
+	GenesisEpoch            uint64       `json:"genesisEpoch"`
+	ImportedTip             uint64       `json:"importedTipEpoch"`
+	OriginReady             bool         `json:"originReady"`
+	Origin                  uint64       `json:"originEpoch"`
+	ClockRound              uint64       `json:"clockRound"`
+	Epochs                  []EpochWords `json:"epochs"`
+	Overrides               []SlotWord   `json:"overrides,omitempty"`
+	Storage                 []SlotWord   `json:"storage"`
 }
 
 // Grouping is the canonical first-use grouping of a structurally accepted CERT_BATCH_V2 request (contract section 3).

@@ -5,7 +5,8 @@ import "fmt"
 // History is a multi-epoch registry for the any-age, reuse and pricing vectors (briefs/b1-any-age-vectors.md families A, B, D and
 // G). Epochs g..8: epoch 0 runs from round 1 to 1000, epoch e >= 1 from 1000e to 1000(e+1), epoch 8 (the usable origin) is open
 // from 8000, and O = 1,000,000. Epochs 0..3 are signed by node00..node03, epochs 4..8 by node01..node04: one member replaced at
-// epoch 4, then the same members in successive epochs. Every member weighs 1, so three signatures reach quorum.
+// epoch 4, then the same members in successive epochs. Epochs below 4 sign with scheme 1, epochs from 4 with scheme 2 (the UC seal
+// signature map is verified the same way under both). Every member weighs 1, so three signatures reach quorum.
 type History struct {
 	f    *fixture
 	vals []validator // node00..node04
@@ -46,13 +47,18 @@ func (h *History) Pre() PreState {
 			end = HistoryStart(e + 1)
 		}
 		auth := authorityOf(h.f.network, e, 2, newDRBG(h.f.seed, fmt.Sprintf("body/%d", e)).hash(), h.set(e))
-		p.Epochs = append(p.Epochs, h.f.epochWords(auth, e, HistoryStart(e), end, e == h.g))
+		w := h.f.epochWords(auth, e, HistoryStart(e), end, e == h.g)
+		if e >= 4 {
+			w.SigningScheme = 2 // the live domain-bound scheme from the first replacement on; older epochs keep scheme 1
+		}
+		p.Epochs = append(p.Epochs, w)
 	}
 	return p
 }
 
-// Preloaded is Pre with epoch 9 imported but not usable: it closes the usable epoch 8 at O+500, above O.
-func (h *History) Preloaded() PreState {
+// Closed is Pre with epoch 9 imported, closing epoch 8 at O+500, while U stays 8: the preload state the contract no longer admits
+// (I != U while ready, and a closed usable epoch), so it is impossible registry state.
+func (h *History) Closed() PreState {
 	p := h.Pre()
 	p.ImportedTip = 9
 	p.Epochs[len(p.Epochs)-1].End, p.Epochs[len(p.Epochs)-1].HasEnd = HistoryClock+500, true

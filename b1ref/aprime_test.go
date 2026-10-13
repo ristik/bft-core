@@ -118,3 +118,27 @@ func TestCallerScannerDuplicateBeforeDecode(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// TestClaimConflictPredicate: the same-shard predicate on synthetic claims, since no real pair of different claims can both fold to
+// one seal (contract section 7a.1).
+func TestClaimConflictPredicate(t *testing.T) {
+	claims := []claim{{partition: 1, shardBytes: []byte{0x80}}, {partition: 1, shardBytes: []byte{0x80}}, {partition: 1, shardBytes: []byte{0xc0}}, {partition: 2, shardBytes: []byte{0x80}}}
+	pl := &plan{k: 4}
+	for i := range pl.occ[:4] {
+		pl.occ[i] = occurrence{newClaim: true}
+	}
+	if !conflicts(claims, pl, 1) {
+		t.Fatal("same partition and shard under one seal is a conflict")
+	}
+	if conflicts(claims, pl, 2) || conflicts(claims, pl, 3) {
+		t.Fatal("another shard or partition is no conflict")
+	}
+	pl.occ[1].sealGroup = 1
+	if conflicts(claims, pl, 1) {
+		t.Fatal("the same shard under another seal is no conflict")
+	}
+	pl.occ[1].sealGroup, pl.occ[0].newClaim = 0, false
+	if conflicts(claims, pl, 1) {
+		t.Fatal("an exact repeat (not a new claim) is no conflict")
+	}
+}

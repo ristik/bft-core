@@ -76,7 +76,7 @@ func state(t testing.TB, p *b1gen.PreState) (b1ref.State, b1ref.Pins) {
 	for _, sw := range p.Storage {
 		w[word32(t, sw.Slot)] = word32(t, sw.Value)
 	}
-	return w, b1ref.Pins{ProfileHash: word32(t, p.PinnedProfileHash)}
+	return w, b1ref.Pins{GenesisCommitment: word32(t, p.PinnedGenesisCommitment), ProfileHash: word32(t, p.PinnedProfileHash)}
 }
 
 func word32(t testing.TB, s string) (w [32]byte) {

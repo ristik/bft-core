@@ -48,7 +48,7 @@ func (f *fixture) preForAuthority(v authoritySpec) PreState {
 func (f *fixture) registryBase() PreState {
 	d := newDRBG(f.seed, "registry")
 	gc, ph := d.hash(), d.hash()
-	return PreState{Network: f.network, Phase: 2, GenesisCommitment: hex32(gc), ProfileHash: hex32(ph), PinnedProfileHash: hex32(ph),
+	return PreState{Network: f.network, Phase: 2, GenesisCommitment: hex32(gc), PinnedGenesisCommitment: hex32(gc), ProfileHash: hex32(ph), PinnedProfileHash: hex32(ph),
 		OriginReady: true, ClockRound: f.clock}
 }
 

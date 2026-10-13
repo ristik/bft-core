@@ -72,19 +72,26 @@ func evalBatch(pl *plan, claims []claim, st State, pins Pins) (error, error) {
 // shard under the same seal (exact repeats were folded away by the grouping).
 func claimRelation(claims []claim, pl *plan, i uint64) error {
 	work("claim")
-	c := &claims[i]
-	var conflict error
-	for j := uint64(0); j < i; j++ {
-		p := &pl.occ[j]
-		if p.newClaim && p.sealGroup == pl.occ[i].sealGroup && claims[j].partition == c.partition && bytes.Equal(claims[j].shardBytes, c.shardBytes) {
-			conflict = ErrClaimConflict
-			break
-		}
-	}
-	if err := ucFolds(c); err != nil {
+	if err := ucFolds(&claims[i]); err != nil {
 		return err
 	}
-	return conflict
+	if conflicts(claims, pl, i) {
+		return ErrClaimConflict
+	}
+	return nil
+}
+
+// conflicts reports whether an earlier distinct claim names the same partition and shard under the same complete seal. Binding
+// and folds take precedence (contract section 7a.1): two different claims that both fold to one seal need a collision, so this is
+// defence in depth.
+func conflicts(claims []claim, pl *plan, i uint64) bool {
+	for j := uint64(0); j < i; j++ {
+		if pl.occ[j].newClaim && pl.occ[j].sealGroup == pl.occ[i].sealGroup && claims[j].partition == claims[i].partition &&
+			bytes.Equal(claims[j].shardBytes, claims[i].shardBytes) {
+			return true
+		}
+	}
+	return false
 }
 
 // sealRelation checks one complete seal against its epoch's authority. There is no certificate-age window: a seal of an admitted

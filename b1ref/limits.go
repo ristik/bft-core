@@ -7,6 +7,7 @@ const (
 	MaxClaims         = 16 // K, claim occurrences per call; E, S and A are at most K
 	MaxMembers        = 16 // N_admit = N_verify
 	MaxSigsPerSeal    = 16
+	MaxBatchSigs      = 256 // Q, signatures over the distinct seals
 	MaxNodeIDBytes    = 128
 	MaxShardDepth     = 256
 	MaxShardBytes     = 33

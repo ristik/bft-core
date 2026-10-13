@@ -369,6 +369,9 @@ func scanBatch(in []byte, pl *plan) error {
 			pl.p += o.steps
 		}
 	}
+	if pl.q > MaxBatchSigs {
+		return ErrTooManySigs // implied by K and the per-seal bound; an explicit cap all the same (contract section 7a.8)
+	}
 	pl.charge = BatchGas(pl.c, pl.k, pl.e, pl.q, pl.a, pl.p)
 	return nil
 }
