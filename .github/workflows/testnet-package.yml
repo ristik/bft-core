@@ -25,7 +25,7 @@ jobs:
       - run: python3 -m unittest discover -s deploy/testnet/faucet -v
       - uses: actions/checkout@v4
         with:
-          ref: 2337674754de9cb5b47f0ec863a12c1d83153fda
+          ref: f7f4d7332eec0d668a096872b2e804397def1a87
           path: pinned-bft
       - run: make -C pinned-bft build
       - run: go build -C pinned-bft -o /tmp/tn-b1genesis ./scripts/b1genesis
@@ -45,7 +45,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: ristik/unicity-pos-contracts
-          ref: 18290d1a9f1f2d365709bc47a8b25f5e67f7d91a
+          ref: 1ef397a37d93a3189dbccc5928814591aa59ee02
           path: pinned-contracts
           submodules: recursive
       - uses: foundry-rs/foundry-toolchain@v1

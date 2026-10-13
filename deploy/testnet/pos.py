@@ -18,9 +18,13 @@ import sys
 
 # The lane's values (scripts/lib/p85-lib.sh). The cadence is a rehearsal value: an election is due this many ordinary root rounds and UC seconds after the
 # last acknowledged rotation. #437 sets the testnet's own (--pos-cadence-rounds / --pos-cadence-seconds).
-CAPS = (16, 2, 8)                      # manifest limits.vMax, limits.lMax, election nMax: the election price is measured at exactly these
+# manifest limits.vMax, limits.lMax, election nMax: the election price AND the records hook's per-record reservation are measured at exactly these. (16, 1, 6) is what
+# the 3,000,000 per record covers with the 1.25 margin (the RecoveryAck of 8 members in 2 lots costs 3,629,888 cold, contracts docs/p85/HOOK_GAS.md); until the owner
+# decides between a higher limit and lower caps (Q12) the package declares caps the limit covers, and `b1-profile --hook-measurement` refuses any pair it does not.
+CAPS = (16, 1, 6)
 BOND_UNIT = 100 * 10**18               # 100 UCT in base units: one weight unit
 GENESIS_UNITS = 1                      # bond units per genesis identity (unit weights)
+HOOK_RECORDS = ('ack', 'stage', 'closure', 'recovery')   # the records of script/measure-hook-gas.sh: the hook's worst record is the largest of them
 H_RECORDS = 2
 HOOK_RECORD_GAS = 3_000_000
 CADENCE_ROUNDS = 400
@@ -56,14 +60,33 @@ def assignment_id(stderr):
     return found[0]
 
 
+def genesis_weights(n, spec=None):
+    """The genesis weight of each of `n` identities, in the trust base's order: `spec` is None (all 1) or a list of positive integers, one per identity.
+
+    The same number is the bond units in the contracts genesis, the root member's weight in the trust base and the EVM validator's weight in the shard configuration
+    (the coupling checks equal weights), and today's genesis rules fix the last at 1: go-base refuses a shard configuration whose validator has another stake ("node must
+    have stake == 1"; `shard-conf generate`), while the root trust base alone would take `--root-weights`. So a genesis other than all 1 cannot be built and is refused here
+    with that reason, before any key is generated; unequal weights enter by a handoff whose candidate carries them (Q3 weight activation), not by the genesis."""
+    weights = [1] * n if spec is None else [int(w) for w in spec]
+    if len(weights) != n:
+        raise PosError(f'{len(weights)} genesis weights for {n} identities: one per identity, in the trust base\'s order')
+    if any(w < 1 for w in weights):
+        raise PosError(f'genesis weights must be positive integers: {weights}')
+    if any(w != 1 for w in weights):
+        raise PosError(f'genesis weights {weights}: the genesis shard configuration takes unit-stake validators only (go-base: "node must have stake == 1") and the coupling needs the '
+                       'root member, the EVM validator and the bonded identity to weigh the same, so every genesis weight is 1; an unequal committee is elected by a handoff (the candidate carries the weights)')
+    return weights
+
+
 def network_word(generation):
     return '0x' + hashlib.sha256(('unicity.testnet.pos.' + generation).encode()).hexdigest()
 
 
-def profile_args(deployment, measurement_path):
+def profile_args(deployment, measurements):
     """The b1-profile flags that pin the hooks and the election to the deployed contracts."""
     return ['--records-custody', deployment['custody'], '--h-records', str(H_RECORDS), '--hook-record-gas', str(HOOK_RECORD_GAS),
-            '--election', deployment['election'], '--elect-measurement', str(measurement_path), '--elect-caps', ','.join(map(str, CAPS))]
+            '--election', deployment['election'], '--elect-measurement', str(measurements['election']), '--hook-measurement', str(measurements['hook']),
+            '--elect-caps', ','.join(map(str, CAPS))]
 
 
 def deployment_of(deployment, profile):
@@ -117,13 +140,17 @@ class Genesis:
         if head != pinned or dirty:
             raise PosError(f'the contracts checkout must be clean at the pinned commit {pinned} (it is at {head}{"; modified" if dirty else ""})')
 
-    def plan(self, trust_base, conf, owners=None):
+    def plan(self, trust_base, conf, owners=None, weights=None):
         """One bonded identity per root/EVM pair, in the order the trust base and the shard configuration list their nodes.
 
         The lane's script derives the owner, withdrawal and payee addresses from the root node id by hash: addresses nobody holds the key of. `owners` (the output of
         `tn-keygen owners`: one record of the three addresses per staking id) replaces them with addresses whose keys the ceremony generated, so that top-up, exit,
-        withdrawal and a reward claim can be rehearsed. The ids do not depend on them (verify-genesis recomputes from this plan)."""
-        out = subprocess.check_output([sys.executable, str(self.repo / 'scripts/p85-genesis-plan.py'), str(trust_base), str(conf), str(BOND_UNIT), str(GENESIS_UNITS)], text=True)
+        withdrawal and a reward claim can be rehearsed. The ids do not depend on them (verify-genesis recomputes from this plan).
+
+        `weights` are the genesis bond units of the identities (genesis_weights: all 1 by default)."""
+        n = len(json.loads(Path(trust_base).read_text())['rootNodes'])
+        units = ','.join(map(str, genesis_weights(n, weights)))
+        out = subprocess.check_output([sys.executable, str(self.repo / 'scripts/p85-genesis-plan.py'), str(trust_base), str(conf), str(BOND_UNIT), units], text=True)
         if owners is not None:
             document = json.loads(out)
             by_id = {row['stakingId']: row for row in owners}
@@ -149,6 +176,7 @@ class Genesis:
         self._run(self.contracts / 'script/p85-genesis.sh', self.dir / 'contracts-genesis.json', self.dir / 'genesis', env=env)
         measured = self._run(self.contracts / 'script/measure-elect.sh', *map(str, CAPS), env=env, cwd=self.contracts)
         (self.dir / 'elect-measurement.json').write_text(measured.stdout)
+        (self.dir / 'hook-measurement.jsonl').write_text(self.measure_hooks(env))
         deployment = json.loads((self.dir / 'genesis/deployment.json').read_text())
         # The b1-profile and the roots' deployment file are built from the FIRST pass: a second pass that deployed anything elsewhere would pin the hooks to one
         # custody and the genesis to another. Everything but the fields that carry the assignment id (the id itself and the manifest hash over it) must be identical.
@@ -158,6 +186,18 @@ class Genesis:
                 raise PosError('the second contracts genesis differs from the first in ' + ', '.join(moved) + ': the profile and the roots would pin another deployment')
         self.deployment = deployment
         return self.assignment
+
+    def measure_hooks(self, env):
+        """The cold measurement of the records hook's records at the deployment's caps (contracts script/measure-hook-gas.sh): JSON lines."""
+        return self._run(self.contracts / 'script/measure-hook-gas.sh', *map(str, CAPS), *HOOK_RECORDS, env=env, cwd=self.contracts).stdout
+
+    def check_hook_gas(self, profile):
+        """The profile's per-record reservation against a FRESH cold measurement at the caps: refused when the contracts grew past the margin
+        (the same rule `b1-profile --hook-measurement` applies at generation, taken from a second measurement)."""
+        fresh = self.dir / 'hook-measurement-fresh.jsonl'
+        fresh.write_text(self.measure_hooks(dict(os.environ)))
+        done = self._run(self.ubft, 'engine-api', 'check-hook-gas', '--b1-profile', profile, '--measurement', fresh)
+        return done.stdout + done.stderr
 
     def alloc_code_hashes(self, genesis):
         """The custody and election code hashes the deployment file records must be those of the code the genesis carries (the keccak of the runtime code)."""

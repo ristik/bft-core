@@ -9,6 +9,9 @@
 # restart); a joiner (evm5, evm6 and their roots) is started and gives its readiness BEFORE the Commit (briefs/joiner-readiness-review.md).
 # Root epochs: 1 genesis, 2 configuration-only advance, 3 coupled s=1 (4->5), 4 coupled s=2 (3->6, J={1,2,5,6}), 5 the derived recovery to K = the s=1 set
 # {1,2,3,5} (root 6->3), which supersedes s=2. EVM validators: evm1-4 genesis; evm5, evm6 spare identities that appear only in successor sets.
+# It starts, stops and restores nodes, so it starts only under the runner's lock flag AND the lane flag, sourced by the paired devnet: sourced anywhere else
+# it does nothing and defines nothing.
+if [ "${H3_LANE_LOCKED:-0}" != 1 ] || [ "${H3_ASSIGNMENT_LANE:-0}" != 1 ] || [ "${PAIRED_DEVNET_STEPS:-0}" != 1 ]; then return 0; fi
 source scripts/lib/m2-handoff-lib.sh
 source scripts/lib/h3-lib.sh
 source scripts/lib/q3-lib.sh
@@ -17,12 +20,15 @@ source scripts/lib/h3-q3-lib.sh
 H3_DIR=test-nodes/h3
 mkdir -p "$H3_DIR"
 cp test-nodes/trust-base.json test-nodes/trust-base-epoch1.json
-read -r h3_slot_shard h3_slot_root h3_slot_conf h3_slot_cursor < <(H3_SLOT_LAYOUT=$([ "${Q3_B1:-0}" = 1 ] && echo 3 || echo 2) go run ./scripts/h3slots)
+read -r h3_slot_shard h3_slot_root h3_slot_conf h3_slot_cursor < <(H3_SLOT_LAYOUT=3 go run ./scripts/h3slots)
 H3_REGISTRY=0xff00000000000000000000000000000000000002
 H3_ONLINE="1 2 3 4"
 H3_ROOTS="1 2 3 4"
-# the paired-devnet seeding leaves the funded sender at nonce 4 (run6c: "nonce too low: next nonce 4, tx nonce 3")
-M2_NEXT_NONCE=${M2_NEXT_NONCE:-4}
+# The next nonce of the funded account is whatever the chain says it is (the seeding and the F8 probes before this point send transactions); a count the
+# node cannot give is a failure, not a guess.
+h3FundedNonce=$(rpc "http://127.0.0.1:$rethEthBase" eth_getTransactionCount "[\"$(go run ./scripts/evmtx -address)\",\"pending\"]" | pyget "['result']") || h3FundedNonce=
+case "$h3FundedNonce" in 0x*) M2_NEXT_NONCE=${M2_NEXT_NONCE:-$((h3FundedNonce))} ;; *) echo "FAIL: the funded account's nonce could not be read from validator 1 (got '$h3FundedNonce')" >&2; return 1 ;; esac
+echo "H3 lane: the funded account's next nonce is $M2_NEXT_NONCE (read from the chain)"
 M2_CHAIN_ID=31337
 
 h3_pass() { echo "  PASS: $*"; }
@@ -367,7 +373,11 @@ h3_late_s2_ack_refused() {
   H3_ONLINE="1 2 3"
   h3_mark
   h3_enroll_authority 6 2 || { echo "enrolling the evm6 authority against the s=2 configuration failed" >&2; return 1; }
+  rm -f test-nodes/evm6/pin.txt               # an earlier restore of this node left one: this restore must compute its own
   h3_restore_validator 6 1 || true            # the s=2 key tries to acknowledge late
+  # the restore is expected to END in a refusal, but it must have STARTED: a restore whose own tooling failed (run h3-b1-20261012-r2: the Go build cache
+  # was cleaned under `go run ./scripts/h4-restore-pin`) refuses nothing, and waiting for a refusal would report the wrong cause
+  [ -s test-nodes/evm6/pin.txt ] || { echo "the late restore of evm6 did not start (no restore pin was computed; see the tooling error above): nothing was refused" >&2; return 1; }
   h3_assert_rejected "$id6" "late s=2 acknowledgement from evm6" 480 test-nodes/evm6/debug.log || return 1
   h3_registry_is 3 5                          # the registry shows the recovery K's folded acknowledgement (shard epoch 3), not s=2's
 }

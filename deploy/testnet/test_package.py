@@ -1,6 +1,7 @@
 import http.client
 import http.server
 import shutil
+import sys
 import json
 import os
 import subprocess
@@ -83,8 +84,32 @@ class ProofOfStake(unittest.TestCase):
         d={'networkWord':'0xaa','chainId':31337,'custody':'0xc','custodyCodeHash':'0xch','election':'0xe','electionCodeHash':'0xeh'}
         self.assertEqual(pos.deployment_of(d,{'runtimeHash':'0xrh'}),{'networkWord':'0xaa','chainId':'31337','custody':'0xc','custodyCodeHash':'0xch',
             'registry':pos.REGISTRY,'registryCodeHash':'0xrh','election':'0xe','electionCodeHash':'0xeh'})
-        args=pos.profile_args(d,'/m.json')
-        self.assertEqual((args[args.index('--records-custody')+1],args[args.index('--election')+1],args[args.index('--elect-caps')+1]),('0xc','0xe','16,2,8'))
+        args=pos.profile_args(d,{'election':'/m.json','hook':'/h.jsonl'})
+        self.assertEqual((args[args.index('--records-custody')+1],args[args.index('--election')+1],args[args.index('--elect-caps')+1]),('0xc','0xe','16,1,6'))
+        self.assertEqual((args[args.index('--elect-measurement')+1],args[args.index('--hook-measurement')+1]),('/m.json','/h.jsonl'))
+    def test_the_caps_are_covered_by_the_per_record_reservation(self):
+        # the cold RecoveryAck: 2,281,165 for 6 members of one lot (3,629,888 for 8 members of 2 lots); the guard's margin is 1.25
+        self.assertEqual(pos.CAPS,(16,1,6))
+        self.assertLessEqual(2_281_165*125//100,pos.HOOK_RECORD_GAS)
+        self.assertGreater(3_629_888*125//100,pos.HOOK_RECORD_GAS)
+    def test_pos_refuses_more_validators_than_the_caps_cover_before_any_key(self):
+        done=subprocess.run([sys.executable,str(Path(__file__).parent/'generate.py'),'--out','/nonexistent/tn-x','--validators',str(pos.CAPS[2]+1),'--ubft','x','--keygen','x','--b1genesis','x',
+            '--images','x','--captcha-sitekey','a','--captcha-secret-file','x','--pos','--pos-contracts','x'],text=True,capture_output=True)
+        self.assertEqual(done.returncode,2);self.assertIn('cover at most %d genesis identities'%pos.CAPS[2],done.stderr)
+    def test_genesis_weights_default_to_one_and_nothing_else_is_buildable(self):
+        self.assertEqual(pos.genesis_weights(4),[1,1,1,1]);self.assertEqual(pos.genesis_weights(3,['1','1','1']),[1,1,1])
+        for bad,why in ((['1','1'],'one per identity'),(['0','1','1'],'positive'),(['2','1','1'],'stake == 1'),(['1','1','4'],'elected by a handoff')):
+            with self.assertRaises(pos.PosError) as e: pos.genesis_weights(3,bad)
+            self.assertIn(why,str(e.exception))
+    def test_the_plan_carries_one_weight_per_identity_in_the_trust_base_order(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp=Path(tmp);(tmp/'tb.json').write_text(json.dumps({'rootNodes':[{'nodeId':'r%d'%i,'sigKey':'0x0%d'%i} for i in (1,2,3)]}))
+            (tmp/'c.json').write_text(json.dumps({'validators':[{'nodeId':'e%d'%i,'sigKey':'0x1%d'%i} for i in (1,2,3)]}))
+            script=Path(__file__).resolve().parents[2]/'scripts/p85-genesis-plan.py'
+            plan=lambda units:subprocess.run([sys.executable,str(script),str(tmp/'tb.json'),str(tmp/'c.json'),'100',units],text=True,capture_output=True)
+            self.assertEqual([r['bondUnits'] for r in json.loads(plan('1').stdout)['identities']],[1,1,1])          # the lane's single number
+            self.assertEqual([r['bondUnits'] for r in json.loads(plan('1,2,4').stdout)['identities']],[1,2,4])
+            self.assertNotEqual(plan('1,2').returncode,0)
     def test_the_topology_runs_the_roots_on_the_pos_flags_and_not_the_poa_records(self):
         with tempfile.TemporaryDirectory() as tmp:
             out=Path(tmp)/'tn-fixture';out.mkdir();(out/'aggregator').mkdir()

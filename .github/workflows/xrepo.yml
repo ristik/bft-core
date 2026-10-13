@@ -1,0 +1,50 @@
+name: xrepo
+
+# The cross-repository consistency suite (xrepo/README.md): the shared fixtures are byte-identical to unicity-pos-contracts at the
+# commit pinned in xrepo/fixtures.json, and the Go halves of the suite pass. Runs on every push and pull request.
+on:
+  push:
+    branches: [integration/enshrined-evm]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  fixtures:
+    name: Shared fixtures match unicity-pos-contracts
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check out unicity-pos-contracts at the pinned commit
+        run: |
+          repo=$(python3 -c "import json;print(json.load(open('xrepo/fixtures.json'))['contracts']['repo'])")
+          commit=$(python3 -c "import json;print(json.load(open('xrepo/fixtures.json'))['contracts']['commit'])")
+          git init --quiet "$RUNNER_TEMP/contracts"
+          git -C "$RUNNER_TEMP/contracts" fetch --quiet --depth 1 "$repo" "$commit"
+          git -C "$RUNNER_TEMP/contracts" checkout --quiet FETCH_HEAD
+          test "$(git -C "$RUNNER_TEMP/contracts" rev-parse HEAD)" = "$commit"
+      - name: The copies are byte-identical
+        run: python3 xrepo/check.py --bft-core . --contracts "$RUNNER_TEMP/contracts"
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: The root's ids, digests and records are the committed vectors
+        run: go test -count=1 ./xrepo/ ./cli/ubft/cmd/ -run 'TestTheRoots|TestCustodysState|TestTheContractsGenesisInput'
+
+  heads:
+    # The pins let a pull request name a commit of the other repository, so two default lines could each be green while holding
+    # different files (one side's PR merged, its counterpart never). After a merge here, compare with the other repository's
+    # branch head, not the pin. It is red between the two merges of a paired change, which is the signal.
+    name: Shared fixtures match unicity-pos-contracts main (after merge)
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: The copies are byte-identical to unicity-pos-contracts main
+        run: |
+          repo=$(python3 -c "import json;print(json.load(open('xrepo/fixtures.json'))['contracts']['repo'])")
+          git clone --quiet --depth 1 --branch main "$repo" "$RUNNER_TEMP/contracts-main"
+          python3 xrepo/check.py --bft-core . --contracts "$RUNNER_TEMP/contracts-main"
