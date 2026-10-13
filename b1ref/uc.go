@@ -11,7 +11,7 @@ import (
 	"github.com/unicitynetwork/bft-go-base/types"
 )
 
-// claim is one decoded certificate claim of a UC_V1/SHARED_SEAL_V1 call.
+// claim is one decoded claim occurrence of a CERT_BATCH_V2 call.
 type claim struct {
 	partition  uint32
 	shardBytes []byte
