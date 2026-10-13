@@ -19,6 +19,7 @@ type fixture struct {
 	authority authoritySpec
 	scheme    map[uint32][]string // nil: the default scheme
 	states    map[string][]byte   // input record state hash by ucKey, overriding the derived one
+	irTime    uint64              // input record timestamp, overriding genesisTime+1000 when nonzero
 }
 
 // scheme maps partition to its shard scheme.
@@ -99,6 +100,9 @@ func (f *fixture) build(variant string, round uint64, signers []validator, withV
 			ir := irSpec{
 				round: 5, epoch: 1, prev: r.bytes32(), state: r.bytes32(), summary: r.bytes32()[:8],
 				timestamp: genesisTime + 1000, block: r.bytes32(), fees: 12, et: r.bytes32(),
+			}
+			if f.irTime != 0 {
+				ir.timestamp = f.irTime
 			}
 			if s, ok := f.states[ucKey(p, sh)]; ok {
 				ir.state = s

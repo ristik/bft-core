@@ -25,6 +25,10 @@ func (w *TokenWorld) Pre() PreState {
 	return p
 }
 
+// IRTime is the input record timestamp of every certificate a TokenWorld issues at root round r: increasing with the round, so a
+// projection's reference-time checks see a history whose anchors were certified at different times.
+func IRTime(r uint64) uint64 { return genesisTime + 1000 + r }
+
 // AnchorSpec names one anchor: the seal's epoch and root round, the shard (a bit string of the epoch's depth) and the state root it
 // certifies.
 type AnchorSpec struct {
@@ -65,6 +69,7 @@ func (w *TokenWorld) Certify(specs []AnchorSpec) ([]Anchor, error) {
 		f.epoch = k.e
 		f.scheme = map[uint32][]string{1: shardsAt(w.Depth(k.e)), 2: {""}}
 		f.states = map[string][]byte{}
+		f.irTime = IRTime(k.r)
 		for _, i := range groups[k] {
 			root := specs[i].StateRoot
 			f.states[ucKey(1, specs[i].Shard)] = root[:]
