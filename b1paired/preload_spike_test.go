@@ -5,14 +5,25 @@ package b1paired_test
 // three root epochs, rootinput.AuthenticateObservationV2, rootinput.DeriveV2, B1Config.Derive and b1state.Admit.
 
 import (
+	"bytes"
 	"context"
+	"math/big"
+	"strings"
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/core/rawdb"
+	ethtypes "github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/crypto"
+	"github.com/ethereum/go-ethereum/rlp"
+	"github.com/ethereum/go-ethereum/trie"
+	"github.com/ethereum/go-ethereum/triedb"
+	"github.com/holiman/uint256"
 	"github.com/stretchr/testify/require"
 	"github.com/unicitynetwork/bft-core/b1paired"
 	"github.com/unicitynetwork/bft-core/b1registry"
 	"github.com/unicitynetwork/bft-core/b1state"
+	"github.com/unicitynetwork/bft-core/handoff"
 	"github.com/unicitynetwork/bft-core/internal/testutils/b1fixture"
 	"github.com/unicitynetwork/bft-core/internal/testutils/certifiedchain"
 	"github.com/unicitynetwork/bft-core/internal/testutils/q3fixture"
@@ -70,6 +81,9 @@ func newThreeEpochs(t *testing.T, w uint64) *threeEpochs {
 		nodes, count := second.NewNodes, 2
 		if epoch == 1 {
 			nodes, count = first.OldNodes, 3
+		}
+		if epoch == 2 {
+			nodes, count = second.OldNodes, 3
 		}
 		for _, node := range nodes[:count] {
 			require.NoError(t, uc.UnicitySeal.Sign(node.PeerConf.ID.String(), node.Signer))
@@ -167,4 +181,106 @@ func TestSpikeCatchUpOfMoreThanBEpochsInPreloadBlocks(t *testing.T) {
 		}
 	}
 	reg.UsableEpoch = obs.Origin().RootEpoch // the acknowledgement block: only now
+}
+
+type trieNodes [][]byte
+
+func (n *trieNodes) Put(_, v []byte) error { *n = append(*n, bytes.Clone(v)); return nil }
+func (n *trieNodes) Delete([]byte) error   { return nil }
+
+// parentWith commits the given registry storage words into a block header at height number (a copy of b1fixture.ParentAt for this fixture).
+func (e *threeEpochs) parentWith(t *testing.T, words map[common.Hash]common.Hash, number uint64) registryproof.Snapshot {
+	t.Helper()
+	storage := trie.NewEmpty(triedb.NewDatabase(rawdb.NewMemoryDatabase(), nil))
+	for k, v := range words {
+		if v == (common.Hash{}) {
+			continue
+		}
+		raw, err := rlp.EncodeToBytes(common.TrimLeftZeroes(v[:]))
+		require.NoError(t, err)
+		require.NoError(t, storage.Update(crypto.Keccak256(k[:]), raw))
+	}
+	account, err := rlp.EncodeToBytes(&ethtypes.StateAccount{Balance: new(uint256.Int), Root: storage.Hash(), CodeHash: e.p.RuntimeHash[:]})
+	require.NoError(t, err)
+	state := trie.NewEmpty(triedb.NewDatabase(rawdb.NewMemoryDatabase(), nil))
+	address := registryproof.RegistryAddress
+	path := crypto.Keccak256(address[:])
+	require.NoError(t, state.Update(path, account))
+	var header ethtypes.Header
+	require.NoError(t, rlp.DecodeBytes(e.g.Header(), &header))
+	header.Root = state.Hash()
+	header.Number = new(big.Int).SetUint64(number)
+	raw, err := rlp.EncodeToBytes(&header)
+	require.NoError(t, err)
+	var proof trieNodes
+	require.NoError(t, state.Prove(path, &proof))
+	ev := registryproof.Evidence{Header: raw, AccountProof: proof}
+	names, err := registryproof.SlotNamesFor(registryproof.FreshB1)
+	require.NoError(t, err)
+	for i := range names {
+		k, err := registryproof.SlotKeyFor(registryproof.FreshB1, i)
+		require.NoError(t, err)
+		var p trieNodes
+		require.NoError(t, storage.Prove(crypto.Keccak256(k[:]), &p))
+		ev.StorageProofs = append(ev.StorageProofs, p)
+	}
+	ctx := e.g.ProofContext()
+	snap, err := registryproof.Verify(ctx, header.Hash(), ev)
+	require.NoError(t, err)
+	return snap
+}
+
+// The frozen-parent conflict (arch blocker, section preload): a root handoff freezes the shard at one EVM parent and the acknowledgement block
+// must build on exactly that parent (DeriveV2: Ack.FrozenParent == executing parent; every folded step froze the same one). Any block between
+// the freeze and the acknowledgement, a preload block included, changes the parent, and the same transition is then refused.
+func TestSpikeAcknowledgementAfterAPreloadBlockLosesItsFrozenParent(t *testing.T) {
+	e := newThreeEpochs(t, 15)
+	genesisConf := [32]byte(e.g.FullShardConfHash())
+	frozen := e.parent.ParentHash()
+	transition := func(frozenParent common.Hash) []byte {
+		var tr handoff.EVMTransition
+		tr.OldRootEpoch, tr.NewRootEpoch = 1, 2 // a root-only step: shard epoch and configuration stay
+		tr.OldActiveConfHash, tr.NewActiveConfHash = genesisConf, genesisConf
+		tr.NextBodyID, tr.GenesisID = [32]byte{1}, [32]byte{2}
+		tr.Ack.FrozenID, tr.Ack.CommitID = [32]byte{3}, [32]byte{4}
+		copy(tr.Ack.FrozenParent[:], frozenParent.Bytes())
+		tr.Ack.SuccessorParent = tr.Ack.FrozenParent
+		tr.Ack.SuccessorTR, tr.Ack.EVMRound = [32]byte{5}, 1
+		b, err := tr.Encode()
+		require.NoError(t, err)
+		return b
+	}
+	o := e.obs(2, 10)
+	ctx := func(parent registryproof.Snapshot, frozenParent common.Hash) rootinput.ContextV2 {
+		return rootinput.ContextV2{Context: context.Background(), B1: e.pair, Genesis: e.origin, Parent: parent, Round: 1, ParentHash: parent.ParentHash().Bytes(), TransitionsPending: true, Transition: transition(frozenParent)}
+	}
+	// the acknowledgement block on the frozen parent itself: the frozen-parent check passes (control)
+	_, err := rootinput.DeriveV2(ctx(e.parent, frozen), o)
+	t.Logf("control, acknowledgement on the frozen parent: %v", err)
+	if err != nil {
+		require.NotContains(t, err.Error(), "frozen parent mismatch", "control: %v", err)
+	}
+	// a preload block lands between the freeze and the acknowledgement: the parent is now a different block
+	words := e.g.B1Words()
+	for k, v := range mustEntryWords(t, e) {
+		words[common.Hash(k)] = common.Hash(v)
+	}
+	words[common.Hash(b1state.FixedSlot("round.authorized"))] = common.Hash(b1state.Word(1))
+	words[common.Hash(b1state.FixedSlot("outcomes.round"))] = common.Hash(b1state.Word(1))
+	words[common.Hash(b1state.FixedSlot("outcomes.commitment"))] = common.Hash{9}
+	p1 := e.parentWith(t, words, 1)
+	require.NotEqual(t, frozen, p1.ParentHash())
+	_, err = rootinput.DeriveV2(ctx(p1, frozen), o)
+	require.ErrorIs(t, err, rootinput.ErrV2Context)
+	require.True(t, strings.Contains(err.Error(), "frozen parent mismatch"), "%v", err)
+}
+
+func mustEntryWords(t *testing.T, e *threeEpochs) map[[32]byte][32]byte {
+	h, err := e.pair.Authority.B1History(15)
+	require.NoError(t, err)
+	history, err := h.B1Entries(15)
+	require.NoError(t, err)
+	w, err := b1state.EntryStorage(history[1])
+	require.NoError(t, err)
+	return w
 }
