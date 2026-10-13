@@ -117,10 +117,7 @@ def validate(generation, ubft):
         request = handoff_ops.build_request(ubft, tmp / 'request.json', tmp / 'next-trust-base.json')
         assert json.loads(request)['nextTrustBase']['epoch'] == 2
         fake, rows = Fake(), []
-        entities = handoff_ops.DockerTransport.__new__(handoff_ops.DockerTransport)
-        entities.generation, entities.project = generation, compose['name']
-        entities.image = compose['services']['rpc']['image']
-        entities.entities = sorted(int(s[3:]) for s in compose['services'] if s.startswith('pod') and s[3:].isdigit())
+        entities = handoff_ops.DockerTransport(generation)   # reads the generated Compose file only
         wrapper = handoff_ops.Wrapper(fake, entities.entities, rows.append, sleep=lambda s: None)
         assert wrapper.propose(request) == n
         plans = [c for c in fake.calls if c[1].endswith('/plan')]
@@ -135,7 +132,7 @@ def validate(generation, ubft):
             command = entities.command(i, '/api/v1/handoff/endorse', 10)
             assert f'container:HOLDER{i}' in command and '--read-only' in command and '-v' not in command and '--volume' not in command and '--privileged' not in command
         aborts = handoff_ops.abort_commands(generation, entities.entities, ['--network', '3'])
-        assert sorted(aborts) == entities.entities and all(c.count('--root-rpc') == 1 and c[-1] == 'http://127.0.0.1:8002' for c in aborts.values())
+        assert sorted(aborts) == entities.entities and all(c.count('--root-rpc') == 1 and c[-1] == entities.root_rpc for c in aborts.values())
     return {'handoff_cli_commands_checked': commands, 'handoff_install_override_renders': 'PASS', 'handoff_wrapper_dry_run': 'PASS', 'entities': n}
 
 

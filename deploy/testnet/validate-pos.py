@@ -19,6 +19,7 @@ import tempfile
 import time
 import urllib.request
 
+import operator_rpc
 import pos
 
 
@@ -69,7 +70,9 @@ def statics(generation, ubft, keygen):
         assert '--genesis-identities' not in root and '--q3-lane' in root and '--profile-2' in root
         # the operator listeners are loopback-only and root and shard of the entity share the holder's namespace (the existing q3-readiness runs there)
         shard = compose['services'][f'shard{i}']['entrypoint']
-        assert root[root.index('--rpc-server-address') + 1] == '127.0.0.1:8002' and shard[shard.index('--rpc-server-address') + 1] == '127.0.0.1:9101'
+        bind = manifest['operator_rpc']['bind']   # generate.py --rpc-bind, loopback by default: the value the entrypoints must carry
+        assert operator_rpc.check_bind(bind) == bind
+        assert root[root.index('--rpc-server-address') + 1] == operator_rpc.listen(bind, operator_rpc.ROOT_PORT) and shard[shard.index('--rpc-server-address') + 1] == operator_rpc.listen(bind, operator_rpc.SHARD_PORT)
         assert compose['services'][f'root{i}']['network_mode'] == compose['services'][f'shard{i}']['network_mode'] == f'service:pod{i}'
     return manifest
 
@@ -96,6 +99,7 @@ def roots_start(generation, ubft, base_port=24000):
     """The PoS roots, native, from the generated entrypoints (only transport addresses and host paths change), certify rounds without an EVM node."""
     cfg = json.loads((generation / 'compose.yaml').read_text())
     n = json.loads((generation / 'manifest.json').read_text())['validators']
+    bind = json.loads((generation / 'manifest.json').read_text())['operator_rpc']['bind']
     processes, logs = [], []
     try:
         for i in range(1, n + 1):
@@ -104,7 +108,7 @@ def roots_start(generation, ubft, base_port=24000):
             for j, arg in enumerate(command):
                 arg = arg.replace('/state', str(generation / f'validator{i}/root')).replace('/network', str(generation / 'network'))
                 arg = re.sub(r'/dns4/root(\d+)/tcp/8000', lambda m: f'/ip4/127.0.0.1/tcp/{base_port + int(m[1])}', arg)
-                arg = arg.replace('/ip4/0.0.0.0/tcp/8000', f'/ip4/127.0.0.1/tcp/{base_port + i}').replace('127.0.0.1:8002', f'127.0.0.1:{base_port + 100 + i}')
+                arg = arg.replace('/ip4/0.0.0.0/tcp/8000', f'/ip4/127.0.0.1/tcp/{base_port + i}').replace(operator_rpc.listen(bind, operator_rpc.ROOT_PORT), f'127.0.0.1:{base_port + 100 + i}')
                 command[j] = re.sub(r'http://ureth\d+:8545', f'http://127.0.0.1:{base_port + 999}', arg)   # no EVM node: the endpoint is closed
             path = generation / f'pos-root{i}.log'
             logs.append(path)

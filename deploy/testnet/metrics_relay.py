@@ -7,9 +7,15 @@ documents, by exact path and GET only. It builds its own upstream request (fixed
 and no other path exists. It is not a forwarder: a request for anything else is refused here and never reaches a loopback endpoint.
 """
 import http.server
+import os
 import urllib.request
 
-ROUTES = {'/root/metrics': 'http://127.0.0.1:8002/api/v1/metrics', '/shard/metrics': 'http://127.0.0.1:9101/api/v1/metrics'}
+# the listeners' addresses come from the generated Compose file (generate.py --rpc-bind, loopback), not from this file
+ROUTES = {}   # filled by main() from the environment
+
+
+def routes(environ):
+    return {'/root/metrics': 'http://%s/api/v1/metrics' % environ['ROOT_RPC'], '/shard/metrics': 'http://%s/api/v1/metrics' % environ['SHARD_RPC']}
 MAX_BODY = 4 * 1024 * 1024
 
 
@@ -47,6 +53,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
 
 def main(port=9102):
+    ROUTES.update(routes(os.environ))
     http.server.ThreadingHTTPServer(('0.0.0.0', port), Handler).serve_forever()
 
 

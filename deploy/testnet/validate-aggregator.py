@@ -15,6 +15,7 @@ import urllib.error
 import urllib.request
 
 import generate
+import operator_rpc
 
 # Canonical absent-deadline SDK request used by the pinned F8 mixed-lane probe.
 REQUEST = 'd9987684015820ffb36b55de9bfaf48b766d1f4e041a6c5d35ba23b402ea2a56a6c7692cb8f81ad998778602d9987883014101582103a19eef04b8856f50bf2d688b0d8804575115e53d2a7780da363628343f9635075820e4b183ff6b7a399983cee26e4feea85d517dede0142def5c838e593a9e6152415820c034e096d7bdf71ba759558663b5cafb7279ecb7e284443e5e6cbce0461aceeef6584154ca6b19a7dbcae7a6adc38af5c8672f81943ecaf51345436684299b4b7ac81a57db2653f32048981e37913db4749ca08d998d1fac4a52ab5579988bc2c50de90000'
@@ -57,7 +58,8 @@ def validate(generation, ubft, aggregator):
         raise RuntimeError(f'certification probe timed out: {last}')
 
     try:
-        n = json.loads((generation/'manifest.json').read_text())['validators']
+        manifest = json.loads((generation/'manifest.json').read_text())
+        n, bind = manifest['validators'], manifest['operator_rpc']['bind']
         for i in range(1,n+1):
             command = cfg['services'][f'root{i}']['entrypoint'].copy()
             command[0] = str(ubft)
@@ -65,7 +67,7 @@ def validate(generation, ubft, aggregator):
                 arg = arg.replace('/state',str(generation/f'validator{i}/root'))
                 arg = arg.replace('/network',str(generation/'network'))
                 arg = re.sub(r'/dns4/root(\d+)/tcp/8000',lambda m:f'/ip4/127.0.0.1/tcp/{23000+int(m[1])}',arg)
-                command[j] = arg.replace('/ip4/0.0.0.0/tcp/8000',f'/ip4/127.0.0.1/tcp/{23000+i}').replace('127.0.0.1:8002',f'127.0.0.1:{23100+i}')
+                command[j] = arg.replace('/ip4/0.0.0.0/tcp/8000',f'/ip4/127.0.0.1/tcp/{23000+i}').replace(operator_rpc.listen(bind,operator_rpc.ROOT_PORT),f'127.0.0.1:{23100+i}')
             launch(f'root{i}',command)
         env = {k:v for k,v in os.environ.items() if not k.startswith('AGGREGATOR_')}
         env.update(cfg['services']['aggregator']['environment'])
