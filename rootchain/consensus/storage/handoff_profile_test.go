@@ -29,7 +29,7 @@ func emptyOrchestration() mockOrchestration {
 	}}
 }
 
-type testRecordAuthority struct{ predecessor []byte }
+type testRecordAuthority struct{ predecessor, parent []byte }
 
 func (a testRecordAuthority) Predecessor() []byte {
 	if len(a.predecessor) != 0 {
@@ -39,7 +39,10 @@ func (a testRecordAuthority) Predecessor() []byte {
 }
 func (testRecordAuthority) CurrentRoot() []evmassign.RootMember { return []evmassign.RootMember{} }
 
-func (testRecordAuthority) VerifyFreeze(evmroot.OrderedHandoffRecord, []byte) ([]byte, error) {
+func (a testRecordAuthority) VerifyFreeze(evmroot.OrderedHandoffRecord, []byte) ([]byte, error) {
+	if len(a.parent) != 0 {
+		return bytes.Clone(a.parent), nil
+	}
 	return bytes.Repeat([]byte{0x42}, 32), nil
 }
 func (testRecordAuthority) VerifyAbort(evmroot.OrderedHandoffRecord, []byte) error { return nil }
@@ -514,12 +517,13 @@ func TestTwoConsecutiveRootHandoffsRestartAtEachPhase(t *testing.T) {
 		}
 	}
 	predecessor := make([]byte, 32)
+	var certifiedParent []byte // the EVM IR the freeze must name once the EVM has certified (nil: the installed one)
 	bodies := [][]byte{bytes.Repeat([]byte{1}, 32), bytes.Repeat([]byte{2}, 32)}
 	restart := func() {
 		var err error
 		s, err = New(crypto.SHA256, s.storage, s.orchestration, logger.New(t), ProfileHandoff)
 		require.NoError(t, err)
-		s.handoffAuth = testRecordAuthority{predecessor: predecessor}
+		s.handoffAuth = testRecordAuthority{predecessor: predecessor, parent: certifiedParent}
 	}
 	add := func(epoch, round uint64, record evmroot.OrderedHandoffRecord) *ExecutedBlock {
 		prior, err := s.Block(round - 1)
@@ -551,14 +555,40 @@ func TestTwoConsecutiveRootHandoffsRestartAtEachPhase(t *testing.T) {
 		}})
 		require.ErrorIs(t, err, want)
 	}
+	ackEVM := func(round uint64) {
+		t.Helper()
+		prior, err := s.Block(round - 1)
+		require.NoError(t, err)
+		_, err = s.Add(&rctypes.BlockData{Version: 2, Epoch: 2, Round: round,
+			Payload: &rctypes.Payload{Version: 2, Requests: []*rctypes.IRChangeReq{{Partition: 8}}},
+			Qc:      &rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{RoundNumber: round - 1, Epoch: 2, CurrentRootHash: prior.RootHash}}},
+			mockIRVerifier{verify: func(uint64, *rctypes.IRChangeReq) (*types.InputRecord, error) {
+				return &types.InputRecord{Version: 1, RoundNumber: round, BlockHash: bytes.Repeat([]byte{0x77}, 32)}, nil
+			}})
+		require.NoError(t, err)
+		// a Commit must find the frozen parent in the COMMITTED root: commit the acknowledging block through an empty child
+		acked := mustBlock(t, s, round)
+		_, err = s.Add(&rctypes.BlockData{Version: 2, Epoch: 2, Round: round + 1, Payload: &rctypes.Payload{Version: 2},
+			Qc: &rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{RoundNumber: round, Epoch: 2, CurrentRootHash: acked.RootHash}}}, nil)
+		require.NoError(t, err)
+		_, err = s.blockTree.Commit(&rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{RoundNumber: round + 1, ParentRoundNumber: round, Epoch: 2},
+			LedgerCommitInfo: &types.UnicitySeal{Version: 1, RootChainRoundNumber: round, Epoch: 2, Hash: acked.RootHash}})
+		require.NoError(t, err)
+	}
 	for epoch := uint64(1); epoch <= 2; epoch++ {
 		base := uint64(2)
 		if epoch == 2 {
-			base = 8
+			// The first handoff was root-only: the EVM shard acknowledges it by certifying a block after the frozen parent, and only then may
+			// the next handoff be prepared (#604; TestSecondRootOnlyHandoffWaitsForTheEVMToAcknowledgeTheFirst).
+			ackEVM(8)
+			certifiedParent = bytes.Repeat([]byte{0x77}, 32)
+			restart()
+			base = 10
 		}
 		body := bodies[epoch-1]
 		frozen := bytes.Repeat([]byte{byte(epoch + 2)}, 32)
-		tr, err := s.blockTree.Root().ShardState.States[types.PartitionShardID{PartitionID: 8, ShardID: (types.ShardID{}).Key()}].TR.Hash()
+		// the successor TR hash is the frozen EVM shard's technical record as of the block before the Prepare (it moves when the EVM certifies)
+		tr, err := mustBlock(t, s, base-1).ShardState.States[types.PartitionShardID{PartitionID: 8, ShardID: (types.ShardID{}).Key()}].TR.Hash()
 		require.NoError(t, err)
 		makeRecord := func(kind string, round uint64) evmroot.OrderedHandoffRecord {
 			return evmroot.OrderedHandoffRecord{Network: 5, Epoch: epoch, OrderedRound: round,

@@ -218,7 +218,8 @@ func (x *ExecutedBlock) extendWithAuthority(newBlock *rctypes.BlockData, verifie
 		}
 		parentState.States = states
 		parentState.Control = &evmroot.ControlState{Network: parentState.Control.Network,
-			Epoch: newBlock.Epoch, PredecessorBodyID: bytes.Clone(record.NextBodyID), Phase: "idle", Pos: parentState.Control.Pos}
+			Epoch: newBlock.Epoch, PredecessorBodyID: bytes.Clone(record.NextBodyID), Phase: "idle", Pos: parentState.Control.Pos,
+			UnackedParent: bytes.Clone(parentState.Control.UnackedParent)}
 	}
 	nextShardState, err := parentState.nextBlock(shardConfs, hash)
 	if err != nil {
@@ -277,6 +278,12 @@ func (x *ExecutedBlock) extendWithAuthority(newBlock *rctypes.BlockData, verifie
 				if !found || nextShardState.States[key] == nil || nextShardState.States[key].IR == nil || len(nextShardState.States[key].IR.BlockHash) != 32 {
 					return nil, errors.Join(ErrHandoffRecord, ErrPrepareNoEVMParent)
 				}
+				// A root-only handoff that committed leaves no shard-epoch difference to show it pending. Until the EVM has certified a block after
+				// its frozen parent, another Prepare would bind that same stalled parent, and the two steps could never be folded into one
+				// acknowledgement (#604).
+				if len(control.UnackedParent) != 0 && bytes.Equal(control.UnackedParent, nextShardState.States[key].IR.BlockHash) {
+					return nil, fmt.Errorf("%w: the previous root-only handoff has no EVM block after its frozen parent yet", ErrAssignmentAckPending)
+				}
 				control.FrozenParent = bytes.Clone(nextShardState.States[key].IR.BlockHash)
 			}
 			if control.Phase == "endorsed" || control.Phase == "committed" {
@@ -307,6 +314,9 @@ func (x *ExecutedBlock) extendWithAuthority(newBlock *rctypes.BlockData, verifie
 					// H is ordered here: the successor's offset is fixed now and an assignment handoff waits for its EVM acknowledgement
 					if err := pos.commit(committed, want != nil); err != nil {
 						return nil, err
+					}
+					if want == nil {
+						control.UnackedParent = bytes.Clone(control.FrozenParent) // root-only: pending until the EVM certifies after this parent
 					}
 				}
 			}
@@ -403,6 +413,16 @@ func (x *ExecutedBlock) extendWithAuthority(newBlock *rctypes.BlockData, verifie
 		}
 
 		nextShardState.Changed[shardKey] = struct{}{}
+	}
+	// The EVM's certified block after the frozen parent of a root-only handoff is its acknowledgement: the next handoff may be prepared.
+	if c := nextShardState.Control; c != nil && len(c.UnackedParent) != 0 {
+		if key, found, err := frozenEVMShard(nextShardState, shardConfs); err == nil && found {
+			if si := nextShardState.States[key]; si != nil && si.IR != nil && !bytes.Equal(si.IR.BlockHash, c.UnackedParent) {
+				cleared := *c
+				cleared.UnackedParent = nil
+				nextShardState.Control = &cleared
+			}
+		}
 	}
 	// the P85 controls follow the certifications, in payload order
 	env := posEnv{Control: nextShardState.Control, LatestEVMRoot: latestRoot, LatestEVMBlock: latestBlock, LatestEVMOK: latestEVMOK,

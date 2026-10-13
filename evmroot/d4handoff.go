@@ -109,11 +109,18 @@ type ControlState struct {
 	// awaiting their EVM acknowledgement and the cursor of the record log. It is committed by this state's digest, so a checkpoint
 	// carries it verifiably. Empty on a chain that does not project records.
 	Pos []byte `cbor:",omitempty"`
+	// UnackedParent is the frozen parent of a committed root-only handoff (one that installs no EVM assignment) until the designated EVM shard has
+	// certified a block after it. A root-only step leaves no shard-epoch difference to show it pending, so this is what keeps the next Prepare from
+	// binding the same stalled parent again: two such steps could never be folded into one acknowledgement. It survives the epoch change into the
+	// successor's idle state and is empty otherwise (and then absent from the digest).
+	UnackedParent []byte `cbor:",omitempty"`
 }
 
 func (s ControlState) Bytes() []byte {
 	fields := cArray{cText("UNICITY_ROOT_HANDOFF_STATE"), cUint(1), cUint(s.Network), cUint(s.Epoch), cBytes(s.PredecessorBodyID), cUint(s.Attempt), cText(s.Phase), cUint(s.OrderedRound), cBytes(s.RecordBytes), cBytes(s.PreviousDigest)}
 	switch {
+	case len(s.UnackedParent) != 0:
+		fields = append(fields, cBytes(s.FrozenParent), cBytes(s.Pos), cBytes(s.UnackedParent)) // positional: the earlier slots stay even when empty
 	case len(s.Pos) != 0:
 		fields = append(fields, cBytes(s.FrozenParent), cBytes(s.Pos)) // positional: the parent slot stays even when it is empty
 	case len(s.FrozenParent) != 0:

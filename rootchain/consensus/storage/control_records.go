@@ -179,7 +179,18 @@ func PrepareMayFollowLapse(c *evmroot.ControlState, round uint64) bool {
 	return PrepareLapsed(c, round) && round > c.OrderedRound+PrepareFreezeLapseRounds+PrepareCooldownRounds
 }
 
+// applyHandoffRecord is the control transition of one ordered record. The unacknowledged root-only step (ControlState.UnackedParent) is not
+// the record's to change: it is set when a root-only handoff commits and cleared when the EVM certifies, both by the block executor, and
+// every transition carries it.
 func applyHandoffRecord(previous *evmroot.ControlState, data []byte, network, epoch, round uint64, authority handoffAuthority, companion []byte) (*evmroot.ControlState, error) {
+	next, err := applyHandoffRecordStep(previous, data, network, epoch, round, authority, companion)
+	if err == nil && next != nil && previous != nil && next != previous {
+		next.UnackedParent = bytes.Clone(previous.UnackedParent)
+	}
+	return next, err
+}
+
+func applyHandoffRecordStep(previous *evmroot.ControlState, data []byte, network, epoch, round uint64, authority handoffAuthority, companion []byte) (*evmroot.ControlState, error) {
 	if previous == nil {
 		return nil, ErrNetworkProfile
 	}
