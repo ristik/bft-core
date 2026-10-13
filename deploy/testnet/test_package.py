@@ -246,6 +246,41 @@ class EntityNamespace(unittest.TestCase):
             self.assertEqual(shard[shard.index('--rpc-server-address')+1],'127.0.0.1:9101')
         text=json.dumps(cfg)
         self.assertNotIn('0.0.0.0:8002',text);self.assertNotIn('0.0.0.0:9101',text)
+    def test_the_bind_is_a_loopback_config_value_that_every_reader_follows(self):
+        import operator_rpc
+        self.assertEqual(operator_rpc.DEFAULT_BIND,'127.0.0.1')
+        for ok in ('127.0.0.1','127.0.0.2','::1'): self.assertEqual(operator_rpc.check_bind(ok),ok)
+        for bad in ('0.0.0.0','::','10.0.0.5','172.30.88.2','localhost','','1.2.3'):
+            with self.assertRaises(operator_rpc.BindError,msg=bad): operator_rpc.check_bind(bad)
+        self.assertEqual(operator_rpc.listen('::1',8002),'[::1]:8002')
+        with tempfile.TemporaryDirectory() as tmp:
+            out=Path(tmp)/'tn-fixture';out.mkdir();(out/'aggregator').mkdir()
+            (out/'aggregator/keys.json').write_text(json.dumps({'authKey':{'privateKey':'0x01'},'sigKey':{'privateKey':'0x02'}}))
+            images={k:'sha256:'+'a'*64 for k in ['node','rpc','guard','signer']}
+            ids={'root':['r%d'%i for i in range(3)],'evm':['e%d'%i for i in range(3)]}
+            cfg=generate.topology(out,3,ids,images,'captcha',(),30000000,False,'127.0.0.2')
+            generate.write(out/'compose.yaml',cfg)
+            for i in (1,2,3):
+                root=cfg['services']['root%d'%i]['entrypoint'];shard=cfg['services']['shard%d'%i]['entrypoint']
+                self.assertEqual((root[root.index('--rpc-server-address')+1],shard[shard.index('--rpc-server-address')+1]),('127.0.0.2:8002','127.0.0.2:9101'))
+                self.assertEqual(cfg['services']['metrics%d'%i]['environment'],{'ROOT_RPC':'127.0.0.2:8002','SHARD_RPC':'127.0.0.2:9101'})
+            # the wrapper reads the listener from the generated file, not from a constant
+            self.assertEqual(handoff_ops.DockerTransport(out).root_rpc,'http://127.0.0.2:8002')
+            self.assertEqual(handoff_ops.abort_commands(out,[1],[])[1][-1],'http://127.0.0.2:8002')
+    def test_the_relay_takes_its_upstreams_from_the_environment(self):
+        self.assertEqual(metrics_relay.routes({'ROOT_RPC':'127.0.0.2:8002','SHARD_RPC':'[::1]:9101'}),{'/root/metrics':'http://127.0.0.2:8002/api/v1/metrics','/shard/metrics':'http://[::1]:9101/api/v1/metrics'})
+        with self.assertRaises(KeyError): metrics_relay.routes({})
+    def test_the_generator_refuses_a_non_loopback_bind_before_any_key(self):
+        for bad in ('0.0.0.0','10.1.2.3','example.org'):
+            done=subprocess.run([sys.executable,str(Path(__file__).parent/'generate.py'),'--out','/nonexistent/tn-x','--validators','4','--ubft','x','--keygen','x','--b1genesis','x',
+                '--images','x','--captcha-sitekey','a','--captcha-secret-file','x','--rpc-bind',bad],text=True,capture_output=True)
+            self.assertEqual(done.returncode,2,bad);self.assertIn('--rpc-bind',done.stderr)
+    def test_no_source_hardcodes_an_operator_listener_address(self):
+        here=Path(__file__).parent
+        for name in ('generate.py','handoff_ops.py','metrics_relay.py','validate-pos.py','validate-aggregator.py','validate-handoff.py'):
+            text=(here/name).read_text()
+            for literal in ("'127.0.0.1:8002'","'127.0.0.1:9101'","http://127.0.0.1:8002","http://127.0.0.1:9101","0.0.0.0:8002","0.0.0.0:9101"):
+                self.assertNotIn(literal,text,f'{name} hardcodes {literal}')
     def test_prometheus_scrapes_the_relay_not_the_loopback_listeners(self):
         source=Path(generate.__file__).read_text()
         self.assertIn("'/root/metrics'",source);self.assertIn("'/shard/metrics'",source);self.assertNotIn("f'root{i}:8002'",source);self.assertNotIn("f'shard{i}:9101'",source)
@@ -354,7 +389,7 @@ class HandoffWrapper(unittest.TestCase):
                 command=transport.command(2,'/api/v1/handoff/intent',10)
             self.assertIn('container:CID2',command);self.assertIn('--read-only',command);self.assertEqual(command[command.index('--cap-drop')+1],'ALL')
             self.assertNotIn('-v',command);self.assertNotIn('--volume',command);self.assertNotIn('--privileged',command)
-            self.assertEqual(command[-2:],['http://127.0.0.1:8002/api/v1/handoff/intent','10'])
+            self.assertEqual(command[-2:],['http://127.0.0.1:8002/api/v1/handoff/intent','10'])   # the default bind
             commands=handoff_ops.abort_commands(out,[1,2,3],['--network','3','--old-epoch','1'])
             self.assertEqual(sorted(commands),[1,2,3])
             self.assertEqual(commands[2][-2:],['--root-rpc','http://127.0.0.1:8002'])

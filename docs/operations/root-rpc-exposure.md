@@ -8,7 +8,7 @@ implemented (owner decision for now: documentation and the warning only).
 ## How to keep it private
 
 1. **Bind to loopback**: `--rpc-server-address 127.0.0.1:PORT`. Operators then reach it over SSH (`ssh -L`) or from the host.
-2. **Containers**: the testnet binds `127.0.0.1` (root 8002, shard 9101) and the root and shard node of each validator entity share one network namespace
+2. **Containers**: the testnet binds its `--rpc-bind` address, loopback only and `127.0.0.1` by default (owner decision Q25; root 8002, shard 9101) and the root and shard node of each validator entity share one network namespace
    (`deploy/testnet`: a holder container per entity), so nothing else on the Docker network can reach either listener, guarded or not; operators exec into the
    entity (`docker compose exec`). The start-up WARN must therefore NOT appear there: if it does, the binding is wrong. Prometheus reads the two metrics documents
    through a relay in the namespace that serves only those exact GET paths. (A package that binds `0.0.0.0` on a shared network would expose every endpoint

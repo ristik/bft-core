@@ -12,6 +12,7 @@ import subprocess
 import tempfile
 import time
 
+import operator_rpc
 import pos
 
 HERE = Path(__file__).resolve().parent
@@ -49,7 +50,7 @@ def evm_partition_params(chain_id):
 def write(path, obj):
     path.write_text(json.dumps(obj, indent=2) + '\n')
 
-def topology(out, n, ids, images, captcha, ureth_flags=(), max_gas=30000000, with_pos=False):
+def topology(out, n, ids, images, captcha, ureth_flags=(), max_gas=30000000, with_pos=False, rpc_bind=operator_rpc.DEFAULT_BIND):
     """JSON is a YAML subset, accepted directly by Docker Compose."""
     services = {}
     def service(name, image, command, mounts=(), memory='256m', cpu=0.5, networks=None, pod=None, **extra):
@@ -72,12 +73,13 @@ def topology(out, n, ids, images, captcha, ureth_flags=(), max_gas=30000000, wit
         # execution client and every other service keep their own.
         service('pod%d'%i, node, ['sleep','infinity'], memory='16m', cpu=0.05,
             networks={'validators':{'aliases':['root%d'%i,'shard%d'%i]}}, init=True)   # sleep as PID 1 would ignore SIGTERM
-        service('metrics%d'%i, images['rpc'], ['python3','-u','metrics_relay.py'], memory='64m', cpu=0.1, pod='pod%d'%i)
+        service('metrics%d'%i, images['rpc'], ['python3','-u','metrics_relay.py'], memory='64m', cpu=0.1, pod='pod%d'%i,
+            environment={'ROOT_RPC':operator_rpc.listen(rpc_bind,operator_rpc.ROOT_PORT),'SHARD_RPC':operator_rpc.listen(rpc_bind,operator_rpc.SHARD_PORT)})
         service('root%d'%i, node, ['ubft','root-node','run','--home','/state','--address','/ip4/0.0.0.0/tcp/8000',
             '--bootnodes', ','.join('/dns4/root%d/tcp/8000/p2p/%s' % (j,ids['root'][j-1]) for j in range(1,n+1) if j!=i),
             '--profile-2','--q3-lane'] + (pos.root_flags(i) if with_pos else ['--genesis-identities','/network/genesis-identities.json']) + [
             '--shard-conf','/network/full-shard-conf.json','--shard-conf','/network/aggregator-conf.json',
-            '--rpc-server-address','127.0.0.1:8002','--metrics','prometheus'] + common,
+            '--rpc-server-address',operator_rpc.listen(rpc_bind,operator_rpc.ROOT_PORT),'--metrics','prometheus'] + common,
             ['./validator%d/root:/state'%i,network,'./validator%d/jwt:/jwt:ro'%i], memory='384m', pod='pod%d'%i)   # the entity's Engine JWT, read-only: q3-readiness runs in the root (it holds the entity's keys.json) and checks its own Engine endpoint
         service('authority%d'%i, node, ['ubft','signing-authority','run','--home','/authority',
             '--client-socket','/authority/client.sock','--operator-socket','/authority/operator.sock',
@@ -100,7 +102,7 @@ def topology(out, n, ids, images, captcha, ureth_flags=(), max_gas=30000000, wit
             '--engine-url','http://ureth%d:8551'%i,'--eth-url','http://ureth%d:8545'%i,
             '--jwt-secret','/jwt/jwt.hex','--engine-fee-collector',FEE,'--b1-profile','/network/b1-profile.json','--q3-lane',
             '--execution-journal','/state/execution-journal.db','--archive-store','/archive',
-            '--archive-prune','--journal-candidates','32','--trust-history-profile-2','--rpc-server-address','127.0.0.1:9101','--metrics','prometheus',
+            '--archive-prune','--journal-candidates','32','--trust-history-profile-2','--rpc-server-address',operator_rpc.listen(rpc_bind,operator_rpc.SHARD_PORT),'--metrics','prometheus',
             '--signing-authority-socket','/authority/client.sock','--signing-authority-credential','/authority/client.cred']
             + common + sum((['--archive-replica',x] for x in replicas), []),
             [evm,auth,network,'./validator%d/jwt:/jwt:ro'%i,'./validator%d/archive:/archive'%i],memory='512m',cpu=0.75,pod='pod%d'%i)
@@ -142,6 +144,7 @@ def main():
     p.add_argument('--offline-validation',action='store_true',help='native ceremony with fixture images; output CANNOT be deployed')
     p.add_argument('--pos',action='store_true',help='the proof-of-stake profile: the contracts genesis (custody, election, evidence) in the EVM genesis, the roots on the P85 flags')
     p.add_argument('--pos-contracts',type=Path,help='a clean unicity-pos-contracts checkout at the pinned commit (needs forge on PATH)')
+    p.add_argument('--rpc-bind',default=operator_rpc.DEFAULT_BIND,help='bind address of the root and shard operator RPC listeners; loopback only (default 127.0.0.1): they have no authentication')
     p.add_argument('--pos-weights',default=None,help='proof-of-stake genesis weights, comma separated, one per validator (default all 1; the genesis rules accept only 1, see pos.genesis_weights)')
     p.add_argument('--pos-cadence-rounds',type=int,default=pos.CADENCE_ROUNDS,help='election cadence: ordinary root rounds after the last acknowledged rotation')
     p.add_argument('--pos-cadence-seconds',type=int,default=pos.CADENCE_SECONDS,help='election cadence: UC seconds after the last acknowledged rotation')
@@ -149,6 +152,8 @@ def main():
     p.add_argument('--captcha-secret-file',required=True,type=Path)
     a=p.parse_args()
     if a.pos and a.pos_contracts is None: p.error('--pos needs --pos-contracts')
+    try: operator_rpc.check_bind(a.rpc_bind)
+    except operator_rpc.BindError as e: p.error(str(e))
     if a.pos_weights is not None and not a.pos: p.error('--pos-weights needs --pos')
     weights=None
     if a.pos:
@@ -334,8 +339,8 @@ def main():
         network.update(chain_id=a.chain_id,genesis_hash='0x'+block,funding_address=next(iter(alloc)),
             validator_rpc_urls=[f'http://ureth{i}:8545' for i in range(1,a.validators+1)],captcha_sitekey=a.captcha_sitekey)
         write(out/'network/network.json',network)
-        write(out/'compose.yaml',topology(out,a.validators,{'root':roots,'evm':evms},records['images'],a.captcha_sitekey,flags,max_gas,bool(genesis)))
-        manifest={'offline_validation_only':a.offline_validation,'generation':out.name,'chain_id':a.chain_id,'genesis_hash':'0x'+block,'validators':a.validators,
+        write(out/'compose.yaml',topology(out,a.validators,{'root':roots,'evm':evms},records['images'],a.captcha_sitekey,flags,max_gas,bool(genesis),a.rpc_bind))
+        manifest={'offline_validation_only':a.offline_validation,'generation':out.name,'chain_id':a.chain_id,'genesis_hash':'0x'+block,'validators':a.validators,'operator_rpc':{'bind':a.rpc_bind,'root_port':operator_rpc.ROOT_PORT,'shard_port':operator_rpc.SHARD_PORT},
             'faucet_address':next(iter(alloc)), 'artifacts':records,
             'pos':({'genesis_assignment':genesis.assignment,'first_pass_assignment':genesis.first,'custody':genesis.deployment['custody'],'election':genesis.deployment['election'],
                     'contracts':PINS['contracts'],'owner_keys':'pos-owner-keys','cadence_rounds':a.pos_cadence_rounds,'cadence_seconds':a.pos_cadence_seconds} if genesis else None),
