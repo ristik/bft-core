@@ -26,18 +26,12 @@ type claim struct {
 	pathSteps  uint64
 }
 
-type certCall struct {
-	claims []claim
-	size   uint64
-	charge uint64
-}
-
-// header parses `version:u8=1 | flags:u8=0 | count:u16` and returns the count.
-func header(in []byte) (uint16, error) {
+// header parses `version:u8 | flags:u8=0 | count:u16` for the given version and returns the count.
+func header(in []byte, version byte) (uint16, error) {
 	if len(in) < 4 {
 		return 0, ErrTruncated
 	}
-	if in[0] != 1 {
+	if in[0] != version {
 		return 0, ErrVersion
 	}
 	if in[1] != 0 {
@@ -79,57 +73,23 @@ func (r *reader) u32() (uint64, error) {
 	return uint64(binary.BigEndian.Uint32(b)), nil
 }
 
-// parseCertCall decodes and bound-checks a whole UC_V1 (shared=false) or
-// SHARED_SEAL_V1 (shared=true) call. Every malformed input is rejected here,
-// before any semantic check, so the verdict never depends on evaluation order.
-func parseCertCall(in []byte, shared bool) (*certCall, error) {
-	if len(in) > MaxCallBytes {
-		return nil, ErrInputTooLarge
-	}
-	count, err := header(in)
-	if err != nil {
-		return nil, err
-	}
-	if count < 1 || count > MaxClaims || (!shared && count != 1) {
-		return nil, ErrCount
-	}
+// parseClaims decodes every claim occurrence of a request scanBatch accepted (k occurrences after the header), including the
+// native decode and byte-exact re-encoding of each certificate. It runs only after the full charge is reserved.
+func parseClaims(in []byte, k uint64) ([]claim, error) {
 	r := &reader{b: in, pos: 4}
 	tokens := 0
-
-	call := &certCall{size: uint64(len(in)), claims: make([]claim, 0, count)}
-	for i := 0; i < int(count); i++ {
+	claims := make([]claim, 0, k)
+	for i := uint64(0); i < k; i++ {
 		c, err := parseClaim(r, &tokens)
 		if err != nil {
 			return nil, fmt.Errorf("claim %d: %w", i, err)
 		}
-		call.claims = append(call.claims, c)
+		claims = append(claims, c)
 	}
 	if r.left() != 0 {
 		return nil, ErrTrailingBytes
 	}
-
-	var steps uint64
-	for i := range call.claims {
-		steps += call.claims[i].pathSteps
-	}
-	var s uint64
-	for _, c := range call.claims {
-		if c.sigs.arg > s {
-			s = c.sigs.arg
-		}
-	}
-	call.charge = UCGas(call.size, s, uint64(len(call.claims)), steps)
-	return call, nil
-}
-
-func compareClaimID(a, b *claim) int {
-	if a.partition != b.partition {
-		if a.partition < b.partition {
-			return -1
-		}
-		return 1
-	}
-	return bytes.Compare(a.shardBytes, b.shardBytes)
+	return claims, nil
 }
 
 func parseClaim(r *reader, tokens *int) (claim, error) {
@@ -170,7 +130,7 @@ func parseClaim(r *reader, tokens *int) (claim, error) {
 	if err != nil {
 		return c, err
 	}
-	if err := decodeUC(&c, ucRaw, tokens); err != nil {
+	if err := decodeUC(&c, ucRaw, tokens, MaxSigsPerSeal); err != nil {
 		return c, fmt.Errorf("unicity certificate: %w", err)
 	}
 	return c, nil
@@ -208,7 +168,7 @@ func cborBytes(b []byte) []byte {
 
 // decodeUC runs the strict scan and shape rules over the UC bytes, then the
 // native decoder, and requires byte-exact re-encoding.
-func decodeUC(c *claim, raw []byte, tokens *int) error {
+func decodeUC(c *claim, raw []byte, tokens *int, maxSigs uint64) error {
 	root, err := scanOne(raw, tokens)
 	if err != nil {
 		return err
@@ -234,7 +194,7 @@ func decodeUC(c *claim, raw []byte, tokens *int) error {
 	if err != nil {
 		return fmt.Errorf("unicity tree certificate: %w", err)
 	}
-	sigs, err := shapeSeal(&k[6])
+	sigs, err := shapeSeal(&k[6], maxSigs)
 	if err != nil {
 		return fmt.Errorf("unicity seal: %w", err)
 	}
@@ -338,7 +298,7 @@ func shapeUnicityCert(it *item) (steps uint64, err error) {
 }
 
 // shapeSeal returns the signature map item.
-func shapeSeal(it *item) (*item, error) {
+func shapeSeal(it *item, maxSigs uint64) (*item, error) {
 	body, ok := it.tagContent(types.UnicitySealTag)
 	if !ok || !body.isArray(8) {
 		return nil, ErrShape
@@ -353,7 +313,7 @@ func shapeSeal(it *item) (*item, error) {
 	if !k[5].isHash() || !k[6].isHash() || (!k[7].null && k[7].major != majMap) {
 		return nil, ErrShape
 	}
-	if k[7].arg > MaxSigsPerSeal {
+	if k[7].arg > maxSigs {
 		return nil, ErrTooManySigs
 	}
 	for i := 0; i < len(k[7].kids); i += 2 {
@@ -412,6 +372,10 @@ func ucFolds(c *claim) error {
 	return nil
 }
 
+// protocol3SigsPerSeal is the step-0 per-seal signature bound that ScanUC keeps for the protocol-3 bridge in bridgeprofile, whose
+// sealed corpus pins it; CERT_BATCH_V2 enforces MaxSigsPerSeal in its own scan before any decode. It goes with protocol 3.
+const protocol3SigsPerSeal = 64
+
 // UCShape is what the strict structural scan of one standalone certificate found.
 type UCShape struct {
 	// PathSteps is the unicity tree path length plus the shard tree sibling count the native gas schedule charges.
@@ -420,7 +384,7 @@ type UCShape struct {
 	SigLens []int
 }
 
-// ScanUC applies exactly the native bounded certificate scan to raw: the byte cap, the strict CBOR token and depth bounds, every
+// ScanUC applies the protocol-3 native bounded certificate scan to raw (64 signatures per seal, see protocol3SigsPerSeal): the byte cap, the strict CBOR token and depth bounds, every
 // field's shape and sublimit (summary, shard depth, siblings, steps, signatures, node ids), the native decoder and the byte-exact
 // re-encoding. It performs no cryptography and allocates only within those bounds. Callers that accept a narrower codec (the SDK's)
 // intersect it with this result.
@@ -430,7 +394,7 @@ func ScanUC(raw []byte) (UCShape, error) {
 		return UCShape{}, ErrUCTooLarge
 	}
 	tokens := 0
-	if err := decodeUC(&c, raw, &tokens); err != nil {
+	if err := decodeUC(&c, raw, &tokens, protocol3SigsPerSeal); err != nil {
 		return UCShape{}, err
 	}
 	shape := UCShape{PathSteps: c.pathSteps}

@@ -37,6 +37,9 @@ func checkVerdict(t *testing.T, v b1ref.Verdict, err error, in []byte, maxGas ui
 		return
 	}
 	if err != nil {
+		if errors.Is(err, b1ref.ErrInfrastructure) && !errors.Is(err, b1ref.ErrMalformed) && !v.Valid {
+			return // a fuzzed claim can name an epoch whose words the seed registry lacks
+		}
 		if !errors.Is(err, b1ref.ErrMalformed) || errors.Is(err, b1ref.ErrInvalid) || v.Valid {
 			t.Fatalf("error outside the malformed family: %v (%+v)", err, v)
 		}
@@ -51,13 +54,11 @@ func checkVerdict(t *testing.T, v b1ref.Verdict, err error, in []byte, maxGas ui
 }
 
 func FuzzCertCall(f *testing.F) {
-	pre := seedFuzz(f, "UC_V1", "SHARED_SEAL_V1")
-	reg := registry(f, pre)
+	pre := seedFuzz(f, "CERT_BATCH_V2")
+	st, pins := state(f, pre)
 	f.Fuzz(func(t *testing.T, in []byte) {
-		v, err := b1ref.UC(in, reg)
-		checkVerdict(t, v, err, in, 6_412_004, b1ref.MaxCallBytes)
-		v, err = b1ref.Shared(in, reg)
-		checkVerdict(t, v, err, in, 6_412_004, b1ref.MaxCallBytes)
+		v, err := b1ref.Cert(in, st, pins)
+		checkVerdict(t, v, err, in, 7_573_804, b1ref.MaxCallBytes)
 	})
 }
 

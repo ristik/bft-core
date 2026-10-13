@@ -17,6 +17,7 @@ type fixture struct {
 	vals      []validator
 	body      [32]byte
 	authority authoritySpec
+	scheme    map[uint32][]string // nil: the default scheme
 }
 
 // scheme maps partition to its shard scheme.
@@ -32,17 +33,37 @@ func newFixture(seed string, nVals int) *fixture {
 	return f
 }
 
+// pre is the default registry: a fresh genesis whose genesis epoch is the fixture's epoch (7), open from round 900, usable, O
+// 1000.
 func (f *fixture) pre() PreState { return f.preForAuthority(f.authority) }
 
 func (f *fixture) preForAuthority(v authoritySpec) PreState {
-	var members []MemberWords
+	p := f.registryBase()
+	p.GenesisEpoch, p.ImportedTip, p.Origin = f.epoch, f.epoch, f.origin
+	p.Epochs = []EpochWords{f.epochWords(v, f.epoch, 900, 0, true)}
+	return p
+}
+
+// registryBase is the common words of a ready registry, without entries.
+func (f *fixture) registryBase() PreState {
+	d := newDRBG(f.seed, "registry")
+	gc, ph := d.hash(), d.hash()
+	return PreState{Network: f.network, Phase: 2, GenesisCommitment: hex32(gc), ProfileHash: hex32(ph), PinnedProfileHash: hex32(ph),
+		OriginReady: true, ClockRound: f.clock}
+}
+
+// epochWords is the entry of epoch e for an authority: the genesis kind for the genesis epoch, a handoff otherwise.
+func (f *fixture) epochWords(v authoritySpec, e, start, end uint64, genesis bool) EpochWords {
+	d := newDRBG(f.seed, fmt.Sprintf("entry/%d", e))
+	w := EpochWords{Epoch: e, BodyKind: 2, BodyID: hex32(v.bodyID), ActivationCommitID: hex32(d.hash()), Start: start, End: end, HasEnd: end != 0,
+		SigningScheme: 1, SigningConfigHash: hex32(d.hash())}
+	if genesis {
+		w.BodyKind, w.ActivationCommitID = 1, hex32([32]byte{})
+	}
 	for _, m := range v.members {
-		members = append(members, MemberWords{NodeID: m.id, Key: hx(m.pub), Weight: m.weight})
+		w.Members = append(w.Members, MemberWords{NodeID: m.id, Key: hx(m.pub), Weight: m.weight})
 	}
-	return PreState{
-		Network: f.network, Origin: f.origin, ClockRound: f.clock,
-		Epochs: []EpochWords{{Epoch: f.epoch, Members: members, BodyID: hex32(f.body), Start: 900, End: 0}},
-	}
+	return w
 }
 
 // certSet is the unsigned-then-signed certificates of every (partition, shard).
@@ -58,8 +79,12 @@ func ucKey(part uint32, shard string) string { return fmt.Sprintf("%d/%s", part,
 // the given root round with the given signers.
 func (f *fixture) build(variant string, round uint64, signers []validator, withV bool) *certSet {
 	cs := &certSet{ucs: map[string]*ucSpec{}, shardRoot: map[uint32][32]byte{}}
-	parts := make([]uint32, 0, len(scheme))
-	for p := range scheme {
+	sch := f.scheme
+	if sch == nil {
+		sch = scheme
+	}
+	parts := make([]uint32, 0, len(sch))
+	for p := range sch {
 		parts = append(parts, p)
 	}
 	sort.Slice(parts, func(i, j int) bool { return parts[i] < parts[j] })
@@ -68,7 +93,7 @@ func (f *fixture) build(variant string, round uint64, signers []validator, withV
 	trees := map[uint32]shardTree{}
 	for _, p := range parts {
 		st := shardTree{leaves: map[string][32]byte{}}
-		for _, sh := range scheme[p] {
+		for _, sh := range sch[p] {
 			r := newDRBG(f.seed, fmt.Sprintf("ir/%s/%d/%s", variant, p, sh))
 			ir := irSpec{
 				round: 5, epoch: 1, prev: r.bytes32(), state: r.bytes32(), summary: r.bytes32()[:8],
@@ -97,7 +122,7 @@ func (f *fixture) build(variant string, round uint64, signers []validator, withV
 	for _, p := range parts {
 		var key [4]byte
 		key = [4]byte{byte(p >> 24), byte(p >> 16), byte(p >> 8), byte(p)}
-		for _, sh := range scheme[p] {
+		for _, sh := range sch[p] {
 			u := cs.ucs[ucKey(p, sh)]
 			u.shardSibs = trees[p].siblings(sh)
 			u.steps = root.path(key)

@@ -1,48 +1,58 @@
 package b1ref
 
-// Hard limits from the A′ design.
+// Hard limits of CERT_BATCH_V2 (briefs/b1-any-age-contract.md section 4) and of RSMT_MEMBER_V1.
 const (
 	MaxCallBytes      = 262144
 	MaxUCBytes        = 24576
-	MaxClaims         = 8
-	MaxMembers        = 16
-	MaxSigsPerSeal    = 64
-	MaxSigEntries     = 512 // parsed signature entries per shared call
+	MaxClaims         = 16 // K, claim occurrences per call; E, S and A are at most K
+	MaxMembers        = 16 // N_admit = N_verify
+	MaxSigsPerSeal    = 16
 	MaxNodeIDBytes    = 128
 	MaxShardDepth     = 256
 	MaxShardBytes     = 33
 	MaxShardSiblings  = 256
 	MaxUnicitySteps   = 32
+	MaxCertSteps      = 4608 // shard siblings plus Unicity steps, summed over every occurrence
 	MaxCBORDepth      = 16
-	MaxCBORTokens     = 32768
+	MaxCBORTokens     = 32768 // summed over every UC occurrence
 	MaxSummaryBytes   = 256
 	MaxRSMTValueBytes = 4096
 	MaxRSMTSiblings   = 256
 	MaxRSMTInputBytes = 4 + 32 + 32 + 4 + MaxRSMTValueBytes + 32 + MaxRSMTSiblings*32 // 12392
 
-	outputVersion = 1
+	certVersion   = 2 // CERT_BATCH_V2 input and output
+	memberVersion = 1 // RSMT_MEMBER_V1 input and output
 )
 
-// Candidate gas schedule (design section 4).
+// CERT_BATCH_V2 schedule (contract section 5). Every term depends on the request only, never on registry contents or warmth.
 const (
-	ucBaseGas      = 60000
-	rsmtBaseGas    = 2000
+	scanBaseGas    = 60000
 	gasPerByte     = 16
+	gasPerPair     = 500 // 500*K*(K-1): bounded identity comparisons
+	commonReads    = 11
+	gasPerRead     = 100 // subsidised registry read
 	gasPerMember   = 1000
+	epochWords     = 11 + 8*MaxMembers
+	EpochGas       = gasPerMember*MaxMembers + gasPerRead*epochWords // 29,900 per distinct declared epoch, at the member ceiling
 	gasPerSig      = 6000
 	gasPerClaim    = 2000
 	gasPerPathStep = 250
-	gasPerRead     = 100 // every registry word is priced warm
-	// RegistryWords is what a ceiling-sized call may read: 8 common words, 11 epoch words, 8 words per member.
-	RegistryWords = 8 + 11 + 8*MaxMembers
+	rsmtBaseGas    = 2000
 )
 
-// UCGas is the charge of UC_V1/SHARED_SEAL_V1: 60000 + 16*B + 16000 + 6000*S + 2000*N + 250*P + 14700, i.e. 90700 + 16*B + ...
-// (repriced by owner-decisions section 22: 1000 per member of the 16-member ceiling, and the 147 registry words of a ceiling-sized entry
-// priced warm at 100 each; the price depends on the request only, never on warmth, state or any cache).
-// Operands are pre-scanned and bounded by the caller profile.
+// ScanGas is G_scan = 60,000 + 16*C + 500*K*(K-1), reserved before the full structural scan.
+func ScanGas(c, k uint64) uint64 { return scanBaseGas + gasPerByte*c + gasPerPair*k*(k-1) }
+
+// BatchGas is G_batch = G_scan + 1,100 + 29,900*E + 6,000*Q + 2,000*A + 250*P over the grouped request. Operands are bounded by
+// the limits above, so it cannot overflow.
+func BatchGas(c, k, e, q, a, p uint64) uint64 {
+	return ScanGas(c, k) + gasPerRead*commonReads + EpochGas*e + gasPerSig*q + gasPerClaim*a + gasPerPathStep*p
+}
+
+// UCGas is the retired step-0 UC_V1 charge, 90,700 + 16*B + 6000*S + 2000*N + 250*P. Only the protocol-3 bridge gate in
+// bridgeprofile still uses it, until that gate moves to protocol 4 (contract section 5).
 func UCGas(b, s, n, p uint64) uint64 {
-	return ucBaseGas + gasPerByte*b + gasPerMember*MaxMembers + gasPerSig*s + gasPerClaim*n + gasPerPathStep*p + gasPerRead*RegistryWords
+	return scanBaseGas + gasPerByte*b + gasPerMember*MaxMembers + gasPerSig*s + gasPerClaim*n + gasPerPathStep*p + gasPerRead*(8+11+8*MaxMembers)
 }
 
 // RSMTGas is the charge of RSMT_MEMBER_V1: 2000 + 16*B + 250*(1+popcount(bitmap)).

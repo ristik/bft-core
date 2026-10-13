@@ -172,7 +172,14 @@ func (r *shapeReader) collection(major byte, max uint64, bound error) uint64 {
 	}
 	return n
 }
-func (r *shapeReader) uc() (sigs, steps uint64) {
+
+// ucShape is what the scan needs of one UC: the seal's signature count and epoch, the seal's byte range, and the path steps.
+type ucShape struct {
+	sigs, steps, epoch uint64
+	sealStart, sealEnd int
+}
+
+func (r *shapeReader) uc() (out ucShape) {
 	r.tag(types.UnicityCertificateTag)
 	r.array(7)
 	r.version()
@@ -202,7 +209,10 @@ func (r *shapeReader) uc() (sigs, steps uint64) {
 		}
 	}
 	n := r.collection(majArray, MaxShardSiblings, ErrTooManySiblings)
-	steps += n
+	if r.err == nil && n != shardDepth(shard) {
+		r.err = ErrShardSiblings
+	}
+	out.steps += n
 	for i := uint64(0); i < n && r.err == nil; i++ {
 		r.hash(false)
 	}
@@ -211,108 +221,168 @@ func (r *shapeReader) uc() (sigs, steps uint64) {
 	r.version()
 	r.uint(math.MaxUint32)
 	n = r.collection(majArray, MaxUnicitySteps, ErrTooManySteps)
-	steps += n
+	out.steps += n
 	for i := uint64(0); i < n && r.err == nil; i++ {
 		r.array(2)
 		r.uint(math.MaxUint32)
 		r.hash(false)
 	}
+	out.sealStart = r.pos
 	r.tag(types.UnicitySealTag)
 	r.array(8)
 	r.version()
 	r.uint(math.MaxUint16)
 	r.uint(math.MaxUint64)
-	r.uint(math.MaxUint64)
+	out.epoch = r.uint(math.MaxUint64)
 	r.uint(math.MaxUint64)
 	r.hash(false)
 	r.hash(false)
-	sigs = r.collection(majMap, MaxSigsPerSeal, ErrTooManySigs)
-	for i := uint64(0); i < sigs && r.err == nil; i++ {
+	out.sigs = r.collection(majMap, MaxSigsPerSeal, ErrTooManySigs)
+	for i := uint64(0); i < out.sigs && r.err == nil; i++ {
 		r.blob(majText, 0, MaxNodeIDBytes, ErrNodeIDTooLong)
 		sig := r.blob(majBytes, 0, math.MaxUint64, ErrShape)
 		if r.err == nil && ((len(sig) != 64 && len(sig) != 65) || (len(sig) == 65 && sig[64] > 1)) {
 			r.err = ErrSigFormat
 		}
 	}
+	out.sealEnd = r.pos
 	return
 }
-func scanCertCall(in []byte, shared bool) (uint64, error) {
+
+// occurrence is one scanned claim occurrence: slices of the input, never copies.
+type occurrence struct {
+	claim, seal []byte
+	epoch       uint64
+	sigs, steps uint64
+	newClaim    bool // first occurrence of these complete claim bytes
+	newSeal     bool // first occurrence of these complete seal bytes
+	sealGroup   int  // index of the occurrence that first carried this seal
+}
+
+// plan is a fully scanned CERT_BATCH_V2 request: its occurrences, the canonical first-use grouping and the full charge. Building
+// it allocates nothing and reads no state.
+type plan struct {
+	c, k          uint64
+	occ           [MaxClaims]occurrence
+	e, s, q, a, p uint64
+	charge        uint64
+}
+
+// scanBatch reads the header and scans every occurrence with one cumulative CBOR budget, then groups epochs, complete seals and
+// complete claims by first use with exact byte comparison (at most K*(K-1)/2 comparisons per class, prepaid by G_scan).
+func scanBatch(in []byte, pl *plan) error {
 	if len(in) > MaxCallBytes {
-		return 0, ErrInputTooLarge
+		return ErrInputTooLarge
 	}
-	n, err := header(in)
+	k, err := header(in, certVersion)
 	if err != nil {
-		return 0, err
+		return err
 	}
-	if n < 1 || n > MaxClaims || (!shared && n != 1) {
-		return 0, ErrCount
+	if k < 1 || k > MaxClaims {
+		return ErrCount
 	}
+	*pl = plan{c: uint64(len(in)), k: uint64(k)}
 	r := reader{b: in, pos: 4}
 	tokens := 0
-	var maxS, steps uint64
-	for i := uint16(0); i < n; i++ {
+	var certSteps uint64
+	for i := 0; i < int(k); i++ {
+		start := r.pos
 		if _, err := r.u32(); err != nil {
-			return 0, err
+			return err
 		}
 		sl, err := r.u16()
 		if err != nil {
-			return 0, err
+			return err
 		}
 		if sl > MaxShardBytes {
-			return 0, ErrShardTooDeep
+			return ErrShardTooDeep
 		}
 		shard, err := r.take(sl)
 		if err != nil {
-			return 0, err
+			return err
 		}
 		if err := validateShard(shard); err != nil {
-			return 0, err
+			return err
 		}
 		if _, err := r.take(96); err != nil {
-			return 0, err
+			return err
 		}
 		ul, err := r.u32()
 		if err != nil {
-			return 0, err
+			return err
 		}
 		if ul > MaxUCBytes {
-			return 0, ErrUCTooLarge
+			return ErrUCTooLarge
 		}
 		raw, err := r.take(ul)
 		if err != nil {
-			return 0, err
+			return err
 		}
 		s := scanner{b: raw, tokens: &tokens}
 		if err := s.skip(0); err != nil {
-			return 0, err
+			return err
 		}
 		if s.pos != len(raw) {
-			return 0, ErrTrailingBytes
+			return ErrTrailingBytes
 		}
 		sr := shapeReader{scanner: scanner{b: raw}}
-		sig, p := sr.uc()
+		u := sr.uc()
 		if sr.err != nil {
-			return 0, sr.err
+			return sr.err
 		}
 		if sr.pos != len(raw) {
-			return 0, ErrShape
+			return ErrShape
 		}
-		if sig > maxS {
-			maxS = sig
+		if certSteps += u.steps; certSteps > MaxCertSteps {
+			return ErrCertSteps
 		}
-		steps += p
+		pl.occ[i] = occurrence{claim: in[start:r.pos], seal: raw[u.sealStart:u.sealEnd], epoch: u.epoch, sigs: u.sigs, steps: u.steps}
 	}
 	if r.left() != 0 {
-		return 0, ErrTrailingBytes
+		return ErrTrailingBytes
 	}
-	return UCGas(uint64(len(in)), maxS, uint64(n), steps), nil
+	for i := 0; i < int(k); i++ {
+		o := &pl.occ[i]
+		o.newClaim, o.newSeal, o.sealGroup = true, true, i
+		newEpoch := true
+		for j := 0; j < i; j++ {
+			p := &pl.occ[j]
+			if o.newClaim && bytes.Equal(p.claim, o.claim) {
+				o.newClaim = false
+			}
+			if o.newSeal && bytes.Equal(p.seal, o.seal) {
+				o.newSeal, o.sealGroup = false, p.sealGroup
+			}
+			if p.epoch == o.epoch {
+				newEpoch = false
+			}
+		}
+		if newEpoch {
+			pl.e++
+		}
+		if o.newSeal {
+			pl.s++
+			pl.q += o.sigs
+		}
+		if o.newClaim {
+			pl.a++
+			pl.p += o.steps
+		}
+	}
+	pl.charge = BatchGas(pl.c, pl.k, pl.e, pl.q, pl.a, pl.p)
+	return nil
+}
+
+// shardDepth is the depth of a valid native shard bit string: its bit length minus the terminator.
+func shardDepth(b []byte) uint64 {
+	return uint64(len(b)*8 - bits.TrailingZeros8(b[len(b)-1]) - 1)
 }
 
 func validateShard(b []byte) error {
 	if len(b) == 0 || b[len(b)-1] == 0 {
 		return ErrShardEncoding
 	}
-	if len(b) > MaxShardBytes || len(b)*8-bits.TrailingZeros8(b[len(b)-1])-1 > MaxShardDepth {
+	if len(b) > MaxShardBytes || shardDepth(b) > MaxShardDepth {
 		return ErrShardTooDeep
 	}
 	return nil

@@ -2,27 +2,23 @@ package b1gen
 
 import "fmt"
 
-// History is a multi-epoch registry scenario for the any-age acceptance and verification-local reuse tests
-// (briefs/b1-any-age-vectors.md families A, B and D). Epoch 0 runs from round 1 to 1000, epoch e in 1..7 from 1000e to 1000(e+1),
-// and epoch 8, the usable origin, is open from 8000; O is 1,000,000. Epochs 0..3 are signed by node00..node03, epochs 4..8 by
-// node01..node04 (one member replaced at epoch 4, then the same members in successive epochs). Every member weighs 1, so three
-// signatures reach quorum.
-//
-// Certificates are returned as single claims in the v1 claim encoding; the batch ABI is not frozen yet, so the corpus does not carry
-// these and tests compose them through the oracle's test-only claim entry.
+// History is a multi-epoch registry for the any-age, reuse and pricing vectors (briefs/b1-any-age-vectors.md families A, B, D and
+// G). Epochs g..8: epoch 0 runs from round 1 to 1000, epoch e >= 1 from 1000e to 1000(e+1), epoch 8 (the usable origin) is open
+// from 8000, and O = 1,000,000. Epochs 0..3 are signed by node00..node03, epochs 4..8 by node01..node04: one member replaced at
+// epoch 4, then the same members in successive epochs. Every member weighs 1, so three signatures reach quorum.
 type History struct {
 	f    *fixture
 	vals []validator // node00..node04
-	Pre  PreState
+	g    uint64
 }
 
-// HistoryOrigin and HistoryClock are the scenario's usable origin epoch and O.
+// HistoryOrigin and HistoryClock are the usable origin epoch and O.
 const (
 	HistoryOrigin = 8
 	HistoryClock  = 1_000_000
 )
 
-// HistoryStart is the first root round of epoch e in the scenario.
+// HistoryStart is the first root round of epoch e.
 func HistoryStart(e uint64) uint64 {
 	if e == 0 {
 		return 1
@@ -30,30 +26,41 @@ func HistoryStart(e uint64) uint64 {
 	return 1000 * e
 }
 
-// NewHistory derives the scenario from a seed.
-func NewHistory(seed string) *History {
-	h := &History{f: newFixture(seed, 4)}
+// NewHistory derives the scenario from a seed with genesis epoch g.
+func NewHistory(seed string, g uint64) *History {
+	h := &History{f: newFixture(seed, 4), g: g}
 	h.f.origin, h.f.clock = HistoryOrigin, HistoryClock
 	for i := 0; i < 5; i++ {
 		h.vals = append(h.vals, makeValidator(seed, fmt.Sprintf("node%02d", i)))
 	}
-	h.Pre = PreState{Network: h.f.network, Origin: HistoryOrigin, ClockRound: HistoryClock}
-	for e := uint64(0); e <= HistoryOrigin; e++ {
-		auth := authorityOf(h.f.network, e, 2, newDRBG(seed, fmt.Sprintf("body/%d", e)).hash(), h.set(e))
-		var members []MemberWords
-		for _, m := range auth.members {
-			members = append(members, MemberWords{NodeID: m.id, Key: hx(m.pub), Weight: m.weight})
-		}
-		ew := EpochWords{Epoch: e, Members: members, BodyID: hex32(auth.bodyID), Start: HistoryStart(e)}
-		if e < HistoryOrigin {
-			ew.End = HistoryStart(e + 1)
-		}
-		h.Pre.Epochs = append(h.Pre.Epochs, ew)
-	}
 	return h
 }
 
-// set is the validator set of epoch e.
+// Pre is the registry: epochs g..8 installed, 8 usable and open.
+func (h *History) Pre() PreState {
+	p := h.f.registryBase()
+	p.GenesisEpoch, p.ImportedTip, p.Origin = h.g, HistoryOrigin, HistoryOrigin
+	for e := h.g; e <= HistoryOrigin; e++ {
+		end := uint64(0)
+		if e < HistoryOrigin {
+			end = HistoryStart(e + 1)
+		}
+		auth := authorityOf(h.f.network, e, 2, newDRBG(h.f.seed, fmt.Sprintf("body/%d", e)).hash(), h.set(e))
+		p.Epochs = append(p.Epochs, h.f.epochWords(auth, e, HistoryStart(e), end, e == h.g))
+	}
+	return p
+}
+
+// Preloaded is Pre with epoch 9 imported but not usable: it closes the usable epoch 8 at O+500, above O.
+func (h *History) Preloaded() PreState {
+	p := h.Pre()
+	p.ImportedTip = 9
+	p.Epochs[len(p.Epochs)-1].End, p.Epochs[len(p.Epochs)-1].HasEnd = HistoryClock+500, true
+	auth := authorityOf(h.f.network, 9, 2, newDRBG(h.f.seed, "body/9").hash(), h.set(9))
+	p.Epochs = append(p.Epochs, h.f.epochWords(auth, 9, HistoryClock+500, 0, false))
+	return p
+}
+
 func (h *History) set(e uint64) []validator {
 	if e < 4 {
 		return h.vals[0:4]
@@ -61,8 +68,7 @@ func (h *History) set(e uint64) []validator {
 	return h.vals[1:5]
 }
 
-// Seal names one seal of the scenario: its epoch and root round, the certificate-set variant (which input records it certifies),
-// and its signers as indexes into node00..node04.
+// Seal names one seal: its epoch, root round, certificate-set variant and signers (indexes into node00..node04).
 type Seal struct {
 	Epoch, Round uint64
 	Variant      string
@@ -80,9 +86,22 @@ func DefaultSigners(e uint64) []int {
 	return []int{1, 2, 3}
 }
 
-// Claim returns the claim of partition part, shard shard, certified under the seal s.
+func hseal(epoch, round uint64, variant string) Seal {
+	return Seal{Epoch: epoch, Round: round, Variant: variant, Signers: DefaultSigners(epoch)}
+}
+
+// Claim returns the claim of partition part, shard shard, certified under the seal s, in the CERT_BATCH_V2 claim encoding.
 func (h *History) Claim(s Seal, part uint32, shard string) []byte {
 	return claimOf(h.uc(s, part, shard)).wire()
+}
+
+// Request is a CERT_BATCH_V2 request of the given claims.
+func Request(claims ...[]byte) []byte {
+	out := []byte{2, 0, byte(len(claims) >> 8), byte(len(claims))}
+	for _, c := range claims {
+		out = append(out, c...)
+	}
+	return out
 }
 
 func (h *History) uc(s Seal, part uint32, shard string) ucSpec {
@@ -92,8 +111,7 @@ func (h *History) uc(s Seal, part uint32, shard string) ucSpec {
 	for _, i := range s.Signers {
 		signers = append(signers, h.vals[i])
 	}
-	cs := f.build(s.Variant, s.Round, signers, false)
-	u := cs.get(part, shard)
+	u := f.build(s.Variant, s.Round, signers, false).get(part, shard)
 	if s.BadLast {
 		n := len(u.seal.sigs) - 1
 		u.seal.sigs = append([]entry{}, u.seal.sigs...)

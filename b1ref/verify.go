@@ -1,108 +1,51 @@
 package b1ref
 
 import (
-	"bytes"
 	"errors"
 	"math/big"
 
 	ethcrypto "github.com/ethereum/go-ethereum/crypto"
-	"github.com/unicitynetwork/bft-core/b1state"
 )
 
-type EpochEntry = b1state.Entry
-
-// Registry is the explicit registry context of one call: everything the
-// builtins would read from authenticated EVM state, and nothing else. In this
-// package it is an injected precondition: the caller asserts it came from
-// authenticated state, and nothing here establishes that. A Registry built by
-// a test is a simulation of the context, not authority.
-type Registry struct {
-	GenesisCommitment, ProfileHash [32]byte
-	Initialized                    bool
-	Phase                          uint64
-	Network                        uint16 // b1.network
-	Origin                         uint64 // origin.rootEpoch, the usable origin: entries above it may be stored (preloaded) but are never usable
-	RootRound                      uint64 // clock.rootRound, O
-	Epochs                         map[uint64]EpochEntry
-}
-
-// Verdict is the outcome of a well-formed call. Why is nil when Valid and
-// otherwise wraps ErrInvalid. Gas is the full charge, independent of where a
-// false relation failed.
+// Verdict is the outcome of a well-formed call. Why is nil when Valid and otherwise wraps ErrInvalid: one verdict for the whole
+// batch, its reason only diagnostic metadata. Gas is the full charge, independent of where a false relation failed.
 type Verdict struct {
 	Valid bool
 	Why   error
 	Gas   uint64
 }
 
-// UC evaluates a UC_V1 input.
-func UC(in []byte, reg *Registry) (Verdict, error) { return certCallVerdict(in, reg, false) }
+// Cert evaluates a CERT_BATCH_V2 request (briefs/b1-any-age-contract.md sections 2 and 3) without a gas limit: the error is a
+// halt (ErrMalformed) or an infrastructure failure (ErrInfrastructure); otherwise the verdict carries the full charge.
+func Cert(in []byte, st State, pins Pins) (Verdict, error) {
+	var pl plan
+	if err := scanBatch(in, &pl); err != nil {
+		return Verdict{}, err
+	}
+	return finishCert(in, &pl, st, pins)
+}
 
-// Shared evaluates a SHARED_SEAL_V1 input.
-func Shared(in []byte, reg *Registry) (Verdict, error) { return certCallVerdict(in, reg, true) }
-
-// VerifyUC returns (valid, err): err is non-nil exactly for malformed input.
-func VerifyUC(in []byte, reg *Registry) (bool, error) {
-	v, err := UC(in, reg)
+// VerifyCert returns (valid, err): err is non-nil exactly for a halt or an infrastructure failure.
+func VerifyCert(in []byte, st State, pins Pins) (bool, error) {
+	v, err := Cert(in, st, pins)
 	return v.Valid, err
 }
 
-// VerifyShared returns (valid, err): err is non-nil exactly for malformed input.
-func VerifyShared(in []byte, reg *Registry) (bool, error) {
-	v, err := Shared(in, reg)
-	return v.Valid, err
-}
-
-func certCallVerdict(in []byte, reg *Registry, shared bool) (Verdict, error) {
-	_, err := scanCertCall(in, shared)
+// finishCert is everything after the scan and the full charge: the native decode of every occurrence, then the registry and the
+// relation.
+func finishCert(in []byte, pl *plan, st State, pins Pins) (Verdict, error) {
+	claims, err := parseClaims(in, pl.k)
 	if err != nil {
 		return Verdict{}, err
 	}
-	call, err := parseCertCall(in, shared)
+	if st == nil {
+		return Verdict{}, ErrHost
+	}
+	why, err := evalBatch(pl, claims, st, pins)
 	if err != nil {
 		return Verdict{}, err
 	}
-	return finishCertCall(call, reg)
-}
-
-// finishCertCall is everything after the structural scan: point decoding, then
-// the semantic relation. Run calls it only once the full charge is reserved.
-func finishCertCall(call *certCall, reg *Registry) (Verdict, error) {
-	if !registryReady(reg) {
-		return Verdict{}, ErrInfrastructure
-	}
-	v := Verdict{Gas: call.charge}
-	v.Why = evalCertCall(call, reg)
-	if errors.Is(v.Why, ErrInfrastructure) {
-		return Verdict{}, v.Why
-	}
-	if v.Why == nil {
-		v.Valid = true
-	}
-	return v, nil
-}
-
-// registryReady is false for an unavailable or impossible registry context.
-func registryReady(reg *Registry) bool {
-	return reg != nil && reg.Initialized && reg.GenesisCommitment != ([32]byte{}) && reg.ProfileHash != ([32]byte{}) && (reg.Phase == 1 || reg.Phase == 2)
-}
-
-// evalCertCall checks the claims' order and their one common seal, then
-// evaluates them as one verification-local batch.
-func evalCertCall(call *certCall, reg *Registry) error {
-	if reg.Phase == 1 {
-		return ErrPhase
-	}
-	for i := range call.claims {
-		c := &call.claims[i]
-		if i > 0 && compareClaimID(&call.claims[i-1], c) >= 0 {
-			return ErrClaimOrder
-		}
-		if !bytes.Equal(c.sealRaw, call.claims[0].sealRaw) {
-			return ErrSealMismatch
-		}
-	}
-	return newBatch(reg).eval(call.claims)
+	return Verdict{Valid: why == nil, Why: why, Gas: pl.charge}, nil
 }
 
 var curveN = ethcrypto.S256().Params().N
@@ -144,10 +87,15 @@ func (it *item) pairs() [][2][]byte {
 	return out
 }
 
-// Output is the successful EVM return data: abi.encode(uint256(1), bool(valid)).
-func Output(valid bool) []byte {
+// Output is the successful CERT_BATCH_V2 return data: abi.encode(uint256(2), bool(valid)).
+func Output(valid bool) []byte { return output(certVersion, valid) }
+
+// MemberOutput is the successful RSMT_MEMBER_V1 return data: abi.encode(uint256(1), bool(valid)).
+func MemberOutput(valid bool) []byte { return output(memberVersion, valid) }
+
+func output(version byte, valid bool) []byte {
 	out := make([]byte, 64)
-	out[31] = outputVersion
+	out[31] = version
 	if valid {
 		out[63] = 1
 	}
@@ -158,42 +106,55 @@ func Output(valid bool) []byte {
 type Op int
 
 const (
-	OpUC Op = iota
-	OpShared
-	OpMember
+	OpCertBatch Op = iota // 0x0100 CERT_BATCH_V2
+	OpMember              // 0x0102 RSMT_MEMBER_V1
 )
 
-// Run is the EVM-facing wrapper of one builtin call with a gas limit: it
-// returns output and gas, or a caller halt consuming forwarded gas. A host
-// error returns ErrInfrastructure with no EVM result (used=0). reg may be nil
-// for OpMember.
-func Run(op Op, in []byte, reg *Registry, gas uint64) (out []byte, used uint64, err error) {
-	limit, base := uint64(MaxCallBytes), uint64(ucBaseGas)
-	if op == OpMember {
-		limit, base = MaxRSMTInputBytes, rsmtBaseGas
-	}
-	if uint64(len(in)) > limit {
-		return nil, gas, ErrInputTooLarge
-	}
-	if gas < base+gasPerByte*uint64(len(in)) {
-		return nil, gas, ErrOutOfGas
-	}
-	var v Verdict
+// Run is the EVM-facing wrapper of one builtin call with a gas limit, in the contract's debit order (section 5): the size cap,
+// then 60,000 + 16*C, then the header and G_scan, then the full scan and grouping, then G_batch, and only then decoding and state.
+// It returns output and gas, or a halt consuming all forwarded gas. An infrastructure failure returns ErrInfrastructure with no
+// EVM result (used=0). st may be nil for OpMember.
+func Run(op Op, in []byte, st State, pins Pins, gas uint64) (out []byte, used uint64, err error) {
 	switch op {
-	case OpUC, OpShared:
-		charge, perr := scanCertCall(in, op == OpShared)
-		if perr != nil {
-			return nil, gas, perr
+	case OpCertBatch:
+		if len(in) > MaxCallBytes {
+			return nil, gas, ErrInputTooLarge
 		}
-		if gas < charge {
+		if gas < scanBaseGas+gasPerByte*uint64(len(in)) {
 			return nil, gas, ErrOutOfGas
 		}
-		call, perr := parseCertCall(in, op == OpShared)
-		if perr != nil {
+		k, herr := header(in, certVersion)
+		if herr != nil {
+			return nil, gas, herr
+		}
+		if k < 1 || k > MaxClaims {
+			return nil, gas, ErrCount
+		}
+		if gas < ScanGas(uint64(len(in)), uint64(k)) {
+			return nil, gas, ErrOutOfGas
+		}
+		var pl plan
+		if perr := scanBatch(in, &pl); perr != nil {
 			return nil, gas, perr
 		}
-		v, err = finishCertCall(call, reg)
+		if gas < pl.charge {
+			return nil, gas, ErrOutOfGas
+		}
+		v, verr := finishCert(in, &pl, st, pins)
+		if verr != nil {
+			if errors.Is(verr, ErrInfrastructure) {
+				return nil, 0, verr
+			}
+			return nil, gas, verr
+		}
+		return Output(v.Valid), v.Gas, nil
 	case OpMember:
+		if len(in) > MaxRSMTInputBytes {
+			return nil, gas, ErrInputTooLarge
+		}
+		if gas < rsmtBaseGas+gasPerByte*uint64(len(in)) {
+			return nil, gas, ErrOutOfGas
+		}
 		mc, perr := parseMember(in)
 		if perr != nil {
 			return nil, gas, perr
@@ -201,24 +162,15 @@ func Run(op Op, in []byte, reg *Registry, gas uint64) (out []byte, used uint64, 
 		if gas < mc.gas {
 			return nil, gas, ErrOutOfGas
 		}
-		v = evalMember(mc)
-	default:
-		return nil, gas, errors.New("b1ref: unknown op")
+		v := evalMember(mc)
+		return MemberOutput(v.Valid), v.Gas, nil
 	}
-	if err != nil {
-		if errors.Is(err, ErrInfrastructure) {
-			return nil, 0, err
-		}
-		return nil, gas, err
-	}
-	return Output(v.Valid), v.Gas, nil
+	return nil, gas, errors.New("b1ref: unknown op")
 }
 
-// onWork is test instrumentation: when set, it is called with "epoch-load"
-// (an epoch entry read), "point" (a member key parsed), "quorum" (a seal's
-// signature loop), "signature", "fold" (a claim's folds) or "rsmt-fold"
-// immediately before each such operation.
-// It never changes behaviour.
+// onWork is test instrumentation: when set, it is called immediately before each counted operation: "epoch-load" (an epoch
+// entry read), "key-parse" (a member key parsed), "claim" and "fold" (a distinct claim's binding and folds), "quorum" (a distinct
+// seal's signature loop), "signature" (one signature check) and "rsmt-fold". It never changes behaviour.
 var onWork func(kind string)
 
 func work(kind string) {
