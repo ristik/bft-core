@@ -390,3 +390,16 @@ func validateShard(b []byte) error {
 	}
 	return nil
 }
+
+// Grouping is the canonical first-use grouping of a structurally valid CERT_BATCH_V2 request and its full charge (contract
+// section 3): what every implementation must compute identically.
+type Grouping struct{ C, K, E, S, Q, A, P, Gas uint64 }
+
+// Group scans a request without reading any state and returns its grouping, or the halt a native call would raise.
+func Group(in []byte) (Grouping, error) {
+	var pl plan
+	if err := scanBatch(in, &pl); err != nil {
+		return Grouping{}, err
+	}
+	return Grouping{C: pl.c, K: pl.k, E: pl.e, S: pl.s, Q: pl.q, A: pl.a, P: pl.p, Gas: pl.charge}, nil
+}
