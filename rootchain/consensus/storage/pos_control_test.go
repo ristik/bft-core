@@ -815,3 +815,17 @@ func TestRejectResultKeepsTheUnacknowledgedRootOnlyParent(t *testing.T) {
 	require.Equal(t, "prepared", next.Phase)
 	require.Equal(t, parent, next.UnackedParent)
 }
+
+// Where a P85 control's replacement is installed the marker is carried once, whatever the control built: a future control op cannot drop it.
+func TestAnyControlReplacementKeepsTheUnackedParent(t *testing.T) {
+	parent := bytes32(0x42)
+	prior := &evmroot.ControlState{Network: 7, Epoch: 2, Phase: "idle", UnackedParent: bytes.Clone(parent)}
+	replaced := withUnackedParent(prior, &evmroot.ControlState{Network: 7, Epoch: 2, Phase: "aborted"}) // a rebuild that forgot it
+	require.Equal(t, parent, replaced.UnackedParent)
+	require.NotSame(t, &prior.UnackedParent[0], &replaced.UnackedParent[0], "a copy, not an alias")
+	// nothing pending stays nothing pending; nil on either side is passed through
+	require.Empty(t, withUnackedParent(&evmroot.ControlState{Phase: "idle"}, &evmroot.ControlState{Phase: "aborted"}).UnackedParent)
+	require.Nil(t, withUnackedParent(prior, nil))
+	only := &evmroot.ControlState{Phase: "aborted"}
+	require.Same(t, only, withUnackedParent(nil, only))
+}

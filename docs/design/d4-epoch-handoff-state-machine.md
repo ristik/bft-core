@@ -101,6 +101,27 @@ RecordID = SHA256(CBOR(["UNICITY_ORDERED_HANDOFF_RECORD",1,network,e,
             predecessorBodyID,attempt,kind,orderedRound,recordPayload]))
 ```
 
+The ten fields above are followed by an optional positional tail, present only
+as far as it is needed: `frozenParent` (bound at Prepare), then `pos` (the
+root's P85 source state), then `unackedParent`. A slot before the last used
+one is encoded as an empty byte string; with none of them used the preimage is
+the ten fields, so states that never carry them keep their digests.
+
+`unackedParent` is the frozen parent of a committed handoff that installed no
+EVM assignment (a root-only step), kept until the designated EVM shard has
+certified a block after it. A root-only step changes no shard epoch, so
+nothing else shows it unacknowledged; without the marker a second Prepare
+would bind the same stalled parent and the two steps could never be folded into
+one acknowledgement (bft-core#604). It is set at the Commit, carried through
+every control transition, the epoch change into the successor's idle state and
+every replacement by a P85 control (a control is no acknowledgement), and
+cleared by the block in which the EVM IR leaves that parent. A Prepare is
+refused (`ErrAssignmentAckPending`) while the EVM IR still equals it. Because it
+decides what the next Prepare may do, it is committed by the control digest like
+the other fields. While the EVM shard is down after a root-only handoff the
+root cannot hand off again: the conservative choice, the committee simply
+stays as it is.
+
 The record payload excludes ID, signatures and proof. The control leaf's value
 is `SHA256(CBOR(ControlState))`, included under the existing
 `UnicityTreeData(P_CTL,value)` and indexed Merkle tree hashing. Genesis,

@@ -432,7 +432,7 @@ func (x *ExecutedBlock) extendWithAuthority(newBlock *rctypes.BlockData, verifie
 		return nil, err
 	}
 	if replaced != nil {
-		nextShardState.Control = replaced
+		nextShardState.Control = withUnackedParent(nextShardState.Control, replaced)
 	}
 	if nextShardState.Control != nil {
 		pos.store(nextShardState.Control) // an acknowledgement or a control changes the state the control digest commits
@@ -553,6 +553,16 @@ func rootOnlySuccessorMembers(fc FreezeCompanion, v3 V3FreezeRules) ([]evmassign
 	}
 	sort.Slice(next, func(i, j int) bool { return next[i].NodeID < next[j].NodeID })
 	return next, nil
+}
+
+// withUnackedParent is the control state a P85 control replaced the current one with, carrying the unacknowledged root-only parent of the one it
+// replaces: no control is an acknowledgement (only an EVM certification is), so every replacement keeps it, however it was built (#604).
+func withUnackedParent(prior, replaced *evmroot.ControlState) *evmroot.ControlState {
+	if prior == nil || replaced == nil {
+		return replaced
+	}
+	replaced.UnackedParent = bytes.Clone(prior.UnackedParent)
+	return replaced
 }
 
 // v3RulesOf is the V3 rule set a handoff authority applies at Freeze, nil where it has none.
