@@ -222,10 +222,12 @@ type ClaimsB1 struct{ Claims map[[64]byte]bool }
 
 func claimKey(root, ir [32]byte) (k [64]byte) { copy(k[:32], root[:]); copy(k[32:], ir[:]); return }
 
-// AuthenticateAnchor admits an anchor whose claim pair is in the set.
-func (c ClaimsB1) AuthenticateAnchor(a *Anchor) error {
-	if !c.Claims[claimKey(a.ExpectedStateRoot, a.ExpectedIRHash)] {
-		return ErrAnchorAuth
+// AuthenticateAnchors admits an anchor table whose every claim pair is in the set: one verdict for the table.
+func (c ClaimsB1) AuthenticateAnchors(anchors []Anchor) error {
+	for i := range anchors {
+		if !c.Claims[claimKey(anchors[i].ExpectedStateRoot, anchors[i].ExpectedIRHash)] {
+			return ErrAnchorAuth
+		}
 	}
 	return nil
 }
@@ -514,7 +516,7 @@ func Replay(fs *FixtureSet, c Case) Expect {
 		if err != nil {
 			return errExpect(err)
 		}
-		return okValues("intrinsic", u64s(g.Intrinsic), "b2", u64s(g.B2), "uc", u64s(g.UC), "rsmt", u64s(g.RSMT),
+		return okValues("intrinsic", u64s(g.Intrinsic), "b2", u64s(g.B2), "batch", u64s(g.Batch), "rsmt", u64s(g.RSMT),
 			"steps", u64s(g.Steps), "total", u64s(g.Total()))
 	case "compose":
 		cfg, err := cfgOf()

@@ -6,9 +6,9 @@ package bridgeprofile
 // key/value membership; neither primitive assumes value == txHash. The leaf
 // value is computed by the B2 relation and supplied by the composition.
 type B1 interface {
-	// AuthenticateAnchor is 0x0100: a native UC under admitted roots
-	// authenticates the anchor's expectedStateRoot and expectedIRHash.
-	AuthenticateAnchor(a *Anchor) error
+	// AuthenticateAnchors is 0x0100, CERT_BATCH_V2, over the whole anchor table: one verdict that every anchor's native UC, under
+	// the admitted authority of its own epoch, authenticates its expectedStateRoot and expectedIRHash.
+	AuthenticateAnchors(anchors []Anchor) error
 	// VerifyMember is 0x0102: (key, raw 32-byte value) is a member under root
 	// by exactly this path.
 	VerifyMember(root, key, value [32]byte, p LeafProof) error
@@ -53,17 +53,16 @@ func Compose(cfg *Cfg, op uint8, envelope []byte, b1 B1) (*Result, error) {
 	if err != nil {
 		return nil, err
 	}
-	if _, err := computeGate(len(envelope), KernelRequestBytes(len(cfg.Bytes()), len(env.History)), env, pol, TxGasBudget); err != nil {
+	if _, err := computeGate(len(cfg.Bytes()), len(envelope), KernelRequestBytes(len(cfg.Bytes()), len(env.History)), env, TxGasBudget); err != nil {
 		return nil, err
 	}
 	times := make([]uint64, len(env.Anchors))
+	if err := b1.AuthenticateAnchors(env.Anchors); err != nil {
+		return nil, ErrAnchorAuth
+	}
 	for j := range env.Anchors {
-		a := &env.Anchors[j]
-		if err := b1.AuthenticateAnchor(a); err != nil {
-			return nil, ErrAnchorAuth
-		}
 		// The opening is trusted only now: B1 has authenticated the pair it hashes to.
-		ir, err := OpenAnchor(a)
+		ir, err := OpenAnchor(&env.Anchors[j])
 		if err != nil {
 			return nil, err
 		}
