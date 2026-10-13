@@ -74,7 +74,6 @@ var (
 	ErrBeforeStart  = newSentinel(ErrInvalid, "root round before the interval start")
 	ErrAfterEnd     = newSentinel(ErrInvalid, "root round at or after the interval end")
 	ErrFuture       = newSentinel(ErrInvalid, "certificate root round is in the future")
-	ErrStale        = newSentinel(ErrInvalid, "certificate older than W_cert")
 
 	ErrPartition     = newSentinel(ErrInvalid, "partition mismatch")
 	ErrShard         = newSentinel(ErrInvalid, "shard mismatch")

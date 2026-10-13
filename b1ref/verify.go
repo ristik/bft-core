@@ -3,12 +3,10 @@ package b1ref
 import (
 	"bytes"
 	"errors"
-	"fmt"
 	"math/big"
 
 	ethcrypto "github.com/ethereum/go-ethereum/crypto"
 	"github.com/unicitynetwork/bft-core/b1state"
-	"github.com/unicitynetwork/bft-go-base/crypto"
 )
 
 type EpochEntry = b1state.Entry
@@ -23,8 +21,7 @@ type Registry struct {
 	Initialized                    bool
 	Phase                          uint64
 	Network                        uint16 // b1.network
-	WCert                          uint64 // b1.wCert
-	Origin                         uint64 // origin.rootEpoch
+	Origin                         uint64 // origin.rootEpoch, the usable origin: entries above it may be stored (preloaded) but are never usable
 	RootRound                      uint64 // clock.rootRound, O
 	Epochs                         map[uint64]EpochEntry
 }
@@ -71,7 +68,7 @@ func certCallVerdict(in []byte, reg *Registry, shared bool) (Verdict, error) {
 // finishCertCall is everything after the structural scan: point decoding, then
 // the semantic relation. Run calls it only once the full charge is reserved.
 func finishCertCall(call *certCall, reg *Registry) (Verdict, error) {
-	if reg == nil || !reg.Initialized || reg.GenesisCommitment == ([32]byte{}) || reg.ProfileHash == ([32]byte{}) || (reg.Phase != 1 && reg.Phase != 2) {
+	if !registryReady(reg) {
 		return Verdict{}, ErrInfrastructure
 	}
 	v := Verdict{Gas: call.charge}
@@ -85,8 +82,13 @@ func finishCertCall(call *certCall, reg *Registry) (Verdict, error) {
 	return v, nil
 }
 
-// evalCertCall checks every claim and the one common seal, returning the first
-// reason the relation fails. It never short-circuits the signature loop.
+// registryReady is false for an unavailable or impossible registry context.
+func registryReady(reg *Registry) bool {
+	return reg != nil && reg.Initialized && reg.GenesisCommitment != ([32]byte{}) && reg.ProfileHash != ([32]byte{}) && (reg.Phase == 1 || reg.Phase == 2)
+}
+
+// evalCertCall checks the claims' order and their one common seal, then
+// evaluates them as one verification-local batch.
 func evalCertCall(call *certCall, reg *Registry) error {
 	if reg.Phase == 1 {
 		return ErrPhase
@@ -100,101 +102,10 @@ func evalCertCall(call *certCall, reg *Registry) error {
 			return ErrSealMismatch
 		}
 	}
-	for i := range call.claims {
-		if err := ucFolds(&call.claims[i]); err != nil {
-			return fmt.Errorf("claim %d: %w", i, err)
-		}
-	}
-	return evalSeal(call, reg)
+	return newBatch(reg).eval(call.claims)
 }
-
-func evalSeal(call *certCall, reg *Registry) error {
-	seal := call.claims[0].uc.UnicitySeal
-	if uint64(seal.NetworkID) != uint64(reg.Network) {
-		return ErrNetwork
-	}
-	if seal.Epoch > reg.Origin {
-		return ErrSealEpoch
-	}
-	entry, ok := reg.Epochs[seal.Epoch]
-	if !ok {
-		return ErrUnknownEpoch
-	}
-	if entry.Epoch != seal.Epoch {
-		return ErrInfrastructure
-	}
-	if err := entry.Validate(); err != nil {
-		return errors.Join(ErrInfrastructure, err)
-	}
-	r := seal.RootChainRoundNumber
-	if r < entry.Start {
-		return ErrBeforeStart
-	}
-	if entry.End != nil && r >= *entry.End {
-		return ErrAfterEnd
-	}
-	if entry.End == nil && seal.Epoch != reg.Origin {
-		return ErrOpenInterval
-	}
-	if r > reg.RootRound {
-		return ErrFuture
-	}
-	if certificateTooOld(reg.RootRound, r, reg.WCert) {
-		return ErrStale
-	}
-	return verifySignatures(call, entry)
-}
-
-// certificateTooOld is the one place the certificate age rule lives: a certificate of root round r is refused when the current root round is more than the
-// profile's W_cert past it. The window also sizes the registry's retained history (b1state.Profile.Bounds) and nothing else reads it; if the age rule is
-// replaced (owner question Q14, briefs/b1-any-age-by-signatures.md) these two are what change, behind the profile parameter.
-func certificateTooOld(rootRound, r, wCert uint64) bool { return rootRound-r > wCert }
 
 var curveN = ethcrypto.S256().Params().N
-
-// verifySignatures checks every supplied signature over SHA256(Seal.SigBytes())
-// and then the quorum. Any unknown signer or bad signature fails the call even
-// when the rest reach quorum; the loop does not stop at the first failure.
-func verifySignatures(call *certCall, entry EpochEntry) error {
-	sigBytes, err := call.claims[0].uc.UnicitySeal.SigBytes()
-	if err != nil {
-		return fmt.Errorf("%w: %v", ErrFold, err)
-	}
-	var first error
-	good := uint64(0)
-	for _, kv := range call.claims[0].sigs.pairs() {
-		var m *member
-		for _, candidate := range entry.Members {
-			if candidate.NodeID == string(kv[0]) {
-				work("point")
-				ver, err := crypto.NewVerifierSecp256k1(candidate.Key[:])
-				if err != nil {
-					return errors.Join(ErrInfrastructure, err)
-				}
-				m = &member{weight: candidate.Weight, ver: ver}
-				break
-			}
-		}
-		if m == nil {
-			first = firstErr(first, ErrUnknownSigner)
-			continue
-		}
-		if err := checkSignature(m, kv[1], sigBytes); err != nil {
-			first = firstErr(first, err)
-			continue
-		}
-		good += m.weight
-	}
-	if first != nil {
-		return first
-	}
-	total, _ := entry.TotalWeight()
-	threshold, _ := b1state.Threshold(total)
-	if good < threshold {
-		return ErrQuorum
-	}
-	return nil
-}
 
 func firstErr(cur, next error) error {
 	if cur != nil {
@@ -303,8 +214,10 @@ func Run(op Op, in []byte, reg *Registry, gas uint64) (out []byte, used uint64, 
 	return Output(v.Valid), v.Gas, nil
 }
 
-// onWork is test instrumentation: when set, it is called with "point",
-// "signature", "fold" or "rsmt-fold" immediately before each such operation.
+// onWork is test instrumentation: when set, it is called with "epoch-load"
+// (an epoch entry read), "point" (a member key parsed), "quorum" (a seal's
+// signature loop), "signature", "fold" (a claim's folds) or "rsmt-fold"
+// immediately before each such operation.
 // It never changes behaviour.
 var onWork func(kind string)
 

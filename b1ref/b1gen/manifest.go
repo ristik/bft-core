@@ -36,7 +36,6 @@ type MemberWords struct {
 // PreState is the explicit registry context of a vector.
 type PreState struct {
 	Network    uint16       `json:"network"`
-	WCert      uint64       `json:"wCert"`
 	Origin     uint64       `json:"origin"`
 	ClockRound uint64       `json:"clockRound"`
 	Epochs     []EpochWords `json:"epochs"`

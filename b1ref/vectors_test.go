@@ -35,7 +35,7 @@ var sentinels = map[string]error{
 	"ErrValueTooLarge": b1ref.ErrValueTooLarge,
 	"ErrUnknownEpoch":  b1ref.ErrUnknownEpoch, "ErrNetwork": b1ref.ErrNetwork, "ErrSealEpoch": b1ref.ErrSealEpoch, "ErrOpenInterval": b1ref.ErrOpenInterval,
 	"ErrBeforeStart": b1ref.ErrBeforeStart, "ErrAfterEnd": b1ref.ErrAfterEnd, "ErrFuture": b1ref.ErrFuture,
-	"ErrStale": b1ref.ErrStale, "ErrPartition": b1ref.ErrPartition, "ErrShard": b1ref.ErrShard, "ErrShardConf": b1ref.ErrShardConf,
+	"ErrPartition": b1ref.ErrPartition, "ErrShard": b1ref.ErrShard, "ErrShardConf": b1ref.ErrShardConf,
 	"ErrTreeRoot": b1ref.ErrTreeRoot, "ErrStateRoot": b1ref.ErrStateRoot, "ErrIRHash": b1ref.ErrIRHash,
 	"ErrSealMismatch": b1ref.ErrSealMismatch, "ErrUnknownSigner": b1ref.ErrUnknownSigner, "ErrSigFormat": b1ref.ErrSigFormat,
 	"ErrSigRange": b1ref.ErrSigRange, "ErrSigInvalid": b1ref.ErrSigInvalid, "ErrQuorum": b1ref.ErrQuorum,
@@ -67,7 +67,7 @@ func registry(t testing.TB, p *b1gen.PreState) *b1ref.Registry {
 	if p == nil {
 		return nil
 	}
-	reg := &b1ref.Registry{Initialized: true, Phase: 2, GenesisCommitment: [32]byte{1}, ProfileHash: [32]byte{2}, Network: p.Network, WCert: p.WCert, Origin: p.Origin, RootRound: p.ClockRound, Epochs: map[uint64]b1ref.EpochEntry{}}
+	reg := &b1ref.Registry{Initialized: true, Phase: 2, GenesisCommitment: [32]byte{1}, ProfileHash: [32]byte{2}, Network: p.Network, Origin: p.Origin, RootRound: p.ClockRound, Epochs: map[uint64]b1ref.EpochEntry{}}
 	for _, e := range p.Epochs {
 		bi, _ := hex.DecodeString(e.BodyID)
 		ent := b1state.Entry{Epoch: e.Epoch, BodyKind: 2, ActivationCommitID: [32]byte{3}, Start: e.Start, SigningScheme: 1, SigningConfigHash: [32]byte{4}}

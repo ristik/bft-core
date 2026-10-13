@@ -13,7 +13,6 @@ type fixture struct {
 	epoch     uint64
 	origin    uint64
 	clock     uint64 // O
-	wCert     uint64
 	round     uint64 // seal root round of the default certificate set
 	vals      []validator
 	body      [32]byte
@@ -24,7 +23,7 @@ type fixture struct {
 var scheme = map[uint32][]string{1: {""}, 2: {"0", "1"}, 3: {""}, 4: {""}, 5: {""}, 6: {""}, 7: {""}}
 
 func newFixture(seed string, nVals int) *fixture {
-	f := &fixture{seed: seed, network: 3, epoch: 7, origin: 7, clock: 1000, wCert: 50, round: 990}
+	f := &fixture{seed: seed, network: 3, epoch: 7, origin: 7, clock: 1000, round: 990}
 	for i := 0; i < nVals; i++ {
 		f.vals = append(f.vals, makeValidator(seed, fmt.Sprintf("node%02d", i)))
 	}
@@ -41,7 +40,7 @@ func (f *fixture) preForAuthority(v authoritySpec) PreState {
 		members = append(members, MemberWords{NodeID: m.id, Key: hx(m.pub), Weight: m.weight})
 	}
 	return PreState{
-		Network: f.network, WCert: f.wCert, Origin: f.origin, ClockRound: f.clock,
+		Network: f.network, Origin: f.origin, ClockRound: f.clock,
 		Epochs: []EpochWords{{Epoch: f.epoch, Members: members, BodyID: hex32(f.body), Start: 900, End: 0}},
 	}
 }

@@ -20,6 +20,7 @@ type claim struct {
 	stateRoot  [32]byte
 	irHash     [32]byte
 	uc         *types.UnicityCertificate
+	ucRaw      []byte
 	sealRaw    []byte
 	sigs       *item // signature map of the seal
 	pathSteps  uint64
@@ -239,6 +240,7 @@ func decodeUC(c *claim, raw []byte, tokens *int) error {
 	}
 	c.sigs = sigs
 	c.pathSteps = steps + k[4].kids[0].kids[2].arg
+	c.ucRaw = raw
 	c.sealRaw = raw[k[6].start:k[6].end]
 
 	var uc types.UnicityCertificate

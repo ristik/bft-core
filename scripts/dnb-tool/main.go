@@ -369,7 +369,7 @@ func b1check(args []string) error {
 	if err != nil {
 		return err
 	}
-	reg := &b1ref.Registry{GenesisCommitment: [32]byte{1}, ProfileHash: [32]byte{1}, Initialized: true, Phase: 2, Network: pf.Network, WCert: pf.WCert, Origin: entries[0].Epoch, RootRound: *clock, Epochs: map[uint64]b1ref.EpochEntry{}}
+	reg := &b1ref.Registry{GenesisCommitment: [32]byte{1}, ProfileHash: [32]byte{1}, Initialized: true, Phase: 2, Network: pf.Network, Origin: entries[0].Epoch, RootRound: *clock, Epochs: map[uint64]b1ref.EpochEntry{}}
 	for _, e := range entries {
 		reg.Epochs[e.Epoch] = e
 	}

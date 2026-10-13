@@ -21,7 +21,6 @@
    "description": "single shard, one seal, quorum 3 of 4",
    "preState": {
     "network": 3,
-    "wCert": 50,
     "origin": 7,
     "clockRound": 1000,
     "epochs": [
@@ -78,7 +77,6 @@
    "description": "four claims over three partitions and two shards, one common seal",
    "preState": {
     "network": 3,
-    "wCert": 50,
     "origin": 7,
     "clockRound": 1000,
     "epochs": [
@@ -135,7 +133,6 @@
    "description": "shared call with one claim",
    "preState": {
     "network": 3,
-    "wCert": 50,
     "origin": 7,
     "clockRound": 1000,
     "epochs": [
@@ -186,7 +183,6 @@
    "description": "two-shard partition, shard 1",
    "preState": {
     "network": 3,
-    "wCert": 50,
     "origin": 7,
     "clockRound": 1000,
     "epochs": [
@@ -243,7 +239,6 @@
    "description": "repeat UC: identical input record under a later seal",
    "preState": {
     "network": 3,
-    "wCert": 50,
     "origin": 7,
     "clockRound": 1000,
     "epochs": [
@@ -294,7 +289,6 @@
    "description": "quorum subset {0,1,2}",
    "preState": {
     "network": 3,
-    "wCert": 50,
     "origin": 7,
     "clockRound": 1000,
     "epochs": [
@@ -345,7 +339,6 @@
    "description": "quorum subset {1,2,3}",
    "preState": {
     "network": 3,
-    "wCert": 50,
     "origin": 7,
     "clockRound": 1000,
     "epochs": [
@@ -396,7 +389,6 @@
    "description": "shared call whose seals carry different quorum subsets",
    "preState": {
     "network": 3,
-    "wCert": 50,
     "origin": 7,
     "clockRound": 1000,
     "epochs": [
@@ -446,7 +438,6 @@
    "description": "seals with 3 then 4 signatures: S is the maximum 4",
    "preState": {
     "network": 3,
-    "wCert": 50,
     "origin": 7,
     "clockRound": 1000,
     "epochs": [
@@ -496,7 +487,6 @@
    "description": "seals with 4 then 3 signatures: S is the maximum 4",
    "preState": {
     "network": 3,
-    "wCert": 50,
     "origin": 7,
     "clockRound": 1000,
     "epochs": [
@@ -546,7 +536,6 @@
    "description": "seal network changed and re-signed",
    "preState": {
     "network": 3,
-    "wCert": 50,
     "origin": 7,
     "clockRound": 1000,
     "epochs": [
@@ -596,7 +585,6 @@
    "description": "claim partition differs from the certificate",
    "preState": {
     "network": 3,
-    "wCert": 50,
     "origin": 7,
     "clockRound": 1000,
     "epochs": [
@@ -646,7 +634,6 @@
    "description": "claim shard bit flipped",
    "preState": {
     "network": 3,
-    "wCert": 50,
     "origin": 7,
     "clockRound": 1000,
     "epochs": [
@@ -696,7 +683,6 @@
    "description": "claim shard configuration hash flipped",
    "preState": {
     "network": 3,
-    "wCert": 50,
     "origin": 7,
     "clockRound": 1000,
     "epochs": [
@@ -746,7 +732,6 @@
    "description": "TRHash flipped inside the certificate",
    "preState": {
     "network": 3,
-    "wCert": 50,
     "origin": 7,
     "clockRound": 1000,
     "epochs": [
@@ -796,7 +781,6 @@
    "description": "IR state hash flipped inside the certificate",
    "preState": {
     "network": 3,
-    "wCert": 50,
     "origin": 7,
     "clockRound": 1000,
     "epochs": [
@@ -846,7 +830,6 @@
    "description": "expectedStateRoot flipped",
    "preState": {
     "network": 3,
-    "wCert": 50,
     "origin": 7,
     "clockRound": 1000,
     "epochs": [
@@ -896,7 +879,6 @@
    "description": "expectedIRHash flipped",
    "preState": {
     "network": 3,
-    "wCert": 50,
     "origin": 7,
     "clockRound": 1000,
     "epochs": [
@@ -946,7 +928,6 @@
    "description": "seal tree root flipped (unsigned)",
    "preState": {
     "network": 3,
-    "wCert": 50,
     "origin": 7,
     "clockRound": 1000,
     "epochs": [
@@ -996,7 +977,6 @@
    "description": "seal epoch changed and re-signed",
    "preState": {
     "network": 3,
-    "wCert": 50,
     "origin": 7,
     "clockRound": 1000,
     "epochs": [
@@ -1046,7 +1026,6 @@
    "description": "one signed seal byte changed after signing",
    "preState": {
     "network": 3,
-    "wCert": 50,
     "origin": 7,
     "clockRound": 1000,
     "epochs": [
@@ -1096,7 +1075,6 @@
    "description": "a signature made by a key other than the named member's",
    "preState": {
     "network": 3,
-    "wCert": 50,
     "origin": 7,
     "clockRound": 1000,
     "epochs": [
@@ -1146,7 +1124,6 @@
    "description": "shard fold computed as raw SHA256(left||right) instead of CBOR operands",
    "preState": {
     "network": 3,
-    "wCert": 50,
     "origin": 7,
     "clockRound": 1000,
     "epochs": [
@@ -1196,7 +1173,6 @@
    "description": "eight claims, the maximum",
    "preState": {
     "network": 3,
-    "wCert": 50,
     "origin": 7,
     "clockRound": 1000,
     "epochs": [
@@ -1247,7 +1223,6 @@
    "description": "count 9",
    "preState": {
     "network": 3,
-    "wCert": 50,
     "origin": 7,
     "clockRound": 1000,
     "epochs": [
@@ -1294,7 +1269,6 @@
    "description": "claims not sorted",
    "preState": {
     "network": 3,
-    "wCert": 50,
     "origin": 7,
     "clockRound": 1000,
     "epochs": [
@@ -1344,7 +1318,6 @@
    "description": "shards not sorted",
    "preState": {
     "network": 3,
-    "wCert": 50,
     "origin": 7,
     "clockRound": 1000,
     "epochs": [
@@ -1394,7 +1367,6 @@
    "description": "the same shard claimed twice",
    "preState": {
     "network": 3,
-    "wCert": 50,
     "origin": 7,
     "clockRound": 1000,
     "epochs": [
@@ -1444,7 +1416,6 @@
    "description": "input record with a changed state hash but no block hash",
    "preState": {
     "network": 3,
-    "wCert": 50,
     "origin": 7,
     "clockRound": 1000,
     "epochs": [
@@ -1494,7 +1465,6 @@
    "description": "seal timestamp before the genesis minimum, re-signed",
    "preState": {
     "network": 3,
-    "wCert": 50,
     "origin": 7,
     "clockRound": 1000,
     "epochs": [
@@ -1544,7 +1514,6 @@
    "description": "null signatures are shaped but false",
    "preState": {
     "network": 3,
-    "wCert": 50,
     "origin": 7,
     "clockRound": 1000,
     "epochs": [
@@ -1594,7 +1563,6 @@
    "description": "signatures encoded as an empty map",
    "preState": {
     "network": 3,
-    "wCert": 50,
     "origin": 7,
     "clockRound": 1000,
     "epochs": [
@@ -1644,7 +1612,6 @@
    "description": "one signer short of the threshold",
    "preState": {
     "network": 3,
-    "wCert": 50,
     "origin": 7,
     "clockRound": 1000,
     "epochs": [
@@ -1694,7 +1661,6 @@
    "description": "duplicate signer key in the wire signature map",
    "preState": {
     "network": 3,
-    "wCert": 50,
     "origin": 7,
     "clockRound": 1000,
     "epochs": [
@@ -1741,7 +1707,6 @@
    "description": "honest quorum plus one signature from an unknown identity",
    "preState": {
     "network": 3,
-    "wCert": 50,
     "origin": 7,
     "clockRound": 1000,
     "epochs": [
@@ -1791,7 +1756,6 @@
    "description": "honest quorum plus one invalid signature from a known member",
    "preState": {
     "network": 3,
-    "wCert": 50,
     "origin": 7,
     "clockRound": 1000,
     "epochs": [
@@ -1841,7 +1805,6 @@
    "description": "r = 0",
    "preState": {
     "network": 3,
-    "wCert": 50,
     "origin": 7,
     "clockRound": 1000,
     "epochs": [
@@ -1891,7 +1854,6 @@
    "description": "s = 0",
    "preState": {
     "network": 3,
-    "wCert": 50,
     "origin": 7,
     "clockRound": 1000,
     "epochs": [
@@ -1941,7 +1903,6 @@
    "description": "r = n",
    "preState": {
     "network": 3,
-    "wCert": 50,
     "origin": 7,
     "clockRound": 1000,
     "epochs": [
@@ -1991,7 +1952,6 @@
    "description": "s replaced by n-s (high-s twin of a valid signature)",
    "preState": {
     "network": 3,
-    "wCert": 50,
     "origin": 7,
     "clockRound": 1000,
     "epochs": [
@@ -2041,7 +2001,6 @@
    "description": "63-byte signature",
    "preState": {
     "network": 3,
-    "wCert": 50,
     "origin": 7,
     "clockRound": 1000,
     "epochs": [
@@ -2088,7 +2047,6 @@
    "description": "65-byte signature with recovery byte 255 (B1 profile policy: the native verifier would accept it)",
    "preState": {
     "network": 3,
-    "wCert": 50,
     "origin": 7,
     "clockRound": 1000,
     "epochs": [
@@ -2135,7 +2093,6 @@
    "description": "65-byte signature with recovery byte 2 (B1 profile policy: the native verifier would accept it)",
    "preState": {
     "network": 3,
-    "wCert": 50,
     "origin": 7,
     "clockRound": 1000,
     "epochs": [
@@ -2182,7 +2139,6 @@
    "description": "65-byte r||s||v signatures",
    "preState": {
     "network": 3,
-    "wCert": 50,
     "origin": 7,
     "clockRound": 1000,
     "epochs": [
@@ -2233,7 +2189,6 @@
    "description": "wrong recovery byte (0/1 swapped) is ignored like the native verifier",
    "preState": {
     "network": 3,
-    "wCert": 50,
     "origin": 7,
     "clockRound": 1000,
     "epochs": [
@@ -2284,7 +2239,6 @@
    "description": "16 members, exactly the threshold of 11 signatures",
    "preState": {
     "network": 3,
-    "wCert": 50,
     "origin": 7,
     "clockRound": 1000,
     "epochs": [
@@ -2395,7 +2349,6 @@
    "description": "16 members, 10 signatures",
    "preState": {
     "network": 3,
-    "wCert": 50,
     "origin": 7,
     "clockRound": 1000,
     "epochs": [
@@ -2507,7 +2460,6 @@
    "description": "16 members, 16 signatures (maximum)",
    "preState": {
     "network": 3,
-    "wCert": 50,
     "origin": 7,
     "clockRound": 1000,
     "epochs": [
@@ -2618,7 +2570,6 @@
    "description": "r = start",
    "preState": {
     "network": 3,
-    "wCert": 50,
     "origin": 7,
     "clockRound": 1000,
     "epochs": [
@@ -2667,7 +2618,6 @@
    "description": "r = start-1",
    "preState": {
     "network": 3,
-    "wCert": 50,
     "origin": 7,
     "clockRound": 1000,
     "epochs": [
@@ -2717,7 +2667,6 @@
    "description": "r = end-1 (closed interval)",
    "preState": {
     "network": 3,
-    "wCert": 50,
     "origin": 8,
     "clockRound": 1000,
     "epochs": [
@@ -2766,7 +2715,6 @@
    "description": "r = end",
    "preState": {
     "network": 3,
-    "wCert": 50,
     "origin": 8,
     "clockRound": 1000,
     "epochs": [
@@ -2816,7 +2764,6 @@
    "description": "open interval of an epoch that is not the origin epoch",
    "preState": {
     "network": 3,
-    "wCert": 50,
     "origin": 8,
     "clockRound": 1000,
     "epochs": [
@@ -2860,15 +2807,14 @@
    }
   },
   {
-   "id": "time.age.wcert.ok",
+   "id": "time.age.old.ok",
    "family": "Time/history",
    "op": "UC_V1",
-   "description": "age = W_cert",
+   "description": "age 10^9 rounds in the open origin epoch",
    "preState": {
     "network": 3,
-    "wCert": 50,
     "origin": 7,
-    "clockRound": 1040,
+    "clockRound": 1000000990,
     "epochs": [
      {
       "epoch": 7,
@@ -2909,15 +2855,14 @@
    }
   },
   {
-   "id": "time.age.wcert+1",
+   "id": "time.age.closed-old.ok",
    "family": "Time/history",
    "op": "UC_V1",
-   "description": "age = W_cert+1",
+   "description": "age 10^9 rounds in a closed epoch",
    "preState": {
     "network": 3,
-    "wCert": 50,
-    "origin": 7,
-    "clockRound": 1041,
+    "origin": 8,
+    "clockRound": 1000000990,
     "epochs": [
      {
       "epoch": 7,
@@ -2945,16 +2890,15 @@
       ],
       "bodyID": "6534a11b07eefbf60fe0a3af29e53ead4d127ff4b04c748bfe7e937eb6178b8c",
       "start": 900,
-      "end": 0
+      "end": 991
      }
     ]
    },
    "request": "01000001000000010001805cf53a9c3d0778e75cfd54b26fa80c634338557d4983482240e09024973fba232fe2ccfdfc43e92fd5fb8ac6218ed3878853a7ee5c428e58d97e5642ddad627affeb1bf785f348de4693777d8e896ff28236276f2a091e0d529efbcbd31401ac00000291d998598701d9985a8a0105015820c9ef21d3c85c21258edd511be1582b5de0cae0ef994ac65704999cc3e138c21e58202fe2ccfdfc43e92fd5fb8ac6218ed3878853a7ee5c428e58d97e5642ddad627a48be6b38ab323827531a6440db745820dacd55ba3fcfd382ee94804eed9f311b7414a645be9e4677c1786a15854097e70c58204e850b0a5ace16820c3dcd2381b84db9bb887e8bfca47e10691d49080e347e475820e31b1eb9edf29f5f824f1e5ab0174d6b1338c108d2a46fde88c4a264f130950a58205cf53a9c3d0778e75cfd54b26fa80c634338557d4983482240e09024973fba23d9985b8301418080d9985c8301018382015820abcc168e86f26b840e762f24b5c0ae93fa3ea65ce8126d1e6e60227ef3263b5682025820c37a4dbbda8b29a189aaac4d321238214cdd98d7a1be8907e18d499f30cd18e782045820f3b76cfe3213fd1313426e601b75bf7d193e9e3931d221a6757ce513503f496ad9985d8801031903de071a6440eef258205286aa48e8bebbaf6617f911a7f92738df102ff2a73ad372995d82208fddd7d45820a45f9240e4e929d627354a4c735abc9bc0aaa960be768024b5f490040e2a4fada3666e6f646530305840d4a9347d610e83f95c3b011ea9ed91a7cf561dc01ee0b4a47ed4e3fddf0e6ecb30cf1168e9c4ef675b65e8d3f0f4dc3d160a0c2af146808e1f87c0f6b10924e3666e6f646530315840da1baa37ab0ad7d80100d2871f0d49dbb9bd10441d96fb859a95952a25e4e08422c522fc04e0e34041f05b2563fc659d7a713b2295ca3b4cfcc6311a89dd6d96666e6f6465303258408fc0de7cd7100f4457cadc6e182080c4eb8ee421e137054a6e5e37e98ede499a0749e3e42d6caa40a1286a028fb10c39a51f259ee3800b711f31c1ec2f0c2837",
    "expected": {
     "status": "ok",
-    "valid": false,
-    "sentinel": "ErrStale",
-    "output": "00000000000000000000000000000000000000000000000000000000000000010000000000000000000000000000000000000000000000000000000000000000",
+    "valid": true,
+    "output": "00000000000000000000000000000000000000000000000000000000000000010000000000000000000000000000000000000000000000000000000000000001",
     "gas": 123738
    }
   },
@@ -2965,7 +2909,6 @@
    "description": "r = O+1",
    "preState": {
     "network": 3,
-    "wCert": 50,
     "origin": 7,
     "clockRound": 989,
     "epochs": [
@@ -3009,13 +2952,12 @@
    }
   },
   {
-   "id": "time.wcert-zero.current.ok",
+   "id": "time.current.ok",
    "family": "Time/history",
    "op": "UC_V1",
-   "description": "W_cert = 0 admits the current round only",
+   "description": "r = O",
    "preState": {
     "network": 3,
-    "wCert": 0,
     "origin": 7,
     "clockRound": 990,
     "epochs": [
@@ -3058,63 +3000,12 @@
    }
   },
   {
-   "id": "time.wcert-zero.old",
-   "family": "Time/history",
-   "op": "UC_V1",
-   "description": "W_cert = 0 with the certificate one round old",
-   "preState": {
-    "network": 3,
-    "wCert": 0,
-    "origin": 7,
-    "clockRound": 991,
-    "epochs": [
-     {
-      "epoch": 7,
-      "members": [
-       {
-        "nodeID": "node00",
-        "key": "0335148cddb0cfea9b3588898717345c8d6dce738cb55441fa87c01d0d9a521ab8",
-        "weight": 1
-       },
-       {
-        "nodeID": "node01",
-        "key": "026ad1e721aee6415e362c8324dfd54e9c8059fd6778521975679403a1f0db0d3f",
-        "weight": 1
-       },
-       {
-        "nodeID": "node02",
-        "key": "0397a6a23a658e60d3fa87504fa28b2ccbf5583e46d0d5a9187d8810da0892e8c6",
-        "weight": 1
-       },
-       {
-        "nodeID": "node03",
-        "key": "03451d45a422065b35aecdcb347128ea302b4bbc2094003eedbd4ed13acbc1b047",
-        "weight": 1
-       }
-      ],
-      "bodyID": "6534a11b07eefbf60fe0a3af29e53ead4d127ff4b04c748bfe7e937eb6178b8c",
-      "start": 900,
-      "end": 0
-     }
-    ]
-   },
-   "request": "01000001000000010001805cf53a9c3d0778e75cfd54b26fa80c634338557d4983482240e09024973fba232fe2ccfdfc43e92fd5fb8ac6218ed3878853a7ee5c428e58d97e5642ddad627affeb1bf785f348de4693777d8e896ff28236276f2a091e0d529efbcbd31401ac00000291d998598701d9985a8a0105015820c9ef21d3c85c21258edd511be1582b5de0cae0ef994ac65704999cc3e138c21e58202fe2ccfdfc43e92fd5fb8ac6218ed3878853a7ee5c428e58d97e5642ddad627a48be6b38ab323827531a6440db745820dacd55ba3fcfd382ee94804eed9f311b7414a645be9e4677c1786a15854097e70c58204e850b0a5ace16820c3dcd2381b84db9bb887e8bfca47e10691d49080e347e475820e31b1eb9edf29f5f824f1e5ab0174d6b1338c108d2a46fde88c4a264f130950a58205cf53a9c3d0778e75cfd54b26fa80c634338557d4983482240e09024973fba23d9985b8301418080d9985c8301018382015820abcc168e86f26b840e762f24b5c0ae93fa3ea65ce8126d1e6e60227ef3263b5682025820c37a4dbbda8b29a189aaac4d321238214cdd98d7a1be8907e18d499f30cd18e782045820f3b76cfe3213fd1313426e601b75bf7d193e9e3931d221a6757ce513503f496ad9985d8801031903de071a6440eef258205286aa48e8bebbaf6617f911a7f92738df102ff2a73ad372995d82208fddd7d45820a45f9240e4e929d627354a4c735abc9bc0aaa960be768024b5f490040e2a4fada3666e6f646530305840d4a9347d610e83f95c3b011ea9ed91a7cf561dc01ee0b4a47ed4e3fddf0e6ecb30cf1168e9c4ef675b65e8d3f0f4dc3d160a0c2af146808e1f87c0f6b10924e3666e6f646530315840da1baa37ab0ad7d80100d2871f0d49dbb9bd10441d96fb859a95952a25e4e08422c522fc04e0e34041f05b2563fc659d7a713b2295ca3b4cfcc6311a89dd6d96666e6f6465303258408fc0de7cd7100f4457cadc6e182080c4eb8ee421e137054a6e5e37e98ede499a0749e3e42d6caa40a1286a028fb10c39a51f259ee3800b711f31c1ec2f0c2837",
-   "expected": {
-    "status": "ok",
-    "valid": false,
-    "sentinel": "ErrStale",
-    "output": "00000000000000000000000000000000000000000000000000000000000000010000000000000000000000000000000000000000000000000000000000000000",
-    "gas": 123738
-   }
-  },
-  {
    "id": "time.seal-epoch.after-origin",
    "family": "Time/history",
    "op": "UC_V1",
    "description": "seal epoch above the origin epoch",
    "preState": {
     "network": 3,
-    "wCert": 50,
     "origin": 6,
     "clockRound": 1000,
     "epochs": [
@@ -3164,7 +3055,6 @@
    "description": "no registry entry for the epoch",
    "preState": {
     "network": 3,
-    "wCert": 50,
     "origin": 7,
     "clockRound": 1000,
     "epochs": null
@@ -3185,7 +3075,6 @@
    "description": "registry network differs from the seal",
    "preState": {
     "network": 4,
-    "wCert": 50,
     "origin": 7,
     "clockRound": 1000,
     "epochs": [
@@ -3235,7 +3124,6 @@
    "description": "shard of 255 bits with 255 siblings",
    "preState": {
     "network": 3,
-    "wCert": 50,
     "origin": 7,
     "clockRound": 1000,
     "epochs": [
@@ -3286,7 +3174,6 @@
    "description": "shard of 256 bits with 256 siblings",
    "preState": {
     "network": 3,
-    "wCert": 50,
     "origin": 7,
     "clockRound": 1000,
     "epochs": [
@@ -3337,7 +3224,6 @@
    "description": "unicity path of 32 steps",
    "preState": {
     "network": 3,
-    "wCert": 50,
     "origin": 7,
     "clockRound": 1000,
     "epochs": [
@@ -3388,7 +3274,6 @@
    "description": "shard bit string without an end marker",
    "preState": {
     "network": 3,
-    "wCert": 50,
     "origin": 7,
     "clockRound": 1000,
     "epochs": [
@@ -3435,7 +3320,6 @@
    "description": "zero-length shard encoding",
    "preState": {
     "network": 3,
-    "wCert": 50,
     "origin": 7,
     "clockRound": 1000,
     "epochs": [
@@ -3482,7 +3366,6 @@
    "description": "shard of 257 bits",
    "preState": {
     "network": 3,
-    "wCert": 50,
     "origin": 7,
     "clockRound": 1000,
     "epochs": [
@@ -3529,7 +3412,6 @@
    "description": "shard encoding of 34 bytes",
    "preState": {
     "network": 3,
-    "wCert": 50,
     "origin": 7,
     "clockRound": 1000,
     "epochs": [
@@ -3576,7 +3458,6 @@
    "description": "unknown version",
    "preState": {
     "network": 3,
-    "wCert": 50,
     "origin": 7,
     "clockRound": 1000,
     "epochs": [
@@ -3623,7 +3504,6 @@
    "description": "nonzero flags",
    "preState": {
     "network": 3,
-    "wCert": 50,
     "origin": 7,
     "clockRound": 1000,
     "epochs": [
@@ -3670,7 +3550,6 @@
    "description": "count 0",
    "preState": {
     "network": 3,
-    "wCert": 50,
     "origin": 7,
     "clockRound": 1000,
     "epochs": [
@@ -3717,7 +3596,6 @@
    "description": "UC_V1 with two claims",
    "preState": {
     "network": 3,
-    "wCert": 50,
     "origin": 7,
     "clockRound": 1000,
     "epochs": [
@@ -3764,7 +3642,6 @@
    "description": "input shorter than the header",
    "preState": {
     "network": 3,
-    "wCert": 50,
     "origin": 7,
     "clockRound": 1000,
     "epochs": [
@@ -3811,7 +3688,6 @@
    "description": "one trailing byte",
    "preState": {
     "network": 3,
-    "wCert": 50,
     "origin": 7,
     "clockRound": 1000,
     "epochs": [
@@ -3858,7 +3734,6 @@
    "description": "request cut inside the certificate",
    "preState": {
     "network": 3,
-    "wCert": 50,
     "origin": 7,
     "clockRound": 1000,
     "epochs": [
@@ -3905,7 +3780,6 @@
    "description": "UC version 1 encoded as 0x18 0x01",
    "preState": {
     "network": 3,
-    "wCert": 50,
     "origin": 7,
     "clockRound": 1000,
     "epochs": [
@@ -3952,7 +3826,6 @@
    "description": "UC wrapped in tag 39006",
    "preState": {
     "network": 3,
-    "wCert": 50,
     "origin": 7,
     "clockRound": 1000,
     "epochs": [
@@ -3999,7 +3872,6 @@
    "description": "TRHash replaced by a float",
    "preState": {
     "network": 3,
-    "wCert": 50,
     "origin": 7,
     "clockRound": 1000,
     "epochs": [
@@ -4046,7 +3918,6 @@
    "description": "TRHash as an indefinite-length byte string",
    "preState": {
     "network": 3,
-    "wCert": 50,
     "origin": 7,
     "clockRound": 1000,
     "epochs": [
@@ -4093,7 +3964,6 @@
    "description": "nesting of 17 containers",
    "preState": {
     "network": 3,
-    "wCert": 50,
     "origin": 7,
     "clockRound": 1000,
     "epochs": [
@@ -4140,7 +4010,6 @@
    "description": "nesting of 16 containers passes the depth bound (rejected by shape instead)",
    "preState": {
     "network": 3,
-    "wCert": 50,
     "origin": 7,
     "clockRound": 1000,
     "epochs": [
@@ -4187,7 +4056,6 @@
    "description": "byte string claiming 2^64-1 bytes",
    "preState": {
     "network": 3,
-    "wCert": 50,
     "origin": 7,
     "clockRound": 1000,
     "epochs": [
@@ -4234,7 +4102,6 @@
    "description": "array claiming 2^64-1 elements",
    "preState": {
     "network": 3,
-    "wCert": 50,
     "origin": 7,
     "clockRound": 1000,
     "epochs": [
@@ -4281,7 +4148,6 @@
    "description": "signer ID that is not UTF-8",
    "preState": {
     "network": 3,
-    "wCert": 50,
     "origin": 7,
     "clockRound": 1000,
     "epochs": [
@@ -4328,7 +4194,6 @@
    "description": "signature map keys out of canonical order",
    "preState": {
     "network": 3,
-    "wCert": 50,
     "origin": 7,
     "clockRound": 1000,
     "epochs": [
@@ -4375,7 +4240,6 @@
    "description": "summaryValue of 257 bytes",
    "preState": {
     "network": 3,
-    "wCert": 50,
     "origin": 7,
     "clockRound": 1000,
     "epochs": [
@@ -4422,7 +4286,6 @@
    "description": "sibling count mismatch is false",
    "preState": {
     "network": 3,
-    "wCert": 50,
     "origin": 7,
     "clockRound": 1000,
     "epochs": [
@@ -4472,7 +4335,6 @@
    "description": "sibling count mismatch is false",
    "preState": {
     "network": 3,
-    "wCert": 50,
     "origin": 7,
     "clockRound": 1000,
     "epochs": [
@@ -4522,7 +4384,6 @@
    "description": "shard sibling hash flipped",
    "preState": {
     "network": 3,
-    "wCert": 50,
     "origin": 7,
     "clockRound": 1000,
     "epochs": [
@@ -4572,7 +4433,6 @@
    "description": "unicity path of another partition used for partition 1",
    "preState": {
     "network": 3,
-    "wCert": 50,
     "origin": 7,
     "clockRound": 1000,
     "epochs": [
@@ -4622,7 +4482,6 @@
    "description": "unicity path step hash flipped",
    "preState": {
     "network": 3,
-    "wCert": 50,
     "origin": 7,
     "clockRound": 1000,
     "epochs": [
@@ -4672,7 +4531,6 @@
    "description": "257 shard siblings",
    "preState": {
     "network": 3,
-    "wCert": 50,
     "origin": 7,
     "clockRound": 1000,
     "epochs": [
@@ -4719,7 +4577,6 @@
    "description": "33 unicity path steps",
    "preState": {
     "network": 3,
-    "wCert": 50,
     "origin": 7,
     "clockRound": 1000,
     "epochs": [
@@ -4766,7 +4623,6 @@
    "description": "65 signatures in the seal",
    "preState": {
     "network": 3,
-    "wCert": 50,
     "origin": 7,
     "clockRound": 1000,
     "epochs": [
@@ -4813,7 +4669,6 @@
    "description": "signer ID of 129 bytes in the seal",
    "preState": {
     "network": 3,
-    "wCert": 50,
     "origin": 7,
     "clockRound": 1000,
     "epochs": [
@@ -4860,7 +4715,6 @@
    "description": "call of 262145 bytes",
    "preState": {
     "network": 3,
-    "wCert": 50,
     "origin": 7,
     "clockRound": 1000,
     "epochs": [
@@ -4907,7 +4761,6 @@
    "description": "certificate of 24577 bytes",
    "preState": {
     "network": 3,
-    "wCert": 50,
     "origin": 7,
     "clockRound": 1000,
     "epochs": [
@@ -4954,7 +4807,6 @@
    "description": "four valid signatures: the reference charge",
    "preState": {
     "network": 3,
-    "wCert": 50,
     "origin": 7,
     "clockRound": 1000,
     "epochs": [
@@ -5005,7 +4857,6 @@
    "description": "invalid last signature charges the same as the valid call",
    "preState": {
     "network": 3,
-    "wCert": 50,
     "origin": 7,
     "clockRound": 1000,
     "epochs": [
@@ -5055,7 +4906,6 @@
    "description": "certificate length 2^32-1",
    "preState": {
     "network": 3,
-    "wCert": 50,
     "origin": 7,
     "clockRound": 1000,
     "epochs": [
@@ -5102,7 +4952,6 @@
    "description": "shard length 65535",
    "preState": {
     "network": 3,
-    "wCert": 50,
     "origin": 7,
     "clockRound": 1000,
     "epochs": [
@@ -5149,7 +4998,6 @@
    "description": "certificate length one past the end of input",
    "preState": {
     "network": 3,
-    "wCert": 50,
     "origin": 7,
     "clockRound": 1000,
     "epochs": [
@@ -5196,7 +5044,6 @@
    "description": "unsupported signature length",
    "preState": {
     "network": 3,
-    "wCert": 50,
     "origin": 7,
     "clockRound": 1000,
     "epochs": [
@@ -5243,7 +5090,6 @@
    "description": "unsupported signature length",
    "preState": {
     "network": 3,
-    "wCert": 50,
     "origin": 7,
     "clockRound": 1000,
     "epochs": [
@@ -5290,7 +5136,6 @@
    "description": "unsupported signature length",
    "preState": {
     "network": 3,
-    "wCert": 50,
     "origin": 7,
     "clockRound": 1000,
     "epochs": [
@@ -5337,7 +5182,6 @@
    "description": "required signature value is null",
    "preState": {
     "network": 3,
-    "wCert": 50,
     "origin": 7,
     "clockRound": 1000,
     "epochs": [
@@ -5384,7 +5228,6 @@
    "description": "false first claim, malformed final claim",
    "preState": {
     "network": 3,
-    "wCert": 50,
     "origin": 7,
     "clockRound": 1000,
     "epochs": [
@@ -5431,7 +5274,6 @@
    "description": "unsorted earlier claims, malformed final claim",
    "preState": {
     "network": 3,
-    "wCert": 50,
     "origin": 7,
     "clockRound": 1000,
     "epochs": [
@@ -5478,7 +5320,6 @@
    "description": "null path collection is zero steps",
    "preState": {
     "network": 3,
-    "wCert": 50,
     "origin": 7,
     "clockRound": 1000,
     "epochs": [
@@ -5529,7 +5370,6 @@
    "description": "null path collection is zero steps",
    "preState": {
     "network": 3,
-    "wCert": 50,
     "origin": 7,
     "clockRound": 1000,
     "epochs": [
@@ -5580,7 +5420,6 @@
    "description": "zero sibling collection with nonzero depth is false",
    "preState": {
     "network": 3,
-    "wCert": 50,
     "origin": 7,
     "clockRound": 1000,
     "epochs": [
@@ -5630,7 +5469,6 @@
    "description": "required sibling hash is null",
    "preState": {
     "network": 3,
-    "wCert": 50,
     "origin": 7,
     "clockRound": 1000,
     "epochs": [
@@ -5677,7 +5515,6 @@
    "description": "weighted threshold boundary",
    "preState": {
     "network": 3,
-    "wCert": 50,
     "origin": 7,
     "clockRound": 1000,
     "epochs": [
@@ -5729,7 +5566,6 @@
    "description": "weighted threshold boundary",
    "preState": {
     "network": 3,
-    "wCert": 50,
     "origin": 7,
     "clockRound": 1000,
     "epochs": [
@@ -5780,7 +5616,6 @@
    "description": "weighted threshold boundary",
    "preState": {
     "network": 3,
-    "wCert": 50,
     "origin": 7,
     "clockRound": 1000,
     "epochs": [
