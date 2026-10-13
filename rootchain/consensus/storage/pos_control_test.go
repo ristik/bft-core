@@ -795,3 +795,23 @@ func TestAQuietParentRoundCertifiesNoBlockHash(t *testing.T) {
 	require.Equal(t, [2]any{f.evm.reject.ResultID, uint64(0)}, f.evm.rejectAsked, "the verifier is asked for the control's result and attempt")
 	require.Equal(t, [][32]byte{pRoot}, f.evm.roots, "and judges the witness against the certified state root")
 }
+
+// A RejectResult rebuilds the control state (idle -> aborted). It is no acknowledgement of an unacknowledged root-only handoff, so the
+// marker that keeps the next Prepare from binding the same stalled parent (#604) must survive it, and survive the Prepare that follows.
+func TestRejectResultKeepsTheUnacknowledgedRootOnlyParent(t *testing.T) {
+	f := newEVMFx(t, rctypes.OpRejectResult)
+	parent := bytes32(0x42)
+	f.env.Control.UnackedParent = bytes.Clone(parent)
+	replaced, err := f.run()
+	require.NoError(t, err)
+	require.Equal(t, "aborted", replaced.Phase)
+	require.Equal(t, parent, replaced.UnackedParent, "the RejectResult rebuild dropped the marker")
+
+	// and the Prepare that opens the next attempt carries it on
+	prepare := evmroot.OrderedHandoffRecord{Network: 7, Epoch: 1, Attempt: 1, OrderedRound: 60, PredecessorBodyID: bytes32(0x77), NextBodyID: bytes32(0x99),
+		FrozenID: make([]byte, 32), ActivationRound: 60 + prepareActivationFloor, SuccessorTRHash: make([]byte, 32), Kind: "prepare"}
+	next, err := applyHandoffRecord(replaced, prepare.Bytes(), 7, 1, 60, testRecordAuthority{predecessor: bytes32(0x77)}, nil)
+	require.NoError(t, err)
+	require.Equal(t, "prepared", next.Phase)
+	require.Equal(t, parent, next.UnackedParent)
+}

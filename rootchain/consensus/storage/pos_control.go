@@ -339,7 +339,8 @@ func (p *posStep) reject(c rctypes.PosControl, block *rctypes.BlockData, svc *Po
 	p.set(state)
 	p.records = append(p.records, rec)
 	return &evmroot.ControlState{Network: ctl.Network, Epoch: ctl.Epoch, PredecessorBodyID: bytes.Clone(ctl.PredecessorBodyID), Attempt: next,
-		Phase: "aborted", OrderedRound: block.Round, PreviousDigest: ctl.Digest()}, nil
+		Phase: "aborted", OrderedRound: block.Round, PreviousDigest: ctl.Digest(),
+		UnackedParent: bytes.Clone(ctl.UnackedParent)}, nil // a RejectResult is no acknowledgement of a root-only step (#604)
 }
 
 // abort projects the close of an Election result by a committed D4 Abort. Only the abort of a primary candidate whose Freeze retained it
