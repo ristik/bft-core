@@ -27,7 +27,8 @@ from pathlib import Path
 import subprocess
 import time
 
-ROOT_RPC = 'http://127.0.0.1:8002'
+import operator_rpc
+
 NOT_PREPARED = 'before the handoff is prepared'
 LAPSED = "the Prepare's freeze has lapsed"
 
@@ -60,6 +61,7 @@ class DockerTransport:
         compose = json.loads((self.generation / 'compose.yaml').read_text())
         self.project = project or compose['name']
         self.image = compose['services']['rpc']['image']
+        self.root_rpc = operator_rpc.url_of(compose['services']['root1']['entrypoint'])   # the listener the generated Compose file configured
         self.entities = sorted(int(n[3:]) for n in compose['services'] if n.startswith('pod') and n[3:].isdigit())
 
     def holder(self, i):
@@ -72,7 +74,7 @@ class DockerTransport:
     def command(self, i, path, timeout):
         # a one-node sidecar of that entity's namespace: read-only, no capabilities, no mounts, the helper script on stdin of python -c
         return ['docker', 'run', '--rm', '-i', '--network', f'container:{self.holder(i)}', '--read-only', '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges:true',
-                '--user', '10001:10001', '--entrypoint', 'python3', self.image, '-c', HELPER, ROOT_RPC + path, str(timeout)]
+                '--user', '10001:10001', '--entrypoint', 'python3', self.image, '-c', HELPER, self.root_rpc + path, str(timeout)]
 
     def post(self, i, path, body, timeout=10):
         done = subprocess.run(self.command(i, path, timeout), input=body, capture_output=True, timeout=timeout + 30)
@@ -150,7 +152,8 @@ class Wrapper:
 def abort_commands(generation, entities, flags):
     """Manual Abort: the same target is dispatched locally to every old root (exec in that entity, one --root-rpc), each result collected by the caller."""
     compose = ['docker', 'compose', '-f', str(Path(generation) / 'compose.yaml')]
-    return {i: compose + ['exec', '-T', f'root{i}', 'ubft', 'root', 'handoff', 'abort', *flags, '--root-rpc', ROOT_RPC] for i in entities}
+    config = json.loads((Path(generation) / 'compose.yaml').read_text())
+    return {i: compose + ['exec', '-T', f'root{i}', 'ubft', 'root', 'handoff', 'abort', *flags, '--root-rpc', operator_rpc.url_of(config['services'][f'root{i}']['entrypoint'])] for i in entities}
 
 
 def build_request(ubft, out, next_trust_base, assignment=None, receipts=None, q3=False):
