@@ -451,8 +451,10 @@ func (g *gen) policy() {
 		e.LeafProofs[0].AnchorIndex, e.LeafProofs[1].AnchorIndex = 1, 0
 	}), both)
 	addEnvSIDs("envelope-leaf-index-out-of-range", "second leaf names anchor 2", bothEnv(func(e *Envelope) { e.LeafProofs[1].AnchorIndex = 2 }), both)
-	addEnv("envelope-nine-anchors", "nine anchors: one over MaxAnchors", envFor(func(e *Envelope) {
-		e.Anchors = append(e.Anchors, anchorOf(0, 2), anchorOf(0, 3), anchorOf(0, 4), anchorOf(0, 5), anchorOf(0, 6), anchorOf(0, 7), anchorOf(0, 8), anchorOf(0, 9))
+	addEnv("envelope-nine-anchors", "MaxAnchors+1 (seventeen) anchors for two leaves: refused by the count bound before any other check", envFor(func(e *Envelope) {
+		for u := byte(2); len(e.Anchors) <= MaxAnchors; u++ {
+			e.Anchors = append(e.Anchors, anchorOf(0, u))
+		}
 	}), 2)
 	addEnv("envelope-three-anchors", "three anchors for two leaves", envFor(func(e *Envelope) { e.Anchors = append(e.Anchors, anchorOf(0, 2), anchorOf(0, 3)) }), 2)
 	addEnv("envelope-no-anchors", "no anchors", envFor(func(e *Envelope) { e.Anchors = nil }), 2)
@@ -1333,16 +1335,17 @@ func (g *gen) proof() {
 	// With the repriced certificate call (owner-decisions section 22) real four-signature certificates never reach the gate, even
 	// at eight anchors with sixteen leaves and deep paths; only the maximum-signature case below does.
 	g.useQuad, g.extraN = false, 0
-	perLeaf("compose-anchors-over-max", "MaxAnchors+1 leaves, each certified by its own UC", MaxAnchors-1)
-	// Eight anchors of certificates carrying 64 seal signatures each (the native maximum): structurally
-	// admitted; the gate prices them (about 0.6M each) before any B1 call.
+	// MaxAnchors+1 anchors cannot come from a token any more (anchors <= leaves <= MaxLeaves = MaxAnchors); the anchor bound is
+	// exercised on envelopes (envelope-anchors-over-max).
+	// MaxAnchors anchors of certificates carrying 16 seal signatures each (the native maximum): structurally admitted; the gate
+	// prices the batch (each a distinct seal, Q = 256) before any B1 call.
 	if hc, err := g.certifiedWith(MaxAnchors-2, func(i int, l Leaf) ShardRound { return ShardRound{BaseTime + 1000, 100 + uint64(i)} }); err == nil {
 		eb := envOf(hc.h, hc.cert, func(e *Envelope) {
 			for i := range e.Anchors {
-				e.Anchors[i].UC = ucWithSigs(g, e.Anchors[i].UC, 64)
+				e.Anchors[i].UC = ucWithSigs(g, e.Anchors[i].UC, 16)
 			}
 		})
-		add("compose-anchors-max-heavy-over-budget", "MaxAnchors (eight) anchors whose certificates carry 64 signatures each (the native maximum), the heaviest admitted shape", eb, claimsOf(hc.cert.Anchors...), "return")
+		add("compose-anchors-max-heavy-over-budget", "MaxAnchors (sixteen) anchors whose certificates carry 16 signatures each (the native maximum), the heaviest admitted shape", eb, claimsOf(hc.cert.Anchors...), "return")
 	} else {
 		g.must(err)
 	}

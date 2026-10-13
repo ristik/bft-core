@@ -18,7 +18,8 @@ const (
 	MaxPathSteps     = 2048
 	MaxPolicyBytes   = 512
 	MaxAmountBytes   = 32
-	MaxAnchors       = 8 // profile parameter: distinct UC anchors, a parser ceiling; the gas gate (gas.go) decides each bundle
+	MaxAnchors       = 16 // distinct UC anchors, at most the leaves; a parser ceiling, the gas gate (gas.go) decides each bundle (contract section 4)
+	MaxCfgBytes      = 1024
 
 	// Embedded lock evidence (J). Cumulative and checked before allocation or crypto.
 	MaxJustificationBytes = 64 << 10
