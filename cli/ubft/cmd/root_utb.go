@@ -46,22 +46,25 @@ func openUTBEntryStore(base *baseFlags, genesisFile, genesisID, dbFile, defaultD
 	}
 	var pin [types.TrustBaseV2IDLen]byte
 	copy(pin[:], pinBytes)
-	// the pinned genesis entry must be the one the root's own genesis trust base builds, so a mismatch is a start-up error and not a surprise at the
-	// first handoff (when the old committee would endorse a successor linked to an entry no other component derives)
-	want, err := utb.BuildUnsigned(nil, utb.FromProjection(genesisTrustBase))
-	if err != nil {
-		return nil, nil, fmt.Errorf("the UTB genesis entry cannot be derived from the genesis trust base: %w", err)
-	}
-	wantID, err := want.EntryID()
-	if err != nil {
-		return nil, nil, err
-	}
-	gotID, err := genesis.EntryID()
-	if err != nil {
-		return nil, nil, err
-	}
-	if wantID != gotID || wantID != pin {
-		return nil, nil, fmt.Errorf("the UTB genesis entry does not match the genesis trust base: the trust base builds %x, the file is %x, the pin is %x", wantID, gotID, pin)
+	// A nil trust base is the offline tooling (export, import): it has only the pin, which utbstore.Open checks against the genesis entry.
+	if genesisTrustBase != nil {
+		// the pinned genesis entry must be the one the root's own genesis trust base builds, so a mismatch is a start-up error and not a surprise at the
+		// first handoff (when the old committee would endorse a successor linked to an entry no other component derives)
+		want, err := utb.BuildUnsigned(nil, utb.FromProjection(genesisTrustBase))
+		if err != nil {
+			return nil, nil, fmt.Errorf("the UTB genesis entry cannot be derived from the genesis trust base: %w", err)
+		}
+		wantID, err := want.EntryID()
+		if err != nil {
+			return nil, nil, err
+		}
+		gotID, err := genesis.EntryID()
+		if err != nil {
+			return nil, nil, err
+		}
+		if wantID != gotID || wantID != pin {
+			return nil, nil, fmt.Errorf("the UTB genesis entry does not match the genesis trust base: the trust base builds %x, the file is %x, the pin is %x", wantID, gotID, pin)
+		}
 	}
 	db, err := base.initDB(dbFile, defaultDBName)
 	if err != nil {
