@@ -44,6 +44,7 @@ import (
 	"github.com/unicitynetwork/bft-core/rootrecords"
 	"github.com/unicitynetwork/bft-core/trustactivation"
 	"github.com/unicitynetwork/bft-core/trusthistorystore"
+	"github.com/unicitynetwork/bft-core/utbstore"
 )
 
 const (
@@ -320,12 +321,14 @@ func rootNodeRun(ctx context.Context, flags *rootNodeRunFlags) error {
 		options = append(options, consensus.WithRecoveryProfile2(history))
 	}
 
+	var utbEntries *utbstore.Store
 	if flags.UTBGenesisFile != "" {
-		store, closeStore, utbErr := flags.openUTBStore()
+		store, closeStore, utbErr := flags.openUTBStore(trustBase)
 		if utbErr != nil {
 			return utbErr
 		}
 		defer closeStore()
+		utbEntries = store
 		options = append(options, consensus.WithUTBStore(store))
 	}
 
@@ -450,6 +453,9 @@ func rootNodeRun(ctx context.Context, flags *rootNodeRunFlags) error {
 	)
 	if err != nil {
 		return fmt.Errorf("failed initiate root node: %w", err)
+	}
+	if utbEntries != nil { // the UTB profile answers on the version 2 certificate protocol with the finalized signed entries
+		node.SetEntryOffers(rootchain.NewStoreOffers(utbEntries))
 	}
 
 	g, ctx := errgroup.WithContext(ctx)

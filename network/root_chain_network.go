@@ -12,6 +12,9 @@ const (
 	ProtocolHandshake           = "/ab/handshake/0.0.1"
 	ProtocolBlockCertification  = "/ab/block-certification/0.0.1"
 	ProtocolUnicityCertificates = "/ab/certificates/0.0.1"
+	// ProtocolUnicityCertificatesV2 carries certification.CertificationResponseV2: the response plus the signed trust-base entries a deployment publishes.
+	// It is a separate protocol, so the presence of the entries is announced by the protocol and the explicit version, never by an array length.
+	ProtocolUnicityCertificatesV2 = "/ab/certificates/0.0.2"
 )
 
 /*
@@ -25,6 +28,7 @@ func NewLibP2PRootChainNetwork(self *Peer, capacity uint, sendCertificateTimeout
 
 	sendProtocolDescriptions := []SendProtocolDescription{
 		{ProtocolID: ProtocolUnicityCertificates, Timeout: sendCertificateTimeout, MsgType: certification.CertificationResponse{}},
+		{ProtocolID: ProtocolUnicityCertificatesV2, Timeout: sendCertificateTimeout, MsgType: certification.CertificationResponseV2{}},
 	}
 	if err = n.RegisterSendProtocols(sendProtocolDescriptions); err != nil {
 		return nil, fmt.Errorf("registering send protocols: %w", err)

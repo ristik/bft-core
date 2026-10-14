@@ -66,6 +66,7 @@ type (
 		net              PartitionNet
 		consensusManager ConsensusManager
 		zkRegistry       *zkverifier.Registry
+		offers           EntryOffers // nil: the legacy certificate protocol only
 
 		log    *slog.Logger
 		tracer trace.Tracer
@@ -114,6 +115,13 @@ func New(
 	observe.Logger().Info("Root node initialized with per-partition ZK proof verification")
 
 	return node, nil
+}
+
+// SetEntryOffers makes the node answer on the version 2 certificate protocol with the finalized signed trust-base entries the offers choose. Call it
+// before Run.
+func (v *Node) SetEntryOffers(o EntryOffers) {
+	v.offers = o
+	v.subscription.offers = o
 }
 
 func (v *Node) initMetrics(m metric.Meter) (err error) {
@@ -203,7 +211,14 @@ func (v *Node) sendResponse(ctx context.Context, nodeID string, cr *certificatio
 	if err := cr.IsValid(); err != nil {
 		return fmt.Errorf("invalid certification response: %w", err)
 	}
-	return v.net.Send(ctx, cr, peerID)
+	msg, sent := withOffers(v.offers, peerID, cr)
+	if err := v.net.Send(ctx, msg, peerID); err != nil {
+		return err
+	}
+	if sent != nil {
+		sent()
+	}
+	return nil
 }
 
 // sendRejection attaches a status code and diagnostic message to a copy of the
@@ -257,6 +272,11 @@ func (v *Node) onHandshake(ctx context.Context, req *handshake.Handshake) error 
 	// handshake is the partition's only refresh mechanism when it has no
 	// BlockCertificationRequests to send, so it must always re-subscribe —
 	// not just before the first certified block.
+	if v.offers != nil { // a handshake is a (re)connect: the answer carries the relevant entries again
+		if id, derr := peer.Decode(req.NodeID); derr == nil {
+			v.offers.Reset(id)
+		}
+	}
 	if err := v.subscription.Subscribe(req.PartitionID, req.ShardID, req.NodeID); err != nil {
 		return fmt.Errorf("subscribing the sender: %w", err)
 	}

@@ -91,7 +91,7 @@ func (x *QuorumCert) verifyUTB(tb types.RootTrustBase, cfg votesig.Config) error
 	if x.GetRound() == GenesisRootRound {
 		return bad("the genesis certificate carries none")
 	}
-	if len(x.LedgerCommitInfo.Hash) == 0 && x.LedgerCommitInfo.RootChainRoundNumber == 0 {
+	if x.LedgerCommitInfo.RootChainRoundNumber == 0 { // the one committing predicate (ProcessQc, the binding and the vote use it): a commit round
 		return bad("a non-committing certificate carries one")
 	}
 	entry, err := utbentry.Decode(x.UTB.Unsigned)

@@ -256,10 +256,16 @@ func (x *VoteMsg) verifyContext(tbs *trustbase.TrustBaseStore) error {
 // when the vote carries one, the trust-base endorsement.
 func (x *VoteMsg) Verify(tbs *trustbase.TrustBaseStore) error {
 	if x.VoteInfo != nil {
-		if cfg, err := tbs.SigningConfig(x.VoteInfo.Epoch); err == nil {
+		cfg, err := tbs.SigningConfig(x.VoteInfo.Epoch)
+		switch {
+		case err == nil:
 			if cfg.UTB != (x.Envelope == votesig.EnvelopeUTB) {
 				return fmt.Errorf("%w: vote from '%s' envelope %d, epoch %d UTB=%v", votesig.ErrEnvelope, x.Author, x.Envelope, x.VoteInfo.Epoch, cfg.UTB)
 			}
+		case x.Envelope == votesig.EnvelopeUTB:
+			// the envelope is chosen by the epoch's authenticated configuration only: without it a version 3 vote is not accepted on the
+			// strength of whatever the signature checks that follow make of it
+			return fmt.Errorf("%w: vote from '%s': no signing configuration for epoch %d: %w", votesig.ErrEnvelope, x.Author, x.VoteInfo.Epoch, err)
 		}
 	}
 	if err := x.verifySignatures(tbs); err != nil {
@@ -284,7 +290,7 @@ func (x *VoteMsg) verifyUTB(tbs *trustbase.TrustBaseStore) error {
 	if !cfg.UTB || x.Envelope != votesig.EnvelopeUTB {
 		return bad("outside a UTB epoch")
 	}
-	if len(x.LedgerCommitInfo.Hash) == 0 && x.LedgerCommitInfo.RootChainRoundNumber == 0 {
+	if x.LedgerCommitInfo.RootChainRoundNumber == 0 { // the one committing predicate: a commit round
 		return bad("a non-committing vote carries one")
 	}
 	entry, err := utbentry.Decode(x.UTB.Unsigned)

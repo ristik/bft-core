@@ -30,6 +30,8 @@ func writeGenesisTrustBase(t *testing.T, dir string) string {
 func TestUTBGenesisToolAndStoreOpening(t *testing.T) {
 	dir := t.TempDir()
 	tbPath := writeGenesisTrustBase(t, dir)
+	tb, err := util.ReadJsonFile(tbPath, &types.RootTrustBaseV1{})
+	require.NoError(t, err)
 	out := filepath.Join(dir, "utb-genesis.cbor")
 
 	cmd := trustBaseUTBGenesisCmd()
@@ -54,11 +56,11 @@ func TestUTBGenesisToolAndStoreOpening(t *testing.T) {
 		}
 		return f
 	}
-	store, closeStore, err := flags(nil).openUTBStore()
+	store, closeStore, err := flags(nil).openUTBStore(tb)
 	require.NoError(t, err)
 	require.EqualValues(t, 1, store.Tip().Epoch)
 	closeStore()
-	_, closeStore, err = flags(nil).openUTBStore()
+	_, closeStore, err = flags(nil).openUTBStore(tb)
 	require.NoError(t, err, "the store reopens")
 	closeStore()
 
@@ -73,11 +75,27 @@ func TestUTBGenesisToolAndStoreOpening(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			f := flags(mut)
 			f.UTBEntriesDBFile = filepath.Join(t.TempDir(), "other.db")
-			_, _, err := f.openUTBStore()
+			_, _, err := f.openUTBStore(tb)
 			require.Error(t, err)
 		})
 	}
 
+	t.Run("a genesis entry of another trust base is a start-up error", func(t *testing.T) {
+		otherDir := t.TempDir()
+		otherPath := writeGenesisTrustBase(t, otherDir)
+		otherOut := filepath.Join(otherDir, "utb-genesis.cbor")
+		c := trustBaseUTBGenesisCmd()
+		var o bytes.Buffer
+		c.SetOut(&o)
+		c.SetArgs([]string{"--trust-base", otherPath, "--out", otherOut})
+		require.NoError(t, c.Execute())
+		f := flags(func(f *rootNodeRunFlags) {
+			f.UTBGenesisFile, f.UTBGenesisID = otherOut, string(bytes.TrimSpace(o.Bytes()))
+			f.UTBEntriesDBFile = filepath.Join(t.TempDir(), "x.db")
+		})
+		_, _, err := f.openUTBStore(tb) // a self-consistent file and pin, but not this deployment's genesis
+		require.ErrorContains(t, err, "does not match the genesis trust base")
+	})
 	t.Run("a genesis trust base that is not epoch 1", func(t *testing.T) {
 		bad := filepath.Join(dir, "bad.json")
 		tb, err := util.ReadJsonFile(tbPath, &types.RootTrustBaseV1{})

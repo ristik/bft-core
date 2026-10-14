@@ -30,6 +30,9 @@ type Subscriptions struct {
 	// subscribed has completed".
 	sending sync.WaitGroup
 
+	// offers, when set, makes every response a version 2 response with the entries chosen for its recipient
+	offers EntryOffers
+
 	log *slog.Logger
 
 	bcRespSent metric.Int64Counter // number of Block Certification Responses sent
@@ -92,7 +95,17 @@ func (s *Subscriptions) Send(ctx context.Context, cr *certification.Certificatio
 		s.log.DebugContext(ctx, fmt.Sprintf("sending CertificationResponse, %d receivers, R_next: %d, IR Hash: %X, Block Hash: %X",
 			len(recipients), cr.Technical.Round, cr.UC.InputRecord.Hash, cr.UC.InputRecord.BlockHash), logger.Shard(cr.Partition, cr.Shard))
 		if len(recipients) > 0 {
-			if err := s.sender(ctx, cr, recipients...); err != nil {
+			if s.offers != nil {
+				// the entries differ per recipient (what it was already offered), so each gets its own message
+				for _, r := range recipients {
+					msg, sent := withOffers(s.offers, r, cr)
+					if err := s.sender(ctx, msg, r); err != nil {
+						s.log.WarnContext(ctx, "sending certification result", logger.Error(err), logger.Shard(cr.Partition, cr.Shard))
+					} else if sent != nil {
+						sent()
+					}
+				}
+			} else if err := s.sender(ctx, cr, recipients...); err != nil {
 				s.log.WarnContext(ctx, "sending certification result", logger.Error(err), logger.Shard(cr.Partition, cr.Shard))
 			}
 			s.bcRespSent.Add(ctx, int64(len(recipients)), observability.Shard(cr.Partition, cr.Shard))
@@ -106,3 +119,18 @@ stop new Sends - the caller is responsible for having closed the path that trigg
 them (cancelling the context the node runs under) before waiting.
 */
 func (s *Subscriptions) Wait() { s.sending.Wait() }
+
+// withOffers is the message to send to one recipient: the response itself, or the version 2 response with the entries chosen for it, and the function that
+// records the offer once the send succeeded. The attachments are chosen from the UC's own signer epoch, so a repeated old UC is never described as signed
+// by a newer committee.
+func withOffers(offers EntryOffers, recipient peer.ID, cr *certification.CertificationResponse) (any, func()) {
+	if offers == nil {
+		return cr, nil
+	}
+	var epoch uint64
+	if cr.UC.UnicitySeal != nil {
+		epoch = cr.UC.UnicitySeal.Epoch
+	}
+	entries, sent := offers.Offer(recipient, epoch)
+	return certification.NewCertificationResponseV2(cr, entries), sent
+}
