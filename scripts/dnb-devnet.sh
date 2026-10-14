@@ -168,15 +168,6 @@ restart_all_validators() {
   info "all validators restarted"
 }
 
-# Fails fast when the root chain is not advancing (the stall that otherwise leaves a deploy waiting for a first block forever).
-root_alive() {
-  local a b
-  a=$(curl -fsS http://127.0.0.1:$rootRpcPort/api/v1/roundInfo | python3 -c "import sys,json;print(json.load(sys.stdin)['roundNumber'])") || return 1
-  sleep 8
-  b=$(curl -fsS http://127.0.0.1:$rootRpcPort/api/v1/roundInfo | python3 -c "import sys,json;print(json.load(sys.stdin)['roundNumber'])") || return 1
-  [ "$b" -gt "$a" ] || { echo "root chain stalled at round $b (see root*/debug.log: 'voter clock skew' / 'in recovery'); a loaded host (concurrent builds) is the known trigger" >&2; return 1; }
-}
-
 status() {
   for i in $(seq 1 "$validators"); do
     printf 'reth%s block=%s\n' "$i" "$(rpc "http://127.0.0.1:$((rethEthBase + i - 1))" eth_blockNumber '[]' | python3 -c "import sys,json;print(int(json.load(sys.stdin)['result'],16))" 2>/dev/null || echo down)"

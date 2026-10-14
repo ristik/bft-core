@@ -5,7 +5,9 @@
 #
 #   scripts/anyage-lane.sh --preflight     checks every pin, binary, checkout and tool and prints the step plan; starts NOTHING, takes no lock
 #   scripts/anyage-lane.sh --plan          prints the step plan only
-#   scripts/anyage-lane.sh                 the run: REFUSED until the substrate is integrated (see the plan, gap G1) and the pinned PRs are merged
+#   scripts/anyage-lane.sh --prep          dry run of the genesis side (ANYAGE_PREP_ONLY): P85 genesis, profile, identities, aggregator shard configurations and the
+#                                          bridge deployment derived from them; starts no reth, root, validator or aggregator; needs the same env as the run
+#   scripts/anyage-lane.sh                 the run: refuses unless the preflight is entirely ok; then the P85 runner under the devnet lock (owner "anyage")
 set -uo pipefail
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 REPO_ROOT=$(cd "$SCRIPT_DIR/.." && pwd)
@@ -96,11 +98,23 @@ preflight() {
   [ "$bad" -eq 0 ]
 }
 
+# The environment the P85 runner and the combined devnet read (CONTRACTS is the bridge deploy's name for the contracts checkout)
+lane_env() { export ANYAGE_LANE=1 P85_LOCK_OWNER=anyage P85_EVIDENCE_PREFIX=anyage CONTRACTS=${P85_CONTRACTS:-}; }
+
 case "${1:-}" in
   --plan) plan ;;
   --preflight) plan; echo; preflight ;;
-  *)
-    echo "REFUSED: the run is not enabled. Run --preflight; every line must be ok, including G1 (the integrated substrate)." >&2
-    echo "A real run is wired only after G1 and the merges; it will then source scripts/p85-lane.sh's preflight and take the devnet lock." >&2
-    exit 3 ;;
+  --prep)
+    # A dry run of the genesis side. It takes the devnet lock (it writes test-nodes/ and ports are not touched, but the checkout is the lane's) and stops
+    # before any reth, root, validator or aggregator is started.
+    lane_env
+    [ -n "${P85_CONTRACTS:-}" ] && [ -n "${DNB_TOOL:-}" ] || { echo "--prep needs P85_CONTRACTS, M2_URETH_BIN, M2_URETH_COMMIT, DNB_TOOL (and P85_DEV_RUN=1 unless the provenance is attested)" >&2; exit 2; }
+    export ANYAGE_PREP_ONLY=1
+    exec "$AGRE_ROOT/briefs/devnet-lock.sh" anyage-prep env P85_LANE_LOCKED=1 "$SCRIPT_DIR/p85-lane.sh" ;;
+  "")
+    plan; echo
+    preflight || { echo "REFUSED: the preflight is not entirely ok; nothing was started." >&2; exit 3; }
+    lane_env
+    exec "$SCRIPT_DIR/p85-lane.sh" ;;
+  *) echo "usage: $0 [--plan|--preflight|--prep]" >&2; exit 2 ;;
 esac

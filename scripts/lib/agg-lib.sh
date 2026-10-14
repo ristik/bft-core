@@ -104,3 +104,12 @@ json.dump({"dir": pwd + "/test-nodes", "ethUrls": ["http://127.0.0.1:%d" % (eth_
   open("test-nodes/lane-config.json", "w"), indent=2)
 PY
 }
+
+# Fails fast when the root chain is not advancing (the stall that otherwise leaves a deploy waiting for a first block forever).
+root_alive() {
+  local a b
+  a=$(curl -fsS http://127.0.0.1:$rootRpcPort/api/v1/roundInfo | python3 -c "import sys,json;print(json.load(sys.stdin)['roundNumber'])") || return 1
+  sleep 8
+  b=$(curl -fsS http://127.0.0.1:$rootRpcPort/api/v1/roundInfo | python3 -c "import sys,json;print(json.load(sys.stdin)['roundNumber'])") || return 1
+  [ "$b" -gt "$a" ] || { echo "root chain stalled at round $b (see root*/debug.log: 'voter clock skew' / 'in recovery'); a loaded host (concurrent builds) is the known trigger" >&2; return 1; }
+}

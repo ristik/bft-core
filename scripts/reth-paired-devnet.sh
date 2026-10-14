@@ -49,6 +49,14 @@ validators=${1:-4}
 rounds=${2:-10}
 postM2aMode=${POST_M2A_MODE:-}
 postM2aChainID=${POST_M2A_CHAIN_ID:-31337}
+# The any-age final lane (scripts/anyage-lane.sh, briefs/anyage-final-lane-plan.md): the P85 genesis AND the bridge in one devnet. ANYAGE_LANE=1 adds
+# the aggregator-go shard(s) as BFT shard(s) of the same root chain (partition 9, scripts/lib/agg-lib.sh) beside the EVM shard; the vault and verifier are
+# deployed by the lane's setup step once the devnet is up. Nothing in the P85 path changes when the flag is unset.
+if [ "${ANYAGE_LANE:-0}" = 1 ]; then
+  [ "${P85_LANE:-0}" = 1 ] && [ "${M2_PROFILE2:-0}" = 1 ] && [ "$validators" -eq 4 ] || { echo "ANYAGE_LANE=1 requires the P85 lane (P85_LANE=1, M2_PROFILE2=1, four validators)" >&2; exit 2; }
+  chainID=$postM2aChainID partitionID=8 rootRpcPort=25866
+  source scripts/lib/agg-lib.sh
+fi
 if [ -n "$postM2aMode" ]; then
   case "$postM2aMode" in f7 | t1 | t4 | t6) ;; *) echo "POST_M2A_MODE must be f7, t1, t4 or t6" >&2; exit 2 ;; esac
   [ "${M2_PROFILE2:-0}" = 1 ] || { echo "post-M2a evidence requires M2_PROFILE2=1" >&2; exit 2; }
@@ -122,6 +130,7 @@ negativeReths="reth-wrong reth-wrongchain reth-othergenesis reth-laterfork"
 # anything a machine-wide sweep here had already killed.
 cleanup() {
   if [ "${F8_MIXED_LANE:-0}" = 1 ]; then f8_stop; fi
+  if [ "${ANYAGE_LANE:-0}" = 1 ]; then stop_aggs; fi   # by this run's own pid files
   ./stop-evm.sh -a >/dev/null 2>&1 || true
   stop_root_nodes
   # These daemons can outlive TERM while their P2P/RPC servers drain. Interrupt only
@@ -316,6 +325,20 @@ if [ "${SIGNING:-local}" = authority ]; then
   cp "$fullShardConf" "test-nodes/shard-conf-${partitionID}_0.json"
   enroll_evm_authorities "$validators" "$partitionID" || exit 1
   echo "enrolled $validators independent signing authorities against the full shard configuration"
+fi
+
+if [ "${ANYAGE_LANE:-0}" = 1 ] && [ -n "${ANYAGE_PREP_ONLY:-}" ]; then
+  # A dry run of the combined genesis: every offline input exists (P85 genesis, profile, identities, enrolled authorities, aggregator shard configurations,
+  # the bridge deployment derived from the identities); no reth, root, validator or aggregator process is started and no port is taken.
+  agg_prepare_confs || { echo "aggregator shard configuration failed" >&2; exit 1; }
+  if [ -n "${DNB_TOOL:-}" ]; then
+    BRIDGE_IDENTITIES=test-nodes/b1-identities.json
+    "$DNB_TOOL" deployment --identities "$BRIDGE_IDENTITIES" --agg-conf "$(for k in $(seq 1 "$aggShards"); do printf '%s,' "$(agg_conf "$k")"; done | sed 's/,$//')" --out test-nodes/bridge \
+      || { echo "the bridge deployment cannot be derived from this genesis' identities" >&2; exit 1; }
+    test -s test-nodes/bridge-deployment.json || { echo "dnb-tool wrote no bridge-deployment.json" >&2; exit 1; }
+  fi
+  echo "anyage prep only: P85 genesis, profile, identities, aggregator shard configurations${DNB_TOOL:+, bridge deployment} generated; nothing started"
+  exit 0
 fi
 
 echo
@@ -814,7 +837,10 @@ pass "seeded three paid user transactions in every reth mempool before block 1"
 echo
 echo "=== 5. the v2 bootstrap certifies a real EVM block 1 ==="
 preflightFailures=$failures
+# the roots register every test-nodes/shard-conf-* file when they start: the aggregator partition's configurations must exist before
+if [ "${ANYAGE_LANE:-0}" = 1 ]; then agg_prepare_confs || { echo "aggregator shard configuration failed" >&2; exit 1; }; fi
 ./start-evm.sh -r -a -e engine-api -v "$validators" >test-nodes/start-evm.log 2>&1
+if [ "${ANYAGE_LANE:-0}" = 1 ]; then root_alive && start_aggs || { echo "aggregator-go did not start (see test-nodes/agg*/stdout.log)" >&2; exit 1; }; fi
 
 echo "waiting for block 1 and a certificate (up to 180s) ..."
 mined=false
