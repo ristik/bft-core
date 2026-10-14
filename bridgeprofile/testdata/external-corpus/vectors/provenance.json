@@ -7,7 +7,7 @@
       "-out",
       "{output}"
     ],
-    "commit": "7e29445123f1af4797eec76ee41f83b41ddb2bba",
+    "commit": "a96f221397bdcb66531263404e844f15c04a23d1",
     "repository": "https://github.com/ristik/bft-core.git"
   },
   "protocolVersion": 4,
