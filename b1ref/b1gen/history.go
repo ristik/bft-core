@@ -125,3 +125,10 @@ func (h *History) uc(s Seal, part uint32, shard string) ucSpec {
 	}
 	return u
 }
+
+// Rendered is Pre with its storage words rendered, as the corpus vectors carry them.
+func (h *History) Rendered() PreState {
+	p := h.Pre()
+	p.render()
+	return p
+}
