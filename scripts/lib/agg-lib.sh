@@ -90,6 +90,8 @@ PY
 bridge_write_config() {
   : "${DNB_TOOL:?set DNB_TOOL to the built dnb-tool}"
   local full=${BRIDGE_FULL_CONF:-test-nodes/evm-full-shard-conf.json}
+  # the plug-in driver reads the full shard configuration as <lane dir>/evm-full-shard-conf.json (the DN-B lane's name; the P85 genesis writes -v2)
+  [ "$full" = test-nodes/evm-full-shard-conf.json ] || cp "$full" test-nodes/evm-full-shard-conf.json
   "$DNB_TOOL" trust-doc --trust-base test-nodes/trust-base.json --out test-nodes/sdk-trust-base.json
   "$DNB_TOOL" pdr --full-shard-conf "$full" --out test-nodes/evm-pdr.cbor
   python3 - "$PWD" "$validators" "$rethEthBase" "$rootRpcPort" "$chainID" "$partitionID" "$aggPartition" "$aggShards" "${AGG_PORT:-3001}" "${BRIDGE_ARCHIVE:-test-nodes/archives}" <<'PY'

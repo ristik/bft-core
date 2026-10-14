@@ -43,6 +43,10 @@ m2_start_root() { # node installEpoch bootnode  (an empty install epoch starts a
       shardConfArgs+=(--shard-conf "$conf")
     done
   fi
+  if [ "${ANYAGE_LANE:-0}" = 1 ]; then   # the any-age lane's aggregator partition: a restarted root must list its shard(s), or the first block it recovers that contains them is refused
+    declare -F agg_conf >/dev/null || { echo "m2_start_root: ANYAGE_LANE needs scripts/lib/agg-lib.sh" >&2; return 1; }
+    local k; for k in $(seq 1 "${aggShards:-1}"); do shardConfArgs+=(--shard-conf "$(agg_conf "$k")"); done
+  fi
   mkdir -p "test-nodes/root$node"
   for i in $(seq 1 90); do
     UBFT_Q4_SHIM_DIR="${Q4_SHIM_DIR:+$Q4_SHIM_DIR/root$node}" ${Q4_ROOT_BIN:-build/ubft} root-node run --home "test-nodes/root$node" \
