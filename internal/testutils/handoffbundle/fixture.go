@@ -15,7 +15,9 @@ import (
 	"github.com/unicitynetwork/bft-core/network/protocol/abdrc"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/storage"
 	rctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
+	"github.com/unicitynetwork/bft-core/rootchain/consensus/votesig"
 	testutils "github.com/unicitynetwork/bft-core/rootchain/testutils"
+	"github.com/unicitynetwork/bft-core/utb"
 	abcrypto "github.com/unicitynetwork/bft-go-base/crypto"
 	"github.com/unicitynetwork/bft-go-base/types"
 	"github.com/unicitynetwork/bft-go-base/types/hex"
@@ -31,6 +33,7 @@ type Fixture struct {
 	Shard     types.ShardID
 	State     *storage.ShardInfo
 	Nodes     []*testutils.TestNode
+	OldNodes  []*testutils.TestNode // the committee that signed the old commit proof
 }
 
 func New(t *testing.T) Fixture { return NewBound(t, nil) }
@@ -126,7 +129,7 @@ func NewBoundAtShardEpoch(t *testing.T, preimage []byte, shardEpoch uint64) Fixt
 			RootHash: state.RootHash, PrevEpochStat: state.PrevEpochStat, Stat: state.Stat,
 			PrevEpochFees: state.PrevEpochFees, Fees: state.Fees, IR: state.IR, IRTR: state.TR,
 			ShardConfHash: state.ShardConfHash}}}
-	return Fixture{Proof: proof, Body: body, Snapshot: snapshot, Old: old, ConfHash: bytes.Clone(state.ShardConfHash), Partition: partition, Shard: shard, State: state, Nodes: nextNodes}
+	return Fixture{Proof: proof, Body: body, Snapshot: snapshot, Old: old, ConfHash: bytes.Clone(state.ShardConfHash), Partition: partition, Shard: shard, State: state, Nodes: nextNodes, OldNodes: oldNodes}
 }
 
 // Next creates another committed handoff signed by the projected v2 trust.
@@ -196,4 +199,24 @@ func Next(t *testing.T, first Fixture, old *types.RootTrustBaseV1) Fixture {
 			ShardConfHash: state.ShardConfHash}}}
 	return Fixture{Proof: proof, Body: body, Snapshot: snapshot, Old: old, ConfHash: first.ConfHash,
 		Partition: first.Partition, Shard: first.Shard, State: &state, Nodes: nextNodes}
+}
+
+// WithUTB endorses the fixture's handoff the way a UTB epoch's committing certificate does: the old committee's endorsement of the successor entry the
+// body implies, over the V2 genesis entry the old trust base projects to. It changes the fixture's commit certificate in place (the proof and the
+// snapshot share it) and returns the genesis entry and the unsigned successor entry. The old epoch's configuration is scheme 1 with UTB.
+func WithUTB(t *testing.T, f Fixture) (genesis, successor *types.RootTrustBaseV2) {
+	t.Helper()
+	genesis, err := utb.BuildUnsigned(nil, utb.FromProjection(f.Old))
+	require.NoError(t, err)
+	successor, err = utb.BuildUnsigned(genesis, utb.FromBodyV2(f.Body, f.Proof.Record.ActivationRound))
+	require.NoError(t, err)
+	unsigned, err := successor.SigBytes()
+	require.NoError(t, err)
+	qc := f.Proof.CommitQC
+	qc.Envelope, qc.UTB = votesig.EnvelopeUTB, &rctypes.UTBCertificate{Unsigned: unsigned, Signatures: map[string]hex.Bytes{}}
+	for _, n := range f.OldNodes[:3] {
+		qc.UTB.Signatures[n.PeerConf.ID.String()], err = n.Signer.SignBytes(unsigned)
+		require.NoError(t, err)
+	}
+	return genesis, successor
 }

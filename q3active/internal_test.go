@@ -199,3 +199,19 @@ func rawBundle(t *testing.T, b Bundle) []byte {
 	require.NoError(t, err)
 	return raw
 }
+
+// A deployment whose genesis configuration enables the signed trust-base entry has a UTB genesis epoch, and activates only the UTB tuple.
+func TestUTBGenesisConfigurationMakesTheGenesisEpochAUTBEpoch(t *testing.T) {
+	f := q3fixture.New(t, q3fixture.Options{UTB: true})
+	rt, err := New(Config{DB: memorydb.New(), Genesis: f.Old, UTBGenesis: true})
+	require.NoError(t, err)
+	cfg, err := rt.Signing(1)
+	require.NoError(t, err)
+	require.True(t, cfg.UTB)
+
+	plain, err := New(Config{DB: memorydb.New(), Genesis: f.Old})
+	require.NoError(t, err)
+	cfg, err = plain.Signing(1)
+	require.NoError(t, err)
+	require.False(t, cfg.UTB)
+}

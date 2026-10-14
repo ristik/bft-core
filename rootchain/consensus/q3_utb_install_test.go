@@ -1,15 +1,19 @@
 package consensus
 
 import (
+	"bytes"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 
 	"github.com/unicitynetwork/bft-core/handoff"
+	"github.com/unicitynetwork/bft-core/internal/testutils/handoffbundle"
 	"github.com/unicitynetwork/bft-core/internal/testutils/q3fixture"
 	"github.com/unicitynetwork/bft-core/keyvaluedb/memorydb"
 	"github.com/unicitynetwork/bft-core/q3format"
 	tbstore "github.com/unicitynetwork/bft-core/rootchain/consensus/trustbase"
+	"github.com/unicitynetwork/bft-core/rootchain/consensus/votesig"
+	"github.com/unicitynetwork/bft-core/utb"
 	"github.com/unicitynetwork/bft-core/utbstore"
 )
 
@@ -121,5 +125,59 @@ func TestInstallVerifiedEpochRefusesWithoutTheEntryStoreOrWithAnotherChain(t *te
 		_, err := r.manager.InstallVerifiedEpoch(w.entry, forged, w.f.Snapshot, nil)
 		require.Error(t, err, "the signatures no longer cover the entry")
 		require.EqualValues(t, 1, r.manager.utbStore.Tip().Epoch)
+	})
+}
+
+// The V2 installer's side: the facts come from the verified body and the record's activation round, and the retained entry is the one the old committee
+// endorsed. (InstallEpochBundle itself needs a profile 2 recovery history; the check it calls is exercised here with the bundle fixture.)
+func TestRetainInstalledUTBForAV2Bundle(t *testing.T) {
+	f := handoffbundle.New(t)
+	genesis, successor := handoffbundle.WithUTB(t, f)
+	cfg := votesig.Config{Scheme: votesig.SchemeLegacy, Network: uint64(f.Old.NetworkID), UTB: true}
+	id, err := genesis.EntryID()
+	require.NoError(t, err)
+	open := func() *ConsensusManager {
+		s, err := utbstore.Open(memorydb.New(), genesis, id)
+		require.NoError(t, err)
+		return &ConsensusManager{utbStore: s}
+	}
+	facts := utb.FromBodyV2(f.Body, f.Proof.Record.ActivationRound)
+
+	x := open()
+	require.NoError(t, x.retainInstalledUTB(1, cfg, f.Proof, facts))
+	stored, err := x.utbStore.Entry(2)
+	require.NoError(t, err)
+	want, _ := successor.EntryID()
+	got, _ := stored.EntryID()
+	require.Equal(t, want, got)
+	require.NoError(t, stored.VerifySuccessor(genesis))
+	require.NoError(t, x.retainInstalledUTB(1, cfg, f.Proof, facts), "idempotent")
+
+	t.Run("not a UTB epoch: nothing to retain", func(t *testing.T) {
+		y := open()
+		require.NoError(t, y.retainInstalledUTB(1, votesig.Config{Scheme: votesig.SchemeLegacy}, f.Proof, facts))
+		require.EqualValues(t, 1, y.utbStore.Tip().Epoch)
+	})
+	t.Run("another activation round than the record's", func(t *testing.T) {
+		bad := utb.FromBodyV2(f.Body, f.Proof.Record.ActivationRound+1)
+		y := open()
+		require.ErrorIs(t, y.retainInstalledUTB(1, cfg, f.Proof, bad), ErrUTBMismatch)
+		require.EqualValues(t, 1, y.utbStore.Tip().Epoch)
+	})
+	t.Run("another body", func(t *testing.T) {
+		body := f.Body
+		body.StateSummary = bytes.Repeat([]byte{9}, 32)
+		y := open()
+		require.ErrorIs(t, y.retainInstalledUTB(1, cfg, f.Proof, utb.FromBodyV2(body, f.Proof.Record.ActivationRound)), ErrUTBMismatch)
+	})
+	t.Run("no store", func(t *testing.T) {
+		require.ErrorIs(t, (&ConsensusManager{}).retainInstalledUTB(1, cfg, f.Proof, facts), ErrUTBStoreMissing)
+	})
+	t.Run("a proof with no endorsement", func(t *testing.T) {
+		p := f.Proof
+		qc := *p.CommitQC
+		qc.UTB = nil
+		p.CommitQC = &qc
+		require.ErrorIs(t, open().retainInstalledUTB(1, cfg, p, facts), ErrUTBMismatch)
 	})
 }

@@ -51,6 +51,7 @@ const (
 	trustBaseDBFileName        = "trustbase.db"
 	orchestrationDBFileName    = "orchestration.db"
 	rootTrustHistoryDBFileName = "root-trust-history.db"
+	rootUTBEntriesDBFileName   = "root-utb-entries.db"
 	defaultNetworkTimeout      = 300 * time.Millisecond
 )
 
@@ -70,6 +71,9 @@ type (
 		PosDeploymentFile        string
 		PosEVMRPC                string
 		TrustHistoryDBFile       string
+		UTBGenesisFile           string // the canonical genesis entry of the signed trust-base chain (utb-genesis); enables the UTB profile
+		UTBGenesisID             string // its EntryID, the pin
+		UTBEntriesDBFile         string
 		Profile2                 bool
 		InstallHandoffEpoch      uint64
 		Q3Lane                   bool // the Q3 acceptance lane: a verified Q3 history, the install journal and the V3 handoff pipeline
@@ -146,6 +150,10 @@ func rootNodeRunCmd(baseFlags *baseFlags) *cobra.Command {
 	cmd.Flags().BoolVar(&flags.Q3Lane, "q3-lane", false, "run the Q3 acceptance lane: verified Q3 history, install journal and V3 handoffs (requires --profile-2)")
 	cmd.Flags().StringVar(&flags.Q3JournalDBFile, "q3-journal-db", "",
 		fmt.Sprintf("Q3 install journal database (default: %s)", filepath.Join("$UBFT_HOME", q3JournalDBFileName)))
+	cmd.Flags().StringVar(&flags.UTBGenesisFile, "utb-genesis", "", "enable the signed trust-base entry (UTB) profile: the canonical genesis entry file (see: trust-base utb-genesis); requires --utb-genesis-id and profile 2")
+	cmd.Flags().StringVar(&flags.UTBGenesisID, "utb-genesis-id", "", "the EntryID of the UTB genesis entry (0x-prefixed SHA-256): the pin the genesis file must match")
+	cmd.Flags().StringVar(&flags.UTBEntriesDBFile, "utb-entries-db", "",
+		fmt.Sprintf("UTB finalized entries database (default: %s)", filepath.Join("$UBFT_HOME", rootUTBEntriesDBFileName)))
 	cmd.Flags().StringVar(&flags.TrustHistoryDBFile, "trust-history-db", "",
 		fmt.Sprintf("profile-2 trust history database (default: %s)", filepath.Join("$UBFT_HOME", rootTrustHistoryDBFileName)))
 
@@ -281,7 +289,7 @@ func rootNodeRun(ctx context.Context, flags *rootNodeRunFlags) error {
 		if closer, ok := journalDB.(io.Closer); ok {
 			defer closer.Close()
 		}
-		if q3rt, err = newRootQ3Runtime(journalDB, trustBase); err != nil {
+		if q3rt, err = newRootQ3Runtime(journalDB, trustBase, flags.UTBGenesisFile != ""); err != nil {
 			return err
 		}
 		// the first trust base is the pinned genesis the verified history is rooted in; the store accepts a V3 epoch's projection only
@@ -310,6 +318,15 @@ func rootNodeRun(ctx context.Context, flags *rootNodeRunFlags) error {
 			return fmt.Errorf("opening root profile-2 history: %w", openErr)
 		}
 		options = append(options, consensus.WithRecoveryProfile2(history))
+	}
+
+	if flags.UTBGenesisFile != "" {
+		store, closeStore, utbErr := flags.openUTBStore()
+		if utbErr != nil {
+			return utbErr
+		}
+		defer closeStore()
+		options = append(options, consensus.WithUTBStore(store))
 	}
 
 	// The root serves the automatic bootstrap-freshness protocol (F6f, #350) in default
