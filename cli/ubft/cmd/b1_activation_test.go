@@ -625,7 +625,7 @@ func TestB1Genesis_AManifestCompilesIntoTheFreshB1Genesis(t *testing.T) {
 func TestB1ProfileFileMatchesTheGenesisToolsGolden(t *testing.T) {
 	h := func(b byte, tail byte) (out [32]byte) { out[0], out[1], out[31] = b, b, tail; return }
 	p := b1state.Profile{Network: 3, RootGenesisID: h(0x29, 0x01), ExecutionChainID: 31337, RuntimeHash: h(0x28, 0x02), CompilerHash: h(0x2f, 0x03),
-		MaxEpochsPerUpdate: 2, DeltaEV: 16, DeltaHold: 17, SystemGas: 269547540, ForcedGas: 5, MaxGas: 276547540, OrdinaryCapacity: 7000000, RestGas: 3431500,
+		MaxEpochsPerUpdate: 2, DeltaEV: 16, DeltaHold: 17, SystemGas: 269547540, ForcedGas: 5, MaxGas: 276547540, OrdinaryCapacity: 7000000, RestGas: 1650000,
 		CompanionBytes: 1048576, OtherCompanionBytes: 65536, GenesisUCTime: 1700000000,
 		RecordsCustody: common.HexToAddress("0x0c0571"), HRecords: 8, HookRecordGas: 120000, ElectionContract: common.HexToAddress("0xe1ec7"), ElectGas: 4200000}
 	got, err := json.Marshal(b1ProfileFileOf(p))

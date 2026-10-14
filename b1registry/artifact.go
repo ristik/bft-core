@@ -15,13 +15,10 @@ import (
 	"github.com/unicitynetwork/bft-core/b1state"
 )
 
-// INTERIM (anyage/b1state): the slot inventory of seal-registry.json was edited by hand to the permanent layout so the Go side can be tested;
-// the bytecode is still the windowed registry's. Replaced by the regenerated artifact of the permanent-registry contract (dev2/dev3).
-const Source = "ristik/unicity-pos-contracts@30bc153a5cbbc42622dda13ab9603cfe08978853:artifacts/seal-registry.json"
-const CodeHashHex = "0x1c660647c1dc27aff97d9e9d5315e2ff60208ea8446253164d831c3ae0cd2611"
+const Source = "ristik/unicity-pos-contracts@e07288e (branch registry/permanent-layout; PR to follow):artifacts/seal-registry.json"
+const CodeHashHex = "0x8c5b57fd322b9ca1370fca310564a1fba8e80b6ad29a78ceb23aa9ae4113cfe4"
 
-// MaxMeasuredEpochs is the most epochs per update the runtime's G_rest was measured for. PROVISIONAL: the permanent-registry runtime (ureth) is
-// re-measured for B = b1state.MinEpochsPerUpdate; until then this is that minimum.
+// MaxMeasuredEpochs is the most epochs per update the runtime's G_rest was measured for (contracts B1GenesisBuilder: UnmeasuredB above 2).
 const MaxMeasuredEpochs uint64 = b1state.MinEpochsPerUpdate
 
 var ErrArtifact = errors.New("b1registry: registry artifact or profile differs from pin")
@@ -35,7 +32,7 @@ func CompilerHash() [32]byte {
 }
 func Runtime() ([]byte, error) {
 	sum := sha256.Sum256(artifact)
-	if hex.EncodeToString(sum[:]) != "0ee686a49a97f9249e118a9234a670e5090b7ab1aee2bba90473151fe65fb734" {
+	if hex.EncodeToString(sum[:]) != "c575023a1038a34cc92b802ad393a2722b0f5eacefccd82f4c90469347711ee7" {
 		return nil, ErrArtifact
 	}
 	var a struct {
@@ -64,8 +61,9 @@ func Runtime() ([]byte, error) {
 }
 
 // MinRestGas is the frozen G_rest allowance the profile must reserve for an update of b epochs: the measured base plus the per-epoch term.
-// PROVISIONAL: the figures are the windowed runtime's; the permanent-registry runtime is re-measured by ureth and these are replaced then.
-func MinRestGas(b uint64) uint64 { return 1136500 + 1147500*b }
+// Measured on the permanent-layout runtime under forge's EVM with 16-member entries (briefs/registry-permanent-layout-for-dev-dev3.md): ureth re-measures
+// under the real client.
+func MinRestGas(b uint64) uint64 { return 1_150_000 + 250_000*b }
 
 // ValidateProfile enforces the measured envelope, independently of caller-supplied pins.
 func ValidateProfile(p b1state.Profile) error {

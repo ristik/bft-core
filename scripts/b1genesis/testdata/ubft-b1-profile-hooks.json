@@ -11,7 +11,7 @@
   "forcedGas": 5,
   "maxGas": 276547540,
   "ordinaryCapacity": 7000000,
-  "restGas": 3431500,
+  "restGas": 1650000,
   "companionBytes": 1048576,
   "otherCompanionBytes": 65536,
   "genesisUcTime": 1700000000,
