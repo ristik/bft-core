@@ -1,6 +1,7 @@
 package bridgeprofile
 
 import (
+	"bytes"
 	"math/big"
 
 	"github.com/decred/dcrd/dcrec/secp256k1/v4"
@@ -15,6 +16,21 @@ import (
 type Fixture struct {
 	Cfg    *Cfg
 	Policy Policy
+	// Shards is the fixture's current shard topology of the aggregation partition, in increasing shard order: the shards and
+	// configurations its certificates are issued under. The policy does not carry it (protocol 4); fixtures and the corpus do.
+	Shards []ShardRow
+}
+
+// ShardRow is one shard of a fixture topology: its native shard ID and its PDR configuration hash.
+type ShardRow struct {
+	ID   []byte
+	Conf [32]byte
+}
+
+// fixtureTopology is the complete uniform MSB-first prefix topology of depth 0 or 1, in increasing shard byte order.
+var fixtureTopology = [][][]byte{
+	0: {{0x80}},
+	1: {{0x40}, {0xc0}},
 }
 
 // NewFixture builds the DEV fixture Cfg from literal inputs. The aggregator
@@ -36,9 +52,20 @@ func NewFixture(chainID uint64, aggPartition uint32, aggConfs ...[32]byte) *Fixt
 	c.B1ProfileHash = H([]byte("fixture-b1-profile"))
 	c.Ty = DeriveType(c.Network, c.RootGenesis, c.ExecutionGenesis, c.ChainID)
 	c.Aid = DeriveAsset(c.Network, c.RootGenesis, c.ExecutionGenesis, c.ChainID)
-	pol := NewPolicy(aggPartition, aggConfs...)
+	pol := NewPolicy(aggPartition)
 	c.AggregatorPolicyHash = pol.Hash()
-	return &Fixture{Cfg: &c, Policy: pol}
+	depth := 0
+	for 1<<depth < len(aggConfs) {
+		depth++
+	}
+	if depth > 1 || 1<<depth != len(aggConfs) {
+		panic("bridgeprofile: a fixture topology has 1 or 2 shard configurations")
+	}
+	f := &Fixture{Cfg: &c, Policy: pol}
+	for i, conf := range aggConfs {
+		f.Shards = append(f.Shards, ShardRow{ID: bytes.Clone(fixtureTopology[depth][i]), Conf: conf})
+	}
+	return f
 }
 
 // KeyFromSeed derives a deterministic signing key.

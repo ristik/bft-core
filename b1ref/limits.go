@@ -50,12 +50,6 @@ func BatchGas(c, k, e, q, a, p uint64) uint64 {
 	return ScanGas(c, k) + gasPerRead*commonReads + EpochGas*e + gasPerSig*q + gasPerClaim*a + gasPerPathStep*p
 }
 
-// UCGas is the retired step-0 UC_V1 charge, 90,700 + 16*B + 6000*S + 2000*N + 250*P. Only the protocol-3 bridge gate in
-// bridgeprofile still uses it, until that gate moves to protocol 4 (contract section 5).
-func UCGas(b, s, n, p uint64) uint64 {
-	return scanBaseGas + gasPerByte*b + gasPerMember*MaxMembers + gasPerSig*s + gasPerClaim*n + gasPerPathStep*p + gasPerRead*(8+11+8*MaxMembers)
-}
-
 // RSMTGas is the charge of RSMT_MEMBER_V1: 2000 + 16*B + 250*(1+popcount(bitmap)).
 func RSMTGas(b, popcount uint64) uint64 {
 	return rsmtBaseGas + gasPerByte*b + gasPerPathStep*(1+popcount)

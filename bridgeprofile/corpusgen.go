@@ -358,37 +358,24 @@ func hexSIDs(sids [][32]byte) string {
 func (g *gen) policy() {
 	f := g.d.F
 	pb := f.Policy.Bytes()
-	confs := [2][32]byte{f.Policy.Shards[0].Conf, f.Policy.Shards[1].Conf}
+	confs := [2][32]byte{f.Shards[0].Conf, f.Shards[1].Conf}
 	ap := func(id, desc string, body []byte) {
 		g.add(Case{ID: id, Family: "policy", Op: "policy-decode", Description: desc, Input: hx(body)})
 	}
-	ap("policy-valid", "the canonical depth 1 policy: shards 40 and c0 in increasing order", pb)
-	ap("policy-valid-depth0", "the canonical depth 0 policy: the one shard 80", NewPolicy(f.Policy.Partition, confs[0]).Bytes())
+	part := uint64(f.Policy.Partition)
+	ap("policy-valid", "the canonical AGG_PARTITION_V2 policy: domain, version 2, the aggregation partition", pb)
 	ap("policy-trailing", "one trailing byte", append(bytes.Clone(pb), 0))
-	ap("policy-old-domain", "the retired one-shard domain UNICITY_BR_AGG_ONE",
-		replaceOnce(pb, CBytes([]byte(policyDomain)), CBytes([]byte("UNICITY_BR_AGG_ONE"))))
-	ap("policy-version-2", "literal version 2", replaceOnce(pb, append(CBytes([]byte(policyDomain)), 0x01), append(CBytes([]byte(policyDomain)), 0x02)))
-	ap("policy-partition-zero", "partition 0", NewPolicy(0, confs[0], confs[1]).Bytes())
-	ap("policy-nonminimal-partition", "partition 11 as 0x180b", replaceOnce(pb, []byte{0x0b, 0x01}, []byte{0x18, 0x0b, 0x01}))
-	ap("policy-depth-2", "depth 2 with four rows", CArr(CBytes([]byte(policyDomain)), CUint(1), CUint(uint64(f.Policy.Partition)), CUint(2),
-		CArr(CArr(CBytes([]byte{0x20}), CBytes(confs[0][:])), CArr(CBytes([]byte{0x60}), CBytes(confs[0][:])),
-			CArr(CBytes([]byte{0xa0}), CBytes(confs[1][:])), CArr(CBytes([]byte{0xe0}), CBytes(confs[1][:])))))
-	row := func(id []byte, conf [32]byte) []byte { return CArr(CBytes(id), CBytes(conf[:])) }
-	withRows := func(depth uint64, rows ...[]byte) []byte {
-		return CArr(CBytes([]byte(policyDomain)), CUint(1), CUint(uint64(f.Policy.Partition)), CUint(depth), CArr(rows...))
-	}
-	ap("policy-depth0-two-rows", "depth 0 with two rows", withRows(0, row([]byte{0x80}, confs[0]), row([]byte{0x80}, confs[1])))
-	ap("policy-depth1-one-row", "depth 1 with only shard 40: a hole", withRows(1, row([]byte{0x40}, confs[0])))
-	ap("policy-depth1-reordered", "depth 1 rows in decreasing shard order", withRows(1, row([]byte{0xc0}, confs[1]), row([]byte{0x40}, confs[0])))
-	ap("policy-depth1-duplicate", "depth 1 naming shard 40 twice (overlap and hole)", withRows(1, row([]byte{0x40}, confs[0]), row([]byte{0x40}, confs[1])))
-	ap("policy-depth1-shard-80", "depth 1 with the root shard 80 and c0 (overlap)", withRows(1, row([]byte{0x80}, confs[0]), row([]byte{0xc0}, confs[1])))
-	ap("policy-empty-bstr-shard", "empty byte string instead of a native shard", withRows(0, row(nil, confs[0])))
-	ap("policy-short-conf", "31-byte configuration hash", withRows(0, CArr(CBytes([]byte{0x80}), CBytes(confs[0][:31]))))
-	ap("policy-extra-field", "a sixth top-level field", CArr(CBytes([]byte(policyDomain)), CUint(1), CUint(uint64(f.Policy.Partition)), CUint(1),
-		CArr(row([]byte{0x40}, confs[0]), row([]byte{0xc0}, confs[1])), CUint(0)))
-	ap("policy-row-extra-field", "a third field in a row", withRows(0, CArr(CBytes([]byte{0x80}), CBytes(confs[0][:]), CUint(0))))
-	ap("policy-nonminimal-depth", "depth 1 as 0x1801", CArr(CBytes([]byte(policyDomain)), CUint(1), CUint(uint64(f.Policy.Partition)), []byte{0x18, 0x01},
-		CArr(row([]byte{0x40}, confs[0]), row([]byte{0xc0}, confs[1]))))
+	ap("policy-protocol-3", "the retired protocol-3 sharded body (UNICITY_BR_AGG_SHARDED, version 1, depth and shard rows)",
+		CArr(CBytes([]byte("UNICITY_BR_AGG_SHARDED")), CUint(1), CUint(part), CUint(1), CArr(CArr(CBytes([]byte{0x40}), CBytes(confs[0][:])), CArr(CBytes([]byte{0xc0}), CBytes(confs[1][:])))))
+	ap("policy-old-domain", "the retired one-shard domain UNICITY_BR_AGG_ONE", replaceOnce(pb, CBytes([]byte(policyDomain)), CBytes([]byte("UNICITY_BR_AGG_ONE"))))
+	ap("policy-domain-text", "the domain as a text string", replaceOnce(pb, CBytes([]byte(policyDomain)), cat(head(3, uint64(len(policyDomain))), []byte(policyDomain))))
+	ap("policy-version-1", "literal version 1", CArr(CBytes([]byte(policyDomain)), CUint(1), CUint(part)))
+	ap("policy-version-3", "literal version 3", CArr(CBytes([]byte(policyDomain)), CUint(3), CUint(part)))
+	ap("policy-partition-zero", "partition 0", NewPolicy(0).Bytes())
+	ap("policy-partition-wide", "partition 2^32", CArr(CBytes([]byte(policyDomain)), CUint(PolicyVersion), CUint(1<<32)))
+	ap("policy-nonminimal-partition", "partition 11 as 0x180b", replaceOnce(pb, []byte{0x02, 0x0b}, []byte{0x02, 0x18, 0x0b}))
+	ap("policy-extra-field", "a fourth field (a shard list)", CArr(CBytes([]byte(policyDomain)), CUint(PolicyVersion), CUint(part), CArr()))
+	ap("policy-missing-partition", "two fields", CArr(CBytes([]byte(policyDomain)), CUint(PolicyVersion)))
 	ap("policy-oversized", "over 512 bytes", append(bytes.Clone(pb), make([]byte, MaxPolicyBytes)...))
 
 	// Default envelope: two leaves in shard 40, one anchor equal to that shard's tuple.
@@ -398,7 +385,7 @@ func (g *gen) policy() {
 		if len(n) > 0 {
 			u = n[0]
 		}
-		return Anchor{Partition: f.Policy.Partition, Shard: f.Policy.Shards[row].ID, ShardConfHash: f.Policy.Shards[row].Conf,
+		return Anchor{Partition: f.Policy.Partition, Shard: f.Shards[row].ID, ShardConfHash: f.Shards[row].Conf,
 			ExpectedStateRoot: H([]byte{byte(row), 'r', u}), ExpectedIRHash: H([]byte{byte(row), 'i', u}), UC: []byte{9, u}, InputRecord: []byte{7, 7}}
 	}
 	envFor := func(mutate func(e *Envelope)) *Envelope {
@@ -432,7 +419,7 @@ func (g *gen) policy() {
 			}
 		})
 	}
-	addEnv("envelope-valid", "one anchor whose claim fields are the shard 40 policy row, two leaves in shard 40 at index 0", envFor(nil), 2)
+	addEnv("envelope-valid", "one anchor of shard 40, two leaves in shard 40 at index 0", envFor(nil), 2)
 	addEnvSIDs("envelope-valid-two-shards", "leaves in both shards: two anchors in first-use order, indices 0 and 1", bothEnv(nil), both)
 	addEnvSIDs("envelope-valid-two-anchors-one-shard", "two different UCs of shard 40 are two anchors, first used by leaf 0 and leaf 1",
 		envFor(func(e *Envelope) {
@@ -447,15 +434,13 @@ func (g *gen) policy() {
 		envFor(func(e *Envelope) { e.Anchors = []Anchor{anchorOf(1)} }), sidsN(1, 2))
 	addEnv("envelope-missing-policy", "empty policy body", envFor(func(e *Envelope) { e.PolicyBody = nil }), 2)
 	addEnv("envelope-other-partition-policy", "a well formed policy for another partition", envFor(func(e *Envelope) {
-		e.PolicyBody = NewPolicy(12, confs[0], confs[1]).Bytes()
-	}), 2)
-	addEnv("envelope-depth0-policy", "a well formed depth 0 policy that Cfg does not pin", envFor(func(e *Envelope) {
-		e.PolicyBody = NewPolicy(f.Policy.Partition, confs[0]).Bytes()
+		e.PolicyBody = NewPolicy(12).Bytes()
 	}), 2)
 	addEnv("envelope-trailing-policy", "policy body with a trailing byte", envFor(func(e *Envelope) { e.PolicyBody = append(bytes.Clone(pb), 0) }), 2)
 	addEnv("envelope-partition", "anchor partition changed", envFor(func(e *Envelope) { e.Anchors[0].Partition++ }), 2)
-	addEnv("envelope-shard", "anchor shard changed to 80", envFor(func(e *Envelope) { e.Anchors[0].Shard = []byte{0x80} }), 2)
-	addEnv("envelope-conf", "anchor configuration changed", envFor(func(e *Envelope) { e.Anchors[0].ShardConfHash[0] ^= 1 }), 2)
+	addEnv("envelope-shard-root", "anchor of the root shard 80 (depth 0): every state ID carries its empty prefix, so planning admits it and the UC decides", envFor(func(e *Envelope) { e.Anchors[0].Shard = []byte{0x80} }), 2)
+	addEnv("envelope-shard-noncanonical", "anchor shard 00 (no terminator)", envFor(func(e *Envelope) { e.Anchors[0].Shard = []byte{0x00} }), 2)
+	addEnv("envelope-conf", "anchor configuration changed: not a policy question in protocol 4 (the UC authenticates it), planning admits it", envFor(func(e *Envelope) { e.Anchors[0].ShardConfHash[0] ^= 1 }), 2)
 	addEnvSIDs("envelope-anchor-of-other-shard", "leaves in shard 40 carrying the c0 anchor", envFor(func(e *Envelope) { e.Anchors = []Anchor{anchorOf(1)} }), sidsN(0, 2))
 	addEnv("envelope-two-identical-anchors", "two anchors with byte-identical UCs: the duplicate is rejected, never a second anchor", envFor(func(e *Envelope) { e.Anchors = append(e.Anchors, e.Anchors[0]); e.LeafProofs[1].AnchorIndex = 1 }), 2)
 	addEnv("envelope-unused-anchor", "a second anchor (shard c0) that no leaf uses", envFor(func(e *Envelope) { e.Anchors = append(e.Anchors, anchorOf(1, 2)) }), 2)
@@ -466,8 +451,10 @@ func (g *gen) policy() {
 		e.LeafProofs[0].AnchorIndex, e.LeafProofs[1].AnchorIndex = 1, 0
 	}), both)
 	addEnvSIDs("envelope-leaf-index-out-of-range", "second leaf names anchor 2", bothEnv(func(e *Envelope) { e.LeafProofs[1].AnchorIndex = 2 }), both)
-	addEnv("envelope-nine-anchors", "nine anchors: one over MaxAnchors", envFor(func(e *Envelope) {
-		e.Anchors = append(e.Anchors, anchorOf(0, 2), anchorOf(0, 3), anchorOf(0, 4), anchorOf(0, 5), anchorOf(0, 6), anchorOf(0, 7), anchorOf(0, 8), anchorOf(0, 9))
+	addEnv("envelope-nine-anchors", "MaxAnchors+1 (seventeen) anchors for two leaves: refused by the count bound before any other check", envFor(func(e *Envelope) {
+		for u := byte(2); len(e.Anchors) <= MaxAnchors; u++ {
+			e.Anchors = append(e.Anchors, anchorOf(0, u))
+		}
 	}), 2)
 	addEnv("envelope-three-anchors", "three anchors for two leaves", envFor(func(e *Envelope) { e.Anchors = append(e.Anchors, anchorOf(0, 2), anchorOf(0, 3)) }), 2)
 	addEnv("envelope-no-anchors", "no anchors", envFor(func(e *Envelope) { e.Anchors = nil }), 2)
@@ -1348,16 +1335,17 @@ func (g *gen) proof() {
 	// With the repriced certificate call (owner-decisions section 22) real four-signature certificates never reach the gate, even
 	// at eight anchors with sixteen leaves and deep paths; only the maximum-signature case below does.
 	g.useQuad, g.extraN = false, 0
-	perLeaf("compose-anchors-over-max", "MaxAnchors+1 leaves, each certified by its own UC", MaxAnchors-1)
-	// Eight anchors of certificates carrying 64 seal signatures each (the native maximum): structurally
-	// admitted; the gate prices them (about 0.6M each) before any B1 call.
+	// MaxAnchors+1 anchors cannot come from a token any more (anchors <= leaves <= MaxLeaves = MaxAnchors); the anchor bound is
+	// exercised on envelopes (envelope-anchors-over-max).
+	// MaxAnchors anchors of certificates carrying 16 seal signatures each (the native maximum): structurally admitted; the gate
+	// prices the batch (each a distinct seal, Q = 256) before any B1 call.
 	if hc, err := g.certifiedWith(MaxAnchors-2, func(i int, l Leaf) ShardRound { return ShardRound{BaseTime + 1000, 100 + uint64(i)} }); err == nil {
 		eb := envOf(hc.h, hc.cert, func(e *Envelope) {
 			for i := range e.Anchors {
-				e.Anchors[i].UC = ucWithSigs(g, e.Anchors[i].UC, 64)
+				e.Anchors[i].UC = ucWithSigs(g, e.Anchors[i].UC, 16)
 			}
 		})
-		add("compose-anchors-max-heavy-over-budget", "MaxAnchors (eight) anchors whose certificates carry 64 signatures each (the native maximum), the heaviest admitted shape", eb, claimsOf(hc.cert.Anchors...), "return")
+		add("compose-anchors-max-heavy-over-budget", "MaxAnchors (sixteen) anchors whose certificates carry 16 signatures each (the native maximum), the heaviest admitted shape", eb, claimsOf(hc.cert.Anchors...), "return")
 	} else {
 		g.must(err)
 	}

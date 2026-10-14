@@ -128,4 +128,7 @@ var priorCaseIDs = []string{
 }
 
 // priorCaseRename maps the prior IDs that changed to their replacement.
-var priorCaseRename = map[string]string{"derive-n160": "derive-n256", "envelope-two-anchors": "envelope-valid-two-anchors-one-shard", "envelope-anchors-8": "envelope-anchors-max", "envelope-anchors-9": "envelope-anchors-over-max"}
+var priorCaseRename = map[string]string{"derive-n160": "derive-n237", "envelope-two-anchors": "envelope-valid-two-anchors-one-shard", "envelope-anchors-8": "envelope-anchors-max", "envelope-anchors-9": "envelope-anchors-over-max",
+	// protocol 4: the policy carries no shard rows, so the protocol-3 row cases map to the rejection of the protocol-3 body, and an
+	// anchor of shard 80 is a root-shard anchor
+	"policy-empty-bstr-shard": "policy-protocol-3", "envelope-shard": "envelope-shard-root"}

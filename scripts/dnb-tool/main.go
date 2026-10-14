@@ -8,7 +8,6 @@ package main
 import (
 	"bytes"
 	"context"
-	stdcrypto "crypto"
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/json"
@@ -86,9 +85,8 @@ func deployment(args []string) error {
 	if err := json.Unmarshal(raw, &id); err != nil {
 		return err
 	}
-	// One registered shard configuration per policy row, in increasing shard-id
-	// byte order (a depth-1 deployment lists the 0x40 shard, then 0xc0).
-	var confs [][32]byte
+	// The registered shard configurations of the aggregation partition: protocol 4's policy names only the partition (the UCs
+	// authenticate each shard's configuration), so they serve to read and cross-check that partition.
 	var partition uint32
 	for i, path := range strings.Split(*aggConfPath, ",") {
 		rawConf, err := os.ReadFile(path)
@@ -99,20 +97,13 @@ func deployment(args []string) error {
 		if err := json.Unmarshal(rawConf, &conf); err != nil {
 			return fmt.Errorf("decoding the aggregator shard configuration %s: %w", path, err)
 		}
-		h, err := conf.Hash(stdcrypto.SHA256)
-		if err != nil {
-			return err
-		}
 		if i == 0 {
 			partition = uint32(conf.PartitionID)
 		} else if partition != uint32(conf.PartitionID) {
 			return fmt.Errorf("shard configuration %s belongs to partition %d, not %d", path, conf.PartitionID, partition)
 		}
-		var c [32]byte
-		copy(c[:], h)
-		confs = append(confs, c)
 	}
-	pol := bridgeprofile.NewPolicy(partition, confs...)
+	pol := bridgeprofile.NewPolicy(partition)
 	semantic := sha256.Sum256(bridgeprofile.SemanticProfileJSON())
 	doc := map[string]any{
 		"network":             *network,

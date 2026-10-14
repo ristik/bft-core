@@ -3,84 +3,38 @@ package bridgeprofile
 import (
 	"bytes"
 	"math/big"
+	"math/bits"
 
 	"github.com/ethereum/go-ethereum/accounts/abi"
 )
 
-const policyDomain = "UNICITY_BR_AGG_SHARDED"
+const policyDomain = "UNICITY_BR_AGG_PARTITION"
 
-// PolicyVersion is the literal version field of the sharded policy body.
-const PolicyVersion = 1
+// PolicyVersion is the literal version field of the partition policy body.
+const PolicyVersion = 2
 
 // EmptyPrefixShard is the one-byte native encoding of the empty shard prefix
 // (depth 0). It is 0x80, not the empty byte string.
 var EmptyPrefixShard = []byte{0x80}
 
-// shardTopology is the complete uniform MSB-first prefix topology of each
-// admitted depth, in increasing shard byte order. A native shard ID is the
-// prefix bits, one set terminator bit and zero padding.
-var shardTopology = [][][]byte{
-	0: {{0x80}},
-	1: {{0x40}, {0xc0}},
-}
-
-// MaxDepth is the deepest admitted topology.
-const MaxDepth = 1
-
-// ShardRow is one policy entry: a native shard and its authenticated native
-// PDR configuration hash.
-type ShardRow struct {
-	ID   []byte
-	Conf [32]byte
-}
-
-// Policy is the sole admitted body C("UNICITY_BR_AGG_SHARDED",1,
-// aggregatorPartition,depth,[[b(shardID),b(shardConfHash)],...]) with exactly
-// 2^depth rows in increasing shard byte order. Its hash is
-// Cfg.aggregatorPolicyHash.
+// Policy is the sole admitted body C(b("UNICITY_BR_AGG_PARTITION"),2,aggregatorPartition) (briefs/b1-any-age-contract.md section 6,
+// AGG_PARTITION_V2): one fixed aggregation partition whose certified shard configurations are authorized by the root quorum. It
+// names no depth, shard list or configuration: each anchor's UC authenticates its own historical shard and configuration hash, and
+// its depth comes from its own canonical shard ID. Its hash is Cfg.aggregatorPolicyHash.
 type Policy struct {
 	Partition uint32
-	Depth     uint8
-	Shards    []ShardRow
 }
 
-// NewPolicy builds the policy of a complete topology of depth len(confs)=2^depth.
-func NewPolicy(partition uint32, confs ...[32]byte) Policy {
-	depth := 0
-	for 1<<depth < len(confs) {
-		depth++
-	}
-	if depth > MaxDepth || 1<<depth != len(confs) {
-		panic("bridgeprofile: policy needs 1 or 2 shard configurations")
-	}
-	p := Policy{Partition: partition, Depth: uint8(depth)}
-	for i, c := range confs {
-		p.Shards = append(p.Shards, ShardRow{ID: bytes.Clone(shardTopology[depth][i]), Conf: c})
-	}
-	return p
-}
+// NewPolicy is the policy of an aggregation partition.
+func NewPolicy(partition uint32) Policy { return Policy{Partition: partition} }
 
 // Bytes is the exact canonical policy body.
 func (p Policy) Bytes() []byte {
-	rows := make([][]byte, len(p.Shards))
-	for i, s := range p.Shards {
-		rows[i] = CArr(CBytes(s.ID), CBytes(s.Conf[:]))
-	}
-	return CArr(CBytes([]byte(policyDomain)), CUint(PolicyVersion), CUint(uint64(p.Partition)),
-		CUint(uint64(p.Depth)), CArr(rows...))
+	return CArr(CBytes([]byte(policyDomain)), CUint(PolicyVersion), CUint(uint64(p.Partition)))
 }
 
 // Hash is aggregatorPolicyHash = H(exact policy bytes).
 func (p Policy) Hash() [32]byte { return H(p.Bytes()) }
-
-// ShardIndex is the row whose shard names the top Depth bits of the raw 32-byte
-// state ID.
-func (p Policy) ShardIndex(sid [32]byte) int {
-	if p.Depth == 0 {
-		return 0
-	}
-	return int(sid[0] >> 7)
-}
 
 // DecodePolicy strictly decodes a policy body of at most MaxPolicyBytes bytes.
 func DecodePolicy(b []byte) (Policy, error) {
@@ -91,7 +45,7 @@ func DecodePolicy(b []byte) (Policy, error) {
 	if err != nil {
 		return Policy{}, err
 	}
-	if !root.isArray(5) {
+	if !root.isArray(3) {
 		return Policy{}, ErrShape
 	}
 	k := root.kids
@@ -108,29 +62,33 @@ func DecodePolicy(b []byte) (Policy, error) {
 	if part == 0 {
 		return Policy{}, ErrIntRange
 	}
-	depth, err := k[3].uintMax(MaxDepth)
-	if err != nil {
-		return Policy{}, ErrShape
-	}
-	topo := shardTopology[depth]
-	if !k[4].isArray(len(topo)) {
-		return Policy{}, ErrShape
-	}
-	p := Policy{Partition: uint32(part), Depth: uint8(depth)}
-	for i := range topo {
-		row := k[4].kids[i]
-		if !row.isArray(2) || !row.kids[0].isBytes() || !bytes.Equal(row.kids[0].data, topo[i]) {
-			return Policy{}, ErrShape
-		}
-		r := ShardRow{ID: bytes.Clone(topo[i])}
-		if err := fixed(&row.kids[1], r.Conf[:]); err != nil {
-			return Policy{}, err
-		}
-		p.Shards = append(p.Shards, r)
-	}
 	// Canonical form follows from the strict scanner (shortest heads, definite
 	// lengths) plus the exact field shapes above, so no re-encode is needed.
-	return p, nil
+	return Policy{Partition: uint32(part)}, nil
+}
+
+// ShardDepth is the depth d of a canonical native shard ID: 8*len - trailingZeroBits(last byte) - 1, the bits before the
+// terminator. ok is false for a noncanonical ID (empty, zero last byte, over 33 bytes or deeper than 256).
+func ShardDepth(shard []byte) (d int, ok bool) {
+	if len(shard) == 0 || len(shard) > 33 || shard[len(shard)-1] == 0 {
+		return 0, false
+	}
+	d = 8*len(shard) - bits.TrailingZeros8(shard[len(shard)-1]) - 1
+	return d, d <= 256
+}
+
+// InShard reports whether the first d bits of a 32-byte state ID are the shard's prefix bits (contract section 6).
+func InShard(shard []byte, sid [32]byte) bool {
+	d, ok := ShardDepth(shard)
+	if !ok {
+		return false
+	}
+	for i := 0; i < d; i++ {
+		if (shard[i/8]>>(7-uint(i%8)))&1 != (sid[i/8]>>(7-uint(i%8)))&1 {
+			return false
+		}
+	}
+	return true
 }
 
 // Anchor is the ABI tuple
@@ -396,15 +354,12 @@ func CheckPolicyBody(cfg *Cfg, env *Envelope) (Policy, error) {
 	return pol, nil
 }
 
-// PlanAnchors requires the envelope's anchor table to be exactly the function
-// of the exported leaves the profile defines: one leaf proof per leaf in kernel
-// order; every anchor's partition, shard and configuration equal to a policy
-// row (the claim fields other than the two native openings are derived from
-// the UC and the policy); anchors pairwise distinct by complete UC bytes
-// (byte-identical UCs are one anchor, never two); anchors numbered by first use
-// in leaf order with none unused; and each leaf's anchorIndex naming an anchor
-// of the leaf's own shard. Different UCs of one shard, even of one root round,
-// are separate anchors. The number of anchors is not tied to the number of
+// PlanAnchors requires the envelope's anchor table to be exactly the function of the exported leaves the profile defines: one leaf
+// proof per leaf in kernel order; every anchor of the policy's partition with a canonical shard ID; anchors pairwise distinct by
+// complete UC bytes (byte-identical UCs are one anchor, never two); anchors numbered by first use in leaf order with none unused;
+// and each leaf's anchorIndex naming an anchor whose shard prefix the leaf's state ID carries. Anchors of one history may come
+// from different topologies: a parent shard before a split and its child after it are both admitted, each bound by its own UC.
+// The configuration hash is not checked here: the UC authenticates it (B1). The number of anchors is not tied to the number of
 // shards.
 func PlanAnchors(pol Policy, env *Envelope, sids [][32]byte) (*AnchorPlan, error) {
 	if len(env.LeafProofs) != len(sids) {
@@ -416,20 +371,12 @@ func PlanAnchors(pol Policy, env *Envelope, sids [][32]byte) (*AnchorPlan, error
 	if len(env.Anchors) == 0 || len(env.Anchors) > len(sids) {
 		return nil, ErrPolicyAnchors
 	}
-	rowOf := make([]int, len(env.Anchors))
 	seen := make(map[[32]byte]struct{}, len(env.Anchors))
 	for j := range env.Anchors {
 		a := &env.Anchors[j]
-		row := -1
-		for r, sh := range pol.Shards {
-			if bytes.Equal(a.Shard, sh.ID) {
-				row = r
-			}
-		}
-		if row < 0 || a.Partition != pol.Partition || a.ShardConfHash != pol.Shards[row].Conf {
+		if _, ok := ShardDepth(a.Shard); !ok || a.Partition != pol.Partition {
 			return nil, ErrPolicyTuple
 		}
-		rowOf[j] = row
 		h := H(a.UC)
 		if _, dup := seen[h]; dup {
 			return nil, ErrPolicyAnchors
@@ -440,7 +387,7 @@ func PlanAnchors(pol Policy, env *Envelope, sids [][32]byte) (*AnchorPlan, error
 	next := 0
 	for i, sid := range sids {
 		idx := int(env.LeafProofs[i].AnchorIndex)
-		if idx >= len(env.Anchors) || idx > next || rowOf[idx] != pol.ShardIndex(sid) {
+		if idx >= len(env.Anchors) || idx > next || !InShard(env.Anchors[idx].Shard, sid) {
 			return nil, ErrPolicyLeafIndex
 		}
 		if idx == next {

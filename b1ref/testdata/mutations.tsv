@@ -1,0 +1,28 @@
+# id	file	sed expression	expect (red: some b1ref test fails; survives: documented unreachable, see note)	note
+seal-key-half	b1ref/prescan.go	s/if o.newSeal \&\& bytes.Equal(p.seal, o.seal) {/if o.newSeal \&\& bytes.Equal(p.seal[:len(p.seal)\/2], o.seal[:len(o.seal)\/2]) {/	red	seal identity is the complete seal bytes
+epoch-grouping-off	b1ref/prescan.go	s/if p.epoch == o.epoch {/if false \&\& p.epoch == o.epoch {/	red	distinct epochs are grouped (E)
+claim-dedup-off	b1ref/batch.go	s/if !o.newClaim {/if false \&\& !o.newClaim {/	red	each distinct claim is evaluated once
+seal-dedup-off	b1ref/batch.go	s/if !pl.occ\[i\].newSeal {/if false \&\& !pl.occ[i].newSeal {/	red	each distinct seal is checked once
+epoch-not-usable-off	b1ref/batch.go	s/if seal.Epoch > cm.origin {/if false {/	red	e > U is false without an entry read (comparing with the tip instead is an equivalent mutant: I = U when ready)
+future-off	b1ref/batch.go	s/if r > cm.o {/if false {/	red	r <= O
+end-off	b1ref/batch.go	s/if auth.entry.End != nil \&\& r >= \*auth.entry.End {/if false {/	red	r < end_e when closed
+before-genesis-off	b1ref/batch.go	s/if seal.Epoch < cm.g {/if false {/	red	e >= g
+phase-off	b1ref/batch.go	s/if c.phase == 1 {/if false {/	red	phase 1 is false
+not-ready-off	b1ref/batch.go	s/if !c.ready {/if false \&\& !c.ready {/	red	no usable origin is false
+claim-precedence	b1ref/batch.go	s/if claimWhy != nil {/if sealWhy == nil \&\& claimWhy != nil {/	red	first failing claim before first failing seal
+quorum-off	b1ref/batch.go	s/if good < auth.threshold {/if false {/	red	weighted quorum
+start-above-O	b1ref/registry.go	s/case ent.Start > c.o, e < c.origin \&\& ent.End == nil,/case e < c.origin \&\& ent.End == nil,/	red	an entry starting above O is Registry
+usable-tip-closed	b1ref/registry.go	s/, e == c.origin \&\& ent.End != nil:/, e == c.origin \&\& ent.End != nil \&\& *ent.End <= c.o:/	red	the usable tip is open (no preload)
+tip-equals-origin	b1ref/registry.go	s/if ready == 1 \&\& (origin < g || origin != tip) {/if ready == 1 \&\& (origin < g || origin > tip) {/	red	I = U when ready (no preload)
+not-ready-words	b1ref/registry.go	s/if ready == 0 \&\& (origin != 0 || o != 0) {/if false {/	red	not ready: U = O = 0
+profile-pin	b1ref/registry.go	s/pins.ProfileHash == \[32\]byte{} || w\[4\] != pins.ProfileHash,/pins.ProfileHash == [32]byte{},/	red	profile hash pinned
+genesis-pin	b1ref/registry.go	s/case pins.GenesisCommitment == \[32\]byte{} || w\[0\] != pins.GenesisCommitment, phase/case w[0] == [32]byte{}, phase/	red	genesis commitment pinned
+total-weight	b1ref/registry.go	s/if sum, err := ent.TotalWeight(); err != nil || sum != total {/if _, err := ent.TotalWeight(); err != nil {/	red	stored total weight equals the members' sum
+key-padding	b1ref/registry.go	s/if !bytes.Equal(w\[6\]\[1:\], make(\[\]byte, 31)) {/if false {/	red	key word padding is zero
+missing-epoch	b1ref/registry.go	s/if present, ok := u64(m\[0\]); ok \&\& present == 0 {/if present, ok := u64(m[0]); ok \&\& present == 9 {/	red	a missing admitted epoch is RegistryMissingEpoch
+sibling-count	b1ref/prescan.go	s/if r.err == nil \&\& n != shardDepth(shard) {/if false {/	red	exactly d shard siblings (halt)
+pair-price	b1ref/limits.go	s/gasPerPair     = 500/gasPerPair     = 400/	red	the G_scan pair term
+conflict-predicate	b1ref/batch.go	s/bytes.Equal(claims\[j\].shardBytes, claims\[i\].shardBytes) {/false {/	red	the same-shard predicate (unit-tested on synthetic claims)
+conflict-call-site	b1ref/batch.go	s/if conflicts(claims, pl, i) {/if false \&\& conflicts(claims, pl, i) {/	survives	contract 7a.1: two different claims for one shard under one seal cannot both pass binding and folds without a collision, so no real vector reaches the call site; the predicate itself is the conflict-predicate row
+q-cap	b1ref/prescan.go	s/if pl.q > MaxBatchSigs {/if false {/	survives	contract 7a.8: Q <= 256 follows from K <= 16 and 16 signatures per seal; no request can exceed it without failing an earlier bound
+cert-steps-cap	b1ref/prescan.go	s/if certSteps += u.steps; certSteps > MaxCertSteps {/if certSteps += u.steps; false {/	survives	contract 7a.8: 4,608 = 16 * (256 + 32) follows from the per-claim bounds
