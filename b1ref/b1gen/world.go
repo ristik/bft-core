@@ -380,7 +380,7 @@ func (r requestSpec) wire() []byte {
 }
 
 func newRequest(claims ...claimSpec) requestSpec {
-	return requestSpec{version: 1, claims: claims}
+	return requestSpec{version: 2, claims: claims}
 }
 
 func hex32(b [32]byte) string { return fmt.Sprintf("%x", b[:]) }

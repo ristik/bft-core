@@ -42,7 +42,7 @@ var (
 	ErrShape           = newSentinel(ErrMalformed, "b1ref: unexpected structure")
 	ErrNativeDecode    = newSentinel(ErrMalformed, "b1ref: native decode failed")
 	ErrReencode        = newSentinel(ErrMalformed, "b1ref: decode/re-encode mismatch")
-	ErrClaimOrder      = newSentinel(ErrInvalid, "b1ref: claims not in strictly sorted order")
+	ErrShardSiblings   = newSentinel(ErrMalformed, "b1ref: shard sibling count differs from the shard depth")
 
 	ErrShardEncoding = newSentinel(ErrMalformed, "b1ref: invalid shard bit string")
 	ErrRSMTLength    = newSentinel(ErrMalformed, "b1ref: RSMT input length does not match its bitmap")
@@ -58,6 +58,7 @@ var (
 	ErrShardTooDeep    = newSentinel(ErrBound, "b1ref: shard too deep")
 	ErrTooManySiblings = newSentinel(ErrBound, "b1ref: too many siblings")
 	ErrTooManySteps    = newSentinel(ErrBound, "b1ref: too many unicity path steps")
+	ErrCertSteps       = newSentinel(ErrBound, "b1ref: too many certificate path steps in the call")
 	ErrDepth           = newSentinel(ErrBound, "b1ref: CBOR nesting too deep")
 	ErrTokens          = newSentinel(ErrBound, "b1ref: too many CBOR tokens")
 	ErrSummaryTooLong  = newSentinel(ErrBound, "b1ref: summary value too long")
@@ -66,15 +67,13 @@ var (
 
 // False reasons (all wrap ErrInvalid).
 var (
-	ErrUnknownEpoch = newSentinel(ErrInvalid, "unknown epoch")
-
-	ErrNetwork      = newSentinel(ErrInvalid, "network mismatch")
-	ErrSealEpoch    = newSentinel(ErrInvalid, "seal epoch is after the origin epoch")
-	ErrOpenInterval = newSentinel(ErrInvalid, "open interval does not name the origin epoch")
-	ErrBeforeStart  = newSentinel(ErrInvalid, "root round before the interval start")
-	ErrAfterEnd     = newSentinel(ErrInvalid, "root round at or after the interval end")
-	ErrFuture       = newSentinel(ErrInvalid, "certificate root round is in the future")
-	ErrStale        = newSentinel(ErrInvalid, "certificate older than W_cert")
+	ErrNetwork            = newSentinel(ErrInvalid, "network mismatch")
+	ErrEpochBeforeGenesis = newSentinel(ErrInvalid, "seal epoch is before the registry's genesis epoch")
+	ErrEpochNotUsable     = newSentinel(ErrInvalid, "seal epoch is after the usable origin epoch")
+	ErrOriginNotReady     = newSentinel(ErrInvalid, "the registry has no usable root origin yet")
+	ErrBeforeStart        = newSentinel(ErrInvalid, "root round before the interval start")
+	ErrAfterEnd           = newSentinel(ErrInvalid, "root round at or after the interval end")
+	ErrFuture             = newSentinel(ErrInvalid, "certificate root round is in the future")
 
 	ErrPartition     = newSentinel(ErrInvalid, "partition mismatch")
 	ErrShard         = newSentinel(ErrInvalid, "shard mismatch")
@@ -84,7 +83,7 @@ var (
 	ErrTreeRoot      = newSentinel(ErrInvalid, "unicity tree root does not match the seal")
 	ErrStateRoot     = newSentinel(ErrInvalid, "state root mismatch")
 	ErrIRHash        = newSentinel(ErrInvalid, "input record digest mismatch")
-	ErrSealMismatch  = newSentinel(ErrInvalid, "seals differ across certificates")
+	ErrClaimConflict = newSentinel(ErrInvalid, "two different claims for one shard under one seal")
 
 	ErrUnknownSigner = newSentinel(ErrInvalid, "unknown signer")
 	ErrSigFormat     = newSentinel(ErrMalformed, "signature is not a canonical compact signature")
@@ -95,6 +94,15 @@ var (
 	ErrRSMTFold      = newSentinel(ErrInvalid, "membership fold does not reach the root")
 )
 
-// ErrInfrastructure represents unavailable or impossible admitted registry state.
+// ErrInfrastructure is the family of execution failures that are neither a verdict nor a halt: impossible admitted registry
+// state (Registry) and unavailable state (Host). No EVM result; the Go harness reports used=0.
 var ErrInfrastructure = errors.New("b1ref: unavailable or inconsistent registry")
+
+var (
+	ErrRegistryCommon       = newSentinel(ErrInfrastructure, "b1ref: impossible common registry state")
+	ErrRegistryMissingEpoch = newSentinel(ErrInfrastructure, "b1ref: no installed entry for an admitted epoch")
+	ErrRegistryInvalidEpoch = newSentinel(ErrInfrastructure, "b1ref: impossible installed entry")
+	ErrHost                 = newSentinel(ErrInfrastructure, "b1ref: execution state unavailable")
+)
+
 var ErrPhase = newSentinel(ErrInvalid, "registry prefix has not finalized")

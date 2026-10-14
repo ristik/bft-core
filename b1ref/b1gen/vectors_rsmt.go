@@ -96,7 +96,7 @@ func (g *gen) rsmt(seed string) {
 	add := func(id, desc, want string, b []byte, bitmap [32]byte, in map[string]string) {
 		valid := want == ""
 		g.m.Vectors = append(g.m.Vectors, Vector{ID: id, Family: fam, Op: opMember, Description: desc, Request: hx(b), Intermediate: in,
-			Expected: Expected{Status: "ok", Valid: &valid, Sentinel: want, Output: hx(outputWords(valid)), Gas: gas(b, bitmap)}})
+			Expected: Expected{Status: "ok", Valid: &valid, Sentinel: want, Output: hx(outputWords(1, valid)), Gas: gas(b, bitmap)}})
 	}
 	bad := func(id, desc, want string, b []byte) {
 		g.m.Vectors = append(g.m.Vectors, Vector{ID: id, Family: fam, Op: opMember, Description: desc, Request: hx(b),

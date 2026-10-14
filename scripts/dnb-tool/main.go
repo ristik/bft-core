@@ -323,11 +323,12 @@ func pdr(args []string) error {
 	return os.WriteFile(*out, enc, 0o644) // #nosec G306 -- public configuration
 }
 
-// b1check evaluates a UC_V1 request with the Go reference verifier (b1ref) against the registry context of the deployment's genesis profile, at
-// a given registry clock: the first place to look when the native call answers false.
+// b1check evaluates a CERT_BATCH_V2 request with the Go reference verifier (b1ref) against a format-2 registry holding the deployment's genesis
+// authority, at a given registry clock: the first place to look when the native call answers false. A v1 request (same claim layout) is read
+// as v2.
 func b1check(args []string) error {
 	fs := flag.NewFlagSet("b1check", flag.ContinueOnError)
-	req := fs.String("request", "", "UC_V1 request bytes")
+	req := fs.String("request", "", "CERT_BATCH_V2 (or v1) request bytes")
 	tbPath := fs.String("trust-base", "", "root trust base")
 	profPath := fs.String("profile", "", "b1 profile JSON (hex form)")
 	clock := fs.Uint64("clock", 0, "registry clock.rootRound")
@@ -352,7 +353,6 @@ func b1check(args []string) error {
 	}
 	var pf struct {
 		Network uint16
-		WCert   uint64 `json:"wCert"`
 	}
 	if err := json.Unmarshal(rawProf, &pf); err != nil {
 		return err
@@ -369,11 +369,13 @@ func b1check(args []string) error {
 	if err != nil {
 		return err
 	}
-	reg := &b1ref.Registry{GenesisCommitment: [32]byte{1}, ProfileHash: [32]byte{1}, Initialized: true, Phase: 2, Network: pf.Network, WCert: pf.WCert, Origin: entries[0].Epoch, RootRound: *clock, Epochs: map[uint64]b1ref.EpochEntry{}}
-	for _, e := range entries {
-		reg.Epochs[e.Epoch] = e
+	last := entries[len(entries)-1].Epoch
+	model := b1ref.Model{GenesisCommitment: [32]byte{1}, ProfileHash: [32]byte{1}, Phase: 2, Network: pf.Network, GenesisEpoch: entries[0].Epoch,
+		ImportedTip: last, OriginReady: true, Origin: last, RootRound: *clock, Epochs: entries}
+	if len(in) > 0 && in[0] == 1 {
+		in = append([]byte{2}, in[1:]...)
 	}
-	v, err := b1ref.UC(in, reg)
+	v, err := b1ref.Cert(in, model.Words(), b1ref.Pins{GenesisCommitment: model.GenesisCommitment, ProfileHash: model.ProfileHash})
 	fmt.Printf("valid=%v why=%v err=%v gas=%d (epoch entry: start=%d members=%d)\n", v.Valid, v.Why, err, v.Gas, entries[0].Start, len(entries[0].Members))
 	return nil
 }

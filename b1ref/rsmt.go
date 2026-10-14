@@ -31,7 +31,7 @@ func parseMember(in []byte) (*memberCall, error) {
 	if len(in) > MaxRSMTInputBytes {
 		return nil, ErrInputTooLarge
 	}
-	count, err := header(in)
+	count, err := header(in, memberVersion)
 	if err != nil {
 		return nil, err
 	}
