@@ -25,36 +25,32 @@ Evidence and Historical Trust, Execution Proof Export; `appendix-bridging.tex`
 
 ---
 
-## 2. Checkpoint, windows, key retention — three separate things
+## 2. Checkpoint, windows, key retention — separate things
+
+> **Policy update (owner decisions §24–§25, any-age verification):** the `W_cert` live-certificate window and its mandatory ancestry fallback are
+> **retired**. The registry keeps every validator epoch and a certificate verifies by its signer epoch's quorum at any age
+> ([`briefs/b1-any-age-contract.md`](../../briefs/b1-any-age-contract.md)). The checkpoint-freshness and evidence/hold material below is unchanged.
 
 | Concept | Unit | Purpose |
 |---|---|---|
 | **trusted checkpoint** | content | trust initialisation: network id, committed root/config commitment, authenticated EVM head. A client verifies subsequent transitions, not an arbitrary chain signed by retired keys. |
 | **checkpoint freshness limit** | **elapsed time (seconds)** | a **derived client policy** — see below. Re-derived if pacing/churn/protection change. |
-| **`W_cert`** | **certified root rounds** | the live certificate-admission window, measured against the **current authenticated origin**. |
-| **key cache** | **count of keys** | recent trust-base bodies held for ordinary admission. |
+| **signer-epoch trust** | **every installed epoch, forever** | the registry's permanent entries; a certificate is admitted against its signer epoch's interval, not against an age window. |
 
-These do not substitute for one another.
+**Mandatory ordering** (`NestingValid`): `Δ_ev < Δ_hold`.
 
-**Mandatory nesting** (`NestingValid`): `W_cert ≤ Δ_ev < Δ_hold`.
+### Certificate admission — any age, against the imported origin
 
-### Live certificate admission — measured against the imported origin
+`AdmitCertificate(certRound, importedOriginRound, originReady, CertEpoch{Start, End, Admitted})`:
 
-`AdmitLiveCertificate(certRound, importedOriginRound, wCert, signerEpochActive)`:
+1. a usable origin exists;
+2. the signer epoch is admitted (installed at or below the usable epoch);
+3. `certRound ≤ importedOriginRound` — a future certificate is retried after root progress, not admitted;
+4. `Start ≤ certRound` and, when the epoch is closed, `certRound < End`.
 
-1. `certRound ≤ importedOriginRound` — a future certificate is retried after root
-   progress, not admitted;
-2. `importedOriginRound − certRound ≤ wCert` — **the age is measured against the
-   current authenticated origin, not a checkpoint round**. A certificate 900
-   rounds behind the origin with `W_cert = 10` is **not live** (the earlier
-   version compared to `checkpointRound` and wrongly admitted it);
-3. the signer epoch was active at `certRound`.
-
-A certificate outside the `W_cert` window is **not rejected** — it goes to the
-historical checkpoint/ancestry path (§3), never expired-key signatures alone.
-Checkpoints belong to that separate path and are **not an input** to this check.
-Vectors: `live_certificate_admission` (fresh / within / at-boundary admitted;
-`stale_past_window`, `future_ahead_of_origin`, `signer_epoch_inactive` rejected).
+How old the certificate is does not matter, and retirement or evidence obligations never prune certificate trust. Vectors: `any_age_certificate_admission`
+(very old current and closed historical epochs admitted; `r = start`, `end − 1`, `O` admitted; `r = end`, `O + 1`, before-start, no usable origin and a
+non-admitted epoch refused).
 
 ### Checkpoint freshness — enforced floor, not round counts
 
@@ -263,7 +259,7 @@ the succinct path.
 | D6 acceptance clause | Evidence |
 |---|---|
 | proof/accounting vectors distinguish native UCT, WUCT and bridged claims | §4; `supply_and_backing` (`O + C ≤ vault`, WUCT vs its own contract native); `TestD6_CustodySolvencyEquation` |
-| live age measured from the current authenticated origin, not a checkpoint | §2 "Live certificate admission"; `live_certificate_admission.stale_past_window` (`admitted: false` for a 900-round-old cert with `W_cert 10`), `future_ahead_of_origin`, `at_window_boundary`; `TestD6_LiveCertMeasuredFromImportedOrigin` |
+| any-age certificate admission against the current authenticated origin (no window) | §2 "Certificate admission"; `any_age_certificate_admission.*`; `TestD6_AnyAgeCertificateAdmission`, `TestD6_RetirementDoesNotPruneCertificateTrust` |
 | the proof vectors carry real evidence, not assumed booleans | §3 real hash-linked headers + Merkle paths + real secp256k1 seal signatures; `historical_block_authentication` (broken linkage / wrong head fail), `multi_shard_anchor` (bad leaf / below-threshold / unsigned / forged signer / relabelled path / substituted root / wrong epoch all fail), `proof_bundle_offline_verification` (a forged event is not in the authenticated ReceiptsRoot), `lock_witness_refresh` (wrong digest fails); `TestD6_HistoricalAuthWalksARealChain`, `TestD6_MultiShardAnchorRecomputesPaths`, `TestD6_ProofBundleOfflineVerification`, `TestD6_LockRefreshRealProofs` |
 | offline verification authenticates the exported receipt/event, not just the subject | §3 "`ProofBundle` …" — the `ReceiptClaim` digest folds up its path at the bound `(TxIndex, LogIndex)` to the authenticated `SubjectHeader.ReceiptsRoot`; `proof_bundle_offline_verification.forged_event_not_in_receipts_root`; `TestD6_ProofBundleOfflineVerification` (wrong-index / unauthenticated-header negatives) |
 | the shared seal authenticates r* itself and the shard paths authenticate their partition/shard/config | §3; `AnchorSeal.VerifySeal` derives the threshold and checks signatures over `AnchorSealStatement(r*, epoch, assignmentID)`; `shardAnchorLeaf` binds length-delimited partition ‖ shard ‖ configHash into the leaf; `multi_shard_anchor.relabelled_shard_path_rejected`, `unsigned_seal_zero_weight`, `forged_signer_entry_not_counted`, `wrong_epoch_seal_rejected`; `TestD6_ShardAnchorLeafFieldBoundaries` |

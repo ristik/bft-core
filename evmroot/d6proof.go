@@ -308,8 +308,8 @@ func VerifyAnchoredHistory(a AnchorBundle, leaves []AnchoredLeaf) AnchorResult {
 type AuthMode uint8
 
 const (
-	AuthLiveCertificate    AuthMode = iota // within W_cert relative to the imported origin
-	AuthCheckpointAncestry                 // outside W_cert: a parent-header chain from a recent authenticated head
+	AuthLiveCertificate    AuthMode = iota // authenticated by a certificate of the signer epoch (any age: the registry keeps every epoch)
+	AuthCheckpointAncestry                 // offline alternative: a parent-header chain from a recent authenticated head (not an expiry fallback)
 )
 
 // receiptLeaf is the length-delimited leaf a receipt/log proof folds from:

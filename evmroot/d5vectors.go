@@ -124,9 +124,9 @@ func BuildD5Vectors() D5VectorSet {
 	}
 
 	// --- protection params ------------------------------------------------
-	p := ProtectionParams{WCert: 50, DeltaEv: 100, DeltaIncl: 40, DeltaExec: 40, DeltaHold: 200}
+	p := ProtectionParams{DeltaEv: 100, DeltaIncl: 40, DeltaExec: 40, DeltaHold: 200}
 	vs.Protection = D5ProtectionCase{Params: p, Valid: p.Valid(),
-		Note: "W_cert <= Δ_ev < Δ_hold and Δ_hold > Δ_ev + Δ_incl + Δ_exec (200 > 100+40+40=180)"}
+		Note: "Δ_ev < Δ_hold and Δ_hold > Δ_ev + Δ_incl + Δ_exec (200 > 100+40+40=180)"}
 
 	// --- withdrawal gates ----------------------------------------------
 	// LiabilityDeadlineRound is a root round; the linkage to inbox positions
