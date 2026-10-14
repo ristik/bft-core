@@ -10,7 +10,9 @@ SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 REPO_ROOT=$(cd "$SCRIPT_DIR/.." && pwd)
 AGRE_ROOT=$(cd "$REPO_ROOT/.." && pwd)
 LOCK_SCRIPT=$AGRE_ROOT/briefs/devnet-lock.sh
-EVIDENCE_DIR=${P85_EVIDENCE_DIR:-$AGRE_ROOT/briefs/devnet-runs/p85-$(date -u +%Y%m%dT%H%M%SZ)}
+EVIDENCE_DIR=${P85_EVIDENCE_DIR:-$AGRE_ROOT/briefs/devnet-runs/${P85_EVIDENCE_PREFIX:-p85}-$(date -u +%Y%m%dT%H%M%SZ)}
+# The any-age final lane (scripts/anyage-lane.sh) is this runner with ANYAGE_LANE=1: its own lock owner and evidence prefix, nothing else differs here.
+LOCK_OWNER=${P85_LOCK_OWNER:-p85-recovery}
 pass() { printf 'PASS: %s\n' "$1"; }
 fail() { printf 'FAIL: %s\n' "$1" >&2; exit 1; }
 
@@ -48,7 +50,7 @@ fi
 
 if [ "${P85_LANE_LOCKED:-0}" != 1 ]; then
   [ -x "$LOCK_SCRIPT" ] || fail "devnet lock helper is missing at $LOCK_SCRIPT"
-  exec "$LOCK_SCRIPT" "p85-recovery" env P85_LANE_LOCKED=1 P85_EVIDENCE_DIR="$EVIDENCE_DIR" "$0" "$@"
+  exec "$LOCK_SCRIPT" "$LOCK_OWNER" env P85_LANE_LOCKED=1 P85_EVIDENCE_DIR="$EVIDENCE_DIR" "$0" "$@"
 fi
 cd "$REPO_ROOT"
 mkdir -p "$EVIDENCE_DIR"
@@ -60,6 +62,9 @@ echo "$RUN_MODE" | tee "$EVIDENCE_DIR/run-mode.txt"
 [ -z "${PROVENANCE:-}" ] || cp -R "$PROVENANCE" "$EVIDENCE_DIR/ureth-provenance"
 { date -u +%FT%TZ; pmset -g log 2>/dev/null; } | gzip >"$EVIDENCE_DIR/pmset-before.log.gz" || true
 echo "bft-core head=$(git rev-parse HEAD) ureth=$M2_URETH_COMMIT ubft sha256=$(shasum -a 256 build/ubft | cut -d' ' -f1)" | tee "$EVIDENCE_DIR/heads.txt"
+if [ "${ANYAGE_LANE:-0}" = 1 ]; then
+  echo "contracts head=$(git -C "$P85_CONTRACTS" rev-parse HEAD) nbp head=$(git -C "${NBP_DIR:?set NBP_DIR}" rev-parse HEAD) aggregator sha256=$(shasum -a 256 "${AGG_BIN:?set AGG_BIN}" | cut -d' ' -f1) dnb-tool sha256=$(shasum -a 256 "${DNB_TOOL:?set DNB_TOOL}" | cut -d' ' -f1)" | tee -a "$EVIDENCE_DIR/heads.txt"
+fi
 
 # A signal to the lane stops the scenario child and waits for its own teardown (an orphaned child keeps restarting nodes in this checkout).
 DEVNET_PIDFILE=
@@ -79,6 +84,7 @@ trap 'exit 143' TERM
 # the single B1 layout: one B1 profile derived from the shard configuration and the root trust base; the registry slots are read under the layout-3 names;
 # every shard node exposes its operator endpoint (the readiness check asks it what it has staged)
 export Q3_B1=1 H3_SLOT_LAYOUT=3 EVM_OPERATOR_STATUS_RPC=1 P85_LANE=1 P85_CONTRACTS M2_ROOT_FLAGS_FN=p85_root_flags
+export ANYAGE_LANE=${ANYAGE_LANE:-0}
 # the roots judge an assignment's committee continuity by the budget committed in the installed EVM configuration; it must be the one the election
 # was priced under (the contracts' genesis parameter): adding a unit-weight joiner to four unit-weight members is D = 2/5, over the 1/4 default
 export P85_DIST_NUM=${P85_DIST_NUM:-1} P85_DIST_DEN=${P85_DIST_DEN:-2}
@@ -96,6 +102,7 @@ status=$?
 set -e
 rm -f "$DEVNET_PIDFILE"
 cp -R test-nodes/p85 "$EVIDENCE_DIR/p85" 2>/dev/null || true
+if [ "$ANYAGE_LANE" = 1 ]; then mkdir -p "$EVIDENCE_DIR/aggregator"; for d in test-nodes/agg test-nodes/agg[0-9]; do [ -d "$d" ] && { mkdir -p "$EVIDENCE_DIR/aggregator/$(basename "$d")"; cp "$d"/stdout.log "$d"/logs/*.log "$EVIDENCE_DIR/aggregator/$(basename "$d")/" 2>/dev/null || true; }; done; cp test-nodes/lane-config.json test-nodes/bridge-addresses.json "$EVIDENCE_DIR/" 2>/dev/null || true; fi
 # what the lane's helpers read, kept so a failure can be replayed offline (go run ./scripts/h3-pdr, the weight checks, the trust-base tools): the roots'
 # databases and public node info, the trust bases, the lane's flow directories; not the execution clients' data, the authorities' credentials or keys
 rsync -a --exclude 'reth*/' --exclude 'evm*/' --exclude 'auth*/' --exclude '*.log' --exclude 'keys.json' --exclude '*.sock' --exclude '*.cred' \
@@ -105,5 +112,11 @@ rsync -a --exclude 'reth*/' --exclude 'evm*/' --exclude 'auth*/' --exclude '*.lo
 if [ "$status" -ne 0 ] || grep -q '^ *FAIL:' "$EVIDENCE_DIR/lane.log"; then
   fail "P85 recovery lane failed (exit $status); see $EVIDENCE_DIR/lane.log"
 fi
+if [ -n "${ANYAGE_PREP_ONLY:-}" ]; then
+  grep -q '^anyage prep only:' "$EVIDENCE_DIR/lane.log" || fail "the prep-only run did not reach its end"
+  pass "any-age prep-only run complete (nothing was started); inputs in $EVIDENCE_DIR/state"
+  exit 0
+fi
 grep -q 'P85 recovery lane: all steps PASSED' "$EVIDENCE_DIR/lane.log" || fail "lane ended without completing its steps"
+[ "$ANYAGE_LANE" != 1 ] || grep -q 'any-age final lane: all steps PASSED' "$EVIDENCE_DIR/lane.log" || fail "the any-age checkpoints did not complete"
 pass "P85 recovery lane complete; evidence in $EVIDENCE_DIR"
