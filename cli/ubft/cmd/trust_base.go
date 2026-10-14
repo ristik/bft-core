@@ -63,6 +63,9 @@ func newTrustBaseCmd(baseConfig *baseFlags) *cobra.Command {
 	cmd.AddCommand(trustBaseVerifyCmd(baseConfig))
 	cmd.AddCommand(trustBaseIDCmd())
 	cmd.AddCommand(trustBaseUTBGenesisCmd())
+	cmd.AddCommand(trustBaseUTBExportCmd(baseConfig))
+	cmd.AddCommand(trustBaseUTBImportCmd(baseConfig))
+	cmd.AddCommand(trustBaseUTBVerifyCmd())
 	return cmd
 }
 

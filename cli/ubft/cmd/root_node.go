@@ -26,6 +26,7 @@ import (
 
 	"github.com/unicitynetwork/bft-go-base/types"
 
+	"github.com/unicitynetwork/bft-core/gettrustbase"
 	"github.com/unicitynetwork/bft-core/handoffdelivery"
 	"github.com/unicitynetwork/bft-core/logger"
 	"github.com/unicitynetwork/bft-core/network"
@@ -330,6 +331,12 @@ func rootNodeRun(ctx context.Context, flags *rootNodeRunFlags) error {
 		defer closeStore()
 		utbEntries = store
 		options = append(options, consensus.WithUTBStore(store))
+		// peers catch up from the same finalized store over the dedicated GetTrustBase stream, apart from the consensus queues
+		trustBaseServer, srvErr := gettrustbase.NewServer(store, gettrustbase.Config{})
+		if srvErr != nil {
+			return fmt.Errorf("UTB GetTrustBase server: %w", srvErr)
+		}
+		trustBaseServer.Register(host)
 	}
 
 	// The root serves the automatic bootstrap-freshness protocol (F6f, #350) in default
