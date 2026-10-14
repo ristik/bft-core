@@ -74,6 +74,8 @@ anyage_record_frozen() { # dir rootRow(JSON of the EVM partition's row in the ro
     "$(anyage_fixed b1.importedTipEpoch "$num")" "$(anyage_fixed b1.originReady "$num")" "$(anyage_custody_cursor "$num")" "$(anyage_registry_count "$num")" >"$dir/frozen-parent.json"
 }
 anyage_custody_cursor() { "${ANYAGE_CAST:-cast}" call "${ANYAGE_CUSTODY:?}" 'recordCursor()(uint64)' --block "$1" --rpc-url "$ANYAGE_RPC" | awk '{print $1}'; }
+anyage_election_cursor() { "${ANYAGE_CAST:-cast}" call "${ANYAGE_ELECTION:?}" 'attemptCursor()(uint64)' --block "$1" --rpc-url "$ANYAGE_RPC" | awk '{print $1}'; }
+anyage_election_last() { "${ANYAGE_CAST:-cast}" call "${ANYAGE_ELECTION:?}" 'lastAttemptResult()(bytes32)' --block "$1" --rpc-url "$ANYAGE_RPC" | tail -n1; }
 anyage_registry_count() { "${ANYAGE_CAST:-cast}" call "${ANYAGE_POS_REGISTRY:?}" 'recordCount()(uint64)' --block "$1" --rpc-url "$ANYAGE_RPC" | awk '{print $1}'; }
 
 # L2: find the block that took the imported tip to E = (tip while frozen) + span, dump it and its parent, and run the offline checks. Beyond the dumps:
@@ -82,7 +84,7 @@ anyage_registry_count() { "${ANYAGE_CAST:-cast}" call "${ANYAGE_POS_REGISTRY:?}"
 #  - the block's receipts are kept (eth_getBlockReceipts).
 # E is derived, never assumed: it is the tip at the freeze plus the span.
 anyage_check_ack() { # dir fromBlock toBlock hRecords [span]
-  local dir=$1 lo=$2 hi=$3 h=$4 span=${5:-2} f e n ph fh fnum c0 c1 cnt want
+  local dir=$1 lo=$2 hi=$3 h=$4 span=${5:-2} f e n ph fh fnum c0 c1 cnt want ec0 ec1 el0 el1
   f="$dir/frozen-parent.json"; [ -s "$f" ] || { anyage_die "no $f: the frozen parent was not recorded"; return 1; }
   e=$(( $(jq -r .importedTipEpoch "$f") + span )); fh=$(jq -r .frozenParentHash "$f"); fnum=$(jq -r .frozenParentNumber "$f")
   mkdir -p "$dir"
@@ -94,8 +96,13 @@ anyage_check_ack() { # dir fromBlock toBlock hRecords [span]
   c0=$(anyage_custody_cursor $((n - 1))) && c1=$(anyage_custody_cursor "$n") && cnt=$(anyage_registry_count "$n") || return 1
   want=$(python3 -I -c "print(min($h, $cnt - $c0))") || return 1
   [ "$((c1 - c0))" -eq "$want" ] && [ "$c1" -le "$cnt" ] || { anyage_die "custody cursor $c0 -> $c1 in the Ack block (records $cnt, H $h): expected an advance of $want"; return 1; }
-  printf '{"ackBlock":%s,"parentBlock":%s,"frozenParentHash":"%s","tipBefore":%s,"tipAfter":%s,"cursorBefore":%s,"cursorAfter":%s,"recordCount":%s,"hRecords":%s}\n' \
-    "$n" "$((n - 1))" "$ph" "$(jq -r .importedTipEpoch "$dir/l2-before.json")" "$e" "$c0" "$c1" "$cnt" "$h" >"$dir/l2-summary.json"
+  # the election hook: elect(origin) runs once per block, so the attempt cursor moves by at most one, and the last attempt result changes exactly when it does
+  ec0=$(anyage_election_cursor $((n - 1))) && ec1=$(anyage_election_cursor "$n") && el0=$(anyage_election_last $((n - 1))) && el1=$(anyage_election_last "$n") || return 1
+  [ $((ec1 - ec0)) -ge 0 ] && [ $((ec1 - ec0)) -le 1 ] || { anyage_die "election attempt cursor $ec0 -> $ec1 in the Ack block: the hook ran more than once"; return 1; }
+  if [ "$ec1" = "$ec0" ]; then [ "$el0" = "$el1" ] || { anyage_die "the last attempt result changed without the attempt cursor"; return 1; }
+  else [ "$el0" != "$el1" ] || { anyage_die "the attempt cursor advanced but the last attempt result did not change"; return 1; }; fi
+  printf '{"ackBlock":%s,"parentBlock":%s,"frozenParentHash":"%s","tipBefore":%s,"tipAfter":%s,"cursorBefore":%s,"cursorAfter":%s,"recordCount":%s,"hRecords":%s,"electionAttemptBefore":%s,"electionAttemptAfter":%s,"lastAttemptResultBefore":"%s","lastAttemptResultAfter":"%s"}\n' \
+    "$n" "$((n - 1))" "$ph" "$(jq -r .importedTipEpoch "$dir/l2-before.json")" "$e" "$c0" "$c1" "$cnt" "$h" "$ec0" "$ec1" "$el0" "$el1" >"$dir/l2-summary.json"
   "${ANYAGE_CAST:-cast}" block "$n" --json --rpc-url "$ANYAGE_RPC" >"$dir/l2-ack-block.json" || return 1
   "${ANYAGE_CAST:-cast}" rpc eth_getBlockReceipts "$(printf '0x%x' "$n")" --rpc-url "$ANYAGE_RPC" >"$dir/l2-ack-receipts.json" 2>"$dir/l2-ack-receipts.err" ||
     { anyage_die "eth_getBlockReceipts failed: $(head -c 200 "$dir/l2-ack-receipts.err")"; return 1; }
@@ -106,7 +113,7 @@ anyage_check_ack() { # dir fromBlock toBlock hRecords [span]
 anyage_selftest() {
   [ "$(anyage_slot b1.format)" = 0xc20ac95bd1f18a98e5ed96b1b03ef2b328ecb52f3bbcd1e981a85385fa0fb5ba ] || { anyage_die "fixed slot derivation differs from b1state.FixedSlot"; return 1; }
   [ "$(anyage_entry_slot 3 4)" = 0x34b51344c5e6d4ad3c4c4ec51cd9fbf82f4d20c905d8bea69796f5b73d8b5c4b ] || { anyage_die "entry slot derivation differs from b1state.EntrySlot"; return 1; }
-  python3 -I "$ANYAGE_CHECK" --selftest && anyage_selftest_ack
+  python3 -I "$ANYAGE_CHECK" --selftest
 }
 
 # ---- lane steps (ANYAGE_LANE=1; sourced by scripts/p85-recovery-steps.sh, which supplies p85_eth, p85_paid, H3_DIR, p85_view ...) --------------------------------
@@ -163,7 +170,7 @@ anyage_step_frozen() {
 anyage_step_l2() {
   local out lo hi h; out=$(anyage_dir); lo=$(cat "$out/setup-block.txt"); hi=$(anyage_latest)
   h=$(jq -r .hRecords "$H3_DIR/b1-profile.json") || return 1
-  export ANYAGE_CUSTODY ANYAGE_POS_REGISTRY; ANYAGE_CUSTODY=$(p85_custody); ANYAGE_POS_REGISTRY=$(p85_registry)
+  export ANYAGE_CUSTODY ANYAGE_POS_REGISTRY ANYAGE_ELECTION; ANYAGE_CUSTODY=$(p85_custody); ANYAGE_POS_REGISTRY=$(p85_registry); ANYAGE_ELECTION=$(p85_election)
   anyage_check_ack "$out" "$lo" "$hi" "$h" 2 || return 1
   anyage_registry_dump "$hi" >"$out/l2-final-registry.json" && python3 -I "$ANYAGE_CHECK" shape "$out/l2-final-registry.json" || return 1
 }
@@ -184,13 +191,13 @@ anyage_step_l1c() {
 # Chain-free test of the L2 shell logic (scripts/anyage/fakechain.py answers cast): the lawful scenario passes, each false claim is refused.
 anyage_selftest_ack() {
   local d; d=$(mktemp -d) || return 1
-  export FAKE_REAL_CAST; FAKE_REAL_CAST=$(command -v cast)
+  export FAKE_REAL_CAST FAKE_CACHE; FAKE_REAL_CAST=$(command -v cast); FAKE_CACHE=$d/fake-cache.json
   local fake; fake="$(cd "$(dirname "${BASH_SOURCE[0]}")/../anyage" && pwd)/fakecast.sh"
   (
-    ANYAGE_CAST=$fake ANYAGE_RPC=fake ANYAGE_CUSTODY=0xc ANYAGE_POS_REGISTRY=0xd
+    ANYAGE_CAST=$fake ANYAGE_RPC=fake ANYAGE_CUSTODY=0xc ANYAGE_POS_REGISTRY=0xd ANYAGE_ELECTION=0xe
     printf '{"frozenParentHash":"%s","frozenParentNumber":4,"importedTipEpoch":1}\n' "$(printf '%064x' $((0xA0000 + 4)))" >"$d/frozen-parent.json"
     anyage_check_ack "$d" 1 6 8 2 >/dev/null || { echo "selftest: the lawful scenario was refused" >&2; exit 1; }
-    for bad in parent cursor; do
+    for bad in parent cursor election election-result; do
       FAKE_BAD=$bad anyage_check_ack "$d" 1 6 8 2 >/dev/null 2>&1 && { echo "selftest: a false $bad claim was accepted" >&2; exit 1; }
     done
     printf '{"frozenParentHash":"%s","frozenParentNumber":3,"importedTipEpoch":1}\n' "$(printf '%064x' $((0xA0000 + 4)))" >"$d/frozen-parent.json"

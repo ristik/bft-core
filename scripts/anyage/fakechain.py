@@ -6,9 +6,20 @@ import json, os, subprocess, sys
 
 REAL = os.environ.get("FAKE_REAL_CAST", "cast")
 CACHE = {}
+DISK = os.environ.get("FAKE_CACHE")   # keccak results survive between invocations (every call of this stub is a new process)
+if DISK and os.path.exists(DISK):
+    try: CACHE = {tuple(json.loads(k)): v for k, v in json.load(open(DISK)).items()}
+    except ValueError: CACHE = {}
+
+def save():
+    if DISK: json.dump({json.dumps(list(k)): v for k, v in CACHE.items()}, open(DISK, "w"))
 
 def real(*a):
-    return subprocess.check_output([REAL, *a], text=True).strip()
+    k = ("r",) + tuple(a)
+    if k not in CACHE:
+        CACHE[k] = subprocess.check_output([REAL, *a], text=True).strip()
+        save()
+    return CACHE[k]
 
 def fixed(name):
     k = ("f", name)
@@ -63,7 +74,10 @@ elif cmd == "block":
     else: print(json.dumps({"number": n, "hash": h, "transactions": []}))
 elif cmd == "call":
     sig, block = a[2], int(opt("--block"))
-    print(cursor(block) if "recordCursor" in sig else count(block))
+    ec = 3 if block < ACK else (5 if BAD == "election" else 4)          # attempt cursor: +1 in the Ack block lawfully, +2 is a second run
+    if "attemptCursor" in sig: print(ec)
+    elif "lastAttemptResult" in sig: print("0x%064x" % (0xE0 + (3 if (BAD == "election-result" and block >= ACK) else ec)))
+    else: print(cursor(block) if "recordCursor" in sig else count(block))
 elif cmd == "rpc":
     print(json.dumps([]))
 else:
