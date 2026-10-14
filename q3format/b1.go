@@ -34,7 +34,9 @@ func (h *History) B1Entries(origin uint64) ([]b1state.Entry, error) {
 // B1EntriesFrom returns the authenticated entries of epochs from..E, where E is the epoch whose interval holds origin (the last epoch that starts at or
 // before it). The work is proportional to E-from+1 and independent of how many epochs precede from: the steady block path asks for the imported tip
 // onward and never touches the permanent history before it. Epochs are consecutive, so the first one is found by offset, not by a scan.
-func (h *History) B1EntriesFrom(origin, from uint64) ([]b1state.Entry, error) {
+//
+// limit caps the run: at most limit entries are converted (0: no cap), so a proposal whose origin is far ahead of the tip costs O(limit), not O(gap).
+func (h *History) B1EntriesFrom(origin, from uint64, limit int) ([]b1state.Entry, error) {
 	if h == nil || len(h.entries) == 0 || from < h.entries[0].epoch {
 		return nil, ErrHistory
 	}
@@ -44,7 +46,7 @@ func (h *History) B1EntriesFrom(origin, from uint64) ([]b1state.Entry, error) {
 	}
 	var out []b1state.Entry
 	for _, v := range h.entries[i:] {
-		if v.start > origin {
+		if v.start > origin || (limit > 0 && len(out) >= limit) {
 			break
 		}
 		e, err := h.b1Entry(v)

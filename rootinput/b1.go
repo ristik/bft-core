@@ -67,11 +67,18 @@ func (c *B1Config) Derive(ctx context.Context, parent registryproof.Snapshot, o 
 	if f.Layout != registryproof.FreshB1 || f.B1Network != uint64(p.Network) || f.B1Format != 2 || f.B1ProfileHash != common.Hash(profileHash) || origin.NetworkID != uint64(p.Network) || parent.VerifiedContext().RegistryCodeHash != common.Hash(p.RuntimeHash) {
 		return B1Result{}, ErrB1Admission
 	}
-	h, err := c.Authority.B1History(origin.RootRound)
+	g, tip := f.B1GenesisEpoch, f.B1ImportedTip
+	if tip < g || tip > origin.RootEpoch {
+		return B1Result{}, ErrB1Admission
+	}
+	// Only the run from the imported tip onward is converted and admitted: the work of this block does not depend on how many epochs precede the tip
+	// (they were admitted when imported), and a proposal whose origin is far ahead costs O(B), not O(gap): the run is capped one past what B allows.
+	limit := int(c.Profile.MaxEpochsPerUpdate) + 2
+	h, seg, err := c.Authority.B1Run(origin.RootRound, tip, limit)
 	if err != nil {
 		return B1Result{}, err
 	}
-	if h.Genesis() != p.RootGenesisID || h.Network() != uint64(p.Network) {
+	if h.Genesis() != p.RootGenesisID || h.Network() != uint64(p.Network) || h.FirstEpoch() != g { // the registry's genesis epoch is the history's first
 		return B1Result{}, ErrB1Admission
 	}
 	if err = h.Ordinary(origin.RootEpoch, origin.RootRound); err != nil {
@@ -84,19 +91,16 @@ func (c *B1Config) Derive(ctx context.Context, parent registryproof.Snapshot, o 
 	if err = o.VerifyRootCommittee(committee.Projection()); err != nil {
 		return B1Result{}, err
 	}
-	g, tip := f.B1GenesisEpoch, f.B1ImportedTip
-	if tip < g || tip > origin.RootEpoch {
-		return B1Result{}, ErrB1Admission
-	}
-	// Only the imported tip onward is read from the authenticated history: the work of this block does not depend on how many epochs precede the tip.
-	seg, err := h.B1EntriesFrom(origin.RootRound, tip)
-	if err != nil {
-		return B1Result{}, err
-	}
 	if err = b1state.ValidateSegment(seg, g); err != nil {
 		return B1Result{}, err
 	}
-	if seg[0].Epoch != tip || seg[len(seg)-1].Epoch != origin.RootEpoch {
+	if seg[0].Epoch != tip {
+		return B1Result{}, ErrB1Admission
+	}
+	if seg[len(seg)-1].Epoch != origin.RootEpoch {
+		if len(seg) == limit { // the cap was hit before the origin's epoch: more than B epochs are missing
+			return B1Result{}, errors.Join(ErrB1Admission, b1state.ErrTooManyEpochs)
+		}
 		return B1Result{}, ErrB1Admission
 	}
 	tipEntry := seg[0]

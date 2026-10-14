@@ -8,6 +8,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/unicitynetwork/bft-core/b1state"
 	"github.com/unicitynetwork/bft-core/registryproof"
+	"github.com/unicitynetwork/bft-core/rootinput"
 )
 
 // Evidence row 5c, root side: the storage words one B1 derivation proves against the parent are the open tip's entry (11 + 8 per member) and one presence word
@@ -62,4 +63,20 @@ func TestDeriveProvesOnlyTheOpenTipAndTheAbsenceOfTheNewEntries(t *testing.T) {
 	_, err = pair2.Derive(context.Background(), parent2, e.obs(3, 15))
 	require.NoError(t, err)
 	check("tip 2, one new entry", *seen, 2, []int{3})
+}
+
+// The registry's genesis epoch is bound to the authenticated history's first epoch, in O(1): a registry that names another epoch as its genesis is refused
+// as an admission failure, before any entry is read.
+func TestDeriveBindsTheRegistrysGenesisEpochToTheHistorysFirst(t *testing.T) {
+	e := newThreeEpochs(t)
+	h, err := e.pair.Authority.B1History(15)
+	require.NoError(t, err)
+	require.EqualValues(t, 1, h.FirstEpoch())
+	pair, parent := e.parentAt(t, map[string]uint64{"b1.genesisEpoch": 2, "b1.importedTipEpoch": 2}, e.entryWords(t, 2))
+	_, err = pair.Derive(context.Background(), parent, e.obs(3, 15))
+	require.ErrorIs(t, err, rootinput.ErrB1Admission)
+	// control: the same parent naming the real genesis epoch derives
+	pair, parent = e.parentAt(t, map[string]uint64{"b1.importedTipEpoch": 2, "b1.originReady": 1, "origin.rootEpoch": 2, "clock.rootRound": 8}, e.entryWords(t, 2))
+	_, err = pair.Derive(context.Background(), parent, e.obs(3, 15))
+	require.NoError(t, err)
 }

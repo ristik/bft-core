@@ -15,8 +15,10 @@ import (
 )
 
 func TestUnavailableCapabilityCannotGrantAuthority(t *testing.T) {
-	for _, source := range []*Source{nil, {}, Bind(nil)} {
+	for _, source := range []*Source{nil, {}, Bind(nil, nil)} {
 		_, err := source.B1History(0)
+		require.ErrorIs(t, err, q3format.ErrHistory)
+		_, _, err = source.B1Run(0, 1, 0)
 		require.ErrorIs(t, err, q3format.ErrHistory)
 	}
 }
