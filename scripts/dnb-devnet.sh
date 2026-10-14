@@ -15,6 +15,7 @@ source helper.sh
 validators=4 rootValidators=4 partitionID=8 aggPartition=9 chainID=${DNB_CHAIN_ID:-31337}
 rethEngineBase=18551 rethEthBase=18545 rethP2PBase=30401 rootRpcPort=25866
 case "${DNB_AGG_SHARDS:-1}" in 1|2) ;; *) echo "DNB_AGG_SHARDS must be 1 or 2" >&2; exit 2 ;; esac
+. scripts/lib/reth-pin.sh   # definitions only: urethB1GenesisCommitment
 source scripts/lib/agg-lib.sh   # the aggregator shard(s) and the bridge deployment, shared with the any-age lane (definitions only)
 : "${URETH_BIN:?set URETH_BIN to the pinned unicity-reth}"
 # The binary is attested, never built here: URETH_SHA256 (the attested file hash) and URETH_COMMIT (the full commit its --version reports)
@@ -86,6 +87,7 @@ PY
   cp test-nodes/evm-full-shard-conf.json "$conf"
   if [ "$SIGNING" = authority ]; then enroll_evm_authorities "$validators" "$partitionID" >/dev/null; info "signing authorities enrolled against the full shard configuration"; fi
   ureth_flags=$(sed -n 's/^ureth flags: *//p' test-nodes/b1-profile.out)
+  ureth_flags="$ureth_flags --unicity.genesis-commitment $(URETH_GENESIS_SPEC=test-nodes/evm-genesis-finalized.json urethB1GenesisCommitment)" || exit 1
 
   if [ "${DNB_AGG:-1}" = 1 ]; then agg_prepare_confs; fi
 
@@ -128,7 +130,7 @@ PY
 
 # Restarts: SIGTERM one process of the running devnet and start it again from its own state.
 start_reth() { # N: start (or restart) validator N's ureth on its datadir
-  local i=$1 ureth_flags; ureth_flags=$(sed -n 's/^ureth flags: *//p' test-nodes/b1-profile.out)
+  local i=$1 ureth_flags; ureth_flags=$(sed -n 's/^ureth flags: *//p' test-nodes/b1-profile.out); ureth_flags="$ureth_flags --unicity.genesis-commitment $(URETH_GENESIS_SPEC=test-nodes/evm-genesis-finalized.json urethB1GenesisCommitment)"
   # shellcheck disable=SC2086
   "$URETH_BIN" node --chain test-nodes/evm-genesis-finalized.json --datadir "test-nodes/reth$i/dd" \
     --authrpc.jwtsecret "test-nodes/evm$i/jwt.hex" --authrpc.addr 127.0.0.1 --authrpc.port $((rethEngineBase + i - 1)) \
