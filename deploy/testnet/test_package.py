@@ -12,6 +12,7 @@ import unittest
 from unittest.mock import patch
 
 import gateway
+import operator_rpc
 import generate
 import pos
 import metrics_relay
@@ -249,10 +250,10 @@ class EntityNamespace(unittest.TestCase):
     def test_the_bind_is_a_loopback_config_value_that_every_reader_follows(self):
         import operator_rpc
         self.assertEqual(operator_rpc.DEFAULT_BIND,'127.0.0.1')
-        for ok in ('127.0.0.1','127.0.0.2','::1'): self.assertEqual(operator_rpc.check_bind(ok),ok)
-        for bad in ('0.0.0.0','::','10.0.0.5','172.30.88.2','localhost','','1.2.3'):
+        for ok in ('127.0.0.1','127.0.0.2','127.255.255.254'): self.assertEqual(operator_rpc.check_bind(ok),ok)
+        for bad in ('0.0.0.0','::','::1','[::1]','10.0.0.5','172.30.88.2','128.0.0.1','localhost','','1.2.3'):
             with self.assertRaises(operator_rpc.BindError,msg=bad): operator_rpc.check_bind(bad)
-        self.assertEqual(operator_rpc.listen('::1',8002),'[::1]:8002')
+        self.assertEqual(operator_rpc.listen('127.0.0.2',8002),'127.0.0.2:8002')
         with tempfile.TemporaryDirectory() as tmp:
             out=Path(tmp)/'tn-fixture';out.mkdir();(out/'aggregator').mkdir()
             (out/'aggregator/keys.json').write_text(json.dumps({'authKey':{'privateKey':'0x01'},'sigKey':{'privateKey':'0x02'}}))
@@ -268,13 +269,34 @@ class EntityNamespace(unittest.TestCase):
             self.assertEqual(handoff_ops.DockerTransport(out).root_rpc,'http://127.0.0.2:8002')
             self.assertEqual(handoff_ops.abort_commands(out,[1],[])[1][-1],'http://127.0.0.2:8002')
     def test_the_relay_takes_its_upstreams_from_the_environment(self):
-        self.assertEqual(metrics_relay.routes({'ROOT_RPC':'127.0.0.2:8002','SHARD_RPC':'[::1]:9101'}),{'/root/metrics':'http://127.0.0.2:8002/api/v1/metrics','/shard/metrics':'http://[::1]:9101/api/v1/metrics'})
+        self.assertEqual(metrics_relay.routes({'ROOT_RPC':'127.0.0.2:8002','SHARD_RPC':'127.0.0.3:9101'}),{'/root/metrics':'http://127.0.0.2:8002/api/v1/metrics','/shard/metrics':'http://127.0.0.3:9101/api/v1/metrics'})
         with self.assertRaises(KeyError): metrics_relay.routes({})
     def test_the_generator_refuses_a_non_loopback_bind_before_any_key(self):
         for bad in ('0.0.0.0','10.1.2.3','example.org'):
             done=subprocess.run([sys.executable,str(Path(__file__).parent/'generate.py'),'--out','/nonexistent/tn-x','--validators','4','--ubft','x','--keygen','x','--b1genesis','x',
                 '--images','x','--captcha-sitekey','a','--captcha-secret-file','x','--rpc-bind',bad],text=True,capture_output=True)
             self.assertEqual(done.returncode,2,bad);self.assertIn('--rpc-bind',done.stderr)
+    def test_every_root_must_carry_the_same_operator_address(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg,out=EntityNamespace.cfg(self,3)
+            self.assertEqual(operator_rpc.common_urls(cfg),('http://127.0.0.1:8002','http://127.0.0.1:9101'))
+            for victim,want in (('root2','roots'),('shard3','shards')):
+                bad=json.loads(json.dumps(cfg));entry=bad['services'][victim]['entrypoint']
+                entry[entry.index('--rpc-server-address')+1]='127.0.0.9:'+entry[entry.index('--rpc-server-address')+1].split(':')[1]
+                with self.assertRaisesRegex(operator_rpc.BindError,want+' carry different'): operator_rpc.common_urls(bad)
+                if victim=='root2':
+                    generate.write(out/'compose.yaml',bad)
+                    with self.assertRaises(operator_rpc.BindError): handoff_ops.DockerTransport(out)
+            bad=json.loads(json.dumps(cfg));entry=bad['services']['root3']['entrypoint']
+            entry[entry.index('--rpc-server-address')+1]='127.0.0.9:8002';generate.write(out/'compose.yaml',bad)
+            with self.assertRaises(operator_rpc.BindError): handoff_ops.abort_commands(out,[1,2,3],[])
+    def test_the_validator_count_is_capped_at_the_registry_ceiling_with_the_reason(self):
+        for n,ok in ((2,False),(3,True),(16,True),(17,False),(32,False)):
+            done=subprocess.run([sys.executable,str(Path(__file__).parent/'generate.py'),'--out','/nonexistent/tn-x','--validators',str(n),'--ubft','/nonexistent/ubft','--keygen','x','--b1genesis','x',
+                '--images','x','--captcha-sitekey','a','--captcha-secret-file','x'],text=True,capture_output=True)
+            if ok: self.assertNotIn('validators must be 3..16',done.stderr,n)
+            else:
+                self.assertEqual(done.returncode,2,n);self.assertIn('validators must be 3..16, got %d'%n,done.stderr);self.assertIn('at most 16 committee members',done.stderr)
     def test_no_source_hardcodes_an_operator_listener_address(self):
         here=Path(__file__).parent
         for name in ('generate.py','handoff_ops.py','metrics_relay.py','validate-pos.py','validate-aggregator.py','validate-handoff.py'):
