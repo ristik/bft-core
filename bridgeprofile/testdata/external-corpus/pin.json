@@ -1,6 +1,6 @@
 {
   "repository": "ristik/native-bridge-plugins",
-  "revision": "f1ca03b80c545a56b57ed9a1224c29bd9c436191",
-  "digest": "66c3a1530ef53d6a0cfc1960092070e342d60ff148907d2b64ad16d6ce91bee5",
-  "status": "sealed-candidate-unmerged"
+  "revision": "a60648e95d62b95c405c015b1cb2d5fbd691b6ec",
+  "digest": "d9cc3b9fe8d99c58161d41a34dc24bbfba8841a5f8fe8b3ec237933201d2296c",
+  "status": "merged-release"
 }
