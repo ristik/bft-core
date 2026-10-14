@@ -37,6 +37,7 @@ import (
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/trustbase"
 	drctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
 	"github.com/unicitynetwork/bft-core/trusthistorystore"
+	"github.com/unicitynetwork/bft-core/utbstore"
 )
 
 type (
@@ -113,6 +114,7 @@ type (
 		frontier         *frontierSampler
 		recoveryProfile2 bool
 		utbPrevious      func(epoch uint64) (*types.RootTrustBaseV2, error)
+		utbStore         *utbstore.Store
 		recoveryHistory  *trusthistorystore.Store
 		posPrefetching   atomic.Int32
 		posQueue         posSubmissions                   // submitted Retirement and RejectResult controls waiting for a leader
@@ -331,12 +333,18 @@ func NewConsensusManager(
 			}
 			return CommittedBlockInfo{Epoch: b.BlockData.Epoch, RootHash: b.RootHash, Timestamp: b.BlockData.Timestamp}, nil
 		})}
+	if optional.UTBStore != nil && optional.UTBPrevious == nil {
+		optional.UTBPrevious = optional.UTBStore.Entry
+	}
 	if optional.UTBPrevious != nil {
 		// the successor entry of a committing vote comes from the manager's CURRENT block store, like the executed block above
 		safetyOptions = append(safetyOptions, WithUTB(func(committed *drctypes.RoundInfo, epoch uint64) ([]byte, error) {
 			return UTBSuccessor{State: manager.blockStore, Previous: optional.UTBPrevious}.Entry(committed, epoch)
 		}))
 		bStore.SetUTBBinding(utbBindingFor(trustBaseStore, bStore, optional.UTBPrevious))
+		if optional.UTBStore != nil {
+			bStore.SetUTBRetention(utbRetentionFor(optional.UTBStore))
+		}
 	}
 	if optional.Q3 != nil {
 		safetyOptions = append(safetyOptions, WithActivationGate(optional.Q3))
@@ -389,6 +397,7 @@ func NewConsensusManager(
 		frontier:         frontier,
 		recoveryProfile2: optional.RecoveryProfile2,
 		utbPrevious:      optional.UTBPrevious,
+		utbStore:         optional.UTBStore,
 		recoveryHistory:  optional.RecoveryHistory,
 		witnesses:        optional.Witnesses,
 		q3:               optional.Q3,
@@ -1721,6 +1730,9 @@ func (x *ConsensusManager) onStateResponse(ctx context.Context, rsp *abdrc.State
 	blockStore.SetPosServices(x.blockStore.PosServices())
 	if x.utbPrevious != nil {
 		blockStore.SetUTBBinding(utbBindingFor(x.trustBaseStore, blockStore, x.utbPrevious))
+		if x.utbStore != nil {
+			blockStore.SetUTBRetention(utbRetentionFor(x.utbStore))
+		}
 	}
 	recoveryRound := blockStore.GetHighQc().GetRound()
 	if a := blockStore.RootAnchor(); a != nil && recoveryRound < a.Slot {

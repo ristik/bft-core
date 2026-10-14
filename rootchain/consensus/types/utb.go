@@ -117,3 +117,12 @@ func (x *QuorumCert) verifyUTB(tb types.RootTrustBase, cfg votesig.Config) error
 	}
 	return nil
 }
+
+// VerifyEnvelopeAndUTB applies the epoch's envelope rule and checks the certificate's endorsement, for a verifier that checks the certificate's
+// signatures itself (the legacy-scheme old commit proof): VerifyScheme does both for every other path.
+func (x *QuorumCert) VerifyEnvelopeAndUTB(tb types.RootTrustBase, cfg votesig.Config) error {
+	if err := x.checkEnvelope(cfg); err != nil {
+		return err
+	}
+	return x.verifyUTB(tb, cfg)
+}

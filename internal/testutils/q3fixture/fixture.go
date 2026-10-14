@@ -26,6 +26,7 @@ import (
 	rctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/votesig"
 	"github.com/unicitynetwork/bft-core/rootchain/testutils"
+	"github.com/unicitynetwork/bft-core/utb"
 	abcrypto "github.com/unicitynetwork/bft-go-base/crypto"
 	"github.com/unicitynetwork/bft-go-base/types"
 	"github.com/unicitynetwork/bft-go-base/types/hex"
@@ -83,6 +84,8 @@ type Options struct {
 
 // Fixture is one activation and everything that authenticates it.
 type Fixture struct {
+	// UTB says the chain is a UTB chain: its genesis epoch is a UTB epoch, every activation carries the UTB tuple and every old commit proof is endorsed.
+	UTB             bool
 	Old             *types.RootTrustBaseV1
 	Genesis         [32]byte
 	OldNodes        []*testutils.TestNode
@@ -122,6 +125,17 @@ func Signers(nodes []*testutils.TestNode) map[string]abcrypto.Signer {
 }
 
 // New builds the fixture.
+// NewHistory is a fresh history from the chain's genesis, a UTB one when the chain is.
+func (f *Fixture) NewHistory(t *testing.T) *q3format.History {
+	t.Helper()
+	h, err := q3format.NewHistory(f.Old)
+	require.NoError(t, err)
+	if f.UTB {
+		h = h.WithUTBGenesis()
+	}
+	return h
+}
+
 func New(t *testing.T, o Options) *Fixture {
 	t.Helper()
 	if o.Weights == nil {
@@ -144,6 +158,8 @@ func New(t *testing.T, o Options) *Fixture {
 	}
 	require.Len(t, o.Weights, 4)
 	f := &Fixture{FrozenParent: bytes.Clone(o.Frozen), CommitSealRound: o.CommitSealRound}
+	f.UTB = o.UTB || (o.After != nil && o.After.UTB) || (o.Chain != nil && o.Chain.UTB)
+	o.UTB = f.UTB
 	switch {
 	case o.After != nil:
 		f.Old, f.OldNodes = o.After.Old, o.After.NewNodes
@@ -162,12 +178,13 @@ func New(t *testing.T, o Options) *Fixture {
 	// the epoch whose committee commits this handoff: the genesis (epoch 1, scheme 1, unit) or the first activation's (epoch 2,
 	// scheme 2, weighted)
 	oldID, oldEpoch, oldVersion, oldTB, oldCfg := genesisID, uint64(1), uint64(1), f.Old, votesig.Config{}
+	_ = oldCfg
 	bodyEpoch, aMin, activate, ordered := uint64(2), uint64(7), uint64(7), uint64(4)
+	hOld := f.NewHistory(t) // the verified history up to the committee that commits this handoff
 	if o.After != nil {
-		h, err := q3format.NewHistory(f.Old)
-		require.NoError(t, err)
-		h, err = h.VerifyEnvelope(o.After.Envelope)
+		h, err := hOld.VerifyEnvelope(o.After.Envelope)
 		require.NoError(t, err, "the preceding activations must be valid")
+		hOld = h
 		tip := h.Tip()
 		oldCfg, err = h.Signing(tip.Epoch())
 		require.NoError(t, err)
@@ -306,6 +323,19 @@ func New(t *testing.T, o Options) *Fixture {
 			qc.Signatures[n.PeerConf.ID.String()] = sig
 		}
 	}
+	if f.UTB { // the old committee endorses the successor entry the committed handoff implies, with the same signers as the certificate
+		chain, err := hOld.UTBUnsigned()
+		require.NoError(t, err)
+		entry, err := utb.BuildUnsigned(chain[len(chain)-1], utb.FromWeightSet(Network, bodyEpoch, activate, f.Members, body.RootThreshold, body.StateSummary, body.ChangeRecordHash))
+		require.NoError(t, err)
+		unsigned, err := entry.SigBytes()
+		require.NoError(t, err)
+		qc.Envelope, qc.UTB = votesig.EnvelopeUTB, &rctypes.UTBCertificate{Unsigned: unsigned, Signatures: map[string]hex.Bytes{}}
+		for _, n := range f.OldNodes[:o.SignedBy] {
+			qc.UTB.Signatures[n.PeerConf.ID.String()], err = n.Signer.SignBytes(unsigned)
+			require.NoError(t, err)
+		}
+	}
 	f.Proof = handoff.OldCommitProof{Profile: evmroot.D4Profile, Record: record, Control: control, ControlPath: path, CommitQC: qc}
 	f.ProofBytes, err = types.Cbor.Marshal(f.Proof)
 	require.NoError(t, err)
@@ -346,13 +376,7 @@ func New(t *testing.T, o Options) *Fixture {
 		copy(f.Claim.CommitID[:], record.ID())
 		copy(f.Claim.PriorID[:], oldID)
 	} else {
-		h, err := q3format.NewHistory(f.Old)
-		require.NoError(t, err)
-		if o.After != nil {
-			h, err = h.VerifyEnvelope(o.After.Envelope)
-			require.NoError(t, err)
-		}
-		next, err := h.WithV3(f.Link)
+		next, err := hOld.WithV3(f.Link)
 		require.NoError(t, err, "the fixture must be a valid activation")
 		f.Claim = next.Tip().Claim()
 	}
