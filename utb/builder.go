@@ -15,7 +15,6 @@ import (
 	"math"
 	"sort"
 
-	"github.com/libp2p/go-libp2p/core/crypto"
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/unicitynetwork/bft-go-base/types"
 	"github.com/unicitynetwork/bft-go-base/types/hex"
@@ -69,13 +68,24 @@ func FromBodyV2(b evmroot.TrustBaseBodyV2, activationRound uint64) SuccessorFact
 	return FromWeightSet(b.NetworkID, b.Epoch, activationRound, b.Members, b.RootThreshold, b.StateSummary, b.ChangeRecordHash)
 }
 
+// FromProjection adapts a runtime V1 projection (what the root installers, the Q3 history and the shard restore hold for an epoch) to the facts. Every
+// path that holds a projection therefore derives the same unsigned entry from the same epoch.
+func FromProjection(tb *types.RootTrustBaseV1) SuccessorFacts {
+	ms := make([]Member, len(tb.RootNodes))
+	for i, n := range tb.RootNodes {
+		ms[i] = Member{NodeID: n.NodeID, Key: bytes.Clone(n.SigKey), Weight: n.Stake}
+	}
+	return SuccessorFacts{Network: uint64(tb.NetworkID), Epoch: tb.Epoch, EpochStart: tb.EpochStart, Members: ms, Threshold: tb.QuorumThreshold,
+		StateHash: bytes.Clone(tb.StateHash), ChangeRecordHash: bytes.Clone(tb.ChangeRecordHash)}
+}
+
 // BuildUnsigned returns the entry for f extending prev, without signatures: epoch prev+1, a strictly later start, PreviousEntryID =
 // prev.EntryID(). It needs no commit QC (that would be circular while a vote is built); the finalized entry is checked against the QC separately.
 // With prev == nil it builds a genesis entry (zero predecessor); its authority is a pin on its EntryID.
 func BuildUnsigned(prev *types.RootTrustBaseV2, f SuccessorFacts) (*types.RootTrustBaseV2, error) {
 	prevID := make([]byte, types.TrustBaseV2IDLen)
 	if prev != nil {
-		if err := prev.Validate(); err != nil {
+		if err := validateShape(prev); err != nil {
 			return nil, fmt.Errorf("%w: predecessor: %v", ErrChain, err)
 		}
 		if f.Network != uint64(prev.NetworkID) {
@@ -104,13 +114,9 @@ func BuildUnsigned(prev *types.RootTrustBaseV2, f SuccessorFacts) (*types.RootTr
 	nodes := make([]*types.NodeInfo, len(ms))
 	var total uint64
 	for i, m := range ms {
-		// the native peer id is derived from the consensus key: a member whose id and key do not match is refused
-		pub, err := crypto.UnmarshalSecp256k1PublicKey(m.Key)
-		if err != nil {
-			return nil, fmt.Errorf("%w: member %q key: %v", ErrFacts, m.NodeID, err)
-		}
-		if id, err := peer.IDFromPublicKey(pub); err != nil || id.String() != m.NodeID {
-			return nil, fmt.Errorf("%w: node id %q is not the peer id of its consensus key", ErrFacts, m.NodeID)
+		// the node id is the libp2p peer id of the member's network (auth) key, a different key from the consensus key, so only its form is checked
+		if _, err := peer.Decode(m.NodeID); err != nil {
+			return nil, fmt.Errorf("%w: node id %q: %v", ErrFacts, m.NodeID, err)
 		}
 		if m.Weight == 0 || m.Weight > types.MaxTrustBaseV2Weight {
 			return nil, fmt.Errorf("%w: member %q weight %d", ErrFacts, m.NodeID, m.Weight)
@@ -123,15 +129,20 @@ func BuildUnsigned(prev *types.RootTrustBaseV2, f SuccessorFacts) (*types.RootTr
 	}
 	e := &types.RootTrustBaseV2{Version: types.TrustBaseV2Version, NetworkID: types.NetworkID(f.Network), Epoch: f.Epoch, EpochStart: f.EpochStart,
 		RootNodes: nodes, QuorumThreshold: f.Threshold, StateHash: bytes.Clone(f.StateHash), ChangeRecordHash: bytes.Clone(f.ChangeRecordHash), PreviousEntryID: prevID}
-	// structural validation of the unsigned entry: Validate requires signatures on a non-genesis entry, so check a copy that carries a placeholder map
-	probe := *e
-	if prev != nil {
-		probe.Signatures = map[string]hex.Bytes{"-": nil}
-	}
-	if err := probe.Validate(); err != nil {
+	if err := validateShape(e); err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrFacts, err)
 	}
 	return e, nil
+}
+
+// validateShape is types.RootTrustBaseV2.Validate for an entry that may still lack its signatures: Validate requires a non-genesis entry to carry a
+// non-empty signature map, so an unsigned one is checked as a copy with a placeholder. Signatures are verified by VerifySuccessor, never here.
+func validateShape(e *types.RootTrustBaseV2) error {
+	probe := *e
+	if !probe.IsGenesis() && len(probe.Signatures) == 0 {
+		probe.Signatures = map[string]hex.Bytes{"-": nil}
+	}
+	return probe.Validate()
 }
 
 // Projection is the runtime V1 view of an entry for existing consumers that need a concrete *types.RootTrustBaseV1 (keys, weights, threshold, epoch
