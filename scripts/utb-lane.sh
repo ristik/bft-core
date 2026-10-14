@@ -77,18 +77,16 @@ preflight() {
   if [ -n "${NBP_DIR:-}" ] && [ -d "$NBP_DIR/tests/live" ]; then yes "NBP_DIR $NBP_DIR"; else no "set NBP_DIR to the native-bridge-plugins checkout"; fi
   [ -n "${DNB_TOOL:-}" ] && [ -x "$DNB_TOOL" ] && yes "DNB_TOOL $DNB_TOOL" || no "set DNB_TOOL to a dnb-tool built from this checkout"
   if (exec 3<>/dev/tcp/127.0.0.1/27117) 2>/dev/null; then yes "MongoDB replica set port 27117 answers"; else no "no MongoDB on 127.0.0.1:27117"; fi
-  echo "-- the patched aggregator (design 11.3; built by dev4, recorded under briefs/builds/aggregator-utb-<sha8>/)"
+  echo "-- the patched aggregator (design 11.3; dev4's local build, recorded under briefs/builds/aggregator-utb-<patch sha8>/)"
   if [ -n "${AGG_BIN:-}" ] && [ -x "$AGG_BIN" ]; then
     yes "AGG_BIN $AGG_BIN"
-    sum=$(shasum -a 256 "$AGG_BIN" | cut -d' ' -f1)
-    prov=${AGG_PROVENANCE:-$AGRE_ROOT/briefs/builds/aggregator-utb-${sum:0:8}}
-    for f in base.txt patch.diff sha256.txt; do check "aggregator provenance $f present at $prov" test -s "$prov/$f"; done
-    if [ -s "$prov/sha256.txt" ] && [ "$(awk '{print $1; exit}' "$prov/sha256.txt")" = "$sum" ]; then yes "the provenance records this binary's digest"; else no "the provenance sha256.txt does not record this binary ($sum)"; fi
+    if prov=$(utb_agg_provenance "$AGG_BIN" "$AGRE_ROOT/briefs/builds" 2>/dev/null); then yes "provenance $prov records this binary, its base and its patch"; else no "$(utb_agg_provenance "$AGG_BIN" "$AGRE_ROOT/briefs/builds" 2>&1 | tail -1)"; fi
+    check "the binary is a UTB build (its UTB variables are in the binary)" bash -c "strings '$AGG_BIN' | grep -q UTB_GENESIS_ID"
   else
-    no "set AGG_BIN to the patched aggregator-go binary"
+    no "set AGG_BIN to the patched aggregator-go binary (briefs/builds/aggregator-utb-*)"
   fi
-  [ -n "${UTB_AGG_ENV_NAMES:-}" ] && [ "$(wc -w <<<"$UTB_AGG_ENV_NAMES")" -ge 3 ] && yes "UTB_AGG_ENV_NAMES names the aggregator's genesis/pin/store variables" || no "set UTB_AGG_ENV_NAMES (three names: genesis file, genesis id, entries database) as the patched binary reads them"
-  [ -n "${UTB_AGG_HISTORY_URL:-}" ] && yes "UTB_AGG_HISTORY_URL $UTB_AGG_HISTORY_URL" || no "set UTB_AGG_HISTORY_URL to the aggregator's read-only binary history range endpoint"
+  if [ -n "${prov:-}" ]; then note "the aggregator was built on: $(sed -n 's/^bft-core (.*): *\([0-9a-f]\{9,\}\).*/bft-core \1/p' "$prov/base.txt" | head -1) (a merge base: it must be re-pinned to the merged bft-core and rebuilt before the real run)"; fi
+  note "the aggregator history range is served at $(utb_agg_history_url 1) (GET /api/v1/trustbases)"
   echo "-- substrate and the generated genesis"
   check "reth-paired-devnet.sh supports UTB_LANE" grep -q 'UTB_LANE' "$REPO_ROOT/scripts/reth-paired-devnet.sh"
   check "helper.sh hands the profile to roots and validators" bash -c "grep -c 'UTB_LANE' '$REPO_ROOT/helper.sh' | grep -qx 2"
@@ -107,7 +105,7 @@ preflight() {
   [ "$bad" -eq 0 ]
 }
 
-lane_env() { export ANYAGE_LANE=1 UTB_LANE=1 P85_LOCK_OWNER=utb P85_EVIDENCE_PREFIX=utb CONTRACTS=${P85_CONTRACTS:-}; }
+lane_env() { export ANYAGE_LANE=1 UTB_LANE=1 P85_LOCK_OWNER=utb P85_EVIDENCE_PREFIX=utb CONTRACTS=${P85_CONTRACTS:-} UTB_COMPONENTS="$(utb_lane_components)"; }
 
 case "${1:-}" in
   --plan) plan ;;

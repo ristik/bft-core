@@ -178,11 +178,13 @@ func getBootStrapNodes(bootNodesStr []string) ([]peer.AddrInfo, error) {
 }
 
 func rootNodeRun(ctx context.Context, flags *rootNodeRunFlags) error {
-	if err := utbprofile.Check(utbprofile.Inputs{Role: utbprofile.Root, GenesisFile: flags.UTBGenesisFile, GenesisID: flags.UTBGenesisID,
-		EntriesDB: flags.PathWithDefault(flags.UTBEntriesDBFile, rootUTBEntriesDBFileName), Profile2: flags.Profile2,
-		LegacyDBs: []string{flags.PathWithDefault(flags.RootDBFile, rootDBFileName), flags.PathWithDefault(flags.TrustBaseDBFile, trustBaseDBFileName),
-			flags.PathWithDefault(flags.OrchestrationDBFile, orchestrationDBFileName)}}); err != nil {
-		return err
+	if flags.baseFlags != nil {
+		if err := utbprofile.Check(utbprofile.Inputs{Role: utbprofile.Root, GenesisFile: flags.UTBGenesisFile, GenesisID: flags.UTBGenesisID,
+			EntriesDB: flags.PathWithDefault(flags.UTBEntriesDBFile, rootUTBEntriesDBFileName), Profile2: flags.Profile2,
+			LegacyDBs: []string{flags.PathWithDefault(flags.RootDBFile, rootDBFileName), flags.PathWithDefault(flags.TrustBaseDBFile, trustBaseDBFileName),
+				flags.PathWithDefault(flags.OrchestrationDBFile, orchestrationDBFileName)}}); err != nil {
+			return err
+		}
 	}
 	keyConf, err := flags.loadKeyConf(flags.baseFlags, false)
 	if err != nil {

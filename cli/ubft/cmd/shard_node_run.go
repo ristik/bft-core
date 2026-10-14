@@ -475,9 +475,11 @@ protocol and docs/engine-api-adapter-plan.md for how this command's pieces fit t
 }
 
 func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(string) bool) error {
-	if err := utbprofile.Check(utbprofile.Inputs{Role: utbprofile.Shard, GenesisFile: flags.UTBGenesisFile, GenesisID: flags.UTBGenesisID,
-		EntriesDB: flags.PathWithDefault(flags.UTBEntriesDBFile, shardUTBEntriesDBFileName)}); err != nil {
-		return err
+	if flags.baseFlags != nil { // (a unit test drives this function with none)
+		if err := utbprofile.Check(utbprofile.Inputs{Role: utbprofile.Shard, GenesisFile: flags.UTBGenesisFile, GenesisID: flags.UTBGenesisID,
+			EntriesDB: flags.PathWithDefault(flags.UTBEntriesDBFile, shardUTBEntriesDBFileName)}); err != nil {
+			return err
+		}
 	}
 	var readOperatorStatus func(context.Context) (archivewiring.OperatorStatus, error)
 	if flags.Restore {

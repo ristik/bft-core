@@ -30,15 +30,46 @@ utb_root_flags() { # node (unused: every root has the same profile)
 }
 utb_shard_flags() { utb_root_flags "$@"; }
 
-# The environment of the patched aggregator (dev4's local build, design §11.3). The NAMES are the binary's own and are recorded in the lane's build manifest
-# (UTB_AGG_ENV_NAMES="GENESIS_FILE GENESIS_ID ENTRIES_DB" -> the variables the binary reads); until they are given the aggregator is started
-# without them and the preflight refuses the lane.
-utb_agg_env() { # K (1-based): the three assignments, in the order of UTB_AGG_ENV_NAMES
-  local k=${1:-1} names=${UTB_AGG_ENV_NAMES:-}
-  [ -n "$names" ] || return 0
-  set -- $names
-  [ $# -ge 3 ] || { echo "utb_agg_env: UTB_AGG_ENV_NAMES wants three names (genesis file, genesis id, entries database)" >&2; return 1; }
-  echo "$1=$PWD/test-nodes/utb-genesis.cbor $2=$(utb_pin) $3=$PWD/test-nodes/utb-agg$k.db"
+# The environment of the patched aggregator (dev4's local build, briefs/builds/aggregator-utb-<patch sha8>/README.md): UTB mode is enabled by UTB_GENESIS_ID; the
+# genesis entry file is the fresh chain's history (UTB_BUNDLE_FILE would be a complete tagged history instead); UTB_ENTRIES_DB is its own append-only store. In UTB mode
+# the binary uses neither the V1 trust-base files nor root REST.
+utb_agg_env() { # K (1-based)
+  local k=${1:-1}
+  [ -s test-nodes/utb-genesis.cbor ] && [ -s test-nodes/utb-genesis.id ] || { echo "utb_agg_env: no UTB genesis (utb_prepare_genesis first)" >&2; return 1; }
+  echo "UTB_GENESIS_FILE=$PWD/test-nodes/utb-genesis.cbor UTB_GENESIS_ID=$(utb_pin) UTB_ENTRIES_DB=$PWD/test-nodes/utb-agg$k.db"
+}
+# The aggregator's read-only binary history range (design 11.3 item 4): GET /api/v1/trustbases?from=E[&to=E]..., the PR6 response codec. The same endpoint serves the
+# lane's reference client; port is the aggregator's (agg_port from scripts/lib/agg-lib.sh when it is loaded).
+utb_agg_history_url() { local k=${1:-1} port=${AGG_PORT:-3001}; echo "http://127.0.0.1:$((port + k - 1))/api/v1/trustbases"; }
+
+# The patched aggregator's provenance directory: the one whose sha256.txt records this binary's digest. It must also hold the base, the patch and a sha256.txt that
+# records the patch's digest. Prints the directory.
+utb_agg_provenance() { # BIN [BUILDS_DIR]
+  local bin=$1 builds=${2:-${AGRE_ROOT:-..}/briefs/builds} sum d psum
+  sum=$(shasum -a 256 "$bin" 2>/dev/null | cut -d' ' -f1)
+  [ -n "$sum" ] || { echo "utb_agg_provenance: cannot read $bin" >&2; return 1; }
+  for d in "$builds"/aggregator-utb-*/; do
+    [ -s "${d}sha256.txt" ] && grep -q "^$sum " "${d}sha256.txt" || continue
+    for f in base.txt patch.diff; do [ -s "${d}$f" ] || { echo "utb_agg_provenance: ${d}$f is missing or empty" >&2; return 1; }; done
+    psum=$(shasum -a 256 "${d}patch.diff" | cut -d' ' -f1)
+    grep -q "^$psum " "${d}sha256.txt" || { echo "utb_agg_provenance: ${d}sha256.txt does not record the patch digest $psum" >&2; return 1; }
+    echo "${d%/}"; return 0
+  done
+  echo "utb_agg_provenance: no aggregator-utb-* provenance under $builds records the binary digest $sum" >&2
+  return 1
+}
+
+# The components pinned in the manifest, from what the lane was given: the aggregator's base commit, patch and binary digests (from its provenance) and the other
+# builds by their environment names.
+utb_lane_components() {
+  local d out=()
+  [ -z "${M2_URETH_COMMIT:-}" ] || out+=("ureth=$M2_URETH_COMMIT")
+  if [ -n "${AGG_BIN:-}" ] && d=$(utb_agg_provenance "$AGG_BIN" 2>/dev/null); then
+    out+=("aggregator-base=$(awk 'NR==1{print $3}' "$d/base.txt")" "aggregator-patch=sha256:$(shasum -a 256 "$d/patch.diff" | cut -d' ' -f1)" "aggregator-binary=sha256:$(shasum -a 256 "$AGG_BIN" | cut -d' ' -f1)")
+  fi
+  [ -z "${P85_CONTRACTS:-}" ] || ! git -C "$P85_CONTRACTS" rev-parse HEAD >/dev/null 2>&1 || out+=("contracts=$(git -C "$P85_CONTRACTS" rev-parse HEAD)")
+  [ -z "${NBP_DIR:-}" ] || ! git -C "$NBP_DIR" rev-parse HEAD >/dev/null 2>&1 || out+=("native-bridge-plugins=$(git -C "$NBP_DIR" rev-parse HEAD)")
+  printf '%s ' "${out[@]+"${out[@]}"}"
 }
 
 # The evidence the lane must leave (design §11.4); a root log saying "signed" or a client printing the new epoch number is not evidence.
@@ -111,6 +142,17 @@ utb_selftest() {
     flags=$(utb_root_flags 1) && [ "$flags" = "--utb-genesis test-nodes/utb-genesis.cbor --utb-genesis-id $(tr -d '[:space:]' <test-nodes/utb-genesis.id)" ] ) \
     && echo "  ok    root and shard flags carry the generated file and the pin read from it" || { echo "  FAIL  utb_root_flags"; UTB_ST_BAD=$((UTB_ST_BAD + 1)); }
   utb_st_no "no flags without a generated genesis" bash -c "cd '$t/empty' 2>/dev/null || mkdir -p '$t/empty' && cd '$t/empty' && source '$cwd/scripts/lib/utb-lib.sh' && utb_root_flags 1"
+  # the aggregator provenance: the directory that records the binary and the patch is found; a missing patch, an unrecorded patch digest or an unknown binary is refused
+  local bld="$t/builds" bin="$t/agg"
+  mkdir -p "$bld/aggregator-utb-aaaaaaaa"
+  printf 'binary\n' >"$bin"; printf 'patch\n' >"$bld/aggregator-utb-aaaaaaaa/patch.diff"; printf 'aggregator-go base: 63cdca1 (x)\n' >"$bld/aggregator-utb-aaaaaaaa/base.txt"
+  printf '%s  patch.diff\n%s  binary\n' "$(shasum -a 256 <"$bld/aggregator-utb-aaaaaaaa/patch.diff" | cut -d' ' -f1)" "$(shasum -a 256 <"$bin" | cut -d' ' -f1)" >"$bld/aggregator-utb-aaaaaaaa/sha256.txt"
+  utb_st "the aggregator provenance is found by the binary digest" bash -c "source '$cwd/scripts/lib/utb-lib.sh'; [ \"\$(utb_agg_provenance '$bin' '$bld')\" = '$bld/aggregator-utb-aaaaaaaa' ]"
+  utb_st_no "an unrecorded binary is refused" bash -c "source '$cwd/scripts/lib/utb-lib.sh'; printf 'other\n' >'$t/other'; utb_agg_provenance '$t/other' '$bld'"
+  utb_st_no "a provenance that does not record the patch digest is refused" bash -c "source '$cwd/scripts/lib/utb-lib.sh'; printf 'edited\n' >>'$bld/aggregator-utb-aaaaaaaa/patch.diff'; utb_agg_provenance '$bin' '$bld'"
+  printf 'patch\n' >"$bld/aggregator-utb-aaaaaaaa/patch.diff"
+  utb_st "the aggregator environment carries the genesis, the pin and its own store" bash -c "cd '$t' && source '$cwd/scripts/lib/utb-lib.sh' && env=\$(utb_agg_env 2) && grep -q 'UTB_GENESIS_FILE=$t/test-nodes/utb-genesis.cbor' <<<\"\$env\" && grep -q 'UTB_GENESIS_ID=0x' <<<\"\$env\" && grep -q 'UTB_ENTRIES_DB=$t/test-nodes/utb-agg2.db' <<<\"\$env\""
+  utb_st "the history URL follows the aggregator's port" bash -c "source '$cwd/scripts/lib/utb-lib.sh'; [ \"\$(AGG_PORT=3100 utb_agg_history_url 2)\" = http://127.0.0.1:3101/api/v1/trustbases ]"
   # the evidence checker: a complete synthetic pack passes, and each broken property is refused by its own check
   local ev="$t/ev"
   mkdir -p "$ev"

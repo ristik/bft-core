@@ -334,7 +334,7 @@ if [ "${UTB_LANE:-0}" = 1 ]; then
   source scripts/lib/utb-lib.sh
   UTB_ROOT_FLAGS_FN=utb_root_flags UTB_AGG_ENV_FN=utb_agg_env
   export UTB_ROOT_FLAGS_FN UTB_AGG_ENV_FN
-  utb_prepare_genesis test-nodes/trust-base.json || { echo "the UTB genesis could not be generated" >&2; exit 1; }
+  UTB_COMPONENTS=${UTB_COMPONENTS:-$(utb_lane_components)} utb_prepare_genesis test-nodes/trust-base.json || { echo "the UTB genesis could not be generated" >&2; exit 1; }
   echo "UTB genesis entry $(utb_pin) (manifest $UTB_DIR/utb-manifest.json)"
 fi
 

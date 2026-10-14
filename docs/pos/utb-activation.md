@@ -27,11 +27,15 @@ refused by the genesis comparison; incompatible binaries by the lane preflight (
 
 `UTB_LANE=1` on top of `ANYAGE_LANE=1`: `reth-paired-devnet.sh` generates the genesis and manifest once from `test-nodes/trust-base.json`; `helper.sh` gives every root and validator
 the flags (from the generated pin file, never a copied value); `m2_start_root` keeps them on a restarted root (`UTB_ROOT_FLAGS_FN`); `agg-lib.sh` passes the patched aggregator its
-genesis/pin/store variables (`UTB_AGG_ENV_FN`, names from `UTB_AGG_ENV_NAMES`, dev4's binary). `--plan`, `--preflight` (pins, merged PRs, binaries, the aggregator patch provenance,
+UTB variables (`UTB_AGG_ENV_FN`: `UTB_GENESIS_FILE`, `UTB_GENESIS_ID`, `UTB_ENTRIES_DB`; dev4's binary `briefs/builds/aggregator-utb-4d69e49b`, history at `GET /api/v1/trustbases`). `--plan`, `--preflight` (pins, merged PRs, binaries, the aggregator patch provenance,
 manifest, prep record), `--selftest` (generation, flags, and the evidence checker with each broken property refused by its own check), `--prep`, `--check-evidence DIR`.
 The required evidence list is `utb_evidence_required` (design §11.4: manifest and patch digests, initial and final bundles, raw entries, a UCResp sample, independent verifier
 output with predecessor epoch/EntryID/weights/threshold, catch-up and restart logs, the original proof digest recorded unchanged by the historical verification, the bridge receipt,
 the client reload of the final bundle).
+
+**The aggregator** is dev4's local build (`briefs/builds/aggregator-utb-4d69e49b`: aggregator-go `63cdca1` + one reviewed patch, not pushed anywhere). It was built on a local merge of the
+PR5 and PR6 heads; once they are merged it is re-pinned to the merged bft-core commit and rebuilt, and the provenance (and the manifest's `aggregator-*` components) change with it. The
+preflight finds the provenance by the binary digest, requires the patch digest to be recorded, and prints the bft-core base.
 
 **The run mode refuses.** The step drivers U1-U5 (reference client probe, aggregator and peer-repair probes, history export) are written after this wiring's first review and
 once PR3-PR6 are merged and the aggregator patch's interface is fixed; no devnet has been run.
