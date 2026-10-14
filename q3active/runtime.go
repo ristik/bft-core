@@ -69,6 +69,9 @@ type Consumer interface {
 type Config struct {
 	DB      keyvaluedb.KeyValueDB
 	Genesis *types.RootTrustBaseV1
+	// UTBGenesis makes the genesis epoch a UTB epoch: the deployment endorses the signed trust-base entry from its first handoff, and every activation
+	// must carry the UTB protocol tuple.
+	UTBGenesis bool
 }
 
 // Participants are the five installers. They exist only after the runtime does (the manager takes the runtime as its gate and
@@ -115,6 +118,9 @@ func New(cfg Config) (*Runtime, error) {
 	h, err := q3format.NewHistory(cfg.Genesis)
 	if err != nil {
 		return nil, err
+	}
+	if cfg.UTBGenesis {
+		h = h.WithUTBGenesis()
 	}
 	staged, err := j.Staged()
 	if err != nil {

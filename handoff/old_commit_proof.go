@@ -89,6 +89,9 @@ func verifyOldQC(qc *rctypes.QuorumCert, tb *types.RootTrustBaseV1, cfg votesig.
 	if _, err := quorumweight.VerifySignedStrict(tb, bs, qc.Signatures); err != nil {
 		return ErrProof
 	}
+	if err := qc.VerifyEnvelopeAndUTB(tb, cfg); err != nil {
+		return fmt.Errorf("%w: %w", ErrProof, err)
+	}
 	return nil
 }
 
@@ -133,6 +136,11 @@ func VerifyOldCommitProofSigning(p OldCommitProof, tb *types.RootTrustBaseV1, cf
 	}
 	if err := verifyOldQC(qc, tb, cfg); err != nil {
 		return VerifiedRecord{}, err
+	}
+	// the commit of a handoff in a UTB epoch is endorsed: the certificate that commits the control record carries the old committee's endorsement of
+	// the successor trust-base entry. That it is the entry the record's body implies is checked by the installer, which has the body.
+	if cfg.UTB && qc.UTB == nil {
+		return VerifiedRecord{}, fmt.Errorf("%w: %w: the committing certificate carries no endorsement", ErrProof, votesig.ErrUTB)
 	}
 	if p.OptionalQC != nil {
 		if p.OptionalQC.VoteInfo == nil || p.OptionalQC.GetRound() != c || p.OptionalQC.VoteInfo.Epoch != p.Record.Epoch || (!domainBound && p.OptionalQC.VoteInfo.Timestamp != qc.LedgerCommitInfo.Timestamp) || !bytes.Equal(p.OptionalQC.VoteInfo.CurrentRootHash, root) {

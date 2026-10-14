@@ -13,6 +13,7 @@ import (
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/storage"
 	rctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/votesig"
+	"github.com/unicitynetwork/bft-core/utb"
 	basetypes "github.com/unicitynetwork/bft-go-base/types"
 )
 
@@ -105,7 +106,7 @@ func (x *ConsensusManager) InstallVerifiedEpoch(entry q3format.Entry, proof hand
 	}
 	projected := entry.Projection()
 	projected.PreviousEntryHash = oldID
-	signing := votesig.Config{Scheme: cfg.SigningScheme, Network: cfg.Network, Genesis: cfg.Genesis}
+	signing := votesig.Config{Scheme: cfg.SigningScheme, Network: cfg.Network, Genesis: cfg.Genesis, UTB: cfg.UTB()}
 	safetyStore, ok := x.blockStore.GetDB().(epochAnchorSafetyStore)
 	if !ok {
 		return nil, errors.New("durable epoch anchor safety store unavailable")
@@ -114,6 +115,9 @@ func (x *ConsensusManager) InstallVerifiedEpoch(entry q3format.Entry, proof hand
 		return nil, err
 	} else if existing != nil && existing.Epoch >= g.Epoch && (existing.Epoch != g.Epoch || !bytes.Equal(existing.GenesisID, g.ID())) {
 		return nil, rctypes.ErrEpochAnchor
+	}
+	if err := x.retainInstalledUTB(v.Epoch, oldSigning, proof, utb.FromProjection(projected)); err != nil {
+		return nil, fmt.Errorf("signed trust-base entry: %w", err)
 	}
 	newTrust, err := x.trustBaseStore.InstallVerified(projected, signing)
 	if err != nil {

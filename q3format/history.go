@@ -141,6 +141,16 @@ type History struct {
 	network uint64
 	genesis [32]byte
 	entries []Entry
+	// utbGenesis says the genesis epoch itself is a UTB epoch (a fresh deployment whose genesis configuration enables the signed trust-base
+	// endorsement from its first epoch): the first handoff is then endorsed too, which a Q3 activation's own tuple cannot arrange for the epoch before it.
+	utbGenesis bool
+}
+
+// WithUTBGenesis returns the history with its genesis epoch a UTB epoch: the genesis epoch signs with scheme 1 and the version 3 envelope.
+func (h *History) WithUTBGenesis() *History {
+	c := *h
+	c.utbGenesis = true
+	return &c
 }
 
 // NewHistory starts a history at the deployment's genesis trust base: epoch 1, self-signed by a unit committee. Its network is the
@@ -215,7 +225,7 @@ func (h *History) Signing(epoch uint64) (votesig.Config, error) {
 		return votesig.Config{}, err
 	}
 	if e.config == nil {
-		return votesig.Config{Scheme: votesig.SchemeLegacy, Network: h.network}, nil
+		return votesig.Config{Scheme: votesig.SchemeLegacy, Network: h.network, UTB: h.utbGenesis && e.epoch == h.entries[0].epoch}, nil
 	}
 	return votesig.Config{Scheme: e.config.SigningScheme, Network: e.config.Network, Genesis: e.config.Genesis, UTB: e.config.UTB()}, nil
 }
@@ -261,7 +271,7 @@ func (h *History) Ordinary(epoch, round uint64) error {
 }
 
 func (h *History) extend(e Entry) *History {
-	return &History{network: h.network, genesis: h.genesis, entries: append(append([]Entry(nil), h.entries...), e)}
+	return &History{network: h.network, genesis: h.genesis, entries: append(append([]Entry(nil), h.entries...), e), utbGenesis: h.utbGenesis}
 }
 
 // Evidence is the frozen-state input the committed record binds: the pre-freeze summary, the frozen EVM parent and the
@@ -332,6 +342,11 @@ func (h *History) WithV3(l Link) (*History, error) {
 	}
 	if b.Config.Genesis != h.genesis {
 		return nil, ErrGenesis
+	}
+	// the envelope is one choice for the whole chain: a UTB epoch endorses the entry of its successor, so an epoch that is not UTB would leave that
+	// entry unendorsed, and a UTB epoch after a non-UTB one would start a chain no pinned genesis entry reaches
+	if tipCfg, err := h.Signing(tip.epoch); err != nil || tipCfg.UTB != b.Config.UTB() {
+		return nil, fmt.Errorf("%w: the UTB envelope of the body's tuple differs from its predecessor epoch's", ErrConfig)
 	}
 	switch {
 	case b.Epoch > tip.epoch+1:

@@ -20,6 +20,7 @@ import (
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/trustbase"
 	rctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
 	"github.com/unicitynetwork/bft-core/trusthistorystore"
+	"github.com/unicitynetwork/bft-core/utb"
 	basetypes "github.com/unicitynetwork/bft-go-base/types"
 )
 
@@ -143,6 +144,9 @@ func (x *ConsensusManager) InstallEpochBundle(incoming handoffdelivery.Bundle) (
 		if lookupErr != nil || stored.V2 == nil || stored.BodyID != bodyID || stored.Start != g.Start {
 			return nil, fmt.Errorf("successor lineage differs from installed body: %w", err)
 		}
+	}
+	if err := x.retainInstalledUTB(proof.Record.Epoch, oldSigning, proof, utb.FromBodyV2(body, g.Start)); err != nil {
+		return nil, fmt.Errorf("signed trust-base entry: %w", err)
 	}
 	newTrust, err := x.trustBaseStore.InstallV2Projection(projected)
 	if err != nil {

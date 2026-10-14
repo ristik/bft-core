@@ -18,6 +18,7 @@ import (
 
 	"github.com/unicitynetwork/bft-core/internal/quorumweight"
 	"github.com/unicitynetwork/bft-core/internal/weightvalidation"
+	"github.com/unicitynetwork/bft-core/utb"
 )
 
 const trustBaseFileName = "trust-base.json"
@@ -61,6 +62,7 @@ func newTrustBaseCmd(baseConfig *baseFlags) *cobra.Command {
 	cmd.AddCommand(trustBaseSignCmd(baseConfig))
 	cmd.AddCommand(trustBaseVerifyCmd(baseConfig))
 	cmd.AddCommand(trustBaseIDCmd())
+	cmd.AddCommand(trustBaseUTBGenesisCmd())
 	return cmd
 }
 
@@ -308,6 +310,44 @@ func trustBaseIDCmd() *cobra.Command {
 			return err
 		}}
 	cmd.Flags().StringVar(&file, "trust-base", "", "the genesis (epoch 1) trust base file")
+	_ = cmd.MarkFlagRequired("trust-base")
+	return cmd
+}
+
+// trustBaseUTBGenesisCmd builds the genesis entry of the signed trust-base chain (version 2) from the deployment's genesis trust base, and prints its
+// EntryID, the pin a root is started with (--utb-genesis, --utb-genesis-id). The entry is the canonical CBOR; it carries no signatures and is authenticated
+// by the pin alone. The member limit and the entry rules are the builder's.
+func trustBaseUTBGenesisCmd() *cobra.Command {
+	var file, out string
+	cmd := &cobra.Command{Use: "utb-genesis", Short: "Build the genesis entry of the signed trust-base chain from a genesis trust base and print its EntryID",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			tb, err := util.ReadJsonFile(file, &types.RootTrustBaseV1{})
+			if err != nil {
+				return fmt.Errorf("failed to load trust base %q: %w", file, err)
+			}
+			if tb.Epoch != 1 {
+				return fmt.Errorf("trust base %q is epoch %d: the chain starts at the epoch-1 trust base", file, tb.Epoch)
+			}
+			entry, err := utb.BuildUnsigned(nil, utb.FromProjection(tb))
+			if err != nil {
+				return err
+			}
+			raw, err := entry.MarshalCBOR()
+			if err != nil {
+				return err
+			}
+			if err := os.WriteFile(out, raw, 0o644); err != nil {
+				return err
+			}
+			id, err := entry.EntryID()
+			if err != nil {
+				return err
+			}
+			_, err = fmt.Fprintf(cmd.OutOrStdout(), "0x%x\n", id)
+			return err
+		}}
+	cmd.Flags().StringVar(&file, "trust-base", "", "the genesis (epoch 1) trust base file")
+	cmd.Flags().StringVar(&out, "out", "utb-genesis.cbor", "where to write the canonical genesis entry")
 	_ = cmd.MarkFlagRequired("trust-base")
 	return cmd
 }

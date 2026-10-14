@@ -29,7 +29,8 @@ type (
 		prefixSource  RecordFetcher // where a checkpoint's missing source-log prefix is fetched from
 		lock          sync.RWMutex
 		log           *slog.Logger
-		utbBinding    UTBBinding // nil unless the deployment has a UTB epoch; checked before a certificate is applied
+		utbBinding    UTBBinding   // nil unless the deployment has a UTB epoch; checked before a certificate is applied
+		utbRetain     UTBRetention // likewise; makes the endorsed entry durable before the certificate is applied
 		// the attempt whose lapse was last reported (reported once)
 		lapseLogged                          bool
 		lapseLoggedEpoch, lapseLoggedAttempt uint64
@@ -300,10 +301,21 @@ func (x *BlockStore) ProcessQc(qc *rctypes.QuorumCert) ([]*certification.Certifi
 		return nil, nil
 	}
 	// the execution context decides whether, and which, endorsement a certificate must carry: before anything is inserted, committed or published
+	alreadyCommitted := false
 	if x.utbBinding != nil {
-		if err := x.utbBinding(qc); err != nil && !errors.Is(err, ErrUTBAlreadyCommitted) {
-			// (a QC that commits a round the tree has pruned, as recovery replays one, is not refused here: the commit below refuses it as it always did)
+		if err := x.utbBinding(qc); errors.Is(err, ErrUTBAlreadyCommitted) {
+			// a QC that commits a round the tree has pruned, as recovery replays one: nothing to bind or to retain (it was when it committed), and the
+			// commit below refuses it as it always did
+			alreadyCommitted = true
+		} else if err != nil {
 			return nil, err
+		}
+	}
+	// the finalized entry survives before the certificate is inserted, so before any commit, certificate or installation it enables is visible; a
+	// failure leaves the certificate unapplied (a retry is not mistaken for a stale certificate)
+	if x.utbRetain != nil && qc.UTB != nil && !alreadyCommitted {
+		if err := x.utbRetain(qc); err != nil {
+			return nil, fmt.Errorf("%w: round %d: %w", ErrUTBRetention, qc.GetRound(), err)
 		}
 	}
 	// add Qc to block tree

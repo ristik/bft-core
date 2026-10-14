@@ -12,6 +12,7 @@ import (
 	"github.com/unicitynetwork/bft-core/q3format"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/storage"
 	"github.com/unicitynetwork/bft-core/trusthistorystore"
+	"github.com/unicitynetwork/bft-core/utbstore"
 )
 
 const (
@@ -45,6 +46,9 @@ type (
 		// Set, the manager endorses the successor entry in the committing votes of epochs configured with votesig.Config.UTB and refuses a
 		// certificate of such an epoch whose endorsement is not the one its executed state implies.
 		UTBPrevious func(epoch uint64) (*basetypes.RootTrustBaseV2, error)
+		// UTBStore is the permanent store of finalized signed entries. Set, it backs UTBPrevious, receives the endorsed entry of every committing
+		// certificate before the commit is applied, and is where the installers append the entry of the epoch they install.
+		UTBStore *utbstore.Store
 	}
 
 	Option func(c *Optional)
@@ -83,6 +87,12 @@ func WithRecoveryProfile2(history *trusthistorystore.Store) Option {
 // WithUTBPrevious wires the signed trust-base entry (UTB) endorsement: previous returns the finalized entry of an epoch.
 func WithUTBPrevious(previous func(epoch uint64) (*basetypes.RootTrustBaseV2, error)) Option {
 	return func(c *Optional) { c.UTBPrevious = previous }
+}
+
+// WithUTBStore wires the permanent entry store: the finalized entries are read from it, and every committing certificate's endorsed entry and every
+// installed epoch's entry is appended to it before the commit or the install is visible.
+func WithUTBStore(store *utbstore.Store) Option {
+	return func(c *Optional) { c.UTBStore = store }
 }
 
 // Q3Authority is the verified Q3 history the manager reads: the signer admission of every epoch (the safety module takes it as

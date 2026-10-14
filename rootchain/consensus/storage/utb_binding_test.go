@@ -224,3 +224,65 @@ func TestProcessQcInAUTBEpochLeavesAPrunedCommitToTheCommit(t *testing.T) {
 	require.ErrorIs(t, err, ErrUTBBinding)
 	require.Equal(t, uint64(4), bStore.GetHighQc().GetRound(), "and it was not inserted")
 }
+
+// The endorsed entry is made durable before the certificate is inserted: a failure leaves the certificate unapplied, and a retry is not mistaken for a
+// stale certificate.
+func TestProcessQcRetainsTheEndorsedEntryBeforeApplyingTheCertificate(t *testing.T) {
+	bStore := utbBindingStoreWithRootTwo(t)
+	var calls, highAtCall []uint64
+	fail := true
+	bStore.SetUTBRetention(func(qc *rctypes.QuorumCert) error {
+		calls = append(calls, qc.GetRound())
+		highAtCall = append(highAtCall, bStore.GetHighQc().GetRound())
+		if fail {
+			return fmt.Errorf("disk full")
+		}
+		return nil
+	})
+	endorsed := func() *rctypes.QuorumCert {
+		return &rctypes.QuorumCert{
+			VoteInfo:         &rctypes.RoundInfo{RoundNumber: 4, ParentRoundNumber: 3},
+			LedgerCommitInfo: &types.UnicitySeal{Version: 1, RootChainRoundNumber: 1, Hash: []byte{1}},
+			Envelope:         votesig.EnvelopeUTB,
+			UTB:              &rctypes.UTBCertificate{Unsigned: []byte("entry")},
+		}
+	}
+	_, err := bStore.ProcessQc(endorsed())
+	require.ErrorIs(t, err, ErrUTBRetention)
+	require.Equal(t, uint64(3), bStore.GetHighQc().GetRound(), "the certificate was not inserted")
+	require.Equal(t, []uint64{3}, highAtCall, "retention ran before the insert")
+
+	fail = false
+	_, err = bStore.ProcessQc(endorsed())
+	require.NotErrorIs(t, err, ErrUTBRetention, "the retry is not stale and is applied")
+	require.Equal(t, uint64(4), bStore.GetHighQc().GetRound())
+	require.Equal(t, []uint64{4, 4}, calls)
+
+	// a certificate without an endorsement never asks for retention
+	calls = nil
+	plain := &rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{RoundNumber: 5, ParentRoundNumber: 4}, LedgerCommitInfo: &types.UnicitySeal{Version: 1}}
+	_, _ = bStore.ProcessQc(plain)
+	require.Empty(t, calls)
+}
+
+// A certificate that commits an already committed round is not retained either: the entry was retained when that round committed.
+func TestProcessQcDoesNotRetainWhatAnAlreadyCommittedRoundCarried(t *testing.T) {
+	bStore := utbBindingStoreWithRootTwo(t)
+	retained := 0
+	bStore.SetUTBRetention(func(*rctypes.QuorumCert) error { retained++; return nil })
+	bStore.SetUTBBinding(NewUTBBinding(func(uint64) (votesig.Config, error) { return votesig.Config{UTB: true}, nil },
+		func(c *rctypes.RoundInfo, _ uint64) ([]byte, error) {
+			_, _, err := bStore.HandoffCommittedAt(c.RoundNumber, c.Epoch, c.CurrentRootHash)
+			return nil, err
+		}))
+	qc := &rctypes.QuorumCert{
+		VoteInfo:         &rctypes.RoundInfo{RoundNumber: 4, ParentRoundNumber: 3},
+		LedgerCommitInfo: &types.UnicitySeal{Version: 1, RootChainRoundNumber: 1, Hash: []byte{1}},
+		Envelope:         votesig.EnvelopeUTB,
+		UTB:              &rctypes.UTBCertificate{Unsigned: []byte("entry")},
+	}
+	_, err := bStore.ProcessQc(qc)
+	require.NotErrorIs(t, err, ErrUTBBinding)
+	require.NotErrorIs(t, err, ErrUTBRetention)
+	require.Zero(t, retained)
+}

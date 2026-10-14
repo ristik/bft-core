@@ -83,13 +83,12 @@ func TestUTBTupleIsTheOnlyOtherValidProtocolConfig(t *testing.T) {
 // A history whose activation carries the UTB tuple signs that epoch (and only that epoch) with the version 3 envelope.
 func TestHistorySigningConfigCarriesTheUTBFlag(t *testing.T) {
 	f := q3fixture.New(t, q3fixture.Options{UTB: true})
-	h, err := q3format.NewHistory(f.Old)
-	require.NoError(t, err)
-	h, err = h.VerifyEnvelope(f.Envelope)
+	h, err := f.NewHistory(t).VerifyEnvelope(f.Envelope)
 	require.NoError(t, err)
 	before, err := h.Signing(1)
 	require.NoError(t, err)
-	require.False(t, before.UTB, "the genesis epoch has no tuple")
+	require.True(t, before.UTB, "a UTB chain's genesis epoch endorses the first handoff")
+	require.EqualValues(t, 1, before.Scheme)
 	after, err := h.Signing(2)
 	require.NoError(t, err)
 	require.True(t, after.UTB)
@@ -103,4 +102,36 @@ func TestHistorySigningConfigCarriesTheUTBFlag(t *testing.T) {
 	cfg, err := h.Signing(2)
 	require.NoError(t, err)
 	require.False(t, cfg.UTB)
+}
+
+// The envelope is one choice for the whole chain.
+func TestUTBEnvelopeCannotChangeMidChain(t *testing.T) {
+	f := q3fixture.New(t, q3fixture.Options{UTB: true})
+	plainGenesis, err := q3format.NewHistory(f.Old) // not a UTB genesis, but the activation's tuple is
+	require.NoError(t, err)
+	_, err = plainGenesis.VerifyEnvelope(f.Envelope)
+	require.ErrorIs(t, err, q3format.ErrConfig, "a UTB epoch after a non-UTB one")
+
+	plain := q3fixture.New(t, q3fixture.Options{})
+	_, err = plain.NewHistory(t).WithUTBGenesis().VerifyEnvelope(plain.Envelope)
+	require.ErrorIs(t, err, q3format.ErrConfig, "a non-UTB epoch after a UTB one")
+}
+
+// A UTB chain's old commit proofs are endorsed and the endorsement is the entry the history derives.
+func TestUTBChainCommitProofsAreEndorsedWithTheHistorysEntry(t *testing.T) {
+	f := q3fixture.New(t, q3fixture.Options{UTB: true})
+	s := q3fixture.New(t, q3fixture.Options{After: f})
+	require.True(t, s.UTB, "a chain stays UTB")
+	h, err := f.NewHistory(t).VerifyEnvelope(f.Envelope)
+	require.NoError(t, err)
+	h, err = h.VerifyEnvelope(s.Envelope)
+	require.NoError(t, err)
+	chain, err := h.UTBUnsigned()
+	require.NoError(t, err)
+	require.Len(t, chain, 3)
+	for i, fx := range []*q3fixture.Fixture{f, s} {
+		want, err := chain[i+1].SigBytes()
+		require.NoError(t, err)
+		require.Equal(t, want, []byte(fx.Proof.CommitQC.UTB.Unsigned), "the endorsement of epoch %d is the entry of the history", i+2)
+	}
 }

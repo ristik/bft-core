@@ -237,7 +237,18 @@ func (s *Store) Tip() Tip {
 	return Tip{Epoch: t.Epoch, EntryID: id}
 }
 
-// Genesis is the first stored epoch.
+// Entry is the decoded finalized entry of an epoch (the predecessor a builder links the next one to).
+func (s *Store) Entry(epoch uint64) (*types.RootTrustBaseV2, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	first := s.entries[0].Epoch
+	if epoch < first || epoch > s.entries[len(s.entries)-1].Epoch {
+		return nil, fmt.Errorf("%w: epoch %d", ErrNotFound, epoch)
+	}
+	return s.entries[epoch-first], nil
+}
+
+// GenesisEpoch is the first stored epoch.
 func (s *Store) GenesisEpoch() uint64 {
 	s.mu.RLock()
 	defer s.mu.RUnlock()

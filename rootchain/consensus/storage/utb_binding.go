@@ -60,6 +60,17 @@ func NewUTBBinding(cfgOf func(epoch uint64) (votesig.Config, error), entryOf fun
 	}
 }
 
+// ErrUTBRetention is returned by ProcessQc when the endorsed entry of a committing certificate cannot be made durable. The certificate is then neither
+// inserted nor committed, so no commit is visible without its entry.
+var ErrUTBRetention = errors.New("the endorsed trust-base entry cannot be retained")
+
+// UTBRetention makes the endorsed entry of a committing certificate durable. It must be idempotent: a replayed certificate, or a later one that carries
+// the same entry, is accepted.
+type UTBRetention func(qc *rctypes.QuorumCert) error
+
+// SetUTBRetention installs the retention applied before a committing certificate is inserted.
+func (x *BlockStore) SetUTBRetention(r UTBRetention) { x.utbRetain = r }
+
 // SetUTBBinding installs the check applied to every certificate before it is inserted or committed.
 func (x *BlockStore) SetUTBBinding(b UTBBinding) { x.utbBinding = b }
 
