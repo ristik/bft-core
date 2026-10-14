@@ -44,8 +44,9 @@ m2_start_root() { # node installEpoch bootnode  (an empty install epoch starts a
     done
   fi
   if [ "${ANYAGE_LANE:-0}" = 1 ]; then   # the any-age lane's aggregator partition: a restarted root must list its shard(s), or the first block it recovers that contains them is refused
-    declare -F agg_conf >/dev/null || { echo "m2_start_root: ANYAGE_LANE needs scripts/lib/agg-lib.sh" >&2; return 1; }
-    local k; for k in $(seq 1 "${aggShards:-1}"); do shardConfArgs+=(--shard-conf "$(agg_conf "$k")"); done
+    # the callback is set by scripts/lib/agg-lib.sh (ANYAGE_SHARD_CONF_FN=agg_conf); other lanes never load it, so the name is not a static dependency of this library
+    [ -n "${ANYAGE_SHARD_CONF_FN:-}" ] && declare -F "$ANYAGE_SHARD_CONF_FN" >/dev/null || { echo "m2_start_root: ANYAGE_LANE needs scripts/lib/agg-lib.sh (ANYAGE_SHARD_CONF_FN)" >&2; return 1; }
+    local k; for k in $(seq 1 "${aggShards:-1}"); do shardConfArgs+=(--shard-conf "$("$ANYAGE_SHARD_CONF_FN" "$k")"); done
   fi
   mkdir -p "test-nodes/root$node"
   for i in $(seq 1 90); do
