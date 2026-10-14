@@ -20,6 +20,10 @@ const (
 	MaxAmountBytes   = 32
 	MaxAnchors       = 16 // distinct UC anchors, at most the leaves; a parser ceiling, the gas gate (gas.go) decides each bundle (contract section 4)
 	MaxCfgBytes      = 1024
+	// MaxBridgeItems is the bridge's shared CBOR item budget J (contract section 5): item heads of the Cfg, the policy body, every
+	// anchor UC and every anchor IR opening, each encoded occurrence counted once. It is a bridge admission limit, stricter than the
+	// native batch's own 32,768-item scan.
+	MaxBridgeItems = 4096
 
 	// Embedded lock evidence (J). Cumulative and checked before allocation or crypto.
 	MaxJustificationBytes = 64 << 10
