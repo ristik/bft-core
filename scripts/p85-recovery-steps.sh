@@ -654,7 +654,7 @@ p85_run_lane() {
   if [ "${ANYAGE_LANE:-0}" = 1 ]; then
     # the any-age final lane (briefs/anyage-final-lane-plan.md): the same P85 steps with the bridge checkpoints between them
     source scripts/lib/agg-lib.sh; source scripts/lib/anyage-lib.sh
-    P85_STEPS="p85_baseline anyage_step_setup p85_joiner_nodes p85_joiner_onboard p85_election_reserved p85_proofs anyage_step_l1b p85_handoff p85_install_activation p85_j_stalls p85_recovery p85_resolved anyage_step_l2 anyage_step_l1c p85_restarts"
+    P85_STEPS="p85_baseline anyage_step_setup p85_joiner_nodes p85_joiner_onboard p85_election_reserved p85_proofs anyage_step_l1b p85_handoff p85_install_activation anyage_step_frozen p85_j_stalls p85_recovery p85_resolved anyage_step_l2 anyage_step_l1c p85_restarts"
   fi
   [ "${P85_MODE:-}" != overbound ] || { P85_JOINER_UNITS=3; P85_STEPS="p85_baseline p85_joiner_nodes p85_joiner_onboard p85_election_refused"; }
   for s in $P85_STEPS; do p85_step "$s" "$s"; done

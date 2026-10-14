@@ -26,9 +26,9 @@ anyage lane steps (one fresh genesis; every step prints PASS/FAIL; evidence unde
   1  genesis: PoS genesis (custody, election, four bonded entities) + bridge (aggregator shard(s), verifier, vault) on the permanent-layout registry   [gap G1]
   2  baseline: registry dump (format 2, I=U=g..), the P85 baseline steps
   3  L1a  burn/lock a supported token; SAVE its exact original UC/proof bytes and hashes; dump the registry (epoch/start/end/O)
-  4  P85: joiner nodes, onboarding, election reserved, proofs, handoff (primary J), install/activation
+  4  P85: joiner nodes, onboarding, election reserved, proofs, [L1b], handoff (primary J), install/activation, [frozen parent recorded]
   5  L1b  once O - r exceeds the old 30-round window, eth_call-verify the SAVED proofs in the current epoch; vault release prepared (NOT sent)
-  6  P85: J stalls (2 of 5 EVM validators), derived recovery back to K  ->  L2: locate the acknowledgement block, dump its parent and itself, offline check:
+  6  P85: J stalls (2 of 5 EVM validators), derived recovery back to K  ->  L2: locate the acknowledgement block, dump its parent and itself, offline check (parent = the frozen parent the root froze; custody cursor advances once; receipts kept):
         I jumps by 2 in ONE block built directly on the frozen parent, both entries consecutive, old tip closed once, I=U=E, hooks once
   7  L1c  after L2, eth_call-verify the SAME saved proofs against the historical epoch; send the ONE vault release; claim; balance delta, nullifier
   8  restarts (P85), final dumps, teardown through scripts/p85-stop.sh only; evidence checksums
@@ -49,7 +49,7 @@ preflight() {
   [ -x "$AGRE_ROOT/briefs/devnet-lock.sh" ] && yes "devnet lock helper present" || no "devnet lock helper missing"
   if [ -d "$AGRE_ROOT/.devnet-lock" ]; then note "the devnet lock is HELD by: $(cat "$AGRE_ROOT/.devnet-lock/owner" 2>/dev/null) (the run would queue)"; else yes "devnet lock is free"; fi
   echo "-- merged prerequisites (read-only gh queries on ristik/*)"
-  for pr in "ristik/ureth 70" "ristik/unicity-pos-contracts 39" "ristik/native-bridge-plugins 17" "ristik/bft-core 611"; do
+  for pr in "ristik/ureth 70" "ristik/unicity-pos-contracts 39" "ristik/native-bridge-plugins 19" "ristik/bft-core 611"; do
     set -- $pr; st=$(gh pr view "$2" -R "$1" --json state --jq .state 2>/dev/null || echo unknown)
     if [ "$st" = MERGED ]; then yes "$1#$2 merged"; else no "$1#$2 is $st (must be MERGED before the run)"; fi
   done
@@ -85,8 +85,11 @@ preflight() {
     check "nbp checkout clean" bash -c "[ -z \"\$(git -C '$NBP_DIR' status --porcelain --untracked-files=no)\" ]"
     check "nbp dependencies installed (node_modules)" test -d "$NBP_DIR/node_modules"
     check "nbp live driver has the any-age entry points (anyage.ts)" test -e "$NBP_DIR/tests/live/anyage.ts"
+    # the driver is pinned to the commit that merged nbp#19: the checkout must contain it
+    mc=$(gh pr view 19 -R ristik/native-bridge-plugins --json mergeCommit --jq .mergeCommit.oid 2>/dev/null)
+    if [ -n "$mc" ] && git -C "$NBP_DIR" merge-base --is-ancestor "$mc" HEAD 2>/dev/null; then yes "nbp checkout contains the nbp#19 merge commit ${mc:0:10}"; else no "nbp checkout does not contain the nbp#19 merge commit '${mc:-unknown}'"; fi
   else
-    no "set NBP_DIR to a native-bridge-plugins checkout containing nbp#17 (tests/live)"
+    no "set NBP_DIR to a native-bridge-plugins checkout containing nbp#19 (tests/live/anyage.ts)"
   fi
   [ -n "${AGG_BIN:-}" ] && [ -x "$AGG_BIN" ] && yes "AGG_BIN $AGG_BIN" || no "set AGG_BIN to the pinned aggregator-go binary"
   [ -n "${DNB_TOOL:-}" ] && [ -x "$DNB_TOOL" ] && yes "DNB_TOOL $DNB_TOOL" || no "set DNB_TOOL to a dnb-tool built from this checkout (go build -o ... ./scripts/dnb-tool)"
