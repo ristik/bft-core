@@ -74,12 +74,15 @@ anyage_record_frozen() { # dir rootRow(JSON of the EVM partition's row in the ro
   [ -n "$want" ] || { anyage_die "the root's EVM partition row names neither a blockHash nor a stateRoot: $row"; return 1; }
   want=$(anyage_norm_hash "$want") || return 1
   head=$(anyage_latest) || return 1
+  local matches=0
   for i in $(seq 0 8); do
     n=$((head - i)); [ "$n" -ge 0 ] || break
     r=$(anyage_norm_hash "$("${ANYAGE_CAST:-cast}" block "$n" --field "$key" --rpc-url "$ANYAGE_RPC")") || return 1
-    [ "$r" = "$want" ] && { found=$n; break; }
+    if [ "$r" = "$want" ]; then matches=$((matches + 1)); [ -n "$found" ] || found=$n; fi
   done
   [ -n "$found" ] || { anyage_die "no reth block among the last 9 (head $head) has the root's frozen $key $want"; return 1; }
+  # a state root shared by several recent blocks (empty blocks keep it) would make the frozen parent ambiguous: refuse rather than guess
+  [ "$matches" -eq 1 ] || { anyage_die "$matches reth blocks among the last 9 (head $head) have the root's frozen $key $want: the frozen parent is ambiguous"; return 1; }
   h=$(anyage_norm_hash "$("${ANYAGE_CAST:-cast}" block "$found" --field hash --rpc-url "$ANYAGE_RPC")") || return 1
   printf '{"frozenParentHash":"%s","frozenParentNumber":%s,"matchedBy":"%s","headAtFreeze":%s,"importedTipEpoch":%s,"originReady":%s,"recordCursor":%s,"recordCount":%s}\n' "$h" "$found" "$key" "$head" \
     "$(anyage_fixed b1.importedTipEpoch "$found")" "$(anyage_fixed b1.originReady "$found")" "$(anyage_custody_cursor "$found")" "$(anyage_registry_count "$found")" >"$dir/frozen-parent.json"
@@ -221,6 +224,7 @@ anyage_selftest_ack() {
     anyage_record_frozen "$d" "{\"partitionId\":8,\"stateRoot\":\"0x$(printf '%064x' $((0xB0000 + 4)))\"}" >/dev/null || { echo "selftest: the frozen parent was not recorded by state root" >&2; exit 1; }
     [ "$(jq -r .frozenParentNumber "$d/frozen-parent.json")" = 4 ] && [ "$(jq -r .matchedBy "$d/frozen-parent.json")" = stateRoot ] || { echo "selftest: wrong frozen block" >&2; exit 1; }
     anyage_record_frozen "$d" "{\"stateRoot\":\"0x$(printf '%064x' 99)\"}" >/dev/null 2>&1 && { echo "selftest: an unknown frozen state root was accepted" >&2; exit 1; }
+    FAKE_DUP=1 anyage_record_frozen "$d" "{\"partitionId\":8,\"stateRoot\":\"0x$(printf '%064x' $((0xB0000 + 4)))\"}" >/dev/null 2>&1 && { echo "selftest: an ambiguous frozen state root (two blocks) was accepted" >&2; exit 1; }
     exit 0
   ) || { rm -rf "$d"; return 1; }
   rm -rf "$d"; echo "anyage L2 shell logic selftest: ok"

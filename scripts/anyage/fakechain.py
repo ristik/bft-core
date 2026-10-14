@@ -70,7 +70,7 @@ elif cmd == "block-number":
 elif cmd == "block":
     n = int(a[1])
     h = HASH(n) if not (BAD == "parent" and n == ACK - 1) else HASH(999)
-    if "--field" in a and opt("--field") == "stateRoot": print("0x%064x" % (0xB0000 + n))
+    if "--field" in a and opt("--field") == "stateRoot": print("0x%064x" % (0xB0000 + (4 if (os.environ.get("FAKE_DUP") and n == 3) else n)))
     elif "--field" in a: print(h)
     else: print(json.dumps({"number": n, "hash": h, "transactions": []}))
 elif cmd == "call":
