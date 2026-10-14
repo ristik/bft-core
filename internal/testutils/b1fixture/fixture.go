@@ -36,14 +36,15 @@ type Fixture struct {
 	Runtime     *q3active.Runtime
 }
 
-func New(t *testing.T, w uint64) *Fixture { return NewWithReservation(t, w, 65536) }
-func NewWithReservation(t *testing.T, w, other uint64) *Fixture {
-	return newFixture(t, w, other, 0)
+func New(t *testing.T) *Fixture { return NewWithReservation(t, 65536) }
+func NewWithReservation(t *testing.T, other uint64) *Fixture {
+	return newFixture(t, other, 0)
 }
-func NewWithRootStart(t *testing.T, w, start uint64) *Fixture {
-	return newFixture(t, w, 65536, start)
+func NewWithRootStart(t *testing.T, start uint64) *Fixture {
+	return newFixture(t, 65536, start)
 }
-func newFixture(t *testing.T, w, other, start uint64) *Fixture {
+func newFixture(t *testing.T, other, start uint64) *Fixture {
+	b := b1state.MinEpochsPerUpdate
 	t.Helper()
 	c := certifiedchain.New(t, 5, 0)
 	c.TrustBase.EpochStart = start
@@ -51,7 +52,7 @@ func newFixture(t *testing.T, w, other, start uint64) *Fixture {
 	require.NoError(t, c.TrustBase.Sign(c.TrustBase.RootNodes[0].NodeID, c.Signer))
 	h, err := q3format.NewHistory(c.TrustBase)
 	require.NoError(t, err)
-	p := b1state.Profile{Network: 5, RootGenesisID: h.Genesis(), ExecutionChainID: 1337, RuntimeHash: [32]byte(common.HexToHash(b1registry.CodeHashHex)), CompilerHash: b1registry.CompilerHash(), WCert: w, DeltaEV: w + 1, DeltaHold: w + 2, RestGas: 1136500 + 1147500*(w+1), CompanionBytes: 1 << 20, OtherCompanionBytes: other, OrdinaryCapacity: 7000000, GenesisUCTime: 1000}
+	p := b1state.Profile{Network: 5, RootGenesisID: h.Genesis(), ExecutionChainID: 1337, RuntimeHash: [32]byte(common.HexToHash(b1registry.CodeHashHex)), CompilerHash: b1registry.CompilerHash(), MaxEpochsPerUpdate: b, DeltaEV: 1, DeltaHold: 2, RestGas: b1registry.MinRestGas(b), CompanionBytes: 1 << 20, OtherCompanionBytes: other, OrdinaryCapacity: 7000000, GenesisUCTime: 1000}
 	p.SystemGas, err = p.RequiredSystemGas()
 	require.NoError(t, err)
 	p.MaxGas = p.SystemGas + p.OrdinaryCapacity

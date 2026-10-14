@@ -184,6 +184,7 @@ type Genesis struct {
 	storage           map[string]common.Hash
 	dynamic           map[common.Hash]common.Hash
 	dynamicProofs     map[common.Hash][][]byte
+	storageTrie       *trie.Trie // the committed genesis storage, for proofs of words that are absent from it (entries not yet installed)
 	storageRoot       common.Hash
 	stateRoot         common.Hash
 	header            []byte
@@ -432,6 +433,7 @@ func (g *Genesis) buildEVMGenesis(chainID uint64, art Artifact, evm EVMParams) e
 		g.evidence.StorageProofs[i] = p
 	}
 
+	g.storageTrie = storage
 	g.dynamicProofs = make(map[common.Hash][][]byte)
 	for key := range g.dynamic {
 		var p nodeList

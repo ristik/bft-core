@@ -12,27 +12,49 @@ func TestD6_NoGlobalSupplyClaim(t *testing.T) {
 	}
 }
 
-func TestD6_LiveCertMeasuredFromImportedOrigin(t *testing.T) {
-	// The review's case: cert round 100, imported origin 1000, W_cert 10 ->
-	// 900 rounds old -> NOT live.
-	if AdmitLiveCertificate(100, 1000, 10, true).Admitted {
-		t.Fatal("a certificate 900 rounds behind the origin was admitted as live")
+func TestD6_AnyAgeCertificateAdmission(t *testing.T) {
+	end := func(v uint64) *uint64 { return &v }
+	open := CertEpoch{Start: 500, Admitted: true}
+	closed := CertEpoch{Start: 10, End: end(20), Admitted: true}
+	for _, tc := range []struct {
+		name         string
+		cert, origin uint64
+		ready        bool
+		e            CertEpoch
+		want         bool
+	}{
+		{"a very old certificate of the current epoch", 500, 10_000_000, true, open, true},
+		{"a very old certificate of a closed historical epoch", 15, 10_000_000, true, closed, true},
+		{"r = start", 10, 1000, true, closed, true},
+		{"r = end - 1", 19, 1000, true, closed, true},
+		{"r = end", 20, 1000, true, closed, false},
+		{"r = O", 1000, 1000, true, open, true},
+		{"r = O + 1", 1001, 1000, true, open, false},
+		{"r before the epoch's start", 9, 1000, true, closed, false},
+		{"no usable origin", 15, 1000, false, closed, false},
+		{"epoch not admitted", 15, 1000, true, CertEpoch{Start: 10, End: end(20)}, false},
+	} {
+		if got := AdmitCertificate(tc.cert, tc.origin, tc.ready, tc.e); got.Admitted != tc.want || (!got.Admitted && got.Reason == "") {
+			t.Fatalf("%s: %+v", tc.name, got)
+		}
 	}
-	// At the boundary (exactly W_cert old): admitted.
-	if !AdmitLiveCertificate(990, 1000, 10, true).Admitted {
-		t.Fatal("a certificate exactly W_cert old was not admitted")
+	// Each refusal is isolated: changing only the named input flips the verdict.
+	base := AdmitCertificate(15, 1000, true, closed)
+	if !base.Admitted {
+		t.Fatal(base)
 	}
-	// One past the boundary: not admitted.
-	if AdmitLiveCertificate(989, 1000, 10, true).Admitted {
-		t.Fatal("a certificate W_cert+1 old was admitted")
+	if AdmitCertificate(15, 1000, false, closed).Admitted || AdmitCertificate(15, 1000, true, CertEpoch{Start: 10, End: end(20)}).Admitted ||
+		AdmitCertificate(15, 14, true, closed).Admitted || AdmitCertificate(15, 1000, true, CertEpoch{Start: 16, End: end(20), Admitted: true}).Admitted ||
+		AdmitCertificate(15, 1000, true, CertEpoch{Start: 10, End: end(15), Admitted: true}).Admitted {
+		t.Fatal("an isolated mutation did not change the verdict")
 	}
-	// Ahead of the origin: not admitted (retry after progress).
-	if AdmitLiveCertificate(1001, 1000, 10, true).Admitted {
-		t.Fatal("a future certificate was admitted")
-	}
-	// Signer epoch inactive: not admitted.
-	if AdmitLiveCertificate(995, 1000, 10, false).Admitted {
-		t.Fatal("a certificate from an inactive signer epoch was admitted")
+}
+
+// Retirement and evidence obligations never prune certificate trust: a certificate of an epoch whose validators all retired still verifies.
+func TestD6_RetirementDoesNotPruneCertificateTrust(t *testing.T) {
+	end := uint64(20)
+	if !AdmitCertificate(15, 1_000_000, true, CertEpoch{Start: 10, End: &end, Admitted: true}).Admitted {
+		t.Fatal("a certificate of a long-retired epoch was refused")
 	}
 }
 
@@ -87,7 +109,7 @@ func TestD6_CheckpointFreshnessDerivedAndStrict(t *testing.T) {
 }
 
 func TestD6_WindowNestingAndKeyRetention(t *testing.T) {
-	if !NestingValid(50, 100, 200) || NestingValid(120, 100, 200) || NestingValid(50, 200, 200) {
+	if !NestingValid(100, 200) || NestingValid(200, 200) || NestingValid(300, 200) {
 		t.Fatal("window nesting check wrong")
 	}
 	if !KeyRetentionRequired(true, false) || !KeyRetentionRequired(false, true) || KeyRetentionRequired(false, false) {

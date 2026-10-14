@@ -74,7 +74,7 @@ func TestD5_SlashableConflictDomain(t *testing.T) {
 }
 
 func TestD5_ProtectionParamOrdering(t *testing.T) {
-	ok := ProtectionParams{WCert: 50, DeltaEv: 100, DeltaIncl: 40, DeltaExec: 40, DeltaHold: 200}
+	ok := ProtectionParams{DeltaEv: 100, DeltaIncl: 40, DeltaExec: 40, DeltaHold: 200}
 	if !ok.Valid() {
 		t.Fatal("valid params rejected")
 	}
@@ -83,10 +83,19 @@ func TestD5_ProtectionParamOrdering(t *testing.T) {
 	if bad.Valid() {
 		t.Fatal("Δ_hold not strictly greater than the sum was accepted")
 	}
+	bad = ok
+	bad.DeltaEv, bad.DeltaHold = 200, 200 // Δ_ev < Δ_hold fails on its own
+	if bad.Valid() {
+		t.Fatal("Δ_ev == Δ_hold was accepted")
+	}
+	huge := ProtectionParams{DeltaEv: ^uint64(0) - 1, DeltaIncl: 2, DeltaExec: 0, DeltaHold: ^uint64(0)}
+	if huge.Valid() {
+		t.Fatal("a sum that overflows uint64 was accepted")
+	}
 }
 
 func TestD5_WithdrawalGates(t *testing.T) {
-	p := ProtectionParams{WCert: 50, DeltaEv: 100, DeltaIncl: 40, DeltaExec: 40, DeltaHold: 200}
+	p := ProtectionParams{DeltaEv: 100, DeltaIncl: 40, DeltaExec: 40, DeltaHold: 200}
 	r := Reservation{Phase: Draining, RetirementRound: 1000, LiabilityDeadlineRound: 1050}
 	if r.CanWithdraw(1100, p, true, false).Allowed {
 		t.Fatal("withdrew before protection elapsed")

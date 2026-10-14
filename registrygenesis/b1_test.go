@@ -16,11 +16,12 @@ import (
 )
 
 func TestB1GenesisBindsRootProfileAndAllStorageWords(t *testing.T) {
-	f := b1fixture.New(t, 15)
+	f := b1fixture.New(t)
 	p := f.Pair.Profile
 	words := f.Genesis.B1Words()
 	require.Equal(t, common.Hash(b1state.Word(1)), words[common.Hash(b1state.FixedSlot("b1.initialized"))])
-	require.Equal(t, common.Hash(b1state.Word(1)), words[common.Hash(b1state.QueueSlot(0))])
+	require.Equal(t, words[common.Hash(b1state.FixedSlot("b1.genesisEpoch"))], words[common.Hash(b1state.FixedSlot("b1.importedTipEpoch"))], "the genesis epoch is the imported tip, with no usable origin yet")
+	require.Equal(t, common.Hash{}, words[common.Hash(b1state.FixedSlot("b1.originReady"))])
 	names, err := registryproof.SlotNamesFor(registryproof.FreshB1)
 	require.NoError(t, err)
 	keys := make([]common.Hash, len(names))
@@ -44,7 +45,7 @@ func TestB1GenesisBindsRootProfileAndAllStorageWords(t *testing.T) {
 	require.Equal(t, common.Hash(profileHash), f.Genesis.Record().B1ProfileHash)
 	require.Equal(t, profileHash[:], recordFields[12])
 	changed := p
-	changed.WCert--
+	changed.DeltaHold++
 	other, err := registrygenesis.GenerateB1(certifiedchain.Config(5), changed, f.History, registrygenesis.EVMParams{GasLimit: changed.MaxGas, BaseFee: registrygenesis.DefaultEVMParams.BaseFee})
 	require.NoError(t, err)
 	require.NotEqual(t, f.Genesis.GenesisCommitment(), other.GenesisCommitment())

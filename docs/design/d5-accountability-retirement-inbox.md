@@ -64,7 +64,7 @@ Phases: `Bonded → RetirementRequested → Draining → Released`.
   acknowledgement while a prepared successor still relies on the stake is
   rejected.
 - **Timing parameters** (`ProtectionParams`), ordering mandatory:
-  `W_cert ≤ Δ_ev < Δ_hold` and `Δ_hold > Δ_ev + Δ_incl + Δ_exec`.
+  `Δ_ev < Δ_hold` and `Δ_hold > Δ_ev + Δ_incl + Δ_exec` (checked arithmetic). Certificate age is not a parameter: certificates do not expire (owner decision §25, ADR 0007 note).
 - **`CanWithdraw(now, p, positionCutoffSatisfied, timelyEvidencePending)`** requires, in order:
   1. phase `Draining`;
   2. `now ≥ max(R_ret + Δ_hold, inheritedProtectionUntil)` — inherited protection

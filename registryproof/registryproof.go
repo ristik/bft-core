@@ -503,8 +503,10 @@ type Fields struct {
 	// against §5.4 instead of the parent-consistency rule.
 	Genesis bool
 
-	B1Initialized, B1Network, B1WCert, B1Head, B1Count uint64
-	B1ProfileHash                                      common.Hash
+	// The permanent B1 registry's fixed words: format, the genesis epoch g, the imported tip I (the import cursor) and whether a usable origin
+	// exists; the usable origin itself is OriginRootEpoch (U) and ClockRootRound (O).
+	B1Initialized, B1Network, B1Format, B1GenesisEpoch, B1ImportedTip, B1OriginReady uint64
+	B1ProfileHash                                                                    common.Hash
 	// The authenticated root-record log words (FreshB1 only): imported count and tip, the progress and UC time of the last import, the
 	// length and tip of the source log as of it, and the last round that imported.
 	RecordsCount, RecordsProgress, RecordsUCTime, RecordsTargetCount, RecordsImportedRound uint64
@@ -562,13 +564,16 @@ func decodeFields(lay *layout, w []common.Hash) (Fields, error) {
 		}{"b1.network", &s.B1Network}, struct {
 			name string
 			dst  *uint64
-		}{"b1.wCert", &s.B1WCert}, struct {
+		}{"b1.format", &s.B1Format}, struct {
 			name string
 			dst  *uint64
-		}{"b1.head", &s.B1Head}, struct {
+		}{"b1.genesisEpoch", &s.B1GenesisEpoch}, struct {
 			name string
 			dst  *uint64
-		}{"b1.count", &s.B1Count})
+		}{"b1.importedTipEpoch", &s.B1ImportedTip}, struct {
+			name string
+			dst  *uint64
+		}{"b1.originReady", &s.B1OriginReady})
 		s.B1ProfileHash = at("b1.profileHash")
 		s.RecordsTip, s.RecordsTargetTip = at("records.tip"), at("records.targetTip")
 		for _, r := range []struct {
@@ -698,7 +703,7 @@ func (l limits) verify(c Context, parentHash common.Hash, ev Evidence) (Snapshot
 		return Snapshot{}, fmt.Errorf("%w: at block %d", ErrNotInitialized, s.Number)
 	}
 	switch {
-	case lay.version == FreshB1 && (s.B1Network == 0 || s.B1Network > 65535 || s.B1WCert >= 16 || s.B1Head > s.B1WCert || s.B1Count == 0 || s.B1Count > s.B1WCert+1 || s.B1ProfileHash == (common.Hash{})):
+	case lay.version == FreshB1 && (s.B1Network == 0 || s.B1Network > 65535 || s.B1Format != 2 || s.B1ImportedTip < s.B1GenesisEpoch || s.B1OriginReady > 1 || (s.B1OriginReady == 1 && (s.OriginRootEpoch < s.B1GenesisEpoch || s.OriginRootEpoch > s.B1ImportedTip)) || s.B1ProfileHash == (common.Hash{})):
 		return Snapshot{}, ErrConfiguration
 	case lay.version != FreshB1 && s.LayoutVersion != lay.version:
 		return Snapshot{}, fmt.Errorf("%w: layout version %d, expected %d", ErrConfiguration, s.LayoutVersion, lay.version)

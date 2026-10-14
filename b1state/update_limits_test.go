@@ -83,11 +83,11 @@ func fixtureMembers(n int) []Member {
 	return ms
 }
 
-// maximalUpdate has exactly K=W+1 live entries, the last with 64 members.
+// maximalUpdate installs exactly B entries, the last with the member ceiling.
 func maximalUpdate(p Profile) Update {
 	u := fixtureUpdate(p)
-	k := p.WCert + 1
-	first := uint64(p.WCert + 10)
+	k := p.MaxEpochsPerUpdate
+	first := uint64(k + 9)
 	u.OriginRound = first + k - 1
 	u.OriginEpoch = k
 	old := first

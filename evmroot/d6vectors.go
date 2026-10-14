@@ -9,29 +9,31 @@ import (
 // fixtures), and custody solvency accounting.
 
 type D6VectorSet struct {
-	GlobalSupplyObservable bool                `json:"global_execution_layer_supply_observable"`
-	LiveCert               []D6LiveCertCase    `json:"live_certificate_admission"`
-	Freshness              D6FreshnessCase     `json:"checkpoint_freshness_policy"`
-	Windows                D6WindowsCase       `json:"window_nesting_and_key_retention"`
-	HistoricalAuth         []D6HistAuthCase    `json:"historical_block_authentication"`
-	MultiShardAnchor       []D6AnchorCase      `json:"multi_shard_anchor"`
-	ProofBundles           []D6ProofBundleCase `json:"proof_bundle_offline_verification"`
-	LockRefresh            []D6LockRefreshCase `json:"lock_witness_refresh"`
-	Supply                 D6SupplyCase        `json:"supply_and_backing"`
-	Custody                []CustodyStep       `json:"custody_walkthrough"`
-	CustodySolvency        []D6SolvencyCase    `json:"custody_solvency"`
-	TokenProfile           D6ProfileCase       `json:"token_profile"`
-	Redemption             D6RedemptionCase    `json:"redemption_relation"`
+	GlobalSupplyObservable bool                  `json:"global_execution_layer_supply_observable"`
+	CertAdmission          []D6CertAdmissionCase `json:"any_age_certificate_admission"`
+	Freshness              D6FreshnessCase       `json:"checkpoint_freshness_policy"`
+	Windows                D6WindowsCase         `json:"window_nesting_and_key_retention"`
+	HistoricalAuth         []D6HistAuthCase      `json:"historical_block_authentication"`
+	MultiShardAnchor       []D6AnchorCase        `json:"multi_shard_anchor"`
+	ProofBundles           []D6ProofBundleCase   `json:"proof_bundle_offline_verification"`
+	LockRefresh            []D6LockRefreshCase   `json:"lock_witness_refresh"`
+	Supply                 D6SupplyCase          `json:"supply_and_backing"`
+	Custody                []CustodyStep         `json:"custody_walkthrough"`
+	CustodySolvency        []D6SolvencyCase      `json:"custody_solvency"`
+	TokenProfile           D6ProfileCase         `json:"token_profile"`
+	Redemption             D6RedemptionCase      `json:"redemption_relation"`
 }
 
-type D6LiveCertCase struct {
-	Name                string `json:"name"`
-	CertRound           uint64 `json:"cert_round"`
-	ImportedOriginRound uint64 `json:"imported_origin_round"`
-	WCert               uint64 `json:"w_cert"`
-	SignerEpochActive   bool   `json:"signer_epoch_active_at_claimed_round"`
-	Admitted            bool   `json:"admitted"`
-	Reason              string `json:"reason,omitempty"`
+type D6CertAdmissionCase struct {
+	Name          string  `json:"name"`
+	CertRound     uint64  `json:"cert_round"`
+	OriginRound   uint64  `json:"imported_origin_round"`
+	OriginReady   bool    `json:"origin_ready"`
+	EpochStart    uint64  `json:"signer_epoch_start"`
+	EpochEnd      *uint64 `json:"signer_epoch_end,omitempty"` // absent while the epoch is open
+	EpochAdmitted bool    `json:"signer_epoch_admitted"`
+	Admitted      bool    `json:"admitted"`
+	Reason        string  `json:"reason,omitempty"`
 }
 
 type D6FreshnessCase struct {
@@ -56,7 +58,6 @@ type D6FreshnessCase struct {
 }
 
 type D6WindowsCase struct {
-	WCert                    uint64 `json:"w_cert"`
 	DeltaEv                  uint64 `json:"delta_ev"`
 	DeltaHold                uint64 `json:"delta_hold"`
 	NestingValid             bool   `json:"nesting_valid"`
@@ -141,24 +142,36 @@ func BuildD6Vectors() D6VectorSet {
 	var vs D6VectorSet
 	vs.GlobalSupplyObservable = GlobalSupplyObservable
 
-	// --- live certificate admission (measured vs the imported origin) ----
-	for _, lc := range []struct {
-		name            string
-		cert, origin, w uint64
-		signerActive    bool
+	// --- any-age certificate admission (against the imported origin; no window) ----
+	u := func(v uint64) *uint64 { return &v }
+	for _, c := range []struct {
+		name         string
+		cert, origin uint64
+		ready        bool
+		start        uint64
+		end          *uint64
+		admitted     bool
 	}{
-		{"fresh_at_origin", 1000, 1000, 10, true},
-		{"within_window", 995, 1000, 10, true},
-		{"at_window_boundary", 990, 1000, 10, true},
-		{"stale_past_window", 100, 1000, 10, true}, // the review's case: 900 rounds old, W_cert 10
-		{"future_ahead_of_origin", 1001, 1000, 10, true},
-		{"signer_epoch_inactive", 998, 1000, 10, false},
+		{"very_old_current_epoch", 5, 1_000_000, true, 1, nil, true},
+		{"very_old_closed_epoch", 15, 1_000_000, true, 10, u(20), true},
+		{"round_equals_start", 10, 1000, true, 10, u(20), true},
+		{"round_is_end_minus_one", 19, 1000, true, 10, u(20), true},
+		{"round_equals_end", 20, 1000, true, 10, u(20), false},
+		{"round_equals_origin_open_epoch", 1000, 1000, true, 500, nil, true},
+		{"round_ahead_of_origin", 1001, 1000, true, 500, nil, false},
+		{"round_before_epoch_start", 9, 1000, true, 10, u(20), false},
+		{"no_usable_origin", 15, 1000, false, 10, u(20), false},
+		{"epoch_not_admitted", 15, 1000, true, 10, u(20), false},
 	} {
-		r := AdmitLiveCertificate(lc.cert, lc.origin, lc.w, lc.signerActive)
-		vs.LiveCert = append(vs.LiveCert, D6LiveCertCase{
-			Name: lc.name, CertRound: lc.cert, ImportedOriginRound: lc.origin, WCert: lc.w,
-			SignerEpochActive: lc.signerActive, Admitted: r.Admitted, Reason: r.Reason,
+		epochAdmitted := c.name != "epoch_not_admitted"
+		r := AdmitCertificate(c.cert, c.origin, c.ready, CertEpoch{Start: c.start, End: c.end, Admitted: epochAdmitted})
+		vs.CertAdmission = append(vs.CertAdmission, D6CertAdmissionCase{
+			Name: c.name, CertRound: c.cert, OriginRound: c.origin, OriginReady: c.ready, EpochStart: c.start, EpochEnd: c.end,
+			EpochAdmitted: epochAdmitted, Admitted: r.Admitted, Reason: r.Reason,
 		})
+		if r.Admitted != c.admitted {
+			panic("d6 vector " + c.name + ": the model disagrees with the intended verdict")
+		}
 	}
 
 	// --- checkpoint freshness policy --------------------------------
@@ -199,8 +212,8 @@ func BuildD6Vectors() D6VectorSet {
 
 	// --- window nesting + key retention ----------------------------
 	vs.Windows = D6WindowsCase{
-		WCert: 50, DeltaEv: 100, DeltaHold: 200,
-		NestingValid:             NestingValid(50, 100, 200),
+		DeltaEv: 100, DeltaHold: 200,
+		NestingValid:             NestingValid(100, 200),
 		KeyRetainedForEvidence:   KeyRetentionRequired(true, false),
 		KeyRetainedForRetirement: KeyRetentionRequired(false, true),
 		KeyNotRetainedIfClear:    !KeyRetentionRequired(false, false),

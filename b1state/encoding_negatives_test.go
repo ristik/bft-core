@@ -73,7 +73,7 @@ func TestUpdateEncodingRefusals(t *testing.T) {
 	}
 }
 func TestProfilePinRefusals(t *testing.T) {
-	p := fixtureProfile(1)
+	p := fixtureProfile(2)
 	for _, change := range []func(*Profile){
 		func(p *Profile) { p.Network = 0 }, func(p *Profile) { p.RootGenesisID = [32]byte{} }, func(p *Profile) { p.ExecutionChainID = 0 }, func(p *Profile) { p.CompilerHash = [32]byte{} }, func(p *Profile) { p.SystemGas = p.MaxGas + 1 }, func(p *Profile) { p.ForcedGas = p.MaxGas }, func(p *Profile) { p.OtherCompanionBytes = p.CompanionBytes + 1 },
 	} {
@@ -83,9 +83,7 @@ func TestProfilePinRefusals(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	p.WCert = math.MaxUint64 / 1000
-	p.DeltaEV = p.WCert
-	p.DeltaHold = p.WCert + 1
+	p.MaxEpochsPerUpdate = math.MaxUint64 / 1000
 	if _, _, _, err := p.Bounds(); !errors.Is(err, ErrOverflow) {
 		t.Fatal(err)
 	}

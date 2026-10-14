@@ -9,18 +9,18 @@ import (
 	"github.com/unicitynetwork/bft-core/b1state"
 )
 
-func profile(k uint64) b1state.Profile {
-	p := b1state.Profile{Network: 5, RootGenesisID: [32]byte{1}, ExecutionChainID: 1337, RuntimeHash: [32]byte(common.HexToHash(b1registry.CodeHashHex)), CompilerHash: b1registry.CompilerHash(), WCert: k - 1, DeltaEV: k, DeltaHold: k + 1, RestGas: 1136500 + 1147500*k, CompanionBytes: 1 << 20, OtherCompanionBytes: 65536, OrdinaryCapacity: 7000000, GenesisUCTime: 1000}
+func profile(b uint64) b1state.Profile {
+	p := b1state.Profile{Network: 5, RootGenesisID: [32]byte{1}, ExecutionChainID: 1337, RuntimeHash: [32]byte(common.HexToHash(b1registry.CodeHashHex)), CompilerHash: b1registry.CompilerHash(), MaxEpochsPerUpdate: b, DeltaEV: 1, DeltaHold: 2, RestGas: b1registry.MinRestGas(b), CompanionBytes: 1 << 20, OtherCompanionBytes: 65536, OrdinaryCapacity: 7000000, GenesisUCTime: 1000}
 	p.SystemGas, _ = p.RequiredSystemGas()
 	p.MaxGas = p.SystemGas + p.OrdinaryCapacity
 	return p
 }
 func TestMeasuredProfileBoundaries(t *testing.T) {
-	for k := uint64(1); k <= 31; k++ {
-		require.NoError(t, b1registry.ValidateProfile(profile(k)))
+	for b := b1state.MinEpochsPerUpdate; b <= b1registry.MaxMeasuredEpochs; b++ {
+		require.NoError(t, b1registry.ValidateProfile(profile(b)))
 	}
-	p := profile(32)
-	require.ErrorIs(t, b1registry.ValidateProfile(p), b1registry.ErrArtifact)
+	p := profile(b1registry.MaxMeasuredEpochs + 1)
+	require.ErrorIs(t, b1registry.ValidateProfile(p), b1registry.ErrArtifact, "more epochs per update than the runtime was measured for")
 	for _, tc := range []struct {
 		name   string
 		change func(*b1state.Profile)
@@ -37,7 +37,7 @@ func TestMeasuredProfileBoundaries(t *testing.T) {
 		}, b1state.ErrProfile},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			p := profile(16)
+			p := profile(b1registry.MaxMeasuredEpochs)
 			tc.change(&p)
 			require.ErrorIs(t, b1registry.ValidateProfile(p), tc.want)
 		})

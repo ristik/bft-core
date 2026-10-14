@@ -257,7 +257,7 @@ if [ "${Q3_B1:-0}" = 1 ]; then
     p85ProfileArgs=($(p85_profile_args))
   fi
   build/ubft engine-api b1-profile --shard-conf "test-nodes/shard-conf-${partitionID}_0.json" --trust-base test-nodes/trust-base.json \
-    --w-cert "${Q3_B1_W_CERT:-15}" --out test-nodes/b1-profile.json ${p85ProfileArgs[@]+"${p85ProfileArgs[@]}"} | tee test-nodes/b1-profile.out || { echo "b1-profile failed" >&2; exit 1; }
+    --max-epochs-per-update "${Q3_B1_MAX_EPOCHS:-2}" --delta-ev "${Q3_B1_DELTA_EV:-16}" --delta-hold "${Q3_B1_DELTA_HOLD:-17}" --out test-nodes/b1-profile.json ${p85ProfileArgs[@]+"${p85ProfileArgs[@]}"} | tee test-nodes/b1-profile.out || { echo "b1-profile failed" >&2; exit 1; }
   if [ "${P85_LANE:-0}" = 1 ]; then p85_write_pos_deployment test-nodes/b1-profile.json || exit 1; p85_check_hook_gas test-nodes/b1-profile.json || exit 1; fi
   b1GasLimit=$(python3 -c "import json;print(json.load(open('test-nodes/b1-profile.json'))['maxGas'])")
   export EVM_B1_PROFILE=test-nodes/b1-profile.json URETH_B1_PROFILE_OUT=test-nodes/b1-profile.out URETH_BUILDER_GASLIMIT=$b1GasLimit

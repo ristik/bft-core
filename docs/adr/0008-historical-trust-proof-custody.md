@@ -2,6 +2,8 @@
 
 ## Status
 
+> **Scoped superseded policy (2026-10, owner decisions §24–§25).** The `W_cert` certificate-admission window and the rule `W_cert ≤ Δ_ev < Δ_hold`, as well as the "outside `W_cert` → historical ancestry" fallback, described below are **retired** for the B1 registry: certificates verify at any age against the permanent epoch registry. The evidence/hold ordering `Δ_ev < Δ_hold` and everything else in this ADR stand. What this ADR originally decided is left as written. See `briefs/b1-any-age-contract.md` and `docs/design/d6-historical-trust-proof-custody.md`.
+
 Proposed (D6, issue #8). Revised after the first review (#82): live certificate
 age is measured against the **imported certified origin**, not a checkpoint
 round; the proof models use **real hash-linked header chains and Merkle paths**

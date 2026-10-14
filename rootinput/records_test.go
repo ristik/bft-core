@@ -46,7 +46,7 @@ func backlog(t *testing.T, n int) fakeRecords {
 }
 
 func TestTheRootInputCommitsTheNextRequiredPrefixOfTheSourceLog(t *testing.T) {
-	f := b1fixture.New(t, 0)
+	f := b1fixture.New(t)
 	c := rootinput.ContextV2{Context: context.Background(), Genesis: f.Origin, Parent: f.Parent, Round: 1, ParentHash: f.Parent.ParentHash().Bytes(), B1: f.Pair}
 
 	f.Pair.Records = backlog(t, 40)
@@ -70,7 +70,7 @@ func TestTheRootInputCommitsTheNextRequiredPrefixOfTheSourceLog(t *testing.T) {
 }
 
 func TestTheRecordsImportRefusesWhatTheRegistryWouldRefuse(t *testing.T) {
-	f := b1fixture.New(t, 0)
+	f := b1fixture.New(t)
 	c := rootinput.ContextV2{Context: context.Background(), Genesis: f.Origin, Parent: f.Parent, Round: 1, ParentHash: f.Parent.ParentHash().Bytes(), B1: f.Pair}
 	cases := map[string]func(r *fakeRecords){
 		"the cursor is unavailable":                  func(r *fakeRecords) { r.cursorErr = errors.New("origin block pruned") },
@@ -92,7 +92,7 @@ func TestTheRecordsImportRefusesWhatTheRegistryWouldRefuse(t *testing.T) {
 }
 
 func TestThePairRederivesTheImportForImportReplayAndRecovery(t *testing.T) {
-	f := b1fixture.New(t, 0)
+	f := b1fixture.New(t)
 	f.Pair.Records = backlog(t, 3)
 	c := rootinput.ContextV2{Context: context.Background(), Genesis: f.Origin, Parent: f.Parent, Round: 1, ParentHash: f.Parent.ParentHash().Bytes(), B1: f.Pair}
 	res, err := rootinput.DeriveV2(c, f.Observation)

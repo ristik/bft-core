@@ -146,7 +146,7 @@ func readProfile(path string, p *b1state.Profile) error {
 		ExecutionChainID    uint64          `json:"executionChainId"`
 		RuntimeHash         common.Hash     `json:"runtimeHash"`
 		CompilerHash        common.Hash     `json:"compilerHash"`
-		WCert               uint64          `json:"wCert"`
+		MaxEpochsPerUpdate  uint64          `json:"maxEpochsPerUpdate"`
 		DeltaEV             uint64          `json:"deltaEv"`
 		DeltaHold           uint64          `json:"deltaHold"`
 		SystemGas           uint64          `json:"systemGas"`
@@ -169,7 +169,7 @@ func readProfile(path string, p *b1state.Profile) error {
 		return fmt.Errorf("the profile %s is in neither JSON form: %w", path, err)
 	}
 	*p = b1state.Profile{Network: f.Network, RootGenesisID: f.RootGenesisID, ExecutionChainID: f.ExecutionChainID,
-		RuntimeHash: f.RuntimeHash, CompilerHash: f.CompilerHash, WCert: f.WCert, DeltaEV: f.DeltaEV, DeltaHold: f.DeltaHold,
+		RuntimeHash: f.RuntimeHash, CompilerHash: f.CompilerHash, MaxEpochsPerUpdate: f.MaxEpochsPerUpdate, DeltaEV: f.DeltaEV, DeltaHold: f.DeltaHold,
 		SystemGas: f.SystemGas, ForcedGas: f.ForcedGas, MaxGas: f.MaxGas, OrdinaryCapacity: f.OrdinaryCapacity, RestGas: f.RestGas,
 		CompanionBytes: f.CompanionBytes, OtherCompanionBytes: f.OtherCompanionBytes, GenesisUCTime: f.GenesisUCTime,
 		RecordsCustody: f.RecordsCustody, HRecords: f.HRecords, HookRecordGas: f.HookRecordGas,

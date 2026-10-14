@@ -64,7 +64,7 @@ func (c *B1Config) Derive(ctx context.Context, parent registryproof.Snapshot, o 
 	f := parent.Fields()
 	origin := o.Origin()
 	profileHash, _ := p.Hash()
-	if f.Layout != registryproof.FreshB1 || f.B1Network != uint64(p.Network) || f.B1WCert != p.WCert || f.B1ProfileHash != common.Hash(profileHash) || origin.NetworkID != uint64(p.Network) || parent.VerifiedContext().RegistryCodeHash != common.Hash(p.RuntimeHash) {
+	if f.Layout != registryproof.FreshB1 || f.B1Network != uint64(p.Network) || f.B1Format != 2 || f.B1ProfileHash != common.Hash(profileHash) || origin.NetworkID != uint64(p.Network) || parent.VerifiedContext().RegistryCodeHash != common.Hash(p.RuntimeHash) {
 		return B1Result{}, ErrB1Admission
 	}
 	h, err := c.Authority.B1History(origin.RootRound)
@@ -88,30 +88,49 @@ func (c *B1Config) Derive(ctx context.Context, parent registryproof.Snapshot, o 
 	if err != nil {
 		return B1Result{}, err
 	}
-	parentOrigin := f.ClockRootRound
-	if parent.Genesis() {
-		parentOrigin = history[0].Start
-	} // genesis installs authority before the operational clock starts
-	expected, err := b1state.Select(history, parentOrigin, p.WCert)
-	if err != nil {
+	if err = b1state.ValidateHistory(history); err != nil {
 		return B1Result{}, err
 	}
-	if uint64(len(expected)) != f.B1Count || f.B1Head > p.WCert || (!parent.Genesis() && f.OriginRootEpoch != expected[len(expected)-1].Epoch) {
+	g, tip := f.B1GenesisEpoch, f.B1ImportedTip
+	if history[0].Epoch != g || history[len(history)-1].Epoch != origin.RootEpoch || tip < g || tip > origin.RootEpoch {
 		return B1Result{}, ErrB1Admission
 	}
-	words := make(map[common.Hash]common.Hash)
-	for i, e := range expected {
-		words[common.Hash(b1state.QueueSlot((f.B1Head+uint64(i))%(p.WCert+1)))] = common.Hash(b1state.Word(e.Epoch))
+	at := func(epoch uint64) b1state.Entry { return history[epoch-g] }
+	closed := func(epoch uint64) b1state.Entry { // the state's form of an entry: closed by its successor unless it is the tip
+		e := at(epoch)
+		e.End = nil
+		if epoch < tip {
+			end := at(epoch + 1).Start
+			e.End = &end
+		}
+		return e
+	}
+	missing := b1state.NextEntries(history, tip, origin.RootEpoch, c.Profile.MaxEpochsPerUpdate+1)
+	if uint64(len(missing)) > c.Profile.MaxEpochsPerUpdate {
+		return B1Result{}, errors.Join(ErrB1Admission, b1state.ErrTooManyEpochs)
+	}
+	// The words to authenticate against the parent: the open tip, the usable origin's entry, and the absence of every entry about to be installed.
+	// Nothing else is read: the steady path never enumerates the history.
+	ready := f.B1OriginReady == 1
+	expected := make(map[common.Hash]common.Hash)
+	prove := func(e b1state.Entry) error {
 		ew, err := b1state.EntryStorage(e)
 		if err != nil {
-			return B1Result{}, err
+			return err
 		}
 		for k, v := range ew {
-			words[common.Hash(k)] = common.Hash(v)
+			expected[common.Hash(k)] = common.Hash(v)
 		}
+		return nil
 	}
-	keys := make([]common.Hash, 0, len(words))
-	for k := range words {
+	if err = prove(closed(tip)); err != nil {
+		return B1Result{}, err
+	}
+	for _, e := range missing {
+		expected[common.Hash(b1state.EntrySlot(e.Epoch, 0))] = common.Hash{}
+	}
+	keys := make([]common.Hash, 0, len(expected))
+	for k := range expected {
 		keys = append(keys, k)
 	}
 	sort.Slice(keys, func(i, j int) bool { return bytes.Compare(keys[i][:], keys[j][:]) < 0 })
@@ -128,18 +147,37 @@ func (c *B1Config) Derive(ctx context.Context, parent registryproof.Snapshot, o 
 		return B1Result{}, err
 	}
 	for i, k := range keys {
-		if got[i] != words[k] {
+		if got[i] != expected[k] {
 			return B1Result{}, b1state.ErrHistory
 		}
-	}
-	end, entries, err := b1state.Delta(history, expected, parentOrigin, origin.RootRound, p.WCert)
-	if err != nil {
-		return B1Result{}, err
 	}
 	if parent.Number() == math.MaxUint64 {
 		return B1Result{}, b1state.ErrOverflow
 	}
-	u := b1state.Update{Network: p.Network, RootGenesisID: p.RootGenesisID, ExecutionChainID: p.ExecutionChainID, ProfileHash: profileHash, ParentHash: [32]byte(parent.ParentHash()), BlockNumber: parent.Number() + 1, OriginEpoch: origin.RootEpoch, OriginRound: origin.RootRound, OriginIdentity: [32]byte(origin.Identity()), PriorTipEpoch: expected[len(expected)-1].Epoch, OldTipEnd: end, NewEntries: entries}
+	var oldTipEnd *uint64
+	entries := make([]b1state.Entry, 0, len(missing))
+	for i, e := range missing {
+		e.End = nil
+		if i+1 < len(missing) {
+			end := missing[i+1].Start
+			e.End = &end
+		}
+		entries = append(entries, e)
+	}
+	if len(entries) > 0 {
+		end := entries[0].Start
+		oldTipEnd = &end
+	}
+	u := b1state.Update{Network: p.Network, RootGenesisID: p.RootGenesisID, ExecutionChainID: p.ExecutionChainID, ProfileHash: profileHash, ParentHash: [32]byte(parent.ParentHash()), BlockNumber: parent.Number() + 1, OriginEpoch: origin.RootEpoch, OriginRound: origin.RootRound, OriginIdentity: [32]byte(origin.Identity()), PriorTipEpoch: tip, OldTipEnd: oldTipEnd, NewEntries: entries}
+	// The registry's own write guards, on the proven parent (a ready parent whose usable epoch is not its imported tip is refused by ParentRegistry,
+	// never repaired by this block): this block is refused here exactly when the runtime would refuse it.
+	pr, err := b1state.ParentRegistry(g, tip, ready, f.OriginRootEpoch, f.ClockRootRound, closed(tip))
+	if err != nil {
+		return B1Result{}, err
+	}
+	if _, _, err = pr.Apply(u, p.MaxEpochsPerUpdate); err != nil {
+		return B1Result{}, err
+	}
 	raw := u.Bytes()
 	_, gas, err := b1state.Admit(raw, p, p.SystemGas)
 	if err != nil {

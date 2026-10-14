@@ -10,7 +10,7 @@ import (
 )
 
 func TestFreshRootInputCannotBypassOwnPairAdmission(t *testing.T) {
-	f := b1fixture.New(t, 0)
+	f := b1fixture.New(t)
 	c := rootinput.ContextV2{Context: context.Background(), Genesis: f.Origin, Parent: f.Parent, Round: 1, ParentHash: f.Parent.ParentHash().Bytes()}
 	_, err := rootinput.DeriveV2(c, f.Observation)
 	require.ErrorIs(t, err, rootinput.ErrB1Admission)

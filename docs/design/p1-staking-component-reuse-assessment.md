@@ -52,7 +52,7 @@ Polygon's checkpoint model.
   acknowledgement that the stake backs **no active or prepared successor**.
   Withdrawal requires `now ≥ max(R_ret + Δ_hold, inheritedProtectionUntil)`, the
   forced-inbox position cutoff through `LiabilityDeadlineRound`, and no pending
-  timely evidence. `Δ_hold > Δ_ev + Δ_incl + Δ_exec`, `W_cert ≤ Δ_ev < Δ_hold`.
+  timely evidence. `Δ_hold > Δ_ev + Δ_incl + Δ_exec`, `Δ_ev < Δ_hold` (the `W_cert` window of the earlier design is retired: certificates do not expire).
 - **Rewards.** Assigned voting weight per **certified root interval**, not
   measured availability: `R_ν(I) = 𝓔(I)·b_ν/W_e`, `𝓔(I) = min(ρ_e·|I|,
   Pool_free)` (`governance.tex` §"Rewards"). No proposer bonus. Idle assigned

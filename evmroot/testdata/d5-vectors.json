@@ -36,14 +36,13 @@
   ],
   "protection_params": {
     "params": {
-      "WCert": 50,
       "DeltaEv": 100,
       "DeltaIncl": 40,
       "DeltaExec": 40,
       "DeltaHold": 200
     },
     "valid": true,
-    "note": "W_cert \u003c= Δ_ev \u003c Δ_hold and Δ_hold \u003e Δ_ev + Δ_incl + Δ_exec (200 \u003e 100+40+40=180)"
+    "note": "Δ_ev \u003c Δ_hold and Δ_hold \u003e Δ_ev + Δ_incl + Δ_exec (200 \u003e 100+40+40=180)"
   },
   "withdrawal_gates": [
     {
