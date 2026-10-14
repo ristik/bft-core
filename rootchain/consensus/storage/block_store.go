@@ -301,14 +301,19 @@ func (x *BlockStore) ProcessQc(qc *rctypes.QuorumCert) ([]*certification.Certifi
 		return nil, nil
 	}
 	// the execution context decides whether, and which, endorsement a certificate must carry: before anything is inserted, committed or published
+	alreadyCommitted := false
 	if x.utbBinding != nil {
-		if err := x.utbBinding(qc); err != nil {
+		if err := x.utbBinding(qc); errors.Is(err, ErrUTBAlreadyCommitted) {
+			// a QC that commits a round the tree has pruned, as recovery replays one: nothing to bind or to retain (it was when it committed), and the
+			// commit below refuses it as it always did
+			alreadyCommitted = true
+		} else if err != nil {
 			return nil, err
 		}
 	}
 	// the finalized entry survives before the certificate is inserted, so before any commit, certificate or installation it enables is visible; a
 	// failure leaves the certificate unapplied (a retry is not mistaken for a stale certificate)
-	if x.utbRetain != nil && qc.UTB != nil {
+	if x.utbRetain != nil && qc.UTB != nil && !alreadyCommitted {
 		if err := x.utbRetain(qc); err != nil {
 			return nil, fmt.Errorf("%w: round %d: %w", ErrUTBRetention, qc.GetRound(), err)
 		}

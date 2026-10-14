@@ -11,7 +11,6 @@ import (
 	"github.com/unicitynetwork/bft-core/handoff"
 	"github.com/unicitynetwork/bft-core/q3format"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/storage"
-	"github.com/unicitynetwork/bft-core/rootchain/consensus/trustbase"
 	drctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/votesig"
 	"github.com/unicitynetwork/bft-core/utb"
@@ -76,8 +75,8 @@ func (s UTBSuccessor) Entry(committed *drctypes.RoundInfo, epoch uint64) ([]byte
 
 // utbBindingFor is the contextual check of a block store's certificates: in a UTB epoch a committing certificate carries exactly the entry the store's own
 // executed state implies, derived like the endorsement a vote makes.
-func utbBindingFor(trustBaseStore *trustbase.TrustBaseStore, blocks *storage.BlockStore, previous func(uint64) (*types.RootTrustBaseV2, error)) storage.UTBBinding {
-	return storage.NewUTBBinding(trustBaseStore.SigningConfig, UTBSuccessor{State: blocks, Previous: previous}.Entry)
+func utbBindingFor(cfgOf func(uint64) (votesig.Config, error), blocks *storage.BlockStore, previous func(uint64) (*types.RootTrustBaseV2, error)) storage.UTBBinding {
+	return storage.NewUTBBinding(cfgOf, UTBSuccessor{State: blocks, Previous: previous}.Entry)
 }
 
 // utbRetentionFor appends the signed entry a committing certificate carries to the permanent store. The store verifies it strictly from its own
