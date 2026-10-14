@@ -126,14 +126,6 @@ func (c *B1Config) Derive(ctx context.Context, parent registryproof.Snapshot, o 
 	if err = prove(closed(tip)); err != nil {
 		return B1Result{}, err
 	}
-	if ready && f.OriginRootEpoch != tip {
-		if f.OriginRootEpoch < g || f.OriginRootEpoch > tip {
-			return B1Result{}, ErrB1Admission
-		}
-		if err = prove(closed(f.OriginRootEpoch)); err != nil {
-			return B1Result{}, err
-		}
-	}
 	for _, e := range missing {
 		expected[common.Hash(b1state.EntrySlot(e.Epoch, 0))] = common.Hash{}
 	}
@@ -177,8 +169,9 @@ func (c *B1Config) Derive(ctx context.Context, parent registryproof.Snapshot, o 
 		oldTipEnd = &end
 	}
 	u := b1state.Update{Network: p.Network, RootGenesisID: p.RootGenesisID, ExecutionChainID: p.ExecutionChainID, ProfileHash: profileHash, ParentHash: [32]byte(parent.ParentHash()), BlockNumber: parent.Number() + 1, OriginEpoch: origin.RootEpoch, OriginRound: origin.RootRound, OriginIdentity: [32]byte(origin.Identity()), PriorTipEpoch: tip, OldTipEnd: oldTipEnd, NewEntries: entries}
-	// The registry's own write guards, on the proven parent: this block is refused here exactly when the runtime would refuse it.
-	pr, err := b1state.ParentRegistry(g, tip, ready, f.OriginRootEpoch, f.ClockRootRound, parentEntries(closed, tip, f.OriginRootEpoch, ready)...)
+	// The registry's own write guards, on the proven parent (a ready parent whose usable epoch is not its imported tip is refused by ParentRegistry,
+	// never repaired by this block): this block is refused here exactly when the runtime would refuse it.
+	pr, err := b1state.ParentRegistry(g, tip, ready, f.OriginRootEpoch, f.ClockRootRound, closed(tip))
 	if err != nil {
 		return B1Result{}, err
 	}
@@ -191,14 +184,6 @@ func (c *B1Config) Derive(ctx context.Context, parent registryproof.Snapshot, o 
 		return B1Result{}, err
 	}
 	return B1Result{Update: raw, Hash: u.Hash(), AdmissionGas: gas}, nil
-}
-
-func parentEntries(closed func(uint64) b1state.Entry, tip, u uint64, ready bool) []b1state.Entry {
-	out := []b1state.Entry{closed(tip)}
-	if ready && u != tip {
-		out = append(out, closed(u))
-	}
-	return out
 }
 
 // Compare rederives on this pair for import, replay and crash recovery. The

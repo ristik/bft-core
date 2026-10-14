@@ -367,3 +367,26 @@ func TestTheElectionHookIsPartOfTheProfile(t *testing.T) {
 		}
 	}
 }
+
+// Apply closes each entry at its successor's start and ignores an asserted end, so Admit is where an inner entry's End must equal the next Start:
+// the bytes the runtime executes must not carry a different one.
+func TestAdmitRequiresEachInnerEntryToEndWhereItsSuccessorStarts(t *testing.T) {
+	p := fixtureProfile(2)
+	build := func(innerEnd uint64) Update {
+		u := fixtureUpdate(p)
+		first, second := fixtureEntry(1, 20), fixtureEntry(2, 30)
+		first.End = &innerEnd
+		old := uint64(20)
+		u.OldTipEnd, u.PriorTipEpoch = &old, 0
+		u.NewEntries, u.OriginEpoch, u.OriginRound = []Entry{first, second}, 2, 40
+		return u
+	}
+	if _, _, err := Admit(build(30).Bytes(), p, math.MaxUint64); err != nil {
+		t.Fatal("control:", err)
+	}
+	for _, end := range []uint64{29, 31} {
+		if _, _, err := Admit(build(end).Bytes(), p, math.MaxUint64); !errors.Is(err, ErrInterval) {
+			t.Fatalf("inner end %d: %v", end, err)
+		}
+	}
+}

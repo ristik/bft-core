@@ -101,7 +101,7 @@ func (n *trieNodes) Put(_, v []byte) error { *n = append(*n, bytes.Clone(v)); re
 func (n *trieNodes) Delete([]byte) error   { return nil }
 
 // parentWith commits the given registry storage words into a block header at height number (a copy of b1fixture.ParentAt for this fixture).
-func (e *threeEpochs) parentWith(t *testing.T, words map[common.Hash]common.Hash, number uint64) registryproof.Snapshot {
+func (e *threeEpochs) parentWith(t *testing.T, words map[common.Hash]common.Hash, number uint64) (registryproof.Snapshot, func([]common.Hash) [][][]byte) {
 	t.Helper()
 	storage := trie.NewEmpty(triedb.NewDatabase(rawdb.NewMemoryDatabase(), nil))
 	for k, v := range words {
@@ -139,7 +139,16 @@ func (e *threeEpochs) parentWith(t *testing.T, words map[common.Hash]common.Hash
 	ctx := e.g.ProofContext()
 	snap, err := registryproof.Verify(ctx, header.Hash(), ev)
 	require.NoError(t, err)
-	return snap
+	prove := func(keys []common.Hash) [][][]byte {
+		out := make([][][]byte, len(keys))
+		for i, k := range keys {
+			var p trieNodes
+			require.NoError(t, storage.Prove(crypto.Keccak256(k[:]), &p))
+			out[i] = p
+		}
+		return out
+	}
+	return snap, prove
 }
 
 // The acknowledgement of a supersession folded over two assignment steps (primary + supersession, MaxSupersessionSpan = 2), derived through the
@@ -217,7 +226,7 @@ func TestSpanTwoSupersessionAcknowledgementInstallsBothEntriesInOneBlock(t *test
 	require.Equal(t, [32]byte(frozen), update.ParentHash, "built on the original frozen parent")
 
 	// the same acknowledgement on any other parent is refused: the frozen-parent check stands
-	other := e.parentWith(t, func() map[common.Hash]common.Hash {
+	other, _ := e.parentWith(t, func() map[common.Hash]common.Hash {
 		w := e.g.B1Words()
 		w[common.Hash(b1state.FixedSlot("round.authorized"))] = common.Hash(b1state.Word(1))
 		w[common.Hash(b1state.FixedSlot("outcomes.round"))] = common.Hash(b1state.Word(1))
@@ -232,4 +241,81 @@ func TestSpanTwoSupersessionAcknowledgementInstallsBothEntriesInOneBlock(t *test
 	s3 := step(3, 2, conf2, conf(withParam("3")), 6)
 	_, err = handoff.FoldTransitions([]handoff.EVMTransition{s1, s2, s3})
 	require.ErrorIs(t, err, handoff.ErrBoundary)
+}
+
+// parentAt builds a committed (non-genesis) parent with the genesis registry words plus the given changes.
+func (e *threeEpochs) parentAt(t *testing.T, set map[string]uint64, extra map[common.Hash]common.Hash) (b1paired.Config, registryproof.Snapshot) {
+	words := e.g.B1Words()
+	for k, v := range map[string]uint64{"round.authorized": 1, "outcomes.round": 1} {
+		words[common.Hash(b1state.FixedSlot(k))] = common.Hash(b1state.Word(v))
+	}
+	words[common.Hash(b1state.FixedSlot("outcomes.commitment"))] = common.Hash{9}
+	for k, v := range set {
+		words[common.Hash(b1state.FixedSlot(k))] = common.Hash(b1state.Word(v))
+	}
+	for k, v := range extra {
+		words[k] = v
+	}
+	parent, prove := e.parentWith(t, words, 1)
+	pair := *e.pair
+	pair.Proofs = func(_ context.Context, _ registryproof.Snapshot, keys []common.Hash) ([][][]byte, error) {
+		return prove(keys), nil
+	}
+	return pair, parent
+}
+
+// A ready parent whose usable epoch is behind the imported tip is registry corruption: Derive refuses it instead of healing it with the update.
+func TestReadyParentBehindTheImportedTipIsRefusedNotHealed(t *testing.T) {
+	e := newThreeEpochs(t)
+	pair, parent := e.parentAt(t, map[string]uint64{"b1.importedTipEpoch": 2, "b1.originReady": 1, "origin.rootEpoch": 1, "clock.rootRound": 5}, e.entryWords(t, 2))
+	_, err := pair.Derive(context.Background(), parent, e.obs(3, 15))
+	require.ErrorIs(t, err, b1state.ErrImportedUsableMismatch)
+	// control: the same parent with the usable epoch on the tip derives (installs epoch 3 only)
+	pair, parent = e.parentAt(t, map[string]uint64{"b1.importedTipEpoch": 2, "b1.originReady": 1, "origin.rootEpoch": 2, "clock.rootRound": 8}, e.entryWords(t, 2))
+	res, err := pair.Derive(context.Background(), parent, e.obs(3, 15))
+	require.NoError(t, err)
+	update, _, err := b1state.Admit(res.Update, e.p, e.p.SystemGas)
+	require.NoError(t, err)
+	require.Len(t, update.NewEntries, 1)
+	require.EqualValues(t, 3, update.NewEntries[0].Epoch)
+}
+
+// Each entry to install must be proven absent: a parent whose presence word for epoch I+1 is already set is refused.
+func TestDeriveRequiresEveryNewEntryToBeProvenAbsent(t *testing.T) {
+	e := newThreeEpochs(t)
+	pair, parent := e.parentAt(t, nil, nil)
+	_, err := pair.Derive(context.Background(), parent, e.obs(3, 15))
+	require.NoError(t, err, "control: nothing installed yet")
+	present := map[common.Hash]common.Hash{common.Hash(b1state.EntrySlot(2, 0)): common.Hash(b1state.Word(1))}
+	pair, parent = e.parentAt(t, nil, present)
+	_, err = pair.Derive(context.Background(), parent, e.obs(3, 15))
+	require.ErrorIs(t, err, b1state.ErrHistory)
+	// the second entry too
+	present = map[common.Hash]common.Hash{common.Hash(b1state.EntrySlot(3, 0)): common.Hash(b1state.Word(1))}
+	pair, parent = e.parentAt(t, nil, present)
+	_, err = pair.Derive(context.Background(), parent, e.obs(3, 15))
+	require.ErrorIs(t, err, b1state.ErrHistory)
+}
+
+func (e *threeEpochs) entryWords(t *testing.T, epoch uint64) map[common.Hash]common.Hash {
+	h, err := e.pair.Authority.B1History(15)
+	require.NoError(t, err)
+	history, err := h.B1Entries(15)
+	require.NoError(t, err)
+	entry := history[epoch-history[0].Epoch]
+	w, err := b1state.EntryStorage(entry)
+	require.NoError(t, err)
+	out := map[common.Hash]common.Hash{}
+	for k, v := range w {
+		out[common.Hash(k)] = common.Hash(v)
+	}
+	// the predecessor is closed by this entry
+	prev := history[epoch-history[0].Epoch-1]
+	prev.End = &entry.Start
+	pw, err := b1state.EntryStorage(prev)
+	require.NoError(t, err)
+	for k, v := range pw {
+		out[common.Hash(k)] = common.Hash(v)
+	}
+	return out
 }

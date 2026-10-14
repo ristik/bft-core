@@ -310,3 +310,20 @@ func TestSpanTwoUpdateInstallsBothOrNeither(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) { r := base(); refused(t, r, tc.u(r), b, tc.want) })
 	}
 }
+
+func TestParentRegistryRefusesAReadyParentBehindItsTip(t *testing.T) {
+	g, e1 := fixtureEntry(0, 7), fixtureEntry(1, 20)
+	end := uint64(20)
+	g.End = &end
+	if _, err := ParentRegistry(0, 1, true, 0, 10, g, e1); !errors.Is(err, ErrImportedUsableMismatch) {
+		t.Fatalf("U < I on a ready parent: %v", err)
+	}
+	if r, err := ParentRegistry(0, 1, true, 1, 25, e1); err != nil || r.U != 1 {
+		t.Fatalf("U = I is lawful: %v", err)
+	}
+	if r, err := ParentRegistry(0, 0, false, 0, 0, g0()); err != nil || r.Ready {
+		t.Fatalf("not ready: any U/O is ignored: %v", err)
+	}
+}
+
+func g0() Entry { return fixtureEntry(0, 7) }

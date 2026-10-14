@@ -7,7 +7,7 @@ import (
 
 // The B1 registry keeps every installed validator epoch forever (briefs/b1-any-age-contract.md section 1): no window, no ring, no pruning,
 // no deletion. Entries are looked up directly by epoch. Two cursors are kept apart: I, the imported tip (the greatest contiguously installed
-// epoch, the durable import cursor), and the usable origin (U, O) that certificate acceptance reads; preloaded epochs may be ahead of U.
+// epoch, the durable import cursor), and the usable origin (U, O) that certificate acceptance reads; there is no preload mode: after every update a ready registry has U = I.
 var (
 	ErrAppendGap                = errors.New("b1state: append is not the successor of the imported tip")
 	ErrImmutable                = errors.New("b1state: an installed entry cannot change")
@@ -233,7 +233,12 @@ func ParentRegistry(genesis, tip uint64, ready bool, u, o uint64, entries ...Ent
 		return nil, ErrHistory
 	}
 	if ready {
-		if _, ok := r.entries[u]; !ok || u < genesis || u > tip {
+		// A committed ready parent has its usable epoch on the imported tip (no preload mode): anything else is registry corruption and is
+		// refused, not repaired by the update that follows.
+		if u != tip {
+			return nil, ErrImportedUsableMismatch
+		}
+		if u < genesis {
 			return nil, ErrHistory
 		}
 	}
