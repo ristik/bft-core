@@ -84,32 +84,28 @@ func (c *B1Config) Derive(ctx context.Context, parent registryproof.Snapshot, o 
 	if err = o.VerifyRootCommittee(committee.Projection()); err != nil {
 		return B1Result{}, err
 	}
-	history, err := h.B1Entries(origin.RootRound)
+	g, tip := f.B1GenesisEpoch, f.B1ImportedTip
+	if tip < g || tip > origin.RootEpoch {
+		return B1Result{}, ErrB1Admission
+	}
+	// Only the imported tip onward is read from the authenticated history: the work of this block does not depend on how many epochs precede the tip.
+	seg, err := h.B1EntriesFrom(origin.RootRound, tip)
 	if err != nil {
 		return B1Result{}, err
 	}
-	if err = b1state.ValidateHistory(history); err != nil {
+	if err = b1state.ValidateSegment(seg, g); err != nil {
 		return B1Result{}, err
 	}
-	g, tip := f.B1GenesisEpoch, f.B1ImportedTip
-	if history[0].Epoch != g || history[len(history)-1].Epoch != origin.RootEpoch || tip < g || tip > origin.RootEpoch {
+	if seg[0].Epoch != tip || seg[len(seg)-1].Epoch != origin.RootEpoch {
 		return B1Result{}, ErrB1Admission
 	}
-	at := func(epoch uint64) b1state.Entry { return history[epoch-g] }
-	closed := func(epoch uint64) b1state.Entry { // the state's form of an entry: closed by its successor unless it is the tip
-		e := at(epoch)
-		e.End = nil
-		if epoch < tip {
-			end := at(epoch + 1).Start
-			e.End = &end
-		}
-		return e
-	}
-	missing := b1state.NextEntries(history, tip, origin.RootEpoch, c.Profile.MaxEpochsPerUpdate+1)
+	tipEntry := seg[0]
+	tipEntry.End = nil // the open tip, as the state holds it
+	missing := seg[1:]
 	if uint64(len(missing)) > c.Profile.MaxEpochsPerUpdate {
 		return B1Result{}, errors.Join(ErrB1Admission, b1state.ErrTooManyEpochs)
 	}
-	// The words to authenticate against the parent: the open tip, the usable origin's entry, and the absence of every entry about to be installed.
+	// The words to authenticate against the parent: the open tip (the usable entry: a ready parent has U = I) and the absence of every entry about to be installed.
 	// Nothing else is read: the steady path never enumerates the history.
 	ready := f.B1OriginReady == 1
 	expected := make(map[common.Hash]common.Hash)
@@ -123,7 +119,7 @@ func (c *B1Config) Derive(ctx context.Context, parent registryproof.Snapshot, o 
 		}
 		return nil
 	}
-	if err = prove(closed(tip)); err != nil {
+	if err = prove(tipEntry); err != nil {
 		return B1Result{}, err
 	}
 	for _, e := range missing {
@@ -171,7 +167,7 @@ func (c *B1Config) Derive(ctx context.Context, parent registryproof.Snapshot, o 
 	u := b1state.Update{Network: p.Network, RootGenesisID: p.RootGenesisID, ExecutionChainID: p.ExecutionChainID, ProfileHash: profileHash, ParentHash: [32]byte(parent.ParentHash()), BlockNumber: parent.Number() + 1, OriginEpoch: origin.RootEpoch, OriginRound: origin.RootRound, OriginIdentity: [32]byte(origin.Identity()), PriorTipEpoch: tip, OldTipEnd: oldTipEnd, NewEntries: entries}
 	// The registry's own write guards, on the proven parent (a ready parent whose usable epoch is not its imported tip is refused by ParentRegistry,
 	// never repaired by this block): this block is refused here exactly when the runtime would refuse it.
-	pr, err := b1state.ParentRegistry(g, tip, ready, f.OriginRootEpoch, f.ClockRootRound, closed(tip))
+	pr, err := b1state.ParentRegistry(g, tip, ready, f.OriginRootEpoch, f.ClockRootRound, tipEntry)
 	if err != nil {
 		return B1Result{}, err
 	}
