@@ -39,6 +39,10 @@ type QuorumCert struct {
 	// signed round data, including the timestamp on new votes.
 	Scheme         uint64               `cbor:"-" json:"-"`
 	SealSignatures map[string]hex.Bytes `cbor:"-" json:"sealSignatures,omitempty"`
+	// Envelope is 0 for the historical wire forms and votesig.EnvelopeUTB (3) for the envelope [3, inner, utb] of an epoch configured with
+	// Config.UTB. UTB is the aggregate trust-base endorsement of a certificate that commits the outgoing handoff; nil otherwise.
+	Envelope uint64          `cbor:"-" json:"-"`
+	UTB      *UTBCertificate `cbor:"-" json:"utb,omitempty"`
 }
 
 type qcWire QuorumCert
@@ -106,6 +110,19 @@ type qcV2Wire struct {
 
 // MarshalCBOR writes the legacy array, or the scheme wrapper for a scheme 2 certificate.
 func (x QuorumCert) MarshalCBOR() ([]byte, error) {
+	if x.Envelope == votesig.EnvelopeUTB {
+		utbCert := x.UTB
+		inner := x
+		inner.Envelope, inner.UTB = 0, nil
+		ib, err := inner.MarshalCBOR()
+		if err != nil {
+			return nil, err
+		}
+		return types.Cbor.Marshal(qcV3Wire{Version: votesig.EnvelopeUTB, Inner: ib, UTB: utbCert})
+	}
+	if x.UTB != nil || x.Envelope != 0 {
+		return nil, fmt.Errorf("%w: envelope %d", votesig.ErrEnvelope, x.Envelope)
+	}
 	if x.Scheme == votesig.SchemeDomainBound {
 		if x.VoteInfo == nil {
 			return nil, fmt.Errorf("%w: scheme 2 certificate has no vote info", votesig.ErrStatement)
@@ -119,6 +136,22 @@ func (x QuorumCert) MarshalCBOR() ([]byte, error) {
 
 // UnmarshalCBOR reads the legacy array or the scheme 2 wrapper; any other wrapper version is refused before verification.
 func (x *QuorumCert) UnmarshalCBOR(data []byte) error {
+	if votesig.PeekEnvelopeUTB(data) {
+		var w qcV3Wire
+		if err := types.Cbor.Unmarshal(data, &w); err != nil {
+			return fmt.Errorf("%w: %w", ErrMalformedQC, err)
+		}
+		if w.Version != votesig.EnvelopeUTB || votesig.PeekEnvelopeUTB(w.Inner) {
+			return fmt.Errorf("%w: envelope", ErrMalformedQC)
+		}
+		var inner QuorumCert
+		if err := inner.UnmarshalCBOR(w.Inner); err != nil {
+			return err
+		}
+		inner.Envelope, inner.UTB = votesig.EnvelopeUTB, w.UTB
+		*x = inner
+		return nil
+	}
 	wrapped, err := votesig.PeekWrapper(data)
 	if err != nil {
 		return err
@@ -366,10 +399,17 @@ func (x *QuorumCert) VerifyScheme(tb types.RootTrustBase, cfg votesig.Config, pi
 	if x.signingScheme() != want {
 		return fmt.Errorf("%w: certificate is scheme %d, its epoch requires scheme %d", votesig.ErrScheme, x.signingScheme(), want)
 	}
-	if want == votesig.SchemeLegacy {
-		return x.Verify(tb, pin...)
+	if err := x.checkEnvelope(cfg); err != nil {
+		return err
 	}
-	return x.verifyDomainBound(tb, cfg)
+	if want == votesig.SchemeLegacy {
+		if err := x.Verify(tb, pin...); err != nil {
+			return err
+		}
+	} else if err := x.verifyDomainBound(tb, cfg); err != nil {
+		return err
+	}
+	return x.verifyUTB(tb, cfg)
 }
 
 // VerifyWith resolves the certificate's own epoch in the store (its trust base and its signing configuration) and verifies

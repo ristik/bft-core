@@ -54,3 +54,53 @@ func TestUTBChainOfAQ3HistoryIsOneCanonicalDerivation(t *testing.T) {
 		require.Equal(t, a, b)
 	}
 }
+
+func TestUTBTupleIsTheOnlyOtherValidProtocolConfig(t *testing.T) {
+	var g [32]byte
+	g[0] = 1
+	plain, utb := q3format.Q3Config(5, g), q3format.Q3ConfigUTB(5, g)
+	require.NoError(t, plain.Validate())
+	require.NoError(t, utb.Validate())
+	require.False(t, plain.UTB())
+	require.True(t, utb.UTB())
+	require.EqualValues(t, 3, utb.VoteCodec)
+	require.NotEqual(t, plain.Identity(), utb.Identity())
+
+	mixed := plain
+	mixed.VoteCodec = 3
+	require.ErrorIs(t, mixed.Validate(), q3format.ErrConfig, "revision 2 with vote codec 3")
+	mixed = utb
+	mixed.VoteCodec = 2
+	require.ErrorIs(t, mixed.Validate(), q3format.ErrConfig, "revision 3 with vote codec 2")
+	mixed = utb
+	mixed.SigningScheme = 1
+	require.ErrorIs(t, mixed.Validate(), q3format.ErrConfig)
+	mixed = plain
+	mixed.Revision = 4
+	require.ErrorIs(t, mixed.Validate(), q3format.ErrConfig)
+}
+
+// A history whose activation carries the UTB tuple signs that epoch (and only that epoch) with the version 3 envelope.
+func TestHistorySigningConfigCarriesTheUTBFlag(t *testing.T) {
+	f := q3fixture.New(t, q3fixture.Options{UTB: true})
+	h, err := q3format.NewHistory(f.Old)
+	require.NoError(t, err)
+	h, err = h.VerifyEnvelope(f.Envelope)
+	require.NoError(t, err)
+	before, err := h.Signing(1)
+	require.NoError(t, err)
+	require.False(t, before.UTB, "the genesis epoch has no tuple")
+	after, err := h.Signing(2)
+	require.NoError(t, err)
+	require.True(t, after.UTB)
+	require.EqualValues(t, 2, after.Scheme)
+
+	plain := q3fixture.New(t, q3fixture.Options{})
+	h, err = q3format.NewHistory(plain.Old)
+	require.NoError(t, err)
+	h, err = h.VerifyEnvelope(plain.Envelope)
+	require.NoError(t, err)
+	cfg, err := h.Signing(2)
+	require.NoError(t, err)
+	require.False(t, cfg.UTB)
+}

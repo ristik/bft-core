@@ -3,6 +3,7 @@ package handoffdelivery
 import (
 	"flag"
 	rctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
+	"github.com/unicitynetwork/bft-core/rootchain/consensus/votesig"
 	"github.com/unicitynetwork/bft-go-base/types/hex"
 	"os"
 	"reflect"
@@ -76,6 +77,11 @@ func excludedLeaf(path string) bool {
 		"Bundle.Proof.OptionalQC.SealSignatures{}",
 		"Bundle.Snapshot.Qc.SealSignatures{}",
 		"Bundle.Snapshot.CommitQc.SealSignatures{}",
+		// the trust-base endorsement of a UTB epoch's certificate: the entry is hashed, the endorsing signatures are a per-root signature set
+		"Bundle.Proof.CommitQC.UTB.Signatures{}",
+		"Bundle.Proof.OptionalQC.UTB.Signatures{}",
+		"Bundle.Snapshot.Qc.UTB.Signatures{}",
+		"Bundle.Snapshot.CommitQc.UTB.Signatures{}",
 		"Bundle.Snapshot.ShardInfo[].UC.UnicitySeal.Signatures{}",
 	} {
 		if path == p || path == p+"#keys" {
@@ -250,6 +256,16 @@ func TestPerturbingEachBundleLeafChangesTheIdentityExactlyWhenItIsHashed(t *test
 		b.Snapshot.Block.Payload.Version = 2
 		b.Snapshot.Block.Payload.PosControls = []rctypes.PosControl{{Network: 5, Op: rctypes.OpCloseLiability, OrderingEpoch: 2, OrderingRound: 9,
 			Close: &rctypes.CloseContext{ClosedEpoch: 1}, Data: make([]byte, 192)}}
+	}
+	// the envelope marker of a certificate: any populated value other than the version 3 envelope is refused by the codec, so keep the real one
+	qcs := []*rctypes.QuorumCert{b.Proof.CommitQC, b.Proof.OptionalQC, b.Snapshot.Qc, b.Snapshot.CommitQc}
+	if b.Snapshot.Block != nil {
+		qcs = append(qcs, b.Snapshot.Block.Qc)
+	}
+	for _, qc := range qcs {
+		if qc != nil {
+			qc.Envelope = votesig.EnvelopeUTB
+		}
 	}
 	want, err := semanticIdentityOf(b)
 	require.NoError(t, err)

@@ -5,6 +5,7 @@ import (
 	gocrypto "crypto"
 	"fmt"
 
+	"github.com/fxamacker/cbor/v2"
 	"github.com/unicitynetwork/bft-go-base/crypto"
 	"github.com/unicitynetwork/bft-go-base/types"
 	"github.com/unicitynetwork/bft-go-base/types/hex"
@@ -12,6 +13,7 @@ import (
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/trustbase"
 	drctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/votesig"
+	"github.com/unicitynetwork/bft-core/utbentry"
 )
 
 type VoteMsg struct {
@@ -29,6 +31,18 @@ type VoteMsg struct {
 	// UnicitySeal.SigBytes(), so that a certificate built from the votes keeps its native seal authentication. Absent on a
 	// non-committing vote and in the legacy form, whose single signature is over the seal bytes.
 	SealSignature hex.Bytes `cbor:"-" json:"sealSignature,omitempty"`
+	// Envelope is 0 for the historical wire forms and votesig.EnvelopeUTB for the envelope [3, inner, utb] of an epoch configured with
+	// Config.UTB. UTB is the voter's endorsement of the unsigned successor entry, present exactly on a vote that commits the outgoing handoff.
+	Envelope uint64            `cbor:"-" json:"-"`
+	UTB      *drctypes.UTBVote `cbor:"-" json:"utb,omitempty"`
+}
+
+// voteV3Wire is the version 3 envelope: [3, inner, utb|null], inner being the unchanged scheme 1 or 2 encoding of the same vote.
+type voteV3Wire struct {
+	_       struct{} `cbor:",toarray"`
+	Version uint64
+	Inner   cbor.RawMessage
+	UTB     *drctypes.UTBVote
 }
 
 // voteInfoV2Wire carries the signed round data, appending time on new votes.
@@ -72,6 +86,18 @@ type voteAnchorWire struct {
 }
 
 func (x *VoteMsg) MarshalCBOR() ([]byte, error) {
+	if x.Envelope == votesig.EnvelopeUTB {
+		inner := *x
+		inner.Envelope, inner.UTB = 0, nil
+		ib, err := inner.MarshalCBOR()
+		if err != nil {
+			return nil, err
+		}
+		return types.Cbor.Marshal(voteV3Wire{Version: votesig.EnvelopeUTB, Inner: ib, UTB: x.UTB})
+	}
+	if x.UTB != nil || x.Envelope != 0 {
+		return nil, fmt.Errorf("%w: envelope %d", votesig.ErrEnvelope, x.Envelope)
+	}
 	if x.Scheme == votesig.SchemeDomainBound {
 		if x.VoteInfo == nil {
 			return nil, fmt.Errorf("%w: scheme 2 vote has no vote info", votesig.ErrStatement)
@@ -90,6 +116,22 @@ func (x *VoteMsg) MarshalCBOR() ([]byte, error) {
 }
 
 func (x *VoteMsg) UnmarshalCBOR(data []byte) error {
+	if votesig.PeekEnvelopeUTB(data) {
+		var w voteV3Wire
+		if err := types.Cbor.Unmarshal(data, &w); err != nil {
+			return err
+		}
+		if w.Version != votesig.EnvelopeUTB || votesig.PeekEnvelopeUTB(w.Inner) {
+			return votesig.ErrEnvelope
+		}
+		var inner VoteMsg
+		if err := inner.UnmarshalCBOR(w.Inner); err != nil {
+			return err
+		}
+		inner.Envelope, inner.UTB = votesig.EnvelopeUTB, w.UTB
+		*x = inner
+		return nil
+	}
 	wrapped, err := votesig.PeekWrapper(data)
 	if err != nil {
 		return err
@@ -210,7 +252,62 @@ func (x *VoteMsg) verifyContext(tbs *trustbase.TrustBaseStore) error {
 	return nil
 }
 
+// Verify checks the vote by its epoch's rule: the envelope the epoch's configuration requires, the signatures of the scheme the epoch signs with and,
+// when the vote carries one, the trust-base endorsement.
 func (x *VoteMsg) Verify(tbs *trustbase.TrustBaseStore) error {
+	if x.VoteInfo != nil {
+		if cfg, err := tbs.SigningConfig(x.VoteInfo.Epoch); err == nil {
+			if cfg.UTB != (x.Envelope == votesig.EnvelopeUTB) {
+				return fmt.Errorf("%w: vote from '%s' envelope %d, epoch %d UTB=%v", votesig.ErrEnvelope, x.Author, x.Envelope, x.VoteInfo.Epoch, cfg.UTB)
+			}
+		}
+	}
+	if err := x.verifySignatures(tbs); err != nil {
+		return err
+	}
+	return x.verifyUTB(tbs)
+}
+
+// verifyUTB checks the endorsement a vote carries: a committing vote of the epoch before the entry's, for the configured network, signed by the
+// voter over exactly the unsigned entry bytes. That the entry is the one the committed state implies is checked where the executed block is known.
+func (x *VoteMsg) verifyUTB(tbs *trustbase.TrustBaseStore) error {
+	if x.UTB == nil {
+		return nil
+	}
+	bad := func(format string, a ...any) error {
+		return fmt.Errorf("%w: vote from '%s': "+format, append([]any{votesig.ErrUTB, x.Author}, a...)...)
+	}
+	cfg, err := tbs.SigningConfig(x.VoteInfo.Epoch)
+	if err != nil {
+		return err
+	}
+	if !cfg.UTB || x.Envelope != votesig.EnvelopeUTB {
+		return bad("outside a UTB epoch")
+	}
+	if len(x.LedgerCommitInfo.Hash) == 0 && x.LedgerCommitInfo.RootChainRoundNumber == 0 {
+		return bad("a non-committing vote carries one")
+	}
+	entry, err := utbentry.Decode(x.UTB.Unsigned)
+	if err != nil {
+		return bad("%v", err)
+	}
+	if entry.Epoch != x.VoteInfo.Epoch+1 || uint64(entry.NetworkID) != cfg.Network {
+		return bad("entry epoch %d network %d, vote epoch %d network %d", entry.Epoch, entry.NetworkID, x.VoteInfo.Epoch, cfg.Network)
+	}
+	if err := votesig.CheckSignatureShape(x.UTB.Signature); err != nil {
+		return bad("%v", err)
+	}
+	tb, err := tbs.GetByEpoch(x.VoteInfo.Epoch)
+	if err != nil {
+		return err
+	}
+	if _, err := tb.VerifySignature(x.UTB.Unsigned, x.UTB.Signature, x.Author); err != nil {
+		return bad("signature: %v", votesig.BadSignature(err))
+	}
+	return nil
+}
+
+func (x *VoteMsg) verifySignatures(tbs *trustbase.TrustBaseStore) error {
 	if x.Author == "" {
 		return fmt.Errorf("author is missing")
 	}
@@ -291,5 +388,19 @@ func (x *VoteMsg) verifyDomainBound(tbs *trustbase.TrustBaseStore, cfg votesig.C
 			return fmt.Errorf("vote from '%s' seal signature verification error: %w", x.Author, votesig.BadSignature(err))
 		}
 	}
+	return nil
+}
+
+// SignUTB endorses the unsigned successor entry with the voter's key and puts the vote in the version 3 envelope. It does not touch the vote's own
+// signatures, which are over their own statements.
+func (x *VoteMsg) SignUTB(signer crypto.Signer, unsigned []byte) error {
+	if signer == nil {
+		return errSignerIsNil
+	}
+	sig, err := signer.SignBytes(unsigned)
+	if err != nil {
+		return fmt.Errorf("failed to sign the trust-base entry: %w", err)
+	}
+	x.Envelope, x.UTB = votesig.EnvelopeUTB, &drctypes.UTBVote{Unsigned: bytes.Clone(unsigned), Signature: sig}
 	return nil
 }

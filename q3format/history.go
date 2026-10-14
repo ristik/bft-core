@@ -217,7 +217,7 @@ func (h *History) Signing(epoch uint64) (votesig.Config, error) {
 	if e.config == nil {
 		return votesig.Config{Scheme: votesig.SchemeLegacy, Network: h.network}, nil
 	}
-	return votesig.Config{Scheme: e.config.SigningScheme, Network: e.config.Network, Genesis: e.config.Genesis}, nil
+	return votesig.Config{Scheme: e.config.SigningScheme, Network: e.config.Network, Genesis: e.config.Genesis, UTB: e.config.UTB()}, nil
 }
 
 // LeaderPolicy is the leader selection policy of an epoch's rounds: "legacy" for a verified legacy epoch, the tuple's policy for a

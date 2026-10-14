@@ -52,6 +52,10 @@ type Config struct {
 	Scheme  uint64
 	Network uint64
 	Genesis [32]byte
+	// UTB says the epoch's votes and certificates use envelope version 3 and carry the signed trust-base endorsement of a handoff-committing
+	// round. It is part of the authenticated epoch configuration, never inferred from a message's shape: in a UTB epoch a version 1/2 vote or
+	// certificate is refused, and outside one a version 3 envelope is.
+	UTB bool
 }
 
 // Validate refuses an unknown scheme and, for scheme 2, an empty genesis identity.

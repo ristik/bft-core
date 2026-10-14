@@ -17,16 +17,15 @@ import (
 
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/unicitynetwork/bft-go-base/types"
-	"github.com/unicitynetwork/bft-go-base/types/hex"
 
-	"github.com/unicitynetwork/bft-core/evmassign"
 	"github.com/unicitynetwork/bft-core/evmroot"
 	"github.com/unicitynetwork/bft-core/internal/quorumweight"
+	"github.com/unicitynetwork/bft-core/utbentry"
 )
 
 // MaxMembers is the deployment's committee ceiling (the admitted 16-member profile). go-base's decoder bound is larger; a larger committee is never
 // admitted through the wire cap. A future profile raises this deliberately.
-const MaxMembers = evmassign.MaxValidators
+const MaxMembers = utbentry.MaxMembers
 
 var (
 	ErrFacts = errors.New("utb: invalid successor facts")
@@ -85,7 +84,7 @@ func FromProjection(tb *types.RootTrustBaseV1) SuccessorFacts {
 func BuildUnsigned(prev *types.RootTrustBaseV2, f SuccessorFacts) (*types.RootTrustBaseV2, error) {
 	prevID := make([]byte, types.TrustBaseV2IDLen)
 	if prev != nil {
-		if err := validateShape(prev); err != nil {
+		if err := utbentry.ValidateShape(prev); err != nil {
 			return nil, fmt.Errorf("%w: predecessor: %v", ErrChain, err)
 		}
 		if f.Network != uint64(prev.NetworkID) {
@@ -129,20 +128,10 @@ func BuildUnsigned(prev *types.RootTrustBaseV2, f SuccessorFacts) (*types.RootTr
 	}
 	e := &types.RootTrustBaseV2{Version: types.TrustBaseV2Version, NetworkID: types.NetworkID(f.Network), Epoch: f.Epoch, EpochStart: f.EpochStart,
 		RootNodes: nodes, QuorumThreshold: f.Threshold, StateHash: bytes.Clone(f.StateHash), ChangeRecordHash: bytes.Clone(f.ChangeRecordHash), PreviousEntryID: prevID}
-	if err := validateShape(e); err != nil {
+	if err := utbentry.ValidateShape(e); err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrFacts, err)
 	}
 	return e, nil
-}
-
-// validateShape is types.RootTrustBaseV2.Validate for an entry that may still lack its signatures: Validate requires a non-genesis entry to carry a
-// non-empty signature map, so an unsigned one is checked as a copy with a placeholder. Signatures are verified by VerifySuccessor, never here.
-func validateShape(e *types.RootTrustBaseV2) error {
-	probe := *e
-	if !probe.IsGenesis() && len(probe.Signatures) == 0 {
-		probe.Signatures = map[string]hex.Bytes{"-": nil}
-	}
-	return probe.Validate()
 }
 
 // Projection is the runtime V1 view of an entry for existing consumers that need a concrete *types.RootTrustBaseV1 (keys, weights, threshold, epoch

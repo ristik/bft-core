@@ -13,6 +13,7 @@ import (
 	abcrypto "github.com/unicitynetwork/bft-go-base/crypto"
 	"github.com/unicitynetwork/bft-go-base/types"
 
+	"github.com/unicitynetwork/bft-core/evmassign"
 	"github.com/unicitynetwork/bft-core/evmroot"
 	"github.com/unicitynetwork/bft-core/q3format"
 	"github.com/unicitynetwork/bft-core/utb"
@@ -194,4 +195,9 @@ func TestProjectionCarriesKeysAndWeightsButNotTheLineage(t *testing.T) {
 	require.NotEqual(t, id[:], h, "the projection's Hash is not the entry identity")
 	_, err = utb.Projection(&types.RootTrustBaseV2{})
 	require.Error(t, err)
+}
+
+// utbentry cannot import evmassign (it is a leaf for consensus types); its member limit is pinned here.
+func TestMemberLimitIsTheDeploymentsValidatorLimit(t *testing.T) {
+	require.Equal(t, evmassign.MaxValidators, utb.MaxMembers)
 }
