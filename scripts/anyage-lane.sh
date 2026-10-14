@@ -5,6 +5,7 @@
 #
 #   scripts/anyage-lane.sh --preflight     checks every pin, binary, checkout and tool and prints the step plan; starts NOTHING, takes no lock
 #   scripts/anyage-lane.sh --plan          prints the step plan only
+#   scripts/anyage-lane.sh --selftest      chain-free tests of the lane's own logic (slot derivations, the offline checker, the L2 shell checks with a stub chain)
 #   scripts/anyage-lane.sh --prep          dry run of the genesis side (ANYAGE_PREP_ONLY): P85 genesis, profile, identities, aggregator shard configurations and the
 #                                          bridge deployment derived from them; starts no reth, root, validator or aggregator; needs the same env as the run
 #   scripts/anyage-lane.sh                 the run: refuses unless the preflight is entirely ok; then the P85 runner under the devnet lock (owner "anyage")
@@ -107,6 +108,8 @@ lane_env() { export ANYAGE_LANE=1 P85_LOCK_OWNER=anyage P85_EVIDENCE_PREFIX=anya
 
 case "${1:-}" in
   --plan) plan ;;
+  --selftest) # the chain-free tests of the L2 shell logic (about two minutes: every stub call is a process)
+    export PATH="$HOME/.foundry/bin:$PATH"; anyage_selftest && ANYAGE_CHECK="$SCRIPT_DIR/anyage/registry_check.py" anyage_selftest_ack ;;
   --preflight) plan; echo; preflight ;;
   --prep)
     # A dry run of the genesis side. It takes the devnet lock (it writes test-nodes/ and ports are not touched, but the checkout is the lane's) and stops
@@ -125,5 +128,5 @@ case "${1:-}" in
     preflight || { echo "REFUSED: the preflight is not entirely ok; nothing was started." >&2; exit 3; }
     lane_env
     exec "$SCRIPT_DIR/p85-lane.sh" ;;
-  *) echo "usage: $0 [--plan|--preflight|--prep]" >&2; exit 2 ;;
+  *) echo "usage: $0 [--plan|--preflight|--selftest|--prep]" >&2; exit 2 ;;
 esac
