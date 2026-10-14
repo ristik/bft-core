@@ -332,6 +332,44 @@ func TestConfigurationsPUTIsRefusedUnderTheHandoffProfile(t *testing.T) {
 	}
 }
 
+// Under the handoff profile PUT /api/v1/trustbases refuses before it reads the body (valid, malformed or oversize) and writes nothing; without it the
+// legacy handler is untouched.
+func TestTrustBasesPUTIsRefusedUnderTheHandoffProfile(t *testing.T) {
+	added := 0
+	add := func(types.RootTrustBase) error { added++; return nil }
+	bodies := map[string]io.Reader{"empty": strings.NewReader(""), "malformed": strings.NewReader("\xff\x00not cbor"), "oversize": io.LimitReader(zeroReader{}, 64<<20)}
+	for name, body := range bodies {
+		t.Run(name, func(t *testing.T) {
+			cr := &countingBody{Reader: body}
+			req := httptest.NewRequest(http.MethodPut, "/api/v1/trustbases", cr)
+			rec := httptest.NewRecorder()
+			trustBasesPutHandler(true, add)(rec, req)
+			require.Equal(t, http.StatusForbidden, rec.Code)
+			require.Zero(t, cr.n, "the body is not read")
+			require.Zero(t, added, "nothing was stored")
+		})
+	}
+	rec := httptest.NewRecorder()
+	trustBasesPutHandler(false, add)(rec, httptest.NewRequest(http.MethodPut, "/api/v1/trustbases", strings.NewReader("junk")))
+	require.Equal(t, http.StatusBadRequest, rec.Code, "the legacy path still parses the body")
+	require.Zero(t, added)
+}
+
+type zeroReader struct{}
+
+func (zeroReader) Read(p []byte) (int, error) { clear(p); return len(p), nil }
+
+type countingBody struct {
+	io.Reader
+	n int
+}
+
+func (c *countingBody) Read(p []byte) (int, error) {
+	n, err := c.Reader.Read(p)
+	c.n += n
+	return n, err
+}
+
 // A restart with an edited aggregator configuration file is refused under the handoff profile, like the EVM one: every shard
 // configuration after genesis comes from committed history, so a local edit cannot diverge one root.
 func TestLoadShardConfsRefusesAnEditedAggregatorConfigurationUnderTheHandoffProfile(t *testing.T) {

@@ -450,7 +450,7 @@ func rootNodeRun(ctx context.Context, flags *rootNodeRunFlags) error {
 			mux.Handle("/api/v1/metrics", promhttp.HandlerFor(pr.(prometheus.Gatherer), promhttp.HandlerOpts{MaxRequestsInFlight: 1}))
 		}
 		mux.HandleFunc("PUT /api/v1/configurations", configurationsHandler(flags.Profile2, orchestration.AddShardConfig))
-		mux.HandleFunc("PUT /api/v1/trustbases", putTrustBaseHandler(trustBaseStore.Store))
+		mux.HandleFunc("PUT /api/v1/trustbases", trustBasesPutHandler(flags.Profile2, trustBaseStore.Store))
 		mux.HandleFunc("GET /api/v1/trustbases", getTrustBaseHandler(trustBaseStore, obs))
 		mux.HandleFunc("GET /api/v1/roundInfo", getRoundInfoHandler(cm.GetState, obs))
 		if flags.Profile2 {
@@ -605,6 +605,18 @@ func parseUint64WithDefault(q url.Values, key string, defaultValue uint64) (uint
 	}
 
 	return v, nil
+}
+
+// trustBasesPutHandler serves PUT /api/v1/trustbases. Under the unified (handoff) profile it refuses every write before it reads the body and is
+// not given the store's append at all: trust bases after genesis come only from the verified transition installer, so a valid-looking future epoch
+// cannot be pre-stored through the operator interface.
+func trustBasesPutHandler(handoffProfile bool, add func(types.RootTrustBase) error) http.HandlerFunc {
+	if handoffProfile {
+		return func(w http.ResponseWriter, _ *http.Request) {
+			http.Error(w, "trust bases change only through a committed root handoff", http.StatusForbidden)
+		}
+	}
+	return putTrustBaseHandler(add)
 }
 
 func putTrustBaseHandler(addTrustBaseFn func(trustBase types.RootTrustBase) error) http.HandlerFunc {
