@@ -10,12 +10,13 @@ import (
 
 	"github.com/unicitynetwork/bft-go-base/types"
 
+	"github.com/unicitynetwork/bft-core/utb"
 	"github.com/unicitynetwork/bft-core/utbstore"
 )
 
 // openUTBStore opens the permanent store of finalized signed trust-base entries, rooted in the genesis entry file and its pinned EntryID. The profile
 // needs the handoff profile (the entries are produced by handoffs) and a pin: a genesis file alone authenticates nothing.
-func (f *rootNodeRunFlags) openUTBStore() (*utbstore.Store, func(), error) {
+func (f *rootNodeRunFlags) openUTBStore(genesisTrustBase *types.RootTrustBaseV1) (*utbstore.Store, func(), error) {
 	if !f.Profile2 {
 		return nil, nil, errors.New("--utb-genesis requires profile 2")
 	}
@@ -36,6 +37,23 @@ func (f *rootNodeRunFlags) openUTBStore() (*utbstore.Store, func(), error) {
 	}
 	var pin [types.TrustBaseV2IDLen]byte
 	copy(pin[:], pinBytes)
+	// the pinned genesis entry must be the one the root's own genesis trust base builds, so a mismatch is a start-up error and not a surprise at the
+	// first handoff (when the old committee would endorse a successor linked to an entry no other component derives)
+	want, err := utb.BuildUnsigned(nil, utb.FromProjection(genesisTrustBase))
+	if err != nil {
+		return nil, nil, fmt.Errorf("the UTB genesis entry cannot be derived from the genesis trust base: %w", err)
+	}
+	wantID, err := want.EntryID()
+	if err != nil {
+		return nil, nil, err
+	}
+	gotID, err := genesis.EntryID()
+	if err != nil {
+		return nil, nil, err
+	}
+	if wantID != gotID || wantID != pin {
+		return nil, nil, fmt.Errorf("the UTB genesis entry does not match the genesis trust base: the trust base builds %x, the file is %x, the pin is %x", wantID, gotID, pin)
+	}
 	db, err := f.initDB(f.UTBEntriesDBFile, rootUTBEntriesDBFileName)
 	if err != nil {
 		return nil, nil, err

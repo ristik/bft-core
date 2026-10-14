@@ -45,7 +45,7 @@ func TestNewRootNodeLibP2PNetwork_Ok(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, net)
 	require.Equal(t, cap(net.ReceivedChannel()), 1000)
-	require.Equal(t, 2, len(net.sendProtocols))
+	require.Equal(t, 4, len(net.sendProtocols), "the legacy and the version 2 certificate protocols, two entries each")
 }
 
 func Test_newLibP2PNetwork(t *testing.T) {

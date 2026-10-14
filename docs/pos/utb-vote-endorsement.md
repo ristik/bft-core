@@ -38,6 +38,13 @@ genesis or Q3 tuple says so (fresh deployment, new genesis: owner §29).
   UTB epoch a committing certificate carries exactly the entry the node's own executed state implies, and no certificate carries one the state does not
   imply. Applied to live proposals and to the replay of recovery blocks (both go through `ProcessQc`).
 
+## What the endorsement is not covered by
+
+The endorsement sits outside the inner vote (the vote's own signatures do not cover it), so a relay can strip it from a vote. That costs liveness only: the
+vote then regroups as "no endorsement", and the binding refuses a handoff-committing certificate without one. It cannot be forged or swapped, because the
+endorsement is the voter's own signature over the entry bytes, which the register groups by (EntryID). Protocol revision 3 (`Q3ConfigUTB`) is admissible from
+the PR that wires the entry store (PR4): before it nothing produces the tuple and the manager fails closed without the store.
+
 ## Not in this PR (PR4)
 
 Retaining the finalized entry and certificate with the commit unit and the entry store feed (`utbstore`), the installers' verification of the retained entry,

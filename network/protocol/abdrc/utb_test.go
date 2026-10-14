@@ -2,6 +2,7 @@ package abdrc
 
 import (
 	"bytes"
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -212,10 +213,25 @@ func TestUTBCertificateNegatives(t *testing.T) {
 	check("another entry than the one endorsed", func(qc *drctypes.QuorumCert) { qc.UTB.Unsigned = f.entry(t, 3, 6) }, votesig.ErrUTB)
 	check("an entry of the wrong epoch", func(qc *drctypes.QuorumCert) { qc.UTB.Unsigned = f.entry(t, 4, 5) }, votesig.ErrUTB)
 	check("garbage as the entry", func(qc *drctypes.QuorumCert) { qc.UTB.Unsigned = []byte{1} }, votesig.ErrUTB)
-	check("an endorsement on a non-committing certificate", func(qc *drctypes.QuorumCert) {
-		*qc = *f.utbQC(t, []string{"1", "2", "3"}, false, nil)
-		qc.UTB = &drctypes.UTBCertificate{Unsigned: entry, Signatures: map[string]hex.Bytes{"1": nil, "2": nil, "3": nil}}
-	}, votesig.ErrUTB)
+	t.Run("a properly endorsed entry on a non-committing certificate", func(t *testing.T) {
+		// every endorsement is valid and by a voter: only the committing rule can refuse it
+		qc := f.utbQC(t, []string{"1", "2", "3"}, false, nil)
+		qc.UTB = &drctypes.UTBCertificate{Unsigned: entry, Signatures: map[string]hex.Bytes{}}
+		for _, id := range []string{"1", "2", "3"} {
+			sig, err := f.signers[id].SignBytes(entry)
+			require.NoError(t, err)
+			qc.UTB.Signatures[id] = sig
+		}
+		require.NoError(t, f.utbQC(t, []string{"1", "2", "3"}, false, nil).VerifyWith(f.store), "premise: the certificate is valid without the endorsement")
+		err := qc.VerifyWith(f.store)
+		require.ErrorIs(t, err, votesig.ErrUTB)
+		require.ErrorContains(t, err, "non-committing")
+	})
+	t.Run("a commit round with an empty hash is still committing", func(t *testing.T) {
+		v := f.utbVote(t, "1", true, entry)
+		v.LedgerCommitInfo.Hash = nil
+		require.NotContains(t, fmt.Sprint(v.Verify(f.store)), "non-committing")
+	})
 	check("a version 1/2 certificate in a UTB epoch", func(qc *drctypes.QuorumCert) { qc.Envelope, qc.UTB = 0, nil }, votesig.ErrEnvelope)
 	t.Run("a version 3 certificate outside a UTB epoch", func(t *testing.T) {
 		g := newDBFixture(t)
@@ -240,4 +256,13 @@ func TestUTBCertificateNegatives(t *testing.T) {
 		var back drctypes.QuorumCert
 		require.ErrorIs(t, types.Cbor.Unmarshal(forged, &back), votesig.ErrUTB)
 	})
+}
+
+func TestUTBVoteOfAnEpochWithoutAConfigurationIsRefusedByTheEnvelopeRule(t *testing.T) {
+	f, entry := utbFixture(t)
+	v := f.utbVote(t, "1", true, entry)
+	v.VoteInfo.Epoch = 9 // an epoch the store holds no trust base (so no signing configuration) for
+	err := v.Verify(f.store)
+	require.ErrorIs(t, err, votesig.ErrEnvelope)
+	require.ErrorContains(t, err, "no signing configuration")
 }

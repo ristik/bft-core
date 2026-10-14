@@ -22,6 +22,7 @@ import (
 	"github.com/unicitynetwork/bft-core/network"
 	"github.com/unicitynetwork/bft-core/network/protocol/certification"
 	"github.com/unicitynetwork/bft-core/network/protocol/handshake"
+	"github.com/unicitynetwork/bft-core/utbstore"
 )
 
 /*
@@ -59,6 +60,16 @@ type BFTClientOptions struct {
 	// committed assignment steps (the followed bundles replayed before the node is built). Genesis is always present; an entry that
 	// contradicts it is refused. Anything a persisted certificate, a peer or the execution client claims does not belong here.
 	InstalledShardConfs map[uint64][]byte
+
+	// UTBStore, when set, receives the signed trust-base entries a version 2 certification response carries: each is authenticated from the predecessor
+	// the store already holds (strictly, by the old committee's quorum) and appended; an invalid or conflicting entry is dropped and never installed. A
+	// client without a store ignores the entries and answers its certificates exactly as before.
+	UTBStore *utbstore.Store
+	// OnTrustBaseGap is called when an attached entry does not directly follow the store's tip (epochs were missed, or the store is behind): the
+	// consumer fetches the missing range from a root (GetTrustBase). have is the store's tip epoch, got the offered entry's epoch.
+	OnTrustBaseGap func(have, got uint64)
+	// OnTrustBaseEntry is called for each entry newly appended, in epoch order, so a consumer can derive the committee it names (utb.Projection).
+	OnTrustBaseEntry func(entry *types.RootTrustBaseV2)
 }
 
 // startupHandshakeDelay is the wait before startup handshake attempt n (0-based): the base interval for the first
@@ -734,6 +745,7 @@ func (c *BFTClient) coalesceBufferedCertificationResponses(ctx context.Context, 
 		queued = append(queued, entry)
 	}
 	appendMessage := func(message any) {
+		message = c.ingestTrustBaseUpdates(ctx, message) // the authority update first, then the certificate under it
 		entry := queuedCertificationMessage{message: message}
 		cr, ok := message.(*certification.CertificationResponse)
 		if ok && cr != nil {
