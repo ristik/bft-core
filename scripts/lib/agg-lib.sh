@@ -12,6 +12,7 @@ case "$aggShards" in 1) aggShardIDs=(0x80) ;; 2) aggShardIDs=(0x40 0xc0) ;; *) e
 # agg_dir K (1-based) is test-nodes/agg for one shard (the layout of the single-shard lane) and test-nodes/agg1, agg2 for two.
 agg_dir() { if [ "$aggShards" = 1 ]; then echo test-nodes/agg; else echo "test-nodes/agg$1"; fi; }
 agg_conf() { if [ "$aggShards" = 1 ]; then echo "test-nodes/shard-conf-${aggPartition}_0.json"; else echo "test-nodes/shard-conf-${aggPartition}_0-s$1.json"; fi; }
+ANYAGE_SHARD_CONF_FN=agg_conf   # the callback scripts/lib/m2-handoff-lib.sh m2_start_root uses under ANYAGE_LANE
 # aggregator-go (internal/config/config.go Validate): a shard conf with a non-empty shard ID REQUIRES SHARDING_MODE=bft-shard (with BFT_ENABLED,
 # the shard's own conf/PDR and signing key, and SHARDING_CHILD_SHARD_ID unset); the empty shard 0x80 of a one-shard partition REQUIRES standalone.
 agg_mode() { if [ "$aggShards" = 1 ]; then echo standalone; else echo bft-shard; fi; }

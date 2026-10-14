@@ -18,7 +18,7 @@ on:
       - 'cmd/q4replay/**'
       - 'cmd/q4report/**'
       - 'scripts/q4-*'
-      - 'scripts/lib/q4-lib.sh'
+      - 'scripts/lib/**'
       - 'docs/pos/q4-*'
       - 'Makefile'
       - 'go.mod'
