@@ -71,19 +71,18 @@ func (g *gen) encoding(seed string) {
 	u := cs.get(1, "")
 	u2 := cs.get(2, "0")
 	c := claimOf(u)
-	req := func(cl ...claimSpec) []byte { return newRequest(cl...).wire() }
-	malformed := func(id, desc, want string, b []byte) { g.bad(id, fam, opUC, desc, b, &pre, want) }
+	malformed := func(id, desc, want string, b []byte) { g.bad(id, fam, desc, b, &pre, want) }
 	mal := func(id, desc, want string, cl claimSpec) { malformed(id, desc, want, req(cl)) }
 
 	// positive limits of the path bounds.
 	for _, depth := range []int{255, 256} {
 		shard := string(bytes.Repeat([]byte{'1'}, depth))
 		x := customUC(f, 9, shard, randSibs(seed, depth), nil, q)
-		g.ok(fmt.Sprintf("paths.shard-depth-%d.ok", depth), fam, opUC, fmt.Sprintf("shard of %d bits with %d siblings", depth, depth),
-			req(claimOf(x)), pre, shapeOf(x), "", &x.seal, nil)
+		g.ok(fmt.Sprintf("paths.shard-depth-%d.ok", depth), fam, fmt.Sprintf("shard of %d bits with %d siblings", depth, depth),
+			req(claimOf(x)), pre, "", &x.seal, nil)
 	}
 	x := customUC(f, 9, "", nil, randSteps(seed, 32, 9), q)
-	g.ok("paths.unicity-steps-32.ok", fam, opUC, "unicity path of 32 steps", req(claimOf(x)), pre, shapeOf(x), "", &x.seal, nil)
+	g.ok("paths.unicity-steps-32.ok", fam, "unicity path of 32 steps", req(claimOf(x)), pre, "", &x.seal, nil)
 
 	// bit-string and header level.
 	cc := c
@@ -100,8 +99,11 @@ func (g *gen) encoding(seed string) {
 	mal("enc.shard.34-bytes", "shard encoding of 34 bytes", "ErrShardTooDeep", cc)
 
 	r := newRequest(c)
-	r.version = 2
-	malformed("enc.header.version", "unknown version", "ErrVersion", r.wire())
+	r.version = 1
+	malformed("enc.header.version-1", "the retired v1 certificate call", "ErrVersion", r.wire())
+	r = newRequest(c)
+	r.version = 3
+	malformed("enc.header.version-3", "unknown version", "ErrVersion", r.wire())
 	r = newRequest(c)
 	r.flags = 1
 	malformed("enc.header.flags", "nonzero flags", "ErrFlags", r.wire())
@@ -109,8 +111,7 @@ func (g *gen) encoding(seed string) {
 	r = newRequest(c)
 	r.count = &zero
 	malformed("enc.header.count-zero", "count 0", "ErrCount", r.wire())
-	malformed("enc.header.uc-count-2", "UC_V1 with two claims", "ErrCount", req(c, claimOf(u2)))
-	malformed("enc.header.truncated", "input shorter than the header", "ErrTruncated", []byte{1, 0, 0})
+	malformed("enc.header.truncated", "input shorter than the header", "ErrTruncated", []byte{2, 0, 0})
 	r = newRequest(c)
 	r.trailing = []byte{0}
 	malformed("enc.trailing", "one trailing byte", "ErrTrailingBytes", r.wire())
@@ -159,20 +160,20 @@ func (g *gen) encoding(seed string) {
 	// path perturbations on a two-shard certificate.
 	y := u2
 	y.shardSibs = nil
-	g.ok("paths.shard.truncated-sibling", fam, opUC, "sibling count mismatch is false", req(claimOf(y)), pre, shapeOf(y), "ErrNativeInvalid", nil, nil)
+	mal("paths.shard.truncated-sibling", "fewer shard siblings than the shard depth (exactly d is a limit)", "ErrShardSiblings", claimOf(y))
 	y = u2
 	y.shardSibs = append(append([][32]byte{}, u2.shardSibs...), u2.shardSibs[0])
-	g.ok("paths.shard.extra-sibling", fam, opUC, "sibling count mismatch is false", req(claimOf(y)), pre, shapeOf(y), "ErrNativeInvalid", nil, nil)
+	mal("paths.shard.extra-sibling", "more shard siblings than the shard depth", "ErrShardSiblings", claimOf(y))
 	y = u2
 	y.shardSibs = [][32]byte{flip32(u2.shardSibs[0])}
-	g.ok("paths.shard.sibling-value", fam, opUC, "shard sibling hash flipped", req(claimOf(y)), pre, shapeOf(y), "ErrTreeRoot", nil, nil)
+	g.ok("paths.shard.sibling-value", fam, "shard sibling hash flipped", req(claimOf(y)), pre, "ErrTreeRoot", nil, nil)
 	y = u
 	y.steps = append([]pathStep{}, u2.steps...)
-	g.ok("paths.unicity.wrong-path", fam, opUC, "unicity path of another partition used for partition 1", req(claimOf(y)), pre, shapeOf(y), "ErrTreeRoot", nil, nil)
+	g.ok("paths.unicity.wrong-path", fam, "unicity path of another partition used for partition 1", req(claimOf(y)), pre, "ErrTreeRoot", nil, nil)
 	y = u2
 	y.steps = append([]pathStep{}, u2.steps...)
 	y.steps[0].hash = flip32(y.steps[0].hash)
-	g.ok("paths.unicity.step-value", fam, opUC, "unicity path step hash flipped", req(claimOf(y)), pre, shapeOf(y), "ErrTreeRoot", nil, nil)
+	g.ok("paths.unicity.step-value", fam, "unicity path step hash flipped", req(claimOf(y)), pre, "ErrTreeRoot", nil, nil)
 
 	// bounds at limit+1.
 	y = customUC(f, 9, string(bytes.Repeat([]byte{'0'}, 256)), randSibs(seed, 257), nil, q)
@@ -181,11 +182,11 @@ func (g *gen) encoding(seed string) {
 	mal("bound.unicity-steps-33", "33 unicity path steps", "ErrTooManySteps", claimOf(y))
 	y = u
 	var many []entry
-	for i := 0; i < 65; i++ {
+	for i := 0; i < 17; i++ {
 		many = append(many, entry{fmt.Sprintf("s%02d", i), cBytes(bytes.Repeat([]byte{byte(i + 1)}, 64))})
 	}
 	y.sealBytes = u.seal.fields(cTextMap(many))
-	mal("bound.signatures-65", "65 signatures in the seal", "ErrTooManySigs", claimOf(y))
+	mal("bound.signatures-17", "17 signatures in the seal", "ErrTooManySigs", claimOf(y))
 	y = u
 	y.sealBytes = u.seal.fields(cTextMap([]entry{{string(bytes.Repeat([]byte{'a'}, 129)), cBytes(u.seal.sigs[0].val)}}))
 	mal("bound.seal-node-id-129", "signer ID of 129 bytes in the seal", "ErrNodeIDTooLong", claimOf(y))
