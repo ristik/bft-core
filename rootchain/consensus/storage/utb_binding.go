@@ -14,6 +14,10 @@ import (
 // state implies. The certificate is neither inserted nor committed, so nothing is published or installed from it.
 var ErrUTBBinding = errors.New("certificate endorsement does not match the committed state")
 
+// ErrUTBAlreadyCommitted is returned by HandoffCommittedAt for a round below the tree's committed root: it was bound when it committed and its block is no
+// longer held, so a certificate that commits it has nothing left to bind or to retain; the commit itself refuses it (ErrCommitFailed), as it always did.
+var ErrUTBAlreadyCommitted = errors.New("the committed round is below the committed root")
+
 // UTBBinding is the contextual check of a certificate before it is applied: the cryptographic checks of the certificate do not authorize a state
 // transition without the execution context that says whether, and which, successor entry it must carry.
 type UTBBinding func(qc *rctypes.QuorumCert) error
@@ -38,8 +42,10 @@ func NewUTBBinding(cfgOf func(epoch uint64) (votesig.Config, error), entryOf fun
 		var want []byte
 		if seal.RootChainRoundNumber != 0 {
 			committed := &rctypes.RoundInfo{RoundNumber: seal.RootChainRoundNumber, Epoch: seal.Epoch, CurrentRootHash: seal.Hash, Timestamp: seal.Timestamp}
-			if want, err = entryOf(committed, qc.VoteInfo.Epoch); err != nil {
-				return fmt.Errorf("%w: committed round %d: %w", ErrUTBBinding, seal.RootChainRoundNumber, err)
+			if want, err = entryOf(committed, qc.VoteInfo.Epoch); errors.Is(err, ErrUTBAlreadyCommitted) {
+				return err // not a refusal: ProcessQc skips the binding and the retention and lets the commit decide
+			} else if err != nil {
+				return fmt.Errorf("%w: committed round %d: %v", ErrUTBBinding, seal.RootChainRoundNumber, err)
 			}
 		}
 		switch {
@@ -63,6 +69,9 @@ func (x *BlockStore) SetUTBBinding(b UTBBinding) { x.utbBinding = b }
 func (x *BlockStore) HandoffCommittedAt(round, epoch uint64, rootHash []byte) (record evmroot.OrderedHandoffRecord, ok bool, err error) {
 	block, err := x.blockTree.FindBlock(round)
 	if err != nil {
+		if root := x.blockTree.Root(); root != nil && round < root.GetRound() {
+			return record, false, fmt.Errorf("%w: round %d, root %d", ErrUTBAlreadyCommitted, round, root.GetRound())
+		}
 		return record, false, err
 	}
 	if block == nil || block.BlockData == nil || block.BlockData.Epoch != epoch || !bytes.Equal(block.RootHash, rootHash) {

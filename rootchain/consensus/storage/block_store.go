@@ -301,7 +301,8 @@ func (x *BlockStore) ProcessQc(qc *rctypes.QuorumCert) ([]*certification.Certifi
 	}
 	// the execution context decides whether, and which, endorsement a certificate must carry: before anything is inserted, committed or published
 	if x.utbBinding != nil {
-		if err := x.utbBinding(qc); err != nil {
+		if err := x.utbBinding(qc); err != nil && !errors.Is(err, ErrUTBAlreadyCommitted) {
+			// (a QC that commits a round the tree has pruned, as recovery replays one, is not refused here: the commit below refuses it as it always did)
 			return nil, err
 		}
 	}

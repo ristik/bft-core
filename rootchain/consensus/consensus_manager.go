@@ -36,6 +36,7 @@ import (
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/storage"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/trustbase"
 	drctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
+	"github.com/unicitynetwork/bft-core/rootchain/consensus/votesig"
 	"github.com/unicitynetwork/bft-core/trusthistorystore"
 )
 
@@ -113,6 +114,7 @@ type (
 		frontier         *frontierSampler
 		recoveryProfile2 bool
 		utbPrevious      func(epoch uint64) (*types.RootTrustBaseV2, error)
+		utbConfig        func(epoch uint64) (votesig.Config, error) // test seam: the authenticated signing configuration the binding consults; nil is the trust base store's
 		recoveryHistory  *trusthistorystore.Store
 		posPrefetching   atomic.Int32
 		posQueue         posSubmissions                   // submitted Retirement and RejectResult controls waiting for a leader
@@ -336,7 +338,7 @@ func NewConsensusManager(
 		safetyOptions = append(safetyOptions, WithUTB(func(committed *drctypes.RoundInfo, epoch uint64) ([]byte, error) {
 			return UTBSuccessor{State: manager.blockStore, Previous: optional.UTBPrevious}.Entry(committed, epoch)
 		}))
-		bStore.SetUTBBinding(utbBindingFor(trustBaseStore, bStore, optional.UTBPrevious))
+		bStore.SetUTBBinding(utbBindingFor(trustBaseStore.SigningConfig, bStore, optional.UTBPrevious))
 	}
 	if optional.Q3 != nil {
 		safetyOptions = append(safetyOptions, WithActivationGate(optional.Q3))
@@ -1720,7 +1722,7 @@ func (x *ConsensusManager) onStateResponse(ctx context.Context, rsp *abdrc.State
 	// the replacement store executes the recovery blocks and then the live ones: it needs the control collaborators of the one it replaces
 	blockStore.SetPosServices(x.blockStore.PosServices())
 	if x.utbPrevious != nil {
-		blockStore.SetUTBBinding(utbBindingFor(x.trustBaseStore, blockStore, x.utbPrevious))
+		blockStore.SetUTBBinding(utbBindingFor(x.utbSigningConfig(), blockStore, x.utbPrevious))
 	}
 	recoveryRound := blockStore.GetHighQc().GetRound()
 	if a := blockStore.RootAnchor(); a != nil && recoveryRound < a.Slot {
@@ -2150,4 +2152,12 @@ func (c committeeMembership) Member(epoch uint64) error {
 		}
 	}
 	return fmt.Errorf("%w: epoch %d", ErrNotAMember, epoch)
+}
+
+// utbSigningConfig is where the binding reads an epoch's signing configuration from.
+func (x *ConsensusManager) utbSigningConfig() func(uint64) (votesig.Config, error) {
+	if x.utbConfig != nil {
+		return x.utbConfig
+	}
+	return x.trustBaseStore.SigningConfig
 }
