@@ -651,15 +651,21 @@ p85_run_lane() {
   read -r h3_slot_shard h3_slot_root h3_slot_conf h3_slot_cursor < <(H3_SLOT_LAYOUT=3 go run ./scripts/h3slots)
   echo "=== P85 recovery lane: PoS genesis (K = 4 entities) -> primary J = K + joiner -> J stalls -> derived recovery to K ==="
   echo "NOTE: every validator signs through its own signing authority, including the P85 EVM possession proofs (SignElectionPoP) and the delegation possession (SignDelegationPossession)."
+  if [ "${ANYAGE_LANE:-0}" = 1 ]; then
+    # the any-age final lane (briefs/anyage-final-lane-plan.md): the same P85 steps with the bridge checkpoints between them
+    source scripts/lib/agg-lib.sh; source scripts/lib/anyage-lib.sh
+    P85_STEPS="p85_baseline anyage_step_setup p85_joiner_nodes p85_joiner_onboard p85_election_reserved p85_proofs anyage_step_l1b p85_handoff p85_install_activation anyage_step_frozen p85_j_stalls p85_recovery p85_resolved anyage_step_l2 anyage_step_l1c p85_restarts"
+  fi
   [ "${P85_MODE:-}" != overbound ] || { P85_JOINER_UNITS=3; P85_STEPS="p85_baseline p85_joiner_nodes p85_joiner_onboard p85_election_refused"; }
   for s in $P85_STEPS; do p85_step "$s" "$s"; done
   echo "P85 recovery lane: all steps PASSED"
+  if [ "${ANYAGE_LANE:-0}" = 1 ]; then echo "any-age final lane: all steps PASSED"; fi
   q3_teardown
 }
 # Sourcing this file only defines the steps. The lane runs when the runner (scripts/p85-lane.sh, under the devnet lock) asks for it, and only while
 # the lock is that runner's: a shell that sources the file to read or test the functions must not start, restart or tear down any node.
 p85_lane_may_run() {
   [ "${P85_LANE_LOCKED:-0}" = 1 ] && [ "${P85_LANE_DEFINE_ONLY:-0}" != 1 ] || return 1
-  [ "$(cat "${DEVNET_LOCK_DIR:-$PWD/../.devnet-lock}/owner" 2>/dev/null)" = "p85-recovery" ]
+  case "$(cat "${DEVNET_LOCK_DIR:-$PWD/../.devnet-lock}/owner" 2>/dev/null)" in p85-recovery) ;; anyage) [ "${ANYAGE_LANE:-0}" = 1 ] ;; *) return 1 ;; esac
 }
 if p85_lane_may_run; then p85_run_lane; fi
