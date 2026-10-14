@@ -242,7 +242,8 @@ type tvMeasurement struct {
 }
 
 // tvEnvelope is one run as a projection fixture for the TS and Rust projections: from cfg, op and envelope, a projection must
-// reproduce the request, the grouping, the item count and the gate; anchors gives each anchor's TokenWorld label.
+// reproduce the request, the grouping, the item count and the gate from the kernel's leaves; anchors gives each anchor's TokenWorld
+// label.
 type tvEnvelope struct {
 	Scenario string         `json:"scenario"`
 	Op       uint8          `json:"op"`
@@ -252,7 +253,14 @@ type tvEnvelope struct {
 	Anchors  []string       `json:"anchors"`
 	Grouping b1ref.Grouping `json:"grouping"`
 	Gate     map[string]any `json:"gate"`
-	Leaves   []string       `json:"leafSids"`
+	Leaves   []tvLeaf       `json:"leaves"`
+}
+
+// tvLeaf is one kernel leaf of the run's token, in leaf order: what the kernel exports for planning, time checks and membership.
+type tvLeaf struct {
+	SID           string `json:"sid"`
+	Value         string `json:"value"`
+	ReferenceTime uint64 `json:"referenceTime"`
 }
 
 const (
@@ -321,7 +329,7 @@ func TestTokenvecThroughTheBridgeProjection(t *testing.T) {
 				e.Anchors = append(e.Anchors, fmt.Sprintf("epoch %d round %d shard %q", a.Epoch, a.Round, a.Shard))
 			}
 			for _, l := range run.res.Leaves {
-				e.Leaves = append(e.Leaves, h32(l.SID))
+				e.Leaves = append(e.Leaves, tvLeaf{SID: h32(l.SID), Value: h32(l.Value), ReferenceTime: l.ReferenceTime})
 			}
 			envs = append(envs, e)
 		})

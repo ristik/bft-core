@@ -32,10 +32,22 @@
         "steps": 10,
         "total": 2159298
       },
-      "leafSids": [
-        "43fddd42ae2288da48e310fbca1c4ff491ad5abacabf6346e0e767c96bc4155d",
-        "b65eda33c99ff5ccfaa3d882bf9bf14c601f948d785b1895beebcf2ff8b9c87b",
-        "26bcbb19029ceb8cf9f2246a380b6297708da9aff5da70384b3faedb7108b7b0"
+      "leaves": [
+        {
+          "sid": "43fddd42ae2288da48e310fbca1c4ff491ad5abacabf6346e0e767c96bc4155d",
+          "value": "8f0008ba9d63dae0f5a201d296148c7bc10d57ea9ccc02b77efe9f23ede7aa62",
+          "referenceTime": 1681974583
+        },
+        {
+          "sid": "b65eda33c99ff5ccfaa3d882bf9bf14c601f948d785b1895beebcf2ff8b9c87b",
+          "value": "731a16143f648f604bed4f168b4ee07fe165475b23ba64eb13980b8ec7afce4d",
+          "referenceTime": 1681977583
+        },
+        {
+          "sid": "26bcbb19029ceb8cf9f2246a380b6297708da9aff5da70384b3faedb7108b7b0",
+          "value": "e25df4c451286184d59094e6c42354d0a26a85118f65f3a8158dd496ac8f7c08",
+          "referenceTime": 1681981083
+        }
       ]
     },
     {
@@ -69,9 +81,17 @@
         "steps": 9,
         "total": 1864002
       },
-      "leafSids": [
-        "43fddd42ae2288da48e310fbca1c4ff491ad5abacabf6346e0e767c96bc4155d",
-        "7362b6bda48a32afb09a282d03bcbc47655032c021b9985eb72a3263c49b221f"
+      "leaves": [
+        {
+          "sid": "43fddd42ae2288da48e310fbca1c4ff491ad5abacabf6346e0e767c96bc4155d",
+          "value": "ca2e55b3d753df27cc14be875a2dd54ba66c053364ef93ed5b597212f927615c",
+          "referenceTime": 1681975583
+        },
+        {
+          "sid": "7362b6bda48a32afb09a282d03bcbc47655032c021b9985eb72a3263c49b221f",
+          "value": "13cca28d328387a9773c5433cd77f15eb7e304068caf754bd8a338755c8fd3b3",
+          "referenceTime": 1681978583
+        }
       ]
     },
     {
@@ -111,15 +131,47 @@
         "steps": 46,
         "total": 3467140
       },
-      "leafSids": [
-        "02e9af8c464768898b5e9cfa9647c1598c85388bb4c5d4f0ebae26ef4ea97105",
-        "2c1764f2afd2cc4cf2427c3b8787097e3fd1e76cd1c6eeaeb5cf06346ed3d177",
-        "5a2d30e0a233ed9b506d0534341993ea47992e0225e8b87efdbe157abe751047",
-        "79c8a9f9f2200da5d0014a659dcfb6d82e96fdb6c94a78bccdc6a0e606e82ff4",
-        "8a2240638fc1385a4198b3207d68003fd5388f3bd4a39da43663c2d76ec0efe0",
-        "ba46fbead547ee077105806cf5afdbff2207744b5d1a81bc1cdac13caabafb07",
-        "cd3a6738e2b7447dd4e40a398fc411e0e7cb165c6f49fbb527eebff184818dda",
-        "fe238654404ee301afafb9303090008807c154b7b3fa1383a71378ee3a68de8b"
+      "leaves": [
+        {
+          "sid": "02e9af8c464768898b5e9cfa9647c1598c85388bb4c5d4f0ebae26ef4ea97105",
+          "value": "79b8d09be50e26b3862cb4009d9cd489ad192ece297bd119e70f38530720155d",
+          "referenceTime": 1681981083
+        },
+        {
+          "sid": "2c1764f2afd2cc4cf2427c3b8787097e3fd1e76cd1c6eeaeb5cf06346ed3d177",
+          "value": "3b5ffb0a6e8ebe30db129f5393ee32d65c2d8ad3a8e1e14ee45b4ea456f566e9",
+          "referenceTime": 1681981083
+        },
+        {
+          "sid": "5a2d30e0a233ed9b506d0534341993ea47992e0225e8b87efdbe157abe751047",
+          "value": "0cccf8d5de81e4663c0fb8127ac6937edd94a69e7a98e40fbc5f0aa77abf255f",
+          "referenceTime": 1681981083
+        },
+        {
+          "sid": "79c8a9f9f2200da5d0014a659dcfb6d82e96fdb6c94a78bccdc6a0e606e82ff4",
+          "value": "a6f8346cc0d2fc277e6d698e4a1f8cd884ba549269d07c47e934ed77f80a24e7",
+          "referenceTime": 1681981083
+        },
+        {
+          "sid": "8a2240638fc1385a4198b3207d68003fd5388f3bd4a39da43663c2d76ec0efe0",
+          "value": "ce3a7a5b515af67947a82fea9340007eeba6ecdab5ee1c87e0247b83d875e291",
+          "referenceTime": 1681981083
+        },
+        {
+          "sid": "ba46fbead547ee077105806cf5afdbff2207744b5d1a81bc1cdac13caabafb07",
+          "value": "872410fc8eb67628053f35ea2287b523e18e30ca1f5841e312d94a4964136ad2",
+          "referenceTime": 1681981083
+        },
+        {
+          "sid": "cd3a6738e2b7447dd4e40a398fc411e0e7cb165c6f49fbb527eebff184818dda",
+          "value": "d5eebfaf7290e2baa53f1883145c831b506521adf168e35840f0f2fbdf8f0fd3",
+          "referenceTime": 1681981083
+        },
+        {
+          "sid": "fe238654404ee301afafb9303090008807c154b7b3fa1383a71378ee3a68de8b",
+          "value": "980d9cd5c42458108e895526c1365256ee4a4d541cacfde882eaf8ce093b053e",
+          "referenceTime": 1681981083
+        }
       ]
     },
     {
@@ -159,15 +211,47 @@
         "steps": 45,
         "total": 3649106
       },
-      "leafSids": [
-        "02e9af8c464768898b5e9cfa9647c1598c85388bb4c5d4f0ebae26ef4ea97105",
-        "2a21298f15a492a156e67e811e34e3282a5f604c1029a27c994f3c7ddda7586c",
-        "4ea3f363b6d9ea67cd931c76fc6f8e6ca108b00b6a70019bd80afff83d232729",
-        "72672486487b4af818b00b6aebcd4c88fbf99004ffa8a5470c65817760fb8f29",
-        "86b76f7d437d06b3e487a690778aa524fba408d1f099d31b0a0e7044f8a362e6",
-        "a1b8d18e62b5cbc8269d84d07d520e7c49c447f52ac24eabcee44788699040b0",
-        "c0f60547f6332945328af357694f276ae8cb4d7b728c38525e759566dfb34dbe",
-        "f3dcec8e1f004bffb33139fa9015ae0aaf727dd16044d7f9bbc74dc3437bda13"
+      "leaves": [
+        {
+          "sid": "02e9af8c464768898b5e9cfa9647c1598c85388bb4c5d4f0ebae26ef4ea97105",
+          "value": "686beee6d49599200171e0932fe550a3f833064d9d4cf188a5f81b6dfb4fdf43",
+          "referenceTime": 1681978183
+        },
+        {
+          "sid": "2a21298f15a492a156e67e811e34e3282a5f604c1029a27c994f3c7ddda7586c",
+          "value": "5945308f44a3ea1b4923cd789004dd1295108cd77ef1d6967acf6d623f7ac95f",
+          "referenceTime": 1681978283
+        },
+        {
+          "sid": "4ea3f363b6d9ea67cd931c76fc6f8e6ca108b00b6a70019bd80afff83d232729",
+          "value": "32d0cc6f7664dfbe5460c8d80e21e50bd8f4164ace3b2e0922f55ef752e89e44",
+          "referenceTime": 1681978383
+        },
+        {
+          "sid": "72672486487b4af818b00b6aebcd4c88fbf99004ffa8a5470c65817760fb8f29",
+          "value": "ced303caeaaae88c318edd4c1347b42c1fd3bdda78997bba77de59291b87638e",
+          "referenceTime": 1681979483
+        },
+        {
+          "sid": "86b76f7d437d06b3e487a690778aa524fba408d1f099d31b0a0e7044f8a362e6",
+          "value": "bb87cebc444063a18bc8c8d96568b22a287280e406dfaa54ccf6073d7df7ed27",
+          "referenceTime": 1681979583
+        },
+        {
+          "sid": "a1b8d18e62b5cbc8269d84d07d520e7c49c447f52ac24eabcee44788699040b0",
+          "value": "de2faecbd63ade179c3bef90ee4464571113d507e9a037dd57dc791666475bad",
+          "referenceTime": 1681980683
+        },
+        {
+          "sid": "c0f60547f6332945328af357694f276ae8cb4d7b728c38525e759566dfb34dbe",
+          "value": "e4210a6d75d59983571ac69cc9a2cb8e6dfe8d88a1cd1da83f12f3e85d887d47",
+          "referenceTime": 1681980783
+        },
+        {
+          "sid": "f3dcec8e1f004bffb33139fa9015ae0aaf727dd16044d7f9bbc74dc3437bda13",
+          "value": "755dc5e36ed935b5265746b6eaf7b2a86483875473a114e7fdd3626033074a41",
+          "referenceTime": 1681980883
+        }
       ]
     },
     {
@@ -207,15 +291,47 @@
         "steps": 45,
         "total": 3649106
       },
-      "leafSids": [
-        "02e9af8c464768898b5e9cfa9647c1598c85388bb4c5d4f0ebae26ef4ea97105",
-        "2a21298f15a492a156e67e811e34e3282a5f604c1029a27c994f3c7ddda7586c",
-        "4ea3f363b6d9ea67cd931c76fc6f8e6ca108b00b6a70019bd80afff83d232729",
-        "72672486487b4af818b00b6aebcd4c88fbf99004ffa8a5470c65817760fb8f29",
-        "86b76f7d437d06b3e487a690778aa524fba408d1f099d31b0a0e7044f8a362e6",
-        "a1b8d18e62b5cbc8269d84d07d520e7c49c447f52ac24eabcee44788699040b0",
-        "c0f60547f6332945328af357694f276ae8cb4d7b728c38525e759566dfb34dbe",
-        "f3dcec8e1f004bffb33139fa9015ae0aaf727dd16044d7f9bbc74dc3437bda13"
+      "leaves": [
+        {
+          "sid": "02e9af8c464768898b5e9cfa9647c1598c85388bb4c5d4f0ebae26ef4ea97105",
+          "value": "686beee6d49599200171e0932fe550a3f833064d9d4cf188a5f81b6dfb4fdf43",
+          "referenceTime": 1681978183
+        },
+        {
+          "sid": "2a21298f15a492a156e67e811e34e3282a5f604c1029a27c994f3c7ddda7586c",
+          "value": "5945308f44a3ea1b4923cd789004dd1295108cd77ef1d6967acf6d623f7ac95f",
+          "referenceTime": 1681978283
+        },
+        {
+          "sid": "4ea3f363b6d9ea67cd931c76fc6f8e6ca108b00b6a70019bd80afff83d232729",
+          "value": "32d0cc6f7664dfbe5460c8d80e21e50bd8f4164ace3b2e0922f55ef752e89e44",
+          "referenceTime": 1681978383
+        },
+        {
+          "sid": "72672486487b4af818b00b6aebcd4c88fbf99004ffa8a5470c65817760fb8f29",
+          "value": "ced303caeaaae88c318edd4c1347b42c1fd3bdda78997bba77de59291b87638e",
+          "referenceTime": 1681979483
+        },
+        {
+          "sid": "86b76f7d437d06b3e487a690778aa524fba408d1f099d31b0a0e7044f8a362e6",
+          "value": "bb87cebc444063a18bc8c8d96568b22a287280e406dfaa54ccf6073d7df7ed27",
+          "referenceTime": 1681979583
+        },
+        {
+          "sid": "a1b8d18e62b5cbc8269d84d07d520e7c49c447f52ac24eabcee44788699040b0",
+          "value": "de2faecbd63ade179c3bef90ee4464571113d507e9a037dd57dc791666475bad",
+          "referenceTime": 1681980683
+        },
+        {
+          "sid": "c0f60547f6332945328af357694f276ae8cb4d7b728c38525e759566dfb34dbe",
+          "value": "e4210a6d75d59983571ac69cc9a2cb8e6dfe8d88a1cd1da83f12f3e85d887d47",
+          "referenceTime": 1681980783
+        },
+        {
+          "sid": "f3dcec8e1f004bffb33139fa9015ae0aaf727dd16044d7f9bbc74dc3437bda13",
+          "value": "755dc5e36ed935b5265746b6eaf7b2a86483875473a114e7fdd3626033074a41",
+          "referenceTime": 1681980883
+        }
       ]
     },
     {
@@ -255,15 +371,47 @@
         "steps": 45,
         "total": 3463306
       },
-      "leafSids": [
-        "02e9af8c464768898b5e9cfa9647c1598c85388bb4c5d4f0ebae26ef4ea97105",
-        "2a21298f15a492a156e67e811e34e3282a5f604c1029a27c994f3c7ddda7586c",
-        "4ea3f363b6d9ea67cd931c76fc6f8e6ca108b00b6a70019bd80afff83d232729",
-        "72672486487b4af818b00b6aebcd4c88fbf99004ffa8a5470c65817760fb8f29",
-        "86b76f7d437d06b3e487a690778aa524fba408d1f099d31b0a0e7044f8a362e6",
-        "a1b8d18e62b5cbc8269d84d07d520e7c49c447f52ac24eabcee44788699040b0",
-        "c0f60547f6332945328af357694f276ae8cb4d7b728c38525e759566dfb34dbe",
-        "f3dcec8e1f004bffb33139fa9015ae0aaf727dd16044d7f9bbc74dc3437bda13"
+      "leaves": [
+        {
+          "sid": "02e9af8c464768898b5e9cfa9647c1598c85388bb4c5d4f0ebae26ef4ea97105",
+          "value": "686beee6d49599200171e0932fe550a3f833064d9d4cf188a5f81b6dfb4fdf43",
+          "referenceTime": 1681978183
+        },
+        {
+          "sid": "2a21298f15a492a156e67e811e34e3282a5f604c1029a27c994f3c7ddda7586c",
+          "value": "5945308f44a3ea1b4923cd789004dd1295108cd77ef1d6967acf6d623f7ac95f",
+          "referenceTime": 1681978283
+        },
+        {
+          "sid": "4ea3f363b6d9ea67cd931c76fc6f8e6ca108b00b6a70019bd80afff83d232729",
+          "value": "32d0cc6f7664dfbe5460c8d80e21e50bd8f4164ace3b2e0922f55ef752e89e44",
+          "referenceTime": 1681978383
+        },
+        {
+          "sid": "72672486487b4af818b00b6aebcd4c88fbf99004ffa8a5470c65817760fb8f29",
+          "value": "ced303caeaaae88c318edd4c1347b42c1fd3bdda78997bba77de59291b87638e",
+          "referenceTime": 1681979483
+        },
+        {
+          "sid": "86b76f7d437d06b3e487a690778aa524fba408d1f099d31b0a0e7044f8a362e6",
+          "value": "bb87cebc444063a18bc8c8d96568b22a287280e406dfaa54ccf6073d7df7ed27",
+          "referenceTime": 1681979583
+        },
+        {
+          "sid": "a1b8d18e62b5cbc8269d84d07d520e7c49c447f52ac24eabcee44788699040b0",
+          "value": "de2faecbd63ade179c3bef90ee4464571113d507e9a037dd57dc791666475bad",
+          "referenceTime": 1681980683
+        },
+        {
+          "sid": "c0f60547f6332945328af357694f276ae8cb4d7b728c38525e759566dfb34dbe",
+          "value": "e4210a6d75d59983571ac69cc9a2cb8e6dfe8d88a1cd1da83f12f3e85d887d47",
+          "referenceTime": 1681980783
+        },
+        {
+          "sid": "f3dcec8e1f004bffb33139fa9015ae0aaf727dd16044d7f9bbc74dc3437bda13",
+          "value": "755dc5e36ed935b5265746b6eaf7b2a86483875473a114e7fdd3626033074a41",
+          "referenceTime": 1681980883
+        }
       ]
     }
   ],
