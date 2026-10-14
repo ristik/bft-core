@@ -120,7 +120,8 @@ anyage_selftest() {
 # Each step is a function the P85 step runner calls like its own (nonzero return = the lane fails and tears down). The plug-in driver is the nbp checkout's
 # tests/live/anyage.ts (save / verify --epoch current|historical / release, protocol 4); NOTHING is refreshed between its commands.
 ANYAGE_WINDOW=${ANYAGE_WINDOW:-30}   # the retired certificate window, in root rounds
-anyage_dir() { echo "${H3_DIR:?}/anyage"; }
+# absolute: the driver runs from the nbp checkout, so a relative evidence path would land there
+anyage_dir() { mkdir -p "${H3_DIR:?}" && echo "$(cd "$H3_DIR" && pwd)/anyage"; }
 anyage_nbp() { (cd "${NBP_DIR:?set NBP_DIR}" && DNB_TOOL="${DNB_TOOL:?set DNB_TOOL}" npx --no-install tsx tests/live/anyage.ts "$@"); }
 anyage_O() { anyage_fixed clock.rootRound latest; }
 anyage_latest() { "${ANYAGE_CAST:-cast}" block-number --rpc-url "$ANYAGE_RPC"; }
