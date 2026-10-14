@@ -2,7 +2,8 @@
 """The host wrapper of the packaged handoff (#437 item 1; arch ruling briefs/package-operator-rpc-ruling.md).
 
 `ubft root handoff propose` runs the plan, intent and endorse phases of ONE attempt in one process against every old root's loopback-only operator endpoint.
-In the package each validator entity's root and shard share a private network namespace and the operator listeners bind to 127.0.0.1, so no process outside an
+In the package each validator entity's root and shard share a private network namespace and the operator listeners bind to the generation's loopback address
+(`generate.py --rpc-bind`, 127.0.0.1 by default; read from the generated compose.yaml, which must carry the same address on every root), so no process outside an
 entity's namespace may call them (and no forwarder exists). This wrapper therefore performs the same phases from the host, each HTTP call made INSIDE the
 target entity's namespace by a one-shot helper container (`docker run --network container:<pod>`), and it keeps what `propose` guarantees:
 
@@ -61,7 +62,7 @@ class DockerTransport:
         compose = json.loads((self.generation / 'compose.yaml').read_text())
         self.project = project or compose['name']
         self.image = compose['services']['rpc']['image']
-        self.root_rpc = operator_rpc.url_of(compose['services']['root1']['entrypoint'])   # the listener the generated Compose file configured
+        self.root_rpc = operator_rpc.common_urls(compose)[0]   # the listener the generated Compose file configured, the same on every root
         self.entities = sorted(int(n[3:]) for n in compose['services'] if n.startswith('pod') and n[3:].isdigit())
 
     def holder(self, i):
@@ -152,8 +153,8 @@ class Wrapper:
 def abort_commands(generation, entities, flags):
     """Manual Abort: the same target is dispatched locally to every old root (exec in that entity, one --root-rpc), each result collected by the caller."""
     compose = ['docker', 'compose', '-f', str(Path(generation) / 'compose.yaml')]
-    config = json.loads((Path(generation) / 'compose.yaml').read_text())
-    return {i: compose + ['exec', '-T', f'root{i}', 'ubft', 'root', 'handoff', 'abort', *flags, '--root-rpc', operator_rpc.url_of(config['services'][f'root{i}']['entrypoint'])] for i in entities}
+    root_rpc = operator_rpc.common_urls(json.loads((Path(generation) / 'compose.yaml').read_text()))[0]
+    return {i: compose + ['exec', '-T', f'root{i}', 'ubft', 'root', 'handoff', 'abort', *flags, '--root-rpc', root_rpc] for i in entities}
 
 
 def build_request(ubft, out, next_trust_base, assignment=None, receipts=None, q3=False):

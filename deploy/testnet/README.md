@@ -23,7 +23,7 @@ EVM is partition 8/full range. This is PoA with profile-2 authenticated history,
 the single B1 registry (layout 3, one `ubft engine-api b1-profile` shared by genesis, ureth and the shard nodes) and no bridge or staking allocation. The registry bytecode and
 engine protocol are supplied by the pinned BFT/ureth builds.
 
-The generated `compose.yaml` is JSON (valid YAML), default N=4, configurable N=3..32.
+The generated `compose.yaml` is JSON (valid YAML), default N=4, configurable N=3..16 (the registry's committee ceiling; a PoS generation is further limited to the election cap, 6).
 All services have CPU/memory/PID limits, explicit restart policies, read-only root filesystems
 and bounded Docker JSON logs (30 MiB/service). Each pod caps memory at about 2.7 GiB (2.625 GiB of its four services, plus a 16 MiB namespace holder and a 64 MiB metrics relay);
 shared services cap another 1.625 GiB, approximately **12.5 GiB for N=4** and
