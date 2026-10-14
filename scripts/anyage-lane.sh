@@ -111,7 +111,12 @@ case "${1:-}" in
     lane_env
     [ -n "${P85_CONTRACTS:-}" ] && [ -n "${DNB_TOOL:-}" ] || { echo "--prep needs P85_CONTRACTS, M2_URETH_BIN, M2_URETH_COMMIT, DNB_TOOL (and P85_DEV_RUN=1 unless the provenance is attested)" >&2; exit 2; }
     export ANYAGE_PREP_ONLY=1
-    exec "$AGRE_ROOT/briefs/devnet-lock.sh" anyage-prep env P85_LANE_LOCKED=1 "$SCRIPT_DIR/p85-lane.sh" ;;
+    "$AGRE_ROOT/briefs/devnet-lock.sh" anyage-prep env P85_LANE_LOCKED=1 "$SCRIPT_DIR/p85-lane.sh"; rc=$?
+    # a successful dry run is recorded for this exact HEAD; the preflight of the run asks for it (a development run says so in the record)
+    if [ "$rc" -eq 0 ]; then
+      printf '%s\n%s\n' "prep-only dry run on bft-core $(git -C "$REPO_ROOT" rev-parse HEAD) at $(date -u +%FT%TZ)" "${P85_DEV_RUN:+DEVELOPMENT RUN (P85_DEV_RUN=1): binary and checkout not attested}" >"$AGRE_ROOT/briefs/devnet-runs/anyage-prep-$(git -C "$REPO_ROOT" rev-parse HEAD | cut -c1-12).ok"
+    fi
+    exit "$rc" ;;
   "")
     plan; echo
     preflight || { echo "REFUSED: the preflight is not entirely ok; nothing was started." >&2; exit 3; }
