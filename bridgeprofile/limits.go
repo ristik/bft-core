@@ -18,7 +18,8 @@ const (
 	MaxPathSteps     = 2048
 	MaxPolicyBytes   = 512
 	MaxAmountBytes   = 32
-	MaxAnchors       = 8 // profile parameter: distinct UC anchors, a parser ceiling; the gas gate (gas.go) decides each bundle
+	MaxAnchors       = 16 // distinct UC anchors, at most the leaves; a parser ceiling, the gas gate (gas.go) decides each bundle (contract section 4)
+	MaxCfgBytes      = 1024
 
 	// Embedded lock evidence (J). Cumulative and checked before allocation or crypto.
 	MaxJustificationBytes = 64 << 10
@@ -47,7 +48,7 @@ const (
 // distinct from the SDK Token.VERSION and from the external bridge's own
 // protocol version. Any byte or derivation change bumps it together with the
 // semantic profile; there is no version dispatch in the parsers.
-const NativeBridgeProtoVersion = 3
+const NativeBridgeProtoVersion = 4
 
 // Fixed protocol bytes adopted from the pinned SDKs v3.0.1. Tags are unchanged
 // from the pre-3.0 profile; versions and arities are not.

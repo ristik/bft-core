@@ -14,7 +14,7 @@ import (
 // is still the real RSMT_MEMBER_V1.
 type permissiveB1 struct{ RefB1 }
 
-func (permissiveB1) AuthenticateAnchor(*Anchor) error { return nil }
+func (permissiveB1) AuthenticateAnchors([]Anchor) error { return nil }
 
 // composition is a certified return history ready for Compose.
 type composition struct {

@@ -372,10 +372,6 @@ func ucFolds(c *claim) error {
 	return nil
 }
 
-// protocol3SigsPerSeal is the step-0 per-seal signature bound that ScanUC keeps for the protocol-3 bridge in bridgeprofile, whose
-// sealed corpus pins it; CERT_BATCH_V2 enforces MaxSigsPerSeal in its own scan before any decode. It goes with protocol 3.
-const protocol3SigsPerSeal = 64
-
 // UCShape is what the strict structural scan of one standalone certificate found.
 type UCShape struct {
 	// PathSteps is the unicity tree path length plus the shard tree sibling count the native gas schedule charges.
@@ -384,7 +380,7 @@ type UCShape struct {
 	SigLens []int
 }
 
-// ScanUC applies the protocol-3 native bounded certificate scan to raw (64 signatures per seal, see protocol3SigsPerSeal): the byte cap, the strict CBOR token and depth bounds, every
+// ScanUC applies the native bounded certificate scan to raw: the byte cap, the strict CBOR token and depth bounds, every
 // field's shape and sublimit (summary, shard depth, siblings, steps, signatures, node ids), the native decoder and the byte-exact
 // re-encoding. It performs no cryptography and allocates only within those bounds. Callers that accept a narrower codec (the SDK's)
 // intersect it with this result.
@@ -394,7 +390,7 @@ func ScanUC(raw []byte) (UCShape, error) {
 		return UCShape{}, ErrUCTooLarge
 	}
 	tokens := 0
-	if err := decodeUC(&c, raw, &tokens, protocol3SigsPerSeal); err != nil {
+	if err := decodeUC(&c, raw, &tokens, MaxSigsPerSeal); err != nil {
 		return UCShape{}, err
 	}
 	shape := UCShape{PathSteps: c.pathSteps}

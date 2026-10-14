@@ -112,10 +112,7 @@ func TestScanClaimedLengthsDoNotAllocate(t *testing.T) {
 	}
 }
 
-func TestUCGasMaximum(t *testing.T) {
-	if g := UCGas(MaxCallBytes, 64, 8, 8*(MaxShardSiblings+MaxUnicitySteps)); g != 5_261_004 { // the retired step-0 schedule
-		t.Fatalf("%d", g)
-	}
+func TestRSMTInputBound(t *testing.T) {
 	if MaxRSMTInputBytes != 12392 {
 		t.Fatalf("%d", MaxRSMTInputBytes)
 	}

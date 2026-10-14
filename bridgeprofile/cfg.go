@@ -61,7 +61,7 @@ func (c *Cfg) Hash() [32]byte { return H(c.Bytes()) }
 // DecodeCfg strictly decodes Cfg bytes; decode then re-encode must equal the
 // input.
 func DecodeCfg(b []byte) (*Cfg, error) {
-	if len(b) > MaxSemanticBytes {
+	if len(b) > MaxCfgBytes {
 		return nil, ErrInputTooLarge
 	}
 	root, err := scanOne(b)
