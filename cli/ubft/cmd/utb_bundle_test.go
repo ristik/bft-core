@@ -52,7 +52,7 @@ func TestUTBExportVerifyImportRoundTrip(t *testing.T) {
 	base := &baseFlags{HomeDir: dir}
 	srcDB := filepath.Join(dir, "src.db")
 	src := &rootNodeRunFlags{baseFlags: base, Profile2: true, UTBGenesisFile: genesisPath, UTBGenesisID: pin, UTBEntriesDBFile: srcDB}
-	store, closeStore, err := src.openUTBStore()
+	store, closeStore, err := src.openUTBStore(nil)
 	require.NoError(t, err)
 	prev := g
 	for e := uint64(2); e <= 8; e++ {

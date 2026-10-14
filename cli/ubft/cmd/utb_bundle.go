@@ -50,7 +50,7 @@ func trustBaseUTBExportCmd(base *baseFlags) *cobra.Command {
 	var out string
 	cmd := &cobra.Command{Use: "utb-export", Short: "Export the complete signed trust-base history as one tagged CBOR bundle (the release bundle)",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			store, closeStore, err := sf.runFlags(base).openUTBStore()
+			store, closeStore, err := sf.runFlags(base).openUTBStore(nil)
 			if err != nil {
 				return err
 			}
@@ -80,7 +80,7 @@ func trustBaseUTBImportCmd(base *baseFlags) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			store, closeStore, err := sf.runFlags(base).openUTBStore()
+			store, closeStore, err := sf.runFlags(base).openUTBStore(nil)
 			if err != nil {
 				return err
 			}
