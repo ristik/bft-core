@@ -1,6 +1,6 @@
 import os, pathlib, subprocess, json
 root=pathlib.Path(__file__).resolve().parents[2]
-# Disable one independent guard at a time, run its named negative test, restore.
+# Disable one independent guard at a time, run its named negative test, restore. b1state guards only: the b1ref reference's own guards are mutation-checked by its owner.
 cases=[
  ('member-bounds','b1state/types.go','len(e.Members) == 0 || len(e.Members) > MaxMembers','false','./b1state','TestMembersIsolatedRefusals'),
  ('member-identity','b1state/types.go','len(m.NodeID) == 0 || len(m.NodeID) > MaxNodeIDBytes || !utf8.ValidString(m.NodeID) || (i > 0 && bytes.Compare([]byte(e.Members[i-1].NodeID), []byte(m.NodeID)) >= 0) || seen[m.Key] || m.Weight == 0','false && (i>0 || seen[m.Key] || bytes.Compare(nil,nil)>0 || !utf8.ValidString(m.NodeID))','./b1state','TestMembersIsolatedRefusals'),
@@ -15,13 +15,6 @@ cases=[
  ('member-debit','b1state/codec.go','members > (budget-scanGas)/1000','false','./b1state','TestUpdateStagedDebitAndCanonical'),
  ('origin-tail','b1state/codec.go','tail.End != nil || tail.Epoch != u.OriginEpoch','false && tail.Epoch==0','./b1state','TestUpdateStagedDebitAndCanonical'),
  ('system-budget','b1state/profile.go','admit > budget || open > budget-admit || imp > budget-admit-open || finalize > budget-admit-open-imp || hooks > budget-admit-open-imp-finalize','false','./b1state','TestUpdateStagedDebitAndCanonical'),
- ('caller-signature-shape','b1ref/prescan.go','r.err == nil && ((len(sig) != 64 && len(sig) != 65) || (len(sig) == 65 && sig[64] > 1))','false && len(sig)==0','./b1ref','TestCallerScannerRejectsSignatureShape'),
- ('caller-full-debit','b1ref/verify.go','gas < charge','false && charge==0','./b1ref','TestRunReservesChargeBeforeWork'),
- ('caller-claim-order','b1ref/verify.go','i > 0 && compareClaimID(&call.claims[i-1], c) >= 0','false','./b1ref','TestGoldenVectors/cert.shared.order'),
- ('caller-seal-equality','b1ref/verify.go','!bytes.Equal(c.sealRaw, call.claims[0].sealRaw)','false && bytes.Equal(nil,nil)','./b1ref','TestGoldenVectors/cert.shared.mixed-subsets.false'),
- ('caller-epoch-entry','b1ref/verify.go','entry.Epoch != seal.Epoch','false','./b1ref','TestAdmittedRegistryRefusals/wrong-epoch'),
- ('caller-phase','b1ref/verify.go','reg.Phase == 1','false','./b1ref','TestAdmittedRegistryRefusals'),
- ('weighted-quorum','b1ref/verify.go','good < threshold','false && threshold==0','./b1ref','TestGoldenVectors/weighted.below'),
 ]
 cases.extend([
  ('append-start-increasing','b1state/registry.go','if e.Start <= tip.Start {','if false {','./b1state','TestAppendGuards'),
@@ -31,13 +24,13 @@ cases.extend([
  ('origin-before-start','b1state/registry.go','if round < target.Start {','if false {','./b1state','TestWriteSideGuardsEachFireAlone'),
  ('origin-at-or-after-end','b1state/registry.go','if target.End != nil && round >= *target.End {','if false {','./b1state','TestWriteSideGuardsEachFireAlone'),
  ('first-origin-before-genesis','b1state/registry.go','} else if epoch < r.Genesis {','} else if false {','./b1state','TestWriteSideGuardsEachFireAlone'),
+ ('origin-beyond-imported-tip','b1state/registry.go','target, ok := r.entries[epoch]','target, ok := r.entries[epoch]; ok = true','./b1state','TestWriteSideGuardsEachFireAlone'),
  ('imported-usable-mismatch','b1state/registry.go','if next.Ready && next.U != next.Tip {','if false {','./b1state','TestSpanTwoUpdateInstallsBothOrNeither'),
  ('epochs-per-update','b1state/registry.go','if uint64(len(u.NewEntries)) > b {','if false {','./b1state','TestSpanTwoUpdateInstallsBothOrNeither'),
  ('append-successor','b1state/registry.go','if e.Epoch != r.Tip+1 {','if false {','./b1state','TestAppendGuards'),
  ('parent-tip-binding','b1state/registry.go','if u.PriorTipEpoch != r.Tip {','if false {','./b1state','TestAppendGuards'),
  ('member-point','b1state/types.go','if _, err := ethcrypto.DecompressPubkey(m.Key[:]); err != nil {','if _, err := ethcrypto.DecompressPubkey(m.Key[:]); err != nil && false {','./b1state','TestMembersIsolatedRefusals/invalid-point'),
  ('candidate-bindings','b1state/types.go','u.ParentHash != b.ParentHash || u.BlockNumber != b.BlockNumber || u.OriginEpoch != b.OriginEpoch || u.OriginRound != b.OriginRound || u.OriginIdentity != b.OriginIdentity','false','./b1state','TestExactCandidateBindings'),
- ('caller-max-S','b1ref/prescan.go','sig > maxS','false','./b1ref','TestRunGas'),
 ])
 env=os.environ.copy();env['GOCACHE']=os.environ['GOCACHE'] # require the caller's private cache
 results=[]
