@@ -8,6 +8,7 @@ import (
 	"github.com/unicitynetwork/bft-core/b1ref"
 	"github.com/unicitynetwork/bft-core/b1ref/b1gen"
 	"github.com/unicitynetwork/bft-core/b1state"
+	"github.com/unicitynetwork/bft-core/evmroot"
 )
 
 func entryOf(t *testing.T, w b1gen.EpochWords) b1state.Entry {
@@ -128,4 +129,76 @@ func TestRegistryWriterMatchesReader(t *testing.T) {
 	v, err := b1ref.Cert(req(h.Claim(b1gen.Seal{Epoch: 8, Round: b1gen.HistoryClock + 1, Variant: "w", Signers: b1gen.DefaultSigners(8)}, 1, "")), st, pins)
 	require.NoError(t, err)
 	require.False(t, v.Valid, "a round above the writer's O is future")
+}
+
+// TestD6AdmissionParity: the D6 any-age admission model (evmroot.AdmitCertificate, contract section 7b) and the b1ref relation give the
+// same verdict for every epoch and round of a grid over the writer-built registry, and each D6 golden admission case has a corpus vector
+// with the same verdict. The model checks only round and interval; b1ref also verifies the signatures, which are valid here.
+func TestD6AdmissionParity(t *testing.T) {
+	h := b1gen.NewHistory("b1-any-age-v1", 0)
+	pre := h.Rendered()
+	st, pins := state(t, &pre)
+	ends := map[uint64]*uint64{}
+	for _, e := range pre.Epochs {
+		if e.HasEnd {
+			end := e.End
+			ends[e.Epoch] = &end
+		}
+	}
+	checked := 0
+	for _, e := range []uint64{0, 2, 5, 8, 9, 40} {
+		start := b1gen.HistoryStart(e)
+		if e > b1gen.HistoryOrigin {
+			start = b1gen.HistoryClock / 2
+		}
+		rounds := []uint64{start, start + 1, b1gen.HistoryClock, b1gen.HistoryClock + 1}
+		if start > 0 {
+			rounds = append(rounds, start-1)
+		}
+		if end := ends[e]; end != nil {
+			rounds = append(rounds, *end-1, *end)
+		}
+		for _, r := range rounds {
+			if r == 0 {
+				continue
+			}
+			ce := evmroot.CertEpoch{Start: start, End: ends[e], Admitted: e <= b1gen.HistoryOrigin}
+			model := evmroot.AdmitCertificate(r, b1gen.HistoryClock, true, ce)
+			v, err := b1ref.Cert(b1gen.Request(h.Claim(b1gen.Seal{Epoch: e, Round: r, Variant: "p", Signers: b1gen.DefaultSigners(e)}, 1, "")), st, pins)
+			require.NoError(t, err)
+			require.Equal(t, model.Admitted, v.Valid, "epoch %d round %d: model %q, b1ref %v", e, r, model.Reason, v.Why)
+			checked++
+		}
+	}
+	require.Greater(t, checked, 30)
+	// not ready: the model refuses (b1ref's not-ready verdict is the corpus vector reg.origin-not-ready, mapped below)
+	require.False(t, evmroot.AdmitCertificate(1500, 0, false, evmroot.CertEpoch{Start: 1000, Admitted: true}).Admitted)
+
+	// each D6 golden admission case and the corpus vector that exercises the same rule (very old open epoch: epoch 8 at round 9,000 against
+	// O = 1,000,000; very old closed epoch: the genesis epoch about 10^6 rounds back)
+	m, _ := loadGolden(t)
+	verdict := map[string]bool{}
+	for _, v := range m.Vectors {
+		if v.Expected.Valid != nil {
+			verdict[v.ID] = *v.Expected.Valid
+		}
+	}
+	for d6, vector := range map[string]string{
+		"very_old_current_epoch": "reuse.one-epoch.two-seals", "very_old_closed_epoch": "time.genesis-epoch.ok", "round_equals_start": "time.closed.start.ok",
+		"round_is_end_minus_one": "time.closed.last.ok", "round_equals_end": "time.closed.at-end", "round_equals_origin_open_epoch": "time.origin.at-O.ok",
+		"round_ahead_of_origin": "time.origin.future", "round_before_epoch_start": "time.closed.before-start", "no_usable_origin": "reg.origin-not-ready",
+		"epoch_not_admitted": "time.past-tip",
+	} {
+		var want *bool
+		for _, c := range evmroot.BuildD6Vectors().CertAdmission {
+			if c.Name == d6 {
+				w := c.Admitted
+				want = &w
+			}
+		}
+		require.NotNil(t, want, "D6 case %s", d6)
+		got, ok := verdict[vector]
+		require.True(t, ok, "corpus vector %s", vector)
+		require.Equal(t, *want, got, "D6 %s vs corpus %s", d6, vector)
+	}
 }
