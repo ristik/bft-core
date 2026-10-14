@@ -109,7 +109,7 @@
    "config": {
     "nMin": 4,
     "nTarget": 10,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 4,
     "distNum": 1,
     "distDen": 4
@@ -254,7 +254,7 @@
    "config": {
     "nMin": 4,
     "nTarget": 10,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 4,
     "distNum": 1,
     "distDen": 4
@@ -404,7 +404,7 @@
    "config": {
     "nMin": 4,
     "nTarget": 10,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 4,
     "distNum": 1,
     "distDen": 4
@@ -554,7 +554,7 @@
    "config": {
     "nMin": 4,
     "nTarget": 10,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 100,
     "distNum": 1,
     "distDen": 1
@@ -699,7 +699,7 @@
    "config": {
     "nMin": 4,
     "nTarget": 10,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 4,
     "distNum": 1,
     "distDen": 4
@@ -844,7 +844,7 @@
    "config": {
     "nMin": 4,
     "nTarget": 10,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 4,
     "distNum": 1,
     "distDen": 4
@@ -974,7 +974,7 @@
    "config": {
     "nMin": 4,
     "nTarget": 10,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 4,
     "distNum": 1,
     "distDen": 4
@@ -1092,7 +1092,7 @@
    "config": {
     "nMin": 4,
     "nTarget": 10,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 4,
     "distNum": 1,
     "distDen": 4
@@ -1175,7 +1175,7 @@
    "config": {
     "nMin": 4,
     "nTarget": 10,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 4,
     "distNum": 1,
     "distDen": 4
@@ -1233,7 +1233,7 @@
    "config": {
     "nMin": 4,
     "nTarget": 10,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 4,
     "distNum": 1,
     "distDen": 4
@@ -1361,7 +1361,7 @@
    "config": {
     "nMin": 4,
     "nTarget": 8,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 100,
     "distNum": 1,
     "distDen": 1
@@ -1497,7 +1497,7 @@
    "config": {
     "nMin": 4,
     "nTarget": 10,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 4,
     "distNum": 1,
     "distDen": 4
@@ -1637,7 +1637,7 @@
    "config": {
     "nMin": 4,
     "nTarget": 10,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 4,
     "distNum": 1,
     "distDen": 4
@@ -1755,7 +1755,7 @@
    "config": {
     "nMin": 4,
     "nTarget": 10,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 4,
     "distNum": 1,
     "distDen": 4
@@ -1945,7 +1945,7 @@
    "config": {
     "nMin": 4,
     "nTarget": 10,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 4,
     "distNum": 1,
     "distDen": 4
@@ -2085,7 +2085,7 @@
    "config": {
     "nMin": 0,
     "nTarget": 10,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 4,
     "distNum": 1,
     "distDen": 4
@@ -2203,7 +2203,7 @@
    "config": {
     "nMin": 4,
     "nTarget": 3,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 4,
     "distNum": 1,
     "distDen": 4
@@ -2321,7 +2321,7 @@
    "config": {
     "nMin": 4,
     "nTarget": 10,
-    "nMax": 33,
+    "nMax": 17,
     "maxM": 4,
     "distNum": 1,
     "distDen": 4
@@ -2439,7 +2439,7 @@
    "config": {
     "nMin": 4,
     "nTarget": 10,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 4,
     "distNum": 1,
     "distDen": 0
@@ -2690,7 +2690,7 @@
    "config": {
     "nMin": 4,
     "nTarget": 10,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 100,
     "distNum": 1,
     "distDen": 1
@@ -2830,7 +2830,7 @@
    "config": {
     "nMin": 4,
     "nTarget": 10,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 4,
     "distNum": 1,
     "distDen": 4
@@ -2975,7 +2975,7 @@
    "config": {
     "nMin": 4,
     "nTarget": 10,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 4,
     "distNum": 1,
     "distDen": 4
@@ -3125,7 +3125,7 @@
    "config": {
     "nMin": 4,
     "nTarget": 10,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 4,
     "distNum": 1,
     "distDen": 4
@@ -3275,7 +3275,7 @@
    "config": {
     "nMin": 4,
     "nTarget": 10,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 100,
     "distNum": 1,
     "distDen": 1
@@ -3355,7 +3355,7 @@
    "config": {
     "nMin": 4,
     "nTarget": 10,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 4,
     "distNum": 1,
     "distDen": 4
@@ -3423,7 +3423,7 @@
    "config": {
     "nMin": 4,
     "nTarget": 10,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 4,
     "distNum": 1,
     "distDen": 4
@@ -3491,7 +3491,7 @@
    "config": {
     "nMin": 4,
     "nTarget": 10,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 4,
     "distNum": 1,
     "distDen": 4
@@ -3629,7 +3629,7 @@
    "config": {
     "nMin": 4,
     "nTarget": 10,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 4,
     "distNum": 1,
     "distDen": 4
@@ -3774,7 +3774,7 @@
    "config": {
     "nMin": 4,
     "nTarget": 10,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 100,
     "distNum": 1,
     "distDen": 1
@@ -3879,7 +3879,7 @@
    "config": {
     "nMin": 4,
     "nTarget": 8,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 3,
     "distNum": 1,
     "distDen": 2
@@ -4041,7 +4041,7 @@
    "config": {
     "nMin": 1,
     "nTarget": 13,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 7,
     "distNum": 1,
     "distDen": 2
@@ -4152,7 +4152,7 @@
    "config": {
     "nMin": 3,
     "nTarget": 7,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 8,
     "distNum": 2,
     "distDen": 2
@@ -4316,7 +4316,7 @@
    "config": {
     "nMin": 3,
     "nTarget": 13,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 2,
     "distNum": 2,
     "distDen": 2
@@ -4492,7 +4492,7 @@
    "config": {
     "nMin": 3,
     "nTarget": 12,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 7,
     "distNum": 1,
     "distDen": 4
@@ -4620,7 +4620,7 @@
    "config": {
     "nMin": 4,
     "nTarget": 10,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 9,
     "distNum": 1,
     "distDen": 2
@@ -4748,7 +4748,7 @@
    "config": {
     "nMin": 1,
     "nTarget": 8,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 6,
     "distNum": 2,
     "distDen": 4
@@ -4889,7 +4889,7 @@
    "config": {
     "nMin": 2,
     "nTarget": 10,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 7,
     "distNum": 2,
     "distDen": 2
@@ -5044,7 +5044,7 @@
    "config": {
     "nMin": 2,
     "nTarget": 14,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 5,
     "distNum": 2,
     "distDen": 2
@@ -5221,7 +5221,7 @@
    "config": {
     "nMin": 1,
     "nTarget": 13,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 4,
     "distNum": 2,
     "distDen": 2
@@ -5327,7 +5327,7 @@
    "config": {
     "nMin": 2,
     "nTarget": 7,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 4,
     "distNum": 1,
     "distDen": 2
@@ -5504,7 +5504,7 @@
    "config": {
     "nMin": 3,
     "nTarget": 14,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 5,
     "distNum": 1,
     "distDen": 2
@@ -5612,7 +5612,7 @@
    "config": {
     "nMin": 4,
     "nTarget": 9,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 5,
     "distNum": 2,
     "distDen": 2
@@ -5780,7 +5780,7 @@
    "config": {
     "nMin": 3,
     "nTarget": 15,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 5,
     "distNum": 1,
     "distDen": 3
@@ -5886,7 +5886,7 @@
    "config": {
     "nMin": 1,
     "nTarget": 8,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 7,
     "distNum": 1,
     "distDen": 4
@@ -5969,7 +5969,7 @@
    "config": {
     "nMin": 2,
     "nTarget": 9,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 9,
     "distNum": 2,
     "distDen": 2
@@ -6126,7 +6126,7 @@
    "config": {
     "nMin": 3,
     "nTarget": 13,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 3,
     "distNum": 1,
     "distDen": 4
@@ -6284,7 +6284,7 @@
    "config": {
     "nMin": 1,
     "nTarget": 14,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 9,
     "distNum": 1,
     "distDen": 2
@@ -6452,7 +6452,7 @@
    "config": {
     "nMin": 4,
     "nTarget": 11,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 8,
     "distNum": 1,
     "distDen": 4
@@ -6564,7 +6564,7 @@
    "config": {
     "nMin": 2,
     "nTarget": 6,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 8,
     "distNum": 1,
     "distDen": 4
@@ -6702,7 +6702,7 @@
    "config": {
     "nMin": 3,
     "nTarget": 14,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 4,
     "distNum": 2,
     "distDen": 2
@@ -6841,7 +6841,7 @@
    "config": {
     "nMin": 1,
     "nTarget": 9,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 7,
     "distNum": 1,
     "distDen": 2
@@ -6959,7 +6959,7 @@
    "config": {
     "nMin": 2,
     "nTarget": 10,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 6,
     "distNum": 1,
     "distDen": 3
@@ -7085,7 +7085,7 @@
    "config": {
     "nMin": 4,
     "nTarget": 9,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 3,
     "distNum": 1,
     "distDen": 3
@@ -7276,7 +7276,7 @@
    "config": {
     "nMin": 3,
     "nTarget": 13,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 5,
     "distNum": 1,
     "distDen": 4
@@ -7387,7 +7387,7 @@
    "config": {
     "nMin": 4,
     "nTarget": 5,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 5,
     "distNum": 2,
     "distDen": 2
@@ -7482,7 +7482,7 @@
    "config": {
     "nMin": 2,
     "nTarget": 6,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 7,
     "distNum": 1,
     "distDen": 3
@@ -7574,7 +7574,7 @@
    "config": {
     "nMin": 4,
     "nTarget": 6,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 6,
     "distNum": 2,
     "distDen": 4
@@ -7682,7 +7682,7 @@
    "config": {
     "nMin": 4,
     "nTarget": 9,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 8,
     "distNum": 1,
     "distDen": 2
@@ -7850,7 +7850,7 @@
    "config": {
     "nMin": 3,
     "nTarget": 13,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 8,
     "distNum": 2,
     "distDen": 4
@@ -7956,7 +7956,7 @@
    "config": {
     "nMin": 2,
     "nTarget": 7,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 7,
     "distNum": 2,
     "distDen": 3
@@ -8093,7 +8093,7 @@
    "config": {
     "nMin": 4,
     "nTarget": 10,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 9,
     "distNum": 2,
     "distDen": 2
@@ -8253,7 +8253,7 @@
    "config": {
     "nMin": 1,
     "nTarget": 14,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 2,
     "distNum": 2,
     "distDen": 2
@@ -8427,7 +8427,7 @@
    "config": {
     "nMin": 1,
     "nTarget": 15,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 8,
     "distNum": 1,
     "distDen": 4
@@ -8520,7 +8520,7 @@
    "config": {
     "nMin": 3,
     "nTarget": 6,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 6,
     "distNum": 1,
     "distDen": 3
@@ -8662,7 +8662,7 @@
    "config": {
     "nMin": 2,
     "nTarget": 12,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 5,
     "distNum": 1,
     "distDen": 4
@@ -8825,7 +8825,7 @@
    "config": {
     "nMin": 1,
     "nTarget": 13,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 9,
     "distNum": 1,
     "distDen": 3
@@ -9011,7 +9011,7 @@
    "config": {
     "nMin": 2,
     "nTarget": 14,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 6,
     "distNum": 1,
     "distDen": 4
@@ -9159,7 +9159,7 @@
    "config": {
     "nMin": 1,
     "nTarget": 12,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 9,
     "distNum": 2,
     "distDen": 3
@@ -9343,7 +9343,7 @@
    "config": {
     "nMin": 2,
     "nTarget": 15,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 4,
     "distNum": 1,
     "distDen": 2
@@ -9461,7 +9461,7 @@
    "config": {
     "nMin": 1,
     "nTarget": 6,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 3,
     "distNum": 2,
     "distDen": 2
@@ -9618,7 +9618,7 @@
    "config": {
     "nMin": 1,
     "nTarget": 12,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 6,
     "distNum": 1,
     "distDen": 3
@@ -9742,7 +9742,7 @@
    "config": {
     "nMin": 1,
     "nTarget": 9,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 6,
     "distNum": 2,
     "distDen": 3
@@ -9835,7 +9835,7 @@
    "config": {
     "nMin": 3,
     "nTarget": 5,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 7,
     "distNum": 2,
     "distDen": 2
@@ -9965,7 +9965,7 @@
    "config": {
     "nMin": 4,
     "nTarget": 11,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 3,
     "distNum": 1,
     "distDen": 4
@@ -10123,7 +10123,7 @@
    "config": {
     "nMin": 2,
     "nTarget": 16,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 5,
     "distNum": 2,
     "distDen": 3
@@ -10256,7 +10256,7 @@
    "config": {
     "nMin": 3,
     "nTarget": 9,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 7,
     "distNum": 2,
     "distDen": 3
@@ -10379,7 +10379,7 @@
    "config": {
     "nMin": 1,
     "nTarget": 7,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 5,
     "distNum": 1,
     "distDen": 2
@@ -10548,7 +10548,7 @@
    "config": {
     "nMin": 2,
     "nTarget": 16,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 2,
     "distNum": 2,
     "distDen": 4
@@ -10711,7 +10711,7 @@
    "config": {
     "nMin": 4,
     "nTarget": 15,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 2,
     "distNum": 1,
     "distDen": 3
@@ -10834,7 +10834,7 @@
    "config": {
     "nMin": 4,
     "nTarget": 11,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 8,
     "distNum": 2,
     "distDen": 3
@@ -10997,7 +10997,7 @@
    "config": {
     "nMin": 4,
     "nTarget": 16,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 8,
     "distNum": 1,
     "distDen": 3
@@ -11170,7 +11170,7 @@
    "config": {
     "nMin": 1,
     "nTarget": 14,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 2,
     "distNum": 2,
     "distDen": 3
@@ -11333,7 +11333,7 @@
    "config": {
     "nMin": 2,
     "nTarget": 12,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 7,
     "distNum": 2,
     "distDen": 4
@@ -11437,7 +11437,7 @@
    "config": {
     "nMin": 3,
     "nTarget": 7,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 2,
     "distNum": 1,
     "distDen": 2
@@ -11599,7 +11599,7 @@
    "config": {
     "nMin": 1,
     "nTarget": 13,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 5,
     "distNum": 1,
     "distDen": 2
@@ -11682,7 +11682,7 @@
    "config": {
     "nMin": 3,
     "nTarget": 6,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 2,
     "distNum": 1,
     "distDen": 2
@@ -11825,7 +11825,7 @@
    "config": {
     "nMin": 4,
     "nTarget": 11,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 5,
     "distNum": 1,
     "distDen": 2
@@ -11997,7 +11997,7 @@
    "config": {
     "nMin": 1,
     "nTarget": 15,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 2,
     "distNum": 1,
     "distDen": 4
@@ -12118,7 +12118,7 @@
    "config": {
     "nMin": 3,
     "nTarget": 5,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 7,
     "distNum": 1,
     "distDen": 3
@@ -12241,7 +12241,7 @@
    "config": {
     "nMin": 4,
     "nTarget": 10,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 9,
     "distNum": 2,
     "distDen": 2
@@ -12426,7 +12426,7 @@
    "config": {
     "nMin": 2,
     "nTarget": 14,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 4,
     "distNum": 2,
     "distDen": 4
@@ -12594,7 +12594,7 @@
    "config": {
     "nMin": 4,
     "nTarget": 10,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 2,
     "distNum": 2,
     "distDen": 3
@@ -12709,7 +12709,7 @@
    "config": {
     "nMin": 3,
     "nTarget": 7,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 5,
     "distNum": 2,
     "distDen": 2
@@ -12828,7 +12828,7 @@
    "config": {
     "nMin": 4,
     "nTarget": 8,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 8,
     "distNum": 2,
     "distDen": 4
@@ -12959,7 +12959,7 @@
    "config": {
     "nMin": 2,
     "nTarget": 11,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 6,
     "distNum": 2,
     "distDen": 2
@@ -13102,7 +13102,7 @@
    "config": {
     "nMin": 4,
     "nTarget": 12,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 2,
     "distNum": 2,
     "distDen": 3
@@ -13301,7 +13301,7 @@
    "config": {
     "nMin": 4,
     "nTarget": 13,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 7,
     "distNum": 1,
     "distDen": 3
@@ -13422,7 +13422,7 @@
    "config": {
     "nMin": 1,
     "nTarget": 8,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 9,
     "distNum": 1,
     "distDen": 4
@@ -13575,7 +13575,7 @@
    "config": {
     "nMin": 3,
     "nTarget": 14,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 4,
     "distNum": 1,
     "distDen": 2
@@ -13698,7 +13698,7 @@
    "config": {
     "nMin": 4,
     "nTarget": 11,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 2,
     "distNum": 2,
     "distDen": 3
@@ -13816,7 +13816,7 @@
    "config": {
     "nMin": 4,
     "nTarget": 11,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 4,
     "distNum": 2,
     "distDen": 4
@@ -13981,7 +13981,7 @@
    "config": {
     "nMin": 2,
     "nTarget": 11,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 8,
     "distNum": 1,
     "distDen": 3
@@ -14088,7 +14088,7 @@
    "config": {
     "nMin": 3,
     "nTarget": 6,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 8,
     "distNum": 1,
     "distDen": 4
@@ -14201,7 +14201,7 @@
    "config": {
     "nMin": 1,
     "nTarget": 11,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 3,
     "distNum": 1,
     "distDen": 4
@@ -14314,7 +14314,7 @@
    "config": {
     "nMin": 2,
     "nTarget": 11,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 9,
     "distNum": 2,
     "distDen": 3
@@ -14424,7 +14424,7 @@
    "config": {
     "nMin": 2,
     "nTarget": 7,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 9,
     "distNum": 1,
     "distDen": 3
@@ -14507,7 +14507,7 @@
    "config": {
     "nMin": 3,
     "nTarget": 6,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 7,
     "distNum": 2,
     "distDen": 3
@@ -14629,7 +14629,7 @@
    "config": {
     "nMin": 3,
     "nTarget": 10,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 8,
     "distNum": 2,
     "distDen": 2
@@ -14732,7 +14732,7 @@
    "config": {
     "nMin": 2,
     "nTarget": 8,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 3,
     "distNum": 2,
     "distDen": 4
@@ -14843,7 +14843,7 @@
    "config": {
     "nMin": 2,
     "nTarget": 8,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 9,
     "distNum": 1,
     "distDen": 2
@@ -14996,7 +14996,7 @@
    "config": {
     "nMin": 1,
     "nTarget": 15,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 5,
     "distNum": 1,
     "distDen": 3
@@ -15144,7 +15144,7 @@
    "config": {
     "nMin": 3,
     "nTarget": 16,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 7,
     "distNum": 2,
     "distDen": 3
@@ -15298,7 +15298,7 @@
    "config": {
     "nMin": 1,
     "nTarget": 10,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 7,
     "distNum": 1,
     "distDen": 3
@@ -15413,7 +15413,7 @@
    "config": {
     "nMin": 1,
     "nTarget": 6,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 9,
     "distNum": 2,
     "distDen": 2
@@ -15545,7 +15545,7 @@
    "config": {
     "nMin": 1,
     "nTarget": 10,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 5,
     "distNum": 1,
     "distDen": 3
@@ -15730,7 +15730,7 @@
    "config": {
     "nMin": 2,
     "nTarget": 16,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 6,
     "distNum": 1,
     "distDen": 2
@@ -15865,7 +15865,7 @@
    "config": {
     "nMin": 1,
     "nTarget": 9,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 7,
     "distNum": 2,
     "distDen": 2
@@ -16021,7 +16021,7 @@
    "config": {
     "nMin": 4,
     "nTarget": 14,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 8,
     "distNum": 1,
     "distDen": 3
@@ -16124,7 +16124,7 @@
    "config": {
     "nMin": 3,
     "nTarget": 8,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 4,
     "distNum": 2,
     "distDen": 4
@@ -16207,7 +16207,7 @@
    "config": {
     "nMin": 3,
     "nTarget": 9,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 2,
     "distNum": 1,
     "distDen": 3
@@ -16310,7 +16310,7 @@
    "config": {
     "nMin": 1,
     "nTarget": 6,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 6,
     "distNum": 1,
     "distDen": 2
@@ -16482,7 +16482,7 @@
    "config": {
     "nMin": 4,
     "nTarget": 15,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 5,
     "distNum": 2,
     "distDen": 4
@@ -16670,7 +16670,7 @@
    "config": {
     "nMin": 1,
     "nTarget": 15,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 3,
     "distNum": 2,
     "distDen": 4
@@ -16848,7 +16848,7 @@
    "config": {
     "nMin": 2,
     "nTarget": 14,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 4,
     "distNum": 1,
     "distDen": 4
@@ -16981,7 +16981,7 @@
    "config": {
     "nMin": 3,
     "nTarget": 12,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 8,
     "distNum": 2,
     "distDen": 2
@@ -17151,7 +17151,7 @@
    "config": {
     "nMin": 1,
     "nTarget": 13,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 5,
     "distNum": 2,
     "distDen": 3
@@ -17277,7 +17277,7 @@
    "config": {
     "nMin": 3,
     "nTarget": 7,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 9,
     "distNum": 1,
     "distDen": 2
@@ -17400,7 +17400,7 @@
    "config": {
     "nMin": 3,
     "nTarget": 10,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 2,
     "distNum": 2,
     "distDen": 3
@@ -17500,7 +17500,7 @@
    "config": {
     "nMin": 1,
     "nTarget": 8,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 5,
     "distNum": 1,
     "distDen": 2
@@ -17622,7 +17622,7 @@
    "config": {
     "nMin": 3,
     "nTarget": 10,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 5,
     "distNum": 2,
     "distDen": 4
@@ -17800,7 +17800,7 @@
    "config": {
     "nMin": 3,
     "nTarget": 16,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 7,
     "distNum": 1,
     "distDen": 3
@@ -17933,7 +17933,7 @@
    "config": {
     "nMin": 1,
     "nTarget": 9,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 9,
     "distNum": 1,
     "distDen": 3
@@ -18076,7 +18076,7 @@
    "config": {
     "nMin": 2,
     "nTarget": 12,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 9,
     "distNum": 1,
     "distDen": 2
@@ -18200,7 +18200,7 @@
    "config": {
     "nMin": 1,
     "nTarget": 9,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 2,
     "distNum": 2,
     "distDen": 4
@@ -18328,7 +18328,7 @@
    "config": {
     "nMin": 3,
     "nTarget": 13,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 7,
     "distNum": 1,
     "distDen": 3
@@ -18441,7 +18441,7 @@
    "config": {
     "nMin": 1,
     "nTarget": 9,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 4,
     "distNum": 1,
     "distDen": 2
@@ -18624,7 +18624,7 @@
    "config": {
     "nMin": 1,
     "nTarget": 14,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 2,
     "distNum": 1,
     "distDen": 4
@@ -18787,7 +18787,7 @@
    "config": {
     "nMin": 1,
     "nTarget": 11,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 4,
     "distNum": 2,
     "distDen": 2
@@ -18974,7 +18974,7 @@
    "config": {
     "nMin": 2,
     "nTarget": 13,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 3,
     "distNum": 2,
     "distDen": 3
@@ -19155,7 +19155,7 @@
    "config": {
     "nMin": 3,
     "nTarget": 15,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 6,
     "distNum": 2,
     "distDen": 2
@@ -19293,7 +19293,7 @@
    "config": {
     "nMin": 4,
     "nTarget": 11,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 6,
     "distNum": 1,
     "distDen": 3
@@ -19431,7 +19431,7 @@
    "config": {
     "nMin": 3,
     "nTarget": 12,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 9,
     "distNum": 1,
     "distDen": 3
@@ -19519,7 +19519,7 @@
    "config": {
     "nMin": 4,
     "nTarget": 6,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 3,
     "distNum": 1,
     "distDen": 4
@@ -19652,7 +19652,7 @@
    "config": {
     "nMin": 2,
     "nTarget": 11,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 2,
     "distNum": 1,
     "distDen": 2
@@ -19775,7 +19775,7 @@
    "config": {
     "nMin": 3,
     "nTarget": 8,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 7,
     "distNum": 2,
     "distDen": 3
@@ -19921,7 +19921,7 @@
    "config": {
     "nMin": 1,
     "nTarget": 10,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 8,
     "distNum": 2,
     "distDen": 2
@@ -20031,7 +20031,7 @@
    "config": {
     "nMin": 1,
     "nTarget": 6,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 6,
     "distNum": 2,
     "distDen": 4
@@ -20153,7 +20153,7 @@
    "config": {
     "nMin": 2,
     "nTarget": 9,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 2,
     "distNum": 2,
     "distDen": 4
@@ -20286,7 +20286,7 @@
    "config": {
     "nMin": 4,
     "nTarget": 10,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 8,
     "distNum": 2,
     "distDen": 4
@@ -20456,7 +20456,7 @@
    "config": {
     "nMin": 1,
     "nTarget": 12,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 2,
     "distNum": 2,
     "distDen": 2
@@ -20575,7 +20575,7 @@
    "config": {
     "nMin": 3,
     "nTarget": 9,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 9,
     "distNum": 2,
     "distDen": 4
@@ -20693,7 +20693,7 @@
    "config": {
     "nMin": 1,
     "nTarget": 10,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 9,
     "distNum": 2,
     "distDen": 2
@@ -20823,7 +20823,7 @@
    "config": {
     "nMin": 4,
     "nTarget": 8,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 3,
     "distNum": 1,
     "distDen": 4
@@ -20986,7 +20986,7 @@
    "config": {
     "nMin": 1,
     "nTarget": 12,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 7,
     "distNum": 2,
     "distDen": 2
@@ -21170,7 +21170,7 @@
    "config": {
     "nMin": 4,
     "nTarget": 13,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 9,
     "distNum": 1,
     "distDen": 4
@@ -21273,7 +21273,7 @@
    "config": {
     "nMin": 3,
     "nTarget": 8,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 8,
     "distNum": 2,
     "distDen": 3
@@ -21439,7 +21439,7 @@
    "config": {
     "nMin": 2,
     "nTarget": 14,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 2,
     "distNum": 2,
     "distDen": 4
@@ -21567,7 +21567,7 @@
    "config": {
     "nMin": 4,
     "nTarget": 10,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 9,
     "distNum": 2,
     "distDen": 2
@@ -21727,7 +21727,7 @@
    "config": {
     "nMin": 3,
     "nTarget": 14,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 3,
     "distNum": 2,
     "distDen": 4
@@ -21856,7 +21856,7 @@
    "config": {
     "nMin": 1,
     "nTarget": 9,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 7,
     "distNum": 2,
     "distDen": 4
@@ -21994,7 +21994,7 @@
    "config": {
     "nMin": 1,
     "nTarget": 10,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 9,
     "distNum": 2,
     "distDen": 4
@@ -22149,7 +22149,7 @@
    "config": {
     "nMin": 1,
     "nTarget": 13,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 9,
     "distNum": 1,
     "distDen": 3
@@ -22232,7 +22232,7 @@
    "config": {
     "nMin": 1,
     "nTarget": 7,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 8,
     "distNum": 1,
     "distDen": 4
@@ -22320,7 +22320,7 @@
    "config": {
     "nMin": 1,
     "nTarget": 7,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 4,
     "distNum": 1,
     "distDen": 2
@@ -22468,7 +22468,7 @@
    "config": {
     "nMin": 4,
     "nTarget": 11,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 5,
     "distNum": 2,
     "distDen": 3
@@ -22660,7 +22660,7 @@
    "config": {
     "nMin": 3,
     "nTarget": 14,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 4,
     "distNum": 1,
     "distDen": 4
@@ -22783,7 +22783,7 @@
    "config": {
     "nMin": 3,
     "nTarget": 5,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 6,
     "distNum": 2,
     "distDen": 4
@@ -22881,7 +22881,7 @@
    "config": {
     "nMin": 3,
     "nTarget": 7,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 4,
     "distNum": 1,
     "distDen": 3
@@ -22984,7 +22984,7 @@
    "config": {
     "nMin": 1,
     "nTarget": 11,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 2,
     "distNum": 1,
     "distDen": 3
@@ -23132,7 +23132,7 @@
    "config": {
     "nMin": 3,
     "nTarget": 13,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 8,
     "distNum": 1,
     "distDen": 2
@@ -23275,7 +23275,7 @@
    "config": {
     "nMin": 1,
     "nTarget": 12,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 4,
     "distNum": 1,
     "distDen": 4
@@ -23409,7 +23409,7 @@
    "config": {
     "nMin": 4,
     "nTarget": 10,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 9,
     "distNum": 1,
     "distDen": 2
@@ -23557,7 +23557,7 @@
    "config": {
     "nMin": 4,
     "nTarget": 9,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 8,
     "distNum": 1,
     "distDen": 4
@@ -23700,7 +23700,7 @@
    "config": {
     "nMin": 1,
     "nTarget": 8,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 3,
     "distNum": 2,
     "distDen": 2
@@ -23816,7 +23816,7 @@
    "config": {
     "nMin": 4,
     "nTarget": 7,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 9,
     "distNum": 1,
     "distDen": 3
@@ -23979,7 +23979,7 @@
    "config": {
     "nMin": 3,
     "nTarget": 16,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 5,
     "distNum": 2,
     "distDen": 4
@@ -24154,7 +24154,7 @@
    "config": {
     "nMin": 1,
     "nTarget": 13,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 9,
     "distNum": 2,
     "distDen": 4
@@ -24322,7 +24322,7 @@
    "config": {
     "nMin": 4,
     "nTarget": 16,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 4,
     "distNum": 2,
     "distDen": 2
@@ -24514,7 +24514,7 @@
    "config": {
     "nMin": 4,
     "nTarget": 14,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 7,
     "distNum": 1,
     "distDen": 4
@@ -24667,7 +24667,7 @@
    "config": {
     "nMin": 4,
     "nTarget": 12,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 4,
     "distNum": 1,
     "distDen": 2
@@ -24816,7 +24816,7 @@
    "config": {
     "nMin": 1,
     "nTarget": 13,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 6,
     "distNum": 2,
     "distDen": 4
@@ -24959,7 +24959,7 @@
    "config": {
     "nMin": 4,
     "nTarget": 14,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 2,
     "distNum": 2,
     "distDen": 4
@@ -25077,7 +25077,7 @@
    "config": {
     "nMin": 3,
     "nTarget": 11,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 3,
     "distNum": 1,
     "distDen": 3
@@ -25210,7 +25210,7 @@
    "config": {
     "nMin": 4,
     "nTarget": 11,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 9,
     "distNum": 1,
     "distDen": 4
@@ -25348,7 +25348,7 @@
    "config": {
     "nMin": 1,
     "nTarget": 11,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 9,
     "distNum": 1,
     "distDen": 2
@@ -25500,7 +25500,7 @@
    "config": {
     "nMin": 1,
     "nTarget": 9,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 5,
     "distNum": 1,
     "distDen": 2
@@ -25623,7 +25623,7 @@
    "config": {
     "nMin": 2,
     "nTarget": 9,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 8,
     "distNum": 2,
     "distDen": 4
@@ -25734,7 +25734,7 @@
    "config": {
     "nMin": 1,
     "nTarget": 6,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 6,
     "distNum": 2,
     "distDen": 3
@@ -25906,7 +25906,7 @@
    "config": {
     "nMin": 1,
     "nTarget": 15,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 8,
     "distNum": 1,
     "distDen": 2
@@ -26096,7 +26096,7 @@
    "config": {
     "nMin": 1,
     "nTarget": 13,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 3,
     "distNum": 2,
     "distDen": 2
@@ -26287,7 +26287,7 @@
    "config": {
     "nMin": 2,
     "nTarget": 12,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 7,
     "distNum": 2,
     "distDen": 4
@@ -26436,7 +26436,7 @@
    "config": {
     "nMin": 3,
     "nTarget": 8,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 6,
     "distNum": 2,
     "distDen": 3
@@ -26582,7 +26582,7 @@
    "config": {
     "nMin": 4,
     "nTarget": 10,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 8,
     "distNum": 1,
     "distDen": 4
@@ -26710,7 +26710,7 @@
    "config": {
     "nMin": 2,
     "nTarget": 9,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 9,
     "distNum": 1,
     "distDen": 2
@@ -26808,7 +26808,7 @@
    "config": {
     "nMin": 3,
     "nTarget": 9,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 5,
     "distNum": 2,
     "distDen": 4
@@ -26984,7 +26984,7 @@
    "config": {
     "nMin": 4,
     "nTarget": 14,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 9,
     "distNum": 2,
     "distDen": 3
@@ -27152,7 +27152,7 @@
    "config": {
     "nMin": 2,
     "nTarget": 13,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 7,
     "distNum": 2,
     "distDen": 4
@@ -27263,7 +27263,7 @@
    "config": {
     "nMin": 3,
     "nTarget": 9,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 6,
     "distNum": 1,
     "distDen": 3
@@ -27431,7 +27431,7 @@
    "config": {
     "nMin": 4,
     "nTarget": 16,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 3,
     "distNum": 2,
     "distDen": 3
@@ -27529,7 +27529,7 @@
    "config": {
     "nMin": 2,
     "nTarget": 8,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 4,
     "distNum": 1,
     "distDen": 3
@@ -27622,7 +27622,7 @@
    "config": {
     "nMin": 4,
     "nTarget": 6,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 6,
     "distNum": 2,
     "distDen": 4
@@ -27734,7 +27734,7 @@
    "config": {
     "nMin": 3,
     "nTarget": 8,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 3,
     "distNum": 1,
     "distDen": 4
@@ -27892,7 +27892,7 @@
    "config": {
     "nMin": 3,
     "nTarget": 15,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 9,
     "distNum": 2,
     "distDen": 2
@@ -28032,7 +28032,7 @@
    "config": {
     "nMin": 4,
     "nTarget": 10,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 3,
     "distNum": 2,
     "distDen": 3
@@ -28142,7 +28142,7 @@
    "config": {
     "nMin": 4,
     "nTarget": 9,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 9,
     "distNum": 1,
     "distDen": 4
@@ -28306,7 +28306,7 @@
    "config": {
     "nMin": 3,
     "nTarget": 12,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 4,
     "distNum": 1,
     "distDen": 2
@@ -28485,7 +28485,7 @@
    "config": {
     "nMin": 3,
     "nTarget": 16,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 9,
     "distNum": 1,
     "distDen": 2
@@ -28666,7 +28666,7 @@
    "config": {
     "nMin": 2,
     "nTarget": 13,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 8,
     "distNum": 1,
     "distDen": 3
@@ -28784,7 +28784,7 @@
    "config": {
     "nMin": 2,
     "nTarget": 12,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 3,
     "distNum": 1,
     "distDen": 4
@@ -28872,7 +28872,7 @@
    "config": {
     "nMin": 4,
     "nTarget": 5,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 8,
     "distNum": 2,
     "distDen": 4
@@ -29032,7 +29032,7 @@
    "config": {
     "nMin": 4,
     "nTarget": 13,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 2,
     "distNum": 1,
     "distDen": 4
@@ -29115,7 +29115,7 @@
    "config": {
     "nMin": 2,
     "nTarget": 7,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 8,
     "distNum": 1,
     "distDen": 4
@@ -29208,7 +29208,7 @@
    "config": {
     "nMin": 4,
     "nTarget": 10,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 9,
     "distNum": 1,
     "distDen": 3
@@ -29306,7 +29306,7 @@
    "config": {
     "nMin": 3,
     "nTarget": 7,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 3,
     "distNum": 1,
     "distDen": 2
@@ -29445,7 +29445,7 @@
    "config": {
     "nMin": 3,
     "nTarget": 13,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 3,
     "distNum": 2,
     "distDen": 4
@@ -29590,7 +29590,7 @@
    "config": {
     "nMin": 1,
     "nTarget": 11,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 8,
     "distNum": 2,
     "distDen": 4
@@ -29735,7 +29735,7 @@
    "config": {
     "nMin": 3,
     "nTarget": 11,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 6,
     "distNum": 1,
     "distDen": 2
@@ -29845,7 +29845,7 @@
    "config": {
     "nMin": 1,
     "nTarget": 8,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 8,
     "distNum": 2,
     "distDen": 2
@@ -29954,7 +29954,7 @@
    "config": {
     "nMin": 2,
     "nTarget": 7,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 6,
     "distNum": 2,
     "distDen": 3
@@ -30053,7 +30053,7 @@
    "config": {
     "nMin": 3,
     "nTarget": 5,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 3,
     "distNum": 2,
     "distDen": 3
@@ -30191,7 +30191,7 @@
    "config": {
     "nMin": 1,
     "nTarget": 12,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 3,
     "distNum": 1,
     "distDen": 4
@@ -30259,7 +30259,7 @@
    "config": {
     "nMin": 4,
     "nTarget": 7,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 6,
     "distNum": 2,
     "distDen": 3
@@ -30352,7 +30352,7 @@
    "config": {
     "nMin": 1,
     "nTarget": 6,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 9,
     "distNum": 1,
     "distDen": 4
@@ -30495,7 +30495,7 @@
    "config": {
     "nMin": 1,
     "nTarget": 13,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 3,
     "distNum": 2,
     "distDen": 3
@@ -30638,7 +30638,7 @@
    "config": {
     "nMin": 2,
     "nTarget": 13,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 5,
     "distNum": 2,
     "distDen": 3
@@ -30759,7 +30759,7 @@
    "config": {
     "nMin": 3,
     "nTarget": 7,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 2,
     "distNum": 2,
     "distDen": 4
@@ -30852,7 +30852,7 @@
    "config": {
     "nMin": 3,
     "nTarget": 7,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 6,
     "distNum": 2,
     "distDen": 2
@@ -31021,7 +31021,7 @@
    "config": {
     "nMin": 2,
     "nTarget": 15,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 9,
     "distNum": 1,
     "distDen": 3
@@ -31144,7 +31144,7 @@
    "config": {
     "nMin": 1,
     "nTarget": 11,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 9,
     "distNum": 1,
     "distDen": 4
@@ -31287,7 +31287,7 @@
    "config": {
     "nMin": 3,
     "nTarget": 14,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 4,
     "distNum": 1,
     "distDen": 3
@@ -31425,7 +31425,7 @@
    "config": {
     "nMin": 3,
     "nTarget": 13,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 5,
     "distNum": 1,
     "distDen": 4
@@ -31543,7 +31543,7 @@
    "config": {
     "nMin": 4,
     "nTarget": 9,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 9,
     "distNum": 2,
     "distDen": 2
@@ -31706,7 +31706,7 @@
    "config": {
     "nMin": 2,
     "nTarget": 13,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 2,
     "distNum": 1,
     "distDen": 4
@@ -31794,7 +31794,7 @@
    "config": {
     "nMin": 3,
     "nTarget": 8,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 6,
     "distNum": 2,
     "distDen": 4
@@ -31907,7 +31907,7 @@
    "config": {
     "nMin": 2,
     "nTarget": 9,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 4,
     "distNum": 2,
     "distDen": 4
@@ -32045,7 +32045,7 @@
    "config": {
     "nMin": 4,
     "nTarget": 11,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 5,
     "distNum": 2,
     "distDen": 2
@@ -32165,7 +32165,7 @@
    "config": {
     "nMin": 4,
     "nTarget": 10,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 4,
     "distNum": 1,
     "distDen": 2
@@ -32301,7 +32301,7 @@
    "config": {
     "nMin": 4,
     "nTarget": 10,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 6,
     "distNum": 2,
     "distDen": 4
@@ -32466,7 +32466,7 @@
    "config": {
     "nMin": 2,
     "nTarget": 12,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 2,
     "distNum": 2,
     "distDen": 2
@@ -32594,7 +32594,7 @@
    "config": {
     "nMin": 4,
     "nTarget": 10,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 4,
     "distNum": 2,
     "distDen": 4
@@ -32759,7 +32759,7 @@
    "config": {
     "nMin": 4,
     "nTarget": 14,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 7,
     "distNum": 1,
     "distDen": 2
@@ -32865,7 +32865,7 @@
    "config": {
     "nMin": 1,
     "nTarget": 5,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 9,
     "distNum": 2,
     "distDen": 4
@@ -32948,7 +32948,7 @@
    "config": {
     "nMin": 1,
     "nTarget": 6,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 9,
     "distNum": 2,
     "distDen": 4
@@ -33050,7 +33050,7 @@
    "config": {
     "nMin": 3,
     "nTarget": 8,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 7,
     "distNum": 1,
     "distDen": 3
@@ -33184,7 +33184,7 @@
    "config": {
     "nMin": 4,
     "nTarget": 8,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 3,
     "distNum": 2,
     "distDen": 3
@@ -33335,7 +33335,7 @@
    "config": {
     "nMin": 4,
     "nTarget": 9,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 3,
     "distNum": 2,
     "distDen": 3
@@ -33448,7 +33448,7 @@
    "config": {
     "nMin": 2,
     "nTarget": 8,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 4,
     "distNum": 2,
     "distDen": 2
@@ -33536,7 +33536,7 @@
    "config": {
     "nMin": 4,
     "nTarget": 7,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 7,
     "distNum": 1,
     "distDen": 3
@@ -33699,7 +33699,7 @@
    "config": {
     "nMin": 3,
     "nTarget": 16,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 2,
     "distNum": 1,
     "distDen": 3
@@ -33827,7 +33827,7 @@
    "config": {
     "nMin": 4,
     "nTarget": 12,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 4,
     "distNum": 1,
     "distDen": 4
@@ -33960,7 +33960,7 @@
    "config": {
     "nMin": 3,
     "nTarget": 11,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 4,
     "distNum": 2,
     "distDen": 3
@@ -34097,7 +34097,7 @@
    "config": {
     "nMin": 1,
     "nTarget": 9,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 2,
     "distNum": 1,
     "distDen": 4
@@ -34235,7 +34235,7 @@
    "config": {
     "nMin": 1,
     "nTarget": 12,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 9,
     "distNum": 1,
     "distDen": 4
@@ -34323,7 +34323,7 @@
    "config": {
     "nMin": 3,
     "nTarget": 8,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 8,
     "distNum": 1,
     "distDen": 2
@@ -34427,7 +34427,7 @@
    "config": {
     "nMin": 2,
     "nTarget": 5,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 3,
     "distNum": 1,
     "distDen": 2
@@ -34552,7 +34552,7 @@
    "config": {
     "nMin": 1,
     "nTarget": 9,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 3,
     "distNum": 2,
     "distDen": 3
@@ -34670,7 +34670,7 @@
    "config": {
     "nMin": 2,
     "nTarget": 10,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 2,
     "distNum": 2,
     "distDen": 2
@@ -34795,7 +34795,7 @@
    "config": {
     "nMin": 1,
     "nTarget": 9,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 5,
     "distNum": 2,
     "distDen": 3
@@ -34951,7 +34951,7 @@
    "config": {
     "nMin": 1,
     "nTarget": 14,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 9,
     "distNum": 2,
     "distDen": 2
@@ -35128,7 +35128,7 @@
    "config": {
     "nMin": 4,
     "nTarget": 15,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 4,
     "distNum": 2,
     "distDen": 3
@@ -35274,7 +35274,7 @@
    "config": {
     "nMin": 3,
     "nTarget": 11,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 7,
     "distNum": 1,
     "distDen": 4
@@ -35377,7 +35377,7 @@
    "config": {
     "nMin": 4,
     "nTarget": 9,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 6,
     "distNum": 2,
     "distDen": 4
@@ -35555,7 +35555,7 @@
    "config": {
     "nMin": 4,
     "nTarget": 13,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 8,
     "distNum": 1,
     "distDen": 3
@@ -35701,7 +35701,7 @@
    "config": {
     "nMin": 2,
     "nTarget": 8,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 3,
     "distNum": 1,
     "distDen": 2
@@ -35812,7 +35812,7 @@
    "config": {
     "nMin": 4,
     "nTarget": 8,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 4,
     "distNum": 2,
     "distDen": 4
@@ -35941,7 +35941,7 @@
    "config": {
     "nMin": 1,
     "nTarget": 11,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 5,
     "distNum": 1,
     "distDen": 2
@@ -36099,7 +36099,7 @@
    "config": {
     "nMin": 2,
     "nTarget": 15,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 5,
     "distNum": 2,
     "distDen": 2
@@ -36269,7 +36269,7 @@
    "config": {
     "nMin": 1,
     "nTarget": 14,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 7,
     "distNum": 1,
     "distDen": 2
@@ -36392,7 +36392,7 @@
    "config": {
     "nMin": 4,
     "nTarget": 10,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 9,
     "distNum": 2,
     "distDen": 2
@@ -36537,7 +36537,7 @@
    "config": {
     "nMin": 2,
     "nTarget": 13,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 8,
     "distNum": 1,
     "distDen": 3
@@ -36642,7 +36642,7 @@
    "config": {
     "nMin": 2,
     "nTarget": 8,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 2,
     "distNum": 1,
     "distDen": 3
@@ -36769,7 +36769,7 @@
    "config": {
     "nMin": 4,
     "nTarget": 11,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 2,
     "distNum": 1,
     "distDen": 4
@@ -36897,7 +36897,7 @@
    "config": {
     "nMin": 3,
     "nTarget": 9,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 7,
     "distNum": 1,
     "distDen": 4
@@ -37060,7 +37060,7 @@
    "config": {
     "nMin": 3,
     "nTarget": 12,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 8,
     "distNum": 2,
     "distDen": 3
@@ -37194,7 +37194,7 @@
    "config": {
     "nMin": 2,
     "nTarget": 10,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 9,
     "distNum": 2,
     "distDen": 4
@@ -37352,7 +37352,7 @@
    "config": {
     "nMin": 4,
     "nTarget": 11,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 5,
     "distNum": 2,
     "distDen": 2
@@ -37459,7 +37459,7 @@
    "config": {
     "nMin": 1,
     "nTarget": 6,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 5,
     "distNum": 1,
     "distDen": 4
@@ -37607,7 +37607,7 @@
    "config": {
     "nMin": 4,
     "nTarget": 15,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 4,
     "distNum": 1,
     "distDen": 2
@@ -37690,7 +37690,7 @@
    "config": {
     "nMin": 4,
     "nTarget": 6,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 4,
     "distNum": 1,
     "distDen": 3
@@ -37838,7 +37838,7 @@
    "config": {
     "nMin": 1,
     "nTarget": 12,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 7,
     "distNum": 1,
     "distDen": 2
@@ -38007,7 +38007,7 @@
    "config": {
     "nMin": 2,
     "nTarget": 11,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 3,
     "distNum": 2,
     "distDen": 2
@@ -38144,7 +38144,7 @@
    "config": {
     "nMin": 4,
     "nTarget": 9,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 7,
     "distNum": 2,
     "distDen": 2
@@ -38317,7 +38317,7 @@
    "config": {
     "nMin": 3,
     "nTarget": 12,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 7,
     "distNum": 1,
     "distDen": 4
@@ -38491,7 +38491,7 @@
    "config": {
     "nMin": 4,
     "nTarget": 15,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 9,
     "distNum": 2,
     "distDen": 2
@@ -38667,7 +38667,7 @@
    "config": {
     "nMin": 4,
     "nTarget": 14,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 9,
     "distNum": 2,
     "distDen": 4
@@ -38840,7 +38840,7 @@
    "config": {
     "nMin": 1,
     "nTarget": 15,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 4,
     "distNum": 2,
     "distDen": 3
@@ -38995,7 +38995,7 @@
    "config": {
     "nMin": 2,
     "nTarget": 9,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 3,
     "distNum": 1,
     "distDen": 2
@@ -39173,7 +39173,7 @@
    "config": {
     "nMin": 1,
     "nTarget": 13,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 2,
     "distNum": 2,
     "distDen": 2
@@ -39326,7 +39326,7 @@
    "config": {
     "nMin": 2,
     "nTarget": 13,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 7,
     "distNum": 1,
     "distDen": 2
@@ -39452,7 +39452,7 @@
    "config": {
     "nMin": 1,
     "nTarget": 7,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 7,
     "distNum": 2,
     "distDen": 3
@@ -39600,7 +39600,7 @@
    "config": {
     "nMin": 3,
     "nTarget": 12,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 2,
     "distNum": 2,
     "distDen": 2
@@ -39693,7 +39693,7 @@
    "config": {
     "nMin": 3,
     "nTarget": 6,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 8,
     "distNum": 1,
     "distDen": 4
@@ -39836,7 +39836,7 @@
    "config": {
     "nMin": 4,
     "nTarget": 12,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 9,
     "distNum": 2,
     "distDen": 3
@@ -39960,7 +39960,7 @@
    "config": {
     "nMin": 2,
     "nTarget": 7,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 2,
     "distNum": 2,
     "distDen": 4
@@ -40043,7 +40043,7 @@
    "config": {
     "nMin": 3,
     "nTarget": 8,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 2,
     "distNum": 1,
     "distDen": 4
@@ -40191,7 +40191,7 @@
    "config": {
     "nMin": 1,
     "nTarget": 13,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 6,
     "distNum": 1,
     "distDen": 3
@@ -40329,7 +40329,7 @@
    "config": {
     "nMin": 3,
     "nTarget": 12,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 3,
     "distNum": 1,
     "distDen": 2
@@ -40462,7 +40462,7 @@
    "config": {
     "nMin": 1,
     "nTarget": 12,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 7,
     "distNum": 2,
     "distDen": 3
@@ -40601,7 +40601,7 @@
    "config": {
     "nMin": 2,
     "nTarget": 9,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 2,
     "distNum": 1,
     "distDen": 3
@@ -40694,7 +40694,7 @@
    "config": {
     "nMin": 1,
     "nTarget": 8,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 8,
     "distNum": 1,
     "distDen": 4
@@ -40807,7 +40807,7 @@
    "config": {
     "nMin": 1,
     "nTarget": 12,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 7,
     "distNum": 2,
     "distDen": 4
@@ -40945,7 +40945,7 @@
    "config": {
     "nMin": 3,
     "nTarget": 9,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 2,
     "distNum": 2,
     "distDen": 3
@@ -41123,7 +41123,7 @@
    "config": {
     "nMin": 4,
     "nTarget": 13,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 6,
     "distNum": 2,
     "distDen": 2
@@ -41239,7 +41239,7 @@
    "config": {
     "nMin": 4,
     "nTarget": 8,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 9,
     "distNum": 1,
     "distDen": 3
@@ -41387,7 +41387,7 @@
    "config": {
     "nMin": 3,
     "nTarget": 12,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 8,
     "distNum": 1,
     "distDen": 4
@@ -41531,7 +41531,7 @@
    "config": {
     "nMin": 3,
     "nTarget": 8,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 6,
     "distNum": 1,
     "distDen": 4
@@ -41639,7 +41639,7 @@
    "config": {
     "nMin": 3,
     "nTarget": 12,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 8,
     "distNum": 2,
     "distDen": 2
@@ -41800,7 +41800,7 @@
    "config": {
     "nMin": 4,
     "nTarget": 14,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 2,
     "distNum": 1,
     "distDen": 2
@@ -41928,7 +41928,7 @@
    "config": {
     "nMin": 1,
     "nTarget": 13,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 8,
     "distNum": 2,
     "distDen": 2
@@ -42115,7 +42115,7 @@
    "config": {
     "nMin": 4,
     "nTarget": 13,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 7,
     "distNum": 1,
     "distDen": 2
@@ -42261,7 +42261,7 @@
    "config": {
     "nMin": 2,
     "nTarget": 9,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 8,
     "distNum": 2,
     "distDen": 2
@@ -42389,7 +42389,7 @@
    "config": {
     "nMin": 3,
     "nTarget": 8,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 7,
     "distNum": 2,
     "distDen": 3
@@ -42525,7 +42525,7 @@
    "config": {
     "nMin": 2,
     "nTarget": 9,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 3,
     "distNum": 1,
     "distDen": 4
@@ -42618,7 +42618,7 @@
    "config": {
     "nMin": 1,
     "nTarget": 7,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 9,
     "distNum": 1,
     "distDen": 4
@@ -42761,7 +42761,7 @@
    "config": {
     "nMin": 1,
     "nTarget": 12,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 5,
     "distNum": 1,
     "distDen": 2
@@ -42950,7 +42950,7 @@
    "config": {
     "nMin": 3,
     "nTarget": 16,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 6,
     "distNum": 1,
     "distDen": 4
@@ -43073,7 +43073,7 @@
    "config": {
     "nMin": 4,
     "nTarget": 10,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 8,
     "distNum": 1,
     "distDen": 4
@@ -43181,7 +43181,7 @@
    "config": {
     "nMin": 1,
     "nTarget": 9,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 4,
     "distNum": 1,
     "distDen": 3
@@ -43319,7 +43319,7 @@
    "config": {
     "nMin": 4,
     "nTarget": 12,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 6,
     "distNum": 2,
     "distDen": 2
@@ -43449,7 +43449,7 @@
    "config": {
     "nMin": 4,
     "nTarget": 9,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 8,
     "distNum": 2,
     "distDen": 4
@@ -43602,7 +43602,7 @@
    "config": {
     "nMin": 1,
     "nTarget": 12,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 5,
     "distNum": 1,
     "distDen": 2
@@ -43754,7 +43754,7 @@
    "config": {
     "nMin": 1,
     "nTarget": 11,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 4,
     "distNum": 2,
     "distDen": 2
@@ -43842,7 +43842,7 @@
    "config": {
     "nMin": 4,
     "nTarget": 8,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 8,
     "distNum": 2,
     "distDen": 2
@@ -43980,7 +43980,7 @@
    "config": {
     "nMin": 4,
     "nTarget": 14,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 3,
     "distNum": 2,
     "distDen": 2
@@ -44127,7 +44127,7 @@
    "config": {
     "nMin": 3,
     "nTarget": 11,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 4,
     "distNum": 2,
     "distDen": 3
@@ -44279,7 +44279,7 @@
    "config": {
     "nMin": 1,
     "nTarget": 12,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 2,
     "distNum": 1,
     "distDen": 4
@@ -44372,7 +44372,7 @@
    "config": {
     "nMin": 3,
     "nTarget": 7,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 6,
     "distNum": 1,
     "distDen": 2
@@ -44475,7 +44475,7 @@
    "config": {
     "nMin": 3,
     "nTarget": 9,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 7,
     "distNum": 1,
     "distDen": 2
@@ -44573,7 +44573,7 @@
    "config": {
     "nMin": 1,
     "nTarget": 8,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 8,
     "distNum": 2,
     "distDen": 2
@@ -44719,7 +44719,7 @@
    "config": {
     "nMin": 3,
     "nTarget": 9,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 7,
     "distNum": 2,
     "distDen": 3
@@ -44902,7 +44902,7 @@
    "config": {
     "nMin": 4,
     "nTarget": 15,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 6,
     "distNum": 2,
     "distDen": 3
@@ -45000,7 +45000,7 @@
    "config": {
     "nMin": 3,
     "nTarget": 9,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 4,
     "distNum": 2,
     "distDen": 3
@@ -45103,7 +45103,7 @@
    "config": {
     "nMin": 3,
     "nTarget": 9,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 6,
     "distNum": 2,
     "distDen": 2
@@ -45246,7 +45246,7 @@
    "config": {
     "nMin": 1,
     "nTarget": 11,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 6,
     "distNum": 1,
     "distDen": 4
@@ -45369,7 +45369,7 @@
    "config": {
     "nMin": 1,
     "nTarget": 10,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 4,
     "distNum": 2,
     "distDen": 2
@@ -45549,7 +45549,7 @@
    "config": {
     "nMin": 1,
     "nTarget": 15,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 6,
     "distNum": 2,
     "distDen": 4
@@ -45747,7 +45747,7 @@
    "config": {
     "nMin": 4,
     "nTarget": 14,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 3,
     "distNum": 1,
     "distDen": 3
@@ -45855,7 +45855,7 @@
    "config": {
     "nMin": 2,
     "nTarget": 8,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 6,
     "distNum": 2,
     "distDen": 3
@@ -45951,7 +45951,7 @@
    "config": {
     "nMin": 4,
     "nTarget": 5,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 9,
     "distNum": 2,
     "distDen": 2
@@ -46041,7 +46041,7 @@
    "config": {
     "nMin": 4,
     "nTarget": 6,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 7,
     "distNum": 2,
     "distDen": 2
@@ -46168,7 +46168,7 @@
    "config": {
     "nMin": 4,
     "nTarget": 8,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 5,
     "distNum": 1,
     "distDen": 2
@@ -46289,7 +46289,7 @@
    "config": {
     "nMin": 4,
     "nTarget": 8,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 3,
     "distNum": 2,
     "distDen": 3
@@ -46417,7 +46417,7 @@
    "config": {
     "nMin": 1,
     "nTarget": 10,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 4,
     "distNum": 1,
     "distDen": 2
@@ -46532,7 +46532,7 @@
    "config": {
     "nMin": 2,
     "nTarget": 6,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 8,
     "distNum": 2,
     "distDen": 4
@@ -46644,7 +46644,7 @@
    "config": {
     "nMin": 2,
     "nTarget": 5,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 6,
     "distNum": 2,
     "distDen": 2
@@ -46784,7 +46784,7 @@
    "config": {
     "nMin": 4,
     "nTarget": 11,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 3,
     "distNum": 1,
     "distDen": 4
@@ -46922,7 +46922,7 @@
    "config": {
     "nMin": 1,
     "nTarget": 11,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 8,
     "distNum": 1,
     "distDen": 3
@@ -47059,7 +47059,7 @@
    "config": {
     "nMin": 4,
     "nTarget": 8,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 2,
     "distNum": 1,
     "distDen": 2
@@ -47205,7 +47205,7 @@
    "config": {
     "nMin": 2,
     "nTarget": 11,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 5,
     "distNum": 1,
     "distDen": 2
@@ -47358,7 +47358,7 @@
    "config": {
     "nMin": 4,
     "nTarget": 14,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 6,
     "distNum": 2,
     "distDen": 4
@@ -47531,7 +47531,7 @@
    "config": {
     "nMin": 3,
     "nTarget": 14,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 3,
     "distNum": 1,
     "distDen": 3
@@ -47664,7 +47664,7 @@
    "config": {
     "nMin": 3,
     "nTarget": 11,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 4,
     "distNum": 1,
     "distDen": 3
@@ -47792,7 +47792,7 @@
    "config": {
     "nMin": 4,
     "nTarget": 11,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 2,
     "distNum": 1,
     "distDen": 2
@@ -47945,7 +47945,7 @@
    "config": {
     "nMin": 3,
     "nTarget": 12,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 7,
     "distNum": 1,
     "distDen": 2
@@ -48094,7 +48094,7 @@
    "config": {
     "nMin": 1,
     "nTarget": 9,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 5,
     "distNum": 1,
     "distDen": 3
@@ -48202,7 +48202,7 @@
    "config": {
     "nMin": 4,
     "nTarget": 8,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 3,
     "distNum": 2,
     "distDen": 2
@@ -48355,7 +48355,7 @@
    "config": {
     "nMin": 1,
     "nTarget": 12,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 5,
     "distNum": 1,
     "distDen": 2
@@ -48489,7 +48489,7 @@
    "config": {
     "nMin": 3,
     "nTarget": 7,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 9,
     "distNum": 2,
     "distDen": 2
@@ -48653,7 +48653,7 @@
    "config": {
     "nMin": 1,
     "nTarget": 12,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 9,
     "distNum": 1,
     "distDen": 3
@@ -48772,7 +48772,7 @@
    "config": {
     "nMin": 2,
     "nTarget": 6,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 6,
     "distNum": 2,
     "distDen": 2
@@ -48929,7 +48929,7 @@
    "config": {
     "nMin": 2,
     "nTarget": 13,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 4,
     "distNum": 2,
     "distDen": 4
@@ -49042,7 +49042,7 @@
    "config": {
     "nMin": 4,
     "nTarget": 11,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 8,
     "distNum": 1,
     "distDen": 3
@@ -49195,7 +49195,7 @@
    "config": {
     "nMin": 2,
     "nTarget": 13,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 3,
     "distNum": 1,
     "distDen": 3
@@ -49283,7 +49283,7 @@
    "config": {
     "nMin": 1,
     "nTarget": 8,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 4,
     "distNum": 1,
     "distDen": 3
@@ -49376,7 +49376,7 @@
    "config": {
     "nMin": 3,
     "nTarget": 9,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 9,
     "distNum": 1,
     "distDen": 2
@@ -49514,7 +49514,7 @@
    "config": {
     "nMin": 3,
     "nTarget": 11,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 3,
     "distNum": 2,
     "distDen": 2
@@ -49681,7 +49681,7 @@
    "config": {
     "nMin": 2,
     "nTarget": 12,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 2,
     "distNum": 1,
     "distDen": 4
@@ -49839,7 +49839,7 @@
    "config": {
     "nMin": 3,
     "nTarget": 15,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 5,
     "distNum": 2,
     "distDen": 3
@@ -49977,7 +49977,7 @@
    "config": {
     "nMin": 1,
     "nTarget": 8,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 8,
     "distNum": 2,
     "distDen": 4
@@ -50110,7 +50110,7 @@
    "config": {
     "nMin": 2,
     "nTarget": 11,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 4,
     "distNum": 1,
     "distDen": 3
@@ -50233,7 +50233,7 @@
    "config": {
     "nMin": 2,
     "nTarget": 11,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 6,
     "distNum": 1,
     "distDen": 4
@@ -50396,7 +50396,7 @@
    "config": {
     "nMin": 3,
     "nTarget": 12,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 5,
     "distNum": 1,
     "distDen": 2
@@ -50515,7 +50515,7 @@
    "config": {
     "nMin": 2,
     "nTarget": 8,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 5,
     "distNum": 1,
     "distDen": 4
@@ -50638,7 +50638,7 @@
    "config": {
     "nMin": 2,
     "nTarget": 9,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 4,
     "distNum": 1,
     "distDen": 2
@@ -50751,7 +50751,7 @@
    "config": {
     "nMin": 1,
     "nTarget": 10,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 2,
     "distNum": 2,
     "distDen": 2
@@ -50879,7 +50879,7 @@
    "config": {
     "nMin": 2,
     "nTarget": 9,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 5,
     "distNum": 2,
     "distDen": 4
@@ -51007,7 +51007,7 @@
    "config": {
     "nMin": 1,
     "nTarget": 12,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 5,
     "distNum": 2,
     "distDen": 3
@@ -51160,7 +51160,7 @@
    "config": {
     "nMin": 1,
     "nTarget": 13,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 9,
     "distNum": 1,
     "distDen": 4
@@ -51271,7 +51271,7 @@
    "config": {
     "nMin": 2,
     "nTarget": 6,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 4,
     "distNum": 1,
     "distDen": 4
@@ -51404,7 +51404,7 @@
    "config": {
     "nMin": 3,
     "nTarget": 11,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 2,
     "distNum": 1,
     "distDen": 3
@@ -51497,7 +51497,7 @@
    "config": {
     "nMin": 1,
     "nTarget": 8,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 4,
     "distNum": 2,
     "distDen": 4
@@ -51623,7 +51623,7 @@
    "config": {
     "nMin": 1,
     "nTarget": 9,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 5,
     "distNum": 1,
     "distDen": 2
@@ -51776,7 +51776,7 @@
    "config": {
     "nMin": 4,
     "nTarget": 12,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 5,
     "distNum": 2,
     "distDen": 4
@@ -51930,7 +51930,7 @@
    "config": {
     "nMin": 3,
     "nTarget": 10,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 2,
     "distNum": 2,
     "distDen": 3
@@ -52100,7 +52100,7 @@
    "config": {
     "nMin": 4,
     "nTarget": 14,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 7,
     "distNum": 2,
     "distDen": 4
@@ -52228,7 +52228,7 @@
    "config": {
     "nMin": 2,
     "nTarget": 12,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 3,
     "distNum": 1,
     "distDen": 3
@@ -52301,7 +52301,7 @@
    "config": {
     "nMin": 3,
     "nTarget": 8,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 6,
     "distNum": 1,
     "distDen": 3
@@ -52409,7 +52409,7 @@
    "config": {
     "nMin": 3,
     "nTarget": 9,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 9,
     "distNum": 1,
     "distDen": 3
@@ -52542,7 +52542,7 @@
    "config": {
     "nMin": 4,
     "nTarget": 9,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 6,
     "distNum": 2,
     "distDen": 2
@@ -52665,7 +52665,7 @@
    "config": {
     "nMin": 4,
     "nTarget": 8,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 3,
     "distNum": 1,
     "distDen": 2
@@ -52811,7 +52811,7 @@
    "config": {
     "nMin": 1,
     "nTarget": 10,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 6,
     "distNum": 2,
     "distDen": 4
@@ -52936,7 +52936,7 @@
    "config": {
     "nMin": 1,
     "nTarget": 7,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 4,
     "distNum": 1,
     "distDen": 4
@@ -53069,7 +53069,7 @@
    "config": {
     "nMin": 1,
     "nTarget": 11,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 6,
     "distNum": 2,
     "distDen": 2
@@ -53181,7 +53181,7 @@
    "config": {
     "nMin": 1,
     "nTarget": 8,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 5,
     "distNum": 1,
     "distDen": 2
@@ -53320,7 +53320,7 @@
    "config": {
     "nMin": 2,
     "nTarget": 11,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 6,
     "distNum": 1,
     "distDen": 2
@@ -53483,7 +53483,7 @@
    "config": {
     "nMin": 4,
     "nTarget": 14,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 3,
     "distNum": 1,
     "distDen": 3
@@ -53601,7 +53601,7 @@
    "config": {
     "nMin": 3,
     "nTarget": 8,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 6,
     "distNum": 1,
     "distDen": 2
@@ -53724,7 +53724,7 @@
    "config": {
     "nMin": 3,
     "nTarget": 11,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 3,
     "distNum": 1,
     "distDen": 3
@@ -53897,7 +53897,7 @@
    "config": {
     "nMin": 1,
     "nTarget": 13,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 9,
     "distNum": 1,
     "distDen": 3
@@ -54068,7 +54068,7 @@
    "config": {
     "nMin": 4,
     "nTarget": 14,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 5,
     "distNum": 1,
     "distDen": 3
@@ -54239,7 +54239,7 @@
    "config": {
     "nMin": 2,
     "nTarget": 15,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 8,
     "distNum": 1,
     "distDen": 3
@@ -54397,7 +54397,7 @@
    "config": {
     "nMin": 2,
     "nTarget": 14,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 6,
     "distNum": 1,
     "distDen": 3
@@ -54605,7 +54605,7 @@
    "config": {
     "nMin": 3,
     "nTarget": 16,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 5,
     "distNum": 2,
     "distDen": 2
@@ -54787,7 +54787,7 @@
    "config": {
     "nMin": 4,
     "nTarget": 15,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 2,
     "distNum": 2,
     "distDen": 4
@@ -54958,7 +54958,7 @@
    "config": {
     "nMin": 3,
     "nTarget": 12,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 9,
     "distNum": 1,
     "distDen": 2
@@ -55072,7 +55072,7 @@
    "config": {
     "nMin": 3,
     "nTarget": 6,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 3,
     "distNum": 1,
     "distDen": 4
@@ -55210,7 +55210,7 @@
    "config": {
     "nMin": 2,
     "nTarget": 11,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 9,
     "distNum": 1,
     "distDen": 2
@@ -55332,7 +55332,7 @@
    "config": {
     "nMin": 2,
     "nTarget": 7,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 3,
     "distNum": 2,
     "distDen": 3
@@ -55471,7 +55471,7 @@
    "config": {
     "nMin": 2,
     "nTarget": 11,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 3,
     "distNum": 2,
     "distDen": 4
@@ -55596,7 +55596,7 @@
    "config": {
     "nMin": 4,
     "nTarget": 10,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 8,
     "distNum": 1,
     "distDen": 2
@@ -55744,7 +55744,7 @@
    "config": {
     "nMin": 1,
     "nTarget": 12,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 3,
     "distNum": 2,
     "distDen": 2
@@ -55848,7 +55848,7 @@
    "config": {
     "nMin": 3,
     "nTarget": 8,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 5,
     "distNum": 2,
     "distDen": 4
@@ -56015,7 +56015,7 @@
    "config": {
     "nMin": 2,
     "nTarget": 14,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 9,
     "distNum": 2,
     "distDen": 2
@@ -56153,7 +56153,7 @@
    "config": {
     "nMin": 3,
     "nTarget": 9,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 5,
     "distNum": 1,
     "distDen": 4
@@ -56266,7 +56266,7 @@
    "config": {
     "nMin": 2,
     "nTarget": 10,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 4,
     "distNum": 1,
     "distDen": 4
@@ -56384,7 +56384,7 @@
    "config": {
     "nMin": 4,
     "nTarget": 10,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 8,
     "distNum": 1,
     "distDen": 2
@@ -56527,7 +56527,7 @@
    "config": {
     "nMin": 2,
     "nTarget": 12,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 8,
     "distNum": 2,
     "distDen": 4
@@ -56690,7 +56690,7 @@
    "config": {
     "nMin": 2,
     "nTarget": 14,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 5,
     "distNum": 2,
     "distDen": 3
@@ -56838,7 +56838,7 @@
    "config": {
     "nMin": 2,
     "nTarget": 10,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 3,
     "distNum": 1,
     "distDen": 2
@@ -56983,7 +56983,7 @@
    "config": {
     "nMin": 3,
     "nTarget": 8,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 9,
     "distNum": 1,
     "distDen": 2
@@ -57116,7 +57116,7 @@
    "config": {
     "nMin": 1,
     "nTarget": 11,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 5,
     "distNum": 2,
     "distDen": 3
@@ -57273,7 +57273,7 @@
    "config": {
     "nMin": 1,
     "nTarget": 13,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 9,
     "distNum": 2,
     "distDen": 3
@@ -57457,7 +57457,7 @@
    "config": {
     "nMin": 3,
     "nTarget": 15,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 3,
     "distNum": 2,
     "distDen": 4
@@ -57605,7 +57605,7 @@
    "config": {
     "nMin": 2,
     "nTarget": 12,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 7,
     "distNum": 1,
     "distDen": 2
@@ -57784,7 +57784,7 @@
    "config": {
     "nMin": 4,
     "nTarget": 13,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 8,
     "distNum": 2,
     "distDen": 4
@@ -57897,7 +57897,7 @@
    "config": {
     "nMin": 3,
     "nTarget": 9,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 3,
     "distNum": 1,
     "distDen": 2
@@ -58055,7 +58055,7 @@
    "config": {
     "nMin": 2,
     "nTarget": 13,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 2,
     "distNum": 1,
     "distDen": 4
@@ -58178,7 +58178,7 @@
    "config": {
     "nMin": 2,
     "nTarget": 11,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 8,
     "distNum": 2,
     "distDen": 3
@@ -58330,7 +58330,7 @@
    "config": {
     "nMin": 2,
     "nTarget": 13,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 4,
     "distNum": 1,
     "distDen": 4
@@ -58443,7 +58443,7 @@
    "config": {
     "nMin": 1,
     "nTarget": 11,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 9,
     "distNum": 2,
     "distDen": 3
@@ -58576,7 +58576,7 @@
    "config": {
     "nMin": 2,
     "nTarget": 11,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 8,
     "distNum": 2,
     "distDen": 3
@@ -58746,7 +58746,7 @@
    "config": {
     "nMin": 2,
     "nTarget": 11,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 2,
     "distNum": 1,
     "distDen": 2
@@ -58918,7 +58918,7 @@
    "config": {
     "nMin": 1,
     "nTarget": 13,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 3,
     "distNum": 1,
     "distDen": 3
@@ -59036,7 +59036,7 @@
    "config": {
     "nMin": 1,
     "nTarget": 9,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 4,
     "distNum": 2,
     "distDen": 3
@@ -59149,7 +59149,7 @@
    "config": {
     "nMin": 4,
     "nTarget": 8,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 8,
     "distNum": 1,
     "distDen": 4
@@ -59297,7 +59297,7 @@
    "config": {
     "nMin": 4,
     "nTarget": 12,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 9,
     "distNum": 1,
     "distDen": 3
@@ -59436,7 +59436,7 @@
    "config": {
     "nMin": 4,
     "nTarget": 7,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 7,
     "distNum": 1,
     "distDen": 3
@@ -59555,7 +59555,7 @@
    "config": {
     "nMin": 4,
     "nTarget": 9,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 8,
     "distNum": 1,
     "distDen": 3
@@ -59696,7 +59696,7 @@
    "config": {
     "nMin": 3,
     "nTarget": 11,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 2,
     "distNum": 2,
     "distDen": 3
@@ -59799,7 +59799,7 @@
    "config": {
     "nMin": 4,
     "nTarget": 8,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 4,
     "distNum": 2,
     "distDen": 2
@@ -59952,7 +59952,7 @@
    "config": {
     "nMin": 3,
     "nTarget": 15,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 5,
     "distNum": 2,
     "distDen": 4
@@ -60065,7 +60065,7 @@
    "config": {
     "nMin": 2,
     "nTarget": 8,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 7,
     "distNum": 2,
     "distDen": 3
@@ -60242,7 +60242,7 @@
    "config": {
     "nMin": 1,
     "nTarget": 13,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 3,
     "distNum": 1,
     "distDen": 3
@@ -60388,7 +60388,7 @@
    "config": {
     "nMin": 2,
     "nTarget": 10,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 6,
     "distNum": 1,
     "distDen": 2
@@ -60501,7 +60501,7 @@
    "config": {
     "nMin": 2,
     "nTarget": 9,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 9,
     "distNum": 1,
     "distDen": 2
@@ -60679,7 +60679,7 @@
    "config": {
     "nMin": 4,
     "nTarget": 15,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 8,
     "distNum": 2,
     "distDen": 3
@@ -60792,7 +60792,7 @@
    "config": {
     "nMin": 2,
     "nTarget": 8,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 4,
     "distNum": 1,
     "distDen": 3
@@ -60880,7 +60880,7 @@
    "config": {
     "nMin": 1,
     "nTarget": 7,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 4,
     "distNum": 2,
     "distDen": 4
@@ -61033,7 +61033,7 @@
    "config": {
     "nMin": 3,
     "nTarget": 15,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 7,
     "distNum": 2,
     "distDen": 4
@@ -61211,7 +61211,7 @@
    "config": {
     "nMin": 4,
     "nTarget": 12,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 2,
     "distNum": 2,
     "distDen": 4
@@ -61340,7 +61340,7 @@
    "config": {
     "nMin": 3,
     "nTarget": 8,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 6,
     "distNum": 2,
     "distDen": 4
@@ -61496,7 +61496,7 @@
    "config": {
     "nMin": 4,
     "nTarget": 12,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 3,
     "distNum": 2,
     "distDen": 2
@@ -61635,7 +61635,7 @@
    "config": {
     "nMin": 1,
     "nTarget": 9,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 5,
     "distNum": 1,
     "distDen": 4
@@ -61778,7 +61778,7 @@
    "config": {
     "nMin": 3,
     "nTarget": 13,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 7,
     "distNum": 1,
     "distDen": 4
@@ -61911,7 +61911,7 @@
    "config": {
     "nMin": 1,
     "nTarget": 14,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 8,
     "distNum": 1,
     "distDen": 2
@@ -62108,7 +62108,7 @@
    "config": {
     "nMin": 2,
     "nTarget": 16,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 8,
     "distNum": 1,
     "distDen": 2
@@ -62265,7 +62265,7 @@
    "config": {
     "nMin": 2,
     "nTarget": 11,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 8,
     "distNum": 2,
     "distDen": 3
@@ -62442,7 +62442,7 @@
    "config": {
     "nMin": 4,
     "nTarget": 11,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 6,
     "distNum": 2,
     "distDen": 3
@@ -62564,7 +62564,7 @@
    "config": {
     "nMin": 3,
     "nTarget": 9,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 8,
     "distNum": 2,
     "distDen": 4
@@ -62655,7 +62655,7 @@
    "config": {
     "nMin": 1,
     "nTarget": 6,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 4,
     "distNum": 2,
     "distDen": 3
@@ -62748,7 +62748,7 @@
    "config": {
     "nMin": 1,
     "nTarget": 6,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 7,
     "distNum": 1,
     "distDen": 3
@@ -62876,7 +62876,7 @@
    "config": {
     "nMin": 4,
     "nTarget": 12,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 3,
     "distNum": 1,
     "distDen": 4
@@ -63003,7 +63003,7 @@
    "config": {
     "nMin": 4,
     "nTarget": 7,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 9,
     "distNum": 1,
     "distDen": 4
@@ -63106,7 +63106,7 @@
    "config": {
     "nMin": 3,
     "nTarget": 8,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 2,
     "distNum": 2,
     "distDen": 4
@@ -63259,7 +63259,7 @@
    "config": {
     "nMin": 4,
     "nTarget": 15,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 7,
     "distNum": 2,
     "distDen": 4
@@ -63417,7 +63417,7 @@
    "config": {
     "nMin": 2,
     "nTarget": 13,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 8,
     "distNum": 2,
     "distDen": 4
@@ -63553,7 +63553,7 @@
    "config": {
     "nMin": 4,
     "nTarget": 11,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 2,
     "distNum": 1,
     "distDen": 4
@@ -63646,7 +63646,7 @@
    "config": {
     "nMin": 4,
     "nTarget": 10,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 9,
     "distNum": 2,
     "distDen": 2
@@ -63770,7 +63770,7 @@
    "config": {
     "nMin": 2,
     "nTarget": 9,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 6,
     "distNum": 1,
     "distDen": 2
@@ -63933,7 +63933,7 @@
    "config": {
     "nMin": 4,
     "nTarget": 13,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 5,
     "distNum": 1,
     "distDen": 2
@@ -64104,7 +64104,7 @@
    "config": {
     "nMin": 3,
     "nTarget": 11,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 9,
     "distNum": 2,
     "distDen": 2
@@ -64281,7 +64281,7 @@
    "config": {
     "nMin": 1,
     "nTarget": 14,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 7,
     "distNum": 2,
     "distDen": 4
@@ -64409,7 +64409,7 @@
    "config": {
     "nMin": 2,
     "nTarget": 8,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 8,
     "distNum": 1,
     "distDen": 2
@@ -64567,7 +64567,7 @@
    "config": {
     "nMin": 1,
     "nTarget": 15,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 4,
     "distNum": 2,
     "distDen": 3
@@ -64680,7 +64680,7 @@
    "config": {
     "nMin": 2,
     "nTarget": 5,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 6,
     "distNum": 1,
     "distDen": 3
@@ -64823,7 +64823,7 @@
    "config": {
     "nMin": 2,
     "nTarget": 11,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 9,
     "distNum": 1,
     "distDen": 2
@@ -64940,7 +64940,7 @@
    "config": {
     "nMin": 4,
     "nTarget": 9,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 6,
     "distNum": 1,
     "distDen": 4
@@ -65078,7 +65078,7 @@
    "config": {
     "nMin": 4,
     "nTarget": 10,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 9,
     "distNum": 2,
     "distDen": 2
@@ -65248,7 +65248,7 @@
    "config": {
     "nMin": 3,
     "nTarget": 10,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 9,
     "distNum": 1,
     "distDen": 2
@@ -65428,7 +65428,7 @@
    "config": {
     "nMin": 3,
     "nTarget": 15,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 4,
     "distNum": 2,
     "distDen": 3
@@ -65538,7 +65538,7 @@
    "config": {
     "nMin": 2,
     "nTarget": 7,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 3,
     "distNum": 2,
     "distDen": 2
@@ -65681,7 +65681,7 @@
    "config": {
     "nMin": 4,
     "nTarget": 13,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 9,
     "distNum": 2,
     "distDen": 3
@@ -65842,7 +65842,7 @@
    "config": {
     "nMin": 2,
     "nTarget": 12,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 3,
     "distNum": 1,
     "distDen": 2
@@ -66005,7 +66005,7 @@
    "config": {
     "nMin": 1,
     "nTarget": 15,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 2,
     "distNum": 1,
     "distDen": 2
@@ -66148,7 +66148,7 @@
    "config": {
     "nMin": 4,
     "nTarget": 15,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 4,
     "distNum": 2,
     "distDen": 4
@@ -66241,7 +66241,7 @@
    "config": {
     "nMin": 4,
     "nTarget": 7,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 6,
     "distNum": 2,
     "distDen": 2
@@ -66344,7 +66344,7 @@
    "config": {
     "nMin": 3,
     "nTarget": 7,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 4,
     "distNum": 2,
     "distDen": 4
@@ -66468,7 +66468,7 @@
    "config": {
     "nMin": 3,
     "nTarget": 10,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 7,
     "distNum": 1,
     "distDen": 2
@@ -66626,7 +66626,7 @@
    "config": {
     "nMin": 1,
     "nTarget": 12,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 9,
     "distNum": 2,
     "distDen": 2
@@ -66785,7 +66785,7 @@
    "config": {
     "nMin": 4,
     "nTarget": 11,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 2,
     "distNum": 1,
     "distDen": 3
@@ -66902,7 +66902,7 @@
    "config": {
     "nMin": 4,
     "nTarget": 6,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 4,
     "distNum": 2,
     "distDen": 4
@@ -67025,7 +67025,7 @@
    "config": {
     "nMin": 4,
     "nTarget": 9,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 7,
     "distNum": 2,
     "distDen": 2
@@ -67123,7 +67123,7 @@
    "config": {
     "nMin": 1,
     "nTarget": 6,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 9,
     "distNum": 1,
     "distDen": 4
@@ -67275,7 +67275,7 @@
    "config": {
     "nMin": 2,
     "nTarget": 11,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 9,
     "distNum": 1,
     "distDen": 2
@@ -67438,7 +67438,7 @@
    "config": {
     "nMin": 1,
     "nTarget": 13,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 5,
     "distNum": 1,
     "distDen": 2
@@ -67546,7 +67546,7 @@
    "config": {
     "nMin": 3,
     "nTarget": 11,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 4,
     "distNum": 1,
     "distDen": 2
@@ -67669,7 +67669,7 @@
    "config": {
     "nMin": 1,
     "nTarget": 9,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 8,
     "distNum": 2,
     "distDen": 2
@@ -67792,7 +67792,7 @@
    "config": {
     "nMin": 4,
     "nTarget": 8,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 6,
     "distNum": 2,
     "distDen": 2
@@ -67968,7 +67968,7 @@
    "config": {
     "nMin": 1,
     "nTarget": 11,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 2,
     "distNum": 1,
     "distDen": 3
@@ -68110,7 +68110,7 @@
    "config": {
     "nMin": 3,
     "nTarget": 10,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 2,
     "distNum": 2,
     "distDen": 2
@@ -68275,7 +68275,7 @@
    "config": {
     "nMin": 4,
     "nTarget": 12,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 7,
     "distNum": 1,
     "distDen": 2
@@ -68399,7 +68399,7 @@
    "config": {
     "nMin": 4,
     "nTarget": 7,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 5,
     "distNum": 1,
     "distDen": 4
@@ -68492,7 +68492,7 @@
    "config": {
     "nMin": 3,
     "nTarget": 8,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 4,
     "distNum": 1,
     "distDen": 2
@@ -68615,7 +68615,7 @@
    "config": {
     "nMin": 3,
     "nTarget": 11,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 7,
     "distNum": 1,
     "distDen": 2
@@ -68772,7 +68772,7 @@
    "config": {
     "nMin": 1,
     "nTarget": 10,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 8,
     "distNum": 1,
     "distDen": 3
@@ -68912,7 +68912,7 @@
    "config": {
     "nMin": 1,
     "nTarget": 10,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 5,
     "distNum": 1,
     "distDen": 3
@@ -69020,7 +69020,7 @@
    "config": {
     "nMin": 4,
     "nTarget": 6,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 4,
     "distNum": 1,
     "distDen": 3
@@ -69148,7 +69148,7 @@
    "config": {
     "nMin": 2,
     "nTarget": 9,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 9,
     "distNum": 1,
     "distDen": 4
@@ -69266,7 +69266,7 @@
    "config": {
     "nMin": 2,
     "nTarget": 10,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 2,
     "distNum": 2,
     "distDen": 2
@@ -69451,7 +69451,7 @@
    "config": {
     "nMin": 2,
     "nTarget": 16,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 5,
     "distNum": 1,
     "distDen": 2
@@ -69549,7 +69549,7 @@
    "config": {
     "nMin": 3,
     "nTarget": 7,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 2,
     "distNum": 2,
     "distDen": 2
@@ -69728,7 +69728,7 @@
    "config": {
     "nMin": 2,
     "nTarget": 16,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 2,
     "distNum": 1,
     "distDen": 3
@@ -69836,7 +69836,7 @@
    "config": {
     "nMin": 2,
     "nTarget": 7,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 3,
     "distNum": 1,
     "distDen": 3
@@ -69960,7 +69960,7 @@
    "config": {
     "nMin": 2,
     "nTarget": 9,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 3,
     "distNum": 2,
     "distDen": 2
@@ -70083,7 +70083,7 @@
    "config": {
     "nMin": 3,
     "nTarget": 8,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 4,
     "distNum": 1,
     "distDen": 4
@@ -70244,7 +70244,7 @@
    "config": {
     "nMin": 3,
     "nTarget": 11,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 9,
     "distNum": 1,
     "distDen": 2
@@ -70421,7 +70421,7 @@
    "config": {
     "nMin": 4,
     "nTarget": 14,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 4,
     "distNum": 1,
     "distDen": 2
@@ -70579,7 +70579,7 @@
    "config": {
     "nMin": 1,
     "nTarget": 12,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 6,
     "distNum": 2,
     "distDen": 3
@@ -70703,7 +70703,7 @@
    "config": {
     "nMin": 4,
     "nTarget": 9,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 9,
     "distNum": 2,
     "distDen": 4
@@ -70796,7 +70796,7 @@
    "config": {
     "nMin": 1,
     "nTarget": 6,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 9,
     "distNum": 1,
     "distDen": 4
@@ -70943,7 +70943,7 @@
    "config": {
     "nMin": 4,
     "nTarget": 12,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 9,
     "distNum": 1,
     "distDen": 3
@@ -71071,7 +71071,7 @@
    "config": {
     "nMin": 2,
     "nTarget": 13,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 2,
     "distNum": 2,
     "distDen": 3
@@ -71218,7 +71218,7 @@
    "config": {
     "nMin": 3,
     "nTarget": 11,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 9,
     "distNum": 1,
     "distDen": 3
@@ -71306,7 +71306,7 @@
    "config": {
     "nMin": 3,
     "nTarget": 7,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 8,
     "distNum": 2,
     "distDen": 2
@@ -71479,7 +71479,7 @@
    "config": {
     "nMin": 1,
     "nTarget": 13,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 9,
     "distNum": 1,
     "distDen": 2
@@ -71670,7 +71670,7 @@
    "config": {
     "nMin": 2,
     "nTarget": 14,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 5,
     "distNum": 1,
     "distDen": 3
@@ -71813,7 +71813,7 @@
    "config": {
     "nMin": 3,
     "nTarget": 14,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 3,
     "distNum": 2,
     "distDen": 3
@@ -71934,7 +71934,7 @@
    "config": {
     "nMin": 3,
     "nTarget": 5,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 8,
     "distNum": 2,
     "distDen": 3
@@ -72094,7 +72094,7 @@
    "config": {
     "nMin": 1,
     "nTarget": 13,
-    "nMax": 32,
+    "nMax": 16,
     "maxM": 5,
     "distNum": 1,
     "distDen": 4
