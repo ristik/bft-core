@@ -44,6 +44,7 @@ import (
 	"github.com/unicitynetwork/bft-core/rootrecords"
 	"github.com/unicitynetwork/bft-core/trustactivation"
 	"github.com/unicitynetwork/bft-core/trusthistorystore"
+	"github.com/unicitynetwork/bft-core/utbprofile"
 	"github.com/unicitynetwork/bft-core/utbstore"
 )
 
@@ -177,6 +178,12 @@ func getBootStrapNodes(bootNodesStr []string) ([]peer.AddrInfo, error) {
 }
 
 func rootNodeRun(ctx context.Context, flags *rootNodeRunFlags) error {
+	if err := utbprofile.Check(utbprofile.Inputs{Role: utbprofile.Root, GenesisFile: flags.UTBGenesisFile, GenesisID: flags.UTBGenesisID,
+		EntriesDB: flags.PathWithDefault(flags.UTBEntriesDBFile, rootUTBEntriesDBFileName), Profile2: flags.Profile2,
+		LegacyDBs: []string{flags.PathWithDefault(flags.RootDBFile, rootDBFileName), flags.PathWithDefault(flags.TrustBaseDBFile, trustBaseDBFileName),
+			flags.PathWithDefault(flags.OrchestrationDBFile, orchestrationDBFileName)}}); err != nil {
+		return err
+	}
 	keyConf, err := flags.loadKeyConf(flags.baseFlags, false)
 	if err != nil {
 		return err
@@ -280,6 +287,9 @@ func rootNodeRun(ctx context.Context, flags *rootNodeRunFlags) error {
 	var options []consensus.Option
 	if flags.Q3Lane && !flags.Profile2 {
 		return errors.New("q3-lane requires profile 2")
+	}
+	if flags.UTBGenesisFile != "" {
+		trustBaseStore.EnableUTBProfile() // the first voting epoch is a UTB epoch whether or not a verified Q3 history later takes over the answers
 	}
 	var q3rt *q3active.Runtime
 	if flags.Q3Lane {

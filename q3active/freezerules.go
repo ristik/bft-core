@@ -67,5 +67,8 @@ func (r *Runtime) ProtocolConfig() (q3format.ProtocolConfig, error) {
 	if h == nil {
 		return q3format.ProtocolConfig{}, ErrFreeze
 	}
+	if h.UTB() { // a UTB chain plans only the UTB tuple, so every successor body keeps the endorsement on (WithV3 refuses any other)
+		return q3format.Q3ConfigUTB(h.Network(), h.Genesis()), nil
+	}
 	return q3format.Q3Config(h.Network(), h.Genesis()), nil
 }

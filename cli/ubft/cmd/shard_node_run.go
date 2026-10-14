@@ -52,6 +52,7 @@ import (
 	"github.com/unicitynetwork/bft-core/shardnode"
 	"github.com/unicitynetwork/bft-core/shardnode/executortest"
 	"github.com/unicitynetwork/bft-core/signingauthority"
+	"github.com/unicitynetwork/bft-core/utbprofile"
 	"github.com/unicitynetwork/bft-core/utbstore"
 )
 
@@ -474,6 +475,10 @@ protocol and docs/engine-api-adapter-plan.md for how this command's pieces fit t
 }
 
 func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(string) bool) error {
+	if err := utbprofile.Check(utbprofile.Inputs{Role: utbprofile.Shard, GenesisFile: flags.UTBGenesisFile, GenesisID: flags.UTBGenesisID,
+		EntriesDB: flags.PathWithDefault(flags.UTBEntriesDBFile, shardUTBEntriesDBFileName)}); err != nil {
+		return err
+	}
 	var readOperatorStatus func(context.Context) (archivewiring.OperatorStatus, error)
 	if flags.Restore {
 		if flags.Executor != "engine-api" || flags.ExecutionJournal == "" || flags.ArchiveStore == "" || !flags.ArchivePrune ||

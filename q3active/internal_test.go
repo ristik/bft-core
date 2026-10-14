@@ -215,3 +215,20 @@ func TestUTBGenesisConfigurationMakesTheGenesisEpochAUTBEpoch(t *testing.T) {
 	require.NoError(t, err)
 	require.False(t, cfg.UTB)
 }
+
+// The tuple a UTB chain plans for its next body is the UTB one, so the planned body is admitted by the chain's own history; a plain chain keeps the plain one.
+func TestProtocolConfigFollowsTheChainsEnvelope(t *testing.T) {
+	f := q3fixture.New(t, q3fixture.Options{UTB: true})
+	utbRT, err := New(Config{DB: memorydb.New(), Genesis: f.Old, UTBGenesis: true})
+	require.NoError(t, err)
+	cfg, err := utbRT.ProtocolConfig()
+	require.NoError(t, err)
+	require.True(t, cfg.UTB())
+	require.NoError(t, cfg.Validate())
+
+	plain, err := New(Config{DB: memorydb.New(), Genesis: f.Old})
+	require.NoError(t, err)
+	cfg, err = plain.ProtocolConfig()
+	require.NoError(t, err)
+	require.False(t, cfg.UTB())
+}
