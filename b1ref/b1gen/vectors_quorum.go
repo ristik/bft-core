@@ -9,9 +9,9 @@ func (g *gen) quorum(seed string) {
 	u := cs.get(1, "")
 	run := func(id, desc, want string, x ucSpec, _ authoritySpec, pre PreState) {
 		if want == "ErrSigFormat" {
-			g.bad(id, fam, opUC, desc, newRequest(claimOf(x)).wire(), &pre, want)
+			g.bad(id, fam, desc, req(claimOf(x)), &pre, want)
 		} else {
-			g.ok(id, fam, opUC, desc, newRequest(claimOf(x)).wire(), pre, shapeOf(x), want, nil, nil)
+			g.ok(id, fam, desc, req(claimOf(x)), pre, want, nil, nil)
 		}
 	}
 	withSigs := func(sigs []entry) ucSpec { x := u; x.seal.sigs = sigs; return x }
@@ -24,7 +24,7 @@ func (g *gen) quorum(seed string) {
 	x.sealBytes = u.seal.fields(cTextMapRaw([]entry{
 		{u.seal.sigs[0].key, cBytes(u.seal.sigs[0].val)}, {u.seal.sigs[1].key, cBytes(u.seal.sigs[1].val)}, {u.seal.sigs[1].key, cBytes(u.seal.sigs[1].val)},
 	}))
-	g.bad("quorum.dup-map-key", fam, opUC, "duplicate signer key in the wire signature map", newRequest(claimOf(x)).wire(), &pre, "ErrDuplicateMapKey")
+	g.bad("quorum.dup-map-key", fam, "duplicate signer key in the wire signature map", req(claimOf(x)), &pre, "ErrDuplicateMapKey")
 
 	mallory := makeValidator(seed, "mallory")
 	run("quorum.unknown-signer", "honest quorum plus one signature from an unknown identity", "ErrUnknownSigner",
@@ -50,27 +50,31 @@ func (g *gen) quorum(seed string) {
 
 	// recovery byte representation: both accepted, the byte is ignored.
 	withV := f.build("a", f.round, q, true).get(1, "")
-	g.ok("quorum.sig.v-present", fam, opUC, "65-byte r||s||v signatures", newRequest(claimOf(withV)).wire(), pre, shapeOf(withV), "", &withV.seal, nil)
+	g.ok("quorum.sig.v-present", fam, "65-byte r||s||v signatures", req(claimOf(withV)), pre, "", &withV.seal, nil)
 	flipped := withV
 	flipped.seal.sigs = append([]entry{}, withV.seal.sigs...)
 	sig := append([]byte{}, flipped.seal.sigs[0].val...)
 	sig[64] ^= 1
 	flipped.seal.sigs[0] = entry{flipped.seal.sigs[0].key, sig}
-	g.ok("quorum.sig.v-ignored", fam, opUC, "wrong recovery byte (0/1 swapped) is ignored like the native verifier", newRequest(claimOf(flipped)).wire(), pre, shapeOf(flipped), "", &flipped.seal, nil)
+	g.ok("quorum.sig.v-ignored", fam, "wrong recovery byte (0/1 swapped) is ignored like the native verifier", req(claimOf(flipped)), pre, "", &flipped.seal, nil)
 
-	// maximal authority: 64 members, exact threshold 43.
-	big64 := newFixture(seed+"/64", 64)
-	bp := big64.pre()
-	bu := func(n int) ucSpec { return big64.build("a", big64.round, big64.vals[:n], false).get(1, "") }
+	// maximal authority: 16 members (the profile ceiling), exact threshold 11.
+	big := newFixture(seed+"/16", 16)
+	bp := big.pre()
+	bu := func(n int) ucSpec { return big.build("a", big.round, big.vals[:n], false).get(1, "") }
 	for _, c := range []struct {
 		id, desc, want string
 		n              int
 	}{
-		{"quorum.max.exact", "64 members, exactly the threshold of 43 signatures", "", 43},
-		{"quorum.max.short", "64 members, 42 signatures", "ErrQuorum", 42},
-		{"quorum.max.all", "64 members, 64 signatures (maximum)", "", 64},
+		{"quorum.max.exact", "16 members, exactly the threshold of 11 signatures", "", 11},
+		{"quorum.max.short", "16 members, 10 signatures", "ErrQuorum", 10},
+		{"quorum.max.all", "16 members, 16 signatures (maximum)", "", 16},
 	} {
 		x := bu(c.n)
-		g.ok(c.id, fam, opUC, c.desc, newRequest(claimOf(x)).wire(), bp, shapeOf(x), c.want, &x.seal, nil)
+		g.ok(c.id, fam, c.desc, req(claimOf(x)), bp, c.want, &x.seal, nil)
 	}
+	// seventeen signatures exceed the per-seal bound, even from a seventeen-member set the registry could never admit
+	over := newFixture(seed+"/17", 17)
+	x17 := over.build("a", over.round, over.vals, false).get(1, "")
+	g.bad("quorum.sigs-17", fam, "seventeen signatures in one seal", req(claimOf(x17)), &bp, "ErrTooManySigs")
 }

@@ -44,7 +44,7 @@
     "leaves": 16,
     "pathSteps": 2048,
     "policyBytes": 512,
-    "aggregatorAnchors": 4,
+    "aggregatorAnchors": 8,
     "aggregatorDepthMax": 1,
     "anchorUcBytes": 8192,
     "irBytes": 512,
@@ -80,8 +80,8 @@
     "full-B1-SDK-seal-acceptance-parity"
   ],
   "normativeArtifactSha256": {
-    "protocol/interop.md": "6f185feec159a74ffbe0cbcccdcbe5b1200bed1e901f984dc34e5d337578c00f",
-    "protocol/abi.json": "6542807a68f62f05c21402fea86d370a27239f05a5eeb0c675e01bc8c9935e26",
+    "protocol/interop.md": "96bd7f4c8427d41e9392a0b9d440438c690699e7e179b0aa654a5511e3d7313a",
+    "protocol/abi.json": "035b9dd9f0d06a95965626753c46d4d2a07a86d8ec1722e9c5bf88dd983f7d9c",
     "protocol/manifest.schema.json": "256bfd1d454ef4b15b089d9d34b6def96a760f698e8ec8fbc95a1c6dcdf29b01",
     "protocol/sdk-trust-base.md": "ec3b55554f01ac1530a950814e6a92c40a5fe6f7d53e9f58d7e04a40d6af0731"
   },

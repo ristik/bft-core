@@ -161,8 +161,10 @@ def main():
         except (pos.PosError,ValueError) as e: p.error(str(e))
     if a.pos and a.validators > pos.CAPS[2]:   # the hook gas and the election were measured for at most nMax members: more genesis identities are outside what the guard checked
         p.error(f'--pos with {a.validators} validators: the caps (vMax,lMax,nMax = {",".join(map(str,pos.CAPS))}) cover at most {pos.CAPS[2]} genesis identities; the hook-gas guard measured nothing above that')
-    if not 3 <= a.validators <= 32 or not 0 < a.chain_id < 2**53:
-        p.error('validators must be 3..32; chain ID must be 1..2^53-1')
+    if not 3 <= a.validators <= 16:
+        p.error(f'validators must be 3..16, got {a.validators}: the registry admits at most 16 committee members and a genesis with more fails')
+    if not 0 < a.chain_id < 2**53:
+        p.error('chain ID must be 1..2^53-1')
     out=a.out.resolve()
     if not re.fullmatch(r'tn-[a-z0-9][a-z0-9_-]*',out.name): p.error('generation directory name must be tn- followed by lowercase letters/digits/dashes')
     if out.exists(): p.error('output exists: choose a new generation directory')

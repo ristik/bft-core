@@ -18,9 +18,13 @@ const (
 	GasReserve       uint64 = 1_000_000
 	IntrinsicBase    uint64 = 21_000
 	IntrinsicPerByte uint64 = 16
-	B2Base           uint64 = 26_000
-	B2PerByte        uint64 = 20
-	B2PerLeaf        uint64 = 14_000
+	// IntrinsicExecPerByte prices the composing verifier's own execution (ABI decode, scans, hashing, memory) per envelope byte. It
+	// was covered by the reserve while the certificate call dominated the gate; after the repricing of owner-decisions section 22 it
+	// does not: measured 50 to 75 gas per envelope byte (contracts `TokenVerifier`, natives mocked), priced at 80.
+	IntrinsicExecPerByte uint64 = 80
+	B2Base               uint64 = 26_000
+	B2PerByte            uint64 = 20
+	B2PerLeaf            uint64 = 14_000
 	// ucRequestFixed is the single-claim 0x0100 request without shard and UC:
 	// header(4) | partition(4) | shardLen(2) | 3*32 | ucLen(4).
 	ucRequestFixed uint64 = 110
@@ -30,7 +34,7 @@ const (
 
 // IntrinsicGas is the direct-call bound for an envelope.
 func IntrinsicGas(envelopeBytes int) uint64 {
-	return IntrinsicBase + IntrinsicPerByte*uint64(envelopeBytes)
+	return IntrinsicBase + (IntrinsicPerByte+IntrinsicExecPerByte)*uint64(envelopeBytes)
 }
 
 // KernelRequestBytes is len(abi.encode(uint8 op, bytes cfg, bytes payload)).

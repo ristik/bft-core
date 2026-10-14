@@ -2,6 +2,7 @@ package b1ref_test
 
 import (
 	"bytes"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -12,12 +13,11 @@ import (
 
 	"github.com/unicitynetwork/bft-core/b1ref"
 	"github.com/unicitynetwork/bft-core/b1ref/b1gen"
-	"github.com/unicitynetwork/bft-core/b1state"
 )
 
 const (
-	goldenPath = "testdata/b1-vectors-aprime.json"
-	goldenSeed = "b1-oracle-v1"
+	goldenPath = "testdata/b1-vectors-anyage.json"
+	goldenSeed = "b1-any-age-v1"
 )
 
 var update = flag.Bool("update", false, "rewrite the golden vector manifest")
@@ -28,26 +28,30 @@ var sentinels = map[string]error{
 	"ErrFlags": b1ref.ErrFlags, "ErrCount": b1ref.ErrCount, "ErrNonCanonical": b1ref.ErrNonCanonical,
 	"ErrDuplicateMapKey": b1ref.ErrDuplicateMapKey, "ErrForbiddenCBOR": b1ref.ErrForbiddenCBOR,
 	"ErrInvalidUTF8": b1ref.ErrInvalidUTF8, "ErrShape": b1ref.ErrShape, "ErrShardEncoding": b1ref.ErrShardEncoding,
-	"ErrRSMTLength": b1ref.ErrRSMTLength, "ErrInputTooLarge": b1ref.ErrInputTooLarge, "ErrUCTooLarge": b1ref.ErrUCTooLarge,
+	"ErrShardSiblings": b1ref.ErrShardSiblings,
+	"ErrRSMTLength":    b1ref.ErrRSMTLength, "ErrInputTooLarge": b1ref.ErrInputTooLarge, "ErrUCTooLarge": b1ref.ErrUCTooLarge,
 	"ErrTooManySigs":   b1ref.ErrTooManySigs,
 	"ErrNodeIDTooLong": b1ref.ErrNodeIDTooLong, "ErrShardTooDeep": b1ref.ErrShardTooDeep, "ErrTooManySiblings": b1ref.ErrTooManySiblings,
 	"ErrTooManySteps": b1ref.ErrTooManySteps, "ErrDepth": b1ref.ErrDepth, "ErrSummaryTooLong": b1ref.ErrSummaryTooLong,
 	"ErrValueTooLarge": b1ref.ErrValueTooLarge,
-	"ErrUnknownEpoch":  b1ref.ErrUnknownEpoch, "ErrNetwork": b1ref.ErrNetwork, "ErrSealEpoch": b1ref.ErrSealEpoch, "ErrOpenInterval": b1ref.ErrOpenInterval,
+	"ErrNetwork":       b1ref.ErrNetwork, "ErrEpochBeforeGenesis": b1ref.ErrEpochBeforeGenesis, "ErrEpochNotUsable": b1ref.ErrEpochNotUsable,
+	"ErrOriginNotReady": b1ref.ErrOriginNotReady, "ErrPhase": b1ref.ErrPhase,
 	"ErrBeforeStart": b1ref.ErrBeforeStart, "ErrAfterEnd": b1ref.ErrAfterEnd, "ErrFuture": b1ref.ErrFuture,
-	"ErrStale": b1ref.ErrStale, "ErrPartition": b1ref.ErrPartition, "ErrShard": b1ref.ErrShard, "ErrShardConf": b1ref.ErrShardConf,
+	"ErrPartition": b1ref.ErrPartition, "ErrShard": b1ref.ErrShard, "ErrShardConf": b1ref.ErrShardConf,
 	"ErrTreeRoot": b1ref.ErrTreeRoot, "ErrStateRoot": b1ref.ErrStateRoot, "ErrIRHash": b1ref.ErrIRHash,
-	"ErrSealMismatch": b1ref.ErrSealMismatch, "ErrUnknownSigner": b1ref.ErrUnknownSigner, "ErrSigFormat": b1ref.ErrSigFormat,
+	"ErrUnknownSigner": b1ref.ErrUnknownSigner, "ErrSigFormat": b1ref.ErrSigFormat,
 	"ErrSigRange": b1ref.ErrSigRange, "ErrSigInvalid": b1ref.ErrSigInvalid, "ErrQuorum": b1ref.ErrQuorum,
-	"ErrRSMTZeroRoot": b1ref.ErrRSMTZeroRoot, "ErrRSMTFold": b1ref.ErrRSMTFold,
-	"ErrClaimOrder": b1ref.ErrClaimOrder, "ErrNativeInvalid": b1ref.ErrNativeInvalid,
+	"ErrRSMTZeroRoot": b1ref.ErrRSMTZeroRoot, "ErrRSMTFold": b1ref.ErrRSMTFold, "ErrNativeInvalid": b1ref.ErrNativeInvalid,
+	"ErrRegistryCommon": b1ref.ErrRegistryCommon, "ErrRegistryMissingEpoch": b1ref.ErrRegistryMissingEpoch,
+	"ErrRegistryInvalidEpoch": b1ref.ErrRegistryInvalidEpoch,
 }
 
-// notInVectors are reasons no manifest vector can reach: ErrTokens is
-// subsumed by the byte bounds (unit-tested on the scanner), and the rest
-// guard against native encoder/decoder failures on input the shape rules
-// already admitted.
-var notInVectors = map[string]bool{"ErrTokens": true, "ErrNativeDecode": true, "ErrReencode": true, "ErrFold": true}
+// notInVectors are reasons no manifest vector can reach: ErrTokens is subsumed by the byte bounds (unit-tested on the scanner),
+// ErrCertSteps by K * (256 + 32) = 4,608, ErrClaimConflict needs two different valid claims for one shard under one seal (a hash
+// collision; its precedence is unit-tested), ErrHost is the state reader failing, and the rest guard against native
+// encoder/decoder failures on input the shape rules already admitted.
+var notInVectors = map[string]bool{"ErrTokens": true, "ErrNativeDecode": true, "ErrReencode": true, "ErrFold": true,
+	"ErrCertSteps": true, "ErrClaimConflict": true, "ErrHost": true}
 
 func loadGolden(t testing.TB) (*b1gen.Manifest, []byte) {
 	t.Helper()
@@ -62,39 +66,33 @@ func loadGolden(t testing.TB) (*b1gen.Manifest, []byte) {
 	return &m, raw
 }
 
-func registry(t testing.TB, p *b1gen.PreState) *b1ref.Registry {
+// state is the vector's registry words as every implementation reads them, and the verifier's pin.
+func state(t testing.TB, p *b1gen.PreState) (b1ref.State, b1ref.Pins) {
 	t.Helper()
 	if p == nil {
-		return nil
+		return nil, b1ref.Pins{}
 	}
-	reg := &b1ref.Registry{Initialized: true, Phase: 2, GenesisCommitment: [32]byte{1}, ProfileHash: [32]byte{2}, Network: p.Network, WCert: p.WCert, Origin: p.Origin, RootRound: p.ClockRound, Epochs: map[uint64]b1ref.EpochEntry{}}
-	for _, e := range p.Epochs {
-		bi, _ := hex.DecodeString(e.BodyID)
-		ent := b1state.Entry{Epoch: e.Epoch, BodyKind: 2, ActivationCommitID: [32]byte{3}, Start: e.Start, SigningScheme: 1, SigningConfigHash: [32]byte{4}}
-		copy(ent.BodyID[:], bi)
-		if e.End != 0 {
-			end := e.End
-			ent.End = &end
-		}
-		for _, m := range e.Members {
-			key, _ := hex.DecodeString(m.Key)
-			member := b1state.Member{NodeID: m.NodeID, Weight: m.Weight}
-			copy(member.Key[:], key)
-			ent.Members = append(ent.Members, member)
-		}
-		reg.Epochs[e.Epoch] = ent
+	w := b1ref.Words{}
+	for _, sw := range p.Storage {
+		w[word32(t, sw.Slot)] = word32(t, sw.Value)
 	}
-	return reg
+	return w, b1ref.Pins{GenesisCommitment: word32(t, p.PinnedGenesisCommitment), ProfileHash: word32(t, p.PinnedProfileHash)}
+}
+
+func word32(t testing.TB, s string) (w [32]byte) {
+	b, err := hex.DecodeString(s)
+	if err != nil || len(b) != 32 {
+		t.Fatalf("bad word %q", s)
+	}
+	copy(w[:], b)
+	return
 }
 
 func op(v b1gen.Vector) b1ref.Op {
-	switch v.Op {
-	case "UC_V1":
-		return b1ref.OpUC
-	case "SHARED_SEAL_V1":
-		return b1ref.OpShared
+	if v.Op == "RSMT_MEMBER_V1" {
+		return b1ref.OpMember
 	}
-	return b1ref.OpMember
+	return b1ref.OpCertBatch
 }
 
 func evaluate(t testing.TB, v b1gen.Vector) (b1ref.Verdict, error) {
@@ -103,14 +101,15 @@ func evaluate(t testing.TB, v b1gen.Vector) (b1ref.Verdict, error) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	reg := registry(t, v.PreState)
-	switch op(v) {
-	case b1ref.OpUC:
-		return b1ref.UC(req, reg)
-	case b1ref.OpShared:
-		return b1ref.Shared(req, reg)
+	return evaluateBytes(t, v, req)
+}
+
+func evaluateBytes(t testing.TB, v b1gen.Vector, req []byte) (b1ref.Verdict, error) {
+	if op(v) == b1ref.OpMember {
+		return b1ref.Member(req)
 	}
-	return b1ref.Member(req)
+	st, pins := state(t, v.PreState)
+	return b1ref.Cert(req, st, pins)
 }
 
 // TestGoldenVectors runs every committed vector through the oracle and checks
@@ -135,6 +134,10 @@ func TestGoldenVectors(t *testing.T) {
 				if !errors.Is(err, want) || !errors.Is(err, b1ref.ErrMalformed) || errors.Is(err, b1ref.ErrInvalid) {
 					t.Fatalf("expected %s (malformed family), got %v", v.Expected.Sentinel, err)
 				}
+			case "registry":
+				if !errors.Is(err, want) || !errors.Is(err, b1ref.ErrInfrastructure) || errors.Is(err, b1ref.ErrMalformed) {
+					t.Fatalf("expected registry failure %s, got verdict %+v err %v", v.Expected.Sentinel, got, err)
+				}
 			case "ok":
 				if err != nil {
 					t.Fatalf("unexpected error: %v", err)
@@ -151,7 +154,11 @@ func TestGoldenVectors(t *testing.T) {
 				if got.Gas != v.Expected.Gas {
 					t.Fatalf("gas %d want %d", got.Gas, v.Expected.Gas)
 				}
-				if hex.EncodeToString(b1ref.Output(got.Valid)) != v.Expected.Output {
+				out := b1ref.Output(got.Valid)
+				if op(v) == b1ref.OpMember {
+					out = b1ref.MemberOutput(got.Valid)
+				}
+				if hex.EncodeToString(out) != v.Expected.Output {
 					t.Fatalf("output words differ")
 				}
 			default:
@@ -190,15 +197,14 @@ func TestGeneratorDeterministic(t *testing.T) {
 	}
 }
 
-// TestManifestCoversFamilies checks every non-deferred row of section 5 has
-// vectors and every deferred one is marked.
+// TestManifestCoversFamilies checks every family has vectors and every reachable sentinel is exercised.
 func TestManifestCoversFamilies(t *testing.T) {
 	m, _ := loadGolden(t)
 	fams := map[string]int{}
 	for _, v := range m.Vectors {
 		fams[v.Family]++
 	}
-	for _, f := range []string{"Native certificates", "Quorum", "Time/history", "Paths/encoding", "Gas/resources"} {
+	for _, f := range []string{"Native certificates", "Quorum", "Time/history", "Registry", "Reuse", "Topology", "Paths/encoding", "Gas/resources"} {
 		if fams[f] == 0 {
 			t.Errorf("no vectors for family %q", f)
 		}
@@ -206,12 +212,6 @@ func TestManifestCoversFamilies(t *testing.T) {
 	if len(m.Deferred) == 0 {
 		t.Error("deferred rows are not marked")
 	}
-	for _, d := range m.Deferred {
-		if !strings.Contains(d.Reason, "EVM") {
-			t.Errorf("deferred row %q has no dependency reason", d.Row)
-		}
-	}
-	// every false/error sentinel the oracle can name for a single perturbation is exercised
 	seen := map[string]bool{}
 	for _, v := range m.Vectors {
 		seen[v.Expected.Sentinel] = true
@@ -223,44 +223,117 @@ func TestManifestCoversFamilies(t *testing.T) {
 	}
 }
 
-// TestRunGas checks the charge boundary: the exact charge succeeds and one
-// less fails with all forwarded gas consumed.
+// TestRunGas checks the debit boundary on every structurally accepted certificate vector: at the exact charge the call returns its
+// result (or its infrastructure failure, used 0), and one less is out of gas with all forwarded gas consumed and no work done.
+// Malformed input consumes everything forwarded.
 func TestRunGas(t *testing.T) {
 	m, _ := loadGolden(t)
-	checked := 0
 	for _, v := range m.Vectors {
-		if v.Expected.Status != "ok" || checked >= 12 && !strings.HasPrefix(v.ID, "quorum.max") {
-			continue
-		}
-		checked++
 		req, _ := hex.DecodeString(v.Request)
-		reg := registry(t, v.PreState)
-		out, used, err := b1ref.Run(op(v), req, reg, v.Expected.Gas)
-		if err != nil || used != v.Expected.Gas || hex.EncodeToString(out) != v.Expected.Output {
-			t.Fatalf("%s: exact charge: out=%x used=%d err=%v", v.ID, out, used, err)
-		}
-		out, used, err = b1ref.Run(op(v), req, reg, v.Expected.Gas-1)
-		if !errors.Is(err, b1ref.ErrOutOfGas) || out != nil || used != v.Expected.Gas-1 {
-			t.Fatalf("%s: charge-1: out=%x used=%d err=%v", v.ID, out, used, err)
-		}
-	}
-	// malformed input consumes everything forwarded.
-	for _, v := range m.Vectors {
-		if v.Expected.Status != "error" {
-			continue
-		}
-		req, _ := hex.DecodeString(v.Request)
-		out, used, err := b1ref.Run(op(v), req, registry(t, v.PreState), 7_000_000)
-		if err == nil || out != nil || used != 7_000_000 {
-			t.Fatalf("%s: malformed must consume all gas: out=%x used=%d err=%v", v.ID, out, used, err)
-		}
-		if want := sentinels[v.Expected.Sentinel]; want == nil || !errors.Is(err, want) || !errors.Is(err, b1ref.ErrMalformed) {
-			t.Fatalf("%s: Run returned %v, want %s in the malformed family", v.ID, err, v.Expected.Sentinel)
+		st, pins := state(t, v.PreState)
+		switch v.Expected.Status {
+		case "ok", "registry":
+			counts := countWork(t)
+			out, used, err := b1ref.Run(op(v), req, st, pins, v.Expected.Gas-1)
+			if !errors.Is(err, b1ref.ErrOutOfGas) || out != nil || used != v.Expected.Gas-1 || len(counts) != 0 {
+				t.Fatalf("%s: charge-1: out=%x used=%d err=%v work=%v", v.ID, out, used, err, counts)
+			}
+			out, used, err = b1ref.Run(op(v), req, st, pins, v.Expected.Gas)
+			if v.Expected.Status == "registry" {
+				if !errors.Is(err, b1ref.ErrInfrastructure) || used != 0 || out != nil {
+					t.Fatalf("%s: exact charge: out=%x used=%d err=%v", v.ID, out, used, err)
+				}
+				continue
+			}
+			if err != nil || used != v.Expected.Gas || hex.EncodeToString(out) != v.Expected.Output {
+				t.Fatalf("%s: exact charge: out=%x used=%d err=%v", v.ID, out, used, err)
+			}
+		case "error":
+			out, used, err := b1ref.Run(op(v), req, st, pins, 7_000_000)
+			if err == nil || out != nil || used != 7_000_000 {
+				t.Fatalf("%s: malformed must consume all gas: out=%x used=%d err=%v", v.ID, out, used, err)
+			}
+			if want := sentinels[v.Expected.Sentinel]; want == nil || !errors.Is(err, want) || !errors.Is(err, b1ref.ErrMalformed) {
+				t.Fatalf("%s: Run returned %v, want %s in the malformed family", v.ID, err, v.Expected.Sentinel)
+			}
 		}
 	}
 }
 
-// TestGasParity: an invalid last signature costs exactly what the valid call does.
+// TestCounters: every valid certificate vector does exactly the work the manifest names, so native implementations can assert the
+// same reuse with their own counters.
+func TestCounters(t *testing.T) {
+	m, _ := loadGolden(t)
+	n := 0
+	for _, v := range m.Vectors {
+		if v.Op != "CERT_BATCH_V2" || v.Expected.Counters == nil {
+			continue
+		}
+		counts := countWork(t)
+		if _, err := evaluate(t, v); err != nil {
+			t.Fatal(v.ID, err)
+		}
+		for kind, want := range v.Expected.Counters {
+			if counts[kind] != want {
+				t.Errorf("%s: %s = %d, want %d", v.ID, kind, counts[kind], want)
+			}
+		}
+		if len(counts) != len(v.Expected.Counters) {
+			t.Errorf("%s: counted %v, manifest names %v", v.ID, counts, v.Expected.Counters)
+		}
+		n++
+	}
+	if n < 20 {
+		t.Fatalf("only %d vectors carry counters", n)
+	}
+}
+
+// TestPermutationInvariance: reversing the claim order of a multi-claim vector keeps its verdict and gas (the reason may differ
+// when several checks fail).
+func TestPermutationInvariance(t *testing.T) {
+	m, _ := loadGolden(t)
+	n := 0
+	for _, v := range m.Vectors {
+		if v.Op != "CERT_BATCH_V2" || v.Expected.Status != "ok" || v.Expected.Grouping == nil || v.Expected.Grouping.K < 2 {
+			continue
+		}
+		req, _ := hex.DecodeString(v.Request)
+		rev := reverseClaims(t, req)
+		a, err1 := evaluateBytes(t, v, req)
+		b, err2 := evaluateBytes(t, v, rev)
+		if err1 != nil || err2 != nil || a.Valid != b.Valid || a.Gas != b.Gas {
+			t.Fatalf("%s: %+v/%v reversed %+v/%v", v.ID, a, err1, b, err2)
+		}
+		n++
+	}
+	if n < 10 {
+		t.Fatalf("only %d multi-claim vectors", n)
+	}
+}
+
+func reverseClaims(t *testing.T, req []byte) []byte {
+	k := int(binary.BigEndian.Uint16(req[2:4]))
+	var claims [][]byte
+	pos := 4
+	for i := 0; i < k; i++ {
+		start := pos
+		sl := int(binary.BigEndian.Uint16(req[pos+4:]))
+		pos += 6 + sl + 96
+		pos += 4 + int(binary.BigEndian.Uint32(req[pos:]))
+		claims = append(claims, req[start:pos])
+	}
+	out := append([]byte{}, req[:4]...)
+	for i := k - 1; i >= 0; i-- {
+		out = append(out, claims[i]...)
+	}
+	if len(out) != len(req) {
+		t.Fatal("reverse lost bytes")
+	}
+	return out
+}
+
+// TestGasParity: an invalid last signature costs exactly what the valid call does, and the per-epoch charge is the 16-member
+// ceiling whatever the entry's size.
 func TestGasParity(t *testing.T) {
 	m, _ := loadGolden(t)
 	gas := map[string]uint64{}
@@ -270,20 +343,23 @@ func TestGasParity(t *testing.T) {
 	if gas["gas.4sigs.valid"] == 0 || gas["gas.4sigs.valid"] != gas["gas.4sigs.last-invalid"] {
 		t.Fatalf("valid %d vs invalid-last %d", gas["gas.4sigs.valid"], gas["gas.4sigs.last-invalid"])
 	}
+	if gas["reuse.witness.verified-first"] != gas["reuse.witness.altered-first"] {
+		t.Fatal("claim order changed the charge")
+	}
+	// the epoch term is the 16-member ceiling: removing the byte and signature terms leaves one value for 1, 4 and 16 members
+	rest := map[uint64]bool{}
+	for _, v := range m.Vectors {
+		if strings.HasPrefix(v.ID, "price.epoch-ceiling.") {
+			g := v.Expected.Grouping
+			rest[v.Expected.Gas-16*g.C-6000*g.Q] = true
+		}
+	}
+	if len(rest) != 1 {
+		t.Fatalf("the epoch charge depends on the entry's size: %v", rest)
+	}
 }
 
-// TestMaxGas pins the design's worst-case figures.
-func TestMaxGas(t *testing.T) {
-	if g := b1ref.UCGas(262144, 64, 8, 2304); g != 6_412_004 {
-		t.Fatalf("UC worst case %d", g)
-	}
-	if g := b1ref.RSMTGas(12392, 256); g != 264_522 {
-		t.Fatalf("RSMT worst case %d", g)
-	}
-}
-
-// countWork records the expensive operations (point decodes, signature
-// checks, path folds) that Run performs.
+// countWork records the counted operations.
 func countWork(t *testing.T) map[string]int {
 	t.Helper()
 	counts := map[string]int{}
@@ -292,76 +368,49 @@ func countWork(t *testing.T) map[string]int {
 	return counts
 }
 
-// TestRunReservesChargeBeforeWork: at charge-1 Run fails out of gas before any
-// point is decoded, any signature checked or any path folded; at the exact
-// charge the same call does that work.
-func TestRunReservesChargeBeforeWork(t *testing.T) {
-	m, _ := loadGolden(t)
-	for _, id := range []string{"cert.single.ok", "rsmt.small.ok"} {
-		var v b1gen.Vector
-		for _, c := range m.Vectors {
-			if c.ID == id {
-				v = c
-			}
-		}
-		if v.ID == "" {
-			t.Fatalf("vector %s missing", id)
-		}
-		req, _ := hex.DecodeString(v.Request)
-		reg := registry(t, v.PreState)
-		counts := countWork(t)
-		if _, _, err := b1ref.Run(op(v), req, reg, v.Expected.Gas-1); !errors.Is(err, b1ref.ErrOutOfGas) {
-			t.Fatalf("%s: charge-1: %v", id, err)
-		}
-		if len(counts) != 0 {
-			t.Fatalf("%s: work done before the charge was reserved: %v", id, counts)
-		}
-		if _, _, err := b1ref.Run(op(v), req, reg, v.Expected.Gas); err != nil {
-			t.Fatalf("%s: exact charge: %v", id, err)
-		}
-		if len(counts) == 0 {
-			t.Fatalf("%s: the counting hook saw no work at the exact charge, so the test proves nothing", id)
-		}
-	}
-}
-
-// TestRunOrder pins the order of the EVM-facing checks: the size bound, then
-// the base-plus-bytes reservation, then parsing, then the full charge.
+// TestRunOrder pins the debit order: the size cap, then 60,000 + 16*C, then the header and G_scan, then the full scan, then G_batch.
 func TestRunOrder(t *testing.T) {
 	m, _ := loadGolden(t)
 	var good, malformed b1gen.Vector
 	for _, v := range m.Vectors {
 		switch v.ID {
-		case "cert.single.ok":
+		case "cert.shared.ok":
 			good = v
-		case "enc.trailing":
+		case "frozen.malformed-last":
 			malformed = v
 		}
 	}
 	req, _ := hex.DecodeString(good.Request)
-	reg := registry(t, good.PreState)
-	if _, used, err := b1ref.Run(b1ref.OpUC, make([]byte, b1ref.MaxCallBytes+1), reg, 10); !errors.Is(err, b1ref.ErrInputTooLarge) || used != 10 {
+	st, pins := state(t, good.PreState)
+	if _, used, err := b1ref.Run(b1ref.OpCertBatch, make([]byte, b1ref.MaxCallBytes+1), st, pins, 10); !errors.Is(err, b1ref.ErrInputTooLarge) || used != 10 {
 		t.Fatalf("oversized input with little gas: used=%d err=%v", used, err)
 	}
-	if _, _, err := b1ref.Run(b1ref.OpMember, make([]byte, b1ref.MaxRSMTInputBytes+1), nil, 10); !errors.Is(err, b1ref.ErrInputTooLarge) {
+	if _, _, err := b1ref.Run(b1ref.OpMember, make([]byte, b1ref.MaxRSMTInputBytes+1), nil, b1ref.Pins{}, 10); !errors.Is(err, b1ref.ErrInputTooLarge) {
 		t.Fatalf("oversized RSMT input: %v", err)
 	}
 	bad, _ := hex.DecodeString(malformed.Request)
+	k := uint64(binary.BigEndian.Uint16(bad[2:4]))
 	reserve := uint64(60000 + 16*len(bad))
-	if _, used, err := b1ref.Run(b1ref.OpUC, bad, reg, reserve-1); !errors.Is(err, b1ref.ErrOutOfGas) || used != reserve-1 {
-		t.Fatalf("below the reservation a malformed input is an out-of-gas, got used=%d err=%v", used, err)
+	scan := b1ref.ScanGas(uint64(len(bad)), k)
+	if _, used, err := b1ref.Run(b1ref.OpCertBatch, bad, st, pins, reserve-1); !errors.Is(err, b1ref.ErrOutOfGas) || used != reserve-1 {
+		t.Fatalf("below 60,000+16C: used=%d err=%v", used, err)
 	}
-	if _, _, err := b1ref.Run(b1ref.OpUC, bad, reg, reserve); !errors.Is(err, b1ref.ErrMalformed) {
-		t.Fatalf("at the reservation the input is parsed: %v", err)
+	if _, _, err := b1ref.Run(b1ref.OpCertBatch, append([]byte{1}, bad[1:]...), st, pins, reserve); !errors.Is(err, b1ref.ErrVersion) {
+		t.Fatalf("at 60,000+16C the header is read: %v", err)
 	}
-	if _, _, err := b1ref.Run(b1ref.OpUC, req, reg, good.Expected.Gas-1); !errors.Is(err, b1ref.ErrOutOfGas) {
-		t.Fatalf("below the full charge: %v", err)
+	if _, _, err := b1ref.Run(b1ref.OpCertBatch, bad, st, pins, scan-1); !errors.Is(err, b1ref.ErrOutOfGas) {
+		t.Fatalf("below G_scan the occurrences are not scanned: %v", err)
+	}
+	if _, _, err := b1ref.Run(b1ref.OpCertBatch, bad, st, pins, scan); !errors.Is(err, b1ref.ErrShape) {
+		t.Fatalf("at G_scan the malformed last occurrence is found: %v", err)
+	}
+	if _, _, err := b1ref.Run(b1ref.OpCertBatch, req, st, pins, good.Expected.Gas-1); !errors.Is(err, b1ref.ErrOutOfGas) {
+		t.Fatalf("below G_batch: %v", err)
 	}
 }
 
-// TestInputNotMutated: the verdict must not depend on, or alter, the caller's
-// bytes (the native bit string decoder works in place, so the shard bytes are
-// decoded from a copy).
+// TestInputNotMutated: the verdict must not depend on, or alter, the caller's bytes (the native bit string decoder works in place,
+// so the shard bytes are decoded from a copy).
 func TestInputNotMutated(t *testing.T) {
 	m, _ := loadGolden(t)
 	for _, v := range m.Vectors {
@@ -372,36 +421,17 @@ func TestInputNotMutated(t *testing.T) {
 			t.Fatalf("%s: input modified", v.ID)
 		}
 		second, err2 := evaluateBytes(t, v, req)
-		if first != second || (err1 == nil) != (err2 == nil) {
+		if first.Valid != second.Valid || first.Gas != second.Gas || (err1 == nil) != (err2 == nil) {
 			t.Fatalf("%s: verdict not repeatable", v.ID)
 		}
 	}
 }
 
-func evaluateBytes(t testing.TB, v b1gen.Vector, req []byte) (verdict [3]uint64, err error) {
-	reg := registry(t, v.PreState)
-	var r b1ref.Verdict
-	switch op(v) {
-	case b1ref.OpUC:
-		r, err = b1ref.UC(req, reg)
-	case b1ref.OpShared:
-		r, err = b1ref.Shared(req, reg)
-	default:
-		r, err = b1ref.Member(req)
-	}
-	if r.Valid {
-		verdict[0] = 1
-	}
-	verdict[1] = r.Gas
-	return verdict, err
-}
-
-// TestRecoveryByteIsPolicy shows the v restriction is B1 policy: the native
-// verifier accepts the same signature with v = 2 and 255, B1 does not.
+// TestRecoveryByteIsPolicy shows the v restriction is B1 policy: the native verifier accepts the same signature with v = 2 and 255,
+// B1 does not.
 func TestRecoveryByteIsPolicy(t *testing.T) {
 	m, _ := loadGolden(t)
-	seed := m.Seed
-	val := b1gen.ValidatorForTest(seed, "node00")
+	val := b1gen.ValidatorForTest(m.Seed, "node00")
 	msg := []byte("seal bytes")
 	sig := val.Sign(msg, false)
 	ver, err := nativeVerifier(val.Pub)
@@ -424,48 +454,12 @@ func TestRecoveryByteIsPolicy(t *testing.T) {
 	}
 }
 
-// TestFrozenClassifications requires a fully frozen manifest.
-func TestFrozenClassifications(t *testing.T) {
-	m, _ := loadGolden(t)
-	if len(m.Notes) == 0 {
-		t.Fatal("missing scope/price notes")
+// TestMaxGas pins the schedule's maximum: K = E = A = 16, Q = 256, P = 4,608 at the byte cap.
+func TestMaxGas(t *testing.T) {
+	if g := b1ref.BatchGas(b1ref.MaxCallBytes, 16, 16, 256, 16, 4608); g != 7_573_804 {
+		t.Fatalf("batch worst case %d", g)
 	}
-}
-
-func TestAdmittedRegistryRefusals(t *testing.T) {
-	m, _ := loadGolden(t)
-	var fixture b1gen.Vector
-	for _, v := range m.Vectors {
-		if v.ID == "cert.single.ok" {
-			fixture = v
-		}
-	}
-	raw, _ := hex.DecodeString(fixture.Request)
-	for _, tc := range []struct {
-		name   string
-		change func(*b1ref.Registry)
-	}{
-		{"uninitialized", func(r *b1ref.Registry) { r.Initialized = false }},
-		{"no-genesis", func(r *b1ref.Registry) { r.GenesisCommitment = [32]byte{} }},
-		{"no-profile", func(r *b1ref.Registry) { r.ProfileHash = [32]byte{} }},
-		{"impossible-phase", func(r *b1ref.Registry) { r.Phase = 3 }},
-		{"bad-key", func(r *b1ref.Registry) { e := r.Epochs[7]; e.Members[0].Key = [33]byte{}; r.Epochs[7] = e }},
-		{"duplicate-key", func(r *b1ref.Registry) { e := r.Epochs[7]; e.Members[1].Key = e.Members[0].Key; r.Epochs[7] = e }},
-		{"missing-config", func(r *b1ref.Registry) { e := r.Epochs[7]; e.SigningConfigHash = [32]byte{}; r.Epochs[7] = e }},
-		{"wrong-epoch", func(r *b1ref.Registry) { e := r.Epochs[7]; e.Epoch = 8; r.Epochs[7] = e }},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			r := registry(t, fixture.PreState)
-			tc.change(r)
-			if _, err := b1ref.UC(raw, r); !errors.Is(err, b1ref.ErrInfrastructure) || errors.Is(err, b1ref.ErrMalformed) {
-				t.Fatal(err)
-			}
-		})
-	}
-	r := registry(t, fixture.PreState)
-	r.Phase = 1
-	v, err := b1ref.UC(raw, r)
-	if err != nil || !errors.Is(v.Why, b1ref.ErrPhase) || v.Gas != fixture.Expected.Gas {
-		t.Fatal(v, err)
+	if g := b1ref.RSMTGas(12392, 256); g != 264_522 {
+		t.Fatalf("RSMT worst case %d", g)
 	}
 }

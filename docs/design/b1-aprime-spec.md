@@ -119,8 +119,8 @@ Weighted quorum is `total-(total-1)/3`; every supplied signer is checked, and
 an invalid/unknown extra fails after an otherwise sufficient quorum.
 
 Full candidate caller charge is
-`60000+16*B+64000+6000*S+2000*N+250*P+1117700`, capped conservatively at
-6,412,004. The first debit precedes allocation-free scanning; the second
+`60000+16*B+16000+6000*S+2000*N+250*P+14700`, capped conservatively at
+5,261,004. The first debit precedes allocation-free scanning; the second
 precedes decoding/crypto. Malformed/OOG consume forwarded gas. Infrastructure
 errors have no EVM result (`Run` reports used=0). RSMT is unchanged, stateless,
 and does not authenticate its caller-supplied root; its maximum is 264,522.

@@ -466,8 +466,8 @@ func (g *gen) policy() {
 		e.LeafProofs[0].AnchorIndex, e.LeafProofs[1].AnchorIndex = 1, 0
 	}), both)
 	addEnvSIDs("envelope-leaf-index-out-of-range", "second leaf names anchor 2", bothEnv(func(e *Envelope) { e.LeafProofs[1].AnchorIndex = 2 }), both)
-	addEnv("envelope-five-anchors", "five anchors: one over MaxAnchors", envFor(func(e *Envelope) {
-		e.Anchors = append(e.Anchors, anchorOf(0, 2), anchorOf(0, 3), anchorOf(0, 4), anchorOf(0, 5))
+	addEnv("envelope-nine-anchors", "nine anchors: one over MaxAnchors", envFor(func(e *Envelope) {
+		e.Anchors = append(e.Anchors, anchorOf(0, 2), anchorOf(0, 3), anchorOf(0, 4), anchorOf(0, 5), anchorOf(0, 6), anchorOf(0, 7), anchorOf(0, 8), anchorOf(0, 9))
 	}), 2)
 	addEnv("envelope-three-anchors", "three anchors for two leaves", envFor(func(e *Envelope) { e.Anchors = append(e.Anchors, anchorOf(0, 2), anchorOf(0, 3)) }), 2)
 	addEnv("envelope-no-anchors", "no anchors", envFor(func(e *Envelope) { e.Anchors = nil }), 2)
@@ -1345,34 +1345,19 @@ func (g *gen) proof() {
 	g.useQuad = true
 	perLeaf("compose-anchors-3-dnb", "three leaves, three anchors, each certificate with the DN-B committee's four signatures: accepted at the transaction budget", 1)
 	perLeaf("compose-anchors-max-dnb", "MaxAnchors anchors, each certificate with four signatures (DN-B committee shape): accepted at the transaction budget", MaxAnchors-2)
-	// The gate decides for real certificates too: four four-signature anchors with sixteen leaves, a long history and deep paths do not fit.
-	g.extraN = 4000
-	if hc, err := g.certifiedWith(MaxLeaves-2, func(i int, l Leaf) ShardRound { return ShardRound{BaseTime + 1000, 100 + uint64(i%2)} }); err == nil {
-		eb := envOf(hc.h, hc.cert, nil)
-		g.must(func() error {
-			if len(hc.cert.Anchors) != MaxAnchors {
-				return fmt.Errorf("load case has %d anchors, want %d", len(hc.cert.Anchors), MaxAnchors)
-			}
-			if gt, e := GateOf(f.Cfg, OpReturn, eb, 1<<62); e != nil || gt.Total() <= TxGasBudget {
-				return fmt.Errorf("load case does not exceed the budget: %v %v", gt, e)
-			}
-			return nil
-		}())
-		add("compose-anchors-max-dnb-load-over-budget", "four anchors with four signatures each, sixteen leaves, deep paths: over the gate at the transaction budget", eb, claimsOf(hc.cert.Anchors...), "return")
-	} else {
-		g.must(err)
-	}
+	// With the repriced certificate call (owner-decisions section 22) real four-signature certificates never reach the gate, even
+	// at eight anchors with sixteen leaves and deep paths; only the maximum-signature case below does.
 	g.useQuad, g.extraN = false, 0
 	perLeaf("compose-anchors-over-max", "MaxAnchors+1 leaves, each certified by its own UC", MaxAnchors-1)
-	// Four anchors of certificates carrying 64 seal signatures each (the native maximum): structurally
-	// admitted, priced out by the gate before any B1 call.
+	// Eight anchors of certificates carrying 64 seal signatures each (the native maximum): structurally
+	// admitted; the gate prices them (about 0.6M each) before any B1 call.
 	if hc, err := g.certifiedWith(MaxAnchors-2, func(i int, l Leaf) ShardRound { return ShardRound{BaseTime + 1000, 100 + uint64(i)} }); err == nil {
 		eb := envOf(hc.h, hc.cert, func(e *Envelope) {
 			for i := range e.Anchors {
 				e.Anchors[i].UC = ucWithSigs(g, e.Anchors[i].UC, 64)
 			}
 		})
-		add("compose-anchors-max-heavy-over-budget", "MaxAnchors anchors whose certificates carry 64 signatures each: over the gate at the transaction budget", eb, claimsOf(hc.cert.Anchors...), "return")
+		add("compose-anchors-max-heavy-over-budget", "MaxAnchors (eight) anchors whose certificates carry 64 signatures each (the native maximum), the heaviest admitted shape", eb, claimsOf(hc.cert.Anchors...), "return")
 	} else {
 		g.must(err)
 	}

@@ -18,7 +18,7 @@ const (
 	// Profile ceilings of the measurement (design v5 section 6: V_max 128, L_max 8, N_max 32).
 	ElectMaxIdentities = 128
 	ElectMaxLots       = 8
-	ElectMaxCommittee  = 32
+	ElectMaxCommittee  = 16
 	// Floors of the measurement script's domain.
 	ElectMinIdentities = 5
 	ElectMinCommittee  = 4
