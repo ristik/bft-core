@@ -327,6 +327,17 @@ if [ "${SIGNING:-local}" = authority ]; then
   echo "enrolled $validators independent signing authorities against the full shard configuration"
 fi
 
+if [ "${UTB_LANE:-0}" = 1 ]; then
+  # the combined UTB lane (scripts/utb-lane.sh): the any-age machinery with the signed trust-base entry profile on from the first voting epoch. The genesis
+  # entry, its pin and the deployment manifest are generated once, here, from the epoch-1 trust base the roots will start with.
+  [ "${ANYAGE_LANE:-0}" = 1 ] || { echo "UTB_LANE=1 requires ANYAGE_LANE=1 (the aggregator partition and the bridge)" >&2; exit 2; }
+  source scripts/lib/utb-lib.sh
+  UTB_ROOT_FLAGS_FN=utb_root_flags UTB_AGG_ENV_FN=utb_agg_env
+  export UTB_ROOT_FLAGS_FN UTB_AGG_ENV_FN
+  utb_prepare_genesis test-nodes/trust-base.json || { echo "the UTB genesis could not be generated" >&2; exit 1; }
+  echo "UTB genesis entry $(utb_pin) (manifest $UTB_DIR/utb-manifest.json)"
+fi
+
 if [ "${ANYAGE_LANE:-0}" = 1 ] && [ -n "${ANYAGE_PREP_ONLY:-}" ]; then
   # A dry run of the combined genesis: every offline input exists (P85 genesis, profile, identities, enrolled authorities, aggregator shard configurations,
   # the bridge deployment derived from the identities); no reth, root, validator or aggregator process is started and no port is taken.

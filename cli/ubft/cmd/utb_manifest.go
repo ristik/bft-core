@@ -95,6 +95,14 @@ func currentBuild() (revision string, modified bool, goBase, goVersion string) {
 
 // deriveUTBManifest computes every derived value of the manifest from the genesis trust base, and writes the genesis entry to outDir.
 func deriveUTBManifest(trustBasePath, outDir string, components map[string]string) (*utbManifest, error) {
+	// the manifest names its files absolutely, so a check from any directory recomputes the same thing
+	var err error
+	if trustBasePath, err = filepath.Abs(trustBasePath); err != nil {
+		return nil, err
+	}
+	if outDir, err = filepath.Abs(outDir); err != nil {
+		return nil, err
+	}
 	tb, err := util.ReadJsonFile(trustBasePath, &types.RootTrustBaseV1{})
 	if err != nil {
 		return nil, fmt.Errorf("failed to load trust base %q: %w", trustBasePath, err)

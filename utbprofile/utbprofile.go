@@ -53,7 +53,7 @@ func Check(in Inputs) error {
 			add("--utb-genesis and --utb-genesis-id go together: the genesis entry is authenticated by its pin, and a pin names nothing without the entry")
 		}
 		if in.Role == Root && !in.Profile2 {
-			add("a root of the profile runs profile 2 (--profile2): the entries are produced by its handoffs")
+			add("a root of the profile runs profile 2 (--profile-2): the entries are produced by its handoffs")
 		}
 		if in.GenesisFile != "" {
 			if fi, err := os.Stat(in.GenesisFile); err != nil || fi.IsDir() || fi.Size() == 0 {
