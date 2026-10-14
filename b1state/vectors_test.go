@@ -24,7 +24,7 @@ func TestIndependentStorageAndUpdateVector(t *testing.T) {
 	if err = json.Unmarshal(raw, &v); err != nil {
 		t.Fatal(err)
 	}
-	p := fixtureProfile(1)
+	p := fixtureProfile(2)
 	h, err := p.Hash()
 	if err != nil || hex.EncodeToString(h[:]) != v.ProfileHash {
 		t.Fatal("profile hash", h, err)
@@ -57,11 +57,26 @@ func TestIndependentStorageAndUpdateVector(t *testing.T) {
 	if !reflect.DeepEqual(asJSON(words), v.GenesisWords) {
 		t.Fatal("genesis words")
 	}
-	out, changed, err := (Ring{Head: 1, GenesisStart: 7, OriginRound: 7, Entries: []Entry{g}}).Apply(u, 1)
+	reg, err := NewRegistry(g)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(out.Entries) != 1 || out.Entries[0].Epoch != 2 || !reflect.DeepEqual(asJSON(changed.Final), v.ChangedWords) {
+	reg.Tip = u.PriorTipEpoch // the vector's parent already holds the epochs below the appended one
+	out, changed, err := reg.Apply(u, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := asJSON(changed.Final); out.Tip != 1 || !reflect.DeepEqual(got, v.ChangedWords) {
+		for k, w := range v.ChangedWords {
+			if got[k] != w {
+				t.Logf("want %s=%s got %q", k, w, got[k])
+			}
+		}
+		for k := range got {
+			if _, ok := v.ChangedWords[k]; !ok {
+				t.Logf("unexpected %s", k)
+			}
+		}
 		t.Fatal("changed words")
 	}
 	if v.RootKey == v.DistinctDelegatedEVMKey || hex.EncodeToString(g.Members[0].Key[:]) != v.RootKey {

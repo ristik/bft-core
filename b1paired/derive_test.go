@@ -22,7 +22,7 @@ import (
 )
 
 func TestOwnPairDerivationAndExactReplay(t *testing.T) {
-	f := b1fixture.New(t, 0)
+	f := b1fixture.New(t)
 	ctx := context.Background()
 	want, err := f.Pair.Derive(ctx, f.Parent, f.Observation)
 	require.NoError(t, err)
@@ -76,7 +76,7 @@ func TestOwnPairDerivationAndExactReplay(t *testing.T) {
 	require.ErrorIs(t, err, b1state.ErrBinding)
 }
 func TestPairRejectsMissingAuthorityAndParentProof(t *testing.T) {
-	f := b1fixture.New(t, 1)
+	f := b1fixture.New(t)
 	ctx := context.Background()
 	for _, tc := range []struct {
 		name        string
@@ -97,7 +97,7 @@ func TestPairRejectsMissingAuthorityAndParentProof(t *testing.T) {
 				return nil, errors.ErrUnsupported
 			}
 		}, f.Parent, f.Observation, errors.ErrUnsupported},
-		{"profile-window", func(c *b1paired.Config) { c.Profile.WCert = 0 }, f.Parent, f.Observation, b1paired.ErrAdmission},
+		{"profile-below-the-span", func(c *b1paired.Config) { c.Profile.MaxEpochsPerUpdate = 1 }, f.Parent, f.Observation, b1state.ErrProfile},
 		{"invalid-profile", func(c *b1paired.Config) { c.Profile.SystemGas-- }, f.Parent, f.Observation, b1state.ErrProfile},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -124,7 +124,7 @@ func TestPairRejectsMissingAuthorityAndParentProof(t *testing.T) {
 }
 
 func TestHonestBodyWithAttackerStorageIsRefused(t *testing.T) {
-	f := b1fixture.New(t, 1)
+	f := b1fixture.New(t)
 	for _, tc := range []struct {
 		name  string
 		slot  [32]byte
@@ -134,7 +134,6 @@ func TestHonestBodyWithAttackerStorageIsRefused(t *testing.T) {
 		{"weight", b1state.MemberSlot(1, 0, 7), b1state.Word(2)},
 		{"configuration", b1state.EntrySlot(1, 8), [32]byte{9}},
 		{"end", b1state.EntrySlot(1, 5), b1state.Word(1)},
-		{"queue", b1state.QueueSlot(0), b1state.Word(9)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			words := f.Genesis.B1Words()
@@ -153,7 +152,7 @@ func TestHonestBodyWithAttackerStorageIsRefused(t *testing.T) {
 }
 
 func TestPairRechecksObservationUnderItsOwnRootCommittee(t *testing.T) {
-	f := b1fixture.New(t, 0)
+	f := b1fixture.New(t)
 	attacker, err := abcrypto.NewInMemorySecp256K1Signer()
 	require.NoError(t, err)
 	attackerBase := testtrustbase.NewTrustBase(t, attacker).(*types.RootTrustBaseV1)
@@ -187,25 +186,30 @@ func (f fixedTrust) GetByEpoch(context.Context, uint64) (*types.RootTrustBaseV1,
 	return f.tb, nil
 }
 
-func TestParentCountClockAndHeightAreIndependentGates(t *testing.T) {
-	f := b1fixture.New(t, 1)
+func TestParentTipClockAndHeightAreIndependentGates(t *testing.T) {
+	f := b1fixture.New(t)
 	for _, tc := range []struct {
-		name                        string
-		number, round, epoch, count uint64
-		want                        error
+		name                 string
+		number, round, epoch uint64
+		ready                uint64
+		tip                  uint64
+		want                 error
 	}{
-		{"count", 0, 0, 0, 2, b1paired.ErrAdmission},
-		{"origin-epoch", 1, 4, 2, 1, b1paired.ErrAdmission},
-		{"clock", 1, 6, 1, 1, b1state.ErrClock},
-		{"height", ^uint64(0), 4, 1, 1, b1state.ErrOverflow},
+		{"imported tip beyond the origin's epoch", 0, 0, 0, 0, 9, b1paired.ErrAdmission},
+		{"origin round regresses", 1, 6, 1, 1, 1, b1state.ErrOriginRoundRegression},
+		{"height", ^uint64(0), 4, 1, 1, 1, b1state.ErrOverflow},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			words := f.Genesis.B1Words()
 			set := func(name string, v uint64) {
 				words[common.Hash(b1state.FixedSlot(name))] = common.Hash(b1state.Word(v))
 			}
-			set("b1.count", tc.count)
+			set("b1.importedTipEpoch", tc.tip)
+			if tc.tip != 1 {
+				set("b1.genesisEpoch", 1)
+			}
 			if tc.number > 0 {
+				set("b1.originReady", tc.ready)
 				set("clock.rootRound", tc.round)
 				set("origin.rootEpoch", tc.epoch)
 				set("round.authorized", 1)
@@ -226,7 +230,7 @@ func TestParentCountClockAndHeightAreIndependentGates(t *testing.T) {
 }
 
 func TestProofFetcherCannotRewriteAdmissionKeys(t *testing.T) {
-	f := b1fixture.New(t, 0)
+	f := b1fixture.New(t)
 	c, h, e, prove := b1fixture.Parent(t, f, f.Genesis.B1Words())
 	parent, err := registryproof.Verify(c, h, e)
 	require.NoError(t, err)
@@ -242,7 +246,7 @@ func TestProofFetcherCannotRewriteAdmissionKeys(t *testing.T) {
 }
 
 func TestEntryStorageRefusesInvalidAuthorityEntry(t *testing.T) {
-	f := b1fixture.New(t, 0)
+	f := b1fixture.New(t)
 	entries, err := f.History.B1Entries(5)
 	require.NoError(t, err)
 	_, err = b1state.EntryStorage(entries[0])
@@ -253,7 +257,7 @@ func TestEntryStorageRefusesInvalidAuthorityEntry(t *testing.T) {
 }
 
 func TestBootstrapInstallsAuthorityBeforeOperationalClock(t *testing.T) {
-	f := b1fixture.NewWithRootStart(t, 0, 2)
+	f := b1fixture.NewWithRootStart(t, 2)
 	require.Zero(t, f.Parent.Fields().ClockRootRound)
 	require.NoError(t, f.History.Ordinary(1, 5))
 	result, err := f.Pair.Derive(context.Background(), f.Parent, f.Observation)

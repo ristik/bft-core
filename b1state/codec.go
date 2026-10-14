@@ -285,7 +285,7 @@ func Admit(raw []byte, p Profile, budget uint64) (Update, uint64, error) {
 		if err := e.Validate(); err != nil {
 			return Update{}, gas, err
 		}
-		if e.BodyKind == 1 || e.Epoch <= u.PriorTipEpoch || e.Start > u.OriginRound || (e.End != nil && (*e.End <= lower(u.OriginRound, p.WCert) || *e.End > u.OriginRound)) {
+		if e.BodyKind == 1 || e.Epoch <= u.PriorTipEpoch || e.Start > u.OriginRound || (e.End != nil && *e.End > u.OriginRound) {
 			return Update{}, gas, ErrInterval
 		}
 		if i > 0 {

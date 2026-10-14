@@ -17,7 +17,7 @@ import (
 )
 
 func TestOfflineExportBindsFreshAllocationAndRefusesOverwrite(t *testing.T) {
-	f := b1fixture.New(t, 0)
+	f := b1fixture.New(t)
 	dir := t.TempDir()
 	write := func(name string, v any) string {
 		raw, err := json.Marshal(v)
@@ -86,7 +86,7 @@ func mutateRegistry(t *testing.T, genesis []byte, edit func(code *string, storag
 // The deployed registry account is compared with an independent regeneration, code and storage: the unchanged genesis passes, and each single
 // change to the deployed account (a code byte, a word, an extra word, a missing word, a nonce, an absent account) is refused by its own sentinel.
 func TestVerifyComparesTheDeployedRegistryAccountWithTheRegeneration(t *testing.T) {
-	f := b1fixture.New(t, 0)
+	f := b1fixture.New(t)
 	genesis := f.Genesis.GenesisJSON()
 	words, err := verifyDeployed(f.Genesis, f.Pair.Profile.RuntimeHash, genesis)
 	require.NoError(t, err)
@@ -182,7 +182,7 @@ func TestVerifyComparesTheDeployedRegistryAccountWithTheRegeneration(t *testing.
 
 // --verify through the command: the deployed genesis the lane's clients run is checked against the inputs the chain was made from.
 func TestVerifyFlagThroughTheCommand(t *testing.T) {
-	f := b1fixture.New(t, 0)
+	f := b1fixture.New(t)
 	dir := t.TempDir()
 	write := func(name string, v any) string {
 		raw, err := json.Marshal(v)
@@ -221,7 +221,7 @@ func TestVerifyFlagThroughTheCommand(t *testing.T) {
 
 // The profile file `ubft engine-api b1-profile` writes (0x-hex hashes) is read as the same profile as the array form of b1state.Profile.
 func TestReadProfileAcceptsTheUbftHexFile(t *testing.T) {
-	f := b1fixture.New(t, 0)
+	f := b1fixture.New(t)
 	dir := t.TempDir()
 	arrays, err := json.Marshal(f.Pair.Profile)
 	require.NoError(t, err)
@@ -229,7 +229,7 @@ func TestReadProfileAcceptsTheUbftHexFile(t *testing.T) {
 	hexFile, err := json.Marshal(map[string]any{
 		"network": p.Network, "rootGenesisId": "0x" + hex.EncodeToString(p.RootGenesisID[:]), "executionChainId": p.ExecutionChainID,
 		"runtimeHash": "0x" + hex.EncodeToString(p.RuntimeHash[:]), "compilerHash": "0x" + hex.EncodeToString(p.CompilerHash[:]),
-		"wCert": p.WCert, "deltaEv": p.DeltaEV, "deltaHold": p.DeltaHold, "systemGas": p.SystemGas, "forcedGas": p.ForcedGas, "maxGas": p.MaxGas,
+		"maxEpochsPerUpdate": p.MaxEpochsPerUpdate, "deltaEv": p.DeltaEV, "deltaHold": p.DeltaHold, "systemGas": p.SystemGas, "forcedGas": p.ForcedGas, "maxGas": p.MaxGas,
 		"ordinaryCapacity": p.OrdinaryCapacity, "restGas": p.RestGas, "companionBytes": p.CompanionBytes,
 		"otherCompanionBytes": p.OtherCompanionBytes, "genesisUcTime": p.GenesisUCTime,
 	})

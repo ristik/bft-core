@@ -28,7 +28,8 @@ EVM_CONTINUITY_MAX_DISTANCE = '1/2'
 
 # The one B1 profile (`ubft engine-api b1-profile`) is the source of the registry genesis (layout 3), the ureth --unicity.* bindings and the shard
 # nodes' Update admission, exactly as scripts/dnb-devnet.sh and the Q3 lanes use it. W_cert is the lanes' value.
-W_CERT = 15
+# B (epochs one block may install) and the P85 evidence/hold windows; certificate age no longer expires, so there is no W_cert.
+MAX_EPOCHS, DELTA_EV, DELTA_HOLD = 2, 16, 17
 
 def ureth_flags_of(profile_output):
     """The `ureth flags:` line `engine-api b1-profile` prints: the bindings that pin the paired client to the profile."""
@@ -253,7 +254,7 @@ def main():
                 owners=json.loads(subprocess.check_output([str(a.keygen.resolve()),'owners',str(home/'pos-owner-keys'),str(a.validators)],text=True))
                 genesis.plan(trust,home/'shard-conf-8_0.json',owners,weights)
                 genesis.prepare(home/'shard-conf-8_0.json',provisional=True)
-            profile_out=cli('engine-api','b1-profile','--shard-conf',home/'shard-conf-8_0.json','--trust-base',trust,'--w-cert',W_CERT,'--out',home/'b1-profile.json',
+            profile_out=cli('engine-api','b1-profile','--shard-conf',home/'shard-conf-8_0.json','--trust-base',trust,'--max-epochs-per-update',MAX_EPOCHS,'--delta-ev',DELTA_EV,'--delta-hold',DELTA_HOLD,'--out',home/'b1-profile.json',
                 *(pos.profile_args(genesis.deployment,{'election':genesis.dir/'elect-measurement.json','hook':genesis.dir/'hook-measurement.jsonl'}) if genesis else []))
             if genesis: print(genesis.check_hook_gas(home/'b1-profile.json'))
             flags=ureth_flags_of(profile_out)

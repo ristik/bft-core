@@ -46,7 +46,7 @@ func newB1Deployment(t *testing.T) *b1Deployment {
 	require.NoError(t, util.WriteJsonFile(d.confPath, d.conf))
 	require.NoError(t, util.WriteJsonFile(d.tbPath, d.tb))
 	var err error
-	d.profile, err = deriveB1Profile(d.tb, d.conf, 1, 7_000_000, 1000)
+	d.profile, err = deriveB1Profile(d.tb, d.conf, 2, 1, 2, 7_000_000, 1000)
 	require.NoError(t, err)
 	d.writeProfile(t, d.profile)
 	// A standard genesis source whose gas limit is the profile's block gas limit.
@@ -266,8 +266,8 @@ func TestB1Origin_ARegistryOfAnotherProfileIsNotAccepted(t *testing.T) {
 	require.NoError(t, err)
 	full := readFullShardConf(t, filepath.Join(d.dir, "genesis-full-shard-conf.json"))
 	other := d.profile
-	other.WCert, other.DeltaEV, other.DeltaHold = 2, 3, 4
-	other.RestGas = b1registry.MinRestGas(other.WCert)
+	other.MaxEpochsPerUpdate, other.DeltaEV, other.DeltaHold = 2, 3, 4
+	other.RestGas = b1registry.MinRestGas(other.MaxEpochsPerUpdate)
 	var e error
 	other.SystemGas, e = other.RequiredSystemGas()
 	require.NoError(t, e)
@@ -372,7 +372,7 @@ func TestB1ProfileCommand_WritesTheProfileAndTheClientFlags(t *testing.T) {
 	var stdout bytes.Buffer
 	cmd := New(testobserve.NewFactory(t))
 	cmd.baseCmd.SetOut(&stdout)
-	cmd.baseCmd.SetArgs([]string{"engine-api", "b1-profile", "--shard-conf", d.confPath, "--trust-base", d.tbPath, "--out", out})
+	cmd.baseCmd.SetArgs([]string{"engine-api", "b1-profile", "--shard-conf", d.confPath, "--trust-base", d.tbPath, "--delta-ev", "1", "--delta-hold", "2", "--out", out})
 	require.NoError(t, cmd.Execute(context.Background()))
 	got, err := readB1Profile(out)
 	require.NoError(t, err)
@@ -427,7 +427,7 @@ func electDeployment(t *testing.T, m b1state.ElectMeasurement) (*b1Deployment, b
 	caps := b1state.ElectCaps{VMax: 16, LMax: 2, NMax: 8}
 	hooks := b1Hooks{RecordsCustody: [20]byte{0xc1}, HRecords: 2, HookRecordGas: 3_000_000, ElectionContract: [20]byte{0xe1}, Measurement: &m,
 		HookMeasurement: &hm, HookCaps: &caps}
-	p, err := deriveB1Profile(d.tb, d.conf, 1, 7_000_000, 1000, hooks)
+	p, err := deriveB1Profile(d.tb, d.conf, 2, 1, 2, 7_000_000, 1000, hooks)
 	require.NoError(t, err)
 	file := b1ProfileFileOf(p)
 	file.ElectMeasurement, file.ElectCaps = &m, &caps
@@ -489,7 +489,7 @@ func TestB1Profile_AHandTypedOrMissingElectionPriceIsRefused(t *testing.T) {
 		})
 	}
 	d := newB1Deployment(t)
-	_, err := deriveB1Profile(d.tb, d.conf, 1, 7_000_000, 1000, b1Hooks{RecordsCustody: [20]byte{0xc1}, HRecords: 1, HookRecordGas: 1, ElectionContract: [20]byte{0xe1}})
+	_, err := deriveB1Profile(d.tb, d.conf, 2, 1, 2, 7_000_000, 1000, b1Hooks{RecordsCustody: [20]byte{0xc1}, HRecords: 1, HookRecordGas: 1, ElectionContract: [20]byte{0xe1}})
 	require.Error(t, err, "an election without a measurement cannot be derived")
 }
 
@@ -625,7 +625,7 @@ func TestB1Genesis_AManifestCompilesIntoTheFreshB1Genesis(t *testing.T) {
 func TestB1ProfileFileMatchesTheGenesisToolsGolden(t *testing.T) {
 	h := func(b byte, tail byte) (out [32]byte) { out[0], out[1], out[31] = b, b, tail; return }
 	p := b1state.Profile{Network: 3, RootGenesisID: h(0x29, 0x01), ExecutionChainID: 31337, RuntimeHash: h(0x28, 0x02), CompilerHash: h(0x2f, 0x03),
-		WCert: 15, DeltaEV: 16, DeltaHold: 17, SystemGas: 269547540, ForcedGas: 5, MaxGas: 276547540, OrdinaryCapacity: 7000000, RestGas: 19360500,
+		MaxEpochsPerUpdate: 2, DeltaEV: 16, DeltaHold: 17, SystemGas: 269547540, ForcedGas: 5, MaxGas: 276547540, OrdinaryCapacity: 7000000, RestGas: 3431500,
 		CompanionBytes: 1048576, OtherCompanionBytes: 65536, GenesisUCTime: 1700000000,
 		RecordsCustody: common.HexToAddress("0x0c0571"), HRecords: 8, HookRecordGas: 120000, ElectionContract: common.HexToAddress("0xe1ec7"), ElectGas: 4200000}
 	got, err := json.Marshal(b1ProfileFileOf(p))
@@ -694,7 +694,7 @@ func TestB1Profile_TheHookReservationMustCoverTheMeasuredWorstRecordWithTheMargi
 	d := newB1Deployment(t)
 	caps := b1state.ElectCaps{VMax: 16, LMax: 2, NMax: 8}
 	derive := func(gas uint64, hm *b1state.HookMeasurement, hc *b1state.ElectCaps) error {
-		_, err := deriveB1Profile(d.tb, d.conf, 1, 7_000_000, 1000, b1Hooks{RecordsCustody: [20]byte{0xc1}, HRecords: 2, HookRecordGas: gas, HookMeasurement: hm, HookCaps: hc})
+		_, err := deriveB1Profile(d.tb, d.conf, 2, 1, 2, 7_000_000, 1000, b1Hooks{RecordsCustody: [20]byte{0xc1}, HRecords: 2, HookRecordGas: gas, HookMeasurement: hm, HookCaps: hc})
 		return err
 	}
 	lane := b1state.HookMeasurement{V: 16, L: 2, C: 8, Gas: 3_629_888, Kind: "recovery"}

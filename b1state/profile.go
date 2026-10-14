@@ -9,11 +9,14 @@ import (
 // RestGas must come from PR3's bounded runtime analysis, never calibration or
 // a guessed production budget. Zero pins deliberately fail validation.
 type Profile struct {
-	Network                                        uint16
-	RootGenesisID                                  [32]byte
-	ExecutionChainID                               uint64
-	RuntimeHash, CompilerHash                      [32]byte
-	WCert, DeltaEV, DeltaHold                      uint64
+	Network                   uint16
+	RootGenesisID             [32]byte
+	ExecutionChainID          uint64
+	RuntimeHash, CompilerHash [32]byte
+	DeltaEV, DeltaHold        uint64
+	// MaxEpochsPerUpdate is B: the most validator-epoch entries one execution block may install, across all update calls. The registry keeps
+	// every installed entry forever (no window, no pruning), so this bounds work per block, not history.
+	MaxEpochsPerUpdate                             uint64
 	SystemGas, ForcedGas, MaxGas, OrdinaryCapacity uint64
 	RestGas                                        uint64
 	CompanionBytes                                 uint64 // space for Update alongside other admitted fields
@@ -84,33 +87,50 @@ const (
 	ImportEnvelopeGas            = ImportAdmissionMaxGas + ImportExecutionGas
 )
 
-func (p Profile) Bounds() (k, c, t uint64, err error) {
-	if p.WCert == math.MaxUint64 {
+// MinEpochsPerUpdate is the least B a profile may carry: the acknowledgement block of a supersession installs every epoch the root moved past the
+// frozen parent, and the root refuses a longer unacknowledged chain than handoff.MaxSupersessionSpan (=2). package handoff asserts at build time
+// that this is not below that span, and the ureth registry carries the same check, so raising the span without B cannot strand an acknowledgement.
+const MinEpochsPerUpdate uint64 = 2
+
+// Per-block admission and write work of the permanent registry (briefs/b1-any-age-by-signatures.md section 2). Conservative prices, not runtime
+// measurements; the exact system bound and RestGas are frozen with the preload codec.
+const (
+	// UpdateGasBase is the fixed admission and finalize reservation of a B1 update.
+	UpdateGasBase uint64 = 155936
+	// EpochGasFixed and EpochGasPerMember price one installed epoch: admission (scan, member debit, authentication) plus the full-entry write
+	// (11 + 8N words) and the closure of the predecessor and cursor writes. There is no deletion term.
+	EpochGasFixed     uint64 = 505244
+	EpochGasPerMember uint64 = 177800
+)
+
+// Bounds returns B, the companion byte ceiling of an update (4096 + 16384 per entry) and its member/entry-count limit units.
+func (p Profile) Bounds() (b, c, t uint64, err error) {
+	b = p.MaxEpochsPerUpdate
+	if b == 0 || b > (math.MaxUint64-4096)/MaxEntryBytes || b > (math.MaxUint64-32)/266 {
 		return 0, 0, 0, ErrOverflow
 	}
-	k = p.WCert + 1
-	if k > (math.MaxUint64-4096)/MaxEntryBytes || k > (math.MaxUint64-32)/266 || k > (math.MaxUint64-6)/524 {
-		return 0, 0, 0, ErrOverflow
-	}
-	return k, 4096 + MaxEntryBytes*k, 32 + 266*k, nil
+	return b, 4096 + MaxEntryBytes*b, 32 + 266*b, nil
 }
+
+// PerEpochGas is the reservation of one installed entry at the member ceiling.
+func PerEpochGas() uint64 { return EpochGasFixed + EpochGasPerMember*MaxMembers }
 func (p Profile) RequiredSystemGas() (uint64, error) {
 	k, _, _, err := p.Bounds()
 	if err != nil {
 		return 0, err
 	}
-	// Admission + rectangular gross write allowance + the pinned rest bound + the root-record import envelope + the records hook.
+	// Admission + per-epoch gross write allowance + the pinned rest bound + the root-record import envelope + the records hook.
 	hook, err := p.HookEnvelopeGas()
 	if err != nil {
 		return 0, err
 	}
-	if p.RestGas > math.MaxUint64-155936-ImportEnvelopeGas-hook || k > (math.MaxUint64-155936-p.RestGas-ImportEnvelopeGas-hook)/15626944 {
+	if p.RestGas > math.MaxUint64-UpdateGasBase-ImportEnvelopeGas-hook || k > (math.MaxUint64-UpdateGasBase-p.RestGas-ImportEnvelopeGas-hook)/PerEpochGas() {
 		return 0, ErrOverflow
 	}
-	return 155936 + 15626944*k + p.RestGas + ImportEnvelopeGas + hook, nil
+	return UpdateGasBase + PerEpochGas()*k + p.RestGas + ImportEnvelopeGas + hook, nil
 }
 func (p Profile) Validate() error {
-	if p.Network == 0 || p.RootGenesisID == ([32]byte{}) || p.ExecutionChainID == 0 || p.RuntimeHash == ([32]byte{}) || p.CompilerHash == ([32]byte{}) || p.RestGas == 0 || p.GenesisUCTime == 0 || !p.validHook() || p.WCert > p.DeltaEV || p.DeltaEV >= p.DeltaHold {
+	if p.Network == 0 || p.RootGenesisID == ([32]byte{}) || p.ExecutionChainID == 0 || p.RuntimeHash == ([32]byte{}) || p.CompilerHash == ([32]byte{}) || p.RestGas == 0 || p.GenesisUCTime == 0 || !p.validHook() || p.DeltaEV >= p.DeltaHold || p.MaxEpochsPerUpdate < MinEpochsPerUpdate {
 		return ErrProfile
 	}
 	_, c, _, err := p.Bounds()
@@ -137,13 +157,13 @@ func (p Profile) Hash() ([32]byte, error) {
 	// All frozen bounds and prices are committed, including caller metering and
 	// the supported signing and quorum policies, rather than inferred locally.
 	// A profile without the election hook hashes exactly as it did before the hook existed; one with it commits three more items.
-	items := uint64(34)
+	items := uint64(35)
 	if p.ElectionEnabled() {
 		items += 3
 	}
 	b := array(nil, items)
 	b = textValue(b, "UNICITY_B1_PROFILE")
-	for _, v := range []uint64{uint64(p.Network), p.WCert, p.DeltaEV, p.DeltaHold, p.SystemGas, p.ForcedGas, p.MaxGas, p.OrdinaryCapacity, p.RestGas, p.CompanionBytes, p.OtherCompanionBytes, k, c, t, p.GenesisUCTime} {
+	for _, v := range []uint64{uint64(p.Network), p.MaxEpochsPerUpdate, p.DeltaEV, p.DeltaHold, p.SystemGas, p.ForcedGas, p.MaxGas, p.OrdinaryCapacity, p.RestGas, p.CompanionBytes, p.OtherCompanionBytes, k, c, t, p.GenesisUCTime} {
 		b = uintValue(b, v)
 	}
 	b = bytesValue(b, p.RootGenesisID[:])
@@ -167,6 +187,7 @@ func (p Profile) Hash() ([32]byte, error) {
 	if p.ElectionEnabled() {
 		b = textValue(b, "P85-election=after the records hook: one ElectionPolicy.elect(origin) from the system caller, origin = the identity of the block's authenticated root origin, within ElectGas; it never reverts for a chain-state reason (a failed election is a stored NoCandidate); a call that errors, reverts or exhausts ElectGas invalidates the block; activation (step 3) has no module and makes no call")
 	}
+	b = textValue(b, "registry=2;permanent-entries;append-only;no-window;B=per-block-epochs;origin=separate-from-imported-tip")
 	b = textValue(b, "native-body=1,2,3;signing=1,2;quorum=total-(total-1)/3;claims=8;signatures=64/512;shard=33/256;path=32;summary=256;RSMT=4096/256/12392")
 	return sha256.Sum256(b), nil
 }

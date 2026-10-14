@@ -52,7 +52,7 @@ type b1ProfileFile struct {
 	ExecutionChainID    uint64      `json:"executionChainId"`
 	RuntimeHash         common.Hash `json:"runtimeHash"`
 	CompilerHash        common.Hash `json:"compilerHash"`
-	WCert               uint64      `json:"wCert"`
+	MaxEpochsPerUpdate  uint64      `json:"maxEpochsPerUpdate"`
 	DeltaEV             uint64      `json:"deltaEv"`
 	DeltaHold           uint64      `json:"deltaHold"`
 	SystemGas           uint64      `json:"systemGas"`
@@ -84,7 +84,7 @@ func (f b1ProfileFile) profile() b1state.Profile {
 	return b1state.Profile{
 		Network: f.Network, RootGenesisID: [32]byte(f.RootGenesisID), ExecutionChainID: f.ExecutionChainID,
 		RuntimeHash: [32]byte(f.RuntimeHash), CompilerHash: [32]byte(f.CompilerHash),
-		WCert: f.WCert, DeltaEV: f.DeltaEV, DeltaHold: f.DeltaHold,
+		MaxEpochsPerUpdate: f.MaxEpochsPerUpdate, DeltaEV: f.DeltaEV, DeltaHold: f.DeltaHold,
 		SystemGas: f.SystemGas, ForcedGas: f.ForcedGas, MaxGas: f.MaxGas, OrdinaryCapacity: f.OrdinaryCapacity,
 		RestGas: f.RestGas, CompanionBytes: f.CompanionBytes, OtherCompanionBytes: f.OtherCompanionBytes, GenesisUCTime: f.GenesisUCTime,
 		RecordsCustody: addressOrZero(f.RecordsCustody), HRecords: f.HRecords, HookRecordGas: f.HookRecordGas,
@@ -113,7 +113,7 @@ func b1ProfileFileOf(p b1state.Profile) b1ProfileFile {
 		ElectionContract: addressPtr(p.ElectionContract), ElectGas: p.ElectGas,
 		Network: p.Network, RootGenesisID: common.Hash(p.RootGenesisID), ExecutionChainID: p.ExecutionChainID,
 		RuntimeHash: common.Hash(p.RuntimeHash), CompilerHash: common.Hash(p.CompilerHash),
-		WCert: p.WCert, DeltaEV: p.DeltaEV, DeltaHold: p.DeltaHold,
+		MaxEpochsPerUpdate: p.MaxEpochsPerUpdate, DeltaEV: p.DeltaEV, DeltaHold: p.DeltaHold,
 		SystemGas: p.SystemGas, ForcedGas: p.ForcedGas, MaxGas: p.MaxGas, OrdinaryCapacity: p.OrdinaryCapacity,
 		RestGas: p.RestGas, CompanionBytes: p.CompanionBytes, OtherCompanionBytes: p.OtherCompanionBytes, GenesisUCTime: p.GenesisUCTime,
 	}
@@ -223,7 +223,7 @@ func bindB1Profile(p b1state.Profile, tb *types.RootTrustBaseV1, conf *types.Par
 }
 
 // deriveB1Profile builds the profile of this deployment with the oracle's frozen envelope for the certificate window.
-func deriveB1Profile(tb *types.RootTrustBaseV1, conf *types.PartitionDescriptionRecord, wCert, ordinaryCapacity, genesisUCTime uint64, hooks ...b1Hooks) (b1state.Profile, error) {
+func deriveB1Profile(tb *types.RootTrustBaseV1, conf *types.PartitionDescriptionRecord, maxEpochs, deltaEV, deltaHold, ordinaryCapacity, genesisUCTime uint64, hooks ...b1Hooks) (b1state.Profile, error) {
 	h, err := q3format.NewHistory(tb)
 	if err != nil {
 		return b1state.Profile{}, fmt.Errorf("the root trust base has no verifiable history: %w", err)
@@ -235,8 +235,8 @@ func deriveB1Profile(tb *types.RootTrustBaseV1, conf *types.PartitionDescription
 	p := b1state.Profile{
 		Network: uint16(conf.NetworkID), RootGenesisID: h.Genesis(), ExecutionChainID: chainID,
 		RuntimeHash: [32]byte(common.HexToHash(b1registry.CodeHashHex)), CompilerHash: b1registry.CompilerHash(),
-		WCert: wCert, DeltaEV: wCert + 1, DeltaHold: wCert + 2,
-		RestGas: b1registry.MinRestGas(wCert), CompanionBytes: 1 << 20, OtherCompanionBytes: 65536, OrdinaryCapacity: ordinaryCapacity, GenesisUCTime: genesisUCTime,
+		MaxEpochsPerUpdate: maxEpochs, DeltaEV: deltaEV, DeltaHold: deltaHold,
+		RestGas: b1registry.MinRestGas(maxEpochs), CompanionBytes: 1 << 20, OtherCompanionBytes: 65536, OrdinaryCapacity: ordinaryCapacity, GenesisUCTime: genesisUCTime,
 	}
 	for _, h := range hooks {
 		p.RecordsCustody, p.HRecords, p.HookRecordGas = h.RecordsCustody, h.HRecords, h.HookRecordGas
@@ -505,7 +505,7 @@ other (V, L, C) is refused. Run it before genesis and whenever the contracts cha
 
 func engineAPIB1ProfileCmd(baseFlags *baseFlags) *cobra.Command {
 	var trustBasePath, out string
-	var wCert, capacity, genesisUCTime uint64
+	var maxEpochs, deltaEV, deltaHold, capacity, genesisUCTime uint64
 	var recordsCustody, electionContract, electMeasurementPath, electCapsFlag, hookMeasurementPath string
 	var hRecords uint32
 	var hookRecordGas uint64
@@ -539,7 +539,7 @@ unicity-pos-contracts script/measure-elect.sh, and the profile file records the 
 			if err != nil {
 				return err
 			}
-			p, err := deriveB1Profile(tb, confs[0], wCert, capacity, genesisUCTime, hooks)
+			p, err := deriveB1Profile(tb, confs[0], maxEpochs, deltaEV, deltaHold, capacity, genesisUCTime, hooks)
 			if err != nil {
 				return err
 			}
@@ -564,7 +564,9 @@ unicity-pos-contracts script/measure-elect.sh, and the profile file records the 
 	flags.addShardConfFlags(cmd, false)
 	cmd.Flags().StringVar(&trustBasePath, "trust-base", "", "the signed root trust base JSON (required)")
 	cmd.Flags().StringVar(&out, "out", "", "output path for the profile JSON (required)")
-	cmd.Flags().Uint64Var(&wCert, "w-cert", 1, "certificate window W_cert; the registry keeps W_cert+1 authority intervals")
+	cmd.Flags().Uint64Var(&maxEpochs, "max-epochs-per-update", b1state.MinEpochsPerUpdate, "B: validator epochs one block may install (at least the supersession span); the registry keeps every epoch forever")
+	cmd.Flags().Uint64Var(&deltaEV, "delta-ev", 31, "P85 evidence window in rounds (DeltaEV); independent of certificate age, which no longer expires")
+	cmd.Flags().Uint64Var(&deltaHold, "delta-hold", 32, "P85 hold window in rounds (DeltaHold); must exceed --delta-ev")
 	cmd.Flags().Uint64Var(&capacity, "ordinary-capacity", 7_000_000, "ordinary transaction gas capacity of a block (the block gas limit is this plus the system reservation)")
 	cmd.Flags().StringVar(&recordsCustody, "records-custody", "", "the custody contract the mandatory records hook applies root records to (0x-hex address)")
 	cmd.Flags().Uint32Var(&hRecords, "h-records", 0, "most records one block's hook applies (1..32; needs --records-custody)")
@@ -734,8 +736,8 @@ func validateB1RunFlags(flags *shardNodeRunFlags) error {
 // urethFlags are the flags that pin the paired ureth to the profile: the B1 bindings, and every mandatory hook the profile (and so its
 // hash) commits to. A ureth started without a hook flag the hash commits to would run a different chain under the same hash.
 func urethFlags(p b1state.Profile, hash [32]byte) string {
-	s := fmt.Sprintf("--unicity.network-id=%d --unicity.root-genesis-id=%s --unicity.chain-id=%d --unicity.profile-hash=%s --unicity.w-cert=%d --unicity.max-gas=%d --unicity.system-gas=%d",
-		p.Network, hexutil.Encode(p.RootGenesisID[:]), p.ExecutionChainID, hexutil.Encode(hash[:]), p.WCert, p.MaxGas, p.SystemGas)
+	s := fmt.Sprintf("--unicity.network-id=%d --unicity.root-genesis-id=%s --unicity.chain-id=%d --unicity.profile-hash=%s --unicity.max-epochs-per-update=%d --unicity.max-gas=%d --unicity.system-gas=%d",
+		p.Network, hexutil.Encode(p.RootGenesisID[:]), p.ExecutionChainID, hexutil.Encode(hash[:]), p.MaxEpochsPerUpdate, p.MaxGas, p.SystemGas)
 	if p.RecordsCustody != ([20]byte{}) {
 		s += fmt.Sprintf(" --unicity.records-custody=%s --unicity.h-records=%d --unicity.hook-record-gas=%d",
 			strings.ToLower(common.Address(p.RecordsCustody).Hex()), p.HRecords, p.HookRecordGas)

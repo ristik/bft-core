@@ -2,6 +2,7 @@ package registrygenesis
 
 import (
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/unicitynetwork/bft-core/b1registry"
 	"github.com/unicitynetwork/bft-core/b1state"
 	"github.com/unicitynetwork/bft-core/q3format"
@@ -71,6 +72,13 @@ func (g *Genesis) B1Proofs(keys []common.Hash) [][][]byte {
 		proof, dynamic := g.dynamicProofs[k]
 		out[i] = cloneNodes(proof)
 		if !dynamic && g.record.Layout == registryproof.FreshB1 {
+			// any other word (a not-yet-installed entry's presence word, say) is proven from the committed storage: present or absent
+			if g.storageTrie != nil {
+				var p nodeList
+				if err := g.storageTrie.Prove(crypto.Keccak256(k[:]), &p); err == nil {
+					out[i] = cloneNodes(p)
+				}
+			}
 			names, _ := registryproof.SlotNamesFor(registryproof.FreshB1)
 			for j, name := range names {
 				if k == common.Hash(b1state.FixedSlot(name)) {

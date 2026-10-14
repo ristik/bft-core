@@ -36,14 +36,9 @@ func TestB1AuthenticatedPrefixPreservesNativeBodiesWeightsAndActualStarts(t *tes
 	require.NoError(t, err)
 	require.Len(t, older, 1)
 	require.Nil(t, older[0].End)
-	live, err := b1state.Select(entries, 15, 8)
-	require.NoError(t, err)
-	require.Len(t, live, 2)
-	// Both supersession epochs must be authenticated even if only the last survives.
-	live, err = b1state.Select(entries, 15, 0)
-	require.NoError(t, err)
-	require.Len(t, live, 1)
-	require.EqualValues(t, 3, live[0].Epoch)
+	// The registry keeps every epoch: both supersession epochs are authenticated and both are installed; nothing survives or is dropped by age.
+	require.NoError(t, b1state.ValidateHistory(entries))
+	require.EqualValues(t, 3, entries[len(entries)-1].Epoch)
 	entries[1].Members[0].Weight++
 	again, err := h.B1Entries(15)
 	require.NoError(t, err)

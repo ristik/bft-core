@@ -73,7 +73,7 @@ func b1Rotated(t *testing.T, f *b1fixture.Fixture, pdr *types.PartitionDescripti
 }
 
 func TestFreshB1CertifiedRecordAssignmentBinding(t *testing.T) {
-	f := b1fixture.New(t, 1)
+	f := b1fixture.New(t)
 	ctx := context.Background()
 	full, err := f.Genesis.FullConfig()
 	require.NoError(t, err)

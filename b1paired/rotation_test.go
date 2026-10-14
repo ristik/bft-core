@@ -21,7 +21,7 @@ import (
 	"github.com/unicitynetwork/bft-go-base/types"
 )
 
-func TestAuthenticatedSupersessionProjectsOnlySurvivingEpochs(t *testing.T) {
+func TestAuthenticatedSupersessionInstallsEveryMissedEpoch(t *testing.T) {
 	first := q3fixture.New(t, q3fixture.Options{})
 	second := q3fixture.New(t, q3fixture.Options{After: first})
 	process := q3process.New(t, first)
@@ -30,9 +30,9 @@ func TestAuthenticatedSupersessionProjectsOnlySurvivingEpochs(t *testing.T) {
 	require.NoError(t, rt.Activate(ctx, process.Bundle()))
 	require.NoError(t, rt.Activate(ctx, q3active.Bundle{Envelope: second.EnvelopeBytes, Snapshot: second.Snapshot}))
 	c := certifiedchain.New(t, 5, 0)
-	for _, w := range []uint64{0, 15} {
-		t.Run(string(rune('A'+w)), func(t *testing.T) {
-			p := b1state.Profile{Network: 5, RootGenesisID: first.Genesis, ExecutionChainID: 1337, RuntimeHash: [32]byte(common.HexToHash(b1registry.CodeHashHex)), CompilerHash: b1registry.CompilerHash(), WCert: w, DeltaEV: w + 1, DeltaHold: w + 2, RestGas: 1136500 + 1147500*(w+1), CompanionBytes: 1 << 20, OtherCompanionBytes: 65536, OrdinaryCapacity: 7000000, GenesisUCTime: 1000}
+	{
+		t.Run("permanent", func(t *testing.T) {
+			p := b1state.Profile{Network: 5, RootGenesisID: first.Genesis, ExecutionChainID: 1337, RuntimeHash: [32]byte(common.HexToHash(b1registry.CodeHashHex)), CompilerHash: b1registry.CompilerHash(), MaxEpochsPerUpdate: b1state.MinEpochsPerUpdate, DeltaEV: 1, DeltaHold: 2, RestGas: b1registry.MinRestGas(b1state.MinEpochsPerUpdate), CompanionBytes: 1 << 20, OtherCompanionBytes: 65536, OrdinaryCapacity: 7000000, GenesisUCTime: 1000}
 			p.SystemGas, _ = p.RequiredSystemGas()
 			p.MaxGas = p.SystemGas + p.OrdinaryCapacity
 			g, err := registrygenesis.GenerateB1(certifiedchain.Config(5), p, rt.History(), registrygenesis.EVMParams{GasLimit: p.MaxGas})
@@ -71,14 +71,10 @@ func TestAuthenticatedSupersessionProjectsOnlySurvivingEpochs(t *testing.T) {
 			require.NoError(t, err)
 			require.NotNil(t, update.OldTipEnd)
 			require.EqualValues(t, 7, *update.OldTipEnd)
-			if w == 0 {
-				require.Len(t, update.NewEntries, 1)
-				require.EqualValues(t, 3, update.NewEntries[0].Epoch)
-			} else {
-				require.Len(t, update.NewEntries, 2)
-				require.EqualValues(t, 2, update.NewEntries[0].Epoch)
-				require.EqualValues(t, 15, *update.NewEntries[0].End)
-			}
+			// no window: nothing is skipped, both missed epochs are installed by the one update (B = 2)
+			require.Len(t, update.NewEntries, 2)
+			require.EqualValues(t, 2, update.NewEntries[0].Epoch)
+			require.EqualValues(t, 15, *update.NewEntries[0].End)
 			require.Equal(t, second.Body.Identity(), update.NewEntries[len(update.NewEntries)-1].BodyID)
 			_, err = pair.Derive(ctx, parent, signed(1, 8))
 			require.ErrorIs(t, err, q3format.ErrOutsideInterval, "authenticated old suffix is not ordinary admission")

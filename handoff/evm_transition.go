@@ -2,6 +2,7 @@ package handoff
 
 import (
 	"bytes"
+	"github.com/unicitynetwork/bft-core/b1state"
 
 	"github.com/unicitynetwork/bft-core/evmassign"
 	"github.com/unicitynetwork/bft-core/evmroot"
@@ -19,6 +20,10 @@ const EVMTransitionVersion uint64 = 3
 // MaxSupersessionSpan bounds the committed handoffs one folded acknowledgement
 // may summarize, matching the Ureth decoder.
 const MaxSupersessionSpan uint64 = 2
+
+// The B1 registry installs every epoch of a folded acknowledgement in one block (b1state.Profile.MaxEpochsPerUpdate), so its minimum must cover the
+// span: a build with a span above it fails here, not on a live chain.
+var _ [b1state.MinEpochsPerUpdate - MaxSupersessionSpan]struct{}
 
 // EVMTransition is the single acknowledgement payload sent across the trusted
 // local bft-core/ureth link. The Ack encoding binds the EVM round and parent.

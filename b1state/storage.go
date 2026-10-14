@@ -20,7 +20,6 @@ func derived(name string, indices ...uint64) [32]byte {
 	}
 	return [32]byte(ethcrypto.Keccak256Hash(b))
 }
-func QueueSlot(i uint64) [32]byte        { return derived("b1.queue", i) }
 func EntrySlot(e, f uint64) [32]byte     { return derived("b1.entry", e, f) }
 func MemberSlot(e, j, f uint64) [32]byte { return derived("b1.member", e, j, f) }
 func memberWords(m Member) (words [8][32]byte) {
@@ -50,16 +49,6 @@ func putEntry(store func([32]byte, [32]byte), e Entry) {
 		}
 	}
 }
-func clearEntry(store func([32]byte, [32]byte), e Entry) {
-	for i := uint64(0); i < EntryWords; i++ {
-		store(EntrySlot(e.Epoch, i), [32]byte{})
-	}
-	for j := range e.Members {
-		for f := uint64(0); f < MemberWords; f++ {
-			store(MemberSlot(e.Epoch, uint64(j), f), [32]byte{})
-		}
-	}
-}
 
 // GenesisWords includes explicit pre-first-import zero origin words, distinct
 // from assigned root epoch. registrygenesis adds the pinned operational allocation.
@@ -75,16 +64,14 @@ func GenesisWords(p Profile, genesis Entry) (map[[32]byte][32]byte, error) {
 		return nil, ErrHistory
 	}
 	words := map[[32]byte][32]byte{}
-	for name, w := range map[string][32]byte{"b1.network": Word(uint64(p.Network)), "b1.wCert": Word(p.WCert), "b1.profileHash": h, "b1.initialized": Word(1), "b1.head": {}, "b1.count": Word(1), "clock.rootRound": {}, "origin.rootEpoch": {}, "assignment.rootEpoch": Word(genesis.Epoch), "records.ucTime": Word(p.GenesisUCTime), "phase": Word(2)} {
+	for name, w := range map[string][32]byte{"b1.network": Word(uint64(p.Network)), "b1.format": Word(2), "b1.profileHash": h, "b1.initialized": Word(1), "b1.genesisEpoch": Word(genesis.Epoch), "b1.importedTipEpoch": Word(genesis.Epoch), "b1.originReady": {}, "clock.rootRound": {}, "origin.rootEpoch": {}, "assignment.rootEpoch": Word(genesis.Epoch), "records.ucTime": Word(p.GenesisUCTime), "phase": Word(2)} {
 		words[FixedSlot(name)] = w
 	}
 	putEntry(func(slot, value [32]byte) { words[slot] = value }, genesis)
-	words[QueueSlot(0)] = Word(genesis.Epoch)
 	return words, nil
 }
 
-// Write records every addressed operation, even when a ring slot is cleared
-// and reused. Final is a state diff; Trace preserves gross work before refunds.
+// Write records every addressed operation. Final is a state diff; Trace preserves gross work before refunds.
 type Write struct {
 	Slot, Value [32]byte
 	Clear       bool
@@ -99,7 +86,6 @@ func (c *Changes) store(slot, value [32]byte, clear bool) {
 	c.Trace = append(c.Trace, Write{Slot: slot, Value: value, Clear: clear})
 }
 func (c *Changes) insert(slot, value [32]byte) { c.store(slot, value, false) }
-func (c *Changes) clear(slot, value [32]byte)  { c.store(slot, value, true) }
 
 // WriteAllowance is the conservative profile allowance, never runtime gas.
 func (c *Changes) WriteAllowance() (uint64, error) {
