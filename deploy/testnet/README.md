@@ -20,7 +20,7 @@ generator enrolls keys inside the long-lived Docker authorities, never in a
 throwaway init process. Full host/daemon loss requires a fresh testnet reset.
 The one aggregator uses the existing F8 RSMT profile, partition 9/full range;
 EVM is partition 8/full range. This is PoA with profile-2 authenticated history,
-the single B1 registry (layout 3, one `ubft engine-api b1-profile` shared by genesis, ureth and the shard nodes) and no bridge or staking allocation. The registry bytecode and
+the single B1 registry (permanent layout, one `ubft engine-api b1-profile` shared by genesis, ureth and the shard nodes) and no bridge or staking allocation. The registry bytecode and
 engine protocol are supplied by the pinned BFT/ureth builds.
 
 The generated `compose.yaml` is JSON (valid YAML), default N=4, configurable N=3..16 (the registry's committee ceiling; a PoS generation is further limited to the election cap, 6).
