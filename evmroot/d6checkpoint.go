@@ -27,44 +27,48 @@ func (c Checkpoint) Complete() bool {
 		len(c.EVMHeadHash) == 32 && len(c.EVMHeadStateRoot) == 32
 }
 
-// LiveCertAdmission is the round-denominated live certificate check result.
-type LiveCertAdmission struct {
+// CertEpoch is what the registry says about the signer epoch of a certificate: its interval and whether the epoch is admitted (installed at or
+// below the usable origin epoch). The registry keeps every installed epoch, so there is no window and no expiry of keys.
+type CertEpoch struct {
+	Start    uint64
+	End      *uint64 // nil while the epoch is open
+	Admitted bool
+}
+
+// CertAdmission is the result of the any-age certificate check.
+type CertAdmission struct {
 	Admitted bool
 	Reason   string
 }
 
-// AdmitLiveCertificate applies the live certificate admission rule
-// (governance.tex §"Economic Invariants" clause 3) against the CURRENT
-// AUTHENTICATED ORIGIN, not a checkpoint:
-//
-//   - the certificate round is not ahead of the imported certified origin;
-//   - the certificate is within W_cert certified root rounds of that origin;
-//   - the signer epoch was active at the claimed root round.
-//
-// A certificate outside the W_cert window is NOT admitted as live — it must
-// be authenticated through the historical checkpoint/ancestry path
-// (d6proof.go), never by expired-key signatures alone. Checkpoints belong
-// to that separate path and are not an input here.
-func AdmitLiveCertificate(certRound, importedOriginRound, wCert uint64, signerEpochActiveAtClaimedRound bool) LiveCertAdmission {
-	if certRound > importedOriginRound {
-		return LiveCertAdmission{false, "certificate round is ahead of the imported certified origin — retry after root progress"}
+// AdmitCertificate applies the any-age certificate admission rule against the CURRENT AUTHENTICATED ORIGIN (owner-decisions section 25,
+// briefs/b1-any-age-contract.md section 1): a usable origin exists, the signer epoch is admitted, the certificate round is not ahead of the origin,
+// and it lies inside the signer epoch's interval (start <= r, and r < end when the epoch is closed). How old the certificate is does not matter:
+// historical quorums are trusted, so a certificate of a closed epoch verifies exactly like a recent one, and retirement or evidence obligations
+// never prune certificate trust.
+func AdmitCertificate(certRound, originRound uint64, originReady bool, e CertEpoch) CertAdmission {
+	switch {
+	case !originReady:
+		return CertAdmission{false, "no usable origin yet"}
+	case !e.Admitted:
+		return CertAdmission{false, "signer epoch is not admitted"}
+	case certRound > originRound:
+		return CertAdmission{false, "certificate round is ahead of the imported certified origin — retry after root progress"}
+	case certRound < e.Start:
+		return CertAdmission{false, "certificate round precedes the signer epoch's start"}
+	case e.End != nil && certRound >= *e.End:
+		return CertAdmission{false, "certificate round is at or past the signer epoch's end"}
 	}
-	if importedOriginRound-certRound > wCert {
-		return LiveCertAdmission{false, "certificate is older than W_cert relative to the current authenticated origin — use the historical checkpoint/ancestry path"}
-	}
-	if !signerEpochActiveAtClaimedRound {
-		return LiveCertAdmission{false, "signer epoch was not active at the claimed root round"}
-	}
-	return LiveCertAdmission{Admitted: true}
+	return CertAdmission{Admitted: true}
 }
 
-// NestingValid checks the mandatory window nesting: W_cert <= Δ_ev < Δ_hold.
-func NestingValid(wCert, deltaEv, deltaHold uint64) bool {
-	return wCert <= deltaEv && deltaEv < deltaHold
-}
+// NestingValid checks the evidence/hold ordering: Δ_ev < Δ_hold. There is no certificate window to nest: a certificate's age is not a policy
+// parameter.
+func NestingValid(deltaEv, deltaHold uint64) bool { return deltaEv < deltaHold }
 
 // KeyRetentionRequired reports whether an evidence-verification key must be
-// retained even after it leaves the ordinary certificate-admission cache.
+// retained. Keys are retained for every installed epoch regardless (certificate trust is never pruned by age or retirement); the function states the
+// obligations that make retention mandatory for evidence and retirement.
 func KeyRetentionRequired(hasOutstandingEvidenceObligation, hasOutstandingRetirementObligation bool) bool {
 	return hasOutstandingEvidenceObligation || hasOutstandingRetirementObligation
 }

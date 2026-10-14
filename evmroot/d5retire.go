@@ -10,9 +10,10 @@ package evmroot
 // ProtectionParams are the round-denominated timing parameters. The
 // ordering constraint is mandatory:
 //
-//	W_cert <= Δ_ev < Δ_hold   and   Δ_hold > Δ_ev + Δ_incl + Δ_exec
+//	Δ_ev < Δ_hold   and   Δ_hold > Δ_ev + Δ_incl + Δ_exec
+//
+// (certificate age is not a parameter: certificates do not expire).
 type ProtectionParams struct {
-	WCert     uint64 // live certificate admission window
 	DeltaEv   uint64 // evidence commitment window
 	DeltaIncl uint64
 	DeltaExec uint64
@@ -21,8 +22,10 @@ type ProtectionParams struct {
 
 // Valid reports whether the parameters satisfy the mandatory ordering.
 func (p ProtectionParams) Valid() bool {
-	return p.WCert <= p.DeltaEv &&
-		p.DeltaEv < p.DeltaHold &&
+	if p.DeltaIncl > ^uint64(0)-p.DeltaEv || p.DeltaExec > ^uint64(0)-p.DeltaEv-p.DeltaIncl {
+		return false // the sum overflows: no Δ_hold can exceed it
+	}
+	return p.DeltaEv < p.DeltaHold &&
 		p.DeltaHold > p.DeltaEv+p.DeltaIncl+p.DeltaExec
 }
 

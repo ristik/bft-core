@@ -11,10 +11,10 @@ import (
 )
 
 func TestFreshB1FixedProofInvariants(t *testing.T) {
-	f := b1fixture.New(t, 1)
+	f := b1fixture.New(t)
 	names, err := registryproof.SlotNamesFor(registryproof.FreshB1)
 	require.NoError(t, err)
-	require.Len(t, names, 42)
+	require.Len(t, names, 43)
 	require.NotContains(t, names, "layoutVersion")
 	for i, n := range names {
 		k, err := registryproof.SlotKeyFor(registryproof.FreshB1, i)
@@ -31,12 +31,12 @@ func TestFreshB1FixedProofInvariants(t *testing.T) {
 		{"nonliteral-initialized", "b1.initialized", common.Hash(b1state.Word(2)), registryproof.ErrNotInitialized},
 		{"network-zero", "b1.network", common.Hash{}, registryproof.ErrConfiguration},
 		{"network-width", "b1.network", common.Hash(b1state.Word(65536)), registryproof.ErrConfiguration},
-		{"unmeasured-window", "b1.wCert", common.Hash(b1state.Word(16)), registryproof.ErrConfiguration},
-		{"head", "b1.head", common.Hash(b1state.Word(2)), registryproof.ErrConfiguration},
-		{"count-zero", "b1.count", common.Hash{}, registryproof.ErrConfiguration},
-		{"count-overflow", "b1.count", common.Hash(b1state.Word(3)), registryproof.ErrConfiguration},
+		{"format-zero", "b1.format", common.Hash{}, registryproof.ErrConfiguration},
+		{"format-other", "b1.format", common.Hash(b1state.Word(3)), registryproof.ErrConfiguration},
+		{"tip-below-genesis", "b1.genesisEpoch", common.Hash(b1state.Word(5)), registryproof.ErrConfiguration},
+		{"ready-flag-width", "b1.originReady", common.Hash(b1state.Word(2)), registryproof.ErrConfiguration},
 		{"missing-profile", "b1.profileHash", common.Hash{}, registryproof.ErrConfiguration},
-		{"scalar-width", "b1.count", common.Hash{0: 1}, registryproof.ErrValue},
+		{"scalar-width", "b1.importedTipEpoch", common.Hash{0: 1}, registryproof.ErrValue},
 		{"phase", "phase", common.Hash(b1state.Word(1)), registryproof.ErrNotFinalized},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -60,7 +60,7 @@ func TestFreshB1FixedProofInvariants(t *testing.T) {
 }
 
 func TestB1StorageProofResourceGuardsBeforeTrieVerification(t *testing.T) {
-	f := b1fixture.New(t, 0)
+	f := b1fixture.New(t)
 	key := common.Hash(b1state.EntrySlot(1, 0))
 	proof := f.Genesis.B1Proofs([]common.Hash{key})[0]
 	_, err := f.Parent.VerifyWords([]common.Hash{key}, [][][]byte{proof})
@@ -84,7 +84,7 @@ func TestB1StorageProofResourceGuardsBeforeTrieVerification(t *testing.T) {
 }
 
 func TestB1StorageProofAggregateBound(t *testing.T) {
-	f := b1fixture.New(t, 0)
+	f := b1fixture.New(t)
 	padding := make([]byte, 65536)
 	proofs := make([][][]byte, 65)
 	for i := range proofs {
@@ -98,7 +98,7 @@ func TestB1StorageProofAggregateBound(t *testing.T) {
 }
 
 func TestB1OrdinaryParentHeadBound(t *testing.T) {
-	f := b1fixture.New(t, 1)
+	f := b1fixture.New(t)
 	words := f.Genesis.B1Words()
 	for name, value := range map[string]uint64{"clock.rootRound": 5, "origin.rootEpoch": 1, "round.authorized": 1, "outcomes.round": 1} {
 		words[common.Hash(b1state.FixedSlot(name))] = common.Hash(b1state.Word(value))
@@ -107,7 +107,8 @@ func TestB1OrdinaryParentHeadBound(t *testing.T) {
 	c, h, e, _ := b1fixture.ParentAt(t, f, words, 1)
 	_, err := registryproof.Verify(c, h, e)
 	require.NoError(t, err)
-	words[common.Hash(b1state.FixedSlot("b1.head"))] = common.Hash(b1state.Word(2))
+	words[common.Hash(b1state.FixedSlot("b1.originReady"))] = common.Hash(b1state.Word(1))
+	words[common.Hash(b1state.FixedSlot("origin.rootEpoch"))] = common.Hash(b1state.Word(9)) // ready with a usable epoch beyond the imported tip
 	c, h, e, _ = b1fixture.ParentAt(t, f, words, 1)
 	_, err = registryproof.Verify(c, h, e)
 	require.ErrorIs(t, err, registryproof.ErrConfiguration)

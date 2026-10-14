@@ -76,7 +76,7 @@ up() {
   conf=test-nodes/shard-conf-${partitionID}_0.json
 
   info "B1 profile, funded genesis, identities"
-  build/ubft engine-api b1-profile --shard-conf "$conf" --trust-base test-nodes/trust-base.json --w-cert "${DNB_W_CERT:-30}" --out test-nodes/b1-profile.json | tee test-nodes/b1-profile.out
+  build/ubft engine-api b1-profile --shard-conf "$conf" --trust-base test-nodes/trust-base.json --max-epochs-per-update "${DNB_MAX_EPOCHS:-2}" --delta-ev "${DNB_DELTA_EV:-31}" --delta-hold "${DNB_DELTA_HOLD:-32}" --out test-nodes/b1-profile.json | tee test-nodes/b1-profile.out
   python3 - <<PY
 import json, subprocess
 p = json.load(open("test-nodes/b1-profile.json"))

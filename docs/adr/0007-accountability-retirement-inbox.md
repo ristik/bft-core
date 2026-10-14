@@ -2,6 +2,8 @@
 
 ## Status
 
+> **Scoped superseded policy (2026-10, owner decisions §24–§25).** The `W_cert` certificate-admission window and the rule `W_cert ≤ Δ_ev < Δ_hold`, as well as the "outside `W_cert` → historical ancestry" fallback, described below are **retired** for the B1 registry: certificates verify at any age against the permanent epoch registry. The evidence/hold ordering `Δ_ev < Δ_hold` and everything else in this ADR stand. What this ADR originally decided is left as written. See `briefs/b1-any-age-contract.md` and `docs/design/d6-historical-trust-proof-custody.md`.
+
 > **Forced-inbox part deferred 2026-10-01 ([ADR 0012](0012-validator-entity-model.md)).** The I-track (bounded forced
 > inclusion, roadmap I1-I5) is deferred by the owner decisions of 2026-10-01: a node fully trusts its co-hosted EVM node, and
 > forced inclusion is not a launch or PoS-shadow prerequisite. This ADR stays as the reference design; the accountability and

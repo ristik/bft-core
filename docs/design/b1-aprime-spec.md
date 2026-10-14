@@ -1,5 +1,8 @@
 # B1 A′ specification and Go oracle (PR1a)
 
+> **Superseded layout and policy (2026-10, owner decisions §24–§25).** The circular queue, `b1.wCert`/`b1.head`/`b1.count`, pruning and the `end > O − W_cert` window below are replaced by the permanent registry of `briefs/b1-any-age-contract.md` §1 (every epoch kept, imported tip separate from the usable origin, `b1.format = 2`). Text below describes the retired windowed layout.
+
+
 This is the inactive, pure slice of B1 #62, from `briefs/b1-design-v4.md`
 (SHA-256 `e94c681529201bce9c945809f6154a99252f208b958f9f1d3889eb37d61e0713`).
 Its immutable design anchors are bft-core `c57f012af8284cab214353841070ce368c6b001e`,
