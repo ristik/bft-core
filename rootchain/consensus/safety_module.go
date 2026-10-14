@@ -34,6 +34,9 @@ var (
 	// ErrStoredMessage is returned when the signed message recorded with a decision cannot be decoded or is not the node's own
 	// message for that (epoch, round).
 	ErrStoredMessage = errors.New("recorded signed message does not match its decision")
+	// ErrNoUTBSource is returned by a module that must endorse the successor trust-base entry of a handoff-committing vote (the epoch is configured
+	// with Config.UTB) but has no source for it: it fails closed rather than sign a vote the epoch's certificates would refuse.
+	ErrNoUTBSource = errors.New("no source for the successor trust-base entry of a committing vote")
 	// ErrNoSigningHistory is returned by a module with an activation gate but no signing resolver: without the authenticated
 	// history an epoch's scheme is unknown, and unknown is never scheme 1.
 	ErrNoSigningHistory = errors.New("no authenticated signing history for the epoch")
@@ -56,6 +59,7 @@ type (
 		members    MembershipGate
 		parentTime func(uint64) (uint64, error)
 		now        func() uint64
+		utb        UTBSource
 	}
 
 	// ActivationGate is the verified history's signer admission (q3active.Runtime). It refuses an epoch the history does not hold
@@ -91,6 +95,12 @@ type (
 		RecordSignedDecision(kind storage.DecisionKind, epoch, round uint64, statement, message []byte) error
 	}
 
+	// UTBSource resolves the committed round of a committing vote to the unsigned successor trust-base entry (types.RootTrustBaseV2.SigBytes) the
+	// committed state implies, or nil when that state holds no outgoing handoff of the epoch. It is derived only from the locally executed block and
+	// the locally validated handoff body, never from what the proposal or the QC says; an error (the executed state or the body is not available)
+	// means no vote.
+	UTBSource func(committed *drctypes.RoundInfo, epoch uint64) ([]byte, error)
+
 	SafetyOption func(*SafetyModule)
 
 	Signable interface {
@@ -123,6 +133,26 @@ func isConsecutive(blockRound, round uint64) bool {
 // WithDomainBoundSigning lets the module sign the scheme 2 statements in epochs whose authenticated configuration says so.
 func WithDomainBoundSigning(r SigningResolver, committed CommittedLookup) SafetyOption {
 	return func(s *SafetyModule) { s.signing, s.committed = r, committed }
+}
+
+// WithUTB gives the module the source of the successor entry it endorses in a committing vote of an epoch configured with Config.UTB.
+func WithUTB(src UTBSource) SafetyOption { return func(s *SafetyModule) { s.utb = src } }
+
+// utbEntry is the unsigned successor entry a vote for block must endorse: nil when the vote is not committing or the committed state holds no
+// outgoing handoff. It is called only in an epoch configured with Config.UTB.
+func (s *SafetyModule) utbEntry(block *drctypes.BlockData) ([]byte, error) {
+	committed := s.isCommitCandidate(block)
+	if committed == nil {
+		return nil, nil
+	}
+	if s.utb == nil {
+		return nil, ErrNoUTBSource
+	}
+	unsigned, err := s.utb(committed, block.Epoch)
+	if err != nil {
+		return nil, fmt.Errorf("%w: round %d: %w", ErrNotSafeToVote, committed.RoundNumber, err)
+	}
+	return unsigned, nil
 }
 
 // ErrNotAMember is returned by every signing path of a root that the epoch's committee does not name: a joiner before its activation, or
@@ -301,8 +331,17 @@ func (s *SafetyModule) MakeVote(block *drctypes.BlockData, execStateID []byte, h
 	if err != nil {
 		return nil, fmt.Errorf("signing configuration of epoch %d: %w", block.Epoch, err)
 	}
+	var unsigned []byte
+	if cfg.UTB {
+		if unsigned, err = s.utbEntry(block); err != nil {
+			return nil, err
+		}
+	}
 	if cfg.Scheme == votesig.SchemeDomainBound {
-		return s.makeVoteDomainBound(cfg, block, execStateID, highQC, lastRoundTC)
+		return s.makeVoteDomainBound(cfg, block, execStateID, highQC, lastRoundTC, unsigned)
+	}
+	if cfg.UTB {
+		return s.makeVoteLegacyUTB(block, execStateID, highQC, lastRoundTC, unsigned)
 	}
 	if err := s.isSafeToVote(block, lastRoundTC); err != nil {
 		return nil, fmt.Errorf("%w, %w", ErrNotSafeToVote, err)
@@ -426,7 +465,7 @@ func (s *SafetyModule) isCommitCandidate(block *drctypes.BlockData) *drctypes.Ro
 // on disk, so a crash earlier leaves no decision and a retry is free; a crash later, or a restart, finds the decision and
 // returns the recorded message itself, never a re-signed one. A different statement for the same (epoch, round) is refused
 // with ErrDecisionConflict.
-func (s *SafetyModule) makeVoteDomainBound(cfg votesig.Config, block *drctypes.BlockData, execStateID []byte, highQC *drctypes.QuorumCert, lastRoundTC *drctypes.TimeoutCert) (*abdrc.VoteMsg, error) {
+func (s *SafetyModule) makeVoteDomainBound(cfg votesig.Config, block *drctypes.BlockData, execStateID []byte, highQC *drctypes.QuorumCert, lastRoundTC *drctypes.TimeoutCert, unsigned []byte) (*abdrc.VoteMsg, error) {
 	decisions, err := s.decisions()
 	if err != nil {
 		return nil, err
@@ -447,7 +486,11 @@ func (s *SafetyModule) makeVoteDomainBound(cfg votesig.Config, block *drctypes.B
 	if err != nil {
 		return nil, fmt.Errorf("vote statement: %w", err)
 	}
-	statement, err := types.Cbor.Marshal([][]byte{pv, sealBytes})
+	parts := [][]byte{pv, sealBytes}
+	if cfg.UTB {
+		parts = append(parts, unsigned) // the endorsed entry is part of the one recorded statement; absent is the empty string
+	}
+	statement, err := types.Cbor.Marshal(parts)
 	if err != nil {
 		return nil, fmt.Errorf("encoding vote statement: %w", err)
 	}
@@ -477,6 +520,89 @@ func (s *SafetyModule) makeVoteDomainBound(cfg votesig.Config, block *drctypes.B
 	}
 	voteMsg := &abdrc.VoteMsg{VoteInfo: info, LedgerCommitInfo: seal, HighQc: highQC, Anchor: block.Anchor, Author: s.peerID}
 	if err := voteMsg.SignDomainBound(s.signer, cfg); err != nil {
+		return nil, err
+	}
+	if err := s.endorse(voteMsg, cfg, unsigned); err != nil {
+		return nil, err
+	}
+	message, err := types.Cbor.Marshal(voteMsg)
+	if err != nil {
+		return nil, fmt.Errorf("encoding signed vote: %w", err)
+	}
+	if err := decisions.RecordSignedDecision(storage.DecisionVote, block.Epoch, block.Round, statement, message); err != nil {
+		return nil, fmt.Errorf("persisting signing decision: %w", err)
+	}
+	if err := s.storage.SetHighestQcRound(qcRound, block.Round); err != nil {
+		return nil, fmt.Errorf("persisting voting rounds: %w", err)
+	}
+	return voteMsg, nil
+}
+
+// endorse puts the vote of a UTB epoch in the version 3 envelope and, when the committed state holds the outgoing handoff, adds the voter's own
+// signature over the unsigned successor entry (scheme 1: a second signature next to the one over the seal bytes; scheme 2: a third, independent of
+// the vote and seal signatures, over the same bytes).
+func (s *SafetyModule) endorse(v *abdrc.VoteMsg, cfg votesig.Config, unsigned []byte) error {
+	if !cfg.UTB {
+		return nil
+	}
+	if unsigned == nil {
+		v.Envelope = votesig.EnvelopeUTB
+		return nil
+	}
+	return v.SignUTB(s.signer, unsigned)
+}
+
+// makeVoteLegacyUTB is the scheme 1 vote of an epoch configured with Config.UTB. Its statement (the native seal bytes and the endorsed entry) is
+// recorded durably with the complete signed vote before the vote is returned, exactly as a scheme 2 vote is, so a restart returns the recorded
+// message and a different endorsement for the same (epoch, round) is refused. Scheme 1 votes of other epochs keep their unchanged path.
+func (s *SafetyModule) makeVoteLegacyUTB(block *drctypes.BlockData, execStateID []byte, highQC *drctypes.QuorumCert, lastRoundTC *drctypes.TimeoutCert, unsigned []byte) (*abdrc.VoteMsg, error) {
+	decisions, err := s.decisions()
+	if err != nil {
+		return nil, err
+	}
+	qcRound := block.GetParentRound()
+	voteInfo := &drctypes.RoundInfo{RoundNumber: block.Round, Epoch: block.Epoch, Timestamp: block.Timestamp, ParentRoundNumber: qcRound, CurrentRootHash: execStateID}
+	h, err := voteInfo.Hash(gocrypto.SHA256)
+	if err != nil {
+		return nil, fmt.Errorf("failed to hash vote info: %w", err)
+	}
+	seal := s.constructCommitInfo(block, h)
+	sealBytes, err := seal.SigBytes()
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal unicity seal: %w", err)
+	}
+	statement, err := types.Cbor.Marshal([][]byte{sealBytes, unsigned})
+	if err != nil {
+		return nil, fmt.Errorf("encoding vote statement: %w", err)
+	}
+	existing, stored, err := decisions.SignedDecision(storage.DecisionVote, block.Epoch, block.Round)
+	if err != nil {
+		return nil, fmt.Errorf("reading signing decision: %w", err)
+	}
+	if existing != nil {
+		if !bytes.Equal(existing, statement) {
+			return nil, fmt.Errorf("not safe to vote, %w: epoch %d round %d", storage.ErrDecisionConflict, block.Epoch, block.Round)
+		}
+		var voteMsg abdrc.VoteMsg
+		if err := types.Cbor.Unmarshal(stored, &voteMsg); err != nil {
+			return nil, fmt.Errorf("%w: vote epoch %d round %d: %w", ErrStoredMessage, block.Epoch, block.Round, err)
+		}
+		if voteMsg.VoteInfo == nil || voteMsg.VoteInfo.Epoch != block.Epoch || voteMsg.VoteInfo.RoundNumber != block.Round || voteMsg.Author != s.peerID {
+			return nil, fmt.Errorf("%w: vote epoch %d round %d", ErrStoredMessage, block.Epoch, block.Round)
+		}
+		if err := s.storage.SetHighestQcRound(qcRound, block.Round); err != nil {
+			return nil, fmt.Errorf("persisting voting rounds: %w", err)
+		}
+		return &voteMsg, nil
+	}
+	if err := s.isSafeToVote(block, lastRoundTC); err != nil {
+		return nil, fmt.Errorf("%w, %w", ErrNotSafeToVote, err)
+	}
+	voteMsg := &abdrc.VoteMsg{VoteInfo: voteInfo, LedgerCommitInfo: seal, HighQc: highQC, Anchor: block.Anchor, Author: s.peerID}
+	if err := voteMsg.Sign(s.signer); err != nil {
+		return nil, err
+	}
+	if err := s.endorse(voteMsg, votesig.Config{UTB: true}, unsigned); err != nil {
 		return nil, err
 	}
 	message, err := types.Cbor.Marshal(voteMsg)

@@ -29,6 +29,7 @@ type (
 		prefixSource  RecordFetcher // where a checkpoint's missing source-log prefix is fetched from
 		lock          sync.RWMutex
 		log           *slog.Logger
+		utbBinding    UTBBinding // nil unless the deployment has a UTB epoch; checked before a certificate is applied
 		// the attempt whose lapse was last reported (reported once)
 		lapseLogged                          bool
 		lapseLoggedEpoch, lapseLoggedAttempt uint64
@@ -297,6 +298,13 @@ func (x *BlockStore) ProcessQc(qc *rctypes.QuorumCert) ([]*certification.Certifi
 	if x.GetHighQc().GetRound() >= qc.GetRound() {
 		// stale qc
 		return nil, nil
+	}
+	// the execution context decides whether, and which, endorsement a certificate must carry: before anything is inserted, committed or published
+	if x.utbBinding != nil {
+		if err := x.utbBinding(qc); err != nil && !errors.Is(err, ErrUTBAlreadyCommitted) {
+			// (a QC that commits a round the tree has pruned, as recovery replays one, is not refused here: the commit below refuses it as it always did)
+			return nil, err
+		}
 	}
 	// add Qc to block tree
 	if err := x.blockTree.InsertQc(qc); err != nil {

@@ -33,6 +33,10 @@ func stripSignatures(proof *handoff.OldCommitProof, s *abdrc.CommittedBlock) {
 	strip := func(qc *rctypes.QuorumCert) {
 		if qc != nil {
 			qc.Signatures, qc.SealSignatures = nil, nil
+			// the endorsement's entry is semantic (the same handoff has the same successor entry); who endorsed it is a per-root signature set
+			if qc.UTB != nil {
+				qc.UTB = &rctypes.UTBCertificate{Unsigned: qc.UTB.Unsigned}
+			}
 		}
 	}
 	strip(proof.CommitQC)

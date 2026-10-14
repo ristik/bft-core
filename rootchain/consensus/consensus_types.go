@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/libp2p/go-libp2p/core/peer"
+	basetypes "github.com/unicitynetwork/bft-go-base/types"
 
 	"github.com/unicitynetwork/bft-core/network/protocol/abdrc"
 	"github.com/unicitynetwork/bft-core/q3format"
@@ -40,6 +41,10 @@ type (
 		RecoveryHistory  *trusthistorystore.Store
 		Q3               Q3Authority
 		Witnesses        WitnessFetcher
+		// UTBPrevious gives the finalized signed trust-base entry of an epoch (the predecessor of the entry a handoff of that epoch produces).
+		// Set, the manager endorses the successor entry in the committing votes of epochs configured with votesig.Config.UTB and refuses a
+		// certificate of such an epoch whose endorsement is not the one its executed state implies.
+		UTBPrevious func(epoch uint64) (*basetypes.RootTrustBaseV2, error)
 	}
 
 	Option func(c *Optional)
@@ -73,6 +78,11 @@ func WithFrontierSigning() Option {
 // WithRecoveryProfile2 enables per-certificate historical LastCR verification.
 func WithRecoveryProfile2(history *trusthistorystore.Store) Option {
 	return func(c *Optional) { c.RecoveryProfile2, c.RecoveryHistory = true, history }
+}
+
+// WithUTBPrevious wires the signed trust-base entry (UTB) endorsement: previous returns the finalized entry of an epoch.
+func WithUTBPrevious(previous func(epoch uint64) (*basetypes.RootTrustBaseV2, error)) Option {
+	return func(c *Optional) { c.UTBPrevious = previous }
 }
 
 // Q3Authority is the verified Q3 history the manager reads: the signer admission of every epoch (the safety module takes it as

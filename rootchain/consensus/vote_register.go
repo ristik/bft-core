@@ -1,6 +1,7 @@
 package consensus
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"errors"
 	"fmt"
@@ -27,6 +28,11 @@ type (
 		// scheme 2: the seal signatures of the same voters, kept only for a committing statement
 		scheme         uint64
 		sealSignatures map[string]hex.Bytes
+		// version 3 envelope (UTB epoch): the unsigned successor entry every vote of this group endorses and the endorsements, kept only for a
+		// group whose votes carry one
+		envelope     uint64
+		utbUnsigned  []byte
+		utbSignature map[string]hex.Bytes
 	}
 
 	VoteRegister struct {
@@ -87,6 +93,22 @@ func (v *VoteRegister) InsertVote(vote *abdrc.VoteMsg, quorumInfo QuorumInfo) (*
 		}
 	}
 
+	if vote.Envelope == votesig.EnvelopeUTB {
+		// a version 3 group never mixes with a version 1/2 one, and votes endorsing different entries (or one endorsing and one not) are different
+		// statements: the group key carries the envelope and the endorsed entry, so they are never counted together and a voter who changes its
+		// endorsement is an equivocator
+		mark := []byte{byte(votesig.EnvelopeUTB)}
+		if vote.UTB != nil {
+			id := vote.UTB.EntryID()
+			mark = append(append(mark, 1), id[:]...)
+		} else {
+			mark = append(mark, 0)
+		}
+		commitInfoHash = sha256.Sum256(append(append([]byte("utb-envelope"), mark...), commitInfoHash[:]...))
+	} else if vote.UTB != nil {
+		return nil, fmt.Errorf("%w: endorsement outside the version 3 envelope from %q", votesig.ErrEnvelope, vote.Author)
+	}
+
 	// has the author already voted in this round?
 	if prevVoteHash, voted := v.authorToVote[vote.Author]; voted {
 		// Check if vote has changed
@@ -106,6 +128,13 @@ func (v *VoteRegister) InsertVote(vote *abdrc.VoteMsg, quorumInfo QuorumInfo) (*
 			voteInfo:   vote.VoteInfo,
 			signatures: make(map[string]hex.Bytes),
 		}
+		if vote.Envelope == votesig.EnvelopeUTB {
+			g := v.hashToSignatures[commitInfoHash]
+			g.envelope = votesig.EnvelopeUTB
+			if vote.UTB != nil {
+				g.utbUnsigned, g.utbSignature = bytes.Clone(vote.UTB.Unsigned), make(map[string]hex.Bytes)
+			}
+		}
 		if domainBound {
 			v.hashToSignatures[commitInfoHash].scheme = votesig.SchemeDomainBound
 			if committing {
@@ -119,6 +148,9 @@ func (v *VoteRegister) InsertVote(vote *abdrc.VoteMsg, quorumInfo QuorumInfo) (*
 	if quorum.sealSignatures != nil {
 		quorum.sealSignatures[vote.Author] = vote.SealSignature
 	}
+	if quorum.utbSignature != nil {
+		quorum.utbSignature[vote.Author] = vote.UTB.Signature
+	}
 	// Check QC
 	weight, err := signedWeight(quorum.signatures, quorumInfo)
 	if err != nil {
@@ -129,6 +161,12 @@ func (v *VoteRegister) InsertVote(vote *abdrc.VoteMsg, quorumInfo QuorumInfo) (*
 		if quorum.scheme == votesig.SchemeDomainBound {
 			// the certificate is made of the two signature maps of the one set of voters; the seal map is the only one a UC takes
 			qc.Scheme, qc.SealSignatures = votesig.SchemeDomainBound, quorum.sealSignatures
+		}
+		if quorum.envelope == votesig.EnvelopeUTB {
+			qc.Envelope = votesig.EnvelopeUTB
+			if quorum.utbSignature != nil {
+				qc.UTB = &drctypes.UTBCertificate{Unsigned: bytes.Clone(quorum.utbUnsigned), Signatures: quorum.utbSignature}
+			}
 		}
 		return qc, nil
 	}

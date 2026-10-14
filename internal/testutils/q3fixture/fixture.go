@@ -40,6 +40,8 @@ const (
 
 // Options shape the fixture. The zero value is the 6,1,1,1 activation at A*=7 with the old commit sealed at round 4.
 type Options struct {
+	// UTB makes the activation's protocol tuple the envelope-version-3 one (q3format.Q3ConfigUTB).
+	UTB             bool
 	Weights         []uint64 // successor weights in member order; four members
 	CommitSealRound uint64   // the old committee's commit round (>= the ordered round 4)
 	SignedBy        int      // how many of the four old members sign the commit; default 3 (the unit threshold); fewer is a forgery
@@ -204,8 +206,12 @@ func New(t *testing.T, o Options) *Fixture {
 	}
 	prior, err := q3format.Prior{Network: Network, Epoch: oldEpoch, BodyVersion: oldVersion, Identity: oldID}.Hash()
 	require.NoError(t, err)
+	cfg := q3format.Q3Config(Network, f.Genesis)
+	if o.UTB {
+		cfg = q3format.Q3ConfigUTB(Network, f.Genesis)
+	}
 	body := q3format.BodyV3{Network: Network, Epoch: bodyEpoch, EarliestActivation: aMin, Members: f.Members, RootThreshold: total*2/3 + 1,
-		StateSummary: bytes.Repeat([]byte{0x22}, 32), PredecessorHash: prior, Config: q3format.Q3Config(Network, f.Genesis)}
+		StateSummary: bytes.Repeat([]byte{0x22}, 32), PredecessorHash: prior, Config: cfg}
 	operator, err := evmroot.D4OperatorCandidateDigest(f.Members)
 	require.NoError(t, err)
 	var shardConf *types.PartitionDescriptionRecord

@@ -4,6 +4,8 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+
+	"github.com/unicitynetwork/bft-core/rootchain/consensus/votesig"
 )
 
 // ErrConfig is returned for a protocol tuple that is not exactly the one Q3 tuple.
@@ -14,6 +16,10 @@ const (
 	configFields   = 9
 	maxConfigText  = 32
 	ConfigRevision = 2
+	// ConfigRevisionUTB is the revision of the tuple whose epochs use the vote/certificate envelope version 3 (vote codec 3): every vote carries
+	// the envelope and a vote that commits the outgoing handoff carries the signed trust-base endorsement. It differs from revision 2 only in
+	// the revision and the vote codec.
+	ConfigRevisionUTB = 3
 )
 
 // LeaderPolicyLegacy is the leader selection of every epoch that has no Q3 tuple.
@@ -46,12 +52,28 @@ func Q3Config(network uint64, genesis [32]byte) ProtocolConfig {
 		QuorumProfile: "D3", LeaderPolicy: LeaderPolicyWeightedV1, EVMRequestPolicy: "mirrored-root-v1", AggregatorPolicy: "unit-v1"}
 }
 
-// Validate refuses a tuple that differs from Q3Config in any field, naming the first field that differs.
+// Q3ConfigUTB is the tuple of a deployment whose root epochs sign the successor trust-base entry in the committing votes (envelope version 3).
+func Q3ConfigUTB(network uint64, genesis [32]byte) ProtocolConfig {
+	c := Q3Config(network, genesis)
+	c.Revision, c.VoteCodec = ConfigRevisionUTB, uint64(votesig.EnvelopeUTB)
+	return c
+}
+
+// UTB reports whether the tuple is the envelope-version-3 one.
+func (c ProtocolConfig) UTB() bool {
+	return c.Revision == ConfigRevisionUTB && c.VoteCodec == votesig.EnvelopeUTB
+}
+
+// Validate refuses a tuple that differs from Q3Config (revision 2) or Q3ConfigUTB (revision 3) in any field, naming the first field that differs; the
+// revision selects which of the two it is compared with, so a mixture of them is invalid.
 func (c ProtocolConfig) Validate() error {
 	if c.Network == 0 || c.Genesis == ([32]byte{}) {
 		return fmt.Errorf("%w: network and genesis are required", ErrConfig)
 	}
 	w := Q3Config(c.Network, c.Genesis)
+	if c.Revision == ConfigRevisionUTB {
+		w = Q3ConfigUTB(c.Network, c.Genesis)
+	}
 	for _, f := range []struct {
 		name      string
 		got, want any
