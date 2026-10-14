@@ -188,6 +188,18 @@ func TestShardPrefix(t *testing.T) {
 	require.True(t, InShard([]byte{0xc0}, hi) && !InShard([]byte{0xc0}, lo))
 	require.True(t, InShard([]byte{0x60}, mid) && !InShard([]byte{0x60}, lo), "depth 2: shard 01 holds 0x5f, not 0x3f")
 	require.False(t, InShard([]byte{0x00}, lo), "a noncanonical shard holds nothing")
+	// deeper than one byte: shard 0x5a 0xa0 is depth 10 (bits 0101101010), so the deciding bit is the second bit of the second byte
+	deep := []byte{0x5a, 0xa0}
+	d, ok := ShardDepth(deep)
+	require.True(t, ok)
+	require.Equal(t, 10, d)
+	var in, out, outFirst [32]byte
+	in[0], in[1] = 0x5a, 0x80             // 01011010 10...: carries all ten bits
+	out[0], out[1] = 0x5a, 0xc0           // 01011010 11...: the tenth bit differs
+	outFirst[0], outFirst[1] = 0x5b, 0x80 // the eighth bit differs
+	require.True(t, InShard(deep, in))
+	require.False(t, InShard(deep, out), "the deciding bit is in the second byte")
+	require.False(t, InShard(deep, outFirst))
 }
 
 func TestPolicyDecodeRejections(t *testing.T) {
