@@ -3,7 +3,7 @@ seal-key-half	b1ref/prescan.go	s/if o.newSeal \&\& bytes.Equal(p.seal, o.seal) {
 epoch-grouping-off	b1ref/prescan.go	s/if p.epoch == o.epoch {/if false \&\& p.epoch == o.epoch {/	red	distinct epochs are grouped (E)
 claim-dedup-off	b1ref/batch.go	s/if !o.newClaim {/if false \&\& !o.newClaim {/	red	each distinct claim is evaluated once
 seal-dedup-off	b1ref/batch.go	s/if !pl.occ\[i\].newSeal {/if false \&\& !pl.occ[i].newSeal {/	red	each distinct seal is checked once
-usable-origin-is-tip	b1ref/batch.go	s/if seal.Epoch > cm.origin {/if seal.Epoch > cm.tip {/	red	e > U is false (seal rule)
+epoch-not-usable-off	b1ref/batch.go	s/if seal.Epoch > cm.origin {/if false {/	red	e > U is false without an entry read (comparing with the tip instead is an equivalent mutant: I = U when ready)
 future-off	b1ref/batch.go	s/if r > cm.o {/if false {/	red	r <= O
 end-off	b1ref/batch.go	s/if auth.entry.End != nil \&\& r >= \*auth.entry.End {/if false {/	red	r < end_e when closed
 before-genesis-off	b1ref/batch.go	s/if seal.Epoch < cm.g {/if false {/	red	e >= g
