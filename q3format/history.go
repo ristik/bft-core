@@ -190,6 +190,12 @@ func (h *History) Tip() Entry        { return h.entries[len(h.entries)-1] }
 
 // ForEpoch is the verified entry of an epoch, or ErrUnknownEpoch. An absent epoch is never a legacy default.
 func (h *History) ForEpoch(epoch uint64) (Entry, error) {
+	// Epochs are consecutive, so the entry is found by offset; a history whose epochs are not (it cannot be built by this package) falls back to the scan.
+	if len(h.entries) > 0 && epoch >= h.entries[0].epoch {
+		if i := epoch - h.entries[0].epoch; i < uint64(len(h.entries)) && h.entries[i].epoch == epoch {
+			return h.entries[i], nil
+		}
+	}
 	for _, e := range h.entries {
 		if e.epoch == epoch {
 			return e, nil
@@ -197,6 +203,9 @@ func (h *History) ForEpoch(epoch uint64) (Entry, error) {
 	}
 	return Entry{}, fmt.Errorf("%w: epoch %d", ErrUnknownEpoch, epoch)
 }
+
+// FirstEpoch is the epoch of the genesis entry of this history: the epoch a registry installed from it must name as its genesis epoch.
+func (h *History) FirstEpoch() uint64 { return h.entries[0].epoch }
 
 // Signing is the explicit signing configuration of an epoch's messages: scheme 1 for a verified legacy epoch, the tuple's scheme
 // and the chain's genesis identity for a verified V3 epoch. An epoch the history does not hold is ErrUnknownEpoch, never scheme 1.

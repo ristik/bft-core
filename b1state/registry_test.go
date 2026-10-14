@@ -327,3 +327,29 @@ func TestParentRegistryRefusesAReadyParentBehindItsTip(t *testing.T) {
 }
 
 func g0() Entry { return fixtureEntry(0, 7) }
+
+func TestValidateSegmentChecksOnlyTheRunItIsGiven(t *testing.T) {
+	g := fixtureEntry(0, 7)
+	e1, e2 := fixtureEntry(1, 8), fixtureEntry(2, 9)
+	if err := ValidateSegment([]Entry{g, e1, e2}, 0); err != nil {
+		t.Fatal("from the genesis epoch:", err)
+	}
+	if err := ValidateSegment([]Entry{e1, e2}, 0); err != nil {
+		t.Fatal("a run that starts after the genesis epoch:", err)
+	}
+	for name, tc := range map[string]struct {
+		seg []Entry
+		g   uint64
+	}{
+		"empty":                         {nil, 0},
+		"a gap":                         {[]Entry{e1, fixtureEntry(3, 12)}, 0},
+		"starts not increasing":         {[]Entry{e1, fixtureEntry(2, 8)}, 0},
+		"genesis body in the middle":    {[]Entry{e1, func() Entry { x := fixtureEntry(2, 9); x.BodyKind, x.ActivationCommitID = 1, [32]byte{}; return x }()}, 0},
+		"the genesis epoch not genesis": {[]Entry{func() Entry { x := fixtureEntry(0, 7); x.BodyKind, x.ActivationCommitID = 2, [32]byte{1}; return x }()}, 0},
+		"an invalid entry":              {[]Entry{func() Entry { x := fixtureEntry(1, 8); x.Members = nil; return x }()}, 0},
+	} {
+		if err := ValidateSegment(tc.seg, tc.g); err == nil {
+			t.Fatalf("%s was accepted", name)
+		}
+	}
+}

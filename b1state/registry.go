@@ -218,6 +218,26 @@ func ValidateHistory(history []Entry) error {
 	return nil
 }
 
+// ValidateSegment checks a contiguous run of authenticated epochs the per-block path works on (the imported tip onward): every entry is valid, the epochs are
+// consecutive, the starts strictly increase, and only the genesis epoch carries the genesis body. It never looks at epochs before the run.
+func ValidateSegment(seg []Entry, genesisEpoch uint64) error {
+	if len(seg) == 0 {
+		return ErrHistory
+	}
+	for i, h := range seg {
+		if err := h.Validate(); err != nil {
+			return err
+		}
+		if (h.Epoch == genesisEpoch) != (h.BodyKind == 1) {
+			return ErrHistory
+		}
+		if i > 0 && (seg[i-1].Epoch == math.MaxUint64 || h.Epoch != seg[i-1].Epoch+1 || h.Start <= seg[i-1].Start) {
+			return ErrHistory
+		}
+	}
+	return nil
+}
+
 // ParentRegistry rebuilds the part of a proven parent registry that the write guards read: the cursors, the open tip and the usable origin's
 // entry. The caller has authenticated those entries' words against the parent; every epoch below the tip is closed by construction.
 func ParentRegistry(genesis, tip uint64, ready bool, u, o uint64, entries ...Entry) (*Registry, error) {
