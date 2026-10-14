@@ -52,6 +52,7 @@ import (
 	"github.com/unicitynetwork/bft-core/shardnode"
 	"github.com/unicitynetwork/bft-core/shardnode/executortest"
 	"github.com/unicitynetwork/bft-core/signingauthority"
+	"github.com/unicitynetwork/bft-core/utbstore"
 )
 
 const lucStoreFileName = "shard-node-luc.json"
@@ -309,6 +310,9 @@ type shardNodeRunFlags struct {
 	ArchiveReplicas      []string
 	ArchivePrune         bool
 	TrustHistoryProfile2 bool
+	UTBGenesisFile       string // enables the signed trust-base entry (UTB) profile: the canonical genesis entry (trust-base utb-genesis)
+	UTBGenesisID         string // its EntryID, the pin
+	UTBEntriesDBFile     string
 	Q3Lane               bool // the Q3 acceptance lane: this node's own verified V3 runtime from the pinned genesis
 	Q3JournalDB          string
 	Restore              bool
@@ -450,6 +454,9 @@ protocol and docs/engine-api-adapter-plan.md for how this command's pieces fit t
 		"EVM genesis coinbase the SealRegistry deployment was generated with (with --certified-record-store)")
 	cmd.Flags().StringVar(&flags.RegistryEVMExtraData, "registry-evm-extra-data", "0x",
 		"EVM genesis extraData the SealRegistry deployment was generated with, 0x-prefixed hex (with --certified-record-store)")
+	cmd.Flags().StringVar(&flags.UTBGenesisFile, "utb-genesis", "", "enable the signed trust-base entry (UTB) profile: the canonical genesis entry file (see: trust-base utb-genesis); requires --utb-genesis-id")
+	cmd.Flags().StringVar(&flags.UTBGenesisID, "utb-genesis-id", "", "the EntryID of the UTB genesis entry (0x-prefixed SHA-256): the pin the genesis file must match")
+	cmd.Flags().StringVar(&flags.UTBEntriesDBFile, "utb-entries-db", "", fmt.Sprintf("UTB finalized entries database (default: %s)", filepath.Join("$UBFT_HOME", shardUTBEntriesDBFileName)))
 	cmd.Flags().IntVar(&flags.HandshakeNodes, "handshake-nodes", shardnode.DefaultBFTClientOptions.HandshakeNodes, "number of root nodes to handshake with")
 	cmd.Flags().IntVar(&flags.CertNodes, "cert-nodes", shardnode.DefaultBFTClientOptions.CertNodes, "number of root nodes to submit each certification request to")
 	cmd.Flags().DurationVar(&flags.HeartbeatInterval, "heartbeat-interval", shardnode.DefaultBFTClientOptions.HeartbeatInterval, "how often to check for root-chain inactivity")
@@ -560,6 +567,15 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 	initialTrustStore, err := shardnode.NewFileTrustBaseStore(trustBases[0], flags.observe.Logger())
 	if err != nil {
 		return fmt.Errorf("creating trust base store: %w", err)
+	}
+	var utbEntries *utbstore.Store
+	if flags.UTBGenesisFile != "" {
+		store, closeStore, utbErr := openUTBEntryStore(flags.baseFlags, flags.UTBGenesisFile, flags.UTBGenesisID, flags.UTBEntriesDBFile, shardUTBEntriesDBFileName, trustBases[0])
+		if utbErr != nil {
+			return utbErr
+		}
+		defer closeStore()
+		utbEntries = store
 	}
 	var trustBaseStore shardnode.TrustBaseStore = initialTrustStore
 	var historicalTrust *shardnode.HistoricalTrustBaseStore
@@ -805,6 +821,7 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 			HeartbeatInterval:        flags.HeartbeatInterval,
 			InactivityTimeout:        flags.InactivityTimeout,
 			StartupHandshakeInterval: flags.StartupHandshakeInterval,
+			UTBStore:                 utbEntries,
 		},
 	)
 	if err != nil {
