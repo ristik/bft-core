@@ -90,10 +90,14 @@ func churnReason(failed error) uint8 {
 	}
 }
 
+// selectionCeiling is the committee ceiling the election policy enforces (b1state.MaxMembers, the B1 registry's member ceiling; the contracts'
+// ElectionPolicy nMax ceiling): 16.
+const selectionCeiling = 16
+
 // elect is the model: it returns the chosen identities ascending, or a reason.
 func elect(c selCase) ([]uint64, []uint64, uint8) {
 	cfg := c.Config
-	if cfg.NMin < 1 || cfg.NTarget < cfg.NMin || cfg.NMax < cfg.NTarget || cfg.NMax > 32 || cfg.DistDen == 0 {
+	if cfg.NMin < 1 || cfg.NTarget < cfg.NMin || cfg.NMax < cfg.NTarget || cfg.NMax > selectionCeiling || cfg.DistDen == 0 {
 		return nil, nil, reasonInvalidProfile
 	}
 	policy := Policy{MaxM: cfg.MaxM, MaxDistNum: cfg.DistNum, MaxDistDen: cfg.DistDen}
@@ -189,7 +193,7 @@ func uniform(from, to, weight uint64) []vMember {
 }
 
 func selectionCases() []selCase {
-	dev := selConfig{NMin: 4, NTarget: 10, NMax: 32, MaxM: 4, DistNum: 1, DistDen: 4}
+	dev := selConfig{NMin: 4, NTarget: 10, NMax: selectionCeiling, MaxM: 4, DistNum: 1, DistDen: 4}
 	var out []selCase
 	add := func(name string, old, eligible []vMember, cfg selConfig) {
 		// the snapshot lists its identities ascending by StakingID
@@ -249,7 +253,7 @@ func selectionCases() []selCase {
 	bad.NTarget = 3
 	add("target below the minimum", ten, ten, bad)
 	bad = dev
-	bad.NMax = 33
+	bad.NMax = selectionCeiling + 1
 	add("maximum above the ceiling", ten, ten, bad)
 	bad = dev
 	bad.DistDen = 0
@@ -326,7 +330,7 @@ func selectionCases() []selCase {
 		}
 		e = dedupe(e)
 		sortMembers(e)
-		cfg := selConfig{NMin: uint64(1 + rng.Intn(4)), NTarget: uint64(size - 1 + rng.Intn(4)), NMax: 32, MaxM: uint64(2 + rng.Intn(8)),
+		cfg := selConfig{NMin: uint64(1 + rng.Intn(4)), NTarget: uint64(size - 1 + rng.Intn(4)), NMax: selectionCeiling, MaxM: uint64(2 + rng.Intn(8)),
 			DistNum: uint64(1 + rng.Intn(2)), DistDen: uint64(2 + rng.Intn(3))}
 		if n%4 == 0 {
 			// raw weights well above the cap: the eligible ones are raw, the old committee carries its quantized weights
