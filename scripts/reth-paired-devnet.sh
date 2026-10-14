@@ -333,7 +333,7 @@ if [ "${ANYAGE_LANE:-0}" = 1 ] && [ -n "${ANYAGE_PREP_ONLY:-}" ]; then
   agg_prepare_confs || { echo "aggregator shard configuration failed" >&2; exit 1; }
   if [ -n "${DNB_TOOL:-}" ]; then
     BRIDGE_IDENTITIES=test-nodes/b1-identities.json
-    "$DNB_TOOL" deployment --identities "$BRIDGE_IDENTITIES" --agg-conf "$(for k in $(seq 1 "$aggShards"); do printf '%s,' "$(agg_conf "$k")"; done | sed 's/,$//')" --out test-nodes/bridge \
+    "$DNB_TOOL" deployment --identities "$BRIDGE_IDENTITIES" --agg-conf "$(for k in $(seq 1 "$aggShards"); do printf '%s,' "$(agg_conf "$k")"; done | sed 's/,$//')" --out test-nodes/bridge-deployment.json \
       || { echo "the bridge deployment cannot be derived from this genesis' identities" >&2; exit 1; }
     test -s test-nodes/bridge-deployment.json || { echo "dnb-tool wrote no bridge-deployment.json" >&2; exit 1; }
   fi

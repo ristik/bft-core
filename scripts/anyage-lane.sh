@@ -92,7 +92,8 @@ preflight() {
   [ -n "${DNB_TOOL:-}" ] && [ -x "$DNB_TOOL" ] && yes "DNB_TOOL $DNB_TOOL" || no "set DNB_TOOL to a dnb-tool built from this checkout (go build -o ... ./scripts/dnb-tool)"
   if (exec 3<>/dev/tcp/127.0.0.1/27117) 2>/dev/null; then yes "MongoDB replica set port 27117 answers"; else no "no MongoDB on 127.0.0.1:27117 (colima + the mongo:7 replset container; aggregator-go needs it)"; fi
   echo "-- substrate"
-  if grep -q 'ANYAGE_LANE' "$REPO_ROOT/scripts/reth-paired-devnet.sh" 2>/dev/null; then yes "reth-paired-devnet.sh supports ANYAGE_LANE (aggregator + bridge on the P85 genesis)"; else no "G1: reth-paired-devnet.sh has no ANYAGE_LANE yet (PoS genesis + aggregator shard + bridge deploy in one genesis)"; fi
+  if grep -q 'ANYAGE_LANE' "$REPO_ROOT/scripts/reth-paired-devnet.sh" 2>/dev/null; then yes "reth-paired-devnet.sh supports ANYAGE_LANE (aggregator + bridge on the P85 genesis)"; else no "reth-paired-devnet.sh has no ANYAGE_LANE (PoS genesis + aggregator shard + bridge deploy in one genesis)"; fi
+  check "the combined genesis dry run was done on this HEAD (scripts/anyage-lane.sh --prep): record at briefs/devnet-runs/anyage-prep-<head>.ok" test -e "$AGRE_ROOT/briefs/devnet-runs/anyage-prep-${head:0:12}.ok"
   echo
   echo "preflight: $ok ok, $bad not ready"
   [ "$bad" -eq 0 ]

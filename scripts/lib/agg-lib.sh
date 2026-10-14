@@ -70,7 +70,7 @@ bridge_deploy_vault() {
   : "${CONTRACTS:?set CONTRACTS to a unicity-pos-contracts checkout with script/BridgeDeploy.s.sol}" "${DNB_TOOL:?set DNB_TOOL to the built dnb-tool}"
   local ids=${BRIDGE_IDENTITIES:-test-nodes/genesis-identities.json}
   local dep=$CONTRACTS/script/bridge-deploy key=${DNB_DEPLOYER_KEY:-0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80} k
-  "$DNB_TOOL" deployment --identities "$ids" --agg-conf "$(for k in $(seq 1 "$aggShards"); do printf '%s,' "$(agg_conf "$k")"; done | sed 's/,$//')" --out test-nodes/bridge
+  "$DNB_TOOL" deployment --identities "$ids" --agg-conf "$(for k in $(seq 1 "$aggShards"); do printf '%s,' "$(agg_conf "$k")"; done | sed 's/,$//')" --out test-nodes/bridge-deployment.json
   cp "$ids" "$dep/genesis.json"; cp test-nodes/bridge-deployment.json "$dep/deployment.json"
   root_alive || return 1
   (cd "$CONTRACTS" && BRIDGE_GENESIS=script/bridge-deploy/genesis.json BRIDGE_DEPLOYMENT=script/bridge-deploy/deployment.json \
