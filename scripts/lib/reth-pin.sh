@@ -279,11 +279,33 @@ urethPinCacheEntry() {
 # --unicity.fee-collector has no default (a zero address would silently burn fees), while the profile
 # flags default to the kernel's pinned profile and must stay at those defaults so a lane measures the
 # configured profile rather than a lane-local one.
+# urethB1GenesisCommitment prints the registry's genesisCommitment word of the finalized genesis the lane runs (URETH_GENESIS_SPEC, else the first of the
+# lanes' usual files): alloc[registry].storage[keccak256("unicity.seal-registry/genesisCommitment")].
+urethB1GenesisCommitment() {
+  local spec=${URETH_GENESIS_SPEC:-} f slot
+  if [ -z "$spec" ]; then for f in test-nodes/evm-genesis-finalized-funded.json test-nodes/evm-genesis-finalized.json; do [ -s "$f" ] && { spec=$f; break; }; done; fi
+  [ -s "$spec" ] || { echo "urethB1GenesisCommitment: no finalized genesis (set URETH_GENESIS_SPEC)" >&2; return 1; }
+  slot=$(cast keccak "unicity.seal-registry/genesisCommitment") || { echo "urethB1GenesisCommitment: cast keccak failed" >&2; return 1; }
+  python3 -I - "$spec" "$slot" <<'PY'
+import json, sys
+spec, slot = sys.argv[1], sys.argv[2].lower()
+alloc = {k.lower().removeprefix("0x"): v for k, v in json.load(open(spec))["alloc"].items()}
+reg = alloc["ff00000000000000000000000000000000000002"]["storage"]
+word = {k.lower(): v for k, v in reg.items()}.get(slot)
+if not word or int(word, 16) == 0:
+    sys.exit("genesisCommitment is not set in the registry storage of " + spec)
+print("0x" + word.lower().removeprefix("0x").rjust(64, "0"))
+PY
+}
+
 urethPinUnicityFlags() {
   echo "--unicity.fee-collector ${URETH_PIN_FEE_COLLECTOR_OVERRIDE:-$URETH_PIN_FEE_COLLECTOR}"
   # A fresh-B1 deployment: `ubft engine-api b1-profile` prints the complete set of bindings (network, root genesis, chain, profile hash, W_cert, gas).
   if [ -n "${URETH_B1_PROFILE_OUT:-}" ] && [ -s "$URETH_B1_PROFILE_OUT" ]; then
     sed -n 's/^ureth flags: *//p' "$URETH_B1_PROFILE_OUT" | tr ' ' '\n'
+    # the registry's genesisCommitment is a deployment pin kept outside the profile hash preimage: read it from the chain spec the lane runs
+    echo "--unicity.genesis-commitment"
+    urethB1GenesisCommitment || return 1
     return 0
   fi
   # The paired-execution binding (ureth#52) pins the chain the client serves. A lane that runs the Q3 coupled runtime sets
