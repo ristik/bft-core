@@ -517,8 +517,8 @@ func Replay(fs *FixtureSet, c Case) Expect {
 		if err != nil {
 			return errExpect(err)
 		}
-		return okValues("intrinsic", u64s(g.Intrinsic), "b2", u64s(g.B2), "batch", u64s(g.Batch), "rsmt", u64s(g.RSMT),
-			"steps", u64s(g.Steps), "total", u64s(g.Total()))
+		return okValues("intrinsic", u64s(g.Intrinsic), "items", u64s(g.Items), "j", u64s(g.J), "b2", u64s(g.B2), "batch", u64s(g.Batch),
+			"rsmt", u64s(g.RSMT), "steps", u64s(g.Steps), "total", u64s(g.Total()))
 	case "compose":
 		cfg, err := cfgOf()
 		if err != nil {

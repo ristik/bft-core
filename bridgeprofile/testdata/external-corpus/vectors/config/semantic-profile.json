@@ -38,6 +38,7 @@
     "cborDepth": 16,
     "rlpDepth": 16,
     "cborItems": 32768,
+    "bridgeCborItems": 4096,
     "semanticBytes": 16384,
     "cfgBytes": 1024,
     "envelopeBytes": 65536,
@@ -52,6 +53,7 @@
     "unicityStepsPerUc": 32,
     "txGasBudget": 7000000,
     "gasReserve": 1000000,
+    "bridgeItemGas": 1000,
     "shardDepthMax": 256
   },
   "normativeArtifacts": [
@@ -81,8 +83,8 @@
     "full-B1-SDK-seal-acceptance-parity"
   ],
   "normativeArtifactSha256": {
-    "protocol/interop.md": "ecc891f1697ceae42364d0d4f78962d32ee8964f34fb0e545c139e41e0491ec6",
-    "protocol/abi.json": "fa2898578fb71eb61fe6770ae0b4b54d1cb58c381a316129a266c5c33b6ec415",
+    "protocol/interop.md": "d391cb7f4fa865539b92cea755c4f0e3a73056743e0d368944e965ae11b0cdf0",
+    "protocol/abi.json": "0369e96b753a065c105e4093cfeb0be92daa60cd16d564e56553f1f9f7735dc1",
     "protocol/manifest.schema.json": "256bfd1d454ef4b15b089d9d34b6def96a760f698e8ec8fbc95a1c6dcdf29b01",
     "protocol/sdk-trust-base.md": "ec3b55554f01ac1530a950814e6a92c40a5fe6f7d53e9f58d7e04a40d6af0731"
   },
