@@ -39,8 +39,9 @@ var ErrNoPeer = errors.New("gettrustbase: no peer served the range")
 
 // Sync appends the entries after the sink's tip, page by page, authenticating each from the entry before it. The first page freezes (end, EntryID) and
 // every later page echoes it, so a peer that is behind or on another history is skipped and the next peer continues from the same cursor. Authenticated
-// prefixes are kept even when a later page fails. It returns the number of entries appended. A sink refusal (conflict, invalid signature, gap) is the
-// peer's fault but is returned, not retried: nothing beyond a refused entry is appended.
+// prefixes are kept even when a later page fails. A peer that is behind, unreachable, on another history or serving an entry the store refuses
+// (conflict, invalid signature, gap) is skipped; nothing beyond a refused entry is appended from it. It returns the number of entries appended, with
+// nil only when the store reached the end or every peer reported nothing newer.
 func Sync(ctx context.Context, f Fetcher, sink Sink, peers []peer.ID, opt SyncOptions) (int, error) {
 	if len(peers) == 0 {
 		return 0, ErrNoPeer
@@ -70,6 +71,7 @@ func Sync(ctx context.Context, f Fetcher, sink Sink, peers []peer.ID, opt SyncOp
 			case <-time.After(opt.Backoff):
 			}
 		}
+		current := 0 // peers that answered "nothing newer than what we hold"
 		for _, id := range peers {
 			for {
 				if err := ctx.Err(); err != nil {
@@ -87,7 +89,10 @@ func Sync(ctx context.Context, f Fetcher, sink Sink, peers []peer.ID, opt SyncOp
 					break
 				}
 				if resp.Status == StatusNotYetAvailable && snapEnd == nil && resp.EffectiveEnd < from {
-					return appended, nil // this peer has nothing newer than we hold
+					// A peer's tip is unauthenticated metadata: a lagging or hostile peer must not end the catch-up. Only when every peer says there is
+					// nothing newer is the store current.
+					current++
+					break
 				}
 				if resp.Status != StatusOK {
 					last = fmt.Errorf("peer %s: %s", id, resp.Status)
@@ -97,11 +102,19 @@ func Sync(ctx context.Context, f Fetcher, sink Sink, peers []peer.ID, opt SyncOp
 					last = fmt.Errorf("%w: page does not continue the requested range", ErrResponse)
 					break
 				}
+				refused := false
 				for _, raw := range entries {
 					if _, err := sink.Append(raw); err != nil {
-						return appended, err
+						// the peer served an entry the store rejects: keep the authenticated prefix, drop its snapshot and try the next peer
+						last = fmt.Errorf("peer %s: %w", id, err)
+						refused = true
+						break
 					}
 					appended++
+				}
+				if refused {
+					from, snapEnd, snapID = sink.Tip().Epoch+1, nil, nil
+					break
 				}
 				if resp.NextEpoch == nil {
 					return appended, nil
@@ -113,9 +126,12 @@ func Sync(ctx context.Context, f Fetcher, sink Sink, peers []peer.ID, opt SyncOp
 				from = *resp.NextEpoch
 			}
 		}
+		if current == len(peers) {
+			return appended, nil
+		}
 	}
 	if last == nil {
 		last = ErrNoPeer
 	}
-	return appended, fmt.Errorf("%w: %v", ErrNoPeer, last)
+	return appended, fmt.Errorf("%w: %w", ErrNoPeer, last)
 }

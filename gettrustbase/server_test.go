@@ -370,3 +370,102 @@ func TestSyncRefusesPagesThatDoNotContinueTheRequest(t *testing.T) {
 	require.Equal(t, uint64(6), *s.seen[1].SnapshotEnd)
 	require.Equal(t, uint64(4), s.seen[1].FromEpoch)
 }
+
+// direct serves each peer ID from a Server in-process, through the real encode and decode.
+type direct map[peer.ID]*Server
+
+func (d direct) Page(_ context.Context, id peer.ID, r *Request) (*Response, [][]byte, error) {
+	enc, err := d[id].Respond(r).Encode()
+	if err != nil {
+		return nil, nil, err
+	}
+	resp, _, err := DecodeResponse(enc, PageLimits)
+	if err != nil {
+		return nil, nil, err
+	}
+	var ents [][]byte
+	for _, e := range resp.Entries {
+		ents = append(ents, e)
+	}
+	return resp, ents, nil
+}
+
+func TestSyncSkipsABehindPeerEvenOnTheFirstPage(t *testing.T) {
+	es := chain(t, nodes(t, 4), 20)
+	d := direct{"lagging": newServer(t, store(t, es, 5), Config{}), "full": newServer(t, store(t, es, 20), Config{}), "lagging2": newServer(t, store(t, es, 8), Config{})}
+	opt := SyncOptions{Network: testNetwork, Rounds: 1}
+
+	sink := store(t, es, 10) // tip 11, ahead of both lagging peers
+	n, err := Sync(context.Background(), d, sink, []peer.ID{"lagging", "lagging2", "full"}, opt)
+	require.NoError(t, err)
+	require.Equal(t, 10, n)
+	require.Equal(t, uint64(21), sink.Tip().Epoch)
+
+	// every peer behind: the store is current, not an error
+	sink = store(t, es, 10)
+	n, err = Sync(context.Background(), d, sink, []peer.ID{"lagging", "lagging2"}, opt)
+	require.NoError(t, err)
+	require.Zero(t, n)
+
+	// one behind peer and one that fails: not "current" - an error, nothing claimed
+	f := &scripted{}
+	d2 := fetchers{"lagging": d, "down": f}
+	_, err = Sync(context.Background(), d2, store(t, es, 10), []peer.ID{"lagging", "down"}, opt)
+	require.ErrorIs(t, err, ErrNoPeer)
+}
+
+// fetchers routes by peer ID.
+type fetchers map[peer.ID]Fetcher
+
+func (f fetchers) Page(ctx context.Context, id peer.ID, r *Request) (*Response, [][]byte, error) {
+	return f[id].Page(ctx, id, r)
+}
+
+func TestSyncSkipsAPeerWhoseEntryTheStoreRefuses(t *testing.T) {
+	ns := nodes(t, 4)
+	es := chain(t, ns, 12)
+	forged := chain(t, ns, 12)
+	forged[6].Signatures = nil
+	for _, s := range ns[:2] { // structurally valid, below the strict quorum
+		require.NoError(t, forged[6].Sign(s.id, s.signer))
+	}
+	// the forged peer's history is internally consistent from epoch 8 only by link, so serve it just to the point of the bad entry
+	bad := &forgedPeer{es: forged, cut: 7}
+	d := fetchers{"bad": bad, "good": direct{"good": newServer(t, store(t, es, 12), Config{})}}
+
+	sink := store(t, es, 2) // tip 3
+	n, err := Sync(context.Background(), d, sink, []peer.ID{"bad", "good"}, SyncOptions{Network: testNetwork, Rounds: 1, MaxEntries: 4})
+	require.NoError(t, err)
+	require.Equal(t, uint64(13), sink.Tip().Epoch)
+	require.Equal(t, 10, n)
+	require.Equal(t, 2, bad.calls, "a good first page, then the forged entry: the peer is skipped after that")
+
+	// every peer serving the bad entry: the refusal is reported and the authenticated prefix kept
+	sink = store(t, es, 2)
+	_, err = Sync(context.Background(), fetchers{"bad": &forgedPeer{es: forged, cut: 7}}, sink, []peer.ID{"bad"}, SyncOptions{Network: testNetwork, Rounds: 1, MaxEntries: 4})
+	require.ErrorIs(t, err, ErrNoPeer)
+	require.ErrorIs(t, err, utbstore.ErrEntry)
+	require.Equal(t, uint64(6), sink.Tip().Epoch, "epochs 4..6 were authentic; epoch 7 is the forged one")
+}
+
+// forgedPeer serves the entries of a (partly forged) chain as one page from the requested start.
+type forgedPeer struct {
+	es    []*types.RootTrustBaseV2
+	cut   int // entries served up to and including this epoch index+1
+	calls int
+	t     *testing.T
+}
+
+func (f *forgedPeer) Page(_ context.Context, _ peer.ID, r *Request) (*Response, [][]byte, error) {
+	f.calls++
+	// it also freezes a bogus snapshot far beyond the real history, which no honest peer can satisfy
+	resp := &Response{Version: 1, Network: testNetwork, Status: StatusOK, FromEpoch: r.FromEpoch, EffectiveEnd: 40, EndEntryID: bytes.Repeat([]byte{9}, 32)}
+	var ents [][]byte
+	for i := int(r.FromEpoch) - 1; i < int(r.FromEpoch)+2 && i < len(f.es); i++ { // three entries a page
+		b, _ := f.es[i].MarshalCBOR()
+		ents = append(ents, b)
+	}
+	next := r.FromEpoch + 3
+	resp.NextEpoch = &next
+	return resp, ents, nil
+}
