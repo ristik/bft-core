@@ -151,3 +151,16 @@ func TestTheProfileFlagsAreRegisteredOnBothNodes(t *testing.T) {
 		}
 	}
 }
+
+// A shard of the profile builds every verified Q3 history of its own (the B1 authority runtime and the Q3 lane runtime) with the UTB genesis, enables the
+// profile on its V2 history store, and a root's runtime follows its flag too; a runtime built without it would refuse the first UTB activation.
+func TestEveryRuntimeAShardOrRootBuildsTakesTheProfileFlag(t *testing.T) {
+	shard, err := os.ReadFile("shard_node_run.go")
+	require.NoError(t, err)
+	require.Equal(t, 2, bytes.Count(shard, []byte("q3active.Config{")), "premise: two Q3 runtimes in the shard node")
+	require.Equal(t, 2, bytes.Count(shard, []byte(`UTBGenesis: flags.UTBGenesisFile != ""`)))
+	require.Contains(t, string(shard), "historical.EnableUTBProfile()")
+	root, err := os.ReadFile("root_q3.go")
+	require.NoError(t, err)
+	require.Contains(t, string(root), "UTBGenesis: utbGenesis")
+}

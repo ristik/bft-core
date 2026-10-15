@@ -10,6 +10,7 @@ import (
 
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/unicitynetwork/bft-core/handoffdelivery"
+	"github.com/unicitynetwork/bft-core/rootchain/consensus/votesig"
 	"github.com/unicitynetwork/bft-go-base/types"
 )
 
@@ -142,7 +143,7 @@ func (f *HandoffFollower) Run(ctx context.Context) error {
 			if err != nil {
 				return err
 			}
-			verified, err := handoffdelivery.Verify(bundle, old, f.Partition, f.Shard, f.expected())
+			verified, err := f.verifyReplayed(bundle, old)
 			if err != nil {
 				return err
 			}
@@ -371,4 +372,16 @@ func (f *HandoffFollower) save(epoch uint64, bundle handoffdelivery.Bundle) erro
 		return err
 	}
 	return syncDirectory(f.Directory)
+}
+
+// verifyReplayed verifies a saved bundle against the trust base of its old epoch by the rule of that epoch: the history's own signing configuration when it has one
+// (a shard of the signed trust-base entry profile), the legacy scheme otherwise.
+func (f *HandoffFollower) verifyReplayed(bundle handoffdelivery.Bundle, old *types.RootTrustBaseV1) (handoffdelivery.Verified, error) {
+	cfg := votesig.Config{Scheme: votesig.SchemeLegacy}
+	if b, ok := f.History.(interface {
+		BundleSigning(*types.RootTrustBaseV1) votesig.Config
+	}); ok {
+		cfg = b.BundleSigning(old)
+	}
+	return handoffdelivery.VerifySigning(bundle, old, cfg, f.Partition, f.Shard, f.expected())
 }

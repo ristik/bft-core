@@ -9,6 +9,7 @@ import (
 
 	"github.com/unicitynetwork/bft-core/archive"
 	"github.com/unicitynetwork/bft-core/handoffdelivery"
+	"github.com/unicitynetwork/bft-core/rootchain/consensus/votesig"
 	"github.com/unicitynetwork/bft-go-base/types"
 )
 
@@ -50,7 +51,13 @@ func VerifyBundle(ctx context.Context, q archive.BundleRequest, raw []byte, hist
 		}
 		conf = installed
 	}
-	if _, err := handoffdelivery.Verify(bundle, old, q.Context.PartitionID, q.Context.ShardID, conf); err != nil {
+	cfg := votesig.Config{Scheme: votesig.SchemeLegacy}
+	if b, ok := history.(interface {
+		BundleSigning(*types.RootTrustBaseV1) votesig.Config
+	}); ok {
+		cfg = b.BundleSigning(old)
+	}
+	if _, err := handoffdelivery.VerifySigning(bundle, old, cfg, q.Context.PartitionID, q.Context.ShardID, conf); err != nil {
 		return err
 	}
 	return nil

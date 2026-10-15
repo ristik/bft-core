@@ -12,6 +12,7 @@ import (
 	"github.com/unicitynetwork/bft-core/handoffdelivery"
 	"github.com/unicitynetwork/bft-core/keyvaluedb"
 	"github.com/unicitynetwork/bft-core/m2contract"
+	"github.com/unicitynetwork/bft-core/rootchain/consensus/votesig"
 	"github.com/unicitynetwork/bft-core/trustactivation"
 	"github.com/unicitynetwork/bft-core/trusthistorystore"
 	"github.com/unicitynetwork/bft-go-base/types"
@@ -23,18 +24,35 @@ type HistoricalTrustBaseStore struct {
 	history  *trusthistorystore.Store
 	profile2 bool
 	active   atomic.Uint64
+	utb      atomic.Bool
+}
+
+// EnableUTBProfile says the handoffs this store verifies were committed by roots of the signed trust-base entry profile: their commit certificates are in the
+// version 3 envelope and carry the old committee's endorsement, which the verification of an old commit proof then demands. It is set once at start-up from the
+// deployment's pinned genesis (--utb-genesis), the shard equivalent of the root's trust-base store flag.
+func (s *HistoricalTrustBaseStore) EnableUTBProfile() { s.utb.Store(true) }
+
+// BundleSigning is the signing configuration the old epoch's commit certificate of a bundle is verified under: the legacy scheme, with the UTB envelope when the
+// profile is on. (A Q3 shard takes the configuration from its verified history instead.)
+func (s *HistoricalTrustBaseStore) BundleSigning(old *types.RootTrustBaseV1) votesig.Config {
+	return votesig.Config{Scheme: votesig.SchemeLegacy, Network: uint64(old.NetworkID), UTB: s.utb.Load()}
 }
 
 func NewHistoricalTrustBaseStore(ctx context.Context, db keyvaluedb.KeyValueDB, anchor *types.RootTrustBaseV1, executionID [32]byte, profile2 bool) (*HistoricalTrustBaseStore, error) {
+	out := &HistoricalTrustBaseStore{profile2: profile2}
 	var verifier trusthistorystore.ActivationVerifier
 	if profile2 {
-		verifier = trustactivation.Verifier{}
+		// the activation proof of every stored handoff is verified (on append and again when the store opens) by the rule of its old epoch: the legacy scheme, in
+		// the UTB envelope once the profile is on
+		verifier = trustactivation.Verifier{Signing: func(uint64) (votesig.Config, error) {
+			return votesig.Config{Scheme: votesig.SchemeLegacy, Network: uint64(anchor.NetworkID), UTB: out.utb.Load()}, nil
+		}}
 	}
 	s, err := trusthistorystore.Open(ctx, db, anchor, executionID, verifier)
 	if err != nil {
 		return nil, err
 	}
-	out := &HistoricalTrustBaseStore{history: s, profile2: profile2}
+	out.history = s
 	out.active.Store(anchor.Epoch)
 	return out, nil
 }
@@ -103,7 +121,7 @@ func (s *HistoricalTrustBaseStore) InstallHandoff(ctx context.Context, bundle ha
 	if err != nil {
 		return handoffdelivery.Verified{}, err
 	}
-	verified, err := handoffdelivery.Verify(bundle, old, partition, shard, confHash)
+	verified, err := handoffdelivery.VerifySigning(bundle, old, s.BundleSigning(old), partition, shard, confHash)
 	if err != nil {
 		return handoffdelivery.Verified{}, err
 	}
