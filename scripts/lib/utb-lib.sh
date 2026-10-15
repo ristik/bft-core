@@ -191,9 +191,22 @@ PY
 
 # After the acknowledgement: the post-recovery token (certified under the epoch-3 committee), the client's unknown-epoch gap, the aggregator's second restart.
 utb_step_u4() {
-  local out sav hist cl; out=$(utb_dir); sav=$(anyage_dir)/l1-post; mkdir -p "$sav"
-  anyage_nbp save "$PWD/test-nodes/lane-config.json" "$sav" 2>&1 | tee "$sav/save.log" || return 1
-  cp "$sav/token.cbor" "$out/proofs/post-recovery-token.cbor"
+  local out i hex; out=$(utb_dir)
+  # A certificate issued after the recovery: the aggregator's latest block carries the unicity certificate of its partition (the bridge's lock proofs cannot be made for the
+  # successor epoch: the dnb tool's lock proof binds the EVM shard configuration of epoch 1). The aggregator certifies a block every round, so the latest one is of the
+  # current root epoch (3) shortly after the aggregator is back on the recovered chain.
+  for i in $(seq 1 60); do
+    hex=$(curl -fsS -X POST "http://127.0.0.1:$(agg_port 1)/" -H 'content-type: application/json' -d '{"jsonrpc":"2.0","id":1,"method":"get_block","params":{"blockNumber":"latest"}}' 2>/dev/null \
+      | jq -r '.result.block.unicityCertificate // empty' | sed 's/^0x//')
+    if [ -n "$hex" ]; then
+      printf '%s' "$hex" | xxd -r -p >"$out/proofs/post-recovery-token.cbor"
+      utb_ev fetch --url "$(utb_agg_url)" --out "$out/bundle/final-probe.cbor" >/dev/null 2>&1 && \
+        utb_ev uc-verify --token "$out/proofs/post-recovery-token.cbor" --bundle "$out/bundle/final-probe.cbor" --shard-conf "$(agg_conf 1)" 2>&1 | grep -q '^certificate 0: epoch 3 ' && break
+    fi
+    sleep 2
+  done
+  rm -f "$out/bundle/final-probe.cbor"
+  [ -s "$out/proofs/post-recovery-token.cbor" ] && [ "$i" -lt 60 ] || { echo "the aggregator's latest block certificate is not one of epoch 3 within 120 s of the recovery" >&2; utb_ev uc-verify --token "$out/proofs/post-recovery-token.cbor" --bundle "$out/bundle/final.cbor" --shard-conf "$(agg_conf 1)" >&2 || true; return 1; }
   utb_ev fetch --url "$(utb_agg_url)" --out "$out/bundle/final.cbor" && utb_ev verify --bundle "$out/bundle/final.cbor" --pin "$(utb_pin)" | tee "$out/bundle/final.verify.txt" || return 1
   utb_ev extract --bundle "$out/bundle/final.cbor" --epoch 3 --out "$out/entries/recovery.cbor" || return 1
   utb_ev verify --bundle "$out/bundle/final.cbor" --pin "$(utb_pin)" | grep '^epoch 2 ' >"$out/verifier/ordinary.txt" && utb_ev verify --bundle "$out/bundle/final.cbor" --pin "$(utb_pin)" | grep '^epoch 3 ' >"$out/verifier/recovery.txt" || return 1
