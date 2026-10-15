@@ -128,6 +128,26 @@ func buildPack(t *testing.T, ubft, tool string) string {
 	put("proofs/historical-verify.log", []byte(strings.TrimSuffix(hist, "\n")))
 	put("proofs/bridge-receipt.json", []byte(`{"redeem":{"gasUsed":"12345"},"claim":{"gasUsed":"6789"}}`))
 
+	// the post-recovery certificate: epoch 3, in the activation interval of its entry, signed by that committee
+	cert3 := testcertificates.CreateUnicityCertificate(t, chain.Members[0].Signer, &types.InputRecord{Version: 1, RoundNumber: 9, Hash: bytes.Repeat([]byte{1}, 32),
+		BlockHash: bytes.Repeat([]byte{2}, 32), SummaryValue: []byte{0}, Timestamp: 1}, pdr, 50, bytes.Repeat([]byte{3}, 32), bytes.Repeat([]byte{4}, 32))
+	cert3.UnicitySeal.Epoch, cert3.UnicitySeal.RootChainRoundNumber, cert3.UnicitySeal.Signatures = 3, 350, nil
+	for _, mm := range chain.Members[:3] {
+		require.NoError(t, cert3.UnicitySeal.Sign(mm.ID, mm.Signer))
+	}
+	enc3, err := types.Cbor.Marshal(cert3)
+	require.NoError(t, err)
+	tok3, err := cbor.Marshal([]any{uint64(2), []any{cbor.RawMessage(enc3)}})
+	require.NoError(t, err)
+	put("proofs/post-recovery-token.cbor", tok3)
+	put("history/client-stale.cbor", initial)
+	put("history/client-synced.cbor", final)
+	confs := filepath.Join(pack, "manifest", "shard-conf.json") + "," + filepath.Join(pack, "manifest", "shard-conf-aggregator.json")
+	refused, _ := exec.Command(tool, "uc-verify", "--token", filepath.Join(pack, "proofs", "post-recovery-token.cbor"), "--bundle", filepath.Join(pack, "history", "client-stale.cbor"), "--shard-conf", confs).CombinedOutput()
+	require.Contains(t, string(refused), "which the history does not hold")
+	put("history/client-before-sync.txt", bytes.TrimSuffix(refused, []byte("\n")))
+	put("history/client-after-sync.txt", []byte(strings.TrimSuffix(run(t, tool, "uc-verify", "--token", filepath.Join(pack, "proofs", "post-recovery-token.cbor"), "--bundle", filepath.Join(pack, "history", "client-synced.cbor"), "--shard-conf", confs), "\n")))
+
 	fsum := sha256.Sum256(final)
 	put("history/client-reload.log", []byte(fmt.Sprintf("client: tip before 1, appended [2 3], tip now 3 entryId 0x00\nfinal bundle sha256 %x\n", fsum)))
 	put("catchup/client-gap-two-entries.log", []byte("client: tip before 1, appended [2 3], tip now 3 entryId 0x00\n"))
@@ -205,8 +225,20 @@ func TestEvidencePackIsCheckedByTheToolsAndEveryBadByteIsRefused(t *testing.T) {
 		"a trust base other than the manifest's": {func(p string) {
 			write(t, p, "manifest/trust-base.json", append(read(t, p, "manifest/trust-base.json"), ' '))
 		}, "manifest does not check out"},
-		"an empty file":  {func(p string) { write(t, p, "catchup/restart.log", nil) }, "missing or empty"},
-		"a missing file": {func(p string) { require.NoError(t, os.Remove(filepath.Join(p, "handoff/ordinary-ack.log"))) }, "missing or empty"},
+		"a post-recovery certificate of epoch 1 (it would verify under the genesis-only history)": {func(p string) { write(t, p, "proofs/post-recovery-token.cbor", read(t, p, "proofs/token.cbor")) }, "must meet an unknown epoch"},
+		"a stale history that already holds the rotation":                                         {func(p string) { write(t, p, "history/client-stale.cbor", read(t, p, "bundle/final.cbor")) }, "not the genesis-only history"},
+		"a placeholder stale history":                                                             {func(p string) { write(t, p, "history/client-stale.cbor", []byte("x\n")) }, "client-stale.cbor does not verify"},
+		"an edited refusal text":                                                                  {func(p string) { write(t, p, "history/client-before-sync.txt", []byte("refused\n")) }, "not the verifier's refusal"},
+		"a synced history that stops at epoch 2": {func(p string) {
+			g, _ := chain.Genesis.MarshalCBOR()
+			b, err := gettrustbase.EncodeBundle([][]byte{g, chain.Entries[0]})
+			require.NoError(t, err)
+			write(t, p, "history/client-synced.cbor", b)
+		}, "does not end at tip 3"},
+		"an edited success text": {func(p string) { write(t, p, "history/client-after-sync.txt", []byte("verified\n")) }, "not the verifier's output on the synced history"},
+		"a placeholder token":    {func(p string) { write(t, p, "proofs/post-recovery-token.cbor", []byte("x\n")) }, "stale client fails for another reason"},
+		"an empty file":          {func(p string) { write(t, p, "catchup/restart.log", nil) }, "missing or empty"},
+		"a missing file":         {func(p string) { require.NoError(t, os.Remove(filepath.Join(p, "handoff/ordinary-ack.log"))) }, "missing or empty"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			pack := copyDir(t, good)

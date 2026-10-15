@@ -289,6 +289,11 @@ proofs/original-proof.sha256
 proofs/historical-verify.log
 proofs/bridge-receipt.json
 history/client-reload.log
+proofs/post-recovery-token.cbor
+history/client-stale.cbor
+history/client-synced.cbor
+history/client-before-sync.txt
+history/client-after-sync.txt
 LIST
 }
 
@@ -340,6 +345,19 @@ utb_check_evidence() {
   have=$(shasum -a 256 <"$dir/bundle/final.cbor" | cut -d' ' -f1)
   grep -q "$have" "$dir/history/client-reload.log" && grep -q "tip now $tip" "$dir/history/client-reload.log" || { echo "history/client-reload.log does not record the final bundle digest $have and tip $tip" >&2; return 1; }
   grep -q "appended \[2 3\]" "$dir/catchup/client-gap-two-entries.log" || { echo "the client gap log does not show epochs 2 and 3 fetched in one sync" >&2; return 1; }
+  # the client flow, re-run by the tool: a client that holds the genesis only meets the unknown epoch of the post-recovery certificate; the synced client holds the final history and verifies it
+  local confs="$dir/manifest/shard-conf.json,$dir/manifest/shard-conf-aggregator.json" stale
+  stale=$("$tool" verify --bundle "$dir/history/client-stale.cbor" --pin "$pin" 2>&1) || { echo "history/client-stale.cbor does not verify from the pin: $stale" >&2; return 1; }
+  grep -q '^ok: epochs 1\.\.1,' <<<"$stale" || { echo "history/client-stale.cbor is not the genesis-only history of a client that missed the rotation: $(tail -1 <<<"$stale")" >&2; return 1; }
+  got=$("$tool" uc-verify --token "$dir/proofs/post-recovery-token.cbor" --bundle "$dir/history/client-stale.cbor" --shard-conf "$confs" 2>&1) \
+    && { echo "the post-recovery certificate verified under the genesis-only history: it must meet an unknown epoch" >&2; return 1; }
+  grep -q "which the history does not hold" <<<"$got" || { echo "the stale client fails for another reason than the unknown epoch: $got" >&2; return 1; }
+  [ "$(cat "$dir/history/client-before-sync.txt")" = "$got" ] || { echo "history/client-before-sync.txt is not the verifier's refusal on the stale history" >&2; return 1; }
+  synced=$("$tool" verify --bundle "$dir/history/client-synced.cbor" --pin "$pin" 2>&1) || { echo "history/client-synced.cbor does not verify from the pin: $synced" >&2; return 1; }
+  [ "$(sed -n 's/^ok: epochs [0-9]*\.\.\([0-9]*\), tip.*/\1/p' <<<"$synced")" = "$tip" ] && [ "$tip" = 3 ] || { echo "history/client-synced.cbor does not end at tip 3: $(tail -1 <<<"$synced")" >&2; return 1; }
+  got=$("$tool" uc-verify --token "$dir/proofs/post-recovery-token.cbor" --bundle "$dir/history/client-synced.cbor" --shard-conf "$confs" 2>&1) || { echo "the post-recovery certificate does not verify under the synced history: $got" >&2; return 1; }
+  grep -q '^certificate 0: epoch 3 ' <<<"$got" || { echo "the post-recovery certificate is not one of epoch 3: $got" >&2; return 1; }
+  [ "$(cat "$dir/history/client-after-sync.txt")" = "$got" ] || { echo "history/client-after-sync.txt is not the verifier's output on the synced history" >&2; return 1; }
   jq -e '(.redeem.gasUsed | tonumber) > 0 and (.claim.gasUsed | tonumber) > 0' "$dir/proofs/bridge-receipt.json" >/dev/null 2>&1 || { echo "proofs/bridge-receipt.json is not a successful redemption and claim" >&2; return 1; }
 }
 
