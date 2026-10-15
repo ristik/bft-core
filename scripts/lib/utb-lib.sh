@@ -172,7 +172,7 @@ utb_step_u3b() {
   off=$(utb_agg_offset)
   start_agg 1 || return 1
   utb_wait_agg_tip 3 90 || return 1
-  utb_agg_lines_since "$off" | jq -c 'select(.msg|startswith("trust-base catch-up") or .msg=="trust-base gap in certification response" or .msg=="Signed trust-base history loaded" or .msg=="trust-base handshake to the newest held committee")' >"$out/catchup/aggregator-repair.jsonl"
+  utb_agg_lines_since "$off" | jq -c 'select((.msg|startswith("trust-base catch-up")) or .msg=="trust-base gap in certification response" or .msg=="Signed trust-base history loaded" or .msg=="trust-base handshake to the newest held committee")' >"$out/catchup/aggregator-repair.jsonl"
   python3 - "$out/catchup/aggregator-repair.jsonl" "$out/catchup/aggregator-peer-repair.log" <<'PY' || return 1
 import json, sys
 lines = [json.loads(l) for l in open(sys.argv[1]) if l.strip()]
