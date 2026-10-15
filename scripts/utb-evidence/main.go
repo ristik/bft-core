@@ -357,7 +357,7 @@ func cmdUCVerify(args []string) error {
 	fs := flag.NewFlagSet("uc-verify", flag.ExitOnError)
 	tokenPath := fs.String("token", "", "a saved token (or any CBOR holding certificates)")
 	bundlePath := fs.String("bundle", "", "the signed trust-base history")
-	confPath := fs.String("shard-conf", "", "the partition description of the certified shard (its hash binds the certificate)")
+	confPath := fs.String("shard-conf", "", "the partition description of the certified shard (its hash binds the certificate); a token can hold certificates of several shards: a comma-separated list, each certificate takes the description of its own partition")
 	_ = fs.Parse(args)
 	b, err := readBundle(*bundlePath)
 	if err != nil {
@@ -377,17 +377,21 @@ func cmdUCVerify(args []string) error {
 	if len(ucs) == 0 {
 		return errors.New("no unicity certificate found in the token")
 	}
-	var confHash []byte
-	var pdr *types.PartitionDescriptionRecord
-	if *confPath != "" {
-		c, err := readPDR(*confPath)
+	var pdrs []*types.PartitionDescriptionRecord
+	var hashes [][]byte
+	for _, path := range strings.Split(*confPath, ",") {
+		if path == "" {
+			continue
+		}
+		c, err := readPDR(path)
 		if err != nil {
 			return err
 		}
-		pdr = c
-		if confHash, err = c.Hash(crypto.SHA256); err != nil {
+		h, err := c.Hash(crypto.SHA256)
+		if err != nil {
 			return err
 		}
+		pdrs, hashes = append(pdrs, c), append(hashes, h)
 	}
 	for i := range ucs {
 		uc := &ucs[i]
@@ -411,10 +415,21 @@ func cmdUCVerify(args []string) error {
 		}
 		var partition types.PartitionID
 		var shard types.ShardID
-		if pdr != nil {
-			partition, shard = pdr.PartitionID, pdr.ShardID
-		} else if uc.UnicityTreeCertificate != nil {
+		var confHash []byte
+		if uc.UnicityTreeCertificate != nil {
 			partition = uc.UnicityTreeCertificate.Partition
+		}
+		if len(pdrs) > 0 {
+			k := -1
+			for j, c := range pdrs {
+				if len(pdrs) == 1 || c.PartitionID == partition {
+					k = j
+				}
+			}
+			if k < 0 {
+				return fmt.Errorf("certificate %d is of partition %d, for which no shard configuration was given", i, partition)
+			}
+			partition, shard, confHash = pdrs[k].PartitionID, pdrs[k].ShardID, hashes[k]
 		}
 		if err := uc.Verify(quorumweight.Checked(e), crypto.SHA256, partition, shard, confHash); err != nil {
 			return fmt.Errorf("certificate %d (epoch %d, seal round %d) does not verify under its epoch's committee: %w", i, epoch, round, err)

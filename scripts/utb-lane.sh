@@ -110,7 +110,8 @@ preflight() {
   [ "$bad" -eq 0 ]
 }
 
-UTB_EVIDENCE=${UTB_EVIDENCE:-$REPO_ROOT/build/utb-evidence}
+# outside build/ (make build clears it) and absolute (the lane steps run in other directories)
+UTB_EVIDENCE=${UTB_EVIDENCE:-$(cd "$REPO_ROOT/.." && pwd)/builds/utb-evidence-pr7}
 lane_env() { export UTB_EVIDENCE ANYAGE_LANE=1 UTB_LANE=1 P85_LOCK_OWNER=utb P85_EVIDENCE_PREFIX=utb CONTRACTS=${P85_CONTRACTS:-} UTB_COMPONENTS="$(utb_lane_components)"; }
 
 case "${1:-}" in

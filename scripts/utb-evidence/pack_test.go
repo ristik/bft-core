@@ -73,6 +73,7 @@ func buildPack(t *testing.T, ubft, tool string) string {
 	pdr := &types.PartitionDescriptionRecord{Version: 1, NetworkID: 5, PartitionID: 9, PartitionTypeID: 9, T2Timeout: 2500000000}
 	conf, _ := json.Marshal(pdr)
 	put("manifest/shard-conf.json", conf)
+	put("manifest/shard-conf-aggregator.json", conf)
 	put("manifest/build.txt", []byte("build\n"))
 	for _, f := range []string{"base.txt", "patch.diff", "sha256.txt"} {
 		put("manifest/aggregator/"+f, []byte("x\n"))

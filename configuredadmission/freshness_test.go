@@ -20,6 +20,7 @@ import (
 	"github.com/unicitynetwork/bft-core/network/protocol/certification"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/frontierrequester"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/frontiertransport"
+	"github.com/unicitynetwork/bft-core/rootchain/consensus/votesig"
 	"github.com/unicitynetwork/bft-core/rootinput"
 	"github.com/unicitynetwork/bft-core/shardnode"
 	"github.com/unicitynetwork/bft-go-base/types"
@@ -536,4 +537,31 @@ func TestNewlyLearnedOrdinaryProgressSurvivesMissingRequesterAndGuard(t *testing
 			require.NoError(t, fresh.Require(), "ordinary progress needs no requester")
 		})
 	}
+}
+
+// A deployment whose first root epoch already signs in another wire form (UTB: scheme 2, version 3 envelope) must hand that configuration to the requester: its collector
+// verifies the QCs it receives by it, and the legacy zero value rejects them all as unauthenticated (UTB lane, EVM shard bootstrap).
+func TestFreshnessAsksForTheSigningConfigurationOfTheObservedRootEpoch(t *testing.T) {
+	chain, _, id, factory := newFreshnessFixture(t)
+	asked := make(chan uint64, 4)
+	f := freshnessFor(chain, &deadOpener{})
+	f.Signing = func(epoch uint64) (votesig.Config, error) {
+		asked <- epoch
+		return votesig.Config{Scheme: votesig.SchemeDomainBound}, nil
+	}
+	startFreshAdmission(t, context.Background(), *factory, id, f)
+	select {
+	case epoch := <-asked:
+		require.Equal(t, fixtureTrust(chain).GetEpoch(), epoch)
+	case <-time.After(5 * time.Second):
+		t.Fatal("the signing configuration was never requested")
+	}
+}
+
+func TestFreshnessIsUnavailableWhenTheSigningConfigurationIsUnknown(t *testing.T) {
+	chain, _, id, factory := newFreshnessFixture(t)
+	f := freshnessFor(chain, &deadOpener{})
+	f.Signing = func(uint64) (votesig.Config, error) { return votesig.Config{}, errors.New("epoch unknown") }
+	startFreshAdmission(t, context.Background(), *factory, id, f)
+	require.ErrorIs(t, f.Require(), ErrFreshnessUnavailable)
 }

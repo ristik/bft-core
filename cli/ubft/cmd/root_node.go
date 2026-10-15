@@ -365,7 +365,12 @@ func rootNodeRun(ctx context.Context, flags *rootNodeRunFlags) error {
 		log.Warn("root frontier service disabled: this root cannot sign under the pinned trust base", "error", signerErr)
 	} else {
 		frontierServing = true
-		options = append(options, consensus.WithFrontierSampler(consensus.DefaultFrontierSamplerConfig(trustBase)), consensus.WithFrontierSigning())
+		samplerCfg := consensus.DefaultFrontierSamplerConfig(trustBase)
+		// the QCs the sampler accepts as covering evidence are of this epoch's wire form (a UTB deployment's first epoch is already scheme 2)
+		if samplerCfg.Signing, err = trustBaseStore.SigningConfig(trustBase.GetEpoch()); err != nil {
+			return fmt.Errorf("frontier sampler signing configuration of epoch %d: %w", trustBase.GetEpoch(), err)
+		}
+		options = append(options, consensus.WithFrontierSampler(samplerCfg), consensus.WithFrontierSigning())
 	}
 
 	if flags.PosDeploymentFile != "" {
