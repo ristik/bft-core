@@ -11,8 +11,8 @@
 #   scripts/utb-lane.sh --check-evidence DIR   checks an evidence directory against the required list (design §11.4)
 #   scripts/utb-lane.sh                the run: refuses unless the preflight is entirely ok
 #
-# THE RUN IS NOT ENABLED YET. The step drivers U1-U5 below (the reference client, the aggregator and peer-repair probes) are written after the reviewers' first
-# pass of this wiring and once PR3-PR6 are merged and the aggregator patch's interface is fixed; until then the run mode refuses.
+# Entries of the run: epoch 2 is the K->J handoff (the P85 J never acknowledges), epoch 3 the derived recovery. The design's acknowledged-J / stalled-L / recovery sequence
+# (three entries) is not what the P85 flow does; the plan below says what is exercised instead.
 set -uo pipefail
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 REPO_ROOT=$(cd "$SCRIPT_DIR/.." && pwd)
@@ -27,20 +27,23 @@ check() { local what=$1; shift; if "$@" >/dev/null 2>&1; then yes "$what"; else 
 
 plan() {
   cat <<'PLAN'
-UTB lane steps (one fresh genesis, ANYAGE_LANE machinery + UTB_LANE=1; evidence under briefs/devnet-runs/utb-<utc>/, required list: --check-evidence):
+UTB lane steps (one fresh genesis, the any-age/P85 machinery + UTB_LANE=1; evidence under briefs/devnet-runs/utb-<utc>/p85/utb, required list: --check-evidence).
+Entries: epoch 2 is the K->J handoff (activated; the P85 J is never acknowledged), epoch 3 the derived recovery to K (the acknowledgement block installs both, span 2).
   0  preflight (this script), the devnet lock, the manifest: pins, builds, the aggregator patch digest, the genesis entry and its pin
   1  genesis: PoS genesis + bridge + aggregator shard + the UTB genesis entry (canonical V2, null signatures), generated once from the epoch-1 trust base
-  2  U1  before rotation: certify a token transaction; SAVE its original inclusion proof / UC bytes and digest; the aggregator and the reference client hold only the genesis history
-  3  U2  ordinary handoff K->J with acknowledgement: capture the outgoing quorum's signed entry, its commit binding and the real UCResp (0.0.2) attachment;
-         the aggregator appends it and publishes a new proof; the client meets the unknown UC epoch, fetches the binary suffix from the aggregator, verifies, retries
-  4  U3  from J: hand off to L (EVM assignment installed, deliberately unacknowledged, L's root quorum alive), recover to the exact set: two further signed entries,
-         the bounded two-entry catch-up and acknowledgement, liability closure, resumed blocks
-  5  U4  a reference client disconnected at its last entry asks for the two-entry gap through the aggregator; peer GetTrustBase repairs an aggregator missing an
-         attachment (controlled fault, root HTTP unavailable to it); aggregator and client restart from their stores with unchanged record bytes; retired signers
-         are stopped only after their commit/endorsement is durable, reads and replay then succeed without them
-  6  U5  the SAVED pre-handoff proof verifies unchanged against its historical committee; the protocol-4 bridge verification/redemption path runs once after
-         recovery with the identical proof digest; the complete history is exported as one tagged file and a client reload reproduces its records and tip exactly
-  7  teardown through scripts/p85-stop.sh only; evidence checksums
+  2  U1  after the baseline and L1a: the aggregator serves the genesis only; the original token (its exact bytes and digest) is saved and verifies under the genesis committee;
+         the reference client (its own durable store) starts from the genesis
+  3  U2  after the K->J activation: the aggregator receives the epoch-2 entry attached to a version 2 certification response (log: received + appended, no catch-up), the root's
+         message is captured and decodes to exactly that entry; the aggregator serves epoch 2
+  4  U3a the aggregator restarts from its retained store (unchanged records); then it is stopped and its history store removed (the controlled fault)
+  5  P85 stalled J and the derived recovery to K (epoch 3), liability closures
+  6  U3b the aggregator restarts holding the genesis only, root HTTP unavailable to it: it repairs epochs 2..3 from a genesis-committee root over GetTrustBase (log: catch-up
+         started / OK page from a root / finished); it serves epoch 3
+  7  L2  the acknowledgement block installs both entries; U4 a token certified after the recovery; the stale client meets the unknown epoch 3, fetches [2 3] in one request
+         and verifies; the aggregator restarts again, unchanged bytes, healthy
+  8  L1c the same saved bytes verify against the historical epoch; the one vault release;  U5 the original token verifies unchanged under its historical committee (utb-evidence),
+         the bridge receipt, the complete history exported and reloaded by a fresh client store: identical records and tip
+  9  restarts (P85), the evidence pack assembled and checked by the tools (self-contained), teardown through scripts/p85-stop.sh only
 PLAN
 }
 
@@ -66,6 +69,8 @@ preflight() {
   check "trust-base utb-manifest and utb-genesis exist" bash -c "$UBFT trust-base --help 2>&1 | grep -q utb-manifest && $UBFT trust-base --help 2>&1 | grep -q utb-genesis"
   check "trust-base utb-verify/utb-export exist (PR6: the independent verifier)" bash -c "$UBFT trust-base --help 2>&1 | grep -q utb-verify && $UBFT trust-base --help 2>&1 | grep -q utb-export"
   note "deploy/testnet/pins.json pins bft $(python3 -c "import json;print(json.load(open('$REPO_ROOT/deploy/testnet/pins.json'))['bft'][:10])" 2>/dev/null): the testnet package is NOT what this lane runs (devnet scripts + build/ubft)"
+  echo "-- the independent verifier"
+  check "utb-evidence builds (scripts/utb-evidence) into $UTB_EVIDENCE" bash -c "cd '$REPO_ROOT' && go build -o '$UTB_EVIDENCE' ./scripts/utb-evidence"
   echo "-- machine"
   free=$(df -k "$AGRE_ROOT" | awk 'NR==2{print int($4/1048576)}')
   if [ "${free:-0}" -ge 25 ]; then yes "free disk ${free} GiB (>= 25)"; else no "free disk ${free:-?} GiB (< 25)"; fi
@@ -105,7 +110,8 @@ preflight() {
   [ "$bad" -eq 0 ]
 }
 
-lane_env() { export ANYAGE_LANE=1 UTB_LANE=1 P85_LOCK_OWNER=utb P85_EVIDENCE_PREFIX=utb CONTRACTS=${P85_CONTRACTS:-} UTB_COMPONENTS="$(utb_lane_components)"; }
+UTB_EVIDENCE=${UTB_EVIDENCE:-$REPO_ROOT/build/utb-evidence}
+lane_env() { export UTB_EVIDENCE ANYAGE_LANE=1 UTB_LANE=1 P85_LOCK_OWNER=utb P85_EVIDENCE_PREFIX=utb CONTRACTS=${P85_CONTRACTS:-} UTB_COMPONENTS="$(utb_lane_components)"; }
 
 case "${1:-}" in
   --plan) plan ;;
@@ -126,7 +132,7 @@ case "${1:-}" in
   "")
     plan; echo
     preflight || { echo "REFUSED: the preflight is not entirely ok; nothing was started." >&2; exit 3; }
-    echo "REFUSED: the step drivers U1-U5 are not written yet (this is the wiring PR); nothing was started." >&2
-    exit 4 ;;
+    lane_env
+    exec "$SCRIPT_DIR/p85-lane.sh" ;;
   *) echo "usage: $0 [--plan|--preflight|--selftest|--prep|--check-evidence DIR]" >&2; exit 2 ;;
 esac

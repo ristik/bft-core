@@ -46,13 +46,13 @@ start_agg() { # K (1-based): one aggregator-go shard
   # the UTB lane's patched aggregator takes its genesis history by environment (UTB_AGG_ENV_FN, scripts/lib/utb-lib.sh); no other lane sets it
   local -a utbEnv=()
   [ -z "${UTB_AGG_ENV_FN:-}" ] || utbEnv=($("$UTB_AGG_ENV_FN" "$k"))
-  env ${utbEnv[@]+"${utbEnv[@]}"} PORT=$port HOST=127.0.0.1 ENABLE_DOCS=false ENABLE_CORS=true \
+  env PORT=$port HOST=127.0.0.1 ENABLE_DOCS=false ENABLE_CORS=true \
     MONGODB_URI="$AGG_MONGO" MONGODB_DATABASE="$(cat "$d/dbname" 2>/dev/null || { n=dnb_agg${k}_$(date +%s); echo $n | tee "$d/dbname"; })" DISABLE_HIGH_AVAILABILITY=true USE_REDIS_FOR_COMMITMENTS=false \
     SMT_BACKEND=memory SHARDING_MODE=$(agg_mode) LOG_LEVEL=info LOG_FORMAT=text LOG_ENABLE_JSON=false LOG_FILE_PATH="$PWD/$d/logs/aggregator.log" \
     SIGNING_KEY_FILE="$PWD/$d/keys.json" BFT_ENABLED=true BFT_ADDRESS=/ip4/127.0.0.1/tcp/$((29100 + k)) BFT_RPC_ADDRESS=http://127.0.0.1:$rootRpcPort \
     BFT_SHARD_CONF_FILE="$PWD/$(agg_conf "$k")" BFT_TRUST_BASE_FILES="$PWD/test-nodes/trust-base.json" \
     BFT_BOOTSTRAP_ADDRESSES="$boot" \
-    "$AGG_BIN" >"$d/stdout.log" 2>&1 &
+    ${utbEnv[@]+"${utbEnv[@]}"} "$AGG_BIN" >"$d/stdout.log" 2>&1 &
   echo $! >"$d/pid"
   for _ in $(seq 1 60); do curl -fsS "http://127.0.0.1:$port/health" >/dev/null 2>&1 && { info "aggregator-go shard $k up on $port"; return; }; sleep 1; done
   tail -20 "$d/stdout.log" >&2; echo "aggregator shard $k did not become healthy" >&2; return 1

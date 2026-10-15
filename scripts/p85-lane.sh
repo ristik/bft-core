@@ -84,7 +84,7 @@ trap 'exit 143' TERM
 # the single B1 layout: one B1 profile derived from the shard configuration and the root trust base; the registry slots are read under the layout-3 names;
 # every shard node exposes its operator endpoint (the readiness check asks it what it has staged)
 export Q3_B1=1 H3_SLOT_LAYOUT=3 EVM_OPERATOR_STATUS_RPC=1 P85_LANE=1 P85_CONTRACTS M2_ROOT_FLAGS_FN=p85_root_flags
-export ANYAGE_LANE=${ANYAGE_LANE:-0}
+export ANYAGE_LANE=${ANYAGE_LANE:-0} UTB_LANE=${UTB_LANE:-0} EVIDENCE_LANE_LOG="$EVIDENCE_DIR/lane.log"
 # the roots judge an assignment's committee continuity by the budget committed in the installed EVM configuration; it must be the one the election
 # was priced under (the contracts' genesis parameter): adding a unit-weight joiner to four unit-weight members is D = 2/5, over the 1/4 default
 export P85_DIST_NUM=${P85_DIST_NUM:-1} P85_DIST_DEN=${P85_DIST_DEN:-2}
@@ -119,4 +119,5 @@ if [ -n "${ANYAGE_PREP_ONLY:-}" ]; then
 fi
 grep -q 'P85 recovery lane: all steps PASSED' "$EVIDENCE_DIR/lane.log" || fail "lane ended without completing its steps"
 [ "$ANYAGE_LANE" != 1 ] || grep -q 'any-age final lane: all steps PASSED' "$EVIDENCE_DIR/lane.log" || fail "the any-age checkpoints did not complete"
+[ "${UTB_LANE:-0}" != 1 ] || grep -q 'UTB lane: all steps PASSED' "$EVIDENCE_DIR/lane.log" || fail "the UTB checkpoints did not complete"
 pass "P85 recovery lane complete; evidence in $EVIDENCE_DIR"

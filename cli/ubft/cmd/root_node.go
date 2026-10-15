@@ -77,6 +77,7 @@ type (
 		UTBGenesisFile           string // the canonical genesis entry of the signed trust-base chain (utb-genesis); enables the UTB profile
 		UTBGenesisID             string // its EntryID, the pin
 		UTBEntriesDBFile         string
+		UTBCaptureUCResp         string // lane diagnostics: write each distinct version 2 certification response that carries entries here, before it is sent
 		Profile2                 bool
 		InstallHandoffEpoch      uint64
 		Q3Lane                   bool // the Q3 acceptance lane: a verified Q3 history, the install journal and the V3 handoff pipeline
@@ -155,6 +156,8 @@ func rootNodeRunCmd(baseFlags *baseFlags) *cobra.Command {
 		fmt.Sprintf("Q3 install journal database (default: %s)", filepath.Join("$UBFT_HOME", q3JournalDBFileName)))
 	cmd.Flags().StringVar(&flags.UTBGenesisFile, "utb-genesis", "", "enable the signed trust-base entry (UTB) profile: the canonical genesis entry file (see: trust-base utb-genesis); requires --utb-genesis-id and profile 2")
 	cmd.Flags().StringVar(&flags.UTBGenesisID, "utb-genesis-id", "", "the EntryID of the UTB genesis entry (0x-prefixed SHA-256): the pin the genesis file must match")
+	cmd.Flags().StringVar(&flags.UTBCaptureUCResp, "utb-capture-ucresp", "", "lane diagnostics: directory to write each distinct version 2 certification response that carries entries to, before it is sent")
+	_ = cmd.Flags().MarkHidden("utb-capture-ucresp")
 	cmd.Flags().StringVar(&flags.UTBEntriesDBFile, "utb-entries-db", "",
 		fmt.Sprintf("UTB finalized entries database (default: %s)", filepath.Join("$UBFT_HOME", rootUTBEntriesDBFileName)))
 	cmd.Flags().StringVar(&flags.TrustHistoryDBFile, "trust-history-db", "",
@@ -474,7 +477,15 @@ func rootNodeRun(ctx context.Context, flags *rootNodeRunFlags) error {
 		return fmt.Errorf("failed initiate root node: %w", err)
 	}
 	if utbEntries != nil { // the UTB profile answers on the version 2 certificate protocol with the finalized signed entries
-		node.SetEntryOffers(rootchain.NewStoreOffers(utbEntries))
+		offers := rootchain.NewStoreOffers(utbEntries)
+		if flags.UTBCaptureUCResp != "" {
+			tap, tapErr := rootchain.NewResponseCapture(flags.UTBCaptureUCResp)
+			if tapErr != nil {
+				return tapErr
+			}
+			offers.SetTap(tap)
+		}
+		node.SetEntryOffers(offers)
 	}
 
 	g, ctx := errgroup.WithContext(ctx)

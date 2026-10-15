@@ -94,7 +94,7 @@ func currentBuild() (revision string, modified bool, goBase, goVersion string) {
 }
 
 // deriveUTBManifest computes every derived value of the manifest from the genesis trust base, and writes the genesis entry to outDir.
-func deriveUTBManifest(trustBasePath, outDir string, components map[string]string) (*utbManifest, error) {
+func deriveUTBManifest(trustBasePath, outDir string, components map[string]string, relative bool) (*utbManifest, error) {
 	// the manifest names its files absolutely, so a check from any directory recomputes the same thing
 	var err error
 	if trustBasePath, err = filepath.Abs(trustBasePath); err != nil {
@@ -133,6 +133,11 @@ func deriveUTBManifest(trustBasePath, outDir string, components map[string]strin
 
 	m := &utbManifest{Schema: utbManifestSchema, Components: components}
 	m.Inputs.TrustBaseFile = trustBasePath
+	if relative { // a self-contained pack names its files relative to the manifest, so it checks out wherever it is moved
+		if m.Inputs.TrustBaseFile, err = filepath.Rel(outDir, trustBasePath); err != nil {
+			return nil, err
+		}
+	}
 	if m.Inputs.TrustBaseSHA256, err = fileSHA256(trustBasePath); err != nil {
 		return nil, err
 	}
@@ -140,9 +145,13 @@ func deriveUTBManifest(trustBasePath, outDir string, components map[string]strin
 	if err := os.MkdirAll(outDir, 0o755); err != nil {
 		return nil, err
 	}
-	m.Derived.UTBGenesisFile = filepath.Join(outDir, "utb-genesis.cbor")
-	if err := os.WriteFile(m.Derived.UTBGenesisFile, raw, 0o644); err != nil {
+	genesisPath := filepath.Join(outDir, "utb-genesis.cbor")
+	if err := os.WriteFile(genesisPath, raw, 0o644); err != nil {
 		return nil, err
+	}
+	m.Derived.UTBGenesisFile = genesisPath
+	if relative {
+		m.Derived.UTBGenesisFile = "utb-genesis.cbor"
 	}
 	sum := sha256.Sum256(raw)
 	m.Derived.RootGenesisID = "0x" + hex.EncodeToString(rootID)
@@ -174,7 +183,14 @@ func checkUTBManifest(manifestPath string) error {
 		return err
 	}
 	defer os.RemoveAll(tmp)
-	again, err := deriveUTBManifest(m.Inputs.TrustBaseFile, tmp, m.Components)
+	// relative paths are the manifest's own directory
+	resolve := func(p string) string {
+		if filepath.IsAbs(p) {
+			return p
+		}
+		return filepath.Join(filepath.Dir(manifestPath), p)
+	}
+	again, err := deriveUTBManifest(resolve(m.Inputs.TrustBaseFile), tmp, m.Components, false)
 	if err != nil {
 		return err
 	}
@@ -190,7 +206,7 @@ func checkUTBManifest(manifestPath string) error {
 	cmp("utbGenesisEntryId", m.Derived.UTBGenesisEntryID, again.Derived.UTBGenesisEntryID)
 	cmp("protocolConfigId", m.Derived.ProtocolConfigID, again.Derived.ProtocolConfigID)
 	cmp("legacyProtocolConfigId", m.Derived.LegacyProtocolConfig, again.Derived.LegacyProtocolConfig)
-	if got, err := fileSHA256(m.Derived.UTBGenesisFile); err != nil {
+	if got, err := fileSHA256(resolve(m.Derived.UTBGenesisFile)); err != nil {
 		diffs = append(diffs, fmt.Sprintf("the genesis entry file %q: %v", m.Derived.UTBGenesisFile, err))
 	} else {
 		cmp("utbGenesisFile content", got, again.Derived.UTBGenesisSHA256)
@@ -203,6 +219,7 @@ func checkUTBManifest(manifestPath string) error {
 
 func trustBaseUTBManifestCmd() *cobra.Command {
 	var tbPath, outDir, check string
+	var relative bool
 	var components []string
 	cmd := &cobra.Command{Use: "utb-manifest", Short: "Generate (or --check) the manifest and genesis artifacts of a fresh UTB deployment from its genesis trust base",
 		RunE: func(cmd *cobra.Command, _ []string) error {
@@ -224,7 +241,7 @@ func trustBaseUTBManifestCmd() *cobra.Command {
 				}
 				comp[name] = value
 			}
-			m, err := deriveUTBManifest(tbPath, outDir, comp)
+			m, err := deriveUTBManifest(tbPath, outDir, comp, relative)
 			if err != nil {
 				return err
 			}
@@ -247,6 +264,7 @@ func trustBaseUTBManifestCmd() *cobra.Command {
 	cmd.Flags().StringVar(&tbPath, "trust-base", "", "the genesis (epoch 1) trust base file")
 	cmd.Flags().StringVar(&outDir, "out-dir", "utb-deployment", "where to write the genesis entry and the manifest")
 	cmd.Flags().StringArrayVar(&components, "component", nil, "a pinned build or checkout of the deployment, name=digest-or-commit (repeatable)")
+	cmd.Flags().BoolVar(&relative, "relative-paths", false, "name the trust base and the genesis entry relative to the manifest (a self-contained evidence pack)")
 	cmd.Flags().StringVar(&check, "check", "", "recompute and compare a manifest instead of generating one")
 	return cmd
 }

@@ -135,3 +135,34 @@ func hexDecode(s string) ([]byte, error) {
 	}
 	return out, nil
 }
+
+// A self-contained pack names its files relative to the manifest: it checks out after it is moved, and without the live deployment.
+func TestRelativeManifestCheckedAfterTheDirectoryMoves(t *testing.T) {
+	dir := t.TempDir()
+	tb := writeGenesisTrustBase(t, dir)
+	pack := filepath.Join(dir, "pack", "manifest")
+	require.NoError(t, os.MkdirAll(pack, 0o755))
+	raw, err := os.ReadFile(tb)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(pack, "trust-base.json"), raw, 0o644))
+	_, err = runManifest(t, "--trust-base", filepath.Join(pack, "trust-base.json"), "--out-dir", pack, "--relative-paths")
+	require.NoError(t, err)
+	var m utbManifest
+	body, err := os.ReadFile(filepath.Join(pack, "utb-manifest.json"))
+	require.NoError(t, err)
+	require.NoError(t, json.Unmarshal(body, &m))
+	require.Equal(t, "trust-base.json", m.Inputs.TrustBaseFile)
+	require.Equal(t, "utb-genesis.cbor", m.Derived.UTBGenesisFile)
+
+	moved := filepath.Join(dir, "elsewhere")
+	require.NoError(t, os.Rename(filepath.Join(dir, "pack"), moved))
+	require.NoError(t, os.Remove(tb)) // nothing of the live deployment is left
+	_, err = runManifest(t, "--check", filepath.Join(moved, "manifest", "utb-manifest.json"))
+	require.NoError(t, err)
+	// and a tampered copy of the genesis entry in the pack is caught
+	g := filepath.Join(moved, "manifest", "utb-genesis.cbor")
+	orig, _ := os.ReadFile(g)
+	require.NoError(t, os.WriteFile(g, append(orig, 0), 0o644))
+	_, err = runManifest(t, "--check", filepath.Join(moved, "manifest", "utb-manifest.json"))
+	require.ErrorContains(t, err, "utbGenesisFile content")
+}

@@ -3,6 +3,8 @@ package rootchain
 import (
 	"bytes"
 	"context"
+	"os"
+	"path/filepath"
 	"sync"
 	"testing"
 
@@ -235,4 +237,41 @@ func TestWithOffersTreatsAResponseWithoutASealAsEpochZero(t *testing.T) {
 	require.True(t, ok)
 	require.Empty(t, v2.TrustBaseUpdates)
 	require.Nil(t, sent)
+}
+
+// The lane's capture writes the exact message about to be sent, once per recipient and highest epoch, and changes nothing about what is sent.
+func TestResponseCaptureWritesTheMessageThatIsSent(t *testing.T) {
+	store := storeWithEpochs(t, 3)
+	offers := NewStoreOffers(store)
+	dir := t.TempDir()
+	tap, err := NewResponseCapture(dir)
+	require.NoError(t, err)
+	offers.SetTap(tap)
+	a := generateNodeID(t)
+	snd := &recordingSender{}
+	subs, err := NewSubscriptions(snd.send, observability.Default(t))
+	require.NoError(t, err)
+	subs.offers = offers
+	t.Cleanup(subs.Wait)
+	require.NoError(t, subs.Subscribe(1, types.ShardID{}, a.String()))
+	subs.Send(context.Background(), ucResponse(2))
+	subs.Wait()
+	files, err := filepath.Glob(filepath.Join(dir, "ucresp-e3-*.cbor"))
+	require.NoError(t, err)
+	require.Len(t, files, 1)
+	captured, err := os.ReadFile(files[0])
+	require.NoError(t, err)
+	sent, err := types.Cbor.Marshal(snd.msgs[0])
+	require.NoError(t, err)
+	require.Equal(t, sent, captured, "the exact bytes of the message sent")
+	var v2 certification.CertificationResponseV2
+	require.NoError(t, types.Cbor.Unmarshal(captured, &v2))
+	require.Len(t, v2.TrustBaseUpdates, 2)
+
+	// a message with no entries is not captured; the same recipient and epoch is not captured twice
+	offers.Reset(a)
+	subs.Send(context.Background(), ucResponse(2))
+	subs.Wait()
+	files, _ = filepath.Glob(filepath.Join(dir, "*.cbor"))
+	require.Len(t, files, 1)
 }
