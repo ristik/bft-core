@@ -27,6 +27,8 @@ type HistoricalTrustBaseStore struct {
 	utb      atomic.Bool
 }
 
+// EnableUTBProfile is WithUTBProfile for a store that is already open; a node of the profile uses the option, because the opening itself verifies the stored handoffs.
+//
 // EnableUTBProfile says the handoffs this store verifies were committed by roots of the signed trust-base entry profile: their commit certificates are in the
 // version 3 envelope and carry the old committee's endorsement, which the verification of an old commit proof then demands. It is set once at start-up from the
 // deployment's pinned genesis (--utb-genesis), the shard equivalent of the root's trust-base store flag.
@@ -38,8 +40,18 @@ func (s *HistoricalTrustBaseStore) BundleSigning(old *types.RootTrustBaseV1) vot
 	return votesig.Config{Scheme: votesig.SchemeLegacy, Network: uint64(old.NetworkID), UTB: s.utb.Load()}
 }
 
-func NewHistoricalTrustBaseStore(ctx context.Context, db keyvaluedb.KeyValueDB, anchor *types.RootTrustBaseV1, executionID [32]byte, profile2 bool) (*HistoricalTrustBaseStore, error) {
+// HistoryOption configures a HistoricalTrustBaseStore before its durable history is opened.
+type HistoryOption func(*HistoricalTrustBaseStore)
+
+// WithUTBProfile makes the store verify by the signed trust-base entry profile from the start. It must be an option and not a later call: opening the store re-verifies every
+// stored activation proof, and those handoffs were committed in the version 3 envelope.
+func WithUTBProfile() HistoryOption { return func(s *HistoricalTrustBaseStore) { s.utb.Store(true) } }
+
+func NewHistoricalTrustBaseStore(ctx context.Context, db keyvaluedb.KeyValueDB, anchor *types.RootTrustBaseV1, executionID [32]byte, profile2 bool, opts ...HistoryOption) (*HistoricalTrustBaseStore, error) {
 	out := &HistoricalTrustBaseStore{profile2: profile2}
+	for _, o := range opts {
+		o(out)
+	}
 	var verifier trusthistorystore.ActivationVerifier
 	if profile2 {
 		// the activation proof of every stored handoff is verified (on append and again when the store opens) by the rule of its old epoch: the legacy scheme, in

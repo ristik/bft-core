@@ -87,3 +87,26 @@ func (l legacyOnly) GetByEpoch(ctx context.Context, e uint64) (*types.RootTrustB
 func (l legacyOnly) InstallHandoff(ctx context.Context, b handoffdelivery.Bundle, p types.PartitionID, s types.ShardID, c []byte) (handoffdelivery.Verified, error) {
 	return l.h.InstallHandoff(ctx, b, p, s, c)
 }
+
+// Reopening: opening the store re-verifies every stored activation proof, so a UTB shard with a stored handoff reopens only when the profile is set before the open.
+func TestAUTBShardReopensItsStoredHandoffs(t *testing.T) {
+	ctx := context.Background()
+	f := handoffbundle.New(t)
+	handoffbundle.WithUTB(t, f)
+	bundle := handoffdelivery.Bundle{Proof: f.Proof, Body: f.Body, Snapshot: f.Snapshot}
+	var executionID [32]byte
+	executionID[0] = 4
+	db := memorydb.New()
+	first, err := NewHistoricalTrustBaseStore(ctx, db, f.Old, executionID, true, WithUTBProfile())
+	require.NoError(t, err)
+	_, err = first.InstallHandoff(ctx, bundle, f.Partition, f.Shard, f.ConfHash)
+	require.NoError(t, err)
+
+	again, err := NewHistoricalTrustBaseStore(ctx, db, f.Old, executionID, true, WithUTBProfile())
+	require.NoError(t, err, "the restart of a UTB shard re-verifies the stored version 3 handoff under the profile")
+	require.True(t, again.BundleSigning(f.Old).UTB)
+
+	_, err = NewHistoricalTrustBaseStore(ctx, db, f.Old, executionID, true)
+	require.Error(t, err, "a shard that forgot the profile cannot reopen a UTB history")
+	require.ErrorContains(t, err, "envelope")
+}

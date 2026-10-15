@@ -704,12 +704,13 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 			return fmt.Errorf("opening historical trust store: %w", openErr)
 		}
 		defer historyDB.Close()
-		historical, openErr := shardnode.NewHistoricalTrustBaseStore(ctx, historyDB, trustBases[0], executionID, flags.TrustHistoryProfile2)
+		var historyOpts []shardnode.HistoryOption
+		if flags.UTBGenesisFile != "" { // the V2 handoffs this shard follows were committed by a UTB root: their certificates are version 3, also when the store reopens
+			historyOpts = append(historyOpts, shardnode.WithUTBProfile())
+		}
+		historical, openErr := shardnode.NewHistoricalTrustBaseStore(ctx, historyDB, trustBases[0], executionID, flags.TrustHistoryProfile2, historyOpts...)
 		if openErr != nil {
 			return fmt.Errorf("verifying historical trust store: %w", openErr)
-		}
-		if flags.UTBGenesisFile != "" { // the V2 handoffs this shard follows were committed by a UTB root: their certificates are version 3
-			historical.EnableUTBProfile()
 		}
 		trustBaseStore = historical
 		historicalTrust = historical
