@@ -116,7 +116,8 @@ utb_step_u1() {
   # the original proof, saved by L1a: the digest is recorded now and nothing refetches it
   cp "$(anyage_dir)/l1/token.cbor" "$out/proofs/token.cbor" || return 1
   shasum -a 256 "$out/proofs/token.cbor" | cut -d' ' -f1 >"$out/proofs/original-proof.sha256"
-  cp test-nodes/shard-conf-${aggPartition}_0.json "$out/manifest/shard-conf.json" 2>/dev/null || cp "$(agg_conf 1)" "$out/manifest/shard-conf.json" || return 1
+  # the original proof is the bridge token's: certified for the EVM shard, so its certificates bind the EVM shard's full configuration (not the aggregator's)
+  cp test-nodes/evm-full-shard-conf-v2.json "$out/manifest/shard-conf.json" || return 1
   utb_ev uc-verify --token "$out/proofs/token.cbor" --bundle "$out/bundle/initial.cbor" --shard-conf "$out/manifest/shard-conf.json" | tee "$out/proofs/before-rotation-verify.txt" || return 1
   # the reference client starts from the genesis alone and holds it through the whole rotation
   utb_ev client --url "$(utb_agg_url)" --store "$out/client.db" --genesis test-nodes/utb-genesis.cbor --pin "$(utb_pin)" | tee "$out/history/client-start.log" || return 1
