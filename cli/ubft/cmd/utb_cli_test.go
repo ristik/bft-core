@@ -9,6 +9,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/require"
+	"github.com/unicitynetwork/bft-core/rootchain/consensus/votesig"
 	abcrypto "github.com/unicitynetwork/bft-go-base/crypto"
 	"github.com/unicitynetwork/bft-go-base/types"
 	"github.com/unicitynetwork/bft-go-base/util"
@@ -164,4 +165,16 @@ func TestEveryRuntimeAShardOrRootBuildsTakesTheProfileFlag(t *testing.T) {
 	root, err := os.ReadFile("root_q3.go")
 	require.NoError(t, err)
 	require.Contains(t, string(root), "UTBGenesis: utbGenesis")
+}
+
+// The bootstrap frontier requester verifies the QCs by the signing configuration of the root epoch: a UTB shard without the Q3 runtime (profile 2 only) must not fall back to the
+// plain legacy scheme (every QC of the UTB envelope was rejected as unauthenticated).
+func TestFreshnessSigningFollowsTheProfileOfTheShard(t *testing.T) {
+	anchor := &types.RootTrustBaseV1{NetworkID: 3}
+	require.Nil(t, freshnessSigning(nil, false, anchor), "no Q3 runtime and no UTB profile: the requester's plain legacy default")
+	f := freshnessSigning(nil, true, anchor)
+	require.NotNil(t, f)
+	cfg, err := f(1)
+	require.NoError(t, err)
+	require.Equal(t, votesig.Config{Scheme: votesig.SchemeLegacy, Network: 3, UTB: true}, cfg)
 }

@@ -319,6 +319,11 @@ h3_restore_validator() {
   for p in $H3_ONLINE; do [ "$p" = "$i" ] || [ "${#peers[@]}" -ge 4 ] || peers+=(--archive-replica "$(evm_validator_id "$p")"); done
   local -a layoutArgs=(--registry-layout "$(registry_layout)")
   [ -z "${EVM_B1_PROFILE:-}" ] || layoutArgs=(--b1-profile "$EVM_B1_PROFILE")   # a fresh-B1 deployment: the profile selects registry layout 3
+  local -a utbArgs=()
+  if [ "${UTB_LANE:-0}" = 1 ]; then   # a shard node restored by the UTB lane keeps the signed trust-base entry profile (the library is the lane's, not every lane's)
+    source scripts/lib/utb-lib.sh
+    utbArgs=($(utb_shard_flags)) || return 1
+  fi
   build/ubft shard-node restore --home "$evidence" --executor engine-api \
     --address "/ip4/127.0.0.1/tcp/$((evmValidatorPortStart + i - 1))" --bootnodes "$bootnodes" \
     --trust-base "$H3_RESTORE_TRUST_BASE" --full-shard-conf "$EVM_FULL_SHARD_CONF" "${layoutArgs[@]}" \
@@ -329,7 +334,7 @@ h3_restore_validator() {
     --signing-authority-socket "test-nodes/auth$i/client.sock" --signing-authority-credential "test-nodes/auth$i/client.cred" \
     "${peers[@]}" --tip-uc "$evidence/tip.uc.cbor" --tip-tr "$evidence/tip.tr.cbor" --trust-body-id "$bodyID" \
     $([ "${Q3_B1:-0}" != 1 ] || echo --q3-lane --rpc-server-address "$(evm_validator_rpc_addr "$i")") \
-    $([ "${UTB_LANE:-0}" != 1 ] || utb_shard_flags) \
+    ${utbArgs[@]+"${utbArgs[@]}"} \
     --log-format text --log-level "${H3_RESTORE_LOG_LEVEL:-info}" >>"$evidence/debug.log" 2>&1 &
   echo $! >"$evidence/pid"
 }

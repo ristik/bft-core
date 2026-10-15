@@ -48,6 +48,7 @@ import (
 	"github.com/unicitynetwork/bft-core/registrygenesis"
 	"github.com/unicitynetwork/bft-core/registryproof"
 	rctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
+	"github.com/unicitynetwork/bft-core/rootchain/consensus/votesig"
 	"github.com/unicitynetwork/bft-core/rootinput"
 	"github.com/unicitynetwork/bft-core/shardnode"
 	"github.com/unicitynetwork/bft-core/shardnode/executortest"
@@ -1263,9 +1264,7 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 		// store that already holds ordinary progress never needs one. The operator trust pin of
 		// `shard-node restore` (D-M2-1) is unchanged and independent of it.
 		freshness := &configuredadmission.Freshness{Opener: peer, TrustBase: trustBases[0], Logger: flags.observe.Logger()}
-		if q3rt != nil {
-			freshness.Signing = q3rt.Signing
-		}
+		freshness.Signing = freshnessSigning(q3rt, flags.UTBGenesisFile != "", trustBases[0])
 		coordinator := &configuredadmission.ExecutionRecovery{Freshness: freshness, Store: journalStore, Context: journalCtx, JournalLimits: limits, Executor: recoveryExecutor, Gate: node.FinalityGate(), Log: flags.observe.Logger(), Genesis: genesis, Limits: configuredadmission.DefaultRecoveryLimits()}
 		server, serverErr := shardnode.NewJournalServer(configuredadmission.JournalProvider{Store: journalStore, Context: journalCtx, Limits: limits}, shardnode.DefaultJournalTransportLimits())
 		if serverErr != nil {
@@ -1894,6 +1893,20 @@ func checkRestoreTrustBodyID(pin []byte, history interface {
 	bodyID, err := history.BodyID(epoch)
 	if err != nil || !bytes.Equal(pin, bodyID[:]) {
 		return trustBodyIDMismatch(err)
+	}
+	return nil
+}
+
+// freshnessSigning is the signing configuration of a root epoch for the bootstrap frontier requester: the verified history's when the node runs the Q3
+// runtime; otherwise the legacy scheme, in the UTB envelope when the node is of the UTB profile (the same configuration BundleSigning gives the handoff
+// bundles). Nil leaves the requester on the plain legacy scheme.
+func freshnessSigning(q3rt *q3active.Runtime, utb bool, anchor *types.RootTrustBaseV1) func(uint64) (votesig.Config, error) {
+	switch {
+	case q3rt != nil:
+		return q3rt.Signing
+	case utb:
+		cfg := votesig.Config{Scheme: votesig.SchemeLegacy, Network: uint64(anchor.NetworkID), UTB: true}
+		return func(uint64) (votesig.Config, error) { return cfg, nil }
 	}
 	return nil
 }
