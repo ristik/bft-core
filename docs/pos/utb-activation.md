@@ -1,0 +1,53 @@
+# Activating the signed trust-base entry profile (UTB PR7)
+
+Design §11. The profile is one fresh-deployment choice made at genesis; nothing in it is a runtime switch. Related: `utb-vote-endorsement.md`, `utb-retention.md`,
+`utb-ucresp.md`, `utb-gettrustbase.md` (PR6).
+
+## What "enabled" means
+
+- **Genesis.** `ubft trust-base utb-manifest --trust-base <epoch-1 trust base> --out-dir D [--component name=pin ...]` derives, in dependency order, the canonical V2 genesis
+  entry (null signatures, zero predecessor), its EntryID (the pin) and `utb-manifest.json`: the input trust base (file digest), the root-chain genesis identity, the UTB
+  EntryID, the protocol tuple identity (`Q3ConfigUTB`: revision 3, vote codec/envelope 3, signing scheme 2) and the plain tuple's, the bft-core revision and the exact
+  `bft-go-base` module (version, sum) of the running binary, and the other pinned components as given. The three identities stay distinct. `--check manifest.json`
+  recomputes everything (and re-reads the files); the lane checks it at generation, in the preflight and on the evidence. Nothing is hand-edited.
+- **Nodes.** `--utb-genesis FILE --utb-genesis-id 0x…` (and `--utb-entries-db`) on `root-node run` and `shard-node run`. At start the node first runs
+  `utbprofile.Check`, then (after the databases open) compares the pinned genesis entry with the one its own genesis trust base builds.
+- **First voting epoch.** A UTB root's trust-base store reports `UTB=true` for every epoch's fallback signing configuration (`EnableUTBProfile`), so the first handoff is endorsed
+  too; with `--q3-lane` the verified history (`q3active.Config.UTBGenesis`) answers the same for the genesis epoch and plans only the UTB tuple (`ProtocolConfig`), which
+  `WithV3` demands of every activation. Production calls no `ActivateSigning`.
+
+## Start-up refusals (`utbprofile.Check`)
+
+Named, all reported together, before any key or database is touched: a pin without a genesis entry or the reverse; a root without profile 2; a missing or empty genesis
+file; an entry store that cannot be persisted; a **legacy database** (rootchain/trustbase/orchestration) with no entry store (there is no approved migration: the profile
+starts from a fresh deployment); and the reverse, an entry store on disk while the flags are off (a node would continue a UTB chain as a plain one). Mismatched pins are
+refused by the genesis comparison; incompatible binaries by the lane preflight (a binary without `--utb-genesis-id` is not started).
+
+## The lane (scripts/utb-lane.sh)
+
+`UTB_LANE=1` on top of `ANYAGE_LANE=1`: `reth-paired-devnet.sh` generates the genesis and manifest once from `test-nodes/trust-base.json`; `helper.sh` gives every root and validator
+the flags (from the generated pin file, never a copied value); `m2_start_root` keeps them on a restarted root (`UTB_ROOT_FLAGS_FN`); `agg-lib.sh` passes the patched aggregator its
+UTB variables (`UTB_AGG_ENV_FN`: `UTB_GENESIS_FILE`, `UTB_GENESIS_ID`, `UTB_ENTRIES_DB`; dev4's binary `briefs/builds/aggregator-utb-4d69e49b`, history at `GET /api/v1/trustbases`). `--plan`, `--preflight` (pins, merged PRs, binaries, the aggregator patch provenance,
+manifest, prep record), `--selftest` (generation, flags, and the evidence checker with each broken property refused by its own check), `--prep`, `--check-evidence DIR`.
+The required evidence list is `utb_evidence_required` (design §11.4: manifest and patch digests, initial and final bundles, raw entries, a UCResp sample, independent verifier
+output with predecessor epoch/EntryID/weights/threshold, catch-up and restart logs, the original proof digest recorded unchanged by the historical verification, the bridge receipt,
+the client reload of the final bundle).
+
+**The aggregator** is dev4's local build (`briefs/builds/aggregator-utb-4d69e49b`: aggregator-go `63cdca1` + one reviewed patch, not pushed anywhere). It was built on a local merge of the
+PR5 and PR6 heads; once they are merged it is re-pinned to the merged bft-core commit and rebuilt, and the provenance (and the manifest's `aggregator-*` components) change with it. The
+preflight finds the provenance by the binary digest, requires the patch digest to be recorded, and prints the bft-core base.
+
+**Shards of the profile.** A shard started with `--utb-genesis` builds its Q3 histories with the UTB genesis, enables the profile on its V2 history store (activation proofs, follower replay and
+archive bundle admission verify by the old epoch's UTB envelope) and keeps its own entry store; a plain shard still refuses a version 3 certificate.
+
+**Entries of the lane.** The P85 flow has no acknowledged J: epoch 2 is the K->J handoff (activated, never acknowledged), epoch 3 the derived recovery to K, and the acknowledgement block installs both
+(span 2). So the design's three-entry sequence (acknowledged J, stalled L, recovery) is not what runs; the lane evidences: piggyback delivery of epoch 2 to the aggregator (and the root's real
+message, captured by the hidden `--utb-capture-ucresp`), the aggregator's restart from its retained store, the controlled fault (down with its history store removed, Mongo kept) and its peer repair
+of 2..3 from a genesis-committee root with root HTTP unavailable to it (rev3's scenario A: the repair runs from the handshake path; the fresh-Mongo scenario B cannot produce a gap with only two
+entries, because the handshake reply attaches both and they follow the genesis), the stale reference client meeting the unknown epoch 3 and fetching [2 3] in one request, a token certified after the
+recovery, the original token verified unchanged under its historical committee, the bridge receipt, and the exported history reloaded exactly.
+
+**Evidence.** `utb_check_evidence` verifies the bytes with the tools (scripts/utb-evidence: fetch, verify, extract, client, ucresp, uc-verify): the manifest checks out inside the pack (relative paths), the
+final bundle verifies from the pinned genesis, each verifier output and entry file is exactly the history's record for its epoch, the initial bundle is a shorter prefix, the UCResp sample is a version 2
+response attaching the entry byte for byte, the token is the original one and its certificates verify under their own epochs (interval checked), the client reload recorded the final digest and tip.
+`go test ./scripts/utb-evidence -run EvidencePack` builds a real pack and shows 18 bad variants refused, each by its own check.

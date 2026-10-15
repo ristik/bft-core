@@ -1,9 +1,13 @@
 package rootchain
 
 import (
+	"fmt"
+	"os"
+	"path/filepath"
 	"sync"
 
 	"github.com/libp2p/go-libp2p/core/peer"
+	"github.com/unicitynetwork/bft-go-base/types"
 
 	"github.com/unicitynetwork/bft-core/network/protocol/certification"
 	"github.com/unicitynetwork/bft-core/utbstore"
@@ -26,6 +30,7 @@ const maxOfferHints = 4096
 // best-effort and in memory only (a restart resets it), never an acknowledgement or an authority: a missed delivery is repaired by GetTrustBase.
 type StoreOffers struct {
 	store *utbstore.Store
+	tap   func(recipient peer.ID, msg *certification.CertificationResponseV2)
 
 	mu    sync.Mutex
 	hints map[peer.ID]uint64
@@ -82,4 +87,48 @@ func (o *StoreOffers) Reset(recipient peer.ID) {
 	o.mu.Lock()
 	delete(o.hints, recipient)
 	o.mu.Unlock()
+}
+
+// SetTap makes every version 2 message that carries entries visible, once, just before it is sent (the lane's capture of real UCResp samples). It observes the
+// message; it cannot change what is sent.
+func (o *StoreOffers) SetTap(tap func(recipient peer.ID, msg *certification.CertificationResponseV2)) {
+	o.tap = tap
+}
+
+// Tap is called by the sender with the message it is about to send.
+func (o *StoreOffers) Tap(recipient peer.ID, msg *certification.CertificationResponseV2) {
+	if o.tap != nil && len(msg.TrustBaseUpdates) > 0 {
+		o.tap(recipient, msg)
+	}
+}
+
+type tapper interface {
+	Tap(recipient peer.ID, msg *certification.CertificationResponseV2)
+}
+
+// NewResponseCapture writes, into dir, the first version 2 message to each recipient for each highest attached epoch, as
+// ucresp-e<epoch>-<recipient>.cbor (the exact bytes about to be sent). Existing files are kept.
+func NewResponseCapture(dir string) (func(peer.ID, *certification.CertificationResponseV2), error) {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return nil, err
+	}
+	return func(recipient peer.ID, msg *certification.CertificationResponseV2) {
+		last, err := types.DecodeRootTrustBaseV2(msg.TrustBaseUpdates[len(msg.TrustBaseUpdates)-1])
+		if err != nil {
+			return
+		}
+		raw, err := types.Cbor.Marshal(msg)
+		if err != nil {
+			return
+		}
+		id := recipient.String()
+		if len(id) > 8 {
+			id = id[len(id)-8:]
+		}
+		name := filepath.Join(dir, fmt.Sprintf("ucresp-e%d-%s.cbor", last.Epoch, id))
+		if _, err := os.Stat(name); err == nil {
+			return
+		}
+		_ = os.WriteFile(name, raw, 0o644)
+	}, nil
 }

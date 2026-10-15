@@ -132,5 +132,9 @@ func withOffers(offers EntryOffers, recipient peer.ID, cr *certification.Certifi
 		epoch = cr.UC.UnicitySeal.Epoch
 	}
 	entries, sent := offers.Offer(recipient, epoch)
-	return certification.NewCertificationResponseV2(cr, entries), sent
+	msg := certification.NewCertificationResponseV2(cr, entries)
+	if t, ok := offers.(tapper); ok {
+		t.Tap(recipient, msg)
+	}
+	return msg, sent
 }

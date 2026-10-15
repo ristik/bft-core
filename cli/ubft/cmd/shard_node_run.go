@@ -52,6 +52,7 @@ import (
 	"github.com/unicitynetwork/bft-core/shardnode"
 	"github.com/unicitynetwork/bft-core/shardnode/executortest"
 	"github.com/unicitynetwork/bft-core/signingauthority"
+	"github.com/unicitynetwork/bft-core/utbprofile"
 	"github.com/unicitynetwork/bft-core/utbstore"
 )
 
@@ -474,6 +475,12 @@ protocol and docs/engine-api-adapter-plan.md for how this command's pieces fit t
 }
 
 func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(string) bool) error {
+	if flags.baseFlags != nil { // (a unit test drives this function with none)
+		if err := utbprofile.Check(utbprofile.Inputs{Role: utbprofile.Shard, GenesisFile: flags.UTBGenesisFile, GenesisID: flags.UTBGenesisID,
+			EntriesDB: flags.PathWithDefault(flags.UTBEntriesDBFile, shardUTBEntriesDBFileName)}); err != nil {
+			return err
+		}
+	}
 	var readOperatorStatus func(context.Context) (archivewiring.OperatorStatus, error)
 	if flags.Restore {
 		if flags.Executor != "engine-api" || flags.ExecutionJournal == "" || flags.ArchiveStore == "" || !flags.ArchivePrune ||
@@ -697,7 +704,11 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 			return fmt.Errorf("opening historical trust store: %w", openErr)
 		}
 		defer historyDB.Close()
-		historical, openErr := shardnode.NewHistoricalTrustBaseStore(ctx, historyDB, trustBases[0], executionID, flags.TrustHistoryProfile2)
+		var historyOpts []shardnode.HistoryOption
+		if flags.UTBGenesisFile != "" { // the V2 handoffs this shard follows were committed by a UTB root: their certificates are version 3, also when the store reopens
+			historyOpts = append(historyOpts, shardnode.WithUTBProfile())
+		}
+		historical, openErr := shardnode.NewHistoricalTrustBaseStore(ctx, historyDB, trustBases[0], executionID, flags.TrustHistoryProfile2, historyOpts...)
 		if openErr != nil {
 			return fmt.Errorf("verifying historical trust store: %w", openErr)
 		}
@@ -718,7 +729,7 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 			if closer, ok := b1Journal.(io.Closer); ok {
 				defer closer.Close()
 			}
-			b1rt, jErr := q3active.New(q3active.Config{DB: b1Journal, Genesis: trustBases[0]})
+			b1rt, jErr := q3active.New(q3active.Config{DB: b1Journal, Genesis: trustBases[0], UTBGenesis: flags.UTBGenesisFile != ""})
 			if jErr != nil {
 				return fmt.Errorf("b1 authority runtime: %w", jErr)
 			}
@@ -741,7 +752,7 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 			if closer, ok := journalDB.(io.Closer); ok {
 				defer closer.Close()
 			}
-			if q3rt, jErr = q3active.New(q3active.Config{DB: journalDB, Genesis: trustBases[0]}); jErr != nil {
+			if q3rt, jErr = q3active.New(q3active.Config{DB: journalDB, Genesis: trustBases[0], UTBGenesis: flags.UTBGenesisFile != ""}); jErr != nil {
 				return fmt.Errorf("q3 runtime: %w", jErr)
 			}
 			if q3Admit, jErr = wireQ3Pair(executor, q3rt, uint64(shardConf.NetworkID), origin.Valid(), [32]byte(origin.BlockHash())); jErr != nil {

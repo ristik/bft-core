@@ -27,6 +27,17 @@ var (
 type signingRegistry struct {
 	byEpoch   map[uint64]votesig.Config
 	authority SigningAuthority
+	// utb marks a deployment of the signed trust-base entry profile that has no verified Q3 history: every epoch's fallback configuration is then the
+	// legacy scheme with the UTB envelope, from the first voting epoch. A bound authority (the Q3 history) answers for itself.
+	utb bool
+}
+
+// EnableUTBProfile makes the legacy-scheme fallback configuration of every epoch a UTB epoch. It is set once at start-up from the deployment's pinned
+// genesis (the --utb-genesis profile), never by a message, and it does not affect a store bound to a verified history, which carries its own flag.
+func (s *TrustBaseStore) EnableUTBProfile() {
+	s.mu.Lock()
+	s.signing.utb = true
+	s.mu.Unlock()
 }
 
 // SigningAuthority is the verified history that decides each epoch's protocol configuration: its signing configuration and its
@@ -134,5 +145,5 @@ func (s *TrustBaseStore) SigningConfig(epoch uint64) (votesig.Config, error) {
 			return s.signing.byEpoch[e], nil
 		}
 	}
-	return votesig.Config{Scheme: votesig.SchemeLegacy, Network: uint64(tb.NetworkID)}, nil
+	return votesig.Config{Scheme: votesig.SchemeLegacy, Network: uint64(tb.NetworkID), UTB: s.signing.utb}, nil
 }

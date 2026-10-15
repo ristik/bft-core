@@ -129,6 +129,12 @@ function start_root_nodes() {
         source scripts/lib/p85-lib.sh
         profileArgs+=($(p85_root_flags "$i" "http://127.0.0.1:${rethEthBase:-18545}"))
       fi
+      if [ "${UTB_LANE:-0}" = 1 ]; then
+        # the signed trust-base entry profile from the first voting epoch (scripts/utb-lane.sh): the generated genesis entry and its pin, read from the files
+        source scripts/lib/utb-lib.sh
+        utbFlags=$(utb_root_flags "$i") || exit 1
+        profileArgs+=($utbFlags)
+      fi
       # Under the handoff profile PUT /api/v1/configurations is refused (#329): the genesis shard
       # configurations are fixed at start, so hand every one of them over by flag.
       collect_shard_conf_args
@@ -575,6 +581,12 @@ function start_one_evm_validator() {
     profileArgs=(--trust-history-profile-2)
     # Q3 #50: the shard node runs the verified coupled runtime (its own verification from the pinned genesis)
     [ "${Q3_B1:-0}" != 1 ] || profileArgs+=(--q3-lane)
+  fi
+  if [ "${UTB_LANE:-0}" = 1 ]; then   # the shard node keeps its own store of the finalized entries, rooted in the same pinned genesis
+    source scripts/lib/utb-lib.sh
+    local utbShardFlags
+    utbShardFlags=$(utb_shard_flags "$i") || return 1
+    profileArgs+=($utbShardFlags)
   fi
 
   # The registry layout only matters to the engine-api executor; resolve it from the run's persisted file.

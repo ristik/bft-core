@@ -146,6 +146,9 @@ type History struct {
 	utbGenesis bool
 }
 
+// UTB reports whether this is a UTB chain: its genesis epoch, and so every epoch after it, endorses the successor trust-base entry.
+func (h *History) UTB() bool { return h.utbGenesis }
+
 // WithUTBGenesis returns the history with its genesis epoch a UTB epoch: the genesis epoch signs with scheme 1 and the version 3 envelope.
 func (h *History) WithUTBGenesis() *History {
 	c := *h
