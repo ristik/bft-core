@@ -29,6 +29,7 @@ import (
 	"github.com/unicitynetwork/bft-go-base/types"
 
 	"github.com/unicitynetwork/bft-core/gettrustbase"
+	"github.com/unicitynetwork/bft-core/internal/quorumweight"
 	"github.com/unicitynetwork/bft-core/keyvaluedb/boltdb"
 	"github.com/unicitynetwork/bft-core/network/protocol/certification"
 	"github.com/unicitynetwork/bft-core/utbstore"
@@ -415,7 +416,7 @@ func cmdUCVerify(args []string) error {
 		} else if uc.UnicityTreeCertificate != nil {
 			partition = uc.UnicityTreeCertificate.Partition
 		}
-		if err := uc.Verify(e, crypto.SHA256, partition, shard, confHash); err != nil {
+		if err := uc.Verify(quorumweight.Checked(e), crypto.SHA256, partition, shard, confHash); err != nil {
 			return fmt.Errorf("certificate %d (epoch %d, seal round %d) does not verify under its epoch's committee: %w", i, epoch, round, err)
 		}
 		var signed uint64
