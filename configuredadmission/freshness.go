@@ -16,6 +16,7 @@ import (
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/frontierclient"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/frontierrequester"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/frontiertransport"
+	"github.com/unicitynetwork/bft-core/rootchain/consensus/votesig"
 	"github.com/unicitynetwork/bft-core/rootinput"
 	"github.com/unicitynetwork/bft-go-base/types"
 )
@@ -46,6 +47,8 @@ type Freshness struct {
 	Opener    frontiertransport.StreamOpener
 	TrustBase *types.RootTrustBaseV1
 	Logger    *slog.Logger
+	// Signing is the signing configuration of a root epoch, from the verified history: the wire form of the QCs the requester accepts. Nil is the legacy scheme.
+	Signing func(epoch uint64) (votesig.Config, error)
 
 	mu        sync.Mutex
 	guard     *bootstrapGuard
@@ -115,9 +118,15 @@ func (f *Freshness) start(ctx context.Context, c configuredprogress.Context, sto
 		return fail(err)
 	}
 	o := c.Observation
+	var signing votesig.Config
+	if f.Signing != nil {
+		if signing, err = f.Signing(o.RootEpoch); err != nil {
+			return fail(fmt.Errorf("signing configuration of root epoch %d: %w", o.RootEpoch, err))
+		}
+	}
 	r, err := frontierrequester.New(frontierrequester.Config{
 		Process: ctx,
-		Profile: frontierclient.Profile{TrustBase: f.TrustBase, NetworkID: o.NetworkID, PartitionID: o.PartitionID, ShardID: o.ShardID, FullShardConfHash: o.ShardConfHash, RootEpoch: o.RootEpoch, GenesisOriginIdentity: c.Origin.Identity().Bytes()},
+		Profile: frontierclient.Profile{TrustBase: f.TrustBase, NetworkID: o.NetworkID, PartitionID: o.PartitionID, ShardID: o.ShardID, FullShardConfHash: o.ShardConfHash, RootEpoch: o.RootEpoch, GenesisOriginIdentity: c.Origin.Identity().Bytes(), Signing: signing},
 		Peers:   peers, Opener: f.Opener, Admission: g,
 		Report: func(err error) {
 			if f.Logger == nil {

@@ -1263,6 +1263,9 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 		// store that already holds ordinary progress never needs one. The operator trust pin of
 		// `shard-node restore` (D-M2-1) is unchanged and independent of it.
 		freshness := &configuredadmission.Freshness{Opener: peer, TrustBase: trustBases[0], Logger: flags.observe.Logger()}
+		if q3rt != nil {
+			freshness.Signing = q3rt.Signing
+		}
 		coordinator := &configuredadmission.ExecutionRecovery{Freshness: freshness, Store: journalStore, Context: journalCtx, JournalLimits: limits, Executor: recoveryExecutor, Gate: node.FinalityGate(), Log: flags.observe.Logger(), Genesis: genesis, Limits: configuredadmission.DefaultRecoveryLimits()}
 		server, serverErr := shardnode.NewJournalServer(configuredadmission.JournalProvider{Store: journalStore, Context: journalCtx, Limits: limits}, shardnode.DefaultJournalTransportLimits())
 		if serverErr != nil {
