@@ -110,7 +110,11 @@ func NewFromState(hash crypto.Hash, block *abdrc.CommittedBlock, db PersistentSt
 	if err := pinProfile(db, profile); err != nil {
 		return nil, refusedBeforeWrite{err}
 	}
-	rootNode, err := NewRootBlock(block, hash, orchestration, profile)
+	local, err := trustedGenesis(db, hash, orchestration, profile)
+	if err != nil {
+		return nil, refusedBeforeWrite{err}
+	}
+	rootNode, err := newRootBlock(block, hash, orchestration, local, profile)
 	if err != nil {
 		// Nothing has been written: the first write is NewBlockTreeWithRootBlock below.
 		return nil, refusedBeforeWrite{fmt.Errorf("failed to create new root node: %w", err)}
@@ -351,7 +355,7 @@ func (x *BlockStore) ProcessQc(qc *rctypes.QuorumCert) ([]*certification.Certifi
 		return nil, nil
 	}
 	// If the QC commits a state committed block becomes the new root
-	ucs, err := x.blockTree.Commit(qc)
+	ucs, err := x.blockTree.Commit(qc, x.log)
 	if err != nil {
 		return nil, fmt.Errorf("committing new root block: %w", err)
 	}

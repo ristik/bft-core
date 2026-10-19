@@ -25,7 +25,7 @@ const ControlPartition types.PartitionID = 0xFFFFFFFF
 type BlockData struct {
 	_         struct{} `cbor:",toarray"`
 	Version   types.Version
-	Author    string   `json:"author"` // NodeID of the proposer
+	Author    string   `json:"author"` // NodeID of the proposer; not authenticated in a recovered state (see storage.ValidateRecoveryState)
 	Round     uint64   `json:"round"`  // Root round number
 	Epoch     uint64   `json:"epoch"`  // Root epoch to establish valid configuration
 	Timestamp uint64   `json:"timestamp"`

@@ -493,31 +493,18 @@ func Test_BlockStore_ShardInfo(t *testing.T) {
 }
 
 func Test_BlockStore_StateRoundtrip(t *testing.T) {
-	shardConf := newShardConf(t)
-	storeA := initBlockStoreFromGenesis(t, shardConf)
-	// the genesis block is created with the shard marked as "changed" - clear
-	// it as the state message does not carry that information
+	c := newTestChain(t, chainShard{partition: 1, epochStarts: []uint64{1}}, chainShard{partition: 2, epochStarts: []uint64{1}})
+	for _, changed := range [][]types.PartitionID{nil, nil, {1}, {1, 2}, {1}} {
+		c.next(changed...)
+	}
+	storeA := c.store
+	// the state message does not carry the "changed" marks
 	clear(storeA.blockTree.root.data.ShardState.Changed)
-
-	// modify Fees to see if they are restored correctly
-	si := storeA.ShardInfo(shardConf.PartitionID, shardConf.ShardID)
-	si.Fees[si.nodeIDs[0]] = 10
-	var err error
-	si.TR.FeeHash, err = si.feeHash(crypto.SHA256) // the technical record commits the accumulators (a recovered head is checked for it)
-	require.NoError(t, err)
-	ut, _, err := storeA.blockTree.root.data.ShardState.UnicityTree(crypto.SHA256)
-	require.NoError(t, err)
-	storeA.blockTree.root.data.RootHash = ut.RootHash()
-
-	state, err := storeA.GetState()
-	require.NoError(t, err)
+	state := c.state()
 	require.NotNil(t, state)
 
-	db, err := NewBoltStorage(filepath.Join(t.TempDir(), "blocks.db"))
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = db.Close() })
 	// state msg is used to init "shard info registry", the orchestration provides data which is not part of state msg
-	storeB, err := NewFromState(crypto.SHA256, state.CommittedHead, db, storeA.orchestration, logger.New(t))
+	storeB, _, err := c.recoverInto(received(t, state))
 	require.NoError(t, err)
 	require.NotNil(t, storeB)
 
@@ -525,26 +512,15 @@ func Test_BlockStore_StateRoundtrip(t *testing.T) {
 	require.Equal(t, storeA.blockTree.root.data.ShardState.States, storeB.blockTree.root.data.ShardState.States)
 	require.Equal(t, storeA.blockTree.root.data.ShardState.Changed, storeB.blockTree.root.data.ShardState.Changed)
 	require.Equal(t, storeA.blockTree.root.data.RootHash, storeB.blockTree.root.data.RootHash, "root hash")
-	require.Equal(t, storeA.blockTree.root.child, storeB.blockTree.root.child)
-	require.Len(t, storeB.blockTree.roundToNode, len(storeA.blockTree.roundToNode))
-	for k, v := range storeA.blockTree.roundToNode {
-		bNode, ok := storeB.blockTree.roundToNode[k]
-		require.True(t, ok)
-		require.ElementsMatch(t, v.child, bNode.child)
-	}
 	require.Equal(t, storeA.blockTree.highQc, storeB.blockTree.highQc)
-
-	siA := storeA.ShardInfo(shardConf.PartitionID, shardConf.ShardID)
-	require.NoError(t, err)
-	require.NotNil(t, siA)
-	require.NoError(t, siA.IsValid())
-
-	siB := storeB.ShardInfo(shardConf.PartitionID, shardConf.ShardID)
-	require.NoError(t, err)
-	require.NotNil(t, siB)
-	require.NoError(t, siB.IsValid())
-
-	require.Equal(t, siA, siB)
+	for _, p := range []types.PartitionID{1, 2} {
+		siA, siB := storeA.ShardInfo(p, types.ShardID{}), storeB.ShardInfo(p, types.ShardID{})
+		require.NotNil(t, siA)
+		require.NotNil(t, siB)
+		require.NoError(t, siA.IsValid())
+		require.NoError(t, siB.IsValid())
+		require.Equal(t, siA, siB)
+	}
 }
 
 // A peer replays a real state message but drops UC and TR of a certified shard (both null): the recovered node

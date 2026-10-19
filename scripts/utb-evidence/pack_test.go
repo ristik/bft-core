@@ -106,7 +106,7 @@ func buildPack(t *testing.T, ubft, tool string) string {
 	base := &certification.CertificationResponse{Partition: 9,
 		UC: types.UnicityCertificate{Version: 1, UnicityTreeCertificate: &types.UnicityTreeCertificate{Version: 1, Partition: 9}}}
 	require.NoError(t, base.SetTechnicalRecord(certification.TechnicalRecord{Round: 5, Epoch: 2, Leader: "1", StatHash: []byte{1}, FeeHash: []byte{2}}))
-	msg, err := types.Cbor.Marshal(certification.NewCertificationResponseV2(base, chain.Entries[:1]))
+	msg, err := types.Cbor.Marshal(certification.NewCertificationResponseV3(base, chain.Entries[:1]))
 	require.NoError(t, err)
 	put("ucresp/piggyback-sample.cbor", msg)
 

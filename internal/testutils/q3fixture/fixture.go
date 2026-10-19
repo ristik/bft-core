@@ -8,6 +8,8 @@ import (
 	"crypto"
 	"crypto/sha256"
 	"fmt"
+	"io"
+	"log/slog"
 	"maps"
 	"slices"
 	"sort"
@@ -341,7 +343,7 @@ func New(t *testing.T, o Options) *Fixture {
 	require.NoError(t, err)
 	// the old committee's certificates of the checkpoint: what the shard's last certified record becomes
 	oldBlock := &storage.ExecutedBlock{HashAlgo: crypto.SHA256, RootHash: tree.RootHash(), ShardState: states}
-	certificates, err := oldBlock.GenerateCertificates(qc)
+	certificates, err := oldBlock.GenerateCertificates(qc, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	require.NoError(t, err)
 	require.Len(t, certificates, 1)
 	shardInfo := abdrc.ShardInfo{Partition: PartitionID, Shard: types.ShardID{}, T2Timeout: state.T2Timeout, RootHash: state.RootHash,

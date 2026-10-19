@@ -1718,6 +1718,14 @@ func (x *ConsensusManager) onStateResponse(ctx context.Context, rsp *abdrc.State
 	slices.SortFunc(rsp.Pending, func(a, b *drctypes.BlockData) int {
 		return cmp.Compare(a.GetRound(), b.GetRound())
 	})
+	// the complete recovery is staged and validated in memory first: nothing is written, installed or advanced unless the head and every
+	// pending block are consistent with the QCs and with what executing them gives. A head with an epoch anchor is installed by its own
+	// path (NewFromAnchorState verifies the anchored successor), which is not staged.
+	if rsp.CommittedHead.Anchor == nil {
+		if err := x.validateRecoveryState(rsp); err != nil {
+			return fmt.Errorf("recovery state validation failed: %w", err)
+		}
+	}
 	recoveryWriteStarted := true
 	defer func() {
 		if recoveryWriteStarted && rErr != nil && x.frontier != nil {
@@ -1747,22 +1755,8 @@ func (x *ConsensusManager) onStateResponse(ctx context.Context, rsp *abdrc.State
 		return fmt.Errorf("recovery, new block store init failed: %w", err)
 	}
 	if x.params.NetworkProfileVersion == storage.ProfileHandoff {
-		if x.epochAnchor == nil {
-			if err := blockStore.ConfigureHandoffAuthority(x.trustBase.Load()); err != nil {
-				return fmt.Errorf("recovery handoff authority: %w", err)
-			}
-		} else if q3Activated(x.q3, x.epochAnchor) {
-			if err := configureV3Authority(blockStore, x.q3, x.trustBase.Load(), x.epochAnchor.Epoch); err != nil {
-				return fmt.Errorf("recovery handoff authority: %w", err)
-			}
-		} else {
-			prior, historyErr := x.recoveryHistory.ByEpoch(x.epochAnchor.Epoch)
-			if historyErr != nil {
-				return fmt.Errorf("recovery handoff authority lineage: %w", historyErr)
-			}
-			if err := blockStore.ConfigureHandoffV2Authority(x.trustBase.Load(), prior); err != nil {
-				return fmt.Errorf("recovery handoff authority: %w", err)
-			}
+		if err := x.configureRecoveryAuthority(blockStore); err != nil {
+			return err
 		}
 	}
 	// create new verifier; it executes the recovery blocks below, so it must already select the view-aware branch (a weighted EVM assignment has no unit
@@ -1846,21 +1840,19 @@ func (x *ConsensusManager) onStateResponse(ctx context.Context, rsp *abdrc.State
 		// Process QC first, update round
 		x.processQC(ctx, prop.Block.Qc)
 		x.processTC(ctx, prop.LastRoundTc)
-		var stateHash []byte
-		if block, err := x.blockStore.Block(prop.Block.Round); err != nil {
-			// Block not found, was not sent with recovery info
-			// execute proposed payload
-			if err = x.fetchWitnesses(ctx, x.blockStore, prop.Block); err == nil {
-				stateHash, err = x.blockStore.Add(prop.Block, x.irReqVerifier)
-			}
-			if err != nil {
-				// wait for timeout, if others make progress this node will need to recover
-				// cannot send vote, so just return and wait for local timeout or new proposal (and try to recover then)
+		// The last block of the recovered state (the tip) is not certified by the state message, so the state hash of a stored block is used only
+		// if it is the proposed block: Add compares the hashes of the complete blocks if the round exists, returns the stored root for the same
+		// block, executes the proposal if the round is not there, and fails otherwise. In case of failure the node does not vote (the vote state is
+		// not touched) and waits for the timeout or the next proposal, as the node cannot sign the proposal with a state it did not compute for it.
+		if _, berr := x.blockStore.Block(prop.Block.Round); berr != nil {
+			// not stored: the witnesses of its payload are fetched before it is executed
+			if err := x.fetchWitnesses(ctx, x.blockStore, prop.Block); err != nil {
 				return fmt.Errorf("recovery failed to execute proposal: %w", err)
 			}
-		} else {
-			// use the state hash from storage
-			stateHash = block.RootHash
+		}
+		stateHash, err := x.blockStore.Add(prop.Block, x.irReqVerifier)
+		if err != nil {
+			return fmt.Errorf("recovery failed to execute proposal: %w", err)
 		}
 		// send a vote message to next leader
 		voteMsg, err := x.safety.MakeVote(prop.Block, stateHash, x.blockStore.GetHighQc(), x.pacemaker.LastRoundTC())
@@ -2227,4 +2219,47 @@ func (x *ConsensusManager) utbSigningConfig() func(uint64) (votesig.Config, erro
 		return x.utbConfig
 	}
 	return x.trustBaseStore.SigningConfig
+}
+
+// validateRecoveryState stages the recovery in memory with the collaborators the real one installs (the handoff authority of the committee the
+// root runs in, the control services, the UTB binding without its durable retention): the head and every pending block must execute and be
+// certified as the state message says before anything is written.
+func (x *ConsensusManager) validateRecoveryState(rsp *abdrc.StateMsg) error {
+	return storage.ValidateRecoveryState(x.params.HashAlgorithm, rsp, x.recovery.ToRound(), x.orchestration, x.blockStore.GetDB(),
+		func(bs *storage.BlockStore) (storage.IRChangeReqVerifier, error) {
+			if x.params.NetworkProfileVersion == storage.ProfileHandoff {
+				if err := x.configureRecoveryAuthority(bs); err != nil {
+					return nil, err
+				}
+			}
+			bs.SetPosServices(x.blockStore.PosServices())
+			if x.utbPrevious != nil {
+				bs.SetUTBBinding(utbBindingFor(x.utbSigningConfig(), bs, x.utbPrevious))
+			}
+			return x.recoveryVerifier(bs)
+		}, x.log, x.params.NetworkProfileVersion)
+}
+
+// configureRecoveryAuthority gives the replacement (or staged) store the handoff authority of the committee the root runs in.
+func (x *ConsensusManager) configureRecoveryAuthority(blockStore *storage.BlockStore) error {
+	if x.epochAnchor == nil {
+		if err := blockStore.ConfigureHandoffAuthority(x.trustBase.Load()); err != nil {
+			return fmt.Errorf("recovery handoff authority: %w", err)
+		}
+		return nil
+	}
+	if q3Activated(x.q3, x.epochAnchor) {
+		if err := configureV3Authority(blockStore, x.q3, x.trustBase.Load(), x.epochAnchor.Epoch); err != nil {
+			return fmt.Errorf("recovery handoff authority: %w", err)
+		}
+		return nil
+	}
+	prior, historyErr := x.recoveryHistory.ByEpoch(x.epochAnchor.Epoch)
+	if historyErr != nil {
+		return fmt.Errorf("recovery handoff authority lineage: %w", historyErr)
+	}
+	if err := blockStore.ConfigureHandoffV2Authority(x.trustBase.Load(), prior); err != nil {
+		return fmt.Errorf("recovery handoff authority: %w", err)
+	}
+	return nil
 }

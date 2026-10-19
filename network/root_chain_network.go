@@ -12,9 +12,12 @@ const (
 	ProtocolHandshake           = "/ab/handshake/0.0.1"
 	ProtocolBlockCertification  = "/ab/block-certification/0.0.1"
 	ProtocolUnicityCertificates = "/ab/certificates/0.0.1"
-	// ProtocolUnicityCertificatesV2 carries certification.CertificationResponseV2: the response plus the signed trust-base entries a deployment publishes.
-	// It is a separate protocol, so the presence of the entries is announced by the protocol and the explicit version, never by an array length.
+	// ProtocolUnicityCertificatesV2 carries certification.CertificationResponseV2.
 	ProtocolUnicityCertificatesV2 = "/ab/certificates/0.0.2"
+	// ProtocolUnicityCertificatesV3 carries certification.CertificationResponseV3: the response, the optional partition view and the signed trust-base
+	// entries a deployment publishes. It is a separate protocol and an explicit version, so no consumer ever infers the format from an array length. A
+	// deployment that publishes entries sends only this one to its UTB peers (no silent fallback to a format that would lose the entries or the status).
+	ProtocolUnicityCertificatesV3 = "/ab/certificates/0.0.3"
 )
 
 /*
@@ -28,7 +31,7 @@ func NewLibP2PRootChainNetwork(self *Peer, capacity uint, sendCertificateTimeout
 
 	sendProtocolDescriptions := []SendProtocolDescription{
 		{ProtocolID: ProtocolUnicityCertificates, Timeout: sendCertificateTimeout, MsgType: certification.CertificationResponse{}},
-		{ProtocolID: ProtocolUnicityCertificatesV2, Timeout: sendCertificateTimeout, MsgType: certification.CertificationResponseV2{}},
+		{ProtocolID: ProtocolUnicityCertificatesV3, Timeout: sendCertificateTimeout, MsgType: certification.CertificationResponseV3{}},
 	}
 	if err = n.RegisterSendProtocols(sendProtocolDescriptions); err != nil {
 		return nil, fmt.Errorf("registering send protocols: %w", err)
