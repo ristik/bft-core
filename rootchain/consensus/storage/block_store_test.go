@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"context"
 	"crypto"
 	"errors"
 	"fmt"
@@ -11,6 +12,10 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/unicitynetwork/bft-go-base/types"
+
+	"github.com/unicitynetwork/bft-core/evmroot"
+	"github.com/unicitynetwork/bft-core/network/protocol/abdrc"
+	"github.com/unicitynetwork/bft-core/rootrecords"
 
 	"github.com/unicitynetwork/bft-core/internal/testutils/logger"
 	rctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
@@ -532,4 +537,109 @@ func roundsOf(blocks []*ExecutedBlock) []uint64 {
 		rounds = append(rounds, b.GetRound())
 	}
 	return rounds
+}
+
+// A root that recovers from a state message has missed the records committed meanwhile. The head commits the log it ends with; the
+// next commit that carries a record finds a gap unless the log was completed first (bft-core#644).
+func Test_BlockStore_StateRecoveryCompletesTheCommittedSourceLog(t *testing.T) {
+	recs := chainOf(3)
+	head := func(t *testing.T) *abdrc.CommittedBlock {
+		storeA := profileStore(t)
+		clear(storeA.blockTree.root.data.ShardState.Changed)
+		storeA.blockTree.root.data.ShardState.Control.Pos = stateOver(recs).Bytes()
+		ut, _, err := storeA.blockTree.root.data.ShardState.UnicityTree(crypto.SHA256)
+		require.NoError(t, err)
+		storeA.blockTree.root.data.RootHash = ut.RootHash()
+		storeA.blockTree.root.data.CommitQc.LedgerCommitInfo.Hash = ut.RootHash()
+		state, err := storeA.GetState()
+		require.NoError(t, err)
+		return state.CommittedHead
+	}
+	next := func() []rootrecords.Record {
+		r := rootrecords.Record{Index: 3, Predecessor: recs[2].ID, Kind: rootrecords.KindSessionClosed, Progress: 99, UCTime: 99, Data: make([]byte, 32)}
+		r.ID = rootrecords.RecordID(r.Index, r.Predecessor, r.Kind, r.Progress, r.UCTime, r.Data)
+		return []rootrecords.Record{r}
+	}
+	// the recovering root retained one record of the three the head commits
+	recovering := func(t *testing.T, fetcher RecordFetcher) (*BlockStore, BoltDB) {
+		db, err := NewBoltStorage(filepath.Join(t.TempDir(), "blocks.db"))
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = db.Close() })
+		require.NoError(t, db.AppendRecords(recs[:1]))
+		old := profileStore(t)
+		old.storage, old.prefixSource = db, fetcher
+		return old, db
+	}
+
+	t.Run("without the prefix the first record past the head finds a gap", func(t *testing.T) {
+		old, db := recovering(t, nil)
+		_, err := NewFromState(crypto.SHA256, head(t), db, old.orchestration, logger.New(t), ProfileHandoff)
+		require.NoError(t, err)
+		require.ErrorIs(t, db.AppendRecords(next()), ErrRecordLog)
+	})
+	t.Run("with the prefix completed before the head is installed it extends the log", func(t *testing.T) {
+		old, db := recovering(t, &sliceFetcher{recs: recs})
+		h := head(t)
+		require.NoError(t, old.EnsureRecordPrefix(h))
+		_, err := NewFromState(crypto.SHA256, h, db, old.orchestration, logger.New(t), ProfileHandoff)
+		require.NoError(t, err)
+		require.NoError(t, db.AppendRecords(next()))
+		n, err := db.RecordCount()
+		require.NoError(t, err)
+		require.EqualValues(t, 4, n)
+	})
+	t.Run("a log that cannot be completed is a refusal that writes nothing", func(t *testing.T) {
+		defer func(d, b time.Duration) { prefixTimeout, prefixBackoff = d, b }(prefixTimeout, prefixBackoff)
+		prefixTimeout, prefixBackoff = 50*time.Millisecond, time.Millisecond
+		old, db := recovering(t, &sliceFetcher{err: errors.New("no root serves the feed")})
+		require.ErrorIs(t, old.EnsureRecordPrefix(head(t)), ErrRecordPrefixMissing)
+		n, err := db.RecordCount()
+		require.NoError(t, err)
+		require.EqualValues(t, 1, n)
+	})
+}
+
+// The roots restart together: a fetch that finds no serving peer is repeated until one answers, within the bound (bft-core#638).
+func TestPrefixFetchRepeatsWhileNoPeerServes(t *testing.T) {
+	defer func(d, b time.Duration) { prefixTimeout, prefixBackoff = d, b }(prefixTimeout, prefixBackoff)
+	prefixTimeout, prefixBackoff = 5*time.Second, time.Millisecond
+	recs := chainOf(10)
+	control := &evmroot.ControlState{Pos: stateOver(recs).Bytes()}
+	db := newBolt(t)
+	f := &flakyFetcher{sliceFetcher: sliceFetcher{recs: recs}, failures: 3}
+	s := &BlockStore{storage: db, prefixSource: f}
+	require.NoError(t, s.ensureRetainedPrefix(control))
+	require.Equal(t, 4, f.calls, "three misses, then the page")
+	n, err := db.RecordCount()
+	require.NoError(t, err)
+	require.EqualValues(t, 10, n)
+
+	// a source that never serves ends at the bound with the sentinel, and nothing is retained
+	prefixTimeout = 30 * time.Millisecond
+	db = newBolt(t)
+	s = &BlockStore{storage: db, prefixSource: &flakyFetcher{sliceFetcher: sliceFetcher{recs: recs}, failures: 1 << 30}}
+	err = s.ensureRetainedPrefix(control)
+	require.ErrorIs(t, err, ErrRecordPrefixMissing)
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	n, _ = db.RecordCount()
+	require.Zero(t, n)
+
+	// a source that answers with nothing is waited on in the same way
+	db = newBolt(t)
+	s = &BlockStore{storage: db, prefixSource: &sliceFetcher{}}
+	require.ErrorIs(t, s.ensureRetainedPrefix(control), ErrRecordPrefixMissing)
+}
+
+// flakyFetcher fails its first `failures` calls with the error of a peer that is not up yet, then serves.
+type flakyFetcher struct {
+	sliceFetcher
+	failures int
+}
+
+func (f *flakyFetcher) Records(ctx context.Context, from uint64, max int) ([]rootrecords.Record, error) {
+	if f.calls < f.failures {
+		f.calls++
+		return nil, errors.New("dial: connection refused")
+	}
+	return f.sliceFetcher.Records(ctx, from, max)
 }

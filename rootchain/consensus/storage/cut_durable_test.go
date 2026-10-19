@@ -5,6 +5,7 @@ import (
 	"crypto"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -180,6 +181,8 @@ func TestInstallRequiresTheRetainedPrefixTheCheckpointCommits(t *testing.T) {
 		require.EqualValues(t, 120, n)
 	})
 	t.Run("an unavailable source is a refusal", func(t *testing.T) {
+		defer func(d, b time.Duration) { prefixTimeout, prefixBackoff = d, b }(prefixTimeout, prefixBackoff)
+		prefixTimeout, prefixBackoff = 50*time.Millisecond, time.Millisecond
 		s, _ := newStore(t, &sliceFetcher{err: errors.New("down")}, nil)
 		require.ErrorIs(t, s.ensureRetainedPrefix(control(state)), ErrRecordPrefixMissing)
 	})
