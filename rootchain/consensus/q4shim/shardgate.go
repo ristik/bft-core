@@ -133,6 +133,8 @@ func describeShard(msg any) (shardMsg, bool) {
 			d.round = v.UC.InputRecord.RoundNumber
 		}
 		return d, true
+	case *certification.CertificationResponseV3:
+		return describeShard(&v.Response) // the combined response is a response, with its entries and view
 	}
 	return shardMsg{}, false
 }
@@ -207,6 +209,37 @@ func (g *ShardGate) Send(ctx context.Context, msg any, receivers ...peer.ID) err
 			continue
 		}
 		if err := g.inner.Send(ctx, msg, to); err != nil && first == nil {
+			first = err
+		}
+	}
+	return first
+}
+
+// certificationSender is what an inner network offers to send a response in the best format each receiver supports.
+type certificationSender interface {
+	SendCertificationResponse(ctx context.Context, cr *certification.CertificationResponse, receivers ...peer.ID) error
+}
+
+// SendCertificationResponse is Send for a response sent in the best format each receiver supports: the same rules apply, and what passes goes to
+// the inner network's own certification send (the plain Send when it has none).
+func (g *ShardGate) SendCertificationResponse(ctx context.Context, cr *certification.CertificationResponse, receivers ...peer.ID) error {
+	cs, ok := g.inner.(certificationSender)
+	if !ok {
+		return g.Send(ctx, cr, receivers...)
+	}
+	d, _ := describeShard(cr)
+	var first error
+	for _, to := range receivers {
+		g.mu.Lock()
+		action := Pass
+		if !g.closed {
+			action = g.decide(Out, cr, to, d, to.String())
+		}
+		g.mu.Unlock()
+		if action != Pass {
+			continue
+		}
+		if err := cs.SendCertificationResponse(ctx, cr, to); err != nil && first == nil {
 			first = err
 		}
 	}

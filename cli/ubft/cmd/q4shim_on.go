@@ -16,6 +16,7 @@ import (
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/unicitynetwork/bft-go-base/crypto"
 
+	"github.com/unicitynetwork/bft-core/rootchain"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/q4shim"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/votesig"
@@ -70,7 +71,7 @@ func wrapRootNet(ctx context.Context, net consensus.RootNet, self peer.ID, signe
 
 // wrapPartitionNet puts the Q4 shard gate (q4shim.ShardGate) between the root node and its partition network: shard-control.json in the
 // shim directory steers it, shard-status.json and shard-trace.jsonl report it. Test and lane binaries only (-tags q4shim).
-func wrapPartitionNet(ctx context.Context, net q4shim.Inner, self peer.ID, log *slog.Logger) (q4shim.Inner, func(), error) {
+func wrapPartitionNet(ctx context.Context, net rootchain.PartitionNet, self peer.ID, log *slog.Logger) (rootchain.PartitionNet, func(), error) {
 	dir := os.Getenv(q4ShimDirEnv)
 	if dir == "" {
 		return nil, nil, fmt.Errorf("q4shim build: %s is not set", q4ShimDirEnv)
