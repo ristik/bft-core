@@ -59,7 +59,7 @@ func FromWeightSet(network, epoch, epochStart uint64, ws evmroot.WeightSet, thre
 		ms[i] = Member{NodeID: m.NodeID, Key: bytes.Clone(m.ConsensusKey), Weight: m.Weight}
 	}
 	return SuccessorFacts{Network: network, Epoch: epoch, EpochStart: epochStart, Members: ms, Threshold: threshold,
-		StateHash: bytes.Clone(stateSummary), ChangeRecordHash: bytes.Clone(changeRecordHash)}
+		StateHash: canonicalHash(stateSummary), ChangeRecordHash: canonicalHash(changeRecordHash)}
 }
 
 // FromBodyV2 adapts a V2 handoff body and the committed record's actual activation round.
@@ -75,7 +75,7 @@ func FromProjection(tb *types.RootTrustBaseV1) SuccessorFacts {
 		ms[i] = Member{NodeID: n.NodeID, Key: bytes.Clone(n.SigKey), Weight: n.Stake}
 	}
 	return SuccessorFacts{Network: uint64(tb.NetworkID), Epoch: tb.Epoch, EpochStart: tb.EpochStart, Members: ms, Threshold: tb.QuorumThreshold,
-		StateHash: bytes.Clone(tb.StateHash), ChangeRecordHash: bytes.Clone(tb.ChangeRecordHash)}
+		StateHash: canonicalHash(tb.StateHash), ChangeRecordHash: canonicalHash(tb.ChangeRecordHash)}
 }
 
 // BuildUnsigned returns the entry for f extending prev, without signatures: epoch prev+1, a strictly later start, PreviousEntryID =
@@ -127,7 +127,7 @@ func BuildUnsigned(prev *types.RootTrustBaseV2, f SuccessorFacts) (*types.RootTr
 		return nil, fmt.Errorf("%w: threshold %d, expected %d for total weight %d", ErrFacts, f.Threshold, want, total)
 	}
 	e := &types.RootTrustBaseV2{Version: types.TrustBaseV2Version, NetworkID: types.NetworkID(f.Network), Epoch: f.Epoch, EpochStart: f.EpochStart,
-		RootNodes: nodes, QuorumThreshold: f.Threshold, StateHash: bytes.Clone(f.StateHash), ChangeRecordHash: bytes.Clone(f.ChangeRecordHash), PreviousEntryID: prevID}
+		RootNodes: nodes, QuorumThreshold: f.Threshold, StateHash: canonicalHash(f.StateHash), ChangeRecordHash: canonicalHash(f.ChangeRecordHash), PreviousEntryID: prevID}
 	if err := utbentry.ValidateShape(e); err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrFacts, err)
 	}
@@ -151,4 +151,13 @@ func Projection(e *types.RootTrustBaseV2) (*types.RootTrustBaseV1, error) {
 	}
 	tb.StateHash, tb.ChangeRecordHash = bytes.Clone(e.StateHash), bytes.Clone(e.ChangeRecordHash)
 	return tb, nil
+}
+
+// canonicalHash is the canonical form of an optional hash of a V2 entry: absent is nil (CBOR null), present is a copy. An empty byte string is
+// the same absence, never a second encoding of it, so every builder yields the one encoding (and EntryID) of a fact.
+func canonicalHash(b []byte) []byte {
+	if len(b) == 0 {
+		return nil
+	}
+	return bytes.Clone(b)
 }

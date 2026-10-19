@@ -61,14 +61,15 @@ type Shard struct {
 
 // Producer holds the evolving root chain state.
 type Producer struct {
-	cfg    Config
-	shards []Shard // canonical order
-	other  *types.PartitionDescriptionRecord
-	tb     *types.RootTrustBaseV1
-	roots  []abcrypto.Signer
-	cur    *storage.ExecutedBlock
-	seal   *types.UnicitySeal
-	orc    orchestration
+	cfg        Config
+	shards     []Shard // canonical order
+	other      *types.PartitionDescriptionRecord
+	tb         *types.RootTrustBaseV1
+	roots      []abcrypto.Signer
+	valSigners []abcrypto.Signer // the shard validators: the requests of a block are signed by validator-0
+	cur        *storage.ExecutedBlock
+	seal       *types.UnicitySeal
+	orc        orchestration
 }
 
 // New creates the producer and its genesis state (round 1): every shard has its
@@ -122,6 +123,7 @@ func New(cfg Config) (*Producer, error) {
 			return nil, err
 		}
 		validators = append(validators, &types.NodeInfo{NodeID: fmt.Sprintf("validator-%d", i), SigKey: key, Stake: 1})
+		p.valSigners = append(p.valSigners, s)
 	}
 	mk := func(partition types.PartitionID, id types.ShardID) (*types.PartitionDescriptionRecord, error) {
 		return &types.PartitionDescriptionRecord{
@@ -292,9 +294,12 @@ func (p *Producer) Next(spec BlockSpec) (*Block, error) {
 				ir.BlockHash = h[:]
 			}
 			req.CertReason = rctypes.Quorum
-			req.Requests = []*certification.BlockCertificationRequest{{
-				PartitionID: p.cfg.Partition, ShardID: sh.ID, NodeID: "validator-0", InputRecord: ir,
-			}}
+			// the executor admits a request only from a member of the shard's active configuration, by its signature
+			signed := &certification.BlockCertificationRequest{PartitionID: p.cfg.Partition, ShardID: sh.ID, NodeID: "validator-0", InputRecord: ir}
+			if err := signed.Sign(p.valSigners[0]); err != nil {
+				return nil, fmt.Errorf("signing the request: %w", err)
+			}
+			req.Requests = []*certification.BlockCertificationRequest{signed}
 		}
 		payload.Requests = append(payload.Requests, req)
 	}

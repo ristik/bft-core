@@ -201,3 +201,16 @@ func TestProjectionCarriesKeysAndWeightsButNotTheLineage(t *testing.T) {
 func TestMemberLimitIsTheDeploymentsValidatorLimit(t *testing.T) {
 	require.Equal(t, evmassign.MaxValidators, utb.MaxMembers)
 }
+
+// An empty optional hash and an absent one are the same fact: every builder yields nil, so one entry has one encoding and one EntryID.
+func TestOptionalHashesAreCanonicalNilWhenEmpty(t *testing.T) {
+	for _, empty := range [][]byte{nil, {}} {
+		f := utb.FromWeightSet(1, 2, 10, nil, 1, empty, empty)
+		require.Nil(t, f.StateHash)
+		require.Nil(t, f.ChangeRecordHash)
+	}
+	f := utb.FromProjection(&types.RootTrustBaseV1{StateHash: []byte{}, ChangeRecordHash: []byte{}})
+	require.Nil(t, f.StateHash)
+	require.Nil(t, f.ChangeRecordHash)
+	require.Equal(t, []byte{1, 2}, utb.FromWeightSet(1, 2, 10, nil, 1, []byte{1, 2}, nil).StateHash)
+}
