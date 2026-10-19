@@ -270,6 +270,12 @@ func Test_BlockStore_StateRoundtrip(t *testing.T) {
 	// modify Fees to see if they are restored correctly
 	si := storeA.ShardInfo(shardConf.PartitionID, shardConf.ShardID)
 	si.Fees[si.nodeIDs[0]] = 10
+	var err error
+	si.TR.FeeHash, err = si.feeHash(crypto.SHA256) // the technical record commits the accumulators (a recovered head is checked for it)
+	require.NoError(t, err)
+	ut, _, err := storeA.blockTree.root.data.ShardState.UnicityTree(crypto.SHA256)
+	require.NoError(t, err)
+	storeA.blockTree.root.data.RootHash = ut.RootHash()
 
 	state, err := storeA.GetState()
 	require.NoError(t, err)

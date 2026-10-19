@@ -59,7 +59,7 @@ func TestHandoffProfileSkipsControlPartitionTimeout(t *testing.T) {
 		t.Fatal("control shard was scheduled")
 		return nil
 	}}
-	generator, err := NewLucBasedT2TimeoutGenerator(&Parameters{NetworkProfileVersion: 2, BlockRate: time.Second}, state)
+	generator, err := NewLucBasedT2TimeoutGenerator(&Parameters{NetworkProfileVersion: storage.ProfileHandoff, BlockRate: time.Second}, state)
 	require.NoError(t, err)
 	timedOut, err := generator.GetT2Timeouts(100)
 	require.NoError(t, err)
@@ -67,7 +67,7 @@ func TestHandoffProfileSkipsControlPartitionTimeout(t *testing.T) {
 }
 
 func TestProfile2VerifierRefusesControlPartition(t *testing.T) {
-	verifier := &IRChangeReqVerifier{params: &Parameters{NetworkProfileVersion: 2}, state: &MockState{
+	verifier := &IRChangeReqVerifier{params: &Parameters{NetworkProfileVersion: storage.ProfileHandoff}, state: &MockState{
 		shardInfo: func(types.PartitionID, types.ShardID) *storage.ShardInfo {
 			t.Fatal("reserved partition reached shard state")
 			return nil

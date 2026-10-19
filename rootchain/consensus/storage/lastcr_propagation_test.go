@@ -55,7 +55,7 @@ func committedRepeatUCScenario(t *testing.T, withSibling bool) {
 	add := func(round, parent uint64, reqs ...*rctypes.IRChangeReq) *ExecutedBlock {
 		t.Helper()
 		p := mustBlock(t, s, parent)
-		_, err := s.Add(&rctypes.BlockData{Version: 2, Round: round, Epoch: 2, Timestamp: 1_000 + round, Payload: &rctypes.Payload{Version: 2, Requests: reqs},
+		_, err := s.Add(&rctypes.BlockData{Version: 3, Round: round, Epoch: 2, Timestamp: 1_000 + round, Payload: &rctypes.Payload{Version: 3, Requests: reqs},
 			Qc: &rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{RoundNumber: parent, Epoch: 2, CurrentRootHash: p.RootHash}}}, verifier)
 		require.NoError(t, err)
 		return mustBlock(t, s, round)

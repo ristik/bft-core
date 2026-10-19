@@ -114,7 +114,7 @@ function start_root_nodes() {
 
     local profileArgs=()
     if [ "${M2_PROFILE2:-0}" = 1 ]; then
-      profileArgs=(--profile-2)
+      profileArgs=(--profile-3)
       if [ "${Q3_B1:-0}" = 1 ]; then
         # Q3 #50: the coupled runtime from genesis, and the PoA genesis committee's identity records the first coupled handoff names as K
         if [ "${P85_LANE:-0}" = 1 ]; then

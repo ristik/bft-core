@@ -51,7 +51,7 @@ func TestIrReqBuffer_AddNil(t *testing.T) {
 }
 
 func TestProfile2BufferRefusesControlPartition(t *testing.T) {
-	buffer := NewIrReqBuffer(logger.New(t), 2)
+	buffer := NewIrReqBuffer(logger.New(t), storage.ProfileHandoff)
 	req := &drctypes.IRChangeReq{Partition: drctypes.ControlPartition, CertReason: drctypes.Quorum,
 		Requests: []*certification.BlockCertificationRequest{{InputRecord: inputRecord1}}}
 	require.ErrorIs(t, buffer.Add(3, req, NewAlwaysTrueIRReqVerifier()), drctypes.ErrControlPartition)

@@ -140,7 +140,7 @@ func TestAbortBlockRejectedAfterCertifiedH(t *testing.T) {
 
 	abort := f.record("abort", 5, 0)
 	companion := f.abortCompanion(t, abort, "old-a", "old-b", "old-c")
-	block := &rctypes.BlockData{Version: 2, Round: 5, Epoch: 1, Payload: &rctypes.Payload{Version: 2,
+	block := &rctypes.BlockData{Version: 3, Round: 5, Epoch: 1, Payload: &rctypes.Payload{Version: 3,
 		HandoffRecords: [][]byte{abort.Bytes(), companion}}}
 	_, err := applyHandoffRecord(committed.ShardState.Control, block.Payload.HandoffRecords[0], 5, 1, block.Round,
 		f.store.handoffAuth, block.Payload.HandoffRecords[1])
@@ -212,7 +212,7 @@ func TestHandoffAuthorizationRejectsUnauthorizedCommit(t *testing.T) {
 		freeze := f.record("freeze", 3, 0)
 		parent, err := f.store.Block(2)
 		require.NoError(t, err)
-		block := &rctypes.BlockData{Version: 2, Round: 3, Epoch: 1, Payload: &rctypes.Payload{Version: 2,
+		block := &rctypes.BlockData{Version: 3, Round: 3, Epoch: 1, Payload: &rctypes.Payload{Version: 3,
 			HandoffRecords: [][]byte{freeze.Bytes(), f.companion(t, freeze, "old-a")}},
 			Qc: &rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{RoundNumber: 2, Epoch: 1, CurrentRootHash: parent.RootHash}}}
 		_, err = f.store.Add(block, nil)
@@ -225,7 +225,7 @@ func TestHandoffAuthorizationRejectsUnauthorizedCommit(t *testing.T) {
 		freeze := f.record("freeze", 3, 0)
 		parent, err := f.store.Block(2)
 		require.NoError(t, err)
-		block := &rctypes.BlockData{Version: 2, Round: 3, Epoch: 1, Payload: &rctypes.Payload{Version: 2,
+		block := &rctypes.BlockData{Version: 3, Round: 3, Epoch: 1, Payload: &rctypes.Payload{Version: 3,
 			HandoffRecords: [][]byte{freeze.Bytes(), f.companion(t, freeze, "old-a", "old-b", "old-c")}},
 			Qc: &rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{RoundNumber: 2, Epoch: 1, CurrentRootHash: parent.RootHash}}}
 		_, err = f.store.Add(block, nil)
@@ -239,7 +239,7 @@ func TestHandoffAuthorizationRejectsUnauthorizedCommit(t *testing.T) {
 		freeze := f.record("freeze", 3, 0)
 		parent, err := f.store.Block(2)
 		require.NoError(t, err)
-		block := &rctypes.BlockData{Version: 2, Round: 3, Epoch: 1, Payload: &rctypes.Payload{Version: 2,
+		block := &rctypes.BlockData{Version: 3, Round: 3, Epoch: 1, Payload: &rctypes.Payload{Version: 3,
 			HandoffRecords: [][]byte{freeze.Bytes(), f.companion(t, freeze, "old-a", "old-b", "old-c")}},
 			Qc: &rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{RoundNumber: 2, Epoch: 1, CurrentRootHash: parent.RootHash}}}
 		_, err = f.store.Add(block, nil)
@@ -252,7 +252,7 @@ func TestHandoffAuthorizationRejectsUnauthorizedCommit(t *testing.T) {
 		freeze := f.record("freeze", 3, 0)
 		parent, err := f.store.Block(2)
 		require.NoError(t, err)
-		block := &rctypes.BlockData{Version: 2, Round: 3, Epoch: 1, Payload: &rctypes.Payload{Version: 2,
+		block := &rctypes.BlockData{Version: 3, Round: 3, Epoch: 1, Payload: &rctypes.Payload{Version: 3,
 			HandoffRecords: [][]byte{freeze.Bytes(), f.companion(t, freeze, "old-a", "old-b", "old-c")}},
 			Qc: &rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{RoundNumber: 2, Epoch: 1, CurrentRootHash: parent.RootHash}}}
 		_, err = f.store.Add(block, nil)
@@ -269,7 +269,7 @@ func TestHandoffAuthorizationRejectsUnauthorizedCommit(t *testing.T) {
 		require.NoError(t, err)
 		parent, err := f.store.Block(2)
 		require.NoError(t, err)
-		block := &rctypes.BlockData{Version: 2, Round: 3, Epoch: 1, Payload: &rctypes.Payload{Version: 2,
+		block := &rctypes.BlockData{Version: 3, Round: 3, Epoch: 1, Payload: &rctypes.Payload{Version: 3,
 			HandoffRecords: [][]byte{freeze.Bytes(), bad}},
 			Qc: &rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{RoundNumber: 2, Epoch: 1, CurrentRootHash: parent.RootHash}}}
 		_, err = f.store.Add(block, nil)
@@ -297,7 +297,7 @@ func TestHandoffAuthorizationRejectsUnauthorizedCommit(t *testing.T) {
 			addProfileBlock(t, f.store, 2, [][]byte{prepare.Bytes()})
 			parent, err := f.store.Block(2)
 			require.NoError(t, err)
-			block := &rctypes.BlockData{Version: 2, Round: 3, Epoch: 1, Payload: &rctypes.Payload{Version: 2,
+			block := &rctypes.BlockData{Version: 3, Round: 3, Epoch: 1, Payload: &rctypes.Payload{Version: 3,
 				HandoffRecords: [][]byte{freeze.Bytes(), f.companion(t, freeze, "old-a", "old-b", "old-c")}},
 				Qc: &rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{RoundNumber: 2, Epoch: 1, CurrentRootHash: parent.RootHash}}}
 			_, err = f.store.Add(block, nil)
@@ -310,7 +310,7 @@ func TestHandoffAuthorizationRejectsUnauthorizedCommit(t *testing.T) {
 		prepare.PredecessorBodyID[0] ^= 1
 		parent, err := f.store.Block(1)
 		require.NoError(t, err)
-		block := &rctypes.BlockData{Version: 2, Round: 2, Epoch: 1, Payload: &rctypes.Payload{Version: 2,
+		block := &rctypes.BlockData{Version: 3, Round: 2, Epoch: 1, Payload: &rctypes.Payload{Version: 3,
 			HandoffRecords: [][]byte{prepare.Bytes()}},
 			Qc: &rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{RoundNumber: 1, Epoch: 1, CurrentRootHash: parent.RootHash}}}
 		_, err = f.store.Add(block, nil)
@@ -332,8 +332,8 @@ func TestHandoffAuthorizationRejectsUnauthorizedCommit(t *testing.T) {
 		require.NoError(t, err)
 		wrongAbort := f.record("abort", 3, 0)
 		wrongAbort.NextBodyID[0] ^= 1
-		invalidAbort := &rctypes.BlockData{Version: 2, Round: 3, Epoch: 1,
-			Payload: &rctypes.Payload{Version: 2, HandoffRecords: [][]byte{wrongAbort.Bytes()}},
+		invalidAbort := &rctypes.BlockData{Version: 3, Round: 3, Epoch: 1,
+			Payload: &rctypes.Payload{Version: 3, HandoffRecords: [][]byte{wrongAbort.Bytes()}},
 			Qc:      &rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{RoundNumber: 2, Epoch: 1, CurrentRootHash: beforeAbort.RootHash}}}
 		_, err = f.store.Add(invalidAbort, nil)
 		require.ErrorIs(t, err, ErrHandoffRecord)
@@ -341,8 +341,8 @@ func TestHandoffAuthorizationRejectsUnauthorizedCommit(t *testing.T) {
 		addProfileBlock(t, f.store, 3, [][]byte{abort.Bytes(), f.abortCompanion(t, abort, "old-a", "old-b", "old-c")})
 		parent, err := f.store.Block(3)
 		require.NoError(t, err)
-		skipped := &rctypes.BlockData{Version: 2, Round: 4, Epoch: 1,
-			Payload: &rctypes.Payload{Version: 2, HandoffRecords: [][]byte{f.record("prepare", 4, 2).Bytes()}},
+		skipped := &rctypes.BlockData{Version: 3, Round: 4, Epoch: 1,
+			Payload: &rctypes.Payload{Version: 3, HandoffRecords: [][]byte{f.record("prepare", 4, 2).Bytes()}},
 			Qc:      &rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{RoundNumber: 3, Epoch: 1, CurrentRootHash: parent.RootHash}}}
 		_, err = f.store.Add(skipped, nil)
 		require.ErrorIs(t, err, ErrHandoffRecord)
@@ -356,8 +356,8 @@ func TestHandoffAuthorizationRejectsUnauthorizedCommit(t *testing.T) {
 		abort := f.record("abort", 3, 0)
 		parent, err := f.store.Block(2)
 		require.NoError(t, err)
-		block := &rctypes.BlockData{Version: 2, Round: 3, Epoch: 1,
-			Payload: &rctypes.Payload{Version: 2, HandoffRecords: [][]byte{abort.Bytes(), f.abortCompanion(t, abort, "old-a")}},
+		block := &rctypes.BlockData{Version: 3, Round: 3, Epoch: 1,
+			Payload: &rctypes.Payload{Version: 3, HandoffRecords: [][]byte{abort.Bytes(), f.abortCompanion(t, abort, "old-a")}},
 			Qc:      &rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{RoundNumber: 2, Epoch: 1, CurrentRootHash: parent.RootHash}}}
 		_, err = f.store.Add(block, nil)
 		require.ErrorIs(t, err, ErrHandoffRecord)
@@ -370,8 +370,8 @@ func TestHandoffAuthorizationRejectsUnauthorizedCommit(t *testing.T) {
 		wrongAttempt.Attempt++
 		parent, err := f.store.Block(2)
 		require.NoError(t, err)
-		block := &rctypes.BlockData{Version: 2, Round: 3, Epoch: 1,
-			Payload: &rctypes.Payload{Version: 2, HandoffRecords: [][]byte{abort.Bytes(), f.abortCompanion(t, wrongAttempt, "old-a", "old-b", "old-c")}},
+		block := &rctypes.BlockData{Version: 3, Round: 3, Epoch: 1,
+			Payload: &rctypes.Payload{Version: 3, HandoffRecords: [][]byte{abort.Bytes(), f.abortCompanion(t, wrongAttempt, "old-a", "old-b", "old-c")}},
 			Qc:      &rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{RoundNumber: 2, Epoch: 1, CurrentRootHash: parent.RootHash}}}
 		_, err = f.store.Add(block, nil)
 		require.ErrorIs(t, err, ErrHandoffRecord)
@@ -385,8 +385,8 @@ func TestHandoffAuthorizationRejectsUnauthorizedCommit(t *testing.T) {
 		wrongPredecessor.PredecessorBodyID[0] ^= 1
 		parent, err := f.store.Block(2)
 		require.NoError(t, err)
-		block := &rctypes.BlockData{Version: 2, Round: 3, Epoch: 1,
-			Payload: &rctypes.Payload{Version: 2, HandoffRecords: [][]byte{abort.Bytes(), f.abortCompanion(t, wrongPredecessor, "old-a", "old-b", "old-c")}},
+		block := &rctypes.BlockData{Version: 3, Round: 3, Epoch: 1,
+			Payload: &rctypes.Payload{Version: 3, HandoffRecords: [][]byte{abort.Bytes(), f.abortCompanion(t, wrongPredecessor, "old-a", "old-b", "old-c")}},
 			Qc:      &rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{RoundNumber: 2, Epoch: 1, CurrentRootHash: parent.RootHash}}}
 		_, err = f.store.Add(block, nil)
 		require.ErrorIs(t, err, ErrHandoffRecord)

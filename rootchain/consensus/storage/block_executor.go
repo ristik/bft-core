@@ -59,7 +59,7 @@ func NewRootBlock(block *abdrc.CommittedBlock, hash crypto.Hash, orchestration O
 	if (profile == ProfileHandoff) != (block.Control != nil) {
 		return nil, ErrNetworkProfile
 	}
-	if (profile == ProfileHandoff && block.Block.GetVersion() != 2) || (profile == ProfileLegacy && block.Block.GetVersion() != 1) {
+	if (profile == ProfileHandoff && block.Block.GetVersion() != rctypes.VersionHandoff) || (profile == ProfileLegacy && block.Block.GetVersion() != rctypes.VersionLegacy) {
 		return nil, ErrNetworkProfile
 	}
 	if block.Control != nil && (block.Control.Network != uint64(orchestration.NetworkID()) || block.Control.Epoch != block.Block.Epoch || len(block.Control.PredecessorBodyID) != 32) {
@@ -125,15 +125,9 @@ func NewRootBlock(block *abdrc.CommittedBlock, hash crypto.Hash, orchestration O
 				UC:        *d.UC,
 			}
 		}
-		if profile == ProfileHandoff {
-			feeHash, err := si.feeHash(crypto.SHA256)
-			if err != nil || !bytes.Equal(feeHash, si.TR.FeeHash) {
-				return nil, fmt.Errorf("%w: fee accumulator differs from technical record", ErrControlCheckpoint)
-			}
-			statHash, err := si.statHash(crypto.SHA256)
-			if err != nil || !bytes.Equal(statHash, si.TR.StatHash) {
-				return nil, fmt.Errorf("%w: statistics differ from technical record", ErrControlCheckpoint)
-			}
+		// every profile: a recovered head is judged by the same invariant as an executed one (the new execution rule is the only rule)
+		if err := si.checkAppliedConfiguration(shardConf, crypto.SHA256); err != nil {
+			return nil, fmt.Errorf("recovered shard %s - %s: %w", d.Partition, d.Shard, err)
 		}
 		if err := si.resetTrustBase(shardConf, crypto.SHA256, shardConfHash); err != nil {
 			return nil, fmt.Errorf("initializing shard trustbase: %w", err)
@@ -172,7 +166,7 @@ func (x *ExecutedBlock) extendWithAuthority(newBlock *rctypes.BlockData, verifie
 		return nil, ErrNetworkProfile
 	}
 	if !bootstrapChild && x.ShardState.Control != nil && x.ShardState.Control.Phase == "committed" {
-		if newBlock.Payload == nil || !newBlock.Payload.IsEmpty() || newBlock.Payload.Version != 2 {
+		if newBlock.Payload == nil || !newBlock.Payload.IsEmpty() || newBlock.Payload.Version != rctypes.VersionHandoff {
 			return nil, ErrHandoffSuffix
 		}
 		unchanged := ShardStates{States: make(map[types.PartitionShardID]*ShardInfo, len(x.ShardState.States)), Changed: ShardSet{}}
@@ -221,7 +215,7 @@ func (x *ExecutedBlock) extendWithAuthority(newBlock *rctypes.BlockData, verifie
 			Epoch: newBlock.Epoch, PredecessorBodyID: bytes.Clone(record.NextBodyID), Phase: "idle", Pos: parentState.Control.Pos,
 			UnackedParent: bytes.Clone(parentState.Control.UnackedParent)}
 	}
-	nextShardState, switched, err := parentState.nextBlockSwitching(shardConfs, hash, configHistory(orchestration))
+	nextShardState, switched, err := parentState.nextBlockSwitching(shardConfs, hash, orchestration)
 	if err != nil {
 		return nil, fmt.Errorf("creating shard info for the block: %w", err)
 	}
@@ -236,6 +230,12 @@ func (x *ExecutedBlock) extendWithAuthority(newBlock *rctypes.BlockData, verifie
 		// under the new committee once that block is committed.
 		for shard := range nextShardState.States {
 			nextShardState.Changed[shard] = struct{}{}
+		}
+	}
+	for key := range switched {
+		from, to := x.ShardState.States[key], nextShardState.States[key]
+		if from != nil && to != nil {
+			log.Info("shard configuration switched", "partition", key.PartitionID.String(), "fromEpoch", from.TR.Epoch, "toEpoch", to.TR.Epoch, "rootRound", newBlock.Round)
 		}
 	}
 	pos, err := loadPos(nextShardState.Control)

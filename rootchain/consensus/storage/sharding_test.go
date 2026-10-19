@@ -666,6 +666,29 @@ func (mo mockOrchestration) ShardConfigByEpoch(types.PartitionID, types.ShardID,
 	return nil, nil
 }
 
+// ShardConfigByHash is the mock's history: every configuration its schedule returns for any round up to a few hundred (the mock keeps no
+// other record), or the explicitly given history.
+func (mo mockOrchestration) ShardConfigByHash(partition types.PartitionID, shard types.ShardID, hash []byte, alg crypto.Hash) (*types.PartitionDescriptionRecord, error) {
+	if mo.shardConfigs == nil {
+		return nil, ErrConfigHistory
+	}
+	for round := uint64(0); round <= 512; round++ {
+		confs, err := mo.shardConfigs(round)
+		if err != nil {
+			continue
+		}
+		for _, c := range confs {
+			if c == nil || c.PartitionID != partition || !c.ShardID.Equal(shard) {
+				continue
+			}
+			if h, err := c.Hash(alg); err == nil && bytes.Equal(h, hash) {
+				return c, nil
+			}
+		}
+	}
+	return nil, ErrConfigHistory
+}
+
 func (mo mockOrchestration) NetworkID() types.NetworkID {
 	return 5
 }

@@ -412,15 +412,15 @@ func (r *CommittedBlock) IsValid() error {
 	if r == nil || r.Block == nil {
 		return errors.New("block data is nil")
 	}
-	if (r.Block.GetVersion() == 2) != (r.Control != nil) {
+	if (r.Block.GetVersion() == rctypes.VersionHandoff) != (r.Control != nil) {
 		return errors.New("missing or unexpected control checkpoint")
 	}
 	if r.Anchor != nil {
 		if err := r.Anchor.IsValid(); err != nil {
 			return err
 		}
-		if r.Block.Version != 2 || r.Block.Payload == nil || !r.Block.Payload.IsEmpty() ||
-			r.Block.Payload.Version != 2 || r.Block.Anchor == nil || r.Block.Qc != nil ||
+		if r.Block.Version != rctypes.VersionHandoff || r.Block.Payload == nil || !r.Block.Payload.IsEmpty() ||
+			r.Block.Payload.Version != rctypes.VersionHandoff || r.Block.Anchor == nil || r.Block.Qc != nil ||
 			r.Block.Round != r.Anchor.Slot || r.Block.Epoch != r.Anchor.Epoch ||
 			!slices.Equal(r.Block.Anchor.GenesisID, r.Anchor.GenesisID) || !slices.Equal(r.Block.Anchor.StateRoot, r.Anchor.StateRoot) ||
 			r.Block.Anchor.Slot != r.Anchor.Slot || r.Block.Anchor.Epoch != r.Anchor.Epoch ||

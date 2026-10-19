@@ -108,11 +108,11 @@ func (p pendingAssignment) supersedeWith(t *testing.T, binding *evmassign.Supers
 func (s *supersession) addEpoch2(t *testing.T, store *BlockStore, round uint64, records ...[]byte) (*ExecutedBlock, error) {
 	t.Helper()
 	parent := mustBlock(t, store, round-1)
-	payload := &rctypes.Payload{Version: 2}
+	payload := &rctypes.Payload{Version: 3}
 	if len(records) > 0 {
 		payload.HandoffRecords = records
 	}
-	_, err := store.Add(&rctypes.BlockData{Version: 2, Round: round, Epoch: 2, Payload: payload,
+	_, err := store.Add(&rctypes.BlockData{Version: 3, Round: round, Epoch: 2, Payload: payload,
 		Qc: &rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{RoundNumber: round - 1, Epoch: 2, CurrentRootHash: parent.RootHash}}}, nil)
 	if err != nil {
 		return nil, err
@@ -175,7 +175,7 @@ func TestSupersessionReplacesAnUnacknowledgedAssignmentOnTheSameParent(t *testin
 
 	s, err := New(crypto.SHA256, p.store.storage, p.f.orch, logger.New(t), ProfileHandoff)
 	require.NoError(t, err)
-	block := &rctypes.BlockData{Version: 2, Round: commit.ActivationRound, Epoch: 3, Payload: &rctypes.Payload{Version: 2}, Anchor: anchor}
+	block := &rctypes.BlockData{Version: 3, Round: commit.ActivationRound, Epoch: 3, Payload: &rctypes.Payload{Version: 3}, Anchor: anchor}
 	_, err = s.Add(block, nil)
 	require.NoError(t, err)
 	si := mustBlock(t, s, commit.ActivationRound).ShardState.States[p.f.shard]
@@ -231,8 +231,8 @@ func TestSupersessionEvidenceIsolatedMutations(t *testing.T) {
 		ackBlock := bytes.Repeat([]byte{0x77}, 32)
 		ack := &types.InputRecord{Version: 1, RoundNumber: pending.TR.Round, Epoch: pending.TR.Epoch,
 			BlockHash: ackBlock, Hash: bytes.Repeat([]byte{0x78}, 32)}
-		_, err = p.store.Add(&rctypes.BlockData{Version: 2, Round: 8, Epoch: 2, Timestamp: 1_000,
-			Payload: &rctypes.Payload{Version: 2, Requests: []*rctypes.IRChangeReq{{Partition: 8}}},
+		_, err = p.store.Add(&rctypes.BlockData{Version: 3, Round: 8, Epoch: 2, Timestamp: 1_000,
+			Payload: &rctypes.Payload{Version: 3, Requests: []*rctypes.IRChangeReq{{Partition: 8}}},
 			Qc:      &rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{RoundNumber: 7, Epoch: 2, CurrentRootHash: prior.RootHash}}},
 			mockIRVerifier{verify: func(uint64, *rctypes.IRChangeReq) (*types.InputRecord, error) { return ack, nil }})
 		require.NoError(t, err)

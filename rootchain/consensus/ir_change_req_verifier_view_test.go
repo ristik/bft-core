@@ -132,7 +132,7 @@ func TestVerifyIRChangeReqViewTimeoutIsElapsedRounds(t *testing.T) {
 }
 
 func TestVerifyIRChangeReqViewRefusesTheControlPartitionInProfile2(t *testing.T) {
-	ver, err := NewIRChangeReqVerifier(&Parameters{BlockRate: time.Second, NetworkProfileVersion: 2}, &MockState{})
+	ver, err := NewIRChangeReqVerifier(&Parameters{BlockRate: time.Second, NetworkProfileVersion: storage.ProfileHandoff}, &MockState{})
 	require.NoError(t, err)
 	v := newViewTarget(t, 12, storage.PurposeCertify)
 	_, err = ver.VerifyIRChangeReqView(v.view, &abtypes.IRChangeReq{Partition: abtypes.ControlPartition, CertReason: abtypes.Quorum})
@@ -145,7 +145,7 @@ func TestDuplicateChangeReqIsOneSentinel(t *testing.T) {
 }
 
 func TestVerifyIRChangeReqViewNilRequestInProfile2(t *testing.T) {
-	ver, err := NewIRChangeReqVerifier(&Parameters{BlockRate: time.Second, NetworkProfileVersion: 2}, &MockState{})
+	ver, err := NewIRChangeReqVerifier(&Parameters{BlockRate: time.Second, NetworkProfileVersion: storage.ProfileHandoff}, &MockState{})
 	require.NoError(t, err)
 	v := newViewTarget(t, 12, storage.PurposeCertify)
 	_, err = ver.VerifyIRChangeReqView(v.view, nil)

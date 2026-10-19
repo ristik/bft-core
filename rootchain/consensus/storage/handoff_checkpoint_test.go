@@ -153,6 +153,14 @@ func TestWithoutAStoredCheckpointTheCurrentCommittedRootIsServed(t *testing.T) {
 // plainStore hides the checkpoint methods of the Bolt store, as a store without checkpoint retention.
 type plainStore struct{ PersistentStore }
 
+// the plain store hides the checkpoint archive, not the profile pin (which the handoff profile requires)
+func (p plainStore) NetworkProfile() (uint64, bool, error) {
+	return p.PersistentStore.(profilePin).NetworkProfile()
+}
+func (p plainStore) SetNetworkProfile(v uint64) error {
+	return p.PersistentStore.(profilePin).SetNetworkProfile(v)
+}
+
 // the plain store hides the checkpoint archive, but a commit still needs somewhere to keep the control cut (and takes the separate
 // writes, as the store has no atomic commit)
 func (p plainStore) PutCut(e CutEntry) error { return p.PersistentStore.(CutStore).PutCut(e) }

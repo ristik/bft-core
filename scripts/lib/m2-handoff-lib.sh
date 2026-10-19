@@ -57,7 +57,7 @@ m2_start_root() { # node installEpoch bootnode  (an empty install epoch starts a
     UBFT_Q4_SHIM_DIR="${Q4_SHIM_DIR:+$Q4_SHIM_DIR/root$node}" ${Q4_ROOT_BIN:-build/ubft} root-node run --home "test-nodes/root$node" \
       --address "/ip4/127.0.0.1/tcp/$(m2_p2p_port "$node")" \
       ${bootArgs[@]+"${bootArgs[@]}"} --trust-base test-nodes/trust-base.json \
-      "${shardConfArgs[@]}" --profile-2 ${installArgs[@]+"${installArgs[@]}"} \
+      "${shardConfArgs[@]}" --profile-3 ${installArgs[@]+"${installArgs[@]}"} \
       --rpc-server-address "127.0.0.1:$port" --log-format text --log-level debug \
       >>"test-nodes/root$node/debug.log" 2>&1 &
     pid=$!

@@ -28,7 +28,7 @@ func refusesToSign(t *testing.T, r *q3Replica, epoch uint64) {
 	stub := &signStub{}
 	require.ErrorIs(t, m.Sign(epoch, stub), ErrNotAMember)
 	require.Zero(t, stub.signed)
-	_, err := m.MakeVote(&drctypes.BlockData{Version: 2, Epoch: epoch, Round: 3}, make([]byte, 32), nil, nil)
+	_, err := m.MakeVote(&drctypes.BlockData{Version: 3, Epoch: epoch, Round: 3}, make([]byte, 32), nil, nil)
 	require.ErrorIs(t, err, ErrNotAMember)
 	qc := &drctypes.QuorumCert{VoteInfo: &drctypes.RoundInfo{Version: 1, RoundNumber: 2, ParentRoundNumber: 1, Epoch: epoch}, Signatures: map[string]hex.Bytes{}}
 	tmo := abdrc.NewTimeoutMsg(drctypes.NewTimeout(3, epoch, qc), r.id().String(), nil)

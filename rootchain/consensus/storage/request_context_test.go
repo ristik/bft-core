@@ -82,10 +82,9 @@ func TestNextEpochRebuildsRequestContext(t *testing.T) {
 	require.ErrorIs(t, err, quorumweight.ErrWeightCap, "a weight-changing successor is not admitted before activation")
 }
 
-// Site 3 (block_tree.go initBlock): a block restored from the database re-derives the context. Under the handoff profile a
-// configuration that differs from the stored ShardConfHash is refused (ErrAssignmentHistory, before any context exists);
-// outside it the stored hash is still not compared (existing profiles keep their verification rules, design section 4), so
-// the context binds to the loaded configuration. Weight is refused in both.
+// Site 3 (block_tree.go initBlock): a block restored from the database re-derives the context. In every profile a configuration
+// that differs from the stored ShardConfHash is refused (ErrAssignmentHistory, before any context exists): the applied configuration is
+// authenticated state. Weight is refused too.
 func TestInitBlockRequestContext(t *testing.T) {
 	pdr := newShardConf(t)
 	block := genesisBlockWithShard(t, pdr)
@@ -97,22 +96,21 @@ func TestInitBlockRequestContext(t *testing.T) {
 
 	altered := *pdr
 	altered.T2Timeout++
-	alteredHash, err := altered.Hash(crypto.SHA256)
-	require.NoError(t, err)
 
-	si.requestCtx = nil
-	require.NoError(t, initBlock(block, orchestrationOf(&altered)), "legacy profile: no new refusal")
-	require.Equal(t, alteredHash, si.RequestContext().ConfHash(), "the context binds to the configuration that was loaded")
-
-	si.requestCtx = nil
-	block.ShardState.Control = &evmroot.ControlState{}
-	err = initBlock(block, orchestrationOf(&altered))
-	require.ErrorIs(t, err, ErrAssignmentHistory)
-	require.Nil(t, si.requestCtx, "a refused restore leaves no context")
+	for name, control := range map[string]*evmroot.ControlState{"legacy profile": nil, "handoff profile": {}} {
+		si.requestCtx = nil
+		block.ShardState.Control = control
+		err := initBlock(block, orchestrationOf(&altered))
+		require.ErrorIs(t, err, ErrAssignmentHistory, name)
+		require.Nil(t, si.requestCtx, "%s: a refused restore leaves no context", name)
+	}
 	block.ShardState.Control = nil
 
 	heavy := *pdr
 	heavy.Validators = []*types.NodeInfo{{NodeID: pdr.Validators[0].NodeID, SigKey: pdr.Validators[0].SigKey, Stake: 4}}
+	heavyHash, err := heavy.Hash(crypto.SHA256)
+	require.NoError(t, err)
+	si.ShardConfHash = heavyHash // the stored state names the heavy configuration: the weight rule refuses it, not the history check
 	err = initBlock(block, orchestrationOf(&heavy))
 	require.ErrorIs(t, err, quorumweight.ErrWeightCap)
 }

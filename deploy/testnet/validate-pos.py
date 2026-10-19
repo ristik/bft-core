@@ -67,7 +67,7 @@ def statics(generation, ubft, keygen):
         assert root[root.index('--pos-deployment') + 1] == '/network/pos-deployment.json'
         assert root[root.index('--pos-genesis-identities') + 1] == '/network/pos-genesis-identities.json'
         assert root[root.index('--pos-evm-rpc') + 1] == f'http://ureth{i}:8545'
-        assert '--genesis-identities' not in root and '--q3-lane' in root and '--profile-2' in root
+        assert '--genesis-identities' not in root and '--q3-lane' in root and '--profile-3' in root
         # the operator listeners are loopback-only and root and shard of the entity share the holder's namespace (the existing q3-readiness runs there)
         shard = compose['services'][f'shard{i}']['entrypoint']
         bind = manifest['operator_rpc']['bind']   # generate.py --rpc-bind, loopback by default: the value the entrypoints must carry

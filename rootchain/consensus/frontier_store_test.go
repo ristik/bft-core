@@ -2,7 +2,10 @@ package consensus
 
 import (
 	"bytes"
+	"crypto"
 	"crypto/sha256"
+	"github.com/unicitynetwork/bft-core/internal/testutils/logger"
+	"github.com/unicitynetwork/bft-go-base/types"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -75,7 +78,7 @@ func TestFrontierProxyForwardsEveryHandoffMethodOfTheStore(t *testing.T) {
 	real, proxy := reflect.TypeOf(storage.BoltDB{}), reflect.TypeOf(&frontierPersistentStore{})
 	for i := 0; i < real.NumMethod(); i++ {
 		name := real.Method(i).Name
-		if !strings.Contains(name, "Handoff") {
+		if !strings.Contains(name, "Handoff") && !strings.Contains(name, "NetworkProfile") {
 			continue
 		}
 		_, ok := proxy.MethodByName(name)
@@ -184,3 +187,46 @@ func TestFrontierProxyForwardsTheControlWitnesses(t *testing.T) {
 	_, err = bare.Witness(hash)
 	require.ErrorIs(t, err, storage.ErrNoWitnessStore)
 }
+
+// The pin of the network profile is visible through the proxy of a default-startup root, and the proxy gives no fallback: a store that was
+// pinned to another profile is refused through it exactly as bare, and a store that cannot pin is refused rather than skipped.
+func TestFrontierProxyExposesTheProfilePinAndFailsClosed(t *testing.T) {
+	db, err := storage.NewBoltStorage(filepath.Join(t.TempDir(), "p.db"), storage.WithNoSync())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	require.NoError(t, db.SetNetworkProfile(storage.ProfileLegacy))
+	proxy := &frontierPersistentStore{PersistentStore: db, sampler: &frontierSampler{}, reader: db}
+	pinned, found, err := proxy.NetworkProfile()
+	require.NoError(t, err)
+	require.True(t, found)
+	require.EqualValues(t, storage.ProfileLegacy, pinned)
+	obs := logger.New(t)
+	_, err = storage.New(crypto.SHA256, proxy, emptyOrchestrationForPin(), obs, storage.ProfileHandoff)
+	require.ErrorIs(t, err, storage.ErrNetworkProfile, "a profile-1 store is refused through the proxy as it is bare")
+	_, err = storage.New(crypto.SHA256, db, emptyOrchestrationForPin(), obs, storage.ProfileHandoff)
+	require.ErrorIs(t, err, storage.ErrNetworkProfile)
+
+	blind := &frontierPersistentStore{PersistentStore: nil}
+	_, _, err = blind.NetworkProfile()
+	require.ErrorIs(t, err, storage.ErrProfilePinUnsupported)
+	require.ErrorIs(t, blind.SetNetworkProfile(storage.ProfileHandoff), storage.ErrProfilePinUnsupported)
+	// over a blind store the handoff profile refuses to start, the legacy one has nothing to pin
+	blindOverBolt := &frontierPersistentStore{PersistentStore: struct{ PersistentStore }{db}, sampler: &frontierSampler{}, reader: db}
+	_, err = storage.New(crypto.SHA256, blindOverBolt, emptyOrchestrationForPin(), obs, storage.ProfileHandoff)
+	require.ErrorIs(t, err, storage.ErrNetworkProfile)
+}
+
+type pinOrchestration struct{}
+
+func (pinOrchestration) NetworkID() types.NetworkID { return 5 }
+func (pinOrchestration) ShardConfig(types.PartitionID, types.ShardID, uint64) (*types.PartitionDescriptionRecord, error) {
+	return nil, nil
+}
+func (pinOrchestration) ShardConfigs(uint64) (map[types.PartitionShardID]*types.PartitionDescriptionRecord, error) {
+	return map[types.PartitionShardID]*types.PartitionDescriptionRecord{}, nil
+}
+func (pinOrchestration) ShardConfigByHash(types.PartitionID, types.ShardID, []byte, crypto.Hash) (*types.PartitionDescriptionRecord, error) {
+	return nil, storage.ErrConfigHistory
+}
+
+func emptyOrchestrationForPin() pinOrchestration { return pinOrchestration{} }

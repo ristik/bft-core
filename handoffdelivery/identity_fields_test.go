@@ -253,7 +253,7 @@ func TestPerturbingEachBundleLeafChangesTheIdentityExactlyWhenItIsHashed(t *test
 	// an arbitrary populated control is not a valid one (op 53 has no context): keep one real control so that the base encodes, and let
 	// each perturbation of it either change the identity or be refused by the codec, as for every other committed value
 	if b.Snapshot.Block != nil && b.Snapshot.Block.Payload != nil {
-		b.Snapshot.Block.Payload.Version = 2
+		b.Snapshot.Block.Payload.Version = 3
 		b.Snapshot.Block.Payload.PosControls = []rctypes.PosControl{{Network: 5, Op: rctypes.OpCloseLiability, OrderingEpoch: 2, OrderingRound: 9,
 			Close: &rctypes.CloseContext{ClosedEpoch: 1}, Data: make([]byte, 192)}}
 	}

@@ -13,11 +13,17 @@ import (
 )
 
 const (
-	ProfileLegacy  uint64 = 1
-	ProfileHandoff uint64 = 2
+	ProfileLegacy uint64 = rctypes.VersionLegacy
+	// ProfileHandoff is the root handoff network profile with the shard-configuration transition rule of ristik/bft-core#640 (see rctypes.VersionHandoff:
+	// the number 2 is the profile before that rule and is refused, never read as this one).
+	ProfileHandoff uint64 = rctypes.VersionHandoff
 )
 
 var ErrNetworkProfile = errors.New("unsupported or mismatched root network profile")
+
+// ErrProfilePinUnsupported is what a store wrapper answers when the store under it cannot record a network profile: the wrapper itself exposes
+// the pin (so the pin is never silently skipped) but there is nothing to read or write. The handoff profile refuses such a store.
+var ErrProfilePinUnsupported = errors.New("the store cannot record a network profile")
 var ErrControlCheckpoint = errors.New("invalid authenticated control checkpoint")
 
 func profileVersion(v []uint64) (uint64, error) {
@@ -95,7 +101,7 @@ func validateControl(c *evmroot.ControlState) error {
 }
 
 func checkStoredRoot(block *ExecutedBlock, profile uint64) error {
-	if block == nil || block.BlockData == nil || (profile == ProfileHandoff && block.BlockData.GetVersion() != 2) || (profile == ProfileLegacy && block.BlockData.GetVersion() != 1) {
+	if block == nil || block.BlockData == nil || (profile == ProfileHandoff && block.BlockData.GetVersion() != rctypes.VersionHandoff) || (profile == ProfileLegacy && block.BlockData.GetVersion() != rctypes.VersionLegacy) {
 		return ErrNetworkProfile
 	}
 	if err := checkProfile(profile, block.ShardState); err != nil {
@@ -155,4 +161,48 @@ func checkStoredSuffix(parent, child *ExecutedBlock) error {
 		}
 	}
 	return nil
+}
+
+// profilePin is the durable pin of the network profile a store runs under.
+type profilePin interface {
+	NetworkProfile() (profile uint64, found bool, err error)
+	SetNetworkProfile(profile uint64) error
+}
+
+// pinProfile makes the profile a property of the store, checked before anything else is read from it: a store that recorded another
+// profile, and a store that holds blocks but never recorded one (written by a root of the execution rule before the pin, which this binary
+// does not run), are refused - whatever their state looks like (the legacy profile has no earlier rule to tell apart and adopts the pin). An empty store records the profile. A store that cannot pin is refused under the handoff profile (fail closed; the legacy profile has nothing earlier to tell apart).
+func pinProfile(db PersistentStore, profile uint64) error {
+	pin, ok := db.(profilePin)
+	if !ok {
+		if profile == ProfileHandoff {
+			// fail closed: a wrapper that hides the pin (the frontier proxy of a default-startup root did) must not turn the pin into nothing
+			return fmt.Errorf("%w: the store cannot record a network profile", ErrNetworkProfile)
+		}
+		return nil
+	}
+	stored, found, err := pin.NetworkProfile()
+	if errors.Is(err, ErrProfilePinUnsupported) {
+		if profile == ProfileHandoff {
+			return fmt.Errorf("%w: %w", ErrNetworkProfile, err)
+		}
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("reading the network profile of the store: %w", err)
+	}
+	switch {
+	case found && stored != profile:
+		return fmt.Errorf("%w: the store runs profile %d, this root was started with profile %d", ErrNetworkProfile, stored, profile)
+	case found:
+		return nil
+	}
+	blocks, err := db.LoadBlocks()
+	if err != nil {
+		return fmt.Errorf("root DB read error: %w", err)
+	}
+	if len(blocks) != 0 && profile == ProfileHandoff {
+		return fmt.Errorf("%w: the store holds blocks but no network profile pin: it was written under another execution rule", ErrNetworkProfile)
+	}
+	return pin.SetNetworkProfile(profile)
 }

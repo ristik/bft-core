@@ -52,6 +52,9 @@ type (
 		NetworkID() types.NetworkID
 		ShardConfig(partition types.PartitionID, shard types.ShardID, rootRound uint64) (*types.PartitionDescriptionRecord, error)
 		ShardConfigs(rootRound uint64) (map[types.PartitionShardID]*types.PartitionDescriptionRecord, error)
+		// ConfigHistory is required, not optional: the applied configuration a real switch leaves is validated against it, so an
+		// orchestration without a history fails to compile instead of silently skipping the check.
+		ConfigHistory
 	}
 )
 
@@ -62,6 +65,9 @@ func New(hashAlgo crypto.Hash, db PersistentStore, orchestration Orchestration, 
 
 	profile, err := profileVersion(networkProfile)
 	if err != nil {
+		return nil, err
+	}
+	if err := pinProfile(db, profile); err != nil {
 		return nil, err
 	}
 	if err := repairCommittedAssignment(db, orchestration, hashAlgo, profile); err != nil {
@@ -99,6 +105,9 @@ func NewFromState(hash crypto.Hash, block *abdrc.CommittedBlock, db PersistentSt
 
 	profile, err := profileVersion(networkProfile)
 	if err != nil {
+		return nil, refusedBeforeWrite{err}
+	}
+	if err := pinProfile(db, profile); err != nil {
 		return nil, refusedBeforeWrite{err}
 	}
 	rootNode, err := NewRootBlock(block, hash, orchestration, profile)
@@ -365,7 +374,7 @@ func (x *BlockStore) Add(block *rctypes.BlockData, verifier IRChangeReqVerifier)
 	if block == nil || block.Payload == nil {
 		return nil, errors.New("missing block or payload")
 	}
-	if (x.profile == ProfileHandoff && (block.GetVersion() != 2 || block.Payload.Version != 2)) ||
+	if (x.profile == ProfileHandoff && (block.GetVersion() != rctypes.VersionHandoff || block.Payload.Version != rctypes.VersionHandoff)) ||
 		(x.profile == ProfileLegacy && (block.GetVersion() != 1 || block.Payload.Version > 1 || len(block.Payload.HandoffRecords) != 0)) {
 		return nil, ErrNetworkProfile
 	}
@@ -730,8 +739,8 @@ func NewGenesisBlock(networkID types.NetworkID, hashAlgo crypto.Hash, networkPro
 		Qc:        nil, // no parent block -> no parent QC
 	}
 	if profile == ProfileHandoff {
-		genesisBlock.Version = 2
-		genesisBlock.Payload.Version = 2
+		genesisBlock.Version = rctypes.VersionHandoff
+		genesisBlock.Payload.Version = rctypes.VersionHandoff
 	}
 
 	// Info about the round that commits the genesis block.
@@ -787,10 +796,4 @@ func NewGenesisBlock(networkID types.NetworkID, hashAlgo crypto.Hash, networkPro
 		RootHash:   commitQc.LedgerCommitInfo.Hash,
 		ShardState: state,
 	}, nil
-}
-
-// configHistory is the orchestration's authenticated configuration history when it serves one (production), nil for a test double.
-func configHistory(o Orchestration) ConfigHistory {
-	h, _ := o.(ConfigHistory)
-	return h
 }

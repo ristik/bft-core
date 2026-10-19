@@ -123,8 +123,8 @@ func NewBoundAtShardEpoch(t *testing.T, preimage []byte, shardEpoch uint64) Fixt
 		ControlPath: path, CommitQC: qc}
 	_, err = handoff.VerifyOldCommitProof(proof, old)
 	require.NoError(t, err)
-	snapshot := &abdrc.CommittedBlock{Block: &rctypes.BlockData{Version: 2, Epoch: 1, Round: 4,
-		Payload: &rctypes.Payload{Version: 2}}, Control: &control, CommitQc: qc,
+	snapshot := &abdrc.CommittedBlock{Block: &rctypes.BlockData{Version: rctypes.VersionHandoff, Epoch: 1, Round: 4,
+		Payload: &rctypes.Payload{Version: rctypes.VersionHandoff}}, Control: &control, CommitQc: qc,
 		ShardInfo: []abdrc.ShardInfo{{Partition: partition, Shard: shard, T2Timeout: state.T2Timeout,
 			RootHash: state.RootHash, PrevEpochStat: state.PrevEpochStat, Stat: state.Stat,
 			PrevEpochFees: state.PrevEpochFees, Fees: state.Fees, IR: state.IR, IRTR: state.TR,
@@ -191,8 +191,8 @@ func Next(t *testing.T, first Fixture, old *types.RootTrustBaseV1) Fixture {
 		ControlPath: path, CommitQC: qc}
 	_, err = handoff.VerifyOldCommitProof(proof, old)
 	require.NoError(t, err)
-	snapshot := &abdrc.CommittedBlock{Block: &rctypes.BlockData{Version: 2, Epoch: 2, Round: 8,
-		Payload: &rctypes.Payload{Version: 2}}, Control: &control, CommitQc: qc,
+	snapshot := &abdrc.CommittedBlock{Block: &rctypes.BlockData{Version: rctypes.VersionHandoff, Epoch: 2, Round: 8,
+		Payload: &rctypes.Payload{Version: rctypes.VersionHandoff}}, Control: &control, CommitQc: qc,
 		ShardInfo: []abdrc.ShardInfo{{Partition: first.Partition, Shard: first.Shard, T2Timeout: state.T2Timeout,
 			RootHash: state.RootHash, PrevEpochStat: state.PrevEpochStat, Stat: state.Stat,
 			PrevEpochFees: state.PrevEpochFees, Fees: state.Fees, IR: state.IR, IRTR: state.TR,

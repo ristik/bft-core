@@ -362,8 +362,8 @@ func newAnchorReplicasWith(t *testing.T, opts anchorOptions, commitSealRound uin
 		PrevEpochFees: shardState.PrevEpochFees, Fees: shardState.Fees,
 		IR: shardState.IR, IRTR: shardState.TR, ShardConfHash: shardState.ShardConfHash,
 		UC: &shardState.LastCR.UC, TR: &shardState.LastCR.Technical}
-	head := &abdrc.CommittedBlock{Block: &rctypes.BlockData{Version: 2, Epoch: 1, Round: commitSealRound,
-		Payload: &rctypes.Payload{Version: 2}}, ShardInfo: []abdrc.ShardInfo{shardInfo}, Control: &control, CommitQc: qc}
+	head := &abdrc.CommittedBlock{Block: &rctypes.BlockData{Version: 3, Epoch: 1, Round: commitSealRound,
+		Payload: &rctypes.Payload{Version: 3}}, ShardInfo: []abdrc.ShardInfo{shardInfo}, Control: &control, CommitQc: qc}
 	bundle := handoffdelivery.Bundle{Proof: proof, Body: body, Snapshot: head}
 	delivered, err := handoffdelivery.Verify(bundle, oldTrust, shardState.PartitionID, shardState.ShardID, shardState.ShardConfHash)
 	require.NoError(t, err)

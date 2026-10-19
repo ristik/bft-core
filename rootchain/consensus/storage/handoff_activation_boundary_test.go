@@ -100,14 +100,14 @@ func TestFirstBlockOfAnEpochWithAnAnchorOffTheCommittedActivationIsRefused(t *te
 	data.Round, data.Anchor = shiftedAnchor.Slot, &shiftedAnchor
 	shifted.BlockData = &data
 	require.True(t, isEpochAnchorRoot(&shifted))
-	child := &rctypes.BlockData{Version: 2, Round: shiftedAnchor.Slot + 1, Epoch: data.Epoch, Anchor: &shiftedAnchor, Payload: &rctypes.Payload{Version: 2}}
+	child := &rctypes.BlockData{Version: 3, Round: shiftedAnchor.Slot + 1, Epoch: data.Epoch, Anchor: &shiftedAnchor, Payload: &rctypes.Payload{Version: 3}}
 	_, err = shifted.Extend(child, nil, f.orch, crypto.SHA256, logger.New(t))
 	require.ErrorIs(t, err, ErrActivationBoundary)
 	require.ErrorIs(t, err, ErrControlCheckpoint)
 
 	// the real anchor, with the first block anywhere from the start on, is accepted by the same call
 	for _, round := range []uint64{7, 9} {
-		ok := &rctypes.BlockData{Version: 2, Round: round, Epoch: root.BlockData.Epoch, Anchor: anchor, Payload: &rctypes.Payload{Version: 2}}
+		ok := &rctypes.BlockData{Version: 3, Round: round, Epoch: root.BlockData.Epoch, Anchor: anchor, Payload: &rctypes.Payload{Version: 3}}
 		_, err = root.Extend(ok, nil, f.orch, crypto.SHA256, logger.New(t))
 		require.NoError(t, err, "first block at round %d", round)
 	}

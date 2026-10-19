@@ -44,7 +44,7 @@ func newLastCRPipeline(t *testing.T) *lastCRPipeline {
 func (p *lastCRPipeline) add(s *BlockStore, round, parent uint64, reqs ...*rctypes.IRChangeReq) (*ExecutedBlock, error) {
 	p.t.Helper()
 	pb := mustBlock(p.t, s, parent)
-	_, err := s.Add(&rctypes.BlockData{Version: 2, Round: round, Epoch: 2, Timestamp: 1_000 + round, Payload: &rctypes.Payload{Version: 2, Requests: reqs},
+	_, err := s.Add(&rctypes.BlockData{Version: 3, Round: round, Epoch: 2, Timestamp: 1_000 + round, Payload: &rctypes.Payload{Version: 3, Requests: reqs},
 		Qc: &rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{RoundNumber: parent, Epoch: 2, CurrentRootHash: pb.RootHash}}}, p.verifier)
 	if err != nil {
 		return nil, err

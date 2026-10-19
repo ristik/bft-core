@@ -78,8 +78,8 @@ func TestRootSourceProjectsTheAcknowledgementOfACommittedAssignment(t *testing.T
 	pending := b7.ShardState.States[f.shard]
 	ack := &types.InputRecord{Version: 1, RoundNumber: pending.TR.Round, Epoch: pending.TR.Epoch,
 		BlockHash: bytes.Repeat([]byte{0x77}, 32), PreviousHash: pending.IR.Hash, Hash: bytes.Repeat([]byte{0x78}, 32)}
-	_, err = s.Add(&rctypes.BlockData{Version: 2, Round: 8, Epoch: 2, Timestamp: 1_000,
-		Payload: &rctypes.Payload{Version: 2, Requests: []*rctypes.IRChangeReq{{Partition: 8}}},
+	_, err = s.Add(&rctypes.BlockData{Version: 3, Round: 8, Epoch: 2, Timestamp: 1_000,
+		Payload: &rctypes.Payload{Version: 3, Requests: []*rctypes.IRChangeReq{{Partition: 8}}},
 		Qc:      &rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{RoundNumber: 7, Epoch: 2, CurrentRootHash: b7.RootHash}}},
 		mockIRVerifier{verify: func(uint64, *rctypes.IRChangeReq) (*types.InputRecord, error) { return ack, nil }})
 	require.NoError(t, err)
@@ -176,8 +176,8 @@ func TestCommitRetainsTheProjectedRecords(t *testing.T) {
 	pending := b7.ShardState.States[f.shard]
 	ack := &types.InputRecord{Version: 1, RoundNumber: pending.TR.Round, Epoch: pending.TR.Epoch,
 		BlockHash: bytes.Repeat([]byte{0x77}, 32), PreviousHash: pending.IR.Hash, Hash: bytes.Repeat([]byte{0x78}, 32)}
-	_, err = s.Add(&rctypes.BlockData{Version: 2, Round: 8, Epoch: 2, Timestamp: 1_000,
-		Payload: &rctypes.Payload{Version: 2, Requests: []*rctypes.IRChangeReq{{Partition: 8}}},
+	_, err = s.Add(&rctypes.BlockData{Version: 3, Round: 8, Epoch: 2, Timestamp: 1_000,
+		Payload: &rctypes.Payload{Version: 3, Requests: []*rctypes.IRChangeReq{{Partition: 8}}},
 		Qc:      &rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{RoundNumber: 7, Epoch: 2, CurrentRootHash: b7.RootHash}}},
 		mockIRVerifier{verify: func(uint64, *rctypes.IRChangeReq) (*types.InputRecord, error) { return ack, nil }})
 	require.NoError(t, err)
@@ -296,8 +296,8 @@ func TestCommitRefusesToDropProjectedRecords(t *testing.T) {
 	pending := b7.ShardState.States[f.shard]
 	ack := &types.InputRecord{Version: 1, RoundNumber: pending.TR.Round, Epoch: pending.TR.Epoch,
 		BlockHash: bytes.Repeat([]byte{0x77}, 32), PreviousHash: pending.IR.Hash, Hash: bytes.Repeat([]byte{0x78}, 32)}
-	_, err = s.Add(&rctypes.BlockData{Version: 2, Round: 8, Epoch: 2, Timestamp: 1_000,
-		Payload: &rctypes.Payload{Version: 2, Requests: []*rctypes.IRChangeReq{{Partition: 8}}},
+	_, err = s.Add(&rctypes.BlockData{Version: 3, Round: 8, Epoch: 2, Timestamp: 1_000,
+		Payload: &rctypes.Payload{Version: 3, Requests: []*rctypes.IRChangeReq{{Partition: 8}}},
 		Qc:      &rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{RoundNumber: 7, Epoch: 2, CurrentRootHash: b7.RootHash}}},
 		mockIRVerifier{verify: func(uint64, *rctypes.IRChangeReq) (*types.InputRecord, error) { return ack, nil }})
 	require.NoError(t, err)

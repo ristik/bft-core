@@ -191,6 +191,22 @@ func (s *frontierPersistentStore) ReadEpochAnchorSafety() (*drctypes.EpochAnchor
 // which is every root in default startup. Each method forwards to the real store; when the real store lacks
 // the capability the result is exactly what the asserting caller does on a failed assertion.
 
+// The network profile pin is the exception to the rule above: there is no fallback. A store that cannot report or record its profile
+// is not pinned, and a pin that is silently skipped is no pin (storage.pinProfile refuses a handoff-profile store that does not expose it).
+func (s *frontierPersistentStore) NetworkProfile() (uint64, bool, error) {
+	if store, ok := s.PersistentStore.(interface{ NetworkProfile() (uint64, bool, error) }); ok {
+		return store.NetworkProfile()
+	}
+	return 0, false, storage.ErrProfilePinUnsupported
+}
+
+func (s *frontierPersistentStore) SetNetworkProfile(profile uint64) error {
+	if store, ok := s.PersistentStore.(interface{ SetNetworkProfile(uint64) error }); ok {
+		return store.SetNetworkProfile(profile)
+	}
+	return storage.ErrProfilePinUnsupported
+}
+
 func (s *frontierPersistentStore) StoreHandoffBody(id, body []byte) error {
 	if store, ok := s.PersistentStore.(interface{ StoreHandoffBody([]byte, []byte) error }); ok {
 		return store.StoreHandoffBody(id, body)

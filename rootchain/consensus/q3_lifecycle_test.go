@@ -55,7 +55,7 @@ func pendingPrimary(t *testing.T) (*q3Replica, *q3fixture.Fixture, types.Partiti
 	t.Cleanup(r.close)
 	require.NoError(t, r.rt.Recover(context.Background()))
 	require.NoError(t, r.rt.Activate(context.Background(), r.bundle()))
-	_, err := r.manager.blockStore.Add(&rctypes.BlockData{Version: 2, Round: 7, Epoch: 2, Payload: &rctypes.Payload{Version: 2}, Anchor: r.manager.epochAnchor}, nil)
+	_, err := r.manager.blockStore.Add(&rctypes.BlockData{Version: 3, Round: 7, Epoch: 2, Payload: &rctypes.Payload{Version: 3}, Anchor: r.manager.epochAnchor}, nil)
 	require.NoError(t, err)
 	first, err := r.manager.blockStore.Block(7)
 	require.NoError(t, err)

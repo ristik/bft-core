@@ -121,7 +121,7 @@ class ProofOfStake(unittest.TestCase):
                 cfg=generate.topology(out,3,ids,images,'captcha',(),30000000,with_pos)
                 for i in (1,2,3):
                     root=cfg['services']['root%d'%i]['entrypoint']
-                    self.assertIn('--q3-lane',root);self.assertIn('--profile-2',root)
+                    self.assertIn('--q3-lane',root);self.assertIn('--profile-3',root)
                     if with_pos:
                         self.assertEqual(root[root.index('--pos-deployment')+1],'/network/pos-deployment.json')
                         self.assertEqual(root[root.index('--pos-genesis-identities')+1],'/network/pos-genesis-identities.json')

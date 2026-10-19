@@ -136,20 +136,20 @@ func TestPosControlDecodeRefusals(t *testing.T) {
 }
 
 func TestEmptyPayloadIsTheCanonicalFourElementTuple(t *testing.T) {
-	raw, err := (&Payload{Version: 2}).MarshalCBOR()
+	raw, err := (&Payload{Version: 3}).MarshalCBOR()
 	require.NoError(t, err)
-	require.Equal(t, "8402808080", hex.EncodeToString(raw))
-	raw2, err := (&Payload{Version: 2, Requests: []*IRChangeReq{}, HandoffRecords: [][]byte{}, PosControls: []PosControl{}}).MarshalCBOR()
+	require.Equal(t, "8403808080", hex.EncodeToString(raw))
+	raw2, err := (&Payload{Version: 3, Requests: []*IRChangeReq{}, HandoffRecords: [][]byte{}, PosControls: []PosControl{}}).MarshalCBOR()
 	require.NoError(t, err)
 	require.Equal(t, raw, raw2)
 	var got Payload
 	require.NoError(t, got.UnmarshalCBOR(raw))
 	require.True(t, got.IsEmpty())
-	require.EqualValues(t, 2, got.Version)
+	require.EqualValues(t, 3, got.Version)
 }
 
 func TestPayloadRoundTripsEqualInMemory(t *testing.T) {
-	for _, p := range []*Payload{{Version: 2}, {Version: 2, HandoffRecords: [][]byte{{1}}}, {Version: 2, PosControls: []PosControl{rejectControl()}}} {
+	for _, p := range []*Payload{{Version: 3}, {Version: 3, HandoffRecords: [][]byte{{1}}}, {Version: 3, PosControls: []PosControl{rejectControl()}}} {
 		raw, err := p.MarshalCBOR()
 		require.NoError(t, err)
 		var got Payload
@@ -159,34 +159,35 @@ func TestPayloadRoundTripsEqualInMemory(t *testing.T) {
 }
 
 func TestPayloadWithControlsRoundTripsAndIsNotEmpty(t *testing.T) {
-	p := &Payload{Version: 2, HandoffRecords: [][]byte{{1, 2, 3}}, PosControls: []PosControl{closeControl(1), retireControl(7, 1)}}
+	p := &Payload{Version: 3, HandoffRecords: [][]byte{{1, 2, 3}}, PosControls: []PosControl{closeControl(1), retireControl(7, 1)}}
 	raw, err := p.MarshalCBOR()
 	require.NoError(t, err)
 	var got Payload
 	require.NoError(t, got.UnmarshalCBOR(raw))
 	require.Equal(t, p.PosControls, got.PosControls)
 	require.False(t, got.IsEmpty())
-	require.False(t, (&Payload{Version: 2, PosControls: []PosControl{rejectControl()}}).IsEmpty(), "a control-bearing block is never an empty suffix")
+	require.False(t, (&Payload{Version: 3, PosControls: []PosControl{rejectControl()}}).IsEmpty(), "a control-bearing block is never an empty suffix")
 }
 
 func TestPayloadDecodeRefusals(t *testing.T) {
 	cases := map[string][]byte{
-		"the retired three-element form":    {0x83, 0x02, 0x80, 0x80},
-		"null requests":                     {0x84, 0x02, 0xf6, 0x80, 0x80},
-		"null handoff records":              {0x84, 0x02, 0x80, 0xf6, 0x80},
-		"null controls":                     {0x84, 0x02, 0x80, 0x80, 0xf6},
-		"controls a byte string":            {0x84, 0x02, 0x80, 0x80, 0x40},
-		"indefinite requests":               {0x84, 0x02, 0x9f, 0xff, 0x80, 0x80},
-		"five elements":                     {0x85, 0x02, 0x80, 0x80, 0x80, 0x80},
-		"two elements":                      {0x82, 0x02, 0x80},
-		"another profile tag":               {0x84, 0x03, 0x80, 0x80, 0x80},
+		"the retired three-element form":    {0x83, 0x03, 0x80, 0x80},
+		"null requests":                     {0x84, 0x03, 0xf6, 0x80, 0x80},
+		"null handoff records":              {0x84, 0x03, 0x80, 0xf6, 0x80},
+		"null controls":                     {0x84, 0x03, 0x80, 0x80, 0xf6},
+		"controls a byte string":            {0x84, 0x03, 0x80, 0x80, 0x40},
+		"indefinite requests":               {0x84, 0x03, 0x9f, 0xff, 0x80, 0x80},
+		"five elements":                     {0x85, 0x03, 0x80, 0x80, 0x80, 0x80},
+		"two elements":                      {0x82, 0x03, 0x80},
+		"another profile tag":               {0x84, 0x04, 0x80, 0x80, 0x80},
+		"the retired profile tag two":       {0x84, 0x02, 0x80, 0x80, 0x80},
 		"profile tag one in the new shape":  {0x84, 0x01, 0x80, 0x80, 0x80},
 		"profile tag a string":              {0x84, 0x61, 0x32, 0x80, 0x80, 0x80},
-		"trailing byte":                     {0x84, 0x02, 0x80, 0x80, 0x80, 0x00},
-		"non-shortest tag":                  {0x84, 0x18, 0x02, 0x80, 0x80, 0x80},
-		"a null element of requests":        {0x84, 0x02, 0x81, 0xf6, 0x80, 0x80},
-		"a null element of handoff records": {0x84, 0x02, 0x80, 0x81, 0xf6, 0x80},
-		"a null element of controls":        {0x84, 0x02, 0x80, 0x80, 0x81, 0xf6},
+		"trailing byte":                     {0x84, 0x03, 0x80, 0x80, 0x80, 0x00},
+		"non-shortest tag":                  {0x84, 0x18, 0x03, 0x80, 0x80, 0x80},
+		"a null element of requests":        {0x84, 0x03, 0x81, 0xf6, 0x80, 0x80},
+		"a null element of handoff records": {0x84, 0x03, 0x80, 0x81, 0xf6, 0x80},
+		"a null element of controls":        {0x84, 0x03, 0x80, 0x80, 0x81, 0xf6},
 		"not an array":                      {0xa0},
 		"empty":                             nil,
 	}
@@ -195,7 +196,7 @@ func TestPayloadDecodeRefusals(t *testing.T) {
 		require.ErrorIs(t, got.UnmarshalCBOR(data), ErrPayloadEncoding, name)
 	}
 	var ok Payload
-	require.NoError(t, ok.UnmarshalCBOR([]byte{0x84, 0x02, 0x80, 0x80, 0x80}))
+	require.NoError(t, ok.UnmarshalCBOR([]byte{0x84, 0x03, 0x80, 0x80, 0x80}))
 	// the legacy profile's one-element payload still decodes
 	var legacy Payload
 	require.NoError(t, legacy.UnmarshalCBOR([]byte{0x81, 0x80}))
@@ -238,5 +239,14 @@ func TestControlOrderingRules(t *testing.T) {
 	require.NoError(t, validatePosControls(many[:MaxPosControls]))
 	require.ErrorIs(t, validatePosControls(many), ErrPosControl)
 	// the payload applies the same rule
-	require.Error(t, (&Payload{Version: 2, PosControls: cases["two rejections"]}).IsValid())
+	require.Error(t, (&Payload{Version: 3, PosControls: cases["two rejections"]}).IsValid())
+}
+
+// The retired version 2 of the handoff profile is not a block of the new one: refused whole, not read as version 3.
+func TestBlockVersionTwoIsRefused(t *testing.T) {
+	b := &BlockData{Version: 2, Round: 2, Epoch: 1, Payload: &Payload{Version: 2}, Qc: &QuorumCert{VoteInfo: &RoundInfo{RoundNumber: 1, Epoch: 1}}}
+	require.Error(t, b.IsValid())
+	require.Error(t, (&Payload{Version: 2}).IsValid())
+	_, err := (&Payload{Version: 2}).MarshalCBOR()
+	require.Error(t, err, "a version 2 payload has no encoding any more")
 }

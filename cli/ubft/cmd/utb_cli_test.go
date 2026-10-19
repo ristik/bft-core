@@ -54,7 +54,7 @@ func TestUTBGenesisToolAndStoreOpening(t *testing.T) {
 	require.Equal(t, "0x"+string(bytesHex(id[:])), pin)
 
 	flags := func(mut func(f *rootNodeRunFlags)) *rootNodeRunFlags {
-		f := &rootNodeRunFlags{baseFlags: &baseFlags{HomeDir: dir}, Profile2: true, UTBGenesisFile: out, UTBGenesisID: pin}
+		f := &rootNodeRunFlags{baseFlags: &baseFlags{HomeDir: dir}, HandoffProfile: true, UTBGenesisFile: out, UTBGenesisID: pin}
 		if mut != nil {
 			mut(f)
 		}
@@ -69,7 +69,7 @@ func TestUTBGenesisToolAndStoreOpening(t *testing.T) {
 	closeStore()
 
 	for name, mut := range map[string]func(f *rootNodeRunFlags){
-		"not the handoff profile":                func(f *rootNodeRunFlags) { f.Profile2 = false },
+		"not the handoff profile":                func(f *rootNodeRunFlags) { f.HandoffProfile = false },
 		"no pin":                                 func(f *rootNodeRunFlags) { f.UTBGenesisID = "" },
 		"a malformed pin":                        func(f *rootNodeRunFlags) { f.UTBGenesisID = "0x12" },
 		"another genesis's pin":                  func(f *rootNodeRunFlags) { f.UTBGenesisID = "0x" + string(bytesHex(make([]byte, 32))) },
@@ -128,12 +128,12 @@ func TestNodesRefuseAMixedUTBConfigurationBeforeAnythingElse(t *testing.T) {
 	require.NoError(t, os.WriteFile(genesis, []byte{1}, 0o644))
 	require.NoError(t, os.WriteFile(filepath.Join(dir, rootDBFileName), []byte("a legacy root database"), 0o644))
 
-	root := &rootNodeRunFlags{baseFlags: &baseFlags{HomeDir: dir}, Profile2: true, UTBGenesisFile: genesis, UTBGenesisID: "0x01"}
+	root := &rootNodeRunFlags{baseFlags: &baseFlags{HomeDir: dir}, HandoffProfile: true, UTBGenesisFile: genesis, UTBGenesisID: "0x01"}
 	err := rootNodeRun(context.Background(), root)
 	require.ErrorIs(t, err, utbprofile.ErrRefused)
 	require.ErrorContains(t, err, "no approved migration")
 
-	root = &rootNodeRunFlags{baseFlags: &baseFlags{HomeDir: dir}, Profile2: true, UTBGenesisFile: genesis}
+	root = &rootNodeRunFlags{baseFlags: &baseFlags{HomeDir: dir}, HandoffProfile: true, UTBGenesisFile: genesis}
 	require.ErrorContains(t, rootNodeRun(context.Background(), root), "go together")
 
 	shard := &shardNodeRunFlags{baseFlags: &baseFlags{HomeDir: dir}, UTBGenesisID: "0x01"}

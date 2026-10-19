@@ -113,10 +113,10 @@ func TestTheRecoveryVerifierExecutesAWeightedProofTheLegacyDispatchRefuses(t *te
 	// the first successor block switches the shard to the activated assignment and carries no request of it; the proof is in the next
 	anchorBlock, err := r.manager.blockStore.Block(anchor.Slot)
 	require.NoError(t, err)
-	switching, err := anchorBlock.Extend(&rctypes.BlockData{Version: 2, Epoch: 2, Round: 7, Anchor: anchor, Payload: &rctypes.Payload{Version: 2}},
+	switching, err := anchorBlock.Extend(&rctypes.BlockData{Version: 3, Epoch: 2, Round: 7, Anchor: anchor, Payload: &rctypes.Payload{Version: 3}},
 		r.manager.irReqVerifier, r.orchestration, crypto.SHA256, r.manager.log)
 	require.NoError(t, err)
-	block := &rctypes.BlockData{Version: 2, Epoch: 2, Round: 8, Payload: &rctypes.Payload{Version: 2, Requests: []*rctypes.IRChangeReq{proof}},
+	block := &rctypes.BlockData{Version: 3, Epoch: 2, Round: 8, Payload: &rctypes.Payload{Version: 3, Requests: []*rctypes.IRChangeReq{proof}},
 		Qc: &rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{RoundNumber: 7, Epoch: 2, CurrentRootHash: switching.RootHash}}}
 	parent := switching
 	extend := func(v *IRChangeReqVerifier) (*storage.ExecutedBlock, error) {

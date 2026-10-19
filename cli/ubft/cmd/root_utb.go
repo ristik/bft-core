@@ -20,7 +20,7 @@ const shardUTBEntriesDBFileName = "shard-utb-entries.db"
 // openUTBStore opens the permanent store of finalized signed trust-base entries, rooted in the genesis entry file and its pinned EntryID. The profile
 // needs the handoff profile (the entries are produced by handoffs) and a pin: a genesis file alone authenticates nothing.
 func (f *rootNodeRunFlags) openUTBStore(genesisTrustBase *types.RootTrustBaseV1) (*utbstore.Store, func(), error) {
-	if !f.Profile2 {
+	if !f.HandoffProfile {
 		return nil, nil, errors.New("--utb-genesis requires profile 2")
 	}
 	return openUTBEntryStore(f.baseFlags, f.UTBGenesisFile, f.UTBGenesisID, f.UTBEntriesDBFile, rootUTBEntriesDBFileName, genesisTrustBase)
