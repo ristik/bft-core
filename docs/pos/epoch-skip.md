@@ -98,3 +98,42 @@ The invariant above and the transition rule apply to the legacy profile (1) as w
 on a store that never recorded one. A legacy store written by the execution before #641 (for example one whose TR announced an epoch ahead of
 its applied configuration) can therefore fail `initBlock` on this binary; the deployments are fresh-genesis, a restarted old legacy devnet
 is not supported. The handoff profile is stricter: a store without the pin is refused outright.
+
+## Why the lane assertion is "a quorum of the running roots", not "every running root" (evidence: lane run 2026-10-19 12:23)
+
+The first version of `p85_epoch_switches` required each running root to log both EVM switches (K->J, recovery). The 12:23 run
+(`briefs/devnet-runs/utb-20261019T122315Z`, all other steps passed) failed it, and the failure was the assertion's premise, not the system:
+
+| root | process starts (15:3x/15:4x) | EVM switch 0->1 (K->J) | EVM switch 1->2 (recovery) |
+|---|---|---|---|
+| 1 | 15:26:04, 15:37:19, **15:40:22**, 15:42:44 | rounds 658, 659 | **856 at 15:40:28.05** |
+| 2 | 15:26:06, 15:37:22, **15:40:25**, 15:42:47 | rounds 658, 659 | **856 at 15:40:28.03** |
+| 3 | 15:26:07, 15:37:26, **15:40:27**, 15:42:50 | rounds 658, 659 | **856 at 15:40:27.93** |
+| 4 | 15:26:09, 15:37:30, **15:40:31**, 15:42:53 | round 659 | none |
+| 5 | 15:28:31, 15:37:34, **15:40:33**, - | round 659 | none |
+
+The recovery epoch's first successor block (round 856) was proposed, voted and certified by roots 1-3 at 15:40:27.9-28.05, **before roots 4 and 5
+were restarted** (15:40:31 and 15:40:33; the lane installs the roots one after the other). Their old processes were alive but did not vote: root
+4's refused the epoch-3 proposals (\`failed to get trust base ... epoch 3: trust base not found\`) and exited at 15:40:29, root 5's was stuck at
+round 834. This is legal, not a quorum shortfall - the committees (\`state/trust-base-epoch{1,2,3}.json\` of the run):
+
+| root epoch | members | quorum threshold | what was certified in it |
+|---|---|---|---|
+| 1 | roots 1-4 | 3 | |
+| 2 | roots 1-5 | 4 | the K->J switch (round 659, re-proposed after 658 timed out) |
+| 3 | roots 1-4 (root 5 is not a member) | 3 | the recovery switch (round 856): 3 of the 4 members |
+
+Root 4's new process started at round 856 ("CM starting ... round=856", "awaiting proposal"), then timeout votes and
+\`processing *abdrc.StateMsg ... pending consensus recovery crosses epoch: the committed head is the first successor of an epoch anchor\`
+(15:40:40), and logged \`completed recovery\` at round 862: it never executed block 856; it took the epoch's state from its peers
+afterwards. A root that enters an epoch through a state import does not execute the blocks the others certified before it arrived, so it
+cannot log their switches. The K->J switch shows the same shape at round 658: executed by the three roots that were up (the committee needed
+4), the round timed out, and 659 re-proposed the switch from the same parent, which all five executed.
+
+What the assertion still requires (and what it cannot be satisfied without): the EVM switches form one chain of at least two pairs, one epoch
+up each; every pair was logged by at least 3 of the running roots (`need = 3` is a lane constant: the smallest quorum threshold among the root epochs these switches fall in, 3 in epochs 1 and 3, 4 in epoch 2, used as a lower bound - it is not "a quorum of the running roots", and it does not look the committee up); for every pair the **last** round at which a root switched is identical on
+every root that logged it (an earlier line is a proposal that did not become the block); every running root logged at least one switch;
+none of the refusal messages ever appears. It fails on silence (no lines), on a pair known to fewer than a quorum, on roots disagreeing about the
+committed round, on a broken chain and on an unreadable line - exercised offline against this run's real data (accepted) and against five
+mutations of it (each refused for its own reason). The reviewer's original formulation (`every running root`) remains falsifiable here only by
+making the lane start the roots together; that is a lane-ordering change, not an evidence relaxation, and is not done.

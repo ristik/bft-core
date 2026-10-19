@@ -73,7 +73,10 @@ preflight() {
   check "utb-evidence builds (scripts/utb-evidence) into $UTB_EVIDENCE" bash -c "cd '$REPO_ROOT' && go build -o '$UTB_EVIDENCE' ./scripts/utb-evidence"
   echo "-- machine"
   free=$(df -k "$AGRE_ROOT" | awk 'NR==2{print int($4/1048576)}')
-  if [ "${free:-0}" -ge 25 ]; then yes "free disk ${free} GiB (>= 25)"; else no "free disk ${free:-?} GiB (< 25)"; fi
+  # the lane itself writes about 1 GiB (the 25 GiB default also covers building ureth/contracts); a run with prebuilt, attested builds on a shared disk may
+  # lower it (the preflight prints the value it checked against; it is not part of the evidence directory)
+  min=${UTB_MIN_FREE_GIB:-25}
+  if [ "${free:-0}" -ge "$min" ]; then yes "free disk ${free} GiB (>= $min)"; else no "free disk ${free:-?} GiB (< $min)"; fi
   [ -x "$AGRE_ROOT/briefs/devnet-lock.sh" ] && yes "devnet lock helper present" || no "devnet lock helper missing"
   if [ -d "$AGRE_ROOT/.devnet-lock" ]; then note "the devnet lock is HELD by: $(cat "$AGRE_ROOT/.devnet-lock/owner" 2>/dev/null) (the run would queue)"; else yes "devnet lock is free"; fi
   echo "-- ureth (attested build) and contracts: as the any-age lane (scripts/anyage-lane.sh --preflight checks them; this lane runs the same builds)"
