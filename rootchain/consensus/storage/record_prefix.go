@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/unicitynetwork/bft-core/evmroot"
+	"github.com/unicitynetwork/bft-core/network/protocol/abdrc"
 	"github.com/unicitynetwork/bft-core/rootrecords"
 )
 
@@ -22,9 +23,13 @@ type RecordFetcher interface {
 	Records(ctx context.Context, from uint64, max int) ([]rootrecords.Record, error)
 }
 
-const (
-	prefixPage    = 256
+const prefixPage = 256
+
+// prefixTimeout bounds the whole fetch; prefixBackoff is the pause between attempts while no peer serves the records (the other roots
+// restart together: a fetch that finds none up yet is repeated until one is, not given up on the first miss).
+var (
 	prefixTimeout = 30 * time.Second
+	prefixBackoff = 500 * time.Millisecond
 )
 
 // SetRecordFetcher names where the missing prefix of the source log is fetched from when a checkpoint is installed.
@@ -40,6 +45,10 @@ func (x *BlockStore) SetRecordFetcher(f RecordFetcher) {
 // authenticated by the checkpoint's state, and only a prefix that ends at exactly the committed tip is retained. A checkpoint whose
 // cursor is valid but whose log is missing is not enough to start.
 func (x *BlockStore) ensureRetainedPrefix(control *evmroot.ControlState) error {
+	return x.ensureRetainedPrefixCtx(context.Background(), control)
+}
+
+func (x *BlockStore) ensureRetainedPrefixCtx(parent context.Context, control *evmroot.ControlState) error {
 	if control == nil || len(control.Pos) == 0 {
 		return nil
 	}
@@ -68,7 +77,7 @@ func (x *BlockStore) ensureRetainedPrefix(control *evmroot.ControlState) error {
 	if x.prefixSource == nil {
 		return fmt.Errorf("%w: %d of %d records retained", ErrRecordPrefixMissing, have, state.Count)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), prefixTimeout)
+	ctx, cancel := context.WithTimeout(parent, prefixTimeout)
 	defer cancel()
 	var prev *rootrecords.Record
 	if have > 0 {
@@ -81,11 +90,11 @@ func (x *BlockStore) ensureRetainedPrefix(control *evmroot.ControlState) error {
 	var staged []rootrecords.Record
 	for next := have; next < state.Count; {
 		want := min(state.Count-next, prefixPage)
-		batch, err := x.prefixSource.Records(ctx, next, int(want))
+		batch, err := x.fetchPage(ctx, next, int(want))
 		if err != nil {
 			return errors.Join(ErrRecordPrefixMissing, err)
 		}
-		if len(batch) == 0 || uint64(len(batch)) > want {
+		if uint64(len(batch)) > want {
 			return fmt.Errorf("%w: %d records for a request of %d", ErrRecordPrefixMissing, len(batch), want)
 		}
 		if err := rootrecords.VerifyAfter(prev, batch); err != nil {
@@ -104,6 +113,40 @@ func (x *BlockStore) ensureRetainedPrefix(control *evmroot.ControlState) error {
 		return fmt.Errorf("%w: the fetched records end at another tip", ErrRecordPrefixConflict)
 	}
 	return store.AppendRecords(staged)
+}
+
+// fetchPage asks the fetcher for one page and repeats the ask, until the context ends, while it fails or serves nothing.
+func (x *BlockStore) fetchPage(ctx context.Context, from uint64, max int) ([]rootrecords.Record, error) {
+	for {
+		batch, err := x.prefixSource.Records(ctx, from, max)
+		if err == nil && len(batch) > 0 {
+			return batch, nil
+		}
+		if err == nil {
+			err = errors.New("no records served")
+		}
+		select {
+		case <-ctx.Done():
+			return nil, fmt.Errorf("records from %d: %w", from, errors.Join(err, ctx.Err()))
+		case <-time.After(prefixBackoff):
+		}
+	}
+}
+
+// EnsureRecordPrefix makes this root retain the source log that a recovery head commits, before the head replaces the root: a root that
+// recovers from a state message has missed the records committed meanwhile, and the first commit past the head that carries one would
+// otherwise find a gap. The head's control state is authenticated first (NewRootBlock binds it to the commit certificate; the state
+// message verification does not), so a count or tip a peer chose drives neither a fetch nor a write. Nothing is written when the head is
+// refused or the log cannot be completed; once it is completed the records stay, authentic, even if installing the head then fails.
+func (x *BlockStore) EnsureRecordPrefix(ctx context.Context, head *abdrc.CommittedBlock) error {
+	if head == nil {
+		return nil
+	}
+	root, err := NewRootBlock(head, x.hash, x.orchestration, x.profile)
+	if err != nil {
+		return refusedBeforeWrite{err}
+	}
+	return x.ensureRetainedPrefixCtx(ctx, root.ShardState.Control)
 }
 
 // closedEpochMatches is the one field of a served Closure that its identifier does not cover: the epoch it closed, which the source
