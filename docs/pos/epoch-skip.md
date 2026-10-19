@@ -49,3 +49,45 @@ direct successor. The predecessor case (parent not yet installed) still requires
 
 `PrevEpochFees/PrevEpochStat` hold the previous **applied** epoch's accumulators, rotated once per applied change. Nothing is credited for
 epochs that were never applied. The two slots are not a payout ledger.
+
+## The execution rule is a network profile (ES4, arch ruling `briefs/epoch-skip-profile-ruling.md`)
+
+The root handoff network profile is **3**. Profile 2 is the profile before this rule and is not a profile of this binary: nothing of it is
+read, nor reinterpreted, by profile 3. Fresh deployments select 3 explicitly (`root-node run --profile-3`; the former `--profile-2`
+does not exist), with no fallback.
+
+Where the number lives (the concrete consumers):
+
+* **Blocks and payloads** carry it: `rctypes.VersionHandoff = 3` is `BlockData.Version`, `Payload.Version` and the payload's wire tag
+  (`[3, requests, handoffRecords, posControls]`), the genesis block, every ordinary proposal, the epoch-anchor block, recovery heads and
+  pending blocks (`GetVersion` checks in `BlockData.IsValid`, `BlockStore.Add`, `NewRootBlock`, `checkStoredRoot`, the recovery message).
+  A block or payload of version 2, or one whose block and payload versions differ, is refused before voting and before persistence.
+* **The store** records it: `metadata/networkProfile`, written when an empty store is first opened and checked before anything else is
+  read. A store that recorded another profile, or that holds blocks and recorded none (a root of the earlier rule), is refused with
+  `ErrNetworkProfile`, whatever its state looks like (it may satisfy the new invariants); a refusal pins nothing. The root trust-history
+  identity is `unicity/root-profile-3/history/1`, so a history database of the earlier rule is a different identity.
+* **Startup, scripts, deployment descriptors**: `--profile-3` (helper.sh, `scripts/lib/m2-handoff-lib.sh`, `deploy/testnet/generate.py`
+  and its tests, `utbprofile` refusals). `payload-vectors.json` (types/testdata) is regenerated for the new tag; it is not one of the
+  xrepo shared fixtures.
+* **Unchanged on purpose**: the Q3 tuple layout and its UTB revision, UTB record version 2, the vote/QC envelope 3, native UC signing,
+  the bridge protocol, the container versions of the checkpoint/shard-state encodings (the block inside carries the profile).
+
+Recorded refusals (not only unit tests):
+
+* The pre-change binary (`946e75da3`, `root-node run`) given the new startup selection: `Error: unknown flag: --profile-3`.
+* The same binary decoding the profile-3 vectors: every payload and block is refused (`non-canonical root payload: profile tag`; the
+  epoch-anchor blocks fail in its block decoder).
+* This binary: a version-2 block/payload (`TestBlockVersionTwoIsRefused`, `TestVersionTwoAndMixed...`), a profile-2 or unpinned store
+  (`TestAProfile2StoreIsRefusedEvenWhenItsStateSatisfiesTheNewInvariants`), a head or stored block whose applied configuration is stale,
+  future, edited, announces another epoch, names another fee-map member or carries edited accounting
+  (`TestRecoveryRefusesStaleFutureEditedAndMismatchedShardStates`).
+
+Peer connectivity is not forbidden; taking part in new-rule consensus is.
+
+## Recovery and reopen (ES3)
+
+A recovered head (`NewRootBlock`) and a stored block (`initBlock`) are judged by one invariant, `ShardInfo.checkAppliedConfiguration`,
+against the configuration in effect at the state's **execution** round (the ordered round for a terminal checkpoint or synthetic anchor,
+which keep the old checkpoint, so they are not "normalised" to a newer configuration): applied hash, the TR epoch, the fee map's members,
+the TR's fee and stat commitments against the accumulators. `TestHeadsBeforeAtAndAfterTheSwitchRecoverIdentically` replays heads before,
+at and after each switch from the network and the disk.
