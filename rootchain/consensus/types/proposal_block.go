@@ -53,6 +53,15 @@ type payloadV1 struct {
 	_        struct{} `cbor:",toarray"`
 	Requests []*IRChangeReq
 }
+// The block and payload version is the root network profile that produced them. Version 1 is the legacy profile. The handoff profile is
+// version 3: version 2 was the handoff profile before the shard-configuration transition rule of ristik/bft-core#640 changed what a block
+// executes, and a version 2 block, payload, state or anchor is refused (never read as 3), so an old-rule node cannot take part in a
+// new-rule chain nor the other way round.
+const (
+	VersionLegacy  = 1
+	VersionHandoff = 3
+)
+
 type payloadV2 struct {
 	_              struct{} `cbor:",toarray"`
 	Version        uint64
@@ -65,9 +74,9 @@ func (x *Payload) MarshalCBOR() ([]byte, error) {
 	if x == nil {
 		return types.Cbor.Marshal(nil)
 	}
-	if x.Version == 2 {
+	if x.Version == VersionHandoff {
 		// every collection is a definite array, empty rather than null
-		v := payloadV2{Version: 2, Requests: x.Requests, HandoffRecords: x.HandoffRecords, PosControls: x.PosControls}
+		v := payloadV2{Version: VersionHandoff, Requests: x.Requests, HandoffRecords: x.HandoffRecords, PosControls: x.PosControls}
 		if v.Requests == nil {
 			v.Requests = []*IRChangeReq{}
 		}
@@ -106,7 +115,7 @@ func (x *Payload) UnmarshalCBOR(data []byte) error {
 		return fmt.Errorf("%w: %d elements, want 4", ErrPayloadEncoding, len(top))
 	}
 	var version uint64
-	if err := types.Cbor.Unmarshal(top[0], &version); err != nil || version != 2 {
+	if err := types.Cbor.Unmarshal(top[0], &version); err != nil || version != VersionHandoff {
 		return fmt.Errorf("%w: profile tag", ErrPayloadEncoding)
 	}
 	for i, raw := range top[1:] {
@@ -139,7 +148,7 @@ func (x *Payload) UnmarshalCBOR(data []byte) error {
 	if nilIfEmpty(len(v2.PosControls)) {
 		v2.PosControls = nil
 	}
-	*x = Payload{Version: 2, Requests: v2.Requests, HandoffRecords: v2.HandoffRecords, PosControls: v2.PosControls}
+	*x = Payload{Version: VersionHandoff, Requests: v2.Requests, HandoffRecords: v2.HandoffRecords, PosControls: v2.PosControls}
 	again, err := x.MarshalCBOR()
 	if err != nil || !bytes.Equal(again, data) {
 		return fmt.Errorf("%w: does not re-encode to the bytes read", ErrPayloadEncoding)
@@ -148,7 +157,7 @@ func (x *Payload) UnmarshalCBOR(data []byte) error {
 }
 
 func (x *Payload) IsValid() error {
-	if x.Version > 2 || (x.Version != 2 && (len(x.HandoffRecords) > 0 || len(x.PosControls) > 0)) {
+	if x.Version > VersionHandoff || x.Version == 2 || (x.Version != VersionHandoff && (len(x.HandoffRecords) > 0 || len(x.PosControls) > 0)) {
 		return errors.New("invalid payload version")
 	}
 	if err := validatePosControls(x.PosControls); err != nil {
@@ -182,7 +191,7 @@ func (x *Payload) IsEmpty() bool {
 }
 
 func (x *BlockData) IsValid() error {
-	if x.GetVersion() != 1 && x.GetVersion() != 2 {
+	if x.GetVersion() != VersionLegacy && x.GetVersion() != VersionHandoff {
 		return types.ErrInvalidVersion(x)
 	}
 	if x.Round < 1 {
@@ -195,11 +204,11 @@ func (x *BlockData) IsValid() error {
 	if err := x.Payload.IsValid(); err != nil {
 		return fmt.Errorf("invalid payload: %w", err)
 	}
-	if (x.GetVersion() == 2) != (x.Payload.Version == 2) {
+	if (x.GetVersion() == VersionHandoff) != (x.Payload.Version == VersionHandoff) {
 		return errors.New("block and payload profile versions differ")
 	}
 	if x.Anchor != nil {
-		if x.GetVersion() != 2 || x.Qc != nil || x.Anchor.IsValid() != nil || x.Epoch != x.Anchor.Epoch || x.Round <= x.Anchor.Slot {
+		if x.GetVersion() != VersionHandoff || x.Qc != nil || x.Anchor.IsValid() != nil || x.Epoch != x.Anchor.Epoch || x.Round <= x.Anchor.Slot {
 			return ErrEpochAnchor
 		}
 		return nil
@@ -218,7 +227,7 @@ func (x *BlockData) IsValid() error {
 	if x.Round <= x.Qc.VoteInfo.RoundNumber {
 		return fmt.Errorf("invalid block round %d, round is less or equal to QC round %d", x.Round, x.Qc.VoteInfo.RoundNumber)
 	}
-	if x.GetVersion() == 2 && x.Qc.VoteInfo.Epoch != x.Epoch {
+	if x.GetVersion() == VersionHandoff && x.Qc.VoteInfo.Epoch != x.Epoch {
 		return fmt.Errorf("block and ordinary parent QC epochs differ")
 	}
 	return nil
@@ -328,7 +337,7 @@ func (x *BlockData) UnmarshalCBOR(data []byte) error {
 		*x = BlockData{Version: legacy.Version, Author: legacy.Author, Round: legacy.Round, Epoch: legacy.Epoch,
 			Timestamp: legacy.Timestamp, Payload: legacy.Payload, Qc: legacy.Qc}
 	}
-	if x.Version != 1 && x.Version != 2 {
+	if x.Version != VersionLegacy && x.Version != VersionHandoff {
 		return types.ErrInvalidVersion(x)
 	}
 	return nil

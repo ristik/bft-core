@@ -13,8 +13,10 @@ import (
 )
 
 const (
-	ProfileLegacy  uint64 = 1
-	ProfileHandoff uint64 = 2
+	ProfileLegacy uint64 = rctypes.VersionLegacy
+	// ProfileHandoff is the root handoff network profile with the shard-configuration transition rule of ristik/bft-core#640 (see rctypes.VersionHandoff:
+	// the number 2 is the profile before that rule and is refused, never read as this one).
+	ProfileHandoff uint64 = rctypes.VersionHandoff
 )
 
 var ErrNetworkProfile = errors.New("unsupported or mismatched root network profile")
@@ -95,7 +97,7 @@ func validateControl(c *evmroot.ControlState) error {
 }
 
 func checkStoredRoot(block *ExecutedBlock, profile uint64) error {
-	if block == nil || block.BlockData == nil || (profile == ProfileHandoff && block.BlockData.GetVersion() != 2) || (profile == ProfileLegacy && block.BlockData.GetVersion() != 1) {
+	if block == nil || block.BlockData == nil || (profile == ProfileHandoff && block.BlockData.GetVersion() != rctypes.VersionHandoff) || (profile == ProfileLegacy && block.BlockData.GetVersion() != rctypes.VersionLegacy) {
 		return ErrNetworkProfile
 	}
 	if err := checkProfile(profile, block.ShardState); err != nil {

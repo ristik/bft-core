@@ -59,7 +59,7 @@ func NewRootBlock(block *abdrc.CommittedBlock, hash crypto.Hash, orchestration O
 	if (profile == ProfileHandoff) != (block.Control != nil) {
 		return nil, ErrNetworkProfile
 	}
-	if (profile == ProfileHandoff && block.Block.GetVersion() != 2) || (profile == ProfileLegacy && block.Block.GetVersion() != 1) {
+	if (profile == ProfileHandoff && block.Block.GetVersion() != rctypes.VersionHandoff) || (profile == ProfileLegacy && block.Block.GetVersion() != rctypes.VersionLegacy) {
 		return nil, ErrNetworkProfile
 	}
 	if block.Control != nil && (block.Control.Network != uint64(orchestration.NetworkID()) || block.Control.Epoch != block.Block.Epoch || len(block.Control.PredecessorBodyID) != 32) {
@@ -166,7 +166,7 @@ func (x *ExecutedBlock) extendWithAuthority(newBlock *rctypes.BlockData, verifie
 		return nil, ErrNetworkProfile
 	}
 	if !bootstrapChild && x.ShardState.Control != nil && x.ShardState.Control.Phase == "committed" {
-		if newBlock.Payload == nil || !newBlock.Payload.IsEmpty() || newBlock.Payload.Version != 2 {
+		if newBlock.Payload == nil || !newBlock.Payload.IsEmpty() || newBlock.Payload.Version != rctypes.VersionHandoff {
 			return nil, ErrHandoffSuffix
 		}
 		unchanged := ShardStates{States: make(map[types.PartitionShardID]*ShardInfo, len(x.ShardState.States)), Changed: ShardSet{}}

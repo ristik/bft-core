@@ -347,7 +347,7 @@ func New(t *testing.T, o Options) *Fixture {
 	shardInfo := abdrc.ShardInfo{Partition: PartitionID, Shard: types.ShardID{}, T2Timeout: state.T2Timeout, RootHash: state.RootHash,
 		PrevEpochStat: state.PrevEpochStat, Stat: state.Stat, PrevEpochFees: state.PrevEpochFees, Fees: state.Fees, IR: state.IR, IRTR: state.TR,
 		ShardConfHash: state.ShardConfHash, UC: &state.LastCR.UC, TR: &state.LastCR.Technical}
-	f.Snapshot = &abdrc.CommittedBlock{Block: &rctypes.BlockData{Version: 2, Epoch: oldEpoch, Round: o.CommitSealRound, Payload: &rctypes.Payload{Version: 2}},
+	f.Snapshot = &abdrc.CommittedBlock{Block: &rctypes.BlockData{Version: rctypes.VersionHandoff, Epoch: oldEpoch, Round: o.CommitSealRound, Payload: &rctypes.Payload{Version: rctypes.VersionHandoff}},
 		ShardInfo: []abdrc.ShardInfo{shardInfo}, Control: &control, CommitQc: qc}
 
 	ctx := q3format.ContextFor(body, attempt, [32]byte(f.Evidence.CandidateDigest))

@@ -365,7 +365,7 @@ func (x *BlockStore) Add(block *rctypes.BlockData, verifier IRChangeReqVerifier)
 	if block == nil || block.Payload == nil {
 		return nil, errors.New("missing block or payload")
 	}
-	if (x.profile == ProfileHandoff && (block.GetVersion() != 2 || block.Payload.Version != 2)) ||
+	if (x.profile == ProfileHandoff && (block.GetVersion() != rctypes.VersionHandoff || block.Payload.Version != rctypes.VersionHandoff)) ||
 		(x.profile == ProfileLegacy && (block.GetVersion() != 1 || block.Payload.Version > 1 || len(block.Payload.HandoffRecords) != 0)) {
 		return nil, ErrNetworkProfile
 	}
@@ -730,8 +730,8 @@ func NewGenesisBlock(networkID types.NetworkID, hashAlgo crypto.Hash, networkPro
 		Qc:        nil, // no parent block -> no parent QC
 	}
 	if profile == ProfileHandoff {
-		genesisBlock.Version = 2
-		genesisBlock.Payload.Version = 2
+		genesisBlock.Version = rctypes.VersionHandoff
+		genesisBlock.Payload.Version = rctypes.VersionHandoff
 	}
 
 	// Info about the round that commits the genesis block.

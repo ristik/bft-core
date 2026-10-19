@@ -68,7 +68,7 @@ func (x *IrReqBuffer) Add(round uint64, irChReq *drctypes.IRChangeReq, ver IRCha
 	if irChReq == nil {
 		return errors.New("ir change request is nil")
 	}
-	if x.profile == 2 && irChReq.Partition == drctypes.ControlPartition {
+	if x.profile == storage.ProfileHandoff && irChReq.Partition == drctypes.ControlPartition {
 		return drctypes.ErrControlPartition
 	}
 	// special case, timeout cannot be requested, it can only be added to a block by the leader
@@ -128,7 +128,7 @@ func (x *IrReqBuffer) GeneratePayload(round uint64, timeouts []*types.UnicityCer
 	}
 	// first add timeout requests
 	for _, uc := range timeouts {
-		if x.profile == 2 && (uc == nil || uc.GetPartitionID() == drctypes.ControlPartition) {
+		if x.profile == storage.ProfileHandoff && (uc == nil || uc.GetPartitionID() == drctypes.ControlPartition) {
 			continue
 		}
 		pID := uc.GetPartitionID()
@@ -179,7 +179,7 @@ func (x *IrReqBuffer) AddView(view *storage.RequestRoundView, irChReq *drctypes.
 	if irChReq == nil {
 		return fmt.Errorf("ir change request is nil: %w", drctypes.ErrInvalidRequest)
 	}
-	if x.profile == 2 && irChReq.Partition == drctypes.ControlPartition {
+	if x.profile == storage.ProfileHandoff && irChReq.Partition == drctypes.ControlPartition {
 		return drctypes.ErrControlPartition
 	}
 	if irChReq.CertReason == drctypes.T2Timeout {
@@ -259,7 +259,7 @@ func (x *IrReqBuffer) GeneratePayloadView(round uint64, timeouts []*types.Unicit
 	}
 	payload := &drctypes.Payload{Requests: make([]*drctypes.IRChangeReq, 0, len(eligible)+len(timeouts))}
 	for _, uc := range timeouts {
-		if uc == nil || (x.profile == 2 && uc.GetPartitionID() == drctypes.ControlPartition) {
+		if uc == nil || (x.profile == storage.ProfileHandoff && uc.GetPartitionID() == drctypes.ControlPartition) {
 			continue
 		}
 		pID, sID := uc.GetPartitionID(), uc.GetShardID()

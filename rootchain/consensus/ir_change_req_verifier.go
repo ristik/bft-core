@@ -77,7 +77,7 @@ func (x *IRChangeReqVerifier) VerifyIRChangeReqView(view *storage.RequestRoundVi
 	if irChReq == nil {
 		return nil, fmt.Errorf("IR change request is nil: %w", drctypes.ErrInvalidRequest)
 	}
-	if x.params.NetworkProfileVersion == 2 && irChReq.Partition == drctypes.ControlPartition {
+	if x.params.NetworkProfileVersion == storage.ProfileHandoff && irChReq.Partition == drctypes.ControlPartition {
 		return nil, drctypes.ErrControlPartition
 	}
 	vr, err := view.VerifyIRChangeReq(irChReq, t2TimeoutToRootRounds(view.T2Timeout(), x.params.BlockRate/2))
@@ -111,7 +111,7 @@ func (x *IRChangeReqVerifier) VerifyIRChangeReq(rootRound uint64, irChReq *drcty
 	if irChReq == nil {
 		return nil, fmt.Errorf("IR change request is nil")
 	}
-	if x.params.NetworkProfileVersion == 2 && irChReq.Partition == drctypes.ControlPartition {
+	if x.params.NetworkProfileVersion == storage.ProfileHandoff && irChReq.Partition == drctypes.ControlPartition {
 		return nil, drctypes.ErrControlPartition
 	}
 	// Certify input, everything needs to be verified again as if received from partition node, since we cannot trust the leader is honest.
@@ -174,7 +174,7 @@ func (x *PartitionTimeoutGenerator) GetT2Timeouts(currentRound uint64, skip ...s
 
 	timedOutShards := make([]*types.UnicityCertificate, 0, len(ucs))
 	for _, uc := range ucs {
-		if x.profile == 2 && (uc == nil || uc.GetPartitionID() == drctypes.ControlPartition) {
+		if x.profile == storage.ProfileHandoff && (uc == nil || uc.GetPartitionID() == drctypes.ControlPartition) {
 			continue
 		}
 		// a shard whose configuration switches in the proposed block gets no request in it (the executor refuses a block that has one)
@@ -213,7 +213,7 @@ func (x *PartitionTimeoutGenerator) GetT2TimeoutsView(currentRound uint64, res V
 		if uc == nil {
 			continue
 		}
-		if x.profile == 2 && uc.GetPartitionID() == drctypes.ControlPartition {
+		if x.profile == storage.ProfileHandoff && uc.GetPartitionID() == drctypes.ControlPartition {
 			continue
 		}
 		pID, sID := uc.GetPartitionID(), uc.GetShardID()

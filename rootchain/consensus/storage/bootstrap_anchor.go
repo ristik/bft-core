@@ -64,9 +64,9 @@ func (x *BlockStore) InstallEpochAnchor(head *abdrc.CommittedBlock, v evmroot.Ve
 	if err := x.installCommittedAssignment(oldRoot, v, g); err != nil {
 		return nil, err
 	}
-	oldRoot.BlockData = &rctypes.BlockData{Version: 2, Epoch: a.Epoch, Round: a.Slot,
+	oldRoot.BlockData = &rctypes.BlockData{Version: rctypes.VersionHandoff, Epoch: a.Epoch, Round: a.Slot,
 		// Preserve the old committed time across the synthetic epoch anchor.
-		Timestamp: head.Block.Timestamp, Payload: &rctypes.Payload{Version: 2}, Anchor: a}
+		Timestamp: head.Block.Timestamp, Payload: &rctypes.Payload{Version: rctypes.VersionHandoff}, Anchor: a}
 	oldRoot.Qc, oldRoot.CommitQc = nil, nil
 	installer, ok := x.storage.(interface {
 		InstallEpochAnchorRoot(*ExecutedBlock, *rctypes.EpochAnchor) error
