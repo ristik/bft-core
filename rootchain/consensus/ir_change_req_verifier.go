@@ -117,12 +117,8 @@ func (x *IRChangeReqVerifier) VerifyIRChangeReq(rootRound, parentRound uint64, i
 	if err != nil {
 		return nil, err
 	}
-	// the configured consistency proof of every carried request, as the receiving root checked it
-	target := zkverifier.Target{Partition: irChReq.Partition, Shard: irChReq.Shard, Epoch: si.IR.Epoch, Params: si.PartitionParams}
-	for _, req := range irChReq.Requests {
-		if err := x.verifyProof(req, target); err != nil {
-			return nil, err
-		}
+	if err := x.verifyProofs(irChReq, si); err != nil {
+		return nil, err
 	}
 	// verify that there are no pending changes in the pipeline for any of the updated partitions - only the
 	// branch the block extends counts, the changes in the other branches are not committed with this block
@@ -146,14 +142,28 @@ VerifyRequest verifies the change request against the committed state of the sha
 check for pending changes of the shard as that depends on which block the change is added to.
 */
 func (x *IRChangeReqVerifier) VerifyRequest(rootRound uint64, irChReq *drctypes.IRChangeReq) (*types.InputRecord, error) {
-	inputRecord, luc, _, err := x.verifyRequest(rootRound, irChReq)
+	inputRecord, luc, si, err := x.verifyRequest(rootRound, irChReq)
 	if err != nil {
+		return nil, err
+	}
+	if err := x.verifyProofs(irChReq, si); err != nil {
 		return nil, err
 	}
 	if err := checkRound(rootRound, luc); err != nil {
 		return nil, err
 	}
 	return inputRecord, nil
+}
+
+// verifyProofs is the configured consistency proof of every carried request, as the receiving root checked it.
+func (x *IRChangeReqVerifier) verifyProofs(irChReq *drctypes.IRChangeReq, si *storage.ShardInfo) error {
+	target := zkverifier.Target{Partition: irChReq.Partition, Shard: irChReq.Shard, Epoch: si.IR.Epoch, Params: si.PartitionParams}
+	for _, req := range irChReq.Requests {
+		if err := x.verifyProof(req, target); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // verifyRequest verifies the request against the last UC of the shard, returns the IR requested, the UC and the shard info judged.

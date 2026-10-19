@@ -119,16 +119,18 @@ type (
 		utbStore         *utbstore.Store
 		utbConfig        func(epoch uint64) (votesig.Config, error) // test seam: the authenticated signing configuration the binding consults; nil is the trust base store's
 		recoveryHistory  *trusthistorystore.Store
-		posPrefetching   atomic.Int32
-		posQueue         posSubmissions                   // submitted Retirement and RejectResult controls waiting for a leader
-		witnesses        WitnessFetcher                   // nil: control witnesses are only what the store already holds
-		q3               Q3Authority                      // the verified Q3 history, nil when the binary does not know it
-		v3Planned        atomic.Pointer[V3Candidate]      // the last candidate PlanV3Candidate derived: the exact body the members declared readiness for
-		q3Staged         atomic.Pointer[Q3Staged]         // the V3 candidate this validator last derived for its operator
-		q3StagedEVM      atomic.Pointer[stagedEVMMembers] // the EVM validators of the successor assignment of the candidate last staged here
-		epochAnchor      *drctypes.EpochAnchor
-		primaryWitness   atomic.Pointer[PrimaryWitnessSource] // the execution client's side of a primary candidate's EVM proof
-		primaryCache     primaryCache
+		// proposalRequestCheck, when set (tests), replaces the verification requestStillValid applies
+		proposalRequestCheck func(round, parentRound uint64, r *drctypes.IRChangeReq) error
+		posPrefetching       atomic.Int32
+		posQueue             posSubmissions                   // submitted Retirement and RejectResult controls waiting for a leader
+		witnesses            WitnessFetcher                   // nil: control witnesses are only what the store already holds
+		q3                   Q3Authority                      // the verified Q3 history, nil when the binary does not know it
+		v3Planned            atomic.Pointer[V3Candidate]      // the last candidate PlanV3Candidate derived: the exact body the members declared readiness for
+		q3Staged             atomic.Pointer[Q3Staged]         // the V3 candidate this validator last derived for its operator
+		q3StagedEVM          atomic.Pointer[stagedEVMMembers] // the EVM validators of the successor assignment of the candidate last staged here
+		epochAnchor          *drctypes.EpochAnchor
+		primaryWitness       atomic.Pointer[PrimaryWitnessSource] // the execution client's side of a primary candidate's EVM proof
+		primaryCache         primaryCache
 		// approvalSink and judgeHook are test seams: where a released parked approval goes, and the intake's proof judgement
 		approvalSink func(*abdrc.HandoffApprovalMsg) error
 		judgeHook    func(*abdrc.HandoffApprovalMsg) error
@@ -1581,7 +1583,7 @@ func (x *ConsensusManager) processNewRoundEvent(ctx context.Context) {
 			// buffered requests were verified against the state at the time they arrived, a commit since then can have made them
 			// stale - leave out the requests the validators (this node included) would reject
 			payload.Requests = slices.DeleteFunc(payload.Requests, func(r *drctypes.IRChangeReq) bool {
-				if _, err := x.irReqVerifier.VerifyIRChangeReq(round, branch, r); err != nil {
+				if err := x.requestStillValid(round, branch, r); err != nil {
 					x.log.WarnContext(ctx, "change request left out of the proposal", logger.Shard(r.Partition, r.Shard), logger.Error(err))
 					return true
 				}
@@ -1878,7 +1880,7 @@ func (x *ConsensusManager) completeRecovery(ctx context.Context, triggerMsg any)
 	if qc, ok := triggerMsg.(*drctypes.QuorumCert); ok {
 		// the QC which failed to be processed, its block should be there now
 		if err := x.processQC(ctx, qc); err != nil {
-			return false, fmt.Errorf("QC after recovery: %w", err)
+			return false, fmt.Errorf("QC after recovery: %w: %w", errTriggerQCNotAccepted, err)
 		}
 	}
 	if vote, ok := triggerMsg.(*abdrc.VoteMsg); ok {
@@ -1889,6 +1891,22 @@ func (x *ConsensusManager) completeRecovery(ctx context.Context, triggerMsg any)
 		}
 	}
 	return false, nil
+}
+
+// errTriggerQCNotAccepted marks a recovery whose state was installed but whose trigger QC was not accepted on top of it.
+var errTriggerQCNotAccepted = errors.New("the QC which triggered the recovery is not accepted")
+
+// requestStillValid is the verification a buffered request must still pass when a proposal on the branch ending with the block of round "branch" is
+// made: the one the validators will apply to the block. A timeout request is generated from that very state a moment before and is not re-judged.
+func (x *ConsensusManager) requestStillValid(round, branch uint64, r *drctypes.IRChangeReq) error {
+	if r.CertReason == drctypes.T2Timeout {
+		return nil
+	}
+	if x.proposalRequestCheck != nil {
+		return x.proposalRequestCheck(round, branch, r)
+	}
+	_, err := x.irReqVerifier.VerifyIRChangeReq(round, branch, r)
+	return err
 }
 
 // recoveryAdmissionRefused marks the refusals of a proposal that triggered a recovery that come before anything is executed or signed: they are not
@@ -1919,7 +1937,12 @@ func (x *ConsensusManager) voteAfterRecovery(ctx context.Context, prop *abdrc.Pr
 	// Authenticate the trigger QC against its executed parent before live time admission.
 	if prop.Block.Qc != nil {
 		if err := x.checkRecoveryNeeded(prop.Block.Qc); err != nil {
-			return admissionRefused(fmt.Errorf("recovery trigger parent: %w", err))
+			err = fmt.Errorf("recovery trigger parent: %w", err)
+			// the installed state does not carry the parent the proposal's QC certifies: recover again, as onProposalMsg does
+			if e := x.sendRecoveryRequests(ctx, prop); e != nil {
+				err = errors.Join(err, fmt.Errorf("sending recovery requests failed: %w", e))
+			}
+			return admissionRefused(err)
 		}
 	}
 	// Recheck after recovery with the current store and current clock.

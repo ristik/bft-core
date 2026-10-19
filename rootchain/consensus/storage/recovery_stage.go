@@ -67,6 +67,10 @@ func ValidateRecoveryState(hashAlg crypto.Hash, state *abdrc.StateMsg, toRound u
 	}
 
 	mem := newMemoryStore()
+	// the staging store runs the recovery's profile: a store that holds the trusted genesis must have recorded it (pinProfile)
+	if err := mem.SetNetworkProfile(profile); err != nil {
+		return err
+	}
 	if local != nil {
 		genesis, err := trustedGenesis(local, hashAlg, orchestration, profile)
 		if err != nil {

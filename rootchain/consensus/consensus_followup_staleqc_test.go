@@ -47,14 +47,18 @@ func Test_Followup_RecoveryRetainedParentMustMatchStaleQC(t *testing.T) {
 		return tc
 	}
 
+	// the safety module reads the parent timestamp of a block it signs from the manager's block store: the honest branch is in `bs`
+	own := cm.blockStore
+	cm.blockStore = bs
 	vote5, err := cm.safety.MakeVote(b5, root5, b5.Qc, mkTC(4, b5.Qc))
+	cm.blockStore = own
 	require.NoError(t, err)
 	qc5 := drctypes.NewQuorumCertificateFromVote(vote5.VoteInfo, vote5.LedgerCommitInfo, map[string]hex.Bytes{vote5.Author: vote5.Signature})
 	require.NoError(t, qc5.Verify(cm.trustBase.Load()))
 	b7 := clone(t, b5)
 	b7.Round, b7.Timestamp, b7.Qc = 7, b5.Timestamp+2, qc5
 	f.state.Pending = append(f.state.Pending, b5, b7)
-	require.NoError(t, f.state.Verify(cm.params.HashAlgorithm, cm.trustBase.Load()))
+	require.NoError(t, f.state.Verify(cm.params.HashAlgorithm, cm.trustBase.Load(), cm.trustBaseStore.GenesisPin()))
 	require.NoError(t, storage.ValidateRecoveryState(cm.params.HashAlgorithm, f.state, 4, cm.orchestration, cm.blockStore.GetDB(), func(bs *storage.BlockStore) (storage.IRChangeReqVerifier, error) {
 		return NewIRChangeReqVerifier(cm.params, bs)
 	}, cm.log))

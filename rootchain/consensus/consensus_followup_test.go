@@ -252,7 +252,7 @@ func Test_Followup_QCBindsTheTimestampOfTheRecoveredTip(t *testing.T) {
 			// the served state passes the verification and the staged recovery of another node
 			served, err := f.cm.blockStore.GetState()
 			require.NoError(t, err)
-			require.NoError(t, served.Verify(crypto.SHA256, f.cm.trustBase.Load()))
+			require.NoError(t, served.Verify(crypto.SHA256, f.cm.trustBase.Load(), f.cm.trustBaseStore.GenesisPin()))
 			require.NoError(t, storage.ValidateRecoveryState(crypto.SHA256, clone(t, served), served.CommittedHead.GetRound(), f.cm.orchestration, f.peerDB,
 				func(bs *storage.BlockStore) (storage.IRChangeReqVerifier, error) {
 					return NewIRChangeReqVerifier(f.cm.params, bs)

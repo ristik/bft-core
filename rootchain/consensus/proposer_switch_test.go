@@ -32,6 +32,8 @@ import (
 const otherPartition types.PartitionID = 0x00AB0001
 
 func bufferRequest(cm *ConsensusManager, partition types.PartitionID) types.PartitionShardID {
+	// the requests of these tests are bare: the verification of a buffered request is not what is under test
+	cm.proposalRequestCheck = func(uint64, uint64, *rctypes.IRChangeReq) error { return nil }
 	key := types.PartitionShardID{PartitionID: partition, ShardID: types.ShardID{}.Key()}
 	cm.irReqBuffer.irChgReqBuffer[key] = &irChange{Req: &rctypes.IRChangeReq{Partition: partition, CertReason: rctypes.Quorum}, InputRecord: &types.InputRecord{Version: 1}}
 	return key
