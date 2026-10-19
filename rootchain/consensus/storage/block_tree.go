@@ -216,8 +216,10 @@ func (bt *BlockTree) InsertQc(qc *abdrc.QuorumCert) error {
 	if err != nil {
 		return fmt.Errorf("find block: %w", err)
 	}
-	if !bytes.Equal(b.RootHash, qc.VoteInfo.CurrentRootHash) {
-		return errors.New("qc state hash is different from local computed state hash")
+	// the QC must certify this very block: before the QC is attached, the block is written, the high QC raised
+	// or a commit attempted, check every field of the block the QC authenticates (not only the state root)
+	if err = CheckQcOfBlock(qc, b); err != nil {
+		return fmt.Errorf("qc does not certify the local block of round %d: %w", qc.GetRound(), err)
 	}
 
 	bt.m.Lock()

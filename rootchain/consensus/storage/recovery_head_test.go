@@ -39,7 +39,7 @@ func consistentHead(t *testing.T, head *abdrc.CommittedBlock, orch Orchestration
 	info := &rctypes.RoundInfo{RoundNumber: b.Round, ParentRoundNumber: b.GetParentRound(), Epoch: b.Epoch, Timestamp: b.Timestamp, CurrentRootHash: built.RootHash}
 	out.Qc = &rctypes.QuorumCert{VoteInfo: info, LedgerCommitInfo: &types.UnicitySeal{Version: 1, Hash: built.RootHash, RootChainRoundNumber: b.Round, Epoch: b.Epoch, Timestamp: b.Timestamp}}
 	out.CommitQc = &rctypes.QuorumCert{
-		VoteInfo: &rctypes.RoundInfo{RoundNumber: b.Round + 1, ParentRoundNumber: b.Round, Epoch: b.Epoch, Timestamp: b.Timestamp},
+		VoteInfo:         &rctypes.RoundInfo{RoundNumber: b.Round + 1, ParentRoundNumber: b.Round, Epoch: b.Epoch, Timestamp: b.Timestamp},
 		LedgerCommitInfo: &types.UnicitySeal{Version: 1, Hash: built.RootHash, RootChainRoundNumber: b.Round, Epoch: b.Epoch, Timestamp: b.Timestamp},
 	}
 	return &out

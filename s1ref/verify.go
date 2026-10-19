@@ -3,9 +3,9 @@ package s1ref
 import (
 	"bytes"
 	"crypto"
-	"errors"
 	"crypto/sha256"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"math/big"
 
