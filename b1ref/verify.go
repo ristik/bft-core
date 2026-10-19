@@ -59,6 +59,24 @@ func firstErr(cur, next error) error {
 }
 
 func checkSignature(m *member, sig, sigBytes []byte) error {
+	if err := checkSignatureFormat(sig); err != nil {
+		return err
+	}
+	work("signature")
+	return verifySealSignature(m.ver, sig, sigBytes)
+}
+
+// CheckSealSignature is the B1 profile's rule for one seal signature, for a caller that holds the member's verifier (the oracle of another profile
+// that must accept exactly what B1 accepts): 64 bytes, or 65 with a recovery byte 0 or 1 (ErrSigFormat otherwise); r and s in range and s low
+// (ErrSigRange); then the compact verification of r||s against the member's key (ErrSigInvalid). It is the rule of checkSignature, without the gas.
+func CheckSealSignature(ver abcrypto.Verifier, sig, sigBytes []byte) error {
+	if err := checkSignatureFormat(sig); err != nil {
+		return err
+	}
+	return verifySealSignature(ver, sig, sigBytes)
+}
+
+func checkSignatureFormat(sig []byte) error {
 	if len(sig) != 64 && len(sig) != 65 {
 		return ErrSigFormat
 	}
@@ -71,8 +89,11 @@ func checkSignature(m *member, sig, sigBytes []byte) error {
 	if r.Sign() == 0 || r.Cmp(curveN) >= 0 || s.Sign() == 0 || s.Cmp(halfN) > 0 {
 		return ErrSigRange
 	}
-	work("signature")
-	if err := verifyCompact(m.ver, sig, sigBytes); err != nil {
+	return nil
+}
+
+func verifySealSignature(ver abcrypto.Verifier, sig, sigBytes []byte) error {
+	if err := verifyCompact(ver, sig, sigBytes); err != nil {
 		return ErrSigInvalid
 	}
 	return nil
