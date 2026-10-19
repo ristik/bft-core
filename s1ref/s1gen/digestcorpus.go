@@ -20,10 +20,10 @@ const DigestCorpusFormat = "s1-evidence-digest/1"
 
 // DigestSeal is the native UnicitySeal of a committing vote (signatures stripped).
 type DigestSeal struct {
-	Network      string `json:"network"`
-	Round        string `json:"commitRound"`
-	Epoch        string `json:"commitEpoch"`
-	Timestamp    string `json:"timestamp"`
+	Network      uint64 `json:"network"`
+	Round        uint64 `json:"commitRound"`
+	Epoch        uint64 `json:"commitEpoch"`
+	Timestamp    uint64 `json:"timestamp"`
 	PreviousHash string `json:"previousHash"` // VH
 	Hash         string `json:"commitHash"`
 	SigBytes     string `json:"sigBytes"` // the native encoding with the signature map null
@@ -36,14 +36,14 @@ type DigestVote struct {
 	Description  string     `json:"description"`
 	Signer       string     `json:"signer"`
 	Key          string     `json:"key"` // compressed secp256k1
-	Epoch        string     `json:"epoch"`
-	Round        string     `json:"round"`
-	Parent       string     `json:"parent"`
+	Epoch        uint64     `json:"epoch"`
+	Round        uint64     `json:"round"`
+	Parent       uint64     `json:"parent"`
 	Exec         string     `json:"exec"`
-	Timestamp    string     `json:"timestamp"` // "0": omitted from VI
+	Timestamp    uint64     `json:"timestamp"` // "0": omitted from VI
 	Committing   bool       `json:"committing"`
 	CommitHash   string     `json:"commitHash"` // 32 bytes hex, "" when the vote does not commit
-	CommitRound  string     `json:"commitRound"`
+	CommitRound  uint64     `json:"commitRound"`
 	VoteInfo     string     `json:"voteInfo"`     // VI
 	VoteInfoHash string     `json:"voteInfoHash"` // VH = sha256(VI)
 	Preimage     string     `json:"preimage"`     // PV
@@ -57,8 +57,8 @@ type DigestVote struct {
 // DigestAnchor is the anchor of a first-round-after-epoch-change timeout.
 type DigestAnchor struct {
 	GenesisID string `json:"genesisId"`
-	Epoch     string `json:"epoch"`
-	Slot      string `json:"slot"`
+	Epoch     uint64 `json:"epoch"`
+	Slot      uint64 `json:"slot"`
 }
 
 // DigestTimeout is one scheme 2 timeout statement.
@@ -67,9 +67,9 @@ type DigestTimeout struct {
 	Description string       `json:"description"`
 	Signer      string       `json:"signer"`
 	Key         string       `json:"key"`
-	Epoch       string       `json:"epoch"`
-	Round       string       `json:"round"`
-	HighQcRound string       `json:"highQcRound"`
+	Epoch       uint64       `json:"epoch"`
+	Round       uint64       `json:"round"`
+	HighQcRound uint64       `json:"highQcRound"`
 	HasAnchor   bool         `json:"hasAnchor"`
 	Anchor      DigestAnchor `json:"anchor"` // zero values when there is no anchor
 	Author      string       `json:"author"`
@@ -112,6 +112,9 @@ type DigestCorpus struct {
 
 func dec(n uint64) string { return strconv.FormatUint(n, 10) }
 
+// hx0 is the 0x-prefixed lower-case hex of b. The prefix is what makes a consumer's JSON decoder read the value as bytes, never as a number.
+func hx0(b []byte) string { return "0x" + hex.EncodeToString(b) }
+
 // widths are the CBOR head-width boundaries of an unsigned integer.
 var widths = []uint64{0, 1, 23, 24, 255, 256, 65535, 65536, 1<<32 - 1, 1 << 32, ^uint64(0)}
 
@@ -120,20 +123,21 @@ func (g *gen) digestVote(w *world, id, desc string, e *ev) DigestVote {
 	v := w.vals[e.author]
 	vi := e.vi(w.net, w.genesis)
 	dg := sha256.Sum256(e.pv)
-	out := DigestVote{Seal: DigestSeal{Network: "0", Round: "0", Epoch: "0", Timestamp: "0"}, ID: id, Description: desc, Signer: e.author, Key: hx(v.pub), Epoch: dec(e.epoch), Round: dec(e.round), Parent: dec(e.parent),
-		Exec: hx(e.exec[:]), Timestamp: dec(e.ts), CommitRound: dec(e.sealRound), VoteInfo: hx(vi), VoteInfoHash: hx(e.prev), Preimage: hx(e.pv), Digest: hx(dg[:]),
-		Sig64: hx(e.voteSig), Sig65: hx(v.signV(e.pv)), SigHighS: hx(highS(e.voteSig))}
+	zero := hx0(make([]byte, 32))
+	out := DigestVote{Seal: DigestSeal{PreviousHash: zero, Hash: zero, SigBytes: "0x", Signature: "0x"}, CommitHash: zero, ID: id, Description: desc, Signer: e.author, Key: hx0(v.pub), Epoch: e.epoch, Round: e.round, Parent: e.parent,
+		Exec: hx0(e.exec[:]), Timestamp: e.ts, CommitRound: e.sealRound, VoteInfo: hx0(vi), VoteInfoHash: hx0(e.prev), Preimage: hx0(e.pv), Digest: hx0(dg[:]),
+		Sig64: hx0(e.voteSig), Sig65: hx0(v.signV(e.pv)), SigHighS: hx0(highS(e.voteSig))}
 	if e.committing() {
-		h := hx(e.hash)
+		h := hx0(e.hash)
 		out.Committing, out.CommitHash = true, h
-		out.Seal = DigestSeal{Network: dec(e.net), Round: dec(e.sealRound), Epoch: dec(e.sealEpoch), Timestamp: dec(e.sealTS), PreviousHash: hx(e.prev), Hash: h,
-			SigBytes: hx(e.sealBytes()), Signature: hx(e.sealSig)}
+		out.Seal = DigestSeal{Network: e.net, Round: e.sealRound, Epoch: e.sealEpoch, Timestamp: e.sealTS, PreviousHash: hx0(e.prev), Hash: h,
+			SigBytes: hx0(e.sealBytes()), Signature: hx0(e.sealSig)}
 	}
 	return out
 }
 
 func (g *gen) digestTimeout(w *world, id, desc, signer string, epoch, round, high uint64, anchor *DigestAnchor, anchorRaw *[3]uint64, gid [32]byte) DigestTimeout {
-	zero := DigestAnchor{GenesisID: "", Epoch: "0", Slot: "0"}
+	zero := DigestAnchor{GenesisID: hx0(make([]byte, 32))}
 	var pt []byte
 	if anchor == nil {
 		pt = timeoutPreimage(w.net, w.genesis, epoch, round, high, signer)
@@ -147,8 +151,8 @@ func (g *gen) digestTimeout(w *world, id, desc, signer string, epoch, round, hig
 	if has {
 		a = *anchor
 	}
-	return DigestTimeout{ID: id, Description: desc, Signer: signer, Key: hx(v.pub), Epoch: dec(epoch), Round: dec(round), HighQcRound: dec(high), HasAnchor: has, Anchor: a,
-		Author: signer, Preimage: hx(pt), Digest: hx(dg[:]), Sig64: hx(v.sign(pt))}
+	return DigestTimeout{ID: id, Description: desc, Signer: signer, Key: hx0(v.pub), Epoch: epoch, Round: round, HighQcRound: high, HasAnchor: has, Anchor: a,
+		Author: signer, Preimage: hx0(pt), Digest: hx0(dg[:]), Sig64: hx0(v.sign(pt))}
 }
 
 // BuildDigestCorpus generates the corpus from a seed. It is a pure function of the seed.
@@ -165,10 +169,10 @@ func BuildDigestCorpus(seed string) *DigestCorpus {
 	for _, net := range []uint64{5, 1, 24, 256, 65535} {
 		w := newWorld(seed, net)
 		for _, id := range []string{"v1", "v2", "v3", "v5"} {
-			c.Keys[id] = hx(w.vals[id].pub)
+			c.Keys[id] = hx0(w.vals[id].pub)
 		}
 		g := &gen{w: w}
-		ctx := DigestContext{Network: net, Genesis: hx32(w.genesis), VoteDomain: dv(w.genesis), TimeoutDomain: dt(w.genesis)}
+		ctx := DigestContext{Network: net, Genesis: hx0(w.genesis[:]), VoteDomain: dv(w.genesis), TimeoutDomain: dt(w.genesis)}
 		votes := &ctx.Votes
 		add := func(id, desc string, e *ev) { *votes = append(*votes, g.digestVote(w, id, desc, e)) }
 		tag := byte(0x50)
@@ -247,7 +251,7 @@ func BuildDigestCorpus(seed string) *DigestCorpus {
 		}
 		gid := sum([]byte("anchor genesis"), []byte(seed))
 		ctx.Timeouts = append(ctx.Timeouts, g.digestTimeout(w, "anchor", "first round after an epoch change: the anchor names the epoch and slot", "v1", 3, 40, 39,
-			&DigestAnchor{GenesisID: hx32(gid), Epoch: "3", Slot: "39"}, &[3]uint64{3, 39}, gid))
+			&DigestAnchor{GenesisID: hx0(gid[:]), Epoch: 3, Slot: 39}, &[3]uint64{3, 39}, gid))
 		ctx.Timeouts = append(ctx.Timeouts, g.digestTimeout(w, "other-author", "another author, same slot", "v2", 2, 150, 149, nil, nil, [32]byte{}))
 		c.Contexts = append(c.Contexts, ctx)
 	}

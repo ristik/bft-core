@@ -6,7 +6,7 @@ import (
 	"encoding/hex"
 	"math/big"
 	"os"
-	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/unicitynetwork/bft-go-base/crypto"
@@ -16,24 +16,17 @@ import (
 	"github.com/unicitynetwork/bft-core/s1ref/s1gen"
 )
 
+const zeroHash = "0x0000000000000000000000000000000000000000000000000000000000000000"
+
 const digestCorpusPath = "testdata/evidence-digest-corpus-v1.json"
 
 func unhex(t *testing.T, s string) []byte {
 	t.Helper()
-	b, err := hex.DecodeString(s)
+	b, err := hex.DecodeString(strings.TrimPrefix(s, "0x"))
 	if err != nil {
 		t.Fatalf("bad hex %q: %v", s, err)
 	}
 	return b
-}
-
-func num(t *testing.T, s string) uint64 {
-	t.Helper()
-	n, err := strconv.ParseUint(s, 10, 64)
-	if err != nil {
-		t.Fatalf("bad number %q: %v", s, err)
-	}
-	return n
 }
 
 // The committed corpus is the generator's output.
@@ -76,12 +69,12 @@ func TestDigestCorpusMatchesTheProductionEncoderAndVerifier(t *testing.T) {
 		for _, v := range ctx.Votes {
 			votes++
 			byID[v.ID] = v
-			vi := votesig.VoteInfo{Epoch: num(t, v.Epoch), Round: num(t, v.Round), Parent: num(t, v.Parent), Timestamp: num(t, v.Timestamp)}
+			vi := votesig.VoteInfo{Epoch: v.Epoch, Round: v.Round, Parent: v.Parent, Timestamp: v.Timestamp}
 			copy(vi.Exec[:], unhex(t, v.Exec))
-			commit := votesig.Commit{Round: num(t, v.CommitRound)}
+			commit := votesig.Commit{Round: v.CommitRound}
 			if v.Committing {
 				commit.Hash = unhex(t, v.CommitHash)
-			} else if v.CommitHash != "" || v.Seal.Hash != "" {
+			} else if v.CommitHash != zeroHash || v.Seal.Hash != zeroHash {
 				t.Fatalf("%s: commit data on a non-committing vote", v.ID)
 			}
 			viBytes, err := cfg.VoteInfoBytes(vi)
@@ -93,11 +86,11 @@ func TestDigestCorpusMatchesTheProductionEncoderAndVerifier(t *testing.T) {
 			if err != nil {
 				t.Fatalf("%s: %v", v.ID, err)
 			}
-			if hex.EncodeToString(viBytes) != v.VoteInfo || hex.EncodeToString(vh[:]) != v.VoteInfoHash || hex.EncodeToString(pv) != v.Preimage {
+			if "0x"+hex.EncodeToString(viBytes) != v.VoteInfo || "0x"+hex.EncodeToString(vh[:]) != v.VoteInfoHash || "0x"+hex.EncodeToString(pv) != v.Preimage {
 				t.Fatalf("N=%d %s: VI/VH/PV differ from votesig", ctx.Network, v.ID)
 			}
 			d := sha256.Sum256(pv)
-			if hex.EncodeToString(d[:]) != v.Digest {
+			if "0x"+hex.EncodeToString(d[:]) != v.Digest {
 				t.Fatalf("%s: digest", v.ID)
 			}
 			if (vi.Timestamp == 0) != (len(viBytes) > 0 && viBytes[0] == 0x86) {
@@ -121,10 +114,10 @@ func TestDigestCorpusMatchesTheProductionEncoderAndVerifier(t *testing.T) {
 				t.Fatalf("%s: low/high s forms", v.ID)
 			}
 			if v.Committing {
-				seal := types.UnicitySeal{Version: 1, NetworkID: types.NetworkID(num(t, v.Seal.Network)), RootChainRoundNumber: num(t, v.Seal.Round),
-					Epoch: num(t, v.Seal.Epoch), Timestamp: num(t, v.Seal.Timestamp), PreviousHash: unhex(t, v.Seal.PreviousHash), Hash: unhex(t, v.Seal.Hash)}
+				seal := types.UnicitySeal{Version: 1, NetworkID: types.NetworkID(v.Seal.Network), RootChainRoundNumber: v.Seal.Round,
+					Epoch: v.Seal.Epoch, Timestamp: v.Seal.Timestamp, PreviousHash: unhex(t, v.Seal.PreviousHash), Hash: unhex(t, v.Seal.Hash)}
 				sb, err := seal.SigBytes()
-				if err != nil || hex.EncodeToString(sb) != v.Seal.SigBytes {
+				if err != nil || "0x"+hex.EncodeToString(sb) != v.Seal.SigBytes {
 					t.Fatalf("%s: seal bytes differ from UnicitySeal.SigBytes (%v)", v.ID, err)
 				}
 				if v.Seal.PreviousHash != v.VoteInfoHash {
@@ -149,9 +142,9 @@ func TestDigestCorpusMatchesTheProductionEncoderAndVerifier(t *testing.T) {
 		}
 		for _, to := range ctx.Timeouts {
 			timeouts++
-			tt := votesig.Timeout{Epoch: num(t, to.Epoch), Round: num(t, to.Round), HighQcRound: num(t, to.HighQcRound), Author: to.Author}
+			tt := votesig.Timeout{Epoch: to.Epoch, Round: to.Round, HighQcRound: to.HighQcRound, Author: to.Author}
 			if to.HasAnchor {
-				a := votesig.Anchor{Epoch: num(t, to.Anchor.Epoch), Slot: num(t, to.Anchor.Slot)}
+				a := votesig.Anchor{Epoch: to.Anchor.Epoch, Slot: to.Anchor.Slot}
 				copy(a.GenesisID[:], unhex(t, to.Anchor.GenesisID))
 				tt.Anchor = &a
 			}
@@ -159,11 +152,11 @@ func TestDigestCorpusMatchesTheProductionEncoderAndVerifier(t *testing.T) {
 			if err != nil {
 				t.Fatalf("%s: %v", to.ID, err)
 			}
-			if hex.EncodeToString(pt) != to.Preimage {
+			if "0x"+hex.EncodeToString(pt) != to.Preimage {
 				t.Fatalf("N=%d timeout %s: PT differs from votesig", ctx.Network, to.ID)
 			}
 			d := sha256.Sum256(pt)
-			if hex.EncodeToString(d[:]) != to.Digest {
+			if "0x"+hex.EncodeToString(d[:]) != to.Digest {
 				t.Fatalf("timeout %s: digest", to.ID)
 			}
 			ver, _ := crypto.NewVerifierSecp256k1(unhex(t, to.Key))
