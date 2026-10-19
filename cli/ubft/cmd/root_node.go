@@ -78,7 +78,7 @@ type (
 		UTBGenesisID             string // its EntryID, the pin
 		UTBEntriesDBFile         string
 		UTBCaptureUCResp         string // lane diagnostics: write each distinct version 2 certification response that carries entries here, before it is sent
-		HandoffProfile                 bool
+		HandoffProfile           bool
 		InstallHandoffEpoch      uint64
 		Q3Lane                   bool // the Q3 acceptance lane: a verified Q3 history, the install journal and the V3 handoff pipeline
 		Q3JournalDBFile          string

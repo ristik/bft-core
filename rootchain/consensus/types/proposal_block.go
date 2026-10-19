@@ -53,6 +53,7 @@ type payloadV1 struct {
 	_        struct{} `cbor:",toarray"`
 	Requests []*IRChangeReq
 }
+
 // The block and payload version is the root network profile that produced them. Version 1 is the legacy profile. The handoff profile is
 // version 3: version 2 was the handoff profile before the shard-configuration transition rule of ristik/bft-core#640 changed what a block
 // executes, and a version 2 block, payload, state or anchor is refused (never read as 3), so an old-rule node cannot take part in a
