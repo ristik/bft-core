@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"strings"
 	"testing"
 
@@ -133,4 +134,65 @@ func TestOperatorNonLoopbackSourcesAreWarnedAbout(t *testing.T) {
 	require.Contains(t, buf.String(), "level=WARN")
 	require.Contains(t, buf.String(), "10.1.0.0/16")
 	require.NotContains(t, buf.String(), "sources=\"[127.0.0.1")
+}
+
+// The warning is about what a range admits: a wide range written with a loopback base address is not loopback.
+func TestOperatorWideRangesWithALoopbackBaseAreWarnedAbout(t *testing.T) {
+	loopback := []string{"127.0.0.1", "127.0.0.0/8", "127.1.0.0/16", "127.0.0.1/32", "::1", "::1/128", "::ffff:127.0.0.1", "::ffff:127.0.0.0/104"}
+	for _, list := range loopback {
+		set, err := parseOperatorSources(list)
+		require.NoError(t, err, list)
+		require.Empty(t, set.exposed(), "%s is loopback", list)
+	}
+	wide := map[string]string{
+		"127.0.0.1/0":          "0.0.0.0/0",
+		"127.0.0.0/1":          "0.0.0.0/1",
+		"127.0.0.0/7":          "126.0.0.0/7",
+		"::1/0":                "::/0",
+		"::1/127":              "::/127",
+		"::ffff:127.0.0.1/96":  "0.0.0.0/0", // wider than loopback once unmapped
+		"::ffff:127.0.0.1/100": "112.0.0.0/4",
+	}
+	for list, shown := range wide {
+		set, err := parseOperatorSources(list)
+		require.NoError(t, err, list)
+		require.Equal(t, []string{shown}, set.exposed(), list)
+	}
+	// they do admit non-loopback peers, which is why the warning matters
+	for list, peer := range map[string]string{"127.0.0.1/0": "8.8.8.8", "::1/0": "2001:db8::1", "::ffff:127.0.0.1/96": "8.8.8.8"} {
+		set, err := parseOperatorSources(list)
+		require.NoError(t, err)
+		require.True(t, set.allows(peer), "%s admits %s", list, peer)
+	}
+	// a mixed list names only the offending range
+	set, err := parseOperatorSources("127.0.0.0/8,::1/128,127.0.0.1/0,10.0.0.0/8")
+	require.NoError(t, err)
+	require.Equal(t, []string{"0.0.0.0/0", "10.0.0.0/8"}, set.exposed())
+
+	var buf bytes.Buffer
+	log := slog.New(slog.NewTextHandler(&buf, nil))
+	t.Cleanup(func() { set, _ := parseOperatorSources(defaultOperatorSources); activeOperatorSources.Store(set) })
+	require.NoError(t, configureOperatorSources(log, "::1/0"))
+	require.Contains(t, buf.String(), "level=WARN")
+	require.Contains(t, buf.String(), "::/0")
+}
+
+// A configured IPv4-mapped IPv6 prefix matches the IPv4 peers it names (peers are matched unmapped); one shorter than /96 is refused.
+func TestOperatorMappedPrefixesMatchTheirIPv4Peers(t *testing.T) {
+	useOperatorSources(t, "::ffff:10.0.0.0/104")
+	require.Equal(t, http.StatusOK, operatorCall("10.1.2.3:1"))
+	require.Equal(t, http.StatusOK, operatorCall("[::ffff:10.1.2.3]:1"))
+	require.Equal(t, http.StatusForbidden, operatorCall("11.0.0.1:1"))
+	log := slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
+	require.Error(t, configureOperatorSources(log, "::ffff:0:0/80"))
+	require.Equal(t, http.StatusOK, operatorCall("10.1.2.3:1"), "the previous list stays")
+}
+
+func TestOperatorLoopbackPrefixIsDecidedByWhatItCovers(t *testing.T) {
+	for p, want := range map[string]bool{
+		"127.0.0.0/8": true, "127.255.0.0/16": true, "127.0.0.1/32": true, "::1/128": true,
+		"127.0.0.1/0": false, "127.0.0.1/7": false, "127.0.0.0/4": false, "::1/0": false, "::1/127": false, "::/128": false, "10.0.0.0/8": false,
+	} {
+		require.Equal(t, want, isLoopbackPrefix(netip.MustParsePrefix(p)), p) // (written unmasked on purpose)
+	}
 }

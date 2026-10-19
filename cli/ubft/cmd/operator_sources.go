@@ -23,7 +23,6 @@ const defaultOperatorSources = "127.0.0.0/8,::1/128"
 // operatorSourceSet is an immutable list of allowed source prefixes.
 type operatorSourceSet struct {
 	prefixes []netip.Prefix
-	loopback bool // the set is exactly the loopback default
 }
 
 // parseOperatorSources reads a comma-separated list of addresses and CIDR prefixes (empty means the loopback default). An empty element or any
@@ -32,7 +31,7 @@ func parseOperatorSources(list string) (*operatorSourceSet, error) {
 	if strings.TrimSpace(list) == "" {
 		list = defaultOperatorSources // not configured
 	}
-	set := &operatorSourceSet{loopback: list == defaultOperatorSources}
+	set := &operatorSourceSet{}
 	for _, item := range strings.Split(list, ",") {
 		item = strings.TrimSpace(item)
 		var p netip.Prefix
@@ -51,7 +50,14 @@ func parseOperatorSources(list string) (*operatorSourceSet, error) {
 			}
 			p = netip.PrefixFrom(a, a.BitLen())
 		}
-		set.prefixes = append(set.prefixes, p)
+		if p.Addr().Is4In6() {
+			// peers are matched unmapped, so an IPv4-mapped prefix is written in its IPv4 form; one shorter than /96 is wider than any IPv4 range
+			if p.Bits() < 96 {
+				return nil, fmt.Errorf("--operator-allowed-sources: %q is an IPv4-mapped prefix shorter than /96; write the IPv4 range instead", item)
+			}
+			p = netip.PrefixFrom(p.Addr().Unmap(), p.Bits()-96)
+		}
+		set.prefixes = append(set.prefixes, p.Masked())
 	}
 	return set, nil
 }
@@ -71,11 +77,16 @@ func (s *operatorSourceSet) allows(host string) bool {
 	return false
 }
 
-// exposed lists the configured prefixes that are not loopback (for the start-up warning).
+// isLoopbackPrefix reports whether every address of the prefix is loopback. The base address of the masked prefix decides it: a masked base in 127.0.0.0/8
+// means the prefix is no wider than /8, and the masked base ::1 means exactly ::1/128. A wide range written with a loopback base address (127.0.0.1/0,
+// ::1/0) masks to 0.0.0.0/0 or ::/0 and is not loopback although it admits the world.
+func isLoopbackPrefix(p netip.Prefix) bool { return p.Masked().Addr().IsLoopback() }
+
+// exposed lists the configured prefixes that are not wholly loopback (for the start-up warning).
 func (s *operatorSourceSet) exposed() []string {
 	var out []string
 	for _, p := range s.prefixes {
-		if !p.Addr().IsLoopback() {
+		if !isLoopbackPrefix(p) {
 			out = append(out, p.String())
 		}
 	}
