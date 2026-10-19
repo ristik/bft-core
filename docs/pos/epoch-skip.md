@@ -91,3 +91,10 @@ against the configuration in effect at the state's **execution** round (the orde
 which keep the old checkpoint, so they are not "normalised" to a newer configuration): applied hash, the TR epoch, the fee map's members,
 the TR's fee and stat commitments against the accumulators. `TestHeadsBeforeAtAndAfterTheSwitchRecoverIdentically` replays heads before,
 at and after each switch from the network and the disk.
+
+## Legacy profile and existing devnets
+
+The invariant above and the transition rule apply to the legacy profile (1) as well, and the legacy profile adopts the network-profile pin
+on a store that never recorded one. A legacy store written by the execution before #641 (for example one whose TR announced an epoch ahead of
+its applied configuration) can therefore fail `initBlock` on this binary; the deployments are fresh-genesis, a restarted old legacy devnet
+is not supported. The handoff profile is stricter: a store without the pin is refused outright.

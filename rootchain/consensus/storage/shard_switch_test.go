@@ -464,6 +464,8 @@ func TestRecoveryRefusesStaleFutureEditedAndMismatchedShardStates(t *testing.T) 
 			break
 		}
 	}, ErrControlCheckpoint)
+	refuse("a fee map with an extra member", 31, func(s *ShardInfo) { s.Fees["intruder"] = 0 }, ErrShardConfMismatch)
+	refuse("edited statistics", 31, func(s *ShardInfo) { s.Stat.Blocks++ }, ErrControlCheckpoint)
 	refuse("a fee map that names another member", 31, func(s *ShardInfo) {
 		for k, v := range s.Fees {
 			delete(s.Fees, k)

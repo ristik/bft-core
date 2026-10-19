@@ -167,11 +167,14 @@ type profilePin interface {
 
 // pinProfile makes the profile a property of the store, checked before anything else is read from it: a store that recorded another
 // profile, and a store that holds blocks but never recorded one (written by a root of the execution rule before the pin, which this binary
-// does not run), are refused - whatever their state looks like (the legacy profile has no earlier rule to tell apart and adopts the pin). An empty store records the profile. A store that cannot pin (a test double)
-// is the caller's.
+// does not run), are refused - whatever their state looks like (the legacy profile has no earlier rule to tell apart and adopts the pin). An empty store records the profile. A store that cannot pin is refused under the handoff profile (fail closed; the legacy profile has nothing earlier to tell apart).
 func pinProfile(db PersistentStore, profile uint64) error {
 	pin, ok := db.(profilePin)
 	if !ok {
+		if profile == ProfileHandoff {
+			// fail closed: a wrapper that hides the pin (the frontier proxy of a default-startup root did) must not turn the pin into nothing
+			return fmt.Errorf("%w: the store cannot record a network profile", ErrNetworkProfile)
+		}
 		return nil
 	}
 	stored, found, err := pin.NetworkProfile()

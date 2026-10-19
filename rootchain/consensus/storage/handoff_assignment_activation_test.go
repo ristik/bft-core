@@ -261,6 +261,12 @@ func TestConflictingDerivedEntryRefusesStartup(t *testing.T) {
 
 type withoutCandidates struct{ PersistentStore }
 
+// hides the candidates, not the profile pin the handoff profile requires
+func (w withoutCandidates) NetworkProfile() (uint64, bool, error) {
+	return w.PersistentStore.(profilePin).NetworkProfile()
+}
+func (w withoutCandidates) SetNetworkProfile(v uint64) error { return w.PersistentStore.(profilePin).SetNetworkProfile(v) }
+
 func TestMissingCandidateRefusesActivationAndStartup(t *testing.T) {
 	f := newAssignmentFixture(t)
 	f.useRealOrchestration(t)
