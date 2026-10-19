@@ -53,6 +53,17 @@ func dueTimeouts(t *testing.T, cm *ConsensusManager, partitions ...types.Partiti
 	cm.t2Timeouts = gen
 }
 
+// withViewResolver installs the view resolver Q3 deployments run with: the steady shard's view says its T2 is long overdue; the switching shard has
+// none and is recorded if it is asked for one (it must never be).
+func withViewResolver(t *testing.T, cm *ConsensusManager, steady types.PartitionID, round uint64) *partitionResolver {
+	t.Helper()
+	f := newFixture(t)
+	res := &partitionResolver{views: map[types.PartitionID]*storage.RequestRoundView{
+		steady: viewOf(t, f.infos, viewOpts{round: round, purpose: storage.PurposeTimeout, ucRound: 1, partition: steady})}}
+	cm.viewResolver = res
+	return res
+}
+
 func requestedPartitions(p *rctypes.Payload) map[types.PartitionID]rctypes.IRChangeReason {
 	out := map[types.PartitionID]rctypes.IRChangeReason{}
 	for _, r := range p.Requests {
@@ -91,6 +102,17 @@ func TestLeaderFromTheEpochAnchorExcludesTheSwitchingShard(t *testing.T) {
 		got := requestedPartitions(leader.net.WaitRootProposal(t).Block.Payload)
 		require.NotContains(t, got, evm, "the switching shard's timeout is not proposed")
 		require.Equal(t, rctypes.T2Timeout, got[otherPartition], "another shard's is")
+	})
+	t.Run("T2 timeouts under a view resolver", func(t *testing.T) {
+		leader, anchor := prepare(t)
+		dueTimeouts(t, leader.manager, evm, otherPartition)
+		res := withViewResolver(t, leader.manager, otherPartition, anchor.Slot+1)
+		leader.manager.processNewRoundEvent(context.Background())
+		got := requestedPartitions(leader.net.WaitRootProposal(t).Block.Payload)
+		require.NotContains(t, got, evm, "the switching shard's timeout is not proposed")
+		require.Equal(t, rctypes.T2Timeout, got[otherPartition], "another shard's is")
+		require.NotContains(t, res.asked, evm, "no view of the switching shard is ever resolved")
+		require.Contains(t, res.asked, otherPartition)
 	})
 }
 
@@ -164,5 +186,16 @@ func TestLeaderFromAQCParentExcludesTheSwitchingShard(t *testing.T) {
 		got := requestedPartitions(testutils.MockAwaitMessage[*abdrc.ProposalMsg](t, net, "/ab/root-proposal/0.0.1").Block.Payload)
 		require.NotContains(t, got, switching)
 		require.Equal(t, rctypes.T2Timeout, got[steady])
+	})
+	t.Run("T2 timeouts under a view resolver", func(t *testing.T) {
+		cm, net, switching, steady := newLeader(t)
+		dueTimeouts(t, cm, switching, steady)
+		res := withViewResolver(t, cm, steady, 30)
+		cm.processNewRoundEvent(context.Background())
+		got := requestedPartitions(testutils.MockAwaitMessage[*abdrc.ProposalMsg](t, net, "/ab/root-proposal/0.0.1").Block.Payload)
+		require.NotContains(t, got, switching)
+		require.Equal(t, rctypes.T2Timeout, got[steady])
+		require.NotContains(t, res.asked, switching, "no view of the switching shard is ever resolved")
+		require.Contains(t, res.asked, steady)
 	})
 }
