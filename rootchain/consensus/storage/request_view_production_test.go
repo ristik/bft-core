@@ -59,7 +59,7 @@ func TestProductionInstalledParentResolvesAcrossTimeoutsAndReopen(t *testing.T) 
 		si := *installed
 		si.Fees = cloneFees(installed.Fees)
 		for i := 0; i < repeats; i++ {
-			require.NoError(t, si.nextRoundWith(nil, h.activated, crypto.SHA256, (*ShardInfo).resetTrustBase))
+			require.NoError(t, si.nextRound(nil))
 		}
 		v, err := resolve(&si, NewRequestViewCache())
 		require.NoError(t, err, "repeats %d", repeats)

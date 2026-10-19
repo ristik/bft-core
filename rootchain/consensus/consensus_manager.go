@@ -1504,6 +1504,25 @@ func (x *ConsensusManager) processNewRoundEvent(ctx context.Context) {
 			return
 		}
 	}
+	// The shards whose configuration switches in this very block are computed from the exact proposal parent before any timeout or view
+	// is resolved and before any payload is selected: they get neither a request nor a T2 timeout request (the executor refuses a block
+	// that carries one), and a view of theirs is never asked for.
+	var switching storage.ShardSet
+	if !oldSuffix {
+		parentRound, ok := uint64(0), false
+		if highQC := x.blockStore.GetHighQc(); highQC != nil {
+			parentRound, ok = highQC.GetRound(), true
+		} else if x.epochAnchor != nil {
+			parentRound, ok = x.epochAnchor.Slot, true
+		}
+		if ok {
+			if switching, err = x.blockStore.SwitchingShardsForBlock(parentRound, round); err != nil {
+				x.log.WarnContext(ctx, "cannot establish the shards that switch configuration in the proposal", logger.Error(err))
+				return
+			}
+			x.irReqBuffer.Drop(switching)
+		}
+	}
 	var timedOutShards []*types.UnicityCertificate
 	if !oldSuffix {
 		if x.viewResolver != nil {
@@ -1516,6 +1535,15 @@ func (x *ConsensusManager) processNewRoundEvent(ctx context.Context) {
 		// error here is not fatal, still make a proposal, hopefully the next node will generate timeout
 		// requests for partitions this node failed to query
 		x.log.WarnContext(ctx, "failed to check timeouts for some partitions", logger.Error(err))
+	}
+	if len(switching) != 0 {
+		kept := timedOutShards[:0]
+		for _, uc := range timedOutShards {
+			if _, sw := switching[types.PartitionShardID{PartitionID: uc.GetPartitionID(), ShardID: uc.GetShardID().Key()}]; !sw {
+				kept = append(kept, uc)
+			}
+		}
+		timedOutShards = kept
 	}
 	payload := &drctypes.Payload{}
 	if profile == storage.ProfileHandoff {

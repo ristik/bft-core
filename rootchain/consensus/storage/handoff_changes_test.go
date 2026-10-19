@@ -245,6 +245,13 @@ var acceptingVerifier = mockIRVerifier{verify: func(_ uint64, req *rctypes.IRCha
 
 func addBlockWithRequests(t *testing.T, s *BlockStore, round uint64, anchor *rctypes.EpochAnchor, reqs ...*rctypes.IRChangeReq) *ExecutedBlock {
 	t.Helper()
+	require.NoError(t, tryBlockWithRequests(s, t, round, anchor, reqs...))
+	return mustBlock(t, s, round)
+}
+
+// tryBlockWithRequests adds the block and returns the store's verdict.
+func tryBlockWithRequests(s *BlockStore, t *testing.T, round uint64, anchor *rctypes.EpochAnchor, reqs ...*rctypes.IRChangeReq) error {
+	t.Helper()
 	block := &rctypes.BlockData{Version: 2, Round: round, Epoch: 2, Payload: &rctypes.Payload{Version: 2, Requests: reqs}}
 	if anchor != nil {
 		block.Anchor = anchor
@@ -253,8 +260,7 @@ func addBlockWithRequests(t *testing.T, s *BlockStore, round uint64, anchor *rct
 		block.Qc = &rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{RoundNumber: round - 1, Epoch: 2, CurrentRootHash: prior.RootHash}}
 	}
 	_, err := s.Add(block, acceptingVerifier)
-	require.NoError(t, err)
-	return mustBlock(t, s, round)
+	return err
 }
 
 // B1 (#329 review): requests are verified against the LAST COMMITTED shard state, which is still the pre-activation anchor in the
@@ -275,29 +281,28 @@ func TestRetiredKeyRequestIsNotCertifiedInTheActivationBlockOrTheNext(t *testing
 	require.NoError(t, err)
 
 	evm := f.shard
-	retiredEVM := f.oldKeys[1:]            // three of the four retired EVM keys: a quorum of the old set
-	for _, round := range []uint64{7, 8} { // the activation block, then the next
-		var a0 *rctypes.EpochAnchor
-		if round == 7 {
-			a0 = anchor
-		}
-		activated := map[types.PartitionShardID]uint64{}
-		if round == 8 {
-			for _, key := range []types.PartitionShardID{a.key, evm} {
-				activated[key] = mustBlock(t, s, 7).ShardState.States[key].TR.Round
-			}
-		}
-		block := addBlockWithRequests(t, s, round, a0, signedRequest(t, a.key, a.oldKey), signedRequest(t, evm, retiredEVM...))
-		for name, key := range map[string]types.PartitionShardID{"aggregator": a.key, "EVM": evm} {
-			si := block.ShardState.States[key]
-			if round == 8 { // the activation block re-certifies every shard; afterwards an ignored request changes nothing
-				require.NotContains(t, block.ShardState.Changed, key, "%s round %d: a retired key's request is not certified", name, round)
-				require.Equal(t, activated[key], si.TR.Round, "%s round %d: the technical record did not advance", name, round)
-			}
-			require.EqualValues(t, 1, si.TR.Epoch, "%s round %d", name, round)
-			require.EqualValues(t, 0, si.IR.Epoch, "%s round %d: the input record is untouched", name, round)
-			require.NotEqual(t, bytes.Repeat([]byte{0x42}, 32), []byte(si.IR.BlockHash), "%s round %d", name, round)
-		}
+	retiredEVM := f.oldKeys[1:] // three of the four retired EVM keys: a quorum of the old set
+	// the activation block switches both shards: a block that carries a request of either is refused whole, so a retired key's request
+	// cannot even be proposed there; the activation block itself carries none and re-certifies every shard under the new committee
+	err = tryBlockWithRequests(s, t, 7, anchor, signedRequest(t, a.key, a.oldKey), signedRequest(t, evm, retiredEVM...))
+	require.ErrorIs(t, err, ErrShardSwitching)
+	activationBlock := addBlockWithRequests(t, s, 7, anchor)
+	activated := map[types.PartitionShardID]uint64{}
+	for name, key := range map[string]types.PartitionShardID{"aggregator": a.key, "EVM": evm} {
+		si := activationBlock.ShardState.States[key]
+		require.Contains(t, activationBlock.ShardState.Changed, key, name)
+		require.EqualValues(t, 1, si.TR.Epoch, name)
+		activated[key] = si.TR.Round
+	}
+	// the block after it: the retired keys' requests are ignored; afterwards an ignored request changes nothing
+	block := addBlockWithRequests(t, s, 8, nil, signedRequest(t, a.key, a.oldKey), signedRequest(t, evm, retiredEVM...))
+	for name, key := range map[string]types.PartitionShardID{"aggregator": a.key, "EVM": evm} {
+		si := block.ShardState.States[key]
+		require.NotContains(t, block.ShardState.Changed, key, "%s: a retired key's request is not certified", name)
+		require.Equal(t, activated[key], si.TR.Round, "%s: the technical record did not advance", name)
+		require.EqualValues(t, 1, si.TR.Epoch, name)
+		require.EqualValues(t, 0, si.IR.Epoch, "%s: the input record is untouched", name)
+		require.NotEqual(t, bytes.Repeat([]byte{0x42}, 32), []byte(si.IR.BlockHash), name)
 	}
 	t.Run("a request of the new members is still certified", func(t *testing.T) {
 		block := addBlockWithRequests(t, s, 9, nil, signedRequest(t, a.key, a.nextKey), signedRequest(t, evm, f.nextKeys[1:]...))
@@ -333,16 +338,15 @@ func TestRotationKeepingTheNodeIDRefusesTheRetiredKey(t *testing.T) {
 	require.NoError(t, err)
 	evm := f.shard
 
-	for _, round := range []uint64{7, 8} {
-		var a0 *rctypes.EpochAnchor
-		if round == 7 {
-			a0 = anchor
-		}
-		block := addBlockWithRequests(t, s, round, a0, signedRequest(t, a.key, a.oldKey), signedRequest(t, evm, f.oldKeys[0]))
+	require.ErrorIs(t, tryBlockWithRequests(s, t, 7, anchor, signedRequest(t, a.key, a.oldKey), signedRequest(t, evm, f.oldKeys[0])), ErrShardSwitching,
+		"the activation block switches both shards: it carries no request of either")
+	addBlockWithRequests(t, s, 7, anchor)
+	{
+		block := addBlockWithRequests(t, s, 8, nil, signedRequest(t, a.key, a.oldKey), signedRequest(t, evm, f.oldKeys[0]))
 		for name, key := range map[string]types.PartitionShardID{"aggregator": a.key, "EVM": evm} {
 			si := block.ShardState.States[key]
-			require.NotEqual(t, bytes.Repeat([]byte{0x42}, 32), []byte(si.IR.BlockHash), "%s round %d: the old key under the kept node id certified nothing", name, round)
-			require.EqualValues(t, 0, si.IR.Epoch, "%s round %d", name, round)
+			require.NotEqual(t, bytes.Repeat([]byte{0x42}, 32), []byte(si.IR.BlockHash), "%s: the old key under the kept node id certified nothing", name)
+			require.EqualValues(t, 0, si.IR.Epoch, name)
 		}
 	}
 	block := addBlockWithRequests(t, s, 9, nil, signedRequest(t, a.key, rotatedAgg), signedRequest(t, evm, rotatedEVM))

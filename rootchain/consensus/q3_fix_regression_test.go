@@ -229,14 +229,34 @@ func TestQ3InstallPreservesSelectedRequestHistory(t *testing.T) {
 			_, err = r.manager.irReqVerifier.VerifyIRChangeReqView(view, lights)
 			require.ErrorIs(t, err, quorumweight.ErrQuorumNotReached)
 			require.NoError(t, r.manager.bufferIRChange(heavy))
-			block := func(req *rctypes.IRChangeReq) *rctypes.BlockData {
-				return &rctypes.BlockData{Version: 2, Epoch: 2, Round: 7, Anchor: anchor, Payload: &rctypes.Payload{Version: 2, Requests: []*rctypes.IRChangeReq{req}}}
-			}
-			parent, err := r.manager.blockStore.Block(anchor.Slot)
+			// The first successor block (7) switches the shard to the activated assignment and carries no request of it. The switch is a
+			// change in the pipeline until it commits (QC of block 8), so the shard's proof is first proposed in block 9.
+			var parent *storage.ExecutedBlock
+			parent, err = r.manager.blockStore.Block(anchor.Slot)
 			require.NoError(t, err)
-			_, err = parent.Extend(block(lights), r.manager.irReqVerifier, r.orchestration, crypto.SHA256, r.manager.log)
+			first := &rctypes.BlockData{Version: 2, Epoch: 2, Round: 7, Anchor: anchor, Payload: &rctypes.Payload{Version: 2}}
+			b7, err := parent.Extend(first, r.manager.irReqVerifier, r.orchestration, crypto.SHA256, r.manager.log)
+			require.NoError(t, err)
+			second := &rctypes.BlockData{Version: 2, Epoch: 2, Round: 8, Payload: &rctypes.Payload{Version: 2},
+				Qc: &rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{RoundNumber: 7, Epoch: 2, CurrentRootHash: b7.RootHash}}}
+			b8, err := b7.Extend(second, r.manager.irReqVerifier, r.orchestration, crypto.SHA256, r.manager.log)
+			require.NoError(t, err)
+			qc8 := &rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{RoundNumber: 8, ParentRoundNumber: 7, Epoch: 2, CurrentRootHash: b8.RootHash},
+				LedgerCommitInfo: &types.UnicitySeal{Version: 1, NetworkID: 5, Epoch: 2, Timestamp: 99, RootChainRoundNumber: 7, Hash: b7.RootHash}}
+			if persist {
+				_, err = r.manager.blockStore.Add(first, r.manager.irReqVerifier)
+				require.NoError(t, err)
+				_, err = r.manager.blockStore.Add(second, r.manager.irReqVerifier)
+				require.NoError(t, err)
+				_, err = r.manager.blockStore.ProcessQc(qc8)
+				require.NoError(t, err)
+			}
+			block := func(req *rctypes.IRChangeReq) *rctypes.BlockData {
+				return &rctypes.BlockData{Version: 2, Epoch: 2, Round: 9, Payload: &rctypes.Payload{Version: 2, Requests: []*rctypes.IRChangeReq{req}}, Qc: qc8}
+			}
+			_, err = b8.Extend(block(lights), r.manager.irReqVerifier, r.orchestration, crypto.SHA256, r.manager.log)
 			require.ErrorIs(t, err, quorumweight.ErrQuorumNotReached)
-			executed, err := parent.Extend(block(heavy), r.manager.irReqVerifier, r.orchestration, crypto.SHA256, r.manager.log)
+			executed, err := b8.Extend(block(heavy), r.manager.irReqVerifier, r.orchestration, crypto.SHA256, r.manager.log)
 			require.NoError(t, err)
 			if persist {
 				_, err = r.manager.blockStore.Add(block(heavy), r.manager.irReqVerifier)

@@ -110,9 +110,15 @@ func TestTheRecoveryVerifierExecutesAWeightedProofTheLegacyDispatchRefuses(t *te
 		proof.Requests = append(proof.Requests, bcr)
 	}
 	require.Len(t, proof.Requests, 1, "the heavy entity alone is a quorum of the weighted request context")
-	block := &rctypes.BlockData{Version: 2, Epoch: 2, Round: 7, Anchor: anchor, Payload: &rctypes.Payload{Version: 2, Requests: []*rctypes.IRChangeReq{proof}}}
-	parent, err := r.manager.blockStore.Block(anchor.Slot)
+	// the first successor block switches the shard to the activated assignment and carries no request of it; the proof is in the next
+	anchorBlock, err := r.manager.blockStore.Block(anchor.Slot)
 	require.NoError(t, err)
+	switching, err := anchorBlock.Extend(&rctypes.BlockData{Version: 2, Epoch: 2, Round: 7, Anchor: anchor, Payload: &rctypes.Payload{Version: 2}},
+		r.manager.irReqVerifier, r.orchestration, crypto.SHA256, r.manager.log)
+	require.NoError(t, err)
+	block := &rctypes.BlockData{Version: 2, Epoch: 2, Round: 8, Payload: &rctypes.Payload{Version: 2, Requests: []*rctypes.IRChangeReq{proof}},
+		Qc: &rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{RoundNumber: 7, Epoch: 2, CurrentRootHash: switching.RootHash}}}
+	parent := switching
 	extend := func(v *IRChangeReqVerifier) (*storage.ExecutedBlock, error) {
 		return parent.Extend(block, v, r.orchestration, crypto.SHA256, r.manager.log)
 	}

@@ -2,7 +2,6 @@ package storage
 
 import (
 	"bytes"
-	"crypto"
 	"maps"
 	"testing"
 
@@ -100,7 +99,7 @@ func TestSuccessorCertifiedParentThroughContinuationsWithRepeatedTimeouts(t *tes
 		cur := *parent
 		cur.Fees = maps.Clone(parent.Fees)
 		for i := 0; i < repeats; i++ {
-			require.NoError(t, cur.nextRoundWith(nil, s.pdr1, crypto.SHA256, resetMembers))
+			require.NoError(t, cur.nextRound(nil))
 		}
 		snap := s.snapshotWith(&cur, s.anchor, s.succ, c1, c2)
 		v := s.mustResolve(snap, fxActivate+25, 6, fxBody3, PurposeExecute)

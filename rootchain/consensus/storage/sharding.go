@@ -36,10 +36,23 @@ type ShardStates struct {
 /*
 nextBlock returns shard states for the next block based on the configs of the round - if the
 shard was part of the current block it's state is cloned, otherwise new empty state is added.
+
+A shard whose applied configuration (ShardConfHash) is not the one in effect at the round switches directly to it
+(advanceShardConfiguration), once, driven by the root's execution and not by the shard's progress; it is marked Changed so the
+transition is certified through the normal pipeline. The returned set names the shards that switched.
 */
 func (ss ShardStates) nextBlock(shardConfs map[types.PartitionShardID]*types.PartitionDescriptionRecord, hashAlg crypto.Hash) (nextBlock ShardStates, err error) {
+	nextBlock, _, err = ss.nextBlockSwitching(shardConfs, hashAlg, nil)
+	return nextBlock, err
+}
+
+// nextBlockSwitching is nextBlock that also reports the shards which switched configuration. history, when set, authenticates the
+// applied configuration a switch leaves (see advanceShardConfigurationHistory).
+func (ss ShardStates) nextBlockSwitching(shardConfs map[types.PartitionShardID]*types.PartitionDescriptionRecord, hashAlg crypto.Hash,
+	history ConfigHistory) (nextBlock ShardStates, switched ShardSet, err error) {
 	nextBlock.States = make(map[types.PartitionShardID]*ShardInfo, len(shardConfs))
 	nextBlock.Changed = ShardSet{}
+	switched = ShardSet{}
 	if ss.Control != nil {
 		control := *ss.Control
 		control.PredecessorBodyID = bytes.Clone(control.PredecessorBodyID)
@@ -53,47 +66,29 @@ func (ss ShardStates) nextBlock(shardConfs map[types.PartitionShardID]*types.Par
 			continue //  shard is deleted
 		}
 		if prevSI, ok := ss.States[k]; ok {
-			// prevSI.IR is the state in the shard when prevSI.TR was created - so when the epoch in the TR
-			// is different the previous round triggered epoch change in the shard and this round should
-			// switch the shard state into next epoch too. TR.Epoch != IR.Epoch stays true throughout a delayed
-			// acknowledgement, so the switch is decided against the installed configuration instead: the
-			// trust base and the fee/stat accumulators are installed exactly once per configuration.
-			pdrHash, err := pdr.Hash(hashAlg)
+			next, didSwitch, err := advanceShardConfigurationHistory(prevSI, pdr, hashAlg, (*ShardInfo).resetTrustBase, history)
 			if err != nil {
-				return nextBlock, fmt.Errorf("calculating PDR hash of shard %s - %s: %w", pdr.PartitionID, pdr.ShardID, err)
+				partition, shard := pdr.PartitionID, pdr.ShardID
+				if prevSI.LastCR != nil {
+					partition, shard = prevSI.LastCR.Partition, prevSI.LastCR.Shard
+				}
+				return nextBlock, nil, fmt.Errorf("creating ShardInfo %s - %s of the next epoch: %w", partition, shard, err)
 			}
-			if prevSI.TR.Epoch != prevSI.IR.Epoch && !bytes.Equal(prevSI.ShardConfHash, pdrHash) {
-				if nextBlock.States[k], err = prevSI.nextEpoch(pdr, hashAlg); err != nil {
-					partition, shard := pdr.PartitionID, pdr.ShardID
-					if prevSI.LastCR != nil {
-						partition, shard = prevSI.LastCR.Partition, prevSI.LastCR.Shard
-					}
-					return nextBlock, fmt.Errorf("creating ShardInfo %s - %s of the next epoch: %w", partition, shard, err)
-				}
-				if ss.Control != nil {
-					next := nextBlock.States[k]
-					if next.TR.FeeHash, err = next.feeHash(crypto.SHA256); err != nil {
-						return nextBlock, err
-					}
-					if next.TR.StatHash, err = next.statHash(crypto.SHA256); err != nil {
-						return nextBlock, err
-					}
-				}
-			} else {
-				si := *prevSI
-				si.Fees = maps.Clone(si.Fees)
-				nextBlock.States[k] = &si
+			nextBlock.States[k] = next
+			if didSwitch {
+				switched[k] = struct{}{}
+				nextBlock.Changed[k] = struct{}{}
 			}
 		} else {
 			// must be new shard activated in this round
 			if nextBlock.States[k], err = NewShardInfo(pdr, hashAlg); err != nil {
-				return nextBlock, fmt.Errorf("creating ShardInfo for %s: %w", k, err)
+				return nextBlock, nil, fmt.Errorf("creating ShardInfo for %s: %w", k, err)
 			}
 			nextBlock.Changed[k] = struct{}{}
 		}
 	}
 
-	return nextBlock, nil
+	return nextBlock, switched, nil
 }
 
 /*
@@ -600,82 +595,123 @@ func (si *ShardInfo) IsValid() error {
 	return nil
 }
 
-func (si *ShardInfo) nextEpoch(shardConf *types.PartitionDescriptionRecord, hashAlg crypto.Hash) (*ShardInfo, error) {
-	return si.nextEpochWith(shardConf, hashAlg, (*ShardInfo).resetTrustBase)
+// ConfigHistory is the authenticated shard configuration history a switch is validated against: the configuration a hash names. A
+// missing entry is an error, never "unchanged".
+type ConfigHistory interface {
+	ShardConfigByHash(partition types.PartitionID, shard types.ShardID, hash []byte, hashAlg crypto.Hash) (*types.PartitionDescriptionRecord, error)
 }
 
-// nextEpochWith is nextEpoch with the derivation of the successor's trust base supplied. Production always supplies
-// resetTrustBase (unit weights); the request view derives a successor technical record from a weighted fixture
-// configuration with resetMembers, which installs the members and no request context.
-func (si *ShardInfo) nextEpochWith(shardConf *types.PartitionDescriptionRecord, hashAlg crypto.Hash,
-	reset func(*ShardInfo, *types.PartitionDescriptionRecord, crypto.Hash, []byte) error) (*ShardInfo, error) {
-	if si.TR.Epoch != shardConf.Epoch {
-		return nil, fmt.Errorf("epochs must be consecutive, expected %d proposed next %d", si.TR.Epoch, shardConf.Epoch)
+var (
+	// ErrShardEpoch reports a configuration that does not advance the shard's applied epoch: a backward epoch, or the same epoch under
+	// another configuration.
+	ErrShardEpoch = errors.New("shard configuration does not advance the applied epoch")
+	// ErrShardSwitching refuses a request for a shard whose configuration switches in the block that carries it.
+	ErrShardSwitching = errors.New("shard configuration switches in this block: no request is applied to it")
+)
+
+// advanceShardConfiguration is the one transition operation of a shard's applied configuration. The applied configuration is named by
+// the ShardInfo's ShardConfHash and nothing else: IR.Epoch (which stays old through delayed acknowledgement and T2 repeats) and the
+// announced TR epoch never decide it. Same hash: a clone, whatever the IR. A newer epoch E: installed directly, even if E > e+1, with
+// no intermediate state and no synthetic acknowledgement; the IR and RootHash stay, the hash/timeout/parameters/members/verifiers/request
+// context are the target's, the accounting rotates once (previous applied epoch = the parent's current accumulators, current = zero for
+// the target's members) and the technical record announces E with the shard round advanced once, the target set's leader and the fee/stat
+// commitments of the new accumulators. A backward epoch, or the same epoch under another hash, is an error.
+func advanceShardConfiguration(parent *ShardInfo, target *types.PartitionDescriptionRecord, hashAlg crypto.Hash) (*ShardInfo, bool, error) {
+	return advanceShardConfigurationHistory(parent, target, hashAlg, (*ShardInfo).resetTrustBase, nil)
+}
+
+func advanceShardConfigurationWith(parent *ShardInfo, target *types.PartitionDescriptionRecord, hashAlg crypto.Hash,
+	reset func(*ShardInfo, *types.PartitionDescriptionRecord, crypto.Hash, []byte) error) (*ShardInfo, bool, error) {
+	return advanceShardConfigurationHistory(parent, target, hashAlg, reset, nil)
+}
+
+// advanceShardConfigurationHistory is advanceShardConfiguration with the derivation of the successor's trust base supplied (production:
+// resetTrustBase; the request view derives a record from a weighted fixture configuration with resetMembers) and, when history is
+// given, the validation of the applied configuration a real switch leaves: the hash must name a stored configuration of this shard whose
+// epoch is the ShardInfo's TR epoch.
+func advanceShardConfigurationHistory(parent *ShardInfo, target *types.PartitionDescriptionRecord, hashAlg crypto.Hash,
+	reset func(*ShardInfo, *types.PartitionDescriptionRecord, crypto.Hash, []byte) error, history ConfigHistory) (*ShardInfo, bool, error) {
+	if parent == nil || target == nil {
+		return nil, false, errors.New("shard configuration advance needs a shard state and a target configuration")
 	}
-	shardConfHash, err := shardConf.Hash(hashAlg)
+	targetHash, err := target.Hash(hashAlg)
 	if err != nil {
-		return nil, fmt.Errorf("failed to calculate shard conf hash: %w", err)
+		return nil, false, fmt.Errorf("failed to calculate shard conf hash: %w", err)
 	}
-	nextSI := &ShardInfo{
-		PartitionID:     shardConf.PartitionID,
-		ShardID:         shardConf.ShardID,
-		T2Timeout:       shardConf.T2Timeout,
-		ShardConfHash:   shardConfHash,
-		RootHash:        si.RootHash,
-		LastCR:          si.LastCR,
-		IR:              si.IR,
-		TR:              si.TR,
-		PartitionParams: maps.Clone(shardConf.PartitionParams),
+	if bytes.Equal(parent.ShardConfHash, targetHash) {
+		same := *parent
+		same.Fees = maps.Clone(parent.Fees)
+		return &same, false, nil
 	}
-
-	if nextSI.PrevEpochFees, err = types.Cbor.Marshal(si.Fees); err != nil {
-		return nil, fmt.Errorf("encoding previous epoch fees: %w", err)
+	if target.Epoch <= parent.TR.Epoch {
+		return nil, false, fmt.Errorf("%w: applied epoch %d, target epoch %d under another configuration", ErrShardEpoch, parent.TR.Epoch, target.Epoch)
 	}
-	if nextSI.PrevEpochStat, err = types.Cbor.Marshal(si.Stat); err != nil {
-		return nil, fmt.Errorf("encoding previous epoch stat: %w", err)
+	if history != nil {
+		applied, err := history.ShardConfigByHash(parent.PartitionID, parent.ShardID, parent.ShardConfHash, hashAlg)
+		if err != nil {
+			return nil, false, fmt.Errorf("the applied configuration %x of the shard is not in the trusted history: %w", parent.ShardConfHash, err)
+		}
+		if applied == nil || applied.Epoch != parent.TR.Epoch {
+			return nil, false, fmt.Errorf("%w: the applied configuration %x does not describe epoch %d preceding the target", ErrShardEpoch, parent.ShardConfHash, parent.TR.Epoch)
+		}
 	}
-
-	nextSI.resetFeeList(shardConf)
-	if err = reset(nextSI, shardConf, hashAlg, shardConfHash); err != nil {
-		return nil, fmt.Errorf("initializing shard trustbase: %w", err)
+	if parent.TR.Round == ^uint64(0) {
+		return nil, false, errors.New("shard round overflow")
 	}
-
-	return nextSI, nil
+	next := &ShardInfo{
+		PartitionID:     target.PartitionID,
+		ShardID:         target.ShardID,
+		T2Timeout:       target.T2Timeout,
+		ShardConfHash:   targetHash,
+		RootHash:        parent.RootHash,
+		LastCR:          parent.LastCR,
+		IR:              parent.IR,
+		TR:              parent.TR,
+		PartitionParams: maps.Clone(target.PartitionParams),
+	}
+	if next.PrevEpochFees, err = types.Cbor.Marshal(parent.Fees); err != nil {
+		return nil, false, fmt.Errorf("encoding previous epoch fees: %w", err)
+	}
+	if next.PrevEpochStat, err = types.Cbor.Marshal(parent.Stat); err != nil {
+		return nil, false, fmt.Errorf("encoding previous epoch stat: %w", err)
+	}
+	next.resetFeeList(target)
+	if err = reset(next, target, hashAlg, targetHash); err != nil {
+		return nil, false, fmt.Errorf("initializing shard trustbase: %w", err)
+	}
+	next.TR.Epoch = target.Epoch
+	next.TR.Round = parent.TR.Round + 1
+	if next.TR.FeeHash, err = next.feeHash(crypto.SHA256); err != nil {
+		return nil, false, fmt.Errorf("hashing fees: %w", err)
+	}
+	if next.TR.StatHash, err = next.statHash(crypto.SHA256); err != nil {
+		return nil, false, fmt.Errorf("hashing statistics: %w", err)
+	}
+	next.TR.Leader = next.selectLeader(next.TR.Round)
+	return next, true, nil
 }
 
 /*
-nextRound advances the TR of the ShardInfo into the next round, ready to be used for
-generating CertificationResponse. The "pdr" argument must be the shard configuration
-for the next round.
+nextRound advances the TR of the ShardInfo into the next round, ready to be used for generating CertificationResponse, within the
+applied configuration: it applies the admitted request to the accounting and never detects, announces or builds a configuration change
+(advanceShardConfiguration is the only operation that does).
 */
-func (si *ShardInfo) nextRound(req *certification.BlockCertificationRequest, pdr *types.PartitionDescriptionRecord, hashAlg crypto.Hash) (err error) {
-	return si.nextRoundWith(req, pdr, hashAlg, (*ShardInfo).resetTrustBase)
-}
-
-func (si *ShardInfo) nextRoundWith(req *certification.BlockCertificationRequest, pdr *types.PartitionDescriptionRecord, hashAlg crypto.Hash,
-	reset func(*ShardInfo, *types.PartitionDescriptionRecord, crypto.Hash, []byte) error) (err error) {
+func (si *ShardInfo) nextRound(req *certification.BlockCertificationRequest) (err error) {
+	if si.TR.Round == ^uint64(0) {
+		return errors.New("shard round overflow")
+	}
 	// timeout IRChangeRequest doesn't have BlockCertificationRequest
 	if req != nil {
 		si.update(req, si.TR.Leader)
 	}
-
-	nextShardInfo := si
-	if si.TR.Epoch != pdr.Epoch {
-		si.TR.Epoch++
-		if nextShardInfo, err = si.nextEpochWith(pdr, hashAlg, reset); err != nil {
-			return fmt.Errorf("creating ShardInfo of the next epoch: %w", err)
-		}
-	}
-
-	if si.TR.FeeHash, err = nextShardInfo.feeHash(crypto.SHA256); err != nil {
+	if si.TR.FeeHash, err = si.feeHash(crypto.SHA256); err != nil {
 		return fmt.Errorf("hashing fees: %w", err)
 	}
-	if si.TR.StatHash, err = nextShardInfo.statHash(crypto.SHA256); err != nil {
+	if si.TR.StatHash, err = si.statHash(crypto.SHA256); err != nil {
 		return fmt.Errorf("hashing statistics: %w", err)
 	}
 	si.TR.Round++
-	si.TR.Leader = nextShardInfo.selectLeader(si.TR.Round)
-
+	si.TR.Leader = si.selectLeader(si.TR.Round)
 	return nil
 }
 

@@ -6,7 +6,6 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/unicitynetwork/bft-core/internal/testutils/logger"
@@ -130,14 +129,14 @@ func TestExecutedBlock_Extend(t *testing.T) {
 	t.Run("empty block", func(t *testing.T) {
 		emptyBlock := newBlock
 		emptyBlock.Payload = &drctypes.Payload{}
-		executedBlock, err := parent.Extend(&emptyBlock, reqVer, orchestration, crypto.SHA512, logger.New(t))
+		executedBlock, err := parent.Extend(&emptyBlock, reqVer, orchestration, crypto.SHA256, logger.New(t))
 		require.NoError(t, err)
 		require.Equal(t, &emptyBlock, executedBlock.BlockData)
 		require.Empty(t, executedBlock.ShardState.Changed, "expected no changes")
 		require.Contains(t, executedBlock.ShardState.States, psID)
 		require.Len(t, executedBlock.ShardState.States, 1)
 		require.Equal(t, parent.ShardState.States, executedBlock.ShardState.States)
-		require.Equal(t, crypto.SHA512, executedBlock.HashAlgo)
+		require.Equal(t, crypto.SHA256, executedBlock.HashAlgo)
 		require.Nil(t, executedBlock.Qc)
 		require.Nil(t, executedBlock.CommitQc)
 	})
@@ -168,32 +167,31 @@ func TestExecutedBlock_Extend(t *testing.T) {
 				return map[types.PartitionShardID]*types.PartitionDescriptionRecord{psID: &pdrEpoch2}, nil
 			},
 		}
-		// if shard has no ChangeRequest in the block then Epoch doesn't change!
+		// the block that makes the next configuration effective switches the shard, with or without a request from it
 		emptyBlock := newBlock
 		emptyBlock.Payload = &drctypes.Payload{}
 		executedBlock, err := parent.Extend(&emptyBlock, &reqVer, orchestration, crypto.SHA256, logger.New(t))
 		require.NoError(t, err)
 		require.Equal(t, &emptyBlock, executedBlock.BlockData)
-		require.Empty(t, executedBlock.ShardState.Changed)
-		require.Len(t, executedBlock.ShardState.States, 1)
-		if assert.Contains(t, executedBlock.ShardState.States, psID) {
-			si := executedBlock.ShardState.States[psID]
-			require.Equal(t, pdrEpoch1.Epoch, si.TR.Epoch, "epoch should stay the same")
-		}
-
-		// next block with shard sending ChangeRequest - the TR should now indicate next epoch
-		executedBlock, err = executedBlock.Extend(&newBlock, &reqVer, orchestration, crypto.SHA256, logger.New(t))
-		require.NoError(t, err)
-		if assert.Contains(t, executedBlock.ShardState.States, psID) {
-			si := executedBlock.ShardState.States[psID]
-			require.Equal(t, pdrEpoch2.Epoch, si.TR.Epoch, "signal new epoch in the TR")
-		}
-		require.Equal(t, &newBlock, executedBlock.BlockData)
-		require.Len(t, executedBlock.ShardState.Changed, 1)
+		require.Len(t, executedBlock.ShardState.Changed, 1, "the transition is certified")
 		require.Contains(t, executedBlock.ShardState.Changed, psID)
-		require.Len(t, executedBlock.ShardState.States, 1)
-		require.Contains(t, executedBlock.ShardState.States, psID)
-		require.Equal(t, certReq.InputRecord, executedBlock.ShardState.States[psID].IR)
+		si := executedBlock.ShardState.States[psID]
+		require.Equal(t, pdrEpoch2.Epoch, si.TR.Epoch, "signal new epoch in the TR")
+		require.Equal(t, parent.ShardState.States[psID].TR.Round+1, si.TR.Round)
+
+		// no request is applied to the shard in the block that switches it
+		_, err = parent.Extend(&newBlock, &reqVer, orchestration, crypto.SHA256, logger.New(t))
+		require.ErrorIs(t, err, ErrShardSwitching)
+
+		// the next block over the same configuration is an ordinary one: the shard's request is applied, nothing switches again
+		next := newBlock
+		next.Round++
+		after, err := executedBlock.Extend(&next, &reqVer, orchestration, crypto.SHA256, logger.New(t))
+		require.NoError(t, err)
+		require.Len(t, after.ShardState.Changed, 1)
+		require.Equal(t, certReq.InputRecord, after.ShardState.States[psID].IR)
+		require.Equal(t, si.PrevEpochFees, after.ShardState.States[psID].PrevEpochFees, "the accounting rotated once")
+		require.Equal(t, pdrEpoch2.Epoch, after.ShardState.States[psID].TR.Epoch)
 	})
 
 	t.Run("new shard introduced", func(t *testing.T) {
