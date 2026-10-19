@@ -1,6 +1,7 @@
 package consensus
 
 import (
+	"github.com/unicitynetwork/bft-core/rootchain/consensus/storage"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -186,4 +187,22 @@ func emptyUC(partitionID types.PartitionID) *types.UnicityCertificate {
 			Shard: types.ShardID{},
 		},
 	}
+}
+
+// A shard whose configuration switches in the proposed block gets no request in it: the buffered request is discarded before any view
+// is resolved (a view of the switching shard is never asked for), and the other shard's request is proposed as before.
+func TestIrReqBuffer_DropExcludesSwitchingShardsBeforeViewResolution(t *testing.T) {
+	buffer := NewIrReqBuffer(logger.New(t))
+	ver := NewAlwaysTrueIRReqVerifier()
+	for _, id := range []types.PartitionID{partitionID1, partitionID2} {
+		require.NoError(t, buffer.Add(3, &drctypes.IRChangeReq{Partition: id, CertReason: drctypes.Quorum,
+			Requests: []*certification.BlockCertificationRequest{{PartitionID: id, NodeID: "1", InputRecord: inputRecord1}}}, ver))
+	}
+	switching := storage.ShardSet{types.PartitionShardID{PartitionID: partitionID1, ShardID: types.ShardID{}.Key()}: {}}
+	buffer.Drop(switching)
+	require.False(t, buffer.IsChangeInBuffer(partitionID1, types.ShardID{}))
+	require.True(t, buffer.IsChangeInBuffer(partitionID2, types.ShardID{}))
+	payload := buffer.GeneratePayload(3, nil, func(types.PartitionID, types.ShardID) *types.InputRecord { return nil })
+	require.Len(t, payload.Requests, 1)
+	require.Equal(t, partitionID2, payload.Requests[0].Partition)
 }

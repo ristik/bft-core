@@ -1504,12 +1504,31 @@ func (x *ConsensusManager) processNewRoundEvent(ctx context.Context) {
 			return
 		}
 	}
+	// The shards whose configuration switches in this very block are computed from the exact proposal parent before any timeout or view
+	// is resolved and before any payload is selected: they get neither a request nor a T2 timeout request (the executor refuses a block
+	// that carries one), and a view of theirs is never asked for.
+	var switching storage.ShardSet
+	if !oldSuffix {
+		parentRound, ok := uint64(0), false
+		if highQC := x.blockStore.GetHighQc(); highQC != nil {
+			parentRound, ok = highQC.GetRound(), true
+		} else if x.epochAnchor != nil {
+			parentRound, ok = x.epochAnchor.Slot, true
+		}
+		if ok {
+			if switching, err = x.blockStore.SwitchingShardsForBlock(parentRound, round); err != nil {
+				x.log.WarnContext(ctx, "cannot establish the shards that switch configuration in the proposal", logger.Error(err))
+				return
+			}
+			x.irReqBuffer.Drop(switching)
+		}
+	}
 	var timedOutShards []*types.UnicityCertificate
 	if !oldSuffix {
 		if x.viewResolver != nil {
-			timedOutShards, err = x.t2Timeouts.GetT2TimeoutsView(round, x.viewResolver)
+			timedOutShards, err = x.t2Timeouts.GetT2TimeoutsView(round, x.viewResolver, switching)
 		} else {
-			timedOutShards, err = x.t2Timeouts.GetT2Timeouts(round)
+			timedOutShards, err = x.t2Timeouts.GetT2Timeouts(round, switching)
 		}
 	}
 	if err != nil {

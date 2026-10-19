@@ -113,12 +113,12 @@ func successorTechnicalRecordWith(si *ShardInfo, pdr *types.PartitionDescription
 	if si == nil || pdr == nil || si.TR.Epoch == ^uint64(0) || pdr.Epoch != si.TR.Epoch+1 {
 		return certification.TechnicalRecord{}, ErrAssignmentHistory
 	}
-	clone := *si
-	clone.Fees = maps.Clone(si.Fees)
-	if err := clone.nextRoundWith(nil, pdr, hashAlg, reset); err != nil {
+	// the one transition operation: what H commits is exactly what the first successor block installs
+	next, _, err := advanceShardConfigurationWith(si, pdr, hashAlg, reset)
+	if err != nil {
 		return certification.TechnicalRecord{}, fmt.Errorf("deriving successor technical record: %w", err)
 	}
-	return clone.TR, nil
+	return next.TR, nil
 }
 
 // candidateActivatedPDR decodes a verified preimage and applies the committed
@@ -476,14 +476,7 @@ func activateEVMAssignment(states map[types.PartitionShardID]*ShardInfo, shardCo
 				return nil, fmt.Errorf("%w: %w: shard %s configuration epoch %d starting at %d does not follow the installed epoch %d at the committed activation %d",
 					ErrControlCheckpoint, ErrActivationBoundary, key, conf.Epoch, conf.EpochStart, si.TR.Epoch, epochStart)
 			}
-			tr, err := successorTechnicalRecord(si, conf, hashAlg)
-			if err != nil {
-				return nil, err
-			}
-			advanced := *si
-			advanced.Fees = maps.Clone(si.Fees)
-			advanced.TR = tr
-			next, err := advanced.nextEpoch(conf, hashAlg)
+			next, _, err := advanceShardConfiguration(si, conf, hashAlg)
 			if err != nil {
 				return nil, err
 			}
@@ -504,20 +497,13 @@ func activateEVMAssignment(states map[types.PartitionShardID]*ShardInfo, shardCo
 			return nil, fmt.Errorf("%w: %w: configuration epoch %d starting at %d does not follow the installed epoch %d at the committed activation %d",
 				ErrControlCheckpoint, ErrActivationBoundary, conf.Epoch, conf.EpochStart, si.TR.Epoch, epochStart)
 		}
-		tr, err := successorTechnicalRecord(si, conf, hashAlg)
+		next, _, err := advanceShardConfiguration(si, conf, hashAlg)
 		if err != nil {
 			return nil, err
 		}
-		digest, err := tr.Hash()
+		digest, err := next.TR.Hash()
 		if err != nil || !bytes.Equal(digest, record.SuccessorTRHash) {
 			return nil, fmt.Errorf("%w: committed successor technical record differs from the derived assignment", ErrControlCheckpoint)
-		}
-		advanced := *si
-		advanced.Fees = maps.Clone(si.Fees)
-		advanced.TR = tr
-		next, err := advanced.nextEpoch(conf, hashAlg)
-		if err != nil {
-			return nil, err
 		}
 		out[key] = next
 	}

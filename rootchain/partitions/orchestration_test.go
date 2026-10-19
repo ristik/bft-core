@@ -1,6 +1,8 @@
 package partitions
 
 import (
+	"bytes"
+	"crypto"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -467,4 +469,41 @@ func testProvenance(t *testing.T) evmassign.Provenance {
 	p, err := identityfix.Provenance(1, 2, evmassign.KindPrimary, 2)
 	require.NoError(t, err)
 	return p
+}
+
+// The configuration a hash names, over the whole stored history (not only the current and the previous one): found at any depth,
+// with its epoch; a hash the history does not hold, another shard's history, and a lookup before anything was stored are errors, never
+// "unchanged".
+func TestShardConfigByHashResolvesTheWholeHistory(t *testing.T) {
+	o, err := NewOrchestration(5, filepath.Join(t.TempDir(), "orchestration.db"), logger.New(t))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = o.db.Close() })
+	base := createShardConf(t, 1, types.ShardID{}, 1)
+	confs := []*types.PartitionDescriptionRecord{base}
+	require.NoError(t, o.AddShardConfig(base))
+	for epoch, start := uint64(1), uint64(30); epoch <= 3; epoch, start = epoch+1, start+15 {
+		next := *base
+		next.Epoch, next.EpochStart = epoch, start
+		next.Validators = createShardConf(t, 1, types.ShardID{}, 1).Validators
+		require.NoError(t, o.AddShardConfig(&next))
+		confs = append(confs, &next)
+	}
+	for _, c := range confs {
+		h, err := c.Hash(crypto.SHA256)
+		require.NoError(t, err)
+		got, err := o.ShardConfigByHash(1, types.ShardID{}, h, crypto.SHA256)
+		require.NoError(t, err)
+		require.Equal(t, c.Epoch, got.Epoch, "the oldest entry resolves as well as the newest")
+		require.Equal(t, c.EpochStart, got.EpochStart)
+	}
+	_, err = o.ShardConfigByHash(1, types.ShardID{}, bytes.Repeat([]byte{7}, 32), crypto.SHA256)
+	require.ErrorContains(t, err, "no stored configuration", "a hash the history does not hold")
+	h, err := confs[1].Hash(crypto.SHA256)
+	require.NoError(t, err)
+	_, err = o.ShardConfigByHash(2, types.ShardID{}, h, crypto.SHA256)
+	require.ErrorContains(t, err, "no stored configuration", "another partition's history")
+	h512, err := confs[1].Hash(crypto.SHA512)
+	require.NoError(t, err)
+	_, err = o.ShardConfigByHash(1, types.ShardID{}, h512, crypto.SHA256)
+	require.Error(t, err, "a hash under another algorithm names nothing")
 }

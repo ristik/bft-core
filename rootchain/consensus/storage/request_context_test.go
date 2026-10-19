@@ -68,9 +68,9 @@ func TestNextEpochRebuildsRequestContext(t *testing.T) {
 	next := *pdr
 	next.Epoch = 1
 	next.Validators = infos
-	si.TR.Epoch++ // nextRound advances the technical record epoch before it derives the successor
-	nsi, err := si.nextEpoch(&next, crypto.SHA256)
+	nsi, switched, err := advanceShardConfiguration(si, &next, crypto.SHA256)
 	require.NoError(t, err)
+	require.True(t, switched)
 	requireUnitContext(t, nsi, &next)
 	require.NotEqual(t, before.Identity(), nsi.RequestContext().Identity())
 	require.Same(t, before, si.RequestContext())
@@ -78,7 +78,7 @@ func TestNextEpochRebuildsRequestContext(t *testing.T) {
 
 	heavy := next
 	heavy.Validators = []*types.NodeInfo{{NodeID: infos[0].NodeID, SigKey: infos[0].SigKey, Stake: 3}, infos[1]}
-	_, err = si.nextEpoch(&heavy, crypto.SHA256)
+	_, _, err = advanceShardConfiguration(si, &heavy, crypto.SHA256)
 	require.ErrorIs(t, err, quorumweight.ErrWeightCap, "a weight-changing successor is not admitted before activation")
 }
 

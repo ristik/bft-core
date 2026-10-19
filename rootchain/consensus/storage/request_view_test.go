@@ -177,13 +177,12 @@ func (s *scenario) snapshot(parent *ShardInfo, pending *types.InputRecord) *Requ
 // acknowledgement is pending: epoch and configuration fixed, round and leader advancing, accumulators rolled once.
 func (s *scenario) installed(repeats int) *ShardInfo {
 	s.f.t.Helper()
-	advanced := *s.parent
-	advanced.Fees = maps.Clone(s.parent.Fees)
-	advanced.TR = s.succTR
-	next, err := advanced.nextEpochWith(s.pdr1, crypto.SHA256, resetMembers)
+	next, switched, err := advanceShardConfigurationWith(s.parent, s.pdr1, crypto.SHA256, resetMembers)
 	require.NoError(s.f.t, err)
+	require.True(s.f.t, switched)
+	require.Equal(s.f.t, s.succTR, next.TR, "the installed record is the successor record H committed")
 	for i := 0; i < repeats; i++ {
-		require.NoError(s.f.t, next.nextRoundWith(nil, s.pdr1, crypto.SHA256, resetMembers))
+		require.NoError(s.f.t, next.nextRound(nil))
 	}
 	return next
 }
@@ -1123,7 +1122,7 @@ func TestExpectedTRAfterExecutedRequestsInTheInstalledState(t *testing.T) {
 	install := bytes.Clone(inst.TR.FeeHash)
 	req := &certification.BlockCertificationRequest{PartitionID: 1, ShardID: types.ShardID{}, NodeID: s.f.id(1), BlockSize: 100, StateSize: 50,
 		InputRecord: &types.InputRecord{Version: 1, RoundNumber: inst.TR.Round, Epoch: inst.TR.Epoch, PreviousHash: []byte{1}, Hash: []byte{2}, SumOfEarnedFees: 25}}
-	require.NoError(t, inst.nextRoundWith(req, s.pdr1, crypto.SHA256, resetMembers))
+	require.NoError(t, inst.nextRound(req))
 	require.NotEqual(t, install, inst.TR.FeeHash, "premise: the executed request moved the fee commitment")
 	require.NotZero(t, inst.Stat.Blocks)
 

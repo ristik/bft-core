@@ -221,9 +221,15 @@ func (x *ExecutedBlock) extendWithAuthority(newBlock *rctypes.BlockData, verifie
 			Epoch: newBlock.Epoch, PredecessorBodyID: bytes.Clone(record.NextBodyID), Phase: "idle", Pos: parentState.Control.Pos,
 			UnackedParent: bytes.Clone(parentState.Control.UnackedParent)}
 	}
-	nextShardState, err := parentState.nextBlock(shardConfs, hash)
+	nextShardState, switched, err := parentState.nextBlockSwitching(shardConfs, hash, configHistory(orchestration))
 	if err != nil {
 		return nil, fmt.Errorf("creating shard info for the block: %w", err)
+	}
+	// a shard that switched configuration at the epoch boundary of this very block (activateEVMAssignment) switched in it too
+	for key, activated := range nextShardState.States {
+		if previous := x.ShardState.States[key]; bootstrapChild && previous != nil && !bytes.Equal(previous.ShardConfHash, activated.ShardConfHash) {
+			switched[key] = struct{}{}
+		}
 	}
 	if bootstrapChild {
 		// The first ordinary successor block recertifies every imported shard
@@ -350,6 +356,11 @@ func (x *ExecutedBlock) extendWithAuthority(newBlock *rctypes.BlockData, verifie
 			log.Info(fmt.Sprintf("no validators in shard config (shard has been removed?) %s", shardKey))
 			continue
 		}
+		// no request (nor T2 repeat) is applied to a shard in the block that switches its configuration: the block certifies the transition
+		// itself; the proposer excludes such a shard, and a proposal that carries one is refused whole
+		if _, switching := switched[shardKey]; switching {
+			return nil, fmt.Errorf("%w: shard %s", ErrShardSwitching, shardKey)
+		}
 		// a committed assignment handoff waits for this shard's certified acknowledgement: its IR epoch catches up with the installed one
 		awaiting := pos.pendingAck() && si.TR.Epoch != si.IR.Epoch
 
@@ -408,7 +419,7 @@ func (x *ExecutedBlock) extendWithAuthority(newBlock *rctypes.BlockData, verifie
 		if len(irChReq.Requests) > 0 {
 			req = irChReq.Requests[0]
 		}
-		if err = si.nextRound(req, shardConfs[shardKey], hash); err != nil {
+		if err = si.nextRound(req); err != nil {
 			return nil, fmt.Errorf("updating shard info for the next round: %w", err)
 		}
 

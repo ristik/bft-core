@@ -494,7 +494,8 @@ func ResolveRequestContext(q RequestQuery, snap *RequestSnapshot) (*RequestRound
 
 // expectedTR is the technical record the round's requests build on, for the assignment idx of the snapshot's chain.
 //
-// While the shard's last certified record is the assignment's predecessor epoch, two states of the parent exist:
+// While the shard's last certified record is of an epoch before the assignment's (the transition to it is not certified yet; the shard
+// may have been idle across several scheduled epochs, so not necessarily its direct predecessor), two states of the parent exist:
 //
 //   - predecessor: the parent has not installed the assignment yet (the committed state lags the activation, or the round is only
 //     collected). The successor record is derived from the frozen parent and its COMPLETE digest must be the committed one: this is
@@ -516,7 +517,7 @@ func expectedTR(snap *RequestSnapshot, idx int) (certification.TechnicalRecord, 
 	}
 	act, p := snap.chain[idx], snap.parent
 	switch {
-	case idx > 0 && act.pdr.Epoch > 0 && p.lastTR.Epoch == act.pdr.Epoch-1:
+	case idx > 0 && act.pdr.Epoch > 0 && p.lastTR.Epoch < act.pdr.Epoch:
 		switch {
 		case p.tr.Epoch == act.pdr.Epoch-1: // predecessor
 			derived, err := successorTechnicalRecordWith(snap.frozen, act.pdr, snap.hashAlg, resetMembers)

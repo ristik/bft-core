@@ -446,6 +446,47 @@ func (o *Orchestration) ShardConfigByEpoch(partitionID types.PartitionID, shardI
 	return found, err
 }
 
+// ShardConfigByHash returns the stored configuration of the shard that hashes to hash under hashAlg. Every stored entry is canonical
+// and immutable (sequential epochs, see AddShardConfig), so a match is the one configuration the hash names; no match, and a hash
+// that two stored entries share, are errors: a missing or ambiguous history is never read as "unchanged".
+func (o *Orchestration) ShardConfigByHash(partitionID types.PartitionID, shardID types.ShardID, hash []byte, hashAlg crypto.Hash) (*types.PartitionDescriptionRecord, error) {
+	var found *types.PartitionDescriptionRecord
+	ambiguous := false
+	err := o.db.View(func(tx *bolt.Tx) error {
+		bucket := getShardBucket(tx, partitionID, shardID)
+		if bucket == nil {
+			return nil
+		}
+		return bucket.ForEach(func(_, v []byte) error {
+			var conf *types.PartitionDescriptionRecord
+			if err := json.Unmarshal(v, &conf); err != nil {
+				return fmt.Errorf("failed to unmarshal shard conf: %w", err)
+			}
+			h, err := conf.Hash(hashAlg)
+			if err != nil {
+				return err
+			}
+			if bytes.Equal(h, hash) {
+				if found != nil {
+					ambiguous = true
+				}
+				found = conf
+			}
+			return nil
+		})
+	})
+	if err != nil {
+		return nil, err
+	}
+	if ambiguous {
+		return nil, fmt.Errorf("configuration hash %x names more than one stored configuration of shard %s-%s", hash, partitionID, shardID)
+	}
+	if found == nil {
+		return nil, fmt.Errorf("no stored configuration of shard %s-%s hashes to %x", partitionID, shardID, hash)
+	}
+	return found, nil
+}
+
 // DerivedChain returns the configurations derived from committed handoffs for
 // the shard with a shard epoch above afterEpoch, oldest first, with their
 // provenance. Together with the acknowledged base it is the committed

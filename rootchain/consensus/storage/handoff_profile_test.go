@@ -921,20 +921,22 @@ func TestHandoffIsolatedGuards(t *testing.T) {
 	})
 }
 
-func TestProfileHandoffAuthenticatesDeferredShardEpochAccumulators(t *testing.T) {
+// The accumulator commitments of a switched shard are those of its new accumulators, in either profile: one transition operation, no
+// deferred announcement that a handoff profile would have to recompute.
+func TestProfileHandoffAuthenticatesTheSwitchedShardEpochAccumulators(t *testing.T) {
 	key := []byte{0x3, 0x24, 0x8b, 0x61, 0x68, 0x51, 0xac, 0x6e, 0x43, 0x7e, 0xc2, 0x4e, 0xcc, 0x21, 0x9e, 0x5b, 0x42, 0x43, 0xdf, 0xa5, 0xdb, 0xdb, 0x8, 0xce, 0xa6, 0x48, 0x3a, 0xc9, 0xe0, 0xdc, 0x6b, 0x55, 0xcd}
 	conf := &types.PartitionDescriptionRecord{PartitionID: 7, Epoch: 1, Validators: []*types.NodeInfo{{NodeID: "n", SigKey: key, Stake: 1}}}
 	si, err := NewShardInfo(conf, crypto.SHA256)
 	require.NoError(t, err)
 	si.Fees["n"] = 9
-	si.TR.Epoch = 2
 	conf2 := *conf
 	conf2.Epoch = 2
 	shard := types.PartitionShardID{PartitionID: conf.PartitionID, ShardID: conf.ShardID.Key()}
 	prior := ShardStates{States: map[types.PartitionShardID]*ShardInfo{shard: si}, Changed: ShardSet{}, Control: initialControl(5)}
 	next, err := prior.nextBlock(map[types.PartitionShardID]*types.PartitionDescriptionRecord{shard: &conf2}, crypto.SHA256)
 	require.NoError(t, err)
-	require.Empty(t, next.Changed)
+	require.Contains(t, next.Changed, shard, "the switch is certified")
+	require.EqualValues(t, 2, next.States[shard].TR.Epoch)
 	require.Equal(t, si.IR, next.States[shard].IR)
 	feeHash, err := next.States[shard].feeHash(crypto.SHA256)
 	require.NoError(t, err)
@@ -946,7 +948,7 @@ func TestProfileHandoffAuthenticatesDeferredShardEpochAccumulators(t *testing.T)
 	legacy.Control = nil
 	legacyNext, err := legacy.nextBlock(map[types.PartitionShardID]*types.PartitionDescriptionRecord{shard: &conf2}, crypto.SHA256)
 	require.NoError(t, err)
-	require.False(t, bytes.Equal(feeHash, legacyNext.States[shard].TR.FeeHash))
+	require.Equal(t, next.States[shard].TR, legacyNext.States[shard].TR, "the profile does not change the transition")
 }
 
 func TestProfileHandoffReloadRejectsForgedSuffixPayload(t *testing.T) {

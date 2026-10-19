@@ -105,6 +105,14 @@ func (x *IrReqBuffer) Add(round uint64, irChReq *drctypes.IRChangeReq, ver IRCha
 	return nil
 }
 
+// Drop discards the buffered requests of the given shards: a shard whose configuration switches in the block being proposed gets no
+// request in it, and a request built on the previous configuration's technical record is stale once the transition is certified.
+func (x *IrReqBuffer) Drop(shards storage.ShardSet) {
+	for key := range shards {
+		delete(x.irChgReqBuffer, key)
+	}
+}
+
 // IsChangeInBuffer returns true if there is a request for IR change from the partition
 // in the buffer
 func (x *IrReqBuffer) IsChangeInBuffer(partitionID types.PartitionID, shardID types.ShardID) bool {

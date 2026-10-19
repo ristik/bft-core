@@ -27,6 +27,7 @@ type viewOpts struct {
 	round      uint64        // target root round
 	purpose    storage.RequestPurpose
 	pending    *types.InputRecord
+	partition  types.PartitionID // another shard's view (its previous UC then names its partition and shard); zero is the shard 1 of the other tests
 }
 
 // viewOf resolves the view of the shard of nodes/infos under opts, through the exported snapshot API only.
@@ -44,7 +45,11 @@ func viewOf(t *testing.T, infos []*types.NodeInfo, o viewOpts) *storage.RequestR
 	if o.purpose == 0 {
 		o.purpose = storage.PurposeCertify
 	}
-	pdr := &types.PartitionDescriptionRecord{Version: 1, NetworkID: 5, PartitionID: 1, PartitionTypeID: 1, ShardID: types.ShardID{},
+	partition := types.PartitionID(1)
+	if o.partition != 0 {
+		partition = o.partition
+	}
+	pdr := &types.PartitionDescriptionRecord{Version: 1, NetworkID: 5, PartitionID: partition, PartitionTypeID: 1, ShardID: types.ShardID{},
 		UnitIDLen: 256, TypeIDLen: 32, T2Timeout: o.t2, Validators: infos}
 	si, err := storage.NewShardInfo(pdr, crypto.SHA256)
 	require.NoError(t, err)
@@ -53,6 +58,10 @@ func viewOf(t *testing.T, infos []*types.NodeInfo, o viewOpts) *storage.RequestR
 	ir := &types.InputRecord{Version: 1, RoundNumber: si.TR.Round, PreviousHash: []byte{1}, Hash: si.RootHash, BlockHash: []byte{2}, SummaryValue: []byte{3}, Timestamp: 1000}
 	si.LastCR = &certification.CertificationResponse{Partition: 1, Technical: si.TR, UC: types.UnicityCertificate{Version: 1, InputRecord: ir,
 		UnicitySeal: &types.UnicitySeal{Version: 1, NetworkID: 5, RootChainRoundNumber: o.ucRound, Timestamp: 1000, Hash: []byte{4}}}}
+	if o.partition != 0 {
+		si.LastCR.UC.UnicityTreeCertificate = &types.UnicityTreeCertificate{Partition: partition}
+		si.LastCR.UC.ShardTreeCertificate = types.ShardTreeCertificate{Shard: types.ShardID{}}
+	}
 	body, parent := bytes.Repeat([]byte{0xA0}, 32), bytes.Repeat([]byte{0x9D, byte(o.shardRound)}, 16)
 	anchor, err := storage.NewRequestAnchor(pdr, crypto.SHA256, 3, body, 7)
 	require.NoError(t, err)
@@ -60,7 +69,7 @@ func viewOf(t *testing.T, infos []*types.NodeInfo, o viewOpts) *storage.RequestR
 	require.NoError(t, err)
 	digest, err := si.LastCR.UC.Hash(crypto.SHA256)
 	require.NoError(t, err)
-	view, err := storage.ResolveRequestContext(storage.RequestQuery{Network: 5, Partition: 1, Shard: types.ShardID{}, RootEpoch: 3, RootRound: o.round,
+	view, err := storage.ResolveRequestContext(storage.RequestQuery{Network: 5, Partition: partition, Shard: types.ShardID{}, RootEpoch: 3, RootRound: o.round,
 		RootBodyID: body, Version: 7, ParentID: parent, PrevUCDigest: digest, Purpose: o.purpose}, snap)
 	require.NoError(t, err)
 	return view
@@ -482,4 +491,19 @@ func TestGeneratePayloadViewSuppressesTimeoutsOfShardsInProgress(t *testing.T) {
 	payload, err = b.GeneratePayloadView(12, timeouts, noneInProgress, &fixedResolver{view: v}, newViewVerifier(t))
 	require.NoError(t, err)
 	require.Len(t, payload.Requests, 1)
+}
+
+// partitionResolver resolves the view of the partitions it was given a view for; any other partition is refused, and every partition it was
+// asked about is recorded (a switching shard must never be asked: no view of it is resolved).
+type partitionResolver struct {
+	views map[types.PartitionID]*storage.RequestRoundView
+	asked []types.PartitionID
+}
+
+func (r *partitionResolver) ResolveView(p types.PartitionID, _ types.ShardID, _ uint64, _ storage.RequestPurpose) (*storage.RequestRoundView, error) {
+	r.asked = append(r.asked, p)
+	if v, ok := r.views[p]; ok {
+		return v, nil
+	}
+	return nil, storage.ErrAssignmentHistory
 }

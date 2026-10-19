@@ -644,6 +644,45 @@ func (x *BlockStore) FrozenShardForBlock(parentRound, blockRound uint64) (types.
 	return frozenShardOf(parent.ShardState, configs, control, blockRound)
 }
 
+// SwitchingShardsForBlock names the shards whose configuration switches in a block of blockRound built on parentRound's block: the
+// applied configuration of the parent's state is not the one in effect at blockRound (the shared plan of the executor, computed from the
+// exact proposal parent, never from a mutable latest view). A proposer excludes them, requests and timeouts alike, before it resolves any
+// view or selects any payload; the executor refuses a block that carries one (ErrShardSwitching). A parent that is a committed handoff's
+// terminal suffix executes nothing, so nothing switches.
+func (x *BlockStore) SwitchingShardsForBlock(parentRound, blockRound uint64) (ShardSet, error) {
+	parent, err := x.blockTree.FindBlock(parentRound)
+	if err != nil {
+		return nil, err
+	}
+	if c := parent.ShardState.Control; c != nil && c.Phase == "committed" && !isEpochAnchorRoot(parent) {
+		return ShardSet{}, nil
+	}
+	configs, err := x.orchestration.ShardConfigs(blockRound)
+	if err != nil {
+		return nil, err
+	}
+	return switchingShards(parent.ShardState, configs, x.hash)
+}
+
+// switchingShards is the pure plan: the shards of state whose applied configuration hash is not their configuration's.
+func switchingShards(state ShardStates, configs map[types.PartitionShardID]*types.PartitionDescriptionRecord, hashAlg crypto.Hash) (ShardSet, error) {
+	out := ShardSet{}
+	for key, conf := range configs {
+		si := state.States[key]
+		if si == nil || conf == nil || len(conf.Validators) == 0 {
+			continue
+		}
+		h, err := conf.Hash(hashAlg)
+		if err != nil {
+			return nil, fmt.Errorf("hashing the configuration of shard %s: %w", key, err)
+		}
+		if !bytes.Equal(h, si.ShardConfHash) {
+			out[key] = struct{}{}
+		}
+	}
+	return out, nil
+}
+
 // CertifiedEVMShardAt selects the sole EVM shard with the verified parent at
 // the given root round. Ambiguous or non-EVM matches fail closed.
 func (x *BlockStore) CertifiedEVMShardAt(round uint64, frozenParent []byte) (types.PartitionShardID, error) {
@@ -748,4 +787,10 @@ func NewGenesisBlock(networkID types.NetworkID, hashAlgo crypto.Hash, networkPro
 		RootHash:   commitQc.LedgerCommitInfo.Hash,
 		ShardState: state,
 	}, nil
+}
+
+// configHistory is the orchestration's authenticated configuration history when it serves one (production), nil for a test double.
+func configHistory(o Orchestration) ConfigHistory {
+	h, _ := o.(ConfigHistory)
+	return h
 }
