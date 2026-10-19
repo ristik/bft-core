@@ -551,8 +551,9 @@ p85_restart_validator() { # id
 # log is the evidence, and it must not be satisfiable by silence. (1) No root ever refused a block for a switching shard's request, saw a
 # configuration that does not advance the applied epoch, or met the old "epochs must be consecutive" halt. (2) The EVM shard (partition 8)
 # switched at the K->J handoff and again at the recovery: the logged (from, to) pairs form one chain of at least two, one epoch up each, and each
-# pair was executed by a quorum of the running roots (3 of 5; a root that entered a later epoch by installing a checkpoint did not execute the
-# first block of the epochs before it, so it legitimately lacks that pair). (3) What the roots executed agrees: for every pair the LAST root round
+# pair was executed by at least 3 of the running roots (a lane constant: the smallest quorum threshold of the root epochs these switches fall in
+# - 3 in epochs 1 and 3, 4 in epoch 2 - used as a lower bound; the committee is not looked up. A root that entered an epoch through a state import
+# did not execute the first block the others certified before it arrived, so it legitimately lacks that pair: docs/pos/epoch-skip.md). (3) What the roots executed agrees: for every pair the LAST root round
 # at which a root switched is the same on all roots that logged it (an earlier line is a proposal that never became the block: a timed-out round
 # is executed by the roots that voted it, then proposed again from the same parent). (4) Every running root logged at least one switch.
 p85_epoch_switches() {

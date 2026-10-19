@@ -74,7 +74,7 @@ preflight() {
   echo "-- machine"
   free=$(df -k "$AGRE_ROOT" | awk 'NR==2{print int($4/1048576)}')
   # the lane itself writes about 1 GiB (the 25 GiB default also covers building ureth/contracts); a run with prebuilt, attested builds on a shared disk may
-  # lower it, and the evidence records the value
+  # lower it (the preflight prints the value it checked against; it is not part of the evidence directory)
   min=${UTB_MIN_FREE_GIB:-25}
   if [ "${free:-0}" -ge "$min" ]; then yes "free disk ${free} GiB (>= $min)"; else no "free disk ${free:-?} GiB (< $min)"; fi
   [ -x "$AGRE_ROOT/briefs/devnet-lock.sh" ] && yes "devnet lock helper present" || no "devnet lock helper missing"
