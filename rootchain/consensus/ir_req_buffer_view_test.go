@@ -315,11 +315,11 @@ func TestT2TimeoutsUnderViewsAreElapsedRoundsOfTheViewsPreviousUC(t *testing.T) 
 
 	early := viewOf(t, f.infos, viewOpts{round: 10 + t2 - 1, purpose: storage.PurposeTimeout})
 	due := viewOf(t, f.infos, viewOpts{round: 10 + t2, purpose: storage.PurposeTimeout})
-	got, err := gen(0, &MockState{}).GetT2TimeoutsView(10+t2-1, &fixedResolver{view: early})
+	got, err := gen(0, &MockState{}).GetT2TimeoutsView(10+t2-1, 0, &fixedResolver{view: early})
 	require.NoError(t, err)
 	require.Empty(t, got, "one round short")
 	res := &fixedResolver{view: due}
-	got, err = gen(0, &MockState{}).GetT2TimeoutsView(10+t2, res)
+	got, err = gen(0, &MockState{}).GetT2TimeoutsView(10+t2, 0, res)
 	require.NoError(t, err)
 	require.Len(t, got, 1)
 	require.EqualValues(t, 10, got[0].GetRootRoundNumber(), "the view's previous UC, not the state's certificate list, supplies the frozen anchor")
@@ -327,33 +327,33 @@ func TestT2TimeoutsUnderViewsAreElapsedRoundsOfTheViewsPreviousUC(t *testing.T) 
 
 	// a longer configured T2 under another assignment is later; weights and keys never enter
 	slow := viewOf(t, f.infos, viewOpts{round: 10 + t2, purpose: storage.PurposeTimeout, t2: 10 * time.Second})
-	got, err = gen(0, &MockState{}).GetT2TimeoutsView(10+t2, &fixedResolver{view: slow})
+	got, err = gen(0, &MockState{}).GetT2TimeoutsView(10+t2, 0, &fixedResolver{view: slow})
 	require.NoError(t, err)
 	require.Empty(t, got)
 
 	// pipeline and view-level pending changes exclude the shard
-	got, err = gen(0, &MockState{inProgress: []types.PartitionID{1}, irInProgress: &types.InputRecord{}}).GetT2TimeoutsView(10+t2, &fixedResolver{view: due})
+	got, err = gen(0, &MockState{inProgress: []types.PartitionID{1}, irInProgress: &types.InputRecord{}}).GetT2TimeoutsView(10+t2, 0, &fixedResolver{view: due})
 	require.NoError(t, err)
 	require.Empty(t, got)
 	pend := viewOf(t, f.infos, viewOpts{round: 10 + t2, purpose: storage.PurposeTimeout, pending: &types.InputRecord{Version: 1, RoundNumber: 1, Hash: []byte{1}}})
-	got, err = gen(0, &MockState{}).GetT2TimeoutsView(10+t2, &fixedResolver{view: pend})
+	got, err = gen(0, &MockState{}).GetT2TimeoutsView(10+t2, 0, &fixedResolver{view: pend})
 	require.NoError(t, err)
 	require.Empty(t, got)
 
 	// the previous UC's own round is not before it: no error, and nothing is due yet
 	same := viewOf(t, f.infos, viewOpts{round: 10, purpose: storage.PurposeTimeout})
-	got, err = gen(0, &MockState{}).GetT2TimeoutsView(10, &fixedResolver{view: same})
+	got, err = gen(0, &MockState{}).GetT2TimeoutsView(10, 0, &fixedResolver{view: same})
 	require.NoError(t, err)
 	require.Empty(t, got)
 
 	// a target round before the previous UC is refused before any subtraction
-	got, err = gen(0, &MockState{}).GetT2TimeoutsView(9, &fixedResolver{view: due})
+	got, err = gen(0, &MockState{}).GetT2TimeoutsView(9, 0, &fixedResolver{view: due})
 	require.ErrorIs(t, err, storage.ErrStaleRequestContext)
 	require.ErrorIs(t, err, quorumweight.ErrRequestContext)
 	require.Empty(t, got)
 
 	// no history: reported, never a timeout from other state
-	got, err = gen(0, &MockState{}).GetT2TimeoutsView(10+t2, &fixedResolver{err: storage.ErrAssignmentHistory})
+	got, err = gen(0, &MockState{}).GetT2TimeoutsView(10+t2, 0, &fixedResolver{err: storage.ErrAssignmentHistory})
 	require.ErrorIs(t, err, storage.ErrAssignmentHistory)
 	require.Empty(t, got)
 	require.False(t, errors.Is(err, storage.ErrStaleRequestContext))
@@ -362,7 +362,7 @@ func TestT2TimeoutsUnderViewsAreElapsedRoundsOfTheViewsPreviousUC(t *testing.T) 
 	ctl := &MockState{certificates: []*types.UnicityCertificate{nil, {InputRecord: &types.InputRecord{}, UnicityTreeCertificate: &types.UnicityTreeCertificate{Partition: drctypes.ControlPartition}, UnicitySeal: &types.UnicitySeal{}}}}
 	g, err := NewLucBasedT2TimeoutGenerator(&Parameters{BlockRate: 900 * time.Millisecond, NetworkProfileVersion: storage.ProfileHandoff}, ctl)
 	require.NoError(t, err)
-	got, err = g.GetT2TimeoutsView(10+t2, &fixedResolver{err: errors.New("must not be asked")})
+	got, err = g.GetT2TimeoutsView(10+t2, 0, &fixedResolver{err: errors.New("must not be asked")})
 	require.NoError(t, err)
 	require.Empty(t, got)
 }

@@ -188,7 +188,7 @@ func TestQ4T2Gate(t *testing.T) {
 			id := types.PartitionID(41 + i)
 			n := rounds(t2, blockRate)
 			for _, target := range []uint64{100 + n - 1, 100 + n} {
-				got, err := gen.GetT2Timeouts(target)
+				got, err := gen.GetT2Timeouts(target, 0)
 				require.NoError(t, err)
 				var due []types.PartitionID
 				for _, g := range got {

@@ -245,11 +245,10 @@ func TestPeekWrapper(t *testing.T) {
 }
 
 func TestSignatureShape(t *testing.T) {
-	require.NoError(t, votesig.CheckSignatureShape(make([]byte, 64)))
-	for _, v := range []byte{0, 1} {
-		require.NoError(t, votesig.CheckSignatureShape(append(make([]byte, 64), v)))
+	for _, v := range []byte{0, 1, 2, 3} {
+		require.NoError(t, votesig.CheckSignatureShape(append(make([]byte, 64), v)), "recovery id %d", v)
 	}
-	for name, sig := range map[string][]byte{"nil": nil, "63": make([]byte, 63), "66": make([]byte, 66), "65 with v=2": append(make([]byte, 64), 2), "65 with v=27": append(make([]byte, 64), 27)} {
+	for name, sig := range map[string][]byte{"nil": nil, "64 compact": make([]byte, 64), "63": make([]byte, 63), "66": make([]byte, 66), "65 with v=4": append(make([]byte, 64), 4), "65 with v=27": append(make([]byte, 64), 27)} {
 		require.ErrorIs(t, votesig.CheckSignatureShape(sig), votesig.ErrSignatureShape, name)
 	}
 	d := votesig.Digest([]byte("x"))

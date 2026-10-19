@@ -219,13 +219,12 @@ func (c Config) TimeoutPreimage(t Timeout) ([]byte, error) {
 	return e.b, nil
 }
 
-// CheckSignatureShape accepts a 64-byte signature or a 65-byte one whose recovery byte is 0 or 1. The signer APIs
-// hash the preimage internally, so SignBytes/VerifyBytes take PV or PT directly and never a digest of it.
+// CheckSignatureShape accepts exactly the recoverable secp256k1 signature the base library's verifier takes: 65 bytes, the last one a
+// recovery ID in 0..3 (the verifier itself rejects a high S and a key other than the trusted one). A compact 64-byte signature is not
+// a native signature; only the frozen B1 profile keeps that form, through its own path (b1ref). The signer APIs hash the preimage
+// internally, so SignBytes/VerifyBytes take PV or PT directly and never a digest of it.
 func CheckSignatureShape(sig []byte) error {
-	switch {
-	case len(sig) == 64:
-		return nil
-	case len(sig) == 65 && sig[64] <= 1:
+	if len(sig) == 65 && sig[64] <= 3 {
 		return nil
 	}
 	return fmt.Errorf("%w: length %d", ErrSignatureShape, len(sig))

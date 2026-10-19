@@ -58,6 +58,9 @@ func (r IRChangeReason) String() string {
 }
 
 func (x *IRChangeReq) IsValid() error {
+	if x == nil {
+		return errors.New("IR change request is nil")
+	}
 	// ignore other values for now, just make sure it is not negative
 	if x.CertReason > T2Timeout {
 		return withSentinels{fmt.Errorf("unknown reason (%d)", x.CertReason), []error{ErrInvalidRequest}}
@@ -78,9 +81,9 @@ func (x *IRChangeReq) Verify(tb RequestVerifier, luc *types.UnicityCertificate, 
 	}
 	// verify IR change proof: every request is validated and counted from the proof alone, never from a claimed total
 	tally := NewRequestTally(tb)
-	for _, req := range x.Requests {
+	for i, req := range x.Requests {
 		if req == nil {
-			return nil, fmt.Errorf("invalid partition %s proof: %w: nil request", x.Partition, ErrInvalidRequest)
+			return nil, fmt.Errorf("invalid partition %s proof: %w: certification request %d is nil", x.Partition, ErrInvalidRequest, i)
 		}
 		if x.Partition != req.PartitionID || !x.Shard.Equal(req.ShardID) {
 			return nil, withSentinels{fmt.Errorf("shard of the change request is %s-%s but block certification request is for %s=%s",

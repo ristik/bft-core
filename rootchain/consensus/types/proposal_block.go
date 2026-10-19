@@ -167,9 +167,9 @@ func (x *Payload) IsValid() error {
 	// there can only be one request per partition shard in a block
 	sysIdSet := map[types.PartitionShardID]struct{}{}
 
-	for _, req := range x.Requests {
+	for i, req := range x.Requests {
 		if req == nil {
-			return errors.New("nil IR change request")
+			return fmt.Errorf("IR change request %d is nil", i)
 		}
 		if err := req.IsValid(); err != nil {
 			return fmt.Errorf("invalid IR change request for %s: %w", req.Partition, err)

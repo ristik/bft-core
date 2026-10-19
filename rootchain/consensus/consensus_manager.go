@@ -1365,9 +1365,8 @@ func (x *ConsensusManager) processTC(ctx context.Context, tc *drctypes.TimeoutCe
 		return
 	}
 	if err := x.blockStore.ProcessTc(tc); err != nil {
-		// method deletes the block that got TC - it will never be part of the chain.
-		// however, this node might not have even seen the block, in which case error is returned, but this is ok - just log
-		x.log.DebugContext(ctx, "could not remove the timeout block, node has not received it", logger.Error(err))
+		// the TC is used anyway, only storing it failed
+		x.log.WarnContext(ctx, "processing timeout certificate", logger.Error(err))
 	}
 	if x.pacemaker.AdvanceRoundTC(ctx, tc) {
 		// Round was advanced, we could have a new trust base.
@@ -1492,6 +1491,19 @@ func (x *ConsensusManager) processNewRoundEvent(ctx context.Context) {
 	x.leaderCnt.Add(ctx, 1)
 	// x.log.InfoContext(ctx, "new round start, node is leader")
 
+	// the proposal extends the block of the high QC (the epoch's anchor for its first block), only changes in that branch are in the way
+	// of new ones
+	highQc := x.blockStore.GetHighQc()
+	var branch uint64
+	switch {
+	case highQc != nil:
+		branch = highQc.GetRound()
+	case x.epochAnchor != nil:
+		branch = x.epochAnchor.Slot
+	}
+	inProgress := func(partition types.PartitionID, shard types.ShardID) *types.InputRecord {
+		return x.blockStore.IsChangeInProgress(branch, partition, shard)
+	}
 	// find shards with T2 timeouts
 	profile := x.params.NetworkProfileVersion
 	if profile == 0 {
@@ -1510,14 +1522,8 @@ func (x *ConsensusManager) processNewRoundEvent(ctx context.Context) {
 	// that carries one), and a view of theirs is never asked for.
 	var switching storage.ShardSet
 	if !oldSuffix {
-		parentRound, ok := uint64(0), false
-		if highQC := x.blockStore.GetHighQc(); highQC != nil {
-			parentRound, ok = highQC.GetRound(), true
-		} else if x.epochAnchor != nil {
-			parentRound, ok = x.epochAnchor.Slot, true
-		}
-		if ok {
-			if switching, err = x.blockStore.SwitchingShardsForBlock(parentRound, round); err != nil {
+		if highQc != nil || x.epochAnchor != nil {
+			if switching, err = x.blockStore.SwitchingShardsForBlock(branch, round); err != nil {
 				x.log.WarnContext(ctx, "cannot establish the shards that switch configuration in the proposal", logger.Error(err))
 				return
 			}
@@ -1527,9 +1533,9 @@ func (x *ConsensusManager) processNewRoundEvent(ctx context.Context) {
 	var timedOutShards []*types.UnicityCertificate
 	if !oldSuffix {
 		if x.viewResolver != nil {
-			timedOutShards, err = x.t2Timeouts.GetT2TimeoutsView(round, x.viewResolver, switching)
+			timedOutShards, err = x.t2Timeouts.GetT2TimeoutsView(round, branch, x.viewResolver, switching)
 		} else {
-			timedOutShards, err = x.t2Timeouts.GetT2Timeouts(round, switching)
+			timedOutShards, err = x.t2Timeouts.GetT2Timeouts(round, branch, switching)
 		}
 	}
 	if err != nil {
@@ -1555,12 +1561,21 @@ func (x *ConsensusManager) processNewRoundEvent(ctx context.Context) {
 	} else if !oldSuffix {
 		if x.viewResolver != nil {
 			var perr error
-			if payload, perr = x.irReqBuffer.GeneratePayloadView(round, timedOutShards, x.blockStore.IsChangeInProgress, x.viewResolver, x.irReqVerifier); perr != nil {
+			if payload, perr = x.irReqBuffer.GeneratePayloadView(round, timedOutShards, inProgress, x.viewResolver, x.irReqVerifier); perr != nil {
 				x.log.WarnContext(ctx, "cannot resolve the request views of the proposal", logger.Error(perr))
 				return
 			}
 		} else {
-			payload = x.irReqBuffer.GeneratePayload(round, timedOutShards, x.blockStore.IsChangeInProgress)
+			payload = x.irReqBuffer.GeneratePayload(round, timedOutShards, inProgress)
+			// buffered requests were verified against the state at the time they arrived, a commit since then can have made them
+			// stale - leave out the requests the validators (this node included) would reject
+			payload.Requests = slices.DeleteFunc(payload.Requests, func(r *drctypes.IRChangeReq) bool {
+				if _, err := x.irReqVerifier.VerifyIRChangeReq(round, branch, r); err != nil {
+					x.log.WarnContext(ctx, "change request left out of the proposal", logger.Shard(r.Partition, r.Shard), logger.Error(err))
+					return true
+				}
+				return false
+			})
 		}
 		if profile == storage.ProfileHandoff {
 			payload.Version = profile
@@ -1870,9 +1885,21 @@ func (x *ConsensusManager) onStateResponse(ctx context.Context, rsp *abdrc.State
 		}
 	}
 	if tmo, ok := triggerMsg.(*abdrc.TimeoutMsg); ok {
+		// the recovery state carries the blocks but not the QC of a block without a child, the high
+		// QC of the timeout vote might be such QC - process it as onTimeoutMsg does
+		x.processQC(ctx, tmo.Timeout.HighQc)
 		// timeout vote carries last round TC, if not nil, use it to advance pacemaker to correct round
 		// todo: timeout votes are not buffered
 		x.processTC(ctx, tmo.LastTC)
+	}
+	if qc, ok := triggerMsg.(*drctypes.QuorumCert); ok {
+		// the QC which failed to be processed, its block should be there now
+		x.processQC(ctx, qc)
+	}
+	if vote, ok := triggerMsg.(*abdrc.VoteMsg); ok {
+		// same as for timeout vote, without the high QC of the vote the buffered votes would be
+		// replayed as votes for a future round
+		x.processQC(ctx, vote.HighQc)
 	}
 	x.replayVoteBuffer(ctx)
 	recoveryWriteStarted = false

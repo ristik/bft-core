@@ -40,7 +40,7 @@ type viewVerifier struct {
 	calls   int
 }
 
-func (v *viewVerifier) VerifyIRChangeReq(uint64, *drctypes.IRChangeReq) (*types.InputRecord, error) {
+func (v *viewVerifier) VerifyIRChangeReq(uint64, uint64, *drctypes.IRChangeReq) (*types.InputRecord, error) {
 	v.t.Fatal("the legacy round-only verifier was used under a request history")
 	return nil, nil
 }

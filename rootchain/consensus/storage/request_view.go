@@ -678,8 +678,9 @@ type RequestHistory interface {
 type RequestViewVerifier interface {
 	IRChangeReqVerifier
 	RequestHistory() RequestHistory
-	// PendingChange is the change of the shard in the uncommitted pipeline, frozen into the view's snapshot.
-	PendingChange(partition types.PartitionID, shard types.ShardID) *types.InputRecord
+	// PendingChange is the change of the shard in the uncommitted pipeline of the branch ending with the block of the round "branch" (the
+	// parent of the block under judgement), frozen into the view's snapshot. Changes in the other branches are not in its way.
+	PendingChange(branch uint64, partition types.PartitionID, shard types.ShardID) *types.InputRecord
 	VerifyIRChangeReqView(view *RequestRoundView, irChReq *rctypes.IRChangeReq) (*VerifiedRequest, error)
 }
 
@@ -695,8 +696,8 @@ func viewDispatch(v IRChangeReqVerifier) RequestViewVerifier {
 // being executed on (parent) and the committed history, never from the last committed ShardInfo. The parent carries the committed
 // LastCR pair of its ancestry (see ShardInfo.LastCR), so the previous UC of the view is the latest committed response, repeat UCs
 // included, whichever block of the pipeline the parent is.
-func resolveExecutionView(vv RequestViewVerifier, parent *ShardInfo, parentID []byte, round uint64, hashAlg crypto.Hash) (*RequestRoundView, error) {
-	return ResolveParentView(vv.RequestHistory(), vv.PendingChange(parent.PartitionID, parent.ShardID), parent, parentID, round, hashAlg, PurposeExecute, nil)
+func resolveExecutionView(vv RequestViewVerifier, parent *ShardInfo, parentID []byte, parentRound, round uint64, hashAlg crypto.Hash) (*RequestRoundView, error) {
+	return ResolveParentView(vv.RequestHistory(), vv.PendingChange(parentRound, parent.PartitionID, parent.ShardID), parent, parentID, round, hashAlg, PurposeExecute, nil)
 }
 
 // ResolveParentView resolves the view of the shard's requests for the target root round and purpose from the committed

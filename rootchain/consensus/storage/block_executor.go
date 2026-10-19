@@ -40,7 +40,9 @@ type (
 	}
 
 	IRChangeReqVerifier interface {
-		VerifyIRChangeReq(round uint64, irChReq *rctypes.IRChangeReq) (*types.InputRecord, error)
+		// VerifyIRChangeReq verifies the change request for the block of the "round" which
+		// extends the block of the "parentRound".
+		VerifyIRChangeReq(round, parentRound uint64, irChReq *rctypes.IRChangeReq) (*types.InputRecord, error)
 	}
 )
 
@@ -371,7 +373,7 @@ func (x *ExecutedBlock) extendWithAuthority(newBlock *rctypes.BlockData, verifie
 			if err != nil {
 				return nil, fmt.Errorf("hashing parent block: %w", err)
 			}
-			view, err := resolveExecutionView(vv, si, parentID, newBlock.Round, hash)
+			view, err := resolveExecutionView(vv, si, parentID, x.GetRound(), newBlock.Round, hash)
 			if err != nil {
 				return nil, fmt.Errorf("resolving request context: %w", err)
 			}
@@ -396,7 +398,7 @@ func (x *ExecutedBlock) extendWithAuthority(newBlock *rctypes.BlockData, verifie
 				log.Info(fmt.Sprintf("ignoring a request of shard %s signed outside its active configuration: %v", shardKey, memberErr))
 				continue
 			}
-			if si.IR, err = verifier.VerifyIRChangeReq(newBlock.Round, irChReq); err != nil {
+			if si.IR, err = verifier.VerifyIRChangeReq(newBlock.Round, x.GetRound(), irChReq); err != nil {
 				return nil, fmt.Errorf("verifying change request: %w", err)
 			}
 		}

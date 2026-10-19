@@ -169,7 +169,7 @@ func TestVerifyIRChangeReqJudgesTheConfiguredProof(t *testing.T) {
 
 	t.Run("a valid proof passes the verifier and the buffer a leader admits it through", func(t *testing.T) {
 		ver := verifier(rsmtParams)
-		ir, err := ver.VerifyIRChangeReq(2, change(valid.envelope, valid.next[:]))
+		ir, err := ver.VerifyIRChangeReq(2, 1, change(valid.envelope, valid.next[:]))
 		require.NoError(t, err)
 		require.Equal(t, valid.next[:], []byte(ir.Hash))
 		require.NoError(t, NewIrReqBuffer(logger.New(t), 1).Add(2, change(valid.envelope, valid.next[:]), ver))
@@ -177,7 +177,7 @@ func TestVerifyIRChangeReqJudgesTheConfiguredProof(t *testing.T) {
 	for name, c := range proofCases(t, ts, valid) {
 		t.Run(name+" is refused", func(t *testing.T) {
 			ver := verifier(rsmtParams)
-			ir, err := ver.VerifyIRChangeReq(2, change(c.proof, c.hash))
+			ir, err := ver.VerifyIRChangeReq(2, 1, change(c.proof, c.hash))
 			require.Nil(t, ir)
 			require.ErrorIs(t, err, ErrProofInvalid)
 			require.ErrorIs(t, err, c.refusedAs)
@@ -186,7 +186,7 @@ func TestVerifyIRChangeReqJudgesTheConfiguredProof(t *testing.T) {
 		})
 	}
 	t.Run("a shard without a configured proof takes the aggregators' signatures alone (control)", func(t *testing.T) {
-		_, err := verifier(nil).VerifyIRChangeReq(2, change([]byte{1, 2, 3}, []byte{3, 3, 3}))
+		_, err := verifier(nil).VerifyIRChangeReq(2, 1, change([]byte{1, 2, 3}, []byte{3, 3, 3}))
 		require.NoError(t, err)
 	})
 }

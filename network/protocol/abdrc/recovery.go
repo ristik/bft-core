@@ -164,7 +164,7 @@ func (sm *StateMsg) CanRecoverToRound(round uint64) error {
 	if round == sm.CommittedHead.Block.GetRound() {
 		return nil
 	}
-	if !slices.ContainsFunc(sm.Pending, func(b *rctypes.BlockData) bool { return b.GetRound() == round }) {
+	if !slices.ContainsFunc(sm.Pending, func(b *rctypes.BlockData) bool { return b != nil && b.GetRound() == round }) {
 		return fmt.Errorf("state has no data block for round %d", round)
 	}
 
@@ -296,6 +296,9 @@ func (sm *StateMsg) verify(hashAlgorithm crypto.Hash, tb types.RootTrustBase, hi
 	}
 	// verify node blocks
 	for _, n := range sm.Pending {
+		if n == nil {
+			return errors.New("invalid block node: block is nil")
+		}
 		if err := n.IsValid(); err != nil {
 			return fmt.Errorf("invalid block node: %w", err)
 		}
@@ -309,12 +312,12 @@ func (sm *StateMsg) verify(hashAlgorithm crypto.Hash, tb types.RootTrustBase, hi
 		return err
 	}
 	for _, c := range sm.CommittedHead.ShardInfo {
+		// IsValid above permits absent LastCRs (a shard which has not been certified yet): there is no UC to verify in that case.
+		if c.UC == nil {
+			continue
+		}
 		ucTrust := tb
 		if history != nil {
-			// IsValid above permits absent LastCRs; there is no UC to verify in that case.
-			if c.UC == nil {
-				continue
-			}
 			historical, err := history.ByEpoch(c.UC.GetRootEpoch())
 			if err != nil {
 				return fmt.Errorf("%w for epoch %d: %w", ErrHistoricalTrustBase, c.UC.GetRootEpoch(), err)
@@ -354,6 +357,9 @@ func verifyRecoveryUC(c ShardInfo, trust types.RootTrustBase, hashAlgorithm cryp
 	// shard without a certificate, would dereference the absent one.
 	if c.UC == nil {
 		return fmt.Errorf("%w: shard %s-%s has no certificate", ErrRecoveryState, c.Partition, c.Shard)
+	}
+	if c.UC.UnicityTreeCertificate == nil {
+		return fmt.Errorf("%w: shard %s-%s: %w", ErrRecoveryState, c.Partition, c.Shard, types.ErrUnicityTreeCertificateIsNil)
 	}
 	partition, shard, conf := c.UC.GetPartitionID(), c.UC.GetShardID(), []byte(nil)
 	if historical {

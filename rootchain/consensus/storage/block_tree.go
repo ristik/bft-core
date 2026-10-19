@@ -159,11 +159,18 @@ func NewBlockTree(bDB PersistentStore, orchestration Orchestration, networkProfi
 	}
 	hQC := rootNode.data.CommitQc
 	treeNodes := map[uint64]*node{rootNode.data.GetRound(): rootNode}
+	orphans := map[uint64]struct{}{}
 	for i := rootIdx - 1; i >= 0; i-- {
 		block := blocks[i]
-		// if parent round does not exist then reject, parent must be recovered
 		parent, found := treeNodes[block.GetParentRound()]
 		if !found {
+			// Blocks older than the root are deleted from the DB when new root is stored but pruned branch
+			// might contain blocks of later rounds too - these have lost their parent and can't be used.
+			if _, orphan := orphans[block.GetParentRound()]; orphan || block.GetParentRound() < rootNode.data.GetRound() {
+				orphans[block.GetRound()] = struct{}{}
+				continue
+			}
+			// if parent round does not exist then reject, parent must be recovered
 			return nil, fmt.Errorf("cannot add block for round %d, parent block %d not found", block.GetRound(), block.GetParentRound())
 		}
 		// init ShardInfo data which is not persisted
@@ -184,6 +191,12 @@ func NewBlockTree(bDB PersistentStore, orchestration Orchestration, networkProfi
 		parent.addChild(n)
 		if n.data.BlockData.Qc.GetRound() > hQC.GetRound() {
 			hQC = n.data.BlockData.Qc
+		}
+		// QC of the block itself, the block might not have a child yet. Only a QC which doesn't commit:
+		// a commit QC is restored as the commit QC of the root once the commit is stored, until then
+		// (the node stopped between InsertQc and Commit) it must stay processable to do the commit
+		if qc := n.data.Qc; qc.GetRound() > hQC.GetRound() && qc.LedgerCommitInfo.RootChainRoundNumber == 0 {
+			hQC = qc
 		}
 	}
 
@@ -337,11 +350,16 @@ func (bt *BlockTree) findPathToRoot(round uint64) []*ExecutedBlock {
 	return path
 }
 
-func (bt *BlockTree) GetAllUncommittedNodes() []*ExecutedBlock {
+/*
+Branch returns the uncommitted blocks of the branch which ends with the block of the "round", ie
+the blocks on the path from that block (included) to the root block (not included).
+Returns nil when there is no block for the round in the tree.
+*/
+func (bt *BlockTree) Branch(round uint64) []*ExecutedBlock {
 	bt.m.Lock()
 	defer bt.m.Unlock()
 
-	return bt.allUncommittedNodes()
+	return bt.findPathToRoot(round)
 }
 
 func (bt *BlockTree) allUncommittedNodes() []*ExecutedBlock {

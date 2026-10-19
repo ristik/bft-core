@@ -140,6 +140,13 @@ func NewFromState(hash crypto.Hash, block *abdrc.CommittedBlock, db PersistentSt
 	}, nil
 }
 
+/*
+ProcessTc persists the timeout certificate.
+
+NB! The proposal/block of the TC round (if there is one) is set aside, not dropped: the round might
+still get QC too (of the votes sent before the timeout) and then FindBlock re-attaches it and the chain
+continues from it. If it doesn't the block is pruned when a block of some other branch gets committed.
+*/
 func (x *BlockStore) ProcessTc(tc *rctypes.TimeoutCert) (rErr error) {
 	if tc == nil {
 		return fmt.Errorf("error tc is nil")
@@ -164,11 +171,16 @@ func (x *BlockStore) ProcessTc(tc *rctypes.TimeoutCert) (rErr error) {
 /*
 IsChangeInProgress - return input record if shard has a pending IR change in the pipeline
 or nil if no change is currently in the pipeline.
+
+Only the uncommitted blocks of the branch ending with the block of the round "branch" are
+checked, ie the blocks which would get committed together with a block extending that round.
+Changes in the other branches of the block tree do not count, at most one of the branches
+ends up being committed.
 */
-func (x *BlockStore) IsChangeInProgress(partition types.PartitionID, shard types.ShardID) *types.InputRecord {
+func (x *BlockStore) IsChangeInProgress(branch uint64, partition types.PartitionID, shard types.ShardID) *types.InputRecord {
 	k := types.PartitionShardID{PartitionID: partition, ShardID: shard.Key()}
-	// go through the block we have and make sure that there is no change in progress for this shard
-	for _, b := range x.blockTree.GetAllUncommittedNodes() {
+	// go through the blocks of the branch and make sure that there is no change in progress for this shard
+	for _, b := range x.blockTree.Branch(branch) {
 		if _, ok := b.ShardState.Changed[k]; ok {
 			return b.ShardState.States[k].IR
 		}
