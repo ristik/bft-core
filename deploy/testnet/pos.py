@@ -163,6 +163,21 @@ class Genesis:
         (self.dir / 'plan.json').write_text(out)
         self.trust_base = Path(trust_base)
 
+    def contracts_take_root_identity(self):
+        """Whether this contracts checkout reads P85_ROOT_NETWORK / P85_ROOT_GENESIS (the same probe as the lane's preflight). Once it does, the identity is required."""
+        script = self.contracts / 'script/P85Genesis.s.sol'
+        return script.is_file() and 'P85_ROOT_GENESIS' in script.read_text()
+
+    def root_identity(self):
+        """The root consensus the contracts bind (contracts#46): its network id N and genesis identity G, from the manifest tool and never typed."""
+        if getattr(self, '_root_identity', None) is None:
+            out = self._run(self.ubft, 'trust-base', 'utb-manifest', '--trust-base', self.trust_base, '--out-dir', self.dir / 'root-identity').stdout
+            n, g = re.search(r'^root network id +(\d+)$', out, re.M), re.search(r'^root genesis id +(0x[0-9a-f]{64})$', out, re.M)
+            if not (n and g and int(n.group(1)) > 0):
+                raise PosError('the manifest tool printed no root network id / genesis id:\n' + out)
+            self._root_identity = (n.group(1), g.group(1))
+        return self._root_identity
+
     def prepare(self, conf, provisional):
         """The contracts genesis input and the contracts' genesis state from the given shard configuration. The base configuration is a first pass only."""
         args = ['pos-relayer', 'genesis'] + (['--provisional'] if provisional else []) + ['--plan', self.dir / 'plan.json', '--trust-base', self.trust_base,
@@ -173,6 +188,8 @@ class Genesis:
         env = dict(os.environ, P85_NETWORK_WORD=network_word(self.generation), P85_CHAIN_ID=str(self.chain_id), P85_ROOTS=REGISTRY, P85_TREASURY=TREASURY,
                    P85_V_MAX=str(CAPS[0]), P85_L_MAX=str(CAPS[1]), P85_N_MAX=str(CAPS[2]), P85_CADENCE_ROUNDS=str(self.cadence[0]),
                    P85_CADENCE_SECONDS=str(self.cadence[1]), P85_DIST_NUM=str(self.dist[0]), P85_DIST_DEN=str(self.dist[1]))
+        if self.contracts_take_root_identity():   # contracts#46 and later; an older pinned checkout does not know the variables
+            env['P85_ROOT_NETWORK'], env['P85_ROOT_GENESIS'] = self.root_identity()
         self._run(self.contracts / 'script/p85-genesis.sh', self.dir / 'contracts-genesis.json', self.dir / 'genesis', env=env)
         measured = self._run(self.contracts / 'script/measure-elect.sh', *map(str, CAPS), env=env, cwd=self.contracts)
         (self.dir / 'elect-measurement.json').write_text(measured.stdout)

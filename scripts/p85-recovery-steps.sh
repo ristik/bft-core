@@ -711,7 +711,7 @@ p85_run_lane() {
     if [ "${UTB_LANE:-0}" = 1 ]; then
       # the combined UTB lane (scripts/utb-lane.sh, design 11.4): the same steps with the signed trust-base entry checkpoints between them
       source scripts/lib/utb-lib.sh
-      P85_STEPS="p85_baseline anyage_step_setup utb_step_u1 p85_joiner_nodes p85_joiner_onboard p85_election_reserved p85_proofs anyage_step_l1b p85_handoff p85_install_activation utb_step_u2 anyage_step_frozen utb_step_u3a p85_j_stalls p85_recovery p85_resolved utb_step_u3b anyage_step_l2 utb_step_u4 anyage_step_l1c utb_step_u5 p85_restarts p85_epoch_switches utb_step_final"
+      P85_STEPS="p85_baseline anyage_step_setup utb_step_u1 p85_joiner_nodes p85_joiner_onboard p85_election_reserved p85_proofs anyage_step_l1b p85_handoff p85_install_activation utb_step_u2 anyage_step_frozen utb_step_u3a p85_j_stalls p85_recovery p85_resolved utb_step_u3b anyage_step_l2 utb_step_u4 utb_step_u4b anyage_step_l1c utb_step_u5 p85_restarts p85_epoch_switches utb_step_final"
     fi
   fi
   [ "${P85_MODE:-}" != overbound ] || { P85_JOINER_UNITS=3; P85_STEPS="p85_baseline p85_joiner_nodes p85_joiner_onboard p85_election_refused"; }

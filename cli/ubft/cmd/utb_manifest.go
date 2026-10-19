@@ -258,7 +258,7 @@ func trustBaseUTBManifestCmd() *cobra.Command {
 				names = append(names, n)
 			}
 			sort.Strings(names)
-			_, err = fmt.Fprintf(cmd.OutOrStdout(), "%s\nroot genesis id  %s\nutb genesis id    %s\n", path, m.Derived.RootGenesisID, m.Derived.UTBGenesisEntryID)
+			_, err = fmt.Fprintf(cmd.OutOrStdout(), "%s\nroot genesis id  %s\nroot network id  %d\nutb genesis id    %s\n", path, m.Derived.RootGenesisID, m.Inputs.NetworkID, m.Derived.UTBGenesisEntryID)
 			return err
 		}}
 	cmd.Flags().StringVar(&tbPath, "trust-base", "", "the genesis (epoch 1) trust base file")
