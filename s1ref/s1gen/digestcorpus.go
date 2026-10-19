@@ -32,25 +32,26 @@ type DigestSeal struct {
 
 // DigestVote is one scheme 2 vote statement.
 type DigestVote struct {
-	ID           string      `json:"id"`
-	Description  string      `json:"description"`
-	Signer       string      `json:"signer"`
-	Key          string      `json:"key"` // compressed secp256k1
-	Epoch        string      `json:"epoch"`
-	Round        string      `json:"round"`
-	Parent       string      `json:"parent"`
-	Exec         string      `json:"exec"`
-	Timestamp    string      `json:"timestamp"` // "0": omitted from VI
-	CommitHash   *string     `json:"commitHash"`
-	CommitRound  string      `json:"commitRound"`
-	VoteInfo     string      `json:"voteInfo"`     // VI
-	VoteInfoHash string      `json:"voteInfoHash"` // VH = sha256(VI)
-	Preimage     string      `json:"preimage"`     // PV
-	Digest       string      `json:"digest"`       // sha256(PV)
-	Sig64        string      `json:"sig64"`        // r||s, low s
-	Sig65        string      `json:"sig65"`        // r||s||v with the true recovery id (0 or 1)
-	SigHighS     string      `json:"sigHighS"`     // r||(n-s): valid for the key, refused by the low-s rule
-	Seal         *DigestSeal `json:"seal,omitempty"`
+	ID           string     `json:"id"`
+	Description  string     `json:"description"`
+	Signer       string     `json:"signer"`
+	Key          string     `json:"key"` // compressed secp256k1
+	Epoch        string     `json:"epoch"`
+	Round        string     `json:"round"`
+	Parent       string     `json:"parent"`
+	Exec         string     `json:"exec"`
+	Timestamp    string     `json:"timestamp"` // "0": omitted from VI
+	Committing   bool       `json:"committing"`
+	CommitHash   string     `json:"commitHash"` // 32 bytes hex, "" when the vote does not commit
+	CommitRound  string     `json:"commitRound"`
+	VoteInfo     string     `json:"voteInfo"`     // VI
+	VoteInfoHash string     `json:"voteInfoHash"` // VH = sha256(VI)
+	Preimage     string     `json:"preimage"`     // PV
+	Digest       string     `json:"digest"`       // sha256(PV)
+	Sig64        string     `json:"sig64"`        // r||s, low s
+	Sig65        string     `json:"sig65"`        // r||s||v with the true recovery id (0 or 1)
+	SigHighS     string     `json:"sigHighS"`     // r||(n-s): valid for the key, refused by the low-s rule
+	Seal         DigestSeal `json:"seal"`         // zero values ("0", "") when the vote does not commit: one fixed schema for every vote
 }
 
 // DigestAnchor is the anchor of a first-round-after-epoch-change timeout.
@@ -62,18 +63,19 @@ type DigestAnchor struct {
 
 // DigestTimeout is one scheme 2 timeout statement.
 type DigestTimeout struct {
-	ID          string        `json:"id"`
-	Description string        `json:"description"`
-	Signer      string        `json:"signer"`
-	Key         string        `json:"key"`
-	Epoch       string        `json:"epoch"`
-	Round       string        `json:"round"`
-	HighQcRound string        `json:"highQcRound"`
-	Anchor      *DigestAnchor `json:"anchor"`
-	Author      string        `json:"author"`
-	Preimage    string        `json:"preimage"` // PT
-	Digest      string        `json:"digest"`
-	Sig64       string        `json:"sig64"`
+	ID          string       `json:"id"`
+	Description string       `json:"description"`
+	Signer      string       `json:"signer"`
+	Key         string       `json:"key"`
+	Epoch       string       `json:"epoch"`
+	Round       string       `json:"round"`
+	HighQcRound string       `json:"highQcRound"`
+	HasAnchor   bool         `json:"hasAnchor"`
+	Anchor      DigestAnchor `json:"anchor"` // zero values when there is no anchor
+	Author      string       `json:"author"`
+	Preimage    string       `json:"preimage"` // PT
+	Digest      string       `json:"digest"`
+	Sig64       string       `json:"sig64"`
 }
 
 // DigestPair names two votes of one context; Equivocation says whether they are an offence (same key, domain, epoch and round, different signed PV).
@@ -118,19 +120,20 @@ func (g *gen) digestVote(w *world, id, desc string, e *ev) DigestVote {
 	v := w.vals[e.author]
 	vi := e.vi(w.net, w.genesis)
 	dg := sha256.Sum256(e.pv)
-	out := DigestVote{ID: id, Description: desc, Signer: e.author, Key: hx(v.pub), Epoch: dec(e.epoch), Round: dec(e.round), Parent: dec(e.parent),
+	out := DigestVote{Seal: DigestSeal{Network: "0", Round: "0", Epoch: "0", Timestamp: "0"}, ID: id, Description: desc, Signer: e.author, Key: hx(v.pub), Epoch: dec(e.epoch), Round: dec(e.round), Parent: dec(e.parent),
 		Exec: hx(e.exec[:]), Timestamp: dec(e.ts), CommitRound: dec(e.sealRound), VoteInfo: hx(vi), VoteInfoHash: hx(e.prev), Preimage: hx(e.pv), Digest: hx(dg[:]),
 		Sig64: hx(e.voteSig), Sig65: hx(v.signV(e.pv)), SigHighS: hx(highS(e.voteSig))}
 	if e.committing() {
 		h := hx(e.hash)
-		out.CommitHash = &h
-		out.Seal = &DigestSeal{Network: dec(e.net), Round: dec(e.sealRound), Epoch: dec(e.sealEpoch), Timestamp: dec(e.sealTS), PreviousHash: hx(e.prev), Hash: h,
+		out.Committing, out.CommitHash = true, h
+		out.Seal = DigestSeal{Network: dec(e.net), Round: dec(e.sealRound), Epoch: dec(e.sealEpoch), Timestamp: dec(e.sealTS), PreviousHash: hx(e.prev), Hash: h,
 			SigBytes: hx(e.sealBytes()), Signature: hx(e.sealSig)}
 	}
 	return out
 }
 
 func (g *gen) digestTimeout(w *world, id, desc, signer string, epoch, round, high uint64, anchor *DigestAnchor, anchorRaw *[3]uint64, gid [32]byte) DigestTimeout {
+	zero := DigestAnchor{GenesisID: "", Epoch: "0", Slot: "0"}
 	var pt []byte
 	if anchor == nil {
 		pt = timeoutPreimage(w.net, w.genesis, epoch, round, high, signer)
@@ -140,7 +143,11 @@ func (g *gen) digestTimeout(w *world, id, desc, signer string, epoch, round, hig
 	}
 	v := w.vals[signer]
 	dg := sha256.Sum256(pt)
-	return DigestTimeout{ID: id, Description: desc, Signer: signer, Key: hx(v.pub), Epoch: dec(epoch), Round: dec(round), HighQcRound: dec(high), Anchor: anchor,
+	a, has := zero, anchor != nil
+	if has {
+		a = *anchor
+	}
+	return DigestTimeout{ID: id, Description: desc, Signer: signer, Key: hx(v.pub), Epoch: dec(epoch), Round: dec(round), HighQcRound: dec(high), HasAnchor: has, Anchor: a,
 		Author: signer, Preimage: hx(pt), Digest: hx(dg[:]), Sig64: hx(v.sign(pt))}
 }
 

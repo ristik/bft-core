@@ -79,8 +79,10 @@ func TestDigestCorpusMatchesTheProductionEncoderAndVerifier(t *testing.T) {
 			vi := votesig.VoteInfo{Epoch: num(t, v.Epoch), Round: num(t, v.Round), Parent: num(t, v.Parent), Timestamp: num(t, v.Timestamp)}
 			copy(vi.Exec[:], unhex(t, v.Exec))
 			commit := votesig.Commit{Round: num(t, v.CommitRound)}
-			if v.CommitHash != nil {
-				commit.Hash = unhex(t, *v.CommitHash)
+			if v.Committing {
+				commit.Hash = unhex(t, v.CommitHash)
+			} else if v.CommitHash != "" || v.Seal.Hash != "" {
+				t.Fatalf("%s: commit data on a non-committing vote", v.ID)
 			}
 			viBytes, err := cfg.VoteInfoBytes(vi)
 			if err != nil {
@@ -118,7 +120,7 @@ func TestDigestCorpusMatchesTheProductionEncoderAndVerifier(t *testing.T) {
 			if s.Cmp(half) > 0 || hs.Cmp(half) <= 0 || new(big.Int).Add(s, hs).Cmp(n) != 0 {
 				t.Fatalf("%s: low/high s forms", v.ID)
 			}
-			if v.Seal != nil {
+			if v.Committing {
 				seal := types.UnicitySeal{Version: 1, NetworkID: types.NetworkID(num(t, v.Seal.Network)), RootChainRoundNumber: num(t, v.Seal.Round),
 					Epoch: num(t, v.Seal.Epoch), Timestamp: num(t, v.Seal.Timestamp), PreviousHash: unhex(t, v.Seal.PreviousHash), Hash: unhex(t, v.Seal.Hash)}
 				sb, err := seal.SigBytes()
@@ -148,7 +150,7 @@ func TestDigestCorpusMatchesTheProductionEncoderAndVerifier(t *testing.T) {
 		for _, to := range ctx.Timeouts {
 			timeouts++
 			tt := votesig.Timeout{Epoch: num(t, to.Epoch), Round: num(t, to.Round), HighQcRound: num(t, to.HighQcRound), Author: to.Author}
-			if to.Anchor != nil {
+			if to.HasAnchor {
 				a := votesig.Anchor{Epoch: num(t, to.Anchor.Epoch), Slot: num(t, to.Anchor.Slot)}
 				copy(a.GenesisID[:], unhex(t, to.Anchor.GenesisID))
 				tt.Anchor = &a
