@@ -52,12 +52,14 @@ type (
 var ErrShardConfMismatch = errors.New("calculated shard conf hash doesn't match the value in block data")
 
 func NewRootBlock(block *abdrc.CommittedBlock, hash crypto.Hash, orchestration Orchestration, networkProfile ...uint64) (*ExecutedBlock, error) {
-	return newRootBlock(block, hash, orchestration, nil, networkProfile...)
+	return newRootBlock(block, hash, orchestration, nil, false, networkProfile...)
 }
 
-// newRootBlock creates the root block of a recovery state. The state is validated completely before the block is returned, ie before anything is
-// persisted or installed. localGenesis is the genesis the node trusts (nil: the one derived by NewGenesisBlock).
-func newRootBlock(block *abdrc.CommittedBlock, hash crypto.Hash, orchestration Orchestration, localGenesis *ExecutedBlock, networkProfile ...uint64) (*ExecutedBlock, error) {
+// newRootBlock creates the root block of a committed head. With recovery set the head is a peer's state message and is validated completely before the
+// block is returned, ie before anything is persisted or installed (validateRecoveredHead, validateShardSet, validateLastResponse); localGenesis is the
+// genesis the node trusts (nil: the one derived by NewGenesisBlock). Without it the head is a handoff checkpoint, authenticated by its own verification
+// (VerifyHandoffSnapshot, the epoch genesis), which carries no QC of its own block.
+func newRootBlock(block *abdrc.CommittedBlock, hash crypto.Hash, orchestration Orchestration, localGenesis *ExecutedBlock, recovery bool, networkProfile ...uint64) (*ExecutedBlock, error) {
 	profile, err := profileVersion(networkProfile)
 	if err != nil {
 		return nil, err
@@ -106,7 +108,7 @@ func newRootBlock(block *abdrc.CommittedBlock, hash crypto.Hash, orchestration O
 		}
 		shardConf, ok := shardConfs[shardKey]
 		if !ok {
-			return nil, fmt.Errorf("block contains shard %s - %s which is not listed in the local orchestration", d.Partition, d.Shard)
+			return nil, fmt.Errorf("block contains shard %s - %s which is not active in the local orchestration", d.Partition, d.Shard)
 		}
 		shardConfHash, err := shardConf.Hash(crypto.SHA256)
 		if err != nil {
@@ -132,8 +134,13 @@ func newRootBlock(block *abdrc.CommittedBlock, hash crypto.Hash, orchestration O
 			IR:            d.IR,
 			TR:            d.IRTR,
 		}
-		if err := validateLastResponse(d, shardConf, orchestration, crypto.SHA256); err != nil {
-			return nil, fmt.Errorf("recovered shard %s - %s: %w", d.Partition, d.Shard, err)
+		if recovery {
+			if err := validateRecoveredFields(d, shardConf); err != nil {
+				return nil, fmt.Errorf("recovered shard %s - %s: %w", d.Partition, d.Shard, err)
+			}
+			if err := validateLastResponse(d, shardConf, orchestration, crypto.SHA256); err != nil {
+				return nil, fmt.Errorf("recovered shard %s - %s: %w", d.Partition, d.Shard, err)
+			}
 		}
 		if d.UC != nil {
 			si.LastCR = &certification.CertificationResponse{
@@ -153,7 +160,7 @@ func newRootBlock(block *abdrc.CommittedBlock, hash crypto.Hash, orchestration O
 		shardState.States[shardKey] = si
 	}
 	// the genesis block has no shards (they are activated by the first block, see ShardStates.nextBlock)
-	if block.GetRound() != rctypes.GenesisRootRound {
+	if recovery && block.GetRound() != rctypes.GenesisRootRound {
 		if err := validateShardSet(block, shardConfs); err != nil {
 			return nil, fmt.Errorf("invalid recovery state: %w", err)
 		}
@@ -166,14 +173,16 @@ func newRootBlock(block *abdrc.CommittedBlock, hash crypto.Hash, orchestration O
 	if profile == ProfileHandoff && !bytes.Equal(ut.RootHash(), block.CommitQc.LedgerCommitInfo.Hash) {
 		return nil, ErrControlCheckpoint
 	}
-	// before anything is written: the head is consistent with the authenticated root and with itself
-	if block.GetRound() == rctypes.GenesisRootRound && localGenesis == nil {
-		if localGenesis, err = NewGenesisBlock(orchestration.NetworkID(), hash, profile); err != nil {
-			return nil, fmt.Errorf("local genesis: %w", err)
+	if recovery {
+		// before anything is written: the head is consistent with the authenticated root and with itself
+		if block.GetRound() == rctypes.GenesisRootRound && localGenesis == nil {
+			if localGenesis, err = NewGenesisBlock(orchestration.NetworkID(), hash, profile); err != nil {
+				return nil, fmt.Errorf("local genesis: %w", err)
+			}
 		}
-	}
-	if err := validateRecoveredHead(block, ut.RootHash(), hash, localGenesis); err != nil {
-		return nil, fmt.Errorf("invalid recovery state: %w", err)
+		if err := validateRecoveredHead(block, ut.RootHash(), hash, localGenesis); err != nil {
+			return nil, fmt.Errorf("invalid recovery state: %w", err)
+		}
 	}
 	return &ExecutedBlock{
 		BlockData:  block.Block,

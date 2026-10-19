@@ -45,7 +45,7 @@ func (v *viewVerifier) VerifyIRChangeReq(uint64, uint64, *drctypes.IRChangeReq) 
 	return nil, nil
 }
 func (v *viewVerifier) RequestHistory() RequestHistory { return v.history }
-func (v *viewVerifier) PendingChange(types.PartitionID, types.ShardID) *types.InputRecord {
+func (v *viewVerifier) PendingChange(uint64, types.PartitionID, types.ShardID) *types.InputRecord {
 	return v.pending
 }
 func (v *viewVerifier) VerifyIRChangeReqView(view *RequestRoundView, req *drctypes.IRChangeReq) (*VerifiedRequest, error) {

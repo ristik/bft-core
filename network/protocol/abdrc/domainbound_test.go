@@ -208,8 +208,8 @@ func TestDomainBoundVoteNegatives(t *testing.T) {
 
 	// signature shape
 	require.ErrorIs(t, mutate(true, func(v *VoteMsg) { v.Signature = v.Signature[:63] }), votesig.ErrSignatureShape, "truncated")
-	require.ErrorIs(t, mutate(true, func(v *VoteMsg) { v.Signature = append(bytes.Clone(v.Signature[:64]), 2) }), votesig.ErrSignatureShape, "forbidden recovery byte")
-	require.NoError(t, mutate(true, func(v *VoteMsg) { v.Signature = bytes.Clone(v.Signature[:64]) }), "64 bytes without the recovery byte is accepted")
+	require.ErrorIs(t, mutate(true, func(v *VoteMsg) { v.Signature = append(bytes.Clone(v.Signature[:64]), 4) }), votesig.ErrSignatureShape, "forbidden recovery byte")
+	require.ErrorIs(t, mutate(true, func(v *VoteMsg) { v.Signature = bytes.Clone(v.Signature[:64]) }), votesig.ErrSignatureShape, "a compact 64-byte signature is not a native signature")
 	require.ErrorIs(t, mutate(true, func(v *VoteMsg) { v.Signature = highS(t, v.Signature) }), votesig.ErrBadSignature, "high-s")
 
 	// old bytes under the new version: the legacy signature of the same vote over the native seal bytes

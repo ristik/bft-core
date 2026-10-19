@@ -209,4 +209,4 @@ require (
 	rsc.io/tmplfunc v0.0.3 // indirect
 )
 
-replace github.com/unicitynetwork/bft-go-base => github.com/ristik/bft-go-base v1.1.1-0.20261019185200-6174434eeb99
+replace github.com/unicitynetwork/bft-go-base => github.com/ristik/bft-go-base v1.1.1-0.20261019192807-8890ddce75de

@@ -36,10 +36,6 @@ type (
 		cuts        cutRing      // control cuts of recent commits, for the shards' authenticated record feed
 		log         *slog.Logger // optional: set by the BlockStore that owns the tree
 		m           sync.RWMutex
-		// timedOut holds the blocks of timed-out rounds, set aside rather than dropped: the votes of a round are signed before its
-		// timeout votes, so a vote delayed past the timeout certificate can still complete a QC for the round, and every honest root
-		// then needs the block. A lookup re-attaches it; a commit prunes it with the rest of the abandoned branches.
-		timedOut map[uint64]*ExecutedBlock
 	}
 )
 
@@ -264,61 +260,6 @@ func (bt *BlockTree) Add(block *ExecutedBlock) error {
 	return bt.blocksDB.WriteBlock(n.data, false)
 }
 
-// RemoveLeaf removes leaf node if it is not root node
-func (bt *BlockTree) RemoveLeaf(round uint64) error {
-	bt.m.Lock()
-	defer bt.m.Unlock()
-	_, err := bt.removeLeaf(round)
-	return err
-}
-
-// SetAsideLeaf removes the leaf of a timed-out round from the tree and keeps its block: a QC for the round can still form from
-// votes delayed past the timeout certificate, and FindBlock then re-attaches it.
-// It reports whether it set a block aside: false when the tree does not hold the round, and false with an error when it holds the
-// round and keeps it (the block has a child).
-func (bt *BlockTree) SetAsideLeaf(round uint64) (bool, error) {
-	bt.m.Lock()
-	defer bt.m.Unlock()
-	n, err := bt.removeLeaf(round)
-	if err != nil || n == nil {
-		return false, err
-	}
-	if bt.timedOut == nil {
-		bt.timedOut = map[uint64]*ExecutedBlock{}
-	}
-	bt.timedOut[round] = n.data
-	return true, nil
-}
-
-// removeLeaf detaches the leaf node of round and returns it (nil when the tree does not hold the round)
-func (bt *BlockTree) removeLeaf(round uint64) (*node, error) {
-	// root cannot be removed
-	if bt.root.data.GetRound() == round {
-		return nil, errors.New("root block cannot be removed")
-	}
-	n, found := bt.roundToNode[round]
-	if !found {
-		// this is ok if we do not have the node, on TC remove might be triggered twice
-		return nil, nil
-	}
-	if len(n.child) > 0 {
-		return nil, fmt.Errorf("error round %v is not leaf node", round)
-	}
-	parent, found := bt.roundToNode[n.data.GetParentRound()]
-	if !found {
-		return nil, fmt.Errorf("error parent block %v not found", n.data.GetParentRound())
-	}
-	delete(bt.roundToNode, round)
-	parent.removeChild(n)
-	return n, nil
-}
-
-func (bt *BlockTree) Root() *ExecutedBlock {
-	bt.m.Lock()
-	defer bt.m.Unlock()
-	return bt.root.data
-}
-
 // findPathToRoot finds bath from node with round to root node
 // returns nil in case of failure, when a node is not found
 // otherwise it will return list of data stored in the path nodes, excluding the root data itself, so if
@@ -419,31 +360,18 @@ func (bt *BlockTree) findBlocksToPrune(newRootRound uint64) ([]uint64, error) {
 	return prunedBlocks, nil
 }
 
+func (bt *BlockTree) Root() *ExecutedBlock {
+	bt.m.Lock()
+	defer bt.m.Unlock()
+	return bt.root.data
+}
+
 func (bt *BlockTree) FindBlock(round uint64) (*ExecutedBlock, error) {
 	bt.m.Lock()
 	defer bt.m.Unlock()
 
 	if b, found := bt.roundToNode[round]; found {
 		return b.data, nil
-	}
-	// a past round is looked up for a QC that certifies it or a block that extends it: a block set aside by a timeout certificate
-	// goes back under its parent, provided no commit has pruned the parent since
-	if b, found := bt.timedOut[round]; found {
-		if parent, ok := bt.roundToNode[b.GetParentRound()]; ok {
-			// its timeout certificate deleted it from the database: it is stored again before it is back in the tree, so a block that
-			// extends it never has a parent the database lacks
-			if err := bt.blocksDB.WriteBlock(b, false); err != nil {
-				return nil, fmt.Errorf("storing the re-attached block of round %d: %w", round, err)
-			}
-			delete(bt.timedOut, round)
-			n := newNode(b)
-			parent.addChild(n)
-			bt.roundToNode[round] = n
-			if bt.log != nil {
-				bt.log.Info("re-attached the block of a timed-out round: a QC or a child refers to it", "round", round)
-			}
-			return b, nil
-		}
 	}
 	return nil, fmt.Errorf("block for round %v not found", round)
 }
@@ -492,11 +420,6 @@ func (bt *BlockTree) Commit(commitQc *abdrc.QuorumCert, logs ...*slog.Logger) ([
 	}
 	for _, round := range blocksToPrune {
 		delete(bt.roundToNode, round)
-	}
-	for round := range bt.timedOut {
-		if round <= commitRound {
-			delete(bt.timedOut, round)
-		}
 	}
 	// generate certificates for all the shards that have changes in progress
 	ucs, err := commitNode.data.GenerateCertificates(commitQc, log)

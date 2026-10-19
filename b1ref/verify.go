@@ -5,6 +5,7 @@ import (
 	"math/big"
 
 	ethcrypto "github.com/ethereum/go-ethereum/crypto"
+	abcrypto "github.com/unicitynetwork/bft-go-base/crypto"
 )
 
 // Verdict is the outcome of a well-formed call. Why is nil when Valid and otherwise wraps ErrInvalid: one verdict for the whole
@@ -71,7 +72,7 @@ func checkSignature(m *member, sig, sigBytes []byte) error {
 		return ErrSigRange
 	}
 	work("signature")
-	if err := m.ver.VerifyBytes(sig, sigBytes); err != nil {
+	if err := verifyCompact(m.ver, sig, sigBytes); err != nil {
 		return ErrSigInvalid
 	}
 	return nil
@@ -178,3 +179,18 @@ func work(kind string) {
 		onWork(kind)
 	}
 }
+
+// verifyCompact is the frozen profile's signature rule, explicitly: the first 64 bytes (r||s) are verified against the member's key by the base
+// library's compact verifier, after the length, recovery-byte (0 or 1 when present) and range checks above. The recoverable verifier
+// (Verifier.VerifyBytes) takes only canonical 65-byte signatures with a recovery ID, which is the native message rule and not this profile's: the
+// profile's acceptance of 64-byte signatures and of recovery bytes 0 and 1 is part of what its Go, Rust and contract implementations agree on, and a
+// library bump must not change it silently.
+func verifyCompact(v abcrypto.Verifier, sig, msg []byte) error {
+	cv, ok := v.(abcrypto.CompactVerifier)
+	if !ok {
+		return errCompactUnsupported
+	}
+	return cv.VerifyCompactBytes(sig[:64], msg)
+}
+
+var errCompactUnsupported = errors.New("the member's verifier has no compact verification")

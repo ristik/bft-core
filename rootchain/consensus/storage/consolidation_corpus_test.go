@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"github.com/fxamacker/cbor/v2"
 	"os"
 	"path/filepath"
 	"slices"
@@ -161,8 +162,10 @@ func TestCorpusProducerEquivalence(t *testing.T) {
 			require.Equal(t, get("partition-view.cbor"), final.View)
 			masterIdx := slices.Index(ctx.Shards, ctx.Master)
 			require.GreaterOrEqual(t, masterIdx, 0)
-			require.Equal(t, get("response-v1.cbor"), final.Shards[masterIdx].ResponseV1)
-			require.Equal(t, get("response-v2.cbor"), final.Shards[masterIdx].ResponseV2)
+			// the corpus is in the upstream wire format: the legacy response of four elements. This chain's response has two more, status and message
+			// (OK and empty here), which the upstream form lacks; the corpus compares equal once they are taken away.
+			require.Equal(t, get("response-v1.cbor"), upstreamLegacy(t, final.Shards[masterIdx].ResponseV1))
+			require.Equal(t, get("response-v2.cbor"), upstreamV2(t, final.Shards[masterIdx].ResponseV2))
 			for i, s := range ctx.Shards {
 				f := s
 				if f == "" {
@@ -181,7 +184,7 @@ func TestCorpusProducerEquivalence(t *testing.T) {
 			require.Equal(t, get("partition-view.cbor"), v2.PartitionView)
 			wireLegacy, err := types.Cbor.Marshal(&legacy)
 			require.NoError(t, err)
-			require.Equal(t, get("response-v1.cbor"), wireLegacy)
+			require.Equal(t, get("response-v1.cbor"), upstreamLegacy(t, wireLegacy))
 
 			trust := &types.RootTrustBaseV1{}
 			require.NoError(t, trust.UnmarshalCBOR(get(ctx.TrustBase)))
@@ -206,4 +209,31 @@ func TestCorpusProducerEquivalence(t *testing.T) {
 			}
 		})
 	}
+}
+
+// upstreamLegacy is a legacy certification response in the upstream four-element form: this chain's six-element form without its status and message,
+// which must be the success status (0) and an empty message for the two forms to describe the same response.
+func upstreamLegacy(t *testing.T, b []byte) []byte {
+	t.Helper()
+	require.GreaterOrEqual(t, len(b), 3)
+	require.EqualValues(t, 0x86, b[0], "a six-element response")
+	require.Equal(t, []byte{0x00, 0x60}, b[len(b)-2:], "status OK and an empty message")
+	out := append([]byte{0x84}, b[1:len(b)-2]...)
+	return out
+}
+
+// upstreamV2 is the upstream sidecar envelope [2, response, view] with its response in the upstream four-element form.
+func upstreamV2(t *testing.T, b []byte) []byte {
+	t.Helper()
+	var env struct {
+		_        struct{} `cbor:",toarray"`
+		Version  cbor.RawMessage
+		Response cbor.RawMessage
+		View     cbor.RawMessage
+	}
+	require.NoError(t, cbor.Unmarshal(b, &env))
+	out := []byte{0x83}
+	out = append(out, env.Version...)
+	out = append(out, upstreamLegacy(t, env.Response)...)
+	return append(out, env.View...)
 }

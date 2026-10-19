@@ -72,7 +72,7 @@ func (ss ShardStates) nextBlockSwitching(shardConfs map[types.PartitionShardID]*
 		if prevSI, ok := ss.States[k]; ok {
 			next, didSwitch, err := advanceShardConfigurationHistory(prevSI, pdr, hashAlg, (*ShardInfo).resetTrustBase, history)
 			if err != nil {
-				partition, shard := pdr.PartitionID, pdr.ShardID
+				partition, shard := prevSI.PartitionID, prevSI.ShardID
 				if prevSI.LastCR != nil {
 					partition, shard = prevSI.LastCR.Partition, prevSI.LastCR.Shard
 				}

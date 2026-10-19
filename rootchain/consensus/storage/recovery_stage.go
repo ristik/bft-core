@@ -184,15 +184,7 @@ func (s *memoryStore) WriteVote(vote any) error { s.vote = vote; return nil }
 func (s *memoryStore) ReadLastVote() (any, error) {
 	return s.vote, nil
 }
-func (s *memoryStore) WriteTC(tc *rctypes.TimeoutCert, dropBlock bool) error {
-	s.m.Lock()
-	defer s.m.Unlock()
-	s.tc = tc
-	if dropBlock {
-		delete(s.blocks, tc.GetRound())
-	}
-	return nil
-}
+func (s *memoryStore) WriteTC(tc *rctypes.TimeoutCert) error { s.tc = tc; return nil }
 func (s *memoryStore) ReadLastTC() (*rctypes.TimeoutCert, error) {
 	return s.tc, nil
 }

@@ -130,7 +130,7 @@ func TestDomainBoundQCNegatives(t *testing.T) {
 		qc.Signatures["1"] = qc.Signatures["1"][:63]
 		require.ErrorIs(t, qc.VerifyWith(f.store), votesig.ErrSignatureShape)
 		qc = base(true)
-		qc.SealSignatures["1"] = append(bytes.Clone(qc.SealSignatures["1"][:64]), 2)
+		qc.SealSignatures["1"] = append(bytes.Clone(qc.SealSignatures["1"][:64]), 4)
 		require.ErrorIs(t, qc.VerifyWith(f.store), votesig.ErrSignatureShape, "forbidden recovery byte")
 	})
 

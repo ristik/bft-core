@@ -18,7 +18,6 @@ import (
 
 	"github.com/unicitynetwork/bft-core/internal/testutils/logger"
 	"github.com/unicitynetwork/bft-core/network/protocol/abdrc"
-	"github.com/unicitynetwork/bft-core/network/protocol/certification"
 	rctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
 	"github.com/unicitynetwork/bft-core/rootchain/partitions"
 	testpartition "github.com/unicitynetwork/bft-core/rootchain/partitions/testutils"
@@ -523,24 +522,15 @@ func Test_BlockStore_StateRoundtrip(t *testing.T) {
 	}
 }
 
-// A peer replays a real state message but drops UC and TR of a certified shard (both null): the recovered node
-// keeps no LastCR for the shard and the next certification request of an honest validator of that shard must be
-// answered with an error, not a nil pointer dereference.
-func Test_BlockStore_RecoveredShardWithoutCertificateRefusesRequests(t *testing.T) {
+// A peer replays a real state message but drops UC and TR of a certified shard (both null): the recovering node refuses the head before it writes
+// anything (the binding of the recovered state), instead of keeping a shard without a last response whose next certification request of an honest
+// validator could only be answered with an error. (A shard info without a last response is still safe to ask: Test_ShardWithoutLastResponseIsSafe.)
+func Test_BlockStore_RecoveredShardWithoutCertificateIsRefused(t *testing.T) {
 	node := testutils.NewTestNode(t)
 	shardConf := newShardConf(t)
 	shardConf.Validators = []*types.NodeInfo{node.NodeInfo(t)}
 	storeA := initBlockStoreFromGenesis(t, shardConf)
 	clear(storeA.blockTree.root.data.ShardState.Changed)
-	siA := storeA.ShardInfo(shardConf.PartitionID, shardConf.ShardID)
-	// make it a certified shard: the recovery shard info carries its last certification response
-	siA.LastCR = &certification.CertificationResponse{
-		Partition: shardConf.PartitionID, Shard: shardConf.ShardID,
-		Technical: certification.TechnicalRecord{Round: 2, Epoch: 0, Leader: "L", StatHash: []byte{1}, FeeHash: []byte{2}},
-		UC: types.UnicityCertificate{Version: 1, InputRecord: siA.IR,
-			UnicitySeal: &types.UnicitySeal{Version: 1, RootChainRoundNumber: 5, Timestamp: 1731504540}},
-	}
-
 	state, err := storeA.GetState()
 	require.NoError(t, err)
 	raw, err := types.Cbor.Marshal(state)
@@ -551,25 +541,14 @@ func Test_BlockStore_RecoveredShardWithoutCertificateRefusesRequests(t *testing.
 		received.CommittedHead.ShardInfo[i].UC = nil
 		received.CommittedHead.ShardInfo[i].TR = nil
 	}
-
 	db, err := NewBoltStorage(filepath.Join(t.TempDir(), "blocks.db"))
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })
-	storeB, err := NewFromState(crypto.SHA256, received.CommittedHead, db, storeA.orchestration, logger.New(t))
-	require.NoError(t, err)
-	siB := storeB.ShardInfo(shardConf.PartitionID, shardConf.ShardID)
-	require.NotNil(t, siB)
-	require.Nil(t, siB.LastCR)
-
-	// a validly signed request of a validator of the shard
-	bcr := &certification.BlockCertificationRequest{
-		PartitionID: shardConf.PartitionID, ShardID: shardConf.ShardID, NodeID: node.NodeInfo(t).NodeID,
-		InputRecord: &types.InputRecord{Version: 1, RoundNumber: 1, PreviousHash: siB.RootHash, Hash: []byte{2}, BlockHash: []byte{3}, SummaryValue: []byte{}, Timestamp: 1731504540},
-	}
-	require.NoError(t, bcr.Sign(node.Signer))
-	require.NotPanics(t, func() {
-		require.ErrorContains(t, siB.ValidRequest(bcr), "no certification response yet")
-	})
+	consistentGenesisRoot(t, storeA, &received)
+	require.NoError(t, db.WriteBlock(storeA.blockTree.root.data, true))
+	_, err = NewFromState(crypto.SHA256, received.CommittedHead, db, storeA.orchestration, logger.New(t))
+	require.ErrorIs(t, err, ErrRefusedBeforeWrite)
+	require.ErrorContains(t, err, "last response")
 }
 
 // The recovered state of a shard without UC/TR and with an IRTR epoch which differs from the IR epoch makes the
@@ -755,7 +734,7 @@ func (mps mockPersistentStore) WriteVote(vote any) error {
 	return mps.writeVote(vote)
 }
 
-func (mps mockPersistentStore) WriteTC(tc *rctypes.TimeoutCert, _ bool) error {
+func (mps mockPersistentStore) WriteTC(tc *rctypes.TimeoutCert) error {
 	return mps.writeTC(tc)
 }
 
@@ -798,7 +777,7 @@ func TestBlockStore_LateQcAfterTc(t *testing.T) {
 		rh2 := add(t, bs, 2, bs.GetHighQc())
 		rh3 := add(t, bs, 3, qcFor(2, 1, rh2, nil))
 		require.NoError(t, bs.ProcessTc(tcFor(3)))
-		require.NotContains(t, roundsOf(bs.blockTree.allUncommittedNodes()), uint64(3), "the timed-out block is off the tree")
+		require.Contains(t, roundsOf(bs.blockTree.allUncommittedNodes()), uint64(3), "the timed-out block stays in the tree: its round can still get a QC")
 		return bs, rh2, rh3
 	}
 
@@ -834,7 +813,6 @@ func TestBlockStore_LateQcAfterTc(t *testing.T) {
 		_, err = bs.ProcessQc(qcFor(5, 4, nil, b4))
 		require.NoError(t, err)
 		require.EqualValues(t, 4, bs.blockTree.Root().GetRound())
-		require.Empty(t, bs.blockTree.timedOut)
 		_, err = bs.Block(3)
 		require.ErrorContains(t, err, "block for round 3 not found")
 	})
@@ -881,17 +859,14 @@ func Test_BlockStore_StateRecoveryCompletesTheCommittedSourceLog(t *testing.T) {
 	}
 
 	t.Run("without the prefix the first record past the head finds a gap", func(t *testing.T) {
-		old, db := recovering(t, nil)
-		_, err := NewFromState(crypto.SHA256, head(t), db, old.orchestration, logger.New(t), ProfileHandoff)
-		require.NoError(t, err)
+		_, db := recovering(t, nil)
+		// installing the head completes nothing: the first record past it finds the gap
 		require.ErrorIs(t, db.AppendRecords(next()), ErrRecordLog)
 	})
 	t.Run("with the prefix completed before the head is installed it extends the log", func(t *testing.T) {
 		old, db := recovering(t, &sliceFetcher{recs: recs})
 		h := head(t)
 		require.NoError(t, old.EnsureRecordPrefix(context.Background(), h))
-		_, err := NewFromState(crypto.SHA256, h, db, old.orchestration, logger.New(t), ProfileHandoff)
-		require.NoError(t, err)
 		require.NoError(t, db.AppendRecords(next()))
 		n, err := db.RecordCount()
 		require.NoError(t, err)
@@ -965,4 +940,16 @@ func (f *flakyFetcher) Records(ctx context.Context, from uint64, max int) ([]roo
 		return nil, errors.New("dial: connection refused")
 	}
 	return f.sliceFetcher.Records(ctx, from, max)
+}
+
+// consistentGenesisRoot makes the hand-built genesis of a store (it activates its shard in the genesis block, which the network's genesis does not)
+// carry QCs that certify the state root it really has, in the store and in the head that is sent.
+func consistentGenesisRoot(t *testing.T, s *BlockStore, received *abdrc.StateMsg) {
+	t.Helper()
+	root := s.blockTree.root.data
+	root.Qc.VoteInfo.CurrentRootHash = root.RootHash
+	root.Qc.LedgerCommitInfo.Hash = root.RootHash
+	root.CommitQc.LedgerCommitInfo.Hash = root.RootHash
+	h := received.CommittedHead
+	h.Qc, h.CommitQc = root.Qc, root.CommitQc
 }

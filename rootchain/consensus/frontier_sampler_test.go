@@ -98,11 +98,11 @@ func (s *frontierFaultStore) WriteVote(v any) error {
 	}
 	return s.PersistentStore.WriteVote(v)
 }
-func (s *frontierFaultStore) WriteTC(tc *drctypes.TimeoutCert, dropBlock bool) error {
+func (s *frontierFaultStore) WriteTC(tc *drctypes.TimeoutCert) error {
 	if s.failTC.Load() {
 		return errors.New("tc fail")
 	}
-	return s.PersistentStore.WriteTC(tc, dropBlock)
+	return s.PersistentStore.WriteTC(tc)
 }
 
 type frontierHarness struct {

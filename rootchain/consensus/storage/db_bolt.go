@@ -433,32 +433,18 @@ func writeBlockTx(tx *bbolt.Tx, block *ExecutedBlock, data []byte, root bool) er
 
 var errNoCertificatesBucket = errors.New("certificates bucket not found")
 
-// WriteTC stores the timeout certificate as the last one. With dropBlock it also deletes the block of the certificate's round, in
-// the same transaction. The caller says so only when its block tree has let go of that block: a block the tree still holds (it has a
-// child, because this root already has the proposal that carries its QC) must stay, or the next start finds a child whose parent
-// the database has deleted and refuses to load ("cannot add block for round N, parent block N-1 not found").
-func (db BoltDB) WriteTC(tc *rctypes.TimeoutCert, dropBlock bool) error {
+// WriteTC stores the timeout certificate as the last one. The block of the certificate's round is kept: the round can still get its QC.
+func (db BoltDB) WriteTC(tc *rctypes.TimeoutCert) error {
 	data, err := types.Cbor.Marshal(tc)
 	if err != nil {
 		return fmt.Errorf("serializing TimeoutCert: %w", err)
 	}
-	blockKey := binary.BigEndian.AppendUint64(make([]byte, 0, 8), tc.GetRound())
-
 	return db.db.Update(func(tx *bbolt.Tx) error {
 		b := tx.Bucket(bucketCertificates)
 		if b == nil {
 			return errNoCertificatesBucket
 		}
-		if err := b.Put(keyTimeoutCert, data); err != nil {
-			return err
-		}
-		if !dropBlock {
-			return nil
-		}
-		if b = tx.Bucket(bucketBlocks); b == nil {
-			return errNoBlocksBucket
-		}
-		return b.Delete(blockKey)
+		return b.Put(keyTimeoutCert, data)
 	})
 }
 

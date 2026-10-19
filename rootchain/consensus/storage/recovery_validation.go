@@ -5,7 +5,6 @@ import (
 	"crypto"
 	"errors"
 	"fmt"
-	"maps"
 
 	"github.com/unicitynetwork/bft-go-base/types"
 
@@ -49,30 +48,34 @@ func validateShardSet(block *abdrc.CommittedBlock, shardConfs map[types.Partitio
 			continue // the shard is deleted
 		}
 		if _, ok := seen[key]; !ok {
-			return fmt.Errorf("shard %s - %s of the configuration is missing from the head", conf.PartitionID, conf.ShardID)
+			return fmt.Errorf("block lacks the active shard %s - %s", conf.PartitionID, conf.ShardID)
 		}
+	}
+	return nil
+}
+
+// validateRecoveredFields requires the operational values of a shard info that the configuration or the certified state determine to be those, never
+// the peer's: the T2 timeout is the configured one and the last certified root hash is the state hash of the input record.
+func validateRecoveredFields(d *abdrc.ShardInfo, conf *types.PartitionDescriptionRecord) error {
+	if d.T2Timeout != conf.T2Timeout {
+		return fmt.Errorf("T2 timeout %s differs from the configured %s", d.T2Timeout, conf.T2Timeout)
+	}
+	if !bytes.Equal(d.RootHash, d.IR.Hash) {
+		return errors.New("last certified root hash differs from the state hash of the input record")
 	}
 	return nil
 }
 
 // validateLastResponse binds the retained last certification response of a shard info to the shard and to the head state. The response is the one
 // generated when the head (or the block which last changed the shard) was committed, hence it certifies exactly the state the info holds; an older
-// genuine UC of the shard is not it. A shard without a response (it has not been certified yet) must be in its initial state. The UC was issued under
+// genuine UC of the shard is not it. A shard without a response is refused. The UC was issued under
 // a configuration of the shard in effect at the UC's own root round, which can be an earlier epoch than the applied one (and not the preceding one:
 // epochs can be skipped), so it is looked up there.
 func validateLastResponse(d *abdrc.ShardInfo, conf *types.PartitionDescriptionRecord, orchestration Orchestration, hashAlg crypto.Hash) error {
-	if d.UC == nil && d.TR == nil {
-		initial, err := isInitialShardState(d, conf, hashAlg)
-		if err != nil {
-			return err
-		}
-		if !initial {
-			return errors.New("a shard without a last response must be in its initial state")
-		}
-		return nil
-	}
+	// every shard of a committed head has a last response - a newly activated shard gets its first one when the block of the activation is
+	// committed - so it cannot be left out: a peer could otherwise strip it from a certified shard and have the node refuse the shard's requests
 	if d.UC == nil || d.TR == nil {
-		return errors.New("last response needs both the UC and the technical record")
+		return errors.New("last response (UC and technical record) is required")
 	}
 	if d.UC.UnicityTreeCertificate == nil || d.UC.UnicityTreeCertificate.Partition != d.Partition || !d.UC.ShardTreeCertificate.Shard.Equal(d.Shard) {
 		return errors.New("last response UC is of another shard")
@@ -117,22 +120,6 @@ func validateLastResponse(d *abdrc.ShardInfo, conf *types.PartitionDescriptionRe
 func technicalRecordsEqual(a, b *certification.TechnicalRecord) bool {
 	return a.Round == b.Round && a.Epoch == b.Epoch && a.Leader == b.Leader &&
 		bytes.Equal(a.StatHash, b.StatHash) && bytes.Equal(a.FeeHash, b.FeeHash)
-}
-
-// isInitialShardState tells whether the shard info is exactly what NewShardInfo derives from the configuration,
-// ie the shard has never been certified.
-func isInitialShardState(d *abdrc.ShardInfo, conf *types.PartitionDescriptionRecord, hashAlg crypto.Hash) (bool, error) {
-	ref, err := NewShardInfo(conf, hashAlg)
-	if err != nil {
-		return false, fmt.Errorf("deriving the initial shard state: %w", err)
-	}
-	eq, err := types.EqualIR(d.IR, ref.IR)
-	if err != nil || !eq {
-		return false, nil
-	}
-	return technicalRecordsEqual(&d.IRTR, &ref.TR) && bytes.Equal(d.ShardConfHash, ref.ShardConfHash) && len(d.RootHash) == 0 &&
-		bytes.Equal(d.PrevEpochStat, ref.PrevEpochStat) && bytes.Equal(d.PrevEpochFees, ref.PrevEpochFees) &&
-		d.Stat == ref.Stat && maps.Equal(d.Fees, ref.Fees), nil
 }
 
 // validateRecoveredHead cross-checks the block, QC and commit QC of the head with each other and with the

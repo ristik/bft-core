@@ -153,7 +153,7 @@ func TestEpochAnchorRootInstallRollsBackAtEveryWriteAndRestarts(t *testing.T) {
 			require.NoError(t, db.SetHighestQcRound(20, 21))
 			require.NoError(t, db.WriteVote(&abdrc.VoteMsg{Author: "old-validator"}))
 			timeout := &rctypes.TimeoutCert{Timeout: &rctypes.Timeout{Epoch: 1, Round: 99, HighQc: &rctypes.QuorumCert{}}}
-			require.NoError(t, db.WriteTC(timeout, true))
+			require.NoError(t, db.WriteTC(timeout))
 			anchor := &rctypes.EpochAnchor{GenesisID: bytes.Repeat([]byte{1}, 32), Epoch: 2, Slot: 6, StateRoot: bytes.Repeat([]byte{2}, 32)}
 			root := &ExecutedBlock{BlockData: &rctypes.BlockData{Version: 3, Epoch: 2, Round: 6, Payload: &rctypes.Payload{Version: 3}, Anchor: anchor}}
 			crash := errors.New("injected crash")
@@ -477,7 +477,7 @@ func Test_BoltDB_TimeoutCert(t *testing.T) {
 		require.NoError(t, err)
 
 		tc := &rctypes.TimeoutCert{Timeout: rctypes.NewTimeout(7, rctypes.GenesisRootEpoch, &rctypes.QuorumCert{})}
-		require.ErrorIs(t, db.WriteTC(tc, true), errNoCertificatesBucket)
+		require.ErrorIs(t, db.WriteTC(tc), errNoCertificatesBucket)
 
 		tc, err = db.ReadLastTC()
 		require.ErrorIs(t, err, errNoCertificatesBucket)
@@ -494,7 +494,7 @@ func Test_BoltDB_TimeoutCert(t *testing.T) {
 		require.Nil(t, tc)
 
 		tc = &rctypes.TimeoutCert{Timeout: rctypes.NewTimeout(7, rctypes.GenesisRootEpoch, &rctypes.QuorumCert{})}
-		require.NoError(t, db.WriteTC(tc, true))
+		require.NoError(t, db.WriteTC(tc))
 		tc2, err := db.ReadLastTC()
 		require.NoError(t, err)
 		require.Equal(t, tc, tc2)
@@ -505,7 +505,7 @@ func Test_BoltDB_TimeoutCert(t *testing.T) {
 		b = ExecutedBlock{BlockData: &rctypes.BlockData{Round: 18}}
 		require.NoError(t, db.WriteBlock(&b, false))
 		tc.Timeout.Round = b.GetRound()
-		require.NoError(t, db.WriteTC(tc, true))
+		require.NoError(t, db.WriteTC(tc))
 		tc2, err = db.ReadLastTC()
 		require.NoError(t, err)
 		require.Equal(t, tc, tc2)

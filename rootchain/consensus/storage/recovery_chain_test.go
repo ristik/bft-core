@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"bytes"
 	"crypto"
 	"crypto/sha256"
 	"fmt"
@@ -123,10 +124,25 @@ func (c *testChain) next(changed ...types.PartitionID) {
 	c.round++
 	c.counter++
 	payload := &rctypes.Payload{}
+	// a shard whose configuration switches in this very block gets no request in it (the executor refuses one, ErrShardSwitching): its change
+	// waits for the next block, as a proposer's would
+	switching, err := c.store.SwitchingShardsForBlock(parent, c.round)
+	require.NoError(c.t, err)
 	for _, p := range changed {
+		if _, ok := switching[types.PartitionShardID{PartitionID: p, ShardID: types.ShardID{}.Key()}]; ok {
+			continue
+		}
 		si := c.store.ShardInfo(p, types.ShardID{})
 		require.NotNil(c.t, si, "a shard can change after its first certification only")
 		require.NotNil(c.t, si.LastCR, "a shard can change after its first certification only")
+		// the verifier of this chain judges against the committed state: a shard whose configuration switched in a block that is not committed yet
+		// waits until it is (the request would name the round of the state before the switch)
+		parentBlock, err := c.store.Block(parent)
+		require.NoError(c.t, err)
+		if inParent := parentBlock.ShardState.States[types.PartitionShardID{PartitionID: p, ShardID: types.ShardID{}.Key()}]; inParent != nil &&
+			!bytes.Equal(inParent.ShardConfHash, si.ShardConfHash) {
+			continue
+		}
 		ir := &types.InputRecord{
 			Version: 1, RoundNumber: si.LastCR.Technical.Round, Epoch: si.LastCR.Technical.Epoch, PreviousHash: si.RootHash,
 			Hash: []byte{byte(c.counter), byte(p), 1}, BlockHash: []byte{byte(c.counter), 2}, SummaryValue: []byte{},

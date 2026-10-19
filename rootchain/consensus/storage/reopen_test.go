@@ -122,39 +122,28 @@ func TestBlockStoreReopensOverItsOwnStore(t *testing.T) {
 		require.Contains(t, rounds, uint64(4))
 	})
 
-	t.Run("a block set aside by its timeout certificate is stored again when it is re-attached", func(t *testing.T) {
+	t.Run("the block of a timed-out round stays in the tree and the database, and a reopened store holds it", func(t *testing.T) {
 		e := setup(t)
 		add(t, e, 2, e.bs.GetHighQc())
 		add(t, e, 3, qcFor(2, 1, e.rh[2]))
-		stored := func() []uint64 {
-			blocks, err := e.bs.storage.LoadBlocks()
-			require.NoError(t, err)
-			return roundsOf(blocks)
-		}
 		require.NoError(t, e.bs.ProcessTc(tcFor(3)))
-		require.NotContains(t, stored(), uint64(3), "the tree let go of round 3, so the database dropped it with the certificate")
-		// anything that looks the round up brings it back under its parent; from then on a child may be stored on top of it
-		_, err := e.bs.blockTree.FindBlock(3)
+		blocks, err := e.bs.storage.LoadBlocks()
 		require.NoError(t, err)
-		require.Contains(t, stored(), uint64(3), "back in the tree, back in the database")
+		require.Contains(t, roundsOf(blocks), uint64(3), "the certificate does not touch the block")
 		reopened(t, e, 2, 3)
 	})
 
-	t.Run("the database keeps a timed-out round's block unless it is told to drop it", func(t *testing.T) {
+	t.Run("the database keeps a timed-out round's block", func(t *testing.T) {
 		db, err := NewBoltStorage(filepath.Join(t.TempDir(), "blocks.db"))
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = db.Close() })
 		require.NoError(t, db.WriteBlock(&ExecutedBlock{BlockData: &types.BlockData{Round: 7}}, false))
-		require.NoError(t, db.WriteTC(tcFor(7), false))
+		require.NoError(t, db.WriteTC(tcFor(7)))
 		blocks, err := db.LoadBlocks()
 		require.NoError(t, err)
 		require.Equal(t, []uint64{7}, roundsOf(blocks), "kept")
 		last, err := db.ReadLastTC()
 		require.NoError(t, err)
-		require.EqualValues(t, 7, last.GetRound(), "and the certificate is stored either way")
-		require.NoError(t, db.WriteTC(tcFor(7), true))
-		blocks, err = db.LoadBlocks()
-		require.NoError(t, err)
-		require.Empty(t, blocks, "dropped")
+		require.EqualValues(t, 7, last.GetRound(), "and the certificate is stored")
 	})
 }

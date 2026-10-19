@@ -22,15 +22,16 @@ type tsEnv struct {
 	pdrA2            *types.PartitionDescriptionRecord // next epoch of A
 	psA, psB, psC    types.PartitionShardID
 	nodes            []*types.NodeInfo
+	signers          []*testutils.TestNode
 }
 
 func newTSEnv(t *testing.T) *tsEnv {
-	_, nodes := testutils.CreateTestNodes(t, 3)
+	signers, nodes := testutils.CreateTestNodes(t, 3)
 	a, b := types.ShardID{}.Split()
 	mk := func(p types.PartitionID, id types.ShardID) *types.PartitionDescriptionRecord {
 		return &types.PartitionDescriptionRecord{Version: 1, PartitionID: p, ShardID: id, EpochStart: 1, Validators: nodes, T2Timeout: 2500000000}
 	}
-	e := &tsEnv{t: t, nodes: nodes, pdrA: mk(1, a), pdrB: mk(1, b), pdrC: mk(2, types.ShardID{})}
+	e := &tsEnv{t: t, nodes: nodes, signers: signers, pdrA: mk(1, a), pdrB: mk(1, b), pdrC: mk(2, types.ShardID{})}
 	pdr2 := *e.pdrA
 	pdr2.Epoch = 1
 	pdr2.EpochStart = 7
@@ -107,9 +108,10 @@ func (e *tsEnv) step(parent *ExecutedBlock, orc mockOrchestration, reqs ...tsReq
 			repeat[r.ps.PartitionID] = parent.ShardState.States[r.ps].IR.NewRepeatIR()
 		} else {
 			ch.CertReason = drctypes.Quorum
-			ch.Requests = []*certification.BlockCertificationRequest{{
-				PartitionID: pdr.PartitionID, ShardID: pdr.ShardID, NodeID: e.nodes[0].NodeID, InputRecord: r.ir,
-			}}
+			// the executor admits a request only from a member of the active configuration, by its signature
+			bcr := &certification.BlockCertificationRequest{PartitionID: pdr.PartitionID, ShardID: pdr.ShardID, NodeID: e.nodes[0].NodeID, InputRecord: r.ir}
+			require.NoError(e.t, bcr.Sign(e.signers[0].Signer))
+			ch.Requests = []*certification.BlockCertificationRequest{bcr}
 		}
 		payload.Requests = append(payload.Requests, ch)
 	}
@@ -252,29 +254,30 @@ func Test_PartitionView_Transitions(t *testing.T) {
 	require.Empty(t, crs)
 	require.Empty(t, b5.ShardState.Changed)
 
-	// epoch switch of A: the request in block N signals the new epoch in the TR only
+	// epoch switch of A (profile 3): the shard's configuration switches in the block of the epoch's first round (no request is applied to it in that
+	// block): its state, technical record and configuration hash move together and the switch is certified with its own response
 	orcEp := e.orchestration(e.pdrA2)
 	oldConf, err := e.pdrA.Hash(crypto.SHA256)
 	require.NoError(t, err)
 	newConf, err := e.pdrA2.Hash(crypto.SHA256)
 	require.NoError(t, err)
 	require.NotEqual(t, oldConf, newConf)
-	b6, crs := e.step(b5, orcEp, tsReq{ps: e.psA, ir: tsIR(irOf(b5, e.psA), "a6", true)})
+	b6, crs := e.step(b5, orcEp)
 	e.checkVector(b5, b6, crs, e.psA)
 	v6 := decodeView(t, crs[0])
-	require.EqualValues(t, 1, b6.ShardState.States[e.psA].TR.Epoch, "TR signals the next epoch")
-	require.Equal(t, oldConf, v6.Leaves[0].ShardConfHash, "still the configuration of the old epoch")
+	require.EqualValues(t, 1, b6.ShardState.States[e.psA].TR.Epoch, "TR names the new epoch")
+	require.Equal(t, newConf, b6.ShardState.States[e.psA].ShardConfHash, "the applied configuration is the new one")
+	require.Equal(t, newConf, v6.Leaves[0].ShardConfHash)
 	aCR6 := crs[0]
 
-	// block N+1: A moves to the new epoch state but has no change; B's vector carries A's new config hash
+	// the next block: A has no change; B's vector carries A's new config hash
 	b7, crs := e.step(b6, orcEp, tsReq{ps: e.psB, ir: tsIR(irOf(b6, e.psB), "b7", true)})
 	e.checkVector(b6, b7, crs, e.psB)
 	v7 := decodeView(t, crs[0])
 	require.Equal(t, newConf, v7.Leaves[0].ShardConfHash)
 	require.Equal(t, newConf, b7.ShardState.States[e.psA].ShardConfHash)
-	// A's own last response (and its vector with the old config hash) is untouched
+	// A's own last response is untouched
 	require.Same(t, aCR6, b7.ShardState.States[e.psA].LastCR)
-	require.Equal(t, oldConf, decodeView(t, b7.ShardState.States[e.psA].LastCR).Leaves[0].ShardConfHash)
 
 	t.Run("recovery", func(t *testing.T) {
 		e.checkRecovery(b7, orcEp)

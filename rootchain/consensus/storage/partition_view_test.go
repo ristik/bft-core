@@ -161,7 +161,7 @@ func Test_PartitionView_NotInLegacyFormat(t *testing.T) {
 	without, err := types.Cbor.Marshal(&cp)
 	require.NoError(t, err)
 	require.Equal(t, without, with, "carrier must not change the legacy encoding")
-	require.EqualValues(t, 0x84, with[0], "legacy response is four element array")
+	require.EqualValues(t, 0x86, with[0], "legacy response is a six element array (the four upstream elements, then status and message)")
 
 	// hashing / persistence formats: ShardInfo round trip drops the carrier
 	si := b.ShardState.States[types.PartitionShardID{PartitionID: fxPartition, ShardID: cr.Shard.Key()}]

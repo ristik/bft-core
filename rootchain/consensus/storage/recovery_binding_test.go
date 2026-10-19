@@ -123,11 +123,11 @@ func Test_RecoveryBinding_RejectsBeforePersistence(t *testing.T) {
 			for k := range shardEntry(sm, 1).Fees {
 				shardEntry(sm, 1).Fees[k]++
 			}
-		}, "commitments"},
-		{"statistics changed", func(t *testing.T, sm *abdrc.StateMsg) { shardEntry(sm, 1).Stat.Blocks += 5 }, "commitments"},
+		}, "technical record"},
+		{"statistics changed", func(t *testing.T, sm *abdrc.StateMsg) { shardEntry(sm, 1).Stat.Blocks += 5 }, "technical record"},
 		{"previous epoch fees changed", func(t *testing.T, sm *abdrc.StateMsg) {
 			shardEntry(sm, 2).PrevEpochFees = []byte{0xa1, 0x61, 0x78, 0x01}
-		}, "commitments"},
+		}, "technical record"},
 		{"timeout changed", func(t *testing.T, sm *abdrc.StateMsg) { shardEntry(sm, 1).T2Timeout *= 2 }, "T2 timeout"},
 		{"fee list of other validators", func(t *testing.T, sm *abdrc.StateMsg) {
 			si := shardEntry(sm, 2)
@@ -215,9 +215,8 @@ func Test_RecoveryBinding_RejectsBeforePersistence(t *testing.T) {
 	})
 }
 
-// Every shard of a committed head has a last response (a newly activated shard gets its first one when the block of
-// the activation is committed): leaving it out is rejected even for a shard whose state is the initial one, a peer
-// could otherwise strip it from a certified shard.
+// Every shard of a committed head has a last response (a newly activated shard gets its first one when the block of the activation is committed):
+// leaving it out is rejected, a peer could otherwise strip it from a certified shard.
 func Test_RecoveryBinding_LastResponseIsRequired(t *testing.T) {
 	conf := newShardConf(t)
 	si, err := NewShardInfo(conf, crypto.SHA256)
@@ -226,10 +225,7 @@ func Test_RecoveryBinding_LastResponseIsRequired(t *testing.T) {
 		Partition: si.PartitionID, Shard: si.ShardID, T2Timeout: si.T2Timeout, RootHash: si.RootHash, PrevEpochStat: si.PrevEpochStat,
 		Stat: si.Stat, PrevEpochFees: si.PrevEpochFees, Fees: si.Fees, IR: si.IR, IRTR: si.TR, ShardConfHash: si.ShardConfHash,
 	}
-	orc := orchestrationOf(conf)
-	require.NoError(t, validateLastResponse(&d, conf, orc, crypto.SHA256), "a shard that was never certified is in its initial state and has no last response")
-	d.IR = &types.InputRecord{Version: 1, RoundNumber: 5, Hash: []byte{1}, PreviousHash: []byte{2}, BlockHash: []byte{3}, SummaryValue: []byte{}, Timestamp: 1}
-	require.ErrorContains(t, validateLastResponse(&d, conf, orc, crypto.SHA256), "initial state", "a certified shard cannot have its last response stripped")
+	require.ErrorContains(t, validateLastResponse(&d, conf, orchestrationOf(conf), crypto.SHA256), "last response")
 }
 
 // What the next consumers do with a shard without a last response must not crash either (defence in depth, the

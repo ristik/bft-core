@@ -427,8 +427,9 @@ func TestInputNotMutated(t *testing.T) {
 	}
 }
 
-// TestRecoveryByteIsPolicy shows the v restriction is B1 policy: the native verifier accepts the same signature with v = 2 and 255,
-// B1 does not.
+// TestRecoveryByteIsPolicy shows the signature rule is B1 policy and not the native rule: the native verifier takes only the canonical 65-byte
+// recoverable signature (the recovery ID must recover the member's key) and refuses the compact 64-byte form, while B1 accepts r||s with a recovery
+// byte 0 or 1 or none, verified compactly, and refuses every other byte. A library bump must not move either side.
 func TestRecoveryByteIsPolicy(t *testing.T) {
 	m, _ := loadGolden(t)
 	val := b1gen.ValidatorForTest(m.Seed, "node00")
@@ -438,10 +439,24 @@ func TestRecoveryByteIsPolicy(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, v := range []byte{0, 1, 2, 255} {
-		if err := ver.VerifyBytes(append(append([]byte{}, sig...), v), msg); err != nil {
-			t.Fatalf("native verifier rejects v=%d: %v", v, err)
+	if ver.VerifyBytes(sig[:64], msg) == nil {
+		t.Fatal("the native verifier must refuse a compact 64-byte signature")
+	}
+	recovered := 0
+	for _, v := range []byte{0, 1, 2, 3, 255} {
+		if ver.VerifyBytes(append(append([]byte{}, sig[:64]...), v), msg) == nil {
+			recovered++
 		}
+	}
+	if recovered != 1 {
+		t.Fatalf("the native verifier must accept exactly the recovery ID that recovers the key, accepted %d", recovered)
+	}
+	cv, ok := ver.(interface{ VerifyCompactBytes(sig, data []byte) error })
+	if !ok {
+		t.Fatal("the member verifier has no compact verification")
+	}
+	if err := cv.VerifyCompactBytes(sig[:64], msg); err != nil {
+		t.Fatalf("compact verification of the same signature: %v", err)
 	}
 	got := map[string]string{}
 	for _, v := range m.Vectors {
