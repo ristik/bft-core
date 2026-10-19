@@ -131,6 +131,8 @@ utb_step_u2() {
   t="$out/bundle/after-activation.cbor"
   utb_ev fetch --url "$(utb_agg_url)" --out "$t" && utb_ev verify --bundle "$t" --pin "$(utb_pin)" | tee "$out/bundle/after-activation.verify.txt" || return 1
   utb_ev extract --bundle "$t" --epoch 2 --out "$out/entries/ordinary-handoff.cbor" || return 1
+  # the aggregator logs asynchronously: wait for the append line itself before it is read
+  for off in $(seq 1 60); do utb_agg_lines_since 0 | grep -aq '"msg":"trust-base entries appended from certification response"' && break; sleep 1; done
   # piggyback and not repair: an append from a certification response, with no catch-up started anywhere before it in the aggregator's life
   utb_agg_lines_since 0 | jq -c 'select(.msg=="received CertificationResponseV2" or .msg=="trust-base entries appended from certification response" or .msg=="trust-base catch-up started" or .msg=="trust-base gap in certification response")' >"$out/handoff/aggregator-ordinary.jsonl"
   python3 - "$out/handoff/aggregator-ordinary.jsonl" "$out/handoff/ordinary-ack.log" <<'PY' || return 1
@@ -168,10 +170,13 @@ utb_step_u3a() {
 
 # After the recovery: the aggregator restarts holding the genesis only, root HTTP unavailable to it; it repairs the missing entries from a genesis-committee root.
 utb_step_u3b() {
+  local i
   local out off; out=$(utb_dir)
   off=$(utb_agg_offset)
   start_agg 1 || return 1
   utb_wait_agg_tip 3 90 || return 1
+  # the aggregator logs asynchronously: the history can be served (tip 3) before its catch-up lines reach the file
+  for i in $(seq 1 60); do utb_agg_lines_since "$off" | grep -aq '"msg":"trust-base catch-up finished"' && break; sleep 1; done
   utb_agg_lines_since "$off" | jq -c 'select((.msg|startswith("trust-base catch-up")) or .msg=="trust-base gap in certification response" or .msg=="Signed trust-base history loaded" or .msg=="trust-base handshake to the newest held committee")' >"$out/catchup/aggregator-repair.jsonl"
   python3 - "$out/catchup/aggregator-repair.jsonl" "$out/catchup/aggregator-peer-repair.log" <<'PY' || return 1
 import json, sys
