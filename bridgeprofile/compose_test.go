@@ -206,7 +206,7 @@ func TestComposeAnchorAndLeafRejections(t *testing.T) {
 	t.Run("anchor not authenticated by an admitted root", func(t *testing.T) {
 		other, err := NewAuthority("rogue")
 		require.NoError(t, err)
-		tb, err := other.TrustBase(3, 1)
+		tb, err := other.Genesis(3, 1, 1)
 		require.NoError(t, err)
 		cp := e.composed(t, 2, irTimeOK)
 		_, err = cp.run(t, RefB1{TB: tb})

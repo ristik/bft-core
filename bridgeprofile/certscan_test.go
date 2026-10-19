@@ -20,8 +20,9 @@ func TestLockCertificateIntersectionScan(t *testing.T) {
 	}
 	require.NoError(t, verify(func(*LockProof) {}))
 
-	t.Run("65 byte seal signature truncated to 64", func(t *testing.T) {
-		err := verify(func(p *LockProof) {
+	// The B1 profile seal rule (briefs/nbp-sdk-migration.md section 12): 64 bytes (r||s) or 65 with recovery byte 0/1.
+	truncated := func(n int) func(p *LockProof) {
+		return func(p *LockProof) {
 			var uc types.UnicityCertificate
 			require.NoError(t, types.Cbor.Unmarshal(p.UC, &uc))
 			names := []string{}
@@ -31,12 +32,38 @@ func TestLockCertificateIntersectionScan(t *testing.T) {
 			sort.Strings(names)
 			for _, k := range names {
 				require.Len(t, uc.UnicitySeal.Signatures[k], SDKSignatureLength)
-				uc.UnicitySeal.Signatures[k] = uc.UnicitySeal.Signatures[k][:64]
+				uc.UnicitySeal.Signatures[k] = uc.UnicitySeal.Signatures[k][:n]
 			}
 			b, err := types.Cbor.Marshal(&uc)
 			require.NoError(t, err)
 			p.UC = b
-		})
+		}
+	}
+	t.Run("65 byte seal signature truncated to 64 is accepted", func(t *testing.T) {
+		require.NoError(t, verify(truncated(64)))
+	})
+	recovery := func(f func(byte) byte) func(p *LockProof) {
+		return func(p *LockProof) {
+			var uc types.UnicityCertificate
+			require.NoError(t, types.Cbor.Unmarshal(p.UC, &uc))
+			for k, sig := range uc.UnicitySeal.Signatures {
+				c := bytes.Clone(sig)
+				c[64] = f(c[64])
+				uc.UnicitySeal.Signatures[k] = c
+			}
+			b, err := types.Cbor.Marshal(&uc)
+			require.NoError(t, err)
+			p.UC = b
+		}
+	}
+	t.Run("recovery byte swapped between 0 and 1 is ignored", func(t *testing.T) {
+		require.NoError(t, verify(recovery(func(v byte) byte { return v ^ 1 })))
+	})
+	t.Run("recovery byte 2", func(t *testing.T) {
+		require.ErrorIs(t, verify(recovery(func(byte) byte { return 2 })), ErrLockUC)
+	})
+	t.Run("63 byte seal signature", func(t *testing.T) {
+		err := verify(truncated(63))
 		require.ErrorIs(t, err, ErrCertSigLength)
 		require.ErrorIs(t, err, ErrLockUC)
 	})
@@ -80,15 +107,22 @@ func TestTokenProjectionDecodesEveryCertificate(t *testing.T) {
 		_, err := ProjectToken(replaceUC(CTag(1, CBytes([]byte{1}))))
 		require.ErrorIs(t, err, ErrCertScan)
 	})
-	t.Run("signature truncated to 64 bytes", func(t *testing.T) {
+	cut := func(n int) []byte {
 		var uc types.UnicityCertificate
 		require.NoError(t, types.Cbor.Unmarshal(tok.MintProof.UC, &uc))
 		for k, s := range uc.UnicitySeal.Signatures {
-			uc.UnicitySeal.Signatures[k] = s[:64]
+			uc.UnicitySeal.Signatures[k] = s[:n]
 		}
 		b, err := types.Cbor.Marshal(&uc)
 		require.NoError(t, err)
-		_, err = ProjectToken(replaceUC(b))
+		return b
+	}
+	t.Run("signature truncated to 64 bytes is in the B1 profile", func(t *testing.T) {
+		_, err := ProjectToken(replaceUC(cut(64)))
+		require.NoError(t, err)
+	})
+	t.Run("signature truncated to 63 bytes", func(t *testing.T) {
+		_, err := ProjectToken(replaceUC(cut(63)))
 		require.ErrorIs(t, err, ErrCertSigLength)
 	})
 }

@@ -3,7 +3,8 @@ package bridgeprofile
 // priorCaseIDs are the case IDs of the pre-3.0 golden manifest (bridge-pr1/1, 120
 // vectors). Each is retained as mapped regression coverage in the candidate
 // corpus; the bytes are not promised unchanged. derive-n160 is the one case
-// whose nonce is chosen by a cfg-dependent search (see priorCaseRename).
+// whose nonce is chosen by a cfg-dependent search (see priorCaseRename; protocol
+// 5's EVM partition 8 moved it to 69).
 var priorCaseIDs = []string{
 	"derive-n1",
 	"derive-n2",
@@ -128,7 +129,7 @@ var priorCaseIDs = []string{
 }
 
 // priorCaseRename maps the prior IDs that changed to their replacement.
-var priorCaseRename = map[string]string{"derive-n160": "derive-n237", "envelope-two-anchors": "envelope-valid-two-anchors-one-shard", "envelope-anchors-8": "envelope-anchors-max", "envelope-anchors-9": "envelope-anchors-over-max",
+var priorCaseRename = map[string]string{"derive-n160": "derive-n69", "envelope-two-anchors": "envelope-valid-two-anchors-one-shard", "envelope-anchors-8": "envelope-anchors-max", "envelope-anchors-9": "envelope-anchors-over-max",
 	// protocol 4: the policy carries no shard rows, so the protocol-3 row cases map to the rejection of the protocol-3 body, and an
 	// anchor of shard 80 is a root-shard anchor
 	"policy-empty-bstr-shard": "policy-protocol-3", "envelope-shard": "envelope-shard-root"}

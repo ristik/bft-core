@@ -1,7 +1,7 @@
 {
-  "artifactVersion": 4,
-  "nativeBridgeProtocolVersion": 4,
-  "sdkVersion": "3.0.1",
+  "artifactVersion": 5,
+  "nativeBridgeProtocolVersion": 5,
+  "sdkVersion": "4.0.0",
   "status": "development-provisional-unactivated",
   "identityFamily": "unicity-native",
   "tags": {
@@ -60,33 +60,27 @@
     "protocol/interop.md",
     "protocol/abi.json",
     "protocol/manifest.schema.json",
-    "protocol/sdk-trust-base.md"
+    "protocol/trust-base.md"
   ],
   "hashing": "Activation descriptor must bind exact SHA-256 of the normative artifacts and final measured bounds; no deployment semanticProfileHash is claimed here.",
   "trustModel": {
-    "scope": "fixed-sdk-root-trust-base",
-    "validatorStake": "1",
-    "epochs": "one-fixed-epoch-and-committee",
-    "quorum": "sdk-count: N-(N-1)/3",
-    "verification": "existing-sdk-3.0.1",
-    "trustBaseId": "SHA256(exact-sdk-emitted-JSON-document-bytes)",
-    "trustDocumentFormat": "sdk-root-trust-base-json-v1",
-    "certificateTransport": "sdk-decodable-subset-for-ordinary-and-embedded-UCs",
-    "deferredIssue": "https://github.com/ristik/bft-core/issues/421"
+    "scope": "unicity-trust-base-history",
+    "trustBaseId": "genesis-entry-id: SHA256(sigBytes of the genesis RootTrustBaseV2, tag 39000)",
+    "trustDocumentFormat": "utb-release-bundle-v1 (tag 39015)",
+    "epochs": "per-seal-epoch entry, root-round interval [start_e, start_e+1)",
+    "quorum": "weighted: floor(2W/3)+1 of the entry",
+    "sealRule": "native-B1: every signature a valid member signature, 64 bytes or 65 with suffix 0/1, at most 16",
+    "verification": "sdk-4.0.0-utb: TS verifyCertificate / token verifier, Rust verify_certificate_of_partition / verify_token_with_policy",
+    "missingEpoch": "NoEntryForEpoch, unavailable family: retryable once the history holds the epoch",
+    "evolution": "wallet-owned history, SDK fetch-and-retry; the plug-ins fetch nothing",
+    "certificateTransport": "sdk-decodable-subset-for-ordinary-and-embedded-UCs"
   },
-  "deferred": [
-    "arbitrary-validator-weights",
-    "trust-base-append-or-fetch",
-    "epoch-evolution-and-interval-closure",
-    "mixed-historical-current-committees",
-    "old-J-validity-through-rotation",
-    "full-B1-SDK-seal-acceptance-parity"
-  ],
+  "deferred": [],
   "normativeArtifactSha256": {
-    "protocol/interop.md": "d391cb7f4fa865539b92cea755c4f0e3a73056743e0d368944e965ae11b0cdf0",
-    "protocol/abi.json": "0369e96b753a065c105e4093cfeb0be92daa60cd16d564e56553f1f9f7735dc1",
-    "protocol/manifest.schema.json": "3bdf4cde1f6ba5b2ef1398e37cd3193bf89e055d5c688986fbe48e54f4de43e2",
-    "protocol/sdk-trust-base.md": "ec3b55554f01ac1530a950814e6a92c40a5fe6f7d53e9f58d7e04a40d6af0731"
+    "protocol/interop.md": "4ccc5a806bf6691a25e1b872b4b84bced1bc0c71579350de6fb158fc12e665e8",
+    "protocol/abi.json": "d836ec1a0eb12b81c92c4fccd5d310aa7b5fd2c7a9119d1fa3b5cf2509eb5685",
+    "protocol/manifest.schema.json": "f256b0ea19ea1f0a390926006b18a7460ecbb63f79f3e3e85040cbf2d710fb05",
+    "protocol/trust-base.md": "af63a7653950bf6516dc9b65f178597fa9925bb4d1ab0d26a5c63354f27f4bad"
   },
   "networkId": {
     "minimum": 1,
