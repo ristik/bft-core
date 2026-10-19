@@ -2,7 +2,7 @@
   "format": "UNICITY_XREPO_FIXTURES/v1",
   "contracts": {
     "repo": "https://github.com/ristik/unicity-pos-contracts",
-    "commit": "5f089f14e8b87b3f94970a6340d8f9985d7a8ac6"
+    "commit": "0ede785663b3d933247b7fa5ef2838ac670bfcbf"
   },
   "fixtures": [
     {"producer": "contracts", "contracts": "test/p85/fixtures/publication.json", "bftCore": ["evmassign/testdata/publication.json", "rootchain/evmstate/testdata/publication.json"],
@@ -21,6 +21,8 @@
      "pair": "the root's Closure, RecoveryAck, Ack and SessionClosed records with real ids and digests -> custody.applyRootRecords, verbatim (XRepoRecords.t.sol)"},
     {"producer": "bft-core", "contracts": "test/p85/fixtures/xrepo-genesis-input.json", "bftCore": ["xrepo/testdata/genesis/contracts-genesis.json"],
      "pair": "pos-relayer genesis --out-contracts (genesis assignment id of the FULL configuration, identities) -> script/P85Genesis.s.sol (XRepoGenesis.t.sol)"},
+    {"producer": "bft-core", "contracts": "test/p85/fixtures/evidence-digest-corpus-go-v1.json", "bftCore": ["s1ref/testdata/evidence-digest-corpus-v1.json"],
+     "pair": "root vote/timeout evidence digests (VI, VH, PV, digest, signatures, seal data) -> RootVoteCbor, Evidence.submitEvidence (EvidenceDigest.t.sol reads the forge-shaped conversion script/evidence-corpus-convert.py writes, regenerated and diffed in CI)"},
     {"producer": "bft-core", "contracts": "test/p85/fixtures/root-records-vectors.json", "bftCore": ["rootrecords/testdata/records-vectors.json"],
      "pair": "record envelope, ids, payload shapes, closure repeat/conflict cases -> AuthenticatedRecords.t.sol (digest words replaced there)"},
     {"producer": "bft-core", "contracts": "test/p85/fixtures/root-records-import-vectors.json", "bftCore": ["rootrecords/testdata/import-vectors.json"],
