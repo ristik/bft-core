@@ -105,29 +105,15 @@ func initBlock(block *ExecutedBlock, orchestration Orchestration) error {
 		if !ok {
 			return fmt.Errorf("block has a shard %s but orchestration doesn't have such shard for round %d", k, block.GetRound())
 		}
-		// Every shard's installed configuration is authenticated state under the handoff profile: the configuration derived from
-		// committed history (genesis plus handoffs) must be the one the block stored, or a retired, edited or unrecovered set would
-		// be loaded into the trust base. A lost or stale derived index, or an edited genesis file, stops the root instead of
-		// silently loading other keys.
-		if block.ShardState.Control != nil {
-			pdrHash, err := pdr.Hash(crypto.SHA256)
-			if err != nil {
-				return fmt.Errorf("hashing shard configuration (%s): %w", k, err)
-			}
-			if !bytes.Equal(pdrHash, si.ShardConfHash) {
-				return fmt.Errorf("%w: shard %s stores configuration %x, committed history derives %x for round %d",
-					ErrAssignmentHistory, k, si.ShardConfHash, pdrHash, block.GetRound())
-			}
+		// Every shard's applied configuration is authenticated state: the configuration derived from committed history (genesis plus
+		// handoffs) at the block's execution round must be the one the block stored, or a retired, edited, unrecovered or
+		// unswitched set would be loaded into the trust base. A lost or stale derived index, an edited genesis file or a store of
+		// another execution rule stops the root instead of silently loading other keys.
+		if err := si.checkAppliedConfiguration(pdr, crypto.SHA256); err != nil {
+			return fmt.Errorf("%w: shard %s of round %d: %w", ErrAssignmentHistory, k, block.GetRound(), err)
 		}
-		// The context is bound to the configuration hash this site has authenticated. Under the handoff profile that is the
-		// stored hash (checked above); outside it the stored hash was never compared and still is not, so the context binds to
-		// the loaded configuration exactly as the trust base always did.
+		// The context is bound to the configuration hash this site has authenticated: the stored hash, equal to the history's (above).
 		committed := si.ShardConfHash
-		if block.ShardState.Control == nil {
-			if committed, err = pdr.Hash(crypto.SHA256); err != nil {
-				return fmt.Errorf("hashing shard configuration (%s): %w", k, err)
-			}
-		}
 		if err = si.resetTrustBase(pdr, crypto.SHA256, committed); err != nil {
 			return fmt.Errorf("init shard trustbase (%s): %w", k, err)
 		}

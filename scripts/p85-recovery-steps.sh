@@ -547,6 +547,35 @@ p85_restart_validator() { # id
   echo "validator $i restarted in its scope"
 }
 
+# The shard-configuration transitions the root executed over the whole run (epoch skipping, ristik/bft-core#640): the roots' own execution
+# log is the evidence. No root ever refused a block for a switching shard's request, saw a configuration that does not advance the applied
+# epoch, or met the old "epochs must be consecutive" halt; and every switch the roots logged is one the handoffs name (one epoch up, only
+# shards that exist), the same on every root that executed it.
+p85_epoch_switches() {
+  local f n=0 out="$H3_DIR/shard-config-switches.txt"
+  : >"$out"
+  for f in test-nodes/root*/debug.log; do
+    [ -f "$f" ] || continue
+    if grep -aE "epochs must be consecutive|does not advance the applied epoch|shard configuration switches in this block" "$f" >/dev/null; then
+      echo "$f: a root met a refused shard-configuration transition:" >&2; grep -aE "epochs must be consecutive|does not advance the applied epoch|shard configuration switches in this block" "$f" | head -3 | cut -c1-300 >&2
+      return 1
+    fi
+    grep -a 'msg="shard configuration switched"' "$f" | sed -E 's/^.*partition=([0-9A-Za-z]+) fromEpoch=([0-9]+) toEpoch=([0-9]+) rootRound=([0-9]+).*$/\1 \2 \3 \4/' | sed "s#^#$(dirname "$f" | xargs basename) #" >>"$out"
+  done
+  n=$(wc -l <"$out" | tr -d ' ')
+  python3 - "$out" <<'PY' || return 1
+import sys, collections
+rows = [l.split() for l in open(sys.argv[1]) if l.strip()]
+bad = [r for r in rows if len(r) != 5 or int(r[3]) != int(r[2]) + 1]
+if bad:
+    sys.exit("a logged shard-configuration switch is not one epoch up: %r" % bad[:3])
+by = collections.defaultdict(set)
+for root, part, f, t, rnd in rows:
+    by[(part, f, t, rnd)].add(root)
+print("shard-configuration switches logged by the roots: %d line(s), %d distinct (partition, from, to, root round)" % (len(rows), len(by)))
+PY
+}
+
 # This step restarts after the resolution. It does NOT cover a restart at the pending boundary (the few blocks between J's closure and the
 # RecoveryAck cannot be hit by a timed restart); that is the contract split test's job.
 p85_restarts() {
@@ -635,7 +664,7 @@ for v in post.values():
 else: raise SystemExit('no NoCandidate result in the simulated attempt')" "$e"
 }
 
-P85_STEPS="p85_baseline p85_joiner_nodes p85_joiner_onboard p85_election_reserved p85_proofs p85_handoff p85_install_activation p85_j_stalls p85_recovery p85_resolved p85_restarts"
+P85_STEPS="p85_baseline p85_joiner_nodes p85_joiner_onboard p85_election_reserved p85_proofs p85_handoff p85_install_activation p85_j_stalls p85_recovery p85_resolved p85_restarts p85_epoch_switches"
 
 p85_run_lane() {
   local s
@@ -654,11 +683,11 @@ p85_run_lane() {
   if [ "${ANYAGE_LANE:-0}" = 1 ]; then
     # the any-age final lane (briefs/anyage-final-lane-plan.md): the same P85 steps with the bridge checkpoints between them
     source scripts/lib/agg-lib.sh; source scripts/lib/anyage-lib.sh
-    P85_STEPS="p85_baseline anyage_step_setup p85_joiner_nodes p85_joiner_onboard p85_election_reserved p85_proofs anyage_step_l1b p85_handoff p85_install_activation anyage_step_frozen p85_j_stalls p85_recovery p85_resolved anyage_step_l2 anyage_step_l1c p85_restarts"
+    P85_STEPS="p85_baseline anyage_step_setup p85_joiner_nodes p85_joiner_onboard p85_election_reserved p85_proofs anyage_step_l1b p85_handoff p85_install_activation anyage_step_frozen p85_j_stalls p85_recovery p85_resolved anyage_step_l2 anyage_step_l1c p85_restarts p85_epoch_switches"
     if [ "${UTB_LANE:-0}" = 1 ]; then
       # the combined UTB lane (scripts/utb-lane.sh, design 11.4): the same steps with the signed trust-base entry checkpoints between them
       source scripts/lib/utb-lib.sh
-      P85_STEPS="p85_baseline anyage_step_setup utb_step_u1 p85_joiner_nodes p85_joiner_onboard p85_election_reserved p85_proofs anyage_step_l1b p85_handoff p85_install_activation utb_step_u2 anyage_step_frozen utb_step_u3a p85_j_stalls p85_recovery p85_resolved utb_step_u3b anyage_step_l2 utb_step_u4 anyage_step_l1c utb_step_u5 p85_restarts utb_step_final"
+      P85_STEPS="p85_baseline anyage_step_setup utb_step_u1 p85_joiner_nodes p85_joiner_onboard p85_election_reserved p85_proofs anyage_step_l1b p85_handoff p85_install_activation utb_step_u2 anyage_step_frozen utb_step_u3a p85_j_stalls p85_recovery p85_resolved utb_step_u3b anyage_step_l2 utb_step_u4 anyage_step_l1c utb_step_u5 p85_restarts p85_epoch_switches utb_step_final"
     fi
   fi
   [ "${P85_MODE:-}" != overbound ] || { P85_JOINER_UNITS=3; P85_STEPS="p85_baseline p85_joiner_nodes p85_joiner_onboard p85_election_refused"; }

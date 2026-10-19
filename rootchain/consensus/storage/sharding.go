@@ -573,6 +573,39 @@ func weightedEVM(conf *types.PartitionDescriptionRecord) bool {
 	return slices.ContainsFunc(conf.Validators, func(v *types.NodeInfo) bool { return v != nil && v.Stake != 1 })
 }
 
+// checkAppliedConfiguration is the invariant of every executed shard state: the applied configuration is the one in effect at the
+// state's execution round (the caller resolved conf at that round, or at the ordered round for a terminal checkpoint), the technical
+// record announces its epoch, the fee map names exactly its members and the TR's fee/stat commitments are those of the accumulators.
+// A state that was stored, recovered or imported under another rule (a switch not applied, an announced-but-not-installed epoch, an
+// edited or foreign configuration) fails here, before anything is published.
+func (si *ShardInfo) checkAppliedConfiguration(conf *types.PartitionDescriptionRecord, hashAlg crypto.Hash) error {
+	h, err := conf.Hash(hashAlg)
+	if err != nil {
+		return fmt.Errorf("hashing the configuration: %w", err)
+	}
+	if !bytes.Equal(h, si.ShardConfHash) {
+		return fmt.Errorf("%w: applied configuration %x, in effect %x", ErrShardConfMismatch, si.ShardConfHash, h)
+	}
+	if si.TR.Epoch != conf.Epoch {
+		return fmt.Errorf("%w: technical record announces epoch %d, the applied configuration is epoch %d", ErrShardEpoch, si.TR.Epoch, conf.Epoch)
+	}
+	if len(si.Fees) != len(conf.Validators) {
+		return fmt.Errorf("%w: the fee map has %d members, the configuration %d", ErrShardConfMismatch, len(si.Fees), len(conf.Validators))
+	}
+	for _, v := range conf.Validators {
+		if _, ok := si.Fees[v.NodeID]; !ok {
+			return fmt.Errorf("%w: the fee map does not name validator %s of the applied configuration", ErrShardConfMismatch, v.NodeID)
+		}
+	}
+	if fee, err := si.feeHash(crypto.SHA256); err != nil || !bytes.Equal(fee, si.TR.FeeHash) {
+		return fmt.Errorf("%w: fee accumulator differs from the technical record", ErrControlCheckpoint)
+	}
+	if stat, err := si.statHash(crypto.SHA256); err != nil || !bytes.Equal(stat, si.TR.StatHash) {
+		return fmt.Errorf("%w: statistics differ from the technical record", ErrControlCheckpoint)
+	}
+	return nil
+}
+
 // IsMember reports whether nodeID is a member of the INSTALLED configuration, by the installed verifiers. Unlike SignerWeight it does not
 // need a unit request context, so it answers for a weighted EVM assignment too (which installs members and verifiers and no context).
 func (si *ShardInfo) IsMember(nodeID string) bool {

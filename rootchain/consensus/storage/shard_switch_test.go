@@ -3,14 +3,20 @@ package storage
 import (
 	"bytes"
 	"crypto"
+	"errors"
+	"maps"
 	"math"
+	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
 	"github.com/unicitynetwork/bft-core/internal/testutils/logger"
+	"github.com/unicitynetwork/bft-core/network/protocol/abdrc"
 	"github.com/unicitynetwork/bft-core/network/protocol/certification"
 	drctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
+	"github.com/unicitynetwork/bft-core/rootchain/partitions"
 	"github.com/unicitynetwork/bft-core/rootchain/testutils"
 	"github.com/unicitynetwork/bft-go-base/types"
 )
@@ -318,4 +324,162 @@ func TestSwitchingShardsForBlockIsThePlanFromTheProposalParent(t *testing.T) {
 	set, err = s.SwitchingShardsForBlock(1, 30)
 	require.NoError(t, err)
 	require.Empty(t, set, "the old-epoch terminal suffix keeps its state: nothing switches there")
+}
+
+// ---- recovery, reopen and imports (ES3) -----------------------------------------------------------------------------------------------
+
+type switchChain struct {
+	t    *testing.T
+	dir  string
+	orch *partitions.Orchestration
+	db   BoltDB
+	bs   *BlockStore
+	conf []*types.PartitionDescriptionRecord
+	rhs  map[uint64][]byte
+	blks map[uint64]*ExecutedBlock // every executed block, as it was when added (the tree prunes what is committed)
+}
+
+// newSwitchChain is a real block store over the real orchestration with one shard scheduled at epochs 0..2 (rounds 1, 30, 45), and a chain
+// of empty blocks around and across both starts. The shard is idle: only the root's execution moves it.
+func newSwitchChain(t *testing.T) *switchChain {
+	c := &switchChain{t: t, dir: t.TempDir(), rhs: map[uint64][]byte{}, blks: map[uint64]*ExecutedBlock{}}
+	log := logger.New(t)
+	var err error
+	c.orch, err = partitions.NewOrchestration(5, filepath.Join(c.dir, "orchestration.db"), log)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = c.orch.Close() })
+	for epoch, start := range []uint64{1, 30, 45} {
+		_, infos := testutils.CreateTestNodes(t, 3)
+		conf := &types.PartitionDescriptionRecord{Version: 1, NetworkID: 5, PartitionID: 1, PartitionTypeID: 99, ShardID: types.ShardID{}, UnitIDLen: 256, TypeIDLen: 32, T2Timeout: 2500 * time.Millisecond,
+			Epoch: uint64(epoch), EpochStart: start, Validators: infos}
+		require.NoError(t, c.orch.AddShardConfig(conf))
+		c.conf = append(c.conf, conf)
+	}
+	c.db, err = NewBoltStorage(filepath.Join(c.dir, "blocks.db"), WithNoSync())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = c.db.Close() })
+	c.bs, err = New(crypto.SHA256, c.db, c.orch, log)
+	require.NoError(t, err)
+	ver := mockIRVerifier{verify: func(uint64, *drctypes.IRChangeReq) (*types.InputRecord, error) {
+		return nil, errors.New("no requests in this chain")
+	}}
+	prev, prevPrev := uint64(1), uint64(0)
+	for _, round := range []uint64{2, 29, 30, 31, 45, 46} {
+		qc := &drctypes.QuorumCert{VoteInfo: &drctypes.RoundInfo{RoundNumber: prev, ParentRoundNumber: prevPrev, CurrentRootHash: c.hashOf(prev)},
+			LedgerCommitInfo: &types.UnicitySeal{Version: 1, NetworkID: 5}}
+		if prevPrev != 0 {
+			qc.LedgerCommitInfo.RootChainRoundNumber, qc.LedgerCommitInfo.Hash = prevPrev, c.hashOf(prevPrev)
+		}
+		_, err := c.bs.ProcessQc(qc)
+		require.NoError(t, err)
+		rh, err := c.bs.Add(&drctypes.BlockData{Round: round, Payload: &drctypes.Payload{}, Qc: qc}, ver)
+		require.NoError(t, err, "round %d", round)
+		c.rhs[round] = rh
+		c.blks[round] = mustBlock(t, c.bs, round)
+		prev, prevPrev = round, prev
+	}
+	return c
+}
+
+func (c *switchChain) hashOf(round uint64) []byte {
+	if round == 1 {
+		return c.bs.mustGenesisHash(c.t)
+	}
+	return c.rhs[round]
+}
+
+func (x *BlockStore) mustGenesisHash(t *testing.T) []byte {
+	b, err := x.Block(1)
+	require.NoError(t, err)
+	return b.RootHash
+}
+
+func (c *switchChain) state(round uint64) *ShardInfo {
+	return c.blks[round].ShardState.States[types.PartitionShardID{PartitionID: 1, ShardID: types.ShardID{}.Key()}]
+}
+
+func (c *switchChain) committed(round uint64) *abdrc.CommittedBlock {
+	b := c.blks[round]
+	shards, err := toRecoveryShardInfo(b)
+	require.NoError(c.t, err)
+	return &abdrc.CommittedBlock{Block: b.BlockData, Qc: b.Qc, ShardInfo: shards,
+		CommitQc: &drctypes.QuorumCert{VoteInfo: &drctypes.RoundInfo{RoundNumber: round}, LedgerCommitInfo: &types.UnicitySeal{Version: 1, NetworkID: 5, Hash: b.RootHash}}}
+}
+
+// Heads before, at and after each switch recover to exactly the executed state: same shard state (applied configuration, TR,
+// accounting, last certified response) and the same root hash, from the network (NewRootBlock) and from the disk (reopen).
+func TestHeadsBeforeAtAndAfterTheSwitchRecoverIdentically(t *testing.T) {
+	c := newSwitchChain(t)
+	require.EqualValues(t, 0, c.state(29).TR.Epoch)
+	require.EqualValues(t, 1, c.state(30).TR.Epoch)
+	require.EqualValues(t, 1, c.state(31).TR.Epoch)
+	require.EqualValues(t, 2, c.state(45).TR.Epoch)
+	require.EqualValues(t, 2, c.state(46).TR.Epoch)
+	for _, round := range []uint64{29, 30, 31, 45, 46} {
+		want := c.blks[round]
+		got, err := NewRootBlock(c.committed(round), crypto.SHA256, c.orch)
+		require.NoError(t, err, "network recovery at round %d", round)
+		require.Equal(t, want.ShardState.States, got.ShardState.States, "round %d", round)
+		require.Equal(t, want.RootHash, got.RootHash, "round %d", round)
+	}
+	// the disk: a reopened store holds the same blocks, each judged by the same invariant
+	reopened, err := New(crypto.SHA256, c.db, c.orch, logger.New(t))
+	require.NoError(t, err)
+	for _, round := range []uint64{45, 46} { // the uncommitted tail is what the disk holds besides the root
+		a := c.blks[round]
+		b, err := reopened.Block(round)
+		require.NoError(t, err)
+		require.Equal(t, a.RootHash, b.RootHash, "round %d", round)
+		require.Equal(t, a.ShardState.States, b.ShardState.States, "round %d", round)
+	}
+}
+
+// A state recovered or reloaded under another rule or another history is refused before anything is published.
+func TestRecoveryRefusesStaleFutureEditedAndMismatchedShardStates(t *testing.T) {
+	c := newSwitchChain(t)
+	refuse := func(name string, round uint64, mutate func(*ShardInfo), want error) {
+		t.Run(name, func(t *testing.T) {
+			cb := c.committed(round)
+			require.Len(t, cb.ShardInfo, 1)
+			si := &cb.ShardInfo[0]
+			var shard ShardInfo
+			shard.TR, shard.Fees, shard.Stat = si.IRTR, maps.Clone(si.Fees), si.Stat
+			shard.PrevEpochFees, shard.PrevEpochStat, shard.ShardConfHash = si.PrevEpochFees, si.PrevEpochStat, bytes.Clone(si.ShardConfHash)
+			mutate(&shard)
+			si.IRTR, si.Fees, si.Stat, si.PrevEpochFees, si.PrevEpochStat, si.ShardConfHash = shard.TR, shard.Fees, shard.Stat, shard.PrevEpochFees, shard.PrevEpochStat, shard.ShardConfHash
+			_, err := NewRootBlock(cb, crypto.SHA256, c.orch)
+			require.ErrorIs(t, err, want)
+		})
+	}
+	h0, err := c.conf[0].Hash(crypto.SHA256)
+	require.NoError(t, err)
+	h2, err := c.conf[2].Hash(crypto.SHA256)
+	require.NoError(t, err)
+	refuse("stale: a head after the switch still names the previous configuration", 31, func(s *ShardInfo) { s.ShardConfHash = h0 }, ErrShardConfMismatch)
+	refuse("future: a head before the start already names the next one", 29, func(s *ShardInfo) { s.ShardConfHash = h2 }, ErrShardConfMismatch)
+	refuse("a technical record announcing an epoch the applied configuration is not", 31, func(s *ShardInfo) { s.TR.Epoch++ }, ErrShardEpoch)
+	refuse("edited accounting", 31, func(s *ShardInfo) {
+		for k := range s.Fees {
+			s.Fees[k]++
+			break
+		}
+	}, ErrControlCheckpoint)
+	refuse("a fee map that names another member", 31, func(s *ShardInfo) {
+		for k, v := range s.Fees {
+			delete(s.Fees, k)
+			s.Fees["intruder"] = v
+			break
+		}
+	}, ErrShardConfMismatch)
+
+	// the disk: a store whose history disagrees (an edited or foreign configuration index) stops the root
+	other := t.TempDir()
+	foreign, err := partitions.NewOrchestration(5, filepath.Join(other, "orchestration.db"), logger.New(t))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = foreign.Close() })
+	conf := *c.conf[0]
+	conf.Validators = c.conf[2].Validators
+	require.NoError(t, foreign.AddShardConfig(&conf))
+	_, err = New(crypto.SHA256, c.db, foreign, logger.New(t))
+	require.ErrorIs(t, err, ErrAssignmentHistory)
 }

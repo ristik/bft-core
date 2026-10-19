@@ -207,10 +207,10 @@ func TestAggregatorKeyReplacementActivatesAtTheBoundaryAndSurvivesRestart(t *tes
 		}
 		require.ErrorIs(t, initBlock(tampered(a.key), f.orch), ErrAssignmentHistory, "an aggregator whose stored hash differs from history stops the root")
 		require.ErrorIs(t, initBlock(tampered(f.shard), f.orch), ErrAssignmentHistory)
-		// Outside the handoff profile (no control state) nothing changes.
+		// Every profile loads the applied configuration the history names, nothing else (one execution rule).
 		legacy := tampered(a.key)
 		legacy.ShardState.Control = nil
-		require.NoError(t, initBlock(legacy, f.orch))
+		require.ErrorIs(t, initBlock(legacy, f.orch), ErrAssignmentHistory)
 	})
 	t.Run("a different installed aggregator configuration refuses the install", func(t *testing.T) {
 		// History says the change replaced a.conf; an orchestration that holds another genesis entry for the shard must not

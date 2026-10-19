@@ -125,15 +125,9 @@ func NewRootBlock(block *abdrc.CommittedBlock, hash crypto.Hash, orchestration O
 				UC:        *d.UC,
 			}
 		}
-		if profile == ProfileHandoff {
-			feeHash, err := si.feeHash(crypto.SHA256)
-			if err != nil || !bytes.Equal(feeHash, si.TR.FeeHash) {
-				return nil, fmt.Errorf("%w: fee accumulator differs from technical record", ErrControlCheckpoint)
-			}
-			statHash, err := si.statHash(crypto.SHA256)
-			if err != nil || !bytes.Equal(statHash, si.TR.StatHash) {
-				return nil, fmt.Errorf("%w: statistics differ from technical record", ErrControlCheckpoint)
-			}
+		// every profile: a recovered head is judged by the same invariant as an executed one (the new execution rule is the only rule)
+		if err := si.checkAppliedConfiguration(shardConf, crypto.SHA256); err != nil {
+			return nil, fmt.Errorf("recovered shard %s - %s: %w", d.Partition, d.Shard, err)
 		}
 		if err := si.resetTrustBase(shardConf, crypto.SHA256, shardConfHash); err != nil {
 			return nil, fmt.Errorf("initializing shard trustbase: %w", err)
@@ -236,6 +230,12 @@ func (x *ExecutedBlock) extendWithAuthority(newBlock *rctypes.BlockData, verifie
 		// under the new committee once that block is committed.
 		for shard := range nextShardState.States {
 			nextShardState.Changed[shard] = struct{}{}
+		}
+	}
+	for key := range switched {
+		from, to := x.ShardState.States[key], nextShardState.States[key]
+		if from != nil && to != nil {
+			log.Info("shard configuration switched", "partition", key.PartitionID.String(), "fromEpoch", from.TR.Epoch, "toEpoch", to.TR.Epoch, "rootRound", newBlock.Round)
 		}
 	}
 	pos, err := loadPos(nextShardState.Control)
