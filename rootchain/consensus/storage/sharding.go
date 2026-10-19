@@ -607,6 +607,10 @@ var (
 	ErrShardEpoch = errors.New("shard configuration does not advance the applied epoch")
 	// ErrShardSwitching refuses a request for a shard whose configuration switches in the block that carries it.
 	ErrShardSwitching = errors.New("shard configuration switches in this block: no request is applied to it")
+	// ErrShardRoundOverflow refuses a shard attempt round that would wrap.
+	ErrShardRoundOverflow = errors.New("shard round overflow")
+	// ErrConfigHistory reports an applied configuration the trusted history does not name (missing, ambiguous or unreadable): never "unchanged".
+	ErrConfigHistory = errors.New("the applied configuration is not in the trusted history")
 )
 
 // advanceShardConfiguration is the one transition operation of a shard's applied configuration. The applied configuration is named by
@@ -649,14 +653,14 @@ func advanceShardConfigurationHistory(parent *ShardInfo, target *types.Partition
 	if history != nil {
 		applied, err := history.ShardConfigByHash(parent.PartitionID, parent.ShardID, parent.ShardConfHash, hashAlg)
 		if err != nil {
-			return nil, false, fmt.Errorf("the applied configuration %x of the shard is not in the trusted history: %w", parent.ShardConfHash, err)
+			return nil, false, fmt.Errorf("%w: %x: %w", ErrConfigHistory, parent.ShardConfHash, err)
 		}
 		if applied == nil || applied.Epoch != parent.TR.Epoch {
 			return nil, false, fmt.Errorf("%w: the applied configuration %x does not describe epoch %d preceding the target", ErrShardEpoch, parent.ShardConfHash, parent.TR.Epoch)
 		}
 	}
 	if parent.TR.Round == ^uint64(0) {
-		return nil, false, errors.New("shard round overflow")
+		return nil, false, ErrShardRoundOverflow
 	}
 	next := &ShardInfo{
 		PartitionID:     target.PartitionID,
@@ -698,7 +702,7 @@ applied configuration: it applies the admitted request to the accounting and nev
 */
 func (si *ShardInfo) nextRound(req *certification.BlockCertificationRequest) (err error) {
 	if si.TR.Round == ^uint64(0) {
-		return errors.New("shard round overflow")
+		return ErrShardRoundOverflow
 	}
 	// timeout IRChangeRequest doesn't have BlockCertificationRequest
 	if req != nil {

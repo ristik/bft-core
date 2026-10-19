@@ -166,7 +166,7 @@ func NewLucBasedT2TimeoutGenerator(c *Parameters, sMonitor State) (*PartitionTim
 	}, nil
 }
 
-func (x *PartitionTimeoutGenerator) GetT2Timeouts(currentRound uint64) ([]*types.UnicityCertificate, error) {
+func (x *PartitionTimeoutGenerator) GetT2Timeouts(currentRound uint64, skip ...storage.ShardSet) ([]*types.UnicityCertificate, error) {
 	// Only activated shards with an UC can time out. New shards are activated by adding their ShardInfo and
 	// an empty IR to the ExecutedBlock in the activation root round. Once the block gets committed, they
 	// get their first UC and can start timing out.
@@ -175,6 +175,10 @@ func (x *PartitionTimeoutGenerator) GetT2Timeouts(currentRound uint64) ([]*types
 	timedOutShards := make([]*types.UnicityCertificate, 0, len(ucs))
 	for _, uc := range ucs {
 		if x.profile == 2 && (uc == nil || uc.GetPartitionID() == drctypes.ControlPartition) {
+			continue
+		}
+		// a shard whose configuration switches in the proposed block gets no request in it (the executor refuses a block that has one)
+		if skipped(skip, uc.GetPartitionID(), uc.GetShardID()) {
 			continue
 		}
 		// do not create T2 timeout requests if shard has a change already in pipeline
@@ -201,7 +205,7 @@ func t2TimeoutToRootRounds(t2Timeout time.Duration, blockRate time.Duration) uin
 // target round before the previous UC's round is refused before the subtraction. Time is elapsed root rounds only: weights and
 // the assignment never enter. A shard whose view cannot be resolved is reported in the returned error and never timed out
 // from other state; the rest are still returned.
-func (x *PartitionTimeoutGenerator) GetT2TimeoutsView(currentRound uint64, res ViewResolver) ([]*types.UnicityCertificate, error) {
+func (x *PartitionTimeoutGenerator) GetT2TimeoutsView(currentRound uint64, res ViewResolver, skip ...storage.ShardSet) ([]*types.UnicityCertificate, error) {
 	var errs []error
 	ucs := x.state.GetCertificates()
 	timedOutShards := make([]*types.UnicityCertificate, 0, len(ucs))
@@ -213,6 +217,9 @@ func (x *PartitionTimeoutGenerator) GetT2TimeoutsView(currentRound uint64, res V
 			continue
 		}
 		pID, sID := uc.GetPartitionID(), uc.GetShardID()
+		if skipped(skip, pID, sID) { // switching in the proposed block: no timeout, and no view of it is ever asked for
+			continue
+		}
 		if x.state.IsChangeInProgress(pID, sID) != nil {
 			continue
 		}
@@ -239,4 +246,15 @@ func (x *PartitionTimeoutGenerator) GetT2TimeoutsView(currentRound uint64, res V
 		}
 	}
 	return timedOutShards, errors.Join(errs...)
+}
+
+// skipped reports whether the shard is in any of the sets.
+func skipped(sets []storage.ShardSet, partition types.PartitionID, shard types.ShardID) bool {
+	key := types.PartitionShardID{PartitionID: partition, ShardID: shard.Key()}
+	for _, set := range sets {
+		if _, ok := set[key]; ok {
+			return true
+		}
+	}
+	return false
 }

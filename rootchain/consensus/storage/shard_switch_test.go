@@ -217,10 +217,10 @@ func TestShardRoundOverflowIsAnErrorNotAWrap(t *testing.T) {
 	parent := f.start()
 	parent.ShardState.States[f.keyA].TR.Round = math.MaxUint64
 	_, err := f.extend(parent, 30)
-	require.ErrorContains(t, err, "overflow")
+	require.ErrorIs(t, err, ErrShardRoundOverflow)
 	si := parent.ShardState.States[f.keyB]
 	si.TR.Round = math.MaxUint64
-	require.ErrorContains(t, si.nextRound(nil), "overflow")
+	require.ErrorIs(t, si.nextRound(nil), ErrShardRoundOverflow)
 }
 
 // A backward epoch, the same epoch under another configuration, and a hash the trusted history does not name are errors, never "unchanged".
@@ -241,7 +241,7 @@ func TestSwitchRefusesBackwardSameEpochAndUnknownAppliedConfiguration(t *testing
 
 	confs := map[types.PartitionShardID]*types.PartitionDescriptionRecord{f.keyA: f.confsA[1]}
 	_, _, err = parent.ShardState.nextBlockSwitching(confs, crypto.SHA256, historyOf())
-	require.ErrorContains(t, err, "not in the trusted history", "a missing history is not 'unchanged'")
+	require.ErrorIs(t, err, ErrConfigHistory, "a missing history is not 'unchanged'")
 	_, _, err = parent.ShardState.nextBlockSwitching(confs, crypto.SHA256, historyOf(f.confsA[0]))
 	require.NoError(t, err)
 	wrongEpoch := *f.confsA[0]

@@ -1526,24 +1526,15 @@ func (x *ConsensusManager) processNewRoundEvent(ctx context.Context) {
 	var timedOutShards []*types.UnicityCertificate
 	if !oldSuffix {
 		if x.viewResolver != nil {
-			timedOutShards, err = x.t2Timeouts.GetT2TimeoutsView(round, x.viewResolver)
+			timedOutShards, err = x.t2Timeouts.GetT2TimeoutsView(round, x.viewResolver, switching)
 		} else {
-			timedOutShards, err = x.t2Timeouts.GetT2Timeouts(round)
+			timedOutShards, err = x.t2Timeouts.GetT2Timeouts(round, switching)
 		}
 	}
 	if err != nil {
 		// error here is not fatal, still make a proposal, hopefully the next node will generate timeout
 		// requests for partitions this node failed to query
 		x.log.WarnContext(ctx, "failed to check timeouts for some partitions", logger.Error(err))
-	}
-	if len(switching) != 0 {
-		kept := timedOutShards[:0]
-		for _, uc := range timedOutShards {
-			if _, sw := switching[types.PartitionShardID{PartitionID: uc.GetPartitionID(), ShardID: uc.GetShardID().Key()}]; !sw {
-				kept = append(kept, uc)
-			}
-		}
-		timedOutShards = kept
 	}
 	payload := &drctypes.Payload{}
 	if profile == storage.ProfileHandoff {
