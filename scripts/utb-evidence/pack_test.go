@@ -47,7 +47,7 @@ func buildPack(t *testing.T, ubft, tool string) string {
 	dir := t.TempDir()
 	chain := utbchain.New(t, 3)
 	pack := filepath.Join(dir, "pack")
-	for _, d := range []string{"manifest/aggregator", "bundle", "entries", "ucresp", "verifier", "catchup", "handoff", "proofs", "history"} {
+	for _, d := range []string{"manifest/aggregator", "bundle", "entries", "ucresp", "verifier", "catchup", "handoff", "proofs", "history", "sdk", "checks"} {
 		require.NoError(t, os.MkdirAll(filepath.Join(pack, d), 0o755))
 	}
 	put := func(name string, data []byte) {
@@ -75,7 +75,7 @@ func buildPack(t *testing.T, ubft, tool string) string {
 	put("manifest/shard-conf.json", conf)
 	put("manifest/shard-conf-aggregator.json", conf)
 	put("manifest/build.txt", []byte("build\n"))
-	for _, f := range []string{"base.txt", "patch.diff", "sha256.txt"} {
+	for _, f := range []string{"commit.txt", "gomod-pins.txt", "sha256.txt"} {
 		put("manifest/aggregator/"+f, []byte("x\n"))
 	}
 
@@ -155,6 +155,9 @@ func buildPack(t *testing.T, ubft, tool string) string {
 	put("catchup/restart.log", []byte("restart\n"))
 	put("handoff/ordinary-ack.log", []byte("piggyback\n"))
 	put("handoff/recovery-closure.log", []byte("J closed at (1,2) = its closure\n"))
+	put("sdk/client.log", []byte("before: verdict no_entry_for_epoch, certificate epoch 3, latest held 1\nafter: verdict ok; fetched from epoch 2 (held tip + 1); tip now 3\nsdk client check: PASSED\n"))
+	put("sdk/sdk-commit.txt", []byte(strings.Repeat("a", 40)+"\n"))
+	put("checks/root-logs.txt", []byte("root logs inspected: 4\nV3 freeze rules are not enabled: 0\nsuccessor body of the committed record: not retained: 0\n"))
 	return pack
 }
 
@@ -237,8 +240,24 @@ func TestEvidencePackIsCheckedByTheToolsAndEveryBadByteIsRefused(t *testing.T) {
 		}, "does not end at tip 3"},
 		"an edited success text": {func(p string) { write(t, p, "history/client-after-sync.txt", []byte("verified\n")) }, "not the verifier's output on the synced history"},
 		"a placeholder token":    {func(p string) { write(t, p, "proofs/post-recovery-token.cbor", []byte("x\n")) }, "stale client fails for another reason"},
-		"an empty file":          {func(p string) { write(t, p, "catchup/restart.log", nil) }, "missing or empty"},
-		"a missing file":         {func(p string) { require.NoError(t, os.Remove(filepath.Join(p, "handoff/ordinary-ack.log"))) }, "missing or empty"},
+		"an SDK client that never met the unknown epoch": {func(p string) {
+			write(t, p, "sdk/client.log", []byte("after: verdict ok; tip now 3\nsdk client check: PASSED\n"))
+		}, "sdk/client.log does not show"},
+		"an SDK client that stopped below the tip": {func(p string) {
+			write(t, p, "sdk/client.log", []byte("before: verdict no_entry_for_epoch\nafter: tip now 2\nsdk client check: PASSED\n"))
+		}, "sdk/client.log does not show"},
+		"an SDK log without the pass line": {func(p string) {
+			write(t, p, "sdk/client.log", []byte("before: verdict no_entry_for_epoch\nafter: tip now 3\n"))
+		}, "sdk/client.log does not show"},
+		"an SDK commit that is not a commit": {func(p string) { write(t, p, "sdk/sdk-commit.txt", []byte("main\n")) }, "not a commit"},
+		"a root log count of the freeze refusal above zero": {func(p string) {
+			write(t, p, "checks/root-logs.txt", []byte("V3 freeze rules are not enabled: 2\nsuccessor body of the committed record: not retained: 0\n"))
+		}, "both refusal counts at 0"},
+		"a root log count of the not-retained refusal above zero": {func(p string) {
+			write(t, p, "checks/root-logs.txt", []byte("V3 freeze rules are not enabled: 0\nsuccessor body of the committed record: not retained: 1\n"))
+		}, "both refusal counts at 0"},
+		"an empty file":  {func(p string) { write(t, p, "catchup/restart.log", nil) }, "missing or empty"},
+		"a missing file": {func(p string) { require.NoError(t, os.Remove(filepath.Join(p, "handoff/ordinary-ack.log"))) }, "missing or empty"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			pack := copyDir(t, good)

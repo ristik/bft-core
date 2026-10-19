@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 # The combined UTB acceptance lane (briefs/utb-signed-entries-design.md §11.4): the any-age/P85 lane (one aggregation partition, the EVM shard, ordinary
 # handoff K->J with acknowledgement, stalled successor L and exact-K recovery) with the signed trust-base entry profile on from the first voting epoch,
-# the local patched aggregator (§11.3) and an independent reference client.
+# the aggregator of ristik/aggregator-go integration/enshrined-evm at a pinned commit (§11.3), an independent reference client and the JS SDK client.
 #
 #   scripts/utb-lane.sh --preflight    checks every pin, binary, checkout, manifest and tool and prints the step plan; starts NOTHING, takes no lock
 #   scripts/utb-lane.sh --plan         prints the step plan only
 #   scripts/utb-lane.sh --selftest     chain-free tests of the lane's own logic (genesis/manifest generation, flags, the evidence-pack checker)
+#   scripts/utb-lane.sh --build-aggregator   AGG_COMMIT=<40 hex>: clone, build and record the aggregator (builds/aggregator-<sha8>/); pushes nothing
 #   scripts/utb-lane.sh --prep         dry run of the genesis side (ANYAGE_PREP_ONLY with UTB_LANE=1): P85 genesis, the UTB genesis entry, pin and manifest,
 #                                      aggregator shard configurations and the bridge deployment; starts no reth, root, validator or aggregator
 #   scripts/utb-lane.sh --check-evidence DIR   checks an evidence directory against the required list (design §11.4)
@@ -29,21 +30,22 @@ plan() {
   cat <<'PLAN'
 UTB lane steps (one fresh genesis, the any-age/P85 machinery + UTB_LANE=1; evidence under briefs/devnet-runs/utb-<utc>/p85/utb, required list: --check-evidence).
 Entries: epoch 2 is the K->J handoff (activated; the P85 J is never acknowledged), epoch 3 the derived recovery to K (the acknowledgement block installs both, span 2).
-  0  preflight (this script), the devnet lock, the manifest: pins, builds, the aggregator patch digest, the genesis entry and its pin
+  0  preflight (this script), the devnet lock, the manifest: pins, builds, the aggregator commit, the genesis entry and its pin
   1  genesis: PoS genesis + bridge + aggregator shard + the UTB genesis entry (canonical V2, null signatures), generated once from the epoch-1 trust base
   2  U1  after the baseline and L1a: the aggregator serves the genesis only; the original token (its exact bytes and digest) is saved and verifies under the genesis committee;
          the reference client (its own durable store) starts from the genesis
-  3  U2  after the K->J activation: the aggregator receives the epoch-2 entry attached to a version 2 certification response (log: received + appended, no catch-up), the root's
+  3  U2  after the K->J activation: the aggregator receives the epoch-2 entry attached to a version 3 certification response (log: received + appended, no catch-up), the root's
          message is captured and decodes to exactly that entry; the aggregator serves epoch 2
   4  U3a the aggregator restarts from its retained store (unchanged records); then it is stopped and its history store removed (the controlled fault)
   5  P85 stalled J and the derived recovery to K (epoch 3), liability closures
   6  U3b the aggregator restarts holding the genesis only, root HTTP unavailable to it: it repairs epochs 2..3 from a genesis-committee root over GetTrustBase (log: catch-up
          started / OK page from a root / finished); it serves epoch 3
   7  L2  the acknowledgement block installs both entries; U4 a token certified after the recovery; the stale client meets the unknown epoch 3, fetches [2 3] in one request
-         and verifies; the aggregator restarts again, unchanged bytes, healthy
+         and verifies; the aggregator restarts again, unchanged bytes, healthy;  U4b the JS SDK (the fork, UTB_SDK_JS) holds the genesis only, meets epoch 3 on the same
+         certificate, fetches epochs 2..3 from the aggregator's GetTrustBase endpoint with its fetch-and-retry loop and verifies; its entries equal the history's bytes
   8  L1c the same saved bytes verify against the historical epoch; the one vault release;  U5 the original token verifies unchanged under its historical committee (utb-evidence),
          the bridge receipt, the complete history exported and reloaded by a fresh client store: identical records and tip
-  9  restarts (P85), the evidence pack assembled and checked by the tools (self-contained), teardown through scripts/p85-stop.sh only
+  9  restarts (P85); the root logs counted (V3 freeze rules are not enabled = 0, successor body ... not retained = 0, recoveries completed reported); the evidence pack assembled and checked by the tools (self-contained), teardown through scripts/p85-stop.sh only
 PLAN
 }
 
@@ -53,7 +55,7 @@ preflight() {
   export PATH="$HOME/.foundry/bin:$PATH"
   for t in cast forge jq python3 go curl git gh node npm shasum; do check "$t on PATH" command -v "$t"; done
   echo "-- merged prerequisites (read-only gh queries on ristik/*)"
-  for pr in "ristik/bft-core 632" "ristik/bft-core 633" "ristik/bft-core 634" "ristik/bft-core 635" "ristik/bft-go-base 1" "ristik/ureth 70" "ristik/unicity-pos-contracts 39" "ristik/native-bridge-plugins 19"; do
+  for pr in "ristik/bft-core 632" "ristik/bft-core 633" "ristik/bft-core 634" "ristik/bft-core 635" "ristik/bft-core 650" "ristik/aggregator-go 2" "ristik/bft-go-base 1" "ristik/ureth 70" "ristik/unicity-pos-contracts 39" "ristik/native-bridge-plugins 19"; do
     set -- $pr; st=$(gh pr view "$2" -R "$1" --json state --jq .state 2>/dev/null || echo unknown)
     if [ "$st" = MERGED ]; then yes "$1#$2 merged"; else no "$1#$2 is $st (must be MERGED before the run)"; fi
   done
@@ -82,18 +84,35 @@ preflight() {
   echo "-- ureth (attested build) and contracts: as the any-age lane (scripts/anyage-lane.sh --preflight checks them; this lane runs the same builds)"
   if [ -n "${M2_URETH_BIN:-}" ] && [ -x "$M2_URETH_BIN" ] && [ -n "${M2_URETH_COMMIT:-}" ]; then yes "M2_URETH_BIN $M2_URETH_BIN @ ${M2_URETH_COMMIT:0:10}"; else no "set M2_URETH_BIN and M2_URETH_COMMIT to the attested ureth build"; fi
   if [ -n "${P85_CONTRACTS:-}" ] && [ -d "$P85_CONTRACTS" ]; then yes "P85_CONTRACTS $P85_CONTRACTS"; else no "set P85_CONTRACTS to the contracts checkout"; fi
+  check "the contracts genesis takes the root network and genesis identity (contracts#46: P85_ROOT_NETWORK, P85_ROOT_GENESIS; the lane sets both from the trust base)" bash -c "grep -q P85_ROOT_GENESIS '${P85_CONTRACTS:-/nonexistent}/script/P85Genesis.s.sol' && grep -q P85_ROOT_NETWORK '${P85_CONTRACTS:-/nonexistent}/script/P85Genesis.s.sol'"
+  note "contracts#46 changes the manifest hash and the publication fixture: the copies under evmassign/testdata and rootchain/evmstate/testdata and the xrepo/fixtures.json pin are re-copied at the #46 merge commit (checked: the new fixture passes evmassign, evmstate, xrepo, posrelayer, signingauthority)"
   if [ -n "${NBP_DIR:-}" ] && [ -d "$NBP_DIR/tests/live" ]; then yes "NBP_DIR $NBP_DIR"; else no "set NBP_DIR to the native-bridge-plugins checkout"; fi
   [ -n "${DNB_TOOL:-}" ] && [ -x "$DNB_TOOL" ] && yes "DNB_TOOL $DNB_TOOL" || no "set DNB_TOOL to a dnb-tool built from this checkout"
   if (exec 3<>/dev/tcp/127.0.0.1/27117) 2>/dev/null; then yes "MongoDB replica set port 27117 answers"; else no "no MongoDB on 127.0.0.1:27117"; fi
-  echo "-- the patched aggregator (design 11.3; dev4's local build, recorded under briefs/builds/aggregator-utb-<patch sha8>/)"
+  echo "-- the aggregator (ristik/aggregator-go integration/enshrined-evm at AGG_COMMIT, built by --build-aggregator; provenance builds/aggregator-<sha8>/)"
   if [ -n "${AGG_BIN:-}" ] && [ -x "$AGG_BIN" ]; then
     yes "AGG_BIN $AGG_BIN"
-    if prov=$(utb_agg_provenance "$AGG_BIN" "$AGRE_ROOT/briefs/builds" 2>/dev/null); then yes "provenance $prov records this binary, its base and its patch"; else no "$(utb_agg_provenance "$AGG_BIN" "$AGRE_ROOT/briefs/builds" 2>&1 | tail -1)"; fi
+    if prov=$(utb_agg_provenance "$AGG_BIN" "$AGRE_ROOT/builds" 2>/dev/null); then yes "provenance $prov records this binary and its commit (the binary reports the same revision)"; else no "$(utb_agg_provenance "$AGG_BIN" "$AGRE_ROOT/builds" 2>&1 | tail -1)"; fi
+    if [ -n "${AGG_COMMIT:-}" ] && [ -n "${prov:-}" ]; then
+      [ "$(tr -d '[:space:]' <"$prov/commit.txt")" = "$AGG_COMMIT" ] && yes "the binary is the pinned AGG_COMMIT ${AGG_COMMIT:0:10}" || no "the binary's commit is not AGG_COMMIT ${AGG_COMMIT:0:10}"
+    else no "set AGG_COMMIT to the pinned aggregator-go commit (40 hex)"; fi
+    if [ -n "${prov:-}" ]; then
+      if pinned=$(utb_agg_pins_ok "$prov" "$REPO_ROOT" 2>&1); then yes "the aggregator's bft-core ($pinned) is in this checkout's history"; else no "$pinned"; fi
+    fi
     check "the binary is a UTB build (its UTB variables are in the binary)" bash -c "strings '$AGG_BIN' | grep -q UTB_GENESIS_ID"
+    check "the binary speaks the combined response (CertificationResponseV3 is in the binary)" bash -c "strings '$AGG_BIN' | grep -q 'received CertificationResponseV3'"
   else
-    no "set AGG_BIN to the patched aggregator-go binary (briefs/builds/aggregator-utb-*)"
+    no "set AGG_BIN to the aggregator built by: AGG_COMMIT=<40 hex> $0 --build-aggregator"
   fi
-  if [ -n "${prov:-}" ]; then note "the aggregator was built on: $(sed -n 's/^bft-core (.*): *\([0-9a-f]\{9,\}\).*/bft-core \1/p' "$prov/base.txt" | head -1) (a merge base: it must be re-pinned to the merged bft-core and rebuilt before the real run)"; fi
+  echo "-- the JS SDK client (ristik/state-transition-sdk-js integration/enshrined-evm, built)"
+  if [ -n "${UTB_SDK_JS:-}" ] && [ -f "$UTB_SDK_JS/lib/util/TrustBaseUtils.js" ]; then
+    yes "UTB_SDK_JS $UTB_SDK_JS"
+    check "UTB_SDK_JS is a clean git checkout" bash -c "[ -z \"\$(git -C '$UTB_SDK_JS' status --porcelain --untracked-files=no)\" ]"
+    check "UTB_SDK_JS contains origin/integration/enshrined-evm (the trust-base history and fetch-and-retry are on it)" git -C "$UTB_SDK_JS" merge-base --is-ancestor origin/integration/enshrined-evm HEAD
+    check "node runs the client check (syntax)" node --check "$REPO_ROOT/scripts/utb-sdk-client/check.mjs"
+  else
+    no "set UTB_SDK_JS to a built checkout of the SDK fork (npm ci && npm run build)"
+  fi
   note "the aggregator history range is served at $(utb_agg_history_url 1) (GET /api/v1/trustbases)"
   echo "-- substrate and the generated genesis"
   check "reth-paired-devnet.sh supports UTB_LANE" grep -q 'UTB_LANE' "$REPO_ROOT/scripts/reth-paired-devnet.sh"
@@ -122,6 +141,11 @@ case "${1:-}" in
   --selftest)
     : "${UTB_ST_TRUSTBASE:?set UTB_ST_TRUSTBASE to an epoch-1 trust base file (for example test-nodes/trust-base.json of any devnet genesis)}"
     utb_selftest ;;
+  --build-aggregator)
+    : "${AGG_COMMIT:?set AGG_COMMIT to the 40-hex aggregator-go commit on integration/enshrined-evm}"
+    bin=$(utb_agg_build "$AGG_COMMIT" "$AGRE_ROOT/builds") || exit 1
+    prov=$(utb_agg_provenance "$bin" "$AGRE_ROOT/builds") || exit 1
+    echo "built $bin"; echo "provenance $prov"; utb_agg_pins_ok "$prov" "$REPO_ROOT" || echo "WARNING: re-pin the aggregator to a bft-core in this checkout's history before the real run" >&2 ;;
   --check-evidence) utb_check_evidence "${2:?usage: $0 --check-evidence DIR}" && echo "evidence complete" ;;
   --preflight) plan; echo; preflight ;;
   --prep)
@@ -138,5 +162,5 @@ case "${1:-}" in
     preflight || { echo "REFUSED: the preflight is not entirely ok; nothing was started." >&2; exit 3; }
     lane_env
     exec "$SCRIPT_DIR/p85-lane.sh" ;;
-  *) echo "usage: $0 [--plan|--preflight|--selftest|--prep|--check-evidence DIR]" >&2; exit 2 ;;
+  *) echo "usage: $0 [--plan|--preflight|--selftest|--build-aggregator|--prep|--check-evidence DIR]" >&2; exit 2 ;;
 esac

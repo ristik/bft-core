@@ -28,6 +28,20 @@ P85_TREASURY=0x00000000000000000000000000000000000000ee
 
 p85_die() { echo "p85: $*" >&2; return 1; }
 
+# The identity of the root consensus the contracts bind (contracts#46: the evidence digests are rebuilt from the root network N and genesis identity G, and both are part
+# of the manifest the genesis hashes): N is the trust base's network id, G its root genesis id, both read from the manifest tool and never typed. Prints
+# "P85_ROOT_NETWORK=<n> P85_ROOT_GENESIS=0x<64 hex>".
+p85_root_identity() { # [trust-base.json]
+  local tb=${1:-test-nodes/trust-base.json} d out n g
+  d=$(mktemp -d) || return 1
+  out=$(build/ubft trust-base utb-manifest --trust-base "$tb" --out-dir "$d" 2>&1); local rc=$?
+  rm -rf "$d"
+  [ "$rc" -eq 0 ] || { echo "p85_root_identity: the manifest tool failed: $out" >&2; return 1; }
+  n=$(sed -n 's/^root network id *//p' <<<"$out"); g=$(sed -n 's/^root genesis id *//p' <<<"$out")
+  [[ $n =~ ^[0-9]+$ ]] && [ "$n" -gt 0 ] && [[ $g =~ ^0x[0-9a-f]{64}$ ]] || { echo "p85_root_identity: no network id / genesis id in the tool's output: $out" >&2; return 1; }
+  echo "P85_ROOT_NETWORK=$n P85_ROOT_GENESIS=$g"
+}
+
 p85_prepare_genesis() {
   [ -s test-nodes/trust-base.json ] && [ -s "test-nodes/shard-conf-${partitionID:-8}_0.json" ] || p85_die "run setup-evm-nodes.sh first" || return 1
   [ -n "${P85_CONTRACTS:-}" ] && [ -x "$P85_CONTRACTS/script/p85-genesis.sh" ] || p85_die "P85_CONTRACTS must name a unicity-pos-contracts checkout" || return 1
@@ -41,8 +55,9 @@ p85_prepare_genesis() {
     --out-identities "$P85_DIR/genesis-identities.json" --out-contracts "$P85_DIR/contracts-genesis.json" 2>"$P85_DIR/genesis-assignment.txt" || return 1
   local IFS=, caps
   read -r -a caps <<<"$P85_CAPS"
-  local word="0x$(printf 'unicity.p85.lane.network' | shasum -a 256 | cut -d' ' -f1)"
-  ( cd "$P85_CONTRACTS" && P85_NETWORK_WORD=$word P85_CHAIN_ID=$chain P85_ROOTS=$P85_REGISTRY P85_TREASURY=$P85_TREASURY \
+  local word="0x$(printf 'unicity.p85.lane.network' | shasum -a 256 | cut -d' ' -f1)" rootid
+  rootid=$(p85_root_identity test-nodes/trust-base.json) || return 1
+  ( cd "$P85_CONTRACTS" && env $rootid P85_NETWORK_WORD=$word P85_CHAIN_ID=$chain P85_ROOTS=$P85_REGISTRY P85_TREASURY=$P85_TREASURY \
       P85_V_MAX=${caps[0]} P85_L_MAX=${caps[1]} P85_N_MAX=${caps[2]} P85_CADENCE_ROUNDS=$P85_CADENCE_ROUNDS P85_CADENCE_SECONDS=$P85_CADENCE_SECONDS P85_DIST_NUM=$P85_DIST_NUM P85_DIST_DEN=$P85_DIST_DEN \
       script/p85-genesis.sh "$OLDPWD/$P85_DIR/contracts-genesis.json" "$OLDPWD/$P85_DIR/genesis" ) || return 1
   ( cd "$P85_CONTRACTS" && script/measure-elect.sh "${caps[0]}" "${caps[1]}" "${caps[2]}" ) >"$P85_DIR/elect-measurement.json" || p85_die "the election measurement failed" || return 1

@@ -183,6 +183,7 @@ class ProofOfStake(unittest.TestCase):
             deployed={'custody':'0xc','custodyCodeHash':'0x1','election':'0xe','electionCodeHash':'0x2','assignmentId':self.ID1}
             def run(*args,**kw):
                 class R: stderr='genesis assignment id '+self.ID1;stdout='{}'
+                if 'utb-manifest' in map(str,args): R.stdout='x\nroot genesis id  0x'+'ab'*32+'\nroot network id  5\nutb genesis id    0x00\n'
                 if str(args[0]).endswith('p85-genesis.sh'):
                     (genesis.dir/'genesis').mkdir(exist_ok=True);(genesis.dir/'genesis/deployment.json').write_text(json.dumps(deployed))
                 return R
@@ -192,6 +193,25 @@ class ProofOfStake(unittest.TestCase):
                 genesis.prepare('full.json',provisional=False)
                 deployed['custody']='0xd'                  # an address may not
                 with self.assertRaisesRegex(pos.PosError,'custody'): genesis.prepare('full.json',provisional=False)
+    def test_the_root_identity_reaches_the_contracts_genesis_and_is_never_guessed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            genesis=pos.Genesis(Path(tmp)/'work','ubft',tmp,generate.REPO,'tn-x',1,(1,2));genesis.trust_base=Path('tb')
+            envs=[]
+            def run(*args,**kw):
+                class R: stderr='genesis assignment id '+self.ID1;stdout='{}'
+                if 'utb-manifest' in map(str,args): R.stdout='root genesis id  0x'+'ab'*32+'\nroot network id  5\n'
+                if str(args[0]).endswith('p85-genesis.sh'):
+                    envs.append(kw['env']);(genesis.dir/'genesis').mkdir(exist_ok=True)
+                    (genesis.dir/'genesis/deployment.json').write_text(json.dumps({'custody':'0xc','custodyCodeHash':'0x1','election':'0xe','electionCodeHash':'0x2','assignmentId':self.ID1}))
+                return R
+            with patch.object(genesis,'_run',side_effect=run):
+                genesis.prepare('base.json',provisional=True)
+            self.assertEqual((envs[0]['P85_ROOT_NETWORK'],envs[0]['P85_ROOT_GENESIS']),('5','0x'+'ab'*32))
+            for out in ('root genesis id  0x'+'ab'*32+'\n','root genesis id  0x12\nroot network id  5\n','root genesis id  0x'+'ab'*32+'\nroot network id  0\n'):
+                bad=pos.Genesis(Path(tmp)/('w'+str(hash(out))),'ubft',tmp,generate.REPO,'tn-x',1,(1,2));bad.trust_base=Path('tb')
+                class R: stdout=out;stderr=''
+                with patch.object(bad,'_run',return_value=R):
+                    with self.assertRaisesRegex(pos.PosError,'no root network id'): bad.root_identity()
     def test_the_owner_keys_replace_the_hash_derived_addresses_and_must_cover_every_identity(self):
         with tempfile.TemporaryDirectory() as tmp:
             genesis=pos.Genesis(Path(tmp)/'work','ubft',tmp,generate.REPO,'tn-x',1,(1,2))
