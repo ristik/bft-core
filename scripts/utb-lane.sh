@@ -45,7 +45,7 @@ Entries: epoch 2 is the K->J handoff (activated; the P85 J is never acknowledged
          certificate, fetches epochs 2..3 from the aggregator's GetTrustBase endpoint with its fetch-and-retry loop and verifies; its entries equal the history's bytes
   8  L1c the same saved bytes verify against the historical epoch; the one vault release;  U5 the original token verifies unchanged under its historical committee (utb-evidence),
          the bridge receipt, the complete history exported and reloaded by a fresh client store: identical records and tip
-  9  restarts (P85); the root logs counted (V3 freeze rules are not enabled = 0, successor body ... not retained = 0, recoveries completed reported); the evidence pack assembled and checked by the tools (self-contained), teardown through scripts/p85-stop.sh only
+  9  restarts (P85); the root logs counted (V3 freeze rules are not enabled = 0, successor trust-base entry cannot be derived = 0, recoveries completed reported); the evidence pack assembled and checked by the tools (self-contained), teardown through scripts/p85-stop.sh only
 PLAN
 }
 

@@ -41,6 +41,14 @@ p85_root_identity() { # [trust-base.json]
   [[ $n =~ ^[0-9]+$ ]] && [ "$n" -gt 0 ] && [[ $g =~ ^0x[0-9a-f]{64}$ ]] || { echo "p85_root_identity: no network id / genesis id in the tool's output: $out" >&2; return 1; }
   echo "P85_ROOT_NETWORK=$n P85_ROOT_GENESIS=$g"
 }
+# p85_root_identity_args [trust-base.json]: fills the array P85_ROOT_ARGS with the two assignments, one element each, whatever IFS the caller has set
+# (p85_prepare_genesis runs with IFS=, for its caps: an unquoted expansion of the identity would not split there). Use: env "${P85_ROOT_ARGS[@]}" ...
+p85_root_identity_args() {
+  local IFS=' ' line
+  line=$(p85_root_identity "$@") || return 1
+  read -r -a P85_ROOT_ARGS <<<"$line"
+  [ "${#P85_ROOT_ARGS[@]}" -eq 2 ] || { echo "p85_root_identity_args: expected two assignments, got: $line" >&2; return 1; }
+}
 
 p85_prepare_genesis() {
   [ -s test-nodes/trust-base.json ] && [ -s "test-nodes/shard-conf-${partitionID:-8}_0.json" ] || p85_die "run setup-evm-nodes.sh first" || return 1
@@ -55,9 +63,9 @@ p85_prepare_genesis() {
     --out-identities "$P85_DIR/genesis-identities.json" --out-contracts "$P85_DIR/contracts-genesis.json" 2>"$P85_DIR/genesis-assignment.txt" || return 1
   local IFS=, caps
   read -r -a caps <<<"$P85_CAPS"
-  local word="0x$(printf 'unicity.p85.lane.network' | shasum -a 256 | cut -d' ' -f1)" rootid
-  rootid=$(p85_root_identity test-nodes/trust-base.json) || return 1
-  ( cd "$P85_CONTRACTS" && env $rootid P85_NETWORK_WORD=$word P85_CHAIN_ID=$chain P85_ROOTS=$P85_REGISTRY P85_TREASURY=$P85_TREASURY \
+  local word="0x$(printf 'unicity.p85.lane.network' | shasum -a 256 | cut -d' ' -f1)"
+  p85_root_identity_args test-nodes/trust-base.json || return 1
+  ( cd "$P85_CONTRACTS" && env "${P85_ROOT_ARGS[@]}" P85_NETWORK_WORD=$word P85_CHAIN_ID=$chain P85_ROOTS=$P85_REGISTRY P85_TREASURY=$P85_TREASURY \
       P85_V_MAX=${caps[0]} P85_L_MAX=${caps[1]} P85_N_MAX=${caps[2]} P85_CADENCE_ROUNDS=$P85_CADENCE_ROUNDS P85_CADENCE_SECONDS=$P85_CADENCE_SECONDS P85_DIST_NUM=$P85_DIST_NUM P85_DIST_DEN=$P85_DIST_DEN \
       script/p85-genesis.sh "$OLDPWD/$P85_DIR/contracts-genesis.json" "$OLDPWD/$P85_DIR/genesis" ) || return 1
   ( cd "$P85_CONTRACTS" && script/measure-elect.sh "${caps[0]}" "${caps[1]}" "${caps[2]}" ) >"$P85_DIR/elect-measurement.json" || p85_die "the election measurement failed" || return 1
@@ -166,7 +174,7 @@ p85_root_flags() {
 }
 
 p85_selftest() {
-  local ok=0 bad
+  local ok=0 bad got
   bad() { echo "p85 selftest FAIL: $*" >&2; ok=1; }
   bash -n scripts/lib/p85-lib.sh || bad "bash -n"
   python3 -c "import ast;ast.parse(open('scripts/p85-genesis-plan.py').read())" || bad "plan generator does not parse"
@@ -174,6 +182,23 @@ p85_selftest() {
   local t; t=$(mktemp -d)
   echo '{"rootNodes":[{"nodeId":"a","sigKey":"0x02"}]}' >"$t/tb.json"; echo '{"validators":[]}' >"$t/c.json"
   python3 scripts/p85-genesis-plan.py "$t/tb.json" "$t/c.json" 1 1 >/dev/null 2>&1 && bad "an uncoupled topology was accepted"
+  # a dry run of p85_prepare_genesis itself (fake ubft, forge and contracts scripts): both root-identity variables, the comma-split caps and the rest reach p85-genesis.sh
+  # as separate variables, under the function's own IFS=,
+  local d="$t/dry" want
+  mkdir -p "$d/scripts" "$d/build" "$d/test-nodes"; cp scripts/p85-genesis-plan.py "$d/scripts/"
+  mkdir -p "$d/contracts/script" "$d/bin"
+  echo '{"rootNodes":[{"nodeId":"a","sigKey":"0x02"}]}' >"$d/test-nodes/trust-base.json"
+  echo '{"validators":[{"nodeId":"e","sigKey":"0x03"}],"partitionParams":{"chain_id":31337}}' >"$d/test-nodes/shard-conf-8_0.json"
+  printf '#!/bin/sh\nif [ "$1" = trust-base ]; then printf "x\\nroot genesis id  0x%s\\nroot network id  7\\n" "%s"; fi\nexit 0\n' "$(printf 'ab%.0s' $(seq 32))" "$(printf 'ab%.0s' $(seq 32))" >"$d/build/ubft"
+  printf '#!/bin/sh\nexit 0\n' >"$d/bin/forge"
+  printf '#!/bin/sh\nenv | grep "^P85_" | sort >"$1.env"\n' >"$d/contracts/script/p85-genesis.sh"
+  printf '#!/bin/sh\necho "{}"\n' >"$d/contracts/script/measure-elect.sh"; cp "$d/contracts/script/measure-elect.sh" "$d/contracts/script/measure-hook-gas.sh"
+  chmod +x "$d/build/ubft" "$d/bin/forge" "$d/contracts/script/"*.sh
+  ( cd "$d" && PATH="$d/bin:$PATH" P85_CONTRACTS="$d/contracts" p85_prepare_genesis ) >"$t/dry.out" 2>&1 || bad "the dry run of p85_prepare_genesis failed: $(tail -3 "$t/dry.out")"
+  want="P85_ROOT_GENESIS=0x$(printf 'ab%.0s' $(seq 32))"
+  grep -qx "$want" "$d/test-nodes/p85/contracts-genesis.json.env" 2>/dev/null || grep -qx "$want" "$d"/test-nodes/p85/*.env 2>/dev/null || bad "P85_ROOT_GENESIS did not reach p85-genesis.sh: $(cat "$d"/test-nodes/p85/*.env 2>/dev/null | tr '\n' ' ')"
+  grep -qx "P85_ROOT_NETWORK=7" "$d"/test-nodes/p85/*.env 2>/dev/null || bad "P85_ROOT_NETWORK did not reach p85-genesis.sh as its own variable"
+  grep -qx "P85_V_MAX=16" "$d"/test-nodes/p85/*.env 2>/dev/null || bad "the caps were not split for p85-genesis.sh"
   rm -rf "$t"
   return $ok
 }

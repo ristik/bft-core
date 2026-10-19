@@ -157,7 +157,7 @@ func buildPack(t *testing.T, ubft, tool string) string {
 	put("handoff/recovery-closure.log", []byte("J closed at (1,2) = its closure\n"))
 	put("sdk/client.log", []byte("before: verdict no_entry_for_epoch, certificate epoch 3, latest held 1\nafter: verdict ok; fetched from epoch 2 (held tip + 1); tip now 3\nsdk client check: PASSED\n"))
 	put("sdk/sdk-commit.txt", []byte(strings.Repeat("a", 40)+"\n"))
-	put("checks/root-logs.txt", []byte("root logs inspected: 4\nV3 freeze rules are not enabled: 0\nsuccessor body of the committed record: not retained: 0\n"))
+	put("checks/root-logs.txt", []byte("root logs inspected: 4\nV3 freeze rules are not enabled: 0\nsuccessor trust-base entry cannot be derived: 0\n"))
 	return pack
 }
 
@@ -251,10 +251,10 @@ func TestEvidencePackIsCheckedByTheToolsAndEveryBadByteIsRefused(t *testing.T) {
 		}, "sdk/client.log does not show"},
 		"an SDK commit that is not a commit": {func(p string) { write(t, p, "sdk/sdk-commit.txt", []byte("main\n")) }, "not a commit"},
 		"a root log count of the freeze refusal above zero": {func(p string) {
-			write(t, p, "checks/root-logs.txt", []byte("V3 freeze rules are not enabled: 2\nsuccessor body of the committed record: not retained: 0\n"))
+			write(t, p, "checks/root-logs.txt", []byte("V3 freeze rules are not enabled: 2\nsuccessor trust-base entry cannot be derived: 0\n"))
 		}, "both refusal counts at 0"},
 		"a root log count of the not-retained refusal above zero": {func(p string) {
-			write(t, p, "checks/root-logs.txt", []byte("V3 freeze rules are not enabled: 0\nsuccessor body of the committed record: not retained: 1\n"))
+			write(t, p, "checks/root-logs.txt", []byte("V3 freeze rules are not enabled: 0\nsuccessor trust-base entry cannot be derived: 1\n"))
 		}, "both refusal counts at 0"},
 		"an empty file":  {func(p string) { write(t, p, "catchup/restart.log", nil) }, "missing or empty"},
 		"a missing file": {func(p string) { require.NoError(t, os.Remove(filepath.Join(p, "handoff/ordinary-ack.log"))) }, "missing or empty"},

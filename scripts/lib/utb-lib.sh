@@ -283,24 +283,30 @@ utb_step_u4b() {
   echo "U4b: the JS SDK client verified the epoch-3 certificate after fetching epochs 2..3 from the aggregator"
 }
 
-# The root logs (rev2's asks on #648/#649): whether any root imported state in the genesis epoch (recovery completed: the path the #648 fix covers), and the two
-# refusals that must never appear, counted over every root's log of the run.
+# The root logs (rev2's asks on #648/#649): each state import (a completed recovery, with its log line: round and time), and the two refusals that must never appear
+# (the sentinel text of ErrUTBSuccessor covers both of its causes), counted over every root's log of the run.
 utb_root_log_report() { # OUT
-  local out=$1 f n total_a=0 total_b=0 rec=0 logs=()
-  for f in test-nodes/root*/debug.log test-nodes/root*/stdout.log; do [ -s "$f" ] && logs+=("$f"); done
+  local out=$1 f total_a=0 total_b=0 rec=0 logs=() n m
+  # one log per root: debug.log holds everything stdout.log has (counting both would count a line twice)
+  for f in test-nodes/root*/; do
+    if [ -s "${f}debug.log" ]; then logs+=("${f}debug.log"); elif [ -s "${f}stdout.log" ]; then logs+=("${f}stdout.log"); fi
+  done
   [ ${#logs[@]} -gt 0 ] || { echo "no root logs under test-nodes/root*" >&2; return 1; }
   : >"$out"
   for f in "${logs[@]}"; do
     n=$(grep -ac 'V3 freeze rules are not enabled' "$f" || true); total_a=$((total_a + n))
-    local m; m=$(grep -ac 'successor body of the committed record: not retained' "$f" || true); total_b=$((total_b + m))
-    local r; r=$(grep -ac 'completed recovery' "$f" || true); rec=$((rec + r))
-    echo "$f: freeze-disabled $n, successor-not-retained $m, completed-recovery $r" >>"$out"
+    m=$(grep -ac 'successor trust-base entry cannot be derived' "$f" || true); total_b=$((total_b + m))
+    echo "$f: freeze-disabled $n, successor-cannot-be-derived $m, completed-recovery $(grep -ac 'completed recovery' "$f" || true)" >>"$out"
   done
   { echo "root logs inspected: ${#logs[@]}"
     echo "V3 freeze rules are not enabled: $total_a"
-    echo "successor body of the committed record: not retained: $total_b"
-    echo "root recoveries completed (state imported; the line is DEBUG level, 0 can mean it was not logged): $rec"
-    if [ "$rec" -gt 0 ]; then echo "state import exercised: yes"; else echo "state import exercised: not observed in the logs"; fi; } >>"$out"
+    echo "successor trust-base entry cannot be derived: $total_b"
+    echo "state imports (completed recovery), each with its log line:"
+    for f in "${logs[@]}"; do grep -a 'completed recovery' "$f" | cut -c1-240 | sed "s#^#  $f: #"; done
+  } >>"$out"
+  rec=$(grep -c '^  .*completed recovery' "$out" || true)
+  echo "state imports: $rec" >>"$out"
+  [ "$rec" -gt 0 ] && echo "state import exercised: yes" >>"$out" || echo "state import exercised: no" >>"$out"
   [ "$total_a" -eq 0 ] && [ "$total_b" -eq 0 ]
 }
 
@@ -440,7 +446,7 @@ utb_check_evidence() {
   [ "$(cat "$dir/history/client-after-sync.txt")" = "$got" ] || { echo "history/client-after-sync.txt is not the verifier's output on the synced history" >&2; return 1; }
   grep -q '^sdk client check: PASSED' "$dir/sdk/client.log" && grep -q "tip now $tip" "$dir/sdk/client.log" && grep -q '^before: verdict no_entry_for_epoch' "$dir/sdk/client.log" || { echo "sdk/client.log does not show the SDK client meeting the unknown epoch and verifying at tip $tip after the fetch" >&2; return 1; }
   grep -qE '^[0-9a-f]{40}$' "$dir/sdk/sdk-commit.txt" || { echo "sdk/sdk-commit.txt is not a commit" >&2; return 1; }
-  grep -q '^V3 freeze rules are not enabled: 0$' "$dir/checks/root-logs.txt" && grep -q '^successor body of the committed record: not retained: 0$' "$dir/checks/root-logs.txt" || { echo "checks/root-logs.txt does not show both refusal counts at 0" >&2; return 1; }
+  grep -q '^V3 freeze rules are not enabled: 0$' "$dir/checks/root-logs.txt" && grep -q '^successor trust-base entry cannot be derived: 0$' "$dir/checks/root-logs.txt" || { echo "checks/root-logs.txt does not show both refusal counts at 0" >&2; return 1; }
   jq -e '(.redeem.gasUsed | tonumber) > 0 and (.claim.gasUsed | tonumber) > 0' "$dir/proofs/bridge-receipt.json" >/dev/null 2>&1 || { echo "proofs/bridge-receipt.json is not a successful redemption and claim" >&2; return 1; }
 }
 
@@ -490,10 +496,10 @@ utb_selftest() {
   # the root-log report: clean logs pass and report the counts; each refusal string, alone, fails it
   mkdir -p "$t/rl/test-nodes/root0" "$t/rl/test-nodes/root1"
   printf 'ok line\ncompleted recovery\n' >"$t/rl/test-nodes/root0/debug.log"; printf 'ok line\n' >"$t/rl/test-nodes/root1/debug.log"
-  utb_st "the root-log report passes clean logs and counts the recoveries" bash -c "cd '$t/rl' && source '$cwd/scripts/lib/utb-lib.sh' && utb_root_log_report r.txt && grep -q '^V3 freeze rules are not enabled: 0\$' r.txt && grep -q '^successor body of the committed record: not retained: 0\$' r.txt && grep -q 'state import exercised: yes' r.txt"
+  utb_st "the root-log report passes clean logs and counts the recoveries" bash -c "cd '$t/rl' && source '$cwd/scripts/lib/utb-lib.sh' && utb_root_log_report r.txt && grep -q '^V3 freeze rules are not enabled: 0\$' r.txt && grep -q '^successor trust-base entry cannot be derived: 0\$' r.txt && grep -q 'state import exercised: yes' r.txt"
   utb_st_no "a root log with the freeze-disabled refusal fails the report" bash -c "cd '$t/rl' && source '$cwd/scripts/lib/utb-lib.sh' && echo 'x storage: V3 freeze rules are not enabled for this committee' >>test-nodes/root1/debug.log && utb_root_log_report r.txt"
   printf 'ok line\n' >"$t/rl/test-nodes/root1/debug.log"
-  utb_st_no "a root log with the not-retained refusal fails the report" bash -c "cd '$t/rl' && source '$cwd/scripts/lib/utb-lib.sh' && echo 'x successor body of the committed record: not retained' >>test-nodes/root1/debug.log && utb_root_log_report r.txt"
+  utb_st_no "a root log with the not-retained refusal fails the report" bash -c "cd '$t/rl' && source '$cwd/scripts/lib/utb-lib.sh' && echo 'x successor trust-base entry cannot be derived' >>test-nodes/root1/debug.log && utb_root_log_report r.txt"
   utb_st_no "no root logs fails the report" bash -c "mkdir -p '$t/nolog' && cd '$t/nolog' && source '$cwd/scripts/lib/utb-lib.sh' && utb_root_log_report r.txt"
   # the evidence checker is exercised on real bytes (a generated chain, a served history, a captured response) by the Go test of scripts/utb-evidence: each bad-byte
   # property is refused by its own check, and a pack of placeholders is refused here
@@ -502,6 +508,7 @@ utb_selftest() {
   while read -r f; do mkdir -p "$ev/$(dirname "$f")"; printf 'x\n' >"$ev/$f"; done < <(utb_evidence_required)
   UBFT=$(realpath "$UBFT") utb_st_no "a pack of placeholders is refused" bash -c "source '$cwd/scripts/lib/utb-lib.sh'; UBFT='$UBFT' UTB_EVIDENCE='${UTB_EVIDENCE:-build/utb-evidence}' utb_check_evidence '$ev'"
   utb_st "the evidence checker accepts a real pack and refuses each bad property (go test ./scripts/utb-evidence -run EvidencePack)" bash -c "cd '$cwd' && UBFT_BIN='$(realpath "$UBFT")' go test -count=1 ./scripts/utb-evidence -run EvidencePack"
+  utb_st "the P85 genesis preparation passes the root identity and the caps to p85-genesis.sh (dry run with fakes: bash -c 'source scripts/lib/p85-lib.sh; p85_selftest')" bash -c "cd '$cwd' && source scripts/lib/p85-lib.sh && p85_selftest"
   echo "utb lane self-test: $UTB_ST_BAD failures"
   [ "$UTB_ST_BAD" -eq 0 ]
 }
