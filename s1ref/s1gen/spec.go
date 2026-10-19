@@ -61,7 +61,7 @@ type ev struct {
 	epoch  uint64
 	round  uint64
 	parent uint64
-	ts     uint64 // scheme 1 VoteInfo timestamp
+	ts     uint64 // VoteInfo timestamp: signed by scheme 1; by scheme 2 only when non-zero
 	exec   [32]byte
 
 	// LedgerCommitInfo.
@@ -94,14 +94,22 @@ func (e *ev) legacyRoundInfo() []byte {
 	return cTag(tagRoundInfo, cArr(cUint(1), cUint(e.round), cUint(e.epoch), cUint(e.ts), cUint(e.parent), cBytes(e.exec[:])))
 }
 
-// domainVoteInfo is the wire VoteInfo of scheme 2: [epoch, round, parent, exec].
+// domainVoteInfo is the wire VoteInfo of scheme 2: [epoch, round, parent, exec], with the timestamp appended when it is non-zero.
 func (e *ev) domainVoteInfo() []byte {
-	return cArr(cUint(e.epoch), cUint(e.round), cUint(e.parent), cBytes(e.exec[:]))
+	its := [][]byte{cUint(e.epoch), cUint(e.round), cUint(e.parent), cBytes(e.exec[:])}
+	if e.ts != 0 {
+		its = append(its, cUint(e.ts))
+	}
+	return cArr(its...)
 }
 
-// vi is the signed VI = C([N, Dv, epoch, round, parent, exec]).
+// vi is the signed VI = C([N, Dv, epoch, round, parent, exec]), with the timestamp appended exactly when it is non-zero.
 func (e *ev) vi(net uint64, g [32]byte) []byte {
-	return cArr(cUint(net), cText(dv(g)), cUint(e.epoch), cUint(e.round), cUint(e.parent), cBytes(e.exec[:]))
+	its := [][]byte{cUint(net), cText(dv(g)), cUint(e.epoch), cUint(e.round), cUint(e.parent), cBytes(e.exec[:])}
+	if e.ts != 0 {
+		its = append(its, cUint(e.ts))
+	}
+	return cArr(its...)
 }
 
 // sealBytes is the native seal with its signatures nulled, which is both the

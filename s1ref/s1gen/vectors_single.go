@@ -17,6 +17,17 @@ func (g *gen) single(seed string) {
 		w.sign(func() *ev { e := w.nc("v1", 150, 0x11); e.hash = []byte{}; return e }()))
 	g.yes("s2.noncommitting.v5.ok", fam, "the epoch 2 member that replaced the retired key", c, v2, w.sign(w.nc("v5", 150, 0x15)))
 
+	// The proposal time is signed in VI when non-zero (the live encoder); zero keeps the historical bytes.
+	ts := func(e *ev, t uint64) *ev { e.ts = t; return e }
+	g.yes("s2.noncommitting.timestamp.ok", fam, "scheme 2 non-committing vote with a proposal timestamp: VI carries it as a seventh element", c, v2, w.sign(ts(w.nc("v1", 152, 0x41), 1_700_000_123)))
+	g.yes("s2.committing.timestamp.ok", fam, "scheme 2 committing vote with a proposal timestamp", c, v2, w.sign(ts(w.cm("v2", 152, 0x42, 151, 1, 0xc5), 1_700_000_124)))
+	g.yes("s2.noncommitting.timestamp-one.ok", fam, "the smallest non-zero timestamp", c, v2, w.sign(ts(w.nc("v1", 152, 0x43), 1)))
+	g.yes("s2.noncommitting.timestamp-max.ok", fam, "the largest timestamp (2^64-1)", c, v2, w.sign(ts(w.nc("v1", 152, 0x44), ^uint64(0))))
+	tsBase := w.sign(ts(w.nc("v1", 153, 0x45), 1_700_000_200))
+	g.no("s2.binding.timestamp-altered", fam, "VoteInfo timestamp altered after signing: VH no longer matches the previous hash", c, v2, "ErrBinding", func() *ev { e := tsBase.cp(); e.ts++; return e }())
+	g.no("s2.binding.timestamp-dropped", fam, "timestamp removed from the evidence VoteInfo after signing", c, v2, "ErrBinding", func() *ev { e := tsBase.cp(); e.ts = 0; return e }())
+	g.no("s2.binding.timestamp-added", fam, "a timestamp added to evidence of a vote signed without one", c, v2, "ErrBinding", func() *ev { e := nc.cp(); e.ts = 5; return e }())
+
 	// Signature forms of one statement.
 	base := w.sign(w.nc("v1", 160, 0x21))
 	sig := base.voteSig
