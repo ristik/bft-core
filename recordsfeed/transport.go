@@ -324,40 +324,54 @@ func (p P2PRemote) Cut(ctx context.Context, key CutKey) (Cut, error) {
 // Records implements Remote. A root that answers with no record for a range the caller knows exists (the log is longer, the cut said
 // so) is a root that does not hold it: the next one is asked.
 func (p P2PRemote) Records(ctx context.Context, from uint64, max int) ([]rootrecords.Record, error) {
+	var errs []error
+	for i := range p.Roots {
+		if ctx.Err() != nil {
+			break
+		}
+		out, err := p.RecordsFromSource(ctx, i, from, max)
+		if err == nil {
+			return out, nil
+		}
+		errs = append(errs, err)
+	}
+	return nil, errors.Join(append([]error{ErrUnavailable}, errs...)...)
+}
+
+// Sources is the number of roots. Together with RecordsFromSource it lets a caller that verifies what it gets move on from a root that served a
+// wrong chain, which Records (the first non-empty answer) cannot.
+func (p P2PRemote) Sources() int { return len(p.Roots) }
+
+// RecordsFromSource asks only the root with the given index.
+func (p P2PRemote) RecordsFromSource(ctx context.Context, source int, from uint64, max int) ([]rootrecords.Record, error) {
+	if source < 0 || source >= len(p.Roots) {
+		return nil, fmt.Errorf("%w: no source %d", ErrUnavailable, source)
+	}
+	root := p.Roots[source]
 	raw, err := types.Cbor.Marshal(request{Kind: kindRecords, From: from, Max: uint32(min(max, MaxBatch))})
 	if err != nil {
 		return nil, err
 	}
-	var errs []error
-	for _, root := range p.Roots {
-		if ctx.Err() != nil {
-			break
-		}
-		body, err := p.callOne(ctx, root, raw, MaxBatchBytes)
-		if err == nil {
-			var wire []wireRecord
-			if err = types.Cbor.Unmarshal(body, &wire); err != nil {
-				err = fmt.Errorf("%w: records: %v", ErrWire, err)
-			} else if len(wire) == 0 {
-				err = errors.New("the root has no record in that range")
-			} else {
-				out := make([]rootrecords.Record, 0, len(wire))
-				for _, w := range wire {
-					r, ferr := fromWire(w)
-					if ferr != nil {
-						err = ferr
-						break
-					}
-					out = append(out, r)
+	body, err := p.callOne(ctx, root, raw, MaxBatchBytes)
+	if err == nil {
+		var wire []wireRecord
+		if err = types.Cbor.Unmarshal(body, &wire); err != nil {
+			err = fmt.Errorf("%w: records: %v", ErrWire, err)
+		} else if len(wire) == 0 {
+			err = errors.New("the root has no record in that range")
+		} else {
+			out := make([]rootrecords.Record, 0, len(wire))
+			for _, w := range wire {
+				r, ferr := fromWire(w)
+				if ferr != nil {
+					return nil, fmt.Errorf("%s: %w", root, ferr)
 				}
-				if err == nil {
-					return out, nil
-				}
+				out = append(out, r)
 			}
+			return out, nil
 		}
-		errs = append(errs, fmt.Errorf("%s: %w", root, err))
 	}
-	return nil, errors.Join(append([]error{ErrUnavailable}, errs...)...)
+	return nil, fmt.Errorf("%s: %w", root, err)
 }
 
 var _ Remote = P2PRemote{}
