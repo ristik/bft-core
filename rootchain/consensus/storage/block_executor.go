@@ -215,7 +215,7 @@ func (x *ExecutedBlock) extendWithAuthority(newBlock *rctypes.BlockData, verifie
 			Epoch: newBlock.Epoch, PredecessorBodyID: bytes.Clone(record.NextBodyID), Phase: "idle", Pos: parentState.Control.Pos,
 			UnackedParent: bytes.Clone(parentState.Control.UnackedParent)}
 	}
-	nextShardState, switched, err := parentState.nextBlockSwitching(shardConfs, hash, configHistory(orchestration))
+	nextShardState, switched, err := parentState.nextBlockSwitching(shardConfs, hash, orchestration)
 	if err != nil {
 		return nil, fmt.Errorf("creating shard info for the block: %w", err)
 	}

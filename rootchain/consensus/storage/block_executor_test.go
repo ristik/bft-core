@@ -164,6 +164,9 @@ func TestExecutedBlock_Extend(t *testing.T) {
 		pdrEpoch2.Epoch++
 		orchestration := mockOrchestration{
 			shardConfigs: func(rootRound uint64) (map[types.PartitionShardID]*types.PartitionDescriptionRecord, error) {
+				if rootRound <= drctypes.GenesisRootRound { // the history holds the configuration the parent applied
+					return map[types.PartitionShardID]*types.PartitionDescriptionRecord{psID: &pdrEpoch1}, nil
+				}
 				return map[types.PartitionShardID]*types.PartitionDescriptionRecord{psID: &pdrEpoch2}, nil
 			},
 		}

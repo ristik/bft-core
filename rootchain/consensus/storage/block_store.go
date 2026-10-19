@@ -52,6 +52,9 @@ type (
 		NetworkID() types.NetworkID
 		ShardConfig(partition types.PartitionID, shard types.ShardID, rootRound uint64) (*types.PartitionDescriptionRecord, error)
 		ShardConfigs(rootRound uint64) (map[types.PartitionShardID]*types.PartitionDescriptionRecord, error)
+		// ConfigHistory is required, not optional: the applied configuration a real switch leaves is validated against it, so an
+		// orchestration without a history fails to compile instead of silently skipping the check.
+		ConfigHistory
 	}
 )
 
@@ -793,10 +796,4 @@ func NewGenesisBlock(networkID types.NetworkID, hashAlgo crypto.Hash, networkPro
 		RootHash:   commitQc.LedgerCommitInfo.Hash,
 		ShardState: state,
 	}, nil
-}
-
-// configHistory is the orchestration's authenticated configuration history when it serves one (production), nil for a test double.
-func configHistory(o Orchestration) ConfigHistory {
-	h, _ := o.(ConfigHistory)
-	return h
 }

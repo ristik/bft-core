@@ -67,6 +67,9 @@ func (emptyRootOrchestration) NetworkID() types.NetworkID { return 5 }
 func (emptyRootOrchestration) ShardConfig(types.PartitionID, types.ShardID, uint64) (*types.PartitionDescriptionRecord, error) {
 	return nil, nil
 }
+func (emptyRootOrchestration) ShardConfigByHash(types.PartitionID, types.ShardID, []byte, crypto.Hash) (*types.PartitionDescriptionRecord, error) {
+	return nil, nil
+}
 func (emptyRootOrchestration) ShardConfigs(uint64) (map[types.PartitionShardID]*types.PartitionDescriptionRecord, error) {
 	return map[types.PartitionShardID]*types.PartitionDescriptionRecord{}, nil
 }

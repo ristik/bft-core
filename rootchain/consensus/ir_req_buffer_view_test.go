@@ -155,7 +155,7 @@ func TestAddViewRefusalsLeaveTheBufferUnchanged(t *testing.T) {
 	require.ErrorIs(t, b.AddView(v, one, ver), quorumweight.ErrQuorumNotReached, "a proof short of the quorum is refused by the verifier")
 	require.False(t, inBuffer(b))
 
-	p2 := NewIrReqBuffer(logger.New(t), 2)
+	p2 := NewIrReqBuffer(logger.New(t), storage.ProfileHandoff)
 	require.ErrorIs(t, p2.AddView(v, &drctypes.IRChangeReq{Partition: drctypes.ControlPartition, CertReason: drctypes.Quorum}, ver), drctypes.ErrControlPartition)
 
 	// a collection view of the assignment in force (no successor committed) is not collection-only
@@ -275,7 +275,7 @@ func TestGeneratePayloadViewKeepsOnlyFreshlyVerifiedEntries(t *testing.T) {
 	require.Empty(t, payload.Requests)
 
 	// control partition timeouts and nil UCs are skipped in the handoff profile
-	b = NewIrReqBuffer(logger.New(t), 2)
+	b = NewIrReqBuffer(logger.New(t), storage.ProfileHandoff)
 	control := []*types.UnicityCertificate{nil, {InputRecord: &types.InputRecord{}, UnicityTreeCertificate: &types.UnicityTreeCertificate{Partition: drctypes.ControlPartition}, UnicitySeal: &types.UnicitySeal{}}}
 	payload, err = b.GeneratePayloadView(12, control, noneInProgress, res, ver)
 	require.NoError(t, err)
@@ -360,7 +360,7 @@ func TestT2TimeoutsUnderViewsAreElapsedRoundsOfTheViewsPreviousUC(t *testing.T) 
 
 	// control partition exclusion and no-UC exclusion are kept
 	ctl := &MockState{certificates: []*types.UnicityCertificate{nil, {InputRecord: &types.InputRecord{}, UnicityTreeCertificate: &types.UnicityTreeCertificate{Partition: drctypes.ControlPartition}, UnicitySeal: &types.UnicitySeal{}}}}
-	g, err := NewLucBasedT2TimeoutGenerator(&Parameters{BlockRate: 900 * time.Millisecond, NetworkProfileVersion: 2}, ctl)
+	g, err := NewLucBasedT2TimeoutGenerator(&Parameters{BlockRate: 900 * time.Millisecond, NetworkProfileVersion: storage.ProfileHandoff}, ctl)
 	require.NoError(t, err)
 	got, err = g.GetT2TimeoutsView(10+t2, &fixedResolver{err: errors.New("must not be asked")})
 	require.NoError(t, err)

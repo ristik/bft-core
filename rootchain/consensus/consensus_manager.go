@@ -69,6 +69,7 @@ type (
 		NetworkID() types.NetworkID
 		ShardConfig(partitionID types.PartitionID, shardID types.ShardID, rootRound uint64) (*types.PartitionDescriptionRecord, error)
 		ShardConfigs(rootRound uint64) (map[types.PartitionShardID]*types.PartitionDescriptionRecord, error)
+		storage.ConfigHistory
 	}
 
 	PersistentStore interface {
