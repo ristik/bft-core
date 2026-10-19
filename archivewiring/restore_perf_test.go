@@ -137,11 +137,13 @@ func TestArchiveRestoreRetainsInBatchesAndReportsItsPhases(t *testing.T) {
 		_, err := restore.Archive.Get(q)
 		require.NoError(t, err, "record %d of %d is not in the local store", i, n)
 	}
-	require.Len(t, lines, 1, "one line between the phases (the periodic lines need a restore longer than %s): %v", restoreProgressEvery, lines)
-	require.Contains(t, lines[0], "archive records fetched and retained; replaying")
+	require.Len(t, lines, 2, "the start of the fetch and one line between the phases (the periodic lines need a restore longer than %s): %v", restoreProgressEvery, lines)
+	require.Contains(t, lines[0], "fetching archive records from the pinned tip to genesis")
 	require.Contains(t, lines[0], "blocks="+strconv.Itoa(n))
-	require.Contains(t, lines[0], "fetchAndVerify=")
-	require.Contains(t, lines[0], "retain=")
+	require.Contains(t, lines[1], "archive records fetched and retained; replaying")
+	require.Contains(t, lines[1], "blocks="+strconv.Itoa(n))
+	require.Contains(t, lines[1], "fetchAndVerify=")
+	require.Contains(t, lines[1], "retain=")
 }
 
 func TestRestoreProgressIsRateLimited(t *testing.T) {
@@ -155,6 +157,9 @@ func TestRestoreProgressIsRateLimited(t *testing.T) {
 	p.note(log, "phase", 6, 10, 4)
 	require.Len(t, lines, 1, "one line per interval")
 	require.Contains(t, lines[0], "done=5 of=10 height=5")
+	// the rate and the time left follow from the elapsed time: 5 of 10 blocks in about 6 s is about 0.8 blocks/s and 6 s to go
+	require.Regexp(t, `blocksPerSec=0\.\d\d`, lines[0])
+	require.Regexp(t, `eta=[5-7]s`, lines[0])
 	p.note(nil, "phase", 7, 10, 3) // no logger: nothing happens
 }
 
@@ -192,4 +197,31 @@ func TestArchiveRestoreStopsWhenABatchIsNotRetained(t *testing.T) {
 		}
 	}
 	require.Zero(t, stored, "the restore stopped at the failed batch: nothing of it, and no later batch, was retained")
+}
+
+// TestRestoreFetchCostProfile prints where one restore's time goes (the log line between the phases) and what a record's fetch costs alone over loopback
+// libp2p. ARCHIVE_PROFILE_RECORDS selects the chain length (unset: skipped). The fetch walks the chain by parent hash, so one record's fetch cannot start
+// before the previous one has arrived; a replica also refuses more than its pending limit of streams at once.
+func TestRestoreFetchCostProfile(t *testing.T) {
+	n, _ := strconv.Atoi(os.Getenv("ARCHIVE_PROFILE_RECORDS"))
+	if n == 0 {
+		t.Skip("set ARCHIVE_PROFILE_RECORDS")
+	}
+	restore, _, sender, ids, qs, _ := newTwoReplicaRestore(t, n)
+	ctx := context.Background()
+	start := time.Now()
+	for _, q := range qs {
+		_, err := Fetch(ctx, sender, ids[0], q, DefaultLimits())
+		require.NoError(t, err)
+	}
+	t.Logf("fetch alone: %.2f ms per record", float64(time.Since(start).Microseconds())/1000/float64(n))
+
+	var lines []string
+	restore.Log = slog.New(slog.NewTextHandler(lineWriter{&lines}, nil))
+	start = time.Now()
+	require.NoError(t, restore.Restore(ctx))
+	for _, l := range lines {
+		t.Log(l)
+	}
+	t.Logf("whole restore: %.2f ms per record", float64(time.Since(start).Microseconds())/1000/float64(n))
 }
