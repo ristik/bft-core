@@ -365,7 +365,9 @@ func newSwitchChain(t *testing.T) *switchChain {
 	}}
 	prev, prevPrev := uint64(1), uint64(0)
 	for _, round := range []uint64{2, 29, 30, 31, 45, 46} {
-		qc := &drctypes.QuorumCert{VoteInfo: &drctypes.RoundInfo{RoundNumber: prev, ParentRoundNumber: prevPrev, CurrentRootHash: c.hashOf(prev)},
+		prevBlock := mustBlock(t, c.bs, prev)
+		qc := &drctypes.QuorumCert{VoteInfo: &drctypes.RoundInfo{RoundNumber: prev, ParentRoundNumber: prevPrev, CurrentRootHash: c.hashOf(prev),
+			Epoch: prevBlock.BlockData.Epoch, Timestamp: prevBlock.BlockData.Timestamp},
 			LedgerCommitInfo: &types.UnicitySeal{Version: 1, NetworkID: 5}}
 		if prevPrev != 0 {
 			qc.LedgerCommitInfo.RootChainRoundNumber, qc.LedgerCommitInfo.Hash = prevPrev, c.hashOf(prevPrev)

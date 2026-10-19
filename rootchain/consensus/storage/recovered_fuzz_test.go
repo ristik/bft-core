@@ -19,6 +19,7 @@ import (
 	testtb "github.com/unicitynetwork/bft-core/internal/testutils/trustbase"
 	"github.com/unicitynetwork/bft-core/network/protocol/abdrc"
 	"github.com/unicitynetwork/bft-core/network/protocol/certification"
+	"github.com/unicitynetwork/bft-core/rootchain/consensus/trustbase"
 	rctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
 )
 
@@ -69,6 +70,7 @@ type recFuzzEnv struct {
 	states   [][]byte // the encoded state messages of the heads of the fixture run (seeds)
 	state    []byte   // the one of the last head
 	progress *recFuzzProgress
+	pin      *trustbase.GenesisPin // the genesis QC the node trusts: a recovering node pins it (no other QC of round 1 verifies)
 }
 
 func indexOfSeed(seeds [][]byte, data []byte) int {
@@ -158,6 +160,10 @@ func newRecFuzzEnv(tb testing.TB) *recFuzzEnv {
 		chainShard{partition: 2, key: "recovered-fuzz-node-2", epochStarts: []uint64{1, 6}},
 		chainShard{partition: 3, key: "recovered-fuzz-node-3", epochStarts: []uint64{1, 8}})
 	env := &recFuzzEnv{dir: dir, orch: c.orch, nodes: c.nodes, log: c.log, progress: &recFuzzProgress{dir: os.Getenv("FUZZ_PROGRESS_DIR")}}
+	genesis, err := NewGenesisBlock(c.orch.NetworkID(), crypto.SHA256)
+	require.NoError(tb, err)
+	env.pin, err = rctypes.GenesisPinOf(genesis.Qc)
+	require.NoError(tb, err)
 	tb.Cleanup(env.progress.flush)
 	for _, changed := range [][]types.PartitionID{nil, nil, {1, 2, 3}, nil, {1}, {2}, nil, {1}, {3}, nil, {1, 3}, nil, {2}, {1}, nil, nil} {
 		c.next(changed...)
@@ -168,7 +174,6 @@ func newRecFuzzEnv(tb testing.TB) *recFuzzEnv {
 	}
 	// the storage of the recovering node stays on bolt: the inputs persist and reload blocks built from a peer's
 	// state (bolt, ShardStates/ShardSet CBOR); only the fixture chain above is in memory
-	var err error
 	env.db, err = openFixtureBolt(filepath.Join(dir, "recovered.db"))
 	require.NoError(tb, err)
 	tb.Cleanup(func() { _ = env.db.Close() })
@@ -233,7 +238,7 @@ type reached struct {
 
 func (e *recFuzzEnv) exercise(sm *abdrc.StateMsg) (r reached) {
 	r.decoded = true
-	r.verified = sm.Verify(crypto.SHA256, &testtb.AlwaysValidTrustBase{}) == nil
+	r.verified = sm.Verify(crypto.SHA256, &testtb.AlwaysValidTrustBase{}, e.pin) == nil
 	_ = sm.CanRecoverToRound(sm.CommittedHead.GetRound())
 	if sm.CommittedHead == nil {
 		return

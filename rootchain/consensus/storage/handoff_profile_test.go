@@ -15,6 +15,7 @@ import (
 	"github.com/unicitynetwork/bft-core/evmassign"
 	"github.com/unicitynetwork/bft-core/evmroot"
 	"github.com/unicitynetwork/bft-core/internal/testutils/logger"
+	"github.com/unicitynetwork/bft-core/network/protocol/certification"
 	testtrustbase "github.com/unicitynetwork/bft-core/internal/testutils/trustbase"
 	"github.com/unicitynetwork/bft-core/network/protocol/abdrc"
 	rctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
@@ -70,6 +71,13 @@ func installTestFrozenShard(t *testing.T, s *BlockStore, parent []byte) {
 	s.orchestration = mockOrchestration{shardConfigs: func(uint64) (map[types.PartitionShardID]*types.PartitionDescriptionRecord, error) {
 		return map[types.PartitionShardID]*types.PartitionDescriptionRecord{shard: conf}, nil
 	}}
+	// a committed shard has the last response of its committed state
+	trHash, err := si.TR.Hash()
+	require.NoError(t, err)
+	si.LastCR = &certification.CertificationResponse{Partition: conf.PartitionID, Shard: conf.ShardID, Technical: si.TR,
+		UC: types.UnicityCertificate{Version: 1, InputRecord: si.IR, TRHash: trHash, ShardConfHash: si.ShardConfHash,
+			UnicityTreeCertificate: &types.UnicityTreeCertificate{Version: 1, Partition: conf.PartitionID},
+			ShardTreeCertificate:   types.ShardTreeCertificate{Shard: conf.ShardID}, UnicitySeal: &types.UnicitySeal{Version: 1}}}
 	root := s.blockTree.Root()
 	root.ShardState.States[shard] = si
 	tree, _, err := root.ShardState.UnicityTree(crypto.SHA256)
