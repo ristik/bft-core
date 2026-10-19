@@ -20,6 +20,7 @@ const (
 )
 
 var ErrNetworkProfile = errors.New("unsupported or mismatched root network profile")
+
 // ErrProfilePinUnsupported is what a store wrapper answers when the store under it cannot record a network profile: the wrapper itself exposes
 // the pin (so the pin is never silently skipped) but there is nothing to read or write. The handoff profile refuses such a store.
 var ErrProfilePinUnsupported = errors.New("the store cannot record a network profile")
