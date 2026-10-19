@@ -114,8 +114,8 @@ The first version of `p85_epoch_switches` required each running root to log both
 
 The recovery epoch's first successor block (round 856) was proposed, voted and certified by roots 1-3 at 15:40:27.9-28.05, **before roots 4 and 5
 were restarted** (15:40:31 and 15:40:33; the lane installs the roots one after the other). Their old processes were alive but did not vote: root
-4's refused the epoch-3 proposals (\`failed to get trust base ... epoch 3: trust base not found\`) and exited at 15:40:29, root 5's was stuck at
-round 834. This is legal, not a quorum shortfall - the committees (\`state/trust-base-epoch{1,2,3}.json\` of the run):
+4's refused the epoch-3 proposals (`failed to get trust base ... epoch 3: trust base not found`) and exited at 15:40:29, root 5's was stuck at
+round 834. This is legal, not a quorum shortfall - the committees (`state/trust-base-epoch{1,2,3}.json` of the run):
 
 | root epoch | members | quorum threshold | what was certified in it |
 |---|---|---|---|
@@ -124,8 +124,8 @@ round 834. This is legal, not a quorum shortfall - the committees (\`state/trust
 | 3 | roots 1-4 (root 5 is not a member) | 3 | the recovery switch (round 856): 3 of the 4 members |
 
 Root 4's new process started at round 856 ("CM starting ... round=856", "awaiting proposal"), then timeout votes and
-\`processing *abdrc.StateMsg ... pending consensus recovery crosses epoch: the committed head is the first successor of an epoch anchor\`
-(15:40:40), and logged \`completed recovery\` at round 862: it never executed block 856; it took the epoch's state from its peers
+`processing *abdrc.StateMsg ... pending consensus recovery crosses epoch: the committed head is the first successor of an epoch anchor`
+(15:40:40), and logged `completed recovery` at round 862: it never executed block 856; it took the epoch's state from its peers
 afterwards. A root that enters an epoch through a state import does not execute the blocks the others certified before it arrived, so it
 cannot log their switches. The K->J switch shows the same shape at round 658: executed by the three roots that were up (the committee needed
 4), the round timed out, and 659 re-proposed the switch from the same parent, which all five executed.

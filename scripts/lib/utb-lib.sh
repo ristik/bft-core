@@ -126,13 +126,13 @@ utb_step_u1() {
 
 # The K->J handoff is activated: the aggregator received the signed entry of epoch 2 attached to a certification response (and nothing else could have told it).
 utb_step_u2() {
-  local out off t; out=$(utb_dir)
+  local out off t n; out=$(utb_dir)
   utb_wait_agg_tip 2 90 || return 1
   t="$out/bundle/after-activation.cbor"
   utb_ev fetch --url "$(utb_agg_url)" --out "$t" && utb_ev verify --bundle "$t" --pin "$(utb_pin)" | tee "$out/bundle/after-activation.verify.txt" || return 1
   utb_ev extract --bundle "$t" --epoch 2 --out "$out/entries/ordinary-handoff.cbor" || return 1
   # the aggregator logs asynchronously: wait for the append line itself before it is read
-  for t in $(seq 1 60); do utb_agg_lines_since 0 | grep -aq '"msg":"trust-base entries appended from certification response"' && break; sleep 1; done
+  for n in $(seq 1 60); do utb_agg_lines_since 0 | grep -aq '"msg":"trust-base entries appended from certification response"' && break; sleep 1; done
   # piggyback and not repair: an append from a certification response, with no catch-up started anywhere before it in the aggregator's life
   utb_agg_lines_since 0 | jq -c 'select(.msg=="received CertificationResponseV2" or .msg=="trust-base entries appended from certification response" or .msg=="trust-base catch-up started" or .msg=="trust-base gap in certification response")' >"$out/handoff/aggregator-ordinary.jsonl"
   python3 - "$out/handoff/aggregator-ordinary.jsonl" "$out/handoff/ordinary-ack.log" <<'PY' || return 1
