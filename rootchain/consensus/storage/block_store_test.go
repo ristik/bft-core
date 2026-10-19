@@ -580,7 +580,7 @@ func Test_BlockStore_StateRecoveryCompletesTheCommittedSourceLog(t *testing.T) {
 	t.Run("with the prefix completed before the head is installed it extends the log", func(t *testing.T) {
 		old, db := recovering(t, &sliceFetcher{recs: recs})
 		h := head(t)
-		require.NoError(t, old.EnsureRecordPrefix(h))
+		require.NoError(t, old.EnsureRecordPrefix(context.Background(), h))
 		_, err := NewFromState(crypto.SHA256, h, db, old.orchestration, logger.New(t), ProfileHandoff)
 		require.NoError(t, err)
 		require.NoError(t, db.AppendRecords(next()))
@@ -588,11 +588,25 @@ func Test_BlockStore_StateRecoveryCompletesTheCommittedSourceLog(t *testing.T) {
 		require.NoError(t, err)
 		require.EqualValues(t, 4, n)
 	})
+	t.Run("a head whose source state is not the certified one drives no fetch and no write", func(t *testing.T) {
+		forged := chainOf(5) // self-consistent, links to the retained first record, ends at the forged tip
+		forgedHead := *head(t)
+		control := *forgedHead.Control
+		control.Pos = stateOver(forged).Bytes()
+		forgedHead.Control = &control
+		f := &sliceFetcher{recs: forged}
+		old, db := recovering(t, f)
+		require.ErrorIs(t, old.EnsureRecordPrefix(context.Background(), &forgedHead), ErrControlCheckpoint)
+		require.Zero(t, f.calls)
+		n, err := db.RecordCount()
+		require.NoError(t, err)
+		require.EqualValues(t, 1, n)
+	})
 	t.Run("a log that cannot be completed is a refusal that writes nothing", func(t *testing.T) {
 		defer func(d, b time.Duration) { prefixTimeout, prefixBackoff = d, b }(prefixTimeout, prefixBackoff)
 		prefixTimeout, prefixBackoff = 50*time.Millisecond, time.Millisecond
 		old, db := recovering(t, &sliceFetcher{err: errors.New("no root serves the feed")})
-		require.ErrorIs(t, old.EnsureRecordPrefix(head(t)), ErrRecordPrefixMissing)
+		require.ErrorIs(t, old.EnsureRecordPrefix(context.Background(), head(t)), ErrRecordPrefixMissing)
 		n, err := db.RecordCount()
 		require.NoError(t, err)
 		require.EqualValues(t, 1, n)

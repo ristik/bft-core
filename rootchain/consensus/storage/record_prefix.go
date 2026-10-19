@@ -45,6 +45,10 @@ func (x *BlockStore) SetRecordFetcher(f RecordFetcher) {
 // authenticated by the checkpoint's state, and only a prefix that ends at exactly the committed tip is retained. A checkpoint whose
 // cursor is valid but whose log is missing is not enough to start.
 func (x *BlockStore) ensureRetainedPrefix(control *evmroot.ControlState) error {
+	return x.ensureRetainedPrefixCtx(context.Background(), control)
+}
+
+func (x *BlockStore) ensureRetainedPrefixCtx(parent context.Context, control *evmroot.ControlState) error {
 	if control == nil || len(control.Pos) == 0 {
 		return nil
 	}
@@ -73,7 +77,7 @@ func (x *BlockStore) ensureRetainedPrefix(control *evmroot.ControlState) error {
 	if x.prefixSource == nil {
 		return fmt.Errorf("%w: %d of %d records retained", ErrRecordPrefixMissing, have, state.Count)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), prefixTimeout)
+	ctx, cancel := context.WithTimeout(parent, prefixTimeout)
 	defer cancel()
 	var prev *rootrecords.Record
 	if have > 0 {
@@ -131,12 +135,18 @@ func (x *BlockStore) fetchPage(ctx context.Context, from uint64, max int) ([]roo
 
 // EnsureRecordPrefix makes this root retain the source log that a recovery head commits, before the head replaces the root: a root that
 // recovers from a state message has missed the records committed meanwhile, and the first commit past the head that carries one would
-// otherwise find a gap. Nothing is written when the log cannot be completed.
-func (x *BlockStore) EnsureRecordPrefix(head *abdrc.CommittedBlock) error {
+// otherwise find a gap. The head's control state is authenticated first (NewRootBlock binds it to the commit certificate; the state
+// message verification does not), so a count or tip a peer chose drives neither a fetch nor a write. Nothing is written when the head is
+// refused or the log cannot be completed; once it is completed the records stay, authentic, even if installing the head then fails.
+func (x *BlockStore) EnsureRecordPrefix(ctx context.Context, head *abdrc.CommittedBlock) error {
 	if head == nil {
 		return nil
 	}
-	return x.ensureRetainedPrefix(head.Control)
+	root, err := NewRootBlock(head, x.hash, x.orchestration, x.profile)
+	if err != nil {
+		return refusedBeforeWrite{err}
+	}
+	return x.ensureRetainedPrefixCtx(ctx, root.ShardState.Control)
 }
 
 // closedEpochMatches is the one field of a served Closure that its identifier does not cover: the epoch it closed, which the source

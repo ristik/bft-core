@@ -1714,7 +1714,7 @@ func (x *ConsensusManager) onStateResponse(ctx context.Context, rsp *abdrc.State
 	// The head commits a source log this root may not retain in full (the records committed while it was away): complete it from the
 	// other roots before the head replaces the root, while the store is still untouched, or the first record past the head finds a gap.
 	if rsp.CommittedHead.Anchor == nil {
-		if err := x.blockStore.EnsureRecordPrefix(rsp.CommittedHead); err != nil {
+		if err := x.blockStore.EnsureRecordPrefix(ctx, rsp.CommittedHead); err != nil {
 			recoveryWriteStarted = false
 			return fmt.Errorf("recovery, source log of the committed head: %w", err)
 		}
