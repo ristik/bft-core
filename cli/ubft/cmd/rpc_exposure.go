@@ -21,7 +21,7 @@ func rpcBindIsLoopback(addr string) bool {
 }
 
 // warnIfRPCExposed logs a WARN when an RPC address that serves operator endpoints is not loopback (#533). The handoff and Q3 operator endpoints of the
-// root and of the shard node insist on a loopback peer themselves (localOperatorRequest), but that is the TCP peer address only, so a reverse proxy on the
+// root and of the shard node answer only the configured operator sources (--operator-allowed-sources, loopback by default; localOperatorRequest), but that is the TCP peer address only, so a reverse proxy on the
 // same host defeats it, and PUT /api/v1/trustbases on the root is not guarded at all; docs/operations/root-rpc-exposure.md says what each endpoint can do.
 func warnIfRPCExposed(log *slog.Logger, node, addr string) {
 	if addr == "" || rpcBindIsLoopback(addr) {

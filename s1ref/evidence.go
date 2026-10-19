@@ -18,7 +18,7 @@ import (
 type evidence struct {
 	scheme uint64
 	author string
-	// VoteInfo. timestamp is meaningful for scheme 1 only; scheme 2 does not sign it.
+	// VoteInfo. timestamp is the native RoundInfo timestamp (scheme 1) or the scheme 2 VI timestamp, which is signed when non-zero and omitted when zero.
 	epoch, round, parent, timestamp uint64
 	exec                            [32]byte
 	roundInfo                       *drctypes.RoundInfo // scheme 1: the native object
@@ -129,9 +129,12 @@ func (e *evidence) scanLegacyVoteInfo(it *item, raw []byte) error {
 }
 
 // scanDomainVoteInfo reads the untagged scheme 2 vote info
-// [epoch, round, parent, exec:bstr32].
+// [epoch, round, parent, exec:bstr32] or, for a vote whose proposal time is
+// non-zero, [epoch, round, parent, exec:bstr32, timestamp]. The timestamp is
+// present exactly when it is non-zero, as in the signed VI: a fifth element
+// that is zero is not the canonical form and is malformed.
 func (e *evidence) scanDomainVoteInfo(it *item) error {
-	if !it.isArray(4) {
+	if !it.isArray(4) && !it.isArray(5) {
 		return ErrShape
 	}
 	k := it.kids
@@ -140,6 +143,12 @@ func (e *evidence) scanDomainVoteInfo(it *item) error {
 	}
 	e.epoch, e.round, e.parent = k[0].arg, k[1].arg, k[2].arg
 	copy(e.exec[:], k[3].data)
+	if len(k) == 5 {
+		if !k[4].isUint() || k[4].arg == 0 {
+			return ErrShape
+		}
+		e.timestamp = k[4].arg
+	}
 	return nil
 }
 

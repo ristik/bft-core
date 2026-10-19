@@ -99,7 +99,11 @@ func (g *gen) encoding() {
 	// VoteInfo shapes.
 	bad("enc.vote-info.scheme2-tagged", "scheme 2 vote info carrying the legacy tag", "ErrShape", items(sc2, au, cTag(39007, cArr(cUint(1), cUint(e.round), cUint(e.epoch), cUint(1), cUint(e.parent), cBytes(e.exec[:]))), seal, vs, cNull))
 	bad("enc.vote-info.scheme2-arity-3", "scheme 2 vote info with three elements", "ErrShape", items(sc2, au, cArr(cUint(2), cUint(150), cUint(149)), seal, vs, cNull))
-	bad("enc.vote-info.scheme2-arity-5", "scheme 2 vote info with a timestamp: scheme 2 does not carry one", "ErrShape", items(sc2, au, cArr(cUint(2), cUint(150), cUint(149), cUint(1), cBytes(e.exec[:])), seal, vs, cNull))
+	bad("enc.vote-info.scheme2-arity-5-misordered", "scheme 2 vote info with the timestamp before the exec hash", "ErrShape", items(sc2, au, cArr(cUint(2), cUint(150), cUint(149), cUint(1), cBytes(e.exec[:])), seal, vs, cNull))
+	bad("enc.vote-info.scheme2-timestamp-zero", "scheme 2 vote info with an explicit zero timestamp: zero is omitted in the signed VI", "ErrShape", items(sc2, au, cArr(cUint(2), cUint(150), cUint(149), cBytes(e.exec[:]), cUint(0)), seal, vs, cNull))
+	bad("enc.vote-info.scheme2-timestamp-text", "scheme 2 vote info with a text timestamp", "ErrShape", items(sc2, au, cArr(cUint(2), cUint(150), cUint(149), cBytes(e.exec[:]), cText("1")), seal, vs, cNull))
+	bad("enc.vote-info.scheme2-timestamp-null", "scheme 2 vote info with a null timestamp", "ErrShape", items(sc2, au, cArr(cUint(2), cUint(150), cUint(149), cBytes(e.exec[:]), cNull), seal, vs, cNull))
+	bad("enc.vote-info.scheme2-arity-6", "scheme 2 vote info with six elements", "ErrShape", items(sc2, au, cArr(cUint(2), cUint(150), cUint(149), cBytes(e.exec[:]), cUint(1), cUint(1)), seal, vs, cNull))
 	bad("enc.vote-info.exec-31", "scheme 2 exec of 31 bytes", "ErrShape", items(sc2, au, cArr(cUint(2), cUint(150), cUint(149), cBytes(e.exec[:31])), seal, vs, cNull))
 	bad("enc.vote-info.exec-null", "scheme 2 exec null", "ErrShape", items(sc2, au, cArr(cUint(2), cUint(150), cUint(149), cNull), seal, vs, cNull))
 	ri := func(tag uint64, version uint64, exec []byte, n int) []byte {

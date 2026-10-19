@@ -86,6 +86,8 @@ type (
 		BlockRate        uint32
 		MaxRequests      uint   // certification request channel capacity
 		RPCServerAddress string // address on which http server is exposed with metrics endpoint
+		// OperatorAllowedSources lists the addresses and CIDR prefixes whose requests the operator endpoints answer (default loopback only)
+		OperatorAllowedSources string
 	}
 )
 
@@ -135,6 +137,8 @@ func rootNodeRunCmd(baseFlags *baseFlags) *cobra.Command {
 	cmd.Flags().StringVar(&flags.RPCServerAddress, "rpc-server-address", "",
 		`Specifies the TCP address for the RPC server to listen on, in the form "host:port". RPC server isn't initialised if address is empty.`)
 
+	cmd.Flags().StringVar(&flags.OperatorAllowedSources, "operator-allowed-sources", defaultOperatorSources, operatorSourcesUsage)
+
 	cmd.Flags().StringVar(&flags.RootDBFile, "root-db", "",
 		fmt.Sprintf("path to the root database (default: %s)", filepath.Join("$UBFT_HOME", rootDBFileName)))
 	cmd.Flags().StringVar(&flags.TrustBaseDBFile, "trust-base-db", "",
@@ -182,6 +186,13 @@ func getBootStrapNodes(bootNodesStr []string) ([]peer.AddrInfo, error) {
 }
 
 func rootNodeRun(ctx context.Context, flags *rootNodeRunFlags) error {
+	operatorLog := slog.Default() // (a unit test drives this function with no base flags)
+	if flags.baseFlags != nil {
+		operatorLog = operatorLogger(flags.observe)
+	}
+	if err := configureOperatorSources(operatorLog, flags.OperatorAllowedSources); err != nil {
+		return err
+	}
 	if flags.baseFlags != nil {
 		if err := utbprofile.Check(utbprofile.Inputs{Role: utbprofile.Root, GenesisFile: flags.UTBGenesisFile, GenesisID: flags.UTBGenesisID,
 			EntriesDB: flags.PathWithDefault(flags.UTBEntriesDBFile, rootUTBEntriesDBFileName), HandoffProfile: flags.HandoffProfile,
@@ -895,14 +906,25 @@ type rootRecordFetcher struct {
 	cm   *consensus.ConsensusManager
 }
 
-func (f rootRecordFetcher) Records(ctx context.Context, from uint64, max int) ([]rootrecords.Record, error) {
+func (f rootRecordFetcher) remote() recordsfeed.P2PRemote {
 	var others []peer.ID
 	for _, id := range f.cm.Validators() {
 		if id != f.host.ID() {
 			others = append(others, id)
 		}
 	}
-	return recordsfeed.P2PRemote{Opener: recordsfeed.FromLibp2p(f.host), Roots: others}.Records(ctx, from, max)
+	return recordsfeed.P2PRemote{Opener: recordsfeed.FromLibp2p(f.host), Roots: others}
+}
+
+func (f rootRecordFetcher) Records(ctx context.Context, from uint64, max int) ([]rootrecords.Record, error) {
+	return f.remote().Records(ctx, from, max)
+}
+
+// Sources and RecordsFromSource let the block store ask one root at a time and skip one whose records do not verify (#647).
+func (f rootRecordFetcher) Sources() int { return f.remote().Sources() }
+
+func (f rootRecordFetcher) RecordsFromSource(ctx context.Context, source int, from uint64, max int) ([]rootrecords.Record, error) {
+	return f.remote().RecordsFromSource(ctx, source, from, max)
 }
 
 // recordsSource adapts the consensus manager to the records feed's server.

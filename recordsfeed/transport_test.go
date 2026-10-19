@@ -229,3 +229,30 @@ func TestAnotherEpochOrTreeIsNotServedUnderTheSameRound(t *testing.T) {
 	_, err = remote.Cut(context.Background(), later)
 	require.ErrorIs(t, err, ErrUnavailable, "the latest cut is never substituted")
 }
+
+// RecordsFromSource asks exactly one root, so a caller that verifies can move on from a root whose records are wrong; Records keeps asking in order.
+func TestRecordsFromSourceAsksOnlyThatRoot(t *testing.T) {
+	c := buildChain(t, 3)
+	ask := func(srv serverFake) *Server { return NewServer(srv, func(peer.ID) bool { return true }) }
+	remote := P2PRemote{
+		Opener: pipeOpener{"empty": ask(serverFake{}), "full": ask(serverFake{records: c.records})},
+		Roots:  []peer.ID{"gone", "empty", "full"},
+	}
+	require.Equal(t, 3, remote.Sources())
+	ctx := context.Background()
+	for i := 0; i < 2; i++ { // unreachable, then a root with no record in the range
+		got, err := remote.RecordsFromSource(ctx, i, 0, 10)
+		require.Error(t, err, i)
+		require.Empty(t, got, i)
+	}
+	got, err := remote.RecordsFromSource(ctx, 2, 0, 10)
+	require.NoError(t, err)
+	require.NotEmpty(t, got)
+	for _, bad := range []int{-1, 3} {
+		_, err = remote.RecordsFromSource(ctx, bad, 0, 10)
+		require.ErrorIs(t, err, ErrUnavailable, bad)
+	}
+	all, err := remote.Records(ctx, 0, 10)
+	require.NoError(t, err)
+	require.Equal(t, got, all, "Records is the first non-empty answer in order")
+}

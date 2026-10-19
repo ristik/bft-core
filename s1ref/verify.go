@@ -437,7 +437,7 @@ func legacyRelation(m *member, e *evidence, f *voteFacts) error {
 // enforce (commit network and epoch, empty seal of a non-committing vote) are
 // checked here.
 func domainBoundRelation(m *member, e *evidence, cfg votesig.Config, ctx *Context, f *voteFacts) error {
-	vi := votesig.VoteInfo{Epoch: e.epoch, Round: e.round, Parent: e.parent, Exec: e.exec}
+	vi := votesig.VoteInfo{Epoch: e.epoch, Round: e.round, Parent: e.parent, Exec: e.exec, Timestamp: e.timestamp}
 	vh, err := cfg.VoteInfoHash(vi)
 	if err != nil {
 		return fmt.Errorf("%w: %v", ErrStatement, err)

@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"io"
 	"mime"
-	"net"
 	"net/http"
 	"os"
 	"strings"
@@ -48,8 +47,7 @@ type rootHandoffPlanRequest struct {
 }
 
 func localOperatorRequest(w http.ResponseWriter, r *http.Request) bool {
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil || !net.ParseIP(host).IsLoopback() {
+	if !operatorSources().allows(remoteHost(r.RemoteAddr)) {
 		http.Error(w, "local operator access required", http.StatusForbidden)
 		return false
 	}

@@ -24,6 +24,8 @@ func (g *gen) pairs() {
 	both("pair.commit-hash", "different commit hash", w.sign(w.cm("v1", 150, 0x11, 149, 1, 0xc1)), w.sign(w.cm("v1", 150, 0x11, 149, 1, 0xc2)))
 	both("pair.commit-round", "different commit round", w.sign(w.cm("v1", 150, 0x11, 149, 1, 0xc1)), w.sign(w.cm("v1", 150, 0x11, 148, 1, 0xc1)))
 	both("pair.committing-vs-noncommitting", "a committing vote and a non-committing one", w.sign(w.cm("v1", 150, 0x11, 149, 1, 0xc1)), A)
+	both("pair.timestamp", "same key, epoch, round and state, signed with different proposal timestamps: different VI, different statement", w.sign(func() *ev { e := w.nc("v1", 150, 0x11); e.ts = 1_700_000_001; return e }()), w.sign(func() *ev { e := w.nc("v1", 150, 0x11); e.ts = 1_700_000_002; return e }()))
+	both("pair.timestamp-vs-none", "a vote signed with a timestamp and the same vote signed without one", w.sign(func() *ev { e := w.nc("v1", 150, 0x11); e.ts = 1_700_000_001; return e }()), A)
 	both("pair.seal-signatures", "two committing votes: both seal signatures are verified", w.sign(w.cm("v2", 150, 0x11, 149, 1, 0xc1)), w.sign(w.cm("v2", 150, 0x12, 149, 1, 0xc1)))
 
 	// The same statement more than once is not equivocation.

@@ -5,6 +5,21 @@ posture is: bind to loopback or to an isolated operator network, never publish t
 address is not loopback (`the root RPC address is not loopback and has no operator authentication ...`). Authenticating the endpoints is not
 implemented (owner decision for now: documentation and the warning only).
 
+## Which peers the operator endpoints answer (`--operator-allowed-sources`)
+
+The handoff, abort, Q3 and pos-control endpoints of the root, and the Q3 staging endpoints of the shard node, answer only requests whose TCP peer
+address is in `--operator-allowed-sources` (also `UBFT_OPERATOR_ALLOWED_SOURCES`): a comma-separated list of IP addresses and CIDR prefixes.
+
+- **Default: loopback only** (`127.0.0.0/8,::1/128`; IPv4-mapped loopback counts). This is the posture of every deployment that does not set the flag.
+- A configured list **replaces** the default: list the loopback prefixes too if local operators still need them. Use it for an isolated operator
+  network (for example `127.0.0.0/8,::1/128,10.20.0.0/24`); never a public range.
+- A list with a malformed element (not an address or prefix, a bad prefix length, an empty element, an IPv6 zone) stops the node **at start** with an
+  error; nothing is served with a half-understood list. An empty value means the default.
+- A configured non-loopback range is accepted and logged at start as a `WARN` (`the operator endpoints accept requests from non-loopback sources and
+  have no operator authentication ...`, with the ranges). This is address filtering on the TCP peer, not authentication: the same limits apply
+  (a reverse proxy makes every request arrive from the proxy's address).
+- The start-up `WARN` for a non-loopback `--rpc-server-address` is unchanged and independent of this setting.
+
 ## How to keep it private
 
 1. **Bind to loopback**: `--rpc-server-address 127.0.0.1:PORT`. Operators then reach it over SSH (`ssh -L`) or from the host.
@@ -22,7 +37,8 @@ implemented (owner decision for now: documentation and the warning only).
 
 ## What each endpoint can do if a stranger reaches it
 
-Root (`cli/ubft/cmd/root_node.go`). "Loopback peer" = the endpoint refuses a request whose TCP peer is not loopback and needs
+Root (`cli/ubft/cmd/root_node.go`). "Loopback peer" = the endpoint refuses a request whose TCP peer is not in the operator sources (loopback by default,
+see above) and needs
 `Content-Type: application/json` without an `Origin` header (blocks browser CSRF); it is a safeguard against a *network* caller, not
 authentication.
 

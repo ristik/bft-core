@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -350,6 +351,8 @@ type shardNodeRunFlags struct {
 	EvidenceRecover bool
 
 	RPCServerAddress string // exposes /api/v1/metrics and /api/v1/health when set
+	// OperatorAllowedSources lists the addresses and CIDR prefixes whose requests the operator endpoints answer (default loopback only)
+	OperatorAllowedSources string
 
 	shardNodeSigningFlags
 }
@@ -470,12 +473,20 @@ protocol and docs/engine-api-adapter-plan.md for how this command's pieces fit t
 		"obtain and apply authenticated evidence for this node's own missing execution anchor (#92); off by default — it depends on peers answering and ends in a finality-changing executor call")
 	cmd.Flags().StringVar(&flags.RPCServerAddress, "rpc-server-address", "",
 		`address for the metrics/health HTTP server, in the form "host:port". Not started if empty.`)
+	cmd.Flags().StringVar(&flags.OperatorAllowedSources, "operator-allowed-sources", defaultOperatorSources, operatorSourcesUsage)
 	flags.addSigningAuthorityFlags(cmd)
 
 	return cmd
 }
 
 func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(string) bool) error {
+	operatorLog := slog.Default() // (a unit test drives this function with no base flags)
+	if flags.baseFlags != nil {
+		operatorLog = operatorLogger(flags.observe)
+	}
+	if err := configureOperatorSources(operatorLog, flags.OperatorAllowedSources); err != nil {
+		return err
+	}
 	if flags.baseFlags != nil { // (a unit test drives this function with none)
 		if err := utbprofile.Check(utbprofile.Inputs{Role: utbprofile.Shard, GenesisFile: flags.UTBGenesisFile, GenesisID: flags.UTBGenesisID,
 			EntriesDB: flags.PathWithDefault(flags.UTBEntriesDBFile, shardUTBEntriesDBFileName)}); err != nil {

@@ -51,7 +51,7 @@ type ArchiveRestore struct {
 const restorePutBatch = 16
 
 // restoreProgressEvery is the least time between two progress lines of one phase.
-const restoreProgressEvery = 10 * time.Second
+const restoreProgressEvery = 5 * time.Second
 
 type restoreProgress struct{ started, last time.Time }
 
@@ -69,8 +69,10 @@ func (p *restoreProgress) note(log *slog.Logger, msg string, done, total int, he
 	}
 	p.last = time.Now()
 	elapsed := time.Since(p.started)
+	rate := float64(done) / max(elapsed.Seconds(), 0.001)
+	eta := time.Duration(float64(max(total-done, 0))/max(rate, 1e-9)) * time.Second
 	log.Info(msg, "done", done, "of", total, "height", height, "elapsed", elapsed.Round(time.Second).String(),
-		"perBlockMs", elapsed.Milliseconds()/int64(max(done, 1)))
+		"perBlockMs", elapsed.Milliseconds()/int64(max(done, 1)), "blocksPerSec", fmt.Sprintf("%.2f", rate), "eta", eta.Round(time.Second).String())
 }
 
 // SingleEpochRestore is kept for callers of the original single-epoch route.
@@ -170,6 +172,11 @@ func (r *ArchiveRestore) Restore(ctx context.Context) error {
 		// last batch is durable.
 		pendingQ, pendingRec = append(pendingQ, q), append(pendingRec, rec)
 		reverse = append(reverse, restoredBlock{q: q, height: header.Number.Uint64(), state: [32]byte(header.Root)})
+		if len(reverse) == 1 && r.Log != nil {
+			// the fetch walks the chain from the pinned tip to genesis: the tip's height is the number of records to fetch
+			r.Log.Info("fetching archive records from the pinned tip to genesis", "blocks", header.Number.Uint64(), "tipBlock", fmt.Sprintf("%x", current),
+				"batch", restorePutBatch)
+		}
 		last := header.Number.Uint64() == 1
 		if last && !bytes.Equal(header.ParentHash[:], r.Genesis.Hash) {
 			return fmt.Errorf("%w: archive does not reach configured genesis", ErrRestore)
