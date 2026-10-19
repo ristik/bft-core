@@ -46,9 +46,12 @@ var q4LookupSites = []q4Site{
 	{Func: "onProposalMsg", Arg: "x.pacemaker.GetCurrentRound()", Source: "local"},
 	{Func: "leaderAfter", Arg: "round + 1", Source: "local"},      // reached only after the math.MaxUint64 refusal
 	{Func: "processNewRoundEvent", Arg: "round", Source: "local"}, // round := x.pacemaker.GetCurrentRound() on the line above
-	{Func: "onStateResponse", Arg: "x.pacemaker.GetCurrentRound()", Source: "local"},
+	{Func: "voteAfterRecovery", Arg: "x.pacemaker.GetCurrentRound() + 1", Source: "local"}, // the next leader after the vote: the pacemaker's own round
 	{Func: "onVoteMsg", Arg: "vote.VoteInfo.RoundNumber", Source: "message",
 		Prerequisite: "a vote for a round ahead of the pacemaker is buffered and returns before the lookup; a stale one is refused; the author is verified under its epoch first",
+		Evidence:     []string{"TestMessageRoundsAreEvidencedBeforeTheSelectorIsAsked", "TestQ4AdmissionAudit"}},
+	{Func: "voteAfterRecovery", Arg: "prop.Block.Round", Source: "message",
+		Prerequisite: "the proposal that triggered the recovery was received by onProposalMsg, which verified it (ProposalMsg.IsValid binds the round to the carried certificate's round + 1) before it was kept as the trigger; the stale check precedes the lookup",
 		Evidence:     []string{"TestMessageRoundsAreEvidencedBeforeTheSelectorIsAsked", "TestQ4AdmissionAudit"}},
 	{Func: "onProposalMsg", Arg: "proposal.Block.Round", Source: "message",
 		Prerequisite: "ProposalMsg.IsValid binds the round to the carried certificate's round + 1 (abdrc.ErrRoundEvidence) before any signature check or lookup",
@@ -155,7 +158,7 @@ func TestQ4LookupCallSites(t *testing.T) {
 			require.Empty(t, s.Evidence, s.Func)
 		}
 	}
-	require.Equal(t, 2, messageSites, "premise: a vote and a proposal are the only routes where a message supplies the lookup round")
+	require.Equal(t, 3, messageSites, "premise: a vote, a proposal and the proposal that triggered a recovery are the only routes where a message supplies the lookup round")
 }
 
 // TestQ4T2Gate pins the T2 boundary at the frozen Q4 values. T2 is shard inactivity, not block cadence: a shard is eligible exactly at

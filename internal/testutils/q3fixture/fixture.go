@@ -268,6 +268,7 @@ func New(t *testing.T, o Options) *Fixture {
 	}
 	state.IR.BlockHash = bytes.Clone(o.Frozen)
 	state.IR.Hash = bytes.Repeat([]byte{0x37}, 32)
+	state.RootHash = bytes.Clone(state.IR.Hash) // the last certified root hash is the state hash of the input record
 	trHash, err := state.TR.Hash()
 	require.NoError(t, err)
 	if o.Assignment { // a coupled handoff commits the technical record derived from the candidate's successor assignment

@@ -79,7 +79,7 @@ func stoppedHandoffReplica(t *testing.T, source *anchorReplica) *ConsensusManage
 	cm, err := NewConsensusManager(id, trust, source.manager.orchestration, testnetwork.NewRootMockNetwork(),
 		source.oldSigners[id.String()], db, obs, WithConsensusParams(params), WithRecoveryProfile2(history))
 	require.NoError(t, err)
-	cm.blockStore, err = storage.NewFromState(crypto.SHA256, source.oldHead, db, source.manager.orchestration, obs.Logger(), storage.ProfileHandoff)
+	cm.blockStore, err = storage.NewFromCheckpoint(crypto.SHA256, source.oldHead, db, source.manager.orchestration, obs.Logger(), storage.ProfileHandoff)
 	require.NoError(t, err)
 	return cm
 }
@@ -313,6 +313,7 @@ func newAnchorReplicasWith(t *testing.T, opts anchorOptions, commitSealRound uin
 	require.NoError(t, err)
 	shardState.IR.BlockHash = bytes.Clone(parent)
 	shardState.IR.Hash = bytes.Repeat([]byte{0x37}, 32)
+	shardState.RootHash = bytes.Clone(shardState.IR.Hash) // the last certified root hash is the state hash of the input record
 	successorTRHash, err := shardState.TR.Hash()
 	require.NoError(t, err)
 	record := evmroot.OrderedHandoffRecord{Network: 5, Epoch: 1, OrderedRound: 4, ActivationRound: 7,
@@ -407,7 +408,7 @@ func newAnchorReplicasWith(t *testing.T, opts anchorOptions, commitSealRound uin
 		}
 		manager, err := NewConsensusManager(node.PeerConf.ID, trust, orchestration, net, node.Signer, rcDB, obs, WithConsensusParams(params), WithRecoveryProfile2(history))
 		require.NoError(t, err)
-		manager.blockStore, err = storage.NewFromState(crypto.SHA256, head, rcDB, orchestration, obs.Logger(), storage.ProfileHandoff)
+		manager.blockStore, err = storage.NewFromCheckpoint(crypto.SHA256, head, rcDB, orchestration, obs.Logger(), storage.ProfileHandoff)
 		require.NoError(t, err)
 		installed, err := manager.InstallEpochGenesis(proof, head, body)
 		require.NoError(t, err)

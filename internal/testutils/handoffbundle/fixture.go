@@ -90,6 +90,7 @@ func NewBoundAtShardEpoch(t *testing.T, preimage []byte, shardEpoch uint64) Fixt
 	require.NoError(t, err)
 	state.IR.BlockHash = bytes.Repeat([]byte{5}, 32)
 	state.IR.Hash = bytes.Repeat([]byte{0x35}, 32)
+	state.RootHash = bytes.Clone(state.IR.Hash) // the last certified root hash is the state hash of the input record
 	trHash, err := state.TR.Hash()
 	require.NoError(t, err)
 	record := evmroot.OrderedHandoffRecord{Network: uint64(old.NetworkID), Epoch: 1, OrderedRound: 4,
@@ -158,6 +159,7 @@ func Next(t *testing.T, first Fixture, old *types.RootTrustBaseV1) Fixture {
 	state.IR = &inputRecord
 	state.IR.BlockHash = bytes.Repeat([]byte{8}, 32)
 	state.IR.Hash = bytes.Repeat([]byte{0x38}, 32)
+	state.RootHash = bytes.Clone(state.IR.Hash) // the last certified root hash is the state hash of the input record
 	trHash, err := state.TR.Hash()
 	require.NoError(t, err)
 	record := evmroot.OrderedHandoffRecord{Network: uint64(old.NetworkID), Epoch: 2, OrderedRound: 8,

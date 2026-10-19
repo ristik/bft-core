@@ -149,7 +149,7 @@ func (r *q3Replica) open(withQ3 bool) error {
 	r.manager = manager
 	if r.opened == 0 {
 		// the first start holds the old epoch's committed checkpoint, as the stopped old committee leaves it
-		manager.blockStore, err = storage.NewFromState(crypto.SHA256, r.f.Snapshot, db, orchestration, obs.Logger(), storage.ProfileHandoff)
+		manager.blockStore, err = storage.NewFromCheckpoint(crypto.SHA256, r.f.Snapshot, db, orchestration, obs.Logger(), storage.ProfileHandoff)
 		require.NoError(t, err)
 	}
 	r.opened++

@@ -161,7 +161,7 @@ func TestLeaderFromAQCParentExcludesTheSwitchingShard(t *testing.T) {
 			Qc: &rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{RoundNumber: 28, Epoch: 1}}}, ShardInfo: infos,
 			CommitQc: &rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{RoundNumber: 29, ParentRoundNumber: 28, Epoch: 1, Timestamp: types.NewTimestamp()},
 				LedgerCommitInfo: &types.UnicitySeal{Hash: tree.RootHash(), PreviousHash: bytes.Repeat([]byte{1}, 32)}}}
-		cm.blockStore, err = storage.NewFromState(crypto.SHA256, checkpoint, cm.blockStore.GetDB(), cm.orchestration, logger.New(t))
+		cm.blockStore, err = storage.NewFromCheckpoint(crypto.SHA256, checkpoint, cm.blockStore.GetDB(), cm.orchestration, logger.New(t))
 		require.NoError(t, err)
 		cm.leaderSelector = constLeader{leader: cm.id}
 		cm.pacemaker.Reset(context.Background(), 29, nil, nil)

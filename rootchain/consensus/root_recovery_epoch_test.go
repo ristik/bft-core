@@ -47,7 +47,7 @@ func restartedRoot(t *testing.T, source *anchorReplica) *ConsensusManager {
 	cm, err := NewConsensusManager(source.manager.id, trust, source.manager.orchestration, testnetwork.NewRootMockNetwork(),
 		source.manager.safety.signer, db, obs, WithConsensusParams(params), WithRecoveryProfile2(history))
 	require.NoError(t, err)
-	cm.blockStore, err = storage.NewFromState(crypto.SHA256, source.oldHead, db, source.manager.orchestration, obs.Logger(), storage.ProfileHandoff)
+	cm.blockStore, err = storage.NewFromCheckpoint(crypto.SHA256, source.oldHead, db, source.manager.orchestration, obs.Logger(), storage.ProfileHandoff)
 	require.NoError(t, err)
 	_, err = cm.InstallEpochGenesis(source.proof, source.oldHead, source.body)
 	require.NoError(t, err)

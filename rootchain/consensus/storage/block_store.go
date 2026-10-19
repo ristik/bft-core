@@ -97,7 +97,20 @@ func (e refusedBeforeWrite) Error() string      { return e.err.Error() }
 func (e refusedBeforeWrite) Unwrap() error      { return e.err }
 func (refusedBeforeWrite) Is(target error) bool { return target == ErrRefusedBeforeWrite }
 
+// NewFromState installs the committed head of a peer's state message as the root of a new store. The head is validated completely before anything is
+// written (newRootBlock with recovery set).
 func NewFromState(hash crypto.Hash, block *abdrc.CommittedBlock, db PersistentStore, orchestration Orchestration, log *slog.Logger, networkProfile ...uint64) (*BlockStore, error) {
+	return newFromHead(hash, block, db, orchestration, log, true, networkProfile...)
+}
+
+// NewFromCheckpoint installs a head that is authenticated by its own verification (a handoff checkpoint: the old committee's commit proof and the
+// epoch genesis, which carry no QC of the checkpoint block itself) as the root of a new store. It is not for a state message of a peer: that is
+// NewFromState, which also binds the head to its QCs and last responses.
+func NewFromCheckpoint(hash crypto.Hash, block *abdrc.CommittedBlock, db PersistentStore, orchestration Orchestration, log *slog.Logger, networkProfile ...uint64) (*BlockStore, error) {
+	return newFromHead(hash, block, db, orchestration, log, false, networkProfile...)
+}
+
+func newFromHead(hash crypto.Hash, block *abdrc.CommittedBlock, db PersistentStore, orchestration Orchestration, log *slog.Logger, recovery bool, networkProfile ...uint64) (*BlockStore, error) {
 	if db == nil {
 		return nil, refusedBeforeWrite{errors.New("storage is nil")}
 	}
@@ -111,12 +124,12 @@ func NewFromState(hash crypto.Hash, block *abdrc.CommittedBlock, db PersistentSt
 	}
 	// the trusted genesis matters to a genesis head only (validateGenesisHead)
 	var local *ExecutedBlock
-	if block != nil && block.Block != nil && block.Block.Round == rctypes.GenesisRootRound {
+	if recovery && block != nil && block.Block != nil && block.Block.Round == rctypes.GenesisRootRound {
 		if local, err = trustedGenesis(db, hash, orchestration, profile); err != nil {
 			return nil, refusedBeforeWrite{err}
 		}
 	}
-	rootNode, err := newRootBlock(block, hash, orchestration, local, true, profile)
+	rootNode, err := newRootBlock(block, hash, orchestration, local, recovery, profile)
 	if err != nil {
 		// Nothing has been written: the first write is NewBlockTreeWithRootBlock below.
 		return nil, refusedBeforeWrite{fmt.Errorf("failed to create new root node: %w", err)}

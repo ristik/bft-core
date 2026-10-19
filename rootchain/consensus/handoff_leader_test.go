@@ -56,7 +56,7 @@ func TestProfile2LeaderEmitsEmptySuffixDespiteBufferedRequest(t *testing.T) {
 		Payload: &rctypes.Payload{Version: 3}, Qc: &rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{RoundNumber: 3, Epoch: 1}}},
 		Control: control, CommitQc: &rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{RoundNumber: 4, ParentRoundNumber: 3, Epoch: 1, Timestamp: types.NewTimestamp()},
 			LedgerCommitInfo: &types.UnicitySeal{Hash: tree.RootHash(), PreviousHash: bytes.Repeat([]byte{1}, 32)}}}
-	cm.blockStore, err = storage.NewFromState(crypto.SHA256, checkpoint, cm.blockStore.GetDB(), cm.orchestration, logger.New(t), storage.ProfileHandoff)
+	cm.blockStore, err = storage.NewFromCheckpoint(crypto.SHA256, checkpoint, cm.blockStore.GetDB(), cm.orchestration, logger.New(t), storage.ProfileHandoff)
 	require.NoError(t, err)
 	cm.leaderSelector = constLeader{leader: cm.id}
 	// The anchor stays installed after the first successor block. A later
