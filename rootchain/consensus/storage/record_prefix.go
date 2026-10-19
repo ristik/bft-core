@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync/atomic"
 	"time"
 
 	"github.com/unicitynetwork/bft-core/evmroot"
@@ -23,7 +24,20 @@ type RecordFetcher interface {
 	Records(ctx context.Context, from uint64, max int) ([]rootrecords.Record, error)
 }
 
+// SourcedRecordFetcher is a RecordFetcher that can be asked one of its sources (the roots of the trust base) at a time. A source that serves a wrong
+// chain is then skipped for the next one, instead of being asked first by every retry (#647).
+type SourcedRecordFetcher interface {
+	RecordFetcher
+	// Sources is the number of sources; they are numbered 0..Sources()-1 in a fixed order.
+	Sources() int
+	// RecordsFromSource asks only the given source.
+	RecordsFromSource(ctx context.Context, source int, from uint64, max int) ([]rootrecords.Record, error)
+}
+
 const prefixPage = 256
+
+// prefixRotation numbers the fetches of this process: each one starts at another source, so a source that lies is not the first one asked every time.
+var prefixRotation atomic.Uint64
 
 // prefixTimeout bounds the whole fetch; prefixBackoff is the pause between attempts while no peer serves the records (the other roots
 // restart together: a fetch that finds none up yet is repeated until one is, not given up on the first miss).
@@ -87,22 +101,42 @@ func (x *BlockStore) ensureRetainedPrefixCtx(parent context.Context, control *ev
 		}
 		prev = &last[0]
 	}
+	if sourced, ok := x.prefixSource.(SourcedRecordFetcher); ok {
+		staged, err := x.fetchFromSources(ctx, sourced, have, state, prev)
+		if err != nil {
+			return err
+		}
+		return store.AppendRecords(staged)
+	}
+	staged, err := collectPrefix(have, state, prev, func(next uint64, want int) ([]rootrecords.Record, error) {
+		return x.fetchPage(ctx, next, want)
+	})
+	if err != nil {
+		return err
+	}
+	return store.AppendRecords(staged)
+}
+
+// collectPrefix gathers and verifies the records from `have` to the checkpoint's tip, a page at a time through page. Each record is verified link by
+// link from the last retained one, the closed epochs are authenticated by the checkpoint's state, and only a prefix that ends at exactly the
+// committed tip is returned; nothing is written here.
+func collectPrefix(have uint64, state rootrecords.State, prev *rootrecords.Record, page func(next uint64, want int) ([]rootrecords.Record, error)) ([]rootrecords.Record, error) {
 	var staged []rootrecords.Record
 	for next := have; next < state.Count; {
 		want := min(state.Count-next, prefixPage)
-		batch, err := x.fetchPage(ctx, next, int(want))
+		batch, err := page(next, int(want))
 		if err != nil {
-			return errors.Join(ErrRecordPrefixMissing, err)
+			return nil, errors.Join(ErrRecordPrefixMissing, err)
 		}
 		if uint64(len(batch)) > want {
-			return fmt.Errorf("%w: %d records for a request of %d", ErrRecordPrefixMissing, len(batch), want)
+			return nil, fmt.Errorf("%w: %d records for a request of %d", ErrRecordPrefixMissing, len(batch), want)
 		}
 		if err := rootrecords.VerifyAfter(prev, batch); err != nil {
-			return errors.Join(ErrRecordPrefixConflict, err)
+			return nil, errors.Join(ErrRecordPrefixConflict, err)
 		}
 		for _, r := range batch {
 			if err := closedEpochMatches(r, state); err != nil {
-				return err
+				return nil, err
 			}
 		}
 		staged = append(staged, batch...)
@@ -110,9 +144,44 @@ func (x *BlockStore) ensureRetainedPrefixCtx(parent context.Context, control *ev
 		next += uint64(len(batch))
 	}
 	if staged[len(staged)-1].ID != state.Tip {
-		return fmt.Errorf("%w: the fetched records end at another tip", ErrRecordPrefixConflict)
+		return nil, fmt.Errorf("%w: the fetched records end at another tip", ErrRecordPrefixConflict)
 	}
-	return store.AppendRecords(staged)
+	return staged, nil
+}
+
+// fetchFromSources takes the whole missing prefix from one source at a time, starting at a different source on every fetch. A source that fails,
+// answers nothing or serves records that do not verify (wrong chain, wrong tip, wrong closed epoch, too many records) is skipped for the next one, and
+// the sources are asked again after a pause until the bound; nothing it served is kept. The result is a verified prefix ending at the committed tip,
+// or ErrRecordPrefixMissing (joined with what each source did, and with ErrRecordPrefixConflict when some source lied) at the bound.
+func (x *BlockStore) fetchFromSources(ctx context.Context, f SourcedRecordFetcher, have uint64, state rootrecords.State, prev *rootrecords.Record) ([]rootrecords.Record, error) {
+	start := prefixRotation.Add(1) - 1
+	var last []error // the most recent outcome of each source
+	for {
+		n := f.Sources()
+		last = last[:0]
+		for k := 0; k < n; k++ {
+			if ctx.Err() != nil {
+				break
+			}
+			source := int((start + uint64(k)) % uint64(n))
+			staged, err := collectPrefix(have, state, prev, func(next uint64, want int) ([]rootrecords.Record, error) {
+				batch, err := f.RecordsFromSource(ctx, source, next, want)
+				if err == nil && len(batch) == 0 {
+					err = errors.New("no records served")
+				}
+				return batch, err
+			})
+			if err == nil {
+				return staged, nil
+			}
+			last = append(last, fmt.Errorf("source %d: %w", source, err))
+		}
+		select {
+		case <-ctx.Done():
+			return nil, errors.Join(append([]error{ErrRecordPrefixMissing, ctx.Err()}, last...)...)
+		case <-time.After(prefixBackoff):
+		}
+	}
 }
 
 // fetchPage asks the fetcher for one page and repeats the ask, until the context ends, while it fails or serves nothing.
