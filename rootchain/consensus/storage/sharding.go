@@ -207,7 +207,7 @@ func (ss ShardStates) certificationResponsesWithViews(algo crypto.Hash) ([]*cert
 				UnicityTreeCertificate: utCert,
 				ShardTreeCertificate:   stCert,
 			},
-			Status: certification.CertStatusOK,
+			Status:        certification.CertStatusOK,
 			PartitionView: views[psID.PartitionID],
 		})
 	}
