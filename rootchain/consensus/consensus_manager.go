@@ -294,28 +294,9 @@ func NewConsensusManager(
 			}
 		}
 	}
-	if cParams.NetworkProfileVersion == storage.ProfileHandoff && installedAnchor == nil {
-		if err := bStore.ConfigureHandoffAuthority(trustBase); err != nil {
-			return nil, fmt.Errorf("handoff authority: %w", err)
-		}
-		if optional.Q3 != nil { // the genesis committee may order the first V3 activation
-			if err := bStore.EnableV3Freeze(optional.Q3.FreezeRules()); err != nil {
-				return nil, fmt.Errorf("handoff authority: %w", err)
-			}
-		}
-	} else if cParams.NetworkProfileVersion == storage.ProfileHandoff && installedAnchor != nil && q3Activated(optional.Q3, installedAnchor) {
-		// The anchor is the first epoch of a Q3 activation: its lineage is the verified history, and the V2 handoff authority has no
-		// body to be built from. Its authority is the verified entry's: the activated epoch orders V3 successors only.
-		if err := configureV3Authority(bStore, optional.Q3, trustBase, installedAnchor.Epoch); err != nil {
-			return nil, fmt.Errorf("handoff authority: %w", err)
-		}
-	} else if cParams.NetworkProfileVersion == storage.ProfileHandoff && installedAnchor != nil {
-		prior, historyErr := optional.RecoveryHistory.ByEpoch(installedAnchor.Epoch)
-		if historyErr != nil {
-			return nil, fmt.Errorf("handoff authority lineage: %w", historyErr)
-		}
-		if err := bStore.ConfigureHandoffV2Authority(trustBase, prior); err != nil {
-			return nil, fmt.Errorf("handoff authority: %w", err)
+	if cParams.NetworkProfileVersion == storage.ProfileHandoff {
+		if err := configureHandoffAuthorities(bStore, trustBase, installedAnchor, optional.Q3, optional.RecoveryHistory); err != nil {
+			return nil, err
 		}
 	}
 	// The lookup reads the manager's CURRENT block store: recovery replaces x.blockStore, and a store captured here would go stale.
@@ -1732,22 +1713,8 @@ func (x *ConsensusManager) onStateResponse(ctx context.Context, rsp *abdrc.State
 		return fmt.Errorf("recovery, new block store init failed: %w", err)
 	}
 	if x.params.NetworkProfileVersion == storage.ProfileHandoff {
-		if x.epochAnchor == nil {
-			if err := blockStore.ConfigureHandoffAuthority(x.trustBase.Load()); err != nil {
-				return fmt.Errorf("recovery handoff authority: %w", err)
-			}
-		} else if q3Activated(x.q3, x.epochAnchor) {
-			if err := configureV3Authority(blockStore, x.q3, x.trustBase.Load(), x.epochAnchor.Epoch); err != nil {
-				return fmt.Errorf("recovery handoff authority: %w", err)
-			}
-		} else {
-			prior, historyErr := x.recoveryHistory.ByEpoch(x.epochAnchor.Epoch)
-			if historyErr != nil {
-				return fmt.Errorf("recovery handoff authority lineage: %w", historyErr)
-			}
-			if err := blockStore.ConfigureHandoffV2Authority(x.trustBase.Load(), prior); err != nil {
-				return fmt.Errorf("recovery handoff authority: %w", err)
-			}
+		if err := configureHandoffAuthorities(blockStore, x.trustBase.Load(), x.epochAnchor, x.q3, x.recoveryHistory); err != nil {
+			return fmt.Errorf("recovery: %w", err)
 		}
 	}
 	// create new verifier; it executes the recovery blocks below, so it must already select the view-aware branch (a weighted EVM assignment has no unit

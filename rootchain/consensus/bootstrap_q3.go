@@ -13,6 +13,7 @@ import (
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/storage"
 	rctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/votesig"
+	"github.com/unicitynetwork/bft-core/trusthistorystore"
 	"github.com/unicitynetwork/bft-core/utb"
 	basetypes "github.com/unicitynetwork/bft-go-base/types"
 )
@@ -233,4 +234,40 @@ func configureV3Authority(bs *storage.BlockStore, q3 Q3Authority, tb *basetypes.
 	}
 	bodyID := entry.BodyID()
 	return bs.ConfigureHandoffV3Authority(tb, bodyID[:], q3.FreezeRules())
+}
+
+// configureHandoffAuthorities gives a profile-3 block store the authority that orders its handoffs, from the committee it runs in: the
+// genesis committee (no installed anchor) orders V2 handoffs and, when Q3 is configured, the first V3 activation; the first epoch of a Q3
+// activation orders V3 successors only; any other anchored epoch takes the verified lineage's V2 authority. Startup and the replacement
+// store of a state-import recovery both use it, so a recovered root cannot lose a rule the started one has.
+func configureHandoffAuthorities(bs *storage.BlockStore, tb *basetypes.RootTrustBaseV1, anchor *rctypes.EpochAnchor, q3 Q3Authority, history *trusthistorystore.Store) error {
+	switch {
+	case anchor == nil:
+		if err := bs.ConfigureHandoffAuthority(tb); err != nil {
+			return fmt.Errorf("handoff authority: %w", err)
+		}
+		if q3 != nil { // the genesis committee may order the first V3 activation
+			if err := bs.EnableV3Freeze(q3.FreezeRules()); err != nil {
+				return fmt.Errorf("handoff authority: %w", err)
+			}
+		}
+	case q3Activated(q3, anchor):
+		// The anchor is the first epoch of a Q3 activation: its lineage is the verified history, and the V2 handoff authority has no
+		// body to be built from. Its authority is the verified entry's: the activated epoch orders V3 successors only.
+		if err := configureV3Authority(bs, q3, tb, anchor.Epoch); err != nil {
+			return fmt.Errorf("handoff authority: %w", err)
+		}
+	default:
+		if history == nil {
+			return fmt.Errorf("handoff authority lineage: %w", abdrc.ErrHistoricalTrustBase)
+		}
+		prior, err := history.ByEpoch(anchor.Epoch)
+		if err != nil {
+			return fmt.Errorf("handoff authority lineage: %w", err)
+		}
+		if err := bs.ConfigureHandoffV2Authority(tb, prior); err != nil {
+			return fmt.Errorf("handoff authority: %w", err)
+		}
+	}
+	return nil
 }

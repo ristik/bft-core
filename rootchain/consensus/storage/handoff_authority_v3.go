@@ -172,3 +172,9 @@ func (x *BlockStore) VerifyFreezeCompanion(record evmroot.OrderedHandoffRecord, 
 	}
 	return x.handoffAuth.VerifyFreeze(record, companion)
 }
+
+// V3FreezeEnabled reports whether this store verifies V3 freeze handoff records (the genesis committee's authority with Q3 rules).
+func (x *BlockStore) V3FreezeEnabled() bool {
+	a, ok := x.handoffAuth.(*v1HandoffAuthority)
+	return ok && a.v3 != nil
+}
