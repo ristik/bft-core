@@ -149,7 +149,10 @@ func CheckQcOfBlock(qc *rctypes.QuorumCert, b *ExecutedBlock) error {
 		return fmt.Errorf("QC is of round %d", vi.RoundNumber)
 	case vi.ParentRoundNumber != b.GetParentRound():
 		return fmt.Errorf("QC parent round %d, block parent round %d", vi.ParentRoundNumber, b.GetParentRound())
-	case vi.Epoch != b.BlockData.Epoch || vi.Timestamp != b.BlockData.Timestamp:
+	case vi.Timestamp != b.BlockData.Timestamp:
+		// the same refusal the timestamp proof gives (a block whose time the QC does not authenticate), so both give one sentinel
+		return fmt.Errorf("QC epoch or timestamp differ from the block's: %w", rctypes.ErrTimestampProof)
+	case vi.Epoch != b.BlockData.Epoch:
 		return errors.New("QC epoch or timestamp differ from the block's")
 	case !bytes.Equal(vi.CurrentRootHash, b.RootHash):
 		return fmt.Errorf("QC state root %X differs from the root %X of the block", []byte(vi.CurrentRootHash), []byte(b.RootHash))

@@ -1,7 +1,9 @@
 package consensus
 
 import (
+	"crypto"
 	"errors"
+	"github.com/unicitynetwork/bft-core/rootrecords"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -55,13 +57,38 @@ func TestRecoveryRefusedBeforeAnyWriteDoesNotLatchTheFrontierFault(t *testing.T)
 	require.Equal(t, before, root.blockStore.RootAnchor(), "and the root's anchor is unchanged")
 }
 
-// A failure after the first write still latches: the store may hold part of the state.
-func TestRecoveryFailingAfterTheFirstWriteStillLatchesTheFrontierFault(t *testing.T) {
+// failPendingWrites is a store that writes the head of a recovery and fails the next block it is asked to write: the failure comes after the first
+// write, whatever the staged validation of the state found.
+type failPendingWrites struct{ storage.PersistentStore }
+
+// the optional capabilities of the store a recovery needs are forwarded
+func (f failPendingWrites) NetworkProfile() (uint64, bool, error) {
+	return f.PersistentStore.(interface{ NetworkProfile() (uint64, bool, error) }).NetworkProfile()
+}
+func (f failPendingWrites) SetNetworkProfile(p uint64) error {
+	return f.PersistentStore.(interface{ SetNetworkProfile(uint64) error }).SetNetworkProfile(p)
+}
+func (f failPendingWrites) AppendRecords(r []rootrecords.Record) error {
+	return f.PersistentStore.(storage.RecordStore).AppendRecords(r)
+}
+func (f failPendingWrites) RecordCount() (uint64, error) {
+	return f.PersistentStore.(storage.RecordStore).RecordCount()
+}
+func (f failPendingWrites) Records(from uint64, max int) ([]rootrecords.Record, error) {
+	return f.PersistentStore.(storage.RecordStore).Records(from, max)
+}
+
+func (f failPendingWrites) WriteBlock(b *storage.ExecutedBlock, root bool) error {
+	if !root {
+		return errors.New("disk full")
+	}
+	return f.PersistentStore.WriteBlock(b, root)
+}
+
+// A state whose pending block does not fit its parent is refused by the staged validation before anything is written, with no latch.
+func TestRecoveryOfAStateTheStagingRefusesWritesAndLatchesNothing(t *testing.T) {
 	c := newAnchorCluster(t)
 	state := c.pastTheFirstSuccessor()
-
-	// A pending block whose QC names a round the new store does not hold: genuine and in the epoch, so it verifies; adding it fails after the head
-	// has been written.
 	bad := *state
 	bad.Pending = append([]*rctypes.BlockData(nil), state.Pending...)
 	first := *bad.Pending[0]
@@ -69,7 +96,26 @@ func TestRecoveryFailingAfterTheFirstWriteStillLatchesTheFrontierFault(t *testin
 	bad.Pending[0] = &first
 
 	root := latchProbe(t, c)
+	before := root.blockStore.RootAnchor()
 	err := recoverTo(t, root, &bad)
+	require.Error(t, err)
+	require.False(t, root.frontier.faulted.Load(), "nothing was written: nothing to latch")
+	require.Equal(t, before, root.blockStore.RootAnchor())
+}
+
+// A failure after the first write still latches: the store may hold part of the state.
+func TestRecoveryFailingAfterTheFirstWriteStillLatchesTheFrontierFault(t *testing.T) {
+	c := newAnchorCluster(t)
+	state := c.pastTheFirstSuccessor()
+	require.NotEmpty(t, state.Pending, "premise: the state has a pending block to write after the head")
+
+	root := latchProbe(t, c)
+	// the store of the running root, wrapped so that the pending blocks cannot be written
+	faulty := failPendingWrites{root.blockStore.GetDB()}
+	var err error
+	root.blockStore, err = storage.NewFromCheckpoint(crypto.SHA256, firstReplica(c.replicas).oldHead, faulty, root.orchestration, root.log, storage.ProfileHandoff)
+	require.NoError(t, err)
+	err = recoverTo(t, root, state)
 	require.Error(t, err)
 	require.False(t, errors.Is(err, storage.ErrRefusedBeforeWrite), "premise: the failure is after the first write: %v", err)
 	require.True(t, root.frontier.faulted.Load(), "a failure after the first write latches")

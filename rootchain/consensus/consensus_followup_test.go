@@ -520,12 +520,13 @@ func Test_Followup_LastVoteOfTheRecoveryVote(t *testing.T) {
 		require.EqualValues(t, 4, f.cm.pacemaker.GetVoted().VoteInfo.RoundNumber)
 	})
 
-	t.Run("a failing last vote write only warns: highest voted round advanced, no second signature", func(t *testing.T) {
+	// ours keeps the vote-store-before-send rule on the recovery path (upstream warns and sends); either way the round is never signed twice
+	t.Run("a failing last vote write: the vote is not sent, highest voted round advanced, no second signature", func(t *testing.T) {
 		f := newFollowup(t, 3, nil)
 		f.db.failWrite = true
 		f.ingress(f.proposal4())
-		require.NoError(t, f.cm.onStateResponse(f.ctx, f.state))
-		require.Len(t, f.votes(), 1)
+		require.ErrorContains(t, f.cm.onStateResponse(f.ctx, f.state), "storing it failed")
+		require.Empty(t, f.votes())
 		require.Empty(t, f.db.written())
 		require.EqualValues(t, 4, f.cm.safety.storage.GetHighestVotedRound())
 		f.net.ResetSentMessages(network.ProtocolRootVote)

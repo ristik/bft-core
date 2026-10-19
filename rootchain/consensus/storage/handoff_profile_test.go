@@ -727,7 +727,8 @@ func TestCommittedAbortReplayRetainsPhaseAndResumesEVMRequests(t *testing.T) {
 		CommitQc: &rctypes.QuorumCert{LedgerCommitInfo: &types.UnicitySeal{Hash: bytes.Clone(aborted.RootHash)}}}
 	checkpoint.ShardInfo, err = toRecoveryShardInfo(aborted)
 	require.NoError(t, err)
-	restarted, err := NewFromState(crypto.SHA256, consistentHead(t, checkpoint, s.orchestration, ProfileHandoff), s.GetDB(), s.orchestration, logger.New(t), ProfileHandoff)
+	// the head is built from an uncommitted block (its input record is past the last response): a checkpoint, authenticated by its own verification
+	restarted, err := NewFromCheckpoint(crypto.SHA256, checkpoint, s.GetDB(), s.orchestration, logger.New(t), ProfileHandoff)
 	require.NoError(t, err, "recovery after durable Abort retains the authenticated phase")
 	root := restarted.blockTree.Root()
 	require.Equal(t, "aborted", root.ShardState.Control.Phase)

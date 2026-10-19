@@ -1976,11 +1976,11 @@ func (x *ConsensusManager) voteAfterRecovery(ctx context.Context, prop *abdrc.Pr
 		// wait for timeout, if others make progress this node will need to recover
 		return fmt.Errorf("failed to sign vote: %w", err)
 	}
-	// as on the ordinary path: the last vote restores the pacemaker after a restart. It is not the barrier against signing twice (MakeVote has
-	// advanced the voting rounds durably before it signed), so a failure to store it only warns, and neither it nor a failed send is a reason to
-	// sign again
+	// the vote is stored like any other before it is sent (a vote that cannot be stored is not sent: the last vote restores the pacemaker after a
+	// restart, and the vote-store-before-send rule holds on the recovery path too). Upstream warns here and sends: MakeVote has advanced the voting
+	// rounds durably before it signed, so this node does not sign the round twice either way; ours keeps the stricter rule.
 	if err = x.blockStore.StoreLastVote(voteMsg); err != nil {
-		x.log.WarnContext(ctx, "vote store failed", logger.Error(err))
+		return fmt.Errorf("vote not sent after recovery: storing it failed: %w", err)
 	}
 	x.pacemaker.SetVoted(voteMsg)
 	// send vote to the next leader
