@@ -197,14 +197,14 @@ func (s *frontierPersistentStore) NetworkProfile() (uint64, bool, error) {
 	if store, ok := s.PersistentStore.(interface{ NetworkProfile() (uint64, bool, error) }); ok {
 		return store.NetworkProfile()
 	}
-	return 0, false, storage.ErrNetworkProfile
+	return 0, false, storage.ErrProfilePinUnsupported
 }
 
 func (s *frontierPersistentStore) SetNetworkProfile(profile uint64) error {
 	if store, ok := s.PersistentStore.(interface{ SetNetworkProfile(uint64) error }); ok {
 		return store.SetNetworkProfile(profile)
 	}
-	return storage.ErrNetworkProfile
+	return storage.ErrProfilePinUnsupported
 }
 
 func (s *frontierPersistentStore) StoreHandoffBody(id, body []byte) error {

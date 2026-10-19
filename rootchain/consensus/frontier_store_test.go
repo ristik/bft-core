@@ -208,8 +208,12 @@ func TestFrontierProxyExposesTheProfilePinAndFailsClosed(t *testing.T) {
 
 	blind := &frontierPersistentStore{PersistentStore: nil}
 	_, _, err = blind.NetworkProfile()
+	require.ErrorIs(t, err, storage.ErrProfilePinUnsupported)
+	require.ErrorIs(t, blind.SetNetworkProfile(storage.ProfileHandoff), storage.ErrProfilePinUnsupported)
+	// over a blind store the handoff profile refuses to start, the legacy one has nothing to pin
+	blindOverBolt := &frontierPersistentStore{PersistentStore: struct{ PersistentStore }{db}, sampler: &frontierSampler{}, reader: db}
+	_, err = storage.New(crypto.SHA256, blindOverBolt, emptyOrchestrationForPin(), obs, storage.ProfileHandoff)
 	require.ErrorIs(t, err, storage.ErrNetworkProfile)
-	require.ErrorIs(t, blind.SetNetworkProfile(storage.ProfileHandoff), storage.ErrNetworkProfile)
 }
 
 type pinOrchestration struct{}
