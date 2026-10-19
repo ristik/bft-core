@@ -156,3 +156,12 @@ such database but it can't load one either.
 `rootchain.db` contains the node's voting record too, so do this for one node at a time and
 never for more than `f` nodes. When more nodes are affected do not continue, the state of the
 network needs to be looked at first.
+
+
+## Rollout notes of the base library
+
+The signature rule above comes from bft-go-base; its own rollout note is [docs/UPGRADING.md](https://github.com/ristik/bft-go-base/blob/main/docs/UPGRADING.md)
+in ristik/bft-go-base. In this repository: native messages and V2 trust-base entries take the 65-byte recoverable rule (`votesig.CheckSignatureShape`:
+65 bytes, recovery ID 0..3); the frozen B1 and S1 reference profiles keep their own acceptance (64 bytes, or 65 with a recovery byte 0 or 1) through the
+explicit compact verifier (`b1ref.verifyCompact`, `s1ref.verifyCompact`), so a library bump does not change what those profiles accept. Tightening them is
+a coordinated re-pin of the Go, Rust and contract implementations, not part of this sync.
