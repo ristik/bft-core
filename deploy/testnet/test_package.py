@@ -196,6 +196,7 @@ class ProofOfStake(unittest.TestCase):
     def test_the_root_identity_reaches_the_contracts_genesis_and_is_never_guessed(self):
         with tempfile.TemporaryDirectory() as tmp:
             genesis=pos.Genesis(Path(tmp)/'work','ubft',tmp,generate.REPO,'tn-x',1,(1,2));genesis.trust_base=Path('tb')
+            (Path(tmp)/'script').mkdir();(Path(tmp)/'script/P85Genesis.s.sol').write_text('vm.envBytes32("P85_ROOT_GENESIS")')
             envs=[]
             def run(*args,**kw):
                 class R: stderr='genesis assignment id '+self.ID1;stdout='{}'
@@ -212,6 +213,26 @@ class ProofOfStake(unittest.TestCase):
                 class R: stdout=out;stderr=''
                 with patch.object(bad,'_run',return_value=R):
                     with self.assertRaisesRegex(pos.PosError,'no root network id'): bad.root_identity()
+    def test_an_older_contracts_checkout_gets_no_root_identity_and_the_manifest_tool_is_not_asked(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            genesis=pos.Genesis(Path(tmp)/'work','ubft',tmp,generate.REPO,'tn-x',1,(1,2));genesis.trust_base=Path('tb')
+            (Path(tmp)/'script').mkdir();(Path(tmp)/'script/P85Genesis.s.sol').write_text('vm.envBytes32("P85_NETWORK_WORD")')
+            self.assertFalse(genesis.contracts_take_root_identity())
+            seen=[]
+            def run(*args,**kw):
+                class R: stderr='genesis assignment id '+self.ID1;stdout='{}'
+                seen.append((list(map(str,args)),kw.get('env')))
+                if str(args[0]).endswith('p85-genesis.sh'):
+                    (genesis.dir/'genesis').mkdir(exist_ok=True)
+                    (genesis.dir/'genesis/deployment.json').write_text(json.dumps({'custody':'0xc','custodyCodeHash':'0x1','election':'0xe','electionCodeHash':'0x2','assignmentId':self.ID1}))
+                return R
+            with patch.object(genesis,'_run',side_effect=run):
+                genesis.prepare('base.json',provisional=True)
+            self.assertFalse(any('utb-manifest' in a for a,_ in seen))
+            genv=[e for a,e in seen if a[0].endswith('p85-genesis.sh')][0]
+            self.assertNotIn('P85_ROOT_GENESIS',genv)
+            (Path(tmp)/'script/P85Genesis.s.sol').write_text('P85_ROOT_GENESIS')
+            self.assertTrue(genesis.contracts_take_root_identity())
     def test_the_owner_keys_replace_the_hash_derived_addresses_and_must_cover_every_identity(self):
         with tempfile.TemporaryDirectory() as tmp:
             genesis=pos.Genesis(Path(tmp)/'work','ubft',tmp,generate.REPO,'tn-x',1,(1,2))
