@@ -31,7 +31,7 @@ func (f *utbStoreFlags) add(cmd *cobra.Command) {
 }
 
 func (f *utbStoreFlags) runFlags(base *baseFlags) *rootNodeRunFlags {
-	return &rootNodeRunFlags{baseFlags: base, Profile2: true, UTBGenesisFile: f.genesis, UTBGenesisID: f.genesisID, UTBEntriesDBFile: f.entriesDB}
+	return &rootNodeRunFlags{baseFlags: base, HandoffProfile: true, UTBGenesisFile: f.genesis, UTBGenesisID: f.genesisID, UTBEntriesDBFile: f.entriesDB}
 }
 
 func parsePin(s string) ([types.TrustBaseV2IDLen]byte, error) {

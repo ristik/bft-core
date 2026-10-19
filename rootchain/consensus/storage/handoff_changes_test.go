@@ -252,7 +252,7 @@ func addBlockWithRequests(t *testing.T, s *BlockStore, round uint64, anchor *rct
 // tryBlockWithRequests adds the block and returns the store's verdict.
 func tryBlockWithRequests(s *BlockStore, t *testing.T, round uint64, anchor *rctypes.EpochAnchor, reqs ...*rctypes.IRChangeReq) error {
 	t.Helper()
-	block := &rctypes.BlockData{Version: 2, Round: round, Epoch: 2, Payload: &rctypes.Payload{Version: 2, Requests: reqs}}
+	block := &rctypes.BlockData{Version: 3, Round: round, Epoch: 2, Payload: &rctypes.Payload{Version: 3, Requests: reqs}}
 	if anchor != nil {
 		block.Anchor = anchor
 	} else {

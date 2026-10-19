@@ -20,7 +20,7 @@ func testEpochAnchor() *EpochAnchor {
 
 func TestEpochAnchorProposalWireAndEpoch(t *testing.T) {
 	a := testEpochAnchor()
-	b := &BlockData{Version: 2, Round: 13, Epoch: 2, Payload: &Payload{Version: 2}, Anchor: a}
+	b := &BlockData{Version: 3, Round: 13, Epoch: 2, Payload: &Payload{Version: 3}, Anchor: a}
 	require.NoError(t, b.IsValid())
 	raw, err := base.Cbor.Marshal(b)
 	require.NoError(t, err)
@@ -38,7 +38,7 @@ func TestEpochAnchorProposalWireAndEpoch(t *testing.T) {
 
 func TestEpochAnchorProposalValidationBoundaries(t *testing.T) {
 	a := testEpochAnchor()
-	b := &BlockData{Version: 2, Round: a.Slot, Epoch: a.Epoch, Payload: &Payload{Version: 2}, Anchor: a}
+	b := &BlockData{Version: 3, Round: a.Slot, Epoch: a.Epoch, Payload: &Payload{Version: 3}, Anchor: a}
 	require.ErrorIs(t, b.IsValid(), ErrEpochAnchor)
 	b.Round++
 	require.NoError(t, b.IsValid())
@@ -59,8 +59,9 @@ func TestEpochAnchorBlockVersionWireGuards(t *testing.T) {
 	require.NoError(t, err)
 	require.EqualValues(t, 1, b.Version)
 
+	// version 2 was the handoff profile before the shard-configuration transition rule (#640): it is refused, never read as 3
 	invalid, err := base.Cbor.MarshalTaggedValue(base.RootPartitionBlockDataTag, blockDataLegacyWire{
-		Version: 3, Round: 1, Payload: &Payload{},
+		Version: 2, Round: 1, Payload: &Payload{},
 	})
 	require.NoError(t, err)
 	var restored BlockData

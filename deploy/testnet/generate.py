@@ -78,7 +78,7 @@ def topology(out, n, ids, images, captcha, ureth_flags=(), max_gas=30000000, wit
             environment={'ROOT_RPC':operator_rpc.listen(rpc_bind,operator_rpc.ROOT_PORT),'SHARD_RPC':operator_rpc.listen(rpc_bind,operator_rpc.SHARD_PORT)})
         service('root%d'%i, node, ['ubft','root-node','run','--home','/state','--address','/ip4/0.0.0.0/tcp/8000',
             '--bootnodes', ','.join('/dns4/root%d/tcp/8000/p2p/%s' % (j,ids['root'][j-1]) for j in range(1,n+1) if j!=i),
-            '--profile-2','--q3-lane'] + (pos.root_flags(i) if with_pos else ['--genesis-identities','/network/genesis-identities.json']) + [
+            '--profile-3','--q3-lane'] + (pos.root_flags(i) if with_pos else ['--genesis-identities','/network/genesis-identities.json']) + [
             '--shard-conf','/network/full-shard-conf.json','--shard-conf','/network/aggregator-conf.json',
             '--rpc-server-address',operator_rpc.listen(rpc_bind,operator_rpc.ROOT_PORT),'--metrics','prometheus'] + common,
             ['./validator%d/root:/state'%i,network,'./validator%d/jwt:/jwt:ro'%i], memory='384m', pod='pod%d'%i)   # the entity's Engine JWT, read-only: q3-readiness runs in the root (it holds the entity's keys.json) and checks its own Engine endpoint

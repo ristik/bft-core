@@ -70,7 +70,7 @@ func TestPendingAcknowledgementExecutesUnderTheViewThroughRepeatUCs(t *testing.T
 
 	// blocks are added to the store on their parent (the follower's path: execution, then the store's own verification)
 	onParent := func(parent *ExecutedBlock, round uint64, reqs ...*rctypes.IRChangeReq) *rctypes.BlockData {
-		return &rctypes.BlockData{Version: 2, Round: round, Epoch: 2, Timestamp: 1_000 + round, Payload: &rctypes.Payload{Version: 2, Requests: reqs},
+		return &rctypes.BlockData{Version: 3, Round: round, Epoch: 2, Timestamp: 1_000 + round, Payload: &rctypes.Payload{Version: 3, Requests: reqs},
 			Qc: &rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{RoundNumber: parent.GetRound(), Epoch: 2, CurrentRootHash: parent.RootHash}}}
 	}
 	timeout := func(parent *ExecutedBlock, round uint64) *rctypes.BlockData {

@@ -52,8 +52,8 @@ func TestProfile2LeaderEmitsEmptySuffixDespiteBufferedRequest(t *testing.T) {
 	state := storage.ShardStates{States: map[types.PartitionShardID]*storage.ShardInfo{}, Control: control}
 	tree, _, err := state.UnicityTree(crypto.SHA256)
 	require.NoError(t, err)
-	checkpoint := &abdrc.CommittedBlock{Block: &rctypes.BlockData{Version: 2, Round: 4, Epoch: 1,
-		Payload: &rctypes.Payload{Version: 2}, Qc: &rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{RoundNumber: 3, Epoch: 1}}},
+	checkpoint := &abdrc.CommittedBlock{Block: &rctypes.BlockData{Version: 3, Round: 4, Epoch: 1,
+		Payload: &rctypes.Payload{Version: 3}, Qc: &rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{RoundNumber: 3, Epoch: 1}}},
 		Control: control, CommitQc: &rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{RoundNumber: 4, ParentRoundNumber: 3, Epoch: 1, Timestamp: types.NewTimestamp()},
 			LedgerCommitInfo: &types.UnicitySeal{Hash: tree.RootHash(), PreviousHash: bytes.Repeat([]byte{1}, 32)}}}
 	cm.blockStore, err = storage.NewFromState(crypto.SHA256, checkpoint, cm.blockStore.GetDB(), cm.orchestration, logger.New(t), storage.ProfileHandoff)

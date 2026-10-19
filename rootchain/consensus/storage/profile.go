@@ -158,3 +158,38 @@ func checkStoredSuffix(parent, child *ExecutedBlock) error {
 	}
 	return nil
 }
+
+// profilePin is the durable pin of the network profile a store runs under.
+type profilePin interface {
+	NetworkProfile() (profile uint64, found bool, err error)
+	SetNetworkProfile(profile uint64) error
+}
+
+// pinProfile makes the profile a property of the store, checked before anything else is read from it: a store that recorded another
+// profile, and a store that holds blocks but never recorded one (written by a root of the execution rule before the pin, which this binary
+// does not run), are refused - whatever their state looks like (the legacy profile has no earlier rule to tell apart and adopts the pin). An empty store records the profile. A store that cannot pin (a test double)
+// is the caller's.
+func pinProfile(db PersistentStore, profile uint64) error {
+	pin, ok := db.(profilePin)
+	if !ok {
+		return nil
+	}
+	stored, found, err := pin.NetworkProfile()
+	if err != nil {
+		return fmt.Errorf("reading the network profile of the store: %w", err)
+	}
+	switch {
+	case found && stored != profile:
+		return fmt.Errorf("%w: the store runs profile %d, this root was started with profile %d", ErrNetworkProfile, stored, profile)
+	case found:
+		return nil
+	}
+	blocks, err := db.LoadBlocks()
+	if err != nil {
+		return fmt.Errorf("root DB read error: %w", err)
+	}
+	if len(blocks) != 0 && profile == ProfileHandoff {
+		return fmt.Errorf("%w: the store holds blocks but no network profile pin: it was written under another execution rule", ErrNetworkProfile)
+	}
+	return pin.SetNetworkProfile(profile)
+}

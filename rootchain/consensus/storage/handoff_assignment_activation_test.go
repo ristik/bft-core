@@ -66,8 +66,8 @@ func (f *assignmentFixture) commitAssignment(t *testing.T) committedAssignment {
 	addProfileBlock(t, f.store, 2, [][]byte{b.prepare.Bytes()})
 	parent, err := f.store.Block(2)
 	require.NoError(t, err)
-	_, err = f.store.Add(&rctypes.BlockData{Version: 2, Round: 3, Epoch: 1,
-		Payload: &rctypes.Payload{Version: 2, HandoffRecords: [][]byte{b.freeze.Bytes(), b.companion}},
+	_, err = f.store.Add(&rctypes.BlockData{Version: 3, Round: 3, Epoch: 1,
+		Payload: &rctypes.Payload{Version: 3, HandoffRecords: [][]byte{b.freeze.Bytes(), b.companion}},
 		Qc:      &rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{RoundNumber: 2, Epoch: 1, CurrentRootHash: parent.RootHash}}}, nil)
 	require.NoError(t, err)
 	if f.afterFreeze != nil {
@@ -89,8 +89,8 @@ func (f *assignmentFixture) commitAssignment(t *testing.T) committedAssignment {
 	own, err := frozen.TR.Hash()
 	require.NoError(t, err)
 	wrong.SuccessorTRHash = own
-	_, err = f.store.Add(&rctypes.BlockData{Version: 2, Round: 4, Epoch: 1,
-		Payload: &rctypes.Payload{Version: 2, HandoffRecords: [][]byte{wrong.Bytes()}},
+	_, err = f.store.Add(&rctypes.BlockData{Version: 3, Round: 4, Epoch: 1,
+		Payload: &rctypes.Payload{Version: 3, HandoffRecords: [][]byte{wrong.Bytes()}},
 		Qc:      &rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{RoundNumber: 3, Epoch: 1, CurrentRootHash: mustBlock(t, f.store, 3).RootHash}}}, nil)
 	require.ErrorIs(t, err, ErrHandoffRecord)
 	require.ErrorIs(t, err, ErrAssignmentHistory)
@@ -113,7 +113,7 @@ func (f *assignmentFixture) commitAssignment(t *testing.T) committedAssignment {
 
 func (f *assignmentFixture) addSuccessorBlock(t *testing.T, s *BlockStore, round uint64, anchor *rctypes.EpochAnchor) *ExecutedBlock {
 	t.Helper()
-	block := &rctypes.BlockData{Version: 2, Round: round, Epoch: 2, Payload: &rctypes.Payload{Version: 2}}
+	block := &rctypes.BlockData{Version: 3, Round: round, Epoch: 2, Payload: &rctypes.Payload{Version: 3}}
 	if anchor != nil {
 		block.Anchor = anchor
 	} else {
@@ -307,8 +307,8 @@ func TestAbortThenRetryWithAnotherAssignmentInstallsOnlyTheRetry(t *testing.T) {
 	abort.Kind, abort.OrderedRound = "abort", 4
 	abortCompanion := f.abortCompanionFor(t, abort)
 	parent := mustBlock(t, f.store, 3)
-	_, err := f.store.Add(&rctypes.BlockData{Version: 2, Round: 4, Epoch: 1, Timestamp: 4_000,
-		Payload: &rctypes.Payload{Version: 2, HandoffRecords: [][]byte{abort.Bytes(), abortCompanion}},
+	_, err := f.store.Add(&rctypes.BlockData{Version: 3, Round: 4, Epoch: 1, Timestamp: 4_000,
+		Payload: &rctypes.Payload{Version: 3, HandoffRecords: [][]byte{abort.Bytes(), abortCompanion}},
 		Qc:      &rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{RoundNumber: 3, Epoch: 1, CurrentRootHash: parent.RootHash}}}, nil)
 	require.NoError(t, err)
 	require.Equal(t, "aborted", mustBlock(t, f.store, 4).ShardState.Control.Phase)
@@ -389,11 +389,11 @@ func (f *assignmentFixture) addAt(t *testing.T, round uint64, records ...[]byte)
 func (f *assignmentFixture) tryAt(t *testing.T, round uint64, records ...[]byte) error {
 	t.Helper()
 	parent := mustBlock(t, f.store, round-1)
-	payload := &rctypes.Payload{Version: 2}
+	payload := &rctypes.Payload{Version: 3}
 	if len(records) > 0 {
 		payload.HandoffRecords = records
 	}
-	_, err := f.store.Add(&rctypes.BlockData{Version: 2, Round: round, Epoch: 1, Timestamp: 1_000 + round, Payload: payload,
+	_, err := f.store.Add(&rctypes.BlockData{Version: 3, Round: round, Epoch: 1, Timestamp: 1_000 + round, Payload: payload,
 		Qc: &rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{RoundNumber: round - 1, Epoch: 1, CurrentRootHash: parent.RootHash}}}, nil)
 	return err
 }
@@ -440,8 +440,8 @@ func TestAcknowledgementEndsThePendingStateAndRetiredKeysStayRefused(t *testing.
 	prior := mustBlock(t, s, 7)
 	ack := &types.InputRecord{Version: 1, RoundNumber: pending.TR.Round, Epoch: pending.TR.Epoch,
 		BlockHash: bytes.Repeat([]byte{0x77}, 32), PreviousHash: pending.IR.Hash, Hash: bytes.Repeat([]byte{0x78}, 32)}
-	_, err = s.Add(&rctypes.BlockData{Version: 2, Round: 8, Epoch: 2, Timestamp: 1_000,
-		Payload: &rctypes.Payload{Version: 2, Requests: []*rctypes.IRChangeReq{{Partition: 8}}},
+	_, err = s.Add(&rctypes.BlockData{Version: 3, Round: 8, Epoch: 2, Timestamp: 1_000,
+		Payload: &rctypes.Payload{Version: 3, Requests: []*rctypes.IRChangeReq{{Partition: 8}}},
 		Qc:      &rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{RoundNumber: 7, Epoch: 2, CurrentRootHash: prior.RootHash}}},
 		mockIRVerifier{verify: func(uint64, *rctypes.IRChangeReq) (*types.InputRecord, error) { return ack, nil }})
 	require.NoError(t, err)

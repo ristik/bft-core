@@ -274,8 +274,8 @@ func newSecondHandoff(t *testing.T, source *anchorReplica, signers map[string]ab
 		PrevEpochFees: shardState.PrevEpochFees, Fees: shardState.Fees,
 		IR: shardState.IR, IRTR: shardState.TR, ShardConfHash: shardState.ShardConfHash,
 		UC: &shardState.LastCR.UC, TR: &shardState.LastCR.Technical}
-	head := &abdrc.CommittedBlock{Block: &rctypes.BlockData{Version: 2, Epoch: 2, Round: commitSealRound,
-		Payload: &rctypes.Payload{Version: 2}}, ShardInfo: []abdrc.ShardInfo{shardInfo}, Control: &control, CommitQc: qc}
+	head := &abdrc.CommittedBlock{Block: &rctypes.BlockData{Version: 3, Epoch: 2, Round: commitSealRound,
+		Payload: &rctypes.Payload{Version: 3}}, ShardInfo: []abdrc.ShardInfo{shardInfo}, Control: &control, CommitQc: qc}
 
 	obs := testobservability.Default(t)
 	db, err := storage.NewBoltStorage(filepath.Join(t.TempDir(), "second.db"), storage.WithNoSync())

@@ -1513,7 +1513,7 @@ func TestIsShardValidatorFollowsAWeightedAssignmentsInstall(t *testing.T) {
 	// the first block past the boundary installs the weighted assignment on the shard (no unit request context); the committed state takes it
 	parent, err := r.manager.blockStore.Block(anchor.Slot)
 	require.NoError(t, err)
-	block := &drctypes.BlockData{Version: 2, Epoch: 2, Round: 7, Anchor: anchor, Payload: &drctypes.Payload{Version: 2}}
+	block := &drctypes.BlockData{Version: 3, Epoch: 2, Round: 7, Anchor: anchor, Payload: &drctypes.Payload{Version: 3}}
 	executed, err := parent.Extend(block, r.manager.irReqVerifier, r.orchestration, crypto.SHA256, r.manager.log)
 	require.NoError(t, err)
 	weighted := executed.ShardState.States[key]

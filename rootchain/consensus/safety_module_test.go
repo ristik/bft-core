@@ -45,10 +45,10 @@ func TestCompetingHandoffAbortAndCommitFollowDurableVoteLocks(t *testing.T) {
 	commit.OrderedRound = 3
 	commit.SuccessorTRHash = bytes.Repeat([]byte{4}, 32)
 	parentQC := &drctypes.QuorumCert{VoteInfo: &drctypes.RoundInfo{RoundNumber: 1, Epoch: 1, CurrentRootHash: bytes.Repeat([]byte{9}, 32)}}
-	abortBlock := &drctypes.BlockData{Version: 2, Round: 2, Epoch: 1, Timestamp: 1, Qc: parentQC,
-		Payload: &drctypes.Payload{Version: 2, HandoffRecords: [][]byte{abort.Bytes(), abortProof}}}
-	commitBlock := &drctypes.BlockData{Version: 2, Round: 2, Epoch: 1, Timestamp: 1, Qc: parentQC,
-		Payload: &drctypes.Payload{Version: 2, HandoffRecords: [][]byte{commit.Bytes()}}}
+	abortBlock := &drctypes.BlockData{Version: 3, Round: 2, Epoch: 1, Timestamp: 1, Qc: parentQC,
+		Payload: &drctypes.Payload{Version: 3, HandoffRecords: [][]byte{abort.Bytes(), abortProof}}}
+	commitBlock := &drctypes.BlockData{Version: 3, Round: 2, Epoch: 1, Timestamp: 1, Qc: parentQC,
+		Payload: &drctypes.Payload{Version: 3, HandoffRecords: [][]byte{commit.Bytes()}}}
 	validators := 4
 	var abortVotes, commitVotes int
 	for i := 0; i < validators; i++ {
@@ -508,7 +508,7 @@ func TestSafetyModule_isCommitCandidate(t *testing.T) {
 func TestEpochAnchorVoteSealIsNoncommitting(t *testing.T) {
 	s := &SafetyModule{}
 	a := &drctypes.EpochAnchor{GenesisID: bytes.Repeat([]byte{1}, 32), Epoch: 2, Slot: 12, StateRoot: bytes.Repeat([]byte{2}, 32)}
-	b := &drctypes.BlockData{Version: 2, Round: 13, Epoch: 2, Anchor: a, Payload: &drctypes.Payload{Version: 2}}
+	b := &drctypes.BlockData{Version: 3, Round: 13, Epoch: 2, Anchor: a, Payload: &drctypes.Payload{Version: 3}}
 	require.Nil(t, s.isCommitCandidate(b))
 	require.Zero(t, s.constructCommitInfo(b, bytes.Repeat([]byte{3}, 32)).RootChainRoundNumber)
 }

@@ -13,7 +13,7 @@ import (
 	"github.com/unicitynetwork/bft-go-base/types/hex"
 )
 
-// payload-vectors.json freezes the wire of the profile-2 root payload and of the proposals that carry it, for Rust and Solidity
+// payload-vectors.json freezes the wire of the profile-3 root payload and of the proposals that carry it, for Rust and Solidity
 // consumers: the payload bytes and their SHA-256, and the proposal block bytes and block hash (the scheme every block id uses), for an
 // empty payload, a handoff-bearing one and a control-bearing one, each in the ordinary (parent QC) and the epoch-anchor form.
 // PAYLOAD_VECTORS_UPDATE=1 regenerates; the consumers must reproduce every byte independently.
@@ -31,9 +31,9 @@ func h(b []byte) string { return "0x" + stdhex.EncodeToString(b) }
 
 func vectorPayloads() map[string]*Payload {
 	return map[string]*Payload{
-		"empty":    {Version: 2},
-		"handoff":  {Version: 2, HandoffRecords: [][]byte{{0x01, 0x02, 0x03}, {0xaa, 0xbb}}},
-		"controls": {Version: 2, PosControls: []PosControl{closeControl(1), rejectControl(), retireControl(7, 1)}},
+		"empty":    {Version: 3},
+		"handoff":  {Version: 3, HandoffRecords: [][]byte{{0x01, 0x02, 0x03}, {0xaa, 0xbb}}},
+		"controls": {Version: 3, PosControls: []PosControl{closeControl(1), rejectControl(), retireControl(7, 1)}},
 	}
 }
 
@@ -44,8 +44,8 @@ func vectorBlocks(p *Payload) map[string]*BlockData {
 		Signatures:       map[string]hex.Bytes{"node-a": word(0x33), "node-b": word(0x44)},
 	}
 	return map[string]*BlockData{
-		"parent-qc":    {Version: 2, Author: "node-a", Round: 9, Epoch: 2, Timestamp: 1_700_000_001, Payload: p, Qc: qc},
-		"epoch-anchor": {Version: 2, Author: "node-a", Round: 9, Epoch: 2, Timestamp: 1_700_000_001, Payload: p, Anchor: &EpochAnchor{GenesisID: word(0x55), Epoch: 2, Slot: 8, StateRoot: word(0x66)}},
+		"parent-qc":    {Version: 3, Author: "node-a", Round: 9, Epoch: 2, Timestamp: 1_700_000_001, Payload: p, Qc: qc},
+		"epoch-anchor": {Version: 3, Author: "node-a", Round: 9, Epoch: 2, Timestamp: 1_700_000_001, Payload: p, Anchor: &EpochAnchor{GenesisID: word(0x55), Epoch: 2, Slot: 8, StateRoot: word(0x66)}},
 	}
 }
 
@@ -81,7 +81,7 @@ func TestPayloadVectorsAreFrozen(t *testing.T) {
 	require.Equal(t, string(want), string(got), "run with PAYLOAD_VECTORS_UPDATE=1 to regenerate")
 }
 
-// Every vector decodes to the value it came from, and the empty payload is the specification's 8402808080.
+// Every vector decodes to the value it came from, and the empty payload is the specification's 8403808080.
 func TestPayloadVectorsDecodeAndRoundTrip(t *testing.T) {
 	raw, err := os.ReadFile(payloadVectorsPath)
 	require.NoError(t, err)
@@ -90,7 +90,7 @@ func TestPayloadVectorsDecodeAndRoundTrip(t *testing.T) {
 	}
 	require.NoError(t, json.Unmarshal(raw, &file))
 	require.Len(t, file.Vectors, 6)
-	require.Equal(t, "0x8402808080", file.Vectors[0].Payload)
+	require.Equal(t, "0x8403808080", file.Vectors[0].Payload)
 	for _, v := range file.Vectors {
 		pb, err := stdhex.DecodeString(v.Payload[2:])
 		require.NoError(t, err)

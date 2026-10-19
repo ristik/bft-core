@@ -72,7 +72,7 @@ func TestSuccessiveCoupledSupersessionInstall(t *testing.T) {
 			require.NoError(t, r.rt.Recover(context.Background()))
 			require.NoError(t, r.rt.Activate(context.Background(), r.bundle()))
 			anchor := r.manager.epochAnchor
-			_, err := r.manager.blockStore.Add(&rctypes.BlockData{Version: 2, Round: 7, Epoch: 2, Payload: &rctypes.Payload{Version: 2}, Anchor: anchor}, nil)
+			_, err := r.manager.blockStore.Add(&rctypes.BlockData{Version: 3, Round: 7, Epoch: 2, Payload: &rctypes.Payload{Version: 3}, Anchor: anchor}, nil)
 			require.NoError(t, err)
 			first, err := r.manager.blockStore.Block(7)
 			require.NoError(t, err)
@@ -234,10 +234,10 @@ func TestQ3InstallPreservesSelectedRequestHistory(t *testing.T) {
 			var parent *storage.ExecutedBlock
 			parent, err = r.manager.blockStore.Block(anchor.Slot)
 			require.NoError(t, err)
-			first := &rctypes.BlockData{Version: 2, Epoch: 2, Round: 7, Anchor: anchor, Payload: &rctypes.Payload{Version: 2}}
+			first := &rctypes.BlockData{Version: 3, Epoch: 2, Round: 7, Anchor: anchor, Payload: &rctypes.Payload{Version: 3}}
 			b7, err := parent.Extend(first, r.manager.irReqVerifier, r.orchestration, crypto.SHA256, r.manager.log)
 			require.NoError(t, err)
-			second := &rctypes.BlockData{Version: 2, Epoch: 2, Round: 8, Payload: &rctypes.Payload{Version: 2},
+			second := &rctypes.BlockData{Version: 3, Epoch: 2, Round: 8, Payload: &rctypes.Payload{Version: 3},
 				Qc: &rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{RoundNumber: 7, Epoch: 2, CurrentRootHash: b7.RootHash}}}
 			b8, err := b7.Extend(second, r.manager.irReqVerifier, r.orchestration, crypto.SHA256, r.manager.log)
 			require.NoError(t, err)
@@ -252,7 +252,7 @@ func TestQ3InstallPreservesSelectedRequestHistory(t *testing.T) {
 				require.NoError(t, err)
 			}
 			block := func(req *rctypes.IRChangeReq) *rctypes.BlockData {
-				return &rctypes.BlockData{Version: 2, Epoch: 2, Round: 9, Payload: &rctypes.Payload{Version: 2, Requests: []*rctypes.IRChangeReq{req}}, Qc: qc8}
+				return &rctypes.BlockData{Version: 3, Epoch: 2, Round: 9, Payload: &rctypes.Payload{Version: 3, Requests: []*rctypes.IRChangeReq{req}}, Qc: qc8}
 			}
 			_, err = b8.Extend(block(lights), r.manager.irReqVerifier, r.orchestration, crypto.SHA256, r.manager.log)
 			require.ErrorIs(t, err, quorumweight.ErrQuorumNotReached)

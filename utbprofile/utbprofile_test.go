@@ -16,7 +16,7 @@ func write(t *testing.T, path string, n int) string {
 func TestFreshDeploymentPasses(t *testing.T) {
 	d := t.TempDir()
 	in := Inputs{Role: Root, GenesisFile: write(t, filepath.Join(d, "g.cbor"), 10), GenesisID: "0x01", EntriesDB: filepath.Join(d, "utb.db"),
-		LegacyDBs: []string{filepath.Join(d, "rootchain.db")}, Profile2: true}
+		LegacyDBs: []string{filepath.Join(d, "rootchain.db")}, HandoffProfile: true}
 	require.NoError(t, Check(in))
 	require.NoError(t, Check(Inputs{Role: Shard, EntriesDB: filepath.Join(d, "none.db")}), "a plain node with no entry store is not the profile's business")
 }
@@ -26,7 +26,7 @@ func TestRefusals(t *testing.T) {
 	genesis := write(t, filepath.Join(d, "g.cbor"), 10)
 	utbDB := filepath.Join(d, "utb.db")
 	legacy := write(t, filepath.Join(d, "rootchain.db"), 100)
-	base := Inputs{Role: Root, GenesisFile: genesis, GenesisID: "0x01", EntriesDB: utbDB, Profile2: true}
+	base := Inputs{Role: Root, GenesisFile: genesis, GenesisID: "0x01", EntriesDB: utbDB, HandoffProfile: true}
 
 	for name, tc := range map[string]struct {
 		mut  func(in *Inputs)
@@ -34,7 +34,7 @@ func TestRefusals(t *testing.T) {
 	}{
 		"a pin without a genesis entry": {func(in *Inputs) { in.GenesisFile = "" }, "go together"},
 		"a genesis entry without a pin": {func(in *Inputs) { in.GenesisID = "" }, "go together"},
-		"a root without profile 2":      {func(in *Inputs) { in.Profile2 = false }, "profile 2"},
+		"a root without profile 3":      {func(in *Inputs) { in.HandoffProfile = false }, "profile 3"},
 		"a missing genesis file":        {func(in *Inputs) { in.GenesisFile = filepath.Join(d, "missing") }, "missing or empty"},
 		"an empty genesis file":         {func(in *Inputs) { in.GenesisFile = write(t, filepath.Join(d, "empty"), 0) }, "missing or empty"},
 		"a legacy database":             {func(in *Inputs) { in.LegacyDBs = []string{legacy} }, "no approved migration"},
@@ -62,10 +62,10 @@ func TestRefusals(t *testing.T) {
 	})
 	t.Run("every finding is reported", func(t *testing.T) {
 		in := base
-		in.GenesisID, in.Profile2, in.LegacyDBs = "", false, []string{legacy}
+		in.GenesisID, in.HandoffProfile, in.LegacyDBs = "", false, []string{legacy}
 		err := Check(in)
 		require.ErrorContains(t, err, "go together")
-		require.ErrorContains(t, err, "profile 2")
+		require.ErrorContains(t, err, "profile 3")
 		require.ErrorContains(t, err, "no approved migration")
 	})
 }

@@ -45,8 +45,8 @@ func (v anchorRecoveryVerifier) VerifyRecoveryAnchor(head *CommittedBlock) error
 func TestRecoveryCommittedHeadRequiresVerifiedTypedAnchor(t *testing.T) {
 	a := &rctypes.EpochAnchor{GenesisID: bytes.Repeat([]byte{1}, 32), Epoch: 2, Slot: 6,
 		StateRoot: bytes.Repeat([]byte{2}, 32)}
-	head := &CommittedBlock{Block: &rctypes.BlockData{Version: 2, Epoch: 2, Round: 6,
-		Payload: &rctypes.Payload{Version: 2}, Anchor: a}, Anchor: a,
+	head := &CommittedBlock{Block: &rctypes.BlockData{Version: 3, Epoch: 2, Round: 6,
+		Payload: &rctypes.Payload{Version: 3}, Anchor: a}, Anchor: a,
 		Control: &evmroot.ControlState{Network: 5, Epoch: 1, PredecessorBodyID: make([]byte, 32)}}
 	encoded, err := types.Cbor.Marshal(head)
 	require.NoError(t, err)
@@ -565,7 +565,7 @@ func TestStateMsg_Verify(t *testing.T) {
 				}, nil},
 				{"a head that is the first successor of an anchor (anchor set, no QC): wait for the next state", func(sm *StateMsg) {
 					a := &rctypes.EpochAnchor{GenesisID: bytes.Repeat([]byte{1}, 32), Epoch: 2, Slot: 4, StateRoot: bytes.Repeat([]byte{2}, 32)}
-					sm.CommittedHead.Block.Version, sm.CommittedHead.Block.Payload.Version = 2, 2
+					sm.CommittedHead.Block.Version, sm.CommittedHead.Block.Payload.Version = 3, 3
 					sm.CommittedHead.Block.Anchor, sm.CommittedHead.Block.Qc = a, nil
 					sm.CommittedHead.Block.Epoch, sm.CommittedHead.Block.Round = a.Epoch, a.Slot+1
 					sm.CommittedHead.Control = &evmroot.ControlState{Network: 5, Epoch: a.Epoch, PredecessorBodyID: make([]byte, 32)}

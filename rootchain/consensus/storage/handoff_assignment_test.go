@@ -372,8 +372,8 @@ func (f *assignmentFixture) admit(t *testing.T, b builtFreeze) error {
 	addProfileBlock(t, f.store, 2, [][]byte{b.prepare.Bytes()})
 	parent, err := f.store.Block(2)
 	require.NoError(t, err)
-	_, err = f.store.Add(&rctypes.BlockData{Version: 2, Round: 3, Epoch: 1,
-		Payload: &rctypes.Payload{Version: 2, HandoffRecords: [][]byte{b.freeze.Bytes(), b.companion}},
+	_, err = f.store.Add(&rctypes.BlockData{Version: 3, Round: 3, Epoch: 1,
+		Payload: &rctypes.Payload{Version: 3, HandoffRecords: [][]byte{b.freeze.Bytes(), b.companion}},
 		Qc:      &rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{RoundNumber: 2, Epoch: 1, CurrentRootHash: parent.RootHash}}}, nil)
 	return err
 }

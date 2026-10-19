@@ -42,7 +42,7 @@ func mockExecutedBlock(round, qcRound uint64) ExecutedBlock {
 
 func TestBlockTreeRejectsAnchorCommitBeforeMutation(t *testing.T) {
 	a := &drctypes.EpochAnchor{GenesisID: test.RandomBytes(32), StateRoot: test.RandomBytes(32), Epoch: 2, Slot: 12}
-	root := newNode(&ExecutedBlock{BlockData: &drctypes.BlockData{Version: 2, Epoch: 2, Round: 12, Anchor: a}})
+	root := newNode(&ExecutedBlock{BlockData: &drctypes.BlockData{Version: 3, Epoch: 2, Round: 12, Anchor: a}})
 	bt := &BlockTree{root: root, roundToNode: map[uint64]*node{12: root}}
 	qc := &drctypes.QuorumCert{VoteInfo: &drctypes.RoundInfo{RoundNumber: 13, ParentRoundNumber: 12}}
 	_, err := bt.Commit(qc)

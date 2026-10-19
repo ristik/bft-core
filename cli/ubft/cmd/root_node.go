@@ -78,7 +78,7 @@ type (
 		UTBGenesisID             string // its EntryID, the pin
 		UTBEntriesDBFile         string
 		UTBCaptureUCResp         string // lane diagnostics: write each distinct version 2 certification response that carries entries here, before it is sent
-		Profile2                 bool
+		HandoffProfile                 bool
 		InstallHandoffEpoch      uint64
 		Q3Lane                   bool // the Q3 acceptance lane: a verified Q3 history, the install journal and the V3 handoff pipeline
 		Q3JournalDBFile          string
@@ -149,9 +149,9 @@ func rootNodeRunCmd(baseFlags *baseFlags) *cobra.Command {
 		"proof-of-stake: JSON-RPC URL of the execution client that serves eth_getProof at the frozen parent; required when the deployment pins an election (the root then builds the storage-proof witness of a primary candidate's Freeze)")
 	cmd.Flags().StringVar(&flags.OrchestrationDBFile, "orchestration-db", "",
 		fmt.Sprintf("path to the orchestration database (default: %s)", filepath.Join("$UBFT_HOME", orchestrationDBFileName)))
-	cmd.Flags().BoolVar(&flags.Profile2, "profile-2", false, "run the version-2 root handoff network profile")
+	cmd.Flags().BoolVar(&flags.HandoffProfile, "profile-3", false, "run the version-3 root handoff network profile (the execution rule with root-applied shard-configuration transitions; a store or peer of profile 2 is refused)")
 	cmd.Flags().Uint64Var(&flags.InstallHandoffEpoch, "install-handoff-epoch", 0, "fetch and verify this successor epoch before starting profile-2 consensus")
-	cmd.Flags().BoolVar(&flags.Q3Lane, "q3-lane", false, "run the Q3 acceptance lane: verified Q3 history, install journal and V3 handoffs (requires --profile-2)")
+	cmd.Flags().BoolVar(&flags.Q3Lane, "q3-lane", false, "run the Q3 acceptance lane: verified Q3 history, install journal and V3 handoffs (requires --profile-3)")
 	cmd.Flags().StringVar(&flags.Q3JournalDBFile, "q3-journal-db", "",
 		fmt.Sprintf("Q3 install journal database (default: %s)", filepath.Join("$UBFT_HOME", q3JournalDBFileName)))
 	cmd.Flags().StringVar(&flags.UTBGenesisFile, "utb-genesis", "", "enable the signed trust-base entry (UTB) profile: the canonical genesis entry file (see: trust-base utb-genesis); requires --utb-genesis-id and profile 2")
@@ -184,7 +184,7 @@ func getBootStrapNodes(bootNodesStr []string) ([]peer.AddrInfo, error) {
 func rootNodeRun(ctx context.Context, flags *rootNodeRunFlags) error {
 	if flags.baseFlags != nil {
 		if err := utbprofile.Check(utbprofile.Inputs{Role: utbprofile.Root, GenesisFile: flags.UTBGenesisFile, GenesisID: flags.UTBGenesisID,
-			EntriesDB: flags.PathWithDefault(flags.UTBEntriesDBFile, rootUTBEntriesDBFileName), Profile2: flags.Profile2,
+			EntriesDB: flags.PathWithDefault(flags.UTBEntriesDBFile, rootUTBEntriesDBFileName), HandoffProfile: flags.HandoffProfile,
 			LegacyDBs: []string{flags.PathWithDefault(flags.RootDBFile, rootDBFileName), flags.PathWithDefault(flags.TrustBaseDBFile, trustBaseDBFileName),
 				flags.PathWithDefault(flags.OrchestrationDBFile, orchestrationDBFileName)}}); err != nil {
 			return err
@@ -260,7 +260,7 @@ func rootNodeRun(ctx context.Context, flags *rootNodeRunFlags) error {
 	if err != nil {
 		return fmt.Errorf("failed to load shard confs: %w", err)
 	}
-	if err := loadShardConfs(orchestration, flags.Profile2, shardConfs); err != nil {
+	if err := loadShardConfs(orchestration, flags.HandoffProfile, shardConfs); err != nil {
 		return err
 	}
 	if flags.PosGenesisIdentitiesFile != "" && (flags.PosDeploymentFile == "" || flags.GenesisIdentitiesFile != "") {
@@ -291,8 +291,8 @@ func rootNodeRun(ctx context.Context, flags *rootNodeRunFlags) error {
 	consensusParams := consensus.NewConsensusParams()
 	consensusParams.BlockRate = time.Duration(flags.BlockRate) * time.Millisecond
 	var options []consensus.Option
-	if flags.Q3Lane && !flags.Profile2 {
-		return errors.New("q3-lane requires profile 2")
+	if flags.Q3Lane && !flags.HandoffProfile {
+		return errors.New("q3-lane requires profile 3")
 	}
 	if flags.UTBGenesisFile != "" {
 		trustBaseStore.EnableUTBProfile() // the first voting epoch is a UTB epoch whether or not a verified Q3 history later takes over the answers
@@ -316,7 +316,7 @@ func rootNodeRun(ctx context.Context, flags *rootNodeRunFlags) error {
 		}
 		options = append(options, consensus.WithQ3(q3rt))
 	}
-	if flags.Profile2 {
+	if flags.HandoffProfile {
 		consensusParams.NetworkProfileVersion = storage.ProfileHandoff
 		rootHistoryDB, openErr := flags.initDB(flags.TrustHistoryDBFile, rootTrustHistoryDBFileName)
 		if openErr != nil {
@@ -329,7 +329,7 @@ func rootNodeRun(ctx context.Context, flags *rootNodeRunFlags) error {
 		if hashErr != nil {
 			return hashErr
 		}
-		identity := sha256.Sum256(append([]byte("unicity/root-profile-2/history/1"), anchorHash...))
+		identity := sha256.Sum256(append([]byte("unicity/root-profile-3/history/1"), anchorHash...))
 		history, openErr := trusthistorystore.Open(ctx, rootHistoryDB, trustBase, identity, trustactivation.Verifier{Signing: trustBaseStore.SigningConfig})
 		if openErr != nil {
 			return fmt.Errorf("opening root profile-2 history: %w", openErr)
@@ -393,8 +393,8 @@ func rootNodeRun(ctx context.Context, flags *rootNodeRunFlags) error {
 		return fmt.Errorf("failed initiate distributed consensus manager: %w", err)
 	}
 	if flags.PosDeploymentFile != "" {
-		if !flags.Profile2 {
-			return fmt.Errorf("%w: --pos-deployment needs --profile-2", ErrPosDeployment)
+		if !flags.HandoffProfile {
+			return fmt.Errorf("%w: --pos-deployment needs --profile-3", ErrPosDeployment)
 		}
 		if err = enablePosClosure(cm, orchestration, trustBaseStore, trustBase, shardConfs, flags.PosDeploymentFile, flags.GenesisIdentitiesFile != "", flags.PosEVMRPC); err != nil {
 			return err
@@ -419,14 +419,14 @@ func rootNodeRun(ctx context.Context, flags *rootNodeRunFlags) error {
 		}
 		defer stopFrontier()
 	}
-	if flags.Profile2 {
+	if flags.HandoffProfile {
 		stopRecords, recErr := serveRootRecords(log, host, cm, shardConfs)
 		if recErr != nil {
 			return recErr
 		}
 		defer stopRecords()
 	}
-	if flags.Profile2 {
+	if flags.HandoffProfile {
 		server, err := handoffdelivery.NewServer(cm)
 		if err != nil {
 			return err
@@ -437,7 +437,7 @@ func rootNodeRun(ctx context.Context, flags *rootNodeRunFlags) error {
 		return err
 	}
 	if flags.InstallHandoffEpoch != 0 {
-		if !flags.Profile2 || flags.InstallHandoffEpoch < 2 {
+		if !flags.HandoffProfile || flags.InstallHandoffEpoch < 2 {
 			return fmt.Errorf("install-handoff-epoch requires profile 2 and epoch >= 2")
 		}
 		if flags.InstallHandoffEpoch < cm.InstalledRootEpoch() {
@@ -507,11 +507,11 @@ func rootNodeRun(ctx context.Context, flags *rootNodeRunFlags) error {
 		if pr := flags.observe.PrometheusRegisterer(); pr != nil {
 			mux.Handle("/api/v1/metrics", promhttp.HandlerFor(pr.(prometheus.Gatherer), promhttp.HandlerOpts{MaxRequestsInFlight: 1}))
 		}
-		mux.HandleFunc("PUT /api/v1/configurations", configurationsHandler(flags.Profile2, orchestration.AddShardConfig))
-		mux.HandleFunc("PUT /api/v1/trustbases", trustBasesPutHandler(flags.Profile2, trustBaseStore.Store))
+		mux.HandleFunc("PUT /api/v1/configurations", configurationsHandler(flags.HandoffProfile, orchestration.AddShardConfig))
+		mux.HandleFunc("PUT /api/v1/trustbases", trustBasesPutHandler(flags.HandoffProfile, trustBaseStore.Store))
 		mux.HandleFunc("GET /api/v1/trustbases", getTrustBaseHandler(trustBaseStore, obs))
 		mux.HandleFunc("GET /api/v1/roundInfo", getRoundInfoHandler(cm.GetState, obs))
-		if flags.Profile2 {
+		if flags.HandoffProfile {
 			mux.HandleFunc("POST /api/v1/handoff/plan", rootHandoffPlanHandler(cm))
 			mux.HandleFunc("POST /api/v1/handoff/intent", rootHandoffIntentHandler(cm))
 			mux.HandleFunc("POST /api/v1/handoff/endorse", rootHandoffEndorseHandler(cm))

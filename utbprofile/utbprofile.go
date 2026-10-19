@@ -32,8 +32,8 @@ type Inputs struct {
 	// LegacyDBs are databases a node without the profile would have created: if any holds data while the entry store does not exist, the deployment
 	// predates the profile and has no signed history to continue from.
 	LegacyDBs []string
-	// Profile2 says the root runs the handoff profile (the entries are produced by handoffs); roots require it.
-	Profile2 bool
+	// HandoffProfile says the root runs the handoff profile (the entries are produced by handoffs); roots require it.
+	HandoffProfile bool
 }
 
 // Enabled reports whether any profile flag was given.
@@ -52,8 +52,8 @@ func Check(in Inputs) error {
 		if in.GenesisFile == "" || in.GenesisID == "" {
 			add("--utb-genesis and --utb-genesis-id go together: the genesis entry is authenticated by its pin, and a pin names nothing without the entry")
 		}
-		if in.Role == Root && !in.Profile2 {
-			add("a root of the profile runs profile 2 (--profile-2): the entries are produced by its handoffs")
+		if in.Role == Root && !in.HandoffProfile {
+			add("a root of the profile runs profile 3 (--profile-3): the entries are produced by its handoffs")
 		}
 		if in.GenesisFile != "" {
 			if fi, err := os.Stat(in.GenesisFile); err != nil || fi.IsDir() || fi.Size() == 0 {

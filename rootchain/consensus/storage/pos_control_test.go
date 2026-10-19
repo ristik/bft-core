@@ -535,13 +535,13 @@ func TestClosureIsMandatoryInTheSuccessorsFirstOrdinaryBlock(t *testing.T) {
 	s, err := New(crypto.SHA256, f.store.storage, f.orch, logger.New(t), ProfileHandoff)
 	require.NoError(t, err)
 	s.SetPosServices(svc)
-	bare := &rctypes.BlockData{Version: 2, Round: 7, Epoch: 2, Timestamp: 1_000, Payload: &rctypes.Payload{Version: 2}, Anchor: anchor}
+	bare := &rctypes.BlockData{Version: 3, Round: 7, Epoch: 2, Timestamp: 1_000, Payload: &rctypes.Payload{Version: 3}, Anchor: anchor}
 	_, err = s.Add(bare, nil)
 	require.ErrorIs(t, err, ErrClosureMissing)
 
 	c, err := control(1, 2, 7)
 	require.NoError(t, err)
-	with := &rctypes.BlockData{Version: 2, Round: 7, Epoch: 2, Timestamp: 1_000, Payload: &rctypes.Payload{Version: 2, PosControls: []rctypes.PosControl{c}}, Anchor: anchor}
+	with := &rctypes.BlockData{Version: 3, Round: 7, Epoch: 2, Timestamp: 1_000, Payload: &rctypes.Payload{Version: 3, PosControls: []rctypes.PosControl{c}}, Anchor: anchor}
 	_, err = s.Add(with, nil)
 	require.NoError(t, err)
 	b7 := mustBlock(t, s, 7)
@@ -552,7 +552,7 @@ func TestClosureIsMandatoryInTheSuccessorsFirstOrdinaryBlock(t *testing.T) {
 
 	// afterwards an empty block is fine: the duty is discharged
 	prior := b7
-	_, err = s.Add(&rctypes.BlockData{Version: 2, Round: 8, Epoch: 2, Timestamp: 1_001, Payload: &rctypes.Payload{Version: 2},
+	_, err = s.Add(&rctypes.BlockData{Version: 3, Round: 8, Epoch: 2, Timestamp: 1_001, Payload: &rctypes.Payload{Version: 3},
 		Qc: &rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{RoundNumber: 7, Epoch: 2, CurrentRootHash: prior.RootHash}}}, nil)
 	require.NoError(t, err)
 }
@@ -613,8 +613,8 @@ func ackedEpochTwo(t *testing.T, evm *fakeEVM, stop uint64) (*BlockStore, *PosSe
 	s.SetPosServices(svc)
 	closure := rctypes.PosControl{Network: 5, ChainID: dep.ChainID, Custody: dep.Custody, OrderingEpoch: 2, OrderingRound: 7, Op: rctypes.OpCloseLiability,
 		Close: &rctypes.CloseContext{ClosedEpoch: 1, BundleSemanticID: facts.BundleID}, Data: data, WitnessHash: sha256.Sum256(bundle)}
-	_, err = s.Add(&rctypes.BlockData{Version: 2, Round: 7, Epoch: 2, Timestamp: 1_000, Anchor: anchor,
-		Payload: &rctypes.Payload{Version: 2, PosControls: []rctypes.PosControl{closure}}}, nil)
+	_, err = s.Add(&rctypes.BlockData{Version: 3, Round: 7, Epoch: 2, Timestamp: 1_000, Anchor: anchor,
+		Payload: &rctypes.Payload{Version: 3, PosControls: []rctypes.PosControl{closure}}}, nil)
 	require.NoError(t, err)
 	b7 := mustBlock(t, s, 7)
 	if stop == 7 {
@@ -623,8 +623,8 @@ func ackedEpochTwo(t *testing.T, evm *fakeEVM, stop uint64) (*BlockStore, *PosSe
 	pending := b7.ShardState.States[f.shard]
 	ack := &types.InputRecord{Version: 1, RoundNumber: pending.TR.Round, Epoch: pending.TR.Epoch,
 		BlockHash: bytes.Repeat([]byte{0x77}, 32), PreviousHash: pending.IR.Hash, Hash: bytes.Repeat([]byte{0x78}, 32)}
-	_, err = s.Add(&rctypes.BlockData{Version: 2, Round: 8, Epoch: 2, Timestamp: 1_000,
-		Payload: &rctypes.Payload{Version: 2, Requests: []*rctypes.IRChangeReq{{Partition: 8}}},
+	_, err = s.Add(&rctypes.BlockData{Version: 3, Round: 8, Epoch: 2, Timestamp: 1_000,
+		Payload: &rctypes.Payload{Version: 3, Requests: []*rctypes.IRChangeReq{{Partition: 8}}},
 		Qc:      &rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{RoundNumber: 7, Epoch: 2, CurrentRootHash: b7.RootHash}}},
 		mockIRVerifier{verify: func(uint64, *rctypes.IRChangeReq) (*types.InputRecord, error) { return ack, nil }})
 	require.NoError(t, err)
@@ -638,8 +638,8 @@ func retirementAt(svc *PosServices, parent *ExecutedBlock, round uint64, blockHa
 	ctl := rctypes.PosControl{Network: 5, ChainID: svc.Deployment.ChainID, Custody: svc.Deployment.Custody, OrderingEpoch: 2, OrderingRound: round,
 		Op: rctypes.OpRetirement, Retire: &rctypes.RetireContext{EVMBlockHash: bh, EVMStateRoot: sr},
 		Data: append(append(word(3), word(2)...), bytes.Repeat([]byte{0xc4}, 32)...), WitnessHash: sha256.Sum256([]byte("accounts"))}
-	return &rctypes.BlockData{Version: 2, Round: round, Epoch: 2, Timestamp: 1_001,
-		Payload: &rctypes.Payload{Version: 2, PosControls: []rctypes.PosControl{ctl}},
+	return &rctypes.BlockData{Version: 3, Round: round, Epoch: 2, Timestamp: 1_001,
+		Payload: &rctypes.Payload{Version: 3, PosControls: []rctypes.PosControl{ctl}},
 		Qc:      &rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{RoundNumber: round - 1, Epoch: 2, CurrentRootHash: parent.RootHash}}}
 }
 

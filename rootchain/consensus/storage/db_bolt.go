@@ -24,6 +24,7 @@ var (
 	bucketMetadata     = []byte("metadata")
 
 	keyDbVersion    = []byte("version")
+	keyNetworkProf  = []byte("networkProfile")
 	keyTimeoutCert  = []byte("tc")
 	keyVote         = []byte("vote")
 	keyHighestVoted = []byte("votedRound")
@@ -867,4 +868,38 @@ func readUint64(b *bbolt.Bucket, key []byte) (uint64, error) {
 
 func writeUint64(b *bbolt.Bucket, key []byte, value uint64) error {
 	return b.Put(key, binary.BigEndian.AppendUint64(nil, value))
+}
+
+// NetworkProfile is the root network profile this store was started under, or found=false for a store that never recorded one (a store of
+// a root that ran before the profile was pinned, or one that holds nothing yet).
+func (db BoltDB) NetworkProfile() (profile uint64, found bool, _ error) {
+	return profile, found, db.db.View(func(tx *bbolt.Tx) error {
+		b := tx.Bucket(bucketMetadata)
+		if b == nil {
+			return errors.New("metadata bucket not found")
+		}
+		if b.Get(keyNetworkProf) == nil {
+			return nil
+		}
+		v, err := readUint64(b, keyNetworkProf)
+		profile, found = v, err == nil
+		return err
+	})
+}
+
+// SetNetworkProfile records the profile of a store that holds no blocks yet; once recorded it is never changed.
+func (db BoltDB) SetNetworkProfile(profile uint64) error {
+	return db.db.Update(func(tx *bbolt.Tx) error {
+		b := tx.Bucket(bucketMetadata)
+		if b == nil {
+			return errors.New("metadata bucket not found")
+		}
+		if b.Get(keyNetworkProf) != nil {
+			if v, err := readUint64(b, keyNetworkProf); err != nil || v != profile {
+				return ErrNetworkProfile
+			}
+			return nil
+		}
+		return writeUint64(b, keyNetworkProf, profile)
+	})
 }

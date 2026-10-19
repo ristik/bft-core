@@ -27,14 +27,14 @@ func TestSecondRootOnlyHandoffWaitsForTheEVMToAcknowledgeTheFirst(t *testing.T) 
 	add := func(epoch, round uint64, rec evmroot.OrderedHandoffRecord, evmHash []byte) error {
 		prior, err := s.Block(round - 1)
 		require.NoError(t, err)
-		payload := &rctypes.Payload{Version: 2}
+		payload := &rctypes.Payload{Version: 3}
 		if len(rec.Kind) != 0 {
 			payload.HandoffRecords = [][]byte{rec.Bytes()}
 		}
 		if evmHash != nil {
 			payload.Requests = []*rctypes.IRChangeReq{{Partition: 8}}
 		}
-		_, err = s.Add(&rctypes.BlockData{Version: 2, Epoch: epoch, Round: round, Payload: payload,
+		_, err = s.Add(&rctypes.BlockData{Version: 3, Epoch: epoch, Round: round, Payload: payload,
 			Qc: &rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{RoundNumber: round - 1, Epoch: epoch, CurrentRootHash: prior.RootHash}}},
 			mockIRVerifier{verify: func(_ uint64, _ *rctypes.IRChangeReq) (*types.InputRecord, error) {
 				return &types.InputRecord{Version: 1, RoundNumber: round, BlockHash: bytes.Clone(evmHash)}, nil
@@ -79,7 +79,7 @@ func TestSecondRootOnlyHandoffWaitsForTheEVMToAcknowledgeTheFirst(t *testing.T) 
 	require.NoError(t, err)
 	predecessor = body1
 	s.handoffAuth = testRecordAuthority{predecessor: predecessor}
-	_, err = s.Add(&rctypes.BlockData{Version: 2, Epoch: 2, Round: 7, Anchor: anchor, Payload: &rctypes.Payload{Version: 2}}, nil)
+	_, err = s.Add(&rctypes.BlockData{Version: 3, Epoch: 2, Round: 7, Anchor: anchor, Payload: &rctypes.Payload{Version: 3}}, nil)
 	require.NoError(t, err)
 	require.Equal(t, "idle", mustBlock(t, s, 7).ShardState.Control.Phase)
 	require.Equal(t, frozenParent, []byte(mustBlock(t, s, 7).ShardState.States[evm].IR.BlockHash), "the EVM has certified nothing since the frozen parent")

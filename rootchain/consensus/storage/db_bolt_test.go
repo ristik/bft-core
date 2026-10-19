@@ -93,7 +93,7 @@ func TestEpochAnchorRootAdvancesOneEpochAndPersistsNewLock(t *testing.T) {
 		return &rctypes.EpochAnchor{GenesisID: bytes.Repeat([]byte{byte(epoch)}, 32), Epoch: epoch, Slot: slot, StateRoot: bytes.Repeat([]byte{byte(epoch + 10)}, 32)}
 	}
 	root := func(a *rctypes.EpochAnchor) *ExecutedBlock {
-		return &ExecutedBlock{BlockData: &rctypes.BlockData{Version: 2, Epoch: a.Epoch, Round: a.Slot, Payload: &rctypes.Payload{Version: 2}, Anchor: a}}
+		return &ExecutedBlock{BlockData: &rctypes.BlockData{Version: 3, Epoch: a.Epoch, Round: a.Slot, Payload: &rctypes.Payload{Version: 3}, Anchor: a}}
 	}
 	a2, a3 := anchor(2, 12), anchor(3, 22)
 	require.NoError(t, db.InstallEpochAnchorRoot(root(a2), a2))
@@ -147,15 +147,15 @@ func TestEpochAnchorRootInstallRollsBackAtEveryWriteAndRestarts(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "anchor-crash.db")
 			db, err := NewBoltStorage(path)
 			require.NoError(t, err)
-			oldRoot := &ExecutedBlock{BlockData: &rctypes.BlockData{Version: 2, Epoch: 1, Round: 4, Payload: &rctypes.Payload{Version: 2}}, CommitQc: &rctypes.QuorumCert{}}
+			oldRoot := &ExecutedBlock{BlockData: &rctypes.BlockData{Version: 3, Epoch: 1, Round: 4, Payload: &rctypes.Payload{Version: 3}}, CommitQc: &rctypes.QuorumCert{}}
 			require.NoError(t, db.WriteBlock(oldRoot, true))
-			require.NoError(t, db.WriteBlock(&ExecutedBlock{BlockData: &rctypes.BlockData{Version: 2, Epoch: 1, Round: 5, Payload: &rctypes.Payload{Version: 2}}}, false))
+			require.NoError(t, db.WriteBlock(&ExecutedBlock{BlockData: &rctypes.BlockData{Version: 3, Epoch: 1, Round: 5, Payload: &rctypes.Payload{Version: 3}}}, false))
 			require.NoError(t, db.SetHighestQcRound(20, 21))
 			require.NoError(t, db.WriteVote(&abdrc.VoteMsg{Author: "old-validator"}))
 			timeout := &rctypes.TimeoutCert{Timeout: &rctypes.Timeout{Epoch: 1, Round: 99, HighQc: &rctypes.QuorumCert{}}}
 			require.NoError(t, db.WriteTC(timeout, true))
 			anchor := &rctypes.EpochAnchor{GenesisID: bytes.Repeat([]byte{1}, 32), Epoch: 2, Slot: 6, StateRoot: bytes.Repeat([]byte{2}, 32)}
-			root := &ExecutedBlock{BlockData: &rctypes.BlockData{Version: 2, Epoch: 2, Round: 6, Payload: &rctypes.Payload{Version: 2}, Anchor: anchor}}
+			root := &ExecutedBlock{BlockData: &rctypes.BlockData{Version: 3, Epoch: 2, Round: 6, Payload: &rctypes.Payload{Version: 3}, Anchor: anchor}}
 			crash := errors.New("injected crash")
 			err = db.installEpochAnchorRootWithFault(root, anchor, func(step string) error {
 				if step == failAt {

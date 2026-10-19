@@ -166,7 +166,7 @@ func addProfileBlock(t *testing.T, s *BlockStore, round uint64, records [][]byte
 	t.Helper()
 	parent, err := s.Block(round - 1)
 	require.NoError(t, err)
-	block := &rctypes.BlockData{Version: 2, Round: round, Epoch: 1, Payload: &rctypes.Payload{Version: 2, HandoffRecords: records},
+	block := &rctypes.BlockData{Version: 3, Round: round, Epoch: 1, Payload: &rctypes.Payload{Version: 3, HandoffRecords: records},
 		Qc: &rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{RoundNumber: round - 1, Epoch: 1, CurrentRootHash: parent.RootHash}}}
 	_, err = s.Add(block, nil)
 	require.NoError(t, err)
@@ -204,8 +204,8 @@ func TestOrderedFreezeStopsOnlyFrozenShardAndAbortReopensIt(t *testing.T) {
 	request := func(round uint64, partition types.PartitionID, records [][]byte) error {
 		parent, err := s.Block(round - 1)
 		require.NoError(t, err)
-		block := &rctypes.BlockData{Version: 2, Round: round, Epoch: 1,
-			Payload: &rctypes.Payload{Version: 2, Requests: []*rctypes.IRChangeReq{{Partition: partition}}, HandoffRecords: records},
+		block := &rctypes.BlockData{Version: 3, Round: round, Epoch: 1,
+			Payload: &rctypes.Payload{Version: 3, Requests: []*rctypes.IRChangeReq{{Partition: partition}}, HandoffRecords: records},
 			Qc:      &rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{RoundNumber: round - 1, Epoch: 1, CurrentRootHash: parent.RootHash}}}
 		_, err = s.Add(block, mockIRVerifier{verify: func(_ uint64, _ *rctypes.IRChangeReq) (*types.InputRecord, error) {
 			return &types.InputRecord{Version: 1, RoundNumber: round, BlockHash: bytes.Repeat([]byte{byte(round)}, 32)}, nil
@@ -219,8 +219,8 @@ func TestOrderedFreezeStopsOnlyFrozenShardAndAbortReopensIt(t *testing.T) {
 	require.ErrorIs(t, request(4, evmroot.D4ControlPartition, nil), rctypes.ErrControlPartition)
 	freezeParent, err := s.Block(3)
 	require.NoError(t, err)
-	_, err = freezeParent.Extend(&rctypes.BlockData{Version: 2, Epoch: 1, Round: 4,
-		Payload: &rctypes.Payload{Version: 2, Requests: []*rctypes.IRChangeReq{{Partition: evmroot.D4ControlPartition}}}},
+	_, err = freezeParent.Extend(&rctypes.BlockData{Version: 3, Epoch: 1, Round: 4,
+		Payload: &rctypes.Payload{Version: 3, Requests: []*rctypes.IRChangeReq{{Partition: evmroot.D4ControlPartition}}}},
 		nil, s.orchestration, crypto.SHA256, logger.New(t))
 	require.ErrorIs(t, err, ErrHandoffRecord, "direct execution must also reject a forged control request")
 	require.NoError(t, request(4, aggregator.PartitionID, nil), "aggregator certification remains live")
@@ -245,8 +245,8 @@ func TestCommitRequiresFrozenParentAtCommittedTip(t *testing.T) {
 	rootShard.IR = &changedIR
 	parent, err := s.Block(3)
 	require.NoError(t, err)
-	block := &rctypes.BlockData{Version: 2, Round: 4, Epoch: 1,
-		Payload: &rctypes.Payload{Version: 2, HandoffRecords: [][]byte{record("commit", 4, 7, frozen, body, bytes.Repeat([]byte{3}, 32))}},
+	block := &rctypes.BlockData{Version: 3, Round: 4, Epoch: 1,
+		Payload: &rctypes.Payload{Version: 3, HandoffRecords: [][]byte{record("commit", 4, 7, frozen, body, bytes.Repeat([]byte{3}, 32))}},
 		Qc:      &rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{RoundNumber: 3, Epoch: 1, CurrentRootHash: parent.RootHash}}}
 	_, err = s.Add(block, nil)
 	require.ErrorIs(t, err, ErrHandoffRecord)
@@ -328,7 +328,7 @@ func TestHandoffControlLeafAndSuffix(t *testing.T) {
 			Reject: &rctypes.RejectContext{Attempt: 1}, Data: make([]byte, 32)}}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			block := &rctypes.BlockData{Version: 2, Round: 5, Epoch: 1, Payload: &rctypes.Payload{Version: 2, HandoffRecords: tc.records, Requests: tc.requests, PosControls: tc.controls},
+			block := &rctypes.BlockData{Version: 3, Round: 5, Epoch: 1, Payload: &rctypes.Payload{Version: 3, HandoffRecords: tc.records, Requests: tc.requests, PosControls: tc.controls},
 				Qc: &rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{RoundNumber: 4, Epoch: 1}}}
 			_, err := s.Add(block, nil)
 			require.ErrorIs(t, err, ErrHandoffSuffix)
@@ -359,7 +359,7 @@ func TestHandoffControlLeafAndSuffix(t *testing.T) {
 	t.Cleanup(func() { _ = recoveryDB.Close() })
 	recovery, err := NewFromState(crypto.SHA256, checkpoint, recoveryDB, s.orchestration, logger.New(t), ProfileHandoff)
 	require.NoError(t, err)
-	_, err = recovery.Add(&rctypes.BlockData{Version: 2, Round: 6, Epoch: 1, Payload: &rctypes.Payload{Version: 2, HandoffRecords: [][]byte{record("abort", 6, 8, frozen, body, zero)}},
+	_, err = recovery.Add(&rctypes.BlockData{Version: 3, Round: 6, Epoch: 1, Payload: &rctypes.Payload{Version: 3, HandoffRecords: [][]byte{record("abort", 6, 8, frozen, body, zero)}},
 		Qc: &rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{RoundNumber: 5, Epoch: 1}}}, nil)
 	require.ErrorIs(t, err, ErrHandoffSuffix)
 	checkpoint.Control = nil
@@ -393,7 +393,7 @@ func TestRecoveryHandoffSnapshotUsesProductionShardTree(t *testing.T) {
 	block := &ExecutedBlock{ShardState: state}
 	info, err := toRecoveryShardInfo(block)
 	require.NoError(t, err)
-	head := &abdrc.CommittedBlock{Block: &rctypes.BlockData{Version: 2, Epoch: 1, Round: 4, Payload: &rctypes.Payload{Version: 2}},
+	head := &abdrc.CommittedBlock{Block: &rctypes.BlockData{Version: 3, Epoch: 1, Round: 4, Payload: &rctypes.Payload{Version: 3}},
 		ShardInfo: info, Control: control, CommitQc: &rctypes.QuorumCert{LedgerCommitInfo: &types.UnicitySeal{Hash: tree.RootHash()}}}
 	orchestration := mockOrchestration{shardConfigs: func(uint64) (map[types.PartitionShardID]*types.PartitionDescriptionRecord, error) {
 		return map[types.PartitionShardID]*types.PartitionDescriptionRecord{shard: conf}, nil
@@ -470,7 +470,7 @@ func TestInstallEpochAnchorFromRecoveryCheckpoint(t *testing.T) {
 	controlCopy.PreviousDigest = bytes.Repeat([]byte{9}, 32)
 	corrupt.Control = &controlCopy
 	require.ErrorIs(t, reloaded.VerifyRecoveryAnchor(&corrupt), ErrControlCheckpoint)
-	first := &rctypes.BlockData{Version: 2, Round: 7, Epoch: 2, Payload: &rctypes.Payload{Version: 2}, Anchor: a}
+	first := &rctypes.BlockData{Version: 3, Round: 7, Epoch: 2, Payload: &rctypes.Payload{Version: 3}, Anchor: a}
 	_, err = reloaded.Add(first, nil)
 	require.NoError(t, err)
 	child, err := reloaded.Block(7)
@@ -528,8 +528,8 @@ func TestTwoConsecutiveRootHandoffsRestartAtEachPhase(t *testing.T) {
 	add := func(epoch, round uint64, record evmroot.OrderedHandoffRecord) *ExecutedBlock {
 		prior, err := s.Block(round - 1)
 		require.NoError(t, err)
-		block := &rctypes.BlockData{Version: 2, Epoch: epoch, Round: round,
-			Payload: &rctypes.Payload{Version: 2, HandoffRecords: [][]byte{record.Bytes()},
+		block := &rctypes.BlockData{Version: 3, Epoch: epoch, Round: round,
+			Payload: &rctypes.Payload{Version: 3, HandoffRecords: [][]byte{record.Bytes()},
 				Requests: []*rctypes.IRChangeReq{{Partition: 9, Shard: shardIDs[0]}, {Partition: 9, Shard: shardIDs[1]}}},
 			Qc: &rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{RoundNumber: round - 1,
 				Epoch: epoch, CurrentRootHash: prior.RootHash}}}
@@ -546,8 +546,8 @@ func TestTwoConsecutiveRootHandoffsRestartAtEachPhase(t *testing.T) {
 		t.Helper()
 		prior, err := s.Block(round - 1)
 		require.NoError(t, err)
-		block := &rctypes.BlockData{Version: 2, Epoch: epoch, Round: round,
-			Payload: &rctypes.Payload{Version: 2, Requests: []*rctypes.IRChangeReq{{Partition: 8}}},
+		block := &rctypes.BlockData{Version: 3, Epoch: epoch, Round: round,
+			Payload: &rctypes.Payload{Version: 3, Requests: []*rctypes.IRChangeReq{{Partition: 8}}},
 			Qc: &rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{RoundNumber: round - 1,
 				Epoch: epoch, CurrentRootHash: prior.RootHash}}}
 		_, err = s.Add(block, mockIRVerifier{verify: func(uint64, *rctypes.IRChangeReq) (*types.InputRecord, error) {
@@ -559,8 +559,8 @@ func TestTwoConsecutiveRootHandoffsRestartAtEachPhase(t *testing.T) {
 		t.Helper()
 		prior, err := s.Block(round - 1)
 		require.NoError(t, err)
-		_, err = s.Add(&rctypes.BlockData{Version: 2, Epoch: 2, Round: round,
-			Payload: &rctypes.Payload{Version: 2, Requests: []*rctypes.IRChangeReq{{Partition: 8}}},
+		_, err = s.Add(&rctypes.BlockData{Version: 3, Epoch: 2, Round: round,
+			Payload: &rctypes.Payload{Version: 3, Requests: []*rctypes.IRChangeReq{{Partition: 8}}},
 			Qc:      &rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{RoundNumber: round - 1, Epoch: 2, CurrentRootHash: prior.RootHash}}},
 			mockIRVerifier{verify: func(uint64, *rctypes.IRChangeReq) (*types.InputRecord, error) {
 				return &types.InputRecord{Version: 1, RoundNumber: round, BlockHash: bytes.Repeat([]byte{0x77}, 32)}, nil
@@ -568,7 +568,7 @@ func TestTwoConsecutiveRootHandoffsRestartAtEachPhase(t *testing.T) {
 		require.NoError(t, err)
 		// a Commit must find the frozen parent in the COMMITTED root: commit the acknowledging block through an empty child
 		acked := mustBlock(t, s, round)
-		_, err = s.Add(&rctypes.BlockData{Version: 2, Epoch: 2, Round: round + 1, Payload: &rctypes.Payload{Version: 2},
+		_, err = s.Add(&rctypes.BlockData{Version: 3, Epoch: 2, Round: round + 1, Payload: &rctypes.Payload{Version: 3},
 			Qc: &rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{RoundNumber: round, Epoch: 2, CurrentRootHash: acked.RootHash}}}, nil)
 		require.NoError(t, err)
 		_, err = s.blockTree.Commit(&rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{RoundNumber: round + 1, ParentRoundNumber: round, Epoch: 2},
@@ -618,8 +618,8 @@ func TestTwoConsecutiveRootHandoffsRestartAtEachPhase(t *testing.T) {
 		// Certify H, install the successor anchor, then restart before its
 		// first ordinary block and the next changed committee's handoff.
 		prior := mustBlock(t, s, base+2)
-		_, err = s.Add(&rctypes.BlockData{Version: 2, Epoch: epoch, Round: base + 3,
-			Payload: &rctypes.Payload{Version: 2}, Qc: &rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{
+		_, err = s.Add(&rctypes.BlockData{Version: 3, Epoch: epoch, Round: base + 3,
+			Payload: &rctypes.Payload{Version: 3}, Qc: &rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{
 				RoundNumber: base + 2, Epoch: epoch, CurrentRootHash: prior.RootHash}}}, nil)
 		require.NoError(t, err)
 		suffix := mustBlock(t, s, base+3)
@@ -642,8 +642,8 @@ func TestTwoConsecutiveRootHandoffsRestartAtEachPhase(t *testing.T) {
 		require.NoError(t, err)
 		predecessor = body
 		restart()
-		first, err := s.Add(&rctypes.BlockData{Version: 2, Epoch: epoch + 1, Round: genesis.Start,
-			Anchor: anchor, Payload: &rctypes.Payload{Version: 2, Requests: []*rctypes.IRChangeReq{
+		first, err := s.Add(&rctypes.BlockData{Version: 3, Epoch: epoch + 1, Round: genesis.Start,
+			Anchor: anchor, Payload: &rctypes.Payload{Version: 3, Requests: []*rctypes.IRChangeReq{
 				{Partition: 9, Shard: shardIDs[0]}, {Partition: 9, Shard: shardIDs[1]},
 			}}}, mockIRVerifier{verify: func(_ uint64, _ *rctypes.IRChangeReq) (*types.InputRecord, error) {
 			return &types.InputRecord{Version: 1, RoundNumber: genesis.Start,
@@ -704,8 +704,8 @@ func TestCommittedAbortReplayRetainsPhaseAndResumesEVMRequests(t *testing.T) {
 	require.NoError(t, err)
 	parent, err := s.Block(2)
 	require.NoError(t, err)
-	abortBlock := &rctypes.BlockData{Version: 2, Round: 3, Epoch: 1,
-		Payload: &rctypes.Payload{Version: 2, HandoffRecords: [][]byte{abort.Bytes(), proof},
+	abortBlock := &rctypes.BlockData{Version: 3, Round: 3, Epoch: 1,
+		Payload: &rctypes.Payload{Version: 3, HandoffRecords: [][]byte{abort.Bytes(), proof},
 			Requests: []*rctypes.IRChangeReq{{Partition: 8}}},
 		Qc: &rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{RoundNumber: 2, Epoch: 1, CurrentRootHash: parent.RootHash}}}
 	_, err = s.Add(abortBlock, mockIRVerifier{verify: func(round uint64, _ *rctypes.IRChangeReq) (*types.InputRecord, error) {
@@ -723,8 +723,8 @@ func TestCommittedAbortReplayRetainsPhaseAndResumesEVMRequests(t *testing.T) {
 	require.NoError(t, err, "recovery after durable Abort retains the authenticated phase")
 	root := restarted.blockTree.Root()
 	require.Equal(t, "aborted", root.ShardState.Control.Phase)
-	block := &rctypes.BlockData{Version: 2, Round: 4, Epoch: 1,
-		Payload: &rctypes.Payload{Version: 2, Requests: []*rctypes.IRChangeReq{{Partition: 8}}},
+	block := &rctypes.BlockData{Version: 3, Round: 4, Epoch: 1,
+		Payload: &rctypes.Payload{Version: 3, Requests: []*rctypes.IRChangeReq{{Partition: 8}}},
 		Qc:      &rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{RoundNumber: 3, Epoch: 1, CurrentRootHash: root.RootHash}}}
 	_, err = restarted.Add(block, mockIRVerifier{verify: func(round uint64, _ *rctypes.IRChangeReq) (*types.InputRecord, error) {
 		return &types.InputRecord{Version: 1, RoundNumber: round, BlockHash: bytes.Repeat([]byte{4}, 32)}, nil
@@ -742,7 +742,7 @@ func TestLegacyAddRejectsProfileTwoVersion(t *testing.T) {
 	require.NoError(t, err)
 	for _, blockVersion := range []types.Version{1, 2} {
 		block := &rctypes.BlockData{Version: blockVersion, Round: 2, Epoch: 1,
-			Payload: &rctypes.Payload{Version: 2},
+			Payload: &rctypes.Payload{Version: 3},
 			Qc:      &rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{RoundNumber: 1, Epoch: 1, CurrentRootHash: parent.RootHash}}}
 		_, err := s.Add(block, nil)
 		require.ErrorIs(t, err, ErrNetworkProfile)
@@ -831,7 +831,7 @@ func TestFourRootNodesRefusePayloadQCOnCommittedBranch(t *testing.T) {
 			addProfileBlock(t, s, 2, [][]byte{record("prepare", 2, 7, zero, body, zero)})
 			addProfileBlock(t, s, 3, [][]byte{record("freeze", 3, 7, frozen, body, zero)})
 			addProfileBlock(t, s, 4, [][]byte{record("commit", 4, 7, frozen, body, tr)})
-			proposal := &rctypes.BlockData{Version: 2, Round: 5, Epoch: 1, Payload: &rctypes.Payload{Version: 2, HandoffRecords: [][]byte{record("abort", 5, 8, frozen, body, zero)}},
+			proposal := &rctypes.BlockData{Version: 3, Round: 5, Epoch: 1, Payload: &rctypes.Payload{Version: 3, HandoffRecords: [][]byte{record("abort", 5, 8, frozen, body, zero)}},
 				Qc: &rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{RoundNumber: 4, Epoch: 1}}}
 			_, err := s.Add(proposal, nil)
 			require.ErrorIs(t, err, ErrHandoffSuffix)
@@ -907,14 +907,14 @@ func TestHandoffIsolatedGuards(t *testing.T) {
 		addProfileBlock(t, s, 2, [][]byte{record("prepare", 2, 7, zero, body, zero)})
 		addProfileBlock(t, s, 3, [][]byte{record("freeze", 3, 7, frozen, body, zero)})
 		h := addProfileBlock(t, s, 4, [][]byte{record("commit", 4, 7, frozen, body, tr)})
-		block := &rctypes.BlockData{Version: 2, Round: 5, Epoch: 1, Payload: &rctypes.Payload{Version: 2,
+		block := &rctypes.BlockData{Version: 3, Round: 5, Epoch: 1, Payload: &rctypes.Payload{Version: 3,
 			HandoffRecords: [][]byte{record("abort", 5, 8, frozen, body, zero)}}}
 		_, err := h.Extend(block, nil, emptyOrchestration(), crypto.SHA256, logger.New(t))
 		require.ErrorIs(t, err, ErrHandoffSuffix)
 	})
 	t.Run("control_partition_request", func(t *testing.T) {
 		s := profileStore(t)
-		block := &rctypes.BlockData{Version: 2, Round: 2, Epoch: 1, Payload: &rctypes.Payload{Version: 2,
+		block := &rctypes.BlockData{Version: 3, Round: 2, Epoch: 1, Payload: &rctypes.Payload{Version: 3,
 			Requests: []*rctypes.IRChangeReq{{Partition: rctypes.ControlPartition}}}, Qc: &rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{RoundNumber: 1, Epoch: 1}}}
 		_, err := s.Add(block, nil)
 		require.ErrorIs(t, err, rctypes.ErrControlPartition)
@@ -967,7 +967,7 @@ func TestProfileHandoffReloadRejectsForgedSuffixPayload(t *testing.T) {
 	require.True(t, isSuffix)
 	forged := *suffix
 	block := *suffix.BlockData
-	block.Payload = &rctypes.Payload{Version: 2, HandoffRecords: [][]byte{record("abort", 5, 8, frozen, body, zero)}}
+	block.Payload = &rctypes.Payload{Version: 3, HandoffRecords: [][]byte{record("abort", 5, 8, frozen, body, zero)}}
 	forged.BlockData = &block
 	require.NoError(t, s.storage.WriteBlock(&forged, false))
 	_, err = New(crypto.SHA256, s.storage, s.orchestration, logger.New(t), ProfileHandoff)
@@ -982,7 +982,7 @@ func TestProfileHandoffRejectsEpochJumpOnEveryBlockPath(t *testing.T) {
 	addProfileBlock(t, s, 2, [][]byte{record("prepare", 2, 7, zero, body, zero)})
 	addProfileBlock(t, s, 3, [][]byte{record("freeze", 3, 7, frozen, body, zero)})
 	h := addProfileBlock(t, s, 4, [][]byte{record("commit", 4, 7, frozen, body, tr)})
-	jump := &rctypes.BlockData{Version: 2, Round: 5, Epoch: 2, Payload: &rctypes.Payload{Version: 2},
+	jump := &rctypes.BlockData{Version: 3, Round: 5, Epoch: 2, Payload: &rctypes.Payload{Version: 3},
 		Qc: &rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{RoundNumber: 4, Epoch: 1, CurrentRootHash: h.RootHash}}}
 	_, err := s.Add(jump, nil)
 	require.EqualError(t, err, ErrNetworkProfile.Error())
@@ -1036,8 +1036,8 @@ func evmRequestBlock(s *BlockStore, round uint64, records [][]byte, hash []byte)
 	if err != nil {
 		return err
 	}
-	block := &rctypes.BlockData{Version: 2, Round: round, Epoch: 1,
-		Payload: &rctypes.Payload{Version: 2, Requests: []*rctypes.IRChangeReq{{Partition: 8}}, HandoffRecords: records},
+	block := &rctypes.BlockData{Version: 3, Round: round, Epoch: 1,
+		Payload: &rctypes.Payload{Version: 3, Requests: []*rctypes.IRChangeReq{{Partition: 8}}, HandoffRecords: records},
 		Qc:      &rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{RoundNumber: round - 1, Epoch: 1, CurrentRootHash: parent.RootHash}}}
 	_, err = s.Add(block, mockIRVerifier{verify: func(_ uint64, _ *rctypes.IRChangeReq) (*types.InputRecord, error) {
 		return &types.InputRecord{Version: 1, RoundNumber: round, BlockHash: bytes.Clone(hash)}, nil
@@ -1069,8 +1069,8 @@ func TestPrepareFreezesTheEVMShardAndAbortLiftsItLikeFreeze(t *testing.T) {
 	// An aggregator shard stays live.
 	parent, err := s.Block(3)
 	require.NoError(t, err)
-	_, err = s.Add(&rctypes.BlockData{Version: 2, Round: 4, Epoch: 1,
-		Payload: &rctypes.Payload{Version: 2, Requests: []*rctypes.IRChangeReq{{Partition: aggregators[0].PartitionID}}},
+	_, err = s.Add(&rctypes.BlockData{Version: 3, Round: 4, Epoch: 1,
+		Payload: &rctypes.Payload{Version: 3, Requests: []*rctypes.IRChangeReq{{Partition: aggregators[0].PartitionID}}},
 		Qc:      &rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{RoundNumber: 3, Epoch: 1, CurrentRootHash: parent.RootHash}}},
 		mockIRVerifier{verify: func(uint64, *rctypes.IRChangeReq) (*types.InputRecord, error) {
 			return &types.InputRecord{Version: 1, RoundNumber: 4, BlockHash: bytes.Repeat([]byte{0x60}, 32)}, nil
@@ -1115,8 +1115,8 @@ func TestBusyEVMCanBeHandedOffBecausePrepareFreezesIt(t *testing.T) {
 		planned = stale
 		parent, err := s.Block(7)
 		require.NoError(t, err)
-		_, err = s.Add(&rctypes.BlockData{Version: 2, Round: 8, Epoch: 1,
-			Payload: &rctypes.Payload{Version: 2, HandoffRecords: [][]byte{record("freeze", 8, 15, frozenID, body, zero)}},
+		_, err = s.Add(&rctypes.BlockData{Version: 3, Round: 8, Epoch: 1,
+			Payload: &rctypes.Payload{Version: 3, HandoffRecords: [][]byte{record("freeze", 8, 15, frozenID, body, zero)}},
 			Qc:      &rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{RoundNumber: 7, Epoch: 1, CurrentRootHash: parent.RootHash}}}, nil)
 		require.ErrorIs(t, err, ErrHandoffRecord)
 		planned = bytes.Clone(latest)
@@ -1161,8 +1161,8 @@ func TestUnendorsedPrepareLapsesAndRepeatedPreparesCannotFreezeContinuously(t *t
 		round := prepared + lapse + 2
 		parent, err := s.Block(round - 1)
 		require.NoError(t, err)
-		_, err = s.Add(&rctypes.BlockData{Version: 2, Round: round, Epoch: 1,
-			Payload: &rctypes.Payload{Version: 2, HandoffRecords: [][]byte{recordAttempt("freeze", round, prepared+8, 0, bytes.Repeat([]byte{2}, 32), body, zero)}},
+		_, err = s.Add(&rctypes.BlockData{Version: 3, Round: round, Epoch: 1,
+			Payload: &rctypes.Payload{Version: 3, HandoffRecords: [][]byte{recordAttempt("freeze", round, prepared+8, 0, bytes.Repeat([]byte{2}, 32), body, zero)}},
 			Qc:      &rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{RoundNumber: round - 1, Epoch: 1, CurrentRootHash: parent.RootHash}}}, nil)
 		require.ErrorIs(t, err, ErrHandoffRecord)
 	})
@@ -1173,8 +1173,8 @@ func TestUnendorsedPrepareLapsesAndRepeatedPreparesCannotFreezeContinuously(t *t
 	prepareAt := func(round, attempt uint64) error {
 		parent, err := s.Block(round - 1)
 		require.NoError(t, err)
-		_, err = s.Add(&rctypes.BlockData{Version: 2, Round: round, Epoch: 1,
-			Payload: &rctypes.Payload{Version: 2, HandoffRecords: [][]byte{recordAttempt("prepare", round, round+8, attempt, zero, bytes.Repeat([]byte{byte(attempt + 5)}, 32), zero)}},
+		_, err = s.Add(&rctypes.BlockData{Version: 3, Round: round, Epoch: 1,
+			Payload: &rctypes.Payload{Version: 3, HandoffRecords: [][]byte{recordAttempt("prepare", round, round+8, attempt, zero, bytes.Repeat([]byte{byte(attempt + 5)}, 32), zero)}},
 			Qc:      &rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{RoundNumber: round - 1, Epoch: 1, CurrentRootHash: parent.RootHash}}}, nil)
 		return err
 	}
@@ -1227,8 +1227,8 @@ func TestPrepareBindsTheFrozenParentAndFreezeMustNameIt(t *testing.T) {
 	addAt := func(t *testing.T, s *BlockStore, round uint64, rec []byte) error {
 		parent, err := s.Block(round - 1)
 		require.NoError(t, err)
-		_, err = s.Add(&rctypes.BlockData{Version: 2, Round: round, Epoch: 1,
-			Payload: &rctypes.Payload{Version: 2, HandoffRecords: [][]byte{rec}},
+		_, err = s.Add(&rctypes.BlockData{Version: 3, Round: round, Epoch: 1,
+			Payload: &rctypes.Payload{Version: 3, HandoffRecords: [][]byte{rec}},
 			Qc:      &rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{RoundNumber: round - 1, Epoch: 1, CurrentRootHash: parent.RootHash}}}, nil)
 		return err
 	}
@@ -1323,8 +1323,8 @@ func TestPrepareActivationFloorIsEnforcedByBlockValidation(t *testing.T) {
 			NextBodyID: body, ActivationRound: activation, SuccessorTRHash: zero, Kind: "prepare"}).Bytes()
 		parent, err := s.Block(round - 1)
 		require.NoError(t, err)
-		_, err = s.Add(&rctypes.BlockData{Version: 2, Round: round, Epoch: 1,
-			Payload: &rctypes.Payload{Version: 2, HandoffRecords: [][]byte{rec}},
+		_, err = s.Add(&rctypes.BlockData{Version: 3, Round: round, Epoch: 1,
+			Payload: &rctypes.Payload{Version: 3, HandoffRecords: [][]byte{rec}},
 			Qc:      &rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{RoundNumber: round - 1, Epoch: 1, CurrentRootHash: parent.RootHash}}}, nil)
 		return err
 	}

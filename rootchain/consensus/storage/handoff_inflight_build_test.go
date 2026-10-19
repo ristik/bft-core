@@ -333,7 +333,7 @@ func TestMembershipChangeDuringPayloadConstructionCannotCertifyTheProposalAndThe
 			return req.Requests[0].InputRecord, nil
 		}}
 		extend := func(reqs ...*rctypes.IRChangeReq) (*ExecutedBlock, error) {
-			return freezeBlock.Extend(&rctypes.BlockData{Version: 2, Epoch: 1, Round: 4, Payload: &rctypes.Payload{Version: 2, Requests: reqs}},
+			return freezeBlock.Extend(&rctypes.BlockData{Version: 3, Epoch: 1, Round: 4, Payload: &rctypes.Payload{Version: 3, Requests: reqs}},
 				verify, f.orch, crypto.SHA256, logger.New(t))
 		}
 		_, err := extend(signedRequest(t, f.shard, evm))

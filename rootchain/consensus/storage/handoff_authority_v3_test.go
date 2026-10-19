@@ -274,7 +274,7 @@ func freezeBlock(t *testing.T, s *BlockStore, round uint64, records [][]byte) *r
 	t.Helper()
 	parent, err := s.Block(round - 1)
 	require.NoError(t, err)
-	return &rctypes.BlockData{Version: 2, Round: round, Epoch: 1, Payload: &rctypes.Payload{Version: 2, HandoffRecords: records},
+	return &rctypes.BlockData{Version: 3, Round: round, Epoch: 1, Payload: &rctypes.Payload{Version: 3, HandoffRecords: records},
 		Qc: &rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{RoundNumber: round - 1, Epoch: 1, CurrentRootHash: parent.RootHash}}}
 }
 

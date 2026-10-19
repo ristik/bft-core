@@ -64,6 +64,9 @@ func New(hashAlgo crypto.Hash, db PersistentStore, orchestration Orchestration, 
 	if err != nil {
 		return nil, err
 	}
+	if err := pinProfile(db, profile); err != nil {
+		return nil, err
+	}
 	if err := repairCommittedAssignment(db, orchestration, hashAlgo, profile); err != nil {
 		return nil, fmt.Errorf("reconciling committed EVM assignment: %w", err)
 	}
@@ -99,6 +102,9 @@ func NewFromState(hash crypto.Hash, block *abdrc.CommittedBlock, db PersistentSt
 
 	profile, err := profileVersion(networkProfile)
 	if err != nil {
+		return nil, refusedBeforeWrite{err}
+	}
+	if err := pinProfile(db, profile); err != nil {
 		return nil, refusedBeforeWrite{err}
 	}
 	rootNode, err := NewRootBlock(block, hash, orchestration, profile)
