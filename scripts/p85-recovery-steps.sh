@@ -549,11 +549,12 @@ p85_restart_validator() { # id
 
 # The shard-configuration transitions the roots executed over the whole run (epoch skipping, ristik/bft-core#640): the roots' own execution
 # log is the evidence, and it must not be satisfiable by silence. (1) No root ever refused a block for a switching shard's request, saw a
-# configuration that does not advance the applied epoch, or met the old "epochs must be consecutive" halt. (2) The switches the P85 flow is known to
-# produce are there: the EVM shard (partition 8) switches at the first successor block of the K->J handoff and again at the recovery's, so each
-# founding root (1..4) logged at least those two, one epoch up each, as one chain; the joiner (5, restored into epoch 2's chain) logged at least
-# one. (3) The founding roots executed the same blocks: the (from, to) pairs and the root rounds they switched at are identical on all of them,
-# and nothing the joiner logged is a switch the founders did not.
+# configuration that does not advance the applied epoch, or met the old "epochs must be consecutive" halt. (2) The EVM shard (partition 8)
+# switched at the K->J handoff and again at the recovery: the logged (from, to) pairs form one chain of at least two, one epoch up each, and each
+# pair was executed by a quorum of the running roots (3 of 5; a root that entered a later epoch by installing a checkpoint did not execute the
+# first block of the epochs before it, so it legitimately lacks that pair). (3) What the roots executed agrees: for every pair the LAST root round
+# at which a root switched is the same on all roots that logged it (an earlier line is a proposal that never became the block: a timed-out round
+# is executed by the roots that voted it, then proposed again from the same parent). (4) Every running root logged at least one switch.
 p85_epoch_switches() {
   local f out="$H3_DIR/shard-config-switches.txt" n
   : >"$out"
@@ -565,7 +566,7 @@ p85_epoch_switches() {
     fi
     grep -a 'msg="shard configuration switched"' "$f" | sed -E 's/^.*partition=([0-9A-Za-z]+) fromEpoch=([0-9]+) toEpoch=([0-9]+) rootRound=([0-9]+).*$/\1 \2 \3 \4/' | sed "s#^#$(basename "$(dirname "$f")") #" >>"$out"
   done
-  python3 - "$out" <<'PY' || return 1
+  python3 - "$out" $(for f in test-nodes/root*/debug.log; do [ -f "$f" ] && basename "$(dirname "$f")"; done) <<'PY' || return 1
 import sys, collections
 rows = [l.split() for l in open(sys.argv[1]) if l.strip()]
 if any(len(r) != 5 for r in rows):
@@ -574,28 +575,27 @@ bad = [r for r in rows if int(r[3]) != int(r[2]) + 1]
 if bad:
     sys.exit("a logged shard-configuration switch is not one epoch up: %r" % bad[:3])
 EVM = "00000008"
-pairs = collections.defaultdict(lambda: collections.defaultdict(set))   # root -> (from, to) -> rounds
+roots = sorted({r[0] for r in rows} | set(sys.argv[2:]))
+pairs = collections.defaultdict(lambda: collections.defaultdict(set))   # (from, to) -> root -> rounds
 for root, part, f, t, rnd in rows:
     if part == EVM:
-        pairs[root][(int(f), int(t))].add(int(rnd))
-founders = ["root1", "root2", "root3", "root4"]
-for r in founders:
-    chain = sorted(pairs[r])
-    if len(chain) < 2:
-        sys.exit("%s logged %d EVM shard-configuration switch(es), the K->J handoff and the recovery are two: %r (no switch logged is a failure, not a pass)" % (r, len(chain), chain))
-    if any(chain[i][1] != chain[i + 1][0] for i in range(len(chain) - 1)):
-        sys.exit("%s: the EVM switches do not form one chain: %r" % (r, chain))
-if len(pairs["root5"]) < 1:
-    sys.exit("the joiner (root5) logged no EVM shard-configuration switch")
-ref = pairs["root1"]
-for r in founders[1:]:
-    if {k: v for k, v in pairs[r].items()} != {k: v for k, v in ref.items()}:
-        sys.exit("%s and root1 executed different EVM switches: %r vs %r" % (r, dict(pairs[r]), dict(ref)))
-for k in pairs["root5"]:
-    if k not in ref:
-        sys.exit("the joiner logged an EVM switch %r that the founding roots did not" % (k,))
-print("EVM shard-configuration switches on roots 1..4 (identical, one chain): %s; the joiner logged %s" % (
-    ", ".join("%d->%d@%s" % (k[0], k[1], sorted(v)) for k, v in sorted(ref.items())), sorted(pairs["root5"])))
+        pairs[(int(f), int(t))][root].add(int(rnd))
+chain = sorted(pairs)
+if len(chain) < 2:
+    sys.exit("the roots logged %d EVM shard-configuration switch pair(s), the K->J handoff and the recovery are two: %r (no switch logged is a failure, not a pass)" % (len(chain), chain))
+if any(chain[i][1] != chain[i + 1][0] for i in range(len(chain) - 1)):
+    sys.exit("the EVM switches do not form one chain: %r" % chain)
+need = 3
+for pair in chain:
+    if len(pairs[pair]) < need:
+        sys.exit("EVM switch %d->%d was logged by %d root(s) %s, fewer than the quorum %d" % (pair[0], pair[1], len(pairs[pair]), sorted(pairs[pair]), need))
+    last = {root: max(rounds) for root, rounds in pairs[pair].items()}
+    if len(set(last.values())) != 1:
+        sys.exit("EVM switch %d->%d: the roots' last switch rounds differ: %r" % (pair[0], pair[1], last))
+silent = [r for r in sys.argv[2:] if not any(r in pairs[p] for p in chain)]
+if silent:
+    sys.exit("running root(s) %s logged no EVM shard-configuration switch" % silent)
+print("EVM shard-configuration switches: %s" % "; ".join("%d->%d at round %d on %s" % (p[0], p[1], max(max(v) for v in pairs[p].values()), sorted(pairs[p])) for p in chain))
 PY
 }
 
