@@ -71,7 +71,7 @@ func msgToRecoveryInfo(msg any) (toRound uint64, signatures map[string]hex.Bytes
 		toRound = mt.Timeout.HighQc.VoteInfo.RoundNumber
 		signatures = mt.Timeout.HighQc.Signatures
 	case *drctypes.QuorumCert:
-		toRound = mt.GetParentRound()
+		toRound = mt.GetRound() // the block the QC certifies: the QC does not match anything shorter (a response ending at the parent fails the trigger again)
 		signatures = mt.Signatures
 	default:
 		return 0, nil, fmt.Errorf("unknown message type, cannot be used for recovery: %T", mt)

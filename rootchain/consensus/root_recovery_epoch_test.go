@@ -163,11 +163,12 @@ func recoverTo(t *testing.T, cm *ConsensusManager, state *abdrc.StateMsg) error 
 			to = b.Round
 		}
 	}
-	_, err := cm.recovery.Set(&rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{RoundNumber: to + 1, ParentRoundNumber: to, Epoch: cm.trustBase.Load().GetEpoch()}})
+	_, err := cm.recovery.Set(&rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{RoundNumber: to, ParentRoundNumber: to - 1, Epoch: cm.trustBase.Load().GetEpoch()}})
 	require.NoError(t, err)
 	err = cm.onStateResponse(context.Background(), state)
-	// The trigger of this helper is a bare QC for the round after the state: its block is not part of any state, and a QC whose block is missing is
-	// answered with a new recovery request after the state is installed (the error says so). The state itself was installed or refused before.
+	// The trigger of this helper is a bare QC for the last round of the state (a recovery targets the block the QC certifies, so the state must reach it):
+	// the QC is not a real one and is not accepted on top of the installed state, which is answered with a new recovery request (the error says so).
+	// The state itself was installed or refused before.
 	if err != nil && errors.Is(err, errTriggerQCNotAccepted) {
 		cm.recovery.Clear() // the new recovery the unaccepted trigger started is not what the test is about
 		return nil

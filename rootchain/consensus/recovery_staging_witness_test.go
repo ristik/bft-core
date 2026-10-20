@@ -47,7 +47,7 @@ func TestRecoveryFetchesThePendingWitnessesBeforeTheStaging(t *testing.T) {
 		heldAtStaging = cm.blockStore.HasWitness(hash)
 		return errStop
 	}
-	_, err := cm.recovery.Set(&drctypes.QuorumCert{VoteInfo: &drctypes.RoundInfo{RoundNumber: pending.Round + 1, ParentRoundNumber: pending.Round, Epoch: head.Epoch}})
+	_, err := cm.recovery.Set(&drctypes.QuorumCert{VoteInfo: &drctypes.RoundInfo{RoundNumber: pending.Round, ParentRoundNumber: pending.Round - 1, Epoch: head.Epoch}})
 	require.NoError(t, err)
 	err = cm.onStateResponse(context.Background(), state)
 	// the state itself may be refused earlier by verification in this fixture; what is pinned is the order of fetch and staging when it gets that far
@@ -67,7 +67,7 @@ func TestRecoveryFetchesThePendingWitnessesBeforeTheStaging(t *testing.T) {
 	staged := false
 	cm.stageRecovery = func(*abdrc.StateMsg) error { staged = true; return nil }
 	cm.recovery.Clear() // the refused state left the root in recovery
-	_, err = cm.recovery.Set(&drctypes.QuorumCert{VoteInfo: &drctypes.RoundInfo{RoundNumber: pending.Round + 1, ParentRoundNumber: pending.Round, Epoch: head.Epoch}})
+	_, err = cm.recovery.Set(&drctypes.QuorumCert{VoteInfo: &drctypes.RoundInfo{RoundNumber: pending.Round, ParentRoundNumber: pending.Round - 1, Epoch: head.Epoch}})
 	require.NoError(t, err)
 	err = cm.onStateResponse(context.Background(), state)
 	require.ErrorIs(t, err, storage.ErrWitnessUnavailable)
