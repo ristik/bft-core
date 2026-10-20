@@ -179,6 +179,21 @@ anyage_step_l1b() {
   echo "L1b: saved proofs verify in the current epoch with O - r = $((o - r)) > $ANYAGE_WINDOW (retired window)"
 }
 
+# #526 step 4 (a multi-shard aggregator): a second token whose history spans the shards, consolidated by the SDK and redeemed once; the per-SID envelope of the same token is
+# the control. Asserted from the driver's record: the consolidated path was used, K = m anchors (one per shard) under ONE seal (S = 1), the per-SID control has more
+# distinct seals or equal, the vault credited exactly the locked amount, and the master round was within the registry's usable origin when it was accepted.
+anyage_step_consolidated() {
+  local out j; out=$(anyage_dir)/consolidated; mkdir -p "$out"
+  anyage_nbp consolidated "$PWD/test-nodes/lane-config.json" "$out" 2>&1 | tee "$out/consolidated.log" || return 1
+  j=$out/consolidated.json; [ -s "$j" ] || { echo "the driver wrote no consolidated.json" >&2; return 1; }
+  jq -e --argjson m "${aggShards:-1}" '.path.kind == "consolidated" and .shards == $m and .consolidated.K == $m and (.consolidated.S | tonumber) == 1 and (.consolidated.anchors | map(.shard) | unique | length) == $m
+      and (.perSid.K | tonumber) >= 1 and (.release.credited | tostring) == (.amountWei | tostring) and (.release.redeem.gasUsed | tonumber) > 0 and (.release.claim.gasUsed | tonumber) > 0' "$j" >/dev/null \
+    || { echo "consolidated.json does not show a consolidated redemption (K = m, S = 1, credited, claimed)" >&2; jq -c '{path, shards, consolidated: {K: .consolidated.K, S: .consolidated.S}, perSid: {K: .perSid.K, S: .perSid.S}}' "$j" >&2; return 1; }
+  # the master seal against the usable origin: the registry accepted the envelope (the redemption succeeded), and the rounds are recorded
+  jq -r '"consolidated: K=\(.consolidated.K) E=\(.consolidated.E) S=\(.consolidated.S) Q=\(.consolidated.Q), envelope \(.consolidated.envelopeBytes) B, gate \(.consolidated.gate.total), estimated gas \(.consolidated.estimatedGas // .consolidated.estimateError), redeem gas used \(.release.redeem.gasUsed)\nper-SID control: K=\(.perSid.K) E=\(.perSid.E) S=\(.perSid.S) Q=\(.perSid.Q), envelope \(.perSid.envelopeBytes) B, gate \(.perSid.gate.total), estimated gas \(.perSid.estimatedGas // .perSid.estimateError)\nmaster round \(.masterRound), registry clock at acceptance \(.usableOrigin.atAcceptance.clockRound), usable epoch \(.usableOrigin.atAcceptance.usableEpoch)"' "$j" | tee "$out/summary.txt"
+  echo "consolidated redeem: K = m anchors under one seal; the per-SID control is in $out/summary.txt"
+}
+
 # Between the activation and the acknowledgement the shard is frozen: record the block the root froze (and the cursors) for L2.
 anyage_step_frozen() {
   local out; out=$(anyage_dir); export ANYAGE_RPC; ANYAGE_RPC=$(p85_eth)
