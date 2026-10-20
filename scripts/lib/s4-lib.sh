@@ -119,21 +119,45 @@ s4_assignments() {
 # one signed transaction of a key, sent to every online validator of the lane's EVM chain (the chain refuses eth_estimateGas: "bound parent hash mismatch", so no
 # cast send) and waited for until its receipt shows success; the receipt (JSON) goes to the file
 s4_send() { # private-key(hex) nonce to value data gas-limit receipt-file
-  local id first sent expected= i receipt status
-  for id in $H3_ONLINE; do
-    sent=$(lane_go_run evmtx -send -eth-url "http://127.0.0.1:$((rethEthBase+id-1))" -chain-id "${M2_CHAIN_ID:-31337}" -private-key "${1#0x}" -nonce "$2" -to "$3" -value "$4" -data "$5" -gas-limit "$6" 2>&1) || { echo "$sent" >&2; return 1; }
-    [ -z "$expected" ] || [ "$expected" = "$sent" ] || { echo "validators disagree on the transaction hash" >&2; return 1; }
-    expected=$sent
-  done
-  first=${H3_ONLINE%% *}
-  for i in $(seq 1 180); do
-    receipt=$(rpc "http://127.0.0.1:$((rethEthBase+first-1))" eth_getTransactionReceipt "[\"$expected\"]")
-    status=$(echo "$receipt" | pyget "['result']['status']" 2>/dev/null)
-    if [ "$status" = 0x1 ]; then echo "$receipt" | jq .result >"$7"; return 0; fi
-    [ "$status" != 0x0 ] || { echo "transaction $expected reverted" >&2; return 1; }
+  local id sent expected= i receipt status n=0
+  s4_send_all() { # the same signed bytes (evmtx signs deterministically) to every online validator: a resend is "already known" where the first send arrived
+    expected=
+    for id in $H3_ONLINE; do
+      sent=$(lane_go_run evmtx -send -eth-url "http://127.0.0.1:$((rethEthBase+id-1))" -chain-id "${M2_CHAIN_ID:-31337}" -private-key "${1#0x}" -nonce "$2" -to "$3" -value "$4" -data "$5" -gas-limit "$6" 2>&1) \
+        || { case "$sent" in *"already known"*|*"known transaction"*|*"already exists"*) sent=$(echo "$sent" | grep -o '0x[0-9a-f]\{64\}' | head -1) ;; *) echo "$sent" >&2; return 1 ;; esac; }
+      [ -z "$expected" ] || [ -z "$sent" ] || [ "$expected" = "$sent" ] || { echo "validators disagree on the transaction hash" >&2; return 1; }
+      [ -n "$sent" ] && expected=$sent
+    done
+  }
+  s4_send_all "$@" || return 1
+  for i in $(seq 1 300); do
+    # a receipt on ANY online validator (each applies the same certified blocks)
+    for id in $H3_ONLINE; do
+      receipt=$(rpc "http://127.0.0.1:$((rethEthBase+id-1))" eth_getTransactionReceipt "[\"$expected\"]")
+      status=$(echo "$receipt" | pyget "['result']['status']" 2>/dev/null)
+      if [ "$status" = 0x1 ]; then echo "$receipt" | jq .result >"$7"; return 0; fi
+      [ "$status" != 0x0 ] || { echo "transaction $expected reverted" >&2; return 1; }
+    done
+    # still nothing: send it again every 30 s (a pool that lost it, a validator that was not yet accepting)
+    if [ $((i % 30)) = 0 ]; then n=$((n+1)); echo "s4_send: no receipt for $expected after $i s; send $((n+1))" >&2; s4_send_all "$@" || true; fi
     sleep 1
   done
-  echo "no receipt for $expected" >&2; return 1
+  echo "no receipt for $expected after 300 s" >&2; s4_diag "$expected" "$2" "$1"; return 1
+}
+
+# the state a failed wait needs to be understood from the pack (the EVM logs are not published): per online validator the head, the transaction by hash, the pool
+# counters and the sender's latest/pending nonce
+s4_diag() { # tx-hash nonce private-key
+  local id u addr
+  addr=$("${P85_CAST:-cast}" wallet address --private-key "0x${3#0x}" 2>/dev/null)
+  echo "s4_send diagnostics for $1 (nonce $2, sender $addr, H3_ONLINE='$H3_ONLINE'):" >&2
+  for id in $H3_ONLINE; do
+    u="http://127.0.0.1:$((rethEthBase+id-1))"
+    echo "  validator $id head=$(rpc "$u" eth_blockNumber '[]' | pyget "['result']") tx=$(rpc "$u" eth_getTransactionByHash "[\"$1\"]" | jq -c '.result // "null" | if type=="object" then {blockNumber,nonce,gas,maxFeePerGas} else . end' 2>/dev/null)" \
+         "txpool=$(rpc "$u" txpool_status '[]' | jq -c '.result // .error.message' 2>/dev/null) nonce_latest=$(rpc "$u" eth_getTransactionCount "[\"$addr\",\"latest\"]" | pyget "['result']") nonce_pending=$(rpc "$u" eth_getTransactionCount "[\"$addr\",\"pending\"]" | pyget "['result']") baseFee=$(rpc "$u" eth_getBlockByNumber '["latest",false]' | jq -r '.result.baseFeePerGas' 2>/dev/null)" >&2
+  done
+  for id in 1 2 3 4 5; do [ -f "test-nodes/evm$id/pid" ] && echo "  evm$id pid $(cat test-nodes/evm$id/pid) alive=$(kill -0 "$(cat test-nodes/evm$id/pid)" 2>/dev/null && echo yes || echo no)" >&2; done
+  for id in $H3_ONLINE; do echo "  evm$id log tail:" >&2; tail -n 5 "test-nodes/evm$id/debug.log" 2>/dev/null | cut -c1-240 >&2; done
 }
 
 # a fresh reporter: a new key, funded by the lane's funded account, which is neither a root key nor an owner key of any entity (the owner key only pays)
