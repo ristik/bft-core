@@ -37,6 +37,7 @@ import (
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/trustbase"
 	drctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/votesig"
+	"github.com/unicitynetwork/bft-core/rootevidence"
 	"github.com/unicitynetwork/bft-core/trusthistorystore"
 	"github.com/unicitynetwork/bft-core/utbstore"
 )
@@ -117,6 +118,7 @@ type (
 		recoveryProfile2 bool
 		utbPrevious      func(epoch uint64) (*types.RootTrustBaseV2, error)
 		utbStore         *utbstore.Store
+		evidence         *rootevidence.Observer
 		utbConfig        func(epoch uint64) (votesig.Config, error) // test seam: the authenticated signing configuration the binding consults; nil is the trust base store's
 		recoveryHistory  *trusthistorystore.Store
 		// stageRecovery, when set (tests), replaces the staged validation of a recovery state
@@ -386,6 +388,7 @@ func NewConsensusManager(
 		recoveryProfile2: optional.RecoveryProfile2,
 		utbPrevious:      optional.UTBPrevious,
 		utbStore:         optional.UTBStore,
+		evidence:         optional.Evidence,
 		recoveryHistory:  optional.RecoveryHistory,
 		witnesses:        optional.Witnesses,
 		q3:               optional.Q3,
@@ -984,6 +987,9 @@ func (x *ConsensusManager) onVoteMsg(ctx context.Context, vote *abdrc.VoteMsg) e
 	ctx, span := x.tracer.Start(ctx, "ConsensusManager.onVoteMsg", trace.WithAttributes(observability.Round(vote.VoteInfo.RoundNumber)))
 	defer span.End()
 
+	// the evidence tap sees the vote before the stale, epoch, leader and duplicate filters below: those decide what consensus uses, not what a
+	// voter signed
+	x.evidence.Offer(vote)
 	if vote.VoteInfo.RoundNumber < x.pacemaker.GetCurrentRound() {
 		x.susVotes.Add(ctx, 1, attrSetQCVoteStale)
 		return fmt.Errorf("stale vote for round %d from %s", vote.VoteInfo.RoundNumber, vote.Author)
