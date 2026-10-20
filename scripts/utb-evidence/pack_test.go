@@ -23,6 +23,9 @@ import (
 	"github.com/unicitynetwork/bft-core/network/protocol/certification"
 )
 
+// importReport is what the lane's import step writes for the root it forced to import state before the V3 handoff.
+const importReport = "root log: test-nodes/root4/debug.log, lines after 10\nstate imports (completed recovery): 1\nV3 freeze rules are not enabled: 0\nsuccessor trust-base entry cannot be derived: 0\nhandoff record outcome: msg=\"root handoff outcome\" phase=committed rootEpoch=1 rootRound=620\nhandoff record round: 620\nvote on the record block: time=2 msg=\"signed vote\" round=620 messageID=ab\n"
+
 func goBuild(t *testing.T, dir, pkg, out string) string {
 	t.Helper()
 	cmd := exec.Command("go", "build", "-o", out, pkg)
@@ -47,7 +50,7 @@ func buildPack(t *testing.T, ubft, tool string) string {
 	dir := t.TempDir()
 	chain := utbchain.New(t, 3)
 	pack := filepath.Join(dir, "pack")
-	for _, d := range []string{"manifest/aggregator", "bundle", "entries", "ucresp", "verifier", "catchup", "handoff", "proofs", "history", "sdk", "checks"} {
+	for _, d := range []string{"manifest/aggregator", "bundle", "entries", "ucresp", "verifier", "catchup", "handoff", "proofs", "history", "sdk", "checks", "state-import"} {
 		require.NoError(t, os.MkdirAll(filepath.Join(pack, d), 0o755))
 	}
 	put := func(name string, data []byte) {
@@ -158,6 +161,8 @@ func buildPack(t *testing.T, ubft, tool string) string {
 	put("sdk/client.log", []byte("before: verdict no_entry_for_epoch, certificate epoch 3, latest held 1\nafter: verdict ok; fetched from epoch 2 (held tip + 1); tip now 3\nsdk client check: PASSED\n"))
 	put("sdk/sdk-commit.txt", []byte(strings.Repeat("a", 40)+"\n"))
 	put("checks/root-logs.txt", []byte("root logs inspected: 4\nV3 freeze rules are not enabled: 0\nsuccessor trust-base entry cannot be derived: 0\n"))
+	put("state-import/import-line.txt", []byte("time=1 level=DEBUG msg=\"completed recovery\"\n"))
+	put("state-import/root4.txt", []byte(importReport))
 	return pack
 }
 
@@ -256,6 +261,18 @@ func TestEvidencePackIsCheckedByTheToolsAndEveryBadByteIsRefused(t *testing.T) {
 		"a root log count of the not-retained refusal above zero": {func(p string) {
 			write(t, p, "checks/root-logs.txt", []byte("V3 freeze rules are not enabled: 0\nsuccessor trust-base entry cannot be derived: 1\n"))
 		}, "both refusal counts at 0"},
+		"a forced import that never happened": {func(p string) {
+			write(t, p, "state-import/root4.txt", []byte(strings.Replace(importReport, "completed recovery): 1", "completed recovery): 0", 1)))
+		}, "state-import/root<N>.txt"},
+		"a refusal after the forced import": {func(p string) {
+			write(t, p, "state-import/root4.txt", []byte(strings.Replace(importReport, "not enabled: 0", "not enabled: 3", 1)))
+		}, "state-import/root<N>.txt"},
+		"no committed record outcome after the forced import": {func(p string) {
+			write(t, p, "state-import/root4.txt", []byte(strings.Replace(importReport, "phase=committed", "phase=aborted", 1)))
+		}, "state-import/root<N>.txt"},
+		"no vote on the record block": {func(p string) {
+			write(t, p, "state-import/root4.txt", []byte(strings.Replace(importReport, "signed vote", "x", 1)))
+		}, "state-import/root<N>.txt"},
 		"an empty file":  {func(p string) { write(t, p, "catchup/restart.log", nil) }, "missing or empty"},
 		"a missing file": {func(p string) { require.NoError(t, os.Remove(filepath.Join(p, "handoff/ordinary-ack.log"))) }, "missing or empty"},
 	} {

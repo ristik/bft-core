@@ -318,6 +318,76 @@ utb_root_log_report() { # OUT
   [ "$total_a" -eq 0 ] && [ "$total_b" -eq 0 ]
 }
 
+# ---- the forced state import (bft-core#671, live proof for #648) -------------------------------------------------------------------------------------------
+# One root of the genesis committee is stopped before the V3 handoff, left behind for UTB_IMPORT_GAP rounds and restarted with its store intact: the first proposal it
+# sees is ahead of its state, so it recovers by importing a peer's state (the log line "completed recovery"), in the genesis epoch. The handoff that follows must then
+# find the V3 freeze rules enabled on it (#648): after the import the root has no refusal, signs the vote on the block of the handoff record and logs the
+# committed outcome of the record.
+utb_import_root() { echo "${UTB_IMPORT_ROOT:-4}"; }
+
+# utb_import_report LOG MARKER OUT: what the lines of LOG after line MARKER show. Succeeds when the root completed a state import, never logged one of the two
+# refusals, and (the handoff step) logged the committed outcome of the epoch-1 handoff record and signed a vote at exactly the record's round.
+utb_import_report() {
+  local log=$1 marker=$2 out=$3 imports freeze succ outcome round voteline
+  [ -s "$log" ] || { echo "no log $log" >&2; return 1; }
+  tail -n +"$((marker + 1))" "$log" >"$out.lines" || return 1
+  imports=$(grep -ac 'completed recovery' "$out.lines" || true)
+  freeze=$(grep -ac 'V3 freeze rules are not enabled' "$out.lines" || true)
+  succ=$(grep -ac 'successor trust-base entry cannot be derived' "$out.lines" || true)
+  outcome=$(grep -a 'root handoff outcome' "$out.lines" | grep -a 'phase=committed' | grep -a 'rootEpoch=1 ' | head -1 || true)
+  round=$(sed -n 's/.* rootRound=\([0-9]*\).*/\1/p' <<<"$outcome")
+  # the vote is signed only after the root executed that very block: a vote at exactly the record's round shows it voted on the record-carrying block
+  voteline=$(grep -a 'msg="signed vote"' "$out.lines" | grep -a -m1 -E " round=${round:-x} " || true)
+  {
+    echo "root log: $log, lines after $marker"
+    echo "state imports (completed recovery): $imports"
+    grep -a 'completed recovery' "$out.lines" | head -3 | cut -c1-240 | sed 's/^/  /'
+    echo "V3 freeze rules are not enabled: $freeze"
+    echo "successor trust-base entry cannot be derived: $succ"
+    echo "handoff record outcome: ${outcome:+$(cut -c1-300 <<<"$outcome")}"
+    echo "handoff record round: ${round:-none}"
+    echo "vote on the record block: ${voteline:+$(cut -c1-240 <<<"$voteline")}"
+  } >"$out"
+  rm -f "$out.lines"
+  [ "$imports" -ge 1 ] && [ "$freeze" -eq 0 ] && [ "$succ" -eq 0 ] && [ -n "$round" ] && [ -n "$voteline" ]
+}
+
+# before the V3 handoff: stop the root, let the others go on UTB_IMPORT_GAP rounds, restart it in the genesis epoch with its store, wait for the state import
+utb_step_s1() {
+  local out node ref log gap start now i marker; out="$(utb_dir)/state-import"; mkdir -p "$out"
+  node=$(utb_import_root); ref=$(h3_first_root); gap=${UTB_IMPORT_GAP:-12}; log="test-nodes/root$node/debug.log"
+  [ "$node" != "$ref" ] || { echo "the root to import state must not be the reference root $ref" >&2; return 1; }
+  start=$(utb_root_round "$ref") || return 1
+  stop_pidfile "test-nodes/root$node/pid" 'ubft root-node' || return 1
+  for i in $(seq 1 50); do lsof -nP -iTCP:"$(m2_rpc_port "$node")" -sTCP:LISTEN >/dev/null 2>&1 || break; sleep 0.2; done
+  for i in $(seq 1 180); do
+    now=$(utb_root_round "$ref") && [ "$now" -ge $((start + gap)) ] && break
+    sleep 1
+  done
+  [ "${now:-0}" -ge $((start + gap)) ] || { echo "root $ref did not advance $gap rounds while root $node was down (round $start -> ${now:-?})" >&2; return 1; }
+  marker=$(wc -l <"$log" | tr -d ' ')
+  echo "$marker" >"$out/marker"
+  m2_start_root "$node" 1 "$(m2_root_addr "$ref")" || return 1
+  for i in $(seq 1 120); do
+    tail -n +"$((marker + 1))" "$log" | grep -aq 'completed recovery' && break
+    sleep 1
+  done
+  tail -n +"$((marker + 1))" "$log" | grep -a 'completed recovery' | head -1 | cut -c1-240 | tee "$out/import-line.txt"
+  [ -s "$out/import-line.txt" ] || { echo "root $node (stopped at round $start, $gap rounds behind) did not recover by state import within 120 s" >&2; return 1; }
+  echo "root $node stopped at root round $start, restarted $gap+ rounds later in the genesis epoch, state import completed (log line $((marker + 1))+)"
+  ! tail -n +"$((marker + 1))" "$log" | grep -aq -e 'V3 freeze rules are not enabled' -e 'successor trust-base entry cannot be derived' || { echo "the root met a refusal right after its import" >&2; return 1; }
+}
+
+utb_root_round() { curl -fsS "http://127.0.0.1:$(m2_rpc_port "$1")/api/v1/roundInfo" 2>/dev/null | python3 -c 'import json,sys; print(json.load(sys.stdin)["roundNumber"])'; }
+
+# after the V3 handoff committed: the imported root took part in it
+utb_step_s2() {
+  local out node; out="$(utb_dir)/state-import"; node=$(utb_import_root)
+  [ -s "$out/marker" ] || { echo "no import marker: utb_step_s1 did not run" >&2; return 1; }
+  utb_import_report "test-nodes/root$node/debug.log" "$(cat "$out/marker")" "$out/root$node.txt" || { cat "$out/root$node.txt" >&2; echo "root $node did not take part in the V3 handoff after its state import" >&2; return 1; }
+  cat "$out/root$node.txt"
+}
+
 # After L1c: the original proof verifies unchanged under its historical committee; the bridge receipt; the exported history reloads exactly.
 utb_step_u5() {
   local out got; out=$(utb_dir)
@@ -390,6 +460,7 @@ history/client-after-sync.txt
 sdk/client.log
 sdk/sdk-commit.txt
 checks/root-logs.txt
+state-import/import-line.txt
 LIST
 }
 
@@ -457,6 +528,9 @@ utb_check_evidence() {
   grep -q '^sdk client check: PASSED' "$dir/sdk/client.log" && grep -q "tip now $tip" "$dir/sdk/client.log" && grep -q '^before: verdict no_entry_for_epoch' "$dir/sdk/client.log" || { echo "sdk/client.log does not show the SDK client meeting the unknown epoch and verifying at tip $tip after the fetch" >&2; return 1; }
   grep -qE '^[0-9a-f]{40}$' "$dir/sdk/sdk-commit.txt" || { echo "sdk/sdk-commit.txt is not a commit" >&2; return 1; }
   grep -q '^V3 freeze rules are not enabled: 0$' "$dir/checks/root-logs.txt" && grep -q '^successor trust-base entry cannot be derived: 0$' "$dir/checks/root-logs.txt" || { echo "checks/root-logs.txt does not show both refusal counts at 0" >&2; return 1; }
+  local ir; ir=$(ls "$dir"/state-import/root[0-9]*.txt 2>/dev/null | head -1)
+  [ -n "$ir" ] && grep -Eq '^state imports \(completed recovery\): [1-9]' "$ir" && grep -q '^V3 freeze rules are not enabled: 0$' "$ir" && grep -q '^successor trust-base entry cannot be derived: 0$' "$ir" \
+    && grep -q '^handoff record outcome: .*phase=committed' "$ir" && grep -q '^vote on the record block: .*signed vote' "$ir" || { echo "state-import/root<N>.txt does not show a state import before the V3 handoff, no refusal, and the committed record outcome" >&2; return 1; }
   jq -e '(.redeem.gasUsed | tonumber) > 0 and (.claim.gasUsed | tonumber) > 0' "$dir/proofs/bridge-receipt.json" >/dev/null 2>&1 || { echo "proofs/bridge-receipt.json is not a successful redemption and claim" >&2; return 1; }
 }
 
@@ -533,6 +607,25 @@ utb_selftest() {
   printf 'ok line\n' >"$t/rl/test-nodes/root1/debug.log"
   utb_st_no "a root log with the not-retained refusal fails the report" bash -c "cd '$t/rl' && source '$cwd/scripts/lib/utb-lib.sh' && echo 'x successor trust-base entry cannot be derived' >>test-nodes/root1/debug.log && utb_root_log_report r.txt"
   utb_st_no "no root logs fails the report" bash -c "mkdir -p '$t/nolog' && cd '$t/nolog' && source '$cwd/scripts/lib/utb-lib.sh' && utb_root_log_report r.txt"
+  # the forced state import (#671): the report needs the import, both refusals at 0, and a vote at exactly the round of the committed handoff record, all after the marker
+  local si="$t/si"; mkdir -p "$si"
+  local imp='time=1 level=DEBUG msg="completed recovery"' vote620='time=2 level=INFO msg="signed vote" node_id=x round=620 messageID=ab' out1='time=3 level=INFO msg="root handoff outcome" node_id=x phase=committed attempt=0 rootEpoch=1 rootRound=620 round=621 go_id=3'
+  printf '%s\n' 'old line before the marker: V3 freeze rules are not enabled' "$imp" "$vote620" "$out1" >"$si/good.log"
+  utb_st "the import report passes an import, a vote at the record round and the committed outcome (a refusal before the marker is not counted)" utb_import_report "$si/good.log" 1 "$si/good.txt"
+  printf '%s\n' marker "$vote620" "$out1" >"$si/noimport.log"
+  utb_st_no "no state import after the marker fails the report" utb_import_report "$si/noimport.log" 1 "$si/o.txt"
+  printf '%s\n' marker "$imp" 'x V3 freeze rules are not enabled for this committee' "$vote620" "$out1" >"$si/freeze.log"
+  utb_st_no "the freeze-disabled refusal after the import fails the report" utb_import_report "$si/freeze.log" 1 "$si/o.txt"
+  printf '%s\n' marker "$imp" 'x successor trust-base entry cannot be derived' "$vote620" "$out1" >"$si/succ.log"
+  utb_st_no "the not-retained refusal after the import fails the report" utb_import_report "$si/succ.log" 1 "$si/o.txt"
+  printf '%s\n' marker "$imp" 'time=2 level=INFO msg="signed vote" node_id=x round=619 messageID=ab' "$out1" >"$si/lowvote.log"
+  utb_st_no "a vote below the record's round fails the report" utb_import_report "$si/lowvote.log" 1 "$si/o.txt"
+  printf '%s\n' marker "$imp" 'time=2 level=INFO msg="signed vote" node_id=x round=700 messageID=ab' "$out1" >"$si/highvote.log"
+  utb_st_no "a vote only above the record's round fails the report" utb_import_report "$si/highvote.log" 1 "$si/o.txt"
+  printf '%s\n' marker "$imp" "$vote620" >"$si/nooutcome.log"
+  utb_st_no "no committed outcome of the record fails the report" utb_import_report "$si/nooutcome.log" 1 "$si/o.txt"
+  printf '%s\n' marker "$imp" "$vote620" "${out1/rootEpoch=1/rootEpoch=2}" >"$si/epoch2.log"
+  utb_st_no "an outcome of another root epoch is not the genesis epoch's handoff" utb_import_report "$si/epoch2.log" 1 "$si/o.txt"
   # U2's evidence: the cases of the real run utb-20261020T014202Z (a catch-up added epoch 2 while responses carried the entry) and of a response that won; each missing
   # property alone is refused
   local u2="$t/u2"; mkdir -p "$u2"
