@@ -33,18 +33,29 @@ func memberWords(m Member) (words [8][32]byte) {
 	words[7] = Word(m.Weight)
 	return
 }
-func putEntry(store func([32]byte, [32]byte), e Entry) {
+
+// StoredWords are the words the registry stores for an entry: its 11 metadata fields (5 and 6 are the closure end and hasEnd) and
+// the 8 words of each member in order, exactly as SealRegistry writes them.
+func (e Entry) StoredWords() (metadata [11][32]byte, members [][8][32]byte) {
 	total, _ := e.TotalWeight()
-	metadata := [11][32]byte{Word(1), Word(e.BodyKind), e.BodyID, e.ActivationCommitID, Word(e.Start), {}, {}, Word(e.SigningScheme), e.SigningConfigHash, Word(uint64(len(e.Members))), Word(total)}
+	metadata = [11][32]byte{Word(1), Word(e.BodyKind), e.BodyID, e.ActivationCommitID, Word(e.Start), {}, {}, Word(e.SigningScheme), e.SigningConfigHash, Word(uint64(len(e.Members))), Word(total)}
 	if e.End != nil {
 		metadata[5] = Word(*e.End)
 		metadata[6] = Word(1)
 	}
+	for _, m := range e.Members {
+		members = append(members, memberWords(m))
+	}
+	return metadata, members
+}
+
+func putEntry(store func([32]byte, [32]byte), e Entry) {
+	metadata, members := e.StoredWords()
 	for i, w := range metadata {
 		store(EntrySlot(e.Epoch, uint64(i)), w)
 	}
-	for j, m := range e.Members {
-		for f, w := range memberWords(m) {
+	for j, words := range members {
+		for f, w := range words {
 			store(MemberSlot(e.Epoch, uint64(j), uint64(f)), w)
 		}
 	}
