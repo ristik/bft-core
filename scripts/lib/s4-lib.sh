@@ -121,7 +121,7 @@ s4_reporter() {
   local d=$S4_DIR k
   if [ ! -s "$S4_KEY" ]; then
     mkdir -p "$(dirname "$S4_KEY")"
-    k=$(s4_cast wallet new --json | jq -r '.[0].private_key') || return 1
+    k=$(s4_cast wallet new --json | jq -r '(.data // .)[0].private_key') || return 1
     ( umask 077; printf '%s\n' "$k" >"$S4_KEY" )
     s4_cast wallet address --private-key "$k" >"$d/reporter.addr" || return 1
     s4_cast send --rpc-url "$(p85_eth)" --private-key "$(cat "$(p85_sender_key)")" --value 1ether "$(cat "$d/reporter.addr")" >"$d/reporter-funding.txt" || return 1
@@ -167,7 +167,7 @@ s4_submit_settle() {
   CASE=$(sed -n 's/.*case=\([0-9a-f]\{64\}\).*/0x\1/p' "$out" | head -1)
   [ -n "$CASE" ] || { echo "the submitter admitted no case: $(cat "$out")" >&2; return 1; }
   s4_pass "the submitter was interrupted after admission (case $CASE) and its output kept ($out)"
-  OFFENCE=$(jq -r .offenceID <<<"$(s4_cast call --json --rpc-url "$(p85_eth)" "$EV" 'caseInfo(bytes32)(bytes32,bytes32,uint64,address,uint256,uint256,uint32,uint32)' "$CASE")" 2>/dev/null)
+  OFFENCE=$(s4_cast call --rpc-url "$(p85_eth)" "$EV" 'caseInfo(bytes32)(bytes32,bytes32,uint64,address,uint256,uint256,uint32,uint32)' "$CASE" | head -1 | awk '{print $1}')
   s4_snapshot admitted || return 1
   out=$d/submit-2.txt
   s4_with_traffic s4_submit_once "$out" "$EV" "${ids[@]}" --wait || return 1
@@ -199,8 +199,8 @@ s4_assert_effects() {
   tx=$(sed -n 's/.* tx=\(0x[0-9a-f]\{64\}\).*/\1/p' "$d/submit-1.txt" | head -1)
   [ -n "$tx" ] || { echo "no transaction hash in the first submit output" >&2; return 1; }
   s4_cast receipt --rpc-url "$(p85_eth)" --json "$tx" >"$d/receipt-submit.json" || return 1
-  jq -e '.status == "0x1" or .status == 1 or .status == "1 (success)"' "$d/receipt-submit.json" >/dev/null || { echo "the submitting transaction failed" >&2; return 1; }
-  s4_pass "inclusion: the evidence transaction $tx is in block $(jq -r .blockNumber "$d/receipt-submit.json") with status success"
+  jq -e '(.data // .) | .status == "0x1" or .status == 1 or .status == "1 (success)" or .status == "success"' "$d/receipt-submit.json" >/dev/null || { echo "the submitting transaction failed" >&2; return 1; }
+  s4_pass "inclusion: the evidence transaction $tx is in block $(jq -r "(.data // .).blockNumber" "$d/receipt-submit.json") with status success"
   s4_py calldata --rpc "$(p85_eth)" --tx "$tx" --statements "$d/votes/statements.json" || return 1
   s4_py effects --before "$d/snapshot-before.json" --admitted "$d/snapshot-admitted.json" --settled "$d/snapshot-settled.json" || return 1
   # negatives after admission: the same pair again, and the pair the other way round, are the same offence; the settled case takes no second debit

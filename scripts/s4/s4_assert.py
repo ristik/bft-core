@@ -280,7 +280,7 @@ def cmd_resolve(a):
 
 def cmd_calldata(a):
     st = json.load(open(a.statements))
-    tx = json.loads(run("tx", a.tx, "--json", "--rpc-url", a.rpc))
+    tx = data_of(run("tx", a.tx, "--json", "--rpc-url", a.rpc))
     inp = tx["input"]
     sig = "submitEvidence((bytes32,uint8,bytes,uint64,uint64),(uint64,bytes32,uint64,bool,bytes32,uint64,uint64,uint64,bytes,bytes),(uint64,bytes32,uint64,bool,bytes32,uint64,uint64,uint64,bytes,bytes),bytes32)"
     dec = run("calldata-decode", sig, inp).splitlines()
