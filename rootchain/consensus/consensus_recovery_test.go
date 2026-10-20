@@ -249,7 +249,7 @@ func Test_msgToRecoveryInfo(t *testing.T) {
 			{
 				name:       "quorum certificate",
 				input:      quorumCert,
-				toRound:    quorumCert.GetParentRound(),
+				toRound:    quorumCert.GetRound(),
 				signatures: signatures,
 			},
 		}

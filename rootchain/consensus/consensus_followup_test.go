@@ -482,10 +482,11 @@ func Test_Followup_RecoveryBookkeeping(t *testing.T) {
 
 	t.Run("a recovery started while completing is kept, with the buffered votes", func(t *testing.T) {
 		f := newFollowup(t, 3, nil)
-		// a QC of round 5 whose block the state does not carry: processing it after the recovery fails
-		qc5 := clone(t, f.qc4)
-		qc5.VoteInfo.RoundNumber, qc5.VoteInfo.ParentRoundNumber = 5, 4
-		_, err := f.cm.recovery.Set(qc5)
+		// a QC of round 4, a block the state carries, whose timestamp is not the block's: the state is suitable for the recovery (it reaches round 4),
+		// processing the QC after it fails
+		badQC := clone(t, f.qc4)
+		badQC.VoteInfo.Timestamp++
+		_, err := f.cm.recovery.Set(badQC)
 		require.NoError(t, err)
 		f.bufferStaleVotes(2)
 		future := f.validVote(9)
