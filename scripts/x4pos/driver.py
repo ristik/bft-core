@@ -64,6 +64,10 @@ def preflight(m, commands=False, root=None):
     by = {s["id"]: s for s in steps}
     interval, tail, policy = m["intervalSeconds"], m["tailSeconds"], m["policy"]
     for s in steps:
+        if "check" not in s:
+            errs.append(f"{s['id']}: no 'check' declared (a command, or an explicit null with an 'uncheckedReason')")
+        elif s["check"] is None and not str(s.get("uncheckedReason", "")).strip():
+            errs.append(f"{s['id']}: 'check' is null without an 'uncheckedReason'")
         if s["budgetSeconds"] <= 0 or s["at"] < 0:
             errs.append(f"{s['id']}: a non-positive budget or negative offset")
         limit = interval if s.get("phase") == "final" else interval - tail
@@ -216,7 +220,10 @@ class Driver:
             now = self.clock.now()
             if st["state"] == RUNNING:   # interrupted: the cursor does not know whether the effect happened
                 if s.get("check") and self._sh(s, "check") == 0:
-                    st.update(state=DONE, finishedUtc=now.isoformat(), adopted=True)
+                    # the effect's true time is unknown: the deadline is judged at the adoption, which is conservative
+                    due = self._start() + timedelta(seconds=s["at"])
+                    late = max(0.0, (now - (due + timedelta(seconds=s["budgetSeconds"]))).total_seconds())
+                    st.update(state=DONE, finishedUtc=now.isoformat(), adopted=True, lateSeconds=late)
                     self.cursor.event(now, event="adopted", step=s["id"])
                 elif s.get("restartable"):
                     st["state"] = PENDING
@@ -266,10 +273,12 @@ class Driver:
     def report(self):
         """PASS only when every step is done on time and every required count is met; a failed step or a deadline violation is FAIL; anything else INCOMPLETE."""
         body = self.cursor.body
-        counts, late, failed, pending = {}, [], [], []
+        counts, late, failed, pending, unverified = {}, [], [], [], []
         for s in self.steps:
             st = body["steps"][s["id"]]
             if st["state"] == DONE:
+                if not s.get("check"):
+                    unverified.append({"step": s["id"], "reason": s.get("uncheckedReason")})
                 for k, v in s.get("counts", {}).items():
                     counts[k] = counts.get(k, 0) + v
                 if st.get("lateSeconds", 0) > 0:
@@ -280,7 +289,7 @@ class Driver:
                 pending.append(s["id"])
         short = {k: {"required": n, "done": counts.get(k, 0)} for k, n in self.m["required"].items() if counts.get(k, 0) < n}
         status = "FAIL" if failed or late else "INCOMPLETE" if pending or short else "PASS"
-        rep = {"status": status, "manifestSha256": self.sha, "startedUtc": body["startedUtc"], "counts": counts, "failed": failed, "late": late, "pending": pending, "shortOfRequired": short}
+        rep = {"status": status, "manifestSha256": self.sha, "startedUtc": body["startedUtc"], "counts": counts, "failed": failed, "late": late, "pending": pending, "shortOfRequired": short, "unverified": unverified}
         (self.dir / "report.json").write_text(json.dumps(rep, indent=1, sort_keys=True))
         return rep
 

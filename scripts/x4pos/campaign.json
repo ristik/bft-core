@@ -71,7 +71,10 @@
    ],
    "args": {
     "change": "rate"
-   }
+   },
+   "check": [
+    "scripts/x4pos/steps/governance-queue.check.sh"
+   ]
   },
   {
    "id": "replace-1",
@@ -92,7 +95,10 @@
    "args": {
     "entity": 5,
     "out": 1
-   }
+   },
+   "check": [
+    "scripts/x4pos/steps/replace.check.sh"
+   ]
   },
   {
    "id": "offence-1",
@@ -111,7 +117,10 @@
    "args": {
     "offender": "replaced",
     "retired": false
-   }
+   },
+   "check": [
+    "scripts/x4pos/steps/offence.check.sh"
+   ]
   },
   {
    "id": "exit-request-protected",
@@ -129,7 +138,10 @@
    ],
    "args": {
     "operator": "protected-offender"
-   }
+   },
+   "check": [
+    "scripts/x4pos/steps/exit-request.check.sh"
+   ]
   },
   {
    "id": "exit-request-clean",
@@ -147,7 +159,10 @@
    ],
    "args": {
     "operator": "clean"
-   }
+   },
+   "check": [
+    "scripts/x4pos/steps/exit-request.check.sh"
+   ]
   },
   {
    "id": "replace-2",
@@ -168,7 +183,10 @@
    "args": {
     "entity": 6,
     "out": 2
-   }
+   },
+   "check": [
+    "scripts/x4pos/steps/replace.check.sh"
+   ]
   },
   {
    "id": "stalled-recovery",
@@ -187,7 +205,10 @@
    ],
    "args": {
     "mode": "stalled-successor"
-   }
+   },
+   "check": [
+    "scripts/x4pos/steps/recovery.check.sh"
+   ]
   },
   {
    "id": "abort-retry",
@@ -203,6 +224,9 @@
    "exclusive": true,
    "dependsOn": [
     "stalled-recovery"
+   ],
+   "check": [
+    "scripts/x4pos/steps/abort.check.sh"
    ]
   },
   {
@@ -221,7 +245,10 @@
    ],
    "args": {
     "retired": true
-   }
+   },
+   "check": [
+    "scripts/x4pos/steps/offence.check.sh"
+   ]
   },
   {
    "id": "exit-claim-clean",
@@ -240,7 +267,10 @@
    "after": {
     "step": "exit-request-clean",
     "delay": "exitMaturity"
-   }
+   },
+   "check": [
+    "scripts/x4pos/steps/exit-claim.check.sh"
+   ]
   },
   {
    "id": "exit-claim-protected",
@@ -263,7 +293,10 @@
    },
    "args": {
     "expectHoldUntilSettled": true
-   }
+   },
+   "check": [
+    "scripts/x4pos/steps/exit-claim.check.sh"
+   ]
   },
   {
    "id": "reward-interval-1",
@@ -278,7 +311,11 @@
    },
    "dependsOn": [
     "baseline"
-   ]
+   ],
+   "check": [
+    "scripts/x4pos/steps/reward-interval.check.sh"
+   ],
+   "restartable": true
   },
   {
    "id": "reward-interval-2",
@@ -293,7 +330,11 @@
    },
    "dependsOn": [
     "baseline"
-   ]
+   ],
+   "check": [
+    "scripts/x4pos/steps/reward-interval.check.sh"
+   ],
+   "restartable": true
   },
   {
    "id": "reward-interval-3",
@@ -308,7 +349,11 @@
    },
    "dependsOn": [
     "baseline"
-   ]
+   ],
+   "check": [
+    "scripts/x4pos/steps/reward-interval.check.sh"
+   ],
+   "restartable": true
   },
   {
    "id": "reward-interval-4",
@@ -323,7 +368,11 @@
    },
    "dependsOn": [
     "baseline"
-   ]
+   ],
+   "check": [
+    "scripts/x4pos/steps/reward-interval.check.sh"
+   ],
+   "restartable": true
   },
   {
    "id": "reward-exhaust-refill",
@@ -338,6 +387,9 @@
    },
    "dependsOn": [
     "reward-interval-4"
+   ],
+   "check": [
+    "scripts/x4pos/steps/reward-exhaust-refill.check.sh"
    ]
   },
   {
@@ -355,7 +407,9 @@
    "args": {
     "kind": "root-stop-restart",
     "outageSeconds": 30
-   }
+   },
+   "check": null,
+   "uncheckedReason": "a restart or outage leaves no durable state to verify afterwards; the command asserts its own recovery (quorum, certified hashes, recovery deadline) and records it in its log; it is NOT restartable, so an interrupted fault fails the campaign"
   },
   {
    "id": "fault-evm-restart",
@@ -372,7 +426,9 @@
    "args": {
     "kind": "evm-validator-restart",
     "outageSeconds": 30
-   }
+   },
+   "check": null,
+   "uncheckedReason": "a restart or outage leaves no durable state to verify afterwards; the command asserts its own recovery (quorum, certified hashes, recovery deadline) and records it in its log; it is NOT restartable, so an interrupted fault fails the campaign"
   },
   {
    "id": "fault-collector-restart",
@@ -388,7 +444,9 @@
    "exclusive": true,
    "args": {
     "kind": "collector-reward-worker-restart"
-   }
+   },
+   "check": null,
+   "uncheckedReason": "a restart or outage leaves no durable state to verify afterwards; the command asserts its own recovery (quorum, certified hashes, recovery deadline) and records it in its log; it is NOT restartable, so an interrupted fault fails the campaign"
   },
   {
    "id": "fault-delayed-episode",
@@ -404,7 +462,9 @@
    "exclusive": true,
    "args": {
     "kind": "delayed-evm-root-extension"
-   }
+   },
+   "check": null,
+   "uncheckedReason": "a restart or outage leaves no durable state to verify afterwards; the command asserts its own recovery (quorum, certified hashes, recovery deadline) and records it in its log; it is NOT restartable, so an interrupted fault fails the campaign"
   },
   {
    "id": "governance-activation-check",
@@ -423,7 +483,10 @@
    "after": {
     "step": "governance-queue",
     "delaySeconds": 6000
-   }
+   },
+   "check": [
+    "scripts/x4pos/steps/governance-check.check.sh"
+   ]
   },
   {
    "id": "final-reconcile",
@@ -436,7 +499,11 @@
    "counts": {
     "reconcile": 1
    },
-   "phase": "final"
+   "phase": "final",
+   "check": [
+    "scripts/x4pos/steps/reconcile.check.sh"
+   ],
+   "restartable": true
   }
  ]
 }

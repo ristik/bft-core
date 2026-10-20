@@ -105,6 +105,27 @@ class Preflight(unittest.TestCase):
             driver.preflight(m)
         self.assertIn(needle, str(e.exception))
 
+    def test_every_step_of_the_checked_in_campaign_declares_its_check(self):
+        m, _ = driver.load_manifest(REAL)
+        for s in m["steps"]:
+            self.assertIn("check", s, s["id"])
+            if s["check"] is None:
+                self.assertEqual(s["kind"], "fault", f"{s['id']}: only a fault may be unchecked")
+                self.assertTrue(s["uncheckedReason"].strip())
+                self.assertFalse(s.get("restartable"), "an unchecked step cannot be adopted, so it must not be restartable")
+            else:
+                self.assertEqual(s["check"][0].split("/")[-1].rsplit(".check.sh", 1)[1:], [""], s["id"])
+
+    def test_a_step_without_a_declared_check_is_refused(self):
+        def drop(m):
+            del m["steps"][1]["check"]
+        self.refused(drop, "b: no 'check' declared")
+        self.refused(lambda m: m["steps"][1].update(check=None), "'check' is null without an 'uncheckedReason'")
+        self.refused(lambda m: m["steps"][1].update(check=None, uncheckedReason="  "), "'check' is null without an 'uncheckedReason'")
+        m = small()
+        m["steps"][1].update(check=None, uncheckedReason="a restart leaves no state")
+        driver.preflight(m)   # explicit and reasoned: accepted
+
     def test_every_rule_refuses(self):
         self.refused(lambda m: m["steps"][2].update(at=850), "after 800 s")                                   # into the final hold
         self.refused(lambda m: m["steps"][1].update(at=50), "before its dependency a can have finished")
@@ -203,6 +224,32 @@ class Execution(unittest.TestCase):
             self.assertEqual(rep["status"], "FAIL")
             self.assertEqual(world.ran, [], "b did not run before a")
             self.assertIn("dependency", rep["failed"][0]["reason"])
+
+    def test_an_unchecked_step_that_completes_is_listed_as_unverified(self):
+        m = small()
+        m["steps"][1].update(check=None, uncheckedReason="no durable effect", restartable=False)
+        with tempfile.TemporaryDirectory() as d:
+            rep = self.drive(m, d, World(), FakeClock()).run()
+            self.assertEqual(rep["status"], "PASS")
+            self.assertEqual(rep["unverified"], [{"step": "b", "reason": "no durable effect"}])
+
+    def test_an_interrupted_step_adopted_after_its_deadline_is_late(self):
+        with tempfile.TemporaryDirectory() as d:
+            clock, world = FakeClock(), World(crash=("a", "after"))   # a's effect exists; the process died before recording it
+            with self.assertRaises(Crash):
+                self.drive(small(), d, world, clock).run()
+            clock.advance(400)   # a's budget is 100 s from offset 0: the host was down past it
+            rep = self.drive(small(), d, world, clock).run()
+            self.assertEqual(rep["status"], "FAIL")
+            self.assertEqual(rep["late"][0]["step"], "a")
+            self.assertGreaterEqual(rep["late"][0]["lateSeconds"], 300)
+        with tempfile.TemporaryDirectory() as d:   # adopted inside the budget: on time
+            clock, world = FakeClock(), World(crash=("a", "after"))
+            with self.assertRaises(Crash):
+                self.drive(small(), d, world, clock).run()
+            clock.advance(50)
+            rep = self.drive(small(), d, world, clock).run()
+            self.assertEqual(rep["status"], "PASS")
 
     def test_the_manifest_is_sealed_into_the_cursor(self):
         with tempfile.TemporaryDirectory() as d:
