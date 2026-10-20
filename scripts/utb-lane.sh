@@ -87,6 +87,7 @@ preflight() {
   check "the contracts genesis takes the root network and genesis identity (contracts#46: P85_ROOT_NETWORK, P85_ROOT_GENESIS; the lane sets both from the trust base)" bash -c "grep -q P85_ROOT_GENESIS '${P85_CONTRACTS:-/nonexistent}/script/P85Genesis.s.sol' && grep -q P85_ROOT_NETWORK '${P85_CONTRACTS:-/nonexistent}/script/P85Genesis.s.sol'"
   note "contracts#46 changes the manifest hash and the publication fixture: the copies under evmassign/testdata and rootchain/evmstate/testdata and the xrepo/fixtures.json pin are re-copied at the #46 merge commit (checked: the new fixture passes evmassign, evmstate, xrepo, posrelayer, signingauthority)"
   if [ -n "${NBP_DIR:-}" ] && [ -d "$NBP_DIR/tests/live" ]; then yes "NBP_DIR $NBP_DIR"; else no "set NBP_DIR to the native-bridge-plugins checkout"; fi
+  check "NBP_DIR's live driver reads the trust-base release bundle (native-bridge-plugins#27, a lane prerequisite: the lane writes trust-base.bundle.cbor since bft-core#658 and no sdk-trust-base.json)" bash -c "grep -q 'trust-base.bundle.cbor' '${NBP_DIR:-/nonexistent}/tests/live/anyage.ts'"
   [ -n "${DNB_TOOL:-}" ] && [ -x "$DNB_TOOL" ] && yes "DNB_TOOL $DNB_TOOL" || no "set DNB_TOOL to a dnb-tool built from this checkout"
   if (exec 3<>/dev/tcp/127.0.0.1/27117) 2>/dev/null; then yes "MongoDB replica set port 27117 answers"; else no "no MongoDB on 127.0.0.1:27117"; fi
   echo "-- the aggregator (ristik/aggregator-go integration/enshrined-evm at AGG_COMMIT, built by --build-aggregator; provenance builds/aggregator-<sha8>/)"
@@ -100,6 +101,7 @@ preflight() {
       if pinned=$(utb_agg_pins_ok "$prov" "$REPO_ROOT" 2>&1); then yes "the aggregator's bft-core ($pinned) is in this checkout's history"; else no "$pinned"; fi
     fi
     check "the binary is a UTB build (its UTB variables are in the binary)" bash -c "strings '$AGG_BIN' | grep -q UTB_GENESIS_ID"
+    check "the binary logs an attachment which adds nothing (aggregator-go#4: 'trust-base update already held'; U2 needs it when the catch-up wins)" bash -c "strings '$AGG_BIN' | grep -q 'trust-base update already held'"
     check "the binary speaks the combined response (CertificationResponseV3 is in the binary)" bash -c "strings '$AGG_BIN' | grep -q 'received CertificationResponseV3'"
   else
     no "set AGG_BIN to the aggregator built by: AGG_COMMIT=<40 hex> $0 --build-aggregator"
