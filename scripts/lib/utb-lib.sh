@@ -228,15 +228,28 @@ utb_step_u3a() {
 
 # After the recovery: the aggregator restarts holding the genesis only, root HTTP unavailable to it; it repairs the missing entries from a genesis-committee root.
 utb_step_u3b() {
-  local i
-  local out off; out=$(utb_dir)
-  off=$(utb_agg_offset)
-  start_agg 1 || return 1
-  utb_wait_agg_tip 3 90 || return 1
-  # the aggregator logs asynchronously: the history can be served (tip 3) before its catch-up lines reach the file
-  for i in $(seq 1 60); do utb_agg_lines_since "$off" | grep -aq '"msg":"trust-base catch-up finished"' && break; sleep 1; done
-  utb_agg_lines_since "$off" | jq -c 'select((.msg|startswith("trust-base catch-up")) or .msg=="trust-base gap in certification response" or .msg=="Signed trust-base history loaded" or .msg=="trust-base handshake to the newest held committee" or .msg=="trust-base entries appended from certification response" or .msg=="dropping an invalid trust-base update")' >"$out/catchup/aggregator-repair.jsonl"
-  python3 -I "$(dirname "${BASH_SOURCE[0]}")/utb-repair-check.py" "$out/catchup/aggregator-repair.jsonl" "$out/catchup/aggregator-peer-repair.log" || return 1
+  local i attempt out off db msg; out=$(utb_dir); db=$PWD/test-nodes/utb-agg1.db
+  # Two routes can repair the aggregator's history after its restart: its own GetTrustBase catch-up from the roots, and the entries a root attaches to the first
+  # certification response (the epoch-3 UC arrives within a millisecond of the handshake, with the folded pair 2,3 attached). U3b judges the first (the check refuses a repair
+  # where only responses raised the tip). Which one is first is a race the harness cannot order, and the response can win it (consol3, run 39451787791, 9 ms after the catch-up
+  # started). The precondition is therefore re-established, not the judgement relaxed: when the catch-up did not raise the tip because a response had (and only then),
+  # the aggregator is stopped, its history store removed again (the U3a fault) and restarted, up to U3B_ATTEMPTS times; every attempt's lines are kept.
+  for attempt in $(seq 1 "${U3B_ATTEMPTS:-4}"); do
+    off=$(utb_agg_offset)
+    start_agg 1 || return 1
+    utb_wait_agg_tip 3 90 || return 1
+    # the aggregator logs asynchronously: the history can be served (tip 3) before its catch-up lines reach the file
+    for i in $(seq 1 60); do utb_agg_lines_since "$off" | grep -aq '"msg":"trust-base catch-up finished"' && break; sleep 1; done
+    utb_agg_lines_since "$off" | jq -c 'select((.msg|startswith("trust-base catch-up")) or .msg=="trust-base gap in certification response" or .msg=="Signed trust-base history loaded" or .msg=="trust-base handshake to the newest held committee" or .msg=="trust-base entries appended from certification response" or .msg=="dropping an invalid trust-base update")' >"$out/catchup/aggregator-repair.jsonl" 2>/dev/null || true
+    cp "$out/catchup/aggregator-repair.jsonl" "$out/catchup/aggregator-repair-attempt$attempt.jsonl"
+    if msg=$(python3 -I "$(dirname "${BASH_SOURCE[0]}")/utb-repair-check.py" "$out/catchup/aggregator-repair.jsonl" "$out/catchup/aggregator-peer-repair.log" 2>&1); then break; fi
+    echo "U3b attempt $attempt: $msg" | tee -a "$out/catchup/u3b-attempts.txt" >&2
+    case "$msg" in *"no successful catch-up raised the tip"*) ;; *) return 1 ;; esac   # any other refusal is a finding, not a lost race
+    grep -aq '"msg":"trust-base entries appended from certification response"' "$out/catchup/aggregator-repair.jsonl" || return 1   # and the lost race must be to a response
+    [ "$attempt" -lt "${U3B_ATTEMPTS:-4}" ] || { echo "U3b: a response beat the catch-up in all $attempt attempts" >&2; return 1; }
+    stop_pidfile "$(agg_dir 1)/pid" aggregator || true; sleep 2; rm -f "$db"
+  done
+  echo "U3b: repaired on attempt $attempt" >>"$out/catchup/u3b-attempts.txt"
   # the repaired history authenticates from the pin and holds epoch 2 byte for byte as the root attached it; U4 checks the final bundle is these bytes
   utb_ev fetch --url "$(utb_agg_url)" --out "$out/bundle/after-repair.cbor" >/dev/null || return 1
   utb_ev verify --bundle "$out/bundle/after-repair.cbor" --pin "$(utb_pin)" | grep -q '^ok: epochs 1\.\.3, ' || { echo "the repaired history is not epochs 1..3 authenticated from the pin" >&2; return 1; }
@@ -602,6 +615,8 @@ utb_selftest() {
   { cat "$t/rep/real.jsonl"; echo "{\"msg\":\"dropping an invalid trust-base update\"}"; } >"$t/rep/dropped.jsonl"
   utb_st "a repair by a catch-up that raised the tip, with a response overlapping the last entry, is accepted" python3 -I "$rc" "$t/rep/real.jsonl" "$t/rep/out.log"
   utb_st_no "a repair where only responses raised the tip is refused" python3 -I "$rc" "$t/rep/responses-only.jsonl" "$t/rep/out.log"
+  utb_st "a response-first race is refused with the message the U3b retry keys on, and carries a response line" bash -c "python3 -I '$rc' '$t/rep/responses-only.jsonl' '$t/rep/out.log' 2>&1 | grep -q 'no successful catch-up raised the tip' && grep -aq 'appended from certification response' '$t/rep/responses-only.jsonl'"
+  utb_st "a refusal for another reason (a dropped invalid update) is not the retried one" bash -c "! python3 -I '$rc' '$t/rep/dropped.jsonl' '$t/rep/out.log' 2>&1 | grep -q 'no successful catch-up raised the tip'"
   utb_st_no "a repair with no finished catch-up is refused" python3 -I "$rc" "$t/rep/no-finish.jsonl" "$t/rep/out.log"
   utb_st_no "a repair with a dropped invalid update is refused" python3 -I "$rc" "$t/rep/dropped.jsonl" "$t/rep/out.log"
   # the aggregator shards in the lane's derived inputs: one shard writes no shard table, two write each shard with its aggregator; the pack verifies against every shard's configuration
