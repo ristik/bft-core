@@ -287,6 +287,7 @@ utb_step_u4b() {
   git -C "$UTB_SDK_JS" rev-parse HEAD >"$out/sdk/sdk-commit.txt" 2>/dev/null || { echo "UTB_SDK_JS is not a git checkout" >&2; return 1; }
   node "$PWD/scripts/utb-sdk-client/check.mjs" --sdk "$UTB_SDK_JS" --url "http://127.0.0.1:$(agg_port 1)" --genesis test-nodes/utb-genesis.cbor --pin "$(utb_pin)" \
     --uc "$out/proofs/post-recovery-token.cbor" --expect-tip 3 --entry "2=$out/entries/ordinary-handoff.cbor" --entry "3=$out/entries/recovery.cbor" --out "$out/sdk/client.log" || return 1
+  grep -q '^sdk client check: PASSED' "$out/sdk/client.log" || { echo "sdk/client.log does not end with the check's PASSED line" >&2; return 1; }
   echo "U4b: the JS SDK client verified the epoch-3 certificate after fetching epochs 2..3 from the aggregator"
 }
 
