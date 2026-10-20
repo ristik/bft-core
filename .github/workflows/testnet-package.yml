@@ -25,7 +25,7 @@ jobs:
       - run: python3 -m unittest discover -s deploy/testnet/faucet -v
       - uses: actions/checkout@v4
         with:
-          ref: d837a973cfbe2a17207c1867f2b41bdfa081a0a2
+          ref: 4dc3a49a2c18ea7fcb2c1e69e1e4719d2f7cb6b4
           path: pinned-bft
       - run: make -C pinned-bft build
       - run: go build -C pinned-bft -o /tmp/tn-b1genesis ./scripts/b1genesis
@@ -33,7 +33,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: ristik/rugregator
-          ref: dd5b1406a17fdeb415799045c5e81609619a870a
+          ref: 711213eb6c4c93503d16d7108d474dfc222984ad
           path: pinned-rugregator
       - run: sudo apt-get update && sudo apt-get install -y libclang-dev libssl-dev pkg-config
       - uses: dtolnay/rust-toolchain@stable
@@ -45,7 +45,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: ristik/unicity-pos-contracts
-          ref: 0c1e43df954c2a60e01dc668b06415fcbf22d043
+          ref: b17829ca0eee3023148524f1bdbdfb2d2729e0c6
           path: pinned-contracts
           submodules: recursive
       - uses: foundry-rs/foundry-toolchain@v1
