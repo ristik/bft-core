@@ -115,7 +115,7 @@ lock script is `$AGRE_ROOT/briefs/devnet-lock.sh` when present, else the reposit
 
 ### Nightly
 
-`schedule` (01:17 UTC) runs `nightly` = all-live + `ureth-targeted` at the tip of `integration/enshrined-evm`: `plan` checks that branch out once, records the SHA (every job checks that SHA out) and prints it. GitHub fires a schedule only from the **default branch's** copy of the workflow file (this repository's default branch is `main`), exactly as `workflow_dispatch` is only dispatchable from it; until the file is on `main` the schedule is inert, and runs are started by pushing a `ci-lane-run/<name>` branch whose `scripts/ci/run-inputs.json` names the lane. Putting the file on `main` is the owner's decision (nothing is pushed to `main` from here).
+`schedule` (01:17 UTC) runs `nightly` = all-live + `ureth-targeted` at the tip of `integration/enshrined-evm`, and so does a `workflow_dispatch` (the file GitHub runs for both is the default branch's copy, and `main` is not the code under test): `plan` checks the integration branch out once, records the SHA in the job summary (every job checks that SHA out). A push of a `ci-lane-run/**` branch tests that very commit. GitHub fires a schedule only from the **default branch's** copy of the workflow file (this repository's default branch is `main`), exactly as `workflow_dispatch` is only dispatchable from it; until the file is on `main` the schedule is inert, and runs are started by pushing a `ci-lane-run/<name>` branch whose `scripts/ci/run-inputs.json` names the lane. Putting the file on `main` is the owner's decision (nothing is pushed to `main` from here).
 
 ### Failures that were not the check
 

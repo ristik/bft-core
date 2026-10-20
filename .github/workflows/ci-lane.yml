@@ -46,10 +46,12 @@ jobs:
       need_ureth: ${{ steps.in.outputs.need_ureth }}
       need_lane_builds: ${{ steps.in.outputs.need_lane_builds }}
     steps:
-      # a scheduled run tests the integration branch tip (resolved here once, recorded below); every other event tests the commit that triggered it
+      # A scheduled or dispatched run tests the tip of integration/enshrined-evm, whichever branch's copy of this file started it (the copy on the default branch `main`
+      # is what GitHub runs for those events, and main is not the code under test): the tip is resolved here ONCE, recorded in the job summary, and every later job
+      # checks out that SHA. A push of a ci-lane-run/** branch tests that very commit.
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          ref: ${{ github.event_name == 'schedule' && 'integration/enshrined-evm' || github.sha }}
+          ref: ${{ github.event_name == 'push' && github.sha || 'integration/enshrined-evm' }}
       - id: in
         env:
           EVENT: ${{ github.event_name }}
@@ -75,6 +77,8 @@ jobs:
           { echo "sha=$sha"; echo "inject=$inject"; echo "lanes=$lanes"; echo "t6=$t6"; echo "targeted=$targeted"
             echo "need_ureth=$need_ureth"; echo "need_lane_builds=$need_lane_builds"; } >>"$GITHUB_OUTPUT"
           echo "lane=$lane inject_failure=$inject lanes=$lanes t6=$t6 targeted=$targeted commit under test=$sha"
+          { echo "### ci-lane plan"; echo "- event: $EVENT, lane: $lane, inject_failure: $inject"; echo "- commit under test: \`$sha\` ($(git log -1 --format=%s | cut -c1-100))"
+            [ "$EVENT" = push ] || echo "- resolved once from \`integration/enshrined-evm\`; every job checks out this SHA"; } >>"$GITHUB_STEP_SUMMARY"
 
   build-ureth:
     needs: plan
