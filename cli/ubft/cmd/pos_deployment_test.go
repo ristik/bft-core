@@ -170,3 +170,32 @@ func TestEnablePosClosureTiesTheEVMEndpointToTheElection(t *testing.T) {
 	require.ErrorIs(t, enablePosClosure(nil, nil, nil, tb, nil, plain, false, "http://127.0.0.1:1"), ErrPosDeployment, "an endpoint with no election")
 	require.ErrorIs(t, enablePosClosure(nil, nil, nil, tb, nil, plain, false, ""), ErrGenesisIdentities, "neither: the earlier checks stand")
 }
+
+// The reward pool is an optional pair a root ignores and the relayer's reward commands need; a half pin is refused.
+func TestLoadPosDeploymentPinsTheRewardPoolOnlyAsAPair(t *testing.T) {
+	base := deploymentJSON(goodWord, "1", goodCustody)
+	with := func(extra string) string { return strings.TrimSuffix(base, "}") + "," + extra + "}" }
+	pool := `"rewardPool":"0x00000000000000000000000000000000000000a5"`
+	poolCode := `"rewardPoolCodeHash":"` + goodCode + `"`
+
+	path := writeDeployment(t, with(pool+","+poolCode))
+	_, _, err := loadPosDeployment(path, 5)
+	require.NoError(t, err, "a root accepts and ignores the pair")
+	addr, err := loadRewardPool(path)
+	require.NoError(t, err)
+	require.Equal(t, byte(0xa5), addr[19])
+
+	_, err = loadRewardPool(writeDeployment(t, base))
+	require.ErrorIs(t, err, ErrPosDeployment, "the relayer's reward commands need the pin")
+
+	zero20 := "0x" + strings.Repeat("00", 20)
+	for name, body := range map[string]string{
+		"a pool without its code hash": with(pool),
+		"a code hash without its pool": with(poolCode),
+		"a zero pool":                  with(`"rewardPool":"` + zero20 + `",` + poolCode),
+		"a short pool":                 with(`"rewardPool":"0x1122",` + poolCode),
+	} {
+		_, _, err := loadPosDeployment(writeDeployment(t, body), 5)
+		require.ErrorIs(t, err, ErrPosDeployment, name)
+	}
+}

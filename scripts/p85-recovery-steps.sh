@@ -714,6 +714,13 @@ p85_run_lane() {
       P85_STEPS="p85_baseline anyage_step_setup utb_step_u1 p85_joiner_nodes p85_joiner_onboard p85_election_reserved p85_proofs anyage_step_l1b utb_step_s1 p85_handoff utb_step_s2 p85_install_activation utb_step_u2 anyage_step_frozen utb_step_u3a p85_j_stalls p85_recovery p85_resolved utb_step_u3b anyage_step_l2 utb_step_u4 utb_step_u4b anyage_step_l1c utb_step_u5 p85_restarts p85_epoch_switches utb_step_final"
     fi
   fi
+  # a multi-shard aggregator (DNB_AGG_SHARDS=2): one more token over the shards, redeemed through the SDK's consolidation (#526 step 4), right after L1b
+  if [ "${ANYAGE_LANE:-0}" = 1 ] && [ "${aggShards:-1}" -gt 1 ]; then P85_STEPS=${P85_STEPS/anyage_step_l1b/anyage_step_l1b anyage_step_consolidated}; fi
+  if [ "${REWARD_LANE:-0}" = 1 ]; then
+    # T8: the funded reward pool is settled and claimed across the lane's real acknowledged history (scripts/lib/rewards-lib.sh), before the lane's last step
+    source scripts/lib/rewards-lib.sh
+    case " $P85_STEPS " in *" utb_step_final "*) P85_STEPS="${P85_STEPS/ utb_step_final/ rw_step_settle utb_step_final}" ;; *) P85_STEPS="$P85_STEPS rw_step_settle" ;; esac
+  fi
   if [ "${S4_LANE:-0}" = 1 ]; then
     # S4 (#57, scripts/lib/s4-lib.sh): the offence is delivered while epoch 2 is live, collected and submitted after the recovery has evicted the joiner
     source scripts/lib/s4-lib.sh

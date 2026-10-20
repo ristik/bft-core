@@ -88,30 +88,3 @@ func TestSenderGivesUpOnAnEstimateThatKeepsBeingRejected(t *testing.T) {
 	require.ErrorContains(t, err, "bound parent hash mismatch")
 	require.EqualValues(t, estimateAttempts, estimates.Load())
 }
-
-// A network whose validators do not gossip includes a transaction only on a node that has it: the signed transaction goes to every Also client as well.
-func TestSenderAlsoSendsTheSignedTransactionToTheOtherClients(t *testing.T) {
-	key, err := ethcrypto.GenerateKey()
-	require.NoError(t, err)
-	c, _ := estimateServer(t, 0, "")
-	var got atomic.Int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var req struct {
-			ID     json.RawMessage `json:"id"`
-			Method string          `json:"method"`
-		}
-		require.NoError(t, json.NewDecoder(r.Body).Decode(&req))
-		if req.Method == "eth_sendRawTransaction" {
-			got.Add(1)
-		}
-		require.NoError(t, json.NewEncoder(w).Encode(map[string]any{"jsonrpc": "2.0", "id": req.ID, "result": "0x00"}))
-	}))
-	t.Cleanup(srv.Close)
-	other, err := rpc.Dial(srv.URL)
-	require.NoError(t, err)
-	t.Cleanup(other.Close)
-	s := Sender{Client: c, Key: key, ChainID: big.NewInt(31337), Wait: 5 * time.Second, Also: []*rpc.Client{other}}
-	_, err = s.Send(context.Background(), [20]byte{1}, nil, []byte{1})
-	require.NoError(t, err)
-	require.EqualValues(t, 1, got.Load())
-}

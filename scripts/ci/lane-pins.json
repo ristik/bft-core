@@ -14,7 +14,14 @@
         "unicity-reth"
       ],
       "features": "default (jemalloc)",
-      "note": "the attested Mac build of the same commit (builds/ureth-6e59b68c) was built with rustc 1.97.1; a Linux binary has its own digest"
+      "note": "the attested Mac build of the same commit (builds/ureth-6e59b68c) was built with rustc 1.97.1; a Linux binary has its own digest",
+      "targetedPackages": [
+        "reth-unicity-b1",
+        "reth-unicity-execution",
+        "reth-unicity-payload",
+        "reth-unicity-store"
+      ],
+      "targetedNote": "the plan's targeted selectors (briefs/ci-lane-migration-plan.md section 1): any-age/batch/layout/provider vectors, system-hook ordering and gas, certified RPC/recovery, persistence. Not cargo test --workspace and no generic Ethereum suites."
     },
     "aggregator-go": {
       "repository": "https://github.com/ristik/aggregator-go.git",
@@ -23,14 +30,15 @@
     },
     "contracts": {
       "repository": "https://github.com/ristik/unicity-pos-contracts.git",
-      "commit": "316203f4414214a960ba681e08050fb7637034f5",
+      "commit": "b17829ca0eee3023148524f1bdbdfb2d2729e0c6",
+      "note": "contracts#53 merge: GovernanceParams (#50), RewardPool (#51) and the governed worst-case election gas / deployment fields (#53)",
       "branch": "main"
     },
     "native-bridge-plugins": {
       "repository": "https://github.com/ristik/native-bridge-plugins.git",
-      "commit": "ccd3bb90b0985a948b1d44d72eb42262ddb2db5d",
+      "commit": "278d15da4c45fc3d9af168fece51ef6b3ca35ddb",
       "branch": "main",
-      "note": "nbp#29 merge: the any-age driver with the two-shard steering (a no-op for one aggregator shard) on top of nbp#27/#28 (trust-base bundle driver, shard-split vectors). Deliberately not main: nbp#30/#31 (consolidated assembly as the default) change what the lane's L1 token exercises and belong to the consolidation lane step."
+      "note": "nbp#33 merge: main with the plug-in consolidation as the default path (nbp#30/#31) and the any-age driver's 'consolidated' command (#526 step 4) on top of the two-shard steering (nbp#29)."
     },
     "state-transition-sdk-js": {
       "repository": "https://github.com/ristik/state-transition-sdk-js.git",
@@ -60,6 +68,23 @@
   "runner": {
     "label": "ubuntu-24.04",
     "minFreeDiskGiB": 8,
-    "minFreeDiskNote": "Measured on ubuntu-24.04 standard runners (4 CPU / 16 GB), runs 39391426570 and 39399607786: the lane's disk growth peaks at 3.88 GiB (the cold ureth build 3.79 GiB, the Go build 3.72 GiB, sources 0.97 GiB); memory peaks at 2.36 GiB (run) and 4.62 GiB (ureth build), no swap. The gate is checked by the preflight after the inputs are unpacked: 8 GiB is 2.06 times the measured peak growth, so a run twice as chatty as the measured one still fits, and it is far below the 25 GiB of the Mac default (which also covers building ureth and contracts there). A runner with less than 8 GiB free after unpacking is refused, never waved through."
+    "minFreeDiskNote": "Measured on ubuntu-24.04 standard runners (4 CPU / 16 GB), runs 39391426570 and 39399607786: the lane's disk growth peaks at 3.88 GiB (the cold ureth build 3.79 GiB, the Go build 3.72 GiB, sources 0.97 GiB); memory peaks at 2.36 GiB (run) and 4.62 GiB (ureth build), no swap. The gate is checked by the preflight after the inputs are unpacked: 8 GiB is 2.06 times the measured peak growth, so a run twice as chatty as the measured one still fits, and it is far below the 25 GiB of the Mac default (which also covers building ureth and contracts there). A runner with less than 8 GiB free after unpacking is refused, never waved through.",
+    "minFreeDiskGiBUrethTargeted": 24,
+    "minFreeDiskUrethTargetedNote": "Measured (run 39433678003, ubuntu-24.04 standard runner): the targeted ureth test build and run grow the disk by 11.15 GiB and use 8.21 GiB of memory (304 tests, 11.3 min sampled). The gate is 24 GiB: 2.15 times the growth, checked by scripts/ci/test-ureth.sh before it builds."
+  },
+  "lane": {
+    "aggShards": 2,
+    "note": "the aggregator partition runs as two bft-shard aggregators (0x40, 0xc0); the any-age L1 token spans both and one more token is redeemed through the SDK's consolidation (#526 step 4)"
+  },
+  "t6": {
+    "comment": "T6 pins its own inputs in scripts/t6-rehearsal.sh (its defaults); they differ from the lane's on purpose and are not unified silently. check-pins.sh t6 refuses a script whose defaults differ from this record.",
+    "contracts": {
+      "commit": "e7eb3216549b772a9e1df2b1214976d7dd9e6e62"
+    },
+    "foundry": {
+      "version": "1.8.3",
+      "linuxAsset": "foundry_v1.8.3_linux_amd64.tar.gz",
+      "linuxSha256": "7ca48e6ca3cac1bce1403ca67e5bc1dc3bc1fd818199c9957c7165079c228568"
+    }
   }
 }

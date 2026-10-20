@@ -31,6 +31,11 @@ CADENCE_ROUNDS = 400
 CADENCE_SECONDS = 300
 REGISTRY = '0xff00000000000000000000000000000000000002'
 TREASURY = '0x00000000000000000000000000000000000000ee'
+# The fixed development authority that may queue and cancel a policy proposal, and the operator reward pool's genesis allocation and rate (T8): explicit
+# package values, never a contracts default. The allocation is separate from the bonds and is in the genesis state from block 0.
+GOVERNANCE_AUTHORITY = '0x00000000000000000000000000000000000000ef'
+REWARD_FUNDING = 10_000 * 10**18
+REWARD_RATE = 10**18
 
 ASSIGNMENT = re.compile(r'genesis assignment id (0x[0-9a-f]{64})')
 AGREE = re.compile(r'genesis assignment (0x[0-9a-f]{64}) is the full shard configuration\'s')
@@ -82,11 +87,13 @@ def network_word(generation):
     return '0x' + hashlib.sha256(('unicity.testnet.pos.' + generation).encode()).hexdigest()
 
 
-def profile_args(deployment, measurements):
-    """The b1-profile flags that pin the hooks and the election to the deployed contracts."""
-    return ['--records-custody', deployment['custody'], '--h-records', str(H_RECORDS), '--hook-record-gas', str(HOOK_RECORD_GAS),
-            '--election', deployment['election'], '--elect-measurement', str(measurements['election']), '--hook-measurement', str(measurements['hook']),
-            '--elect-caps', ','.join(map(str, CAPS))]
+def profile_args(deployment, measurements, shadow=False):
+    """The b1-profile flags that pin the hooks and the election to the deployed contracts. `shadow` (X4): the records hook and no authoritative election."""
+    args = ['--records-custody', deployment['custody'], '--h-records', str(H_RECORDS), '--hook-record-gas', str(HOOK_RECORD_GAS),
+            '--hook-measurement', str(measurements['hook']), '--elect-caps', ','.join(map(str, CAPS))]
+    if not shadow:
+        args += ['--election', deployment['election'], '--elect-measurement', str(measurements['election'])]
+    return args
 
 
 def deployment_of(deployment, profile):
@@ -94,6 +101,8 @@ def deployment_of(deployment, profile):
     return {'networkWord': deployment['networkWord'], 'chainId': str(deployment['chainId']), 'custody': deployment['custody'],
             'custodyCodeHash': deployment['custodyCodeHash'], 'registry': REGISTRY, 'registryCodeHash': profile['runtimeHash'],
             'election': deployment['election'], 'electionCodeHash': deployment['electionCodeHash']}
+    # The reward pool is NOT in this file: the roots of the pinned bft build refuse a file with fields they do not know (DisallowUnknownFields), and a root
+    # ignores the pool anyway. The lane (same-commit binaries) writes the optional pair; the package gets it when its bft pin moves past the commit that accepts it.
 
 
 def merge_alloc(genesis, extra):
@@ -186,6 +195,7 @@ class Genesis:
         if provisional:
             self.first = self.assignment
         env = dict(os.environ, P85_NETWORK_WORD=network_word(self.generation), P85_CHAIN_ID=str(self.chain_id), P85_ROOTS=REGISTRY, P85_TREASURY=TREASURY,
+                   P85_GOVERNANCE_AUTHORITY=GOVERNANCE_AUTHORITY, P85_REWARD_FUNDING=str(REWARD_FUNDING), P85_REWARD_RATE=str(REWARD_RATE),
                    P85_V_MAX=str(CAPS[0]), P85_L_MAX=str(CAPS[1]), P85_N_MAX=str(CAPS[2]), P85_CADENCE_ROUNDS=str(self.cadence[0]),
                    P85_CADENCE_SECONDS=str(self.cadence[1]), P85_DIST_NUM=str(self.dist[0]), P85_DIST_DEN=str(self.dist[1]))
         if self.contracts_take_root_identity():   # contracts#46 and later; an older pinned checkout does not know the variables
@@ -217,12 +227,17 @@ class Genesis:
         return done.stdout + done.stderr
 
     def alloc_code_hashes(self, genesis):
-        """The custody and election code hashes the deployment file records must be those of the code the genesis carries (the keccak of the runtime code)."""
-        for module in ('custody', 'election'):
+        """The code hashes the deployment file records must be those of the code the genesis carries (the keccak of the runtime code): custody, election, the
+        governed policy source and the reward pool. The reward pool must also hold exactly its recorded funding from block 0 (T8: allocated, not promised)."""
+        for module, key in (('custody', 'custody'), ('election', 'election'), ('policy', 'policy'), ('rewardPool', 'rewardPool')):
             want = self.deployment[module + 'CodeHash']
-            have = code_hash(genesis, self.deployment[module])
+            have = code_hash(genesis, self.deployment[key])
             if want.lower() != have:
                 raise PosError(f'{module} code in the genesis hashes to {have}, the deployment records {want}')
+        pool = self.deployment['rewardPool'].lower().removeprefix('0x')
+        held = [v for k, v in genesis['alloc'].items() if k.lower().removeprefix('0x') == pool]
+        if len(held) != 1 or int(held[0].get('balance', '0x0'), 16) != int(self.deployment['rewardFunding']):
+            raise PosError(f'the reward pool does not hold its recorded funding {self.deployment["rewardFunding"]} in the genesis state')
 
     def reconcile(self, full_conf):
         """The id the roots will close is the full configuration's: when the first pass (base configuration) differs, prepare again from the full one."""

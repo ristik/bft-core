@@ -196,17 +196,19 @@ s4_submit_settle() {
   s4_snapshot settled || return 1
 }
 
+s4_eth_all() { local i out=; for i in ${H3_ONLINE:-1}; do out="${out:+$out,}http://127.0.0.1:$((rethEthBase + i - 1))"; done; echo "$out"; }
+
 # one submitter process. The first run has no --settle and is stopped as soon as it has printed the case line (the submitter dies after admission: with the lane's
 # single-lot exposure a settling run would finish before it could be interrupted); the second run (--wait) submits again and settles from the on-chain cursor
 s4_submit_once() {
   local out=$1 ev=$2; shift 2
   local ids=() wait=0 f pid settle=()
   for f in "$@"; do [ "$f" = --wait ] && { wait=1; settle=(--settle); } || ids+=(--assignment "$f"); done
-  local d=$S4_DIR also=() id
-  # the lane's validators do not gossip transactions: the signed transaction goes to every online validator (the first is --eth-rpc)
-  for id in ${H3_ONLINE#* }; do also+=(--eth-rpc-also "http://127.0.0.1:$((rethEthBase+id-1))"); done
+  local d=$S4_DIR eth id
+  # the lane's validators do not gossip transactions: --eth-rpc lists every online validator (the first decides reads)
+  eth=$(s4_eth_all)
   build/ubft evidence submit --journal "$d/journal-root$(jq -r .halfA.root "$d/delivery.json").db" --journal "$d/journal-root$(jq -r .halfB.root "$d/delivery.json").db" \
-    --eth-rpc "$(p85_eth)" --evidence "$ev" ${also[@]+"${also[@]}"} "${ids[@]}" --sender-key "$S4_KEY" ${settle[@]+"${settle[@]}"} >"$out" 2>&1 &
+    --eth-rpc "$eth" --evidence "$ev" "${ids[@]}" --sender-key "$S4_KEY" ${settle[@]+"${settle[@]}"} >"$out" 2>&1 &
   pid=$!
   if [ "$wait" = 0 ]; then
     for f in $(seq 1 3000); do grep -q "case=" "$out" 2>/dev/null && break; kill -0 "$pid" 2>/dev/null || break; sleep 0.1; done

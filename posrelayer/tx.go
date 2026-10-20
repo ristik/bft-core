@@ -223,16 +223,57 @@ func (j Joiner) AdmitCalldata(ctx context.Context, rd Reader, m Modules, chainID
 	return writes.Pack("admitDelegation", r, ownerSig, evmSig)
 }
 
-// Sender sends transactions from one account to one execution client.
+// Sender sends transactions from one account to one execution client. Where the validators' execution clients do not gossip transactions to each other (the lane's
+// devnet: peers are added by hand and a pool is private to its node), the transaction is also sent to Also, so that whichever validator builds the next block has it.
 type Sender struct {
 	Client  *rpc.Client
 	Key     *ecdsa.PrivateKey
 	ChainID *big.Int
+	// Also are further execution clients the signed transaction is sent to as well. Their answers do not decide the send: the first client's does, and a refusal
+	// that only says the transaction is already there is expected. The receipt is looked for on every client.
+	Also []*rpc.Client
 	// Wait bounds the wait for a receipt (default 90 s).
 	Wait time.Duration
-	// Also are further execution clients the signed transaction is sent to as well (their errors are ignored: the transaction is known to Client's node). A devnet whose
-	// validators do not gossip transactions includes it only when the proposer is a node that has it.
-	Also []*rpc.Client
+}
+
+// alreadyThere are the answers of a node that has the transaction (or has mined it): not failures of a broadcast.
+func alreadyThere(err error) bool {
+	m := strings.ToLower(err.Error())
+	return strings.Contains(m, "already known") || strings.Contains(m, "known transaction") || strings.Contains(m, "nonce too low") ||
+		strings.Contains(m, "already imported")
+}
+
+// broadcast sends the raw transaction to the further clients. It returns the refusals that are neither "already there" nor of no interest: the caller reports them.
+func (s Sender) broadcast(ctx context.Context, raw hexutil.Bytes) []error {
+	var bad []error
+	for i, c := range s.Also {
+		if err := c.CallContext(ctx, nil, "eth_sendRawTransaction", raw); err != nil && !alreadyThere(err) {
+			bad = append(bad, fmt.Errorf("client %d: %w", i+1, err))
+		}
+	}
+	return bad
+}
+
+// receipt looks for the transaction's receipt on the first client and then on the others; a node that has not seen the block yet answers null and is not an error.
+func (s Sender) receipt(ctx context.Context, h ethcommon.Hash) (*struct {
+	Status hexutil.Uint64 `json:"status"`
+}, error) {
+	var first error
+	for i, c := range append([]*rpc.Client{s.Client}, s.Also...) {
+		var out *struct {
+			Status hexutil.Uint64 `json:"status"`
+		}
+		if err := c.CallContext(ctx, &out, "eth_getTransactionReceipt", h); err != nil {
+			if i == 0 {
+				first = err
+			}
+			continue
+		}
+		if out != nil {
+			return out, nil
+		}
+	}
+	return nil, first
 }
 
 // transientEstimate marks the one refusal that is not about the transaction: the bound-execution node rejects an estimate whose block was built on a head that
@@ -299,19 +340,15 @@ func (s Sender) Send(ctx context.Context, to [20]byte, value *big.Int, data []by
 	if err := s.Client.CallContext(ctx, nil, "eth_sendRawTransaction", hexutil.Bytes(raw)); err != nil {
 		return ethcommon.Hash{}, err
 	}
-	for _, c := range s.Also {
-		_ = c.CallContext(ctx, nil, "eth_sendRawTransaction", hexutil.Bytes(raw))
-	}
+	broadcastErrs := s.broadcast(ctx, raw)
 	wait := s.Wait
 	if wait == 0 {
 		wait = 90 * time.Second
 	}
 	deadline := time.Now().Add(wait)
 	for time.Now().Before(deadline) {
-		var out *struct {
-			Status hexutil.Uint64 `json:"status"`
-		}
-		if err := s.Client.CallContext(ctx, &out, "eth_getTransactionReceipt", tx.Hash()); err != nil {
+		out, err := s.receipt(ctx, tx.Hash())
+		if err != nil {
 			return tx.Hash(), err
 		}
 		if out != nil {
@@ -326,7 +363,12 @@ func (s Sender) Send(ctx context.Context, to [20]byte, value *big.Int, data []by
 		case <-time.After(500 * time.Millisecond):
 		}
 	}
-	return tx.Hash(), fmt.Errorf("transaction %s was not mined within %s", tx.Hash(), wait)
+	return tx.Hash(), fmt.Errorf("transaction %s was not mined within %s%s", tx.Hash(), wait, func() string {
+		if len(broadcastErrs) == 0 {
+			return ""
+		}
+		return fmt.Sprintf(" (the broadcast to the other clients was refused: %v)", errors.Join(broadcastErrs...))
+	}())
 }
 
 // DecodeAdmit reads admitDelegation calldata back: the request and the two signatures (for tests and for an operator checking what a

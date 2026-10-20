@@ -13,10 +13,10 @@ set -uo pipefail
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd); repo=$(cd "$here/../.." && pwd)
 source "$repo/scripts/lib/portable.sh"
 . "$repo/scripts/lib/reth-pin.sh"   # rethEvidenceValidate / rethEvidenceSecretValues (definitions only)
-ev= out= status=0 nodes= minlogs=0; extra=()
+ev= out= status=0 nodes= minlogs=0 kind=combined; extra=()
 while [ $# -gt 0 ]; do case "$1" in
   --evidence) ev=$2; shift 2 ;; --out) out=$2; shift 2 ;; --status) status=$2; shift 2 ;; --nodes) nodes=$2; shift 2 ;;
-  --min-node-logs) minlogs=$2; shift 2 ;; --extra) extra+=("$2"); shift 2 ;; *) echo "publish-evidence: unknown argument $1" >&2; exit 2 ;; esac; done
+  --min-node-logs) minlogs=$2; shift 2 ;; --kind) kind=$2; shift 2 ;; --extra) extra+=("$2"); shift 2 ;; *) echo "publish-evidence: unknown argument $1" >&2; exit 2 ;; esac; done
 [ -d "$ev" ] && [ -n "$out" ] || { echo "usage: publish-evidence.sh --evidence DIR --out OUT --status N [--nodes DIR] [--min-node-logs N] [--extra PATH]..." >&2; exit 2; }
 name=$(basename "$ev"); mkdir -p "$out"; quarantine="$(cd "$out" && pwd)/../quarantine"; mkdir -p "$quarantine"
 stage=$(mktemp -d); trap 'rm -rf "$stage"' EXIT
@@ -48,11 +48,25 @@ for p in ${extra[@]+"${extra[@]}"}; do [ -e "$p" ] && cp -R "$p" "$ci/"; done
 # 2. completeness: the sentinels the lane prints at its end, the exit status, the evidence checker on the self-contained pack
 complete=yes; why=()
 [ "$status" -eq 0 ] || { complete=no; why+=("lane exit status $status"); }
-grep -q 'P85 recovery lane complete' "$ev/lane.log" 2>/dev/null || grep -q 'UTB lane: all steps PASSED' "$ev/lane.log" 2>/dev/null || { complete=no; why+=("no completion sentinel in lane.log"); }
-if [ "$complete" = yes ]; then
-  if [ -d "$pub/p85/run/utb" ]; then "$repo/scripts/utb-lane.sh" --check-evidence "$pub/p85/run/utb" >"$pub/ci-check-evidence.txt" 2>&1 || { complete=no; why+=("utb-lane.sh --check-evidence refused the published pack"); }
-  else complete=no; why+=("no p85/run/utb pack"); fi
-fi
+case "$kind" in
+  combined)
+    grep -q 'P85 recovery lane complete' "$ev/lane.log" 2>/dev/null || grep -q 'UTB lane: all steps PASSED' "$ev/lane.log" 2>/dev/null || { complete=no; why+=("no completion sentinel in lane.log"); }
+    if [ "$complete" = yes ]; then
+      if [ -d "$pub/p85/run/utb" ]; then "$repo/scripts/utb-lane.sh" --check-evidence "$pub/p85/run/utb" >"$pub/ci-check-evidence.txt" 2>&1 || { complete=no; why+=("utb-lane.sh --check-evidence refused the published pack"); }
+      else complete=no; why+=("no p85/run/utb pack"); fi
+    fi ;;
+  overbound)
+    grep -q 'P85 recovery lane: all steps PASSED' "$ev/lane.log" 2>/dev/null || { complete=no; why+=("no completion sentinel in lane.log"); }
+    grep -q 'election_refused' "$ev/lane.log" 2>/dev/null || { complete=no; why+=("the over-bound refusal step did not run"); } ;;
+  abort)
+    grep -q 'H6 Abort rehearsal: Abort before H committed' "$ev/lane.log" 2>/dev/null || { complete=no; why+=("no Abort-before-H completion line in lane.log"); }
+    [ -s "$pub/q3/h6-before-h/abort.status" ] && [ -s "$pub/q3/h6-after-h/abort.status" ] || { complete=no; why+=("the Abort evidence files are missing"); } ;;
+  t6)
+    grep -q 'PASS: T6 placeholder harness run complete' "$ev/t6-rehearsal.log" 2>/dev/null || { complete=no; why+=("no completion sentinel in t6-rehearsal.log"); }
+    head -1 "$ev/run-summary.md" 2>/dev/null | grep -q '^T6 harness rehearsal: PASS' || { complete=no; why+=("run-summary.md does not say PASS"); }
+    ! grep -q 'NOT EVIDENCE' "$ev/run-mode.txt" 2>/dev/null || { complete=no; why+=("run-mode.txt marks the run NOT EVIDENCE"); } ;;
+  *) complete=no; why+=("unknown kind $kind") ;;
+esac
 if [ "$complete" = no ]; then
   { echo "INCOMPLETE: this is a failed or partial run's pack, kept for diagnosis. It is NOT acceptance evidence."; printf 'reason: %s\n' "${why[@]}"; } >"$pub/INCOMPLETE.txt"
 fi

@@ -37,6 +37,8 @@ Entries: epoch 2 is the K->J handoff (activated; the P85 J is never acknowledged
   2b S1/S2 (bft-core#671, live proof for #648) before the V3 handoff one root (UTB_IMPORT_ROOT, default 4) is stopped, left 12 rounds behind (UTB_IMPORT_GAP) and restarted in the genesis
          epoch with its store: it recovers by state import (log: completed recovery); after the handoff committed its log shows no 'V3 freeze rules are not enabled', no 'successor
          trust-base entry cannot be derived', a signed vote at exactly the record's round and the committed outcome of the record (state-import/root<N>.txt)
+  2c C   (DNB_AGG_SHARDS=2) right after L1b: a second token over both aggregator shards is consolidated by the SDK (K = m anchors under one seal) and redeemed once (#526 step 4);
+         the per-SID envelope of the same token is built and priced as the control (anyage_step_consolidated)
   3  U2  after the K->J activation: the aggregator receives the epoch-2 entry attached to a version 3 certification response (log: received + appended, no catch-up), the root's
          message is captured and decodes to exactly that entry; the aggregator serves epoch 2
   4  U3a the aggregator restarts from its retained store (unchanged records); then it is stopped and its history store removed (the controlled fault)

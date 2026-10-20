@@ -234,8 +234,35 @@ h3_retry_handoff() { # old epoch, attempt function (builds the assignment and pr
 }
 
 # Restart every root of the quorum with the install epoch; each fetches and verifies the bundle, derives and installs the configuration.
+#
+# H3_RESTART_TOGETHER=1 (the P85 / any-age / UTB lanes, scripts/p85-lane.sh): stop every root first, archive every root's state, then start them in one tight loop. The rolling
+# restart below leaves the roots already restarted to form the quorum and execute the install epoch's first block (the EVM shard-configuration switch) while the last root
+# is still stopped and archiving; on a slow host that root, the joiner's, started rounds after the switch, recovered by state and never logged the switch, so
+# p85_epoch_switches (every running root must have logged one) failed (ci-lane run 39396698292 and 39433678003). Together, no root can run the switch without the others.
 h3_restart_roots() {
   local epoch=$1 i prev boot
+  if [ "${H3_RESTART_TOGETHER:-0}" = 1 ]; then
+    for i in $H3_ROOTS; do
+      stop_pidfile "test-nodes/root$i/pid" 'ubft root-node' || return 1
+    done
+    for i in $H3_ROOTS; do
+      for _ in $(seq 1 50); do lsof -nP -iTCP:"$(m2_rpc_port "$i")" -sTCP:LISTEN >/dev/null 2>&1 || break; sleep 0.2; done
+      m2_archive_root_state "$i" "$epoch" || return 1
+    done
+    # a root that bootstraps to a stopped root refuses to start ("failed to bootstrap"): the first root has no bootnode, as at a cold network's genesis, and once it listens
+    # the others start CONCURRENTLY (m2_start_root waits 2-3 s per root for its listener, so one after the other the roots before the last could form the quorum and run the
+    # switch while the last one is still starting). Any four of five can make a quorum, so the start of the last root is within the same few hundred milliseconds as the others'.
+    local first pids=() rc=0 p; first=$(h3_first_root)
+    m2_start_root "$first" "$epoch" "" || return 1
+    for i in $H3_ROOTS; do
+      [ "$i" != "$first" ] || continue
+      ( m2_start_root "$i" "$epoch" "$(m2_root_addr "$first")" ) & pids+=($!)
+    done
+    for p in "${pids[@]}"; do wait "$p" || rc=1; done
+    [ "$rc" = 0 ] || return 1
+    m2_wait_root_epoch "$(h3_first_root)" "$epoch"
+    return
+  fi
   for i in $H3_ROOTS; do
     prev=$(echo "$H3_ROOTS" | tr ' ' '\n' | grep -vx "$i" | head -1)
     boot=$(m2_root_addr "$prev")
@@ -388,8 +415,9 @@ h3_verify_mint() { # root epoch (trust base) shard epoch (PDR)
   "$tmp/extract" extract --archive "$H3_ARCHIVES/evm$first" --block-hash "$block" --tx-index "$txIndex" --log-index "$logIndex" \
     --emitter "$contract" --topic "$topic" --config-pdr "$tmp/config-pdr.json" --out "$tmp/locked.cbor" || return 1
   # offline: no network, only the bundle, the genesis pin and the trust base for the certificate's root epoch
-  local offline='(version 1) (allow default) (deny network*)'
-  env -i PATH="$PATH" sandbox-exec -p "$offline" "$tmp/verify" --bundle "$tmp/locked.cbor" --trust-base "test-nodes/trust-base-epoch$trustEpoch.json" \
+  # (macOS sandbox-exec, or a Linux network namespace; with neither there is no offline verification to claim)
+  [ -n "$(lane_net_deny_mechanism)" ] || { echo "h3_verify_mint: no network-denial mechanism on this host: the offline verification cannot be shown" >&2; return 1; }
+  lane_net_deny_run "$tmp/verify" --bundle "$tmp/locked.cbor" --trust-base "test-nodes/trust-base-epoch$trustEpoch.json" \
     --genesis-conf "$fullShardConf" --lock-contract "$contract" --mode locked >"$tmp/verify-locked.json" || return 1
   cat "$tmp/verify-locked.json"
 }

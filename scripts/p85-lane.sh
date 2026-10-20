@@ -84,7 +84,11 @@ trap 'exit 143' TERM
 
 # the single B1 layout: one B1 profile derived from the shard configuration and the root trust base; the registry slots are read under the layout-3 names;
 # every shard node exposes its operator endpoint (the readiness check asks it what it has staged)
-export Q3_B1=1 H3_SLOT_LAYOUT=3 EVM_OPERATOR_STATUS_RPC=1 P85_LANE=1 P85_CONTRACTS M2_ROOT_FLAGS_FN=p85_root_flags
+export Q3_B1=1 H3_SLOT_LAYOUT=3 EVM_OPERATOR_STATUS_RPC=1 P85_LANE=1 H3_RESTART_TOGETHER=1 P85_CONTRACTS M2_ROOT_FLAGS_FN=p85_root_flags
+# P85_SHADOW=1 (X4 #58): the same genesis and devnet with the records hook and NO authoritative election; scripts/x4-shadow-steps.sh runs the shadow adapter
+# against it with a scripted eligibility scenario instead of the recovery steps
+export P85_SHADOW=${P85_SHADOW:-0}
+[ "$P85_SHADOW" != 1 ] || [ "${ANYAGE_LANE:-0}${UTB_LANE:-0}${REWARD_LANE:-0}" = 000 ] || fail "P85_SHADOW=1 does not combine with the any-age, UTB or reward lanes"
 export ANYAGE_LANE=${ANYAGE_LANE:-0} UTB_LANE=${UTB_LANE:-0} EVIDENCE_LANE_LOG="$EVIDENCE_DIR/lane.log"
 # the roots judge an assignment's committee continuity by the budget committed in the installed EVM configuration; it must be the one the election
 # was priced under (the contracts' genesis parameter): adding a unit-weight joiner to four unit-weight members is D = 2/5, over the 1/4 default
@@ -116,6 +120,11 @@ fi
 if [ -n "${ANYAGE_PREP_ONLY:-}" ]; then
   grep -q '^anyage prep only:' "$EVIDENCE_DIR/lane.log" || fail "the prep-only run did not reach its end"
   pass "any-age prep-only run complete (nothing was started); inputs in $EVIDENCE_DIR/state"
+  exit 0
+fi
+if [ "$P85_SHADOW" = 1 ]; then
+  grep -q 'X4 shadow lane: all steps PASSED' "$EVIDENCE_DIR/lane.log" || fail "the shadow lane ended without completing its steps or without a PASS from the adapter (see $EVIDENCE_DIR/p85/run/shadow/REPORT.md)"
+  pass "X4 shadow lane complete; evidence in $EVIDENCE_DIR (adapter report in p85/run/shadow)"
   exit 0
 fi
 grep -q 'P85 recovery lane: all steps PASSED' "$EVIDENCE_DIR/lane.log" || fail "lane ended without completing its steps"
