@@ -284,6 +284,8 @@ jobs:
         with:
           name: ureth-linux
           path: ${{ runner.temp }}/artifacts/ureth-linux
+      - name: Free disk (before the sampler, so the growth it reports is T6's own)
+        run: scripts/ci/prune-runner.sh
       - name: Sample resources
         run: |
           mkdir -p "$RUNNER_TEMP/res"

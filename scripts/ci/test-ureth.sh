@@ -11,7 +11,12 @@ repo=$(jq -r .components.ureth.repository "$pins"); commit=$(jq -r .components.u
 mapfile -t pkgs < <(jq -r '.components.ureth.targetedPackages[]' "$pins")
 [ "${#pkgs[@]}" -gt 0 ] || { echo "test-ureth: no targeted packages in the manifest" >&2; exit 2; }
 [[ $commit =~ ^[0-9a-f]{40}$ ]] || { echo "test-ureth: the pinned commit is not 40 hex: $commit" >&2; exit 2; }
-mkdir -p "$out" "$work"; rm -rf "$work/src"; mkdir -p "$work/src"; src=$work/src
+# the free-disk gate, set from the measured growth of this job (lane-pins.json runner.minFreeDiskGiBUrethTargeted); a runner with less is refused, never waved through
+need=$(jq -r '.runner.minFreeDiskGiBUrethTargeted // 0' "$pins"); mkdir -p "$out" "$work"
+free_gib=$(df -Pk "$work" | awk 'NR==2 {printf "%d", $4/1048576}')
+[ "$free_gib" -ge "$need" ] || { echo "test-ureth: only ${free_gib} GiB free, the manifest's gate is ${need} GiB (measured growth 11.15 GiB)" >&2; exit 1; }
+echo "disk free ${free_gib} GiB (gate ${need} GiB)"
+rm -rf "$work/src"; mkdir -p "$work/src"; src=$work/src
 git -C "$src" init -q && git -C "$src" fetch -q --depth 1 "$repo" "$commit" && git -C "$src" checkout -q --detach FETCH_HEAD || { echo "test-ureth: cannot fetch the pin" >&2; exit 1; }
 [ "$(git -C "$src" rev-parse HEAD)" = "$commit" ] || { echo "test-ureth: the checkout is not the pinned commit" >&2; exit 1; }
 rustup toolchain install "$rust" --profile minimal --no-self-update >/dev/null || exit 1
