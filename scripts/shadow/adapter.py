@@ -143,7 +143,7 @@ def cmd_run(a):
             time.sleep(wait)
         try:
             row = observe(k, rpc, a.rpc, modules, a.registry, a.anvil, out)
-        except (cap.CaptureGap, RpcError, fork.ForkRefused, OSError) as e:
+        except Exception as e:  # any failure of one sample is a recorded coverage gap with its cause, never a crash and never equality
             row = {"sample": k, "utc": datetime.now(timezone.utc).isoformat(), "verdict": "GAP", "case": "gap", "inputDigest": "", "gap": f"{type(e).__name__}: {e}"}
             events.write(json.dumps({"utc": row["utc"], "event": "gap", "sample": k, "detail": row["gap"]}) + "\n")
             events.flush()

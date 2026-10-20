@@ -2,6 +2,7 @@
 (there is no send method). `ForkRpc` may send, and only after `verify()` proved that its URL is the loopback anvil this process spawned, on the pinned chain
 id, serving the pinned block hash."""
 import json
+import time
 import urllib.request
 
 READ_METHODS = frozenset({"eth_call", "eth_getBlockByNumber", "eth_getStorageAt", "eth_getCode", "eth_chainId", "eth_blockNumber", "web3_clientVersion"})
@@ -71,8 +72,15 @@ class ForkRpc(ReadOnlyRpc):
         out = self.request("eth_call", [{"from": frm, "to": to, "data": "0x" + data.hex()}, block])
         return bytes.fromhex(out[2:])
 
-    def send(self, frm, to, data):
-        """A transaction on the (verified) fork from an impersonated account; returns the receipt status (1 = success)."""
+    def send(self, frm, to, data, wait=20.0):
+        """A transaction on the (verified) fork from an impersonated account; polls for the receipt (anvil mines a moment after accepting it) and returns its
+        status (1 = success). A receipt that never arrives is an RpcError."""
         txh = self.request("eth_sendTransaction", [{"from": frm, "to": to, "data": "0x" + data.hex(), "gas": hex(30_000_000), "gasPrice": "0x0"}])
-        rec = self.request("eth_getTransactionReceipt", [txh])
-        return int(rec["status"], 16)
+        deadline = time.monotonic() + wait
+        while True:
+            rec = self.request("eth_getTransactionReceipt", [txh])
+            if rec is not None:
+                return int(rec["status"], 16)
+            if time.monotonic() > deadline:
+                raise RpcError(f"no receipt for {txh} within {wait}s")
+            time.sleep(0.2)

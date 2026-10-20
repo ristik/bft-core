@@ -343,6 +343,18 @@ class ForkSafety(unittest.TestCase):
         with self.assertRaises(chain.RpcError):
             f.rpc.send(fork.SYSTEM_CALLER, "0x" + "11" * 20, b"")
 
+    def test_a_receipt_that_arrives_late_is_waited_for_and_one_that_never_does_is_an_error(self):
+        f = fork.Fork("http://node.example:8545", self.PIN, command=["true"])
+        f.rpc.verified = True
+        answers = iter(["0xabc", None, None, {"status": "0x1"}])
+        f.rpc.request = lambda m, p: next(answers)
+        self.assertEqual(f.rpc.send(fork.SYSTEM_CALLER, "0x" + "11" * 20, b""), 1)
+        g = fork.Fork("http://node.example:8545", self.PIN, command=["true"])
+        g.rpc.verified = True
+        g.rpc.request = lambda m, p: "0xabc" if m == "eth_sendTransaction" else None
+        with self.assertRaises(chain.RpcError):
+            g.rpc.send(fork.SYSTEM_CALLER, "0x" + "11" * 20, b"", wait=0.5)
+
     def test_the_authoritative_endpoint_has_no_write_method(self):
         rpc = chain.ReadOnlyRpc("http://node.example:8545")
         for m in ("eth_sendTransaction", "eth_sendRawTransaction", "evm_mine", "anvil_impersonateAccount"):
