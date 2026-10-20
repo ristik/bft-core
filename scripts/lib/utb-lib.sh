@@ -231,21 +231,35 @@ utb_step_u3b() {
   utb_wait_agg_tip 3 90 || return 1
   # the aggregator logs asynchronously: the history can be served (tip 3) before its catch-up lines reach the file
   for i in $(seq 1 60); do utb_agg_lines_since "$off" | grep -aq '"msg":"trust-base catch-up finished"' && break; sleep 1; done
-  utb_agg_lines_since "$off" | jq -c 'select((.msg|startswith("trust-base catch-up")) or .msg=="trust-base gap in certification response" or .msg=="Signed trust-base history loaded" or .msg=="trust-base handshake to the newest held committee")' >"$out/catchup/aggregator-repair.jsonl"
+  utb_agg_lines_since "$off" | jq -c 'select((.msg|startswith("trust-base catch-up")) or .msg=="trust-base gap in certification response" or .msg=="Signed trust-base history loaded" or .msg=="trust-base handshake to the newest held committee" or .msg=="trust-base entries appended from certification response" or .msg=="dropping an invalid trust-base update")' >"$out/catchup/aggregator-repair.jsonl"
   python3 - "$out/catchup/aggregator-repair.jsonl" "$out/catchup/aggregator-peer-repair.log" <<'PY' || return 1
 import json, sys
 lines = [json.loads(l) for l in open(sys.argv[1]) if l.strip()]
 st = [i for i, l in enumerate(lines) if l["msg"] == "trust-base catch-up started"]
 if not st: raise SystemExit("no catch-up started after the restart")
-fin = [i for i, l in enumerate(lines) if l["msg"] == "trust-base catch-up finished" and "error" not in l and l.get("added", 0) >= 2]
-if not fin: raise SystemExit("no successful catch-up finished (added >= 2)")
-pages = [l for l in lines[st[0]:fin[0]] if l["msg"] == "trust-base catch-up page" and l.get("status") == "OK" and l.get("entries", 0) >= 1]
-if not pages: raise SystemExit("no OK catch-up page from a root between the start and the finish")
-out = ["peer repair: started from epoch %s, %d OK page(s), peers %s, finished adding %s (tip %s)" % (lines[st[0]].get("from"), len(pages), sorted({p["peer"] for p in pages}), lines[fin[0]]["added"], lines[fin[0]]["tip"])]
+# the entries can arrive over two overlapping paths (a catch-up page and a piggybacked certification response): together they cover the missing epochs 2..3
+fin = [i for i, l in enumerate(lines) if l["msg"] == "trust-base catch-up finished" and "error" not in l]
+if not fin: raise SystemExit("no successful catch-up finished")
+pages = [l for l in lines[st[0]:] if l["msg"] == "trust-base catch-up page" and l.get("status") == "OK" and l.get("entries", 0) >= 1]
+if not pages: raise SystemExit("no OK catch-up page with entries from a root after the catch-up started")
+if any(l["msg"] == "dropping an invalid trust-base update" for l in lines): raise SystemExit("the aggregator dropped an invalid trust-base update")
+by_catchup = sum(lines[i].get("added", 0) for i in fin)
+by_response = sum(l.get("added", 0) for l in lines if l["msg"] == "trust-base entries appended from certification response")
+tip = max(lines[i].get("tip", 0) for i in fin)
+if tip < 3: raise SystemExit("the catch-up did not reach epoch 3 (tip %s)" % tip)
+# a catch-up counts every append it makes, including an entry a piggybacked response already added, so the counts overlap: they must cover the missing epochs, and the exact
+# content is checked on the fetched history afterwards (epochs 1..3 from the pin, epoch 2 byte for byte)
+missing = tip - (lines[st[0]]["from"] - 1)
+if by_catchup < 1 or by_catchup + by_response < missing: raise SystemExit("epochs %s..%s were not all added: by catch-up %d, by response %d" % (lines[st[0]]["from"], tip, by_catchup, by_response))
+out = ["peer repair: started from epoch %s, %d OK page(s), peers %s; added by catch-up %d, by certification response %d (the counts may overlap; tip %s)" % (lines[st[0]].get("from"), len(pages), sorted({p["peer"] for p in pages}), by_catchup, by_response, tip)]
 out += [json.dumps(l) for l in lines]
 open(sys.argv[2], "w").write("\n".join(out) + "\n")
 PY
-  echo "U3b: the aggregator repaired epochs 2..3 from a root over GetTrustBase (root HTTP was not available to it)"
+  # the repaired history authenticates from the pin and holds epoch 2 byte for byte as the root attached it; U4 checks the final bundle is these bytes
+  utb_ev fetch --url "$(utb_agg_url)" --out "$out/bundle/after-repair.cbor" >/dev/null || return 1
+  utb_ev verify --bundle "$out/bundle/after-repair.cbor" --pin "$(utb_pin)" | grep -q '^ok: epochs 1\.\.3, ' || { echo "the repaired history is not epochs 1..3 authenticated from the pin" >&2; return 1; }
+  utb_ev extract --bundle "$out/bundle/after-repair.cbor" --epoch 2 --out "$out/entries/repaired-2.cbor" >/dev/null && cmp -s "$out/entries/repaired-2.cbor" "$out/entries/ordinary-handoff.cbor" || { echo "the repaired epoch 2 differs from the entry the root attached" >&2; return 1; }
+  echo "U3b: the aggregator repaired epochs 2..3 from the roots (catch-up page and/or piggybacked response, counts in catchup/aggregator-peer-repair.log); the history is epochs 1..3 from the pin"
 }
 
 # After the acknowledgement: the post-recovery token (certified under the epoch-3 committee), the client's unknown-epoch gap, the aggregator's second restart.
@@ -266,7 +280,7 @@ utb_step_u4() {
   done
   rm -f "$out/bundle/final-probe.cbor"
   [ -s "$out/proofs/post-recovery-token.cbor" ] && [ "$i" -lt 60 ] || { echo "the aggregator's latest block certificate is not one of epoch 3 within 120 s of the recovery" >&2; utb_ev uc-verify --token "$out/proofs/post-recovery-token.cbor" --bundle "$out/bundle/final.cbor" --shard-conf "$(agg_conf 1)" >&2 || true; return 1; }
-  utb_ev fetch --url "$(utb_agg_url)" --out "$out/bundle/final.cbor" && utb_ev verify --bundle "$out/bundle/final.cbor" --pin "$(utb_pin)" | tee "$out/bundle/final.verify.txt" || return 1
+  utb_ev fetch --url "$(utb_agg_url)" --out "$out/bundle/final.cbor" && cmp -s "$out/bundle/after-repair.cbor" "$out/bundle/final.cbor" && utb_ev verify --bundle "$out/bundle/final.cbor" --pin "$(utb_pin)" | tee "$out/bundle/final.verify.txt" || return 1
   utb_ev extract --bundle "$out/bundle/final.cbor" --epoch 3 --out "$out/entries/recovery.cbor" || return 1
   utb_ev verify --bundle "$out/bundle/final.cbor" --pin "$(utb_pin)" | grep '^epoch 2 ' >"$out/verifier/ordinary.txt" && utb_ev verify --bundle "$out/bundle/final.cbor" --pin "$(utb_pin)" | grep '^epoch 3 ' >"$out/verifier/recovery.txt" || return 1
   # the reference client was last seen at the genesis: the post-recovery certificate names an epoch it does not hold
