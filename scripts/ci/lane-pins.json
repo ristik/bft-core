@@ -60,6 +60,6 @@
   "runner": {
     "label": "ubuntu-24.04",
     "minFreeDiskGiB": 8,
-    "minFreeDiskNote": "provisional until the measured value replaces it (docs/ci-lanes.md)"
+    "minFreeDiskNote": "Measured on ubuntu-24.04 standard runners (4 CPU / 16 GB), runs 39391426570 and 39399607786: the lane's disk growth peaks at 3.88 GiB (the cold ureth build 3.79 GiB, the Go build 3.72 GiB, sources 0.97 GiB); memory peaks at 2.36 GiB (run) and 4.62 GiB (ureth build), no swap. The gate is checked by the preflight after the inputs are unpacked: 8 GiB is 2.06 times the measured peak growth, so a run twice as chatty as the measured one still fits, and it is far below the 25 GiB of the Mac default (which also covers building ureth and contracts there). A runner with less than 8 GiB free after unpacking is refused, never waved through."
   }
 }

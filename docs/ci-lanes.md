@@ -50,7 +50,19 @@ Rust / Go / Node versions, the Foundry release and its archive digest, the Mongo
 ## Resources and the free-disk gate
 
 Every job samples `df`, `free` and the largest resident process every 5 s (`scripts/ci/sample-resources.sh`) and publishes the series as
-`resources-<job>` with a summary. MEASUREMENTS_PLACEHOLDER
+`resources-<job>` with a summary. Measured on ubuntu-24.04 standard runners (4 CPU / 16 GB / `/dev/root` 145 GB, 85 GiB free before and 115 GiB after `prune-runner.sh`; image 20261018.339.1):
+
+| job | wall time | peak disk growth | lowest free | peak memory used |
+|---|---|---|---|---|
+| `build-ureth` (cold, rustc 1.97.1, locked release) | 18 min 38 s | 3.79 GiB | 110.6 GiB | 4.62 GiB (no swap) |
+| `build-tools` (ubft, Go tools, aggregator, self-tests) | 3 min 32 s | 3.72 GiB | 81.9 GiB | 1.86 GiB |
+| `build-sources` (contracts + forge, NBP, JS SDK) | 4 min 27 s | 0.97 GiB | 84.0 GiB | 3.74 GiB |
+| `run-lane` (prep + the lane, 10 min) | 10 min 8 s | 3.88 GiB | 109.9 GiB | 2.36 GiB |
+
+**The free-disk gate** (`runner.minFreeDiskGiB` in `lane-pins.json`, passed as `UTB_MIN_FREE_GIB`, checked by the lane's preflight after the inputs are unpacked) is
+**8 GiB**: 2.06 times the lane's measured peak growth, so a run twice as chatty as the measured one still fits; the Mac default of 25 GiB also covers building ureth
+and contracts there and does not apply to a prebuilt run. A runner with less free after unpacking is refused. The runner's disk is far larger than the 14 GB the
+plan assumed, and nothing here depends on that margin: the largest single consumer, the cold ureth build, grows the disk by 3.8 GiB.
 
 ## Evidence and what a failed run leaves
 

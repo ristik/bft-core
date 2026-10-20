@@ -25,7 +25,6 @@ on:
 
 permissions:
   contents: read
-  actions: read   # download-artifact from an earlier run (reuse_ureth_run, push runs only)
 
 jobs:
   plan:
@@ -34,7 +33,6 @@ jobs:
     outputs:
       lane: ${{ steps.in.outputs.lane }}
       inject: ${{ steps.in.outputs.inject }}
-      reuse_ureth_run: ${{ steps.in.outputs.reuse_ureth_run }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - id: in
@@ -44,19 +42,15 @@ jobs:
           IN_INJECT: ${{ inputs.inject_failure }}
         run: |
           set -euo pipefail
-          reuse=
           if [ "$EVENT" = workflow_dispatch ]; then lane=$IN_LANE; inject=$IN_INJECT
-          else lane=$(jq -r .lane scripts/ci/run-inputs.json); inject=$(jq -r .inject_failure scripts/ci/run-inputs.json); reuse=$(jq -r '.reuse_ureth_run // ""' scripts/ci/run-inputs.json); fi
-          case "$lane" in combined|build-only|ureth-only) ;; *) echo "bad lane $lane" >&2; exit 1 ;; esac
+          else lane=$(jq -r .lane scripts/ci/run-inputs.json); inject=$(jq -r .inject_failure scripts/ci/run-inputs.json); fi
+          case "$lane" in combined|build-only) ;; *) echo "bad lane $lane" >&2; exit 1 ;; esac
           case "$inject" in none|after-builds|in-lane) ;; *) echo "bad inject_failure $inject" >&2; exit 1 ;; esac
-          [ -z "$reuse" ] || [[ $reuse =~ ^[0-9]+$ ]] || { echo "bad reuse_ureth_run" >&2; exit 1; }
-          echo "lane=$lane" >>"$GITHUB_OUTPUT"; echo "inject=$inject" >>"$GITHUB_OUTPUT"; echo "reuse_ureth_run=$reuse" >>"$GITHUB_OUTPUT"
-          echo "lane=$lane inject_failure=$inject reuse_ureth_run=${reuse:-none} sha=$GITHUB_SHA"
-          [ -z "$reuse" ] || echo "NOTE: this run reuses the ureth binary of run $reuse (an iteration run, not acceptance evidence)"
+          echo "lane=$lane" >>"$GITHUB_OUTPUT"; echo "inject=$inject" >>"$GITHUB_OUTPUT";
+          echo "lane=$lane inject_failure=$inject sha=$GITHUB_SHA"
 
   build-ureth:
     needs: plan
-    if: needs.plan.outputs.reuse_ureth_run == ''
     runs-on: ubuntu-24.04
     timeout-minutes: 240
     steps:
@@ -92,7 +86,6 @@ jobs:
 
   build-tools:
     needs: plan
-    if: needs.plan.outputs.lane != 'ureth-only'
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
@@ -134,7 +127,6 @@ jobs:
 
   build-sources:
     needs: plan
-    if: needs.plan.outputs.lane != 'ureth-only'
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
@@ -173,8 +165,7 @@ jobs:
 
   run-lane:
     needs: [plan, build-ureth, build-tools, build-sources]
-    # the builds may be skipped (reused ureth, build-only); a failed build fails the run job's prerequisites
-    if: ${{ !cancelled() && needs.plan.outputs.lane == 'combined' && needs.build-tools.result == 'success' && needs.build-sources.result == 'success' && (needs.build-ureth.result == 'success' || (needs.build-ureth.result == 'skipped' && needs.plan.outputs.reuse_ureth_run != '')) }}
+    if: ${{ needs.plan.outputs.lane == 'combined' }}   # a failed build job fails the run job's prerequisites (no !cancelled override)
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
@@ -190,17 +181,9 @@ jobs:
         with:
           node-version: '22'
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-        if: needs.plan.outputs.reuse_ureth_run == ''
         with:
           name: ureth-linux
           path: ${{ runner.temp }}/artifacts/ureth-linux
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-        if: needs.plan.outputs.reuse_ureth_run != ''
-        with:
-          name: ureth-linux
-          path: ${{ runner.temp }}/artifacts/ureth-linux
-          run-id: ${{ needs.plan.outputs.reuse_ureth_run }}
-          github-token: ${{ github.token }}
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: bft-tools
