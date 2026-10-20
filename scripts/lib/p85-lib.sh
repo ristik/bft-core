@@ -119,9 +119,18 @@ p85_check_hook_gas() { # profile
 
 p85_json() { python3 -c "import json,sys;print(json.load(open('$1'))$2)"; }
 
+# P85_SHADOW=1 (X4 #58, briefs/x4-shadow-campaign-design.md): the staking modules are in the genesis and the records hook runs, but the chain has NO authoritative
+# election: the profile carries no --election/--elect-measurement and the roots run without --pos-deployment/--pos-evm-rpc/--pos-genesis-identities. The shadow
+# adapter (scripts/shadow) then runs the real election on forks of certified state. The genesis tool takes the election optional (b1state validHook).
+p85_shadow() { [ "${P85_SHADOW:-0}" = 1 ]; }
+
 p85_profile_args() {
   local d=$P85_DIR/genesis/deployment.json
   [ -s "$d" ] || p85_die "no deployment: run p85_prepare_genesis" || return 1
+  if p85_shadow; then
+    echo --records-custody "$(p85_json "$d" "['custody']")" --h-records "$P85_H_RECORDS" --hook-record-gas "$P85_HOOK_RECORD_GAS" --hook-measurement "$P85_DIR/hook-measurement.jsonl" --elect-caps "$P85_CAPS"
+    return
+  fi
   echo --records-custody "$(p85_json "$d" "['custody']")" --h-records "$P85_H_RECORDS" --hook-record-gas "$P85_HOOK_RECORD_GAS" \
     --election "$(p85_json "$d" "['election']")" --elect-measurement "$P85_DIR/elect-measurement.json" --hook-measurement "$P85_DIR/hook-measurement.jsonl" --elect-caps "$P85_CAPS"
 }
@@ -145,7 +154,8 @@ P85_CAST=${P85_CAST:-$HOME/.foundry/bin/cast}
 # the joiner bonds P85_JOINER_UNITS units (3 in the over-bound mode, which refuses a candidate that heavy), and is funded with those plus two more units for the
 # gas of its transactions (the default mode: 1 + 2 = 3 units, as before). Decided here, before the genesis alloc, from the mode.
 P85_JOINER_UNITS=${P85_JOINER_UNITS:-$([ "${P85_MODE:-}" = overbound ] && echo 3 || echo 1)}
-P85_JOINER_FUND_WEI=${P85_JOINER_FUND_WEI:-$(python3 -c "print($P85_BOND_UNIT * ($P85_JOINER_UNITS + 2))")}
+# the shadow chain's joiner account also funds the scripted spare identities (scripts/x4-shadow-steps.sh): ten more units
+P85_JOINER_FUND_WEI=${P85_JOINER_FUND_WEI:-$(python3 -c "print($P85_BOND_UNIT * ($P85_JOINER_UNITS + 2 + (10 if '${P85_SHADOW:-0}' == '1' else 0)))")}
 
 # The joiner entity's EVM-side account (owner of its custody identity; it also pays the relayer transactions of the lane). It is funded in the
 # genesis alloc, so the lane needs no faucet. Its root/EVM keys are the nodes' own (written by the lane when the joiner's nodes exist).
@@ -191,7 +201,34 @@ PY
 # p85_root_flags <node> <eth rpc url>: the flags of a root of the lane. The P85
 # control executor with the election pinned (--q3-lane is added by the caller), and the genesis committee's records as K. --pos-evm-rpc is required by an election-pinned chain.
 p85_root_flags() {
+  # no election is pinned: a root given --pos-deployment would require the election-pinned chain. It still records the genesis committee (the same file, the
+  # non-PoS flag: --pos-genesis-identities needs --pos-deployment), so the assignment the records hook delivers is the one custody holds.
+  if p85_shadow; then echo --genesis-identities "$P85_DIR/genesis-identities.json"; return 0; fi
   echo --pos-deployment "$P85_DIR/pos-deployment.json" --pos-genesis-identities "$P85_DIR/genesis-identities.json" --pos-evm-rpc "$2"
+}
+
+# The shadow chain has the records hook and NO election, and its roots run without the PoS flags. Two checks, both run by the shadow lane after the genesis and
+# after the roots started (and by the selftest on fixtures): a profile with an election, or a root with --pos-*, would make the shadow comparison meaningless.
+p85_assert_shadow_profile() { # b1-profile.json
+  python3 - "$1" <<'PY' || return 1
+import json, sys
+p = json.load(open(sys.argv[1]))
+zero = "0x" + "00" * 20
+if p.get("recordsCustody", zero) == zero: sys.exit("shadow: the profile has no records hook (recordsCustody)")
+if p.get("electionContract", zero) != zero or p.get("electGas", 0) != 0 or p.get("electMeasurement"):
+    sys.exit("shadow: the profile carries an authoritative election (electionContract/electGas/electMeasurement)")
+PY
+}
+p85_assert_shadow_roots() { # the command lines of the running roots
+  local f pid args n=0
+  for f in test-nodes/root*/pid; do
+    [ -s "$f" ] || continue
+    pid=$(cat "$f"); args=$(ps -o args= -p "$pid" 2>/dev/null) || continue
+    [ -n "$args" ] || continue
+    n=$((n + 1))
+    case "$args" in *--pos-deployment*|*--pos-evm-rpc*|*--pos-genesis-identities*) p85_die "shadow: root $f runs with PoS flags: $args" || return 1;; esac
+  done
+  [ "$n" -gt 0 ] || p85_die "shadow: no running root to check" || return 1
 }
 
 p85_selftest() {
@@ -220,6 +257,29 @@ p85_selftest() {
   grep -qx "$want" "$d/test-nodes/p85/contracts-genesis.json.env" 2>/dev/null || grep -qx "$want" "$d"/test-nodes/p85/*.env 2>/dev/null || bad "P85_ROOT_GENESIS did not reach p85-genesis.sh: $(cat "$d"/test-nodes/p85/*.env 2>/dev/null | tr '\n' ' ')"
   grep -qx "P85_ROOT_NETWORK=7" "$d"/test-nodes/p85/*.env 2>/dev/null || bad "P85_ROOT_NETWORK did not reach p85-genesis.sh as its own variable"
   grep -qx "P85_V_MAX=16" "$d"/test-nodes/p85/*.env 2>/dev/null || bad "the caps were not split for p85-genesis.sh"
+  # the shadow variant: no election flags, no PoS root flags; the unshadowed variant keeps both (regression)
+  mkdir -p "$t/sh/genesis" "$t/sh/n/root1"
+  echo '{"custody":"0x00000000000000000000000000000000000000c1","election":"0x00000000000000000000000000000000000000e1"}' >"$t/sh/genesis/deployment.json"
+  got=$(P85_DIR="$t/sh" P85_SHADOW=1 p85_profile_args); case "$got" in *--election*|*--elect-measurement*) bad "the shadow profile arguments carry the election: $got";; esac
+  case "$got" in *--records-custody*--hook-measurement*--elect-caps*) ;; *) bad "the shadow profile arguments lost the records hook: $got";; esac
+  got=$(P85_DIR="$t/sh" P85_SHADOW=0 p85_profile_args); case "$got" in *--election*--elect-measurement*) ;; *) bad "the PoS profile arguments lost the election: $got";; esac
+  got=$(P85_DIR="$t/sh" P85_SHADOW=1 p85_root_flags 1 http://x); case "$got" in *--pos-*) bad "a shadow root is given PoS flags: $got";; esac
+  case "$got" in *--genesis-identities*) ;; *) bad "a shadow root does not record the genesis committee: $got";; esac
+  got=$(P85_DIR="$t/sh" P85_SHADOW=0 p85_root_flags 1 http://x); case "$got" in *--pos-deployment*--pos-evm-rpc*) ;; *) bad "a PoS root lost its PoS flags: $got";; esac
+  echo '{"recordsCustody":"0x00000000000000000000000000000000000000c1","electionContract":"0x0000000000000000000000000000000000000000","electGas":0}' >"$t/sh/ok.json"
+  p85_assert_shadow_profile "$t/sh/ok.json" 2>/dev/null || bad "a hook-only profile was refused as a shadow profile"
+  echo '{"recordsCustody":"0x00000000000000000000000000000000000000c1","electionContract":"0x00000000000000000000000000000000000000e1","electGas":5}' >"$t/sh/bad.json"
+  p85_assert_shadow_profile "$t/sh/bad.json" 2>/dev/null && bad "a profile with an election was accepted as a shadow profile"
+  echo '{"electionContract":"0x0000000000000000000000000000000000000000","electGas":0}' >"$t/sh/nohook.json"
+  p85_assert_shadow_profile "$t/sh/nohook.json" 2>/dev/null && bad "a profile without the records hook was accepted as a shadow profile"
+  sleep 30 & local sp=$!; echo "$sp" >"$t/sh/n/root1/pid"
+  ( cd "$t/sh/n" && mkdir -p test-nodes && rm -rf test-nodes/root1 && cp -R root1 test-nodes/root1 && p85_assert_shadow_roots ) 2>/dev/null || bad "a root without PoS flags was refused"
+  kill "$sp" 2>/dev/null; wait "$sp" 2>/dev/null
+  # a process whose command line carries a PoS flag is refused
+  local pf="$t/sh/n/test-nodes/root1/pid"
+  bash -c 'exec -a "ubft root-node run --pos-deployment x" sleep 30' & local sp2=$!; echo "$sp2" >"$pf"
+  ( cd "$t/sh/n" && p85_assert_shadow_roots ) 2>/dev/null && bad "a root with --pos-deployment was accepted as a shadow root"
+  kill "$sp2" 2>/dev/null; wait "$sp2" 2>/dev/null
   rm -rf "$t"
   return $ok
 }

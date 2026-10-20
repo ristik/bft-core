@@ -1,0 +1,109 @@
+{
+ "assignmentID": "0x24150e8f3b6a8a569b29ba8dd52de6fa2659b2250f32850209a5fc4c313c9b16",
+ "attempt": 1,
+ "attemptCursorAfter": 1,
+ "frozen": [
+  {
+   "bindingHash": "0x26d8716b3648555b1608415a7bf03c10f58f5dd69c14f4f9f7b549c07547ef67",
+   "generation": 1,
+   "id": 1,
+   "raw": 1,
+   "weight": 1
+  },
+  {
+   "bindingHash": "0x0976fd8126d3fb1a78b31a4911d5dc1f074ef402500f21f7d82bfff774967858",
+   "generation": 1,
+   "id": 2,
+   "raw": 1,
+   "weight": 1
+  },
+  {
+   "bindingHash": "0xbc2e813f504a0acd867f13719e15df2af8cda95067869b4c0ba6ab7bbe3e9f4e",
+   "generation": 1,
+   "id": 3,
+   "raw": 1,
+   "weight": 1
+  },
+  {
+   "bindingHash": "0xc6cb36a4be705108273b5fc8387cab583942042dcf7b7a3970338f6110df42f8",
+   "generation": 1,
+   "id": 4,
+   "raw": 1,
+   "weight": 1
+  }
+ ],
+ "members": [
+  {
+   "evmKeyHash": "0xc4bb6ae528f95103769c0ea0c7137901e8dec454009ca6189bf2ede113a1258f",
+   "id": 1,
+   "lots": [
+    1
+   ],
+   "payee": "0x7bc5b3c5324440751e1e164e00c82083c60ecf90",
+   "rawWeight": 1,
+   "rootKeyHash": "0x1b375778b21d5dfcc44cee65376bc343369425cc12e221be69a91991a78ce745",
+   "weight": 1
+  },
+  {
+   "evmKeyHash": "0xb0ee7b5e15bb54d6e4e0d6e0d3099ad78a17c45b8430493fabbe8289228133f5",
+   "id": 2,
+   "lots": [
+    2
+   ],
+   "payee": "0x90c9b007c91b2319b2731aa7ed34687701878463",
+   "rawWeight": 1,
+   "rootKeyHash": "0x23b40627e055f3a7cd7ee0ba8baef7a5260f186faca0378b095a4a2077636edf",
+   "weight": 1
+  },
+  {
+   "evmKeyHash": "0xedd273e0670833cb8f288de6d309dd4e6106d162325cd496773fa53ddcc701da",
+   "id": 3,
+   "lots": [
+    3
+   ],
+   "payee": "0xc19bd86a9430499a42fd3756e7c803876ea12249",
+   "rawWeight": 1,
+   "rootKeyHash": "0x57d3fb1aec92ee8c64b09869870f21a1ada9ffb9334d8eed271ca6ea2e3cb972",
+   "weight": 1
+  },
+  {
+   "evmKeyHash": "0x194c4cbb9e631acd6157687705fb392744ae96c86a0791a0dcc66c9afe33ee47",
+   "id": 4,
+   "lots": [
+    4
+   ],
+   "payee": "0x34de31ae9c0a65ac540f1d539c1af75055fcccc1",
+   "rawWeight": 1,
+   "rootKeyHash": "0x9e25a63abec73ef6f7a11cc712a00a3571cbaa87afa36df617ede11e6c53202b",
+   "weight": 1
+  }
+ ],
+ "openResultAfter": "0xfb360cb43a129f650a59ed4443352e7aa56b2e5f1dab38c4b371667a84ba118e",
+ "origin": "0xb0c2e47d2a59f2f5954246a619748243fdfdfe6f3ee28e4bf36d827c886e65ff",
+ "outcome": "Reserved",
+ "policyID": 1,
+ "predecessor": "0x56967a69c028acc373c04f286e41a7ed373887cad5c08539f301c5d5fe9cb57f",
+ "progress": 411,
+ "publication": {
+  "assignmentID": "0x24150e8f3b6a8a569b29ba8dd52de6fa2659b2250f32850209a5fc4c313c9b16",
+  "attempt": 1,
+  "contractsDigest": "0xcf6452ae78a788d1d1abe42c0ccf30bc08ecfec81e1c8ea53dc01ba4755ba296",
+  "incumbent": "0x56967a69c028acc373c04f286e41a7ed373887cad5c08539f301c5d5fe9cb57f",
+  "incumbentExposureDigest": "0x5222ecec1000c7fad7e9c18130eeeb9779f87c6cdf33c17527278ccc7f920e70",
+  "incumbentKeyDigest": "0xcc6d6cd2a41e74817e7f1c64a8d9625e9676b3332c0be32618f690cc43134041",
+  "kCommit": "0xbae1ef86900b58c506c12d335d76884d2833b6b8ed221a325fe07eea05f1bd2e",
+  "policyDigest": "0xe97406895499717cb6bfaf21e161d1a297c626b57058d2fd3eeb0401a44c99c5",
+  "snapshotDigest": "0x2bf0623777af178e0bb1acfc4f98f09428f95572402275e61ff416e75e9455b3"
+ },
+ "reason": "None",
+ "reservation": {
+  "evmEpoch": 2,
+  "lineage": "0xf35057f6d14d9357816e75c6dadefc2db2202220ca27e3bc52ea374cd2953ee8",
+  "policyID": 1,
+  "rootEpoch": 2,
+  "state": 1
+ },
+ "resultID": "0xfb360cb43a129f650a59ed4443352e7aa56b2e5f1dab38c4b371667a84ba118e",
+ "snapshotDigest": "0x2bf0623777af178e0bb1acfc4f98f09428f95572402275e61ff416e75e9455b3",
+ "ucTime": 1792519810
+}
