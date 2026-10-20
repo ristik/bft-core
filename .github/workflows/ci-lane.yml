@@ -230,17 +230,7 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: lane-evidence
-          path: |
-            ${{ runner.temp }}/lane-out/upload/
-            ${{ runner.temp }}/lane-out/run-lane.log
-            ${{ runner.temp }}/lane-out/publish.log
-            ${{ runner.temp }}/lane-out/lane-prep.log
-            ${{ runner.temp }}/lane-out/lane-stdout.log
-            ${{ runner.temp }}/lane-out/mongo/
-            ${{ runner.temp }}/lane-out/host-before.log.gz
-            ${{ runner.temp }}/lane-out/host-after.log.gz
-            ${{ runner.temp }}/lane-out/oom-lines.txt
-            ${{ runner.temp }}/lane-out/cgroup-memory.events
+          path: ${{ runner.temp }}/lane-out/upload/
           if-no-files-found: warn
           retention-days: 30
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4

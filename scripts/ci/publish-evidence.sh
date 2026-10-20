@@ -23,7 +23,13 @@ pub=$stage/$name; mkdir -p "$pub"
 ( cd "$ev" && find . \( -name keys.json -o -name 'jwt.hex' -o -name '*.key' -o -name '*.scan' -o -name '*.cred' -o -name '*.sock' -o -name '.scan-inputs' -o -name '.devnet-pid' -o -name '.runner-pids' \) -print ) | sort >"$out/removed.txt"
 rsync -a --exclude keys.json --exclude jwt.hex --exclude '*.key' --exclude '*.scan' --exclude '*.cred' --exclude '*.sock' --exclude .scan-inputs \
   --exclude .devnet-pid --exclude .runner-pids --exclude 'reth*/' --exclude 'evm*/' --exclude 'auth*/' "$ev/" "$pub/"
-for p in ${extra[@]+"${extra[@]}"}; do [ -e "$p" ] && { mkdir -p "$pub/ci"; cp -R "$p" "$pub/ci/"; }; done
+# a file which carries a private key in a JSON field (the P85 joiner's joiner.json: ownerKey, rootKey) is left out by content as well as by name; listed, not silent
+( cd "$pub" && grep -rIlE '"(ownerKey|rootKey|privateKey)"[[:space:]]*:[[:space:]]*"(0x)?[0-9a-fA-F]{64}"' . 2>/dev/null ) | sed 's#^\./#./#' | sort >"$stage/secret-fields.txt"
+while read -r f; do [ -n "$f" ] || continue; rm -f "$pub/$f"; echo "$f (private-key field, removed by content)" >>"$out/removed.txt"; done <"$stage/secret-fields.txt"
+# the CI harness's own logs (run log, lane stdout, Mongo, host records) are a second archive, scanned on its own: a secret in the evidence directory must not take the
+# diagnostics with it, and a secret in a log must not ride along unscanned
+ci=$stage/$name-ci; mkdir -p "$ci"
+for p in ${extra[@]+"${extra[@]}"}; do [ -e "$p" ] && cp -R "$p" "$ci/"; done
 # 2. completeness: the sentinels the lane prints at its end, the exit status, the evidence checker on the self-contained pack
 complete=yes; why=()
 [ "$status" -eq 0 ] || { complete=no; why+=("lane exit status $status"); }
@@ -38,14 +44,18 @@ fi
 # 3. SHA256SUMS over the final published directory (INCOMPLETE.txt and the checker output included)
 ( cd "$pub" && find . -type f ! -name SHA256SUMS | LC_ALL=C sort | xargs -I{} bash -c 'source "$0/scripts/lib/portable.sh"; p_sha256 "$1"' "$repo" {} >SHA256SUMS ) 
 ( cd "$pub" && p_sha256 -c SHA256SUMS >/dev/null ) || { echo "publish-evidence: the checksums of the published directory do not verify" >&2; exit 1; }
-# 4. archive, then the secret scan and selection of the archive by the repository's existing pattern
+# 4. archives, then the secret scan and selection of each archive by the repository's existing pattern
+( cd "$ci" && find . -type f ! -name SHA256SUMS | LC_ALL=C sort | xargs -I{} bash -c 'source "$0/scripts/lib/portable.sh"; p_sha256 "$1"' "$repo" {} >SHA256SUMS )
 tar -C "$stage" -czf "$stage/$name.tar.gz" "$name"
-sel=(--out "$out/sel" --quarantine "$quarantine" --require SHA256SUMS --min-node-logs "$minlogs")
+tar -C "$stage" -czf "$stage/$name-ci.tar.gz" "$name-ci"
+mkdir -p "$out/sel"
+sel=(--out "$out/sel" --quarantine "$quarantine" --require SHA256SUMS)
 [ -z "$nodes" ] || sel+=(--nodes "$nodes")
-"$repo/scripts/reth-pin.sh" select-upload "${sel[@]}" "$stage/$name.tar.gz"; scan_rc=$?
+"$repo/scripts/reth-pin.sh" select-upload "${sel[@]}" --min-node-logs "$minlogs" "$stage/$name.tar.gz"; scan_rc=$?
+"$repo/scripts/reth-pin.sh" select-upload "${sel[@]}" --min-node-logs 0 "$stage/$name-ci.tar.gz"; scan_ci_rc=$?
 cp "$out/sel/"* "$out/" 2>/dev/null; rm -rf "$out/sel"
-if [ -f "$out/$name.tar.gz" ]; then ( cd "$out" && p_sha256 "$name.tar.gz" >"$name.tar.gz.sha256" ); fi
-{ echo "evidence $name  complete=$complete ${why[*]:-}"; echo "scan exit $scan_rc"; ls -l "$out" | awk 'NR>1{print $NF, $5}'; } >"$out/PUBLISH-SUMMARY.txt"
+for a in "$name.tar.gz" "$name-ci.tar.gz"; do [ -f "$out/$a" ] && ( cd "$out" && p_sha256 "$a" >"$a.sha256" ); done
+{ echo "evidence $name  complete=$complete ${why[*]:-}"; echo "scan exit evidence=$scan_rc ci-logs=$scan_ci_rc"; ls -l "$out" | awk 'NR>1{print $NF, $5}'; } >"$out/PUBLISH-SUMMARY.txt"
 cat "$out/PUBLISH-SUMMARY.txt"
-[ "$scan_rc" -eq 0 ] && { [ "$complete" = yes ] || exit 3; exit 0; }
+[ "$scan_rc" -eq 0 ] && [ "$scan_ci_rc" -eq 0 ] && { [ "$complete" = yes ] || exit 3; exit 0; }
 exit 4
