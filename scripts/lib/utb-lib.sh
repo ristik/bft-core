@@ -40,7 +40,7 @@ utb_agg_env() { # K (1-based)
   [ -s test-nodes/utb-genesis.cbor ] && [ -s test-nodes/utb-genesis.id ] || { echo "utb_agg_env: no UTB genesis (utb_prepare_genesis first)" >&2; return 1; }
   # BFT_RPC_ADDRESS is a dead port: in UTB mode the aggregator builds no root REST client, and the lane shows root HTTP is not what it uses. JSON logs: the
   # evidence reads the log lines by their exact messages (the markers of the aggregator's UTB history code: internal/bft/utb.go).
-  echo "UTB_GENESIS_FILE=$PWD/test-nodes/utb-genesis.cbor UTB_GENESIS_ID=$(utb_pin) UTB_ENTRIES_DB=$PWD/test-nodes/utb-agg$k.db BFT_RPC_ADDRESS=http://127.0.0.1:1 LOG_FORMAT=json LOG_ENABLE_JSON=true"
+  echo "UTB_GENESIS_FILE=$PWD/test-nodes/utb-genesis.cbor UTB_GENESIS_ID=$(utb_pin) UTB_ENTRIES_DB=$PWD/test-nodes/utb-agg$k.db BFT_RPC_ADDRESS=http://127.0.0.1:1 LOG_LEVEL=debug LOG_FORMAT=json LOG_ENABLE_JSON=true"
 }
 # The aggregator's read-only binary history range (design 11.3 item 4): GET /api/v1/trustbases?from=E[&to=E]..., the PR6 response codec. The same endpoint serves the
 # lane's reference client; port is the aggregator's (agg_port from scripts/lib/agg-lib.sh when it is loaded).
@@ -156,12 +156,16 @@ lines = [json.loads(l) for l in open(sys.argv[1]) if l.strip()]
 app = [i for i, l in enumerate(lines) if l["msg"] == "trust-base entries appended from certification response" and l.get("added", 0) >= 1 and l.get("tip") == 2]
 cu = [i for i, l in enumerate(lines) if l["msg"] == "trust-base catch-up finished" and not l.get("error") and l.get("added", 0) >= 1 and l.get("tip") == 2]
 rcv = [l for l in lines if l["msg"] == "received CertificationResponseV3" and l.get("trustBaseUpdates", 0) >= 1]
+bad = [l for l in lines if l["msg"] == "dropping an invalid trust-base update"]
+if bad: raise SystemExit("the aggregator dropped %d attached trust-base updates as invalid: %s" % (len(bad), json.dumps(bad[0])))
 if not rcv: raise SystemExit("the aggregator never received a version 3 response carrying an attachment: the root did not attach the entry")
 if not app and not cu: raise SystemExit("the aggregator log shows epoch 2 added neither from a response nor by a catch-up")
 via = "response" if app and (not cu or app[0] < cu[0]) else "catch-up"
+held = [l for l in lines if l["msg"] == "trust-base update already held" and l.get("tip", 0) >= 2]
+if via == "catch-up" and not held: raise SystemExit("the catch-up added epoch 2 but no attachment was shown consumed: no 'trust-base update already held' line with tip >= 2 (the aggregator runs at LOG_LEVEL=debug)")
 first = lines[min(app + cu)]
 how = {"response": "from a certification response (the message path)", "catch-up": "by its catch-up worker from a root over GetTrustBase"}[via]
-open(sys.argv[2], "w").write("attached: the aggregator received %d version 3 responses carrying entries (first at line %d with %d)\nadded: epoch 2 (tip 2) was added %s\npath: %s\n%s\n%s\n" % (len(rcv), lines.index(rcv[0]) + 1, rcv[0]["trustBaseUpdates"], how, via, json.dumps(rcv[0]), json.dumps(first)))
+open(sys.argv[2], "w").write("attached: the aggregator received %d version 3 responses carrying entries (first at line %d with %d)\nadded: epoch 2 (tip 2) was added %s\npath: %s\nconsumed: %s\ninvalid attachments dropped: 0\n%s\n%s\n" % (len(rcv), lines.index(rcv[0]) + 1, rcv[0]["trustBaseUpdates"], how, via, ("%d attachments read after the catch-up and found already held (DEBUG), first: %s" % (len(held), json.dumps(held[0]))) if held else "the response's own append (INFO)", json.dumps(rcv[0]), json.dumps(first)))
 PY
 }
 
@@ -193,7 +197,7 @@ utb_step_u2() {
   utb_ev extract --bundle "$t" --epoch 2 --out "$out/entries/ordinary-handoff.cbor" || return 1
   # the aggregator logs asynchronously: wait for the line which shows epoch 2 added (from a response or by its catch-up) before the log is read
   for n in $(seq 1 60); do utb_agg_lines_since 0 | jq -e -s 'any(.[]; (.msg=="trust-base entries appended from certification response" and .tip==2) or (.msg=="trust-base catch-up finished" and .tip==2 and (.added//0)>=1))' >/dev/null 2>&1 && break; sleep 1; done
-  utb_agg_lines_since 0 | jq -c 'select(.msg=="received CertificationResponseV3" or .msg=="trust-base entries appended from certification response" or .msg=="trust-base catch-up started" or .msg=="trust-base catch-up finished" or .msg=="trust-base gap in certification response")' >"$out/handoff/aggregator-ordinary.jsonl"
+  utb_agg_lines_since 0 | jq -c 'select(.msg=="received CertificationResponseV3" or .msg=="trust-base entries appended from certification response" or .msg=="trust-base catch-up started" or .msg=="trust-base catch-up finished" or .msg=="trust-base gap in certification response" or .msg=="trust-base update already held" or .msg=="dropping an invalid trust-base update")' >"$out/handoff/aggregator-ordinary.jsonl"
   utb_u2_evidence "$out/handoff/aggregator-ordinary.jsonl" "$out/handoff/ordinary-ack.log" || return 1
   # the real message the root sent: captured just before it was sent
   local f; f=$(ls test-nodes/utb-ucresp/root*/ucresp-e2-*.cbor 2>/dev/null | head -1)
@@ -517,13 +521,20 @@ utb_selftest() {
   # U2's evidence: the cases of the real run utb-20261020T014202Z (a catch-up added epoch 2 while responses carried the entry) and of a response that won; each missing
   # property alone is refused
   local u2="$t/u2"; mkdir -p "$u2"
-  printf '%s\n' '{"msg":"trust-base catch-up started","from":2}' '{"msg":"received CertificationResponseV3","trustBaseUpdates":1}' '{"msg":"trust-base catch-up finished","added":1,"tip":2,"error":null}' >"$u2/catchup.jsonl"
+  printf '%s\n' '{"msg":"trust-base catch-up started","from":2}' '{"msg":"received CertificationResponseV3","trustBaseUpdates":1}' '{"msg":"trust-base catch-up finished","added":1,"tip":2,"error":null}' '{"msg":"trust-base update already held","attached":1,"tip":2}' >"$u2/catchup.jsonl"
+  printf '%s\n' '{"msg":"trust-base catch-up started","from":2}' '{"msg":"received CertificationResponseV3","trustBaseUpdates":1}' '{"msg":"trust-base catch-up finished","added":1,"tip":2,"error":null}' >"$u2/notconsumed.jsonl"
+  printf '%s\n' '{"msg":"trust-base catch-up started","from":2}' '{"msg":"received CertificationResponseV3","trustBaseUpdates":1}' '{"msg":"trust-base catch-up finished","added":1,"tip":2,"error":null}' '{"msg":"trust-base update already held","attached":1,"tip":1}' >"$u2/heldtip1.jsonl"
+  printf '%s\n' '{"msg":"trust-base catch-up started","from":2}' '{"msg":"received CertificationResponseV3","trustBaseUpdates":1}' '{"msg":"trust-base catch-up finished","added":1,"tip":2,"error":null}' '{"msg":"trust-base update already held","attached":1,"tip":2}' '{"msg":"dropping an invalid trust-base update","error":"x"}' >"$u2/dropped.jsonl"
   printf '%s\n' '{"msg":"received CertificationResponseV3","trustBaseUpdates":1}' '{"msg":"trust-base entries appended from certification response","added":1,"tip":2}' >"$u2/response.jsonl"
   printf '%s\n' '{"msg":"trust-base catch-up started","from":2}' '{"msg":"trust-base catch-up finished","added":1,"tip":2,"error":null}' >"$u2/noattach.jsonl"
   printf '%s\n' '{"msg":"received CertificationResponseV3","trustBaseUpdates":1}' '{"msg":"trust-base catch-up finished","added":0,"tip":1,"error":null}' >"$u2/noadd.jsonl"
   printf '%s\n' '{"msg":"received CertificationResponseV3","trustBaseUpdates":1}' '{"msg":"trust-base catch-up finished","added":1,"tip":2,"error":"no peer served the range"}' >"$u2/failedcatchup.jsonl"
   utb_st "U2 evidence: epoch 2 added by the catch-up while responses carried it is accepted and the path is recorded" bash -c "source '$cwd/scripts/lib/utb-lib.sh'; utb_u2_evidence '$u2/catchup.jsonl' '$u2/o1' && grep -q '^path: catch-up' '$u2/o1' && grep -q '^attached: ' '$u2/o1'"
   utb_st "U2 evidence: epoch 2 added from a response is accepted and the path is recorded" bash -c "source '$cwd/scripts/lib/utb-lib.sh'; utb_u2_evidence '$u2/response.jsonl' '$u2/o2' && grep -q '^path: response' '$u2/o2'"
+  utb_st_no "U2 evidence: the catch-up won and no attachment was shown consumed" bash -c "source '$cwd/scripts/lib/utb-lib.sh'; utb_u2_evidence '$u2/notconsumed.jsonl' '$u2/o6'"
+  utb_st_no "U2 evidence: an 'already held' line below tip 2 does not show epoch 2 consumed" bash -c "source '$cwd/scripts/lib/utb-lib.sh'; utb_u2_evidence '$u2/heldtip1.jsonl' '$u2/o7'"
+  utb_st_no "U2 evidence: an attachment dropped as invalid fails it" bash -c "source '$cwd/scripts/lib/utb-lib.sh'; utb_u2_evidence '$u2/dropped.jsonl' '$u2/o8'"
+  utb_st "U2 evidence: the catch-up case records that the attachments were consumed" bash -c "grep -q '^consumed: 1 attachments read after the catch-up' '$u2/o1'"
   utb_st_no "U2 evidence: no response carried an attachment" bash -c "source '$cwd/scripts/lib/utb-lib.sh'; utb_u2_evidence '$u2/noattach.jsonl' '$u2/o3'"
   utb_st_no "U2 evidence: epoch 2 was not added" bash -c "source '$cwd/scripts/lib/utb-lib.sh'; utb_u2_evidence '$u2/noadd.jsonl' '$u2/o4'"
   utb_st_no "U2 evidence: a failed catch-up is not an add" bash -c "source '$cwd/scripts/lib/utb-lib.sh'; utb_u2_evidence '$u2/failedcatchup.jsonl' '$u2/o5'"
