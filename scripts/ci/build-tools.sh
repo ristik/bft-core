@@ -35,4 +35,8 @@ build/ubft trust-base generate --home "$tb" --epoch 1 --epoch-start 1 --network-
 { UBFT="$repo/build/ubft" UTB_ST_TRUSTBASE="$tb/trust-base.json" scripts/utb-lane.sh --selftest; printf 'commit %s\n' "$head"; } 2>&1 | tee "$out/selftest/utb-lane-selftest.log"
 grep -q '^utb lane self-test: 0 failures' "$out/selftest/utb-lane-selftest.log" || { echo "build-tools: the lane self-test failed" >&2; exit 1; }
 scripts/ci/check-pins.sh selftest 2>&1 | tee "$out/selftest/check-pins-selftest.log"
+scripts/ci/check-pins.sh selftest >/dev/null 2>&1 || { echo "build-tools: the pin checker self-test failed" >&2; exit 1; }
+# the evidence publisher with planted canaries (a secret file and a leaked secret value must not reach the upload set)
+scripts/ci/publish-selftest.sh 2>&1 | tee "$out/selftest/publish-selftest.log"
+grep -q '^publish-evidence self-test: .* 0 failures' "$out/selftest/publish-selftest.log" || { echo "build-tools: the publisher self-test failed" >&2; exit 1; }
 ( cd "$out" && find . -type f ! -name sha256.txt | LC_ALL=C sort | xargs sha256sum >sha256.txt )

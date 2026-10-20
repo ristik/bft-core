@@ -54,10 +54,10 @@ Every job samples `df`, `free` and the largest resident process every 5 s (`scri
 
 | job | wall time | peak disk growth | lowest free | peak memory used |
 |---|---|---|---|---|
-| `build-ureth` (cold, rustc 1.97.1, locked release) | 18 min 38 s | 3.79 GiB | 110.6 GiB | 4.62 GiB (no swap) |
+| `build-ureth` (cold, rustc 1.97.1, locked release) | 18 min 38 s (acceptance run: 12 min 38 s) | 3.79 GiB | 110.6 GiB | 4.62 GiB (4.99 GiB), no swap |
 | `build-tools` (ubft, Go tools, aggregator, self-tests) | 3 min 32 s | 3.72 GiB | 81.9 GiB | 1.86 GiB |
 | `build-sources` (contracts + forge, NBP, JS SDK) | 4 min 27 s | 0.97 GiB | 84.0 GiB | 3.74 GiB |
-| `run-lane` (prep + the lane, 10 min) | 10 min 8 s | 3.88 GiB | 109.9 GiB | 2.36 GiB |
+| `run-lane` (prep + the lane) | 10 min 8 s (acceptance run: 10 min 29 s) | 3.88 GiB (3.90 GiB) | 109.9 GiB (110.4 GiB) | 2.36 GiB (5.31 GiB) |
 
 **The free-disk gate** (`runner.minFreeDiskGiB` in `lane-pins.json`, passed as `UTB_MIN_FREE_GIB`, checked by the lane's preflight after the inputs are unpacked) is
 **8 GiB**: 2.06 times the lane's measured peak growth, so a run twice as chatty as the measured one still fits; the Mac default of 25 GiB also covers building ureth
