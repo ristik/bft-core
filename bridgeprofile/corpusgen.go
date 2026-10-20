@@ -1383,6 +1383,31 @@ func (g *gen) proof() {
 		add("compose-two-ucs-per-shard", "leaves of one shard certified by different UCs: separate anchors, each authenticated", envOf(twoUC.h, twoUC.cert, nil), claimsOf(twoUC.cert.Anchors...), "return")
 		add("compose-two-ucs-final-not-admitted", "the last of several anchors is not authenticated", envOf(twoUC.h, twoUC.cert, nil), claimsOf(twoUC.cert.Anchors[:len(twoUC.cert.Anchors)-1]...), "return")
 	}
+	// A topology split (AGG_PARTITION_V2): the earlier leaves are certified by the full-range parent shard, the later ones by its children after the split. Both sides are
+	// admitted, each bound by its own UC (its own shard and configuration), so the anchors have different depths.
+	{
+		parentPDR := FixtureShardPDR(DevNetwork, DevAggPart, types.ShardID{}, DevChainID, "agg-parent")
+		parent := &AggregatorWorld{PDRs: []*types.PartitionDescriptionRecord{parentPDR}, Auth: d.Auth, TB: d.TB}
+		half := len(cp.res.Leaves) / 2
+		before, err := parent.Certify(cp.res.Leaves[:half], extra, BaseTime+1000, 100)
+		g.must(err)
+		after, err := d.Agg.Certify(cp.res.Leaves[half:], extra, BaseTime+1000+1, 200)
+		g.must(err)
+		if err == nil {
+			split := &CertifiedLeaves{Anchors: append(append([]Anchor{}, before.Anchors...), after.Anchors...), Rows: append(append([]int{}, before.Rows...), after.Rows...)}
+			split.Proofs = append(split.Proofs, before.Proofs...)
+			for _, p := range after.Proofs {
+				p.AnchorIndex += uint16(len(before.Anchors))
+				split.Proofs = append(split.Proofs, p)
+			}
+			add("compose-shard-split-both-sides", "earlier leaves under the parent shard's UC (depth 0), later leaves under its children's UCs (depth 1): both sides of a split verify, each by its own UC",
+				envOf(cp.h, split, nil), claimsOf(split.Anchors...), "return")
+			add("compose-shard-split-child-not-admitted", "B1 authenticates the parent shard's anchor but not the children's",
+				envOf(cp.h, split, nil), claimsOf(split.Anchors[:len(before.Anchors)]...), "return")
+			add("compose-shard-split-parent-not-admitted", "B1 authenticates the children's anchors but not the parent shard's",
+				envOf(cp.h, split, nil), claimsOf(split.Anchors[len(before.Anchors):]...), "return")
+		}
+	}
 	gateCases := func(prefix string, eb []byte) {
 		gt, err := GateOf(f.Cfg, OpReturn, eb, 1<<62)
 		g.must(err)
