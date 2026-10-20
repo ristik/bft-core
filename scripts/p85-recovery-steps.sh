@@ -31,9 +31,21 @@ source scripts/lib/p85-lib.sh
 m2_online_validators() { echo "${H3_ONLINE:-1 2 3 4}"; }
 
 p85_pass() { echo "  PASS: $*"; }
+# The execution side at a failure (its logs and data are not published): per validator the head, the base fee, the pool counters and the tail of its logs. A transaction that is
+# never mined (a wait for a receipt that times out) is otherwise undiagnosable from the pack.
+p85_chain_report() {
+  local i u
+  [ -n "${rethEthBase:-}" ] || return 0
+  for i in 1 2 3 4 5; do
+    u="http://127.0.0.1:$((rethEthBase + i - 1))"
+    echo "--- execution validator $i: head=$(curl -s --max-time 3 -X POST "$u" -H 'content-type: application/json' -d '{"jsonrpc":"2.0","id":1,"method":"eth_getBlockByNumber","params":["latest",false]}' 2>/dev/null | jq -c '.result|{number,baseFeePerGas,gasUsed,gasLimit,txs:(.transactions|length)}' 2>/dev/null) txpool=$(curl -s --max-time 3 -X POST "$u" -H 'content-type: application/json' -d '{"jsonrpc":"2.0","id":1,"method":"txpool_status","params":[]}' 2>/dev/null | jq -c '.result // .error.message' 2>/dev/null)" >&2
+    [ -f "test-nodes/evm$i/debug.log" ] && { tail -n 4 "test-nodes/evm$i/debug.log" | cut -c1-260 >&2; }
+  done
+}
 p85_step_die() {
   local i
   echo "  FAIL: $*" >&2
+  p85_chain_report
   for i in 1 2 3 4 5; do [ -f "test-nodes/root$i/debug.log" ] && { echo "--- tail of root$i/debug.log" >&2; tail -n 6 "test-nodes/root$i/debug.log" | cut -c1-300 >&2; }; done
   q3_teardown
   exit 1
