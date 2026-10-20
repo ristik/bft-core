@@ -28,6 +28,7 @@ import (
 
 	"github.com/unicitynetwork/bft-core/gettrustbase"
 	"github.com/unicitynetwork/bft-core/handoffdelivery"
+	"github.com/unicitynetwork/bft-core/keyvaluedb/boltdb"
 	"github.com/unicitynetwork/bft-core/logger"
 	"github.com/unicitynetwork/bft-core/network"
 	"github.com/unicitynetwork/bft-core/network/protocol/abdrc"
@@ -42,6 +43,7 @@ import (
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/trustbase"
 	"github.com/unicitynetwork/bft-core/rootchain/partitions"
 	"github.com/unicitynetwork/bft-core/rootchain/poswitness"
+	"github.com/unicitynetwork/bft-core/rootevidence"
 	"github.com/unicitynetwork/bft-core/rootrecords"
 	"github.com/unicitynetwork/bft-core/trustactivation"
 	"github.com/unicitynetwork/bft-core/trusthistorystore"
@@ -77,6 +79,7 @@ type (
 		UTBGenesisFile           string // the canonical genesis entry of the signed trust-base chain (utb-genesis); enables the UTB profile
 		UTBGenesisID             string // its EntryID, the pin
 		UTBEntriesDBFile         string
+		EvidenceJournalFile      string // the root vote evidence journal (S3); empty disables the observer
 		UTBCaptureUCResp         string // lane diagnostics: write each distinct version 2 certification response that carries entries here, before it is sent
 		HandoffProfile           bool
 		InstallHandoffEpoch      uint64
@@ -164,6 +167,8 @@ func rootNodeRunCmd(baseFlags *baseFlags) *cobra.Command {
 	_ = cmd.Flags().MarkHidden("utb-capture-ucresp")
 	cmd.Flags().StringVar(&flags.UTBEntriesDBFile, "utb-entries-db", "",
 		fmt.Sprintf("UTB finalized entries database (default: %s)", filepath.Join("$UBFT_HOME", rootUTBEntriesDBFileName)))
+	cmd.Flags().StringVar(&flags.EvidenceJournalFile, "evidence-journal", "",
+		"enable the root vote evidence observer (S3): the journal database file; it observes signed votes before the consensus filters and never affects consensus")
 	cmd.Flags().StringVar(&flags.TrustHistoryDBFile, "trust-history-db", "",
 		fmt.Sprintf("profile-2 trust history database (default: %s)", filepath.Join("$UBFT_HOME", rootTrustHistoryDBFileName)))
 
@@ -389,6 +394,20 @@ func rootNodeRun(ctx context.Context, flags *rootNodeRunFlags) error {
 		options = append(options, consensus.WithWitnessFetcher(func(ctx context.Context, hash [32]byte, peers []peer.ID, maxBytes int) ([]byte, error) {
 			return poswitness.Fetch(ctx, poswitness.FromLibp2p(host), peers, hash, maxBytes)
 		}))
+	}
+	if flags.EvidenceJournalFile != "" {
+		evidenceDB, dbErr := boltdb.New(flags.EvidenceJournalFile)
+		if dbErr != nil {
+			return fmt.Errorf("evidence journal: %w", dbErr)
+		}
+		defer evidenceDB.Close()
+		journal, dbErr := rootevidence.NewJournal(evidenceDB, 0)
+		if dbErr != nil {
+			return fmt.Errorf("evidence journal: %w", dbErr)
+		}
+		observer := rootevidence.NewObserver(journal, trustBaseStore, log, 0)
+		go observer.Run(ctx)
+		options = append(options, consensus.WithEvidenceObserver(observer))
 	}
 	cm, err := consensus.NewConsensusManager(
 		host.ID(),
