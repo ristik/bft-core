@@ -46,6 +46,11 @@ election is deliberately not changed for recovered authors only, nodes which saw
 with it.
 
 "local" is read only (the trusted local genesis comes from it).
+
+The staging runs the recovery the way the consensus manager performs it, with what the manager installs (handoff authority, control services, UTB
+binding, the verifier), and intentionally leaves out what only the real store can answer for: the durable UTB retention, the P85 record log (the staging
+store accepts appends without a log; the real store checks continuity, and EnsureRecordPrefix completes it before the head is installed), the control
+cuts, the profile pin of the real store, and the witnesses (the manager fetches those into the live store before it stages).
 */
 func ValidateRecoveryState(hashAlg crypto.Hash, state *abdrc.StateMsg, toRound uint64, orchestration Orchestration, local PersistentStore,
 	newVerifier func(*BlockStore) (IRChangeReqVerifier, error), log *slog.Logger, networkProfile ...uint64) error {
@@ -151,9 +156,9 @@ func CheckQcOfBlock(qc *rctypes.QuorumCert, b *ExecutedBlock) error {
 		return fmt.Errorf("QC parent round %d, block parent round %d", vi.ParentRoundNumber, b.GetParentRound())
 	case vi.Timestamp != b.BlockData.Timestamp:
 		// the same refusal the timestamp proof gives (a block whose time the QC does not authenticate), so both give one sentinel
-		return fmt.Errorf("QC epoch or timestamp differ from the block's: %w", rctypes.ErrTimestampProof)
+		return fmt.Errorf("QC epoch or timestamp differ from the block's: the timestamp is %d, the block's is %d: %w", vi.Timestamp, b.BlockData.Timestamp, rctypes.ErrTimestampProof)
 	case vi.Epoch != b.BlockData.Epoch:
-		return errors.New("QC epoch or timestamp differ from the block's")
+		return fmt.Errorf("QC epoch or timestamp differ from the block's: the epoch is %d, the block's is %d", vi.Epoch, b.BlockData.Epoch)
 	case !bytes.Equal(vi.CurrentRootHash, b.RootHash):
 		return fmt.Errorf("QC state root %X differs from the root %X of the block", []byte(vi.CurrentRootHash), []byte(b.RootHash))
 	}

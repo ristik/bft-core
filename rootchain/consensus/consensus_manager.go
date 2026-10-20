@@ -119,6 +119,8 @@ type (
 		utbStore         *utbstore.Store
 		utbConfig        func(epoch uint64) (votesig.Config, error) // test seam: the authenticated signing configuration the binding consults; nil is the trust base store's
 		recoveryHistory  *trusthistorystore.Store
+		// stageRecovery, when set (tests), replaces the staged validation of a recovery state
+		stageRecovery func(*abdrc.StateMsg) error
 		// proposalRequestCheck, when set (tests), replaces the verification requestStillValid applies
 		proposalRequestCheck func(round, parentRound uint64, r *drctypes.IRChangeReq) error
 		posPrefetching       atomic.Int32
@@ -1734,8 +1736,20 @@ func (x *ConsensusManager) onStateResponse(ctx context.Context, rsp *abdrc.State
 	// the complete recovery is staged and validated in memory first: nothing is written, installed or advanced unless the head and every
 	// pending block are consistent with the QCs and with what executing them gives. A head with an epoch anchor is installed by its own
 	// path (NewFromAnchorState verifies the anchored successor), which is not staged.
+	// The staging executes the pending blocks as the replay will, so the witnesses of their controls must be held when it does, exactly as the replay
+	// fetches them before each Add (witnesses are content-addressed and hash-checked: holding them early changes nothing else). Without this a root that
+	// lacks a witness would refuse a state it could recover from.
+	for i, block := range rsp.Pending {
+		if err := x.fetchWitnesses(ctx, x.blockStore, block); err != nil {
+			return fmt.Errorf("recovery block %d controls: %w", i, err)
+		}
+	}
 	if rsp.CommittedHead.Anchor == nil {
-		if err := x.validateRecoveryState(rsp); err != nil {
+		stage := x.validateRecoveryState
+		if x.stageRecovery != nil {
+			stage = x.stageRecovery
+		}
+		if err := stage(rsp); err != nil {
 			return fmt.Errorf("recovery state validation failed: %w", err)
 		}
 	}
