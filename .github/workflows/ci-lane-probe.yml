@@ -1,0 +1,13 @@
+name: ci-lane-probe
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - run: |
+          echo "ref=$GITHUB_REF sha=$GITHUB_SHA"
+          nproc; free -g | head -2; df -h / /mnt | cat
