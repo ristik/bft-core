@@ -126,7 +126,9 @@ func deployment(args []string) error {
 }
 
 // trustBundle writes the release bundle of the deployment's trust-base history at its genesis (the entry a root is started with,
-// ubft trust-base utb-genesis) and its genesis EntryID: the trust input of the bridge profile (protocol 5) and its pin.
+// ubft trust-base utb-genesis) and its genesis EntryID: the trust input of the bridge profile (protocol 5) and its pin. The bundle
+// holds the genesis only: a lock certified after a root epoch change needs the later entries (the plug-in reports ErrNoEntryForEpoch,
+// retryable), so past an epoch change give the plug-in the exported history (ubft trust-base utb-export) instead; its pin is unchanged.
 func trustBundle(args []string) error {
 	fs := flag.NewFlagSet("trust-bundle", flag.ContinueOnError)
 	in := fs.String("trust-base", "", "the genesis (epoch 1) trust base JSON")
