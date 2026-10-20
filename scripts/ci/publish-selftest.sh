@@ -42,4 +42,23 @@ mkrun "$t/runB" yes
 [ -f "$t/outB/runB-ci.tar.gz" ] && ok "the CI logs archive is still published (scanned on its own)" || no "the CI logs archive was lost with the rejected one"
 ls "$t/outB"/*.REJECTED.txt >/dev/null 2>&1 && ok "a REJECTED diagnostic is published instead" || no "no REJECTED diagnostic"
 ! grep -rqF "$canary" "$t/outB" && ok "the diagnostic does not carry the value" || no "the upload set contains the canary value"
+# S1: a secret inside a compressed member is a secret in the archive (the value is one under --nodes)
+mkrun "$t/runC" no; printf 'compressed leak %s\n' "$canary" | gzip -c >"$t/runC/nodes/root1/debug.log.gz"
+"$here/publish-evidence.sh" --evidence "$t/runC" --out "$t/outC" --status 0 --nodes "$t/test-nodes" --extra "$t/runA.extra/run-lane.log" >/dev/null 2>&1; rc=$?
+[ "$rc" -eq 4 ] && ok "a secret value inside a .gz member makes the archive unpublishable (exit 4)" || no "a value inside a .gz member: exit $rc, wanted 4"
+[ -f "$t/outC/runC.tar.gz" ] && no "the archive with a secret inside a .gz member was published" || ok "that archive is not in the upload set"
+# the same, nested in a .tar.gz
+mkrun "$t/runC2" no; mkdir "$t/c2" && printf 'nested leak %s\n' "$canary" >"$t/c2/inner.log" && tar -C "$t/c2" -czf "$t/runC2/nodes/root1/bundle.tar.gz" inner.log
+"$here/publish-evidence.sh" --evidence "$t/runC2" --out "$t/outC2" --status 0 --nodes "$t/test-nodes" --extra "$t/runA.extra/run-lane.log" >/dev/null 2>&1; rc=$?
+[ "$rc" -eq 4 ] && [ ! -f "$t/outC2/runC2.tar.gz" ] && ok "a secret inside a .tar.gz member is refused too" || no "a value inside a .tar.gz: exit $rc or the archive was published"
+# S2: the values of files REMOVED by name or content are searched for in what remains: the joiner's ownerKey is not under --nodes, but it appears in a log
+joinerkey=$(printf '%064d' 424242)
+mkrun "$t/runD" no; sed -i.bak "s/\"ownerKey\":\"0x[0-9]*\"/\"ownerKey\":\"0x$joinerkey\"/" "$t/runD/p85/joiner/joiner.json"; rm -f "$t/runD/p85/joiner/joiner.json.bak"
+echo "leaked joiner key $joinerkey in a log" >>"$t/runD/nodes/root1/debug.log"
+"$here/publish-evidence.sh" --evidence "$t/runD" --out "$t/outD" --status 0 --nodes "$t/test-nodes" --extra "$t/runA.extra/run-lane.log" >/dev/null 2>&1; rc=$?
+[ "$rc" -eq 4 ] && [ ! -f "$t/outD/runD.tar.gz" ] && ok "a removed file's secret (joiner ownerKey) that leaked into a log refuses the archive" || no "removed-file value in a log: exit $rc or published"
+! grep -rqF "$joinerkey" "$t/outD" && ok "the joiner key is not in the upload set" || no "the joiner key is in the upload set"
+mkrun "$t/runE" no
+"$here/publish-evidence.sh" --evidence "$t/runE" --out "$t/outE" --status 0 --nodes "$t/test-nodes" --extra "$t/runA.extra/run-lane.log" >/dev/null 2>&1; rc=$?
+[ -f "$t/outE/runE.tar.gz" ] && [ ! -e "$t/xE" ] && ok "the same run without a leak publishes (joiner.json removed)" || no "a clean run was not published (exit $rc)"
 echo "publish-evidence self-test: $n cases, $bad failures"; [ "$bad" -eq 0 ]

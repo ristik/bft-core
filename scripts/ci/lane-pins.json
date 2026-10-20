@@ -28,9 +28,9 @@
     },
     "native-bridge-plugins": {
       "repository": "https://github.com/ristik/native-bridge-plugins.git",
-      "commit": "efeff933d28fc0d8238e48b2785e07e3a87dee35",
+      "commit": "ccd3bb90b0985a948b1d44d72eb42262ddb2db5d",
       "branch": "main",
-      "note": "provisional: the two-shard lane needs the any-age driver of native-bridge-plugins#29"
+      "note": "nbp#29 merge: the any-age driver with the two-shard steering (a no-op for one aggregator shard) on top of nbp#27/#28 (trust-base bundle driver, shard-split vectors). Deliberately not main: nbp#30/#31 (consolidated assembly as the default) change what the lane's L1 token exercises and belong to the consolidation lane step."
     },
     "state-transition-sdk-js": {
       "repository": "https://github.com/ristik/state-transition-sdk-js.git",
