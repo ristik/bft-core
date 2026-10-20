@@ -85,6 +85,16 @@ r=$t/runH2; mkrun "$r" no; echo "this is not gzip" >"$r/nodes/root1/fake.log.gz"
 r=$t/runH3; mkrun "$r" no; mkdir "$t/h3"; echo x >"$t/h3/a"; tar -C "$t/h3" -czf "$r/nodes/root1/b.tar.gz" a; head -c 30 "$r/nodes/root1/b.tar.gz" >"$r/nodes/root1/c.tgz"; rm "$r/nodes/root1/b.tar.gz"; refused "a truncated .tgz" "$r" "$t/outH3"
 # inside a tar.gz: a plain tar member that nobody expands
 r=$t/runH4; mkrun "$r" no; mkdir "$t/h4"; printf 'leak %s\n' "$canary" >"$t/h4/in.log"; tar -C "$t/h4" -cf "$t/h4.tar" in.log; tar -C "$t" -czf "$r/nodes/root1/outer.tar.gz" h4.tar; refused "a plain .tar inside a .tar.gz" "$r" "$t/outH4"
+# rev3 B1: the output of an expansion is looked at again
+r=$t/runI; mkrun "$r" no; printf 'leak %s\n' "$canary" | gzip -c | gzip -c >"$r/nodes/root1/old.log.gz"; refused "a gzip of a gzip" "$r" "$t/outI"
+if command -v zstd >/dev/null; then r=$t/runI2; mkrun "$r" no; printf 'leak %s\n' "$canary" | zstd -q -c | gzip -c >"$r/nodes/root1/old.log.gz"; refused "a zstd inside a .gz" "$r" "$t/outI2"; fi
+# rev3 B2: --nodes that yields no secret value is a refusal, not a silent no-scan
+mkdir "$t/emptynodes"; r=$t/runJ; mkrun "$r" no; rm -rf "$r/state" "$r/p85/joiner"  # no removed secret file whose value the publisher would find anyway: only --nodes could catch the leak
+echo "key in a log: $canary" >>"$r/nodes/root1/debug.log"
+"$here/publish-evidence.sh" --evidence "$r" --out "$t/outJ" --status 0 --nodes "$t/emptynodes" --extra "$t/runA.extra/run-lane.log" >/dev/null 2>&1; rc=$?
+[ "$rc" -eq 4 ] && [ ! -f "$t/outJ/runJ.tar.gz" ] && ok "an empty --nodes directory refuses the archive (exit 4)" || no "empty --nodes: exit $rc or published"
+! "$here/t6-secrets.sh" "$t/nosec" "$t/does-not-exist" >/dev/null 2>&1 && ok "t6-secrets fails when the source is missing" || no "t6-secrets exited 0 on a missing source"
+mkdir -p "$t/nokeys/evm1"; ! "$here/t6-secrets.sh" "$t/nosec2" "$t/nokeys" >/dev/null 2>&1 && ok "t6-secrets fails when it finds no jwt/keys" || no "t6-secrets exited 0 with nothing to save"
 # the plain case still publishes (expandable gz and a nested gz are fine)
 r=$t/runH5; mkrun "$r" no; printf 'fine\n' | gzip -c >"$r/nodes/root1/ok.log.gz"
 "$here/publish-evidence.sh" --evidence "$r" --out "$t/outH5" --status 0 --nodes "$t/test-nodes" --extra "$t/runA.extra/run-lane.log" >/dev/null 2>&1; rc=$?

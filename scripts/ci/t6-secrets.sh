@@ -4,7 +4,7 @@
 # DEST is outside the evidence and is never uploaded. Usage: t6-secrets.sh DEST TEST_NODES_DIR [TREASURY_KEY_HEX]
 set -euo pipefail
 dest=${1:?DEST}; src=${2:?TEST_NODES_DIR}; treasury=${3:-}
-[ -d "$src" ] || exit 0   # nothing to save (the isolated checkout is already gone, or never existed)
+[ -d "$src" ] || { echo "t6-secrets: $src does not exist, the devnet secrets cannot be saved" >&2; exit 1; }
 mkdir -p "$dest"
 ( cd "$src" && find . -maxdepth 4 -type f \( -name jwt.hex -o -name keys.json \) -print ) | while IFS= read -r f; do
   d=$(dirname "${f#./}"); d=${d//\//-}; [ "$d" != . ] || d=top
@@ -12,3 +12,5 @@ mkdir -p "$dest"
 done
 if [ -n "$treasury" ]; then mkdir -p "$dest/treasury"; printf '{"privateKey":"0x%s"}\n' "${treasury#0x}" >"$dest/treasury/keys.json"; fi
 chmod -R go-rwx "$dest"
+# a devnet always has JWTs and keys: finding none means the save did not work
+find "$dest" -name jwt.hex | grep -q . && find "$dest" -name keys.json ! -path "*/treasury/*" | grep -q . || { echo "t6-secrets: no jwt.hex / keys.json found under $src" >&2; exit 1; }

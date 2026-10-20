@@ -39,7 +39,8 @@ finalize() {
   fi
   # the values of this devnet's keys and JWTs are searched for in the published pack (--nodes). A passing run's checkout is already gone: t6-rehearsal.sh saved the
   # secrets into $T6_SECRETS_DIR before removing it; a failing run's checkout is still here. This directory is outside the evidence and never uploaded.
-  [ -z "$iso" ] || scripts/ci/t6-secrets.sh "$T6_SECRETS_DIR" "$iso/bft-core/test-nodes" "$(sed -n 's/^T6_TREASURY_TEST_KEY=//p' scripts/t6/lane-actions.sh | head -1)"
+  # (no checkout and nothing saved earlier: the publisher refuses, it never publishes unscanned)
+  [ -z "$iso" ] || [ ! -d "$iso/bft-core/test-nodes" ] || scripts/ci/t6-secrets.sh "$T6_SECRETS_DIR" "$iso/bft-core/test-nodes" "$(sed -n 's/^T6_TREASURY_TEST_KEY=//p' scripts/t6/lane-actions.sh | head -1)" || log "saving the devnet secrets failed"
   st=${lane_rc:-1}; [ "$rc" -eq 0 ] || st=$rc
   scripts/ci/publish-evidence.sh --evidence "$evdir" --out "$out/upload" --kind t6 --status "$st" --min-node-logs 0 --nodes "$T6_SECRETS_DIR" \
     --extra "$out/run-lane.log" --extra "$out/lane-stdout.log" --extra "$out/host-before.log.gz" --extra "$out/host-after.log.gz" --extra "$out/oom-lines.txt" >"$out/publish.log" 2>&1
