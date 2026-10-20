@@ -31,9 +31,11 @@ evidence. Prospective GovernanceParams and funded RewardPool remain design work;
 FixedPolicy currently supplies immutable parameters. Real root evidence is in
 [contracts #46](https://github.com/ristik/unicity-pos-contracts/pull/46), paired
 with core #654; the earlier locally defined root vote digest is obsolete.
-S1's original Go builtin oracle is not an activated 0x0103 builtin. The separately
-exposed EVM-domain evidence format still needs an authenticated consensus codec
-or explicit exclusion; do not call that path completed real-message verification.
+S1's original Go builtin oracle is not an activated 0x0103 builtin; the Solidity
+root-vote verifier is S1's execution surface (owner default, 2026-10-20). The
+EVM-domain evidence path is excluded: `Evidence.submitEvmEvidence` is fail-closed
+and always reverts with `EvmEvidenceUndefined` (contracts #49) until an
+authenticated EVM-validator format exists; only root scheme-2 evidence is slashable.
 
 All component APIs below describe the intended design. Concrete implementation
 selectors and remaining fixture boundaries are tracked in the contracts

@@ -30,14 +30,17 @@ One fixture set, the contracts' own published election result (`publication.json
 | `testdata/go-records.json` | bft-core (`XREPO_UPDATE=1 go test ./xrepo`) | The records the root's projection (`rootrecords.State`) emits, with the ids the root names and the digests it derives from the identity records: **recovery** (Closure of G, Closure of the Reserved J, RecoveryAck, Closure of K), **ack** (Closure of G, Ack, Closure of J), **session-closed**; and after each record, what the root holds |
 | `testdata/custody-view.json` | contracts (`XRepoRecords.t.sol`) | Custody's state after applying those records verbatim, as custody reports it |
 | `testdata/go-retirement.json` | bft-core (`XREPO_UPDATE=1 go test ./xrepo`) | The acknowledged history (Closure of G, Ack, Closure of J) followed by the **Retirements** of identities 1 and 2, whose reference digests are the evmassign model (`evmassign.ExposureID`/`ExposureChainStep`) of custody's exposure-chain storage word, which a root reads from custody's storage proof, with the registry's closed epoch of each record; and two conflicting scheme 2 root votes of identity 1's root key in J's epoch, built by the root's statement derivation (`types.DomainBoundStatement`) and signed by the root's signer |
+| `testdata/go-rotation-evidence.json` | bft-core (`XREPO_UPDATE=1 go test ./xrepo`) | Conflicting scheme 2 root votes, built by the root's statement derivation and signed by the root's signer with the contracts' test scalars, for their rotation scenario: identity 2's old key in the old epoch, its new (staged, Ack-activated) key in the new epoch, and the old key in the new epoch |
 | `testdata/genesis/contracts-genesis.json` | bft-core (`XREPO_UPDATE=1 go test ./cli/ubft/cmd -run ContractsGenesisInput`) | What `ubft pos-relayer genesis --out-contracts` writes for the committed plan, trust base and FULL shard configuration |
 
-Tests here: `xrepo/consistency_test.go`, `xrepo/retirement_test.go` and `cli/ubft/cmd/pos_relayer_xrepo_test.go`. Tests there: `test/p85/XRepoRecords.t.sol`
+Tests here: `xrepo/consistency_test.go`, `xrepo/retirement_test.go`, `xrepo/rotation_evidence_test.go` and `cli/ubft/cmd/pos_relayer_xrepo_test.go`. Tests there: `test/p85/XRepoRecords.t.sol`
 (custody accepts the records with no word replaced, its state matches after every record, and the three disagreements of
 2026-10-11 are each refused as one changed word) and `test/p85/XRepoGenesis.t.sol` (the genesis script deploys from the file and
 custody holds the genesis assignment under the file's id) and `test/p85/XRepoRetirement.t.sol` (each record is imported by a
 SealRegistry round and applied by custody verbatim; the retired identity's lot is held by the Go-signed equivocation charged to its
-historical exposure, the clean lot matures and is claimed, and after settlement the held lot matures less its penalty and is claimed).
+historical exposure, the clean lot matures and is claimed, and after settlement the held lot matures less its penalty and is claimed)
+and `test/p85/XRepoRotationEvidence.t.sol` (custody activates a staged root key with an Ack and the owner changes; the Go-signed
+pairs are charged to the old key's earlier exposure and the new key's later one, and the old key in the new epoch is refused).
 
 ## Coverage
 
@@ -59,6 +62,7 @@ Producer -> consumer pairs that are pinned (file in `fixtures.json`):
 | **Custody's resulting state (ids, digests, states, H rounds, closure anchors, offsets, session outcome) equals the root's model** | contracts -> Go | this suite |
 | **Retirement with the real reference digest, through the SealRegistry, to maturity and claim, with one held and one clean lot** | Go -> contracts | this suite |
 | **A root-signed equivocation of a retired generation's key, attributed to its historical exposure** | Go -> contracts | this suite |
+| **Root-signed equivocations across a root-key rotation activated by an Ack: historical attribution and KeyMismatch** | Go -> contracts | this suite |
 | **The contracts genesis input: field names and types, and the genesis assignment id = the root's custody key of the genesis epoch over the FULL configuration** | Go -> contracts | this suite |
 
 ## Evidence parity and remaining boundaries
@@ -75,8 +79,11 @@ slashing exercise. `testdata/go-retirement.json` adds one root-signed pair
 (the root's statement derivation and signer) by the key of a generation that
 retired before the evidence was submitted: the contracts charge it to the
 historical exposure, hold that lot and debit it on settlement
-(`XRepoRetirement.t.sol`). Rotation through an Ack is still not combined with
-it. The EVM-domain codec remains undefined, and `Evidence.submitEvmEvidence`
+(`XRepoRetirement.t.sol`). `testdata/go-rotation-evidence.json` adds root-signed
+pairs across a root-key rotation that custody activates with an Ack: the old key
+in the old epoch is charged only to the earlier exposure, the new key in the new
+epoch to the new one, and the old key in the new epoch is `KeyMismatch`
+(`XRepoRotationEvidence.t.sol`). The EVM-domain codec remains undefined, and `Evidence.submitEvmEvidence`
 is fail-closed: it always reverts with `EvmEvidenceUndefined`.
 
 Still not covered by the lifecycle replay suite:

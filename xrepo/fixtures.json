@@ -2,7 +2,7 @@
   "format": "UNICITY_XREPO_FIXTURES/v1",
   "contracts": {
     "repo": "https://github.com/ristik/unicity-pos-contracts",
-    "commit": "d14fa68ead18065e44b60101bfe1fa6dd3806553"
+    "commit": "f87f49c8fe3a2f36f53290a849e5ed72a1e0dabe"
   },
   "fixtures": [
     {"producer": "contracts", "contracts": "test/p85/fixtures/publication.json", "bftCore": ["evmassign/testdata/publication.json", "rootchain/evmstate/testdata/publication.json"],
@@ -21,6 +21,8 @@
      "pair": "the root's Closure, RecoveryAck, Ack and SessionClosed records with real ids and digests -> custody.applyRootRecords, verbatim (XRepoRecords.t.sol)"},
     {"producer": "bft-core", "contracts": "test/p85/fixtures/xrepo-go-retirement.json", "bftCore": ["xrepo/testdata/go-retirement.json"],
      "pair": "the root's Retirement records with custody's exposure-chain reference digests and a root-signed equivocation of a retiring identity's key -> SealRegistry.importRootRecords -> custody.applyRootRecords verbatim -> Evidence hold -> mature and claim (XRepoRetirement.t.sol)"},
+    {"producer": "bft-core", "contracts": "test/p85/fixtures/xrepo-go-rotation-evidence.json", "bftCore": ["xrepo/testdata/go-rotation-evidence.json"],
+     "pair": "root-signed equivocations by the old and the new root key of an identity whose rotation custody activates with an Ack -> Evidence.submitEvidence: historical attribution, KeyMismatch for the old key in the new epoch (XRepoRotationEvidence.t.sol)"},
     {"producer": "bft-core", "contracts": "test/p85/fixtures/xrepo-genesis-input.json", "bftCore": ["xrepo/testdata/genesis/contracts-genesis.json"],
      "pair": "pos-relayer genesis --out-contracts (genesis assignment id of the FULL configuration, identities) -> script/P85Genesis.s.sol (XRepoGenesis.t.sol)"},
     {"producer": "bft-core", "contracts": "test/p85/fixtures/evidence-digest-corpus-go-v1.json", "bftCore": ["s1ref/testdata/evidence-digest-corpus-v1.json"],
