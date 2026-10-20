@@ -44,6 +44,8 @@ type retryRestoreFixture struct {
 	wf       *wiringFixture
 	limits   configuredprogress.JournalLimits
 	executor *restoreExecutorFixture
+	stores   []*archive.Store // the two replicas' stores, in Replicas order
+	senderID peer.ID
 }
 
 func newRetryRestoreFixture(t *testing.T, failures int64, retry FetchRetry) *retryRestoreFixture {
@@ -72,6 +74,7 @@ func buildRetryRestoreFixtureMutating(t *testing.T, failures int64, retry FetchR
 	f := newWiringFixture(t, 5)
 	sender := testpeer.CreatePeer(t, testpeer.CreatePeerConfiguration(t))
 	var replicas []*peer.ID
+	var stores []*archive.Store
 	for range 2 {
 		remote := testpeer.CreatePeer(t, testpeer.CreatePeerConfiguration(t))
 		sender.Network().Peerstore().AddAddrs(remote.ID(), remote.MultiAddresses(), peerstore.PermanentAddrTTL)
@@ -89,6 +92,7 @@ func buildRetryRestoreFixtureMutating(t *testing.T, failures int64, retry FetchR
 			}
 			require.NoError(t, store.Put(q, rec))
 		}
+		stores = append(stores, store)
 		server, err := NewServer(store, f.subject, func(context.Context, archive.Request, *archive.Record) error { return nil }, []peer.ID{sender.ID()}, DefaultLimits())
 		require.NoError(t, err)
 		if refusals != nil {
@@ -120,7 +124,7 @@ func buildRetryRestoreFixtureMutating(t *testing.T, failures int64, retry FetchR
 		restore: &ArchiveRestore{Journal: journal, Context: f.context, JournalLimits: limits, Archive: local,
 			Subject: f.subject, Replicas: [2]peer.ID{*replicas[0], *replicas[1]}, Host: host,
 			Limits: DefaultLimits(), Retry: retry, Adapter: executor, Genesis: genesis, TipUC: last.ResultingUC, TipTR: last.ResultingTR},
-		host: host, journal: journal, local: local, wf: f, limits: limits, executor: executor,
+		host: host, journal: journal, local: local, wf: f, limits: limits, executor: executor, stores: stores, senderID: sender.ID(),
 	}
 }
 

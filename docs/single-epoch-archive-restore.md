@@ -76,6 +76,54 @@ written journal state: restart from **new empty disks**. Generic EL P2P, snap,
 and pipeline sync do not establish the paired seal history and cannot be used
 as a restore source; the pinned client and Engine API checks remain mandatory.
 
+## Sources lost or lying during a restore
+
+The restore has two phases. The **fetch walk** goes from the pinned tip to genesis, authenticates each record against the configured
+subject and its own epoch, and retains it in the new local archive. The **replay** then imports the local copies into the execution
+client. Sources (the two replicas, and the roots for handoff bundles) are used only in the walk and, for a body that is still missing
+afterwards, in the observation backfill. What the tests establish
+(`archivewiring/restore_source_experiments_test.go`, in process, with the real server, framing and retry policy; no process lane):
+
+| Source behaviour | Result | Test |
+|---|---|---|
+| One replica gone partway through the walk | the other replica serves the rest; the restore completes | `TestArchiveRestoreSurvivesLosingOneReplicaDuringTheFetchWalk` |
+| Both replicas gone partway through the walk | after the bounded wait (`FetchRetry.Total`, 150 s by default) the restore ends with `ErrRestore` and `archive.ErrUnavailable`. Nothing reached the journal or the execution client: no restore pin, no observation, EL at genesis. With the sources back, the same restore completes | `TestArchiveRestoreLosingBothReplicasDuringTheFetchWalkEndsCleanlyAndResumes` |
+| Both replicas gone once the replay has begun | the replay needs no source; the restore completes and opens no further stream | `TestArchiveRestoreReplayDoesNotNeedTheSources` |
+| The replay itself fails partway (here the execution client refuses block 3) | not rolled back: the EL stays past genesis and no pin is recorded. A second restore on the same disks is refused before any fetch (`EL head must be the checked genesis`). Restart from new empty disks, as above | `TestArchiveRestoreFailedReplayIsNotResumedOnTheSameDisks` |
+| A replica that accepts the stream and never answers | each exchange ends at `Limits.Deadline`; the other replica serves; with both silent the restore ends after the bounded wait | `TestArchiveRestoreBypassesAReplicaThatAcceptsAndNeverAnswers`, `TestArchiveRestoreEndsWhenBothReplicasAcceptAndNeverAnswer` |
+| A replica asked for one block that answers with another block's genuine, correctly certified record | the answer does not echo the request (`ErrReplica`) and is bypassed; with every replica doing it the restore ends with `ErrRestore`, `ErrReplica` and keeps nothing | `TestArchiveRestoreBypassesAReplicaThatAnswersWithAnotherBlocksRecord`, `TestArchiveRestoreRefusesWhenEveryReplicaAnswersWithAnotherBlocksRecord` |
+
+A record that is delivered and fails authentication is never retried (`TestArchiveRestoreVerificationFailureIsNotRetried`), and the pin
+checks of the next section apply to whatever a source serves. These tests do not show a source process killed or lying during a live
+restore on a devnet, and they use a fixture execution client, so the failed-replay row says nothing about what a real reth leaves on disk
+beyond the instruction to start from empty disks.
+
+## Incompatible stores: the refusal boundary
+
+Fresh genesis removes migration development; it does not remove the silent-load refusal. The restore and the run commands read only
+stores written by this version for this deployment, and refuse everything else by name. Nothing is migrated, imported or rewritten.
+
+| Store | Incompatible when | Refusal | Evidence |
+|---|---|---|---|
+| BFT journal (`--execution-journal`, `.trust`, `.handoffs`) and the LUC checkpoint | any of these paths already exists at restore | `restore requires a fresh BFT data directory: <path> already exists` (a copied journal, the profile-2 siblings) | `cli/ubft/cmd/shard_node_restore_test.go` `TestRestoreCommandAcceptsProfile2AndRequiresFreshState` |
+| Journal database, legacy or unknown bucket | the file was written by an older layout (legacy bucket) or holds an unknown bucket | `configuredprogress.ErrVersion`, at open | `configuredprogress/codec_test.go` `TestOpenIsolationAndMalformedState` |
+| Journal database, origin | the journal is for another configured origin, or its version, origin or limits changed | `configuredprogress.ErrContext` | `configuredprogress/journal_test.go` `TestJournalRejectsCorruptForeignAndVersionedRecords` |
+| Journal database, record | a record is damaged | `configuredprogress.ErrUntrusted` (envelope digest) | same test |
+| Journal database, record version | a record carries another version | `configuredprogress.ErrContext` | same test |
+| Journal database, descriptor | a legacy or other-version identity descriptor | `configuredprogress.ErrVersion` | `configuredprogress/m2_identity_test.go` `TestM2IdentityRefusesLegacyDescriptor`, `TestM2DescriptorVersionRefused` |
+| Archive store, manifest | the manifest magic is not the one for the record's version | `archive.ErrCorrupt`; the file is not rewritten | `archive/archive_test.go` `TestManifestOfAnotherVersionIsRefusedNotMigrated` |
+| Archive store, record | a nonempty slot that version 1 requires empty; a missing slot | `archive.ErrInvalid` when written, `archive.ErrUnavailable` when read | `archive/archive_test.go` `TestVersionOneAccountingSlotIsEmptyAndRequired` |
+| Local archive directory | not empty at restore | `restore archive directory <dir> is not empty; supply a fresh directory` | code only (`cli/ubft/cmd/shard_node_run.go`, restore branch); no test reaches it |
+| Legacy LUC checkpoint beside an execution journal (run) | the checkpoint file exists | `execution journal requires fresh D2 lane state: legacy LUC checkpoint exists at <path>; no automatic migration` | code only; no test reaches it |
+| Execution client | its head or finalized block is not the checked genesis | `EL head must be the checked genesis on an empty disk` | `archivewiring/restore_source_experiments_test.go` `TestArchiveRestoreFailedReplayIsNotResumedOnTheSameDisks` |
+| Archive replica pair | a configured replica was replaced and both or the order changed | `frontier.ErrContext` (the one-replica-at-a-time rule above) | `configuredprogress/journal_frontier_rotation_test.go` `TestMalformedReplicaPairChangeIsRefusedAtStartup` |
+
+The boundary is therefore: **a store is either created by this version in this deployment or it is refused.** The supported way to meet a
+refusal is a fresh authenticated restore on new empty disks. Not covered: an interrupted upgrade (a process stopped between writing the
+journal and the archive, then started on a different binary) and a real old-format file store put through the command line; the two "code
+only" rows are not exercised by a test. Whether the owner accepts this boundary as the H4 scope is a decision for #21 and is not recorded
+here.
+
 ## Freshness assumption
 
 The replicas and root peers are availability sources, never trust anchors. A restoring node accepts
