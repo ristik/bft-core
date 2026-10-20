@@ -187,7 +187,7 @@ func buildRetirement(t *testing.T) goRetirement {
 	return goRetirement{
 		Format: "UNICITY_XREPO_GO_RETIREMENT/v1",
 		Note: "Produced by bft-core (XREPO_UPDATE=1 go test ./xrepo) from the contracts' publication fixture. The records are what the root's projection " +
-			"emits; the Retirement reference digests are custody's exposure chains as the root derives them; the evidence pair is signed by the root's " +
+			"emits; the Retirement reference digests are the evmassign model of custody's exposure-chain storage word (a root reads it from custody's storage proof); the evidence pair is signed by the root's " +
 			"statement derivation and signer. The contracts import the records through the SealRegistry and apply them verbatim. Do not edit by hand.",
 		ResultID: p.ResultID, GenesisAssignmentID: hx(s.genesis[:]), PrimaryAssignmentID: hx(s.primary[:]),
 		Records: out, Retirements: rets,
