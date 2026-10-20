@@ -12,7 +12,8 @@
 set -uo pipefail
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 REPO_ROOT=$(cd "$SCRIPT_DIR/.." && pwd)
-AGRE_ROOT=$(cd "$REPO_ROOT/.." && pwd)
+AGRE_ROOT=${AGRE_ROOT:-$(cd "$REPO_ROOT/.." && pwd)}
+source "$SCRIPT_DIR/lib/portable.sh"
 source "$SCRIPT_DIR/lib/anyage-lib.sh"
 ok=0 bad=0
 yes() { printf '  ok    %s\n' "$1"; ok=$((ok + 1)); }
@@ -47,7 +48,7 @@ preflight() {
   echo "-- machine"
   free=$(df -k "$AGRE_ROOT" | awk 'NR==2{print int($4/1048576)}')
   if [ "${free:-0}" -ge 25 ]; then yes "free disk ${free} GiB (>= 25)"; else no "free disk ${free:-?} GiB (< 25)"; fi
-  [ -x "$AGRE_ROOT/briefs/devnet-lock.sh" ] && yes "devnet lock helper present" || no "devnet lock helper missing"
+  [ -x "$(lane_lock_script)" ] && yes "devnet lock helper present ($(lane_lock_script))" || no "devnet lock helper missing"
   if [ -d "$AGRE_ROOT/.devnet-lock" ]; then note "the devnet lock is HELD by: $(cat "$AGRE_ROOT/.devnet-lock/owner" 2>/dev/null) (the run would queue)"; else yes "devnet lock is free"; fi
   echo "-- merged prerequisites (read-only gh queries on ristik/*)"
   for pr in "ristik/ureth 70" "ristik/unicity-pos-contracts 39" "ristik/native-bridge-plugins 19" "ristik/bft-core 611"; do
@@ -58,7 +59,7 @@ preflight() {
   check "clean checkout" bash -c "[ -z \"\$(git -C '$REPO_ROOT' status --porcelain --untracked-files=no)\" ]"
   head=$(git -C "$REPO_ROOT" rev-parse HEAD)
   check "HEAD contains origin/integration/enshrined-evm (incl. #611)" git -C "$REPO_ROOT" merge-base --is-ancestor origin/integration/enshrined-evm HEAD
-  if [ -x "$REPO_ROOT/build/ubft" ] && go version -m "$REPO_ROOT/build/ubft" 2>/dev/null | grep -q "vcs.revision=$head" && ! go version -m "$REPO_ROOT/build/ubft" | grep -q 'vcs.modified=true'; then yes "build/ubft is built from HEAD ${head:0:10}"; else no "build/ubft is missing or not built from HEAD ${head:0:10} (make build)"; fi
+  if [ -x "$REPO_ROOT/build/ubft" ] && lane_buildinfo "$REPO_ROOT/build/ubft" 2>/dev/null | grep -q "vcs.revision=$head" && ! lane_buildinfo "$REPO_ROOT/build/ubft" | grep -q 'vcs.modified=true'; then yes "build/ubft is built from HEAD ${head:0:10}"; else no "build/ubft is missing or not built from HEAD ${head:0:10} (make build)"; fi
   echo "-- ureth (attested build)"
   if [ -n "${M2_URETH_BIN:-}" ] && [ -x "$M2_URETH_BIN" ] && [ -n "${M2_URETH_COMMIT:-}" ]; then
     rep=$("$M2_URETH_BIN" --version 2>&1 | sed -n 's/^Commit SHA: //p' | head -1)
@@ -117,7 +118,7 @@ case "${1:-}" in
     lane_env
     [ -n "${P85_CONTRACTS:-}" ] && [ -n "${DNB_TOOL:-}" ] || { echo "--prep needs P85_CONTRACTS, M2_URETH_BIN, M2_URETH_COMMIT, DNB_TOOL (and P85_DEV_RUN=1 unless the provenance is attested)" >&2; exit 2; }
     export ANYAGE_PREP_ONLY=1
-    "$AGRE_ROOT/briefs/devnet-lock.sh" anyage-prep env P85_LANE_LOCKED=1 "$SCRIPT_DIR/p85-lane.sh"; rc=$?
+    "$(lane_lock_script)" anyage-prep env P85_LANE_LOCKED=1 "$SCRIPT_DIR/p85-lane.sh"; rc=$?
     # a successful dry run is recorded for this exact HEAD; the preflight of the run asks for it (a development run says so in the record)
     if [ "$rc" -eq 0 ]; then
       printf '%s\n%s\n' "prep-only dry run on bft-core $(git -C "$REPO_ROOT" rev-parse HEAD) at $(date -u +%FT%TZ)" "${P85_DEV_RUN:+DEVELOPMENT RUN (P85_DEV_RUN=1): binary and checkout not attested}" >"$AGRE_ROOT/briefs/devnet-runs/anyage-prep-$(git -C "$REPO_ROOT" rev-parse HEAD | cut -c1-12).ok"

@@ -20,6 +20,7 @@
 set -uo pipefail
 # Definitions only; sourced here, before cleanup can run, for its ownership-scoped stop functions.
 source helper.sh
+source scripts/lib/portable.sh
 # Definitions only: the fork-client resolver and the flag the seal-capable client requires.
 . scripts/lib/reth-pin.sh
 if [ "${H4_RESTORE_PROBE:-0}" = 1 ]; then
@@ -824,7 +825,7 @@ txHashes=""
 for nonce in 0 1 2; do
   expected=""
   for i in $(seq 1 "$validators"); do
-    sent=$(go run ./scripts/evmtx -send -eth-url "http://127.0.0.1:$((rethEthBase + i - 1))" \
+    sent=$(lane_go_run evmtx -send -eth-url "http://127.0.0.1:$((rethEthBase + i - 1))" \
       -chain-id "$postM2aChainID" -nonce "$nonce" 2>&1)
     if [[ "$sent" != 0x* ]]; then
       fail "could not seed validator $i's mempool at nonce $nonce: $sent"

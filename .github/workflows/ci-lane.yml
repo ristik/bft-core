@@ -1,0 +1,224 @@
+# The combined UTB/P85/any-age lane on GitHub-hosted STANDARD runners (docs/ci-lanes.md; briefs/ci-lane-migration-plan.md step 1).
+#
+# Dispatch: Actions -> ci-lane -> Run workflow (workflow_dispatch). A workflow_dispatch workflow must exist on the default branch to be dispatchable (a dispatch with
+# --ref <branch> of a workflow that only exists on that branch answers HTTP 404; verified 2026-10-20), so before this file is on the default branch the lane is run by
+# pushing a branch named ci-lane-run/<anything>: the push event reads its inputs from scripts/ci/run-inputs.json of that branch. No schedule, no pull_request.
+#
+# Builds publish compact binaries and pinned sources; the run job downloads only those (no Rust target, no Go build cache, no Go/Rust toolchain).
+name: ci-lane
+
+on:
+  workflow_dispatch:
+    inputs:
+      lane:
+        description: "combined = build everything and run the lane; build-only = the builds and their provenance checks only"
+        type: choice
+        options: [combined, build-only]
+        default: combined
+      inject_failure:
+        description: "Harness failure to test the failure path (honoured only by this workflow): none | after-builds | in-lane"
+        type: choice
+        options: [none, after-builds, in-lane]
+        default: none
+  push:
+    branches: ['ci-lane-run/**']
+
+permissions:
+  contents: read
+
+jobs:
+  plan:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      lane: ${{ steps.in.outputs.lane }}
+      inject: ${{ steps.in.outputs.inject }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - id: in
+        env:
+          EVENT: ${{ github.event_name }}
+          IN_LANE: ${{ inputs.lane }}
+          IN_INJECT: ${{ inputs.inject_failure }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT" = workflow_dispatch ]; then lane=$IN_LANE; inject=$IN_INJECT
+          else lane=$(jq -r .lane scripts/ci/run-inputs.json); inject=$(jq -r .inject_failure scripts/ci/run-inputs.json); fi
+          case "$lane" in combined|build-only) ;; *) echo "bad lane $lane" >&2; exit 1 ;; esac
+          case "$inject" in none|after-builds|in-lane) ;; *) echo "bad inject_failure $inject" >&2; exit 1 ;; esac
+          echo "lane=$lane" >>"$GITHUB_OUTPUT"; echo "inject=$inject" >>"$GITHUB_OUTPUT";
+          echo "lane=$lane inject_failure=$inject sha=$GITHUB_SHA"
+
+  build-ureth:
+    needs: plan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Free disk (the runner's unused toolchains and images)
+        run: scripts/ci/prune-runner.sh
+      - name: Sample resources
+        run: |
+          mkdir -p "$RUNNER_TEMP/res"
+          nohup scripts/ci/sample-resources.sh "$RUNNER_TEMP/res/build-ureth.tsv" 5 "$RUNNER_TEMP" >/dev/null 2>&1 &
+          echo $! >"$RUNNER_TEMP/res/sampler.pid"
+          { uname -a; nproc; free -m; df -h; echo "image ${ImageVersion:-?}"; } >"$RUNNER_TEMP/res/runner.txt"
+      - name: Build unicity-reth from the pin
+        run: scripts/ci/build-ureth.sh "$RUNNER_TEMP/ureth-out" "$RUNNER_TEMP/ureth-build"
+      - name: Resources of this job
+        if: always()
+        run: |
+          kill "$(cat "$RUNNER_TEMP/res/sampler.pid")" 2>/dev/null || true
+          scripts/ci/summarize-resources.sh "$RUNNER_TEMP/res/build-ureth.tsv" | tee "$RUNNER_TEMP/res/build-ureth.summary.txt"
+          df -h / | tail -1
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ureth-linux
+          path: ${{ runner.temp }}/ureth-out/
+          if-no-files-found: error
+          retention-days: 30
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: resources-build-ureth
+          path: ${{ runner.temp }}/res/
+          retention-days: 30
+
+  build-tools:
+    needs: plan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0   # the aggregator's bft-core pin must be in this checkout's history (utb_agg_pins_ok)
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: '1.25.14'
+          cache: false
+      - name: Sample resources
+        run: |
+          mkdir -p "$RUNNER_TEMP/res"
+          nohup scripts/ci/sample-resources.sh "$RUNNER_TEMP/res/build-tools.tsv" 5 "$RUNNER_TEMP" >/dev/null 2>&1 &
+          echo $! >"$RUNNER_TEMP/res/sampler.pid"
+      - name: Build the Go side, the aggregator from its pin, and run the chain-free self-tests
+        env:
+          AGRE_ROOT: ${{ runner.temp }}/agre-build
+        run: |
+          mkdir -p "$AGRE_ROOT/builds"
+          scripts/ci/build-tools.sh "$RUNNER_TEMP/tools-out"
+      - name: Resources of this job
+        if: always()
+        run: |
+          kill "$(cat "$RUNNER_TEMP/res/sampler.pid")" 2>/dev/null || true
+          scripts/ci/summarize-resources.sh "$RUNNER_TEMP/res/build-tools.tsv" | tee "$RUNNER_TEMP/res/build-tools.summary.txt"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: bft-tools
+          path: ${{ runner.temp }}/tools-out/
+          if-no-files-found: error
+          retention-days: 30
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: resources-build-tools
+          path: ${{ runner.temp }}/res/
+          retention-days: 30
+
+  build-sources:
+    needs: plan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '22'
+      - name: Sample resources
+        run: |
+          mkdir -p "$RUNNER_TEMP/res"
+          nohup scripts/ci/sample-resources.sh "$RUNNER_TEMP/res/build-sources.tsv" 5 "$RUNNER_TEMP" >/dev/null 2>&1 &
+          echo $! >"$RUNNER_TEMP/res/sampler.pid"
+      - name: Install the pinned Foundry
+        run: |
+          scripts/ci/install-foundry.sh
+          echo "$HOME/.foundry/bin" >>"$GITHUB_PATH"
+      - name: Pinned sources (contracts with its forge build, the NBP driver, the JS SDK)
+        run: scripts/ci/prepare-sources.sh "$RUNNER_TEMP/sources-out" "$RUNNER_TEMP/sources-work"
+      - name: Resources of this job
+        if: always()
+        run: |
+          kill "$(cat "$RUNNER_TEMP/res/sampler.pid")" 2>/dev/null || true
+          scripts/ci/summarize-resources.sh "$RUNNER_TEMP/res/build-sources.tsv" | tee "$RUNNER_TEMP/res/build-sources.summary.txt"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: sources
+          path: ${{ runner.temp }}/sources-out/
+          if-no-files-found: error
+          retention-days: 30
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: resources-build-sources
+          path: ${{ runner.temp }}/res/
+          retention-days: 30
+
+  run-lane:
+    needs: [plan, build-ureth, build-tools, build-sources]
+    if: ${{ needs.plan.outputs.lane == 'combined' }}   # a failed build job fails the run job's prerequisites (no !cancelled override)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+      - name: Machine checks and free disk
+        run: |
+          set -eu
+          for c in docker jq python3 curl git node npm zstd rsync lsof openssl xxd strings; do command -v "$c" >/dev/null || { echo "missing $c" >&2; sudo apt-get update -qq && sudo apt-get install -y -qq "$c" || true; }; done
+          scripts/ci/prune-runner.sh
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '22'
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: ureth-linux
+          path: ${{ runner.temp }}/artifacts/ureth-linux
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: bft-tools
+          path: ${{ runner.temp }}/artifacts/tools
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: sources
+          path: ${{ runner.temp }}/artifacts/sources
+      - name: Sample resources
+        run: |
+          mkdir -p "$RUNNER_TEMP/res"
+          nohup scripts/ci/sample-resources.sh "$RUNNER_TEMP/res/run-lane.tsv" 5 "$RUNNER_TEMP" >/dev/null 2>&1 &
+          echo $! >"$RUNNER_TEMP/res/sampler.pid"
+          { uname -a; nproc; free -m; df -h; echo "image ${ImageVersion:-?}"; } >"$RUNNER_TEMP/res/runner.txt"
+      - name: The lane
+        env:
+          CI_INJECT_FAILURE: ${{ needs.plan.outputs.inject }}
+          LANE_DEADLINE_MIN: '70'
+        run: scripts/ci/run-lane.sh "$RUNNER_TEMP/artifacts" "$RUNNER_TEMP/lane" "$RUNNER_TEMP/lane-out"
+      - name: Resources of this job
+        if: always()
+        run: |
+          kill "$(cat "$RUNNER_TEMP/res/sampler.pid")" 2>/dev/null || true
+          scripts/ci/summarize-resources.sh "$RUNNER_TEMP/res/run-lane.tsv" | tee "$RUNNER_TEMP/res/run-lane.summary.txt"
+      - name: Upload set (the publishable evidence pack, its outer digest, the logs)
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: lane-evidence
+          path: ${{ runner.temp }}/lane-out/upload/
+          if-no-files-found: warn
+          retention-days: 30
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: resources-run-lane
+          path: ${{ runner.temp }}/res/
+          retention-days: 30

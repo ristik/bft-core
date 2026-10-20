@@ -4,6 +4,7 @@
 #
 # The caller defines (before calling a function): info (optional), and runs from the repository root (test-nodes/, build/ubft). UBFT overrides build/ubft.
 
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/portable.sh"
 UBFT=${UBFT:-build/ubft}
 UTB_DIR=${UTB_DIR:-test-nodes/utb}
 
@@ -71,7 +72,7 @@ utb_agg_build() {
 }
 
 # The aggregator binary's provenance directory: the aggregator-<sha8> directory whose sha256.txt records the binary's digest, which holds commit.txt (40 hex) and
-# gomod-pins.txt, and whose commit is the one the binary itself reports as its VCS revision (go version -m). Prints the directory.
+# gomod-pins.txt, and whose commit is the one the binary itself reports as its VCS revision (lane_buildinfo). Prints the directory.
 utb_agg_provenance() { # BIN [BUILDS_DIR]
   local bin=$1 builds=${2:-${AGRE_ROOT:-..}/builds} sum d commit rev
   sum=$(shasum -a 256 "$bin" 2>/dev/null | cut -d' ' -f1)
@@ -81,9 +82,9 @@ utb_agg_provenance() { # BIN [BUILDS_DIR]
     for f in commit.txt gomod-pins.txt; do [ -s "${d}$f" ] || { echo "utb_agg_provenance: ${d}$f is missing or empty" >&2; return 1; }; done
     commit=$(tr -d '[:space:]' <"${d}commit.txt")
     [[ $commit =~ ^[0-9a-f]{40}$ ]] || { echo "utb_agg_provenance: ${d}commit.txt is not a 40-hex commit" >&2; return 1; }
-    rev=$(go version -m "$bin" 2>/dev/null | sed -n 's/^[[:space:]]*build[[:space:]]*vcs.revision=//p')
+    rev=$(lane_buildinfo "$bin" 2>/dev/null | sed -n 's/^[[:space:]]*build[[:space:]]*vcs.revision=//p')
     [ "$rev" = "$commit" ] || { echo "utb_agg_provenance: the binary reports revision '${rev:-none}', its provenance says $commit" >&2; return 1; }
-    go version -m "$bin" 2>/dev/null | grep -q 'vcs.modified=true' && { echo "utb_agg_provenance: the binary was built from a modified tree" >&2; return 1; }
+    lane_buildinfo "$bin" 2>/dev/null | grep -q 'vcs.modified=true' && { echo "utb_agg_provenance: the binary was built from a modified tree" >&2; return 1; }
     echo "${d%/}"; return 0
   done
   echo "utb_agg_provenance: no aggregator-* provenance under $builds records the binary digest $sum" >&2

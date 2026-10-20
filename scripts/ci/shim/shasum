@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# CI shim for hosts without perl's shasum: `shasum -a 256 [-c] ...` as sha256sum. Put scripts/ci/shim at the END of PATH (a real shasum wins).
+if [ "${1:-}" = -a ] && [ "${2:-}" = 256 ]; then shift 2; exec sha256sum "$@"; fi
+echo "shasum shim: only 'shasum -a 256' is supported" >&2; exit 2
