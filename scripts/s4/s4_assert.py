@@ -192,6 +192,15 @@ def cmd_snapshot(a):
     print("snapshot at block %d: %d exposure lots, %d other lots" % (block, len(lots_ids), len(other)))
 
 
+# what an evidence case may change on a lot: its debit and its hold. A lot's reference count is not part of it: the lane's next election (opened after the
+# recovery) references the honest lots in the same window.
+CASE_FIELDS = ("initial", "remaining", "penalized", "category", "capBps", "holds", "pendingHolds", "retirementImported")
+
+
+def core(lot):
+    return {k: lot[k] for k in CASE_FIELDS}
+
+
 def cmd_effects(a):
     before, admitted, settled = (json.load(open(p)) for p in (a.before, a.admitted, a.settled))
     ids = [str(i) for i in before["exposureLots"]]
@@ -223,7 +232,7 @@ def cmd_effects(a):
             fail("lot %s: the retirement state changed at admission" % i)
     ok("holds installed on exactly the attributable lots %s (one each, no debit yet, retirement state unchanged: a missing Retirement is not an evidence hold)" % ",".join(ids))
     for i in [str(x) for x in before["otherLots"]]:
-        if admitted["lots"][i]["holds"] != 0 or admitted["lots"][i] != {**before["lots"][i]}:
+        if admitted["lots"][i]["holds"] != 0 or core(admitted["lots"][i]) != core(before["lots"][i]):
             fail("the unrelated lot %s changed at admission: %r -> %r" % (i, before["lots"][i], admitted["lots"][i]))
     ok("unrelated lots %s are untouched and hold-free (an unrelated withdrawal is not blocked by this case)" % ",".join(str(x) for x in before["otherLots"]))
     if not admitted.get("excluded"):
@@ -250,7 +259,7 @@ def cmd_effects(a):
         fail("the bounty %d exceeds the cap %d" % (dr, pol["bountyCap"]))
     ok("capped bounty to the reporter (+%d, cap %d) and treasury credit (+%d) equal the policy arithmetic; total credits +%d = the debit" % (dr, pol["bountyCap"], dt, settled["totalCredits"] - before["totalCredits"]))
     for i in [str(x) for x in before["otherLots"]]:
-        if settled["lots"][i] != before["lots"][i]:
+        if core(settled["lots"][i]) != core(before["lots"][i]):
             fail("the honest lot %s changed across the case: %r -> %r" % (i, before["lots"][i], settled["lots"][i]))
     ok("honest lots %s unchanged across the whole case" % ",".join(str(x) for x in before["otherLots"]))
 

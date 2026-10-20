@@ -39,3 +39,14 @@ class Rules(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class Core(unittest.TestCase):
+    LOT = dict(initial=1, remaining=1, penalized=0, category=2, capBps=500, holds=0, pendingHolds=0, retirementImported=False, refCount=1)
+
+    def test_reference_count_is_not_a_case_effect(self):
+        self.assertEqual(m.core(self.LOT), m.core(dict(self.LOT, refCount=2)))
+
+    def test_hold_and_debit_are_case_effects(self):
+        self.assertNotEqual(m.core(self.LOT), m.core(dict(self.LOT, holds=1)))
+        self.assertNotEqual(m.core(self.LOT), m.core(dict(self.LOT, remaining=0, penalized=1)))
