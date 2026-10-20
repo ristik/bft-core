@@ -87,11 +87,13 @@ def network_word(generation):
     return '0x' + hashlib.sha256(('unicity.testnet.pos.' + generation).encode()).hexdigest()
 
 
-def profile_args(deployment, measurements):
-    """The b1-profile flags that pin the hooks and the election to the deployed contracts."""
-    return ['--records-custody', deployment['custody'], '--h-records', str(H_RECORDS), '--hook-record-gas', str(HOOK_RECORD_GAS),
-            '--election', deployment['election'], '--elect-measurement', str(measurements['election']), '--hook-measurement', str(measurements['hook']),
-            '--elect-caps', ','.join(map(str, CAPS))]
+def profile_args(deployment, measurements, shadow=False):
+    """The b1-profile flags that pin the hooks and the election to the deployed contracts. `shadow` (X4): the records hook and no authoritative election."""
+    args = ['--records-custody', deployment['custody'], '--h-records', str(H_RECORDS), '--hook-record-gas', str(HOOK_RECORD_GAS),
+            '--hook-measurement', str(measurements['hook']), '--elect-caps', ','.join(map(str, CAPS))]
+    if not shadow:
+        args += ['--election', deployment['election'], '--elect-measurement', str(measurements['election'])]
+    return args
 
 
 def deployment_of(deployment, profile):

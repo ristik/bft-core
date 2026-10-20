@@ -943,6 +943,7 @@ if [ "${M2_PROFILE2:-0}" = 1 ] && [ "${POST_M2A_SKIP_HANDOFF:-0}" != 1 ]; then
   if [ "${Q3_WEIGHT_LANE:-0}" = 1 ]; then handoffScript=scripts/q3-weight-activation-steps.sh; fi   # Q3 #50 slice E
   if [ "${Q4_LIVE_LANE:-0}" = 1 ]; then handoffScript=scripts/q4-live-steps.sh; fi
   if [ "${P85_LANE:-0}" = 1 ]; then handoffScript=scripts/p85-recovery-steps.sh; fi
+  if [ "${P85_SHADOW:-0}" = 1 ]; then handoffScript=scripts/x4-shadow-steps.sh; fi   # X4: the records hook without an election, and the shadow adapter's scripted scenario
   if [ "${H6_ABORT_LANE:-0}" = 1 ]; then handoffScript=scripts/h6/abort-rehearsal-steps.sh; fi
   # the steps files act on the devnet at source time: they start only when this script, the runner, says so (and each lane adds its own flags)
   PAIRED_DEVNET_STEPS=1

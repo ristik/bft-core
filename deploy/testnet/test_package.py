@@ -88,6 +88,13 @@ class ProofOfStake(unittest.TestCase):
         args=pos.profile_args(d,{'election':'/m.json','hook':'/h.jsonl'})
         self.assertEqual((args[args.index('--records-custody')+1],args[args.index('--election')+1],args[args.index('--elect-caps')+1]),('0xc','0xe','16,1,6'))
         self.assertEqual((args[args.index('--elect-measurement')+1],args[args.index('--hook-measurement')+1]),('/m.json','/h.jsonl'))
+    def test_the_shadow_profile_has_the_hook_and_no_election(self):
+        d={'custody':'0xc','election':'0xe'}
+        args=pos.profile_args(d,{'election':'/m.json','hook':'/h.jsonl'},shadow=True)
+        self.assertNotIn('--election',args);self.assertNotIn('--elect-measurement',args)
+        self.assertEqual((args[args.index('--records-custody')+1],args[args.index('--hook-measurement')+1],args[args.index('--elect-caps')+1]),('0xc','/h.jsonl','16,1,6'))
+        full=pos.profile_args(d,{'election':'/m.json','hook':'/h.jsonl'})
+        self.assertEqual(sorted(set(full)-set(args)),sorted(['--election','--elect-measurement','0xe','/m.json']))
     def test_the_caps_are_covered_by_the_per_record_reservation(self):
         # the cold RecoveryAck: 2,281,165 for 6 members of one lot (3,629,888 for 8 members of 2 lots); the guard's margin is 1.25
         self.assertEqual(pos.CAPS,(16,1,6))
