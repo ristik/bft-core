@@ -151,15 +151,19 @@ func (r *Registry) append(e Entry, w *Changes) (installed bool, err error) {
 	if r.Ready && r.Tip == r.U && e.Start <= r.O {
 		return false, ErrAppendClosesUsableOrigin
 	}
+	open := clone(e)
+	open.End = nil // an entry is installed open; its successor closes it, exactly once
+	c, err := r.Deployment.EpochCommitment(open)
+	if err != nil {
+		return false, err
+	}
 	end := e.Start
 	tip.End = &end
 	r.entries[r.Tip] = tip
 	w.insert(EntrySlot(tip.Epoch, 5), Word(end))
 	w.insert(EntrySlot(tip.Epoch, 6), Word(1))
-	open := clone(e)
-	open.End = nil // an entry is installed open; its successor closes it, exactly once
 	r.entries[e.Epoch] = open
-	putEntry(w.insert, open, r.Deployment)
+	putEntry(w.insert, open, c)
 	r.Tip = e.Epoch
 	return true, nil
 }

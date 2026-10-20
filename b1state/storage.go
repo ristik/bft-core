@@ -89,13 +89,12 @@ func (d Deployment) EpochCommitment(e Entry) ([32]byte, error) {
 	return [32]byte(ethcrypto.Keccak256Hash(b)), nil
 }
 
-// putEntry writes an entry's stored words and its commitment. The entry is validated by every caller.
-func putEntry(store func([32]byte, [32]byte), e Entry, d Deployment) {
+// putEntry stores e's words and its commitment c, which the caller derives (and refuses on) before writing anything.
+func putEntry(store func([32]byte, [32]byte), e Entry, c [32]byte) {
 	metadata, members := e.StoredWords()
 	for i, w := range metadata {
 		store(EntrySlot(e.Epoch, uint64(i)), w)
 	}
-	c, _ := d.EpochCommitment(e)
 	store(EntrySlot(e.Epoch, CommitmentField), c)
 	for j, words := range members {
 		for f, w := range words {
@@ -122,7 +121,11 @@ func GenesisWords(p Profile, genesis Entry, genesisCommitment [32]byte) (map[[32
 	for name, w := range map[string][32]byte{"b1.network": Word(uint64(p.Network)), "b1.format": Word(2), "b1.profileHash": h, "b1.initialized": Word(1), "b1.genesisEpoch": Word(genesis.Epoch), "b1.importedTipEpoch": Word(genesis.Epoch), "b1.originReady": {}, "clock.rootRound": {}, "origin.rootEpoch": {}, "assignment.rootEpoch": Word(genesis.Epoch), "records.ucTime": Word(p.GenesisUCTime), "phase": Word(2)} {
 		words[FixedSlot(name)] = w
 	}
-	putEntry(func(slot, value [32]byte) { words[slot] = value }, genesis, Deployment{GenesisCommitment: genesisCommitment, ProfileHash: h})
+	c, err := Deployment{GenesisCommitment: genesisCommitment, ProfileHash: h}.EpochCommitment(genesis)
+	if err != nil {
+		return nil, err
+	}
+	putEntry(func(slot, value [32]byte) { words[slot] = value }, genesis, c)
 	return words, nil
 }
 
@@ -160,10 +163,11 @@ func (c *Changes) WriteAllowance() (uint64, error) {
 
 // EntryStorage exports every addressed metadata/member word, including zeros, and the commitment word.
 func EntryStorage(e Entry, d Deployment) (map[[32]byte][32]byte, error) {
-	if err := e.Validate(); err != nil {
+	c, err := d.EpochCommitment(e) // validates e
+	if err != nil {
 		return nil, err
 	}
 	out := make(map[[32]byte][32]byte)
-	putEntry(func(k, v [32]byte) { out[k] = v }, e, d)
+	putEntry(func(k, v [32]byte) { out[k] = v }, e, c)
 	return out, nil
 }
