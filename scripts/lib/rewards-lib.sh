@@ -17,8 +17,12 @@ rw_assert() { python3 -c "import sys;sys.exit(0 if ($1) else 1)" || { echo "$2" 
 rw_dep() { jq -r ".$1" "$P85_DEPLOY"; }
 rw_pool() { rw_dep rewardPool; }
 rw_uint() { p85_call "$@" | awk '{print $1}'; }   # a cast call answer that is one unsigned integer
+# The lane's validators do not gossip transactions (each reth pool is private, peers are added by hand), so the relayer's transactions go to every online validator's
+# execution client, as the lane'"'"'s own paid-transaction helper (m2_send_paid) does: whichever validator builds the next block has the transaction. The first URL decides reads.
+rw_eth_all() { local i out=; for i in ${H3_ONLINE:-1}; do out="${out:+$out,}http://127.0.0.1:$((rethEthBase + i - 1))"; done; echo "$out"; }
+
 rw_settle_run() { # <log>: settle until the pool accepts nothing more
-  build/ubft pos-relayer tx reward settle --eth-rpc "$(p85_eth)" --pos-deployment "$P85_DEPLOY" --sender-key "$(p85_sender_key)" --max-steps 200 2>&1 | tee "$1"
+  build/ubft pos-relayer tx reward settle --eth-rpc "$(rw_eth_all)" --pos-deployment "$P85_DEPLOY" --sender-key "$(p85_sender_key)" --max-steps 200 2>&1 | tee "$1"
   grep -q "reward pool idle after" "$1" || { echo "the reward pool did not go idle (see $1)" >&2; return 1; }
 }
 rw_check_run() { # <out> [extra funding wei]
@@ -38,7 +42,7 @@ rw_step_settle() {
   rw_assert "$(rw_uint "$pool" 'available()(uint256)') == $funding" "the pool does not hold its genesis allocation before any interval is closed" || return 1
   rw_assert "$($P85_CAST balance --rpc-url "$(p85_eth)" "$pool") >= $funding" "the pool balance is below its allocation" || return 1
   # 2. explicit funding on top, through the relayer
-  build/ubft pos-relayer tx reward fund --eth-rpc "$(p85_eth)" --pos-deployment "$P85_DEPLOY" --sender-key "$(p85_sender_key)" --value-wei "$RW_EXTRA_FUNDING_WEI" || return 1
+  build/ubft pos-relayer tx reward fund --eth-rpc "$(rw_eth_all)" --pos-deployment "$P85_DEPLOY" --sender-key "$(p85_sender_key)" --value-wei "$RW_EXTRA_FUNDING_WEI" || return 1
   # 3. settle across the real acknowledged history, then recompute everything from scratch and compare
   rw_settle_run "$dir/settle-1.log" || return 1
   rw_check_run "$dir/check-1.txt" "$RW_EXTRA_FUNDING_WEI" || return 1
@@ -57,15 +61,15 @@ rw_step_settle() {
   "$P85_CAST" send --rpc-url "$(p85_eth)" --private-key "$(cat "$(p85_sender_key)")" --value "$RW_GAS_WEI" "$payee" >/dev/null || return 1
   bal0=$($P85_CAST balance --rpc-url "$(p85_eth)" "$to"); pool0=$($P85_CAST balance --rpc-url "$(p85_eth)" "$pool"); total0=$(rw_uint "$pool" 'totalCredits()(uint256)')
   half=$(python3 -c "print($credit // 2)")
-  build/ubft pos-relayer tx reward claim --eth-rpc "$(p85_eth)" --pos-deployment "$P85_DEPLOY" --sender-key "$key" --amount-wei "$half" --to "$to" || return 1
+  build/ubft pos-relayer tx reward claim --eth-rpc "$(rw_eth_all)" --pos-deployment "$P85_DEPLOY" --sender-key "$key" --amount-wei "$half" --to "$to" || return 1
   bal1=$($P85_CAST balance --rpc-url "$(p85_eth)" "$to"); pool1=$($P85_CAST balance --rpc-url "$(p85_eth)" "$pool"); total1=$(rw_uint "$pool" 'totalCredits()(uint256)')
   rw_assert "$bal1 - $bal0 == $half and $pool0 - $pool1 == $half and $total0 - $total1 == $half and $(rw_uint "$pool" 'credits(address)(uint256)' "$payee") == $credit - $half" \
     "the first claim moved other amounts than $half (recipient +$((bal1 - bal0)), pool balance $pool0 -> $pool1, totalCredits $total0 -> $total1)" || return 1
-  if build/ubft pos-relayer tx reward claim --eth-rpc "$(p85_eth)" --pos-deployment "$P85_DEPLOY" --sender-key "$key" \
+  if build/ubft pos-relayer tx reward claim --eth-rpc "$(rw_eth_all)" --pos-deployment "$P85_DEPLOY" --sender-key "$key" \
        --amount-wei "$(python3 -c "print($credit - $half + 1)")" --to "$to" >"$dir/over-claim.log" 2>&1; then
     echo "an over-claim was paid" >&2; return 1
   fi
-  build/ubft pos-relayer tx reward claim --eth-rpc "$(p85_eth)" --pos-deployment "$P85_DEPLOY" --sender-key "$key" --amount-wei "$(python3 -c "print($credit - $half)")" --to "$to" || return 1
+  build/ubft pos-relayer tx reward claim --eth-rpc "$(rw_eth_all)" --pos-deployment "$P85_DEPLOY" --sender-key "$key" --amount-wei "$(python3 -c "print($credit - $half)")" --to "$to" || return 1
   rw_assert "$(rw_uint "$pool" 'credits(address)(uint256)' "$payee") == 0" "the payee still has credit after claiming all of it" || return 1
   rw_assert "$($P85_CAST balance --rpc-url "$(p85_eth)" "$to") == $bal0 + $credit" "the recipient did not receive exactly the credit" || return 1
   # 6. conservation: nothing is owed that the pool does not hold, and nothing was forced into it
