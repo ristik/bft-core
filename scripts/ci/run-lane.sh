@@ -46,7 +46,7 @@ host_evidence before "$out/host-before.log.gz"
 log "commit under test $head; lane=$inject; deadline ${deadline} min; artifacts $art"
 
 # ---- 1. verify and place the build artifacts (binaries and pinned sources only) ------------------------------------------------------------------------------
-ur=$art/ureth-linux; [ -x "$ur/unicity-reth" ] || die "no unicity-reth in $ur"
+ur=$art/ureth-linux; [ -f "$ur/unicity-reth" ] || die "no unicity-reth in $ur"
 ureth_commit=$(jq -er .components.ureth.commit "$pins")
 prov=$AGRE_ROOT/builds/ureth-${ureth_commit:0:8}; mkdir -p "$prov"; cp "$ur"/* "$prov/"
 chmod +x "$prov/unicity-reth"
