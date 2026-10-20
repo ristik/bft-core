@@ -21,6 +21,29 @@ rw_uint() { p85_call "$@" | awk '{print $1}'; }   # a cast call answer that is o
 # execution client, as the lane'"'"'s own paid-transaction helper (m2_send_paid) does: whichever validator builds the next block has the transaction. The first URL decides reads.
 rw_eth_all() { local i out=; for i in ${H3_ONLINE:-1}; do out="${out:+$out,}http://127.0.0.1:$((rethEthBase + i - 1))"; done; echo "$out"; }
 
+# One plain value transfer from a funded key, built and signed offline (scripts/evmtx: fixed gas limit 21000, the account's pending nonce), sent to every online
+# validator's execution client and waited for until a receipt shows success. `cast send` estimated the gas on one validator (the bound-execution node refuses an estimate
+# whose parent hash moved: 'bound parent hash mismatch') and left the transaction in a pool the other validators never see (no gossip in the lane).
+rw_send_value() { # <private key file> <to> <wei>
+  local key addr nonce id first sent expected= i status
+  key=$(tr -d '[:space:]' <"$1"); key=${key#0x}
+  addr=$("$P85_CAST" wallet address --private-key "0x$key") || return 1
+  nonce=$("$P85_CAST" nonce --block pending --rpc-url "http://127.0.0.1:$rethEthBase" "$addr") || return 1
+  for id in ${H3_ONLINE:-1}; do
+    sent=$(lane_go_run evmtx -send -eth-url "http://127.0.0.1:$((rethEthBase + id - 1))" -chain-id "${M2_CHAIN_ID:-31337}" -private-key "$key" -nonce "$nonce" -to "$2" -value "$3" -gas-limit 21000 2>&1) \
+      || { echo "$sent" >&2; return 1; }
+    [ -z "$expected" ] || [ "$expected" = "$sent" ] || { echo "the validators answered different transaction hashes ($expected, $sent)" >&2; return 1; }
+    expected=$sent
+  done
+  first=${H3_ONLINE:-1}; first=${first%% *}
+  for i in $(seq 1 180); do
+    status=$("$P85_CAST" receipt --rpc-url "http://127.0.0.1:$((rethEthBase + first - 1))" "$expected" status 2>/dev/null | awk '{print $1}')
+    case "$status" in 1|true) return 0 ;; 0|false) echo "the transfer $expected reverted" >&2; return 1 ;; esac
+    sleep 1
+  done
+  echo "the transfer $expected was not mined within 180 s" >&2; return 1
+}
+
 rw_settle_run() { # <log>: settle until the pool accepts nothing more
   build/ubft pos-relayer tx reward settle --eth-rpc "$(rw_eth_all)" --pos-deployment "$P85_DEPLOY" --sender-key "$(p85_sender_key)" --max-steps 200 2>&1 | tee "$1"
   grep -q "reward pool idle after" "$1" || { echo "the reward pool did not go idle (see $1)" >&2; return 1; }
@@ -58,7 +81,7 @@ rw_step_settle() {
   credit=$(rw_uint "$pool" 'credits(address)(uint256)' "$payee")
   rw_assert "${credit:-0} > 1" "payee 1 has no credit to claim ($credit)" || return 1
   to=0x$(printf 'p85-lane/reward-recipient' | shasum -a 256 | cut -c1-40)
-  "$P85_CAST" send --rpc-url "$(p85_eth)" --private-key "$(cat "$(p85_sender_key)")" --value "$RW_GAS_WEI" "$payee" >/dev/null || return 1
+  rw_send_value "$(p85_sender_key)" "$payee" "$RW_GAS_WEI" || return 1
   bal0=$($P85_CAST balance --rpc-url "$(p85_eth)" "$to"); pool0=$($P85_CAST balance --rpc-url "$(p85_eth)" "$pool"); total0=$(rw_uint "$pool" 'totalCredits()(uint256)')
   half=$(python3 -c "print($credit // 2)")
   build/ubft pos-relayer tx reward claim --eth-rpc "$(rw_eth_all)" --pos-deployment "$P85_DEPLOY" --sender-key "$key" --amount-wei "$half" --to "$to" || return 1
