@@ -58,6 +58,75 @@ def model(segments, progress, tail_open, start, rate, available, members_of):
     return credits, a, available, intervals
 
 
+class ReplayError(AssertionError):
+    pass
+
+
+def replay(events, segments, members_of, start, snapshots, genesis_funding):
+    """X4: the pool's life replayed event by event, so funding that arrives AFTER intervals closed is accounted for as it happened (the one-block recompute above
+    assumes every wei was there from the start). events: ordered dicts {kind: fund|close|claim, ...}; close has segment, start, end, rate, budget, distributed;
+    snapshots: [(effectiveProgress, rate)] indexed by policy id as the pool reads them. Every close is checked against what the model derives from the segments
+    and the funding available at that moment: an interval closed while the pool was empty stays at budget 0 (no backfill when funds arrive later). Returns the
+    final state and counters; raises ReplayError at the first disagreement."""
+    available, total, credits = genesis_funding, 0, {}
+    nxt, seg, cursor, count = start, 0, 0, len(snapshots) - 1
+    stats = {"intervals": 0, "zeroBudget": 0, "paid": 0, "fundings": 0, "claims": 0, "exhaustedAt": None, "refilledAfterExhaustion": False, "dust": 0}
+    for ev in events:
+        if ev["kind"] == "fund":
+            available += ev["amount"]
+            stats["fundings"] += 1
+            if stats["exhaustedAt"] is not None:
+                stats["refilledAfterExhaustion"] = True
+        elif ev["kind"] == "claim":
+            if credits.get(ev["payee"], 0) < ev["amount"]:
+                raise ReplayError(f"{ev['payee']} claimed {ev['amount']} with credit {credits.get(ev['payee'], 0)}")
+            credits[ev["payee"]] -= ev["amount"]
+            total -= ev["amount"]
+            stats["claims"] += 1
+        elif ev["kind"] == "close":
+            while seg < len(segments) and segments[seg][2] is not None and nxt >= segments[seg][2]:
+                seg += 1
+            if seg >= len(segments):
+                raise ReplayError(f"an interval closed at {ev['start']} with no owner left")
+            owner, s_start, s_end = segments[seg]
+            if ev["segment"] != seg or ev["start"] != nxt:
+                raise ReplayError(f"interval starts at {ev['start']} (segment {ev['segment']}), the model has {nxt} (segment {seg}): the timeline is not contiguous")
+            while cursor < count and snapshots[cursor + 1][0] <= nxt:
+                cursor += 1
+            end = (nxt - start) // GRID * GRID + GRID + start
+            if s_end is not None and s_end < end:
+                end = s_end
+            if cursor < count and snapshots[cursor + 1][0] < end:
+                end = snapshots[cursor + 1][0]
+            rate = snapshots[cursor][1]
+            if ev["end"] != end or ev["rate"] != rate:
+                raise ReplayError(f"interval [{nxt}, {ev['end']}) at rate {ev['rate']}: the model has end {end} and rate {rate}")
+            nominal = rate * (end - nxt) // RATE_UNITS
+            budget = min(nominal, available)
+            members = members_of(owner)
+            tw = sum(w for w, _ in members)
+            shares = [(payee, budget * w // tw) for w, payee in members] if budget else []
+            distributed = sum(s for _, s in shares)
+            if ev["budget"] != budget or ev["distributed"] != distributed:
+                raise ReplayError(f"interval [{nxt}, {end}): budget {ev['budget']} distributed {ev['distributed']}, the model with {available} available has {budget} / {distributed}")
+            available += -budget + (budget - distributed)
+            for payee, s in shares:
+                credits[payee] = credits.get(payee, 0) + s
+            total += distributed
+            stats["dust"] += budget - distributed
+            stats["intervals"] += 1
+            if budget == 0:
+                stats["zeroBudget"] += 1
+                if stats["exhaustedAt"] is None and nominal > 0:
+                    stats["exhaustedAt"] = end
+            else:
+                stats["paid"] += 1
+            nxt = end
+        else:
+            raise ReplayError(f"unknown event {ev['kind']}")
+    return {"available": available, "totalCredits": total, "credits": credits, "nextStart": nxt, "stats": stats}
+
+
 def words(hexstr):
     h = hexstr.strip()
     assert h.startswith("0x"), h
@@ -137,6 +206,83 @@ def check(a):
           "tailOpen": tail_open, "available": got_avail, "totalCredits": got_total, "surplus": bal - got_avail - got_total, "payees": len(credits)}))
 
 
+def topic(cast, sig):
+    return subprocess.run([cast, "keccak", sig], text=True, capture_output=True, check=True).stdout.strip().lower()
+
+
+def fetch_events(a, c):
+    """The pool's Funded / IntervalClosed / Claimed logs up to the pinned block, in (block, log index) order, decoded."""
+    sigs = {topic(a.cast, "Funded(address,uint256)"): "fund", topic(a.cast, "IntervalClosed(uint256,uint64,uint64,uint128,uint256,uint256)"): "close",
+            topic(a.cast, "Claimed(address,address,uint256)"): "claim"}
+    out = subprocess.run([a.cast, "logs", "--rpc-url", a.rpc, "--address", a.pool, "--from-block", "0", "--to-block", str(c.block), "--json"],
+                         text=True, capture_output=True)
+    if out.returncode:
+        raise SystemExit(f"cast logs failed: {out.stderr.strip()}")
+    logs = json.loads(out.stdout or "[]")
+    logs.sort(key=lambda l: (int(l["blockNumber"], 16), int(l["logIndex"], 16)))
+    events = []
+    for l in logs:
+        kind = sigs.get(l["topics"][0].lower())
+        if kind is None:
+            continue
+        w = words(l["data"])
+        if kind == "fund":
+            events.append({"kind": "fund", "amount": w[0], "block": int(l["blockNumber"], 16)})
+        elif kind == "claim":
+            events.append({"kind": "claim", "payee": addr_of(int(l["topics"][1], 16)), "amount": w[0], "block": int(l["blockNumber"], 16)})
+        else:
+            events.append({"kind": "close", "segment": int(l["topics"][1], 16), "start": w[0], "end": w[1], "rate": w[2], "budget": w[3], "distributed": w[4],
+                           "block": int(l["blockNumber"], 16)})
+    return events
+
+
+def replay_check(a):
+    block = a.block
+    if block is None:
+        block = int(subprocess.run([a.cast, "block-number", "--rpc-url", a.rpc], text=True, capture_output=True, check=True).stdout.strip())
+    c = Chain(a.rpc, a.cast, block)
+    n = c.raw(a.pool, "segmentCount()")[0]
+    segments = []
+    for i in range(n):
+        w = c.raw(a.pool, "segmentAt(uint256)", i)
+        segments.append(("0x" + format(w[0], "064x"), w[1], w[2] if w[3] else None))
+    assert segments[0][0] == a.genesis_assignment.lower(), "segment 0 is not the genesis assignment"
+
+    def members_of(assignment):
+        ids = c.raw(a.custody, "assignmentExposures(bytes32)", assignment)
+        return [(c.raw(a.custody, "exposures(bytes32)", "0x" + format(ids[2 + k], "064x"))[3],
+                 addr_of(c.raw(a.custody, "exposures(bytes32)", "0x" + format(ids[2 + k], "064x"))[7])) for k in range(ids[1])]
+
+    count = c.raw(a.policy, "currentPolicyID()")[0]
+    snaps = []
+    for i in range(count + 1):
+        try:
+            w = c.raw(a.policy, "snapshotAt(uint32)", i)
+            snaps.append((w[12], w[10]))
+        except SystemExit:
+            snaps.append((0, c.raw(a.policy, "rewardRateAt(uint32)", i)[0]))
+    start = c.raw(a.pool, "START()")[0]
+    events = fetch_events(a, c)
+    state = replay(events, segments, members_of, start, snaps, a.initial_funding)
+    got = {"available": c.raw(a.pool, "available()")[0], "totalCredits": c.raw(a.pool, "totalCredits()")[0], "nextStart": c.raw(a.pool, "nextStart()")[0]}
+    for k in got:
+        assert got[k] == state[k], f"{k}: the chain has {got[k]}, the replay {state[k]}"
+    for payee, want in sorted(state["credits"].items()):
+        have = c.raw(a.pool, "credits(address)", payee)[0]
+        assert have == want, f"credit of {payee}: {have}, replayed {want}"
+    s = state["stats"]
+    if a.min_paid is not None:
+        assert s["paid"] >= a.min_paid, f"{s['paid']} paid intervals, {a.min_paid} required"
+    if a.require_exhaustion:
+        assert s["exhaustedAt"] is not None and s["zeroBudget"] >= 1, "the pool never ran dry (no zero-budget interval with a positive nominal budget)"
+    if a.require_refill:
+        assert s["refilledAfterExhaustion"], "no funding arrived after the pool ran dry"
+        last_zero = max((e["end"] for e in events if e["kind"] == "close" and e["budget"] == 0), default=0)
+        assert any(e["kind"] == "close" and e["budget"] > 0 and e["start"] >= last_zero for e in events), "no interval was paid after the last empty one"
+    print("REWARDS-REPLAY ok " + json.dumps(dict(s, block=block, events=len(events), segments=len(segments), nextStart=got["nextStart"], available=got["available"],
+                                                 totalCredits=got["totalCredits"], payees=len(state["credits"]))))
+
+
 def main():
     p = argparse.ArgumentParser()
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -146,11 +292,19 @@ def main():
     c.add_argument("--initial-funding", type=int, required=True)
     c.add_argument("--extra-funding", type=int, default=0)
     c.add_argument("--block", type=int)
+    r = sub.add_parser("replay")
+    for name in ("rpc", "cast", "pool", "custody", "registry", "election", "policy", "genesis-assignment"):
+        r.add_argument("--" + name, required=True)
+    r.add_argument("--initial-funding", type=int, required=True)
+    r.add_argument("--block", type=int)
+    r.add_argument("--min-paid", type=int)
+    r.add_argument("--require-exhaustion", action="store_true")
+    r.add_argument("--require-refill", action="store_true")
     a = p.parse_args()
     try:
-        check(a)
+        replay_check(a) if a.cmd == "replay" else check(a)
     except AssertionError as e:
-        sys.exit(f"REWARDS-CHECK FAILED: {e}")
+        sys.exit(f"REWARDS-{a.cmd.upper()} FAILED: {e}")
 
 
 if __name__ == "__main__":
