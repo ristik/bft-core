@@ -82,9 +82,9 @@ class ProofOfStake(unittest.TestCase):
         for clash in ('0xabcd','0xABCD','abcd'):
             with self.assertRaises(pos.PosError): pos.merge_alloc({'alloc':{'ABCD':{}}},{clash:{}})
     def test_the_deployment_file_and_profile_flags_follow_the_contracts_deployment(self):
-        d={'networkWord':'0xaa','chainId':31337,'custody':'0xc','custodyCodeHash':'0xch','election':'0xe','electionCodeHash':'0xeh'}
+        d={'networkWord':'0xaa','chainId':31337,'custody':'0xc','custodyCodeHash':'0xch','election':'0xe','electionCodeHash':'0xeh','rewardPool':'0xrp','rewardPoolCodeHash':'0xrph'}
         self.assertEqual(pos.deployment_of(d,{'runtimeHash':'0xrh'}),{'networkWord':'0xaa','chainId':'31337','custody':'0xc','custodyCodeHash':'0xch',
-            'registry':pos.REGISTRY,'registryCodeHash':'0xrh','election':'0xe','electionCodeHash':'0xeh'})
+            'registry':pos.REGISTRY,'registryCodeHash':'0xrh','election':'0xe','electionCodeHash':'0xeh','rewardPool':'0xrp','rewardPoolCodeHash':'0xrph'})
         args=pos.profile_args(d,{'election':'/m.json','hook':'/h.jsonl'})
         self.assertEqual((args[args.index('--records-custody')+1],args[args.index('--election')+1],args[args.index('--elect-caps')+1]),('0xc','0xe','16,1,6'))
         self.assertEqual((args[args.index('--elect-measurement')+1],args[args.index('--hook-measurement')+1]),('/m.json','/h.jsonl'))
@@ -257,6 +257,21 @@ class ProofOfStake(unittest.TestCase):
         d=pos.Genesis.__new__(pos.Genesis);d.deployment={'custody':'0xaa','custodyCodeHash':'0xdead','election':'0xaa','electionCodeHash':'0xabcd'}
         with patch('pos.subprocess.run',return_value=R):
             with self.assertRaisesRegex(pos.PosError,'custody code'): d.alloc_code_hashes(genesis)
+    def test_the_reward_pool_code_and_funding_are_checked_against_the_genesis_state(self):
+        class R: returncode=0;stdout='0xABCD\n';stderr=''
+        dep={'custody':'0xaa','custodyCodeHash':'0xabcd','election':'0xaa','electionCodeHash':'0xabcd','policy':'0xaa','policyCodeHash':'0xabcd',
+             'rewardPool':'0xcc','rewardPoolCodeHash':'0xabcd','rewardFunding':'1000'}
+        def genesis(balance):
+            return {'alloc':{'0xAA':{'code':'0x6001'},'0xCC':{'code':'0x6001','balance':balance}}}
+        d=pos.Genesis.__new__(pos.Genesis);d.deployment=dep
+        with patch('pos.subprocess.run',return_value=R):
+            d.alloc_code_hashes(genesis(hex(1000)))
+            for wrong in (hex(999),hex(1001),'0x0'):
+                with self.assertRaisesRegex(pos.PosError,'recorded funding'): d.alloc_code_hashes(genesis(wrong))
+            d.deployment=dict(dep,rewardPoolCodeHash='0xdead')
+            with self.assertRaisesRegex(pos.PosError,'rewardPool code'): d.alloc_code_hashes(genesis(hex(1000)))
+            d.deployment=dict(dep,policyCodeHash='0xdead')
+            with self.assertRaisesRegex(pos.PosError,'policy code'): d.alloc_code_hashes(genesis(hex(1000)))
 
 class EntityNamespace(unittest.TestCase):
     def cfg(self,n=4):

@@ -25,6 +25,10 @@ P85_DIST_NUM=${P85_DIST_NUM:-1}; P85_DIST_DEN=${P85_DIST_DEN:-2}   # the electio
 P85_CADENCE_SECONDS=${P85_CADENCE_SECONDS:-300}    # ...and this many UC seconds
 P85_REGISTRY=0xff00000000000000000000000000000000000002
 P85_TREASURY=0x00000000000000000000000000000000000000ee
+# T8: the fixed development authority of policy governance, and the reward pool's genesis allocation and rate (explicit; the contracts have no default authority)
+P85_GOVERNANCE_AUTHORITY=${P85_GOVERNANCE_AUTHORITY:-0x00000000000000000000000000000000000000ef}
+P85_REWARD_FUNDING=${P85_REWARD_FUNDING:-10000000000000000000000}
+P85_REWARD_RATE=${P85_REWARD_RATE:-1000000000000000000}
 
 p85_die() { echo "p85: $*" >&2; return 1; }
 
@@ -66,6 +70,7 @@ p85_prepare_genesis() {
   local word="0x$(printf 'unicity.p85.lane.network' | shasum -a 256 | cut -d' ' -f1)"
   p85_root_identity_args test-nodes/trust-base.json || return 1
   ( cd "$P85_CONTRACTS" && env "${P85_ROOT_ARGS[@]}" P85_NETWORK_WORD=$word P85_CHAIN_ID=$chain P85_ROOTS=$P85_REGISTRY P85_TREASURY=$P85_TREASURY \
+      P85_GOVERNANCE_AUTHORITY=$P85_GOVERNANCE_AUTHORITY P85_REWARD_FUNDING=$P85_REWARD_FUNDING P85_REWARD_RATE=$P85_REWARD_RATE \
       P85_V_MAX=${caps[0]} P85_L_MAX=${caps[1]} P85_N_MAX=${caps[2]} P85_CADENCE_ROUNDS=$P85_CADENCE_ROUNDS P85_CADENCE_SECONDS=$P85_CADENCE_SECONDS P85_DIST_NUM=$P85_DIST_NUM P85_DIST_DEN=$P85_DIST_DEN \
       script/p85-genesis.sh "$OLDPWD/$P85_DIR/contracts-genesis.json" "$OLDPWD/$P85_DIR/genesis" ) || return 1
   ( cd "$P85_CONTRACTS" && script/measure-elect.sh "${caps[0]}" "${caps[1]}" "${caps[2]}" ) >"$P85_DIR/elect-measurement.json" || p85_die "the election measurement failed" || return 1
@@ -129,6 +134,7 @@ print(json.dumps({
     "custody": d["custody"], "custodyCodeHash": d["custodyCodeHash"],
     "registry": "0xff00000000000000000000000000000000000002", "registryCodeHash": p["runtimeHash"],
     "election": d["election"], "electionCodeHash": d["electionCodeHash"],
+    "rewardPool": d["rewardPool"], "rewardPoolCodeHash": d["rewardPoolCodeHash"],
 }, indent=1))
 PY
 }
@@ -154,9 +160,22 @@ p85_merge_alloc() {
   local src=$1
   [ -s "$P85_DIR/genesis/alloc.json" ] || return 0
   p85_joiner_prepare || return 1
-  python3 - "$src" "$P85_DIR/genesis/alloc.json" "$(cat "$P85_DIR/joiner/owner.addr")" "$P85_JOINER_FUND_WEI" <<'PY'
-import json, sys
-g = json.load(open(sys.argv[1])); extra = json.load(open(sys.argv[2]))
+  python3 - "$src" "$P85_DIR/genesis/alloc.json" "$(cat "$P85_DIR/joiner/owner.addr")" "$P85_JOINER_FUND_WEI" "$P85_DIR/genesis/deployment.json" "$P85_CAST" <<'PY'
+import json, subprocess, sys
+g = json.load(open(sys.argv[1])); extra = json.load(open(sys.argv[2])); dep = json.load(open(sys.argv[5]))
+# T8: the contracts' genesis state carries the deployed code of every module the deployment records, and the reward pool holds exactly its recorded
+# funding from block 0 (allocated, not promised). Checked before anything is merged.
+def acct(addr):
+    hits = [v for k, v in extra.items() if k.lower().removeprefix("0x") == addr.lower().removeprefix("0x")]
+    if len(hits) != 1: sys.exit(f"no account {addr} in the contracts genesis state")
+    return hits[0]
+for module in ("custody", "election", "policy", "rewardPool"):
+    code = acct(dep[module]).get("code", "0x")
+    if len(code) <= 2: sys.exit(f"no code at the {module} ({dep[module]}) in the contracts genesis state")
+    have = subprocess.run([sys.argv[6], "keccak", code], text=True, capture_output=True, check=True).stdout.strip().lower()
+    if have != dep[module + "CodeHash"].lower(): sys.exit(f"{module} code in the genesis state hashes to {have}, the deployment records {dep[module + 'CodeHash']}")
+if int(acct(dep["rewardPool"]).get("balance", "0x0"), 16) != int(dep["rewardFunding"]):
+    sys.exit(f"the reward pool does not hold its recorded funding {dep['rewardFunding']} in the genesis state")
 extra[sys.argv[3]] = {"balance": hex(int(sys.argv[4]))}
 for addr, acct in extra.items():
     if addr in g["alloc"] or addr.lower() in {k.lower() for k in g["alloc"]}:
