@@ -231,9 +231,9 @@ rm -rf "$SN"; refuses "a leaked secret fails the lane even when the scenarios pa
 # evidence must still be published. The stub writes the same JWT on every run, so $SN holds it.
 wfStep() { awk -v n="name: $2" 'index($0,n){f=1} f&&/run: >-/{r=1;next} r&&NF==0{exit} r{printf "%s ",$0}' "$1"; }
 wfDir() { rm -rf "$T/wf"; mkdir -p "$T/wf"; ln -s "$PWD/scripts" "$T/wf/scripts"; ln -s "$SN" "$T/wf/test-nodes"; }
-smokeSelect=$(wfStep .github/workflows/reth-smoke.yml "Select publishable evidence")
-faultSelect=$(wfStep .github/workflows/reth-fault.yml "Validate and select publishable evidence")
-check "both workflows have a selection step, and upload only its directory" sh -c "[ -n '$smokeSelect' ] && [ -n '$faultSelect' ] && [ \$(grep -c 'path: evidence-upload/' .github/workflows/reth-smoke.yml) -eq 1 ] && [ \$(grep -c 'path: evidence-upload/' .github/workflows/reth-fault.yml) -eq 1 ] && ! grep -q 'path: .*tar.gz' .github/workflows/reth-smoke.yml .github/workflows/reth-fault.yml"
+smokeSelect=$(wfStep .github/workflows/stock-reth-control.yml "Select publishable evidence")
+faultSelect=$(wfStep .github/workflows/stock-reth-fault-control.yml "Validate and select publishable evidence")
+check "both workflows have a selection step, and upload only its directory" sh -c "[ -n '$smokeSelect' ] && [ -n '$faultSelect' ] && [ \$(grep -c 'path: evidence-upload/' .github/workflows/stock-reth-control.yml) -eq 1 ] && [ \$(grep -c 'path: evidence-upload/' .github/workflows/stock-reth-fault-control.yml) -eq 1 ] && ! grep -q 'path: .*tar.gz' .github/workflows/stock-reth-control.yml .github/workflows/stock-reth-fault-control.yml"
 wfScan() { mkdir -p "$T/wf/$(dirname "$2")/.scan-inputs"; cp "$1" "$T/wf/$(dirname "$2")/.scan-inputs/$(basename "$2" .tar.gz).scan"; }
 wfDir; cp "$T/ev/leak.tar.gz" "$T/wf/reth-smoke-evidence.tar.gz"; wfScan "$T/ev/.scan-inputs/leak.scan" reth-smoke-evidence.tar.gz; leakSha=$(rethPinSha256 "$T/wf/reth-smoke-evidence.tar.gz")
 refuses "the smoke workflow's selection rejects the archive with the leaked JWT" "is not publishable" sh -c "cd '$T/wf' && $smokeSelect"
