@@ -367,7 +367,7 @@ class RecordedReplay(unittest.TestCase):
     """A recorded real snapshot (testdata/recorded/*): the reference recomputed offline equals the contract output recorded from the real election on the fork."""
 
     def test_recorded_snapshots_replay(self):
-        dirs = sorted(RECORDED.glob("recorded/raw/*")) if RECORDED.exists() else []
+        dirs = sorted(RECORDED.glob("recorded/raw/*"))
         if not dirs:
             self.skipTest("no recorded snapshot checked in yet")
         for d in dirs:
