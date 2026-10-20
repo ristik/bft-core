@@ -101,10 +101,9 @@ func newEvidenceCmd() *cobra.Command {
 			if !ok {
 				return fmt.Errorf("%w: bad chain id %q", ErrEvidence, chainHex)
 			}
-			rd, err := (posrelayer.RPCReader{Client: client}).Pin(ctx)
-			if err != nil {
-				return err
-			}
+			// reads at the head, not at a block pinned before the first transaction: the submitter reads the case it just created and the settlement cursor after each
+			// transaction (a pinned reader reported a successful submission as "the case does not exist" on the live devnet)
+			rd := evidenceReader(client)
 			s := &rootevidence.Submitter{Reader: rd, Sender: posrelayer.Sender{Client: client, Key: key, ChainID: chain}, Evidence: ev, ChainID: chain, Assignments: ids}
 			var firstErr error
 			for _, p := range col.Pairs() {
@@ -138,6 +137,11 @@ func newEvidenceCmd() *cobra.Command {
 	}
 	root.AddCommand(scan, submit)
 	return root
+}
+
+// evidenceReader reads the execution client's latest state: every transaction the submitter sends changes what its next read must see.
+func evidenceReader(client *rpc.Client) posrelayer.RPCReader {
+	return posrelayer.RPCReader{Client: client}
 }
 
 func parseAddress20(s string) ([20]byte, error) {
