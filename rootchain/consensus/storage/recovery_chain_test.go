@@ -122,6 +122,22 @@ func (v chainVerifier) VerifyIRChangeReq(round, _ uint64, req *rctypes.IRChangeR
 // not listed are unchanged) and processes the QC of it, which commits the previous round.
 func (c *testChain) next(changed ...types.PartitionID) {
 	c.t.Helper()
+	c.process(c.propose(changed, nil))
+}
+
+// process is the arrival of the QC: the store processes it (which commits the parent round) and the next block carries it.
+func (c *testChain) process(qc *rctypes.QuorumCert) {
+	c.t.Helper()
+	_, err := c.store.ProcessQc(qc)
+	require.NoError(c.t, err)
+	c.highQc = qc
+}
+
+// propose adds the next round block (a quorum change request for each of the changed partitions, a T2 timeout request for each of the
+// timed out ones) on the QC processed last, and returns the QC the block gets, which is not processed yet: until it is, the block and its
+// parent are pending.
+func (c *testChain) propose(changed, timedOut []types.PartitionID) *rctypes.QuorumCert {
+	c.t.Helper()
 	parent := c.round
 	c.round++
 	c.counter++
@@ -154,6 +170,9 @@ func (c *testChain) next(changed ...types.PartitionID) {
 		require.NoError(c.t, bcr.Sign(c.nodes[p].signer))
 		payload.Requests = append(payload.Requests, &rctypes.IRChangeReq{Partition: p, CertReason: rctypes.Quorum, Requests: []*certification.BlockCertificationRequest{bcr}})
 	}
+	for _, p := range timedOut {
+		payload.Requests = append(payload.Requests, &rctypes.IRChangeReq{Partition: p, CertReason: rctypes.T2Timeout})
+	}
 	bd := &rctypes.BlockData{Author: "chain", Round: c.round, Epoch: rctypes.GenesisRootEpoch, Timestamp: types.GenesisTime + c.round, Payload: payload, Qc: c.highQc}
 	root, err := c.store.Add(bd, chainVerifier{c.store})
 	require.NoError(c.t, err)
@@ -169,9 +188,7 @@ func (c *testChain) next(changed ...types.PartitionID) {
 			Hash: parentBlock.RootHash, PreviousHash: vh},
 		Signatures: map[string]hex.Bytes{"x": {1}},
 	}
-	_, err = c.store.ProcessQc(qc)
-	require.NoError(c.t, err)
-	c.highQc = qc
+	return qc
 }
 
 func (c *testChain) state() *abdrc.StateMsg {
