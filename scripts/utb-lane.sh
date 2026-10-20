@@ -101,6 +101,7 @@ preflight() {
       if pinned=$(utb_agg_pins_ok "$prov" "$REPO_ROOT" 2>&1); then yes "the aggregator's bft-core ($pinned) is in this checkout's history"; else no "$pinned"; fi
     fi
     check "the binary is a UTB build (its UTB variables are in the binary)" bash -c "strings '$AGG_BIN' | grep -q UTB_GENESIS_ID"
+    check "the binary logs an attachment which adds nothing (aggregator-go#4: 'trust-base update already held'; U2 needs it when the catch-up wins)" bash -c "strings '$AGG_BIN' | grep -q 'trust-base update already held'"
     check "the binary speaks the combined response (CertificationResponseV3 is in the binary)" bash -c "strings '$AGG_BIN' | grep -q 'received CertificationResponseV3'"
   else
     no "set AGG_BIN to the aggregator built by: AGG_COMMIT=<40 hex> $0 --build-aggregator"
