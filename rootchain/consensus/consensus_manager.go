@@ -1347,7 +1347,10 @@ func (x *ConsensusManager) processQC(ctx context.Context, qc *drctypes.QuorumCer
 	// in the "DiemBFT v4" pseudocode the process_certificate_qc first calls
 	// leaderSelector.Update and after that pacemaker.AdvanceRound - we do it the
 	// other way around as otherwise current leader goes out of sync with peers...
-	if err := x.leaderSelector.Update(qc, x.pacemaker.GetCurrentRound(), x.blockStore.Block); err != nil {
+	if err := x.leaderSelector.Update(qc, x.pacemaker.GetCurrentRound(), x.blockStore.Block); errors.Is(err, leader.ErrNotConsecutive) {
+		// a timed-out round precedes the QC: no election, the next leader is the round-robin fallback on every node
+		x.log.DebugContext(ctx, "leader selector not updated", logger.Error(err))
+	} else if err != nil {
 		x.log.ErrorContext(ctx, "failed to update leader selector", logger.Error(err))
 	}
 	return nil
@@ -1840,7 +1843,10 @@ func (x *ConsensusManager) onStateResponse(ctx context.Context, rsp *abdrc.State
 	// in the "DiemBFT v4" pseudocode the process_certificate_qc first calls
 	// leaderSelector.Update and after that pacemaker.AdvanceRound - we do it the
 	// other way around as otherwise current leader goes out of sync with peers...
-	if err = x.leaderSelector.Update(x.blockStore.GetHighQc(), x.pacemaker.GetCurrentRound(), x.blockStore.Block); err != nil {
+	if err = x.leaderSelector.Update(x.blockStore.GetHighQc(), x.pacemaker.GetCurrentRound(), x.blockStore.Block); errors.Is(err, leader.ErrNotConsecutive) {
+		// not a fault: see the live path, the round-robin fallback applies
+		x.log.DebugContext(ctx, "leader selector not updated", logger.Error(err))
+	} else if err != nil {
 		x.log.ErrorContext(ctx, "failed to update leader selector", logger.Error(err))
 		if x.frontier != nil {
 			x.frontier.latchFault()
