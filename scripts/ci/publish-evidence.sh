@@ -58,6 +58,12 @@ case "$kind" in
   overbound)
     grep -q 'P85 recovery lane: all steps PASSED' "$ev/lane.log" 2>/dev/null || { complete=no; why+=("no completion sentinel in lane.log"); }
     grep -q 'election_refused' "$ev/lane.log" 2>/dev/null || { complete=no; why+=("the over-bound refusal step did not run"); } ;;
+  x4shadow)
+    grep -q 'X4 shadow lane: all steps PASSED' "$ev/lane.log" 2>/dev/null || { complete=no; why+=("no completion sentinel in lane.log"); }
+    adapter=$pub/p85/run/shadow/adapter
+    [ "$(jq -r .status "$adapter/report.json" 2>/dev/null)" = PASS ] || { complete=no; why+=("the shadow adapter's report.json is missing or its status is not PASS"); }
+    [ "$(jq -r '.manifest.campaign.intervalSeconds // 0' "$adapter/report.json" 2>/dev/null)" -ge 5400 ] 2>/dev/null || { complete=no; why+=("the report does not declare a 90-minute campaign interval"); }
+    ( cd "$adapter" 2>/dev/null && p_sha256 -c SHA256SUMS >/dev/null ) || { complete=no; why+=("the adapter pack's SHA256SUMS do not verify"); } ;;
   abort)
     grep -q 'H6 Abort rehearsal: Abort before H committed' "$ev/lane.log" 2>/dev/null || { complete=no; why+=("no Abort-before-H completion line in lane.log"); }
     [ -s "$pub/q3/h6-before-h/abort.status" ] && [ -s "$pub/q3/h6-after-h/abort.status" ] || { complete=no; why+=("the Abort evidence files are missing"); } ;;
