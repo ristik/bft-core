@@ -20,13 +20,11 @@ s4_round() { curl -fsS "$(h3_rpc_url "$1")/api/v1/roundInfo" 2>/dev/null | jq -r
 s4_epoch() { curl -fsS "$(h3_rpc_url "$1")/api/v1/roundInfo" 2>/dev/null | jq -r '.epochNumber'; }
 s4_short() { grep -a -m1 -o 'node_id=16\*[A-Za-z0-9]*' "test-nodes/root$1/debug.log" | head -1 | sed 's/node_id=//'; }
 
-# the root that was the leader of round $1+1 (the one a vote of round $1 is sent to), from the roots' own round log; empty if no root logged it
+# the root that was the leader of round $1+1: the one the offender's own genuine vote of round $1 went to. The offender root logs it itself ("next leader" at that round);
+# the LAST such line of its log is taken (an earlier epoch's log can carry the same round number)
 s4_next_leader_root() {
   local r=$1 n line short
-  for n in 1 2 3 4 5; do
-    line=$(grep -a 'round has lasted minimum required duration; next leader' "test-nodes/root$n/debug.log" 2>/dev/null | grep -a " round=$r " | head -1)
-    [ -z "$line" ] || break
-  done
+  line=$(grep -a 'round has lasted minimum required duration; next leader' "test-nodes/root$S4_OFFENDER_ROOT/debug.log" 2>/dev/null | grep -a " round=$r " | tail -1)
   [ -n "$line" ] || return 1
   short=$(echo "$line" | sed -n 's/.*next leader <peer.ID \(16\*[A-Za-z0-9]*\)>.*/\1/p')
   for n in 1 2 3 4 5; do [ "$(s4_short "$n")" = "$short" ] && { echo "$n"; return 0; }; done
