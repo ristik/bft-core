@@ -249,12 +249,17 @@ h3_restart_roots() {
       for _ in $(seq 1 50); do lsof -nP -iTCP:"$(m2_rpc_port "$i")" -sTCP:LISTEN >/dev/null 2>&1 || break; sleep 0.2; done
       m2_archive_root_state "$i" "$epoch" || return 1
     done
-    # a root that bootstraps to a stopped root refuses to start ("failed to bootstrap"): the first root has no bootnode, as at a cold network's genesis, and the others dial it
-    local first; first=$(h3_first_root)
+    # a root that bootstraps to a stopped root refuses to start ("failed to bootstrap"): the first root has no bootnode, as at a cold network's genesis, and once it listens
+    # the others start CONCURRENTLY (m2_start_root waits 2-3 s per root for its listener, so one after the other the roots before the last could form the quorum and run the
+    # switch while the last one is still starting). Any four of five can make a quorum, so the start of the last root is within the same few hundred milliseconds as the others'.
+    local first pids=() rc=0 p; first=$(h3_first_root)
+    m2_start_root "$first" "$epoch" "" || return 1
     for i in $H3_ROOTS; do
-      if [ "$i" = "$first" ]; then boot=; else boot=$(m2_root_addr "$first"); fi
-      m2_start_root "$i" "$epoch" "$boot" || return 1
+      [ "$i" != "$first" ] || continue
+      ( m2_start_root "$i" "$epoch" "$(m2_root_addr "$first")" ) & pids+=($!)
     done
+    for p in "${pids[@]}"; do wait "$p" || rc=1; done
+    [ "$rc" = 0 ] || return 1
     m2_wait_root_epoch "$(h3_first_root)" "$epoch"
     return
   fi
