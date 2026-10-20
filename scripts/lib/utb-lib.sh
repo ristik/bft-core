@@ -232,34 +232,12 @@ utb_step_u3b() {
   # the aggregator logs asynchronously: the history can be served (tip 3) before its catch-up lines reach the file
   for i in $(seq 1 60); do utb_agg_lines_since "$off" | grep -aq '"msg":"trust-base catch-up finished"' && break; sleep 1; done
   utb_agg_lines_since "$off" | jq -c 'select((.msg|startswith("trust-base catch-up")) or .msg=="trust-base gap in certification response" or .msg=="Signed trust-base history loaded" or .msg=="trust-base handshake to the newest held committee" or .msg=="trust-base entries appended from certification response" or .msg=="dropping an invalid trust-base update")' >"$out/catchup/aggregator-repair.jsonl"
-  python3 - "$out/catchup/aggregator-repair.jsonl" "$out/catchup/aggregator-peer-repair.log" <<'PY' || return 1
-import json, sys
-lines = [json.loads(l) for l in open(sys.argv[1]) if l.strip()]
-st = [i for i, l in enumerate(lines) if l["msg"] == "trust-base catch-up started"]
-if not st: raise SystemExit("no catch-up started after the restart")
-# the entries can arrive over two overlapping paths (a catch-up page and a piggybacked certification response): together they cover the missing epochs 2..3
-fin = [i for i, l in enumerate(lines) if l["msg"] == "trust-base catch-up finished" and "error" not in l]
-if not fin: raise SystemExit("no successful catch-up finished")
-pages = [l for l in lines[st[0]:] if l["msg"] == "trust-base catch-up page" and l.get("status") == "OK" and l.get("entries", 0) >= 1]
-if not pages: raise SystemExit("no OK catch-up page with entries from a root after the catch-up started")
-if any(l["msg"] == "dropping an invalid trust-base update" for l in lines): raise SystemExit("the aggregator dropped an invalid trust-base update")
-by_catchup = sum(lines[i].get("added", 0) for i in fin)
-by_response = sum(l.get("added", 0) for l in lines if l["msg"] == "trust-base entries appended from certification response")
-tip = max(lines[i].get("tip", 0) for i in fin)
-if tip < 3: raise SystemExit("the catch-up did not reach epoch 3 (tip %s)" % tip)
-# a catch-up counts every append it makes, including an entry a piggybacked response already added, so the counts overlap: they must cover the missing epochs, and the exact
-# content is checked on the fetched history afterwards (epochs 1..3 from the pin, epoch 2 byte for byte)
-missing = tip - (lines[st[0]]["from"] - 1)
-if by_catchup < 1 or by_catchup + by_response < missing: raise SystemExit("epochs %s..%s were not all added: by catch-up %d, by response %d" % (lines[st[0]]["from"], tip, by_catchup, by_response))
-out = ["peer repair: started from epoch %s, %d OK page(s), peers %s; added by catch-up %d, by certification response %d (the counts may overlap; tip %s)" % (lines[st[0]].get("from"), len(pages), sorted({p["peer"] for p in pages}), by_catchup, by_response, tip)]
-out += [json.dumps(l) for l in lines]
-open(sys.argv[2], "w").write("\n".join(out) + "\n")
-PY
+  python3 -I "$(dirname "${BASH_SOURCE[0]}")/utb-repair-check.py" "$out/catchup/aggregator-repair.jsonl" "$out/catchup/aggregator-peer-repair.log" || return 1
   # the repaired history authenticates from the pin and holds epoch 2 byte for byte as the root attached it; U4 checks the final bundle is these bytes
   utb_ev fetch --url "$(utb_agg_url)" --out "$out/bundle/after-repair.cbor" >/dev/null || return 1
   utb_ev verify --bundle "$out/bundle/after-repair.cbor" --pin "$(utb_pin)" | grep -q '^ok: epochs 1\.\.3, ' || { echo "the repaired history is not epochs 1..3 authenticated from the pin" >&2; return 1; }
   utb_ev extract --bundle "$out/bundle/after-repair.cbor" --epoch 2 --out "$out/entries/repaired-2.cbor" >/dev/null && cmp -s "$out/entries/repaired-2.cbor" "$out/entries/ordinary-handoff.cbor" || { echo "the repaired epoch 2 differs from the entry the root attached" >&2; return 1; }
-  echo "U3b: the aggregator repaired epochs 2..3 from the roots (catch-up page and/or piggybacked response, counts in catchup/aggregator-peer-repair.log); the history is epochs 1..3 from the pin"
+  echo "U3b: a catch-up from the roots raised the aggregator's tip (the line is in catchup/aggregator-peer-repair.log); the history is epochs 1..3 from the pin"
 }
 
 # After the acknowledgement: the post-recovery token (certified under the epoch-3 committee), the client's unknown-epoch gap, the aggregator's second restart.
@@ -524,6 +502,28 @@ utb_selftest() {
   utb_st_no "an aggregator pin that is not in the checkout's history is refused" bash -c "source '$cwd/scripts/lib/utb-lib.sh'; printf 'replace github.com/unicitynetwork/bft-core => github.com/ristik/bft-core v1.1.1-0.20261019192856-000000000000\n' >'$pd/gomod-pins.txt'; utb_agg_pins_ok '$pd' '$cwd'"
   utb_st "the aggregator environment carries the genesis, the pin and its own store" bash -c "cd '$t' && source '$cwd/scripts/lib/utb-lib.sh' && env=\$(utb_agg_env 2) && grep -q 'UTB_GENESIS_FILE=$t/test-nodes/utb-genesis.cbor' <<<\"\$env\" && grep -q 'UTB_GENESIS_ID=0x' <<<\"\$env\" && grep -q 'UTB_ENTRIES_DB=$t/test-nodes/utb-agg2.db' <<<\"\$env\""
   utb_st "the history URL follows the aggregator's port" bash -c "source '$cwd/scripts/lib/utb-lib.sh'; [ \"\$(AGG_PORT=3100 utb_agg_history_url 2)\" = http://127.0.0.1:3101/api/v1/trustbases ]"
+  # the U3b repair judgement: a catch-up from the roots must raise the tip; responses alone, or a catch-up that only re-appends held entries, do not pass
+  local rc="$cwd/scripts/lib/utb-repair-check.py"
+  mkdir -p "$t/rep"
+  { echo "{\"msg\":\"trust-base catch-up started\",\"from\":2}"
+    echo "{\"msg\":\"trust-base catch-up page\",\"from\":2,\"peer\":\"p1\",\"status\":\"OK\",\"entries\":1}"
+    echo "{\"msg\":\"trust-base catch-up finished\",\"added\":1,\"tip\":2}"
+    echo "{\"msg\":\"trust-base catch-up started\",\"from\":3}"
+    echo "{\"msg\":\"trust-base catch-up page\",\"from\":3,\"peer\":\"p1\",\"status\":\"OK\",\"entries\":1}"
+    echo "{\"msg\":\"trust-base entries appended from certification response\",\"added\":1,\"tip\":3}"
+    echo "{\"msg\":\"trust-base catch-up finished\",\"added\":1,\"tip\":3}"; } >"$t/rep/real.jsonl"
+  # responses raise the tip first; the catch-up only re-appends the held entries (its pages are OK and carry entries)
+  { echo "{\"msg\":\"trust-base catch-up started\",\"from\":2}"
+    echo "{\"msg\":\"trust-base entries appended from certification response\",\"added\":1,\"tip\":2}"
+    echo "{\"msg\":\"trust-base entries appended from certification response\",\"added\":1,\"tip\":3}"
+    echo "{\"msg\":\"trust-base catch-up page\",\"from\":2,\"peer\":\"p1\",\"status\":\"OK\",\"entries\":2}"
+    echo "{\"msg\":\"trust-base catch-up finished\",\"added\":2,\"tip\":3}"; } >"$t/rep/responses-only.jsonl"
+  grep -v 'catch-up finished' "$t/rep/real.jsonl" >"$t/rep/no-finish.jsonl"
+  { cat "$t/rep/real.jsonl"; echo "{\"msg\":\"dropping an invalid trust-base update\"}"; } >"$t/rep/dropped.jsonl"
+  utb_st "a repair by a catch-up that raised the tip, with a response overlapping the last entry, is accepted" python3 -I "$rc" "$t/rep/real.jsonl" "$t/rep/out.log"
+  utb_st_no "a repair where only responses raised the tip is refused" python3 -I "$rc" "$t/rep/responses-only.jsonl" "$t/rep/out.log"
+  utb_st_no "a repair with no finished catch-up is refused" python3 -I "$rc" "$t/rep/no-finish.jsonl" "$t/rep/out.log"
+  utb_st_no "a repair with a dropped invalid update is refused" python3 -I "$rc" "$t/rep/dropped.jsonl" "$t/rep/out.log"
   # the root-log report: clean logs pass and report the counts; each refusal string, alone, fails it
   mkdir -p "$t/rl/test-nodes/root0" "$t/rl/test-nodes/root1"
   printf 'ok line\ncompleted recovery\n' >"$t/rl/test-nodes/root0/debug.log"; printf 'ok line\n' >"$t/rl/test-nodes/root1/debug.log"
