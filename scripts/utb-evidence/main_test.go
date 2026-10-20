@@ -5,11 +5,13 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"github.com/unicitynetwork/bft-core/bridgeprofile"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/fxamacker/cbor/v2"
@@ -183,4 +185,62 @@ func TestUCVerifyChecksEachCertificateUnderItsOwnEpoch(t *testing.T) {
 	ef := filepath.Join(dir, "empty.cbor")
 	require.NoError(t, os.WriteFile(ef, empty, 0o644))
 	require.Error(t, run(ef), "a token with no certificate proves nothing")
+}
+
+// Several shards of one aggregator partition (the two-shard lane): a token holds certificates of both, each verifies under its own shard's configuration, and a
+// certificate of a configuration which was not given is refused, whichever order the configurations are listed in. Real two-shard certificates from the bridge
+// profile's aggregator world (one shard tree per certificate).
+func TestUCVerifyTwoShardsOfOnePartition(t *testing.T) {
+	dir := t.TempDir()
+	auth, err := bridgeprofile.NewAuthority("root-1")
+	require.NoError(t, err)
+	tb, err := auth.Genesis(bridgeprofile.DevNetwork, 1, 1)
+	require.NoError(t, err)
+	gen, err := types.Cbor.Marshal(tb)
+	require.NoError(t, err)
+	bundle, err := gettrustbase.EncodeBundle([][]byte{gen})
+	require.NoError(t, err)
+	bundleFile := filepath.Join(dir, "b.cbor")
+	require.NoError(t, os.WriteFile(bundleFile, bundle, 0o644))
+
+	left, right := types.ShardID{}.Split()
+	pdrL := bridgeprofile.FixtureShardPDR(bridgeprofile.DevNetwork, bridgeprofile.DevAggPart, left, bridgeprofile.DevChainID, "agg-0")
+	pdrR := bridgeprofile.FixtureShardPDR(bridgeprofile.DevNetwork, bridgeprofile.DevAggPart, right, bridgeprofile.DevChainID, "agg-1")
+	pdrOther := bridgeprofile.FixtureShardPDR(bridgeprofile.DevNetwork, bridgeprofile.DevAggPart, right, bridgeprofile.DevChainID, "agg-other") // not the one certified under
+	conf := func(name string, pdr *types.PartitionDescriptionRecord) string {
+		enc, err := json.Marshal(pdr)
+		require.NoError(t, err)
+		f := filepath.Join(dir, name)
+		require.NoError(t, os.WriteFile(f, enc, 0o644))
+		return f
+	}
+	confL, confR, confOther := conf("l.json", pdrL), conf("r.json", pdrR), conf("o.json", pdrOther)
+
+	world := &bridgeprofile.AggregatorWorld{PDRs: []*types.PartitionDescriptionRecord{pdrL, pdrR}, Auth: auth, TB: tb}
+	var sl, sr [32]byte
+	sl[0], sr[0] = 0x00, 0x80 // the top bit picks the shard
+	sl[1], sr[1] = 1, 1
+	cert, err := world.Certify([]bridgeprofile.Leaf{{SID: sl, Value: sl}, {SID: sr, Value: sr}}, nil, 1_000, 5)
+	require.NoError(t, err)
+	require.Len(t, cert.Anchors, 2)
+	token := func(name string, ucs ...[]byte) string {
+		var arr []any
+		for _, u := range ucs {
+			arr = append(arr, cbor.RawMessage(u))
+		}
+		enc, err := cbor.Marshal([]any{uint64(2), arr})
+		require.NoError(t, err)
+		f := filepath.Join(dir, name)
+		require.NoError(t, os.WriteFile(f, enc, 0o644))
+		return f
+	}
+	run := func(tok string, confs ...string) error {
+		return cmdUCVerify([]string{"--token", tok, "--bundle", bundleFile, "--shard-conf", strings.Join(confs, ",")})
+	}
+	both := token("both.cbor", cert.Anchors[0].UC, cert.Anchors[1].UC)
+	require.NoError(t, run(both, confL, confR), "a token holding a certificate of each shard verifies against both configurations")
+	require.NoError(t, run(both, confR, confL), "in either order")
+	require.Error(t, run(both, confL), "the right shard's certificate does not verify under the left shard's configuration alone")
+	require.Error(t, run(both, confL, confOther), "nor under a configuration it was not made under")
+	require.NoError(t, run(token("left.cbor", cert.Anchors[0].UC), confL, confR))
 }
