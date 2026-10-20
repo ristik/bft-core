@@ -378,12 +378,12 @@ the removed checkpoint/bridge/NFT/auction/proxy couplings.
 
 | P1 acceptance clause | Evidence |
 |---|---|
-| a reuse matrix identifies every retained dependency and removed test obligation | §3 table (mappings verified in §3.3) + `evmroot/testdata/p1-reuse-matrix.json`; `TestP1_ReuseMatrixValidates`, `TestP1_ReferenceRowsDropAnUpstreamTestAndReHomeIt` (every reference/port row has `removed_upstream_test` + `local_home`); retained deps = 0 live (`TestP1_NoUpstreamSourceIsPorted`), reference-only list named in §7 |
+| a reuse matrix identifies every retained dependency and removed test obligation | §3 table (mappings verified in §3.3) + `evmroot/testdata/p1-reuse-matrix.json`; `TestP1_ReuseMatrixValidates`, `TestP1_ReferenceRowsDropAnUpstreamTestAndReHomeIt` (every reference/port row has `removed_upstream_test` + `local_home`); retained deps = 0 live (`TestP1_LicenceGateDependsOnTheDeclaredDestination`), reference-only list named in §7 |
 | checkpoint / bridge coupling deleted only after identifying accounting duties it carried | §3 rows 2, 3, 7, 9 + §5; `TestP1_EveryRemovalNamesItsAccountingDuty`, `TestP1_CheckpointAndBridgeCouplingIsRemoved` |
 | root-certified lifecycle and assigned-weight rewards have explicit accounting replacements | §5 keys `root-certified-lifecycle`, `assigned-weight-reward`; `TestP1_RootCertifiedLifecycleAndRewardHaveReplacements` (both present, non-trivial, cite `governance.tex`) |
 | neither compiler modernization nor upstream test success is treated as a security audit | §2, §4, §6; `Decision.UpstreamTestSuiteIsNotASecurityAudit` / `CompilerModernizationIsNotAnAudit` / `SecurityAuditOwner`; `TestP1_UpstreamTestSuccessIsNotAnAudit` |
 | minimal self-bond compared with a port | §4 |
-| pinned Polygon source revisions + licences | §2; `sources` in the fixture with 40-hex revisions + SPDX ids; `TestP1_NoUpstreamSourceIsPorted` |
+| pinned Polygon source revisions + licences | §2; `sources` in the fixture with 40-hex revisions + SPDX ids; `TestP1_LicenceGateDependsOnTheDeclaredDestination` |
 | vendor only justified components | §4 and §7 — none justified for vendoring on engineering grounds (not a licence bar); `AnyVendored() == false`, `Decision.Vendored == false` |
 
 ## 9. Reproduce
