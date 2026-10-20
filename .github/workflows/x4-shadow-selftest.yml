@@ -1,0 +1,17 @@
+# X4 #58 step A: the self-tests of the shadow comparison adapter (scripts/shadow): the independent reference replays the xrepo-shared selection and
+# continuity vectors (with a canary that a mutated vector fails), the comparator catches an injected divergence in every compared field, the coverage rule
+# turns gaps and vacuous answers into INCOMPLETE, the fork refuses every unsafe endpoint, and recorded real snapshots replay. Python standard library only.
+name: x4-shadow-selftest
+on:
+  pull_request:
+    paths: ['scripts/shadow/**', 'continuity/testdata/**', '.github/workflows/x4-shadow-selftest.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  selftest:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 scripts/shadow/test_shadow.py -v
