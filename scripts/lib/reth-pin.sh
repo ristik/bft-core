@@ -1,7 +1,7 @@
 #!/bin/bash
 # reth-pin.sh - the pinned execution client and the evidence archive, shared by every lane that
 # packages a real-reth run: scripts/reth-smoke.sh (the smoke lane, locally and in CI) and the
-# real-reth-fault workflow (F1c, #90).
+# stock-reth-fault-control workflow (F1c, #90).
 #
 # DEFINITIONS ONLY. Sourcing this file sets variables and defines functions; it starts nothing,
 # changes no directory and installs no trap, so scripts/reth-smoke-selftest.sh can exercise every

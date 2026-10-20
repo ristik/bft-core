@@ -120,3 +120,22 @@ lock script is `$AGRE_ROOT/briefs/devnet-lock.sh` when present, else the reposit
 ### Failures that were not the check
 
 A run once failed only at `actions/upload-artifact` (five `CreateArtifact` request timeouts, after all 304 tests passed): GitHub infrastructure. It is recorded, not hidden, and the kind is rerun on the final head; no result is accepted from a rerun of a failing check.
+
+## Step 3: pull requests, and the stock-reth controls
+
+### Pull requests
+
+`ci-lane` also runs on `pull_request` (opened, synchronize, reopened, ready for review) to `integration/enshrined-evm` and `main`. Nothing here is path-filtered at the workflow level:
+a filtered-out workflow leaves its checks absent, and a required check that is absent stays pending forever. Instead `plan` classifies the change itself:
+
+- `scripts/ci/classify.py` reads the changed paths (`git diff BASE HEAD`) against `scripts/ci/pr-paths.json` and selects lane jobs. Docs, briefs, markdown and the trees the lanes do not exercise select nothing; `go.mod`, `go.sum`, `Makefile`, this workflow, `scripts/ci/**` (the rules and the pins included) and the shared lane libraries select **every** lane; the other paths select the lanes that depend on them (over-bound, Abort, T6, targeted ureth); any other code selects the umbrella `combined` lane. It errs toward running, never toward skipping, and it is read from the PR's own tree, so a PR that edits the rules selects everything and cannot narrow what it is judged by. Its cases are tested (`classify.py selftest`).
+- `lane-gate` **always reports** and is the check to require. It passes when everything the plan selected succeeded; a not-selected job is skipped and never blocks, and a selected job that failed, was cancelled or never ran (a build it needs failed) fails it (`gate.sh selftest`). A docs-only PR therefore gets a green gate in about a minute with no lane run; a draft PR is reported with a note and runs no live lane until it is ready for review.
+- `selftests` (chain-free, minutes): the classifier, the gate, `check-pins` and the publisher's self-tests, selected when `scripts/ci/**`, a workflow or `scripts/lib/reth-pin.sh` changes.
+- A newer push to a PR cancels its older run (one concurrency group per PR); nothing else cancels.
+- The token is read-only, no job uses a secret, the Actions are pinned by commit, and every job runs on a standard runner. A pull request from a fork runs the same jobs under the same read-only token (GitHub asks for approval before the first run of a new contributor).
+
+Making `lane-gate` a required check of `integration/enshrined-evm` is a branch-protection setting and is the owner's decision; this change does not touch protection.
+
+### The stock-reth controls
+
+`real-reth-smoke` and `real-reth-fault` ran the Go adapter against the **upstream stock reth** release the scripts pin, and their names read like evidence about our execution client. They are renamed `stock-reth-control` and `stock-reth-fault-control` and are manual-dispatch only (no PR trigger); their job names and the evidence artifact names say STOCK and not the Unicity profile. The useful parts are kept: their refusal and collection paths (`scripts/reth-smoke-selftest.sh`, now the first step of the control; `scripts/lib/reth-pin.sh select-upload`, which the lane publisher uses) and the scripts for local runs. What the Unicity profile needs is tested by `ci-lane`: the attested Linux ureth, the combined, over-bound, Abort and T6 lanes, and the targeted `reth-unicity-*` crate tests.

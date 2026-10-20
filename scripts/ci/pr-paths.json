@@ -1,0 +1,35 @@
+{
+  "comment": "The PR path classifier's rules (scripts/ci/classify.py; docs/ci-lanes.md 'Pull requests'; briefs/ci-lane-migration-plan.md sections 1 and 4). A glob has * (no slash) and ** (anything). A change selects a lane when one of its changed paths matches that lane's globs; 'all' globs select every live lane; 'ignore' paths select nothing (docs, briefs, markdown, workflows and trees the lanes do not exercise). The classifier errs toward running a lane, never toward skipping one: a path no rule names is treated as lane code for 'combined' only.",
+  "ignore": [
+    "docs/**", "briefs/**", "**/*.md", "LICENSE", ".gitignore", "CLAUDE.md", "CONTRIBUTING.md",
+    "faucet/**", "deploy/**", "tools/**", "docker-compose.yml", "docker-compose.evm.yml", "scripts/Dockerfile",
+    ".github/workflows/go-ci.yml", ".github/workflows/docker.yml", ".github/workflows/faucet.yml", ".github/workflows/h6-helper.yml",
+    ".github/workflows/testnet-package.yml", ".github/workflows/xrepo.yml", ".github/workflows/q4-gates.yml", ".github/workflows/bridgeprofile.yml",
+    ".github/workflows/x4-shadow-selftest.yml", ".github/workflows/stock-reth-control.yml", ".github/workflows/stock-reth-fault-control.yml",
+    "scripts/reth-baseline.sh", "scripts/reth-by-hand.sh", "scripts/reth-chaos.sh", "scripts/reth-chaos-selftest.sh", "scripts/reth-smoke.sh", "scripts/reth-smoke-selftest.sh",
+    "scripts/reth-payload-retention.sh", "scripts/f6*.sh", "scripts/d1-*", "scripts/d2c-*", "scripts/chaos-evm.sh", "scripts/m1-*", "scripts/check-*.sh",
+    "scripts/x4/**", "scripts/q4-*", "scripts/anyage/**", "scripts/h6/helper/**"
+  ],
+  "all": [
+    "go.mod", "go.sum", "Makefile",
+    ".github/workflows/ci-lane.yml",
+    "scripts/ci/**", "scripts/lib/portable.sh", "scripts/lib/lane-runner-lib.sh", "scripts/reth-paired-devnet.sh", "helper.sh"
+  ],
+  "lanes": {
+    "overbound": [
+      "rootchain/**", "evmassign/**", "posrelayer/**", "cli/**", "engineapi/**", "shardnode/**", "continuity/**", "registry*/**", "b1registry/**",
+      "scripts/p85*", "scripts/lib/p85-lib.sh", "scripts/lib/h3*.sh", "scripts/lib/m2*.sh", "scripts/lib/q3*.sh", "scripts/b1genesis/**", "scripts/h3-pdr/**"
+    ],
+    "abort": [
+      "rootchain/**", "evmroot/**", "handoff*/**", "q3*/**", "cli/**", "shardnode/**",
+      "scripts/h6/**", "scripts/lib/h6*.sh", "scripts/lib/h3*.sh", "scripts/lib/m2*.sh", "scripts/lib/q3*.sh", "scripts/m2*.sh", "scripts/h3*"
+    ],
+    "t6": [
+      "evmassign/**", "signingauthority/**", "rootchain/**", "b1state/**", "b1ref/**", "cli/**", "evmroot/**", "engineapi/**", "mintproof/**",
+      "scripts/t6*", "scripts/t6/**", "scripts/lib/h3*.sh", "scripts/lib/m2*.sh", "scripts/f7-*", "scripts/b1genesis/**", "scripts/evmtx/**"
+    ],
+    "ureth-targeted": [
+      "b1ref/**", "b1state/**", "engineapi/**", "parentwitness/**", "scripts/b1genesis/**", "scripts/evmtx/**"
+    ]
+  }
+}
