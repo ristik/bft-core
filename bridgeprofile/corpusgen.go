@@ -1191,6 +1191,51 @@ func (g *gen) lock() {
 		}
 		back(c.id, c.desc, remint(func(lp *LockProof) { lp.TrustBaseID = ti.ID() }), c.base, "dev")
 	}
+	// Several faults get one verdict in every implementation: the seal epoch first, then the
+	// configuration (the PDR), then the certificate (protocol/trust-base.md).
+	ucMut := func(raw []byte, f func(uc *types.UnicityCertificate)) []byte {
+		var uc types.UnicityCertificate
+		g.must(types.Cbor.Unmarshal(raw, &uc))
+		f(&uc)
+		b, err := types.Cbor.Marshal(&uc)
+		g.must(err)
+		return b
+	}
+	if p := certifiedIn("next-epoch", d.Auth, NextEpochStart+5); p != nil {
+		back("backing-two-faults-epoch-and-root", "sealed in epoch 2, which the installed history does not hold, with a false seal root: the epoch decides (retryable)",
+			remint(func(lp *LockProof) {
+				*lp = *p
+				lp.UC = ucMut(p.UC, func(uc *types.UnicityCertificate) { uc.UnicitySeal.Hash[0] ^= 1 })
+			}), "pinned", "dev")
+	}
+	back("backing-two-faults-pdr-and-signature", "a configuration that is not the certificate's and a broken seal signature: the configuration decides",
+		remint(func(lp *LockProof) {
+			lp.PDR = flip(lp.PDR, len(lp.PDR)-2)
+			lp.UC = ucMut(lp.UC, func(uc *types.UnicityCertificate) {
+				for k := range uc.UnicitySeal.Signatures {
+					uc.UnicitySeal.Signatures[k] = flip(uc.UnicitySeal.Signatures[k], 3)
+				}
+			})
+		}), "pinned", "dev")
+	// The strict seal rule: a full quorum plus one signature of a non-member is refused.
+	if ti, err := g.fs.trustInput("committee-4"); err == nil {
+		com, err := NewCommittee("quorum-4", 4)
+		g.must(err)
+		if p, err := d.World.Certified(f, com, d.EVMPDR, ti, DevRootRound, 5, 9); err == nil {
+			back("backing-quorum-plus-non-member", "all four members sign and a non-member adds a signature: the seal fails",
+				remint(func(lp *LockProof) {
+					*lp = *p
+					lp.UC = ucMut(p.UC, func(uc *types.UnicityCertificate) {
+						ids := make([]string, 0, len(uc.UnicitySeal.Signatures))
+						for id := range uc.UnicitySeal.Signatures {
+							ids = append(ids, id)
+						}
+						sort.Strings(ids) // deterministic: a copy of the first member's signature
+						uc.UnicitySeal.Signatures["16Uiu2HAmNonMember"] = bytes.Clone(uc.UnicitySeal.Signatures[ids[0]])
+					})
+				}), "committee-4", "dev")
+		}
+	}
 	// J mutation after certification.
 	hm := *h
 	hm.Mint.Justification = flip(h.Mint.Justification, len(h.Mint.Justification)-3)
