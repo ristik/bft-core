@@ -714,6 +714,12 @@ p85_run_lane() {
       P85_STEPS="p85_baseline anyage_step_setup utb_step_u1 p85_joiner_nodes p85_joiner_onboard p85_election_reserved p85_proofs anyage_step_l1b utb_step_s1 p85_handoff utb_step_s2 p85_install_activation utb_step_u2 anyage_step_frozen utb_step_u3a p85_j_stalls p85_recovery p85_resolved utb_step_u3b anyage_step_l2 utb_step_u4 utb_step_u4b anyage_step_l1c utb_step_u5 p85_restarts p85_epoch_switches utb_step_final"
     fi
   fi
+  if [ "${S4_LANE:-0}" = 1 ]; then
+    # S4 (#57, scripts/lib/s4-lib.sh): the offence is delivered while epoch 2 is live, collected and submitted after the recovery has evicted the joiner
+    source scripts/lib/s4-lib.sh
+    P85_STEPS=${P85_STEPS/ p85_j_stalls/ s4_equivocate p85_j_stalls}
+    P85_STEPS=${P85_STEPS/ p85_resolved/ p85_resolved s4_collect_after_rotation s4_submit_settle s4_check}
+  fi
   [ "${P85_MODE:-}" != overbound ] || { P85_JOINER_UNITS=3; P85_STEPS="p85_baseline p85_joiner_nodes p85_joiner_onboard p85_election_refused"; }
   for s in $P85_STEPS; do
     p85_step "$s" "$s"

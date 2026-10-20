@@ -144,15 +144,15 @@ def cmd_journals(a):
 
 LOT_SIG = "lots(uint256)(uint64,uint64,uint128,uint128,uint128,uint8,uint16,uint32,uint64,uint64,uint64,uint64,uint64)"
 LOT_FIELDS = ["id", "generation", "initial", "remaining", "penalized", "category", "capBps", "refCount", "holdRetirement", "timeFloor", "holdUntil", "evidenceUntil", "timeUntil"]
-POLICY_SIG = "policyTerms(bytes32)((uint16,uint16,uint16,uint128,uint64,uint64,uint64,uint64,uint64,uint64))"
+POLICY_SIG = "policyTerms(bytes32)(uint16,uint16,uint16,uint128,uint64,uint64,uint64,uint64,uint64,uint64)"
 POLICY_FIELDS = ["penaltyBps", "lifetimeCapBps", "bountyBps", "bountyCap", "evidenceWindow", "suffixEvidenceWindow", "holdNormal", "holdSuffix", "holdRetirement", "timeFloor"]
 RELEASE_SIG = "releaseState(uint256)(bool,uint32,bool,uint64,uint64,uint64,uint32)"
 RELEASE_FIELDS = ["released", "references", "retirementImported", "roundUntil", "evidenceUntil", "timeUntil", "holds"]
 
 
 def tuple_of(v, fields):
-    if len(v) == 1 and isinstance(v[0], list):
-        v = v[0]
+    if len(v) != len(fields):
+        raise RuntimeError("expected %d values, got %d: %r" % (len(fields), len(v), v))
     return {f: (x if isinstance(x, bool) else num(x)) for f, x in zip(fields, v)}
 
 
@@ -184,10 +184,9 @@ def cmd_snapshot(a):
     if a.offence:
         snap["offenceSeen"] = c(a.evidence, "offenceSeen(bytes32)(bool)", a.offence)[0] is True
     if a.case:
-        info = c(a.evidence, "caseInfo(bytes32)((bytes32,bytes32,uint64,address,uint256,uint256,uint32,uint32))", a.case)
-        snap["case"] = tuple_of(info, ["offenceID", "exposureID", "id", "reporter", "budget", "debited", "cursor", "lotCount"])
-        snap["case"]["offenceID"], snap["case"]["exposureID"] = info[0][0] if isinstance(info[0], list) else info[0], a.exposure
-        snap["case"]["reporter"] = (info[0][3] if isinstance(info[0], list) else info[3])
+        info = c(a.evidence, "caseInfo(bytes32)(bytes32,bytes32,uint64,address,uint256,uint256,uint32,uint32)", a.case)
+        snap["case"] = {"offenceID": info[0], "exposureID": info[1], "id": num(info[2]), "reporter": info[3], "budget": num(info[4]), "debited": num(info[5]),
+                        "cursor": num(info[6]), "lotCount": num(info[7])}
         snap["caseDebited"] = num(c(a.custody, "caseDebited(bytes32)(uint256)", a.case)[0])
     json.dump(snap, open(a.out, "w"), indent=2)
     print("snapshot at block %d: %d exposure lots, %d other lots" % (block, len(lots_ids), len(other)))
@@ -256,6 +255,27 @@ def cmd_effects(a):
     ok("honest lots %s unchanged across the whole case" % ",".join(str(x) for x in before["otherLots"]))
 
 
+def cmd_resolve(a):
+    key = bytes.fromhex(h(a.key))
+    want = h(run("keccak", "0x" + key.hex()).strip())
+    for aid in a.assignment:
+        asg = call(a.rpc, a.custody, "assignments(bytes32)(uint8,bytes32,uint64,uint64,uint64,uint64,bool,bool,uint64,bool,uint64,uint64,bytes32,bytes32,bytes32,uint32)", aid)
+        if num(asg[2]) != a.epoch:
+            continue
+        for e in call(a.rpc, a.custody, "assignmentExposures(bytes32)(bytes32[])", aid)[0]:
+            x = call(a.rpc, a.custody, "exposures(bytes32)(bytes32,uint64,uint64,uint64,uint64,bytes32,bytes32,address,bool,uint32)", e)
+            if h(x[5]) == want:
+                lots = [num(v) for v in call(a.rpc, a.custody, "exposureLots(bytes32)(uint256[])", e)[0]]
+                others = []
+                for e2 in call(a.rpc, a.custody, "assignmentExposures(bytes32)(bytes32[])", aid)[0]:
+                    if e2 != e:
+                        others += [num(v) for v in call(a.rpc, a.custody, "exposureLots(bytes32)(uint256[])", e2)[0]]
+                json.dump({"assignment": aid, "exposure": e, "entity": num(x[1]), "lots": lots, "otherLots": others, "firstRound": num(asg[5]), "rootEpoch": num(asg[2])}, open(a.out, "w"), indent=2)
+                ok("the offender's exposure %s (entity %d, lots %s) is in assignment %s, root epoch %d" % (e[:12], num(x[1]), ",".join(map(str, lots)), aid[:12], a.epoch))
+                return
+    fail("no exposure of the offender's key among the candidate assignments for root epoch %d" % a.epoch)
+
+
 # ---- calldata / refusal -------------------------------------------------------------------------------------------------------------------------------
 
 def cmd_calldata(a):
@@ -306,6 +326,10 @@ def main():
     e = sub.add_parser("effects")
     e.add_argument("--before", required=True); e.add_argument("--admitted", required=True); e.add_argument("--settled", required=True)
     e.set_defaults(fn=cmd_effects)
+    rs = sub.add_parser("resolve")
+    rs.add_argument("--rpc", required=True); rs.add_argument("--custody", required=True); rs.add_argument("--key", required=True)
+    rs.add_argument("--epoch", type=int, required=True); rs.add_argument("--assignment", action="append", required=True); rs.add_argument("--out", required=True)
+    rs.set_defaults(fn=cmd_resolve)
     c = sub.add_parser("calldata")
     c.add_argument("--rpc", required=True); c.add_argument("--tx", required=True); c.add_argument("--statements", required=True)
     c.set_defaults(fn=cmd_calldata)

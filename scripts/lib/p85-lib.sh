@@ -171,6 +171,8 @@ PY
 # control executor with the election pinned (--q3-lane is added by the caller), and the genesis committee's records as K. --pos-evm-rpc is required by an election-pinned chain.
 p85_root_flags() {
   echo --pos-deployment "$P85_DIR/pos-deployment.json" --pos-genesis-identities "$P85_DIR/genesis-identities.json" --pos-evm-rpc "$2"
+  # S4: every root keeps an observer journal (S3, docs/root-evidence.md)
+  [ "${S4_LANE:-0}" != 1 ] || echo --evidence-journal "test-nodes/root$1/evidence.db"
 }
 
 p85_selftest() {

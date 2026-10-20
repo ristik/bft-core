@@ -7,9 +7,11 @@
 #   s4_collect_after_rotation   after the recovery to K (the joiner evicted): stop each observer root in turn, copy its journal, restart it; scan each copy alone and both together
 #   s4_submit_settle            a third party, holding a fresh funded account and no root or owner key, submits the pair through the real Evidence contract and settles it; the
 #                               submitter is killed once between admission and settlement and rerun
-#   s4_assert                   the named assertions on the journals, the calldata and the certified EVM effects (scripts/s4/s4_assert.py)
+#   s4_check                    the named assertions on the journals, the calldata and the certified EVM effects (scripts/s4/s4_assert.py)
 
 S4_DIR=${S4_DIR:-test-nodes/p85/s4}
+# the reporter's throw-away key lives outside the archived directories under a name the lane's state copy excludes (*.cred)
+S4_KEY=${S4_KEY:-test-nodes/s4-reporter/reporter.cred}
 S4_OFFENDER_ROOT=${S4_OFFENDER_ROOT:-5}   # the joiner's root
 
 s4_pass() { printf 'PASS: s4: %s\n' "$1"; }
@@ -99,6 +101,141 @@ s4_collect_after_rotation() {
   build/ubft evidence scan --journal "$d/journal-root$a.db" >"$d/scan-root$a.json" || return 1
   build/ubft evidence scan --journal "$d/journal-root$b.db" >"$d/scan-root$b.json" || return 1
   build/ubft evidence scan --journal "$d/journal-root$a.db" --journal "$d/journal-root$b.db" >"$d/scan-both.json" || return 1
-  python3 scripts/s4/s4_assert.py journals --delivery "$d/delivery.json" --statements "$d/votes/statements.json" --scan-a "$d/scan-root$a.json" --scan-b "$d/scan-root$b.json" \
+  s4_py journals --delivery "$d/delivery.json" --statements "$d/votes/statements.json" --scan-a "$d/scan-root$a.json" --scan-b "$d/scan-root$b.json" \
     --scan-both "$d/scan-both.json" --stats "$d/observer-stats-root$a.txt" --stats "$d/observer-stats-root$b.txt" --offender-key "$(jq -r .sigKey.publicKey "test-nodes/root$S4_OFFENDER_ROOT/node-info.json" 2>/dev/null || true)" || return 1
 }
+
+s4_json_addr() { jq -r ".$1" "$P85_DEPLOY"; }
+s4_evidence() { s4_cast call --rpc-url "$(p85_eth)" "$(p85_custody)" 'evidence()(address)' | awk '{print $1}'; }
+s4_py() { python3 scripts/s4/s4_assert.py "$@"; }
+
+# the candidate assignments the offence's exposure is resolved among: the primary J's (the election result the lane opened) and the genesis one
+s4_assignments() {
+  local r a_j a_g
+  r=$(cat "$H3_DIR/result-id.txt")
+  a_j=$(p85_call "$(p85_election)" 'result(bytes32)' "$r" | p85_dec result | jq -r .assignmentID) || return 1
+  a_g=$(grep -o '0x[0-9a-fA-F]\{64\}' "$P85_DIR/genesis-assignment.txt" | head -1)
+  echo "$a_j $a_g"
+}
+
+# a fresh reporter: a new key, funded by the lane's funded account, which is neither a root key nor an owner key of any entity (the owner key only pays)
+s4_reporter() {
+  local d=$S4_DIR k
+  if [ ! -s "$S4_KEY" ]; then
+    mkdir -p "$(dirname "$S4_KEY")"
+    k=$(s4_cast wallet new --json | jq -r '.[0].private_key') || return 1
+    ( umask 077; printf '%s\n' "$k" >"$S4_KEY" )
+    s4_cast wallet address --private-key "$k" >"$d/reporter.addr" || return 1
+    s4_cast send --rpc-url "$(p85_eth)" --private-key "$(cat "$(p85_sender_key)")" --value 1ether "$(cat "$d/reporter.addr")" >"$d/reporter-funding.txt" || return 1
+  fi
+}
+
+# a transaction in the EVM chain every few seconds while a command runs (the blocks of the lane's chain come from transactions)
+s4_with_traffic() {
+  local pid
+  "$@" & pid=$!
+  while kill -0 "$pid" 2>/dev/null; do p85_paid 1 >/dev/null 2>&1 || true; sleep 2; done
+  wait "$pid"
+}
+
+s4_snapshot() { # tag [case]
+  s4_py snapshot --rpc "$(p85_eth)" --custody "$(p85_custody)" --evidence "$EV" --exposure "$EXPOSURE" --reporter "$(cat "$S4_DIR/reporter.addr")" \
+    $(for l in $OTHER_LOTS; do printf -- '--other-lot %s ' "$l"; done) ${OFFENCE:+--offence $OFFENCE} ${CASE:+--case $CASE} --out "$S4_DIR/snapshot-$1.json"
+}
+
+s4_submit_settle() {
+  local d=$S4_DIR EV a ids=() pid out n both key
+  mkdir -p "$d"
+  EV=$(s4_evidence) || return 1
+  read -r -a ids <<<"$(s4_assignments)" || return 1
+  key=$(jq -r '.Pairs[0].Key' "$d/scan-both.json")
+  s4_py resolve --rpc "$(p85_eth)" --custody "$(p85_custody)" --key "$key" --epoch 2 $(for a in "${ids[@]}"; do printf -- '--assignment %s ' "$a"; done) --out "$d/resolved.json" || return 1
+  EXPOSURE=$(jq -r .exposure "$d/resolved.json"); OTHER_LOTS=$(jq -r '.otherLots[]' "$d/resolved.json" | head -3 | tr '\n' ' ')
+  jq -e '.lots|length>=1' "$d/resolved.json" >/dev/null || return 1
+  a=$(jq -r .assignment "$d/resolved.json")
+  s4_reporter || return 1
+  CASE=; OFFENCE=; s4_snapshot before || return 1
+  # the control calls, from the real pair (they are eth_calls: nothing is sent): reordered/altered payloads and the identical pair are refused before admission
+  s4_tool calldata --journal "$d/journal-root$(jq -r .halfA.root "$d/delivery.json").db" --journal "$d/journal-root$(jq -r .halfB.root "$d/delivery.json").db" \
+    --network-word "$(s4_cast call --rpc-url "$(p85_eth)" "$EV" 'network()(bytes32)' 2>/dev/null | awk '{print $1}')" --root-network "$(jq -r .network "$H3_DIR/candidate-config-2.json")" \
+    --genesis "$(jq -r .genesis "$H3_DIR/candidate-config-2.json")" --exposure "$EXPOSURE" --out "$d/calldata" || return 1
+  local rep; rep=$(cat "$d/reporter.addr")
+  s4_py refusal --rpc "$(p85_eth)" --to "$EV" --sender "$rep" --data "$d/calldata/identical.hex" --error 'IdenticalStatements()' || return 1
+  s4_py refusal --rpc "$(p85_eth)" --to "$EV" --sender "$rep" --data "$d/calldata/altered.hex" --error 'BadSignature()' || return 1
+  s4_py refusal --rpc "$(p85_eth)" --to "$EV" --sender "$rep" --data "$d/calldata/sealstripped.hex" --error 'SealSignatureMissing()' || return 1
+  # the real submission; the submitter is killed once it has printed the admitted case, and rerun: it must resume from the on-chain cursor
+  out=$d/submit-1.txt
+  s4_with_traffic s4_submit_once "$out" "$EV" "${ids[@]}" || true
+  CASE=$(sed -n 's/.*case=\([0-9a-f]\{64\}\).*/0x\1/p' "$out" | head -1)
+  [ -n "$CASE" ] || { echo "the submitter admitted no case: $(cat "$out")" >&2; return 1; }
+  s4_pass "the submitter was interrupted after admission (case $CASE) and its output kept ($out)"
+  OFFENCE=$(jq -r .offenceID <<<"$(s4_cast call --json --rpc-url "$(p85_eth)" "$EV" 'caseInfo(bytes32)(bytes32,bytes32,uint64,address,uint256,uint256,uint32,uint32)' "$CASE")" 2>/dev/null)
+  s4_snapshot admitted || return 1
+  out=$d/submit-2.txt
+  s4_with_traffic s4_submit_once "$out" "$EV" "${ids[@]}" --wait || return 1
+  grep -q 'settled in' "$out" || { echo "the second submitter run did not settle: $(cat "$out")" >&2; return 1; }
+  s4_snapshot settled || return 1
+}
+
+# one submitter process. The first run has no --settle and is stopped as soon as it has printed the case line (the submitter dies after admission: with the lane's
+# single-lot exposure a settling run would finish before it could be interrupted); the second run (--wait) submits again and settles from the on-chain cursor
+s4_submit_once() {
+  local out=$1 ev=$2; shift 2
+  local ids=() wait=0 f pid settle=()
+  for f in "$@"; do [ "$f" = --wait ] && { wait=1; settle=(--settle); } || ids+=(--assignment "$f"); done
+  local d=$S4_DIR
+  build/ubft evidence submit --journal "$d/journal-root$(jq -r .halfA.root "$d/delivery.json").db" --journal "$d/journal-root$(jq -r .halfB.root "$d/delivery.json").db" \
+    --eth-rpc "$(p85_eth)" --evidence "$ev" "${ids[@]}" --sender-key "$S4_KEY" ${settle[@]+"${settle[@]}"} >"$out" 2>&1 &
+  pid=$!
+  if [ "$wait" = 0 ]; then
+    for f in $(seq 1 300); do grep -q 'case=' "$out" 2>/dev/null && break; kill -0 "$pid" 2>/dev/null || break; sleep 0.1; done
+    kill -KILL "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
+    return 0
+  fi
+  wait "$pid"
+}
+
+s4_assert_effects() {
+  local d=$S4_DIR EV rep tx bal0 bal1 bounty
+  EV=$(s4_evidence) || return 1; rep=$(cat "$d/reporter.addr")
+  tx=$(sed -n 's/.* tx=\(0x[0-9a-f]\{64\}\).*/\1/p' "$d/submit-1.txt" | head -1)
+  [ -n "$tx" ] || { echo "no transaction hash in the first submit output" >&2; return 1; }
+  s4_cast receipt --rpc-url "$(p85_eth)" --json "$tx" >"$d/receipt-submit.json" || return 1
+  jq -e '.status == "0x1" or .status == 1 or .status == "1 (success)"' "$d/receipt-submit.json" >/dev/null || { echo "the submitting transaction failed" >&2; return 1; }
+  s4_pass "inclusion: the evidence transaction $tx is in block $(jq -r .blockNumber "$d/receipt-submit.json") with status success"
+  s4_py calldata --rpc "$(p85_eth)" --tx "$tx" --statements "$d/votes/statements.json" || return 1
+  s4_py effects --before "$d/snapshot-before.json" --admitted "$d/snapshot-admitted.json" --settled "$d/snapshot-settled.json" || return 1
+  # negatives after admission: the same pair again, and the pair the other way round, are the same offence; the settled case takes no second debit
+  s4_py refusal --rpc "$(p85_eth)" --to "$EV" --sender "$rep" --data "$d/calldata/canonical.hex" --error 'DuplicateOffence()' || return 1
+  s4_py refusal --rpc "$(p85_eth)" --to "$EV" --sender "$rep" --data "$d/calldata/reordered.hex" --error 'DuplicateOffence()' || return 1
+  s4_with_traffic s4_submit_once "$d/submit-3.txt" "$EV" $(s4_assignments) --wait || return 1
+  grep -q 'AlreadyAdmitted' "$d/submit-3.txt" || { echo "the repeated submission did not report AlreadyAdmitted: $(cat "$d/submit-3.txt")" >&2; return 1; }
+  CASE=$(sed -n 's/.*case=\([0-9a-f]\{64\}\).*/0x\1/p' "$d/submit-1.txt" | head -1)
+  OFFENCE=$(jq -r .case.offenceID "$d/snapshot-settled.json"); EXPOSURE=$(jq -r .exposure "$d/resolved.json"); OTHER_LOTS=$(jq -r '.otherLots[]' "$d/resolved.json" | head -3 | tr '\n' ' ')
+  s4_snapshot final || return 1
+  cmp -s <(jq -S 'del(.block)' "$d/snapshot-settled.json") <(jq -S 'del(.block)' "$d/snapshot-final.json") || { echo "state moved after the repeated submission" >&2; return 1; }
+  s4_pass "negatives: duplicate resubmission (submitter AlreadyAdmitted; eth_call DuplicateOffence for the pair and the reordered pair) takes no second debit, hold or credit (state identical)"
+  # the unrelated path: the reporter claims the bounty; the unrelated lots stayed as they were (asserted in the effects)
+  bounty=$(jq -r '.creditReporter' "$d/snapshot-final.json")
+  bal0=$(s4_cast balance --rpc-url "$(p85_eth)" "$rep")
+  s4_cast send --rpc-url "$(p85_eth)" --private-key "$(cat "$S4_KEY")" "$(p85_custody)" 'claim(uint256,address)' "$bounty" "$rep" >"$d/claim.txt" || return 1
+  bal1=$(s4_cast balance --rpc-url "$(p85_eth)" "$rep")
+  python3 - "$bal0" "$bal1" "$bounty" "$d/claim.txt" <<'PY' || return 1
+import re, sys
+b0, b1, bounty = int(sys.argv[1].split()[0]), int(sys.argv[2].split()[0]), int(sys.argv[3])
+gas = 0
+m = re.search(r"gasUsed\s+(\d+)", open(sys.argv[4]).read()); p = re.search(r"effectiveGasPrice\s+(\d+)", open(sys.argv[4]).read())
+if m and p: gas = int(m.group(1)) * int(p.group(1))
+if b1 - b0 + gas != bounty: sys.exit("FAIL: s4: the reporter's balance moved by %d (+ gas %d), the bounty is %d" % (b1 - b0, gas, bounty))
+print("PASS: s4: the reporter claimed exactly the bounty %d (balance +%d, gas %d)" % (bounty, b1 - b0, gas))
+PY
+}
+
+# the archive of the exercise: public artifacts only (the harness' statements hold signatures, never a key; the journals hold signed votes)
+s4_archive() {
+  local d=$S4_DIR
+  ( cd "$d" && rm -f SHA256SUMS && find . -type f ! -name SHA256SUMS | LC_ALL=C sort | xargs shasum -a 256 >SHA256SUMS )
+  s4_pass "archive: $(wc -l <"$d/SHA256SUMS" | tr -d ' ') files with SHA256SUMS in $d "
+}
+
+s4_check() { s4_assert_effects && s4_archive && rm -f "$S4_KEY"; }
