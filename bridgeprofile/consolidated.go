@@ -5,7 +5,6 @@ import (
 	gocrypto "crypto"
 	"fmt"
 	"sort"
-	"strconv"
 
 	"github.com/unicitynetwork/bft-go-base/types"
 )
@@ -200,18 +199,8 @@ func (g *gen) consolidated() {
 			Aux: map[string]string{"operation": "return", "claims": claims}})
 	}
 	gate := func(id, desc string, env []byte) {
-		gt, err := GateOf(f.Cfg, OpReturn, env, 1<<62)
-		g.must(err)
-		if err != nil {
-			return
-		}
-		for _, c := range []struct {
-			suffix string
-			budget uint64
-		}{{"-exact", gt.Total()}, {"-minus-one", gt.Total() - 1}} {
-			g.add(Case{ID: id + c.suffix, Family: "proof", Op: "gate", Cfg: "dev", Description: desc + c.suffix[1:] + " budget",
-				Input: hx(env), Aux: map[string]string{"operation": "return", "budget": strconv.FormatUint(c.budget, 10)}})
-		}
+		g.add(Case{ID: id, Family: "proof", Op: "gate", Cfg: "dev", Description: desc + " estimate", Input: hx(env),
+			Aux: map[string]string{"operation": "return"}})
 	}
 	one := func(int, Leaf) ShardRound { return ShardRound{BaseTime + 1000, 100} }
 	for _, n := range []int{4, 16} {
@@ -247,7 +236,7 @@ func (g *gen) consolidated() {
 			desc := fmt.Sprintf("%d leaves over %d shards consolidated under one seal of a %d-member committee: %d anchors", len(res.Leaves), m, n, m)
 			eb := envOf(h, cl.CertifiedLeaves, nil)
 			compose("compose-"+id, desc, eb, claimsOf(cl.Anchors...))
-			gate("gate-"+id, desc+", gate at its exact", eb)
+			gate("gate-"+id, desc+", gas", eb)
 			if n != 4 || m != 4 {
 				continue
 			}
@@ -265,7 +254,7 @@ func (g *gen) consolidated() {
 			}
 			mb := envOf(h, mixed.CertifiedLeaves, nil)
 			compose("compose-consolidated-mixed", "a consolidated group of four shards plus the last leaf under a later seal: five anchors, two seals", mb, claimsOf(mixed.Anchors...))
-			gate("gate-consolidated-mixed", "the mixed consolidated bundle, gate at its exact", mb)
+			gate("gate-consolidated-mixed", "the mixed consolidated bundle, gas", mb)
 			// a derived certificate whose shard-tree path (another shard's leaf hash) was altered: B1 refuses it as any bad UC
 			bad := envOf(h, cl.CertifiedLeaves, func(e *Envelope) { e.Anchors[1].UC = ucWithAlteredShardSibling(g, e.Anchors[1].UC) })
 			others := append(append([]Anchor{}, cl.Anchors[:1]...), cl.Anchors[2:]...)

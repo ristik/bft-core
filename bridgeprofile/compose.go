@@ -53,7 +53,7 @@ func Compose(cfg *Cfg, op uint8, envelope []byte, b1 B1) (*Result, error) {
 	if err != nil {
 		return nil, err
 	}
-	if _, err := computeGate(cfg.Bytes(), len(envelope), KernelRequestBytes(len(cfg.Bytes()), len(env.History)), env, TxGasBudget); err != nil {
+	if _, err := computeGate(cfg.Bytes(), len(envelope), KernelRequestBytes(len(cfg.Bytes()), len(env.History)), env); err != nil {
 		return nil, err
 	}
 	times := make([]uint64, len(env.Anchors))

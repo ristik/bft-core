@@ -66,8 +66,7 @@ func VerifyLockProof(p *LockProof, cfg *Cfg, n uint64, want [32]byte, tr *TrustI
 	if tr.Network() != types.NetworkID(cfg.Network) {
 		return ErrSealNetwork
 	}
-	var steps uint64
-	if err := scanCertificate(p.UC, &steps); err != nil {
+	if err := scanCertificate(p.UC); err != nil {
 		return fmt.Errorf("%w: %w", ErrLockUC, err)
 	}
 	var uc types.UnicityCertificate

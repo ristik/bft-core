@@ -1,29 +1,22 @@
 package bridgeprofile
 
-// The profile-v3 bounds are named parameters, defined only here and mirrored by
-// profile-v3.json limits. They bound the parsers; the 7,000,000 ordinary-capacity gate (gas.go)
-// admits or refuses each bundle (after the repricing of owner-decisions section 22 realistic bundles pass at eight anchors, the maximum envelope no longer fits); a later
-// profile version raises them together with the budget.
-//
-// DEV-DEFAULT safety ceilings of design section "Plug-in verification" and
-// "B2 projection". They are test ceilings, not a claim that the maximum fits a
-// block. Limits are intersected, never additive entitlements.
+// BridgeResources: the one resource policy of the direct path (owner section 36, briefs/b7-direct-uncapped-design.md section 1),
+// defined only here and mirrored by the semantic profile's limits, the contract (BridgeBounds) and the plug-ins. There is no gas
+// ceiling and no bridge-specific history cap: every history the native kernels accept is admitted and paid. The aggregate entries
+// are exactly the native kernels' own limits until the native composition (B7 PR 2) streams them: B2 (ureth b2 MAX_TRANSFERS,
+// MAX_HISTORY) and B1 (MAX_CLAIMS). MaxEnvelopeBytes is the ingress bound the pool and RPC are configured to carry. The remaining
+// constants are per-object shape bounds (schemas, widths, depth), not history caps.
 const (
-	MaxTransfers     = 23       // transfers including the final burn
-	MaxLeaves        = 24       // profile parameter: B2 leaves (16 -> 24 by the #526 step 5 measurement, briefs/526-step5-limits.md)
-	MaxSemanticBytes = 16 << 10 // history projection and Cfg input
-	MaxEnvelopeBytes = 64 << 10
+	MaxTransfers     = 64               // B2 MAX_TRANSFERS: transfers including the final burn
+	MaxLeaves        = MaxTransfers + 1 // B2 leaf output: the mint and every transfer (the kernel's result bound)
+	MaxSemanticBytes = 128 << 10        // B2 MAX_HISTORY: history projection and Cfg input
+	MaxEnvelopeBytes = 512 << 10        // ingress: above every envelope the native bounds admit; txpool and RPC carry it
 	MaxCBORDepth     = 16
-	MaxCBORItems     = 32768
-	MaxPathSteps     = 2048
+	MaxCBORItems     = 32768 // per object: the native scan of one CBOR object
 	MaxPolicyBytes   = 512
 	MaxAmountBytes   = 32
-	MaxAnchors       = 16 // distinct UC anchors, at most the leaves; a parser ceiling, the gas gate (gas.go) decides each bundle (contract section 4)
+	MaxAnchors       = 16 // B1 MAX_CLAIMS: distinct UC anchors of one CERT_BATCH_V2 call, at most the leaves (contract section 4)
 	MaxCfgBytes      = 1024
-	// MaxBridgeItems is the bridge's shared CBOR item budget J (contract section 5): item heads of the Cfg, the policy body, every
-	// anchor UC and every anchor IR opening, each encoded occurrence counted once. It is a bridge admission limit, stricter than the
-	// native batch's own 32,768-item scan.
-	MaxBridgeItems = 4096
 
 	// Embedded lock evidence (J). Cumulative and checked before allocation or crypto.
 	MaxJustificationBytes = 64 << 10

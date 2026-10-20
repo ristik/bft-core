@@ -1,5 +1,5 @@
 {
-  "artifactVersion": 7,
+  "artifactVersion": 8,
   "nativeBridgeProtocolVersion": 5,
   "sdkVersion": "4.0.0",
   "status": "development-provisional-unactivated",
@@ -38,20 +38,17 @@
     "cborDepth": 16,
     "rlpDepth": 16,
     "cborItems": 32768,
-    "bridgeCborItems": 4096,
-    "semanticBytes": 16384,
+    "semanticBytes": 131072,
     "cfgBytes": 1024,
-    "envelopeBytes": 65536,
-    "transfers": 23,
-    "leaves": 24,
-    "pathSteps": 2048,
+    "envelopeBytes": 524288,
+    "transfers": 64,
+    "leaves": 65,
     "policyBytes": 512,
     "aggregatorAnchors": 16,
     "anchorUcBytes": 8192,
     "irBytes": 512,
     "rsmtSiblingsPerLeaf": 32,
     "unicityStepsPerUc": 32,
-    "txGasBudget": 7000000,
     "gasReserve": 1000000,
     "bridgeItemGas": 1000,
     "shardDepthMax": 256
@@ -95,5 +92,5 @@
     "verification": "one-CERT_BATCH_V2-0x0100-over-the-anchor-table",
     "certificateAge": "any-age-permanent-registry"
   },
-  "limitsNote": "Named profile parameters shared by contract, oracle and plug-ins (bft-core briefs/b1-any-age-contract.md section 4); a later profile version may raise them."
+  "limitsNote": "The one resource policy shared by contract, oracle and plug-ins (owner section 36, bft-core briefs/b7-direct-uncapped-design.md section 1): no gas ceiling and no bridge-specific history cap; the aggregate entries are the native kernels' own limits and envelopeBytes is the ingress bound; the rest are per-object shape bounds."
 }

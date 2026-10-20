@@ -59,14 +59,14 @@ func measureConsolidated(t *testing.T, d *Deployment, n, m, transfers int) conso
 	cl, err := w.CertifyConsolidated(res.Leaves, nil, oneRound)
 	require.NoError(t, err)
 	eb := encodeEnvelope(t, d.F, h, cl.CertifiedLeaves)
-	gt, err := GateOf(d.F.Cfg, OpReturn, eb, 1<<62)
+	gt, err := GateOf(d.F.Cfg, OpReturn, eb)
 	require.NoError(t, err)
 	grp, err := b1ref.Group(CertBatchRequest(cl.Anchors))
 	require.NoError(t, err)
 	require.NoError(t, RefB1{TB: w.TB}.AuthenticateAnchors(cl.Anchors), "B1 authenticates every derived certificate")
 	per, err := w.CertifyAssigned(res.Leaves, nil, func(i int, _ Leaf) ShardRound { return ShardRound{BaseTime + 1000, 100 + uint64(i)} })
 	require.NoError(t, err)
-	pg, err := GateOf(d.F.Cfg, OpReturn, encodeEnvelope(t, d.F, h, per), 1<<62)
+	pg, err := GateOf(d.F.Cfg, OpReturn, encodeEnvelope(t, d.F, h, per))
 	require.NoError(t, err)
 	return consolidatedRow{N: n, M: m, L: len(res.Leaves), K: grp.K, E: grp.E, S: grp.S, Q: grp.Q, Batch: grp.Gas, Gate: gt.Total(),
 		PerSIDGate: pg.Total(), Envelope: len(eb), View: len(cl.Views[0])}
@@ -74,8 +74,8 @@ func measureConsolidated(t *testing.T, d *Deployment, n, m, transfers int) conso
 
 // TestConsolidatedGateTable is the measured table of bridgeprofile/README.md ("Consolidated bundles"): return histories of 8 and 16
 // leaves spanning m = 1, 2, 4, 8 shards, consolidated under one seal of a 4- or 16-member committee. Every bundle has one anchor per
-// shard and one seal (E = S = 1, Q = N) and is admitted under the 7,000,000 gate; the same token on the per-SID path (one seal per
-// leaf) costs more, and at 16 members and 16 leaves it is refused.
+// shard and one seal (E = S = 1, Q = N); the same token on the per-SID path (one seal per leaf) costs more. No estimate is refused
+// (owner section 36): the table only prices them.
 func TestConsolidatedGateTable(t *testing.T) {
 	d, err := NewDeployment()
 	require.NoError(t, err)
@@ -105,13 +105,11 @@ func TestConsolidatedGateTable(t *testing.T) {
 				require.Equal(t, want[i], got, "N=%d m=%d transfers=%d", n, m, transfers)
 				require.Equal(t, uint64(m), got.K, "one anchor per shard")
 				require.Equal(t, [3]uint64{1, 1, uint64(n)}, [3]uint64{got.E, got.S, got.Q}, "one seal")
-				require.Less(t, got.Gate, uint64(7_000_000), "admitted")
 				require.Less(t, got.Gate, got.PerSIDGate)
 				i++
 			}
 		}
 	}
-	require.Greater(t, want[len(want)-1].PerSIDGate, uint64(7_000_000), "per SID, 16 leaves under a 16-member committee are refused")
 }
 
 // The anchors CertifyConsolidated derives from the authenticated view are byte for byte the certificates the round's seal gives each
