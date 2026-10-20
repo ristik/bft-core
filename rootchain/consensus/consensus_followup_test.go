@@ -17,6 +17,7 @@ import (
 	testnetwork "github.com/unicitynetwork/bft-core/internal/testutils/network"
 	"github.com/unicitynetwork/bft-core/network"
 	"github.com/unicitynetwork/bft-core/network/protocol/abdrc"
+	"github.com/unicitynetwork/bft-core/network/protocol/certification"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/leader"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/storage"
 	drctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
@@ -47,6 +48,9 @@ type followup struct {
 
 	m       sync.Mutex
 	emitted int
+	// barrier travels through cm.ucSink after the real emissions and is acknowledged by the counting goroutine, see emittedCount
+	barrier *certification.CertificationResponse
+	acked   chan struct{}
 }
 
 // spyDB records the last votes which are written and can fail the write.
@@ -86,7 +90,8 @@ func clone[T any](t *testing.T, v *T) *T {
 // 4 already), change forges the state message of the peer.
 func newFollowup(t *testing.T, votedRound uint64, change func(state *abdrc.StateMsg, tip *drctypes.BlockData)) *followup {
 	cm, state, qc4, _, mockNet := recoveryTreeSetup(t)
-	f := &followup{t: t, cm: cm, net: mockNet, qc4: qc4, honest: clone(t, state)}
+	f := &followup{t: t, cm: cm, net: mockNet, qc4: qc4, honest: clone(t, state),
+		barrier: &certification.CertificationResponse{}, acked: make(chan struct{})}
 	tip := state.Pending[len(state.Pending)-1]
 	require.EqualValues(t, 4, tip.Round)
 	f.block4 = clone(t, tip)
@@ -107,7 +112,11 @@ func newFollowup(t *testing.T, votedRound uint64, change func(state *abdrc.State
 			select {
 			case <-ctx.Done():
 				return
-			case <-cm.ucSink:
+			case certs := <-cm.ucSink:
+				if len(certs) == 1 && certs[0] == f.barrier {
+					f.acked <- struct{}{}
+					continue
+				}
 				f.m.Lock()
 				f.emitted++
 				f.m.Unlock()
@@ -170,7 +179,22 @@ func (f *followup) votes() []testnetwork.PeerMessage {
 	return f.net.SentMessages(network.ProtocolRootVote)
 }
 
+// emittedCount returns the number of the emissions of the node so far. The send into the buffered cm.ucSink completes before the
+// counting goroutine has counted it, so a snapshot taken right after a step could miss an emission of that step and the next
+// snapshot would then see it as new. The barrier is queued behind all the emissions of the completed steps: when it is acknowledged,
+// the single counting goroutine has counted every one of them.
 func (f *followup) emittedCount() int {
+	f.t.Helper()
+	select {
+	case f.cm.ucSink <- []*certification.CertificationResponse{f.barrier}:
+	case <-f.ctx.Done():
+		f.t.Fatal("the test is over")
+	}
+	select {
+	case <-f.acked:
+	case <-f.ctx.Done():
+		f.t.Fatal("the test is over")
+	}
 	f.m.Lock()
 	defer f.m.Unlock()
 	return f.emitted
