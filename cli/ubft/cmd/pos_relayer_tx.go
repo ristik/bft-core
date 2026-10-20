@@ -116,12 +116,13 @@ func readJoiner(path string) (posrelayer.Joiner, error) {
 type txEnv struct {
 	ethRPC, deployment, senderKey string
 	client                        *rpc.Client
+	also                          []*rpc.Client // the further execution clients of a comma-separated --eth-rpc: transactions are sent to them as well
 	mods                          posrelayer.Modules
 	chain                         *big.Int
 }
 
 func (e *txEnv) flags(cmd *cobra.Command, senderRequired bool) {
-	cmd.Flags().StringVar(&e.ethRPC, "eth-rpc", "", "the execution client's JSON-RPC URL")
+	cmd.Flags().StringVar(&e.ethRPC, "eth-rpc", "", "the execution client's JSON-RPC URL; a comma-separated list sends every transaction to each of them (reads and receipts use the first, then the others), for validators whose pools do not gossip")
 	cmd.Flags().StringVar(&e.deployment, "pos-deployment", "", "the P85 deployment file, with the election pinned")
 	cmd.Flags().StringVar(&e.senderKey, "sender-key", "", "file holding the 0x-hex private key of the account that pays for the transaction")
 	_ = cmd.MarkFlagRequired("eth-rpc")
@@ -141,14 +142,22 @@ func (e *txEnv) open() error {
 	}
 	e.mods = posrelayer.Modules{Election: dep.Election, Custody: dep.Custody}
 	e.chain = new(big.Int).SetBytes(dep.ChainID[:])
-	if e.client, err = rpc.Dial(e.ethRPC); err != nil {
+	urls := strings.Split(e.ethRPC, ",")
+	if e.client, err = rpc.Dial(strings.TrimSpace(urls[0])); err != nil {
 		return errors.Join(ErrPosRelayer, err)
+	}
+	for _, u := range urls[1:] {
+		c, derr := rpc.Dial(strings.TrimSpace(u))
+		if derr != nil {
+			return errors.Join(ErrPosRelayer, derr)
+		}
+		e.also = append(e.also, c)
 	}
 	return nil
 }
 
 func (e *txEnv) sender(key *ecdsa.PrivateKey) posrelayer.Sender {
-	return posrelayer.Sender{Client: e.client, Key: key, ChainID: e.chain}
+	return posrelayer.Sender{Client: e.client, Key: key, ChainID: e.chain, Also: e.also}
 }
 
 func (e *txEnv) send(cmd *cobra.Command, key *ecdsa.PrivateKey, to [20]byte, value *big.Int, data []byte, what string) error {
