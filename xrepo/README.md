@@ -29,12 +29,15 @@ One fixture set, the contracts' own published election result (`publication.json
 |---|---|---|
 | `testdata/go-records.json` | bft-core (`XREPO_UPDATE=1 go test ./xrepo`) | The records the root's projection (`rootrecords.State`) emits, with the ids the root names and the digests it derives from the identity records: **recovery** (Closure of G, Closure of the Reserved J, RecoveryAck, Closure of K), **ack** (Closure of G, Ack, Closure of J), **session-closed**; and after each record, what the root holds |
 | `testdata/custody-view.json` | contracts (`XRepoRecords.t.sol`) | Custody's state after applying those records verbatim, as custody reports it |
+| `testdata/go-retirement.json` | bft-core (`XREPO_UPDATE=1 go test ./xrepo`) | The acknowledged history (Closure of G, Ack, Closure of J) followed by the **Retirements** of identities 1 and 2, whose reference digests are custody's exposure chains as the root derives them (`evmassign.ExposureID`/`ExposureChainStep`), with the registry's closed epoch of each record; and two conflicting scheme 2 root votes of identity 1's root key in J's epoch, built by the root's statement derivation (`types.DomainBoundStatement`) and signed by the root's signer |
 | `testdata/genesis/contracts-genesis.json` | bft-core (`XREPO_UPDATE=1 go test ./cli/ubft/cmd -run ContractsGenesisInput`) | What `ubft pos-relayer genesis --out-contracts` writes for the committed plan, trust base and FULL shard configuration |
 
-Tests here: `xrepo/consistency_test.go` and `cli/ubft/cmd/pos_relayer_xrepo_test.go`. Tests there: `test/p85/XRepoRecords.t.sol`
+Tests here: `xrepo/consistency_test.go`, `xrepo/retirement_test.go` and `cli/ubft/cmd/pos_relayer_xrepo_test.go`. Tests there: `test/p85/XRepoRecords.t.sol`
 (custody accepts the records with no word replaced, its state matches after every record, and the three disagreements of
 2026-10-11 are each refused as one changed word) and `test/p85/XRepoGenesis.t.sol` (the genesis script deploys from the file and
-custody holds the genesis assignment under the file's id).
+custody holds the genesis assignment under the file's id) and `test/p85/XRepoRetirement.t.sol` (each record is imported by a
+SealRegistry round and applied by custody verbatim; the retired identity's lot is held by the Go-signed equivocation charged to its
+historical exposure, the clean lot matures and is claimed, and after settlement the held lot matures less its penalty and is claimed).
 
 ## Coverage
 
@@ -54,6 +57,8 @@ Producer -> consumer pairs that are pinned (file in `fixtures.json`):
 | **RecoveryAck: the recovery assignment id the root announces, J's and K's offsets, rounds and epochs; K's digests under K's own id** | Go -> contracts | this suite |
 | **Ack and SessionClosed payloads and their effect** | Go -> contracts | this suite |
 | **Custody's resulting state (ids, digests, states, H rounds, closure anchors, offsets, session outcome) equals the root's model** | contracts -> Go | this suite |
+| **Retirement with the real reference digest, through the SealRegistry, to maturity and claim, with one held and one clean lot** | Go -> contracts | this suite |
+| **A root-signed equivocation of a retired generation's key, attributed to its historical exposure** | Go -> contracts | this suite |
 | **The contracts genesis input: field names and types, and the genesis assignment id = the root's custody key of the genesis epoch over the FULL configuration** | Go -> contracts | this suite |
 
 ## Evidence parity and remaining boundaries
@@ -65,19 +70,22 @@ is copied through `fixtures.json` to contracts and consumed by
 VoteInfo/VotePreimage CBOR, verifies SHA-256 vote signatures and the separate
 native seal signature for committing votes, and admits the Go-generated pairs.
 The earlier Keccak/ABI root digest mismatch is fixed. This proves the root
-signature/codec boundary, not third-party evidence collection, historical
-rotation-to-debit integration or a live slashing exercise. The EVM-domain codec
-remains undefined; do not count its opaque statement path as root parity.
+signature/codec boundary, not third-party evidence collection or a live
+slashing exercise. `testdata/go-retirement.json` adds one root-signed pair
+(the root's statement derivation and signer) by the key of a generation that
+retired before the evidence was submitted: the contracts charge it to the
+historical exposure, hold that lot and debit it on settlement
+(`XRepoRetirement.t.sol`). Rotation through an Ack is still not combined with
+it. The EVM-domain codec remains undefined, and `Evidence.submitEvmEvidence`
+is fail-closed: it always reverts with `EvmEvidenceUndefined`.
 
 Still not covered by the lifecycle replay suite:
 
-- **Retirement record with the real reference digest end to end.** The exposure chain value is pinned (custody-digests.json) and the
-  record shape is replayed (root-records-vectors.json), but no Go-produced Retirement is applied verbatim: it needs a generation with
-  every exposure released.
 - **Closure witness / handoff checkpoint path** (the root's own retained bundle, #563): Go-internal and Go <-> execution client; it
   has no Solidity consumer. Not part of this suite.
-- **The registry (SealRegistry) as the record source.** The replay uses the test record source (`MockRootRecords`), as the other
-  custody tests do; the registry import is pinned separately (root-records-import-vectors.json).
+- **The registry (SealRegistry) as the record source of the other histories.** `XRepoRecords.t.sol` uses the test record source
+  (`MockRootRecords`); only the retirement case imports through the registry. The registry import is pinned separately as well
+  (root-records-import-vectors.json).
 - **The value of the recovery assignment id.** The rule is checked on the store (a recovery epoch is keyed by its assignment hash), but the id in the vectors is a label: K's hash covers the shard configuration, and the contracts' fixture has identities and a result, not a root shard configuration. Custody takes K's id from the RecoveryAck as an opaque word, so the pair that matters (K's digests under the announced id) is covered.
 - **A second election after the first resolves**, more than one pending handoff besides primary plus recovery, and key rotation
   through an Ack.
