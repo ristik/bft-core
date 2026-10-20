@@ -249,9 +249,11 @@ h3_restart_roots() {
       for _ in $(seq 1 50); do lsof -nP -iTCP:"$(m2_rpc_port "$i")" -sTCP:LISTEN >/dev/null 2>&1 || break; sleep 0.2; done
       m2_archive_root_state "$i" "$epoch" || return 1
     done
+    # a root that bootstraps to a stopped root refuses to start ("failed to bootstrap"): the first root has no bootnode, as at a cold network's genesis, and the others dial it
+    local first; first=$(h3_first_root)
     for i in $H3_ROOTS; do
-      prev=$(echo "$H3_ROOTS" | tr ' ' '\n' | grep -vx "$i" | head -1)
-      m2_start_root "$i" "$epoch" "$(m2_root_addr "$prev")" || return 1
+      if [ "$i" = "$first" ]; then boot=; else boot=$(m2_root_addr "$first"); fi
+      m2_start_root "$i" "$epoch" "$boot" || return 1
     done
     m2_wait_root_epoch "$(h3_first_root)" "$epoch"
     return
