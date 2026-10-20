@@ -1,0 +1,22 @@
+{
+ "format": "UNICITY_X4_SHADOW_CAMPAIGN/v1",
+ "name": "x4-shadow-90min",
+ "profile": "PoA-authoritative shadow: staking modules and records hook in the genesis, NO authoritative election, roots without PoS flags",
+ "seed": 20261020,
+ "intervalSeconds": 5400,
+ "cadenceSeconds": 60,
+ "rules": {"minDue": 24, "minEach": 2, "minDistinctInputs": 2},
+ "scenario": {
+  "spareA": {"units": 1, "onboardWindow": [600, 900], "retireWindow": [4200, 4500]},
+  "spareB": {"unitsChoices": [4, 5], "registerWindow": [1500, 1800], "admitDelayWindow": [180, 300], "retireWindow": [3300, 3600]}
+ },
+ "election": {"cadenceRounds": 400, "cadenceSeconds": 300, "distanceBound": "1/2", "caps": "16,1,6", "note": "the election is due about seven minutes after genesis; observation starts when it is due, so every sample is a due comparison"},
+ "features": {
+  "authority": "PoA (installed committee fixed; asserted at the start and the end)",
+  "election": "contract deployed, hook NOT enabled (shadow only, on forks)",
+  "recordsHook": "enabled", "custody": "enabled", "governance": "deployed, no proposal queued", "rewardPool": "deployed and funded, not exercised",
+  "evidenceObservation": "not exercised", "retirementClosure": "requestRetirement of spare identities only", "forcedInclusion": "off",
+  "bridgeAggregation": "off", "checkpointRestore": "off", "feeRewardDistribution": "not distributed"
+ },
+ "notExercised": "reward settlement, offences, exits with maturity, faults and governance activation belong to the four-hour PoS observation (step B); the shadow observation compares the election only"
+}
