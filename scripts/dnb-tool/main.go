@@ -1,6 +1,6 @@
 // Command dnb-tool derives the DN-B lane's bridge deployment inputs from a running (or just generated) B1 devnet:
 //
-//	dnb-tool deployment --identities genesis-identities.json --b1-profile b1-profile.json --agg-conf shard-conf-9_0.json --out deployment.json
+//	dnb-tool deployment --identities genesis-identities.json --b1-profile b1-profile.json --agg-conf shard-conf-7_0.json --out deployment.json
 //
 // The deployment document is what unicity-pos-contracts script/BridgeDeploy.s.sol reads beside the genesis identity document.
 package main

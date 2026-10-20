@@ -2,9 +2,9 @@
 # (the any-age final lane, ANYAGE_LANE=1). Definitions only: sourcing this file starts nothing, reads nothing and takes no port.
 #
 # The caller defines (before calling a function): info, rpc, root_alive, boot_node (helper.sh), stop_pidfile (helper.sh), and the variables
-# validators, partitionID, chainID, rethEthBase, rootRpcPort, rootPortStart (helper.sh). Optional: aggPartition (9), DNB_AGG_SHARDS (1).
+# validators, partitionID, chainID, rethEthBase, rootRpcPort, rootPortStart (helper.sh). Optional: aggPartition (7), DNB_AGG_SHARDS (1).
 
-aggPartition=${aggPartition:-9}
+aggPartition=${aggPartition:-7}
 # DNB_AGG_SHARDS=2 runs the aggregator partition as the depth-1 topology of the B3 profile: two aggregator-go shards, 0x40 and 0xc0 (the
 # top bit of a state ID picks the shard), each its own BFT shard of the one root chain. 1 (default) is the single full-range shard 0x80.
 aggShards=${DNB_AGG_SHARDS:-1}

@@ -12,7 +12,7 @@ set -euo pipefail
 cd "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source helper.sh
 
-validators=4 rootValidators=4 partitionID=8 aggPartition=9 chainID=${DNB_CHAIN_ID:-31337}
+validators=4 rootValidators=4 partitionID=8 aggPartition=7 chainID=${DNB_CHAIN_ID:-31337}
 rethEngineBase=18551 rethEthBase=18545 rethP2PBase=30401 rootRpcPort=25866
 case "${DNB_AGG_SHARDS:-1}" in 1|2) ;; *) echo "DNB_AGG_SHARDS must be 1 or 2" >&2; exit 2 ;; esac
 . scripts/lib/reth-pin.sh   # definitions only: urethB1GenesisCommitment
