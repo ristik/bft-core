@@ -29,9 +29,13 @@ rsync -a --exclude keys.json --exclude jwt.hex --exclude '*.key' --exclude '*.sc
   --exclude .devnet-pid --exclude .runner-pids --exclude 'reth*/' --exclude 'evm*/' --exclude 'auth*/' "$ev/" "$pub/"
 # the values of everything removed so far are searched for in what is published (S2): a key file, JWT or credential which was left out must not reappear in a log
 vals=$stage/scan-values; : >"$vals"
-collect_values() { # FILE: every token of >= 24 characters (hex, base64, JWT parts), 0x stripped, nothing consisting of one repeated character
+collect_values() { # FILE: the secret values of a file which is left out. Whole-secret files (keys, JWTs, credentials, scan inputs): their content (0x stripped). Anything else: the values of its
+  # private-key fields only (ownerKey, rootKey, privateKey, secret, seed), never its other tokens (addresses, node ids and public keys are not secrets and appear in public files)
   [ -f "$1" ] || return 0
-  tr -c 'A-Za-z0-9+/=_.-' '\n' <"$1" 2>/dev/null | sed -E 's/^0x//' | awk 'length($0) >= 24 { s=$0; gsub(substr(s,1,1),"",s); if (length(s) > 0) print $0 }' >>"$vals"
+  case "$1" in
+    *.key|*/jwt.hex|*.cred|*.scan) tr -d '[:space:]' <"$1" 2>/dev/null | sed -E 's/^0x//' | awk 'length($0) >= 16' >>"$vals"; echo >>"$vals" ;;
+    *) grep -aoE '"(ownerKey|rootKey|privateKey|secret|seed)"[[:space:]]*:[[:space:]]*"(0x)?[0-9a-fA-F]{32,}"' "$1" 2>/dev/null | sed -E 's/^.*:[[:space:]]*"(0x)?//; s/"$//' >>"$vals" ;;
+  esac
 }
 while read -r f; do case "$f" in *"(directory excluded"*) ;; *) collect_values "$ev/$f" ;; esac; done <"$out/removed.txt"
 # a file which carries a private key in a JSON field (the P85 joiner's joiner.json: ownerKey, rootKey) is left out by content as well as by name; listed, not silent
