@@ -386,11 +386,10 @@ if result.get("blockHash","").lower()!=pin["blockHash"].lower():
     raise SystemExit("pre-handoff F7 verification block hash differs from the certified receipt pin")
 PY
   pass "pre-handoff F7 archive bundle, receipt pin, and epoch-1 verification output agree"
-  if command -v sandbox-exec >/dev/null 2>&1; then
-    env -i PATH="$PATH" sandbox-exec -p '(version 1) (allow default) (deny network*)' \
-      build/f7-mintproof-verify --bundle "$bundle" --trust-base "$trust" --mode locked \
+  if net_deny=$(lane_net_deny_mechanism) && [ -n "$net_deny" ]; then
+    lane_net_deny_run build/f7-mintproof-verify --bundle "$bundle" --trust-base "$trust" --mode locked \
       >"$EVIDENCE_DIR/f7-verify.json"
-    pass "retained F7 verification rerun in a network-denied macOS sandbox"
+    pass "retained F7 verification rerun in a network-denied sandbox ($net_deny)"
   else
     env -i PATH="$PATH" HTTP_PROXY=http://127.0.0.1:9 HTTPS_PROXY=http://127.0.0.1:9 \
       ALL_PROXY=http://127.0.0.1:9 build/f7-mintproof-verify --bundle "$bundle" \
@@ -496,6 +495,9 @@ run_step "fresh BFT and F7 tool build" build_bft_tools
 run_step "isolated pinned Foundry release install" install_pinned_foundry
 run_step "contracts e7eb3216 source rebuild and manifest artifact match" build_pinned_contracts
 run_step "source, binary, and manifest pins" write_prerehearsal_pins
+# CI harness-failure test (scripts/ci/run-t6.sh, workflow input inject_failure=in-lane): fail deliberately after the builds so the failure path's diagnostics can be shown.
+# Honoured only on a GitHub runner; it asserts nothing and weakens nothing, it adds a failing step.
+if [ "${GITHUB_ACTIONS:-}" = true ] && [ "${T6_INJECT_FAIL_AFTER_BUILD:-}" = 1 ]; then run_step "injected-harness-failure-after-the-builds" false; fi
 run_step "paired T6 rehearsal with handoffs and documented restore" run_paired_t6
 run_step "deployed B1 registry equals its independent regeneration (code and storage)" verify_b1_registry
 run_step "retain and recheck pre-handoff offline F7 bundle" extract_verify_f7

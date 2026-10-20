@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # T6-only callbacks used from the existing paired profile-2 lane.
+[ "$(type -t lane_net_deny_run)" = function ] || source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../lib/portable.sh"   # definitions only
 
 # Hardhat/Anvil account 1 is a public disposable key. It funds only this placeholder-genesis
 # rehearsal's treasury address and must never be used for a production manifest.
@@ -164,9 +165,8 @@ PY
     fail "receipt-complete F7 archive record did not become available before the handoffs"; return 1;
   }
   pass "extracted the F7 offline bundle before root handoff"
-  if command -v sandbox-exec >/dev/null 2>&1; then
-    env -i PATH="$PATH" sandbox-exec -p '(version 1) (allow default) (deny network*)' \
-      build/f7-mintproof-verify --bundle test-nodes/post-m2a-evidence/t6-f7-locked.cbor \
+  if [ -n "$(lane_net_deny_mechanism)" ]; then
+    lane_net_deny_run build/f7-mintproof-verify --bundle test-nodes/post-m2a-evidence/t6-f7-locked.cbor \
       --trust-base "$trust" --mode locked >test-nodes/post-m2a-evidence/t6-f7-verify.json || {
         fail "offline F7 verification failed before root handoff"; return 1;
       }

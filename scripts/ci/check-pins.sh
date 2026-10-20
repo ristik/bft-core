@@ -33,6 +33,15 @@ check_git() { # NAME DIR
 case "${1:-}" in
   component) check_component "${2:?NAME}" "${3:?VALUE}" || bad=1 ;;
   git) check_git "${2:?NAME}" "${3:?DIR}" || bad=1 ;;
+  t6)   # the defaults of scripts/t6-rehearsal.sh against this manifest's t6 record (the script keeps its own pins; they must be the recorded ones)
+    t6s=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/scripts/t6-rehearsal.sh
+    c=$(jq -r '.t6.contracts.commit' "$PINS"); f=$(jq -r '.t6.foundry.linuxSha256' "$PINS"); v=$(jq -r '.t6.foundry.version' "$PINS")
+    u=$(jq -r '.components.ureth.commit' "$PINS")
+    grep -q "T6_CONTRACTS_COMMIT:-$c}" "$t6s" && say "ok    t6 contracts $c" || { say "FAIL  t6: the script's default contracts commit is not $c"; bad=1; }
+    grep -q "digest=$f" "$t6s" && say "ok    t6 foundry linux asset $f" || { say "FAIL  t6: the script's Linux Foundry digest is not $f"; bad=1; }
+    grep -q "foundry/releases/download/v$v/" "$t6s" && say "ok    t6 foundry v$v" || { say "FAIL  t6: the script does not download Foundry v$v"; bad=1; }
+    grep -q "T6_URETH_COMMIT:-$u}" "$t6s" && say "ok    t6 ureth default is the lane's $u" || { say "FAIL  t6: the script's default ureth commit is not the lane's $u"; bad=1; }
+    ;;
   env-core)   # the components a P85 / H6 lane without the aggregator reads: ureth (binary + provenance), contracts, Foundry
     check_git contracts "${P85_CONTRACTS:-/nonexistent}" || bad=1
     reported=$("${M2_URETH_BIN:-/nonexistent}" --version 2>&1 | sed -n 's/^Commit SHA: //p' | head -1)
@@ -75,7 +84,11 @@ case "${1:-}" in
     git -C "$t/repo" -c user.email=a@b -c user.name=a commit -q --allow-empty -m y; echo x >"$t/repo/f"; git -C "$t/repo" add f
     printf '{"components":{"demo":{"commit":"%s"}}}\n' "$(git -C "$t/repo" rev-parse HEAD)" >"$t/pins4.json"; echo y >>"$t/repo/f"
     n=$((n + 1)); if PINS=$t/pins4.json "$0" git demo "$t/repo" >/dev/null 2>&1; then echo "  FAIL  a dirty checkout was accepted"; fails=$((fails + 1)); else echo "  ok    a checkout with a local change is refused"; fi
+    # the T6 script's own defaults against the manifest's t6 record: the real record is accepted, a record that differs (contracts commit, Foundry digest) is refused
+    n=$((n + 1)); if "$0" t6 >/dev/null 2>&1; then echo "  ok    the T6 script's defaults match the record"; else echo "  FAIL  the T6 script's defaults do not match the record"; fails=$((fails + 1)); fi
+    jq '.t6.contracts.commit="0123456789abcdef0123456789abcdef01234567"' "$PINS" >"$t/t6a.json"; jq '.t6.foundry.linuxSha256="00"' "$PINS" >"$t/t6b.json"
+    for m in t6a t6b; do n=$((n + 1)); if PINS=$t/$m.json "$0" t6 >/dev/null 2>&1; then echo "  FAIL  a T6 record that differs from the script ($m) was accepted"; fails=$((fails + 1)); else echo "  ok    a T6 record that differs from the script ($m) is refused"; fi; done
     echo "check-pins self-test: $n cases, $fails failures"; [ "$fails" -eq 0 ]; exit $? ;;
-  *) echo "usage: $0 component NAME VALUE | git NAME DIR | env | selftest" >&2; exit 2 ;;
+  *) echo "usage: $0 component NAME VALUE | git NAME DIR | env | env-core | t6 | selftest" >&2; exit 2 ;;
 esac
 exit $bad

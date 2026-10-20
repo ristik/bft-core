@@ -61,6 +61,10 @@ case "$kind" in
   abort)
     grep -q 'H6 Abort rehearsal: Abort before H committed' "$ev/lane.log" 2>/dev/null || { complete=no; why+=("no Abort-before-H completion line in lane.log"); }
     [ -s "$pub/q3/h6-before-h/abort.status" ] && [ -s "$pub/q3/h6-after-h/abort.status" ] || { complete=no; why+=("the Abort evidence files are missing"); } ;;
+  t6)
+    grep -q 'PASS: T6 placeholder harness run complete' "$ev/t6-rehearsal.log" 2>/dev/null || { complete=no; why+=("no completion sentinel in t6-rehearsal.log"); }
+    head -1 "$ev/run-summary.md" 2>/dev/null | grep -q '^T6 harness rehearsal: PASS' || { complete=no; why+=("run-summary.md does not say PASS"); }
+    ! grep -q 'NOT EVIDENCE' "$ev/run-mode.txt" 2>/dev/null || { complete=no; why+=("run-mode.txt marks the run NOT EVIDENCE"); } ;;
   *) complete=no; why+=("unknown kind $kind") ;;
 esac
 if [ "$complete" = no ]; then
