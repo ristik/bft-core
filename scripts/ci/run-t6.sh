@@ -28,6 +28,13 @@ finalize() {
   ev=$(ls -d "$AGRE_ROOT"/briefs/devnet-runs/t6-rehearsal-2* 2>/dev/null | sort | tail -1)
   if [ -n "$ev" ] && [ -d "$ev" ]; then cp -R "$ev" "$work/evidence-dir" 2>/dev/null || true; evdir=$work/evidence-dir
   else evdir=$work/evidence-none; mkdir -p "$evdir"; echo "T6 produced no evidence directory" >"$evdir/t6-rehearsal.log"; fi
+  # a failing T6 keeps its isolated checkout: the nodes' logs (roots, EVM validators, execution clients, authorities; flattened, because the publisher leaves whole
+  # evm*/reth*/auth* directories out by name) go into the evidence so a failure can be diagnosed from the artifact alone; the secret scan covers them like everything else
+  iso=$(grep -a 'Isolated checkout:' "$out/lane-stdout.log" 2>/dev/null | tail -n 1 | sed 's/^.*Isolated checkout: //')
+  if [ -n "$iso" ] && [ -d "$iso/bft-core/test-nodes" ]; then
+    mkdir -p "$evdir/failed-node-logs"
+    ( cd "$iso/bft-core/test-nodes" && find . -maxdepth 3 -type f \( -name '*.log' -o -name 'pid' \) ! -path '*/dd/*' -print | while read -r f; do cp "$f" "$evdir/failed-node-logs/$(echo "${f#./}" | tr '/' '-')" 2>/dev/null; done )
+  fi
   st=${lane_rc:-1}; [ "$rc" -eq 0 ] || st=$rc
   scripts/ci/publish-evidence.sh --evidence "$evdir" --out "$out/upload" --kind t6 --status "$st" --min-node-logs 0 \
     --extra "$out/run-lane.log" --extra "$out/lane-stdout.log" --extra "$out/host-before.log.gz" --extra "$out/host-after.log.gz" --extra "$out/oom-lines.txt" >"$out/publish.log" 2>&1
