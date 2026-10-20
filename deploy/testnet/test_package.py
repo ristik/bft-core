@@ -84,7 +84,7 @@ class ProofOfStake(unittest.TestCase):
     def test_the_deployment_file_and_profile_flags_follow_the_contracts_deployment(self):
         d={'networkWord':'0xaa','chainId':31337,'custody':'0xc','custodyCodeHash':'0xch','election':'0xe','electionCodeHash':'0xeh','rewardPool':'0xrp','rewardPoolCodeHash':'0xrph'}
         self.assertEqual(pos.deployment_of(d,{'runtimeHash':'0xrh'}),{'networkWord':'0xaa','chainId':'31337','custody':'0xc','custodyCodeHash':'0xch',
-            'registry':pos.REGISTRY,'registryCodeHash':'0xrh','election':'0xe','electionCodeHash':'0xeh','rewardPool':'0xrp','rewardPoolCodeHash':'0xrph'})
+            'registry':pos.REGISTRY,'registryCodeHash':'0xrh','election':'0xe','electionCodeHash':'0xeh'})
         args=pos.profile_args(d,{'election':'/m.json','hook':'/h.jsonl'})
         self.assertEqual((args[args.index('--records-custody')+1],args[args.index('--election')+1],args[args.index('--elect-caps')+1]),('0xc','0xe','16,1,6'))
         self.assertEqual((args[args.index('--elect-measurement')+1],args[args.index('--hook-measurement')+1]),('/m.json','/h.jsonl'))
