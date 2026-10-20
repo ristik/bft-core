@@ -77,7 +77,7 @@
   },
   "deferred": [],
   "normativeArtifactSha256": {
-    "protocol/interop.md": "ebd48ccdca5cb3fd49536db812e26ffc52504d9454683349a21a89beb8290da8",
+    "protocol/interop.md": "646ab864c3f677d92bdc088e886b6de7938bc5d2747383f443175fd311cdb0b8",
     "protocol/abi.json": "d836ec1a0eb12b81c92c4fccd5d310aa7b5fd2c7a9119d1fa3b5cf2509eb5685",
     "protocol/manifest.schema.json": "f256b0ea19ea1f0a390926006b18a7460ecbb63f79f3e3e85040cbf2d710fb05",
     "protocol/trust-base.md": "445f354723d9ab7247a9c1ec518bebc82993a71e960dae9edb2af2986bb9c628"
