@@ -5,6 +5,7 @@ import (
 	gocrypto "crypto"
 	"fmt"
 	"math/big"
+	"math/bits"
 	"sort"
 	"time"
 
@@ -160,7 +161,7 @@ func (a *Authority) Certify(network types.NetworkID, epoch, rootRound uint64, ir
 // complete uniform shard tree, inputs in increasing shard order) and returns
 // the unicity certificate of inputs[target], with its shard-tree siblings.
 func (a *Authority) CertifyShards(network types.NetworkID, epoch, rootRound uint64, inputs []ShardInput, target int) (*types.UnicityCertificate, error) {
-	trHash := H([]byte("fixture-technical-record"))
+	trHash := fixtureTRHash
 	var scheme types.ShardingScheme
 	var ins []types.ShardTreeInput
 	confs := make([][]byte, len(inputs))
@@ -207,6 +208,9 @@ func (a *Authority) CertifyShards(network types.NetworkID, epoch, rootRound uint
 	return &types.UnicityCertificate{Version: 1, InputRecord: ir, TRHash: trHash[:], ShardConfHash: confHash,
 		ShardTreeCertificate: stCert, UnicityTreeCertificate: cert, UnicitySeal: seal}, nil
 }
+
+// fixtureTRHash is the technical-record hash of every fixture shard-tree leaf.
+var fixtureTRHash = H([]byte("fixture-technical-record"))
 
 // FixturePDR is a one-validator shard configuration for partition p of network n.
 func FixturePDR(network types.NetworkID, partition types.PartitionID, chainID uint64, validatorSeed string) *types.PartitionDescriptionRecord {
@@ -399,12 +403,14 @@ type CertifiedLeaves struct {
 	Proofs  []LeafProof
 }
 
-// Row is the policy row (shard) a state ID belongs to: the top bit at depth 1.
+// Row is the shard (index into PDRs) a state ID belongs to: the top d bits of the ID for the 2^d shards of a depth-d topology
+// (d <= 8).
 func (w *AggregatorWorld) Row(sid [32]byte) int {
-	if len(w.PDRs) == 1 {
+	d := bits.Len(uint(len(w.PDRs))) - 1
+	if d == 0 {
 		return 0
 	}
-	return int(sid[0] >> 7)
+	return int(sid[0] >> (8 - d))
 }
 
 // ShardRound names the root round and IR timestamp one certification is made at.
