@@ -2,7 +2,7 @@
  "format": "native-bridge-vectors/3",
  "nativeBridgeProtoVersion": 5,
  "family": "unlock",
- "fixtureDigest": "cde688201a08d895e893dceafb592ad018c6122d486400efe744770299a83748",
+ "fixtureDigest": "905c8444ba567573e2cc1b798be53987006bacdfda2fe63b9349933afbd0f8e1",
  "cases": [
   {
    "id": "unlock-valid",
