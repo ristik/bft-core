@@ -28,9 +28,9 @@
     },
     "native-bridge-plugins": {
       "repository": "https://github.com/ristik/native-bridge-plugins.git",
-      "commit": "836644c99dc4f4d211049b2bad84562115fbd38a",
-      "branch": "dev3/anyage-consolidated",
-      "note": "PROVISIONAL (until the nbp PR of the consolidated driver merges, then its merge commit): nbp main (nbp#30/#31 consolidation as the default plug-in path) plus the anyage driver's 'consolidated' command (#526 step 4) on top of the two-shard steering (nbp#29)."
+      "commit": "278d15da4c45fc3d9af168fece51ef6b3ca35ddb",
+      "branch": "main",
+      "note": "nbp#33 merge: main with the plug-in consolidation as the default path (nbp#30/#31) and the any-age driver's 'consolidated' command (#526 step 4) on top of the two-shard steering (nbp#29)."
     },
     "state-transition-sdk-js": {
       "repository": "https://github.com/ristik/state-transition-sdk-js.git",
