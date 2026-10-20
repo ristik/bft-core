@@ -6,10 +6,10 @@
       "description": "an untouched fungible split whose embedded dependencies were certified in epochs 2, 5 and 8 (scheme 1 and 2)",
       "leaves": 3,
       "historyBytes": 1364,
-      "historySha256": "8d5369b6604275d8a13e495d01bf54889dc83beb5ca880f761aa8ff2619e29ab",
-      "envelopeBytes": 5856,
+      "historySha256": "0edea7193953fdd2b5f374f212c3147d3fcef683138d677116f6d948fe8601c5",
+      "envelopeBytes": 5824,
       "requestBytes": 2182,
-      "requestSha256": "0ecc8b1cdad635f3c2991ee1b5fb2dc2ca1a92801f8ba7b012790c3cf891c24a",
+      "requestSha256": "2a6d02630b9728c78aa74be27f9bed3d96850c8cfc7b4920f246d6a3d8f3d65c",
       "grouping": {
         "C": 2182,
         "K": 3,
@@ -24,25 +24,25 @@
       "gate": {
         "b2": 106400,
         "batch": 250212,
-        "intrinsic": 591432,
+        "intrinsic": 588360,
         "items": 198000,
         "j": 198,
         "reserve": 1000000,
-        "rsmt": 17088,
-        "steps": 11,
-        "total": 2163132
+        "rsmt": 16326,
+        "steps": 10,
+        "total": 2159298
       },
-      "nullifier": "ebfeaa53995e40ff2677fbaa5928a2faaf31ccbf6dc5cd44d8c9074e95dea71a"
+      "nullifier": "9e4cb08724101fa7d43a15987bbfd9dbe372315b918067ee25879f44a03946e8"
     },
     {
       "scenario": "split-across-topology-change",
       "description": "a dependency certified in shard 0 before a split (epoch 3) and its successor in child shard 01 after it (epoch 6)",
       "leaves": 2,
       "historyBytes": 1092,
-      "historySha256": "3b461a959f2b81564af7734cf846a52c921756541edea2cfc84d995d970f718e",
+      "historySha256": "9cab767cc28f821be80738f218a3c29d31e35f0570d86b417bf37d640c54c9cd",
       "envelopeBytes": 4256,
       "requestBytes": 1490,
-      "requestSha256": "6e9573c73b7641669afaa289361754a32c2d7765c721819cae768216d47c914a",
+      "requestSha256": "74928881e04a16050e36ecb61133ae1fb812dcd277f217296a3d4999ec7ffac2",
       "grouping": {
         "C": 1490,
         "K": 2,
@@ -65,17 +65,17 @@
         "steps": 9,
         "total": 1864002
       },
-      "nullifier": "939ed076fe0cb7fb41f66ac71fca35c15b7ee2991e934893d81bd4d8a576cd1d"
+      "nullifier": "7c17c853b1a4659022aa5eda9a597d7297e9b4e89e50ac617ac0cbd0069de5ea"
     },
     {
       "scenario": "consolidated-eight-shards",
       "description": "a token over eight shards after consolidation: every anchor under one seal",
       "leaves": 8,
       "historyBytes": 2724,
-      "historySha256": "2c9c06eb4f17999d61a690ee91bef0044365a05b602b4b035b4834a990b5bd56",
-      "envelopeBytes": 14688,
+      "historySha256": "27dd845195c78165151a048c7ec4073383aa43b9acb270836645602c15a31088",
+      "envelopeBytes": 14752,
       "requestBytes": 6356,
-      "requestSha256": "889b98ca4eb627ddb50e4e2a83c5dedbab60094f78adef2105722b3508d4540d",
+      "requestSha256": "9710f96dfe4923b6f645223797eab0ffaa5aad80ec77e4695be1071e7f8ffa1c",
       "grouping": {
         "C": 6356,
         "K": 8,
@@ -90,25 +90,25 @@
       "gate": {
         "b2": 203920,
         "batch": 262696,
-        "intrinsic": 1439304,
+        "intrinsic": 1445448,
         "items": 509000,
         "j": 509,
         "reserve": 1000000,
-        "rsmt": 44552,
-        "steps": 44,
-        "total": 3459472
+        "rsmt": 46076,
+        "steps": 46,
+        "total": 3467140
       },
-      "nullifier": "c439311eb4b41513ecd1c0eaee851deaa95cd49d58b422a0a6e52801c9dc6f3e"
+      "nullifier": "ed2e602b39d586491de5ea3a6ec40725031de659a3d8b5f3ab4bf9219c3cfbee"
     },
     {
       "scenario": "unconsolidated-eight-seals",
       "description": "the same eight shards before consolidation: eight seals over three epochs (one entry read per epoch)",
       "leaves": 8,
       "historyBytes": 2724,
-      "historySha256": "4b4d9cba7e34ae03045fbe051792d61c3e3ced99bb39716414b24cce4ad7793c",
-      "envelopeBytes": 14784,
+      "historySha256": "b644765271e78c56affbe8da55e6615318864109b7902b767f7fa358ad39251a",
+      "envelopeBytes": 14720,
       "requestBytes": 6356,
-      "requestSha256": "0c9771d799b96efc2b3cfe987720d41afa88f174efadac1835de7e7eaa961278",
+      "requestSha256": "1968fd8380240fa41cec7ea0fafd5f6cf6bf385cbccc7fafac2677ef3a35e6de",
       "grouping": {
         "C": 6356,
         "K": 8,
@@ -123,25 +123,25 @@
       "gate": {
         "b2": 203920,
         "batch": 448496,
-        "intrinsic": 1448520,
+        "intrinsic": 1442376,
         "items": 509000,
         "j": 509,
         "reserve": 1000000,
-        "rsmt": 46838,
-        "steps": 47,
-        "total": 3656774
+        "rsmt": 45314,
+        "steps": 45,
+        "total": 3649106
       },
-      "nullifier": "b6b4a9821f445c6092b5acd8eaeba5ff47456be98b120ce6feec10ddbeb73f57"
+      "nullifier": "ce7ab0d87019e8cb379f0753b86d9db4c03e8e666336a8ae93bdaa57d9de6e2a"
     },
     {
       "scenario": "paired/unconsolidated-eight-seals",
       "description": "the same eight shards before consolidation: eight seals over three epochs (one entry read per epoch)",
       "leaves": 8,
       "historyBytes": 2724,
-      "historySha256": "4b4d9cba7e34ae03045fbe051792d61c3e3ced99bb39716414b24cce4ad7793c",
-      "envelopeBytes": 14784,
+      "historySha256": "b644765271e78c56affbe8da55e6615318864109b7902b767f7fa358ad39251a",
+      "envelopeBytes": 14720,
       "requestBytes": 6356,
-      "requestSha256": "0c9771d799b96efc2b3cfe987720d41afa88f174efadac1835de7e7eaa961278",
+      "requestSha256": "1968fd8380240fa41cec7ea0fafd5f6cf6bf385cbccc7fafac2677ef3a35e6de",
       "grouping": {
         "C": 6356,
         "K": 8,
@@ -156,25 +156,25 @@
       "gate": {
         "b2": 203920,
         "batch": 448496,
-        "intrinsic": 1448520,
+        "intrinsic": 1442376,
         "items": 509000,
         "j": 509,
         "reserve": 1000000,
-        "rsmt": 46838,
-        "steps": 47,
-        "total": 3656774
+        "rsmt": 45314,
+        "steps": 45,
+        "total": 3649106
       },
-      "nullifier": "b6b4a9821f445c6092b5acd8eaeba5ff47456be98b120ce6feec10ddbeb73f57"
+      "nullifier": "ce7ab0d87019e8cb379f0753b86d9db4c03e8e666336a8ae93bdaa57d9de6e2a"
     },
     {
       "scenario": "paired/consolidated-eight-shards",
       "description": "a token over eight shards after consolidation: every anchor under one seal",
       "leaves": 8,
       "historyBytes": 2724,
-      "historySha256": "4b4d9cba7e34ae03045fbe051792d61c3e3ced99bb39716414b24cce4ad7793c",
-      "envelopeBytes": 14784,
+      "historySha256": "b644765271e78c56affbe8da55e6615318864109b7902b767f7fa358ad39251a",
+      "envelopeBytes": 14720,
       "requestBytes": 6356,
-      "requestSha256": "c865c16044aafb8aa773417767c4fd6636b0b64190d8cf89a39e923c0143e343",
+      "requestSha256": "835497d8eceaec6c143e10eedf7d1c31a13354655a2c9591c487f64f31efbdb8",
       "grouping": {
         "C": 6356,
         "K": 8,
@@ -189,15 +189,15 @@
       "gate": {
         "b2": 203920,
         "batch": 262696,
-        "intrinsic": 1448520,
+        "intrinsic": 1442376,
         "items": 509000,
         "j": 509,
         "reserve": 1000000,
-        "rsmt": 46838,
-        "steps": 47,
-        "total": 3470974
+        "rsmt": 45314,
+        "steps": 45,
+        "total": 3463306
       },
-      "nullifier": "b6b4a9821f445c6092b5acd8eaeba5ff47456be98b120ce6feec10ddbeb73f57"
+      "nullifier": "ce7ab0d87019e8cb379f0753b86d9db4c03e8e666336a8ae93bdaa57d9de6e2a"
     }
   ],
   "notes": [

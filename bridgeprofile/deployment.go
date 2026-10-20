@@ -28,8 +28,8 @@ type Deployment struct {
 const (
 	DevChainID   = 31337
 	DevRootRound = 40 // root round of the embedded lock certificates
-	DevAggPart   = 7  // the state-transition SDKs' fixed aggregation partition
-	DevEVMPart   = 8
+	DevAggPart   = 11
+	DevEVMPart   = 7
 	DevNetwork   = 3
 	// NextEpochStart is the first root round of epoch 2 in the multi-epoch trust fixtures.
 	NextEpochStart = DevRootRound + 10
