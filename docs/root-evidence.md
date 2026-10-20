@@ -25,8 +25,9 @@ size account are written in one transaction.
 - one statement ≤ 4 KiB; a page ≤ 64 records and ≤ 256 KiB; a journal budget of 1 GiB (sum of record encodings);
 - a full queue (1024 votes) or a failed journal write is counted (`Observer.Gaps`) and the observer reports itself unhealthy; a refused record
   (`ErrBudget`) leaves no trace. Nothing evicts an actionable record to make room, and consensus never waits for the journal;
-- `Journal.Export(afterSeq, limit)` returns `OldestSeq`, `NextSeq`, `More` and `Gap`: a requested range that starts before `OldestSeq` is a
-  declared gap, never an apparently complete empty page. Sequence numbers are monotone across restarts.
+- `Journal.Export(afterSeq, limit)` returns `OldestSeq`, `NextSeq`, `More` and `Gap`: a requested range that contains pruned events (`afterSeq` below the highest
+  pruned sequence, kept in the journal) is a declared gap, never an apparently complete empty page; votes the observer never captured are
+  reported by `Observer.Gaps`. Sequence numbers are monotone across restarts.
 
 ## Retention (`rootevidence.Retention`)
 

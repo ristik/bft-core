@@ -55,8 +55,8 @@ type SlotRecord struct {
 func (r *SlotRecord) Paired() bool { return r.Second != nil }
 
 // Page is one bounded page of the export. NextSeq is the cursor to pass back; More says the page stopped at a limit. Gap says that the
-// requested range starts before OldestSeq: records of the range were pruned or never durably captured, so an empty or short page is not
-// proof that nothing happened there.
+// requested range contains events that were pruned: an empty or short page is not proof that nothing happened there. (Votes the observer
+// never captured are reported by Observer.Gaps, not here.)
 type Page struct {
 	OldestSeq uint64
 	NextSeq   uint64
@@ -75,6 +75,7 @@ type Journal struct {
 var (
 	keySeq   = []byte("m/seq")
 	keyBytes = []byte("m/bytes")
+	keyFloor = []byte("m/floor") // the highest event sequence ever pruned
 )
 
 // NewJournal opens the journal on db. budget is the local size budget in bytes (0 selects DefaultBudget).
@@ -247,7 +248,11 @@ func (j *Journal) Export(afterSeq uint64, limit int) (*Page, error) {
 	if first {
 		page.OldestSeq = next + 1 // nothing is held
 	}
-	page.Gap = afterSeq+1 < page.OldestSeq
+	var floor uint64
+	if _, err := j.db.Read(keyFloor, &floor); err != nil {
+		return nil, err
+	}
+	page.Gap = afterSeq < floor
 	if page.Gap {
 		page.NextSeq = max(page.NextSeq, page.OldestSeq-1)
 	}
@@ -308,9 +313,19 @@ func (j *Journal) Delete(s Slot) error {
 		_ = tx.Rollback()
 		return err
 	}
-	if err := tx.Write(keyBytes, used-min(used, size)); err != nil {
+	floor, err := readCounter(tx, keyFloor)
+	if err != nil {
 		_ = tx.Rollback()
 		return err
+	}
+	for _, w := range []struct {
+		k []byte
+		v uint64
+	}{{keyBytes, used - min(used, size)}, {keyFloor, max(floor, rec.FirstSeq, rec.PairSeq)}} {
+		if err := tx.Write(w.k, w.v); err != nil {
+			_ = tx.Rollback()
+			return err
+		}
 	}
 	return tx.Commit()
 }

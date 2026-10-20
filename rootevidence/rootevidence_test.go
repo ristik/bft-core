@@ -236,6 +236,10 @@ func TestExportPagesAndGaps(t *testing.T) {
 	require.EqualValues(t, 11, g.OldestSeq)
 	require.Len(t, g.Records, MaxPageRecords+6-10)
 	require.EqualValues(t, MaxPageRecords+6, g.NextSeq, "the cursor moves on past the gap")
+	past, err := j.Export(10, 0)
+	require.NoError(t, err)
+	require.False(t, past.Gap, "a consumer already beyond the pruned events has no gap")
+	require.Len(t, past.Records, MaxPageRecords+6-10)
 }
 
 func TestObserverTapIsIndependentOfConsensusAdmission(t *testing.T) {
