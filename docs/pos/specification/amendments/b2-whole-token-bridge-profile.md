@@ -89,35 +89,25 @@ recover and require equality with the reconstructed source key, then verify. The
   anchor InputRecord ≤ 512 bytes. All are checked before allocation or crypto; over-bound evidence is a budget outcome and never
   triggers an online fallback.
 
-**Offline lock-proof verification (oracle: `VerifyMintBacking`).** Supported profile: one explicitly provisioned, fixed SDK
-root trust base for both ordinary inclusion proofs and the embedded EVM UC, **unit-weight validators, one fixed epoch/committee,
-SDK count quorum** (`quorumThreshold = N − (N−1)/3` for N distinct validators). Installation (`LoadTrustInput`) rejects every other
-configuration (non-unit weight, another threshold, no epoch, duplicate nodes); weights are never flattened into unit weights.
-Using only the token, that one installed document `B` (the SDK's JSON representation, pinned by the manifest) and the pinned
-deployment (the shard genesis configuration and the vault runtime code hash): `J.trustBaseId = SHA256(B)` of the installed bytes
-(an integrity binding, not authentication of the base); the seal's network and root epoch equal the base's and its root round is
-at least `epochStartRound` (scope guards that reject use outside the fixed profile, not epoch evolution); the UC verifies under the
-base with the SDK's own verification, unchanged; the carried PDR is canonical, hashes to the UC's configuration commitment and
+**Offline lock-proof verification (oracle: `VerifyMintBacking`), native bridge protocol 5.** *Supersedes the protocol-4 fixed
+SDK 3.0.1 trust document (`RenderTrustBaseJSON`, `config/sdk-root-trust-base.json`, the unit-weight count-quorum profile); the
+normative contract is native-bridge-plugins `protocol/trust-base.md`.* The trust input is the network's Unicity Trust Base
+history, installed from a release bundle (gettrustbase tag 39015) under its genesis EntryID (`LoadTrustInput(bundle, pin)`: another
+genesis `ErrTrustBaseDigest`, a malformed, incomplete or unwitnessed bundle `ErrTrustBase`). Using only the token, that history and
+the pinned deployment (the shard genesis configuration and the vault runtime code hash): `J.trustBaseId` is the genesis EntryID; the
+seal's epoch selects its entry (another network `ErrSealNetwork`, an epoch newer than the latest held `ErrNoEntryForEpoch`,
+retryable, before the genesis or a root round outside `[start_e, start_e+1)` `ErrSealEpoch`); the carried PDR is canonical, hashes to the UC's configuration commitment and
 changes no non-membership setting of the pinned genesis, with PDR epoch = IR epoch; `keccak256(headerRLP) = InputRecord.blockHash`
 and `header.stateRoot = InputRecord.hash` under the pinned header profile; the vault account is proven by a strict MPT walk under
 the state root with its code hash equal to the pin; the lock word at `keccak256(keccak256(abi.encode(n,5)))` is proven under the
 account's storage root and equals the digest reconstructed from the actual mint. The MPT walk rejects non-canonical RLP, hash
 references to nodes that must be embedded, unconsumed or over-consumed keys and every duplicate, unused or out-of-order node.
-There is no mint-proof circularity: the lock digest commits cfg, nonce, amount, ID and recipient, not J or the mint hash. The
-oracle renders `B` (`RenderTrustBaseJSON`) exactly as the pinned JS SDK 3.0.1 emits it (decimal-string numbers, unprefixed
-lower-case hex, null absent hashes) and `LoadTrustInput` parses that form; native-bridge-plugins' `tools/sdk_trust_fixture.mjs --corpus`
-requires every trust document of the corpus to be byte-identical to the SDK's own emission, and the Rust SDK 3.0.1 `from_json`
-parses the same bytes. The pinned `B` is published as `config/sdk-root-trust-base.json` with its provenance.
-
-**DEFERRED: common SDK trust-base work (ristik/bft-core#421), unsupported in the current bridge profile.** Epoch changes,
-appended trust-base records, caller-driven retrieval of newer bases, arbitrary weights such as `(98,1,1)`, mixed
-historical/current committees, interval closure, old-J validity through rotation and full B1/SDK seal-signature acceptance parity
-are deferred. They are neither passing coverage nor activation prerequisites of this amendment; the oracle builds no weighted
-verifier, epoch resolver, handoff verifier, trust history or epoch bundle, and tests only the rejection of non-unit configuration
-and of epoch mismatch. A different epoch or base is unsupported and never silently installed; J is immutable after certification and
-aggregator refresh stays within the one pinned base, preserving M/T, CD and the original `t`. SDK/native signature-acceptance
-differences (TS binds the recovery parity; Rust's explicit-key seal check does not; B1 accepts 64-byte seals and an ignored 0/1
-suffix) are recorded limitations; the strict token-unlock rule above is separate and unchanged.
+There is no mint-proof circularity: the lock digest commits cfg, nonce, amount, ID and recipient, not J or the mint hash. The UC verifies under
+the selected entry with the B1 profile seal rule (`b1Seal`: every signature a member's and accepted by `b1ref.CheckSealSignature`,
+64 bytes or 65 with recovery byte 0/1; an unknown signer or an invalid signature fails the seal; weights reach `floor(2W/3)+1`).
+The checks run in the order network and epoch, PDR and configuration, certificate, so an input with several faults has one verdict
+in the oracle and both plug-ins. The corpus publishes the dev bundle (`config/trust-base.bundle.cbor`) and its pin
+(`config/trust-base.genesis.entryid`); the strict token-unlock rule above is separate and unchanged.
 
 ## C. Configuration, policy, projection, result and envelope
 
@@ -171,8 +161,8 @@ canonical minimal RLP integers, left-padded to recover the bytes32 digest.
 ## E. Candidate corpus and fixture
 
 `go run ./cmd/gencorpus -out DIR` writes the `protocol/vectors/{config,wire,unlock,policy,lock,history,proof,return,vault}/cases.json`
-tree, `config/fixtures.json`, `config/semantic-profile.json` (a byte copy of native-bridge-plugins `protocol/profile-v2.json`) and the
-pinned SDK trust document with its provenance; the output is deterministic. VERSION, `provenance.json` and the digests are added
+tree, `config/fixtures.json`, `config/semantic-profile.json` (a byte copy of native-bridge-plugins `protocol/profile-v5.json`) and the
+dev trust-base release bundle with its genesis EntryID; the output is deterministic. VERSION, `provenance.json` and the digests are added
 by `tools/vectors.py seal`, which records the generator commit. Every case
 carries its input bytes, operation, auxiliary inputs and the expected status, error family, exact sentinel name, relation result
 with leaves `(sid,txHash,t,v)` and the canonical kernel output. `Replay` is the executable definition of each op; the Go test
