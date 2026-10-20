@@ -26,6 +26,7 @@ source scripts/lib/p85-lib.sh
 X4_CADENCE=${X4_CADENCE:-10}         # seconds between samples
 X4_PHASE_SECONDS=${X4_PHASE_SECONDS:-90}   # how long each scripted state is sampled (>= 8 samples at the default cadence)
 X4_DIR=$H3_DIR/shadow
+X4_RETRY_LOG=$X4_DIR/rpc-retries.log   # transient pre-send node refusals that x4_retry tried again
 P85_DEPLOY=$P85_DIR/pos-deployment.json
 x4_eth() { echo "http://127.0.0.1:$rethEthBase"; }
 x4_call() { "$P85_CAST" call --rpc-url "$(x4_eth)" "$@"; }
@@ -60,13 +61,13 @@ x4_spare_file() { # n
 }
 x4_join() { # n step [args]
   local n=$1 step=$2; shift 2
-  build/ubft pos-relayer tx join "$step" --eth-rpc "$(x4_eth)" --pos-deployment "$P85_DEPLOY" --joiner "$P85_DIR/spare$n/spare.json" "$@"
+  x4_retry build/ubft pos-relayer tx join "$step" --eth-rpc "$(x4_eth)" --pos-deployment "$P85_DEPLOY" --joiner "$P85_DIR/spare$n/spare.json" "$@"
 }
 x4_register_bond() { # n units: the spare is funded by the joiner account, registers and bonds (not yet admitted: not in the election's live index)
   local n=$1 units=$2 id owner
   x4_spare_file "$n" || return 1
   owner=$("$P85_CAST" wallet address --private-key "$(cat "$P85_DIR/spare$n/owner.key")") || return 1
-  "$P85_CAST" send --rpc-url "$(x4_eth)" --private-key "$(cat "$P85_DIR/joiner/owner.key")" --value "$(python3 -c "print($P85_BOND_UNIT * ($units + 2))")" "$owner" >/dev/null || return 1
+  x4_retry "$P85_CAST" send --rpc-url "$(x4_eth)" --private-key "$(cat "$P85_DIR/joiner/owner.key")" --value "$(python3 -c "print($P85_BOND_UNIT * ($units + 2))")" "$owner" >/dev/null || return 1
   id=$(x4_join "$n" register 2>"$X4_DIR/spare$n-register.log") || { cat "$X4_DIR/spare$n-register.log" >&2; return 1; }
   echo "$id" >"$X4_DIR/spare$n-id"
   x4_join "$n" bond --id "$id" --value-wei "$(python3 -c "print($P85_BOND_UNIT * $units)")" || return 1
@@ -78,7 +79,7 @@ x4_admit() { # n
 }
 x4_onboard() { x4_register_bond "$1" "$2" && x4_admit "$1"; } # n units
 x4_retire() { # n: the owner asks custody to retire the identity (it leaves the eligible set)
-  "$P85_CAST" send --rpc-url "$(x4_eth)" --private-key "$(cat "$P85_DIR/spare$1/owner.key")" "$(jq -r .custody "$P85_DEPLOY")" 'requestRetirement(uint64)' "$(cat "$X4_DIR/spare$1-id")" >/dev/null || return 1
+  x4_retry "$P85_CAST" send --rpc-url "$(x4_eth)" --private-key "$(cat "$P85_DIR/spare$1/owner.key")" "$(jq -r .custody "$P85_DEPLOY")" 'requestRetirement(uint64)' "$(cat "$X4_DIR/spare$1-id")" >/dev/null || return 1
   echo "spare $1 requested retirement"
 }
 
