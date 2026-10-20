@@ -1,42 +1,16 @@
-# Real-reth smoke lane (F1c, #90).
+# STOCK reth control lane (formerly `real-reth-smoke`, F1c #90).
 #
-# The `ci` workflow's compose and chaos jobs run `--executor fake`, which models no execution at
-# all — they cannot say anything about the Engine API path. This workflow is the counterpart that
-# runs the Go adapter against the APPROVED PINNED execution client.
-# The owner limits automatic runs to execution-related changes to reduce noise.
+# What this is and is not. It runs the Go adapter and the paired funded-transaction devnet against the upstream, STOCK reth release the scripts pin (scripts/lib/reth-pin.sh,
+# upstream v2.5.0). It says nothing about the Unicity execution client (ureth) or its profile: that is tested by the `ci-lane` workflow (the attested Linux ureth, the combined,
+# over-bound, Abort and T6 lanes, and the targeted `reth-unicity-*` crate tests; briefs/ci-lane-migration-plan.md, owner decision section 34: targeted tests only, no broad upstream
+# reth matrix). So this is a MANUAL control now: it no longer runs on pull requests, and its names no longer read like evidence about our profile.
 #
-# Named separately and deliberately: a green `ci` run must never be read as real-execution
-# evidence, and this job's name says which it is. Fault scenarios are NOT run here; they are the
-# separately named real-reth-fault workflow, so a green smoke check never implies fault coverage.
-#
-# Every step of the lane — obtaining and verifying the pinned client, the scenarios, evidence
-# collection, archive validation and teardown — is scripts/reth-smoke.sh, the same script a local
-# run executes, so the refusal and collection paths are exercised locally and by
-# scripts/reth-smoke-selftest.sh rather than only ever read here. There is no fake fallback: a wrong
+# Every step of the lane (obtaining and verifying the pinned stock client, the scenarios, evidence collection, archive validation, teardown) is scripts/reth-smoke.sh, the same
+# script a local run executes, so the refusal and collection paths are exercised locally and by scripts/reth-smoke-selftest.sh (run first here). There is no fake fallback: a wrong
 # pin, a bad or missing binary or an RPC failure fails the job visibly.
-name: real-reth-smoke
+name: stock-reth-control
 
 on:
-  pull_request:
-    branches:
-      - integration/enshrined-evm
-      - main
-    paths:
-      - 'engineapi/**'
-      - 'shardnode/**'
-      - 'rootchain/**'
-      - 'network/**'
-      - 'cli/**'
-      - 'scripts/reth-*.sh'
-      - 'scripts/lib/reth-*.sh'
-      - 'scripts/evmtx/**'
-      - 'scripts/Dockerfile'
-      - '*-evm*.sh'
-      - 'docker-compose.evm.yml'
-      - 'go.mod'
-      - 'go.sum'
-      - 'Makefile'
-      - '.github/workflows/reth-smoke.yml'
   workflow_dispatch:
     inputs:
       inject_failure:
@@ -48,8 +22,8 @@ env:
   GO_VERSION: 1.24
 
 jobs:
-  real-reth-smoke:
-    name: real-reth smoke (pinned client, funded transaction)
+  stock-reth-control:
+    name: STOCK reth control (upstream reth, not the Unicity profile; no claim about ureth)
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -80,7 +54,10 @@ jobs:
           path: ~/.cache/reth-pin
           key: ${{ steps.pin.outputs.key }}
 
-      - name: Real-reth smoke lane
+      - name: Chain-free refusal and collection self-test (no reth, no network)
+        run: ./scripts/reth-smoke-selftest.sh
+
+      - name: Stock reth control lane
         env:
           INJECT: ${{ github.event_name == 'workflow_dispatch' && inputs.inject_failure && '--inject-failure' || '' }}
         run: ./scripts/reth-smoke.sh --fetch --cache-dir ~/.cache/reth-pin --archive reth-smoke-evidence.tar.gz $INJECT
@@ -106,7 +83,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: reth-smoke-evidence
+          name: stock-reth-control-evidence
           path: evidence-upload/
           if-no-files-found: error
           retention-days: 14

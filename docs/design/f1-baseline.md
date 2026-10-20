@@ -1155,14 +1155,14 @@ reach, F8 (#16) — which should not treat this as an explanation for the unexpl
 
 ### 6.4 Real-reth in CI, and the same lane locally
 
-Two workflows run the adapter against the **approved pinned execution client**, each named for what it
+(Renamed and made manual by CI plan step 3: they run the STOCK upstream client; the Unicity client is `ci-lane`.) Two workflows run the adapter against the **approved pinned stock execution client**, each named for what it
 proves, because a green `ci` run (every job `--executor fake`) must never be read as real-execution
 evidence and a green smoke run must never be read as fault coverage:
 
 | workflow | runs | trigger |
 | --- | --- | --- |
-| `real-reth-smoke` (`.github/workflows/reth-smoke.yml`) | stock-client control (20 blocks) and the paired funded-transaction devnet | every PR to `integration/enshrined-evm`; manual dispatch, optionally with a deliberate failure |
-| `real-reth-fault` (`.github/workflows/reth-fault.yml`) | bounded `scripts/reth-chaos.sh` scenarios, each on its own cluster (default `reth-only-restart,pair-restart`) | **manual dispatch only** — before accepting a change to the executor, adapter or recovery paths, or when a fault result is needed; never on PRs |
+| `stock-reth-control` (`.github/workflows/stock-reth-control.yml`, formerly `real-reth-smoke`) | stock-client control (20 blocks) and the paired funded-transaction devnet, against the upstream STOCK reth release | **manual dispatch only** (optionally with a deliberate failure); no longer on PRs: it says nothing about ureth or the Unicity profile, which `ci-lane` tests (CI plan step 3, owner section 34: targeted tests only) |
+| `stock-reth-fault-control` (`.github/workflows/stock-reth-fault-control.yml`, formerly `real-reth-fault`) | bounded `scripts/reth-chaos.sh` scenarios, each on its own cluster (default `reth-only-restart,pair-restart`), stock reth | **manual dispatch only** — before accepting a change to the executor, adapter or recovery paths, or when a stock-client fault result is needed; never on PRs |
 
 **One implementation, locally and in CI (#90).** Everything the lanes do beyond the scenarios —
 obtaining and verifying the client, the cache, evidence collection, archive validation and teardown —

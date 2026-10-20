@@ -353,6 +353,32 @@ func findUCs(v any, out *[]types.UnicityCertificate) {
 	}
 }
 
+// verifyUnderConfs verifies uc under the committee tb with the shard configuration (shard and hash) of the given ones which is for its partition: with none given the
+// certificate's own partition is used unchecked (as before); with one it must be that one (as before); with several of one partition it must verify under one of them,
+// and the error of the last candidate is returned when none does.
+func verifyUnderConfs(uc *types.UnicityCertificate, tb types.RootTrustBase, partition types.PartitionID, pdrs []*types.PartitionDescriptionRecord, hashes [][]byte) error {
+	if len(pdrs) == 0 {
+		return uc.Verify(quorumweight.Checked(tb), crypto.SHA256, partition, types.ShardID{}, nil)
+	}
+	var last error
+	candidates := 0
+	for j, c := range pdrs {
+		if len(pdrs) != 1 && c.PartitionID != partition {
+			continue
+		}
+		candidates++
+		err := uc.Verify(quorumweight.Checked(tb), crypto.SHA256, c.PartitionID, c.ShardID, hashes[j])
+		if err == nil {
+			return nil
+		}
+		last = err
+	}
+	if candidates == 0 {
+		return fmt.Errorf("the certificate is of partition %d, for which no shard configuration was given", partition)
+	}
+	return last
+}
+
 func cmdUCVerify(args []string) error {
 	fs := flag.NewFlagSet("uc-verify", flag.ExitOnError)
 	tokenPath := fs.String("token", "", "a saved token (or any CBOR holding certificates)")
@@ -414,24 +440,12 @@ func cmdUCVerify(args []string) error {
 			return fmt.Errorf("certificate %d: seal round %d is outside the activation interval of epoch %d", i, round, epoch)
 		}
 		var partition types.PartitionID
-		var shard types.ShardID
-		var confHash []byte
 		if uc.UnicityTreeCertificate != nil {
 			partition = uc.UnicityTreeCertificate.Partition
 		}
-		if len(pdrs) > 0 {
-			k := -1
-			for j, c := range pdrs {
-				if len(pdrs) == 1 || c.PartitionID == partition {
-					k = j
-				}
-			}
-			if k < 0 {
-				return fmt.Errorf("certificate %d is of partition %d, for which no shard configuration was given", i, partition)
-			}
-			partition, shard, confHash = pdrs[k].PartitionID, pdrs[k].ShardID, hashes[k]
-		}
-		if err := uc.Verify(quorumweight.Checked(e), crypto.SHA256, partition, shard, confHash); err != nil {
+		// the configurations given for the certificate's partition: several shards of one partition each have their own (a token can hold certificates of several of them),
+		// and the certificate must verify under one of them (its shard and the configuration hash bound together); none is a refusal
+		if err := verifyUnderConfs(uc, quorumweight.Checked(e), partition, pdrs, hashes); err != nil {
 			return fmt.Errorf("certificate %d (epoch %d, seal round %d) does not verify under its epoch's committee: %w", i, epoch, round, err)
 		}
 		var signed uint64

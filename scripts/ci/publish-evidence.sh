@@ -8,7 +8,7 @@
 # Secret values are searched for everywhere that is published, INCLUDING inside .gz / .tgz members (an expanded scan view), and the values of every file removed by name
 # or content (keys, JWTs, credentials, the joiner's ownerKey/rootKey) are added to the search, so a removed secret that leaked into a log still refuses the archive.
 # A secret found by value or field in what remains is NOT published: the archive is quarantined (OUT/../quarantine, never uploaded) and OUT/<name>.REJECTED.txt names what
-# was found where, never the value (scripts/lib/reth-pin.sh select-upload, the pattern of reth-smoke.yml).
+# was found where, never the value (scripts/lib/reth-pin.sh select-upload, the pattern of stock-reth-control.yml).
 set -uo pipefail
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd); repo=$(cd "$here/../.." && pwd)
 source "$repo/scripts/lib/portable.sh"
