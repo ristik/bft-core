@@ -34,6 +34,7 @@ func Test_ReputationBased_Update(t *testing.T) {
 
 		err := rl.Update(&types.QuorumCert{VoteInfo: &types.RoundInfo{RoundNumber: 5, ParentRoundNumber: 3}}, 6, loadBlock)
 		require.EqualError(t, err, `not updating leaders because rounds are not consecutive {parent: 3, QC: 5, current: 6}`)
+		require.ErrorIs(t, err, ErrNotConsecutive)
 		require.Equal(t, slotIdx, rl.curIdx, "expected that round leader buffer index is not changed")
 
 		err = rl.Update(&types.QuorumCert{VoteInfo: &types.RoundInfo{RoundNumber: 1, ParentRoundNumber: 1}}, 2, loadBlock)
