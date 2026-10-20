@@ -1,0 +1,442 @@
+{
+ "format": "UNICITY_X4_POS_CAMPAIGN/v1",
+ "name": "x4-pos-4h",
+ "seed": 20261021,
+ "intervalSeconds": 14400,
+ "tailSeconds": 3600,
+ "policy": {
+  "evidenceWindowRounds": 1000,
+  "holdRounds": 2000,
+  "timeFloorSeconds": 3600,
+  "roundSeconds": 1.0,
+  "safetySeconds": 300,
+  "settleSeconds": 120,
+  "recoveryBudgetSeconds": 120,
+  "note": "the P85 genesis terms of unicity-pos-contracts script/P85Genesis.s.sol (evidenceWindow 1000, holds 2000 rounds, timeFloor 3600 s); the exit maturity is the larger of the hold at the declared round time and the UC-time floor, plus a safety margin"
+ },
+ "required": {
+  "replacements": 2,
+  "keyRotations": 2,
+  "recoveries": 1,
+  "aborts": 1,
+  "offences": 2,
+  "exitRequests": 2,
+  "exits": 2,
+  "rewardIntervals": 4,
+  "rewardExhaustRefill": 1,
+  "faults": 4,
+  "governance": 1,
+  "governanceActivated": 1,
+  "reconcile": 1
+ },
+ "features": {
+  "authority": "PoS",
+  "election": "authoritative hook",
+  "custody": "enabled",
+  "governance": "queue early, activate at a due boundary",
+  "rewardPool": "small separately funded genesis capital, exhaustion then fund()",
+  "evidence": "S3/S4 observation, export, submission, settlement",
+  "forcedInclusion": "off",
+  "bridgeAggregation": "off",
+  "checkpointRestore": "off",
+  "feeRewardDistribution": "not distributed"
+ },
+ "steps": [
+  {
+   "id": "baseline",
+   "kind": "baseline",
+   "at": 0,
+   "budgetSeconds": 300,
+   "cmd": [
+    "scripts/x4pos/steps/baseline.sh"
+   ],
+   "check": [
+    "scripts/x4pos/steps/baseline.check.sh"
+   ],
+   "restartable": true
+  },
+  {
+   "id": "governance-queue",
+   "kind": "governance-queue",
+   "at": 600,
+   "budgetSeconds": 300,
+   "cmd": [
+    "scripts/x4pos/steps/governance-queue.sh"
+   ],
+   "counts": {
+    "governance": 1
+   },
+   "dependsOn": [
+    "baseline"
+   ],
+   "args": {
+    "change": "rate"
+   }
+  },
+  {
+   "id": "replace-1",
+   "kind": "replace",
+   "at": 1200,
+   "budgetSeconds": 900,
+   "cmd": [
+    "scripts/x4pos/steps/replace.sh"
+   ],
+   "counts": {
+    "replacements": 1,
+    "keyRotations": 1
+   },
+   "exclusive": true,
+   "dependsOn": [
+    "baseline"
+   ],
+   "args": {
+    "entity": 5,
+    "out": 1
+   }
+  },
+  {
+   "id": "offence-1",
+   "kind": "offence",
+   "at": 2300,
+   "budgetSeconds": 600,
+   "cmd": [
+    "scripts/x4pos/steps/offence.sh"
+   ],
+   "counts": {
+    "offences": 1
+   },
+   "dependsOn": [
+    "replace-1"
+   ],
+   "args": {
+    "offender": "replaced",
+    "retired": false
+   }
+  },
+  {
+   "id": "exit-request-protected",
+   "kind": "exit-request",
+   "at": 3000,
+   "budgetSeconds": 300,
+   "cmd": [
+    "scripts/x4pos/steps/exit-request.sh"
+   ],
+   "counts": {
+    "exitRequests": 1
+   },
+   "dependsOn": [
+    "offence-1"
+   ],
+   "args": {
+    "operator": "protected-offender"
+   }
+  },
+  {
+   "id": "exit-request-clean",
+   "kind": "exit-request",
+   "at": 3400,
+   "budgetSeconds": 300,
+   "cmd": [
+    "scripts/x4pos/steps/exit-request.sh"
+   ],
+   "counts": {
+    "exitRequests": 1
+   },
+   "dependsOn": [
+    "replace-1"
+   ],
+   "args": {
+    "operator": "clean"
+   }
+  },
+  {
+   "id": "replace-2",
+   "kind": "replace",
+   "at": 3800,
+   "budgetSeconds": 900,
+   "cmd": [
+    "scripts/x4pos/steps/replace.sh"
+   ],
+   "counts": {
+    "replacements": 1,
+    "keyRotations": 1
+   },
+   "exclusive": true,
+   "dependsOn": [
+    "replace-1"
+   ],
+   "args": {
+    "entity": 6,
+    "out": 2
+   }
+  },
+  {
+   "id": "stalled-recovery",
+   "kind": "recovery",
+   "at": 5000,
+   "budgetSeconds": 1500,
+   "cmd": [
+    "scripts/x4pos/steps/recovery.sh"
+   ],
+   "counts": {
+    "recoveries": 1
+   },
+   "exclusive": true,
+   "dependsOn": [
+    "replace-2"
+   ],
+   "args": {
+    "mode": "stalled-successor"
+   }
+  },
+  {
+   "id": "abort-retry",
+   "kind": "abort",
+   "at": 6800,
+   "budgetSeconds": 900,
+   "cmd": [
+    "scripts/x4pos/steps/abort.sh"
+   ],
+   "counts": {
+    "aborts": 1
+   },
+   "exclusive": true,
+   "dependsOn": [
+    "stalled-recovery"
+   ]
+  },
+  {
+   "id": "offence-2-retired-key",
+   "kind": "offence",
+   "at": 7900,
+   "budgetSeconds": 600,
+   "cmd": [
+    "scripts/x4pos/steps/offence.sh"
+   ],
+   "counts": {
+    "offences": 1
+   },
+   "dependsOn": [
+    "abort-retry"
+   ],
+   "args": {
+    "retired": true
+   }
+  },
+  {
+   "id": "exit-claim-clean",
+   "kind": "exit-claim",
+   "at": 7700,
+   "budgetSeconds": 600,
+   "cmd": [
+    "scripts/x4pos/steps/exit-claim.sh"
+   ],
+   "counts": {
+    "exits": 1
+   },
+   "dependsOn": [
+    "exit-request-clean"
+   ],
+   "after": {
+    "step": "exit-request-clean",
+    "delay": "exitMaturity"
+   }
+  },
+  {
+   "id": "exit-claim-protected",
+   "kind": "exit-claim",
+   "at": 8600,
+   "budgetSeconds": 600,
+   "cmd": [
+    "scripts/x4pos/steps/exit-claim.sh"
+   ],
+   "counts": {
+    "exits": 1
+   },
+   "dependsOn": [
+    "exit-request-protected",
+    "offence-2-retired-key"
+   ],
+   "after": {
+    "step": "exit-request-protected",
+    "delay": "exitMaturity"
+   },
+   "args": {
+    "expectHoldUntilSettled": true
+   }
+  },
+  {
+   "id": "reward-interval-1",
+   "kind": "reward-interval",
+   "at": 4400,
+   "budgetSeconds": 300,
+   "cmd": [
+    "scripts/x4pos/steps/reward-interval.sh"
+   ],
+   "counts": {
+    "rewardIntervals": 1
+   },
+   "dependsOn": [
+    "baseline"
+   ]
+  },
+  {
+   "id": "reward-interval-2",
+   "kind": "reward-interval",
+   "at": 5600,
+   "budgetSeconds": 300,
+   "cmd": [
+    "scripts/x4pos/steps/reward-interval.sh"
+   ],
+   "counts": {
+    "rewardIntervals": 1
+   },
+   "dependsOn": [
+    "baseline"
+   ]
+  },
+  {
+   "id": "reward-interval-3",
+   "kind": "reward-interval",
+   "at": 7600,
+   "budgetSeconds": 300,
+   "cmd": [
+    "scripts/x4pos/steps/reward-interval.sh"
+   ],
+   "counts": {
+    "rewardIntervals": 1
+   },
+   "dependsOn": [
+    "baseline"
+   ]
+  },
+  {
+   "id": "reward-interval-4",
+   "kind": "reward-interval",
+   "at": 9400,
+   "budgetSeconds": 300,
+   "cmd": [
+    "scripts/x4pos/steps/reward-interval.sh"
+   ],
+   "counts": {
+    "rewardIntervals": 1
+   },
+   "dependsOn": [
+    "baseline"
+   ]
+  },
+  {
+   "id": "reward-exhaust-refill",
+   "kind": "reward-exhaust-refill",
+   "at": 9900,
+   "budgetSeconds": 600,
+   "cmd": [
+    "scripts/x4pos/steps/reward-exhaust-refill.sh"
+   ],
+   "counts": {
+    "rewardExhaustRefill": 1
+   },
+   "dependsOn": [
+    "reward-interval-4"
+   ]
+  },
+  {
+   "id": "fault-root-restart",
+   "kind": "fault",
+   "at": 8100,
+   "budgetSeconds": 300,
+   "cmd": [
+    "scripts/x4pos/steps/fault.sh"
+   ],
+   "counts": {
+    "faults": 1
+   },
+   "exclusive": true,
+   "args": {
+    "kind": "root-stop-restart",
+    "outageSeconds": 30
+   }
+  },
+  {
+   "id": "fault-evm-restart",
+   "kind": "fault",
+   "at": 8800,
+   "budgetSeconds": 300,
+   "cmd": [
+    "scripts/x4pos/steps/fault.sh"
+   ],
+   "counts": {
+    "faults": 1
+   },
+   "exclusive": true,
+   "args": {
+    "kind": "evm-validator-restart",
+    "outageSeconds": 30
+   }
+  },
+  {
+   "id": "fault-collector-restart",
+   "kind": "fault",
+   "at": 9300,
+   "budgetSeconds": 300,
+   "cmd": [
+    "scripts/x4pos/steps/fault.sh"
+   ],
+   "counts": {
+    "faults": 1
+   },
+   "exclusive": true,
+   "args": {
+    "kind": "collector-reward-worker-restart"
+   }
+  },
+  {
+   "id": "fault-delayed-episode",
+   "kind": "fault",
+   "at": 10000,
+   "budgetSeconds": 600,
+   "cmd": [
+    "scripts/x4pos/steps/fault.sh"
+   ],
+   "counts": {
+    "faults": 1
+   },
+   "exclusive": true,
+   "args": {
+    "kind": "delayed-evm-root-extension"
+   }
+  },
+  {
+   "id": "governance-activation-check",
+   "kind": "governance-check",
+   "at": 10100,
+   "budgetSeconds": 300,
+   "cmd": [
+    "scripts/x4pos/steps/governance-check.sh"
+   ],
+   "counts": {
+    "governanceActivated": 1
+   },
+   "dependsOn": [
+    "governance-queue"
+   ],
+   "after": {
+    "step": "governance-queue",
+    "delaySeconds": 6000
+   }
+  },
+  {
+   "id": "final-reconcile",
+   "kind": "reconcile",
+   "at": 13200,
+   "budgetSeconds": 1000,
+   "cmd": [
+    "scripts/x4pos/steps/reconcile.sh"
+   ],
+   "counts": {
+    "reconcile": 1
+   },
+   "phase": "final"
+  }
+ ]
+}
