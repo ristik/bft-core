@@ -115,8 +115,10 @@ func (v3 CertificationResponseV3) MarshalCBOR() ([]byte, error) {
 	return types.Cbor.Marshal(wire(v3))
 }
 
-// UnmarshalCBOR is strict: exactly the four-element array, version 3, a view that is a definite-length byte string or null (an integer array or
-// undefined is refused), entries within the bounds.
+// UnmarshalCBOR is strict where the format has meaning: exactly the four-element array, version 3, a view that is a definite-length byte string
+// or null (an empty string, an indefinite-length or tagged string, an array and undefined are refused), at most MaxTrustBaseUpdates entries of
+// 1..MaxTrustBaseUpdateBytes bytes. The list of entries is not canonical-checked beyond that (null and [] both decode as no entries, an entry may be
+// an indefinite-length string): the entries are opaque here and decoded strictly, from their own canonical form, by utbstore.
 func (v3 *CertificationResponseV3) UnmarshalCBOR(data []byte) error {
 	type rawEnvelope struct {
 		_                struct{} `cbor:",toarray"`
