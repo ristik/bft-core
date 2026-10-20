@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -373,4 +374,44 @@ func Test_QuorumStatus_String(t *testing.T) {
 	assert.Equal(t, "QuorumAchieved", QuorumAchieved.String())
 	assert.Equal(t, "QuorumNotPossible", QuorumNotPossible.String())
 	assert.Equal(t, "QuorumStatus(4)", (QuorumNotPossible + 1).String())
+}
+
+func TestCertRequestBuffer_RedeliverOnlyForADecidedOutcomeAndTheStoredRequest(t *testing.T) {
+	a, b := generateNodeID(t).String(), generateNodeID(t).String()
+	tb := mockQuorumInfo{nodeCount: 2, quorum: 2}
+	mk := func(node string) *certification.BlockCertificationRequest {
+		return &certification.BlockCertificationRequest{PartitionID: sysID1, NodeID: node, InputRecord: &types.InputRecord{Version: 1, RoundNumber: 7, Hash: []byte{1}}, Signature: []byte("s-" + node)}
+	}
+	buf, err := NewCertificationRequestBuffer(observability.Default(t).Meter("test"))
+	require.NoError(t, err)
+	ctx := context.Background()
+
+	_, _, ok := buf.Redeliver(mk(a), tb, 0)
+	require.False(t, ok, "an empty buffer holds nothing to hand over")
+
+	_, _, err = buf.Add(ctx, mk(a), tb)
+	require.NoError(t, err)
+	_, _, ok = buf.Redeliver(mk(a), tb, 0)
+	require.False(t, ok, "an undecided shard is not handed over")
+
+	st, _, err := buf.Add(ctx, mk(b), tb)
+	require.NoError(t, err)
+	require.Equal(t, QuorumAchieved, st)
+
+	_, _, ok = buf.Redeliver(mk("someone-else"), tb, 0)
+	require.False(t, ok, "a node without a stored request")
+	other := mk(a)
+	other.Signature = []byte("different")
+	_, _, ok = buf.Redeliver(other, tb, 0)
+	require.False(t, ok, "not the stored bytes")
+	status, evidence, ok := buf.Redeliver(mk(a), tb, 0)
+	require.True(t, ok)
+	require.Equal(t, QuorumAchieved, status)
+	require.Len(t, evidence, 2)
+	_, _, ok = buf.Redeliver(mk(a), tb, time.Hour)
+	require.False(t, ok, "rate limited")
+
+	buf.Clear(ctx, sysID1, types.ShardID{})
+	_, _, ok = buf.Redeliver(mk(a), tb, 0)
+	require.False(t, ok, "certified and cleared")
 }

@@ -180,9 +180,21 @@ accepted (`prevUC`, nil on first startup):
 | Class | Condition | Action |
 |-------|-----------|--------|
 | **Valid** | `prevUC` is nil, or `newUC` legitimately extends it | Drive the round state machine (§3) |
-| **Duplicate** | same root round as `prevUC` | No-op — this node is connected to more than one root node and received the same certificate twice |
+| **Duplicate** | same root round as `prevUC` | No-op — this node is connected to more than one root node and received the same certificate twice — except that, with a request pending on `prevUC`, it re-sends that request unchanged (below) |
 | **Repeat** | same `InputRecord` as `prevUC`, later root round | The root chain's T2 timed out waiting for this shard; still drive §3 — a repeat UC carries a fresh `TechnicalRecord` naming the next attempt at the same round number |
 | **Equivocating** | neither of the above holds | Fatal. Something is wrong with the certificate sequence, this node's own bookkeeping, or both — do not continue building on top of it |
+
+**A pending request is re-sent, unchanged, on a duplicate.** The root answers a handshake with
+its latest certificate, and a request lost on the way (or one the roots cannot certify yet:
+the closing epoch of a root handoff admits only empty blocks until the next epoch starts) would
+otherwise wait for the root chain's T2 and its repeat certificate. When a request was submitted
+on the held certificate and an authenticated Duplicate of it arrives, the node sends the *same
+signed bytes* again (never re-signed or rebuilt), at most `ResubmitMinInterval` (5 s) apart and
+at most `MaxResubmits` (10) times per request; older, newer and repeat certificates never
+trigger it. The root treats it as idempotent: a node's request is stored once, and a
+byte-identical repeat of a request whose outcome is decided but not yet certified hands that
+outcome to the consensus manager again (at most every 2 s per shard). The aggregator's client
+follows the same rule (#665).
 
 Equivocation detection is `types.CheckNonEquivocatingCertificates` — see its
 doc comment for the seven checks it runs. Do not reimplement this by hand;

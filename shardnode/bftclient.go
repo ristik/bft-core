@@ -52,6 +52,10 @@ type BFTClientOptions struct {
 	CertNodes         int           // how many root nodes to submit certification requests to
 	HeartbeatInterval time.Duration // how often to check for inactivity
 	InactivityTimeout time.Duration // re-handshake if no UC received for this long
+	// ResubmitMinInterval is the least time between two sends of the same pending certification request (zero: DefaultResubmitMinInterval).
+	ResubmitMinInterval time.Duration
+	// MaxResubmits bounds the re-sends of one pending request (zero: DefaultMaxResubmits; negative disables re-sending).
+	MaxResubmits int
 	// StartupHandshakeInterval is how often the handshake is re-sent until the first certificate arrives (zero
 	// disables the early retry). A root that has not yet loaded the shard drops the handshake without an answer; waiting
 	// a full InactivityTimeout for the next one let a validator fall far behind the cluster (H3 lane run3).
@@ -86,6 +90,12 @@ func startupHandshakeDelay(base, ceiling time.Duration, n int) time.Duration {
 }
 
 const startupFixedAttempts = 5
+
+// Defaults of the re-send of a pending certification request (see resubmitPending).
+const (
+	DefaultResubmitMinInterval = 5 * time.Second
+	DefaultMaxResubmits        = 10
+)
 
 var DefaultBFTClientOptions = BFTClientOptions{
 	HandshakeNodes:    defaultHandshakeNodes,
@@ -169,6 +179,13 @@ type BFTClient struct {
 	// retrying, since a later certificate supersedes an earlier one.
 	unapplied *deliveryAttempt
 
+	// outstanding is the request this client last submitted and the certificate it was submitted on: the request is still
+	// pending exactly while that certificate is the held one (a certificate that advances the round replaces the held one, and
+	// the next Submit replaces this).
+	outstanding *outstandingRequest
+	// resubmitWanted is set by the configured-mode feed observer, which performs no network I/O, to ask Run to re-send.
+	resubmitWanted bool
+
 	lastCertResponseTime atomic.Int64
 	// firstResponse is set once any certification response has arrived; it ends the early startup handshake retry.
 	firstResponse atomic.Bool
@@ -204,6 +221,15 @@ func (c *BFTClient) classifyUC(prev, next *types.UnicityCertificate) (UCClass, e
 		}
 	}
 	return ClassifyUC(prev, next)
+}
+
+// outstandingRequest is a submitted certification request awaiting the certificate of its round. The signed request is kept
+// as submitted: a re-send puts the same bytes on the wire, it never re-signs or rebuilds.
+type outstandingRequest struct {
+	req      *certification.BlockCertificationRequest
+	on       deliveryAttempt // the held certificate the request was submitted on
+	lastSent time.Time
+	resent   int
 }
 
 // deliveryAttempt identifies one certificate for retry purposes. Rounds are enough: a UCDuplicate
@@ -428,7 +454,12 @@ func (c *BFTClient) Run(ctx context.Context) error {
 			count := c.feedPendingCount
 			c.feedPending = nil
 			c.feedPendingCount = 0
+			resubmit, held := c.resubmitWanted, c.feedHeld
+			c.resubmitWanted = false
 			c.mu.Unlock()
+			if resubmit {
+				c.resubmitPending(ctx, held)
+			}
 			if uc != nil {
 				c.renewSubscriptionIfIdle(ctx, uc, true, count)
 			}
@@ -901,6 +932,14 @@ func (c *BFTClient) observeConfiguredFeed(uc *types.UnicityCertificate, tr *cert
 		if class == UCDuplicate && id != c.feedHeldIdentity {
 			progress = false
 		}
+		if classErr == nil && class == UCDuplicate && id == c.feedHeldIdentity {
+			// the root answered with the certificate already held: if a request is pending on it, Run re-sends it (no I/O here)
+			c.resubmitWanted = true
+			select {
+			case c.admissionWake <- struct{}{}:
+			default:
+			}
+		}
 	}
 	if progress {
 		c.feedHeld, c.feedHeldIdentity = u, id
@@ -1145,6 +1184,9 @@ func (c *BFTClient) handleCertificationResponse(ctx context.Context, cr *certifi
 		if class == UCStale {
 			metrics.recordStaleUC(ctx)
 		}
+		if class == UCDuplicate {
+			c.resubmitPending(ctx, prevLUC)
+		}
 		if c.log != nil {
 			c.log.DebugContext(ctx, class.String()+" UC, ignoring",
 				slog.Uint64("rootRound", cr.UC.GetRootRoundNumber()),
@@ -1224,6 +1266,20 @@ func (c *BFTClient) Submit(ctx context.Context, req *certification.BlockCertific
 	if luc == nil {
 		return errors.New("shardnode: no certificate received yet, cannot select root nodes to submit to")
 	}
+	if err := c.sendRequest(ctx, req, luc); err != nil {
+		return err
+	}
+	// A submitted request refills this node's subscription at the root chain, so nothing else needs
+	// to ask for one this round.
+	c.mu.Lock()
+	c.submittedSinceHandshake = true
+	c.outstanding = &outstandingRequest{req: req, on: deliveryAttempt{partitionRound: luc.GetRoundNumber(), rootRound: luc.GetRootRoundNumber()}, lastSent: time.Now()}
+	c.mu.Unlock()
+	return nil
+}
+
+// sendRequest puts req on the wire to the root nodes selected from luc.
+func (c *BFTClient) sendRequest(ctx context.Context, req *certification.BlockCertificationRequest, luc *types.UnicityCertificate) error {
 	tb, err := c.trustBaseStore.GetByEpoch(ctx, luc.GetRootEpoch())
 	if err != nil {
 		return fmt.Errorf("loading trust base for epoch %d: %w", luc.GetRootEpoch(), err)
@@ -1232,15 +1288,57 @@ func (c *BFTClient) Submit(ctx context.Context, req *certification.BlockCertific
 	if err != nil {
 		return fmt.Errorf("selecting root nodes for certification: %w", err)
 	}
-	if err := c.net.Send(ctx, req, rootIDs...); err != nil {
-		return err
+	return c.net.Send(ctx, req, rootIDs...)
+}
+
+// resubmitPending re-sends the pending certification request when a root has just shown, by answering with the certificate this
+// node already holds, that it is alive and still at the certificate the request was submitted on: the request was lost on the way,
+// or the roots could not certify it (the closing epoch of a root handoff admits only empty blocks until the next epoch starts).
+// Without this a lost request is recovered only by the root chain's T2 timeout and its repeat certificate (#665).
+//
+// The rule, shared with the aggregator's client so both behave alike:
+//   - pending: a request was submitted on the held certificate and no certificate that advances the round has arrived since;
+//   - trigger: only an authenticated UCDuplicate of the held certificate (same partition and root round), as a handshake answer is;
+//     an older, newer or repeat certificate never triggers (those are ignored or restart the round);
+//   - action: the same signed bytes, never re-signed or rebuilt, once per trigger;
+//   - bounds: at least ResubmitMinInterval between sends of the request, at most MaxResubmits re-sends of it, no timer of its own.
+//
+// The roots take a repeated byte-identical request as idempotent: a node's request is stored once, and one whose quorum is already
+// decided re-issues the certification request to the current leader (rootchain.Node.countRequest).
+func (c *BFTClient) resubmitPending(ctx context.Context, held *types.UnicityCertificate) {
+	if held == nil {
+		return
 	}
-	// A submitted request refills this node's subscription at the root chain, so nothing else needs
-	// to ask for one this round.
+	limit, every := c.opts.MaxResubmits, c.opts.ResubmitMinInterval
+	if limit == 0 {
+		limit = DefaultMaxResubmits
+	}
+	if every == 0 {
+		every = DefaultResubmitMinInterval
+	}
 	c.mu.Lock()
-	c.submittedSinceHandshake = true
+	o := c.outstanding
+	if limit < 0 || o == nil || o.on != (deliveryAttempt{partitionRound: held.GetRoundNumber(), rootRound: held.GetRootRoundNumber()}) ||
+		o.resent >= limit || time.Since(o.lastSent) < every {
+		c.mu.Unlock()
+		return
+	}
+	o.resent++
+	o.lastSent = time.Now()
+	req, attempt := o.req, o.resent
 	c.mu.Unlock()
-	return nil
+
+	if err := c.sendRequest(ctx, req, held); err != nil {
+		if c.log != nil {
+			c.log.WarnContext(ctx, "re-sending the pending certification request failed", slog.Int("attempt", attempt), slog.String("err", err.Error()))
+		}
+		return
+	}
+	if c.log != nil {
+		c.log.InfoContext(ctx, "certification request still outstanding after a duplicate certificate, re-sent unchanged",
+			slog.Uint64("round", req.InputRecord.RoundNumber), slog.Int("attempt", attempt),
+			slog.Uint64("heldRootRound", held.GetRootRoundNumber()))
+	}
 }
 
 // InstallShardConf records the shard configuration hash in effect from the given shard epoch. It is called only with what a verified
