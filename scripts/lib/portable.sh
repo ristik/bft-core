@@ -46,3 +46,19 @@ host_evidence() {
 lane_go_run() { local t=$1; shift; if [ -n "${LANE_TOOLS_DIR:-}" ] && [ -x "$LANE_TOOLS_DIR/$t" ]; then "$LANE_TOOLS_DIR/$t" "$@"; else go run "./scripts/$t" "$@"; fi; }
 # `go version -m BIN...` (module and VCS information embedded in a Go binary): the prebuilt buildinfo tool when $LANE_TOOLS_DIR has it, else the go command.
 lane_buildinfo() { if [ -n "${LANE_TOOLS_DIR:-}" ] && [ -x "$LANE_TOOLS_DIR/buildinfo" ]; then "$LANE_TOOLS_DIR/buildinfo" "$@"; else go version -m "$@"; fi; }
+
+# A command that must not reach the network (the offline F7 verification). lane_net_deny_mechanism prints how it is done here, or nothing when no real mechanism
+# exists (the caller then keeps its stripped-proxy-environment fallback and says so); lane_net_deny_run CMD... runs CMD with the network denied: macOS sandbox-exec,
+# or on Linux a fresh network namespace (sudo -n unshare -n, back to the calling user: an unprivileged user namespace is restricted on the runner image).
+lane_net_deny_mechanism() {
+  if command -v sandbox-exec >/dev/null 2>&1; then echo "macOS sandbox-exec"
+  elif [ "$(uname -s)" = Linux ] && command -v unshare >/dev/null 2>&1 && sudo -n true 2>/dev/null && sudo -n unshare -n true 2>/dev/null; then echo "Linux network namespace"
+  fi
+}
+lane_net_deny_run() {
+  case "$(lane_net_deny_mechanism)" in
+    "macOS sandbox-exec") env -i PATH="$PATH" sandbox-exec -p '(version 1) (allow default) (deny network*)' "$@" ;;
+    "Linux network namespace") sudo -n unshare -n -- sudo -n -u "$(id -un)" env -i PATH="$PATH" "$@" ;;
+    *) return 125 ;;
+  esac
+}
