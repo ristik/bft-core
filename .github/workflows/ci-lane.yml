@@ -96,9 +96,17 @@ jobs:
             if [ "$PR_DRAFT" = true ]; then
               note="draft pull request: live lanes are not run until it is ready for review"
             else
-              # the classifier of the PR's own tree: a change to its rules (scripts/ci/**) selects every lane, so a PR cannot narrow what it is judged by
-              c=$(python3 scripts/ci/classify.py --base "$PR_BASE" --head HEAD)
-              echo "$c"
+              # The classifier and its rules are the BASE branch's copies, never the PR's own: a PR cannot narrow what it is judged by (rev3 B2 on #706). If the base has none
+              # (the PR that introduces them), the plan fails closed and selects everything.
+              mkdir -p "$RUNNER_TEMP/base-ci"
+              if git show "$PR_BASE:scripts/ci/classify.py" >"$RUNNER_TEMP/base-ci/classify.py" 2>/dev/null && git show "$PR_BASE:scripts/ci/pr-paths.json" >"$RUNNER_TEMP/base-ci/pr-paths.json" 2>/dev/null; then
+                c=$(python3 "$RUNNER_TEMP/base-ci/classify.py" --rules "$RUNNER_TEMP/base-ci/pr-paths.json" --base "$PR_BASE" --head HEAD)
+                src="the base branch's classifier"
+              else
+                c='{"lanes":["combined","overbound","abort"],"t6":true,"targeted":true,"selftests":true,"reason":{"all":"the base branch has no classifier: everything is selected"}}'
+                src="no classifier on the base: fail closed"
+              fi
+              echo "$c ($src)"
               lanes=$(jq -c .lanes <<<"$c"); t6=$(jq -r .t6 <<<"$c"); targeted=$(jq -r .targeted <<<"$c"); selftests=$(jq -r .selftests <<<"$c")
             fi
           fi
@@ -111,7 +119,7 @@ jobs:
           { echo "### ci-lane plan"; echo "- event: $EVENT, lane: $lane, inject_failure: $inject"; echo "- commit under test: \`$sha\` ($(git log -1 --format=%s | cut -c1-100))"
             echo "- selected: lanes=$lanes t6=$t6 ureth-targeted=$targeted selftests=$selftests"; [ -z "$note" ] || echo "- $note"
             case "$EVENT" in push|pull_request) ;; *) echo "- resolved once from \`integration/enshrined-evm\`; every job checks out this SHA" ;; esac
-            [ "$EVENT" != pull_request ] || { echo "- classifier: \`scripts/ci/classify.py\` over \`git diff $PR_BASE HEAD\`:"; echo '```'; python3 scripts/ci/classify.py --base "$PR_BASE" --head HEAD | jq -c .reason; echo '```'; }; } >>"$GITHUB_STEP_SUMMARY"
+            [ "$EVENT" != pull_request ] || { echo "- classifier ($src) over \`git diff $PR_BASE HEAD\`:"; echo '```'; jq -c .reason <<<"$c"; echo '```'; }; } >>"$GITHUB_STEP_SUMMARY"
 
   build-ureth:
     needs: plan
@@ -420,8 +428,11 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ needs.plan.outputs.sha || github.sha }}
+          fetch-depth: 0
       - name: Gate
         env:
+          EVENT: ${{ github.event_name }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
           PLAN_RESULT: ${{ needs.plan.result }}
           PLAN_LANES: ${{ needs.plan.outputs.lanes }}
           PLAN_T6: ${{ needs.plan.outputs.t6 }}
@@ -439,4 +450,7 @@ jobs:
           R_SELFTESTS: ${{ needs.selftests.result }}
         run: |
           set -o pipefail
-          scripts/ci/gate.sh | tee -a "$GITHUB_STEP_SUMMARY"
+          # the gate logic is the BASE branch's copy on a pull request (a PR cannot weaken the check that judges it); where the base has none (the PR that introduces it) the PR's own is used
+          gate=scripts/ci/gate.sh
+          if [ "$EVENT" = pull_request ] && git show "$PR_BASE:scripts/ci/gate.sh" >"$RUNNER_TEMP/gate.sh" 2>/dev/null; then chmod +x "$RUNNER_TEMP/gate.sh"; gate="$RUNNER_TEMP/gate.sh"; echo "gate logic: the base branch's"; else echo "gate logic: this tree's (no base copy)"; fi
+          "$gate" | tee -a "$GITHUB_STEP_SUMMARY"
