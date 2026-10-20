@@ -1,0 +1,48 @@
+{
+  "comment": "The reviewed input manifest of the CI combined lane (docs/ci-lanes.md). NOT deploy/testnet/pins.json (that is the testnet package's). scripts/ci/check-pins.sh verifies every built or downloaded component against this file and refuses a wrong pin.",
+  "schema": 1,
+  "components": {
+    "ureth": {
+      "repository": "https://github.com/ristik/ureth.git",
+      "commit": "6e59b68cc29f196d54d3d6e28d6266a8c02d05a1",
+      "package": "unicity-reth",
+      "cargoArgs": ["build", "--release", "--locked", "-p", "unicity-reth"],
+      "features": "default (jemalloc)",
+      "note": "the attested Mac build of the same commit (builds/ureth-6e59b68c) was built with rustc 1.97.1; a Linux binary has its own digest"
+    },
+    "aggregator-go": {
+      "repository": "https://github.com/ristik/aggregator-go.git",
+      "commit": "86d93f1e9ba067a6d7bfe6103cdd79ccee58424e",
+      "branch": "integration/enshrined-evm"
+    },
+    "contracts": {
+      "repository": "https://github.com/ristik/unicity-pos-contracts.git",
+      "commit": "316203f4414214a960ba681e08050fb7637034f5",
+      "branch": "main"
+    },
+    "native-bridge-plugins": {
+      "repository": "https://github.com/ristik/native-bridge-plugins.git",
+      "commit": "efeff933d28fc0d8238e48b2785e07e3a87dee35",
+      "branch": "main",
+      "note": "provisional: the two-shard lane needs the any-age driver of native-bridge-plugins#29"
+    },
+    "state-transition-sdk-js": {
+      "repository": "https://github.com/ristik/state-transition-sdk-js.git",
+      "commit": "59bc7fb7dfdb935759fbe885eeb3bdc01811bb05",
+      "branch": "integration/enshrined-evm"
+    }
+  },
+  "toolchains": {
+    "rust": "1.97.1",
+    "go": "1.24.13",
+    "node": "22",
+    "foundry": { "version": "TO-BE-MEASURED", "linuxAsset": "TO-BE-MEASURED", "sha256": "TO-BE-MEASURED" }
+  },
+  "images": {
+    "mongo": { "image": "mongo", "digest": "TO-BE-MEASURED" }
+  },
+  "runner": {
+    "label": "ubuntu-24.04",
+    "minFreeDiskGiB": "TO-BE-MEASURED"
+  }
+}
