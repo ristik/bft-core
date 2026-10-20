@@ -10,6 +10,7 @@
 #   lane_collect <evidence dir> <test-nodes subdir>...   copies kept for offline replay, the sleep/wake record, SHA256SUMS
 
 # the attested Ureth of the single B1 layout (briefs/builds/ureth-6e59b68c); a lane's <LANE>_URETH_COMMIT overrides it
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/portable.sh"
 LANE_URETH_PIN=6e59b68cc29f196d54d3d6e28d6266a8c02d05a1
 
 lane_pass() { printf 'PASS: %s\n' "$1"; }
@@ -24,7 +25,7 @@ lane_preflight() {
   local bin=$1 commit=$2 dev=${3:-0} provenance=${4:-} missing=() c reported got attested head
   for c in git go jq curl python3 awk tee lsof openssl make mktemp rsync; do command -v "$c" >/dev/null 2>&1 || missing+=("$c"); done
   # the lock helper is needed only to TAKE the lock: a caller that already holds it, or a dedicated host (LANE_HOLDS_LOCK=1), needs none
-  [ "${LANE_HOLDS_LOCK:-0}" = 1 ] || [ -x "$AGRE_ROOT/briefs/devnet-lock.sh" ] || missing+=("$AGRE_ROOT/briefs/devnet-lock.sh")
+  [ "${LANE_HOLDS_LOCK:-0}" = 1 ] || [ -x "$(lane_lock_script)" ] || missing+=("$(lane_lock_script)")
   [ -n "$bin" ] && [ -x "$bin" ] || missing+=("the Ureth binary (a build carrying the fresh-B1 profile)")
   [ -n "$commit" ] || missing+=("the Ureth source commit")
   [ -x "$REPO_ROOT/build/ubft" ] || missing+=("build/ubft (make build)")
@@ -126,7 +127,7 @@ lane_begin() {
   [ -z "$LANE_PROVENANCE" ] || cp -R "$LANE_PROVENANCE" "$dir/ureth-provenance"
   [ -z "${LANE_RUGREGATOR_PROVENANCE:-}" ] || cp -R "$LANE_RUGREGATOR_PROVENANCE" "$dir/rugregator-provenance"
   # the machine's own sleep/wake record around the run: a run across a suspend is not evidence, and this shows it without reading the machine later
-  { date -u +%FT%TZ; pmset -g log 2>/dev/null; } | gzip >"$dir/pmset-before.log.gz" || true
+  host_evidence before "$(host_evidence_file "$dir" before)"
   echo "bft-core head=$(git -C "$REPO_ROOT" rev-parse HEAD) branch=$(git -C "$REPO_ROOT" rev-parse --abbrev-ref HEAD) ureth=$LANE_URETH_COMMIT ubft sha256=$(lane_sha256 "$REPO_ROOT/build/ubft")${LANE_RUGREGATOR_SHA256:+ rugregator=$F8_RUGREGATOR_PIN rugregator sha256=$LANE_RUGREGATOR_SHA256}" | tee "$dir/heads.txt"
   LANE_EVIDENCE_DIR=$dir
   trap lane_stop_devnet EXIT
@@ -159,7 +160,7 @@ lane_collect() {
   for n in root1 root2 root3 root4 root5 root6 evm1 evm2 evm3 evm4 evm5 evm6; do
     [ -f "$REPO_ROOT/test-nodes/$n/debug.log" ] && cp "$REPO_ROOT/test-nodes/$n/debug.log" "$LANE_EVIDENCE_DIR/$n-debug.log"
   done
-  { date -u +%FT%TZ; pmset -g log 2>/dev/null; } | gzip >"$LANE_EVIDENCE_DIR/pmset-after.log.gz" || true
+  host_evidence after "$(host_evidence_file "$LANE_EVIDENCE_DIR" after)"
   echo "state kept in $REPO_ROOT/test-nodes (nodes stopped by their own teardown); evidence copy in $LANE_EVIDENCE_DIR" >"$LANE_EVIDENCE_DIR/state.txt"
   (cd "$LANE_EVIDENCE_DIR" && find . -type f ! -name SHA256SUMS ! -name '.devnet-pid' | LC_ALL=C sort | xargs shasum -a 256 >SHA256SUMS) || true
 }

@@ -17,7 +17,7 @@
 set -uo pipefail
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 REPO_ROOT=$(cd "$SCRIPT_DIR/.." && pwd)
-AGRE_ROOT=$(cd "$REPO_ROOT/.." && pwd)
+AGRE_ROOT=${AGRE_ROOT:-$(cd "$REPO_ROOT/.." && pwd)}
 cd "$REPO_ROOT" || exit 1
 source "$SCRIPT_DIR/lib/utb-lib.sh"
 ok=0 bad=0
@@ -56,17 +56,29 @@ preflight() {
   echo "== UTB lane preflight (no devnet is started) =="
   echo "-- tools"
   export PATH="$HOME/.foundry/bin:$PATH"
-  for t in cast forge jq python3 go curl git gh node npm shasum; do check "$t on PATH" command -v "$t"; done
+  # LANE_PINNED=1 (the CI run job, scripts/ci/run-lane.sh): no Go toolchain and no live gh queries; the components are the manifest's pins (scripts/ci/lane-pins.json)
+  # and the commit under test is the recorded one. Nothing else in the preflight is relaxed.
+  if [ "${LANE_PINNED:-0}" = 1 ]; then tools="cast forge jq python3 curl git node npm shasum"; else tools="cast forge jq python3 go curl git gh node npm shasum"; fi
+  for t in $tools; do check "$t on PATH" command -v "$t"; done
+  if [ "${LANE_PINNED:-0}" = 1 ]; then
+  echo "-- components against the reviewed manifest (scripts/ci/lane-pins.json; replaces the live gh queries)"
+  while read -r line; do case "$line" in ok*) yes "${line#ok }";; *) no "${line#FAIL }";; esac; done < <("$SCRIPT_DIR/ci/check-pins.sh" env 2>&1)
+  else
   echo "-- merged prerequisites (read-only gh queries on ristik/*)"
   for pr in "ristik/bft-core 632" "ristik/bft-core 633" "ristik/bft-core 634" "ristik/bft-core 635" "ristik/bft-core 650" "ristik/aggregator-go 2" "ristik/bft-go-base 1" "ristik/ureth 70" "ristik/unicity-pos-contracts 39" "ristik/native-bridge-plugins 19"; do
     set -- $pr; st=$(gh pr view "$2" -R "$1" --json state --jq .state 2>/dev/null || echo unknown)
     if [ "$st" = MERGED ]; then yes "$1#$2 merged"; else no "$1#$2 is $st (must be MERGED before the run)"; fi
   done
+  fi
   echo "-- bft-core checkout and build"
   check "clean checkout" bash -c "[ -z \"\$(git -C '$REPO_ROOT' status --porcelain --untracked-files=no)\" ]"
   head=$(git -C "$REPO_ROOT" rev-parse HEAD)
-  check "HEAD contains origin/integration/enshrined-evm" git -C "$REPO_ROOT" merge-base --is-ancestor origin/integration/enshrined-evm HEAD
-  if [ -x "$UBFT" ] && go version -m "$UBFT" 2>/dev/null | grep -q "vcs.revision=$head" && ! go version -m "$UBFT" | grep -q 'vcs.modified=true'; then yes "$UBFT is built from HEAD ${head:0:10}"; else no "$UBFT is missing or not built from HEAD ${head:0:10} (make build)"; fi
+  if [ "${LANE_PINNED:-0}" = 1 ]; then
+    check "HEAD is the recorded commit under test (${LANE_COMMIT_UNDER_TEST:-unset})" test -n "${LANE_COMMIT_UNDER_TEST:-}" -a "$head" = "${LANE_COMMIT_UNDER_TEST:-}"
+  else
+    check "HEAD contains origin/integration/enshrined-evm" git -C "$REPO_ROOT" merge-base --is-ancestor origin/integration/enshrined-evm HEAD
+  fi
+  if [ -x "$UBFT" ] && lane_buildinfo "$UBFT" 2>/dev/null | grep -q "vcs.revision=$head" && ! lane_buildinfo "$UBFT" | grep -q 'vcs.modified=true'; then yes "$UBFT is built from HEAD ${head:0:10}"; else no "$UBFT is missing or not built from HEAD ${head:0:10} (make build)"; fi
   # the participant binaries must know the profile: a binary that predates it would start a node that silently runs the plain protocol
   for sub in "root-node run" "shard-node run"; do
     check "$sub accepts --utb-genesis/--utb-genesis-id" bash -c "$UBFT $sub --help 2>&1 | grep -q -- '--utb-genesis-id'"
@@ -75,14 +87,18 @@ preflight() {
   check "trust-base utb-verify/utb-export exist (PR6: the independent verifier)" bash -c "$UBFT trust-base --help 2>&1 | grep -q utb-verify && $UBFT trust-base --help 2>&1 | grep -q utb-export"
   note "deploy/testnet/pins.json pins bft $(python3 -c "import json;print(json.load(open('$REPO_ROOT/deploy/testnet/pins.json'))['bft'][:10])" 2>/dev/null): the testnet package is NOT what this lane runs (devnet scripts + build/ubft)"
   echo "-- the independent verifier"
-  check "utb-evidence builds (scripts/utb-evidence) into $UTB_EVIDENCE" bash -c "cd '$REPO_ROOT' && go build -o '$UTB_EVIDENCE' ./scripts/utb-evidence"
+  if [ "${LANE_PINNED:-0}" = 1 ]; then
+    check "utb-evidence ($UTB_EVIDENCE) is built from HEAD ${head:0:10} (a prebuilt binary, verified by its embedded build information)" bash -c "source '$SCRIPT_DIR/lib/portable.sh'; [ -x '$UTB_EVIDENCE' ] && lane_buildinfo '$UTB_EVIDENCE' | grep -q 'vcs.revision=$head' && ! lane_buildinfo '$UTB_EVIDENCE' | grep -q 'vcs.modified=true'"
+  else
+    check "utb-evidence builds (scripts/utb-evidence) into $UTB_EVIDENCE" bash -c "cd '$REPO_ROOT' && go build -o '$UTB_EVIDENCE' ./scripts/utb-evidence"
+  fi
   echo "-- machine"
   free=$(df -k "$AGRE_ROOT" | awk 'NR==2{print int($4/1048576)}')
   # the lane itself writes about 1 GiB (the 25 GiB default also covers building ureth/contracts); a run with prebuilt, attested builds on a shared disk may
   # lower it (the preflight prints the value it checked against; it is not part of the evidence directory)
   min=${UTB_MIN_FREE_GIB:-25}
   if [ "${free:-0}" -ge "$min" ]; then yes "free disk ${free} GiB (>= $min)"; else no "free disk ${free:-?} GiB (< $min)"; fi
-  [ -x "$AGRE_ROOT/briefs/devnet-lock.sh" ] && yes "devnet lock helper present" || no "devnet lock helper missing"
+  [ -x "$(lane_lock_script)" ] && yes "devnet lock helper present ($(lane_lock_script))" || no "devnet lock helper missing"
   if [ -d "$AGRE_ROOT/.devnet-lock" ]; then note "the devnet lock is HELD by: $(cat "$AGRE_ROOT/.devnet-lock/owner" 2>/dev/null) (the run would queue)"; else yes "devnet lock is free"; fi
   echo "-- ureth (attested build) and contracts: as the any-age lane (scripts/anyage-lane.sh --preflight checks them; this lane runs the same builds)"
   if [ -n "${M2_URETH_BIN:-}" ] && [ -x "$M2_URETH_BIN" ] && [ -n "${M2_URETH_COMMIT:-}" ]; then yes "M2_URETH_BIN $M2_URETH_BIN @ ${M2_URETH_COMMIT:0:10}"; else no "set M2_URETH_BIN and M2_URETH_COMMIT to the attested ureth build"; fi
@@ -117,7 +133,8 @@ preflight() {
   if [ -n "${UTB_SDK_JS:-}" ] && [ -f "$UTB_SDK_JS/lib/util/TrustBaseUtils.js" ]; then
     yes "UTB_SDK_JS $UTB_SDK_JS"
     check "UTB_SDK_JS is a clean git checkout" bash -c "[ -z \"\$(git -C '$UTB_SDK_JS' status --porcelain --untracked-files=no)\" ]"
-    check "UTB_SDK_JS contains origin/integration/enshrined-evm (the trust-base history and fetch-and-retry are on it)" git -C "$UTB_SDK_JS" merge-base --is-ancestor origin/integration/enshrined-evm HEAD
+    if [ "${LANE_PINNED:-0}" = 1 ]; then note "UTB_SDK_JS is the manifest's pin (checked above), not a branch-tip ancestry query"; else
+    check "UTB_SDK_JS contains origin/integration/enshrined-evm (the trust-base history and fetch-and-retry are on it)" git -C "$UTB_SDK_JS" merge-base --is-ancestor origin/integration/enshrined-evm HEAD; fi
     check "node runs the client check (syntax)" node --check "$REPO_ROOT/scripts/utb-sdk-client/check.mjs"
   else
     no "set UTB_SDK_JS to a built checkout of the SDK fork (npm ci && npm run build)"
@@ -135,7 +152,12 @@ preflight() {
     note "no generated manifest yet (test-nodes/utb/utb-manifest.json): --prep creates it"
   fi
   check "the genesis dry run was done on this HEAD (scripts/utb-lane.sh --prep): record at briefs/devnet-runs/utb-prep-<head>.ok" test -e "$AGRE_ROOT/briefs/devnet-runs/utb-prep-${head:0:12}.ok"
-  check "the lane's own self-test passes" bash -c "UBFT='$UBFT' UTB_ST_TRUSTBASE='${UTB_ST_TRUSTBASE:-}' bash -c 'source $SCRIPT_DIR/lib/utb-lib.sh; utb_selftest'"
+  if [ "${LANE_PINNED:-0}" = 1 ]; then
+    # the self-test compiles Go test binaries: it runs in the build job (a toolchain job), and this job checks its recorded result for this very commit
+    check "the lane's own self-test passed in the build job for HEAD ${head:0:10} (${LANE_SELFTEST_LOG:-unset})" bash -c "grep -q '^utb lane self-test: 0 failures' '${LANE_SELFTEST_LOG:-/nonexistent}' && grep -qx 'commit $head' '${LANE_SELFTEST_LOG:-/nonexistent}'"
+  else
+    check "the lane's own self-test passes" bash -c "UBFT='$UBFT' UTB_ST_TRUSTBASE='${UTB_ST_TRUSTBASE:-}' bash -c 'source $SCRIPT_DIR/lib/utb-lib.sh; utb_selftest'"
+  fi
   echo
   echo "preflight: $ok ok, $bad not ready"
   [ "$bad" -eq 0 ]
@@ -161,7 +183,7 @@ case "${1:-}" in
     lane_env
     [ -n "${P85_CONTRACTS:-}" ] && [ -n "${DNB_TOOL:-}" ] || { echo "--prep needs P85_CONTRACTS, M2_URETH_BIN, M2_URETH_COMMIT, DNB_TOOL (and P85_DEV_RUN=1 unless the provenance is attested)" >&2; exit 2; }
     export ANYAGE_PREP_ONLY=1
-    "$AGRE_ROOT/briefs/devnet-lock.sh" utb-prep env P85_LANE_LOCKED=1 "$SCRIPT_DIR/p85-lane.sh"; rc=$?
+    "$(lane_lock_script)" utb-prep env P85_LANE_LOCKED=1 "$SCRIPT_DIR/p85-lane.sh"; rc=$?
     if [ "$rc" -eq 0 ]; then
       printf '%s\n%s\n' "prep-only dry run on bft-core $(git -C "$REPO_ROOT" rev-parse HEAD) at $(date -u +%FT%TZ)" "${P85_DEV_RUN:+DEVELOPMENT RUN (P85_DEV_RUN=1): binary and checkout not attested}" >"$AGRE_ROOT/briefs/devnet-runs/utb-prep-$(git -C "$REPO_ROOT" rev-parse HEAD | cut -c1-12).ok"
     fi

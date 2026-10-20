@@ -1,0 +1,65 @@
+{
+  "comment": "The reviewed input manifest of the CI combined lane (docs/ci-lanes.md). NOT deploy/testnet/pins.json (that is the testnet package's). scripts/ci/check-pins.sh verifies every built or downloaded component against this file and refuses a wrong pin.",
+  "schema": 1,
+  "components": {
+    "ureth": {
+      "repository": "https://github.com/ristik/ureth.git",
+      "commit": "6e59b68cc29f196d54d3d6e28d6266a8c02d05a1",
+      "package": "unicity-reth",
+      "cargoArgs": [
+        "build",
+        "--release",
+        "--locked",
+        "-p",
+        "unicity-reth"
+      ],
+      "features": "default (jemalloc)",
+      "note": "the attested Mac build of the same commit (builds/ureth-6e59b68c) was built with rustc 1.97.1; a Linux binary has its own digest"
+    },
+    "aggregator-go": {
+      "repository": "https://github.com/ristik/aggregator-go.git",
+      "commit": "86d93f1e9ba067a6d7bfe6103cdd79ccee58424e",
+      "branch": "integration/enshrined-evm"
+    },
+    "contracts": {
+      "repository": "https://github.com/ristik/unicity-pos-contracts.git",
+      "commit": "316203f4414214a960ba681e08050fb7637034f5",
+      "branch": "main"
+    },
+    "native-bridge-plugins": {
+      "repository": "https://github.com/ristik/native-bridge-plugins.git",
+      "commit": "ccd3bb90b0985a948b1d44d72eb42262ddb2db5d",
+      "branch": "main",
+      "note": "nbp#29 merge: the any-age driver with the two-shard steering (a no-op for one aggregator shard) on top of nbp#27/#28 (trust-base bundle driver, shard-split vectors). Deliberately not main: nbp#30/#31 (consolidated assembly as the default) change what the lane's L1 token exercises and belong to the consolidation lane step."
+    },
+    "state-transition-sdk-js": {
+      "repository": "https://github.com/ristik/state-transition-sdk-js.git",
+      "commit": "59bc7fb7dfdb935759fbe885eeb3bdc01811bb05",
+      "branch": "integration/enshrined-evm"
+    }
+  },
+  "toolchains": {
+    "rust": "1.97.1",
+    "go": "1.25.14",
+    "node": "22",
+    "foundry": {
+      "version": "1.8.1",
+      "linuxAsset": "foundry_v1.8.1_linux_amd64.tar.gz",
+      "url": "https://github.com/foundry-rs/foundry/releases/download/v1.8.1/foundry_v1.8.1_linux_amd64.tar.gz",
+      "sha256": "37b45855232e57624d90113b049ca54f0c92055bb5c1997fcbdc3076c7b89c10",
+      "note": "the version the lane's Mac runs (cast/forge 1.8.1); anyage-lane.sh requires 1.8.x"
+    }
+  },
+  "images": {
+    "mongo": {
+      "image": "mongo:7.0.45",
+      "digest": "sha256:c53852c00c23ca9f23fc39690350ffa9a80e3642fe8f96879726d8da0abe80a7",
+      "note": "multi-arch index digest; the lane pulls image@digest"
+    }
+  },
+  "runner": {
+    "label": "ubuntu-24.04",
+    "minFreeDiskGiB": 8,
+    "minFreeDiskNote": "Measured on ubuntu-24.04 standard runners (4 CPU / 16 GB), runs 39391426570 and 39399607786: the lane's disk growth peaks at 3.88 GiB (the cold ureth build 3.79 GiB, the Go build 3.72 GiB, sources 0.97 GiB); memory peaks at 2.36 GiB (run) and 4.62 GiB (ureth build), no swap. The gate is checked by the preflight after the inputs are unpacked: 8 GiB is 2.06 times the measured peak growth, so a run twice as chatty as the measured one still fits, and it is far below the 25 GiB of the Mac default (which also covers building ureth and contracts there). A runner with less than 8 GiB free after unpacking is refused, never waved through."
+  }
+}
