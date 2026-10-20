@@ -135,6 +135,11 @@ PY
 # TMPDIR); make it writable first. A failing run keeps its checkout for inspection; a passing run never does.
 remove_isolation_root() {
   [ -n "${ISOLATION_ROOT:-}" ] && [ -d "$ISOLATION_ROOT" ] || return 0
+  # CI (scripts/ci/run-t6.sh) searches the published pack for the VALUES of this devnet's keys and JWTs, which die with the checkout: save them first
+  if [ -n "${T6_SECRETS_DIR:-}" ]; then
+    local here_; here_=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+    "$here_/ci/t6-secrets.sh" "$T6_SECRETS_DIR" "$ISOLATION_ROOT/bft-core/test-nodes" "$(sed -n 's/^T6_TREASURY_TEST_KEY=//p' "$here_/t6/lane-actions.sh" | head -1)" || true
+  fi
   chmod -R u+w "$ISOLATION_ROOT" 2>/dev/null || true
   rm -rf "$ISOLATION_ROOT"
 }

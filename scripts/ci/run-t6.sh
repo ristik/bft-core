@@ -16,6 +16,8 @@ pins=scripts/ci/lane-pins.json
 inject=${CI_INJECT_FAILURE:-none}; deadline=${T6_DEADLINE_MIN:-105}
 head=$(git rev-parse HEAD)
 export AGRE_ROOT=$work/agre DEVNET_LOCK_DIR=$work/agre/.devnet-lock
+# the devnet's secrets, saved for the value scan of the published pack (see finalize); outside the evidence, never uploaded
+export T6_SECRETS_DIR=$work/t6-secrets; mkdir -p "$T6_SECRETS_DIR"
 mkdir -p "$AGRE_ROOT/builds" "$AGRE_ROOT/briefs/devnet-runs"
 rc=0; lane_rc=; finalized=0
 
@@ -35,8 +37,11 @@ finalize() {
     mkdir -p "$evdir/failed-node-logs"
     ( cd "$iso/bft-core/test-nodes" && find . -maxdepth 3 -type f \( -name '*.log' -o -name 'pid' \) ! -path '*/dd/*' -print | while read -r f; do cp "$f" "$evdir/failed-node-logs/$(echo "${f#./}" | tr '/' '-')" 2>/dev/null; done )
   fi
+  # the values of this devnet's keys and JWTs are searched for in the published pack (--nodes). A passing run's checkout is already gone: t6-rehearsal.sh saved the
+  # secrets into $T6_SECRETS_DIR before removing it; a failing run's checkout is still here. This directory is outside the evidence and never uploaded.
+  [ -z "$iso" ] || scripts/ci/t6-secrets.sh "$T6_SECRETS_DIR" "$iso/bft-core/test-nodes" "$(sed -n 's/^T6_TREASURY_TEST_KEY=//p' scripts/t6/lane-actions.sh | head -1)"
   st=${lane_rc:-1}; [ "$rc" -eq 0 ] || st=$rc
-  scripts/ci/publish-evidence.sh --evidence "$evdir" --out "$out/upload" --kind t6 --status "$st" --min-node-logs 0 \
+  scripts/ci/publish-evidence.sh --evidence "$evdir" --out "$out/upload" --kind t6 --status "$st" --min-node-logs 0 --nodes "$T6_SECRETS_DIR" \
     --extra "$out/run-lane.log" --extra "$out/lane-stdout.log" --extra "$out/host-before.log.gz" --extra "$out/host-after.log.gz" --extra "$out/oom-lines.txt" >"$out/publish.log" 2>&1
   pub_rc=$?; log "publish-evidence exit $pub_rc"; tail -n 8 "$out/publish.log"
   return 0
