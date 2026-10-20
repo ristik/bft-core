@@ -40,7 +40,7 @@ s4_equivocate() {
   local d=$S4_DIR cur start R leader a="" b="" n cfg net gen epoch=2 utb=() ra rb t0
   mkdir -p "$d"
   [ "$(s4_epoch 1)" = "$epoch" ] || { echo "root 1 is not in epoch $epoch (the joiner is a committee member only there)" >&2; return 1; }
-  cfg=$H3_DIR/candidate-config-2.json
+  cfg=$H3_DIR/candidate-config-1.json   # the first handoff installs epoch 2
   net=$(jq -r .network "$cfg"); gen=$(jq -r .genesis "$cfg")
   [ "$(jq -r .signingScheme "$cfg")" = 2 ] || { echo "epoch 2 is not a scheme 2 epoch" >&2; return 1; }
   [ "${UTB_LANE:-0}" != 1 ] || utb=(--utb)
@@ -157,8 +157,8 @@ s4_submit_settle() {
   CASE=; OFFENCE=; s4_snapshot before || return 1
   # the control calls, from the real pair (they are eth_calls: nothing is sent): reordered/altered payloads and the identical pair are refused before admission
   s4_tool calldata --journal "$d/journal-root$(jq -r .halfA.root "$d/delivery.json").db" --journal "$d/journal-root$(jq -r .halfB.root "$d/delivery.json").db" \
-    --network-word "$(s4_cast call --rpc-url "$(p85_eth)" "$EV" 'network()(bytes32)' 2>/dev/null | awk '{print $1}')" --root-network "$(jq -r .network "$H3_DIR/candidate-config-2.json")" \
-    --genesis "$(jq -r .genesis "$H3_DIR/candidate-config-2.json")" --exposure "$EXPOSURE" --out "$d/calldata" || return 1
+    --network-word "$(s4_cast call --rpc-url "$(p85_eth)" "$EV" 'network()(bytes32)' 2>/dev/null | awk '{print $1}')" --root-network "$(jq -r .network "$H3_DIR/candidate-config-1.json")" \
+    --genesis "$(jq -r .genesis "$H3_DIR/candidate-config-1.json")" --exposure "$EXPOSURE" --out "$d/calldata" || return 1
   local rep; rep=$(cat "$d/reporter.addr")
   s4_py refusal --rpc "$(p85_eth)" --to "$EV" --sender "$rep" --data "$d/calldata/identical.hex" --error 'IdenticalStatements()' || return 1
   s4_py refusal --rpc "$(p85_eth)" --to "$EV" --sender "$rep" --data "$d/calldata/altered.hex" --error 'BadSignature()' || return 1
