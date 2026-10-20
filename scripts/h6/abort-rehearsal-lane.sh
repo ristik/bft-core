@@ -11,8 +11,9 @@
 set -euo pipefail
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 REPO_ROOT=$(cd "$SCRIPT_DIR/../.." && pwd)
-AGRE_ROOT=$(cd "$REPO_ROOT/.." && pwd)
-LOCK_SCRIPT=$AGRE_ROOT/briefs/devnet-lock.sh
+source "$REPO_ROOT/scripts/lib/portable.sh"
+AGRE_ROOT=$(lane_agre_root)
+LOCK_SCRIPT=$(lane_lock_script)
 H6_URETH_COMMIT=${H6_URETH_COMMIT:-6e59b68cc29f196d54d3d6e28d6266a8c02d05a1}
 EVIDENCE_DIR=${H6_EVIDENCE_DIR:-$AGRE_ROOT/briefs/devnet-runs/h6-abort-$(date -u +%Y%m%dT%H%M%SZ)}
 pass() { printf 'PASS: %s\n' "$1"; }
@@ -145,7 +146,7 @@ export Q3_B1=1 H3_SLOT_LAYOUT=3 EVM_OPERATOR_STATUS_RPC=1
 # the steps start only under the runner's lock flag and the lane flag (the wrapper passes the first through its environment)
 export H6_LANE_LOCKED=1
 # the machine's own sleep/wake record around the run, so a suspended clock is visible in the evidence rather than read off the machine later
-{ date -u +%FT%TZ; pmset -g log 2>/dev/null; } | gzip >"$EVIDENCE_DIR/pmset-before.log.gz" || true
+host_evidence before "$(host_evidence_file "$EVIDENCE_DIR" before)"
 
 set +e
 DEVNET_PIDFILE="$EVIDENCE_DIR/.devnet-pid"; rm -f "$DEVNET_PIDFILE"
@@ -160,7 +161,7 @@ set -e
 rm -f "$DEVNET_PIDFILE"
 # the state is kept for offline replay: test-nodes stays where it is; the evidence below is a copy
 cp -R test-nodes/q3 "$EVIDENCE_DIR/q3" 2>/dev/null || true
-{ date -u +%FT%TZ; pmset -g log 2>/dev/null; } | gzip >"$EVIDENCE_DIR/pmset-after.log.gz" || true
+host_evidence after "$(host_evidence_file "$EVIDENCE_DIR" after)"
 for n in root1 root2 root3 root4 evm1 evm2 evm3 evm4; do [ -f "test-nodes/$n/debug.log" ] && cp "test-nodes/$n/debug.log" "$EVIDENCE_DIR/$n-debug.log"; done
 for n in 1 2 3 4; do
   for f in "test-nodes/auth$n"/*.log "test-nodes/reth$n/reth.log"; do [ -f "$f" ] && cp "$f" "$EVIDENCE_DIR/$(echo "$f" | sed 's#^test-nodes/##; s#/#-#g')"; done

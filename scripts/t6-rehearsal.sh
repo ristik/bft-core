@@ -3,8 +3,10 @@
 set -euo pipefail
 
 SOURCE_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-AGRE_ROOT=$(cd "$SOURCE_ROOT/.." && pwd)
-LOCK_SCRIPT=$AGRE_ROOT/briefs/devnet-lock.sh
+REPO_ROOT=$SOURCE_ROOT
+source "$SOURCE_ROOT/scripts/lib/portable.sh"
+AGRE_ROOT=$(lane_agre_root)
+LOCK_SCRIPT=$(lane_lock_script)
 SCRIPT_PATH=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")
 EVIDENCE_DIR=${T6_EVIDENCE_DIR:-$AGRE_ROOT/briefs/devnet-runs/t6-rehearsal-$(date -u +%Y%m%dT%H%M%SZ)}
 T6_BFT_COMMIT=${T6_BFT_COMMIT:-$(git -C "$SOURCE_ROOT" rev-parse HEAD)}
@@ -215,6 +217,11 @@ install_pinned_foundry() {
       asset=foundry_v1.8.3_darwin_amd64.tar.gz
       digest=1b469229681b31e3c66a07132811b99460b2874a0a48de3b29500234454f47b8
       ;;
+    Linux-x86_64|Linux-amd64)
+      # the published asset's digest as the GitHub release API lists it (asset digest, checked 2026-10-20) and as sha256sum of the downloaded file: the same value
+      asset=foundry_v1.8.3_linux_amd64.tar.gz
+      digest=7ca48e6ca3cac1bce1403ca67e5bc1dc3bc1fd818199c9957c7165079c228568
+      ;;
     *) fail "no pinned Foundry release asset is configured for $(uname -s)-$(uname -m)"; return 1 ;;
   esac
   archive=$ISOLATION_ROOT/cache/$asset
@@ -228,7 +235,7 @@ install_pinned_foundry() {
   }
   printf 'Foundry release=v1.8.3\nFoundry asset=%s\nFoundry asset sha256=%s\nFoundry forge sha256=%s\n' \
     "$asset" "$digest" "$(sha256 "$ISOLATION_ROOT/bin/forge")" >>"$EVIDENCE_DIR/source-pin.txt"
-  pass "Foundry v1.8.3 installed from its pinned published macOS artifact"
+  pass "Foundry v1.8.3 installed from its pinned published $(uname -s) artifact"
 }
 
 build_pinned_contracts() {

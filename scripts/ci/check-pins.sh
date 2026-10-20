@@ -4,6 +4,7 @@
 #   scripts/ci/check-pins.sh git NAME DIR              the HEAD of the checkout DIR (clean, no local change) must equal the pinned commit of NAME
 #   scripts/ci/check-pins.sh env                       every component the lane reads from the environment (AGG_COMMIT + the aggregator provenance, P85_CONTRACTS, NBP_DIR,
 #                                                      UTB_SDK_JS, M2_URETH_COMMIT + M2_URETH_BIN's reported commit, FOUNDRY) against the manifest; prints one line each
+#   scripts/ci/check-pins.sh env-core                  the same for a lane without the aggregator, NBP and the SDK (ureth, contracts, Foundry)
 #   scripts/ci/check-pins.sh selftest                  chain-free tests: a right pin is accepted, a wrong one, a short one and an unknown component are refused
 # PINS=<file> selects another manifest (the self-test uses it). Exit status 0 only when everything checked matches.
 set -uo pipefail
@@ -32,6 +33,14 @@ check_git() { # NAME DIR
 case "${1:-}" in
   component) check_component "${2:?NAME}" "${3:?VALUE}" || bad=1 ;;
   git) check_git "${2:?NAME}" "${3:?DIR}" || bad=1 ;;
+  env-core)   # the components a P85 / H6 lane without the aggregator reads: ureth (binary + provenance), contracts, Foundry
+    check_git contracts "${P85_CONTRACTS:-/nonexistent}" || bad=1
+    reported=$("${M2_URETH_BIN:-/nonexistent}" --version 2>&1 | sed -n 's/^Commit SHA: //p' | head -1)
+    check_component ureth "${reported:-none}" || bad=1
+    check_component ureth "${M2_URETH_COMMIT:-none}" || bad=1
+    want=$(jq -r '.toolchains.foundry.version' "$PINS"); got=$(cast --version 2>/dev/null | sed -n 's/^cast Version: *\([0-9.]*\).*/\1/p; s/^cast \([0-9.]*\).*/\1/p' | head -1)
+    if [ -n "$got" ] && [ "$got" = "${want#v}" ]; then say "ok    foundry $got"; else say "FAIL  foundry: cast reports '${got:-nothing}', the manifest pins '$want'"; bad=1; fi
+    ;;
   env)
     check_component aggregator-go "${AGG_COMMIT:-none}" || bad=1
     if [ -n "${AGG_BIN:-}" ]; then
