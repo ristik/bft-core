@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -137,7 +138,16 @@ func TestArchiveRestoreRetainsInBatchesAndReportsItsPhases(t *testing.T) {
 		_, err := restore.Archive.Get(q)
 		require.NoError(t, err, "record %d of %d is not in the local store", i, n)
 	}
-	require.Len(t, lines, 2, "the start of the fetch and one line between the phases (the periodic lines need a restore longer than %s): %v", restoreProgressEvery, lines)
+	// The periodic lines (they carry "done=") appear whenever the restore outlasts restoreProgressEvery, which a loaded machine can do:
+	// the phase lines are the two without them, in order.
+	var phases []string
+	for _, line := range lines {
+		if !strings.Contains(line, "done=") {
+			phases = append(phases, line)
+		}
+	}
+	require.Len(t, phases, 2, "the start of the fetch and one line between the phases: %v", lines)
+	lines = phases
 	require.Contains(t, lines[0], "fetching archive records from the pinned tip to genesis")
 	require.Contains(t, lines[0], "blocks="+strconv.Itoa(n))
 	require.Contains(t, lines[1], "archive records fetched and retained; replaying")
