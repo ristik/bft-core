@@ -1,7 +1,7 @@
 {
   "bft": "4dc3a49a2c18ea7fcb2c1e69e1e4719d2f7cb6b4",
   "ureth": "6e59b68cc29f196d54d3d6e28d6266a8c02d05a1",
-  "rugregator": "dd5b1406a17fdeb415799045c5e81609619a870a",
+  "rugregator": "711213eb6c4c93503d16d7108d474dfc222984ad",
   "runtime": "debian:bookworm-slim@sha256:7c7b2c966bc9ee8cedfeef67e0e279108992c77681fa595db4a9d65c06ccc587",
   "python": "python:3.13.12-alpine3.22@sha256:41351b07080ccfaa27bf38dde20de79ee6a0ac74a58c00c6d7a7d96ac4e69716",
   "contracts": "b17829ca0eee3023148524f1bdbdfb2d2729e0c6"
