@@ -134,5 +134,5 @@ validators (`reth_untrust`, used by T6's coupled rotation). An older ureth has t
   including block itself is inconclusive and is repeated (up to four times); a transaction that was only ever included by the validator it was sent to fails the step.
 - `lane.txGossip` in `scripts/ci/lane-pins.json` makes the CI run set both (`scripts/ci/run-lane.sh`). It belongs with a ureth pin that has gossip.
 
-Evidence (run 39505397682, ureth `3de4dfff`): attempt 1 inconclusive (validator 2 sealed the including block 10 itself); attempt 2: the transaction sent to validator 2 only was included in block 12, sealed by
+Evidence (run 39505397682, ureth `3de4dfff` (ureth#75 head at the time; merged as `53c9330d`)): attempt 1 inconclusive (validator 2 sealed the including block 10 itself); attempt 2: the transaction sent to validator 2 only was included in block 12, sealed by
 validator 4. In both attempts the block sealed in between by validator 1 (blocks 9 and 11) did NOT include it: the gossip takes a moment, a block built right after the submission can miss it.

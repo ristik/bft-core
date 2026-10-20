@@ -4,7 +4,7 @@
   "components": {
     "ureth": {
       "repository": "https://github.com/ristik/ureth.git",
-      "commit": "3de4dfff20151a18265d449522ac764d139a6c7a",
+      "commit": "53c9330d030426b9847ac2c69840adcfc8490221",
       "package": "unicity-reth",
       "cargoArgs": [
         "build",
@@ -14,7 +14,7 @@
         "unicity-reth"
       ],
       "features": "default (jemalloc)",
-      "note": "EXPERIMENT: ristik/ureth#75 head (transaction-only gossip); not a reviewed pin",
+      "note": "ureth#75 merge: transaction-only gossip among the trusted peers of the shard (the lanes peer the clients with admin_addTrustedPeer, scripts/lib/reth-peers.sh)",
       "targetedPackages": [
         "reth-unicity-b1",
         "reth-unicity-execution",

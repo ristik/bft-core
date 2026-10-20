@@ -274,6 +274,9 @@ h3_restart_roots() {
   m2_wait_root_epoch "$(h3_first_root)" "$epoch"
 }
 
+# reth_trust / reth_untrust (definitions only): every lane that reaches h3_start_reth needs them, not only the paired devnet that sources them first
+declare -F reth_trust >/dev/null || source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/reth-peers.sh"
+
 h3_start_reth() { # spare execution client i, peered with the running ones
   local i=$1 j enode
   openssl rand -hex 32 >"test-nodes/evm$i/jwt.hex"
@@ -292,8 +295,8 @@ h3_start_reth() { # spare execution client i, peered with the running ones
   # a member that joins is trusted by the others and trusts them (transaction gossip, scripts/lib/reth-peers.sh)
   for j in $H3_ONLINE; do
     [ "$j" = "$i" ] && continue
-    reth_trust "$i" "$j" || continue
-    reth_trust "$j" "$i" || true
+    reth_trust "$i" "$j" || echo "WARN h3_start_reth: validator $i could not trust validator $j (transaction gossip needs the peering)" >&2
+    reth_trust "$j" "$i" || echo "WARN h3_start_reth: validator $j could not trust validator $i (transaction gossip needs the peering)" >&2
   done
 }
 

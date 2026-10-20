@@ -51,7 +51,7 @@ gossip_step_proof() {
       [ "$s" != "$v" ] || turnBefore=1
     done
     if [ -n "$sealer" ] && [ "$sealer" != "$v" ]; then
-      echo "GOSSIP: the transaction sent to validator $v only was included in block $block, sealed by validator $sealer (validator $v's own turn had not come: ${turnBefore} own blocks in between)"
+      echo "GOSSIP: the transaction sent to validator $v only was included in block $block, sealed by validator $sealer (validator $v sealed a block in between: $([ "$turnBefore" = 1 ] && echo yes || echo no))"
       ok=1; break
     fi
     echo "GOSSIP: attempt $attempt inconclusive: the including block $block was sealed by the submitter itself (validator ${sealer:-?}); trying again" >&2
