@@ -350,3 +350,29 @@ func TestJournalPrune(t *testing.T) {
 		require.Equal(t, want, rec != nil, "round %d", r)
 	}
 }
+
+// A pruned event in the interior of the journal (events above it remain) is a gap for a consumer whose cursor lies below it, and only for it.
+func TestExportReportsAnInteriorHole(t *testing.T) {
+	f := newFixture(t)
+	j := newJournal(t, 0)
+	for r := uint64(10); r < 16; r++ { // events 1..6
+		_, err := j.Record(f.observe(t, "1", 2, r, false, 0x01))
+		require.NoError(t, err)
+	}
+	require.NoError(t, j.Delete(Slot{"1", 2, 13})) // event 4
+
+	below, err := j.Export(2, 0)
+	require.NoError(t, err)
+	require.True(t, below.Gap, "event 4 lies above the cursor and is gone")
+	require.EqualValues(t, 1, below.OldestSeq, "the oldest held event is unchanged: the hole is not a pruned prefix")
+	require.Len(t, below.Records, 3, "events 3, 5 and 6 remain")
+
+	from0, err := j.Export(0, 0)
+	require.NoError(t, err)
+	require.True(t, from0.Gap)
+
+	at, err := j.Export(4, 0)
+	require.NoError(t, err)
+	require.False(t, at.Gap, "a cursor at or beyond the hole has missed nothing")
+	require.Len(t, at.Records, 2)
+}
