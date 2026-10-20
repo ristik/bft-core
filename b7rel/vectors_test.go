@@ -167,9 +167,22 @@ func build(t *testing.T) vectors {
 	bad("one trailing byte", func(b []byte) []byte { return append(b, 0) })
 	bad("one trailing word", func(b []byte) []byte { return append(b, make([]byte, 32)...) })
 	bad("one word short", func(b []byte) []byte { return b[:len(b)-32] })
-	bad("epoch count zero", setCount(0))
+	bad("epoch count zero, three epochs of length", setCount(0))
 	bad("epoch count above the length", setCount(4))
-	bad("epoch count above MaxEpochs", setCount(MaxEpochs+1))
+	bad("epoch count above MaxEpochs, three epochs of length", setCount(MaxEpochs+1))
+	// the count rules alone: the length is the one the count implies, so only the 1..MaxEpochs bound refuses
+	bad("epoch count zero, header only (512 bytes)", func(b []byte) []byte { b = b[:32*headerWords]; w := word(0); copy(b[32*15:], w[:]); return b })
+	bad("MaxEpochs+1 epochs, length-consistent", func([]byte) []byte {
+		b, err := baseJournal(MaxEpochs).Encode()
+		require.NoError(t, err)
+		w := word(MaxEpochs + 1)
+		copy(b[32*15:], w[:])
+		for _, x := range [][32]byte{word(MaxEpochs + 1), label("b7rel/C/65"), word(100*(MaxEpochs+1) + 1), word(100*(MaxEpochs+1) + 50)} {
+			b = append(b, x[:]...)
+		}
+		require.Len(t, b, 32*(headerWords+epochUseWords*(MaxEpochs+1)))
+		return b
+	})
 	bad("epoch count with a high byte", at(15, 0))
 	bad("releaseTo with a high byte", at(13, 0))
 	bad("epoch with a high byte", at(16, 0))
