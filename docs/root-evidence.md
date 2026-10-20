@@ -46,7 +46,29 @@ time or cache freshness. The rule mirrors `Evidence.sol _requireTimely` and is n
 or an uncertain submission is the submitter's to add. Unclosed epochs can hold records indefinitely: the bound is per record and per page, not a
 fixed total, and at the budget the observer stops taking new slots and says so.
 
-## Not in this slice
+## Submitter (`ubft evidence`, package `rootevidence`)
 
-The peer `GetRootEvidence` service (collectors currently read journal files), backfill from the anti-equivocation decision store, the
-submitter and the live S4 exercise.
+Permissionless and key-free: it holds a funded EVM account, never a root or owner key.
+
+- `evidence scan --journal a.db --journal b.db`: merges the journals (copies: a running root holds its file) by slot. One half of an offence in
+  each observer is a pair neither alone could show. Prints the offences and the number of declared export gaps.
+- `evidence submit --journal … --eth-rpc URL --evidence ADDR --assignment ID… --sender-key FILE [--settle]`: for each pair, `Submitter.Submit`.
+  1. `offenceSeen` (the contract's own answer): known offences are never resubmitted, whoever reported them (`AlreadyAdmitted`).
+  2. The exposure is resolved among the given candidate assignments (root epoch = voting epoch, exposure holding the voter's key hash) and read
+     with the assignment's cutoff values and captured policy windows; none found is `Unresolved` (transient).
+  3. `Retention` against the contract's `progress()`: a proven-late pair is `TooLate` and not sent; the inclusive cutoff is still sent.
+  4. `SubmitCalldata` builds `submitEvidence(header, a, b, exposureID)` with the **original** vote and seal signatures, statements ordered by
+     digest. Before it does, it rebuilds from the typed fields exactly what the contract rebuilds (PV through `votesig`, the native seal bytes
+     through `UnicitySeal.SigBytes`) and refuses unless they equal the bytes the signatures were verified under.
+  5. Sent through `posrelayer.Sender` (estimateGas simulates, the receipt must succeed); the case must exist afterwards. A revert is classified
+     by the contract's own error selector: `EvidenceLate`/`RoundBeforeEpoch` permanent, `DuplicateOffence` already admitted,
+     `AssignmentNotActivated`/`ExposureUnknown` transient, the rest rejected. An unclassified failure is returned for the caller to retry.
+- `Submitter.Settle` (`--settle`): `settleEvidence` in ascending batches of the contract's `maxBatch`, from the on-chain cursor; resumable.
+
+ABI selectors are pinned against `forge inspect` output of unicity-pos-contracts 07891a6 (`TestABIMatchesTheContracts`).
+
+## Not in these slices
+
+The peer `GetRootEvidence` service (collectors read journal files), backfill from the anti-equivocation decision store, a durable submit outbox
+(restart safety rests on `offenceSeen`; a submission whose receipt timed out may still land, and a second send then reverts with
+`DuplicateOffence`), automatic backoff scheduling, resolving candidate assignments from chain, and the live S4 exercise.
