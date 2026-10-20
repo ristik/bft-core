@@ -232,6 +232,31 @@ type Sender struct {
 	Wait time.Duration
 }
 
+// transientEstimate marks the one refusal that is not about the transaction: the bound-execution node rejects an estimate whose block was built on a head that
+// moved meanwhile ("bound execution input rejected the block: bound parent hash mismatch"). It is asked again; a revert or any other error is returned at once.
+const transientEstimate = "bound execution input rejected the block"
+
+const estimateAttempts = 6
+
+func (s Sender) estimateGas(ctx context.Context, est map[string]any) (hexutil.Uint64, error) {
+	var err error
+	for attempt := 1; attempt <= estimateAttempts; attempt++ {
+		var gas hexutil.Uint64
+		if err = s.Client.CallContext(ctx, &gas, "eth_estimateGas", est); err == nil {
+			return gas, nil
+		}
+		if !strings.Contains(err.Error(), transientEstimate) {
+			return 0, err
+		}
+		select {
+		case <-ctx.Done():
+			return 0, ctx.Err()
+		case <-time.After(time.Second):
+		}
+	}
+	return 0, err
+}
+
 // Send signs and sends an EIP-1559 transaction, waits for its receipt and fails unless it succeeded.
 func (s Sender) Send(ctx context.Context, to [20]byte, value *big.Int, data []byte) (ethcommon.Hash, error) {
 	from := ethcrypto.PubkeyToAddress(s.Key.PublicKey)
@@ -255,8 +280,8 @@ func (s Sender) Send(ctx context.Context, to [20]byte, value *big.Int, data []by
 	}
 	toAddr := ethcommon.Address(to)
 	est := map[string]any{"from": from, "to": toAddr, "data": hexutil.Bytes(data), "value": (*hexutil.Big)(value)}
-	var gas hexutil.Uint64
-	if err := s.Client.CallContext(ctx, &gas, "eth_estimateGas", est); err != nil {
+	gas, err := s.estimateGas(ctx, est)
+	if err != nil {
 		return ethcommon.Hash{}, fmt.Errorf("the transaction would revert or run out of gas: %w", err)
 	}
 	tx, err := types.SignNewTx(s.Key, types.LatestSignerForChainID(s.ChainID), &types.DynamicFeeTx{ChainID: s.ChainID, Nonce: uint64(nonce),
