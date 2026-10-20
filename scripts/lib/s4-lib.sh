@@ -230,7 +230,7 @@ s4_assert_effects() {
   s4_py refusal --rpc "$(p85_eth)" --to "$EV" --sender "$rep" --data "$d/calldata/canonical.hex" --error 'DuplicateOffence()' || return 1
   s4_py refusal --rpc "$(p85_eth)" --to "$EV" --sender "$rep" --data "$d/calldata/reordered.hex" --error 'DuplicateOffence()' || return 1
   s4_with_traffic s4_submit_once "$d/submit-3.txt" "$EV" $(s4_assignments) --wait || return 1
-  grep -q 'AlreadyAdmitted' "$d/submit-3.txt" || { echo "the repeated submission did not report AlreadyAdmitted: $(cat "$d/submit-3.txt")" >&2; return 1; }
+  grep -q 'already-admitted' "$d/submit-3.txt" || { echo "the repeated submission did not report AlreadyAdmitted: $(cat "$d/submit-3.txt")" >&2; return 1; }
   CASE=$(sed -n 's/.*case=\([0-9a-f]\{64\}\).*/0x\1/p' "$d/submit-1.txt" | head -1)
   OFFENCE=$(jq -r .case.offenceID "$d/snapshot-settled.json"); EXPOSURE=$(jq -r .exposure "$d/resolved.json"); OTHER_LOTS=$(jq -r '.otherLots[]' "$d/resolved.json" | head -3 | tr '\n' ' ')
   s4_snapshot final || return 1
