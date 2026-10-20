@@ -202,9 +202,11 @@ s4_submit_once() {
   local out=$1 ev=$2; shift 2
   local ids=() wait=0 f pid settle=()
   for f in "$@"; do [ "$f" = --wait ] && { wait=1; settle=(--settle); } || ids+=(--assignment "$f"); done
-  local d=$S4_DIR
+  local d=$S4_DIR also=() id
+  # the lane's validators do not gossip transactions: the signed transaction goes to every online validator (the first is --eth-rpc)
+  for id in ${H3_ONLINE#* }; do also+=(--eth-rpc-also "http://127.0.0.1:$((rethEthBase+id-1))"); done
   build/ubft evidence submit --journal "$d/journal-root$(jq -r .halfA.root "$d/delivery.json").db" --journal "$d/journal-root$(jq -r .halfB.root "$d/delivery.json").db" \
-    --eth-rpc "$(p85_eth)" --evidence "$ev" "${ids[@]}" --sender-key "$S4_KEY" ${settle[@]+"${settle[@]}"} >"$out" 2>&1 &
+    --eth-rpc "$(p85_eth)" --evidence "$ev" ${also[@]+"${also[@]}"} "${ids[@]}" --sender-key "$S4_KEY" ${settle[@]+"${settle[@]}"} >"$out" 2>&1 &
   pid=$!
   if [ "$wait" = 0 ]; then
     for f in $(seq 1 3000); do grep -q "case=" "$out" 2>/dev/null && break; kill -0 "$pid" 2>/dev/null || break; sleep 0.1; done

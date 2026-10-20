@@ -29,6 +29,7 @@ func newEvidenceCmd() *cobra.Command {
 
 	var journals []string
 	var ethRPC, evidenceHex, senderKey string
+	var alsoRPC []string
 	var assignments []string
 	var settle bool
 
@@ -104,7 +105,16 @@ func newEvidenceCmd() *cobra.Command {
 			// reads at the head, not at a block pinned before the first transaction: the submitter reads the case it just created and the settlement cursor after each
 			// transaction (a pinned reader reported a successful submission as "the case does not exist" on the live devnet)
 			rd := evidenceReader(client)
-			s := &rootevidence.Submitter{Reader: rd, Sender: posrelayer.Sender{Client: client, Key: key, ChainID: chain}, Evidence: ev, ChainID: chain, Assignments: ids}
+			var also []*rpc.Client
+			for _, u := range alsoRPC {
+				c, err := rpc.Dial(u)
+				if err != nil {
+					return errors.Join(ErrEvidence, err)
+				}
+				defer c.Close()
+				also = append(also, c)
+			}
+			s := &rootevidence.Submitter{Reader: rd, Sender: posrelayer.Sender{Client: client, Key: key, ChainID: chain, Also: also}, Evidence: ev, ChainID: chain, Assignments: ids}
 			var firstErr error
 			for _, p := range col.Pairs() {
 				res, err := s.Submit(ctx, p)
@@ -128,6 +138,7 @@ func newEvidenceCmd() *cobra.Command {
 	}
 	submit.Flags().StringArrayVar(&journals, "journal", nil, "an observer journal file (repeat for several roots)")
 	submit.Flags().StringVar(&ethRPC, "eth-rpc", "", "the execution client's JSON-RPC URL")
+	submit.Flags().StringArrayVar(&alsoRPC, "eth-rpc-also", nil, "another execution client the signed transactions are sent to as well (repeat; for a network whose validators do not gossip transactions)")
 	submit.Flags().StringVar(&evidenceHex, "evidence", "", "the deployed Evidence module (20-byte hex)")
 	submit.Flags().StringArrayVar(&assignments, "assignment", nil, "a candidate assignment id the offence's exposure is resolved among (repeat)")
 	submit.Flags().StringVar(&senderKey, "sender-key", "", "file holding the 0x-hex private key of the funded account that sends the transactions")

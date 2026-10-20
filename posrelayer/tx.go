@@ -230,6 +230,9 @@ type Sender struct {
 	ChainID *big.Int
 	// Wait bounds the wait for a receipt (default 90 s).
 	Wait time.Duration
+	// Also are further execution clients the signed transaction is sent to as well (their errors are ignored: the transaction is known to Client's node). A devnet whose
+	// validators do not gossip transactions includes it only when the proposer is a node that has it.
+	Also []*rpc.Client
 }
 
 // transientEstimate marks the one refusal that is not about the transaction: the bound-execution node rejects an estimate whose block was built on a head that
@@ -295,6 +298,9 @@ func (s Sender) Send(ctx context.Context, to [20]byte, value *big.Int, data []by
 	}
 	if err := s.Client.CallContext(ctx, nil, "eth_sendRawTransaction", hexutil.Bytes(raw)); err != nil {
 		return ethcommon.Hash{}, err
+	}
+	for _, c := range s.Also {
+		_ = c.CallContext(ctx, nil, "eth_sendRawTransaction", hexutil.Bytes(raw))
 	}
 	wait := s.Wait
 	if wait == 0 {
