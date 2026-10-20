@@ -50,7 +50,7 @@ rounds=${2:-10}
 postM2aMode=${POST_M2A_MODE:-}
 postM2aChainID=${POST_M2A_CHAIN_ID:-31337}
 # The any-age final lane (scripts/anyage-lane.sh, briefs/anyage-final-lane-plan.md): the P85 genesis AND the bridge in one devnet. ANYAGE_LANE=1 adds
-# the aggregator-go shard(s) as BFT shard(s) of the same root chain (partition 9, scripts/lib/agg-lib.sh) beside the EVM shard; the vault and verifier are
+# the aggregator-go shard(s) as BFT shard(s) of the same root chain (partition 7, the aggregation partition, scripts/lib/agg-lib.sh) beside the EVM shard; the vault and verifier are
 # deployed by the lane's setup step once the devnet is up. Nothing in the P85 path changes when the flag is unset.
 if [ "${ANYAGE_LANE:-0}" = 1 ]; then
   [ "${P85_LANE:-0}" = 1 ] && [ "${M2_PROFILE2:-0}" = 1 ] && [ "$validators" -eq 4 ] || { echo "ANYAGE_LANE=1 requires the P85 lane (P85_LANE=1, M2_PROFILE2=1, four validators)" >&2; exit 2; }
