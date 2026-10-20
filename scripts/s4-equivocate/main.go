@@ -6,6 +6,10 @@
 //	    writes DIR/a.vote (non-committing), DIR/b.vote (committing) as the wire CBOR the roots decode, and DIR/statements.json: everything public about
 //	    the two statements (the voter, key, epoch, round, the typed fields, the preimage and its digest, the signatures). The private key is read
 //	    and never written.
+//	s4-equivocate calldata --journal J.db... --network-word 0x.. --root-network N --genesis 0x.. --exposure 0x.. --out DIR
+//	    from the merged journals: DIR/canonical.hex (the submitEvidence call the submitter sends) and the control variants a reviewer expects the contract to refuse:
+//	    identical.hex (one statement twice), altered.hex (the committing statement's executed state changed after signing), sealstripped.hex (its seal signature
+//	    removed), reordered.hex (the same pair in the other order: not refused before admission, a duplicate offence after it)
 //	s4-equivocate send --keys KEYS.json --vote FILE --to /ip4/H/tcp/P/p2p/ID
 //	    opens a libp2p host whose identity is the voter's authentication key (the voter's node id), dials the root and sends the vote on the root
 //	    vote protocol. It does not change, bypass or disable anything in the root: the root receives an ordinary signed vote.
@@ -27,6 +31,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/prometheus/client_golang/prometheus"
 	abcrypto "github.com/unicitynetwork/bft-go-base/crypto"
@@ -34,10 +39,12 @@ import (
 
 	"github.com/unicitynetwork/bft-core/cli/ubft/cmd"
 	testobs "github.com/unicitynetwork/bft-core/internal/testutils/observability"
+	"github.com/unicitynetwork/bft-core/keyvaluedb/boltdb"
 	"github.com/unicitynetwork/bft-core/network"
 	"github.com/unicitynetwork/bft-core/network/protocol/abdrc"
 	drctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/votesig"
+	"github.com/unicitynetwork/bft-core/rootevidence"
 )
 
 // Params is what the two statements are made of. Network and Genesis are the live epoch's signing configuration (the candidate configuration of the
@@ -319,9 +326,178 @@ func runSend(args []string) error {
 	return nil
 }
 
+const submitEvidenceABI = `[{"type":"function","name":"submitEvidence","stateMutability":"nonpayable","inputs":[
+ {"name":"h","type":"tuple","components":[{"name":"network","type":"bytes32"},{"name":"domain","type":"uint8"},{"name":"key","type":"bytes"},{"name":"votingEpoch","type":"uint64"},{"name":"votingRound","type":"uint64"}]},
+ {"name":"a","type":"tuple","components":[{"name":"parent","type":"uint64"},{"name":"exec","type":"bytes32"},{"name":"timestamp","type":"uint64"},{"name":"committing","type":"bool"},{"name":"commitHash","type":"bytes32"},{"name":"commitRound","type":"uint64"},{"name":"commitEpoch","type":"uint64"},{"name":"commitTimestamp","type":"uint64"},{"name":"signature","type":"bytes"},{"name":"sealSignature","type":"bytes"}]},
+ {"name":"b","type":"tuple","components":[{"name":"parent","type":"uint64"},{"name":"exec","type":"bytes32"},{"name":"timestamp","type":"uint64"},{"name":"committing","type":"bool"},{"name":"commitHash","type":"bytes32"},{"name":"commitRound","type":"uint64"},{"name":"commitEpoch","type":"uint64"},{"name":"commitTimestamp","type":"uint64"},{"name":"signature","type":"bytes"},{"name":"sealSignature","type":"bytes"}]},
+ {"name":"exposureID","type":"bytes32"}],"outputs":[{"name":"caseID","type":"bytes32"}]}]`
+
+type evHeader struct {
+	Network     [32]byte
+	Domain      uint8
+	Key         []byte
+	VotingEpoch uint64
+	VotingRound uint64
+}
+
+type evVote struct {
+	Parent          uint64
+	Exec            [32]byte
+	Timestamp       uint64
+	Committing      bool
+	CommitHash      [32]byte
+	CommitRound     uint64
+	CommitEpoch     uint64
+	CommitTimestamp uint64
+	Signature       []byte
+	SealSignature   []byte
+}
+
+// Variants returns the canonical submitEvidence call of the single paired slot of the journals and its controls, as hex (no 0x prefix) calldata.
+func Variants(journals []*rootevidence.Journal, network [32]byte, cfg votesig.Config, exposure [32]byte) (map[string][]byte, error) {
+	col, err := rootevidence.Collect(journals...)
+	if err != nil {
+		return nil, err
+	}
+	pairs := col.Pairs()
+	if len(pairs) != 1 {
+		return nil, fmt.Errorf("the journals hold %d offences, the exercise needs exactly one", len(pairs))
+	}
+	canonical, err := rootevidence.SubmitCalldata(network, cfg, pairs[0], exposure)
+	if err != nil {
+		return nil, err
+	}
+	parsed, err := abi.JSON(strings.NewReader(submitEvidenceABI))
+	if err != nil {
+		return nil, err
+	}
+	m := parsed.Methods["submitEvidence"]
+	args, err := m.Inputs.Unpack(canonical[4:])
+	if err != nil {
+		return nil, err
+	}
+	h := *abi.ConvertType(args[0], new(evHeader)).(*evHeader)
+	a := *abi.ConvertType(args[1], new(evVote)).(*evVote)
+	b := *abi.ConvertType(args[2], new(evVote)).(*evVote)
+	pack := func(h evHeader, a, b evVote) ([]byte, error) {
+		raw, err := m.Inputs.Pack(h, a, b, exposure)
+		if err != nil {
+			return nil, err
+		}
+		return append(append([]byte{}, m.ID...), raw...), nil
+	}
+	out := map[string][]byte{"canonical": canonical}
+	committing, other := &b, &a
+	if a.Committing {
+		committing, other = &a, &b
+	}
+	_ = other
+	if out["identical"], err = pack(h, a, a); err != nil {
+		return nil, err
+	}
+	if out["reordered"], err = pack(h, b, a); err != nil {
+		return nil, err
+	}
+	alt := func(mut func(c *evVote)) ([]byte, error) {
+		x, y := a, b
+		if committing == &b {
+			mut(&y)
+		} else {
+			mut(&x)
+		}
+		return pack(h, x, y)
+	}
+	if out["altered"], err = alt(func(c *evVote) { c.Exec[31] ^= 1 }); err != nil {
+		return nil, err
+	}
+	if out["sealstripped"], err = alt(func(c *evVote) { c.SealSignature = nil }); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func openJournals(paths []string) ([]*rootevidence.Journal, func(), error) {
+	var js []*rootevidence.Journal
+	var closers []func()
+	closeAll := func() {
+		for _, c := range closers {
+			c()
+		}
+	}
+	for _, p := range paths {
+		db, err := boltdb.New(p)
+		if err != nil {
+			closeAll()
+			return nil, nil, fmt.Errorf("journal %q: %w", p, err)
+		}
+		closers = append(closers, func() { _ = db.Close() })
+		j, err := rootevidence.NewJournal(db, 0)
+		if err != nil {
+			closeAll()
+			return nil, nil, err
+		}
+		js = append(js, j)
+	}
+	return js, closeAll, nil
+}
+
+type listFlag []string
+
+func (l *listFlag) String() string     { return strings.Join(*l, ",") }
+func (l *listFlag) Set(v string) error { *l = append(*l, v); return nil }
+
+func runCalldata(args []string) error {
+	fs := flag.NewFlagSet("calldata", flag.ExitOnError)
+	var journals listFlag
+	fs.Var(&journals, "journal", "an observer journal copy (repeat)")
+	netWord := fs.String("network-word", "", "the deployment's network word (0x + 32 bytes)")
+	rootNetwork := fs.Uint64("root-network", 0, "the root network id N")
+	genesis := fs.String("genesis", "", "the root-chain genesis identity G")
+	exposure := fs.String("exposure", "", "the exposure id (0x + 32 bytes)")
+	out := fs.String("out", "", "the output directory")
+	_ = fs.Parse(args)
+	if len(journals) == 0 || *out == "" || *netWord == "" || *genesis == "" || *exposure == "" {
+		return errors.New("calldata needs --journal, --network-word, --genesis, --exposure and --out")
+	}
+	nw, err := parseGenesis(*netWord)
+	if err != nil {
+		return err
+	}
+	g, err := parseGenesis(*genesis)
+	if err != nil {
+		return err
+	}
+	ex, err := parseGenesis(*exposure)
+	if err != nil {
+		return err
+	}
+	js, closeAll, err := openJournals(journals)
+	if err != nil {
+		return err
+	}
+	defer closeAll()
+	cfg := votesig.Config{Scheme: votesig.SchemeDomainBound, Network: *rootNetwork, Genesis: g}
+	v, err := Variants(js, nw, cfg, ex)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(*out, 0o755); err != nil {
+		return err
+	}
+	for name, data := range v {
+		if err := os.WriteFile(filepath.Join(*out, name+".hex"), []byte("0x"+hex.EncodeToString(data)+"\n"), 0o644); err != nil {
+			return err
+		}
+	}
+	fmt.Printf("wrote %d calldata files to %s\n", len(v), *out)
+	return nil
+}
+
 func main() {
 	var err error
 	switch {
+	case len(os.Args) >= 2 && os.Args[1] == "calldata":
+		err = runCalldata(os.Args[2:])
 	case len(os.Args) >= 2 && os.Args[1] == "make":
 		err = runMake(os.Args[2:])
 	case len(os.Args) >= 2 && os.Args[1] == "send":

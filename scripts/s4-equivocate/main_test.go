@@ -307,3 +307,63 @@ func TestMakeWritesPublicDescriptionOnly(t *testing.T) {
 }
 
 func hexString(b []byte) string { return gohex.EncodeToString(b) }
+
+// The controls of the live exercise are made from the real pair: the canonical call, the pair the other way round, one statement twice, the committing
+// statement changed after signing and its seal signature removed. Each differs from the canonical call exactly where it says.
+func TestVariantsOfTheCanonicalCall(t *testing.T) {
+	o := newOffender(t, false)
+	a, b, err := BuildPair(o.signer, o.params(40))
+	require.NoError(t, err)
+	j1, j2 := journal(t), journal(t)
+	for j, v := range map[*rootevidence.Journal]*abdrc.VoteMsg{j1: a, j2: b} {
+		obs, err := rootevidence.Observe(v, o.store)
+		require.NoError(t, err)
+		_, err = j.Record(obs)
+		require.NoError(t, err)
+	}
+	net := sha256.Sum256([]byte("p85-network"))
+	exposure := sha256.Sum256([]byte("exposure"))
+	_, err = Variants([]*rootevidence.Journal{j1}, net, o.cfg, exposure)
+	require.Error(t, err, "one journal holds no offence")
+	v, err := Variants([]*rootevidence.Journal{j1, j2}, net, o.cfg, exposure)
+	require.NoError(t, err)
+	require.Len(t, v, 5)
+	m := evidenceABI(t).Methods["submitEvidence"]
+	type hdr struct {
+		Network     [32]byte
+		Domain      uint8
+		Key         []byte
+		VotingEpoch uint64
+		VotingRound uint64
+	}
+	unpack := func(name string) (hdr, evVote, evVote) {
+		require.Equal(t, []byte(m.ID), v[name][:4], name)
+		args, err := m.Inputs.Unpack(v[name][4:])
+		require.NoError(t, err, name)
+		return *abi.ConvertType(args[0], new(hdr)).(*hdr), *abi.ConvertType(args[1], new(evVote)).(*evVote), *abi.ConvertType(args[2], new(evVote)).(*evVote)
+	}
+	_, ca, cb := unpack("canonical")
+	require.NotEqual(t, ca.Exec, cb.Exec)
+	_, ra, rb := unpack("reordered")
+	require.Equal(t, ca, rb)
+	require.Equal(t, cb, ra)
+	_, ia, ib := unpack("identical")
+	require.Equal(t, ia, ib, "one statement twice")
+	_, aa, ab := unpack("altered")
+	_, sa, sb := unpack("sealstripped")
+	commit := func(x, y evVote) (evVote, evVote) {
+		if x.Committing {
+			return x, y
+		}
+		return y, x
+	}
+	cc, co := commit(ca, cb)
+	ac, ao := commit(aa, ab)
+	sc, so := commit(sa, sb)
+	require.Equal(t, co, ao, "the other statement is untouched")
+	require.Equal(t, co, so)
+	require.NotEqual(t, cc.Exec, ac.Exec, "altered: the committing statement's executed state changed after signing")
+	require.Equal(t, cc.Signature, ac.Signature, "with its original signature")
+	require.Empty(t, sc.SealSignature, "sealstripped: no seal signature")
+	require.Equal(t, cc.Signature, sc.Signature)
+}
