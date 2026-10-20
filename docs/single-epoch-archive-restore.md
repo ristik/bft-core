@@ -119,10 +119,10 @@ stores written by this version for this deployment, and refuse everything else b
 | Archive replica pair | a configured replica was replaced and both or the order changed | `frontier.ErrContext` (the one-replica-at-a-time rule above) | `configuredprogress/journal_frontier_rotation_test.go` `TestMalformedReplicaPairChangeIsRefusedAtStartup` |
 
 The boundary is therefore: **a store is either created by this version in this deployment or it is refused.** The supported way to meet a
-refusal is a fresh authenticated restore on new empty disks. Not covered: an interrupted upgrade (a process stopped between writing the
-journal and the archive, then started on a different binary) and a real old-format file store put through the command line; the two "code
-only" rows are not exercised by a test. Whether the owner accepts this boundary as the H4 scope is a decision for #21 and is not recorded
-here.
+refusal is a fresh authenticated restore on new empty disks. Out of scope: an interrupted upgrade (a process stopped between writing the journal and the archive, then started on a different binary)
+and an old-format file store put through the command line. The owner's greenroom decision is fresh genesis and no migrations, so there is no
+upgrade path to interrupt and no old-format store to import; both are met by the refusal and a fresh restore, as above. The two "code only"
+rows are not exercised by a test; that is accepted for #21 (owner decision, relayed by the orchestrator, 2026-10-20).
 
 ## Freshness assumption
 
