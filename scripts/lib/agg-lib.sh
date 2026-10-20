@@ -96,6 +96,8 @@ bridge_write_config() {
   local full=${BRIDGE_FULL_CONF:-test-nodes/evm-full-shard-conf.json}
   # the plug-in driver reads the full shard configuration as <lane dir>/evm-full-shard-conf.json (the DN-B lane's name; the P85 genesis writes -v2)
   [ "$full" = test-nodes/evm-full-shard-conf.json ] || cp "$full" test-nodes/evm-full-shard-conf.json
+  # the genesis-only release bundle and its pin: past a root epoch change, replace the bundle with the exported history
+  # (ubft trust-base utb-export from a root's store) or a lock of the later epoch is ErrNoEntryForEpoch; the pin stays the same
   "$DNB_TOOL" trust-bundle --trust-base test-nodes/trust-base.json --out test-nodes/trust-base.bundle.cbor --out-pin test-nodes/trust-base.genesis.entryid
   "$DNB_TOOL" pdr --full-shard-conf "$full" --out test-nodes/evm-pdr.cbor
   python3 - "$PWD" "$validators" "$rethEthBase" "$rootRpcPort" "$chainID" "$partitionID" "$aggPartition" "$aggShards" "${AGG_PORT:-3001}" "${BRIDGE_ARCHIVE:-test-nodes/archives}" <<'PY'
