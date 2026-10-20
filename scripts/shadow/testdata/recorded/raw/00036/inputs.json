@@ -1,0 +1,400 @@
+{
+ "block": {
+  "hash": "0xe6b5881d5e0a65f5a56e252e30b89327bf2dc80afce5cea34c8a7bc0b2a59a91",
+  "number": 101,
+  "stateRoot": "0x514fda4bed6a1544ec48ecb501ac97b7bd6240281a65051233ca0aac581b68f4",
+  "timestamp": 1792519810
+ },
+ "chainId": 31337,
+ "clock": {
+  "custodyCursor": 0,
+  "progress": 411,
+  "recordCount": 0,
+  "ucTime": 1792519810
+ },
+ "custody": {
+  "bondUnit": 100000000000000000000,
+  "lastAckedAssignment": {
+   "$b": "0x56967a69c028acc373c04f286e41a7ed373887cad5c08539f301c5d5fe9cb57f"
+  },
+  "limits": {
+   "lMax": 1,
+   "maxBatch": 32,
+   "rMax": 4,
+   "vMax": 16
+  },
+  "minBond": 100000000000000000000,
+  "nextStakingID": 4
+ },
+ "election": {
+  "address": "0x051A08C2e5262403690784A4FF712809d55A53c3",
+  "anchorProgress": 0,
+  "anchorTime": 0,
+  "attemptCursor": 0,
+  "attemptProgress": 0,
+  "attemptTime": 0,
+  "initialized": true,
+  "network": {
+   "$b": "0x2104c54dfc47b38a41729e38a73bd8ee749bb5e996dc9904719e328c2b81696b"
+  },
+  "openResult": {
+   "$b": "0x0000000000000000000000000000000000000000000000000000000000000000"
+  },
+  "params": {
+   "cadenceRounds": 400,
+   "cadenceSeconds": 300,
+   "distDen": 2,
+   "distNum": 1,
+   "maxM": 4,
+   "nMax": 6,
+   "nMin": 4,
+   "nTarget": 6
+  }
+ },
+ "format": "UNICITY_X4_SHADOW_INPUTS/v1",
+ "identities": [
+  {
+   "excluded": false,
+   "id": 1,
+   "indexed": true,
+   "keyOwner": [
+    1,
+    2
+   ],
+   "lots": [
+    {
+     "category": 2,
+     "generation": 1,
+     "id": 1,
+     "refCount": 1,
+     "remaining": 100000000000000000000
+    }
+   ],
+   "position": {
+    "generation": 1,
+    "lotCount": 1,
+    "openLots": 1,
+    "owner": 610525635181477738600973691039380966883223294393,
+    "retirementRequested": false,
+    "roleNonce": 0,
+    "rootKeyHash": {
+     "$b": "0x1b375778b21d5dfcc44cee65376bc343369425cc12e221be69a91991a78ce745"
+    },
+    "stagedRootKeyHash": {
+     "$b": "0x0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    "withdrawal": 550995599647984021904922168825862566526907130143
+   },
+   "staged": {
+    "bindingHash": {
+     "$b": "0x26d8716b3648555b1608415a7bf03c10f58f5dd69c14f4f9f7b549c07547ef67"
+    },
+    "evmKeyHash": {
+     "$b": "0xc4bb6ae528f95103769c0ea0c7137901e8dec454009ca6189bf2ede113a1258f"
+    },
+    "payee": "0x7bc5b3c5324440751e1e164e00c82083c60ecf90",
+    "rootKeyHash": {
+     "$b": "0x1b375778b21d5dfcc44cee65376bc343369425cc12e221be69a91991a78ce745"
+    }
+   }
+  },
+  {
+   "excluded": false,
+   "id": 2,
+   "indexed": true,
+   "keyOwner": [
+    2,
+    2
+   ],
+   "lots": [
+    {
+     "category": 2,
+     "generation": 1,
+     "id": 2,
+     "refCount": 1,
+     "remaining": 100000000000000000000
+    }
+   ],
+   "position": {
+    "generation": 1,
+    "lotCount": 1,
+    "openLots": 1,
+    "owner": 339336070737283100156724640283539783565155387099,
+    "retirementRequested": false,
+    "roleNonce": 0,
+    "rootKeyHash": {
+     "$b": "0x23b40627e055f3a7cd7ee0ba8baef7a5260f186faca0378b095a4a2077636edf"
+    },
+    "stagedRootKeyHash": {
+     "$b": "0x0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    "withdrawal": 485571563379529680019700488309245554058193747833
+   },
+   "staged": {
+    "bindingHash": {
+     "$b": "0x0976fd8126d3fb1a78b31a4911d5dc1f074ef402500f21f7d82bfff774967858"
+    },
+    "evmKeyHash": {
+     "$b": "0xb0ee7b5e15bb54d6e4e0d6e0d3099ad78a17c45b8430493fabbe8289228133f5"
+    },
+    "payee": "0x90c9b007c91b2319b2731aa7ed34687701878463",
+    "rootKeyHash": {
+     "$b": "0x23b40627e055f3a7cd7ee0ba8baef7a5260f186faca0378b095a4a2077636edf"
+    }
+   }
+  },
+  {
+   "excluded": false,
+   "id": 3,
+   "indexed": true,
+   "keyOwner": [
+    3,
+    2
+   ],
+   "lots": [
+    {
+     "category": 2,
+     "generation": 1,
+     "id": 3,
+     "refCount": 1,
+     "remaining": 100000000000000000000
+    }
+   ],
+   "position": {
+    "generation": 1,
+    "lotCount": 1,
+    "openLots": 1,
+    "owner": 309077901960543259541852553165416771408607649900,
+    "retirementRequested": false,
+    "roleNonce": 0,
+    "rootKeyHash": {
+     "$b": "0x57d3fb1aec92ee8c64b09869870f21a1ada9ffb9334d8eed271ca6ea2e3cb972"
+    },
+    "stagedRootKeyHash": {
+     "$b": "0x0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    "withdrawal": 1254669772816550446928770445121538409881247827875
+   },
+   "staged": {
+    "bindingHash": {
+     "$b": "0xbc2e813f504a0acd867f13719e15df2af8cda95067869b4c0ba6ab7bbe3e9f4e"
+    },
+    "evmKeyHash": {
+     "$b": "0xedd273e0670833cb8f288de6d309dd4e6106d162325cd496773fa53ddcc701da"
+    },
+    "payee": "0xc19bd86a9430499a42fd3756e7c803876ea12249",
+    "rootKeyHash": {
+     "$b": "0x57d3fb1aec92ee8c64b09869870f21a1ada9ffb9334d8eed271ca6ea2e3cb972"
+    }
+   }
+  },
+  {
+   "excluded": false,
+   "id": 4,
+   "indexed": true,
+   "keyOwner": [
+    4,
+    2
+   ],
+   "lots": [
+    {
+     "category": 2,
+     "generation": 1,
+     "id": 4,
+     "refCount": 1,
+     "remaining": 100000000000000000000
+    }
+   ],
+   "position": {
+    "generation": 1,
+    "lotCount": 1,
+    "openLots": 1,
+    "owner": 47203900180003808687434811241696882961808189862,
+    "retirementRequested": false,
+    "roleNonce": 0,
+    "rootKeyHash": {
+     "$b": "0x9e25a63abec73ef6f7a11cc712a00a3571cbaa87afa36df617ede11e6c53202b"
+    },
+    "stagedRootKeyHash": {
+     "$b": "0x0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    "withdrawal": 1274058486196991026135343871708641193785577359711
+   },
+   "staged": {
+    "bindingHash": {
+     "$b": "0xc6cb36a4be705108273b5fc8387cab583942042dcf7b7a3970338f6110df42f8"
+    },
+    "evmKeyHash": {
+     "$b": "0x194c4cbb9e631acd6157687705fb392744ae96c86a0791a0dcc66c9afe33ee47"
+    },
+    "payee": "0x34de31ae9c0a65ac540f1d539c1af75055fcccc1",
+    "rootKeyHash": {
+     "$b": "0x9e25a63abec73ef6f7a11cc712a00a3571cbaa87afa36df617ede11e6c53202b"
+    }
+   }
+  }
+ ],
+ "incumbent": {
+  "assignmentID": {
+   "$b": "0x56967a69c028acc373c04f286e41a7ed373887cad5c08539f301c5d5fe9cb57f"
+  },
+  "evmEpoch": 1,
+  "exposureDigest": {
+   "$b": "0x5222ecec1000c7fad7e9c18130eeeb9779f87c6cdf33c17527278ccc7f920e70"
+  },
+  "exposures": [
+   {
+    "evmKeyHash": {
+     "$b": "0xc4bb6ae528f95103769c0ea0c7137901e8dec454009ca6189bf2ede113a1258f"
+    },
+    "generation": 1,
+    "id": 1,
+    "lots": [
+     1
+    ],
+    "payee": "0x7bc5b3c5324440751e1e164e00c82083c60ecf90",
+    "rawWeight": 1,
+    "rootKeyHash": {
+     "$b": "0x1b375778b21d5dfcc44cee65376bc343369425cc12e221be69a91991a78ce745"
+    },
+    "weight": 1
+   },
+   {
+    "evmKeyHash": {
+     "$b": "0xb0ee7b5e15bb54d6e4e0d6e0d3099ad78a17c45b8430493fabbe8289228133f5"
+    },
+    "generation": 1,
+    "id": 2,
+    "lots": [
+     2
+    ],
+    "payee": "0x90c9b007c91b2319b2731aa7ed34687701878463",
+    "rawWeight": 1,
+    "rootKeyHash": {
+     "$b": "0x23b40627e055f3a7cd7ee0ba8baef7a5260f186faca0378b095a4a2077636edf"
+    },
+    "weight": 1
+   },
+   {
+    "evmKeyHash": {
+     "$b": "0xedd273e0670833cb8f288de6d309dd4e6106d162325cd496773fa53ddcc701da"
+    },
+    "generation": 1,
+    "id": 3,
+    "lots": [
+     3
+    ],
+    "payee": "0xc19bd86a9430499a42fd3756e7c803876ea12249",
+    "rawWeight": 1,
+    "rootKeyHash": {
+     "$b": "0x57d3fb1aec92ee8c64b09869870f21a1ada9ffb9334d8eed271ca6ea2e3cb972"
+    },
+    "weight": 1
+   },
+   {
+    "evmKeyHash": {
+     "$b": "0x194c4cbb9e631acd6157687705fb392744ae96c86a0791a0dcc66c9afe33ee47"
+    },
+    "generation": 1,
+    "id": 4,
+    "lots": [
+     4
+    ],
+    "payee": "0x34de31ae9c0a65ac540f1d539c1af75055fcccc1",
+    "rawWeight": 1,
+    "rootKeyHash": {
+     "$b": "0x9e25a63abec73ef6f7a11cc712a00a3571cbaa87afa36df617ede11e6c53202b"
+    },
+    "weight": 1
+   }
+  ],
+  "keyDigest": {
+   "$b": "0xcc6d6cd2a41e74817e7f1c64a8d9625e9676b3332c0be32618f690cc43134041"
+  },
+  "lineage": {
+   "$b": "0xf35057f6d14d9357816e75c6dadefc2db2202220ca27e3bc52ea374cd2953ee8"
+  },
+  "policyID": 1,
+  "policyTerms": [
+   100,
+   500,
+   1000,
+   1000000000000000000,
+   1000,
+   1000,
+   2000,
+   2000,
+   2000,
+   3600
+  ],
+  "rootEpoch": 1
+ },
+ "lotTable": {
+  "1": {
+   "category": 2,
+   "generation": 1,
+   "id": 1,
+   "refCount": 1,
+   "remaining": 100000000000000000000
+  },
+  "2": {
+   "category": 2,
+   "generation": 1,
+   "id": 2,
+   "refCount": 1,
+   "remaining": 100000000000000000000
+  },
+  "3": {
+   "category": 2,
+   "generation": 1,
+   "id": 3,
+   "refCount": 1,
+   "remaining": 100000000000000000000
+  },
+  "4": {
+   "category": 2,
+   "generation": 1,
+   "id": 4,
+   "refCount": 1,
+   "remaining": 100000000000000000000
+  }
+ },
+ "moduleDigestInputs": [
+  "0xc399A50Da6437b10e26AEf8DB67EB7f79f8f1D93",
+  {
+   "$b": "0xb7dee002d94d1ee7e2a092a8ba27bba2e32de79ca15d0bd8f759a117193584f2"
+  },
+  "0x051A08C2e5262403690784A4FF712809d55A53c3",
+  {
+   "$b": "0x5ffcd3899ff860562ab720f30ea1bd495c2bb853b37250458c981b66ad32e5c2"
+  },
+  "0x0436aE1D18F43e988e79066835AdA48804614b54",
+  {
+   "$b": "0xc78a84583c811205bac92c677b47ff386dc73a5526e77c79db1b26c9f3275b18"
+  },
+  "0xd4650d6e4ee28e85749877bb7e589973a9c3a14d",
+  {
+   "$b": "0xb145891359abe2fe93d085ce3fe33cf86f0bc555e3eee09759e0591b7ae88712"
+  },
+  "0x328e42012fbbf7c4f50fa303fbf802a90ff8db71",
+  {
+   "$b": "0x64f28c5b6ef85dc06088155cff9d5dd02e6c401a3df86d24cc9e62c37d7d0963"
+  },
+  "0xff00000000000000000000000000000000000002"
+ ],
+ "modules": {
+  "custody": "0xc399A50Da6437b10e26AEf8DB67EB7f79f8f1D93",
+  "election": "0x051A08C2e5262403690784A4FF712809d55A53c3",
+  "evidence": "0x0436aE1D18F43e988e79066835AdA48804614b54",
+  "policySource": "0x328e42012fbbf7c4f50fa303fbf802a90ff8db71",
+  "registry": "0xff00000000000000000000000000000000000002",
+  "roots": "0xff00000000000000000000000000000000000002",
+  "selection": "0xd4650d6e4ee28e85749877bb7e589973a9c3a14d"
+ },
+ "origin": {
+  "$b": "0xb0c2e47d2a59f2f5954246a619748243fdfdfe6f3ee28e4bf36d827c886e65ff"
+ },
+ "policy": {
+  "currentPolicyID": 1
+ }
+}

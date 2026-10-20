@@ -1,0 +1,20 @@
+{
+ "assignmentID": "0x0000000000000000000000000000000000000000000000000000000000000000",
+ "attempt": 1,
+ "attemptCursorAfter": 1,
+ "frozen": [],
+ "members": [],
+ "openResultAfter": "0x0000000000000000000000000000000000000000000000000000000000000000",
+ "origin": "0x52569b435a59beac86b236610ce8b7818908b18efb26150777bace10c0b28a71",
+ "outcome": "NoCandidateRecorded",
+ "policyID": 0,
+ "predecessor": "0x56967a69c028acc373c04f286e41a7ed373887cad5c08539f301c5d5fe9cb57f",
+ "progress": 748,
+ "publication": null,
+ "reason": "MembershipChurn",
+ "reservation": null,
+ "resultID": "0xedcd8e634e1e3b78757f07258594063eefcac850ccda0a186ef83bbd6c15bf4c",
+ "snapshotDigest": "0x1abf0183f63be8ca8bb773ee88f3e63cff89c354fc1ce1301da41aacb65d9bb0",
+ "state": 2,
+ "ucTime": 1792520111
+}

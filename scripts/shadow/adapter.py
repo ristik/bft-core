@@ -137,10 +137,15 @@ def cmd_run(a):
     rows = []
     t0 = time.monotonic()
     obs = open(out / "observations.jsonl", "w")
+    taken = 0
     for k in range(a.samples):
         wait = t0 + k * a.cadence - time.monotonic()
         if wait > 0:
             time.sleep(wait)
+        if a.stop_file and Path(a.stop_file).exists():   # the driver ends the interval: the scheduled samples are those begun before the stop
+            events.write(json.dumps({"utc": datetime.now(timezone.utc).isoformat(), "event": "stop-file", "sample": k}) + "\n")
+            break
+        taken += 1
         try:
             row = observe(k, rpc, a.rpc, modules, a.registry, a.anvil, out)
         except Exception as e:  # any failure of one sample is a recorded coverage gap with its cause, never a crash and never equality
@@ -152,7 +157,10 @@ def cmd_run(a):
         obs.flush()
         print(f"sample {k}: {row['verdict']} {row['case']}", flush=True)
     manifest["finishedUtc"] = datetime.now(timezone.utc).isoformat()
-    cov = write_report(out, manifest, rows, a.samples)
+    obs.close()      # everything the pack seals is on disk before it is hashed
+    events.close()
+    manifest["samplesScheduled"] = taken
+    cov = write_report(out, manifest, rows, taken)
     seal(out)
     print(json.dumps({k: cov[k] for k in ("status", "scheduled", "accounted", "dueComparisons", "cases", "reasons")}, indent=1))
     return 0 if cov["status"] != report.STATUS_FAIL else 1
@@ -179,7 +187,8 @@ def main(argv=None):
     r.add_argument("--deployment", required=True)
     r.add_argument("--out", required=True)
     r.add_argument("--cadence", type=float, default=60.0)
-    r.add_argument("--samples", type=int, default=5)
+    r.add_argument("--samples", type=int, default=5, help="at most this many samples")
+    r.add_argument("--stop-file", help="end the interval when this file exists (a scenario driver's end marker)")
     r.add_argument("--registry", default=REGISTRY)
     r.add_argument("--anvil", default="anvil")
     rp = sub.add_parser("replay")
