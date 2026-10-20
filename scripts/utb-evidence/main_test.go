@@ -240,7 +240,7 @@ func TestUCVerifyTwoShardsOfOnePartition(t *testing.T) {
 	both := token("both.cbor", cert.Anchors[0].UC, cert.Anchors[1].UC)
 	require.NoError(t, run(both, confL, confR), "a token holding a certificate of each shard verifies against both configurations")
 	require.NoError(t, run(both, confR, confL), "in either order")
-	require.Error(t, run(both, confL), "the right shard's certificate does not verify under the left shard's configuration alone")
-	require.Error(t, run(both, confL, confOther), "nor under a configuration it was not made under")
+	require.ErrorContains(t, run(both, confL), "invalid shard configuration hash", "the right shard's certificate does not verify under the left shard's configuration alone")
+	require.ErrorContains(t, run(both, confL, confOther), "invalid shard configuration hash", "nor under a configuration it was not made under")
 	require.NoError(t, run(token("left.cbor", cert.Anchors[0].UC), confL, confR))
 }

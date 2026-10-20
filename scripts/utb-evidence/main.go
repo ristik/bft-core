@@ -444,7 +444,7 @@ func cmdUCVerify(args []string) error {
 			partition = uc.UnicityTreeCertificate.Partition
 		}
 		// the configurations given for the certificate's partition: several shards of one partition each have their own (a token can hold certificates of several of them),
-		// and the certificate must verify under exactly one of them (shard and configuration hash bound together); none is a refusal
+		// and the certificate must verify under one of them (its shard and the configuration hash bound together); none is a refusal
 		if err := verifyUnderConfs(uc, quorumweight.Checked(e), partition, pdrs, hashes); err != nil {
 			return fmt.Errorf("certificate %d (epoch %d, seal round %d) does not verify under its epoch's committee: %w", i, epoch, round, err)
 		}
