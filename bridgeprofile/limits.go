@@ -9,8 +9,8 @@ package bridgeprofile
 // "B2 projection". They are test ceilings, not a claim that the maximum fits a
 // block. Limits are intersected, never additive entitlements.
 const (
-	MaxTransfers     = 15       // transfers including the final burn
-	MaxLeaves        = 16       // profile parameter: B2 leaves (raise in a later profile version)
+	MaxTransfers     = 23       // transfers including the final burn
+	MaxLeaves        = 24       // profile parameter: B2 leaves (16 -> 24 by the #526 step 5 measurement, briefs/526-step5-limits.md)
 	MaxSemanticBytes = 16 << 10 // history projection and Cfg input
 	MaxEnvelopeBytes = 64 << 10
 	MaxCBORDepth     = 16
