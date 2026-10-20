@@ -1,1 +1,1 @@
-{"lane":"nightly","inject_failure":"none"}
+{"lane":"abort","inject_failure":"in-lane"}
