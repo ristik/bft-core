@@ -263,8 +263,21 @@ func (q *oneMsg) PopFront() any {
 	return m
 }
 
-// Send delivers one vote to a root over the root vote protocol from a host whose identity is the voter's authentication key.
-func Send(ctx context.Context, k *cmd.KeyConf, vote *abdrc.VoteMsg, to peer.AddrInfo, timeout time.Duration) error {
+// Send delivers one vote to a root over the root vote protocol from a host whose identity is the voter's authentication key. A new host can have no peer in its table
+// for a moment after the bootstrap dial ("failed to find any peer in table", seen on the live devnet): the delivery is attempted again, up to 5 times. A repeated
+// delivery of the same vote is the same statement, not another one.
+func Send(ctx context.Context, k *cmd.KeyConf, vote *abdrc.VoteMsg, to peer.AddrInfo, timeout time.Duration) (err error) {
+	for attempt := 1; attempt <= 5; attempt++ {
+		if err = sendOnce(ctx, k, vote, to, timeout); err == nil || ctx.Err() != nil {
+			return err
+		}
+		fmt.Fprintf(os.Stderr, "s4-equivocate: delivery attempt %d failed: %v\n", attempt, err)
+		time.Sleep(2 * time.Second)
+	}
+	return err
+}
+
+func sendOnce(ctx context.Context, k *cmd.KeyConf, vote *abdrc.VoteMsg, to peer.AddrInfo, timeout time.Duration) error {
 	kp, err := k.AuthKeyPair()
 	if err != nil {
 		return err
