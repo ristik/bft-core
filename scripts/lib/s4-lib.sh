@@ -92,9 +92,9 @@ s4_collect_after_rotation() {
   a=$(jq -r .halfA.root "$d/delivery.json"); b=$(jq -r .halfB.root "$d/delivery.json")
   epoch=$(s4_epoch 1)
   [ "$epoch" -ge 3 ] || { echo "the roots are in epoch $epoch: the joiner has not been rotated out" >&2; return 1; }
-  # the rotation: the committee of the current epoch does not name the offender's root
-  jq -e --arg id "$(h3_root_id "$S4_OFFENDER_ROOT")" '[.commit.signers[]?.nodeId] | index($id) | not' "$H3_DIR/activation-record-3.json" >/dev/null \
-    || { echo "the joiner's root is still in the committee of the current epoch" >&2; return 1; }
+  # the rotation: the first epoch-3 certificate (K signs it, the joiner's root cannot) names three of the four K roots and not the offender
+  jq -e --arg id "$(h3_root_id "$S4_OFFENDER_ROOT")" '.epoch == 3 and ([.signers[].nodeId] | index($id) | not)' "$H3_DIR/first-epoch3-certificate.json" >/dev/null \
+    || { echo "the first epoch-3 certificate is missing or names the joiner's root" >&2; return 1; }
   s4_snapshot_journal "$a" || return 1
   s4_snapshot_journal "$b" || return 1
   # a collector which holds no runtime state: each scan is a new process reading only the journal copies
