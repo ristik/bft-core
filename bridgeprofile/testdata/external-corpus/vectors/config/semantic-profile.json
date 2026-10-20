@@ -80,7 +80,7 @@
     "protocol/interop.md": "4ccc5a806bf6691a25e1b872b4b84bced1bc0c71579350de6fb158fc12e665e8",
     "protocol/abi.json": "d836ec1a0eb12b81c92c4fccd5d310aa7b5fd2c7a9119d1fa3b5cf2509eb5685",
     "protocol/manifest.schema.json": "f256b0ea19ea1f0a390926006b18a7460ecbb63f79f3e3e85040cbf2d710fb05",
-    "protocol/trust-base.md": "d38b09542bdc5c7df454620da20080b1bf1289eac5e7033b1a2a5373bf4e5b95"
+    "protocol/trust-base.md": "445f354723d9ab7247a9c1ec518bebc82993a71e960dae9edb2af2986bb9c628"
   },
   "networkId": {
     "minimum": 1,
