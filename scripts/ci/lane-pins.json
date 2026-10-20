@@ -30,7 +30,8 @@
     },
     "contracts": {
       "repository": "https://github.com/ristik/unicity-pos-contracts.git",
-      "commit": "316203f4414214a960ba681e08050fb7637034f5",
+      "commit": "b17829ca0eee3023148524f1bdbdfb2d2729e0c6",
+      "note": "contracts#53 merge: GovernanceParams (#50), RewardPool (#51) and the governed worst-case election gas / deployment fields (#53)",
       "branch": "main"
     },
     "native-bridge-plugins": {
