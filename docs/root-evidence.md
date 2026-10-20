@@ -72,3 +72,28 @@ ABI selectors are pinned against `forge inspect` output of unicity-pos-contracts
 The peer `GetRootEvidence` service (collectors read journal files), backfill from the anti-equivocation decision store, a durable submit outbox
 (restart safety rests on `offenceSeen`; a submission whose receipt timed out may still land, and a second send then reverts with
 `DuplicateOffence`), automatic backoff scheduling, resolving candidate assignments from chain, and the live S4 exercise.
+
+## S4: the focused live slashing exercise (#57)
+
+One lane run proves the service path with real effects (`S4_LANE=1`; in CI a `ci-lane-run/**` push whose `scripts/ci/run-inputs.json` says `"s4": true`;
+locally `S4_LANE=1 scripts/p85-lane.sh`, or `scripts/utb-lane.sh` for the combined lane). Code: `scripts/lib/s4-lib.sh` (steps), `scripts/s4-equivocate`
+(harness signer and vote sender), `scripts/s4/s4_assert.py` (the named PASS lines and the independent policy arithmetic; `python3 -m unittest test_s4_assert`).
+
+1. Every root runs `--evidence-journal test-nodes/rootN/evidence.db`.
+2. `s4_equivocate` (epoch 2 live): a harness-only signer holding the joiner root's key (`test-nodes/root5/keys.json`; the root5 process is untouched) makes two scheme 2
+   votes for one past epoch-2 round, different statements, one committing (vote and seal signatures), and delivers them over `/ab/root-vote/0.0.1` from a host with the
+   joiner's libp2p identity, to two different roots among 1-4, never the root the genuine vote of that round went to (read from the offender's own log), so no journal
+   holds a genuine third statement. Both halves arrive stale (the first some rounds after its slot, the second later).
+3. The recovery evicts the joiner (epoch 3). `s4_collect_after_rotation` stops each observer root in turn, copies its journal and restarts it; `ubft evidence scan` runs
+   over each copy alone (no offence) and over both (exactly one; no gap; the observers' `evidence observer stats` lines show no dropped/failed).
+4. `s4_submit_settle`: a fresh funded reporter (neither a root key nor an owner key) runs `ubft evidence submit --eth-rpc <every validator> --evidence ... --assignment ...`.
+   Controls first (eth_call of the real pair altered: identical statements, altered payload, seal stripped: `IdenticalStatements`, `BadSignature`, `SealSignatureMissing`);
+   the first submitter run has no `--settle` and is stopped after it printed the admitted case; the second run resumes and settles from the on-chain cursor.
+5. `s4_check`: inclusion, calldata carries the original signatures, `EvidenceAccepted`/`offenceSeen`, holds on exactly the attributable lots, the exact historical lot
+   debit once, bounty (capped) and treasury equal to the arithmetic from `policyTerms`, honest lots unchanged (reference counts excluded: the next election references
+   them), duplicate resubmission and the reordered pair refused (`DuplicateOffence`) with the state identical, the reporter claims exactly the bounty, `SHA256SUMS`.
+
+Differences from the design (§5): the joiner holds one election weight, so its exposure has one lot per entity and settlement is one batch (interrupting between batches
+is covered in process by `TestSettle`); every vote half is stale on arrival; "an unrelated withdrawal" is reduced to the reporter's claim plus the honest lots staying
+unchanged; the live run found two defects of the S3 command (a reader pinned before its own transactions; no peer yet in a fresh host's table) and the lane's chain
+needs the signed transaction at every validator (no gossip) and no `eth_estimateGas`-based `cast send`.

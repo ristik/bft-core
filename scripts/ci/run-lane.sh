@@ -84,6 +84,10 @@ export DNB_AGG_SHARDS=$(jq -r '.lane.aggShards // 1' "$pins")
 # T8: the lane includes the funded operator reward pool step (scripts/lib/rewards-lib.sh): the genesis payees hold keys, the pool is settled across the real
 # acknowledged history, recomputed from scratch, claimed. Off by default on the Mac (REWARD_LANE unset); on in CI.
 export REWARD_LANE=1
+# S4 (#57, scripts/lib/s4-lib.sh, docs/root-evidence.md): the focused live slashing exercise is added to the combined lane when scripts/ci/run-inputs.json of the commit under
+# test says "s4": true (a ci-lane-run/** push; off by default). It adds the roots' observer journals, a harness-signed equivocation by the joiner's root key and the
+# submission through the real Evidence contract after the recovery.
+if [ "$kind" = combined ] && [ "$(jq -r '.s4 // false' scripts/ci/run-inputs.json 2>/dev/null)" = true ]; then export S4_LANE=1; log "S4_LANE=1 (run-inputs s4)"; fi
 export LANE_PINNED=1 LANE_COMMIT_UNDER_TEST=$head UTB_MIN_FREE_GIB=${UTB_MIN_FREE_GIB:-$(jq -r '.runner.minFreeDiskGiB' "$pins")}
 if [ "$kind" = combined ]; then pins_mode=env; else pins_mode=env-core; fi
 scripts/ci/check-pins.sh "$pins_mode" 2>&1 | tee -a "$out/run-lane.log" | grep -q '^FAIL' && die "a component does not match the manifest"
