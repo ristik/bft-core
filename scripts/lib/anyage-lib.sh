@@ -153,6 +153,11 @@ anyage_step_setup() {
   python3 -I "$ANYAGE_CHECK" shape "$out/l1a-registry.json" || return 1
   anyage_nbp save "$PWD/test-nodes/lane-config.json" "$out/l1" 2>&1 | tee "$out/l1/save.log" || return 1
   [ -s "$out/l1/saved.json" ] && [ -s "$out/l1/envelope.bin" ] || { echo "save wrote no saved.json / envelope.bin" >&2; return 1; }
+  # several aggregator shards (DNB_AGG_SHARDS=2): the saved history must carry an anchor of each shard (the driver steers the locks for it and asserts it; checked again from the saved bytes)
+  if [ "${aggShards:-1}" -gt 1 ]; then
+    jq -e --argjson n "$aggShards" '([.anchors[].shard] | unique | length) == $n' "$out/l1/saved.json" >/dev/null || { echo "the saved history does not carry an anchor of each of the $aggShards aggregator shards" >&2; return 1; }
+    jq -r '.anchors[] | "anchor shard \(.shard) epoch \(.epoch) round \(.round)"' "$out/l1/saved.json" >"$out/l1/shards.txt"
+  fi
   (cd "$out/l1" && shasum -a 256 saved.json token.cbor envelope.bin batch-request.bin >SHA256SUMS)
   echo "L1a: the original proof bytes are saved ($(cut -c1-16 "$out/l1/SHA256SUMS" | head -1)...), anchors' latest round $(anyage_saved_round)"
 }

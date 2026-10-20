@@ -396,3 +396,45 @@ func TestOrphanTemporaryDirectoryIsIgnored(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// An archive store written under another manifest magic is refused as corrupt, never read through a compatibility path or rewritten.
+// This is the archive half of the refusal boundary in docs/single-epoch-archive-restore.md: a restore that meets such a store is refused
+// before anything is imported; it does not migrate it.
+func TestManifestOfAnotherVersionIsRefusedNotMigrated(t *testing.T) {
+	q, rec := fixture()
+	store, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Put(q, rec); err != nil {
+		t.Fatal(err)
+	}
+	loc, err := location(q)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(store.dir, loc, "manifest")
+	original, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, magic := range []string{"ARCHIVE0", "ARCHIVE3", "archive1"} {
+		other := append([]byte(magic), original[8:]...)
+		if err := os.WriteFile(path, other, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := store.Get(q); !errors.Is(err, ErrCorrupt) {
+			t.Fatalf("manifest with magic %q was read: %v", magic, err)
+		}
+		after, err := os.ReadFile(path)
+		if err != nil || !bytes.Equal(after, other) {
+			t.Fatalf("the refused manifest was rewritten: %v", err)
+		}
+	}
+	if err := os.WriteFile(path, original, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Get(q); err != nil {
+		t.Fatalf("control: the genuine manifest must read: %v", err)
+	}
+}
