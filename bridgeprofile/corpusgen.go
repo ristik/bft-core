@@ -604,6 +604,11 @@ func (g *gen) histories() {
 		h, _ := build(5, tr, true)
 		add(fmt.Sprintf("return-valid-%d", tr), "history", fmt.Sprintf("mint, %d ordinary transfers, final burn", tr), "return", h)
 	}
+	// the transfer bound itself: MaxTransfers transactions including the final burn, and one more
+	h, _ = build(5, MaxTransfers-1, true)
+	add("return-transfers-max", "history", "MaxTransfers transactions including the final burn", "return", h)
+	h, _ = build(5, MaxTransfers, true)
+	add("return-transfers-over-max", "history", "MaxTransfers+1 transactions including the final burn", "return", h)
 	h, _ = build(7, 0, false)
 	add("mint-for-return-op", "history", "a mint-only history under the return operation", "return", h)
 	h, _ = build(7, 2, true)
@@ -1466,8 +1471,9 @@ func (g *gen) proof() {
 	// With the repriced certificate call (owner-decisions section 22) real four-signature certificates never reach the gate, even
 	// at eight anchors with sixteen leaves and deep paths; only the maximum-signature case below does.
 	g.useQuad, g.extraN = false, 0
-	// MaxAnchors+1 anchors cannot come from a token any more (anchors <= leaves <= MaxLeaves = MaxAnchors); the anchor bound is
-	// exercised on envelopes (envelope-anchors-over-max).
+	// MaxLeaves > MaxAnchors since #526 step 5: a token whose leaves each carry their own certificate can now need MaxAnchors+1
+	// anchors; the parser refuses it before any gate or B1 call (envelope-anchors-over-max exercises the bound on envelopes).
+	perLeaf("compose-anchors-over-max", "MaxAnchors+1 leaves, each certified by its own UC: one anchor over MaxAnchors", MaxAnchors-1)
 	// MaxAnchors anchors of certificates carrying 16 seal signatures each (the native maximum): structurally admitted; the gate
 	// prices the batch (each a distinct seal, Q = 256) before any B1 call.
 	if hc, err := g.certifiedWith(MaxAnchors-2, func(i int, l Leaf) ShardRound { return ShardRound{BaseTime + 1000, 100 + uint64(i)} }); err == nil {

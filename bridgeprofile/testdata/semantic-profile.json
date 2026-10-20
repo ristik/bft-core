@@ -1,5 +1,5 @@
 {
-  "artifactVersion": 6,
+  "artifactVersion": 7,
   "nativeBridgeProtocolVersion": 5,
   "sdkVersion": "4.0.0",
   "status": "development-provisional-unactivated",
@@ -42,8 +42,8 @@
     "semanticBytes": 16384,
     "cfgBytes": 1024,
     "envelopeBytes": 65536,
-    "transfers": 15,
-    "leaves": 16,
+    "transfers": 23,
+    "leaves": 24,
     "pathSteps": 2048,
     "policyBytes": 512,
     "aggregatorAnchors": 16,

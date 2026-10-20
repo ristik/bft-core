@@ -35,3 +35,4 @@ artifacts/
 # private scan inputs of the real-reth lanes: secret values, never committed or uploaded
 .scan-inputs/
 /dnb-tool
+__pycache__/
