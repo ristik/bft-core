@@ -111,7 +111,9 @@ case "$kind" in
     export H6_URETH_ATTESTED=$M2_URETH_BIN H6_URETH_ATTESTED_SHA256=$(awk '{print $1; exit}' "$M2_URETH_ATTESTED_PROVENANCE/sha256.txt") H6_URETH_ATTESTED_PROVENANCE=$M2_URETH_ATTESTED_PROVENANCE H6_URETH_COMMIT=$M2_URETH_COMMIT
     log "scripts/h6/abort-rehearsal-lane.sh (deadline ${deadline} min)"
     p_timeout "$((deadline * 60))" scripts/h6/abort-rehearsal-lane.sh 2>&1 | tee "$out/lane-stdout.log" >/dev/null
-    lane_rc=${PIPESTATUS[0]} ;;
+    lane_rc=${PIPESTATUS[0]}
+    # the Abort lane has no step hook: inject_failure=in-lane adds a failing harness step after it ran (the lane's own result is kept in the log; the verdict is the injected failure)
+    if [ "$inject" = in-lane ]; then log "injected harness failure (inject_failure=in-lane) after the Abort lane (its own exit was $lane_rc)"; lane_rc=1; fi ;;
 esac
 log "lane exit $lane_rc"
 tail -n 6 "$out/lane-stdout.log" | cut -c1-200
