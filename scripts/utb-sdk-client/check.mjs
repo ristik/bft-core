@@ -69,5 +69,5 @@ const none = { getTrustBaseEntries: () => { again.push(1); return Promise.reject
 const second = await verifyWithTrustBaseUpdate(verify, history, none);
 if (second.verdict !== 'ok' || again.length !== 0) fail('a client holding the epoch verified with a fetch or failed');
 say('second verification: ok with no fetch');
-if (opt('out')) writeFileSync(opt('out'), lines.join('\n') + '\n');
 say('sdk client check: PASSED');
+if (opt('out')) writeFileSync(opt('out'), lines.join('\n') + '\n');
