@@ -1,6 +1,6 @@
 {
  "format": "UNICITY_XREPO_GO_RETIREMENT/v1",
- "note": "Produced by bft-core (XREPO_UPDATE=1 go test ./xrepo) from the contracts' publication fixture. The records are what the root's projection emits; the Retirement reference digests are custody's exposure chains as the root derives them; the evidence pair is signed by the root's statement derivation and signer. The contracts import the records through the SealRegistry and apply them verbatim. Do not edit by hand.",
+ "note": "Produced by bft-core (XREPO_UPDATE=1 go test ./xrepo) from the contracts' publication fixture. The records are what the root's projection emits; the Retirement reference digests are the evmassign model of custody's exposure-chain storage word (a root reads it from custody's storage proof); the evidence pair is signed by the root's statement derivation and signer. The contracts import the records through the SealRegistry and apply them verbatim. Do not edit by hand.",
  "resultId": "0x8af64e9c9da34531f1b91bc18e5af8072c8466349b20661352626317852d39fd",
  "genesisAssignmentId": "0x7971fcee127203c6ef4962db14f70a41fc493629f4cad9e836906b6fc5c3fa63",
  "primaryAssignmentId": "0xd6812f6e3b074d067bf0090459d11e6d77489494d543988a68036ab236fc4a10",
