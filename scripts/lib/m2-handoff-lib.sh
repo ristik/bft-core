@@ -2,6 +2,7 @@
 # Functions of the M2 profile-2 handoff lane, shared with the H3 assignment lane.
 # Definitions only: sourcing starts nothing. Needs reth-paired-devnet.sh context (rpc, pyget, validators, ...).
 
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/portable.sh"
 m2_rpc_port() { echo $((25866 + $1 - 1)); }
 m2_p2p_port() { echo $((rootPortStart + $1 - 1)); }
 m2_root_addr() { boot_node "test-nodes/root$1" "$(m2_p2p_port "$1")"; }
@@ -122,7 +123,7 @@ m2_archive_root_state() {
 m2_send_paid() {
   local epoch=$1 nonce=${M2_NEXT_NONCE:-$2} expected='' sent='' i receipt block hash status log j rpcPort logValidator
   for i in $(m2_online_validators); do
-    sent=$(go run ./scripts/evmtx -send -eth-url "http://127.0.0.1:$((rethEthBase+i-1))" \
+    sent=$(lane_go_run evmtx -send -eth-url "http://127.0.0.1:$((rethEthBase+i-1))" \
       -chain-id "${M2_CHAIN_ID:-31337}" -nonce "$nonce" 2>&1) || { echo "m2_send_paid: evmtx failed on validator $i (nonce $nonce): $sent" >&2; return 1; }
     [[ "$sent" = 0x* ]] || { echo "m2_send_paid: validator $i returned no transaction hash (nonce $nonce): $sent" >&2; return 1; }
     [ -z "$expected" ] || [ "$expected" = "$sent" ] || { echo "m2_send_paid: validators disagree on the transaction hash: $expected vs $sent" >&2; return 1; }

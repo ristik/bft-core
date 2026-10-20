@@ -1,6 +1,7 @@
 # Sourced by scripts/h3-assignment-steps.sh (the H3 acceptance lane) and by the T6 rehearsal's coupled-rotation step: the H3 lane helpers.
 # Definitions and defaults only: sourcing starts nothing. They need the paired-devnet context (rpc, pyget, evm_validator_id, m2_* helpers) and the
 # variables the caller sets (H3_DIR, H3_ROOTS, H3_ONLINE, H3_REGISTRY, h3_slot_*, M2_NEXT_NONCE, M2_CHAIN_ID; optionally H3_ARCHIVES, H3_RESTORE_RESTART).
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/portable.sh"
 H3_ARCHIVES=${H3_ARCHIVES:-test-nodes/h3-archives}
 H3_LOOP_MARK=${H3_LOOP_MARK:-${H3_DIR:-test-nodes/h3}/loop-mark}
 
@@ -54,7 +55,7 @@ h3_pdr_file() { # shard epoch -> path
     # the root serves it to a local operator (the Q3 runtime: q3/shard-conf), as an operator of a container package must obtain it: no store file is read
     build/ubft q3 shard-conf --root-rpc "$(h3_rpc_url "$(h3_first_root)")" --epoch "$1" --out "$out" || return 1
   else
-    go run ./scripts/h3-pdr --orchestration "test-nodes/root$(h3_first_root)/orchestration.db" --epoch "$1" >"$out" || return 1   # roots without the Q3 runtime serve no such endpoint
+    lane_go_run h3-pdr --orchestration "test-nodes/root$(h3_first_root)/orchestration.db" --epoch "$1" >"$out" || return 1   # roots without the Q3 runtime serve no such endpoint
   fi
   echo "$out"
 }
@@ -311,7 +312,7 @@ h3_restore_validator() {
   cp "$evidence/jwt.hex" "test-nodes/evm$i/jwt.hex"
   h3_start_reth "$i" || return 1
   cp "test-nodes/evm$i/jwt.hex" "$evidence/jwt.hex"   # h3_start_reth drew a new secret for the new execution client
-  go run ./scripts/h4-restore-pin "$H3_ARCHIVES/evm$replica" "$H3_RESTORE_TRUST_BASE" "$evidence/tip" >"$evidence/pin.txt" || return 1
+  lane_go_run h4-restore-pin "$H3_ARCHIVES/evm$replica" "$H3_RESTORE_TRUST_BASE" "$evidence/tip" >"$evidence/pin.txt" || return 1
   bodyID=$(tr ' ' '\n' <"$evidence/pin.txt" | sed -n 's/^bodyID=//p')
   rootBoot=$(m2_root_addr "$(h3_first_root)")
   bootnodes=$(evm_bootnodes_for_peers "$rootBoot" "$i" $H3_ONLINE) || return 1
@@ -343,7 +344,7 @@ h3_restore_validator() {
 h3_send_certified() { # epoch args...
   local epoch=$1 id sent expected= first i receipt status block; shift
   for id in $H3_ONLINE; do
-    sent=$(go run ./scripts/evmtx -send -eth-url "http://127.0.0.1:$((rethEthBase+id-1))" -chain-id "${M2_CHAIN_ID:-31337}" -nonce "$M2_NEXT_NONCE" "$@" 2>&1) || { echo "$sent" >&2; return 1; }
+    sent=$(lane_go_run evmtx -send -eth-url "http://127.0.0.1:$((rethEthBase+id-1))" -chain-id "${M2_CHAIN_ID:-31337}" -nonce "$M2_NEXT_NONCE" "$@" 2>&1) || { echo "$sent" >&2; return 1; }
     [ -z "$expected" ] || [ "$expected" = "$sent" ] || return 1
     expected=$sent
   done
@@ -363,10 +364,10 @@ h3_send_certified() { # epoch args...
 # F7: deploy the lock contract and lock 42 wei; extract the inclusion bundle (absence proofs are not required); verify offline with the trust base of the UC's root epoch.
 h3_mint() { # root epoch of the certificate
   local epoch=$1 initcode contract topic block txIndex logIndex first=${H3_ONLINE%% *}
-  initcode=$(go run ./scripts/evmtx -lock-initcode) || return 1
+  initcode=$(lane_go_run evmtx -lock-initcode) || return 1
   h3_send_certified "$epoch" -create -data "$initcode" -gas-limit 200000 -value 0 || return 1
-  contract=$(go run ./scripts/evmtx -create-address -nonce "$((M2_NEXT_NONCE - 1))") || return 1
-  topic=$(go run ./scripts/evmtx -event-topic 'Locked(uint256)') || return 1
+  contract=$(lane_go_run evmtx -create-address -nonce "$((M2_NEXT_NONCE - 1))") || return 1
+  topic=$(lane_go_run evmtx -event-topic 'Locked(uint256)') || return 1
   h3_send_certified "$epoch" -to "$contract" -value 42 -gas-limit 100000 || return 1
   block=$(echo "$H3_RECEIPT" | pyget "['result']['blockHash']")
   txIndex=$(python3 -c "print(int('$(echo "$H3_RECEIPT" | pyget "['result']['transactionIndex']")',16))")

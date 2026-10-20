@@ -6,7 +6,13 @@
       "repository": "https://github.com/ristik/ureth.git",
       "commit": "6e59b68cc29f196d54d3d6e28d6266a8c02d05a1",
       "package": "unicity-reth",
-      "cargoArgs": ["build", "--release", "--locked", "-p", "unicity-reth"],
+      "cargoArgs": [
+        "build",
+        "--release",
+        "--locked",
+        "-p",
+        "unicity-reth"
+      ],
       "features": "default (jemalloc)",
       "note": "the attested Mac build of the same commit (builds/ureth-6e59b68c) was built with rustc 1.97.1; a Linux binary has its own digest"
     },
@@ -34,15 +40,26 @@
   },
   "toolchains": {
     "rust": "1.97.1",
-    "go": "1.24.13",
+    "go": "1.25.14",
     "node": "22",
-    "foundry": { "version": "TO-BE-MEASURED", "linuxAsset": "TO-BE-MEASURED", "sha256": "TO-BE-MEASURED" }
+    "foundry": {
+      "version": "1.8.1",
+      "linuxAsset": "foundry_v1.8.1_linux_amd64.tar.gz",
+      "url": "https://github.com/foundry-rs/foundry/releases/download/v1.8.1/foundry_v1.8.1_linux_amd64.tar.gz",
+      "sha256": "37b45855232e57624d90113b049ca54f0c92055bb5c1997fcbdc3076c7b89c10",
+      "note": "the version the lane's Mac runs (cast/forge 1.8.1); anyage-lane.sh requires 1.8.x"
+    }
   },
   "images": {
-    "mongo": { "image": "mongo", "digest": "TO-BE-MEASURED" }
+    "mongo": {
+      "image": "mongo:7.0.45",
+      "digest": "sha256:c53852c00c23ca9f23fc39690350ffa9a80e3642fe8f96879726d8da0abe80a7",
+      "note": "multi-arch index digest; the lane pulls image@digest"
+    }
   },
   "runner": {
     "label": "ubuntu-24.04",
-    "minFreeDiskGiB": "TO-BE-MEASURED"
+    "minFreeDiskGiB": 8,
+    "minFreeDiskNote": "provisional until the measured value replaces it (docs/ci-lanes.md)"
   }
 }

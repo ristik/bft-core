@@ -65,7 +65,7 @@ p85_live_count() { p85_call "$(p85_election)" "liveCount()(uint32)" | awk '{prin
 # The paid transaction of a step takes the funded account's next nonce from the chain: the lane seeds three (0-2) and no other step sends one, so a
 # fixed start of 4 (the M2/H3 lanes' value, after a paid block) leaves a gap that is never mined (run 28: "not certified" while the shard built blocks).
 p85_chain_nonce() {
-  local addr; addr=$(go run ./scripts/evmtx -address) || return 1
+  local addr; addr=$(lane_go_run evmtx -address) || return 1
   "$P85_CAST" nonce --rpc-url "http://127.0.0.1:$((rethEthBase + $(echo "${H3_ONLINE:-1}" | awk '{print $1}') - 1))" "$addr" || return 1
 }
 p85_paid() { M2_NEXT_NONCE=$(p85_chain_nonce) || return 1; h3_paid "$1"; }
@@ -701,7 +701,7 @@ p85_run_lane() {
   Q3_WEIGHTS="1 1 1 1"; Q3_TOTAL_WEIGHT=4; Q3_ROOT_QUORUM=3; Q3_EVM_QUORUM=3
   M2_NEXT_NONCE=${M2_NEXT_NONCE:-4}; M2_CHAIN_ID=31337
   cp test-nodes/trust-base.json test-nodes/trust-base-epoch1.json
-  read -r h3_slot_shard h3_slot_root h3_slot_conf h3_slot_cursor < <(H3_SLOT_LAYOUT=3 go run ./scripts/h3slots)
+  read -r h3_slot_shard h3_slot_root h3_slot_conf h3_slot_cursor < <(H3_SLOT_LAYOUT=3 lane_go_run h3slots)
   echo "=== P85 recovery lane: PoS genesis (K = 4 entities) -> primary J = K + joiner -> J stalls -> derived recovery to K ==="
   echo "NOTE: every validator signs through its own signing authority, including the P85 EVM possession proofs (SignElectionPoP) and the delegation possession (SignDelegationPossession)."
   if [ "${ANYAGE_LANE:-0}" = 1 ]; then
@@ -715,7 +715,12 @@ p85_run_lane() {
     fi
   fi
   [ "${P85_MODE:-}" != overbound ] || { P85_JOINER_UNITS=3; P85_STEPS="p85_baseline p85_joiner_nodes p85_joiner_onboard p85_election_refused"; }
-  for s in $P85_STEPS; do p85_step "$s" "$s"; done
+  for s in $P85_STEPS; do
+    p85_step "$s" "$s"
+    # CI harness-failure test (scripts/ci/run-lane.sh, workflow input inject_failure=in-lane): the lane fails deliberately after one named step so the failure path's
+    # diagnostics can be shown. Honoured only on a GitHub runner; it asserts nothing and weakens nothing, it adds a failing step.
+    if [ "${GITHUB_ACTIONS:-}" = true ] && [ -n "${CI_INJECT_FAIL_AFTER:-}" ] && [ "$s" = "$CI_INJECT_FAIL_AFTER" ]; then p85_step "injected-harness-failure-after-$s" false; fi
+  done
   echo "P85 recovery lane: all steps PASSED"
   if [ "${ANYAGE_LANE:-0}" = 1 ]; then echo "any-age final lane: all steps PASSED"; fi
   if [ "${UTB_LANE:-0}" = 1 ]; then echo "UTB lane: all steps PASSED"; fi

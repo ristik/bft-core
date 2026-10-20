@@ -8,8 +8,9 @@
 set -euo pipefail
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 REPO_ROOT=$(cd "$SCRIPT_DIR/.." && pwd)
-AGRE_ROOT=$(cd "$REPO_ROOT/.." && pwd)
-LOCK_SCRIPT=$AGRE_ROOT/briefs/devnet-lock.sh
+source "$SCRIPT_DIR/lib/portable.sh"
+AGRE_ROOT=$(lane_agre_root)
+LOCK_SCRIPT=$(lane_lock_script)
 EVIDENCE_DIR=${P85_EVIDENCE_DIR:-$AGRE_ROOT/briefs/devnet-runs/${P85_EVIDENCE_PREFIX:-p85}-$(date -u +%Y%m%dT%H%M%SZ)}
 # The any-age final lane (scripts/anyage-lane.sh) is this runner with ANYAGE_LANE=1: its own lock owner and evidence prefix, nothing else differs here.
 LOCK_OWNER=${P85_LOCK_OWNER:-p85-recovery}
@@ -43,8 +44,8 @@ else
   [ -z "$(git -C "$REPO_ROOT" status --porcelain --untracked-files=no)" ] || fail "the checkout has uncommitted changes: an evidence run needs a clean one"
   [ -x "$REPO_ROOT/build/ubft" ] || fail "build/ubft is missing (make build)"
   head=$(git -C "$REPO_ROOT" rev-parse HEAD)
-  go version -m "$REPO_ROOT/build/ubft" | grep -q "vcs.revision=$head" || fail "build/ubft is not built from HEAD $head (make build)"
-  ! go version -m "$REPO_ROOT/build/ubft" | grep -q 'vcs.modified=true' || fail "build/ubft was built from a modified tree"
+  lane_buildinfo "$REPO_ROOT/build/ubft" | grep -q "vcs.revision=$head" || fail "build/ubft is not built from HEAD $head (make build)"
+  ! lane_buildinfo "$REPO_ROOT/build/ubft" | grep -q 'vcs.modified=true' || fail "build/ubft was built from a modified tree"
   RUN_MODE="RUN MODE: evidence run: attested prebuilt Ureth $M2_URETH_BIN sha256=$got commit=$M2_URETH_COMMIT (provenance $PROVENANCE); everything else from this checkout at $head"
 fi
 
@@ -60,7 +61,7 @@ printf '%s %s\n' "$PPID" "$$" >"$EVIDENCE_DIR/.runner-pids"
 [ -x build/ubft ] || fail "build/ubft is missing (make build)"
 echo "$RUN_MODE" | tee "$EVIDENCE_DIR/run-mode.txt"
 [ -z "${PROVENANCE:-}" ] || cp -R "$PROVENANCE" "$EVIDENCE_DIR/ureth-provenance"
-{ date -u +%FT%TZ; pmset -g log 2>/dev/null; } | gzip >"$EVIDENCE_DIR/pmset-before.log.gz" || true
+host_evidence before "$(host_evidence_file "$EVIDENCE_DIR" before)"
 echo "bft-core head=$(git rev-parse HEAD) ureth=$M2_URETH_COMMIT ubft sha256=$(shasum -a 256 build/ubft | cut -d' ' -f1)" | tee "$EVIDENCE_DIR/heads.txt"
 if [ "${ANYAGE_LANE:-0}" = 1 ]; then
   echo "contracts head=$(git -C "$P85_CONTRACTS" rev-parse HEAD) nbp head=$(git -C "${NBP_DIR:?set NBP_DIR}" rev-parse HEAD) aggregator sha256=$(shasum -a 256 "${AGG_BIN:?set AGG_BIN}" | cut -d' ' -f1) dnb-tool sha256=$(shasum -a 256 "${DNB_TOOL:?set DNB_TOOL}" | cut -d' ' -f1)" | tee -a "$EVIDENCE_DIR/heads.txt"
@@ -107,7 +108,7 @@ if [ "$ANYAGE_LANE" = 1 ]; then mkdir -p "$EVIDENCE_DIR/aggregator"; for d in te
 # databases and public node info, the trust bases, the lane's flow directories; not the execution clients' data, the authorities' credentials or keys
 rsync -a --exclude 'reth*/' --exclude 'evm*/' --exclude 'auth*/' --exclude '*.log' --exclude 'keys.json' --exclude '*.sock' --exclude '*.cred' \
   --exclude 'jwt.hex' --exclude 'p85/' test-nodes/ "$EVIDENCE_DIR/state/" 2>/dev/null || true
-{ date -u +%FT%TZ; pmset -g log 2>/dev/null; } | gzip >"$EVIDENCE_DIR/pmset-after.log.gz" || true
+host_evidence after "$(host_evidence_file "$EVIDENCE_DIR" after)"
 (cd "$EVIDENCE_DIR" && find . -type f ! -name SHA256SUMS ! -name '.devnet-pid' | LC_ALL=C sort | xargs shasum -a 256 >SHA256SUMS) || true
 if [ "$status" -ne 0 ] || grep -q '^ *FAIL:' "$EVIDENCE_DIR/lane.log"; then
   fail "P85 recovery lane failed (exit $status); see $EVIDENCE_DIR/lane.log"
