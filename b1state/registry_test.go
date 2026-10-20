@@ -12,7 +12,7 @@ func chain(t *testing.T, g uint64, starts ...uint64) *Registry {
 	t.Helper()
 	gen := fixtureEntry(0, 7)
 	gen.Epoch, gen.BodyID = g, [32]byte{1}
-	r, err := NewRegistry(gen)
+	r, err := NewRegistry(gen, fixtureDeployment)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -63,7 +63,7 @@ func TestGenesisZeroIsAnOccupiedEpochAndNoOriginIsReadyYet(t *testing.T) {
 	if _, ok := r.Entry(1); ok {
 		t.Fatal("an absent epoch is absent")
 	}
-	if _, err := NewRegistry(func() Entry { e := fixtureEntry(1, 7); return e }()); !errors.Is(err, ErrHistory) {
+	if _, err := NewRegistry(func() Entry { e := fixtureEntry(1, 7); return e }(), fixtureDeployment); !errors.Is(err, ErrHistory) {
 		t.Fatalf("a non-genesis body cannot start a registry: %v", err)
 	}
 }
@@ -88,7 +88,7 @@ func TestAppendAndOriginAdvanceAreOneAtomicUpdate(t *testing.T) {
 		}
 	}
 	// nothing is deleted and no installed entry is rewritten except the one-time closure of the old tip (end word and hasEnd flag)
-	genesisWords, _ := EntryStorage(old0(r))
+	genesisWords, _ := EntryStorage(old0(r), r.Deployment)
 	for _, x := range w.Trace {
 		_, touchesGenesis := genesisWords[x.Slot]
 		if x.Clear || (touchesGenesis && x.Slot != EntrySlot(0, 5) && x.Slot != EntrySlot(0, 6)) {

@@ -94,7 +94,7 @@ func TestDeriveWorkDoesNotGrowWithThePermanentHistory(t *testing.T) {
 		entries, err := hist.B1EntriesFrom(round, tip, 0)
 		require.NoError(t, err)
 		words := g.B1Words()
-		ew, err := b1state.EntryStorage(entries[0])
+		ew, err := b1state.EntryStorage(entries[0], g.B1Deployment())
 		require.NoError(t, err)
 		for k, v := range ew {
 			words[common.Hash(k)] = common.Hash(v)

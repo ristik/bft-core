@@ -274,3 +274,8 @@ func TestEpochCommitmentBindsEveryStoredWordButClosure(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, c0, c, "closure words are excluded")
 }
+
+// The registry serves exactly the epochs one journal can name.
+func TestTheRegistryViewBoundIsMaxEpochs(t *testing.T) {
+	require.EqualValues(t, MaxEpochs, b1state.MaxCommitmentView)
+}

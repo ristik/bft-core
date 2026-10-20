@@ -11,6 +11,9 @@ import (
 	ethcrypto "github.com/ethereum/go-ethereum/crypto"
 )
 
+// fixtureDeployment binds the fixture registries' entry commitments.
+var fixtureDeployment = Deployment{GenesisCommitment: [32]byte{12}, ProfileHash: [32]byte{13}}
+
 func fixtureEntry(epoch, start uint64) Entry {
 	var scalar [32]byte
 	scalar[31] = 1
@@ -198,7 +201,7 @@ func TestGenesisWordsDescribeThePermanentRegistry(t *testing.T) {
 	p := fixtureProfile(2)
 	g := fixtureEntry(0, 7)
 	g.Members[0].NodeID = string(bytes.Repeat([]byte{'a'}, 128))
-	words, err := GenesisWords(p, g)
+	words, err := GenesisWords(p, g, fixtureDeployment.GenesisCommitment)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -328,7 +331,7 @@ func TestTheElectionHookIsPartOfTheProfile(t *testing.T) {
 		t.Fatal("the election hook is in the hash", err)
 	}
 	// pinned: the enabled form is a new encoding (three more items), so its hash is a fixed vector
-	if got := fmt.Sprintf("%x", withHash); got != "a02cc2e1ca3446613cb8fef331d6cc75afcb3bb867f1aa4d22db1fd1b50ad743" {
+	if got := fmt.Sprintf("%x", withHash); got != "67625d750d467bc7f9046dcaa2370e7cc834132958348f4bfae2e6fe4ca9a6f1" {
 		t.Fatal("the profile with the election hook hashes as the pinned vector, got", got)
 	}
 	// each pin changes the hash alone

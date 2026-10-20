@@ -15,8 +15,8 @@ import (
 	"github.com/unicitynetwork/bft-core/b1state"
 )
 
-const Source = "ristik/unicity-pos-contracts@0c1e43df954c2a60e01dc668b06415fcbf22d043:artifacts/seal-registry.json"
-const CodeHashHex = "0x8c5b57fd322b9ca1370fca310564a1fba8e80b6ad29a78ceb23aa9ae4113cfe4"
+const Source = "ristik/unicity-pos-contracts@10f2cc3ce67e7b96d0bfb2a8da466096b14fff8c:artifacts/seal-registry.json"
+const CodeHashHex = "0xd9203c57504d34ba762de428907c11fc3907d2ed4ee9bdbab88ee07df53c9584"
 
 // MaxMeasuredEpochs is the most epochs per update the runtime's G_rest was measured for (contracts B1GenesisBuilder: UnmeasuredB above 2).
 const MaxMeasuredEpochs uint64 = b1state.MinEpochsPerUpdate
@@ -32,7 +32,7 @@ func CompilerHash() [32]byte {
 }
 func Runtime() ([]byte, error) {
 	sum := sha256.Sum256(artifact)
-	if hex.EncodeToString(sum[:]) != "c575023a1038a34cc92b802ad393a2722b0f5eacefccd82f4c90469347711ee7" {
+	if hex.EncodeToString(sum[:]) != "ce27157de8107ddf08612dec8703b9bf5aa5587379ca8c26b45861bf8490c2e2" {
 		return nil, ErrArtifact
 	}
 	var a struct {

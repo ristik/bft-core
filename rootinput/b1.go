@@ -113,8 +113,9 @@ func (c *B1Config) Derive(ctx context.Context, parent registryproof.Snapshot, o 
 	// Nothing else is read: the steady path never enumerates the history.
 	ready := f.B1OriginReady == 1
 	expected := make(map[common.Hash]common.Hash)
+	deployment := b1state.Deployment{GenesisCommitment: f.GenesisCommitment, ProfileHash: profileHash}
 	prove := func(e b1state.Entry) error {
-		ew, err := b1state.EntryStorage(e)
+		ew, err := b1state.EntryStorage(e, deployment)
 		if err != nil {
 			return err
 		}

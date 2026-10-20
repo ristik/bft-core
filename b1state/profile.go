@@ -98,8 +98,8 @@ const (
 	// UpdateGasBase is the fixed admission and finalize reservation of a B1 update.
 	UpdateGasBase uint64 = 155936
 	// EpochGasFixed and EpochGasPerMember price one installed epoch: admission (scan, member debit, authentication) plus the full-entry write
-	// (11 + 8N words) and the closure of the predecessor and cursor writes. There is no deletion term.
-	EpochGasFixed     uint64 = 505244
+	// (11 + 8N words and the C_e cache word) and the closure of the predecessor and cursor writes. There is no deletion term.
+	EpochGasFixed     uint64 = 527344
 	EpochGasPerMember uint64 = 177800
 )
 

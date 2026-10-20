@@ -31,18 +31,58 @@ type Registry struct {
 	Tip     uint64 // I: the imported tip
 	Ready   bool   // a usable origin exists
 	U, O    uint64 // usable origin epoch and root round, meaningful once Ready
-	entries map[uint64]Entry
+	// Deployment binds every entry's cached commitment (field CommitmentField) to this registry.
+	Deployment Deployment
+	entries    map[uint64]Entry
 }
 
 // NewRegistry installs the genesis entry: open, I = g, no usable origin yet.
-func NewRegistry(genesis Entry) (*Registry, error) {
+func NewRegistry(genesis Entry, d Deployment) (*Registry, error) {
 	if err := genesis.Validate(); err != nil {
 		return nil, err
 	}
 	if genesis.BodyKind != 1 || genesis.End != nil {
 		return nil, ErrHistory
 	}
-	return &Registry{Genesis: genesis.Epoch, Tip: genesis.Epoch, entries: map[uint64]Entry{genesis.Epoch: clone(genesis)}}, nil
+	return &Registry{Genesis: genesis.Epoch, Tip: genesis.Epoch, Deployment: d, entries: map[uint64]Entry{genesis.Epoch: clone(genesis)}}, nil
+}
+
+// MaxCommitmentView bounds one EpochCommitments call: the most root epochs one B7 journal names.
+const MaxCommitmentView = 64
+
+// ErrCommitmentView is a commitment view of no epochs, of more than MaxCommitmentView, or naming an epoch that is not installed.
+var ErrCommitmentView = errors.New("b1state: bad epoch commitment view")
+
+// CachedEpoch is what the registry's commitment view returns for one epoch: the cached C_e and the closure words, which C_e
+// excludes because closing an epoch rewrites them.
+type CachedEpoch struct {
+	Commitment [32]byte
+	End        uint64
+	HasEnd     bool
+}
+
+// EpochCommitments is SealRegistry.epochCommitments: one direct lookup per named epoch, at most MaxCommitmentView, in the
+// caller's order. It never enumerates the history.
+func (r *Registry) EpochCommitments(epochs []uint64) ([]CachedEpoch, error) {
+	if len(epochs) == 0 || len(epochs) > MaxCommitmentView {
+		return nil, ErrCommitmentView
+	}
+	out := make([]CachedEpoch, len(epochs))
+	for i, epoch := range epochs {
+		e, ok := r.entries[epoch]
+		if !ok {
+			return nil, ErrCommitmentView
+		}
+		c, err := r.Deployment.EpochCommitment(e)
+		if err != nil {
+			return nil, err
+		}
+		out[i] = CachedEpoch{Commitment: c}
+		if e.End != nil {
+			out[i].End, out[i].HasEnd = *e.End, true
+		}
+	}
+	return out, nil
 }
 
 // Entry is the direct lookup by epoch.
@@ -119,7 +159,7 @@ func (r *Registry) append(e Entry, w *Changes) (installed bool, err error) {
 	open := clone(e)
 	open.End = nil // an entry is installed open; its successor closes it, exactly once
 	r.entries[e.Epoch] = open
-	putEntry(w.insert, open)
+	putEntry(w.insert, open, r.Deployment)
 	r.Tip = e.Epoch
 	return true, nil
 }

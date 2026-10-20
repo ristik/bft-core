@@ -11,7 +11,7 @@ import (
 	"github.com/unicitynetwork/bft-core/rootinput"
 )
 
-// Evidence row 5c, root side: the storage words one B1 derivation proves against the parent are the open tip's entry (11 + 8 per member) and one presence word
+// Evidence row 5c, root side: the storage words one B1 derivation proves against the parent are the open tip's entry (11 + 8 per member and the C_e cache word) and one presence word
 // per entry about to be installed, whatever the history before the tip holds. Nothing of any other installed epoch is proven or read.
 func TestDeriveProvesOnlyTheOpenTipAndTheAbsenceOfTheNewEntries(t *testing.T) {
 	e := newThreeEpochs(t)
@@ -23,7 +23,7 @@ func TestDeriveProvesOnlyTheOpenTipAndTheAbsenceOfTheNewEntries(t *testing.T) {
 	tipWords := func(epoch int) map[common.Hash]bool {
 		open := history[epoch-1]
 		open.End = nil
-		w, err := b1state.EntryStorage(open)
+		w, err := b1state.EntryStorage(open, e.g.B1Deployment())
 		require.NoError(t, err)
 		out := map[common.Hash]bool{}
 		for k := range w {

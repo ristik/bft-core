@@ -42,9 +42,11 @@ func TestRegistryWriterMatchesReader(t *testing.T) {
 	p.MaxGas = p.SystemGas + p.OrdinaryCapacity
 	profileHash, err := p.Hash()
 	require.NoError(t, err)
-	words, err := b1state.GenesisWords(p, entries[0])
+	// the genesis commitment is an operational word registrygenesis allocates; the corpus fixture carries its own value
+	gc := word32(t, pre.GenesisCommitment)
+	words, err := b1state.GenesisWords(p, entries[0], gc)
 	require.NoError(t, err)
-	reg, err := b1state.NewRegistry(entries[0])
+	reg, err := b1state.NewRegistry(entries[0], b1state.Deployment{GenesisCommitment: gc, ProfileHash: profileHash})
 	require.NoError(t, err)
 
 	// first usable origin in the genesis epoch, then two epochs per update with the origin moving to the new tip; O stays below the
@@ -69,8 +71,6 @@ func TestRegistryWriterMatchesReader(t *testing.T) {
 	require.Equal(t, uint64(b1gen.HistoryOrigin), reg.Tip)
 	require.True(t, reg.Ready)
 
-	// the genesis commitment is an operational word registrygenesis allocates; the corpus fixture carries its own value
-	gc := word32(t, pre.GenesisCommitment)
 	words[b1state.FixedSlot("genesisCommitment")] = gc
 
 	// every word the corpus registry carries is the writer's word; the writer's other words are operational slots outside B1
@@ -105,6 +105,14 @@ func TestRegistryWriterMatchesReader(t *testing.T) {
 		}
 	}
 	require.Equal(t, 9*(11+4*8), slots)
+	// the writer also caches C_e at field 11 of every entry (B7 trust cache); the reader corpus does not carry it, since no reader reads it
+	deployment := b1state.Deployment{GenesisCommitment: gc, ProfileHash: profileHash}
+	for _, e := range entries {
+		want, err := deployment.EpochCommitment(e)
+		require.NoError(t, err)
+		require.Equal(t, want, words[b1state.EntrySlot(e.Epoch, b1state.CommitmentField)], "epoch %d C_e", e.Epoch)
+		require.NotContains(t, corpus, b1state.EntrySlot(e.Epoch, b1state.CommitmentField))
+	}
 	// and nothing the reader reads is missing: every nonzero B1 word the writer wrote for entries and the common state is in the corpus
 	for _, name := range b1ref.CommonSlots {
 		if name != "b1.profileHash" {

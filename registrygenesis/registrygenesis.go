@@ -295,7 +295,7 @@ func Generate(config *bfttypes.PartitionDescriptionRecord, pins Pins, art Artifa
 			return nil, ErrArtifact
 		}
 		delete(words, "layoutVersion")
-		bw, err := b1state.GenesisWords(art.b1.profile, art.b1.genesis)
+		bw, err := b1state.GenesisWords(art.b1.profile, art.b1.genesis, commitment)
 		if err != nil {
 			return nil, err
 		}

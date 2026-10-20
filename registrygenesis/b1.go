@@ -66,6 +66,12 @@ func (g *Genesis) B1Words() map[common.Hash]common.Hash {
 	}
 	return out
 }
+
+// B1Deployment is what binds every registry entry's commitment (C_e at field 11): the genesisCommitment and b1.profileHash words.
+func (g *Genesis) B1Deployment() b1state.Deployment {
+	return b1state.Deployment{GenesisCommitment: g.genesisCommitment, ProfileHash: g.storage["b1.profileHash"]}
+}
+
 func (g *Genesis) B1Proofs(keys []common.Hash) [][][]byte {
 	out := make([][][]byte, len(keys))
 	for i, k := range keys {

@@ -303,7 +303,7 @@ func (e *threeEpochs) entryWords(t *testing.T, epoch uint64) map[common.Hash]com
 	history, err := h.B1Entries(15)
 	require.NoError(t, err)
 	entry := history[epoch-history[0].Epoch]
-	w, err := b1state.EntryStorage(entry)
+	w, err := b1state.EntryStorage(entry, e.g.B1Deployment())
 	require.NoError(t, err)
 	out := map[common.Hash]common.Hash{}
 	for k, v := range w {
@@ -312,7 +312,7 @@ func (e *threeEpochs) entryWords(t *testing.T, epoch uint64) map[common.Hash]com
 	// the predecessor is closed by this entry
 	prev := history[epoch-history[0].Epoch-1]
 	prev.End = &entry.Start
-	pw, err := b1state.EntryStorage(prev)
+	pw, err := b1state.EntryStorage(prev, e.g.B1Deployment())
 	require.NoError(t, err)
 	for k, v := range pw {
 		out[common.Hash(k)] = common.Hash(v)

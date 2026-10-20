@@ -16,6 +16,7 @@ func TestIndependentStorageAndUpdateVector(t *testing.T) {
 		ScanGas, MemberGas                   uint64
 		GenesisWords, ChangedWords           map[string]string
 		RootKey, DistinctDelegatedEVMKey     string
+		GenesisCommitment                    string
 	}
 	raw, err := os.ReadFile("testdata/projection.json")
 	if err != nil {
@@ -43,7 +44,12 @@ func TestIndependentStorageAndUpdateVector(t *testing.T) {
 	}
 	g := fixtureEntry(0, 7)
 	g.Members[0].NodeID = strings.Repeat("a", 128)
-	words, err := GenesisWords(p, g)
+	gcBytes, err := hex.DecodeString(v.GenesisCommitment)
+	if err != nil || len(gcBytes) != 32 {
+		t.Fatal("genesis commitment", err)
+	}
+	gc := [32]byte(gcBytes)
+	words, err := GenesisWords(p, g, gc)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -57,7 +63,7 @@ func TestIndependentStorageAndUpdateVector(t *testing.T) {
 	if !reflect.DeepEqual(asJSON(words), v.GenesisWords) {
 		t.Fatal("genesis words")
 	}
-	reg, err := NewRegistry(g)
+	reg, err := NewRegistry(g, Deployment{GenesisCommitment: gc, ProfileHash: h})
 	if err != nil {
 		t.Fatal(err)
 	}

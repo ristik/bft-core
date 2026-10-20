@@ -249,10 +249,10 @@ func TestEntryStorageRefusesInvalidAuthorityEntry(t *testing.T) {
 	f := b1fixture.New(t)
 	entries, err := f.History.B1Entries(5)
 	require.NoError(t, err)
-	_, err = b1state.EntryStorage(entries[0])
+	_, err = b1state.EntryStorage(entries[0], f.Genesis.B1Deployment())
 	require.NoError(t, err)
 	entries[0].Members[0].Weight = 0
-	_, err = b1state.EntryStorage(entries[0])
+	_, err = b1state.EntryStorage(entries[0], f.Genesis.B1Deployment())
 	require.ErrorIs(t, err, b1state.ErrMembers)
 }
 

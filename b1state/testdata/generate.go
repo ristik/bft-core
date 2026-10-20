@@ -33,7 +33,11 @@ func key(n byte) []byte {
 	k, _ := crypto.ToECDSA(b)
 	return crypto.CompressPubkey(&k.PublicKey)
 }
-func entry(words map[string]string, epoch, start, weight uint64, id string, pub []byte) {
+
+// genesisCommitment is a fixture value: registrygenesis derives the real word before the allocation.
+var genesisCommitment = hashByte(12)
+
+func entry(words map[string]string, epoch, start, weight uint64, id string, pub, profileHash []byte) {
 	kind := uint64(2)
 	commit := hashByte(byte(epoch + 10))
 	if epoch == 0 {
@@ -58,6 +62,17 @@ func entry(words map[string]string, epoch, start, weight uint64, id string, pub 
 	for f, w := range ms {
 		words[slot("b1.member", epoch, 0, uint64(f))] = hx(w)
 	}
+	// C_e at field 11: the domain, genesisCommitment, profileHash, the epoch, metadata words 0-4 and 7-10, then the member words.
+	pre := append(append(append(crypto.Keccak256([]byte("unicity.seal-registry.v2/epoch-commitment")), genesisCommitment...), profileHash...), word(epoch)...)
+	for f, w := range metadata {
+		if f != 5 && f != 6 {
+			pre = append(pre, w...)
+		}
+	}
+	for _, w := range ms {
+		pre = append(pre, w...)
+	}
+	words[slot("b1.entry", epoch, 11)] = hx(crypto.Keccak256(pre))
 }
 func main() {
 	enc, _ := cbor.CoreDetEncOptions().EncMode()
@@ -69,9 +84,9 @@ func main() {
 		return b
 	}
 	// Synthetic fixture pins: these do not name a real compiler/runtime/G_rest.
-	// B=1; the system gas is the written formula: 155936 + (505244+177800*16)*B + RestGas + import envelope (2000+16*16384+1000*32 + 18,000,000).
+	// B=1; the system gas is the written formula: 155936 + (527344+177800*16)*B + RestGas + import envelope (2000+16*16384+1000*32 + 18,000,000).
 	const bEpochs, rest = 2, 100
-	systemGas := uint64(155936 + (505244+177800*16)*bEpochs + rest + (2000 + 16*16384 + 1000*32 + 18000000))
+	systemGas := uint64(155936 + (527344+177800*16)*bEpochs + rest + (2000 + 16*16384 + 1000*32 + 18000000))
 	profile := []any{"UNICITY_B1_PROFILE", uint64(3), uint64(bEpochs), uint64(1), uint64(2), systemGas, uint64(0), systemGas + 7000000, uint64(7000000), uint64(rest), uint64(1000000), uint64(1024), uint64(bEpochs), uint64(4096 + 16384*bEpochs), uint64(32 + 266*bEpochs), uint64(1000), hashByte(1), uint64(2), make([]byte, 20), uint64(0), uint64(0), hashByte(3), hashByte(4), uint64(16), uint64(128), uint64(16384), uint64(16), uint64(262144), uint64(24576), uint64(32768), "scan=2000+16C;members=1000T;UC=60000+16B+16000+6000S+2000N+250P+14700;RSMT=2000+16B+250(1+popcount);I=22100;D=7100", "P85-import=scan 2000+16C_R;entries 1000N;C_R<=16384;N<=32;outcome=[system,G_pre,1,'',SHA256(rootInput)];G_pre=admit+open+import", "P85-hook=after EIP-4788: one custody.applyRootRecords(min(H,available)) iff the registry holds more records than custody; reads recordCursor,recordCount,recordTargetCount,limits,recordCursor; G_hooks excluded from the outcome, included in the system total", "registry=2;permanent-entries;append-only;no-window;B=per-block-epochs;origin=separate-from-imported-tip", "native-body=1,2,3;signing=1,2;quorum=total-(total-1)/3;claims=8;signatures=64/512;shard=33/256;path=32;summary=256;RSMT=4096/256/12392"}
 	pb := encode(profile)
 	ph := sha256.Sum256(pb)
@@ -86,18 +101,18 @@ func main() {
 	for name, w := range map[string][]byte{"b1.format": word(2), "b1.network": word(3), "b1.profileHash": ph[:], "b1.initialized": word(1), "b1.genesisEpoch": word(0), "b1.importedTipEpoch": word(0), "b1.originReady": word(0), "clock.rootRound": word(0), "origin.rootEpoch": word(0), "assignment.rootEpoch": word(0), "records.ucTime": word(1000), "phase": word(2)} {
 		genesis[hx(fixed(name))] = hx(w)
 	}
-	entry(genesis, 0, 7, 1, id, pub)
+	entry(genesis, 0, 7, 1, id, pub, ph[:])
 	// The update appends epoch 1 (start 8) after the genesis epoch 0: the old tip is closed once at 8 (end word, hasEnd flag), the entry is
 	// installed open, the imported tip advances, and the first usable origin (epoch 1, round 10) is published with ready = 1.
 	changed := map[string]string{}
 	changed[slot("b1.entry", 0, 5)] = hx(word(8))
 	changed[slot("b1.entry", 0, 6)] = hx(word(1))
-	entry(changed, 1, 8, 7, id, pub)
+	entry(changed, 1, 8, 7, id, pub, ph[:])
 	changed[hx(fixed("b1.importedTipEpoch"))] = hx(word(1))
 	changed[hx(fixed("b1.originReady"))] = hx(word(1))
 	changed[hx(fixed("origin.rootEpoch"))] = hx(word(1))
 	changed[hx(fixed("clock.rootRound"))] = hx(word(10))
-	out := map[string]any{"note": "Synthetic independent Go fixture; no PR3 runtime or authenticated admission. Genesis operational origin is zero before the first prefix.", "profileBytes": hx(pb), "profileHash": hx(ph[:]), "updateBytes": hx(ub), "updateHash": hx(uh[:]), "scanGas": 2000 + 16*len(ub), "memberGas": 1000, "genesisWords": genesis, "changedWords": changed, "rootKey": hx(pub), "distinctDelegatedEVMKey": hx(key(9)), "parentOrigin": 7, "origin": 10, "maxEpochsPerUpdate": 1, "oldTipEnd": 8, "importedTip": 1}
+	out := map[string]any{"note": "Synthetic independent Go fixture; no PR3 runtime or authenticated admission. Genesis operational origin is zero before the first prefix.", "profileBytes": hx(pb), "profileHash": hx(ph[:]), "updateBytes": hx(ub), "updateHash": hx(uh[:]), "scanGas": 2000 + 16*len(ub), "memberGas": 1000, "genesisWords": genesis, "changedWords": changed, "genesisCommitment": hx(genesisCommitment), "rootKey": hx(pub), "distinctDelegatedEVMKey": hx(key(9)), "parentOrigin": 7, "origin": 10, "maxEpochsPerUpdate": 1, "oldTipEnd": 8, "importedTip": 1}
 	encoder := json.NewEncoder(os.Stdout)
 	encoder.SetIndent("", " ")
 	if err := encoder.Encode(out); err != nil {
