@@ -40,6 +40,7 @@ type Statement struct {
 	Signature       []byte // the vote signature over sha256(PV)
 	SealSignature   []byte // the committing vote's signature over the native seal bytes; empty otherwise
 	PV              []byte // the exact preimage the vote signature covers
+	SealBytes       []byte // the native seal bytes the seal signature covers; empty on a non-committing vote
 }
 
 // Digest is the identity of the statement: SHA-256 of its preimage. Two valid signature encodings of one statement are one statement.
@@ -78,7 +79,7 @@ func Observe(v *abdrc.VoteMsg, tbs *trustbase.TrustBaseStore) (*Observation, err
 	seal := v.LedgerCommitInfo
 	o := &Observation{Author: v.Author, Key: st.Key, Epoch: v.VoteInfo.Epoch, Round: v.VoteInfo.RoundNumber, S: Statement{
 		Parent: v.VoteInfo.ParentRoundNumber, Exec: bytes.Clone(v.VoteInfo.CurrentRootHash), Timestamp: v.VoteInfo.Timestamp,
-		Committing: st.Committing, Signature: bytes.Clone(v.Signature), PV: st.PV,
+		Committing: st.Committing, Signature: bytes.Clone(v.Signature), PV: st.PV, SealBytes: st.SealBytes,
 	}}
 	if st.Committing {
 		o.S.CommitHash, o.S.CommitRound, o.S.CommitEpoch, o.S.CommitTimestamp = bytes.Clone(seal.Hash), seal.RootChainRoundNumber, seal.Epoch, seal.Timestamp
