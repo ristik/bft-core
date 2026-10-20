@@ -207,7 +207,7 @@ s4_submit_once() {
     --eth-rpc "$(p85_eth)" --evidence "$ev" "${ids[@]}" --sender-key "$S4_KEY" ${settle[@]+"${settle[@]}"} >"$out" 2>&1 &
   pid=$!
   if [ "$wait" = 0 ]; then
-    for f in $(seq 1 300); do grep -q 'case=' "$out" 2>/dev/null && break; kill -0 "$pid" 2>/dev/null || break; sleep 0.1; done
+    for f in $(seq 1 3000); do grep -q "case=" "$out" 2>/dev/null && break; kill -0 "$pid" 2>/dev/null || break; sleep 0.1; done
     kill -KILL "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
     return 0
   fi
