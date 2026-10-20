@@ -45,7 +45,7 @@ old-epoch to new-epoch log gap only: keep that number, and do not substitute it 
 | Certified history verifiable | Saved receipts and roots unchanged; archived UC/TR and handoff chain; the F7 proof re-verified offline by the second operator. |
 | No certified monetary reorg | Fixed-height comparisons and a monotonic finalized observer; preserve the stopped state if recovery cannot be proved. |
 | Execution by a non-author | A named human second operator, the documentation revision, transcript and defects. The author's source checks are not independent acceptance. |
-| Authority loss and freshness (issue discussion) | Unsupported here (same-key resurrection is refused); needs separate evidence for certified replacement, clone fencing, expired receipts and storage faults. Do not mark issue 23 complete from the lanes alone. |
+| Authority loss and freshness (issue discussion) | [authority-loss.md](authority-loss.md): the contract, the in-process evidence (including the root restored-store negative control and the SIGKILL test of the root safety store) and the supported limits per item. Same-key resurrection is refused; root hosts are never restored or cloned, and are replaced by certified rotation; power loss is not exercised. The real-host parts (an actual authority loss and replacement, the root fencing procedure, power loss) belong to the Linux-host rehearsal. Do not mark issue 23 complete from the lanes alone. |
 
 ## Refusals: stop at the first unexplained one
 
