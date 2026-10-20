@@ -13,6 +13,8 @@ What the container stack does not support yet (OPERATOR.md section 6) is exercis
 
 - [scenarios.md](scenarios.md): the native lanes, what each one proves and the commands.
 - [evidence.md](evidence.md): what to record, the interruption objectives, the acceptance map, refusals and what to do.
+- [authority-loss.md](authority-loss.md): authority loss, clones and backups, bootstrap freshness and storage faults: the contract,
+  the evidence and the supported limits.
 
 Procedures the lanes follow: [H3 runbook](../h3-evm-assignment-runbook.md) (coupled root/EVM rotation, joiners, supersession),
 [M2 runbook](../m2-runbook.md) (handoffs, restore after disk loss, archive replicas),
