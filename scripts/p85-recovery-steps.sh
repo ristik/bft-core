@@ -716,6 +716,11 @@ p85_run_lane() {
   fi
   # a multi-shard aggregator (DNB_AGG_SHARDS=2): one more token over the shards, redeemed through the SDK's consolidation (#526 step 4), right after L1b
   if [ "${ANYAGE_LANE:-0}" = 1 ] && [ "${aggShards:-1}" -gt 1 ]; then P85_STEPS=${P85_STEPS/anyage_step_l1b/anyage_step_l1b anyage_step_consolidated}; fi
+  if [ "${REWARD_LANE:-0}" = 1 ]; then
+    # T8: the funded reward pool is settled and claimed across the lane's real acknowledged history (scripts/lib/rewards-lib.sh), before the lane's last step
+    source scripts/lib/rewards-lib.sh
+    case " $P85_STEPS " in *" utb_step_final "*) P85_STEPS="${P85_STEPS/ utb_step_final/ rw_step_settle utb_step_final}" ;; *) P85_STEPS="$P85_STEPS rw_step_settle" ;; esac
+  fi
   [ "${P85_MODE:-}" != overbound ] || { P85_JOINER_UNITS=3; P85_STEPS="p85_baseline p85_joiner_nodes p85_joiner_onboard p85_election_refused"; }
   for s in $P85_STEPS; do
     p85_step "$s" "$s"

@@ -330,6 +330,131 @@ func newPosTxCmd() *cobra.Command {
 	join.Flags().StringVar(&evmCredential, "evm-authority-credential", "", "operator credential of that authority")
 	_ = join.MarkFlagRequired("joiner")
 
-	root.AddCommand(submit, finalize, join)
+	root.AddCommand(submit, finalize, join, newPosRewardCmd())
+	return root
+}
+
+// newPosRewardCmd is `ubft pos-relayer tx reward`: the funded reward pool's permissionless work (read the authenticated records, close the next
+// interval), funding, and a payee's claim. The relayer chooses no endpoint or length; the pool decides from the authenticated root records.
+func newPosRewardCmd() *cobra.Command {
+	root := &cobra.Command{Use: "reward", Short: "advance, settle, fund and claim the operator reward pool"}
+	pool := func(env *txEnv) ([20]byte, error) { return loadRewardPool(env.deployment) }
+
+	var senv txEnv
+	var maxSteps int
+	settle := &cobra.Command{
+		Use:   "settle",
+		Short: "read the pool's next authenticated records and close its next intervals, until the pool accepts no more (bounded by --max-steps)",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			key, err := readKeyFile(senv.senderKey)
+			if err != nil {
+				return err
+			}
+			addr, err := pool(&senv)
+			if err != nil {
+				return err
+			}
+			if err := senv.open(); err != nil {
+				return err
+			}
+			defer senv.client.Close()
+			rd := posrelayer.RPCReader{Client: senv.client}
+			for i := 0; i < maxSteps; i++ {
+				ctx, cancel := context.WithTimeout(cmd.Context(), 30*time.Second)
+				step, err := posrelayer.NextRewardStep(ctx, rd, addr)
+				cancel()
+				if err != nil {
+					return fmt.Errorf("%w: the reward pool: %v", ErrPosRelayer, err)
+				}
+				if step.Kind == "" {
+					cmd.PrintErrf("reward pool idle after %d step(s)\n", i)
+					return nil
+				}
+				if err := senv.send(cmd, key, addr, nil, step.Data, step.Kind); err != nil {
+					return err
+				}
+			}
+			cmd.PrintErrf("reward pool: stopped after %d step(s); run again to continue\n", maxSteps)
+			return nil
+		},
+	}
+	senv.flags(settle, true)
+	settle.Flags().IntVar(&maxSteps, "max-steps", 64, "at most this many transactions in one run")
+
+	var cenv txEnv
+	var amountWei, toHex string
+	claim := &cobra.Command{
+		Use:   "claim",
+		Short: "pay a payee's credit to an address (the sender is the payee)",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			key, err := readKeyFile(cenv.senderKey)
+			if err != nil {
+				return err
+			}
+			amount, ok := new(big.Int).SetString(amountWei, 10)
+			if !ok || amount.Sign() <= 0 {
+				return fmt.Errorf("%w: --amount-wei must be a positive integer", ErrPosRelayer)
+			}
+			to, err := decodeFixedHex("to", toHex, 20)
+			if err != nil {
+				return err
+			}
+			addr, err := pool(&cenv)
+			if err != nil {
+				return err
+			}
+			if err := cenv.open(); err != nil {
+				return err
+			}
+			defer cenv.client.Close()
+			var dst [20]byte
+			copy(dst[:], to)
+			data, err := posrelayer.ClaimCalldata(amount, dst)
+			if err != nil {
+				return err
+			}
+			return cenv.send(cmd, key, addr, nil, data, "claim")
+		},
+	}
+	cenv.flags(claim, true)
+	claim.Flags().StringVar(&amountWei, "amount-wei", "", "the amount to claim, in wei")
+	claim.Flags().StringVar(&toHex, "to", "", "the recipient address")
+	_ = claim.MarkFlagRequired("amount-wei")
+	_ = claim.MarkFlagRequired("to")
+
+	var fenv txEnv
+	var fundWei string
+	fund := &cobra.Command{
+		Use:   "fund",
+		Short: "add funding to the pool (RewardPool.fund); only value sent this way is allocated to rewards",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			key, err := readKeyFile(fenv.senderKey)
+			if err != nil {
+				return err
+			}
+			v, ok := new(big.Int).SetString(fundWei, 10)
+			if !ok || v.Sign() <= 0 {
+				return fmt.Errorf("%w: --value-wei must be a positive integer", ErrPosRelayer)
+			}
+			addr, err := pool(&fenv)
+			if err != nil {
+				return err
+			}
+			if err := fenv.open(); err != nil {
+				return err
+			}
+			defer fenv.client.Close()
+			data, err := posrelayer.FundCalldata()
+			if err != nil {
+				return err
+			}
+			return fenv.send(cmd, key, addr, v, data, "fund")
+		},
+	}
+	fenv.flags(fund, true)
+	fund.Flags().StringVar(&fundWei, "value-wei", "", "the funding, in wei")
+	_ = fund.MarkFlagRequired("value-wei")
+
+	root.AddCommand(settle, claim, fund)
 	return root
 }

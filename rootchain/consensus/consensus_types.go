@@ -11,6 +11,7 @@ import (
 	"github.com/unicitynetwork/bft-core/network/protocol/abdrc"
 	"github.com/unicitynetwork/bft-core/q3format"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/storage"
+	"github.com/unicitynetwork/bft-core/rootevidence"
 	"github.com/unicitynetwork/bft-core/trusthistorystore"
 	"github.com/unicitynetwork/bft-core/utbstore"
 )
@@ -49,6 +50,8 @@ type (
 		// UTBStore is the permanent store of finalized signed entries. Set, it backs UTBPrevious, receives the endorsed entry of every committing
 		// certificate before the commit is applied, and is where the installers append the entry of the epoch they install.
 		UTBStore *utbstore.Store
+		// Evidence is the evidence service's ingress tap: every decoded root vote is offered to it before any filter of onVoteMsg.
+		Evidence *rootevidence.Observer
 	}
 
 	Option func(c *Optional)
@@ -93,6 +96,12 @@ func WithUTBPrevious(previous func(epoch uint64) (*basetypes.RootTrustBaseV2, er
 // installed epoch's entry is appended to it before the commit or the install is visible.
 func WithUTBStore(store *utbstore.Store) Option {
 	return func(c *Optional) { c.UTBStore = store }
+}
+
+// WithEvidenceObserver wires the evidence service's ingress tap (S3). It only observes: the vote is offered, never changed or admitted, and the
+// observer's failures do not reach consensus.
+func WithEvidenceObserver(o *rootevidence.Observer) Option {
+	return func(c *Optional) { c.Evidence = o }
 }
 
 // Q3Authority is the verified Q3 history the manager reads: the signer admission of every epoch (the safety module takes it as

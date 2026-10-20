@@ -367,34 +367,91 @@ func (x *VoteMsg) verifySignatures(tbs *trustbase.TrustBaseStore) error {
 }
 
 func (x *VoteMsg) verifyDomainBound(tbs *trustbase.TrustBaseStore, cfg votesig.Config) error {
-	pv, sealBytes, committing, err := x.domainBoundStatement(cfg)
+	pv, sealBytes, committing, err := x.checkedStatement(cfg)
 	if err != nil {
-		return fmt.Errorf("vote from '%s': %w", x.Author, err)
-	}
-	if err := votesig.CheckSignatureShape(x.Signature); err != nil {
-		return fmt.Errorf("vote from '%s' vote signature: %w", x.Author, err)
-	}
-	if committing {
-		if err := votesig.CheckSignatureShape(x.SealSignature); err != nil {
-			return fmt.Errorf("vote from '%s' seal signature: %w", x.Author, err)
-		}
+		return err
 	}
 	if err := x.verifyContext(tbs); err != nil {
 		return err
 	}
+	_, err = x.verifyStatementSignatures(tbs, pv, sealBytes, committing)
+	return err
+}
+
+// checkedStatement derives the signed statement of a scheme 2 vote and checks the shape of its signatures.
+func (x *VoteMsg) checkedStatement(cfg votesig.Config) (pv, sealBytes []byte, committing bool, err error) {
+	pv, sealBytes, committing, err = x.domainBoundStatement(cfg)
+	if err != nil {
+		return nil, nil, false, fmt.Errorf("vote from '%s': %w", x.Author, err)
+	}
+	if err := votesig.CheckSignatureShape(x.Signature); err != nil {
+		return nil, nil, false, fmt.Errorf("vote from '%s' vote signature: %w", x.Author, err)
+	}
+	if committing {
+		if err := votesig.CheckSignatureShape(x.SealSignature); err != nil {
+			return nil, nil, false, fmt.Errorf("vote from '%s' seal signature: %w", x.Author, err)
+		}
+	}
+	return pv, sealBytes, committing, nil
+}
+
+// verifyStatementSignatures verifies the vote signature over PV and, for a committing vote, the seal signature, with the voter's key of the
+// vote's epoch. It returns that key.
+func (x *VoteMsg) verifyStatementSignatures(tbs *trustbase.TrustBaseStore, pv, sealBytes []byte, committing bool) ([]byte, error) {
 	voteTrustBase, err := tbs.GetByEpoch(x.VoteInfo.Epoch)
 	if err != nil {
-		return fmt.Errorf("failed to get trust base for vote verification, epoch %d: %w", x.VoteInfo.Epoch, err)
+		return nil, fmt.Errorf("failed to get trust base for vote verification, epoch %d: %w", x.VoteInfo.Epoch, err)
 	}
 	if _, err := voteTrustBase.VerifySignature(pv, x.Signature, x.Author); err != nil {
-		return fmt.Errorf("vote from '%s' vote signature verification error: %w", x.Author, votesig.BadSignature(err))
+		return nil, fmt.Errorf("vote from '%s' vote signature verification error: %w", x.Author, votesig.BadSignature(err))
 	}
 	if committing {
 		if _, err := voteTrustBase.VerifySignature(sealBytes, x.SealSignature, x.Author); err != nil {
-			return fmt.Errorf("vote from '%s' seal signature verification error: %w", x.Author, votesig.BadSignature(err))
+			return nil, fmt.Errorf("vote from '%s' seal signature verification error: %w", x.Author, votesig.BadSignature(err))
 		}
 	}
-	return nil
+	for _, n := range voteTrustBase.GetRootNodes() {
+		if n.NodeID == x.Author {
+			return bytes.Clone(n.SigKey), nil
+		}
+	}
+	return nil, fmt.Errorf("vote from '%s': no key in the trust base of epoch %d", x.Author, x.VoteInfo.Epoch)
+}
+
+// SignedStatement is a scheme 2 vote statement whose signatures were verified: the exact preimage the vote signature covers, for a committing
+// vote the native seal bytes the second signature covers, and the voter's key of the vote's epoch.
+type SignedStatement struct {
+	PV, SealBytes []byte
+	Committing    bool
+	Key           []byte
+}
+
+// VerifyStatement verifies the signed statement of a scheme 2 vote and nothing else: not the high QC or the anchor it carries, not the
+// round it was received in, not the envelope. The signatures are over the statement alone, so a vote whose transport context is stale or
+// unverifiable still is evidence when its signatures are genuine. It does not admit the vote to anything.
+func (x *VoteMsg) VerifyStatement(tbs *trustbase.TrustBaseStore) (*SignedStatement, error) {
+	if x.Author == "" || x.VoteInfo == nil || x.LedgerCommitInfo == nil {
+		return nil, fmt.Errorf("%w: author, vote info or commit info is missing", votesig.ErrStatement)
+	}
+	if x.signingScheme() != votesig.SchemeDomainBound {
+		return nil, fmt.Errorf("%w: vote is not scheme 2", votesig.ErrScheme)
+	}
+	cfg, err := tbs.SigningConfig(x.VoteInfo.Epoch)
+	if err != nil {
+		return nil, err
+	}
+	if cfg.Scheme != votesig.SchemeDomainBound {
+		return nil, fmt.Errorf("%w: epoch %d requires scheme %d", votesig.ErrScheme, x.VoteInfo.Epoch, cfg.Scheme)
+	}
+	pv, sealBytes, committing, err := x.checkedStatement(cfg)
+	if err != nil {
+		return nil, err
+	}
+	key, err := x.verifyStatementSignatures(tbs, pv, sealBytes, committing)
+	if err != nil {
+		return nil, err
+	}
+	return &SignedStatement{PV: pv, SealBytes: sealBytes, Committing: committing, Key: key}, nil
 }
 
 // SignUTB endorses the unsigned successor entry with the voter's key and puts the vote in the version 3 envelope. It does not touch the vote's own

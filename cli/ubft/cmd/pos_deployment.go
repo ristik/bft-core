@@ -40,6 +40,10 @@ type posDeploymentFile struct {
 	// without it a primary candidate is admitted as before. Both or neither.
 	Election     string `json:"election,omitempty"`         // 20 bytes
 	ElectionCode string `json:"electionCodeHash,omitempty"` // 32 bytes: keccak256 of the deployed election code
+	// Optional pair: the funded RewardPool (T8). NOT consensus-critical (it is ordinary EVM work and no root judges it), so a root ignores it; the
+	// relayer's reward commands and the genesis checks use it. Both or neither.
+	RewardPool     string `json:"rewardPool,omitempty"`         // 20 bytes
+	RewardPoolCode string `json:"rewardPoolCodeHash,omitempty"` // 32 bytes: keccak256 of the deployed reward pool code
 }
 
 func decodeFixedHex(name, s string, n int) ([]byte, error) {
@@ -98,6 +102,17 @@ func loadPosDeployment(path string, rootNetwork uint64) (storage.PosDeployment, 
 	if (f.Election == "") != (f.ElectionCode == "") {
 		return out, pins, fmt.Errorf("%w: election and electionCodeHash are pinned together", ErrPosDeployment)
 	}
+	if (f.RewardPool == "") != (f.RewardPoolCode == "") {
+		return out, pins, fmt.Errorf("%w: rewardPool and rewardPoolCodeHash are pinned together", ErrPosDeployment)
+	}
+	if f.RewardPool != "" {
+		if _, err := decodeFixedHex("rewardPool", f.RewardPool, 20); err != nil {
+			return out, pins, err
+		}
+		if _, err := decodeFixedHex("rewardPoolCodeHash", f.RewardPoolCode, 32); err != nil {
+			return out, pins, err
+		}
+	}
 	if f.Election != "" {
 		election, err := decodeFixedHex("election", f.Election, 20)
 		if err != nil {
@@ -120,6 +135,32 @@ func loadPosDeployment(path string, rootNetwork uint64) (storage.PosDeployment, 
 	copy(pins.Registry[:], registry)
 	copy(pins.RegistryCode[:], registryCode)
 	return out, pins, nil
+}
+
+// loadRewardPool reads the reward pool the deployment file pins, for the relayer's reward commands. A file that pins none is refused: the pool is
+// optional for a root, never for a command that sends to it.
+func loadRewardPool(path string) ([20]byte, error) {
+	var pool [20]byte
+	if _, _, err := loadPosDeployment(path, 0); err != nil {
+		return pool, err
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return pool, errors.Join(ErrPosDeployment, err)
+	}
+	var f posDeploymentFile
+	if err := json.Unmarshal(raw, &f); err != nil {
+		return pool, errors.Join(ErrPosDeployment, err)
+	}
+	if f.RewardPool == "" {
+		return pool, fmt.Errorf("%w: the deployment file pins no rewardPool", ErrPosDeployment)
+	}
+	addr, err := decodeFixedHex("rewardPool", f.RewardPool, 20)
+	if err != nil {
+		return pool, err
+	}
+	copy(pool[:], addr)
+	return pool, nil
 }
 
 // enablePosClosure installs the closure duty on a running manager: the controls of this deployment are executed against the closed
