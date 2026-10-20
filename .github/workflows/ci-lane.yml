@@ -5,15 +5,20 @@
 # pushing a branch named ci-lane-run/<anything>: the push event reads its inputs from scripts/ci/run-inputs.json of that branch. No schedule, no pull_request.
 #
 # Builds publish compact binaries and pinned sources; the run job downloads only those (no Rust target, no Go build cache, no Go/Rust toolchain).
+#
+# Step 2 (briefs/ci-lane-migration-plan.md section 4): besides the combined lane, the focused P85 over-bound control (overbound), the H6 Abort rehearsal (abort), the T6 rehearsal
+# on Linux (t6, its own Foundry v1.8.3 pin) and the targeted ureth crate tests (ureth-targeted). `all-live` is combined + overbound + abort + t6, each on its own VM
+# (one devnet per VM). The nightly (schedule) runs all-live and ureth-targeted at the integration branch tip, resolved once in `plan` and recorded; a schedule fires only from the
+# default branch's copy of this file (docs/ci-lanes.md).
 name: ci-lane
 
 on:
   workflow_dispatch:
     inputs:
       lane:
-        description: "combined = build everything and run the lane; build-only = the builds and their provenance checks only"
+        description: "combined | overbound | abort | t6 | ureth-targeted | all-live (combined, overbound, abort, t6) | build-only (the builds and their provenance checks only)"
         type: choice
-        options: [combined, build-only]
+        options: [combined, overbound, abort, t6, ureth-targeted, all-live, build-only]
         default: combined
       inject_failure:
         description: "Harness failure to test the failure path (honoured only by this workflow): none | after-builds | in-lane"
@@ -22,6 +27,8 @@ on:
         default: none
   push:
     branches: ['ci-lane-run/**']
+  schedule:
+    - cron: '17 1 * * *'   # nightly, UTC: all-live + ureth-targeted at the integration tip (only fires once this file is on the default branch)
 
 permissions:
   contents: read
@@ -31,10 +38,20 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     outputs:
-      lane: ${{ steps.in.outputs.lane }}
+      sha: ${{ steps.in.outputs.sha }}
       inject: ${{ steps.in.outputs.inject }}
+      lanes: ${{ steps.in.outputs.lanes }}
+      t6: ${{ steps.in.outputs.t6 }}
+      targeted: ${{ steps.in.outputs.targeted }}
+      need_ureth: ${{ steps.in.outputs.need_ureth }}
+      need_lane_builds: ${{ steps.in.outputs.need_lane_builds }}
     steps:
+      # A scheduled or dispatched run tests the tip of integration/enshrined-evm, whichever branch's copy of this file started it (the copy on the default branch `main`
+      # is what GitHub runs for those events, and main is not the code under test): the tip is resolved here ONCE, recorded in the job summary, and every later job
+      # checks out that SHA. A push of a ci-lane-run/** branch tests that very commit.
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.event_name == 'push' && github.sha || 'integration/enshrined-evm' }}
       - id: in
         env:
           EVENT: ${{ github.event_name }}
@@ -43,18 +60,35 @@ jobs:
         run: |
           set -euo pipefail
           if [ "$EVENT" = workflow_dispatch ]; then lane=$IN_LANE; inject=$IN_INJECT
+          elif [ "$EVENT" = schedule ]; then lane=nightly; inject=none
           else lane=$(jq -r .lane scripts/ci/run-inputs.json); inject=$(jq -r .inject_failure scripts/ci/run-inputs.json); fi
-          case "$lane" in combined|build-only) ;; *) echo "bad lane $lane" >&2; exit 1 ;; esac
+          case "$lane" in combined|overbound|abort|t6|ureth-targeted|all-live|nightly|build-only) ;; *) echo "bad lane $lane" >&2; exit 1 ;; esac
           case "$inject" in none|after-builds|in-lane) ;; *) echo "bad inject_failure $inject" >&2; exit 1 ;; esac
-          echo "lane=$lane" >>"$GITHUB_OUTPUT"; echo "inject=$inject" >>"$GITHUB_OUTPUT";
-          echo "lane=$lane inject_failure=$inject sha=$GITHUB_SHA"
+          lanes='[]'; t6=false; targeted=false
+          case "$lane" in
+            combined|overbound|abort) lanes="[\"$lane\"]" ;;
+            all-live|nightly) lanes='["combined","overbound","abort"]'; t6=true ;;
+            t6) t6=true ;;
+          esac
+          case "$lane" in ureth-targeted|nightly) targeted=true ;; esac
+          need_lane_builds=false; [ "$lanes" = '[]' ] && [ "$lane" != build-only ] || need_lane_builds=true
+          need_ureth=false; [ "$lanes" != '[]' ] || [ "$t6" = true ] || [ "$lane" = build-only ] && need_ureth=true
+          sha=$(git rev-parse HEAD)
+          { echo "sha=$sha"; echo "inject=$inject"; echo "lanes=$lanes"; echo "t6=$t6"; echo "targeted=$targeted"
+            echo "need_ureth=$need_ureth"; echo "need_lane_builds=$need_lane_builds"; } >>"$GITHUB_OUTPUT"
+          echo "lane=$lane inject_failure=$inject lanes=$lanes t6=$t6 targeted=$targeted commit under test=$sha"
+          { echo "### ci-lane plan"; echo "- event: $EVENT, lane: $lane, inject_failure: $inject"; echo "- commit under test: \`$sha\` ($(git log -1 --format=%s | cut -c1-100))"
+            [ "$EVENT" = push ] || echo "- resolved once from \`integration/enshrined-evm\`; every job checks out this SHA"; } >>"$GITHUB_STEP_SUMMARY"
 
   build-ureth:
     needs: plan
+    if: ${{ needs.plan.outputs.need_ureth == 'true' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 240
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
       - name: Free disk (the runner's unused toolchains and images)
         run: scripts/ci/prune-runner.sh
       - name: Sample resources
@@ -86,11 +120,13 @@ jobs:
 
   build-tools:
     needs: plan
+    if: ${{ needs.plan.outputs.need_lane_builds == 'true' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
+          ref: ${{ needs.plan.outputs.sha }}
           fetch-depth: 0   # the aggregator's bft-core pin must be in this checkout's history (utb_agg_pins_ok)
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
@@ -127,10 +163,13 @@ jobs:
 
   build-sources:
     needs: plan
+    if: ${{ needs.plan.outputs.need_lane_builds == 'true' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: '22'
@@ -165,12 +204,18 @@ jobs:
 
   run-lane:
     needs: [plan, build-ureth, build-tools, build-sources]
-    if: ${{ needs.plan.outputs.lane == 'combined' }}   # a failed build job fails the run job's prerequisites (no !cancelled override)
+    if: ${{ needs.plan.outputs.lanes != '[]' }}   # a failed build job fails the run job's prerequisites (no !cancelled override)
+    strategy:
+      fail-fast: false   # each kind is its own VM and its own verdict
+      matrix:
+        kind: ${{ fromJSON(needs.plan.outputs.lanes) }}
+    name: run-lane (${{ matrix.kind }})
     runs-on: ubuntu-24.04
-    timeout-minutes: 90
+    timeout-minutes: ${{ matrix.kind == 'combined' && 90 || 60 }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
+          ref: ${{ needs.plan.outputs.sha }}
           fetch-depth: 0
       - name: Machine checks and free disk
         run: |
@@ -201,7 +246,8 @@ jobs:
       - name: The lane
         env:
           CI_INJECT_FAILURE: ${{ needs.plan.outputs.inject }}
-          LANE_DEADLINE_MIN: '70'
+          CI_LANE_KIND: ${{ matrix.kind }}
+          LANE_DEADLINE_MIN: ${{ matrix.kind == 'combined' && '70' || '45' }}
         run: scripts/ci/run-lane.sh "$RUNNER_TEMP/artifacts" "$RUNNER_TEMP/lane" "$RUNNER_TEMP/lane-out"
       - name: Resources of this job
         if: always()
@@ -212,13 +258,103 @@ jobs:
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: lane-evidence
+          name: lane-evidence-${{ matrix.kind }}
           path: ${{ runner.temp }}/lane-out/upload/
           if-no-files-found: warn
           retention-days: 30
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
         with:
-          name: resources-run-lane
+          name: resources-run-lane-${{ matrix.kind }}
+          path: ${{ runner.temp }}/res/
+          retention-days: 30
+
+  run-t6:
+    needs: [plan, build-ureth]
+    if: ${{ needs.plan.outputs.t6 == 'true' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
+          fetch-depth: 0
+      # T6 rebuilds its own helper tools, the four allocation contracts and its own Foundry (v1.8.3) in an isolated checkout: this job needs Go
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: '1.25.14'
+          cache: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: ureth-linux
+          path: ${{ runner.temp }}/artifacts/ureth-linux
+      - name: Free disk (before the sampler, so the growth it reports is T6's own)
+        run: scripts/ci/prune-runner.sh
+      - name: Sample resources
+        run: |
+          mkdir -p "$RUNNER_TEMP/res"
+          nohup scripts/ci/sample-resources.sh "$RUNNER_TEMP/res/run-t6.tsv" 5 "$RUNNER_TEMP" >/dev/null 2>&1 &
+          echo $! >"$RUNNER_TEMP/res/sampler.pid"
+          { uname -a; nproc; free -m; df -h; echo "image ${ImageVersion:-?}"; } >"$RUNNER_TEMP/res/runner.txt"
+      - name: T6 rehearsal
+        env:
+          CI_INJECT_FAILURE: ${{ needs.plan.outputs.inject }}
+          T6_DEADLINE_MIN: '105'
+        run: scripts/ci/run-t6.sh "$RUNNER_TEMP/artifacts" "$RUNNER_TEMP/t6" "$RUNNER_TEMP/t6-out"
+      - name: Resources of this job
+        if: always()
+        run: |
+          kill "$(cat "$RUNNER_TEMP/res/sampler.pid")" 2>/dev/null || true
+          scripts/ci/summarize-resources.sh "$RUNNER_TEMP/res/run-t6.tsv" | tee "$RUNNER_TEMP/res/run-t6.summary.txt"
+      - name: Upload set (the publishable evidence pack, its outer digest, the logs)
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: t6-evidence
+          path: ${{ runner.temp }}/t6-out/upload/
+          if-no-files-found: warn
+          retention-days: 30
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: resources-run-t6
+          path: ${{ runner.temp }}/res/
+          retention-days: 30
+
+  ureth-targeted:
+    needs: plan
+    if: ${{ needs.plan.outputs.targeted == 'true' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
+      - name: Free disk
+        run: scripts/ci/prune-runner.sh
+      - name: Sample resources
+        run: |
+          mkdir -p "$RUNNER_TEMP/res"
+          nohup scripts/ci/sample-resources.sh "$RUNNER_TEMP/res/ureth-targeted.tsv" 5 "$RUNNER_TEMP" >/dev/null 2>&1 &
+          echo $! >"$RUNNER_TEMP/res/sampler.pid"
+          { uname -a; nproc; free -m; df -h; echo "image ${ImageVersion:-?}"; } >"$RUNNER_TEMP/res/runner.txt"
+      - name: Targeted ureth tests (the Unicity crates of the pin, not the workspace)
+        run: scripts/ci/test-ureth.sh "$RUNNER_TEMP/ureth-test-out" "$RUNNER_TEMP/ureth-test"
+      - name: Resources of this job
+        if: always()
+        run: |
+          kill "$(cat "$RUNNER_TEMP/res/sampler.pid")" 2>/dev/null || true
+          scripts/ci/summarize-resources.sh "$RUNNER_TEMP/res/ureth-targeted.tsv" | tee "$RUNNER_TEMP/res/ureth-targeted.summary.txt"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: ureth-targeted
+          path: ${{ runner.temp }}/ureth-test-out/
+          if-no-files-found: warn
+          retention-days: 30
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: resources-ureth-targeted
           path: ${{ runner.temp }}/res/
           retention-days: 30
