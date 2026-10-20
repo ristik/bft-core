@@ -9,8 +9,8 @@
 #   lane_run_devnet <VAR=value>...       the paired devnet as a child stopped by its own pid; sets LANE_STATUS
 #   lane_collect <evidence dir> <test-nodes subdir>...   copies kept for offline replay, the sleep/wake record, SHA256SUMS
 
-# the attested Ureth of the single B1 layout (briefs/builds/ureth-47f5146b); a lane's <LANE>_URETH_COMMIT overrides it
-LANE_URETH_PIN=47f5146b59c01e2180aa66b250ec87330231658d
+# the attested Ureth of the single B1 layout (briefs/builds/ureth-6e59b68c); a lane's <LANE>_URETH_COMMIT overrides it
+LANE_URETH_PIN=6e59b68cc29f196d54d3d6e28d6266a8c02d05a1
 
 lane_pass() { printf 'PASS: %s\n' "$1"; }
 lane_fail() { printf 'FAIL: %s\n' "$1" >&2; exit 1; }

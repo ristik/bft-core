@@ -89,7 +89,7 @@ either the cold source build, or an ATTESTED prebuilt binary (`T6_URETH_ATTESTED
 the digest, the provenance directory's commit and digest and the binary's reported commit must all agree with the pin); `T6_URETH_BIN` and
 `T6_TEST_SKIP_OVER_BOUND` are development overrides and mark the run NOT EVIDENCE. The preflight checks every tool before the devnet lock is
 taken. On failure it keeps its checkout and partial evidence; on success it removes the build checkout. Check its final summary and every
-evidence row; `run-mode.txt` says which mode ran. Evidence: `briefs/devnet-runs/t6-rehearsal-20261011T044434Z` (attested Ureth 47f5146b, #534).
+evidence row; `run-mode.txt` says which mode ran. Evidence: `briefs/devnet-runs/t6-rehearsal-20261020T071455Z` (attested Ureth 6e59b68c, integration head a02be17ce); the earlier `t6-rehearsal-20261011T044434Z` ran Ureth 47f5146b (#534), which the current profile generator no longer starts.
 
 ## 5. Ureth execution-version activation
 

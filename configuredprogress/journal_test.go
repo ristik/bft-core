@@ -209,7 +209,8 @@ func TestJournalRejectsCorruptForeignAndVersionedRecords(t *testing.T) {
 	wrong := f.ctx
 	wrong.Observation.NetworkID = 9
 	_, err := s.LoadJournal(context.Background(), wrong, testJournalLimits)
-	require.Error(t, err)
+	require.ErrorIs(t, err, ErrContext, "a journal of another origin is refused by name")
+	require.NotErrorIs(t, err, ErrUntrusted)
 	key := journalCandidateKey(candidate.Hash)
 	original := []byte(nil)
 	require.NoError(t, s.db.View(func(tx *bolt.Tx) error { original = bytes.Clone(tx.Bucket(bucketName).Get(key)); return nil }))
@@ -219,7 +220,9 @@ func TestJournalRejectsCorruptForeignAndVersionedRecords(t *testing.T) {
 		return tx.Bucket(bucketName).Put(key, raw)
 	}))
 	_, err = s.LoadJournal(context.Background(), f.ctx, testJournalLimits)
-	require.Error(t, err)
+	require.ErrorIs(t, err, ErrUntrusted, "a damaged record is refused by name")
+	require.NotErrorIs(t, err, ErrContext)
+	require.NotErrorIs(t, err, ErrVersion)
 	w, err := decodeCandidate(original)
 	require.NoError(t, err)
 	w.Version++
