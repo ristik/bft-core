@@ -73,6 +73,7 @@ export P85_CONTRACTS=$AGRE_ROOT/contracts NBP_DIR=$AGRE_ROOT/native-bridge-plugi
 # Foundry at the pinned release, verified by the digest of the downloaded archive
 scripts/ci/install-foundry.sh "$work/dl" >>"$out/run-lane.log" 2>&1 || die "cannot install the pinned Foundry"
 export PATH="$HOME/.foundry/bin:$repo/scripts/ci/shim:$PATH"
+export DNB_AGG_SHARDS=$(jq -r '.lane.aggShards // 1' "$pins")
 export LANE_PINNED=1 LANE_COMMIT_UNDER_TEST=$head UTB_MIN_FREE_GIB=${UTB_MIN_FREE_GIB:-$(jq -r '.runner.minFreeDiskGiB' "$pins")}
 scripts/ci/check-pins.sh env 2>&1 | tee -a "$out/run-lane.log" | grep -q '^FAIL' && die "a component does not match the manifest"
 

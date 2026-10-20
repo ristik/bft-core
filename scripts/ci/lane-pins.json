@@ -28,9 +28,9 @@
     },
     "native-bridge-plugins": {
       "repository": "https://github.com/ristik/native-bridge-plugins.git",
-      "commit": "ccd3bb90b0985a948b1d44d72eb42262ddb2db5d",
-      "branch": "main",
-      "note": "nbp#29 merge: the any-age driver with the two-shard steering (a no-op for one aggregator shard) on top of nbp#27/#28 (trust-base bundle driver, shard-split vectors). Deliberately not main: nbp#30/#31 (consolidated assembly as the default) change what the lane's L1 token exercises and belong to the consolidation lane step."
+      "commit": "836644c99dc4f4d211049b2bad84562115fbd38a",
+      "branch": "dev3/anyage-consolidated",
+      "note": "PROVISIONAL (until the nbp PR of the consolidated driver merges, then its merge commit): nbp main (nbp#30/#31 consolidation as the default plug-in path) plus the anyage driver's 'consolidated' command (#526 step 4) on top of the two-shard steering (nbp#29)."
     },
     "state-transition-sdk-js": {
       "repository": "https://github.com/ristik/state-transition-sdk-js.git",
@@ -61,5 +61,9 @@
     "label": "ubuntu-24.04",
     "minFreeDiskGiB": 8,
     "minFreeDiskNote": "Measured on ubuntu-24.04 standard runners (4 CPU / 16 GB), runs 39391426570 and 39399607786: the lane's disk growth peaks at 3.88 GiB (the cold ureth build 3.79 GiB, the Go build 3.72 GiB, sources 0.97 GiB); memory peaks at 2.36 GiB (run) and 4.62 GiB (ureth build), no swap. The gate is checked by the preflight after the inputs are unpacked: 8 GiB is 2.06 times the measured peak growth, so a run twice as chatty as the measured one still fits, and it is far below the 25 GiB of the Mac default (which also covers building ureth and contracts there). A runner with less than 8 GiB free after unpacking is refused, never waved through."
+  },
+  "lane": {
+    "aggShards": 2,
+    "note": "the aggregator partition runs as two bft-shard aggregators (0x40, 0xc0); the any-age L1 token spans both and one more token is redeemed through the SDK's consolidation (#526 step 4)"
   }
 }
