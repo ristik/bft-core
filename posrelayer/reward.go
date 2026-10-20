@@ -1,6 +1,7 @@
 package posrelayer
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -8,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/ethereum/go-ethereum/accounts/abi"
+	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/rpc"
 )
 
@@ -67,11 +69,39 @@ type RewardStep struct {
 	Data []byte
 }
 
-// notNow reports a call the node executed and refused: the pool's own revert (NothingToDo, NotCaughtUp), which only says the step is not due. A
-// transport failure is not that: it is returned, so a relayer never mistakes an unreachable node for an idle pool.
-func notNow(err error) bool {
+// The reverts that only say "this step is not due": RewardPool.NothingToDo() and RewardPool.NotCaughtUp() (`cast sig`).
+var (
+	revertNothingToDo = []byte{0x5c, 0x52, 0xa8, 0x68}
+	revertNotCaughtUp = []byte{0x12, 0x91, 0x63, 0x0f}
+)
+
+// executionReverted is the JSON-RPC code of an eth_call whose execution reverted (go-ethereum, reth).
+const executionReverted = 3
+
+// notNow reports a call the node executed and the POOL refused with one of the two reverts that mean "not due yet". Every other failure is
+// returned: a transport error, a node error (for example -32000), and a pool revert of another kind (TimelineMismatch, RecordOutOfOrder,
+// CommitteeTooLarge, ...), which is a real problem of the pool and never "idle".
+func notNow(err error) (bool, error) {
 	var re rpc.Error
-	return errors.As(err, &re)
+	if !errors.As(err, &re) || re.ErrorCode() != executionReverted {
+		return false, err
+	}
+	var de rpc.DataError
+	if !errors.As(err, &de) {
+		return false, fmt.Errorf("posrelayer: the pool call reverted without a reason: %w", err)
+	}
+	data, ok := de.ErrorData().(string)
+	if !ok {
+		return false, fmt.Errorf("posrelayer: the pool call reverted with unreadable data: %w", err)
+	}
+	raw, derr := hexutil.Decode(data)
+	if derr != nil || len(raw) < 4 {
+		return false, fmt.Errorf("posrelayer: the pool call reverted with unreadable data %q: %w", data, err)
+	}
+	if bytes.Equal(raw[:4], revertNothingToDo) || bytes.Equal(raw[:4], revertNotCaughtUp) {
+		return true, nil
+	}
+	return false, fmt.Errorf("posrelayer: the pool refused with %x (not NothingToDo or NotCaughtUp): %w", raw[:4], err)
 }
 
 // NextRewardStep asks the pool, by simulation, what it would accept now: first to read the next authenticated records (up to the per-call
@@ -83,7 +113,7 @@ func NextRewardStep(ctx context.Context, rd Reader, pool [20]byte) (RewardStep, 
 	}
 	if _, err := rd.Call(ctx, pool, adv); err == nil {
 		return RewardStep{Kind: "advance", Data: adv}, nil
-	} else if !notNow(err) {
+	} else if _, err := notNow(err); err != nil {
 		return RewardStep{}, err
 	}
 	cl, err := CloseIntervalCalldata()
@@ -92,7 +122,7 @@ func NextRewardStep(ctx context.Context, rd Reader, pool [20]byte) (RewardStep, 
 	}
 	if _, err := rd.Call(ctx, pool, cl); err == nil {
 		return RewardStep{Kind: "close", Data: cl}, nil
-	} else if !notNow(err) {
+	} else if _, err := notNow(err); err != nil {
 		return RewardStep{}, err
 	}
 	return RewardStep{}, nil
