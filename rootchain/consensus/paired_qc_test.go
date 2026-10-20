@@ -101,6 +101,7 @@ func committedBlock(t *testing.T) (*storage.ExecutedBlock, []byte) {
 	require.NoError(t, err)
 	shardState.IR.BlockHash = bytes.Repeat([]byte{5}, 32)
 	shardState.IR.Hash = bytes.Repeat([]byte{0x37}, 32)
+	shardState.RootHash = bytes.Clone(shardState.IR.Hash) // the last certified root hash is the state hash of the input record
 	predecessor := bytes.Repeat([]byte{1}, 32)
 	record := evmroot.OrderedHandoffRecord{Network: 5, Epoch: 1, OrderedRound: 4, ActivationRound: 7, PredecessorBodyID: predecessor,
 		NextBodyID: bytes.Repeat([]byte{3}, 32), FrozenID: bytes.Repeat([]byte{2}, 32), SuccessorTRHash: bytes.Repeat([]byte{6}, 32), Kind: "commit"}

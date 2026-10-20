@@ -39,12 +39,12 @@ func newIngestRig(t *testing.T, upTo uint64) *ingestRig {
 	return r
 }
 
-func (r *ingestRig) v2(t *testing.T, base *certification.CertificationResponse, epochs ...uint64) *certification.CertificationResponseV2 {
+func (r *ingestRig) v2(t *testing.T, base *certification.CertificationResponse, epochs ...uint64) *certification.CertificationResponseV3 {
 	var raw [][]byte
 	for _, e := range epochs {
 		raw = append(raw, r.chain.Entries[e-2])
 	}
-	return certification.NewCertificationResponseV2(base, raw)
+	return certification.NewCertificationResponseV3(base, raw)
 }
 
 func TestVersion2ResponseAppendsTheEntriesAndYieldsTheLegacyResponse(t *testing.T) {
@@ -90,7 +90,7 @@ func TestAnInvalidEntryIsNeverInstalledAndStopsTheUpdate(t *testing.T) {
 	base := baseResponse(t)
 	bad := bytes.Clone(r.chain.Entries[0])
 	bad[len(bad)-7] ^= 1 // a signature byte
-	v2 := certification.NewCertificationResponseV2(base, [][]byte{bad, r.chain.Entries[1]})
+	v2 := certification.NewCertificationResponseV3(base, [][]byte{bad, r.chain.Entries[1]})
 	out := r.c.ingestTrustBaseUpdates(context.Background(), v2)
 	require.IsType(t, &certification.CertificationResponse{}, out, "the response itself is still delivered to the certificate checks")
 	require.EqualValues(t, 1, r.c.opts.UTBStore.Tip().Epoch)
@@ -100,7 +100,7 @@ func TestAnInvalidEntryIsNeverInstalledAndStopsTheUpdate(t *testing.T) {
 	t.Run("an entry that does not extend the chain", func(t *testing.T) {
 		other := utbchain.New(t, 3)
 		r.c.opts.UTBStore = other.Store(t, 3)
-		v2 := certification.NewCertificationResponseV2(base, [][]byte{r.chain.Entries[1]}) // epoch 3 of the first chain, offered to a store at epoch 3
+		v2 := certification.NewCertificationResponseV3(base, [][]byte{r.chain.Entries[1]}) // epoch 3 of the first chain, offered to a store at epoch 3
 		r.c.ingestTrustBaseUpdates(context.Background(), v2)
 		require.EqualValues(t, 3, r.c.opts.UTBStore.Tip().Epoch)
 	})
@@ -144,9 +144,9 @@ func TestCoalescingIngestsVersion2UpdatesBeforeItDropsAStaleResponse(t *testing.
 	zero := make([]byte, 32)
 	trHash, err := f.technical.Hash()
 	require.NoError(t, err)
-	response := func(rootRound uint64, entries ...[]byte) *certification.CertificationResponseV2 {
+	response := func(rootRound uint64, entries ...[]byte) *certification.CertificationResponseV3 {
 		uc := testcertificates.CreateUnicityCertificate(t, f.signer, f.ucMine.InputRecord, pdr, rootRound, zero, trHash)
-		return certification.NewCertificationResponseV2(&certification.CertificationResponse{Partition: authPartitionID, Shard: types.ShardID{}, Technical: *f.technical, UC: *uc}, entries)
+		return certification.NewCertificationResponseV3(&certification.CertificationResponse{Partition: authPartitionID, Shard: types.ShardID{}, Technical: *f.technical, UC: *uc}, entries)
 	}
 	older, newest := response(51, chain.Entries[0]), response(52, chain.Entries[1], chain.Entries[2])
 	queued := make(chan any, 1)

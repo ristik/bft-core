@@ -8,6 +8,8 @@ import (
 	"crypto"
 	"crypto/sha256"
 	"fmt"
+	"io"
+	"log/slog"
 	"maps"
 	"slices"
 	"sort"
@@ -266,6 +268,7 @@ func New(t *testing.T, o Options) *Fixture {
 	}
 	state.IR.BlockHash = bytes.Clone(o.Frozen)
 	state.IR.Hash = bytes.Repeat([]byte{0x37}, 32)
+	state.RootHash = bytes.Clone(state.IR.Hash) // the last certified root hash is the state hash of the input record
 	trHash, err := state.TR.Hash()
 	require.NoError(t, err)
 	if o.Assignment { // a coupled handoff commits the technical record derived from the candidate's successor assignment
@@ -341,7 +344,7 @@ func New(t *testing.T, o Options) *Fixture {
 	require.NoError(t, err)
 	// the old committee's certificates of the checkpoint: what the shard's last certified record becomes
 	oldBlock := &storage.ExecutedBlock{HashAlgo: crypto.SHA256, RootHash: tree.RootHash(), ShardState: states}
-	certificates, err := oldBlock.GenerateCertificates(qc)
+	certificates, err := oldBlock.GenerateCertificates(qc, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	require.NoError(t, err)
 	require.Len(t, certificates, 1)
 	shardInfo := abdrc.ShardInfo{Partition: PartitionID, Shard: types.ShardID{}, T2Timeout: state.T2Timeout, RootHash: state.RootHash,

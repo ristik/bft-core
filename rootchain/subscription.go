@@ -20,7 +20,7 @@ const responsesPerSubscription = 2
 type Subscriptions struct {
 	mu     sync.RWMutex
 	subs   map[partitionShard]map[peer.ID]int
-	sender func(ctx context.Context, msg any, receivers ...peer.ID) error
+	sender func(ctx context.Context, cr *certification.CertificationResponse, receivers ...peer.ID) error
 
 	// sending tracks the goroutines spawned by Send. Without it those goroutines
 	// outlive their caller unobserved: the node has no way to drain them at
@@ -30,15 +30,17 @@ type Subscriptions struct {
 	// subscribed has completed".
 	sending sync.WaitGroup
 
-	// offers, when set, makes every response a version 2 response with the entries chosen for its recipient
-	offers EntryOffers
+	// offers, when set, makes every response a version 3 response with the entries chosen for its recipient; offerSender sends such a message (it
+	// travels on the combined protocol only: a peer that cannot receive it is not sent the response without the entries)
+	offers      EntryOffers
+	offerSender func(ctx context.Context, msg any, receivers ...peer.ID) error
 
 	log *slog.Logger
 
 	bcRespSent metric.Int64Counter // number of Block Certification Responses sent
 }
 
-func NewSubscriptions(sender func(ctx context.Context, msg any, receivers ...peer.ID) error, obs Observability) (*Subscriptions, error) {
+func NewSubscriptions(sender func(ctx context.Context, cr *certification.CertificationResponse, receivers ...peer.ID) error, obs Observability) (*Subscriptions, error) {
 	r := &Subscriptions{
 		subs:   map[partitionShard]map[peer.ID]int{},
 		sender: sender,
@@ -95,11 +97,11 @@ func (s *Subscriptions) Send(ctx context.Context, cr *certification.Certificatio
 		s.log.DebugContext(ctx, fmt.Sprintf("sending CertificationResponse, %d receivers, R_next: %d, IR Hash: %X, Block Hash: %X",
 			len(recipients), cr.Technical.Round, cr.UC.InputRecord.Hash, cr.UC.InputRecord.BlockHash), logger.Shard(cr.Partition, cr.Shard))
 		if len(recipients) > 0 {
-			if s.offers != nil {
+			if s.offers != nil && s.offerSender != nil {
 				// the entries differ per recipient (what it was already offered), so each gets its own message
 				for _, r := range recipients {
 					msg, sent := withOffers(s.offers, r, cr)
-					if err := s.sender(ctx, msg, r); err != nil {
+					if err := s.offerSender(ctx, msg, r); err != nil {
 						s.log.WarnContext(ctx, "sending certification result", logger.Error(err), logger.Shard(cr.Partition, cr.Shard))
 					} else if sent != nil {
 						sent()
@@ -120,7 +122,7 @@ them (cancelling the context the node runs under) before waiting.
 */
 func (s *Subscriptions) Wait() { s.sending.Wait() }
 
-// withOffers is the message to send to one recipient: the response itself, or the version 2 response with the entries chosen for it, and the function that
+// withOffers is the message to send to one recipient: the response itself, or the version 3 response with the entries chosen for it, and the function that
 // records the offer once the send succeeded. The attachments are chosen from the UC's own signer epoch, so a repeated old UC is never described as signed
 // by a newer committee.
 func withOffers(offers EntryOffers, recipient peer.ID, cr *certification.CertificationResponse) (any, func()) {
@@ -132,7 +134,7 @@ func withOffers(offers EntryOffers, recipient peer.ID, cr *certification.Certifi
 		epoch = cr.UC.UnicitySeal.Epoch
 	}
 	entries, sent := offers.Offer(recipient, epoch)
-	msg := certification.NewCertificationResponseV2(cr, entries)
+	msg := certification.NewCertificationResponseV3(cr, entries)
 	if t, ok := offers.(tapper); ok {
 		t.Tap(recipient, msg)
 	}

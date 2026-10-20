@@ -12,28 +12,34 @@ import (
 	"github.com/unicitynetwork/bft-core/utbstore"
 )
 
-// ingestTrustBaseUpdates turns a version 2 certification response into the legacy response every later stage handles, after its attached entries have
-// been authenticated and appended. Any other message is returned unchanged.
+// ingestTrustBaseUpdates turns a certification response of the sidecar (version 2) or combined (version 3) protocol into the legacy response every later
+// stage handles, after the entries of a version 3 response have been authenticated and appended. Any other message is returned unchanged.
 //
 // The entries are an authority update independent of the response's status and of its certificate: a valid entry is kept even when the certificate or the
 // request's outcome is not accepted, and an invalid one never affects the certificate, which is verified afterwards under this client's own epoch rules
-// exactly as a legacy response is. A message that is not a well-formed version 2 response (version, bounds) is dropped whole.
+// exactly as a legacy response is. A message that is not a well-formed response of its version (version, bounds) is not read for entries. The partition
+// view of either version is consumed by the clients that use it (the aggregator); the shard node ignores it.
 func (c *BFTClient) ingestTrustBaseUpdates(ctx context.Context, msg any) any {
-	v2, ok := msg.(*certification.CertificationResponseV2)
-	if !ok {
-		return msg
-	}
-	if v2 == nil {
-		return nil
-	}
-	if err := v2.IsValid(); err != nil {
-		if c.log != nil {
-			c.log.WarnContext(ctx, "dropping invalid version 2 certification response", slog.String("err", err.Error()))
+	switch m := msg.(type) {
+	case *certification.CertificationResponseV2:
+		if m == nil {
+			return nil
 		}
-		return v2.Response() // its certificate is judged by the legacy checks, which refuse it for the same structural reasons
+		return m.Legacy()
+	case *certification.CertificationResponseV3:
+		if m == nil {
+			return nil
+		}
+		if err := m.IsValid(); err != nil {
+			if c.log != nil {
+				c.log.WarnContext(ctx, "dropping invalid version 3 certification response", slog.String("err", err.Error()))
+			}
+			return m.Legacy() // its certificate is judged by the legacy checks, which refuse it for the same structural reasons
+		}
+		c.applyTrustBaseUpdates(ctx, m.TrustBaseUpdates)
+		return m.Legacy()
 	}
-	c.applyTrustBaseUpdates(ctx, v2.TrustBaseUpdates)
-	return v2.Response()
+	return msg
 }
 
 func (c *BFTClient) applyTrustBaseUpdates(ctx context.Context, updates []hex.Bytes) {

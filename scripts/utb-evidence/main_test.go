@@ -112,7 +112,7 @@ func TestUCRespCheckRequiresTheExactAttachment(t *testing.T) {
 	base := &certification.CertificationResponse{Partition: 1,
 		UC: types.UnicityCertificate{Version: 1, UnicityTreeCertificate: &types.UnicityTreeCertificate{Version: 1, Partition: 1}}}
 	require.NoError(t, base.SetTechnicalRecord(certification.TechnicalRecord{Round: 5, Epoch: 2, Leader: "1", StatHash: []byte{1}, FeeHash: []byte{2}}))
-	msg, err := types.Cbor.Marshal(certification.NewCertificationResponseV2(base, chain.Entries[:1]))
+	msg, err := types.Cbor.Marshal(certification.NewCertificationResponseV3(base, chain.Entries[:1]))
 	require.NoError(t, err)
 	file, entry, other := filepath.Join(dir, "m.cbor"), filepath.Join(dir, "e2.cbor"), filepath.Join(dir, "e3.cbor")
 	require.NoError(t, os.WriteFile(file, msg, 0o644))

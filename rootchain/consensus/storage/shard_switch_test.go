@@ -365,7 +365,9 @@ func newSwitchChain(t *testing.T) *switchChain {
 	}}
 	prev, prevPrev := uint64(1), uint64(0)
 	for _, round := range []uint64{2, 29, 30, 31, 45, 46} {
-		qc := &drctypes.QuorumCert{VoteInfo: &drctypes.RoundInfo{RoundNumber: prev, ParentRoundNumber: prevPrev, CurrentRootHash: c.hashOf(prev)},
+		prevBlock := mustBlock(t, c.bs, prev)
+		qc := &drctypes.QuorumCert{VoteInfo: &drctypes.RoundInfo{RoundNumber: prev, ParentRoundNumber: prevPrev, CurrentRootHash: c.hashOf(prev),
+			Epoch: prevBlock.BlockData.Epoch, Timestamp: prevBlock.BlockData.Timestamp},
 			LedgerCommitInfo: &types.UnicitySeal{Version: 1, NetworkID: 5}}
 		if prevPrev != 0 {
 			qc.LedgerCommitInfo.RootChainRoundNumber, qc.LedgerCommitInfo.Hash = prevPrev, c.hashOf(prevPrev)
@@ -419,7 +421,8 @@ func TestHeadsBeforeAtAndAfterTheSwitchRecoverIdentically(t *testing.T) {
 		want := c.blks[round]
 		got, err := NewRootBlock(c.committed(round), crypto.SHA256, c.orch)
 		require.NoError(t, err, "network recovery at round %d", round)
-		require.Equal(t, want.ShardState.States, got.ShardState.States, "round %d", round)
+		// the partition view is an in-process carrier: a recovered head has none until its shard is certified again
+		require.Equal(t, withoutViews(want.ShardState.States), got.ShardState.States, "round %d", round)
 		require.Equal(t, want.RootHash, got.RootHash, "round %d", round)
 	}
 	// the disk: a reopened store holds the same blocks, each judged by the same invariant
@@ -430,7 +433,7 @@ func TestHeadsBeforeAtAndAfterTheSwitchRecoverIdentically(t *testing.T) {
 		b, err := reopened.Block(round)
 		require.NoError(t, err)
 		require.Equal(t, a.RootHash, b.RootHash, "round %d", round)
-		require.Equal(t, a.ShardState.States, b.ShardState.States, "round %d", round)
+		require.Equal(t, withoutViews(a.ShardState.States), b.ShardState.States, "round %d", round)
 	}
 }
 
@@ -484,4 +487,19 @@ func TestRecoveryRefusesStaleFutureEditedAndMismatchedShardStates(t *testing.T) 
 	require.NoError(t, foreign.AddShardConfig(&conf))
 	_, err = New(crypto.SHA256, c.db, foreign, logger.New(t))
 	require.ErrorIs(t, err, ErrAssignmentHistory)
+}
+
+// withoutViews is the states with the in-process partition view carrier of every last response taken away (the originals are untouched).
+func withoutViews(states map[types.PartitionShardID]*ShardInfo) map[types.PartitionShardID]*ShardInfo {
+	out := make(map[types.PartitionShardID]*ShardInfo, len(states))
+	for k, si := range states {
+		cp := *si
+		if si.LastCR != nil {
+			cr := *si.LastCR
+			cr.PartitionView = nil
+			cp.LastCR = &cr
+		}
+		out[k] = &cp
+	}
+	return out
 }

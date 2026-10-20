@@ -67,6 +67,10 @@ func NewShardNetwork(peer *Peer, obs Observability, opts ShardNetworkOptions) (*
 			ProtocolID: ProtocolUnicityCertificatesV2,
 			TypeFn:     func() any { return &certification.CertificationResponseV2{} },
 		},
+		{
+			ProtocolID: ProtocolUnicityCertificatesV3,
+			TypeFn:     func() any { return &certification.CertificationResponseV3{} },
+		},
 	}
 	if err := n.RegisterReceiveProtocols(receiveProtocols); err != nil {
 		return nil, fmt.Errorf("registering receive protocols: %w", err)

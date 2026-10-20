@@ -40,12 +40,12 @@ type viewVerifier struct {
 	calls   int
 }
 
-func (v *viewVerifier) VerifyIRChangeReq(uint64, *drctypes.IRChangeReq) (*types.InputRecord, error) {
+func (v *viewVerifier) VerifyIRChangeReq(uint64, uint64, *drctypes.IRChangeReq) (*types.InputRecord, error) {
 	v.t.Fatal("the legacy round-only verifier was used under a request history")
 	return nil, nil
 }
 func (v *viewVerifier) RequestHistory() RequestHistory { return v.history }
-func (v *viewVerifier) PendingChange(types.PartitionID, types.ShardID) *types.InputRecord {
+func (v *viewVerifier) PendingChange(uint64, types.PartitionID, types.ShardID) *types.InputRecord {
 	return v.pending
 }
 func (v *viewVerifier) VerifyIRChangeReqView(view *RequestRoundView, req *drctypes.IRChangeReq) (*VerifiedRequest, error) {

@@ -31,6 +31,10 @@ type ShardStates struct {
 
 	// cache schemes of the block
 	schemes map[types.PartitionID]types.ShardingScheme
+
+	// viewEncodeHook, when set (tests), is called for every partition view encoded by
+	// the operations on this value. It is not propagated to the states derived from it.
+	viewEncodeHook func(types.PartitionID)
 }
 
 /*
@@ -68,7 +72,7 @@ func (ss ShardStates) nextBlockSwitching(shardConfs map[types.PartitionShardID]*
 		if prevSI, ok := ss.States[k]; ok {
 			next, didSwitch, err := advanceShardConfigurationHistory(prevSI, pdr, hashAlg, (*ShardInfo).resetTrustBase, history)
 			if err != nil {
-				partition, shard := pdr.PartitionID, pdr.ShardID
+				partition, shard := prevSI.PartitionID, prevSI.ShardID
 				if prevSI.LastCR != nil {
 					partition, shard = prevSI.LastCR.Partition, prevSI.LastCR.Shard
 				}
@@ -95,18 +99,29 @@ func (ss ShardStates) nextBlockSwitching(shardConfs map[types.PartitionShardID]*
 UnicityTree builds the unicity tree based on the shard states.
 */
 func (ss ShardStates) UnicityTree(algo crypto.Hash) (*types.UnicityTree, map[types.PartitionID]types.ShardTree, error) {
+	ut, trees, _, err := ss.unicityTree(algo)
+	return ut, trees, err
+}
+
+/*
+unicityTree builds the unicity tree and, in addition to UnicityTree, returns the exact
+shard tree inputs the shard trees were created from (by partition, in the order given to
+CreateShardTree). The inputs reference live shard state and must be copied before retaining.
+*/
+func (ss ShardStates) unicityTree(algo crypto.Hash) (*types.UnicityTree, map[types.PartitionID]types.ShardTree, map[types.PartitionID][]types.ShardTreeInput, error) {
 	schemes, err := ss.shardingSchemes()
 	if err != nil {
-		return nil, nil, fmt.Errorf("acquiring sharding schemes: %w", err)
+		return nil, nil, nil, fmt.Errorf("acquiring sharding schemes: %w", err)
 	}
 	utData := make([]*types.UnicityTreeData, 0, len(schemes))
 	if ss.Control != nil {
 		if _, exists := schemes[evmroot.D4ControlPartition]; exists {
-			return nil, nil, errors.New("control partition is also configured as a shard")
+			return nil, nil, nil, errors.New("control partition is also configured as a shard")
 		}
 		utData = append(utData, &types.UnicityTreeData{Partition: evmroot.D4ControlPartition, ShardTreeRoot: ss.Control.Digest()})
 	}
 	shardTrees := make(map[types.PartitionID]types.ShardTree)
+	inputs := make(map[types.PartitionID][]types.ShardTreeInput, len(schemes))
 	var si *ShardInfo
 	var ok bool
 	for partitionID, shards := range schemes {
@@ -114,11 +129,11 @@ func (ss ShardStates) UnicityTree(algo crypto.Hash) (*types.UnicityTree, map[typ
 		for shardID := range shards.All() {
 			psID := types.PartitionShardID{PartitionID: partitionID, ShardID: shardID.Key()}
 			if si, ok = ss.States[psID]; !ok {
-				return nil, nil, fmt.Errorf("missing shard info for %s", psID.String())
+				return nil, nil, nil, fmt.Errorf("missing shard info for %s", psID.String())
 			}
 			trHash, err := si.TR.Hash()
 			if err != nil {
-				return nil, nil, fmt.Errorf("calculating TR hash: %w", err)
+				return nil, nil, nil, fmt.Errorf("calculating TR hash: %w", err)
 			}
 			sti = append(sti, types.ShardTreeInput{
 				Shard:         shardID,
@@ -129,10 +144,11 @@ func (ss ShardStates) UnicityTree(algo crypto.Hash) (*types.UnicityTree, map[typ
 		}
 		shardTree, err := types.CreateShardTree(shards, sti, algo)
 		if err != nil {
-			return nil, nil, fmt.Errorf("creating shard tree: %w", err)
+			return nil, nil, nil, fmt.Errorf("creating shard tree: %w", err)
 		}
 
 		shardTrees[partitionID] = shardTree
+		inputs[partitionID] = sti
 		utData = append(utData, &types.UnicityTreeData{
 			Partition:     partitionID,
 			ShardTreeRoot: shardTree.RootHash(),
@@ -141,37 +157,42 @@ func (ss ShardStates) UnicityTree(algo crypto.Hash) (*types.UnicityTree, map[typ
 
 	ut, err := types.NewUnicityTree(algo, utData)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
-	return ut, shardTrees, nil
+	return ut, shardTrees, inputs, nil
 }
 
 /*
-certificationResponses builds the unicity tree and certification responses based on the shard states.
+certificationResponsesWithViews builds the unicity tree and certification responses based on the shard states.
 CertificationResponse will be generated only for shards marked as "changed".
 The UnicityCertificates in the response are not complete, they miss the UnicitySeal.
+
+The responses also carry the encoded partition view (see partitionViews). Failure to produce a view
+is not an error of the certification, the failures are returned (by partition) for reporting and the
+responses of that partition are left without the view.
 */
-func (ss ShardStates) certificationResponses(algo crypto.Hash) ([]*certification.CertificationResponse, []byte, error) {
-	ut, shardTrees, err := ss.UnicityTree(algo)
+func (ss ShardStates) certificationResponsesWithViews(algo crypto.Hash) ([]*certification.CertificationResponse, []byte, map[types.PartitionID]error, error) {
+	ut, shardTrees, inputs, err := ss.unicityTree(algo)
 	if err != nil {
-		return nil, nil, fmt.Errorf("creating unicity tree: %w", err)
+		return nil, nil, nil, fmt.Errorf("creating unicity tree: %w", err)
 	}
+	views, viewErrs := ss.partitionViews(inputs)
 
 	crs := make([]*certification.CertificationResponse, 0, len(ss.Changed))
 	for psID, si := range ss.changedShards() {
 		stCert, err := shardTrees[psID.PartitionID].Certificate(si.ShardID)
 		if err != nil {
-			return nil, nil, fmt.Errorf("creating shard tree certificate: %w", err)
+			return nil, nil, nil, fmt.Errorf("creating shard tree certificate: %w", err)
 		}
 
 		utCert, err := ut.Certificate(si.PartitionID)
 		if err != nil {
-			return nil, nil, fmt.Errorf("creating unicity tree certificate: %w", err)
+			return nil, nil, nil, fmt.Errorf("creating unicity tree certificate: %w", err)
 		}
 
 		trHash, err := si.TR.Hash()
 		if err != nil {
-			return nil, nil, fmt.Errorf("calculating TR hash: %w", err)
+			return nil, nil, nil, fmt.Errorf("calculating TR hash: %w", err)
 		}
 
 		crs = append(crs, &certification.CertificationResponse{
@@ -186,11 +207,103 @@ func (ss ShardStates) certificationResponses(algo crypto.Hash) ([]*certification
 				UnicityTreeCertificate: utCert,
 				ShardTreeCertificate:   stCert,
 			},
-			Status: certification.CertStatusOK,
+			Status:        certification.CertStatusOK,
+			PartitionView: views[psID.PartitionID],
 		})
 	}
 
-	return crs, ut.RootHash(), err
+	return crs, ut.RootHash(), viewErrs, nil
+}
+
+// Retention of partition views: while the process runs, every shard's LastCR keeps its own, original
+// response including the encoded partition view of the round it was certified in, so a handshake or a
+// stale request is answered with exactly the original bytes (never regenerated from newer state). The view
+// is kept in memory only: it is not persisted and not part of the recovery data, so after a root restart or
+// recovery the replies carry a null view until it is restored when the shard is next certified (normally
+// within a few rounds). A view is shared by the responses of one round, so a partition retains at most one
+// distinct view per shard that has a LastCR, ie <= S views of <= MaxPartitionViewSize bytes: O(S*W) per
+// partition, O(S^2) bytes with W = Theta(S). With the production cap (S <= MaxPartitionViewLeaves = 8,
+// W <= 16 KiB) that is at most 128 KiB per partition.
+
+/*
+partitionViews encodes the partition view (the complete vector of the shard tree leaves) of
+each partition which has changed shards, ie which produces certification responses. The views
+are built from the very inputs the shard trees were created from. The result is deep copied,
+encoded once per partition and immutable, so it is safe to share between the responses and
+retain in memory. Partitions for which the view can't be produced (ie topology or record
+shape outside of the consolidation limits) are reported in the error map and are missing
+from the result.
+*/
+func (ss ShardStates) partitionViews(inputs map[types.PartitionID][]types.ShardTreeInput) (map[types.PartitionID][]byte, map[types.PartitionID]error) {
+	var views map[types.PartitionID][]byte
+	var errs map[types.PartitionID]error
+	for psID := range ss.Changed {
+		if _, done := views[psID.PartitionID]; done {
+			continue
+		}
+		if _, failed := errs[psID.PartitionID]; failed {
+			continue
+		}
+		data, err := encodePartitionView(psID.PartitionID, inputs[psID.PartitionID], ss.viewEncodeHook)
+		if err != nil {
+			if errs == nil {
+				errs = map[types.PartitionID]error{}
+			}
+			errs[psID.PartitionID] = err
+			continue
+		}
+		if views == nil {
+			views = map[types.PartitionID][]byte{}
+		}
+		views[psID.PartitionID] = data
+	}
+	return views, errs
+}
+
+// encodePartitionView encodes the view of the partition, onEncode (optional, nil in production) is
+// called once per call (observability for the scaling tests: the view must be encoded once per
+// changed partition per round, whatever the number of responses).
+func encodePartitionView(partition types.PartitionID, inputs []types.ShardTreeInput, onEncode func(types.PartitionID)) ([]byte, error) {
+	if onEncode != nil {
+		onEncode(partition)
+	}
+	if len(inputs) == 0 {
+		return nil, errors.New("no shard tree inputs")
+	}
+	scheme := make(types.ShardingScheme, 0, len(inputs))
+	for _, in := range inputs {
+		scheme = append(scheme, in.Shard)
+	}
+	if len(inputs) == 1 {
+		scheme = types.ShardingScheme{} // single shard partition has empty scheme
+	}
+	order, err := types.CanonicalShardOrder(scheme)
+	if err != nil {
+		return nil, fmt.Errorf("canonical shard order: %w", err)
+	}
+	byShard := make(map[string]types.ShardTreeInput, len(inputs))
+	for _, in := range inputs {
+		byShard[in.Shard.Key()] = in
+	}
+	view := &types.PartitionViewV1{Version: types.PartitionViewVersionV1, PartitionID: partition}
+	for _, id := range order {
+		in, ok := byShard[id.Key()]
+		if !ok {
+			return nil, fmt.Errorf("no input for shard %q", id)
+		}
+		view.Leaves = append(view.Leaves, types.PartitionViewLeafV1{
+			ShardID:       in.Shard,
+			InputRecord:   in.IR,
+			TRHash:        in.TRHash,
+			ShardConfHash: in.ShardConfHash,
+		})
+	}
+	// Clone detaches the view from the mutable shard state, MarshalCBOR validates the limits.
+	data, err := view.Clone().MarshalCBOR()
+	if err != nil {
+		return nil, fmt.Errorf("encoding partition view: %w", err)
+	}
+	return data, nil
 }
 
 func (ss *ShardStates) shardingSchemes() (map[types.PartitionID]types.ShardingScheme, error) {
@@ -817,6 +930,11 @@ func (si *ShardInfo) validRequest(req *certification.BlockCertificationRequest) 
 		return fmt.Errorf("request of shard %s-%s but ShardInfo of %s-%s", req.PartitionID, req.ShardID, si.PartitionID, si.ShardID)
 	}
 
+	// a shard whose last certification response is unknown (never certified, or recovered from a state message
+	// which carried no UC/TR for it) can not be extended: the request is refused, the node must not crash
+	if si.LastCR == nil {
+		return errors.New("shard has no certification response yet")
+	}
 	if req.IRRound() != si.LastCR.Technical.Round {
 		return fmt.Errorf("expected round %d, got %d", si.LastCR.Technical.Round, req.IRRound())
 	}

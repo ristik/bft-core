@@ -63,7 +63,7 @@ func TestBlockStoreReopensOverItsOwnStore(t *testing.T) {
 		t.Helper()
 		bs, err := e.open()
 		require.NoError(t, err, "the root cannot start over its own block store")
-		require.ElementsMatch(t, want, roundsOf(bs.blockTree.GetAllUncommittedNodes()), "the uncommitted blocks after the restart")
+		require.ElementsMatch(t, want, roundsOf(bs.blockTree.allUncommittedNodes()), "the uncommitted blocks after the restart")
 	}
 
 	t.Run("a commit abandons a sibling fork above the committed round", func(t *testing.T) {
@@ -83,7 +83,7 @@ func TestBlockStoreReopensOverItsOwnStore(t *testing.T) {
 		_, err = e.bs.ProcessQc(commit3)
 		require.NoError(t, err)
 		require.EqualValues(t, 3, e.bs.blockTree.Root().GetRound())
-		require.ElementsMatch(t, []uint64{4}, roundsOf(e.bs.blockTree.GetAllUncommittedNodes()), "the tree dropped the sibling")
+		require.ElementsMatch(t, []uint64{4}, roundsOf(e.bs.blockTree.allUncommittedNodes()), "the tree dropped the sibling")
 		reopened(t, e, 4)
 	})
 
@@ -95,7 +95,7 @@ func TestBlockStoreReopensOverItsOwnStore(t *testing.T) {
 		add(t, e, 3, qcFor(2, 1, e.rh[2]))
 		add(t, e, 4, qcFor(3, 2, e.rh[3]))
 		_ = e.bs.ProcessTc(tcFor(3)) // the tree keeps a block that has a child; what ProcessTc reports is not the subject here
-		require.Contains(t, roundsOf(e.bs.blockTree.GetAllUncommittedNodes()), uint64(3), "the tree still holds round 3")
+		require.Contains(t, roundsOf(e.bs.blockTree.allUncommittedNodes()), uint64(3), "the tree still holds round 3")
 		reopened(t, e, 2, 3, 4)
 	})
 
@@ -117,44 +117,33 @@ func TestBlockStoreReopensOverItsOwnStore(t *testing.T) {
 		// a restart may or may not bring the set-aside block back as a leaf; it must not fail, and 2 and 4 must be there
 		bs, err := e.open()
 		require.NoError(t, err, "the root cannot start over its own block store")
-		rounds := roundsOf(bs.blockTree.GetAllUncommittedNodes())
+		rounds := roundsOf(bs.blockTree.allUncommittedNodes())
 		require.Contains(t, rounds, uint64(2))
 		require.Contains(t, rounds, uint64(4))
 	})
 
-	t.Run("a block set aside by its timeout certificate is stored again when it is re-attached", func(t *testing.T) {
+	t.Run("the block of a timed-out round stays in the tree and the database, and a reopened store holds it", func(t *testing.T) {
 		e := setup(t)
 		add(t, e, 2, e.bs.GetHighQc())
 		add(t, e, 3, qcFor(2, 1, e.rh[2]))
-		stored := func() []uint64 {
-			blocks, err := e.bs.storage.LoadBlocks()
-			require.NoError(t, err)
-			return roundsOf(blocks)
-		}
 		require.NoError(t, e.bs.ProcessTc(tcFor(3)))
-		require.NotContains(t, stored(), uint64(3), "the tree let go of round 3, so the database dropped it with the certificate")
-		// anything that looks the round up brings it back under its parent; from then on a child may be stored on top of it
-		_, err := e.bs.blockTree.FindBlock(3)
+		blocks, err := e.bs.storage.LoadBlocks()
 		require.NoError(t, err)
-		require.Contains(t, stored(), uint64(3), "back in the tree, back in the database")
+		require.Contains(t, roundsOf(blocks), uint64(3), "the certificate does not touch the block")
 		reopened(t, e, 2, 3)
 	})
 
-	t.Run("the database keeps a timed-out round's block unless it is told to drop it", func(t *testing.T) {
+	t.Run("the database keeps a timed-out round's block", func(t *testing.T) {
 		db, err := NewBoltStorage(filepath.Join(t.TempDir(), "blocks.db"))
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = db.Close() })
 		require.NoError(t, db.WriteBlock(&ExecutedBlock{BlockData: &types.BlockData{Round: 7}}, false))
-		require.NoError(t, db.WriteTC(tcFor(7), false))
+		require.NoError(t, db.WriteTC(tcFor(7)))
 		blocks, err := db.LoadBlocks()
 		require.NoError(t, err)
 		require.Equal(t, []uint64{7}, roundsOf(blocks), "kept")
 		last, err := db.ReadLastTC()
 		require.NoError(t, err)
-		require.EqualValues(t, 7, last.GetRound(), "and the certificate is stored either way")
-		require.NoError(t, db.WriteTC(tcFor(7), true))
-		blocks, err = db.LoadBlocks()
-		require.NoError(t, err)
-		require.Empty(t, blocks, "dropped")
+		require.EqualValues(t, 7, last.GetRound(), "and the certificate is stored")
 	})
 }

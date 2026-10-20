@@ -277,7 +277,7 @@ func cmdClient(args []string) error {
 
 func cmdUCResp(args []string) error {
 	fs := flag.NewFlagSet("ucresp", flag.ExitOnError)
-	file := fs.String("file", "", "a captured version 2 response")
+	file := fs.String("file", "", "a captured version 3 response")
 	entry := fs.String("entry", "", "the entry file the attachment must equal")
 	_ = fs.Parse(args)
 	raw, err := os.ReadFile(*file)
@@ -288,9 +288,9 @@ func cmdUCResp(args []string) error {
 	if err != nil {
 		return err
 	}
-	var v2 certification.CertificationResponseV2
+	var v2 certification.CertificationResponseV3
 	if err := types.Cbor.Unmarshal(raw, &v2); err != nil {
-		return fmt.Errorf("not a version 2 certification response: %w", err)
+		return fmt.Errorf("not a version 3 certification response: %w", err)
 	}
 	if err := v2.IsValid(); err != nil {
 		return err
@@ -299,7 +299,7 @@ func cmdUCResp(args []string) error {
 		if bytes.Equal(u, want) {
 			e, _ := types.DecodeRootTrustBaseV2(u)
 			fmt.Printf("ok: the response (partition %d, status %d, UC epoch %d) attaches the entry of epoch %d at position %d byte for byte\n",
-				v2.Partition, v2.Status, sealEpoch(&v2.UC), e.Epoch, i)
+				v2.Response.Partition, v2.Response.Status, sealEpoch(&v2.Response.UC), e.Epoch, i)
 			return nil
 		}
 	}

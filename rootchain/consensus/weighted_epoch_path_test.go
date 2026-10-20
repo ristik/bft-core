@@ -208,6 +208,7 @@ func newSecondHandoff(t *testing.T, source *anchorReplica, signers map[string]ab
 	parent := bytes.Repeat([]byte{5}, 32)
 	shardState.IR.BlockHash = bytes.Clone(parent)
 	shardState.IR.Hash = bytes.Repeat([]byte{0x37}, 32)
+	shardState.RootHash = bytes.Clone(shardState.IR.Hash) // the last certified root hash is the state hash of the input record
 	successorTRHash, err := shardState.TR.Hash()
 	require.NoError(t, err)
 	orderedRound, commitSealRound := start+3, start+8
@@ -282,7 +283,7 @@ func newSecondHandoff(t *testing.T, source *anchorReplica, signers map[string]ab
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, db.Close()) })
 	require.NoError(t, db.StoreHandoffBody(bodyID[:], body.Encode()))
-	root.blockStore, err = storage.NewFromState(crypto.SHA256, head, db, source.manager.orchestration, obs.Logger(), storage.ProfileHandoff)
+	root.blockStore, err = storage.NewFromCheckpoint(crypto.SHA256, head, db, source.manager.orchestration, obs.Logger(), storage.ProfileHandoff)
 	require.NoError(t, err)
 	return secondHandoff{root: root, proof: proof, head: head, body: body, signers: signers}
 }

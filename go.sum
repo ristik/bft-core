@@ -483,8 +483,10 @@ github.com/quic-go/webtransport-go v0.8.1-0.20241018022711-4ac2c9250e66 h1:4WFk6
 github.com/quic-go/webtransport-go v0.8.1-0.20241018022711-4ac2c9250e66/go.mod h1:Vp72IJajgeOL6ddqrAhmp7IM9zbTcgkQxD/YdxrVwMw=
 github.com/raulk/go-watchdog v1.3.0 h1:oUmdlHxdkXRJlwfG0O9omj8ukerm8MEQavSiDTEtBsk=
 github.com/raulk/go-watchdog v1.3.0/go.mod h1:fIvOnLbF0b0ZwkB9YU4mOW9Did//4vPZtDqv66NfsMU=
-github.com/ristik/bft-go-base v1.1.1-0.20261014185050-997695836851 h1:Cn7MhE/p3qM8kpxRzC1STfDeil0AUlPELbn/8FU8TXg=
-github.com/ristik/bft-go-base v1.1.1-0.20261014185050-997695836851/go.mod h1:hBnOG52VRy/vpgIBUulTgk7PBTwODZ2xkVjCEu5yRcQ=
+github.com/ristik/bft-go-base v1.1.1-0.20261019185200-6174434eeb99 h1:R3DO7ZNRQbByK2eGkhb2rheTqf/x7lfXzSu+Ve1uCQs=
+github.com/ristik/bft-go-base v1.1.1-0.20261019185200-6174434eeb99/go.mod h1:hBnOG52VRy/vpgIBUulTgk7PBTwODZ2xkVjCEu5yRcQ=
+github.com/ristik/bft-go-base v1.1.1-0.20261019192807-8890ddce75de h1:1w6G26S/pGmm/K36WWbm936GocDG4KCRM0y1lgPdqeE=
+github.com/ristik/bft-go-base v1.1.1-0.20261019192807-8890ddce75de/go.mod h1:hBnOG52VRy/vpgIBUulTgk7PBTwODZ2xkVjCEu5yRcQ=
 github.com/rivo/uniseg v0.2.0 h1:S1pD9weZBuJdFmowNwbpi7BJ8TNftyUImj/0WQi72jY=
 github.com/rivo/uniseg v0.2.0/go.mod h1:J6wj4VEh+S6ZtnVlnTBMWIodfgj8LQOQFoIToxlJtxc=
 github.com/rogpeppe/go-internal v1.9.0/go.mod h1:WtVeX8xhTBvf0smdhujwtBcq4Qrzq/fJaraNFVN+nFs=

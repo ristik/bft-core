@@ -14,6 +14,7 @@ import (
 	"github.com/unicitynetwork/bft-go-base/types"
 
 	test "github.com/unicitynetwork/bft-core/internal/testutils"
+	"github.com/unicitynetwork/bft-core/internal/testutils/logger"
 	drctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
 )
 
@@ -48,18 +49,6 @@ func TestBlockTreeRejectsAnchorCommitBeforeMutation(t *testing.T) {
 	_, err := bt.Commit(qc)
 	require.ErrorIs(t, err, ErrCommitFailed)
 	require.Same(t, root, bt.root)
-	require.Len(t, bt.roundToNode, 1)
-}
-
-// A set-aside block whose parent is no longer in the tree is not re-attached: the lookup fails instead of hanging it off nothing.
-func TestBlockTree_SetAsideBlockWithoutParentIsNotRestored(t *testing.T) {
-	root := newNode(&ExecutedBlock{BlockData: &drctypes.BlockData{Round: 4}})
-	orphan := &ExecutedBlock{BlockData: &drctypes.BlockData{Round: 5, Qc: &drctypes.QuorumCert{VoteInfo: &drctypes.RoundInfo{RoundNumber: 2}}}}
-	bt := &BlockTree{root: root, roundToNode: map[uint64]*node{4: root}, timedOut: map[uint64]*ExecutedBlock{5: orphan}}
-	b, err := bt.FindBlock(5)
-	require.ErrorContains(t, err, "block for round 5 not found")
-	require.Nil(t, b)
-	require.Empty(t, root.child)
 	require.Len(t, bt.roundToNode, 1)
 }
 
@@ -131,26 +120,25 @@ func createTestBlockTree(t *testing.T) *BlockTree {
 	}
 }
 
-func TestBlockTree_RemoveLeaf(t *testing.T) {
+func TestBlockTree_Branch(t *testing.T) {
+	rounds := func(blocks []*ExecutedBlock) (r []uint64) {
+		for _, b := range blocks {
+			r = append(r, b.GetRound())
+		}
+		return r
+	}
 	tree := createTestBlockTree(t)
-	// remove leaf that has children
-	require.ErrorContains(t, tree.RemoveLeaf(9), "error round 9 is not leaf node")
-	require.ErrorContains(t, tree.RemoveLeaf(5), "root block cannot be removed")
-	require.ErrorContains(t, tree.RemoveLeaf(11), "error round 11 is not leaf node")
-	require.NoError(t, tree.RemoveLeaf(8))
-	b, err := tree.FindBlock(8)
-	require.ErrorContains(t, err, "block for round 8 not found")
-	require.Nil(t, b)
-	b, err = tree.FindBlock(7)
-	require.NoError(t, err)
-	require.NotNil(t, b)
-	require.Equal(t, "B7", b.BlockData.Author)
-	// make sure node 7 child "8" was removed
-	n, found := tree.roundToNode[7]
-	require.True(t, found)
-	require.Empty(t, n.child)
-	// not and error if leaf does not exist, consider removed
-	require.NoError(t, tree.RemoveLeaf(2))
+	// only the blocks on the path to the root (not included), blocks of the other branches are not listed
+	require.Equal(t, []uint64{8, 7, 6}, rounds(tree.Branch(8)))
+	require.Equal(t, []uint64{7, 6}, rounds(tree.Branch(7)))
+	require.Equal(t, []uint64{10, 9}, rounds(tree.Branch(10)))
+	require.Equal(t, []uint64{12, 11, 9}, rounds(tree.Branch(12)))
+	require.Equal(t, []uint64{9}, rounds(tree.Branch(9)))
+	// root is committed
+	require.Empty(t, tree.Branch(5))
+	// no such block
+	require.Empty(t, tree.Branch(2))
+	require.Empty(t, tree.Branch(13))
 }
 
 func TestBlockTree_FindPathToRoot(t *testing.T) {
@@ -177,16 +165,12 @@ func TestBlockTree_FindPathToRoot(t *testing.T) {
 	require.Nil(t, tree.findPathToRoot(2))
 }
 
-func TestBlockTree_GetAllUncommittedNodes(t *testing.T) {
+func TestBlockTree_allUncommittedNodes(t *testing.T) {
 	tree := createTestBlockTree(t)
 	// tree has 8 nodes, only root is not committed
 	require.Len(t, tree.roundToNode, 8)
-	blocks := tree.GetAllUncommittedNodes()
+	blocks := tree.allUncommittedNodes()
 	require.Len(t, blocks, 7)
-	require.NoError(t, tree.RemoveLeaf(8))
-	require.NoError(t, tree.RemoveLeaf(7))
-	blocks = tree.GetAllUncommittedNodes()
-	require.Len(t, blocks, 5)
 }
 
 func TestBlockTree_pruning(t *testing.T) {
@@ -252,11 +236,61 @@ func TestBlockTree_pruning(t *testing.T) {
 func TestBlockTree_InsertQc(t *testing.T) {
 	tree := createTestBlockTree(t)
 	require.ErrorContains(t, tree.InsertQc(&drctypes.QuorumCert{VoteInfo: &drctypes.RoundInfo{RoundNumber: 2, CurrentRootHash: nil}}), "find block: block for round 2 not found")
-	require.ErrorContains(t, tree.InsertQc(&drctypes.QuorumCert{VoteInfo: &drctypes.RoundInfo{RoundNumber: 12, CurrentRootHash: test.RandomBytes(32)}}), "qc state hash is different from local computed state hash")
+
 	b, err := tree.FindBlock(12)
 	require.NoError(t, err)
 	b.RootHash = []byte{1, 2, 3}
-	require.NoError(t, tree.InsertQc(&drctypes.QuorumCert{VoteInfo: &drctypes.RoundInfo{RoundNumber: 12, CurrentRootHash: []byte{1, 2, 3}}}))
+	// the QC which certifies the local block, field by field
+	exact := func() *drctypes.QuorumCert {
+		return &drctypes.QuorumCert{VoteInfo: &drctypes.RoundInfo{
+			RoundNumber: 12, ParentRoundNumber: b.GetParentRound(), Epoch: b.BlockData.Epoch,
+			Timestamp: b.BlockData.Timestamp, CurrentRootHash: []byte{1, 2, 3}}}
+	}
+
+	// every field of the QC the block must match is refused, before anything is attached, written or raised
+	for name, mutate := range map[string]func(*drctypes.RoundInfo){
+		"state root":   func(vi *drctypes.RoundInfo) { vi.CurrentRootHash = test.RandomBytes(32) },
+		"epoch":        func(vi *drctypes.RoundInfo) { vi.Epoch++ },
+		"timestamp":    func(vi *drctypes.RoundInfo) { vi.Timestamp++ },
+		"parent round": func(vi *drctypes.RoundInfo) { vi.ParentRoundNumber-- },
+	} {
+		t.Run("mismatch of the "+name, func(t *testing.T) {
+			highBefore := tree.HighQc()
+			qc := exact()
+			mutate(qc.VoteInfo)
+			require.ErrorContains(t, tree.InsertQc(qc), "qc does not certify the local block of round 12")
+			require.Nil(t, b.Qc, "the QC was not attached")
+			require.Same(t, highBefore, tree.HighQc(), "the high QC did not change")
+			stored := loadStoredBlock(t, tree, 12)
+			require.Nil(t, stored.Qc, "nothing was written")
+		})
+	}
+
+	t.Run("a QC of nothing", func(t *testing.T) {
+		require.ErrorContains(t, tree.InsertQc(&drctypes.QuorumCert{VoteInfo: &drctypes.RoundInfo{RoundNumber: 12}}), "does not certify")
+	})
+
+	t.Run("exact match", func(t *testing.T) {
+		qc := exact()
+		require.NoError(t, tree.InsertQc(qc))
+		require.Same(t, qc, b.Qc)
+		require.Same(t, qc, tree.HighQc())
+		require.NotNil(t, loadStoredBlock(t, tree, 12).Qc)
+	})
+}
+
+// loadStoredBlock reads the block of the round back from the persistent store of the tree.
+func loadStoredBlock(t *testing.T, tree *BlockTree, round uint64) *ExecutedBlock {
+	t.Helper()
+	blocks, err := tree.blocksDB.LoadBlocks()
+	require.NoError(t, err)
+	for _, b := range blocks {
+		if b.GetRound() == round {
+			return b
+		}
+	}
+	t.Fatalf("no stored block for round %d", round)
+	return nil
 }
 
 func Test_NewBlockTree(t *testing.T) {
@@ -304,6 +338,28 @@ func Test_NewBlockTree(t *testing.T) {
 		bt, err := NewBlockTree(db, orchestration)
 		require.EqualError(t, err, `cannot add block for round 6, parent block 5 not found`)
 		require.Nil(t, bt)
+	})
+
+	t.Run("blocks of a pruned branch are skipped", func(t *testing.T) {
+		// B3 (pruned)--> B4 (root)--> B5--> B6
+		//  ╰--> B7 --> B8
+		// blocks older than the root are deleted from the DB when the root is stored, B7 and B8 are not
+		block7 := mockExecutedBlock(7, 3)
+		block8 := mockExecutedBlock(8, 7)
+		db := mockPersistentStore{
+			loadBlocks: func() ([]*ExecutedBlock, error) {
+				return []*ExecutedBlock{&block8, &block7, &block2, &block1, &blockRoot}, nil
+			},
+		}
+		bt, err := NewBlockTree(db, orchestration)
+		require.NoError(t, err)
+		require.Len(t, bt.roundToNode, 3)
+		require.Len(t, bt.allUncommittedNodes(), 2)
+		for _, round := range []uint64{7, 8} {
+			_, err = bt.FindBlock(round)
+			require.Error(t, err)
+		}
+		require.Equal(t, block2.BlockData.Qc, bt.HighQc())
 	})
 
 	t.Run("failure to init root block", func(t *testing.T) {
@@ -369,7 +425,7 @@ func Test_NewBlockTree(t *testing.T) {
 		b, err = bt.FindBlock(block2.GetRound())
 		require.NoError(t, err)
 		require.Equal(t, &block2, b)
-		blocks := bt.GetAllUncommittedNodes()
+		blocks := bt.allUncommittedNodes()
 		if assert.Len(t, blocks, 2) {
 			require.Contains(t, blocks, &block1)
 			require.Contains(t, blocks, &block2)
@@ -392,7 +448,7 @@ func Test_NewBlockTree(t *testing.T) {
 		rootB := bt.Root()
 		require.NotNil(t, rootB)
 		require.Equal(t, drctypes.GenesisRootRound, rootB.GetRound())
-		require.Len(t, bt.GetAllUncommittedNodes(), 0)
+		require.Len(t, bt.allUncommittedNodes(), 0)
 		require.NotNil(t, bt.HighQc())
 	})
 }
@@ -489,16 +545,16 @@ func Test_BlockTree_Add(t *testing.T) {
 		}
 		bt, err := NewBlockTree(db, orchestration)
 		require.NoError(t, err)
-		require.Len(t, bt.GetAllUncommittedNodes(), 0)
+		require.Len(t, bt.allUncommittedNodes(), 0)
 
 		require.NoError(t, bt.Add(&block1))
-		require.Len(t, bt.GetAllUncommittedNodes(), 1)
+		require.Len(t, bt.allUncommittedNodes(), 1)
 
 		require.NoError(t, bt.Add(&block2))
 		b, err := bt.FindBlock(block2.GetRound())
 		require.NoError(t, err)
 		require.Equal(t, &block2, b)
-		require.Len(t, bt.GetAllUncommittedNodes(), 2)
+		require.Len(t, bt.allUncommittedNodes(), 2)
 
 		require.Equal(t, &blockRoot, bt.Root(), "root should not have changed")
 
@@ -522,12 +578,12 @@ func Test_BlockTree_Add(t *testing.T) {
 				Hash:         b.RootHash,
 			},
 		}
-		certs, err := bt.Commit(commitQc)
+		certs, err := bt.Commit(commitQc, logger.New(t))
 		require.NoError(t, err)
 		require.Empty(t, certs)
 		newRoot := bt.Root()
 		require.Equal(t, newRoot, b)
 		require.Len(t, bt.roundToNode, 2)
-		require.Len(t, bt.GetAllUncommittedNodes(), 1)
+		require.Len(t, bt.allUncommittedNodes(), 1)
 	})
 }

@@ -43,8 +43,7 @@ type (
 		WriteVote(vote any) error
 		ReadLastVote() (msg any, err error)
 
-		// WriteTC stores the last timeout certificate and, with dropBlock, deletes the block of its round with it
-		WriteTC(tc *rctypes.TimeoutCert, dropBlock bool) error
+		WriteTC(tc *rctypes.TimeoutCert) error
 		ReadLastTC() (*rctypes.TimeoutCert, error)
 	}
 
@@ -98,7 +97,20 @@ func (e refusedBeforeWrite) Error() string      { return e.err.Error() }
 func (e refusedBeforeWrite) Unwrap() error      { return e.err }
 func (refusedBeforeWrite) Is(target error) bool { return target == ErrRefusedBeforeWrite }
 
+// NewFromState installs the committed head of a peer's state message as the root of a new store. The head is validated completely before anything is
+// written (newRootBlock with recovery set).
 func NewFromState(hash crypto.Hash, block *abdrc.CommittedBlock, db PersistentStore, orchestration Orchestration, log *slog.Logger, networkProfile ...uint64) (*BlockStore, error) {
+	return newFromHead(hash, block, db, orchestration, log, true, networkProfile...)
+}
+
+// NewFromCheckpoint installs a head that is authenticated by its own verification (a handoff checkpoint: the old committee's commit proof and the
+// epoch genesis, which carry no QC of the checkpoint block itself) as the root of a new store. It is not for a state message of a peer: that is
+// NewFromState, which also binds the head to its QCs and last responses.
+func NewFromCheckpoint(hash crypto.Hash, block *abdrc.CommittedBlock, db PersistentStore, orchestration Orchestration, log *slog.Logger, networkProfile ...uint64) (*BlockStore, error) {
+	return newFromHead(hash, block, db, orchestration, log, false, networkProfile...)
+}
+
+func newFromHead(hash crypto.Hash, block *abdrc.CommittedBlock, db PersistentStore, orchestration Orchestration, log *slog.Logger, recovery bool, networkProfile ...uint64) (*BlockStore, error) {
 	if db == nil {
 		return nil, refusedBeforeWrite{errors.New("storage is nil")}
 	}
@@ -110,7 +122,14 @@ func NewFromState(hash crypto.Hash, block *abdrc.CommittedBlock, db PersistentSt
 	if err := pinProfile(db, profile); err != nil {
 		return nil, refusedBeforeWrite{err}
 	}
-	rootNode, err := NewRootBlock(block, hash, orchestration, profile)
+	// the trusted genesis matters to a genesis head only (validateGenesisHead)
+	var local *ExecutedBlock
+	if recovery && block != nil && block.Block != nil && block.Block.Round == rctypes.GenesisRootRound {
+		if local, err = trustedGenesis(db, hash, orchestration, profile); err != nil {
+			return nil, refusedBeforeWrite{err}
+		}
+	}
+	rootNode, err := newRootBlock(block, hash, orchestration, local, recovery, profile)
 	if err != nil {
 		// Nothing has been written: the first write is NewBlockTreeWithRootBlock below.
 		return nil, refusedBeforeWrite{fmt.Errorf("failed to create new root node: %w", err)}
@@ -140,35 +159,37 @@ func NewFromState(hash crypto.Hash, block *abdrc.CommittedBlock, db PersistentSt
 	}, nil
 }
 
-func (x *BlockStore) ProcessTc(tc *rctypes.TimeoutCert) (rErr error) {
+/*
+ProcessTc persists the timeout certificate.
+
+NB! The proposal/block of the TC round (if there is one) stays in the tree: the round might
+still get QC too (of the votes sent before the timeout) and then the chain continues from it.
+If it doesn't the block is pruned when a block of some other branch gets committed.
+*/
+func (x *BlockStore) ProcessTc(tc *rctypes.TimeoutCert) error {
 	if tc == nil {
 		return fmt.Errorf("error tc is nil")
 	}
-	// Set the proposal/block of the TC round aside, if it exists: a quorum voted for timeout, but the same roots may have voted for
-	// the block before timing out, and a vote delayed past the TC can still complete a QC for it. Dropping the block then leaves every
-	// root unable to process that QC and unable to recover it from a peer.
-	// It is fine if the block is not found, it does not matter anyway
-	setAside, treeErr := x.blockTree.SetAsideLeaf(tc.GetRound())
-	// Persist the last known TC. The database drops the round's block only if the tree let go of it just now: the tree keeps a block
-	// that has a child (this root already holds the proposal carrying its QC), and what the tree keeps a restart must find.
-	if err := x.storage.WriteTC(tc, setAside); err != nil {
-		// store DB error and continue
-		rErr = fmt.Errorf("TC write failed: %w", err)
+	// persist last known TC
+	if err := x.storage.WriteTC(tc); err != nil {
+		return fmt.Errorf("TC write failed: %w", err)
 	}
-	if treeErr != nil {
-		return errors.Join(rErr, fmt.Errorf("removing timeout block %v: %w", tc.GetRound(), treeErr))
-	}
-	return rErr
+	return nil
 }
 
 /*
 IsChangeInProgress - return input record if shard has a pending IR change in the pipeline
 or nil if no change is currently in the pipeline.
+
+Only the uncommitted blocks of the branch ending with the block of the round "branch" are
+checked, ie the blocks which would get committed together with a block extending that round.
+Changes in the other branches of the block tree do not count, at most one of the branches
+ends up being committed.
 */
-func (x *BlockStore) IsChangeInProgress(partition types.PartitionID, shard types.ShardID) *types.InputRecord {
+func (x *BlockStore) IsChangeInProgress(branch uint64, partition types.PartitionID, shard types.ShardID) *types.InputRecord {
 	k := types.PartitionShardID{PartitionID: partition, ShardID: shard.Key()}
-	// go through the block we have and make sure that there is no change in progress for this shard
-	for _, b := range x.blockTree.GetAllUncommittedNodes() {
+	// go through the blocks of the branch and make sure that there is no change in progress for this shard
+	for _, b := range x.blockTree.Branch(branch) {
 		if _, ok := b.ShardState.Changed[k]; ok {
 			return b.ShardState.States[k].IR
 		}
@@ -304,6 +325,18 @@ func (x *BlockStore) ProcessQc(qc *rctypes.QuorumCert) ([]*certification.Certifi
 	if qc == nil {
 		return nil, fmt.Errorf("qc is nil")
 	}
+	// A QC at or below the high QC is stale, unless the block it certifies is still retained: a higher QC is no proof
+	// that this retained block is the one the QC certifies (a recovered uncertified leaf of another branch can differ
+	// in timestamp, epoch or parent). The retained block is checked with the shared predicate before the stale-QC
+	// short circuit, so that a stale QC cannot authorize anything built on a mismatching block. A QC of pruned history
+	// (no retained block) stays a no-op.
+	if qc.VoteInfo != nil {
+		if b, err := x.blockTree.FindBlock(qc.GetRound()); err == nil {
+			if err = CheckQcOfBlock(qc, b); err != nil {
+				return nil, fmt.Errorf("qc does not certify the local block of round %d: %w", qc.GetRound(), err)
+			}
+		}
+	}
 	// if we have processed it already then skip (in case we are the next leader we have already handled the QC)
 	if x.GetHighQc().GetRound() >= qc.GetRound() {
 		// stale qc
@@ -339,7 +372,7 @@ func (x *BlockStore) ProcessQc(qc *rctypes.QuorumCert) ([]*certification.Certifi
 		return nil, nil
 	}
 	// If the QC commits a state committed block becomes the new root
-	ucs, err := x.blockTree.Commit(qc)
+	ucs, err := x.blockTree.Commit(qc, x.log)
 	if err != nil {
 		return nil, fmt.Errorf("committing new root block: %w", err)
 	}

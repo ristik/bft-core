@@ -31,6 +31,9 @@ import (
 type (
 	PartitionNet interface {
 		Send(ctx context.Context, msg any, receivers ...peer.ID) error
+		// SendCertificationResponse sends the response using the best protocol version
+		// supported by each receiver.
+		SendCertificationResponse(ctx context.Context, cr *certification.CertificationResponse, receivers ...peer.ID) error
 		ReceivedChannel() <-chan any
 	}
 
@@ -94,7 +97,7 @@ func New(
 	if err != nil {
 		return nil, fmt.Errorf("creating request buffer: %w", err)
 	}
-	subs, err := NewSubscriptions(pNet.Send, observe)
+	subs, err := NewSubscriptions(pNet.SendCertificationResponse, observe)
 	if err != nil {
 		return nil, fmt.Errorf("creating subscribers list: %w", err)
 	}
@@ -117,11 +120,12 @@ func New(
 	return node, nil
 }
 
-// SetEntryOffers makes the node answer on the version 2 certificate protocol with the finalized signed trust-base entries the offers choose. Call it
+// SetEntryOffers makes the node answer on the version 3 certificate protocol with the finalized signed trust-base entries the offers choose. Call it
 // before Run.
 func (v *Node) SetEntryOffers(o EntryOffers) {
 	v.offers = o
 	v.subscription.offers = o
+	v.subscription.offerSender = v.net.Send
 }
 
 func (v *Node) initMetrics(m metric.Meter) (err error) {
@@ -210,6 +214,10 @@ func (v *Node) sendResponse(ctx context.Context, nodeID string, cr *certificatio
 
 	if err := cr.IsValid(); err != nil {
 		return fmt.Errorf("invalid certification response: %w", err)
+	}
+	if v.offers == nil {
+		// no trust-base entries to attach: the network chooses between the sidecar and the legacy protocol from what the receiver announced
+		return v.net.SendCertificationResponse(ctx, cr, peerID)
 	}
 	msg, sent := withOffers(v.offers, peerID, cr)
 	if err := v.net.Send(ctx, msg, peerID); err != nil {

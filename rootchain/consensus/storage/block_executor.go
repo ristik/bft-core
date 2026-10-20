@@ -14,6 +14,7 @@ import (
 	"github.com/unicitynetwork/bft-core/internal/quorumweight"
 	"github.com/unicitynetwork/bft-core/internal/weightvalidation"
 
+	"github.com/unicitynetwork/bft-core/logger"
 	"github.com/unicitynetwork/bft-core/network/protocol/abdrc"
 	"github.com/unicitynetwork/bft-core/network/protocol/certification"
 	rctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
@@ -40,7 +41,9 @@ type (
 	}
 
 	IRChangeReqVerifier interface {
-		VerifyIRChangeReq(round uint64, irChReq *rctypes.IRChangeReq) (*types.InputRecord, error)
+		// VerifyIRChangeReq verifies the change request for the block of the "round" which
+		// extends the block of the "parentRound".
+		VerifyIRChangeReq(round, parentRound uint64, irChReq *rctypes.IRChangeReq) (*types.InputRecord, error)
 	}
 )
 
@@ -49,6 +52,14 @@ type (
 var ErrShardConfMismatch = errors.New("calculated shard conf hash doesn't match the value in block data")
 
 func NewRootBlock(block *abdrc.CommittedBlock, hash crypto.Hash, orchestration Orchestration, networkProfile ...uint64) (*ExecutedBlock, error) {
+	return newRootBlock(block, hash, orchestration, nil, false, networkProfile...)
+}
+
+// newRootBlock creates the root block of a committed head. With recovery set the head is a peer's state message and is validated completely before the
+// block is returned, ie before anything is persisted or installed (validateRecoveredHead, validateShardSet, validateLastResponse); localGenesis is the
+// genesis the node trusts (nil: the one derived by NewGenesisBlock). Without it the head is a handoff checkpoint, authenticated by its own verification
+// (VerifyHandoffSnapshot, the epoch genesis), which carries no QC of its own block.
+func newRootBlock(block *abdrc.CommittedBlock, hash crypto.Hash, orchestration Orchestration, localGenesis *ExecutedBlock, recovery bool, networkProfile ...uint64) (*ExecutedBlock, error) {
 	profile, err := profileVersion(networkProfile)
 	if err != nil {
 		return nil, err
@@ -81,27 +92,33 @@ func NewRootBlock(block *abdrc.CommittedBlock, hash crypto.Hash, orchestration O
 	if err != nil {
 		return nil, fmt.Errorf("loading shard configurations for round %d: %w", block.GetRound(), err)
 	}
-
 	shardState := ShardStates{
 		States:  make(map[types.PartitionShardID]*ShardInfo, len(shardConfs)),
 		Changed: ShardSet{},
 		Control: block.Control,
 	}
-	for _, d := range block.ShardInfo {
+	for i := range block.ShardInfo {
+		d := &block.ShardInfo[i]
 		if profile == ProfileHandoff && d.Partition == evmroot.D4ControlPartition {
 			return nil, ErrControlCheckpoint
 		}
 		shardKey := types.PartitionShardID{PartitionID: d.Partition, ShardID: d.Shard.Key()}
+		if _, dup := shardState.States[shardKey]; dup {
+			return nil, fmt.Errorf("block contains shard %s - %s more than once", d.Partition, d.Shard)
+		}
 		shardConf, ok := shardConfs[shardKey]
 		if !ok {
-			return nil, fmt.Errorf("block contains shard %s - %s which is not listed in the local orchestration", d.Partition, d.Shard)
+			return nil, fmt.Errorf("block contains shard %s - %s which is not active in the local orchestration", d.Partition, d.Shard)
 		}
 		shardConfHash, err := shardConf.Hash(crypto.SHA256)
 		if err != nil {
-			return nil, fmt.Errorf("calculating PDR hash: %w", err)
+			return nil, fmt.Errorf("shard %s - %s: calculating PDR hash: %w", d.Partition, d.Shard, err)
 		}
 		if !bytes.Equal(d.ShardConfHash, shardConfHash) {
 			return nil, fmt.Errorf("%w for %s - %s", ErrShardConfMismatch, d.Partition, d.Shard)
+		}
+		if d.IR == nil {
+			return nil, fmt.Errorf("recovered shard %s - %s: input record is missing", d.Partition, d.Shard)
 		}
 
 		si := &ShardInfo{
@@ -116,6 +133,14 @@ func NewRootBlock(block *abdrc.CommittedBlock, hash crypto.Hash, orchestration O
 			Fees:          d.Fees,
 			IR:            d.IR,
 			TR:            d.IRTR,
+		}
+		if recovery {
+			if err := validateRecoveredFields(d, shardConf); err != nil {
+				return nil, fmt.Errorf("recovered shard %s - %s: %w", d.Partition, d.Shard, err)
+			}
+			if err := validateLastResponse(d, shardConf, orchestration, crypto.SHA256); err != nil {
+				return nil, fmt.Errorf("recovered shard %s - %s: %w", d.Partition, d.Shard, err)
+			}
 		}
 		if d.UC != nil {
 			si.LastCR = &certification.CertificationResponse{
@@ -134,6 +159,12 @@ func NewRootBlock(block *abdrc.CommittedBlock, hash crypto.Hash, orchestration O
 		}
 		shardState.States[shardKey] = si
 	}
+	// the genesis block has no shards (they are activated by the first block, see ShardStates.nextBlock)
+	if recovery && block.GetRound() != rctypes.GenesisRootRound {
+		if err := validateShardSet(block, shardConfs); err != nil {
+			return nil, fmt.Errorf("invalid recovery state: %w", err)
+		}
+	}
 
 	ut, _, err := shardState.UnicityTree(hash)
 	if err != nil {
@@ -141,6 +172,17 @@ func NewRootBlock(block *abdrc.CommittedBlock, hash crypto.Hash, orchestration O
 	}
 	if profile == ProfileHandoff && !bytes.Equal(ut.RootHash(), block.CommitQc.LedgerCommitInfo.Hash) {
 		return nil, ErrControlCheckpoint
+	}
+	if recovery {
+		// before anything is written: the head is consistent with the authenticated root and with itself
+		if block.GetRound() == rctypes.GenesisRootRound && localGenesis == nil {
+			if localGenesis, err = NewGenesisBlock(orchestration.NetworkID(), hash, profile); err != nil {
+				return nil, fmt.Errorf("local genesis: %w", err)
+			}
+		}
+		if err := validateRecoveredHead(block, ut.RootHash(), hash, localGenesis); err != nil {
+			return nil, fmt.Errorf("invalid recovery state: %w", err)
+		}
 	}
 	return &ExecutedBlock{
 		BlockData:  block.Block,
@@ -371,7 +413,7 @@ func (x *ExecutedBlock) extendWithAuthority(newBlock *rctypes.BlockData, verifie
 			if err != nil {
 				return nil, fmt.Errorf("hashing parent block: %w", err)
 			}
-			view, err := resolveExecutionView(vv, si, parentID, newBlock.Round, hash)
+			view, err := resolveExecutionView(vv, si, parentID, x.GetRound(), newBlock.Round, hash)
 			if err != nil {
 				return nil, fmt.Errorf("resolving request context: %w", err)
 			}
@@ -396,7 +438,7 @@ func (x *ExecutedBlock) extendWithAuthority(newBlock *rctypes.BlockData, verifie
 				log.Info(fmt.Sprintf("ignoring a request of shard %s signed outside its active configuration: %v", shardKey, memberErr))
 				continue
 			}
-			if si.IR, err = verifier.VerifyIRChangeReq(newBlock.Round, irChReq); err != nil {
+			if si.IR, err = verifier.VerifyIRChangeReq(newBlock.Round, x.GetRound(), irChReq); err != nil {
 				return nil, fmt.Errorf("verifying change request: %w", err)
 			}
 		}
@@ -787,8 +829,9 @@ func frozenShard(state ShardStates, configs map[types.PartitionShardID]*types.Pa
 	return selected, nil
 }
 
-func (x *ExecutedBlock) GenerateCertificates(commitQc *rctypes.QuorumCert) ([]*certification.CertificationResponse, error) {
-	crs, rootHash, err := x.ShardState.certificationResponses(x.HashAlgo)
+func (x *ExecutedBlock) GenerateCertificates(commitQc *rctypes.QuorumCert, logs ...*slog.Logger) ([]*certification.CertificationResponse, error) {
+	log := loggerOr(logs, nil)
+	crs, rootHash, viewErrs, err := x.ShardState.certificationResponsesWithViews(x.HashAlgo)
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate root hash: %w", err)
 	}
@@ -802,6 +845,11 @@ func (x *ExecutedBlock) GenerateCertificates(commitQc *rctypes.QuorumCert) ([]*c
 	}
 	if len(crs) == 0 {
 		return nil, nil
+	}
+	// the partition view is optional proof material, never a reason to fail the certification
+	for partition, err := range viewErrs {
+		log.Warn("certification responses are sent without partition view",
+			slog.Uint64("partition", uint64(partition)), slog.Uint64("round", x.GetRound()), logger.Error(err))
 	}
 
 	// The UC carries the signatures of the native seal. A legacy QC's signatures are those; a scheme 2 QC has two maps, and only its seal

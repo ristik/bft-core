@@ -69,9 +69,9 @@ func TestLegacyChangeWithSeveralRequestsChecksEachProof(t *testing.T) {
 		return &abtypes.IRChangeReq{Partition: partitionID1, CertReason: abtypes.Quorum, Requests: []*certification.BlockCertificationRequest{
 			rig.request(t, 0, valid.prev, valid.envelope, valid.next[:]), rig.request(t, 1, valid.prev, second, valid.next[:])}}
 	}
-	_, err := rig.ver.VerifyIRChangeReq(2, change(valid.envelope))
+	_, err := rig.ver.VerifyIRChangeReq(2, 1, change(valid.envelope))
 	require.NoError(t, err, "control: both carried proofs hold")
-	_, err = rig.ver.VerifyIRChangeReq(2, change([]byte{1, 2, 3}))
+	_, err = rig.ver.VerifyIRChangeReq(2, 1, change([]byte{1, 2, 3}))
 	require.ErrorIs(t, err, ErrProofInvalid, "the first request's valid proof is no reason to skip the second's")
 	require.ErrorIs(t, err, zkverifier.ErrInvalidProofFormat)
 }
@@ -101,9 +101,9 @@ func TestNoQuorumChangeChecksTheProofsOfItsRequests(t *testing.T) {
 			}
 			return &abtypes.IRChangeReq{Partition: partitionID1, CertReason: abtypes.QuorumNotPossible, Requests: reqs}
 		}
-		_, err := rig.ver.VerifyIRChangeReq(2, change(tr[2].envelope))
+		_, err := rig.ver.VerifyIRChangeReq(2, 1, change(tr[2].envelope))
 		require.NoError(t, err, "control: three different transitions, each proved")
-		_, err = rig.ver.VerifyIRChangeReq(2, change([]byte{1, 2, 3}))
+		_, err = rig.ver.VerifyIRChangeReq(2, 1, change([]byte{1, 2, 3}))
 		require.ErrorIs(t, err, ErrProofInvalid)
 		require.ErrorIs(t, err, zkverifier.ErrInvalidProofFormat)
 	})

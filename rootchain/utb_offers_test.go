@@ -179,15 +179,16 @@ func ucResponse(epoch uint64) *certification.CertificationResponse {
 		UC: types.UnicityCertificate{InputRecord: &types.InputRecord{Hash: []byte{1}, BlockHash: []byte{2}}, UnicitySeal: &types.UnicitySeal{Epoch: epoch}}}
 }
 
-// Subscribers get their own version 2 message; the offer is recorded only for those whose send succeeded.
-func TestSubscriptionsSendVersion2WithPerRecipientEntries(t *testing.T) {
+// Subscribers get their own version 3 message; the offer is recorded only for those whose send succeeded.
+func TestSubscriptionsSendVersion3WithPerRecipientEntries(t *testing.T) {
 	store := storeWithEpochs(t, 4)
 	offers := NewStoreOffers(store)
 	a, b := generateNodeID(t), generateNodeID(t)
 	snd := &recordingSender{fail: map[peer.ID]bool{b: true}}
-	subs, err := NewSubscriptions(snd.send, observability.Default(t))
+	subs, err := NewSubscriptions(snd.sendCR, observability.Default(t))
 	require.NoError(t, err)
 	subs.offers = offers
+	subs.offerSender = snd.send
 	t.Cleanup(subs.Wait)
 	require.NoError(t, subs.Subscribe(1, types.ShardID{}, a.String()))
 	require.NoError(t, subs.Subscribe(1, types.ShardID{}, b.String()))
@@ -196,7 +197,7 @@ func TestSubscriptionsSendVersion2WithPerRecipientEntries(t *testing.T) {
 	subs.Wait()
 	require.Len(t, snd.msgs, 2)
 	for i, msg := range snd.msgs {
-		v2, ok := msg.(*certification.CertificationResponseV2)
+		v2, ok := msg.(*certification.CertificationResponseV3)
 		require.True(t, ok, "%T", msg)
 		require.Len(t, snd.receiver[i], 1, "one message per recipient")
 		require.Equal(t, []uint64{2, 3}, epochsOf(t, func() [][]byte {
@@ -206,7 +207,7 @@ func TestSubscriptionsSendVersion2WithPerRecipientEntries(t *testing.T) {
 			}
 			return out
 		}()))
-		require.EqualValues(t, 7, v2.Technical.Round)
+		require.EqualValues(t, 7, v2.Response.Technical.Round)
 	}
 	require.Contains(t, offers.hints, a, "a successful send is recorded")
 	require.NotContains(t, offers.hints, b, "a failed send leaves the update pending")
@@ -215,7 +216,7 @@ func TestSubscriptionsSendVersion2WithPerRecipientEntries(t *testing.T) {
 func TestWithoutOffersTheLegacyResponseIsSentToAllAtOnce(t *testing.T) {
 	a, b := generateNodeID(t), generateNodeID(t)
 	snd := &recordingSender{}
-	subs, err := NewSubscriptions(snd.send, observability.Default(t))
+	subs, err := NewSubscriptions(snd.sendCR, observability.Default(t))
 	require.NoError(t, err)
 	t.Cleanup(subs.Wait)
 	require.NoError(t, subs.Subscribe(1, types.ShardID{}, a.String()))
@@ -233,7 +234,7 @@ func TestWithOffersTreatsAResponseWithoutASealAsEpochZero(t *testing.T) {
 	cr := ucResponse(2)
 	cr.UC.UnicitySeal = nil
 	msg, sent := withOffers(NewStoreOffers(store), generateNodeID(t), cr)
-	v2, ok := msg.(*certification.CertificationResponseV2)
+	v2, ok := msg.(*certification.CertificationResponseV3)
 	require.True(t, ok)
 	require.Empty(t, v2.TrustBaseUpdates)
 	require.Nil(t, sent)
@@ -249,9 +250,10 @@ func TestResponseCaptureWritesTheMessageThatIsSent(t *testing.T) {
 	offers.SetTap(tap)
 	a := generateNodeID(t)
 	snd := &recordingSender{}
-	subs, err := NewSubscriptions(snd.send, observability.Default(t))
+	subs, err := NewSubscriptions(snd.sendCR, observability.Default(t))
 	require.NoError(t, err)
 	subs.offers = offers
+	subs.offerSender = snd.send
 	t.Cleanup(subs.Wait)
 	require.NoError(t, subs.Subscribe(1, types.ShardID{}, a.String()))
 	subs.Send(context.Background(), ucResponse(2))
@@ -264,7 +266,7 @@ func TestResponseCaptureWritesTheMessageThatIsSent(t *testing.T) {
 	sent, err := types.Cbor.Marshal(snd.msgs[0])
 	require.NoError(t, err)
 	require.Equal(t, sent, captured, "the exact bytes of the message sent")
-	var v2 certification.CertificationResponseV2
+	var v2 certification.CertificationResponseV3
 	require.NoError(t, types.Cbor.Unmarshal(captured, &v2))
 	require.Len(t, v2.TrustBaseUpdates, 2)
 
@@ -274,4 +276,9 @@ func TestResponseCaptureWritesTheMessageThatIsSent(t *testing.T) {
 	subs.Wait()
 	files, _ = filepath.Glob(filepath.Join(dir, "*.cbor"))
 	require.Len(t, files, 1)
+}
+
+// sendCR is the sender of the plain (no entries) path, which takes the response itself.
+func (s *recordingSender) sendCR(ctx context.Context, cr *certification.CertificationResponse, receivers ...peer.ID) error {
+	return s.send(ctx, cr, receivers...)
 }

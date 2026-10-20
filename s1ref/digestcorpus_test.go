@@ -105,13 +105,24 @@ func TestDigestCorpusMatchesTheProductionEncoderAndVerifier(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			for name, sig := range map[string]string{"sig64": v.Sig64, "sig65": v.Sig65} {
-				if err := votesig.CheckSignatureShape(unhex(t, sig)); err != nil {
-					t.Fatalf("%s %s: %v", v.ID, name, err)
-				}
-				if err := ver.VerifyBytes(unhex(t, sig), pv); err != nil {
-					t.Fatalf("%s %s does not verify: %v", v.ID, name, err)
-				}
+			// the 65-byte form is the native recoverable signature; the 64-byte form is the contract profile's compact one (r||s), which the base
+			// library's native verifier refuses and its compact verifier checks (the same rule S1/B1 keep explicitly, see s1ref.verifyCompact)
+			sig65, sig64 := unhex(t, v.Sig65), unhex(t, v.Sig64)
+			if err := votesig.CheckSignatureShape(sig65); err != nil {
+				t.Fatalf("%s sig65: %v", v.ID, err)
+			}
+			if err := ver.VerifyBytes(sig65, pv); err != nil {
+				t.Fatalf("%s sig65 does not verify: %v", v.ID, err)
+			}
+			if votesig.CheckSignatureShape(sig64) == nil || ver.VerifyBytes(sig64, pv) == nil {
+				t.Fatalf("%s sig64: the native rule must refuse the compact form", v.ID)
+			}
+			cv, ok := ver.(interface{ VerifyCompactBytes(sig, data []byte) error })
+			if !ok {
+				t.Fatalf("%s: the verifier has no compact verification", v.ID)
+			}
+			if err := cv.VerifyCompactBytes(sig64, pv); err != nil {
+				t.Fatalf("%s sig64 does not verify compactly: %v", v.ID, err)
 			}
 			s := new(big.Int).SetBytes(unhex(t, v.Sig64)[32:64])
 			hs := new(big.Int).SetBytes(unhex(t, v.SigHighS)[32:64])
@@ -128,11 +139,12 @@ func TestDigestCorpusMatchesTheProductionEncoderAndVerifier(t *testing.T) {
 				if v.Seal.PreviousHash != v.VoteInfoHash {
 					t.Fatalf("%s: the seal's previous hash is VH", v.ID)
 				}
-				if err := ver.VerifyBytes(unhex(t, v.Seal.Signature), sb); err != nil {
+				// the seal signature of the corpus is the contract profile's compact form
+				if err := cv.VerifyCompactBytes(unhex(t, v.Seal.Signature), sb); err != nil {
 					t.Fatalf("%s: seal signature: %v", v.ID, err)
 				}
 				// a seal signature never stands in for the vote signature, nor the reverse
-				if ver.VerifyBytes(unhex(t, v.Seal.Signature), pv) == nil || ver.VerifyBytes(unhex(t, v.Sig64), sb) == nil {
+				if cv.VerifyCompactBytes(unhex(t, v.Seal.Signature), pv) == nil || cv.VerifyCompactBytes(unhex(t, v.Sig64), sb) == nil {
 					t.Fatalf("%s: seal and vote signatures are interchangeable", v.ID)
 				}
 			}
@@ -165,7 +177,7 @@ func TestDigestCorpusMatchesTheProductionEncoderAndVerifier(t *testing.T) {
 				t.Fatalf("timeout %s: digest", to.ID)
 			}
 			ver, _ := crypto.NewVerifierSecp256k1(unhex(t, to.Key))
-			if err := ver.VerifyBytes(unhex(t, to.Sig64), pt); err != nil {
+			if err := ver.(interface{ VerifyCompactBytes(sig, data []byte) error }).VerifyCompactBytes(unhex(t, to.Sig64), pt); err != nil {
 				t.Fatalf("timeout %s: %v", to.ID, err)
 			}
 		}

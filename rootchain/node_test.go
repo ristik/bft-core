@@ -1272,6 +1272,10 @@ func (pn mockPartitionNet) Send(ctx context.Context, msg any, receivers ...p2pee
 	return pn.send(ctx, msg, receivers...)
 }
 
+func (pn mockPartitionNet) SendCertificationResponse(ctx context.Context, cr *certification.CertificationResponse, receivers ...p2peer.ID) error {
+	return pn.send(ctx, cr, receivers...)
+}
+
 func (pn mockPartitionNet) ReceivedChannel() <-chan any { return pn.recCh() }
 
 type mockConsensusManager struct {
@@ -1478,4 +1482,43 @@ func Test_theRootLogsEachCheckedProofForTheLanes(t *testing.T) {
 	require.Contains(t, line, "verifier_type=aggregator_rsmt_v1")
 	require.Contains(t, line, fmt.Sprintf("proof_size=%d", len(env)))
 	require.Contains(t, line, "shard.partition=9")
+}
+
+// a shard whose last certification is older than other shards' keeps its own sidecar: the handshake re-delivers exactly the original response, view
+// bytes included (uc-consolidation)
+func Test_onHandshake_redeliversTheOriginalSidecar(t *testing.T) {
+	nopObs := testobservability.NOPObservability()
+	nwPeer := network.Peer{}
+	nodeID := generateNodeID(t)
+	certResp := validCertificationResponse(t)
+	signer, err := abcrypto.NewInMemorySecp256K1Signer()
+	require.NoError(t, err)
+	verifier, err := signer.Verifier()
+	require.NoError(t, err)
+	publicKey, err := verifier.MarshalPublicKey()
+	require.NoError(t, err)
+
+	own := certResp
+	own.PartitionView = []byte{0x83, 0x01, 0x01, 0x80}
+	var sent any
+	partNet := mockPartitionNet{
+		send: func(ctx context.Context, msg any, receivers ...p2peer.ID) error {
+			sent = msg
+			return nil
+		},
+	}
+	cm := mockConsensusManager{
+		shardInfo: func(partition types.PartitionID, shard types.ShardID) (*storage.ShardInfo, error) {
+			return newMockShardInfo(t, nodeID.String(), publicKey, own), nil
+		},
+	}
+	node, err := New(&nwPeer, partNet, cm, nopObs)
+	require.NoError(t, err)
+	require.NoError(t, node.onHandshake(t.Context(), &handshake.Handshake{
+		PartitionID: own.Partition, ShardID: own.Shard, NodeID: nodeID.String(),
+	}))
+	got, ok := sent.(*certification.CertificationResponse)
+	require.True(t, ok)
+	require.Equal(t, []byte{0x83, 0x01, 0x01, 0x80}, got.PartitionView)
+	require.Equal(t, own.UC.GetRootRoundNumber(), got.UC.GetRootRoundNumber())
 }

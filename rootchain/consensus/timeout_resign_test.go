@@ -29,9 +29,9 @@ func TestALocalTimeoutAfterARecoveryResendsTheTimeoutVoteAlreadySignedForTheRoun
 	genesisQC := cm.blockStore.GetHighQc()
 	require.EqualValues(t, 1, genesisQC.GetRound())
 	// round 2: a block on genesis, executed and stored
-	rh2, err := cm.blockStore.Add(&drctypes.BlockData{Version: 1, Round: 2, Epoch: genesisQC.VoteInfo.Epoch, Payload: &drctypes.Payload{}, Qc: genesisQC}, cm.irReqVerifier)
+	rh2, err := cm.blockStore.Add(&drctypes.BlockData{Version: 1, Round: 2, Epoch: genesisQC.VoteInfo.Epoch, Timestamp: genesisQC.VoteInfo.Timestamp + 1, Payload: &drctypes.Payload{}, Qc: genesisQC}, cm.irReqVerifier)
 	require.NoError(t, err)
-	// round 2 times out: its block is set aside, and the pacemaker enters round 3 under the TC
+	// round 2 times out: its block stays in the tree, and the pacemaker enters round 3 under the TC
 	tc2 := &drctypes.TimeoutCert{Timeout: &drctypes.Timeout{Round: 2, Epoch: genesisQC.VoteInfo.Epoch, HighQc: genesisQC}}
 	require.NoError(t, cm.blockStore.ProcessTc(tc2))
 	cm.pacemaker.Reset(ctx, genesisQC.GetRound(), tc2, nil)

@@ -5,6 +5,7 @@ import (
 	"math/big"
 
 	ethcrypto "github.com/ethereum/go-ethereum/crypto"
+	abcrypto "github.com/unicitynetwork/bft-go-base/crypto"
 )
 
 // Verdict is the outcome of a well-formed call. Why is nil when Valid and otherwise wraps ErrInvalid: one verdict for the whole
@@ -58,6 +59,24 @@ func firstErr(cur, next error) error {
 }
 
 func checkSignature(m *member, sig, sigBytes []byte) error {
+	if err := checkSignatureFormat(sig); err != nil {
+		return err
+	}
+	work("signature")
+	return verifySealSignature(m.ver, sig, sigBytes)
+}
+
+// CheckSealSignature is the B1 profile's rule for one seal signature, for a caller that holds the member's verifier (the oracle of another profile
+// that must accept exactly what B1 accepts): 64 bytes, or 65 with a recovery byte 0 or 1 (ErrSigFormat otherwise); r and s in range and s low
+// (ErrSigRange); then the compact verification of r||s against the member's key (ErrSigInvalid). It is the rule of checkSignature, without the gas.
+func CheckSealSignature(ver abcrypto.Verifier, sig, sigBytes []byte) error {
+	if err := checkSignatureFormat(sig); err != nil {
+		return err
+	}
+	return verifySealSignature(ver, sig, sigBytes)
+}
+
+func checkSignatureFormat(sig []byte) error {
 	if len(sig) != 64 && len(sig) != 65 {
 		return ErrSigFormat
 	}
@@ -70,8 +89,11 @@ func checkSignature(m *member, sig, sigBytes []byte) error {
 	if r.Sign() == 0 || r.Cmp(curveN) >= 0 || s.Sign() == 0 || s.Cmp(halfN) > 0 {
 		return ErrSigRange
 	}
-	work("signature")
-	if err := m.ver.VerifyBytes(sig, sigBytes); err != nil {
+	return nil
+}
+
+func verifySealSignature(ver abcrypto.Verifier, sig, sigBytes []byte) error {
+	if err := verifyCompact(ver, sig, sigBytes); err != nil {
 		return ErrSigInvalid
 	}
 	return nil
@@ -178,3 +200,18 @@ func work(kind string) {
 		onWork(kind)
 	}
 }
+
+// verifyCompact is the frozen profile's signature rule, explicitly: the first 64 bytes (r||s) are verified against the member's key by the base
+// library's compact verifier, after the length, recovery-byte (0 or 1 when present) and range checks above. The recoverable verifier
+// (Verifier.VerifyBytes) takes only canonical 65-byte signatures with a recovery ID, which is the native message rule and not this profile's: the
+// profile's acceptance of 64-byte signatures and of recovery bytes 0 and 1 is part of what its Go, Rust and contract implementations agree on, and a
+// library bump must not change it silently.
+func verifyCompact(v abcrypto.Verifier, sig, msg []byte) error {
+	cv, ok := v.(abcrypto.CompactVerifier)
+	if !ok {
+		return errCompactUnsupported
+	}
+	return cv.VerifyCompactBytes(sig[:64], msg)
+}
+
+var errCompactUnsupported = errors.New("the member's verifier has no compact verification")

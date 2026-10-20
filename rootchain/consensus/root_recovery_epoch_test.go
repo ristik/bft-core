@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto"
 	"crypto/sha256"
+	"errors"
 	"path/filepath"
 	"sort"
 	"testing"
@@ -47,7 +48,7 @@ func restartedRoot(t *testing.T, source *anchorReplica) *ConsensusManager {
 	cm, err := NewConsensusManager(source.manager.id, trust, source.manager.orchestration, testnetwork.NewRootMockNetwork(),
 		source.manager.safety.signer, db, obs, WithConsensusParams(params), WithRecoveryProfile2(history))
 	require.NoError(t, err)
-	cm.blockStore, err = storage.NewFromState(crypto.SHA256, source.oldHead, db, source.manager.orchestration, obs.Logger(), storage.ProfileHandoff)
+	cm.blockStore, err = storage.NewFromCheckpoint(crypto.SHA256, source.oldHead, db, source.manager.orchestration, obs.Logger(), storage.ProfileHandoff)
 	require.NoError(t, err)
 	_, err = cm.InstallEpochGenesis(source.proof, source.oldHead, source.body)
 	require.NoError(t, err)
@@ -164,7 +165,14 @@ func recoverTo(t *testing.T, cm *ConsensusManager, state *abdrc.StateMsg) error 
 	}
 	_, err := cm.recovery.Set(&rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{RoundNumber: to + 1, ParentRoundNumber: to, Epoch: cm.trustBase.Load().GetEpoch()}})
 	require.NoError(t, err)
-	return cm.onStateResponse(context.Background(), state)
+	err = cm.onStateResponse(context.Background(), state)
+	// The trigger of this helper is a bare QC for the round after the state: its block is not part of any state, and a QC whose block is missing is
+	// answered with a new recovery request after the state is installed (the error says so). The state itself was installed or refused before.
+	if err != nil && errors.Is(err, errTriggerQCNotAccepted) {
+		cm.recovery.Clear() // the new recovery the unaccepted trigger started is not what the test is about
+		return nil
+	}
+	return err
 }
 
 // A root restarted into the new epoch while its peers are already in it recovers from a peer's state, though that state contains QCs that

@@ -23,7 +23,7 @@ type (
 	State interface {
 		ShardInfo(partition types.PartitionID, shard types.ShardID) *storage.ShardInfo
 		GetCertificates() []*types.UnicityCertificate
-		IsChangeInProgress(id types.PartitionID, shard types.ShardID) *types.InputRecord
+		IsChangeInProgress(branch uint64, id types.PartitionID, shard types.ShardID) *types.InputRecord
 	}
 
 	IRChangeReqVerifier struct {
@@ -64,8 +64,8 @@ func (x *IRChangeReqVerifier) SetRequestHistory(h storage.RequestHistory) { x.hi
 func (x *IRChangeReqVerifier) RequestHistory() storage.RequestHistory { return x.history }
 
 // PendingChange is the change of the shard in the uncommitted pipeline.
-func (x *IRChangeReqVerifier) PendingChange(partition types.PartitionID, shard types.ShardID) *types.InputRecord {
-	return x.state.IsChangeInProgress(partition, shard)
+func (x *IRChangeReqVerifier) PendingChange(branch uint64, partition types.PartitionID, shard types.ShardID) *types.InputRecord {
+	return x.state.IsChangeInProgress(branch, partition, shard)
 }
 
 // VerifyIRChangeReqView judges a proof under the supplied view only: it never reads the last committed ShardInfo, so the
@@ -107,36 +107,22 @@ func (x *IRChangeReqVerifier) verifyProof(req *certification.BlockCertificationR
 	return nil
 }
 
-func (x *IRChangeReqVerifier) VerifyIRChangeReq(rootRound uint64, irChReq *drctypes.IRChangeReq) (*types.InputRecord, error) {
-	if irChReq == nil {
-		return nil, fmt.Errorf("IR change request is nil")
-	}
-	if x.params.NetworkProfileVersion == storage.ProfileHandoff && irChReq.Partition == drctypes.ControlPartition {
-		return nil, drctypes.ErrControlPartition
-	}
-	// Certify input, everything needs to be verified again as if received from partition node, since we cannot trust the leader is honest.
-	// This gets the shardInfo from committed round (for which there is UC), and irChReq should build on that.
-	si := x.state.ShardInfo(irChReq.Partition, irChReq.Shard)
-	if si == nil {
-		// There shouldn't be an IR change request for a shard with no committed state
-		return nil, fmt.Errorf("missing shard info for partition %d shard %s", irChReq.Partition, irChReq.Shard.String())
-	}
-
-	// verify request
-	luc := si.LastCR.UC
-	inputRecord, err := irChReq.Verify(si, &luc, rootRound, t2TimeoutToRootRounds(si.T2Timeout, x.params.BlockRate/2))
+/*
+VerifyIRChangeReq verifies the change request for the block of the "rootRound" which extends
+the block of the "parentRound": the request must be valid (see VerifyRequest), carry the configured
+consistency proofs, and the shard must not have a pending change in the branch the block extends.
+*/
+func (x *IRChangeReqVerifier) VerifyIRChangeReq(rootRound, parentRound uint64, irChReq *drctypes.IRChangeReq) (*types.InputRecord, error) {
+	inputRecord, luc, si, err := x.verifyRequest(rootRound, irChReq)
 	if err != nil {
-		return nil, fmt.Errorf("certification request verification failed: %w", err)
+		return nil, err
 	}
-	// the configured consistency proof of every carried request, as the receiving root checked it
-	target := zkverifier.Target{Partition: irChReq.Partition, Shard: irChReq.Shard, Epoch: si.IR.Epoch, Params: si.PartitionParams}
-	for _, req := range irChReq.Requests {
-		if err := x.verifyProof(req, target); err != nil {
-			return nil, err
-		}
+	if err := x.verifyProofs(irChReq, si); err != nil {
+		return nil, err
 	}
-	// verify that there are no pending changes in the pipeline for any of the updated partitions
-	if ir := x.state.IsChangeInProgress(irChReq.Partition, irChReq.Shard); ir != nil {
+	// verify that there are no pending changes in the pipeline for any of the updated partitions - only the
+	// branch the block extends counts, the changes in the other branches are not committed with this block
+	if ir := x.state.IsChangeInProgress(parentRound, irChReq.Partition, irChReq.Shard); ir != nil {
 		if b, err := types.EqualIR(inputRecord, ir); b || err != nil {
 			if err != nil {
 				return nil, fmt.Errorf("comparing input records: %w", err)
@@ -145,11 +131,74 @@ func (x *IRChangeReqVerifier) VerifyIRChangeReq(rootRound uint64, irChReq *drcty
 		}
 		return nil, fmt.Errorf("shard %s-%s has pending changes in pipeline", irChReq.Partition, irChReq.Shard)
 	}
-	// check - should never happen, somehow the root node round must have been reset
-	if rootRound < luc.UnicitySeal.RootChainRoundNumber {
-		return nil, fmt.Errorf("current round %v is in the past, LUC round %v", rootRound, luc.UnicitySeal.RootChainRoundNumber)
+	if err := checkRound(rootRound, luc); err != nil {
+		return nil, err
 	}
 	return inputRecord, nil
+}
+
+/*
+VerifyRequest verifies the change request against the committed state of the shard. It does not
+check for pending changes of the shard as that depends on which block the change is added to.
+*/
+func (x *IRChangeReqVerifier) VerifyRequest(rootRound uint64, irChReq *drctypes.IRChangeReq) (*types.InputRecord, error) {
+	inputRecord, luc, si, err := x.verifyRequest(rootRound, irChReq)
+	if err != nil {
+		return nil, err
+	}
+	if err := x.verifyProofs(irChReq, si); err != nil {
+		return nil, err
+	}
+	if err := checkRound(rootRound, luc); err != nil {
+		return nil, err
+	}
+	return inputRecord, nil
+}
+
+// verifyProofs is the configured consistency proof of every carried request, as the receiving root checked it.
+func (x *IRChangeReqVerifier) verifyProofs(irChReq *drctypes.IRChangeReq, si *storage.ShardInfo) error {
+	target := zkverifier.Target{Partition: irChReq.Partition, Shard: irChReq.Shard, Epoch: si.IR.Epoch, Params: si.PartitionParams}
+	for _, req := range irChReq.Requests {
+		if err := x.verifyProof(req, target); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// verifyRequest verifies the request against the last UC of the shard, returns the IR requested, the UC and the shard info judged.
+func (x *IRChangeReqVerifier) verifyRequest(rootRound uint64, irChReq *drctypes.IRChangeReq) (*types.InputRecord, *types.UnicityCertificate, *storage.ShardInfo, error) {
+	if irChReq == nil {
+		return nil, nil, nil, fmt.Errorf("IR change request is nil")
+	}
+	if x.params.NetworkProfileVersion == storage.ProfileHandoff && irChReq.Partition == drctypes.ControlPartition {
+		return nil, nil, nil, drctypes.ErrControlPartition
+	}
+	// Certify input, everything needs to be verified again as if received from partition node, since we cannot trust the leader is honest.
+	// This gets the shardInfo from committed round (for which there is UC), and irChReq should build on that.
+	si := x.state.ShardInfo(irChReq.Partition, irChReq.Shard)
+	if si == nil {
+		// There shouldn't be an IR change request for a shard with no committed state
+		return nil, nil, nil, fmt.Errorf("missing shard info for partition %d shard %s", irChReq.Partition, irChReq.Shard.String())
+	}
+	if si.LastCR == nil {
+		return nil, nil, nil, fmt.Errorf("shard %d %s has no certification response yet", irChReq.Partition, irChReq.Shard.String())
+	}
+	// verify request
+	luc := si.LastCR.UC
+	inputRecord, err := irChReq.Verify(si, &luc, rootRound, t2TimeoutToRootRounds(si.T2Timeout, x.params.BlockRate/2))
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("certification request verification failed: %w", err)
+	}
+	return inputRecord, &luc, si, nil
+}
+
+// check - should never happen, somehow the root node round must have been reset
+func checkRound(rootRound uint64, luc *types.UnicityCertificate) error {
+	if rootRound < luc.UnicitySeal.RootChainRoundNumber {
+		return fmt.Errorf("current round %v is in the past, LUC round %v", rootRound, luc.UnicitySeal.RootChainRoundNumber)
+	}
+	return nil
 }
 
 func NewLucBasedT2TimeoutGenerator(c *Parameters, sMonitor State) (*PartitionTimeoutGenerator, error) {
@@ -166,7 +215,9 @@ func NewLucBasedT2TimeoutGenerator(c *Parameters, sMonitor State) (*PartitionTim
 	}, nil
 }
 
-func (x *PartitionTimeoutGenerator) GetT2Timeouts(currentRound uint64, skip ...storage.ShardSet) ([]*types.UnicityCertificate, error) {
+// GetT2Timeouts returns the shards which have timed out for the block of the "currentRound" which
+// extends the block of the "parentRound".
+func (x *PartitionTimeoutGenerator) GetT2Timeouts(currentRound, parentRound uint64, skip ...storage.ShardSet) ([]*types.UnicityCertificate, error) {
 	// Only activated shards with an UC can time out. New shards are activated by adding their ShardInfo and
 	// an empty IR to the ExecutedBlock in the activation root round. Once the block gets committed, they
 	// get their first UC and can start timing out.
@@ -182,7 +233,7 @@ func (x *PartitionTimeoutGenerator) GetT2Timeouts(currentRound uint64, skip ...s
 			continue
 		}
 		// do not create T2 timeout requests if shard has a change already in pipeline
-		if x.state.IsChangeInProgress(uc.GetPartitionID(), uc.GetShardID()) != nil {
+		if x.state.IsChangeInProgress(parentRound, uc.GetPartitionID(), uc.GetShardID()) != nil {
 			continue
 		}
 
@@ -205,7 +256,7 @@ func t2TimeoutToRootRounds(t2Timeout time.Duration, blockRate time.Duration) uin
 // target round before the previous UC's round is refused before the subtraction. Time is elapsed root rounds only: weights and
 // the assignment never enter. A shard whose view cannot be resolved is reported in the returned error and never timed out
 // from other state; the rest are still returned.
-func (x *PartitionTimeoutGenerator) GetT2TimeoutsView(currentRound uint64, res ViewResolver, skip ...storage.ShardSet) ([]*types.UnicityCertificate, error) {
+func (x *PartitionTimeoutGenerator) GetT2TimeoutsView(currentRound, parentRound uint64, res ViewResolver, skip ...storage.ShardSet) ([]*types.UnicityCertificate, error) {
 	var errs []error
 	ucs := x.state.GetCertificates()
 	timedOutShards := make([]*types.UnicityCertificate, 0, len(ucs))
@@ -220,7 +271,7 @@ func (x *PartitionTimeoutGenerator) GetT2TimeoutsView(currentRound uint64, res V
 		if skipped(skip, pID, sID) { // switching in the proposed block: no timeout, and no view of it is ever asked for
 			continue
 		}
-		if x.state.IsChangeInProgress(pID, sID) != nil {
+		if x.state.IsChangeInProgress(parentRound, pID, sID) != nil {
 			continue
 		}
 		view, err := res.ResolveView(pID, sID, currentRound, storage.PurposeTimeout)

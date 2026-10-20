@@ -38,7 +38,7 @@ func Test_Subscriptions(t *testing.T) {
 	nodeIdB := generateNodeID(t)
 
 	t.Run("subscribe", func(t *testing.T) {
-		sender := func(ctx context.Context, msg any, receivers ...peer.ID) error {
+		sender := func(ctx context.Context, msg *certification.CertificationResponse, receivers ...peer.ID) error {
 			t.Error("unexpected send call", msg, receivers)
 			return nil
 		}
@@ -73,7 +73,7 @@ func Test_Subscriptions(t *testing.T) {
 	})
 
 	t.Run("send, not subscribed", func(t *testing.T) {
-		sender := func(ctx context.Context, msg any, receivers ...peer.ID) error {
+		sender := func(ctx context.Context, msg *certification.CertificationResponse, receivers ...peer.ID) error {
 			t.Error("unexpected send call", msg, receivers)
 			return nil
 		}
@@ -115,7 +115,7 @@ func Test_Subscriptions(t *testing.T) {
 
 	t.Run("send, one receiver", func(t *testing.T) {
 		done := make(chan struct{})
-		sender := func(ctx context.Context, msg any, receivers ...peer.ID) error {
+		sender := func(ctx context.Context, msg *certification.CertificationResponse, receivers ...peer.ID) error {
 			defer close(done)
 			if assert.Len(t, receivers, 1) {
 				assert.Equal(t, nodeIdA, receivers[0])
@@ -141,7 +141,7 @@ func Test_Subscriptions(t *testing.T) {
 
 	t.Run("send, two receivers", func(t *testing.T) {
 		done := make(chan struct{})
-		sender := func(ctx context.Context, msg any, receivers ...peer.ID) error {
+		sender := func(ctx context.Context, msg *certification.CertificationResponse, receivers ...peer.ID) error {
 			defer close(done)
 			if assert.Len(t, receivers, 2) {
 				assert.ElementsMatch(t, []peer.ID{nodeIdA, nodeIdB}, receivers)
@@ -171,7 +171,7 @@ func Test_Subscriptions(t *testing.T) {
 		// calls it's counter should be zero and next call will remove it from registry
 		var sendCalls, receiverCnt atomic.Int32
 		done := make(chan struct{})
-		sender := func(ctx context.Context, msg any, receivers ...peer.ID) error {
+		sender := func(ctx context.Context, msg *certification.CertificationResponse, receivers ...peer.ID) error {
 			// Count BEFORE signalling. Both branches below hand control back to the test — the
 			// unbuffered send blocks until it is received, and the close releases it — so a
 			// receiverCnt.Add placed after them races the assertion that reads it. CI caught
@@ -261,7 +261,7 @@ func Test_Subscriptions_Wait(t *testing.T) {
 
 	release := make(chan struct{})
 	var senderDone atomic.Bool
-	sender := func(ctx context.Context, msg any, receivers ...peer.ID) error {
+	sender := func(ctx context.Context, msg *certification.CertificationResponse, receivers ...peer.ID) error {
 		<-release
 		senderDone.Store(true)
 		return nil
@@ -323,7 +323,7 @@ func Test_Subscriptions_QuotaStarvesANonSubmittingNode(t *testing.T) {
 	// Send delivers on its own goroutine, so the counter is shared across goroutines and the race
 	// detector is right to object to sent++.
 	var sent atomic.Int64
-	subs, err := NewSubscriptions(func(context.Context, any, ...peer.ID) error { sent.Add(1); return nil }, observability.Default(t))
+	subs, err := NewSubscriptions(func(context.Context, *certification.CertificationResponse, ...peer.ID) error { sent.Add(1); return nil }, observability.Default(t))
 	require.NoError(t, err)
 	require.NoError(t, subs.Subscribe(partition, shard, node.String()))
 

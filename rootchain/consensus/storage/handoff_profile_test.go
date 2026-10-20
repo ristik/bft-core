@@ -17,6 +17,7 @@ import (
 	"github.com/unicitynetwork/bft-core/internal/testutils/logger"
 	testtrustbase "github.com/unicitynetwork/bft-core/internal/testutils/trustbase"
 	"github.com/unicitynetwork/bft-core/network/protocol/abdrc"
+	"github.com/unicitynetwork/bft-core/network/protocol/certification"
 	rctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
 	abcrypto "github.com/unicitynetwork/bft-go-base/crypto"
 	"github.com/unicitynetwork/bft-go-base/types"
@@ -70,6 +71,13 @@ func installTestFrozenShard(t *testing.T, s *BlockStore, parent []byte) {
 	s.orchestration = mockOrchestration{shardConfigs: func(uint64) (map[types.PartitionShardID]*types.PartitionDescriptionRecord, error) {
 		return map[types.PartitionShardID]*types.PartitionDescriptionRecord{shard: conf}, nil
 	}}
+	// a committed shard has the last response of its committed state
+	trHash, err := si.TR.Hash()
+	require.NoError(t, err)
+	si.LastCR = &certification.CertificationResponse{Partition: conf.PartitionID, Shard: conf.ShardID, Technical: si.TR,
+		UC: types.UnicityCertificate{Version: 1, InputRecord: si.IR, TRHash: trHash, ShardConfHash: si.ShardConfHash,
+			UnicityTreeCertificate: &types.UnicityTreeCertificate{Version: 1, Partition: conf.PartitionID},
+			ShardTreeCertificate:   types.ShardTreeCertificate{Shard: conf.ShardID}, UnicitySeal: &types.UnicitySeal{Version: 1}}}
 	root := s.blockTree.Root()
 	root.ShardState.States[shard] = si
 	tree, _, err := root.ShardState.UnicityTree(crypto.SHA256)
@@ -357,7 +365,7 @@ func TestHandoffControlLeafAndSuffix(t *testing.T) {
 	recoveryDB, err := NewBoltStorage(filepath.Join(t.TempDir(), "recovery.db"), WithNoSync())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = recoveryDB.Close() })
-	recovery, err := NewFromState(crypto.SHA256, checkpoint, recoveryDB, s.orchestration, logger.New(t), ProfileHandoff)
+	recovery, err := NewFromState(crypto.SHA256, consistentHead(t, checkpoint, s.orchestration, ProfileHandoff), recoveryDB, s.orchestration, logger.New(t), ProfileHandoff)
 	require.NoError(t, err)
 	_, err = recovery.Add(&rctypes.BlockData{Version: 3, Round: 6, Epoch: 1, Payload: &rctypes.Payload{Version: 3, HandoffRecords: [][]byte{record("abort", 6, 8, frozen, body, zero)}},
 		Qc: &rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{RoundNumber: 5, Epoch: 1}}}, nil)
@@ -719,7 +727,8 @@ func TestCommittedAbortReplayRetainsPhaseAndResumesEVMRequests(t *testing.T) {
 		CommitQc: &rctypes.QuorumCert{LedgerCommitInfo: &types.UnicitySeal{Hash: bytes.Clone(aborted.RootHash)}}}
 	checkpoint.ShardInfo, err = toRecoveryShardInfo(aborted)
 	require.NoError(t, err)
-	restarted, err := NewFromState(crypto.SHA256, checkpoint, s.GetDB(), s.orchestration, logger.New(t), ProfileHandoff)
+	// the head is built from an uncommitted block (its input record is past the last response): a checkpoint, authenticated by its own verification
+	restarted, err := NewFromCheckpoint(crypto.SHA256, checkpoint, s.GetDB(), s.orchestration, logger.New(t), ProfileHandoff)
 	require.NoError(t, err, "recovery after durable Abort retains the authenticated phase")
 	root := restarted.blockTree.Root()
 	require.Equal(t, "aborted", root.ShardState.Control.Phase)
@@ -762,7 +771,7 @@ func TestCommittedHandoffSuffixClearsPendingChanges(t *testing.T) {
 	var err error
 	checkpoint.ShardInfo, err = toRecoveryShardInfo(h)
 	require.NoError(t, err)
-	recovered, err := NewFromState(crypto.SHA256, checkpoint, s.GetDB(), s.orchestration, logger.New(t), ProfileHandoff)
+	recovered, err := NewFromState(crypto.SHA256, consistentHead(t, checkpoint, s.orchestration, ProfileHandoff), s.GetDB(), s.orchestration, logger.New(t), ProfileHandoff)
 	require.NoError(t, err)
 	suffix := addProfileBlock(t, recovered, 5, nil)
 	marker := types.PartitionShardID{PartitionID: 99}
@@ -997,7 +1006,7 @@ func TestProfileHandoffRejectsEpochJumpOnEveryBlockPath(t *testing.T) {
 	recoveryDB, err := NewBoltStorage(filepath.Join(t.TempDir(), "recovery.db"), WithNoSync())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = recoveryDB.Close() })
-	recovery, err := NewFromState(crypto.SHA256, checkpoint, recoveryDB, s.orchestration, logger.New(t), ProfileHandoff)
+	recovery, err := NewFromState(crypto.SHA256, consistentHead(t, checkpoint, s.orchestration, ProfileHandoff), recoveryDB, s.orchestration, logger.New(t), ProfileHandoff)
 	require.NoError(t, err)
 	_, err = recovery.Add(jump, nil)
 	require.EqualError(t, err, ErrNetworkProfile.Error())

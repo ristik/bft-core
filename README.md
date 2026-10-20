@@ -22,6 +22,11 @@ Run `make build` to build the application. Executable will be built to `build/ub
 | `make clean-ffi` | Clean all Rust FFI build artifacts |
 | `make check-rust` | Verify Rust toolchain is available |
 
+# Upgrading
+
+The release with the strict signature rule assumes a stop-all upgrade of every process (the conservative baseline; there is no activation gate). A gentler procedure
+(root validator cutover first, then rolling aggregators) is described in
+[docs/upgrade.md](docs/upgrade.md#strict-signature-rule-bft-go-base-uc-consolidation).
 
 # Configuration
 

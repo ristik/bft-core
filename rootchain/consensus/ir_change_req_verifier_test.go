@@ -61,7 +61,7 @@ func TestHandoffProfileSkipsControlPartitionTimeout(t *testing.T) {
 	}}
 	generator, err := NewLucBasedT2TimeoutGenerator(&Parameters{NetworkProfileVersion: storage.ProfileHandoff, BlockRate: time.Second}, state)
 	require.NoError(t, err)
-	timedOut, err := generator.GetT2Timeouts(100)
+	timedOut, err := generator.GetT2Timeouts(100, 0)
 	require.NoError(t, err)
 	require.Empty(t, timedOut)
 }
@@ -73,7 +73,7 @@ func TestProfile2VerifierRefusesControlPartition(t *testing.T) {
 			return nil
 		},
 	}}
-	_, err := verifier.VerifyIRChangeReq(3, &abtypes.IRChangeReq{Partition: abtypes.ControlPartition})
+	_, err := verifier.VerifyIRChangeReq(3, 2, &abtypes.IRChangeReq{Partition: abtypes.ControlPartition})
 	require.ErrorIs(t, err, abtypes.ErrControlPartition)
 }
 
@@ -81,7 +81,7 @@ func (s *MockState) ShardInfo(partition types.PartitionID, shard types.ShardID) 
 	return s.shardInfo(partition, shard)
 }
 
-func (s *MockState) IsChangeInProgress(id types.PartitionID, _ types.ShardID) *types.InputRecord {
+func (s *MockState) IsChangeInProgress(_ uint64, id types.PartitionID, _ types.ShardID) *types.InputRecord {
 	for _, sysId := range s.inProgress {
 		if sysId == id {
 			return s.irInProgress
@@ -143,9 +143,27 @@ func TestIRChangeReqVerifier_VerifyIRChangeReq(t *testing.T) {
 			params: &Parameters{BlockRate: 500 * time.Millisecond},
 			state:  stateProvider([]types.PartitionID{partitionID1}, nil),
 		}
-		data, err := ver.VerifyIRChangeReq(2, nil)
+		data, err := ver.VerifyIRChangeReq(2, 1, nil)
 		require.Nil(t, data)
 		require.EqualError(t, err, "IR change request is nil")
+	})
+
+	// a shard recovered from a state message without UC/TR (or not certified yet) has no LastCR
+	t.Run("shard without certification response yet", func(t *testing.T) {
+		st := stateProvider(nil, nil)
+		realShardInfo := st.shardInfo
+		st.shardInfo = func(partitionID types.PartitionID, shard types.ShardID) *storage.ShardInfo {
+			si := realShardInfo(partitionID, shard)
+			si.LastCR = nil
+			return si
+		}
+		ver := &IRChangeReqVerifier{params: &Parameters{BlockRate: 500 * time.Millisecond}, state: st}
+		req := &abtypes.IRChangeReq{Partition: partitionID1, CertReason: abtypes.T2Timeout}
+		require.NotPanics(t, func() {
+			data, err := ver.VerifyIRChangeReq(2, 1, req)
+			require.Nil(t, data)
+			require.ErrorContains(t, err, "no certification response yet")
+		})
 	})
 
 	t.Run("error change in progress", func(t *testing.T) {
@@ -174,7 +192,7 @@ func TestIRChangeReqVerifier_VerifyIRChangeReq(t *testing.T) {
 			CertReason: abtypes.Quorum,
 			Requests:   []*certification.BlockCertificationRequest{request},
 		}
-		data, err := ver.VerifyIRChangeReq(2, irChReq)
+		data, err := ver.VerifyIRChangeReq(2, 1, irChReq)
 		require.Nil(t, data)
 		require.EqualError(t, err, "shard 00000001- has pending changes in pipeline")
 	})
@@ -205,7 +223,7 @@ func TestIRChangeReqVerifier_VerifyIRChangeReq(t *testing.T) {
 			CertReason: abtypes.Quorum,
 			Requests:   []*certification.BlockCertificationRequest{request},
 		}
-		data, err := ver.VerifyIRChangeReq(2, irChReq)
+		data, err := ver.VerifyIRChangeReq(2, 1, irChReq)
 		require.Nil(t, data)
 		require.EqualError(t, err, "missing shard info for partition 2 shard ")
 	})
@@ -236,9 +254,13 @@ func TestIRChangeReqVerifier_VerifyIRChangeReq(t *testing.T) {
 			CertReason: abtypes.Quorum,
 			Requests:   []*certification.BlockCertificationRequest{request},
 		}
-		data, err := ver.VerifyIRChangeReq(1, irChReq)
+		data, err := ver.VerifyIRChangeReq(1, 0, irChReq)
 		require.Nil(t, data)
 		require.ErrorIs(t, err, ErrDuplicateChangeReq)
+		// pending changes are not checked when only the request is verified
+		data, err = ver.VerifyRequest(2, irChReq)
+		require.NoError(t, err)
+		require.Equal(t, newIR, data)
 	})
 
 	t.Run("invalid root round, luc round is bigger", func(t *testing.T) {
@@ -267,7 +289,7 @@ func TestIRChangeReqVerifier_VerifyIRChangeReq(t *testing.T) {
 			CertReason: abtypes.Quorum,
 			Requests:   []*certification.BlockCertificationRequest{request},
 		}
-		data, err := ver.VerifyIRChangeReq(1, irChReq)
+		data, err := ver.VerifyIRChangeReq(1, 0, irChReq)
 		require.Nil(t, data)
 		require.EqualError(t, err, "current round 1 is in the past, LUC round 2")
 	})
@@ -298,7 +320,7 @@ func TestIRChangeReqVerifier_VerifyIRChangeReq(t *testing.T) {
 			CertReason: abtypes.Quorum,
 			Requests:   []*certification.BlockCertificationRequest{request},
 		}
-		ir, err := ver.VerifyIRChangeReq(2, irChReq)
+		ir, err := ver.VerifyIRChangeReq(2, 1, irChReq)
 		require.NoError(t, err)
 		require.Equal(t, newIR, ir)
 	})
@@ -366,18 +388,18 @@ func TestPartitionTimeoutGenerator_GetT2Timeouts(t *testing.T) {
 	}
 
 	// last certified round is 1 then 11 - 1 = 10 we have not heard from partition in 10 rounds ~ at minimum 2500 ms not yet timeout
-	tmos, err := tmoGen.GetT2Timeouts(11)
+	tmos, err := tmoGen.GetT2Timeouts(11, 10)
 	require.NoError(t, err)
 	require.Empty(t, tmos)
 	// last certified round is 1 then 12 - 1 = 11 we have not heard from partition in 12 rounds ~ at minimum 2750 ms not yet timeout
-	tmos, err = tmoGen.GetT2Timeouts(12)
+	tmos, err = tmoGen.GetT2Timeouts(12, 11)
 	require.NoError(t, err)
 	require.Len(t, tmos, 1)
 	require.EqualValues(t, tmos[0].GetPartitionID(), partitionID1)
 	// mock sysID1 has pending change in pipeline - no timeout will be generated
 	state.inProgress = append(state.inProgress, partitionID1)
 	state.irInProgress = irSysID1
-	tmos, err = tmoGen.GetT2Timeouts(12)
+	tmos, err = tmoGen.GetT2Timeouts(12, 11)
 	require.NoError(t, err)
 	require.Empty(t, tmos)
 }
@@ -405,11 +427,11 @@ func TestPartitionTimeoutGenerator_IndependentShardT2(t *testing.T) {
 	generator := &PartitionTimeoutGenerator{blockRate: time.Second, state: state}
 	// Root rounds are spaced at blockRate/2. At round 5 only the one second
 	// shard has reached its own T2; the five second shard remains live.
-	timedOut, err := generator.GetT2Timeouts(5)
+	timedOut, err := generator.GetT2Timeouts(5, 0)
 	require.NoError(t, err)
 	require.Len(t, timedOut, 1)
 	require.Equal(t, shortID, timedOut[0].GetPartitionID())
-	timedOut, err = generator.GetT2Timeouts(13)
+	timedOut, err = generator.GetT2Timeouts(13, 0)
 	require.NoError(t, err)
 	require.Len(t, timedOut, 2)
 	require.Equal(t, shortID, timedOut[0].GetPartitionID())

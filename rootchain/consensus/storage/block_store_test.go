@@ -14,10 +14,10 @@ import (
 	"github.com/unicitynetwork/bft-go-base/types"
 
 	"github.com/unicitynetwork/bft-core/evmroot"
-	"github.com/unicitynetwork/bft-core/network/protocol/abdrc"
 	"github.com/unicitynetwork/bft-core/rootrecords"
 
 	"github.com/unicitynetwork/bft-core/internal/testutils/logger"
+	"github.com/unicitynetwork/bft-core/network/protocol/abdrc"
 	rctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
 	"github.com/unicitynetwork/bft-core/rootchain/partitions"
 	testpartition "github.com/unicitynetwork/bft-core/rootchain/partitions/testutils"
@@ -94,6 +94,232 @@ func TestHandleTcError(t *testing.T) {
 	}
 	// For now ignore if we do not have a block that timeouts
 	require.NoError(t, bStore.ProcessTc(tc))
+}
+
+/*
+Round can get both TC and QC - validators vote for the proposal and then time out, the QC
+can be formed of the votes sent before the timeout. The block of the round must be still
+usable after the TC has been processed.
+*/
+func Test_BlockStore_lateQcAfterTc(t *testing.T) {
+	irVer := mockIRVerifier{verify: func(uint64, *rctypes.IRChangeReq) (*types.InputRecord, error) {
+		return nil, errors.New("no IR changes in this test")
+	}}
+	tc3 := &rctypes.TimeoutCert{Timeout: &rctypes.Timeout{Round: 3}}
+	// creates chain B1--> B2--> B3 where round 3 has got TC, returns the store, QC
+	// for the round 2 (current high QC) and (unprocessed) QC for the round 3
+	setup := func(t *testing.T) (bs *BlockStore, qc2, qc3 *rctypes.QuorumCert) {
+		bs = initBlockStoreFromGenesis(t, nil)
+		rh2, err := bs.Add(&rctypes.BlockData{Round: 2, Payload: &rctypes.Payload{}, Qc: bs.GetHighQc()}, irVer)
+		require.NoError(t, err)
+		qc2 = qcFor(2, 1, rh2, 0)
+		_, err = bs.ProcessQc(qc2)
+		require.NoError(t, err)
+		rh3, err := bs.Add(&rctypes.BlockData{Round: 3, Payload: &rctypes.Payload{}, Qc: qc2}, irVer)
+		require.NoError(t, err)
+
+		require.NoError(t, bs.ProcessTc(tc3))
+		// the block stays in the tree and in the DB
+		b, err := bs.Block(3)
+		require.NoError(t, err)
+		require.EqualValues(t, 3, b.GetRound())
+		require.Len(t, bs.blockTree.allUncommittedNodes(), 2)
+		require.Equal(t, []uint64{3, 2, 1}, persistedRounds(t, bs.GetDB()))
+		require.Equal(t, qc2, bs.GetHighQc())
+		return bs, qc2, qcFor(3, 2, rh3, 0)
+	}
+	// loads new store from the DB of the bs
+	reload := func(t *testing.T, bs *BlockStore) *BlockStore {
+		bs, err := New(crypto.SHA256, bs.GetDB(), bs.orchestration, bs.log)
+		require.NoError(t, err)
+		return bs
+	}
+
+	t.Run("late QC is processed and proposal extending it is accepted", func(t *testing.T) {
+		bs, _, qc3 := setup(t)
+		_, err := bs.ProcessQc(qc3)
+		require.NoError(t, err)
+		require.Equal(t, qc3, bs.GetHighQc())
+
+		_, err = bs.Add(&rctypes.BlockData{Round: 4, Payload: &rctypes.Payload{}, Qc: qc3}, irVer)
+		require.NoError(t, err)
+		require.Equal(t, []uint64{4, 3, 2, 1}, persistedRounds(t, bs.GetDB()))
+		// state sent to recovering nodes contains the block
+		state, err := bs.GetState()
+		require.NoError(t, err)
+		require.Len(t, state.Pending, 3)
+	})
+
+	t.Run("proposal extending the late QC is accepted", func(t *testing.T) {
+		// the QC itself is not processed, ie it is considered to be stale
+		bs, _, qc3 := setup(t)
+		_, err := bs.Add(&rctypes.BlockData{Round: 4, Payload: &rctypes.Payload{}, Qc: qc3}, irVer)
+		require.NoError(t, err)
+		require.Len(t, bs.blockTree.allUncommittedNodes(), 3)
+	})
+
+	t.Run("repeated TC is harmless", func(t *testing.T) {
+		bs, _, qc3 := setup(t)
+		require.NoError(t, bs.ProcessTc(tc3))
+		_, err := bs.ProcessQc(qc3)
+		require.NoError(t, err)
+		// TC after the QC
+		require.NoError(t, bs.ProcessTc(tc3))
+		require.Equal(t, qc3, bs.GetHighQc())
+		_, err = bs.Add(&rctypes.BlockData{Round: 4, Payload: &rctypes.Payload{}, Qc: qc3}, irVer)
+		require.NoError(t, err)
+	})
+
+	t.Run("TC for a round the node has no block for", func(t *testing.T) {
+		bs, _, _ := setup(t)
+		require.NoError(t, bs.ProcessTc(&rctypes.TimeoutCert{Timeout: &rctypes.Timeout{Round: 4}}))
+		require.Len(t, bs.blockTree.allUncommittedNodes(), 2)
+	})
+
+	t.Run("late QC after restart", func(t *testing.T) {
+		bs, _, qc3 := setup(t)
+		bs = reload(t, bs)
+		_, err := bs.ProcessQc(qc3)
+		require.NoError(t, err)
+		_, err = bs.Add(&rctypes.BlockData{Round: 4, Payload: &rctypes.Payload{}, Qc: qc3}, irVer)
+		require.NoError(t, err)
+	})
+
+	t.Run("restart after a late QC which doesn't commit", func(t *testing.T) {
+		// B2--> B3
+		//  ╰--> B4 (TC(4), late QC(4) commits nothing as B4 doesn't extend QC(3)), round 5 times out too
+		bs, qc2, _ := setup(t)
+		rh4, err := bs.Add(&rctypes.BlockData{Round: 4, Payload: &rctypes.Payload{}, Qc: qc2}, irVer)
+		require.NoError(t, err)
+		require.NoError(t, bs.ProcessTc(&rctypes.TimeoutCert{Timeout: &rctypes.Timeout{Round: 4, HighQc: qc2}}))
+		qc4 := qcFor(4, 2, rh4, 0)
+		_, err = bs.ProcessQc(qc4)
+		require.NoError(t, err)
+		require.NoError(t, bs.ProcessTc(&rctypes.TimeoutCert{Timeout: &rctypes.Timeout{Round: 5, HighQc: qc4}}))
+		// QC(4) is not the commit QC of any block, it's restored from B4 itself; otherwise the next
+		// proposal would extend QC(2) and fail the safety check against TC(5)
+		bs = reload(t, bs)
+		require.EqualValues(t, 4, bs.GetHighQc().GetRound())
+		_, err = bs.Add(&rctypes.BlockData{Round: 6, Payload: &rctypes.Payload{}, Qc: bs.GetHighQc()}, irVer)
+		require.NoError(t, err)
+	})
+
+	t.Run("restart between storing a commit QC and the commit", func(t *testing.T) {
+		// QC(3) commits B2 (B3 extends QC(2)); the node stops after InsertQc has stored the QC with B3
+		// but before Commit has stored the new root
+		bs, _, qc3 := setup(t)
+		commitQc3 := qcFor(3, 2, qc3.VoteInfo.CurrentRootHash, 2)
+		require.NoError(t, bs.blockTree.InsertQc(commitQc3))
+		bs = reload(t, bs)
+		require.EqualValues(t, 1, bs.blockTree.Root().GetRound())
+		// the QC is processed again and the commit is done
+		_, err := bs.ProcessQc(commitQc3)
+		require.NoError(t, err)
+		require.EqualValues(t, 2, bs.blockTree.Root().GetRound())
+		require.EqualValues(t, 3, bs.GetHighQc().GetRound())
+	})
+
+	t.Run("chain continues from the previous round", func(t *testing.T) {
+		bs, qc2, qc3 := setup(t)
+		// B2--> B3
+		//  ╰--> B4--> B5
+		rh4, err := bs.Add(&rctypes.BlockData{Round: 4, Payload: &rctypes.Payload{}, Qc: qc2}, irVer)
+		require.NoError(t, err)
+		// node can be restarted while there are multiple branches
+		bs = reload(t, bs)
+		require.Len(t, bs.blockTree.allUncommittedNodes(), 3)
+		qc4 := qcFor(4, 2, rh4, 0)
+		_, err = bs.ProcessQc(qc4)
+		require.NoError(t, err)
+		_, err = bs.Add(&rctypes.BlockData{Round: 5, Payload: &rctypes.Payload{}, Qc: qc4}, irVer)
+		require.NoError(t, err)
+		// block of the timeout round is still there...
+		_, err = bs.Block(3)
+		require.NoError(t, err)
+		state, err := bs.GetState()
+		require.NoError(t, err)
+		require.Len(t, state.Pending, 4)
+		// ...until QC for round 5 commits round 4
+		_, err = bs.ProcessQc(qcFor(5, 4, nil, 4))
+		require.NoError(t, err)
+		require.EqualValues(t, 4, bs.blockTree.Root().GetRound())
+		require.Equal(t, []uint64{5, 4}, persistedRounds(t, bs.GetDB()))
+
+		_, err = bs.Block(3)
+		require.EqualError(t, err, "block for round 3 not found")
+		_, err = bs.ProcessQc(qc3)
+		require.NoError(t, err, "stale QC is ignored")
+		_, err = bs.Add(&rctypes.BlockData{Round: 6, Payload: &rctypes.Payload{}, Qc: qc3}, irVer)
+		require.EqualError(t, err, "add block failed: parent round 3 not found, recover")
+	})
+}
+
+/*
+Only the changes in the branch the new block extends are in the way of a new change of the
+shard, at most one of the branches is committed.
+*/
+func Test_BlockStore_IsChangeInProgress(t *testing.T) {
+	shardConf := newShardConf(t)
+	partition, shard := shardConf.PartitionID, shardConf.ShardID
+	bs := initBlockStoreFromGenesis(t, shardConf)
+	ir := func(round uint64) *types.InputRecord {
+		return &types.InputRecord{Version: 1, RoundNumber: round, Hash: []byte{byte(round)}, BlockHash: []byte{1}, SummaryValue: []byte{2}}
+	}
+	// what IRChangeReqVerifier does: no new change while one is in progress in the branch the block extends
+	irVer := mockIRVerifier2(func(round, parentRound uint64, req *rctypes.IRChangeReq) (*types.InputRecord, error) {
+		if bs.IsChangeInProgress(parentRound, req.Partition, req.Shard) != nil {
+			return nil, errors.New("shard has pending changes in pipeline")
+		}
+		return ir(round), nil
+	})
+	change := &rctypes.Payload{Requests: []*rctypes.IRChangeReq{{Partition: partition, Shard: shard, CertReason: rctypes.T2Timeout}}}
+
+	// B1 (root)--> B2--> B3 (changes the shard, gets TC)
+	//               ╰--> B4 (changes the shard)--> B5
+	rh2, err := bs.Add(&rctypes.BlockData{Round: 2, Payload: &rctypes.Payload{}, Qc: bs.GetHighQc()}, irVer)
+	require.NoError(t, err)
+	qc2 := qcFor(2, 1, rh2, 0)
+	_, err = bs.ProcessQc(qc2)
+	require.NoError(t, err)
+	require.Nil(t, bs.IsChangeInProgress(2, partition, shard))
+
+	rh3, err := bs.Add(&rctypes.BlockData{Round: 3, Payload: change, Qc: qc2}, irVer)
+	require.NoError(t, err)
+	require.Equal(t, ir(3), bs.IsChangeInProgress(3, partition, shard))
+	require.Nil(t, bs.IsChangeInProgress(2, partition, shard))
+	require.NoError(t, bs.ProcessTc(&rctypes.TimeoutCert{Timeout: &rctypes.Timeout{Round: 3}}))
+	require.Equal(t, ir(3), bs.IsChangeInProgress(3, partition, shard))
+
+	// block extending the round 2 can change the shard again...
+	rh4, err := bs.Add(&rctypes.BlockData{Round: 4, Payload: change, Qc: qc2}, irVer)
+	require.NoError(t, err)
+	require.Equal(t, ir(4), bs.IsChangeInProgress(4, partition, shard))
+	require.Equal(t, ir(3), bs.IsChangeInProgress(3, partition, shard))
+	require.Nil(t, bs.IsChangeInProgress(2, partition, shard))
+	// ...but block extending the round 3 or 4 can't
+	_, err = bs.Add(&rctypes.BlockData{Round: 5, Payload: change, Qc: qcFor(3, 2, rh3, 0)}, irVer)
+	require.ErrorContains(t, err, "shard has pending changes in pipeline")
+	qc4 := qcFor(4, 2, rh4, 0)
+	_, err = bs.Add(&rctypes.BlockData{Round: 5, Payload: change, Qc: qc4}, irVer)
+	require.ErrorContains(t, err, "shard has pending changes in pipeline")
+
+	_, err = bs.ProcessQc(qc4)
+	require.NoError(t, err)
+	rh5, err := bs.Add(&rctypes.BlockData{Round: 5, Payload: &rctypes.Payload{}, Qc: qc4}, irVer)
+	require.NoError(t, err)
+	// change is in progress in all the blocks of the branch until it is committed
+	require.Equal(t, ir(4), bs.IsChangeInProgress(5, partition, shard))
+
+	// QC for round 5 commits round 4 - the change of round 4 is certified, the one of round 3 is dropped
+	qc5 := qcFor(5, 4, rh5, 4)
+	qc5.LedgerCommitInfo.Hash = rh4
+	crs, err := bs.ProcessQc(qc5)
+	require.NoError(t, err)
+	require.Len(t, crs, 1)
+	require.Equal(t, ir(4), crs[0].UC.InputRecord)
+	for round := uint64(2); round <= 6; round++ {
+		require.Nil(t, bs.IsChangeInProgress(round, partition, shard), "round %d", round)
+	}
 }
 
 func TestHandleQcError(t *testing.T) {
@@ -266,31 +492,18 @@ func Test_BlockStore_ShardInfo(t *testing.T) {
 }
 
 func Test_BlockStore_StateRoundtrip(t *testing.T) {
-	shardConf := newShardConf(t)
-	storeA := initBlockStoreFromGenesis(t, shardConf)
-	// the genesis block is created with the shard marked as "changed" - clear
-	// it as the state message does not carry that information
+	c := newTestChain(t, chainShard{partition: 1, epochStarts: []uint64{1}}, chainShard{partition: 2, epochStarts: []uint64{1}})
+	for _, changed := range [][]types.PartitionID{nil, nil, {1}, {1, 2}, {1}} {
+		c.next(changed...)
+	}
+	storeA := c.store
+	// the state message does not carry the "changed" marks
 	clear(storeA.blockTree.root.data.ShardState.Changed)
-
-	// modify Fees to see if they are restored correctly
-	si := storeA.ShardInfo(shardConf.PartitionID, shardConf.ShardID)
-	si.Fees[si.nodeIDs[0]] = 10
-	var err error
-	si.TR.FeeHash, err = si.feeHash(crypto.SHA256) // the technical record commits the accumulators (a recovered head is checked for it)
-	require.NoError(t, err)
-	ut, _, err := storeA.blockTree.root.data.ShardState.UnicityTree(crypto.SHA256)
-	require.NoError(t, err)
-	storeA.blockTree.root.data.RootHash = ut.RootHash()
-
-	state, err := storeA.GetState()
-	require.NoError(t, err)
+	state := c.state()
 	require.NotNil(t, state)
 
-	db, err := NewBoltStorage(filepath.Join(t.TempDir(), "blocks.db"))
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = db.Close() })
 	// state msg is used to init "shard info registry", the orchestration provides data which is not part of state msg
-	storeB, err := NewFromState(crypto.SHA256, state.CommittedHead, db, storeA.orchestration, logger.New(t))
+	storeB, _, err := c.recoverInto(received(t, state))
 	require.NoError(t, err)
 	require.NotNil(t, storeB)
 
@@ -298,26 +511,82 @@ func Test_BlockStore_StateRoundtrip(t *testing.T) {
 	require.Equal(t, storeA.blockTree.root.data.ShardState.States, storeB.blockTree.root.data.ShardState.States)
 	require.Equal(t, storeA.blockTree.root.data.ShardState.Changed, storeB.blockTree.root.data.ShardState.Changed)
 	require.Equal(t, storeA.blockTree.root.data.RootHash, storeB.blockTree.root.data.RootHash, "root hash")
-	require.Equal(t, storeA.blockTree.root.child, storeB.blockTree.root.child)
-	require.Len(t, storeB.blockTree.roundToNode, len(storeA.blockTree.roundToNode))
-	for k, v := range storeA.blockTree.roundToNode {
-		bNode, ok := storeB.blockTree.roundToNode[k]
-		require.True(t, ok)
-		require.ElementsMatch(t, v.child, bNode.child)
-	}
 	require.Equal(t, storeA.blockTree.highQc, storeB.blockTree.highQc)
+	for _, p := range []types.PartitionID{1, 2} {
+		siA, siB := storeA.ShardInfo(p, types.ShardID{}), storeB.ShardInfo(p, types.ShardID{})
+		require.NotNil(t, siA)
+		require.NotNil(t, siB)
+		require.NoError(t, siA.IsValid())
+		require.NoError(t, siB.IsValid())
+		require.Equal(t, siA, siB)
+	}
+}
 
-	siA := storeA.ShardInfo(shardConf.PartitionID, shardConf.ShardID)
+// A peer replays a real state message but drops UC and TR of a certified shard (both null): the recovering node refuses the head before it writes
+// anything (the binding of the recovered state), instead of keeping a shard without a last response whose next certification request of an honest
+// validator could only be answered with an error. (A shard info without a last response is still safe to ask: Test_ShardWithoutLastResponseIsSafe.)
+func Test_BlockStore_RecoveredShardWithoutCertificateIsRefused(t *testing.T) {
+	node := testutils.NewTestNode(t)
+	shardConf := newShardConf(t)
+	shardConf.Validators = []*types.NodeInfo{node.NodeInfo(t)}
+	storeA := initBlockStoreFromGenesis(t, shardConf)
+	clear(storeA.blockTree.root.data.ShardState.Changed)
+	state, err := storeA.GetState()
 	require.NoError(t, err)
-	require.NotNil(t, siA)
-	require.NoError(t, siA.IsValid())
+	raw, err := types.Cbor.Marshal(state)
+	require.NoError(t, err)
+	var received abdrc.StateMsg
+	require.NoError(t, types.Cbor.Unmarshal(raw, &received))
+	for i := range received.CommittedHead.ShardInfo {
+		received.CommittedHead.ShardInfo[i].UC = nil
+		received.CommittedHead.ShardInfo[i].TR = nil
+	}
+	db, err := NewBoltStorage(filepath.Join(t.TempDir(), "blocks.db"))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	consistentGenesisRoot(t, storeA, &received)
+	require.NoError(t, db.WriteBlock(storeA.blockTree.root.data, true))
+	_, err = NewFromState(crypto.SHA256, received.CommittedHead, db, storeA.orchestration, logger.New(t))
+	require.ErrorIs(t, err, ErrRefusedBeforeWrite)
+	require.ErrorContains(t, err, "last response")
+}
 
+// The recovered state of a shard without UC/TR and with an IRTR epoch which differs from the IR epoch makes the
+// next block switch the shard into its next epoch; the error of that path used to be formatted from the (nil)
+// LastCR and panicked.
+func Test_BlockStore_RecoveredShardWithoutCertificateAndInconsistentEpoch(t *testing.T) {
+	shardConf := newShardConf(t)
+	storeA := initBlockStoreFromGenesis(t, shardConf)
+	clear(storeA.blockTree.root.data.ShardState.Changed)
+	state, err := storeA.GetState()
+	require.NoError(t, err)
+	raw, err := types.Cbor.Marshal(state)
+	require.NoError(t, err)
+	var received abdrc.StateMsg
+	require.NoError(t, types.Cbor.Unmarshal(raw, &received))
+	for i := range received.CommittedHead.ShardInfo {
+		received.CommittedHead.ShardInfo[i].UC = nil
+		received.CommittedHead.ShardInfo[i].TR = nil
+		received.CommittedHead.ShardInfo[i].IRTR.Epoch = received.CommittedHead.ShardInfo[i].IR.Epoch + 7
+	}
+
+	db, err := NewBoltStorage(filepath.Join(t.TempDir(), "blocks.db"))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	storeB, err := NewFromState(crypto.SHA256, received.CommittedHead, db, storeA.orchestration, logger.New(t))
+	if err != nil {
+		return // rejected at recovery: nothing to execute (the binding of the recovered state)
+	}
 	siB := storeB.ShardInfo(shardConf.PartitionID, shardConf.ShardID)
-	require.NoError(t, err)
 	require.NotNil(t, siB)
-	require.NoError(t, siB.IsValid())
-
-	require.Equal(t, siA, siB)
+	require.Nil(t, siB.LastCR)
+	confs, err := storeB.orchestration.ShardConfigs(3)
+	require.NoError(t, err)
+	require.NotPanics(t, func() {
+		_, err := storeB.blockTree.root.data.ShardState.nextBlock(confs, crypto.SHA256)
+		require.Error(t, err)
+		require.ErrorContains(t, err, fmt.Sprintf("creating ShardInfo %s - %s of the next epoch", siB.PartitionID, siB.ShardID))
+	})
 }
 
 func Test_BlockStore_persistence(t *testing.T) {
@@ -421,6 +690,25 @@ func genesisBlockWithShard(t *testing.T, shardConf *types.PartitionDescriptionRe
 	return eb
 }
 
+// qcFor returns QC for the "round", when commitRound != 0 the QC commits the (parent) round
+func qcFor(round, parent uint64, rootHash []byte, commitRound uint64) *rctypes.QuorumCert {
+	return &rctypes.QuorumCert{
+		VoteInfo:         &rctypes.RoundInfo{RoundNumber: round, ParentRoundNumber: parent, CurrentRootHash: rootHash},
+		LedgerCommitInfo: &types.UnicitySeal{Version: 1, RootChainRoundNumber: commitRound},
+	}
+}
+
+// persistedRounds returns the rounds of the blocks in the DB (in descending order)
+func persistedRounds(t *testing.T, db PersistentStore) (rounds []uint64) {
+	t.Helper()
+	blocks, err := db.LoadBlocks()
+	require.NoError(t, err)
+	for _, b := range blocks {
+		rounds = append(rounds, b.GetRound())
+	}
+	return rounds
+}
+
 type mockPersistentStore struct {
 	loadBlocks func() ([]*ExecutedBlock, error)
 	writeBlock func(block *ExecutedBlock, root bool) error
@@ -446,7 +734,7 @@ func (mps mockPersistentStore) WriteVote(vote any) error {
 	return mps.writeVote(vote)
 }
 
-func (mps mockPersistentStore) WriteTC(tc *rctypes.TimeoutCert, _ bool) error {
+func (mps mockPersistentStore) WriteTC(tc *rctypes.TimeoutCert) error {
 	return mps.writeTC(tc)
 }
 
@@ -489,7 +777,7 @@ func TestBlockStore_LateQcAfterTc(t *testing.T) {
 		rh2 := add(t, bs, 2, bs.GetHighQc())
 		rh3 := add(t, bs, 3, qcFor(2, 1, rh2, nil))
 		require.NoError(t, bs.ProcessTc(tcFor(3)))
-		require.NotContains(t, roundsOf(bs.blockTree.GetAllUncommittedNodes()), uint64(3), "the timed-out block is off the tree")
+		require.Contains(t, roundsOf(bs.blockTree.allUncommittedNodes()), uint64(3), "the timed-out block stays in the tree: its round can still get a QC")
 		return bs, rh2, rh3
 	}
 
@@ -505,7 +793,7 @@ func TestBlockStore_LateQcAfterTc(t *testing.T) {
 		// the next leader extends the late QC
 		_, err = bs.Add(&rctypes.BlockData{Round: 4, Payload: &rctypes.Payload{}, Qc: qc3}, irVer)
 		require.NoError(t, err)
-		require.Contains(t, roundsOf(bs.blockTree.GetAllUncommittedNodes()), uint64(3))
+		require.Contains(t, roundsOf(bs.blockTree.allUncommittedNodes()), uint64(3))
 	})
 
 	t.Run("a repeated TC is harmless", func(t *testing.T) {
@@ -525,7 +813,6 @@ func TestBlockStore_LateQcAfterTc(t *testing.T) {
 		_, err = bs.ProcessQc(qcFor(5, 4, nil, b4))
 		require.NoError(t, err)
 		require.EqualValues(t, 4, bs.blockTree.Root().GetRound())
-		require.Empty(t, bs.blockTree.timedOut)
 		_, err = bs.Block(3)
 		require.ErrorContains(t, err, "block for round 3 not found")
 	})
@@ -572,17 +859,14 @@ func Test_BlockStore_StateRecoveryCompletesTheCommittedSourceLog(t *testing.T) {
 	}
 
 	t.Run("without the prefix the first record past the head finds a gap", func(t *testing.T) {
-		old, db := recovering(t, nil)
-		_, err := NewFromState(crypto.SHA256, head(t), db, old.orchestration, logger.New(t), ProfileHandoff)
-		require.NoError(t, err)
+		_, db := recovering(t, nil)
+		// installing the head completes nothing: the first record past it finds the gap
 		require.ErrorIs(t, db.AppendRecords(next()), ErrRecordLog)
 	})
 	t.Run("with the prefix completed before the head is installed it extends the log", func(t *testing.T) {
 		old, db := recovering(t, &sliceFetcher{recs: recs})
 		h := head(t)
 		require.NoError(t, old.EnsureRecordPrefix(context.Background(), h))
-		_, err := NewFromState(crypto.SHA256, h, db, old.orchestration, logger.New(t), ProfileHandoff)
-		require.NoError(t, err)
 		require.NoError(t, db.AppendRecords(next()))
 		n, err := db.RecordCount()
 		require.NoError(t, err)
@@ -656,4 +940,16 @@ func (f *flakyFetcher) Records(ctx context.Context, from uint64, max int) ([]roo
 		return nil, errors.New("dial: connection refused")
 	}
 	return f.sliceFetcher.Records(ctx, from, max)
+}
+
+// consistentGenesisRoot makes the hand-built genesis of a store (it activates its shard in the genesis block, which the network's genesis does not)
+// carry QCs that certify the state root it really has, in the store and in the head that is sent.
+func consistentGenesisRoot(t *testing.T, s *BlockStore, received *abdrc.StateMsg) {
+	t.Helper()
+	root := s.blockTree.root.data
+	root.Qc.VoteInfo.CurrentRootHash = root.RootHash
+	root.Qc.LedgerCommitInfo.Hash = root.RootHash
+	root.CommitQc.LedgerCommitInfo.Hash = root.RootHash
+	h := received.CommittedHead
+	h.Qc, h.CommitQc = root.Qc, root.CommitQc
 }

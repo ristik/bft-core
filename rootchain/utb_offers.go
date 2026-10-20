@@ -30,7 +30,7 @@ const maxOfferHints = 4096
 // best-effort and in memory only (a restart resets it), never an acknowledgement or an authority: a missed delivery is repaired by GetTrustBase.
 type StoreOffers struct {
 	store *utbstore.Store
-	tap   func(recipient peer.ID, msg *certification.CertificationResponseV2)
+	tap   func(recipient peer.ID, msg *certification.CertificationResponseV3)
 
 	mu    sync.Mutex
 	hints map[peer.ID]uint64
@@ -91,28 +91,28 @@ func (o *StoreOffers) Reset(recipient peer.ID) {
 
 // SetTap makes every version 2 message that carries entries visible, once, just before it is sent (the lane's capture of real UCResp samples). It observes the
 // message; it cannot change what is sent.
-func (o *StoreOffers) SetTap(tap func(recipient peer.ID, msg *certification.CertificationResponseV2)) {
+func (o *StoreOffers) SetTap(tap func(recipient peer.ID, msg *certification.CertificationResponseV3)) {
 	o.tap = tap
 }
 
 // Tap is called by the sender with the message it is about to send.
-func (o *StoreOffers) Tap(recipient peer.ID, msg *certification.CertificationResponseV2) {
+func (o *StoreOffers) Tap(recipient peer.ID, msg *certification.CertificationResponseV3) {
 	if o.tap != nil && len(msg.TrustBaseUpdates) > 0 {
 		o.tap(recipient, msg)
 	}
 }
 
 type tapper interface {
-	Tap(recipient peer.ID, msg *certification.CertificationResponseV2)
+	Tap(recipient peer.ID, msg *certification.CertificationResponseV3)
 }
 
 // NewResponseCapture writes, into dir, the first version 2 message to each recipient for each highest attached epoch, as
 // ucresp-e<epoch>-<recipient>.cbor (the exact bytes about to be sent). Existing files are kept.
-func NewResponseCapture(dir string) (func(peer.ID, *certification.CertificationResponseV2), error) {
+func NewResponseCapture(dir string) (func(peer.ID, *certification.CertificationResponseV3), error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, err
 	}
-	return func(recipient peer.ID, msg *certification.CertificationResponseV2) {
+	return func(recipient peer.ID, msg *certification.CertificationResponseV3) {
 		last, err := types.DecodeRootTrustBaseV2(msg.TrustBaseUpdates[len(msg.TrustBaseUpdates)-1])
 		if err != nil {
 			return

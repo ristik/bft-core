@@ -179,6 +179,9 @@ func (x *TimeoutVote) UnmarshalCBOR(data []byte) error {
 }
 
 func (x *Timeout) IsValid() error {
+	if x == nil {
+		return fmt.Errorf("timeout is nil")
+	}
 	if x.Anchor != nil {
 		if x.HighQc != nil || x.Anchor.IsValid() != nil || x.Epoch != x.Anchor.Epoch || x.Round <= x.Anchor.Slot {
 			return ErrEpochAnchor
@@ -306,6 +309,11 @@ func BytesFromTimeoutVote(t *Timeout, author string, vote *TimeoutVote) []byte {
 func (x *TimeoutCert) IsValid() error {
 	if x.Timeout == nil {
 		return fmt.Errorf("timeout data is unassigned")
+	}
+	for author, vote := range x.Signatures {
+		if vote == nil {
+			return fmt.Errorf("timeout vote of %q is nil", author)
+		}
 	}
 	return nil
 }

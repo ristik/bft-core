@@ -180,7 +180,14 @@ func TestStateMsg_CanRecoverToRound(t *testing.T) {
 	})
 }
 
-func TestStateMsg_Verify(t *testing.T) {
+// stateMsgFixture builds a valid StateMsg (the QCs pass an always valid trust base) and returns the shard UC it carries.
+func stateMsgFixture(t *testing.T) (validStateMsg func() StateMsg, uc *types.UnicityCertificate) {
+	validStateMsg, uc, _, _ = stateMsgFixtureFull(t)
+	return validStateMsg, uc
+}
+
+// stateMsgFixtureFull is stateMsgFixture with the signer of the shard UC and the input record it certifies.
+func stateMsgFixtureFull(t *testing.T) (validStateMsg func() StateMsg, uc *types.UnicityCertificate, signer abcrypto.Signer, headIR *types.InputRecord) {
 	r4vInfo := &rctypes.RoundInfo{
 		RoundNumber:       4,
 		ParentRoundNumber: 3,
@@ -200,7 +207,7 @@ func TestStateMsg_Verify(t *testing.T) {
 		Timestamp:         types.NewTimestamp(),
 	}
 
-	headIR := &types.InputRecord{
+	headIR = &types.InputRecord{
 		Version:         1,
 		PreviousHash:    test.RandomBytes(32),
 		Hash:            test.RandomBytes(32),
@@ -215,9 +222,9 @@ func TestStateMsg_Verify(t *testing.T) {
 		PartitionID: 1,
 	}
 
-	signer, _ := testsig.CreateSignerAndVerifier(t)
+	signer, _ = testsig.CreateSignerAndVerifier(t)
 
-	uc := testcertificates.CreateUnicityCertificate(
+	uc = testcertificates.CreateUnicityCertificate(
 		t,
 		signer,
 		headIR,
@@ -227,7 +234,7 @@ func TestStateMsg_Verify(t *testing.T) {
 		make([]byte, 32),
 	)
 
-	validStateMsg := func() StateMsg {
+	validStateMsg = func() StateMsg {
 		h4, err := r4vInfo.Hash(crypto.SHA256)
 		require.NoError(t, err)
 		h5, err := r5vInfo.Hash(crypto.SHA256)
@@ -309,6 +316,12 @@ func TestStateMsg_Verify(t *testing.T) {
 		}
 	}
 
+	return validStateMsg, uc, signer, headIR
+}
+
+func TestStateMsg_Verify(t *testing.T) {
+	validStateMsg, uc, signer, headIR := stateMsgFixtureFull(t)
+
 	t.Run("ok", func(t *testing.T) {
 		sm := validStateMsg()
 		tb := testtb.NewAlwaysValidTrustBase(t)
@@ -334,6 +347,17 @@ func TestStateMsg_Verify(t *testing.T) {
 		sm := validStateMsg()
 		sm.CommittedHead.Block.Qc.LedgerCommitInfo.PreviousHash[0]++
 		require.EqualError(t, sm.Verify(crypto.SHA256, &types.RootTrustBaseV1{}), "block qc verification error: vote info hash verification failed")
+	})
+
+	// the info moves on to the next epoch before the shard certifies in it: the retained UC carries the
+	// configuration hash of its own epoch, the info the one of the new epoch
+	t.Run("retained UC of the previous epoch configuration", func(t *testing.T) {
+		sm := validStateMsg()
+		cp := *sm.CommittedHead.ShardInfo[0].UC
+		sm.CommittedHead.ShardInfo[0].ShardConfHash = test.RandomBytes(32)
+		sm.CommittedHead.ShardInfo[0].UC = &cp
+		require.NoError(t, sm.CommittedHead.ShardInfo[0].IsValid())
+		require.NoError(t, sm.Verify(crypto.SHA256, testtb.NewAlwaysValidTrustBase(t)))
 	})
 
 	t.Run("invalid block node data", func(t *testing.T) {
@@ -579,7 +603,7 @@ func TestStateMsg_Verify(t *testing.T) {
 			}
 			// The test trust base accepts any signature, so a QC that only lacks signatures verifies; nothing else on this list may.
 			acceptable := map[string]bool{"head block QC without signatures": true}
-			// A profile-2 state may legitimately carry a shard without a last certificate; the legacy path has no such shard.
+			// A state may legitimately carry a shard without a last certificate (one not certified yet): there is nothing to verify.
 			acceptableInHistory := map[string]bool{"shard info without a certificate": true}
 			verifiers := map[string]func(StateMsg) error{
 				"legacy":  func(sm StateMsg) error { return sm.Verify(crypto.SHA256, current) },
@@ -598,7 +622,7 @@ func TestStateMsg_Verify(t *testing.T) {
 						require.NotPanics(t, func() {
 							m.mutate(&sm)
 							err := verify(sm)
-							if !acceptable[m.name] && !(acceptableInHistory[m.name] && name != "legacy") {
+							if !acceptable[m.name] && !acceptableInHistory[m.name] {
 								require.Error(t, err)
 							}
 							if m.want != nil {
@@ -682,6 +706,90 @@ func TestStateMsg_Verify(t *testing.T) {
 				require.ErrorIs(t, bad.VerifyWithHistory(crypto.SHA256, current, history), ErrRecoveryEpoch, name)
 			}
 		})
+	})
+
+	// the same class of peer-supplied nulls in the shard infos
+	t.Run("null UC or null unicity tree certificate in a shard info", func(t *testing.T) {
+		tb := testtb.NewAlwaysValidTrustBase(t)
+		for name, mut := range map[string]func(*StateMsg){
+			"null UC (not yet certified shard)": func(sm *StateMsg) { sm.CommittedHead.ShardInfo[0].UC = nil },
+			"null technical record":             func(sm *StateMsg) { sm.CommittedHead.ShardInfo[0].TR = nil },
+			"null input record":                 func(sm *StateMsg) { sm.CommittedHead.ShardInfo[0].IR = nil },
+			"null unicity tree certificate": func(sm *StateMsg) {
+				cp := *uc
+				cp.UnicityTreeCertificate = nil
+				sm.CommittedHead.ShardInfo[0].UC = &cp
+			},
+		} {
+			sm := validStateMsg()
+			mut(&sm)
+			raw, err := types.Cbor.Marshal(&sm)
+			require.NoError(t, err)
+			var decoded StateMsg
+			require.NoError(t, types.Cbor.Unmarshal(raw, &decoded), name)
+			require.NotPanics(t, func() {
+				err := decoded.Verify(crypto.SHA256, tb)
+				if name != "null UC (not yet certified shard)" {
+					require.Error(t, err, name)
+				} // a shard without UC has nothing to verify and is not an error by itself
+			}, name)
+		}
+	})
+
+	t.Run("null entries elsewhere in the message", func(t *testing.T) {
+		tb := testtb.NewAlwaysValidTrustBase(t)
+		for name, mut := range map[string]func(*StateMsg){
+			"null pending block": func(sm *StateMsg) { sm.Pending = append(sm.Pending, nil) },
+			"null block":         func(sm *StateMsg) { sm.CommittedHead.Block = nil },
+			"null block qc":      func(sm *StateMsg) { sm.CommittedHead.Block.Qc = nil },
+			"null qc":            func(sm *StateMsg) { sm.CommittedHead.Qc = nil },
+			"null commit qc":     func(sm *StateMsg) { sm.CommittedHead.CommitQc = nil },
+			"null pending qc vote info": func(sm *StateMsg) {
+				sm.Pending[0].Qc = &rctypes.QuorumCert{}
+			},
+		} {
+			sm := validStateMsg()
+			mut(&sm)
+			raw, err := types.Cbor.Marshal(&sm)
+			require.NoError(t, err, name)
+			var decoded StateMsg
+			require.NoError(t, types.Cbor.Unmarshal(raw, &decoded), name)
+			require.NotPanics(t, func() {
+				require.Error(t, decoded.Verify(crypto.SHA256, tb), name)
+				_ = decoded.CanRecoverToRound(6)
+			}, name)
+		}
+	})
+
+	// bft-go-base#17: a CBOR null in the partition path of a shard UC decodes to a nil path item, which used to
+	// panic UC.Verify (a peer could crash a recovering root node with one StateMsg)
+	t.Run("nil entry in the partition path of a shard UC", func(t *testing.T) {
+		withNilStep := func(sm *StateMsg) {
+			cp := *uc
+			utc := *uc.UnicityTreeCertificate
+			utc.HashSteps = []*types.PathItem{nil}
+			cp.UnicityTreeCertificate = &utc
+			sm.CommittedHead.ShardInfo[0].UC = &cp
+		}
+		tb := testtb.NewAlwaysValidTrustBase(t)
+
+		sm := validStateMsg()
+		withNilStep(&sm)
+		require.NotPanics(t, func() {
+			err := sm.Verify(crypto.SHA256, tb)
+			require.Error(t, err)
+			require.ErrorIs(t, err, types.ErrNilPathItem)
+		})
+
+		// the same message as it arrives from the network
+		sm = validStateMsg()
+		withNilStep(&sm)
+		raw, err := types.Cbor.Marshal(&sm)
+		require.NoError(t, err)
+		var decoded StateMsg
+		require.NoError(t, types.Cbor.Unmarshal(raw, &decoded))
+		require.Contains(t, decoded.CommittedHead.ShardInfo[0].UC.UnicityTreeCertificate.HashSteps, (*types.PathItem)(nil))
+		require.NotPanics(t, func() { require.ErrorIs(t, decoded.Verify(crypto.SHA256, tb), types.ErrNilPathItem) })
 	})
 }
 

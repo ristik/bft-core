@@ -100,7 +100,7 @@ func TestSuccessiveCoupledSupersessionInstall(t *testing.T) {
 				empty, dbErr := storage.NewBoltStorage(filepath.Join(t.TempDir(), "empty.db"))
 				require.NoError(t, dbErr)
 				t.Cleanup(func() { require.NoError(t, empty.Close()) })
-				r.manager.blockStore, err = storage.NewFromState(crypto.SHA256, f.Snapshot, empty, r.orchestration, r.manager.log, storage.ProfileHandoff)
+				r.manager.blockStore, err = storage.NewFromCheckpoint(crypto.SHA256, f.Snapshot, empty, r.orchestration, r.manager.log, storage.ProfileHandoff)
 				require.NoError(t, err)
 			}
 			err = r.rt.Activate(context.Background(), q3active.Bundle{Envelope: second.EnvelopeBytes, Snapshot: second.Snapshot, Candidate: second.Candidate})

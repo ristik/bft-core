@@ -23,6 +23,9 @@ func commitRound(t *testing.T, s *BlockStore, round uint64) {
 	t.Helper()
 	b, err := s.Block(round)
 	require.NoError(t, err)
+	// the committed block carries the QC that certified it, as a running root's does
+	b.Qc = &rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{RoundNumber: round, ParentRoundNumber: b.GetParentRound(), Epoch: 1, CurrentRootHash: b.RootHash},
+		LedgerCommitInfo: &types.UnicitySeal{Version: 1, RootChainRoundNumber: round - 1, Epoch: 1}}
 	_, err = s.blockTree.Commit(&rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{RoundNumber: round + 1, ParentRoundNumber: round, Epoch: 1},
 		LedgerCommitInfo: &types.UnicitySeal{Version: 1, RootChainRoundNumber: round, Epoch: 1, Hash: b.RootHash}})
 	require.NoError(t, err)
