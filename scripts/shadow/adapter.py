@@ -157,6 +157,8 @@ def cmd_run(a):
         obs.flush()
         print(f"sample {k}: {row['verdict']} {row['case']}", flush=True)
     manifest["finishedUtc"] = datetime.now(timezone.utc).isoformat()
+    obs.close()      # everything the pack seals is on disk before it is hashed
+    events.close()
     manifest["samplesScheduled"] = taken
     cov = write_report(out, manifest, rows, taken)
     seal(out)

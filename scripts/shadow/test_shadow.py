@@ -304,6 +304,39 @@ class Coverage(unittest.TestCase):
         self.assertTrue(any("over-bound" in r for r in cov["reasons"]))
 
 
+class SealedPack(unittest.TestCase):
+    """A run that ends on its stop file seals a pack whose SHA256SUMS verify, events.jsonl (the stop event) included."""
+
+    def test_the_sealed_pack_verifies_its_own_sums_after_a_stop_file_run(self):
+        import hashlib
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            d = Path(d)
+            dep = d / "deployment.json"
+            dep.write_text(json.dumps({"election": "0x" + "e1" * 20, "custody": "0x" + "c1" * 20, "evidence": "0x" + "e2" * 20}))
+            stop = d / "stop"
+            calls = []
+
+            def fake_observe(k, *a, **kw):
+                calls.append(k)
+                stop.touch()   # the driver ends the interval after the first sample
+                return {"sample": k, "verdict": "MATCH", "case": "NotDue", "inputDigest": "d", "block": {"number": 5}}
+            rpc = mock.Mock()
+            rpc.chain_id.return_value = 31337
+            with mock.patch.object(adapter, "observe", fake_observe), mock.patch.object(adapter, "ReadOnlyRpc", return_value=rpc), \
+                    mock.patch.object(adapter, "tool_versions", return_value={}):
+                adapter.main(["run", "--rpc", "http://x", "--deployment", str(dep), "--out", str(d / "out"), "--cadence", "0", "--samples", "5", "--stop-file", str(stop)])
+            self.assertEqual(calls, [0])
+            out = d / "out"
+            self.assertIn("stop-file", (out / "events.jsonl").read_text())
+            sums = [line.split("  ", 1) for line in (out / "SHA256SUMS").read_text().splitlines()]
+            self.assertTrue(any(name == "events.jsonl" for _, name in sums))
+            for digest, name in sums:
+                self.assertEqual(hashlib.sha256((out / name).read_bytes()).hexdigest(), digest, name)
+            on_disk = {str(p.relative_to(out)) for p in out.rglob("*") if p.is_file() and p.name != "SHA256SUMS"}
+            self.assertEqual(on_disk, {name for _, name in sums}, "every file of the pack is sealed")
+
+
 class ForkSafety(unittest.TestCase):
     PIN = {"number": 77, "hash": "0x" + "ab" * 32, "chainId": 31337}
 
