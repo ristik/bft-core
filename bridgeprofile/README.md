@@ -61,3 +61,17 @@ Read: every consolidated bundle up to the 16-leaf profile bound fits the gate at
 history whose leaves all carry distinct seals fits at 4 members but not at 16 (bold). Each additional shard under the shared seal
 costs about 0.15–0.2M at 4 members and 0.3–0.4M at 16 (UC bytes and items of the repeated seal copy). The leaf and history-byte terms
 still grow with L, so longer histories (a later profile step) and the B7 fallback are unaffected by this table.
+
+### Profile limits after #526 step 5 (MaxLeaves 24, MaxTransfers 23)
+
+`step5_limits_test.go` holds the measurements behind the raise:
+- the oracle's return history is 548 + 272·L bytes;
+- RSMT membership paths have about log2(n) siblings for n state IDs: a mean of 20 and a p99 of 23 at 10^6 (the 10^6 run is behind
+  `STEP5_RSMT_LARGE=1`);
+- at 24 leaves with 24 siblings per path, a consolidated bundle stays below 6M gas for a 4-member committee over up to 4 shards
+  (5.91M) and for a 16-member committee over up to 2 shards (5.93M).
+
+A 16-member committee over 8 shards is over the 7M budget already at 16 leaves. The gate prices every bundle, and what does not fit
+redeems via the B7 fallback. MaxAnchors stays 16: with 24 leaves a token can need more anchors than that, which the parser refuses
+(`compose-anchors-over-max`). New corpus cases `return-transfers-max` and `-over-max` pin the transfer bound. `return-valid-16` (17
+transactions) is now accepted.
