@@ -116,6 +116,26 @@ s4_assignments() {
   echo "$a_j $a_g"
 }
 
+# one signed transaction of a key, sent to every online validator of the lane's EVM chain (the chain refuses eth_estimateGas: "bound parent hash mismatch", so no
+# cast send) and waited for until its receipt shows success; the receipt (JSON) goes to the file
+s4_send() { # private-key(hex) nonce to value data gas-limit receipt-file
+  local id first sent expected= i receipt status
+  for id in $H3_ONLINE; do
+    sent=$(lane_go_run evmtx -send -eth-url "http://127.0.0.1:$((rethEthBase+id-1))" -chain-id "${M2_CHAIN_ID:-31337}" -private-key "${1#0x}" -nonce "$2" -to "$3" -value "$4" -data "$5" -gas-limit "$6" 2>&1) || { echo "$sent" >&2; return 1; }
+    [ -z "$expected" ] || [ "$expected" = "$sent" ] || { echo "validators disagree on the transaction hash" >&2; return 1; }
+    expected=$sent
+  done
+  first=${H3_ONLINE%% *}
+  for i in $(seq 1 180); do
+    receipt=$(rpc "http://127.0.0.1:$((rethEthBase+first-1))" eth_getTransactionReceipt "[\"$expected\"]")
+    status=$(echo "$receipt" | pyget "['result']['status']" 2>/dev/null)
+    if [ "$status" = 0x1 ]; then echo "$receipt" | jq .result >"$7"; return 0; fi
+    [ "$status" != 0x0 ] || { echo "transaction $expected reverted" >&2; return 1; }
+    sleep 1
+  done
+  echo "no receipt for $expected" >&2; return 1
+}
+
 # a fresh reporter: a new key, funded by the lane's funded account, which is neither a root key nor an owner key of any entity (the owner key only pays)
 s4_reporter() {
   local d=$S4_DIR k
@@ -124,7 +144,8 @@ s4_reporter() {
     k=$(s4_cast wallet new --json | jq -r '(.data // .)[0].private_key') || return 1
     ( umask 077; printf '%s\n' "$k" >"$S4_KEY" )
     s4_cast wallet address --private-key "$k" >"$d/reporter.addr" || return 1
-    s4_cast send --rpc-url "$(p85_eth)" --private-key "$(cat "$(p85_sender_key)")" --value 1ether "$(cat "$d/reporter.addr")" >"$d/reporter-funding.txt" || return 1
+    # funded from the lane's paid-transaction account (the funded default key of scripts/evmtx), not from the joiner's owner key
+    s4_send ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80 "$(p85_chain_nonce)" "$(cat "$d/reporter.addr")" 1000000000000000000 0x 21000 "$d/reporter-funding.json" || return 1
   fi
 }
 
@@ -216,14 +237,13 @@ s4_assert_effects() {
   # the unrelated path: the reporter claims the bounty; the unrelated lots stayed as they were (asserted in the effects)
   bounty=$(jq -r '.creditReporter' "$d/snapshot-final.json")
   bal0=$(s4_cast balance --rpc-url "$(p85_eth)" "$rep")
-  s4_cast send --rpc-url "$(p85_eth)" --private-key "$(cat "$S4_KEY")" "$(p85_custody)" 'claim(uint256,address)' "$bounty" "$rep" >"$d/claim.txt" || return 1
+  s4_send "$(cat "$S4_KEY")" "$(s4_cast nonce --rpc-url "$(p85_eth)" "$rep")" "$(p85_custody)" 0 "$(s4_cast calldata 'claim(uint256,address)' "$bounty" "$rep")" 300000 "$d/claim-receipt.json" || return 1
   bal1=$(s4_cast balance --rpc-url "$(p85_eth)" "$rep")
-  python3 - "$bal0" "$bal1" "$bounty" "$d/claim.txt" <<'PY' || return 1
-import re, sys
+  python3 - "$bal0" "$bal1" "$bounty" "$d/claim-receipt.json" <<'PY' || return 1
+import json, sys
 b0, b1, bounty = int(sys.argv[1].split()[0]), int(sys.argv[2].split()[0]), int(sys.argv[3])
-gas = 0
-m = re.search(r"gasUsed\s+(\d+)", open(sys.argv[4]).read()); p = re.search(r"effectiveGasPrice\s+(\d+)", open(sys.argv[4]).read())
-if m and p: gas = int(m.group(1)) * int(p.group(1))
+r = json.load(open(sys.argv[4]))
+gas = int(r["gasUsed"], 16) * int(r["effectiveGasPrice"], 16)
 if b1 - b0 + gas != bounty: sys.exit("FAIL: s4: the reporter's balance moved by %d (+ gas %d), the bounty is %d" % (b1 - b0, gas, bounty))
 print("PASS: s4: the reporter claimed exactly the bounty %d (balance +%d, gas %d)" % (bounty, b1 - b0, gas))
 PY
