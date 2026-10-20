@@ -21,8 +21,6 @@ import (
 	abcrypto "github.com/unicitynetwork/bft-go-base/crypto"
 	"github.com/unicitynetwork/bft-go-base/types"
 
-	"github.com/unicitynetwork/bft-core/internal/quorumweight"
-
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/zkverifier/rsmt"
 )
 
@@ -93,27 +91,55 @@ func NewCommittee(seed string, n int) (*Authority, error) {
 	return a, nil
 }
 
-// TrustBase is the signed root trust base of one signer epoch.
-func (a *Authority) TrustBase(network types.NetworkID, epoch uint64) (*types.RootTrustBaseV1, error) {
-	return a.TrustBaseWith(network, epoch, 0)
-}
-
-// TrustBaseWith is TrustBase with an explicit epoch start round.
-func (a *Authority) TrustBaseWith(network types.NetworkID, epoch, epochStart uint64, opts ...types.Option) (*types.RootTrustBaseV1, error) {
-	var nodes []*types.NodeInfo
-	for _, m := range a.members {
-		nodes = append(nodes, &types.NodeInfo{NodeID: m.info.NodeID, SigKey: m.info.SigKey, Stake: m.info.Stake})
-	}
-	tb, err := quorumweight.NewTrustBase(network, nodes, append([]types.Option{types.WithEpoch(epoch), types.WithEpochStart(epochStart)}, opts...)...)
+// NewWeightedCommittee derives a committee with the given member weights from
+// a seed; members are in derivation order.
+func NewWeightedCommittee(seed string, weights ...uint64) (*Authority, error) {
+	a, err := NewCommittee(seed, len(weights))
 	if err != nil {
 		return nil, err
 	}
+	for i, w := range weights {
+		a.members[i].info.Stake = w
+	}
+	return a, nil
+}
+
+// entry is an unsigned trust-base entry with this committee as its members and
+// the native threshold floor(2W/3)+1.
+func (a *Authority) entry(network types.NetworkID, epoch, epochStart uint64, previous []byte) *types.RootTrustBaseV2 {
+	e := types.NewRootTrustBaseV2()
+	e.NetworkID, e.Epoch, e.EpochStart, e.PreviousEntryID = network, epoch, epochStart, previous
+	var total uint64
 	for _, m := range a.members {
-		if err := tb.Sign(m.info.NodeID, m.signer); err != nil {
+		e.RootNodes = append(e.RootNodes, &types.NodeInfo{NodeID: m.info.NodeID, SigKey: m.info.SigKey, Stake: m.info.Stake})
+		total += m.info.Stake
+	}
+	sort.Slice(e.RootNodes, func(i, j int) bool { return e.RootNodes[i].NodeID < e.RootNodes[j].NodeID })
+	e.QuorumThreshold = total*2/3 + 1
+	return e
+}
+
+// Genesis is the genesis trust-base entry with this committee, epoch and start
+// round (no predecessor, no witness).
+func (a *Authority) Genesis(network types.NetworkID, epoch, epochStart uint64) (*types.RootTrustBaseV2, error) {
+	e := a.entry(network, epoch, epochStart, make([]byte, types.TrustBaseV2IDLen))
+	return e, e.Validate()
+}
+
+// Successor is the entry after prev, with next as its committee from root round
+// epochStart, witnessed by every member of this (prev's) committee.
+func (a *Authority) Successor(prev *types.RootTrustBaseV2, next *Authority, epochStart uint64) (*types.RootTrustBaseV2, error) {
+	id, err := prev.EntryID()
+	if err != nil {
+		return nil, err
+	}
+	e := next.entry(prev.NetworkID, prev.Epoch+1, epochStart, id[:])
+	for _, m := range a.members {
+		if err := e.Sign(m.info.NodeID, m.signer); err != nil {
 			return nil, err
 		}
 	}
-	return tb, nil
+	return e, e.Validate()
 }
 
 // ShardInput is one shard's certified state in a root round: its
@@ -277,7 +303,7 @@ func (w *LockWorld) Evidence(n uint64, headerNumber uint64) (*LockEvidence, erro
 
 // Certified assembles the LockProof of nonce n: the evidence plus a unicity
 // certificate of the EVM shard (configuration pdr) signed by auth at rootRound
-// in the root epoch of tbID's trust base.
+// in the root epoch of the trust input's latest entry.
 func (w *LockWorld) Certified(f *Fixture, auth *Authority, pdr *types.PartitionDescriptionRecord, tr *TrustInput, rootRound, n, headerNumber uint64) (*LockProof, error) {
 	return w.CertifiedWith(f, auth, pdr, tr, rootRound, n, headerNumber, nil)
 }
@@ -290,7 +316,7 @@ func (w *LockWorld) CertifiedWith(f *Fixture, auth *Authority, pdr *types.Partit
 	if err != nil {
 		return nil, err
 	}
-	tb, id := tr.Base, tr.ID()
+	tb, id := tr.Tip(), tr.ID()
 	ir := &types.InputRecord{Version: 1, RoundNumber: headerNumber, Epoch: pdr.Epoch, PreviousHash: sl(H([]byte("fixture-previous-state"))),
 		Hash: ev.StateRoot[:], SummaryValue: []byte{}, Timestamp: SealTime + headerNumber, BlockHash: gethcrypto.Keccak256(ev.Header)}
 	if mutIR != nil {
@@ -361,7 +387,7 @@ func (n *rnode) proof(key [32]byte) (bm [32]byte, sibs [][32]byte) {
 type AggregatorWorld struct {
 	PDRs []*types.PartitionDescriptionRecord
 	Auth *Authority
-	TB   *types.RootTrustBaseV1
+	TB   *types.RootTrustBaseV2
 }
 
 // CertifiedLeaves is one anchor per distinct complete UC in first-use leaf

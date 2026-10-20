@@ -47,8 +47,9 @@ func VerifyMintBacking(cfg *Cfg, h *History, tr *TrustInput, pin *DeploymentPin)
 }
 
 // VerifyLockProof verifies the embedded proof for the lock digest want of
-// nonce n. Order: the caller's trust base must be the one the proof names;
-// network, root epoch, the SDK's UC verification (signatures, quorum, folds); the carried PDR against
+// nonce n. Order: the proof's trustBaseId must be the installed history's
+// genesis; the seal's network, epoch and root round select the entry of its
+// epoch, under which the SDK's UC verification runs (signatures, quorum, folds); the carried PDR against
 // the certificate's configuration commitment and the pinned deployment; the
 // header against the certified input record; the vault account and its code
 // hash under the header state root; the lock word under the storage root.
@@ -59,13 +60,12 @@ func VerifyLockProof(p *LockProof, cfg *Cfg, n uint64, want [32]byte, tr *TrustI
 	if p.Cfg != cfg.Hash() {
 		return ErrLockProofCfg
 	}
-	if tr == nil || tr.Base == nil {
+	if tr == nil || len(tr.Entries) == 0 {
 		return ErrTrustBaseDigest
 	}
-	if tr.Base.GetNetworkID() != types.NetworkID(cfg.Network) {
-		return ErrEpochMismatch
+	if tr.Network() != types.NetworkID(cfg.Network) {
+		return ErrSealNetwork
 	}
-	tb := tr.Base
 	var steps uint64
 	if err := scanCertificate(p.UC, &steps); err != nil {
 		return fmt.Errorf("%w: %w", ErrLockUC, err)
@@ -78,7 +78,8 @@ func VerifyLockProof(p *LockProof, cfg *Cfg, n uint64, want [32]byte, tr *TrustI
 	if err != nil || !bytes.Equal(canonical, p.UC) || uc.InputRecord == nil || uc.UnicitySeal == nil {
 		return fmt.Errorf("%w: noncanonical or incomplete", ErrLockUC)
 	}
-	if err := checkFixedProfile(p, tr, &uc); err != nil {
+	tb, err := checkTrust(p, tr, &uc)
+	if err != nil {
 		return err
 	}
 	pdr, pdrHash, err := verifyLockPDR(p, cfg, &uc, pin)

@@ -54,7 +54,8 @@ func scanCertificate(raw []byte, steps *uint64) error {
 		if !sig.isBytes() {
 			return ErrCertScan
 		}
-		if len(sig.data) != SDKSignatureLength {
+		// 64 bytes (r||s) or 65 with an ignored recovery suffix, as both SDKs and native B1
+		if n := len(sig.data); n != SDKSignatureLength-1 && n != SDKSignatureLength {
 			return fmt.Errorf("%w: %d bytes", ErrCertSigLength, len(sig.data))
 		}
 	}

@@ -89,14 +89,14 @@ PY
   rm -f "$dep/genesis.json" "$dep/deployment.json"
 }
 
-# Writes the lane's derived inputs next to the devnet state (SDK trust document, EVM PDR, config for the plug-in driver).
+# Writes the lane's derived inputs next to the devnet state (trust-base release bundle and pin, EVM PDR, config for the plug-in driver).
 # BRIDGE_FULL_CONF is the full shard configuration the root certifies (the EVM genesis' evm-full-shard-conf*.json).
 bridge_write_config() {
   : "${DNB_TOOL:?set DNB_TOOL to the built dnb-tool}"
   local full=${BRIDGE_FULL_CONF:-test-nodes/evm-full-shard-conf.json}
   # the plug-in driver reads the full shard configuration as <lane dir>/evm-full-shard-conf.json (the DN-B lane's name; the P85 genesis writes -v2)
   [ "$full" = test-nodes/evm-full-shard-conf.json ] || cp "$full" test-nodes/evm-full-shard-conf.json
-  "$DNB_TOOL" trust-doc --trust-base test-nodes/trust-base.json --out test-nodes/sdk-trust-base.json
+  "$DNB_TOOL" trust-bundle --trust-base test-nodes/trust-base.json --out test-nodes/trust-base.bundle.cbor --out-pin test-nodes/trust-base.genesis.entryid
   "$DNB_TOOL" pdr --full-shard-conf "$full" --out test-nodes/evm-pdr.cbor
   python3 - "$PWD" "$validators" "$rethEthBase" "$rootRpcPort" "$chainID" "$partitionID" "$aggPartition" "$aggShards" "${AGG_PORT:-3001}" "${BRIDGE_ARCHIVE:-test-nodes/archives}" <<'PY'
 import json, sys

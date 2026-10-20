@@ -16,11 +16,13 @@ func newSentinel(parent error, msg string) *sentinel { return &sentinel{msg: msg
 
 // Families. A malformed input is a framing/encoding failure, an invalid one is
 // well formed but outside the launch profile or wrong, a budget failure is a
-// direct-verification cap.
+// direct-verification cap, an unavailable one is retryable later.
 var (
 	ErrMalformed = errors.New("bridgeprofile: malformed encoding")
 	ErrInvalid   = errors.New("bridgeprofile: relation does not hold")
 	ErrBudget    = errors.New("bridgeprofile: direct budget exceeded")
+	// ErrUnavailable is retryable: verification needs data the verifier does not hold yet.
+	ErrUnavailable = errors.New("bridgeprofile: not available yet")
 )
 
 // Malformed reasons.
@@ -40,7 +42,7 @@ var (
 	ErrRLP           = newSentinel(ErrMalformed, "noncanonical or malformed RLP")
 	// A certificate outside the intersection of the native bounded scan and the SDK 3.0.1 codec.
 	ErrCertScan      = newSentinel(ErrMalformed, "certificate outside the native/SDK codec intersection")
-	ErrCertSigLength = newSentinel(ErrMalformed, "certificate seal signature is not 65 bytes")
+	ErrCertSigLength = newSentinel(ErrMalformed, "certificate seal signature is neither 64 nor 65 bytes")
 )
 
 // Budget reasons.
@@ -118,9 +120,11 @@ var (
 // Embedded lock proof verification reasons (offline: token plus pinned
 // trust base). Unknown epochs and every binding failure are distinct.
 var (
-	ErrTrustBaseDigest = newSentinel(ErrInvalid, "the proof's trustBaseId is not the digest of the installed trust-base document")
-	ErrEpochMismatch   = newSentinel(ErrInvalid, "certificate network, root epoch or root round is outside the one pinned base")
-	ErrTrustConfig     = newSentinel(ErrInvalid, "trust base is outside the supported fixed profile (unit weights, quorum N-(N-1)/3)")
+	ErrTrustBaseDigest = newSentinel(ErrInvalid, "the trustBaseId is not the genesis EntryID of the installed trust-base history")
+	ErrTrustBase       = newSentinel(ErrInvalid, "the trust-base bundle is malformed, incomplete or not witnessed link by link")
+	ErrSealNetwork     = newSentinel(ErrInvalid, "the certificate is sealed on another network than the trust-base history's")
+	ErrSealEpoch       = newSentinel(ErrInvalid, "the seal epoch precedes the history's genesis, or the root round is outside the epoch's interval")
+	ErrNoEntryForEpoch = newSentinel(ErrUnavailable, "the history holds no entry for the seal epoch yet (retryable once it does)")
 	ErrLockUC          = newSentinel(ErrInvalid, "embedded unicity certificate does not verify")
 	ErrLockPDR         = newSentinel(ErrInvalid, "embedded partition description is not the pinned deployment's")
 	ErrLockHeader      = newSentinel(ErrInvalid, "header is not bound to the certified input record")

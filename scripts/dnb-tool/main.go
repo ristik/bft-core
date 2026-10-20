@@ -10,6 +10,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -27,7 +28,9 @@ import (
 	"github.com/unicitynetwork/bft-core/archive"
 	"github.com/unicitynetwork/bft-core/b1ref"
 	"github.com/unicitynetwork/bft-core/bridgeprofile"
+	"github.com/unicitynetwork/bft-core/gettrustbase"
 	"github.com/unicitynetwork/bft-core/q3format"
+	"github.com/unicitynetwork/bft-core/utb"
 	"github.com/unicitynetwork/bft-go-base/types"
 )
 
@@ -40,8 +43,8 @@ func main() {
 	switch os.Args[1] {
 	case "deployment":
 		err = deployment(os.Args[2:])
-	case "trust-doc":
-		err = trustDoc(os.Args[2:])
+	case "trust-bundle":
+		err = trustBundle(os.Args[2:])
 	case "b1check":
 		err = b1check(os.Args[2:])
 	case "pdr":
@@ -122,11 +125,13 @@ func deployment(args []string) error {
 	return os.WriteFile(*out, append(enc, '\n'), 0o644) // #nosec G306 -- public configuration
 }
 
-// trustDoc renders the SDK RootTrustBase JSON document of the signed root trust base: the one pinned trust input of the fixed-base profile.
-func trustDoc(args []string) error {
-	fs := flag.NewFlagSet("trust-doc", flag.ContinueOnError)
-	in := fs.String("trust-base", "", "signed root trust base JSON")
-	out := fs.String("out", "", "output path")
+// trustBundle writes the release bundle of the deployment's trust-base history at its genesis (the entry a root is started with,
+// ubft trust-base utb-genesis) and its genesis EntryID: the trust input of the bridge profile (protocol 5) and its pin.
+func trustBundle(args []string) error {
+	fs := flag.NewFlagSet("trust-bundle", flag.ContinueOnError)
+	in := fs.String("trust-base", "", "the genesis (epoch 1) trust base JSON")
+	out := fs.String("out", "", "where to write the release bundle")
+	outPin := fs.String("out-pin", "", "where to write the genesis EntryID (hex)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -138,14 +143,25 @@ func trustDoc(args []string) error {
 	if err := json.Unmarshal(raw, &tb); err != nil {
 		return err
 	}
-	doc, err := bridgeprofile.RenderTrustBaseJSON(&tb)
+	genesis, err := utb.BuildUnsigned(nil, utb.FromProjection(&tb))
 	if err != nil {
 		return err
 	}
-	if _, err := bridgeprofile.LoadTrustInput(doc); err != nil {
-		return fmt.Errorf("the rendered document is not a loadable trust input: %w", err)
+	bundle, err := bridgeprofile.TrustBundle(genesis)
+	if err != nil {
+		return err
 	}
-	return os.WriteFile(*out, doc, 0o644) // #nosec G306 -- public configuration
+	id, err := genesis.EntryID()
+	if err != nil {
+		return err
+	}
+	if _, err := bridgeprofile.LoadTrustInput(bundle, id); err != nil {
+		return fmt.Errorf("the bundle is not a loadable trust input: %w", err)
+	}
+	if err := os.WriteFile(*out, bundle, 0o644); err != nil { // #nosec G306 -- public configuration
+		return err
+	}
+	return os.WriteFile(*outPin, []byte(hex.EncodeToString(id[:])+"\n"), 0o644) // #nosec G306 -- public configuration
 }
 
 // lockProof assembles the LockProof (bridgeprofile.LockProof) of vault.lockDigest[nonce] at a certified EVM block: the archived resulting
@@ -159,7 +175,7 @@ func lockProof(args []string) error {
 	vaultText := fs.String("vault", "", "vault address")
 	nonce := fs.Uint64("nonce", 0, "lock nonce")
 	fullConf := fs.String("full-shard-conf", "", "the EVM shard's full configuration (as registered with the root chain)")
-	trustDocPath := fs.String("trust-doc", "", "the pinned SDK trust-base document")
+	trustBundlePath := fs.String("trust-bundle", "", "the trust-base release bundle (trust-bundle)")
 	cfgHash := fs.String("cfg", "", "the vault's CFG")
 	out := fs.String("out", "", "output path")
 	if err := fs.Parse(args); err != nil {
@@ -202,11 +218,19 @@ func lockProof(args []string) error {
 	if !bytes.Equal(sum[:], uc.ShardConfHash) {
 		return fmt.Errorf("the full shard configuration is not the configuration the block's certificate commits to")
 	}
-	doc, err := os.ReadFile(*trustDocPath)
+	bundle, err := os.ReadFile(*trustBundlePath)
 	if err != nil {
 		return err
 	}
-	tbID := sha256.Sum256(doc)
+	// trustBaseId is the genesis EntryID of the history the bundle carries
+	decoded, err := gettrustbase.DecodeBundle(bundle, gettrustbase.BundleLimits{MaxBytes: 1 << 20, MaxEntries: 1 << 16})
+	if err != nil {
+		return err
+	}
+	tbID, err := decoded.Entries[0].EntryID()
+	if err != nil {
+		return err
+	}
 	vault := common.HexToAddress(*vaultText)
 	slot := crypto.Keccak256Hash(common.LeftPadBytes(new(big.Int).SetUint64(*nonce).Bytes(), 32), common.LeftPadBytes([]byte{5}, 32))
 	raw, err := rpcCall(*ethURL, "eth_getProof", []any{vault, []common.Hash{slot}, map[string]any{"blockHash": blockHash}})

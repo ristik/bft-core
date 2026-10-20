@@ -4,16 +4,17 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"fmt"
 	"math/big"
 	"net"
 	"net/http"
-	"strings"
 	"testing"
 
 	"github.com/decred/dcrd/dcrec/secp256k1/v4"
+	"github.com/fxamacker/cbor/v2"
 	"github.com/stretchr/testify/require"
 	"github.com/unicitynetwork/bft-go-base/types"
+
+	"github.com/unicitynetwork/bft-core/gettrustbase"
 )
 
 var errNetwork = errors.New("network is disabled in this test")
@@ -86,7 +87,7 @@ func TestLockProofMutations(t *testing.T) {
 			}
 		}), ErrLockUC},
 		{"uc input record hash", reUC(func(uc *types.UnicityCertificate) { uc.InputRecord.Hash[0] ^= 1 }), ErrLockUC},
-		{"uc seal network", reUC(func(uc *types.UnicityCertificate) { uc.UnicitySeal.NetworkID++ }), ErrEpochMismatch},
+		{"uc seal network", reUC(func(uc *types.UnicityCertificate) { uc.UnicitySeal.NetworkID++ }), ErrSealNetwork},
 		{"uc noncanonical", func(lp *LockProof) { lp.UC = append(bytes.Clone(lp.UC), 0) }, ErrLockUC},
 		{"uc undecodable", func(lp *LockProof) { lp.UC = []byte{1, 2, 3} }, ErrLockUC},
 		{"pdr noncanonical", func(lp *LockProof) { lp.PDR = append(bytes.Clone(lp.PDR), 0) }, ErrLockPDR},
@@ -135,14 +136,13 @@ func TestLockProofMutations(t *testing.T) {
 	})
 	t.Run("certificate of another network under a base of that network", func(t *testing.T) {
 		auth := e.Auth
-		tb4, err := auth.TrustBase(4, 1)
+		tb4, err := auth.Genesis(4, 1, 1)
 		require.NoError(t, err)
-		b, _ := RenderTrustBaseJSON(tb4)
-		t4, err := LoadTrustInput(b)
+		t4, err := installGenesis(tb4)
 		require.NoError(t, err)
 		p, err := e.World.Certified(e.F, auth, e.EVMPDR, t4, testRound, 5, 9)
 		require.NoError(t, err)
-		require.ErrorIs(t, VerifyMintBacking(e.F.Cfg, e.remint(t, p, func(*LockProof) {}), t4, e.Pin), ErrEpochMismatch)
+		require.ErrorIs(t, VerifyMintBacking(e.F.Cfg, e.remint(t, p, func(*LockProof) {}), t4, e.Pin), ErrSealNetwork)
 	})
 	t.Run("VerifyLockProof binds the cfg itself", func(t *testing.T) {
 		c := *lp
@@ -208,36 +208,23 @@ func TestLockProofMutationAfterCertification(t *testing.T) {
 	require.ErrorIs(t, err, ErrCDMismatch)
 }
 
-// One pinned SDK trust-base document. Trust-base evolution (epochs, appended
-// records, newer bases, weights) is common SDK work for later: the scenarios
-// below are rejections, never support.
-func TestLockProofFixedProfile(t *testing.T) {
+// The trust input is the network's trust-base history: the proof names its
+// genesis, and the certificate is verified under the entry of its own seal
+// epoch, within that epoch's root-round interval.
+func TestLockProofTrustHistory(t *testing.T) {
 	e := newEnv(t)
 	h, lp := e.backedToken(t, 5, amt, oneKey())
 	require.NoError(t, VerifyMintBacking(e.F.Cfg, h, e.Trust, e.Pin))
-	inst := func(tb *types.RootTrustBaseV1) *TrustInput {
-		b, err := RenderTrustBaseJSON(tb)
-		require.NoError(t, err)
-		ti, err := LoadTrustInput(b)
-		require.NoError(t, err)
-		return ti
-	}
-	// Digest: a different document (another epoch, same keys) is another id.
-	next, err := e.Auth.TrustBase(3, 2)
-	require.NoError(t, err)
-	require.ErrorIs(t, VerifyMintBacking(e.F.Cfg, h, inst(next), e.Pin), ErrTrustBaseDigest)
 	require.ErrorIs(t, VerifyMintBacking(e.F.Cfg, h, nil, e.Pin), ErrTrustBaseDigest)
-	rogue, _ := NewAuthority("rogue")
-	rtb, err := rogue.TrustBase(3, 1)
+	// Another genesis is another trust input, whatever its keys.
+	rogue, err := NewAuthority("rogue")
 	require.NoError(t, err)
-	require.ErrorIs(t, VerifyMintBacking(e.F.Cfg, h, inst(rtb), e.Pin), ErrTrustBaseDigest)
-	// The digest is of the installed bytes: a semantically equal re-serialisation is another id.
-	re := bytes.Replace(e.Trust.JSON, []byte(`"epoch":"1"`), []byte(`"epoch": "1"`), 1)
-	require.NotEqual(t, e.Trust.JSON, re)
-	rti, err := LoadTrustInput(re)
+	rg, err := rogue.Genesis(3, 1, 1)
 	require.NoError(t, err)
-	require.ErrorIs(t, VerifyMintBacking(e.F.Cfg, h, rti, e.Pin), ErrTrustBaseDigest)
-	// Epoch scope guards, with the proof naming the installed document.
+	tr, err := installGenesis(rg)
+	require.NoError(t, err)
+	require.ErrorIs(t, VerifyMintBacking(e.F.Cfg, h, tr, e.Pin), ErrTrustBaseDigest)
+	// Epoch scope, with the proof naming the installed history.
 	named := func(ti *TrustInput) *History {
 		c := *lp
 		c.TrustBaseID = ti.ID()
@@ -245,90 +232,108 @@ func TestLockProofFixedProfile(t *testing.T) {
 		require.NoError(t, err)
 		return hh
 	}
-	ti2 := inst(next)
-	require.ErrorIs(t, VerifyMintBacking(e.F.Cfg, named(ti2), ti2, e.Pin), ErrEpochMismatch, "seal epoch 1, base epoch 2")
-	late, err := e.Auth.TrustBaseWith(3, 1, testRound+1)
+	late, err := e.Auth.Genesis(3, 1, testRound+1)
 	require.NoError(t, err)
-	tl := inst(late)
-	require.ErrorIs(t, VerifyMintBacking(e.F.Cfg, named(tl), tl, e.Pin), ErrEpochMismatch, "root round before epochStartRound")
-	early, err := e.Auth.TrustBaseWith(3, 1, testRound)
+	tl, err := installGenesis(late)
 	require.NoError(t, err)
-	te := inst(early)
-	require.NoError(t, VerifyMintBacking(e.F.Cfg, named(te), te, e.Pin), "root round equal to epochStartRound")
-	net, err := e.Auth.TrustBase(4, 1)
+	require.ErrorIs(t, VerifyMintBacking(e.F.Cfg, named(tl), tl, e.Pin), ErrSealEpoch, "root round before the epoch start")
+	early, err := e.Auth.Genesis(3, 1, testRound)
 	require.NoError(t, err)
-	tn := inst(net)
-	require.ErrorIs(t, VerifyMintBacking(e.F.Cfg, named(tn), tn, e.Pin), ErrEpochMismatch, "another network")
+	te, err := installGenesis(early)
+	require.NoError(t, err)
+	require.NoError(t, VerifyMintBacking(e.F.Cfg, named(te), te, e.Pin), "root round equal to the epoch start")
+	net, err := e.Auth.Genesis(4, 1, 1)
+	require.NoError(t, err)
+	tn, err := installGenesis(net)
+	require.NoError(t, err)
+	require.ErrorIs(t, VerifyMintBacking(e.F.Cfg, named(tn), tn, e.Pin), ErrSealNetwork, "another network")
 }
 
-func TestTrustInputRejectsUnsupportedConfiguration(t *testing.T) {
+// An epoch change: a certificate of epoch 2 is retryable until the history
+// holds epoch 2, then verifies under epoch 2's committee only; epoch 1 ends
+// where epoch 2 starts.
+func TestLockProofEpochChange(t *testing.T) {
 	e := newEnv(t)
-	render := func(mut func(tb *types.RootTrustBaseV1)) []byte {
-		tb := *e.TB
-		mut(&tb)
-		b, err := RenderTrustBaseJSON(&tb)
+	e.backedToken(t, 5, amt, oneKey()) // records the lock of nonce 5 the proofs below certify
+	next, err := NewAuthority("root-2")
+	require.NoError(t, err)
+	e2, err := e.Auth.Successor(e.TB, next, NextEpochStart)
+	require.NoError(t, err)
+	both, err := installGenesis(e.TB, e2)
+	require.NoError(t, err)
+	require.Equal(t, e.Trust.ID(), both.ID(), "the same genesis: the same trust input")
+	sealed := func(tr *TrustInput, auth *Authority, round uint64) *History {
+		p, err := e.World.Certified(e.F, auth, e.EVMPDR, tr, round, 5, 9)
+		require.NoError(t, err)
+		return e.remint(t, p, func(*LockProof) {})
+	}
+	inEpoch2 := sealed(both, next, NextEpochStart+5)
+	require.ErrorIs(t, VerifyMintBacking(e.F.Cfg, inEpoch2, e.Trust, e.Pin), ErrNoEntryForEpoch)
+	require.NoError(t, VerifyMintBacking(e.F.Cfg, inEpoch2, both, e.Pin))
+	require.ErrorIs(t, VerifyMintBacking(e.F.Cfg, sealed(both, e.Auth, NextEpochStart+5), both, e.Pin), ErrLockUC, "epoch 1's committee in epoch 2")
+	require.ErrorIs(t, VerifyMintBacking(e.F.Cfg, sealed(both, next, NextEpochStart-1), both, e.Pin), ErrSealEpoch, "epoch 2 before its start")
+	require.ErrorIs(t, VerifyMintBacking(e.F.Cfg, sealed(e.Trust, e.Auth, NextEpochStart), both, e.Pin), ErrSealEpoch, "epoch 1 after it ended")
+	require.NoError(t, VerifyMintBacking(e.F.Cfg, sealed(e.Trust, e.Auth, NextEpochStart-1), both, e.Pin), "epoch 1 at its last round")
+}
+
+// Weights: the threshold is floor(2W/3)+1 of the weights, never a member count.
+func TestLockProofWeightedCommittee(t *testing.T) {
+	e := newEnv(t)
+	e.backedToken(t, 5, amt, oneKey()) // records the lock of nonce 5 the proofs below certify
+	for _, c := range []struct {
+		weights []uint64
+		signers int
+		ok      bool
+	}{{[]uint64{98, 1, 1}, 1, true}, {[]uint64{1, 1, 98}, 2, false}, {[]uint64{1, 1, 98}, 3, true}} {
+		com, err := NewWeightedCommittee("weighted", c.weights...)
+		require.NoError(t, err)
+		g, err := com.Genesis(3, 1, 1)
+		require.NoError(t, err)
+		require.Equal(t, uint64(67), g.QuorumThreshold)
+		tr, err := installGenesis(g)
+		require.NoError(t, err)
+		com.Signers = c.signers
+		p, err := e.World.Certified(e.F, com, e.EVMPDR, tr, testRound, 5, 9)
+		require.NoError(t, err)
+		err = VerifyMintBacking(e.F.Cfg, e.remint(t, p, func(*LockProof) {}), tr, e.Pin)
+		if c.ok {
+			require.NoError(t, err, c)
+		} else {
+			require.ErrorIs(t, err, ErrLockUC, c)
+		}
+	}
+}
+
+func TestTrustInputInstallation(t *testing.T) {
+	e := newEnv(t)
+	id := e.Trust.ID()
+	_, err := LoadTrustInput(e.Trust.Bundle, id)
+	require.NoError(t, err)
+	other := id
+	other[0] ^= 1
+	_, err = LoadTrustInput(e.Trust.Bundle, other)
+	require.ErrorIs(t, err, ErrTrustBaseDigest)
+	_, err = LoadTrustInput(append(bytes.Clone(e.Trust.Bundle), 0), id)
+	require.ErrorIs(t, err, ErrTrustBase)
+	_, err = LoadTrustInput(nil, id)
+	require.ErrorIs(t, err, ErrTrustBase)
+	// A successor witnessed by its own committee instead of its predecessor's.
+	next, err := NewAuthority("root-2")
+	require.NoError(t, err)
+	forged, err := next.Successor(e.TB, next, NextEpochStart)
+	require.NoError(t, err)
+	raw := func(x *types.RootTrustBaseV2) []byte {
+		b, err := types.Cbor.Marshal(x)
 		require.NoError(t, err)
 		return b
 	}
-	for name, mut := range map[string]func(tb *types.RootTrustBaseV1){
-		"weight 2": func(tb *types.RootTrustBaseV1) {
-			tb.RootNodes = []*types.NodeInfo{{NodeID: "a", SigKey: tb.RootNodes[0].SigKey, Stake: 2}}
-		},
-		"weight 0": func(tb *types.RootTrustBaseV1) {
-			tb.RootNodes = []*types.NodeInfo{{NodeID: "a", SigKey: tb.RootNodes[0].SigKey, Stake: 0}}
-		},
-		"threshold 2 of 1": func(tb *types.RootTrustBaseV1) { tb.QuorumThreshold = 2 },
-		"threshold 0":      func(tb *types.RootTrustBaseV1) { tb.QuorumThreshold = 0 },
-		"no nodes":         func(tb *types.RootTrustBaseV1) { tb.RootNodes = nil },
-		"epoch 0":          func(tb *types.RootTrustBaseV1) { tb.Epoch = 0 },
-		"version 2":        func(tb *types.RootTrustBaseV1) { tb.Version = 2 },
-		"duplicate node id": func(tb *types.RootTrustBaseV1) {
-			a := tb.RootNodes[0]
-			tb.RootNodes = []*types.NodeInfo{a, a}
-			tb.QuorumThreshold = 2
-		},
-	} {
-		_, err := LoadTrustInput(render(mut))
-		require.ErrorIs(t, err, ErrTrustConfig, name)
-	}
-	_, err := LoadTrustInput([]byte("not json"))
-	require.ErrorIs(t, err, ErrTrustConfig)
-	// One-byte textual edits of the valid document, each isolated: an out-of-range number is never read as its low bits, and nothing
-	// may follow the single JSON value.
-	good := e.Trust.JSON
-	edit := func(old, repl string) []byte {
-		require.Contains(t, string(good), old)
-		return []byte(strings.Replace(string(good), old, repl, 1))
-	}
-	for name, doc := range map[string][]byte{
-		"version 2^32+1 narrows to 1": edit(`"version":"1"`, `"version":"4294967297"`),
-		"networkId zero":              edit(fmt.Sprintf(`"networkId":%d`, e.TB.NetworkID), `"networkId":0`),
-		"networkId 2^16+3 narrows":    edit(fmt.Sprintf(`"networkId":%d`, e.TB.NetworkID), fmt.Sprintf(`"networkId":%d`, 65536+uint64(e.TB.NetworkID))),
-		"trailing bracket":            append(bytes.Clone(good), ']'),
-		"trailing second document":    append(bytes.Clone(good), good...),
-		"trailing whitespace garbage": append(bytes.Clone(good), " x"...),
-	} {
-		_, err := LoadTrustInput(doc)
-		require.ErrorIs(t, err, ErrTrustConfig, name)
-	}
-	_, err = LoadTrustInput(append(bytes.Clone(good), '\n'))
-	require.NoError(t, err, "trailing whitespace alone is not a second value")
-	// N=4 requires 3, N=7 requires 5, N=3 requires 3 (N-(N-1)/3).
-	for _, c := range []struct{ n, q uint64 }{{1, 1}, {3, 3}, {4, 3}, {7, 5}, {10, 7}} {
-		tb := *e.TB
-		tb.RootNodes = nil
-		for i := uint64(0); i < c.n; i++ {
-			tb.RootNodes = append(tb.RootNodes, &types.NodeInfo{NodeID: string(rune('a' + i)), SigKey: e.TB.RootNodes[0].SigKey, Stake: 1})
-		}
-		tb.QuorumThreshold = c.q
-		b, _ := RenderTrustBaseJSON(&tb)
-		_, err := LoadTrustInput(b)
-		require.NoError(t, err, "N=%d q=%d", c.n, c.q)
-		tb.QuorumThreshold = c.q - 1
-		b, _ = RenderTrustBaseJSON(&tb)
-		_, err = LoadTrustInput(b)
-		require.ErrorIs(t, err, ErrTrustConfig, "N=%d q=%d", c.n, c.q-1)
-	}
+	fid, err := forged.EntryID()
+	require.NoError(t, err)
+	b, err := types.Cbor.MarshalTaggedValue(gettrustbase.ResponseTag, &gettrustbase.Response{Version: gettrustbase.Version, Network: 3,
+		Status: gettrustbase.StatusOK, FromEpoch: 1, EffectiveEnd: 2, EndEntryID: fid[:], Entries: []cbor.RawMessage{raw(e.TB), raw(forged)}})
+	require.NoError(t, err)
+	_, err = LoadTrustInput(b, id)
+	require.ErrorIs(t, err, ErrTrustBase)
 }
 
 // A quorum certificate signed by a member outside the selected trust base fails.
@@ -437,11 +442,9 @@ func TestLockProofCountQuorumBoundaries(t *testing.T) {
 			e := newEnv(t)
 			auth, err := NewCommittee("committee", c.n)
 			require.NoError(t, err)
-			tb, err := auth.TrustBase(3, 1)
+			tb, err := auth.Genesis(3, 1, 1)
 			require.NoError(t, err)
-			b, err := RenderTrustBaseJSON(tb)
-			require.NoError(t, err)
-			e.Trust, err = LoadTrustInput(b)
+			e.Trust, err = installGenesis(tb)
 			require.NoError(t, err)
 			auth.Signers = signers
 			e.Auth = auth
@@ -454,4 +457,33 @@ func TestLockProofCountQuorumBoundaries(t *testing.T) {
 			}
 		}
 	}
+}
+
+// The native B1 seal rule (go-base's RootTrustBaseV2 quorum check): one invalid
+// signature of a known member fails the seal even when the valid ones reach the
+// quorum (three of four), as in both SDKs.
+func TestLockProofInvalidSignatureFailsTheSeal(t *testing.T) {
+	e := newEnv(t)
+	com, err := NewCommittee("strict", 4)
+	require.NoError(t, err)
+	g, err := com.Genesis(3, 1, 1)
+	require.NoError(t, err)
+	tr, err := installGenesis(g)
+	require.NoError(t, err)
+	e.Trust, e.Auth = tr, com
+	h, lp := e.backedToken(t, 5, amt, oneKey())
+	require.NoError(t, VerifyMintBacking(e.F.Cfg, h, tr, e.Pin))
+	var uc types.UnicityCertificate
+	require.NoError(t, types.Cbor.Unmarshal(lp.UC, &uc))
+	require.Len(t, uc.UnicitySeal.Signatures, 4)
+	for id, sig := range uc.UnicitySeal.Signatures {
+		c := bytes.Clone(sig)
+		c[10] ^= 1
+		uc.UnicitySeal.Signatures[id] = c
+		break
+	}
+	b, err := types.Cbor.Marshal(&uc)
+	require.NoError(t, err)
+	err = VerifyMintBacking(e.F.Cfg, e.remint(t, lp, func(p *LockProof) { p.UC = b }), tr, e.Pin)
+	require.ErrorIs(t, err, ErrLockUC)
 }

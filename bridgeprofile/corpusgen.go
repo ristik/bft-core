@@ -14,6 +14,8 @@ import (
 
 	"github.com/decred/dcrd/dcrec/secp256k1/v4"
 	"github.com/unicitynetwork/bft-go-base/types"
+
+	"github.com/unicitynetwork/bft-core/gettrustbase"
 )
 
 // semanticProfile is the canonical native-bridge profile artifact, byte for
@@ -28,8 +30,8 @@ var Notes = []string{
 	"Every fixture value is a DEV fixture input, not a production parameter.",
 	"Signatures are RFC 6979 deterministic with low-s; every implementation must reproduce them byte for byte.",
 	"No gas price is frozen by this corpus. Bounds are provisional DEV ceilings.",
-	"Supported authority is one fixed SDK trust base, unit weights, count quorum N-(N-1)/3. DEFERRED (common SDK trust-base work, bft-core#421): weighted acceptance such as (98,1,1), mixed historical/current committees, trust-base append/fetch, interval closure, old-J validity through rotation, full B1/SDK seal parity; they have no cases.",
-	"The trust-base documents in fixtures.json are the exact bytes the pinned JS SDK 3.0.1 emits; native-bridge-plugins checks each against the SDK, and config/sdk-root-trust-base.json is the pinned B.",
+	"The authority is the network's Unicity Trust Base history (protocol/trust-base.md): each seal is verified under the entry of its own epoch, within its root-round interval, weights reaching floor(2W/3)+1, every signature a valid member signature (64 bytes or 65 with suffix 0/1, the B1 profile rule).",
+	"Each trustBases entry in fixtures.json is a release bundle (tag 39015) and the genesis EntryID it is installed under; config/trust-base.bundle.cbor is the dev bundle and config/trust-base.genesis.entryid its pin. Test data, not an authenticated deployment.",
 	"B1 in compose cases is the claim set in aux.claims plus the real RSMT_MEMBER_V1; UC verification behind 0x0100 is B1's own conformance.",
 	"referenceTime and nonce are decimal strings; amounts are minimal big-endian hex.",
 }
@@ -53,6 +55,9 @@ type gen struct {
 	// useQuad selects it for certifiedWith, extraN adds that many unrelated leaves to every shard tree (deeper paths).
 	useQuad bool
 	extraN  int
+	// e2 and e2New are epoch 2 of the dev history with the same keys and with newCom as its committee.
+	e2, e2New *types.RootTrustBaseV2
+	newCom    *Authority
 }
 
 func (g *gen) agg() *AggregatorWorld {
@@ -91,49 +96,57 @@ func BuildCorpus() (*Corpus, error) {
 	g0 := g
 	f := d.F
 	fs := &FixtureSet{Format: CorpusFormat, Proto: NativeBridgeProtoVersion, Notes: Notes,
-		Cfgs: map[string]FixtureJSON{"dev": fixtureJSON("dev", f)}, TrustBases: map[string]string{}, Pins: map[string]PinJSON{},
+		Cfgs: map[string]FixtureJSON{"dev": fixtureJSON("dev", f)}, TrustBases: map[string]TrustJSON{}, Pins: map[string]PinJSON{},
 		Aggregat: map[string]string{}}
-	tb2, err := d.Auth.TrustBase(DevNetwork, 2)
-	if err != nil {
-		return nil, err
+	// Trust inputs: release bundles and the genesis each is installed under.
+	trust := func(pin *types.RootTrustBaseV2, entries ...*types.RootTrustBaseV2) TrustJSON {
+		b, err := TrustBundle(entries...)
+		g0.must(err)
+		id, err := pin.EntryID()
+		g0.must(err)
+		return TrustJSON{Bundle: hx(b), Pin: hex.EncodeToString(id[:])}
 	}
+	fs.TrustBases["pinned"] = trust(d.TB, d.TB)
+	// Epoch 2 from root round NextEpochStart: the same keys, or a new committee, witnessed by epoch 1's.
+	e2, err := d.Auth.Successor(d.TB, d.Auth, NextEpochStart)
+	g0.must(err)
+	fs.TrustBases["next-epoch"] = trust(d.TB, d.TB, e2)
+	newCom, err := NewAuthority("root-2")
+	g0.must(err)
+	e2new, err := d.Auth.Successor(d.TB, newCom, NextEpochStart)
+	g0.must(err)
+	fs.TrustBases["next-epoch-new-committee"] = trust(d.TB, d.TB, e2new)
+	g.e2, g.e2New, g.newCom = e2, e2new, newCom
 	rogue, err := NewAuthority("rogue")
-	if err != nil {
-		return nil, err
-	}
-	rtb, err := rogue.TrustBase(DevNetwork, 1)
-	if err != nil {
-		return nil, err
-	}
-	jsonHex := func(tb *types.RootTrustBaseV1) string { b, err := RenderTrustBaseJSON(tb); g0.must(err); return hx(b) }
-	fs.TrustBases["pinned"] = hx(d.Trust.JSON)
-	fs.TrustBases["next-epoch-same-keys"] = jsonHex(tb2)
-	fs.TrustBases["rogue-authority"] = jsonHex(rtb)
-	futureStart, err := d.Auth.TrustBaseWith(DevNetwork, 1, DevRootRound+1)
 	g0.must(err)
-	fs.TrustBases["epoch-start-after-certificate"] = jsonHex(futureStart)
-	otherNet, err := d.Auth.TrustBase(DevNetwork+1, 1)
+	rg, err := rogue.Genesis(DevNetwork, 1, 1)
 	g0.must(err)
-	fs.TrustBases["other-network"] = jsonHex(otherNet)
-	// Four validators with threshold 2: a valid SDK document whose threshold is
-	// not the supported count quorum N-(N-1)/3 = 3.
-	quad, err := NewCommittee("quorum-4", 4)
+	fs.TrustBases["rogue-authority"] = trust(rg, rg)
+	futureStart, err := d.Auth.Genesis(DevNetwork, 1, DevRootRound+1)
 	g0.must(err)
-	wrongThr, err := quad.TrustBase(DevNetwork, 1)
+	fs.TrustBases["epoch-start-after-certificate"] = trust(futureStart, futureStart)
+	otherNet, err := d.Auth.Genesis(DevNetwork+1, 1, 1)
 	g0.must(err)
-	wrongThr.QuorumThreshold = 2
-	fs.TrustBases["threshold-not-n-minus-third"] = jsonHex(wrongThr)
-	// Unit-weight committees for the count-quorum boundaries.
+	fs.TrustBases["other-network"] = trust(otherNet, otherNet)
+	// Unit-weight committees for the quorum boundaries (floor(2N/3)+1 = N-(N-1)/3 of N).
 	for _, n := range []int{3, 4, 7} {
 		com, err := NewCommittee(fmt.Sprintf("quorum-%d", n), n)
 		g0.must(err)
-		ctb, err := com.TrustBase(DevNetwork, 1)
+		ctb, err := com.Genesis(DevNetwork, 1, 1)
 		g0.must(err)
-		fs.TrustBases[fmt.Sprintf("committee-%d", n)] = jsonHex(ctb)
+		fs.TrustBases[fmt.Sprintf("committee-%d", n)] = trust(ctb, ctb)
 	}
-	heavy := *d.TB
-	heavy.RootNodes = []*types.NodeInfo{{NodeID: d.TB.RootNodes[0].NodeID, SigKey: d.TB.RootNodes[0].SigKey, Stake: 2}}
-	fs.TrustBases["non-unit-weight"] = jsonHex(&heavy)
+	// Weighted committees (W = 100, threshold 67), the heavy member first or last in signing order.
+	for _, c := range []struct {
+		name string
+		w    []uint64
+	}{{"weighted-heavy-first", []uint64{98, 1, 1}}, {"weighted-heavy-last", []uint64{1, 1, 98}}} {
+		com, err := NewWeightedCommittee(c.name, c.w...)
+		g0.must(err)
+		ctb, err := com.Genesis(DevNetwork, 1, 1)
+		g0.must(err)
+		fs.TrustBases[c.name] = trust(ctb, ctb)
+	}
 	pdrHex := func(p *types.PartitionDescriptionRecord) string { b, _ := types.Cbor.Marshal(p); return hx(b) }
 	fs.Pins["dev"] = PinJSON{GenesisPDR: pdrHex(d.EVMPDR), VaultCodeHash: h32(d.Pin.VaultCodeHash)}
 	other := *d.Pin
@@ -152,14 +165,7 @@ func BuildCorpus() (*Corpus, error) {
 	fs.Cfgs["dev-replacement-vault"] = fixtureJSON("dev-replacement-vault", &dev2)
 	g.fs = fs
 
-	for _, network := range []uint64{0, 65536} {
-		var doc map[string]any
-		g.must(json.Unmarshal(d.Trust.JSON, &doc))
-		doc["networkId"] = network
-		raw, err := json.Marshal(doc)
-		g.must(err)
-		g.add(Case{ID: fmt.Sprintf("trust-network-%d", network), Family: "config", Op: "trust-input", Description: "network rejected before narrowing", Input: hx(raw)})
-	}
+	g.trustInputs()
 	g.networkBoundaries()
 	g.config()
 	g.vault()
@@ -373,7 +379,7 @@ func (g *gen) policy() {
 	ap("policy-version-3", "literal version 3", CArr(CBytes([]byte(policyDomain)), CUint(3), CUint(part)))
 	ap("policy-partition-zero", "partition 0", NewPolicy(0).Bytes())
 	ap("policy-partition-wide", "partition 2^32", CArr(CBytes([]byte(policyDomain)), CUint(PolicyVersion), CUint(1<<32)))
-	ap("policy-nonminimal-partition", "partition 11 as 0x180b", replaceOnce(pb, []byte{0x02, 0x0b}, []byte{0x02, 0x18, 0x0b}))
+	ap("policy-nonminimal-partition", fmt.Sprintf("partition %d as 0x18%02x", part, part), replaceOnce(pb, []byte{0x02, byte(part)}, []byte{0x02, 0x18, byte(part)}))
 	ap("policy-extra-field", "a fourth field (a shard list)", CArr(CBytes([]byte(policyDomain)), CUint(PolicyVersion), CUint(part), CArr()))
 	ap("policy-missing-partition", "two fields", CArr(CBytes([]byte(policyDomain)), CUint(PolicyVersion)))
 	ap("policy-oversized", "over 512 bytes", append(bytes.Clone(pb), make([]byte, MaxPolicyBytes)...))
@@ -852,7 +858,8 @@ func (g *gen) wire() {
 	tadd("token-proof-extra-sibling", "a sibling beyond the bitmap", replaceOnce(tbts, p0, pr(CUint(1), cd0, CUint(tok.MintProof.T), CBytes(append(bytes.Clone(path), make([]byte, 32)...)), uc0)))
 	tadd("token-proof-no-certificate", "null certificate", replaceOnce(tbts, p0, pr(CUint(1), cd0, CUint(tok.MintProof.T), CBytes(path), CNull)))
 	tadd("token-proof-certificate-not-decodable", "a tagged item that is not an SDK-decodable certificate", replaceOnce(tbts, p0, pr(CUint(1), cd0, CUint(tok.MintProof.T), CBytes(path), CTag(1, CBytes([]byte{1})))))
-	tadd("token-proof-signature-64-bytes", "certificate whose seal signatures are 64 bytes", replaceOnce(tbts, p0, pr(CUint(1), cd0, CUint(tok.MintProof.T), CBytes(path), g.shortSigUC(uc0))))
+	tadd("token-proof-signature-64-bytes", "certificate whose seal signatures are 64 bytes (r||s): inside the B1 profile rule", replaceOnce(tbts, p0, pr(CUint(1), cd0, CUint(tok.MintProof.T), CBytes(path), g.shortSigUC(uc0, 64))))
+	tadd("token-proof-signature-63-bytes", "certificate whose seal signatures are 63 bytes", replaceOnce(tbts, p0, pr(CUint(1), cd0, CUint(tok.MintProof.T), CBytes(path), g.shortSigUC(uc0, 63))))
 	for _, mutation := range certificateMutations() {
 		uc, err := replaceCertificateItem(uc0, mutation.replacement, mutation.path...)
 		g.must(err)
@@ -1060,7 +1067,7 @@ func (g *gen) lock() {
 				uc.UnicitySeal.Signatures[k] = flip(uc.UnicitySeal.Signatures[k], 3)
 			}
 		})},
-		{"backing-uc-signature-64-bytes", "every seal signature cut to 64 bytes: inside native B1's accepted widths, outside the SDK codec", reUC(func(uc *types.UnicityCertificate) {
+		{"backing-uc-signature-64-bytes", "every seal signature cut to 64 bytes (r||s): accepted by the B1 profile rule, as by both SDKs", reUC(func(uc *types.UnicityCertificate) {
 			for k, sig := range uc.UnicitySeal.Signatures {
 				uc.UnicitySeal.Signatures[k] = sig[:64]
 			}
@@ -1109,45 +1116,125 @@ func (g *gen) lock() {
 	back("backing-amount-differs", "mint amount differs from the locked amount", hb(5, new(big.Int).Add(amount, big.NewInt(1)), keys[0]), "pinned", "dev")
 	back("backing-recipient-differs", "mint recipient differs from the locked recipient", hb(5, amount, KeyFromSeed("thief")), "pinned", "dev")
 	back("backing-nonce-differs", "proof of nonce 5 offered for nonce 6", hb(6, amount, keys[0]), "pinned", "dev")
-	back("backing-next-epoch-trust-base", "a different document (another epoch, same keys) is installed: digest mismatch", h, "next-epoch-same-keys", "dev")
-	back("backing-rogue-authority", "a document whose only authority is another key is installed", h, "rogue-authority", "dev")
-	back("backing-non-unit-weight", "unsupported configuration: a validator of weight 2", h, "non-unit-weight", "dev")
-	back("backing-threshold", "unsupported configuration: quorumThreshold is not N-(N-1)/3", h, "threshold-not-n-minus-third", "dev")
-	// Unit-weight count-quorum boundaries: N-(N-1)/3 distinct valid signers accept, one fewer rejects.
-	for _, c := range []struct{ n, q int }{{3, 3}, {4, 3}, {7, 5}} {
-		name := fmt.Sprintf("committee-%d", c.n)
-		raw, _ := hex.DecodeString(g.fs.TrustBases[name])
-		ti, err := LoadTrustInput(raw)
+	back("backing-rogue-authority", "a history whose genesis is another authority is installed: the proof names the dev genesis", h, "rogue-authority", "dev")
+	// Epoch 2: a proof sealed in it verifies once the history holds it, and is retryable before.
+	certifiedIn := func(base string, auth *Authority, rootRound uint64) *LockProof {
+		ti, err := g.fs.trustInput(base)
 		g.must(err)
-		com, err := NewCommittee(fmt.Sprintf("quorum-%d", c.n), c.n)
+		if ti == nil {
+			return nil
+		}
+		p, err := d.World.Certified(f, auth, d.EVMPDR, ti, rootRound, 5, 9)
+		g.must(err)
+		return p
+	}
+	for _, c := range []struct {
+		id, desc, sealedIn, installed string
+		auth                          *Authority
+		round                         uint64
+	}{
+		{"backing-next-epoch-held", "sealed in epoch 2 (same keys); the installed history holds epoch 2", "next-epoch", "next-epoch", d.Auth, NextEpochStart + 5},
+		{"backing-next-epoch-not-held", "sealed in epoch 2; the installed history holds epoch 1 only: retryable", "next-epoch", "pinned", d.Auth, NextEpochStart + 5},
+		{"backing-new-committee", "sealed in epoch 2 by its new committee", "next-epoch-new-committee", "next-epoch-new-committee", g.newCom, NextEpochStart + 5},
+		{"backing-new-committee-old-signer", "sealed in epoch 2 by epoch 1's committee, which is not epoch 2's", "next-epoch-new-committee", "next-epoch-new-committee", d.Auth, NextEpochStart + 5},
+		{"backing-ended-epoch", "sealed in epoch 1 at a root round where epoch 2 has started", "pinned", "next-epoch", d.Auth, NextEpochStart + 5},
+	} {
+		if p := certifiedIn(c.sealedIn, c.auth, c.round); p != nil {
+			back(c.id, c.desc, remint(func(lp *LockProof) { *lp = *p }), c.installed, "dev")
+		}
+	}
+	// Quorum boundaries: unit weights (floor(2N/3)+1 distinct valid signers accept, one fewer rejects) and weights.
+	for _, c := range []struct {
+		name, seed string
+		n, q       int
+		weights    []uint64
+	}{{"committee-3", "quorum-3", 3, 3, nil}, {"committee-4", "quorum-4", 4, 3, nil}, {"committee-7", "quorum-7", 7, 5, nil},
+		{"weighted-heavy-first", "weighted-heavy-first", 3, 1, []uint64{98, 1, 1}}, {"weighted-heavy-last", "weighted-heavy-last", 3, 3, []uint64{1, 1, 98}}} {
+		ti, err := g.fs.trustInput(c.name)
+		g.must(err)
+		var com *Authority
+		if c.weights == nil {
+			com, err = NewCommittee(c.seed, c.n)
+		} else {
+			com, err = NewWeightedCommittee(c.seed, c.weights...)
+		}
 		g.must(err)
 		if ti == nil || com == nil {
 			continue
 		}
 		for _, k := range []int{c.q, c.q - 1} {
+			if k == 0 {
+				continue
+			}
 			com.Signers = k
 			p, err := d.World.Certified(f, com, d.EVMPDR, ti, DevRootRound, 5, 9)
 			g.must(err)
 			if p == nil {
 				continue
 			}
-			id, desc := fmt.Sprintf("backing-quorum-n%d-signers%d", c.n, k), fmt.Sprintf("%d validators, threshold %d: %d distinct valid signers", c.n, c.q, k)
-			back(id, desc, remint(func(lp *LockProof) { *lp = *p }), name, "dev")
+			id, desc := fmt.Sprintf("backing-quorum-%s-signers%d", strings.TrimPrefix(c.name, "committee-"), k), fmt.Sprintf("%s: the first %d signers", c.name, k)
+			if c.weights == nil {
+				id, desc = fmt.Sprintf("backing-quorum-n%d-signers%d", c.n, k), fmt.Sprintf("%d validators of weight 1, threshold %d: %d distinct valid signers", c.n, c.q, k)
+			}
+			back(id, desc, remint(func(lp *LockProof) { *lp = *p }), c.name, "dev")
 		}
 	}
-	// A proof that names the installed document but whose certificate lies outside the one pinned base.
+	// A proof that names the installed history but whose certificate lies outside it.
 	for _, c := range []struct{ id, desc, base string }{
-		{"backing-epoch-mismatch", "the proof names the installed document (epoch 2) but its certificate is sealed in root epoch 1", "next-epoch-same-keys"},
-		{"backing-epoch-start-after", "certificate root round before the base's epochStartRound", "epoch-start-after-certificate"},
-		{"backing-other-network", "the installed document is for another network", "other-network"},
+		{"backing-epoch-start-after", "certificate root round before the genesis's epochStartRound", "epoch-start-after-certificate"},
+		{"backing-other-network", "the installed history is for another network", "other-network"},
 	} {
-		raw, _ := hex.DecodeString(g.fs.TrustBases[c.base])
-		ti, err := LoadTrustInput(raw)
+		ti, err := g.fs.trustInput(c.base)
 		g.must(err)
 		if err != nil {
 			continue
 		}
 		back(c.id, c.desc, remint(func(lp *LockProof) { lp.TrustBaseID = ti.ID() }), c.base, "dev")
+	}
+	// Several faults get one verdict in every implementation: the seal epoch first, then the
+	// configuration (the PDR), then the certificate (protocol/trust-base.md).
+	ucMut := func(raw []byte, f func(uc *types.UnicityCertificate)) []byte {
+		var uc types.UnicityCertificate
+		g.must(types.Cbor.Unmarshal(raw, &uc))
+		f(&uc)
+		b, err := types.Cbor.Marshal(&uc)
+		g.must(err)
+		return b
+	}
+	if p := certifiedIn("next-epoch", d.Auth, NextEpochStart+5); p != nil {
+		back("backing-two-faults-epoch-and-root", "sealed in epoch 2, which the installed history does not hold, with a false seal root: the epoch decides (retryable)",
+			remint(func(lp *LockProof) {
+				*lp = *p
+				lp.UC = ucMut(p.UC, func(uc *types.UnicityCertificate) { uc.UnicitySeal.Hash[0] ^= 1 })
+			}), "pinned", "dev")
+	}
+	back("backing-two-faults-pdr-and-signature", "a configuration that is not the certificate's and a broken seal signature: the configuration decides",
+		remint(func(lp *LockProof) {
+			lp.PDR = flip(lp.PDR, len(lp.PDR)-2)
+			lp.UC = ucMut(lp.UC, func(uc *types.UnicityCertificate) {
+				for k := range uc.UnicitySeal.Signatures {
+					uc.UnicitySeal.Signatures[k] = flip(uc.UnicitySeal.Signatures[k], 3)
+				}
+			})
+		}), "pinned", "dev")
+	// The strict seal rule: a full quorum plus one signature of a non-member is refused.
+	if ti, err := g.fs.trustInput("committee-4"); err == nil {
+		com, err := NewCommittee("quorum-4", 4)
+		g.must(err)
+		if p, err := d.World.Certified(f, com, d.EVMPDR, ti, DevRootRound, 5, 9); err == nil {
+			back("backing-quorum-plus-non-member", "all four members sign and a non-member adds a signature: the seal fails",
+				remint(func(lp *LockProof) {
+					*lp = *p
+					lp.UC = ucMut(p.UC, func(uc *types.UnicityCertificate) {
+						ids := make([]string, 0, len(uc.UnicitySeal.Signatures))
+						for id := range uc.UnicitySeal.Signatures {
+							ids = append(ids, id)
+						}
+						sort.Strings(ids) // deterministic: a copy of the first member's signature
+						uc.UnicitySeal.Signatures["16Uiu2HAmNonMember"] = bytes.Clone(uc.UnicitySeal.Signatures[ids[0]])
+					})
+				}), "committee-4", "dev")
+		}
 	}
 	// J mutation after certification.
 	hm := *h
@@ -1326,7 +1413,7 @@ func (g *gen) proof() {
 	// The DN-B committee shape: four validators, so four signatures per seal.
 	quadAuth, err := NewCommittee("dnb-aggregator-committee", 4)
 	g.must(err)
-	quadTB, err := quadAuth.TrustBase(DevNetwork, 1)
+	quadTB, err := quadAuth.Genesis(DevNetwork, 1, 1)
 	g.must(err)
 	g.quad = &AggregatorWorld{PDRs: d.Agg.PDRs, Auth: quadAuth, TB: quadTB}
 	g.useQuad = true
@@ -1427,7 +1514,7 @@ func rewriteIRBytes(raw []byte, mut func(r *types.InputRecord)) []byte {
 }
 
 // pack renders the family files, the fixture set, the semantic profile and the
-// pinned SDK trust-base document with its provenance.
+// dev trust-base release bundle with its genesis EntryID.
 func (g *gen) pack() (*Corpus, error) {
 	out := &Corpus{Files: map[string][]byte{}, Set: g.fs, Cases: g.cases}
 	js := func(v any) ([]byte, error) {
@@ -1456,29 +1543,10 @@ func (g *gen) pack() (*Corpus, error) {
 		out.Files[fam+"/cases.json"] = b
 	}
 	out.Files["config/semantic-profile.json"] = semanticProfile
-	b, err := g.d.sdkTrustFixture()
-	if err != nil {
-		return nil, err
-	}
-	out.Files["config/sdk-root-trust-base.json"] = g.d.Trust.JSON
-	out.Files["config/sdk-root-trust-base.provenance.json"] = b
+	id := g.d.Trust.ID()
+	out.Files["config/trust-base.bundle.cbor"] = g.d.Trust.Bundle
+	out.Files["config/trust-base.genesis.entryid"] = []byte(hex.EncodeToString(id[:]) + "\n")
 	return out, nil
-}
-
-// sdkTrustFixture is the provenance record published beside the pinned B; it
-// has the bytes native-bridge-plugins' tools/sdk_trust_fixture.mjs writes.
-func (d *Deployment) sdkTrustFixture() ([]byte, error) {
-	sum := sha256.Sum256(d.Trust.JSON)
-	b, err := json.MarshalIndent(struct {
-		Fixture       string `json:"fixture"`
-		SDKVersion    string `json:"sdkVersion"`
-		SDKCommit     string `json:"sdkCommit"`
-		Serialization string `json:"serialization"`
-		ByteLength    int    `json:"byteLength"`
-		SHA256        string `json:"sha256"`
-	}{"synthetic-fixed-base-not-authenticated", "3.0.1", "f5f0737306901215860aa920a6ab570b699efba8",
-		"UTF8(JSON.stringify(RootTrustBase.fromJSON(source).toJSON()))", len(d.Trust.JSON), hex.EncodeToString(sum[:])}, "", "  ")
-	return append(b, '\n'), err
 }
 
 // Digest is the SHA-256 of the sorted "sha256  path" listing of every
@@ -1499,12 +1567,12 @@ func (c *Corpus) Digest() string {
 	return hex.EncodeToString(d[:])
 }
 
-// shortSigUC re-encodes a certificate with every seal signature cut to 64 bytes.
-func (g *gen) shortSigUC(uc []byte) []byte {
+// shortSigUC re-encodes a certificate with every seal signature cut to n bytes.
+func (g *gen) shortSigUC(uc []byte, n int) []byte {
 	var c types.UnicityCertificate
 	g.must(types.Cbor.Unmarshal(uc, &c))
 	for k, sig := range c.UnicitySeal.Signatures {
-		c.UnicitySeal.Signatures[k] = sig[:64]
+		c.UnicitySeal.Signatures[k] = sig[:n]
 	}
 	b, err := types.Cbor.Marshal(&c)
 	g.must(err)
@@ -1538,4 +1606,43 @@ func ucWithSigs(g *gen, uc []byte, n int) []byte {
 	out, err := types.Cbor.Marshal(&c)
 	g.must(err)
 	return out
+}
+
+// trustInputs is the config family's installation of release bundles: the pin
+// must be the bundle's genesis, the bundle complete, canonical and witnessed
+// link by link.
+func (g *gen) trustInputs() {
+	d := g.d
+	add := func(id, desc string, bundle []byte, pin *types.RootTrustBaseV2) {
+		p, err := pin.EntryID()
+		g.must(err)
+		g.add(Case{ID: id, Family: "config", Op: "trust-input", Description: desc, Input: hx(bundle), Aux: map[string]string{"pin": hex.EncodeToString(p[:])}})
+	}
+	pinned, err := TrustBundle(d.TB)
+	g.must(err)
+	add("trust-genesis-bundle", "a release bundle of the genesis alone, under its own EntryID", pinned, d.TB)
+	full, err := TrustBundle(d.TB, g.e2New)
+	g.must(err)
+	add("trust-two-epoch-bundle", "the genesis and epoch 2 (a new committee witnessed by epoch 1's)", full, d.TB)
+	add("trust-other-pin", "a bundle installed under another genesis EntryID", pinned, g.e2New)
+	add("trust-trailing-byte", "a complete bundle followed by one byte", append(bytes.Clone(full), 0), d.TB)
+	// epoch 2 witnessed by a key that is not a member of epoch 1's committee
+	forged, err := g.newCom.Successor(d.TB, g.newCom, NextEpochStart)
+	g.must(err)
+	var raw [][]byte
+	for _, e := range []*types.RootTrustBaseV2{d.TB, forged} {
+		b, err := types.Cbor.Marshal(e)
+		g.must(err)
+		raw = append(raw, b)
+	}
+	if fid, err := forged.EntryID(); err == nil {
+		r := &gettrustbase.Response{Version: gettrustbase.Version, Network: forged.NetworkID, Status: gettrustbase.StatusOK, FromEpoch: d.TB.Epoch,
+			EffectiveEnd: forged.Epoch, EndEntryID: fid[:]}
+		for _, b := range raw {
+			r.Entries = append(r.Entries, b)
+		}
+		b, err := types.Cbor.MarshalTaggedValue(gettrustbase.ResponseTag, r)
+		g.must(err)
+		add("trust-unwitnessed-successor", "epoch 2 is signed by its own committee, not by epoch 1's", b, d.TB)
+	}
 }

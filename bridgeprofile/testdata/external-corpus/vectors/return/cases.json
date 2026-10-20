@@ -1,8 +1,8 @@
 {
- "format": "native-bridge-vectors/2",
- "nativeBridgeProtoVersion": 4,
+ "format": "native-bridge-vectors/3",
+ "nativeBridgeProtoVersion": 5,
  "family": "return",
- "fixtureDigest": "6a36234ec3380a1356ad07dc52742ad96b8fb0b60b30ea299c19cd4ad19f241c",
+ "fixtureDigest": "905c8444ba567573e2cc1b798be53987006bacdfda2fe63b9349933afbd0f8e1",
  "cases": [
   {
    "id": "return-partial-amount",

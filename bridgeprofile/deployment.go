@@ -16,8 +16,8 @@ import (
 type Deployment struct {
 	F      *Fixture
 	Auth   *Authority
-	TB     *types.RootTrustBaseV1
-	Trust  *TrustInput // the one pinned SDK trust-base document
+	TB     *types.RootTrustBaseV2 // the genesis entry
+	Trust  *TrustInput            // the installed trust-base history (release bundle of TB)
 	EVMPDR *types.PartitionDescriptionRecord
 	Pin    *DeploymentPin
 	World  *LockWorld
@@ -31,6 +31,8 @@ const (
 	DevAggPart   = 11
 	DevEVMPart   = 7
 	DevNetwork   = 3
+	// NextEpochStart is the first root round of epoch 2 in the multi-epoch trust fixtures.
+	NextEpochStart = DevRootRound + 10
 )
 
 // NewDeployment builds the DEV deployment.
@@ -39,15 +41,11 @@ func NewDeployment() (*Deployment, error) {
 	if err != nil {
 		return nil, err
 	}
-	tb, err := auth.TrustBase(DevNetwork, 1)
+	tb, err := auth.Genesis(DevNetwork, 1, 1)
 	if err != nil {
 		return nil, err
 	}
-	tbJSON, err := RenderTrustBaseJSON(tb)
-	if err != nil {
-		return nil, err
-	}
-	trust, err := LoadTrustInput(tbJSON)
+	trust, err := installGenesis(tb)
 	if err != nil {
 		return nil, err
 	}
@@ -92,4 +90,18 @@ func (d *Deployment) Backed(n uint64, amount *big.Int, keys []*secp256k1.Private
 	}
 	h, err := d.F.BuildTokenWith(n, amount, keys, BuildOpts{Proof: lp})
 	return h, lp, err
+}
+
+// installGenesis installs the release bundle of entries (a genesis first) under
+// that genesis's EntryID.
+func installGenesis(entries ...*types.RootTrustBaseV2) (*TrustInput, error) {
+	b, err := TrustBundle(entries...)
+	if err != nil {
+		return nil, err
+	}
+	id, err := entries[0].EntryID()
+	if err != nil {
+		return nil, err
+	}
+	return LoadTrustInput(b, id)
 }

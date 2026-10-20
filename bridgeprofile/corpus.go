@@ -21,7 +21,7 @@ import (
 // language can follow the same procedure.
 
 // CorpusFormat identifies the case layout.
-const CorpusFormat = "native-bridge-vectors/2"
+const CorpusFormat = "native-bridge-vectors/3"
 
 // Expect is the outcome every implementation must reproduce.
 type Expect struct {
@@ -112,7 +112,7 @@ type FixtureSet struct {
 	Proto      int                    `json:"nativeBridgeProtoVersion"`
 	Notes      []string               `json:"notes"`
 	Cfgs       map[string]FixtureJSON `json:"fixtures"`
-	TrustBases map[string]string      `json:"trustBases"` // name -> canonical root trust base CBOR, hex
+	TrustBases map[string]TrustJSON   `json:"trustBases"` // name -> a release bundle and the genesis pin it is installed under
 	Pins       map[string]PinJSON     `json:"pins"`
 	Aggregat   map[string]string      `json:"aggregatorAuthorities"` // name -> canonical root trust base hex
 }
@@ -158,7 +158,8 @@ var reasons = []struct {
 	{"ErrZeroDigest", ErrZeroDigest}, {"ErrDeadlineMismatch", ErrDeadlineMismatch}, {"ErrDeadlineExpired", ErrDeadlineExpired},
 	{"ErrIROpening", ErrIROpening}, {"ErrIRShape", ErrIRShape}, {"ErrIRState", ErrIRState}, {"ErrIRTime", ErrIRTime},
 	{"ErrGasBudget", ErrGasBudget}, {"ErrPathBitmap", ErrPathBitmap}, {"ErrAnchorAuth", ErrAnchorAuth}, {"ErrLeafProof", ErrLeafProof},
-	{"ErrTrustBaseDigest", ErrTrustBaseDigest}, {"ErrEpochMismatch", ErrEpochMismatch}, {"ErrTrustConfig", ErrTrustConfig}, {"ErrLockUC", ErrLockUC},
+	{"ErrTrustBaseDigest", ErrTrustBaseDigest}, {"ErrTrustBase", ErrTrustBase}, {"ErrSealNetwork", ErrSealNetwork},
+	{"ErrSealEpoch", ErrSealEpoch}, {"ErrNoEntryForEpoch", ErrNoEntryForEpoch}, {"ErrLockUC", ErrLockUC},
 	{"ErrLockPDR", ErrLockPDR}, {"ErrLockHeader", ErrLockHeader}, {"ErrLockAccount", ErrLockAccount},
 	{"ErrLockCodeHash", ErrLockCodeHash}, {"ErrLockStorage", ErrLockStorage}, {"ErrLockDigest", ErrLockDigest},
 	{"ErrMPTNode", ErrMPTNode}, {"ErrMPTPath", ErrMPTPath}, {"ErrMPTAbsent", ErrMPTAbsent}, {"ErrMPTExtraneous", ErrMPTExtraneous},
@@ -179,6 +180,8 @@ func Reason(err error) (name, family string) {
 		family = "budget"
 	case errors.Is(err, ErrInvalid):
 		family = "invalid"
+	case errors.Is(err, ErrUnavailable):
+		family = "unavailable"
 	}
 	return
 }
@@ -278,12 +281,31 @@ func (fs *FixtureSet) policyBody(name string) []byte {
 	return b
 }
 
+// TrustJSON is an installed trust input: a release bundle (tag 39015, hex) and
+// the genesis EntryID (hex) the installation pins.
+type TrustJSON struct {
+	Bundle string `json:"bundle"`
+	Pin    string `json:"pin"`
+}
+
+func pin32(s string) ([32]byte, bool) {
+	var p [32]byte
+	b, err := hex.DecodeString(s)
+	if err != nil || len(b) != 32 {
+		return p, false
+	}
+	copy(p[:], b)
+	return p, true
+}
+
 func (fs *FixtureSet) trustInput(name string) (*TrustInput, error) {
-	raw, err := hex.DecodeString(fs.TrustBases[name])
-	if err != nil || len(raw) == 0 {
+	t, ok := fs.TrustBases[name]
+	raw, err := hex.DecodeString(t.Bundle)
+	p, okp := pin32(t.Pin)
+	if !ok || err != nil || len(raw) == 0 || !okp {
 		return nil, ErrTrustBaseDigest
 	}
-	return LoadTrustInput(raw)
+	return LoadTrustInput(raw, p)
 }
 
 func (fs *FixtureSet) pin(name string) (*DeploymentPin, error) {
@@ -336,12 +358,16 @@ func Replay(fs *FixtureSet, c Case) Expect {
 		copy(aid[:], a)
 		amt, _ := new(big.Int).SetString(p[1], 10)
 		return okValues("data", hx(ValueData(aid, amt)))
-	case "trust-input":
-		_, err := LoadTrustInput(in)
+	case "trust-input": // input: a release bundle; aux pin: the genesis EntryID it is installed under
+		p, ok := pin32(c.Aux["pin"])
+		if !ok {
+			return Expect{Status: "error", Reason: "bad-hex"}
+		}
+		_, err := LoadTrustInput(in, p)
 		if err != nil {
 			return errExpect(err)
 		}
-		return okValues()
+		return Expect{Status: "ok"}
 	case "cfg-decode":
 		cfg, err := DecodeCfg(in)
 		if err != nil {

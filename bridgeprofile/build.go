@@ -41,7 +41,7 @@ func NewFixture(chainID uint64, aggPartition uint32, aggConfs ...[32]byte) *Fixt
 	c.RootGenesis = H([]byte("fixture-root-genesis"))
 	c.ChainID = chainID
 	c.ExecutionGenesis = H([]byte("fixture-execution-genesis"))
-	c.EVMPartition = 7
+	c.EVMPartition = DevEVMPart
 	c.EVMShard = EmptyPrefixShard
 	vh := H([]byte("fixture-vault"))
 	copy(c.Vault[:], vh[:20])

@@ -1,7 +1,6 @@
 package bridgeprofile
 
 import (
-	stdcrypto "crypto"
 	"encoding/binary"
 	"math/bits"
 	"sort"
@@ -25,16 +24,16 @@ const refRound = 1 << 40
 // registry renders the trust base as a ready format-2 registry: genesis epoch = usable epoch = import tip = the base's epoch, open
 // from its start round, O = refRound.
 func (r RefB1) registry() (b1ref.State, b1ref.Pins, error) {
-	tb, ok := r.TB.(*types.RootTrustBaseV1)
+	tb, ok := r.TB.(*types.RootTrustBaseV2)
 	if !ok || tb == nil {
 		return nil, b1ref.Pins{}, ErrAnchorAuth
 	}
-	id, err := tb.Hash(stdcrypto.SHA256)
+	id, err := tb.EntryID()
 	if err != nil {
 		return nil, b1ref.Pins{}, ErrAnchorAuth
 	}
 	e := b1state.Entry{Epoch: tb.Epoch, BodyKind: 1, Start: tb.EpochStart, SigningScheme: 1, SigningConfigHash: H([]byte("bridgeprofile/RefB1 signing configuration"))}
-	copy(e.BodyID[:], id)
+	copy(e.BodyID[:], id[:])
 	for _, n := range tb.RootNodes {
 		if n == nil || len(n.SigKey) != 33 {
 			return nil, b1ref.Pins{}, ErrAnchorAuth

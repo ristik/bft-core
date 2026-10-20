@@ -33,7 +33,7 @@ func TestCorpusIsDeterministicAndPinned(t *testing.T) {
 	require.Equal(t, strings.TrimSpace(string(want)), a.Digest(),
 		"the candidate corpus changed; review the diff of the generated tree and update the pin")
 	// The tree is exactly what native-bridge-plugins' tools/vectors.py seals: the nine
-	// family directories plus the semantic profile and the pinned SDK trust document.
+	// family directories plus the semantic profile and the dev trust-base release bundle.
 	for p := range a.Files {
 		dir, _, _ := strings.Cut(p, "/")
 		require.Contains(t, families, dir, p)
@@ -93,9 +93,16 @@ func TestCorpusCoversTheDesign(t *testing.T) {
 		"mint-pre30-bare-payload": "ErrMintData", "compose-false-opening": "ErrIROpening", "compose-ir-time-before-latest-t": "ErrIRTime",
 		"compose-refresh-later-anchor": "", "compose-refresh-rewritten-t": "ErrLeafProof", "compose-txhash-as-leaf-value": "ErrLeafProof",
 		"unlock-regression-01": "", "unlock-regression-00": "ErrUnlockKey", "backing-valid": "",
-		"backing-trust-base-digest": "ErrTrustBaseDigest", "backing-next-epoch-trust-base": "ErrTrustBaseDigest",
-		"backing-non-unit-weight": "ErrTrustConfig", "backing-threshold": "ErrTrustConfig", "backing-epoch-mismatch": "ErrEpochMismatch",
-		"backing-epoch-start-after": "ErrEpochMismatch", "backing-other-network": "ErrEpochMismatch",
+		"backing-trust-base-digest": "ErrTrustBaseDigest", "backing-rogue-authority": "ErrTrustBaseDigest",
+		"backing-next-epoch-held": "", "backing-next-epoch-not-held": "ErrNoEntryForEpoch", "backing-new-committee": "",
+		"backing-new-committee-old-signer": "ErrLockUC", "backing-ended-epoch": "ErrSealEpoch",
+		"backing-epoch-start-after": "ErrSealEpoch", "backing-other-network": "ErrSealNetwork",
+		"backing-quorum-weighted-heavy-first-signers1": "", "backing-quorum-weighted-heavy-last-signers3": "",
+		"backing-quorum-weighted-heavy-last-signers2": "ErrLockUC",
+		"backing-two-faults-epoch-and-root":           "ErrNoEntryForEpoch", "backing-two-faults-pdr-and-signature": "ErrLockPDR",
+		"backing-quorum-plus-non-member": "ErrLockUC",
+		"trust-genesis-bundle":           "", "trust-two-epoch-bundle": "", "trust-other-pin": "ErrTrustBaseDigest",
+		"trust-trailing-byte": "ErrTrustBase", "trust-unwitnessed-successor": "ErrTrustBase",
 		"mint-j-mutated-after-certification": "ErrCDMismatch", "justification-missing-proof": "ErrLockProofShape",
 		"justification-bound-header-over": "ErrLockProofTooLarge", "justification-over-64k": "ErrJustificationTooLarge",
 		"mint-two-assets": "ErrMintData", "return-partial-amount": "ErrReturnAmount",
@@ -108,8 +115,6 @@ func TestCorpusCoversTheDesign(t *testing.T) {
 		want["token-certificate-"+mutation.name] = "ErrCertScan"
 		want["backing-certificate-"+mutation.name] = "ErrCertScan"
 	}
-	want["trust-network-0"] = "ErrTrustConfig"
-	want["trust-network-65536"] = "ErrTrustConfig"
 	want["token-combined-path-2048"] = ""
 	want["token-combined-path-2049"] = "ErrTooManyPaths"
 	got := map[string]Expect{}
