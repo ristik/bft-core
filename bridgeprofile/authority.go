@@ -26,7 +26,9 @@ import (
 // epoch (TrustInput.entryFor), with the seal's signatures judged by the B1
 // profile rule (b1Seal), the rule the bridge contract and both SDKs apply.
 func verifyNativeUC(entry *types.RootTrustBaseV2, uc *types.UnicityCertificate, partition types.PartitionID, shard types.ShardID, conf []byte) error {
-	return uc.Verify(b1Seal{entry}, stdcrypto.SHA256, partition, shard, conf)
+	// routed through quorumweight.Checked like every production UC verification (it wraps only V1 trust bases; b1Seal's own
+	// tally is overflow-checked)
+	return uc.Verify(quorumweight.Checked(b1Seal{entry}), stdcrypto.SHA256, partition, shard, conf)
 }
 
 // b1Seal is a trust-base entry whose quorum check is the B1 profile seal rule:
