@@ -169,8 +169,9 @@ new_isolated_checkout() {
   ISOLATION_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/t6-rehearsal.XXXXXX")
   available_kb=$(df -Pk "$ISOLATION_ROOT" | awk 'NR==2 {print $4}')
   printf 'disk available before clean build: %s KiB\n' "$available_kb" | tee "$EVIDENCE_DIR/disk-before.txt"
-  if [ "$available_kb" -lt 5500000 ]; then
-    fail "less than 5.5 GiB free for the clean source build; no build started"
+  # 7 GiB: 2.07 times the 3.38 GiB the whole attested-ureth T6 grew a standard runner's disk by (docs/ci-lanes.md, run 39452732284); the Mac run has 20+ GiB
+  if [ "$available_kb" -lt 7340032 ]; then
+    fail "less than 7 GiB free for the clean source build; no build started"
     return 1
   fi
   mkdir -p "$ISOLATION_ROOT/home" "$ISOLATION_ROOT/cache/go-build" \
