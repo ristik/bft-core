@@ -308,7 +308,7 @@ m2_wait_archive_replica_catchup() {
 # has advanced it waits for each restarted archive replica to catch up through the certified head taken at its restart (m2_wait_archive_replica_catchup); a
 # lane that holds validators down on purpose skips it (replicas that are down cannot acknowledge).
 m2_advance_authorities() {
-  local epoch=$1 trustFile=$2 conf=${3:-$fullShardConf} ids=${4:-1 2 3 4} i offline rootBoot onlineValidators bootnodes startLine
+  local epoch=$1 trustFile=$2 conf=${3:-$fullShardConf} ids=${4:-1 2 3 4} i offline rootBoot onlineValidators bootnodes startLine addr
   local -a catchups=()
   [ "${SIGNING:-local}" = authority ] || return 0
   rootBoot=$(m2_root_addr 1) || return 1
@@ -334,6 +334,10 @@ m2_advance_authorities() {
       bootnodes=$(evm_bootnodes_for_peers "$rootBoot" "$i" $onlineValidators) || return 1
       startLine=$(wc -l < "test-nodes/evm$i/debug.log")
       start_one_evm_validator "$i" "$validators" "$partitionID" "$rootBoot" engine-api rpc "$bootnodes" || return 1
+      # The planned-restart marker covers the whole outage, so it is removed only once the validator's RPC endpoint accepts connections again: the process is up well
+      # before its listener is, and a fast machine (a CI runner) completes stop, advance and start between two samples of an observer that reads the marker.
+      addr=$(evm_validator_rpc_addr "$i")
+      for _ in $(seq 1 120); do (exec 3<>"/dev/tcp/${addr%:*}/${addr##*:}") 2>/dev/null && break; sleep 0.5; done
       [ "${M2_ADVANCE_NO_REPLICA_WAIT:-0}" = 1 ] || ! m2_is_archive_replica "$i" || catchups+=("$i:$startLine:$(m2_latest_certified_hash)")
     fi
     rm -f "test-nodes/post-m2a-evidence/restarting/$i"

@@ -3,8 +3,10 @@
 set -euo pipefail
 
 SOURCE_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-AGRE_ROOT=$(cd "$SOURCE_ROOT/.." && pwd)
-LOCK_SCRIPT=$AGRE_ROOT/briefs/devnet-lock.sh
+REPO_ROOT=$SOURCE_ROOT
+source "$SOURCE_ROOT/scripts/lib/portable.sh"
+AGRE_ROOT=$(lane_agre_root)
+LOCK_SCRIPT=$(lane_lock_script)
 SCRIPT_PATH=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")
 EVIDENCE_DIR=${T6_EVIDENCE_DIR:-$AGRE_ROOT/briefs/devnet-runs/t6-rehearsal-$(date -u +%Y%m%dT%H%M%SZ)}
 T6_BFT_COMMIT=${T6_BFT_COMMIT:-$(git -C "$SOURCE_ROOT" rev-parse HEAD)}
@@ -167,8 +169,9 @@ new_isolated_checkout() {
   ISOLATION_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/t6-rehearsal.XXXXXX")
   available_kb=$(df -Pk "$ISOLATION_ROOT" | awk 'NR==2 {print $4}')
   printf 'disk available before clean build: %s KiB\n' "$available_kb" | tee "$EVIDENCE_DIR/disk-before.txt"
-  if [ "$available_kb" -lt 5500000 ]; then
-    fail "less than 5.5 GiB free for the clean source build; no build started"
+  # 7 GiB: 2.07 times the 3.38 GiB the whole attested-ureth T6 grew a standard runner's disk by (docs/ci-lanes.md, run 39452732284); the Mac run has 20+ GiB
+  if [ "$available_kb" -lt 7340032 ]; then
+    fail "less than 7 GiB free for the clean source build; no build started"
     return 1
   fi
   mkdir -p "$ISOLATION_ROOT/home" "$ISOLATION_ROOT/cache/go-build" \
@@ -215,6 +218,11 @@ install_pinned_foundry() {
       asset=foundry_v1.8.3_darwin_amd64.tar.gz
       digest=1b469229681b31e3c66a07132811b99460b2874a0a48de3b29500234454f47b8
       ;;
+    Linux-x86_64|Linux-amd64)
+      # the published asset's digest as the GitHub release API lists it (asset digest, checked 2026-10-20) and as sha256sum of the downloaded file: the same value
+      asset=foundry_v1.8.3_linux_amd64.tar.gz
+      digest=7ca48e6ca3cac1bce1403ca67e5bc1dc3bc1fd818199c9957c7165079c228568
+      ;;
     *) fail "no pinned Foundry release asset is configured for $(uname -s)-$(uname -m)"; return 1 ;;
   esac
   archive=$ISOLATION_ROOT/cache/$asset
@@ -228,7 +236,7 @@ install_pinned_foundry() {
   }
   printf 'Foundry release=v1.8.3\nFoundry asset=%s\nFoundry asset sha256=%s\nFoundry forge sha256=%s\n' \
     "$asset" "$digest" "$(sha256 "$ISOLATION_ROOT/bin/forge")" >>"$EVIDENCE_DIR/source-pin.txt"
-  pass "Foundry v1.8.3 installed from its pinned published macOS artifact"
+  pass "Foundry v1.8.3 installed from its pinned published $(uname -s) artifact"
 }
 
 build_pinned_contracts() {
@@ -379,11 +387,10 @@ if result.get("blockHash","").lower()!=pin["blockHash"].lower():
     raise SystemExit("pre-handoff F7 verification block hash differs from the certified receipt pin")
 PY
   pass "pre-handoff F7 archive bundle, receipt pin, and epoch-1 verification output agree"
-  if command -v sandbox-exec >/dev/null 2>&1; then
-    env -i PATH="$PATH" sandbox-exec -p '(version 1) (allow default) (deny network*)' \
-      build/f7-mintproof-verify --bundle "$bundle" --trust-base "$trust" --mode locked \
+  if net_deny=$(lane_net_deny_mechanism) && [ -n "$net_deny" ]; then
+    lane_net_deny_run build/f7-mintproof-verify --bundle "$bundle" --trust-base "$trust" --mode locked \
       >"$EVIDENCE_DIR/f7-verify.json"
-    pass "retained F7 verification rerun in a network-denied macOS sandbox"
+    pass "retained F7 verification rerun in a network-denied sandbox ($net_deny)"
   else
     env -i PATH="$PATH" HTTP_PROXY=http://127.0.0.1:9 HTTPS_PROXY=http://127.0.0.1:9 \
       ALL_PROXY=http://127.0.0.1:9 build/f7-mintproof-verify --bundle "$bundle" \
@@ -489,6 +496,9 @@ run_step "fresh BFT and F7 tool build" build_bft_tools
 run_step "isolated pinned Foundry release install" install_pinned_foundry
 run_step "contracts e7eb3216 source rebuild and manifest artifact match" build_pinned_contracts
 run_step "source, binary, and manifest pins" write_prerehearsal_pins
+# CI harness-failure test (scripts/ci/run-t6.sh, workflow input inject_failure=in-lane): fail deliberately after the builds so the failure path's diagnostics can be shown.
+# Honoured only on a GitHub runner; it asserts nothing and weakens nothing, it adds a failing step.
+if [ "${GITHUB_ACTIONS:-}" = true ] && [ "${T6_INJECT_FAIL_AFTER_BUILD:-}" = 1 ]; then run_step "injected-harness-failure-after-the-builds" false; fi
 run_step "paired T6 rehearsal with handoffs and documented restore" run_paired_t6
 run_step "deployed B1 registry equals its independent regeneration (code and storage)" verify_b1_registry
 run_step "retain and recheck pre-handoff offline F7 bundle" extract_verify_f7

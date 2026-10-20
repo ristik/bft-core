@@ -415,8 +415,9 @@ h3_verify_mint() { # root epoch (trust base) shard epoch (PDR)
   "$tmp/extract" extract --archive "$H3_ARCHIVES/evm$first" --block-hash "$block" --tx-index "$txIndex" --log-index "$logIndex" \
     --emitter "$contract" --topic "$topic" --config-pdr "$tmp/config-pdr.json" --out "$tmp/locked.cbor" || return 1
   # offline: no network, only the bundle, the genesis pin and the trust base for the certificate's root epoch
-  local offline='(version 1) (allow default) (deny network*)'
-  env -i PATH="$PATH" sandbox-exec -p "$offline" "$tmp/verify" --bundle "$tmp/locked.cbor" --trust-base "test-nodes/trust-base-epoch$trustEpoch.json" \
+  # (macOS sandbox-exec, or a Linux network namespace; with neither there is no offline verification to claim)
+  [ -n "$(lane_net_deny_mechanism)" ] || { echo "h3_verify_mint: no network-denial mechanism on this host: the offline verification cannot be shown" >&2; return 1; }
+  lane_net_deny_run "$tmp/verify" --bundle "$tmp/locked.cbor" --trust-base "test-nodes/trust-base-epoch$trustEpoch.json" \
     --genesis-conf "$fullShardConf" --lock-contract "$contract" --mode locked >"$tmp/verify-locked.json" || return 1
   cat "$tmp/verify-locked.json"
 }
