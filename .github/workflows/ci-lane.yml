@@ -2,7 +2,11 @@
 #
 # Dispatch: Actions -> ci-lane -> Run workflow (workflow_dispatch). A workflow_dispatch workflow must exist on the default branch to be dispatchable (a dispatch with
 # --ref <branch> of a workflow that only exists on that branch answers HTTP 404; verified 2026-10-20), so before this file is on the default branch the lane is run by
-# pushing a branch named ci-lane-run/<anything>: the push event reads its inputs from scripts/ci/run-inputs.json of that branch. No schedule, no pull_request.
+# pushing a branch named ci-lane-run/<anything>: the push event reads its inputs from scripts/ci/run-inputs.json of that branch.
+#
+# Pull requests (step 3): a pull_request run classifies the change by path (scripts/ci/classify.py, rules scripts/ci/pr-paths.json) and runs only the lane jobs the change can
+# affect; docs-only changes run none. `lane-gate` ALWAYS reports (it is the check to require): it passes when everything the plan selected succeeded, and fails when a selected job
+# failed, was cancelled or never ran; jobs that were not selected are skipped and never block. The workflow itself is not path-filtered, precisely so that its checks exist on every PR.
 #
 # Builds publish compact binaries and pinned sources; the run job downloads only those (no Rust target, no Go build cache, no Go/Rust toolchain).
 #
@@ -27,11 +31,19 @@ on:
         default: none
   push:
     branches: ['ci-lane-run/**']
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+    branches: [integration/enshrined-evm, main]
   schedule:
     - cron: '17 1 * * *'   # nightly, UTC: all-live + ureth-targeted at the integration tip (only fires once this file is on the default branch)
 
 permissions:
   contents: read
+
+concurrency:
+  # a newer push to the same PR supersedes the older run (heavy jobs on a standard runner); other events never cancel each other
+  group: ci-lane-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
 
 jobs:
   plan:
@@ -45,24 +57,32 @@ jobs:
       targeted: ${{ steps.in.outputs.targeted }}
       need_ureth: ${{ steps.in.outputs.need_ureth }}
       need_lane_builds: ${{ steps.in.outputs.need_lane_builds }}
+      selftests: ${{ steps.in.outputs.selftests }}
+      note: ${{ steps.in.outputs.note }}
     steps:
       # A scheduled or dispatched run tests the tip of integration/enshrined-evm, whichever branch's copy of this file started it (the copy on the default branch `main`
       # is what GitHub runs for those events, and main is not the code under test): the tip is resolved here ONCE, recorded in the job summary, and every later job
       # checks out that SHA. A push of a ci-lane-run/** branch tests that very commit.
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          ref: ${{ github.event_name == 'push' && github.sha || 'integration/enshrined-evm' }}
+          ref: ${{ (github.event_name == 'push' || github.event_name == 'pull_request') && github.sha || 'integration/enshrined-evm' }}
+          fetch-depth: 0   # a pull request is classified against its base
       - id: in
         env:
           EVENT: ${{ github.event_name }}
           IN_LANE: ${{ inputs.lane }}
           IN_INJECT: ${{ inputs.inject_failure }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PR_DRAFT: ${{ github.event.pull_request.draft }}
         run: |
           set -euo pipefail
-          if [ "$EVENT" = workflow_dispatch ]; then lane=$IN_LANE; inject=$IN_INJECT
+          note=; selftests=false
+          if [ "$EVENT" = pull_request ]; then
+            lane=pr; inject=none
+          elif [ "$EVENT" = workflow_dispatch ]; then lane=$IN_LANE; inject=$IN_INJECT
           elif [ "$EVENT" = schedule ]; then lane=nightly; inject=none
           else lane=$(jq -r .lane scripts/ci/run-inputs.json); inject=$(jq -r .inject_failure scripts/ci/run-inputs.json); fi
-          case "$lane" in combined|overbound|abort|t6|ureth-targeted|all-live|nightly|build-only) ;; *) echo "bad lane $lane" >&2; exit 1 ;; esac
+          case "$lane" in combined|overbound|abort|t6|ureth-targeted|all-live|nightly|build-only|pr) ;; *) echo "bad lane $lane" >&2; exit 1 ;; esac
           case "$inject" in none|after-builds|in-lane) ;; *) echo "bad inject_failure $inject" >&2; exit 1 ;; esac
           lanes='[]'; t6=false; targeted=false
           case "$lane" in
@@ -71,14 +91,35 @@ jobs:
             t6) t6=true ;;
           esac
           case "$lane" in ureth-targeted|nightly) targeted=true ;; esac
+          case "$lane" in nightly|all-live) selftests=true ;; esac
+          if [ "$lane" = pr ]; then
+            if [ "$PR_DRAFT" = true ]; then
+              note="draft pull request: live lanes are not run until it is ready for review"
+            else
+              # The classifier and its rules are the BASE branch's copies, never the PR's own: a PR cannot narrow what it is judged by (rev3 B2 on #706). If the base has none
+              # (the PR that introduces them), the plan fails closed and selects everything.
+              mkdir -p "$RUNNER_TEMP/base-ci"
+              if git show "$PR_BASE:scripts/ci/classify.py" >"$RUNNER_TEMP/base-ci/classify.py" 2>/dev/null && git show "$PR_BASE:scripts/ci/pr-paths.json" >"$RUNNER_TEMP/base-ci/pr-paths.json" 2>/dev/null; then
+                c=$(python3 "$RUNNER_TEMP/base-ci/classify.py" --rules "$RUNNER_TEMP/base-ci/pr-paths.json" --base "$PR_BASE" --head HEAD)
+                src="the base branch's classifier"
+              else
+                c='{"lanes":["combined","overbound","abort"],"t6":true,"targeted":true,"selftests":true,"reason":{"all":"the base branch has no classifier: everything is selected"}}'
+                src="no classifier on the base: fail closed"
+              fi
+              echo "$c ($src)"
+              lanes=$(jq -c .lanes <<<"$c"); t6=$(jq -r .t6 <<<"$c"); targeted=$(jq -r .targeted <<<"$c"); selftests=$(jq -r .selftests <<<"$c")
+            fi
+          fi
           need_lane_builds=false; [ "$lanes" = '[]' ] && [ "$lane" != build-only ] || need_lane_builds=true
           need_ureth=false; [ "$lanes" != '[]' ] || [ "$t6" = true ] || [ "$lane" = build-only ] && need_ureth=true
           sha=$(git rev-parse HEAD)
           { echo "sha=$sha"; echo "inject=$inject"; echo "lanes=$lanes"; echo "t6=$t6"; echo "targeted=$targeted"
-            echo "need_ureth=$need_ureth"; echo "need_lane_builds=$need_lane_builds"; } >>"$GITHUB_OUTPUT"
-          echo "lane=$lane inject_failure=$inject lanes=$lanes t6=$t6 targeted=$targeted commit under test=$sha"
+            echo "need_ureth=$need_ureth"; echo "need_lane_builds=$need_lane_builds"; echo "selftests=$selftests"; echo "note=$note"; } >>"$GITHUB_OUTPUT"
+          echo "lane=$lane inject_failure=$inject lanes=$lanes t6=$t6 targeted=$targeted selftests=$selftests commit under test=$sha"
           { echo "### ci-lane plan"; echo "- event: $EVENT, lane: $lane, inject_failure: $inject"; echo "- commit under test: \`$sha\` ($(git log -1 --format=%s | cut -c1-100))"
-            [ "$EVENT" = push ] || echo "- resolved once from \`integration/enshrined-evm\`; every job checks out this SHA"; } >>"$GITHUB_STEP_SUMMARY"
+            echo "- selected: lanes=$lanes t6=$t6 ureth-targeted=$targeted selftests=$selftests"; [ -z "$note" ] || echo "- $note"
+            case "$EVENT" in push|pull_request) ;; *) echo "- resolved once from \`integration/enshrined-evm\`; every job checks out this SHA" ;; esac
+            [ "$EVENT" != pull_request ] || { echo "- classifier ($src) over \`git diff $PR_BASE HEAD\`:"; echo '```'; jq -c .reason <<<"$c"; echo '```'; }; } >>"$GITHUB_STEP_SUMMARY"
 
   build-ureth:
     needs: plan
@@ -358,3 +399,58 @@ jobs:
           name: resources-ureth-targeted
           path: ${{ runner.temp }}/res/
           retention-days: 30
+
+  selftests:
+    needs: plan
+    if: ${{ needs.plan.outputs.selftests == 'true' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
+      - name: Chain-free self-tests of the CI scripts (classifier, gate, pins, publisher)
+        run: |
+          set -euo pipefail
+          for c in jq rsync zstd; do command -v "$c" >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq "$c"; }; done
+          python3 scripts/ci/classify.py selftest
+          scripts/ci/gate.sh selftest
+          scripts/ci/check-pins.sh selftest
+          scripts/ci/publish-selftest.sh
+
+  lane-gate:
+    # ALWAYS reports: the one check to require. Not-selected jobs are skipped and never block; a selected job that failed, was cancelled or never ran fails it.
+    needs: [plan, build-ureth, build-tools, build-sources, run-lane, run-t6, ureth-targeted, selftests]
+    if: ${{ always() }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.plan.outputs.sha || github.sha }}
+          fetch-depth: 0
+      - name: Gate
+        env:
+          EVENT: ${{ github.event_name }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PLAN_RESULT: ${{ needs.plan.result }}
+          PLAN_LANES: ${{ needs.plan.outputs.lanes }}
+          PLAN_T6: ${{ needs.plan.outputs.t6 }}
+          PLAN_TARGETED: ${{ needs.plan.outputs.targeted }}
+          PLAN_SELFTESTS: ${{ needs.plan.outputs.selftests }}
+          PLAN_NEED_URETH: ${{ needs.plan.outputs.need_ureth }}
+          PLAN_NEED_LANE_BUILDS: ${{ needs.plan.outputs.need_lane_builds }}
+          PLAN_NOTE: ${{ needs.plan.outputs.note }}
+          R_BUILD_URETH: ${{ needs.build-ureth.result }}
+          R_BUILD_TOOLS: ${{ needs.build-tools.result }}
+          R_BUILD_SOURCES: ${{ needs.build-sources.result }}
+          R_RUN_LANE: ${{ needs.run-lane.result }}
+          R_RUN_T6: ${{ needs.run-t6.result }}
+          R_URETH_TARGETED: ${{ needs.ureth-targeted.result }}
+          R_SELFTESTS: ${{ needs.selftests.result }}
+        run: |
+          set -o pipefail
+          # the gate logic is the BASE branch's copy on a pull request (a PR cannot weaken the check that judges it); where the base has none (the PR that introduces it) the PR's own is used
+          gate=scripts/ci/gate.sh
+          if [ "$EVENT" = pull_request ] && git show "$PR_BASE:scripts/ci/gate.sh" >"$RUNNER_TEMP/gate.sh" 2>/dev/null; then chmod +x "$RUNNER_TEMP/gate.sh"; gate="$RUNNER_TEMP/gate.sh"; echo "gate logic: the base branch's"; else echo "gate logic: this tree's (no base copy)"; fi
+          "$gate" | tee -a "$GITHUB_STEP_SUMMARY"

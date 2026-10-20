@@ -250,7 +250,7 @@ jobs:
   # `--executor fake` only — neither has a reth image to test against; see
   # docs/engine-api-adapter-plan.md §10 and scripts/reth-by-hand.sh.
   # These are fake-executor evidence. Real execution is covered separately by
-  # reth-smoke.yml and reth-fault.yml, which this change leaves untouched.
+  # stock-reth-control.yml and stock-reth-fault-control.yml (the manual stock-client controls), which this change leaves untouched.
   # Process/container lanes remain available on manual dispatch. Every PR runs the full Go suite.
   evm-shard-chaos:
     if: github.event_name == 'workflow_dispatch'
