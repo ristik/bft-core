@@ -407,11 +407,28 @@ func (v *Node) collectUnderView(ctx context.Context, req *certification.BlockCer
 // countRequest counts an admitted request under tb and asks for certification when a quorum, or the impossibility of one, is
 // reached. A collection-only view never certifies: a decisive outcome clears the shard's buffer, so that the requests sent again
 // from the activation round on are counted under the view then in force, never dropped as already decided.
+// redeliverMinInterval bounds, per shard, how often a repeated request hands its decided outcome to the consensus manager again.
+var redeliverMinInterval = 2 * time.Second
+
 func (v *Node) countRequest(ctx context.Context, req *certification.BlockCertificationRequest, tb QuorumInfo, collectionOnly bool) (rErr error) {
 	// requests counted for an earlier shard round, anchor or assignment are retired, never counted again
 	v.incomingRequests.Retire(req.PartitionID, req.ShardID, tb)
 	// check if consensus is already achieved
 	if res := v.incomingRequests.IsConsensusReceived(req.PartitionID, req.ShardID, tb); res != QuorumInProgress {
+		if !collectionOnly {
+			if status, requests, again := v.incomingRequests.Redeliver(req, tb, redeliverMinInterval); again {
+				// the node repeats, byte for byte, the request whose outcome was decided but is not certified yet: the first hand-over to
+				// the leader may have been lost (#665). Hand it over again; the leader's buffer ignores a duplicate.
+				reason := consensus.Quorum
+				if status == QuorumNotPossible {
+					reason = consensus.QuorumNotPossible
+				}
+				v.log.DebugContext(ctx, fmt.Sprintf("partition %s repeated request of a decided, uncertified outcome (%s), handing it over again", req.PartitionID, status),
+					logger.Shard(req.PartitionID, req.ShardID))
+				return v.consensusManager.RequestCertification(ctx, consensus.IRChangeRequest{
+					Partition: req.PartitionID, Shard: req.ShardID, Reason: reason, Requests: requests})
+			}
+		}
 		v.log.DebugContext(ctx, fmt.Sprintf("dropping stale block certification request (%s) for partition %s", res, req.PartitionID), logger.Shard(req.PartitionID, req.ShardID))
 		return
 	}

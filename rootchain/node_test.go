@@ -1044,6 +1044,53 @@ func Test_onBlockCertificationRequest(t *testing.T) {
 		}
 	})
 
+	// #665: the first hand-over of a decided outcome to the leader can be lost (the closing epoch of a root handoff admits only empty
+	// blocks); a node repeating its byte-identical request gets the hand-over repeated, and only that.
+	t.Run("a repeated identical request of a decided, uncertified outcome is handed over again", func(t *testing.T) {
+		var handed []consensus.IRChangeRequest
+		cm := &mockConsensusManager{
+			shardInfo: func(types.PartitionID, types.ShardID) (*storage.ShardInfo, error) { return si, nil },
+			requestCert: func(_ context.Context, cr consensus.IRChangeRequest) error {
+				handed = append(handed, cr)
+				return nil
+			},
+		}
+		node, err := New(&nwPeer, partNet, cm, testobservability.Default(t))
+		require.NoError(t, err)
+		second := validCertRequest
+		second.NodeID = nodeID2
+		require.NoError(t, second.Sign(signer2))
+		require.NoError(t, node.onBlockCertificationRequest(t.Context(), &validCertRequest))
+		require.NoError(t, node.onBlockCertificationRequest(t.Context(), &second))
+		require.Len(t, handed, 1, "the quorum is handed over once")
+
+		old := redeliverMinInterval
+		t.Cleanup(func() { redeliverMinInterval = old })
+
+		redeliverMinInterval = time.Hour
+		require.NoError(t, node.onBlockCertificationRequest(t.Context(), &validCertRequest))
+		require.Len(t, handed, 1, "not again within the minimum interval")
+
+		redeliverMinInterval = 0
+		require.NoError(t, node.onBlockCertificationRequest(t.Context(), &validCertRequest))
+		require.Len(t, handed, 2, "a byte-identical repeat hands the outcome over again")
+		require.Equal(t, handed[0], handed[1], "with the same reason and evidence")
+		require.Equal(t, consensus.Quorum, handed[1].Reason)
+		require.Len(t, handed[1].Requests, 2)
+
+		// another request of the same node in the round is not a repeat: it stays refused as stale and hands nothing over
+		changed := validCertRequest
+		changed.BlockSize++
+		require.NoError(t, changed.Sign(signer))
+		require.NoError(t, node.onBlockCertificationRequest(t.Context(), &changed))
+		require.Len(t, handed, 2)
+
+		// once the outcome is certified the buffer is cleared and a repeat is an ordinary new request
+		node.incomingRequests.Clear(t.Context(), validCertRequest.PartitionID, validCertRequest.ShardID)
+		require.NoError(t, node.onBlockCertificationRequest(t.Context(), &validCertRequest))
+		require.Len(t, handed, 2, "a lone request of a new round decides nothing")
+	})
+
 	t.Run("success, quorum", func(t *testing.T) {
 		certReqCalls := 0
 		cm := &mockConsensusManager{

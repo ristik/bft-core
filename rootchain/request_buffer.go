@@ -66,8 +66,10 @@ type (
 		roundTag string
 		qState   QuorumStatus
 
-		start     time.Time
-		attrShard metric.MeasurementOption
+		start time.Time
+		// forwardedAt is when the decided outcome was last handed to the consensus manager (the decision, or a Redeliver)
+		forwardedAt time.Time
+		attrShard   metric.MeasurementOption
 	}
 )
 
@@ -184,6 +186,49 @@ func tagOf(tb QuorumInfo) string {
 	return ""
 }
 
+// Redeliver is the idempotent answer to a request the buffer already holds: when the shard's outcome is decided (a quorum, or none
+// possible) but not yet certified, and req is byte-identical to the request stored for its node, it returns the evidence of the
+// decision again so the caller can hand it to the consensus manager once more (the first hand-over can have been lost: the leader it
+// went to could not include it, as in the closing epoch of a root handoff, or it did not arrive). At most once per minInterval per
+// shard. A different request of the node, a node without a stored request, an undecided shard or a buffer counted under another
+// assignment, round or anchor returns false and changes nothing.
+func (c *CertRequestBuffer) Redeliver(req *certification.BlockCertificationRequest, tb QuorumInfo, minInterval time.Duration) (QuorumStatus, []*certification.BlockCertificationRequest, bool) {
+	if req == nil || req.InputRecord == nil || tb == nil {
+		return QuorumUnknown, nil, false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	rs, ok := c.store[partitionShard{partition: req.PartitionID, shard: req.ShardID.Key()}]
+	if !ok || rs.tally == nil || (rs.qState != QuorumAchieved && rs.qState != QuorumNotPossible) ||
+		rs.identity != tb.Identity() || rs.roundTag != tagOf(tb) || time.Since(rs.forwardedAt) < minInterval {
+		return QuorumUnknown, nil, false
+	}
+	if _, stored := rs.nodeRequest[req.NodeID]; !stored {
+		return QuorumUnknown, nil, false
+	}
+	// the bytes on the wire, signature and proof included: Bytes() is only what the signature covers
+	want, err := types.Cbor.Marshal(req)
+	if err != nil {
+		return QuorumUnknown, nil, false
+	}
+	same := false
+	for _, group := range rs.requests {
+		for _, held := range group {
+			if held.NodeID != req.NodeID {
+				continue
+			}
+			if b, err := types.Cbor.Marshal(held); err == nil && bytes.Equal(b, want) {
+				same = true
+			}
+		}
+	}
+	if !same {
+		return QuorumUnknown, nil, false
+	}
+	rs.forwardedAt = time.Now()
+	return rs.qState, rs.proof(rs.qState, rs.tally, tb), true
+}
+
 /*
 Clear clears node request in one shard - this must be called when the shard's Certification Request for a
 round has been processed in order for the buffer to accept requests for the next round.
@@ -224,6 +269,7 @@ func (c *CertRequestBuffer) updQuorumStatus(ctx context.Context, rb *requestBuff
 		c.consensusDur.Record(ctx, time.Since(rb.start).Seconds(), attrQuorumNotPossible)
 	}
 	rb.qState = qs
+	rb.forwardedAt = time.Now()
 	// start clock to track time until Clear is called (consensus has been certified)
 	rb.start = time.Now()
 }
