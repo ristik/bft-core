@@ -175,6 +175,7 @@ func BuildCorpus() (*Corpus, error) {
 	g.wire()
 	g.lock()
 	g.proof()
+	g.consolidated()
 	if g.failed != nil {
 		return nil, g.failed
 	}
@@ -933,31 +934,49 @@ func (g *gen) certified(transfers int) (*certifiedHistory, error) {
 // names: leaves of a shard at one round share a UC, at different rounds they
 // are certified by different UCs.
 func (g *gen) certifiedWith(transfers int, assign func(i int, l Leaf) ShardRound) (*certifiedHistory, error) {
-	f := g.d.F
+	h, res, keys, err := ReturnHistory(g.d.F, transfers)
+	if err != nil {
+		return nil, err
+	}
+	cert, err := g.agg().CertifyAssigned(res.Leaves, g.extraLeaves(), assign)
+	if err != nil {
+		return nil, err
+	}
+	return &certifiedHistory{h: h, res: res, cert: cert, keys: keys}, nil
+}
+
+// extraLeaves are the other state IDs every certified tree also holds.
+func (g *gen) extraLeaves() []Leaf {
+	extra := []Leaf{{SID: H([]byte("other-1")), Value: H([]byte("v1"))}, {SID: H([]byte("other-2")), Value: H([]byte("v2"))}}
+	for i := 0; i < g.extraN; i++ {
+		extra = append(extra, Leaf{SID: H([]byte(fmt.Sprint("load-", i))), Value: H([]byte("lv"))})
+	}
+	return extra
+}
+
+// ReturnHistory is the oracle's return history with `transfers` ordinary transfers and a final burn, and its verified result.
+func ReturnHistory(f *Fixture, transfers int) (*History, *Result, []*secp256k1.PrivateKey, error) {
+	return ReturnHistorySeeded(f, transfers, "cert")
+}
+
+// ReturnHistorySeeded is ReturnHistory with the owners' keys derived from seed ("cert" is ReturnHistory's).
+func ReturnHistorySeeded(f *Fixture, transfers int, seed string) (*History, *Result, []*secp256k1.PrivateKey, error) {
 	keys := make([]*secp256k1.PrivateKey, transfers+1)
 	for i := range keys {
-		keys[i] = KeyFromSeed(fmt.Sprintf("cert-%d", i))
+		keys[i] = KeyFromSeed(fmt.Sprintf("%s-%d", seed, i))
 	}
 	h, err := f.BuildToken(5, big.NewInt(1_000_000_007), keys)
 	if err != nil {
-		return nil, err
+		return nil, nil, nil, err
 	}
 	var rcpt [20]byte
 	rcpt[0], rcpt[19] = 0xAA, 0x01
 	f.AppendBurn(h, keys[len(keys)-1], rcpt, big.NewInt(1_000_000_007))
 	res, err := VerifyReturn(f.Cfg, h.Bytes())
 	if err != nil {
-		return nil, err
+		return nil, nil, nil, err
 	}
-	extra := []Leaf{{SID: H([]byte("other-1")), Value: H([]byte("v1"))}, {SID: H([]byte("other-2")), Value: H([]byte("v2"))}}
-	for i := 0; i < g.extraN; i++ {
-		extra = append(extra, Leaf{SID: H([]byte(fmt.Sprint("load-", i))), Value: H([]byte("lv"))})
-	}
-	cert, err := g.agg().CertifyAssigned(res.Leaves, extra, assign)
-	if err != nil {
-		return nil, err
-	}
-	return &certifiedHistory{h: h, res: res, cert: cert, keys: keys}, nil
+	return h, res, keys, nil
 }
 
 func claimOf(a Anchor) string { return h32(a.ExpectedStateRoot) + ":" + h32(a.ExpectedIRHash) }

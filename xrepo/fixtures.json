@@ -2,7 +2,7 @@
   "format": "UNICITY_XREPO_FIXTURES/v1",
   "contracts": {
     "repo": "https://github.com/ristik/unicity-pos-contracts",
-    "commit": "0ede785663b3d933247b7fa5ef2838ac670bfcbf"
+    "commit": "cee74db614a33be1954b0673b490e378bc3dc476"
   },
   "fixtures": [
     {"producer": "contracts", "contracts": "test/p85/fixtures/publication.json", "bftCore": ["evmassign/testdata/publication.json", "rootchain/evmstate/testdata/publication.json"],
@@ -19,6 +19,8 @@
      "pair": "custody's state after applying the root's records (ids, digests, states, H rounds, closure anchors, offsets, session outcome) -> xrepo"},
     {"producer": "bft-core", "contracts": "test/p85/fixtures/xrepo-go-records.json", "bftCore": ["xrepo/testdata/go-records.json"],
      "pair": "the root's Closure, RecoveryAck, Ack and SessionClosed records with real ids and digests -> custody.applyRootRecords, verbatim (XRepoRecords.t.sol)"},
+    {"producer": "bft-core", "contracts": "test/p85/fixtures/xrepo-go-retirement.json", "bftCore": ["xrepo/testdata/go-retirement.json"],
+     "pair": "the root's Retirement records with custody's exposure-chain reference digests and a root-signed equivocation of a retiring identity's key -> SealRegistry.importRootRecords -> custody.applyRootRecords verbatim -> Evidence hold -> mature and claim (XRepoRetirement.t.sol)"},
     {"producer": "bft-core", "contracts": "test/p85/fixtures/xrepo-genesis-input.json", "bftCore": ["xrepo/testdata/genesis/contracts-genesis.json"],
      "pair": "pos-relayer genesis --out-contracts (genesis assignment id of the FULL configuration, identities) -> script/P85Genesis.s.sol (XRepoGenesis.t.sol)"},
     {"producer": "bft-core", "contracts": "test/p85/fixtures/evidence-digest-corpus-go-v1.json", "bftCore": ["s1ref/testdata/evidence-digest-corpus-v1.json"],

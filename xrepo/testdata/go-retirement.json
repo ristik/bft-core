@@ -1,0 +1,116 @@
+{
+ "format": "UNICITY_XREPO_GO_RETIREMENT/v1",
+ "note": "Produced by bft-core (XREPO_UPDATE=1 go test ./xrepo) from the contracts' publication fixture. The records are what the root's projection emits; the Retirement reference digests are custody's exposure chains as the root derives them; the evidence pair is signed by the root's statement derivation and signer. The contracts import the records through the SealRegistry and apply them verbatim. Do not edit by hand.",
+ "resultId": "0x8af64e9c9da34531f1b91bc18e5af8072c8466349b20661352626317852d39fd",
+ "genesisAssignmentId": "0x7971fcee127203c6ef4962db14f70a41fc493629f4cad9e836906b6fc5c3fa63",
+ "primaryAssignmentId": "0xd6812f6e3b074d067bf0090459d11e6d77489494d543988a68036ab236fc4a10",
+ "records": [
+  {
+   "index": 0,
+   "recordId": "0x04bafefc05e11587946d06820ba3640a72cfb2943baf8dd6f63e3becae147f91",
+   "predecessor": "0x0000000000000000000000000000000000000000000000000000000000000000",
+   "kind": 4,
+   "kindName": "Closure",
+   "progress": 100100,
+   "ucTime": 604900,
+   "data": "0x7971fcee127203c6ef4962db14f70a41fc493629f4cad9e836906b6fc5c3fa6300000000000000000000000000000000000000000000000000000000000187045834a60d78e10756a78ed1e37a81143c96ddbe48750e5fc9479ed808674636843e16b3c350f06c4407cf24b8a79986cd44f6eecc69e8af923f07cc467f8e57efee0eaea4daeb80b2446dcf8cb198a14f9be38947ea5527285cbe7e67b2cdc5eab6de14d06e769e9dd8337609efbe3adf6725a93cdacb3116de9f6edb4f2bedfd",
+   "closedEpoch": 1
+  },
+  {
+   "index": 1,
+   "recordId": "0xb4f52dd136805d83c1f4d7839c2a14f5981944fabbe005c16015e32eaa286800",
+   "predecessor": "0x04bafefc05e11587946d06820ba3640a72cfb2943baf8dd6f63e3becae147f91",
+   "kind": 2,
+   "kindName": "Ack",
+   "progress": 100102,
+   "ucTime": 604905,
+   "data": "0x8af64e9c9da34531f1b91bc18e5af8072c8466349b20661352626317852d39fd00000000000000000000000000000000000000000000000000000000000187040000000000000000000000000000000000000000000000000000000000018704000000000000000000000000000000000000000000000000000000000001870e",
+   "closedEpoch": 0
+  },
+  {
+   "index": 2,
+   "recordId": "0xa62abf5d8b752e10462b61445401aa2ea9db28d651acf1ff2dda2aa9be21492e",
+   "predecessor": "0xb4f52dd136805d83c1f4d7839c2a14f5981944fabbe005c16015e32eaa286800",
+   "kind": 4,
+   "kindName": "Closure",
+   "progress": 100141,
+   "ucTime": 604910,
+   "data": "0xd6812f6e3b074d067bf0090459d11e6d77489494d543988a68036ab236fc4a10000000000000000000000000000000000000000000000000000000000001873617cb45d38b3d85aeb00c232daba2faf3deccb3da69dae6f002d98a15a7c1c48aa2d08626507dd23e7c7126091f02d8b373c764d005b69bf6e8498a96d149c850ed42b8e2c02490d3cab4831d06551a49d07db575782ed6af44e1c50d2e3a4852b6de14d06e769e9dd8337609efbe3adf6725a93cdacb3116de9f6edb4f2bedfd",
+   "closedEpoch": 2
+  },
+  {
+   "index": 3,
+   "recordId": "0x166236dfc43369a6b708babbacf3dd5461504b5862b5dbe308746c0cefbf2b77",
+   "predecessor": "0xa62abf5d8b752e10462b61445401aa2ea9db28d651acf1ff2dda2aa9be21492e",
+   "kind": 5,
+   "kindName": "Retirement",
+   "progress": 100161,
+   "ucTime": 604920,
+   "data": "0x00000000000000000000000000000000000000000000000000000000000000010000000000000000000000000000000000000000000000000000000000000001aff6d3a19166c92c1f395eabb404ae9ca7fa8dedc1ed4b888c26f69f1440420a",
+   "closedEpoch": 0
+  },
+  {
+   "index": 4,
+   "recordId": "0x5d7ba2cc61b54524efc49d62d359caa793baaabf960d8b49132d9480983d5b6d",
+   "predecessor": "0x166236dfc43369a6b708babbacf3dd5461504b5862b5dbe308746c0cefbf2b77",
+   "kind": 5,
+   "kindName": "Retirement",
+   "progress": 100162,
+   "ucTime": 604921,
+   "data": "0x0000000000000000000000000000000000000000000000000000000000000002000000000000000000000000000000000000000000000000000000000000000178de45aa80c931509771c3de098f4e1a55bc9c6c073fbdc4fd7500524d3366b8",
+   "closedEpoch": 0
+  }
+ ],
+ "retirements": [
+  {
+   "id": 1,
+   "generation": 1,
+   "exposureIds": [
+    "0xcb31f716b4d93bc3ee54823bd2e721b4bdfafce5cc9a9e9274ddd2547cc53e08",
+    "0xd320dcd781cdb9d1bd5b12f87fc42c8b93b886bd6de99e2a618666827367e7ef"
+   ],
+   "refDigest": "0xaff6d3a19166c92c1f395eabb404ae9ca7fa8dedc1ed4b888c26f69f1440420a",
+   "maxLiabilityAnchor": 100141,
+   "lot": 1,
+   "held": true
+  },
+  {
+   "id": 2,
+   "generation": 1,
+   "exposureIds": [
+    "0xd7f69798ce41a398432f3efb7693ffdbe94d83d2e1f52caf8987ad95e022f312",
+    "0xeef1f4010909dec474802c1bda1f22cc564666c4ed99af3e2900e7a54d2cc6c6"
+   ],
+   "refDigest": "0x78de45aa80c931509771c3de098f4e1a55bc9c6c073fbdc4fd7500524d3366b8",
+   "maxLiabilityAnchor": 100141,
+   "lot": 2,
+   "held": false
+  }
+ ],
+ "evidence": {
+  "note": "Two non-committing scheme 2 votes of identity 1's root key in J's root epoch and one round with different executed states: an equivocation by a key whose generation retires before the evidence is submitted.",
+  "rootNetwork": 5,
+  "rootGenesis": "0x40d3f49654705ac02f71177499356cd8511e0475d833414fa013efd49c349a8a",
+  "id": 1,
+  "key": "0x02423a013f03ff32d7a5ffbcc8e139c62130fdfeb5c6da121bce78049e46bc47d6",
+  "votingEpoch": 2,
+  "votingRound": 100130,
+  "exposureId": "0xd320dcd781cdb9d1bd5b12f87fc42c8b93b886bd6de99e2a618666827367e7ef",
+  "a": {
+   "parent": 100129,
+   "exec": "0x4b67cba068a8f080ce68076a9e87f9fd3c42c2f028f5440ec7fffd9d07de9d06",
+   "timestamp": 604907,
+   "preimage": "0x8670554e49434954595f504f535f564f544505784a726f6f742d766f74652f34306433663439363534373035616330326637313137373439393335366364383531316530343735643833333431346661303133656664343963333439613861582029302335c595d87ff23618f08e161e51bdf77a06c3dbc62f0f1f0cd6dcb3649bf600",
+   "digest": "0x8046c0d69aba615e606ab2564627781ec381b74fc00517e174aae55ee6d03ada",
+   "signature": "0xc2ddb32a41f78103dccea08ed3dc6055b9778d39eaa024c048aa4cd1df9950da6bd74bef77b2df9312f069932558067c32f08a54aef97abf358051bdc09c0b1300"
+  },
+  "b": {
+   "parent": 100129,
+   "exec": "0x8eb80eb4dd8f628818f583588a71ed2ad3e31d669a98e1426c312c45e906c13f",
+   "timestamp": 604907,
+   "preimage": "0x8670554e49434954595f504f535f564f544505784a726f6f742d766f74652f343064336634393635343730356163303266373131373734393933353663643835313165303437356438333334313466613031336566643439633334396138615820cdc9c785f12e3d1109f834d241b77adfe8e097982c8f7ccb3f010b0a419617fbf600",
+   "digest": "0x2ff8f745d59390d316485ae3fa09dafa85f631ac76c3c3aac9dfdeeaaeffc486",
+   "signature": "0x5a19a75517e4a6391bceb8272002fbfa244feceb28f3354664b89cf2dc80bb5d49efeba6489ae5755b7d933df33bf1ab6a194e5eb030c25bf6dc132e471d431a00"
+  }
+ }
+}
