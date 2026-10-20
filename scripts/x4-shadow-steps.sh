@@ -103,6 +103,7 @@ x4_passive() {
 # schedule is executed at its offsets from the first sample. Setup (genesis, devnet, the wait for due) is outside the interval.
 x4_campaign() {
   local plan t0 line at op n units now wait epoch_before
+  H3_REGISTRY=0xff00000000000000000000000000000000000002   # h3_slot reads the registry's epoch slots
   H3_SLOT_LAYOUT=3; read -r h3_slot_shard h3_slot_root h3_slot_conf h3_slot_cursor < <(H3_SLOT_LAYOUT=3 lane_go_run h3slots)
   h3_registry_is 0 1 || x4_die "the registry is not at shard epoch 0 / root epoch 1 before the observation"
   plan=$(python3 scripts/shadow/scenario.py plan "$X4_CAMPAIGN") || x4_die "the scenario schedule is invalid"
