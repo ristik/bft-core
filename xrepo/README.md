@@ -56,12 +56,21 @@ Producer -> consumer pairs that are pinned (file in `fixtures.json`):
 | **Custody's resulting state (ids, digests, states, H rounds, closure anchors, offsets, session outcome) equals the root's model** | contracts -> Go | this suite |
 | **The contracts genesis input: field names and types, and the genesis assignment id = the root's custody key of the genesis epoch over the FULL configuration** | Go -> contracts | this suite |
 
-Not covered:
+## Evidence parity and remaining boundaries
 
-- **Evidence (slashing).** No shared vector, and by reading the two sides do not agree: `Evidence.sol` verifies
-  `keccak256(abi.encode(VOTE_DOMAIN, network, domain, keccak256(key), epoch, round, payload))`, while the root signs the SHA-256 of
-  a CBOR preimage (`rootchain/consensus/votesig`). A root's vote signature cannot satisfy `submitEvidence` as written. This needs a
-  design decision, not a test.
+Evidence digest parity now has a shared corpus: core #654 (`f07468a552`) and
+contracts #46 (`0ede785663`). `s1ref/testdata/evidence-digest-corpus-v1.json`
+is copied through `fixtures.json` to contracts and consumed by
+`test/p85/EvidenceDigest.t.sol`. The contract rebuilds canonical scheme-2
+VoteInfo/VotePreimage CBOR, verifies SHA-256 vote signatures and the separate
+native seal signature for committing votes, and admits the Go-generated pairs.
+The earlier Keccak/ABI root digest mismatch is fixed. This proves the root
+signature/codec boundary, not third-party evidence collection, historical
+rotation-to-debit integration or a live slashing exercise. The EVM-domain codec
+remains undefined; do not count its opaque statement path as root parity.
+
+Still not covered by the lifecycle replay suite:
+
 - **Retirement record with the real reference digest end to end.** The exposure chain value is pinned (custody-digests.json) and the
   record shape is replayed (root-records-vectors.json), but no Go-produced Retirement is applied verbatim: it needs a generation with
   every exposure released.
