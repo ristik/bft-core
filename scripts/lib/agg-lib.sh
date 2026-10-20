@@ -100,15 +100,17 @@ bridge_write_config() {
   # (ubft trust-base utb-export from a root's store) or a lock of the later epoch is ErrNoEntryForEpoch; the pin stays the same
   "$DNB_TOOL" trust-bundle --trust-base test-nodes/trust-base.json --out test-nodes/trust-base.bundle.cbor --out-pin test-nodes/trust-base.genesis.entryid
   "$DNB_TOOL" pdr --full-shard-conf "$full" --out test-nodes/evm-pdr.cbor
-  python3 - "$PWD" "$validators" "$rethEthBase" "$rootRpcPort" "$chainID" "$partitionID" "$aggPartition" "$aggShards" "${AGG_PORT:-3001}" "${BRIDGE_ARCHIVE:-test-nodes/archives}" <<'PY'
+  python3 - "$PWD" "$validators" "$rethEthBase" "$rootRpcPort" "$chainID" "$partitionID" "$aggPartition" "$aggShards" "${AGG_PORT:-3001}" "${BRIDGE_ARCHIVE:-test-nodes/archives}" "${aggShardIDs[*]}" <<'PY'
 import json, sys
-pwd, validators, eth_base, root_rpc, chain, evm_part, agg_part, shards, agg_port, archive = sys.argv[1:]
+pwd, validators, eth_base, root_rpc, chain, evm_part, agg_part, shards, agg_port, archive, shard_ids = sys.argv[1:]
 a = json.load(open("test-nodes/bridge-addresses.json"))
 validators, eth_base, shards, agg_port = int(validators), int(eth_base), int(shards), int(agg_port)
+# the any-age driver routes a leaf to the aggregator whose shard prefix covers its state ID (native shard ID bytes, hex: 0x40 -> "40")
+agg_shards = [{"shard": sid[2:], "url": "http://127.0.0.1:%d" % (agg_port + i)} for i, sid in enumerate(shard_ids.split())] if shards > 1 else None
 json.dump({"dir": pwd + "/test-nodes", "ethUrls": ["http://127.0.0.1:%d" % (eth_base + i) for i in range(validators)],
   "aggUrl": "http://127.0.0.1:%d" % agg_port, "aggUrls": ["http://127.0.0.1:%d" % (agg_port + i) for i in range(shards)],
   "vault": a["BridgeVault"], "verifier": a["TokenVerifier"], "rootRpc": "http://127.0.0.1:" + root_rpc, "chainId": int(chain),
-  "evmPartition": int(evm_part), "aggPartition": int(agg_part), "archive": pwd + "/" + archive + "/evm1"},
+  "evmPartition": int(evm_part), "aggPartition": int(agg_part), "archive": pwd + "/" + archive + "/evm1", **({"aggShards": agg_shards} if agg_shards else {})},
   open("test-nodes/lane-config.json", "w"), indent=2)
 PY
 }

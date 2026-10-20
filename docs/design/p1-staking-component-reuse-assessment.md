@@ -1,22 +1,24 @@
 # P1 — Staking component reuse assessment
 
-Issue: [#27 P1](https://github.com/ristik/bft-core/issues/27) · Milestone: M4S ·
-Prereqs: [#6 D4](https://github.com/ristik/bft-core/issues/6),
-[#7 D5](https://github.com/ristik/bft-core/issues/7) · Status: **proposed for owner
-acceptance** (see "Open for owner acceptance" at the end; [ADR 0012](../adr/0012-validator-entity-model.md)
-overrides older prose here, see section 1.1)
+Issue: [#27 P1](https://github.com/ristik/bft-core/issues/27). Development direction
+reconciled 2026-10-20 with [ADR 0011](../adr/0011-staking-component-reuse.md) and
+[canonical P85 v5](pos-architecture.md), the #85 deliverable awaiting owner
+acceptance. The pinned upstream investigation below is historical; its current
+replacement mapping and selected direction are stated explicitly here.
 
 P1 is an assessment ticket. It produces **a reviewed reuse decision**, not
 contract code: which parts of the Polygon PoS staking contracts can serve the
 enshrined-EVM PoS lifecycle, which are dropped, and what assumes each dropped
 duty. No contract code is vendored by P1; the contract repository is
-`unicity-pos-contracts` (section 2.1); the toolchain is chosen in
-[P2](https://github.com/ristik/bft-core/issues/30); parameter values and any
-security audit are separate.
+`unicity-pos-contracts` (section 2.1); the implementation now pins its toolchain in that repository. Development
+values are in P85; production economics and external audit are separate.
 
 Model: [`evmroot/p1reuse.go`](../../evmroot/p1reuse.go) (types + `Validate`),
 [`evmroot/p1matrix.go`](../../evmroot/p1matrix.go) (`BuildP1ReuseMatrix`).
 Fixture: [`evmroot/testdata/p1-reuse-matrix.json`](../../evmroot/testdata/p1-reuse-matrix.json).
+These code/JSON artifacts preserve the earlier assessment (including its GPL
+Destination); they validate schema, not today's license, manifest or accounting
+behavior. This docs-only reconciliation does not regenerate them.
 Decision record: [ADR 0011](../adr/0011-staking-component-reuse.md).
 
 Specification basis: `docs/pos/specification/governance.tex` §§ "Stake Registry",
@@ -50,9 +52,11 @@ Polygon's checkpoint model.
 - **Retirement.** `Bonded → RetirementRequested → Draining → Released`
   (`evmroot/d5retire.go`). `R_ret` is recorded only on an authenticated
   acknowledgement that the stake backs **no active or prepared successor**.
-  Withdrawal requires `now ≥ max(R_ret + Δ_hold, inheritedProtectionUntil)`, the
-  forced-inbox position cutoff through `LiabilityDeadlineRound`, and no pending
-  timely evidence. `Δ_hold > Δ_ev + Δ_incl + Δ_exec`, `Δ_ev < Δ_hold` (the `W_cert` window of the earlier design is retired: certificates do not expire).
+  Withdrawal follows P85's strict progress gates, inherited protection maxima,
+  UC-time floor, complete closure/retirement imports and absence of unsettled
+  accepted evidence. Each relevant hold exceeds its evidence window. No inbox
+  cutoff or inclusion guarantee remains. `W_cert` is retired: certificate
+  verification is any-age; economic evidence deadlines still apply.
 - **Rewards.** Assigned voting weight per **certified root interval**, not
   measured availability: `R_ν(I) = 𝓔(I)·b_ν/W_e`, `𝓔(I) = min(ρ_e·|I|,
   Pool_free)` (`governance.tex` §"Rewards"). No proposer bonus. Idle assigned
@@ -68,19 +72,17 @@ Polygon's checkpoint model.
   custody and its fixed slash/exit rules are separated from election policy
   (`governance.tex` §"Upgrade and Delivery Boundaries").
 
-### 1.1 Where ADR 0012 overrides this section
+### 1.1 Current owner decisions
 
-- "Owner and consensus-key roles" and "distinct consensus/node roles" (row 6,
-  section 5): a validator is authenticated only by its BFT Core consensus key and
-  P3 binds only that key. Owner/withdrawal roles are unaffected.
-- The "forced-inbox position cutoff through `LiabilityDeadlineRound`" in the
-  Retirement bullet, row 1, row 3's note and section 5: the I-track is deferred,
-  and what replaces it is an open owner question. Read the inbox cutoff as a
-  deferred safeguard, not a launch dependency; the `Δ_hold` and pending-evidence
-  gates stand.
-- Weights apply at the root/validator-entity level only; aggregator shards are
-  unweighted; validator-set changes are coupled; only positive certified proofs
-  are required of the EVM.
+One staking identity operates root and coupled EVM nodes with separate role keys;
+root weights are mirrored by the EVM committee; aggregator committees remain
+unweighted. P85 authenticates the owner/root/EVM binding and payee without a
+second staking identity. Validator changes are coupled and proved positively.
+Ordinary EVM evidence is the selected route, not an open question. It protects
+only valid pairs executed before their deadline. A freeze or censorship may make
+a report late. Captured closure/retirement holds remain; no forced-inclusion
+watermark or separately certified release authority is required. Funded PoS
+operator rewards are required; PoA accounting is external.
 
 ## 2. Pinned upstream candidates and licences
 
@@ -115,21 +117,13 @@ immutable, and concluded from that that no upstream source could ever be used.
 a property of deployed bytecode and says nothing about licensing; a platform's
 licence does not determine the licence of a separate artifact.
 
-**The destination is now declared rather than inferred** (`Destination` in
-`evmroot/p1reuse.go`, and a required field of the matrix):
-
-| Field | Value |
-|---|---|
-| Repository | `unicity-pos-contracts` — separate from `bft-core` |
-| Licence | **GPL‑3.0 proposed** (not selected; the owner decides, #85) |
-| Boundary | Separate repository, source tree and build; **no linking**. The platform interacts with deployed contracts only across the EVM ABI and the certified-input boundary. It does not import, compile or link contract source, and neither side derives from the other's source. |
-| Determination owner | Repository owner, before any file is copied |
-
-Under that boundary a GPL‑3.0 contract set and an Apache‑2.0 platform can
-coexist, and **a GPL‑3.0 source port is licence-permitted**. Separate
-repositories are not by themselves a legal determination — the boundary above is
-what the conclusion rests on, and the owner confirms it. This document is an
-engineering assessment, not legal advice.
+**Selected destination:** `ristik/unicity-pos-contracts`, a separately built
+and released contract package, with Apache-2.0 for newly authored source and
+interfaces. Dependencies keep their notices. Owner §4.3 selected clean-room
+implementation; contracts #7 records the actual provenance. No Polygon staking
+source is imported. A GPL destination was an investigated alternative, not the
+current deployment or release license. Any future port needs its own per-file
+license and artifact-boundary review; separate repositories alone settle neither.
 
 **Licence facts at the pins, with their uncertainty retained.**
 
@@ -159,20 +153,16 @@ where that duty goes), **defer-not-applicable** (out of scope for self-bond; kep
 as a reference for a later optional upgrade), **vendor-port** (copy upstream
 source, gated on compatibility with the *declared* destination licence).
 
-**`vendor-port` is available** under the GPL‑3.0 destination (§2.1). No row uses
-it at this revision, and that is an engineering judgement about these particular
-units (§4), **not** a licence prohibition.
-
-**Not "clean-room".** The earlier revision called the first disposition
-clean-room. No clean-room process was performed: there was no separated
-specification team, no separated implementation team that never saw the original,
-and no records proving separation. "No verbatim copying" is not a clean-room
-process, and the term is withdrawn in favour of independent implementation with
-documented provenance.
+No row selects `vendor-port`. The old GPL-destination comparison was an
+engineering alternative, not a conclusion that Apache platform licensing bars
+separately licensed contracts. The selected staking implementation is clean-room
+in the specification-led sense documented by contracts #7; earlier research of
+upstream code is not denied or retroactively certified as separated. General
+purpose imports are recorded in the contracts provenance manifest.
 
 | # | Upstream unit | Purpose | Disposition | Replacement / where the duty goes | Removed upstream test |
 |---|---|---|---|---|---|
-| 1 | `StakeManager.stakeFor/restake/unstake/unstakeClaim`; `WITHDRAWAL_DELAY = 2¹³` epochs | Bonding + fixed-delay unbond claim | independent-implementation | D5 `Reservation` + `ProtectionParams`; delay is `Δ_hold` in **certified root rounds** with `Δ_hold > Δ_ev+Δ_incl+Δ_exec`, plus the forced-inbox position cutoff and the pending-evidence gate. Requesting retirement does not start the clock. (The inbox cutoff is deferred by ADR 0012, section 1.1.) Local home: **P2**. | `StakeManager.Staking.js` `describe('unstake')` / `describe('unstakeClaim')`, and the `WITHDRAWAL_DELAY` cases in `StakeManager.test.js` / `ValidatorShare.test.js` (verified, 3.3) → D5 `TestD5_WithdrawalGates` |
+| 1 | `StakeManager.stakeFor/restake/unstake/unstakeClaim`; `WITHDRAWAL_DELAY = 2¹³` epochs | Bonding + fixed-delay unbond claim | independent-implementation | D5 `Reservation` + `ProtectionParams`; P85 holds use canonical progress, captured maxima and UC time, with holds strictly greater than evidence windows and no unsettled accepted case. Requesting retirement does not start the authenticated retirement clock. No inbox cutoff is active. Local home: **P2**. | `StakeManager.Staking.js` `describe('unstake')` / `describe('unstakeClaim')`, and the `WITHDRAWAL_DELAY` cases in `StakeManager.test.js` / `ValidatorShare.test.js` (verified, 3.3) → D5 `TestD5_WithdrawalGates` |
 | 2 | `StakeManager.checkSignatures/_increaseRewardAndAssertConsensus/rewardPerStake/CHECKPOINT_REWARD/_updateRewardsAndCommit`; proposer bonus + `combinedStakePower` split | Checkpoint-submission-driven reward accrual & consensus assertion | **remove** (checkpoint coupling) | Duty *(sizes a per-interval pool, applies a proposer bonus, splits by validator vs delegator stake power every checkpoint)* → accounting replacement **`assigned-weight-reward`**: `R_ν(I)=min(ρ_e·\|I\|,Pool_free)·b_ν/W_e` over certified root-round progress; no proposer bonus. | `StakeManager.test.js` proposer-bonus-with-delegation and unequal-stake checkpoint cases at both pins (verified, 3.3): invariants replaced by assigned-weight settlement and invariants that disappear are split in 3.3 → T8/P7 reward-settlement vectors |
 | 3 | `StakeManager.slash` + `SlashingManager.updateSlashedAmounts` + `verifyConsensus` (Heimdall-checkpoint-signed batch) | Apply a slashing batch validated by Heimdall consensus signatures | **remove** (Heimdall/checkpoint path) | Duty *(debit offender validator+delegation stake, credit a reporter, update totals, jail)* → accounting replacement **`objective-slashing-penalty`**: D5 `SlashableConflict` + S1/S2; charge attributable collateral once, bounded bounty, remainder to treasury, duplicate-offence guard, jail excludes future elections. | `SlashingManager.test.js` slash-list, jail and unstake cases only; it has **no** signature-rejection case (wrong as first stated, 3.3) → D5 `TestD5_SlashableConflictDomain`, S1/S2 vectors |
 | 4 | `SlashingManager.updateSlashedAmounts`: reporter bounty, proposer share, remainder routing (there is **no** amount cap; a larger-than-stake amount reverts in `StakeManager.slash` via `SafeMath` underflow) | Penalty arithmetic for an authenticated batch | independent-implementation | Re-implemented in **S2** against D5 collateral attribution; CEI on the bounty credit. Local home: **S2**. See §3.1 — de-duplication is **not** upstream. | `test/units/staking/SlashingManager.test.js` @ `eef53596`; it does **not** cover the invariants first listed, see 3.2 and 3.3 |
@@ -324,14 +314,13 @@ vectors; the new settlement tests are written against the governance.tex reward 
 
 ## 4. Three options, compared on engineering merit
 
-The earlier revision compared two options and eliminated one on a licence ground
-that has been withdrawn (§2.1). With a GPL‑3.0 destination declared, **all three
-of the reviewer's options are licence-permitted**, so the comparison is now on
-engineering merit alone.
+The alternatives were compared on engineering merit, including a hypothetical
+GPL destination for a focused port. That was a viable option to assess, subject
+to actual file notices; it is not the selected license or permission to copy.
 
 | Axis | (a) Focused port of `StakeManager`/`ValidatorShare` | (b) Selective reuse of compatible primitives | (c) Independent implementation of the profile's behaviours |
 |---|---|---|---|
-| Licence | **permitted** — GPL‑3.0 into a GPL‑3.0 destination | permitted under either destination licence | permitted |
+| Licence | Requires compatible destination and resolved file notices | Keep each imported dependency's license | Apache-2.0 chosen for new code; no staking source copied |
 | What it buys | real deployed-bytecode provenance | small, well-understood, low-risk building blocks | exactly the surface the profile needs |
 | Toolchain | solc 0.5.17 → ≥0.8 is a rewrite (built-in overflow checks, `address payable`, ABI v2, constructor/visibility syntax) | same migration, far less code | targets the P2 toolchain directly |
 | Unused surface | validator NFT, auctions, `dethrone`, delegation vouchers, Heimdall fee token, `StateSender`, upgradeable proxies, checkpoint Merkle plumbing — dead in self-bond, still on the audit surface | none | none |
@@ -349,10 +338,9 @@ reward-per-weight accumulator, cap/bounty/remainder split, CEI claim pattern) ar
 small and must be rewritten against the D4/D5 certified lifecycle regardless,
 which upstream does not have.
 
-**(a) is not excluded.** It is rejected for *these* units on the surface,
-storage-coupling and toolchain grounds above. A later unit with a closer surface
-match — and the vendored `common/oz` primitives in particular — can revisit it,
-and the matrix's licence gate will admit it under the declared destination.
+A future port is a new reviewed scope decision; the historical schema
+checker does not authorize it. The current implementation uses separately pinned
+general-purpose libraries, not the staking repository's vendored tree.
 
 ## 5. Explicit accounting replacements
 
@@ -362,43 +350,29 @@ references live in `evmroot/testdata/p1-reuse-matrix.json`
 
 | Key | Duty (Polygon) | Replacement | Spec |
 |---|---|---|---|
-| `root-certified-lifecycle` | reserve collateral to an assignment; hold it through extension / pending candidate / cancelled transition; release only on an authenticated "backs no successor" statement | D4 handoff state machine + D5 `Reservation`; election reserves, `AcknowledgeRetirement` records `R_ret`, withdrawal gated by `Δ_hold` / inbox cutoff / pending evidence; abort needs a root-certified abort + EVM ack | `governance.tex` §§ Stake Registry, Election, Trust Base Derivation, Economic Invariants 1–4; ADR 0006/0007 |
+| `root-certified-lifecycle` | reserve collateral to an assignment; hold it through extension / pending candidate / cancelled transition; release only on an authenticated "backs no successor" statement | P85 reservation, imported Retirement and exact closure/reference digests; strict captured progress/UC-time gates and accepted-case holds; only authenticated session cancellation releases its references | `governance.tex` §§ Stake Registry, Election, Trust Base Derivation, Economic Invariants 1–4; ADR 0006/0007 |
 | `assigned-weight-reward` | per-checkpoint pool sizing + proposer bonus + validator/delegator split | closed-interval `R_ν(I)=min(ρ_e·\|I\|,Pool_free)·b_ν/W_e` over certified root-round progress; integer arithmetic, remainder stays in the source pot; idempotent bounded permissionless settlement; CEI claims; idle assigned validators paid (accepted limitation) | `governance.tex` §§ Rewards, Fees; roadmap T8, P7 |
 | `objective-slashing-penalty` | Heimdall-signed slash batch: debit stake, credit reporter, jail | D5 `SlashableConflict` + S1/S2: charge attributable active/retiring collateral once, bounded bounty, remainder to treasury, duplicate-offence guard, jail excludes future elections; never mints/burns UCT | `governance.tex` §§ Slashing, "Slashed Stake"; ADR 0007; roadmap S1–S2 |
-| `collateral-attribution-through-rotation` | keep bookkeeping attached across signer change / unbonding | D5 `InheritedProtectionUntil` (max protection across rotation/delegation change); historical bindings survive rotation & exit; slashing hits collateral + attributable unbonding shares | `governance.tex` §§ Stake Registry, Economic Invariants 4; ADR 0007; roadmap P3–P4 |
+| `collateral-attribution-through-rotation` | keep bookkeeping attached across signer change / unbonding | D5 `InheritedProtectionUntil` (max protection across rotation/delegation change); historical bindings survive rotation & exit; slashing hits historically attributable lots; delegated shares are out of scope | `governance.tex` §§ Stake Registry, Economic Invariants 4; ADR 0007; roadmap P3–P4 |
 | `fee-accounting` | separate Heimdall fee-token escrow + claim | no separate fee token; T3 `FeeCollector` (protocol balance accounting, no contract call) + independent `Treasury`; permissionless split | `governance.tex` §§ Fees, Information Flows; roadmap T3 |
 | `validator-identity-bookkeeping` | move bookkeeping on NFT transfer; auctions; dethrone refund | P3 stable non-transferable staking account, owner key, distinct roles, PoP, unique active bindings; no transfer, no auction | `governance.tex` §§ Stake Registry, Election; roadmap P3, P5 |
 
-## 6. What P1 does not decide
+## 6. Boundaries
 
-- The contract toolchain (**P2**); the repository is `unicity-pos-contracts`.
-- Any parameter value — `Δ_hold`, `ρ_e`, `N_max`, bounty caps, minimum
-  self-bond, positive base-fee floor (release decisions; P7 for governance).
-- The actual vendoring / writing of contract code (**P2** and later).
-- Whether to accept a separately-housed GPL‑3.0 ported package, and the
-  destination licence (**owner decisions**; see "Open for owner acceptance").
-- A security audit. **Compiler modernization and a green upstream test suite
-  are not a security audit** — the audit owner is the roadmap X-series (X2
-  pre-TGE; X4/X5 PoS).
-- Delegation (`ValidatorShare`) — deferred; its own ticket carries its own
-  historical loss tests.
+P1 is an assessment, not an implementation acceptance or security audit. The
+contract toolchain/license and development policy now have concrete artifacts;
+final production values, external audit and activation remain separate. Stake
+share delegation and its historical commission/loss tests remain deferred.
 
 ## 7. Reuse decision (normative)
 
-> Independent implementation of a minimal self-bond set (not a clean-room process:
-> provenance is documented, not certified). **No Polygon source is vendored or
-> ported at this revision**: that is an engineering choice about these units
-> (section 4), not a licence bar. Under the declared destination boundary a
-> GPL‑3.0 port into the separate contract repository is licence-permitted, and the
-> owner confirms the boundary. A short, named list of algorithm shapes — the
-> delayed-unbond state machine, the reward-per-weight accumulator, the
-> bounty/proposer-share/remainder penalty split, and the dormant delegation
-> exchange-rate/commission formulas — is used as **reference only**. All M4S
-> staking-contract code is written locally in `unicity-pos-contracts` (licence
-> chosen by the owner; GPL‑3.0 proposed), against the frozen D4/D5 lifecycle.
-> Checkpoint, bridge/state-sync, validator-NFT/auction, Heimdall-fee and
-> upgradeable-proxy couplings are removed; each accounting duty they carried is
-> re-homed per section 5.
+Follow ADR 0011 and P85 v5: write the self-bond staking logic from the written
+specification and independent behavioral tests, without copying or translating
+upstream staking source/layout/algorithms/tests. New source/interfaces use
+Apache-2.0. Preserve separate repository/build/release boundaries and notices
+for general-purpose imports. No inherited audit is claimed. The root-certified
+lifecycle, ordinary EVM evidence and required funded operator rewards replace
+the removed checkpoint/bridge/NFT/auction/proxy couplings.
 
 ## 8. Acceptance mapping
 
@@ -425,25 +399,28 @@ curl -s https://api.github.com/repos/0xPolygon/pos-contracts  | jq '{archived,li
 curl -s https://api.github.com/repos/maticnetwork/contracts/branches/main | jq -r .commit.sha
 ```
 
-## 10. Open for owner acceptance
+## 10. Current behavior mapping and acceptance
 
-P1 stays open for the owner. These decisions are the owner's; this assessment
-records them and decides none (unresolved values stay symbolic):
+The upstream test-location checks in §3.3 remain the investigation record. The
+following homes replace schema-only claims with concrete behaviors. Contract
+paths are in `ristik/unicity-pos-contracts`, inspected at `316203f441` (includes
+#7 custody and #46 real root evidence). Presence of a test is not a claim that
+P1 reran it or that the whole parent milestone has closed.
 
-1. **Accept P1's reviewed artifact/reuse boundary** (ADR 0011): independent
-   implementation, nothing vendored, reference-only shapes.
-2. **Confirm the licence boundary and select the contract licence**; decide
-   whether a ported GPL package is ever in scope, and what a genesis package or
-   node release carrying GPL bytecode must state.
-3. **Resolve upstream licence scope** before any file is copied (GPLv3 `LICENSE`
-   vs MIT `package.json`; no SPDX on `pos-contracts` `StakeManager.sol`; vendored
-   OZ file notices).
-4. **#85 economics:** bond/weight unit, election size and churn, penalties,
-   bounties and repeat offences, protection periods, governance bounds and
-   custody migration.
-5. **Evidence protection and safe withdrawal with the I-track deferred**, and an
-   enforceable real-time retirement floor/checkpoint policy (ADR 0012 open
-   question 2).
+| Studied duty / §3 rows | Retained, excluded or new local requirement | Current artifact / remaining work |
+|---|---|---|
+| Bond/unbond/collateral, rows 1/3 | Retain conservation/exit intent; replace fixed-delay/checkpoint release with authenticated closure | `test/p85/Lifecycle.t.sol`, `Reservation.t.sol`, `Maturity.t.sol`, `Protection.t.sol`, `Claims.t.sol`; real Go Retirement digest-to-claim integration remains a P4/H7 acceptance item |
+| Reward accounting, row 2 | Replace checkpoint/proposer rewards with funded assigned-weight intervals; no PoA on-chain or second EVM reward | P85 §7; T8 #47/P7 #54 implementation still required, not satisfied by the P1 matrix |
+| Slashing, row 4 | Replace Heimdall batch authority with actual root vote conflicts, historical attribution, dedup and bounded debit/bounty | `EvidenceDigest.t.sol` consumes Go signed corpus; `Evidence.t.sol`, `Fuzz.t.sol`, `P85Invariant.t.sol`; S3/S4 network discovery/submission exercise remains |
+| Delegated shares, row 5 | Excluded in self-bond profile | No share/commission/voucher API; separate tests required if ever introduced |
+| Identity, row 6 | Replace transferable NFT/auction identity with stable IDs, key PoP/tombstones and historical exposure | `Identity.t.sol`, `Delegation.t.sol`, `Records.t.sol`; key delegation here is not delegated stake |
+| Checkpoint proof/indexing, row 7 | New positive EVM-state proof and root-record binding | core `rootchain/consensus/storage/primary_proof_real_test.go`, `pos_control_test.go`; contracts `XRepoRecords.t.sol`, `XRepoGenesis.t.sol` |
+| Mutable registry/proxy, row 8 | Excluded; retain narrow fixed permissions | `Genesis.t.sol`, `Fuzz.t.sol`, unauthorized-caller invariants; prospective bounded policy still P7 |
+| Fee/state-sync coupling, row 9 | Exclude Heimdall fee token/state-sync; separate native fee/treasury accounting | contracts `test/T2T3.t.sol`, `T2T3Invariant.t.sol`; not permission to borrow stake/bridge backing |
+| Libraries, row 10 | Replace old SafeMath with checked Solidity and pinned general-purpose guard | contracts `foundry.toml`, `docs/p85/PROVENANCE.md`, `Claims.t.sol` reentrancy/recipient cases |
 
-Until these are answered, P2 starts no custody code on assumptions beyond this
-document, and P-DESIGN #85 acceptance waits on items 4 and 5.
+The clean-room direction and ordinary-evidence choice are settled. Owner
+acceptance of the self-contained #85 design is still required; publishing it
+neither grants that acceptance nor closes PR #415. Development values and fresh
+genesis are sufficient; unresolved hypothetical GPL copying, migration and final
+production economics do not block the selected development implementation.
