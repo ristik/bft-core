@@ -82,7 +82,13 @@ type goRetirement struct {
 
 func rootSigner(t *testing.T, i int) (*crypto.InMemorySecp256K1Signer, []byte) {
 	t.Helper()
-	priv := new(big.Int).SetUint64(uint64(contractsRootKeyBase + i)).FillBytes(make([]byte, 32))
+	return scalarSigner(t, uint64(contractsRootKeyBase+i))
+}
+
+// scalarSigner is the secp256k1 signer of a contracts test scalar and its compressed public key.
+func scalarSigner(t *testing.T, scalar uint64) (*crypto.InMemorySecp256K1Signer, []byte) {
+	t.Helper()
+	priv := new(big.Int).SetUint64(scalar).FillBytes(make([]byte, 32))
 	s, err := crypto.NewInMemorySecp256K1SignerFromKey(priv)
 	require.NoError(t, err)
 	v, err := s.Verifier()
