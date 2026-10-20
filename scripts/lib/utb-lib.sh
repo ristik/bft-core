@@ -321,14 +321,14 @@ utb_root_log_report() { # OUT
 # ---- the forced state import (bft-core#671, live proof for #648) -------------------------------------------------------------------------------------------
 # One root of the genesis committee is stopped before the V3 handoff, left behind for UTB_IMPORT_GAP rounds and restarted with its store intact: the first proposal it
 # sees is ahead of its state, so it recovers by importing a peer's state (the log line "completed recovery"), in the genesis epoch. The handoff that follows must then
-# find the V3 freeze rules enabled on it (#648): after the import the root has no refusal, signs votes at and after the round of the handoff record and logs the
+# find the V3 freeze rules enabled on it (#648): after the import the root has no refusal, signs the vote on the block of the handoff record and logs the
 # committed outcome of the record.
 utb_import_root() { echo "${UTB_IMPORT_ROOT:-4}"; }
 
 # utb_import_report LOG MARKER OUT: what the lines of LOG after line MARKER show. Succeeds when the root completed a state import, never logged one of the two
-# refusals, and (the handoff step) logged the committed outcome of the epoch-1 handoff record after having signed a vote at or after the record's round.
+# refusals, and (the handoff step) logged the committed outcome of the epoch-1 handoff record and signed a vote at exactly the record's round.
 utb_import_report() {
-  local log=$1 marker=$2 out=$3 imports freeze succ outcome round vote
+  local log=$1 marker=$2 out=$3 imports freeze succ outcome round voteline
   [ -s "$log" ] || { echo "no log $log" >&2; return 1; }
   tail -n +"$((marker + 1))" "$log" >"$out.lines" || return 1
   imports=$(grep -ac 'completed recovery' "$out.lines" || true)
@@ -336,7 +336,8 @@ utb_import_report() {
   succ=$(grep -ac 'successor trust-base entry cannot be derived' "$out.lines" || true)
   outcome=$(grep -a 'root handoff outcome' "$out.lines" | grep -a 'phase=committed' | grep -a 'rootEpoch=1 ' | head -1 || true)
   round=$(sed -n 's/.* rootRound=\([0-9]*\).*/\1/p' <<<"$outcome")
-  vote=$(grep -a 'msg="signed vote"' "$out.lines" | sed -n 's/.* round=\([0-9]*\) .*/\1/p' | sort -n | tail -1)
+  # the vote is signed only after the root executed that very block: a vote at exactly the record's round shows it voted on the record-carrying block
+  voteline=$(grep -a 'msg="signed vote"' "$out.lines" | grep -a -m1 -E " round=${round:-x} " || true)
   {
     echo "root log: $log, lines after $marker"
     echo "state imports (completed recovery): $imports"
@@ -345,10 +346,10 @@ utb_import_report() {
     echo "successor trust-base entry cannot be derived: $succ"
     echo "handoff record outcome: ${outcome:+$(cut -c1-300 <<<"$outcome")}"
     echo "handoff record round: ${round:-none}"
-    echo "highest round signed: ${vote:-none}"
+    echo "vote on the record block: ${voteline:+$(cut -c1-240 <<<"$voteline")}"
   } >"$out"
   rm -f "$out.lines"
-  [ "$imports" -ge 1 ] && [ "$freeze" -eq 0 ] && [ "$succ" -eq 0 ] && [ -n "$round" ] && [ -n "$vote" ] && [ "$vote" -ge "$round" ]
+  [ "$imports" -ge 1 ] && [ "$freeze" -eq 0 ] && [ "$succ" -eq 0 ] && [ -n "$round" ] && [ -n "$voteline" ]
 }
 
 # before the V3 handoff: stop the root, let the others go on UTB_IMPORT_GAP rounds, restart it in the genesis epoch with its store, wait for the state import
@@ -529,7 +530,7 @@ utb_check_evidence() {
   grep -q '^V3 freeze rules are not enabled: 0$' "$dir/checks/root-logs.txt" && grep -q '^successor trust-base entry cannot be derived: 0$' "$dir/checks/root-logs.txt" || { echo "checks/root-logs.txt does not show both refusal counts at 0" >&2; return 1; }
   local ir; ir=$(ls "$dir"/state-import/root[0-9]*.txt 2>/dev/null | head -1)
   [ -n "$ir" ] && grep -Eq '^state imports \(completed recovery\): [1-9]' "$ir" && grep -q '^V3 freeze rules are not enabled: 0$' "$ir" && grep -q '^successor trust-base entry cannot be derived: 0$' "$ir" \
-    && grep -q '^handoff record outcome: .*phase=committed' "$ir" || { echo "state-import/root<N>.txt does not show a state import before the V3 handoff, no refusal, and the committed record outcome" >&2; return 1; }
+    && grep -q '^handoff record outcome: .*phase=committed' "$ir" && grep -q '^vote on the record block: .*signed vote' "$ir" || { echo "state-import/root<N>.txt does not show a state import before the V3 handoff, no refusal, and the committed record outcome" >&2; return 1; }
   jq -e '(.redeem.gasUsed | tonumber) > 0 and (.claim.gasUsed | tonumber) > 0' "$dir/proofs/bridge-receipt.json" >/dev/null 2>&1 || { echo "proofs/bridge-receipt.json is not a successful redemption and claim" >&2; return 1; }
 }
 
@@ -606,7 +607,7 @@ utb_selftest() {
   printf 'ok line\n' >"$t/rl/test-nodes/root1/debug.log"
   utb_st_no "a root log with the not-retained refusal fails the report" bash -c "cd '$t/rl' && source '$cwd/scripts/lib/utb-lib.sh' && echo 'x successor trust-base entry cannot be derived' >>test-nodes/root1/debug.log && utb_root_log_report r.txt"
   utb_st_no "no root logs fails the report" bash -c "mkdir -p '$t/nolog' && cd '$t/nolog' && source '$cwd/scripts/lib/utb-lib.sh' && utb_root_log_report r.txt"
-  # the forced state import (#671): the report needs the import, both refusals at 0, and a vote at or after the round of the committed handoff record, all after the marker
+  # the forced state import (#671): the report needs the import, both refusals at 0, and a vote at exactly the round of the committed handoff record, all after the marker
   local si="$t/si"; mkdir -p "$si"
   local imp='time=1 level=DEBUG msg="completed recovery"' vote620='time=2 level=INFO msg="signed vote" node_id=x round=620 messageID=ab' out1='time=3 level=INFO msg="root handoff outcome" node_id=x phase=committed attempt=0 rootEpoch=1 rootRound=620 round=621 go_id=3'
   printf '%s\n' 'old line before the marker: V3 freeze rules are not enabled' "$imp" "$vote620" "$out1" >"$si/good.log"
@@ -618,7 +619,9 @@ utb_selftest() {
   printf '%s\n' marker "$imp" 'x successor trust-base entry cannot be derived' "$vote620" "$out1" >"$si/succ.log"
   utb_st_no "the not-retained refusal after the import fails the report" utb_import_report "$si/succ.log" 1 "$si/o.txt"
   printf '%s\n' marker "$imp" 'time=2 level=INFO msg="signed vote" node_id=x round=619 messageID=ab' "$out1" >"$si/lowvote.log"
-  utb_st_no "no vote at or after the record's round fails the report" utb_import_report "$si/lowvote.log" 1 "$si/o.txt"
+  utb_st_no "a vote below the record's round fails the report" utb_import_report "$si/lowvote.log" 1 "$si/o.txt"
+  printf '%s\n' marker "$imp" 'time=2 level=INFO msg="signed vote" node_id=x round=700 messageID=ab' "$out1" >"$si/highvote.log"
+  utb_st_no "a vote only above the record's round fails the report" utb_import_report "$si/highvote.log" 1 "$si/o.txt"
   printf '%s\n' marker "$imp" "$vote620" >"$si/nooutcome.log"
   utb_st_no "no committed outcome of the record fails the report" utb_import_report "$si/nooutcome.log" 1 "$si/o.txt"
   printf '%s\n' marker "$imp" "$vote620" "${out1/rootEpoch=1/rootEpoch=2}" >"$si/epoch2.log"

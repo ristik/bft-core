@@ -24,7 +24,7 @@ import (
 )
 
 // importReport is what the lane's import step writes for the root it forced to import state before the V3 handoff.
-const importReport = "root log: test-nodes/root4/debug.log, lines after 10\nstate imports (completed recovery): 1\nV3 freeze rules are not enabled: 0\nsuccessor trust-base entry cannot be derived: 0\nhandoff record outcome: msg=\"root handoff outcome\" phase=committed rootEpoch=1 rootRound=620\nhandoff record round: 620\nhighest round signed: 622\n"
+const importReport = "root log: test-nodes/root4/debug.log, lines after 10\nstate imports (completed recovery): 1\nV3 freeze rules are not enabled: 0\nsuccessor trust-base entry cannot be derived: 0\nhandoff record outcome: msg=\"root handoff outcome\" phase=committed rootEpoch=1 rootRound=620\nhandoff record round: 620\nvote on the record block: time=2 msg=\"signed vote\" round=620 messageID=ab\n"
 
 func goBuild(t *testing.T, dir, pkg, out string) string {
 	t.Helper()
@@ -269,6 +269,9 @@ func TestEvidencePackIsCheckedByTheToolsAndEveryBadByteIsRefused(t *testing.T) {
 		}, "state-import/root<N>.txt"},
 		"no committed record outcome after the forced import": {func(p string) {
 			write(t, p, "state-import/root4.txt", []byte(strings.Replace(importReport, "phase=committed", "phase=aborted", 1)))
+		}, "state-import/root<N>.txt"},
+		"no vote on the record block": {func(p string) {
+			write(t, p, "state-import/root4.txt", []byte(strings.Replace(importReport, "signed vote", "x", 1)))
 		}, "state-import/root<N>.txt"},
 		"an empty file":  {func(p string) { write(t, p, "catchup/restart.log", nil) }, "missing or empty"},
 		"a missing file": {func(p string) { require.NoError(t, os.Remove(filepath.Join(p, "handoff/ordinary-ack.log"))) }, "missing or empty"},
