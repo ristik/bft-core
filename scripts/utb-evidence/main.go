@@ -358,7 +358,7 @@ func findUCs(v any, out *[]types.UnicityCertificate) {
 // and the error of the last candidate is returned when none does.
 func verifyUnderConfs(uc *types.UnicityCertificate, tb types.RootTrustBase, partition types.PartitionID, pdrs []*types.PartitionDescriptionRecord, hashes [][]byte) error {
 	if len(pdrs) == 0 {
-		return uc.Verify(tb, crypto.SHA256, partition, types.ShardID{}, nil)
+		return uc.Verify(quorumweight.Checked(tb), crypto.SHA256, partition, types.ShardID{}, nil)
 	}
 	var last error
 	candidates := 0
@@ -367,7 +367,7 @@ func verifyUnderConfs(uc *types.UnicityCertificate, tb types.RootTrustBase, part
 			continue
 		}
 		candidates++
-		err := uc.Verify(tb, crypto.SHA256, c.PartitionID, c.ShardID, hashes[j])
+		err := uc.Verify(quorumweight.Checked(tb), crypto.SHA256, c.PartitionID, c.ShardID, hashes[j])
 		if err == nil {
 			return nil
 		}
