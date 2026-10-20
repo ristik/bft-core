@@ -25,8 +25,9 @@ done
 
 # the aggregator from its pin (utb_agg_build: clean clone, VCS stamped, provenance directory; refuses a commit off integration/enshrined-evm)
 export AGRE_ROOT=${AGRE_ROOT:-$(cd "$repo/.." && pwd)}
-AGG_COMMIT=$(jq -er '.components["aggregator-go"].commit' scripts/ci/lane-pins.json) scripts/utb-lane.sh --build-aggregator
-cp -R "$AGRE_ROOT/builds/aggregator-${AGG_COMMIT:0:8}" "$out/" 2>/dev/null || cp -R "$AGRE_ROOT/builds/aggregator-$(jq -er '.components["aggregator-go"].commit' scripts/ci/lane-pins.json | cut -c1-8)" "$out/"
+AGG_COMMIT=$(jq -er '.components["aggregator-go"].commit' scripts/ci/lane-pins.json); export AGG_COMMIT
+scripts/utb-lane.sh --build-aggregator
+cp -R "$AGRE_ROOT/builds/aggregator-${AGG_COMMIT:0:8}" "$out/"
 
 # the self-tests that compile Go test binaries run here; the run job checks their recorded result
 tb=$(mktemp -d); for i in 1 2 3; do build/ubft root-node init --home "$tb/root$i" -g >/dev/null; done
