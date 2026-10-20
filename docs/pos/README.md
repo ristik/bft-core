@@ -10,6 +10,12 @@ The [owner architecture decisions of 2026-10-01](../adr/0012-validator-entity-mo
 at the root level only, coupled validator-set changes, deferred I-track, centrally run aggregator shards) amend the roadmap
 below; the roadmap carries a decision section and per-ticket amendment notes.
 
+The [canonical PoS architecture, P85 v5](../design/pos-architecture.md) is the
+self-contained #85 deliverable for owner acceptance. [ADR0011](../adr/0011-staking-component-reuse.md)
+and the [P1 assessment](../design/p1-staking-component-reuse-assessment.md) record
+the selected Apache-2.0 clean-room direction and current accounting replacements.
+Publication does not accept the architecture or close its implementation gates.
+
 This is a planning and reference change. It adds no consensus, reth or contract implementation,
 sets no production parameters, and authorizes no deployment or currency issuance.
 GitHub issues are the work tracker; this roadmap records the stage contracts and technical baseline.
