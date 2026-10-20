@@ -116,13 +116,17 @@ case "$stage" in
     curl -sS --max-time 2 -X POST http://127.0.0.1:18545 -H 'Content-Type: application/json' \
       -d '{"jsonrpc":"2.0","id":1,"method":"eth_blockNumber","params":[]}' | grep -q '"result":"0x0"'
     echo 'H4_FRESH_EL_GENESIS' >>"$evidence/restore.log"
-    # Discovery is disabled, so reintroduce the replacement client to surviving peers.
+    # Discovery is disabled, so reintroduce the replacement client to surviving peers: as TRUSTED peers, in both directions (ureth's transaction gossip connects to trusted peers only).
     for j in 2 3 4; do
       enode=$(curl -sS --max-time 5 -X POST "http://127.0.0.1:$((18544+j))" \
         -H 'Content-Type: application/json' -d '{"jsonrpc":"2.0","id":1,"method":"admin_nodeInfo","params":[]}' \
         | python3 -c 'import json,sys; print(json.load(sys.stdin)["result"]["enode"])')
       curl -sS --max-time 5 -X POST http://127.0.0.1:18545 -H 'Content-Type: application/json' \
-        -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"admin_addPeer\",\"params\":[\"$enode\"]}" >/dev/null
+        -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"admin_addTrustedPeer\",\"params\":[\"$enode\"]}" >/dev/null
+      new_enode=${new_enode:-$(curl -sS --max-time 5 -X POST http://127.0.0.1:18545 -H 'Content-Type: application/json' \
+        -d '{"jsonrpc":"2.0","id":1,"method":"admin_nodeInfo","params":[]}' | python3 -c 'import json,sys; print(json.load(sys.stdin)["result"]["enode"])')}
+      curl -sS --max-time 5 -X POST "http://127.0.0.1:$((18544+j))" -H 'Content-Type: application/json' \
+        -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"admin_addTrustedPeer\",\"params\":[\"$new_enode\"]}" >/dev/null
     done
     pinTrustBase=test-nodes/trust-base.json
     restoreProfile2Args=()
