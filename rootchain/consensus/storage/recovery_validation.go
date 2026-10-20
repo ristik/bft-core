@@ -25,8 +25,9 @@ recovering node therefore, before anything is written or installed:
  2. requires every shard info to hold the invariant of an executed one: the applied configuration is the one in effect, the technical record announces
     its epoch, and its fee and statistics commitments are those of the accumulators (ShardInfo.checkAppliedConfiguration, called by newRootBlock). The
     epoch transition is the profile 3 one: the applied configuration is named by its hash alone, so a skipped scheduled epoch is as valid as the next one;
- 3. binds each retained last response (UC and technical record) to the shard and to the head state; a shard without one is accepted only when its whole
-    state is the initial state derived from the configuration (validateLastResponse).
+ 3. binds each retained last response (UC and technical record) to the shard and to the head state; every shard of a committed head has one (a newly
+    activated shard gets its first response when the block of its activation is committed), so a shard without one is refused
+    (validateLastResponse).
 
 No information beyond the state message and the local orchestration is used.
 */

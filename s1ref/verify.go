@@ -539,7 +539,7 @@ func pair(ctx *Context, a, b *voteFacts) (*Offence, error) {
 }
 
 // verifyCompact is the frozen profile's signature rule, explicitly: the first 64 bytes (r||s) are verified against the member's key by the base
-// library's compact verifier, after the length, recovery-byte (0 or 1 when present) and range checks above. The recoverable verifier
+// library's compact verifier, after the length, recovery-byte (0 or 1 when present, checked at decode in evidence.go) and range checks above. The recoverable verifier
 // (Verifier.VerifyBytes) takes only canonical 65-byte signatures with a recovery ID, which is the native message rule and not this profile's: the
 // profile's acceptance of 64-byte signatures and of recovery bytes 0 and 1 is part of what its Go, Rust and contract implementations agree on, and a
 // library bump must not change it silently.

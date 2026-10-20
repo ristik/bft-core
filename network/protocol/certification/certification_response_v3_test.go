@@ -2,6 +2,7 @@ package certification
 
 import (
 	"bytes"
+	"github.com/fxamacker/cbor/v2"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -23,9 +24,9 @@ func entryBytes(b byte, n int) []byte { return bytes.Repeat([]byte{b}, n) }
 
 func TestResponseV3RoundTripsAndKeepsTheLegacyMeaning(t *testing.T) {
 	base := v3Base(t)
-	v2 := NewCertificationResponseV3(base, [][]byte{entryBytes(1, 300), entryBytes(2, 310)})
-	require.NoError(t, v2.IsValid())
-	raw, err := types.Cbor.Marshal(v2)
+	v3 := NewCertificationResponseV3(base, [][]byte{entryBytes(1, 300), entryBytes(2, 310)})
+	require.NoError(t, v3.IsValid())
+	raw, err := types.Cbor.Marshal(v3)
 	require.NoError(t, err)
 	var back CertificationResponseV3
 	require.NoError(t, types.Cbor.Unmarshal(raw, &back))
@@ -52,15 +53,15 @@ func TestResponseV3RoundTripsAndKeepsTheLegacyMeaning(t *testing.T) {
 
 func TestResponseV3IsNotTheLegacyFormAndNeverGuessedFromArity(t *testing.T) {
 	base := v3Base(t)
-	v2raw, err := types.Cbor.Marshal(NewCertificationResponseV3(base, [][]byte{entryBytes(1, 10)}))
+	v3raw, err := types.Cbor.Marshal(NewCertificationResponseV3(base, [][]byte{entryBytes(1, 10)}))
 	require.NoError(t, err)
 	legacyRaw, err := types.Cbor.Marshal(base)
 	require.NoError(t, err)
 
 	var legacy CertificationResponse
-	require.Error(t, types.Cbor.Unmarshal(v2raw, &legacy), "a legacy reader refuses the version 2 bytes")
-	var v2 CertificationResponseV3
-	require.Error(t, types.Cbor.Unmarshal(legacyRaw, &v2), "and a version 2 reader refuses the 6-element legacy bytes")
+	require.Error(t, types.Cbor.Unmarshal(v3raw, &legacy), "a legacy reader refuses the version 3 bytes")
+	var v3 CertificationResponseV3
+	require.Error(t, types.Cbor.Unmarshal(legacyRaw, &v3), "and a version 3 reader refuses the 6-element legacy bytes")
 	old := struct {
 		_         struct{} `cbor:",toarray"`
 		Partition types.PartitionID
@@ -70,7 +71,7 @@ func TestResponseV3IsNotTheLegacyFormAndNeverGuessedFromArity(t *testing.T) {
 	}{Partition: base.Partition, Technical: base.Technical, UC: base.UC}
 	oldRaw, err := types.Cbor.Marshal(old)
 	require.NoError(t, err)
-	require.Error(t, types.Cbor.Unmarshal(oldRaw, &v2), "and the 4-element one")
+	require.Error(t, types.Cbor.Unmarshal(oldRaw, &v3), "and the 4-element one")
 }
 
 func TestResponseV3Bounds(t *testing.T) {
@@ -81,28 +82,28 @@ func TestResponseV3Bounds(t *testing.T) {
 		"an oversize":    {entryBytes(1, MaxTrustBaseUpdateBytes+1)},
 	} {
 		t.Run(name, func(t *testing.T) {
-			v2 := NewCertificationResponseV3(base, updates)
-			require.ErrorIs(t, v2.IsValid(), ErrResponseV3)
-			_, err := types.Cbor.Marshal(v2)
+			v3 := NewCertificationResponseV3(base, updates)
+			require.ErrorIs(t, v3.IsValid(), ErrResponseV3)
+			_, err := types.Cbor.Marshal(v3)
 			require.ErrorIs(t, err, ErrResponseV3, "a sender cannot produce what no receiver accepts")
 		})
 	}
 	require.NoError(t, NewCertificationResponseV3(base, [][]byte{entryBytes(1, MaxTrustBaseUpdateBytes), entryBytes(2, 1)}).IsValid())
 
 	t.Run("a wrong version, hand-built", func(t *testing.T) {
-		v2 := NewCertificationResponseV3(base, nil)
-		v2.Version = 2
-		require.ErrorIs(t, v2.IsValid(), ErrResponseV3)
+		v3 := NewCertificationResponseV3(base, nil)
+		v3.Version = 2
+		require.ErrorIs(t, v3.IsValid(), ErrResponseV3)
 		type wire CertificationResponseV3
-		raw, err := types.Cbor.Marshal(wire(*v2))
+		raw, err := types.Cbor.Marshal(wire(*v3))
 		require.NoError(t, err)
 		var back CertificationResponseV3
 		require.ErrorIs(t, types.Cbor.Unmarshal(raw, &back), ErrResponseV3)
 	})
 	t.Run("three entries, hand-built on the wire", func(t *testing.T) {
 		type wire CertificationResponseV3
-		v2 := NewCertificationResponseV3(base, [][]byte{entryBytes(1, 10), entryBytes(2, 10), entryBytes(3, 10)})
-		raw, err := types.Cbor.Marshal(wire(*v2))
+		v3 := NewCertificationResponseV3(base, [][]byte{entryBytes(1, 10), entryBytes(2, 10), entryBytes(3, 10)})
+		raw, err := types.Cbor.Marshal(wire(*v3))
 		require.NoError(t, err)
 		var back CertificationResponseV3
 		require.ErrorIs(t, types.Cbor.Unmarshal(raw, &back), ErrResponseV3)
@@ -120,4 +121,57 @@ func TestResponseV3Bounds(t *testing.T) {
 		var nilResp *CertificationResponseV3
 		require.ErrorIs(t, nilResp.IsValid(), ErrResponseV3)
 	})
+}
+
+// The view of a V3 message is an opaque canonical byte string that is null when omitted: an empty string, a string over the view limit, an
+// indefinite-length string and a tagged string are refused by the decoder, and the constructor omits a view over the limit instead of sending it.
+// (Hand-built frames: a good message with the view element replaced.)
+func TestResponseV3ViewGuards(t *testing.T) {
+	base := v3Base(t)
+	frame := func(view []byte) []byte {
+		t.Helper()
+		version, err := types.Cbor.Marshal(CertificationResponseV3Version)
+		require.NoError(t, err)
+		resp, err := types.Cbor.Marshal(base)
+		require.NoError(t, err)
+		// [version, response, view, null]: the view bytes are spliced in as they are (the encoder would not write the indefinite form)
+		out := append([]byte{0x84}, version...)
+		out = append(out, resp...)
+		out = append(out, view...)
+		return append(out, 0xf6)
+	}
+	bstr := func(n int) []byte { // definite-length byte string of n bytes
+		b, err := cbor.Marshal(bytes.Repeat([]byte{7}, n))
+		require.NoError(t, err)
+		return b
+	}
+	decode := func(view []byte) error {
+		var v3 CertificationResponseV3
+		return types.Cbor.Unmarshal(frame(view), &v3)
+	}
+
+	require.NoError(t, decode([]byte{0xf6}), "control: null")
+	require.NoError(t, decode(bstr(1)), "control: a non-empty view")
+	require.NoError(t, decode(bstr(MaxPartitionViewSize)), "control: a view of exactly the limit")
+
+	require.ErrorIs(t, decode([]byte{0x40}), ErrResponseV3, "an empty byte string is not an omitted view")
+	require.ErrorIs(t, decode(bstr(MaxPartitionViewSize+1)), ErrResponseV3, "a view over the limit")
+	require.ErrorIs(t, decode([]byte{0x5f, 0x41, 0x01, 0xff}), ErrResponseV3, "an indefinite-length byte string")
+	require.ErrorIs(t, decode([]byte{0xc2, 0x41, 0x01}), ErrResponseV3, "a tagged byte string")
+	require.ErrorIs(t, decode([]byte{0x81, 0x01}), ErrResponseV3, "an array")
+
+	// the constructor omits a view over the limit; the envelope check refuses one that is there anyway
+	over := *base
+	over.PartitionView = bytes.Repeat([]byte{7}, MaxPartitionViewSize+1)
+	require.Nil(t, NewCertificationResponseV3(&over, nil).PartitionView, "an over-limit view is omitted, never sent")
+	fits := *base
+	fits.PartitionView = bytes.Repeat([]byte{7}, MaxPartitionViewSize)
+	require.Len(t, NewCertificationResponseV3(&fits, nil).PartitionView, MaxPartitionViewSize)
+	hand := NewCertificationResponseV3(base, nil)
+	hand.PartitionView = bytes.Repeat([]byte{7}, MaxPartitionViewSize+1)
+	require.ErrorIs(t, hand.IsValid(), ErrResponseV3)
+	_, err := types.Cbor.Marshal(hand)
+	require.ErrorIs(t, err, ErrResponseV3, "a sender cannot produce an over-limit view")
+	hand.PartitionView = []byte{}
+	require.ErrorIs(t, hand.IsValid(), ErrResponseV3, "an empty view is null or absent, never an empty string")
 }
