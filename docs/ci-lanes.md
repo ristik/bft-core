@@ -122,6 +122,22 @@ lock script is `$AGRE_ROOT/briefs/devnet-lock.sh` when present, else the reposit
 
 A run once failed only at `actions/upload-artifact` (five `CreateArtifact` request timeouts, after all 304 tests passed): GitHub infrastructure. It is recorded, not hidden, and the kind is rerun on the final head; no result is accepted from a rerun of a failing check.
 
+## Transaction gossip in the lane (ureth with ristik/ureth#34)
+
+ureth connects the validators' execution clients as **trusted peers only** and gossips pending transactions among them. The lane scripts therefore peer the clients with `admin_addTrustedPeer` in both
+directions (`scripts/lib/reth-peers.sh`: `reth_trust`, `reth_trust_mesh`, `reth_untrust`; `admin_addPeer` adds a static peer and is not enough), and a retired member is removed from the retained
+validators (`reth_untrust`, used by T6's coupled rotation). An older ureth has the same admin methods and ignores them.
+
+- `LANE_TX_FANOUT=all` (default) keeps the old behaviour: every paid transaction goes to every online validator (`m2_send_paid`, `rw_eth_all`, #711). `LANE_TX_FANOUT=one` sends it to the first validator only;
+  the others must receive it by gossip.
+- `GOSSIP_LANE=1` adds the step `gossip_step_proof` after `p85_baseline` (`scripts/lib/gossip-lib.sh`): it sends one transaction to the validator that just sealed a block, to that validator ONLY, and requires
+  that a block sealed by a DIFFERENT validator includes it (the sealer of a block is the validator whose log holds `sealed execution payload` for its hash). An attempt in which the submitter seals the
+  including block itself is inconclusive and is repeated (up to four times); a transaction that was only ever included by the validator it was sent to fails the step.
+- `lane.txGossip` in `scripts/ci/lane-pins.json` makes the CI run set both (`scripts/ci/run-lane.sh`). It belongs with a ureth pin that has gossip.
+
+Evidence (run 39505397682, ureth `3de4dfff` (ureth#75 head at the time; merged as `53c9330d`)): attempt 1 inconclusive (validator 2 sealed the including block 10 itself); attempt 2: the transaction sent to validator 2 only was included in block 12, sealed by
+validator 4. In both attempts the block sealed in between by validator 1 (blocks 9 and 11) did NOT include it: the gossip takes a moment, a block built right after the submission can miss it.
+
 ## Step 3: pull requests, and the stock-reth controls
 
 ### Pull requests
