@@ -3,6 +3,7 @@ package rootevidence
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"path/filepath"
 	"testing"
 	"time"
@@ -375,4 +376,50 @@ func TestExportReportsAnInteriorHole(t *testing.T) {
 	require.NoError(t, err)
 	require.False(t, at.Gap, "a cursor at or beyond the hole has missed nothing")
 	require.Len(t, at.Records, 2)
+}
+
+type captureHandler struct{ lines chan map[string]any }
+
+func (h captureHandler) Enabled(context.Context, slog.Level) bool { return true }
+func (h captureHandler) Handle(_ context.Context, r slog.Record) error {
+	m := map[string]any{"msg": r.Message}
+	r.Attrs(func(a slog.Attr) bool { m[a.Key] = a.Value.Any(); return true })
+	h.lines <- m
+	return nil
+}
+func (h captureHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
+func (h captureHandler) WithGroup(string) slog.Handler      { return h }
+
+// The observer's counters are readable from the root's log: periodically and once more when the context ends, with the gaps named.
+func TestObserverLogsItsCounters(t *testing.T) {
+	f := newFixture(t)
+	lines := make(chan map[string]any, 16)
+	o := NewObserver(newJournal(t, 0), f.store, slog.New(captureHandler{lines}), 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { o.LogStats(ctx, 5*time.Millisecond); close(done) }()
+	first := <-lines
+	require.Equal(t, "evidence observer stats", first["msg"])
+	require.EqualValues(t, 0, first["dropped"])
+	require.EqualValues(t, 0, first["failed"])
+	require.Equal(t, true, first["healthy"])
+	// a full queue is a gap and the line says so (the worker is not running: the queue of one fills)
+	o.Offer(f.vote(t, "1", 2, 12, false, 1))
+	o.Offer(f.vote(t, "1", 2, 12, false, 2))
+	require.Eventually(t, func() bool {
+		select {
+		case l := <-lines:
+			return l["dropped"] == uint64(1) && l["healthy"] == false
+		default:
+			return false
+		}
+	}, time.Second, 2*time.Millisecond)
+	cancel()
+	<-done
+	var last map[string]any
+	for len(lines) > 0 {
+		last = <-lines
+	}
+	require.NotNil(t, last, "a final line is logged when the context ends")
+	require.EqualValues(t, 1, last["dropped"])
 }

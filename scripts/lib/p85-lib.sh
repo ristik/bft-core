@@ -205,6 +205,8 @@ p85_root_flags() {
   # non-PoS flag: --pos-genesis-identities needs --pos-deployment), so the assignment the records hook delivers is the one custody holds.
   if p85_shadow; then echo --genesis-identities "$P85_DIR/genesis-identities.json"; return 0; fi
   echo --pos-deployment "$P85_DIR/pos-deployment.json" --pos-genesis-identities "$P85_DIR/genesis-identities.json" --pos-evm-rpc "$2"
+  # S4: every root keeps an observer journal (S3, docs/root-evidence.md)
+  [ "${S4_LANE:-0}" != 1 ] || echo --evidence-journal "test-nodes/root$1/evidence.db"
 }
 
 # The shadow chain has the records hook and NO election, and its roots run without the PoS flags. Two checks, both run by the shadow lane after the genesis and

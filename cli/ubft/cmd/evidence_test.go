@@ -58,3 +58,8 @@ func TestEvidenceScanMergesTheHalvesOfSeparateRoots(t *testing.T) {
 	require.Equal(t, "1", both.Pairs[0].Author)
 	require.EqualValues(t, 12, both.Pairs[0].Round)
 }
+
+// The submitter reads the case and the settlement cursor after its own transactions: the reader must not be pinned to a block taken before them.
+func TestEvidenceReaderReadsTheHead(t *testing.T) {
+	require.Empty(t, evidenceReader(nil).Block)
+}

@@ -86,7 +86,7 @@ func newEvidenceCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			client, err := rpc.Dial(ethRPC)
+			client, err := rpc.Dial(strings.TrimSpace(strings.Split(ethRPC, ",")[0]))
 			if err != nil {
 				return errors.Join(ErrEvidence, err)
 			}
@@ -101,11 +101,21 @@ func newEvidenceCmd() *cobra.Command {
 			if !ok {
 				return fmt.Errorf("%w: bad chain id %q", ErrEvidence, chainHex)
 			}
-			rd, err := (posrelayer.RPCReader{Client: client}).Pin(ctx)
-			if err != nil {
-				return err
+			// reads at the head, not at a block pinned before the first transaction: the submitter reads the case it just created and the settlement cursor after each
+			// transaction (a pinned reader reported a successful submission as "the case does not exist" on the live devnet)
+			rd := evidenceReader(client)
+			// a comma-separated --eth-rpc sends every transaction to each client (the lane's validators do not gossip); reads and the first answer use the first
+			urls := strings.Split(ethRPC, ",")
+			var also []*rpc.Client
+			for _, u := range urls[1:] {
+				c, err := rpc.Dial(strings.TrimSpace(u))
+				if err != nil {
+					return errors.Join(ErrEvidence, err)
+				}
+				defer c.Close()
+				also = append(also, c)
 			}
-			s := &rootevidence.Submitter{Reader: rd, Sender: posrelayer.Sender{Client: client, Key: key, ChainID: chain}, Evidence: ev, ChainID: chain, Assignments: ids}
+			s := &rootevidence.Submitter{Reader: rd, Sender: posrelayer.Sender{Client: client, Key: key, ChainID: chain, Also: also}, Evidence: ev, ChainID: chain, Assignments: ids}
 			var firstErr error
 			for _, p := range col.Pairs() {
 				res, err := s.Submit(ctx, p)
@@ -128,7 +138,7 @@ func newEvidenceCmd() *cobra.Command {
 		},
 	}
 	submit.Flags().StringArrayVar(&journals, "journal", nil, "an observer journal file (repeat for several roots)")
-	submit.Flags().StringVar(&ethRPC, "eth-rpc", "", "the execution client's JSON-RPC URL")
+	submit.Flags().StringVar(&ethRPC, "eth-rpc", "", "the execution client's JSON-RPC URL; a comma-separated list sends every transaction to each of them (reads and the first answer use the first), for validators whose pools do not gossip")
 	submit.Flags().StringVar(&evidenceHex, "evidence", "", "the deployed Evidence module (20-byte hex)")
 	submit.Flags().StringArrayVar(&assignments, "assignment", nil, "a candidate assignment id the offence's exposure is resolved among (repeat)")
 	submit.Flags().StringVar(&senderKey, "sender-key", "", "file holding the 0x-hex private key of the funded account that sends the transactions")
@@ -138,6 +148,11 @@ func newEvidenceCmd() *cobra.Command {
 	}
 	root.AddCommand(scan, submit)
 	return root
+}
+
+// evidenceReader reads the execution client's latest state: every transaction the submitter sends changes what its next read must see.
+func evidenceReader(client *rpc.Client) posrelayer.RPCReader {
+	return posrelayer.RPCReader{Client: client}
 }
 
 func parseAddress20(s string) ([20]byte, error) {
