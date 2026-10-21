@@ -36,9 +36,9 @@
     },
     "native-bridge-plugins": {
       "repository": "https://github.com/ristik/native-bridge-plugins.git",
-      "commit": "b5f08fe435a641cc4829d97222a21be7f7928e94",
-      "branch": "dev4/b7-pr3",
-      "note": "nbp dev4/b7-pr3 on main 51a2a261 (nbp#38): profile v6 (2 MiB envelope), the PR 3 reseal, anyage.ts long-history and in-process redeem signing"
+      "commit": "9c21eb605faa0ea57651d6aa2c4f07b0fd78c202",
+      "branch": "main",
+      "note": "nbp#40 merge (B7 PR 3): profile v6 (2 MiB envelope), the PR 3 reseal on nbp#38's parity cases, anyage.ts long-history and in-process redeem signing"
     },
     "state-transition-sdk-js": {
       "repository": "https://github.com/ristik/state-transition-sdk-js.git",
