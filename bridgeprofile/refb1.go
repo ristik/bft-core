@@ -49,7 +49,17 @@ func (r RefB1) registry() (b1ref.State, b1ref.Pins, error) {
 	return m.Words(), b1ref.Pins{GenesisCommitment: m.GenesisCommitment, ProfileHash: m.ProfileHash}, nil
 }
 
-// AuthenticateAnchors makes the one 0x0100 call over the anchor table: every anchor's UC verifies under the admitted authority for
+// Registry is the registry RefB1 evaluates against, as storage words, and the deployment pins: what a native B1 reads from the journal.
+func (r RefB1) Registry() (b1ref.Words, b1ref.Pins, error) {
+	st, pins, err := r.registry()
+	if err != nil {
+		return nil, b1ref.Pins{}, err
+	}
+	return st.(b1ref.Words), pins, nil
+}
+
+// AuthenticateAnchors makes the one CERT_BATCH_V2 evaluation over the anchor table, under the composition's limits (b1ref.Composed, as
+// BRIDGE_COMPOSE_V1 evaluates it): every anchor's UC verifies under the admitted authority for
 // the anchor's partition, shard and configuration, with expectedStateRoot its input-record state hash and expectedIRHash the
 // SHA-256 of its canonical input-record bytes. One verdict for the table.
 func (r RefB1) AuthenticateAnchors(anchors []Anchor) error {
@@ -57,7 +67,7 @@ func (r RefB1) AuthenticateAnchors(anchors []Anchor) error {
 	if err != nil {
 		return err
 	}
-	v, err := b1ref.Cert(CertBatchRequest(anchors), st, pins)
+	v, err := b1ref.CertWith(CertBatchRequest(anchors), st, pins, b1ref.Composed)
 	if err != nil || !v.Valid {
 		return ErrAnchorAuth
 	}

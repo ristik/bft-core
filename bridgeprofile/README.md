@@ -65,7 +65,7 @@ and items of the repeated seal copy). The leaf and history-byte terms grow with 
 
 There is no gas ceiling and no bridge-specific history cap (`limits.go`, briefs/b7-direct-uncapped-design.md §1). The gas formula is
 an estimate that wallets set their gas limit from; a call with too little gas runs out of gas and reverts. The composition streams
-the history and the anchor table (B7 PR 2b, briefs/dev4-b7-native-compose-spec.md §7): it is bounded by MaxEnvelopeBytes (512 KiB,
+the history and the anchor table (B7 PR 2b, briefs/dev4-b7-native-compose-spec.md §7): it is bounded by MaxEnvelopeBytes (2 MiB,
 the ingress bound), the u16 anchor wire width (MaxAnchors 65,535) and its gas, under `ComposedHistory` and `b1ref.Composed`.
 MaxTransfers 64, MaxLeaves 65 and MaxSemanticBytes 128 KiB are the standalone B2 kernel's own bounds (0x0104, which `prepareLock`
 calls), and B1's 16 claims those of a standalone CERT_BATCH_V2 call. The cumulative path-step budget (2,048) and the shared Solidity item budget (4,096) are gone: path steps and items are charged; each

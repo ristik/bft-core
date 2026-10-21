@@ -85,6 +85,8 @@ export DNB_AGG_SHARDS=$(jq -r '.lane.aggShards // 1' "$pins")
 if [ -n "$(jq -r '.lane.evmT2Ms // empty' "$pins")" ]; then export EVM_T2_MS=$(jq -r '.lane.evmT2Ms' "$pins"); log "EVM_T2_MS=$EVM_T2_MS (lane-pins)"; fi
 # ureth with transaction-only gossip (ristik/ureth#34): the lane submits each transaction to ONE validator and proves that the others received it (scripts/lib/gossip-lib.sh)
 if [ "$(jq -r '.lane.txGossip // false' "$pins")" = true ]; then export GOSSIP_LANE=1 LANE_TX_FANOUT=one; fi
+# B7 PR 3: the long-history redemption step (scripts/lib/anyage-lib.sh anyage_step_long_history), when lane-pins says .lane.longHistory
+if [ "$(jq -r '.lane.longHistory // false' "$pins")" = true ]; then export B7_LONG_HISTORY=1; fi
 # T8: the lane includes the funded operator reward pool step (scripts/lib/rewards-lib.sh): the genesis payees hold keys, the pool is settled across the real
 # acknowledged history, recomputed from scratch, claimed. Off by default on the Mac (REWARD_LANE unset); on in CI.
 export REWARD_LANE=1
