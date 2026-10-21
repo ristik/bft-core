@@ -80,7 +80,9 @@ jobs:
         env:
           STAGES: ${{ inputs.stages }}
         run: |
-          sudo -E env "PATH=$PATH" python3 deploy/testnet/rehearse.py --generation /srv/tn-rehearsal-1 --evidence "$RUNNER_TEMP/evidence" ${STAGES:+--stages "$STAGES"}
+          sudo -E env "PATH=$PATH" python3 deploy/testnet/rehearse.py --generation /srv/tn-rehearsal-1 --evidence "$RUNNER_TEMP/evidence" \
+            --reset-out /srv/tn-rehearsal-2 --reset-ubft pinned-bft/build/ubft --reset-b1genesis /tmp/tn-b1genesis --reset-keygen /tmp/tn-keygen \
+            --reset-captcha-sitekey rehearsal-sitekey --reset-captcha-secret-file /tmp/captcha-secret ${STAGES:+--stages "$STAGES"}
       - name: Resources and logs
         if: always()
         run: |
@@ -88,8 +90,10 @@ jobs:
           sudo chown -R "$(id -u):$(id -g)" "$RUNNER_TEMP/evidence"   # the rehearsal ran as root
           docker stats --no-stream --format 'table {{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}\t{{.PIDs}}' > "$RUNNER_TEMP/evidence/docker-stats.txt" || true
           df -h / > "$RUNNER_TEMP/evidence/df.txt" || true
-          sudo bash -c "cd /srv/tn-rehearsal-1 && docker compose ps -a > '$RUNNER_TEMP/evidence/compose-ps.txt' && docker compose logs --no-color --timestamps --tail 400 > '$RUNNER_TEMP/evidence/compose-logs.txt'" || true
-          sudo cp /srv/tn-rehearsal-1/manifest.json "$RUNNER_TEMP/evidence/manifest.json" || true
+          # the generation that is live now: the reset's, else the restored one, else the original
+          G=$(for d in /srv/tn-rehearsal-2 /srv/tn-rehearsal-1-restored /srv/tn-rehearsal-1; do sudo test -f "$d/compose.yaml" && { echo "$d"; break; }; done)
+          sudo bash -c "cd '$G' && docker compose ps -a > '$RUNNER_TEMP/evidence/compose-ps.txt' && docker compose logs --no-color --timestamps --tail 400 > '$RUNNER_TEMP/evidence/compose-logs.txt'" || true
+          sudo cp "$G/manifest.json" "$RUNNER_TEMP/evidence/manifest.json" || true
           sudo chown -R "$(id -u):$(id -g)" "$RUNNER_TEMP/evidence" || true
           cp deploy/testnet/artifacts/images.json "$RUNNER_TEMP/evidence/images.json" || true
       - uses: actions/upload-artifact@v4

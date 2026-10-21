@@ -32,13 +32,19 @@ class Failure(Exception):
 class Rehearsal:
     def __init__(self, generation, evidence, cast):
         self.gen, self.evidence, self.cast = Path(generation).resolve(), Path(evidence), cast
-        self.manifest = json.loads((self.gen / 'manifest.json').read_text())
-        self.n = self.manifest['validators']
-        self.chain_id, self.genesis = self.manifest['chain_id'], self.manifest['genesis_hash'].lower()
+        self.adopt(self.gen)
         self.evidence.mkdir(parents=True, exist_ok=True)
         self.log = (self.evidence / 'rehearsal.log').open('a')
         self.results = []
         self.pods = ()
+        self.reset_args = {}
+
+    def adopt(self, generation):
+        """Work on this generation from now on (after a restore or a reset it is another directory with, after a reset, another network identity)."""
+        self.gen = Path(generation).resolve()
+        self.manifest = json.loads((self.gen / 'manifest.json').read_text())
+        self.n = self.manifest['validators']
+        self.chain_id, self.genesis = self.manifest['chain_id'], self.manifest['genesis_hash'].lower()
 
     # --- recording -------------------------------------------------------------------------------------------------------------
     def say(self, text):
@@ -311,7 +317,46 @@ class Rehearsal:
             r = self.wait(f'validator {i} has it', lambda i=i: self.ureth(i, 'eth_getTransactionReceipt', [after['transactionHash']]), 120)
             self.expect(r['blockHash'] == after['blockHash'], f'validator {i} has it in the same block')
 
-STAGES = (('up', 'up'), ('identity', 'identity'), ('first-tx', 'first_tx'), ('gateway-limits', 'gateway_limits'), ('faucet-guard', 'faucet_guard'), ('pod-restart', 'pod_restart'), ('backup-restore', 'backup_restore'))
+    def reset(self):
+        """The ASSET-LOSING arbitrary reset (reset.py, README): the old generation is destroyed and a fresh network with a new genesis identity is generated and
+        started. Checks: a changed block-zero hash and funded account, the old network pin gets the wrong-network answer from the faucet guard (checked before
+        the captcha), the old history is not on the new chain, and the new network serves a paid transfer. Needs the generator's own arguments (--reset-*)."""
+        need = ('out', 'ubft', 'b1genesis', 'keygen', 'captcha_sitekey', 'captcha_secret_file')
+        missing = [k for k in need if not self.reset_args.get(k)]
+        if missing:
+            raise Failure('the reset stage needs --reset-' + ', --reset-'.join(m.replace('_', '-') for m in missing))
+        old, old_genesis, old_faucet, old_tx = self.gen, self.genesis, self.manifest['faucet_address'], getattr(self, 'tx', None)
+        new = Path(self.reset_args['out'])
+        a = self.reset_args
+        out = subprocess.run([sys.executable, str(Path(__file__).with_name('reset.py')), '--old', str(old), '--lose-all-assets', '--', '--out', str(new),
+                              '--validators', str(self.n), '--chain-id', str(self.chain_id), '--ubft', a['ubft'], '--b1genesis', a['b1genesis'], '--keygen', a['keygen'],
+                              '--captcha-sitekey', a['captcha_sitekey'], '--captcha-secret-file', a['captcha_secret_file']], check=True, text=True, capture_output=True).stdout
+        self.say('  ' + out.strip().splitlines()[-1])
+        self.expect(not old.exists(), 'the old generation directory is gone')
+        retired = old.with_suffix('.retired-manifest.json')
+        self.expect(retired.is_file() and json.loads(retired.read_text())['genesis_hash'].lower() == old_genesis, 'the old public manifest was kept beside it')
+        self.adopt(new)
+        self.expect(self.genesis != old_genesis, 'the block-zero hash changed', f'{old_genesis[:12]}.. -> {self.genesis[:12]}..')
+        self.expect(self.manifest['faucet_address'] != old_faucet, 'the funded (faucet) account is a new one')
+        self.up()
+        self.identity()
+        if old_tx:
+            for i in range(1, self.n + 1):
+                self.expect(self.ureth(i, 'eth_getTransactionReceipt', [old_tx['transactionHash']]) is None, f'validator {i} does not have the old network\'s transaction')
+        ip = {'X-Forwarded-For': PROXY_IPS[0] + '50', 'Content-Type': 'application/json'}
+        self.compose('up', '-d', '--no-deps', 'faucet')
+        self.wait('the faucet guard answers', lambda: self.http(FAUCET, 'GET', '/api/network')[0] == 200, 120)
+        s, text = self.http(FAUCET, 'POST', '/api/claim', json.dumps({'address': '0x' + '11' * 20, 'chain_id': self.chain_id, 'genesis_hash': old_genesis}).encode(), ip)
+        self.expect(s == 409, 'a wallet pinned to the old genesis gets the wrong-network answer', f'status {s}')
+        s, text = self.http(FAUCET, 'POST', '/api/claim', json.dumps({'address': '0x' + '11' * 20, 'chain_id': self.chain_id, 'genesis_hash': self.genesis}).encode(), ip)
+        self.expect(s == 400 and 'hCaptcha' in text, 'a wallet on the new pin passes the network check and stops at the captcha (the signer is not started)', f'status {s}')
+        pin = json.loads(self.http(FAUCET, 'GET', '/api/network')[1])
+        self.expect(pin['genesis_hash'].lower() == self.genesis, 'the faucet guard publishes the new pin')
+        receipt = json.loads(self.send_via_gateway(self.gen / 'faucet-secrets', '0x' + '66' * 20))
+        self.expect(receipt['status'] == '0x1', 'a paid transfer on the new network succeeds', receipt['transactionHash'])
+        self.say('  note the old generation\'s surviving authority directories (the restore pointed at them) are left on disk by reset.py; a host removes them by hand')
+
+STAGES = (('up', 'up'), ('identity', 'identity'), ('first-tx', 'first_tx'), ('gateway-limits', 'gateway_limits'), ('faucet-guard', 'faucet_guard'), ('pod-restart', 'pod_restart'), ('backup-restore', 'backup_restore'), ('reset', 'reset'))
 
 
 def main():
@@ -320,10 +365,13 @@ def main():
     p.add_argument('--evidence', required=True, type=Path)
     p.add_argument('--cast', default='cast')
     p.add_argument('--pods', default='2,1', help='validator entities pod-restart stops and restarts, one at a time, in this order')
+    for name in ('out', 'ubft', 'b1genesis', 'keygen', 'captcha-sitekey', 'captcha-secret-file'):
+        p.add_argument('--reset-' + name, help='the reset stage passes this to generate.py as --' + name + ' (--out: the new generation directory)')
     p.add_argument('--stages', default=','.join(s for s, _ in STAGES), help='comma separated, in order')
     a = p.parse_args()
     r = Rehearsal(a.generation, a.evidence, a.cast)
     r.pods = tuple(int(x) for x in a.pods.split(',') if x)
+    r.reset_args = {k[len('reset_'):]: v for k, v in vars(a).items() if k.startswith('reset_')}
     wanted = a.stages.split(',')
     unknown = set(wanted) - {s for s, _ in STAGES}
     if unknown:
