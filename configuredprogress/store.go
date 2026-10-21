@@ -109,6 +109,8 @@ type Store struct {
 	journal    bool
 	frontier   *frontier.Policy
 	log        *slog.Logger
+	vm         verifyMemo   // successful certificate verifications of the loads, see verifymemo.go
+	jc         journalCache // the last full journal load and its sampler, see journal_cache.go
 }
 
 // SetLogger sets the logger EnableFrontier reports a replica pair change to.
@@ -240,6 +242,7 @@ func tokenFor(s *Store, i *durableImage) ProgressToken {
 
 // Initialize atomically creates descriptor and revision-0 control. Existing state is verified, never reset.
 func (s *Store) Initialize(ctx context.Context, c Context) (State, ProgressToken, error) {
+	s.vm.reset() // an install: whatever the memo holds was verified under the previous state (bft-core#728)
 	var err error
 	c, err = ownContext(c)
 	if err != nil {
@@ -334,6 +337,11 @@ func (s *Store) readRaw() (descriptor, control, headName, headRaw []byte, err er
 
 // Load performs bounded verification of descriptor, control, referenced pairs and referenced head only.
 func (s *Store) Load(ctx context.Context, c Context) (State, ProgressToken, error) {
+	return s.load(ctx, c, true)
+}
+
+// load is Load with the choice of the verification memo: the sampler and the equivalence tests verify without it.
+func (s *Store) load(ctx context.Context, c Context, useMemo bool) (State, ProgressToken, error) {
 	var ownErr error
 	c, ownErr = ownContext(c)
 	if ownErr != nil {
@@ -341,6 +349,9 @@ func (s *Store) Load(ctx context.Context, c Context) (State, ProgressToken, erro
 	}
 	if err := c.check(); err != nil {
 		return State{}, ProgressToken{}, err
+	}
+	if useMemo {
+		c = s.memoContext(c)
 	}
 	desc, control, hn, hr, err := s.readRaw()
 	if err != nil {
