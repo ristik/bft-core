@@ -19,7 +19,9 @@ concurrency:
   cancel-in-progress: false
 jobs:
   rehearse:
-    runs-on: ubuntu-latest
+    # ubuntu-22.04 (glibc 2.35), not -latest (2.39): a binary needs a glibc no newer than the runtime image's (bookworm, 2.36). The first run built on 2.39 and
+    # build-images.py's own --help check in the runtime image refused it, as the package README says (build on Debian 12 or older).
+    runs-on: ubuntu-22.04
     timeout-minutes: 240
     steps:
       - uses: actions/checkout@v4
@@ -59,6 +61,7 @@ jobs:
           version: v1.8.1   # cast: offline signing of the rehearsal's transactions
       - uses: Swatinem/rust-cache@v2
         with:
+          cache-on-failure: true
           workspaces: |
             pinned-ureth
             pinned-rugregator
