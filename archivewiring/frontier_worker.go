@@ -52,14 +52,38 @@ func (w *FrontierWorker) Run(ctx context.Context) error {
 	}
 }
 
+// Pass runs one pass and, at debug level, logs how long each step took (bft-core#728 trace: whether failing passes keep the journal store busy).
 func (w *FrontierWorker) Pass(ctx context.Context) error {
+	start, last := time.Now(), time.Now()
+	var steps []slog.Attr
+	mark := func(name string) {
+		now := time.Now()
+		steps = append(steps, slog.Duration(name, now.Sub(last)))
+		last = now
+	}
+	err := w.pass(ctx, mark)
+	if w.Log != nil {
+		attrs := append([]slog.Attr{slog.Duration("total", time.Since(start))}, steps...)
+		if err != nil {
+			attrs = append(attrs, slog.String("err", err.Error()))
+		}
+		w.Log.LogAttrs(ctx, slog.LevelDebug, "archive: frontier worker pass", attrs...)
+	}
+	return err
+}
+
+func (w *FrontierWorker) pass(ctx context.Context, mark func(string)) error {
 	if w.Journal == nil || w.Archive == nil || w.Replicas[0] == "" || w.Replicas[1] == "" || w.Replicas[0] == w.Replicas[1] {
 		return ErrConfig
 	}
-	if err := w.audit(ctx); err != nil {
+	err := w.audit(ctx)
+	mark("audit")
+	if err != nil {
 		return err
 	}
-	if err := w.Journal.VerifyFrontierCopies(ctx, w.Context, w.Limits); err != nil {
+	err = w.Journal.VerifyFrontierCopies(ctx, w.Context, w.Limits)
+	mark("verifyCopies")
+	if err != nil {
 		return err
 	}
 	// A crash after the frontier commit but before prune leaves this work for

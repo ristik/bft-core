@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/libp2p/go-libp2p/core/peer"
@@ -44,6 +45,7 @@ func DefaultRecoveryLimits() RecoveryLimits {
 // journal. It never promotes a candidate or an executor head into authority.
 type ExecutionRecovery struct {
 	mu            sync.Mutex
+	holder        atomic.Pointer[recoveryHolder] // the call holding mu, for the timing trace
 	Store         *configuredprogress.Store
 	Context       configuredprogress.Context
 	JournalLimits configuredprogress.JournalLimits
@@ -278,14 +280,19 @@ func (r *ExecutionRecovery) finality(ctx context.Context, c recoveryChain) (shar
 }
 
 func (r *ExecutionRecovery) Recover(ctx context.Context, held *types.UnicityCertificate) (shardnode.BlockRef, error) {
+	trace := r.startTrace("Recover")
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	defer trace.enter(r)()
+	defer func() { trace.log(ctx, r.Log, held) }()
 	ctx, cancel := context.WithTimeout(ctx, r.limits().Deadline)
 	defer cancel()
 	if err := ctx.Err(); err != nil {
 		return shardnode.BlockRef{}, err
 	}
+	loadStart := time.Now()
 	c, err := r.load(ctx)
+	trace.load = time.Since(loadStart)
 	if err != nil {
 		// Acquisition needs somewhere to ask: hot-journal peers (a transport and at least one provider), or the authenticated archive. After
 		// an assignment shrinks the set to {self} there are no peers, and the archive alone must still be tried; retired peers are never
@@ -293,7 +300,11 @@ func (r *ExecutionRecovery) Recover(ctx context.Context, held *types.UnicityCert
 		if !r.canAcquire() || !errors.Is(err, ErrRecoveryUnavailable) {
 			return shardnode.BlockRef{}, err
 		}
-		if fetchErr := r.acquireMissing(ctx); fetchErr != nil {
+		acquireStart := time.Now()
+		fetchErr := r.acquireMissing(ctx)
+		trace.acquire, trace.acquired = time.Since(acquireStart), true
+		if fetchErr != nil {
+			trace.acquireErr = fetchErr.Error()
 			return shardnode.BlockRef{}, fmt.Errorf("%w: peer catch-up: %v", err, fetchErr)
 		}
 		c, err = r.load(ctx)
@@ -304,15 +315,24 @@ func (r *ExecutionRecovery) Recover(ctx context.Context, held *types.UnicityCert
 	if held != nil && c.latest != nil && rootPositionAfter(held.GetRootEpoch(), held.GetRootRoundNumber(), c.latest.GetRootEpoch(), c.latest.GetRootRoundNumber()) {
 		return shardnode.BlockRef{}, fmt.Errorf("%w: held certificate is newer than durable journal", ErrRecoveryUnavailable)
 	}
-	return r.recoverChain(ctx, c, true)
+	chainStart := time.Now()
+	head, chainErr := r.recoverChain(ctx, c, true)
+	trace.chain = time.Since(chainStart)
+	return head, chainErr
 }
 
 func (r *ExecutionRecovery) recoverChain(ctx context.Context, c recoveryChain, checkCurrent bool) (shardnode.BlockRef, error) {
+	rpcStart := time.Now()
 	head, err := r.Executor.Head(ctx)
+	headTook := time.Since(rpcStart)
 	if err != nil {
 		return head, fmt.Errorf("%w: executor head RPC: %w", ErrRecoveryUnavailable, err)
 	}
+	finStart := time.Now()
 	f, err := r.finality(ctx, c)
+	if d := headTook + time.Since(finStart); d >= slowRecoveryStep && r.Log != nil {
+		r.Log.LogAttrs(ctx, slog.LevelDebug, "recovery: slow executor reads", slog.Duration("head", headTook), slog.Duration("finality", time.Since(finStart)))
+	}
 	if err != nil {
 		return head, err
 	}
@@ -455,8 +475,11 @@ func (r *ExecutionRecovery) acquireMissing(ctx context.Context) error {
 // admitted. It is invoked only after the normal root observation check has
 // authenticated that certificate and found the stored predecessor missing.
 func (r *ExecutionRecovery) AcquireForCertificate(ctx context.Context, uc *types.UnicityCertificate, tr *certification.TechnicalRecord) error {
+	trace := r.startTrace("AcquireForCertificate")
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	defer trace.enter(r)()
+	defer func() { trace.log(ctx, r.Log, uc) }()
 	ctx, cancel := context.WithTimeout(ctx, r.limits().Deadline)
 	defer cancel()
 	if _, err := rootinput.AuthenticateObservationV2(ctx, r.Context.Observation, uc, tr); err != nil {
@@ -508,10 +531,18 @@ func (r *ExecutionRecovery) fetchFromPeers(ctx context.Context, after shardnode.
 		}
 		var entries []shardnode.JournalFetchEntry
 		var fetchErr error
+		fetchStart := time.Now()
 		if r.fetch != nil {
 			entries, fetchErr = r.fetch(ctx, provider, req)
 		} else {
 			entries, fetchErr = shardnode.RequestJournalEntries(ctx, r.Host, provider, req, limits)
+		}
+		if r.Log != nil {
+			attrs := []slog.Attr{slog.String("provider", provider.String()), slog.Duration("took", time.Since(fetchStart)), slog.Int("entries", len(entries))}
+			if fetchErr != nil {
+				attrs = append(attrs, slog.String("err", fetchErr.Error()))
+			}
+			r.Log.LogAttrs(ctx, slog.LevelDebug, "recovery: journal fetch from a peer", attrs...)
 		}
 		if fetchErr != nil {
 			last = fetchErr
@@ -864,4 +895,64 @@ func (r *ExecutionRecovery) providerList() []peer.ID {
 func (r *ExecutionRecovery) canAcquire() bool {
 	peers := (r.Host != nil || r.fetch != nil) && len(r.providerList()) > 0
 	return peers || r.FetchArchive != nil
+}
+
+// slowRecoveryStep is the duration from which an executor read inside recovery is logged.
+const slowRecoveryStep = 50 * time.Millisecond
+
+type recoveryHolder struct {
+	op    string
+	since time.Time
+}
+
+// recoveryTrace times one Recover or AcquireForCertificate call for the bft-core#728 trace: the wait for the coordinator's lock (and who held it), then the journal load,
+// the peer catch-up it triggered (the part that dials other validators and the archive) and the chain recovery. Debug level; no behaviour change.
+type recoveryTrace struct {
+	op                   string
+	asked, locked        time.Time
+	holderOp             string
+	holderFor            time.Duration
+	load, acquire, chain time.Duration
+	acquired             bool
+	acquireErr           string
+}
+
+func (r *ExecutionRecovery) startTrace(op string) *recoveryTrace {
+	t := &recoveryTrace{op: op, asked: time.Now()}
+	if h := r.holder.Load(); h != nil {
+		t.holderOp, t.holderFor = h.op, t.asked.Sub(h.since)
+	}
+	return t
+}
+
+// enter records that the lock is now held and returns the function that records its release.
+func (t *recoveryTrace) enter(r *ExecutionRecovery) func() {
+	t.locked = time.Now()
+	me := &recoveryHolder{op: t.op, since: t.locked}
+	r.holder.Store(me)
+	return func() { r.holder.CompareAndSwap(me, nil) }
+}
+
+func (t *recoveryTrace) log(ctx context.Context, l *slog.Logger, uc *types.UnicityCertificate) {
+	if l == nil {
+		return
+	}
+	attrs := []slog.Attr{
+		slog.String("op", t.op),
+		slog.Duration("lockWait", t.locked.Sub(t.asked)), slog.Duration("total", time.Since(t.asked)),
+		slog.Duration("load", t.load), slog.Duration("chain", t.chain),
+	}
+	if uc != nil {
+		attrs = append(attrs, slog.Uint64("rootRound", uc.GetRootRoundNumber()), slog.Uint64("shardRound", uc.GetRoundNumber()))
+	}
+	if t.holderOp != "" {
+		attrs = append(attrs, slog.String("holderWhenAsked", t.holderOp), slog.Duration("heldForWhenAsked", t.holderFor))
+	}
+	if t.acquired {
+		attrs = append(attrs, slog.Duration("peerCatchUp", t.acquire))
+		if t.acquireErr != "" {
+			attrs = append(attrs, slog.String("peerCatchUpErr", t.acquireErr))
+		}
+	}
+	l.LogAttrs(ctx, slog.LevelDebug, "recovery: call timing", attrs...)
 }

@@ -35,6 +35,6 @@ Procedures the lanes follow: [H3 runbook](../h3-evm-assignment-runbook.md) (coup
 
 Rolling or mixed BFT versions, rolling execution activation, any migration of an older registry layout, downgrade over newly written
 state, resurrecting an authority from a snapshot, automatic authority restart, public RPC exposure beyond OPERATOR.md's, and
-production capacity claims. The OWNER decides interruption objectives, the human second operator, production artifacts and
+production capacity claims. The OWNER decides interruption objectives, the second operator's role, production artifacts and
 identities, validator membership and weights, custody, fees, the bootstrap pin authority, fencing, host placement and
-escalation contacts; no fixture value here is a production recommendation.
+escalation routes (named by role, never by person); no fixture value here is a production recommendation.
