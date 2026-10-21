@@ -93,6 +93,7 @@ case "$kind" in x4shadow|x4rewards) export REWARD_LANE=0 ;; esac   # the shadow 
 # test says "s4": true (a ci-lane-run/** push; off by default). It adds the roots' observer journals, a harness-signed equivocation by the joiner's root key and the
 # submission through the real Evidence contract after the recovery.
 if [ "$kind" = combined ] && [ "$(jq -r '.s4 // false' scripts/ci/run-inputs.json 2>/dev/null)" = true ]; then export S4_LANE=1; log "S4_LANE=1 (run-inputs s4)"; fi
+export EVM_VALIDATOR_LOG_LEVEL=debug
 export LANE_PINNED=1 LANE_COMMIT_UNDER_TEST=$head UTB_MIN_FREE_GIB=${UTB_MIN_FREE_GIB:-$(jq -r '.runner.minFreeDiskGiB' "$pins")}
 if [ "$kind" = combined ]; then pins_mode=env; else pins_mode=env-core; fi
 scripts/ci/check-pins.sh "$pins_mode" 2>&1 | tee -a "$out/run-lane.log" | grep -q '^FAIL' && die "a component does not match the manifest"
