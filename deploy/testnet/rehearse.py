@@ -126,8 +126,17 @@ class Rehearsal:
         # is the only service that talks to a third party: the host starts it, the rehearsal does not); the faucet guard has no dependency on it
         start = [s for s in self.services() if not s.startswith('authority') and s != 'signer']
         self.compose('up', '-d', '--no-deps', *start)
+        def missing():
+            running = set(self.compose('ps', '--services', '--status', 'running').split())
+            return sorted(set(start) - running)
+        try:
+            self.wait('every started service is running', lambda: not missing(), 120)
+        except Failure:
+            self.say('  not running: ' + ' '.join(missing()))
+            self.say(self.compose('ps', '-a', check=False))
+            raise
         running = set(self.compose('ps', '--services', '--status', 'running').split())
-        self.expect(set(start) <= running, 'every non-authority service except the signer is running', f'{len(start)} services')
+        self.expect(True, 'every non-authority service except the signer is running', f'{len(start)} services')
         self.expect('signer' not in running, 'the faucet signer is not running (no third-party call in the rehearsal)')
         head = self.wait('the public gateway reports a head (every validator identity checked by the relay)',
                          lambda: self.http(PUBLIC_RPC, 'GET', '/healthz')[0] == 200, 600)
