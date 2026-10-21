@@ -4,7 +4,7 @@
   "components": {
     "ureth": {
       "repository": "https://github.com/ristik/ureth.git",
-      "commit": "53c9330d030426b9847ac2c69840adcfc8490221",
+      "commit": "28483b83e8d103696dd98ff2dd2d5d5e10fdcf83",
       "package": "unicity-reth",
       "cargoArgs": [
         "build",
@@ -30,14 +30,14 @@
     },
     "contracts": {
       "repository": "https://github.com/ristik/unicity-pos-contracts.git",
-      "commit": "b17829ca0eee3023148524f1bdbdfb2d2729e0c6",
+      "commit": "5c9dedc3dc2f15371eec938c06600f94a386b7e2",
       "note": "contracts#53 merge: GovernanceParams (#50), RewardPool (#51) and the governed worst-case election gas / deployment fields (#53)",
       "branch": "main"
     },
     "native-bridge-plugins": {
       "repository": "https://github.com/ristik/native-bridge-plugins.git",
-      "commit": "278d15da4c45fc3d9af168fece51ef6b3ca35ddb",
-      "branch": "main",
+      "commit": "cbe0e78bc008999823631bcd2fd332a7375aee54",
+      "branch": "dev4/b7-pr3",
       "note": "nbp#33 merge: main with the plug-in consolidation as the default path (nbp#30/#31) and the any-age driver's 'consolidated' command (#526 step 4) on top of the two-shard steering (nbp#29)."
     },
     "state-transition-sdk-js": {
@@ -77,7 +77,9 @@
     "note": "the aggregator partition runs as two bft-shard aggregators (0x40, 0xc0); the any-age L1 token spans both and one more token is redeemed through the SDK's consolidation (#526 step 4)",
     "txGossip": true,
     "evmT2Ms": 15000,
-    "evmT2Note": "the EVM shard's T2 in the CI lane (milliseconds; the Mac default stays 5000). After the recovery only 3 of the 4 enrolled validators run, so a round needs all three signatures and its latency is the slowest of three: measured first-UC-to-third-signature up to 14.3 s on a standard runner (bft-core#728, run 39554461091), while T2 = 5 s turned every late round into a permanent livelock. 15 s passed the combined lane with all steps; the margin over the measured tail is small, see #728."
+    "evmT2Note": "the EVM shard's T2 in the CI lane (milliseconds; the Mac default stays 5000). After the recovery only 3 of the 4 enrolled validators run, so a round needs all three signatures and its latency is the slowest of three: measured first-UC-to-third-signature up to 14.3 s on a standard runner (bft-core#728, run 39554461091), while T2 = 5 s turned every late round into a permanent livelock. 15 s passed the combined lane with all steps; the margin over the measured tail is small, see #728.",
+    "longHistory": true,
+    "longHistoryNote": "B7 PR 3 (briefs/dev4-b7-pr3-plan.md 4.2): anyage_step_long_history redeems a token transferred live past every former bridge bound, one gas short (reverts, vault unchanged) and then funded. Needs the 0x0105 stack (ureth with BRIDGE_COMPOSE_V1, contracts with the 0x0105 TokenVerifier) and the nbp driver's long-history command."
   },
   "t6": {
     "comment": "T6 pins its own inputs in scripts/t6-rehearsal.sh (its defaults); they differ from the lane's on purpose and are not unified silently. check-pins.sh t6 refuses a script whose defaults differ from this record.",
