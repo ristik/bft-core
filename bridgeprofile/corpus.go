@@ -157,7 +157,7 @@ var reasons = []struct {
 	{"ErrReturnAmount", ErrReturnAmount}, {"ErrReturnRecip", ErrReturnRecip}, {"ErrLockInput", ErrLockInput},
 	{"ErrZeroDigest", ErrZeroDigest}, {"ErrDeadlineMismatch", ErrDeadlineMismatch}, {"ErrDeadlineExpired", ErrDeadlineExpired},
 	{"ErrIROpening", ErrIROpening}, {"ErrIRShape", ErrIRShape}, {"ErrIRState", ErrIRState}, {"ErrIRTime", ErrIRTime},
-	{"ErrGasBudget", ErrGasBudget}, {"ErrPathBitmap", ErrPathBitmap}, {"ErrAnchorAuth", ErrAnchorAuth}, {"ErrLeafProof", ErrLeafProof},
+	{"ErrPathBitmap", ErrPathBitmap}, {"ErrAnchorAuth", ErrAnchorAuth}, {"ErrLeafProof", ErrLeafProof},
 	{"ErrTrustBaseDigest", ErrTrustBaseDigest}, {"ErrTrustBase", ErrTrustBase}, {"ErrSealNetwork", ErrSealNetwork},
 	{"ErrSealEpoch", ErrSealEpoch}, {"ErrNoEntryForEpoch", ErrNoEntryForEpoch}, {"ErrLockUC", ErrLockUC},
 	{"ErrLockPDR", ErrLockPDR}, {"ErrLockHeader", ErrLockHeader}, {"ErrLockAccount", ErrLockAccount},
@@ -535,11 +535,7 @@ func Replay(fs *FixtureSet, c Case) Expect {
 		if c.Aux["operation"] == "mint" {
 			op = OpMint
 		}
-		budget := TxGasBudget
-		if v, ok := c.Aux["budget"]; ok {
-			budget, _ = strconv.ParseUint(v, 10, 64)
-		}
-		g, err := GateOf(cfg, op, in, budget)
+		g, err := GateOf(cfg, op, in)
 		if err != nil {
 			return errExpect(err)
 		}

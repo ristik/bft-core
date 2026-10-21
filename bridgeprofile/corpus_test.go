@@ -116,7 +116,7 @@ func TestCorpusCoversTheDesign(t *testing.T) {
 		want["backing-certificate-"+mutation.name] = "ErrCertScan"
 	}
 	want["token-combined-path-2048"] = ""
-	want["token-combined-path-2049"] = "ErrTooManyPaths"
+	want["token-combined-path-2049"] = "" // no cumulative path budget (owner section 36)
 	got := map[string]Expect{}
 	for _, fam := range families {
 		for _, cs := range c.Cases[fam] {

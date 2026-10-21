@@ -27,7 +27,7 @@ func bitmapOf(n int) (b [32]byte) {
 
 // TestGateWorkedTable pins the gate formula of briefs/b1-any-age-contract.md section 5 to the contract's worked budget table:
 // Cfg 512 bytes, history 16,384 bytes, sixteen leaves with eight RSMT siblings each, and the table's envelope sizes and native
-// batch charges (which b1ref's worked vectors produce). The rows show the 7,000,000 gate admitting or refusing each shape.
+// batch charges (which b1ref's worked vectors produce). The rows price each shape; none is refused (owner section 36).
 func TestGateWorkedTable(t *testing.T) {
 	for _, row := range []struct {
 		envelope int
@@ -37,9 +37,9 @@ func TestGateWorkedTable(t *testing.T) {
 		{24_768, 132_730, 4_301_234},   // N=4, A=1
 		{29_088, 353_428, 4_936_652},   // N=4, A=4, distinct epochs
 		{46_368, 517_720, 6_759_824},   // N=4, A=16, shared seal
-		{46_368, 1_326_220, 7_568_324}, // N=4, A=16, distinct epochs: over
+		{46_368, 1_326_220, 7_568_324}, // N=4, A=16, distinct epochs
 		{42_016, 468_520, 6_292_832},   // N=16, A=8, shared seal
-		{42_016, 1_349_820, 7_174_132}, // N=16, A=8, distinct epochs: over
+		{42_016, 1_349_820, 7_174_132}, // N=16, A=8, distinct epochs
 		{60_704, 2_702_476, 10_320_836},
 	} {
 		require.Equal(t, row.gate, gateOf(512, row.envelope, 16_384, 16, 8, row.batch), "envelope %d batch %d", row.envelope, row.batch)

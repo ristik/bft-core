@@ -1,5 +1,5 @@
 {
-  "artifactVersion": 7,
+  "artifactVersion": 8,
   "nativeBridgeProtocolVersion": 5,
   "sdkVersion": "4.0.0",
   "status": "development-provisional-unactivated",
@@ -38,20 +38,17 @@
     "cborDepth": 16,
     "rlpDepth": 16,
     "cborItems": 32768,
-    "bridgeCborItems": 4096,
-    "semanticBytes": 16384,
+    "semanticBytes": 131072,
     "cfgBytes": 1024,
-    "envelopeBytes": 65536,
-    "transfers": 23,
-    "leaves": 24,
-    "pathSteps": 2048,
+    "envelopeBytes": 524288,
+    "transfers": 64,
+    "leaves": 65,
     "policyBytes": 512,
     "aggregatorAnchors": 16,
     "anchorUcBytes": 8192,
     "irBytes": 512,
     "rsmtSiblingsPerLeaf": 32,
     "unicityStepsPerUc": 32,
-    "txGasBudget": 7000000,
     "gasReserve": 1000000,
     "bridgeItemGas": 1000,
     "shardDepthMax": 256
@@ -77,7 +74,7 @@
   },
   "deferred": [],
   "normativeArtifactSha256": {
-    "protocol/interop.md": "ceccb22c896bd8e501a763a31d5df65d31a908c812def4d7555c728d411b854e",
+    "protocol/interop.md": "60c8c17b2a31ba159eec6ce1a8528a39f36f25f05fc2dd8b2868f5f1be3ade27",
     "protocol/abi.json": "d836ec1a0eb12b81c92c4fccd5d310aa7b5fd2c7a9119d1fa3b5cf2509eb5685",
     "protocol/manifest.schema.json": "f256b0ea19ea1f0a390926006b18a7460ecbb63f79f3e3e85040cbf2d710fb05",
     "protocol/trust-base.md": "445f354723d9ab7247a9c1ec518bebc82993a71e960dae9edb2af2986bb9c628"
@@ -95,5 +92,5 @@
     "verification": "one-CERT_BATCH_V2-0x0100-over-the-anchor-table",
     "certificateAge": "any-age-permanent-registry"
   },
-  "limitsNote": "Named profile parameters shared by contract, oracle and plug-ins (bft-core briefs/b1-any-age-contract.md section 4); a later profile version may raise them."
+  "limitsNote": "The one resource policy shared by contract, oracle and plug-ins (owner section 36, bft-core briefs/b7-direct-uncapped-design.md section 1): no gas ceiling and no bridge-specific history cap; the aggregate entries are the native kernels' own limits and envelopeBytes is the ingress bound; the rest are per-object shape bounds."
 }

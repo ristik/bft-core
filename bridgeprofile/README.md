@@ -36,7 +36,7 @@ the round's master shard with one quorum check, every anchor derived from it); `
 
 Measured (`TestConsolidatedGateTable`; DEV Cfg, the oracle's return histories, fixture IRs): K anchors, E epochs, S seals, Q seal
 signatures (b1ref grouping), the native batch charge, the gate total of the consolidated bundle, and the gate of the same token on
-the per-SID path with every leaf under its own seal (protocol 5's worst case). The gate is 7,000,000.
+the per-SID path with every leaf under its own seal (protocol 5's worst case). The gate is an estimate with no ceiling (owner §36).
 
 | N | m | L | K | E | S | Q | batch | gate (consolidated) | gate (per SID) | envelope B | view B |
 |---|---|---|---|---|---|---|---|---|---|---|---|
@@ -57,21 +57,23 @@ the per-SID path with every leaf under its own seal (protocol 5's worst case). T
 | 16 | 8 | 8 | 8 | 1 | 1 | 16 | 550,664 | 5,138,808 | 5,810,808 | 27,360 | 1,516 |
 | 16 | 8 | 16 | 8 | 1 | 1 | 16 | 550,664 | 5,753,528 | **10,412,952** | 31,584 | 1,516 |
 
-Read: every consolidated bundle up to the 16-leaf profile bound fits the gate at both committee sizes; on the per-SID path a 16-leaf
-history whose leaves all carry distinct seals fits at 4 members but not at 16 (bold). Each additional shard under the shared seal
-costs about 0.15–0.2M at 4 members and 0.3–0.4M at 16 (UC bytes and items of the repeated seal copy). The leaf and history-byte terms
-still grow with L, so longer histories (a later profile step) and the B7 fallback are unaffected by this table.
+Read: consolidation is always the cheaper bundle, and the per-SID path costs about 10.4M at 16 members and 16 leaves (bold, over
+the former 7M ceiling). Each additional shard under the shared seal costs about 0.15–0.2M at 4 members and 0.3–0.4M at 16 (UC bytes
+and items of the repeated seal copy). The leaf and history-byte terms grow with L.
 
-### Profile limits after #526 step 5 (MaxLeaves 24, MaxTransfers 23)
+### The resource policy (owner §36, B7 direct path)
 
-`step5_limits_test.go` holds the measurements behind the raise:
-- the oracle's return history is 548 + 272·L bytes;
-- RSMT membership paths have about log2(n) siblings for n state IDs: a mean of 20 and a p99 of 23 at 10^6 (the 10^6 run is behind
-  `STEP5_RSMT_LARGE=1`);
-- at 24 leaves with 24 siblings per path, a consolidated bundle stays below 6M gas for a 4-member committee over up to 4 shards
-  (5.91M) and for a 16-member committee over up to 2 shards (5.93M).
+There is no gas ceiling and no bridge-specific history cap (`limits.go`, briefs/b7-direct-uncapped-design.md §1). The gas formula is
+an estimate that wallets set their gas limit from; a call with too little gas runs out of gas and reverts. The aggregate bounds are
+the native kernels' own until the native composition streams them: MaxTransfers 64 and MaxLeaves 65 (B2), MaxSemanticBytes 128 KiB
+(B2 history), MaxAnchors 16 (B1 claims). MaxEnvelopeBytes is 512 KiB, an ingress bound above every envelope those admit. The
+cumulative path-step budget (2,048) and the shared Solidity item budget (4,096) are gone: path steps and items are charged; each
+certificate, path and CBOR object keeps its own shape bound, and the envelope's declared siblings never exceed its bytes.
 
-A 16-member committee over 8 shards is over the 7M budget already at 16 leaves. The gate prices every bundle, and what does not fit
-redeems via the B7 fallback. MaxAnchors stays 16: with 24 leaves a token can need more anchors than that, which the parser refuses
-(`compose-anchors-over-max`). New corpus cases `return-transfers-max` and `-over-max` pin the transfer bound. `return-valid-16` (17
-transactions) is now accepted.
+### Measurements (#526 step 5)
+
+`step5_limits_test.go` keeps the measurements: the oracle's return history is 548 + 272·L bytes (up to 23 transfers, a one-byte
+array head); RSMT membership paths have about log2(n) siblings for n state IDs (mean 20, p99 23 at 10^6, behind
+`STEP5_RSMT_LARGE=1`); and `TestEstimateHasNoCeiling` prices a 16-member committee over 8 shards at 65 leaves and 24 siblings far
+above the former 7M, unrefused. A token whose leaves each carry their own certificate can still need more than MaxAnchors anchors,
+which the parser refuses (`compose-anchors-over-max`); consolidation removes that need.

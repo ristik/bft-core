@@ -129,6 +129,8 @@ var priorCaseIDs = []string{
 
 // priorCaseRename maps the prior IDs that changed to their replacement.
 var priorCaseRename = map[string]string{"derive-n160": "derive-n237", "envelope-two-anchors": "envelope-valid-two-anchors-one-shard", "envelope-anchors-8": "envelope-anchors-max", "envelope-anchors-9": "envelope-anchors-over-max",
+	// owner section 36: MaxEnvelopeBytes is 512 KiB, and the size cases are named by the bound
+	"envelope-size-65536": "envelope-size-max", "envelope-size-65568": "envelope-size-max-plus-word",
 	// protocol 4: the policy carries no shard rows, so the protocol-3 row cases map to the rejection of the protocol-3 body, and an
 	// anchor of shard 80 is a root-shard anchor
 	"policy-empty-bstr-shard": "policy-protocol-3", "envelope-shard": "envelope-shard-root"}

@@ -372,7 +372,7 @@ func TestB1ProfileCommand_WritesTheProfileAndTheClientFlags(t *testing.T) {
 	var stdout bytes.Buffer
 	cmd := New(testobserve.NewFactory(t))
 	cmd.baseCmd.SetOut(&stdout)
-	cmd.baseCmd.SetArgs([]string{"engine-api", "b1-profile", "--shard-conf", d.confPath, "--trust-base", d.tbPath, "--delta-ev", "1", "--delta-hold", "2", "--out", out})
+	cmd.baseCmd.SetArgs([]string{"engine-api", "b1-profile", "--shard-conf", d.confPath, "--trust-base", d.tbPath, "--delta-ev", "1", "--delta-hold", "2", "--ordinary-capacity", "7000000", "--out", out})
 	require.NoError(t, cmd.Execute(context.Background()))
 	got, err := readB1Profile(out)
 	require.NoError(t, err)
@@ -580,6 +580,9 @@ func TestTheUrethFlagsPinEveryHookTheProfileHashCommits(t *testing.T) {
 	plain := urethFlags(d.profile, plainHash)
 	require.NotContains(t, plain, "records-custody")
 	require.NotContains(t, plain, "election")
+	// the pool admits one transaction of the whole ordinary capacity carrying a maximal bridge envelope
+	require.Contains(t, plain, fmt.Sprintf("--txpool.max-tx-gas=%d", d.profile.OrdinaryCapacity))
+	require.Contains(t, plain, "--txpool.max-tx-input-bytes=1048576")
 	// the records hook alone prints no election flags
 	records := p
 	records.ElectionContract, records.ElectGas = [20]byte{}, 0
