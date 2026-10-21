@@ -22,6 +22,9 @@ LAWFUL_EARLY = ("RoundGateNotMet", "TimeGateNotMet", "EvidenceGateNotMet", "Evid
 ERRORS = LAWFUL_EARLY + ("RetirementNotImported", "LotStillReferenced", "RecordsPending", "LotAlreadyReleased", "LotUnknown", "BatchTooLarge", "EmptyBatch")
 
 
+CAST_TIMEOUT = 60   # a wedged execution client must be an error the lane can log, not a wait that never ends
+
+
 class ExitError(Exception):
     pass
 
@@ -32,8 +35,10 @@ def need(cond, message):
 
 
 def cast(a, *args):
-    out = subprocess.run([a.cast, *args], text=True, capture_output=True)
-    return out
+    try:
+        return subprocess.run([a.cast, *args], text=True, capture_output=True, timeout=CAST_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        raise ExitError(f"cast {args[0]} timed out after {CAST_TIMEOUT} s (the execution client does not answer)")
 
 
 def call(a, sig, *args, frm=None, block=None):
@@ -110,7 +115,9 @@ def cmd_matured(a):
 
 def cmd_claimed(a):
     now = read_state(a)
-    bal = int(subprocess.run([a.cast, "balance", "--rpc-url", a.rpc, a.recipient], text=True, capture_output=True, check=True).stdout.strip())
+    out = cast(a, "balance", "--rpc-url", a.rpc, a.recipient)
+    need(out.returncode == 0, f"cast balance failed: {out.stderr.strip()}")
+    bal = int(out.stdout.strip())
     need(bal - a.recipient_before == a.credit, f"the recipient received {bal - a.recipient_before}, the credit was {a.credit}")
     need(now["credit"] == 0, f"the withdrawal address still holds credit {now['credit']}")
     print(json.dumps({"received": a.credit}))
