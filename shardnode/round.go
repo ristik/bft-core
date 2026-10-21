@@ -135,6 +135,10 @@ type Round struct {
 	// sign, whether or not the signer agreed. A re-delivery of that same certificate must not
 	// build a second candidate or ask a second time — see the refusal guard in HandleCertificate.
 	attempted *attemptedRound
+	// awaitGaveUp is the authorization whose leader's block this node waited for the whole await budget and abstained from (bft-core#728). A re-delivery of the
+	// same certificate (several roots answer the same request, retransmissions) is polled once, not awaited again: the loop that handles it also queues every newer
+	// certificate, so repeating a 5 s wait per copy of a dead leader's round stacked tens of seconds in front of the repeat UC that starts the fresh attempt.
+	awaitGaveUp *attemptedRound
 	// restoredFrom, when non-nil, is the partition round of the certificate this process was
 	// resumed from (node.go's LoadLUC / verifyRestoredLUC / SeedLUC sequence). A Round marked this
 	// way observes, reconciles and stays diagnosable, but never signs — see abstainRestored.
@@ -226,6 +230,9 @@ func (a *attemptedRound) answers(uc *types.UnicityCertificate, exp Expectation) 
 // leader time to build, seal and publish a block over the local network; below this the follower
 // would abstain from rounds nobody was late for.
 const MinAwaitTimeout = 200 * time.Millisecond
+
+// redeliveryPoll is the wait for the leader's block on a re-delivery of an authorization this node already abstained from after the full budget.
+const redeliveryPoll = 20 * time.Millisecond
 
 /*
 AwaitTimeoutForT2 derives a follower's missing-leader await budget from the shard's own T2 timeout.
@@ -1688,10 +1695,17 @@ func (r *Round) produceBlock(ctx context.Context, head BlockRef, exp Expectation
 	if r.disseminator == nil {
 		return Block{}, params, errors.New("shardnode: not leader this round and no disseminator configured — cannot obtain the leader's block")
 	}
-	awaitCtx, cancel := context.WithTimeout(ctx, r.awaitTimeout)
+	budget := r.awaitTimeout
+	if r.awaitGaveUp.answers(held, exp) && budget > redeliveryPoll {
+		budget = redeliveryPoll // the same authorization again: the block may have arrived since, but there is nothing new to wait for
+	}
+	awaitCtx, cancel := context.WithTimeout(ctx, budget)
 	defer cancel()
 	block, err := r.disseminator.Await(awaitCtx, exp.Round)
 	if err != nil {
+		if r.awaitGaveUp == nil || !r.awaitGaveUp.answers(held, exp) {
+			r.awaitGaveUp = &attemptedRound{round: exp.Round, partitionRound: held.GetRoundNumber(), rootRound: held.GetRootRoundNumber()}
+		}
 		return Block{}, params, fmt.Errorf("awaiting round %d block from leader %s: %w (this validator abstains from the round; the next certificate — likely a repeat UC — will start a fresh attempt)", exp.Round, leader, err)
 	}
 	return block, params, nil
