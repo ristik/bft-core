@@ -62,7 +62,7 @@ func TestStep5RSMTPathsHaveLogDepth(t *testing.T) {
 func step5Gate(t *testing.T, d *Deployment, n, m, s, l int) uint64 {
 	t.Helper()
 	w := consolidatedWorld(t, n, depthOf(m))
-	_, res, err := SpanningHistory(d.F, w, MaxAnchors-2)
+	_, res, err := SpanningHistory(d.F, w, fixtureAnchors-2)
 	require.NoError(t, err)
 	cl, err := w.CertifyConsolidated(res.Leaves, nil, oneRound)
 	require.NoError(t, err)

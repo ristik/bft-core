@@ -16,6 +16,10 @@ import (
 
 // NewShardedAggregator is an aggregation partition of 2^depth shards (depth <= 3: the view's V1 limit of 8 leaves) certified by
 // auth under tb. The shard configurations are in increasing shard order; depth 1 gives the DEV deployment's two shards.
+
+// fixtureAnchors is the former B1 claim bound (16), kept as the size of the fixtures and corpus cases built around it.
+const fixtureAnchors = 16
+
 func NewShardedAggregator(auth *Authority, tb *types.RootTrustBaseV2, depth int) (*AggregatorWorld, error) {
 	if depth < 0 || 1<<depth > types.MaxPartitionViewLeaves {
 		return nil, fmt.Errorf("bridgeprofile: %d shards exceed the partition view's %d", 1<<depth, types.MaxPartitionViewLeaves)
@@ -218,7 +222,7 @@ func (g *gen) consolidated() {
 			if err != nil {
 				return
 			}
-			h, res, err := SpanningHistory(f, w, MaxAnchors-2)
+			h, res, err := SpanningHistory(f, w, fixtureAnchors-2)
 			g.must(err)
 			if err != nil {
 				return

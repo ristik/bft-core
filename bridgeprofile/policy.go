@@ -273,9 +273,6 @@ func boundEnvelopeCounts(b []byte) error {
 	if !ok || nl > n {
 		return ErrABIFraming
 	}
-	if nl > MaxLeaves {
-		return ErrTooManyPaths
-	}
 	// Every sibling is a 32-byte word of the envelope, so the declared siblings can never exceed n/32 in sum: a count the bytes
 	// cannot hold is refused before any allocation. This is the envelope's own bound, not a path budget.
 	room, steps := n/32, uint64(0)

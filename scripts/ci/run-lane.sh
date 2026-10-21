@@ -81,6 +81,8 @@ export P85_CONTRACTS=$AGRE_ROOT/contracts NBP_DIR=$AGRE_ROOT/native-bridge-plugi
 scripts/ci/install-foundry.sh "$work/dl" >>"$out/run-lane.log" 2>&1 || die "cannot install the pinned Foundry"
 export PATH="$HOME/.foundry/bin:$repo/scripts/ci/shim:$PATH"
 export DNB_AGG_SHARDS=$(jq -r '.lane.aggShards // 1' "$pins")
+# the EVM shard's T2 (setup-evm-nodes.sh reads EVM_T2_MS; unset = 5000): scripts/ci/lane-pins.json lane.evmT2Ms, see its note and bft-core#728
+if [ -n "$(jq -r '.lane.evmT2Ms // empty' "$pins")" ]; then export EVM_T2_MS=$(jq -r '.lane.evmT2Ms' "$pins"); log "EVM_T2_MS=$EVM_T2_MS (lane-pins)"; fi
 # ureth with transaction-only gossip (ristik/ureth#34): the lane submits each transaction to ONE validator and proves that the others received it (scripts/lib/gossip-lib.sh)
 if [ "$(jq -r '.lane.txGossip // false' "$pins")" = true ]; then export GOSSIP_LANE=1 LANE_TX_FANOUT=one; fi
 # T8: the lane includes the funded operator reward pool step (scripts/lib/rewards-lib.sh): the genesis payees hold keys, the pool is settled across the real

@@ -168,19 +168,27 @@ func (h *History) Bytes() []byte {
 // DecodeHistory strictly decodes a history. Mint and transfer wire fields are
 // decoded against the exact literal shapes; reconstructed-source fields are
 // checked by the relation, not here. The transfer count is bounded before
-// transfers are decoded.
-func DecodeHistory(b []byte) (*History, error) {
-	if len(b) > MaxSemanticBytes {
+// transfers are decoded. The bounds are the standalone kernel's (KernelHistory).
+func DecodeHistory(b []byte) (*History, error) { return DecodeHistoryWith(b, KernelHistory) }
+
+// DecodeHistoryWith is DecodeHistory under explicit aggregate bounds.
+func DecodeHistoryWith(b []byte, lim HistoryBounds) (*History, error) {
+	if len(b) > lim.Bytes {
 		return nil, ErrInputTooLarge
 	}
-	root, err := scanOne(b)
+	s := scanner{b: b, maxItems: lim.Items}
+	it, err := s.item(0)
 	if err != nil {
 		return nil, err
 	}
+	if s.pos != len(b) {
+		return nil, ErrTrailing
+	}
+	root := &it
 	if !root.isArray(2) || !root.kids[0].isArray(3) || root.kids[1].major != majArray {
 		return nil, ErrShape
 	}
-	if len(root.kids[1].kids) > MaxTransfers {
+	if len(root.kids[1].kids) > lim.Transfers {
 		return nil, ErrTooManyTx
 	}
 	h := &History{}
@@ -378,9 +386,19 @@ func PrepareLock(cfg *Cfg, n uint64, amount *big.Int, p0 []byte) (*Result, error
 	return res, nil
 }
 
-// VerifyMint is the mint operation: the history must hold zero transfers.
+// VerifyMint is the mint operation of the standalone kernel: the history must hold zero transfers.
 func VerifyMint(cfg *Cfg, history []byte) (*Result, error) {
-	h, err := DecodeHistory(history)
+	return VerifyMintWith(cfg, history, KernelHistory)
+}
+
+// VerifyReturn is the return operation of the standalone kernel: at least the final burn is required.
+func VerifyReturn(cfg *Cfg, history []byte) (*Result, error) {
+	return VerifyReturnWith(cfg, history, KernelHistory)
+}
+
+// VerifyMintWith is VerifyMint under explicit history bounds (ComposedHistory in the composition).
+func VerifyMintWith(cfg *Cfg, history []byte, lim HistoryBounds) (*Result, error) {
+	h, err := DecodeHistoryWith(history, lim)
 	if err != nil {
 		return nil, err
 	}
@@ -391,9 +409,9 @@ func VerifyMint(cfg *Cfg, history []byte) (*Result, error) {
 	return res, err
 }
 
-// VerifyReturn is the return operation: at least the final burn is required.
-func VerifyReturn(cfg *Cfg, history []byte) (*Result, error) {
-	h, err := DecodeHistory(history)
+// VerifyReturnWith is VerifyReturn under explicit history bounds.
+func VerifyReturnWith(cfg *Cfg, history []byte, lim HistoryBounds) (*Result, error) {
+	h, err := DecodeHistoryWith(history, lim)
 	if err != nil {
 		return nil, err
 	}
