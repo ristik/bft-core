@@ -17,7 +17,7 @@ want=$(jq -r .toolchains.go scripts/ci/lane-pins.json); have=$(go env GOVERSION)
 
 make build >/dev/null
 cp build/ubft "$out/ubft"
-for t in dnb-tool utb-evidence evmtx h3slots h3-pdr h4-restore-pin m2slots f7-mintproof-extract f7-mintproof-verify; do go build -trimpath=false -o "$out/tools/$t" "./scripts/$t"; done
+for t in dnb-tool utb-evidence evmtx h3slots h3-pdr h4-restore-pin m2slots f7-mintproof-extract f7-mintproof-verify s4-equivocate; do go build -trimpath=false -o "$out/tools/$t" "./scripts/$t"; done
 go build -o "$out/tools/buildinfo" ./scripts/ci/buildinfo
 for b in "$out/ubft" "$out/tools/utb-evidence" "$out/tools/dnb-tool"; do
   "$out/tools/buildinfo" "$b" | grep -q "vcs.revision=$head" && ! "$out/tools/buildinfo" "$b" | grep -q 'vcs.modified=true' || { echo "build-tools: $b is not stamped for a clean $head" >&2; exit 1; }
