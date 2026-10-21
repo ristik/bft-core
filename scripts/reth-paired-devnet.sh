@@ -534,7 +534,7 @@ boundedRun 60 build/ubft shard-node run --home test-nodes/evm1 --executor engine
   --address /ip4/127.0.0.1/tcp/28001 --trust-base test-nodes/trust-base.json \
   --shard-conf "test-nodes/shard-conf-${partitionID}_0.json" \
   --engine-url http://127.0.0.1:18751 --eth-url http://127.0.0.1:18745 \
-  --jwt-secret test-nodes/evm1/jwt.hex --log-format text --log-level info
+  --jwt-secret test-nodes/evm1/jwt.hex --log-format text --log-level debug
 runOut=$boundedOut; runStatus=$boundedStatus
 if [ "$runStatus" -ne 0 ] && [ "$runStatus" -ne 124 ] && echo "$runOut" | grep -q 'startup chain-identity check' &&
    echo "$runOut" | grep -q 'chainId=31338, shard conf says 31337'; then
@@ -590,7 +590,7 @@ else
     --shard-conf "test-nodes/shard-conf-${partitionID}_0.json" \
     --engine-url http://127.0.0.1:18851 --eth-url http://127.0.0.1:18845 \
     --expected-genesis-hash "$expectedGenesis" \
-    --jwt-secret test-nodes/evm1/jwt.hex --log-format text --log-level info
+    --jwt-secret test-nodes/evm1/jwt.hex --log-format text --log-level debug
   genOut=$boundedOut; genStatus=$boundedStatus
   # Assert the SPECIFIC mismatch diagnostic carrying both hashes, not merely "a genesis check
   # failed" — an unreadable fixture, an unreachable client or a malformed expected value all
@@ -616,7 +616,7 @@ else
     --address /ip4/127.0.0.1/tcp/28003 --trust-base test-nodes/trust-base.json \
     --shard-conf "test-nodes/shard-conf-${partitionID}_0.json" \
     --engine-url http://127.0.0.1:18851 --eth-url "http://127.0.0.1:$rethEthBase" \
-    --jwt-secret test-nodes/evm1/jwt.hex --log-format text --log-level info
+    --jwt-secret test-nodes/evm1/jwt.hex --log-format text --log-level debug
   pairOut=$boundedOut; pairStatus=$boundedStatus
   # The "--" before the pattern is load-bearing: this message STARTS with "--eth-url", and without
   # it grep parses the pattern as an option bundle and never matches. That produced a FAIL against
@@ -723,7 +723,7 @@ else
     --shard-conf "test-nodes/shard-conf-${partitionID}_0.json" \
     --engine-url http://127.0.0.1:18951 --eth-url http://127.0.0.1:18945 \
     --expected-genesis-hash "$configuredGenesis" \
-    --jwt-secret test-nodes/evm1/jwt.hex --log-format text --log-level info
+    --jwt-secret test-nodes/evm1/jwt.hex --log-format text --log-level debug
   forkOut=$boundedOut; forkStatus=$boundedStatus
   forkMsg="only the fixed Cancun profile is supported"
   if [ "$forkStatus" -ne 0 ] && [ "$forkStatus" -ne 124 ] &&
