@@ -167,10 +167,10 @@ x4p_exit_request_check() { # read-only: requested, imported, and a root logged t
 }
 
 # exit-claim: before maturity `mature` refuses for a lawful early reason (never a missing Retirement), then matures exactly the lots' principal into the withdrawal
-# credit and claims it to a fresh recipient with exact balance deltas. args.expectHoldUntilSettled: an offender's exit stays refused (EvidenceHoldPending) while
+# credit and claims it to a fresh recipient with exact balance deltas. args.expectReason (EvidenceHoldPending): an offender's exit stays refused (EvidenceHoldPending) while
 # its evidence is unsettled, and the step records that refusal before waiting.
 x4p_exit_claim() {
-  local id st="$X4_STEP_DIR/state-pre.json" wait t0 ids recip credit before wkey out="$X4_STEP_DIR/refusal.json" did_mature=0
+  local id st="$X4_STEP_DIR/state-pre.json" wait t0 ids recip credit before wkey out="$X4_STEP_DIR/refusal.json" did_mature=0 expect
   id=$(x4p_exit_id) || return 1; wkey=$(x4p_withdrawal_key "$id")
   [ -r "$wkey" ] || x4p_die "no withdrawal key $wkey (the campaign needs X4_HELD_KEYS=1)" || return 1
   wait=$(x4p_arg matureWaitSeconds 900)
@@ -179,9 +179,9 @@ x4p_exit_claim() {
   if [ "$(x4p_exit_field "$st" credit)" = 0 ] && ! python3 -c "import json,sys;sys.exit(0 if all(l['category']==4 for l in json.load(open('$st'))['lots']) else 1)"; then   # not yet matured
     x4p_exit refusal "$id" --allow-success >"$out" || return 1   # a refusal must be lawful; a mature-now answer is allowed once the gates have passed
     x4p_log "mature before the gates: $(cat "$out")"
-    if [ "$(x4p_arg expectHoldUntilSettled false)" = true ]; then
-      jq -e '.outcome=="refused" and .reason=="EvidenceHoldPending"' "$out" >/dev/null || x4p_die "the held offender's exit was not refused for EvidenceHoldPending: $(cat "$out")" || return 1
-    fi
+    expect=$(x4p_arg expectReason "")   # the held offender (S4): the first refusal must be the evidence hold, not a gate
+    jq --arg e "$expect" '. + {expected: $e}' "$out" >"$out.tmp" && mv "$out.tmp" "$out"
+    [ -z "$expect" ] || jq -e --arg e "$expect" '.outcome=="refused" and .reason==$e' "$out" >/dev/null || x4p_die "the exit was not refused for $expect: $(cat "$out")" || return 1
     t0=$(date +%s)
     until x4p_exit refusal "$id" --allow-success 2>/dev/null | jq -e '.outcome=="mature-now"' >/dev/null; do
       [ $(( $(date +%s) - t0 )) -lt "$wait" ] || { x4p_exit refusal "$id" --allow-success >"$X4_STEP_DIR/refusal-last.json" 2>&1 || true; x4p_die "identity $id did not mature within ${wait}s: $(cat "$X4_STEP_DIR/refusal-last.json")"; return 1; }
