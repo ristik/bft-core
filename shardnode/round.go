@@ -139,6 +139,9 @@ type Round struct {
 	// same certificate (several roots answer the same request, retransmissions) is polled once, not awaited again: the loop that handles it also queues every newer
 	// certificate, so repeating a 5 s wait per copy of a dead leader's round stacked tens of seconds in front of the repeat UC that starts the fresh attempt.
 	awaitGaveUp *attemptedRound
+	// watchSupersession, when set, arms a cancel for a follower's wait on the held certificate, to fire when a repeat UC of it (same InputRecord, same root epoch, greater
+	// authenticated root round) arrives while the node is still waiting (bft-core#728). See produceBlock.
+	watchSupersession func(held *types.UnicityCertificate, cancel func()) (unregister func())
 	// restoredFrom, when non-nil, is the partition round of the certificate this process was
 	// resumed from (node.go's LoadLUC / verifyRestoredLUC / SeedLUC sequence). A Round marked this
 	// way observes, reconciles and stays diagnosable, but never signs — see abstainRestored.
@@ -319,6 +322,17 @@ func (r *Round) SetAwaitTimeout(d time.Duration) {
 	defer r.mu.Unlock()
 	r.awaitTimeout = d
 }
+
+// SetSupersessionWatch installs the signal that ends a follower's wait for the leader's block when a repeat UC of the certificate being handled arrives.
+// Optional; without it every wait runs its full budget.
+func (r *Round) SetSupersessionWatch(watch func(held *types.UnicityCertificate, cancel func()) func()) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.watchSupersession = watch
+}
+
+// errAwaitSuperseded is the cause of a follower's wait ending because a repeat UC replaced the certificate it was handling.
+var errAwaitSuperseded = errors.New("the certificate was superseded by a repeat UC while waiting for the leader's block")
 
 // SetEvidenceBuffer attaches the optional serving buffer, which is then fed by every certificate
 // this node handles. Safe to call, or not, at any point before Run starts.
@@ -795,6 +809,15 @@ func (r *Round) HandleCertificate(ctx context.Context, uc *types.UnicityCertific
 			r.health.updateVoting(false, err.Error())
 			if r.log != nil {
 				r.log.WarnContext(ctx, "declining leader round after a different proposal was already journaled", slog.Uint64("round", exp.Round), slog.String("reason", err.Error()))
+			}
+			return nil
+		}
+		if errors.Is(err, errAwaitSuperseded) {
+			// The certified application of this certificate has succeeded; only the speculative wait for its child was abandoned, because a repeat UC
+			// replaced it and is delivered next. Returning success keeps the admission journal from redelivering the obsolete wait (the abstention is
+			// remembered in awaitGaveUp); recovery and commit failures are returned as before.
+			if r.log != nil {
+				r.log.DebugContext(ctx, "abandoned the wait for the leader's block: a repeat UC replaced the certificate", slog.Uint64("round", exp.Round), slog.Uint64("rootRound", uc.GetRootRoundNumber()))
 			}
 			return nil
 		}
@@ -1701,7 +1724,23 @@ func (r *Round) produceBlock(ctx context.Context, head BlockRef, exp Expectation
 	}
 	awaitCtx, cancel := context.WithTimeout(ctx, budget)
 	defer cancel()
-	block, err := r.disseminator.Await(awaitCtx, exp.Round)
+	// Only the wait for the speculative child block is cancelled: a repeat UC replaces the certificate that started it, and is handled next with its own full
+	// budget. Nothing is signed or committed by either outcome, and no second HandleCertificate runs.
+	waitCtx, cut := context.WithCancelCause(awaitCtx)
+	defer cut(nil)
+	if watch := r.watchSupersession; watch != nil && budget > redeliveryPoll {
+		defer watch(held, func() { cut(errAwaitSuperseded) })()
+	}
+	block, err := r.disseminator.Await(waitCtx, exp.Round)
+	if err != nil && errors.Is(context.Cause(waitCtx), errAwaitSuperseded) {
+		pollCtx, pollCancel := context.WithTimeout(ctx, redeliveryPoll)
+		lateBlock, lateErr := r.disseminator.Await(pollCtx, exp.Round) // a block that landed in the same instant is still taken
+		pollCancel()
+		if lateErr == nil {
+			return lateBlock, params, nil
+		}
+		err = errAwaitSuperseded
+	}
 	if err != nil {
 		if r.awaitGaveUp == nil || !r.awaitGaveUp.answers(held, exp) {
 			r.awaitGaveUp = &attemptedRound{round: exp.Round, partitionRound: held.GetRoundNumber(), rootRound: held.GetRootRoundNumber()}
