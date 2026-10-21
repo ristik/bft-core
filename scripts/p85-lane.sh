@@ -102,7 +102,7 @@ export EVM_PARTITION_PARAMS_EXTRA=${EVM_PARTITION_PARAMS_EXTRA:-continuity_max_d
 set +e
 DEVNET_PIDFILE="$EVIDENCE_DIR/.devnet-pid"; rm -f "$DEVNET_PIDFILE"
 ( set -o pipefail
-  EVM_JOURNAL_CANDIDATES=${EVM_JOURNAL_CANDIDATES:-256} M2_PROFILE2=1 SIGNING=authority \
+  EVM_JOURNAL_CANDIDATES=${EVM_JOURNAL_CANDIDATES:-1024} EVM_JOURNAL_OBSERVATIONS=${EVM_JOURNAL_OBSERVATIONS:-2048} M2_PROFILE2=1 SIGNING=authority \
     POST_M2A_URETH_BIN="$M2_URETH_BIN" POST_M2A_URETH_COMMIT="$M2_URETH_COMMIT" \
     M2_RUN_LOG_DIR="$EVIDENCE_DIR/nodes" \
     bash -c 'echo $$ >"$0"; exec bash ./scripts/reth-paired-devnet.sh 4 10' "$DEVNET_PIDFILE" 2>&1 | tee "$EVIDENCE_DIR/lane.log" ) &
@@ -113,6 +113,7 @@ rm -f "$DEVNET_PIDFILE"
 cp -R test-nodes/p85 "$EVIDENCE_DIR/p85" 2>/dev/null || true
 # the execution side's logs only (never its data or keys: the publisher excludes evm*/ reth*/ whole): the last 4000 lines of each validator's node and client log, for a transaction that was never mined
 mkdir -p "$EVIDENCE_DIR/exec-logs"
+for f in test-nodes/evm*/debug.log; do [ -f "$f" ] && { grep -a "bft client loop\|authenticated certification response seen\|HandleCertificate phases\|follower wait for the leader\|certified execution remains unready\|certificate admitted\|recovery: \|configuredprogress: \|archive: frontier worker pass\|archive: replica pass\|certified frontier waiting\|archive replica waiting\|differs from a full load\|capacity reached\|journal stopped" "$f" >"$EVIDENCE_DIR/exec-logs/$(basename "$(dirname "$f")")-loop-timing.log" 2>/dev/null || true; }; done
 for f in test-nodes/evm*/debug.log test-nodes/reth*/reth.log; do [ -f "$f" ] && tail -n 4000 "$f" >"$EVIDENCE_DIR/exec-logs/$(basename "$(dirname "$f")")-$(basename "$f")" 2>/dev/null; done
 if [ "$ANYAGE_LANE" = 1 ]; then mkdir -p "$EVIDENCE_DIR/aggregator"; for d in test-nodes/agg test-nodes/agg[0-9]; do [ -d "$d" ] && { mkdir -p "$EVIDENCE_DIR/aggregator/$(basename "$d")"; cp "$d"/stdout.log "$d"/logs/*.log "$EVIDENCE_DIR/aggregator/$(basename "$d")/" 2>/dev/null || true; }; done; cp test-nodes/lane-config.json test-nodes/bridge-addresses.json "$EVIDENCE_DIR/" 2>/dev/null || true; fi
 # what the lane's helpers read, kept so a failure can be replayed offline (go run ./scripts/h3-pdr, the weight checks, the trust-base tools): the roots'
