@@ -123,7 +123,7 @@ x4p_exit_root_log() { # <id> <out file>
   : >"$out"
   for f in test-nodes/root*/debug.log; do
     [ -r "$f" ] || continue
-    grep -E "msg=\"retirement (requested|proof ready)\"" "$f" | grep -E "id=$id([[:space:]]|$)" | sed "s|^|$(dirname "$f" | xargs basename) |" >>"$out" || true
+    grep -E "retirement (requested|proof ready)" "$f" | grep -E "[[:space:]]id=$id([[:space:]]|$)" | sed "s|^|$(dirname "$f" | xargs basename) |" >>"$out" || true
   done
 }
 
