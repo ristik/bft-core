@@ -103,6 +103,10 @@ x4p_exit() { # <exit_check.py subcommand> <id> [flags]
   python3 scripts/x4pos/exit_check.py "$sub" --rpc "$(p85_eth)" --cast "$P85_CAST" --custody "$(p85_custody)" --id "$id" "$@"
 }
 x4p_exit_field() { jq -r ".$2" "$1"; }   # <state json> <field>
+# The lane's shard adds no block while nothing happens (runs 39586726777 and 39602386344: the head stood at one block for 80+ minutes), and custody reads the LATEST block's
+# time and number: a wait for a time gate, or for the proposer's confirmations after a request, needs transactions. One paid 1-wei transfer from the lane's funded sender per tick
+# (a failed tick is only a missed block; the wait's own deadline decides).
+x4p_tick() { rw_send_value "$(p85_sender_key)" 0x000000000000000000000000000000000000dEaD 1 >/dev/null 2>&1 || sleep 3; }
 x4p_owner_key() { echo "$P85_DIR/owner-keys/owner-$1.key"; }
 x4p_withdrawal_key() { echo "$P85_DIR/owner-keys/withdrawal-$1.key"; }
 x4p_address_of() { "$P85_CAST" wallet address --private-key "0x$(tr -d '[:space:]' <"$1" | sed 's/^0x//')"; }
@@ -151,7 +155,7 @@ x4p_exit_request() {
     x4p_exit state "$id" >"$X4_STEP_DIR/state-after.json" || return 1
     [ "$(x4p_exit_field "$X4_STEP_DIR/state-after.json" imported)" = true ] && break
     [ $(( $(date +%s) - t0 )) -lt "$imp" ] || { x4p_exit_root_log "$id" "$X4_STEP_DIR/roots.log"; x4p_die "the Retirement of identity $id was not imported within ${imp}s (roots.log has what the proposers logged)"; return 1; }
-    sleep 3
+    x4p_tick
   done
   now=$(date +%s)
   x4p_exit_root_log "$id" "$X4_STEP_DIR/roots.log"
@@ -185,7 +189,7 @@ x4p_exit_claim() {
     t0=$(date +%s)
     until x4p_exit refusal "$id" --allow-success 2>/dev/null | jq -e '.outcome=="mature-now"' >/dev/null; do
       [ $(( $(date +%s) - t0 )) -lt "$wait" ] || { x4p_exit refusal "$id" --allow-success >"$X4_STEP_DIR/refusal-last.json" 2>&1 || true; x4p_die "identity $id did not mature within ${wait}s: $(cat "$X4_STEP_DIR/refusal-last.json")"; return 1; }
-      sleep 5
+      x4p_tick
     done
     ids="[$(jq -r '[.lots[].id]|map(tostring)|join(",")' "$st")]"
     x4p_ensure_gas "$wkey" || return 1
