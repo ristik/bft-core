@@ -239,6 +239,61 @@ func (x *BlockStore) ClosureControls(parentRound, epoch, round uint64) ([]rctype
 	return controls, nil
 }
 
+// RetirementParent is the EVM tuple a Retirement in the block proposed at round, on the block of parentRound, must name, derived exactly
+// as the executor derives it (certifiedEVM). It reports false when no Retirement can be ordered in that child: the chain has no P85
+// state, the parent has no usable EVM record, a handoff is in flight, the parent is an epoch anchor or a frozen suffix. The block store
+// holds the parent unchanged: a child that certifies a newer EVM block does not change the tuple.
+func (x *BlockStore) RetirementParent(parentRound, round uint64) (EVMParent, bool, error) {
+	parent, err := x.blockTree.FindBlock(parentRound)
+	if err != nil {
+		return EVMParent{}, false, err
+	}
+	pos, err := loadPos(parent.ShardState.Control)
+	if err != nil || !pos.on || isEpochAnchorRoot(parent) {
+		return EVMParent{}, false, err
+	}
+	if c := parent.ShardState.Control; c != nil && c.Phase == "committed" || handoffInFlight(pos, parent.ShardState.Control) {
+		return EVMParent{}, false, nil
+	}
+	confs, err := x.orchestration.ShardConfigs(round)
+	if err != nil {
+		return EVMParent{}, false, err
+	}
+	root, block, ok := certifiedEVM(parent.ShardState, confs)
+	if !ok {
+		return EVMParent{}, false, nil
+	}
+	out := EVMParent{StateRoot: root}
+	copy(out.BlockHash[:], block)
+	return out, true, nil
+}
+
+// RetirementOrdered reports whether the branch ending at parentRound has ordered a Retirement of the generation.
+func (x *BlockStore) RetirementOrdered(parentRound, id, generation uint64) bool {
+	parent, err := x.blockTree.FindBlock(parentRound)
+	if err != nil {
+		return false
+	}
+	return retirementIn(parent, id, generation)
+}
+
+// RetirementCommitted reports whether the committed root has ordered a Retirement of the generation.
+func (x *BlockStore) RetirementCommitted(id, generation uint64) bool {
+	return retirementIn(x.blockTree.Root(), id, generation)
+}
+
+func retirementIn(b *ExecutedBlock, id, generation uint64) bool {
+	if b == nil {
+		return false
+	}
+	pos, err := loadPos(b.ShardState.Control)
+	if err != nil || !pos.on {
+		return false
+	}
+	_, ok := pos.state.IsRetired(id, generation)
+	return ok
+}
+
 // StoreWitness retains control witness bytes under their SHA-256.
 func (x *BlockStore) StoreWitness(data []byte) error {
 	store, ok := x.storage.(WitnessStore)
