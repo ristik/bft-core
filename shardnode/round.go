@@ -526,6 +526,8 @@ func (r *Round) MarkRestored(round uint64) {
 // tr describes. Every step is idempotent, because that retry re-runs all of
 // them.
 func (r *Round) HandleCertificate(ctx context.Context, uc *types.UnicityCertificate, tr *certification.TechnicalRecord) error {
+	ph := &phaseTrace{start: time.Now()}
+	defer ph.log(ctx, r, uc, tr)
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	ctx = WithProofEvidence(ctx)
@@ -598,6 +600,7 @@ func (r *Round) HandleCertificate(ctx context.Context, uc *types.UnicityCertific
 	// about itself are the same certificates, and letting them diverge would mean a node able to
 	// prove something to a peer that it could not prove to itself.
 	r.recovery.observe(ctx, uc, tr, r.nodeID)
+	ph.mark("observed")
 	if r.journalRecovery != nil && r.health.Snapshot().ExecutionRecovery == "stopped" {
 		return fmt.Errorf("shardnode: execution journal stopped: %s", r.health.Snapshot().ExecutionRecoveryDetail)
 	}
@@ -664,6 +667,7 @@ func (r *Round) HandleCertificate(ctx context.Context, uc *types.UnicityCertific
 	// two are never byte-equal, and that is expected, not divergence: there
 	// is nothing yet to compare against. Only compare once the root chain
 	// has a real PreviousHash to hold the executor to.
+	ph.mark("recovered")
 	if r.journalRecovery == nil && len(exp.PreviousHash) > 0 && !bytes.Equal(head.StateRoot, exp.PreviousHash) {
 		head, err = r.reconcile(ctx, uc, exp, head)
 		if err != nil {
@@ -788,6 +792,7 @@ func (r *Round) HandleCertificate(ctx context.Context, uc *types.UnicityCertific
 	if r.journalRecovery != nil && r.health.Snapshot().ExecutionRecovery == "stopped" {
 		return fmt.Errorf("shardnode: execution journal stopped before block production: %s", r.health.Snapshot().ExecutionRecoveryDetail)
 	}
+	ph.mark("before-produce")
 	block, params, err := r.produceBlock(ctx, head, exp, sealHash, leader, uc, tr, readinessTicket)
 	if err != nil {
 		if errors.Is(err, errReadinessRevoked) {
@@ -851,6 +856,7 @@ func (r *Round) HandleCertificate(ctx context.Context, uc *types.UnicityCertific
 		}
 	}
 
+	ph.mark("produced")
 	verifyStart := time.Now()
 	status, err := r.verifyWithRetry(ctx, block, params)
 	r.metrics.recordVerifyDuration(ctx, time.Since(verifyStart), tr.Leader == r.nodeID)
@@ -998,6 +1004,7 @@ func (r *Round) HandleCertificate(ctx context.Context, uc *types.UnicityCertific
 		return nil
 	}
 	req = signed
+	ph.mark("signed")
 	if r.log != nil {
 		proof := CurrentProofEvidence(ctx)
 		var requestDigest string
@@ -1731,7 +1738,20 @@ func (r *Round) produceBlock(ctx context.Context, head BlockRef, exp Expectation
 	if watch := r.watchSupersession; watch != nil && budget > redeliveryPoll {
 		defer watch(held, func() { cut(errAwaitSuperseded) })()
 	}
+	waitStart := time.Now()
 	block, err := r.disseminator.Await(waitCtx, exp.Round)
+	if r.log != nil {
+		outcome := "block"
+		switch {
+		case err != nil && errors.Is(context.Cause(waitCtx), errAwaitSuperseded):
+			outcome = "superseded"
+		case err != nil:
+			outcome = "timeout"
+		}
+		r.log.LogAttrs(ctx, slog.LevelDebug, "round: follower wait for the leader's block ended",
+			slog.Uint64("round", exp.Round), slog.Uint64("shardRound", held.GetRoundNumber()), slog.Uint64("rootRound", held.GetRootRoundNumber()),
+			slog.String("outcome", outcome), slog.Duration("waited", time.Since(waitStart)), slog.Duration("budget", budget))
+	}
 	if err != nil && errors.Is(context.Cause(waitCtx), errAwaitSuperseded) {
 		pollCtx, pollCancel := context.WithTimeout(ctx, redeliveryPoll)
 		lateBlock, lateErr := r.disseminator.Await(pollCtx, exp.Round) // a block that landed in the same instant is still taken
@@ -1776,4 +1796,33 @@ func SealHash(uc *types.UnicityCertificate) (Hash, error) {
 		return nil, fmt.Errorf("shardnode: certificate has no unicity seal")
 	}
 	return Hash(uc.UnicitySeal.Hash), nil
+}
+
+// phaseTrace times the stages of one HandleCertificate call for the bft-core#728 trace: which stage a slow delivery spent its time in. Debug level, one line per call.
+type phaseTrace struct {
+	start time.Time
+	last  time.Time
+	marks []slog.Attr
+}
+
+// mark records the time since the previous mark (or the start) under name.
+func (p *phaseTrace) mark(name string) {
+	now := time.Now()
+	if p.last.IsZero() {
+		p.last = p.start
+	}
+	p.marks = append(p.marks, slog.Duration(name, now.Sub(p.last)))
+	p.last = now
+}
+
+func (p *phaseTrace) log(ctx context.Context, r *Round, uc *types.UnicityCertificate, tr *certification.TechnicalRecord) {
+	if r.log == nil {
+		return
+	}
+	p.mark("rest")
+	attrs := append([]slog.Attr{
+		slog.Uint64("shardRound", uc.GetRoundNumber()), slog.Uint64("rootRound", uc.GetRootRoundNumber()), slog.Uint64("round", tr.Round),
+		slog.Duration("total", time.Since(p.start)),
+	}, p.marks...)
+	r.log.LogAttrs(ctx, slog.LevelDebug, "round: HandleCertificate phases", attrs...)
 }
