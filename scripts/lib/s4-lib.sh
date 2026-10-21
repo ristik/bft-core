@@ -136,7 +136,7 @@ s4_send() { # private-key(hex) nonce to value data gas-limit receipt-file
   local id sent expected= i receipt status n=0
   s4_send_all() { # the same signed bytes (evmtx signs deterministically) to every online validator: a resend is "already known" where the first send arrived
     expected=
-    for id in $H3_ONLINE; do
+    for id in $(s4_targets); do
       sent=$(lane_go_run evmtx -send -eth-url "http://127.0.0.1:$((rethEthBase+id-1))" -chain-id "${M2_CHAIN_ID:-31337}" -private-key "${1#0x}" -nonce "$2" -to "$3" -value "$4" -data "$5" -gas-limit "$6" 2>&1) \
         || { case "$sent" in *"already known"*|*"known transaction"*|*"already exists"*) sent=$(echo "$sent" | grep -o '0x[0-9a-f]\{64\}' | head -1) ;; *) echo "$sent" >&2; return 1 ;; esac; }
       [ -z "$expected" ] || [ -z "$sent" ] || [ "$expected" = "$sent" ] || { echo "validators disagree on the transaction hash" >&2; return 1; }
@@ -234,7 +234,9 @@ s4_submit_settle() {
   s4_snapshot settled || return 1
 }
 
-s4_eth_all() { local i out=; for i in ${H3_ONLINE:-1}; do out="${out:+$out,}http://127.0.0.1:$((rethEthBase + i - 1))"; done; echo "$out"; }
+# the validators a transaction is sent to: every online one (older ureth: pools do not gossip), or only the first with LANE_TX_FANOUT=one (ureth with transaction gossip)
+s4_targets() { local o=${H3_ONLINE:-1}; [ "${LANE_TX_FANOUT:-all}" != one ] || o=${o%% *}; echo "$o"; }
+s4_eth_all() { local i out=; for i in $(s4_targets); do out="${out:+$out,}http://127.0.0.1:$((rethEthBase + i - 1))"; done; echo "$out"; }
 
 # one submitter process. The first run has no --settle and is stopped as soon as it has printed the case line (the submitter dies after admission: with the lane's
 # single-lot exposure a settling run would finish before it could be interrupted); the second run (--wait) submits again and settles from the on-chain cursor
