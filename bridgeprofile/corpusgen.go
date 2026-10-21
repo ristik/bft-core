@@ -1480,6 +1480,17 @@ func (g *gen) proof() {
 	} else {
 		g.must(err)
 	}
+	// A composed history above the standalone kernel's 128 KiB (MaxSemanticBytes): 490 transfers in two shards, admitted and paid.
+	// Transfer i is certified at BaseTime+10*i, so the anchors are rounds after the last of them.
+	if bigH, err := g.certifiedWith(490, func(int, Leaf) ShardRound { return ShardRound{BaseTime + 10000, 100} }); err == nil {
+		eb := envOf(bigH.h, bigH.cert, nil)
+		if n := len(bigH.h.Bytes()); n <= MaxSemanticBytes || len(eb) > MaxEnvelopeBytes {
+			g.must(fmt.Errorf("compose-history-over-128k: history %d bytes, envelope %d bytes", n, len(eb)))
+		}
+		add("compose-history-over-128k", "a 492-leaf history above the standalone kernel's 128 KiB, in two shards under one UC per shard: admitted by the composition", eb, claimsOf(bigH.cert.Anchors...), "return")
+	} else {
+		g.must(err)
+	}
 	big65, err := g.certified(MaxLeaves - 2)
 	g.must(err)
 	if err == nil {
@@ -1719,6 +1730,16 @@ func (g *gen) nativeCompose() {
 	}
 	for _, t := range twins {
 		g.add(t)
+	}
+	// Out-of-gas twins of the cases above the former aggregates: one gas short of the charge halts.
+	for _, t := range twins {
+		switch t.ID {
+		case "native-compose-anchors-over-max", "native-compose-long-history", "native-compose-history-over-128k":
+			gas, _ := strconv.ParseUint(t.Expected.Values["gas"], 10, 64)
+			g.add(Case{ID: t.ID + "-out-of-gas", Family: "proof", Op: "native-compose", Cfg: t.Cfg,
+				Description: t.ID + " forwarded one gas less than its charge: an out-of-gas halt", Input: t.Input,
+				Aux: map[string]string{"claims": t.Aux["claims"], "gasLimit": strconv.FormatUint(gas-1, 10)}})
+		}
 	}
 	if vi < 0 {
 		g.must(fmt.Errorf("no valid native-compose return case"))
