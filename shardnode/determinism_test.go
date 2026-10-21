@@ -83,7 +83,7 @@ type determinismValidator struct {
 	sub    *recordingSubmitter
 }
 
-func newDeterminismValidator(t *testing.T, disseminator *broadcastDisseminator) *determinismValidator {
+func newDeterminismValidator(t *testing.T, disseminator shardnode.Disseminator) *determinismValidator {
 	t.Helper()
 	signer, err := abcrypto.NewInMemorySecp256K1Signer()
 	require.NoError(t, err)

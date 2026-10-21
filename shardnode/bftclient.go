@@ -137,6 +137,7 @@ type BFTClient struct {
 	trustBaseStore TrustBaseStore
 	driver         RoundDriver
 	log            *slog.Logger
+	superseded     supersession // see WatchSupersession
 	opts           BFTClientOptions
 	metrics        *Metrics // optional; nil-safe, see metrics.go
 	health         *Health  // optional; nil-safe, see health.go
@@ -440,11 +441,36 @@ func (c *BFTClient) Run(ctx context.Context) error {
 		startupC = startup.C
 	}
 
-	received := c.net.ReceivedChannel()
+	queue := &receiveQueue{ch: c.net.ReceivedChannel()}
 	busyEnd := time.Now() // when this loop last finished a delivery; see logLoopTiming
+	// deliver coalesces what is queued behind first and hands it to the driver one message at a time. While it does, receiveDuring keeps reading the network.
+	deliver := func(first any) (closed bool) {
+		pickedUp := time.Now()
+		backlog := queue.len()
+		batch, closed := c.coalesceFrom(ctx, first, queue)
+		coalesced := time.Since(pickedUp)
+		stopReader := c.receiveDuring(ctx, queue)
+		for _, queued := range batch {
+			handleStart := time.Now()
+			c.handleMessage(ctx, queued)
+			c.logLoopTiming(ctx, queued, loopTiming{idle: pickedUp.Sub(busyEnd), backlog: backlog, batch: len(batch), coalesce: coalesced, handle: time.Since(handleStart)})
+		}
+		stopReader()
+		busyEnd = time.Now()
+		return closed
+	}
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
+		}
+		if first, ok, _ := queue.pop(); ok { // read by receiveDuring during the last delivery: ahead of the channel
+			if deliver(first) {
+				return errors.New("shardnode: network received channel closed")
+			}
+			continue
+		}
+		if queue.closed {
+			return errors.New("shardnode: network received channel closed")
 		}
 		select {
 		case <-ctx.Done():
@@ -464,21 +490,11 @@ func (c *BFTClient) Run(ctx context.Context) error {
 			if uc != nil {
 				c.renewSubscriptionIfIdle(ctx, uc, true, count)
 			}
-		case msg, ok := <-received:
+		case msg, ok := <-queue.ch:
 			if !ok {
 				return errors.New("shardnode: network received channel closed")
 			}
-			pickedUp := time.Now()
-			backlog := len(received)
-			batch, closed := c.coalesceBufferedCertificationResponses(ctx, msg, received)
-			coalesced := time.Since(pickedUp)
-			for _, queued := range batch {
-				handleStart := time.Now()
-				c.handleMessage(ctx, queued)
-				c.logLoopTiming(ctx, queued, loopTiming{idle: pickedUp.Sub(busyEnd), backlog: backlog, batch: len(batch), coalesce: coalesced, handle: time.Since(handleStart)})
-			}
-			busyEnd = time.Now()
-			if closed {
+			if deliver(msg) {
 				return errors.New("shardnode: network received channel closed")
 			}
 		case <-startupC:
@@ -803,7 +819,12 @@ func compareCertificationAuthorization(a, b *certificationAuthorization) int {
 // preserved so the normal non-equivocation check still sees them. Identical copies are retained at
 // most twice, preserving one retry opportunity without allowing duplicate traffic to grow the batch.
 func (c *BFTClient) coalesceBufferedCertificationResponses(ctx context.Context, first any, received <-chan any) ([]any, bool) {
-	drainLimit := len(received)
+	return c.coalesceFrom(ctx, first, &receiveQueue{ch: received})
+}
+
+// coalesceFrom is coalesceBufferedCertificationResponses over the loop's queue (messages carried over from the last delivery, then the network channel).
+func (c *BFTClient) coalesceFrom(ctx context.Context, first any, received *receiveQueue) ([]any, bool) {
+	drainLimit := received.len()
 	queued := make([]queuedCertificationMessage, 0, 1)
 	activeInput := ""
 	activeAuth := (*certificationAuthorization)(nil)
@@ -826,6 +847,7 @@ func (c *BFTClient) coalesceBufferedCertificationResponses(ctx context.Context, 
 		if ok && cr != nil {
 			if authorization, err := c.verifyCertificationAuthorization(ctx, cr); err == nil {
 				entry.authorization = authorization
+				c.superseded.observe(authorization) // a wait running on another worker (the admission journal's retry) is superseded by this too
 			}
 		}
 
@@ -887,19 +909,17 @@ func (c *BFTClient) coalesceBufferedCertificationResponses(ctx context.Context, 
 	appendMessage(first)
 	closed := false
 	for drained := 0; drained < drainLimit; drained++ {
-		select {
-		case message, ok := <-received:
-			if !ok {
-				closed = true
-				goto drained
-			}
-			appendMessage(message)
-		default:
-			goto drained
+		message, ok, isClosed := received.pop()
+		if isClosed {
+			closed = true
+			break
 		}
+		if !ok {
+			break
+		}
+		appendMessage(message)
 	}
 
-drained:
 	batch := make([]any, 0, len(queued))
 	for _, entry := range queued {
 		if entry.message != nil {
