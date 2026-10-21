@@ -113,7 +113,7 @@ PY
   done
   for i in $(seq 1 "$validators"); do
     enode=$(rpc "http://127.0.0.1:$((rethEthBase + i - 1))" admin_nodeInfo '[]' | python3 -c "import sys,json;print(json.load(sys.stdin)['result']['enode'])")
-    for j in $(seq 1 "$validators"); do [ "$i" = "$j" ] || rpc "http://127.0.0.1:$((rethEthBase + j - 1))" admin_addPeer "[\"$enode\"]" >/dev/null; done
+    for j in $(seq 1 "$validators"); do [ "$i" = "$j" ] || rpc "http://127.0.0.1:$((rethEthBase + j - 1))" admin_addTrustedPeer "[\"$enode\"]" >/dev/null; done
   done
   info "reth clients up and peered"
 
