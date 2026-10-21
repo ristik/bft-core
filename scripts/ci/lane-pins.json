@@ -4,7 +4,7 @@
   "components": {
     "ureth": {
       "repository": "https://github.com/ristik/ureth.git",
-      "commit": "6e59b68cc29f196d54d3d6e28d6266a8c02d05a1",
+      "commit": "53c9330d030426b9847ac2c69840adcfc8490221",
       "package": "unicity-reth",
       "cargoArgs": [
         "build",
@@ -14,7 +14,7 @@
         "unicity-reth"
       ],
       "features": "default (jemalloc)",
-      "note": "the attested Mac build of the same commit (builds/ureth-6e59b68c) was built with rustc 1.97.1; a Linux binary has its own digest",
+      "note": "ureth#75 merge: transaction-only gossip among the trusted peers of the shard (the lanes peer the clients with admin_addTrustedPeer, scripts/lib/reth-peers.sh)",
       "targetedPackages": [
         "reth-unicity-b1",
         "reth-unicity-execution",
@@ -74,7 +74,8 @@
   },
   "lane": {
     "aggShards": 2,
-    "note": "the aggregator partition runs as two bft-shard aggregators (0x40, 0xc0); the any-age L1 token spans both and one more token is redeemed through the SDK's consolidation (#526 step 4)"
+    "note": "the aggregator partition runs as two bft-shard aggregators (0x40, 0xc0); the any-age L1 token spans both and one more token is redeemed through the SDK's consolidation (#526 step 4)",
+    "txGossip": true
   },
   "t6": {
     "comment": "T6 pins its own inputs in scripts/t6-rehearsal.sh (its defaults); they differ from the lane's on purpose and are not unified silently. check-pins.sh t6 refuses a script whose defaults differ from this record.",
