@@ -1,0 +1,17 @@
+# X4 #58 step B1: the self-tests of the resumable PoS scenario driver (scripts/x4pos): preflight refusals, the durable cursor, kill-and-resume at every boundary,
+# verification instead of trust on resume, the sealed manifest, deadlines and honest statuses. Python standard library only; no chain.
+name: x4-pos-driver-selftest
+on:
+  pull_request:
+    paths: ['scripts/x4pos/**', '.github/workflows/x4-pos-driver-selftest.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  selftest:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - run: python3 scripts/x4pos/test_driver.py -v
+      - run: python3 scripts/x4pos/driver.py preflight scripts/x4pos/campaign.json
