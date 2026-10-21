@@ -2,8 +2,8 @@
 
 Read [NOTICE.txt](NOTICE.txt) before using this network. All test UCT and other
 assets are disposable. This package supports #434 and the deployment/reset part
-of #432; it does not close either issue. The owner's bare-metal server, DNS,
-contacts and hCaptcha credentials are still to be supplied. No public deployment,
+of #432; it does not close either issue. The bare-metal server, DNS and
+hCaptcha credentials are supplied by the deployment, not by this package. No public deployment,
 independent second-operator rehearsal or production readiness is claimed.
 
 Each validator entity is a **four-container pod**: root, paired ureth, shard,
@@ -131,7 +131,7 @@ Bridge subnets 172.30.88.0/24 and 172.30.89.0/24 must be unused. Verify Docker's
 actual proxy socket peer: faucet trusts only 172.30.88.1 and RPC only 172.30.89.1;
 nginx must overwrite X-Forwarded-For. Adjust the exact peer config deliberately if
 the host differs. Never disable hCaptcha publicly. Publish NOTICE.txt, the current
-chain/genesis manifest, wallet setup, status URL and actual support contacts.
+chain/genesis manifest, wallet setup, status URL and the incident-owner role's reporting channel.
 
 Use a fresh external wallet pinned to the generated chain ID/genesis. Claim test
 UCT via the faucet, wait for a successful receipt, then submit a signed native
@@ -147,12 +147,12 @@ RPC still responds afterwards. A raw externally signed transaction must enter
 Prometheus scrapes root `/api/v1/metrics` and RPC counters, keeps seven days / 1 GiB
 and is accessible only on loopback port 9090 (SSH tunnel for operators).
 `TestnetTargetDown` and `TestnetRPCFailures` appear in `/alerts`; connect an approved
-Alertmanager/duty channel when the owner supplies it. No alert delivery is claimed
+Alertmanager route when the deployment supplies one. No alert delivery is claimed
 until that route is tested. Watch gateway `/healthz`, faucet `/healthz` (budget,
 balance, network pin), aggregator internal `/health`, `docker compose ps`, restart
 counts, host disk/RAM and shard logs. A responding root metrics target alone does
 not prove consensus progress; compare root roundInfo and certified shard heads
-between samples. Page the duty operator if certified heads stop for 2 minutes,
+between samples. Notify the incident owner if certified heads stop for 2 minutes,
 any pod repeatedly restarts, disk >80%, or faucet balance falls below its reserve.
 Pause claims on uncertain nonce outcomes; follow the faucet runbook for refill.
 
@@ -161,10 +161,13 @@ Docker collects every container's stdout/stderr with rotation. Export incidents:
 For each incident record generation, manifest, UTC start/end, affected services,
 transaction hashes, heads, restarts and recovery decision. Never publish env-file
 secrets, keystores, authority stores or `docker inspect` output containing keys.
-Before public launch fill duty operator, backup operator, owner escalation and
-public support/status URL in the operational handover; verify reachability. The
-duty operator owns pause/restart, backup operator owns restore verification and
-owner decides destructive reset. This initial package creates no production SLA.
+Roles, not persons: the **network operator** owns pause/restart and routine operation,
+the **incident owner** owns an incident from detection to the recorded recovery decision
+and restore verification, the **release manager** owns the pinned manifest and approves
+a destructive reset, and the **faucet operator** owns refill and the faucet's alerts.
+Before public launch the deployment records which people hold these roles in its own
+handover and verifies the public status URL is reachable. This package creates no
+production SLA.
 
 ## Quiesced backup and same-generation restore
 

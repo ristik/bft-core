@@ -728,6 +728,10 @@ p85_run_lane() {
   fi
   # a multi-shard aggregator (DNB_AGG_SHARDS=2): one more token over the shards, redeemed through the SDK's consolidation (#526 step 4), right after L1b
   if [ "${ANYAGE_LANE:-0}" = 1 ] && [ "${aggShards:-1}" -gt 1 ]; then P85_STEPS=${P85_STEPS/anyage_step_l1b/anyage_step_l1b anyage_step_consolidated}; fi
+  # B7 PR 3: the long-history redemption (above every former bridge bound; underfunded first, then funded), right after the consolidated one
+  if [ "${ANYAGE_LANE:-0}" = 1 ] && [ "${B7_LONG_HISTORY:-0}" = 1 ]; then
+    case " $P85_STEPS " in *" anyage_step_consolidated "*) P85_STEPS=${P85_STEPS/anyage_step_consolidated/anyage_step_consolidated anyage_step_long_history} ;; *) P85_STEPS=${P85_STEPS/anyage_step_l1b/anyage_step_l1b anyage_step_long_history} ;; esac
+  fi
   # ureth with transaction gossip (ristik/ureth#34): a transaction submitted to one validator only is included by the validator whose turn comes first, before the submitter's own
   if [ "${GOSSIP_LANE:-0}" = 1 ]; then
     source scripts/lib/gossip-lib.sh

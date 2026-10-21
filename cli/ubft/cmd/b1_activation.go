@@ -568,7 +568,7 @@ unicity-pos-contracts script/measure-elect.sh, and the profile file records the 
 	cmd.Flags().Uint64Var(&maxEpochs, "max-epochs-per-update", b1state.MinEpochsPerUpdate, "B: validator epochs one block may install (at least the supersession span); the registry keeps every epoch forever")
 	cmd.Flags().Uint64Var(&deltaEV, "delta-ev", 31, "P85 evidence window in rounds (DeltaEV); independent of certificate age, which no longer expires")
 	cmd.Flags().Uint64Var(&deltaHold, "delta-hold", 32, "P85 hold window in rounds (DeltaHold); must exceed --delta-ev")
-	cmd.Flags().Uint64Var(&capacity, "ordinary-capacity", 30_000_000, "ordinary transaction gas capacity of a block (the block gas limit is this plus the system reservation); one transaction may use all of it")
+	cmd.Flags().Uint64Var(&capacity, "ordinary-capacity", 60_000_000, "ordinary transaction gas capacity of a block (the block gas limit is this plus the system reservation); one transaction may use all of it. 60M holds the largest measured bridge redemption, 1,000 leaves under original seals at 48M (B7 PR 3, briefs/dev4-b7-pr3-plan.md section 5)")
 	cmd.Flags().StringVar(&recordsCustody, "records-custody", "", "the custody contract the mandatory records hook applies root records to (0x-hex address)")
 	cmd.Flags().Uint32Var(&hRecords, "h-records", 0, "most records one block's hook applies (1..32; needs --records-custody)")
 	cmd.Flags().Uint64Var(&hookRecordGas, "hook-record-gas", 0, "gross gas reserved per applied record (needs --records-custody)")

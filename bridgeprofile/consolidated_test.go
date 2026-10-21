@@ -206,3 +206,21 @@ func TestConsolidatedShardLimit(t *testing.T) {
 	_, err = NewShardedAggregator(auth, tb, 4)
 	require.Error(t, err)
 }
+
+// RefB1 authenticates an anchor table under the composition's limits, as BRIDGE_COMPOSE_V1 does: 64 anchors (one UC per leaf) are
+// above a standalone CERT_BATCH_V2 call's 16 claims and verify; the standalone evaluation refuses the same request's claim count.
+func TestRefB1ComposedAnchorTable(t *testing.T) {
+	d, err := NewDeployment()
+	require.NoError(t, err)
+	w := consolidatedWorld(t, 4, 2)
+	_, res, _, err := ReturnHistorySeeded(d.F, 62, "refb1-composed")
+	require.NoError(t, err)
+	cert, err := w.CertifyAssigned(res.Leaves, nil, func(i int, _ Leaf) ShardRound { return ShardRound{BaseTime + 2000, 100 + uint64(i)} })
+	require.NoError(t, err)
+	require.Len(t, cert.Anchors, 64)
+	require.NoError(t, RefB1{TB: w.TB}.AuthenticateAnchors(cert.Anchors))
+	words, pins, err := RefB1{TB: w.TB}.Registry()
+	require.NoError(t, err)
+	_, err = b1ref.Cert(CertBatchRequest(cert.Anchors), words, pins)
+	require.ErrorIs(t, err, b1ref.ErrCount)
+}

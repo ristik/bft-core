@@ -266,6 +266,7 @@ type plan struct {
 	occ           []occurrence
 	e, s, q, a, p uint64
 	charge        uint64
+	perUCItems    bool // the claims are decoded with the same per-UC item budget the scan used (Limits.PerUCItems)
 }
 
 // scanBatch reads the header and scans every occurrence with one cumulative CBOR budget, then groups epochs, complete seals and
@@ -285,7 +286,7 @@ func scanBatch(in []byte, pl *plan, lim Limits) error {
 	if cap(occ) < int(k) {
 		occ = make([]occurrence, 0, k)
 	}
-	*pl = plan{c: uint64(len(in)), k: uint64(k), occ: occ[:k]}
+	*pl = plan{c: uint64(len(in)), k: uint64(k), occ: occ[:k], perUCItems: lim.PerUCItems}
 	r := reader{b: in, pos: 4}
 	tokens := 0
 	var certSteps uint64

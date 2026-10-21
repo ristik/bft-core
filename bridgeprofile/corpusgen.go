@@ -559,11 +559,11 @@ func (g *gen) policy() {
 		b, _ := e0.Encode()
 		return b
 	}
-	addBytes("envelope-size-max", "envelope of exactly MaxEnvelopeBytes (512 KiB)", sized(0), 2)
+	addBytes("envelope-size-max", "envelope of exactly MaxEnvelopeBytes (2 MiB)", sized(0), 2)
 	addBytes("envelope-size-max-plus-word", "envelope one word over MaxEnvelopeBytes", sized(32), 2)
 	// The anchor count is a u16 on the CERT_BATCH_V2 wire and in every anchorIndex: a declared count above it is refused before any
 	// allocation, whatever the envelope's bytes could hold.
-	wide := sized(0)
+	wide := sized(80_000 - MaxEnvelopeBytes) // about 80 KB: room for the declared count, far below the bound
 	off := new(big.Int).SetBytes(wide[64:96]).Uint64()
 	new(big.Int).SetUint64(MaxAnchors + 1).FillBytes(wide[off : off+32])
 	addBytes("envelope-anchors-over-wire", "a declared anchor count of 65536, one above the u16 wire width", wide, 2)

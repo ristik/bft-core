@@ -6,6 +6,7 @@ import (
 	"crypto"
 	"encoding/json"
 	"fmt"
+	"github.com/unicitynetwork/bft-core/bridgeprofile"
 	"os"
 	"path/filepath"
 	"testing"
@@ -582,7 +583,7 @@ func TestTheUrethFlagsPinEveryHookTheProfileHashCommits(t *testing.T) {
 	require.NotContains(t, plain, "election")
 	// the pool admits one transaction of the whole ordinary capacity carrying a maximal bridge envelope
 	require.Contains(t, plain, fmt.Sprintf("--txpool.max-tx-gas=%d", d.profile.OrdinaryCapacity))
-	require.Contains(t, plain, "--txpool.max-tx-input-bytes=1048576")
+	require.Contains(t, plain, fmt.Sprintf("--txpool.max-tx-input-bytes=%d", 2*bridgeprofile.MaxEnvelopeBytes))
 	// the records hook alone prints no election flags
 	records := p
 	records.ElectionContract, records.ElectGas = [20]byte{}, 0
