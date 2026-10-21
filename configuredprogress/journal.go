@@ -775,9 +775,10 @@ func (s *Store) loadJournal(ctx context.Context, c Context, limits JournalLimits
 		}
 		s.jc.misses.Add(1)
 	}
+	id, identified := identityOf(c) // read before the load: if the authority moves during it, the next lookup misses
 	image, stamp, consistent, err := s.loadJournalFull(ctx, c, limits, useMemo)
-	if err == nil && useMemo {
-		s.storeJournal(c, limits, stamp, consistent, image)
+	if err == nil && useMemo && identified {
+		s.storeJournal(id, limits, stamp, consistent, image)
 	}
 	return image, err
 }

@@ -169,7 +169,11 @@ func OpenConfiguredV2(path string, s Settings) (*Store, error) {
 	}
 	return &Store{db: &timedDB{DB: db}, settings: s}, nil
 }
-func (s *Store) Close() error { return s.db.Close() }
+func (s *Store) Close() error {
+	s.jc.disabled.Store(true) // no new sampler, and wait for the one that may be running before the database goes away
+	s.jc.wg.Wait()
+	return s.db.Close()
+}
 func (s *Store) at(n string) error {
 	if s.checkpoint != nil {
 		return s.checkpoint(n)

@@ -8,6 +8,7 @@ import (
 	"reflect"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 	"github.com/unicitynetwork/bft-core/frontier"
@@ -392,7 +393,7 @@ func TestJournalCacheNeverReplacesNewerWithOlder(t *testing.T) {
 	newer := s.jc.entry.txid
 	old := *s.jc.entry
 	old.txid = newer - 1
-	s.storeJournal(c, limits, journalStamp{txid: old.txid, descriptor: old.descriptor, control: old.control, ok: true}, true, old.snap)
+	s.storeJournal(old.ctx, limits, journalStamp{txid: old.txid, descriptor: old.descriptor, control: old.control, ok: true}, true, old.snap)
 	require.Equal(t, newer, s.jc.entry.txid)
 	_ = f
 }
@@ -444,4 +445,111 @@ func TestLoadAfterEachWriteVerifiesOnlyWhatChanged(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, before, s.vm.remembered.Load())
 	require.Equal(t, hits+1, s.ViewStats().Hits)
+}
+
+type liveAuthority struct {
+	mu    sync.Mutex
+	epoch uint64
+	ready bool
+}
+
+func (a *liveAuthority) CurrentRootEpoch() (uint64, bool) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.epoch, a.ready
+}
+
+func (a *liveAuthority) set(epoch uint64, ready bool) {
+	a.mu.Lock()
+	a.epoch, a.ready = epoch, ready
+	a.mu.Unlock()
+}
+
+// The root-epoch authority is a live object: the cache key holds its STATE, so a snapshot cached while it was ready is not served once a full load would refuse.
+func TestJournalCacheKeyHoldsTheAuthoritysState(t *testing.T) {
+	s, _, c, _, _, limits := frontierTestSetupWithFixture(t, t.TempDir()+"/journal.db")
+	defer s.Close()
+	ctx := context.Background()
+	auth := &liveAuthority{epoch: c.Observation.RootEpoch, ready: true}
+	c.Observation.EpochAuthority = auth
+
+	_, err := s.LoadJournal(ctx, c, limits)
+	require.NoError(t, err)
+	_, err = s.LoadJournal(ctx, c, limits)
+	require.NoError(t, err)
+	hits := s.ViewStats().Hits
+	require.Positive(t, hits)
+
+	auth.set(c.Observation.RootEpoch, false) // same pointer, same commit, but a fresh load now refuses
+	_, wantErr := s.loadJournal(ctx, c, limits, false)
+	require.Error(t, wantErr)
+	_, gotErr := s.LoadJournal(ctx, c, limits)
+	require.Error(t, gotErr, "the cached snapshot must not be served while the authority is not ready")
+	require.Equal(t, wantErr.Error(), gotErr.Error())
+	require.Equal(t, hits, s.ViewStats().Hits)
+
+	auth.set(c.Observation.RootEpoch, true)
+	_, err = s.LoadJournal(ctx, c, limits)
+	require.NoError(t, err)
+
+	misses := s.ViewStats().Misses
+	auth.set(c.Observation.RootEpoch+1, true) // the epoch advanced: one miss, then hits again
+	_, err = s.LoadJournal(ctx, c, limits)
+	require.NoError(t, err)
+	require.Equal(t, misses+1, s.ViewStats().Misses)
+	_, err = s.LoadJournal(ctx, c, limits)
+	require.NoError(t, err)
+	require.Equal(t, misses+1, s.ViewStats().Misses)
+}
+
+// The divergence that matters most: the cache holds a snapshot and a full load at the SAME commit fails. The sampler must flag it, say why, and drop the view,
+// after which a load fails exactly as an uncached one does.
+func TestJournalCacheSamplerFlagsAFullLoadThatFailsAtTheCachedCommit(t *testing.T) {
+	s, _, c, _, _, limits := frontierTestSetupWithFixture(t, t.TempDir()+"/journal.db")
+	defer s.Close()
+	ctx := context.Background()
+	rec := &recordedLog{}
+	s.SetLogger(slogOf(rec))
+	auth := &liveAuthority{epoch: c.Observation.RootEpoch, ready: true}
+	c.Observation.EpochAuthority = auth
+	_, err := s.LoadJournal(ctx, c, limits)
+	require.NoError(t, err)
+
+	auth.set(c.Observation.RootEpoch, false)
+	s.sampleJournal(c, limits) // the sampler runs without the lookup, as it does when the authority goes unready during a sample
+
+	require.Equal(t, uint64(1), s.ViewStats().Mismatches)
+	logs := rec.find("configuredprogress: a full load at the cached commit fails where the cache would have served a snapshot; cache dropped")
+	require.Len(t, logs, 1)
+	require.NotEmpty(t, logs[0]["err"])
+	s.jc.mu.Lock()
+	require.Nil(t, s.jc.entry, "the view was dropped")
+	s.jc.mu.Unlock()
+	_, gotErr := s.LoadJournal(ctx, c, limits)
+	_, wantErr := s.loadJournal(ctx, c, limits, false)
+	require.Error(t, gotErr)
+	require.Equal(t, wantErr.Error(), gotErr.Error())
+}
+
+// A failed full load while the database moves is not evidence against the view: no commit to compare at, so nothing is counted.
+func TestJournalCacheSamplerIgnoresAFailureWhenTheCommitMoved(t *testing.T) {
+	s, f, c, _, _, limits := frontierTestSetupWithFixture(t, t.TempDir()+"/journal.db")
+	defer s.Close()
+	ctx := context.Background()
+	s.jc.every, s.jc.interval = 1<<62, 1000*time.Hour // no background sampler: this test calls the sampler itself
+	s.jc.lastRun.Store(time.Now().UnixNano())
+	image, err := s.LoadJournal(ctx, c, limits)
+	require.NoError(t, err)
+	last := image.Observations[len(image.Observations)-1]
+	ir := *last.UC.InputRecord
+	s.jc.fresh = func(context.Context, Context, JournalLimits) (JournalSnapshot, journalStamp, bool, error) {
+		o := f.observation(&ir, last.TR.Round+1, last.UC.GetRootRoundNumber()+1)
+		p, _, e := s.PrepareObservation(ctx, c, o)
+		require.NoError(t, e)
+		_, _, e = s.CommitObservation(p)
+		require.NoError(t, e)
+		return JournalSnapshot{}, journalStamp{}, false, errors.New("injected failure after the database moved")
+	}
+	s.sampleJournal(c, limits)
+	require.Zero(t, s.ViewStats().Mismatches)
 }

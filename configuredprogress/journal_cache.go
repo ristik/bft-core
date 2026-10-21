@@ -30,6 +30,11 @@ const (
 )
 
 // ctxIdentity is what a cached snapshot's verification depended on that the Context carries. A Context holding something not comparable cannot be cached.
+//
+// Invariants the identity relies on: a trust base for an epoch and the shard configuration installed for a shard epoch never change content once they exist,
+// so holding TrustBases by identity and ConfForEpoch by presence is enough for the snapshot cache (the verification memo, in contrast, keys on content). The
+// root-epoch authority is a live object whose answer changes under the same pointer and whose "not ready" makes a fresh load fail, so its STATE
+// (current epoch, ready) is part of the identity and is read at every lookup and before every fill.
 type ctxIdentity struct {
 	network    types.NetworkID
 	partition  types.PartitionID
@@ -39,7 +44,9 @@ type ctxIdentity struct {
 	execConfig [32]byte
 	origin     [32]byte
 	trust      any
-	authority  any
+	hasAuth    bool
+	authEpoch  uint64
+	authReady  bool
 	confFn     bool
 }
 
@@ -47,13 +54,15 @@ func identityOf(c Context) (ctxIdentity, bool) {
 	id := ctxIdentity{
 		network: c.Observation.NetworkID, partition: c.Observation.PartitionID, shard: string(c.Observation.ShardID.Bytes()),
 		conf: string(c.Observation.ShardConfHash), rootEpoch: c.Observation.RootEpoch, execConfig: c.ExecutionConfigV2,
-		trust: c.Observation.TrustBases, authority: c.Observation.EpochAuthority, confFn: c.Observation.ConfForEpoch != nil,
+		trust: c.Observation.TrustBases, confFn: c.Observation.ConfForEpoch != nil,
 	}
 	id.origin = c.Origin.BlockHash()
-	for _, v := range []any{id.trust, id.authority} {
-		if v != nil && !reflect.TypeOf(v).Comparable() {
-			return ctxIdentity{}, false
-		}
+	if c.Observation.EpochAuthority != nil {
+		id.hasAuth = true
+		id.authEpoch, id.authReady = c.Observation.EpochAuthority.CurrentRootEpoch()
+	}
+	if id.trust != nil && !reflect.TypeOf(id.trust).Comparable() {
+		return ctxIdentity{}, false
 	}
 	return id, true
 }
@@ -101,12 +110,14 @@ type journalCache struct {
 	bad     atomic.Uint64
 	lastRun atomic.Int64 // unix nanoseconds of the last sampler start
 	running atomic.Bool
+	wg      sync.WaitGroup // background samplers, waited for by Close
 
 	// test and tuning hooks; zero means the defaults
 	every    uint64
 	interval time.Duration
 	inline   bool // run the sampler synchronously (tests)
 	disabled atomic.Bool
+	fresh    func(ctx context.Context, c Context, limits JournalLimits) (JournalSnapshot, journalStamp, bool, error)
 }
 
 func (s *Store) ViewStats() JournalViewStats {
@@ -150,12 +161,8 @@ func (s *Store) cachedJournal(c Context, limits JournalLimits) (JournalSnapshot,
 }
 
 // storeJournal caches a snapshot a full load built, unless the database moved on after it or the load found the progress image it started from changed.
-func (s *Store) storeJournal(c Context, limits JournalLimits, stamp journalStamp, consistent bool, snap JournalSnapshot) {
+func (s *Store) storeJournal(id ctxIdentity, limits JournalLimits, stamp journalStamp, consistent bool, snap JournalSnapshot) {
 	if s.jc.disabled.Load() || !stamp.ok || !consistent || snap.coverageBaseNeedsPersist {
-		return
-	}
-	id, ok := identityOf(c)
-	if !ok {
 		return
 	}
 	entry := &journalCacheEntry{txid: stamp.txid, descriptor: stamp.descriptor, control: stamp.control, ctx: id, limits: limits, snap: cloneSnapshot(snap)}
@@ -167,6 +174,9 @@ func (s *Store) storeJournal(c Context, limits JournalLimits, stamp journalStamp
 }
 
 func (s *Store) maybeSample(c Context, limits JournalLimits) {
+	if s.jc.disabled.Load() {
+		return
+	}
 	every := s.jc.every
 	if every == 0 {
 		every = samplerEvery
@@ -191,40 +201,74 @@ func (s *Store) maybeSample(c Context, limits JournalLimits) {
 		run()
 		return
 	}
-	go run()
+	s.jc.wg.Add(1)
+	go func() {
+		defer s.jc.wg.Done()
+		run()
+	}()
 }
 
-// sampleJournal runs a full load with neither the cache nor the verification memo and deep-compares it with the cached snapshot taken at the same commit id.
+// currentStamp reads the database's commit id and progress digests in one transaction.
+func (s *Store) currentStamp() journalStamp {
+	var stamp journalStamp
+	if err := s.db.View(func(tx *bolt.Tx) error { stamp = stampOf(tx); return nil }); err != nil {
+		return journalStamp{}
+	}
+	return stamp
+}
+
+func (e *journalCacheEntry) stampMatches(stamp journalStamp) bool {
+	return stamp.ok && e.txid == stamp.txid && e.descriptor == stamp.descriptor && e.control == stamp.control
+}
+
+// sampleJournal runs a full load with neither the cache nor the verification memo and compares it with the cached snapshot, provided the database is at the
+// cached commit before and after it. At that commit a difference is a mismatch, and so is a fresh load that FAILS where the cache would have served a snapshot:
+// that is the divergence that matters most (a context that no longer verifies the journal), so it is logged, counted and drops the view like any other.
 func (s *Store) sampleJournal(c Context, limits JournalLimits) {
 	s.jc.mu.Lock()
 	e := s.jc.entry
 	s.jc.mu.Unlock()
-	if e == nil {
+	if e == nil || !e.stampMatches(s.currentStamp()) {
 		return
 	}
 	cached := cloneSnapshot(e.snap)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
-	fresh, stamp, consistent, err := s.loadJournalFull(ctx, c, limits, false)
+	fresh, _, _, err := s.freshLoad(ctx, c, limits)
 	s.jc.samples.Add(1)
-	if err != nil || !consistent || !stamp.ok || stamp.txid != e.txid {
-		return // the database moved on (or the load failed): nothing to compare at this commit id
+	if !e.stampMatches(s.currentStamp()) {
+		return // the database moved on while the full load ran: there is no commit at which to compare
 	}
+	equal := err == nil && reflect.DeepEqual(cached, fresh)
 	if s.log != nil {
 		st := s.ViewStats()
-		s.log.LogAttrs(ctx, slog.LevelDebug, "configuredprogress: journal view sampled", slog.Int("txid", stamp.txid), slog.Bool("equal", reflect.DeepEqual(cached, fresh)),
+		s.log.LogAttrs(ctx, slog.LevelDebug, "configuredprogress: journal view sampled", slog.Int("txid", e.txid), slog.Bool("equal", equal), slog.Bool("freshLoadFailed", err != nil),
 			slog.Uint64("hits", st.Hits), slog.Uint64("misses", st.Misses), slog.Uint64("samples", st.Samples), slog.Uint64("mismatches", st.Mismatches),
 			slog.Int("candidates", len(fresh.Candidates)), slog.Int("observations", len(fresh.Observations)))
 	}
-	if !reflect.DeepEqual(cached, fresh) {
-		s.jc.bad.Add(1)
-		s.DropJournalView()
-		if s.log != nil {
-			s.log.ErrorContext(ctx, "configuredprogress: the cached journal snapshot differs from a full load at the same commit; cache dropped",
-				slog.Int("txid", stamp.txid), slog.Int("cachedCandidates", len(cached.Candidates)), slog.Int("freshCandidates", len(fresh.Candidates)),
-				slog.Int("cachedObservations", len(cached.Observations)), slog.Int("freshObservations", len(fresh.Observations)))
-		}
+	if equal {
+		return
 	}
+	s.jc.bad.Add(1)
+	s.DropJournalView()
+	if s.log != nil {
+		attrs := []any{slog.Int("txid", e.txid), slog.Int("cachedCandidates", len(cached.Candidates)), slog.Int("freshCandidates", len(fresh.Candidates)),
+			slog.Int("cachedObservations", len(cached.Observations)), slog.Int("freshObservations", len(fresh.Observations))}
+		msg := "configuredprogress: the cached journal snapshot differs from a full load at the same commit; cache dropped"
+		if err != nil {
+			msg = "configuredprogress: a full load at the cached commit fails where the cache would have served a snapshot; cache dropped"
+			attrs = append(attrs, slog.String("err", err.Error()))
+		}
+		s.log.ErrorContext(ctx, msg, attrs...)
+	}
+}
+
+// freshLoad is the sampler's full load (neither cache nor memo); tests replace it.
+func (s *Store) freshLoad(ctx context.Context, c Context, limits JournalLimits) (JournalSnapshot, journalStamp, bool, error) {
+	if s.jc.fresh != nil {
+		return s.jc.fresh(ctx, c, limits)
+	}
+	return s.loadJournalFull(ctx, c, limits, false)
 }
 
 var (
