@@ -123,6 +123,9 @@ t6_coupled_rotation_s1() {
   stop_pidfile test-nodes/h4-replaced/pid 'ubft shard-node restore' || true
   stop_one_evm_validator 4 || return 1
   stop_one_evm_validator 5 || return 1
+  # membership follows the set: the retired member is no longer a transaction-gossip peer of the retained ones (the joiner is trusted when its client starts)
+  declare -F reth_untrust >/dev/null || source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lib/reth-peers.sh"
+  for j in 1 2 3; do reth_untrust "$j" 4 || echo "WARN coupled rotation: validator $j could not untrust the retired validator 4" >&2; done
   h3_q3_activate_coupled "$next" 4 5 || return 1
 
   H3_ONLINE="1 2 3 5"
