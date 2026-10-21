@@ -25,6 +25,19 @@ class FakeRelay:
         self.calls.append((method,params))
         return {'jsonrpc':'2.0','id':1,'result':'0x1'}
 
+class LaneKeysAreNotInherited(unittest.TestCase):
+    def test_the_plan_key_variables_never_reach_the_deployment_environment(self):
+        with patch.dict(os.environ, {'P85_PLAN_OWNER_KEYS': '/x', 'P85_PLAN_WITHDRAWAL_KEYS': '/y', 'P85_PLAN_KEEP': '1', 'P85_CHAIN_ID': '7'}):
+            env = pos.clean_environ()
+        self.assertNotIn('P85_PLAN_OWNER_KEYS', env)
+        self.assertNotIn('P85_PLAN_WITHDRAWAL_KEYS', env)
+        self.assertEqual((env['P85_PLAN_KEEP'], env['P85_CHAIN_ID']), ('1', '7'))
+
+    def test_the_deployment_paths_use_it(self):
+        src = (Path(pos.__file__)).read_text()
+        self.assertNotIn('dict(os.environ', src)
+
+
 class ChurnBudget(unittest.TestCase):
     def test_the_generated_evm_configuration_commits_the_testnet_churn_budget(self):
         params=dict(item.split('=',1) for item in generate.evm_partition_params(1337).split(','))
