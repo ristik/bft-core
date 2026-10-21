@@ -88,8 +88,9 @@ jobs:
           sudo chown -R "$(id -u):$(id -g)" "$RUNNER_TEMP/evidence"   # the rehearsal ran as root
           docker stats --no-stream --format 'table {{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}\t{{.PIDs}}' > "$RUNNER_TEMP/evidence/docker-stats.txt" || true
           df -h / > "$RUNNER_TEMP/evidence/df.txt" || true
-          (cd /srv/tn-rehearsal-1 && sudo docker compose ps -a > "$RUNNER_TEMP/evidence/compose-ps.txt" && sudo docker compose logs --no-color --timestamps --tail 400 > "$RUNNER_TEMP/evidence/compose-logs.txt") || true
-          cp /srv/tn-rehearsal-1/manifest.json "$RUNNER_TEMP/evidence/manifest.json" || true
+          sudo bash -c "cd /srv/tn-rehearsal-1 && docker compose ps -a > '$RUNNER_TEMP/evidence/compose-ps.txt' && docker compose logs --no-color --timestamps --tail 400 > '$RUNNER_TEMP/evidence/compose-logs.txt'" || true
+          sudo cp /srv/tn-rehearsal-1/manifest.json "$RUNNER_TEMP/evidence/manifest.json" || true
+          sudo chown -R "$(id -u):$(id -g)" "$RUNNER_TEMP/evidence" || true
           cp deploy/testnet/artifacts/images.json "$RUNNER_TEMP/evidence/images.json" || true
       - uses: actions/upload-artifact@v4
         if: always()

@@ -134,6 +134,8 @@ class Rehearsal:
         except Failure:
             self.say('  not running: ' + ' '.join(missing()))
             self.say(self.compose('ps', '-a', check=False))
+            for name in missing()[:4]:
+                self.say(f'--- last log of {name}\n' + self.compose('logs', '--no-color', '--tail', '25', name, check=False))
             raise
         running = set(self.compose('ps', '--services', '--status', 'running').split())
         self.expect(True, 'every non-authority service except the signer is running', f'{len(start)} services')
