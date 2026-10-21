@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"math/big"
 	"strconv"
 	"strings"
@@ -556,6 +557,23 @@ func Replay(fs *FixtureSet, c Case) Expect {
 		}
 		res, err := Compose(cfg, op, in, b1)
 		return resultExpect(res, err)
+	case "native-compose":
+		b1, err := parseClaims(c.Aux["claims"])
+		if err != nil {
+			return errExpect(err)
+		}
+		limit := uint64(math.MaxUint64)
+		if v, ok := c.Aux["gasLimit"]; ok {
+			limit, _ = strconv.ParseUint(v, 10, 64)
+		}
+		out, status, gas, halt := NativeCompose(in, limit, b1)
+		switch {
+		case errors.Is(halt, ErrComposeABI):
+			return Expect{Status: "halt", Values: map[string]string{"halt": "abi"}}
+		case errors.Is(halt, ErrComposeOutOfGas):
+			return Expect{Status: "halt", Values: map[string]string{"halt": "out-of-gas"}}
+		}
+		return Expect{Status: "ok", Output: hx(out[:]), Values: map[string]string{"status": u64s(status), "statusName": ComposeStatusName(status), "gas": u64s(gas)}}
 	}
 	return Expect{Status: "error", Reason: "unknown-op"}
 }

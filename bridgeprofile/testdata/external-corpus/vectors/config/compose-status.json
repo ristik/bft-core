@@ -1,0 +1,254 @@
+[
+ {
+  "code": 0,
+  "name": "ok"
+ },
+ {
+  "code": 1,
+  "name": "ErrTruncated"
+ },
+ {
+  "code": 2,
+  "name": "ErrTrailing"
+ },
+ {
+  "code": 3,
+  "name": "ErrNonCanonical"
+ },
+ {
+  "code": 4,
+  "name": "ErrForbiddenCBOR"
+ },
+ {
+  "code": 5,
+  "name": "ErrShape"
+ },
+ {
+  "code": 6,
+  "name": "ErrTag"
+ },
+ {
+  "code": 7,
+  "name": "ErrVersion"
+ },
+ {
+  "code": 8,
+  "name": "ErrLength"
+ },
+ {
+  "code": 9,
+  "name": "ErrIntRange"
+ },
+ {
+  "code": 10,
+  "name": "ErrABIFraming"
+ },
+ {
+  "code": 11,
+  "name": "ErrBadOperation"
+ },
+ {
+  "code": 12,
+  "name": "ErrDeadline"
+ },
+ {
+  "code": 13,
+  "name": "ErrInputTooLarge"
+ },
+ {
+  "code": 14,
+  "name": "ErrTooManyTx"
+ },
+ {
+  "code": 15,
+  "name": "ErrTooManyItems"
+ },
+ {
+  "code": 16,
+  "name": "ErrTooDeep"
+ },
+ {
+  "code": 17,
+  "name": "ErrTooManyPaths"
+ },
+ {
+  "code": 18,
+  "name": "ErrJustificationTooLarge"
+ },
+ {
+  "code": 19,
+  "name": "ErrLockProofTooLarge"
+ },
+ {
+  "code": 20,
+  "name": "ErrCfgMismatch"
+ },
+ {
+  "code": 21,
+  "name": "ErrPolicyHash"
+ },
+ {
+  "code": 22,
+  "name": "ErrPolicyTuple"
+ },
+ {
+  "code": 23,
+  "name": "ErrPolicyAnchors"
+ },
+ {
+  "code": 24,
+  "name": "ErrPolicyLeafIndex"
+ },
+ {
+  "code": 25,
+  "name": "ErrPolicyLeafCount"
+ },
+ {
+  "code": 26,
+  "name": "ErrPolicyPartition"
+ },
+ {
+  "code": 27,
+  "name": "ErrPredicate"
+ },
+ {
+  "code": 28,
+  "name": "ErrMintShape"
+ },
+ {
+  "code": 29,
+  "name": "ErrLockProofShape"
+ },
+ {
+  "code": 30,
+  "name": "ErrLockProofCfg"
+ },
+ {
+  "code": 31,
+  "name": "ErrMintJustif"
+ },
+ {
+  "code": 32,
+  "name": "ErrMintSalt"
+ },
+ {
+  "code": 33,
+  "name": "ErrMintType"
+ },
+ {
+  "code": 34,
+  "name": "ErrMintData"
+ },
+ {
+  "code": 35,
+  "name": "ErrTransferData"
+ },
+ {
+  "code": 36,
+  "name": "ErrCDMismatch"
+ },
+ {
+  "code": 37,
+  "name": "ErrUnlock"
+ },
+ {
+  "code": 38,
+  "name": "ErrUnlockLength"
+ },
+ {
+  "code": 39,
+  "name": "ErrUnlockScalars"
+ },
+ {
+  "code": 40,
+  "name": "ErrUnlockRecovery"
+ },
+ {
+  "code": 41,
+  "name": "ErrUnlockKey"
+ },
+ {
+  "code": 42,
+  "name": "ErrMinterKey"
+ },
+ {
+  "code": 43,
+  "name": "ErrRepeatedSID"
+ },
+ {
+  "code": 44,
+  "name": "ErrNoTransfers"
+ },
+ {
+  "code": 45,
+  "name": "ErrHasTransfers"
+ },
+ {
+  "code": 46,
+  "name": "ErrBurnNotFinal"
+ },
+ {
+  "code": 47,
+  "name": "ErrNotBurn"
+ },
+ {
+  "code": 48,
+  "name": "ErrBurnReason"
+ },
+ {
+  "code": 49,
+  "name": "ErrReturnData"
+ },
+ {
+  "code": 50,
+  "name": "ErrReturnAmount"
+ },
+ {
+  "code": 51,
+  "name": "ErrReturnRecip"
+ },
+ {
+  "code": 52,
+  "name": "ErrLockInput"
+ },
+ {
+  "code": 53,
+  "name": "ErrZeroDigest"
+ },
+ {
+  "code": 54,
+  "name": "ErrDeadlineMismatch"
+ },
+ {
+  "code": 55,
+  "name": "ErrDeadlineExpired"
+ },
+ {
+  "code": 56,
+  "name": "ErrIROpening"
+ },
+ {
+  "code": 57,
+  "name": "ErrIRShape"
+ },
+ {
+  "code": 58,
+  "name": "ErrIRState"
+ },
+ {
+  "code": 59,
+  "name": "ErrIRTime"
+ },
+ {
+  "code": 60,
+  "name": "ErrPathBitmap"
+ },
+ {
+  "code": 61,
+  "name": "ErrAnchorAuth"
+ },
+ {
+  "code": 62,
+  "name": "ErrLeafProof"
+ }
+]

@@ -176,6 +176,7 @@ func BuildCorpus() (*Corpus, error) {
 	g.lock()
 	g.proof()
 	g.consolidated()
+	g.nativeCompose()
 	if g.failed != nil {
 		return nil, g.failed
 	}
@@ -1571,6 +1572,11 @@ func (g *gen) pack() (*Corpus, error) {
 		out.Files[fam+"/cases.json"] = b
 	}
 	out.Files["config/semantic-profile.json"] = semanticProfile
+	statusJSON, err := js(composeStatusTable())
+	if err != nil {
+		return nil, err
+	}
+	out.Files["config/compose-status.json"] = statusJSON
 	id := g.d.Trust.ID()
 	out.Files["config/trust-base.bundle.cbor"] = g.d.Trust.Bundle
 	out.Files["config/trust-base.genesis.entryid"] = []byte(hex.EncodeToString(id[:]) + "\n")
@@ -1673,4 +1679,75 @@ func (g *gen) trustInputs() {
 		g.must(err)
 		add("trust-unwitnessed-successor", "epoch 2 is signed by its own committee, not by epoch 1's", b, d.TB)
 	}
+}
+
+// nativeCompose emits the BRIDGE_COMPOSE_V1 twin of every compose case (native-<id>: the abi-encoded three-field input, the same
+// claims, the 384-byte output, status and gas), then a non-canonical input (a halt), an unknown operation (a status) and a valid
+// return one gas short of its charge (an out-of-gas halt).
+func (g *gen) nativeCompose() {
+	var twins []Case
+	vi := -1
+	for _, c := range g.cases["proof"] {
+		if c.Op != "compose" {
+			continue
+		}
+		cfg, err := g.fs.cfg(c.Cfg)
+		g.must(err)
+		env, err := hex.DecodeString(c.Input)
+		g.must(err)
+		if err != nil || cfg == nil {
+			return
+		}
+		op := uint8(OpReturn)
+		if c.Aux["operation"] == "mint" {
+			op = OpMint
+		}
+		in, err := EncodeComposeInput(op, cfg.Bytes(), env)
+		g.must(err)
+		t := Case{ID: "native-" + c.ID, Family: "proof", Op: "native-compose", Cfg: c.Cfg,
+			Description: "BRIDGE_COMPOSE_V1 of " + c.ID + ": " + c.Description, Input: hx(in), Aux: map[string]string{"claims": c.Aux["claims"]}}
+		t.Expected = Replay(g.fs, t)
+		twins = append(twins, t)
+		if vi < 0 && op == OpReturn && t.Expected.Values["status"] == "0" {
+			vi = len(twins) - 1
+		}
+	}
+	for _, t := range twins {
+		g.add(t)
+	}
+	if vi < 0 {
+		g.must(fmt.Errorf("no valid native-compose return case"))
+		return
+	}
+	valid := twins[vi]
+	in, _ := hex.DecodeString(valid.Input)
+	g.add(Case{ID: "native-compose-trailing-word", Family: "proof", Op: "native-compose", Cfg: valid.Cfg,
+		Description: "a valid input followed by one zero word: not the canonical ABI, a halt", Input: hx(append(bytes.Clone(in), make([]byte, 32)...)),
+		Aux: map[string]string{"claims": valid.Aux["claims"]}})
+	bad := bytes.Clone(in)
+	bad[31] = 3
+	g.add(Case{ID: "native-compose-op-3", Family: "proof", Op: "native-compose", Cfg: valid.Cfg,
+		Description: "operation 3 (neither mint nor return): ErrBadOperation after the base charge", Input: hx(bad),
+		Aux: map[string]string{"claims": valid.Aux["claims"]}})
+	gas, _ := strconv.ParseUint(valid.Expected.Values["gas"], 10, 64)
+	g.add(Case{ID: "native-compose-out-of-gas", Family: "proof", Op: "native-compose", Cfg: valid.Cfg,
+		Description: "the valid return " + valid.ID + " forwarded one gas less than its charge: an out-of-gas halt", Input: valid.Input,
+		Aux: map[string]string{"claims": valid.Aux["claims"], "gasLimit": strconv.FormatUint(gas-1, 10)}})
+	g.add(Case{ID: "native-compose-exact-gas", Family: "proof", Op: "native-compose", Cfg: valid.Cfg,
+		Description: "the valid return " + valid.ID + " forwarded exactly its charge", Input: valid.Input,
+		Aux: map[string]string{"claims": valid.Aux["claims"], "gasLimit": strconv.FormatUint(gas, 10)}})
+}
+
+// composeStatusEntry is one row of config/compose-status.json.
+type composeStatusEntry struct {
+	Code uint64 `json:"code"`
+	Name string `json:"name"`
+}
+
+func composeStatusTable() []composeStatusEntry {
+	out := []composeStatusEntry{{0, "ok"}}
+	for i := 1; i < len(ComposeStatus); i++ {
+		out = append(out, composeStatusEntry{uint64(i), ComposeStatusName(uint64(i))})
+	}
+	return out
 }
