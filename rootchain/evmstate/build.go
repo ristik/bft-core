@@ -14,6 +14,7 @@ import (
 	"github.com/ethereum/go-ethereum/rpc"
 
 	"github.com/unicitynetwork/bft-core/evmassign"
+	"github.com/unicitynetwork/bft-core/rootchain/consensus/storage"
 )
 
 // SlotProof is one storage slot of an account at a block: its 32-byte value and the root-to-leaf proof nodes.
@@ -56,6 +57,36 @@ func (r *recordingReader) word(slot [32]byte) ([32]byte, error) {
 	return proofs[0].Value, nil
 }
 
+// dryReader answers every slot with the zero word and lists what was asked, in order.
+type dryReader struct{ slots [][32]byte }
+
+func (d *dryReader) word(slot [32]byte) ([32]byte, error) {
+	d.slots = append(d.slots, slot)
+	return [32]byte{}, nil
+}
+
+// fetch reads the slots in one call and remembers them; the slots already known are not asked for again.
+func (r *recordingReader) fetch(slots [][32]byte) error {
+	var want [][32]byte
+	for _, s := range slots {
+		if _, ok := r.slots[s]; !ok {
+			want = append(want, s)
+		}
+	}
+	if len(want) == 0 {
+		return nil
+	}
+	account, proofs, err := r.src.Proof(r.ctx, r.addr, want)
+	if err != nil || len(proofs) != len(want) {
+		return errors.Join(ErrBuild, err, fmt.Errorf("%d slots of %x: %d proofs", len(want), r.addr, len(proofs)))
+	}
+	r.account = account
+	for i, s := range want {
+		r.slots[s] = proofs[i]
+	}
+	return nil
+}
+
 // BuildPrimaryWitness collects the witness evmassign.VerifyPrimary's authority reads for a result: the Election and custody accounts at
 // the source's block, with exactly the slots the verifier consumes. The slots custody is read at depend on the session the election
 // names, so they are discovered by running the same reader the verifier runs.
@@ -66,8 +97,47 @@ func BuildPrimaryWitness(ctx context.Context, src ProofSource, pins Pins, result
 	if err := readPrimary(election, custody, pins, resultID, &f); err != nil {
 		return nil, err
 	}
+	return encodeAccounts(election, custody)
+}
+
+// BuildRetirementWitness collects the witness Authority.VerifyRetirement reads for (id, generation): the custody and registry accounts at the
+// source's block, with exactly the slots the verifier consumes, the deployment bindings the verifier checks first included. It also returns
+// the facts the witness proves, so a caller can tell an eligible generation from one that is not (yet) retirable before it offers anything.
+// Nothing the source answers is trusted: the witness is only as good as the verification against the certified state root.
+func BuildRetirementWitness(ctx context.Context, src ProofSource, pins Pins, id, generation uint64) ([]byte, storage.RetirementFacts, error) {
+	var f storage.RetirementFacts
+	custody := &recordingReader{ctx: ctx, src: src, addr: pins.Custody, slots: map[[32]byte]SlotProof{}}
+	registry := &recordingReader{ctx: ctx, src: src, addr: pins.Registry, slots: map[[32]byte]SlotProof{}}
+	// the verifier reads custody.network and custody.roots first (accounts)
+	bindings := [][32]byte{baseSlot(custodyNetwork), baseSlot(custodyRoots)}
+	// One call per account for every slot that does not depend on another: a dry run of the reader against empty words lists them (the lot
+	// slots depend on the lot count and are read afterwards, one by one).
+	dryC, dryR := &dryReader{}, &dryReader{}
+	var ignored storage.RetirementFacts
+	if err := readRetirement(dryC, dryR, id, generation, &ignored); err == nil {
+		if err := custody.fetch(append(append([][32]byte(nil), bindings...), dryC.slots...)); err != nil {
+			return nil, f, err
+		}
+		if err := registry.fetch(dryR.slots); err != nil {
+			return nil, f, err
+		}
+	}
+	for _, slot := range bindings {
+		if _, err := custody.word(slot); err != nil {
+			return nil, f, err
+		}
+	}
+	if err := readRetirement(custody, registry, id, generation, &f); err != nil {
+		return nil, f, err
+	}
+	raw, err := encodeAccounts(custody, registry)
+	return raw, f, err
+}
+
+// encodeAccounts is the canonical witness of the recorded accounts: ascending by address, each with its slots ascending.
+func encodeAccounts(readers ...*recordingReader) ([]byte, error) {
 	var accounts []accountProof
-	for _, r := range []*recordingReader{election, custody} {
+	for _, r := range readers {
 		ap := accountProof{Addr: bytes.Clone(r.addr[:]), Proofs: r.account}
 		var slots [][32]byte
 		for s := range r.slots {

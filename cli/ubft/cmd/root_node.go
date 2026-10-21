@@ -153,7 +153,7 @@ func rootNodeRunCmd(baseFlags *baseFlags) *cobra.Command {
 	cmd.Flags().StringVar(&flags.PosDeploymentFile, "pos-deployment", "",
 		"proof-of-stake: JSON pinning the custody deployment (networkWord, chainId, custody). Turns on the P85 control executor and the mandatory CloseLiability duty (profile 2 only); refused together with --genesis-identities")
 	cmd.Flags().StringVar(&flags.PosEVMRPC, "pos-evm-rpc", "",
-		"proof-of-stake: JSON-RPC URL of the execution client that serves eth_getProof at the frozen parent; required when the deployment pins an election (the root then builds the storage-proof witness of a primary candidate's Freeze)")
+		"proof-of-stake: JSON-RPC URL of the execution client that serves eth_getProof and custody's logs; required when the deployment pins an election (the root then builds the storage-proof witness of a primary candidate's Freeze). With it every root also builds the Retirement controls of the identities whose owner requested one (the request cursor and pending set persist in "+posRetirementStateFileName+")")
 	cmd.Flags().StringVar(&flags.OrchestrationDBFile, "orchestration-db", "",
 		fmt.Sprintf("path to the orchestration database (default: %s)", filepath.Join("$UBFT_HOME", orchestrationDBFileName)))
 	cmd.Flags().BoolVar(&flags.HandoffProfile, "profile-3", false, "run the version-3 root handoff network profile (the execution rule with root-applied shard-configuration transitions; a store or peer of profile 2 is refused)")
@@ -407,6 +407,7 @@ func rootNodeRun(ctx context.Context, flags *rootNodeRunFlags) error {
 		}
 		observer := rootevidence.NewObserver(journal, trustBaseStore, log, 0)
 		go observer.Run(ctx)
+		go observer.LogStats(ctx, 15*time.Second)
 		options = append(options, consensus.WithEvidenceObserver(observer))
 	}
 	cm, err := consensus.NewConsensusManager(
@@ -426,7 +427,8 @@ func rootNodeRun(ctx context.Context, flags *rootNodeRunFlags) error {
 		if !flags.HandoffProfile {
 			return fmt.Errorf("%w: --pos-deployment needs --profile-3", ErrPosDeployment)
 		}
-		if err = enablePosClosure(cm, orchestration, trustBaseStore, trustBase, shardConfs, flags.PosDeploymentFile, flags.GenesisIdentitiesFile != "", flags.PosEVMRPC); err != nil {
+		if err = enablePosClosure(ctx, cm, orchestration, trustBaseStore, trustBase, shardConfs, flags.PosDeploymentFile, flags.GenesisIdentitiesFile != "", flags.PosEVMRPC,
+			flags.PathWithDefault("", posRetirementStateFileName)); err != nil {
 			return err
 		}
 		stopWitnesses := serveWitnesses(host, cm)

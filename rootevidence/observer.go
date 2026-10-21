@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log/slog"
 	"sync/atomic"
+	"time"
 
 	"github.com/unicitynetwork/bft-core/network/protocol/abdrc"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/trustbase"
@@ -100,3 +101,26 @@ func (o *Observer) Gaps() uint64 {
 
 // Healthy is false once a gap exists; the export advertises it.
 func (o *Observer) Healthy() bool { return o.Gaps() == 0 }
+
+// LogStats logs the observer's counters every interval and once more when the context ends, so that an operator (and the live S4 exercise) can read
+// from the root's log that no vote was lost: dropped and failed are the explicit coverage gaps, healthy says none exists.
+func (o *Observer) LogStats(ctx context.Context, interval time.Duration) {
+	if o == nil {
+		return
+	}
+	emit := func() {
+		s := o.Stats()
+		o.log.InfoContext(context.WithoutCancel(ctx), "evidence observer stats", "kept", s.Kept, "rejected", s.Rejected, "dropped", s.Dropped, "failed", s.Failed, "healthy", o.Healthy())
+	}
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			emit()
+			return
+		case <-t.C:
+			emit()
+		}
+	}
+}
