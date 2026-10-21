@@ -1,0 +1,265 @@
+#!/usr/bin/env python3
+"""Container-package rehearsal of a generated testnet (TN-1: #432, #433, #434, #435).
+
+Drives an already generated and enrolled generation (generate.py ran, the authorities are live) through the checks the package README lists as pending, and
+writes the evidence directory it asks for. The same script runs on a GitHub runner (.github/workflows/testnet-rehearsal.yml) and on the real host, so the
+runner rehearsal is evidence of the package and never of the host: it proves nothing about capacity, DNS/TLS, real hCaptcha or a second operator.
+
+No third-party service is contacted. The faucet SIGNER is never started (it verifies hCaptcha itself); only the faucet guard runs, and only the requests it
+refuses before the signer are sent. A real dispense is host-only. Needs docker compose and foundry's `cast`; run as the user that may read the generation
+(host root on Linux, the files belong to UID 10001).
+"""
+import argparse
+import datetime
+import http.client
+import json
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+PUBLIC_RPC = '127.0.0.1:8545'
+FAUCET = '127.0.0.1:8088'
+PROXY_IPS = ('203.0.113.', '198.51.100.')   # documentation ranges: the client addresses the nginx in front would have set in X-Forwarded-For
+
+
+class Failure(Exception):
+    pass
+
+
+class Rehearsal:
+    def __init__(self, generation, evidence, cast):
+        self.gen, self.evidence, self.cast = Path(generation).resolve(), Path(evidence), cast
+        self.manifest = json.loads((self.gen / 'manifest.json').read_text())
+        self.n = self.manifest['validators']
+        self.chain_id, self.genesis = self.manifest['chain_id'], self.manifest['genesis_hash'].lower()
+        self.evidence.mkdir(parents=True, exist_ok=True)
+        self.log = (self.evidence / 'rehearsal.log').open('a')
+        self.results = []
+
+    # --- recording -------------------------------------------------------------------------------------------------------------
+    def say(self, text):
+        line = f'{datetime.datetime.now(datetime.timezone.utc).strftime("%H:%M:%SZ")} {text}'
+        print(line, flush=True)
+        self.log.write(line + '\n')
+        self.log.flush()
+
+    def expect(self, condition, what, detail=''):
+        if not condition:
+            raise Failure(f'{what}' + (f': {detail}' if detail else ''))
+        self.say(f'  ok   {what}' + (f' ({detail})' if detail else ''))
+
+    def stage(self, name, fn):
+        self.say(f'== {name}')
+        try:
+            fn()
+        except Exception as error:   # a failed stage is recorded as failed, then the run stops: later stages depend on it
+            self.say(f'FAIL {name}: {error}')
+            self.results.append((name, 'FAIL', str(error)))
+            raise
+        self.say(f'PASS {name}')
+        self.results.append((name, 'PASS', ''))
+
+    # --- docker and RPC --------------------------------------------------------------------------------------------------------
+    def compose(self, *args, check=True):
+        return subprocess.run(['docker', 'compose', '-f', str(self.gen / 'compose.yaml'), *args], check=check, text=True, capture_output=True).stdout
+
+    def services(self):
+        return self.compose('config', '--services').split()
+
+    def inner(self, url, method, params=()):
+        """JSON-RPC to a validator's execution client from inside the validator network (the rpc container has python, ureth has no curl)."""
+        code = ('import json,sys,urllib.request as u;'
+                'r=u.Request(sys.argv[1],json.dumps({"jsonrpc":"2.0","id":1,"method":sys.argv[2],"params":json.loads(sys.argv[3])}).encode(),{"Content-Type":"application/json"});'
+                'print(u.urlopen(r,timeout=10).read().decode())')
+        out = self.compose('exec', '-T', 'rpc', 'python3', '-c', code, url, method, json.dumps(list(params)))
+        return json.loads(out).get('result')
+
+    def ureth(self, i, method, params=()):
+        return self.inner(f'http://ureth{i}:8545', method, params)
+
+    @staticmethod
+    def http(host, method, path, body=None, headers=None, timeout=15):
+        """(status, text). A refusal is a status, not an exception; a connection the server closes first is reported as status 0 with the reason."""
+        conn = http.client.HTTPConnection(host, timeout=timeout)
+        try:
+            conn.request(method, path, body=body, headers=headers or {})
+            response = conn.getresponse()
+            return response.status, response.read().decode(errors='replace')
+        except (ConnectionError, http.client.HTTPException, OSError) as error:
+            return 0, type(error).__name__
+        finally:
+            conn.close()
+
+    def rpc(self, body, ip, host=PUBLIC_RPC):
+        data = body if isinstance(body, bytes) else json.dumps(body).encode()
+        return self.http(host, 'POST', '/', data, {'Content-Type': 'application/json', 'X-Forwarded-For': ip})
+
+    def call(self, method, params=(), ip=PROXY_IPS[0] + '10'):
+        status, text = self.rpc({'jsonrpc': '2.0', 'id': 1, 'method': method, 'params': list(params)}, ip)
+        if status != 200:
+            raise Failure(f'{method} through the public gateway: {status} {text}')
+        return json.loads(text).get('result')
+
+    def wait(self, what, probe, seconds):
+        deadline = time.monotonic() + seconds
+        last = None
+        while time.monotonic() < deadline:
+            try:
+                last = probe()
+                if last:
+                    return last
+            except Exception as error:   # services start in any order; a probe that raises is "not yet"
+                last = error
+            time.sleep(3)
+        raise Failure(f'{what}: not within {seconds} s (last: {last})')
+
+    def cast_run(self, *args):
+        return subprocess.run([self.cast, *args], check=True, text=True, capture_output=True).stdout.strip()
+
+    # --- stages ----------------------------------------------------------------------------------------------------------------
+    def up(self):
+        self.compose('config', '--quiet')
+        # every service except the signing authorities (live since generation, never restarted) and the faucet signer (it verifies hCaptcha itself and
+        # is the only service that talks to a third party: the host starts it, the rehearsal does not); the faucet guard has no dependency on it
+        start = [s for s in self.services() if not s.startswith('authority') and s != 'signer']
+        self.compose('up', '-d', '--no-deps', *start)
+        def missing():
+            running = set(self.compose('ps', '--services', '--status', 'running').split())
+            return sorted(set(start) - running)
+        try:
+            self.wait('every started service is running', lambda: not missing(), 120)
+        except Failure:
+            self.say('  not running: ' + ' '.join(missing()))
+            self.say(self.compose('ps', '-a', check=False))
+            for name in missing()[:4]:
+                self.say(f'--- last log of {name}\n' + self.compose('logs', '--no-color', '--tail', '25', name, check=False))
+            raise
+        running = set(self.compose('ps', '--services', '--status', 'running').split())
+        self.expect(True, 'every non-authority service except the signer is running', f'{len(start)} services')
+        self.expect('signer' not in running, 'the faucet signer is not running (no third-party call in the rehearsal)')
+        head = self.wait('the public gateway reports a head (every validator identity checked by the relay)',
+                         lambda: self.http(PUBLIC_RPC, 'GET', '/healthz')[0] == 200, 600)
+        self.expect(head, 'the public gateway is healthy')
+
+    def identity(self):
+        for i in range(1, self.n + 1):
+            chain = int(self.ureth(i, 'eth_chainId'), 16)
+            genesis = self.ureth(i, 'eth_getBlockByNumber', ['0x0', False])['hash'].lower()
+            self.expect(chain == self.chain_id and genesis == self.genesis, f'validator {i} reports the manifest chain id and block-zero hash', genesis)
+        self.expect(int(self.call('eth_chainId'), 16) == self.chain_id, 'the public gateway reports the manifest chain id')
+
+    def first_tx(self):
+        secrets = self.gen / 'faucet-secrets'
+        to = '0x' + '11' * 20   # an ordinary account (0x..01 is the ecrecover precompile)
+        before = int(self.call('eth_getBalance', [to, 'latest']), 16)
+        receipt = json.loads(self.send_via_gateway(secrets, to))
+        self.expect(receipt['status'] == '0x1', 'the funded first transaction succeeded', json.dumps(receipt)[:600])
+        self.expect(int(self.call('eth_getBalance', [to, 'latest']), 16) == before + 1, 'the recipient balance grew by the transferred wei')
+        for i in range(1, self.n + 1):
+            r = self.wait(f'validator {i} has the receipt', lambda i=i: self.ureth(i, 'eth_getTransactionReceipt', [receipt['transactionHash']]), 120)
+            self.expect(r['blockHash'] == receipt['blockHash'], f'validator {i} has it in the same block', r['blockHash'])
+        self.tx = receipt
+
+    def send_via_gateway(self, secrets, to):
+        # cast talks to the public gateway: the gateway only accepts the allow-listed methods, and the generated proxy peer is trusted only with X-Forwarded-For,
+        # which cast cannot set: sign offline, then submit through the gateway ourselves
+        sender = self.manifest['faucet_address']
+        nonce = int(self.call('eth_getTransactionCount', [sender, 'latest']), 16)
+        price = int(self.call('eth_gasPrice'), 16)
+        raw = self.cast_run('mktx', '--keystore', str(secrets / 'keystore.json'), '--password-file', str(secrets / 'password'), '--legacy', '--nonce', str(nonce),
+                            '--gas-price', str(price), '--gas-limit', '21000', '--chain', str(self.chain_id), '--value', '1', to)
+        sent = self.call('eth_sendRawTransaction', [raw])
+        self.say(f'  submitted {sent} (nonce {nonce}, gas price {price})')
+        receipt = self.wait('the transaction is mined', lambda: self.call('eth_getTransactionReceipt', [sent]), 180)
+        return json.dumps(receipt)
+
+    def gateway_limits(self):
+        a, b = PROXY_IPS[0] + '20', PROXY_IPS[1] + '20'
+        ok = {'jsonrpc': '2.0', 'id': 1, 'method': 'eth_chainId', 'params': []}
+        s, _ = self.rpc(ok, a)
+        self.expect(s == 200, 'an allowed method is served')
+        for name, method in (('signing', 'eth_sign'), ('admin', 'admin_peers'), ('engine', 'engine_newPayloadV3'), ('debug', 'debug_traceTransaction'), ('accounts', 'eth_accounts')):
+            s, _ = self.rpc(dict(ok, method=method), b)
+            self.expect(s == 400, f'a {name} method ({method}) is refused', f'status {s}')
+        s, _ = self.rpc([ok], b)
+        self.expect(s == 400, 'a batch is refused', f'status {s}')
+        s, _ = self.rpc(b'{not json', b)
+        self.expect(s == 400, 'malformed JSON is refused', f'status {s}')
+        s, text = self.rpc(json.dumps(dict(ok, params=['x' * 20000])).encode(), b)
+        self.expect(s in (400, 0), 'a body over 16 KiB is refused', f'status {s} {text[:40] if s == 0 else ""}')
+        s, _ = self.http(PUBLIC_RPC, 'POST', '/other', json.dumps(ok).encode(), {'X-Forwarded-For': b})
+        self.expect(s == 400, 'another path is refused', f'status {s}')
+        s, _ = self.http(PUBLIC_RPC, 'POST', '/', json.dumps(ok).encode())
+        self.expect(s == 400, 'a request without the proxy-set client address is refused', f'status {s}')
+        burst = PROXY_IPS[0] + '30'
+        statuses = [self.rpc(ok, burst)[0] for _ in range(40)]
+        self.expect(429 in statuses, 'a burst from one client address is rate limited (10/s per address)', f'{statuses.count(200)}x200 {statuses.count(429)}x429')
+        s, _ = self.rpc(ok, PROXY_IPS[1] + '31')
+        self.expect(s == 200, 'ordinary requests from other clients are still served during the burst window')
+        time.sleep(1.2)
+        s, _ = self.rpc(ok, burst)
+        self.expect(s == 200, 'the limited client is served again after the window')
+
+    def faucet_guard(self):
+        self.compose('up', '-d', '--no-deps', 'faucet')
+        ip = {'X-Forwarded-For': PROXY_IPS[0] + '40', 'Content-Type': 'application/json'}
+        self.wait('the faucet guard answers', lambda: self.http(FAUCET, 'GET', '/api/network')[0] == 200, 120)
+        s, text = self.http(FAUCET, 'GET', '/api/network')
+        pin = json.loads(text)
+        self.expect(pin['chain_id'] == self.chain_id and pin['genesis_hash'].lower() == self.genesis, 'the faucet publishes the manifest network pin')
+
+        def claim(body, headers=ip):
+            return self.http(FAUCET, 'POST', '/api/claim', body if isinstance(body, bytes) else json.dumps(body).encode(), headers)
+        good = {'address': '0x' + '11' * 20, 'chain_id': self.chain_id, 'genesis_hash': self.genesis}
+        for what, body in (('an address that is not hex', dict(good, address='0xnot-an-address')), ('a short address', dict(good, address='0x1234')),
+                           ('the zero address', dict(good, address='0x' + '00' * 20)), ('a missing address', {'chain_id': self.chain_id})):
+            s, _ = claim(body)
+            self.expect(s == 400, f'{what} is refused', f'status {s}')
+        s, _ = claim(b'{bad json')
+        self.expect(s == 400, 'malformed JSON is refused', f'status {s}')
+        s, _ = claim(json.dumps(dict(good, pad='x' * 4096)).encode())
+        self.expect(s in (400, 0), 'a body over 2 KiB is refused', f'status {s}')
+        s, _ = claim(dict(good, chain_id=self.chain_id + 1))
+        self.expect(s == 409, 'a wallet on another chain id gets the wrong-network answer', f'status {s}')
+        s, _ = claim(dict(good, genesis_hash='0x' + '22' * 32))
+        self.expect(s == 409, 'a wallet pinned to another (reset) genesis gets the wrong-network answer', f'status {s}')
+        s, text = claim(good)
+        self.expect(s == 400 and 'hCaptcha' in text, 'a claim without a captcha token is refused before any reservation or signer call', f'status {s}')
+        running = set(self.compose('ps', '--services', '--status', 'running').split())
+        self.expect('signer' not in running, 'the signer was never started: no request reached a third party')
+        self.say('  note the duplicate/rate-limited claim (one per address and IP per 24 h) needs a request that passes the captcha: host-only')
+
+
+STAGES = (('up', 'up'), ('identity', 'identity'), ('first-tx', 'first_tx'), ('gateway-limits', 'gateway_limits'), ('faucet-guard', 'faucet_guard'))
+
+
+def main():
+    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument('--generation', required=True, type=Path)
+    p.add_argument('--evidence', required=True, type=Path)
+    p.add_argument('--cast', default='cast')
+    p.add_argument('--stages', default=','.join(s for s, _ in STAGES), help='comma separated, in order')
+    a = p.parse_args()
+    r = Rehearsal(a.generation, a.evidence, a.cast)
+    wanted = a.stages.split(',')
+    unknown = set(wanted) - {s for s, _ in STAGES}
+    if unknown:
+        p.error(f'unknown stages {sorted(unknown)}')
+    code = 0
+    try:
+        for name, method in STAGES:
+            if name in wanted:
+                r.stage(name, getattr(r, method))
+    except Exception:
+        code = 1
+    finally:
+        r.say('RESULT ' + ' '.join(f'{n}={s}' for n, s, _ in r.results))
+        (a.evidence / 'result.json').write_text(json.dumps({'generation': r.gen.name, 'stages': r.results}, indent=2) + '\n')
+    return code
+
+
+if __name__ == '__main__':
+    sys.exit(main())
