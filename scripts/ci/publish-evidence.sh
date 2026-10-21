@@ -58,6 +58,15 @@ case "$kind" in
   overbound)
     grep -q 'P85 recovery lane: all steps PASSED' "$ev/lane.log" 2>/dev/null || { complete=no; why+=("no completion sentinel in lane.log"); }
     grep -q 'election_refused' "$ev/lane.log" 2>/dev/null || { complete=no; why+=("the over-bound refusal step did not run"); } ;;
+  x4rewards)
+    grep -q 'X4 rewards lane: all steps PASSED' "$ev/lane.log" 2>/dev/null || { complete=no; why+=("no completion sentinel in lane.log"); }
+    # the pool's whole life replayed against the chain: it ran dry (a zero-budget interval), was refilled, and a later interval was paid; the replay agreed with the chain
+    xr=$pub/p85/run/x4pos/steps/xr/replay-after.txt
+    line=$(sed -n 's/^REWARDS-REPLAY ok //p' "$xr" 2>/dev/null | tail -n 1)
+    [ -n "$line" ] || { complete=no; why+=("no REWARDS-REPLAY ok line in the exhaust-refill step's final replay"); }
+    [ "$(jq -r '.refilledAfterExhaustion' <<<"${line:-null}" 2>/dev/null)" = true ] && [ "$(jq -r '.zeroBudget // 0' <<<"${line:-null}" 2>/dev/null)" -ge 1 ] 2>/dev/null \
+      && [ "$(jq -r '.paid // 0' <<<"${line:-null}" 2>/dev/null)" -ge 3 ] 2>/dev/null && [ "$(jq -r '.fundings // 0' <<<"${line:-null}" 2>/dev/null)" -ge 1 ] 2>/dev/null \
+      || { complete=no; why+=("the replay does not show a dry pool refilled and then paid (zeroBudget >= 1, fundings >= 1, paid >= 3, refilledAfterExhaustion)"); } ;;
   x4shadow)
     grep -q 'X4 shadow lane: all steps PASSED' "$ev/lane.log" 2>/dev/null || { complete=no; why+=("no completion sentinel in lane.log"); }
     adapter=$pub/p85/run/shadow/adapter
