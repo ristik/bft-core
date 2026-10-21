@@ -12,8 +12,9 @@ const SDKSignatureLength = 65
 
 // scanCertificate is the bounded certificate scan every embedded or token-carried certificate passes before any allocation
 // proportional to its contents or any cryptography: the native shape and sublimit scan (b1ref.ScanUC) intersected with the SDK
-// codec subset. steps is the cumulative path-step account of the enclosing object and is checked against MaxPathSteps.
-func scanCertificate(raw []byte, steps *uint64) error {
+// codec subset. Its path steps are bounded by the native per-certificate sublimits; there is no cumulative path budget across
+// certificates (owner section 36): path work is charged, not capped.
+func scanCertificate(raw []byte) error {
 	// The bridge restrictions run before the generic native decoder in ScanUC.
 	// Native B1 deliberately accepts null containers; the JS SDK cannot decode
 	// those encodings. Do not normalize them or change B1's acceptance rules.
@@ -59,18 +60,8 @@ func scanCertificate(raw []byte, steps *uint64) error {
 			return fmt.Errorf("%w: %d bytes", ErrCertSigLength, len(sig.data))
 		}
 	}
-	shape, err := b1ref.ScanUC(raw)
-	if err != nil {
+	if _, err := b1ref.ScanUC(raw); err != nil {
 		return fmt.Errorf("%w: %w", ErrCertScan, err)
 	}
-	return addPathSteps(steps, shape.PathSteps)
-}
-
-// All UC and RSMT paths in an enclosing object share this overflow-safe budget.
-func addPathSteps(steps *uint64, n uint64) error {
-	if *steps > MaxPathSteps || n > MaxPathSteps-*steps {
-		return ErrTooManyPaths
-	}
-	*steps += n
 	return nil
 }

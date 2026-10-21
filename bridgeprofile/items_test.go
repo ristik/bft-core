@@ -28,22 +28,22 @@ func TestBridgeItemsRule(t *testing.T) {
 		"nested":              {CArr(arrayOf(2), CBytes([]byte{1, 2})), 5},
 		"map keys and values": {[]byte{0xa1, 0x61, 'k', 0x01}, 3},
 	} {
-		n, err := BridgeItems(tc.b, MaxBridgeItems)
+		n, err := BridgeItems(tc.b)
 		require.NoError(t, err, name)
 		require.Equal(t, tc.j, n, name)
 	}
 }
 
-// TestBridgeJCap: J over Cfg, policy, every UC and every IR opening shares one 4,096 budget: exactly 4,096 is admitted, 4,097 is
-// ErrTooManyItems, also when the overflow is split across anchors; an IR opening counts separately from anything inside its UC, and
-// repeated objects count each time.
-func TestBridgeJCap(t *testing.T) {
+// TestBridgeJSums: J over Cfg, policy, every UC and every IR opening is a sum with no shared budget (owner section 36): far more
+// than the former 4,096 items across anchors is counted and charged; each object is bounded only by its own native scan
+// (MaxCBORItems, ErrTooManyItems); an IR opening counts separately from its UC, and repeated objects count each time.
+func TestBridgeJSums(t *testing.T) {
 	f := fix()
 	cfg := f.Cfg.Bytes()
 	base := func() int {
-		n1, err := BridgeItems(cfg, MaxBridgeItems)
+		n1, err := BridgeItems(cfg)
 		require.NoError(t, err)
-		n2, err := BridgeItems(f.Policy.Bytes(), MaxBridgeItems)
+		n2, err := BridgeItems(f.Policy.Bytes())
 		require.NoError(t, err)
 		return n1 + n2
 	}()
@@ -55,22 +55,11 @@ func TestBridgeJCap(t *testing.T) {
 		}
 		return e
 	}
-	// one anchor filling the budget exactly, then one item over
-	fill := MaxBridgeItems - base - 2
-	j, err := bridgeJ(cfg, env(fill))
+	j, err := bridgeJ(cfg, env(MaxCBORItems, MaxCBORItems, MaxCBORItems))
 	require.NoError(t, err)
-	require.Equal(t, uint64(MaxBridgeItems), j)
-	_, err = bridgeJ(cfg, env(fill+1))
-	require.ErrorIs(t, err, ErrTooManyItems)
-	// the same overflow split over three anchors: each IR opening adds its own 2 items
-	third := (MaxBridgeItems - base - 3*2) / 3
-	rest := MaxBridgeItems - base - 3*2 - 2*third
-	j, err = bridgeJ(cfg, env(third, third, rest))
-	require.NoError(t, err)
-	require.Equal(t, uint64(MaxBridgeItems), j)
-	_, err = bridgeJ(cfg, env(third, third, rest+1))
-	require.ErrorIs(t, err, ErrTooManyItems)
-	// repeated encoded objects count each time
+	require.Equal(t, uint64(base+3*(MaxCBORItems+2)), j)
+	_, err = bridgeJ(cfg, env(MaxCBORItems+1))
+	require.ErrorIs(t, err, ErrTooManyItems, "one object over its own native scan")
 	j1, err := bridgeJ(cfg, env(10))
 	require.NoError(t, err)
 	j2, err := bridgeJ(cfg, env(10, 10))
@@ -86,18 +75,14 @@ func TestGateItemsTerm(t *testing.T) {
 	require.Equal(t, uint64(5_633_600), IntrinsicExecPerByte*6720+GasPerItem*4096+GasReserve)
 }
 
-// TestGateCountsItems: the gate of a real composed envelope carries J and its 1,000*J charge, and bridgeJ (which the gate runs before
-// any B1 call) refuses an anchor table over the item budget with ErrTooManyItems. A real certificate dense enough to cross 4,096 on
-// its own is not built here; the boundary is TestBridgeJCap's.
+// TestGateCountsItems: the estimate of a real composed envelope carries J and its 1,000*J charge.
 func TestGateCountsItems(t *testing.T) {
 	e := newEnv(t)
 	cp := e.composed(t, 1, irTimeOK)
-	g, err := GateOf(e.F.Cfg, OpReturn, mustEncode(t, cp.env), TxGasBudget)
+	g, err := GateOf(e.F.Cfg, OpReturn, mustEncode(t, cp.env))
 	require.NoError(t, err)
 	require.Greater(t, g.J, uint64(0))
 	require.Equal(t, GasPerItem*g.J, g.Items)
-	_, err = bridgeJ(e.F.Cfg.Bytes(), &Envelope{PolicyBody: cp.env.PolicyBody, Anchors: []Anchor{{UC: arrayOf(MaxBridgeItems), InputRecord: arrayOf(1)}}})
-	require.ErrorIs(t, err, ErrTooManyItems)
 }
 
 func mustEncode(t *testing.T, e *Envelope) []byte {
