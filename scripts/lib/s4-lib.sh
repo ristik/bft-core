@@ -95,6 +95,11 @@ s4_collect_after_rotation() {
     || { echo "the first epoch-3 certificate is missing or names the joiner's root" >&2; return 1; }
   s4_snapshot_journal "$a" || return 1
   s4_snapshot_journal "$b" || return 1
+  # The lane's own protocol after restarting roots (p85_restarts): the first validator is restarted in its scope and a paid transaction must be certified. Without it the
+  # execution chain stayed at one height for minutes after the roots' restarts on the CI runner (s4 milestone runs 39500868890#2 and 39518175232: the claim and the next
+  # candidate block never certified, "awaits peer catch-up"), while the control without S4 passed.
+  case " $H3_ONLINE " in *" 1 "*) p85_restart_validator 1 || return 1 ;; esac
+  p85_paid 3 || { echo "a paid transaction was not certified after the observer roots' restarts" >&2; return 1; }
   # a collector which holds no runtime state: each scan is a new process reading only the journal copies
   build/ubft evidence scan --journal "$d/journal-root$a.db" >"$d/scan-root$a.json" || return 1
   build/ubft evidence scan --journal "$d/journal-root$b.db" >"$d/scan-root$b.json" || return 1
