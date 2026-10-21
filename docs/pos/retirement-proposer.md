@@ -8,7 +8,7 @@ exclusion). `POST /api/v1/pos/control` stays for explicit submissions.
 ## What a root does
 
 1. **Discovery** (`rootchain/posretire`). Every root polls its execution client for custody's `RetirementRequested(uint64 indexed id, uint64 generation)`,
-   Confirmations (8) blocks behind the head, from a persisted cursor. The cursor and the pending `(id, generation)` set live in `$UBFT_HOME/pos-retirements.json`
+   up to the head with no confirmation depth (the EVM shard makes no blocks while idle, so a depth would stall a request on a quiet chain; certified blocks are final and a proof at a certified block, never the log, authorizes), rescanning the last 8 blocks before a persisted cursor. The cursor and the pending `(id, generation)` set live in `$UBFT_HOME/pos-retirements.json`
    (atomic writes by a single background writer, never on the consensus loop; a file that cannot be read stops the node rather than forgetting requests; a write that fails or is lost in a crash only costs a rediscovery from the older cursor, and an ended request that comes back is ended again by the next committed observation, a repeated Retirement being a no-op in the executor). Logs are scheduling hints only: a proof authorizes, a log does not.
    Work is always keyed by `(id, generation)`: a request cannot be reset within a generation, a new generation never reuses an old proof.
 2. **Preparation** (off the consensus loop). When a block is added to the tree it is the candidate parent of the next proposal. `Prepare(parent)` starts, for at most

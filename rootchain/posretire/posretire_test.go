@@ -108,16 +108,17 @@ func TestDiscoveryFindsConfirmedRequestsAndKeepsAKeyedSetAcrossRestarts(t *testi
 	h.chain.reqs = []Request{{Key{ID: 3, Generation: 2}, 500}, {Key{ID: 1, Generation: 1}, 400}, {Key{ID: 3, Generation: 3}, 995}}
 	svc := h.service()
 	require.NoError(t, svc.Poll(context.Background()))
-	// block 995 is within Confirmations of the head: not yet
-	require.Equal(t, []Key{{ID: 1, Generation: 1}, {ID: 3, Generation: 2}}, svc.Pending(), "ascending by block, then key")
+	// block 995 is near the head and found at once: there is no confirmation depth
+	require.Equal(t, []Key{{ID: 1, Generation: 1}, {ID: 3, Generation: 2}, {ID: 3, Generation: 3}}, svc.Pending(), "ascending by block, then key")
 	// the same request again (and a repeat scan) changes nothing
 	require.NoError(t, svc.Poll(context.Background()))
-	require.Len(t, svc.Pending(), 2)
+	require.Len(t, svc.Pending(), 3)
 	h.chain.mu.Lock()
 	h.chain.head = 1100
 	h.chain.mu.Unlock()
+	h.chain.reqs = append(h.chain.reqs, Request{Key{ID: 3, Generation: 4}, 1100})
 	require.NoError(t, svc.Poll(context.Background()))
-	require.Equal(t, []Key{{ID: 1, Generation: 1}, {ID: 3, Generation: 2}, {ID: 3, Generation: 3}}, svc.Pending(), "the work is keyed by (id, generation)")
+	require.Equal(t, []Key{{ID: 1, Generation: 1}, {ID: 3, Generation: 2}, {ID: 3, Generation: 3}, {ID: 3, Generation: 4}}, svc.Pending(), "the work is keyed by (id, generation)")
 
 	// restart: the pending set and the cursor come back from the file; the scan resumes after the cursor, not from zero
 	svc.Flush()
@@ -128,7 +129,30 @@ func TestDiscoveryFindsConfirmedRequestsAndKeepsAKeyedSetAcrossRestarts(t *testi
 	h.chain.head = 1200
 	h.chain.mu.Unlock()
 	require.NoError(t, again.Poll(context.Background()))
-	require.Equal(t, []uint64{1093}, h.chain.from, "resumes after the cursor (head 1100 - 8 confirmations = 1092)")
+	require.Equal(t, []uint64{1093}, h.chain.from, "resumes Rescan blocks before the cursor (1100 - 8 + 1)")
+}
+
+// An idle EVM shard makes no blocks: the head stays where the request's block is. The request must be imported without waiting for more blocks.
+func TestARequestOnAnIdleChainIsDiscoveredWithoutFurtherBlocks(t *testing.T) {
+	h := newHarness(t)
+	h.chain.reqs = []Request{{Key{ID: 7, Generation: 1}, 1000}}
+	svc := h.service()
+	require.NoError(t, svc.Poll(context.Background()))
+	require.Equal(t, []Key{{ID: 7, Generation: 1}}, svc.Pending(), "the request in the head block itself")
+	require.NoError(t, svc.Poll(context.Background()))
+	require.Len(t, svc.Pending(), 1, "the overlap rescan does not duplicate it")
+}
+
+// A head block replaced before it was certified: the request in the replacement block is found although the cursor passed that height.
+func TestARequestInAReplacedHeadBlockIsStillFound(t *testing.T) {
+	h := newHarness(t)
+	svc := h.service()
+	require.NoError(t, svc.Poll(context.Background()))
+	h.chain.mu.Lock()
+	h.chain.reqs = []Request{{Key{ID: 9, Generation: 1}, 998}}
+	h.chain.mu.Unlock()
+	require.NoError(t, svc.Poll(context.Background()))
+	require.Equal(t, []Key{{ID: 9, Generation: 1}}, svc.Pending())
 }
 
 func TestAnUnreadableStateFileIsAnErrorNotAnEmptySet(t *testing.T) {
