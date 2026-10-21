@@ -719,7 +719,7 @@ x4e_hold_probe() {
   jq -e '.outcome == "refused" and .reason == "EvidenceHoldPending"' "$d/hold-probe.json" >/dev/null || { echo "the admitted, unsettled case did not hold the exit: $(cat "$d/hold-probe.json")" >&2; return 1; }
   echo "x4e: exit of identity 5 refused for EvidenceHoldPending while the case is admitted and unsettled"
 }
-x4e_claim() { x4e_run exit-claim exit-claim.sh "{\"id\":5,\"matureWaitSeconds\":7200}" && x4e_run exit-claim exit-claim.check.sh '{"id":5}'; }
+x4e_claim() { x4e_run exit-claim exit-claim.sh "{\"id\":5,\"matureWaitSeconds\":5400}" && x4e_run exit-claim exit-claim.check.sh '{"id":5}'; }
 
 P85_STEPS="p85_baseline p85_joiner_nodes p85_joiner_onboard p85_election_reserved p85_proofs p85_handoff p85_install_activation p85_j_stalls p85_recovery p85_resolved p85_restarts p85_epoch_switches"
 
