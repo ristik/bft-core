@@ -711,7 +711,7 @@ x4e_run() { # id script argsJSON
   X4_CURSOR_DIR=$cur X4_STEP_ID=$1 X4_STEP_DIR=$cur/steps/$1 X4_STEP_ARGS=$3 X4_SEED=1 bash "scripts/x4pos/steps/$2"
 }
 x4e_request() { x4e_run exit-request exit-request.sh '{"id":5,"exposureWaitSeconds":900,"importWaitSeconds":1200}' && x4e_run exit-request exit-request.check.sh '{"id":5}'; }
-x4e_claim() { x4e_run exit-claim exit-claim.sh '{"id":5,"matureWaitSeconds":7200}' && x4e_run exit-claim exit-claim.check.sh '{"id":5}'; }
+x4e_claim() { x4e_run exit-claim exit-claim.sh "{\"id\":5,\"matureWaitSeconds\":7200$([ "${S4_LANE:-0}" != 1 ] || echo ',"expectReason":"EvidenceHoldPending"')}" && x4e_run exit-claim exit-claim.check.sh '{"id":5}'; }
 
 P85_STEPS="p85_baseline p85_joiner_nodes p85_joiner_onboard p85_election_reserved p85_proofs p85_handoff p85_install_activation p85_j_stalls p85_recovery p85_resolved p85_restarts p85_epoch_switches"
 
