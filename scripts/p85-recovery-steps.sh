@@ -31,9 +31,21 @@ source scripts/lib/p85-lib.sh
 m2_online_validators() { echo "${H3_ONLINE:-1 2 3 4}"; }
 
 p85_pass() { echo "  PASS: $*"; }
+# The execution side at a failure (its logs and data are not published): per validator the head, the base fee, the pool counters and the tail of its logs. A transaction that is
+# never mined (a wait for a receipt that times out) is otherwise undiagnosable from the pack.
+p85_chain_report() {
+  local i u
+  [ -n "${rethEthBase:-}" ] || return 0
+  for i in 1 2 3 4 5; do
+    u="http://127.0.0.1:$((rethEthBase + i - 1))"
+    echo "--- execution validator $i: head=$(curl -s --max-time 3 -X POST "$u" -H 'content-type: application/json' -d '{"jsonrpc":"2.0","id":1,"method":"eth_getBlockByNumber","params":["latest",false]}' 2>/dev/null | jq -c '.result|{number,baseFeePerGas,gasUsed,gasLimit,txs:(.transactions|length)}' 2>/dev/null) txpool=$(curl -s --max-time 3 -X POST "$u" -H 'content-type: application/json' -d '{"jsonrpc":"2.0","id":1,"method":"txpool_status","params":[]}' 2>/dev/null | jq -c '.result // .error.message' 2>/dev/null)" >&2
+    [ -f "test-nodes/evm$i/debug.log" ] && { tail -n 4 "test-nodes/evm$i/debug.log" | cut -c1-260 >&2; }
+  done
+}
 p85_step_die() {
   local i
   echo "  FAIL: $*" >&2
+  p85_chain_report
   for i in 1 2 3 4 5; do [ -f "test-nodes/root$i/debug.log" ] && { echo "--- tail of root$i/debug.log" >&2; tail -n 6 "test-nodes/root$i/debug.log" | cut -c1-300 >&2; }; done
   q3_teardown
   exit 1
@@ -725,6 +737,18 @@ p85_run_lane() {
     # T8: the funded reward pool is settled and claimed across the lane's real acknowledged history (scripts/lib/rewards-lib.sh), before the lane's last step
     source scripts/lib/rewards-lib.sh
     case " $P85_STEPS " in *" utb_step_final "*) P85_STEPS="${P85_STEPS/ utb_step_final/ rw_step_settle utb_step_final}" ;; *) P85_STEPS="$P85_STEPS rw_step_settle" ;; esac
+  fi
+  if [ "${S4_LANE:-0}" = 1 ]; then
+    # S4 (#57, scripts/lib/s4-lib.sh): the offence is delivered while epoch 2 is live, collected and submitted after the recovery has evicted the joiner
+    source scripts/lib/s4-lib.sh
+    P85_STEPS=${P85_STEPS/ p85_j_stalls/ s4_equivocate p85_j_stalls}
+    P85_STEPS=${P85_STEPS/ p85_resolved/ p85_resolved s4_collect_after_rotation s4_submit_settle s4_check}
+    # the reporter's claim runs late, where the execution chain is healthy (before the reward step, else before the lane's last step, else at the end)
+    case " $P85_STEPS " in
+      *" rw_step_settle "*) P85_STEPS=${P85_STEPS/ rw_step_settle/ s4_claim rw_step_settle} ;;
+      *" utb_step_final "*) P85_STEPS=${P85_STEPS/ utb_step_final/ s4_claim utb_step_final} ;;
+      *) P85_STEPS="$P85_STEPS s4_claim" ;;
+    esac
   fi
   [ "${P85_MODE:-}" != overbound ] || { P85_JOINER_UNITS=3; P85_STEPS="p85_baseline p85_joiner_nodes p85_joiner_onboard p85_election_refused"; }
   for s in $P85_STEPS; do

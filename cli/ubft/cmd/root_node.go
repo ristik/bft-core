@@ -407,6 +407,7 @@ func rootNodeRun(ctx context.Context, flags *rootNodeRunFlags) error {
 		}
 		observer := rootevidence.NewObserver(journal, trustBaseStore, log, 0)
 		go observer.Run(ctx)
+		go observer.LogStats(ctx, 15*time.Second)
 		options = append(options, consensus.WithEvidenceObserver(observer))
 	}
 	cm, err := consensus.NewConsensusManager(
