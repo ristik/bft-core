@@ -263,25 +263,29 @@ type occurrence struct {
 // it allocates nothing and reads no state.
 type plan struct {
 	c, k          uint64
-	occ           [MaxClaims]occurrence
+	occ           []occurrence
 	e, s, q, a, p uint64
 	charge        uint64
 }
 
 // scanBatch reads the header and scans every occurrence with one cumulative CBOR budget, then groups epochs, complete seals and
 // complete claims by first use with exact byte comparison (at most K*(K-1)/2 comparisons per class, prepaid by G_scan).
-func scanBatch(in []byte, pl *plan) error {
-	if len(in) > MaxCallBytes {
+func scanBatch(in []byte, pl *plan, lim Limits) error {
+	if len(in) > lim.CallBytes {
 		return ErrInputTooLarge
 	}
 	k, err := header(in, certVersion)
 	if err != nil {
 		return err
 	}
-	if k < 1 || k > MaxClaims {
+	if k < 1 || int(k) > lim.Claims {
 		return ErrCount
 	}
-	*pl = plan{c: uint64(len(in)), k: uint64(k)}
+	occ := pl.occ[:0]
+	if cap(occ) < int(k) {
+		occ = make([]occurrence, 0, k)
+	}
+	*pl = plan{c: uint64(len(in)), k: uint64(k), occ: occ[:k]}
 	r := reader{b: in, pos: 4}
 	tokens := 0
 	var certSteps uint64
@@ -318,6 +322,9 @@ func scanBatch(in []byte, pl *plan) error {
 		if err != nil {
 			return err
 		}
+		if lim.PerUCItems {
+			tokens = 0
+		}
 		s := scanner{b: raw, tokens: &tokens}
 		if err := s.skip(0); err != nil {
 			return err
@@ -333,7 +340,7 @@ func scanBatch(in []byte, pl *plan) error {
 		if sr.pos != len(raw) {
 			return ErrShape
 		}
-		if certSteps += u.steps; certSteps > MaxCertSteps {
+		if certSteps += u.steps; certSteps > lim.CertSteps {
 			return ErrCertSteps
 		}
 		pl.occ[i] = occurrence{claim: in[start:r.pos], seal: raw[u.sealStart:u.sealEnd], epoch: u.epoch, sigs: u.sigs, steps: u.steps}
@@ -369,7 +376,7 @@ func scanBatch(in []byte, pl *plan) error {
 			pl.p += o.steps
 		}
 	}
-	if pl.q > MaxBatchSigs {
+	if pl.q > lim.BatchSigs {
 		return ErrTooManySigs // implied by K and the per-seal bound; an explicit cap all the same (contract section 7a.8)
 	}
 	pl.charge = BatchGas(pl.c, pl.k, pl.e, pl.q, pl.a, pl.p)
@@ -396,9 +403,12 @@ func validateShard(b []byte) error {
 type Grouping struct{ C, K, E, S, Q, A, P, Gas uint64 }
 
 // Group scans a request without reading any state and returns its grouping, or the halt a native call would raise.
-func Group(in []byte) (Grouping, error) {
+func Group(in []byte) (Grouping, error) { return GroupWith(in, Standard) }
+
+// GroupWith is Group under explicit aggregate limits (Composed for the native composition's anchor table).
+func GroupWith(in []byte, lim Limits) (Grouping, error) {
 	var pl plan
-	if err := scanBatch(in, &pl); err != nil {
+	if err := scanBatch(in, &pl, lim); err != nil {
 		return Grouping{}, err
 	}
 	return Grouping{C: pl.c, K: pl.k, E: pl.e, S: pl.s, Q: pl.q, A: pl.a, P: pl.p, Gas: pl.charge}, nil

@@ -20,7 +20,7 @@ type Verdict struct {
 // halt (ErrMalformed) or an infrastructure failure (ErrInfrastructure); otherwise the verdict carries the full charge.
 func Cert(in []byte, st State, pins Pins) (Verdict, error) {
 	var pl plan
-	if err := scanBatch(in, &pl); err != nil {
+	if err := scanBatch(in, &pl, Standard); err != nil {
 		return Verdict{}, err
 	}
 	return finishCert(in, &pl, st, pins)
@@ -156,7 +156,7 @@ func Run(op Op, in []byte, st State, pins Pins, gas uint64) (out []byte, used ui
 			return nil, gas, ErrOutOfGas
 		}
 		var pl plan
-		if perr := scanBatch(in, &pl); perr != nil {
+		if perr := scanBatch(in, &pl, Standard); perr != nil {
 			return nil, gas, perr
 		}
 		if gas < pl.charge {

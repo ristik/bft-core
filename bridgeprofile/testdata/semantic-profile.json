@@ -1,5 +1,5 @@
 {
-  "artifactVersion": 8,
+  "artifactVersion": 9,
   "nativeBridgeProtocolVersion": 5,
   "sdkVersion": "4.0.0",
   "status": "development-provisional-unactivated",
@@ -44,7 +44,7 @@
     "transfers": 64,
     "leaves": 65,
     "policyBytes": 512,
-    "aggregatorAnchors": 16,
+    "aggregatorAnchors": 65535,
     "anchorUcBytes": 8192,
     "irBytes": 512,
     "rsmtSiblingsPerLeaf": 32,
@@ -74,7 +74,7 @@
   },
   "deferred": [],
   "normativeArtifactSha256": {
-    "protocol/interop.md": "2f1920c18c39ceb3d0f659eea935c760ad75c467dc0ba89a59ed290182dfbba9",
+    "protocol/interop.md": "c698600db2157885652f5126b4d33954d7d618a40a608cc0f88adf6085f7336f",
     "protocol/abi.json": "d836ec1a0eb12b81c92c4fccd5d310aa7b5fd2c7a9119d1fa3b5cf2509eb5685",
     "protocol/manifest.schema.json": "f256b0ea19ea1f0a390926006b18a7460ecbb63f79f3e3e85040cbf2d710fb05",
     "protocol/trust-base.md": "445f354723d9ab7247a9c1ec518bebc82993a71e960dae9edb2af2986bb9c628"
@@ -92,5 +92,5 @@
     "verification": "one-CERT_BATCH_V2-0x0100-over-the-anchor-table",
     "certificateAge": "any-age-permanent-registry"
   },
-  "limitsNote": "The one resource policy shared by contract, oracle and plug-ins (owner section 36, bft-core briefs/b7-direct-uncapped-design.md section 1): no gas ceiling and no bridge-specific history cap; the aggregate entries are the native kernels' own limits and envelopeBytes is the ingress bound; the rest are per-object shape bounds."
+  "limitsNote": "The one resource policy shared by contract, oracle and plug-ins (owner section 36, bft-core briefs/b7-direct-uncapped-design.md section 1): no gas ceiling and no history cap. The composition (BRIDGE_COMPOSE_V1) is bounded by envelopeBytes (the ingress bound), the u16 anchor wire width (aggregatorAnchors) and its gas, and streams the history and the anchor table (bft-core briefs/dev4-b7-native-compose-spec.md section 7); transfers, leaves and semanticBytes are the standalone B2 kernel's own bounds (0x0104, prepareLock); the rest are per-object shape bounds."
 }

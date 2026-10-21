@@ -7,10 +7,10 @@
       "-out",
       "{output}"
     ],
-    "commit": "8d3de197ddce7c7beba0ee3f40b7e9baf0f326fc",
+    "commit": "e84c5d863bdd73a88f02c39af46ad12314ffc242",
     "repository": "https://github.com/ristik/bft-core.git"
   },
   "protocolVersion": 5,
   "sdkVersion": "4.0.0",
-  "semanticProfileSha256": "80c1b767754e3eda1487739b003970bfa46083877d58845b02083dd9a19238eb"
+  "semanticProfileSha256": "7c2cc74696a0047e0046f37b3e204fd8fe05fd4b54e28e87bc23a502b797755e"
 }

@@ -95,6 +95,15 @@ type scanner struct {
 	// inclusion proof does. Canonical key order inside that certificate is the
 	// certificate verifier's concern, not this scanner's.
 	native bool
+	// maxItems bounds tokens; zero is MaxCBORItems.
+	maxItems int
+}
+
+func (s *scanner) itemBound() int {
+	if s.maxItems == 0 {
+		return MaxCBORItems
+	}
+	return s.maxItems
 }
 
 // scanOne scans exactly one item spanning all of b.
@@ -160,7 +169,7 @@ func (s *scanner) head() (major byte, arg uint64, err error) {
 
 func (s *scanner) item(depth int) (item, error) {
 	start := s.pos
-	if s.tokens++; s.tokens > MaxCBORItems {
+	if s.tokens++; s.tokens > s.itemBound() {
 		return item{}, ErrTooManyItems
 	}
 	if s.pos < len(s.b) {

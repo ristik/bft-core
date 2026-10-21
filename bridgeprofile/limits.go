@@ -1,21 +1,24 @@
 package bridgeprofile
 
+import "math"
+
 // BridgeResources: the one resource policy of the direct path (owner section 36, briefs/b7-direct-uncapped-design.md section 1),
 // defined only here and mirrored by the semantic profile's limits, the contract (BridgeBounds) and the plug-ins. There is no gas
-// ceiling and no bridge-specific history cap: every history the native kernels accept is admitted and paid. The aggregate entries
-// are exactly the native kernels' own limits until the native composition (B7 PR 2) streams them: B2 (ureth b2 MAX_TRANSFERS,
-// MAX_HISTORY) and B1 (MAX_CLAIMS). MaxEnvelopeBytes is the ingress bound the pool and RPC are configured to carry. The remaining
-// constants are per-object shape bounds (schemas, widths, depth), not history caps.
+// ceiling and no history cap. The composition (Compose, BRIDGE_COMPOSE_V1) is bounded by the envelope (MaxEnvelopeBytes, the
+// ingress bound the pool and RPC are configured to carry), the wire widths and its gas; it streams the history and the anchor table
+// under ComposedHistory and b1ref.Composed (briefs/dev4-b7-native-compose-spec.md section 7). MaxTransfers and MaxSemanticBytes
+// are the standalone B2 kernel's own bounds (0x0104: ureth b2 MAX_TRANSFERS, MAX_HISTORY), which prepareLock still calls. The
+// remaining constants are per-object shape bounds (schemas, widths, depth), not history caps.
 const (
-	MaxTransfers     = 64               // B2 MAX_TRANSFERS: transfers including the final burn
-	MaxLeaves        = MaxTransfers + 1 // B2 leaf output: the mint and every transfer (the kernel's result bound)
-	MaxSemanticBytes = 128 << 10        // B2 MAX_HISTORY: history projection and Cfg input
-	MaxEnvelopeBytes = 512 << 10        // ingress: above every envelope the native bounds admit; txpool and RPC carry it
+	MaxTransfers     = 64               // standalone B2 MAX_TRANSFERS: transfers including the final burn
+	MaxLeaves        = MaxTransfers + 1 // standalone B2 leaf output: the mint and every transfer (the kernel's result bound)
+	MaxSemanticBytes = 128 << 10        // standalone B2 MAX_HISTORY: history projection and Cfg input
+	MaxEnvelopeBytes = 512 << 10        // ingress: the composition's only aggregate byte bound; txpool and RPC carry it
 	MaxCBORDepth     = 16
 	MaxCBORItems     = 32768 // per object: the native scan of one CBOR object
 	MaxPolicyBytes   = 512
 	MaxAmountBytes   = 32
-	MaxAnchors       = 16 // B1 MAX_CLAIMS: distinct UC anchors of one CERT_BATCH_V2 call, at most the leaves (contract section 4)
+	MaxAnchors       = math.MaxUint16 // wire width: the CERT_BATCH_V2 claim count and the leaf anchorIndex are u16
 	MaxCfgBytes      = 1024
 
 	// Embedded lock evidence (J). Cumulative and checked before allocation or crypto.
@@ -39,6 +42,16 @@ const (
 	// SDK token (oracle-side strict decode only; the kernel never sees a token).
 	MaxProofUCBytes = 24 << 10
 	MaxTokenBytes   = 4 << 20
+)
+
+// HistoryBounds are the aggregate bounds of one history decode: its bytes, its transfers (the final burn included) and the CBOR
+// items of the whole history. The standalone kernel uses KernelHistory; the composition uses ComposedHistory, where the history is
+// bounded by the envelope that carries it and every item and leaf is paid before the kernel runs.
+type HistoryBounds struct{ Bytes, Transfers, Items int }
+
+var (
+	KernelHistory   = HistoryBounds{Bytes: MaxSemanticBytes, Transfers: MaxTransfers, Items: MaxCBORItems}
+	ComposedHistory = HistoryBounds{Bytes: MaxEnvelopeBytes, Transfers: math.MaxInt, Items: math.MaxInt}
 )
 
 // NativeBridgeProtoVersion is the byte-contract version of this profile. It is
