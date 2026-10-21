@@ -72,11 +72,24 @@ s4_equivocate() {
 }
 
 # stop root $1 (TERM, then wait for the process), copy its journal, start it again in the current epoch
+# Copy root $1's journal. By default the root is only PAUSED (SIGSTOP) while the file is copied and continued at once: a bbolt file is copy-on-write with the meta page
+# written last, so a copy taken while the process is stopped is a consistent crash-point snapshot, and no root restart disturbs the lane (S4_RESTART_ROOTS=1 stops and
+# restarts the root instead, as the first S4 runs did: in those runs the execution chain stopped certifying afterwards in the milestone runs, see docs/root-evidence.md).
 s4_snapshot_journal() {
   local i=$1 ref pid epoch k
+  pid=$(cat "test-nodes/root$i/pid" 2>/dev/null)
+  if [ "${S4_RESTART_ROOTS:-0}" != 1 ]; then
+    kill -0 "$pid" 2>/dev/null || { echo "root $i is not running" >&2; return 1; }
+    kill -STOP "$pid" || return 1
+    cp "test-nodes/root$i/evidence.db" "$S4_DIR/journal-root$i.db"; k=$?
+    kill -CONT "$pid"
+    [ "$k" = 0 ] || return 1
+    sleep 16   # the next periodic counter line (every 15 s) after the pause
+    grep -a 'evidence observer stats' "test-nodes/root$i/debug.log" | tail -1 >"$S4_DIR/observer-stats-root$i.txt"
+    return 0
+  fi
   epoch=$(s4_epoch "$i"); ref=
   for k in 1 2 3 4; do [ "$k" = "$i" ] || { ref=$k; break; }; done
-  pid=$(cat "test-nodes/root$i/pid" 2>/dev/null)
   stop_pidfile "test-nodes/root$i/pid" 'ubft root-node' || return 1
   for k in $(seq 1 100); do kill -0 "$pid" 2>/dev/null || break; sleep 0.2; done
   kill -0 "$pid" 2>/dev/null && { echo "root $i did not stop" >&2; return 1; }
