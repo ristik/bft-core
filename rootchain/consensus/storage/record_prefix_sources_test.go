@@ -16,12 +16,16 @@ import (
 type sources struct {
 	roots []RecordFetcher
 	asked []int
+	onAsk func(count int) // called before each ask, with the number of asks so far including this one
 }
 
 func (s *sources) Sources() int { return len(s.roots) }
 
 func (s *sources) RecordsFromSource(ctx context.Context, i int, from uint64, max int) ([]rootrecords.Record, error) {
 	s.asked = append(s.asked, i)
+	if s.onAsk != nil {
+		s.onAsk(len(s.asked))
+	}
 	return s.roots[i].Records(ctx, from, max)
 }
 
@@ -136,9 +140,11 @@ func TestPrefixFetchSkipsARootWhoseRecordsDoNotVerify(t *testing.T) {
 }
 
 // Every root lying is a refusal at the bound, with the sentinel, and nothing written - not even the pages that verified before the lie.
+// The bound is not a wall-clock one here: it is reached when the first pass over the roots is done and the second has begun, so that every
+// lie has been seen however slow the runner is (bft-core #733: a 100 ms bound raced the lie detection).
 func TestPrefixFetchWithAllRootsLyingWritesNothing(t *testing.T) {
 	defer func(d, b time.Duration) { prefixTimeout, prefixBackoff = d, b }(prefixTimeout, prefixBackoff)
-	prefixTimeout, prefixBackoff = 100*time.Millisecond, time.Millisecond
+	prefixTimeout, prefixBackoff = time.Minute, time.Millisecond
 	honest := chainOf(600)
 	control := &evmroot.ControlState{Pos: stateOver(honest).Bytes()}
 	all := lies(honest)
@@ -146,18 +152,29 @@ func TestPrefixFetchWithAllRootsLyingWritesNothing(t *testing.T) {
 
 	db := newBolt(t)
 	require.NoError(t, db.AppendRecords(honest[:50]))
-	src := &sources{roots: liars}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	// The roots are asked from root 3, which only fails: the bound is reached as it is asked again, so it is the pass in progress and
+	// the lies of the first pass must still be reported.
+	prefixRotation.Store(3)
+	var src *sources
+	src = &sources{roots: liars, onAsk: func(int) {
+		if n := len(src.asked); n > 1 && src.asked[n-1] == 3 {
+			cancel()
+		}
+	}}
 	s := &BlockStore{storage: db, prefixSource: src}
-	err := s.ensureRetainedPrefix(control)
+	err := s.ensureRetainedPrefixCtx(ctx, control)
 	require.ErrorIs(t, err, ErrRecordPrefixMissing)
-	require.ErrorIs(t, err, ErrRecordPrefixConflict, "the lies are reported, not hidden behind the timeout")
-	require.ErrorIs(t, err, context.DeadlineExceeded)
+	require.ErrorIs(t, err, ErrRecordPrefixConflict, "the lies are reported, not hidden behind the bound")
+	require.ErrorIs(t, err, context.Canceled)
 	require.GreaterOrEqual(t, len(src.asked), len(liars), "every root was asked")
 	n, e := db.RecordCount()
 	require.NoError(t, e)
 	require.EqualValues(t, 50, n, "nothing past what was retained")
 
-	// one source that lies: the same
+	// one source that lies: the same (only the refusal and the empty write are asserted, so a short bound is enough)
+	prefixTimeout = 200 * time.Millisecond
 	db = newBolt(t)
 	s = &BlockStore{storage: db, prefixSource: &sources{roots: liars[:1]}}
 	require.ErrorIs(t, s.ensureRetainedPrefix(control), ErrRecordPrefixMissing)
