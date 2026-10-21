@@ -123,6 +123,10 @@ class ProofOfStake(unittest.TestCase):
         keys=set(re.findall(r'`json:"(\w+)(?:,omitempty)?"`',struct[:struct.index('\n}')]))
         d={'networkWord':'0xaa','chainId':31337,'custody':'0xc','custodyCodeHash':'0xch','election':'0xe','electionCodeHash':'0xeh','rewardPool':'0xrp','rewardPoolCodeHash':'0xrph'}
         self.assertEqual(set(pos.deployment_of(d,{'runtimeHash':'0xrh'})),keys)
+    def test_the_rehearsal_stages_are_methods_and_the_workflow_runs_it(self):
+        import rehearse
+        for name,method in rehearse.STAGES: self.assertTrue(callable(getattr(rehearse.Rehearsal,method)),name)
+        self.assertIn('deploy/testnet/rehearse.py',(generate.REPO/'.github/workflows/testnet-rehearsal.yml').read_text())
     def test_the_shadow_profile_has_the_hook_and_no_election(self):
         d={'custody':'0xc','election':'0xe'}
         args=pos.profile_args(d,{'election':'/m.json','hook':'/h.jsonl'},shadow=True)
