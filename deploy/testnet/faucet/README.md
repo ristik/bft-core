@@ -4,7 +4,7 @@ Test UCT has **no real value**. The testnet may reset arbitrarily; balances and
 other assets may disappear without notice or obligation. This service distributes
 gas funds, not TGE allocations. One bare-metal server can run this stack alongside
 the paired validator containers. No public server/domain has been provisioned by
-this PR; the owner supplies them. Public readiness also depends on the #432
+this PR; the deployment supplies them. Public readiness also depends on the #432
 deployment rehearsal.
 
 ## Reuse decision and pins
@@ -38,7 +38,7 @@ deployment components, not new consensus or public general-purpose RPC services.
    Ethereum V3 keystore. Never mount a validator, root, signing-authority, treasury
    or Engine JWT key. Keep the faucet account separate from the refill account.
    Keep only a small test balance in it, and never use its nonce outside this signer.
-2. The server operator owns refill/alerts. Fund the faucet address with test UCT
+2. The faucet operator owns refill/alerts. Fund the faucet address with test UCT
    from the testnet's allocation/treasury account (or explicitly allocate it in a
    fresh testnet genesis). The disposable Hardhat account used by the acceptance
    lane is not a public-testnet funding source.
