@@ -155,10 +155,11 @@ func collectPrefix(have uint64, state rootrecords.State, prev *rootrecords.Recor
 // or ErrRecordPrefixMissing (joined with what each source did, and with ErrRecordPrefixConflict when some source lied) at the bound.
 func (x *BlockStore) fetchFromSources(ctx context.Context, f SourcedRecordFetcher, have uint64, state rootrecords.State, prev *rootrecords.Record) ([]rootrecords.Record, error) {
 	start := prefixRotation.Add(1) - 1
-	var last []error // the most recent outcome of each source
+	// The most recent outcome of each source, across passes; a refusal of its records is kept over a later failure, so that the bound
+	// cannot hide that a source lied however far the pass in progress got.
+	outcome := map[int]error{}
 	for {
 		n := f.Sources()
-		last = last[:0]
 		for k := 0; k < n; k++ {
 			if ctx.Err() != nil {
 				break
@@ -174,11 +175,20 @@ func (x *BlockStore) fetchFromSources(ctx context.Context, f SourcedRecordFetche
 			if err == nil {
 				return staged, nil
 			}
-			last = append(last, fmt.Errorf("source %d: %w", source, err))
+			if old, lied := outcome[source]; lied && errors.Is(old, ErrRecordPrefixConflict) && !errors.Is(err, ErrRecordPrefixConflict) {
+				continue
+			}
+			outcome[source] = fmt.Errorf("source %d: %w", source, err)
 		}
 		select {
 		case <-ctx.Done():
-			return nil, errors.Join(append([]error{ErrRecordPrefixMissing, ctx.Err()}, last...)...)
+			out := []error{ErrRecordPrefixMissing, ctx.Err()}
+			for i := 0; i < n; i++ {
+				if err, ok := outcome[i]; ok {
+					out = append(out, err)
+				}
+			}
+			return nil, errors.Join(out...)
 		case <-time.After(prefixBackoff):
 		}
 	}
