@@ -189,7 +189,7 @@ class ReplayAgainstTheChain(unittest.TestCase):
             tamper(world)
         return world
 
-    def run_cli(self, world, *flags):
+    def run_cli(self, world, *flags, python_flags=()):
         import json
         import subprocess
         import tempfile
@@ -200,7 +200,7 @@ class ReplayAgainstTheChain(unittest.TestCase):
             wf = Path(d) / "world.json"
             wf.write_text(json.dumps(world))
             env = {"PATH": "/usr/bin:/bin", "WORLD": str(wf), "SHADOW": str(Path(__file__).resolve().parent / "shadow")}
-            return subprocess.run([sys.executable, str(Path(__file__).resolve().parent / "rewards_check.py"), "replay", "--rpc", "x", "--cast", str(shim), "--pool", "0xp",
+            return subprocess.run([sys.executable, *python_flags, str(Path(__file__).resolve().parent / "rewards_check.py"), "replay", "--rpc", "x", "--cast", str(shim), "--pool", "0xp",
                                    "--custody", "0xc", "--registry", "0xr", "--election", "0xe", "--policy", "0xq", "--genesis-assignment", "0x" + "ab" * 32,
                                    "--initial-funding", str(2 * UCT), *flags], capture_output=True, text=True, env=env)
 
@@ -219,6 +219,22 @@ class ReplayAgainstTheChain(unittest.TestCase):
                 r = self.run_cli(self.world(tamper))
                 self.assertNotEqual(r.returncode, 0)
                 self.assertIn("REWARDS-REPLAY FAILED", r.stderr)
+
+    def test_the_checks_survive_python_optimize(self):
+        """`python -O` strips assert statements: a tool built on them prints ok having checked nothing. The checks are explicit raises."""
+        import ast
+        tree = ast.parse((Path(__file__).resolve().parent / "rewards_check.py").read_text())
+        self.assertEqual([n.lineno for n in ast.walk(tree) if isinstance(n, ast.Assert)], [], "no assert statement may carry a check")
+        for name, tamper in (("available", lambda w: w["final"].update(available=w["final"]["available"] + 1)),
+                             ("a payee's credit", lambda w: w["final"]["credits"].update({self.PAYEES[0]: 1}))):
+            with self.subTest(name):
+                r = self.run_cli(self.world(tamper), python_flags=("-O",))
+                self.assertNotEqual(r.returncode, 0, "python -O printed ok: " + r.stdout)
+                self.assertIn("REWARDS-REPLAY FAILED", r.stderr)
+        ok = self.run_cli(self.world(), "--require-exhaustion", "--require-refill", python_flags=("-O",))
+        self.assertEqual(ok.returncode, 0, ok.stderr)
+        for flags in (("--min-paid", "9"),):
+            self.assertNotEqual(self.run_cli(self.world(), *flags, python_flags=("-O",)).returncode, 0)
 
     def test_the_required_facts_are_required(self):
         def no_dry(w):   # drop the zero-budget close and the refill: a pool that never ran dry

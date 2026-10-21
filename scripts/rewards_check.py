@@ -32,7 +32,7 @@ def model(segments, progress, tail_open, start, rate, available, members_of):
             break
         owner, s_start, s_end = segments[seg]
         if a < s_start:
-            raise AssertionError(f"timeline gap: the next interval starts at {a}, the owner at {s_start}")
+            raise ReplayError(f"timeline gap: the next interval starts at {a}, the owner at {s_start}")
         if s_end is None and tail_open:
             break
         b = (a - start) // GRID * GRID + GRID + start
@@ -47,7 +47,7 @@ def model(segments, progress, tail_open, start, rate, available, members_of):
         total = sum(w for w, _ in members)
         distributed = 0
         if budget:
-            assert total > 0, "zero total weight"
+            need(total > 0, "zero total weight")
             for w, payee in members:
                 share = budget * w // total
                 credits[payee] = credits.get(payee, 0) + share
@@ -60,6 +60,12 @@ def model(segments, progress, tail_open, start, rate, available, members_of):
 
 class ReplayError(AssertionError):
     pass
+
+
+def need(cond, message):
+    """A check that survives `python -O` (an `assert` statement is stripped there and the tool would print ok having checked nothing)."""
+    if not cond:
+        raise ReplayError(message)
 
 
 def replay(events, segments, members_of, start, snapshots, genesis_funding):
@@ -129,9 +135,9 @@ def replay(events, segments, members_of, start, snapshots, genesis_funding):
 
 def words(hexstr):
     h = hexstr.strip()
-    assert h.startswith("0x"), h
+    need(h.startswith("0x"), h)
     h = h[2:]
-    assert len(h) % 64 == 0, f"not whole words: {h[:80]}"
+    need(len(h) % 64 == 0, f"not whole words: {h[:80]}")
     return [int(h[i:i + 64], 16) for i in range(0, len(h), 64)]
 
 
@@ -170,12 +176,12 @@ def check(a):
     for i, (assignment, start, _) in enumerate(segments):
         asg = c.raw(a.custody, "assignments(bytes32)", assignment)
         offset, offset_set = asg[4], bool(asg[6])
-        assert offset_set, f"segment {i}: custody has not activated {assignment}"
-        assert start == offset, f"segment {i} starts at {start}, custody holds offset {offset} for {assignment}"
-    assert segments[0][0] == a.genesis_assignment.lower(), "segment 0 is not the genesis assignment"
+        need(offset_set, f"segment {i}: custody has not activated {assignment}")
+        need(start == offset, f"segment {i} starts at {start}, custody holds offset {offset} for {assignment}")
+    need(segments[0][0] == a.genesis_assignment.lower(), "segment 0 is not the genesis assignment")
     for i in range(len(segments) - 1):
-        assert segments[i][2] is not None, f"segment {i} is not the last yet has no end"
-        assert segments[i][2] == segments[i + 1][1], f"segment {i} ends at {segments[i][2]}, segment {i + 1} starts at {segments[i + 1][1]}"
+        need(segments[i][2] is not None, f"segment {i} is not the last yet has no end")
+        need(segments[i][2] == segments[i + 1][1], f"segment {i} ends at {segments[i][2]}, segment {i + 1} starts at {segments[i + 1][1]}")
 
     def members_of(assignment):
         ids = c.raw(a.custody, "assignmentExposures(bytes32)", assignment)
@@ -194,14 +200,14 @@ def check(a):
     credits, next_start, available, intervals = model(segments, progress, tail_open, start, rate, funded, members_of)
 
     got_next, got_avail, got_total = c.raw(a.pool, "nextStart()")[0], c.raw(a.pool, "available()")[0], c.raw(a.pool, "totalCredits()")[0]
-    assert got_next == next_start, f"nextStart {got_next}, recomputed {next_start}"
-    assert got_avail == available, f"available {got_avail}, recomputed {available}"
-    assert got_total == sum(credits.values()), f"totalCredits {got_total}, recomputed {sum(credits.values())}"
+    need(got_next == next_start, f"nextStart {got_next}, recomputed {next_start}")
+    need(got_avail == available, f"available {got_avail}, recomputed {available}")
+    need(got_total == sum(credits.values()), f"totalCredits {got_total}, recomputed {sum(credits.values())}")
     for payee, want in sorted(credits.items()):
         have = c.raw(a.pool, "credits(address)", payee)[0]
-        assert have == want, f"credit of {payee}: {have}, recomputed {want}"
+        need(have == want, f"credit of {payee}: {have}, recomputed {want}")
     bal = int(subprocess.run([a.cast, "balance", "--rpc-url", a.rpc, "--block", str(block), a.pool], text=True, capture_output=True, check=True).stdout.strip())
-    assert bal >= got_avail + got_total, f"the pool holds {bal}, it has allocated {got_avail + got_total}"
+    need(bal >= got_avail + got_total, f"the pool holds {bal}, it has allocated {got_avail + got_total}")
     print("REWARDS-CHECK ok " + json.dumps({"block": block, "segments": len(segments), "intervals": intervals, "nextStart": got_next, "progress": progress,
           "tailOpen": tail_open, "available": got_avail, "totalCredits": got_total, "surplus": bal - got_avail - got_total, "payees": len(credits)}))
 
@@ -246,7 +252,7 @@ def replay_check(a):
     for i in range(n):
         w = c.raw(a.pool, "segmentAt(uint256)", i)
         segments.append(("0x" + format(w[0], "064x"), w[1], w[2] if w[3] else None))
-    assert segments[0][0] == a.genesis_assignment.lower(), "segment 0 is not the genesis assignment"
+    need(segments[0][0] == a.genesis_assignment.lower(), "segment 0 is not the genesis assignment")
 
     def members_of(assignment):
         ids = c.raw(a.custody, "assignmentExposures(bytes32)", assignment)
@@ -263,19 +269,19 @@ def replay_check(a):
     state = replay(events, segments, members_of, start, snaps, a.initial_funding)
     got = {"available": c.raw(a.pool, "available()")[0], "totalCredits": c.raw(a.pool, "totalCredits()")[0], "nextStart": c.raw(a.pool, "nextStart()")[0]}
     for k in got:
-        assert got[k] == state[k], f"{k}: the chain has {got[k]}, the replay {state[k]}"
+        need(got[k] == state[k], f"{k}: the chain has {got[k]}, the replay {state[k]}")
     for payee, want in sorted(state["credits"].items()):
         have = c.raw(a.pool, "credits(address)", payee)[0]
-        assert have == want, f"credit of {payee}: {have}, replayed {want}"
+        need(have == want, f"credit of {payee}: {have}, replayed {want}")
     s = state["stats"]
     if a.min_paid is not None:
-        assert s["paid"] >= a.min_paid, f"{s['paid']} paid intervals, {a.min_paid} required"
+        need(s["paid"] >= a.min_paid, f"{s['paid']} paid intervals, {a.min_paid} required")
     if a.require_exhaustion:
-        assert s["exhaustedAt"] is not None and s["zeroBudget"] >= 1, "the pool never ran dry (no zero-budget interval with a positive nominal budget)"
+        need(s["exhaustedAt"] is not None and s["zeroBudget"] >= 1, "the pool never ran dry (no zero-budget interval with a positive nominal budget)")
     if a.require_refill:
-        assert s["refilledAfterExhaustion"], "no funding arrived after the pool ran dry"
+        need(s["refilledAfterExhaustion"], "no funding arrived after the pool ran dry")
         last_zero = max((e["end"] for e in events if e["kind"] == "close" and e["budget"] == 0), default=0)
-        assert any(e["kind"] == "close" and e["budget"] > 0 and e["start"] >= last_zero for e in events), "no interval was paid after the last empty one"
+        need(any(e["kind"] == "close" and e["budget"] > 0 and e["start"] >= last_zero for e in events), "no interval was paid after the last empty one")
     print("REWARDS-REPLAY ok " + json.dumps(dict(s, block=block, events=len(events), segments=len(segments), nextStart=got["nextStart"], available=got["available"],
                                                  totalCredits=got["totalCredits"], payees=len(state["credits"]))))
 
