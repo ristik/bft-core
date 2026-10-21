@@ -175,7 +175,7 @@ x4p_exit_request_check() { # read-only: requested, imported, and a root logged t
 # credit and claims it to a fresh recipient with exact balance deltas. args.expectReason (EvidenceHoldPending): an offender's exit stays refused (EvidenceHoldPending) while
 # its evidence is unsettled, and the step records that refusal before waiting.
 x4p_exit_claim() {
-  local id st="$X4_STEP_DIR/state-pre.json" wait t0 ids recip credit before wkey out="$X4_STEP_DIR/refusal.json" did_mature=0 expect
+  local id st="$X4_STEP_DIR/state-pre.json" wait t0 ids recip credit before wkey out="$X4_STEP_DIR/refusal.json" did_mature=0 expect n=0
   id=$(x4p_exit_id) || return 1; wkey=$(x4p_withdrawal_key "$id")
   [ -r "$wkey" ] || x4p_die "no withdrawal key $wkey (the campaign needs X4_HELD_KEYS=1)" || return 1
   wait=$(x4p_arg matureWaitSeconds 900)
@@ -190,6 +190,7 @@ x4p_exit_claim() {
     t0=$(date +%s)
     until x4p_exit refusal "$id" --allow-success 2>/dev/null | jq -e '.outcome=="mature-now"' >/dev/null; do
       [ $(( $(date +%s) - t0 )) -lt "$wait" ] || { x4p_exit refusal "$id" --allow-success >"$X4_STEP_DIR/refusal-last.json" 2>&1 || true; x4p_die "identity $id did not mature within ${wait}s: $(cat "$X4_STEP_DIR/refusal-last.json")"; return 1; }
+      n=$((n + 1)); [ $((n % 10)) -ne 1 ] || x4p_log "waiting for identity $id to mature: $(x4p_exit refusal "$id" --allow-success 2>&1 | head -c 200) head=$("$P85_CAST" block-number --rpc-url "$(p85_eth)" 2>&1) t=$(( $(date +%s) - t0 ))s"
       x4p_tick
     done
     ids="[$(jq -r '[.lots[].id]|map(tostring)|join(",")' "$st")]"
