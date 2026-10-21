@@ -123,12 +123,14 @@ func (a *Adapter) CheckExecutionProfile(ctx context.Context, wantChainID uint64)
 }
 
 // unicityNativePrecompiles is what a B1/B2 deployment's client adds to the pinned Cancun set (ureth's Unicity EVM factory): the one certificate operation
-// CERT_BATCH_V2 at 0x0100 (the any-age batch, protocol 4; 0x0101 stays unregistered), the stateless RSMT membership check at 0x0102 and the B2 native
-// token kernel at 0x0104. 0x0103 (S1) stays unregistered. Nothing else may differ.
+// CERT_BATCH_V2 at 0x0100 (the any-age batch, protocol 4; 0x0101 stays unregistered), the stateless RSMT membership check at 0x0102, the B2 native
+// token kernel at 0x0104 and the bridge composition BRIDGE_COMPOSE_V1 at 0x0105 (B7 direct PR 2, ureth#79). 0x0103 (S1) stays unregistered. Nothing
+// else may differ.
 var unicityNativePrecompiles = map[string]string{
-	"unicity-b1-cert-batch-v2": "0x0000000000000000000000000000000000000100",
-	"unicity-b1-membership":    "0x0000000000000000000000000000000000000102",
-	"unicity-b2-sdk3":          "0x0000000000000000000000000000000000000104",
+	"unicity-b1-cert-batch-v2":  "0x0000000000000000000000000000000000000100",
+	"unicity-b1-membership":     "0x0000000000000000000000000000000000000102",
+	"unicity-b2-sdk3":           "0x0000000000000000000000000000000000000104",
+	"unicity-bridge-compose-v1": "0x0000000000000000000000000000000000000105",
 }
 
 // ExpectUnicityPrecompiles makes the profile check require exactly the B1/B2 native precompiles in addition to the pinned Cancun set. It is for a
