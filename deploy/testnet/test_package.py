@@ -25,6 +25,33 @@ class FakeRelay:
         self.calls.append((method,params))
         return {'jsonrpc':'2.0','id':1,'result':'0x1'}
 
+class LaneKeysAreNotInherited(unittest.TestCase):
+    def test_the_plan_key_variables_never_reach_the_deployment_environment(self):
+        with patch.dict(os.environ, {'P85_PLAN_OWNER_KEYS': '/x', 'P85_PLAN_WITHDRAWAL_KEYS': '/y', 'P85_PLAN_KEEP': '1', 'P85_CHAIN_ID': '7'}):
+            env = pos.clean_environ()
+        self.assertNotIn('P85_PLAN_OWNER_KEYS', env)
+        self.assertNotIn('P85_PLAN_WITHDRAWAL_KEYS', env)
+        self.assertEqual((env['P85_PLAN_KEEP'], env['P85_CHAIN_ID']), ('1', '7'))
+
+    def test_the_plan_subprocess_gets_the_cleaned_environment(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            genesis=pos.Genesis(Path(tmp)/'work','ubft',tmp,generate.REPO,'tn-x',1,(1,2))
+            tb,conf=Path(tmp)/'tb.json',Path(tmp)/'conf.json'
+            tb.write_text(json.dumps({'rootNodes':[{'nodeId':'r1','sigKey':'k1'},{'nodeId':'r2','sigKey':'k2'}]}))
+            conf.write_text(json.dumps({'validators':[{'nodeId':'e1','sigKey':'q1'},{'nodeId':'e2','sigKey':'q2'}]}))
+            seen=[]
+            real=subprocess.check_output
+            def spy(cmd,**kw):
+                seen.append(kw.get('env'))
+                return real(cmd,**kw)
+            with patch.dict(os.environ,{'P85_PLAN_OWNER_KEYS':'/x','P85_PLAN_PAYEE_KEYS':'/y','P85_CAST':'cast'}), patch.object(pos.subprocess,'check_output',spy):
+                genesis.plan(tb,conf)
+            self.assertEqual(len(seen),1)
+            self.assertIsNotNone(seen[0],'the plan script inherited os.environ (no env= given)')
+            self.assertFalse([k for k in seen[0] if k.startswith('P85_PLAN_') and k.endswith('KEYS')])
+            self.assertEqual(seen[0].get('P85_CAST'),'cast')
+
+
 class ChurnBudget(unittest.TestCase):
     def test_the_generated_evm_configuration_commits_the_testnet_churn_budget(self):
         params=dict(item.split('=',1) for item in generate.evm_partition_params(1337).split(','))
