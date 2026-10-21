@@ -18,9 +18,13 @@ type Verdict struct {
 
 // Cert evaluates a CERT_BATCH_V2 request (briefs/b1-any-age-contract.md sections 2 and 3) without a gas limit: the error is a
 // halt (ErrMalformed) or an infrastructure failure (ErrInfrastructure); otherwise the verdict carries the full charge.
-func Cert(in []byte, st State, pins Pins) (Verdict, error) {
+func Cert(in []byte, st State, pins Pins) (Verdict, error) { return CertWith(in, st, pins, Standard) }
+
+// CertWith is Cert under explicit aggregate limits: the composition authenticates its anchor table under Composed, as the native
+// BRIDGE_COMPOSE_V1 does.
+func CertWith(in []byte, st State, pins Pins, lim Limits) (Verdict, error) {
 	var pl plan
-	if err := scanBatch(in, &pl, Standard); err != nil {
+	if err := scanBatch(in, &pl, lim); err != nil {
 		return Verdict{}, err
 	}
 	return finishCert(in, &pl, st, pins)
@@ -35,7 +39,7 @@ func VerifyCert(in []byte, st State, pins Pins) (bool, error) {
 // finishCert is everything after the scan and the full charge: the native decode of every occurrence, then the registry and the
 // relation.
 func finishCert(in []byte, pl *plan, st State, pins Pins) (Verdict, error) {
-	claims, err := parseClaims(in, pl.k)
+	claims, err := parseClaims(in, pl.k, pl.perUCItems)
 	if err != nil {
 		return Verdict{}, err
 	}

@@ -39,6 +39,8 @@ Entries: epoch 2 is the K->J handoff (activated; the P85 J is never acknowledged
          trust-base entry cannot be derived', a signed vote at exactly the record's round and the committed outcome of the record (state-import/root<N>.txt)
   2c C   (DNB_AGG_SHARDS=2) right after L1b: a second token over both aggregator shards is consolidated by the SDK (K = m anchors under one seal) and redeemed once (#526 step 4);
          the per-SID envelope of the same token is built and priced as the control (anyage_step_consolidated)
+  2d LH  (B7_LONG_HISTORY=1) a token transferred live past every former bridge bound (more than 65 leaves, above 64 KiB and 7M gas) is redeemed one gas short (it reverts,
+         the vault unchanged) and then with the estimate (credited, claimed) (anyage_step_long_history, B7 PR 3)
   3  U2  after the K->J activation: the aggregator receives the epoch-2 entry attached to a version 3 certification response (log: received + appended, no catch-up), the root's
          message is captured and decodes to exactly that entry; the aggregator serves epoch 2
   4  U3a the aggregator restarts from its retained store (unchanged records); then it is stopped and its history store removed (the controlled fault)
@@ -109,6 +111,9 @@ preflight() {
   note "contracts#46 changes the manifest hash and the publication fixture: the copies under evmassign/testdata and rootchain/evmstate/testdata and the xrepo/fixtures.json pin are re-copied at the #46 merge commit (checked: the new fixture passes evmassign, evmstate, xrepo, posrelayer, signingauthority)"
   if [ -n "${NBP_DIR:-}" ] && [ -d "$NBP_DIR/tests/live" ]; then yes "NBP_DIR $NBP_DIR"; else no "set NBP_DIR to the native-bridge-plugins checkout"; fi
   check "NBP_DIR's live driver reads the trust-base release bundle (native-bridge-plugins#27, a lane prerequisite: the lane writes trust-base.bundle.cbor since bft-core#658 and no sdk-trust-base.json)" bash -c "grep -q 'trust-base.bundle.cbor' '${NBP_DIR:-/nonexistent}/tests/live/anyage.ts'"
+  if [ "${B7_LONG_HISTORY:-0}" = 1 ]; then
+    check "B7_LONG_HISTORY=1: NBP_DIR's live driver has the long-history command (B7 PR 3)" bash -c "grep -q \"'long-history'\" '${NBP_DIR:-/nonexistent}/tests/live/anyage.ts'"
+  fi
   if [ "${DNB_AGG_SHARDS:-1}" != 1 ]; then
     check "DNB_AGG_SHARDS=${DNB_AGG_SHARDS}: NBP_DIR's live driver steers the saved history across the aggregator shards (native-bridge-plugins anyage driver: 'no lock gave a mint and a burn on different aggregator shards')" bash -c "grep -q 'on different aggregator shards' '${NBP_DIR:-/nonexistent}/tests/live/anyage.ts'"
     check "the aggregator shard count is 2 (the depth-1 topology 0x40, 0xc0)" test "${DNB_AGG_SHARDS}" = 2

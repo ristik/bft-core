@@ -75,11 +75,14 @@ func (r *reader) u32() (uint64, error) {
 
 // parseClaims decodes every claim occurrence of a request scanBatch accepted (k occurrences after the header), including the
 // native decode and byte-exact re-encoding of each certificate. It runs only after the full charge is reserved.
-func parseClaims(in []byte, k uint64) ([]claim, error) {
+func parseClaims(in []byte, k uint64, perUCItems bool) ([]claim, error) {
 	r := &reader{b: in, pos: 4}
 	tokens := 0
 	claims := make([]claim, 0, k)
 	for i := uint64(0); i < k; i++ {
+		if perUCItems {
+			tokens = 0
+		}
 		c, err := parseClaim(r, &tokens)
 		if err != nil {
 			return nil, fmt.Errorf("claim %d: %w", i, err)

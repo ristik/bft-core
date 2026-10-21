@@ -182,6 +182,22 @@ anyage_step_l1b() {
 # #526 step 4 (a multi-shard aggregator): a second token whose history spans the shards, consolidated by the SDK and redeemed once; the per-SID envelope of the same token is
 # the control. Asserted from the driver's record: the consolidated path was used, K = m anchors (one per shard) under ONE seal (S = 1), the per-SID control has more
 # distinct seals or equal, the vault credited exactly the locked amount, and the master round was within the registry's usable origin when it was accepted.
+# B7 PR 3 (briefs/dev4-b7-pr3-plan.md 4.2, B7_LONG_HISTORY=1): a token transferred live LONG_TRANSFERS times (default 320) past every former bridge bound (more than 65
+# leaves, an envelope above 64 KiB, a redemption above 7M gas), consolidated by the SDK and redeemed twice: one gas short of what the call needs (mined, reverted, the vault's
+# lock, spent and credit state unchanged) and then with the estimate (credited, claimed). Asserted from the driver's record.
+anyage_step_long_history() {
+  local out j; out=$(anyage_dir)/long-history; mkdir -p "$out"
+  anyage_nbp long-history "$PWD/test-nodes/lane-config.json" "$out" 2>&1 | tee "$out/long-history.log" || return 1
+  j=$out/long-history.json; [ -s "$j" ] || { echo "the driver wrote no long-history.json" >&2; return 1; }
+  jq -e '(.leaves | tonumber) > 65 and (.envelopeBytes | tonumber) > 65536 and (.release.redeem.gasUsed | tonumber) > 7000000
+      and .underfunded.status == "0x0" and (.underfunded.vaultBefore == .underfunded.vaultAfter)
+      and (.underfunded.gasLimit | tonumber) < (.release.redeem.gasLimit | tonumber)
+      and (.release.credited | tostring) == (.amountWei | tostring) and (.release.claim.gasUsed | tonumber) > 0' "$j" >/dev/null \
+    || { echo "long-history.json does not show the long redemption (more than 65 leaves, above 64 KiB and 7M gas; underfunded reverts with the vault unchanged; then credited and claimed)" >&2
+         jq -c '{transfers, leaves, envelopeBytes, estimatedGas, underfunded: {gasLimit: .underfunded.gasLimit, status: .underfunded.status, unchanged: (.underfunded.vaultBefore == .underfunded.vaultAfter)}, redeem: .release.redeem}' "$j" >&2; return 1; }
+  jq -r '"long history: \(.transfers) transfers, \(.leaves) leaves, envelope \(.envelopeBytes) B (history \(.historyBytes) B), K=\(.K) S=\(.S) E=\(.E) Q=\(.Q)\nestimated gas \(.estimatedGas); underfunded at \(.underfunded.gasLimit): status \(.underfunded.status), vault unchanged\nredeem gas used \(.release.redeem.gasUsed) (limit \(.release.redeem.gasLimit)), credited \(.release.credited), claim gas used \(.release.claim.gasUsed)"' "$j" | tee "$out/summary.txt"
+}
+
 anyage_step_consolidated() {
   local out j; out=$(anyage_dir)/consolidated; mkdir -p "$out"
   anyage_nbp consolidated "$PWD/test-nodes/lane-config.json" "$out" 2>&1 | tee "$out/consolidated.log" || return 1
