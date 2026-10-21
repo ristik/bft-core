@@ -228,6 +228,7 @@ s4_submit_settle() {
   s4_pass "the submitter was interrupted after admission (case $CASE) and its output kept ($out)"
   OFFENCE=$(s4_cast call --rpc-url "$(p85_eth)" "$EV" 'caseInfo(bytes32)(bytes32,bytes32,uint64,address,uint256,uint256,uint32,uint32)' "$CASE" | head -1 | awk '{print $1}')
   s4_snapshot admitted || return 1
+  [ -z "${S4_ADMITTED_HOOK:-}" ] || "$S4_ADMITTED_HOOK" || return 1   # X4 B3b: the exit probe, while the case is admitted and not yet settled (the holds are installed)
   out=$d/submit-2.txt
   s4_with_traffic s4_submit_once "$out" "$EV" "${ids[@]}" --wait || return 1
   grep -q 'settled in' "$out" || { echo "the second submitter run did not settle: $(cat "$out")" >&2; return 1; }
