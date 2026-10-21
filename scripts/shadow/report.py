@@ -8,7 +8,7 @@ REFUSAL_REASONS = ("refusal:Cardinality", "refusal:MembershipChurn", "refusal:We
 DEFAULT_RULES = {"minDue": 24, "minEach": 2, "minDistinctInputs": 2}
 
 
-def coverage(rows, scheduled, rules=None):
+def coverage(rows, scheduled, rules=None, interval=None):
     """rows: observation dicts with 'verdict' in MATCH / MISMATCH / GAP, 'case', 'inputDigest'. scheduled: the number of samples the declared interval schedules."""
     rules = dict(DEFAULT_RULES, **(rules or {}))
     verdicts = Counter(r["verdict"] for r in rows)
@@ -34,11 +34,23 @@ def coverage(rows, scheduled, rules=None):
         reasons.append((STATUS_INCOMPLETE, "no refusal beyond the churn bound (over-bound) was observed"))
     if len({r["inputDigest"] for r in due}) < rules["minDistinctInputs"]:
         reasons.append((STATUS_INCOMPLETE, "the due comparisons repeat one input: a vacuous answer, not coverage"))
+    if interval is not None and interval["actualSeconds"] < rules.get("minDurationSeconds", 0):
+        reasons.append((STATUS_INCOMPLETE, f"observed {interval['actualSeconds']:.0f} s of the declared {interval['declaredSeconds']} s interval"))
+    incumbents = sorted({r["incumbent"] for r in rows if r.get("incumbent")})
+    if len(incumbents) > 1:
+        reasons.append((STATUS_FAIL, f"the installed incumbent assignment changed during the observation ({len(incumbents)} distinct): the PoA committee must stay fixed"))
+    clocks = [r["clock"] for r in rows if r.get("clock")]
+    blocks = [r["block"]["number"] for r in rows if r.get("block")]
+    timeline = {"firstBlock": min(blocks, default=None), "lastBlock": max(blocks, default=None), "firstProgress": clocks[0]["progress"] if clocks else None,
+                "lastProgress": clocks[-1]["progress"] if clocks else None, "firstUcTime": clocks[0]["ucTime"] if clocks else None,
+                "lastUcTime": clocks[-1]["ucTime"] if clocks else None, "incumbents": incumbents}
+    if interval is not None:
+        timeline.update(interval)
     status = STATUS_FAIL if any(s == STATUS_FAIL for s, _ in reasons) else STATUS_INCOMPLETE if reasons else STATUS_PASS
     return {"status": status, "reasons": [m for _, m in reasons], "scheduled": scheduled, "accounted": accounted, "verdicts": dict(verdicts), "dueComparisons": len(due),
             "cases": dict(cases), "refusals": refusals, "overBound": over_bound, "idle": {"NotDue": sum(1 for r in rows if r["case"] == "NotDue"),
                                                                                        "Disabled": sum(1 for r in rows if r["case"] == "Disabled")},
-            "rules": rules}
+            "rules": rules, "timeline": timeline}
 
 
 def write_markdown(path, manifest, cov, first_failure=None):

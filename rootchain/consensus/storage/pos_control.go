@@ -71,6 +71,37 @@ type ClosureProposer interface {
 	Closure(epoch, orderingEpoch, orderingRound uint64) (rctypes.PosControl, []byte, error)
 }
 
+// EVMParent is the exact EVM tuple a Retirement in the child of a block is judged against: the state root certified in that parent
+// and the hash of the block it certified (the zero word when that round was quiet, as certifiedState requires).
+type EVMParent struct {
+	StateRoot, BlockHash [32]byte
+}
+
+// RetirementKey identifies one Retirement request: an identity generation.
+type RetirementKey struct{ ID, Generation uint64 }
+
+// PreparedRetirement is a Retirement control, with its retained witness, built for one EVMParent: the control carries no ordering position
+// yet (the proposer stamps its block's).
+type PreparedRetirement struct {
+	ID, Generation uint64
+	Control        rctypes.PosControl
+	Witness        []byte
+}
+
+// RetirementProposer builds the Retirement controls of the identities whose owner requested one, against the EVM state certified in the
+// parent the proposal extends. Retirement is optional (unlike the mandatory closure): both methods are non-blocking, the proofs are
+// collected off the consensus loop and the leader only uses what is ready for exactly its parent.
+type RetirementProposer interface {
+	// Prepare starts collecting the proofs of the pending requests against parent, if any are pending and not collected yet.
+	Prepare(parent EVMParent)
+	// Ready returns at most max prepared Retirements for exactly this parent, rotating fairly among the requests; none when none is ready.
+	Ready(parent EVMParent, max int) []PreparedRetirement
+	// Pending lists the requests still waiting, so the caller can tell which of them a committed block has ordered.
+	Pending() []RetirementKey
+	// Ordered tells the proposer a Retirement of the generation is committed: nothing more to propose for it.
+	Ordered(id, generation uint64)
+}
+
 // WitnessSource returns the retained witness bytes by their SHA-256.
 type WitnessSource interface {
 	Witness(hash [32]byte) ([]byte, error)
@@ -127,6 +158,8 @@ type PosServices struct {
 	Witnesses  WitnessSource
 	EVM        EVMStateAuthority
 	Proposer   ClosureProposer
+	// Retirements, when set, makes the proposer build the Retirement controls itself (the normal exit needs only the owner's on-chain request).
+	Retirements RetirementProposer
 	// Primary, when set together with Deployment.Election, makes the EVM proof of a primary candidate a condition of its Freeze: the
 	// companion must be version 4 and carry a proof that evmassign.VerifyPrimary accepts against the frozen parent's state root.
 	Primary PrimaryAuthority

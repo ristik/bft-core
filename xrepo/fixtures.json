@@ -23,8 +23,6 @@
      "pair": "the root's Retirement records with custody's exposure-chain reference digests and a root-signed equivocation of a retiring identity's key -> SealRegistry.importRootRecords -> custody.applyRootRecords verbatim -> Evidence hold -> mature and claim (XRepoRetirement.t.sol)"},
     {"producer": "bft-core", "contracts": "test/p85/fixtures/xrepo-go-rotation-evidence.json", "bftCore": ["xrepo/testdata/go-rotation-evidence.json"],
      "pair": "root-signed equivocations by the old and the new root key of an identity whose rotation custody activates with an Ack -> Evidence.submitEvidence: historical attribution, KeyMismatch for the old key in the new epoch (XRepoRotationEvidence.t.sol)"},
-    {"producer": "bft-core", "contracts": "test/b7/fixtures/b7-relation-vectors-v1.json", "bftCore": ["b7rel/testdata/b7-relation-vectors-v1.json"],
-     "pair": "the B7 relation interface: candidate limits and relation ID, the per-epoch registry commitment C_e over the stored entry words, and the canonical journal codec -> B7Relation.sol (B7RelationVectors.t.sol)"},
     {"producer": "bft-core", "contracts": "test/p85/fixtures/xrepo-genesis-input.json", "bftCore": ["xrepo/testdata/genesis/contracts-genesis.json"],
      "pair": "pos-relayer genesis --out-contracts (genesis assignment id of the FULL configuration, identities) -> script/P85Genesis.s.sol (XRepoGenesis.t.sol)"},
     {"producer": "bft-core", "contracts": "test/p85/fixtures/evidence-digest-corpus-go-v1.json", "bftCore": ["s1ref/testdata/evidence-digest-corpus-v1.json"],

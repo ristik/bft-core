@@ -13,7 +13,7 @@ T6_BFT_COMMIT=${T6_BFT_COMMIT:-$(git -C "$SOURCE_ROOT" rev-parse HEAD)}
 T6_BFT_REMOTE=${T6_BFT_REMOTE:-$(git -C "$SOURCE_ROOT" remote get-url origin)}
 T6_BFT_REF=${T6_BFT_REF:-t6/rehearsal-harness}
 # the Ureth the run is pinned to: 6e59b68c (briefs/builds/ureth-6e59b68c/), the build the UTB lanes run and one that takes the --unicity.max-epochs-per-update flag the current b1genesis emits (47f5146b rejects it); an ATTESTED build of the pin is accepted (T6_URETH_ATTESTED)
-T6_URETH_COMMIT=${T6_URETH_COMMIT:-6e59b68cc29f196d54d3d6e28d6266a8c02d05a1}
+T6_URETH_COMMIT=${T6_URETH_COMMIT:-53c9330d030426b9847ac2c69840adcfc8490221}
 T6_URETH_REMOTE=${T6_URETH_REMOTE:-https://github.com/ristik/ureth.git}
 T6_CONTRACTS_COMMIT=${T6_CONTRACTS_COMMIT:-e7eb3216549b772a9e1df2b1214976d7dd9e6e62}
 # The four allocation contracts are rebuilt from their e7eb3216 source commit. The registry is not: the fresh-B1 registry (layout 3) is generated in code
@@ -135,6 +135,12 @@ PY
 # TMPDIR); make it writable first. A failing run keeps its checkout for inspection; a passing run never does.
 remove_isolation_root() {
   [ -n "${ISOLATION_ROOT:-}" ] && [ -d "$ISOLATION_ROOT" ] || return 0
+  # CI (scripts/ci/run-t6.sh) searches the published pack for the VALUES of this devnet's keys and JWTs, which die with the checkout: save them first
+  if [ -n "${T6_SECRETS_DIR:-}" ]; then
+    local here_; here_=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+    "$here_/ci/t6-secrets.sh" "$T6_SECRETS_DIR" "$ISOLATION_ROOT/bft-core/test-nodes" "$(sed -n 's/^T6_TREASURY_TEST_KEY=//p' "$here_/t6/lane-actions.sh" | head -1)" \
+      || echo "T6: saving the devnet secrets FAILED; the CI publisher refuses evidence it cannot value-scan" >&2
+  fi
   chmod -R u+w "$ISOLATION_ROOT" 2>/dev/null || true
   rm -rf "$ISOLATION_ROOT"
 }

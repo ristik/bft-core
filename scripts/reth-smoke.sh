@@ -4,7 +4,7 @@
 # Obtains the approved pinned execution client and verifies it, runs the stock-client control and
 # the paired funded-transaction devnet against it, and then — whatever happened — collects the
 # evidence, tears down every process the run started, archives the evidence and validates the
-# archive. .github/workflows/reth-smoke.yml is a thin wrapper around this script.
+# archive. .github/workflows/stock-reth-control.yml is a thin wrapper around this script.
 #
 # Usage (from anywhere; it runs from the repository root):
 #   ./scripts/reth-smoke.sh --reth-bin PATH [options]   # a binary you built from the pinned commit
@@ -110,7 +110,7 @@ if [ "${RETH_SMOKE_SUPERVISED:-0}" != "1" ]; then
   export RETH_EVIDENCE_SCAN_FILE # reth-baseline.sh records its JWTs here, before using them
   prov=$runDir/provenance.txt
   {
-    echo "lane=real-reth-smoke"
+    echo "lane=stock-reth-control"
     echo "bft=$(git rev-parse HEAD 2>/dev/null) dirty=$(git status --porcelain --untracked-files=no 2>/dev/null | grep -q . && echo yes || echo no)"
     echo "invocation=$0 ${origArgs[*]}"
     echo "host=$(rethPinPlatform) date=$(date -u +%Y-%m-%dT%H:%M:%SZ)"

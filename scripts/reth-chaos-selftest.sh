@@ -471,7 +471,7 @@ fi
 # record, and the fault workflow's own selection step — extracted verbatim from the YAML — must then
 # refuse to publish the archive. Without the record, that selection published it as "validated".
 repoRoot=$(cd "$(dirname "$harness")/../.." && pwd)
-faultSelect=$(awk 'index($0,"name: Validate and select publishable evidence"){f=1} f&&/run: >-/{r=1;next} r&&NF==0{exit} r{printf "%s ",$0}' "$repoRoot/.github/workflows/reth-fault.yml")
+faultSelect=$(awk 'index($0,"name: Validate and select publishable evidence"){f=1} f&&/run: >-/{r=1;next} r&&NF==0{exit} r{printf "%s ",$0}' "$repoRoot/.github/workflows/stock-reth-fault-control.yml")
 scanOut=$(scenarioLifecycle scaninputs '
   openssl() { echo "jwt-for-$SENTINEL"; }
   startReth() { grep -qxF "$(tr -d " \n" <test-nodes/evm1/jwt.hex)" "$(chaosScanFile)" 2>/dev/null || echo USED_BEFORE_RECORDED; }

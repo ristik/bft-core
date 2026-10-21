@@ -205,6 +205,8 @@ p85_root_flags() {
   # non-PoS flag: --pos-genesis-identities needs --pos-deployment), so the assignment the records hook delivers is the one custody holds.
   if p85_shadow; then echo --genesis-identities "$P85_DIR/genesis-identities.json"; return 0; fi
   echo --pos-deployment "$P85_DIR/pos-deployment.json" --pos-genesis-identities "$P85_DIR/genesis-identities.json" --pos-evm-rpc "$2"
+  # S4: every root keeps an observer journal (S3, docs/root-evidence.md)
+  [ "${S4_LANE:-0}" != 1 ] || echo --evidence-journal "test-nodes/root$1/evidence.db"
 }
 
 # The shadow chain has the records hook and NO election, and its roots run without the PoS flags. Two checks, both run by the shadow lane after the genesis and
@@ -229,6 +231,22 @@ p85_assert_shadow_roots() { # the command lines of the running roots
     case "$args" in *--pos-deployment*|*--pos-evm-rpc*|*--pos-genesis-identities*) p85_die "shadow: root $f runs with PoS flags: $args" || return 1;; esac
   done
   [ "$n" -gt 0 ] || p85_die "shadow: no running root to check" || return 1
+}
+
+# A node answers an estimateGas/send that raced a block being built with "bound parent hash mismatch" / "Failed to estimate gas" (ci-lane run 39495201581: the
+# shadow campaign's 27th minute). Both are refusals BEFORE anything is sent, so the same transaction can be tried again; nothing else is retried, and every retry
+# is logged (X4_RETRY_LOG) so the evidence shows how often the node did it. x4_retry CMD...: stdout of the successful attempt; the last stderr on failure.
+x4_retry() {
+  local i n=${X4_RETRIES:-8} out rc err; err=$(mktemp) || return 1
+  for i in $(seq 1 "$n"); do
+    out=$("$@" 2>"$err"); rc=$?
+    if [ "$rc" -eq 0 ]; then rm -f "$err"; printf '%s\n' "$out"; return 0; fi
+    if grep -qE 'Failed to estimate gas|bound parent hash mismatch' "$err" && [ "$i" -lt "$n" ]; then
+      echo "$(date -u +%FT%TZ) retry $i/$n: $1 $2 $3: $(head -c 200 "$err" | tr '\n' ' ')" >>"${X4_RETRY_LOG:-/dev/null}"
+      sleep "${X4_RETRY_SLEEP:-5}"; continue
+    fi
+    printf '%s\n' "$out"; cat "$err" >&2; rm -f "$err"; return "$rc"
+  done
 }
 
 p85_selftest() {
@@ -280,6 +298,14 @@ p85_selftest() {
   bash -c 'exec -a "ubft root-node run --pos-deployment x" sleep 30' & local sp2=$!; echo "$sp2" >"$pf"
   ( cd "$t/sh/n" && p85_assert_shadow_roots ) 2>/dev/null && bad "a root with --pos-deployment was accepted as a shadow root"
   kill "$sp2" 2>/dev/null; wait "$sp2" 2>/dev/null
+  # x4_retry: a transient pre-send refusal is retried and logged, anything else fails at once, a persistent refusal fails after the bound
+  local c="$t/retry-count"; echo 0 >"$c"
+  flaky() { local n; n=$(cat "$c"); echo $((n + 1)) >"$c"; if [ "$n" -lt 2 ]; then echo "Error: Failed to estimate gas: bound parent hash mismatch" >&2; return 1; fi; echo "ok-out"; }
+  got=$(X4_RETRY_SLEEP=0 X4_RETRY_LOG="$t/retry.log" x4_retry flaky 2>/dev/null); [ "$got" = ok-out ] && [ "$(cat "$c")" = 3 ] && [ "$(wc -l <"$t/retry.log" | tr -d ' ')" = 2 ] || bad "x4_retry did not retry a transient estimate refusal twice and log it: '$got' $(cat "$c")"
+  echo 0 >"$c"; hard() { local n; n=$(cat "$c"); echo $((n + 1)) >"$c"; echo "Error: execution reverted" >&2; return 7; }
+  X4_RETRY_SLEEP=0 x4_retry hard >/dev/null 2>&1; [ "$?" = 7 ] && [ "$(cat "$c")" = 1 ] || bad "x4_retry retried (or masked the status of) a real failure"
+  echo 0 >"$c"; always() { local n; n=$(cat "$c"); echo $((n + 1)) >"$c"; echo "bound parent hash mismatch" >&2; return 1; }
+  X4_RETRIES=4 X4_RETRY_SLEEP=0 x4_retry always >/dev/null 2>&1; [ "$?" = 1 ] && [ "$(cat "$c")" = 4 ] || bad "x4_retry did not stop at its bound"
   rm -rf "$t"
   return $ok
 }

@@ -89,6 +89,10 @@ export Q3_B1=1 H3_SLOT_LAYOUT=3 EVM_OPERATOR_STATUS_RPC=1 P85_LANE=1 H3_RESTART_
 # against it with a scripted eligibility scenario instead of the recovery steps
 export P85_SHADOW=${P85_SHADOW:-0}
 [ "$P85_SHADOW" != 1 ] || [ "${ANYAGE_LANE:-0}${UTB_LANE:-0}${REWARD_LANE:-0}" = 000 ] || fail "P85_SHADOW=1 does not combine with the any-age, UTB or reward lanes"
+# X4_REWARDS=1 (X4 step B3): the shadow chain (records hook, no election) with a SMALL reward allocation, so the pool runs dry; the reward steps of scripts/x4pos run on it
+export X4_REWARDS=${X4_REWARDS:-0}
+[ "$X4_REWARDS" != 1 ] || [ "$P85_SHADOW" = 1 ] || fail "X4_REWARDS=1 needs P85_SHADOW=1"
+[ "$X4_REWARDS" != 1 ] || export P85_REWARD_FUNDING=${P85_REWARD_FUNDING:-2000000000000000000}
 export ANYAGE_LANE=${ANYAGE_LANE:-0} UTB_LANE=${UTB_LANE:-0} EVIDENCE_LANE_LOG="$EVIDENCE_DIR/lane.log"
 # the roots judge an assignment's committee continuity by the budget committed in the installed EVM configuration; it must be the one the election
 # was priced under (the contracts' genesis parameter): adding a unit-weight joiner to four unit-weight members is D = 2/5, over the 1/4 default
@@ -107,6 +111,9 @@ status=$?
 set -e
 rm -f "$DEVNET_PIDFILE"
 cp -R test-nodes/p85 "$EVIDENCE_DIR/p85" 2>/dev/null || true
+# the execution side's logs only (never its data or keys: the publisher excludes evm*/ reth*/ whole): the last 4000 lines of each validator's node and client log, for a transaction that was never mined
+mkdir -p "$EVIDENCE_DIR/exec-logs"
+for f in test-nodes/evm*/debug.log test-nodes/reth*/reth.log; do [ -f "$f" ] && tail -n 4000 "$f" >"$EVIDENCE_DIR/exec-logs/$(basename "$(dirname "$f")")-$(basename "$f")" 2>/dev/null; done
 if [ "$ANYAGE_LANE" = 1 ]; then mkdir -p "$EVIDENCE_DIR/aggregator"; for d in test-nodes/agg test-nodes/agg[0-9]; do [ -d "$d" ] && { mkdir -p "$EVIDENCE_DIR/aggregator/$(basename "$d")"; cp "$d"/stdout.log "$d"/logs/*.log "$EVIDENCE_DIR/aggregator/$(basename "$d")/" 2>/dev/null || true; }; done; cp test-nodes/lane-config.json test-nodes/bridge-addresses.json "$EVIDENCE_DIR/" 2>/dev/null || true; fi
 # what the lane's helpers read, kept so a failure can be replayed offline (go run ./scripts/h3-pdr, the weight checks, the trust-base tools): the roots'
 # databases and public node info, the trust bases, the lane's flow directories; not the execution clients' data, the authorities' credentials or keys
@@ -123,6 +130,11 @@ if [ -n "${ANYAGE_PREP_ONLY:-}" ]; then
   exit 0
 fi
 if [ "$P85_SHADOW" = 1 ]; then
+  if [ "$X4_REWARDS" = 1 ]; then
+    grep -q 'X4 rewards lane: all steps PASSED' "$EVIDENCE_DIR/lane.log" || fail "the rewards lane ended without completing its steps (see $EVIDENCE_DIR/p85/run/x4pos)"
+    pass "X4 rewards lane complete; evidence in $EVIDENCE_DIR (p85/run/x4pos)"
+    exit 0
+  fi
   grep -q 'X4 shadow lane: all steps PASSED' "$EVIDENCE_DIR/lane.log" || fail "the shadow lane ended without completing its steps or without a PASS from the adapter (see $EVIDENCE_DIR/p85/run/shadow/REPORT.md)"
   pass "X4 shadow lane complete; evidence in $EVIDENCE_DIR (adapter report in p85/run/shadow)"
   exit 0

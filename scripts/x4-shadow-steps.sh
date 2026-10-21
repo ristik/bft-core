@@ -26,6 +26,7 @@ source scripts/lib/p85-lib.sh
 X4_CADENCE=${X4_CADENCE:-10}         # seconds between samples
 X4_PHASE_SECONDS=${X4_PHASE_SECONDS:-90}   # how long each scripted state is sampled (>= 8 samples at the default cadence)
 X4_DIR=$H3_DIR/shadow
+X4_RETRY_LOG=$X4_DIR/rpc-retries.log   # transient pre-send node refusals that x4_retry tried again
 P85_DEPLOY=$P85_DIR/pos-deployment.json
 x4_eth() { echo "http://127.0.0.1:$rethEthBase"; }
 x4_call() { "$P85_CAST" call --rpc-url "$(x4_eth)" "$@"; }
@@ -60,18 +61,26 @@ x4_spare_file() { # n
 }
 x4_join() { # n step [args]
   local n=$1 step=$2; shift 2
-  build/ubft pos-relayer tx join "$step" --eth-rpc "$(x4_eth)" --pos-deployment "$P85_DEPLOY" --joiner "$P85_DIR/spare$n/spare.json" "$@"
+  x4_retry build/ubft pos-relayer tx join "$step" --eth-rpc "$(x4_eth)" --pos-deployment "$P85_DEPLOY" --joiner "$P85_DIR/spare$n/spare.json" "$@"
 }
-x4_onboard() { # n units
+x4_register_bond() { # n units: the spare is funded by the joiner account, registers and bonds (not yet admitted: not in the election's live index)
   local n=$1 units=$2 id owner
   x4_spare_file "$n" || return 1
   owner=$("$P85_CAST" wallet address --private-key "$(cat "$P85_DIR/spare$n/owner.key")") || return 1
-  "$P85_CAST" send --rpc-url "$(x4_eth)" --private-key "$(cat "$P85_DIR/joiner/owner.key")" --value "$(python3 -c "print($P85_BOND_UNIT * ($units + 2))")" "$owner" >/dev/null || return 1
+  x4_retry "$P85_CAST" send --rpc-url "$(x4_eth)" --private-key "$(cat "$P85_DIR/joiner/owner.key")" --value "$(python3 -c "print($P85_BOND_UNIT * ($units + 2))")" "$owner" >/dev/null || return 1
   id=$(x4_join "$n" register 2>"$X4_DIR/spare$n-register.log") || { cat "$X4_DIR/spare$n-register.log" >&2; return 1; }
   echo "$id" >"$X4_DIR/spare$n-id"
   x4_join "$n" bond --id "$id" --value-wei "$(python3 -c "print($P85_BOND_UNIT * $units)")" || return 1
-  x4_join "$n" admit --id "$id" || return 1
-  echo "spare $n: custody id $id, $units unit(s), live count $(x4_live_count)"
+  echo "spare $n: custody id $id, $units unit(s) bonded"
+}
+x4_admit() { # n
+  x4_join "$1" admit --id "$(cat "$X4_DIR/spare$1-id")" || return 1
+  echo "spare $1 admitted, live count $(x4_live_count)"
+}
+x4_onboard() { x4_register_bond "$1" "$2" && x4_admit "$1"; } # n units
+x4_retire() { # n: the owner asks custody to retire the identity (it leaves the eligible set)
+  x4_retry "$P85_CAST" send --rpc-url "$(x4_eth)" --private-key "$(cat "$P85_DIR/spare$1/owner.key")" "$(jq -r .custody "$P85_DEPLOY")" 'requestRetirement(uint64)' "$(cat "$X4_DIR/spare$1-id")" >/dev/null || return 1
+  echo "spare $1 requested retirement"
 }
 
 # the election is due when the registry's progress and UC time have passed both thresholds (the chain, with no election hook, does nothing about it)
@@ -91,29 +100,95 @@ x4_passive() {
   [ "$(x4_call "$(x4_election)" 'attemptCursor()(uint64)')" = 0 ] || { echo "an election attempt was recorded on a chain with no election hook" >&2; return 1; }
 }
 
+# the declared campaign (X4_CAMPAIGN=scripts/shadow/campaign.json): the adapter observes the checked-in interval from the election's due moment, and the seed's
+# schedule is executed at its offsets from the first sample. Setup (genesis, devnet, the wait for due) is outside the interval.
+x4_campaign() {
+  local plan t0 line at op n units now wait epoch_before
+  H3_REGISTRY=0xff00000000000000000000000000000000000002   # h3_slot reads the registry's epoch slots
+  H3_SLOT_LAYOUT=3; read -r h3_slot_shard h3_slot_root h3_slot_conf h3_slot_cursor < <(H3_SLOT_LAYOUT=3 lane_go_run h3slots)
+  h3_registry_is 0 1 || x4_die "the registry is not at shard epoch 0 / root epoch 1 before the observation"
+  plan=$(python3 scripts/shadow/scenario.py plan "$X4_CAMPAIGN") || x4_die "the scenario schedule is invalid"
+  echo "$plan" >"$X4_DIR/scenario-plan.jsonl"
+  x4_step passive x4_passive
+  python3 scripts/shadow/adapter.py run --rpc "$(x4_eth)" --deployment "$P85_DIR/genesis/deployment.json" --out "$X4_DIR/adapter" --campaign "$X4_CAMPAIGN" >"$X4_DIR/adapter.log" 2>&1 &
+  X4_ADAPTER_PID=$!
+  t0=$(date +%s)
+  echo "observation starts $(date -u +%FT%TZ); declared $(jq -r .intervalSeconds "$X4_CAMPAIGN") s at $(jq -r .cadenceSeconds "$X4_CAMPAIGN") s cadence; adapter pid $X4_ADAPTER_PID"
+  while read -r line; do
+    at=$(jq -r .at <<<"$line"); op=$(jq -r .op <<<"$line"); n=$(jq -r .spare <<<"$line"); units=$(jq -r '.units // 0' <<<"$line")
+    now=$(date +%s); wait=$((t0 + at - now)); [ "$wait" -le 0 ] || sleep "$wait"
+    echo "t+$(( $(date +%s) - t0 )) s: $op spare $n $units"
+    case "$op" in
+      register-bond-admit) x4_onboard "$n" "$units" || x4_die "$op spare $n" ;;
+      register-bond) x4_register_bond "$n" "$units" || x4_die "$op spare $n" ;;
+      admit) x4_admit "$n" || x4_die "$op spare $n" ;;
+      retire) x4_retire "$n" || x4_die "$op spare $n" ;;
+      *) x4_die "unknown scenario op $op" ;;
+    esac
+    jq -cn --arg utc "$(date -u +%FT%TZ)" --argjson at "$at" --arg op "$op" --argjson spare "$n" --arg block "$("$P85_CAST" block-number --rpc-url "$(x4_eth)")" \
+      '{utc: $utc, at: $at, op: $op, spare: $spare, block: ($block|tonumber)}' >>"$X4_DIR/scenario-done.jsonl"
+  done <<<"$plan"
+  wait "$X4_ADAPTER_PID"; local rc=$?
+  X4_ADAPTER_PID=
+  h3_registry_is 0 1 || x4_die "the registry's epochs moved during the shadow observation (the installed PoA committee must stay fixed)"
+  [ "$rc" = 0 ] || x4_die "the shadow adapter reported a divergence (FAIL), see $X4_DIR/adapter"
+}
+
+# X4_REWARDS=1 (step B3): the reward steps of scripts/x4pos on this chain. The genesis allocation is small (P85_REWARD_FUNDING), so the pool runs dry after a few
+# grid intervals; the steps settle, replay the pool's whole life against the chain, observe the zero-budget interval, refill through the relayer and see a later
+# interval paid. They are the same scripts the PoS campaign's driver runs; here they run in sequence, without the driver, on a chain that has no election.
+x4_step_run() { # id script argsJSON
+  local cur=$H3_DIR/x4pos
+  X4_CURSOR_DIR=$cur X4_STEP_ID=$1 X4_STEP_DIR=$cur/steps/$1 X4_STEP_ARGS=$3 X4_SEED=1 bash "scripts/x4pos/steps/$2" || return 1
+}
+x4_rewards_mode() {
+  local cur=$H3_DIR/x4pos target=${X4_REWARDS_PROGRESS:-3600} p i
+  mkdir -p "$cur/steps"
+  { echo "export P85_DIR=$PWD/$P85_DIR P85_CAST=$P85_CAST rethEthBase=$rethEthBase M2_CHAIN_ID=${M2_CHAIN_ID:-31337} H3_ONLINE='${H3_ONLINE:-1 2 3 4}' PATH=$PATH"
+    [ -z "${LANE_TOOLS_DIR:-}" ] || echo "export LANE_TOOLS_DIR=$LANE_TOOLS_DIR"; } >"$cur/env.sh"
+  x4_step baseline x4_baseline
+  for i in $(seq 1 7200); do
+    p=$(x4_num "$(x4_registry)" 'progress()(uint64)'); [ "$p" -ge "$target" ] && break; sleep 1
+  done
+  [ "$p" -ge "$target" ] || x4_die "the registry's progress did not reach $target in 7200 s (at $p)"
+  x4_step "reward-interval 1" x4_step_run ri1 reward-interval.sh '{"minIntervals":3}'
+  x4_step "reward-interval 1 check" bash -c "X4_CURSOR_DIR=$cur X4_STEP_ID=ri1 X4_STEP_DIR=$cur/steps/ri1 X4_STEP_ARGS='{\"minIntervals\":3}' bash scripts/x4pos/steps/reward-interval.check.sh"
+  x4_step "reward-exhaust-refill" x4_step_run xr reward-exhaust-refill.sh '{"refillWei":"1500000000000000000","waitSeconds":1500}'
+  x4_step "reward-exhaust-refill check" bash -c "X4_CURSOR_DIR=$cur X4_STEP_ID=xr X4_STEP_DIR=$cur/steps/xr bash scripts/x4pos/steps/reward-exhaust-refill.check.sh"
+  x4_step "chain stayed passive" x4_still_passive
+  echo "X4 rewards lane: all steps PASSED"
+  q3_teardown
+}
+
 x4_run_lane() {
+  if [ "${X4_REWARDS:-0}" = 1 ]; then x4_rewards_mode; return; fi
   local s
   mkdir -p "$X4_DIR"; rm -f "$X4_DIR/stop"
   H3_ONLINE="1 2 3 4"
   echo "=== X4 shadow lane: PoS genesis, records hook, NO authoritative election; the shadow adapter samples certified state ==="
   x4_step baseline x4_baseline
-  python3 scripts/shadow/adapter.py run --rpc "$(x4_eth)" --deployment "$P85_DIR/genesis/deployment.json" --out "$X4_DIR/adapter" \
-    --cadence "$X4_CADENCE" --samples 100000 --stop-file "$X4_DIR/stop" >"$X4_DIR/adapter.log" 2>&1 &
-  X4_ADAPTER_PID=$!
-  echo "adapter pid $X4_ADAPTER_PID (cadence ${X4_CADENCE}s, log $X4_DIR/adapter.log)"
-  x4_step passive x4_passive
-  sleep "$X4_PHASE_SECONDS"                      # the unchanged candidate, sampled
-  x4_step "spare 1: a one-unit identity" x4_onboard 1 1
-  sleep "$X4_PHASE_SECONDS"                      # a valid changed candidate, sampled
-  x4_step "spare 2: a four-unit identity" x4_onboard 2 4
-  sleep "$X4_PHASE_SECONDS"                      # a candidate beyond the weight bound: refused, sampled
-  touch "$X4_DIR/stop"
-  wait "$X4_ADAPTER_PID"; local rc=$?
-  X4_ADAPTER_PID=
+  local rc=0
+  if [ -n "${X4_CAMPAIGN:-}" ]; then
+    x4_campaign
+  else   # the short development scenario: three phases, the adapter stopped by the driver
+    python3 scripts/shadow/adapter.py run --rpc "$(x4_eth)" --deployment "$P85_DIR/genesis/deployment.json" --out "$X4_DIR/adapter" \
+      --cadence "$X4_CADENCE" --samples 100000 --stop-file "$X4_DIR/stop" >"$X4_DIR/adapter.log" 2>&1 &
+    X4_ADAPTER_PID=$!
+    echo "adapter pid $X4_ADAPTER_PID (cadence ${X4_CADENCE}s, log $X4_DIR/adapter.log)"
+    x4_step passive x4_passive
+    sleep "$X4_PHASE_SECONDS"                      # the unchanged candidate, sampled
+    x4_step "spare 1: a one-unit identity" x4_onboard 1 1
+    sleep "$X4_PHASE_SECONDS"                      # a valid changed candidate, sampled
+    x4_step "spare 2: a four-unit identity" x4_onboard 2 4
+    sleep "$X4_PHASE_SECONDS"                      # a candidate beyond the weight bound: refused, sampled
+    touch "$X4_DIR/stop"
+    wait "$X4_ADAPTER_PID"; rc=$?
+    X4_ADAPTER_PID=
+  fi
   cp "$X4_DIR/adapter/REPORT.md" "$X4_DIR/REPORT.md" 2>/dev/null || true
   local status; status=$(jq -r .status "$X4_DIR/adapter/report.json" 2>/dev/null)
   echo "shadow adapter exit $rc, status ${status:-none}: $(jq -c '{scheduled,accounted,verdicts,dueComparisons,cases}' "$X4_DIR/adapter/report.json" 2>/dev/null)"
-  [ "$rc" != 0 ] && x4_die "the shadow adapter reported a divergence (FAIL), see $X4_DIR/adapter"
+  [ "$rc" = 0 ] || x4_die "the shadow adapter reported a divergence (FAIL), see $X4_DIR/adapter"
   [ "$status" = PASS ] || x4_die "the shadow adapter's status is ${status:-none}, not PASS: $(jq -r '.reasons | join("; ")' "$X4_DIR/adapter/report.json" 2>/dev/null)"
   x4_step "the chain stayed passive" x4_still_passive
   echo "X4 shadow lane: all steps PASSED"
