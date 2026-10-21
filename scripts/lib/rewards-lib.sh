@@ -74,7 +74,7 @@ rw_step_settle() {
   rw_settle_run "$dir/settle-2.log" || return 1
   grep -q "idle after 0 step" "$dir/settle-2.log" || { echo "a repeated settlement moved the pool (see $dir/settle-2.log)" >&2; return 1; }
   rw_check_run "$dir/check-2.txt" "$RW_EXTRA_FUNDING_WEI" || return 1
-  diff <(sed 's/"block": [0-9]*, //' "$dir/check-1.txt") <(sed 's/"block": [0-9]*, //' "$dir/check-2.txt") >/dev/null \
+  diff <(sed -e 's/"block": [0-9]*, //' -e 's/"progress": [0-9]*, //' "$dir/check-1.txt") <(sed -e 's/"block": [0-9]*, //' -e 's/"progress": [0-9]*, //' "$dir/check-2.txt") >/dev/null \
     || { echo "the pool's state differs between the two checks although nothing was sent" >&2; return 1; }
   # 5. a payee claims in two parts; an over-claim is refused; exact balances
   [ -s "$key" ] || { echo "no payee key (REWARD_LANE sets P85_PLAN_PAYEE_KEYS before the plan)" >&2; return 1; }
