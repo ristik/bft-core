@@ -121,6 +121,7 @@ func New(
 	}
 
 	client.SetDriver(&persistingDriver{driver: round, store: store})
+	round.SetSupersessionWatch(client.WatchSupersession)
 
 	health := NewHealth()
 	client.SetHealth(health)
