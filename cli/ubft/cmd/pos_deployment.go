@@ -5,6 +5,7 @@ package cmd
 // runs on and the custody address. A root started without it executes no controls and enforces no closure duty.
 
 import (
+	"context"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -19,8 +20,12 @@ import (
 	"github.com/unicitynetwork/bft-core/rootchain/evmstate"
 	"github.com/unicitynetwork/bft-core/rootchain/partitions"
 	"github.com/unicitynetwork/bft-core/rootchain/posclosure"
+	"github.com/unicitynetwork/bft-core/rootchain/posretire"
 	"github.com/unicitynetwork/bft-go-base/types"
 )
+
+// posRetirementStateFileName is the root's Retirement request state (under the node home).
+const posRetirementStateFileName = "pos-retirements.json"
 
 // ErrPosDeployment is returned for a deployment file that cannot pin a custody deployment, or one used where it must not be.
 var ErrPosDeployment = errors.New("invalid P85 custody deployment")
@@ -166,8 +171,13 @@ func loadRewardPool(path string) ([20]byte, error) {
 // enablePosClosure installs the closure duty on a running manager: the controls of this deployment are executed against the closed
 // epoch's own trust base and the EVM shard's installed assignment, and every block must carry the mandatory closures. It refuses a
 // proof-of-authority deployment (operator-assigned staking ids do not fit custody's uint64 ids, so the digests could never be formed).
-func enablePosClosure(cm *consensus.ConsensusManager, orchestration *partitions.Orchestration, trustBases posclosure.TrustBases,
-	tb *types.RootTrustBaseV1, shardConfs []*types.PartitionDescriptionRecord, path string, poaGenesis bool, evmRPC string) error {
+//
+// With an execution-client endpoint (evmRPC) the root also builds the Retirement controls of the identities whose owner requested one
+// (rootchain/posretire): it discovers the requests from custody's log, collects the proofs against the EVM state of each candidate
+// parent and proposes them itself, so the normal exit needs only the owner's on-chain request. retirementState is the file that keeps
+// the discovery cursor and the pending requests across a restart.
+func enablePosClosure(ctx context.Context, cm *consensus.ConsensusManager, orchestration *partitions.Orchestration, trustBases posclosure.TrustBases,
+	tb *types.RootTrustBaseV1, shardConfs []*types.PartitionDescriptionRecord, path string, poaGenesis bool, evmRPC, retirementState string) error {
 	if poaGenesis {
 		return fmt.Errorf("%w: a proof-of-authority genesis has no custody; do not combine it with a P85 deployment", ErrPosDeployment)
 	}
@@ -175,10 +185,10 @@ func enablePosClosure(cm *consensus.ConsensusManager, orchestration *partitions.
 	if err != nil {
 		return err
 	}
-	if (dep.Election != [20]byte{}) != (evmRPC != "") {
+	if (dep.Election != [20]byte{}) && evmRPC == "" {
 		// Every root can lead a Freeze, so every root of a chain that judges primary candidates needs the execution client that serves
-		// the proof at the frozen parent; without an election the client would serve nothing.
-		return fmt.Errorf("%w: --pos-evm-rpc goes with, and only with, an election in the deployment", ErrPosDeployment)
+		// the proof at the frozen parent.
+		return fmt.Errorf("%w: an election in the deployment needs --pos-evm-rpc", ErrPosDeployment)
 	}
 	conf, err := coupledGenesisShard(shardConfs)
 	if err != nil {
@@ -186,21 +196,42 @@ func enablePosClosure(cm *consensus.ConsensusManager, orchestration *partitions.
 	}
 	authority := posclosure.New(posclosure.History{Partition: conf.PartitionID, Shard: conf.ShardID, TrustBases: trustBases, Orchestration: orchestration})
 	var primary storage.PrimaryAuthority
-	if dep.Election != ([20]byte{}) {
+	var retirements storage.RetirementProposer
+	if evmRPC != "" {
 		client, err := rpc.Dial(evmRPC)
 		if err != nil {
 			return errors.Join(ErrPosDeployment, err)
 		}
-		cm.SetPrimaryWitnessSource(evmstate.RPCWitnessSource{Client: client, Pins: pins})
-		primary = evmstate.Authority{Pins: pins}
+		if dep.Election != ([20]byte{}) {
+			cm.SetPrimaryWitnessSource(evmstate.RPCWitnessSource{Client: client, Pins: pins})
+			primary = evmstate.Authority{Pins: pins}
+		}
+		if retirements, err = newRetirementService(ctx, client, dep, pins, retirementState); err != nil {
+			return err
+		}
 	}
 	cm.SetPosServices(&storage.PosServices{
-		Primary:    primary,
-		Deployment: dep,
-		Authority:  authority,
-		Witnesses:  cm,
-		EVM:        evmstate.Authority{Pins: pins},
-		Proposer:   posclosure.Proposer{Source: cm, Authority: authority, Deployment: dep},
+		Primary:     primary,
+		Deployment:  dep,
+		Authority:   authority,
+		Witnesses:   cm,
+		EVM:         evmstate.Authority{Pins: pins},
+		Proposer:    posclosure.Proposer{Source: cm, Authority: authority, Deployment: dep},
+		Retirements: retirements,
 	})
 	return nil
+}
+
+// newRetirementService starts the Retirement request discovery of a root against its execution client; it runs until ctx ends.
+func newRetirementService(ctx context.Context, client *rpc.Client, dep storage.PosDeployment, pins evmstate.Pins, statePath string) (*posretire.Service, error) {
+	if statePath == "" {
+		return nil, fmt.Errorf("%w: the Retirement builder needs a state file", ErrPosDeployment)
+	}
+	svc, err := posretire.New(posretire.Config{Deployment: dep, Pins: pins, Chain: posretire.RPCChain{Client: client, Custody: dep.Custody},
+		Proofs: posretire.RPCProofs(client), StatePath: statePath})
+	if err != nil {
+		return nil, errors.Join(ErrPosDeployment, err)
+	}
+	go svc.Run(ctx)
+	return svc, nil
 }
