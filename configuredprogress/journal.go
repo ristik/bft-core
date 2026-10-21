@@ -7,8 +7,10 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"log/slog"
 	"math"
 	"sort"
+	"time"
 
 	"github.com/unicitynetwork/bft-core/frontier"
 	"github.com/unicitynetwork/bft-core/network/protocol/certification"
@@ -782,6 +784,7 @@ func (s *Store) LoadJournal(ctx context.Context, c Context, limits JournalLimits
 }
 
 func (s *Store) loadJournalOnce(ctx context.Context, c Context, limits JournalLimits) (JournalSnapshot, ProgressToken, error) {
+	loadStart := time.Now()
 	state, token, err := s.Load(ctx, c)
 	if err != nil {
 		return JournalSnapshot{}, ProgressToken{}, err
@@ -1001,5 +1004,10 @@ func (s *Store) loadJournalOnce(ctx context.Context, c Context, limits JournalLi
 		}
 		return nil
 	})
+	if l := s.db.log.Load(); l != nil && time.Since(loadStart) >= s.db.threshold() {
+		l.LogAttrs(ctx, slog.LevelDebug, "configuredprogress: journal load",
+			slog.Duration("took", time.Since(loadStart)), slog.Int("candidates", len(out.Candidates)), slog.Int("observations", len(out.Observations)),
+			slog.Uint64("bytes", uint64(out.Bytes)))
+	}
 	return out, token, err
 }
