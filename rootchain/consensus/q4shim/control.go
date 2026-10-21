@@ -154,13 +154,12 @@ func (n *Net) Status() Status {
 // that is invalid is a fault in the trace and leaves the previous rules in force. After every poll the status is written next to it
 // as statusPath (when set), so that a lane can read what has been injected.
 func (n *Net) Watch(ctx context.Context, controlPath, statusPath string, every time.Duration) {
-	var last []byte
+	var reader controlReader
 	var lastStatus []byte
 	tick := time.NewTicker(every)
 	defer tick.Stop()
 	for {
-		if raw, err := os.ReadFile(controlPath); err == nil && !bytes.Equal(raw, last) {
-			last = raw
+		if raw, ok := reader.next(controlPath); ok {
 			var c Control
 			dec := json.NewDecoder(bytes.NewReader(raw))
 			dec.DisallowUnknownFields()
@@ -189,4 +188,25 @@ func (n *Net) Watch(ctx context.Context, controlPath, statusPath string, every t
 		case <-tick.C:
 		}
 	}
+}
+
+// controlReader hands out a control document once it has been read identically on two consecutive polls. The lane writes the file with
+// an ordinary truncate-and-write, so a poll can see it half written; acting on that would record a spurious bad-control fault (and then
+// fail the next assertion on the number of faults, bft-core #686). A document that really is invalid stays invalid across polls and is
+// reported one poll later.
+type controlReader struct{ last, pending []byte }
+
+// next reads path and returns its content when it is new and stable.
+func (r *controlReader) next(path string) ([]byte, bool) {
+	raw, err := os.ReadFile(path)
+	if err != nil || bytes.Equal(raw, r.last) {
+		r.pending = nil
+		return nil, false
+	}
+	if !bytes.Equal(raw, r.pending) {
+		r.pending = raw // changed since the previous poll: it may still be being written
+		return nil, false
+	}
+	r.last, r.pending = raw, nil
+	return raw, true
 }
