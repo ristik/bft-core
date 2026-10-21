@@ -37,6 +37,17 @@ def ureth_flags_of(profile_output):
     if len(lines) != 1 or not lines[0]: raise ValueError('b1-profile printed no single "ureth flags:" line')
     return lines[0]
 
+def genesis_commitment(genesis):
+    """The registry's genesisCommitment word of a finalized EVM genesis: alloc[registry].storage[keccak256("unicity.seal-registry/genesisCommitment")]. The paired
+    client needs it as --unicity.genesis-commitment (the lanes pass it the same way, scripts/lib/reth-pin.sh urethB1GenesisCommitment): `b1-profile` does not print it."""
+    slot = subprocess.run(['cast', 'keccak', 'unicity.seal-registry/genesisCommitment'], check=True, text=True, capture_output=True).stdout.strip().lower()
+    alloc = {k.lower().removeprefix('0x'): v for k, v in genesis['alloc'].items()}
+    storage = {k.lower(): v for k, v in alloc[pos.REGISTRY.lower().removeprefix('0x')]['storage'].items()}
+    word = storage.get(slot)
+    if not word or int(word, 16) == 0:
+        raise ValueError('genesisCommitment is not set in the registry storage of the finalized genesis')
+    return '0x' + word.lower().removeprefix('0x').rjust(64, '0')
+
 def funded_base_genesis(chain_id, max_gas, alloc, entropy):
     """The standard genesis the registry is allocated into: the lanes' chain configuration, the profile's block gas limit and the package's funding."""
     return {'config': {'chainId': chain_id, 'homesteadBlock': 0, 'eip150Block': 0, 'eip155Block': 0, 'eip158Block': 0, 'byzantiumBlock': 0,
@@ -342,6 +353,7 @@ def main():
         network.update(chain_id=a.chain_id,genesis_hash='0x'+block,funding_address=next(iter(alloc)),
             validator_rpc_urls=[f'http://ureth{i}:8545' for i in range(1,a.validators+1)],captcha_sitekey=a.captcha_sitekey)
         write(out/'network/network.json',network)
+        flags=[*flags,'--unicity.genesis-commitment='+genesis_commitment(json.loads((home/'genesis.json').read_text()))]
         write(out/'compose.yaml',topology(out,a.validators,{'root':roots,'evm':evms},records['images'],a.captcha_sitekey,flags,max_gas,bool(genesis),a.rpc_bind))
         manifest={'offline_validation_only':a.offline_validation,'generation':out.name,'chain_id':a.chain_id,'genesis_hash':'0x'+block,'validators':a.validators,'operator_rpc':{'bind':a.rpc_bind,'root_port':operator_rpc.ROOT_PORT,'shard_port':operator_rpc.SHARD_PORT},
             'faucet_address':next(iter(alloc)), 'artifacts':records,

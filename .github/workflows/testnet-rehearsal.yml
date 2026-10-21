@@ -4,8 +4,8 @@ name: testnet-rehearsal
 # verifies hCaptcha, is not started). Manual: it builds ureth from source, which takes the better part of an hour.
 on:
   pull_request:
-    # only a change to the rehearsal itself starts it (it is long); everything else dispatches it by hand
-    paths: ['deploy/testnet/rehearse.py', '.github/workflows/testnet-rehearsal.yml']
+    # a change to the package (it is long, but the package changes rarely and this is the only run of it as containers)
+    paths: ['deploy/testnet/**', '.github/workflows/testnet-rehearsal.yml']
   workflow_dispatch:
     inputs:
       stages:
