@@ -441,6 +441,7 @@ func (c *BFTClient) Run(ctx context.Context) error {
 	}
 
 	received := c.net.ReceivedChannel()
+	busyEnd := time.Now() // when this loop last finished a delivery; see logLoopTiming
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -467,10 +468,16 @@ func (c *BFTClient) Run(ctx context.Context) error {
 			if !ok {
 				return errors.New("shardnode: network received channel closed")
 			}
+			pickedUp := time.Now()
+			backlog := len(received)
 			batch, closed := c.coalesceBufferedCertificationResponses(ctx, msg, received)
+			coalesced := time.Since(pickedUp)
 			for _, queued := range batch {
+				handleStart := time.Now()
 				c.handleMessage(ctx, queued)
+				c.logLoopTiming(ctx, queued, loopTiming{idle: pickedUp.Sub(busyEnd), backlog: backlog, batch: len(batch), coalesce: coalesced, handle: time.Since(handleStart)})
 			}
+			busyEnd = time.Now()
 			if closed {
 				return errors.New("shardnode: network received channel closed")
 			}
@@ -642,6 +649,43 @@ func (c *BFTClient) sendHandshake(ctx context.Context) error {
 		return fmt.Errorf("sending handshake: %w", err)
 	}
 	return nil
+}
+
+// loopTiming is what the Run loop measured around one delivered message. The loop is single
+// threaded: a handle that blocks (a follower waiting for the leader's block, a round driver call)
+// delays every certificate queued behind it, so a slow shard round can be attributed either to the
+// time the loop spent busy (handle, and the idle gap that is its absence) or to something outside
+// it, such as the admission retry timer.
+type loopTiming struct {
+	idle     time.Duration // the loop waited this long in select before this batch arrived
+	backlog  int           // messages still queued on the network channel when the batch was taken
+	batch    int           // messages the coalescer kept from the buffered ones
+	coalesce time.Duration // verification and coalescing of the buffered messages
+	handle   time.Duration // this message's handleMessage call
+}
+
+// logLoopTiming logs one delivered certification response's timing at debug level. Handles above
+// a second are logged at info: they are the stalls to look for.
+func (c *BFTClient) logLoopTiming(ctx context.Context, msg any, t loopTiming) {
+	if c.log == nil {
+		return
+	}
+	cr, ok := msg.(*certification.CertificationResponse)
+	if !ok || cr == nil || cr.UC.UnicitySeal == nil {
+		return
+	}
+	level := slog.LevelDebug
+	if t.handle >= time.Second {
+		level = slog.LevelInfo
+	}
+	c.log.Log(ctx, level, "bft client loop: delivered a certification response",
+		slog.Uint64("rootRound", cr.UC.UnicitySeal.RootChainRoundNumber),
+		slog.Uint64("shardRound", cr.UC.GetRoundNumber()),
+		slog.Duration("idle", t.idle),
+		slog.Int("backlog", t.backlog),
+		slog.Int("batch", t.batch),
+		slog.Duration("coalesce", t.coalesce),
+		slog.Duration("handle", t.handle))
 }
 
 func (c *BFTClient) handleMessage(ctx context.Context, msg any) {
