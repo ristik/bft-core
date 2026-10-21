@@ -38,6 +38,7 @@ class Rehearsal:
         self.evidence.mkdir(parents=True, exist_ok=True)
         self.log = (self.evidence / 'rehearsal.log').open('a')
         self.results = []
+        self.pods = ()
 
     # --- recording -------------------------------------------------------------------------------------------------------------
     def say(self, text):
@@ -163,15 +164,18 @@ class Rehearsal:
             self.expect(r['blockHash'] == receipt['blockHash'], f'validator {i} has it in the same block', r['blockHash'])
         self.tx = receipt
 
+    def raw_tx(self, to, nonce, price, value=1):
+        secrets = self.gen / 'faucet-secrets'
+        return self.cast_run('mktx', '--keystore', str(secrets / 'keystore.json'), '--password-file', str(secrets / 'password'), '--legacy', '--nonce', str(nonce),
+                             '--gas-price', str(price), '--gas-limit', '21000', '--chain', str(self.chain_id), '--value', str(value), to)
+
     def send_via_gateway(self, secrets, to):
         # cast talks to the public gateway: the gateway only accepts the allow-listed methods, and the generated proxy peer is trusted only with X-Forwarded-For,
         # which cast cannot set: sign offline, then submit through the gateway ourselves
         sender = self.manifest['faucet_address']
         nonce = int(self.call('eth_getTransactionCount', [sender, 'latest']), 16)
         price = int(self.call('eth_gasPrice'), 16)
-        raw = self.cast_run('mktx', '--keystore', str(secrets / 'keystore.json'), '--password-file', str(secrets / 'password'), '--legacy', '--nonce', str(nonce),
-                            '--gas-price', str(price), '--gas-limit', '21000', '--chain', str(self.chain_id), '--value', '1', to)
-        sent = self.call('eth_sendRawTransaction', [raw])
+        sent = self.call('eth_sendRawTransaction', [self.raw_tx(to, nonce, price)])
         self.say(f'  submitted {sent} (nonce {nonce}, gas price {price})')
         receipt = self.wait('the transaction is mined', lambda: self.call('eth_getTransactionReceipt', [sent]), 180)
         return json.dumps(receipt)
@@ -232,8 +236,42 @@ class Rehearsal:
         self.expect('signer' not in running, 'the signer was never started: no request reached a third party')
         self.say('  note the duplicate/rate-limited claim (one per address and IP per 24 h) needs a request that passes the captcha: host-only')
 
+    def pod_restart(self):
+        """One validator entity at a time: stop its execution client, root and shard node (its signing authority stays live, as the README requires), check what the
+        package promises, start them again and check they rejoin. The PUBLIC gateway fails closed while a validator is down (it checks every validator's identity
+        before it serves or broadcasts): that is asserted, not worked around; the survivors are driven directly, as the gateway would fan out."""
+        sender, to = self.manifest['faucet_address'], '0x' + '22' * 20
+        for i in self.pods:
+            names = [f'ureth{i}', f'root{i}', f'shard{i}']
+            survivors = [j for j in range(1, self.n + 1) if j != i]
+            self.say(f'  stopping validator {i}: {" ".join(names)}')
+            self.compose('stop', *names)
+            self.wait('the public gateway refuses while a validator is down (fail closed)', lambda: self.http(PUBLIC_RPC, 'GET', '/healthz')[0] == 503, 120)
+            self.expect(True, f'validator {i} down: the public gateway fails closed (503), no partial broadcast')
+            nonce = int(self.ureth(survivors[0], 'eth_getTransactionCount', [sender, 'latest']), 16)
+            price = int(self.ureth(survivors[0], 'eth_gasPrice'), 16)
+            raw = self.raw_tx(to, nonce, price)
+            hashes = {self.ureth(j, 'eth_sendRawTransaction', [raw]) for j in survivors}
+            self.expect(len(hashes) == 1, f'the {len(survivors)} survivors accept the same transaction', next(iter(hashes)))
+            tx = next(iter(hashes))
+            blocks = set()
+            for j in survivors:
+                r = self.wait(f'survivor {j} mines it with validator {i} down', lambda j=j: self.ureth(j, 'eth_getTransactionReceipt', [tx]), 240)
+                self.expect(r['status'] == '0x1', f'survivor {j} has a successful receipt', r['blockHash'])
+                blocks.add(r['blockHash'])
+            self.expect(len(blocks) == 1, 'the survivors agree on the including block')
+            self.say(f'  starting validator {i}')
+            self.compose('start', *names)
+            r = self.wait(f'validator {i} catches up to the transaction mined without it', lambda: self.ureth(i, 'eth_getTransactionReceipt', [tx]), 300)
+            self.expect(r['blockHash'] in blocks, f'validator {i} has the same block after restart', r['blockHash'])
+            self.wait('the public gateway is healthy again', lambda: self.http(PUBLIC_RPC, 'GET', '/healthz')[0] == 200, 120)
+            receipt = json.loads(self.send_via_gateway(self.gen / 'faucet-secrets', '0x' + '33' * 20))
+            self.expect(receipt['status'] == '0x1', f'a transaction through the public gateway succeeds after validator {i} rejoined', receipt['transactionHash'])
+            for j in range(1, self.n + 1):
+                r = self.wait(f'validator {j} has it', lambda j=j: self.ureth(j, 'eth_getTransactionReceipt', [receipt['transactionHash']]), 120)
+                self.expect(r['blockHash'] == receipt['blockHash'], f'validator {j} has it in the same block')
 
-STAGES = (('up', 'up'), ('identity', 'identity'), ('first-tx', 'first_tx'), ('gateway-limits', 'gateway_limits'), ('faucet-guard', 'faucet_guard'))
+STAGES = (('up', 'up'), ('identity', 'identity'), ('first-tx', 'first_tx'), ('gateway-limits', 'gateway_limits'), ('faucet-guard', 'faucet_guard'), ('pod-restart', 'pod_restart'))
 
 
 def main():
@@ -241,9 +279,11 @@ def main():
     p.add_argument('--generation', required=True, type=Path)
     p.add_argument('--evidence', required=True, type=Path)
     p.add_argument('--cast', default='cast')
+    p.add_argument('--pods', default='2,1', help='validator entities pod-restart stops and restarts, one at a time, in this order')
     p.add_argument('--stages', default=','.join(s for s, _ in STAGES), help='comma separated, in order')
     a = p.parse_args()
     r = Rehearsal(a.generation, a.evidence, a.cast)
+    r.pods = tuple(int(x) for x in a.pods.split(',') if x)
     wanted = a.stages.split(',')
     unknown = set(wanted) - {s for s, _ in STAGES}
     if unknown:
