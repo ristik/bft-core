@@ -37,7 +37,7 @@ const (
 	MaxPerPrepare    = 4  // proofs started per candidate parent
 	ProofBudget      = 5 * time.Second
 	MaxScanRange     = 2000 // blocks per eth_getLogs
-	Confirmations    = 8    // blocks behind the EVM head a log must be
+	Rescan           = 8    // blocks before the cursor scanned again: a head block replaced before it was certified cannot hide a request
 	maxRootBlocks    = 256  // state root -> block hash memory (for quiet parents)
 	MaxNegative      = 1024 // (parent, request) outcomes remembered as "not retirable at this parent"
 	stateFileVersion = 1
@@ -290,18 +290,18 @@ func (s *Service) Run(ctx context.Context) {
 	}
 }
 
-// Poll scans the confirmed blocks after the cursor once.
+// Poll scans from just before the cursor to the EVM head once. There is no confirmation depth: the EVM shard produces blocks only when it has
+// something to do, so on a quiet chain a depth would hold a request back indefinitely. Certified blocks are final, and a request is only ever
+// acted on after a proof at a certified block; a log from a head block that is later replaced stays a pending hint that no proof will
+// support (bounded by MaxPending), and a request in a replacement block is found by the Rescan overlap.
 func (s *Service) Poll(ctx context.Context) error {
 	head, err := s.cfg.Chain.Head(ctx)
 	if err != nil {
 		return err
 	}
-	if head < Confirmations {
-		return nil
-	}
-	to := head - Confirmations
+	to := head
 	s.mu.Lock()
-	from := s.cursor + 1
+	from := s.cursor + 1 - min(Rescan, s.cursor)
 	s.mu.Unlock()
 	if to < from {
 		return nil
@@ -337,7 +337,7 @@ func (s *Service) Poll(ctx context.Context) error {
 		s.pending = append(s.pending, pendingItem{Key: r.Key})
 		s.log.Info("retirement requested", "id", r.ID, "generation", r.Generation, "evmBlock", r.Block)
 	}
-	s.cursor = to
+	s.cursor = max(s.cursor, to)
 	s.persistLocked()
 	return nil
 }
