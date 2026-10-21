@@ -83,6 +83,11 @@ def genesis_weights(n, spec=None):
     return weights
 
 
+def clean_environ():
+    """The caller's environment without the lane-only P85_PLAN_*KEYS variables: a testnet deployment must never hold owner or withdrawal keys that are publicly derivable."""
+    return {k: v for k, v in os.environ.items() if not (k.startswith('P85_PLAN_') and k.endswith('KEYS'))}
+
+
 def network_word(generation):
     return '0x' + hashlib.sha256(('unicity.testnet.pos.' + generation).encode()).hexdigest()
 
@@ -159,7 +164,7 @@ class Genesis:
         `weights` are the genesis bond units of the identities (genesis_weights: all 1 by default)."""
         n = len(json.loads(Path(trust_base).read_text())['rootNodes'])
         units = ','.join(map(str, genesis_weights(n, weights)))
-        out = subprocess.check_output([sys.executable, str(self.repo / 'scripts/p85-genesis-plan.py'), str(trust_base), str(conf), str(BOND_UNIT), units], text=True)
+        out = subprocess.check_output([sys.executable, str(self.repo / 'scripts/p85-genesis-plan.py'), str(trust_base), str(conf), str(BOND_UNIT), units], text=True, env=clean_environ())
         if owners is not None:
             document = json.loads(out)
             by_id = {row['stakingId']: row for row in owners}
@@ -194,7 +199,7 @@ class Genesis:
         self.assignment = assignment_id(self._run(self.ubft, *args).stderr)
         if provisional:
             self.first = self.assignment
-        env = dict(os.environ, P85_NETWORK_WORD=network_word(self.generation), P85_CHAIN_ID=str(self.chain_id), P85_ROOTS=REGISTRY, P85_TREASURY=TREASURY,
+        env = dict(clean_environ(), P85_NETWORK_WORD=network_word(self.generation), P85_CHAIN_ID=str(self.chain_id), P85_ROOTS=REGISTRY, P85_TREASURY=TREASURY,
                    P85_GOVERNANCE_AUTHORITY=GOVERNANCE_AUTHORITY, P85_REWARD_FUNDING=str(REWARD_FUNDING), P85_REWARD_RATE=str(REWARD_RATE),
                    P85_V_MAX=str(CAPS[0]), P85_L_MAX=str(CAPS[1]), P85_N_MAX=str(CAPS[2]), P85_CADENCE_ROUNDS=str(self.cadence[0]),
                    P85_CADENCE_SECONDS=str(self.cadence[1]), P85_DIST_NUM=str(self.dist[0]), P85_DIST_DEN=str(self.dist[1]))
@@ -222,7 +227,7 @@ class Genesis:
         """The profile's per-record reservation against a FRESH cold measurement at the caps: refused when the contracts grew past the margin
         (the same rule `b1-profile --hook-measurement` applies at generation, taken from a second measurement)."""
         fresh = self.dir / 'hook-measurement-fresh.jsonl'
-        fresh.write_text(self.measure_hooks(dict(os.environ)))
+        fresh.write_text(self.measure_hooks(clean_environ()))
         done = self._run(self.ubft, 'engine-api', 'check-hook-gas', '--b1-profile', profile, '--measurement', fresh)
         return done.stdout + done.stderr
 
