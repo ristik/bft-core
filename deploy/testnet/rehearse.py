@@ -271,7 +271,47 @@ class Rehearsal:
                 r = self.wait(f'validator {j} has it', lambda j=j: self.ureth(j, 'eth_getTransactionReceipt', [receipt['transactionHash']]), 120)
                 self.expect(r['blockHash'] == receipt['blockHash'], f'validator {j} has it in the same block')
 
-STAGES = (('up', 'up'), ('identity', 'identity'), ('first-tx', 'first_tx'), ('gateway-limits', 'gateway_limits'), ('faucet-guard', 'faucet_guard'), ('pod-restart', 'pod_restart'))
+    def backup_restore(self):
+        """Quiesced backup and same-generation restore (backup.py, README "Quiesced backup"): every non-authority service is stopped, the live authorities are
+        recorded, the generation is archived, restored beside it with its authority mounts pointing at the surviving original directories, and started from there.
+        Checks the history survived (a receipt from before the backup, on every validator), the network identity, the faucet pin, and that the network goes on."""
+        backup = Path(__file__).with_name('backup.py')
+        archive = self.gen.parent / 'backups' / (self.gen.name + '.tar.gz')
+        archive.parent.mkdir(mode=0o700, exist_ok=True)
+        restored = self.gen.parent / (self.gen.name + '-restored')
+        marker = json.loads(self.send_via_gateway(self.gen / 'faucet-secrets', '0x' + '44' * 20))
+        self.expect(marker['status'] == '0x1', 'a transaction before the backup', marker['transactionHash'])
+        sender = self.manifest['faucet_address']
+        nonce_before = int(self.call('eth_getTransactionCount', [sender, 'latest']), 16)
+        out = subprocess.run([sys.executable, str(backup), 'backup', str(self.gen), str(archive)], check=True, text=True, capture_output=True).stdout
+        self.say('  ' + out.strip())
+        self.expect(archive.is_file() and archive.with_suffix('.gz.sha256').is_file(), 'the archive and its sha256 sidecar exist outside the generation')
+        running = set(self.compose('ps', '--services', '--status', 'running').split())
+        self.expect(running == {s for s in self.services() if s.startswith('authority')}, 'only the signing authorities run after the backup')
+        out = subprocess.run([sys.executable, str(backup), 'restore', str(restored), str(archive), '--live-generation', str(self.gen)], check=True, text=True,
+                             capture_output=True).stdout
+        self.say('  ' + out.strip())
+        subprocess.run(['chown', '-R', '10001:10001', str(restored)], check=True)
+        self.gen = restored
+        start = [s for s in self.services() if not s.startswith('authority') and s != 'signer']
+        self.compose('up', '-d', '--no-deps', *start)
+        self.wait('the public gateway is healthy from the restored generation', lambda: self.http(PUBLIC_RPC, 'GET', '/healthz')[0] == 200, 600)
+        self.identity()
+        for i in range(1, self.n + 1):
+            r = self.wait(f'validator {i} has the pre-backup receipt', lambda i=i: self.ureth(i, 'eth_getTransactionReceipt', [marker['transactionHash']]), 120)
+            self.expect(r['blockHash'] == marker['blockHash'], f'validator {i} has it in the same block after the restore')
+        self.expect(int(self.call('eth_getTransactionCount', [sender, 'latest']), 16) == nonce_before, 'the funded account nonce is what it was at the backup')
+        s, text = self.http(FAUCET, 'GET', '/api/network')
+        pin = json.loads(text) if s == 200 else {}
+        self.expect(pin.get('genesis_hash', '').lower() == self.genesis, 'the faucet guard publishes the same network pin after the restore')
+        after = json.loads(self.send_via_gateway(self.gen / 'faucet-secrets', '0x' + '55' * 20))
+        self.expect(after['status'] == '0x1', 'a fresh transaction through the public gateway succeeds from the restored generation', after['transactionHash'])
+        self.expect(int(after['blockNumber'], 16) > int(marker['blockNumber'], 16), 'it lands after the pre-backup block')
+        for i in range(1, self.n + 1):
+            r = self.wait(f'validator {i} has it', lambda i=i: self.ureth(i, 'eth_getTransactionReceipt', [after['transactionHash']]), 120)
+            self.expect(r['blockHash'] == after['blockHash'], f'validator {i} has it in the same block')
+
+STAGES = (('up', 'up'), ('identity', 'identity'), ('first-tx', 'first_tx'), ('gateway-limits', 'gateway_limits'), ('faucet-guard', 'faucet_guard'), ('pod-restart', 'pod_restart'), ('backup-restore', 'backup_restore'))
 
 
 def main():
