@@ -103,7 +103,7 @@ func (c Context) check() error {
 }
 
 type Store struct {
-	db         *bolt.DB
+	db         *timedDB
 	settings   Settings
 	checkpoint func(string) error
 	journal    bool
@@ -112,7 +112,10 @@ type Store struct {
 }
 
 // SetLogger sets the logger EnableFrontier reports a replica pair change to.
-func (s *Store) SetLogger(l *slog.Logger) { s.log = l }
+func (s *Store) SetLogger(l *slog.Logger) {
+	s.log = l
+	s.db.log.Store(l)
+}
 
 // OpenConfiguredV2 opens an isolated v2 database without creating its bucket or initializing data.
 func OpenConfiguredV2(path string, s Settings) (*Store, error) {
@@ -162,7 +165,7 @@ func OpenConfiguredV2(path string, s Settings) (*Store, error) {
 	if err != nil {
 		return fail(err)
 	}
-	return &Store{db: db, settings: s}, nil
+	return &Store{db: &timedDB{DB: db}, settings: s}, nil
 }
 func (s *Store) Close() error { return s.db.Close() }
 func (s *Store) at(n string) error {

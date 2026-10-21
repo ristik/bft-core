@@ -373,7 +373,16 @@ func (p *Publisher) replicaLoop(ctx context.Context, index int) {
 	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
 	for {
-		if err := p.replicaPass(ctx, index); err != nil && ctx.Err() == nil {
+		passStart := time.Now()
+		err := p.replicaPass(ctx, index)
+		if ctx.Err() == nil {
+			attrs := []slog.Attr{slog.String("replica", p.Replicas[index].String()), slog.Duration("took", time.Since(passStart))}
+			if err != nil {
+				attrs = append(attrs, slog.String("err", err.Error()))
+			}
+			p.Log.LogAttrs(ctx, slog.LevelDebug, "archive: replica pass", attrs...)
+		}
+		if err != nil && ctx.Err() == nil {
 			p.Log.WarnContext(ctx, "archive replica waiting", "replica", p.Replicas[index], "err", err)
 		}
 		select {
