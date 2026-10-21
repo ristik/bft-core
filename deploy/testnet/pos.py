@@ -105,9 +105,11 @@ def deployment_of(deployment, profile):
     """The roots' --pos-deployment file: the contracts' addresses and code hashes, and the registry's code hash from the profile."""
     return {'networkWord': deployment['networkWord'], 'chainId': str(deployment['chainId']), 'custody': deployment['custody'],
             'custodyCodeHash': deployment['custodyCodeHash'], 'registry': REGISTRY, 'registryCodeHash': profile['runtimeHash'],
-            'election': deployment['election'], 'electionCodeHash': deployment['electionCodeHash']}
-    # The reward pool is NOT in this file: the roots of the pinned bft build refuse a file with fields they do not know (DisallowUnknownFields), and a root
-    # ignores the pool anyway. The lane (same-commit binaries) writes the optional pair; the package gets it when its bft pin moves past the commit that accepts it.
+            'election': deployment['election'], 'electionCodeHash': deployment['electionCodeHash'],
+            'rewardPool': deployment['rewardPool'], 'rewardPoolCodeHash': deployment['rewardPoolCodeHash']}
+    # The reward pool pair is read by the relayer's reward commands (`ubft pos-relayer tx reward`) and the genesis checks; a root ignores it. The file
+    # must carry only fields the pinned bft build knows (it refuses unknown ones): the pin is a commit that accepts the pair, and a test compares the
+    # file's keys with that build's deployment file.
 
 
 def merge_alloc(genesis, extra):
