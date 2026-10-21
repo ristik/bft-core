@@ -63,11 +63,14 @@ func newCertSender(t *testing.T) (*Peer, *LibP2PNetwork) {
 	return p, nw
 }
 
+// recvBound is an upper bound that only a lost message reaches: delivery is awaited as a condition, never as a latency window (bft-core #729).
+const recvBound = 30 * time.Second
+
 func recv(t *testing.T, nw *LibP2PNetwork) any {
 	select {
 	case m := <-nw.ReceivedChannel():
 		return m
-	case <-time.After(3 * time.Second):
+	case <-time.After(recvBound):
 		t.Fatal("no message before timeout")
 		return nil
 	}

@@ -302,14 +302,13 @@ func Test_SendCertificationResponse_RefusalIsNotRetried(t *testing.T) {
 	require.False(t, lazyHandshakeRefused(io.EOF))
 }
 
-// Optional: with latency L one way and a send timeout T the certificate is delivered on the lazy path
-// (header and payload are sent at once, the negotiation answer is awaited for 2 one way trips), while explicit
-// negotiation would need 3 trips before the payload can even be sent. The property holds for 2L < T < 3L; T is
-// the midpoint, so that the margin on both sides is L/2 (150 ms) and a loaded runner that delays a trip
-// (connection setup, scheduling) does not move the test to the wrong side. A smaller L with the same ratio
-// shrinks the absolute margin in proportion and made this test flaky (bft-core #681: 120 ms / 300 ms left 60 ms).
+// With latency on every certificate stream the certificate is still delivered on the lazy path: header and payload go out in one
+// write and the sender does not wait for a negotiation answer before writing the payload (explicit negotiation would need 3 one way
+// trips first). The property is asserted on the exchange itself (writes and replies before the payload), not on elapsed time: a
+// latency window (2L < T < 3L) could not be made robust on a loaded runner and failed three times in CI (bft-core #681). The send
+// context is generous, so only a real failure reaches it.
 func Test_SendCertificationResponse_DeliveredWithLatencyWithinTimeout(t *testing.T) {
-	const latency, timeout = 300 * time.Millisecond, 750 * time.Millisecond // 2*latency < timeout < 3*latency, midpoint
+	const latency, timeout = 50 * time.Millisecond, 30 * time.Second
 	cm := &countingMuxer{delay: latency}
 	conf, err := NewPeerConfiguration(randomTestAddressStr, nil, generateKeyPair(t), nil, nil)
 	require.NoError(t, err)
@@ -321,8 +320,9 @@ func Test_SendCertificationResponse_DeliveredWithLatencyWithinTimeout(t *testing
 
 	for _, kind := range []recvKind{recvLegacy, recvBoth} {
 		p, nw := newCertReceiver(t, senderPeer, kind)
-		// connection setup and identify are not subject to the send timeout
+		// connection setup and identify are not part of the send
 		require.NoError(t, senderPeer.host.Connect(context.Background(), peer.AddrInfo{ID: p.ID()}))
+		cm.reset()
 		ctx, cancel := context.WithTimeout(context.Background(), timeout)
 		err := senderNw.sendCertificationFrame(ctx, p.ID(), []string{ProtocolUnicityCertificatesV2, ProtocolUnicityCertificates},
 			ProtocolUnicityCertificates, &certificationFrames{cr: testCertResponse(t, nil)})
@@ -330,6 +330,11 @@ func Test_SendCertificationResponse_DeliveredWithLatencyWithinTimeout(t *testing
 		require.NoError(t, err)
 		recv(t, nw)
 		requireNoMore(t, nw)
+		st := cm.stats()
+		require.Len(t, st, 1)
+		require.Equal(t, 1, st[0].writes, "header and payload must be a single write")
+		require.True(t, st[0].firstWriteHeader)
+		require.Zero(t, st[0].repliesBeforeLastWrite, "no negotiation exchange before the payload")
 	}
 }
 
