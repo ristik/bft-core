@@ -12,6 +12,7 @@ from unittest import mock
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import adapter  # noqa: E402
+import scenario  # noqa: E402
 import chain  # noqa: E402
 import compare  # noqa: E402
 import fork  # noqa: E402
@@ -335,6 +336,74 @@ class SealedPack(unittest.TestCase):
                 self.assertEqual(hashlib.sha256((out / name).read_bytes()).hexdigest(), digest, name)
             on_disk = {str(p.relative_to(out)) for p in out.rglob("*") if p.is_file() and p.name != "SHA256SUMS"}
             self.assertEqual(on_disk, {name for _, name in sums}, "every file of the pack is sealed")
+
+
+class Campaign(unittest.TestCase):
+    CAMPAIGN = HERE / "campaign.json"
+
+    def test_the_checked_in_campaign_declares_ninety_minutes_at_sixty_seconds(self):
+        c = jload(self.CAMPAIGN)
+        self.assertEqual((c["intervalSeconds"], c["cadenceSeconds"]), (5400, 60))
+        self.assertEqual(c["intervalSeconds"] // c["cadenceSeconds"], 90)
+        self.assertGreaterEqual(c["rules"]["minDue"], 24)
+        self.assertEqual(c["features"]["forcedInclusion"], "off")
+
+    def test_the_schedule_is_deterministic_from_the_seed_and_valid_for_every_seed(self):
+        c = jload(self.CAMPAIGN)
+        self.assertEqual(scenario.plan(c), scenario.plan(c))
+        self.assertNotEqual(scenario.plan(c, 1), scenario.plan(c, 2))
+        for seed in range(300):
+            events = scenario.plan(c, seed)   # plan() asserts its own invariants
+            self.assertEqual([e["op"] for e in events if e["spare"] == 2][0], "register-bond")
+            self.assertGreaterEqual(max(e["units"] for e in events if e["spare"] == 2 and "units" in e), 4)   # beyond the 1/2 weight bound with the other spare admitted
+
+    def test_the_schedule_validator_refuses_a_bad_schedule(self):
+        c = jload(self.CAMPAIGN)
+        good = scenario.plan(c)
+        for bad in (list(reversed(good)), [dict(good[0], at=10)] + good[1:], good[:-1] + [dict(good[-1], at=5390)],
+                    [dict(good[0], at=good[1]["at"] - 10)] + good[1:], good[:-1], [dict(e, units=9) if "units" in e else e for e in good]):
+            with self.assertRaises(AssertionError):
+                scenario.check(c, bad)
+
+    def test_a_campaign_run_embeds_the_manifest_and_cuts_short_runs_to_incomplete(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            d = Path(d)
+            dep = d / "deployment.json"
+            dep.write_text(json.dumps({"election": "0x" + "e1" * 20, "custody": "0x" + "c1" * 20, "evidence": "0x" + "e2" * 20}))
+            camp = d / "campaign.json"
+            camp.write_text(json.dumps({"intervalSeconds": 3, "cadenceSeconds": 1, "rules": {"minDue": 1, "minEach": 1, "minDistinctInputs": 1}}))
+            rpc = mock.Mock()
+            rpc.chain_id.return_value = 31337
+            row = lambda k: {"sample": k, "verdict": "MATCH", "case": "changed", "inputDigest": "d%d" % k, "block": {"number": 5 + k}, "incumbent": "0x01",  # noqa: E731
+                             "clock": {"progress": 100 + k, "ucTime": 1000 + k}}
+            with mock.patch.object(adapter, "observe", lambda k, *a, **kw: row(k)), mock.patch.object(adapter, "ReadOnlyRpc", return_value=rpc), \
+                    mock.patch.object(adapter, "tool_versions", return_value={}):
+                adapter.main(["run", "--rpc", "http://x", "--deployment", str(dep), "--out", str(d / "out"), "--campaign", str(camp)])
+                stop = d / "stop"
+                stop.touch()
+                adapter.main(["run", "--rpc", "http://x", "--deployment", str(dep), "--out", str(d / "out2"), "--campaign", str(camp), "--stop-file", str(stop)])
+            rep = jload(d / "out" / "report.json")
+            self.assertEqual((rep["scheduled"], rep["accounted"]), (3, 3))
+            self.assertEqual(rep["manifest"]["campaignSha256"], __import__("hashlib").sha256(camp.read_bytes()).hexdigest())
+            self.assertEqual((rep["timeline"]["declaredSeconds"], rep["timeline"]["firstBlock"], rep["timeline"]["lastProgress"]), (3, 5, 102))
+            self.assertGreaterEqual(rep["timeline"]["actualSeconds"], 2)
+            short = jload(d / "out2" / "report.json")   # the driver stopped the interval at once: zero samples are not the declared interval
+            self.assertEqual(short["status"], "INCOMPLETE")
+            self.assertEqual(short["scheduled"], 0)
+
+    def test_an_interval_shorter_than_declared_and_a_moving_committee_are_not_a_pass(self):
+        rows = good_rows()
+        cov = report.coverage(rows, len(rows), {"minDurationSeconds": 100}, {"declaredSeconds": 120, "actualSeconds": 50.0, "minSeconds": 100})
+        self.assertEqual(cov["status"], "INCOMPLETE")
+        self.assertTrue(any("declared" in r for r in cov["reasons"]))
+        ok = report.coverage(rows, len(rows), {"minDurationSeconds": 100}, {"declaredSeconds": 120, "actualSeconds": 119.0, "minSeconds": 100})
+        self.assertEqual(ok["status"], "PASS", ok["reasons"])
+        moved = [dict(r, incumbent="0x01") for r in rows]
+        moved[7] = dict(moved[7], incumbent="0x02")
+        cov = report.coverage(moved, len(moved))
+        self.assertEqual(cov["status"], "FAIL")
+        self.assertTrue(any("incumbent" in r for r in cov["reasons"]))
 
 
 class ForkSafety(unittest.TestCase):

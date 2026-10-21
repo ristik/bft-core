@@ -14,7 +14,7 @@ REPO_ROOT=$(cd "$SCRIPT_DIR/../.." && pwd)
 source "$REPO_ROOT/scripts/lib/portable.sh"
 AGRE_ROOT=$(lane_agre_root)
 LOCK_SCRIPT=$(lane_lock_script)
-H6_URETH_COMMIT=${H6_URETH_COMMIT:-6e59b68cc29f196d54d3d6e28d6266a8c02d05a1}
+H6_URETH_COMMIT=${H6_URETH_COMMIT:-53c9330d030426b9847ac2c69840adcfc8490221}
 EVIDENCE_DIR=${H6_EVIDENCE_DIR:-$AGRE_ROOT/briefs/devnet-runs/h6-abort-$(date -u +%Y%m%dT%H%M%SZ)}
 pass() { printf 'PASS: %s\n' "$1"; }
 fail() { printf 'FAIL: %s\n' "$1" >&2; exit 1; }

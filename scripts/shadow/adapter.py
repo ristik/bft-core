@@ -92,7 +92,8 @@ def build_row(k, inp, contract, evidence, out_dir):
         mism.append({"field": "reference", "contract": None, "reference": ref_error})
     case = compare.case_of(contract, inp["incumbent"]["exposures"]) if contract.get("outcome") in ("NotDue", "Disabled", "NoCandidateRecorded", "Reserved") else "error"
     row = {"sample": k, "utc": datetime.now(timezone.utc).isoformat(), "chainId": inp["chainId"], "block": inp["block"], "origin": "0x" + inp["origin"].hex(),
-           "inputDigest": input_digest(inp), "case": case, "contract": contract, "reference": expected, "verdict": "MISMATCH" if mism else "MATCH", "mismatches": mism,
+           "inputDigest": input_digest(inp), "case": case,
+           "clock": {"progress": inp["clock"]["progress"], "ucTime": inp["clock"]["ucTime"]}, "incumbent": "0x" + inp["incumbent"]["assignmentID"].hex(), "contract": contract, "reference": expected, "verdict": "MISMATCH" if mism else "MATCH", "mismatches": mism,
            "fork": evidence}
     base = Path(out_dir) / "raw" / f"{k:05d}"
     if mism or case not in ("NotDue", "Disabled"):
@@ -104,8 +105,8 @@ def build_row(k, inp, contract, evidence, out_dir):
     return row
 
 
-def write_report(out_dir, manifest, rows, scheduled, rules=None):
-    cov = report.coverage(rows, scheduled, rules)
+def write_report(out_dir, manifest, rows, scheduled, rules=None, interval=None):
+    cov = report.coverage(rows, scheduled, dict(rules or {}, **({"minDurationSeconds": interval["minSeconds"]} if interval else {})), interval)
     first = next(({"sample": r["sample"], "mismatches": r["mismatches"][:5], "artifacts": r.get("artifacts")} for r in rows if r["verdict"] == "MISMATCH"), None)
     manifest = dict(manifest, firstBlock=min((r["block"]["number"] for r in rows if "block" in r), default=None),
                     lastBlock=max((r["block"]["number"] for r in rows if "block" in r), default=None))
@@ -126,10 +127,16 @@ def cmd_run(a):
     out = Path(a.out)
     out.mkdir(parents=True, exist_ok=True)
     dep = json.load(open(a.deployment))
+    campaign = None
+    if a.campaign:   # a declared interval: the samples, the cadence and the coverage rules come from the checked-in manifest
+        campaign_bytes = Path(a.campaign).read_bytes()
+        campaign = json.loads(campaign_bytes)
+        a.cadence, a.samples = float(campaign["cadenceSeconds"]), campaign["intervalSeconds"] // campaign["cadenceSeconds"]
     modules = {"election": dep["election"], "custody": dep["custody"], "evidence": dep["evidence"]}
     rpc = ReadOnlyRpc(a.rpc)
     manifest = {"format": "UNICITY_X4_SHADOW_MANIFEST/v1", "rpc": a.rpc, "chainId": rpc.chain_id(), "cadenceSeconds": a.cadence, "samples": a.samples,
                 "modules": modules, "registry": a.registry, "startedUtc": datetime.now(timezone.utc).isoformat(), "tools": tool_versions(a.anvil),
+                "campaign": campaign, "campaignSha256": hashlib.sha256(campaign_bytes).hexdigest() if campaign else None,
                 "fork": "anvil fork of the pinned finalized block; the election runs with the system caller impersonated inside the fork only (not ureth: no enshrined hook "
                         "or precompiles); a comparison, not consensus evidence"}
     json.dump(manifest, open(out / "manifest.json", "w"), indent=1, sort_keys=True)
@@ -160,7 +167,11 @@ def cmd_run(a):
     obs.close()      # everything the pack seals is on disk before it is hashed
     events.close()
     manifest["samplesScheduled"] = taken
-    cov = write_report(out, manifest, rows, taken)
+    interval = None
+    if campaign:
+        interval = {"declaredSeconds": campaign["intervalSeconds"], "actualSeconds": time.monotonic() - t0, "minSeconds": (a.samples - 1) * a.cadence,
+                    "startedUtc": manifest["startedUtc"], "finishedUtc": manifest["finishedUtc"]}
+    cov = write_report(out, manifest, rows, taken, campaign["rules"] if campaign else None, interval)
     seal(out)
     print(json.dumps({k: cov[k] for k in ("status", "scheduled", "accounted", "dueComparisons", "cases", "reasons")}, indent=1))
     return 0 if cov["status"] != report.STATUS_FAIL else 1
@@ -188,6 +199,7 @@ def main(argv=None):
     r.add_argument("--out", required=True)
     r.add_argument("--cadence", type=float, default=60.0)
     r.add_argument("--samples", type=int, default=5, help="at most this many samples")
+    r.add_argument("--campaign", help="a campaign manifest (scripts/shadow/campaign.json): the declared interval, cadence and rules; overrides --cadence and --samples")
     r.add_argument("--stop-file", help="end the interval when this file exists (a scenario driver's end marker)")
     r.add_argument("--registry", default=REGISTRY)
     r.add_argument("--anvil", default="anvil")
