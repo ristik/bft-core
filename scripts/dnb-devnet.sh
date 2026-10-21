@@ -64,7 +64,7 @@ up() {
   init_root_nodes "$rootValidators" >/dev/null
   init_evm_validators "$validators" >/dev/null
   if [ "$SIGNING" = authority ]; then init_evm_authorities "$validators" "$partitionID" >/dev/null; fi
-  generate_evm_shard_conf "$validators" "$partitionID" "$chainID" 5000 exec >/dev/null
+  generate_evm_shard_conf "$validators" "$partitionID" "$chainID" "${EVM_T2_MS:-5000}" exec >/dev/null
   conf=test-nodes/shard-conf-${partitionID}_0.json
 
   info "B1 profile, funded genesis, identities"

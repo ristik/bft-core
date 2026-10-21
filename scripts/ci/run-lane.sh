@@ -90,6 +90,8 @@ export REWARD_LANE=1
 # S4 (#57, scripts/lib/s4-lib.sh, docs/root-evidence.md): the focused live slashing exercise is added to the combined lane when scripts/ci/run-inputs.json of the commit under
 # test says "s4": true (a ci-lane-run/** push; off by default). It adds the roots' observer journals, a harness-signed equivocation by the joiner's root key and the
 # submission through the real Evidence contract after the recovery.
+# experiment knob (bft-core#728): the EVM shard's T2 in milliseconds from run-inputs.json "evmT2Ms" (default 5000, the lane's value)
+if [ -n "$(jq -r '.evmT2Ms // empty' scripts/ci/run-inputs.json 2>/dev/null)" ]; then export EVM_T2_MS=$(jq -r '.evmT2Ms' scripts/ci/run-inputs.json); log "EVM_T2_MS=$EVM_T2_MS (run-inputs)"; fi
 if [ "$kind" = combined ] && [ "$(jq -r '.s4 // false' scripts/ci/run-inputs.json 2>/dev/null)" = true ]; then export S4_LANE=1; log "S4_LANE=1 (run-inputs s4)"; fi
 export LANE_PINNED=1 LANE_COMMIT_UNDER_TEST=$head UTB_MIN_FREE_GIB=${UTB_MIN_FREE_GIB:-$(jq -r '.runner.minFreeDiskGiB' "$pins")}
 if [ "$kind" = combined ]; then pins_mode=env; else pins_mode=env-core; fi
