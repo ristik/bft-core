@@ -239,6 +239,17 @@ matching the new manifest, old wallet claim 409, new-wallet faucet claim and a
 paid external-client transaction. Update public manifests/wallets/status and
 announce asset loss before restoring ingress. No compatibility or migration.
 
+## Reward pool (PoS profile)
+
+The roots' `pos-deployment.json` carries the funded reward pool (`rewardPool`, `rewardPoolCodeHash`), and generation checks the pool's code hash and its exact
+funding against the genesis state. The pool's commands are the relayer's `ubft pos-relayer tx reward` (each takes `--eth-rpc`, `--pos-deployment` and `--sender-key`,
+the account that pays for the transaction):
+
+- `settle`: anyone. It reads the pool's next authenticated root records and closes the next intervals until the pool accepts no more (`--max-steps` bounds a run).
+  No operator privilege is involved: the pool decides from the authenticated records.
+- `claim`: the payee, the sender being the payee (`--amount-wei`, `--to` the recipient). It pays out a credit the payee has earned.
+- `fund`: adds value to the pool (`--value-wei`). Only value sent through `fund` is allocated to rewards: a plain transfer to the pool address is not.
+
 ## Observation/fault campaign and evidence limits
 
 Second operator records checkout, pins, image IDs/hashes, host specs, exact commands
