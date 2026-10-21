@@ -292,14 +292,7 @@ func (x *ExecutedBlock) extendWithAuthority(newBlock *rctypes.BlockData, verifie
 	var latestBlock []byte
 	latestEVMOK := false
 	if pos.on {
-		if key, found, err := frozenEVMShard(nextShardState, shardConfs); err == nil && found && nextShardState.States[key] != nil &&
-			nextShardState.States[key].IR != nil && len(nextShardState.States[key].IR.Hash) == 32 {
-			copy(latestRoot[:], nextShardState.States[key].IR.Hash)
-			if len(nextShardState.States[key].IR.BlockHash) == 32 {
-				latestBlock = bytes.Clone(nextShardState.States[key].IR.BlockHash)
-			}
-			latestEVMOK = true
-		}
+		latestRoot, latestBlock, latestEVMOK = certifiedEVM(nextShardState, shardConfs)
 	}
 	// Apply the ordered control record before shard requests. A freeze takes
 	// effect in its own block, for leaders and for every voter replaying it.
@@ -892,4 +885,20 @@ func (x *ExecutedBlock) GetParentRound() uint64 {
 		return x.BlockData.GetParentRound()
 	}
 	return 0
+}
+
+// certifiedEVM is the EVM state a block's certifications have not yet touched: the state root the designated EVM shard's input record
+// carries and the hash of the block it certified (nil when that round was quiet: a quiet input record carries no block hash). It is the P
+// a Retirement or RejectResult in the next block must name, and the one derivation both the executor and the proposer use.
+func certifiedEVM(state ShardStates, configs map[types.PartitionShardID]*types.PartitionDescriptionRecord) (root [32]byte, block []byte, ok bool) {
+	key, found, err := frozenEVMShard(state, configs)
+	if err != nil || !found || state.States[key] == nil || state.States[key].IR == nil || len(state.States[key].IR.Hash) != 32 {
+		return root, nil, false
+	}
+	ir := state.States[key].IR
+	copy(root[:], ir.Hash)
+	if len(ir.BlockHash) == 32 {
+		block = bytes.Clone(ir.BlockHash)
+	}
+	return root, block, true
 }

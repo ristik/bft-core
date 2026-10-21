@@ -154,43 +154,25 @@ func TestCertificateSDKIntersectionSentinels(t *testing.T) {
 	}
 }
 
-func TestCertificateCumulativeUnicitySteps(t *testing.T) {
+// There is no cumulative path budget (owner section 36): every certificate is bounded by its own native sublimits, and a token whose
+// RSMT paths and certificate steps sum past the former 2,048-step budget projects.
+func TestNoCumulativePathBudget(t *testing.T) {
 	e := newEnv(t)
 	raw, err := certificateWithSteps(e.composed(t, 2, irTimeOK).cert.InclusionProofs()[0].UC, 31)
 	require.NoError(t, err)
-	var steps uint64
-	for i := 0; i < 64; i++ {
-		require.NoError(t, scanCertificate(raw, &steps))
+	for i := 0; i < 65; i++ {
+		require.NoError(t, scanCertificate(raw))
 	}
-	require.Equal(t, uint64(2048), steps)
-	require.ErrorIs(t, scanCertificate(raw, &steps), ErrTooManyPaths)
-	require.Equal(t, uint64(2048), steps, "a rejected charge leaves the account intact")
-}
-
-func TestTokenCombinedPathBudget(t *testing.T) {
-	e := newEnv(t)
-	raw, err := certificateWithSteps(e.composed(t, 2, irTimeOK).cert.InclusionProofs()[0].UC, 31)
-	require.NoError(t, err)
 	h, err := e.F.BuildToken(5, amt, manyKeys(8))
 	require.NoError(t, err)
-	for _, extra := range []int{0, 1} {
-		proofs := make([]InclusionProof, 8)
-		for i := range proofs {
-			n := 224
-			if i == 0 {
-				n += extra
-			}
-			for bit := 0; bit < n; bit++ {
-				proofs[i].Bitmap[bit/8] |= 1 << (bit % 8)
-			}
-			proofs[i].Siblings = make([][32]byte, n)
-			proofs[i].UC = raw
+	proofs := make([]InclusionProof, 8)
+	for i := range proofs {
+		for bit := 0; bit < 256; bit++ {
+			proofs[i].Bitmap[bit/8] |= 1 << (bit % 8)
 		}
-		_, err := ProjectToken(TokenFromHistory(h, proofs).Bytes())
-		if extra == 0 {
-			require.NoError(t, err)
-		} else {
-			require.ErrorIs(t, err, ErrTooManyPaths)
-		}
+		proofs[i].Siblings = make([][32]byte, 256)
+		proofs[i].UC = raw
 	}
+	_, err = ProjectToken(TokenFromHistory(h, proofs).Bytes())
+	require.NoError(t, err, "8 x (256 siblings + 31 steps) is far above the former 2,048-step budget")
 }

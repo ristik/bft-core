@@ -98,6 +98,7 @@ func TestTokenDecodeRejections(t *testing.T) {
 	require.ErrorIs(t, err, ErrShape)
 }
 
+// No cumulative path budget (owner section 36): nine proofs of 256 steps each (2,304, over the former 2,048) decode.
 func TestTokenCumulativePathSteps(t *testing.T) {
 	e := newEnv(t)
 	realUC := e.composed(t, 2, irTimeOK).cert.InclusionProofs()[0].UC
@@ -118,8 +119,8 @@ func TestTokenCumulativePathSteps(t *testing.T) {
 		_, err = DecodeToken(TokenFromHistory(h, proofs).Bytes())
 		return err
 	}
-	require.NoError(t, build(7), "eight proofs of 256 steps: exactly 2048")
-	require.ErrorIs(t, build(8), ErrTooManyPaths)
+	require.NoError(t, build(7), "eight proofs of 256 steps: 2048")
+	require.NoError(t, build(8), "nine proofs of 256 steps: 2304")
 }
 
 func manyKeys(n int) []*secp256k1.PrivateKey {

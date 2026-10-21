@@ -10,14 +10,15 @@ import (
 	"github.com/unicitynetwork/bft-core/b1ref"
 )
 
-// The direct-call gas gate (briefs/b1-any-age-contract.md section 5, protocol 4). Every term is the native price of a call the
+// The direct-call gas estimate (briefs/b1-any-age-contract.md section 5, protocol 4). Every term is the native price of a call the
 // composing verifier makes, or a fixed allowance, computed from complete bounded scans; the contract, this oracle and the plug-ins
-// implement the same formula. It is an admission rule, not a measured fit:
+// implement the same formula. It is a conservative estimate a wallet sets its gas limit from, never an admission rule: there is no
+// fixed transaction budget (owner section 36, briefs/b7-direct-uncapped-design.md section 1), and a call with too little gas runs
+// out of gas and reverts atomically.
 //
-//	G_gate = 21,000 + 16*D_max + 80*B_env + G_kernel + G_batch + sum_i G_leaf(i) + 1,000,000 <= 7,000,000
+//	G_gate = 21,000 + 16*D_max + 80*B_env + G_kernel + G_batch + sum_i G_leaf(i) + 1,000,000
 //	D_max  = 4 + 128 + pad32(B_cfg) + pad32(B_env)
 const (
-	TxGasBudget      uint64 = 7_000_000 // ureth ordinary capacity
 	GasReserve       uint64 = 1_000_000
 	IntrinsicBase    uint64 = 21_000
 	IntrinsicPerByte uint64 = 16
@@ -84,45 +85,44 @@ func LeafPathGas(p LeafProof) (gas, steps uint64, err error) {
 	return b1ref.RSMTGas(rsmtRequestFixed+32*uint64(pop), uint64(pop)), uint64(pop), nil
 }
 
-// Gate is the gate's terms. Steps is the cumulative path work: certificate steps over the distinct anchors plus RSMT siblings over
-// every leaf, at most MaxPathSteps. J is the bridge CBOR item count and Items its charge, 1,000*J.
+// Gate is the estimate's terms. Steps is the cumulative path work: certificate steps over the distinct anchors plus RSMT siblings
+// over every leaf. J is the bridge CBOR item count and Items its charge, 1,000*J.
 type Gate struct {
 	Intrinsic, B2, Batch, RSMT, Items uint64
 	Steps, J                          uint64
 	Grouping                          b1ref.Grouping
 }
 
-// Total is the gated sum including the fixed reserve.
+// Total is the estimate including the fixed reserve.
 func (g Gate) Total() uint64 { return g.Intrinsic + g.Items + g.B2 + g.Batch + g.RSMT + GasReserve }
 
 // BridgeItems is J for one canonical CBOR object: its item heads (tags and containers, scalar and string heads, every child and map
-// key and value; the contents of a byte string are opaque). n is the budget left; an object that would exceed it is refused as soon
-// as the next item would cross it (ErrTooManyItems).
-func BridgeItems(b []byte, n int) (int, error) {
-	s := scanner{b: b, native: true, tokens: MaxCBORItems - n}
+// key and value; the contents of a byte string are opaque), within the object's own native item scan (MaxCBORItems, ErrTooManyItems).
+func BridgeItems(b []byte) (int, error) {
+	s := scanner{b: b, native: true}
 	if _, err := s.item(0); err != nil {
 		return 0, err
 	}
 	if s.pos != len(b) {
 		return 0, ErrTrailing
 	}
-	return s.tokens - (MaxCBORItems - n), nil
+	return s.tokens, nil
 }
 
-// bridgeJ sums J over the Cfg, the policy body, every anchor UC and every anchor IR opening, each occurrence once, against the shared
-// MaxBridgeItems budget. A malformed UC is an anchor-authentication failure and a malformed IR opening an IR shape failure, as later
-// checks would class them; exceeding the budget is ErrTooManyItems.
+// bridgeJ sums J over the Cfg, the policy body, every anchor UC and every anchor IR opening, each occurrence once. There is no shared
+// item budget: every item is charged (GasPerItem), and each object is bounded by its own scan and byte bound. A malformed UC is an
+// anchor-authentication failure and a malformed IR opening an IR shape failure, as later checks would class them.
 func bridgeJ(cfg []byte, env *Envelope) (uint64, error) {
-	left := MaxBridgeItems
+	var j uint64
 	take := func(b []byte, malformed error) error {
-		n, err := BridgeItems(b, left)
+		n, err := BridgeItems(b)
 		if errors.Is(err, ErrTooManyItems) {
 			return err
 		}
 		if err != nil {
 			return malformed
 		}
-		left -= n
+		j += uint64(n)
 		return nil
 	}
 	if err := take(cfg, ErrShape); err != nil {
@@ -139,12 +139,12 @@ func bridgeJ(cfg []byte, env *Envelope) (uint64, error) {
 			return 0, err
 		}
 	}
-	return uint64(MaxBridgeItems - left), nil
+	return j, nil
 }
 
-// computeGate prices a complete bounded envelope against budget: the one CERT_BATCH_V2 call over the anchor table is scanned and
-// grouped by the reference (b1ref.Group), so its charge is exactly the native one.
-func computeGate(cfg []byte, envelopeBytes int, kernelRequest uint64, env *Envelope, budget uint64) (Gate, error) {
+// computeGate prices a complete bounded envelope: the one CERT_BATCH_V2 call over the anchor table is scanned and grouped by the
+// reference (b1ref.Group), so its charge is exactly the native one.
+func computeGate(cfg []byte, envelopeBytes int, kernelRequest uint64, env *Envelope) (Gate, error) {
 	g := Gate{Intrinsic: IntrinsicGas(len(cfg), envelopeBytes), B2: B2Gas(kernelRequest, len(env.LeafProofs))}
 	for j := range env.Anchors {
 		if err := ScanAnchor(&env.Anchors[j]); err != nil {
@@ -169,19 +169,13 @@ func computeGate(cfg []byte, envelopeBytes int, kernelRequest uint64, env *Envel
 		g.RSMT += gas
 		g.Steps += steps
 	}
-	if g.Steps > MaxPathSteps {
-		return Gate{}, ErrTooManyPaths
-	}
-	if g.Total() > budget {
-		return Gate{}, ErrGasBudget
-	}
 	return g, nil
 }
 
-// GateOf runs the composition up to and including the gate for an envelope
-// against an explicit budget: framing, policy body, kernel, anchor table, gate.
-// It makes no B1 call. The corpus uses it to publish the gate's components.
-func GateOf(cfg *Cfg, op uint8, envelope []byte, budget uint64) (Gate, error) {
+// GateOf runs the composition up to and including the estimate for an envelope:
+// framing, policy body, kernel, anchor table, estimate. It makes no B1 call. The
+// corpus uses it to publish the estimate's components.
+func GateOf(cfg *Cfg, op uint8, envelope []byte) (Gate, error) {
 	env, err := DecodeEnvelope(envelope)
 	if err != nil {
 		return Gate{}, err
@@ -206,5 +200,5 @@ func GateOf(cfg *Cfg, op uint8, envelope []byte, budget uint64) (Gate, error) {
 	if _, err := PlanAnchors(pol, env, sids); err != nil {
 		return Gate{}, err
 	}
-	return computeGate(cfg.Bytes(), len(envelope), KernelRequestBytes(len(cfg.Bytes()), len(env.History)), env, budget)
+	return computeGate(cfg.Bytes(), len(envelope), KernelRequestBytes(len(cfg.Bytes()), len(env.History)), env)
 }

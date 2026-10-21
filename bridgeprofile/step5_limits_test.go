@@ -14,11 +14,12 @@ import (
 
 // #526 step 5 (briefs/526-step5-limits.md): the measurements behind MaxLeaves 24.
 
-// The oracle's return history is exactly 548 + 272*L bytes for L leaves.
+// The oracle's return history is exactly 548 + 272*L bytes for L leaves, while its transfer array has a one-byte CBOR head
+// (at most 23 transfers).
 func TestStep5HistoryBytesAreLinearInTheLeaves(t *testing.T) {
 	d, err := NewDeployment()
 	require.NoError(t, err)
-	for tr := 1; tr <= MaxTransfers-1; tr++ {
+	for tr := 1; tr <= 22; tr++ {
 		h, res, _, err := ReturnHistory(d.F, tr)
 		require.NoError(t, err)
 		require.Equal(t, 548+272*len(res.Leaves), len(h.Bytes()), "%d transfers", tr)
@@ -77,21 +78,17 @@ func step5Gate(t *testing.T, d *Deployment, n, m, s, l int) uint64 {
 	eb, err := e.Encode()
 	require.NoError(t, err)
 	cfg := d.F.Cfg.Bytes()
-	g, err := computeGate(cfg, len(eb), KernelRequestBytes(len(cfg), hist), e, math.MaxUint64)
+	g, err := computeGate(cfg, len(eb), KernelRequestBytes(len(cfg), hist), e)
 	require.NoError(t, err)
 	return g.Total()
 }
 
-// At the new bound and 24 siblings the recommended shapes fit with margin (a 4-member committee over up to 4 shards, a 16-member
-// committee over up to 2), and the heaviest one is over the budget already at the old bound: raising MaxLeaves admits no bundle the
-// gate would not price, it only lets the gate decide.
-func TestStep5GateAtTheNewBound(t *testing.T) {
+// The estimate has no ceiling (owner section 36): the heaviest consolidated shape (a 16-member committee over 8 shards, 24 siblings)
+// at the native leaf bound is priced far above the former 7,000,000 budget and is not refused; it only needs that much gas.
+func TestEstimateHasNoCeiling(t *testing.T) {
 	d, err := NewDeployment()
 	require.NoError(t, err)
-	for _, c := range []struct{ n, m int }{{4, 4}, {16, 2}} {
-		g := step5Gate(t, d, c.n, c.m, 24, MaxLeaves)
-		require.Less(t, g, uint64(6_000_000), "N=%d m=%d at %d leaves", c.n, c.m, MaxLeaves)
-		t.Logf("N=%d m=%d s=24 L=%d gate %d", c.n, c.m, MaxLeaves, g)
-	}
-	require.Greater(t, step5Gate(t, d, 16, 8, 24, 16), TxGasBudget, "N=16 m=8 is over the budget at the old bound of 16 leaves")
+	g := step5Gate(t, d, 16, 8, 24, MaxLeaves)
+	require.Greater(t, g, uint64(7_000_000))
+	t.Logf("N=16 m=8 s=24 L=%d estimate %d", MaxLeaves, g)
 }

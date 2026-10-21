@@ -52,7 +52,6 @@ var (
 	ErrTooManyItems  = newSentinel(ErrBudget, "too many CBOR items")
 	ErrTooDeep       = newSentinel(ErrBudget, "CBOR nesting too deep")
 	ErrTooManyPaths  = newSentinel(ErrBudget, "too many path steps")
-	ErrGasBudget     = newSentinel(ErrBudget, "direct-call gas gate exceeded")
 	// Embedded lock evidence over a bound: rejected, never fetched online.
 	ErrJustificationTooLarge = newSentinel(ErrBudget, "mint justification over the evidence bound")
 	ErrLockProofTooLarge     = newSentinel(ErrBudget, "lock proof component over its bound")

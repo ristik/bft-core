@@ -25,6 +25,7 @@ import (
 	"github.com/unicitynetwork/bft-core/b1paired"
 	"github.com/unicitynetwork/bft-core/b1registry"
 	"github.com/unicitynetwork/bft-core/b1state"
+	"github.com/unicitynetwork/bft-core/bridgeprofile"
 	"github.com/unicitynetwork/bft-core/q3active"
 	"github.com/unicitynetwork/bft-core/q3format"
 	"github.com/unicitynetwork/bft-core/recordsfeed"
@@ -567,7 +568,7 @@ unicity-pos-contracts script/measure-elect.sh, and the profile file records the 
 	cmd.Flags().Uint64Var(&maxEpochs, "max-epochs-per-update", b1state.MinEpochsPerUpdate, "B: validator epochs one block may install (at least the supersession span); the registry keeps every epoch forever")
 	cmd.Flags().Uint64Var(&deltaEV, "delta-ev", 31, "P85 evidence window in rounds (DeltaEV); independent of certificate age, which no longer expires")
 	cmd.Flags().Uint64Var(&deltaHold, "delta-hold", 32, "P85 hold window in rounds (DeltaHold); must exceed --delta-ev")
-	cmd.Flags().Uint64Var(&capacity, "ordinary-capacity", 7_000_000, "ordinary transaction gas capacity of a block (the block gas limit is this plus the system reservation)")
+	cmd.Flags().Uint64Var(&capacity, "ordinary-capacity", 30_000_000, "ordinary transaction gas capacity of a block (the block gas limit is this plus the system reservation); one transaction may use all of it")
 	cmd.Flags().StringVar(&recordsCustody, "records-custody", "", "the custody contract the mandatory records hook applies root records to (0x-hex address)")
 	cmd.Flags().Uint32Var(&hRecords, "h-records", 0, "most records one block's hook applies (1..32; needs --records-custody)")
 	cmd.Flags().Uint64Var(&hookRecordGas, "hook-record-gas", 0, "gross gas reserved per applied record (needs --records-custody)")
@@ -733,11 +734,17 @@ func validateB1RunFlags(flags *shardNodeRunFlags) error {
 	return nil
 }
 
+// urethTxInputBytes is the pool's per-transaction size bound for the paired ureth: twice the bridge's envelope bound
+// (bridgeprofile.MaxEnvelopeBytes), so a redemption at that bound with its Cfg and call framing is admitted. The stock 128 KiB
+// default would refuse it (owner section 36, briefs/b7-direct-uncapped-design.md section 1).
+const urethTxInputBytes = 2 * bridgeprofile.MaxEnvelopeBytes
+
 // urethFlags are the flags that pin the paired ureth to the profile: the B1 bindings, and every mandatory hook the profile (and so its
-// hash) commits to. A ureth started without a hook flag the hash commits to would run a different chain under the same hash.
+// hash) commits to. A ureth started without a hook flag the hash commits to would run a different chain under the same hash. The
+// pool is aligned with the profile's capacity: a transaction may use the whole ordinary capacity and carry a maximal bridge envelope.
 func urethFlags(p b1state.Profile, hash [32]byte) string {
-	s := fmt.Sprintf("--unicity.network-id=%d --unicity.root-genesis-id=%s --unicity.chain-id=%d --unicity.profile-hash=%s --unicity.max-epochs-per-update=%d --unicity.max-gas=%d --unicity.system-gas=%d",
-		p.Network, hexutil.Encode(p.RootGenesisID[:]), p.ExecutionChainID, hexutil.Encode(hash[:]), p.MaxEpochsPerUpdate, p.MaxGas, p.SystemGas)
+	s := fmt.Sprintf("--unicity.network-id=%d --unicity.root-genesis-id=%s --unicity.chain-id=%d --unicity.profile-hash=%s --unicity.max-epochs-per-update=%d --unicity.max-gas=%d --unicity.system-gas=%d --txpool.max-tx-gas=%d --txpool.max-tx-input-bytes=%d",
+		p.Network, hexutil.Encode(p.RootGenesisID[:]), p.ExecutionChainID, hexutil.Encode(hash[:]), p.MaxEpochsPerUpdate, p.MaxGas, p.SystemGas, p.OrdinaryCapacity, urethTxInputBytes)
 	if p.RecordsCustody != ([20]byte{}) {
 		s += fmt.Sprintf(" --unicity.records-custody=%s --unicity.h-records=%d --unicity.hook-record-gas=%d",
 			strings.ToLower(common.Address(p.RecordsCustody).Hex()), p.HRecords, p.HookRecordGas)

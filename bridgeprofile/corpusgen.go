@@ -497,11 +497,11 @@ func (g *gen) policy() {
 		}
 		return out
 	}
-	addEnv("envelope-paths-2048-eight-leaves", "eight leaves of 256 siblings: exactly MaxPathSteps", withLeaves(rep(8, 256)...), 8)
-	addEnv("envelope-paths-2049-nine-leaves", "nine leaves with sibling counts 256 x8 and 1: one step over MaxPathSteps", withLeaves(append(rep(8, 256), 1)...), 9)
-	addEnv("envelope-paths-2048-one-leaf", "one leaf with 2048 siblings", withLeaves(2048), 1)
-	addEnv("envelope-paths-2049-one-leaf", "one leaf with 2049 siblings", withLeaves(2049), 1)
-	addEnv("envelope-paths-2049-split", "two leaves of 1024 and 1025 siblings", withLeaves(1024, 1025), 2)
+	addEnv("envelope-paths-2048-eight-leaves", "eight leaves of 256 siblings, 2,048 in sum: there is no cumulative path budget", withLeaves(rep(8, 256)...), 8)
+	addEnv("envelope-paths-2049-nine-leaves", "nine leaves with sibling counts 256 x8 and 1: over the former 2,048-step budget, framed", withLeaves(append(rep(8, 256), 1)...), 9)
+	addEnv("envelope-paths-2048-one-leaf", "one leaf with 2048 siblings: framed (the per-leaf RSMT bound is the composition's)", withLeaves(2048), 1)
+	addEnv("envelope-paths-2049-one-leaf", "one leaf with 2049 siblings: framed (the per-leaf RSMT bound is the composition's)", withLeaves(2049), 1)
+	addEnv("envelope-paths-2049-split", "two leaves of 1024 and 1025 siblings: framed", withLeaves(1024, 1025), 2)
 	base, _ := envFor(nil).Encode()
 	putWord := func(b []byte, off int, v *big.Int) []byte {
 		out := bytes.Clone(b)
@@ -557,8 +557,8 @@ func (g *gen) policy() {
 		b, _ := e0.Encode()
 		return b
 	}
-	addBytes("envelope-size-65536", "envelope of exactly MaxEnvelopeBytes", sized(0), 2)
-	addBytes("envelope-size-65568", "envelope one word over MaxEnvelopeBytes", sized(32), 2)
+	addBytes("envelope-size-max", "envelope of exactly MaxEnvelopeBytes (512 KiB)", sized(0), 2)
+	addBytes("envelope-size-max-plus-word", "envelope one word over MaxEnvelopeBytes", sized(32), 2)
 }
 
 // histories: the relation cases (mint and return) and the return terminal.
@@ -892,7 +892,7 @@ func (g *gen) wire() {
 			}
 			proofs[i].Siblings = make([][32]byte, siblings)
 		}
-		tadd(fmt.Sprintf("token-combined-path-%d", 2048+n-224), "combined RSMT and Unicity path budget", TokenFromHistory(h, proofs).Bytes())
+		tadd(fmt.Sprintf("token-combined-path-%d", 2048+n-224), "RSMT and Unicity paths summing to 2,048 or 2,049 steps: no cumulative budget, both project", TokenFromHistory(h, proofs).Bytes())
 	}
 	tadd("token-proof-oversized-certificate", "certificate over the proof bound", replaceOnce(tbts, p0, pr(CUint(1), cd0, CUint(tok.MintProof.T), CBytes(path), CTag(1, CBytes(make([]byte, MaxProofUCBytes))))))
 	// Kernel ABI.
@@ -1432,19 +1432,9 @@ func (g *gen) proof() {
 				envOf(cp.h, split, nil), claimsOf(split.Anchors[len(before.Anchors):]...), "return")
 		}
 	}
-	gateCases := func(prefix string, eb []byte) {
-		gt, err := GateOf(f.Cfg, OpReturn, eb, 1<<62)
-		g.must(err)
-		if err != nil {
-			return
-		}
-		for _, c := range []struct {
-			id     string
-			budget uint64
-		}{{prefix + "-exact", gt.Total()}, {prefix + "-minus-one", gt.Total() - 1}} {
-			g.add(Case{ID: c.id, Family: "proof", Op: "gate", Cfg: "dev", Description: "the gate total of " + prefix + " against its exact budget and one less", Input: hx(eb),
-				Aux: map[string]string{"operation": "return", "budget": strconv.FormatUint(c.budget, 10)}})
-		}
+	gateCases := func(id string, eb []byte) {
+		g.add(Case{ID: id, Family: "proof", Op: "gate", Cfg: "dev", Description: "the gas estimate of " + id, Input: hx(eb),
+			Aux: map[string]string{"operation": "return"}})
 	}
 	perLeaf := func(id, desc string, transfers int) {
 		c, err := g.certifiedWith(transfers, func(i int, l Leaf) ShardRound { return ShardRound{BaseTime + 1000, 100 + uint64(i)} })
@@ -1466,23 +1456,21 @@ func (g *gen) proof() {
 	g.must(err)
 	g.quad = &AggregatorWorld{PDRs: d.Agg.PDRs, Auth: quadAuth, TB: quadTB}
 	g.useQuad = true
-	perLeaf("compose-anchors-3-dnb", "three leaves, three anchors, each certificate with the DN-B committee's four signatures: accepted at the transaction budget", 1)
-	perLeaf("compose-anchors-max-dnb", "MaxAnchors anchors, each certificate with four signatures (DN-B committee shape): accepted at the transaction budget", MaxAnchors-2)
-	// With the repriced certificate call (owner-decisions section 22) real four-signature certificates never reach the gate, even
-	// at eight anchors with sixteen leaves and deep paths; only the maximum-signature case below does.
+	perLeaf("compose-anchors-3-dnb", "three leaves, three anchors, each certificate with the DN-B committee's four signatures", 1)
+	perLeaf("compose-anchors-max-dnb", "MaxAnchors anchors, each certificate with four signatures (DN-B committee shape)", MaxAnchors-2)
 	g.useQuad, g.extraN = false, 0
 	// MaxLeaves > MaxAnchors since #526 step 5: a token whose leaves each carry their own certificate can now need MaxAnchors+1
-	// anchors; the parser refuses it before any gate or B1 call (envelope-anchors-over-max exercises the bound on envelopes).
+	// anchors; the parser refuses it before any B1 call (envelope-anchors-over-max exercises the bound on envelopes).
 	perLeaf("compose-anchors-over-max", "MaxAnchors+1 leaves, each certified by its own UC: one anchor over MaxAnchors", MaxAnchors-1)
-	// MaxAnchors anchors of certificates carrying 16 seal signatures each (the native maximum): structurally admitted; the gate
-	// prices the batch (each a distinct seal, Q = 256) before any B1 call.
+	// MaxAnchors anchors of certificates carrying 16 seal signatures each (the native maximum, each a distinct seal, Q = 256): the
+	// heaviest admitted batch; there is no gas budget to refuse it (owner section 36), it is paid.
 	if hc, err := g.certifiedWith(MaxAnchors-2, func(i int, l Leaf) ShardRound { return ShardRound{BaseTime + 1000, 100 + uint64(i)} }); err == nil {
 		eb := envOf(hc.h, hc.cert, func(e *Envelope) {
 			for i := range e.Anchors {
 				e.Anchors[i].UC = ucWithSigs(g, e.Anchors[i].UC, 16)
 			}
 		})
-		add("compose-anchors-max-heavy-over-budget", "MaxAnchors (sixteen) anchors whose certificates carry 16 signatures each (the native maximum), the heaviest admitted shape", eb, claimsOf(hc.cert.Anchors...), "return")
+		add("compose-anchors-max-heavy", "MaxAnchors (sixteen) anchors whose certificates carry 16 signatures each (the native maximum), the heaviest admitted shape", eb, claimsOf(hc.cert.Anchors...), "return")
 	} else {
 		g.must(err)
 	}
@@ -1520,21 +1508,11 @@ func (g *gen) proof() {
 		e.Anchors = append(e.Anchors, u)
 	}), claimsOf(append(mc.Anchors, func() Anchor { u := mc.Anchors[0]; u.UC = append(bytes.Clone(u.UC), 0); return u }())...), "mint")
 	add("compose-mint-wrong-anchor", "the mint carries the other shard's anchor", envOf(mt, mc, func(e *Envelope) { e.Anchors = oc.Anchors }), claimsOf(oc.Anchors...), "mint")
-	// Gate components: exact budget accepts, one less refuses.
-	eb := envFrom(nil)
-	gt, err := GateOf(f.Cfg, OpReturn, eb, TxGasBudget)
-	g.must(err)
-	if err == nil {
-		for _, c := range []struct {
-			id, desc string
-			budget   uint64
-		}{{"gate-exact-budget", "the gate total equals the budget", gt.Total()}, {"gate-budget-minus-one", "one gas under the gate total", gt.Total() - 1}, {"gate-full-budget", "the 7,000,000 transaction budget", TxGasBudget}} {
-			g.add(Case{ID: c.id, Family: "proof", Op: "gate", Cfg: "dev", Description: c.desc, Input: hx(eb),
-				Aux: map[string]string{"operation": "return", "budget": strconv.FormatUint(c.budget, 10)}})
-		}
-	}
+	// Gas estimate components of the default return bundle.
+	g.add(Case{ID: "gate-return", Family: "proof", Op: "gate", Cfg: "dev", Description: "the gas estimate of the default return bundle",
+		Input: hx(envFrom(nil)), Aux: map[string]string{"operation": "return"}})
 	mb := envOf(mt, mc, nil)
-	g.add(Case{ID: "gate-mint", Family: "proof", Op: "gate", Cfg: "dev", Description: "the gate of a one-leaf one-anchor mint", Input: hx(mb),
+	g.add(Case{ID: "gate-mint", Family: "proof", Op: "gate", Cfg: "dev", Description: "the gas estimate of a one-leaf one-anchor mint", Input: hx(mb),
 		Aux: map[string]string{"operation": "mint"}})
 }
 
