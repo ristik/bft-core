@@ -1,5 +1,7 @@
 package b1ref
 
+import "math"
+
 // Hard limits of CERT_BATCH_V2 (briefs/b1-any-age-contract.md section 4) and of RSMT_MEMBER_V1.
 const (
 	MaxCallBytes      = 262144
@@ -23,6 +25,24 @@ const (
 
 	certVersion   = 2 // CERT_BATCH_V2 input and output
 	memberVersion = 1 // RSMT_MEMBER_V1 input and output
+)
+
+// Limits are the aggregate bounds of one CERT_BATCH_V2 scan. A standalone call (0x0100) uses Standard. The native composition
+// (BRIDGE_COMPOSE_V1) groups its anchor table under Composed: the claim count is bounded by the u16 wire count, the request by
+// the envelope, and the CBOR item budget applies to each UC occurrence on its own; its gas pays for all of it
+// (briefs/dev4-b7-native-compose-spec.md section 7). The per-object bounds (UC bytes, shard, signatures per seal, steps per
+// occurrence) are the same in both.
+type Limits struct {
+	CallBytes  int
+	Claims     int
+	BatchSigs  uint64
+	CertSteps  uint64
+	PerUCItems bool // the CBOR item budget is per UC occurrence instead of summed over the call
+}
+
+var (
+	Standard = Limits{CallBytes: MaxCallBytes, Claims: MaxClaims, BatchSigs: MaxBatchSigs, CertSteps: MaxCertSteps}
+	Composed = Limits{CallBytes: math.MaxInt, Claims: math.MaxUint16, BatchSigs: math.MaxUint64, CertSteps: math.MaxUint64, PerUCItems: true}
 )
 
 // CERT_BATCH_V2 schedule (contract section 5). Every term depends on the request only, never on registry contents or warmth.

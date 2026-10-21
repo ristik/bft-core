@@ -281,20 +281,25 @@ func TestEnvelopeRoundTripAndFraming(t *testing.T) {
 
 func TestEnvelopeCountBounds(t *testing.T) {
 	f := fix()
-	e := envelopeFor(t, f, 0)
-	for i := 0; i < MaxAnchors; i++ {
+	// Above the former aggregates (seventeen anchors, MaxLeaves+1 leaves) the envelope decodes: the composition streams them.
+	e := envelopeFor(t, f, MaxLeaves+1)
+	for i := 0; i < fixtureAnchors; i++ {
 		e.Anchors = append(e.Anchors, e.Anchors[0])
 	}
 	b, err := e.Encode()
 	require.NoError(t, err)
 	_, err = DecodeEnvelope(b)
-	require.ErrorIs(t, err, ErrTooManyPaths)
-
-	e = envelopeFor(t, f, MaxLeaves+1)
-	b, err = e.Encode()
 	require.NoError(t, err)
-	_, err = DecodeEnvelope(b)
+	// The anchor count is a u16 on the wire: a declared count of MaxAnchors+1 is refused from the head word, before any allocation,
+	// in an envelope whose bytes could hold it; MaxAnchors itself passes the count bound (and then fails the framing).
+	wide := append(b, make([]byte, MaxAnchors+1)...)
+	off := new(big.Int).SetBytes(wide[64:96]).Uint64()
+	new(big.Int).SetUint64(MaxAnchors + 1).FillBytes(wide[off : off+32])
+	_, err = DecodeEnvelope(wide)
 	require.ErrorIs(t, err, ErrTooManyPaths)
+	new(big.Int).SetUint64(MaxAnchors).FillBytes(wide[off : off+32])
+	_, err = DecodeEnvelope(wide)
+	require.ErrorIs(t, err, ErrABIFraming)
 }
 
 func TestCheckPolicy(t *testing.T) {
@@ -464,16 +469,14 @@ func TestCheckPolicySharded(t *testing.T) {
 	e.Anchors[0].Shard = []byte{0x20} // shard 00: a leaf with prefix 01 is not in it
 	_, _, err = CheckPolicy(f.Cfg, e, [][32]byte{s01, s01})
 	require.ErrorIs(t, err, ErrPolicyLeafIndex)
-	// The anchor bound is a named profile parameter.
-	many := make([]spec, MaxAnchors+1)
-	idx := make([]uint16, MaxAnchors+1)
-	sids := make([][32]byte, MaxAnchors+1)
+	// Seventeen anchors, above the former B1 claim bound of 16, are admitted: the anchor table is streamed.
+	many := make([]spec, fixtureAnchors+1)
+	idx := make([]uint16, fixtureAnchors+1)
+	sids := make([][32]byte, fixtureAnchors+1)
 	for i := range many {
 		many[i], idx[i], sids[i] = spec{0, byte(i + 1)}, uint16(i), s0
 	}
 	_, _, err = CheckPolicy(f.Cfg, env(many, idx...), sids)
-	require.ErrorIs(t, err, ErrTooManyPaths)
-	_, _, err = CheckPolicy(f.Cfg, env(many[:MaxAnchors], idx[:MaxAnchors]...), sids[:MaxAnchors])
 	require.NoError(t, err)
 }
 

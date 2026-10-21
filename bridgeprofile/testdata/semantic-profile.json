@@ -1,5 +1,5 @@
 {
-  "artifactVersion": 8,
+  "artifactVersion": 9,
   "nativeBridgeProtocolVersion": 5,
   "sdkVersion": "4.0.0",
   "status": "development-provisional-unactivated",
@@ -44,7 +44,7 @@
     "transfers": 64,
     "leaves": 65,
     "policyBytes": 512,
-    "aggregatorAnchors": 16,
+    "aggregatorAnchors": 65535,
     "anchorUcBytes": 8192,
     "irBytes": 512,
     "rsmtSiblingsPerLeaf": 32,
@@ -92,5 +92,5 @@
     "verification": "one-CERT_BATCH_V2-0x0100-over-the-anchor-table",
     "certificateAge": "any-age-permanent-registry"
   },
-  "limitsNote": "The one resource policy shared by contract, oracle and plug-ins (owner section 36, bft-core briefs/b7-direct-uncapped-design.md section 1): no gas ceiling and no bridge-specific history cap; the aggregate entries are the native kernels' own limits and envelopeBytes is the ingress bound; the rest are per-object shape bounds."
+  "limitsNote": "The one resource policy shared by contract, oracle and plug-ins (owner section 36, bft-core briefs/b7-direct-uncapped-design.md section 1): no gas ceiling and no history cap. The composition (BRIDGE_COMPOSE_V1) is bounded by envelopeBytes (the ingress bound), the u16 anchor wire width (aggregatorAnchors) and its gas, and streams the history and the anchor table (bft-core briefs/dev4-b7-native-compose-spec.md section 7); transfers, leaves and semanticBytes are the standalone B2 kernel's own bounds (0x0104, prepareLock); the rest are per-object shape bounds."
 }

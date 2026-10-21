@@ -156,7 +156,7 @@ func computeGate(cfg []byte, envelopeBytes int, kernelRequest uint64, env *Envel
 		return Gate{}, err
 	}
 	g.J, g.Items = j, GasPerItem*j
-	grouping, err := b1ref.Group(CertBatchRequest(env.Anchors))
+	grouping, err := b1ref.GroupWith(CertBatchRequest(env.Anchors), b1ref.Composed)
 	if err != nil {
 		return Gate{}, ErrAnchorAuth
 	}
@@ -186,9 +186,9 @@ func GateOf(cfg *Cfg, op uint8, envelope []byte) (Gate, error) {
 	}
 	var res *Result
 	if op == OpMint {
-		res, err = VerifyMint(cfg, env.History)
+		res, err = VerifyMintWith(cfg, env.History, ComposedHistory)
 	} else {
-		res, err = VerifyReturn(cfg, env.History)
+		res, err = VerifyReturnWith(cfg, env.History, ComposedHistory)
 	}
 	if err != nil {
 		return Gate{}, err

@@ -64,10 +64,11 @@ and items of the repeated seal copy). The leaf and history-byte terms grow with 
 ### The resource policy (owner §36, B7 direct path)
 
 There is no gas ceiling and no bridge-specific history cap (`limits.go`, briefs/b7-direct-uncapped-design.md §1). The gas formula is
-an estimate that wallets set their gas limit from; a call with too little gas runs out of gas and reverts. The aggregate bounds are
-the native kernels' own until the native composition streams them: MaxTransfers 64 and MaxLeaves 65 (B2), MaxSemanticBytes 128 KiB
-(B2 history), MaxAnchors 16 (B1 claims). MaxEnvelopeBytes is 512 KiB, an ingress bound above every envelope those admit. The
-cumulative path-step budget (2,048) and the shared Solidity item budget (4,096) are gone: path steps and items are charged; each
+an estimate that wallets set their gas limit from; a call with too little gas runs out of gas and reverts. The composition streams
+the history and the anchor table (B7 PR 2b, briefs/dev4-b7-native-compose-spec.md §7): it is bounded by MaxEnvelopeBytes (512 KiB,
+the ingress bound), the u16 anchor wire width (MaxAnchors 65,535) and its gas, under `ComposedHistory` and `b1ref.Composed`.
+MaxTransfers 64, MaxLeaves 65 and MaxSemanticBytes 128 KiB are the standalone B2 kernel's own bounds (0x0104, which `prepareLock`
+calls), and B1's 16 claims those of a standalone CERT_BATCH_V2 call. The cumulative path-step budget (2,048) and the shared Solidity item budget (4,096) are gone: path steps and items are charged; each
 certificate, path and CBOR object keeps its own shape bound, and the envelope's declared siblings never exceed its bytes.
 
 ### Measurements (#526 step 5)
@@ -75,8 +76,8 @@ certificate, path and CBOR object keeps its own shape bound, and the envelope's 
 `step5_limits_test.go` keeps the measurements: the oracle's return history is 548 + 272·L bytes (up to 23 transfers, a one-byte
 array head); RSMT membership paths have about log2(n) siblings for n state IDs (mean 20, p99 23 at 10^6, behind
 `STEP5_RSMT_LARGE=1`); and `TestEstimateHasNoCeiling` prices a 16-member committee over 8 shards at 65 leaves and 24 siblings far
-above the former 7M, unrefused. A token whose leaves each carry their own certificate can still need more than MaxAnchors anchors,
-which the parser refuses (`compose-anchors-over-max`); consolidation removes that need.
+above the former 7M, unrefused. A token whose leaves each carry their own certificate needs one anchor per leaf; seventeen
+(`compose-anchors-over-max`) and an 80-leaf history with 80 anchors (`compose-long-history`) are admitted and paid.
 
 ### Native composition (BRIDGE_COMPOSE_V1, B7 direct PR 2)
 

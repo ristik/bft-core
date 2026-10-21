@@ -26,10 +26,10 @@ func TestCallerScannerAllocatesNothing(t *testing.T) {
 	for _, id := range []string{"cert.single.ok", "cert.batch.max-16.ok", "quorum.max.all", "price.worst.k16"} {
 		raw := vectorByID(t, m, id)
 		var pl plan
-		if err := scanBatch(raw, &pl); err != nil {
+		if err := scanBatch(raw, &pl, Standard); err != nil {
 			t.Fatal(err)
 		}
-		if n := testing.AllocsPerRun(20, func() { scanBatch(raw, &pl) }); n != 0 {
+		if n := testing.AllocsPerRun(20, func() { scanBatch(raw, &pl, Standard) }); n != 0 {
 			t.Fatalf("%s: %g allocations", id, n)
 		}
 	}
@@ -46,7 +46,7 @@ func TestGroupingParity(t *testing.T) {
 		}
 		raw, _ := hex.DecodeString(v.Request)
 		var pl plan
-		if err := scanBatch(raw, &pl); err != nil {
+		if err := scanBatch(raw, &pl, Standard); err != nil {
 			t.Fatalf("%s: %v", v.ID, err)
 		}
 		if pl.c != g.C || pl.k != g.K || pl.e != g.E || pl.s != g.S || pl.q != g.Q || pl.a != g.A || pl.p != g.P || pl.charge != v.Expected.Gas {
@@ -68,7 +68,7 @@ func TestCallerScannerRejectsSignatureShape(t *testing.T) {
 		}
 		raw, _ := hex.DecodeString(v.Request)
 		var pl plan
-		if err := scanBatch(raw, &pl); !errors.Is(err, ErrSigFormat) {
+		if err := scanBatch(raw, &pl, Standard); !errors.Is(err, ErrSigFormat) {
 			t.Fatalf("%s: %v", v.ID, err)
 		}
 		count++
@@ -88,7 +88,7 @@ func certFrame(uc []byte) []byte {
 	return f[:len(f):len(f)]
 }
 
-func scanErr(in []byte) error { var pl plan; return scanBatch(in, &pl) }
+func scanErr(in []byte) error { var pl plan; return scanBatch(in, &pl, Standard) }
 
 func TestCallerScannerEmptyUC(t *testing.T) {
 	if err := scanErr(certFrame(nil)); !errors.Is(err, ErrTruncated) {
@@ -123,7 +123,7 @@ func TestCallerScannerDuplicateBeforeDecode(t *testing.T) {
 // one seal (contract section 7a.1).
 func TestClaimConflictPredicate(t *testing.T) {
 	claims := []claim{{partition: 1, shardBytes: []byte{0x80}}, {partition: 1, shardBytes: []byte{0x80}}, {partition: 1, shardBytes: []byte{0xc0}}, {partition: 2, shardBytes: []byte{0x80}}}
-	pl := &plan{k: 4}
+	pl := &plan{k: 4, occ: make([]occurrence, 4)}
 	for i := range pl.occ[:4] {
 		pl.occ[i] = occurrence{newClaim: true}
 	}
@@ -140,5 +140,29 @@ func TestClaimConflictPredicate(t *testing.T) {
 	pl.occ[1].sealGroup, pl.occ[0].newClaim = 0, false
 	if conflicts(claims, pl, 1) {
 		t.Fatal("an exact repeat (not a new claim) is no conflict")
+	}
+}
+
+// TestComposedLimits: the composition's anchor table is grouped under Composed. Seventeen occurrences of one claim exceed the
+// standalone claim bound (ErrCount) but group under Composed into one claim, one seal and one epoch, with the occurrences counted.
+func TestComposedLimits(t *testing.T) {
+	single := vectorByID(t, b1gen.Build(corpusSeed), "cert.single.ok")
+	one, err := GroupWith(single, Composed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	in := []byte{2, 0, 0, 17}
+	for i := 0; i < 17; i++ {
+		in = append(in, single[4:]...)
+	}
+	if _, err := Group(in); !errors.Is(err, ErrCount) {
+		t.Fatalf("standalone: %v", err)
+	}
+	g, err := GroupWith(in, Composed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if g.K != 17 || g.A != 1 || g.S != 1 || g.E != 1 || g.Q != one.Q || g.P != one.P {
+		t.Fatalf("composed grouping %+v, single %+v", g, one)
 	}
 }

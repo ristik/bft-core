@@ -38,9 +38,9 @@ func Compose(cfg *Cfg, op uint8, envelope []byte, b1 B1) (*Result, error) {
 	}
 	var res *Result
 	if op == OpMint {
-		res, err = VerifyMint(cfg, env.History)
+		res, err = VerifyMintWith(cfg, env.History, ComposedHistory)
 	} else {
-		res, err = VerifyReturn(cfg, env.History)
+		res, err = VerifyReturnWith(cfg, env.History, ComposedHistory)
 	}
 	if err != nil {
 		return nil, err

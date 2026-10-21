@@ -112,15 +112,21 @@ func decodeProof(it *item, b []byte) (*InclusionProof, error) {
 
 // DecodeToken strictly decodes an entire SDK token. Every proof is mandatory
 // and complete; trailing bytes, extra slots and a separate third
-// reference-time slot are rejected.
+// reference-time slot are rejected. A token is bounded by MaxTokenBytes alone: its transfers and items are those of the history the
+// composition streams (ComposedHistory), not the standalone kernel's.
 func DecodeToken(b []byte) (*Token, error) {
 	if len(b) > MaxTokenBytes {
 		return nil, ErrInputTooLarge
 	}
-	root, err := scanOneNative(b)
+	s := scanner{b: b, native: true, maxItems: ComposedHistory.Items}
+	it, err := s.item(0)
 	if err != nil {
 		return nil, err
 	}
+	if s.pos != len(b) {
+		return nil, ErrTrailing
+	}
+	root := &it
 	c, err := root.tagContent(TagToken)
 	if err != nil {
 		return nil, err
@@ -137,9 +143,6 @@ func DecodeToken(b []byte) (*Token, error) {
 	}
 	if c.kids[2].major != majArray {
 		return nil, ErrShape
-	}
-	if len(c.kids[2].kids) > MaxTransfers {
-		return nil, ErrTooManyTx
 	}
 	t := &Token{}
 	if err := decodeMint(&g.kids[0], b, &t.Mint); err != nil {

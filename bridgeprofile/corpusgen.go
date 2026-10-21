@@ -459,8 +459,8 @@ func (g *gen) policy() {
 		e.LeafProofs[0].AnchorIndex, e.LeafProofs[1].AnchorIndex = 1, 0
 	}), both)
 	addEnvSIDs("envelope-leaf-index-out-of-range", "second leaf names anchor 2", bothEnv(func(e *Envelope) { e.LeafProofs[1].AnchorIndex = 2 }), both)
-	addEnv("envelope-nine-anchors", "MaxAnchors+1 (seventeen) anchors for two leaves: refused by the count bound before any other check", envFor(func(e *Envelope) {
-		for u := byte(2); len(e.Anchors) <= MaxAnchors; u++ {
+	addEnv("envelope-nine-anchors", "seventeen anchors for two leaves: more anchors than leaves", envFor(func(e *Envelope) {
+		for u := byte(2); len(e.Anchors) <= fixtureAnchors; u++ {
 			e.Anchors = append(e.Anchors, anchorOf(0, u))
 		}
 	}), 2)
@@ -533,12 +533,12 @@ func (g *gen) policy() {
 			}
 		}), n
 	}
-	for _, n := range []int{MaxAnchors, MaxAnchors + 1} {
+	for _, n := range []int{fixtureAnchors, fixtureAnchors + 1} {
 		e, leaves := manyAnchors(n)
-		if n == MaxAnchors {
-			addEnv("envelope-anchors-max", "MaxAnchors distinct UCs of one shard, each used by one leaf", e, leaves)
+		if n == fixtureAnchors {
+			addEnv("envelope-anchors-max", "sixteen distinct UCs of one shard, each used by one leaf", e, leaves)
 		} else {
-			addEnv("envelope-anchors-over-max", "one more anchor than MaxAnchors", e, leaves)
+			addEnv("envelope-anchors-over-max", "seventeen distinct UCs, above the former B1 claim bound of 16: admitted (the composition streams the anchor table)", e, leaves)
 		}
 	}
 	leaves := func(n int) *Envelope {
@@ -549,8 +549,8 @@ func (g *gen) policy() {
 			}
 		})
 	}
-	addEnv("envelope-leaves-max", "MaxLeaves leaves, the maximum history", leaves(MaxLeaves), MaxLeaves)
-	addEnv("envelope-leaves-over-max", "MaxLeaves+1 leaves exceed MaxLeaves", leaves(MaxLeaves+1), MaxLeaves+1)
+	addEnv("envelope-leaves-max", "MaxLeaves leaves, the standalone kernel's leaf bound", leaves(MaxLeaves), MaxLeaves)
+	addEnv("envelope-leaves-over-max", "MaxLeaves+1 leaves, above the standalone kernel's bound: admitted by the composition", leaves(MaxLeaves+1), MaxLeaves+1)
 	sized := func(extra int) []byte {
 		e0 := envFor(func(e *Envelope) { e.History = nil })
 		b0, _ := e0.Encode()
@@ -560,6 +560,12 @@ func (g *gen) policy() {
 	}
 	addBytes("envelope-size-max", "envelope of exactly MaxEnvelopeBytes (512 KiB)", sized(0), 2)
 	addBytes("envelope-size-max-plus-word", "envelope one word over MaxEnvelopeBytes", sized(32), 2)
+	// The anchor count is a u16 on the CERT_BATCH_V2 wire and in every anchorIndex: a declared count above it is refused before any
+	// allocation, whatever the envelope's bytes could hold.
+	wide := sized(0)
+	off := new(big.Int).SetBytes(wide[64:96]).Uint64()
+	new(big.Int).SetUint64(MaxAnchors + 1).FillBytes(wide[off : off+32])
+	addBytes("envelope-anchors-over-wire", "a declared anchor count of 65536, one above the u16 wire width", wide, 2)
 }
 
 // histories: the relation cases (mint and return) and the return terminal.
@@ -978,7 +984,7 @@ func ReturnHistorySeeded(f *Fixture, transfers int, seed string) (*History, *Res
 	var rcpt [20]byte
 	rcpt[0], rcpt[19] = 0xAA, 0x01
 	f.AppendBurn(h, keys[len(keys)-1], rcpt, big.NewInt(1_000_000_007))
-	res, err := VerifyReturn(f.Cfg, h.Bytes())
+	res, err := VerifyReturnWith(f.Cfg, h.Bytes(), ComposedHistory)
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -1443,13 +1449,11 @@ func (g *gen) proof() {
 		if err == nil {
 			eb := envOf(c.h, c.cert, nil)
 			add(id, desc, eb, claimsOf(c.cert.Anchors...), "return")
-			if len(c.cert.Anchors) <= MaxAnchors {
-				gateCases("gate-"+id, eb)
-			}
+			gateCases("gate-"+id, eb)
 		}
 	}
 	perLeaf("compose-anchors-3", "three leaves, each certified by its own UC: three anchors (one-signature fixture certificates)", 1)
-	perLeaf("compose-anchors-max", "MaxAnchors leaves, each certified by its own UC: exactly MaxAnchors anchors (one-signature fixture certificates)", MaxAnchors-2)
+	perLeaf("compose-anchors-max", "sixteen leaves, each certified by its own UC: sixteen anchors (one-signature fixture certificates)", fixtureAnchors-2)
 	// The DN-B committee shape: four validators, so four signatures per seal.
 	quadAuth, err := NewCommittee("dnb-aggregator-committee", 4)
 	g.must(err)
@@ -1458,20 +1462,21 @@ func (g *gen) proof() {
 	g.quad = &AggregatorWorld{PDRs: d.Agg.PDRs, Auth: quadAuth, TB: quadTB}
 	g.useQuad = true
 	perLeaf("compose-anchors-3-dnb", "three leaves, three anchors, each certificate with the DN-B committee's four signatures", 1)
-	perLeaf("compose-anchors-max-dnb", "MaxAnchors anchors, each certificate with four signatures (DN-B committee shape)", MaxAnchors-2)
+	perLeaf("compose-anchors-max-dnb", "sixteen anchors, each certificate with four signatures (DN-B committee shape)", fixtureAnchors-2)
 	g.useQuad, g.extraN = false, 0
-	// MaxLeaves > MaxAnchors since #526 step 5: a token whose leaves each carry their own certificate can now need MaxAnchors+1
-	// anchors; the parser refuses it before any B1 call (envelope-anchors-over-max exercises the bound on envelopes).
-	perLeaf("compose-anchors-over-max", "MaxAnchors+1 leaves, each certified by its own UC: one anchor over MaxAnchors", MaxAnchors-1)
-	// MaxAnchors anchors of certificates carrying 16 seal signatures each (the native maximum, each a distinct seal, Q = 256): the
-	// heaviest admitted batch; there is no gas budget to refuse it (owner section 36), it is paid.
-	if hc, err := g.certifiedWith(MaxAnchors-2, func(i int, l Leaf) ShardRound { return ShardRound{BaseTime + 1000, 100 + uint64(i)} }); err == nil {
+	// Above the former aggregates (B7 PR 2b): seventeen anchors (B1's 16 claims), and a history of 80 leaves, each with its own UC
+	// (B2's 64 transfers and B1's 16 claims at once). The composition streams both; they are paid, never refused for their length.
+	perLeaf("compose-anchors-over-max", "seventeen leaves, each certified by its own UC: one anchor above the former B1 claim bound, admitted", fixtureAnchors-1)
+	perLeaf("compose-long-history", "eighty leaves (78 transfers and the burn), each certified by its own UC: above the former transfer, leaf and anchor bounds", 78)
+	// Sixteen anchors of certificates carrying 16 seal signatures each (the native per-seal maximum, each a distinct seal, Q = 256):
+	// there is no gas budget to refuse it (owner section 36), it is paid.
+	if hc, err := g.certifiedWith(fixtureAnchors-2, func(i int, l Leaf) ShardRound { return ShardRound{BaseTime + 1000, 100 + uint64(i)} }); err == nil {
 		eb := envOf(hc.h, hc.cert, func(e *Envelope) {
 			for i := range e.Anchors {
 				e.Anchors[i].UC = ucWithSigs(g, e.Anchors[i].UC, 16)
 			}
 		})
-		add("compose-anchors-max-heavy", "MaxAnchors (sixteen) anchors whose certificates carry 16 signatures each (the native maximum), the heaviest admitted shape", eb, claimsOf(hc.cert.Anchors...), "return")
+		add("compose-anchors-max-heavy", "sixteen anchors whose certificates carry 16 signatures each (the native per-seal maximum)", eb, claimsOf(hc.cert.Anchors...), "return")
 	} else {
 		g.must(err)
 	}
@@ -1479,7 +1484,7 @@ func (g *gen) proof() {
 	g.must(err)
 	if err == nil {
 		eb := envOf(big65.h, big65.cert, nil)
-		add("compose-leaves-max-two-anchors", "MaxLeaves leaves in two shards under one UC per shard", eb, claimsOf(big65.cert.Anchors...), "return")
+		add("compose-leaves-max-two-anchors", "MaxLeaves (the standalone kernel's bound) leaves in two shards under one UC per shard", eb, claimsOf(big65.cert.Anchors...), "return")
 		gateCases("gate-compose-leaves-max-two-anchors", eb)
 	}
 	add("compose-refresh-later-anchor", "the same leaves proven under later admitted roots keep their original t", envOf(cp.h, later, nil), claimsOf(later.Anchors...), "return")

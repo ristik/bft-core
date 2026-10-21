@@ -139,11 +139,33 @@ func (m *meter) charge(n uint64) error {
 	return nil
 }
 
+// historyScan is the history's native item scan under ComposedHistory's item bound.
+func historyScan(history []byte) (*item, int, error) {
+	s := scanner{b: history, native: true, maxItems: ComposedHistory.Items}
+	it, err := s.item(0)
+	if err != nil {
+		return nil, 0, err
+	}
+	if s.pos != len(history) {
+		return nil, 0, ErrTrailing
+	}
+	return &it, s.tokens, nil
+}
+
+// historyItems is the history's J: its item heads under the native scan, zero if it does not scan.
+func historyItems(history []byte) uint64 {
+	_, n, err := historyScan(history)
+	if err != nil {
+		return 0
+	}
+	return uint64(n)
+}
+
 // historyLeaves is the kernel's leaf count read from the history's head before any verification, as B2 counts it: the history is
 // [mint, transfers] and L = 1 + len(transfers); a history whose head is not that shape has no count (zero).
 func historyLeaves(history []byte) uint64 {
-	root, err := scanOneNative(history)
-	if err != nil || !root.isArray(2) || root.kids[1].major != majArray || len(root.kids[1].kids) > MaxTransfers {
+	root, _, err := historyScan(history)
+	if err != nil || !root.isArray(2) || root.kids[1].major != majArray {
 		return 0
 	}
 	return 1 + uint64(len(root.kids[1].kids))
@@ -236,14 +258,14 @@ func nativeCompose(input []byte, m *meter, b1 B1) (*Result, error) {
 	if err := m.charge(ComposePerItem * items(env.PolicyBody)); err != nil {
 		return nil, err
 	}
-	if err := m.charge(ComposePerItem*items(env.History) + ComposePerLeaf*historyLeaves(env.History)); err != nil {
+	if err := m.charge(ComposePerItem*historyItems(env.History) + ComposePerLeaf*historyLeaves(env.History)); err != nil {
 		return nil, err
 	}
 	var res *Result
 	if op == OpMint {
-		res, err = VerifyMint(cfg, env.History)
+		res, err = VerifyMintWith(cfg, env.History, ComposedHistory)
 	} else {
-		res, err = VerifyReturn(cfg, env.History)
+		res, err = VerifyReturnWith(cfg, env.History, ComposedHistory)
 	}
 	if err != nil {
 		return nil, err
@@ -272,7 +294,7 @@ func nativeCompose(input []byte, m *meter, b1 B1) (*Result, error) {
 	if err := m.charge(ComposePerItem * anchorItems); err != nil {
 		return nil, err
 	}
-	grouping, err := b1ref.Group(CertBatchRequest(env.Anchors))
+	grouping, err := b1ref.GroupWith(CertBatchRequest(env.Anchors), b1ref.Composed)
 	if err != nil {
 		return nil, ErrAnchorAuth
 	}

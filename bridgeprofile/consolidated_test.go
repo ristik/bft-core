@@ -100,7 +100,7 @@ func TestConsolidatedGateTable(t *testing.T) {
 	i := 0
 	for _, n := range []int{4, 16} {
 		for _, m := range []int{1, 2, 4, 8} {
-			for _, transfers := range []int{6, MaxAnchors - 2} {
+			for _, transfers := range []int{6, fixtureAnchors - 2} {
 				got := measureConsolidated(t, d, n, m, transfers)
 				require.Equal(t, want[i], got, "N=%d m=%d transfers=%d", n, m, transfers)
 				require.Equal(t, uint64(m), got.K, "one anchor per shard")
@@ -118,7 +118,7 @@ func TestConsolidatedCertificatesAreTheRoundsOrdinaryUCs(t *testing.T) {
 	d, err := NewDeployment()
 	require.NoError(t, err)
 	w := consolidatedWorld(t, 4, 3)
-	_, res, err := SpanningHistory(d.F, w, MaxAnchors-2)
+	_, res, err := SpanningHistory(d.F, w, fixtureAnchors-2)
 	require.NoError(t, err)
 	cl, err := w.CertifyConsolidated(res.Leaves, nil, oneRound)
 	require.NoError(t, err)
@@ -145,7 +145,7 @@ func TestConsolidatedMixedBundle(t *testing.T) {
 	d, err := NewDeployment()
 	require.NoError(t, err)
 	w := consolidatedWorld(t, 4, 2)
-	_, res, err := SpanningHistory(d.F, w, MaxAnchors-2)
+	_, res, err := SpanningHistory(d.F, w, fixtureAnchors-2)
 	require.NoError(t, err)
 	last := len(res.Leaves) - 1
 	cl, err := w.CertifyConsolidated(res.Leaves, nil, func(i int, _ Leaf) ShardRound {
@@ -168,7 +168,7 @@ func TestConsolidatedAlteredShardLeafIsRefusedLikeAnyUC(t *testing.T) {
 	d, err := NewDeployment()
 	require.NoError(t, err)
 	w := consolidatedWorld(t, 4, 2)
-	_, res, err := SpanningHistory(d.F, w, MaxAnchors-2)
+	_, res, err := SpanningHistory(d.F, w, fixtureAnchors-2)
 	require.NoError(t, err)
 	cl, err := w.CertifyConsolidated(res.Leaves, nil, oneRound)
 	require.NoError(t, err)
