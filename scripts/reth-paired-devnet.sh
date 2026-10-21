@@ -393,16 +393,11 @@ for i in $(seq 1 "$validators"); do
 done
 pass "all $validators reth instances are up on the shard's generated chain spec"
 
-# devp2p static peering (docs/engine-api-adapter.md §5): discovery is off, so introduce them
-# explicitly rather than relying on it.
-for i in $(seq 1 "$validators"); do
-  enode=$(rpc "http://127.0.0.1:$((rethEthBase + i - 1))" admin_nodeInfo '[]' | pyget "['result']['enode']")
-  for j in $(seq 1 "$validators"); do
-    [ "$i" = "$j" ] && continue
-    rpc "http://127.0.0.1:$((rethEthBase + j - 1))" admin_addPeer "[\"$enode\"]" >/dev/null
-  done
-done
-pass "reth instances statically peered"
+# devp2p peering (docs/engine-api-adapter.md §5, ristik/ureth#34): discovery is off, so introduce them explicitly. They are TRUSTED peers of each other: ureth's transaction-only
+# gossip connects to trusted peers only, in both directions (scripts/lib/reth-peers.sh).
+source scripts/lib/reth-peers.sh
+reth_trust_mesh "$(seq 1 "$validators" | tr '\n' ' ')" || { fail "could not peer the execution clients"; exit 1; }
+pass "reth instances trust each other (transaction gossip peers)"
 
 if [ "${D2C_FAULT_SCENARIO:-}" = proof-outage ] || [ "${D2C_FAULT_SCENARIO:-}" = proof-corrupt ]; then
   mkdir -p test-nodes/proof-proxy

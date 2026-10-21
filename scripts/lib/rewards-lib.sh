@@ -18,8 +18,9 @@ rw_dep() { jq -r ".$1" "$P85_DEPLOY"; }
 rw_pool() { rw_dep rewardPool; }
 rw_uint() { p85_call "$@" | awk '{print $1}'; }   # a cast call answer that is one unsigned integer
 # The lane's validators do not gossip transactions (each reth pool is private, peers are added by hand), so the relayer's transactions go to every online validator's
-# execution client, as the lane'"'"'s own paid-transaction helper (m2_send_paid) does: whichever validator builds the next block has the transaction. The first URL decides reads.
-rw_eth_all() { local i out=; for i in ${H3_ONLINE:-1}; do out="${out:+$out,}http://127.0.0.1:$((rethEthBase + i - 1))"; done; echo "$out"; }
+# execution client, as the lane's own paid-transaction helper (m2_send_paid) does: whichever validator builds the next block has the transaction. The first URL decides reads.
+# With LANE_TX_FANOUT=one (ureth with transaction gossip) only the first is used and the others receive the transaction from it.
+rw_eth_all() { local i out= online=${H3_ONLINE:-1}; [ "${LANE_TX_FANOUT:-all}" != one ] || online=${online%% *}; for i in $online; do out="${out:+$out,}http://127.0.0.1:$((rethEthBase + i - 1))"; done; echo "$out"; }
 
 # One plain value transfer from a funded key, built and signed offline (scripts/evmtx: fixed gas limit 21000, the account's pending nonce), sent to every online
 # validator's execution client and waited for until a receipt shows success. `cast send` estimated the gas on one validator (the bound-execution node refuses an estimate
@@ -73,7 +74,7 @@ rw_step_settle() {
   rw_settle_run "$dir/settle-2.log" || return 1
   grep -q "idle after 0 step" "$dir/settle-2.log" || { echo "a repeated settlement moved the pool (see $dir/settle-2.log)" >&2; return 1; }
   rw_check_run "$dir/check-2.txt" "$RW_EXTRA_FUNDING_WEI" || return 1
-  diff <(sed 's/"block": [0-9]*, //' "$dir/check-1.txt") <(sed 's/"block": [0-9]*, //' "$dir/check-2.txt") >/dev/null \
+  diff <(sed -e 's/"block": [0-9]*, //' -e 's/"progress": [0-9]*, //' "$dir/check-1.txt") <(sed -e 's/"block": [0-9]*, //' -e 's/"progress": [0-9]*, //' "$dir/check-2.txt") >/dev/null \
     || { echo "the pool's state differs between the two checks although nothing was sent" >&2; return 1; }
   # 5. a payee claims in two parts; an over-claim is refused; exact balances
   [ -s "$key" ] || { echo "no payee key (REWARD_LANE sets P85_PLAN_PAYEE_KEYS before the plan)" >&2; return 1; }
