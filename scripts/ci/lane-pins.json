@@ -36,7 +36,7 @@
     },
     "native-bridge-plugins": {
       "repository": "https://github.com/ristik/native-bridge-plugins.git",
-      "commit": "cbe0e78bc008999823631bcd2fd332a7375aee54",
+      "commit": "c1cdd860db45b1d526a2ae9a97befcfd57dca311",
       "branch": "dev4/b7-pr3",
       "note": "nbp#33 merge: main with the plug-in consolidation as the default path (nbp#30/#31) and the any-age driver's 'consolidated' command (#526 step 4) on top of the two-shard steering (nbp#29)."
     },
