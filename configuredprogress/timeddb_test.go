@@ -118,3 +118,27 @@ func TestTimedDBKeepsTransactionSemantics(t *testing.T) {
 	require.Equal(t, []byte("v"), got)
 	require.ErrorIs(t, d.Update(func(*bolt.Tx) error { return context.Canceled }), context.Canceled, "a body error is returned and rolls back")
 }
+
+// bft-core#728 trace: a journal load reports how big the journal it just read was, so load time can be plotted against size.
+func TestJournalLoadLogsItsSize(t *testing.T) {
+	f := newFixture(t, 2)
+	s, _ := openJournal(t, f, testJournalLimits)
+	defer s.Close()
+	bootstrap := f.bootstrap(1, 4)
+	admitJournal(t, s, f, bootstrap)
+	require.NoError(t, s.PutJournalCandidate(context.Background(), f.ctx, testJournalLimits, candidateB1(f, bootstrap)))
+	rec := &recordedLog{}
+	s.SetLogger(slog.New(rec))
+	s.db.slow = time.Nanosecond // every load counts as slow here
+	image, err := s.LoadJournal(context.Background(), f.ctx, testJournalLimits)
+	require.NoError(t, err)
+
+	logs := rec.find("configuredprogress: journal load")
+	require.NotEmpty(t, logs)
+	last := logs[len(logs)-1]
+	require.NotEmpty(t, image.Candidates)
+	require.Equal(t, int64(len(image.Candidates)), last["candidates"])
+	require.Equal(t, int64(len(image.Observations)), last["observations"])
+	require.Equal(t, uint64(image.Bytes), last["bytes"])
+	require.Positive(t, last["took"].(time.Duration))
+}
