@@ -87,6 +87,8 @@ func (h *harness) service() *Service {
 		},
 	})
 	require.NoError(h.t, err)
+	// the background writer must be done before t.TempDir is removed (cleanups run last-registered first)
+	h.t.Cleanup(func() { svc.wg.Wait(); svc.Flush() })
 	return svc
 }
 
@@ -347,6 +349,7 @@ func TestARootsFailingNodeLeavesTheRequestPendingForALaterParent(t *testing.T) {
 			return []byte{1}, eligible(1, 1), nil
 		}})
 	require.NoError(t, err)
+	t.Cleanup(func() { svc.wg.Wait(); svc.Flush() })
 	svc.Add(Key{ID: 1, Generation: 1})
 	svc.Prepare(parentOf(1))
 	time.Sleep(50 * time.Millisecond)
