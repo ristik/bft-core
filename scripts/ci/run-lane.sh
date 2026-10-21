@@ -141,6 +141,8 @@ case "$kind" in
   x4exit)
     # the exit lifecycle of the PoS campaign (scripts/x4pos exit steps): the recovery lane's chain (election, roots with --pos-deployment and --pos-evm-rpc), then the joiner's
     # identity requests retirement; the roots build and order the Retirement, the lots mature after the gates and are claimed (X4_EXIT_LANE=1)
+    # run-inputs "s4": true makes the joiner the slashed, held offender (scripts/lib/s4-lib.sh): its exit is refused on the evidence hold until the case is settled
+    if [ "$(jq -r '.s4 // false' scripts/ci/run-inputs.json 2>/dev/null)" = true ]; then export S4_LANE=1; log "S4_LANE=1 (run-inputs s4)"; fi
     export X4_EXIT_LANE=1 P85_EVIDENCE_PREFIX=x4-exit-lane P85_LOCK_OWNER=p85-recovery
     log "X4_EXIT_LANE=1 scripts/p85-lane.sh (deadline ${deadline} min)"
     p_timeout "$((deadline * 60))" scripts/p85-lane.sh 2>&1 | tee "$out/lane-stdout.log" >/dev/null
