@@ -57,7 +57,7 @@ class Model(unittest.TestCase):
 
 class Replay(unittest.TestCase):
     """X4 B3: the pool's life replayed event by event: exhaustion, zero-budget intervals, refill, no backfill, dust, claims."""
-    SNAPS = [(0, UCT), (0, UCT)]   # policy 1 in force from progress 0 at 1 UCT per 1,000 progress units
+    SNAPS = [(0, 0), (0, UCT)]   # policy 1 in force from progress 0 at 1 UCT per 1,000 progress units
 
     def close(self, seg, start, end, budget, distributed=None):
         return {"kind": "close", "segment": seg, "start": start, "end": end, "rate": UCT, "budget": budget, "distributed": budget if distributed is None else distributed}
@@ -100,7 +100,7 @@ class Replay(unittest.TestCase):
 
     def test_dust_returns_to_available_in_the_same_call(self):
         members = {"X": [(1, "p1"), (1, "p2"), (1, "p3")]}
-        s = rc.replay([dict(self.close(0, 0, 1000, 10, 9), rate=10)], [("X", 0, None)], lambda a: members[a], 0, [(0, 10), (0, 10)], 10)
+        s = rc.replay([dict(self.close(0, 0, 1000, 10, 9), rate=10)], [("X", 0, None)], lambda a: members[a], 0, [(0, 0), (0, 10)], 10)
         # rate 10 per 1,000 units: nominal 10; budget min(10, 10) = 10 over three equal weights: 3 each, dust 1 back to available
         self.assertEqual((s["available"], s["totalCredits"], s["stats"]["dust"]), (1, 9, 1))
 
@@ -120,7 +120,7 @@ class Replay(unittest.TestCase):
             self.go([self.close(0, 0, 1000, UCT), self.close(0, 1000, 2000, UCT)], funding=10 * UCT, segments=segs)
 
     def test_a_rate_change_ends_the_interval_at_its_effective_progress(self):
-        snaps = [(0, UCT), (0, UCT), (1500, 2 * UCT)]
+        snaps = [(0, 0), (0, UCT), (1500, 2 * UCT)]
         ev = [self.close(0, 0, 1000, UCT), dict(self.close(0, 1000, 1500, UCT // 2)), dict(self.close(0, 1500, 2000, UCT), rate=2 * UCT)]
         s = rc.replay(ev, [("G", 0, None)], lambda a: MEMBERS[a], 0, snaps, 10 * UCT)
         self.assertEqual(s["nextStart"], 2000)
@@ -172,7 +172,7 @@ class ReplayAgainstTheChain(unittest.TestCase):
         sc = Replay()
         events = sc.scenario()
         members = [(10, p) for p in self.PAYEES]
-        state = rc.replay(events, [("0x" + "ab" * 32, 0, None)], lambda a: members, 0, [(0, UCT), (0, UCT)], 2 * UCT)
+        state = rc.replay(events, [("0x" + "ab" * 32, 0, None)], lambda a: members, 0, [(0, 0), (0, UCT)], 2 * UCT)
         logs, idx = [], 0
         for n, e in enumerate(events):
             idx += 1
@@ -182,7 +182,7 @@ class ReplayAgainstTheChain(unittest.TestCase):
             else:
                 logs.append(dict(base, topics=[topic("IntervalClosed(uint256,uint64,uint64,uint128,uint256,uint256)"), w(e["segment"])],
                                  data=w(e["start"], e["end"], e["rate"], e["budget"], e["distributed"])))
-        world = {"block": 99, "balance": state["available"] + state["totalCredits"], "start": 0, "snapshots": [[0, UCT], [0, UCT]], "logs": logs,
+        world = {"block": 99, "balance": state["available"] + state["totalCredits"], "start": 0, "snapshots": [[0, 0], [0, UCT]], "logs": logs,
                  "segments": [["0x" + "ab" * 32, 0, None]], "members": members, "final": {"available": state["available"], "totalCredits": state["totalCredits"],
                                                                                           "nextStart": state["nextStart"], "credits": {k.lower(): v for k, v in state["credits"].items()}}}
         if tamper:

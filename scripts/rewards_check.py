@@ -65,11 +65,11 @@ class ReplayError(AssertionError):
 def replay(events, segments, members_of, start, snapshots, genesis_funding):
     """X4: the pool's life replayed event by event, so funding that arrives AFTER intervals closed is accounted for as it happened (the one-block recompute above
     assumes every wei was there from the start). events: ordered dicts {kind: fund|close|claim, ...}; close has segment, start, end, rate, budget, distributed;
-    snapshots: [(effectiveProgress, rate)] indexed by policy id as the pool reads them. Every close is checked against what the model derives from the segments
+    snapshots: [(effectiveProgress, rate)] indexed by policy id (index 0 unused: ids start at 1). Every close is checked against what the model derives from the segments
     and the funding available at that moment: an interval closed while the pool was empty stays at budget 0 (no backfill when funds arrive later). Returns the
     final state and counters; raises ReplayError at the first disagreement."""
     available, total, credits = genesis_funding, 0, {}
-    nxt, seg, cursor, count = start, 0, 0, len(snapshots) - 1
+    nxt, seg, cursor, count = start, 0, 1, len(snapshots) - 1   # policy ids start at 1: the pool's rateCursor is 1 at construction
     stats = {"intervals": 0, "zeroBudget": 0, "paid": 0, "fundings": 0, "claims": 0, "exhaustedAt": None, "refilledAfterExhaustion": False, "dust": 0}
     for ev in events:
         if ev["kind"] == "fund":
@@ -254,13 +254,10 @@ def replay_check(a):
                  addr_of(c.raw(a.custody, "exposures(bytes32)", "0x" + format(ids[2 + k], "064x"))[7])) for k in range(ids[1])]
 
     count = c.raw(a.policy, "currentPolicyID()")[0]
-    snaps = []
-    for i in range(count + 1):
-        try:
-            w = c.raw(a.policy, "snapshotAt(uint32)", i)
-            snaps.append((w[12], w[10]))
-        except SystemExit:
-            snaps.append((0, c.raw(a.policy, "rewardRateAt(uint32)", i)[0]))
+    snaps = [(0, 0)]   # index 0 unused
+    for i in range(1, count + 1):
+        w = c.raw(a.policy, "snapshotAt(uint32)", i)   # Policy (10 words), rewardRate, hash, effectiveProgress, effectiveTime
+        snaps.append((w[12], w[10]))
     start = c.raw(a.pool, "START()")[0]
     events = fetch_events(a, c)
     state = replay(events, segments, members_of, start, snaps, a.initial_funding)
