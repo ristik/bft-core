@@ -176,6 +176,7 @@ func BuildCorpus() (*Corpus, error) {
 	g.lock()
 	g.proof()
 	g.consolidated()
+	g.nestedParity()
 	g.nativeCompose()
 	if g.failed != nil {
 		return nil, g.failed
@@ -1694,6 +1695,91 @@ func (g *gen) trustInputs() {
 		b, err := types.Cbor.MarshalTaggedValue(gettrustbase.ResponseTag, r)
 		g.must(err)
 		add("trust-unwitnessed-successor", "epoch 2 is signed by its own committee, not by epoch 1's", b, d.TB)
+	}
+}
+
+// nestedParity pins how a failure inside an embedded CBOR object is reported (the justification, the mint data, the terminal
+// return reason): each object is scanned on its own budget and any scan failure is that object's semantic error, never a bare
+// budget or depth error; a malformed return amount is ErrReturnAmount, checked before the trailing fee slots. Every mutation is
+// re-signed so it is the only defect, and is emitted as a 0x0104 kernel case and, inside a valid envelope, as a compose case (and
+// so a native-compose twin).
+func (g *gen) nestedParity() {
+	f := g.d.F
+	amount := big.NewInt(1_000_000_007)
+	deep := append(bytes.Repeat([]byte{0x81}, MaxCBORDepth+1), 0)             // one level past the depth bound
+	wide := append([]byte{0x99, 0x80, 0x01}, make([]byte, MaxCBORItems+1)...) // an array of 32769 zeros: one item too many
+	type history struct {
+		id, desc, op string
+		h            *History
+	}
+	var out []history
+	// The return reason, field by field; nil keeps the canonical reason.
+	ret := func(id, desc string, mk func(parts [][]byte) []byte) {
+		h, _, keys, err := ReturnHistorySeeded(f, 2, "nested")
+		g.must(err)
+		if err != nil {
+			return
+		}
+		n := len(h.Transfers) - 1
+		ok := h.Transfers[n].Data
+		root, _ := scanOne(ok)
+		var parts [][]byte
+		for _, k := range root.kids[0].kids {
+			parts = append(parts, ok[k.start:k.end])
+		}
+		r := mk(parts)
+		h.Transfers[n].Data = r
+		h.Transfers[n].Recipient = BurnPredicate(H(r))
+		g.must(h.Resign(keys))
+		out = append(out, history{id, desc, "return", h})
+	}
+	reason := func(p [][]byte) []byte { return CTag(TagReturnReason, CArr(p...)) }
+	ret("nested-return-deep", "the return reason nested one level past the CBOR depth bound", func([][]byte) []byte { return deep })
+	ret("nested-return-items", "the return reason one item over its own CBOR item budget", func([][]byte) []byte { return wide })
+	ret("nested-return-amount-leading-zero", "return amount with a leading zero byte", func(p [][]byte) []byte {
+		p[7] = CBytes(append([]byte{0}, amount.Bytes()...))
+		return reason(p)
+	})
+	ret("nested-return-amount-empty", "empty return amount", func(p [][]byte) []byte { p[7] = CBytes(nil); return reason(p) })
+	ret("nested-return-amount-33", "a 33-byte return amount", func(p [][]byte) []byte { p[7] = CBytes(append([]byte{1}, make([]byte, 32)...)); return reason(p) })
+	ret("nested-return-amount-uint", "return amount as an unsigned integer, not bytes", func(p [][]byte) []byte { p[7] = CUint(5); return reason(p) })
+	ret("nested-return-amount-before-fee", "a malformed amount and a set fee-token slot: the amount is checked first", func(p [][]byte) []byte {
+		p[7] = CBytes(append([]byte{0}, amount.Bytes()...))
+		p[8] = CBytes(append(make([]byte, 19), 1))
+		return reason(p)
+	})
+	// The mint's embedded objects.
+	mint := func(id, desc string, mut func(m *MintTx)) {
+		h, err := f.BuildToken(5, amount, []*secp256k1.PrivateKey{KeyFromSeed("nested-0")})
+		g.must(err)
+		if err != nil {
+			return
+		}
+		mut(&h.Mint)
+		g.must(h.Resign(nil))
+		out = append(out, history{id, desc, "mint", h})
+	}
+	mint("nested-mint-data-deep", "mint data nested one level past the CBOR depth bound", func(m *MintTx) { m.Data = deep })
+	mint("nested-mint-data-items", "mint data one item over its own CBOR item budget", func(m *MintTx) { m.Data = wide })
+	mint("nested-mint-data-amount-leading-zero", "mint amount with a leading zero byte", func(m *MintTx) {
+		m.Data = CTag(TagValue, CArr(CUint(ValueVersion), CArr(CArr(CBytes(f.Cfg.Aid[:]), CBytes(append([]byte{0}, amount.Bytes()...)))), CNull))
+	})
+	mint("nested-justification-deep", "the mint justification nested one level past the CBOR depth bound", func(m *MintTx) { m.Justification = deep })
+	mint("nested-justification-items", "the mint justification one item over its own CBOR item budget", func(m *MintTx) { m.Justification = wide })
+	// Each as a kernel case, and inside a valid envelope: the kernel stage fails before any anchor is used.
+	base, err := g.certified(1)
+	g.must(err)
+	if err != nil {
+		return
+	}
+	for _, c := range out {
+		g.add(Case{ID: c.id, Family: "history", Op: c.op, Cfg: "dev", Description: c.desc, Input: hx(c.h.Bytes())})
+		e := &Envelope{PolicyBody: f.Policy.Bytes(), History: c.h.Bytes(), Anchors: append([]Anchor{}, base.cert.Anchors...),
+			LeafProofs: append([]LeafProof{}, base.cert.Proofs...)}
+		env, err := e.Encode()
+		g.must(err)
+		g.add(Case{ID: "compose-" + c.id, Family: "proof", Op: "compose", Cfg: "dev", Description: c.desc + ", in a composition",
+			Input: hx(env), Aux: map[string]string{"operation": c.op, "claims": claimsOf(base.cert.Anchors...)}})
 	}
 }
 
