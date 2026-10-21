@@ -91,7 +91,7 @@ locally `S4_LANE=1 scripts/p85-lane.sh`, or `scripts/utb-lane.sh` for the combin
    the first submitter run has no `--settle` and is stopped after it printed the admitted case; the second run resumes and settles from the on-chain cursor.
 5. `s4_check`: inclusion, calldata carries the original signatures, `EvidenceAccepted`/`offenceSeen`, holds on exactly the attributable lots, the exact historical lot
    debit once, bounty (capped) and treasury equal to the arithmetic from `policyTerms`, honest lots unchanged (reference counts excluded: the next election references
-   them), duplicate resubmission and the reordered pair refused (`DuplicateOffence`) with the state identical, the reporter claims exactly the bounty, `SHA256SUMS`.
+   them), duplicate resubmission and the reordered pair refused (`DuplicateOffence`) with the state identical, `SHA256SUMS`. `s4_claim` (a later step, before the lane's reward step) has the reporter claim exactly the bounty and re-archives; it is separate because the claim, the last transaction of the check, repeatedly got no block in the 3-validator window right after the observer roots' restarts (the other S4 assertions never failed), and the credit stays on chain.
 
 Differences from the design (§5), complete list:
 

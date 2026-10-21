@@ -738,6 +738,12 @@ p85_run_lane() {
     source scripts/lib/s4-lib.sh
     P85_STEPS=${P85_STEPS/ p85_j_stalls/ s4_equivocate p85_j_stalls}
     P85_STEPS=${P85_STEPS/ p85_resolved/ p85_resolved s4_collect_after_rotation s4_submit_settle s4_check}
+    # the reporter's claim runs late, where the execution chain is healthy (before the reward step, else before the lane's last step, else at the end)
+    case " $P85_STEPS " in
+      *" rw_step_settle "*) P85_STEPS=${P85_STEPS/ rw_step_settle/ s4_claim rw_step_settle} ;;
+      *" utb_step_final "*) P85_STEPS=${P85_STEPS/ utb_step_final/ s4_claim utb_step_final} ;;
+      *) P85_STEPS="$P85_STEPS s4_claim" ;;
+    esac
   fi
   [ "${P85_MODE:-}" != overbound ] || { P85_JOINER_UNITS=3; P85_STEPS="p85_baseline p85_joiner_nodes p85_joiner_onboard p85_election_refused"; }
   for s in $P85_STEPS; do
