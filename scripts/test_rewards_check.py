@@ -126,5 +126,108 @@ class Replay(unittest.TestCase):
         self.assertEqual(s["nextStart"], 2000)
 
 
+SHIM = r'''#!/usr/bin/env python3
+import json, os, sys
+W = json.load(open(os.environ["WORLD"]))
+a = sys.argv[1:]
+def word(n): return format(n, "064x")
+def out(ws): print("0x" + "".join(word(w) for w in ws))
+if a[0] == "keccak":
+    sys.path.insert(0, os.environ["SHADOW"])
+    from keccak import keccak256
+    print("0x" + keccak256(a[1].encode()).hex())
+elif a[0] == "block-number": print(W["block"])
+elif a[0] == "balance": print(W["balance"])
+elif a[0] == "logs": print(json.dumps(W["logs"]))
+elif a[0] == "call":
+    args = a[1:]
+    i = 0
+    while args[i].startswith("--"): i += 2   # the --rpc-url and --block option pairs
+    to, sig, params = args[i], args[i + 1], args[i + 2:]
+    if sig.startswith("segmentCount"): out([len(W["segments"])])
+    elif sig.startswith("segmentAt"): s = W["segments"][int(params[0])]; out([int(s[0], 16), s[1], s[2] or 0, 1 if s[2] is not None else 0])
+    elif sig.startswith("assignmentExposures"): out([32, len(W["members"])] + [100 + k for k in range(len(W["members"]))])
+    elif sig.startswith("exposures"): k = int(params[0], 16) - 100; m = W["members"][k]; out([0, 0, 0, m[0], 0, 0, 0, int(m[1], 16)])
+    elif sig.startswith("currentPolicyID"): out([len(W["snapshots"]) - 1])
+    elif sig.startswith("snapshotAt"): s = W["snapshots"][int(params[0])]; out([0] * 10 + [s[1], 0, s[0], 0])
+    elif sig.startswith("START"): out([W["start"]])
+    elif sig.startswith("available"): out([W["final"]["available"]])
+    elif sig.startswith("totalCredits"): out([W["final"]["totalCredits"]])
+    elif sig.startswith("nextStart"): out([W["final"]["nextStart"]])
+    elif sig.startswith("credits"): out([W["final"]["credits"].get(params[0].lower(), 0)])
+    else: sys.exit("shim: " + sig)
+'''
+
+
+class ReplayAgainstTheChain(unittest.TestCase):
+    """The glue of `rewards_check.py replay`: logs fetched with cast, decoded, replayed and compared with the chain's own views (a shim stands in for cast)."""
+    PAYEES = ["0x%040x" % (0xA0 + i) for i in range(4)]
+
+    def world(self, tamper=None):
+        sys.path.insert(0, str(Path(__file__).resolve().parent / "shadow"))
+        from keccak import keccak256
+
+        def topic(sig): return "0x" + keccak256(sig.encode()).hex()
+        def w(*ns): return "0x" + "".join(format(n, "064x") for n in ns)
+        sc = Replay()
+        events = sc.scenario()
+        members = [(10, p) for p in self.PAYEES]
+        state = rc.replay(events, [("0x" + "ab" * 32, 0, None)], lambda a: members, 0, [(0, UCT), (0, UCT)], 2 * UCT)
+        logs, idx = [], 0
+        for n, e in enumerate(events):
+            idx += 1
+            base = {"blockNumber": hex(10 + n), "logIndex": hex(idx)}
+            if e["kind"] == "fund":
+                logs.append(dict(base, topics=[topic("Funded(address,uint256)"), w(0xF0)], data=w(e["amount"])))
+            else:
+                logs.append(dict(base, topics=[topic("IntervalClosed(uint256,uint64,uint64,uint128,uint256,uint256)"), w(e["segment"])],
+                                 data=w(e["start"], e["end"], e["rate"], e["budget"], e["distributed"])))
+        world = {"block": 99, "balance": state["available"] + state["totalCredits"], "start": 0, "snapshots": [[0, UCT], [0, UCT]], "logs": logs,
+                 "segments": [["0x" + "ab" * 32, 0, None]], "members": members, "final": {"available": state["available"], "totalCredits": state["totalCredits"],
+                                                                                          "nextStart": state["nextStart"], "credits": {k.lower(): v for k, v in state["credits"].items()}}}
+        if tamper:
+            tamper(world)
+        return world
+
+    def run_cli(self, world, *flags):
+        import json
+        import subprocess
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            shim = Path(d) / "cast"
+            shim.write_text(SHIM.replace("#!/usr/bin/env python3", "#!" + sys.executable, 1))
+            shim.chmod(0o755)
+            wf = Path(d) / "world.json"
+            wf.write_text(json.dumps(world))
+            env = {"PATH": "/usr/bin:/bin", "WORLD": str(wf), "SHADOW": str(Path(__file__).resolve().parent / "shadow")}
+            return subprocess.run([sys.executable, str(Path(__file__).resolve().parent / "rewards_check.py"), "replay", "--rpc", "x", "--cast", str(shim), "--pool", "0xp",
+                                   "--custody", "0xc", "--registry", "0xr", "--election", "0xe", "--policy", "0xq", "--genesis-assignment", "0x" + "ab" * 32,
+                                   "--initial-funding", str(2 * UCT), *flags], capture_output=True, text=True, env=env)
+
+    def test_the_chain_agrees_with_the_replay_of_its_logs(self):
+        r = self.run_cli(self.world(), "--min-paid", "4", "--require-exhaustion", "--require-refill")
+        self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+        self.assertIn("REWARDS-REPLAY ok", r.stdout)
+        self.assertIn('"zeroBudget": 1', r.stdout)
+
+    def test_a_chain_state_that_differs_from_the_logs_is_refused(self):
+        for name, tamper in (("available", lambda w: w["final"].update(available=w["final"]["available"] + 1)),
+                             ("total credits", lambda w: w["final"].update(totalCredits=w["final"]["totalCredits"] - 1)),
+                             ("next start", lambda w: w["final"].update(nextStart=1)),
+                             ("a payee's credit", lambda w: w["final"]["credits"].update({self.PAYEES[0]: 1}))):
+            with self.subTest(name):
+                r = self.run_cli(self.world(tamper))
+                self.assertNotEqual(r.returncode, 0)
+                self.assertIn("REWARDS-REPLAY FAILED", r.stderr)
+
+    def test_the_required_facts_are_required(self):
+        def no_dry(w):   # drop the zero-budget close and the refill: a pool that never ran dry
+            w["logs"] = [l for i, l in enumerate(w["logs"]) if i != 3]   # no refill event
+        r = self.run_cli(self.world(no_dry), "--require-refill")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("REWARDS-REPLAY FAILED", r.stderr)
+        self.assertNotEqual(self.run_cli(self.world(), "--min-paid", "5").returncode, 0)
+
+
 if __name__ == "__main__":
     unittest.main()
