@@ -22,7 +22,7 @@ rw_uint() { p85_call "$@" | awk '{print $1}'; }   # a cast call answer that is o
 # With LANE_TX_FANOUT=one (ureth with transaction gossip) only the first is used and the others receive the transaction from it.
 rw_eth_all() { local i out= online=${H3_ONLINE:-1}; [ "${LANE_TX_FANOUT:-all}" != one ] || online=${online%% *}; for i in $online; do out="${out:+$out,}http://127.0.0.1:$((rethEthBase + i - 1))"; done; echo "$out"; }
 
-# One plain value transfer from a funded key, built and signed offline (scripts/evmtx: fixed gas limit 21000, the account's pending nonce), sent to every online
+# One plain value transfer (or, with RW_SEND_DATA=<calldata> and RW_SEND_GAS=<limit>, one contract call) from a funded key, built and signed offline (scripts/evmtx: fixed gas limit 21000, the account's pending nonce), sent to every online
 # validator's execution client and waited for until a receipt shows success. `cast send` estimated the gas on one validator (the bound-execution node refuses an estimate
 # whose parent hash moved: 'bound parent hash mismatch') and left the transaction in a pool the other validators never see (no gossip in the lane).
 rw_send_value() { # <private key file> <to> <wei>
@@ -31,7 +31,7 @@ rw_send_value() { # <private key file> <to> <wei>
   addr=$("$P85_CAST" wallet address --private-key "0x$key") || return 1
   nonce=$("$P85_CAST" nonce --block pending --rpc-url "http://127.0.0.1:$rethEthBase" "$addr") || return 1
   for id in ${H3_ONLINE:-1}; do
-    sent=$(lane_go_run evmtx -send -eth-url "http://127.0.0.1:$((rethEthBase + id - 1))" -chain-id "${M2_CHAIN_ID:-31337}" -private-key "$key" -nonce "$nonce" -to "$2" -value "$3" -gas-limit 21000 2>&1) \
+    sent=$(lane_go_run evmtx -send -eth-url "http://127.0.0.1:$((rethEthBase + id - 1))" -chain-id "${M2_CHAIN_ID:-31337}" -private-key "$key" -nonce "$nonce" -to "$2" -value "$3" -gas-limit "${RW_SEND_GAS:-21000}" -data "${RW_SEND_DATA:-0x}" 2>&1) \
       || { echo "$sent" >&2; return 1; }
     [ -z "$expected" ] || [ "$expected" = "$sent" ] || { echo "the validators answered different transaction hashes ($expected, $sent)" >&2; return 1; }
     expected=$sent
