@@ -3,6 +3,9 @@ name: testnet-rehearsal
 # never of the host: nothing here measures capacity, DNS/TLS, real hCaptcha or a second operator. No third-party service is contacted (the faucet signer, which
 # verifies hCaptcha, is not started). Manual: it builds ureth from source, which takes the better part of an hour.
 on:
+  pull_request:
+    # only a change to the rehearsal itself starts it (it is long); everything else dispatches it by hand
+    paths: ['deploy/testnet/rehearse.py', '.github/workflows/testnet-rehearsal.yml']
   workflow_dispatch:
     inputs:
       stages:
