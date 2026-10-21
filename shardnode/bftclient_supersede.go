@@ -2,6 +2,9 @@ package shardnode
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"log/slog"
 	"sync"
 
 	"github.com/unicitynetwork/bft-core/network/protocol/certification"
@@ -153,7 +156,7 @@ func (c *BFTClient) receiveDuring(ctx context.Context, q *receiveQueue) (stop fu
 				}
 				if cr, isCR := msg.(*certification.CertificationResponse); isCR && cr != nil {
 					if authorization, err := c.verifyCertificationAuthorization(ctx, cr); err == nil {
-						c.superseded.observe(authorization)
+						c.noteAuthenticated(ctx, cr, authorization, "reader")
 					}
 				}
 				held = append(held, msg)
@@ -166,4 +169,17 @@ func (c *BFTClient) receiveDuring(ctx context.Context, q *receiveQueue) (stop fu
 		q.carry = append(q.carry, held...)
 		q.closed = q.closed || closed
 	}
+}
+
+// noteAuthenticated records an authenticated response with the supersession marker and, at debug level, logs it: the arrival time of every certificate, which the
+// delivery log lines (written when a delivery ends) do not give (bft-core#728 trace).
+func (c *BFTClient) noteAuthenticated(ctx context.Context, cr *certification.CertificationResponse, a *certificationAuthorization, source string) {
+	c.superseded.observe(a)
+	if c.log == nil {
+		return
+	}
+	sum := sha256.Sum256([]byte(a.inputRecord))
+	c.log.LogAttrs(ctx, slog.LevelDebug, "bft client: authenticated certification response seen",
+		slog.Uint64("shardRound", cr.UC.GetRoundNumber()), slog.Uint64("rootRound", a.rootRound), slog.Uint64("rootEpoch", a.rootEpoch),
+		slog.Uint64("round", cr.Technical.Round), slog.String("leader", cr.Technical.Leader), slog.String("ir", hex.EncodeToString(sum[:4])), slog.String("source", source))
 }
