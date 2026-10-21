@@ -104,7 +104,8 @@ x4p_exit() { # <exit_check.py subcommand> <id> [flags]
 }
 x4p_exit_field() { jq -r ".$2" "$1"; }   # <state json> <field>
 # The lane's shard adds no block while nothing happens (runs 39586726777 and 39602386344: the head stood at one block for 80+ minutes), and custody reads the LATEST block's
-# time and number: a wait for a time gate, or for the proposer's confirmations after a request, needs transactions. One paid 1-wei transfer from the lane's funded sender per tick
+# time: a wait for a time gate needs transactions (a real mature() transaction lands in a new block with a fresh timestamp, only the eth_call polling reads the idle head;
+# this is a test-harness measure, not a product requirement). One paid 1-wei transfer from the lane's funded sender per tick
 # (a failed tick is only a missed block; the wait's own deadline decides).
 x4p_tick() { rw_send_value "$(p85_sender_key)" 0x000000000000000000000000000000000000dEaD 1 >/dev/null 2>&1 || sleep 3; }
 x4p_owner_key() { echo "$P85_DIR/owner-keys/owner-$1.key"; }
@@ -155,7 +156,7 @@ x4p_exit_request() {
     x4p_exit state "$id" >"$X4_STEP_DIR/state-after.json" || return 1
     [ "$(x4p_exit_field "$X4_STEP_DIR/state-after.json" imported)" = true ] && break
     [ $(( $(date +%s) - t0 )) -lt "$imp" ] || { x4p_exit_root_log "$id" "$X4_STEP_DIR/roots.log"; x4p_die "the Retirement of identity $id was not imported within ${imp}s (roots.log has what the proposers logged)"; return 1; }
-    x4p_tick
+    sleep 3   # no ticks: the proposer scans certified blocks with no confirmations (#740), so an idle chain does not hold the import
   done
   now=$(date +%s)
   x4p_exit_root_log "$id" "$X4_STEP_DIR/roots.log"
