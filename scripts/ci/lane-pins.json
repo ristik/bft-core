@@ -4,7 +4,7 @@
   "components": {
     "ureth": {
       "repository": "https://github.com/ristik/ureth.git",
-      "commit": "28483b83e8d103696dd98ff2dd2d5d5e10fdcf83",
+      "commit": "ef52f3c178ee3c4e6bc8827d1b6fd0b1d3652bc4",
       "package": "unicity-reth",
       "cargoArgs": [
         "build",
@@ -14,7 +14,7 @@
         "unicity-reth"
       ],
       "features": "default (jemalloc)",
-      "note": "ureth#75 merge: transaction-only gossip among the trusted peers of the shard (the lanes peer the clients with admin_addTrustedPeer, scripts/lib/reth-peers.sh)",
+      "note": "ureth#83 merge (B7 PR 3): BRIDGE_COMPOSE_V1 with the 2 MiB envelope, on #82 (embedded-object parity) and #81 (0x0105 streamed composition); includes #75's transaction gossip",
       "targetedPackages": [
         "reth-unicity-b1",
         "reth-unicity-execution",
