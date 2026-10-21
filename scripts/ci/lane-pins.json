@@ -36,9 +36,9 @@
     },
     "native-bridge-plugins": {
       "repository": "https://github.com/ristik/native-bridge-plugins.git",
-      "commit": "c1cdd860db45b1d526a2ae9a97befcfd57dca311",
+      "commit": "b5f08fe435a641cc4829d97222a21be7f7928e94",
       "branch": "dev4/b7-pr3",
-      "note": "nbp#33 merge: main with the plug-in consolidation as the default path (nbp#30/#31) and the any-age driver's 'consolidated' command (#526 step 4) on top of the two-shard steering (nbp#29)."
+      "note": "nbp dev4/b7-pr3 on main 51a2a261 (nbp#38): profile v6 (2 MiB envelope), the PR 3 reseal, anyage.ts long-history and in-process redeem signing"
     },
     "state-transition-sdk-js": {
       "repository": "https://github.com/ristik/state-transition-sdk-js.git",
