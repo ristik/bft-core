@@ -234,9 +234,9 @@ func DecodeEnvelope(b []byte) (*Envelope, error) {
 
 // boundEnvelopeCounts reads the declared array lengths straight from the head
 // words, so an over-budget count is rejected before any allocation. It walks
-// the leaf proofs in order with overflow-safe offset arithmetic and rejects a
-// cumulative sibling count above MaxPathSteps; a layout it cannot follow is
-// ErrABIFraming.
+// the leaf proofs in order with overflow-safe offset arithmetic and rejects
+// declared siblings the envelope's bytes cannot hold; a layout it cannot follow
+// is ErrABIFraming. Per-leaf siblings are bounded by MaxRSMTSiblings (LeafPathGas).
 func boundEnvelopeCounts(b []byte) error {
 	n := uint64(len(b))
 	// word reads the 32-byte word at off; a value above 2^64-1 or a read past
@@ -276,7 +276,9 @@ func boundEnvelopeCounts(b []byte) error {
 	if nl > MaxLeaves {
 		return ErrTooManyPaths
 	}
-	var steps uint64
+	// Every sibling is a 32-byte word of the envelope, so the declared siblings can never exceed n/32 in sum: a count the bytes
+	// cannot hold is refused before any allocation. This is the envelope's own bound, not a path budget.
+	room, steps := n/32, uint64(0)
 	for i := uint64(0); i < nl; i++ {
 		headAt, ok := add(offLeaves, 32+32*i)
 		if !ok {
@@ -302,7 +304,7 @@ func boundEnvelopeCounts(b []byte) error {
 		if !ok {
 			return ErrABIFraming
 		}
-		if ns > MaxPathSteps-steps {
+		if ns > room-steps {
 			return ErrTooManyPaths
 		}
 		steps += ns

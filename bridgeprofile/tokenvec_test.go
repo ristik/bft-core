@@ -217,7 +217,7 @@ func (p *tvProjection) Request(s tokenvec.Scenario, anchors []b1gen.Anchor) ([]b
 	if err != nil {
 		return nil, fmt.Errorf("compose: %w", err)
 	}
-	gate, err := GateOf(p.f.Cfg, OpReturn, b, TxGasBudget)
+	gate, err := GateOf(p.f.Cfg, OpReturn, b)
 	if err != nil {
 		return nil, fmt.Errorf("gate: %w", err)
 	}
