@@ -153,10 +153,10 @@ class Rehearsal:
 
     def first_tx(self):
         secrets = self.gen / 'faucet-secrets'
-        to = '0x' + '00' * 19 + '01'
+        to = '0x' + '11' * 20   # an ordinary account (0x..01 is the ecrecover precompile)
         before = int(self.call('eth_getBalance', [to, 'latest']), 16)
         receipt = json.loads(self.send_via_gateway(secrets, to))
-        self.expect(receipt['status'] == '0x1', 'the funded first transaction succeeded', receipt['transactionHash'])
+        self.expect(receipt['status'] == '0x1', 'the funded first transaction succeeded', json.dumps(receipt)[:600])
         self.expect(int(self.call('eth_getBalance', [to, 'latest']), 16) == before + 1, 'the recipient balance grew by the transferred wei')
         for i in range(1, self.n + 1):
             r = self.wait(f'validator {i} has the receipt', lambda i=i: self.ureth(i, 'eth_getTransactionReceipt', [receipt['transactionHash']]), 120)
