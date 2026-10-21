@@ -39,7 +39,7 @@ func VerifyCert(in []byte, st State, pins Pins) (bool, error) {
 // finishCert is everything after the scan and the full charge: the native decode of every occurrence, then the registry and the
 // relation.
 func finishCert(in []byte, pl *plan, st State, pins Pins) (Verdict, error) {
-	claims, err := parseClaims(in, pl.k)
+	claims, err := parseClaims(in, pl.k, pl.perUCItems)
 	if err != nil {
 		return Verdict{}, err
 	}

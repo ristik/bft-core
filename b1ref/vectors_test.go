@@ -478,3 +478,40 @@ func TestMaxGas(t *testing.T) {
 		t.Fatalf("RSMT worst case %d", g)
 	}
 }
+
+// TestCertWithComposedDecodesEachUCOnItsOwnBudget: under Composed both the scan and the claim decode give each UC its own item
+// budget, so a table whose UCs together exceed MaxCBORTokens verifies (Standard refuses the request's size or claim count first).
+func TestCertWithComposedDecodesEachUCOnItsOwnBudget(t *testing.T) {
+	m, _ := loadGolden(t)
+	var v *b1gen.Vector
+	for i := range m.Vectors {
+		if m.Vectors[i].ID == "cert.single.ok" {
+			v = &m.Vectors[i]
+		}
+	}
+	if v == nil {
+		t.Fatal("cert.single.ok missing")
+	}
+	single, err := hex.DecodeString(v.Request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, pins := state(t, v.PreState)
+	one, err := b1ref.GroupWith(single, b1ref.Composed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Enough copies of the claim that the UC items summed over the table exceed the per-call budget.
+	n := b1ref.MaxCBORTokens/50 + 1
+	in := []byte{2, 0, byte(n >> 8), byte(n)}
+	for i := 0; i < n; i++ {
+		in = append(in, single[4:]...)
+	}
+	got, err := b1ref.CertWith(in, st, pins, b1ref.Composed)
+	if err != nil || !got.Valid {
+		t.Fatalf("composed: %+v %v (single claim grouping %+v)", got, err, one)
+	}
+	if _, err := b1ref.Cert(in, st, pins); !errors.Is(err, b1ref.ErrInputTooLarge) && !errors.Is(err, b1ref.ErrCount) {
+		t.Fatalf("standalone: %v", err)
+	}
+}
