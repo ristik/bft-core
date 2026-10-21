@@ -96,21 +96,70 @@ tar -C "$stage" -czf "$stage/$name-ci.tar.gz" "$name-ci"
 mkdir -p "$out/sel"
 # the scan inputs: every secret under --nodes is read by the validator itself; the values of the removed files are sealed into one file
 { sort -u "$vals"; echo '#sealed'; } >"$stage/scan-inputs"
-# scan view of an archive: the tree with every .gz / .tgz / .tar.gz member expanded beside it (a secret inside a compressed member is a secret in the archive)
-scan_view() { # TREE NAME -> prints the view archive path
-  local v=$stage/view-$2 f depth
-  rm -rf "$v"; mkdir -p "$v"; rsync -a "$1/" "$v/$2/"
-  for depth in 1 2 3; do
+# scan view of an archive: the tree with every .gz / .tgz / .tar.gz member expanded beside it (a secret inside a compressed member is a secret in the archive).
+# FAIL CLOSED: a member the view cannot expand and that is not on the allowlist (any other compression or archive format, found by extension OR by magic bytes), a
+# gzip/tgz whose expansion fails (corrupt or truncated), and a gzip still unexpanded after the nesting depth, make the archive unscannable. They are listed in
+# $stage/unscannable-NAME (names only) and publish_archive refuses the archive. Formats allowed to stay opaque: none (the lane's artifacts are text, JSON, CBOR and .gz).
+opaque_allow=''   # newline-separated archive-relative member paths
+unscannable_reason() { # FILE -> prints a reason when FILE is a compression or archive format the view cannot expand, nothing otherwise
+  local f=$1 magic
+  case "$f" in
+    *.zst|*.zstd|*.xz|*.lzma|*.bz2|*.zip|*.7z|*.rar|*.lz4|*.lz|*.Z|*.br|*.tar|*.tbz|*.tbz2|*.txz|*.tzst|*.jar|*.war|*.apk|*.cpio|*.ar|*.deb|*.rpm) echo "archive/compression format by extension"; return ;;
+  esac
+  magic=$(head -c 6 "$f" 2>/dev/null | od -An -tx1 | tr -d ' \n')
+  case "$magic" in
+    28b52ffd*) echo "zstd by magic bytes" ;;   fd377a585a00) echo "xz by magic bytes" ;;   425a68*) echo "bzip2 by magic bytes" ;;
+    504b0304*|504b0506*) echo "zip by magic bytes" ;;   377abcaf271c) echo "7z by magic bytes" ;;   526172211a07*) echo "rar by magic bytes" ;;   04224d18*) echo "lz4 by magic bytes" ;;
+    5d0000*) echo "lzma by magic bytes" ;;   1f9d*) echo "compress(1) by magic bytes" ;;
+    1f8b*) ;;   # gzip: expanded by scan_view (by magic, whatever the name)
+    *) [ "$(head -c 262 "$f" 2>/dev/null | tail -c 5)" = ustar ] && echo "tar by magic bytes" ;;
+  esac
+}
+is_gzip() { [ "$(head -c 2 "$1" 2>/dev/null | od -An -tx1 | tr -d ' \n')" = 1f8b ]; }
+scan_view() { # TREE NAME -> prints the view archive path; unscannable members are listed in $stage/unscannable-NAME
+  local v=$stage/view-$2 f depth why u=$stage/unscannable-$2 rel
+  rm -rf "$v"; mkdir -p "$v"; rsync -a "$1/" "$v/$2/"; : >"$u"
+  # gzip is expanded by its magic bytes whatever the name, and the output of an expansion is looked at again (a gzip of a gzip, a zstd inside a gzip), up to the depth bound
+  for depth in 1 2 3 4 5; do
     while IFS= read -r f; do
-      [ -e "$f.expanded" ] || [ -d "$f.expanded.d" ] && continue
-      case "$f" in *.tar.gz|*.tgz) mkdir -p "$f.expanded.d"; tar -xzf "$f" -C "$f.expanded.d" 2>/dev/null || gunzip -c "$f" >"$f.expanded" 2>/dev/null || true ;; *) gunzip -c "$f" >"$f.expanded" 2>/dev/null || true ;; esac
-    done < <(find "$v" -type f \( -name '*.gz' -o -name '*.tgz' \) ! -name '*.expanded' 2>/dev/null)
+      { [ -e "$f.expanded" ] || [ -d "$f.expanded.d" ]; } && continue
+      rel=${f#$v/}
+      case "$f" in
+        *.tar.gz|*.tgz) mkdir -p "$f.expanded.d"
+          # a tar.gz is unpacked as an archive; a .tgz that is a plain gzip is expanded as bytes; if neither works the file is unscannable
+          if ! tar -xzf "$f" -C "$f.expanded.d" 2>/dev/null; then
+            rm -rf "$f.expanded.d"
+            gunzip -c "$f" >"$f.expanded" 2>/dev/null || { rm -f "$f.expanded"; echo "$rel: gzip expansion failed (corrupt or truncated)" >>"$u"; }
+          fi ;;
+        *) gunzip -c "$f" >"$f.expanded" 2>/dev/null || { rm -f "$f.expanded"; echo "$rel: gzip expansion failed (corrupt or truncated)" >>"$u"; } ;;
+      esac
+    done < <(find "$v" -type f \( -name '*.gz' -o -name '*.tgz' -o -size +0 \) 2>/dev/null | while IFS= read -r g; do
+               case "$g" in *.gz|*.tgz) echo "$g" ;; *) is_gzip "$g" && echo "$g" ;; esac; done)
   done
+  # everything left in the view (originals and expanded contents alike) that the view cannot read, and a gzip nested deeper than the loop expands
+  while IFS= read -r f; do
+    rel=${f#$v/}
+    why=$(unscannable_reason "$f"); [ -z "$why" ] || { printf '%s\n' "$opaque_allow" | grep -qxF "$rel" || echo "$rel: $why" >>"$u"; }
+    if { case "$f" in *.gz|*.tgz) true ;; *) is_gzip "$f" ;; esac; } && [ ! -e "$f.expanded" ] && [ ! -d "$f.expanded.d" ] && ! grep -qF "$rel:" "$u"; then
+      echo "$rel: gzip nested deeper than the scan expands" >>"$u"
+    fi
+  done < <(find "$v" -type f 2>/dev/null)
+  sort -u "$u" -o "$u"
   tar -C "$v" -czf "$stage/view-$2.tar.gz" "$2"; echo "$stage/view-$2.tar.gz"
 }
 publish_archive() { # NAME MINLOGS -> sets last_rc: 0 published, 1 published incomplete-by-validator, 2 refused
   local n=$1 minlogs_=$2 view rep
   view=$(scan_view "$stage/$n" "$n")
+  # a --nodes directory that yields no secret value means the save of the devnet's secrets failed: nothing could be searched for, so nothing is published
+  if [ -n "${nodes:-}" ] && [ -z "$(rethEvidenceSecretValues "$nodes" 2>/dev/null | tr -d ' \n')" ]; then echo "--nodes $nodes yields no secret values to search for (the secrets were not saved?)" >>"$stage/unscannable-$n"; fi
+  if [ -s "$stage/unscannable-$n" ]; then
+    # fail closed: what cannot be scanned is not published
+    mv "$stage/$n.tar.gz" "$quarantine/$n.tar.gz"
+    { echo "REJECTED: $n.tar.gz was not published (it holds members the secret scan cannot read: a compression or archive format it cannot expand, or a corrupt or too deeply nested gzip)."
+      echo "It was moved to the quarantine on the machine that ran the lane and was not uploaded. Unscannable members:"
+      cat "$stage/unscannable-$n"; } >"$out/$n.tar.gz.REJECTED.txt"
+    last_rc=2; return 2
+  fi
   rep=$(rethEvidenceValidate "$view" "${nodes:-}" "$stage/scan-inputs" 0 SHA256SUMS 2>&1); last_rc=$?
   if [ "$last_rc" -eq 2 ]; then
     mv "$stage/$n.tar.gz" "$quarantine/$n.tar.gz"
