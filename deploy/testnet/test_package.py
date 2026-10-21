@@ -33,9 +33,23 @@ class LaneKeysAreNotInherited(unittest.TestCase):
         self.assertNotIn('P85_PLAN_WITHDRAWAL_KEYS', env)
         self.assertEqual((env['P85_PLAN_KEEP'], env['P85_CHAIN_ID']), ('1', '7'))
 
-    def test_the_deployment_paths_use_it(self):
-        src = (Path(pos.__file__)).read_text()
-        self.assertNotIn('dict(os.environ', src)
+    def test_the_plan_subprocess_gets_the_cleaned_environment(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            genesis=pos.Genesis(Path(tmp)/'work','ubft',tmp,generate.REPO,'tn-x',1,(1,2))
+            tb,conf=Path(tmp)/'tb.json',Path(tmp)/'conf.json'
+            tb.write_text(json.dumps({'rootNodes':[{'nodeId':'r1','sigKey':'k1'},{'nodeId':'r2','sigKey':'k2'}]}))
+            conf.write_text(json.dumps({'validators':[{'nodeId':'e1','sigKey':'q1'},{'nodeId':'e2','sigKey':'q2'}]}))
+            seen=[]
+            real=subprocess.check_output
+            def spy(cmd,**kw):
+                seen.append(kw.get('env'))
+                return real(cmd,**kw)
+            with patch.dict(os.environ,{'P85_PLAN_OWNER_KEYS':'/x','P85_PLAN_PAYEE_KEYS':'/y','P85_CAST':'cast'}), patch.object(pos.subprocess,'check_output',spy):
+                genesis.plan(tb,conf)
+            self.assertEqual(len(seen),1)
+            self.assertIsNotNone(seen[0],'the plan script inherited os.environ (no env= given)')
+            self.assertFalse([k for k in seen[0] if k.startswith('P85_PLAN_') and k.endswith('KEYS')])
+            self.assertEqual(seen[0].get('P85_CAST'),'cast')
 
 
 class ChurnBudget(unittest.TestCase):

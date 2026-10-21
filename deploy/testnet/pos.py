@@ -164,7 +164,7 @@ class Genesis:
         `weights` are the genesis bond units of the identities (genesis_weights: all 1 by default)."""
         n = len(json.loads(Path(trust_base).read_text())['rootNodes'])
         units = ','.join(map(str, genesis_weights(n, weights)))
-        out = subprocess.check_output([sys.executable, str(self.repo / 'scripts/p85-genesis-plan.py'), str(trust_base), str(conf), str(BOND_UNIT), units], text=True)
+        out = subprocess.check_output([sys.executable, str(self.repo / 'scripts/p85-genesis-plan.py'), str(trust_base), str(conf), str(BOND_UNIT), units], text=True, env=clean_environ())
         if owners is not None:
             document = json.loads(out)
             by_id = {row['stakingId']: row for row in owners}
