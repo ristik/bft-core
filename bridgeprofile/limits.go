@@ -13,7 +13,7 @@ const (
 	MaxTransfers     = 64               // standalone B2 MAX_TRANSFERS: transfers including the final burn
 	MaxLeaves        = MaxTransfers + 1 // standalone B2 leaf output: the mint and every transfer (the kernel's result bound)
 	MaxSemanticBytes = 128 << 10        // standalone B2 MAX_HISTORY: history projection and Cfg input
-	MaxEnvelopeBytes = 512 << 10        // ingress: the composition's only aggregate byte bound; txpool and RPC carry it
+	MaxEnvelopeBytes = 2 << 20          // ingress: the composition's only aggregate byte bound (B7 PR 3: a 1,000-leaf original-seal history is ~1.5 MB); txpool and RPC carry it
 	MaxCBORDepth     = 16
 	MaxCBORItems     = 32768 // per object: the native scan of one CBOR object
 	MaxPolicyBytes   = 512
