@@ -73,7 +73,7 @@ case "$kind" in
     xs=$pub/p85/run/x4pos/steps
     jq -e '.imported == true and .pRet > 0 and .tRet > 0' "$xs/exit-request/request.json" >/dev/null 2>&1 || { complete=no; why+=("exit-request/request.json does not show an imported Retirement (pRet, tRet)"); }
     grep -q 'retirement proof ready.*latencyMs=' "$xs/exit-request/roots.log" 2>/dev/null || { complete=no; why+=("no 'retirement proof ready' line with latencyMs in exit-request/roots.log"); }
-    jq -e '.outcome == "refused" and .lawfulEarly == true' "$xs/exit-claim/refusal.json" >/dev/null 2>&1 || { complete=no; why+=("exit-claim/refusal.json: the early mature was not refused for a lawful reason"); }
+    jq -e '.outcome == "refused" and .lawfulEarly == true and (.expected == "" or .expected == .reason)' "$xs/exit-claim/refusal.json" >/dev/null 2>&1 || { complete=no; why+=("exit-claim/refusal.json: the early mature was not refused for a lawful reason"); }
     jq -e '.creditDelta > 0' "$xs/exit-claim/matured.json" >/dev/null 2>&1 || { complete=no; why+=("exit-claim/matured.json: no credit delta"); }
     jq -e '.received > 0' "$xs/exit-claim/claimed.json" >/dev/null 2>&1 || { complete=no; why+=("exit-claim/claimed.json: nothing claimed"); } ;;
   x4shadow)
