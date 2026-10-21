@@ -77,3 +77,13 @@ array head); RSMT membership paths have about log2(n) siblings for n state IDs (
 `STEP5_RSMT_LARGE=1`); and `TestEstimateHasNoCeiling` prices a 16-member committee over 8 shards at 65 leaves and 24 siblings far
 above the former 7M, unrefused. A token whose leaves each carry their own certificate can still need more than MaxAnchors anchors,
 which the parser refuses (`compose-anchors-over-max`); consolidation removes that need.
+
+### Native composition (BRIDGE_COMPOSE_V1, B7 direct PR 2)
+
+`native.go` is the executable reference for the `0x0105` precompile (briefs/dev4-b7-native-compose-spec.md): `NativeCompose` runs
+`Compose`'s relation over `abi.encode(uint8 op, bytes cfg, bytes envelope)` and returns the fixed 384-byte output (marker, status,
+the ten result fields, leaf count), a status code from the append-only `ComposeStatus` table (`config/compose-status.json` in the
+corpus) and the gas metered by the trial schedule `100000 + 2B + 20J + 16000L + 6000Q + 29900E + 2000A + 250P + 50K⌈log2 K⌉`, each
+charge taken before the work it pays for (the doc comment of `NativeCompose` lists the order). Only a non-canonical ABI and out of
+gas halt. The corpus carries a `native-<id>` twin of every `compose` case plus a halt, an unknown operation, and a valid return at
+exactly its charge and one gas short.
