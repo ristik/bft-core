@@ -847,7 +847,7 @@ func (c *BFTClient) coalesceFrom(ctx context.Context, first any, received *recei
 		if ok && cr != nil {
 			if authorization, err := c.verifyCertificationAuthorization(ctx, cr); err == nil {
 				entry.authorization = authorization
-				c.superseded.observe(authorization) // a wait running on another worker (the admission journal's retry) is superseded by this too
+				c.noteAuthenticated(ctx, cr, authorization, "coalescer") // a wait running on another worker (the admission journal's retry) is superseded by this too
 			}
 		}
 
