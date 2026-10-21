@@ -39,7 +39,7 @@ const (
 	MaxScanRange     = 2000 // blocks per eth_getLogs
 	Confirmations    = 8    // blocks behind the EVM head a log must be
 	maxRootBlocks    = 256  // state root -> block hash memory (for quiet parents)
-	MaxNotRequested  = 200  // observations of "not requested at P" after which a request is dropped (it was superseded)
+	MaxNegative      = 1024 // (parent, request) outcomes remembered as "not retirable at this parent"
 	stateFileVersion = 1
 )
 
@@ -88,10 +88,7 @@ type entry struct {
 	at      uint64 // insertion counter, for eviction
 }
 
-type pendingItem struct {
-	Key
-	Misses int `json:"misses,omitempty"` // consecutive proofs in which the generation was not (yet) requested at P
-}
+type pendingItem struct{ Key }
 
 type persisted struct {
 	Version int           `json:"version"`
@@ -110,6 +107,10 @@ type Service struct {
 	pending    []pendingItem
 	done       []Key
 	cache      []*entry
+	negative   []cacheKey // outcomes "not retirable at this parent", oldest first
+	snap       []byte     // the newest state not yet written
+	writing    bool
+	flushWG    sync.WaitGroup
 	inflight   map[cacheKey]struct{}
 	roots      map[[32]byte][32]byte // state root -> the block hash that certified it
 	rootsOrd   [][32]byte
@@ -162,16 +163,44 @@ func New(cfg Config) (*Service, error) {
 	return s, nil
 }
 
-// persistLocked writes the state atomically. The caller holds s.mu.
+// persistLocked snapshots the state for the single background writer; the caller holds s.mu and never waits for the disk (Ordered is called on
+// the consensus loop). A write that fails, or a crash before it, only costs a rediscovery: the cursor on disk is older than the log, a
+// request that was ended comes back and is ended again by the next committed observation (a repeated Retirement is a no-op in the executor).
 func (s *Service) persistLocked() {
 	raw, err := json.Marshal(persisted{Version: stateFileVersion, Cursor: s.cursor, Pending: s.pending, Done: s.done})
-	if err == nil {
-		err = writeFileAtomic(s.cfg.StatePath, raw)
-	}
 	if err != nil {
-		s.log.Error("cannot persist the retirement requests; they are rediscovered from the log after a restart", "error", err)
+		s.log.Error("cannot encode the retirement requests", "error", err)
+		return
+	}
+	s.snap = raw
+	if s.writing {
+		return
+	}
+	s.writing = true
+	s.flushWG.Add(1)
+	go s.writeLoop()
+}
+
+func (s *Service) writeLoop() {
+	defer s.flushWG.Done()
+	for {
+		s.mu.Lock()
+		raw := s.snap
+		s.snap = nil
+		if raw == nil {
+			s.writing = false
+			s.mu.Unlock()
+			return
+		}
+		s.mu.Unlock()
+		if err := writeFileAtomic(s.cfg.StatePath, raw); err != nil {
+			s.log.Error("cannot persist the retirement requests; they are rediscovered from the log after a restart", "error", err)
+		}
 	}
 }
+
+// Flush waits until everything handed to the writer is on disk.
+func (s *Service) Flush() { s.flushWG.Wait() }
 
 func writeFileAtomic(path string, data []byte) error {
 	tmp, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".*")
@@ -254,6 +283,7 @@ func (s *Service) Run(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			s.wg.Wait()
+			s.Flush()
 			return
 		case <-t.C:
 		}
@@ -354,7 +384,7 @@ func (s *Service) Prepare(parent storage.EVMParent) {
 	for i := 0; i < n && started < MaxPerPrepare; i++ {
 		item := s.pending[(s.rotate+i)%n]
 		ck := cacheKey{parent, item.Key}
-		if _, busy := s.inflight[ck]; busy || s.cachedLocked(ck) {
+		if _, busy := s.inflight[ck]; busy || s.cachedLocked(ck) || slices.Contains(s.negative, ck) {
 			continue
 		}
 		select {
@@ -396,24 +426,23 @@ func (s *Service) collect(ck cacheKey, fetchAt [32]byte) {
 	}
 	switch {
 	case !facts.NotImported:
-		// the registry retired the generation: complete
+		// the registry retired the generation: complete (a generation only advances after its predecessor was retired, so a superseded
+		// request ends here too)
 		s.log.Info("retirement request complete (the generation is retired in the registry)", "id", ck.key.ID, "generation", ck.key.Generation)
 		s.removeLocked(ck.key, true)
 		return
-	case !facts.Requested:
-		// the log can be ahead of the certified parent, so this is not yet a verdict: a request that stays unrequested is a superseded one
-		if s.pending[idx].Misses++; s.pending[idx].Misses >= MaxNotRequested {
-			s.log.Info("retirement request dropped: never requested at the certified states", "id", ck.key.ID, "generation", ck.key.Generation)
-			s.removeLocked(ck.key, true)
+	case !facts.Requested || !facts.NoLiveExposures || !facts.NoLotReferences || !facts.RecordsCaughtUp:
+		// Not retirable at this parent. "Not requested" is expected whenever the certified parent lags the log (a stalled EVM certification
+		// keeps the same old root for any number of rounds): the request stays pending however long that lasts, and the outcome is remembered
+		// for this parent so it is not collected again for it.
+		s.negative = append(s.negative, ck)
+		if len(s.negative) > MaxNegative {
+			s.negative = s.negative[len(s.negative)-MaxNegative:]
 		}
 		return
-	case !facts.NoLiveExposures || !facts.NoLotReferences || !facts.RecordsCaughtUp:
-		s.pending[idx].Misses = 0
-		return // temporarily ineligible: kept for a later parent
 	case len(witness) > evmstate.MaxWitnessBytes:
 		return
 	}
-	s.pending[idx].Misses = 0
 	var data [96]byte
 	binary.BigEndian.PutUint64(data[24:32], ck.key.ID)
 	binary.BigEndian.PutUint64(data[56:64], ck.key.Generation)

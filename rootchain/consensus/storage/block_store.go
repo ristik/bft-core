@@ -239,10 +239,13 @@ func (x *BlockStore) ClosureControls(parentRound, epoch, round uint64) ([]rctype
 	return controls, nil
 }
 
-// RetirementParent is the EVM tuple a Retirement in the block proposed at round, on the block of parentRound, must name, derived exactly
-// as the executor derives it (certifiedEVM). It reports false when no Retirement can be ordered in that child: the chain has no P85
-// state, the parent has no usable EVM record, a handoff is in flight, the parent is an epoch anchor or a frozen suffix. The block store
-// holds the parent unchanged: a child that certifies a newer EVM block does not change the tuple.
+// RetirementParent is the EVM tuple a Retirement in the block proposed at round, on the block of parentRound, must name. It is derived by the
+// two steps the executor takes for an ordinary child (extendWithAuthority): the state the child's certifications start from
+// (nextBlockSwitching, which carries a shard's record over and applies a configuration switch), then certifiedEVM. It reports false when no
+// Retirement can be ordered in that child: the chain has no P85 state, the parent has no usable EVM record, a handoff is in flight, the
+// parent is an epoch anchor or a frozen suffix (the paths the executor treats otherwise). The tuple is only a proposal: the leader
+// trial-executes the whole block, so a disagreement costs a Retirement, never a block. A child that certifies a newer EVM block does not
+// change the tuple of its own Retirement.
 func (x *BlockStore) RetirementParent(parentRound, round uint64) (EVMParent, bool, error) {
 	parent, err := x.blockTree.FindBlock(parentRound)
 	if err != nil {
@@ -259,7 +262,11 @@ func (x *BlockStore) RetirementParent(parentRound, round uint64) (EVMParent, boo
 	if err != nil {
 		return EVMParent{}, false, err
 	}
-	root, block, ok := certifiedEVM(parent.ShardState, confs)
+	start, _, err := parent.ShardState.nextBlockSwitching(confs, x.hash, x.orchestration)
+	if err != nil {
+		return EVMParent{}, false, err
+	}
+	root, block, ok := certifiedEVM(start, confs)
 	if !ok {
 		return EVMParent{}, false, nil
 	}

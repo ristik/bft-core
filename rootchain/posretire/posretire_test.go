@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"errors"
+	"os"
 	"path/filepath"
 	"sync"
 	"sync/atomic"
@@ -117,6 +118,7 @@ func TestDiscoveryFindsConfirmedRequestsAndKeepsAKeyedSetAcrossRestarts(t *testi
 	require.Equal(t, []Key{{ID: 1, Generation: 1}, {ID: 3, Generation: 2}, {ID: 3, Generation: 3}}, svc.Pending(), "the work is keyed by (id, generation)")
 
 	// restart: the pending set and the cursor come back from the file; the scan resumes after the cursor, not from zero
+	svc.Flush()
 	again := h.service()
 	require.Equal(t, svc.Pending(), again.Pending())
 	h.chain.mu.Lock()
@@ -131,6 +133,7 @@ func TestAnUnreadableStateFileIsAnErrorNotAnEmptySet(t *testing.T) {
 	h := newHarness(t)
 	svc := h.service()
 	require.True(t, svc.Add(Key{ID: 1, Generation: 1}))
+	svc.Flush()
 	require.NoError(t, writeFileAtomic(h.path, []byte("{not json")))
 	_, err := New(Config{Chain: h.chain, Proofs: func([32]byte) evmstate.ProofSource { return nil }, StatePath: h.path})
 	require.Error(t, err)
@@ -217,22 +220,75 @@ func TestTheEligibilityOfARequestAtTheParentDecidesWhatHappensToIt(t *testing.T)
 	}
 }
 
-func TestARequestThatIsNeverRequestedAtTheCertifiedStatesIsDropped(t *testing.T) {
+// The certified parent can lag the log for any number of rounds (a stalled EVM certification keeps the same old root): the request stays
+// pending, and becomes ready for the first parent that includes it.
+func TestARequestNotYetRequestedAtTheCertifiedStatesStaysPendingHoweverLongItLags(t *testing.T) {
 	h := newHarness(t)
+	var visible atomic.Bool
 	h.facts = func(id, generation uint64) storage.RetirementFacts {
 		f := eligible(id, generation)
-		f.Requested = false
+		f.Requested = visible.Load()
 		return f
 	}
 	svc := h.service()
 	svc.Add(Key{ID: 1, Generation: 1})
-	for i := 0; i < MaxNotRequested; i++ {
+	for i := 0; i < 300; i++ {
 		before := h.built.Load()
-		svc.Prepare(parentOf(byte(i + 1)))
+		svc.Prepare(storage.EVMParent{StateRoot: [32]byte{1, byte(i), byte(i >> 8)}, BlockHash: [32]byte{2, byte(i), byte(i >> 8)}})
 		require.Eventually(t, func() bool { return h.built.Load() == before+1 }, 2*time.Second, time.Millisecond)
 		require.Eventually(t, func() bool { svc.mu.Lock(); defer svc.mu.Unlock(); return len(svc.inflight) == 0 }, 2*time.Second, time.Millisecond)
 	}
-	require.Empty(t, svc.Pending(), "superseded")
+	require.Equal(t, []Key{{ID: 1, Generation: 1}}, svc.Pending(), "300 parents that predate the request did not end it")
+	svc.Flush()
+	require.Equal(t, []Key{{ID: 1, Generation: 1}}, h.service().Pending(), "nor on disk")
+
+	visible.Store(true)
+	p := parentOf(9)
+	svc.Prepare(p)
+	require.Len(t, waitReady(t, svc, p, 1), 1, "the first parent that includes the request")
+}
+
+// The same parent is not proved again for a request it cannot retire.
+func TestAnOutcomeIsRememberedPerParentAndRequest(t *testing.T) {
+	h := newHarness(t)
+	h.facts = func(id, generation uint64) storage.RetirementFacts {
+		f := eligible(id, generation)
+		f.NoLiveExposures = false
+		return f
+	}
+	svc := h.service()
+	svc.Add(Key{ID: 1, Generation: 1})
+	svc.Add(Key{ID: 2, Generation: 1})
+	p := parentOf(1)
+	svc.Prepare(p)
+	require.Eventually(t, func() bool { return h.built.Load() == 2 }, 2*time.Second, time.Millisecond)
+	require.Eventually(t, func() bool { svc.mu.Lock(); defer svc.mu.Unlock(); return len(svc.inflight) == 0 }, 2*time.Second, time.Millisecond)
+	for i := 0; i < 5; i++ {
+		svc.Prepare(p)
+	}
+	time.Sleep(30 * time.Millisecond)
+	require.EqualValues(t, 2, h.built.Load(), "nothing was collected again for the same parent")
+	svc.Prepare(parentOf(2))
+	require.Eventually(t, func() bool { return h.built.Load() == 4 }, 2*time.Second, time.Millisecond)
+	require.Len(t, svc.Pending(), 2)
+}
+
+// Persisting never waits for the disk: a write that blocks does not hold the lock the consensus loop takes in Ordered.
+func TestOrderedDoesNotWaitForTheDisk(t *testing.T) {
+	h := newHarness(t)
+	svc := h.service()
+	svc.Add(Key{ID: 1, Generation: 1})
+	svc.Flush()
+	// the state file's directory is gone: every write fails, none may block or panic
+	require.NoError(t, os.RemoveAll(filepath.Dir(h.path)))
+	start := time.Now()
+	for i := uint64(2); i < 200; i++ {
+		svc.Add(Key{ID: i, Generation: 1})
+		svc.Ordered(i, 1)
+	}
+	require.Less(t, time.Since(start), time.Second)
+	svc.Flush()
+	require.Len(t, svc.Pending(), 1, "the in-memory state is right whatever the disk says")
 }
 
 func TestOrderedEndsTheRequestAndItIsNotRediscovered(t *testing.T) {
@@ -252,6 +308,7 @@ func TestOrderedEndsTheRequestAndItIsNotRediscovered(t *testing.T) {
 	svc.mu.Unlock()
 	require.NoError(t, svc.Poll(context.Background()))
 	require.Empty(t, svc.Pending())
+	svc.Flush()
 	require.Empty(t, h.service().Pending(), "and the restart sees it ended")
 }
 
