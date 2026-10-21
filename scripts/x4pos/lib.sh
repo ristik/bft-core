@@ -107,7 +107,9 @@ x4p_exit_field() { jq -r ".$2" "$1"; }   # <state json> <field>
 # time: a wait for a time gate needs transactions (a real mature() transaction lands in a new block with a fresh timestamp, only the eth_call polling reads the idle head;
 # this is a test-harness measure, not a product requirement). One paid 1-wei transfer from the lane's funded sender per tick
 # (a failed tick is only a missed block; the wait's own deadline decides).
-x4p_tick() { rw_send_value "$(p85_sender_key)" 0x000000000000000000000000000000000000dEaD 1 >/dev/null 2>&1 || sleep 3; }
+# Bounded: a command that does not answer within <seconds> is stopped (its own children only) and counts as failed.
+x4p_bounded() { local sec=$1 pid w rc; shift; "$@" & pid=$!; ( sleep "$sec"; pkill -P "$pid" 2>/dev/null; kill "$pid" 2>/dev/null ) & w=$!; wait "$pid"; rc=$?; kill "$w" 2>/dev/null; wait "$w" 2>/dev/null; return $rc; }
+x4p_tick() { x4p_bounded 240 rw_send_value "$(p85_sender_key)" 0x000000000000000000000000000000000000dEaD 1 >/dev/null 2>&1 || { x4p_log "tick failed or timed out"; sleep 3; }; }
 x4p_owner_key() { echo "$P85_DIR/owner-keys/owner-$1.key"; }
 x4p_withdrawal_key() { echo "$P85_DIR/owner-keys/withdrawal-$1.key"; }
 x4p_address_of() { "$P85_CAST" wallet address --private-key "0x$(tr -d '[:space:]' <"$1" | sed 's/^0x//')"; }
@@ -190,7 +192,7 @@ x4p_exit_claim() {
     t0=$(date +%s)
     until x4p_exit refusal "$id" --allow-success 2>/dev/null | jq -e '.outcome=="mature-now"' >/dev/null; do
       [ $(( $(date +%s) - t0 )) -lt "$wait" ] || { x4p_exit refusal "$id" --allow-success >"$X4_STEP_DIR/refusal-last.json" 2>&1 || true; x4p_die "identity $id did not mature within ${wait}s: $(cat "$X4_STEP_DIR/refusal-last.json")"; return 1; }
-      n=$((n + 1)); [ $((n % 10)) -ne 1 ] || x4p_log "waiting for identity $id to mature: $(x4p_exit refusal "$id" --allow-success 2>&1 | head -c 200) head=$("$P85_CAST" block-number --rpc-url "$(p85_eth)" 2>&1) t=$(( $(date +%s) - t0 ))s"
+      n=$((n + 1)); [ $((n % 10)) -ne 1 ] || x4p_log "waiting for identity $id to mature: $(x4p_exit refusal "$id" --allow-success 2>&1 | head -c 200) head=$(p_timeout 30 "$P85_CAST" block-number --rpc-url "$(p85_eth)" 2>&1) t=$(( $(date +%s) - t0 ))s"
       x4p_tick
     done
     ids="[$(jq -r '[.lots[].id]|map(tostring)|join(",")' "$st")]"
