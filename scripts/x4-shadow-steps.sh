@@ -134,7 +134,34 @@ x4_campaign() {
   [ "$rc" = 0 ] || x4_die "the shadow adapter reported a divergence (FAIL), see $X4_DIR/adapter"
 }
 
+# X4_REWARDS=1 (step B3): the reward steps of scripts/x4pos on this chain. The genesis allocation is small (P85_REWARD_FUNDING), so the pool runs dry after a few
+# grid intervals; the steps settle, replay the pool's whole life against the chain, observe the zero-budget interval, refill through the relayer and see a later
+# interval paid. They are the same scripts the PoS campaign's driver runs; here they run in sequence, without the driver, on a chain that has no election.
+x4_step_run() { # id script argsJSON
+  local cur=$H3_DIR/x4pos
+  X4_CURSOR_DIR=$cur X4_STEP_ID=$1 X4_STEP_DIR=$cur/steps/$1 X4_STEP_ARGS=$3 X4_SEED=1 bash "scripts/x4pos/steps/$2" || return 1
+}
+x4_rewards_mode() {
+  local cur=$H3_DIR/x4pos target=${X4_REWARDS_PROGRESS:-3600} p i
+  mkdir -p "$cur/steps"
+  { echo "export P85_DIR=$PWD/$P85_DIR P85_CAST=$P85_CAST rethEthBase=$rethEthBase M2_CHAIN_ID=${M2_CHAIN_ID:-31337} H3_ONLINE='${H3_ONLINE:-1 2 3 4}' PATH=$PATH"
+    [ -z "${LANE_TOOLS_DIR:-}" ] || echo "export LANE_TOOLS_DIR=$LANE_TOOLS_DIR"; } >"$cur/env.sh"
+  x4_step baseline x4_baseline
+  for i in $(seq 1 7200); do
+    p=$(x4_num "$(x4_registry)" 'progress()(uint64)'); [ "$p" -ge "$target" ] && break; sleep 1
+  done
+  [ "$p" -ge "$target" ] || x4_die "the registry's progress did not reach $target in 7200 s (at $p)"
+  x4_step "reward-interval 1" x4_step_run ri1 reward-interval.sh '{"minIntervals":3}'
+  x4_step "reward-interval 1 check" bash -c "X4_CURSOR_DIR=$cur X4_STEP_ID=ri1 X4_STEP_DIR=$cur/steps/ri1 X4_STEP_ARGS='{\"minIntervals\":3}' bash scripts/x4pos/steps/reward-interval.check.sh"
+  x4_step "reward-exhaust-refill" x4_step_run xr reward-exhaust-refill.sh '{"refillWei":"1500000000000000000","waitSeconds":1500}'
+  x4_step "reward-exhaust-refill check" bash -c "X4_CURSOR_DIR=$cur X4_STEP_ID=xr X4_STEP_DIR=$cur/steps/xr bash scripts/x4pos/steps/reward-exhaust-refill.check.sh"
+  x4_step "chain stayed passive" x4_still_passive
+  echo "X4 rewards lane: all steps PASSED"
+  q3_teardown
+}
+
 x4_run_lane() {
+  if [ "${X4_REWARDS:-0}" = 1 ]; then x4_rewards_mode; return; fi
   local s
   mkdir -p "$X4_DIR"; rm -f "$X4_DIR/stop"
   H3_ONLINE="1 2 3 4"
