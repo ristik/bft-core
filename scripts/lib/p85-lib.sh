@@ -62,6 +62,8 @@ p85_prepare_genesis() {
   chain=$(python3 -c "import json;print(json.load(open('$conf'))['partitionParams']['chain_id'])" 2>/dev/null) || chain=${chainID:-31337}
   mkdir -p "$P85_DIR"
   # REWARD_LANE=1 (T8): the genesis payees hold keys, so the reward step can claim for real
+  # X4_HELD_KEYS=1 (the PoS campaign): the genesis owners and withdrawal addresses hold keys the lane keeps, so an incumbent can request retirement and claim
+  P85_PLAN_OWNER_KEYS=$([ "${X4_HELD_KEYS:-0}" = 1 ] && echo "$P85_DIR/owner-keys") \
   P85_PLAN_PAYEE_KEYS=$([ "${REWARD_LANE:-0}" = 1 ] && echo "$P85_DIR/payee-keys") P85_CAST=$P85_CAST \
     python3 scripts/p85-genesis-plan.py test-nodes/trust-base.json "$conf" "$P85_BOND_UNIT" "$P85_GENESIS_UNITS" >"$P85_DIR/plan.json" || return 1
   # the first pass runs on the base configuration (the full one does not exist yet): provisional, its id is replaced by p85_reconcile_genesis_assignment
