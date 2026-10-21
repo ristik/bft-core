@@ -121,8 +121,11 @@ m2_archive_root_state() {
 }
 
 m2_send_paid() {
-  local epoch=$1 nonce=${M2_NEXT_NONCE:-$2} expected='' sent='' i receipt block hash status log j rpcPort logValidator
-  for i in $(m2_online_validators); do
+  local epoch=$1 nonce=${M2_NEXT_NONCE:-$2} expected='' sent='' i receipt block hash status log j rpcPort logValidator targets
+  # The transaction goes to every online validator (their pools do not gossip on an older ureth), or, with LANE_TX_FANOUT=one (ureth with transaction gossip, ristik/ureth#34), to
+  # the first one only: the others must receive it from it.
+  targets=$(m2_online_validators); [ "${LANE_TX_FANOUT:-all}" != one ] || targets=${targets%% *}
+  for i in $targets; do
     sent=$(lane_go_run evmtx -send -eth-url "http://127.0.0.1:$((rethEthBase+i-1))" \
       -chain-id "${M2_CHAIN_ID:-31337}" -nonce "$nonce" 2>&1) || { echo "m2_send_paid: evmtx failed on validator $i (nonce $nonce): $sent" >&2; return 1; }
     [[ "$sent" = 0x* ]] || { echo "m2_send_paid: validator $i returned no transaction hash (nonce $nonce): $sent" >&2; return 1; }

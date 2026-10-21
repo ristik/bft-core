@@ -17,7 +17,7 @@ Actions -> `ci-lane` -> Run workflow (`workflow_dispatch`), inputs:
 
 | input | values | meaning |
 |---|---|---|
-| `lane` | `combined` / `overbound` / `abort` / `t6` / `ureth-targeted` / `all-live` / `build-only` | one kind, or `all-live` = combined + overbound + abort + t6 (each on its own VM), or the builds and their provenance checks only (see Step 2 below) |
+| `lane` | `combined` / `overbound` / `abort` / `t6` / `ureth-targeted` / `all-live` / `x4-shadow` / `build-only` | one kind, or `all-live` = combined + overbound + abort + t6 (each on its own VM), or the builds and their provenance checks only (see Step 2 below) |
 | `inject_failure` | `none` / `after-builds` / `in-lane` | a harness failure to test the failure path: fail after the builds are verified (no lane started) / fail the lane deliberately after step `utb_step_u1`. Honoured only by this workflow (`CI_INJECT_FAILURE`, and `CI_INJECT_FAIL_AFTER` which `p85-recovery-steps.sh` honours only when `GITHUB_ACTIONS=true`); it adds a failing step and weakens no check. |
 
 A `workflow_dispatch` workflow has to exist on the default branch to be dispatchable (dispatching a workflow that exists only on a branch answers HTTP 404;
@@ -91,6 +91,7 @@ lock script is `$AGRE_ROOT/briefs/devnet-lock.sh` when present, else the reposit
 | `combined` | `scripts/utb-lane.sh` (above) | `lane-evidence-combined` |
 | `overbound` | `P85_MODE=overbound scripts/p85-lane.sh`: the election's refusal of an over-bound candidate, from a fresh genesis with the prerequisite steps (`election_refused` is a completion sentinel) | `lane-evidence-overbound` |
 | `abort` | `scripts/h6/abort-rehearsal-lane.sh`: an Abort before H committed and one after (`abort.status` files are sentinels) | `lane-evidence-abort` |
+| `x4shadow` (`lane: x4-shadow`, manual; not in `all-live` or the nightly) | `P85_SHADOW=1 scripts/p85-lane.sh` with the declared campaign `scripts/shadow/campaign.json` (X4 #58, `briefs/x4-shadow-campaign-design.md` section 2): the PoA-authoritative chain carries the staking modules and the records hook but no election hook; from the moment the election is due the shadow adapter samples certified state every 60 s for 90 minutes (setup excluded), runs the real election on a disposable anvil fork of each sample and compares it with an independent reference; the seed's schedule changes two spare identities (registered/bonded, admitted, retired) so the answer changes. The lane passes only when the adapter's report is PASS (zero divergence, 90 of 90 samples, >= 24 due comparisons, >= 2 each of changed, unchanged and refusal, an over-bound refusal, the incumbent assignment and the registry epochs fixed). It is a comparison on a fork, not consensus evidence. Run deadline 140 min, job timeout 170 min; one devnet | `lane-evidence-x4shadow` (the adapter pack `p85/run/shadow/adapter` with its own `SHA256SUMS`, `REPORT.md`, `report.json`, `observations.jsonl`, `raw/` for every non-idle sample) |
 | `t6` | `scripts/t6-rehearsal.sh` (`scripts/ci/run-t6.sh`): independent genesis/artifact checks, authority-backed rotation, over-bound control, acknowledgement, paid execution under the new set, offline F7 verification | `t6-evidence` |
 | `ureth-targeted` | `scripts/ci/test-ureth.sh`: `cargo test -p` the four Unicity crates of the ureth pin (`components.ureth.targetedPackages`: `reth-unicity-b1`, `-execution`, `-payload`, `-store`), not `--workspace` and no generic Ethereum suites; an empty selection fails | `ureth-targeted` (cargo log, per-binary results, summary) |
 
@@ -120,3 +121,38 @@ lock script is `$AGRE_ROOT/briefs/devnet-lock.sh` when present, else the reposit
 ### Failures that were not the check
 
 A run once failed only at `actions/upload-artifact` (five `CreateArtifact` request timeouts, after all 304 tests passed): GitHub infrastructure. It is recorded, not hidden, and the kind is rerun on the final head; no result is accepted from a rerun of a failing check.
+
+## Transaction gossip in the lane (ureth with ristik/ureth#34)
+
+ureth connects the validators' execution clients as **trusted peers only** and gossips pending transactions among them. The lane scripts therefore peer the clients with `admin_addTrustedPeer` in both
+directions (`scripts/lib/reth-peers.sh`: `reth_trust`, `reth_trust_mesh`, `reth_untrust`; `admin_addPeer` adds a static peer and is not enough), and a retired member is removed from the retained
+validators (`reth_untrust`, used by T6's coupled rotation). An older ureth has the same admin methods and ignores them.
+
+- `LANE_TX_FANOUT=all` (default) keeps the old behaviour: every paid transaction goes to every online validator (`m2_send_paid`, `rw_eth_all`, #711). `LANE_TX_FANOUT=one` sends it to the first validator only;
+  the others must receive it by gossip.
+- `GOSSIP_LANE=1` adds the step `gossip_step_proof` after `p85_baseline` (`scripts/lib/gossip-lib.sh`): it sends one transaction to the validator that just sealed a block, to that validator ONLY, and requires
+  that a block sealed by a DIFFERENT validator includes it (the sealer of a block is the validator whose log holds `sealed execution payload` for its hash). An attempt in which the submitter seals the
+  including block itself is inconclusive and is repeated (up to four times); a transaction that was only ever included by the validator it was sent to fails the step.
+- `lane.txGossip` in `scripts/ci/lane-pins.json` makes the CI run set both (`scripts/ci/run-lane.sh`). It belongs with a ureth pin that has gossip.
+
+Evidence (run 39505397682, ureth `3de4dfff` (ureth#75 head at the time; merged as `53c9330d`)): attempt 1 inconclusive (validator 2 sealed the including block 10 itself); attempt 2: the transaction sent to validator 2 only was included in block 12, sealed by
+validator 4. In both attempts the block sealed in between by validator 1 (blocks 9 and 11) did NOT include it: the gossip takes a moment, a block built right after the submission can miss it.
+
+## Step 3: pull requests, and the stock-reth controls
+
+### Pull requests
+
+`ci-lane` also runs on `pull_request` (opened, synchronize, reopened, ready for review) to `integration/enshrined-evm` and `main`. Nothing here is path-filtered at the workflow level:
+a filtered-out workflow leaves its checks absent, and a required check that is absent stays pending forever. Instead `plan` classifies the change itself:
+
+- `scripts/ci/classify.py` reads the changed paths (`git diff BASE HEAD`) against `scripts/ci/pr-paths.json` and selects lane jobs. Docs, briefs, markdown and the trees the lanes do not exercise select nothing; `go.mod`, `go.sum`, `Makefile`, this workflow, `scripts/ci/**` (the rules and the pins included) and the shared lane libraries select **every** lane; the other paths select the lanes that depend on them (over-bound, Abort, T6, targeted ureth); any other code selects the umbrella `combined` lane. It errs toward running, never toward skipping. The classifier, its rules and the gate logic are the **base branch's copies** on a pull request (`git show BASE:scripts/ci/...`), never the PR's own, so a PR cannot narrow what it is judged by; a base without them (the PR that introduces them) fails closed and selects every lane. Its cases are tested (`classify.py selftest`), and the `ignore` list is held to what no lane reaches *mechanically*: the self-test finds every script reachable from the lane entry points (and every repository file whose path those scripts mention, docs and briefs aside) and fails if an `ignore` glob would swallow one (`scripts/anyage/**` and `scripts/d1-*` were such inputs). **Residual:** the workflow file `ci-lane.yml` itself runs from the PR's merge commit (GitHub runs a PR's own workflow file), so a PR can still edit the workflow to drop a job; that edit is in the diff, is reviewed, and is the only part of the judging machinery a PR controls.
+- `lane-gate` **always reports** and is the check to require. It passes when everything the plan selected succeeded; a not-selected job is skipped and never blocks, and a selected job that failed, was cancelled or never ran (a build it needs failed) fails it (`gate.sh selftest`). A docs-only PR therefore gets a green gate in about a minute with no lane run; a draft PR is reported with a note and runs no live lane until it is ready for review.
+- `selftests` (chain-free, minutes): the classifier, the gate, `check-pins` and the publisher's self-tests, selected when `scripts/ci/**`, a workflow or `scripts/lib/reth-pin.sh` changes.
+- A newer push to a PR cancels its older run (one concurrency group per PR); nothing else cancels.
+- The token is read-only, no job uses a secret, the Actions are pinned by commit, and every job runs on a standard runner. A pull request from a fork runs the same jobs under the same read-only token (GitHub asks for approval before the first run of a new contributor).
+
+Making `lane-gate` a required check of `integration/enshrined-evm` is a branch-protection setting and is the owner's decision; this change does not touch protection.
+
+### The stock-reth controls
+
+`real-reth-smoke` and `real-reth-fault` ran the Go adapter against the **upstream stock reth** release the scripts pin, and their names read like evidence about our execution client. They are renamed `stock-reth-control` and `stock-reth-fault-control` and are manual-dispatch only (no PR trigger); their job names and the evidence artifact names say STOCK and not the Unicity profile. The useful parts are kept: their refusal and collection paths (`scripts/reth-smoke-selftest.sh`, now the first step of the control, **a step added here**; `scripts/lib/reth-pin.sh select-upload`, which the lane publisher uses) and the scripts for local runs. What the Unicity profile needs is tested by `ci-lane`: the attested Linux ureth, the combined, over-bound, Abort and T6 lanes, and the targeted `reth-unicity-*` crate tests.

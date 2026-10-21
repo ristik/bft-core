@@ -444,12 +444,12 @@ func (g *ShardGate) Status() ShardStatus {
 // Watch polls the control file and applies it whenever its content changes, and writes the status after every poll, until ctx ends. An
 // invalid document is a fault and leaves the previous rules in force.
 func (g *ShardGate) Watch(ctx context.Context, controlPath, statusPath string, every time.Duration) {
-	var last, lastStatus []byte
+	var reader controlReader
+	var lastStatus []byte
 	tick := time.NewTicker(every)
 	defer tick.Stop()
 	for {
-		if raw, err := os.ReadFile(controlPath); err == nil && !bytes.Equal(raw, last) {
-			last = raw
+		if raw, ok := reader.next(controlPath); ok {
 			var c ShardControl
 			dec := json.NewDecoder(bytes.NewReader(raw))
 			dec.DisallowUnknownFields()

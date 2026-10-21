@@ -14,9 +14,9 @@ log() { printf '%s run-lane: %s\n' "$(date -u +%FT%TZ)" "$*" | tee -a "$out/run-
 die() { log "HARNESS FAILURE: $*"; rc=1; finalize; exit 1; }
 pins=scripts/ci/lane-pins.json
 inject=${CI_INJECT_FAILURE:-none}; deadline=${LANE_DEADLINE_MIN:-75}
-# CI_LANE_KIND: combined (utb-lane.sh), overbound (P85_MODE=overbound scripts/p85-lane.sh) or abort (scripts/h6/abort-rehearsal-lane.sh); each from its own fresh genesis
+# CI_LANE_KIND: x4shadow (P85_SHADOW=1 scripts/p85-lane.sh with the declared 90-minute campaign, scripts/shadow/campaign.json), combined (utb-lane.sh), overbound (P85_MODE=overbound scripts/p85-lane.sh) or abort (scripts/h6/abort-rehearsal-lane.sh); each from its own fresh genesis
 kind=${CI_LANE_KIND:-combined}
-case "$kind" in combined|overbound|abort) ;; *) echo "run-lane: unknown CI_LANE_KIND $kind" >&2; exit 2 ;; esac
+case "$kind" in combined|overbound|abort|x4shadow) ;; *) echo "run-lane: unknown CI_LANE_KIND $kind" >&2; exit 2 ;; esac
 head=$(git rev-parse HEAD)
 export AGRE_ROOT=$work/agre DEVNET_LOCK_DIR=$work/agre/.devnet-lock
 mkdir -p "$AGRE_ROOT/builds" "$AGRE_ROOT/briefs/devnet-runs"
@@ -31,7 +31,7 @@ finalize() {
   host_evidence after "$out/host-after.log.gz"
   { dmesg 2>/dev/null || sudo -n dmesg 2>/dev/null; } | grep -i -E 'out of memory|oom-kill|killed process' >"$out/oom-lines.txt" 2>/dev/null || true
   [ -r /sys/fs/cgroup/memory.events ] && cp /sys/fs/cgroup/memory.events "$out/cgroup-memory.events" || true
-  case "$kind" in combined) evglob=utb-2 ;; overbound) evglob=p85-overbound-2 ;; abort) evglob=h6-abort-2 ;; esac
+  case "$kind" in combined) evglob=utb-2 ;; overbound) evglob=p85-overbound-2 ;; abort) evglob=h6-abort-2 ;; x4shadow) evglob=x4-shadow-lane-2 ;; esac
   ev=$(ls -d "$AGRE_ROOT"/briefs/devnet-runs/${evglob}* 2>/dev/null | sort | tail -1)
   if [ -n "$ev" ] && [ -d "$ev" ]; then
     cp -R "$ev" "$work/evidence-dir" 2>/dev/null || true; evdir=$work/evidence-dir
@@ -81,9 +81,12 @@ export P85_CONTRACTS=$AGRE_ROOT/contracts NBP_DIR=$AGRE_ROOT/native-bridge-plugi
 scripts/ci/install-foundry.sh "$work/dl" >>"$out/run-lane.log" 2>&1 || die "cannot install the pinned Foundry"
 export PATH="$HOME/.foundry/bin:$repo/scripts/ci/shim:$PATH"
 export DNB_AGG_SHARDS=$(jq -r '.lane.aggShards // 1' "$pins")
+# ureth with transaction-only gossip (ristik/ureth#34): the lane submits each transaction to ONE validator and proves that the others received it (scripts/lib/gossip-lib.sh)
+if [ "$(jq -r '.lane.txGossip // false' "$pins")" = true ]; then export GOSSIP_LANE=1 LANE_TX_FANOUT=one; fi
 # T8: the lane includes the funded operator reward pool step (scripts/lib/rewards-lib.sh): the genesis payees hold keys, the pool is settled across the real
 # acknowledged history, recomputed from scratch, claimed. Off by default on the Mac (REWARD_LANE unset); on in CI.
 export REWARD_LANE=1
+[ "$kind" != x4shadow ] || export REWARD_LANE=0   # the shadow chain has no authoritative election and no reward step
 # S4 (#57, scripts/lib/s4-lib.sh, docs/root-evidence.md): the focused live slashing exercise is added to the combined lane when scripts/ci/run-inputs.json of the commit under
 # test says "s4": true (a ci-lane-run/** push; off by default). It adds the roots' observer journals, a harness-signed equivocation by the joiner's root key and the
 # submission through the real Evidence contract after the recovery.
@@ -115,6 +118,14 @@ case "$kind" in
     log "P85_MODE=overbound scripts/p85-lane.sh (deadline ${deadline} min)"
     p_timeout "$((deadline * 60))" scripts/p85-lane.sh 2>&1 | tee "$out/lane-stdout.log" >/dev/null
     lane_rc=${PIPESTATUS[0]} ;;
+  x4shadow)
+    # the PoA-authoritative shadow observation (briefs/x4-shadow-campaign-design.md section 2): the records hook without an election; the adapter observes the checked-in
+    # interval from the election's due moment and passes only on its own PASS (zero divergence, every scheduled sample, the required due counts)
+    export P85_SHADOW=1 X4_CAMPAIGN=$repo/scripts/shadow/campaign.json P85_EVIDENCE_PREFIX=x4-shadow-lane P85_LOCK_OWNER=p85-recovery
+    log "P85_SHADOW=1 scripts/p85-lane.sh, campaign $(jq -r .name "$X4_CAMPAIGN") (deadline ${deadline} min)"
+    p_timeout "$((deadline * 60))" scripts/p85-lane.sh 2>&1 | tee "$out/lane-stdout.log" >/dev/null
+    lane_rc=${PIPESTATUS[0]}
+    if [ "$inject" = in-lane ]; then log "injected harness failure (inject_failure=in-lane) after the shadow lane (its own exit was $lane_rc)"; lane_rc=1; fi ;;
   abort)
     export H6_URETH_ATTESTED=$M2_URETH_BIN H6_URETH_ATTESTED_SHA256=$(awk '{print $1; exit}' "$M2_URETH_ATTESTED_PROVENANCE/sha256.txt") H6_URETH_ATTESTED_PROVENANCE=$M2_URETH_ATTESTED_PROVENANCE H6_URETH_COMMIT=$M2_URETH_COMMIT
     log "scripts/h6/abort-rehearsal-lane.sh (deadline ${deadline} min)"

@@ -8,7 +8,7 @@
 # Secret values are searched for everywhere that is published, INCLUDING inside .gz / .tgz members (an expanded scan view), and the values of every file removed by name
 # or content (keys, JWTs, credentials, the joiner's ownerKey/rootKey) are added to the search, so a removed secret that leaked into a log still refuses the archive.
 # A secret found by value or field in what remains is NOT published: the archive is quarantined (OUT/../quarantine, never uploaded) and OUT/<name>.REJECTED.txt names what
-# was found where, never the value (scripts/lib/reth-pin.sh select-upload, the pattern of reth-smoke.yml).
+# was found where, never the value (scripts/lib/reth-pin.sh select-upload, the pattern of stock-reth-control.yml).
 set -uo pipefail
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd); repo=$(cd "$here/../.." && pwd)
 source "$repo/scripts/lib/portable.sh"
@@ -58,6 +58,12 @@ case "$kind" in
   overbound)
     grep -q 'P85 recovery lane: all steps PASSED' "$ev/lane.log" 2>/dev/null || { complete=no; why+=("no completion sentinel in lane.log"); }
     grep -q 'election_refused' "$ev/lane.log" 2>/dev/null || { complete=no; why+=("the over-bound refusal step did not run"); } ;;
+  x4shadow)
+    grep -q 'X4 shadow lane: all steps PASSED' "$ev/lane.log" 2>/dev/null || { complete=no; why+=("no completion sentinel in lane.log"); }
+    adapter=$pub/p85/run/shadow/adapter
+    [ "$(jq -r .status "$adapter/report.json" 2>/dev/null)" = PASS ] || { complete=no; why+=("the shadow adapter's report.json is missing or its status is not PASS"); }
+    [ "$(jq -r '.manifest.campaign.intervalSeconds // 0' "$adapter/report.json" 2>/dev/null)" -ge 5400 ] 2>/dev/null || { complete=no; why+=("the report does not declare a 90-minute campaign interval"); }
+    ( cd "$adapter" 2>/dev/null && p_sha256 -c SHA256SUMS >/dev/null ) || { complete=no; why+=("the adapter pack's SHA256SUMS do not verify"); } ;;
   abort)
     grep -q 'H6 Abort rehearsal: Abort before H committed' "$ev/lane.log" 2>/dev/null || { complete=no; why+=("no Abort-before-H completion line in lane.log"); }
     [ -s "$pub/q3/h6-before-h/abort.status" ] && [ -s "$pub/q3/h6-after-h/abort.status" ] || { complete=no; why+=("the Abort evidence files are missing"); } ;;
