@@ -302,24 +302,28 @@ func Test_SendCertificationResponse_RefusalIsNotRetried(t *testing.T) {
 	require.False(t, lazyHandshakeRefused(io.EOF))
 }
 
-// Optional: with 120 ms one way latency and a 300 ms send timeout the certificate is delivered
-// on the lazy path (header and payload are sent at once). Explicit negotiation would need 3 one
-// way trips (360 ms) for the payload to arrive.
+// Optional: with latency L one way and a send timeout T the certificate is delivered on the lazy path
+// (header and payload are sent at once, the negotiation answer is awaited for 2 one way trips), while explicit
+// negotiation would need 3 trips before the payload can even be sent. The property holds for 2L < T < 3L; T is
+// the midpoint, so that the margin on both sides is L/2 (150 ms) and a loaded runner that delays a trip
+// (connection setup, scheduling) does not move the test to the wrong side. A smaller L with the same ratio
+// shrinks the absolute margin in proportion and made this test flaky (bft-core #681: 120 ms / 300 ms left 60 ms).
 func Test_SendCertificationResponse_DeliveredWithLatencyWithinTimeout(t *testing.T) {
-	cm := &countingMuxer{delay: 120 * time.Millisecond}
+	const latency, timeout = 300 * time.Millisecond, 750 * time.Millisecond // 2*latency < timeout < 3*latency, midpoint
+	cm := &countingMuxer{delay: latency}
 	conf, err := NewPeerConfiguration(randomTestAddressStr, nil, generateKeyPair(t), nil, nil)
 	require.NoError(t, err)
 	senderPeer, err := newPeer(context.Background(), conf, logger.New(t), nil, libp2p.Muxer("/yamux/1.0.0", cm))
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = senderPeer.Close() })
-	senderNw, err := NewLibP2PRootChainNetwork(senderPeer, 10, 300*time.Millisecond, observability.Default(t))
+	senderNw, err := NewLibP2PRootChainNetwork(senderPeer, 10, timeout, observability.Default(t))
 	require.NoError(t, err)
 
 	for _, kind := range []recvKind{recvLegacy, recvBoth} {
 		p, nw := newCertReceiver(t, senderPeer, kind)
 		// connection setup and identify are not subject to the send timeout
 		require.NoError(t, senderPeer.host.Connect(context.Background(), peer.AddrInfo{ID: p.ID()}))
-		ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
 		err := senderNw.sendCertificationFrame(ctx, p.ID(), []string{ProtocolUnicityCertificatesV2, ProtocolUnicityCertificates},
 			ProtocolUnicityCertificates, &certificationFrames{cr: testCertResponse(t, nil)})
 		cancel()

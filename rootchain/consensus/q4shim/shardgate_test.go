@@ -204,8 +204,11 @@ func TestShardGate(t *testing.T) {
 		ctl, status := filepath.Join(dir, "shard-control.json"), filepath.Join(dir, "shard-status.json")
 		require.NoError(t, os.WriteFile(ctl, []byte(`{"gen":7,"rules":[{"name":"cut","direction":"in","partition":8,"action":"hold","require":true}]}`), 0o600))
 		ctx, cancel := context.WithCancel(context.Background())
-		defer cancel()
-		go g.gate.Watch(ctx, ctl, status, 10*time.Millisecond)
+		// Watch writes shard-status.json.tmp and renames it inside t.TempDir(): the watcher must have returned before the directory is removed
+		// (bft-core #686: "TempDir RemoveAll cleanup: directory not empty"), so the subtest ends by cancelling and joining it.
+		watched := make(chan struct{})
+		go func() { g.gate.Watch(ctx, ctl, status, 10*time.Millisecond); close(watched) }()
+		defer func() { cancel(); <-watched }()
 		require.Eventually(t, func() bool {
 			raw, err := os.ReadFile(status)
 			var st ShardStatus
@@ -223,4 +226,33 @@ func TestShardGate(t *testing.T) {
 		require.Len(t, g.inner.got(), 1, "outbound still reaches the network (the node is stopping)")
 		require.Empty(t, g.events())
 	})
+}
+
+// A control file that is read half written is not a fault: it is acted on only once two consecutive polls read it identically (bft-core #686).
+func TestControlReaderWaitsForAStableDocument(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "control.json")
+	var r controlReader
+	read := func() (string, bool) { raw, ok := r.next(path); return string(raw), ok }
+
+	_, ok := read()
+	require.False(t, ok, "no file")
+	require.NoError(t, os.WriteFile(path, []byte(`{"gen":7,"rul`), 0o600)) // half written
+	_, ok = read()
+	require.False(t, ok, "first sight of new content: not yet")
+	require.NoError(t, os.WriteFile(path, []byte(`{"gen":7,"rules":[]}`), 0o600)) // the writer finished
+	_, ok = read()
+	require.False(t, ok, "content changed since the last poll: not yet")
+	doc, ok := read()
+	require.True(t, ok)
+	require.Equal(t, `{"gen":7,"rules":[]}`, doc)
+	_, ok = read()
+	require.False(t, ok, "handed out once")
+
+	// an invalid document stays invalid across polls and is handed out after the second one
+	require.NoError(t, os.WriteFile(path, []byte(`{nonsense`), 0o600))
+	_, ok = read()
+	require.False(t, ok)
+	doc, ok = read()
+	require.True(t, ok)
+	require.Equal(t, `{nonsense`, doc)
 }
