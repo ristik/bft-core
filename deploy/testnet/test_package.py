@@ -1,3 +1,4 @@
+import re
 import http.client
 import http.server
 import shutil
@@ -111,10 +112,17 @@ class ProofOfStake(unittest.TestCase):
     def test_the_deployment_file_and_profile_flags_follow_the_contracts_deployment(self):
         d={'networkWord':'0xaa','chainId':31337,'custody':'0xc','custodyCodeHash':'0xch','election':'0xe','electionCodeHash':'0xeh','rewardPool':'0xrp','rewardPoolCodeHash':'0xrph'}
         self.assertEqual(pos.deployment_of(d,{'runtimeHash':'0xrh'}),{'networkWord':'0xaa','chainId':'31337','custody':'0xc','custodyCodeHash':'0xch',
-            'registry':pos.REGISTRY,'registryCodeHash':'0xrh','election':'0xe','electionCodeHash':'0xeh'})
+            'registry':pos.REGISTRY,'registryCodeHash':'0xrh','election':'0xe','electionCodeHash':'0xeh','rewardPool':'0xrp','rewardPoolCodeHash':'0xrph'})
         args=pos.profile_args(d,{'election':'/m.json','hook':'/h.jsonl'})
         self.assertEqual((args[args.index('--records-custody')+1],args[args.index('--election')+1],args[args.index('--elect-caps')+1]),('0xc','0xe','16,1,6'))
         self.assertEqual((args[args.index('--elect-measurement')+1],args[args.index('--hook-measurement')+1]),('/m.json','/h.jsonl'))
+    def test_the_deployment_file_carries_exactly_the_fields_the_pinned_roots_and_relayer_read(self):
+        # the pinned roots refuse unknown fields and the relayer's loadRewardPool needs the pool pair: the generated keys are the deployment struct's json keys
+        go=(generate.REPO/'cli/ubft/cmd/pos_deployment.go').read_text()
+        struct=go[go.index('type posDeploymentFile struct'):]
+        keys=set(re.findall(r'`json:"(\w+)(?:,omitempty)?"`',struct[:struct.index('\n}')]))
+        d={'networkWord':'0xaa','chainId':31337,'custody':'0xc','custodyCodeHash':'0xch','election':'0xe','electionCodeHash':'0xeh','rewardPool':'0xrp','rewardPoolCodeHash':'0xrph'}
+        self.assertEqual(set(pos.deployment_of(d,{'runtimeHash':'0xrh'})),keys)
     def test_the_shadow_profile_has_the_hook_and_no_election(self):
         d={'custody':'0xc','election':'0xe'}
         args=pos.profile_args(d,{'election':'/m.json','hook':'/h.jsonl'},shadow=True)
