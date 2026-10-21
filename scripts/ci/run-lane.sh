@@ -16,7 +16,7 @@ pins=scripts/ci/lane-pins.json
 inject=${CI_INJECT_FAILURE:-none}; deadline=${LANE_DEADLINE_MIN:-75}
 # CI_LANE_KIND: x4rewards (the shadow chain with a small reward allocation: the PoS campaign's reward steps, X4_REWARDS=1), x4shadow (P85_SHADOW=1 scripts/p85-lane.sh with the declared 90-minute campaign, scripts/shadow/campaign.json), combined (utb-lane.sh), overbound (P85_MODE=overbound scripts/p85-lane.sh) or abort (scripts/h6/abort-rehearsal-lane.sh); each from its own fresh genesis
 kind=${CI_LANE_KIND:-combined}
-case "$kind" in combined|overbound|abort|x4shadow|x4rewards) ;; *) echo "run-lane: unknown CI_LANE_KIND $kind" >&2; exit 2 ;; esac
+case "$kind" in combined|overbound|abort|x4shadow|x4rewards|x4exit) ;; *) echo "run-lane: unknown CI_LANE_KIND $kind" >&2; exit 2 ;; esac
 head=$(git rev-parse HEAD)
 export AGRE_ROOT=$work/agre DEVNET_LOCK_DIR=$work/agre/.devnet-lock
 mkdir -p "$AGRE_ROOT/builds" "$AGRE_ROOT/briefs/devnet-runs"
@@ -31,7 +31,7 @@ finalize() {
   host_evidence after "$out/host-after.log.gz"
   { dmesg 2>/dev/null || sudo -n dmesg 2>/dev/null; } | grep -i -E 'out of memory|oom-kill|killed process' >"$out/oom-lines.txt" 2>/dev/null || true
   [ -r /sys/fs/cgroup/memory.events ] && cp /sys/fs/cgroup/memory.events "$out/cgroup-memory.events" || true
-  case "$kind" in combined) evglob=utb-2 ;; overbound) evglob=p85-overbound-2 ;; abort) evglob=h6-abort-2 ;; x4shadow|x4rewards) evglob=x4-shadow-lane-2 ;; esac
+  case "$kind" in combined) evglob=utb-2 ;; overbound) evglob=p85-overbound-2 ;; abort) evglob=h6-abort-2 ;; x4shadow|x4rewards) evglob=x4-shadow-lane-2 ;; x4exit) evglob=x4-exit-lane-2 ;; esac
   ev=$(ls -d "$AGRE_ROOT"/briefs/devnet-runs/${evglob}* 2>/dev/null | sort | tail -1)
   if [ -n "$ev" ] && [ -d "$ev" ]; then
     cp -R "$ev" "$work/evidence-dir" 2>/dev/null || true; evdir=$work/evidence-dir
@@ -88,7 +88,7 @@ if [ "$(jq -r '.lane.txGossip // false' "$pins")" = true ]; then export GOSSIP_L
 # T8: the lane includes the funded operator reward pool step (scripts/lib/rewards-lib.sh): the genesis payees hold keys, the pool is settled across the real
 # acknowledged history, recomputed from scratch, claimed. Off by default on the Mac (REWARD_LANE unset); on in CI.
 export REWARD_LANE=1
-case "$kind" in x4shadow|x4rewards) export REWARD_LANE=0 ;; esac   # the shadow chain has no authoritative election and no reward step
+case "$kind" in x4shadow|x4rewards|x4exit) export REWARD_LANE=0 ;; esac   # the shadow chain has no authoritative election and no reward step
 # S4 (#57, scripts/lib/s4-lib.sh, docs/root-evidence.md): the focused live slashing exercise is added to the combined lane when scripts/ci/run-inputs.json of the commit under
 # test says "s4": true (a ci-lane-run/** push; off by default). It adds the roots' observer journals, a harness-signed equivocation by the joiner's root key and the
 # submission through the real Evidence contract after the recovery.
@@ -136,6 +136,14 @@ case "$kind" in
     p_timeout "$((deadline * 60))" scripts/p85-lane.sh 2>&1 | tee "$out/lane-stdout.log" >/dev/null
     lane_rc=${PIPESTATUS[0]}
     if [ "$inject" = in-lane ]; then log "injected harness failure (inject_failure=in-lane) after the rewards lane (its own exit was $lane_rc)"; lane_rc=1; fi ;;
+  x4exit)
+    # the exit lifecycle of the PoS campaign (scripts/x4pos exit steps): the recovery lane's chain (election, roots with --pos-deployment and --pos-evm-rpc), then the joiner's
+    # identity requests retirement; the roots build and order the Retirement, the lots mature after the gates and are claimed (X4_EXIT_LANE=1)
+    export X4_EXIT_LANE=1 P85_EVIDENCE_PREFIX=x4-exit-lane P85_LOCK_OWNER=p85-recovery
+    log "X4_EXIT_LANE=1 scripts/p85-lane.sh (deadline ${deadline} min)"
+    p_timeout "$((deadline * 60))" scripts/p85-lane.sh 2>&1 | tee "$out/lane-stdout.log" >/dev/null
+    lane_rc=${PIPESTATUS[0]}
+    if [ "$inject" = in-lane ]; then log "injected harness failure (inject_failure=in-lane) after the exit lane (its own exit was $lane_rc)"; lane_rc=1; fi ;;
   abort)
     export H6_URETH_ATTESTED=$M2_URETH_BIN H6_URETH_ATTESTED_SHA256=$(awk '{print $1; exit}' "$M2_URETH_ATTESTED_PROVENANCE/sha256.txt") H6_URETH_ATTESTED_PROVENANCE=$M2_URETH_ATTESTED_PROVENANCE H6_URETH_COMMIT=$M2_URETH_COMMIT
     log "scripts/h6/abort-rehearsal-lane.sh (deadline ${deadline} min)"
