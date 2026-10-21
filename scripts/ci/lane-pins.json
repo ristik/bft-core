@@ -76,7 +76,7 @@
     "aggShards": 2,
     "note": "the aggregator partition runs as two bft-shard aggregators (0x40, 0xc0); the any-age L1 token spans both and one more token is redeemed through the SDK's consolidation (#526 step 4)",
     "txGossip": true,
-    "evmT2Ms": 15000,
+    "evmT2Ms": 5000,
     "evmT2Note": "the EVM shard's T2 in the CI lane (milliseconds; the Mac default stays 5000). After the recovery only 3 of the 4 enrolled validators run, so a round needs all three signatures and its latency is the slowest of three: measured first-UC-to-third-signature up to 14.3 s on a standard runner (bft-core#728, run 39554461091), while T2 = 5 s turned every late round into a permanent livelock. 15 s passed the combined lane with all steps; the margin over the measured tail is small, see #728."
   },
   "t6": {

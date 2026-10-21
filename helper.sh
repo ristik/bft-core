@@ -545,7 +545,7 @@ function start_one_evm_validator() {
 	  # replicas catch up; a persistent publication stall still fails loudly. A lane that stops and restores validators on purpose
 	  # (the H3 rotation lane) raises it with EVM_JOURNAL_CANDIDATES: with two replicas down the frontier cannot advance for the
 	  # whole acknowledgement window.
-	  executorArgs+=(--archive-store "$EVM_ARCHIVE_ROOT/evm$i" --archive-prune --journal-candidates "${EVM_JOURNAL_CANDIDATES:-32}")
+	  executorArgs+=(--archive-store "$EVM_ARCHIVE_ROOT/evm$i" --archive-prune --journal-candidates "${EVM_JOURNAL_CANDIDATES:-32}" --journal-observations "${EVM_JOURNAL_OBSERVATIONS:-512}")
 	  # EVM_ARCHIVE_REPLICA_POOL (ids) names the candidates after a validator-set change: a retired validator is not a valid replica
 	  # of the installed assignment, and the node refuses to start naming one. By default every validator but the publisher itself is a
 	  # candidate (the product takes exactly two replica peer IDs and restricts nothing else), so each validator serves as a replica too.
