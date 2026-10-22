@@ -37,6 +37,23 @@ class Rules(unittest.TestCase):
         self.assertNotEqual(r["bounty"], E)
 
 
+class OffenderPairs(unittest.TestCase):
+    A, B = {"Key": "0xAA11", "Epoch": 2, "Round": 7}, {"Key": "bb22", "Epoch": 2, "Round": 9}
+
+    def test_no_key_keeps_every_pair(self):
+        self.assertEqual(m.offender_pairs({"Pairs": [self.A, self.B]}, ""), [self.A, self.B])
+        self.assertEqual(m.offender_pairs({"Pairs": None}, ""), [])
+
+    def test_a_key_selects_only_its_offence_whatever_the_prefix_and_case(self):
+        self.assertEqual(m.offender_pairs({"Pairs": [self.A, self.B]}, "aa11"), [self.A])
+        self.assertEqual(m.offender_pairs({"Pairs": [self.A, self.B]}, "0xBB22"), [self.B])
+        self.assertEqual(m.offender_pairs({"Pairs": [self.A]}, "cc33"), [])
+
+    def test_mutant_unfiltered_would_count_two(self):  # the second offence in the same journals must not make the first one "two offences"
+        self.assertEqual(len(m.offender_pairs({"Pairs": [self.A, self.B]}, "")), 2)
+        self.assertEqual(len(m.offender_pairs({"Pairs": [self.A, self.B]}, "aa11")), 1)
+
+
 if __name__ == "__main__":
     unittest.main()
 
