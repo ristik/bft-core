@@ -521,7 +521,7 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 	if flags.EVMTransitionFile != "" && flags.Executor != "engine-api" {
 		return errors.New("--engine-epoch-transition requires --executor=engine-api")
 	}
-	if flags.ArchiveStore != "" && (flags.ExecutionJournal == "" || len(flags.ArchiveReplicas) != 2) || flags.ArchiveStore == "" && len(flags.ArchiveReplicas) != 0 {
+	if !archiveFlagsValid(flags.ArchiveStore, flags.ExecutionJournal, flags.ArchiveReplicas) {
 		return archivewiring.ErrConfig
 	}
 	if flags.ArchivePrune && flags.ArchiveStore == "" {
@@ -1503,6 +1503,16 @@ func buildDisseminator(p *network.Peer, obs Observability, validators []*types.N
 	// The recipients are the active assignment's validators as of each publish, not the genesis ones: after a rotation the successor
 	// quorum must be reachable.
 	return shardnode.NewNetDisseminatorFrom(p, obs, active)
+}
+
+// archiveFlagsValid is the flag-level shape of the archive configuration: an archive store needs the execution journal, and names its
+// replicas either not at all (the node derives them, archiveReplicaSet) or as exactly one explicit pair (legacy 2-of-2). Replicas without a
+// store mean nothing.
+func archiveFlagsValid(store, journal string, replicas []string) bool {
+	if store == "" {
+		return len(replicas) == 0
+	}
+	return journal != "" && (len(replicas) == 0 || len(replicas) == 2)
 }
 
 // archiveReplicaSet is the archive replica configuration. Without --archive-replica the set is derived from the shard's validators (archivepolicy:

@@ -37,8 +37,10 @@ func TestRestoreCommandAcceptsProfile2AndRequiresFreshState(t *testing.T) {
 	require.ErrorContains(t, err, "local-key restore is refused")
 	flags.SigningAuthoritySocket = "authority.sock"
 	flags.TrustHistoryProfile2 = true
+	flags.ArchiveReplicas = []string{"one-replica-is-neither-derived-nor-a-pair"}
 	err = shardNodeRun(context.Background(), flags, nil)
 	require.ErrorIs(t, err, archivewiring.ErrConfig, "profile-2 restore reaches ordinary replica configuration validation")
+	flags.ArchiveReplicas = nil
 	require.NoError(t, os.Mkdir(journal+".handoffs", 0700))
 	err = shardNodeRun(context.Background(), flags, nil)
 	require.ErrorContains(t, err, "fresh BFT data directory")
