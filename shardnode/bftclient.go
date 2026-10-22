@@ -22,6 +22,7 @@ import (
 	"github.com/unicitynetwork/bft-core/network"
 	"github.com/unicitynetwork/bft-core/network/protocol/certification"
 	"github.com/unicitynetwork/bft-core/network/protocol/handshake"
+	"github.com/unicitynetwork/bft-core/q3install"
 	"github.com/unicitynetwork/bft-core/utbstore"
 )
 
@@ -424,7 +425,7 @@ func (c *BFTClient) Run(ctx context.Context) error {
 		}()
 	}
 
-	if err := c.sendHandshake(ctx); err != nil {
+	if err := c.initialHandshake(ctx); err != nil {
 		return fmt.Errorf("initial handshake: %w", err)
 	}
 
@@ -622,6 +623,50 @@ func (c *BFTClient) renewSubscriptionIfIdle(ctx context.Context, uc *types.Unici
 	c.mu.Unlock()
 }
 
+// trustBaseLoadError marks a handshake that could not start because the trust base of its epoch is not served (yet).
+type trustBaseLoadError struct {
+	epoch uint64
+	err   error
+}
+
+func (e *trustBaseLoadError) Error() string {
+	return fmt.Sprintf("loading trust base for epoch %d: %v", e.epoch, e.err)
+}
+func (e *trustBaseLoadError) Unwrap() error { return e.err }
+
+// How long the initial handshake waits for the trust base of its epoch, and how often it asks. A restarted node can learn of the
+// installed epoch (the handoff floor) a moment before its own installation of that epoch completes; the trust store serves the epoch
+// once it does. Without the wait the node exits on that window (#748: validator 1 died restarting into root epoch 3 and the shard,
+// down to the three validators the lane kept online, stopped at one round). Variables so a test can shorten them.
+var (
+	initialHandshakeTrustBaseWait  = 30 * time.Second
+	initialHandshakeTrustBaseRetry = 100 * time.Millisecond
+)
+
+// initialHandshake is sendHandshake, retried while the trust base of its epoch is missing because its installation is incomplete
+// (q3install.ErrIncomplete, which q3active.ErrNotActive wraps). Any other failure (the network refusing the send, no usable root node,
+// a trust store that cannot read or does not know the epoch) is returned at once.
+func (c *BFTClient) initialHandshake(ctx context.Context) error {
+	deadline := time.Now().Add(initialHandshakeTrustBaseWait)
+	logged := false
+	for {
+		err := c.sendHandshake(ctx)
+		var load *trustBaseLoadError
+		if err == nil || !errors.As(err, &load) || !errors.Is(load.err, q3install.ErrIncomplete) || !time.Now().Before(deadline) {
+			return err
+		}
+		if c.log != nil && !logged {
+			logged = true
+			c.log.WarnContext(ctx, "initial handshake waits for the trust base of its epoch", slog.Uint64("epoch", load.epoch), slog.String("err", load.err.Error()))
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(initialHandshakeTrustBaseRetry):
+		}
+	}
+}
+
 func (c *BFTClient) sendHandshake(ctx context.Context) error {
 	c.mu.Lock()
 	luc := c.luc
@@ -654,7 +699,7 @@ func (c *BFTClient) sendHandshake(ctx context.Context) error {
 	}
 	tb, err := c.trustBaseStore.GetByEpoch(ctx, epoch)
 	if err != nil {
-		return fmt.Errorf("loading trust base for epoch %d: %w", epoch, err)
+		return &trustBaseLoadError{epoch: epoch, err: err}
 	}
 	rootIDs, err := randomNodeSelector(tb, c.opts.HandshakeNodes)
 	if err != nil {

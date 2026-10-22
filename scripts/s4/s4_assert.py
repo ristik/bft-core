@@ -91,6 +91,13 @@ def h(x):
     return x[2:] if x.startswith("0x") else x
 
 
+def offender_pairs(scan, key):
+    """The offences of a scan (`ubft evidence scan`) which are the offender's: all of them when no key is given (the single-offender lane), else only those whose key is `key`
+    (a lane with several offenders in the same journals: the second offence must not be confused with the first)."""
+    pairs = scan["Pairs"] or []
+    return [p for p in pairs if h(p["Key"]) == h(key)] if key else pairs
+
+
 def parse_stats(line):
     """`... msg="evidence observer stats" kept=N rejected=N dropped=N failed=N healthy=true` -> dict."""
     out = {}
@@ -108,10 +115,10 @@ def cmd_journals(a):
     delivery = json.load(open(a.delivery))
     st = json.load(open(a.statements))
     sa, sb, both = (json.load(open(p)) for p in (a.scan_a, a.scan_b, a.scan_both))
-    if sa["Pairs"] or sb["Pairs"]:
+    if offender_pairs(sa, a.offender_key) or offender_pairs(sb, a.offender_key):
         fail("a single observer's journal already holds the pair: a=%r b=%r" % (sa["Pairs"], sb["Pairs"]))
     ok("the pair is in no single journal (scan of each copy alone: 0 offences; slots %d and %d)" % (sa["Slots"], sb["Slots"]))
-    pairs = both["Pairs"] or []
+    pairs = offender_pairs(both, a.offender_key)
     if len(pairs) != 1:
         fail("the scan over both journals reports %d offences, wanted exactly one" % len(pairs))
     p = pairs[0]

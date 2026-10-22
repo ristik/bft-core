@@ -270,10 +270,13 @@ class Rehearsal:
 
     def view(self, to, signature, *args):
         """A contract view through the public gateway: eth_call with cast-encoded data, decoded by cast. `signature` is cast's 'name(inputs)(outputs)'."""
+        return [int(line.split()[0]) for line in self.view_text(to, signature, *args).splitlines()]
+
+    def view_text(self, to, signature, *args):
         function = signature.split(')(')[0] + ')'
         data = self.cast_run('calldata', function, *args)
         raw = self.call('eth_call', [{'to': to, 'data': data}, 'latest'])
-        return [int(line.split()[0]) for line in self.cast_run('abi-decode', signature, raw).splitlines()]
+        return self.cast_run('abi-decode', signature, raw)
 
     def pos_smoke(self):
         """OPERATOR.md 5a's smoke, run: the containers started on the PoS genesis, the contracts are there, the election clock ticks and the custody has applied every
@@ -311,11 +314,11 @@ class Rehearsal:
     def balance(self, address):
         return int(self.call('eth_getBalance', [address, 'latest']), 16)
 
-    def relayer(self, key_file, *args):
+    def relayer(self, key_file, *args, joiner=False):
         """`ubft pos-relayer tx ...` in a one-shot container on the validators network: the public gateway has no X-Forwarded-For from a host client and the relayer
         sends each transaction to every validator (their pools do not gossip), so it talks to the execution clients directly. The key is copied to a directory only
         uid 10001 can read, mounted read-only, and removed afterwards; the container has the node image's limits (read-only, no capabilities, bounded). The
-        relayer's own output is returned: (exit status, stderr)."""
+        relayer's own output is returned: (exit status, stderr). With `joiner` the staged file is a `join` identity file instead of a sender key."""
         services = json.loads((self.gen / 'compose.yaml').read_text())['services']
         project = json.loads((self.gen / 'compose.yaml').read_text())['name']
         network = subprocess.run(['docker', 'network', 'ls', '-q', '--filter', f'label=com.docker.compose.project={project}',
@@ -333,7 +336,7 @@ class Rehearsal:
                                   '--security-opt', 'no-new-privileges', '--memory', '256m', '--pids-limit', '128', '--tmpfs', '/tmp', '-e', 'HOME=/tmp',
                                   '-v', f'{staging}:/key:ro', '-v', f'{self.gen / "network" / "pos-deployment.json"}:/deployment.json:ro',
                                   services['root1']['image'], 'pos-relayer', 'tx', *args, '--eth-rpc', urls, '--pos-deployment', '/deployment.json',
-                                  '--sender-key', '/key/key'], text=True, capture_output=True)
+                                  *(('--joiner',) if joiner else ('--sender-key',)), '/key/key'], text=True, capture_output=True)
         finally:
             shutil.rmtree(staging, ignore_errors=True)
         self.say('  relayer ' + ' '.join(args) + f': exit {run.returncode}: ' + ' | '.join(run.stderr.strip().splitlines()[-4:]))
@@ -368,6 +371,49 @@ class Rehearsal:
         status, out = self.relayer(keys / 'payee.key', 'reward', 'claim', '--amount-wei', '1', '--to', recipient)
         self.say(f'  claim without credit: exit {status}')
         self.expect(self.balance(recipient) == 0 and self.balance(pool) == after, 'a claim by a payee without credit moves nothing out of the pool', f'recipient {self.balance(recipient)}, pool {self.balance(pool)}')
+
+    def pos_election(self):
+        """The election reserves a result. The first design gave an identity two units by a second bond; the package's caps are (16, 1, 6): lMax is ONE lot per
+        identity and a genesis identity has used it, so that bond is refused with LotCapacity (asserted here: the first run of this stage reverted on it, and
+        unequal weights therefore need a new identity that bonds several units in one lot, i.e. a joiner, which is a later stage). What this stage checks is that
+        the election reserves a result for the unchanged four-member set at its cadence (400 rounds and 300 s past the anchors) and records the frozen members;
+        no handoff is made here. A result open BEFORE the stage starts is reported, not hidden."""
+        pos = self.manifest.get('pos')
+        self.expect(bool(pos), 'the manifest carries a pos block (this generation was made with --pos)')
+        deployment = json.loads((self.gen / 'network' / 'pos-deployment.json').read_text())
+        custody, election = deployment['custody'], deployment['election']
+        identity = json.loads((self.gen / 'network' / 'pos-plan.json').read_text())['identities'][0]
+        zero = '0x' + '00' * 32
+        def open_result():
+            out = self.view_text(election, 'openResult()(bytes32)').strip()
+            return None if out == zero else out
+        before = open_result()
+        self.say(f'  open result at the start: {before}')
+        live = self.view(election, 'liveCount()(uint32)')[0]
+        self.expect(live == self.n, 'the election\'s live index holds every genesis identity', str(live))
+        # a second lot for an existing identity: an eth_call from the owner (one wei is enough, the lot limit is checked after the zero-value check)
+        status, text = self.rpc({'jsonrpc': '2.0', 'id': 1, 'method': 'eth_call', 'params': [{
+            'from': identity['owner'], 'to': custody, 'value': '0x1', 'data': self.cast_run('calldata', 'bond(uint64)', str(identity['stakingId']))}, 'latest']},
+            PROXY_IPS[0] + '10')
+        error = json.loads(text).get('error', {}) if status == 200 else {}
+        selector = self.cast_run('sig', 'LotCapacity()')
+        self.say(f'  second bond by the owner of identity {identity["stakingId"]}: {error.get("message")} {str(error.get("data"))[:40]}')
+        self.expect(str(error.get('data', '')).startswith(selector), 'a second lot is refused with LotCapacity at lMax 1 (no top-up, no unequal weight without a joiner)', text[:200])
+        def clock():
+            return ' '.join(f'{k}={self.view(to, sig)[0]}' for k, to, sig in (('progress', self.REGISTRY, 'progress()(uint64)'), ('ucTime', self.REGISTRY, 'ucTime()(uint64)'),
+                                                                                ('records', self.REGISTRY, 'recordCount()(uint64)'), ('cursor', custody, 'recordCursor()(uint64)')))
+        def reserved():
+            self.say('  election clock: ' + clock())
+            return open_result()
+        result = before or self.wait('the election reserves a result', reserved, 1500)
+        raw = self.call('eth_call', [{'to': election, 'data': self.cast_run('calldata', 'result(bytes32)', result)}, 'latest'])
+        state = int(raw[2:66], 16)   # ResultState: 1 Reserved
+        members = self.view_text(election, 'frozenMembers(bytes32)((uint64,uint64,uint64,uint64,bytes32)[])', result)
+        (self.evidence / 'pos-election-frozen-members.txt').write_text(members + '\n')
+        self.say(f'  result {result}, state {state}: {members}')
+        self.expect(state == 1, 'the open result is Reserved', str(state))
+        self.expect(members.count('(') - members.count('((') == self.n, f'the reserved result freezes {self.n} members', members[:200])
+        self.expect(before is None, 'no result was open before the stage started', str(before))
 
     def pod_restart(self):
         """One validator entity at a time: stop its execution client, root and shard node (its signing authority stays live, as the README requires), check what the
@@ -485,7 +531,7 @@ class Rehearsal:
 
 STAGES = (('up', 'up'), ('identity', 'identity'), ('first-tx', 'first_tx'), ('gateway-limits', 'gateway_limits'), ('faucet-guard', 'faucet_guard'), ('load', 'load'), ('pod-restart', 'pod_restart'), ('backup-restore', 'backup_restore'), ('reset', 'reset'))
 # run on a generation made with --pos (the workflow's second generation); not part of the default list
-POS_STAGES = (('pos-smoke', 'pos_smoke'), ('pos-rewards', 'pos_rewards'))
+POS_STAGES = (('pos-smoke', 'pos_smoke'), ('pos-rewards', 'pos_rewards'), ('pos-election', 'pos_election'))
 
 
 def main():

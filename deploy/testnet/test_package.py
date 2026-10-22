@@ -690,7 +690,7 @@ class Topology(unittest.TestCase):
                 self.assertTrue(cfg['networks']['validators']['internal'])
                 for i in range(1,n+1):
                     shard=cfg['services']['shard%d'%i]['entrypoint']
-                    self.assertEqual(shard.count('--archive-replica'),2)
+                    self.assertNotIn('--archive-replica',shard,'the node derives its archive replicas')
                     self.assertIn('--signing-authority-socket',shard)
                     self.assertIn('./validator%d/evm:/state'%i,cfg['services']['shard%d'%i]['volumes'])
 
