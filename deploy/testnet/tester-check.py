@@ -22,6 +22,8 @@ def rpc(url, method, params=(), timeout=10):
 
 def published(args):
     """(chain_id, genesis_hash) from --manifest (a manifest.json or the faucet's /api/network JSON, a file or URL) or from the two flags."""
+    if args.manifest and (args.chain_id is not None or args.genesis_hash):
+        raise ValueError('give either --manifest or --chain-id and --genesis-hash, not both')
     if args.manifest:
         if args.manifest.startswith(('http://', 'https://')):
             with urllib.request.urlopen(args.manifest, timeout=10) as r:

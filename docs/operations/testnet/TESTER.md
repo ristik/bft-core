@@ -31,7 +31,7 @@ Any EVM wallet works. Add a custom network with:
 | chain ID | `<chain-id>` |
 | currency symbol | `UCT` (18 decimals) |
 
-Create a **new** account for it. A wallet that pinned a previous generation's chain ID or block-zero hash is wrong after a reset; remove that network and add it again.
+Create a **new** account for it. The gateway does not serve `eth_feeHistory`, so a wallet that cannot estimate fees without it needs a legacy (gas-price) transaction: choose that option, or set the gas price by hand (`eth_gasPrice` returns it). A wallet that pinned a previous generation's chain ID or block-zero hash is wrong after a reset; remove that network and add it again.
 
 With command-line tools (Foundry's `cast`):
 
@@ -56,11 +56,13 @@ cast balance <your-address> --rpc-url <rpc-url>
 ## 4. Send a transaction
 
 ```sh
-cast send <recipient-address> --value 1000000000000000wei --private-key <your-key> --rpc-url <rpc-url>
+cast send <recipient-address> --value 1000000000000000wei --legacy --private-key <your-key> --rpc-url <rpc-url>
 ```
 
+`--legacy` is needed: without it `cast` estimates EIP-1559 fees with `eth_feeHistory`, which the gateway does not allow (it serves `eth_gasPrice` instead), and the send fails.
+
 The gateway accepts the ordinary read methods and `eth_sendRawTransaction`; it refuses signing, admin and Engine methods, batches and bodies over 16 KiB, and answers `429`
-above 10 requests per second per client IP. A receipt with status 1 means the transaction is in a block. To check that the block is certified by the network, compare a
+above 10 requests per second per client IP, and the gateway also has a 100 requests per second budget for everyone together, so a busy network can answer `429` below your own 10 per second. Wait a second and retry. A receipt with status 1 means the transaction is in a block. To check that the block is certified by the network, compare a
 block's hash on your endpoint with the operator's status page for the same height.
 
 ## 5. What to report

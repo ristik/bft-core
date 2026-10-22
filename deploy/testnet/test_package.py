@@ -691,13 +691,13 @@ class TesterCheck(unittest.TestCase):
         import importlib.util
         spec=importlib.util.spec_from_file_location('tester_check',Path(__file__).parent/'tester-check.py')
         m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m);return m
-    def serve(self,chain=31337,zero=None,heights=(5,6)):
+    def serve(self,chain=31337,zero=None,heights=(5,6),net=None):
         zero=zero or self.GEN;hs=iter(heights);last=[heights[0]]
         class H(http.server.BaseHTTPRequestHandler):
             def log_message(self,*a): pass
             def do_POST(self):
                 req=json.loads(self.rfile.read(int(self.headers['Content-Length'])))
-                r={'eth_chainId':hex(chain),'net_version':str(chain),'eth_getBlockByNumber':{'hash':zero}}.get(req['method'])
+                r={'eth_chainId':hex(chain),'net_version':str(net or chain),'eth_getBlockByNumber':{'hash':zero}}.get(req['method'])
                 if req['method']=='eth_blockNumber':
                     last[0]=next(hs,last[0]);r=hex(last[0])
                 body=json.dumps({'jsonrpc':'2.0','id':1,'result':r}).encode()
@@ -716,6 +716,13 @@ class TesterCheck(unittest.TestCase):
     def test_a_wrong_chain_id_fails(self):
         code,out,_=self.run_check(self.serve(chain=1),'--chain-id','31337','--genesis-hash',self.GEN)
         self.assertEqual(code,1);self.assertIn('FAIL chain ID',out)
+    def test_a_wrong_net_version_alone_fails(self):
+        code,out,_=self.run_check(self.serve(net=1),'--chain-id','31337','--genesis-hash',self.GEN)
+        self.assertEqual(code,1);self.assertIn('FAIL net_version',out);self.assertIn('ok   chain ID',out)
+    def test_a_manifest_together_with_explicit_values_is_refused(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            f=Path(tmp)/'m.json';f.write_text(json.dumps({'chain_id':31337,'genesis_hash':self.GEN}))
+            self.assertEqual(self.run_check(self.serve(),'--manifest',str(f),'--chain-id','31337')[0],2)
     def test_a_reset_network_with_another_block_zero_fails(self):
         code,out,_=self.run_check(self.serve(zero='0x'+'cd'*32),'--chain-id','31337','--genesis-hash',self.GEN)
         self.assertEqual(code,1);self.assertIn('FAIL block-zero hash',out);self.assertIn('DO NOT USE',out)
