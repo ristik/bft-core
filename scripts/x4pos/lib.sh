@@ -107,8 +107,9 @@ x4p_exit_field() { jq -r ".$2" "$1"; }   # <state json> <field>
 # time: a wait for a time gate needs transactions (a real mature() transaction lands in a new block with a fresh timestamp, only the eth_call polling reads the idle head;
 # this is a test-harness measure, not a product requirement). One paid 1-wei transfer from the lane's funded sender per tick
 # (a failed tick is only a missed block; the wait's own deadline decides).
-# Bounded: a command that does not answer within <seconds> is stopped (its own children only) and counts as failed.
-x4p_bounded() { local sec=$1 pid w rc; shift; "$@" & pid=$!; ( sleep "$sec"; pkill -P "$pid" 2>/dev/null; kill "$pid" 2>/dev/null ) & w=$!; wait "$pid"; rc=$?; kill "$w" 2>/dev/null; wait "$w" 2>/dev/null; return $rc; }   # global-kill-ok: pkill -P kills only the children of the pid this function started
+# Bounded: a command that does not answer within <seconds> is stopped together with its whole process tree below the pid this function started (a `go run` grandchild too) and counts as failed.
+x4p_kill_tree() { local c; for c in $(pgrep -P "$1" 2>/dev/null); do x4p_kill_tree "$c"; done; kill "$1" 2>/dev/null; }   # global-kill-ok: walks only the descendants of the pid it is given
+x4p_bounded() { local sec=$1 pid w rc; shift; "$@" & pid=$!; ( sleep "$sec"; x4p_kill_tree "$pid" ) & w=$!; wait "$pid"; rc=$?; kill "$w" 2>/dev/null; wait "$w" 2>/dev/null; return $rc; }
 x4p_tick() { x4p_bounded 240 rw_send_value "$(p85_sender_key)" 0x000000000000000000000000000000000000dEaD 1 >/dev/null 2>&1 || { x4p_log "tick failed or timed out"; sleep 3; }; }
 x4p_owner_key() { echo "$P85_DIR/owner-keys/owner-$1.key"; }
 x4p_withdrawal_key() { echo "$P85_DIR/owner-keys/withdrawal-$1.key"; }

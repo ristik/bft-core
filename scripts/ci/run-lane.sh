@@ -39,7 +39,7 @@ finalize() {
     evdir=$work/evidence-none; mkdir -p "$evdir"; echo "the lane produced no evidence directory" >"$evdir/lane.log"
   fi
   st=${lane_rc:-1}; [ "$rc" -eq 0 ] || st=$rc
-  scripts/ci/publish-evidence.sh --evidence "$evdir" --out "$out/upload" --kind "$kind" --status "$st" --nodes "$repo/test-nodes" --min-node-logs 1 \
+  scripts/ci/publish-evidence.sh --evidence "$evdir" --out "$out/upload" --kind "$kind" --s4 "${S4_LANE:-0}" --status "$st" --nodes "$repo/test-nodes" --min-node-logs 1 \
     --extra "$out/run-lane.log" --extra "$out/lane-stdout.log" --extra "$out/lane-prep.log" --extra "$out/mongo" --extra "$out/p85-stop.log" --extra "$out/host-before.log.gz" --extra "$out/host-after.log.gz" --extra "$out/oom-lines.txt" >"$out/publish.log" 2>&1
   pub_rc=$?; log "publish-evidence exit $pub_rc"; cat "$out/publish.log" | tail -n 8
   return 0
