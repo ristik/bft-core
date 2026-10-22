@@ -153,10 +153,10 @@ func (p Policy) eligibleIndex(name string) int {
 
 // acksValid applies the replica rules of an Eligible policy to a record's
 // acknowledgments. Version 3 records name two distinct eligible replicas in
-// canonical order under this policy's digest; a legacy record may name its two
-// eligible replicas in either order. A historical record may name replicas
-// outside the policy or carry an earlier policy digest, provided one of its
-// acknowledgments is by a currently eligible replica.
+// canonical order under this policy's digest. Nothing else is current: a legacy
+// (version 1 or 2) record, a record of an earlier policy or one naming a replica
+// outside the policy is historical evidence, accepted only when historical is
+// set and one of its acknowledgments is by a currently eligible replica.
 func acksValid(r Record, p Policy, historical bool) error {
 	if r.Acks[0].Replica == "" || r.Acks[0].Replica == r.Acks[1].Replica || r.Acks[1].Replica == "" {
 		return ErrContext
@@ -169,8 +169,6 @@ func acksValid(r Record, p Policy, historical bool) error {
 			}
 			return nil
 		}
-	} else if i0 >= 0 && i1 >= 0 {
-		return nil
 	}
 	if historical && (i0 >= 0 || i1 >= 0) {
 		return nil

@@ -184,24 +184,23 @@ func TestEligibleHistoricalRecords(t *testing.T) {
 	require(t, err, ErrContext)
 }
 
-// Version 1 and 2 records are historical two-replica records: current when both
-// acknowledging replicas are still eligible (either order), otherwise historical.
+// Version 1 and 2 records are historical two-replica evidence under an Eligible
+// policy, even when both acknowledging replicas are still eligible: they are
+// accepted only by DecodeMigrating, as Historical, and never encoded again.
 func TestEligibleLegacyRecords(t *testing.T) {
 	base, legacy := fixture()
 	p := eligiblePolicy(legacy)
 	for _, tc := range []struct {
-		names      [2]string
-		epoch      uint64
-		strict     error
-		historical bool
-		migrating  error
+		names     [2]string
+		epoch     uint64
+		migrating error
 	}{
-		{[2]string{"replica-a", "replica-b"}, 0, nil, false, nil},
-		{[2]string{"replica-c", "replica-a"}, 0, nil, false, nil},
-		{[2]string{"replica-b", "replica-c"}, 4, nil, false, nil},
-		{[2]string{"replica-a", "replica-z"}, 0, ErrContext, true, nil},
-		{[2]string{"replica-z", "replica-c"}, 4, ErrContext, true, nil},
-		{[2]string{"replica-y", "replica-z"}, 0, ErrContext, false, ErrContext},
+		{[2]string{"replica-a", "replica-b"}, 0, nil},
+		{[2]string{"replica-c", "replica-a"}, 0, nil},
+		{[2]string{"replica-b", "replica-c"}, 4, nil},
+		{[2]string{"replica-a", "replica-z"}, 0, nil},
+		{[2]string{"replica-z", "replica-c"}, 4, nil},
+		{[2]string{"replica-y", "replica-z"}, 0, ErrContext},
 	} {
 		r := base
 		r.Epoch = tc.epoch
@@ -210,34 +209,72 @@ func TestEligibleLegacyRecords(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if want := version; tc.epoch != 0 {
-			if raw[len(domain)] != epochVersion {
-				t.Fatalf("%v: version %d", tc.names, raw[len(domain)])
-			}
-		} else if raw[len(domain)] != want {
+		wantVersion := version
+		if tc.epoch != 0 {
+			wantVersion = epochVersion
+		}
+		if raw[len(domain)] != wantVersion {
 			t.Fatalf("%v: version %d", tc.names, raw[len(domain)])
 		}
-		got, err := Decode(raw, p)
-		if tc.strict == nil && err != nil || tc.strict != nil && !errorsIs(err, tc.strict) {
+		if _, err := Decode(raw, p); !errorsIs(err, ErrContext) {
 			t.Fatalf("%v strict: %v", tc.names, err)
 		}
-		if tc.strict == nil && got.Migrated() {
-			t.Fatalf("%v: current legacy record reported migrated", tc.names)
+		if _, err := Encode(r, p); !errorsIs(err, ErrContext) {
+			t.Fatalf("%v encode: %v", tc.names, err)
 		}
-		got, err = DecodeMigrating(raw, p)
-		if tc.migrating == nil && err != nil || tc.migrating != nil && !errorsIs(err, tc.migrating) {
-			t.Fatalf("%v migrating: %v", tc.names, err)
+		got, err := DecodeMigrating(raw, p)
+		if tc.migrating != nil {
+			if !errorsIs(err, tc.migrating) {
+				t.Fatalf("%v migrating: %v", tc.names, err)
+			}
+			continue
 		}
-		if tc.migrating == nil && got.Historical != tc.historical {
-			t.Fatalf("%v: historical %v want %v", tc.names, got.Historical, tc.historical)
+		if err != nil || !got.Historical || !got.Migrated() {
+			t.Fatalf("%v migrating: %+v %v", tc.names, got, err)
 		}
 	}
-	// A legacy two-replica policy never accepts a version 3 record, and still
-	// encodes the legacy vector byte for byte.
+	// A legacy two-replica policy never accepts a version 3 record.
 	r, p3 := eligibleFixture()
 	v3, _ := pairRecord(r, p3, 0, 1)
 	if _, err := Encode(v3, legacy); !errorsIs(err, ErrContext) {
 		t.Fatalf("v3 under legacy policy: %v", err)
+	}
+}
+
+// One replica named twice must never count as two acknowledgments, in any
+// version and through every entry point.
+func TestEligibleDuplicateAcknowledger(t *testing.T) {
+	base, legacy := fixture()
+	p := eligiblePolicy(legacy)
+	for _, epoch := range []uint64{0, 4} {
+		r := base
+		r.Epoch = epoch
+		setSubject(&r, Policy{Replicas: [2]string{"replica-a", "replica-a"}})
+		raw, err := encodeRecord(r)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := Decode(raw, p); !errorsIs(err, ErrContext) {
+			t.Fatalf("epoch %d strict: %v", epoch, err)
+		}
+		if _, err := DecodeMigrating(raw, p); !errorsIs(err, ErrContext) {
+			t.Fatalf("epoch %d migrating: %v", epoch, err)
+		}
+		if _, err := Encode(r, p); !errorsIs(err, ErrContext) {
+			t.Fatalf("epoch %d encode: %v", epoch, err)
+		}
+	}
+	// A version 3 record of an earlier policy naming one replica twice.
+	older := p
+	older.PolicyDigest = [32]byte{7}
+	r, _ := pairRecord(base, older, 0, 1)
+	r.Acks[1].Replica = r.Acks[0].Replica
+	raw, err := encodeRecord(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := DecodeMigrating(raw, p); !errorsIs(err, ErrContext) {
+		t.Fatalf("historical v3 duplicate: %v", err)
 	}
 }
 
