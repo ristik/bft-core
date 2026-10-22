@@ -12,6 +12,10 @@ on:
         description: 'rehearse.py stages, comma separated (default: all that exist)'
         required: false
         default: ''
+      pos_stages:
+        description: 'PoS-only run: rehearse.py PoS-profile stages (e.g. up,identity,first-tx,pos-smoke,pos-election,pos-proposal); skips the PoA rehearsal'
+        required: false
+        default: ''
 permissions:
   contents: read
 concurrency:
@@ -83,6 +87,7 @@ jobs:
             --ubft pinned-bft/build/ubft --b1genesis /tmp/tn-b1genesis --keygen /tmp/tn-keygen \
             --captcha-sitekey rehearsal-sitekey --captcha-secret-file /tmp/captcha-secret
       - name: Rehearse
+        if: ${{ inputs.pos_stages == '' }}
         env:
           STAGES: ${{ inputs.stages }}
         run: |
@@ -100,11 +105,13 @@ jobs:
             --ubft pinned-bft/build/ubft --b1genesis /tmp/tn-b1genesis --keygen /tmp/tn-keygen \
             --captcha-sitekey rehearsal-sitekey --captcha-secret-file /tmp/captcha-secret \
             --pos --pos-contracts pinned-contracts
-      - name: PoS profile, rehearse (first start, the 5a smoke, owner keys and the reward pool)
+      - name: PoS profile, rehearse (first start, the 5a smoke, owner keys, the reward pool, the election, the handoff proposal)
         if: ${{ inputs.stages == '' }}
+        env:
+          POS_STAGES: ${{ inputs.pos_stages }}
         run: |
           sudo -E env "PATH=$PATH" python3 deploy/testnet/rehearse.py --generation /srv/tn-rehearsal-pos --evidence "$RUNNER_TEMP/evidence-pos" \
-            --stages up,identity,first-tx,pos-smoke,pos-rewards,pos-election
+            --ubft pinned-bft/build/ubft --stages "${POS_STAGES:-up,identity,first-tx,pos-smoke,pos-rewards,pos-election,pos-proposal}"
       - name: PoS profile, resources and logs
         if: always() && inputs.stages == ''
         run: |

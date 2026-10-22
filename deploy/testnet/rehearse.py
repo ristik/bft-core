@@ -11,6 +11,7 @@ refuses before the signer are sent. A real dispense is host-only. Needs docker c
 """
 import argparse
 import datetime
+import hashlib
 import http.client
 import json
 import os
@@ -22,6 +23,8 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
+
+import operator_rpc
 
 PUBLIC_RPC = '127.0.0.1:8545'
 FAUCET = '127.0.0.1:8088'
@@ -41,6 +44,7 @@ class Rehearsal:
         self.results = []
         self.pods = ()
         self.reset_args = {}
+        self.ubft = None
 
     def adopt(self, generation):
         """Work on this generation from now on (after a restore or a reset it is another directory with, after a reset, another network identity)."""
@@ -314,16 +318,24 @@ class Rehearsal:
     def balance(self, address):
         return int(self.call('eth_getBalance', [address, 'latest']), 16)
 
-    def relayer(self, key_file, *args, joiner=False):
-        """`ubft pos-relayer tx ...` in a one-shot container on the validators network: the public gateway has no X-Forwarded-For from a host client and the relayer
-        sends each transaction to every validator (their pools do not gossip), so it talks to the execution clients directly. The key is copied to a directory only
-        uid 10001 can read, mounted read-only, and removed afterwards; the container has the node image's limits (read-only, no capabilities, bounded). The
-        relayer's own output is returned: (exit status, stderr). With `joiner` the staged file is a `join` identity file instead of a sender key."""
-        services = json.loads((self.gen / 'compose.yaml').read_text())['services']
-        project = json.loads((self.gen / 'compose.yaml').read_text())['name']
-        network = subprocess.run(['docker', 'network', 'ls', '-q', '--filter', f'label=com.docker.compose.project={project}',
+    def node_run(self, args, mounts=()):
+        """`ubft` (the node image) in a one-shot container on the validators network, with the limits of the package's own services: read-only, no capabilities,
+        bounded, uid 10001. `mounts` are 'host:container[:ro]' volumes. Returns the finished process (text stdout and stderr)."""
+        compose = json.loads((self.gen / 'compose.yaml').read_text())
+        network = subprocess.run(['docker', 'network', 'ls', '-q', '--filter', f'label=com.docker.compose.project={compose["name"]}',
                                   '--filter', 'label=com.docker.compose.network=validators'], check=True, text=True, capture_output=True).stdout.split()
         self.expect(len(network) == 1, 'the generation has one validators network', str(network))
+        command = ['docker', 'run', '--rm', '--network', network[0], '--user', '10001:10001', '--read-only', '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges',
+                   '--memory', '256m', '--pids-limit', '128', '--tmpfs', '/tmp', '-e', 'HOME=/tmp']
+        for mount in mounts:
+            command += ['-v', mount]
+        return subprocess.run(command + [compose['services']['root1']['image'], *args], text=True, capture_output=True)
+
+    def relayer(self, key_file, *args, joiner=False, mounts=()):
+        """`ubft pos-relayer tx ...` in a one-shot container (node_run): the public gateway has no X-Forwarded-For from a host client and the relayer sends each
+        transaction to every validator (their pools do not gossip), so it talks to the execution clients directly. The key is copied to a directory only uid 10001
+        can read, mounted read-only, and removed afterwards. The relayer's own output is returned: (exit status, stderr). With `joiner` the staged file is a `join`
+        identity file instead of a sender key; `mounts` are further volumes."""
         staging = Path(tempfile.mkdtemp(prefix='tn-relayer-key-'))
         try:
             key = staging / 'key'
@@ -332,11 +344,8 @@ class Rehearsal:
                 os.chown(path, 10001, 10001)
                 os.chmod(path, mode)
             urls = ','.join(f'http://ureth{i}:8545' for i in range(1, self.n + 1))
-            run = subprocess.run(['docker', 'run', '--rm', '--network', network[0], '--user', '10001:10001', '--read-only', '--cap-drop', 'ALL',
-                                  '--security-opt', 'no-new-privileges', '--memory', '256m', '--pids-limit', '128', '--tmpfs', '/tmp', '-e', 'HOME=/tmp',
-                                  '-v', f'{staging}:/key:ro', '-v', f'{self.gen / "network" / "pos-deployment.json"}:/deployment.json:ro',
-                                  services['root1']['image'], 'pos-relayer', 'tx', *args, '--eth-rpc', urls, '--pos-deployment', '/deployment.json',
-                                  *(('--joiner',) if joiner else ('--sender-key',)), '/key/key'], text=True, capture_output=True)
+            run = self.node_run(['pos-relayer', 'tx', *args, '--eth-rpc', urls, '--pos-deployment', '/deployment.json', *(('--joiner',) if joiner else ('--sender-key',)), '/key/key'],
+                                [f'{staging}:/key:ro', f'{self.gen / "network" / "pos-deployment.json"}:/deployment.json:ro', *mounts])
         finally:
             shutil.rmtree(staging, ignore_errors=True)
         self.say('  relayer ' + ' '.join(args) + f': exit {run.returncode}: ' + ' | '.join(run.stderr.strip().splitlines()[-4:]))
@@ -414,6 +423,139 @@ class Rehearsal:
         self.expect(state == 1, 'the open result is Reserved', str(state))
         self.expect(members.count('(') - members.count('((') == self.n, f'the reserved result freezes {self.n} members', members[:200])
         self.expect(before is None, 'no result was open before the stage started', str(before))
+
+    # --- the packaged handoff, OPERATOR.md 5b (TN-S #437) ------------------------------------------------------------------------
+    def host_ubft(self, *args):
+        """The pinned host binary (--ubft), for the steps that only read and write files; stdout, or a Failure naming the command and its stderr."""
+        self.expect(bool(self.ubft), 'the handoff stages need --ubft (the pinned binary)')
+        run = subprocess.run([self.ubft, *map(str, args)], text=True, capture_output=True)
+        if run.returncode:
+            raise Failure(f'ubft {" ".join(map(str, args[:4]))}: exit {run.returncode}: {run.stderr.strip()[-500:]}')
+        return run.stdout
+
+    def exec_in(self, service, *command):
+        run = subprocess.run(['docker', 'compose', '-f', str(self.gen / 'compose.yaml'), 'exec', '-T', service, *command], text=True, capture_output=True)
+        if run.returncode:
+            raise Failure(f'{service}: {" ".join(command[:5])}: exit {run.returncode}: {run.stderr.strip()[-500:]}')
+        return run.stdout
+
+    def entity_ids(self):
+        """(root node id, EVM node id) of every entity: the root's from its home, the shard node's from its generated command line."""
+        services = json.loads((self.gen / 'compose.yaml').read_text())['services']
+        ids = []
+        for i in range(1, self.n + 1):
+            root = self.host_ubft('node-id', '--home', self.gen / f'validator{i}' / 'root').strip().splitlines()[-1]
+            command = services[f'shard{i}']['entrypoint']
+            ids.append((root, command[command.index('--node-id') + 1]))
+        return ids
+
+    def build_assignment(self, tag, work, result, ids, reserved, evm_pops=None):
+        """p85_build_assignment: the EVM context, the election's proposal for the result (`reserved` before the proofs exist, with the stored proofs after), every
+        member's possession proof made INSIDE its signing authority's namespace (the inputs are copied to the entity's auth directory, which only its authority and
+        shard mount), and the assembled EVM assignment. Returns (assignment file, proposal directory name, context file)."""
+        net, root_rpc = self.gen / 'network', operator_rpc.common_urls(json.loads((self.gen / 'compose.yaml').read_text()))[0]
+        self.exec_in('root1', 'ubft', 'root', 'handoff', 'evm-context', '--root-rpc', root_rpc, '--out', '/tmp/context.json')
+        context = work / f'{tag}-context.json'
+        context.write_text(self.exec_in('root1', 'cat', '/tmp/context.json'))
+        os.chown(work, 10001, 10001)
+        node_ids = ','.join(f'{r},{e}' for r, e in ids)
+        args = ['pos-relayer', 'proposal', *(['--reserved'] if reserved else []), '--eth-rpc', 'http://ureth1:8545', '--pos-deployment', '/deployment.json',
+                '--context', f'/work/{tag}-context.json', '--result-id', result, '--node-ids', node_ids, '--trust-base', '/trust-base.json', '--out-dir', f'/work/{tag}-proposal']
+        if evm_pops:
+            args += ['--evm-pops', f'/work/{evm_pops}']
+        subprocess.run(['chown', '-R', '10001:10001', str(work)], check=True)
+        run = self.node_run(args, [f'{work}:/work', f'{net / "pos-deployment.json"}:/deployment.json:ro', f'{net / "trust-base.json"}:/trust-base.json:ro'])
+        self.expect(run.returncode == 0, f'{tag}: pos-relayer proposal', run.stderr.strip()[-500:])
+        proposal = work / f'{tag}-proposal'
+        pops = []
+        for i, (_, evm) in enumerate(ids, 1):
+            auth = self.gen / f'validator{i}' / 'auth'
+            for name, source in (('context.json', context), ('validators.json', proposal / 'validators.json'), ('identities.json', proposal / 'identities.json')):
+                shutil.copy(source, auth / name)
+                os.chown(auth / name, 10001, 10001)
+            out = self.exec_in(f'authority{i}', 'ubft', 'root', 'handoff', 'evm-pop', '--context', '/authority/context.json', '--validators', '/authority/validators.json',
+                               '--identities', '/authority/identities.json', '--node-id', evm, '--authority-socket', '/authority/operator.sock',
+                               '--authority-credential', '/authority/operator.cred')
+            (work / f'{tag}-pop-{i}.json').write_text(out)
+            pops.append(str(work / f'{tag}-pop-{i}.json'))
+        assignment = work / f'{tag}-assignment.json'
+        self.host_ubft('root', 'handoff', 'evm-assemble', '--context', context, '--validators', proposal / 'validators.json', '--identities', proposal / 'identities.json',
+                       '--authorization', proposal / 'authorization.json', '--pops', ','.join(pops), '--bindings', proposal / 'bindings.json',
+                       *(['--evm-pops', proposal / 'evm-pops.json'] if evm_pops else []), '--out', assignment)
+        return assignment, proposal, context
+
+    def pos_proposal(self):
+        """5b steps 0-4 on the election's reserved result: the preflight, the next root trust base (epoch 2, the same four members and weights, signed by each
+        root's key), the EVM possession proofs made by the signing authorities over the candidate, their submission to the election and its finalization (sent by
+        the relayer container with a funded owner key), and the assignment rebuilt with the stored proofs. Stops before the candidate, readiness and the proposal."""
+        pos = self.manifest.get('pos')
+        self.expect(bool(pos), 'the manifest carries a pos block (this generation was made with --pos)')
+        compose = json.loads((self.gen / 'compose.yaml').read_text())
+        net, work = self.gen / 'network', self.gen / 'network' / 'handoff'
+        deployment = json.loads((net / 'pos-deployment.json').read_text())
+        election = deployment['election']
+        work.mkdir(exist_ok=True)
+        # 0 preflight: every entity running, every root at epoch 1, the election has a reserved result
+        running = set(self.compose('ps', '--services', '--status', 'running').split())
+        needed = {f'{role}{i}' for i in range(1, self.n + 1) for role in ('pod', 'root', 'shard', 'authority', 'ureth')}
+        self.expect(needed <= running, 'every entity service is running', str(sorted(needed - running)))
+        root_rpc = operator_rpc.common_urls(compose)[0]
+        for i in range(1, self.n + 1):
+            self.exec_in(f'root{i}', 'ubft', 'q3', 'signers', '--root-rpc', root_rpc, '--out', '/tmp/signers.json')
+            signers = json.loads(self.exec_in(f'root{i}', 'cat', '/tmp/signers.json'))
+            self.expect(signers.get('epoch') == 1, f'root {i} certifies at epoch 1', str(signers)[:200])
+        zero = '0x' + '00' * 32
+        result = self.view_text(election, 'openResult()(bytes32)').strip()
+        self.expect(result != zero, 'the election has a reserved result (run pos-election first)')
+        ids = self.entity_ids()
+        # 1 the next root trust base
+        weights = ','.join(['1'] * self.n)
+        self.host_ubft('trust-base', 'generate', '--home', work, '--network-id', '3', '--epoch', '2', '--epoch-start', '200000', '--previous-trust-base', net / 'trust-base.json',
+                       '--root-weights', weights, '--output-file-name', 'trust-base-epoch2.json',
+                       *[x for i in range(1, self.n + 1) for x in ('--node-info', self.gen / f'validator{i}' / 'root' / 'node-info.json')])
+        for i in range(1, self.n + 1):
+            self.host_ubft('trust-base', 'sign', '--home', self.gen / f'validator{i}' / 'root', '--trust-base', work / 'trust-base-epoch2.json')
+        # 2-3 the assignment with its reserved proofs, the candidate, every authority's proof over it
+        assignment, proposal, context = self.build_assignment('reserved', work, result, ids, True)
+        attempt = (proposal / 'attempt.txt').read_text().strip()
+        self.host_ubft('pos-relayer', 'candidate', '--context', context, '--assignment', assignment, '--next-trust-base', work / 'trust-base-epoch2.json', '--out', work / 'candidate.hex')
+        collected = []
+        for i in range(1, self.n + 1):
+            auth = self.gen / f'validator{i}' / 'auth'
+            for name, source in (('candidate.hex', work / 'candidate.hex'), ('pos-deployment.json', net / 'pos-deployment.json')):
+                shutil.copy(source, auth / name)
+                os.chown(auth / name, 10001, 10001)
+            self.exec_in(f'authority{i}', 'ubft', 'pos-relayer', 'sign-pop', '--candidate', '/authority/candidate.hex', '--pos-deployment', '/authority/pos-deployment.json',
+                         '--attempt', attempt, '--authority-socket', '/authority/operator.sock', '--authority-credential', '/authority/operator.cred', '--out', '/authority/evmpop.json')
+            shutil.copy(auth / 'evmpop.json', work / f'evmpop-{i}.json')
+            collected += ['--pop', work / f'evmpop-{i}.json']
+        self.host_ubft('pos-relayer', 'assemble', '--candidate', work / 'candidate.hex', '--pos-deployment', net / 'pos-deployment.json', '--attempt', attempt, *collected,
+                       '--out', work / 'evm-pops-collected.json')
+        # 3 submit the proofs and finalize the result: the funded owner key of a genesis identity pays
+        identity = json.loads((net / 'pos-plan.json').read_text())['identities'][0]
+        if self.balance(identity['owner']) < 10 ** 17:
+            self.faucet_send(identity['owner'], 10 ** 18)
+        owner_key = self.gen / pos['owner_keys'] / f'identity-{identity["stakingId"]}' / 'owner.key'
+        subprocess.run(['chown', '-R', '10001:10001', str(work)], check=True)
+        for step, extra in (('submit-pops', ['--evm-pops', '/work/evm-pops-collected.json']), ('finalize', [])):
+            status, out = self.relayer(owner_key, step, '--result-id', result, *extra, mounts=[f'{work}:/work:ro'])
+            self.expect(status == 0, f'pos-relayer tx {step}', out.strip()[-500:])
+        raw = self.call('eth_call', [{'to': election, 'data': self.cast_run('calldata', 'publication(bytes32)', result)}, 'latest'])
+        self.expect(int(raw[2 + 64 * 10:2 + 64 * 11], 16) == 1, 'the result is published (the election holds the proofs)')
+        # 4 the assignment again, with the stored proofs
+        assignment, proposal, _ = self.build_assignment('published', work, result, ids, False, 'evm-pops-collected.json')
+        self.expect(assignment.stat().st_size > 0, 'the published assignment is written', str(assignment))
+        kept = self.evidence / 'handoff'
+        kept.mkdir(exist_ok=True)
+        lines = []
+        for path in sorted(work.rglob('*')):
+            if path.is_file() and path.suffix in ('.json', '.hex', '.txt'):
+                lines.append(f'{hashlib.sha256(path.read_bytes()).hexdigest()}  {path.relative_to(work)}')
+                target = kept / path.relative_to(work)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy(path, target)
+        (kept / 'sha256.txt').write_text('\n'.join(lines) + '\n')
+        self.say(f'  {len(lines)} handoff artifacts recorded (sha256.txt)')
 
     def pod_restart(self):
         """One validator entity at a time: stop its execution client, root and shard node (its signing authority stays live, as the README requires), check what the
@@ -531,7 +673,7 @@ class Rehearsal:
 
 STAGES = (('up', 'up'), ('identity', 'identity'), ('first-tx', 'first_tx'), ('gateway-limits', 'gateway_limits'), ('faucet-guard', 'faucet_guard'), ('load', 'load'), ('pod-restart', 'pod_restart'), ('backup-restore', 'backup_restore'), ('reset', 'reset'))
 # run on a generation made with --pos (the workflow's second generation); not part of the default list
-POS_STAGES = (('pos-smoke', 'pos_smoke'), ('pos-rewards', 'pos_rewards'), ('pos-election', 'pos_election'))
+POS_STAGES = (('pos-smoke', 'pos_smoke'), ('pos-rewards', 'pos_rewards'), ('pos-election', 'pos_election'), ('pos-proposal', 'pos_proposal'))
 
 
 def main():
@@ -542,9 +684,11 @@ def main():
     p.add_argument('--pods', default='2,1', help='validator entities pod-restart stops and restarts, one at a time, in this order')
     for name in ('out', 'ubft', 'b1genesis', 'keygen', 'captcha-sitekey', 'captcha-secret-file'):
         p.add_argument('--reset-' + name, help='the reset stage passes this to generate.py as --' + name + ' (--out: the new generation directory)')
+    p.add_argument('--ubft', type=Path, help='the pinned ubft binary, for the handoff stages (they write and read files with it)')
     p.add_argument('--stages', default=','.join(s for s, _ in STAGES), help='comma separated, in order (the default is the PoA stages; POS_STAGES are named explicitly)')
     a = p.parse_args()
     r = Rehearsal(a.generation, a.evidence, a.cast)
+    r.ubft = a.ubft.resolve() if a.ubft else None
     r.pods = tuple(int(x) for x in a.pods.split(',') if x)
     r.reset_args = {k[len('reset_'):]: v for k, v in vars(a).items() if k.startswith('reset_')}
     wanted = a.stages.split(',')
