@@ -700,6 +700,27 @@ for v in post.values():
 else: raise SystemExit('no NoCandidate result in the simulated attempt')" "$e"
 }
 
+# X4_EXIT_LANE=1 (X4 #58 step B3b): the joiner's identity (custody id 5, bonded, delegated, in the unacknowledged primary J and then recovered back to K) exits through the
+# proposer-built Retirement (arch ruling (c)): the owner calls requestRetirement, every root builds and orders the control (roots with --pos-deployment and --pos-evm-rpc),
+# the lots mature after the round/evidence/time gates and the withdrawal address claims. The steps are scripts/x4pos/steps/exit-*.sh, run as the campaign driver runs them.
+x4e_run() { # id script argsJSON
+  local cur=$H3_DIR/x4pos
+  mkdir -p "$cur/steps"
+  { echo "export P85_DIR=$PWD/$P85_DIR P85_CAST=$P85_CAST rethEthBase=$rethEthBase M2_CHAIN_ID=${M2_CHAIN_ID:-31337} H3_ONLINE='${H3_ONLINE:-1 2 3 4}' PATH=$PATH"
+    [ -z "${LANE_TOOLS_DIR:-}" ] || echo "export LANE_TOOLS_DIR=$LANE_TOOLS_DIR"; } >"$cur/env.sh"
+  X4_CURSOR_DIR=$cur X4_STEP_ID=$1 X4_STEP_DIR=$cur/steps/$1 X4_STEP_ARGS=$3 X4_SEED=1 bash "scripts/x4pos/steps/$2"
+}
+x4e_request() { x4e_run exit-request exit-request.sh '{"id":5,"exposureWaitSeconds":900,"importWaitSeconds":2400}' && x4e_run exit-request exit-request.check.sh '{"id":5}'; }
+# the held offender: while the case is admitted and not settled the identity's exit is refused for the EVIDENCE HOLD (and not for a missing Retirement, which it has by then)
+x4e_hold_probe() {
+  local d=$H3_DIR/x4pos/steps/exit-request
+  mkdir -p "$d"
+  python3 scripts/x4pos/exit_check.py refusal --rpc "$(p85_eth)" --cast "$P85_CAST" --custody "$(p85_custody)" --id 5 >"$d/hold-probe.json" || { cat "$d/hold-probe.json" >&2; return 1; }
+  jq -e '.outcome == "refused" and .reason == "EvidenceHoldPending"' "$d/hold-probe.json" >/dev/null || { echo "the admitted, unsettled case did not hold the exit: $(cat "$d/hold-probe.json")" >&2; return 1; }
+  echo "x4e: exit of identity 5 refused for EvidenceHoldPending while the case is admitted and unsettled"
+}
+x4e_claim() { x4e_run exit-claim exit-claim.sh "{\"id\":5,\"matureWaitSeconds\":5400}" && x4e_run exit-claim exit-claim.check.sh '{"id":5}'; }
+
 P85_STEPS="p85_baseline p85_joiner_nodes p85_joiner_onboard p85_election_reserved p85_proofs p85_handoff p85_install_activation p85_j_stalls p85_recovery p85_resolved p85_restarts p85_epoch_switches"
 
 p85_run_lane() {
@@ -753,6 +774,16 @@ p85_run_lane() {
       *" utb_step_final "*) P85_STEPS=${P85_STEPS/ utb_step_final/ s4_claim utb_step_final} ;;
       *) P85_STEPS="$P85_STEPS s4_claim" ;;
     esac
+  fi
+  if [ "${X4_EXIT_LANE:-0}" = 1 ]; then   # the request is made before the roots restart (they must keep the pending request), the claim is the lane's last step
+    if [ "${S4_LANE:-0}" = 1 ]; then
+      # the held offender: it asks before its case is submitted (the chain is healthy then; after the observer roots' restarts it nearly stalls, #728), the exit is probed while
+      # the case is admitted and unsettled, and claimed at the end
+      export S4_ADMITTED_HOOK=x4e_hold_probe
+      P85_STEPS=${P85_STEPS/ s4_submit_settle/ x4e_request s4_submit_settle}; P85_STEPS="$P85_STEPS x4e_claim"
+    else
+      P85_STEPS=${P85_STEPS/ p85_restarts/ x4e_request p85_restarts}; P85_STEPS="$P85_STEPS x4e_claim"
+    fi
   fi
   [ "${P85_MODE:-}" != overbound ] || { P85_JOINER_UNITS=3; P85_STEPS="p85_baseline p85_joiner_nodes p85_joiner_onboard p85_election_refused"; }
   for s in $P85_STEPS; do

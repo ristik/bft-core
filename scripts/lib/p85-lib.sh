@@ -167,6 +167,12 @@ p85_joiner_prepare() {
   [ -s "$d/owner.key" ] || { printf '0x%s\n' "$(openssl rand -hex 32)" >"$d/owner.key"; chmod 600 "$d/owner.key"; }
   "$P85_CAST" wallet address --private-key "$(cat "$d/owner.key")" >"$d/owner.addr" || p85_die "cast is not available (P85_CAST)" || return 1
   printf '0x%s\n' "$(printf 'p85-lane/withdrawal/joiner' | shasum -a 256 | cut -c1-40)" >"$d/withdrawal.addr"
+  if [ "${X4_EXIT_LANE:-0}" = 1 ]; then   # X4 B3b: the joiner's identity (custody id 5) exits, so its owner and withdrawal addresses are keys the lane holds (random, lane-only)
+    [ -s "$d/withdrawal.key" ] || { printf '0x%s\n' "$(openssl rand -hex 32)" >"$d/withdrawal.key"; chmod 600 "$d/withdrawal.key"; }
+    "$P85_CAST" wallet address --private-key "$(cat "$d/withdrawal.key")" >"$d/withdrawal.addr" || p85_die "cast is not available (P85_CAST)" || return 1
+    mkdir -p "$P85_DIR/owner-keys"
+    cp "$d/owner.key" "$P85_DIR/owner-keys/owner-5.key"; cp "$d/withdrawal.key" "$P85_DIR/owner-keys/withdrawal-5.key"; chmod 600 "$P85_DIR"/owner-keys/*-5.key
+  fi
   printf '0x%s\n' "$(printf 'p85-lane/payee/joiner' | shasum -a 256 | cut -c1-40)" >"$d/payee.addr"
 }
 

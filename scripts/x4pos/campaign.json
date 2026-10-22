@@ -292,7 +292,7 @@
     "delay": "exitMaturity"
    },
    "args": {
-    "expectHoldUntilSettled": true
+    "expectReason": "EvidenceHoldPending"
    },
    "check": [
     "scripts/x4pos/steps/exit-claim.check.sh"
