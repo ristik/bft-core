@@ -92,7 +92,10 @@ def validate(generation, ubft, aggregator):
         generated = cfg['services']['aggregator']['environment']
         assert generated['SHARDING_MODE']=='standalone' and generated['BFT_ENABLED']=='true'
         # aggregator-go sends no consistency proof: the partition must not ask the root for one (it would refuse every nonempty request)
-        assert 'proof_type' not in (json.loads((generation/'network/aggregator-conf.json').read_text()).get('partitionParams') or {})
+        conf = json.loads((generation/'network/aggregator-conf.json').read_text())
+        assert 'proof_type' not in (conf.get('partitionParams') or {})
+        # aggregator-go serves only its protocol constant (api.AggregationPartitionID)
+        assert conf['partitionId']==7, conf['partitionId']
         start_mongo(mongo)
         env = dict(os.environ)
         env.update(generated)
@@ -107,7 +110,7 @@ def validate(generation, ubft, aggregator):
         launch('aggregator',[str(aggregator)],env)
         root_url = 'http://127.0.0.1:23101/api/v1/roundInfo'
         def certified():
-            return next((row for row in get(root_url)['partitionShards'] if row['partitionId']==9 and row['shardId'].lower()=='0x80'),None)
+            return next((row for row in get(root_url)['partitionShards'] if row['partitionId']==conf['partitionId'] and row['shardId'].lower()=='0x80'),None)
         before = wait_for(certified)
         rpc_url = 'http://127.0.0.1:23200/'
         def submit():
