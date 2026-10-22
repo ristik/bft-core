@@ -14,6 +14,8 @@ S4_DIR=${S4_DIR:-test-nodes/p85/s4}
 # the reporter's throw-away key lives outside the archived directories under a name the lane's state copy excludes (*.cred)
 S4_KEY=${S4_KEY:-test-nodes/s4-reporter/reporter.cred}
 S4_OFFENDER_ROOT=${S4_OFFENDER_ROOT:-5}   # the joiner's root
+# 1 (default): the offender is evicted by the recovery (the joiner); 0: the offender is a member that stays (X4 B4's second offence): the first epoch-3 certificate must still name it
+S4_EXPECT_EVICTED=${S4_EXPECT_EVICTED:-1}
 
 s4_pass() { printf 'PASS: s4: %s\n' "$1"; }
 s4_cast() { "${P85_CAST:-cast}" "$@"; }
@@ -55,6 +57,7 @@ s4_equivocate() {
   [ -n "$leader" ] || { echo "no round of epoch 2 with a known next leader (activation round $start, current $cur)" >&2; return 1; }
   for n in 1 2 3 4; do
     [ "$n" != "$leader" ] || continue
+    [ "$n" != "$S4_OFFENDER_ROOT" ] || continue   # the offender's own journal holds its genuine vote (never an observer)
     if [ -z "$a" ]; then a=$n; elif [ -z "$b" ]; then b=$n; fi
   done
   [ -n "$b" ] || { echo "fewer than two observer roots besides the next leader $leader" >&2; return 1; }
@@ -105,8 +108,12 @@ s4_collect_after_rotation() {
   epoch=$(s4_epoch 1)
   [ "$epoch" -ge 3 ] || { echo "the roots are in epoch $epoch: the joiner has not been rotated out" >&2; return 1; }
   # the rotation: the first epoch-3 certificate (K signs it, the joiner's root cannot) names three of the four K roots and not the offender
-  jq -e --arg id "$(h3_root_id "$S4_OFFENDER_ROOT")" '.epoch == 3 and ([.signers[].nodeId] | index($id) | not)' "$H3_DIR/first-epoch3-certificate.json" >/dev/null \
-    || { echo "the first epoch-3 certificate is missing or names the joiner's root" >&2; return 1; }
+  if [ "$S4_EXPECT_EVICTED" = 1 ]; then
+    jq -e --arg id "$(h3_root_id "$S4_OFFENDER_ROOT")" '.epoch == 3 and ([.signers[].nodeId] | index($id) | not)' "$H3_DIR/first-epoch3-certificate.json" >/dev/null \
+      || { echo "the first epoch-3 certificate is missing or names the joiner's root" >&2; return 1; }
+  else   # a member that stays: the certificate is epoch 3 (the rotation happened); whether this offender signs it is the quorum's business (the rotation is not about it)
+    jq -e '.epoch == 3' "$H3_DIR/first-epoch3-certificate.json" >/dev/null || { echo "the first epoch-3 certificate is missing" >&2; return 1; }
+  fi
   s4_snapshot_journal "$a" || return 1
   s4_snapshot_journal "$b" || return 1
   # a collector which holds no runtime state: each scan is a new process reading only the journal copies
@@ -185,6 +192,8 @@ s4_reporter() {
     # funded from the lane's paid-transaction account (the funded default key of scripts/evmtx), not from the joiner's owner key
     s4_send ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80 "$(p85_chain_nonce)" "$(cat "$d/reporter.addr")" 1000000000000000000 0x 21000 "$d/reporter-funding.json" || return 1
   fi
+  # a second offence has its own S4_DIR but the same throw-away reporter
+  [ -s "$d/reporter.addr" ] || s4_cast wallet address --private-key "$(cat "$S4_KEY")" >"$d/reporter.addr" || return 1
 }
 
 # a transaction in the EVM chain every few seconds while a command runs (the blocks of the lane's chain come from transactions)
@@ -205,7 +214,8 @@ s4_submit_settle() {
   mkdir -p "$d"
   EV=$(s4_evidence) || return 1
   read -r -a ids <<<"$(s4_assignments)" || return 1
-  key=$(jq -r '.Pairs[0].Key' "$d/scan-both.json")
+  key=$(jq -r --arg k "$(jq -r .sigKey.publicKey "test-nodes/root$S4_OFFENDER_ROOT/node-info.json" 2>/dev/null || true)" \
+    'if $k == "" then .Pairs[0].Key else ([.Pairs[] | select((.Key | ascii_downcase | ltrimstr("0x")) == ($k | ascii_downcase | ltrimstr("0x")))][0].Key) end' "$d/scan-both.json")   # the offender's own pair when several offences are in the journals
   s4_py resolve --rpc "$(p85_eth)" --custody "$(p85_custody)" --key "$key" --epoch 2 $(for a in "${ids[@]}"; do printf -- '--assignment %s ' "$a"; done) --out "$d/resolved.json" || return 1
   EXPOSURE=$(jq -r .exposure "$d/resolved.json"); OTHER_LOTS=$(jq -r '.otherLots[]' "$d/resolved.json" | head -3 | tr '\n' ' ')
   jq -e '.lots|length>=1' "$d/resolved.json" >/dev/null || return 1
