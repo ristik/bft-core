@@ -1291,11 +1291,17 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 		server.SetPeerAuthorizer(activePeers.Allowed)
 		server.Register(peer)
 		coordinator.Host, coordinator.ProviderSource, coordinator.TransportLimits = peer, activePeers, shardnode.DefaultJournalTransportLimits()
+		var archiveCatchUp *archivewiring.CatchUp // a gap longer than one recovery is paged in from the archive (#769) once the frontier worker exists
 		if archiveLocal != nil {
 			source := &archivewiring.RecoverySource{Context: journalCtx, Subject: archiveSubject, Local: archiveLocal, Host: archiveHost,
 				Replicas: archiveReplicas, Limits: archiveTransportLimits, MaxBlocks: configuredadmission.DefaultRecoveryLimits().Blocks, Log: flags.observe.Logger()}
+			archiveCatchUp = &archivewiring.CatchUp{Source: source}
 			coordinator.FetchArchive = func(ctx context.Context, after shardnode.BlockRef, target []byte) ([]shardnode.JournalFetchEntry, error) {
 				entries, fetchErr := source.FetchSuffix(ctx, after, target)
+				if errors.Is(fetchErr, archivewiring.ErrArchiveSuffixTooLong) {
+					// a valid chain longer than one recovery: the archive catch-up takes it page by page
+					return nil, fmt.Errorf("%w: %w", configuredadmission.ErrRecoveryUnavailable, fetchErr)
+				}
 				if errors.Is(fetchErr, archivewiring.ErrArchiveRecoveryInvalid) {
 					return nil, fmt.Errorf("%w: %w", configuredadmission.ErrRecoveryInvalid, fetchErr)
 				}
@@ -1329,6 +1335,11 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 			defer func() { cancelArchive(); <-archiveDone; _ = metrics.Close() }()
 			if flags.ArchivePrune {
 				worker := &archivewiring.FrontierWorker{Journal: journalStore, Context: journalCtx, Limits: limits, Archive: archiveLocal, Subject: archiveSubject, Replicas: archiveReplicas, PolicyDigest: archiveDigest, Host: archiveHost, TransportLimits: archiveTransportLimits, Log: flags.observe.Logger(), Finalized: recoveryExecutor.Finalized}
+				if archiveCatchUp != nil {
+					// without the frontier pruning the journal behind it, a catch-up would only fill the journal: it is wired only here
+					archiveCatchUp.Frontier = worker
+					coordinator.ArchiveCatchUp = archiveCatchUp
+				}
 				pruneDone := make(chan struct{})
 				go func() { defer close(pruneDone); _ = worker.Run(archiveCtx) }()
 				defer func() { cancelArchive(); <-pruneDone }()
