@@ -188,6 +188,7 @@ func (s *Store) persistCoverageBase(ctx context.Context, c Context, base *Covera
 // for subsequent journal recovery. The caller has already imported all of its
 // ancestors through the paired Engine path and checked the EL head and root.
 func (s *Store) InstallRestoreAnchor(ctx context.Context, c Context, limits JournalLimits, a RestoreAnchor) error {
+	s.vm.reset() // an install: whatever the memo holds was verified under the previous state (bft-core#728)
 	if !s.journal || a.Height == 0 || a.RootRound == 0 || a.Hash == ([32]byte{}) || a.StateRoot == ([32]byte{}) {
 		return ErrSettings
 	}
