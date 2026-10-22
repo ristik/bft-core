@@ -84,3 +84,144 @@ x4p_reward_exhaust_refill() {
   x4p_log "refilled $refill wei after $(x4p_replay_field "$X4_STEP_DIR/replay-before.txt" zeroBudget) zero-budget interval(s); $(x4p_replay_field "$X4_STEP_DIR/replay-after.txt" paid) paid interval(s) in all"
 }
 x4p_reward_exhaust_refill_check() { x4p_reward_replay "$X4_STEP_DIR/check-replay.txt" --require-exhaustion --require-refill >/dev/null; }
+
+# ---- exits (B3b) ---------------------------------------------------------------------------------------------------------------------------------------------
+# An exit is the owner's one call, requestRetirement(id), on custody: every root started with --pos-deployment and --pos-evm-rpc finds the RetirementRequested log, builds
+# the Retirement control against its parent's EVM state and proposes it (arch ruling (c), briefs/x4-retirement-control-design.md); the step only waits for RetirementImported.
+# Nothing here POSTs to a node. The identity is args.id, or args.operator looked up in $X4_CURSOR_DIR/state/operators.json ({"<operator>": <stakingId>}, written by the
+# replacement steps).
+
+x4p_exit_id() {
+  local id op
+  id=$(x4p_arg id ""); [ -z "$id" ] || { echo "$id"; return; }
+  op=$(x4p_arg operator ""); [ -n "$op" ] && [ -r "$X4_CURSOR_DIR/state/operators.json" ] || { x4p_die "no args.id and no operator mapping for '$op'"; return 1; }
+  id=$(jq -er --arg o "$op" '.[$o]' "$X4_CURSOR_DIR/state/operators.json") || { x4p_die "operator '$op' is not in operators.json"; return 1; }
+  echo "$id"
+}
+x4p_exit() { # <exit_check.py subcommand> <id> [flags]
+  local sub=$1 id=$2; shift 2
+  python3 scripts/x4pos/exit_check.py "$sub" --rpc "$(p85_eth)" --cast "$P85_CAST" --custody "$(p85_custody)" --id "$id" "$@"
+}
+x4p_exit_field() { jq -r ".$2" "$1"; }   # <state json> <field>
+# The lane's shard adds no block while nothing happens (runs 39586726777 and 39602386344: the head stood at one block for 80+ minutes), and custody reads the LATEST block's
+# time: a wait for a time gate needs transactions (a real mature() transaction lands in a new block with a fresh timestamp, only the eth_call polling reads the idle head;
+# this is a test-harness measure, not a product requirement). One paid 1-wei transfer from the lane's funded sender per tick
+# (a failed tick is only a missed block; the wait's own deadline decides).
+# Bounded: a command that does not answer within <seconds> is stopped (its own children only) and counts as failed.
+x4p_bounded() { local sec=$1 pid w rc; shift; "$@" & pid=$!; ( sleep "$sec"; pkill -P "$pid" 2>/dev/null; kill "$pid" 2>/dev/null ) & w=$!; wait "$pid"; rc=$?; kill "$w" 2>/dev/null; wait "$w" 2>/dev/null; return $rc; }   # global-kill-ok: pkill -P kills only the children of the pid this function started
+x4p_tick() { x4p_bounded 240 rw_send_value "$(p85_sender_key)" 0x000000000000000000000000000000000000dEaD 1 >/dev/null 2>&1 || { x4p_log "tick failed or timed out"; sleep 3; }; }
+x4p_owner_key() { echo "$P85_DIR/owner-keys/owner-$1.key"; }
+x4p_withdrawal_key() { echo "$P85_DIR/owner-keys/withdrawal-$1.key"; }
+x4p_address_of() { "$P85_CAST" wallet address --private-key "0x$(tr -d '[:space:]' <"$1" | sed 's/^0x//')"; }
+# a contract call from a key file: <key file> <to> <signature> [args...]; the gas limit is fixed (no estimate: see rw_send_value)
+x4p_send_call() {
+  local key=$1 to=$2 sig=$3; shift 3
+  RW_SEND_DATA=$("$P85_CAST" calldata "$sig" "$@") RW_SEND_GAS=${X4P_CALL_GAS:-400000} rw_send_value "$key" "$to" 0
+}
+# the key's account holds enough for a call (the genesis owners are funded nothing): top up from the lane's sender, then wait until EVERY online validator shows the balance
+# (the lane's validators do not gossip, and the call is sent to each of them: one that is still behind refuses it with 'insufficient funds'; run 39709173901)
+x4p_balance_ok() { # <address> : every online validator holds at least 0.02 ether for it
+  local addr=$1 i bal
+  for i in ${H3_ONLINE:-1}; do
+    bal=$(p_timeout 30 "$P85_CAST" balance --rpc-url "http://127.0.0.1:$((rethEthBase + i - 1))" "$addr" 2>/dev/null | awk '{print $1}')
+    [ -n "$bal" ] && rw_assert "$bal >= 20000000000000000" "" 2>/dev/null || return 1
+  done
+}
+x4p_ensure_gas() { # <key file>
+  local addr k; addr=$(x4p_address_of "$1") || return 1
+  x4p_balance_ok "$addr" && return 0
+  x4p_bounded 300 rw_send_value "$(p85_sender_key)" "$addr" 100000000000000000 || { x4p_die "could not fund $addr for gas"; return 1; }
+  for k in $(seq 1 150); do x4p_balance_ok "$addr" && return 0; x4p_tick; done
+  x4p_die "$addr was funded but not every validator shows it"
+}
+# the proposer's own evidence from the roots' logs: one JSON line per 'retirement requested' / 'retirement proof ready' of this identity
+x4p_exit_root_log() { # <id> <out file>
+  local id=$1 out=$2 f
+  : >"$out"
+  for f in test-nodes/root*/debug.log; do
+    [ -r "$f" ] || continue
+    grep -E "retirement (requested|proof ready)" "$f" | grep -E "[[:space:]]id=$id([[:space:]]|$)" | sed "s|^|$(dirname "$f" | xargs basename) |" >>"$out" || true
+  done
+}
+
+# exit-request: wait until the identity has no live exposure, call requestRetirement from the owner key, wait for the Retirement to be imported; request.json is the evidence.
+x4p_exit_request() {
+  local id st="$X4_STEP_DIR/state-before.json" wait_exp imp key t0 now blk=
+  id=$(x4p_exit_id) || return 1; key=$(x4p_owner_key "$id")
+  [ -r "$key" ] || x4p_die "no owner key $key (the campaign needs X4_HELD_KEYS=1)" || return 1
+  wait_exp=$(x4p_arg exposureWaitSeconds 600); imp=$(x4p_arg importWaitSeconds 900)
+  t0=$(date +%s)
+  while :; do
+    x4p_exit state "$id" >"$st" || return 1
+    [ "$(x4p_exit_field "$st" liveExposures)" -eq 0 ] && break
+    [ $(( $(date +%s) - t0 )) -lt "$wait_exp" ] || x4p_die "identity $id still has $(x4p_exit_field "$st" liveExposures) live exposure(s) after ${wait_exp}s" || return 1
+    sleep 2
+  done
+  x4p_ensure_gas "$(x4p_withdrawal_key "$id")" || return 1   # the claim's gas, paid for long before it is needed
+  if [ "$(x4p_exit_field "$st" retirementRequested)" != true ]; then   # a resumed step must not request twice
+    x4p_ensure_gas "$key" || return 1
+    x4p_send_call "$key" "$(p85_custody)" 'requestRetirement(uint64)' "$id" || x4p_die "requestRetirement($id) was not mined" || return 1
+    blk=$("$P85_CAST" block-number --rpc-url "$(p85_eth)")
+    x4p_log "requestRetirement($id) mined by block $blk"
+  fi
+  t0=$(date +%s)
+  while :; do
+    x4p_exit state "$id" >"$X4_STEP_DIR/state-after.json" || return 1
+    [ "$(x4p_exit_field "$X4_STEP_DIR/state-after.json" imported)" = true ] && break
+    [ $(( $(date +%s) - t0 )) -lt "$imp" ] || { x4p_exit_root_log "$id" "$X4_STEP_DIR/roots.log"; x4p_die "the Retirement of identity $id was not imported within ${imp}s (roots.log has what the proposers logged)"; return 1; }
+    sleep 3   # no ticks: the proposer scans certified blocks with no confirmations (#740), so an idle chain does not hold the import
+  done
+  now=$(date +%s)
+  x4p_exit_root_log "$id" "$X4_STEP_DIR/roots.log"
+  grep -q 'retirement proof ready' "$X4_STEP_DIR/roots.log" || x4p_die "the Retirement was imported but no root logged 'retirement proof ready' for identity $id" || return 1
+  jq -n --argjson st "$(cat "$X4_STEP_DIR/state-after.json")" --arg blk "${blk:-}" --argjson waited "$((now - t0))" \
+    '{id:$st.id, generation:$st.generation, requestBlock:(if $blk=="" then null else ($blk|tonumber) end), imported:$st.imported, pRet:$st.pRet, tRet:$st.tRet, importWaitSeconds:$waited, lots:($st.lots|length)}' >"$X4_STEP_DIR/request.json"
+  x4p_log "identity $id: Retirement imported (pRet $(x4p_exit_field "$X4_STEP_DIR/request.json" pRet), tRet $(x4p_exit_field "$X4_STEP_DIR/request.json" tRet))"
+}
+x4p_exit_request_check() { # read-only: requested, imported, and a root logged the proof
+  local id; id=$(x4p_exit_id) || return 1
+  x4p_exit state "$id" >"$X4_STEP_DIR/check-state.json" || return 1
+  [ "$(x4p_exit_field "$X4_STEP_DIR/check-state.json" retirementRequested)" = true ] && [ "$(x4p_exit_field "$X4_STEP_DIR/check-state.json" imported)" = true ]
+}
+
+# exit-claim: before maturity `mature` refuses for a lawful early reason (never a missing Retirement), then matures exactly the lots' principal into the withdrawal
+# credit and claims it to a fresh recipient with exact balance deltas. args.expectReason (EvidenceHoldPending): an offender's exit stays refused (EvidenceHoldPending) while
+# its evidence is unsettled, and the step records that refusal before waiting.
+x4p_exit_claim() {
+  local id st="$X4_STEP_DIR/state-pre.json" wait t0 ids recip credit before wkey out="$X4_STEP_DIR/refusal.json" did_mature=0 expect n=0
+  id=$(x4p_exit_id) || return 1; wkey=$(x4p_withdrawal_key "$id")
+  [ -r "$wkey" ] || x4p_die "no withdrawal key $wkey (the campaign needs X4_HELD_KEYS=1)" || return 1
+  wait=$(x4p_arg matureWaitSeconds 900)
+  x4p_exit state "$id" >"$st" || return 1
+  [ "$(x4p_exit_field "$st" imported)" = true ] || x4p_die "identity $id has no imported Retirement: run exit-request first" || return 1
+  if [ "$(x4p_exit_field "$st" credit)" = 0 ] && ! python3 -c "import json,sys;sys.exit(0 if all(l['category']==4 for l in json.load(open('$st'))['lots']) else 1)"; then   # not yet matured
+    x4p_exit refusal "$id" --allow-success >"$out" || return 1   # a refusal must be lawful; a mature-now answer is allowed once the gates have passed
+    x4p_log "mature before the gates: $(cat "$out")"
+    expect=$(x4p_arg expectReason "")   # the held offender (S4): the first refusal must be the evidence hold, not a gate
+    jq --arg e "$expect" '. + {expected: $e}' "$out" >"$out.tmp" && mv "$out.tmp" "$out"
+    [ -z "$expect" ] || jq -e --arg e "$expect" '.outcome=="refused" and .reason==$e' "$out" >/dev/null || x4p_die "the exit was not refused for $expect: $(cat "$out")" || return 1
+    t0=$(date +%s)
+    until x4p_exit refusal "$id" --allow-success 2>/dev/null | jq -e '.outcome=="mature-now"' >/dev/null; do
+      [ $(( $(date +%s) - t0 )) -lt "$wait" ] || { x4p_exit refusal "$id" --allow-success >"$X4_STEP_DIR/refusal-last.json" 2>&1 || true; x4p_die "identity $id did not mature within ${wait}s: $(cat "$X4_STEP_DIR/refusal-last.json")"; return 1; }
+      n=$((n + 1)); [ $((n % 10)) -ne 1 ] || x4p_log "waiting for identity $id to mature: $(x4p_exit refusal "$id" --allow-success 2>&1 | head -c 200) head=$(p_timeout 30 "$P85_CAST" block-number --rpc-url "$(p85_eth)" 2>&1) t=$(( $(date +%s) - t0 ))s"
+      x4p_tick
+    done
+    ids="[$(jq -r '[.lots[].id]|map(tostring)|join(",")' "$st")]"
+    x4p_ensure_gas "$wkey" || return 1
+    x4p_send_call "$wkey" "$(p85_custody)" 'mature(uint256[])' "$ids" || x4p_die "mature($ids) was not mined" || return 1
+    did_mature=1
+  fi
+  # a resumed step that matured before it was interrupted has no "before" to compare with: the credit and lots are checked at the claim instead
+  [ "$did_mature" = 0 ] || x4p_exit matured "$id" --before "$st" >"$X4_STEP_DIR/matured.json" || return 1
+  credit=$(x4p_exit state "$id" | jq -r .credit)
+  if [ "$credit" != 0 ]; then
+    recip=$("$P85_CAST" wallet new --json | jq -r '(.data // .)[0].address'); before=$("$P85_CAST" balance --rpc-url "$(p85_eth)" "$recip")
+    x4p_send_call "$wkey" "$(p85_custody)" 'claim(uint256,address)' "$credit" "$recip" || x4p_die "claim($credit) was not mined" || return 1
+    x4p_exit claimed "$id" --recipient "$recip" --recipient-before "$before" --credit "$credit" >"$X4_STEP_DIR/claimed.json" || return 1
+    x4p_log "identity $id: matured and claimed $credit wei to $recip"
+  fi
+}
+x4p_exit_claim_check() { # read-only: the lots are released and nothing remains credited
+  local id; id=$(x4p_exit_id) || return 1
+  x4p_exit state "$id" | python3 -c "import json,sys;s=json.load(sys.stdin);sys.exit(0 if s['lots'] and all(l['category']==4 and l['remaining']==0 for l in s['lots']) and s['credit']==0 else 1)"
+}
