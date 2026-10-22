@@ -19,6 +19,21 @@ x4r_sample() { # <out file> <seconds since start>
 # one paid transfer to every online validator keeps the shard's blocks moving (a harness measure, as scripts/x4pos/lib.sh x4p_tick)
 x4r_tick() { x4r_bounded 120 rw_send_value "$(p85_sender_key)" 0x000000000000000000000000000000000000dEaD 1 >/dev/null 2>&1 || x4r_log "tick failed or timed out"; }
 
+# Run 39738459511 found why J does not move after the install: the incumbents' signing authorities refuse every vote ("signing-context-mismatch": still enrolled for the old scope)
+# and the joiner has no session (auth5/client.cred missing). The P85 lane never needs this (it stalls J on purpose). The T6 coupled rotation (scripts/t6/coupled-rotation.sh) shows the
+# rest of an ordinary acknowledged rotation: advance the retained authorities to the activated scope, enroll the joiner's authority, restart the joiner under that session.
+x4r_complete() {
+  local rootEpoch=2 shardEpoch=1
+  H3_ONLINE="1 2 3 4 5"
+  x4r_log "advancing the retained validators' authorities to root epoch $rootEpoch / shard epoch $shardEpoch"
+  M2_ADVANCE_NO_REPLICA_WAIT=0 h3_advance_authorities "$rootEpoch" "$shardEpoch" 1 2 3 4 || { x4r_log "the authority advance failed"; return 1; }
+  x4r_log "enrolling the joiner's authority"
+  h3_enroll_authority 5 "$shardEpoch" || { x4r_log "enrolling the evm5 authority failed"; return 1; }
+  stop_one_evm_validator 5 2>/dev/null || true
+  h3_restore_validator 5 2 || { x4r_log "restoring the joiner under its session failed"; return 1; }
+  x4r_log "the joiner is back under its enrolled authority"
+}
+
 x4r_observe() {
   local d=$H3_DIR/x4r t0 now g="" acked="" s waited=${X4R_WAIT_SECONDS:-1500} n=0
   mkdir -p "$d"; : >"$d/timeline.jsonl"
