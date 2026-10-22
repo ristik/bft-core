@@ -29,8 +29,9 @@ x4r_complete() {
   M2_ADVANCE_NO_REPLICA_WAIT=0 h3_advance_authorities "$rootEpoch" "$shardEpoch" 1 2 3 4 || { x4r_log "the authority advance failed"; return 1; }
   x4r_log "enrolling the joiner's authority"
   h3_enroll_authority 5 "$shardEpoch" || { x4r_log "enrolling the evm5 authority failed"; return 1; }
+  # a second restore is refused (the archive names no verified-trust body for epoch 2: run 39749748797); the joiner keeps its restored state and only restarts under its session
   stop_one_evm_validator 5 2>/dev/null || true
-  h3_restore_validator 5 2 || { x4r_log "restoring the joiner under its session failed"; return 1; }
+  start_one_evm_validator 5 || { x4r_log "restarting the joiner under its session failed"; return 1; }
   x4r_log "the joiner is back under its enrolled authority"
 }
 
