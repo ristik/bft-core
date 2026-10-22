@@ -25,7 +25,6 @@ from pathlib import Path
 
 PUBLIC_RPC = '127.0.0.1:8545'
 FAUCET = '127.0.0.1:8088'
-BOND_UNIT = 100 * 10 ** 18   # one weight unit: deploy/testnet/pos.py BOND_UNIT
 PROXY_IPS = ('203.0.113.', '198.51.100.')   # documentation ranges: the client addresses the nginx in front would have set in X-Forwarded-For
 
 
@@ -374,42 +373,35 @@ class Rehearsal:
         self.expect(self.balance(recipient) == 0 and self.balance(pool) == after, 'a claim by a payee without credit moves nothing out of the pool', f'recipient {self.balance(recipient)}, pool {self.balance(pool)}')
 
     def pos_election(self):
-        """Weights without a joiner: identity 1's owner bonds one more bond unit (`join bond` is the relayer's only bonding command; it reads an identity file and
-        uses nothing of it but the owner key, so every other field of the file written here is a throwaway), which gives that identity two units against the
-        others' one, and the stage waits for the election to reserve a result at its cadence (400 rounds and 300 s past the anchors). Records the frozen
-        members; no handoff is made here (the next stage). A result reserved BEFORE the bond froze the old weights: that is reported, not hidden."""
+        """The election reserves a result. The first design gave an identity two units by a second bond; the package's caps are (16, 1, 6): lMax is ONE lot per
+        identity and a genesis identity has used it, so that bond is refused with LotCapacity (asserted here: the first run of this stage reverted on it, and
+        unequal weights therefore need a new identity that bonds several units in one lot, i.e. a joiner, which is a later stage). What this stage checks is that
+        the election reserves a result for the unchanged four-member set at its cadence (400 rounds and 300 s past the anchors) and records the frozen members;
+        no handoff is made here. A result open BEFORE the stage starts is reported, not hidden."""
         pos = self.manifest.get('pos')
         self.expect(bool(pos), 'the manifest carries a pos block (this generation was made with --pos)')
         deployment = json.loads((self.gen / 'network' / 'pos-deployment.json').read_text())
         custody, election = deployment['custody'], deployment['election']
         identity = json.loads((self.gen / 'network' / 'pos-plan.json').read_text())['identities'][0]
-        sid = identity['stakingId']
         zero = '0x' + '00' * 32
         def open_result():
             out = self.view_text(election, 'openResult()(bytes32)').strip()
             return None if out == zero else out
         before = open_result()
-        self.say(f'  open result before the bond: {before}')
+        self.say(f'  open result at the start: {before}')
         live = self.view(election, 'liveCount()(uint32)')[0]
         self.expect(live == self.n, 'the election\'s live index holds every genesis identity', str(live))
-        self.faucet_send(identity['owner'], (BOND_UNIT + 10 ** 18))
-        staging = Path(tempfile.mkdtemp(prefix='tn-joiner-'))
-        try:
-            throwaway = lambda: '0x' + os.urandom(32).hex()
-            owner_key = (self.gen / pos['owner_keys'] / f'identity-{sid}' / 'owner.key').read_text().strip()
-            file = staging / 'joiner.json'
-            file.write_text(json.dumps({'ownerKey': owner_key, 'rootKey': throwaway(), 'evmKey': throwaway(), 'withdrawal': identity['withdrawal'],
-                                        'payee': identity['payee'], 'rootNodeId': 'unused', 'evmNodeId': 'unused', 'expiry': 4000000000}))
-            held = self.balance(custody)
-            status, out = self.relayer(file, 'join', 'bond', '--id', str(sid), '--value-wei', str(BOND_UNIT), joiner=True)
-        finally:
-            shutil.rmtree(staging, ignore_errors=True)
-        self.expect(status == 0, 'the owner of an existing identity bonds one more unit', out.strip()[-300:])
-        self.expect(self.wait('the custody holds the bond', lambda: self.balance(custody) - held == BOND_UNIT, 120), 'the custody balance rose by exactly one bond unit')
+        # a second lot for an existing identity: an eth_call from the owner (one wei is enough, the lot limit is checked after the zero-value check)
+        status, text = self.rpc({'jsonrpc': '2.0', 'id': 1, 'method': 'eth_call', 'params': [{
+            'from': identity['owner'], 'to': custody, 'value': '0x1', 'data': self.cast_run('calldata', 'bond(uint64)', str(identity['stakingId']))}, 'latest']},
+            PROXY_IPS[0] + '10')
+        error = json.loads(text).get('error', {}) if status == 200 else {}
+        selector = self.cast_run('sig', 'LotCapacity()')
+        self.say(f'  second bond by the owner of identity {identity["stakingId"]}: {error.get("message")} {str(error.get("data"))[:40]}')
+        self.expect(str(error.get('data', '')).startswith(selector), 'a second lot is refused with LotCapacity at lMax 1 (no top-up, no unequal weight without a joiner)', text[:200])
         def clock():
             return ' '.join(f'{k}={self.view(to, sig)[0]}' for k, to, sig in (('progress', self.REGISTRY, 'progress()(uint64)'), ('ucTime', self.REGISTRY, 'ucTime()(uint64)'),
                                                                                 ('records', self.REGISTRY, 'recordCount()(uint64)'), ('cursor', custody, 'recordCursor()(uint64)')))
-        self.say('  election clock: ' + clock())
         def reserved():
             self.say('  election clock: ' + clock())
             return open_result()
@@ -418,11 +410,10 @@ class Rehearsal:
         state = int(raw[2:66], 16)   # ResultState: 1 Reserved
         members = self.view_text(election, 'frozenMembers(bytes32)((uint64,uint64,uint64,uint64,bytes32)[])', result)
         (self.evidence / 'pos-election-frozen-members.txt').write_text(members + '\n')
-        count = members.count('(') - members.count('((')
         self.say(f'  result {result}, state {state}: {members}')
         self.expect(state == 1, 'the open result is Reserved', str(state))
-        self.expect(count >= 1, 'the reserved result freezes members', members[:200])
-        self.expect(before is None, 'the result was reserved after the bond (not before it)', str(before))
+        self.expect(members.count('(') - members.count('((') == self.n, f'the reserved result freezes {self.n} members', members[:200])
+        self.expect(before is None, 'no result was open before the stage started', str(before))
 
     def pod_restart(self):
         """One validator entity at a time: stop its execution client, root and shard node (its signing authority stays live, as the README requires), check what the
