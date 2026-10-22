@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/libp2p/go-libp2p/core/peer"
@@ -37,7 +38,13 @@ type FrontierWorker struct {
 	Finalized        func(context.Context) (shardnode.BlockRef, error)
 	auditCursor      uint64
 	lastCapacityWarn time.Time
+	// advancing serializes frontier advances: the worker's own passes and Advance from a long catch-up (#769) would otherwise
+	// invalidate each other's planned coverage (frontier.ErrStale) on every pass.
+	advancing sync.Mutex
 }
+
+// passCoverage is how many blocks one worker pass covers.
+const passCoverage = 4
 
 func (w *FrontierWorker) Run(ctx context.Context) error {
 	if w.Log == nil {
@@ -86,7 +93,24 @@ func (w *FrontierWorker) pass(ctx context.Context, mark func(string)) error {
 	if err != nil {
 		return err
 	}
-	err = w.Journal.VerifyFrontierCopies(ctx, w.Context, w.Limits)
+	return w.advance(ctx, mark, passCoverage)
+}
+
+// Advance covers and prunes up to max consecutive certified blocks above the frontier, as a pass does after its audit, under the same
+// rules: each block at or below local execution finality, retained receipt-complete in the local archive, and read back verified from
+// two replicas. A long catch-up (#769) calls it after each admitted page so that the journal stays inside its limits. It does not
+// advance past a block it cannot cover; that is not an error unless no block is covered and the first one is missing.
+func (w *FrontierWorker) Advance(ctx context.Context, max int) error {
+	if w.Journal == nil || w.Archive == nil || !validReplicas(w.Replicas) || w.PolicyDigest == ([32]byte{}) && len(w.Replicas) != 2 || max <= 0 {
+		return ErrConfig
+	}
+	return w.advance(ctx, func(string) {}, max)
+}
+
+func (w *FrontierWorker) advance(ctx context.Context, mark func(string), max int) error {
+	w.advancing.Lock()
+	defer w.advancing.Unlock()
+	err := w.Journal.VerifyFrontierCopies(ctx, w.Context, w.Limits)
 	mark("verifyCopies")
 	if err != nil {
 		return err
@@ -187,7 +211,7 @@ func (w *FrontierWorker) pass(ctx context.Context, mark func(string)) error {
 		}
 		covered = append(covered, frontier.Coverage{Anchor: record, Material: rec})
 		height, epoch, round = entry.Candidate.Number, entry.ResultingUC.GetRootEpoch(), entry.ResultingUC.GetRootRoundNumber()
-		if len(covered) == 4 {
+		if len(covered) == max {
 			break
 		}
 	}

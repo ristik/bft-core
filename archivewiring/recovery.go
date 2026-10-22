@@ -23,6 +23,9 @@ import (
 var (
 	ErrArchiveRecoveryUnavailable = errors.New("archive recovery: certified record unavailable")
 	ErrArchiveRecoveryInvalid     = errors.New("archive recovery: certified record invalid")
+	// ErrArchiveSuffixTooLong marks a FetchSuffix refusal for length alone: the chain may well be valid, and a long catch-up
+	// (ArchivePlan) can bring it in page by page (#769).
+	ErrArchiveSuffixTooLong = errors.New("archive recovery: suffix longer than one recovery")
 )
 
 // RecoverySource reads a certified suffix from local immutable storage first,
@@ -75,7 +78,7 @@ func (s *RecoverySource) FetchSuffix(ctx context.Context, after shardnode.BlockR
 		}
 		current = common.BytesToHash(entry.Block.ParentHash)
 	}
-	return nil, fmt.Errorf("%w: suffix exceeds %d records", ErrArchiveRecoveryInvalid, max)
+	return nil, fmt.Errorf("%w: %w: suffix exceeds %d records", ErrArchiveRecoveryInvalid, ErrArchiveSuffixTooLong, max)
 }
 
 func frontierRecordForRecovery(q archive.Request, header *gethtypes.Header, result *types.UnicityCertificate) frontier.Record {
@@ -83,13 +86,25 @@ func frontierRecordForRecovery(q archive.Request, header *gethtypes.Header, resu
 }
 
 func (s *RecoverySource) fetchVerifiedEntry(ctx context.Context, q archive.Request) (shardnode.JournalFetchEntry, error) {
+	entry, _, _, err := s.fetchVerifiedRecord(ctx, q, false)
+	return entry, err
+}
+
+// fetchVerifiedRecord is fetchVerifiedEntry that also returns the record and whether it came from the local archive. With
+// receiptComplete, a copy without a valid receipt list is passed over like a failed one: a long catch-up retains its records as
+// the local copy the frontier later needs, and the frontier accepts only receipt-complete ones.
+func (s *RecoverySource) fetchVerifiedRecord(ctx context.Context, q archive.Request, receiptComplete bool) (shardnode.JournalFetchEntry, *archive.Record, bool, error) {
 	var failures []error
 	if s.Local != nil {
-		rec, err := s.Local.Get(q)
+		get := s.Local.Get
+		if receiptComplete {
+			get = s.Local.GetReceiptComplete
+		}
+		rec, err := get(q)
 		if err == nil {
 			entry, verifyErr := s.decodeEntry(ctx, q, rec)
 			if verifyErr == nil {
-				return entry, nil
+				return entry, rec, true, nil
 			}
 			err = verifyErr
 		}
@@ -103,11 +118,14 @@ func (s *RecoverySource) fetchVerifiedEntry(ctx context.Context, q archive.Reque
 			continue
 		}
 		rec, err := Fetch(ctx, s.Host, id, q, s.Limits)
+		if err == nil && receiptComplete && !archive.HasReceiptList(rec) {
+			err = fmt.Errorf("%w: copy without a receipt list", archive.ErrUnavailable)
+		}
 		if err == nil {
 			var entry shardnode.JournalFetchEntry
 			entry, err = s.decodeEntry(ctx, q, rec)
 			if err == nil {
-				return entry, nil
+				return entry, rec, false, nil
 			}
 		}
 		failures = append(failures, fmt.Errorf("replica %s: %w", id, err))
@@ -116,9 +134,9 @@ func (s *RecoverySource) fetchVerifiedEntry(ctx context.Context, q archive.Reque
 		}
 	}
 	if len(failures) == 0 {
-		return shardnode.JournalFetchEntry{}, archive.ErrUnavailable
+		return shardnode.JournalFetchEntry{}, nil, false, archive.ErrUnavailable
 	}
-	return shardnode.JournalFetchEntry{}, fmt.Errorf("all archive copies failed verification or retrieval: %w", errors.Join(failures...))
+	return shardnode.JournalFetchEntry{}, nil, false, fmt.Errorf("all archive copies failed verification or retrieval: %w", errors.Join(failures...))
 }
 
 func (s *RecoverySource) decodeEntry(ctx context.Context, q archive.Request, rec *archive.Record) (shardnode.JournalFetchEntry, error) {
