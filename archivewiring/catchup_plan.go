@@ -3,6 +3,7 @@ package archivewiring
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -11,8 +12,9 @@ import (
 	"github.com/unicitynetwork/bft-core/shardnode"
 )
 
-// MaxPlanBlocks bounds the gap one ArchivePlan walks: 32 bytes of memory per block. A longer outage is an operator restore.
-const MaxPlanBlocks = 1 << 20
+// MaxPlanBlocks bounds the gap one ArchivePlan walks. A plan keeps a hash, a height and an index entry per block, about 150 bytes:
+// some 40 MB at this bound, which is days of outage at testnet block rates. A longer outage is an operator restore.
+const MaxPlanBlocks = 1 << 18
 
 // planPutBatch is how many walked replica records are retained with one shared set of device flushes (as restorePutBatch).
 const planPutBatch = 16
@@ -107,6 +109,8 @@ func (s *RecoverySource) Extend(ctx context.Context, p *ArchivePlan, until time.
 			return fmt.Errorf("%w: %x: %v", ErrArchiveRecoveryUnavailable, p.next, err)
 		}
 		number := entry.Block.Number
+		// Defence in depth: the walk follows certified parent hashes, so a height that breaks off (here and at the anchor below) needs
+		// a forged certified record. The first record's height is checked against the anchor's (a Top at or below it).
 		if n := len(p.walked); n > 0 && number+1 != p.heights[n-1] {
 			return fmt.Errorf("%w: archive block %x is at height %d, its child at %d", ErrArchiveRecoveryInvalid, p.next, number, p.heights[n-1])
 		}
@@ -174,6 +178,7 @@ func (s *RecoverySource) Page(ctx context.Context, p *ArchivePlan, from shardnod
 		if err != nil {
 			return nil, fmt.Errorf("%w: %x: %v", ErrArchiveRecoveryUnavailable, q.BlockHash, err)
 		}
+		// unreachable without a forged certified record (the plan is hash-linked); admission checks the links again
 		if !bytes.Equal(entry.Block.ParentHash, parentHash) || entry.Block.Number != parentNumber+1 {
 			return nil, fmt.Errorf("%w: planned block %x does not extend %x", ErrArchiveRecoveryInvalid, q.BlockHash, parentHash)
 		}
@@ -182,4 +187,64 @@ func (s *RecoverySource) Page(ctx context.Context, p *ArchivePlan, from shardnod
 		parentHash, parentNumber, parentState = entry.Block.Hash, entry.Block.Number, bytes.Clone(entry.Block.StateRoot)
 	}
 	return out, nil
+}
+
+// CatchUp is the archive side of a long catch-up as configuredadmission.ExecutionRecovery uses it (its ArchiveCatchUp): one plan at
+// a time, walked with Source, and the frontier advanced by Frontier, which the node may set after the coordinator is built. Calls
+// come serialized by the coordinator.
+type CatchUp struct {
+	Source   *RecoverySource
+	Frontier *FrontierWorker
+	plan     *ArchivePlan
+}
+
+// Walk continues the plan when after is its anchor, or a block on it once joined; otherwise it starts one from after up to top. A
+// plan that is refused before its first block, or whose chain misses the anchor, is dropped: its top came from a peer's tail or an
+// earlier target, and the next call starts from another.
+func (c *CatchUp) Walk(ctx context.Context, after shardnode.BlockRef, top []byte, until time.Time) (bool, int, error) {
+	if c.plan != nil {
+		if _, on := c.plan.Remaining(after.Hash); !on || !c.plan.joined && !bytes.Equal(after.Hash, c.plan.After.Hash) {
+			c.plan = nil
+		}
+	}
+	if c.plan == nil {
+		if len(top) != 32 {
+			return false, 0, fmt.Errorf("%w: no block to start the archive walk from", ErrArchiveRecoveryUnavailable)
+		}
+		plan, err := NewArchivePlan(after, [32]byte(top))
+		if err != nil {
+			return false, 0, err
+		}
+		c.plan = plan
+	}
+	// the walk's time is bounded as a whole: a record fetch that blocks past until ends the walk, not the caller's call
+	walkCtx, cancel := context.WithDeadline(ctx, until)
+	err := c.Source.Extend(walkCtx, c.plan, until)
+	cancel()
+	if err != nil && errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil {
+		err = nil // its time budget, spent: the next call resumes
+	}
+	walked, joined := c.plan.Walked(), c.plan.Joined()
+	if err != nil && (walked == 0 || errors.Is(err, ErrArchiveRecoveryInvalid)) {
+		c.plan = nil
+	}
+	return joined, walked, err
+}
+
+func (c *CatchUp) Page(ctx context.Context, from shardnode.BlockRef, max int) ([]shardnode.JournalFetchEntry, int, error) {
+	if c.plan == nil {
+		return nil, 0, ErrArchiveRecoveryUnavailable
+	}
+	above, _ := c.plan.Remaining(from.Hash)
+	entries, err := c.Source.Page(ctx, c.plan, from, max)
+	return entries, above, err
+}
+
+func (c *CatchUp) Drop() { c.plan = nil }
+
+func (c *CatchUp) AdvanceFrontier(ctx context.Context, max int) error {
+	if c.Frontier == nil {
+		return ErrConfig
+	}
+	return c.Frontier.Advance(ctx, max)
 }

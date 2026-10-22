@@ -68,6 +68,12 @@ type ExecutionRecovery struct {
 	// FetchArchive retrieves an authenticated suffix after peer hot-journal
 	// sources are unavailable. Returned entries pass through admitFetched too.
 	FetchArchive func(context.Context, shardnode.BlockRef, []byte) ([]shardnode.JournalFetchEntry, error)
+	// ArchiveCatchUp, when set, closes a gap that one recovery cannot (longer than its bounds, or with its newest blocks not archived
+	// yet) from the archive, one page per call (#769, catchup.go).
+	ArchiveCatchUp  ArchiveCatchUp
+	catchUpLast     []byte    // the target the previous catch-up call was asked for
+	catchUpWarned   []byte    // the target of the last catch-up warning, and when it was logged
+	catchUpWarnedAt time.Time // (one a minute per target)
 }
 
 var (
@@ -574,6 +580,9 @@ func (r *ExecutionRecovery) fetchFromPeers(ctx context.Context, after shardnode.
 		if len(actualTarget) == 0 && len(entries) > 0 {
 			actualTarget = entries[len(entries)-1].Block.Hash
 		}
+		if _, err := r.catchUpRoomFor(ctx, len(entries), target, advance); err != nil {
+			return err
+		}
 		if err := r.admitFetched(ctx, after, actualTarget, entries, advance, "peer_recovery"); err == nil {
 			return nil
 		} else {
@@ -586,37 +595,48 @@ func (r *ExecutionRecovery) fetchFromPeers(ctx context.Context, after shardnode.
 			last = fmt.Errorf("provider %s: %v", provider, err)
 		}
 	}
-	if last != nil {
-		peerErr := fmt.Errorf("%w: target %x unavailable from %d peers: %v", ErrRecoveryUnavailable, target, len(r.providerList()), last)
-		if r.FetchArchive != nil {
-			archiveErr := r.fetchFromArchive(ctx, after, target, advance)
-			if archiveErr == nil {
-				return nil
-			}
-			if errors.Is(archiveErr, ErrRecoveryBudget) {
-				return r.archiveBudgetUnavailable(ctx, target, archiveErr)
-			}
-			if errors.Is(archiveErr, ErrRecoveryInvalid) || errors.Is(archiveErr, ErrRecoveryConflict) {
-				return archiveErr
-			}
-			return fmt.Errorf("%w: target %x unavailable from peers and archive: %v", ErrRecoveryUnavailable, target, archiveErr)
-		}
-		return peerErr
-	}
 	if r.FetchArchive != nil {
-		archiveErr := r.fetchFromArchive(ctx, after, target, advance)
-		if archiveErr == nil {
-			return nil
-		}
-		if errors.Is(archiveErr, ErrRecoveryBudget) {
-			return r.archiveBudgetUnavailable(ctx, target, archiveErr)
-		}
-		if errors.Is(archiveErr, ErrRecoveryInvalid) || errors.Is(archiveErr, ErrRecoveryConflict) {
-			return archiveErr
-		}
-		return fmt.Errorf("%w: target %x unavailable from peers and archive: %v", ErrRecoveryUnavailable, target, archiveErr)
+		return r.archiveFallback(ctx, after, target, advance, expected)
+	}
+	if last != nil {
+		return fmt.Errorf("%w: target %x unavailable from %d peers: %v", ErrRecoveryUnavailable, target, len(r.providerList()), last)
 	}
 	return fmt.Errorf("%w: target %x unavailable from %d peers", ErrRecoveryUnavailable, target, len(r.providerList()))
+}
+
+// archiveFallback asks the archive for the suffix the peers could not supply. A suffix longer than one recovery, or one whose newest
+// blocks are not archived yet, goes on as a long catch-up when one is wired (#769); a refusal of the data itself keeps its class.
+func (r *ExecutionRecovery) archiveFallback(ctx context.Context, after shardnode.BlockRef, target []byte, advance bool, expected *types.UnicityCertificate) error {
+	catchUp := advance && r.ArchiveCatchUp != nil
+	entries, archiveErr := r.FetchArchive(ctx, after, target)
+	if archiveErr == nil && catchUp {
+		// A suffix one recovery could take may still not fit the journal while the frontier lags: admitting it would stop half way
+		// (or at the journal's bounds); the catch-up pages it instead.
+		if room, err := r.catchUpRoom(ctx, len(entries)); err != nil {
+			return err
+		} else if !room {
+			return r.catchUpPage(ctx, after, target, expected)
+		}
+	}
+	if archiveErr == nil {
+		archiveErr = r.admitArchive(ctx, after, target, entries, advance)
+	}
+	if archiveErr == nil {
+		return nil
+	}
+	if errors.Is(archiveErr, ErrRecoveryBudget) {
+		if catchUp {
+			return r.catchUpPage(ctx, after, target, expected)
+		}
+		return r.archiveBudgetUnavailable(ctx, target, archiveErr)
+	}
+	if errors.Is(archiveErr, ErrRecoveryInvalid) || errors.Is(archiveErr, ErrRecoveryConflict) {
+		return archiveErr
+	}
+	if catchUp {
+		return r.catchUpPage(ctx, after, target, expected)
+	}
+	return fmt.Errorf("%w: target %x unavailable from peers and archive: %v", ErrRecoveryUnavailable, target, archiveErr)
 }
 
 func (r *ExecutionRecovery) archiveBudgetUnavailable(ctx context.Context, target []byte, err error) error {
@@ -627,11 +647,7 @@ func (r *ExecutionRecovery) archiveBudgetUnavailable(ctx context.Context, target
 	return retryErr
 }
 
-func (r *ExecutionRecovery) fetchFromArchive(ctx context.Context, after shardnode.BlockRef, target []byte, advance bool) error {
-	entries, err := r.FetchArchive(ctx, after, target)
-	if err != nil {
-		return err
-	}
+func (r *ExecutionRecovery) admitArchive(ctx context.Context, after shardnode.BlockRef, target []byte, entries []shardnode.JournalFetchEntry, advance bool) error {
 	if err := r.admitFetched(ctx, after, target, entries, advance, "archive_recovery"); err != nil {
 		return err
 	}
