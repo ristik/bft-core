@@ -232,7 +232,7 @@ func TestCodecVectorAndRefusals(t *testing.T) {
 	_, err = Decode(bad, p)
 	require(t, err, ErrInvalid)
 	bad = bytes.Clone(wire)
-	bad[len(domain)] = 3
+	bad[len(domain)] = 4
 	checksum := sha256.Sum256(bad[:len(bad)-32])
 	copy(bad[len(bad)-32:], checksum[:])
 	_, err = Decode(bad, p)

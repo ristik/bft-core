@@ -76,11 +76,11 @@ type testWriter struct{ t *testing.T }
 func (w testWriter) Write(b []byte) (int, error) { w.t.Log(string(b)); return len(b), nil }
 
 // newTwoReplicaRestore is a restore of a synthetic n-block archive that two in-process replicas serve over real libp2p streams.
-func newTwoReplicaRestore(t *testing.T, n int) (*ArchiveRestore, *restoreExecutorFixture, *network.Peer, [2]peer.ID, []archive.Request, []*archive.Record) {
+func newTwoReplicaRestore(t *testing.T, n int) (*ArchiveRestore, *restoreExecutorFixture, *network.Peer, []peer.ID, []archive.Request, []*archive.Record) {
 	t.Helper()
 	f := newWiringFixtureWithLimits(t, n, configuredprogress.JournalLimits{Candidates: n + 16, Observations: 2*n + 32, Bytes: 128 << 20})
 	sender := testpeer.CreatePeer(t, testpeer.CreatePeerConfiguration(t))
-	var ids [2]peer.ID
+	ids := make([]peer.ID, 2)
 	var qs []archive.Request
 	var recs []*archive.Record
 	for i := range ids {

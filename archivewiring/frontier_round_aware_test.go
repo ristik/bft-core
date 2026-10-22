@@ -72,7 +72,7 @@ func TestRoundAwareFrontierBreaksUnresolvedObservationDeadlock(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, local.Put(nextRequest, nextRecord))
 
-	peers := [2]peer.ID{"first", "second"}
+	peers := []peer.ID{"first", "second"}
 	policy := frontier.Policy{Context: f.subject, Replicas: [2]string{peers[0].String(), peers[1].String()},
 		Binding: CertifiedBinding{Context: f.context, Subject: f.subject},
 		Availability: fixtureAvailability{stores: map[string]*archive.Store{

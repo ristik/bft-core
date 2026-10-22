@@ -43,7 +43,7 @@ func TestFrontierDoesNotCoverReceiptFreeV1Record(t *testing.T) {
 	require.NoError(t, err)
 	second, err := archive.Open(t.TempDir())
 	require.NoError(t, err)
-	peers := [2]peer.ID{"first", "second"}
+	peers := []peer.ID{"first", "second"}
 	policy := frontier.Policy{Context: f.subject, Replicas: [2]string{peers[0].String(), peers[1].String()},
 		Binding: CertifiedBinding{Context: f.context, Subject: f.subject}, Availability: fixtureAvailability{stores: map[string]*archive.Store{"first": first, "second": second}}}
 	require.NoError(t, f.store.EnableFrontier(context.Background(), f.context, f.limits, policy))
@@ -84,7 +84,7 @@ func TestPublisherUpgradesV1AndFrontierAdvances(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, first.Put(q, upgraded))
 	require.NoError(t, second.Put(q, upgraded))
-	peers := [2]peer.ID{"first", "second"}
+	peers := []peer.ID{"first", "second"}
 	policy := frontier.Policy{
 		Context:  f.subject,
 		Replicas: [2]string{peers[0].String(), peers[1].String()},

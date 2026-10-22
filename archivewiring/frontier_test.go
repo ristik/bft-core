@@ -137,7 +137,7 @@ func TestFrontierJournalAdvancePruneAndRestart(t *testing.T) {
 			require.NoError(t, s.Put(q, rec))
 		}
 	}
-	peers := [2]peer.ID{"first", "second"}
+	peers := []peer.ID{"first", "second"}
 	policy := frontier.Policy{Context: f.subject, Replicas: [2]string{peers[0].String(), peers[1].String()}, Binding: CertifiedBinding{Context: f.context, Subject: f.subject}, Availability: fixtureAvailability{stores: map[string]*archive.Store{peers[0].String(): first, peers[1].String(): second}}}
 	require.NoError(t, f.store.EnableFrontier(context.Background(), f.context, f.limits, policy))
 	finalizedAt := func(height uint64) shardnode.BlockRef {
@@ -198,7 +198,7 @@ func TestFrontierPruneSweepKeepsTimeoutRepeatBodies(t *testing.T) {
 			require.NoError(t, s.Put(q, rec))
 		}
 	}
-	peers := [2]peer.ID{"first", "second"}
+	peers := []peer.ID{"first", "second"}
 	policy := frontier.Policy{Context: f.subject, Replicas: [2]string{peers[0].String(), peers[1].String()}, Binding: CertifiedBinding{Context: f.context, Subject: f.subject}, Availability: fixtureAvailability{stores: map[string]*archive.Store{peers[0].String(): first, peers[1].String(): second}}}
 	require.NoError(t, f.store.EnableFrontier(context.Background(), f.context, f.limits, policy))
 	worker := &FrontierWorker{Journal: f.store, Context: f.context, Limits: f.limits, Archive: local, Subject: f.subject, Replicas: peers}
@@ -268,7 +268,7 @@ func TestFrontierPacedAuditRepairsPrunedReplica(t *testing.T) {
 			require.NoError(t, s.Put(q, rec))
 		}
 	}
-	peers := [2]peer.ID{firstPeer.ID(), secondPeer.ID()}
+	peers := []peer.ID{firstPeer.ID(), secondPeer.ID()}
 	policy := frontier.Policy{Context: f.subject, Replicas: [2]string{peers[0].String(), peers[1].String()}, Binding: CertifiedBinding{Context: f.context, Subject: f.subject}, Availability: ReplicaAvailability{Context: context.Background(), Host: sender, Replicas: peers, Limits: DefaultLimits()}}
 	require.NoError(t, f.store.EnableFrontier(context.Background(), f.context, f.limits, policy))
 	worker := &FrontierWorker{Journal: f.store, Context: f.context, Limits: f.limits, Archive: local, Subject: f.subject, Replicas: peers, Host: sender, TransportLimits: DefaultLimits()}
@@ -292,7 +292,7 @@ func TestFrontierWorkerWaitsToPruneAfterOfflineRestart(t *testing.T) {
 	require.NoError(t, err)
 	q, rec := f.record(t, 0)
 	require.NoError(t, local.Put(q, rec))
-	peers := [2]peer.ID{"first", "second"}
+	peers := []peer.ID{"first", "second"}
 	available := digestAvailability{copies: map[string]map[[32]byte][32]byte{"first": {}, "second": {}}}
 	policy := frontier.Policy{Context: f.subject, Replicas: [2]string{"first", "second"}, Binding: CertifiedBinding{Context: f.context, Subject: f.subject}, Availability: available}
 	request, err := archive.EncodeRequest(q)
@@ -391,7 +391,7 @@ func TestFrontierLongRunPastJournalCapsAndReplicaLoss(t *testing.T) {
 	require.Greater(t, blocks, limits.Candidates)
 	require.Greater(t, blocks, limits.Observations)
 	f := newWiringFixtureWithLimits(t, 0, limits)
-	peers := [2]peer.ID{"first", "second"}
+	peers := []peer.ID{"first", "second"}
 	availability := digestAvailability{copies: map[string]map[[32]byte][32]byte{peers[0].String(): {}, peers[1].String(): {}}}
 	policy := frontier.Policy{Context: f.subject, Replicas: [2]string{peers[0].String(), peers[1].String()}, Binding: CertifiedBinding{Context: f.context, Subject: f.subject}, Availability: availability}
 	require.NoError(t, f.store.EnableFrontier(context.Background(), f.context, limits, policy))

@@ -42,11 +42,11 @@ func TestFrontierWorkerResumesAfterArchiveReplicaReplacement(t *testing.T) {
 			require.NoError(t, s.Put(q, rec))
 		}
 	}
-	policyFor := func(replicas [2]peer.ID) frontier.Policy {
+	policyFor := func(replicas []peer.ID) frontier.Policy {
 		return frontier.Policy{Context: f.subject, Replicas: [2]string{replicas[0].String(), replicas[1].String()}, Binding: CertifiedBinding{Context: f.context, Subject: f.subject},
 			Availability: ReplicaAvailability{Context: context.Background(), Host: sender, Replicas: replicas, Limits: DefaultLimits()}}
 	}
-	before := [2]peer.ID{remotes[0].ID(), remotes[1].ID()}
+	before := []peer.ID{remotes[0].ID(), remotes[1].ID()}
 	require.NoError(t, f.store.EnableFrontier(context.Background(), f.context, f.limits, policyFor(before)))
 
 	// Height one is acknowledged by the original pair and not yet pruned.
@@ -70,7 +70,7 @@ func TestFrontierWorkerResumesAfterArchiveReplicaReplacement(t *testing.T) {
 	require.NoError(t, f.store.AdvanceFrontier(context.Background(), f.context, f.limits, []frontier.Coverage{item}))
 
 	// The second replica is replaced by the third.
-	after := [2]peer.ID{remotes[0].ID(), remotes[2].ID()}
+	after := []peer.ID{remotes[0].ID(), remotes[2].ID()}
 	require.NoError(t, f.store.EnableFrontier(context.Background(), f.context, f.limits, policyFor(after)))
 	snap, err := f.store.LoadFrontier(context.Background(), f.context, f.limits)
 	require.NoError(t, err)

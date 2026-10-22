@@ -150,6 +150,7 @@ func journalEpochObservationKey(epoch, root, round uint64) []byte {
 // migration from a legacy LUC/record or from an already advanced configured-progress database.
 // Reopening requires the identical limits and descriptor; no history is discarded at capacity.
 func (s *Store) EnableJournal(ctx context.Context, c Context, limits JournalLimits) error {
+	s.vm.reset() // an install: whatever the memo holds was verified under the previous state (bft-core#728)
 	if err := limits.check(); err != nil {
 		return err
 	}
@@ -759,42 +760,73 @@ func (s *Store) BackfillJournalObservation(ctx context.Context, c Context, limit
 // LoadJournal verifies every retained byte against the caller's configured origin and root trust.
 // It is intentionally a capped full-history scan for the private D2 lane, never a readiness grant.
 func (s *Store) LoadJournal(ctx context.Context, c Context, limits JournalLimits) (JournalSnapshot, error) {
+	return s.loadJournal(ctx, c, limits, true)
+}
+
+// loadJournal is LoadJournal with the choice of the production path (useMemo: the snapshot cache and the verification memo) or a plain full load with neither,
+// which is what the sampler and the equivalence tests compare against.
+func (s *Store) loadJournal(ctx context.Context, c Context, limits JournalLimits, useMemo bool) (JournalSnapshot, error) {
 	if err := limits.check(); err != nil {
 		return JournalSnapshot{}, err
 	}
+	if useMemo {
+		if snap, ok := s.cachedJournal(c, limits); ok {
+			return snap, nil
+		}
+		s.jc.misses.Add(1)
+	}
+	id, identified := identityOf(c) // read before the load: if the authority moves during it, the next lookup misses
+	image, stamp, consistent, err := s.loadJournalFull(ctx, c, limits, useMemo)
+	if err == nil && useMemo && identified {
+		s.storeJournal(id, limits, stamp, consistent, image)
+	}
+	return image, err
+}
+
+// loadJournalFull reads and verifies the whole journal. It also reports the commit id and progress stamp of the transaction that read it, and whether the
+// progress image it had verified was still the one in that transaction.
+func (s *Store) loadJournalFull(ctx context.Context, c Context, limits JournalLimits, useMemo bool) (JournalSnapshot, journalStamp, bool, error) {
 	// Progress and journal are read in separate Bolt transactions because progress
 	// verification runs outside a transaction. A certificate can commit between
 	// those reads. Retry that moving snapshot instead of treating it as damage.
 	for attempt := 0; attempt < 3; attempt++ {
-		image, token, err := s.loadJournalOnce(ctx, c, limits)
+		image, token, stamp, consistent, err := s.loadJournalOnce(ctx, c, limits, useMemo)
 		if err == nil && image.coverageBaseNeedsPersist {
 			if persistErr := s.persistCoverageBase(ctx, c, image.CoverageBase); persistErr != nil {
 				if errors.Is(persistErr, ErrStale) {
 					continue
 				}
-				return JournalSnapshot{}, persistErr
+				return JournalSnapshot{}, journalStamp{}, false, persistErr
 			}
 			image.coverageBaseNeedsPersist = false
+			consistent = false // the persist was a write: this snapshot is not the one at the stamped commit id
 		}
 		if token.t == nil || s.Unchanged(token) {
-			return image, err
+			return image, stamp, consistent, err
 		}
 	}
-	return JournalSnapshot{}, ErrStale
+	return JournalSnapshot{}, journalStamp{}, false, ErrStale
 }
 
-func (s *Store) loadJournalOnce(ctx context.Context, c Context, limits JournalLimits) (JournalSnapshot, ProgressToken, error) {
+func (s *Store) loadJournalOnce(ctx context.Context, c Context, limits JournalLimits, useMemo bool) (JournalSnapshot, ProgressToken, journalStamp, bool, error) {
 	loadStart := time.Now()
-	state, token, err := s.Load(ctx, c)
+	state, token, err := s.load(ctx, c, useMemo)
+	if err == nil && useMemo {
+		c = s.memoContext(c)
+	}
 	if err != nil {
-		return JournalSnapshot{}, ProgressToken{}, err
+		return JournalSnapshot{}, ProgressToken{}, journalStamp{}, false, err
 	}
 	if err := s.at("after-journal-progress-load"); err != nil {
-		return JournalSnapshot{}, token, err
+		return JournalSnapshot{}, token, journalStamp{}, false, err
 	}
 	var out JournalSnapshot
+	var stamp journalStamp
+	consistent := false
 	err = s.db.View(func(tx *bolt.Tx) error {
 		b := tx.Bucket(bucketName)
+		stamp = stampOf(tx)
+		consistent = imageMatches(b, state.i) // the progress image verified above is the one in this transaction
 		if err := readJournalMeta(b, state.i.descriptorDigest, limits); err != nil {
 			return err
 		}
@@ -1009,5 +1041,5 @@ func (s *Store) loadJournalOnce(ctx context.Context, c Context, limits JournalLi
 			slog.Duration("took", time.Since(loadStart)), slog.Int("candidates", len(out.Candidates)), slog.Int("observations", len(out.Observations)),
 			slog.Uint64("bytes", uint64(out.Bytes)))
 	}
-	return out, token, err
+	return out, token, stamp, consistent, err
 }
