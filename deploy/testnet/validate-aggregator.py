@@ -3,7 +3,9 @@
 
 Use the generated partition, keys and environment. Only transport addresses and
 host paths change. Success requires a root-certified nonempty SMT transition,
-not merely HTTP admission or an aggregator health response.
+not merely HTTP admission or an aggregator health response. aggregator-go needs
+MongoDB as a replica set: the probe runs the package's pinned image in Docker,
+published on loopback only, and removes it afterwards.
 """
 import json
 import os
@@ -29,10 +31,28 @@ def get(url, body=None):
         return json.load(response)
 
 
+MONGO_PORT = 23300
+
+
+def start_mongo(name):
+    image = generate.PINS['mongo']
+    subprocess.run(['docker','run','-d','--rm','--name',name,'-p',f'127.0.0.1:{MONGO_PORT}:27017',image,
+                    'mongod','--replSet','rs0','--bind_ip_all'],check=True,stdout=subprocess.DEVNULL)
+    initiate = "try { rs.status().ok } catch (e) { rs.initiate({_id: 'rs0', members: [{_id: 0, host: 'localhost:27017'}]}).ok }"
+    deadline = time.monotonic()+120
+    while time.monotonic() < deadline:
+        state = subprocess.run(['docker','exec',name,'mongosh','--quiet','--eval',initiate+"; rs.status().myState"],text=True,capture_output=True)
+        if state.returncode == 0 and state.stdout.strip().endswith('1'):
+            return
+        time.sleep(1)
+    raise RuntimeError('MongoDB replica set did not become primary')
+
+
 def validate(generation, ubft, aggregator):
     cfg = json.loads((generation/'compose.yaml').read_text())
     processes = []
     logs = []
+    mongo = f'tn-probe-mongo-{os.getpid()}'
 
     def launch(name, command, env=None):
         path = generation/(name+'.log')
@@ -69,19 +89,21 @@ def validate(generation, ubft, aggregator):
                 arg = re.sub(r'/dns4/root(\d+)/tcp/8000',lambda m:f'/ip4/127.0.0.1/tcp/{23000+int(m[1])}',arg)
                 command[j] = arg.replace('/ip4/0.0.0.0/tcp/8000',f'/ip4/127.0.0.1/tcp/{23000+i}').replace(operator_rpc.listen(bind,operator_rpc.ROOT_PORT),f'127.0.0.1:{23100+i}')
             launch(f'root{i}',command)
-        env = {k:v for k,v in os.environ.items() if not k.startswith('AGGREGATOR_')}
-        env.update(cfg['services']['aggregator']['environment'])
-        for line in (generation/'aggregator/secrets.env').read_text().splitlines():
-            key,value = line.split('=',1)
-            env[key] = value
-        env.update(AGGREGATOR_LISTEN='127.0.0.1:23200',
-                   AGGREGATOR_BFT_ADDR='/ip4/127.0.0.1/tcp/23001',
-                   AGGREGATOR_P2P_ADDR='/ip4/127.0.0.1/tcp/0',
-                   AGGREGATOR_DB_PATH=str(generation/'aggregator/db'))
-        # Clap renders the effective environment value in this pinned binary's help.
-        help_text = subprocess.check_output([str(aggregator),'--help'],env=env,text=True)
-        assert '[env: AGGREGATOR_CONSISTENCY_PROOF_MODE=rsmt]' in help_text, 'pinned binary did not resolve generated RSMT environment'
-        assert json.loads((generation/'network/aggregator-conf.json').read_text())['partitionParams']['proof_type']=='aggregator_rsmt_v1'
+        generated = cfg['services']['aggregator']['environment']
+        assert generated['SHARDING_MODE']=='standalone' and generated['BFT_ENABLED']=='true'
+        # aggregator-go sends no consistency proof: the partition must not ask the root for one (it would refuse every nonempty request)
+        assert 'proof_type' not in (json.loads((generation/'network/aggregator-conf.json').read_text()).get('partitionParams') or {})
+        start_mongo(mongo)
+        env = dict(os.environ)
+        env.update(generated)
+        env.update(PORT='23200', HOST='127.0.0.1',
+                   MONGODB_URI=f'mongodb://127.0.0.1:{MONGO_PORT}/?replicaSet=rs0&directConnection=true',
+                   SIGNING_KEY_FILE=str(generation/'aggregator/keys.json'),
+                   BFT_ADDRESS='/ip4/127.0.0.1/tcp/23201', BFT_ANNOUNCE_ADDRESSES='/ip4/127.0.0.1/tcp/23201',
+                   BFT_BOOTSTRAP_ADDRESSES=re.sub(r'/dns4/root(\d+)/tcp/8000',lambda m:f'/ip4/127.0.0.1/tcp/{23000+int(m[1])}',generated['BFT_BOOTSTRAP_ADDRESSES']),
+                   BFT_RPC_ADDRESS='http://127.0.0.1:23101',
+                   BFT_SHARD_CONF_FILE=str(generation/'network/aggregator-conf.json'),
+                   BFT_TRUST_BASE_FILES=str(generation/'network/trust-base.json'))
         launch('aggregator',[str(aggregator)],env)
         root_url = 'http://127.0.0.1:23101/api/v1/roundInfo'
         def certified():
@@ -90,7 +112,7 @@ def validate(generation, ubft, aggregator):
         rpc_url = 'http://127.0.0.1:23200/'
         def submit():
             result = get(rpc_url,{'jsonrpc':'2.0','id':1,'method':'certification_request','params':REQUEST})
-            if result.get('error',{}).get('message')=='SERVICE_NOT_READY':
+            if result.get('result',{}).get('status')=='SERVICE_NOT_READY':
                 return False
             assert result.get('result',{}).get('status')=='SUCCESS', result
             return True
@@ -109,6 +131,7 @@ def validate(generation, ubft, aggregator):
             print(f'--- {path.name} ---\n{path.read_text()[-24000:]}')
         raise
     finally:
+        subprocess.run(['docker','rm','-f',mongo],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
         for proc, _ in processes:
             if proc.poll() is None:
                 proc.terminate()

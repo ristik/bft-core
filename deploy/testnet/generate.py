@@ -59,6 +59,23 @@ def funded_base_genesis(chain_id, max_gas, alloc, entropy):
 def evm_partition_params(chain_id):
     return f'proof_type=exec,chain_id={chain_id},continuity_max_distance={EVM_CONTINUITY_MAX_DISTANCE}'
 
+# The one aggregator (owner decision 40): aggregator-go, partition 9 as one full-range shard, a single instance without high availability, its state in MongoDB.
+AGGREGATOR_PORT, AGGREGATOR_BFT_PORT = 8080, 9200   # in validator 1's namespace beside its root (8000, 8002), shard node (9000, 9101) and metrics relay (9102)
+# aggregator-go needs MongoDB as a replica set (transactions and change streams): one member, initiated by the healthcheck on its first run.
+MONGO_REPLICA_SET = "try { quit(rs.status().myState === 1 ? 0 : 1) } catch (e) { rs.initiate({_id: 'rs0', members: [{_id: 0, host: 'mongo:27017'}]}); quit(1) }"
+
+def aggregator_environment(root_boot, rpc_bind):
+    """aggregator-go reads its configuration from the environment. One full-range shard runs SHARDING_MODE=standalone with BFT (aggregator-go refuses
+    bft-shard mode for the empty shard ID, scripts/lib/agg-lib.sh). Its signing key is the shard-node key file; BFT_RPC_ADDRESS is root 1's operator
+    endpoint, which serves the trust bases of later root epochs and is loopback-only: hence the aggregator shares validator 1's namespace."""
+    return {'PORT':str(AGGREGATOR_PORT),'HOST':'0.0.0.0','ENABLE_DOCS':'false','ENABLE_CORS':'false',
+        'MONGODB_URI':'mongodb://mongo:27017/?replicaSet=rs0','MONGODB_DATABASE':'aggregator','MONGODB_MAX_POOL_SIZE':'20',
+        'DISABLE_HIGH_AVAILABILITY':'true','USE_REDIS_FOR_COMMITMENTS':'false','SMT_BACKEND':'memory','SHARDING_MODE':'standalone',
+        'LOG_LEVEL':'info','LOG_FORMAT':'json','SIGNING_KEY_FILE':'/state/keys.json',
+        'BFT_ENABLED':'true','BFT_ADDRESS':'/ip4/0.0.0.0/tcp/%d'%AGGREGATOR_BFT_PORT,'BFT_ANNOUNCE_ADDRESSES':'/dns4/aggregator/tcp/%d'%AGGREGATOR_BFT_PORT,
+        'BFT_BOOTSTRAP_ADDRESSES':root_boot,'BFT_RPC_ADDRESS':'http://'+operator_rpc.listen(rpc_bind,operator_rpc.ROOT_PORT),
+        'BFT_SHARD_CONF_FILE':'/network/aggregator-conf.json','BFT_TRUST_BASE_FILES':'/network/trust-base.json'}
+
 def write(path, obj):
     path.write_text(json.dumps(obj, indent=2) + '\n')
 
@@ -83,8 +100,9 @@ def topology(out, n, ids, images, captcha, ureth_flags=(), max_gas=30000000, wit
         # q3-readiness (which needs both) runs inside the entity's namespace. The holder owns the namespace and the DNS names, so recreating a root (the install
         # restart) or restarting the shard does not take the namespace down. Different entities stay in different namespaces; the authority (unix sockets), the
         # execution client and every other service keep their own.
-        service('pod%d'%i, node, ['sleep','infinity'], memory='16m', cpu=0.05,
-            networks={'validators':{'aliases':['root%d'%i,'shard%d'%i]}}, init=True)   # sleep as PID 1 would ignore SIGTERM
+        holder = {'validators':{'aliases':['root%d'%i,'shard%d'%i]}}
+        if i == 1: holder = {'validators':{'aliases':['root1','shard1','aggregator']},'aggregator':{}}   # the aggregator's namespace, the only way to its MongoDB
+        service('pod%d'%i, node, ['sleep','infinity'], memory='16m', cpu=0.05, networks=holder, init=True)   # sleep as PID 1 would ignore SIGTERM
         service('metrics%d'%i, images['rpc'], ['python3','-u','metrics_relay.py'], memory='64m', cpu=0.1, pod='pod%d'%i,
             environment={'ROOT_RPC':operator_rpc.listen(rpc_bind,operator_rpc.ROOT_PORT),'SHARD_RPC':operator_rpc.listen(rpc_bind,operator_rpc.SHARD_PORT)})
         service('root%d'%i, node, ['ubft','root-node','run','--home','/state','--address','/ip4/0.0.0.0/tcp/8000',
@@ -119,16 +137,16 @@ def topology(out, n, ids, images, captcha, ureth_flags=(), max_gas=30000000, wit
             '--signing-authority-socket','/authority/client.sock','--signing-authority-credential','/authority/client.cred']
             + common + sum((['--archive-replica',x] for x in replicas), []),
             [evm,auth,network,'./validator%d/jwt:/jwt:ro'%i,'./validator%d/archive:/archive'%i],memory='512m',cpu=0.75,pod='pod%d'%i)
-    keys = json.loads((out/'aggregator/keys.json').read_text())
-    # Runtime secrets are supplied through a private env file, not Compose's public manifest.
-    env = {'AGGREGATOR_LISTEN':'0.0.0.0:8080','AGGREGATOR_BFT_MODE':'live','AGGREGATOR_PARTITION_ID':'9',
-        'AGGREGATOR_SHARD_ID':'0x80','AGGREGATOR_BFT_PEER_ID':ids['root'][0],
-        'AGGREGATOR_BFT_ADDR':'/dns4/root1/tcp/8000','AGGREGATOR_P2P_ADDR':'/ip4/0.0.0.0/tcp/0',
-        'AGGREGATOR_DB_PATH':'/state/db','AGGREGATOR_SMT_BACKEND':'disk',
-        'AGGREGATOR_ROUND_DURATION_MS':'1000','AGGREGATOR_FAKE_STATE_TRANSITIONS':'false',
-        'AGGREGATOR_UC_TIMEOUT_MS':'30000','AGGREGATOR_BATCH_LIMIT':'1000','AGGREGATOR_CONSISTENCY_PROOF_MODE':'rsmt'}
-    (out/'aggregator/secrets.env').write_text('AGGREGATOR_AUTH_KEY='+keys['authKey']['privateKey'].removeprefix('0x')+'\nAGGREGATOR_SIG_KEY='+keys['sigKey']['privateKey'].removeprefix('0x')+'\n')
-    service('aggregator',node,['rugregator'],['./aggregator:/state',network],memory='512m',cpu=0.75,environment=env,env_file=['./aggregator/secrets.env'])
+    # The aggregator's signing key stays in its private key file (aggregator/keys.json, read-only mount): nothing secret is in its environment or this manifest.
+    # mongod runs directly as the package UID (the image's entrypoint would switch users, which cap_drop ALL forbids); /tmp is the writable HOME of mongosh.
+    # It has no authentication: it is reachable only on its own internal network, which only validator 1's namespace (the aggregator's) joins.
+    service('mongo',PINS['mongo'],['mongod','--replSet','rs0','--bind_ip_all','--port','27017','--dbpath','/data/db','--wiredTigerCacheSizeGB','0.25'],
+        ['./mongo:/data/db'],memory='768m',cpu=0.5,networks=['aggregator'],user='10001:10001',environment={'HOME':'/tmp'},
+        healthcheck={'test':['CMD','mongosh','--quiet','--eval',MONGO_REPLICA_SET],'interval':'10s','timeout':'10s','retries':12,'start_period':'20s'})
+    services['mongo']['pids_limit']=256   # mongod runs ~85 threads idle, plus one per connection (the aggregator's pool is 20)
+    services['mongo']['tmpfs'].append('/data/configdb:size=1m,mode=1777')   # the image declares it a volume: unused here, and no anonymous volume per recreate
+    service('aggregator',node,['aggregator'],['./aggregator:/state:ro',network],memory='512m',cpu=0.75,pod='pod1',
+        environment=aggregator_environment(root_boot,rpc_bind),depends_on={'mongo':{'condition':'service_healthy'}})
     service('rpc',images['rpc'],['python3','-u','gateway.py'],[network],memory='128m',networks=['validators','edge'],environment={'TRUSTED_PROXY_IP':'172.30.89.1'},
         ports=['127.0.0.1:8545:8545'],healthcheck={'test':['CMD','python3','-c',"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8545/healthz', timeout=10)"],'interval':'30s','timeout':'12s','retries':3})
     service('relay',images['guard'],['python3','-u','relay.py'],['./network/network.json:/config/network.json:ro'],memory='128m',networks=['validators','faucet'])
@@ -141,7 +159,7 @@ def topology(out, n, ids, images, captcha, ureth_flags=(), max_gas=30000000, wit
         ['./monitoring/prometheus.json:/etc/prometheus/prometheus.json:ro','./monitoring/alerts.json:/etc/prometheus/alerts.json:ro','./metrics:/prometheus'],
         memory='256m',networks=['validators','faucet'],user='10001:10001',ports=['127.0.0.1:9090:9090'])
     return {'name':out.name,'services':services,
-        'networks':{'validators':{'internal':True},'faucet':{'ipam':{'config':[{'subnet':'172.30.88.0/24','gateway':'172.30.88.1'}]}},'edge':{'ipam':{'config':[{'subnet':'172.30.89.0/24','gateway':'172.30.89.1'}]}}},
+        'networks':{'validators':{'internal':True},'aggregator':{'internal':True},'faucet':{'ipam':{'config':[{'subnet':'172.30.88.0/24','gateway':'172.30.88.1'}]}},'edge':{'ipam':{'config':[{'subnet':'172.30.89.0/24','gateway':'172.30.89.1'}]}}},
         'secrets':{'faucet_keystore':{'file':'./faucet-secrets/keystore.json'},'faucet_password':{'file':'./faucet-secrets/password'},
                    'hcaptcha_secret':{'file':'./faucet-secrets/hcaptcha-secret'}}}
 
@@ -313,9 +331,10 @@ def main():
                 except subprocess.TimeoutExpired: proc.kill(); proc.wait()
                 log.close()
         (home/'agg-conf').mkdir()
+        # No proof_type: aggregator-go sends no SMT consistency proof, and the root's aggregator_rsmt_v1 verifier would refuse every nonempty request
+        # (docs/operations/dnb/stage2-live-round-trip.md finding 2). The root checks the aggregator's signature only, as in the DN-B lanes (README).
         cli('shard-conf','generate','--home',home/'agg-conf','--network-id','3','--partition-id','9','--partition-type-id','9',
-            '--shard-id','0x80','--epoch','0','--epoch-start','1','--t2-timeout','5000',
-            '--partition-params','proof_type=aggregator_rsmt_v1','--node-info',out/'aggregator/node-info.json')
+            '--shard-id','0x80','--epoch','0','--epoch-start','1','--t2-timeout','5000','--node-info',out/'aggregator/node-info.json')
         # The PoS roots take pos-genesis-identities.json instead (the two flags exclude each other): the PoA records are not shipped beside them.
         for name in ('trust-base.json','full-shard-conf.json','genesis.json','b1-profile.json','b1-identities.json')+(() if genesis else ('genesis-identities.json',)):
             shutil.copy2(home/name,out/'network'/name)
@@ -339,6 +358,7 @@ def main():
         if genesis: shutil.move(str(home/'pos-owner-keys'),out/'pos-owner-keys')   # private host material, like faucet-secrets: not mounted, not in network/
         shutil.copy2(a.captcha_secret_file,out/'faucet-secrets/hcaptcha-secret')
         (out/'claims').mkdir()
+        (out/'mongo').mkdir()
         (out/'metrics').mkdir()
         (out/'monitoring').mkdir()
         write(out/'monitoring/prometheus.json', {'global':{'scrape_interval':'15s'},'rule_files':['/etc/prometheus/alerts.json'],

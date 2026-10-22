@@ -18,8 +18,15 @@ Authority keys exist only in process memory by protocol design. Authorities use
 changes its key and requires a separately authorized validator replacement. The
 generator enrolls keys inside the long-lived Docker authorities, never in a
 throwaway init process. Full host/daemon loss requires a fresh testnet reset.
-The one aggregator uses the existing F8 RSMT profile, partition 9/full range;
-EVM is partition 8/full range. This is PoA with profile-2 authenticated history,
+The one aggregator is aggregator-go (owner decision 40): partition 9, one full-range
+shard, a single instance without high availability, its state in a single-node
+MongoDB replica set (`mongo` service, pinned image, no authentication, on its own
+internal network that only validator 1's namespace joins, data in `<generation>/mongo`). It runs in validator 1's network namespace, because it reads
+the trust bases of later root epochs from root 1's loopback-only operator endpoint.
+**The aggregator partition has no `proof_type`:** aggregator-go sends no SMT
+consistency proof, so the root checks only the aggregator's signature (one signer),
+not its SMT root transitions; rugregator's `aggregator_rsmt_v1` check is not in this
+package. EVM is partition 8/full range. This is PoA with profile-2 authenticated history,
 the single B1 registry (permanent layout, one `ubft engine-api b1-profile` shared by genesis, ureth and the shard nodes) and no bridge or staking allocation. The registry bytecode and
 engine protocol are supplied by the pinned BFT/ureth builds.
 
@@ -62,11 +69,11 @@ From this PR's repository root, on the target Linux build host:
 python3 deploy/testnet/build-images.py \
   --bft-source /srv/src/bft-pinned \
   --ureth-source /srv/src/ureth-pinned \
-  --rugregator-source /srv/src/rugregator-pinned
+  --aggregator-go-source /srv/src/aggregator-go-pinned
 go build -o build/tn-keygen ./deploy/testnet/keygen
 ```
 
-The builder reuses `make build`, `cargo build --locked` and the existing faucet
+The builder reuses `make build`, `cargo build --locked` (ureth), `go build` with cgo (aggregator-go) and the existing faucet
 Dockerfiles. It checks clean source revisions, builds Linux ELF binaries and
 checks their `--help` inside the runtime image. Exact base-image digests are pinned;
 OS package installation is resolved at build time. `artifacts/images.json` records
@@ -150,7 +157,7 @@ and is accessible only on loopback port 9090 (SSH tunnel for operators).
 `TestnetTargetDown` and `TestnetRPCFailures` appear in `/alerts`; connect an approved
 Alertmanager route when the deployment supplies one. No alert delivery is claimed
 until that route is tested. Watch gateway `/healthz`, faucet `/healthz` (budget,
-balance, network pin), aggregator internal `/health`, `docker compose ps`, restart
+balance, network pin), aggregator internal `/health` (port 8080 in validator 1's namespace), the `mongo` healthcheck, `docker compose ps`, restart
 counts, host disk/RAM and shard logs. A responding root metrics target alone does
 not prove consensus progress; compare root roundInfo and certified shard heads
 between samples. Notify the incident owner if certified heads stop for 2 minutes,
@@ -213,8 +220,8 @@ procedure against the surviving authority, not a bare DB rollback or clone.
 
 Copy encrypted archives, digest, exact `docker save` images and checkout off host.
 Check decrypt/load before relying on them. Backups contain disposable root/shard
-keys, Engine JWTs, faucet key/password, operator/client credentials and aggregator
-keys; restrict access. SHA-256 checks integrity, not authentication against a
+keys, Engine JWTs, faucet key/password, operator/client credentials, the aggregator
+key (`aggregator/keys.json`) and the aggregator's MongoDB data; restrict access. SHA-256 checks integrity, not authentication against a
 malicious supplier. Off-host archives support investigation and retained history;
 they are **not full-host same-network disaster recovery**. Coupled rotation,
 interrupted handoff/abort and replay remain #432 acceptance work. If those
@@ -280,16 +287,16 @@ internal review. No merge is authorized by this package.
 PR CI requires `docker compose config --quiet` for generated fixture topologies
 N=3,4,7; this parsing step needs no Docker daemon. Package tests check the
 signer's generated invocation against the tracked script permissions (the image
-copies a readable script and invokes it through `/bin/sh`), the RSMT environment
-setting, and rejection of an otherwise valid allowed JSON-RPC request larger
+copies a readable script and invokes it through `/bin/sh`), the aggregator-go and
+MongoDB service settings, and rejection of an otherwise valid allowed JSON-RPC request larger
 than 16 KiB before any relay call.
 
-CI also builds rugregator from `pins.json`'s revision and runs
+CI also builds aggregator-go from `pins.json`'s revision and runs
 `validate-generation.py --aggregator <pinned-binary>`: a native three-root probe
 using generated keys, partition configurations and aggregator environment, with
-host paths and loopback transport addresses substituted. It checks the pinned
-binary's effective `AGGREGATOR_CONSISTENCY_PROOF_MODE=rsmt`, submits a real SDK
-request, waits for its certified inclusion proof, and requires the root's
+host paths and loopback transport addresses substituted, against the pinned MongoDB
+image started in Docker as a one-member replica set. It checks that the aggregator
+partition asks for no consistency proof, submits a real SDK request, waits for its certified inclusion proof, and requires the root's
 partition-9 certified round and state root to advance. HTTP admission or empty
 rounds alone cannot pass. No EVM validator or faucet is started by this probe;
 it does not supply the owner-server deployment, recovery or campaign evidence

@@ -32,16 +32,11 @@ jobs:
       - run: go build -o /tmp/tn-keygen ./deploy/testnet/keygen
       - uses: actions/checkout@v4
         with:
-          repository: ristik/rugregator
-          ref: 711213eb6c4c93503d16d7108d474dfc222984ad
-          path: pinned-rugregator
-      - run: sudo apt-get update && sudo apt-get install -y libclang-dev libssl-dev pkg-config
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: pinned-rugregator
-      - run: cargo build --locked -p uni-aggregator --bin aggregator
-        working-directory: pinned-rugregator
+          repository: ristik/aggregator-go
+          ref: 86d93f1e9ba067a6d7bfe6103cdd79ccee58424e
+          path: pinned-aggregator-go
+      # cgo for secp256k1, no rocksdb tag (memory SMT, state in MongoDB), as build-images.py builds it; go.mod's newer toolchain is fetched by GOTOOLCHAIN=auto
+      - run: CGO_ENABLED=1 go build -C pinned-aggregator-go -trimpath -o /tmp/tn-aggregator ./cmd/aggregator
       - uses: actions/checkout@v4
         with:
           repository: ristik/unicity-pos-contracts
@@ -52,6 +47,6 @@ jobs:
         with:
           # the contracts' own CI pin: the registry's runtime bytecode and code hash are protocol surface
           version: v1.8.1
-      - run: python3 deploy/testnet/validate-generation.py --ubft pinned-bft/build/ubft --keygen /tmp/tn-keygen --b1genesis /tmp/tn-b1genesis --check-prometheus --aggregator pinned-rugregator/target/debug/aggregator --pos-contracts pinned-contracts
+      - run: python3 deploy/testnet/validate-generation.py --ubft pinned-bft/build/ubft --keygen /tmp/tn-keygen --b1genesis /tmp/tn-b1genesis --check-prometheus --aggregator /tmp/tn-aggregator --pos-contracts pinned-contracts
       - run: docker build -f deploy/testnet/Dockerfile.rpc deploy/testnet -t testnet-rpc:test
       - run: docker run --rm --entrypoint python3 testnet-rpc:test -c 'import gateway; assert "eth_sign" not in gateway.PUBLIC'
