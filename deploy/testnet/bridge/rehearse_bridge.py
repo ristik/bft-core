@@ -81,7 +81,7 @@ class BridgeRehearsal(Rehearsal):
 
     # --- stages ----------------------------------------------------------------------------------------------------------------
     def deploy(self):
-        # the package's one aggregator (aggregator-go, partition 9, one shard: owner decision 40); the lock side and the lock-proof endpoint do not depend
+        # the package's one aggregator (aggregator-go, partition 7, one shard: owner decision 40); the lock side and the lock-proof endpoint do not depend
         # on it, the mint/redeem stages (part 2) will
         out = subprocess.run([sys.executable, str(HERE / 'deploy_bridge.py'), str(self.gen), '--agg-conf', 'network/aggregator-conf.json',
                               '--agg-url', 'http://aggregator:8080'], text=True, capture_output=True)

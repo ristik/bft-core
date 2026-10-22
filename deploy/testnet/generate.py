@@ -59,7 +59,7 @@ def funded_base_genesis(chain_id, max_gas, alloc, entropy):
 def evm_partition_params(chain_id):
     return f'proof_type=exec,chain_id={chain_id},continuity_max_distance={EVM_CONTINUITY_MAX_DISTANCE}'
 
-# The one aggregator (owner decision 40): aggregator-go, partition 9 as one full-range shard, a single instance without high availability, its state in MongoDB.
+# The one aggregator (owner decision 40): aggregator-go, partition 7 (the protocol constant every aggregator-go verifier requires) as one full-range shard, a single instance without high availability, its state in MongoDB.
 AGGREGATOR_PORT, AGGREGATOR_BFT_PORT = 8080, 9200   # in validator 1's namespace beside its root (8000, 8002), shard node (9000, 9101) and metrics relay (9102)
 # aggregator-go needs MongoDB as a replica set (transactions and change streams): one member, initiated by the healthcheck on its first run.
 MONGO_REPLICA_SET = "try { quit(rs.status().myState === 1 ? 0 : 1) } catch (e) { rs.initiate({_id: 'rs0', members: [{_id: 0, host: 'mongo:27017'}]}); quit(1) }"
@@ -334,7 +334,7 @@ def main():
         (home/'agg-conf').mkdir()
         # No proof_type: aggregator-go sends no SMT consistency proof, and the root's aggregator_rsmt_v1 verifier would refuse every nonempty request
         # (docs/operations/dnb/stage2-live-round-trip.md finding 2). The root checks the aggregator's signature only, as in the DN-B lanes (README).
-        cli('shard-conf','generate','--home',home/'agg-conf','--network-id','3','--partition-id','9','--partition-type-id','9',
+        cli('shard-conf','generate','--home',home/'agg-conf','--network-id','3','--partition-id','7','--partition-type-id','7',
             '--shard-id','0x80','--epoch','0','--epoch-start','1','--t2-timeout','5000','--node-info',out/'aggregator/node-info.json')
         # The PoS roots take pos-genesis-identities.json instead (the two flags exclude each other): the PoA records are not shipped beside them.
         for name in ('trust-base.json','full-shard-conf.json','genesis.json','b1-profile.json','b1-identities.json')+(() if genesis else ('genesis-identities.json',)):
@@ -346,7 +346,7 @@ def main():
                 shutil.copy2(genesis.dir/src,out/'network'/name)
             (out/'network/pos-genesis-assignment.txt').write_text(genesis.assignment+'\n')
             genesis.alloc_code_hashes(json.loads((home/'genesis.json').read_text()))
-        shutil.copy2(home/'agg-conf/shard-conf-9_0.json',out/'network/aggregator-conf.json')
+        shutil.copy2(home/'agg-conf/shard-conf-7_0.json',out/'network/aggregator-conf.json')
         for i in range(1,a.validators+1):
             val=out/f'validator{i}'
             for kind in ('root','evm'):

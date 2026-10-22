@@ -4,7 +4,7 @@ TN-B (#429), with B-TEST (#438) as its prerequisite, puts fake-value bridging on
 `deploy/testnet` without changing the package's own services. The plan, and the items that do or don't need the host, are in `briefs/tnb-without-host.md`.
 
 Status: **part 1**. That is the bridge tools image, the post-genesis deploy and the lock-proof endpoint. The mint, transfer, burn, redeem and claim stages (part 2) use the package's one
-aggregator: aggregator-go on partition 9, one shard (owner decision 40).
+aggregator: aggregator-go on partition 7, one shard (owner decision 40).
 
 ## Files
 

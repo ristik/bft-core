@@ -109,8 +109,10 @@ class Aggregator(unittest.TestCase):
         source=(generate.HERE/'generate.py').read_text()
         self.assertNotIn('proof_type=aggregator_rsmt_v1',source)
         call=source[source.index("cli('shard-conf','generate','--home',home/'agg-conf'"):]
-        self.assertNotIn('--partition-params',call[:call.index('\n',call.index("node-info.json"))])
-        self.assertIn("'--partition-id','9'",source)
+        call=call[:call.index('\n',call.index("node-info.json"))]
+        self.assertNotIn('--partition-params',call)
+        # aggregator-go refuses any other partition (api.AggregationPartitionID, a protocol constant)
+        self.assertIn("'--partition-id','7'",call)
 
 class ProofOfStake(unittest.TestCase):
     ID1='0x'+'11'*32

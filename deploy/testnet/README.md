@@ -18,7 +18,7 @@ Authority keys exist only in process memory by protocol design. Authorities use
 changes its key and requires a separately authorized validator replacement. The
 generator enrolls keys inside the long-lived Docker authorities, never in a
 throwaway init process. Full host/daemon loss requires a fresh testnet reset.
-The one aggregator is aggregator-go (owner decision 40): partition 9, one full-range
+The one aggregator is aggregator-go (owner decision 40): partition 7, one full-range
 shard, a single instance without high availability, its state in a single-node
 MongoDB replica set (`mongo` service, pinned image, no authentication, on its own
 internal network that only validator 1's namespace joins, data in `<generation>/mongo`). It runs in validator 1's network namespace, because it reads
@@ -297,7 +297,7 @@ using generated keys, partition configurations and aggregator environment, with
 host paths and loopback transport addresses substituted, against the pinned MongoDB
 image started in Docker as a one-member replica set. It checks that the aggregator
 partition asks for no consistency proof, submits a real SDK request, waits for its certified inclusion proof, and requires the root's
-partition-9 certified round and state root to advance. HTTP admission or empty
+partition-7 certified round and state root to advance. HTTP admission or empty
 rounds alone cannot pass. No EVM validator or faucet is started by this probe;
 it does not supply the owner-server deployment, recovery or campaign evidence
 required above. Local validation is deferred to PR CI for this revision.
