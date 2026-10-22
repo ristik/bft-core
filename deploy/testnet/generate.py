@@ -108,7 +108,6 @@ def topology(out, n, ids, images, captcha, ureth_flags=(), max_gas=30000000, wit
             '--engine.persistence-threshold','64','--builder.gaslimit',str(max_gas),'--unicity.fee-collector',FEE,*ureth_flags],
             ['./validator%d/ureth:/state'%i,'./validator%d/jwt:/jwt:ro'%i,network], memory='1536m',cpu=1.0)
         peers = root_boot + ''.join(',/dns4/shard%d/tcp/9000/p2p/%s'%(j,ids['evm'][j-1]) for j in range(1,n+1) if j!=i)
-        replicas = [x for j,x in enumerate(ids['evm'],1) if j!=i][:2]
         service('shard%d'%i, node, ['ubft','shard-node','run','--home','/state','--executor','engine-api',
             '--address','/ip4/0.0.0.0/tcp/9000','--bootnodes',peers,
             '--full-shard-conf','/network/full-shard-conf.json','--genesis','/network/genesis.json',
@@ -117,7 +116,7 @@ def topology(out, n, ids, images, captcha, ureth_flags=(), max_gas=30000000, wit
             '--execution-journal','/state/execution-journal.db','--archive-store','/archive',
             '--archive-prune','--journal-candidates','32','--trust-history-profile-2','--rpc-server-address',operator_rpc.listen(rpc_bind,operator_rpc.SHARD_PORT),'--metrics','prometheus',
             '--signing-authority-socket','/authority/client.sock','--signing-authority-credential','/authority/client.cred']
-            + common + sum((['--archive-replica',x] for x in replicas), []),
+            + common,   # no --archive-replica: the node derives its replicas (archivepolicy: the next three validators in peer-ID order, any two make a block durable)
             [evm,auth,network,'./validator%d/jwt:/jwt:ro'%i,'./validator%d/archive:/archive'%i],memory='512m',cpu=0.75,pod='pod%d'%i)
     keys = json.loads((out/'aggregator/keys.json').read_text())
     # Runtime secrets are supplied through a private env file, not Compose's public manifest.

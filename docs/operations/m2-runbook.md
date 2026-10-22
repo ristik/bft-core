@@ -576,6 +576,8 @@ see Gaps for the remaining product and live-rehearsal limits.
 
 ### Replacing a configured archive replica (`--archive-replica`)
 
+By default a node is given no `--archive-replica`: it derives its replicas from the shard configuration (the next three validators after it in circular peer-ID order; any two acknowledgements make a block durable, so one replica may be down). The explicit pair below is the legacy 2-of-2 configuration and is still accepted.
+
 After a validator-set change retires one configured replica, a retained validator
 can switch to a replacement replica by changing its `--archive-replica` pair and
 restarting. Both configured replicas are checked against the installed (verified)

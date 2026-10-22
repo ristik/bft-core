@@ -99,6 +99,8 @@ export ANYAGE_LANE=${ANYAGE_LANE:-0} UTB_LANE=${UTB_LANE:-0} EVIDENCE_LANE_LOG="
 export P85_DIST_NUM=${P85_DIST_NUM:-1} P85_DIST_DEN=${P85_DIST_DEN:-2}
 export EVM_PARTITION_PARAMS_EXTRA=${EVM_PARTITION_PARAMS_EXTRA:-continuity_max_distance=$P85_DIST_NUM/$P85_DIST_DEN}
 
+# archive replicas are derived by the node (#751): every P85 lane runs the default policy; EVM_ARCHIVE_DERIVED= (empty) restores the legacy fixed pairs
+export EVM_ARCHIVE_DERIVED=${EVM_ARCHIVE_DERIVED-1}
 set +e
 DEVNET_PIDFILE="$EVIDENCE_DIR/.devnet-pid"; rm -f "$DEVNET_PIDFILE"
 ( set -o pipefail
