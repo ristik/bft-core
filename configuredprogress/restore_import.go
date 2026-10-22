@@ -18,6 +18,7 @@ import (
 func (s *Store) InstallReplayedTip(ctx context.Context, c Context, limits JournalLimits, candidate JournalCandidate,
 	resultUC *types.UnicityCertificate, resultTR *certification.TechnicalRecord,
 	tipUC *types.UnicityCertificate, tipTR *certification.TechnicalRecord, anchor RestoreAnchor) error {
+	s.vm.reset() // an install: whatever the memo holds was verified under the previous state (bft-core#728)
 	if !s.journal || limits.check() != nil || candidate.LocallyBuilt || candidate.AuthorizingUC == nil || candidate.AuthorizingTR == nil ||
 		resultUC == nil || resultTR == nil || tipUC == nil || tipTR == nil || resultUC.InputRecord == nil || tipUC.InputRecord == nil ||
 		candidate.Number == 0 || candidate.Number != candidate.ParentNumber+1 || candidate.Round == 0 ||
