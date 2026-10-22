@@ -216,6 +216,7 @@ s4_submit_settle() {
   read -r -a ids <<<"$(s4_assignments)" || return 1
   key=$(jq -r --arg k "$(jq -r .sigKey.publicKey "test-nodes/root$S4_OFFENDER_ROOT/node-info.json" 2>/dev/null || true)" \
     'if $k == "" then .Pairs[0].Key else ([.Pairs[] | select((.Key | ascii_downcase | ltrimstr("0x")) == ($k | ascii_downcase | ltrimstr("0x")))][0].Key) end' "$d/scan-both.json")   # the offender's own pair when several offences are in the journals
+  [ -n "$key" ] && [ "$key" != null ] || { echo "the scan over both journals holds no pair of the offender (root $S4_OFFENDER_ROOT)" >&2; return 1; }
   s4_py resolve --rpc "$(p85_eth)" --custody "$(p85_custody)" --key "$key" --epoch 2 $(for a in "${ids[@]}"; do printf -- '--assignment %s ' "$a"; done) --out "$d/resolved.json" || return 1
   EXPOSURE=$(jq -r .exposure "$d/resolved.json"); OTHER_LOTS=$(jq -r '.otherLots[]' "$d/resolved.json" | head -3 | tr '\n' ' ')
   jq -e '.lots|length>=1' "$d/resolved.json" >/dev/null || return 1
