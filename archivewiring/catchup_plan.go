@@ -231,6 +231,18 @@ func (c *CatchUp) Walk(ctx context.Context, after shardnode.BlockRef, top []byte
 	return joined, walked, err
 }
 
+// Live reports whether the plan continues from after: walking from it, or joined and holding it.
+func (c *CatchUp) Live(after shardnode.BlockRef) bool {
+	if c.plan == nil {
+		return false
+	}
+	if bytes.Equal(after.Hash, c.plan.After.Hash) {
+		return true
+	}
+	_, on := c.plan.Remaining(after.Hash)
+	return on && c.plan.joined
+}
+
 func (c *CatchUp) Page(ctx context.Context, from shardnode.BlockRef, max int) ([]shardnode.JournalFetchEntry, int, error) {
 	if c.plan == nil {
 		return nil, 0, ErrArchiveRecoveryUnavailable

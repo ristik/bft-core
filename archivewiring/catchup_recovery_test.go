@@ -1,6 +1,7 @@
 package archivewiring
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"strings"
@@ -28,6 +29,7 @@ var returningLimits = configuredprogress.JournalLimits{Candidates: 12, Observati
 // returningNode is a validator that comes back at genesis after the network moved on (#769): an empty journal with the bootstrap
 // certificate, frontier pruning against two replicas, an executor at genesis, and a recovery coordinator with the archive catch-up.
 type returningNode struct {
+	limits   configuredprogress.JournalLimits
 	store    *configuredprogress.Store
 	exec     *restoreExecutorFixture
 	worker   *FrontierWorker
@@ -36,6 +38,12 @@ type returningNode struct {
 
 func newReturningNode(t *testing.T, p *planFixture, replicas map[string]*archive.Store) *returningNode {
 	t.Helper()
+	return newReturningNodeWith(t, p, replicas, returningLimits, configuredadmission.RecoveryLimits{Blocks: 8, Bytes: 4 << 20, Deadline: 20 * time.Second})
+}
+
+func newReturningNodeWith(t *testing.T, p *planFixture, replicas map[string]*archive.Store, limits configuredprogress.JournalLimits, recoveryLimits configuredadmission.RecoveryLimits) *returningNode {
+	t.Helper()
+	returningLimits := limits
 	ctx := context.Background()
 	store, err := configuredprogress.OpenConfiguredV2(t.TempDir()+"/journal.db", configuredprogress.Settings{Retain: 8})
 	require.NoError(t, err)
@@ -57,9 +65,9 @@ func newReturningNode(t *testing.T, p *planFixture, replicas map[string]*archive
 	exec := newRestoreExecutorFixture(p.genesis)
 	worker := &FrontierWorker{Journal: store, Context: p.f.context, Limits: returningLimits, Archive: p.local, Subject: p.f.subject, Replicas: names, Finalized: exec.Finalized}
 	recovery := &configuredadmission.ExecutionRecovery{Store: store, Context: p.f.context, JournalLimits: returningLimits, Executor: exec, Gate: shardnode.NewFinalityGate(),
-		Genesis: p.genesis, Limits: configuredadmission.RecoveryLimits{Blocks: 8, Bytes: 4 << 20, Deadline: 20 * time.Second},
+		Genesis: p.genesis, Limits: recoveryLimits,
 		FetchArchive: p.source.FetchSuffix, ArchiveCatchUp: &CatchUp{Source: p.source, Frontier: worker}}
-	return &returningNode{store: store, exec: exec, worker: worker, recovery: recovery}
+	return &returningNode{limits: limits, store: store, exec: exec, worker: worker, recovery: recovery}
 }
 
 // catchUp submits the gap's target certificate until it is admitted, as the node's admission does with each new certificate, and
@@ -70,10 +78,10 @@ func (n *returningNode) catchUp(t *testing.T, p *planFixture, height int, maxCal
 	target := p.f.entries[height-1]
 	for calls := 1; calls <= maxCalls; calls++ {
 		err := n.recovery.AcquireForCertificate(ctx, target.ResultingUC, target.ResultingTR)
-		image, loadErr := n.store.LoadJournal(ctx, p.f.context, returningLimits)
+		image, loadErr := n.store.LoadJournal(ctx, p.f.context, n.limits)
 		require.NoError(t, loadErr)
-		require.LessOrEqual(t, len(image.Candidates), returningLimits.Candidates, "call %d: candidates", calls)
-		require.LessOrEqual(t, len(image.Observations), returningLimits.Observations, "call %d: observations", calls)
+		require.LessOrEqual(t, len(image.Candidates), n.limits.Candidates, "call %d: candidates", calls)
+		require.LessOrEqual(t, len(image.Observations), n.limits.Observations, "call %d: observations", calls)
 		if err == nil {
 			// the node recovers from the journal once the certificate is admitted: the executor ends finalized at the target
 			head, err := n.recovery.Recover(ctx, target.ResultingUC)
@@ -109,30 +117,11 @@ func TestArchiveCatchUp_ClosesAGapSeveralJournalsLongPageByPage(t *testing.T) {
 func TestArchiveCatchUp_TakesTheNewestBlocksFromAPeersJournal(t *testing.T) {
 	t.Parallel()
 	const gap, fresh = 29, 6
-	ctx := context.Background()
 	p := newPlanFixture(t, gap)
 	p.serve(t, 1, gap-fresh) // the archive lacks the newest six
-	// the peer: the fixture's own journal holds all 29; its frontier prunes what the archive holds
-	peerLocal, err := archive.Open(t.TempDir())
-	require.NoError(t, err)
-	for h := 1; h <= gap; h++ {
-		q, rec := p.f.record(t, h-1)
-		require.NoError(t, peerLocal.Put(q, rec))
-	}
-	names := []peer.ID{"first", "second"}
 	replicas := map[string]*archive.Store{replicaA: p.replica, replicaB: p.second}
-	require.NoError(t, p.f.store.EnableFrontier(ctx, p.f.context, p.f.limits, frontier.Policy{Context: p.f.subject, Replicas: [2]string{replicaA, replicaB},
-		Binding: CertifiedBinding{Context: p.f.context, Subject: p.f.subject}, Availability: fixtureAvailability{stores: replicas}}))
-	top := p.ref(gap)
-	peerWorker := &FrontierWorker{Journal: p.f.store, Context: p.f.context, Limits: p.f.limits, Archive: peerLocal, Subject: p.f.subject, Replicas: names,
-		Finalized: func(context.Context) (shardnode.BlockRef, error) { return top, nil }}
-	// a legacy two-replica worker reads back no copies itself (the journal does): cover exactly what the archive holds
-	require.NoError(t, peerWorker.Advance(ctx, gap-fresh))
-	pruned, err := p.f.store.LoadFrontier(ctx, p.f.context, p.f.limits)
-	require.NoError(t, err)
-	require.EqualValues(t, gap-fresh, pruned.Anchor.Height, "the peer retains only the blocks the archive lacks")
-
-	server, err := shardnode.NewJournalServer(configuredadmission.JournalProvider{Store: p.f.store, Context: p.f.context, Limits: p.f.limits}, shardnode.DefaultJournalTransportLimits())
+	honest := prunedPeer(t, p, replicas, gap, gap-fresh)
+	server, err := shardnode.NewJournalServer(honest, shardnode.DefaultJournalTransportLimits())
 	require.NoError(t, err)
 	peerHost := testpeer.CreatePeer(t, testpeer.CreatePeerConfiguration(t))
 	server.Register(peerHost)
@@ -175,4 +164,142 @@ func TestArchiveCatchUp_WaitsForArchiveCopiesWithoutStopping(t *testing.T) {
 	copies[replicaB] = p.second // the second copy appears (the #760 backfill)
 	n.catchUp(t, p, gap, 40)
 	require.EqualValues(t, gap, n.exec.finalized.Number)
+}
+
+// TestArchiveCatchUp_CutsPagesAtTheByteBudget: rev2 B1. A page of P blocks can be more than one recovery's byte budget (64 blocks of
+// 1 MiB against 64 MiB); admitting it would end in the terminal ErrRecoveryBudget. Here the budget is about two of the fixture's blocks.
+func TestArchiveCatchUp_CutsPagesAtTheByteBudget(t *testing.T) {
+	t.Parallel()
+	const gap = 20
+	p := newPlanFixture(t, gap)
+	p.serve(t, 1, gap)
+	raw := int64(len(p.f.entries[0].Candidate.Raw))
+	n := newReturningNodeWith(t, p, map[string]*archive.Store{replicaA: p.replica, replicaB: p.second}, returningLimits,
+		configuredadmission.RecoveryLimits{Blocks: 8, Bytes: 2*raw + raw/2, Deadline: 20 * time.Second})
+	require.Greater(t, 3*raw, 2*raw+raw/2, "a page of three blocks is over the budget")
+	n.catchUp(t, p, gap, 60)
+	require.EqualValues(t, gap, n.exec.finalized.Number)
+}
+
+// TestArchiveCatchUp_TheObservationLimitBinds: a journal whose observation limit is tighter than its candidate limit still never
+// overruns either (each admitted block brings its certificate).
+func TestArchiveCatchUp_TheObservationLimitBinds(t *testing.T) {
+	t.Parallel()
+	const gap = 20
+	p := newPlanFixture(t, gap)
+	p.serve(t, 1, gap)
+	n := newReturningNodeWith(t, p, map[string]*archive.Store{replicaA: p.replica, replicaB: p.second},
+		configuredprogress.JournalLimits{Candidates: 16, Observations: 6, Bytes: 16 << 20}, configuredadmission.RecoveryLimits{Blocks: 8, Bytes: 4 << 20, Deadline: 20 * time.Second})
+	n.catchUp(t, p, gap, 60)
+	require.EqualValues(t, gap, n.exec.finalized.Number)
+}
+
+// TestArchiveCatchUp_TheLastPageAdmitsTheCertificate: with one recovery smaller than any remaining stretch, the catch-up's own last
+// page reaches the target, and that call returns nil (the certificate is admitted) instead of asking for another round.
+func TestArchiveCatchUp_TheLastPageAdmitsTheCertificate(t *testing.T) {
+	t.Parallel()
+	const gap = 14
+	p := newPlanFixture(t, gap)
+	p.serve(t, 1, gap)
+	n := newReturningNodeWith(t, p, map[string]*archive.Store{replicaA: p.replica, replicaB: p.second}, returningLimits,
+		configuredadmission.RecoveryLimits{Blocks: 2, Bytes: 4 << 20, Deadline: 20 * time.Second})
+	ctx := context.Background()
+	target := p.f.entries[gap-1]
+	for calls := 1; ; calls++ {
+		require.LessOrEqual(t, calls, 30)
+		err := n.recovery.AcquireForCertificate(ctx, target.ResultingUC, target.ResultingTR)
+		if err == nil {
+			break
+		}
+		require.ErrorIs(t, err, configuredadmission.ErrRecoveryUnavailable)
+	}
+	image, err := n.store.LoadJournal(ctx, p.f.context, returningLimits)
+	require.NoError(t, err)
+	require.Equal(t, target.Candidate.Hash, image.Observations[len(image.Observations)-1].TargetHash, "the target's certificate is the journal's latest")
+}
+
+// TestArchiveCatchUp_FallsBackToAnEarlierCertifiedTarget: with no peer to name the top and the current target not archived yet, the walk
+// starts from the target an earlier call was asked for, which the archive has by then.
+func TestArchiveCatchUp_FallsBackToAnEarlierCertifiedTarget(t *testing.T) {
+	t.Parallel()
+	const gap, earlier = 29, 25
+	ctx := context.Background()
+	p := newPlanFixture(t, gap)
+	p.serve(t, 1, earlier-1) // the earlier target is not archived yet either
+	n := newReturningNode(t, p, map[string]*archive.Store{replicaA: p.replica, replicaB: p.second})
+	first := p.f.entries[earlier-1]
+	require.ErrorIs(t, n.recovery.AcquireForCertificate(ctx, first.ResultingUC, first.ResultingTR), configuredadmission.ErrRecoveryUnavailable)
+	p.serve(t, earlier, earlier) // archived now; the newest four still are not
+	target := p.f.entries[gap-1]
+	for range 20 {
+		err := n.recovery.AcquireForCertificate(ctx, target.ResultingUC, target.ResultingTR)
+		require.ErrorIs(t, err, configuredadmission.ErrRecoveryUnavailable)
+		if n.exec.finalized.Number >= earlier {
+			break
+		}
+	}
+	require.EqualValues(t, earlier, n.exec.finalized.Number, "the walk started from the earlier target and the catch-up reached it")
+	p.serve(t, earlier+1, gap)
+	n.catchUp(t, p, gap, 20)
+}
+
+// liarProvider serves a self-consistent tail whose oldest parent is fabricated: the archive has no such block.
+type liarProvider struct{ honest configuredadmission.JournalProvider }
+
+func (l liarProvider) FetchJournal(ctx context.Context, req shardnode.JournalFetchRequest) ([]shardnode.JournalFetchEntry, error) {
+	entries, err := l.honest.FetchJournal(ctx, req)
+	if err != nil || len(entries) == 0 {
+		return entries, err
+	}
+	entries[0].Block.ParentHash = bytes.Repeat([]byte{0x5a}, 32)
+	return entries, nil
+}
+
+// TestArchiveCatchUp_ALyingFirstPeerDoesNotHoldItUp: rev2 B2. The first provider's tail names a top the archive does not have; it is
+// skipped after its walk fails, and the honest second provider's tail closes the gap.
+func TestArchiveCatchUp_ALyingFirstPeerDoesNotHoldItUp(t *testing.T) {
+	t.Parallel()
+	const gap, fresh = 29, 6
+	p := newPlanFixture(t, gap)
+	p.serve(t, 1, gap-fresh)
+	replicas := map[string]*archive.Store{replicaA: p.replica, replicaB: p.second}
+	honest := prunedPeer(t, p, replicas, gap, gap-fresh)
+	asker := testpeer.CreatePeer(t, testpeer.CreatePeerConfiguration(t))
+	var providers []peer.ID
+	for _, provider := range []shardnode.JournalFetchProvider{liarProvider{honest}, honest} {
+		server, err := shardnode.NewJournalServer(provider, shardnode.DefaultJournalTransportLimits())
+		require.NoError(t, err)
+		host := testpeer.CreatePeer(t, testpeer.CreatePeerConfiguration(t))
+		server.Register(host)
+		asker.Network().Peerstore().AddAddrs(host.ID(), host.MultiAddresses(), peerstore.PermanentAddrTTL)
+		providers = append(providers, host.ID())
+	}
+	n := newReturningNode(t, p, replicas)
+	n.recovery.Host, n.recovery.Providers = asker, providers
+	n.catchUp(t, p, gap, 40)
+	require.EqualValues(t, gap, n.exec.finalized.Number)
+}
+
+// prunedPeer is a peer whose journal (the fixture's own, all gap blocks) has pruned through the archived height: it retains only the
+// blocks the archive lacks.
+func prunedPeer(t *testing.T, p *planFixture, replicas map[string]*archive.Store, gap, archived int) configuredadmission.JournalProvider {
+	t.Helper()
+	ctx := context.Background()
+	peerLocal, err := archive.Open(t.TempDir())
+	require.NoError(t, err)
+	for h := 1; h <= gap; h++ {
+		q, rec := p.f.record(t, h-1)
+		require.NoError(t, peerLocal.Put(q, rec))
+	}
+	require.NoError(t, p.f.store.EnableFrontier(ctx, p.f.context, p.f.limits, frontier.Policy{Context: p.f.subject, Replicas: [2]string{replicaA, replicaB},
+		Binding: CertifiedBinding{Context: p.f.context, Subject: p.f.subject}, Availability: fixtureAvailability{stores: replicas}}))
+	top := p.ref(gap)
+	peerWorker := &FrontierWorker{Journal: p.f.store, Context: p.f.context, Limits: p.f.limits, Archive: peerLocal, Subject: p.f.subject, Replicas: []peer.ID{"first", "second"},
+		Finalized: func(context.Context) (shardnode.BlockRef, error) { return top, nil }}
+	// a legacy two-replica worker reads back no copies itself (the journal does): cover exactly what the archive holds
+	require.NoError(t, peerWorker.Advance(ctx, archived))
+	pruned, err := p.f.store.LoadFrontier(ctx, p.f.context, p.f.limits)
+	require.NoError(t, err)
+	require.EqualValues(t, archived, pruned.Anchor.Height, "the peer retains only the blocks the archive lacks")
+	return configuredadmission.JournalProvider{Store: p.f.store, Context: p.f.context, Limits: p.f.limits}
 }

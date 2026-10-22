@@ -70,10 +70,12 @@ type ExecutionRecovery struct {
 	FetchArchive func(context.Context, shardnode.BlockRef, []byte) ([]shardnode.JournalFetchEntry, error)
 	// ArchiveCatchUp, when set, closes a gap that one recovery cannot (longer than its bounds, or with its newest blocks not archived
 	// yet) from the archive, one page per call (#769, catchup.go).
-	ArchiveCatchUp  ArchiveCatchUp
-	catchUpLast     []byte    // the target the previous catch-up call was asked for
-	catchUpWarned   []byte    // the target of the last catch-up warning, and when it was logged
-	catchUpWarnedAt time.Time // (one a minute per target)
+	ArchiveCatchUp     ArchiveCatchUp
+	catchUpSeen        []byte               // the last distinct target a catch-up call was asked for,
+	catchUpPrev        []byte               // and the one before it
+	catchUpRefusedTops map[string]time.Time // peer-supplied tops whose walk failed at its first record (rev2 B2)
+	catchUpWarned      []byte               // the target of the last catch-up warning, and when it was logged
+	catchUpWarnedAt    time.Time            // (one a minute per target)
 }
 
 var (
@@ -596,7 +598,7 @@ func (r *ExecutionRecovery) fetchFromPeers(ctx context.Context, after shardnode.
 		}
 	}
 	if r.FetchArchive != nil {
-		return r.archiveFallback(ctx, after, target, advance, expected)
+		return r.archiveFallback(ctx, after, target, advance, expected, last)
 	}
 	if last != nil {
 		return fmt.Errorf("%w: target %x unavailable from %d peers: %v", ErrRecoveryUnavailable, target, len(r.providerList()), last)
@@ -606,7 +608,7 @@ func (r *ExecutionRecovery) fetchFromPeers(ctx context.Context, after shardnode.
 
 // archiveFallback asks the archive for the suffix the peers could not supply. A suffix longer than one recovery, or one whose newest
 // blocks are not archived yet, goes on as a long catch-up when one is wired (#769); a refusal of the data itself keeps its class.
-func (r *ExecutionRecovery) archiveFallback(ctx context.Context, after shardnode.BlockRef, target []byte, advance bool, expected *types.UnicityCertificate) error {
+func (r *ExecutionRecovery) archiveFallback(ctx context.Context, after shardnode.BlockRef, target []byte, advance bool, expected *types.UnicityCertificate, peerErr error) error {
 	catchUp := advance && r.ArchiveCatchUp != nil
 	entries, archiveErr := r.FetchArchive(ctx, after, target)
 	if archiveErr == nil && catchUp {
@@ -635,6 +637,9 @@ func (r *ExecutionRecovery) archiveFallback(ctx context.Context, after shardnode
 	}
 	if catchUp {
 		return r.catchUpPage(ctx, after, target, expected)
+	}
+	if peerErr != nil {
+		return fmt.Errorf("%w: target %x unavailable from peers (%v) and archive: %v", ErrRecoveryUnavailable, target, peerErr, archiveErr)
 	}
 	return fmt.Errorf("%w: target %x unavailable from peers and archive: %v", ErrRecoveryUnavailable, target, archiveErr)
 }

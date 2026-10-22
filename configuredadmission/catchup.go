@@ -19,6 +19,8 @@ type ArchiveCatchUp interface {
 	// Walk continues the plan from after, or starts one from after up to top when there is none (top is used only then), until it
 	// joins after or until passes. walked is how many blocks the plan holds.
 	Walk(ctx context.Context, after shardnode.BlockRef, top []byte, until time.Time) (joined bool, walked int, err error)
+	// Live reports whether a plan for after is in progress (walking from after, or joined and holding after): its top is fixed then.
+	Live(after shardnode.BlockRef) bool
 	// Page returns up to max verified entries of the joined plan above from, oldest first, and how many planned blocks lie above from.
 	Page(ctx context.Context, from shardnode.BlockRef, max int) (entries []shardnode.JournalFetchEntry, above int, err error)
 	// Drop forgets the plan; the next call starts another.
@@ -48,9 +50,13 @@ func (r *ExecutionRecovery) catchUpPage(ctx context.Context, after shardnode.Blo
 	}()
 	catchUp := r.ArchiveCatchUp
 	page := r.catchUpPageSize()
-	top := r.catchUpTop(ctx, after, target, expected)
-	if len(target) == 32 {
-		defer func() { r.catchUpLast = bytes.Clone(target) }()
+	var top []byte
+	fromPeer := false
+	if !catchUp.Live(after) {
+		top, fromPeer = r.catchUpTop(ctx, after, target, expected)
+	}
+	if len(target) == 32 && !bytes.Equal(target, r.catchUpSeen) {
+		defer func() { r.catchUpPrev, r.catchUpSeen = r.catchUpSeen, bytes.Clone(target) }()
 	}
 	// a third of the call walks; the rest admits, finalizes and advances the frontier
 	until := started.Add(r.limits().Deadline / 3)
@@ -59,6 +65,11 @@ func (r *ExecutionRecovery) catchUpPage(ctx context.Context, after shardnode.Blo
 	}
 	joined, walked, err := catchUp.Walk(ctx, after, top, until)
 	if err != nil {
+		if fromPeer && walked == 0 {
+			// rev2 B2: a peer's tail is only its claim. A top the archive does not have is skipped for a while, so that one faulty
+			// peer first in the provider order cannot hold the catch-up on its fabricated tail.
+			r.catchUpRefuseTop(top)
+		}
 		return r.catchUpWaiting(ctx, target, "walking the archive", err)
 	}
 	if !joined {
@@ -74,6 +85,7 @@ func (r *ExecutionRecovery) catchUpPage(ctx context.Context, after shardnode.Blo
 		catchUp.Drop()
 		return r.catchUpWaiting(ctx, target, "reading the planned page", errors.Join(err, errors.New("empty page")))
 	}
+	entries = withinBytes(entries, r.limits().Bytes)
 	last := entries[len(entries)-1].Block
 	if err := r.admitFetched(ctx, after, last.Hash, entries, true, "archive_catchup"); err != nil {
 		catchUp.Drop()
@@ -99,9 +111,11 @@ func (r *ExecutionRecovery) catchUpPage(ctx context.Context, after shardnode.Blo
 }
 
 // catchUpTop is the block the archive walk starts from (rev2 R1): the newest blocks are in the peers' hot journals and not archived yet,
-// so a peer's journal tail (a zero ancestor) names the parent of its oldest retained entry, which two replicas hold. Without one, the
-// target seen by the previous call (archived by now, most likely), else the target.
-func (r *ExecutionRecovery) catchUpTop(ctx context.Context, after shardnode.BlockRef, target []byte, expected *types.UnicityCertificate) []byte {
+// so a peer's journal tail (a zero ancestor) names the parent of its oldest retained entry, which two replicas hold. A peer's tail is
+// unauthenticated: a top whose walk failed at its first record is skipped for a while (catchUpRefuseTop), and the next provider's is
+// taken. Without one, a certified target from an earlier call (archived by now, most likely), else the target. fromPeer reports
+// whether the top came from a peer's tail.
+func (r *ExecutionRecovery) catchUpTop(ctx context.Context, after shardnode.BlockRef, target []byte, expected *types.UnicityCertificate) (top []byte, fromPeer bool) {
 	req := shardnode.JournalFetchRequest{TargetHash: target, AfterHash: make([]byte, 32)}
 	if len(target) == 0 && expected != nil {
 		req.HeldRound = expected.GetRoundNumber()
@@ -133,14 +147,45 @@ func (r *ExecutionRecovery) catchUpTop(ctx context.Context, after shardnode.Bloc
 		}
 		oldest := entries[0].Block
 		// Only a locator: the walk verifies every record it reaches from here and admission verifies the tail again later.
-		if linked && len(oldest.ParentHash) == 32 && oldest.Number > after.Number+1 {
-			return bytes.Clone(oldest.ParentHash)
+		if linked && len(oldest.ParentHash) == 32 && oldest.Number > after.Number+1 && !r.catchUpRefused(oldest.ParentHash) {
+			return bytes.Clone(oldest.ParentHash), true
 		}
 	}
-	if len(r.catchUpLast) == 32 && !bytes.Equal(r.catchUpLast, after.Hash) {
-		return bytes.Clone(r.catchUpLast)
+	// Certified targets of earlier calls: the one before this target, else the one before that.
+	for _, earlier := range [][]byte{r.catchUpSeen, r.catchUpPrev} {
+		if len(earlier) == 32 && !bytes.Equal(earlier, target) && !bytes.Equal(earlier, after.Hash) {
+			return bytes.Clone(earlier), false
+		}
 	}
-	return target
+	return target, false
+}
+
+// catchUpRefusedFor is how long a peer-supplied top whose walk failed at its first record is skipped.
+const catchUpRefusedFor = time.Minute
+
+func (r *ExecutionRecovery) catchUpRefuseTop(top []byte) {
+	if r.catchUpRefusedTops == nil || len(r.catchUpRefusedTops) >= 64 {
+		r.catchUpRefusedTops = make(map[string]time.Time) // bounded: a fresh map forgets older refusals
+	}
+	r.catchUpRefusedTops[string(top)] = time.Now()
+}
+
+func (r *ExecutionRecovery) catchUpRefused(top []byte) bool {
+	at, ok := r.catchUpRefusedTops[string(top)]
+	return ok && time.Since(at) < catchUpRefusedFor
+}
+
+// withinBytes cuts a page at the recovery's byte budget, keeping at least one entry: admitFetched refuses a longer suffix with the
+// terminal ErrRecoveryBudget (rev2 B1), and one entry is at most configuredprogress.MaxCandidateBytes, under any valid budget.
+func withinBytes(entries []shardnode.JournalFetchEntry, budget int64) []shardnode.JournalFetchEntry {
+	var total int64
+	for i, e := range entries {
+		total += int64(len(e.Block.Raw))
+		if total > budget && i > 0 {
+			return entries[:i]
+		}
+	}
+	return entries
 }
 
 // catchUpRoomFor makes room in the journal for n more blocks before a catch-up admits them (an archive page, or the last stretch from
