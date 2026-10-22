@@ -127,6 +127,15 @@ class ProofOfStake(unittest.TestCase):
         import rehearse
         for name,method in rehearse.STAGES: self.assertTrue(callable(getattr(rehearse.Rehearsal,method)),name)
         self.assertIn('deploy/testnet/rehearse.py',(generate.REPO/'.github/workflows/testnet-rehearsal.yml').read_text())
+    def test_the_pos_stages_are_methods_the_workflow_runs_and_the_default_list_excludes_them(self):
+        import rehearse
+        workflow=(generate.REPO/'.github/workflows/testnet-rehearsal.yml').read_text()
+        for name,method in rehearse.POS_STAGES:
+            self.assertTrue(callable(getattr(rehearse.Rehearsal,method)),name)
+            self.assertIn(name,workflow)
+            self.assertNotIn(name,[n for n,_ in rehearse.STAGES])   # the PoA generation has no registry: the default run must not name them
+        self.assertIn('--pos-contracts pinned-contracts',workflow)
+        self.assertIn('ref: ${{ steps.pins.outputs.contracts }}',workflow)
     def test_the_paired_client_gets_the_registry_genesis_commitment(self):
         # bft-core tn1 rehearsal: ureth 6e59b68c refuses to start without --unicity.genesis-commitment, which b1-profile does not print
         slot='0x'+'ab'*32
