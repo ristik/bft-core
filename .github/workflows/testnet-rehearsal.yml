@@ -34,7 +34,7 @@ jobs:
           python3 - <<'E' >> "$GITHUB_OUTPUT"
           import json
           p = json.load(open('deploy/testnet/pins.json'))
-          for k in ('bft', 'ureth', 'rugregator'):
+          for k in ('bft', 'ureth', 'rugregator', 'contracts'):
               print(f'{k}={p[k]}')
           E
       - uses: actions/setup-go@v5
@@ -55,6 +55,12 @@ jobs:
           repository: ristik/rugregator
           ref: ${{ steps.pins.outputs.rugregator }}
           path: pinned-rugregator
+      - uses: actions/checkout@v4
+        with:
+          repository: ristik/unicity-pos-contracts
+          ref: ${{ steps.pins.outputs.contracts }}
+          path: pinned-contracts
+          submodules: recursive   # the PoS profile's genesis is built from a clean checkout at the pin (generate.py refuses any other)
       - run: sudo apt-get update && sudo apt-get install -y clang libclang-dev libssl-dev pkg-config protobuf-compiler
       - uses: foundry-rs/foundry-toolchain@v1
         with:
@@ -83,6 +89,34 @@ jobs:
           sudo -E env "PATH=$PATH" python3 deploy/testnet/rehearse.py --generation /srv/tn-rehearsal-1 --evidence "$RUNNER_TEMP/evidence" \
             --reset-out /srv/tn-rehearsal-2 --reset-ubft pinned-bft/build/ubft --reset-b1genesis /tmp/tn-b1genesis --reset-keygen /tmp/tn-keygen \
             --reset-captcha-sitekey rehearsal-sitekey --reset-captcha-secret-file /tmp/captcha-secret ${STAGES:+--stages "$STAGES"}
+      - name: PoS profile, generation (the PoA generation is stopped first, the host ports are the same)
+        if: ${{ inputs.stages == '' }}
+        run: |
+          for d in /srv/tn-rehearsal-2 /srv/tn-rehearsal-1-restored /srv/tn-rehearsal-1; do
+            if sudo test -f "$d/compose.yaml"; then sudo docker compose -f "$d/compose.yaml" down; fi
+          done
+          umask 077
+          sudo -E env "PATH=$PATH" python3 deploy/testnet/generate.py --out /srv/tn-rehearsal-pos --validators 4 --chain-id 31337 \
+            --ubft pinned-bft/build/ubft --b1genesis /tmp/tn-b1genesis --keygen /tmp/tn-keygen \
+            --captcha-sitekey rehearsal-sitekey --captcha-secret-file /tmp/captcha-secret \
+            --pos --pos-contracts pinned-contracts
+      - name: PoS profile, rehearse (first start of the containers on the PoS genesis)
+        if: ${{ inputs.stages == '' }}
+        run: |
+          sudo -E env "PATH=$PATH" python3 deploy/testnet/rehearse.py --generation /srv/tn-rehearsal-pos --evidence "$RUNNER_TEMP/evidence-pos" \
+            --stages up,identity,first-tx,pos-smoke
+      - name: PoS profile, resources and logs
+        if: always() && inputs.stages == ''
+        run: |
+          mkdir -p "$RUNNER_TEMP/evidence-pos"
+          sudo chown -R "$(id -u):$(id -g)" "$RUNNER_TEMP/evidence-pos" || true
+          if sudo test -f /srv/tn-rehearsal-pos/compose.yaml; then
+            docker stats --no-stream --format 'table {{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}\t{{.PIDs}}' > "$RUNNER_TEMP/evidence-pos/docker-stats.txt" || true
+            sudo bash -c "cd /srv/tn-rehearsal-pos && docker compose ps -a > '$RUNNER_TEMP/evidence-pos/compose-ps.txt' && docker compose logs --no-color --timestamps --tail 600 > '$RUNNER_TEMP/evidence-pos/compose-logs.txt'" || true
+            sudo cp /srv/tn-rehearsal-pos/manifest.json "$RUNNER_TEMP/evidence-pos/manifest.json" || true
+            sudo cp -r /srv/tn-rehearsal-pos/network "$RUNNER_TEMP/evidence-pos/network" || true   # public material only: no key is ever in network/
+            sudo chown -R "$(id -u):$(id -g)" "$RUNNER_TEMP/evidence-pos" || true
+          fi
       - name: Resources and logs
         if: always()
         run: |
@@ -101,3 +135,9 @@ jobs:
         with:
           name: testnet-rehearsal-evidence
           path: ${{ runner.temp }}/evidence
+      - uses: actions/upload-artifact@v4
+        if: always() && inputs.stages == ''
+        with:
+          name: testnet-rehearsal-pos-evidence
+          path: ${{ runner.temp }}/evidence-pos
+          if-no-files-found: ignore
