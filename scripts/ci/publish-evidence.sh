@@ -79,6 +79,9 @@ case "$kind" in
     fi
     jq -e '.creditDelta > 0' "$xs/exit-claim/matured.json" >/dev/null 2>&1 || { complete=no; why+=("exit-claim/matured.json: no credit delta"); }
     jq -e '.received > 0' "$xs/exit-claim/claimed.json" >/dev/null 2>&1 || { complete=no; why+=("exit-claim/claimed.json: nothing claimed"); } ;;
+  x4replace)
+    grep -q 'P85 recovery lane: all steps PASSED' "$ev/lane.log" 2>/dev/null || { complete=no; why+=("no completion sentinel in lane.log"); }
+    [ -s "$pub/p85/run/x4r/observe.json" ] || { complete=no; why+=("no x4r/observe.json"); } ;;
   x4shadow)
     grep -q 'X4 shadow lane: all steps PASSED' "$ev/lane.log" 2>/dev/null || { complete=no; why+=("no completion sentinel in lane.log"); }
     adapter=$pub/p85/run/shadow/adapter

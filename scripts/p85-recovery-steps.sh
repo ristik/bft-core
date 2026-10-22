@@ -775,6 +775,10 @@ p85_run_lane() {
       *) P85_STEPS="$P85_STEPS s4_claim" ;;
     esac
   fi
+  if [ "${X4_REPLACE_LANE:-0}" = 1 ]; then   # X4 B2b slice 1 (research): J = K + joiner stays alive after the install; the step records whether and when custody acknowledges it
+    source scripts/x4pos/replace-lib.sh
+    P85_STEPS="p85_baseline p85_joiner_nodes p85_joiner_onboard p85_election_reserved p85_proofs p85_handoff p85_install_activation x4r_observe"
+  fi
   if [ "${X4_EXIT_LANE:-0}" = 1 ]; then   # the request is made before the roots restart (they must keep the pending request), the claim is the lane's last step
     if [ "${S4_LANE:-0}" = 1 ]; then
       # the held offender: it asks before its case is submitted (the chain is healthy then; after the observer roots' restarts it nearly stalls, #728), the exit is probed while

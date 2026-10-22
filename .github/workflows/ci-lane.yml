@@ -22,7 +22,7 @@ on:
       lane:
         description: "combined | overbound | abort | t6 | ureth-targeted | all-live (combined, overbound, abort, t6) | x4-shadow (the declared 90-minute PoA-authoritative shadow observation, manual; not part of all-live or the nightly) | x4-exit (the exit lifecycle on the recovery lane's chain: the joiner's identity requests retirement, the roots order the Retirement, the lots mature and are claimed; manual, ~2.5 h) | x4-rewards (the PoS campaign's reward steps on a small-funded shadow chain, manual) | build-only (the builds and their provenance checks only)"
         type: choice
-        options: [combined, overbound, abort, t6, ureth-targeted, all-live, x4-shadow, x4-rewards, x4-exit, build-only]
+        options: [combined, overbound, abort, t6, ureth-targeted, all-live, x4-shadow, x4-rewards, x4-exit, x4-replace, build-only]
         default: combined
       inject_failure:
         description: "Harness failure to test the failure path (honoured only by this workflow): none | after-builds | in-lane"
@@ -82,7 +82,7 @@ jobs:
           elif [ "$EVENT" = workflow_dispatch ]; then lane=$IN_LANE; inject=$IN_INJECT
           elif [ "$EVENT" = schedule ]; then lane=nightly; inject=none
           else lane=$(jq -r .lane scripts/ci/run-inputs.json); inject=$(jq -r .inject_failure scripts/ci/run-inputs.json); fi
-          case "$lane" in combined|overbound|abort|t6|ureth-targeted|all-live|x4-shadow|x4-rewards|x4-exit|nightly|build-only|pr) ;; *) echo "bad lane $lane" >&2; exit 1 ;; esac
+          case "$lane" in combined|overbound|abort|t6|ureth-targeted|all-live|x4-shadow|x4-rewards|x4-exit|x4-replace|nightly|build-only|pr) ;; *) echo "bad lane $lane" >&2; exit 1 ;; esac
           case "$inject" in none|after-builds|in-lane) ;; *) echo "bad inject_failure $inject" >&2; exit 1 ;; esac
           lanes='[]'; t6=false; targeted=false
           case "$lane" in
@@ -90,6 +90,7 @@ jobs:
             x4-shadow) lanes='["x4shadow"]' ;;
             x4-rewards) lanes='["x4rewards"]' ;;
             x4-exit) lanes='["x4exit"]' ;;
+            x4-replace) lanes='["x4replace"]' ;;
             all-live|nightly) lanes='["combined","overbound","abort"]'; t6=true ;;
             t6) t6=true ;;
           esac
@@ -255,7 +256,7 @@ jobs:
         kind: ${{ fromJSON(needs.plan.outputs.lanes) }}
     name: run-lane (${{ matrix.kind }})
     runs-on: ubuntu-24.04
-    timeout-minutes: ${{ matrix.kind == 'x4shadow' && 170 || matrix.kind == 'x4rewards' && 90 || matrix.kind == 'x4exit' && 200 || matrix.kind == 'combined' && 90 || 60 }}
+    timeout-minutes: ${{ matrix.kind == 'x4shadow' && 170 || matrix.kind == 'x4rewards' && 90 || matrix.kind == 'x4exit' && 200 || matrix.kind == 'x4replace' && 120 || matrix.kind == 'combined' && 90 || 60 }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -291,7 +292,7 @@ jobs:
         env:
           CI_INJECT_FAILURE: ${{ needs.plan.outputs.inject }}
           CI_LANE_KIND: ${{ matrix.kind }}
-          LANE_DEADLINE_MIN: ${{ matrix.kind == 'x4shadow' && '140' || matrix.kind == 'x4rewards' && '70' || matrix.kind == 'x4exit' && '170' || matrix.kind == 'combined' && '70' || '45' }}
+          LANE_DEADLINE_MIN: ${{ matrix.kind == 'x4shadow' && '140' || matrix.kind == 'x4rewards' && '70' || matrix.kind == 'x4exit' && '170' || matrix.kind == 'x4replace' && '95' || matrix.kind == 'combined' && '70' || '45' }}
         run: scripts/ci/run-lane.sh "$RUNNER_TEMP/artifacts" "$RUNNER_TEMP/lane" "$RUNNER_TEMP/lane-out"
       - name: Resources of this job
         if: always()
