@@ -13,8 +13,11 @@ import argparse
 import datetime
 import http.client
 import json
+import os
+import shutil
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -292,6 +295,75 @@ class Rehearsal:
         bad = [line for line in logs.splitlines() if 'AssignmentNotActive' in line or 'revert' in line.lower()]
         self.expect(not bad, 'no revert or AssignmentNotActive in any root or shard log', f'{len(bad)} lines' + (': ' + bad[0][:200] if bad else ''))
 
+    def faucet_send(self, to, wei):
+        """A value transfer from the faucet account through the public gateway (it is the only funded account: the PoS owners hold nothing at genesis)."""
+        sender = self.manifest['faucet_address']
+        nonce = int(self.call('eth_getTransactionCount', [sender, 'latest']), 16)
+        sent = self.call('eth_sendRawTransaction', [self.raw_tx(to, nonce, int(self.call('eth_gasPrice'), 16), wei)])
+        receipt = self.wait(f'the funding of {to} is mined', lambda: self.call('eth_getTransactionReceipt', [sent]), 180)
+        self.expect(receipt['status'] == '0x1', f'{wei} wei reach {to}', sent)
+
+    def balance(self, address):
+        return int(self.call('eth_getBalance', [address, 'latest']), 16)
+
+    def relayer(self, key_file, *args):
+        """`ubft pos-relayer tx ...` in a one-shot container on the validators network: the public gateway has no X-Forwarded-For from a host client and the relayer
+        sends each transaction to every validator (their pools do not gossip), so it talks to the execution clients directly. The key is copied to a directory only
+        uid 10001 can read, mounted read-only, and removed afterwards; the container has the node image's limits (read-only, no capabilities, bounded). The
+        relayer's own output is returned: (exit status, stderr)."""
+        services = json.loads((self.gen / 'compose.yaml').read_text())['services']
+        project = json.loads((self.gen / 'compose.yaml').read_text())['name']
+        network = subprocess.run(['docker', 'network', 'ls', '-q', '--filter', f'label=com.docker.compose.project={project}',
+                                  '--filter', 'label=com.docker.compose.network=validators'], check=True, text=True, capture_output=True).stdout.split()
+        self.expect(len(network) == 1, 'the generation has one validators network', str(network))
+        staging = Path(tempfile.mkdtemp(prefix='tn-relayer-key-'))
+        try:
+            key = staging / 'key'
+            key.write_text(Path(key_file).read_text())
+            for path, mode in ((key, 0o400), (staging, 0o500)):
+                os.chown(path, 10001, 10001)
+                os.chmod(path, mode)
+            urls = ','.join(f'http://ureth{i}:8545' for i in range(1, self.n + 1))
+            run = subprocess.run(['docker', 'run', '--rm', '--network', network[0], '--user', '10001:10001', '--read-only', '--cap-drop', 'ALL',
+                                  '--security-opt', 'no-new-privileges', '--memory', '256m', '--pids-limit', '128', '--tmpfs', '/tmp', '-e', 'HOME=/tmp',
+                                  '-v', f'{staging}:/key:ro', '-v', f'{self.gen / "network" / "pos-deployment.json"}:/deployment.json:ro',
+                                  services['root1']['image'], 'pos-relayer', 'tx', *args, '--eth-rpc', urls, '--pos-deployment', '/deployment.json',
+                                  '--sender-key', '/key/key'], text=True, capture_output=True)
+        finally:
+            shutil.rmtree(staging, ignore_errors=True)
+        self.say('  relayer ' + ' '.join(args) + f': exit {run.returncode}: ' + ' | '.join(run.stderr.strip().splitlines()[-4:]))
+        return run.returncode, run.stderr
+
+    def pos_rewards(self):
+        """The owner keys the ceremony generated, used: an owner and a payee funded from the faucet account, the reward pool funded by the relayer (its balance
+        rises by exactly the funding), `reward settle` run against a chain with no root record yet (it must find nothing to close and say so), and a claim by a
+        payee with no credit (nothing may leave the pool). Credits, a paid claim and an owner's custody calls (top-up, exit, withdrawal) need root records or an
+        election and are later stages."""
+        pos = self.manifest.get('pos')
+        self.expect(bool(pos), 'the manifest carries a pos block (this generation was made with --pos)')
+        deployment = json.loads((self.gen / 'network' / 'pos-deployment.json').read_text())
+        pool = deployment['rewardPool']
+        self.expect(len(self.call('eth_getCode', [pool, 'latest'])) > 100, 'the reward pool has code at its genesis address', pool)
+        identity = json.loads((self.gen / 'network' / 'pos-plan.json').read_text())['identities'][0]
+        keys = self.gen / pos['owner_keys'] / f'identity-{identity["stakingId"]}'
+        for role in ('owner', 'payee'):
+            self.expect(self.balance(identity[role]) == 0, f'the {role} of identity {identity["stakingId"]} holds nothing at genesis', identity[role])
+            self.faucet_send(identity[role], 10 ** 18)
+        funding = 10 ** 15
+        before = self.balance(pool)
+        self.say(f'  reward pool balance {before}')
+        status, out = self.relayer(keys / 'owner.key', 'reward', 'fund', '--value-wei', str(funding))
+        self.expect(status == 0, 'reward fund with the owner key succeeds', out.strip()[-300:])
+        after = self.wait('the pool balance reflects the funding', lambda: (lambda b: b if b != before else None)(self.balance(pool)), 120)
+        self.expect(after == before + funding, 'the pool balance rose by exactly the funding', f'{before} + {funding} = {after}')
+        status, out = self.relayer(keys / 'owner.key', 'reward', 'settle', '--max-steps', '4')
+        self.expect(status == 0 and 'reward pool idle after' in out, 'reward settle runs to the end of what the chain has (nothing to close, with no root record) and says so', out.strip()[-300:])
+        self.expect(self.balance(pool) == after, 'settle moved nothing out of the pool')
+        recipient = '0x' + '77' * 20
+        status, out = self.relayer(keys / 'payee.key', 'reward', 'claim', '--amount-wei', '1', '--to', recipient)
+        self.say(f'  claim without credit: exit {status}')
+        self.expect(self.balance(recipient) == 0 and self.balance(pool) == after, 'a claim by a payee without credit moves nothing out of the pool', f'recipient {self.balance(recipient)}, pool {self.balance(pool)}')
+
     def pod_restart(self):
         """One validator entity at a time: stop its execution client, root and shard node (its signing authority stays live, as the README requires), check what the
         package promises, start them again and check they rejoin. The PUBLIC gateway fails closed while a validator is down (it checks every validator's identity
@@ -408,7 +480,7 @@ class Rehearsal:
 
 STAGES = (('up', 'up'), ('identity', 'identity'), ('first-tx', 'first_tx'), ('gateway-limits', 'gateway_limits'), ('faucet-guard', 'faucet_guard'), ('load', 'load'), ('pod-restart', 'pod_restart'), ('backup-restore', 'backup_restore'), ('reset', 'reset'))
 # run on a generation made with --pos (the workflow's second generation); not part of the default list
-POS_STAGES = (('pos-smoke', 'pos_smoke'),)
+POS_STAGES = (('pos-smoke', 'pos_smoke'), ('pos-rewards', 'pos_rewards'))
 
 
 def main():
