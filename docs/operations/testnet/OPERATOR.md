@@ -16,7 +16,7 @@ reboot on a network you intend to keep. Design detail: [deploy/testnet/README.md
 - One Debian 12/bookworm server (the runtime glibc). It builds the images too: `images.json` records *local* image IDs.
   Plan 24 GiB RAM, 8 cores, 100 GiB SSD for N=4 (budgets, not measurements) plus off-host backup space.
 - Docker Engine with the Compose v2 plugin (not pinned: record versions), Go 1.27.1 (official tarball), Rust 1.97.1
-  (rustup), clang/libclang, make, git, Python 3.11+, jq, curl. Work as a non-root user in the `docker` group who
+  (rustup), clang/libclang, make, git, Python 3.11+, jq, curl, and Foundry's `cast` on PATH (v1.8.1 in CI: `generate.py` takes the registry's genesis commitment from the finalized genesis with `cast keccak`, the PoS profile checks code hashes with it, and the rehearsal signs its transactions with it). Work as a non-root user in the `docker` group who
   owns `/srv/src`; only the commands shown with `sudo` need root (they keep your PATH, so `go` is found).
 - Public: TCP 443 (and 80 only for certificate renewal), SSH for operators. Ports 8545 (RPC), 8088 (faucet) and
   9090 (Prometheus) bind host loopback only; never publish them or any validator port. Docker subnets
