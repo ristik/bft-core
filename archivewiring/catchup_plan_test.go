@@ -25,7 +25,8 @@ import (
 // archive: the state of a validator that comes back after the others have pruned the gap from their journals (#769).
 type planFixture struct {
 	f       *wiringFixture
-	replica *archive.Store
+	replica *archive.Store // served over the archive protocol
+	second  *archive.Store // the second copy, for the frontier's two acknowledgments
 	local   *archive.Store
 	source  *RecoverySource
 	genesis shardnode.BlockRef
@@ -42,6 +43,8 @@ func newPlanFixture(t *testing.T, n int) *planFixture {
 	server, err := NewServer(replica, f.subject, func(context.Context, archive.Request, *archive.Record) error { return nil }, []peer.ID{sender.ID()}, DefaultLimits())
 	require.NoError(t, err)
 	server.Register(context.Background(), host)
+	second, err := archive.Open(t.TempDir())
+	require.NoError(t, err)
 	local, err := archive.Open(t.TempDir())
 	require.NoError(t, err)
 	// the journal image lists candidates in its own order: index them by height
@@ -50,7 +53,7 @@ func newPlanFixture(t *testing.T, n int) *planFixture {
 		require.Equal(t, uint64(i+1), e.Candidate.Number)
 	}
 	first := f.entries[0].Candidate
-	return &planFixture{f: f, replica: replica, local: local, genesis: shardnode.BlockRef{Number: first.ParentNumber, Hash: first.ParentHash, StateRoot: first.ParentState},
+	return &planFixture{f: f, replica: replica, second: second, local: local, genesis: shardnode.BlockRef{Number: first.ParentNumber, Hash: first.ParentHash, StateRoot: first.ParentState},
 		source: &RecoverySource{Context: f.context, Subject: f.subject, Local: local, Host: sender, Replicas: []peer.ID{host.ID()}, Limits: DefaultLimits(), MaxBlocks: 8}}
 }
 
@@ -61,6 +64,7 @@ func (p *planFixture) serve(t *testing.T, from, to int) {
 		q, rec := p.f.record(t, h-1)
 		require.True(t, archive.HasReceiptList(rec), "the fixture's empty blocks are receipt-complete")
 		require.NoError(t, p.replica.Put(q, rec))
+		require.NoError(t, p.second.Put(q, rec))
 	}
 }
 
@@ -256,6 +260,21 @@ func TestArchivePlan_Refusals(t *testing.T) {
 		require.NoError(t, p.source.Extend(context.Background(), plan, far()))
 		require.True(t, plan.Joined())
 		require.Equal(t, 4, plan.Walked())
+	})
+	t.Run("a top at or below the anchor's height is invalid", func(t *testing.T) {
+		p := newPlanFixture(t, 6)
+		p.serve(t, 1, 6)
+		for _, top := range []int{3, 5} {
+			plan, err := NewArchivePlan(p.ref(5), p.hash(top))
+			if top == 5 {
+				require.ErrorIs(t, err, ErrArchiveRecoveryUnavailable, "the anchor itself is no top")
+				continue
+			}
+			require.NoError(t, err)
+			err = p.source.Extend(context.Background(), plan, far())
+			require.ErrorIs(t, err, ErrArchiveRecoveryInvalid, "top %d", top)
+			require.Zero(t, plan.Walked())
+		}
 	})
 	t.Run("a plan needs an anchor and another top", func(t *testing.T) {
 		p := newPlanFixture(t, 1)
