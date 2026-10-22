@@ -25,6 +25,7 @@ from pathlib import Path
 
 PUBLIC_RPC = '127.0.0.1:8545'
 FAUCET = '127.0.0.1:8088'
+BOND_UNIT = 100 * 10 ** 18   # one weight unit: deploy/testnet/pos.py BOND_UNIT
 PROXY_IPS = ('203.0.113.', '198.51.100.')   # documentation ranges: the client addresses the nginx in front would have set in X-Forwarded-For
 
 
@@ -270,10 +271,13 @@ class Rehearsal:
 
     def view(self, to, signature, *args):
         """A contract view through the public gateway: eth_call with cast-encoded data, decoded by cast. `signature` is cast's 'name(inputs)(outputs)'."""
+        return [int(line.split()[0]) for line in self.view_text(to, signature, *args).splitlines()]
+
+    def view_text(self, to, signature, *args):
         function = signature.split(')(')[0] + ')'
         data = self.cast_run('calldata', function, *args)
         raw = self.call('eth_call', [{'to': to, 'data': data}, 'latest'])
-        return [int(line.split()[0]) for line in self.cast_run('abi-decode', signature, raw).splitlines()]
+        return self.cast_run('abi-decode', signature, raw)
 
     def pos_smoke(self):
         """OPERATOR.md 5a's smoke, run: the containers started on the PoS genesis, the contracts are there, the election clock ticks and the custody has applied every
@@ -311,11 +315,11 @@ class Rehearsal:
     def balance(self, address):
         return int(self.call('eth_getBalance', [address, 'latest']), 16)
 
-    def relayer(self, key_file, *args):
+    def relayer(self, key_file, *args, joiner=False):
         """`ubft pos-relayer tx ...` in a one-shot container on the validators network: the public gateway has no X-Forwarded-For from a host client and the relayer
         sends each transaction to every validator (their pools do not gossip), so it talks to the execution clients directly. The key is copied to a directory only
         uid 10001 can read, mounted read-only, and removed afterwards; the container has the node image's limits (read-only, no capabilities, bounded). The
-        relayer's own output is returned: (exit status, stderr)."""
+        relayer's own output is returned: (exit status, stderr). With `joiner` the staged file is a `join` identity file instead of a sender key."""
         services = json.loads((self.gen / 'compose.yaml').read_text())['services']
         project = json.loads((self.gen / 'compose.yaml').read_text())['name']
         network = subprocess.run(['docker', 'network', 'ls', '-q', '--filter', f'label=com.docker.compose.project={project}',
@@ -333,7 +337,7 @@ class Rehearsal:
                                   '--security-opt', 'no-new-privileges', '--memory', '256m', '--pids-limit', '128', '--tmpfs', '/tmp', '-e', 'HOME=/tmp',
                                   '-v', f'{staging}:/key:ro', '-v', f'{self.gen / "network" / "pos-deployment.json"}:/deployment.json:ro',
                                   services['root1']['image'], 'pos-relayer', 'tx', *args, '--eth-rpc', urls, '--pos-deployment', '/deployment.json',
-                                  '--sender-key', '/key/key'], text=True, capture_output=True)
+                                  *(('--joiner',) if joiner else ('--sender-key',)), '/key/key'], text=True, capture_output=True)
         finally:
             shutil.rmtree(staging, ignore_errors=True)
         self.say('  relayer ' + ' '.join(args) + f': exit {run.returncode}: ' + ' | '.join(run.stderr.strip().splitlines()[-4:]))
@@ -368,6 +372,57 @@ class Rehearsal:
         status, out = self.relayer(keys / 'payee.key', 'reward', 'claim', '--amount-wei', '1', '--to', recipient)
         self.say(f'  claim without credit: exit {status}')
         self.expect(self.balance(recipient) == 0 and self.balance(pool) == after, 'a claim by a payee without credit moves nothing out of the pool', f'recipient {self.balance(recipient)}, pool {self.balance(pool)}')
+
+    def pos_election(self):
+        """Weights without a joiner: identity 1's owner bonds one more bond unit (`join bond` is the relayer's only bonding command; it reads an identity file and
+        uses nothing of it but the owner key, so every other field of the file written here is a throwaway), which gives that identity two units against the
+        others' one, and the stage waits for the election to reserve a result at its cadence (400 rounds and 300 s past the anchors). Records the frozen
+        members; no handoff is made here (the next stage). A result reserved BEFORE the bond froze the old weights: that is reported, not hidden."""
+        pos = self.manifest.get('pos')
+        self.expect(bool(pos), 'the manifest carries a pos block (this generation was made with --pos)')
+        deployment = json.loads((self.gen / 'network' / 'pos-deployment.json').read_text())
+        custody, election = deployment['custody'], deployment['election']
+        identity = json.loads((self.gen / 'network' / 'pos-plan.json').read_text())['identities'][0]
+        sid = identity['stakingId']
+        zero = '0x' + '00' * 32
+        def open_result():
+            out = self.view_text(election, 'openResult()(bytes32)').strip()
+            return None if out == zero else out
+        before = open_result()
+        self.say(f'  open result before the bond: {before}')
+        live = self.view(election, 'liveCount()(uint32)')[0]
+        self.expect(live == self.n, 'the election\'s live index holds every genesis identity', str(live))
+        self.faucet_send(identity['owner'], (BOND_UNIT + 10 ** 18))
+        staging = Path(tempfile.mkdtemp(prefix='tn-joiner-'))
+        try:
+            throwaway = lambda: '0x' + os.urandom(32).hex()
+            owner_key = (self.gen / pos['owner_keys'] / f'identity-{sid}' / 'owner.key').read_text().strip()
+            file = staging / 'joiner.json'
+            file.write_text(json.dumps({'ownerKey': owner_key, 'rootKey': throwaway(), 'evmKey': throwaway(), 'withdrawal': identity['withdrawal'],
+                                        'payee': identity['payee'], 'rootNodeId': 'unused', 'evmNodeId': 'unused', 'expiry': 4000000000}))
+            held = self.balance(custody)
+            status, out = self.relayer(file, 'join', 'bond', '--id', str(sid), '--value-wei', str(BOND_UNIT), joiner=True)
+        finally:
+            shutil.rmtree(staging, ignore_errors=True)
+        self.expect(status == 0, 'the owner of an existing identity bonds one more unit', out.strip()[-300:])
+        self.expect(self.wait('the custody holds the bond', lambda: self.balance(custody) - held == BOND_UNIT, 120), 'the custody balance rose by exactly one bond unit')
+        def clock():
+            return ' '.join(f'{k}={self.view(to, sig)[0]}' for k, to, sig in (('progress', self.REGISTRY, 'progress()(uint64)'), ('ucTime', self.REGISTRY, 'ucTime()(uint64)'),
+                                                                                ('records', self.REGISTRY, 'recordCount()(uint64)'), ('cursor', custody, 'recordCursor()(uint64)')))
+        self.say('  election clock: ' + clock())
+        def reserved():
+            self.say('  election clock: ' + clock())
+            return open_result()
+        result = before or self.wait('the election reserves a result', reserved, 1500)
+        raw = self.call('eth_call', [{'to': election, 'data': self.cast_run('calldata', 'result(bytes32)', result)}, 'latest'])
+        state = int(raw[2:66], 16)   # ResultState: 1 Reserved
+        members = self.view_text(election, 'frozenMembers(bytes32)((uint64,uint64,uint64,uint64,bytes32)[])', result)
+        (self.evidence / 'pos-election-frozen-members.txt').write_text(members + '\n')
+        count = members.count('(') - members.count('((')
+        self.say(f'  result {result}, state {state}: {members}')
+        self.expect(state == 1, 'the open result is Reserved', str(state))
+        self.expect(count >= 1, 'the reserved result freezes members', members[:200])
+        self.expect(before is None, 'the result was reserved after the bond (not before it)', str(before))
 
     def pod_restart(self):
         """One validator entity at a time: stop its execution client, root and shard node (its signing authority stays live, as the README requires), check what the
@@ -485,7 +540,7 @@ class Rehearsal:
 
 STAGES = (('up', 'up'), ('identity', 'identity'), ('first-tx', 'first_tx'), ('gateway-limits', 'gateway_limits'), ('faucet-guard', 'faucet_guard'), ('load', 'load'), ('pod-restart', 'pod_restart'), ('backup-restore', 'backup_restore'), ('reset', 'reset'))
 # run on a generation made with --pos (the workflow's second generation); not part of the default list
-POS_STAGES = (('pos-smoke', 'pos_smoke'), ('pos-rewards', 'pos_rewards'))
+POS_STAGES = (('pos-smoke', 'pos_smoke'), ('pos-rewards', 'pos_rewards'), ('pos-election', 'pos_election'))
 
 
 def main():
