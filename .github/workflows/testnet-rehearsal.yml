@@ -1,0 +1,103 @@
+name: testnet-rehearsal
+# The container package, built from pins.json and run on a hosted runner: deploy/testnet/rehearse.py. Evidence of the PACKAGE only (TN-1 #432/#433/#434/#435),
+# never of the host: nothing here measures capacity, DNS/TLS, real hCaptcha or a second operator. No third-party service is contacted (the faucet signer, which
+# verifies hCaptcha, is not started). Manual: it builds ureth from source, which takes the better part of an hour.
+on:
+  pull_request:
+    # a change to the package (it is long, but the package changes rarely and this is the only run of it as containers)
+    paths: ['deploy/testnet/**', '.github/workflows/testnet-rehearsal.yml']
+  workflow_dispatch:
+    inputs:
+      stages:
+        description: 'rehearse.py stages, comma separated (default: all that exist)'
+        required: false
+        default: ''
+permissions:
+  contents: read
+concurrency:
+  group: testnet-rehearsal-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  rehearse:
+    # ubuntu-22.04 (glibc 2.35), not -latest (2.39): a binary needs a glibc no newer than the runtime image's (bookworm, 2.36). The first run built on 2.39 and
+    # build-images.py's own --help check in the runtime image refused it, as the package README says (build on Debian 12 or older).
+    runs-on: ubuntu-22.04
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v4
+      - name: Free disk (the ureth release build is large)
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /opt/hostedtoolcache/CodeQL
+          df -h /
+      - id: pins
+        run: |
+          python3 - <<'E' >> "$GITHUB_OUTPUT"
+          import json
+          p = json.load(open('deploy/testnet/pins.json'))
+          for k in ('bft', 'ureth', 'rugregator'):
+              print(f'{k}={p[k]}')
+          E
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.pins.outputs.bft }}
+          path: pinned-bft
+      - uses: actions/checkout@v4
+        with:
+          repository: ristik/ureth
+          ref: ${{ steps.pins.outputs.ureth }}
+          path: pinned-ureth
+      - uses: actions/checkout@v4
+        with:
+          repository: ristik/rugregator
+          ref: ${{ steps.pins.outputs.rugregator }}
+          path: pinned-rugregator
+      - run: sudo apt-get update && sudo apt-get install -y clang libclang-dev libssl-dev pkg-config protobuf-compiler
+      - uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: v1.8.1   # cast: offline signing of the rehearsal's transactions
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+          workspaces: |
+            pinned-ureth
+            pinned-rugregator
+      - name: Build the images from the pinned sources (build-images.py builds each binary and checks the source pin and a clean tree)
+        run: python3 deploy/testnet/build-images.py --bft-source pinned-bft --ureth-source pinned-ureth --rugregator-source pinned-rugregator
+      - run: go build -o /tmp/tn-keygen ./deploy/testnet/keygen
+      - run: go build -C pinned-bft -o /tmp/tn-b1genesis ./scripts/b1genesis
+      - name: Generate a generation (authorities start here and stay live)
+        run: |
+          umask 077
+          echo rehearsal-not-a-real-secret > /tmp/captcha-secret
+          sudo -E env "PATH=$PATH" python3 deploy/testnet/generate.py --out /srv/tn-rehearsal-1 --validators 4 --chain-id 31337 \
+            --ubft pinned-bft/build/ubft --b1genesis /tmp/tn-b1genesis --keygen /tmp/tn-keygen \
+            --captcha-sitekey rehearsal-sitekey --captcha-secret-file /tmp/captcha-secret
+      - name: Rehearse
+        env:
+          STAGES: ${{ inputs.stages }}
+        run: |
+          sudo -E env "PATH=$PATH" python3 deploy/testnet/rehearse.py --generation /srv/tn-rehearsal-1 --evidence "$RUNNER_TEMP/evidence" \
+            --reset-out /srv/tn-rehearsal-2 --reset-ubft pinned-bft/build/ubft --reset-b1genesis /tmp/tn-b1genesis --reset-keygen /tmp/tn-keygen \
+            --reset-captcha-sitekey rehearsal-sitekey --reset-captcha-secret-file /tmp/captcha-secret ${STAGES:+--stages "$STAGES"}
+      - name: Resources and logs
+        if: always()
+        run: |
+          mkdir -p "$RUNNER_TEMP/evidence"
+          sudo chown -R "$(id -u):$(id -g)" "$RUNNER_TEMP/evidence"   # the rehearsal ran as root
+          docker stats --no-stream --format 'table {{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}\t{{.PIDs}}' > "$RUNNER_TEMP/evidence/docker-stats.txt" || true
+          df -h / > "$RUNNER_TEMP/evidence/df.txt" || true
+          # the generation that is live now: the reset's, else the restored one, else the original
+          G=$(for d in /srv/tn-rehearsal-2 /srv/tn-rehearsal-1-restored /srv/tn-rehearsal-1; do sudo test -f "$d/compose.yaml" && { echo "$d"; break; }; done)
+          sudo bash -c "cd '$G' && docker compose ps -a > '$RUNNER_TEMP/evidence/compose-ps.txt' && docker compose logs --no-color --timestamps --tail 400 > '$RUNNER_TEMP/evidence/compose-logs.txt'" || true
+          sudo cp "$G/manifest.json" "$RUNNER_TEMP/evidence/manifest.json" || true
+          sudo chown -R "$(id -u):$(id -g)" "$RUNNER_TEMP/evidence" || true
+          cp deploy/testnet/artifacts/images.json "$RUNNER_TEMP/evidence/images.json" || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: testnet-rehearsal-evidence
+          path: ${{ runner.temp }}/evidence

@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto"
 	"crypto/sha256"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"sort"
@@ -144,6 +145,65 @@ type ObservationContextV2 struct {
 	// EpochAuthority is set only for profile 2. It reports the epoch whose
 	// handoff has been installed; nil preserves the fixed genesis profile.
 	EpochAuthority RootEpochAuthority
+	// VerifyMemo, when set, remembers successful certificate signature verifications so that re-reading a journal does not repeat them (bft-core#728). The
+	// zero value (nil) verifies every certificate every time. It memoizes only UnicityCertificate.Verify, whose inputs are exactly the key (the certificate,
+	// the content of the trust base it is checked under, the partition, the shard and the shard configuration hash); every other check of this function
+	// (shape, network, current-epoch authority, technical record) always runs.
+	VerifyMemo VerifyMemo
+}
+
+// VerifyMemo remembers successful certificate verifications by an opaque key derived from every input of the verification. Only successes are ever
+// remembered; an implementation must be safe for concurrent use.
+type VerifyMemo interface {
+	Verified(key [32]byte) bool
+	Remember(key [32]byte)
+}
+
+// certificateVerificationKey binds a memoized verification to the certificate's canonical bytes and to the content (not the identity) of everything
+// UnicityCertificate.Verify reads besides the certificate: the trust base, the partition, the shard and the configuration hash.
+func certificateVerificationKey(u *types.UnicityCertificate, tb *types.RootTrustBaseV1, partition types.PartitionID, shard types.ShardID, conf []byte) ([32]byte, bool) {
+	ub, err := types.Cbor.Marshal(u)
+	if err != nil {
+		return [32]byte{}, false
+	}
+	tbHash, err := tb.Hash(crypto.SHA256)
+	if err != nil {
+		return [32]byte{}, false
+	}
+	h := sha256.New()
+	write := func(b []byte) {
+		var n [8]byte
+		binary.BigEndian.PutUint64(n[:], uint64(len(b)))
+		h.Write(n[:])
+		h.Write(b)
+	}
+	write([]byte("unicity-certificate-verification/1"))
+	write(ub)
+	write(tbHash)
+	var pid [8]byte
+	binary.BigEndian.PutUint64(pid[:], uint64(partition))
+	write(pid[:])
+	write(shard.Bytes())
+	write(conf)
+	var key [32]byte
+	copy(key[:], h.Sum(nil))
+	return key, true
+}
+
+// verifyCertificate is UnicityCertificate.Verify through the optional memo.
+func verifyCertificate(c ObservationContextV2, u *types.UnicityCertificate, tb *types.RootTrustBaseV1, conf []byte) error {
+	if c.VerifyMemo == nil {
+		return u.Verify(quorumweight.Checked(tb), crypto.SHA256, c.PartitionID, c.ShardID, conf)
+	}
+	key, ok := certificateVerificationKey(u, tb, c.PartitionID, c.ShardID, conf)
+	if ok && c.VerifyMemo.Verified(key) {
+		return nil
+	}
+	err := u.Verify(quorumweight.Checked(tb), crypto.SHA256, c.PartitionID, c.ShardID, conf)
+	if err == nil && ok {
+		c.VerifyMemo.Remember(key)
+	}
+	return err
 }
 
 // RootEpochAuthority is backed by locally verified handoff state. A trust
@@ -228,10 +288,10 @@ func authenticateObservationV2(ctx context.Context, c ObservationContextV2, uc *
 			return VerifiedObservationV2{}, fmt.Errorf("%w: shard epoch %d", ErrConfEpochUnknown, t.Epoch)
 		}
 		conf = bytes.Clone(installed)
-		if err = u.Verify(quorumweight.Checked(tb), crypto.SHA256, c.PartitionID, c.ShardID, conf); err != nil {
+		if err = verifyCertificate(c, u, tb, conf); err != nil {
 			return VerifiedObservationV2{}, fmt.Errorf("%w: %w", ErrUnauthenticated, err)
 		}
-	} else if err = u.Verify(quorumweight.Checked(tb), crypto.SHA256, c.PartitionID, c.ShardID, conf); err != nil {
+	} else if err = verifyCertificate(c, u, tb, conf); err != nil {
 		return VerifiedObservationV2{}, fmt.Errorf("%w: %w", ErrUnauthenticated, err)
 	}
 	if u.UnicitySeal == nil || uint64(u.UnicitySeal.NetworkID) != uint64(c.NetworkID) {

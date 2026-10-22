@@ -123,6 +123,24 @@ class ProofOfStake(unittest.TestCase):
         keys=set(re.findall(r'`json:"(\w+)(?:,omitempty)?"`',struct[:struct.index('\n}')]))
         d={'networkWord':'0xaa','chainId':31337,'custody':'0xc','custodyCodeHash':'0xch','election':'0xe','electionCodeHash':'0xeh','rewardPool':'0xrp','rewardPoolCodeHash':'0xrph'}
         self.assertEqual(set(pos.deployment_of(d,{'runtimeHash':'0xrh'})),keys)
+    def test_the_rehearsal_stages_are_methods_and_the_workflow_runs_it(self):
+        import rehearse
+        for name,method in rehearse.STAGES: self.assertTrue(callable(getattr(rehearse.Rehearsal,method)),name)
+        self.assertIn('deploy/testnet/rehearse.py',(generate.REPO/'.github/workflows/testnet-rehearsal.yml').read_text())
+    def test_the_paired_client_gets_the_registry_genesis_commitment(self):
+        # bft-core tn1 rehearsal: ureth 6e59b68c refuses to start without --unicity.genesis-commitment, which b1-profile does not print
+        slot='0x'+'ab'*32
+        class Done: stdout=slot+'\n'
+        real=generate.subprocess.run
+        generate.subprocess.run=lambda *a,**k: Done()
+        try:
+            reg=pos.REGISTRY.lower().removeprefix('0x')
+            word='0x'+'01'*32
+            self.assertEqual(generate.genesis_commitment({'alloc':{pos.REGISTRY:{'storage':{slot.upper().replace('0X','0x'):word}}}}),word)
+            self.assertEqual(generate.genesis_commitment({'alloc':{reg:{'storage':{slot:'0x5'}}}}),'0x'+'00'*31+'05')
+            for bad in ({}, {slot:'0x0'}):
+                with self.assertRaises(ValueError): generate.genesis_commitment({'alloc':{reg:{'storage':bad}}})
+        finally: generate.subprocess.run=real
     def test_the_shadow_profile_has_the_hook_and_no_election(self):
         d={'custody':'0xc','election':'0xe'}
         args=pos.profile_args(d,{'election':'/m.json','hook':'/h.jsonl'},shadow=True)

@@ -142,3 +142,5 @@ func TestJournalLoadLogsItsSize(t *testing.T) {
 	require.Equal(t, uint64(image.Bytes), last["bytes"])
 	require.Positive(t, last["took"].(time.Duration))
 }
+
+func slogOf(h *recordedLog) *slog.Logger { return slog.New(h) }
