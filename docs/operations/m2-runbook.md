@@ -574,6 +574,13 @@ There is no platform-independent operator-safe replica restart command. Use the
 deployment-owned service manager only after the acknowledgement/frontier checks;
 see Gaps for the remaining product and live-rehearsal limits.
 
+### Derived archive replicas (the default)
+
+Without `--archive-replica` the node derives its replicas from the shard's validators: the next three validators after it in circular peer-ID order, and any two
+acknowledgements make a block durable. A dead replica therefore no longer stops pruning while the other two stay up, and a validator-set change moves the
+replicas with it, so there is nothing to reconfigure. The testnet package passes no `--archive-replica` (the package test asserts it). Give the flag only as
+exactly one explicit pair, which keeps the older two-of-two behaviour; any other count is refused at startup. The rules below apply to that explicit pair only.
+
 ### Replacing a configured archive replica (`--archive-replica`)
 
 After a validator-set change retires one configured replica, a retained validator
