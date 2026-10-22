@@ -108,7 +108,12 @@ class Rehearsal:
         return self.http(host, 'POST', '/', data, {'Content-Type': 'application/json', 'X-Forwarded-For': ip})
 
     def call(self, method, params=(), ip=PROXY_IPS[0] + '10'):
-        status, text = self.rpc({'jsonrpc': '2.0', 'id': 1, 'method': method, 'params': list(params)}, ip)
+        for attempt in range(6):
+            status, text = self.rpc({'jsonrpc': '2.0', 'id': 1, 'method': method, 'params': list(params)}, ip)
+            if status != 429 or attempt == 5:
+                break
+            self.say(f'  {method}: 429 from the per-client limit (10 requests/s), waiting 1 s ({attempt + 1}/5)')   # the limit is the package's; a driver that bursts waits for it
+            time.sleep(1)
         if status != 200:
             raise Failure(f'{method} through the public gateway: {status} {text}')
         return json.loads(text).get('result')
