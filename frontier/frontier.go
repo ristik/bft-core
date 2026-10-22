@@ -176,6 +176,9 @@ func acksValid(r Record, p Policy, historical bool) error {
 	return ErrContext
 }
 
+// ReplicasValid reports whether the policy names a usable replica set: a valid Eligible set with its digest, or the legacy pair.
+func (p Policy) ReplicasValid() bool { return policyReplicasValid(p) }
+
 func policyReplicasValid(p Policy) bool {
 	if len(p.Eligible) != 0 {
 		return eligibleValid(p)

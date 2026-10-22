@@ -95,7 +95,7 @@ func TestRecoverySourceSkipsCorruptFirstReplica(t *testing.T) {
 	local, err := archive.Open(t.TempDir())
 	require.NoError(t, err)
 	source := &RecoverySource{Context: f.context, Subject: f.subject, Local: local, Host: sender,
-		Replicas: [2]peer.ID{badReplica.ID(), goodReplica.ID()}, Limits: DefaultLimits(), MaxBlocks: 8}
+		Replicas: []peer.ID{badReplica.ID(), goodReplica.ID()}, Limits: DefaultLimits(), MaxBlocks: 8}
 	entries, err := source.FetchSuffix(context.Background(), genesis, q.BlockHash[:])
 	require.NoError(t, err)
 	require.Len(t, entries, 1)

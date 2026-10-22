@@ -21,6 +21,39 @@ import (
 
 var ErrConfig = errors.New("archive wiring: invalid replica configuration")
 
+// replicaCopies is the number of verified remote copies that makes a block durably archived (archivepolicy.K). A third replica is
+// published to as well, but never required.
+const replicaCopies = 2
+
+// ackSet is the set of replicas (by index into Replicas) holding a verified copy.
+type ackSet uint8
+
+func (a ackSet) count() int {
+	n := 0
+	for ; a != 0; a &= a - 1 {
+		n++
+	}
+	return n
+}
+
+// validReplicas reports whether r is a usable replica list: two or three distinct, non-empty peer IDs.
+func validReplicas(r []peer.ID) bool {
+	if len(r) < replicaCopies || len(r) > 3 {
+		return false
+	}
+	for i, id := range r {
+		if id == "" {
+			return false
+		}
+		for _, other := range r[:i] {
+			if other == id {
+				return false
+			}
+		}
+	}
+	return true
+}
+
 type Publisher struct {
 	Journal        *configuredprogress.Store
 	Context        configuredprogress.Context
@@ -28,7 +61,7 @@ type Publisher struct {
 	Archive        *archive.Store
 	Subject        archive.Context
 	Host           shardnode.EvidenceHost
-	Replicas       [2]peer.ID
+	Replicas       []peer.ID
 	Limits         Limits
 	Log            *slog.Logger
 	Metrics        *Metrics
@@ -36,13 +69,13 @@ type Publisher struct {
 	ReceiptSource  ReceiptSource
 
 	mu              sync.Mutex
-	ack             map[[32]byte]uint8
+	ack             map[[32]byte]ackSet
 	bundleAck       map[uint64]uint8
 	bundleConflict  map[uint64]uint8 // per epoch, the replicas that refused our bundle as semantically different: never retried
 	cursor          int
-	replicaCursor   [2]int
+	replicaCursor   []int // one per replica, sized in Run
 	status          Status
-	replicaProgress [2]ReplicaProgress
+	replicaProgress []ReplicaProgress
 }
 
 // ReceiptSource is the execution RPC boundary used only while capturing an
@@ -130,16 +163,25 @@ type ReplicaProgress struct {
 // verified read-back after restart; this in-memory count never licenses prune.
 func (p *Publisher) Snapshot() Status { p.mu.Lock(); defer p.mu.Unlock(); return p.status }
 
+// sizeState sizes the per-replica state to Replicas. The caller holds p.mu.
+func (p *Publisher) sizeState() {
+	if len(p.replicaCursor) != len(p.Replicas) {
+		p.replicaCursor = make([]int, len(p.Replicas))
+		p.replicaProgress = make([]ReplicaProgress, len(p.Replicas))
+	}
+}
+
 // ReplicaProgress returns a copy of the latest per-peer transfer diagnostics.
-func (p *Publisher) ReplicaProgress() [2]ReplicaProgress {
+func (p *Publisher) ReplicaProgress() []ReplicaProgress {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	return p.replicaProgress
+	p.sizeState()
+	return append([]ReplicaProgress(nil), p.replicaProgress...)
 }
 
 // Validate checks the complete static policy before the node starts.
 func (p *Publisher) Validate() error {
-	if p.Journal == nil || p.Archive == nil || p.Host == nil || p.Replicas[0] == "" || p.Replicas[1] == "" || p.Replicas[0] == p.Replicas[1] || !p.Limits.valid() {
+	if p.Journal == nil || p.Archive == nil || p.Host == nil || !validReplicas(p.Replicas) || !p.Limits.valid() {
 		return ErrConfig
 	}
 	var q archive.Request
@@ -163,11 +205,12 @@ func (p *Publisher) Run(ctx context.Context) error {
 	}
 	p.mu.Lock()
 	if p.ack == nil {
-		p.ack = make(map[[32]byte]uint8)
+		p.ack = make(map[[32]byte]ackSet)
 	}
 	if p.bundleAck == nil {
 		p.bundleAck = make(map[uint64]uint8)
 	}
+	p.sizeState()
 	p.mu.Unlock()
 	var workers sync.WaitGroup
 	for i := range p.Replicas {
@@ -291,7 +334,7 @@ func (p *Publisher) pass(ctx context.Context) error {
 		p.mu.Lock()
 		bits := p.ack[hash]
 		p.mu.Unlock()
-		if bits == 3 {
+		if bits.count() >= replicaCopies {
 			continue
 		}
 		if processed >= 4 {
@@ -335,10 +378,10 @@ func (p *Publisher) pass(ctx context.Context) error {
 		var h [32]byte
 		copy(h[:], e.Candidate.Hash)
 		live[h] = struct{}{}
-		switch p.ack[h] {
-		case 3:
+		switch n := p.ack[h].count(); {
+		case n >= replicaCopies:
 			status.Acknowledged++
-		case 0:
+		case n == 0:
 			status.Pending++
 		default:
 			status.Lagging++
@@ -402,8 +445,9 @@ func (p *Publisher) replicaPass(ctx context.Context, index int) error {
 	if len(entries) == 0 {
 		return nil
 	}
-	mask := uint8(1 << index)
+	mask := ackSet(1 << index)
 	p.mu.Lock()
+	p.sizeState()
 	start := p.replicaCursor[index]
 	p.mu.Unlock()
 	var first error
@@ -471,6 +515,7 @@ func (p *Publisher) replicaPass(ctx context.Context, index int) error {
 
 func (p *Publisher) setReplicaError(index int, message string) {
 	p.mu.Lock()
+	p.sizeState()
 	p.replicaProgress[index].Replica = p.Replicas[index].String()
 	p.replicaProgress[index].Error = message
 	p.mu.Unlock()

@@ -105,7 +105,7 @@ func sameArchiveContext(a, b archive.Context) bool {
 type ReplicaAvailability struct {
 	Context  context.Context
 	Host     shardnode.EvidenceHost
-	Replicas [2]peer.ID
+	Replicas []peer.ID
 	Limits   Limits
 }
 

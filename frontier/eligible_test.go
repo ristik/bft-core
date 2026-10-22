@@ -304,3 +304,21 @@ func TestEligibleStoreRoundTripAndRegression(t *testing.T) {
 }
 
 func errorsIsWrapped(got, want error) bool { return errors.Is(got, want) }
+
+// An Eligible policy is only usable with its digest: records are bound to it, so a zero digest would bind them to nothing.
+func TestEligibleValidRefusesZeroPolicyDigest(t *testing.T) {
+	_, p := eligibleFixture()
+	if !p.ReplicasValid() {
+		t.Fatal("valid policy refused")
+	}
+	p.PolicyDigest = [32]byte{}
+	if p.ReplicasValid() {
+		t.Fatal("zero digest accepted")
+	}
+	base, q := eligibleFixture()
+	good, _ := pairRecord(base, q, 0, 1)
+	q.PolicyDigest = [32]byte{}
+	good.PolicyDigest = [32]byte{}
+	_, err := Encode(good, q)
+	require(t, err, ErrContext)
+}

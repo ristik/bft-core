@@ -62,8 +62,8 @@ type OperatorStatus struct {
 // are the publisher's latest process-local transfer diagnostics.
 func ReadOperatorStatus(ctx context.Context, journal *configuredprogress.Store, journalContext configuredprogress.Context,
 	limits configuredprogress.JournalLimits, local *archive.Store, subject archive.Context,
-	replicas [2]peer.ID, currentRootEpoch uint64, activated []uint64,
-	progress [2]ReplicaProgress, authority *AuthorityReport) (OperatorStatus, error) {
+	replicas []peer.ID, currentRootEpoch uint64, activated []uint64,
+	progress []ReplicaProgress, authority *AuthorityReport) (OperatorStatus, error) {
 	var out OperatorStatus
 	if journal == nil {
 		return out, configuredprogress.ErrSettings

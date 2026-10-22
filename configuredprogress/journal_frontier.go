@@ -107,7 +107,7 @@ func sameFrontierContext(c Context, p frontier.Policy) bool {
 // before activating pruning. The local anchor is authenticated against the
 // certified journal; replica availability is checked only before advancement.
 func (s *Store) EnableFrontier(ctx context.Context, c Context, limits JournalLimits, p frontier.Policy) error {
-	if !s.journal || p.Binding == nil || p.Availability == nil || !sameFrontierContext(c, p) || p.Replicas[0] == "" || p.Replicas[1] == "" || p.Replicas[0] == p.Replicas[1] {
+	if !s.journal || p.Binding == nil || p.Availability == nil || !sameFrontierContext(c, p) || !p.ReplicasValid() {
 		return ErrContext
 	}
 	if err := limits.check(); err != nil {
@@ -152,7 +152,7 @@ func (s *Store) migrateReplicaPair(anchor *frontier.Record, p frontier.Policy) e
 	}
 	if s.log != nil {
 		s.log.Warn("archive replica pair changed; durable frontier position kept, retired acknowledgments dropped, pruning waits for the new pair to acknowledge beyond it",
-			"previous", anchor.PersistedReplicas(), "configured", p.Replicas, "height", anchor.Height, "round", anchor.Round)
+			"previous", anchor.PersistedReplicas(), "configured", p.Replicas, "eligible", p.Eligible, "height", anchor.Height, "round", anchor.Round)
 	}
 	return nil
 }

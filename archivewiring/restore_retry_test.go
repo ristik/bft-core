@@ -122,7 +122,7 @@ func buildRetryRestoreFixtureMutating(t *testing.T, failures int64, retry FetchR
 	host := &saturatedHost{EvidenceHost: sender, failures: failures}
 	return &retryRestoreFixture{
 		restore: &ArchiveRestore{Journal: journal, Context: f.context, JournalLimits: limits, Archive: local,
-			Subject: f.subject, Replicas: [2]peer.ID{*replicas[0], *replicas[1]}, Host: host,
+			Subject: f.subject, Replicas: []peer.ID{*replicas[0], *replicas[1]}, Host: host,
 			Limits: DefaultLimits(), Retry: retry, Adapter: executor, Genesis: genesis, TipUC: last.ResultingUC, TipTR: last.ResultingTR},
 		host: host, journal: journal, local: local, wf: f, limits: limits, executor: executor, stores: stores, senderID: sender.ID(),
 	}
