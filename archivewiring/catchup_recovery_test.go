@@ -314,3 +314,24 @@ func prunedPeer(t *testing.T, p *planFixture, replicas map[string]*archive.Store
 	require.EqualValues(t, archived, pruned.Anchor.Height, "the peer retains only the blocks the archive lacks")
 	return configuredadmission.JournalProvider{Store: p.f.store, Context: p.f.context, Limits: p.f.limits}
 }
+
+// TestArchiveCatchUp_AfterTheNodeHoldsTheNewCertificate is the order a restarted validator meets (the #769 acceptance, run 39826811339):
+// its admission retains the network's newest certificate first, unresolved, and only then asks for the gap, so the journal no longer
+// loads as a chain and the coordinator acquires the missing suffix behind the retained certificate (acquireMissing), not before it.
+func TestArchiveCatchUp_AfterTheNodeHoldsTheNewCertificate(t *testing.T) {
+	t.Parallel()
+	const gap = 29
+	p := newPlanFixture(t, gap)
+	p.serve(t, 1, gap)
+	n := newReturningNode(t, p, map[string]*archive.Store{replicaA: p.replica, replicaB: p.second})
+	ctx := context.Background()
+	target := p.f.entries[gap-1]
+	o, err := rootinput.AuthenticateObservationV2(ctx, p.f.context.Observation, target.ResultingUC, target.ResultingTR)
+	require.NoError(t, err)
+	prepared, _, err := n.store.PrepareObservation(ctx, p.f.context, o)
+	require.NoError(t, err)
+	_, _, err = n.store.CommitObservation(prepared)
+	require.NoError(t, err)
+	n.catchUp(t, p, gap, 40)
+	require.EqualValues(t, gap, n.exec.finalized.Number, "the executor is finalized at the target")
+}

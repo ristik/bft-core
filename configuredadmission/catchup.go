@@ -40,8 +40,10 @@ func (r *ExecutionRecovery) catchUpPageSize() int {
 // else the target this coordinator saw last, else the target), walks the archive back to the retained anchor within a third of the
 // call's time, then admits the next page through admitFetched and finalizes it. When the journal has no room for a page, the call
 // first advances the frontier (the worker's passes do so too) and waits while it cannot. A call that made progress still returns ErrRecoveryUnavailable naming the height, unless its page reached
-// the target: the next authenticated certificate continues it.
-func (r *ExecutionRecovery) catchUpPage(ctx context.Context, after shardnode.BlockRef, target []byte, expected *types.UnicityCertificate) (err error) {
+// the target: the next authenticated certificate continues it. advance is the caller's admission mode: a restarted node has usually
+// retained the newest certificate already (its admission does so before it asks for the gap), and then the pages backfill the chain
+// behind it (acquireMissing) instead of advancing progress.
+func (r *ExecutionRecovery) catchUpPage(ctx context.Context, after shardnode.BlockRef, target []byte, expected *types.UnicityCertificate, advance bool) (err error) {
 	started := time.Now()
 	defer func() {
 		// Out of time: what this call admitted is durable journal state and the next call resumes from it.
@@ -77,7 +79,7 @@ func (r *ExecutionRecovery) catchUpPage(ctx context.Context, after shardnode.Blo
 		r.catchUpProgress(ctx, "archive catch-up: walking back", after.Number, walked, started)
 		return fmt.Errorf("%w: catching up from the archive: %d blocks walked back towards height %d", ErrRecoveryUnavailable, walked, after.Number)
 	}
-	frontierWait, err := r.catchUpRoomFor(ctx, page, target, true)
+	frontierWait, err := r.catchUpRoomFor(ctx, page, target)
 	if err != nil {
 		return err
 	}
@@ -88,13 +90,17 @@ func (r *ExecutionRecovery) catchUpPage(ctx context.Context, after shardnode.Blo
 	}
 	entries = withinBytes(entries, r.limits().Bytes)
 	last := entries[len(entries)-1].Block
-	if err := r.admitFetched(ctx, after, last.Hash, entries, true, "archive_catchup"); err != nil {
+	if err := r.admitFetched(ctx, after, last.Hash, entries, advance, "archive_catchup"); err != nil {
 		catchUp.Drop()
 		return err
 	}
-	c, err := r.load(ctx)
+	image, err := r.Store.LoadJournal(ctx, r.Context, r.JournalLimits)
 	if err != nil {
-		return err
+		return fmt.Errorf("%w: verifying journal: %w", ErrRecoveryUnavailable, err)
+	}
+	c, ok := r.retainedChain(image)
+	if !ok {
+		return fmt.Errorf("%w: no retained certified chain after the page at %d", ErrRecoveryUnavailable, last.Number)
 	}
 	if _, err := r.recoverChain(ctx, c, false); err != nil {
 		return err
@@ -197,10 +203,10 @@ func withinBytes(entries []shardnode.JournalFetchEntry, budget int64) []shardnod
 // catchUpRoomFor makes room in the journal for n more blocks before a catch-up admits them (an archive page, or the last stretch from
 // a peer or the archive): admitting more than the journal holds would stop at its bounds, and that stop is terminal. Without room it
 // advances the frontier, which frees the journal only for blocks two replicas hold verified copies of; the frontier's errors (replica
-// copies, local finality, a concurrent pass) are never a recovery class (rev2 R2), and the call waits. Without a catch-up wired, or
-// for a backfill (advance false), nothing changes.
-func (r *ExecutionRecovery) catchUpRoomFor(ctx context.Context, n int, target []byte, advance bool) (time.Duration, error) {
-	if r.ArchiveCatchUp == nil || !advance {
+// copies, local finality, a concurrent pass) are never a recovery class (rev2 R2), and the call waits. Without a catch-up wired,
+// nothing changes.
+func (r *ExecutionRecovery) catchUpRoomFor(ctx context.Context, n int, target []byte) (time.Duration, error) {
+	if r.ArchiveCatchUp == nil {
 		return 0, nil
 	}
 	if room, err := r.catchUpRoom(ctx, n); err != nil || room {

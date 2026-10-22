@@ -442,17 +442,7 @@ func (r *ExecutionRecovery) acquireMissing(ctx context.Context) error {
 	if len(target) != 32 {
 		return fmt.Errorf("%w: no certified target hash to request", ErrRecoveryUnavailable)
 	}
-	var partial recoveryChain
-	found := false
-	for end := len(image.Observations); end >= 0; end-- {
-		prefix := image
-		prefix.Observations = image.Observations[:end]
-		if p, e := r.chainFromImage(prefix); e == nil {
-			partial = p
-			found = true
-			break
-		}
-	}
+	partial, found := r.retainedChain(image)
 	if !found {
 		return fmt.Errorf("%w: no retained certified ancestor before target %x", ErrRecoveryUnavailable, target)
 	}
@@ -477,6 +467,19 @@ func (r *ExecutionRecovery) acquireMissing(ctx context.Context) error {
 		}
 	}
 	return r.fetchFromPeers(ctx, partial.anchor, target, false, quietHeld)
+}
+
+// retainedChain is the longest certified chain the journal holds behind its newest observations: all of it while the journal loads as
+// a chain, else the chain behind a retained certificate whose body is still missing.
+func (r *ExecutionRecovery) retainedChain(image configuredprogress.JournalSnapshot) (recoveryChain, bool) {
+	for end := len(image.Observations); end >= 0; end-- {
+		prefix := image
+		prefix.Observations = image.Observations[:end]
+		if c, err := r.chainFromImage(prefix); err == nil {
+			return c, true
+		}
+	}
+	return recoveryChain{}, false
 }
 
 // AcquireForCertificate fills a gap before the newer root certificate is
@@ -582,7 +585,7 @@ func (r *ExecutionRecovery) fetchFromPeers(ctx context.Context, after shardnode.
 		if len(actualTarget) == 0 && len(entries) > 0 {
 			actualTarget = entries[len(entries)-1].Block.Hash
 		}
-		if _, err := r.catchUpRoomFor(ctx, len(entries), target, advance); err != nil {
+		if _, err := r.catchUpRoomFor(ctx, len(entries), target); err != nil {
 			return err
 		}
 		if err := r.admitFetched(ctx, after, actualTarget, entries, advance, "peer_recovery"); err == nil {
@@ -609,7 +612,7 @@ func (r *ExecutionRecovery) fetchFromPeers(ctx context.Context, after shardnode.
 // archiveFallback asks the archive for the suffix the peers could not supply. A suffix longer than one recovery, or one whose newest
 // blocks are not archived yet, goes on as a long catch-up when one is wired (#769); a refusal of the data itself keeps its class.
 func (r *ExecutionRecovery) archiveFallback(ctx context.Context, after shardnode.BlockRef, target []byte, advance bool, expected *types.UnicityCertificate, peerErr error) error {
-	catchUp := advance && r.ArchiveCatchUp != nil
+	catchUp := r.ArchiveCatchUp != nil
 	entries, archiveErr := r.FetchArchive(ctx, after, target)
 	if archiveErr == nil && catchUp {
 		// A suffix one recovery could take may still not fit the journal while the frontier lags: admitting it would stop half way
@@ -617,7 +620,7 @@ func (r *ExecutionRecovery) archiveFallback(ctx context.Context, after shardnode
 		if room, err := r.catchUpRoom(ctx, len(entries)); err != nil {
 			return err
 		} else if !room {
-			return r.catchUpPage(ctx, after, target, expected)
+			return r.catchUpPage(ctx, after, target, expected, advance)
 		}
 	}
 	if archiveErr == nil {
@@ -628,7 +631,7 @@ func (r *ExecutionRecovery) archiveFallback(ctx context.Context, after shardnode
 	}
 	if errors.Is(archiveErr, ErrRecoveryBudget) {
 		if catchUp {
-			return r.catchUpPage(ctx, after, target, expected)
+			return r.catchUpPage(ctx, after, target, expected, advance)
 		}
 		return r.archiveBudgetUnavailable(ctx, target, archiveErr)
 	}
@@ -636,7 +639,7 @@ func (r *ExecutionRecovery) archiveFallback(ctx context.Context, after shardnode
 		return archiveErr
 	}
 	if catchUp {
-		return r.catchUpPage(ctx, after, target, expected)
+		return r.catchUpPage(ctx, after, target, expected, advance)
 	}
 	if peerErr != nil {
 		return fmt.Errorf("%w: target %x unavailable from peers (%v) and archive: %v", ErrRecoveryUnavailable, target, peerErr, archiveErr)
