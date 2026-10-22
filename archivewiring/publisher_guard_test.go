@@ -229,3 +229,19 @@ func TestPublisherRefusesAnInvalidReplicaSet(t *testing.T) {
 		require.ErrorIs(t, p.Validate(), ErrConfig, name)
 	}
 }
+
+// A record this node has not built yet is not a failure of the replica being served: with one real replica fault and the local record
+// missing, only the faulty replica reports an error.
+func TestReplicaPassLocalRecordMissingIsNotAReplicaError(t *testing.T) {
+	t.Parallel()
+	f := newWiringFixture(t, 2)
+	local, err := archive.Open(t.TempDir())
+	require.NoError(t, err)
+	sender := testpeer.CreatePeer(t, testpeer.CreatePeerConfiguration(t))
+	ids := []peer.ID{testpeer.CreatePeer(t, testpeer.CreatePeerConfiguration(t)).ID(), testpeer.CreatePeer(t, testpeer.CreatePeerConfiguration(t)).ID()}
+	p := &Publisher{Journal: f.store, Context: f.context, JournalLimits: f.limits, Archive: local, Subject: f.subject, Host: sender, Replicas: ids, Limits: DefaultLimits(), ack: make(map[[32]byte]ackSet)}
+	require.NoError(t, p.replicaPass(context.Background(), 0))
+	for _, r := range p.ReplicaProgress() {
+		require.Empty(t, r.Error)
+	}
+}

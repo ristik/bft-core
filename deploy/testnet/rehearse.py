@@ -242,6 +242,56 @@ class Rehearsal:
         self.expect('signer' not in running, 'the signer was never started: no request reached a third party')
         self.say('  note the duplicate/rate-limited claim (one per address and IP per 24 h) needs a request that passes the captcha: host-only')
 
+    def load(self):
+        """Sustained load at the gateway's limits (loadgen.py, the tool the host runs too): 20 signed transfers a second for 20 s from four client addresses (5/s
+        each, under the 10/s per-address limit), every accepted transfer must be mined successfully and every validator must agree on the sender's nonce after."""
+        secrets, summary = self.gen / 'faucet-secrets', self.evidence / 'load.json'
+        out = subprocess.run([sys.executable, str(Path(__file__).with_name('loadgen.py')), '--rpc', 'http://' + PUBLIC_RPC + '/', '--chain-id', str(self.chain_id),
+                              '--sender', self.manifest['faucet_address'], '--keystore', str(secrets / 'keystore.json'), '--password-file', str(secrets / 'password'),
+                              '--cast', self.cast, '--rate', '20', '--duration', '20', '--ips', '4', '--min-accepted', '350', '--out', str(summary)],
+                             text=True, capture_output=True)
+        self.say(out.stdout.strip() or out.stderr.strip())
+        self.expect(out.returncode == 0, 'the generated load was accepted and every accepted transfer mined successfully', (json.loads(summary.read_text()) if summary.exists() else {}).get('problems', out.stderr[-300:]))
+        sender = self.manifest['faucet_address']
+        nonces = {i: self.ureth(i, 'eth_getTransactionCount', [sender, 'latest']) for i in range(1, self.n + 1)}
+        self.wait('every validator has the same sender nonce', lambda: len({self.ureth(i, 'eth_getTransactionCount', [sender, 'latest']) for i in range(1, self.n + 1)}) == 1, 120)
+        self.expect(True, 'every validator agrees on the sender nonce after the load', str(nonces))
+
+    # --- proof-of-stake profile (a generation made with generate.py --pos; TN-S #430, P8-TEST #437) -------------------------------
+    REGISTRY = '0xff00000000000000000000000000000000000002'
+
+    def view(self, to, signature, *args):
+        """A contract view through the public gateway: eth_call with cast-encoded data, decoded by cast. `signature` is cast's 'name(inputs)(outputs)'."""
+        function = signature.split(')(')[0] + ')'
+        data = self.cast_run('calldata', function, *args)
+        raw = self.call('eth_call', [{'to': to, 'data': data}, 'latest'])
+        return [int(line.split()[0]) for line in self.cast_run('abi-decode', signature, raw).splitlines()]
+
+    def pos_smoke(self):
+        """OPERATOR.md 5a's smoke, run: the containers started on the PoS genesis, the contracts are there, the election clock ticks and the custody has applied every
+        root record. The first start of the packaged PoS genesis (#587's open item); it says nothing about a handoff (that is a later stage)."""
+        pos = self.manifest.get('pos')
+        self.expect(bool(pos), 'the manifest carries a pos block (this generation was made with --pos)')
+        net = self.gen / 'network'
+        self.expect((net / 'pos-genesis-assignment.txt').read_text().strip() == pos['genesis_assignment'], 'the shipped genesis assignment id is the manifest one', pos['genesis_assignment'])
+        deployment = json.loads((net / 'pos-deployment.json').read_text())
+        for name, address in (('registry', self.REGISTRY), ('custody', deployment['custody']), ('election', deployment['election'])):
+            code = self.call('eth_getCode', [address, 'latest'])
+            self.expect(len(code) > 100, f'the {name} contract has code at its genesis address', f'{address} {(len(code) - 2) // 2} bytes')
+        first = self.view(self.REGISTRY, 'progress()(uint64)')[0]
+        self.say(f'  registry progress {first}')
+        later = self.wait('the election clock rises (the registry progress)', lambda: (lambda v: v if v > first else None)(self.view(self.REGISTRY, 'progress()(uint64)')[0]), 240)
+        self.expect(later > first, 'the registry progress rises on the running chain', f'{first} -> {later}')
+        self.say('  election thresholds (rounds, seconds): ' + ' '.join(map(str, self.view(deployment['election'], 'thresholds()(uint256,uint256)'))))
+        def applied():
+            count = self.view(self.REGISTRY, 'recordCount()(uint64)')[0]
+            return count if count == self.view(deployment['custody'], 'recordCursor()(uint64)')[0] else None
+        self.expect(self.wait('the custody has applied every root record', lambda: applied() is not None, 240), 'recordCursor equals recordCount', str(applied()))
+        names = [f'{role}{i}' for i in range(1, self.n + 1) for role in ('root', 'shard')]
+        logs = self.compose('logs', '--no-color', *names, check=False)
+        bad = [line for line in logs.splitlines() if 'AssignmentNotActive' in line or 'revert' in line.lower()]
+        self.expect(not bad, 'no revert or AssignmentNotActive in any root or shard log', f'{len(bad)} lines' + (': ' + bad[0][:200] if bad else ''))
+
     def pod_restart(self):
         """One validator entity at a time: stop its execution client, root and shard node (its signing authority stays live, as the README requires), check what the
         package promises, start them again and check they rejoin. The PUBLIC gateway fails closed while a validator is down (it checks every validator's identity
@@ -356,7 +406,9 @@ class Rehearsal:
         self.expect(receipt['status'] == '0x1', 'a paid transfer on the new network succeeds', receipt['transactionHash'])
         self.say('  note the old generation\'s surviving authority directories (the restore pointed at them) are left on disk by reset.py; a host removes them by hand')
 
-STAGES = (('up', 'up'), ('identity', 'identity'), ('first-tx', 'first_tx'), ('gateway-limits', 'gateway_limits'), ('faucet-guard', 'faucet_guard'), ('pod-restart', 'pod_restart'), ('backup-restore', 'backup_restore'), ('reset', 'reset'))
+STAGES = (('up', 'up'), ('identity', 'identity'), ('first-tx', 'first_tx'), ('gateway-limits', 'gateway_limits'), ('faucet-guard', 'faucet_guard'), ('load', 'load'), ('pod-restart', 'pod_restart'), ('backup-restore', 'backup_restore'), ('reset', 'reset'))
+# run on a generation made with --pos (the workflow's second generation); not part of the default list
+POS_STAGES = (('pos-smoke', 'pos_smoke'),)
 
 
 def main():
@@ -367,18 +419,18 @@ def main():
     p.add_argument('--pods', default='2,1', help='validator entities pod-restart stops and restarts, one at a time, in this order')
     for name in ('out', 'ubft', 'b1genesis', 'keygen', 'captcha-sitekey', 'captcha-secret-file'):
         p.add_argument('--reset-' + name, help='the reset stage passes this to generate.py as --' + name + ' (--out: the new generation directory)')
-    p.add_argument('--stages', default=','.join(s for s, _ in STAGES), help='comma separated, in order')
+    p.add_argument('--stages', default=','.join(s for s, _ in STAGES), help='comma separated, in order (the default is the PoA stages; POS_STAGES are named explicitly)')
     a = p.parse_args()
     r = Rehearsal(a.generation, a.evidence, a.cast)
     r.pods = tuple(int(x) for x in a.pods.split(',') if x)
     r.reset_args = {k[len('reset_'):]: v for k, v in vars(a).items() if k.startswith('reset_')}
     wanted = a.stages.split(',')
-    unknown = set(wanted) - {s for s, _ in STAGES}
+    unknown = set(wanted) - {s for s, _ in STAGES + POS_STAGES}
     if unknown:
         p.error(f'unknown stages {sorted(unknown)}')
     code = 0
     try:
-        for name, method in STAGES:
+        for name, method in STAGES + POS_STAGES:
             if name in wanted:
                 r.stage(name, getattr(r, method))
     except Exception:

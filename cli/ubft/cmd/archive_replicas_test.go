@@ -418,3 +418,24 @@ func TestSetFrontierReplicas(t *testing.T) {
 	require.True(t, legacy.ReplicasValid())
 	require.ErrorIs(t, setFrontierReplicas(&frontier.Policy{}, []peer.ID{a, b, c}, [32]byte{}), archivewiring.ErrConfig, "three replicas need a policy digest")
 }
+
+// The derived mode (no --archive-replica) must be reachable from the command line: the flag check once demanded exactly two replicas, so a
+// node started without them failed at startup although archiveReplicaSet derives the set.
+func TestArchiveFlagsValid(t *testing.T) {
+	two := []string{"a", "b"}
+	for name, c := range map[string]struct {
+		store, journal string
+		replicas       []string
+		ok             bool
+	}{
+		"derived":                {"s", "j", nil, true},
+		"explicit pair":          {"s", "j", two, true},
+		"one replica":            {"s", "j", two[:1], false},
+		"three replicas":         {"s", "j", append(slices.Clone(two), "c"), false},
+		"store without journal":  {"s", "", nil, false},
+		"replicas without store": {"", "j", two, false},
+		"no archive":             {"", "j", nil, true},
+	} {
+		require.Equal(t, c.ok, archiveFlagsValid(c.store, c.journal, c.replicas), name)
+	}
+}

@@ -132,6 +132,7 @@ actual proxy socket peer: faucet trusts only 172.30.88.1 and RPC only 172.30.89.
 nginx must overwrite X-Forwarded-For. Adjust the exact peer config deliberately if
 the host differs. Never disable hCaptcha publicly. Publish NOTICE.txt, the current
 chain/genesis manifest, wallet setup, status URL and the incident-owner role's reporting channel.
+[TESTER.md](../../docs/operations/testnet/TESTER.md) is the wallet and transaction page for external testers; it points them at `tester-check.py`, which checks an endpoint against the published chain ID and block-zero hash.
 
 Use a fresh external wallet pinned to the generated chain ID/genesis. Claim test
 UCT via the faucet, wait for a successful receipt, then submit a signed native
