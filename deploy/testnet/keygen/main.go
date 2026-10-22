@@ -51,7 +51,7 @@ func main() {
 	must(json.NewEncoder(os.Stdout).Encode(alloc))
 }
 
-// owners writes one secp256k1 key per role (owner, withdrawal, payee) of each genesis identity of the PoS profile, as hex private keys in 0600 files under a new 0700
+// owners writes one secp256k1 key per role (owner, withdrawal, payee) of each genesis identity of the PoS profile, as 0x-prefixed hex private keys (the form `ubft pos-relayer --sender-key` reads) in 0600 files under a new 0700
 // directory, and prints only the addresses (JSON) for the genesis plan. The keys are never part of the shipped network files.
 func owners(dir, count string) {
 	n, err := strconv.Atoi(count)
@@ -65,7 +65,7 @@ func owners(dir, count string) {
 		for _, role := range []string{"owner", "withdrawal", "payee"} {
 			key, err := crypto.GenerateKey()
 			must(err)
-			must(os.WriteFile(filepath.Join(sub, role+".key"), []byte(hex.EncodeToString(crypto.FromECDSA(key))+"\n"), 0600))
+			must(os.WriteFile(filepath.Join(sub, role+".key"), []byte("0x"+hex.EncodeToString(crypto.FromECDSA(key))+"\n"), 0600))
 			identity[role] = crypto.PubkeyToAddress(key.PublicKey).Hex()
 		}
 		identities = append(identities, identity)
