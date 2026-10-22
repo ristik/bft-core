@@ -137,7 +137,7 @@ N=$G/network; /srv/src/bft-pinned/build/ubft pos-relayer verify-genesis --plan $
 **Owner keys.** The lane's plan derives each genesis identity's `owner`, `withdrawal` and `payee` addresses from the root node id by hash: addresses nobody holds the key of, so
 no identity could top up, exit, withdraw or claim a reward. The package's ceremony instead generates, per identity, three fresh secp256k1 keys (`tn-keygen owners`) and puts
 their addresses in `pos-plan.json` (public: the assignment id does not depend on them, `verify-genesis` recomputes from that plan). The keys are in
-`$G/pos-owner-keys/identity-<stakingId>/{owner,withdrawal,payee}.key` (hex, mode 0600, directory 0700), generated at ceremony time, never in `network/`, never mounted into a
+`$G/pos-owner-keys/identity-<stakingId>/{owner,withdrawal,payee}.key` (0x-prefixed hex, mode 0600, directory 0700), generated at ceremony time, never in `network/`, never mounted into a
 container and never committed. Handling is that of `faucet-secrets/`: private host material; `backup.py` archives the whole generation (mode-0600 archive), so keep the archive
 as private as the directory; the section 4 `chown -R 10001` makes them readable only by that uid, so `sudo chown -R "$USER" $G/pos-owner-keys` before use. The owners hold
 no balance at genesis (a genesis balance would change the supply the bond accounting is audited against): fund the owner of an identity from the faucet account for gas and
