@@ -63,7 +63,7 @@ func TestAuditPrunedTerminalRepairBeforeFrontier(t *testing.T) {
 			require.NoError(t, s.Put(q, r))
 		}
 	}
-	pair := [2]peer.ID{"first", "second"}
+	pair := []peer.ID{"first", "second"}
 	policy := frontier.Policy{Context: f.subject, Replicas: [2]string{pair[0].String(), pair[1].String()},
 		Binding: CertifiedBinding{Context: f.context, Subject: f.subject}, Availability: fixtureAvailability{copies}}
 	require.NoError(t, f.store.EnableFrontier(ctx, f.context, f.limits, policy))

@@ -28,6 +28,11 @@ var (
 
 const version byte = 1
 const epochVersion byte = 2
+
+// policyVersion records the digest of the archive policy (archivepolicy) the
+// two acknowledging replicas were selected under. Its acknowledgments name any
+// two of the policy's eligible replicas, in the policy's canonical order.
+const policyVersion byte = 3
 const domain = "M2FRONTIER"
 const MaxBytes = archive.MaxRequestBytes + 512
 
@@ -48,15 +53,21 @@ type Record struct {
 	Height    uint64
 	StateRoot [32]byte
 	Subject   archive.Request
-	Acks      [2]Acknowledgment
+	// PolicyDigest binds a version 3 record to the archive policy it was
+	// acknowledged under; zero for version 1 and 2 records.
+	PolicyDigest [32]byte
+	Acks         [2]Acknowledgment
 	// Retired holds, by slot, the replica names whose acknowledgments a pair
 	// migration dropped. It is never encoded; only DecodeMigrating sets it.
 	Retired [2]string
+	// Historical is set only by DecodeMigrating: the record was acknowledged under
+	// an earlier policy than the current one, or by a replica outside it.
+	Historical bool
 }
 
 // Migrated reports whether DecodeMigrating dropped an acknowledgment, so the
 // position was certified by replicas that are not all in the current policy.
-func (r Record) Migrated() bool { return r.Acks[0].Dropped() || r.Acks[1].Dropped() }
+func (r Record) Migrated() bool { return r.Historical || r.Acks[0].Dropped() || r.Acks[1].Dropped() }
 
 // PersistedReplicas returns the replica names the record was written under.
 func (r Record) PersistedReplicas() [2]string {
@@ -70,8 +81,13 @@ func (r Record) PersistedReplicas() [2]string {
 }
 
 type Policy struct {
-	Context         archive.Context
-	Replicas        [2]string
+	Context  archive.Context
+	Replicas [2]string
+	// Eligible, when set, replaces Replicas: the policy's 2 or 3 replicas in
+	// canonical order, any two of which may acknowledge a position. PolicyDigest
+	// is the digest of that policy and is nonzero whenever Eligible is set.
+	Eligible        []string
+	PolicyDigest    [32]byte
 	MinimumSequence uint64 // authenticated lower bound supplied by the recovery owner
 	Binding         CertifiedBinding
 	Availability    ReplicaAvailability
@@ -109,7 +125,64 @@ func valid(r Record, p Policy) error { return validRecord(r, p, false) }
 // Nothing new is ever encoded or planned from such a record.
 func validHistorical(r Record, p Policy) error { return validRecord(r, p, true) }
 
+func eligibleValid(p Policy) bool {
+	if len(p.Eligible) < 2 || len(p.Eligible) > 3 || p.PolicyDigest == ([32]byte{}) {
+		return false
+	}
+	for i, name := range p.Eligible {
+		if len(name) == 0 || len(name) > 64 {
+			return false
+		}
+		for _, other := range p.Eligible[:i] {
+			if other == name {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func (p Policy) eligibleIndex(name string) int {
+	for i, e := range p.Eligible {
+		if e == name {
+			return i
+		}
+	}
+	return -1
+}
+
+// acksValid applies the replica rules of an Eligible policy to a record's
+// acknowledgments. Version 3 records name two distinct eligible replicas in
+// canonical order under this policy's digest. Nothing else is current: a legacy
+// (version 1 or 2) record, a record of an earlier policy or one naming a replica
+// outside the policy is historical evidence, accepted only when historical is
+// set and one of its acknowledgments is by a currently eligible replica.
+func acksValid(r Record, p Policy, historical bool) error {
+	if r.Acks[0].Replica == "" || r.Acks[0].Replica == r.Acks[1].Replica || r.Acks[1].Replica == "" {
+		return ErrContext
+	}
+	i0, i1 := p.eligibleIndex(r.Acks[0].Replica), p.eligibleIndex(r.Acks[1].Replica)
+	if r.PolicyDigest != ([32]byte{}) {
+		if r.PolicyDigest == p.PolicyDigest {
+			if i0 < 0 || i1 < 0 || i0 >= i1 {
+				return ErrContext
+			}
+			return nil
+		}
+	}
+	if historical && (i0 >= 0 || i1 >= 0) {
+		return nil
+	}
+	return ErrContext
+}
+
+// ReplicasValid reports whether the policy names a usable replica set: a valid Eligible set with its digest, or the legacy pair.
+func (p Policy) ReplicasValid() bool { return policyReplicasValid(p) }
+
 func policyReplicasValid(p Policy) bool {
+	if len(p.Eligible) != 0 {
+		return eligibleValid(p)
+	}
 	return len(p.Replicas[0]) != 0 && len(p.Replicas[0]) <= 64 && len(p.Replicas[1]) != 0 && len(p.Replicas[1]) <= 64 && p.Replicas[0] != p.Replicas[1]
 }
 
@@ -130,9 +203,18 @@ func validRecord(r Record, p Policy, historical bool) error {
 	if !policyReplicasValid(p) {
 		return ErrContext
 	}
-	for i, a := range r.Acks {
-		if a.Replica != p.Replicas[i] && !(historical && a.Dropped()) {
+	if len(p.Eligible) != 0 {
+		if err := acksValid(r, p, historical); err != nil {
+			return err
+		}
+	} else {
+		if r.PolicyDigest != ([32]byte{}) {
 			return ErrContext
+		}
+		for i, a := range r.Acks {
+			if a.Replica != p.Replicas[i] && !(historical && a.Dropped()) {
+				return ErrContext
+			}
 		}
 	}
 	digest := sha256.Sum256(q)
@@ -165,9 +247,15 @@ func encodeRecord(r Record) ([]byte, error) {
 	}
 	var b bytes.Buffer
 	b.WriteString(domain)
-	if r.Epoch == 0 {
+	switch {
+	case r.PolicyDigest != ([32]byte{}):
+		if r.Epoch == 0 {
+			return nil, ErrInvalid
+		}
+		b.WriteByte(policyVersion)
+	case r.Epoch == 0:
 		b.WriteByte(version)
-	} else {
+	default:
 		b.WriteByte(epochVersion)
 	}
 	for _, v := range []uint64{r.Sequence, r.Round, r.Height} {
@@ -175,6 +263,9 @@ func encodeRecord(r Record) ([]byte, error) {
 	}
 	if r.Epoch != 0 {
 		_ = binary.Write(&b, binary.BigEndian, r.Epoch)
+	}
+	if r.PolicyDigest != ([32]byte{}) {
+		b.Write(r.PolicyDigest[:])
 	}
 	b.Write(r.StateRoot[:])
 	_ = binary.Write(&b, binary.BigEndian, uint32(len(q)))
@@ -248,7 +339,7 @@ func decode(raw []byte, p Policy, migrate bool) (Record, error) {
 	if !bytes.Equal(raw[:len(domain)], []byte(domain)) {
 		return out, ErrInvalid
 	}
-	if raw[len(domain)] != version && raw[len(domain)] != epochVersion {
+	if raw[len(domain)] != version && raw[len(domain)] != epochVersion && raw[len(domain)] != policyVersion {
 		return out, ErrVersion
 	}
 	payload := raw[:len(raw)-32]
@@ -262,8 +353,13 @@ func decode(raw []byte, p Policy, migrate bool) (Record, error) {
 			return Record{}, ErrInvalid
 		}
 	}
-	if raw[len(domain)] == epochVersion {
+	if raw[len(domain)] == epochVersion || raw[len(domain)] == policyVersion {
 		if binary.Read(r, binary.BigEndian, &out.Epoch) != nil || out.Epoch == 0 {
+			return Record{}, ErrInvalid
+		}
+	}
+	if raw[len(domain)] == policyVersion {
+		if _, err := io.ReadFull(r, out.PolicyDigest[:]); err != nil || out.PolicyDigest == ([32]byte{}) {
 			return Record{}, ErrInvalid
 		}
 	}
@@ -303,8 +399,12 @@ func decode(raw []byte, p Policy, migrate bool) (Record, error) {
 	}
 	persisted := out
 	if migrate {
-		if out, err = migrateAcks(out, p); err != nil {
-			return Record{}, err
+		if len(p.Eligible) == 0 {
+			if out, err = migrateAcks(out, p); err != nil {
+				return Record{}, err
+			}
+		} else {
+			out.Historical = acksValid(out, p, false) != nil
 		}
 		err = validHistorical(out, p)
 	} else {

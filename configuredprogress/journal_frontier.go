@@ -107,7 +107,7 @@ func sameFrontierContext(c Context, p frontier.Policy) bool {
 // before activating pruning. The local anchor is authenticated against the
 // certified journal; replica availability is checked only before advancement.
 func (s *Store) EnableFrontier(ctx context.Context, c Context, limits JournalLimits, p frontier.Policy) error {
-	if !s.journal || p.Binding == nil || p.Availability == nil || !sameFrontierContext(c, p) || p.Replicas[0] == "" || p.Replicas[1] == "" || p.Replicas[0] == p.Replicas[1] {
+	if !s.journal || p.Binding == nil || p.Availability == nil || !sameFrontierContext(c, p) || !p.ReplicasValid() {
 		return ErrContext
 	}
 	if err := limits.check(); err != nil {
@@ -152,7 +152,7 @@ func (s *Store) migrateReplicaPair(anchor *frontier.Record, p frontier.Policy) e
 	}
 	if s.log != nil {
 		s.log.Warn("archive replica pair changed; durable frontier position kept, retired acknowledgments dropped, pruning waits for the new pair to acknowledge beyond it",
-			"previous", anchor.PersistedReplicas(), "configured", p.Replicas, "height", anchor.Height, "round", anchor.Round)
+			"previous", anchor.PersistedReplicas(), "configured", p.Replicas, "eligible", p.Eligible, "height", anchor.Height, "round", anchor.Round)
 	}
 	return nil
 }
@@ -253,11 +253,28 @@ func (s *Store) LoadFrontier(ctx context.Context, c Context, limits JournalLimit
 }
 
 // VerifyFrontierCopies refuses an advance while a previously promised anchor
-// has lost either independently configured replica copy.
+// has lost its durability: either acknowledging replica under a legacy pair, or
+// fewer than two copies over the configured replicas under an Eligible policy.
 func (s *Store) VerifyFrontierCopies(ctx context.Context, c Context, limits JournalLimits) error {
 	f, err := s.LoadFrontier(ctx, c, limits)
 	if err != nil || f.Anchor == nil {
 		return err
+	}
+	if len(s.frontier.Eligible) != 0 {
+		// Any two configured replicas holding the promised copy keep the promise, whoever acknowledged it: one stopped acknowledger
+		// (or one outside the current set) must not freeze the frontier while another configured replica still holds the record.
+		copies := 0
+		var last error
+		for _, name := range s.frontier.Eligible {
+			if err := s.frontier.Availability.VerifyAvailable(name, f.Anchor.Subject, f.Anchor.Acks[0].ManifestDigest); err != nil {
+				last = err
+				continue
+			}
+			if copies++; copies == 2 {
+				return nil
+			}
+		}
+		return fmt.Errorf("%w: %d of %d configured replicas hold the promised copy, two required: %v", frontier.ErrUnavailable, copies, len(s.frontier.Eligible), last)
 	}
 	for _, ack := range f.Anchor.Acks {
 		if ack.Dropped() {

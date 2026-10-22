@@ -159,6 +159,19 @@ func operatorStatusSummary(s archivewiring.OperatorStatus) string {
 			fmt.Fprintf(&b, " (%s)", replica.Error)
 		}
 	}
+	a := s.Archive
+	if a.CopiesRequired != 0 {
+		fmt.Fprintf(&b, "; archive %d/%d replicas healthy (%d copies required)", a.ReplicasHealthy, a.ReplicasConfigured, a.CopiesRequired)
+		if a.Frozen {
+			b.WriteString(" FROZEN: frontier and pruning stopped")
+		}
+		if a.UncoveredBlocks != 0 {
+			fmt.Fprintf(&b, "; %d certified blocks above the frontier from h=%d", a.UncoveredBlocks, a.OldestUncoveredHeight)
+		}
+		if a.CapacityWarning {
+			fmt.Fprintf(&b, "; JOURNAL AT %d%% OF ITS LIMIT", a.JournalPercent)
+		}
+	}
 	if s.Authority != nil {
 		if s.Authority.Reachable {
 			if s.Authority.RootEpoch == 0 {

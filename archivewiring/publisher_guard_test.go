@@ -53,7 +53,7 @@ func TestPublisherBacklogDoesNotUseConsensusWitnessAndRotates(t *testing.T) {
 	f := newWiringFixture(t, 6)
 	local, err := archive.Open(t.TempDir())
 	require.NoError(t, err)
-	p := &Publisher{Journal: f.store, Context: f.context, JournalLimits: f.limits, Archive: local, Subject: f.subject, ack: make(map[[32]byte]uint8)}
+	p := &Publisher{Journal: f.store, Context: f.context, JournalLimits: f.limits, Archive: local, Subject: f.subject, ack: make(map[[32]byte]ackSet)}
 	// No adapter or witness requester is supplied. A backlog must still publish.
 	require.NoError(t, p.pass(context.Background()))
 	firstPass := 0
@@ -131,7 +131,7 @@ func TestPublisherReplicaDeliveryIsIndependent(t *testing.T) {
 		<-release
 	})
 	limits := DefaultLimits()
-	p := &Publisher{Journal: f.store, Context: f.context, JournalLimits: f.limits, Archive: local, Subject: f.subject, Host: sender, Replicas: [2]peer.ID{good.ID(), slow.ID()}, Limits: limits, ack: make(map[[32]byte]uint8)}
+	p := &Publisher{Journal: f.store, Context: f.context, JournalLimits: f.limits, Archive: local, Subject: f.subject, Host: sender, Replicas: []peer.ID{good.ID(), slow.ID()}, Limits: limits, ack: make(map[[32]byte]ackSet)}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	defer releasePeer()
@@ -158,4 +158,74 @@ func TestPublisherReplicaDeliveryIsIndependent(t *testing.T) {
 	releasePeer()
 	cancel()
 	<-slowDone
+}
+
+// With three replicas and one unreachable, the other two still make every block durable: status reports it acknowledged, the local pass
+// stops rebuilding it, and the third replica is published to as well when it is reachable again.
+func TestPublisherTwoOfThreeAcknowledgesWithOneReplicaDown(t *testing.T) {
+	t.Parallel()
+	f := newWiringFixture(t, 3)
+	local, err := archive.Open(t.TempDir())
+	require.NoError(t, err)
+	for i := range f.entries {
+		q, rec := f.record(t, i)
+		require.NoError(t, local.Put(q, rec))
+	}
+	sender := testpeer.CreatePeer(t, testpeer.CreatePeerConfiguration(t))
+	var ids []peer.ID
+	stores := make([]*archive.Store, 3)
+	for i := range stores {
+		remote := testpeer.CreatePeer(t, testpeer.CreatePeerConfiguration(t))
+		ids = append(ids, remote.ID())
+		stores[i], err = archive.Open(t.TempDir())
+		require.NoError(t, err)
+		if i == 1 {
+			continue // never reachable: no address, no server
+		}
+		sender.Network().Peerstore().AddAddrs(remote.ID(), remote.MultiAddresses(), peerstore.PermanentAddrTTL)
+		server, err := NewServer(stores[i], f.subject, JournalVerifier(f.store, f.context, f.limits, f.subject), []peer.ID{sender.ID()}, DefaultLimits())
+		require.NoError(t, err)
+		server.Register(context.Background(), remote)
+	}
+	p := &Publisher{Journal: f.store, Context: f.context, JournalLimits: f.limits, Archive: local, Subject: f.subject, Host: sender, Replicas: ids, Limits: DefaultLimits(), ack: make(map[[32]byte]ackSet)}
+	require.NoError(t, p.Validate())
+	ctx := context.Background()
+	require.NoError(t, p.replicaPass(ctx, 0))
+	require.Error(t, p.replicaPass(ctx, 1))
+	require.NoError(t, p.replicaPass(ctx, 2))
+	require.NoError(t, p.pass(ctx))
+	require.Equal(t, Status{Acknowledged: int64(len(f.entries))}, p.Snapshot(), "two verified copies are enough")
+	for hash, set := range p.ack {
+		require.Equal(t, ackSet(0b101), set, "block %x", hash)
+	}
+	progress := p.ReplicaProgress()
+	require.Len(t, progress, 3)
+	require.NotEmpty(t, progress[1].Error)
+	require.Empty(t, progress[0].Error)
+	require.Empty(t, progress[2].Error)
+	for i := range f.entries {
+		q, _ := f.record(t, i)
+		_, err := stores[0].Get(q)
+		require.NoError(t, err)
+		_, err = stores[2].Get(q)
+		require.NoError(t, err)
+		_, err = stores[1].Get(q)
+		require.Error(t, err)
+	}
+	// One copy is not enough.
+	p.ack = map[[32]byte]ackSet{}
+	require.NoError(t, p.replicaPass(ctx, 2))
+	require.NoError(t, p.pass(ctx))
+	require.Equal(t, Status{Lagging: int64(len(f.entries))}, p.Snapshot())
+}
+
+func TestPublisherRefusesAnInvalidReplicaSet(t *testing.T) {
+	f := newWiringFixture(t, 1)
+	local, err := archive.Open(t.TempDir())
+	require.NoError(t, err)
+	sender := testpeer.CreatePeer(t, testpeer.CreatePeerConfiguration(t))
+	for name, replicas := range map[string][]peer.ID{"none": nil, "one": {"a"}, "four": {"a", "b", "c", "d"}, "duplicate": {"a", "a", "b"}} {
+		p := &Publisher{Journal: f.store, Context: f.context, JournalLimits: f.limits, Archive: local, Subject: f.subject, Host: sender, Replicas: replicas, Limits: DefaultLimits()}
+		require.ErrorIs(t, p.Validate(), ErrConfig, name)
+	}
 }

@@ -51,10 +51,13 @@ func frontierTestSetup(t *testing.T, path string) (*Store, Context, frontier.Pol
 }
 
 func frontierTestSetupWithFixture(t *testing.T, path string) (*Store, *fixture, Context, frontier.Policy, frontier.Coverage, JournalLimits) {
+	return frontierTestSetupWithLimits(t, path, JournalLimits{Candidates: 3, Observations: 5, Bytes: 16 << 20})
+}
+
+func frontierTestSetupWithLimits(t *testing.T, path string, limits JournalLimits) (*Store, *fixture, Context, frontier.Policy, frontier.Coverage, JournalLimits) {
 	t.Helper()
 	f := newFixture(t, 0)
 	c, subject := frontierTestContext(f)
-	limits := JournalLimits{Candidates: 3, Observations: 5, Bytes: 16 << 20}
 	s, err := OpenConfiguredV2(path, Settings{Retain: 3})
 	require.NoError(t, err)
 	_, _, err = s.Initialize(context.Background(), c)

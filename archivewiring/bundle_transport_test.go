@@ -96,7 +96,7 @@ func TestBundlePublisherContinuesAfterOneReplicaFails(t *testing.T) {
 		return nil
 	})
 	server.Register(context.Background(), good)
-	p := &Publisher{Archive: local, Subject: request.Context, Host: client, Replicas: [2]peer.ID{bad.ID(), good.ID()}, Limits: DefaultLimits(),
+	p := &Publisher{Archive: local, Subject: request.Context, Host: client, Replicas: []peer.ID{bad.ID(), good.ID()}, Limits: DefaultLimits(),
 		BundleVerifier: func(context.Context, archive.BundleRequest, []byte) error { return nil }, bundleAck: make(map[uint64]uint8)}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()

@@ -6,6 +6,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"slices"
 	"testing"
 
 	"github.com/libp2p/go-libp2p/core/peer"
@@ -13,7 +14,9 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/unicitynetwork/bft-go-base/types"
 
+	"github.com/unicitynetwork/bft-core/archivepolicy"
 	"github.com/unicitynetwork/bft-core/archivewiring"
+	"github.com/unicitynetwork/bft-core/frontier"
 	"github.com/unicitynetwork/bft-core/shardnode"
 )
 
@@ -54,12 +57,12 @@ func TestParseArchiveReplicasRefusesMalformedConfiguration(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			got, err := parseArchiveReplicas(raws, self)
 			require.ErrorIs(t, err, archivewiring.ErrConfig)
-			require.Equal(t, [2]peer.ID{}, got, "no half-parsed pair escapes a refusal")
+			require.Equal(t, []peer.ID{}, got, "no half-parsed pair escapes a refusal")
 		})
 	}
 	got, err := parseArchiveReplicas([]string{a.String(), b.String()}, self)
 	require.NoError(t, err)
-	require.Equal(t, [2]peer.ID{a, b}, got)
+	require.Equal(t, []peer.ID{a, b}, got)
 	_, err = parseArchiveReplicas([]string{a.String(), c.String()}, self)
 	require.NoError(t, err, "membership is not judged here: a replica that a later step installed must parse")
 }
@@ -67,10 +70,10 @@ func TestParseArchiveReplicasRefusesMalformedConfiguration(t *testing.T) {
 func TestRequireArchiveReplicasInstalledRefusesUninstalledPeers(t *testing.T) {
 	a, b, stranger := randPeer(t), randPeer(t), randPeer(t)
 	installed := []peer.ID{a, b}
-	require.NoError(t, requireArchiveReplicasInstalled([2]peer.ID{a, b}, installed))
-	require.ErrorIs(t, requireArchiveReplicasInstalled([2]peer.ID{a, stranger}, installed), archivewiring.ErrConfig)
-	require.ErrorIs(t, requireArchiveReplicasInstalled([2]peer.ID{stranger, b}, installed), archivewiring.ErrConfig)
-	require.ErrorIs(t, requireArchiveReplicasInstalled([2]peer.ID{a, b}, nil), archivewiring.ErrConfig)
+	require.NoError(t, requireArchiveReplicasInstalled([]peer.ID{a, b}, installed))
+	require.ErrorIs(t, requireArchiveReplicasInstalled([]peer.ID{a, stranger}, installed), archivewiring.ErrConfig)
+	require.ErrorIs(t, requireArchiveReplicasInstalled([]peer.ID{stranger, b}, installed), archivewiring.ErrConfig)
+	require.ErrorIs(t, requireArchiveReplicasInstalled([]peer.ID{a, b}, nil), archivewiring.ErrConfig)
 }
 
 // A replacement pair is refused against the genesis set and accepted once the persisted replay installed the successor assignment; a
@@ -78,8 +81,8 @@ func TestRequireArchiveReplicasInstalledRefusesUninstalledPeers(t *testing.T) {
 func TestAReplacementArchiveReplicaPairIsValidatedAgainstTheReplayedSet(t *testing.T) {
 	self, b, d, e, other := randPeer(t), randPeer(t), randPeer(t), randPeer(t), randPeer(t)
 	genesis := nodeInfos(self, b, d, other)
-	replacement := [2]peer.ID{b, e}
-	original := [2]peer.ID{b, d}
+	replacement := []peer.ID{b, e}
+	original := []peer.ID{b, d}
 
 	t.Run("genesis-only startup is unchanged", func(t *testing.T) {
 		peers, err := shardnode.NewActivePeers(self, genesis)
@@ -111,7 +114,7 @@ func TestAReplacementArchiveReplicaPairIsValidatedAgainstTheReplayedSet(t *testi
 		peers, err := shardnode.NewActivePeers(self, genesis)
 		require.NoError(t, err)
 		require.ErrorIs(t, admitArchivePeers(peers, replacement, true, false), archivewiring.ErrConfig)
-		require.NoError(t, admitArchivePeers(peers, [2]peer.ID{}, false, false))
+		require.NoError(t, admitArchivePeers(peers, []peer.ID{}, false, false))
 	})
 }
 
@@ -125,7 +128,7 @@ func TestRestoreValidatesReplicasAfterCatchUpAndBeforeReleaseSetupOrReplay(t *te
 		peers.Hold()
 		return peers
 	}
-	run := func(peers *shardnode.ActivePeers, replicas [2]peer.ID, catchUp func() error) (steps []string, err error) {
+	run := func(peers *shardnode.ActivePeers, replicas []peer.ID, catchUp func() error) (steps []string, err error) {
 		err = runProfile2ArchiveRestore(context.Background(),
 			func(context.Context) error {
 				steps = append(steps, "catch-up")
@@ -142,14 +145,14 @@ func TestRestoreValidatesReplicasAfterCatchUpAndBeforeReleaseSetupOrReplay(t *te
 
 	t.Run("replacement accepted after the catch-up installed it", func(t *testing.T) {
 		peers := newPeers()
-		steps, err := run(peers, [2]peer.ID{b, e}, func() error { return peers.Install(1, nodeInfos(self, b, e, other)) })
+		steps, err := run(peers, []peer.ID{b, e}, func() error { return peers.Install(1, nodeInfos(self, b, e, other)) })
 		require.NoError(t, err)
 		require.Equal(t, []string{"catch-up", "setup", "replay", "repair"}, steps)
 		require.True(t, peers.Allowed(e))
 	})
 	t.Run("replacement refused when the catch-up installed nothing", func(t *testing.T) {
 		peers := newPeers()
-		steps, err := run(peers, [2]peer.ID{b, e}, func() error { return nil })
+		steps, err := run(peers, []peer.ID{b, e}, func() error { return nil })
 		require.ErrorIs(t, err, archivewiring.ErrConfig)
 		require.Equal(t, []string{"catch-up"}, steps, "no setup, replay or repair after a refusal")
 		require.False(t, peers.Allowed(b), "the hold stays")
@@ -157,7 +160,7 @@ func TestRestoreValidatesReplicasAfterCatchUpAndBeforeReleaseSetupOrReplay(t *te
 	t.Run("a failed catch-up never releases the hold", func(t *testing.T) {
 		peers := newPeers()
 		failure := errors.New("catch-up incomplete")
-		steps, err := run(peers, [2]peer.ID{b, d}, func() error { return failure })
+		steps, err := run(peers, []peer.ID{b, d}, func() error { return failure })
 		require.ErrorIs(t, err, failure)
 		require.Equal(t, []string{"catch-up"}, steps)
 		require.False(t, peers.Allowed(b), "the hold stays")
@@ -208,7 +211,7 @@ func TestShardNodeRunValidatesArchiveReplicasAfterReplayAndBeforeRelease(t *test
 	calls := callsIn(run)
 
 	// Structural parsing is early: before the follower that fetches from the replicas is built, and before any replay.
-	require.Len(t, calls["parseArchiveReplicas"], 1)
+	require.Len(t, calls["archiveReplicaSet"], 1)
 	var follower token.Pos
 	ast.Inspect(run, func(n ast.Node) bool {
 		if lit, ok := n.(*ast.CompositeLit); ok {
@@ -219,9 +222,9 @@ func TestShardNodeRunValidatesArchiveReplicasAfterReplayAndBeforeRelease(t *test
 		return true
 	})
 	require.NotZero(t, follower)
-	require.Less(t, calls["parseArchiveReplicas"][0].pos, follower)
+	require.Less(t, calls["archiveReplicaSet"][0].pos, follower)
 	require.Len(t, calls["runProfile2JournalStartup"], 1)
-	require.Less(t, calls["parseArchiveReplicas"][0].pos, calls["runProfile2JournalStartup"][0].pos)
+	require.Less(t, calls["archiveReplicaSet"][0].pos, calls["runProfile2JournalStartup"][0].pos)
 
 	// Membership validation lives only in admitArchivePeers, never against the hold-sensitive Allowed, and every release goes through it.
 	require.Empty(t, calls["requireArchiveReplicasInstalled"], "shardNodeRun validates through admitArchivePeers only")
@@ -356,4 +359,62 @@ func installedSource(t *testing.T, fn *ast.FuncDecl) []string {
 		return true
 	})
 	return out
+}
+
+// Without --archive-replica the set is derived from the validators: the next three after this node in circular peer-ID order, bound to the
+// policy digest; with exactly two others it is the pair; with fewer it is a configuration error. An explicit pair keeps the legacy records.
+func TestArchiveReplicaSetDerivesFromValidators(t *testing.T) {
+	self := randPeer(t)
+	var others []peer.ID
+	for i := 0; i < 4; i++ {
+		others = append(others, randPeer(t))
+	}
+	got, digest, err := archiveReplicaSet(nil, self, others, 7)
+	require.NoError(t, err)
+	require.Len(t, got, 3)
+	require.NotEqual(t, [32]byte{}, digest)
+	want, err := archivepolicy.Select(self, append(slices.Clone(others), self), 7)
+	require.NoError(t, err)
+	require.Equal(t, want.Replicas, got)
+	require.NotContains(t, got, self)
+	// The order the validators are listed in does not matter; the epoch does (it is part of the digest).
+	shuffled := []peer.ID{others[2], others[0], others[3], others[1]}
+	again, sameDigest, err := archiveReplicaSet(nil, self, shuffled, 7)
+	require.NoError(t, err)
+	require.Equal(t, got, again)
+	require.Equal(t, digest, sameDigest)
+	_, otherDigest, err := archiveReplicaSet(nil, self, others, 8)
+	require.NoError(t, err)
+	require.NotEqual(t, digest, otherDigest)
+
+	pair, _, err := archiveReplicaSet(nil, self, others[:2], 7)
+	require.NoError(t, err)
+	require.Len(t, pair, 2)
+	for _, n := range []int{0, 1} {
+		got, _, err := archiveReplicaSet(nil, self, others[:n], 7)
+		require.ErrorIs(t, err, archivewiring.ErrConfig, "%d other validators", n)
+		require.Nil(t, got)
+	}
+
+	explicit, explicitDigest, err := archiveReplicaSet([]string{others[0].String(), others[1].String()}, self, others, 7)
+	require.NoError(t, err)
+	require.Equal(t, []peer.ID{others[0], others[1]}, explicit)
+	require.Equal(t, [32]byte{}, explicitDigest, "an explicit pair is a legacy two-replica configuration")
+	_, _, err = archiveReplicaSet([]string{others[0].String()}, self, others, 7)
+	require.ErrorIs(t, err, archivewiring.ErrConfig)
+}
+
+func TestSetFrontierReplicas(t *testing.T) {
+	a, b, c := randPeer(t), randPeer(t), randPeer(t)
+	var p frontier.Policy
+	require.NoError(t, setFrontierReplicas(&p, []peer.ID{a, b, c}, [32]byte{1}))
+	require.Equal(t, []string{a.String(), b.String(), c.String()}, p.Eligible)
+	require.Equal(t, [32]byte{1}, p.PolicyDigest)
+	require.True(t, p.ReplicasValid())
+	var legacy frontier.Policy
+	require.NoError(t, setFrontierReplicas(&legacy, []peer.ID{a, b}, [32]byte{}))
+	require.Equal(t, [2]string{a.String(), b.String()}, legacy.Replicas)
+	require.Empty(t, legacy.Eligible)
+	require.True(t, legacy.ReplicasValid())
+	require.ErrorIs(t, setFrontierReplicas(&frontier.Policy{}, []peer.ID{a, b, c}, [32]byte{}), archivewiring.ErrConfig, "three replicas need a policy digest")
 }

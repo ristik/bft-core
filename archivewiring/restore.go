@@ -33,7 +33,7 @@ type ArchiveRestore struct {
 	JournalLimits configuredprogress.JournalLimits
 	Archive       *archive.Store
 	Subject       archive.Context
-	Replicas      [2]peer.ID
+	Replicas      []peer.ID
 	Host          shardnode.EvidenceHost
 	Limits        Limits
 	// Retry bounds the wait for a replica that cannot serve a record right now (zero value: DefaultFetchRetry).
@@ -97,7 +97,7 @@ type restoredBlock struct {
 
 func (r *ArchiveRestore) Restore(ctx context.Context) error {
 	if r == nil || r.Journal == nil || r.Archive == nil || r.Adapter == nil || r.Host == nil ||
-		r.Replicas[0] == "" || r.Replicas[1] == "" || r.Replicas[0] == r.Replicas[1] ||
+		!validReplicas(r.Replicas) ||
 		r.TipUC == nil || r.TipTR == nil || r.TipUC.InputRecord == nil || len(r.Genesis.Hash) != 32 || !r.Limits.valid() {
 		return fmt.Errorf("%w: incomplete restore configuration", ErrRestore)
 	}

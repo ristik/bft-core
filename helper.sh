@@ -484,7 +484,8 @@ function archive_replica_pool() {
   echo ${EVM_ARCHIVE_REPLICA_POOL:-$(seq 1 "$1")}
 }
 
-# archive_replicas_of <validator> <validators>: the two archive replicas this validator names (the product takes exactly two peer IDs): the next two
+# archive_replicas_of <validator> <validators>: the two archive replicas this validator names (a fixed pair of --archive-replica peer IDs; with
+# EVM_ARCHIVE_DERIVED set, every other validator, as the node derives them): the next two
 # candidates after it in pool order, wrapping, never itself; a validator outside the pool takes the first two. With the default pool every validator
 # is a replica of exactly two others (1->2,3  2->3,4  3->4,1  4->1,2), so none is left out and none carries more than its share.
 function archive_replicas_of() {
@@ -493,6 +494,17 @@ function archive_replicas_of() {
   # down through the Commit) may only name members of the assignment it has installed
   if [ -n "${!pinned:-}" ]; then echo "${!pinned}"; return 0; fi
   n=${#pool[@]}
+  if [ -n "${EVM_ARCHIVE_DERIVED:-}" ]; then
+    # The node derives its replicas itself (archivepolicy: the next three validators after it in circular peer-ID order, any two of
+    # which make a block durable). With at most three other validators that is every other validator, which is all this helper models.
+    for k in $(seq 0 $((n - 1))); do [ "${pool[$k]}" = "$i" ] || out+=("${pool[$k]}"); done
+    if [ "${#out[@]}" -gt 3 ]; then
+      echo "EVM_ARCHIVE_DERIVED with ${#out[@]} other validators needs the peer-ID order of archivepolicy.Select" >&2
+      return 1
+    fi
+    echo "${out[*]}"
+    return 0
+  fi
   for k in $(seq 0 $((n - 1))); do [ "${pool[$k]}" = "$i" ] && start=$((k + 1)); done
   for k in $(seq 0 $((n - 1))); do
     [ "${pool[$(((start + k) % n))]}" = "$i" ] && continue
@@ -549,11 +561,14 @@ function start_one_evm_validator() {
 	  # EVM_ARCHIVE_REPLICA_POOL (ids) names the candidates after a validator-set change: a retired validator is not a valid replica
 	  # of the installed assignment, and the node refuses to start naming one. By default every validator but the publisher itself is a
 	  # candidate (the product takes exactly two replica peer IDs and restricts nothing else), so each validator serves as a replica too.
-	  for j in $(archive_replicas_of "$i" "$n"); do
-	    peerID=$(evm_validator_id "$j") || return 1
-	    executorArgs+=(--archive-replica "$peerID")
-	    replicaCount=$((replicaCount + 1))
-	  done
+	  # EVM_ARCHIVE_DERIVED: pass no --archive-replica; the node derives its replica set from the shard conf (any two of up to three).
+	  if [ -z "${EVM_ARCHIVE_DERIVED:-}" ]; then
+	    for j in $(archive_replicas_of "$i" "$n"); do
+	      peerID=$(evm_validator_id "$j") || return 1
+	      executorArgs+=(--archive-replica "$peerID")
+	      replicaCount=$((replicaCount + 1))
+	    done
+	  fi
 	fi
   fi
 
