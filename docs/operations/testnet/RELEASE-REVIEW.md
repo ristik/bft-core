@@ -51,10 +51,10 @@ Each row: the check, where to look, and what a pass is. Record `PASS`, `FAIL` (w
 
 | # | check | where / how | pass |
 |---|---|---|---|
-| 13 | Each validator's signing key is held by its authority only | `compose.yaml` mounts: the `authority%d` container alone mounts `validator%d/auth` read-write; root and shard get the socket and a credential | no other container mounts another validator's `auth` |
+| 13 | Each validator's signing key is held by its own authority only | `compose.yaml` mounts: `validator%d/auth` (the authority's key, sockets and credentials) is mounted by `authority%d` and by that validator's own `shard%d` (client socket and credential) and by nothing else | no container mounts another validator's `auth`; the root nodes and every other service mount none |
 | 14 | Faucet key and captcha secret are Docker secrets | `compose.yaml` `secrets:`; `faucet-secrets/` modes | readable only by the signer; not in `compose.yaml`, environment or images |
 | 15 | Aggregator secrets are in a private env file | `aggregator/secrets.env` mode and owner; not in `compose.yaml` | as stated |
-| 16 | Containers are least-privilege | `docker compose config --format json`: every service has `read_only`, `cap_drop: [ALL]`, `no-new-privileges`, a non-root user, `mem_limit`, `cpus`, `pids_limit` | no exceptions without a written reason |
+| 16 | Containers are least-privilege | `docker compose config --format json`: every service has `read_only`, `cap_drop: [ALL]`, `no-new-privileges`, a non-root user (in `compose.yaml` or the image's `USER`), `mem_limit`, `cpus`, `pids_limit` | no exceptions without a written reason |
 | 17 | The generation directory and backups carry no secret in a public place | backup archive location, mode; the manifest and `network/` contain no private key | as stated |
 
 ### 1.4 Resource bounds
