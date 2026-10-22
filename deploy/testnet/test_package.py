@@ -738,5 +738,56 @@ class TesterCheck(unittest.TestCase):
         self.assertEqual(self.run_check(self.serve(),'--chain-id','31337','--genesis-hash','0x12')[0],2)
         self.assertEqual(self.run_check('http://127.0.0.1:1/','--chain-id','31337','--genesis-hash',self.GEN)[0],2)
 
+class LoadGenerator(unittest.TestCase):
+    """deploy/testnet/loadgen.py against an in-memory node and a fake clock."""
+    def module(self):
+        import importlib.util
+        spec=importlib.util.spec_from_file_location('loadgen',Path(__file__).parent/'loadgen.py')
+        m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m);return m
+    class Node:
+        def __init__(self,limit_every=0,status='0x1',fail_at=None,mine=True):
+            self.sent=[];self.calls=0;self.limit_every=limit_every;self.status=status;self.fail_at=fail_at;self.mine=mine;self.xff=set()
+        def post(self,method,params,xff=None):
+            self.xff.add(xff)
+            ok=lambda r:(200,json.dumps({'jsonrpc':'2.0','id':1,'result':r}))
+            if method=='eth_getTransactionCount': return ok(hex(0 if params[1]=='pending' else (len(self.sent) if self.mine else 0)))
+            if method=='eth_gasPrice': return ok('0x1')
+            if method=='eth_sendRawTransaction':
+                self.calls+=1
+                if self.limit_every and self.calls%self.limit_every==0: return 429,'limited'
+                if self.fail_at is not None and len(self.sent)==self.fail_at: return 500,'boom'
+                self.sent.append(params[0]);return ok('0x%064x'%len(self.sent))
+            if method=='eth_getTransactionReceipt': return ok({'status':self.status})
+            raise AssertionError(method)
+    def run_load(self,node,**kw):
+        now=[0.0]
+        def sleep(d): now[0]+=d
+        args=dict(sender='0xaa',sign=lambda to,n,p: f'raw{n}',rate=10,duration=3,ips=0,ip_prefix='203.0.113.',recipients=4,receipt_wait=5,min_accepted=1)
+        args.update(kw)
+        return self.module().run(node,args.pop('sender'),args.pop('sign'),args.pop('rate'),args.pop('duration'),args.pop('ips'),args.pop('ip_prefix'),args.pop('recipients'),
+                                 args.pop('receipt_wait'),args.pop('min_accepted'),clock=lambda:now[0],sleep=sleep)
+    def test_every_accepted_transfer_mined_is_a_pass(self):
+        node=self.Node();s,problems=self.run_load(node)
+        self.assertEqual(problems,[]);self.assertEqual((s['submitted'],s['accepted'],s['mined_ok'],s['rate_limited_429']),(30,30,30,0))
+        self.assertEqual(node.sent,[f'raw{i}' for i in range(30)])
+    def test_rate_limited_submissions_are_counted_and_resent_with_the_same_nonce(self):
+        node=self.Node(limit_every=4);s,problems=self.run_load(node)
+        self.assertEqual(problems,[]);self.assertGreater(s['rate_limited_429'],0);self.assertEqual(node.sent,[f'raw{i}' for i in range(30)])
+    def test_the_requests_are_spread_over_the_client_addresses(self):
+        node=self.Node();self.run_load(node,ips=3)
+        self.assertEqual(node.xff,{'203.0.113.1','203.0.113.2','203.0.113.3'})
+    def test_a_transfer_mined_with_a_failed_status_fails_the_run(self):
+        s,problems=self.run_load(self.Node(status='0x0'))
+        self.assertTrue(any('failed status' in p for p in problems),problems)
+    def test_a_refused_submission_other_than_the_rate_limit_fails_the_run(self):
+        s,problems=self.run_load(self.Node(fail_at=5))
+        self.assertTrue(any('HTTP 500' in p for p in problems),problems);self.assertEqual(s['errors'],25)
+    def test_accepted_transfers_that_are_never_mined_fail_the_run(self):
+        s,problems=self.run_load(self.Node(mine=False))
+        self.assertTrue(any('not mined within' in p for p in problems),problems)
+    def test_too_few_accepted_fails_the_run(self):
+        s,problems=self.run_load(self.Node(),min_accepted=31)
+        self.assertTrue(any('only 30 accepted' in p for p in problems),problems)
+
 
 if __name__=='__main__': unittest.main()
