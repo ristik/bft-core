@@ -9,6 +9,8 @@ import (
 	"testing"
 	"time"
 
+	gethtypes "github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/rlp"
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/libp2p/go-libp2p/core/peerstore"
 	"github.com/stretchr/testify/require"
@@ -172,19 +174,33 @@ func TestArchivePlan_ARestartedWalkReadsTheRetainedRecordsLocally(t *testing.T) 
 
 func TestArchivePlan_Refusals(t *testing.T) {
 	t.Parallel()
-	t.Run("a copy without receipts is passed over", func(t *testing.T) {
+	t.Run("a replica copy without receipts is passed over", func(t *testing.T) {
 		p := newPlanFixture(t, 3)
 		p.serve(t, 1, 2)
 		q, rec := p.f.record(t, 2)
-		bare := *rec
-		bare.Extensions = nil
-		require.False(t, archive.HasReceiptList(&bare))
-		require.NoError(t, p.replica.Put(q, &bare))
+		bare := withoutReceipts(rec)
+		require.NoError(t, p.replica.Put(q, bare))
+		binding := CertifiedBinding{Context: p.f.context, Subject: p.f.subject}
+		fr := frontierRecordForRecovery(q, header(t, rec), resulting(t, rec))
+		require.NoError(t, binding.VerifyCertified(fr, rec))
+		require.Error(t, binding.VerifyCertified(fr, bare), "the binding refuses a copy only for its missing receipts: what keeps the retained copies receipt-complete")
 		plan, err := NewArchivePlan(p.genesis, p.hash(3))
 		require.NoError(t, err)
 		err = p.source.Extend(context.Background(), plan, far())
 		require.ErrorIs(t, err, ErrArchiveRecoveryUnavailable)
+		require.ErrorContains(t, err, "certified binding")
 		require.Zero(t, plan.Walked())
+	})
+	t.Run("a local copy without receipts does not stand in for a receipt-complete one", func(t *testing.T) {
+		p := newPlanFixture(t, 3)
+		p.serve(t, 1, 3)
+		q, rec := p.f.record(t, 2)
+		require.NoError(t, p.local.Put(q, withoutReceipts(rec)))
+		plan, err := NewArchivePlan(p.genesis, p.hash(3))
+		require.NoError(t, err)
+		require.NoError(t, p.source.Extend(context.Background(), plan, far()))
+		_, err = p.local.GetReceiptComplete(q)
+		require.NoError(t, err, "the replica's receipt-complete copy is retained beside the bare one (the frontier needs it)")
 	})
 	t.Run("a tampered certificate is passed over", func(t *testing.T) {
 		p := newPlanFixture(t, 3)
@@ -248,4 +264,30 @@ func TestArchivePlan_Refusals(t *testing.T) {
 		_, err = NewArchivePlan(shardnode.BlockRef{}, p.hash(1))
 		require.ErrorIs(t, err, ErrArchiveRecoveryUnavailable)
 	})
+}
+
+// withoutReceipts is rec with its receipt list removed (a certified legacy record): the extension map stays non-nil, as SameArchiveCore strips it.
+func withoutReceipts(rec *archive.Record) *archive.Record {
+	cp := *rec
+	cp.Extensions = make(map[string][]byte, len(rec.Extensions))
+	for k, v := range rec.Extensions {
+		if k != archive.ReceiptListKey {
+			cp.Extensions[k] = v
+		}
+	}
+	return &cp
+}
+
+func header(t *testing.T, rec *archive.Record) *gethtypes.Header {
+	t.Helper()
+	var h gethtypes.Header
+	require.NoError(t, rlp.DecodeBytes(rec.Header, &h))
+	return &h
+}
+
+func resulting(t *testing.T, rec *archive.Record) *types.UnicityCertificate {
+	t.Helper()
+	var uc types.UnicityCertificate
+	require.NoError(t, types.Cbor.Unmarshal(rec.ResultingUC, &uc))
+	return &uc
 }

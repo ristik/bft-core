@@ -19,7 +19,7 @@ const planPutBatch = 16
 
 // ArchivePlan is the archive part of a long catch-up (bft-core#769, briefs/769-rejoin-design.md): the certified chain from a retained
 // anchor (After) up to Top, walked back through the archive without FetchSuffix's cap. Walking is bounded by time and resumes where the
-// previous call stopped; every walked record is verified (RecoverySource.decodeEntry, receipt-complete copies only) and retained in
+// previous call stopped; every walked record is verified (RecoverySource.decodeEntry, which accepts receipt-complete copies only) and retained in
 // the local archive, so a resumed or restarted walk reads it back locally. The plan holds only block hashes. A page is read back from
 // the local archive and verified again, and journal admission checks it once more: the plan is a locator and a staging area, never
 // evidence.
@@ -102,7 +102,7 @@ func (s *RecoverySource) Extend(ctx context.Context, p *ArchivePlan, until time.
 			return fmt.Errorf("%w: catch-up gap exceeds %d blocks; restore the validator", ErrArchiveRecoveryUnavailable, MaxPlanBlocks)
 		}
 		q := archive.Request{Context: s.Subject, BlockHash: p.next}
-		entry, rec, local, err := s.fetchVerifiedRecord(ctx, q, true)
+		entry, rec, local, err := s.fetchVerifiedRecord(ctx, q)
 		if err != nil {
 			return fmt.Errorf("%w: %x: %v", ErrArchiveRecoveryUnavailable, p.next, err)
 		}
@@ -170,7 +170,7 @@ func (s *RecoverySource) Page(ctx context.Context, p *ArchivePlan, from shardnod
 	parentHash, parentNumber, parentState := from.Hash, from.Number, bytes.Clone(from.StateRoot)
 	for i := above - 1; i >= 0 && len(out) < max; i-- {
 		q := archive.Request{Context: s.Subject, BlockHash: p.walked[i]}
-		entry, _, _, err := s.fetchVerifiedRecord(ctx, q, true)
+		entry, _, _, err := s.fetchVerifiedRecord(ctx, q)
 		if err != nil {
 			return nil, fmt.Errorf("%w: %x: %v", ErrArchiveRecoveryUnavailable, q.BlockHash, err)
 		}

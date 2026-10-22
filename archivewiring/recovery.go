@@ -86,21 +86,17 @@ func frontierRecordForRecovery(q archive.Request, header *gethtypes.Header, resu
 }
 
 func (s *RecoverySource) fetchVerifiedEntry(ctx context.Context, q archive.Request) (shardnode.JournalFetchEntry, error) {
-	entry, _, _, err := s.fetchVerifiedRecord(ctx, q, false)
+	entry, _, _, err := s.fetchVerifiedRecord(ctx, q)
 	return entry, err
 }
 
-// fetchVerifiedRecord is fetchVerifiedEntry that also returns the record and whether it came from the local archive. With
-// receiptComplete, a copy without a valid receipt list is passed over like a failed one: a long catch-up retains its records as
-// the local copy the frontier later needs, and the frontier accepts only receipt-complete ones.
-func (s *RecoverySource) fetchVerifiedRecord(ctx context.Context, q archive.Request, receiptComplete bool) (shardnode.JournalFetchEntry, *archive.Record, bool, error) {
+// fetchVerifiedRecord is fetchVerifiedEntry that also returns the record and whether it came from the local archive. Every copy it
+// accepts is receipt-complete: the certified binding validates the receipt list against the header (ValidateReceiptCommitments), so
+// a long catch-up that retains these records holds the local copies the frontier needs.
+func (s *RecoverySource) fetchVerifiedRecord(ctx context.Context, q archive.Request) (shardnode.JournalFetchEntry, *archive.Record, bool, error) {
 	var failures []error
 	if s.Local != nil {
-		get := s.Local.Get
-		if receiptComplete {
-			get = s.Local.GetReceiptComplete
-		}
-		rec, err := get(q)
+		rec, err := s.Local.Get(q)
 		if err == nil {
 			entry, verifyErr := s.decodeEntry(ctx, q, rec)
 			if verifyErr == nil {
@@ -118,9 +114,6 @@ func (s *RecoverySource) fetchVerifiedRecord(ctx context.Context, q archive.Requ
 			continue
 		}
 		rec, err := Fetch(ctx, s.Host, id, q, s.Limits)
-		if err == nil && receiptComplete && !archive.HasReceiptList(rec) {
-			err = fmt.Errorf("%w: copy without a receipt list", archive.ErrUnavailable)
-		}
 		if err == nil {
 			var entry shardnode.JournalFetchEntry
 			entry, err = s.decodeEntry(ctx, q, rec)
