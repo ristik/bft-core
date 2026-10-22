@@ -15,7 +15,8 @@ A snapshot is one JSON object per line, written by a collector during the run (t
 Invariants (each a named failure, first one wins):
   schema        a snapshot is missing a field or carries a non-integer / negative amount
   order         t strictly increases, block never decreases
-  cursor        a cursor never decreases and never disappears
+  cursor        a cursor never decreases and never disappears (a cursor that is new in a later snapshot is fine)
+  cumulative    the cumulative totals (pool funded/paid, custody deposited/withdrawn/slashed) never decrease; balance and held may move either way
   pool          funded == paid + balance
   custody       deposited == withdrawn + slashed + held
   payments      the cumulative payment list only grows by appending; no (interval, payee) is paid twice; sum(payments) == pool.paid
@@ -23,6 +24,7 @@ Exit status: 0 PASS, 1 FAIL (first failing invariant in the output), 2 INCOMPLET
 import argparse
 import json
 import sys
+from collections import Counter
 from pathlib import Path
 
 FIELDS = {"pool": ("funded", "paid", "balance"), "custody": ("deposited", "withdrawn", "slashed", "held")}
@@ -66,7 +68,7 @@ def check(snaps):
         if c["deposited"] != c["withdrawn"] + c["slashed"] + c["held"]:
             raise Fail("custody", i, f"deposited {c['deposited']} != withdrawn {c['withdrawn']} + slashed {c['slashed']} + held {c['held']}")
         keys = [(p[0], p[1]) for p in s["payments"]]
-        dup = sorted({k for k in keys if keys.count(k) > 1})
+        dup = sorted(k for k, n in Counter(keys).items() if n > 1)
         if dup:
             raise Fail("payments", i, f"paid twice: {dup[0]}")
         if sum(p[2] for p in s["payments"]) != s["pool"]["paid"]:
@@ -79,6 +81,9 @@ def check(snaps):
                     raise Fail("cursor", i, f"cursor {name} disappeared")
                 if s["cursors"][name] < v:
                     raise Fail("cursor", i, f"cursor {name} went back {v}->{s['cursors'][name]}")
+            for sec, name in (("pool", "funded"), ("pool", "paid"), ("custody", "deposited"), ("custody", "withdrawn"), ("custody", "slashed")):
+                if s[sec][name] < prev[sec][name]:
+                    raise Fail("cumulative", i, f"{sec}.{name} went back {prev[sec][name]}->{s[sec][name]}")
             if s["payments"][:len(prev["payments"])] != prev["payments"]:
                 raise Fail("payments", i, "the earlier payments were rewritten, not appended to")
         prev = s
