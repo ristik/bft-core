@@ -244,7 +244,9 @@ func TestArchiveCatchUp_FallsBackToAnEarlierCertifiedTarget(t *testing.T) {
 }
 
 // liarProvider serves a self-consistent tail whose oldest parent is fabricated: the archive has no such block.
-type liarProvider struct{ honest configuredadmission.JournalProvider }
+type liarProvider struct {
+	honest configuredadmission.JournalProvider
+}
 
 func (l liarProvider) FetchJournal(ctx context.Context, req shardnode.JournalFetchRequest) ([]shardnode.JournalFetchEntry, error) {
 	entries, err := l.honest.FetchJournal(ctx, req)
