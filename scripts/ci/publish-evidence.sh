@@ -94,6 +94,7 @@ case "$kind" in
     ! grep -q 'NOT EVIDENCE' "$ev/run-mode.txt" 2>/dev/null || { complete=no; why+=("run-mode.txt marks the run NOT EVIDENCE"); } ;;
   *) complete=no; why+=("unknown kind $kind") ;;
 esac
+[ -z "${CI_INTERIM:-}" ] || { complete=no; why+=("INTERIM EXPERIMENT, not acceptance evidence: $CI_INTERIM"); }
 if [ "$complete" = no ]; then
   { echo "INCOMPLETE: this is a failed or partial run's pack, kept for diagnosis. It is NOT acceptance evidence."; printf 'reason: %s\n' "${why[@]}"; } >"$pub/INCOMPLETE.txt"
 fi
