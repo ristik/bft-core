@@ -13,10 +13,10 @@ set -uo pipefail
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd); repo=$(cd "$here/../.." && pwd)
 source "$repo/scripts/lib/portable.sh"
 . "$repo/scripts/lib/reth-pin.sh"   # rethEvidenceValidate / rethEvidenceSecretValues (definitions only)
-ev= out= status=0 nodes= minlogs=0 kind=combined; extra=()
+ev= out= status=0 nodes= minlogs=0 kind=combined s4=0; extra=()
 while [ $# -gt 0 ]; do case "$1" in
   --evidence) ev=$2; shift 2 ;; --out) out=$2; shift 2 ;; --status) status=$2; shift 2 ;; --nodes) nodes=$2; shift 2 ;;
-  --min-node-logs) minlogs=$2; shift 2 ;; --kind) kind=$2; shift 2 ;; --extra) extra+=("$2"); shift 2 ;; *) echo "publish-evidence: unknown argument $1" >&2; exit 2 ;; esac; done
+  --min-node-logs) minlogs=$2; shift 2 ;; --kind) kind=$2; shift 2 ;; --s4) s4=$2; shift 2 ;; --extra) extra+=("$2"); shift 2 ;; *) echo "publish-evidence: unknown argument $1" >&2; exit 2 ;; esac; done
 [ -d "$ev" ] && [ -n "$out" ] || { echo "usage: publish-evidence.sh --evidence DIR --out OUT --status N [--nodes DIR] [--min-node-logs N] [--extra PATH]..." >&2; exit 2; }
 name=$(basename "$ev"); mkdir -p "$out"; quarantine="$(cd "$out" && pwd)/../quarantine"; mkdir -p "$quarantine"
 stage=$(mktemp -d); trap 'rm -rf "$stage"' EXIT
@@ -74,7 +74,7 @@ case "$kind" in
     jq -e '.imported == true and .pRet > 0 and .tRet > 0' "$xs/exit-request/request.json" >/dev/null 2>&1 || { complete=no; why+=("exit-request/request.json does not show an imported Retirement (pRet, tRet)"); }
     grep -q 'retirement proof ready.*latencyMs=' "$xs/exit-request/roots.log" 2>/dev/null || { complete=no; why+=("no 'retirement proof ready' line with latencyMs in exit-request/roots.log"); }
     jq -e '.outcome == "refused" and .lawfulEarly == true and (.expected == "" or .expected == .reason)' "$xs/exit-claim/refusal.json" >/dev/null 2>&1 || { complete=no; why+=("exit-claim/refusal.json: the early mature was not refused for a lawful reason"); }
-    if [ -d "$pub/p85/s4" ] || [ -d "$pub/p85/run/s4" ]; then   # the S4 (held offender) variant: the exit was refused for the evidence hold while the case was admitted and unsettled
+    if [ "$s4" = 1 ]; then   # the S4 (held offender) variant, keyed on the run's own S4 flag (run-lane passes S4_LANE), not on a directory name: the exit was refused for the evidence hold while the case was admitted and unsettled
       jq -e '.outcome == "refused" and .reason == "EvidenceHoldPending"' "$xs/exit-request/hold-probe.json" >/dev/null 2>&1 || { complete=no; why+=("exit-request/hold-probe.json: no EvidenceHoldPending refusal while the case was admitted"); }
     fi
     jq -e '.creditDelta > 0' "$xs/exit-claim/matured.json" >/dev/null 2>&1 || { complete=no; why+=("exit-claim/matured.json: no credit delta"); }
