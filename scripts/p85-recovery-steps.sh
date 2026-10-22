@@ -237,7 +237,10 @@ p85_election_reserved() {
   echo "$r" >"$H3_DIR/result-id.txt"
   [ "$(p85_result_state "$r")" = 1 ] || { echo "the open result is not Reserved" >&2; return 1; }
   p85_call "$(p85_election)" "frozenMembers(bytes32)((uint64,uint64,uint64,uint64,bytes32)[])" "$r" >"$H3_DIR/frozen-members.txt"
-  [ "$(grep -o 'bytes32\|(' "$H3_DIR/frozen-members.txt" | wc -l)" -gt 0 ] || true
+  # the result freezes the identities live when it was reserved: one reserved before the onboarding finished lacks the joiner, and every later step
+  # (the proofs, the handoff) would fail on it, far from the cause (#750)
+  local frozen live; frozen=$(grep -o '(' "$H3_DIR/frozen-members.txt" | wc -l | tr -d ' '); live=$(p85_live_count)
+  [ "$frozen" = "$live" ] || { echo "the election reserved a result of $frozen members, but $live identities are live: it fired before the onboarding finished (cadence $P85_CADENCE_ROUNDS rounds / $P85_CADENCE_SECONDS s is shorter than the steps before it)" >&2; return 1; }
 }
 
 # One assignment (the plan's EVM part) for entities 1..5, built from the election's own records. mode: reserved (before the proofs are

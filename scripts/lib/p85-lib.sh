@@ -20,9 +20,13 @@ P85_BOND_UNIT=${P85_BOND_UNIT:-100000000000000000000}   # 100 UCT in base units:
 P85_GENESIS_UNITS=${P85_GENESIS_UNITS:-1}          # bond units per genesis identity (unit weights, like the PoA lanes)
 P85_H_RECORDS=${P85_H_RECORDS:-2}
 P85_HOOK_RECORD_GAS=${P85_HOOK_RECORD_GAS:-3000000}
-P85_CADENCE_ROUNDS=${P85_CADENCE_ROUNDS:-400}      # the election is due this many ordinary rounds after the last acknowledged rotation (the joiner is onboarded first)...
+# the election is due this many ordinary rounds after the last acknowledged rotation, and the joiner must be admitted before that: the any-age and UTB
+# lanes run about 390 rounds of steps (the aggregator setup alone is ~200) before the onboarding, so the plain 400/300 fired in the middle of it and
+# froze a four-member result without the joiner (#750: 'node ... is not a successor validator'); they get twice the window
+if [ "${ANYAGE_LANE:-0}${UTB_LANE:-0}" = 00 ]; then P85_CADENCE_DEFAULT_ROUNDS=400 P85_CADENCE_DEFAULT_SECONDS=300; else P85_CADENCE_DEFAULT_ROUNDS=800 P85_CADENCE_DEFAULT_SECONDS=600; fi
+P85_CADENCE_ROUNDS=${P85_CADENCE_ROUNDS:-$P85_CADENCE_DEFAULT_ROUNDS}      # the election is due this many ordinary rounds after the last acknowledged rotation (the joiner is onboarded first)...
 P85_DIST_NUM=${P85_DIST_NUM:-1}; P85_DIST_DEN=${P85_DIST_DEN:-2}   # the election's weight-distance bound D <= 1/2: adding one unit-weight joiner to four unit-weight members is D = 2/5, over the default 1/4 (WeightChurn, a NoCandidate)
-P85_CADENCE_SECONDS=${P85_CADENCE_SECONDS:-300}    # ...and this many UC seconds
+P85_CADENCE_SECONDS=${P85_CADENCE_SECONDS:-$P85_CADENCE_DEFAULT_SECONDS}    # ...and this many UC seconds
 P85_REGISTRY=0xff00000000000000000000000000000000000002
 P85_TREASURY=0x00000000000000000000000000000000000000ee
 # T8: the fixed development authority of policy governance, and the reward pool's genesis allocation and rate (explicit; the contracts have no default authority)
