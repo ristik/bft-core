@@ -502,8 +502,9 @@ func (p *Publisher) replicaPass(ctx context.Context, index int) error {
 		q := archive.Request{Context: p.Subject, BlockHash: hash}
 		rec, err := p.Archive.GetReceiptComplete(q)
 		if errors.Is(err, archive.ErrUnavailable) {
-			p.setReplicaError(index, "local receipt-complete archive record unavailable")
-			continue // The local publisher will reconstruct this record.
+			// Not a replica failure: this node's own record is not built yet and the local publisher will reconstruct it. Recording it
+			// against the replica made every replica look failed at once, which the operator status reads as a frozen frontier.
+			continue
 		}
 		if err == nil {
 			_, expected, checkErr := p.fromJournal(ctx, e)
