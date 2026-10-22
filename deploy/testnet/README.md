@@ -35,7 +35,7 @@ Monitor disks: retention bounds metrics/logs but does not bound chain databases.
 
 Only public RPC (8545), faucet (8088) and Prometheus (9090) bind **host loopback**.
 No root admin, shard admin, authority or Engine endpoint has a published port.
-The validator network is internal. The faucet's isolated signer has Internet
+The validator network is internal (each ureth serves `eth,net,web3,debug` there: the shard node needs `debug_getRawHeader`; the public gateway allow-lists methods and has no `debug_*`). The faucet's isolated signer has Internet
 access for hCaptcha but cannot reach validators; only its relay bridges networks.
 RPC permits an explicit public method list, no batches, bodies <=16 KiB, eight
 concurrent upstream jobs, five-second client read timeout, ten requests/IP/second,
