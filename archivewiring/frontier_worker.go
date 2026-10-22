@@ -317,9 +317,9 @@ func (w *FrontierWorker) audit(ctx context.Context) error {
 
 // ensureCopies counts the configured replicas holding a verified copy of the position after repairing what it can. It keeps going past two:
 // the acknowledgers come first, so the two copies pruning needs are restored before the optional third, and a replica that returns after
-// pruning is backfilled by the same bounded sweep. Callers need only replicaCopies.
-// Acknowledging replicas come first, a failed one is rewritten from the local record, and a configured replica that did not acknowledge
-// is used only to make up a shortfall; down collects the replicas that failed both, for the rest of the pass. A retired replica (dropped, or outside the configured set) is neither verified nor repaired.
+// pruning is backfilled by the same bounded sweep. Callers need only replicaCopies. A failed replica is rewritten from the local record;
+// down collects the replicas that failed both the read and the rewrite, for the rest of the pass. A retired replica (dropped, or outside
+// the configured set) is neither verified nor repaired.
 func (w *FrontierWorker) ensureCopies(ctx context.Context, availability ReplicaAvailability, down map[peer.ID]bool, r frontier.Record, rec *archive.Record) int {
 	ackers := make(map[peer.ID]bool, len(r.Acks))
 	var order []peer.ID

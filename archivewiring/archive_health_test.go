@@ -125,6 +125,11 @@ func TestPublisherWarnsOnceThenQuietlyAndAgainOnANewError(t *testing.T) {
 	p.warnThrottled(ctx, "archive replica waiting", errors.New("different"), "replica", "a")
 	p.warnThrottled(ctx, "archive replica waiting", same, "replica", "b")
 	require.Equal(t, []slog.Level{slog.LevelWarn, slog.LevelWarn}, log.levels()[5:], "a new error text or replica warns at once")
+	// The same failure with a different height or hash is the same message.
+	for _, height := range []string{"4", "5", "6"} {
+		p.warnThrottled(ctx, "archive publication waiting", errors.New("block "+height+" hash 0x"+height+"abc: replica unavailable"))
+	}
+	require.Equal(t, []slog.Level{slog.LevelWarn, slog.LevelDebug, slog.LevelDebug}, log.levels()[7:])
 }
 
 func TestFrontierWorkerWarnsNearCapacityOncePerMinute(t *testing.T) {

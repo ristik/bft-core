@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"regexp"
 	"sort"
 	"sync"
 	"time"
@@ -164,10 +165,13 @@ type ReplicaProgress struct {
 // verified read-back after restart; this in-memory count never licenses prune.
 func (p *Publisher) Snapshot() Status { p.mu.Lock(); defer p.mu.Unlock(); return p.status }
 
+// variableText matches the parts of an error text that change between retries of the same failure (heights, hashes, durations).
+var variableText = regexp.MustCompile(`0x[0-9a-fA-F]+|[0-9a-fA-F]{16,}|[0-9]+`)
+
 // warnThrottled logs a recurring wait at WARN the first time and again after a minute, and at DEBUG in between: a stopped replica is
-// retried every two seconds and must not bury the log. A different error text is a new message and logs at WARN at once.
+// retried every two seconds and must not bury the log. A different failure (the error text with numbers and hashes removed) is a new message and logs at WARN at once.
 func (p *Publisher) warnThrottled(ctx context.Context, msg string, err error, attrs ...any) {
-	key := msg + "\x00" + fmt.Sprint(attrs...) + "\x00" + err.Error()
+	key := msg + "\x00" + fmt.Sprint(attrs...) + "\x00" + variableText.ReplaceAllString(err.Error(), "#")
 	p.mu.Lock()
 	if p.warned == nil {
 		p.warned = make(map[string]time.Time)
