@@ -3,6 +3,7 @@ package shardnode
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -12,7 +13,11 @@ import (
 	"github.com/unicitynetwork/bft-go-base/types"
 
 	testpeer "github.com/unicitynetwork/bft-core/internal/testutils/peer"
+	"github.com/unicitynetwork/bft-core/q3install"
 )
+
+// errIncomplete is what a trust store answers while its installation of the epoch is incomplete (q3active.ErrNotActive wraps the sentinel).
+var errIncomplete = fmt.Errorf("q3active: activation is not installed: %w", q3install.ErrIncomplete)
 
 // flakyTrustStore serves no trust base for its first `missing` lookups, as a node's trust store does until its own installation of the
 // epoch completes.
@@ -52,7 +57,7 @@ func newTrustWaitClient(t *testing.T, f *confBindingFixture, store TrustBaseStor
 func TestInitialHandshakeWaitsForTheTrustBaseOfItsEpoch(t *testing.T) {
 	shortTrustBaseWait(t, 5*time.Second)
 	f := newConfBindingFixture(t)
-	store := &flakyTrustStore{tb: f.tb, missing: 5, err: errors.New("q3active: activation is not installed")}
+	store := &flakyTrustStore{tb: f.tb, missing: 5, err: errIncomplete}
 	client, _, driver := newTrustWaitClient(t, f, store)
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
@@ -71,7 +76,7 @@ func TestInitialHandshakeWaitsForTheTrustBaseOfItsEpoch(t *testing.T) {
 // A trust base that never arrives still ends the start, with the cause, after the wait.
 func TestInitialHandshakeGivesUpWhenTheTrustBaseNeverArrives(t *testing.T) {
 	shortTrustBaseWait(t, 50*time.Millisecond)
-	cause := errors.New("q3active: activation is not installed")
+	cause := errIncomplete
 	client, net, _ := newTrustWaitClient(t, newConfBindingFixture(t), &flakyTrustStore{missing: 1 << 30, err: cause})
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -81,4 +86,21 @@ func TestInitialHandshakeGivesUpWhenTheTrustBaseNeverArrives(t *testing.T) {
 	net.mu.Lock()
 	defer net.mu.Unlock()
 	require.Zero(t, net.handshakes, "no handshake was sent without a trust base")
+}
+
+// Only an incomplete installation is waited for: a trust store that fails any other way ends the start at once, not after the wait.
+func TestInitialHandshakeDoesNotWaitForOtherTrustBaseErrors(t *testing.T) {
+	shortTrustBaseWait(t, time.Minute)
+	cause := errors.New("trust store: database closed")
+	store := &flakyTrustStore{missing: 1 << 30, err: cause}
+	client, net, _ := newTrustWaitClient(t, newConfBindingFixture(t), store)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	err := client.Run(ctx)
+	require.ErrorIs(t, err, cause)
+	require.NotErrorIs(t, err, context.DeadlineExceeded)
+	require.Equal(t, int32(1), store.calls.Load(), "asked once, not retried")
+	net.mu.Lock()
+	defer net.mu.Unlock()
+	require.Zero(t, net.handshakes)
 }
