@@ -143,6 +143,10 @@ case "$kind" in
     # identity requests retirement; the roots build and order the Retirement, the lots mature after the gates and are claimed (X4_EXIT_LANE=1)
     # run-inputs "s4": true makes the joiner the slashed, held offender (scripts/lib/s4-lib.sh): its exit is refused on the evidence hold until the case is settled
     if [ "$(jq -r '.s4 // false' scripts/ci/run-inputs.json 2>/dev/null)" = true ]; then export S4_LANE=1; log "S4_LANE=1 (run-inputs s4)"; fi
+    # INTERIM EXPERIMENT (not acceptance evidence): run-inputs "evmJournalCandidates": N raises the validators' journal bound (default 256), which #751 shows is what halts the 3-of-4
+    # shard ~26 min after the recovery. The publisher marks such a pack INCOMPLETE with that reason, whatever it shows.
+    jc=$(jq -r '.evmJournalCandidates // empty' scripts/ci/run-inputs.json 2>/dev/null)
+    if [ -n "$jc" ]; then export EVM_JOURNAL_CANDIDATES=$jc CI_INTERIM="EVM_JOURNAL_CANDIDATES=$jc (interim experiment for #751)"; log "INTERIM EXPERIMENT: $CI_INTERIM"; fi
     export X4_EXIT_LANE=1 P85_EVIDENCE_PREFIX=x4-exit-lane P85_LOCK_OWNER=p85-recovery
     log "X4_EXIT_LANE=1 scripts/p85-lane.sh (deadline ${deadline} min)"
     p_timeout "$((deadline * 60))" scripts/p85-lane.sh 2>&1 | tee "$out/lane-stdout.log" >/dev/null
