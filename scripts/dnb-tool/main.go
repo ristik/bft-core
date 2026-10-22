@@ -9,7 +9,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
-	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -18,8 +17,8 @@ import (
 	"math/big"
 	"net/http"
 	"os"
-	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
@@ -186,7 +185,7 @@ func lockProof(args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	src, err := newLockProofSource(*archiveDir, *ethURL, *vaultText, *fullConf, *trustBundlePath, *cfgHash)
+	src, err := newLockProofSource(context.Background(), *archiveDir, *ethURL, *vaultText, *fullConf, *trustBundlePath, *cfgHash)
 	if err != nil {
 		return err
 	}
@@ -198,20 +197,25 @@ func lockProof(args []string) error {
 }
 
 // lockProofSource holds what every lock proof of one deployment shares (the shard configuration, the trust-base ID, the vault and its CFG); build reads
-// one block's certificate and header from the archive and the lock's storage proof from the paired client. It keeps no state between calls.
+// one block's certificate and header from the archive and the lock's storage proof from the paired client. Between calls it keeps only the archive
+// locator's Contexts (a locator, never evidence).
 type lockProofSource struct {
-	archiveDir, ethURL string
-	vault              common.Address
-	cfg                [32]byte
-	pdr                []byte
-	pdrHash            [32]byte
-	trustBaseID        [32]byte
+	archive     *archiveLocator
+	ethURL      string
+	vault       common.Address
+	cfg         [32]byte
+	pdr         []byte
+	pdrHash     [32]byte
+	trustBaseID [32]byte
 }
 
 // errNotFound marks a request for a block the archive does not (yet) hold or a nonce with no lock at that block.
 var errNotFound = errors.New("not found")
 
-func newLockProofSource(archiveDir, ethURL, vaultText, fullConf, trustBundlePath, cfgHash string) (*lockProofSource, error) {
+// archiveRescanEvery bounds how often a lookup that misses rereads the archive directory for Contexts not yet seen.
+const archiveRescanEvery = 10 * time.Second
+
+func newLockProofSource(ctx context.Context, archiveDir, ethURL, vaultText, fullConf, trustBundlePath, cfgHash string) (*lockProofSource, error) {
 	rawConf, err := os.ReadFile(fullConf)
 	if err != nil {
 		return nil, err
@@ -237,23 +241,26 @@ func newLockProofSource(archiveDir, ethURL, vaultText, fullConf, trustBundlePath
 	if err != nil {
 		return nil, err
 	}
-	s := &lockProofSource{archiveDir: archiveDir, ethURL: ethURL, vault: common.HexToAddress(vaultText), pdr: pdr, pdrHash: sha256.Sum256(pdr), trustBaseID: tbID}
+	store, err := archive.Open(archiveDir)
+	if err != nil {
+		return nil, err
+	}
+	locator, err := newArchiveLocator(ctx, archiveDir, store, archiveRescanEvery)
+	if err != nil {
+		return nil, err
+	}
+	s := &lockProofSource{archive: locator, ethURL: ethURL, vault: common.HexToAddress(vaultText), pdr: pdr, pdrHash: sha256.Sum256(pdr), trustBaseID: tbID}
 	copy(s.cfg[:], common.HexToHash(cfgHash).Bytes())
 	return s, nil
 }
 
 func (s *lockProofSource) build(ctx context.Context, blockHash common.Hash, nonce uint64) ([]byte, error) {
-	request, err := requestForBlock(s.archiveDir, blockHash)
-	if err != nil {
-		return nil, fmt.Errorf("%w: %w", errNotFound, err)
+	_, rec, err := s.archive.locate(ctx, blockHash)
+	if errors.Is(err, errNotFound) {
+		return nil, fmt.Errorf("%w: the archive holds no receipt-complete record of block %s", errNotFound, blockHash)
 	}
-	store, err := archive.Open(s.archiveDir)
 	if err != nil {
 		return nil, err
-	}
-	rec, err := store.GetReceiptComplete(request)
-	if err != nil {
-		return nil, fmt.Errorf("%w: the archive does not hold block %s: %w", errNotFound, blockHash, err)
 	}
 	var hdr gethtypes.Header
 	if err := rlp.DecodeBytes(rec.Header, &hdr); err != nil || hdr.Hash() != blockHash {
@@ -332,35 +339,6 @@ func rpcCall(ctx context.Context, url, method string, params []any) (json.RawMes
 type rpcError struct{ method, message string }
 
 func (e *rpcError) Error() string { return e.method + ": " + e.message }
-
-func requestForBlock(dir string, blockHash common.Hash) (archive.Request, error) {
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return archive.Request{}, err
-	}
-	var matches []archive.Request
-	for _, entry := range entries {
-		if !entry.IsDir() || !strings.HasPrefix(entry.Name(), "v2-") {
-			continue
-		}
-		manifest, readErr := os.ReadFile(filepath.Join(dir, entry.Name(), "manifest"))
-		if readErr != nil || len(manifest) < 12 || !bytes.Equal(manifest[:8], []byte("ARCHIVE2")) {
-			continue
-		}
-		requestLen := binary.BigEndian.Uint32(manifest[8:12])
-		if requestLen == 0 || uint64(requestLen)+12 > uint64(len(manifest)) {
-			continue
-		}
-		request, decodeErr := archive.DecodeRequest(manifest[12 : 12+requestLen])
-		if decodeErr == nil && request.BlockHash == [32]byte(blockHash) {
-			matches = append(matches, request)
-		}
-	}
-	if len(matches) != 1 {
-		return archive.Request{}, fmt.Errorf("expected one receipt-complete archive request for %s, found %d", blockHash, len(matches))
-	}
-	return matches[0], nil
-}
 
 // pdr writes the canonical CBOR of the EVM shard's full configuration: the artifact a lock proof carries and the manifest pins.
 func pdr(args []string) error {

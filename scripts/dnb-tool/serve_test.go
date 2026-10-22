@@ -67,8 +67,10 @@ func TestLockProofServe_RefusesMalformedRequestsBeforeBuilding(t *testing.T) {
 		"/v1/lockproof?block=" + goodBlock + "&nonce=0",                                 // zero nonce
 		"/v1/lockproof?block=" + goodBlock + "&nonce=07",                                // non-canonical
 		"/v1/lockproof?block=" + goodBlock + "&nonce=-1",
-		"/v1/lockproof?block=" + goodBlock + "&nonce=18446744073709551616", // 2^64
-		"/v1/lockproof?block=" + goodBlock + "&nonce=7&x=1",                // extra parameter
+		"/v1/lockproof?block=" + goodBlock + "&nonce=18446744073709551616",      // 2^64
+		"/v1/lockproof?block=" + goodBlock + "&nonce=7&x=1",                     // extra parameter
+		"/v1/lockproof?block=" + goodBlock + "&block=" + goodBlock + "&nonce=7", // a parameter twice
+		"/v1/lockproof?block=" + goodBlock + "&nonce=7&nonce=8",
 	} {
 		require.Equal(t, http.StatusBadRequest, get(h, target, "192.0.2.1:5000").Code, target)
 	}
@@ -100,11 +102,41 @@ func TestLockProofServe_RateLimitsPerClientAndGlobally(t *testing.T) {
 	q := "/v1/lockproof?block=" + goodBlock + "&nonce=7"
 	require.Equal(t, http.StatusOK, get(h, q, "192.0.2.1:1").Code)
 	require.Equal(t, http.StatusOK, get(h, q, "192.0.2.1:2").Code)
-	require.Equal(t, http.StatusTooManyRequests, get(h, q, "192.0.2.1:3").Code, "third request of one client in a second")
-	require.Equal(t, http.StatusTooManyRequests, get(h, q, "192.0.2.2:1").Code, "the global budget of 3 is spent")
+	for range 5 {
+		require.Equal(t, http.StatusTooManyRequests, get(h, q, "192.0.2.1:3").Code, "one client over its own limit")
+	}
+	require.Equal(t, http.StatusOK, get(h, q, "192.0.2.2:1").Code, "refused requests spent none of the global budget")
+	require.Equal(t, http.StatusTooManyRequests, get(h, q, "192.0.2.3:1").Code, "the global budget of 3 is spent")
 	at = at.Add(time.Second)
 	require.Equal(t, http.StatusOK, get(h, q, "192.0.2.1:4").Code, "a new window")
-	require.Equal(t, 3, f.calls)
+	require.Equal(t, 4, f.calls)
+}
+
+func TestLockProofServe_LimitsAnIPv6ClientByIts64(t *testing.T) {
+	l := roomy()
+	l.perClient = 1
+	h := newProofHandler(&fakeBuilder{}, "172.30.89.1", l)
+	q := "/v1/lockproof?block=" + goodBlock + "&nonce=7"
+	require.Equal(t, http.StatusOK, get(h, q, "172.30.89.1:1", "X-Forwarded-For", "2001:db8:1:2::1").Code)
+	require.Equal(t, http.StatusTooManyRequests, get(h, q, "172.30.89.1:2", "X-Forwarded-For", "2001:db8:1:2:ffff::9").Code, "same /64")
+	require.Equal(t, http.StatusOK, get(h, q, "172.30.89.1:3", "X-Forwarded-For", "2001:db8:1:3::1").Code, "another /64")
+	require.Equal(t, http.StatusOK, get(h, q, "[2001:db8:9:9::1]:5").Code, "a direct IPv6 peer")
+	require.Equal(t, http.StatusTooManyRequests, get(h, q, "[2001:db8:9:9::2]:5").Code)
+}
+
+func TestLockProofServe_CapsTheTrackedClients(t *testing.T) {
+	l := roomy()
+	l.maxClients = 2
+	h := newProofHandler(&fakeBuilder{}, "", l)
+	at := time.Unix(1000, 0)
+	h.now = func() time.Time { return at }
+	q := "/v1/lockproof?block=" + goodBlock + "&nonce=7"
+	require.Equal(t, http.StatusOK, get(h, q, "192.0.2.1:1").Code)
+	require.Equal(t, http.StatusOK, get(h, q, "192.0.2.2:1").Code)
+	require.Equal(t, http.StatusTooManyRequests, get(h, q, "192.0.2.3:1").Code, "a third client in one window is not tracked, so refused")
+	require.Equal(t, http.StatusOK, get(h, q, "192.0.2.1:2").Code, "a tracked client is still served")
+	at = at.Add(time.Second)
+	require.Equal(t, http.StatusOK, get(h, q, "192.0.2.3:2").Code, "a new window forgets the clients")
 }
 
 func TestLockProofServe_UsesForwardedForOnlyFromTheTrustedProxy(t *testing.T) {

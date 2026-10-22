@@ -42,7 +42,8 @@ def main():
     addr = json.loads((gen / 'bridge/bridge-addresses.json').read_text())
     i = a.archive_of
     services = {'lockproof': hardened(
-        image=image, mem_limit='128m', cpus=0.5, networks=['validators', 'edge'], ports=['127.0.0.1:8090:8090'],
+        image=image, mem_limit='256m', cpus=0.5,   # 256m: the archive locator keeps an 8-byte key per archived block
+        networks=['validators', 'edge'], ports=['127.0.0.1:8090:8090'],
         entrypoint=['dnb-tool', 'lockproof-serve', '--listen', '0.0.0.0:8090', '--archive', '/archive', '--eth-url', f'http://ureth{i}:8545',
                     '--vault', addr['BridgeVault'], '--cfg', addr['CFG'], '--full-shard-conf', '/network/full-shard-conf.json',
                     '--trust-bundle', '/bridge/trust-base.bundle.cbor', '--trusted-proxy', TRUSTED_PROXY],

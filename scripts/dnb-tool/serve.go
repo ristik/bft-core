@@ -38,7 +38,7 @@ func lockProofServe(args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	src, err := newLockProofSource(*archiveDir, *ethURL, *vaultText, *fullConf, *trustBundlePath, *cfgHash)
+	src, err := newLockProofSource(context.Background(), *archiveDir, *ethURL, *vaultText, *fullConf, *trustBundlePath, *cfgHash)
 	if err != nil {
 		return err
 	}
@@ -106,7 +106,7 @@ func (h *proofHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	block, nonceText := q.Get("block"), q.Get("nonce")
 	nonce, err := strconv.ParseUint(nonceText, 10, 64)
-	if len(q) != 2 || !blockParam.MatchString(block) || err != nil || nonce == 0 || nonceText != strconv.FormatUint(nonce, 10) {
+	if len(q) != 2 || len(q["block"]) != 1 || len(q["nonce"]) != 1 || !blockParam.MatchString(block) || err != nil || nonce == 0 || nonceText != strconv.FormatUint(nonce, 10) {
 		reply(w, http.StatusBadRequest, "want exactly block=0x<64 hex> and nonce=<decimal, nonzero>")
 		return
 	}
@@ -134,18 +134,25 @@ func (h *proofHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// client is the peer's address, or X-Forwarded-For's when the peer is the trusted proxy (the package gateway's rule).
+// client is the peer's address, or X-Forwarded-For's when the peer is the trusted proxy (the package gateway's rule). An IPv6 client is its /64:
+// one host usually holds a whole /64, so a per-address limit would not limit it.
 func (h *proofHandler) client(r *http.Request) (string, bool) {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
 		host = r.RemoteAddr
 	}
-	if h.trustedProxy == "" || host != h.trustedProxy {
+	if h.trustedProxy != "" && host == h.trustedProxy {
+		host = r.Header.Get("X-Forwarded-For")
+		if net.ParseIP(host) == nil {
+			return "", false
+		}
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
 		return host, true
 	}
-	ip := net.ParseIP(r.Header.Get("X-Forwarded-For"))
-	if ip == nil {
-		return "", false
+	if ip.To4() == nil {
+		return ip.Mask(net.CIDRMask(64, 128)).String() + "/64", true
 	}
 	return ip.String(), true
 }
@@ -162,8 +169,11 @@ func (h *proofHandler) allowed(client string) bool {
 		return false
 	}
 	h.clients[client] = n + 1
-	h.budget--
-	return n < h.limits.perClient && h.budget >= 0
+	if n >= h.limits.perClient || h.budget <= 0 {
+		return false
+	}
+	h.budget-- // only an admitted request spends the global budget: one client over its own limit cannot lock the others out
+	return true
 }
 
 func reply(w http.ResponseWriter, status int, text string) {
