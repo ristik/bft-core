@@ -34,8 +34,9 @@ type FrontierWorker struct {
 	Log             *slog.Logger
 	// Finalized bounds pruning to the execution head this node has actually
 	// committed. An archive copy can arrive before local EL finality does.
-	Finalized   func(context.Context) (shardnode.BlockRef, error)
-	auditCursor uint64
+	Finalized        func(context.Context) (shardnode.BlockRef, error)
+	auditCursor      uint64
+	lastCapacityWarn time.Time
 }
 
 func (w *FrontierWorker) Run(ctx context.Context) error {
@@ -103,6 +104,7 @@ func (w *FrontierWorker) pass(ctx context.Context, mark func(string)) error {
 	if err != nil {
 		return err
 	}
+	w.warnCapacity(ctx, image)
 	var finalized shardnode.BlockRef
 	if w.Finalized != nil {
 		finalized, err = w.Finalized(ctx)
@@ -196,6 +198,21 @@ func (w *FrontierWorker) pass(ctx context.Context, mark func(string)) error {
 		return fmt.Errorf("frontier advance: %w", err)
 	}
 	return w.Journal.PruneFrontier(ctx, w.Context, w.Limits)
+}
+
+// warnCapacity logs once a minute while the hot journal is at or above capacityWarnPercent of any limit. The hard limits stop admission,
+// so this is the operator's lead time to restore two archive copies.
+func (w *FrontierWorker) warnCapacity(ctx context.Context, image configuredprogress.JournalSnapshot) {
+	usage := JournalUsage{CandidatesUsed: len(image.Candidates), CandidatesCap: w.Limits.Candidates, ObservationsUsed: len(image.Observations),
+		ObservationsCap: w.Limits.Observations, BytesUsed: image.Bytes, BytesCap: w.Limits.Bytes}
+	pct := usage.Percent()
+	if w.Log == nil || pct < capacityWarnPercent || time.Since(w.lastCapacityWarn) < time.Minute {
+		return
+	}
+	w.lastCapacityWarn = time.Now()
+	w.Log.WarnContext(ctx, "execution journal is near its limit: pruning needs two verified archive copies", "percent", pct,
+		"candidates", usage.CandidatesUsed, "candidatesCap", usage.CandidatesCap, "observations", usage.ObservationsUsed, "observationsCap", usage.ObservationsCap,
+		"bytes", usage.BytesUsed, "bytesCap", usage.BytesCap)
 }
 
 // holders names, as indexes into Replicas in canonical order, the two replicas whose verified read-back returned this exact record: the
@@ -298,7 +315,9 @@ func (w *FrontierWorker) audit(ctx context.Context) error {
 	return nil
 }
 
-// ensureCopies counts the configured replicas holding a verified copy of the position after repairing what it can, and stops at two.
+// ensureCopies counts the configured replicas holding a verified copy of the position after repairing what it can. It keeps going past two:
+// the acknowledgers come first, so the two copies pruning needs are restored before the optional third, and a replica that returns after
+// pruning is backfilled by the same bounded sweep. Callers need only replicaCopies.
 // Acknowledging replicas come first, a failed one is rewritten from the local record, and a configured replica that did not acknowledge
 // is used only to make up a shortfall; down collects the replicas that failed both, for the rest of the pass. A retired replica (dropped, or outside the configured set) is neither verified nor repaired.
 func (w *FrontierWorker) ensureCopies(ctx context.Context, availability ReplicaAvailability, down map[peer.ID]bool, r frontier.Record, rec *archive.Record) int {
@@ -327,9 +346,7 @@ func (w *FrontierWorker) ensureCopies(ctx context.Context, availability ReplicaA
 			down[id] = true // neither a read nor a rewrite worked: a stopped peer costs one dial per pass, not one per position
 			continue
 		}
-		if copies++; copies == replicaCopies {
-			break
-		}
+		copies++
 	}
 	return copies
 }
