@@ -680,7 +680,7 @@ class Topology(unittest.TestCase):
                 self.assertEqual([k for k,v in cfg['services'].items() if 'aggregator' in (v.get('networks') or {})],['pod1','mongo'],'only the aggregator\'s namespace reaches MongoDB')
                 self.assertEqual((mongo['user'],mongo['read_only'],mongo['cap_drop']),('10001:10001',True,['ALL']))
                 self.assertIn('--replSet',mongo['entrypoint']);self.assertIn('rs.initiate',mongo['healthcheck']['test'][-1])
-                self.assertEqual(mongo['volumes'],['./mongo:/data/db']);self.assertIn('/data/configdb:size=1m,mode=1777',mongo['tmpfs'])
+                self.assertEqual(mongo['stop_grace_period'],'30s');self.assertEqual(mongo['volumes'],['./mongo:/data/db']);self.assertIn('/data/configdb:size=1m,mode=1777',mongo['tmpfs'])
                 if os.environ.get('TN_REQUIRE_COMPOSE')=='1':
                     # config needs no daemon; do not silently skip this check in CI.
                     generate.write(out/'compose.yaml',cfg)

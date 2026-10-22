@@ -145,6 +145,7 @@ def topology(out, n, ids, images, captcha, ureth_flags=(), max_gas=30000000, wit
         healthcheck={'test':['CMD','mongosh','--quiet','--eval',MONGO_REPLICA_SET],'interval':'10s','timeout':'10s','retries':12,'start_period':'20s'})
     services['mongo']['pids_limit']=256   # mongod runs ~85 threads idle, plus one per connection (the aggregator's pool is 20)
     services['mongo']['tmpfs'].append('/data/configdb:size=1m,mode=1777')   # the image declares it a volume: unused here, and no anonymous volume per recreate
+    services['mongo']['stop_grace_period']='30s'   # a clean mongod shutdown before backup.py archives the stopped generation
     service('aggregator',node,['aggregator'],['./aggregator:/state:ro',network],memory='512m',cpu=0.75,pod='pod1',
         environment=aggregator_environment(root_boot,rpc_bind),depends_on={'mongo':{'condition':'service_healthy'}})
     service('rpc',images['rpc'],['python3','-u','gateway.py'],[network],memory='128m',networks=['validators','edge'],environment={'TRUSTED_PROXY_IP':'172.30.89.1'},

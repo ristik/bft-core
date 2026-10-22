@@ -9,3 +9,6 @@ Initially all validator entities, execution clients, aggregator, faucet and acce
 services share one bare-metal host. Host, disk, network or operator failure can
 stop the entire testnet. Multiple validator containers do not create independent
 physical failure domains. No production SLA or continuity promise is made.
+
+There is one aggregator. The root trusts the single aggregator's signature;
+it does not verify the aggregator's tree (no consistency proof).
