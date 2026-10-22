@@ -22,6 +22,7 @@ import (
 	"github.com/unicitynetwork/bft-core/network"
 	"github.com/unicitynetwork/bft-core/network/protocol/certification"
 	"github.com/unicitynetwork/bft-core/network/protocol/handshake"
+	"github.com/unicitynetwork/bft-core/q3install"
 	"github.com/unicitynetwork/bft-core/utbstore"
 )
 
@@ -642,15 +643,16 @@ var (
 	initialHandshakeTrustBaseRetry = 100 * time.Millisecond
 )
 
-// initialHandshake is sendHandshake, retried while only the trust base of its epoch is missing. Any other failure (the network
-// refusing the send, no usable root node) is returned at once.
+// initialHandshake is sendHandshake, retried while the trust base of its epoch is missing because its installation is incomplete
+// (q3install.ErrIncomplete, which q3active.ErrNotActive wraps). Any other failure (the network refusing the send, no usable root node,
+// a trust store that cannot read or does not know the epoch) is returned at once.
 func (c *BFTClient) initialHandshake(ctx context.Context) error {
 	deadline := time.Now().Add(initialHandshakeTrustBaseWait)
 	logged := false
 	for {
 		err := c.sendHandshake(ctx)
 		var load *trustBaseLoadError
-		if err == nil || !errors.As(err, &load) || !time.Now().Before(deadline) {
+		if err == nil || !errors.As(err, &load) || !errors.Is(load.err, q3install.ErrIncomplete) || !time.Now().Before(deadline) {
 			return err
 		}
 		if c.log != nil && !logged {
