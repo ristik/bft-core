@@ -5,7 +5,7 @@ links; record every gap as a documentation defect (section 9) instead of asking 
 
 ## 1. What you run
 N validator pods (default 4), each a BFT root node, a paired EVM shard node, its ureth execution client and an
-in-memory signing authority; plus one aggregator, a public JSON-RPC gateway (`rpc`), the faucet (`faucet`,
+in-memory signing authority; plus one aggregator (aggregator-go, one shard, its state in a `mongo` service), a public JSON-RPC gateway (`rpc`), the faucet (`faucet`,
 `signer`, `relay`) and Prometheus, all on one Docker host. Consensus is PoA.
 Read [NOTICE.txt](../../../deploy/testnet/NOTICE.txt) first. **Test UCT has no value, the network is reset
 arbitrarily, and one host/disk/operator failure stops the whole testnet.** Authority keys exist only in memory:
@@ -35,12 +35,12 @@ are clean checkouts of the exact revisions in [pins.json](../../../deploy/testne
 GUIDE_COMMIT=REPLACE_WITH_GIVEN_COMMIT bash -eo pipefail <<'EOF'   # stops at the first error, keeps your shell
 git clone -b integration/enshrined-evm https://github.com/ristik/bft-core.git /srv/src/pkg
 git -C /srv/src/pkg checkout --detach "$GUIDE_COMMIT"
-for r in bft:bft-core ureth:ureth rugregator:rugregator; do n=${r%%:*}; pin=$(jq -r .$n /srv/src/pkg/deploy/testnet/pins.json)
+for r in bft:bft-core ureth:ureth aggregator-go:aggregator-go; do n=${r%%:*}; pin=$(jq -r --arg n $n '.[$n]' /srv/src/pkg/deploy/testnet/pins.json)
   git clone https://github.com/ristik/${r#*:}.git /srv/src/$n-pinned && git -C /srv/src/$n-pinned fetch -q origin $pin
   git -C /srv/src/$n-pinned checkout --detach $pin; done
 cd /srv/src/pkg
 python3 deploy/testnet/build-images.py --bft-source /srv/src/bft-pinned \
-  --ureth-source /srv/src/ureth-pinned --rugregator-source /srv/src/rugregator-pinned
+  --ureth-source /srv/src/ureth-pinned --aggregator-go-source /srv/src/aggregator-go-pinned
 go build -o build/tn-keygen ./deploy/testnet/keygen
 go build -C /srv/src/bft-pinned -o build/b1genesis ./scripts/b1genesis   # the independent genesis-registry regeneration, from the pinned source
 EOF
@@ -263,4 +263,4 @@ block-zero hash and faucet address. The old pin must get 409 (checked before the
 - 24 h observation: certified heights, restarts, disk/RAM each minute; any stall, its duration and recovery.
 - Rotation, Abort and single-validator restore as **not supported here** unless done via the H6 lanes.
 - Every documentation defect: where you were stuck, what you guessed, what worked. Publish only public output:
-  never keystores, `secrets.env`, credentials, `docker inspect` output or private state.
+  never keystores, `aggregator/keys.json`, credentials, `docker inspect` output or private state.

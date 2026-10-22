@@ -83,8 +83,7 @@ class B1Layout(unittest.TestCase):
         self.assertIn('--pos-contracts pinned-contracts',workflow)
     def test_the_topology_follows_the_profile(self):
         with tempfile.TemporaryDirectory() as tmp:
-            out=Path(tmp)/'tn-fixture';out.mkdir();(out/'aggregator').mkdir()
-            (out/'aggregator/keys.json').write_text(json.dumps({'authKey':{'privateKey':'0x01'},'sigKey':{'privateKey':'0x02'}}))
+            out=Path(tmp)/'tn-fixture';out.mkdir()
             images={k:'sha256:'+'a'*64 for k in ['node','rpc','guard','signer']}
             cfg=generate.topology(out,3,{'root':['r%d'%i for i in range(3)],'evm':['e%d'%i for i in range(3)]},images,'captcha',['--unicity.network-id','3'],123456)
             for i in (1,2,3):
@@ -96,6 +95,24 @@ class B1Layout(unittest.TestCase):
                 self.assertIn('--q3-lane',shard);self.assertNotIn('--registry-layout',shard)
                 root=svc['root%d'%i]['entrypoint']
                 self.assertIn('--q3-lane',root);self.assertEqual(root[root.index('--genesis-identities')+1],'/network/genesis-identities.json')
+
+class Aggregator(unittest.TestCase):
+    def test_the_workflows_build_the_pinned_aggregator_go(self):
+        for name in ('testnet-package.yml','testnet-rehearsal.yml','testnet-bridge.yml'):
+            workflow=(generate.REPO/'.github/workflows'/name).read_text()
+            self.assertNotIn('rugregator',workflow,name)
+            self.assertIn('repository: ristik/aggregator-go',workflow,name)
+        self.assertIn('ref: '+generate.PINS['aggregator-go'],(generate.REPO/'.github/workflows/testnet-package.yml').read_text())
+        self.assertNotIn('rugregator',(generate.HERE/'build-images.py').read_text()+(generate.HERE/'Dockerfile.node').read_text())
+    def test_the_aggregator_partition_asks_for_no_consistency_proof(self):
+        # aggregator-go sends none; under proof_type=aggregator_rsmt_v1 the root would refuse every nonempty certification request
+        source=(generate.HERE/'generate.py').read_text()
+        self.assertNotIn('proof_type=aggregator_rsmt_v1',source)
+        call=source[source.index("cli('shard-conf','generate','--home',home/'agg-conf'"):]
+        call=call[:call.index('\n',call.index("node-info.json"))]
+        self.assertNotIn('--partition-params',call)
+        # aggregator-go refuses any other partition (api.AggregationPartitionID, a protocol constant)
+        self.assertIn("'--partition-id','7'",call)
 
 class ProofOfStake(unittest.TestCase):
     ID1='0x'+'11'*32
@@ -182,8 +199,7 @@ class ProofOfStake(unittest.TestCase):
             self.assertNotEqual(plan('1,2').returncode,0)
     def test_the_topology_runs_the_roots_on_the_pos_flags_and_not_the_poa_records(self):
         with tempfile.TemporaryDirectory() as tmp:
-            out=Path(tmp)/'tn-fixture';out.mkdir();(out/'aggregator').mkdir()
-            (out/'aggregator/keys.json').write_text(json.dumps({'authKey':{'privateKey':'0x01'},'sigKey':{'privateKey':'0x02'}}))
+            out=Path(tmp)/'tn-fixture';out.mkdir()
             images={k:'sha256:'+'a'*64 for k in ['node','rpc','guard','signer']}
             ids={'root':['r%d'%i for i in range(3)],'evm':['e%d'%i for i in range(3)]}
             for with_pos in (False,True):
@@ -345,22 +361,23 @@ class ProofOfStake(unittest.TestCase):
 class EntityNamespace(unittest.TestCase):
     def cfg(self,n=4):
         tmp=tempfile.mkdtemp();self.addCleanup(shutil.rmtree,tmp)
-        out=Path(tmp)/'tn-fixture';out.mkdir();(out/'aggregator').mkdir()
-        (out/'aggregator/keys.json').write_text(json.dumps({'authKey':{'privateKey':'0x01'},'sigKey':{'privateKey':'0x02'}}))
+        out=Path(tmp)/'tn-fixture';out.mkdir()
         images={k:'sha256:'+'a'*64 for k in ['node','rpc','guard','signer']}
         return generate.topology(out,n,{'root':['r%d'%i for i in range(n)],'evm':['e%d'%i for i in range(n)]},images,'captcha'),out
     def test_root_and_shard_of_one_entity_share_one_namespace_and_other_entities_do_not(self):
         cfg,_=self.cfg();services=cfg['services']
         for i in (1,2,3,4):
             holder=services['pod%d'%i]
-            self.assertEqual(holder['networks'],{'validators':{'aliases':['root%d'%i,'shard%d'%i]}});self.assertIs(holder['init'],True)
+            # validator 1's namespace also holds the one aggregator: it reads root 1's loopback-only trust-base endpoint
+            self.assertEqual(holder['networks'],{'validators':{'aliases':['root1','shard1','aggregator']},'aggregator':{}} if i==1 else {'validators':{'aliases':['root%d'%i,'shard%d'%i]}});self.assertIs(holder['init'],True)
             for name in ('root%d'%i,'shard%d'%i,'metrics%d'%i):
                 self.assertEqual(services[name]['network_mode'],'service:pod%d'%i);self.assertNotIn('networks',services[name])
             for name in ('authority%d'%i,'ureth%d'%i):
                 self.assertNotIn('network_mode',services[name]);self.assertEqual(services[name]['networks'],['validators'])
         for i in (1,2,3,4): self.assertIn('./validator%d/jwt:/jwt:ro'%i,services['root%d'%i]['volumes'],'readiness runs in the root with only this entity\'s JWT')
+        self.assertEqual(services['aggregator']['network_mode'],'service:pod1');self.assertNotIn('networks',services['aggregator'])
         joined=[n for n,s in services.items() if 'network_mode' in s]
-        self.assertEqual(sorted(joined),sorted(f'{k}{i}' for k in ('root','shard','metrics') for i in (1,2,3,4)))
+        self.assertEqual(sorted(joined),sorted([f'{k}{i}' for k in ('root','shard','metrics') for i in (1,2,3,4)]+['aggregator']))
         self.assertEqual([n for n,s in services.items() if isinstance(s.get('networks'),dict)],['pod1','pod2','pod3','pod4'])
         for name,svc in services.items():
             if name.startswith(('pod','root','shard','metrics','authority','ureth')): self.assertNotIn('ports',svc)
@@ -380,8 +397,7 @@ class EntityNamespace(unittest.TestCase):
             with self.assertRaises(operator_rpc.BindError,msg=bad): operator_rpc.check_bind(bad)
         self.assertEqual(operator_rpc.listen('127.0.0.2',8002),'127.0.0.2:8002')
         with tempfile.TemporaryDirectory() as tmp:
-            out=Path(tmp)/'tn-fixture';out.mkdir();(out/'aggregator').mkdir()
-            (out/'aggregator/keys.json').write_text(json.dumps({'authKey':{'privateKey':'0x01'},'sigKey':{'privateKey':'0x02'}}))
+            out=Path(tmp)/'tn-fixture';out.mkdir()
             images={k:'sha256:'+'a'*64 for k in ['node','rpc','guard','signer']}
             ids={'root':['r%d'%i for i in range(3)],'evm':['e%d'%i for i in range(3)]}
             cfg=generate.topology(out,3,ids,images,'captcha',(),30000000,False,'127.0.0.2')
@@ -438,7 +454,8 @@ class EntityNamespace(unittest.TestCase):
         self.assertEqual(done.returncode,0,done.stderr)
         rendered=json.loads(done.stdout)['services']
         self.assertEqual(rendered['root1']['network_mode'],'service:pod1')
-        self.assertEqual(rendered['pod1']['networks']['validators']['aliases'],['root1','shard1'])
+        self.assertEqual(rendered['pod1']['networks']['validators']['aliases'],['root1','shard1','aggregator'])
+        self.assertEqual(rendered['aggregator']['network_mode'],'service:pod1')
 
 class MetricsRelay(unittest.TestCase):
     def setUp(self):
@@ -624,8 +641,7 @@ class Topology(unittest.TestCase):
     def test_private_pods_and_limits(self):
         for n in [3,4,7]:
             with tempfile.TemporaryDirectory() as tmp:
-                out=Path(tmp)/'tn-fixture';out.mkdir();(out/'aggregator').mkdir()
-                (out/'aggregator/keys.json').write_text(json.dumps({'authKey':{'privateKey':'0x01'},'sigKey':{'privateKey':'0x02'}}))
+                out=Path(tmp)/'tn-fixture';out.mkdir()
                 images={k:'sha256:'+'a'*64 for k in ['node','rpc','guard','signer']}
                 cfg=generate.topology(out,n,{'root':['r%d'%i for i in range(n)],'evm':['e%d'%i for i in range(n)]},images,'captcha')
                 for name,svc in cfg['services'].items():
@@ -647,9 +663,26 @@ class Topology(unittest.TestCase):
                     if command[0].endswith('.sh'):
                         source=Path(__file__).parent/'faucet'/Path(command[0]).name
                         self.assertTrue(source.is_file() and os.access(source,os.X_OK),command)
-                env=cfg['services']['aggregator']['environment']
-                self.assertEqual(env['AGGREGATOR_CONSISTENCY_PROOF_MODE'],'rsmt')
-                self.assertNotIn('AGGREGATOR_CONSISTENCY_PROOFS',env)
+                # the one aggregator (owner decision 40): aggregator-go, one full-range shard, no HA, beside root 1 (its trust-base endpoint is loopback-only)
+                agg=cfg['services']['aggregator']
+                env=agg['environment']
+                self.assertEqual(agg['entrypoint'],['aggregator']);self.assertEqual(agg['network_mode'],'service:pod1')
+                self.assertEqual((env['SHARDING_MODE'],env['BFT_ENABLED'],env['DISABLE_HIGH_AVAILABILITY'],env['SMT_BACKEND']),('standalone','true','true','memory'))
+                self.assertEqual(env['BFT_RPC_ADDRESS'],'http://127.0.0.1:%d'%operator_rpc.ROOT_PORT)
+                self.assertEqual(env['BFT_BOOTSTRAP_ADDRESSES'].count('/dns4/root'),n)
+                self.assertEqual(env['SIGNING_KEY_FILE'],'/state/keys.json');self.assertIn('./aggregator:/state:ro',agg['volumes'])
+                self.assertNotIn('env_file',agg)
+                self.assertFalse([k for k in env if re.search('KEY|SECRET|PASSWORD',k) and k!='SIGNING_KEY_FILE'],'no secret in the public manifest')
+                self.assertEqual(agg['depends_on'],{'mongo':{'condition':'service_healthy'}})
+                self.assertIn('aggregator',cfg['services']['pod1']['networks']['validators']['aliases'])
+                self.assertFalse(any('aggregator' in cfg['services']['pod%d'%i]['networks']['validators']['aliases'] for i in range(2,n+1)))
+                mongo=cfg['services']['mongo']
+                self.assertEqual(mongo['image'],generate.PINS['mongo']);self.assertRegex(mongo['image'],r'^mongo:[0-9.]+@sha256:[0-9a-f]{64}$')
+                self.assertEqual(mongo['networks'],['aggregator']);self.assertNotIn('ports',mongo);self.assertTrue(cfg['networks']['aggregator']['internal'])
+                self.assertEqual([k for k,v in cfg['services'].items() if 'aggregator' in (v.get('networks') or {})],['pod1','mongo'],'only the aggregator\'s namespace reaches MongoDB')
+                self.assertEqual((mongo['user'],mongo['read_only'],mongo['cap_drop']),('10001:10001',True,['ALL']))
+                self.assertIn('--replSet',mongo['entrypoint']);self.assertIn('rs.initiate',mongo['healthcheck']['test'][-1])
+                self.assertEqual(mongo['stop_grace_period'],'30s');self.assertEqual(mongo['volumes'],['./mongo:/data/db']);self.assertIn('/data/configdb:size=1m,mode=1777',mongo['tmpfs'])
                 if os.environ.get('TN_REQUIRE_COMPOSE')=='1':
                     # config needs no daemon; do not silently skip this check in CI.
                     generate.write(out/'compose.yaml',cfg)

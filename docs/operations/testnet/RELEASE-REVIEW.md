@@ -15,7 +15,7 @@ Record, before anything else, and refuse to continue on a mismatch:
 | item | how | record |
 |---|---|---|
 | bft-core revision | `git rev-parse HEAD` in a clean clone; must equal `pins.json` `bft` or be reviewed with the diff stated | |
-| ureth, rugregator revisions | `deploy/testnet/pins.json` | |
+| ureth, aggregator-go revisions; the MongoDB image reference | `deploy/testnet/pins.json` | |
 | image IDs | `docker image inspect --format '{{.Id}}' <image>` for each image in `deploy/testnet/artifacts/images.json`; equal to the manifest | |
 | generation and manifest | `manifest.json` of the deployed generation: `generation`, `chain_id`, `genesis_hash`, `artifacts` | |
 | `config_sha256` | recompute `sha256sum network/*.json` in the generation; equal to `manifest.json` `config_sha256` | |
@@ -23,7 +23,7 @@ Record, before anything else, and refuse to continue on a mismatch:
 
 ## 1. Checklist
 
-**Warning: never run `docker compose config` and attach or paste its output.** It expands `env_file`, so the aggregator's private keys (`aggregator/secrets.env`) appear in it. Read the generated `compose.yaml` directly: it is JSON and only references the file.
+**Read the generated `compose.yaml` directly** (it is JSON); do not attach `docker compose config` output to the record. No service takes a secret through `env_file` or its environment (row 15), but `docker compose config` would expand one if a later change added it.
 
 Each row: the check, where to look, and what a pass is. Record `PASS`, `FAIL` (with the finding id) or `N/A` (with the reason), and the exact command and output for anything not obvious.
 
@@ -55,8 +55,8 @@ Each row: the check, where to look, and what a pass is. Record `PASS`, `FAIL` (w
 |---|---|---|---|
 | 13 | Each validator's signing key is held by its own authority only | `compose.yaml` mounts: `validator%d/auth` (the authority's key, sockets and credentials) is mounted by `authority%d` and by that validator's own `shard%d` (client socket and credential) and by nothing else | no container mounts another validator's `auth`; the root nodes and every other service mount none |
 | 14 | Faucet key and captcha secret are Docker secrets | `compose.yaml` `secrets:`; `faucet-secrets/` modes | readable only by the signer; not in `compose.yaml`, environment or images |
-| 15 | Aggregator secrets are in a private env file | `aggregator/secrets.env` mode and owner; not in the generated `compose.yaml`. Do not attach `docker compose config` output to the record: it expands `env_file` and prints the aggregator keys | as stated |
-| 16 | Containers are least-privilege | the generated `compose.yaml`: every service has `read_only`, `cap_drop: [ALL]`, `no-new-privileges`, a non-root user (only `prometheus` sets `user` in `compose.yaml`; for the others `docker image inspect --format '{{.Config.User}}' <id>` for each image in `images.json` must print a non-root user), `mem_limit`, `cpus`, `pids_limit` | no exceptions without a written reason |
+| 15 | The aggregator's key is a private file | `aggregator/keys.json` mode and owner (10001, 0600), mounted read-only by `aggregator` only; the `aggregator` and `mongo` services have no `env_file` and no key, secret or password in their environment in the generated `compose.yaml` | as stated |
+| 16 | Containers are least-privilege | the generated `compose.yaml`: every service has `read_only`, `cap_drop: [ALL]`, `no-new-privileges`, a non-root user (only `prometheus` and `mongo` set `user` in `compose.yaml`; for the others `docker image inspect --format '{{.Config.User}}' <id>` for each image in `images.json` must print a non-root user), `mem_limit`, `cpus`, `pids_limit`. `mongo` has no authentication: it is on its own internal `aggregator` network, which only `pod1` joins, so every container in validator 1's namespace (`root1`, `shard1`, `metrics1`, `aggregator`) reaches it. That is validator 1's trust domain (the co-hosted entity is trusted, validator-entity model); no other service reaches it | no exceptions without a written reason |
 | 17 | The generation directory and backups carry no secret in a public place | backup archive location, mode; the manifest and `network/` contain no private key; the review record itself (no key, no `docker compose config` output) | as stated |
 
 ### 1.4 Resource bounds
@@ -85,6 +85,7 @@ Each row: the check, where to look, and what a pass is. Record `PASS`, `FAIL` (w
 | 27 | Central operator, one host, arbitrary reset, no value and no SLA are disclosed to users | `NOTICE.txt`, the faucet page, `TESTER.md` | each of the four is stated and reachable from the faucet and RPC landing text |
 | 28 | The failure matrix covers the slice | `docs/pos/x1-failure-matrix.md` section 13 (merged with #766 before this pack is used) | every row MET, MET-WITH-LIMIT with the limit read, or MISSING and listed in the residual limits below |
 | 29 | Docs name roles, not persons | `deploy/testnet`, `docs/operations/testnet` | no personal names, handles or addresses |
+| 30 | The single aggregator is trusted, not verified | `network/aggregator-conf.json` has no `proof_type` (aggregator-go sends no SMT consistency proof); `NOTICE.txt` and `TESTER.md` | disclosed: the root accepts the single aggregator's signed state roots without verifying its tree |
 
 ## 2. T1 to T4 evidence cross-check
 
@@ -101,7 +102,7 @@ A row whose artifact changed is refreshed or its limit is written down in the re
 ```
 TN-1 release review record
 Reviewer role: release reviewer            Date (UTC):
-Release: bft-core <rev>   ureth <rev>   rugregator <rev>   generation <name>
+Release: bft-core <rev>   ureth <rev>   aggregator-go <rev>   mongo <image digest>   generation <name>
 Image IDs: <per image>     manifest chain_id/genesis_hash: <values>
 Environment: <host or runner; kernel, Docker version, cores, memory, disk>
 

@@ -2,6 +2,7 @@
 
 **Test assets have no real value.** UCT here is disposable gas. The network operator may reset the network at any time, without notice, compatibility or migration, and
 every balance and transaction is then gone ([NOTICE](../../../deploy/testnet/NOTICE.txt)). Never use a key that guards anything valuable; make a new one for this network.
+There is a single aggregator, and the root trusts its signature: it does not verify the aggregator's tree (no consistency proof).
 
 The operator publishes four things with every generation: the **RPC URL**, the **faucet URL**, the **chain ID** and the **block-zero hash** (also in the public
 `manifest.json`; the faucet page shows the same two values). This page uses `<rpc-url>`, `<faucet-url>`, `<chain-id>` and `<genesis-hash>` for them. If the operator
