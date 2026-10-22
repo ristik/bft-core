@@ -118,11 +118,21 @@ x4p_send_call() {
   local key=$1 to=$2 sig=$3; shift 3
   RW_SEND_DATA=$("$P85_CAST" calldata "$sig" "$@") RW_SEND_GAS=${X4P_CALL_GAS:-400000} rw_send_value "$key" "$to" 0
 }
-# the key's account holds enough for a call (the genesis owners are funded nothing): top up from the lane's sender
+# the key's account holds enough for a call (the genesis owners are funded nothing): top up from the lane's sender, then wait until EVERY online validator shows the balance
+# (the lane's validators do not gossip, and the call is sent to each of them: one that is still behind refuses it with 'insufficient funds'; run 39709173901)
+x4p_balance_ok() { # <address> : every online validator holds at least 0.02 ether for it
+  local addr=$1 i bal
+  for i in ${H3_ONLINE:-1}; do
+    bal=$(p_timeout 30 "$P85_CAST" balance --rpc-url "http://127.0.0.1:$((rethEthBase + i - 1))" "$addr" 2>/dev/null | awk '{print $1}')
+    [ -n "$bal" ] && rw_assert "$bal >= 20000000000000000" "" 2>/dev/null || return 1
+  done
+}
 x4p_ensure_gas() { # <key file>
-  local addr bal; addr=$(x4p_address_of "$1") || return 1
-  bal=$("$P85_CAST" balance --rpc-url "$(p85_eth)" "$addr")
-  rw_assert "$bal >= 20000000000000000" "" 2>/dev/null || rw_send_value "$(p85_sender_key)" "$addr" 100000000000000000
+  local addr k; addr=$(x4p_address_of "$1") || return 1
+  x4p_balance_ok "$addr" && return 0
+  x4p_bounded 300 rw_send_value "$(p85_sender_key)" "$addr" 100000000000000000 || { x4p_die "could not fund $addr for gas"; return 1; }
+  for k in $(seq 1 150); do x4p_balance_ok "$addr" && return 0; x4p_tick; done
+  x4p_die "$addr was funded but not every validator shows it"
 }
 # the proposer's own evidence from the roots' logs: one JSON line per 'retirement requested' / 'retirement proof ready' of this identity
 x4p_exit_root_log() { # <id> <out file>
@@ -147,6 +157,7 @@ x4p_exit_request() {
     [ $(( $(date +%s) - t0 )) -lt "$wait_exp" ] || x4p_die "identity $id still has $(x4p_exit_field "$st" liveExposures) live exposure(s) after ${wait_exp}s" || return 1
     sleep 2
   done
+  x4p_ensure_gas "$(x4p_withdrawal_key "$id")" || return 1   # the claim's gas, paid for long before it is needed
   if [ "$(x4p_exit_field "$st" retirementRequested)" != true ]; then   # a resumed step must not request twice
     x4p_ensure_gas "$key" || return 1
     x4p_send_call "$key" "$(p85_custody)" 'requestRetirement(uint64)' "$id" || x4p_die "requestRetirement($id) was not mined" || return 1
