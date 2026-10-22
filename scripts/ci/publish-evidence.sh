@@ -67,6 +67,18 @@ case "$kind" in
     [ "$(jq -r '.refilledAfterExhaustion' <<<"${line:-null}" 2>/dev/null)" = true ] && [ "$(jq -r '.zeroBudget // 0' <<<"${line:-null}" 2>/dev/null)" -ge 1 ] 2>/dev/null \
       && [ "$(jq -r '.paid // 0' <<<"${line:-null}" 2>/dev/null)" -ge 3 ] 2>/dev/null && [ "$(jq -r '.fundings // 0' <<<"${line:-null}" 2>/dev/null)" -ge 1 ] 2>/dev/null \
       || { complete=no; why+=("the replay does not show a dry pool refilled and then paid (zeroBudget >= 1, fundings >= 1, paid >= 3, refilledAfterExhaustion)"); } ;;
+  x4exit)
+    grep -q 'P85 recovery lane: all steps PASSED' "$ev/lane.log" 2>/dev/null || { complete=no; why+=("no completion sentinel in lane.log"); }
+    # the exit lifecycle: requested and imported with the proposers' proof lines (latency, tuples), refused early for a lawful reason, matured, claimed with exact amounts
+    xs=$pub/p85/run/x4pos/steps
+    jq -e '.imported == true and .pRet > 0 and .tRet > 0' "$xs/exit-request/request.json" >/dev/null 2>&1 || { complete=no; why+=("exit-request/request.json does not show an imported Retirement (pRet, tRet)"); }
+    grep -q 'retirement proof ready.*latencyMs=' "$xs/exit-request/roots.log" 2>/dev/null || { complete=no; why+=("no 'retirement proof ready' line with latencyMs in exit-request/roots.log"); }
+    jq -e '.outcome == "refused" and .lawfulEarly == true and (.expected == "" or .expected == .reason)' "$xs/exit-claim/refusal.json" >/dev/null 2>&1 || { complete=no; why+=("exit-claim/refusal.json: the early mature was not refused for a lawful reason"); }
+    if [ -d "$pub/p85/s4" ] || [ -d "$pub/p85/run/s4" ]; then   # the S4 (held offender) variant: the exit was refused for the evidence hold while the case was admitted and unsettled
+      jq -e '.outcome == "refused" and .reason == "EvidenceHoldPending"' "$xs/exit-request/hold-probe.json" >/dev/null 2>&1 || { complete=no; why+=("exit-request/hold-probe.json: no EvidenceHoldPending refusal while the case was admitted"); }
+    fi
+    jq -e '.creditDelta > 0' "$xs/exit-claim/matured.json" >/dev/null 2>&1 || { complete=no; why+=("exit-claim/matured.json: no credit delta"); }
+    jq -e '.received > 0' "$xs/exit-claim/claimed.json" >/dev/null 2>&1 || { complete=no; why+=("exit-claim/claimed.json: nothing claimed"); } ;;
   x4shadow)
     grep -q 'X4 shadow lane: all steps PASSED' "$ev/lane.log" 2>/dev/null || { complete=no; why+=("no completion sentinel in lane.log"); }
     adapter=$pub/p85/run/shadow/adapter
@@ -82,6 +94,7 @@ case "$kind" in
     ! grep -q 'NOT EVIDENCE' "$ev/run-mode.txt" 2>/dev/null || { complete=no; why+=("run-mode.txt marks the run NOT EVIDENCE"); } ;;
   *) complete=no; why+=("unknown kind $kind") ;;
 esac
+[ -z "${CI_INTERIM:-}" ] || { complete=no; why+=("INTERIM EXPERIMENT, not acceptance evidence: $CI_INTERIM"); }
 if [ "$complete" = no ]; then
   { echo "INCOMPLETE: this is a failed or partial run's pack, kept for diagnosis. It is NOT acceptance evidence."; printf 'reason: %s\n' "${why[@]}"; } >"$pub/INCOMPLETE.txt"
 fi
