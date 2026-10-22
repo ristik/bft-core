@@ -63,7 +63,7 @@ func TestSingleEpochArchiveRestoreResolvesCertifiedQuietTip(t *testing.T) {
 	genesis := shardnode.BlockRef{Hash: f.context.Origin.BlockHash().Bytes(), StateRoot: f.context.Origin.StateRoot().Bytes()}
 	executor := newRestoreExecutorFixture(genesis)
 	r := &SingleEpochRestore{Journal: journal, Context: f.context, JournalLimits: limits, Archive: local,
-		Subject: f.subject, Replicas: [2]peer.ID{first.ID(), second.ID()}, Host: sender,
+		Subject: f.subject, Replicas: []peer.ID{first.ID(), second.ID()}, Host: sender,
 		Limits: DefaultLimits(), Adapter: executor, Genesis: genesis, TipUC: uc, TipTR: tr}
 	require.NoError(t, r.Restore(context.Background()))
 	require.EqualValues(t, 1, executor.head.Number)
@@ -111,7 +111,7 @@ func TestArchiveRestoreBackfillsAnUnresolvedHistoricalObservation(t *testing.T) 
 	executor := newRestoreExecutorFixture(genesis)
 	last := f.entries[len(f.entries)-1]
 	restore := &ArchiveRestore{Journal: journal, Context: f.context, JournalLimits: limits, Archive: local,
-		Subject: f.subject, Replicas: [2]peer.ID{first.ID(), second.ID()}, Host: sender, Limits: DefaultLimits(),
+		Subject: f.subject, Replicas: []peer.ID{first.ID(), second.ID()}, Host: sender, Limits: DefaultLimits(),
 		Adapter: executor, Genesis: genesis, TipUC: last.ResultingUC, TipTR: last.ResultingTR}
 	require.NoError(t, restore.Restore(context.Background()))
 	// A retry after the replay marker and EL finality are durable resumes the
@@ -249,7 +249,7 @@ func TestSingleEpochArchiveRestoreReplaysBeyondJournalCapWithReplicaFailover(t *
 	genesis := shardnode.BlockRef{Number: 0, Hash: f.context.Origin.BlockHash().Bytes(), StateRoot: f.context.Origin.StateRoot().Bytes()}
 	executor := newRestoreExecutorFixture(genesis)
 	restore := &SingleEpochRestore{Journal: journal, Context: f.context, JournalLimits: limits, Archive: local,
-		Subject: f.subject, Replicas: [2]peer.ID{failed.ID(), healthy.ID()}, Host: sender,
+		Subject: f.subject, Replicas: []peer.ID{failed.ID(), healthy.ID()}, Host: sender,
 		Limits: Limits{Deadline: DefaultLimits().Deadline / 10, Pending: 4, PerPeer: 1}, Adapter: executor,
 		Genesis: genesis, TipUC: last.ResultingUC, TipTR: last.ResultingTR}
 	require.NoError(t, restore.Restore(context.Background()))
@@ -327,10 +327,10 @@ func TestSingleEpochArchiveRestoreReplaysBeyondJournalCapWithReplicaFailover(t *
 		Replicas: [2]string{failed.ID().String(), healthy.ID().String()},
 		Binding:  CertifiedBinding{Context: f.context, Subject: f.subject},
 		Availability: ReplicaAvailability{Context: context.Background(), Host: sender,
-			Replicas: [2]peer.ID{failed.ID(), healthy.ID()}, Limits: DefaultLimits()}}
+			Replicas: []peer.ID{failed.ID(), healthy.ID()}, Limits: DefaultLimits()}}
 	require.NoError(t, journal.EnableFrontier(context.Background(), f.context, limits, policy))
 	worker := &FrontierWorker{Journal: journal, Context: f.context, Limits: limits, Archive: local,
-		Subject: f.subject, Replicas: [2]peer.ID{failed.ID(), healthy.ID()}, Host: sender, TransportLimits: DefaultLimits()}
+		Subject: f.subject, Replicas: []peer.ID{failed.ID(), healthy.ID()}, Host: sender, TransportLimits: DefaultLimits()}
 	require.NoError(t, worker.Pass(context.Background()))
 	image, err = journal.LoadJournal(context.Background(), f.context, limits)
 	require.NoError(t, err)

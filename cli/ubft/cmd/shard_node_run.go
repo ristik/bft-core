@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -30,6 +31,7 @@ import (
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/zkverifier"
 
 	"github.com/unicitynetwork/bft-core/archive"
+	"github.com/unicitynetwork/bft-core/archivepolicy"
 	"github.com/unicitynetwork/bft-core/archivewiring"
 	"github.com/unicitynetwork/bft-core/b1state"
 	"github.com/unicitynetwork/bft-core/certifiedstore"
@@ -432,9 +434,9 @@ protocol and docs/engine-api-adapter-plan.md for how this command's pieces fit t
 	cmd.Flags().Int64Var(&flags.JournalBytes, "journal-bytes", 64<<20,
 		"maximum retained hot journal bytes with --execution-journal; pruning requires --archive-prune")
 	cmd.Flags().StringVar(&flags.ArchiveStore, "archive-store", "",
-		"local certified archive directory; requires --execution-journal and exactly two --archive-replica peer IDs")
+		"local certified archive directory; requires --execution-journal. Replicas are derived from the shard's validators (the next three after this node in peer-ID order, any two sufficing) unless exactly two --archive-replica peer IDs are given")
 	cmd.Flags().StringSliceVar(&flags.ArchiveReplicas, "archive-replica", nil,
-		"configured replica peer ID; set exactly twice with --archive-store")
+		"explicit replica peer ID; set exactly twice with --archive-store to replace the derived replica set with this fixed pair (both required)")
 	cmd.Flags().BoolVar(&flags.ArchivePrune, "archive-prune", false,
 		"advance the certified frontier and prune acknowledged journal history; requires --archive-store")
 	cmd.Flags().BoolVar(&flags.TrustHistoryProfile2, "trust-history-profile-2", false,
@@ -876,7 +878,8 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 		var archiveLocal *archive.Store
 		var archiveSubject archive.Context
 		var archiveHost shardnode.EvidenceHost
-		var archiveReplicas [2]libp2ppeer.ID
+		var archiveReplicas []libp2ppeer.ID
+		var archiveDigest [32]byte // digest of the derived archive policy; zero with an explicit replica pair (legacy 2-of-2 records)
 		var archiveAllowed []libp2ppeer.ID
 		var publisher *archivewiring.Publisher
 		archiveTransportLimits := archivewiring.DefaultLimits()
@@ -911,7 +914,7 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 				return e
 			}
 			// Structure only: membership is checked against the installed set after the replay (admitArchivePeers).
-			archiveReplicas, e = parseArchiveReplicas(flags.ArchiveReplicas, peer.ID())
+			archiveReplicas, archiveDigest, e = archiveReplicaSet(flags.ArchiveReplicas, peer.ID(), archiveAllowed, trustBases[0].GetEpoch())
 			if e != nil {
 				return e
 			}
@@ -1163,7 +1166,10 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 			if archiveLocal == nil || !flags.ArchivePrune {
 				return nil
 			}
-			policy := frontier.Policy{Context: archiveSubject, Replicas: [2]string{archiveReplicas[0].String(), archiveReplicas[1].String()}, Binding: archivewiring.CertifiedBinding{Context: journalCtx, Subject: archiveSubject}, Availability: archivewiring.ReplicaAvailability{Context: ctx, Host: archiveHost, Replicas: archiveReplicas, Limits: archiveTransportLimits}}
+			policy := frontier.Policy{Context: archiveSubject, Binding: archivewiring.CertifiedBinding{Context: journalCtx, Subject: archiveSubject}, Availability: archivewiring.ReplicaAvailability{Context: ctx, Host: archiveHost, Replicas: archiveReplicas, Limits: archiveTransportLimits}}
+			if e := setFrontierReplicas(&policy, archiveReplicas, archiveDigest); e != nil {
+				return e
+			}
 			journalStore.SetLogger(flags.observe.Logger())
 			if e := journalStore.EnableFrontier(ctx, journalCtx, limits, policy); e != nil {
 				return fmt.Errorf("authenticating certified frontier: %w", e)
@@ -1322,7 +1328,7 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 			go func() { defer close(archiveDone); _ = publisher.Run(archiveCtx) }()
 			defer func() { cancelArchive(); <-archiveDone; _ = metrics.Close() }()
 			if flags.ArchivePrune {
-				worker := &archivewiring.FrontierWorker{Journal: journalStore, Context: journalCtx, Limits: limits, Archive: archiveLocal, Subject: archiveSubject, Replicas: archiveReplicas, Host: archiveHost, TransportLimits: archiveTransportLimits, Log: flags.observe.Logger(), Finalized: recoveryExecutor.Finalized}
+				worker := &archivewiring.FrontierWorker{Journal: journalStore, Context: journalCtx, Limits: limits, Archive: archiveLocal, Subject: archiveSubject, Replicas: archiveReplicas, PolicyDigest: archiveDigest, Host: archiveHost, TransportLimits: archiveTransportLimits, Log: flags.observe.Logger(), Finalized: recoveryExecutor.Finalized}
 				pruneDone := make(chan struct{})
 				go func() { defer close(pruneDone); _ = worker.Run(archiveCtx) }()
 				defer func() { cancelArchive(); <-pruneDone }()
@@ -1342,7 +1348,7 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 					}
 				}
 			}
-			var progress [2]archivewiring.ReplicaProgress
+			var progress []archivewiring.ReplicaProgress
 			if publisher != nil {
 				progress = publisher.ReplicaProgress()
 			}
@@ -1499,27 +1505,64 @@ func buildDisseminator(p *network.Peer, obs Observability, validators []*types.N
 	return shardnode.NewNetDisseminatorFrom(p, obs, active)
 }
 
-// parseArchiveReplicas is the structural half of the archive replica configuration: exactly two distinct, valid peer IDs, neither this
+// archiveReplicaSet is the archive replica configuration. Without --archive-replica the set is derived from the shard's validators (archivepolicy:
+// the next three after this node in circular peer-ID order, any two of which make a block durable) and the returned digest binds the frontier
+// records to that policy. An explicit pair keeps the previous two-replica behaviour and returns a zero digest. others is the shard's other
+// validators; the installed set is checked later (admitArchivePeers).
+func archiveReplicaSet(raws []string, self libp2ppeer.ID, others []libp2ppeer.ID, epoch uint64) ([]libp2ppeer.ID, [32]byte, error) {
+	if len(raws) != 0 {
+		replicas, err := parseArchiveReplicas(raws, self)
+		return replicas, [32]byte{}, err
+	}
+	policy, err := archivepolicy.Select(self, append(slices.Clone(others), self), epoch)
+	if err != nil {
+		return nil, [32]byte{}, fmt.Errorf("%w: deriving archive replicas: %v", archivewiring.ErrConfig, err)
+	}
+	digest, err := policy.Digest()
+	if err != nil {
+		return nil, [32]byte{}, fmt.Errorf("%w: archive policy: %v", archivewiring.ErrConfig, err)
+	}
+	return policy.Replicas, digest, nil
+}
+
+// setFrontierReplicas names the replicas in the frontier policy: the eligible set bound to the derived policy digest, or the legacy pair.
+func setFrontierReplicas(p *frontier.Policy, replicas []libp2ppeer.ID, digest [32]byte) error {
+	names := make([]string, len(replicas))
+	for i, id := range replicas {
+		names[i] = id.String()
+	}
+	if digest == ([32]byte{}) {
+		if len(names) != 2 {
+			return archivewiring.ErrConfig
+		}
+		p.Replicas = [2]string{names[0], names[1]}
+		return nil
+	}
+	p.Eligible, p.PolicyDigest = names, digest
+	return nil
+}
+
+// parseArchiveReplicas is the structural half of an explicit archive replica configuration: exactly two distinct, valid peer IDs, neither this
 // node. It runs at startup, before the handoff follower is built, because the follower fetches its verified bundles from these replicas;
 // they supply availability only, never the installed membership (their bytes pass the bundle verifier before anything is installed).
 // Whether they are validators of the installed assignment is requireArchiveReplicasInstalled, which needs the replayed set.
-func parseArchiveReplicas(raws []string, self libp2ppeer.ID) ([2]libp2ppeer.ID, error) {
-	var out [2]libp2ppeer.ID
+func parseArchiveReplicas(raws []string, self libp2ppeer.ID) ([]libp2ppeer.ID, error) {
+	out := make([]libp2ppeer.ID, len(raws))
 	if len(raws) != 2 {
-		return out, archivewiring.ErrConfig
+		return []libp2ppeer.ID{}, archivewiring.ErrConfig
 	}
 	for i, raw := range raws {
 		id, err := libp2ppeer.Decode(raw)
 		if err != nil {
-			return [2]libp2ppeer.ID{}, fmt.Errorf("%w: archive replica %d: %v", archivewiring.ErrConfig, i, err)
+			return []libp2ppeer.ID{}, fmt.Errorf("%w: archive replica %d: %v", archivewiring.ErrConfig, i, err)
 		}
 		if id == self {
-			return [2]libp2ppeer.ID{}, fmt.Errorf("%w: archive replica cannot be self", archivewiring.ErrConfig)
+			return []libp2ppeer.ID{}, fmt.Errorf("%w: archive replica cannot be self", archivewiring.ErrConfig)
 		}
 		out[i] = id
 	}
 	if out[0] == out[1] {
-		return [2]libp2ppeer.ID{}, fmt.Errorf("%w: the two archive replicas must be distinct", archivewiring.ErrConfig)
+		return []libp2ppeer.ID{}, fmt.Errorf("%w: the two archive replicas must be distinct", archivewiring.ErrConfig)
 	}
 	return out, nil
 }
@@ -1527,7 +1570,7 @@ func parseArchiveReplicas(raws []string, self libp2ppeer.ID) ([2]libp2ppeer.ID, 
 // requireArchiveReplicasInstalled is the membership half: both replicas must be validators of the INSTALLED assignment (installed is
 // ActivePeers.Peers(), which reflects the replayed verified steps and never contains this node). Run it only after the persisted replay
 // (plain run) or CatchUp (restore); against the genesis set it would refuse a replica that a later step installed.
-func requireArchiveReplicasInstalled(replicas [2]libp2ppeer.ID, installed []libp2ppeer.ID) error {
+func requireArchiveReplicasInstalled(replicas []libp2ppeer.ID, installed []libp2ppeer.ID) error {
 	for _, replica := range replicas {
 		found := false
 		for _, candidate := range installed {
@@ -1543,7 +1586,7 @@ func requireArchiveReplicasInstalled(replicas [2]libp2ppeer.ID, installed []libp
 // admitArchivePeers validates the configured replicas against the installed set and only then ends the startup hold on the archive peer
 // set (held: the node holds it, which is the profile-2 case). A refusal leaves the hold in place, so nobody is authorized from a set
 // the node has just found inconsistent with its configuration. archived is whether an archive is configured at all.
-func admitArchivePeers(peers *shardnode.ActivePeers, replicas [2]libp2ppeer.ID, archived, held bool) error {
+func admitArchivePeers(peers *shardnode.ActivePeers, replicas []libp2ppeer.ID, archived, held bool) error {
 	if archived {
 		if err := requireArchiveReplicasInstalled(replicas, peers.Peers()); err != nil {
 			return err

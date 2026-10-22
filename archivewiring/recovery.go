@@ -33,7 +33,7 @@ type RecoverySource struct {
 	Subject   archive.Context
 	Local     *archive.Store
 	Host      shardnode.EvidenceHost
-	Replicas  [2]peer.ID
+	Replicas  []peer.ID
 	Limits    Limits
 	MaxBlocks int
 	Log       *slog.Logger

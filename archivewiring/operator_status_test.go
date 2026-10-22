@@ -18,13 +18,13 @@ func TestReadOperatorStatusUsesFixtureJournalAndReceiptArchive(t *testing.T) {
 	q, rec := f.record(t, 1)
 	rec.Extensions = map[string][]byte{archive.ReceiptListKey: {0xc0}}
 	require.NoError(t, local.Put(q, rec))
-	progress := [2]ReplicaProgress{
+	progress := []ReplicaProgress{
 		{Replica: "replica-a", LastAcknowledgedHeight: 2},
 		{Replica: "replica-b", LastAcknowledgedHeight: 1, Error: "timeout"},
 	}
 	authority := &AuthorityReport{Reachable: true, RootEpoch: 2, ShardEpoch: 1, ReservedRound: 17}
 	ids := testpeer.GeneratePeerIDs(t, 2)
-	replicas := [2]peer.ID{ids[0], ids[1]}
+	replicas := []peer.ID{ids[0], ids[1]}
 	status, err := ReadOperatorStatus(context.Background(), f.store, f.context, f.limits, local, f.subject,
 		replicas, 2, []uint64{2}, progress, authority)
 	require.NoError(t, err)
