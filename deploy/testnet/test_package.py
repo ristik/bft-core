@@ -684,4 +684,52 @@ class Restore(unittest.TestCase):
             with self.assertRaises(ValueError): backup.extract(archive,base/'unsafe')
             self.assertFalse((base/'unsafe').exists())
 
+class TesterCheck(unittest.TestCase):
+    """deploy/testnet/tester-check.py against a stub JSON-RPC endpoint."""
+    GEN='0x'+'ab'*32
+    def module(self):
+        import importlib.util
+        spec=importlib.util.spec_from_file_location('tester_check',Path(__file__).parent/'tester-check.py')
+        m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m);return m
+    def serve(self,chain=31337,zero=None,heights=(5,6)):
+        zero=zero or self.GEN;hs=iter(heights);last=[heights[0]]
+        class H(http.server.BaseHTTPRequestHandler):
+            def log_message(self,*a): pass
+            def do_POST(self):
+                req=json.loads(self.rfile.read(int(self.headers['Content-Length'])))
+                r={'eth_chainId':hex(chain),'net_version':str(chain),'eth_getBlockByNumber':{'hash':zero}}.get(req['method'])
+                if req['method']=='eth_blockNumber':
+                    last[0]=next(hs,last[0]);r=hex(last[0])
+                body=json.dumps({'jsonrpc':'2.0','id':1,'result':r}).encode()
+                self.send_response(200);self.send_header('Content-Length',str(len(body)));self.end_headers();self.wfile.write(body)
+        srv=http.server.HTTPServer(('127.0.0.1',0),H);threading.Thread(target=srv.serve_forever,daemon=True).start();self.addCleanup(srv.shutdown)
+        return f'http://127.0.0.1:{srv.server_port}/'
+    def run_check(self,url,*extra):
+        import io,contextlib
+        out=io.StringIO();err=io.StringIO()
+        with contextlib.redirect_stdout(out),contextlib.redirect_stderr(err):
+            code=self.module().main(['--rpc',url,*extra])
+        return code,out.getvalue(),err.getvalue()
+    def test_the_published_network_passes(self):
+        code,out,_=self.run_check(self.serve(),'--chain-id','31337','--genesis-hash','0x'+'AB'*32,'--wait','5')
+        self.assertEqual(code,0,out);self.assertIn('serves the published network',out)
+    def test_a_wrong_chain_id_fails(self):
+        code,out,_=self.run_check(self.serve(chain=1),'--chain-id','31337','--genesis-hash',self.GEN)
+        self.assertEqual(code,1);self.assertIn('FAIL chain ID',out)
+    def test_a_reset_network_with_another_block_zero_fails(self):
+        code,out,_=self.run_check(self.serve(zero='0x'+'cd'*32),'--chain-id','31337','--genesis-hash',self.GEN)
+        self.assertEqual(code,1);self.assertIn('FAIL block-zero hash',out);self.assertIn('DO NOT USE',out)
+    def test_a_stalled_chain_fails_only_when_a_block_is_required(self):
+        url=self.serve(heights=(5,))
+        self.assertEqual(self.run_check(url,'--chain-id','31337','--genesis-hash',self.GEN)[0],0)
+        self.assertEqual(self.run_check(url,'--chain-id','31337','--genesis-hash',self.GEN,'--wait','2')[0],1)
+    def test_the_manifest_file_form_is_read(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            f=Path(tmp)/'m.json';f.write_text(json.dumps({'chain_id':31337,'genesis_hash':self.GEN,'captcha_sitekey':'x','validators':4}))
+            self.assertEqual(self.run_check(self.serve(),'--manifest',str(f))[0],0)
+    def test_a_malformed_publication_or_unreachable_endpoint_is_exit_2(self):
+        self.assertEqual(self.run_check(self.serve(),'--chain-id','31337','--genesis-hash','0x12')[0],2)
+        self.assertEqual(self.run_check('http://127.0.0.1:1/','--chain-id','31337','--genesis-hash',self.GEN)[0],2)
+
+
 if __name__=='__main__': unittest.main()
