@@ -91,6 +91,13 @@ func (n *returningNode) catchUp(t *testing.T, p *planFixture, height int, maxCal
 			require.EqualValues(t, height, head.Number)
 			return calls
 		}
+		var certified uint64
+		for _, e := range image.Candidates {
+			if e.Certified {
+				certified = max(certified, e.Candidate.Number)
+			}
+		}
+		require.GreaterOrEqual(t, n.exec.finalized.Number, certified, "call %d: every admitted page is executed and finalized in the same call", calls)
 		require.ErrorIs(t, err, configuredadmission.ErrRecoveryUnavailable, "call %d", calls)
 		require.False(t, n.recovery.Terminal(err), "call %d: a catch-up in progress never stops the node: %v", calls, err)
 		require.False(t, errors.Is(err, configuredadmission.ErrRecoveryInvalid) || errors.Is(err, configuredadmission.ErrRecoveryConflict), "call %d: %v", calls, err)
