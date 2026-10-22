@@ -58,15 +58,23 @@ func newTwoOfThree(t *testing.T, blocks int, holds, down [3]bool) *twoOfThree {
 			}
 		}
 	}
-	names := make([]string, len(x.peers))
-	for i, id := range x.peers {
-		names[i] = id.String()
-	}
-	policy := frontier.Policy{Context: f.subject, Eligible: names, PolicyDigest: testPolicyDigest, Binding: CertifiedBinding{Context: f.context, Subject: f.subject},
-		Availability: ReplicaAvailability{Context: context.Background(), Host: sender, Replicas: x.peers, Limits: DefaultLimits()}}
-	require.NoError(t, f.store.EnableFrontier(context.Background(), f.context, f.limits, policy))
-	x.worker = &FrontierWorker{Journal: f.store, Context: f.context, Limits: f.limits, Archive: local, Subject: f.subject, Replicas: x.peers, PolicyDigest: testPolicyDigest, Host: sender, TransportLimits: DefaultLimits()}
+	x.enable(t, sender, []int{0, 1, 2}, testPolicyDigest)
 	return x
+}
+
+// enable installs the frontier policy over the given replicas (indexes into peers) and a worker for them.
+func (x *twoOfThree) enable(t *testing.T, sender *network.Peer, members []int, digest [32]byte) {
+	t.Helper()
+	var ids []peer.ID
+	var names []string
+	for _, i := range members {
+		ids = append(ids, x.peers[i])
+		names = append(names, x.peers[i].String())
+	}
+	policy := frontier.Policy{Context: x.f.subject, Eligible: names, PolicyDigest: digest, Binding: CertifiedBinding{Context: x.f.context, Subject: x.f.subject},
+		Availability: ReplicaAvailability{Context: context.Background(), Host: sender, Replicas: ids, Limits: DefaultLimits()}}
+	require.NoError(t, x.f.store.EnableFrontier(context.Background(), x.f.context, x.f.limits, policy))
+	x.worker = &FrontierWorker{Journal: x.f.store, Context: x.f.context, Limits: x.f.limits, Archive: x.local, Subject: x.f.subject, Replicas: ids, PolicyDigest: digest, Host: sender, TransportLimits: DefaultLimits()}
 }
 
 // stop shuts replica i down: from now on it neither answers nor accepts a connection.
@@ -163,4 +171,60 @@ func TestValidReplicas(t *testing.T) {
 	} {
 		require.Equal(t, tc.want, validReplicas(tc.in), name)
 	}
+}
+
+// The promised copy stays valid while any two configured replicas hold it: stopping either acknowledger of the durable anchor (or the
+// third replica) does not freeze the frontier, and the next records name the replicas that are left.
+func TestFrontierAdvancesAfterAnAcknowledgerOfTheAnchorStops(t *testing.T) {
+	t.Parallel()
+	for stopped := 0; stopped < 3; stopped++ {
+		x := newTwoOfThree(t, 8, [3]bool{true, true, true}, [3]bool{})
+		require.NoError(t, x.worker.Pass(context.Background()))
+		before := x.anchor(t)
+		require.NotNil(t, before)
+		require.Equal(t, x.peers[0].String(), before.Acks[0].Replica)
+		require.Equal(t, x.peers[1].String(), before.Acks[1].Replica)
+		x.stop(t, stopped)
+		require.NoError(t, x.worker.Pass(context.Background()), "replica %d stopped", stopped)
+		after := x.anchor(t)
+		require.Greater(t, after.Height, before.Height, "replica %d stopped: the frontier moved on", stopped)
+		for _, ack := range after.Acks {
+			require.NotEqual(t, x.peers[stopped].String(), ack.Replica)
+		}
+	}
+}
+
+// With two replicas stopped only one copy remains: the frontier does not move.
+func TestFrontierFreezesWhenTwoReplicasStopAfterTheAnchor(t *testing.T) {
+	t.Parallel()
+	for _, stopped := range [][2]int{{0, 1}, {0, 2}, {1, 2}} {
+		x := newTwoOfThree(t, 8, [3]bool{true, true, true}, [3]bool{})
+		require.NoError(t, x.worker.Pass(context.Background()))
+		before := x.anchor(t)
+		x.stop(t, stopped[0])
+		x.stop(t, stopped[1])
+		require.ErrorIs(t, x.worker.Pass(context.Background()), frontier.ErrUnavailable, "%v", stopped)
+		require.Equal(t, before.Height, x.anchor(t).Height, "%v", stopped)
+	}
+}
+
+// An anchor acknowledged by a replica that is no longer in the policy (a membership change) is historical: the frontier advances to a
+// record of the current policy as soon as two configured replicas hold the promised copy.
+func TestFrontierAdvancesFromAnAnchorWithAnOutsideAcknowledger(t *testing.T) {
+	t.Parallel()
+	x := newTwoOfThree(t, 8, [3]bool{true, true, true}, [3]bool{})
+	require.NoError(t, x.worker.Pass(context.Background()))
+	before := x.anchor(t)
+	require.Equal(t, x.peers[1].String(), before.Acks[1].Replica)
+	x.enable(t, x.sender, []int{0, 2}, [32]byte{6}) // replica 1 leaves the set
+	snap, err := x.f.store.LoadFrontier(context.Background(), x.f.context, x.f.limits)
+	require.NoError(t, err)
+	require.True(t, snap.Anchor.Migrated())
+	require.NoError(t, x.worker.Pass(context.Background()))
+	after := x.anchor(t)
+	require.Greater(t, after.Height, before.Height)
+	require.Equal(t, [32]byte{6}, after.PolicyDigest)
+	require.False(t, after.Migrated())
+	require.Equal(t, x.peers[0].String(), after.Acks[0].Replica)
+	require.Equal(t, x.peers[2].String(), after.Acks[1].Replica)
 }
