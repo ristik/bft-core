@@ -12,6 +12,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"math/big"
@@ -51,6 +52,8 @@ func main() {
 		err = pdr(os.Args[2:])
 	case "lockproof":
 		err = lockProof(os.Args[2:])
+	case "lockproof-serve":
+		err = lockProofServe(os.Args[2:])
 	default:
 		err = fmt.Errorf("unknown command %q", os.Args[1])
 	}
@@ -183,89 +186,126 @@ func lockProof(args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	blockHash := common.HexToHash(*blockHashText)
-	request, err := requestForBlock(*archiveDir, blockHash)
+	src, err := newLockProofSource(*archiveDir, *ethURL, *vaultText, *fullConf, *trustBundlePath, *cfgHash)
 	if err != nil {
 		return err
 	}
-	store, err := archive.Open(*archiveDir)
+	lp, err := src.build(context.Background(), common.HexToHash(*blockHashText), *nonce)
 	if err != nil {
 		return err
 	}
-	rec, err := store.GetReceiptComplete(request)
+	return os.WriteFile(*out, lp, 0o644) // #nosec G306 -- public proof
+}
+
+// lockProofSource holds what every lock proof of one deployment shares (the shard configuration, the trust-base ID, the vault and its CFG); build reads
+// one block's certificate and header from the archive and the lock's storage proof from the paired client. It keeps no state between calls.
+type lockProofSource struct {
+	archiveDir, ethURL string
+	vault              common.Address
+	cfg                [32]byte
+	pdr                []byte
+	pdrHash            [32]byte
+	trustBaseID        [32]byte
+}
+
+// errNotFound marks a request for a block the archive does not (yet) hold or a nonce with no lock at that block.
+var errNotFound = errors.New("not found")
+
+func newLockProofSource(archiveDir, ethURL, vaultText, fullConf, trustBundlePath, cfgHash string) (*lockProofSource, error) {
+	rawConf, err := os.ReadFile(fullConf)
 	if err != nil {
-		return fmt.Errorf("the archive does not hold block %s: %w", blockHash, err)
-	}
-	var hdr gethtypes.Header
-	if err := rlp.DecodeBytes(rec.Header, &hdr); err != nil || hdr.Hash() != blockHash {
-		return fmt.Errorf("archived header is not block %s", blockHash)
-	}
-	rawConf, err := os.ReadFile(*fullConf)
-	if err != nil {
-		return err
+		return nil, err
 	}
 	var conf types.PartitionDescriptionRecord
 	if err := json.Unmarshal(rawConf, &conf); err != nil {
-		return err
+		return nil, err
 	}
 	pdr, err := types.Cbor.Marshal(&conf)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	var uc types.UnicityCertificate
-	if err := types.Cbor.Unmarshal(rec.ResultingUC, &uc); err != nil {
-		return err
-	}
-	sum := sha256.Sum256(pdr)
-	if !bytes.Equal(sum[:], uc.ShardConfHash) {
-		return fmt.Errorf("the full shard configuration is not the configuration the block's certificate commits to")
-	}
-	bundle, err := os.ReadFile(*trustBundlePath)
+	bundle, err := os.ReadFile(trustBundlePath)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	// trustBaseId is the genesis EntryID of the history the bundle carries
 	decoded, err := gettrustbase.DecodeBundle(bundle, gettrustbase.BundleLimits{MaxBytes: 1 << 20, MaxEntries: 1 << 16})
 	if err != nil {
-		return err
+		return nil, err
 	}
 	tbID, err := decoded.Entries[0].EntryID()
 	if err != nil {
-		return err
+		return nil, err
 	}
-	vault := common.HexToAddress(*vaultText)
-	slot := crypto.Keccak256Hash(common.LeftPadBytes(new(big.Int).SetUint64(*nonce).Bytes(), 32), common.LeftPadBytes([]byte{5}, 32))
-	raw, err := rpcCall(*ethURL, "eth_getProof", []any{vault, []common.Hash{slot}, map[string]any{"blockHash": blockHash}})
+	s := &lockProofSource{archiveDir: archiveDir, ethURL: ethURL, vault: common.HexToAddress(vaultText), pdr: pdr, pdrHash: sha256.Sum256(pdr), trustBaseID: tbID}
+	copy(s.cfg[:], common.HexToHash(cfgHash).Bytes())
+	return s, nil
+}
+
+func (s *lockProofSource) build(ctx context.Context, blockHash common.Hash, nonce uint64) ([]byte, error) {
+	request, err := requestForBlock(s.archiveDir, blockHash)
 	if err != nil {
-		return err
+		return nil, fmt.Errorf("%w: %w", errNotFound, err)
+	}
+	store, err := archive.Open(s.archiveDir)
+	if err != nil {
+		return nil, err
+	}
+	rec, err := store.GetReceiptComplete(request)
+	if err != nil {
+		return nil, fmt.Errorf("%w: the archive does not hold block %s: %w", errNotFound, blockHash, err)
+	}
+	var hdr gethtypes.Header
+	if err := rlp.DecodeBytes(rec.Header, &hdr); err != nil || hdr.Hash() != blockHash {
+		return nil, fmt.Errorf("archived header is not block %s", blockHash)
+	}
+	var uc types.UnicityCertificate
+	if err := types.Cbor.Unmarshal(rec.ResultingUC, &uc); err != nil {
+		return nil, err
+	}
+	if !bytes.Equal(s.pdrHash[:], uc.ShardConfHash) {
+		return nil, fmt.Errorf("the full shard configuration is not the configuration the block's certificate commits to")
+	}
+	slot := crypto.Keccak256Hash(common.LeftPadBytes(new(big.Int).SetUint64(nonce).Bytes(), 32), common.LeftPadBytes([]byte{5}, 32))
+	raw, err := rpcCall(ctx, s.ethURL, "eth_getProof", []any{s.vault, []common.Hash{slot}, map[string]any{"blockHash": blockHash}})
+	var refused *rpcError
+	if errors.As(err, &refused) {
+		// the client answered and refused: typically a block older than its proof window (--rpc.eth-proof-window)
+		return nil, fmt.Errorf("%w: the paired client serves no eth_getProof at block %s (%w)", errNotFound, blockHash, err)
+	}
+	if err != nil {
+		return nil, err
 	}
 	var proof struct {
 		Address      common.Address  `json:"address"`
 		AccountProof []hexutil.Bytes `json:"accountProof"`
 		StorageProof []struct {
+			Value *hexutil.Big    `json:"value"`
 			Proof []hexutil.Bytes `json:"proof"`
 		} `json:"storageProof"`
 	}
 	if err := json.Unmarshal(raw, &proof); err != nil {
-		return err
+		return nil, err
 	}
-	if proof.Address != vault || len(proof.StorageProof) != 1 {
-		return fmt.Errorf("unexpected eth_getProof answer")
+	if proof.Address != s.vault || len(proof.StorageProof) != 1 {
+		return nil, fmt.Errorf("unexpected eth_getProof answer")
 	}
-	lp := bridgeprofile.LockProof{TrustBaseID: tbID, PDR: pdr, UC: bytes.Clone(rec.ResultingUC), Header: bytes.Clone(rec.Header)}
-	copy(lp.Cfg[:], common.HexToHash(*cfgHash).Bytes())
+	if v := proof.StorageProof[0].Value; v == nil || v.ToInt().Sign() == 0 {
+		return nil, fmt.Errorf("%w: no lock with nonce %d at block %s", errNotFound, nonce, blockHash)
+	}
+	lp := bridgeprofile.LockProof{TrustBaseID: s.trustBaseID, PDR: s.pdr, UC: bytes.Clone(rec.ResultingUC), Header: bytes.Clone(rec.Header), Cfg: s.cfg}
 	for _, n := range proof.AccountProof {
 		lp.AccountNodes = append(lp.AccountNodes, []byte(n))
 	}
 	for _, n := range proof.StorageProof[0].Proof {
 		lp.StorageNodes = append(lp.StorageNodes, []byte(n))
 	}
-	return os.WriteFile(*out, lp.Bytes(), 0o644) // #nosec G306 -- public proof
+	return lp.Bytes(), nil
 }
 
-func rpcCall(url, method string, params []any) (json.RawMessage, error) {
+func rpcCall(ctx context.Context, url, method string, params []any) (json.RawMessage, error) {
 	body, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": 1, "method": method, "params": params})
-	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, url, bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
@@ -283,10 +323,15 @@ func rpcCall(url, method string, params []any) (json.RawMessage, error) {
 		return nil, err
 	}
 	if out.Error != nil {
-		return nil, fmt.Errorf("%s: %s", method, out.Error.Message)
+		return nil, &rpcError{method: method, message: out.Error.Message}
 	}
 	return out.Result, nil
 }
+
+// rpcError is a JSON-RPC error answer (the client was reached and refused), as distinct from a transport failure.
+type rpcError struct{ method, message string }
+
+func (e *rpcError) Error() string { return e.method + ": " + e.message }
 
 func requestForBlock(dir string, blockHash common.Hash) (archive.Request, error) {
 	entries, err := os.ReadDir(dir)

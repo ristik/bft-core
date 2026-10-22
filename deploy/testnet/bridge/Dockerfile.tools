@@ -1,0 +1,34 @@
+# The bridge tools of the testnet package: forge/cast (the post-genesis deploy and the driver's chain calls), the contracts with their build output,
+# the native-bridge-plugins checkout with its dependencies (the live driver tests/live/*.ts), and dnb-tool. Sources are checked against pins.json by
+# build-bridge-image.py, which passes NODE_IMAGE, GO_IMAGE, FOUNDRY_URL and FOUNDRY_SHA256 from it.
+ARG NODE_IMAGE
+ARG GO_IMAGE
+# dnb-tool needs cgo (bft-go-base's secp256k1); built on the same Debian release as the runtime image
+FROM ${GO_IMAGE} AS go
+COPY bft /src
+RUN cd /src && go build -trimpath -o /dnb-tool ./scripts/dnb-tool
+
+FROM ${NODE_IMAGE} AS build
+ARG FOUNDRY_URL
+ARG FOUNDRY_SHA256
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl git && rm -rf /var/lib/apt/lists/*
+RUN curl -fsSL "$FOUNDRY_URL" -o /tmp/foundry.tar.gz && echo "$FOUNDRY_SHA256  /tmp/foundry.tar.gz" | sha256sum -c - \
+    && mkdir /foundry && tar -xzf /tmp/foundry.tar.gz -C /foundry && /foundry/forge --version
+ENV HOME=/home/bridge
+COPY contracts /opt/bridge/contracts
+# solc is fetched by forge's svm into $HOME/.svm here, once; the runtime image never compiles what this build already compiled
+RUN cd /opt/bridge/contracts && /foundry/forge build -q
+COPY native-bridge-plugins /opt/bridge/native-bridge-plugins
+RUN cd /opt/bridge/native-bridge-plugins && npm ci --no-audit --no-fund && npx --no-install tsx --version
+
+FROM ${NODE_IMAGE}
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/*
+COPY --from=build /foundry/forge /foundry/cast /usr/local/bin/
+COPY --from=go /dnb-tool /usr/local/bin/
+COPY --from=build --chown=10001:10001 /home/bridge /home/bridge
+COPY --from=build /opt/bridge /opt/bridge
+# the image is run read-only: forge works on a copy of /opt/bridge/contracts (with its build output and cache, so nothing recompiles) in a writable volume
+ENV HOME=/home/bridge DNB_TOOL=/usr/local/bin/dnb-tool
+WORKDIR /opt/bridge/native-bridge-plugins
+USER 10001:10001
+ENTRYPOINT []

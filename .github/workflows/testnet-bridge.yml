@@ -1,0 +1,118 @@
+name: testnet-bridge
+# The bridge on the container package (TN-B #429/#438, briefs/tnb-without-host.md): the package built and brought up as testnet-rehearsal does it, then
+# deploy/testnet/bridge/rehearse_bridge.py. Evidence of the PACKAGE only, never of the host. No third-party service is contacted (the faucet signer is not
+# started). Long: it builds ureth from source. A workflow_dispatch only exists once this file is on the default branch, so it also runs on a push of a
+# tnb-rehearsal/** branch.
+on:
+  pull_request:
+    paths: ['deploy/testnet/bridge/**', 'scripts/dnb-tool/**', '.github/workflows/testnet-bridge.yml']
+  push:
+    branches: ['tnb-rehearsal/**']
+  workflow_dispatch:
+    inputs:
+      stages:
+        description: 'rehearse_bridge.py stages, comma separated (default: all)'
+        required: false
+        default: ''
+permissions:
+  contents: read
+concurrency:
+  group: testnet-bridge-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  rehearse:
+    # ubuntu-22.04 (glibc 2.35): the node image's binaries are built on the runner and run on bookworm (testnet-rehearsal.yml)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v4
+      - name: Free disk (the ureth release build is large)
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /opt/hostedtoolcache/CodeQL
+          df -h /
+      - id: pins
+        run: |
+          python3 - <<'E' >> "$GITHUB_OUTPUT"
+          import json
+          p = json.load(open('deploy/testnet/pins.json'))
+          for k in ('bft', 'ureth', 'rugregator'):
+              print(f'{k}={p[k]}')
+          b = json.load(open('deploy/testnet/bridge/pins.json'))
+          print(f"contracts={b['contracts']}")
+          print(f"nbp={b['native-bridge-plugins']}")
+          E
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.pins.outputs.bft }}
+          path: pinned-bft
+      - uses: actions/checkout@v4
+        with:
+          repository: ristik/ureth
+          ref: ${{ steps.pins.outputs.ureth }}
+          path: pinned-ureth
+      - uses: actions/checkout@v4
+        with:
+          repository: ristik/rugregator
+          ref: ${{ steps.pins.outputs.rugregator }}
+          path: pinned-rugregator
+      - uses: actions/checkout@v4
+        with:
+          repository: ristik/unicity-pos-contracts
+          ref: ${{ steps.pins.outputs.contracts }}
+          path: pinned-contracts
+          submodules: recursive
+      - uses: actions/checkout@v4
+        with:
+          repository: ristik/native-bridge-plugins
+          ref: ${{ steps.pins.outputs.nbp }}
+          path: pinned-nbp
+      - run: sudo apt-get update && sudo apt-get install -y clang libclang-dev libssl-dev pkg-config protobuf-compiler
+      - uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: v1.8.1   # cast: offline signing of the rehearsal's transactions
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+          workspaces: |
+            pinned-ureth
+            pinned-rugregator
+      - name: Build the node images from the pinned sources
+        run: python3 deploy/testnet/build-images.py --bft-source pinned-bft --ureth-source pinned-ureth --rugregator-source pinned-rugregator
+      - name: Build the bridge tools image (dnb-tool from this checkout, contracts and plug-ins at bridge/pins.json)
+        run: python3 deploy/testnet/bridge/build-bridge-image.py --contracts-source pinned-contracts --nbp-source pinned-nbp
+      - run: go build -o /tmp/tn-keygen ./deploy/testnet/keygen
+      - run: go build -C pinned-bft -o /tmp/tn-b1genesis ./scripts/b1genesis
+      - name: Generate a generation (authorities start here and stay live)
+        run: |
+          umask 077
+          echo rehearsal-not-a-real-secret > /tmp/captcha-secret
+          sudo -E env "PATH=$PATH" python3 deploy/testnet/generate.py --out /srv/tn-bridge-1 --validators 4 --chain-id 31337 \
+            --ubft pinned-bft/build/ubft --b1genesis /tmp/tn-b1genesis --keygen /tmp/tn-keygen \
+            --captcha-sitekey rehearsal-sitekey --captcha-secret-file /tmp/captcha-secret
+      - name: Bring the package up (rehearse.py up, identity)
+        run: sudo -E env "PATH=$PATH" python3 deploy/testnet/rehearse.py --generation /srv/tn-bridge-1 --evidence "$RUNNER_TEMP/evidence" --stages up,identity
+      - name: Bridge stages
+        env:
+          STAGES: ${{ inputs.stages }}
+        run: |
+          sudo -E env "PATH=$PATH" python3 deploy/testnet/bridge/rehearse_bridge.py --generation /srv/tn-bridge-1 --evidence "$RUNNER_TEMP/evidence" ${STAGES:+--stages "$STAGES"}
+      - name: Resources and logs
+        if: always()
+        run: |
+          mkdir -p "$RUNNER_TEMP/evidence"
+          sudo chown -R "$(id -u):$(id -g)" "$RUNNER_TEMP/evidence"   # the rehearsal ran as root
+          docker stats --no-stream --format 'table {{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}\t{{.PIDs}}' > "$RUNNER_TEMP/evidence/docker-stats.txt" || true
+          df -h / > "$RUNNER_TEMP/evidence/df.txt" || true
+          sudo bash -c "cd /srv/tn-bridge-1 && docker compose -f compose.yaml -f compose.bridge.yaml ps -a > '$RUNNER_TEMP/evidence/compose-ps.txt' && docker compose -f compose.yaml -f compose.bridge.yaml logs --no-color --timestamps --tail 400 > '$RUNNER_TEMP/evidence/compose-logs.txt'" || true
+          sudo cp /srv/tn-bridge-1/manifest.json "$RUNNER_TEMP/evidence/manifest.json" || true
+          sudo chown -R "$(id -u):$(id -g)" "$RUNNER_TEMP/evidence" || true
+          cp deploy/testnet/artifacts/images.json deploy/testnet/artifacts/bridge-images.json "$RUNNER_TEMP/evidence/" || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: testnet-bridge-evidence
+          path: ${{ runner.temp }}/evidence
