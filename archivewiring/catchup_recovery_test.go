@@ -3,8 +3,10 @@ package archivewiring
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"errors"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -243,9 +245,11 @@ func TestArchiveCatchUp_FallsBackToAnEarlierCertifiedTarget(t *testing.T) {
 	n.catchUp(t, p, gap, 20)
 }
 
-// liarProvider serves a self-consistent tail whose oldest parent is fabricated: the archive has no such block.
+// liarProvider serves a self-consistent tail whose oldest parent is fabricated, a different one on every request: the archive has none
+// of them, and no refusal keyed on the top could stop it (rev2 B2 delta).
 type liarProvider struct {
 	honest configuredadmission.JournalProvider
+	served *atomic.Uint64
 }
 
 func (l liarProvider) FetchJournal(ctx context.Context, req shardnode.JournalFetchRequest) ([]shardnode.JournalFetchEntry, error) {
@@ -253,7 +257,10 @@ func (l liarProvider) FetchJournal(ctx context.Context, req shardnode.JournalFet
 	if err != nil || len(entries) == 0 {
 		return entries, err
 	}
-	entries[0].Block.ParentHash = bytes.Repeat([]byte{0x5a}, 32)
+	n := l.served.Add(1)
+	fake := bytes.Repeat([]byte{0x5a}, 32)
+	binary.BigEndian.PutUint64(fake[24:], n)
+	entries[0].Block.ParentHash = fake
 	return entries, nil
 }
 
@@ -268,7 +275,8 @@ func TestArchiveCatchUp_ALyingFirstPeerDoesNotHoldItUp(t *testing.T) {
 	honest := prunedPeer(t, p, replicas, gap, gap-fresh)
 	asker := testpeer.CreatePeer(t, testpeer.CreatePeerConfiguration(t))
 	var providers []peer.ID
-	for _, provider := range []shardnode.JournalFetchProvider{liarProvider{honest}, honest} {
+	liar := liarProvider{honest: honest, served: new(atomic.Uint64)}
+	for _, provider := range []shardnode.JournalFetchProvider{liar, honest} {
 		server, err := shardnode.NewJournalServer(provider, shardnode.DefaultJournalTransportLimits())
 		require.NoError(t, err)
 		host := testpeer.CreatePeer(t, testpeer.CreatePeerConfiguration(t))
@@ -280,6 +288,7 @@ func TestArchiveCatchUp_ALyingFirstPeerDoesNotHoldItUp(t *testing.T) {
 	n.recovery.Host, n.recovery.Providers = asker, providers
 	n.catchUp(t, p, gap, 40)
 	require.EqualValues(t, gap, n.exec.finalized.Number)
+	require.LessOrEqual(t, liar.served.Load(), uint64(2), "the liar's tail is not asked for again within the refusal minute (the other request it may answer is the ordinary exact suffix at the end)")
 }
 
 // prunedPeer is a peer whose journal (the fixture's own, all gap blocks) has pruned through the archived height: it retains only the

@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/unicitynetwork/bft-core/shardnode"
 	"github.com/unicitynetwork/bft-go-base/types"
 )
@@ -51,9 +52,9 @@ func (r *ExecutionRecovery) catchUpPage(ctx context.Context, after shardnode.Blo
 	catchUp := r.ArchiveCatchUp
 	page := r.catchUpPageSize()
 	var top []byte
-	fromPeer := false
+	var source peer.ID // the provider whose tail named top; empty for a certified target
 	if !catchUp.Live(after) {
-		top, fromPeer = r.catchUpTop(ctx, after, target, expected)
+		top, source = r.catchUpTop(ctx, after, target, expected)
 	}
 	if len(target) == 32 && !bytes.Equal(target, r.catchUpSeen) {
 		defer func() { r.catchUpPrev, r.catchUpSeen = r.catchUpSeen, bytes.Clone(target) }()
@@ -65,10 +66,10 @@ func (r *ExecutionRecovery) catchUpPage(ctx context.Context, after shardnode.Blo
 	}
 	joined, walked, err := catchUp.Walk(ctx, after, top, until)
 	if err != nil {
-		if fromPeer && walked == 0 {
-			// rev2 B2: a peer's tail is only its claim. A top the archive does not have is skipped for a while, so that one faulty
-			// peer first in the provider order cannot hold the catch-up on its fabricated tail.
-			r.catchUpRefuseTop(top)
+		if source != "" && walked == 0 {
+			// rev2 B2: a peer's tail is only its claim. A provider whose top the archive does not have is not asked for a while, so
+			// that one faulty peer first in the provider order cannot hold the catch-up with fabricated tails, however often it varies them.
+			r.catchUpRefuseProvider(source)
 		}
 		return r.catchUpWaiting(ctx, target, "walking the archive", err)
 	}
@@ -112,10 +113,10 @@ func (r *ExecutionRecovery) catchUpPage(ctx context.Context, after shardnode.Blo
 
 // catchUpTop is the block the archive walk starts from (rev2 R1): the newest blocks are in the peers' hot journals and not archived yet,
 // so a peer's journal tail (a zero ancestor) names the parent of its oldest retained entry, which two replicas hold. A peer's tail is
-// unauthenticated: a top whose walk failed at its first record is skipped for a while (catchUpRefuseTop), and the next provider's is
-// taken. Without one, a certified target from an earlier call (archived by now, most likely), else the target. fromPeer reports
-// whether the top came from a peer's tail.
-func (r *ExecutionRecovery) catchUpTop(ctx context.Context, after shardnode.BlockRef, target []byte, expected *types.UnicityCertificate) (top []byte, fromPeer bool) {
+// unauthenticated: a provider whose top failed the walk at its first record is not asked for a while (catchUpRefuseProvider), and the
+// next provider is. Without a tail, a certified target from an earlier call (archived by now, most likely), else the target. source
+// is the provider whose tail named the top, empty for a certified target.
+func (r *ExecutionRecovery) catchUpTop(ctx context.Context, after shardnode.BlockRef, target []byte, expected *types.UnicityCertificate) (top []byte, source peer.ID) {
 	req := shardnode.JournalFetchRequest{TargetHash: target, AfterHash: make([]byte, 32)}
 	if len(target) == 0 && expected != nil {
 		req.HeldRound = expected.GetRoundNumber()
@@ -125,10 +126,15 @@ func (r *ExecutionRecovery) catchUpTop(ctx context.Context, after shardnode.Bloc
 	if limits.MaxBlocks == 0 {
 		limits = shardnode.DefaultJournalTransportLimits()
 	}
-	for index, provider := range r.providerList() {
-		if index >= 4 || ctx.Err() != nil {
+	asked := 0
+	for _, provider := range r.providerList() {
+		if asked >= 4 || ctx.Err() != nil {
 			break
 		}
+		if r.catchUpRefusing(provider) {
+			continue
+		}
+		asked++
 		var entries []shardnode.JournalFetchEntry
 		var err error
 		if r.fetch != nil {
@@ -147,31 +153,31 @@ func (r *ExecutionRecovery) catchUpTop(ctx context.Context, after shardnode.Bloc
 		}
 		oldest := entries[0].Block
 		// Only a locator: the walk verifies every record it reaches from here and admission verifies the tail again later.
-		if linked && len(oldest.ParentHash) == 32 && oldest.Number > after.Number+1 && !r.catchUpRefused(oldest.ParentHash) {
-			return bytes.Clone(oldest.ParentHash), true
+		if linked && len(oldest.ParentHash) == 32 && oldest.Number > after.Number+1 {
+			return bytes.Clone(oldest.ParentHash), provider
 		}
 	}
 	// Certified targets of earlier calls: the one before this target, else the one before that.
 	for _, earlier := range [][]byte{r.catchUpSeen, r.catchUpPrev} {
 		if len(earlier) == 32 && !bytes.Equal(earlier, target) && !bytes.Equal(earlier, after.Hash) {
-			return bytes.Clone(earlier), false
+			return bytes.Clone(earlier), ""
 		}
 	}
-	return target, false
+	return target, ""
 }
 
-// catchUpRefusedFor is how long a peer-supplied top whose walk failed at its first record is skipped.
+// catchUpRefusedFor is how long a provider whose tail named a top the archive walk could not start from is not asked.
 const catchUpRefusedFor = time.Minute
 
-func (r *ExecutionRecovery) catchUpRefuseTop(top []byte) {
-	if r.catchUpRefusedTops == nil || len(r.catchUpRefusedTops) >= 64 {
-		r.catchUpRefusedTops = make(map[string]time.Time) // bounded: a fresh map forgets older refusals
+func (r *ExecutionRecovery) catchUpRefuseProvider(provider peer.ID) {
+	if r.catchUpRefused == nil {
+		r.catchUpRefused = make(map[peer.ID]time.Time) // bounded by the providers: one entry each
 	}
-	r.catchUpRefusedTops[string(top)] = time.Now()
+	r.catchUpRefused[provider] = time.Now()
 }
 
-func (r *ExecutionRecovery) catchUpRefused(top []byte) bool {
-	at, ok := r.catchUpRefusedTops[string(top)]
+func (r *ExecutionRecovery) catchUpRefusing(provider peer.ID) bool {
+	at, ok := r.catchUpRefused[provider]
 	return ok && time.Since(at) < catchUpRefusedFor
 }
 

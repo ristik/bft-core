@@ -70,12 +70,12 @@ type ExecutionRecovery struct {
 	FetchArchive func(context.Context, shardnode.BlockRef, []byte) ([]shardnode.JournalFetchEntry, error)
 	// ArchiveCatchUp, when set, closes a gap that one recovery cannot (longer than its bounds, or with its newest blocks not archived
 	// yet) from the archive, one page per call (#769, catchup.go).
-	ArchiveCatchUp     ArchiveCatchUp
-	catchUpSeen        []byte               // the last distinct target a catch-up call was asked for,
-	catchUpPrev        []byte               // and the one before it
-	catchUpRefusedTops map[string]time.Time // peer-supplied tops whose walk failed at its first record (rev2 B2)
-	catchUpWarned      []byte               // the target of the last catch-up warning, and when it was logged
-	catchUpWarnedAt    time.Time            // (one a minute per target)
+	ArchiveCatchUp  ArchiveCatchUp
+	catchUpSeen     []byte                // the last distinct target a catch-up call was asked for,
+	catchUpPrev     []byte                // and the one before it
+	catchUpRefused  map[peer.ID]time.Time // providers whose tail's top failed the walk at its first record, and when (rev2 B2)
+	catchUpWarned   []byte                // the target of the last catch-up warning, and when it was logged
+	catchUpWarnedAt time.Time             // (one a minute per target)
 }
 
 var (
