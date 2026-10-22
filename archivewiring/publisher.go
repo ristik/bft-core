@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"regexp"
 	"sort"
 	"sync"
 	"time"
@@ -76,6 +77,7 @@ type Publisher struct {
 	replicaCursor   []int // one per replica, sized in Run
 	status          Status
 	replicaProgress []ReplicaProgress
+	warned          map[string]time.Time // last WARN per message and error, see warnThrottled
 }
 
 // ReceiptSource is the execution RPC boundary used only while capturing an
@@ -163,6 +165,33 @@ type ReplicaProgress struct {
 // verified read-back after restart; this in-memory count never licenses prune.
 func (p *Publisher) Snapshot() Status { p.mu.Lock(); defer p.mu.Unlock(); return p.status }
 
+// variableText matches the parts of an error text that change between retries of the same failure (heights, hashes, durations).
+var variableText = regexp.MustCompile(`0x[0-9a-fA-F]+|[0-9a-fA-F]{16,}|[0-9]+`)
+
+// warnThrottled logs a recurring wait at WARN the first time and again after a minute, and at DEBUG in between: a stopped replica is
+// retried every two seconds and must not bury the log. A different failure (the error text with numbers and hashes removed) is a new message and logs at WARN at once.
+func (p *Publisher) warnThrottled(ctx context.Context, msg string, err error, attrs ...any) {
+	key := msg + "\x00" + fmt.Sprint(attrs...) + "\x00" + variableText.ReplaceAllString(err.Error(), "#")
+	p.mu.Lock()
+	if p.warned == nil {
+		p.warned = make(map[string]time.Time)
+	}
+	last, seen := p.warned[key]
+	quiet := seen && time.Since(last) < time.Minute
+	if !quiet {
+		if len(p.warned) > 64 {
+			clear(p.warned) // bounded: error texts can vary without end
+		}
+		p.warned[key] = time.Now()
+	}
+	p.mu.Unlock()
+	if quiet {
+		p.Log.DebugContext(ctx, msg, append(attrs, "err", err)...)
+		return
+	}
+	p.Log.WarnContext(ctx, msg, append(attrs, "err", err)...)
+}
+
 // sizeState sizes the per-replica state to Replicas. The caller holds p.mu.
 func (p *Publisher) sizeState() {
 	if len(p.replicaCursor) != len(p.Replicas) {
@@ -227,7 +256,7 @@ func (p *Publisher) Run(ctx context.Context) error {
 		defer ticker.Stop()
 		for {
 			if err := p.publishBundles(ctx); err != nil && ctx.Err() == nil {
-				p.Log.WarnContext(ctx, "handoff bundle replication waiting", "err", err)
+				p.warnThrottled(ctx, "handoff bundle replication waiting", err)
 			}
 			select {
 			case <-ctx.Done():
@@ -241,7 +270,7 @@ func (p *Publisher) Run(ctx context.Context) error {
 	defer ticker.Stop()
 	for {
 		if err := p.pass(ctx); err != nil && ctx.Err() == nil {
-			p.Log.WarnContext(ctx, "archive publication waiting", "err", err)
+			p.warnThrottled(ctx, "archive publication waiting", err)
 		}
 		select {
 		case <-ctx.Done():
@@ -426,7 +455,7 @@ func (p *Publisher) replicaLoop(ctx context.Context, index int) {
 			p.Log.LogAttrs(ctx, slog.LevelDebug, "archive: replica pass", attrs...)
 		}
 		if err != nil && ctx.Err() == nil {
-			p.Log.WarnContext(ctx, "archive replica waiting", "replica", p.Replicas[index], "err", err)
+			p.warnThrottled(ctx, "archive replica waiting", err, "replica", p.Replicas[index])
 		}
 		select {
 		case <-ctx.Done():

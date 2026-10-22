@@ -23,6 +23,36 @@ type JournalUsage struct {
 	BytesCap         int64 `json:"bytesCap"`
 }
 
+// capacityWarnPercent is the journal fill level at which operators are warned (and the frontier worker logs): the hard limits stop
+// admission, so the warning has to come while archiving can still catch up.
+const capacityWarnPercent = 75
+
+// Percent returns the highest fill level of the three journal limits, in whole percent; a zero cap counts as unlimited.
+func (u JournalUsage) Percent() int {
+	pct := 0
+	for _, f := range [][2]int64{{int64(u.CandidatesUsed), int64(u.CandidatesCap)}, {int64(u.ObservationsUsed), int64(u.ObservationsCap)}, {u.BytesUsed, u.BytesCap}} {
+		if f[1] > 0 && int(f[0]*100/f[1]) > pct {
+			pct = int(f[0] * 100 / f[1])
+		}
+	}
+	return pct
+}
+
+// ArchiveHealth summarizes what pruning depends on: two verified remote copies. Healthy replicas are those without a transfer error
+// and with an observed acknowledgement; Frozen is true when fewer than CopiesRequired are healthy, which is when the frontier and
+// pruning stop. UncoveredBlocks is the certified suffix above the prune frontier that has no durable coverage yet.
+type ArchiveHealth struct {
+	CopiesRequired        int      `json:"copiesRequired"`
+	ReplicasConfigured    int      `json:"replicasConfigured"`
+	ReplicasHealthy       int      `json:"replicasHealthy"`
+	FailedReplicas        []string `json:"failedReplicas,omitempty"`
+	Frozen                bool     `json:"frozen"`
+	OldestUncoveredHeight uint64   `json:"oldestUncoveredHeight,omitempty"`
+	UncoveredBlocks       uint64   `json:"uncoveredBlocks"`
+	JournalPercent        int      `json:"journalPercent"`
+	CapacityWarning       bool     `json:"capacityWarning"`
+}
+
 type BlockPin struct {
 	Height    uint64 `json:"height"`
 	Hash      string `json:"hash"`
@@ -54,6 +84,7 @@ type OperatorStatus struct {
 	RestoreBase       *BlockPin        `json:"restoreBase,omitempty"`
 	LatestLocalV2     *BlockPin        `json:"latestLocalV2Archive,omitempty"`
 	Replicas          []ReplicaReport  `json:"replicas"`
+	Archive           ArchiveHealth    `json:"archive"`
 	Authority         *AuthorityReport `json:"authority,omitempty"`
 }
 
@@ -139,11 +170,37 @@ func ReadOperatorStatus(ctx context.Context, journal *configuredprogress.Store, 
 		}
 		out.Replicas = append(out.Replicas, report)
 	}
+	out.Archive = archiveHealth(out)
 	if authority != nil {
 		copy := *authority
 		out.Authority = &copy
 	}
 	return out, nil
+}
+
+func archiveHealth(s OperatorStatus) ArchiveHealth {
+	h := ArchiveHealth{CopiesRequired: replicaCopies, ReplicasConfigured: len(s.Replicas), JournalPercent: s.Journal.Percent()}
+	h.CapacityWarning = h.JournalPercent >= capacityWarnPercent
+	for _, r := range s.Replicas {
+		if r.Error == "" {
+			h.ReplicasHealthy++
+		} else {
+			h.FailedReplicas = append(h.FailedReplicas, r.Replica)
+		}
+	}
+	h.Frozen = h.ReplicasHealthy < h.CopiesRequired
+	if s.CertifiedTip != nil {
+		covered := uint64(0)
+		if s.PruneFrontier != nil {
+			covered = s.PruneFrontier.Height
+		} else if s.RestoreBase != nil {
+			covered = s.RestoreBase.Height
+		}
+		if s.CertifiedTip.Height > covered {
+			h.OldestUncoveredHeight, h.UncoveredBlocks = covered+1, s.CertifiedTip.Height-covered
+		}
+	}
+	return h
 }
 
 func cloneHigherPin(current, candidate *BlockPin) *BlockPin {
