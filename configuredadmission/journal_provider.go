@@ -56,20 +56,33 @@ func (p JournalProvider) FetchJournal(ctx context.Context, req shardnode.Journal
 			entries[string(e.Candidate.Hash)] = e
 		}
 	}
+	// A zero ancestor (no block has that hash) asks for this journal's tail instead of an exact suffix: the certified chain ending at
+	// the target as far back as it is retained, within the same 256-block and 64 MiB bounds. A long catch-up (#769) takes the newest,
+	// not yet archived, blocks this way and walks the archive from the tail's oldest parent.
+	tail := bytes.Equal(req.AfterHash, make([]byte, 32))
 	var reverse []shardnode.JournalFetchEntry
 	hash := target
 	var total int64
 	for !bytes.Equal(hash, req.AfterHash) {
 		if len(reverse) >= 256 {
+			if tail {
+				break
+			}
 			return nil, fmt.Errorf("journal provider: suffix exceeds 256 blocks")
 		}
 		e, ok := entries[string(hash)]
 		if !ok {
+			if tail && len(reverse) > 0 {
+				break
+			}
 			return nil, fmt.Errorf("journal provider: missing certified entry %x", hash)
 		}
 		b := e.Candidate
 		total += int64(len(b.Raw))
 		if total > 64<<20 {
+			if tail && len(reverse) > 0 {
+				break
+			}
 			return nil, fmt.Errorf("journal provider: suffix exceeds 64 MiB")
 		}
 		reverse = append(reverse, shardnode.JournalFetchEntry{
