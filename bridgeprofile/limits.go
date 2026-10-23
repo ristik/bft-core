@@ -58,7 +58,7 @@ var (
 // distinct from the SDK Token.VERSION and from the external bridge's own
 // protocol version. Any byte or derivation change bumps it together with the
 // semantic profile; there is no version dispatch in the parsers.
-const NativeBridgeProtoVersion = 5
+const NativeBridgeProtoVersion = 6
 
 // Fixed protocol bytes adopted from the pinned SDKs v3.0.1. Tags are unchanged
 // from the pre-3.0 profile; versions and arities are not.

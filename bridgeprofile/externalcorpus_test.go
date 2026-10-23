@@ -63,7 +63,7 @@ func TestExternalSealedCorpus(t *testing.T) {
 			require.Equal(t, c.Expected, Replay(&fs, c), c.ID)
 		}
 	}
-	generated, err := BuildCorpus()
+	generated, err := BuildSealedCorpus()
 	require.NoError(t, err)
 	for name, b := range generated.Files {
 		require.Equal(t, b, files[name], "external companion bytes differ: %s", name)
