@@ -3,10 +3,12 @@
 # The pool is a small genesis alloc (P85_REWARD_FUNDING, run-lane sets it for run-inputs "rewards": true), so it runs dry; x4e_run (scripts/p85-recovery-steps.sh) runs the same
 # scripts/x4pos/steps/reward-*.sh the driver runs. NOT yet proven on this chain: whether the settle/replay agree with the K -> J -> K acknowledged history and the slashed lots.
 
-X4R_PROGRESS=${X4R_PROGRESS:-5400}   # the registry's progress (seconds of certified time) waited for before the first settle, as in the shadow rewards lane
-# live (x4-rew-1/-2): at progress 3600 this chain had closed 2 intervals (the shadow chain 3), ~0.306 UCT paid each (5 payees), settle and replay agreeing; a 2 UCT pool was still at 1.39 UCT
-# then ("the pool never ran dry"), so the lane uses a 0.5 UCT pool (run-lane.sh) and waits for progress 5400: interval 1 paid, 2 partly, 3 at zero budget
-X4R_MIN_INTERVALS=${X4R_MIN_INTERVALS:-2}
+X4R_PROGRESS=${X4R_PROGRESS:-3000}   # the registry's progress (seconds of certified time) waited for before the first settle, as in the shadow rewards lane
+# WHEN: right after the baseline. RewardPool.closeInterval (unicity-pos-contracts b17829ca, src/p85/RewardPool.sol:271-290) reverts NotCaughtUp for the tail of the latest assignment
+# while ELECTION.openResult() != 0; the recovery lane has an open result from p85_election_reserved on, and a later one after the recovery (the one offence 2 uses), so on this
+# chain no interval past the K tail closes once those steps ran (live: x4-rew-1/-2/-3 closed 2 intervals at progress 3600 and none after, with the registry progress and the head advancing).
+# Before the election steps the grid (1000 progress units) closes: 0.5 UCT is ~0.306 UCT an interval (4 members), so interval 1 pays, 2 pays the rest, 3 is at zero budget.
+X4R_MIN_INTERVALS=${X4R_MIN_INTERVALS:-3}
 X4R_EXHAUST_WAIT=${X4R_EXHAUST_WAIT:-3000}
 
 x4r_intervals() {
