@@ -706,9 +706,51 @@ class Rehearsal:
         for i in range(1, self.n + 1):
             def activated(i=i):
                 logs = self.compose('logs', '--no-color', f'shard{i}', check=False)
-                return any('msg="handoff activated"' in line and 'rootEpoch=2' in line for line in logs.splitlines())
+                # the package's logs are JSON: {"message":"handoff activated","rootEpoch":2,...} (the lane's text format was msg="handoff activated" rootEpoch=2)
+                return any('"message":"handoff activated"' in line and '"rootEpoch":2,' in line for line in logs.splitlines())
             self.wait(f'shard {i} logs the activation of root epoch 2', activated, 90)
         self.say('  every shard has activated root epoch 2')
+
+    def pos_advance(self):
+        """5b steps 11-13: the shard configuration of the epoch the handoff activates (read from a running root), then, for each entity in turn, the advance of its
+        signing authority to the new root epoch and shard configuration and a new session for its shard node (the shard is stopped for it and started again with the
+        same command; the authority is never recreated), and finally paid work at the new epoch: a transaction through the public gateway is certified on every
+        validator, the roots stay at epoch 2 and the custody has applied every root record. Needs pos-install first."""
+        compose = json.loads((self.gen / 'compose.yaml').read_text())
+        work = self.gen / 'network' / 'handoff'
+        transport = handoff_ops.DockerTransport(self.gen)
+        self.expect(all(self.root_epoch(i, transport) == 2 for i in range(1, self.n + 1)), 'every root certifies at epoch 2 (run pos-install first)')
+        root_rpc = operator_rpc.common_urls(compose)[0]
+        # 11 the shard configuration of the activated shard epoch (the EVM partition's epoch after the installed one)
+        installed = json.loads((self.gen / 'network' / 'full-shard-conf.json').read_text())['epoch']
+        shard_epoch = installed + 1
+        self.exec_in('root1', 'ubft', 'q3', 'shard-conf', '--root-rpc', root_rpc, '--epoch', str(shard_epoch), '--out', '/tmp/shard-conf.json')
+        conf = json.loads(self.exec_in('root1', 'cat', '/tmp/shard-conf.json'))
+        self.expect(conf.get('epoch') == shard_epoch and conf.get('partitionId') == 8, f'a root holds the EVM shard configuration of epoch {shard_epoch}', str(conf)[:200])
+        (work / f'shard-conf-{shard_epoch}.json').write_text(json.dumps(conf, indent=1) + '\n')
+        subprocess.run(['chmod', '-R', 'a+rX', str(work)], check=True)
+        # 12 the authorities and the shard nodes, one entity at a time
+        for i in range(1, self.n + 1):
+            self.say(f'  advancing the authority of entity {i}')
+            self.compose('stop', f'shard{i}')
+            operator = ['--operator-socket', '/authority/operator.sock', '--operator-credential', '/authority/operator.cred']
+            self.exec_in(f'authority{i}', 'ubft', 'signing-authority', 'advance-epoch', *operator, '--trust-base', '/network/handoff/trust-base-epoch2.json',
+                         '--shard-conf', f'/network/handoff/shard-conf-{shard_epoch}.json')
+            self.exec_in(f'authority{i}', 'ubft', 'signing-authority', 'replace-session', *operator, '--out', '/authority/client.cred')
+            self.compose('start', f'shard{i}')
+        # 13 paid work at the new epoch
+        self.wait('the public gateway is healthy', lambda: self.http(PUBLIC_RPC, 'GET', '/healthz')[0] == 200, 300)
+        receipt = json.loads(self.send_via_gateway(self.gen / 'faucet-secrets', '0x' + '44' * 20))
+        self.expect(receipt['status'] == '0x1', 'a transaction through the gateway is mined after the switch', receipt['transactionHash'])
+        for i in range(1, self.n + 1):
+            r = self.wait(f'validator {i} has it', lambda i=i: self.ureth(i, 'eth_getTransactionReceipt', [receipt['transactionHash']]), 180)
+            self.expect(r['blockHash'] == receipt['blockHash'], f'validator {i} has it in the same block')
+        self.expect(all(self.root_epoch(i, transport) == 2 for i in range(1, self.n + 1)), 'every root still certifies at epoch 2')
+        deployment = json.loads((self.gen / 'network' / 'pos-deployment.json').read_text())
+        def applied():
+            count = self.view(self.REGISTRY, 'recordCount()(uint64)')[0]
+            return count if count == self.view(deployment['custody'], 'recordCursor()(uint64)')[0] else None
+        self.say(f'  recordCount == recordCursor == {self.wait("the custody has applied every root record", lambda: applied() is not None, 300) and applied()}')
 
     def pod_restart(self):
         """One validator entity at a time: stop its execution client, root and shard node (its signing authority stays live, as the README requires), check what the
@@ -826,7 +868,7 @@ class Rehearsal:
 
 STAGES = (('up', 'up'), ('identity', 'identity'), ('first-tx', 'first_tx'), ('gateway-limits', 'gateway_limits'), ('faucet-guard', 'faucet_guard'), ('load', 'load'), ('pod-restart', 'pod_restart'), ('backup-restore', 'backup_restore'), ('reset', 'reset'))
 # run on a generation made with --pos (the workflow's second generation); not part of the default list
-POS_STAGES = (('pos-smoke', 'pos_smoke'), ('pos-rewards', 'pos_rewards'), ('pos-election', 'pos_election'), ('pos-proposal', 'pos_proposal'), ('pos-propose', 'pos_propose'), ('pos-install', 'pos_install'))
+POS_STAGES = (('pos-smoke', 'pos_smoke'), ('pos-rewards', 'pos_rewards'), ('pos-election', 'pos_election'), ('pos-proposal', 'pos_proposal'), ('pos-propose', 'pos_propose'), ('pos-install', 'pos_install'), ('pos-advance', 'pos_advance'))
 
 
 def main():
