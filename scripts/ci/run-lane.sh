@@ -103,10 +103,10 @@ fi
 if [ "$(jq -r '.accounting // false' scripts/ci/run-inputs.json 2>/dev/null)" = true ]; then
   case "$kind" in x4exit) export X4_ACCT_LANE=1; log "X4_ACCT_LANE=1 (run-inputs accounting)" ;; *) log "accounting is for the x4exit kind"; exit 2 ;; esac
 fi
-# run-inputs "rewards": true (with "accounting": true, x4exit kind) adds X4 B6c's reward steps on the recovery chain with a SMALL genesis pool (it runs dry, is refilled, then paid)
+# run-inputs "rewards": true (with "accounting": true, x4exit kind) adds X4 B6c's reward steps on the recovery chain with a SMALL genesis pool, 0.5 UCT: about 0.3 UCT a closed interval on this chain, so the third interval is at zero budget (it runs dry, is refilled, then paid)
 if [ "$(jq -r '.rewards // false' scripts/ci/run-inputs.json 2>/dev/null)" = true ]; then
   [ "${X4_ACCT_LANE:-0}" = 1 ] || { log "rewards needs accounting: true on the x4exit kind"; exit 2; }
-  export X4_REWARDS_POS=1 P85_REWARD_FUNDING=${P85_REWARD_FUNDING:-2000000000000000000}; log "X4_REWARDS_POS=1 P85_REWARD_FUNDING=$P85_REWARD_FUNDING (run-inputs rewards)"
+  export X4_REWARDS_POS=1 P85_REWARD_FUNDING=${P85_REWARD_FUNDING:-500000000000000000}; log "X4_REWARDS_POS=1 P85_REWARD_FUNDING=$P85_REWARD_FUNDING (run-inputs rewards)"
 fi
 export LANE_PINNED=1 LANE_COMMIT_UNDER_TEST=$head UTB_MIN_FREE_GIB=${UTB_MIN_FREE_GIB:-$(jq -r '.runner.minFreeDiskGiB' "$pins")}
 if [ "$kind" = combined ]; then pins_mode=env; else pins_mode=env-core; fi
