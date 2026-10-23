@@ -241,11 +241,11 @@ type pendingHandoff struct {
 
 func (x *ConsensusManager) handoffPredecessor() ([]byte, error) {
 	if x.params.NetworkProfileVersion != storage.ProfileHandoff || x.recoveryHistory == nil {
-		return nil, ErrHandoffApproval
+		return nil, fmt.Errorf("%w: this root does not run the handoff profile with a trust history", ErrHandoffApproval)
 	}
 	current := x.trustBase.Load()
 	if current == nil {
-		return nil, ErrHandoffApproval
+		return nil, fmt.Errorf("%w: no installed trust base", ErrHandoffApproval)
 	}
 	if x.q3 != nil && current.Epoch > 1 {
 		if entry, ok := x.q3.Activated(current.Epoch); ok { // a verified activation's identity is its V3 body's, from the Q3 history
@@ -261,7 +261,7 @@ func (x *ConsensusManager) handoffPredecessor() ([]byte, error) {
 		return bytes.Clone(prior.BodyID[:]), nil
 	}
 	if prior.V1 == nil {
-		return nil, ErrHandoffApproval
+		return nil, fmt.Errorf("%w: the trust history holds neither a V1 nor a V2 body for epoch %d", ErrHandoffApproval, current.Epoch)
 	}
 	return prior.V1.Hash(crypto.SHA256)
 }
@@ -310,22 +310,61 @@ func (x *ConsensusManager) PlanHandoff(next *types.RootTrustBaseV1, proposal *ev
 // AcceptHandoffIntent registers a plan another validator's operator endpoint built, after checking everything about it that needs
 // no signature and no EVM state: the body, the candidate, the attempt this chain expects next.
 func (x *ConsensusManager) AcceptHandoffIntent(plan abdrc.HandoffApprovalMsg) error {
-	if plan.Signer != "" || len(plan.Signature) != 0 || len(plan.AbortSignature) != 0 || len(plan.FrozenParent) != 0 {
-		return ErrHandoffApproval
-	}
 	state, err := x.blockStore.GetState()
-	if err != nil || state == nil || state.CommittedHead == nil || state.CommittedHead.Block == nil {
-		return ErrHandoffApproval
+	if err != nil {
+		return fmt.Errorf("%w: no committed state", ErrHandoffApproval)
 	}
-	attempt, err := plannedAttempt(state.CommittedHead.Control, state.CommittedHead.Block.Round)
-	if err != nil || plan.Attempt != attempt {
-		return ErrHandoffApproval
+	return x.acceptHandoffIntentAtState(plan, state)
+}
+
+// acceptHandoffIntentAtState is AcceptHandoffIntent against a given committed state.
+//
+// The leader orders a plan's Prepare as soon as it holds the plan's intent, so an operator that hands the intent to the other validators one after the
+// other can reach a validator whose committed control state already holds that Prepare. The intent is not needed there any more (it is held only so that a
+// leader can order the Prepare, and a validator endorses against the committed Prepare itself), so the same plan is accepted again without being held:
+// the Prepare of this attempt must be committed and not lapsed, and it must be bound to this plan's body. A different plan for the attempt, or an
+// attempt whose Prepare lapsed, is refused with the reason.
+func (x *ConsensusManager) acceptHandoffIntentAtState(plan abdrc.HandoffApprovalMsg, state *abdrc.StateMsg) error {
+	if plan.Signer != "" || len(plan.Signature) != 0 || len(plan.AbortSignature) != 0 || len(plan.FrozenParent) != 0 {
+		return fmt.Errorf("%w: an intent carries no signer, signature or frozen parent", ErrHandoffApproval)
+	}
+	if state == nil || state.CommittedHead == nil || state.CommittedHead.Block == nil {
+		return fmt.Errorf("%w: no committed head", ErrHandoffApproval)
+	}
+	control, round := state.CommittedHead.Control, state.CommittedHead.Block.Round
+	if control != nil && control.Phase == "prepared" && control.Attempt == plan.Attempt && !storage.PrepareLapsed(control, round) {
+		body, _, err := x.checkPlanBody(&plan)
+		if err != nil {
+			return err
+		}
+		prepared, err := storage.DecodeOrderedHandoffRecord(control.RecordBytes)
+		if err != nil {
+			return fmt.Errorf("%w: the committed Prepare does not decode: %w", ErrHandoffApproval, err)
+		}
+		if id := body.id; !bytes.Equal(id[:], prepared.NextBodyID) {
+			return fmt.Errorf("%w: attempt %d is prepared for another plan", ErrHandoffApproval, plan.Attempt)
+		}
+		return nil
+	}
+	attempt, err := plannedAttempt(control, round)
+	if err != nil {
+		return fmt.Errorf("%w: no plannable attempt in the committed control state (phase %q): %w", ErrHandoffApproval, controlPhase(control), err)
+	}
+	if plan.Attempt != attempt {
+		return fmt.Errorf("%w: the plan is for attempt %d, this validator's committed state plans attempt %d", ErrHandoffApproval, plan.Attempt, attempt)
 	}
 	if _, _, err := x.checkPlanBody(&plan); err != nil {
 		return err
 	}
 	x.setHandoffIntent(plan)
 	return nil
+}
+
+func controlPhase(c *evmroot.ControlState) string {
+	if c == nil {
+		return "none"
+	}
+	return c.Phase
 }
 
 func (x *ConsensusManager) setHandoffIntent(plan abdrc.HandoffApprovalMsg) {
@@ -758,7 +797,7 @@ func (x *ConsensusManager) verifyPlanReceipts(body, receipts []byte, attempt uin
 // attempt and the candidate. Nothing in it names a frozen parent: the root binds that at the Prepare.
 func (x *ConsensusManager) checkPlanBody(msg *abdrc.HandoffApprovalMsg) (planBody, []byte, error) {
 	if msg == nil || len(msg.Body) == 0 || len(msg.Body) > 1<<20 || len(msg.Candidate) != 32 || msg.ActivationRound == 0 {
-		return planBody{}, nil, ErrHandoffApproval
+		return planBody{}, nil, fmt.Errorf("%w: malformed plan (body, candidate digest or activation round)", ErrHandoffApproval)
 	}
 	body, err := x.decodePlanBody(msg.Body)
 	if err != nil {
@@ -767,7 +806,7 @@ func (x *ConsensusManager) checkPlanBody(msg *abdrc.HandoffApprovalMsg) (planBod
 	old := x.trustBase.Load()
 	if old == nil || old.Epoch == ^uint64(0) || body.epoch != old.Epoch+1 || body.network != uint64(old.NetworkID) ||
 		body.earliest > msg.ActivationRound {
-		return body, nil, ErrHandoffApproval
+		return body, nil, fmt.Errorf("%w: the plan's epoch, network or earliest activation does not fit this validator's installed epoch", ErrHandoffApproval)
 	}
 	predecessor, err := x.handoffPredecessor()
 	if err != nil {
@@ -787,7 +826,7 @@ func (x *ConsensusManager) checkPlanBody(msg *abdrc.HandoffApprovalMsg) (planBod
 	if !bytes.Equal(body.predecessorHash, link) ||
 		!bytes.Equal(body.stateSummary, intentSummary(body.network, predecessor, msg.Attempt)) ||
 		!bytes.Equal(body.changeRecordHash, evmroot.D4CandidateContextHash(body.network, predecessor, msg.Attempt, msg.Candidate, body.earliest)) {
-		return body, nil, ErrHandoffApproval
+		return body, nil, fmt.Errorf("%w: the plan's predecessor link, state summary or change record is not the one this validator derives", ErrHandoffApproval)
 	}
 	// V3 readiness: every successor member declared itself ready for exactly this body, attempt and candidate; a V2 plan carries none
 	if body.version == 3 {
