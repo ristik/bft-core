@@ -5,6 +5,8 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"slices"
+	"sort"
 
 	"github.com/unicitynetwork/bft-go-base/types"
 )
@@ -240,10 +242,24 @@ type VerifyContext struct {
 	CurrentRoot []RootMember
 }
 
+// sameValidators compares the two validator sets, not their order: a successor assignment is sorted by node id (NewSuccessor), while the installed
+// configuration keeps the order it was generated in (the genesis lists its validators in the order of the trust base's root nodes, which the genesis
+// plan pairs by index), so a committee that did not change would otherwise always read as an EVM-only change.
 func sameValidators(a, b []*types.NodeInfo) bool {
 	if len(a) != len(b) {
 		return false
 	}
+	for i := range a {
+		if a[i] == nil || b[i] == nil {
+			return false
+		}
+	}
+	byID := func(nodes []*types.NodeInfo) []*types.NodeInfo {
+		sorted := slices.Clone(nodes)
+		sort.SliceStable(sorted, func(i, j int) bool { return sorted[i].NodeID < sorted[j].NodeID })
+		return sorted
+	}
+	a, b = byID(a), byID(b)
 	for i := range a {
 		if a[i] == nil || b[i] == nil || a[i].NodeID != b[i].NodeID || a[i].Stake != b[i].Stake || !bytes.Equal(a[i].SigKey, b[i].SigKey) {
 			return false
