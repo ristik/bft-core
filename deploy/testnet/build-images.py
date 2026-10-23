@@ -3,6 +3,7 @@
 import argparse
 import hashlib
 import json
+import os
 import pathlib
 import shutil
 import subprocess
@@ -15,14 +16,14 @@ def run(*args):
 
 def main():
     p = argparse.ArgumentParser()
-    for name in ('bft', 'ureth', 'rugregator'):
+    for name in ('bft', 'ureth', 'aggregator-go'):
         p.add_argument('--' + name + '-source', required=True, type=pathlib.Path)
     a = p.parse_args()
     artifacts = HERE / 'artifacts'
     artifacts.mkdir(exist_ok=True)
     records = {}
-    for name, binary in (('bft', 'ubft'), ('ureth', 'unicity-reth'), ('rugregator', 'rugregator')):
-        src = getattr(a, name + '_source').resolve()
+    for name, binary in (('bft', 'ubft'), ('ureth', 'unicity-reth'), ('aggregator-go', 'aggregator')):
+        src = getattr(a, name.replace('-', '_') + '_source').resolve()
         if run('git', '-C', str(src), 'rev-parse', 'HEAD') != PINS[name]:
             raise SystemExit(name + ' source pin mismatch')
         if run('git', '-C', str(src), 'status', '--porcelain', '--untracked-files=no'):
@@ -31,14 +32,13 @@ def main():
         if name == 'bft':
             subprocess.run(['make', 'build'], cwd=src, check=True)
             path = src / 'build/ubft'
+        elif name == 'aggregator-go':
+            # cgo for secp256k1; no rocksdb tag: the package runs the memory SMT backend, its state in MongoDB (as scripts/lib/utb-lib.sh builds it)
+            path = src / 'build/aggregator'
+            subprocess.run(['go', 'build', '-trimpath', '-o', str(path), './cmd/aggregator'], cwd=src, check=True, env={**os.environ, 'CGO_ENABLED': '1'})
         else:
-            args = ['cargo', 'build', '--locked', '--release']
-            if name == 'ureth':
-                args += ['-p', 'unicity-reth']
-            else:
-                args += ['-p', 'uni-aggregator', '--bin', 'aggregator']
-            subprocess.run(args, cwd=src, check=True)
-            path = src / 'target/release' / ('aggregator' if name == 'rugregator' else binary)
+            subprocess.run(['cargo', 'build', '--locked', '--release', '-p', 'unicity-reth'], cwd=src, check=True)
+            path = src / 'target/release' / binary
         with path.open('rb') as stream:
             if stream.read(4) != b'\x7fELF':
                 raise SystemExit('build on Linux for the server, not macOS')
@@ -46,8 +46,11 @@ def main():
         records[binary] = hashlib.sha256(path.read_bytes()).hexdigest()
     shutil.copy2(HERE / 'Dockerfile.node', artifacts / 'Dockerfile')
     subprocess.run(['docker', 'build', '-t', 'tnops-node:verified', str(artifacts)], check=True)
-    for binary in ('ubft', 'unicity-reth', 'rugregator'):
+    for binary in ('ubft', 'unicity-reth'):
         subprocess.run(['docker', 'run', '--rm', '--entrypoint', binary, 'tnops-node:verified', '--help'], check=True, stdout=subprocess.DEVNULL)
+    # aggregator-go has no --help: it reads its environment and starts; ldd shows its cgo libraries resolve in the image
+    subprocess.run(['docker', 'run', '--rm', '--entrypoint', 'ldd', 'tnops-node:verified', '/usr/local/bin/aggregator'], check=True, stdout=subprocess.DEVNULL)
+    subprocess.run(['docker', 'pull', PINS['mongo']], check=True, stdout=subprocess.DEVNULL)
     images = {'node': run('docker', 'image', 'inspect', '--format={{.Id}}', 'tnops-node:verified')}
     for kind, dockerfile in (('guard', 'Dockerfile.gateway'), ('signer', 'Dockerfile.backend')):
         tag = 'tnops-' + kind + ':verified'
