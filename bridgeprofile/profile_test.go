@@ -514,6 +514,11 @@ func TestStorageSlots(t *testing.T) {
 	require.NotEqual(t, ClaimableSlot(a), RedeemedSlot(1))
 	var pid [32]byte
 	pid[31] = 7
+	// cast index bytes32 7 (cast index uint256 1 9): the nested mapping slot of spentPart[1][7].
+	want, err := hex.DecodeString("249e73b6d05bd504eb6e3cb3ae7778c492aea0e392781230aeb97e54b95c661a")
+	require.NoError(t, err)
+	sp := SpentPartSlot(1, pid)
+	require.Equal(t, want, sp[:])
 	require.NotEqual(t, SpentPartSlot(1, pid), SpentPartSlot(2, pid))
 	require.NotEqual(t, SpentPartSlot(1, pid), RedeemedSlot(1))
 	require.NotEqual(t, LockedAmountSlot(1), RedeemedSlot(1))
