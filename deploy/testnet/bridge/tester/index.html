@@ -52,7 +52,8 @@ document.getElementById('credit').onclick = async () => {
     // claimable(address): 0x402914f5
     const data = '0x402914f5' + address.slice(2).toLowerCase().padStart(64, '0');
     const credit = BigInt(await ethereum.request({method: 'eth_call', params: [{to: cfg.vault, data}, 'latest']}));
-    out.textContent = `${address}: ${credit} wei claimable`;
+    const ether = `${credit / 10n ** 18n}.${(credit % 10n ** 18n).toString().padStart(18, '0')}`.replace(/\.?0+$/, '');
+    out.textContent = `${address}: ${ether} ETH (${credit} wei) claimable`;
   } catch (error) { out.textContent = error.message; }
 };
 init().catch(error => { document.getElementById('network').replaceChildren(row('error', error.message)); });
