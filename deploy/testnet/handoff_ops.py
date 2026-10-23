@@ -18,9 +18,11 @@ Inputs (trust base, candidate, receipts, assignment) are files written by the ho
 SHA-256 of the request and of the plan and of every attempt (`handoff/log.jsonl`). No key and no authority credential passes through these files.
 
     handoff_ops.py propose <generation> --ubft UBFT --next-trust-base F [--next-evm-assignment F] [--readiness-receipts F,F] [--q3]
+    handoff_ops.py hold    <generation> --ubft UBFT --next-trust-base F [...the propose options]   (rehearsal: plan, intents, ONE endorsement; prints the abort target)
     handoff_ops.py abort   <generation> -- <the `ubft root handoff abort` flags except --root-rpc>
 """
 import argparse
+import base64
 import concurrent.futures
 import hashlib
 import json
@@ -154,6 +156,19 @@ class Wrapper:
             raise HandoffError(f'only {accepted}/{len(results)} validators endorsed: ' + '; '.join(refusals))
         return accepted
 
+    def hold(self, request):
+        """A rehearsal of Abort: the plan and every intent as `attempt` does, then the endorsement of the FIRST entity only (its weight is below the quorum, so no Freeze
+        follows). Returns the plan; the Prepare has been ordered when this returns, and lapses by itself after PrepareFreezeLapseRounds."""
+        plan = self.plan(request, 1)
+        self.record(event='plan', attempt=1, request_sha256=sha(request), plan_sha256=sha(plan), entity=self.entities[0])
+        for entity in self.entities[1:]:
+            self.intent(entity, plan, 1)
+        refusal = self.endorse(self.entities[0], plan, self.now() + self.prepare_timeout)
+        self.record(event='hold', plan_sha256=sha(plan), endorsed=[self.entities[0]] if not refusal else [], refusal=refusal)
+        if refusal:
+            raise HandoffError(refusal)
+        return plan
+
     def propose(self, request):
         for number in range(1, self.max_attempts + 1):
             try:
@@ -170,6 +185,19 @@ def abort_commands(generation, entities, flags):
     compose = ['docker', 'compose', '-f', str(Path(generation) / 'compose.yaml')]
     root_rpc = operator_rpc.common_urls(json.loads((Path(generation) / 'compose.yaml').read_text()))[0]
     return {i: compose + ['exec', '-T', f'root{i}', 'ubft', 'root', 'handoff', 'abort', *flags, '--root-rpc', root_rpc] for i in entities}
+
+
+def abort_target(transport, entity, plan, old_epoch):
+    """The exact target of Abort for the plan just held (the fields scripts/h6/prepare-handoff.py derives): network, predecessor and attempt from the root's context, the
+    successor body identity as the SHA-256 of the plan's canonical body."""
+    status, body = transport.post(entity, '/api/v1/handoff/evm-assignment/context', b'{}')
+    if status != 200:
+        raise HandoffError(f'entity {entity} refused the context: {status} {body.decode(errors="replace")}')
+    context, held = json.loads(body), json.loads(plan)
+    if held['Attempt'] != context['attempt']:
+        raise HandoffError(f'the context plans attempt {context["attempt"]}, the plan is attempt {held["Attempt"]}')
+    return {'network': context['network'], 'oldEpoch': old_epoch, 'predecessorBodyId': '0x' + context['predecessor'].removeprefix('0x'),
+            'attempt': held['Attempt'], 'nextBodyId': '0x' + sha(base64.b64decode(held['Body'], validate=True))}
 
 
 def build_request(ubft, out, next_trust_base, assignment=None, receipts=None, q3=False):
@@ -196,21 +224,37 @@ def main():
     q.add_argument('--prepare-timeout', type=float, default=60)
     q.add_argument('--max-attempts', type=int, default=3)
     q.add_argument('--intent-delay', type=float, default=0.0, help='seconds to wait before handing each validator the intent (testing slow delivery)')
+    h = sub.add_parser('hold')
+    h.add_argument('generation', type=Path)
+    h.add_argument('--ubft', type=Path, required=True)
+    h.add_argument('--next-trust-base', type=Path, required=True)
+    h.add_argument('--next-evm-assignment', type=Path)
+    h.add_argument('--readiness-receipts')
+    h.add_argument('--q3', action='store_true')
+    h.add_argument('--prepare-timeout', type=float, default=60)
     r = sub.add_parser('abort')
     r.add_argument('generation', type=Path)
     r.add_argument('flags', nargs=argparse.REMAINDER)
     a = p.parse_args()
     transport = DockerTransport(a.generation)
     if a.action == 'abort':
-        failed = False
-        for i, command in abort_commands(a.generation, transport.entities, [f for f in a.flags if f != '--']).items():
-            done = subprocess.run(command, text=True, capture_output=True)
-            print(f'entity {i}: exit {done.returncode}\n{done.stdout}{done.stderr}')
-            failed = failed or done.returncode != 0
-        raise SystemExit(1 if failed else 0)
+        # all at once: each command waits for the COMMITTED Abort, which needs the approvals of a quorum, so one after another the first would wait out its timeout
+        commands = abort_commands(a.generation, transport.entities, [f for f in a.flags if f != '--'])
+        with concurrent.futures.ThreadPoolExecutor(max_workers=len(commands)) as pool:
+            done = dict(zip(commands, pool.map(lambda c: subprocess.run(c, text=True, capture_output=True), commands.values())))
+        for i, result in done.items():
+            print(f'entity {i}: exit {result.returncode}\n{result.stdout}{result.stderr}')
+        raise SystemExit(1 if any(result.returncode for result in done.values()) else 0)
     work = a.generation / 'handoff'
     work.mkdir(mode=0o700, exist_ok=True)
     request = build_request(a.ubft, work / f'plan-request-{int(time.time())}.json', a.next_trust_base, a.next_evm_assignment, a.readiness_receipts, a.q3)
+    if a.action == 'hold':
+        old_epoch = json.loads(Path(a.generation, 'network', 'trust-base.json').read_text())['epoch']
+        with (work / 'log.jsonl').open('a') as log:
+            wrapper = Wrapper(transport, transport.entities, lambda row: (log.write(json.dumps(row, sort_keys=True) + '\n'), log.flush()), a.prepare_timeout)
+            plan = wrapper.hold(request)
+        print(json.dumps(abort_target(transport, transport.entities[0], plan, old_epoch), sort_keys=True))
+        return
     with (work / 'log.jsonl').open('a') as log:
         wrapper = Wrapper(transport, transport.entities, lambda row: (log.write(json.dumps(row, sort_keys=True) + '\n'), log.flush(), print(json.dumps(row, sort_keys=True))),
                           a.prepare_timeout, a.max_attempts, intent_delay=a.intent_delay)

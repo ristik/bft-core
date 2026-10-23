@@ -512,6 +512,21 @@ class HandoffWrapper(unittest.TestCase):
         self.assertEqual(fake.calls.index(plans[0]),0,'the plan precedes every intent and endorsement')
         self.assertEqual([r['event'] for r in rows],['plan','intent','endorse'])
         self.assertEqual(rows[0]['plan_sha256'],handoff_ops.sha(b'PLAN-1'));self.assertEqual(rows[0]['request_sha256'],handoff_ops.sha(b'REQUEST'))
+    def test_hold_endorses_at_the_first_entity_only_and_the_abort_target_is_derived_from_the_context_and_the_plan(self):
+        import base64,json
+        body=b'CANONICAL-BODY';plan=json.dumps({'Attempt':3,'Body':base64.b64encode(body).decode()}).encode()
+        fake=self.Fake([1,2,3,4],plans=[plan]);rows=[]
+        self.assertEqual(self.wrapper(fake,rows).hold(b'R'),plan)
+        self.assertEqual([c[0] for c in fake.calls if c[1].endswith('/endorse')],[1],'one endorsement, below the quorum: no Freeze follows')
+        self.assertEqual(sorted(c[0] for c in fake.calls if c[1].endswith('/intent')),[2,3,4])
+        self.assertEqual([r['event'] for r in rows],['plan','hold'])
+        class Context(self.Fake):
+            def post(self,entity,path,body,timeout=10):
+                return (200,json.dumps({'network':7,'attempt':3,'predecessor':'0x'+'ab'*32}).encode()) if path.endswith('/evm-assignment/context') else (200,b'{}')
+        target=handoff_ops.abort_target(Context([1]),1,plan,1)
+        self.assertEqual(target,{'network':7,'oldEpoch':1,'predecessorBodyId':'0x'+'ab'*32,'attempt':3,'nextBodyId':'0x'+handoff_ops.sha(body)})
+        with self.assertRaisesRegex(handoff_ops.HandoffError,'plans attempt 3'):
+            handoff_ops.abort_target(Context([1]),1,json.dumps({'Attempt':2,'Body':base64.b64encode(body).decode()}).encode(),1)
     def test_an_endorsement_refused_before_the_prepare_is_retried_until_it_is_prepared(self):
         fake=self.Fake([1,2,3,4],endorse_script={2:[(409,b'endorsed before the handoff is prepared')]*2+[(204,b'')]})
         self.assertEqual(self.wrapper(fake,[]).propose(b'R'),4)
