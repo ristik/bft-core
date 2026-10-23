@@ -16,9 +16,9 @@ const candidatePin = "testdata/corpus-candidate.digest"
 var updateCorpus = os.Getenv("UPDATE_CORPUS_PIN") != ""
 
 func TestCorpusIsDeterministicAndPinned(t *testing.T) {
-	a, err := BuildCorpus()
+	a, err := BuildSealedCorpus()
 	require.NoError(t, err)
-	b, err := BuildCorpus()
+	b, err := BuildSealedCorpus()
 	require.NoError(t, err)
 	require.Equal(t, len(a.Files), len(b.Files))
 	for p, x := range a.Files {
@@ -33,10 +33,10 @@ func TestCorpusIsDeterministicAndPinned(t *testing.T) {
 	require.Equal(t, strings.TrimSpace(string(want)), a.Digest(),
 		"the candidate corpus changed; review the diff of the generated tree and update the pin")
 	// The tree is exactly what native-bridge-plugins' tools/vectors.py seals: the nine
-	// family directories plus the semantic profile and the dev trust-base release bundle.
+	// family directories, the split corpus under split/ plus the semantic profile and the dev trust-base release bundle.
 	for p := range a.Files {
 		dir, _, _ := strings.Cut(p, "/")
-		require.Contains(t, families, dir, p)
+		require.Contains(t, append([]string{SplitDir}, families...), dir, p)
 		require.NotContains(t, []string{"VERSION", "provenance.json", "SHA256SUMS", "MANIFEST.sha256", "PROVENANCE.json"}, p)
 	}
 	require.Equal(t, semanticProfile, a.Files["config/semantic-profile.json"])

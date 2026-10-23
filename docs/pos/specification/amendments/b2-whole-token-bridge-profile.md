@@ -150,9 +150,11 @@ under B1's field, null, width and canonical rules, its `stateHash` equals `expec
 `leafValue` and exactly its path. All-or-nothing. **B1 needs no change for SDK 3.0.1:** its primitives are generic
 key/value membership and native UC/IR claims.
 
-## D. Vault replay and storage (unchanged)
+## D. Vault replay and storage
 
-Replay is a plain mapping keyed by the lock nonce: `spentNullifier[n]` goes from zero to `eta` once. Permanent lock digests are
+**Protocol 6 (split lineage; docs/design/bridge-split-lineage-spec.md):** slot 6 is `redeemedAmount` (nonce => sum of the redeemed part amounts), new slot 8 is `lockedAmount` (nonce => the lock's amount) and new slot 9 is `spentPart` (nonce => partId => nullifier, set once per part; `keccak256(abi.encode(partId, keccak256(abi.encode(nonce, 9))))`). The replay guard is `spentPart[n][partId] == 0` and `redeemedAmount[n] + partAmount <= lockedAmount[n]`; a part is paid once, a second redemption of the same part fails with an already-redeemed outcome. Slots 0 to 5 and 7 are unchanged, in particular the lock digest stays at slot 5. The paragraph below is the protocol 5 text (slot 6 `spentNullifier`).
+
+Protocol 5: replay is a plain mapping keyed by the lock nonce: `spentNullifier[n]` goes from zero to `eta` once. Permanent lock digests are
 never deleted. Storage layout (full 32-byte words): slot 0 `lastNonce`, 1 `locked`, 2 `credited`, 3 `paid`, 4 `entered`,
 5 `mapping(uint256=>bytes32) lockDigest`, 6 `mapping(uint256=>bytes32) spentNullifier`, 7 `mapping(address=>uint256) claimable`.
 Logical slot `keccak256(abi.encode(key, base))`; trie key `keccak256(logical slot)`; account key `keccak256(vault)`; stored values are

@@ -14,9 +14,10 @@ const (
 	TagSplitJustification = 39044 // split mint reason: [burnedSourceToken, [allocationProof]]
 	TagSplitManifest      = 39046 // [b(root)] committed by the burn
 
-	// SplitProtoVersion is the byte-contract version that admits lineage. Version 5 (NativeBridgeProtoVersion) refuses every
-	// split; both stay in this package until the fresh deployment replaces the old precompile.
-	SplitProtoVersion = 6
+	// SplitProtoVersion is the byte-contract version that admits lineage; since the cutover it is NativeBridgeProtoVersion. The
+	// version 5 composition (BRIDGE_COMPOSE, which refuses every split) stays in this package until the fresh deployment
+	// replaces the old precompile.
+	SplitProtoVersion = NativeBridgeProtoVersion
 
 	// MaxSumProofSteps is one step per key bit.
 	MaxSumProofSteps = 256
