@@ -3,11 +3,11 @@
 TN-B (#429), with B-TEST (#438) as its prerequisite, puts fake-value bridging on the public PoA testnet. This directory adds the bridge to the container package in
 `deploy/testnet` without changing the package's own services. The plan, and the items that do or don't need the host, are in `briefs/tnb-without-host.md`.
 
-Status: **part 4** (the live negatives). Part 1 is the bridge tools image, the post-genesis deploy and the lock-proof endpoint. Part 2 adds the bridge's round trip on the package's one
+Status: **part 5** (the release manifest). Part 1 is the bridge tools image, the post-genesis deploy and the lock-proof endpoint. Part 2 adds the bridge's round trip on the package's one
 aggregator (aggregator-go on partition 7, one shard: owner decision 40): lock, mint, transfers, burn, redeem and claim, driven by native-bridge-plugins' live
 driver (`tests/live/anyage.ts`) in the bridge tools image, plus the consolidated and long-history redeems, on-chain negatives and a backup and restore with the
 bridge deployed. Part 3 adds the bridge tester (native-bridge-plugins `tester/`), its page and the published directory, below. Part 4 adds the live negatives (#438): a
-conflicting burn, replays after the validator restart and after the restore, and the vault's custody books. Not covered here: a reset with
+conflicting burn, replays after the validator restart and after the restore, and the vault's custody books. Part 5 adds the release manifest, below. Not covered here: a reset with
 outstanding locks, retired-key forged histories, the proof refresh across rotations, and the public routes to the aggregator and for redemptions
 (`briefs/tnb-without-host.md`).
 
@@ -17,7 +17,8 @@ outstanding locks, retired-key forged histories, the proof refresh across rotati
 |---|---|
 | `pins.json` | the bridge release's inputs: contracts and native-bridge-plugins commits, plus the Node, Go and Foundry images or releases by digest or sha256 |
 | `Dockerfile.tools`, `build-bridge-image.py` | `tnops-bridge:verified`: forge/cast, the built contracts, the plug-in driver, and dnb-tool from this checkout. The build refuses a source that is not at its pin or not clean, and records the image ID in `../artifacts/bridge-images.json`. |
-| `deploy_bridge.py` | an operator action on a running generation: the deployment document (`dnb-tool deployment`), then `BridgeDeploy.s.sol` signed with the generation's faucet keystore. The script refuses a vault whose genesis identities differ from the chain's. It also reads the vault's CFG and writes the trust bundle, the PDR and the driver configuration. Everything goes under `GENERATION/bridge/`. |
+| `deploy_bridge.py` | an operator action on a running generation: the deployment document (`dnb-tool deployment`), then `BridgeDeploy.s.sol` signed with the generation's faucet keystore. The script refuses a vault whose genesis identities differ from the chain's. It also reads the vault's CFG and writes the trust bundle, the PDR, the driver configuration and the release manifest. Everything goes under `GENERATION/bridge/`. |
+| `release.py` | the bridge release manifest, `GENERATION/bridge/public/bridge-release.json` (below) |
 | `tester/index.html` | the tester page: the fake-value disclosure, the network's endpoints (read from `tester-config.json` beside it), the tester's steps and a read of the visitor's vault credit through their EVM wallet |
 | `overlay.py` | `GENERATION/compose.bridge.yaml`, the Compose overlay with the bridge's services |
 | `rehearse_bridge.py` | the bridge stages of the runner rehearsal (`.github/workflows/testnet-bridge.yml`) |
@@ -38,7 +39,7 @@ cd /srv/<generation> && sudo docker compose -f compose.yaml -f compose.bridge.ya
 
 | stage | what it checks |
 |---|---|
-| `deploy` | TokenVerifier and BridgeVault deployed after genesis and readable through the public gateway; the vault's CFG |
+| `deploy` | TokenVerifier and BridgeVault deployed after genesis and readable through the public gateway; the vault's CFG. The release manifest against the chain: each contract's address, code hash and deploy block, the vault's CFG, the genesis, the B1 profile, and the limits (D1 2 MiB, D3 60M, the latest block's gas limit, the proof window, the gateway's body bound, the SDK batch bound) |
 | `lockproof` | the lock-proof endpoint (below) |
 | `fund` | a driver key for this generation, in `GENERATION/bridge/driver.env` (mode 0600, never in the evidence), funded from the faucet |
 | `roundtrip` | a lock, its proof from validator 1's archive, the mint, 3 transfers and the burn certified by the aggregator, the return proof verified by `eth_call`, then the redemption and the claim with the last validator stopped; it rejoins with the same blocks. The vault's balance rises by the lock and falls back after the claim. |
@@ -52,6 +53,22 @@ cd /srv/<generation> && sudo docker compose -f compose.yaml -f compose.bridge.ya
 The driver signs with its own key and with the fixed, publicly known keys of its recipient and submitter (`tests/live/anyage.ts`). That is fine on a
 rehearsal generation, but not on a public network: anyone can spend what those addresses hold. A redeem transaction carries the whole return proof, and the public gateway
 takes request bodies of at most 16 KiB (`gateway.py`). The `roundtrip` stage prints whether its proof fits. Until it does, a tester's redeem goes to an RPC without that limit.
+
+## The release manifest
+
+`deploy_bridge.py` writes `GENERATION/bridge/public/bridge-release.json`, one file that names what this generation's bridge was built and deployed from and
+the limits it runs with. It holds no secret and is published with the tester's files. Each value is read from where it is in force, not restated:
+
+| part | contents | read from |
+| --- | --- | --- |
+| `package` | generation, chain ID, genesis hash, validators, the node images and their source pins | the generation's `manifest.json` |
+| `bridge` | the bridge tools image, its source pins (contracts, native-bridge-plugins, Node, Go, Foundry, bft-core) and dnb-tool's sha256 | `artifacts/bridge-images.json`, refused if it is not the image the deploy ran |
+| `contracts` | the contracts commit; BridgeVault's and TokenVerifier's address, deploy transaction, block and code hash; the CFG | the deploy's broadcast record and the chain |
+| `profile` | the vector corpus digest, the native-bridge-plugins commit, the state-transition SDK (version, tarball, integrity), the B1 profile and its sha256 | the image's checkouts, refused if the plug-ins' corpus is not the one the contracts' golden tests pin; `network/b1-profile.json` |
+| `limits` | D1 the redemption envelope bound (2 MiB), D3 the ordinary block capacity (60M gas), the block gas limit, the proof window, the gateway's body bound, the lock-proof endpoint's rate, the largest lock, the SDK batch bound | the generation's files where the value is configured; otherwise the constant's definition, named beside it, at its component's pin |
+
+The rehearsal's `deploy` stage checks it against the chain. A changed pin, image or limit shows up as a changed manifest; there is no compatibility between
+releases (greenroom).
 
 ## The lock-proof endpoint
 
