@@ -54,6 +54,35 @@ class OffenderPairs(unittest.TestCase):
         self.assertEqual(len(m.offender_pairs({"Pairs": [self.A, self.B]}, "aa11")), 1)
 
 
+class OffenderPubkey(unittest.TestCase):
+    """s4_offender_pubkey (scripts/lib/s4-lib.sh) against the node-info.json shape ubft writes: {"nodeId": ..., "sigKey": "0x<33-byte compressed key>", "stake": 1}."""
+    KEY = "02876171d75b9792c851bd741ef505e3f0b957eb2303f606f8ee6b6727163266bc"
+
+    def run_helper(self, node_info, root="1"):
+        import pathlib, subprocess, tempfile
+        lib = pathlib.Path(__file__).resolve().parents[1] / "lib" / "s4-lib.sh"
+        with tempfile.TemporaryDirectory() as d:
+            if node_info is not None:
+                (pathlib.Path(d) / "test-nodes" / ("root" + root)).mkdir(parents=True)
+                (pathlib.Path(d) / "test-nodes" / ("root" + root) / "node-info.json").write_text(node_info)
+            script = 'source <(sed -n "/^s4_offender_pubkey() {/,/^}/p" %s); S4_OFFENDER_ROOT=%s; s4_offender_pubkey' % (lib, root)
+            return subprocess.run(["bash", "-c", script], cwd=d, capture_output=True, text=True)
+
+    def test_the_real_shape_gives_the_key_without_0x(self):
+        r = self.run_helper('{"nodeId":"16Uiu2HAk","sigKey":"0x%s","stake":1}' % self.KEY)
+        self.assertEqual((r.returncode, r.stdout.strip()), (0, self.KEY), r.stderr)
+
+    def test_every_malformed_or_missing_key_fails_loudly(self):
+        for name, body in (("the old nested spelling", '{"sigKey":{"publicKey":"0x%s"}}' % self.KEY), ("no sigKey", '{"nodeId":"x"}'), ("empty", '{"sigKey":""}'),
+                           ("short", '{"sigKey":"0x0287"}'), ("not hex", '{"sigKey":"0x02%s"}' % ("zz" * 32)), ("not JSON", "{"), ("a compressed key with a bad prefix", '{"sigKey":"0x05%s"}' % self.KEY[2:])):
+            with self.subTest(name):
+                r = self.run_helper(body)
+                self.assertNotEqual(r.returncode, 0, r.stdout)
+                self.assertEqual(r.stdout.strip(), "")
+        r = self.run_helper(None)
+        self.assertNotEqual(r.returncode, 0)
+
+
 if __name__ == "__main__":
     unittest.main()
 
