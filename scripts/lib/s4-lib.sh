@@ -23,6 +23,9 @@ s4_round() { curl -fsS "$(h3_rpc_url "$1")/api/v1/roundInfo" 2>/dev/null | jq -r
 s4_epoch() { curl -fsS "$(h3_rpc_url "$1")/api/v1/roundInfo" 2>/dev/null | jq -r '.epochNumber'; }
 s4_short() { grep -a -m1 -o 'node_id=16\*[A-Za-z0-9]*' "test-nodes/root$1/debug.log" | head -1 | sed 's/node_id=//'; }
 
+# the offender root's public signing key as the evidence scan names it (66 hex, no 0x): node-info.json carries it as .sigKey (an earlier spelling, .sigKey.publicKey, read nothing and left --offender-key empty)
+s4_offender_pubkey() { jq -r '.sigKey | if type == "string" then . else .publicKey end' "test-nodes/root${1:-$S4_OFFENDER_ROOT}/node-info.json" | sed 's/^0x//'; }
+
 # the root that was the leader of round $1+1: the one the offender's own genuine vote of round $1 went to. The offender root logs it itself ("next leader" at that round);
 # the LAST such line of its log is taken (an earlier epoch's log can carry the same round number)
 s4_next_leader_root() {
@@ -121,7 +124,7 @@ s4_collect_after_rotation() {
   build/ubft evidence scan --journal "$d/journal-root$b.db" >"$d/scan-root$b.json" || return 1
   build/ubft evidence scan --journal "$d/journal-root$a.db" --journal "$d/journal-root$b.db" >"$d/scan-both.json" || return 1
   s4_py journals --delivery "$d/delivery.json" --statements "$d/votes/statements.json" --scan-a "$d/scan-root$a.json" --scan-b "$d/scan-root$b.json" \
-    --scan-both "$d/scan-both.json" --stats "$d/observer-stats-root$a.txt" --stats "$d/observer-stats-root$b.txt" --offender-key "$(jq -r .sigKey.publicKey "test-nodes/root$S4_OFFENDER_ROOT/node-info.json" 2>/dev/null || true)" || return 1
+    --scan-both "$d/scan-both.json" --stats "$d/observer-stats-root$a.txt" --stats "$d/observer-stats-root$b.txt" --offender-key "$(s4_offender_pubkey)" || return 1
 }
 
 s4_json_addr() { jq -r ".$1" "$P85_DEPLOY"; }
@@ -214,7 +217,7 @@ s4_submit_settle() {
   mkdir -p "$d"
   EV=$(s4_evidence) || return 1
   read -r -a ids <<<"$(s4_assignments)" || return 1
-  key=$(jq -r --arg k "$(jq -r .sigKey.publicKey "test-nodes/root$S4_OFFENDER_ROOT/node-info.json" 2>/dev/null || true)" \
+  key=$(jq -r --arg k "$(s4_offender_pubkey)" \
     'if $k == "" then .Pairs[0].Key else ([.Pairs[] | select((.Key | ascii_downcase | ltrimstr("0x")) == ($k | ascii_downcase | ltrimstr("0x")))][0].Key) end' "$d/scan-both.json")   # the offender's own pair when several offences are in the journals
   [ -n "$key" ] && [ "$key" != null ] || { echo "the scan over both journals holds no pair of the offender (root $S4_OFFENDER_ROOT)" >&2; return 1; }
   s4_py resolve --rpc "$(p85_eth)" --custody "$(p85_custody)" --key "$key" --epoch 2 $(for a in "${ids[@]}"; do printf -- '--assignment %s ' "$a"; done) --out "$d/resolved.json" || return 1
