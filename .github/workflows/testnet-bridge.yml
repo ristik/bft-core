@@ -35,8 +35,8 @@ jobs:
           python3 - <<'E' >> "$GITHUB_OUTPUT"
           import json
           p = json.load(open('deploy/testnet/pins.json'))
-          for k in ('bft', 'ureth', 'rugregator'):
-              print(f'{k}={p[k]}')
+          for k in ('bft', 'ureth', 'aggregator-go'):
+              print(f"{k.replace('-', '_')}={p[k]}")
           b = json.load(open('deploy/testnet/bridge/pins.json'))
           print(f"contracts={b['contracts']}")
           print(f"nbp={b['native-bridge-plugins']}")
@@ -56,9 +56,9 @@ jobs:
           path: pinned-ureth
       - uses: actions/checkout@v4
         with:
-          repository: ristik/rugregator
-          ref: ${{ steps.pins.outputs.rugregator }}
-          path: pinned-rugregator
+          repository: ristik/aggregator-go
+          ref: ${{ steps.pins.outputs.aggregator_go }}
+          path: pinned-aggregator-go
       - uses: actions/checkout@v4
         with:
           repository: ristik/unicity-pos-contracts
@@ -79,9 +79,8 @@ jobs:
           cache-on-failure: true
           workspaces: |
             pinned-ureth
-            pinned-rugregator
       - name: Build the node images from the pinned sources
-        run: python3 deploy/testnet/build-images.py --bft-source pinned-bft --ureth-source pinned-ureth --rugregator-source pinned-rugregator
+        run: python3 deploy/testnet/build-images.py --bft-source pinned-bft --ureth-source pinned-ureth --aggregator-go-source pinned-aggregator-go
       - name: Build the bridge tools image (dnb-tool from this checkout, contracts and plug-ins at bridge/pins.json)
         run: python3 deploy/testnet/bridge/build-bridge-image.py --contracts-source pinned-contracts --nbp-source pinned-nbp
       - run: go build -o /tmp/tn-keygen ./deploy/testnet/keygen
