@@ -32,6 +32,7 @@ type Expect struct {
 	Result *RJSON            `json:"result,omitempty"` // relation result
 	Output string            `json:"output,omitempty"` // canonical kernel output, hex
 	Values map[string]string `json:"values,omitempty"` // op-specific derived values
+	Split  *SplitRJSON       `json:"split,omitempty"`  // lineage result (protocol 6)
 }
 
 // LeafJSON is a leaf (sid, txHash, t, v).
@@ -164,6 +165,9 @@ var reasons = []struct {
 	{"ErrLockPDR", ErrLockPDR}, {"ErrLockHeader", ErrLockHeader}, {"ErrLockAccount", ErrLockAccount},
 	{"ErrLockCodeHash", ErrLockCodeHash}, {"ErrLockStorage", ErrLockStorage}, {"ErrLockDigest", ErrLockDigest},
 	{"ErrMPTNode", ErrMPTNode}, {"ErrMPTPath", ErrMPTPath}, {"ErrMPTAbsent", ErrMPTAbsent}, {"ErrMPTExtraneous", ErrMPTExtraneous},
+	{"ErrSplitJustif", ErrSplitJustif}, {"ErrSplitProofCount", ErrSplitProofCount}, {"ErrSplitProofShape", ErrSplitProofShape},
+	{"ErrSplitManifest", ErrSplitManifest}, {"ErrSplitBurn", ErrSplitBurn},
+	{"ErrSplitProof", ErrSplitProof}, {"ErrSplitSum", ErrSplitSum},
 }
 
 // Reason names the leaf sentinel err wraps and its family.

@@ -72,7 +72,10 @@ func ComposeStatusName(code uint64) string {
 // StatusOf maps a Compose error to its status code: the outermost error in err's chain (depth first, in the order Unwrap and
 // Unwrap() []error give) that is itself a table sentinel decides. Sentinels unwrap only to their family, so the first sentinel met
 // is the most specific reason. An error with no table sentinel in its chain is errComposeUnmapped.
-func StatusOf(err error) (uint64, error) {
+func StatusOf(err error) (uint64, error) { return statusIn(ComposeStatus, err) }
+
+// statusIn is StatusOf over a status table.
+func statusIn(table []error, err error) (uint64, error) {
 	if err == nil {
 		return 0, nil
 	}
@@ -81,8 +84,8 @@ func StatusOf(err error) (uint64, error) {
 		if e == nil {
 			return 0, false
 		}
-		for i := 1; i < len(ComposeStatus); i++ {
-			if e == ComposeStatus[i] {
+		for i := 1; i < len(table); i++ {
+			if e == table[i] {
 				return uint64(i), true
 			}
 		}
@@ -217,13 +220,7 @@ func NativeCompose(input []byte, gasLimit uint64, b1 B1) (out [ComposeOutputByte
 }
 
 func nativeCompose(input []byte, m *meter, b1 B1) (*Result, error) {
-	items := func(b []byte) uint64 {
-		n, err := BridgeItems(b)
-		if err != nil {
-			return 0
-		}
-		return uint64(n)
-	}
+	items := itemsOf
 	if err := m.charge(ComposeBase + ComposePerByte*uint64(len(input))); err != nil {
 		return nil, err
 	}
@@ -270,72 +267,90 @@ func nativeCompose(input []byte, m *meter, b1 B1) (*Result, error) {
 	if err != nil {
 		return nil, err
 	}
+	if err := composeTail(m, b1, cfgBytes, env, pol, res); err != nil {
+		return nil, err
+	}
+	return res, nil
+}
+
+// itemsOf is J of one object: its bridge item count, zero if it does not scan.
+func itemsOf(b []byte) uint64 {
+	n, err := BridgeItems(b)
+	if err != nil {
+		return 0
+	}
+	return uint64(n)
+}
+
+// composeTail is steps 5 to 7 of NativeCompose, shared with the lineage composition: the anchor plan and scans, the grouping charge,
+// B1 authentication, the time comparison and one membership per leaf of res, in leaf order.
+func composeTail(m *meter, b1 B1, cfgBytes []byte, env *Envelope, pol Policy, res *Result) error {
 	sids := make([][32]byte, len(res.Leaves))
 	for i, l := range res.Leaves {
 		sids[i] = l.SID
 	}
 	plan, err := PlanAnchors(pol, env, sids)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	// The anchor scans in computeGate's order, with the same failures.
 	for j := range env.Anchors {
 		if err := ScanAnchor(&env.Anchors[j]); err != nil {
-			return nil, err
+			return err
 		}
 	}
 	if _, err := bridgeJ(cfgBytes, env); err != nil {
-		return nil, err
+		return err
 	}
 	var anchorItems uint64
 	for j := range env.Anchors {
-		anchorItems += items(env.Anchors[j].UC) + items(env.Anchors[j].InputRecord)
+		anchorItems += itemsOf(env.Anchors[j].UC) + itemsOf(env.Anchors[j].InputRecord)
 	}
 	if err := m.charge(ComposePerItem * anchorItems); err != nil {
-		return nil, err
+		return err
 	}
 	grouping, err := b1ref.GroupWith(CertBatchRequest(env.Anchors), b1ref.Composed)
 	if err != nil {
-		return nil, ErrAnchorAuth
+		return ErrAnchorAuth
 	}
 	if err := m.charge(ComposePerSignature*grouping.Q + ComposePerEpoch*grouping.E + ComposePerClaim*grouping.A +
 		ComposePerStep*grouping.P + ComposeGroupGas(grouping.K)); err != nil {
-		return nil, err
+		return err
 	}
 	steps := make([]uint64, len(env.LeafProofs))
 	for i, p := range env.LeafProofs {
 		_, s, err := LeafPathGas(p)
 		if err != nil {
-			return nil, err
+			return err
 		}
 		steps[i] = s
 	}
 	if err := b1.AuthenticateAnchors(env.Anchors); err != nil {
-		return nil, ErrAnchorAuth
+		return ErrAnchorAuth
 	}
 	times := make([]uint64, len(env.Anchors))
 	for j := range env.Anchors {
 		ir, err := OpenAnchor(&env.Anchors[j])
 		if err != nil {
-			return nil, err
+			return err
 		}
 		times[j] = ir.Timestamp
 	}
 	for i, l := range res.Leaves {
 		if l.ReferenceTime > times[plan.LeafAnchor[i]] {
-			return nil, ErrIRTime
+			return ErrIRTime
 		}
 	}
 	for i, l := range res.Leaves {
 		if err := m.charge(ComposePerStep * steps[i]); err != nil {
-			return nil, err
+			return err
 		}
 		a := &env.Anchors[plan.LeafAnchor[i]]
 		if err := b1.VerifyMember(a.ExpectedStateRoot, l.SID, l.Value, env.LeafProofs[i]); err != nil {
-			return nil, ErrLeafProof
+			return ErrLeafProof
 		}
 	}
-	return res, nil
+	return nil
 }
 
 // decodeComposeInput is DecodeKernelInput without the kernel's size bound (the caller applies MaxComposeInputBytes): any framing

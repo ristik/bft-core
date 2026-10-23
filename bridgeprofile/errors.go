@@ -136,3 +136,15 @@ var (
 	ErrMPTAbsent       = newSentinel(ErrInvalid, "MPT key is absent")
 	ErrMPTExtraneous   = newSentinel(ErrInvalid, "MPT proof carries a duplicate or extraneous node")
 )
+
+// Split lineage reasons (protocol 6, docs/design/bridge-split-lineage-spec.md). Appended after every earlier reason: the status
+// table of the lineage composition is the earlier table plus these, in this order.
+var (
+	ErrSplitJustif     = newSentinel(ErrInvalid, "split mint justification is not the exact tag 39044 body")
+	ErrSplitProofCount = newSentinel(ErrInvalid, "split justification does not carry exactly one allocation proof")
+	ErrSplitProofShape = newSentinel(ErrInvalid, "allocation proof is outside the codec bounds (steps, depth order, sums)")
+	ErrSplitManifest   = newSentinel(ErrInvalid, "burn data is not a single-root split manifest")
+	ErrSplitBurn       = newSentinel(ErrInvalid, "the source's final transfer is not the burn of its manifest")
+	ErrSplitProof      = newSentinel(ErrInvalid, "allocation proof does not verify against the manifest root")
+	ErrSplitSum        = newSentinel(ErrInvalid, "allocation root sum differs from the burned source amount")
+)
