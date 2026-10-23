@@ -9,7 +9,7 @@ A snapshot is one JSON object per line, written by a collector during the run (t
     {"t": <seconds since start, strictly increasing>, "block": <EVM block, non-decreasing>,
      "cursors": {"<name>": <integer>, ...},              # record / reward / evidence cursors; each is non-decreasing across snapshots
      "pool":    {"funded": W, "paid": W, "balance": W},    # cumulative wei funded into / paid out of the reward pool and what it holds now
-     "custody": {"deposited": W, "withdrawn": W, "slashed": W, "held": W},   # cumulative in / out, and what custody holds now (lots + credits)
+     "custody": {"deposited": W, "withdrawn": W, "slashed": W, "held": W, "balance": W},   # cumulative in / out; held = lots + credits still owed; balance = the account (optional)
      "payments": [["<interval>", "<payee>", W], ...]}      # every payment made up to this snapshot, cumulative (a payment is never rewritten or repeated)
 
 Invariants (each a named failure, first one wins):
@@ -18,7 +18,8 @@ Invariants (each a named failure, first one wins):
   cursor        a cursor never decreases and never disappears (a cursor that is new in a later snapshot is fine)
   cumulative    the cumulative totals (pool funded/paid, custody deposited/withdrawn/slashed) never decrease; balance and held may move either way
   pool          funded == paid + balance
-  custody       deposited == withdrawn + slashed + held
+  custody       deposited == withdrawn + held (the pinned custody: a slashed amount leaves its lot as a bounty / treasury CREDIT, so it is inside held until claimed and inside
+                withdrawn after; adding `slashed` would count it twice), slashed <= deposited, and when a balance is given balance >= held (the surplus is not negative)
   payments      the cumulative payment list only grows by appending; no (interval, payee) is paid twice; sum(payments) == pool.paid
 Exit status: 0 PASS, 1 FAIL (first failing invariant in the output), 2 INCOMPLETE (fewer than two snapshots: nothing can be compared)."""
 import argparse
@@ -65,8 +66,12 @@ def check(snaps):
         if s["pool"]["funded"] != s["pool"]["paid"] + s["pool"]["balance"]:
             raise Fail("pool", i, f"funded {s['pool']['funded']} != paid {s['pool']['paid']} + balance {s['pool']['balance']}")
         c = s["custody"]
-        if c["deposited"] != c["withdrawn"] + c["slashed"] + c["held"]:
-            raise Fail("custody", i, f"deposited {c['deposited']} != withdrawn {c['withdrawn']} + slashed {c['slashed']} + held {c['held']}")
+        if c["deposited"] != c["withdrawn"] + c["held"]:
+            raise Fail("custody", i, f"deposited {c['deposited']} != withdrawn {c['withdrawn']} + held {c['held']}")
+        if c["slashed"] > c["deposited"]:
+            raise Fail("custody", i, f"slashed {c['slashed']} exceeds deposited {c['deposited']}")
+        if "balance" in c and (not amount(c["balance"]) or c["balance"] < c["held"]):
+            raise Fail("custody", i, f"the custody balance {c['balance']} is below what it holds {c['held']}")
         keys = [(p[0], p[1]) for p in s["payments"]]
         dup = sorted(k for k, n in Counter(keys).items() if n > 1)
         if dup:
