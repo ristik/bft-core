@@ -13,9 +13,9 @@ import accounting  # noqa: E402
 S0 = {"t": 0, "block": 10, "cursors": {"records": 0, "rewards": 0},
       "pool": {"funded": 100, "paid": 0, "balance": 100}, "custody": {"deposited": 50, "withdrawn": 0, "slashed": 0, "held": 50}, "payments": []}
 S1 = {"t": 600, "block": 40, "cursors": {"records": 3, "rewards": 1},
-      "pool": {"funded": 100, "paid": 30, "balance": 70}, "custody": {"deposited": 50, "withdrawn": 0, "slashed": 5, "held": 45}, "payments": [["1", "0xa", 20], ["1", "0xb", 10]]}
+      "pool": {"funded": 100, "paid": 30, "balance": 70}, "custody": {"deposited": 50, "withdrawn": 0, "slashed": 5, "held": 50}, "payments": [["1", "0xa", 20], ["1", "0xb", 10]]}
 S2 = {"t": 1200, "block": 90, "cursors": {"records": 3, "rewards": 2},
-      "pool": {"funded": 150, "paid": 50, "balance": 100}, "custody": {"deposited": 50, "withdrawn": 45, "slashed": 5, "held": 0}, "payments": [["1", "0xa", 20], ["1", "0xb", 10], ["2", "0xa", 20]]}
+      "pool": {"funded": 150, "paid": 50, "balance": 100}, "custody": {"deposited": 50, "withdrawn": 50, "slashed": 5, "held": 0}, "payments": [["1", "0xa", 20], ["1", "0xb", 10], ["2", "0xa", 20]]}
 GOOD = [S0, S1, S2]
 
 
@@ -49,6 +49,15 @@ class Accounting(unittest.TestCase):
     def test_pool_conservation(self):
         self.fails(mutate(1, lambda s: s["pool"].update(balance=71)), "pool", 1)
 
+    def test_slashed_is_inside_held_or_withdrawn_not_added_again(self):
+        # the old identity deposited == withdrawn + slashed + held double counted a slash that sits in a credit: it must not be satisfiable by adding slashed
+        self.fails(mutate(1, lambda s: s["custody"].update(held=45)), "custody", 1)
+        self.fails(mutate(1, lambda s: s["custody"].update(slashed=51)), "custody", 1)
+
+    def test_a_custody_balance_below_what_it_holds_fails(self):
+        self.assertEqual(run(mutate(1, lambda s: s["custody"].update(balance=50)))["status"], "PASS")
+        self.fails(mutate(1, lambda s: s["custody"].update(balance=49)), "custody", 1)
+
     def test_custody_conservation(self):
         self.fails(mutate(2, lambda s: s["custody"].update(withdrawn=44)), "custody", 2)
 
@@ -70,9 +79,9 @@ class Accounting(unittest.TestCase):
             a, b = copy.deepcopy(S1), copy.deepcopy(S2)
             a["custody"], b["custody"] = c1, c2
             return run([S0, a, b])
-        for name, c1, c2 in (("deposited", dict(deposited=60, withdrawn=0, slashed=5, held=55), dict(deposited=50, withdrawn=0, slashed=5, held=45)),
-                             ("withdrawn", dict(deposited=50, withdrawn=10, slashed=5, held=35), dict(deposited=50, withdrawn=9, slashed=5, held=36)),
-                             ("slashed", dict(deposited=50, withdrawn=0, slashed=6, held=44), dict(deposited=50, withdrawn=0, slashed=5, held=45))):
+        for name, c1, c2 in (("deposited", dict(deposited=60, withdrawn=0, slashed=5, held=60), dict(deposited=50, withdrawn=0, slashed=5, held=50)),
+                             ("withdrawn", dict(deposited=50, withdrawn=10, slashed=5, held=40), dict(deposited=50, withdrawn=9, slashed=5, held=41)),
+                             ("slashed", dict(deposited=50, withdrawn=0, slashed=6, held=50), dict(deposited=50, withdrawn=0, slashed=5, held=50))):
             with self.subTest(name):
                 r = run_custody(c1, c2)
                 self.assertEqual((r["status"], r["firstFailure"]["invariant"], r["firstFailure"]["snapshot"]), ("FAIL", "cumulative", 2), r)

@@ -1,7 +1,8 @@
 {
  "format": "UNICITY_X4_POS_CAMPAIGN/v1",
  "name": "x4-pos-4h",
- "seed": 20261021,
+ "accounting": true,
+  "seed": 20261021,
  "intervalSeconds": 14400,
  "tailSeconds": 3600,
  "policy": {
