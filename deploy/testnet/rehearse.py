@@ -782,14 +782,16 @@ class Rehearsal:
         net = self.gen / 'network'
         operator = ['--operator-socket', '/authority/operator.sock', '--operator-credential', '/authority/operator.cred']
         def status(i):
-            return json.loads(self.exec_in(f'authority{i}', 'ubft', 'signing-authority', 'status', *operator))
+            # the identity of the authority's state; the reservation fields (reservedRound, responses) move with every certified round
+            full = json.loads(self.exec_in(f'authority{i}', 'ubft', 'signing-authority', 'status', *operator))
+            return {k: full[k] for k in ('authorityId', 'networkId', 'partitionId', 'shardEpoch', 'rootEpoch', 'shardConfHash', 'generation', 'signingKeyFingerprint', 'enrollmentComplete')}
         before = status(1)
         rc, out, err = self.exec_rc('authority1', 'ubft', 'signing-authority', 'advance-epoch', *operator, '--trust-base', '/network/trust-base.json',
                                     '--shard-conf', '/network/full-shard-conf.json')
         self.say(f'  advance back to epoch 1: exit {rc}: {(out + err).strip()[-300:]}')
         (self.evidence / 'handoff').mkdir(exist_ok=True)
         (self.evidence / 'handoff' / 'stale-trust-base.txt').write_text(f'exit {rc}\n{out}{err}')
-        self.expect(rc != 0, 'the authority refuses to be advanced back to the epoch-1 trust base and shard configuration', (out + err).strip()[-300:])
+        self.expect(rc != 0 and 'signing-context-mismatch' in err, 'the authority refuses to be advanced back to the epoch-1 trust base and shard configuration (signing-context-mismatch)', (out + err).strip()[-300:])
         after = status(1)
         self.expect(after == before, 'the refused advance changes nothing in the authority status', f'{before} -> {after}')
         # (2) the old client credential
