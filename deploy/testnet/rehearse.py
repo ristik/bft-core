@@ -611,11 +611,17 @@ class Rehearsal:
             receipts.append(str(work / f'receipt-{i}.json'))
         self.expect(len(receipts) == self.n, 'one readiness receipt per entity')
         # 7 propose, as ONE plan, by the host wrapper
+        transport = handoff_ops.DockerTransport(self.gen)
         run = subprocess.run([sys.executable, str(Path(__file__).resolve().parent / 'handoff_ops.py'), 'propose', str(self.gen), '--ubft', str(self.ubft),
                               '--next-trust-base', str(work / 'trust-base-epoch2.json'), '--next-evm-assignment', str(work / 'published-assignment.json'),
                               '--readiness-receipts', ','.join(receipts)], text=True, capture_output=True)
         (self.evidence / 'handoff').mkdir(exist_ok=True)
         (self.evidence / 'handoff' / 'propose.log').write_text(run.stdout + run.stderr)
+        if run.returncode:   # the root's refusal is one line for many causes: report what each root holds, so the refusal can be located
+            for i in range(1, self.n + 1):
+                for path in ('/api/v1/q3/status', '/api/v1/q3/signers'):
+                    status, body = transport.post(i, path, b'{}')
+                    self.say(f'  root {i} {path}: {status} {body[:400].decode(errors="replace")}')
         self.expect(run.returncode == 0, 'handoff_ops.py propose', (run.stdout + run.stderr).strip()[-600:])
         accepted = int(run.stdout.strip().splitlines()[-1].split()[1])
         self.expect(accepted >= self.n * 2 // 3 + 1, f'a quorum of the {self.n} roots endorsed the one plan', run.stdout.strip().splitlines()[-1])
