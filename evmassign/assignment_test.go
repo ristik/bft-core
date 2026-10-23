@@ -5,6 +5,7 @@ import (
 	"crypto"
 	"crypto/sha256"
 	"fmt"
+	"slices"
 	"sort"
 	"testing"
 	"time"
@@ -426,6 +427,13 @@ func TestCandidateVerifyContextIsolatedMutations(t *testing.T) {
 		v := f.verifyCtx(c)
 		v.CurrentRoot = f.root // the committee does not change, the EVM validators do
 		_, _, err := Verify(raw, v)
+		require.ErrorIs(t, err, ErrEVMOnly)
+		// the same committee listed in another order is still the unchanged committee (the refusal compares sets)
+		require.Greater(t, len(f.root), 1)
+		v.CurrentRoot = slices.Clone(f.root)
+		slices.Reverse(v.CurrentRoot)
+		require.NotEqual(t, f.root, v.CurrentRoot)
+		_, _, err = Verify(raw, v)
 		require.ErrorIs(t, err, ErrEVMOnly)
 		// Same committee and same EVM validators at the next epoch (a configuration-only boundary) is allowed.
 		current := clonePDR(t, f.succ)

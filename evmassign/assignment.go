@@ -49,8 +49,8 @@ func CouplingRequired(pdr *types.PartitionDescriptionRecord) bool {
 	return pdr != nil && pdr.PartitionParams[CouplingParam] == "true"
 }
 
-// SameCommittee reports whether two root committees are identical (ids, keys, weights; both in candidate order).
-func SameCommittee(a, b []RootMember) bool { return sameRoot(a, b) }
+// SameCommittee reports whether two root committees are the same set (ids, keys, weights), whatever order they are listed in.
+func SameCommittee(a, b []RootMember) bool { return sameCommittee(a, b) }
 
 // EVMPartitionTypeID identifies the designated EVM partition type. Its
 // configuration changes only through a committed root handoff.

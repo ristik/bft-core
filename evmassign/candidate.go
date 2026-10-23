@@ -313,6 +313,26 @@ func ValidateCoupling(root []RootMember, succ *types.PartitionDescriptionRecord,
 	return nil
 }
 
+// sameCommittee compares two root committees as sets: the order a candidate lists its members in is not part of who they are. The
+// EVM-only refusal must not depend on it (a reordered, unchanged committee would otherwise pass as a change). sameRoot, the exact
+// comparison of the listed order, stays for the binding to the preimage.
+func sameCommittee(a, b []RootMember) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	byID := func(members []RootMember) []RootMember {
+		sorted := slices.Clone(members)
+		sort.SliceStable(sorted, func(i, j int) bool {
+			if sorted[i].NodeID != sorted[j].NodeID {
+				return sorted[i].NodeID < sorted[j].NodeID
+			}
+			return bytes.Compare(sorted[i].Key, sorted[j].Key) < 0
+		})
+		return sorted
+	}
+	return sameRoot(byID(a), byID(b))
+}
+
 func sameRoot(a, b []RootMember) bool {
 	if len(a) != len(b) {
 		return false
@@ -390,7 +410,7 @@ func VerifyInstalledWith(r Rules, c Candidate, succ, current *types.PartitionDes
 	if err := ValidateSuccessorWith(r, current, succ); err != nil {
 		return err
 	}
-	if currentRoot != nil && sameRoot(c.RootMembers, currentRoot) && !sameValidators(succ.Validators, current.Validators) {
+	if currentRoot != nil && sameCommittee(c.RootMembers, currentRoot) && !sameValidators(succ.Validators, current.Validators) {
 		return ErrEVMOnly
 	}
 	old, err := PDRHash(current)
