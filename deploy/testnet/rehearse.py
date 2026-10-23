@@ -643,6 +643,8 @@ class Rehearsal:
         accepted = int(run.stdout.strip().splitlines()[-1].split()[1])
         self.expect(accepted >= self.n * 2 // 3 + 1, f'a quorum of the {self.n} roots endorsed the one plan', run.stdout.strip().splitlines()[-1])
         log = [json.loads(line) for line in (self.gen / 'handoff' / 'log.jsonl').read_text().splitlines()]
+        held = [n for n, row in enumerate(log) if row['event'] == 'hold']
+        log = log[held[-1] + 1:] if held else log   # a rehearsed Abort (pos-abort) left its held plan in the log: this proposal is what follows it
         self.expect(len({row['plan_sha256'] for row in log if row['event'] in ('plan', 'intent', 'endorse')}) == 1, 'every phase of the attempt carries the same plan hash')
         # the intents were handed over 1.5 s apart (plus the sidecar's second each): the later validators got theirs after the leader had ordered the Prepare, which the
         # root refused before #795. Neither a refusal nor a lapse may appear.
