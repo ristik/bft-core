@@ -97,12 +97,15 @@ class Rehearsal:
         return self.compose('config', '--services').split()
 
     def inner(self, url, method, params=()):
+        return self.inner_reply(url, method, params).get('result')
+
+    def inner_reply(self, url, method, params=()):
         """JSON-RPC to a validator's execution client from inside the validator network (the rpc container has python, ureth has no curl)."""
         code = ('import json,sys,urllib.request as u;'
                 'r=u.Request(sys.argv[1],json.dumps({"jsonrpc":"2.0","id":1,"method":sys.argv[2],"params":json.loads(sys.argv[3])}).encode(),{"Content-Type":"application/json"});'
                 'print(u.urlopen(r,timeout=10).read().decode())')
         out = self.compose('exec', '-T', 'rpc', 'python3', '-c', code, url, method, json.dumps(list(params)))
-        return json.loads(out).get('result')
+        return json.loads(out)
 
     def ureth(self, i, method, params=()):
         return self.inner(f'http://ureth{i}:8545', method, params)
@@ -931,9 +934,14 @@ class Rehearsal:
             nonce = int(self.ureth(survivors[0], 'eth_getTransactionCount', [sender, 'latest']), 16)
             price = int(self.ureth(survivors[0], 'eth_gasPrice'), 16)
             raw = self.raw_tx(to, nonce, price)
-            hashes = {self.ureth(j, 'eth_sendRawTransaction', [raw]) for j in survivors}
-            self.expect(len(hashes) == 1, f'the {len(survivors)} survivors accept the same transaction', next(iter(hashes)))
-            tx = next(iter(hashes))
+            # the hash is the transaction's own (keccak of the raw bytes), not what a node answers: a survivor the transaction has already reached by gossip answers
+            # "already known" with no result, which is acceptance of the same transaction; any other error is a refusal
+            tx = self.cast_run('keccak', raw)
+            for j in survivors:
+                reply = self.inner_reply(f'http://ureth{j}:8545', 'eth_sendRawTransaction', [raw])
+                known = 'already known' in str(reply.get('error', '')).lower()
+                self.expect(reply.get('result') == tx or known, f'survivor {j} accepts the transaction', json.dumps(reply)[:200])
+            self.say(f'  the {len(survivors)} survivors accept transaction {tx}')
             blocks = set()
             for j in survivors:
                 r = self.wait(f'survivor {j} mines it with validator {i} down', lambda j=j: self.ureth(j, 'eth_getTransactionReceipt', [tx]), 240)
