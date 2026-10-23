@@ -339,6 +339,12 @@ type Result struct {
 	ReleaseTo          [20]byte
 	Nullifier          [32]byte
 	Leaves             []Leaf
+
+	// Lineage fields (protocol 6; zero in the standalone kernel and in protocol 5). Nonce, Amount, TokenID, Salt, FirstPredicateHash
+	// and LockDigest above are always the ROOT lock's; the redeemed part is below. At depth 0 the part is the root.
+	PartTokenID [32]byte
+	PartAmount  *big.Int
+	Depth       uint64
 }
 
 // StateID is sid = H(C(Psource, b(sourceHash32))) with the predicate nested as
