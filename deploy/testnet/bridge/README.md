@@ -20,6 +20,7 @@ outstanding locks, retired-key forged histories, the proof refresh across rotati
 | `deploy_bridge.py` | an operator action on a running generation: the deployment document (`dnb-tool deployment`), then `BridgeDeploy.s.sol` signed with the generation's faucet keystore. The script refuses a vault whose genesis identities differ from the chain's. It also reads the vault's CFG and writes the trust bundle, the PDR and the driver configuration. Everything goes under `GENERATION/bridge/`. |
 | `tester/index.html` | the tester page: the fake-value disclosure, the network's endpoints (read from `tester-config.json` beside it), the tester's steps and a read of the visitor's vault credit through their EVM wallet |
 | `overlay.py` | `GENERATION/compose.bridge.yaml`, the Compose overlay with the bridge's services |
+| `RECOVERY.md` | the operator's bridge recovery runbook: roles, what depends on what, the checks after any procedure, and each failure's procedure |
 | `rehearse_bridge.py` | the bridge stages of the runner rehearsal (`.github/workflows/testnet-bridge.yml`) |
 
 ## Operator steps
