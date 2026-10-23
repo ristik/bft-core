@@ -8,7 +8,9 @@ network against validator 1's execution client (an operator action: the public g
   1. dnb-tool deployment: the deployment document from the B1 identity document (network/b1-identities.json) and the aggregator shard configurations;
   2. forge script BridgeDeploy.s.sol, which refuses a vault whose rootGenesis, executionGenesis or b1ProfileHash differ from the genesis', signed with the
      generation's genesis-funded faucet keystore (the key never leaves its file);
-  3. dnb-tool trust-bundle / pdr, then GENERATION/bridge/lane-config.json for tests/live/anyage.ts.
+  3. dnb-tool trust-bundle / pdr, then GENERATION/bridge/lane-config.json for tests/live/anyage.ts and GENERATION/bridge/public/, the one directory
+     to publish for testers: the tester page (bridge/tester/index.html), tester-config.json for the bridge tester (native-bridge-plugins tester/), which
+     names the endpoints a tester reaches (--tester-*-url; the defaults are the internal names), and the four public files it names.
 Writes everything under GENERATION/bridge/.
 """
 import argparse
@@ -45,11 +47,15 @@ def main():
     p.add_argument('--agg-url', required=True, help='each shard\'s aggregator URL as the driver reaches it, comma separated, same order')
     p.add_argument('--agg-partition', type=int, default=7, help='the aggregation partition the bridge profile names (7, the fixed one)')
     p.add_argument('--agg-shard', default='', help='native shard ID bytes of each shard, hex, comma separated (two or more shards)')
+    p.add_argument('--tester-eth-url', default=ETH, help='the JSON-RPC endpoint testers use (the public gateway\'s name on a public host)')
+    p.add_argument('--tester-redeem-eth-url', default='', help='where testers send redemptions, when the --tester-eth-url gateway cannot take them')
+    p.add_argument('--tester-agg-url', default='', help='the aggregator endpoint testers use (default: the first --agg-url)')
+    p.add_argument('--tester-lockproof-url', default='http://lockproof:8090', help='the lock-proof endpoint testers use')
     a = p.parse_args()
     gen = a.generation.resolve()
     manifest = json.loads((gen / 'manifest.json').read_text())
     work = gen / 'bridge'
-    (work / 'home').mkdir(parents=True, exist_ok=True)
+    work.mkdir(parents=True, exist_ok=True)
     confs = a.agg_conf.split(',')
     urls = a.agg_url.split(',')
     shards = [s for s in a.agg_shard.split(',') if s]
@@ -88,6 +94,18 @@ def main():
     if len(shards) > 1:
         config['aggShards'] = [{'shard': s, 'url': u} for s, u in zip(shards, urls)]
     (work / 'lane-config.json').write_text(json.dumps(config, indent=2) + '\n')
+    # what an operator publishes for testers, and nothing else (bridge/README.md "The bridge tester")
+    public = work / 'public'
+    public.mkdir(exist_ok=True)
+    files = {'trustBundle': 'trust-base.bundle.cbor', 'trustEntryId': 'trust-base.genesis.entryid', 'evmPdr': 'evm-pdr.cbor', 'deployment': 'bridge-deployment.json'}
+    for name in files.values():
+        (public / name).write_bytes((work / name).read_bytes())
+    (public / 'index.html').write_bytes((Path(__file__).parent / 'tester/index.html').read_bytes())
+    tester = {'ethUrl': a.tester_eth_url, 'aggUrl': a.tester_agg_url or urls[0], 'lockProofUrl': a.tester_lockproof_url, 'chainId': manifest['chain_id'],
+              'vault': addr['BridgeVault'], 'files': files}
+    if a.tester_redeem_eth_url:
+        tester['redeemEthUrl'] = a.tester_redeem_eth_url
+    (public / 'tester-config.json').write_text(json.dumps(tester, indent=2) + '\n')
     if os.getuid() == 0:   # the package's services run as 10001 (the lock-proof endpoint reads the trust bundle here)
         subprocess.run(['chown', '-R', '10001:10001', str(work)], check=True)
     print(json.dumps(addr))
