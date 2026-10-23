@@ -31,7 +31,7 @@ import time
 import operator_rpc
 
 NOT_PREPARED = 'before the handoff is prepared'
-INTENT_REFUSED = 'invalid operator approval'   # the root's one-line refusal of an intent; many causes, some of them a root that has not yet caught up
+LATER_ATTEMPT = 'committed state plans attempt'   # the root's refusal of an intent whose attempt's Prepare has lapsed (its text names the attempt it plans now)
 LAPSED = "the Prepare's freeze has lapsed"
 
 # stdlib only: runs in the rpc image, inside one entity's namespace. Prints the status on the first line and the body after it.
@@ -91,9 +91,10 @@ def sha(data):
 
 
 class Wrapper:
-    def __init__(self, transport, entities, log, prepare_timeout=60.0, max_attempts=3, sleep=time.sleep, now=time.monotonic, intent_timeout=15.0):
+    def __init__(self, transport, entities, log, prepare_timeout=60.0, max_attempts=3, sleep=time.sleep, now=time.monotonic, intent_delay=0.0):
         self.transport, self.entities, self.log = transport, list(entities), log
-        self.prepare_timeout, self.max_attempts, self.sleep, self.now, self.intent_timeout = prepare_timeout, max_attempts, sleep, now, intent_timeout
+        self.prepare_timeout, self.max_attempts, self.sleep, self.now = prepare_timeout, max_attempts, sleep, now
+        self.intent_delay = intent_delay   # a pause before each intent: slow delivery on purpose (the rehearsal reproduces #795 with it)
 
     def record(self, **row):
         self.log(dict(row, time=time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())))
@@ -121,23 +122,19 @@ class Wrapper:
             self.sleep(1)
 
     def intent(self, entity, plan, number):
-        """The plan as this root's intent. A refusal "invalid operator approval" is retried for `intent_timeout` seconds (a root that has not caught up with the state
-        the plan was built from refuses it; the rehearsal saw one root refuse in two runs of three and accept the same plan later). Every refusal is recorded, and one that
-        lasts is the error. Any other refusal is final at once."""
-        deadline = self.now() + self.intent_timeout
-        tries = 0
-        while True:
-            status, body = self.transport.post(entity, '/api/v1/handoff/intent', plan)
-            if 200 <= status < 300:
-                if tries:
-                    self.record(event='intent-accepted-after-refusals', attempt=number, entity=entity, refusals=tries)
-                return
-            text = body.decode(errors='replace')
-            tries += 1
-            self.record(event='intent-refused', attempt=number, entity=entity, status=status, body=text, refusals=tries)
-            if INTENT_REFUSED not in text or self.now() > deadline:
-                raise HandoffError(f'validator {entity} refused the plan: {status} {text}' + (f' ({tries} times in {self.intent_timeout:g} s)' if tries > 1 else ''))
-            self.sleep(1)
+        """The plan as this root's intent. A refusal that says this validator's committed state already plans a LATER attempt is a lapse: the plan's Prepare was
+        ordered and ran out its freeze window before the intent arrived, so the attempt is dead and propose re-plans (the root accepts a late intent for a Prepare
+        that is still open, #795). Any other refusal is final and recorded."""
+        if self.intent_delay:
+            self.sleep(self.intent_delay)
+        status, body = self.transport.post(entity, '/api/v1/handoff/intent', plan)
+        if 200 <= status < 300:
+            return
+        text = body.decode(errors='replace')
+        self.record(event='intent-refused', attempt=number, entity=entity, status=status, body=text)
+        if LATER_ATTEMPT in text:
+            raise HandoffLapsed(f'validator {entity}: {text.strip()}')
+        raise HandoffError(f'validator {entity} refused the plan: {status} {text}')
 
     def attempt(self, request, number):
         plan = self.plan(request, number)
@@ -198,6 +195,7 @@ def main():
     q.add_argument('--q3', action='store_true')
     q.add_argument('--prepare-timeout', type=float, default=60)
     q.add_argument('--max-attempts', type=int, default=3)
+    q.add_argument('--intent-delay', type=float, default=0.0, help='seconds to wait before handing each validator the intent (testing slow delivery)')
     r = sub.add_parser('abort')
     r.add_argument('generation', type=Path)
     r.add_argument('flags', nargs=argparse.REMAINDER)
@@ -215,7 +213,7 @@ def main():
     request = build_request(a.ubft, work / f'plan-request-{int(time.time())}.json', a.next_trust_base, a.next_evm_assignment, a.readiness_receipts, a.q3)
     with (work / 'log.jsonl').open('a') as log:
         wrapper = Wrapper(transport, transport.entities, lambda row: (log.write(json.dumps(row, sort_keys=True) + '\n'), log.flush(), print(json.dumps(row, sort_keys=True))),
-                          a.prepare_timeout, a.max_attempts)
+                          a.prepare_timeout, a.max_attempts, intent_delay=a.intent_delay)
         accepted = wrapper.propose(request)
     print(f'submitted {accepted} root endorsements')
 
