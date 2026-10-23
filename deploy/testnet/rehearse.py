@@ -675,6 +675,23 @@ class Rehearsal:
         # the EVM is frozen from Prepare: a paid transaction mined shows it certifies again
         self.faucet_send('0x' + '33' * 20, 1)
         self.expect(int(self.call('eth_blockNumber'), 16) > before, 'the execution chain advanced after the Abort')
+        # the next attempt: when does the root plan it again? Asked every 5 s for 90 s, each answer recorded (the stage ends on the first acceptance)
+        root_rpc = operator_rpc.common_urls(json.loads((self.gen / 'compose.yaml').read_text()))[0]
+        asked, deadline = [], time.monotonic() + 90
+        while True:
+            try:
+                self.exec_in('root1', 'rm', '-rf', '/tmp/candidate-probe')
+                self.exec_in('root1', 'ubft', 'root', 'handoff', 'q3-candidate', '--next-trust-base', '/network/handoff/trust-base-epoch2.json',
+                             '--next-evm-assignment', '/network/handoff/published-assignment.json', '--root-rpc', root_rpc, '--out-dir', '/tmp/candidate-probe')
+                asked.append(f'{time.strftime("%H:%M:%S")} accepted')
+                break
+            except Failure as refused:
+                asked.append(f'{time.strftime("%H:%M:%S")} {str(refused)[-160:]}')
+                if time.monotonic() > deadline:
+                    break
+                time.sleep(5)
+        (self.evidence / 'handoff' / 'abort-next-attempt.txt').write_text('\n'.join(asked) + '\n')
+        self.expect(asked[-1].endswith('accepted'), f'the root plans the next attempt again ({len(asked)} asks, {len(asked) * 5 - 5} s after the first)', asked[0] + ' ... ' + asked[-1])
 
     def root_epoch(self, i, transport=None):
         """The epoch of root i's committed certificate, or None while it does not answer."""
