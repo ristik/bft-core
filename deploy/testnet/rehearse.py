@@ -870,6 +870,33 @@ class Rehearsal:
         """pos-restart after the second handoff: the roots were recreated into epoch 3 over the epoch-2 stores and keep that container; the pods restart and stay at epoch 3."""
         self.pos_restart(epoch=3)
 
+    def pos_recreate(self):
+        """A root recreated from compose.yaml ALONE, without any --install-handoff-epoch (the plain `docker compose up -d --force-recreate` an operator runs after a
+        host reboot): it is recreated in its entity's namespace (--no-deps: pod<i> stays), must certify at the installed root epoch again and the custody must have
+        applied every root record. The flag-less start is what OPERATOR.md step 8 lists as UNVERIFIED; this stage settles it (a failure carries the root's last log
+        lines). Run on the current network, after pos-advance (epoch 2) or pos-handoff-2 (epoch 3): the epoch is read from the roots."""
+        transport = handoff_ops.DockerTransport(self.gen)
+        epoch = self.root_epoch(1, transport)
+        self.expect(epoch is not None and epoch >= 2 and all(self.root_epoch(i, transport) == epoch for i in range(1, self.n + 1)),
+                    'every root certifies at the same switched epoch (run a handoff first)', str(epoch))
+        victim = 1
+        self.say(f'  recreating root{victim} from compose.yaml alone (no install flag), epoch {epoch}')
+        self.compose('up', '-d', '--no-deps', '--force-recreate', f'root{victim}')
+        entry = json.loads((self.gen / 'compose.yaml').read_text())['services'][f'root{victim}']['entrypoint']
+        self.expect('--install-handoff-epoch' not in entry, f'root{victim} was recreated without --install-handoff-epoch', ' '.join(entry)[-200:])
+        try:
+            self.wait(f'root {victim} certifies at epoch {epoch} again', lambda: self.root_epoch(victim, transport) == epoch, 240)
+        except Exception:
+            (self.evh() / 'recreate-root.log').write_text(self.compose('logs', '--no-color', '--tail', '80', f'root{victim}', check=False))
+            raise
+        for i in range(1, self.n + 1):
+            self.expect(self.root_epoch(i, transport) == epoch, f'root {i} certifies at epoch {epoch}')
+        deployment = json.loads((self.gen / 'network' / 'pos-deployment.json').read_text())
+        def applied():
+            count = self.view(self.REGISTRY, 'recordCount()(uint64)')[0]
+            return count if count == self.view(deployment['custody'], 'recordCursor()(uint64)')[0] else None
+        self.expect(self.wait('the custody has applied every root record', lambda: applied() is not None, 300), 'recordCursor equals recordCount after the recreate', str(applied()))
+
     def pos_stale(self):
         """Credentials of the old epoch after the switch. (1) the authority refuses to be advanced back to the epoch-1 trust base and shard configuration, and its
         status does not move; (2) a shard node started with its PRE-advance client credential (kept as client.cred.pre-epoch-2 by pos-advance) is not served by the
@@ -1032,7 +1059,7 @@ class Rehearsal:
 
 STAGES = (('up', 'up'), ('identity', 'identity'), ('first-tx', 'first_tx'), ('gateway-limits', 'gateway_limits'), ('faucet-guard', 'faucet_guard'), ('load', 'load'), ('pod-restart', 'pod_restart'), ('backup-restore', 'backup_restore'), ('reset', 'reset'))
 # run on a generation made with --pos (the workflow's second generation); not part of the default list
-POS_STAGES = (('pos-smoke', 'pos_smoke'), ('pos-rewards', 'pos_rewards'), ('pos-election', 'pos_election'), ('pos-proposal', 'pos_proposal'), ('pos-abort', 'pos_abort'), ('pos-propose', 'pos_propose'), ('pos-install', 'pos_install'), ('pos-advance', 'pos_advance'), ('pos-restart', 'pos_restart'), ('pos-stale', 'pos_stale'), ('pos-handoff-2', 'pos_handoff_2'), ('pos-restart-2', 'pos_restart_2'))
+POS_STAGES = (('pos-smoke', 'pos_smoke'), ('pos-rewards', 'pos_rewards'), ('pos-election', 'pos_election'), ('pos-proposal', 'pos_proposal'), ('pos-abort', 'pos_abort'), ('pos-propose', 'pos_propose'), ('pos-install', 'pos_install'), ('pos-advance', 'pos_advance'), ('pos-restart', 'pos_restart'), ('pos-stale', 'pos_stale'), ('pos-handoff-2', 'pos_handoff_2'), ('pos-restart-2', 'pos_restart_2'), ('pos-recreate', 'pos_recreate'))
 
 
 def main():
