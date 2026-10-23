@@ -24,6 +24,7 @@ Evidence of the package only, as rehearse.py's. No third-party service is contac
 import argparse
 import http.client
 import json
+import os
 import secrets
 import subprocess
 import sys
@@ -48,6 +49,8 @@ GATEWAY_MAX_BODY = 16384   # gateway.py MAX_BODY
 # One aggregator answers at most 256 state IDs in one batch (the SDK's BATCH_MAX_STATE_IDS), and the long history's batch holds the mint, every
 # transfer and the burn, so with the single aggregator-go it has at most 254 transfers; the driver also requires more than 64 (the former bound).
 LONG_TRANSFERS_MAX = 254
+# BridgeVault's custom errors at the contracts pin: AlreadyRedeemed(uint256), InsufficientCredit(uint256,uint256)
+ALREADY_REDEEMED, INSUFFICIENT_CREDIT = '0xd36d946d', '0x4eb7eaec'
 
 
 class BridgeRehearsal(Rehearsal):
@@ -106,7 +109,7 @@ class BridgeRehearsal(Rehearsal):
         names /work and /archive), validator 1's certified-block archive read-only at /archive. Returns its output; a failing command fails the stage."""
         env = ['-e', f'SAVE_TRANSFERS={transfers}', '-e', f'LONG_TRANSFERS={transfers}'] if transfers is not None else []
         out = subprocess.run(['docker', 'run', '--rm', '--read-only', '--network', validators_network(self.gen), '--user', '10001:10001',
-                              '--env-file', str(self.gen / 'bridge/driver.env'), '-e', 'HOME=/work/home', *env, '--tmpfs', '/tmp',
+                              '--env-file', str(self.gen / 'bridge/driver.env'), '-e', 'HOME=/tmp/home', *env, '--tmpfs', '/tmp',
                               '-v', f'{self.gen / "bridge"}:/work', '-v', f'{self.gen / "validator1/archive"}:/archive:ro',
                               TAG, 'npx', '--no-install', 'tsx', DRIVER, *args], text=True, capture_output=True)
         self.say('  ' + '\n  '.join((out.stdout + out.stderr).strip().splitlines()[-25:]))
@@ -228,7 +231,8 @@ class BridgeRehearsal(Rehearsal):
     def fund(self):
         env = self.gen / 'bridge/driver.env'
         if not env.exists():
-            env.touch(mode=0o600)
+            env.touch()
+            os.chmod(env, 0o600)   # the driver's key: owner only, whatever the umask
             env.write_text(f'DNB_DEPLOYER_KEY=0x{secrets.token_hex(32)}\n')
         key = env.read_text().split('=', 1)[1].strip()
         address = self.cast_run('wallet', 'address', '--private-key', key)
@@ -245,15 +249,16 @@ class BridgeRehearsal(Rehearsal):
         envelope = (run / 'envelope.bin').read_bytes()
         vault = self.addresses()['BridgeVault']
         data = '0x9945e3d3' + (32).to_bytes(32, 'big').hex() + len(envelope).to_bytes(32, 'big').hex() + envelope.hex() + '00' * (-len(envelope) % 32)
-        before = self.vault_balance()
+        word = lambda n: int(n).to_bytes(32, 'big').hex()
         r = self.inner_response(1, 'eth_call', [{'from': SUBMITTER, 'to': vault, 'data': data}, 'latest'])
-        self.expect('error' in r, 'the redeemed envelope is refused a second time (eth_call reverts)', json.dumps(r)[:300])
+        self.expect((r.get('error') or {}).get('data') == ALREADY_REDEEMED + word(saved['nonce']),
+                    'the redeemed envelope is refused a second time (AlreadyRedeemed of its nonce)', json.dumps(r)[:300])
         spent = self.inner_response(1, 'eth_call', [{'to': vault, 'data': self.cast_run('calldata', 'spentNullifier(uint256)', str(saved['nonce']))}, 'latest'])
         self.expect(spent.get('result', '').lower().removeprefix('0x') == saved['nullifier'].lower().removeprefix('0x'), 'the vault keeps the lock\'s nullifier', spent.get('result', ''))
         claim = self.cast_run('calldata', 'claim(uint256,address)', str(saved['amountWei']), PAYEE)
         r = self.inner_response(1, 'eth_call', [{'from': RECIPIENT, 'to': vault, 'data': claim}, 'latest'])
-        self.expect('error' in r, 'the claim of an already claimed credit is refused', json.dumps(r)[:300])
-        self.expect(self.vault_balance() == before, 'the vault balance is unchanged')
+        self.expect((r.get('error') or {}).get('data') == INSUFFICIENT_CREDIT + word(0) + word(saved['amountWei']),
+                    'the claim of an already claimed credit is refused (InsufficientCredit: none left)', json.dumps(r)[:300])
 
     def consolidated(self):
         self.driver('consolidated', '/work/lane-config.json', '/work/consolidated')
@@ -266,7 +271,14 @@ class BridgeRehearsal(Rehearsal):
     def backup_restore(self):
         nonce = json.loads((self.gen / 'bridge/roundtrip/saved.json').read_text())['nonce']
         self.bridge_compose('rm', '-sf', 'lockproof')   # quiesced: the overlay's service stops too
-        super().backup_restore()
+        # backup.py restores plain files and directories only (sockets are left out of the archive): name anything else here, before the backup
+        odd = [str(f.relative_to(self.gen)) for f in self.gen.rglob('*') if not f.name.endswith(('.sock', '.sock.lock')) and (f.is_symlink() or not (f.is_file() or f.is_dir()))]
+        self.expect(not odd, 'the generation holds only plain files and directories (backup.py restores nothing else)', ' '.join(odd[:20]))
+        try:
+            super().backup_restore()
+        except subprocess.CalledProcessError as e:
+            self.say(f'  {" ".join(map(str, e.cmd[1:3]))} failed: {(e.stderr or "").strip()[-2000:]}')
+            raise
         vault = self.addresses()['BridgeVault']
         self.expect(self.call('eth_getCode', [vault, 'latest']) not in (None, '0x'), 'the vault is there on the restored generation')
         spent = self.inner_response(1, 'eth_call', [{'to': vault, 'data': self.cast_run('calldata', 'spentNullifier(uint256)', str(nonce))}, 'latest'])
