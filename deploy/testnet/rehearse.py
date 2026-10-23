@@ -935,11 +935,13 @@ class Rehearsal:
             price = int(self.ureth(survivors[0], 'eth_gasPrice'), 16)
             raw = self.raw_tx(to, nonce, price)
             # the hash is the transaction's own (keccak of the raw bytes), not what a node answers: a survivor the transaction has already reached by gossip answers
-            # "already known" with no result, which is acceptance of the same transaction; any other error is a refusal
+            # "already known" with no result, which is acceptance of the same transaction; "nonce too low" counts only with the receipt (below); any other error is a refusal
             tx = self.cast_run('keccak', raw)
             for j in survivors:
                 reply = self.inner_reply(f'http://ureth{j}:8545', 'eth_sendRawTransaction', [raw])
-                known = 'already known' in str(reply.get('error', '')).lower()
+                error = str(reply.get('error', '')).lower()
+                # "nonce too low" is acceptance only when this survivor already holds the transaction's receipt: the sends are sequential and a fast block can include it first
+                known = 'already known' in error or ('nonce too low' in error and self.ureth(j, 'eth_getTransactionReceipt', [tx]) is not None)
                 self.expect(reply.get('result') == tx or known, f'survivor {j} accepts the transaction', json.dumps(reply)[:200])
             self.say(f'  the {len(survivors)} survivors accept transaction {tx}')
             blocks = set()
