@@ -24,6 +24,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+import handoff_ops
 import operator_rpc
 
 PUBLIC_RPC = '127.0.0.1:8545'
@@ -500,10 +501,12 @@ class Rehearsal:
         needed = {f'{role}{i}' for i in range(1, self.n + 1) for role in ('pod', 'root', 'shard', 'authority', 'ureth')}
         self.expect(needed <= running, 'every entity service is running', str(sorted(needed - running)))
         root_rpc = operator_rpc.common_urls(compose)[0]
+        transport = handoff_ops.DockerTransport(self.gen)   # one-shot python sidecar in the entity's namespace (the operator listener is loopback there)
         for i in range(1, self.n + 1):
-            self.exec_in(f'root{i}', 'ubft', 'q3', 'signers', '--root-rpc', root_rpc, '--out', '/tmp/signers.json')
-            signers = json.loads(self.exec_in(f'root{i}', 'cat', '/tmp/signers.json'))
-            self.expect(signers.get('epoch') == 1, f'root {i} certifies at epoch 1', str(signers)[:200])
+            # `ubft q3 signers --out` writes only the signer list, no epoch (the first run of this stage found 5b's step 0 wrong): ask the endpoint it wraps
+            status, body = transport.post(i, '/api/v1/q3/signers', b'{}')
+            signers = json.loads(body) if status == 200 else {}
+            self.expect(status == 200 and signers.get('epoch') == 1 and signers.get('quorum'), f'root {i} certifies at epoch 1 with a quorum', f'{status} {body[:200]!r}')
         zero = '0x' + '00' * 32
         result = self.view_text(election, 'openResult()(bytes32)').strip()
         self.expect(result != zero, 'the election has a reserved result (run pos-election first)')
