@@ -5,6 +5,8 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"slices"
+	"sort"
 
 	"github.com/unicitynetwork/bft-go-base/types"
 )
@@ -240,10 +242,24 @@ type VerifyContext struct {
 	CurrentRoot []RootMember
 }
 
+// sameValidators compares the two validator sets, not their order: a successor assignment is sorted by node id (NewSuccessor), while the installed
+// configuration keeps the order it was generated in (the genesis lists its validators in the order of the trust base's root nodes, which the genesis
+// plan pairs by index), so a committee that did not change would otherwise always read as an EVM-only change.
 func sameValidators(a, b []*types.NodeInfo) bool {
 	if len(a) != len(b) {
 		return false
 	}
+	for i := range a {
+		if a[i] == nil || b[i] == nil {
+			return false
+		}
+	}
+	byID := func(nodes []*types.NodeInfo) []*types.NodeInfo {
+		sorted := slices.Clone(nodes)
+		sort.SliceStable(sorted, func(i, j int) bool { return sorted[i].NodeID < sorted[j].NodeID })
+		return sorted
+	}
+	a, b = byID(a), byID(b)
 	for i := range a {
 		if a[i] == nil || b[i] == nil || a[i].NodeID != b[i].NodeID || a[i].Stake != b[i].Stake || !bytes.Equal(a[i].SigKey, b[i].SigKey) {
 			return false
@@ -295,6 +311,26 @@ func ValidateCoupling(root []RootMember, succ *types.PartitionDescriptionRecord,
 		}
 	}
 	return nil
+}
+
+// sameCommittee compares two root committees as sets: the order a candidate lists its members in is not part of who they are. The
+// EVM-only refusal must not depend on it (a reordered, unchanged committee would otherwise pass as a change). sameRoot, the exact
+// comparison of the listed order, stays for the binding to the preimage.
+func sameCommittee(a, b []RootMember) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	byID := func(members []RootMember) []RootMember {
+		sorted := slices.Clone(members)
+		sort.SliceStable(sorted, func(i, j int) bool {
+			if sorted[i].NodeID != sorted[j].NodeID {
+				return sorted[i].NodeID < sorted[j].NodeID
+			}
+			return bytes.Compare(sorted[i].Key, sorted[j].Key) < 0
+		})
+		return sorted
+	}
+	return sameRoot(byID(a), byID(b))
 }
 
 func sameRoot(a, b []RootMember) bool {
@@ -374,7 +410,7 @@ func VerifyInstalledWith(r Rules, c Candidate, succ, current *types.PartitionDes
 	if err := ValidateSuccessorWith(r, current, succ); err != nil {
 		return err
 	}
-	if currentRoot != nil && sameRoot(c.RootMembers, currentRoot) && !sameValidators(succ.Validators, current.Validators) {
+	if currentRoot != nil && sameCommittee(c.RootMembers, currentRoot) && !sameValidators(succ.Validators, current.Validators) {
 		return ErrEVMOnly
 	}
 	old, err := PDRHash(current)
