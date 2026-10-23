@@ -68,6 +68,8 @@ GATEWAY_MAX_BODY = 16384   # gateway.py MAX_BODY
 LONG_TRANSFERS_MAX = 254
 # BridgeVault's custom errors at the contracts pin (protocol 6): PartAlreadyRedeemed(uint256,bytes32), InsufficientCredit(uint256,uint256)
 PART_ALREADY_REDEEMED, INSUFFICIENT_CREDIT = '0xe8f8709e', '0x4eb7eaec'
+# BridgeRejected(uint256): the composition's nonzero status (the V2 table, native-bridge-plugins protocol/vectors/split/config/compose-status-v2.json)
+BRIDGE_REJECTED = '0x2896c49d'
 # BridgeVault's events at the contracts pin (src/bridge/BridgeVault.sol)
 LOCKED_EVENT = 'Locked(uint256,address,bytes32,address,bytes32,bytes32,uint256,bytes32,bytes32,bytes32,bytes)'
 # protocol 6: RedemptionCredited(nonce, partId, recipient indexed; nullifier, amount, remaining)
@@ -142,14 +144,14 @@ class BridgeRehearsal(Rehearsal):
             raise Failure(f'the driver failed: {args[0]}')
         return out.stdout
 
-    def tester(self, *args, check=True, wallet='tester-wallet'):
+    def tester(self, *args, check=True, wallet='tester-wallet', key='tester.key'):
         """One command of the bridge tester CLI in the bridge tools image, on the validators network, with its wallet at /work/WALLET. The tester has
         no driver key and no archive: its mounts are only its wallet, its key file and the published directory (bridge/public), read-only. Returns
         (exit code, output)."""
         work = self.gen / 'bridge'
         out = subprocess.run(['docker', 'run', '--rm', '--read-only', '--network', validators_network(self.gen), '--user', '10001:10001', '-e', 'HOME=/tmp/home',
                               '--tmpfs', '/tmp', '-v', f'{work / "public"}:/work/public:ro', '-v', f'{work / wallet}:/work/{wallet}',
-                              '-v', f'{work / "tester.key"}:/work/tester.key:ro', TAG, 'npx', '--no-install', 'tsx', TESTER, *args, '--wallet', f'/work/{wallet}'],
+                              '-v', f'{work / key}:/work/tester.key:ro', TAG, 'npx', '--no-install', 'tsx', TESTER, *args, '--wallet', f'/work/{wallet}'],
                              text=True, capture_output=True)
         text = (out.stdout + out.stderr).strip()
         self.say('  $ bridge-tester ' + ' '.join(args) + '\n    ' + '\n    '.join(text.splitlines()[-12:]))
@@ -403,7 +405,7 @@ class BridgeRehearsal(Rehearsal):
         work = self.gen / 'bridge'
         wallet = 'split-wallet'
         shutil.rmtree(work / wallet, ignore_errors=True)
-        key_file = work / 'tester.key'
+        key_file = work / 'split-tester.key'   # this stage's own: the tester stage writes and removes tester.key
         key = f'0x{secrets.token_hex(32)}'
         key_file.write_text(key + '\n')
         os.chmod(key_file, 0o600)
@@ -423,7 +425,7 @@ class BridgeRehearsal(Rehearsal):
         if os.getuid() == 0:
             os.chown(work / wallet, 10001, 10001)
         unit = lambda n: f'{n * SPLIT_UNIT}wei'
-        t = lambda *args, **kw: self.tester(*args, wallet=wallet, **kw)
+        t = lambda *args, **kw: self.tester(*args, wallet=wallet, key='split-tester.key', **kw)
         record = lambda rid: json.loads((work / wallet / 'tokens' / rid / 'token.json').read_text())
         me = self.cast_run('wallet', 'address', '--private-key', key)
         self.faucet_send(me, TESTER_FUNDS)
@@ -466,8 +468,16 @@ class BridgeRehearsal(Rehearsal):
         t('burn', '--token', f'{n}.2')
         self.driver('split-negatives', '/work/lane-config.json', f'/work/{wallet}', f'{n}.2', f'{n}.1')
         neg = json.loads((work / wallet / 'tokens' / f'{n}.2' / 'split-negatives.json').read_text())
-        self.say(f'  split negatives: parent return {neg["parentReturn"]["chain"]} (plug-in: {neg["parentReturn"]["pluginRefusal"][:80]}), changed recipient {neg["changedRecipient"]}, '
-                 f'changed amount {neg["changedAmount"]}, out of gas at {neg["outOfGas"]["gasLimit"]} of {neg["outOfGas"]["estimate"]} (status 0, vault unchanged), duplicate {neg["duplicate"]["statuses"]}')
+        for what, r in (('the split 40 returned', neg['parentReturn']['chain']), ('the 60 with a changed recipient', neg['changedRecipient']),
+                        ('the 60 with a changed amount', neg['changedAmount'])):
+            self.expect(r['revert'].startswith(BRIDGE_REJECTED) and int(r['revert'][10:74], 16) == r['code'] != 0,
+                        f'{what} is refused by the composition (BridgeRejected, V2 status {r["code"]} {r["name"]})', r['revert'][:80])
+        self.expect(neg['outOfGas']['status'] == '0x0' and int(neg['outOfGas']['gasLimit']) < int(neg['outOfGas']['estimate']),
+                    'the underfunded redemption ran out of gas (status 0) and left the vault unchanged', json.dumps(neg['outOfGas']))
+        self.expect(sorted(neg['duplicate']['statuses']) == ['0x0', '0x1'] and int(neg['duplicate']['credited']) == 60 * SPLIT_UNIT,
+                    'of two simultaneous submissions of the 60 exactly one redeemed, credited once', json.dumps(neg['duplicate']['statuses']))
+        self.say(f'  split negatives: parent return {neg["parentReturn"]["chain"]["name"]} (plug-in: {neg["parentReturn"]["pluginRefusal"][:80]}), changed recipient {neg["changedRecipient"]["name"]}, '
+                 f'changed amount {neg["changedAmount"]["name"]}, out of gas at {neg["outOfGas"]["gasLimit"]} of {neg["outOfGas"]["estimate"]} (status 0, vault unchanged), duplicate {neg["duplicate"]["statuses"]}')
         self.expect(remaining() == 25 * SPLIT_UNIT and claimable() == 75 * SPLIT_UNIT, 'after the 60: 25 left in the lock, 75 claimable', f'{remaining()} {claimable()}')
 
         # redeem 25: the lock is complete
@@ -480,7 +490,8 @@ class BridgeRehearsal(Rehearsal):
         t('claim')
         self.expect(self.vault_balance() == before and claimable() == 0, 'the vault paid back exactly the 100 locked (custody back to where it was)', str(self.vault_balance() - before))
         _, text = t('status')
-        self.expect(f'token {n}.1.2: redeemed' in text or 'this token redeemed' in text, 'status shows the parts redeemed', text.splitlines()[-1])
+        line = next((l for l in text.splitlines() if l.startswith(f'token {n}.1.2: ')), '')
+        self.expect(line.startswith(f'token {n}.1.2: redeemed,') and line.endswith('this token redeemed'), 'status shows the 25 redeemed in the wallet and in the vault', line)
 
     def keep_tester(self):
         out = self.evidence / 'tester'
