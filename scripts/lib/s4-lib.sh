@@ -16,12 +16,25 @@ S4_KEY=${S4_KEY:-test-nodes/s4-reporter/reporter.cred}
 S4_OFFENDER_ROOT=${S4_OFFENDER_ROOT:-5}   # the joiner's root
 # 1 (default): the offender is evicted by the recovery (the joiner); 0: the offender is a member that stays (X4 B4's second offence): the first epoch-3 certificate must still name it
 S4_EXPECT_EVICTED=${S4_EXPECT_EVICTED:-1}
+# the root epoch the offence is delivered in (default 2: the joiner's epoch). X4 B4's second offence is delivered in epoch 3, where the staying member votes: the epoch's
+# files are candidate-config-(E-1).json (handoff E-1 installs epoch E; the recovery is handoff 2) and activation-record-E.json, both in $H3_DIR
+S4_EPOCH=${S4_EPOCH:-2}
 
 s4_pass() { printf 'PASS: s4: %s\n' "$1"; }
 s4_cast() { "${P85_CAST:-cast}" "$@"; }
 s4_round() { curl -fsS "$(h3_rpc_url "$1")/api/v1/roundInfo" 2>/dev/null | jq -r '.roundNumber'; }
 s4_epoch() { curl -fsS "$(h3_rpc_url "$1")/api/v1/roundInfo" 2>/dev/null | jq -r '.epochNumber'; }
 s4_short() { grep -a -m1 -o 'node_id=16\*[A-Za-z0-9]*' "test-nodes/root$1/debug.log" | head -1 | sed 's/node_id=//'; }
+
+# the offender root's public signing key as the evidence scan names it (66 hex = 33 bytes, no 0x). node-info.json carries it as .sigKey, "0x" + hex (an earlier spelling,
+# .sigKey.publicKey, read nothing and left --offender-key empty). Fails loudly: an unreadable or malformed key is an error, never an empty value or a fallback.
+s4_offender_pubkey() {
+  local f="test-nodes/root${1:-$S4_OFFENDER_ROOT}/node-info.json" k
+  k=$(jq -er '.sigKey | select(type == "string")' "$f") || { echo "s4: no string .sigKey in $f" >&2; return 1; }
+  k=${k#0x}
+  [[ "$k" =~ ^(02|03)[0-9a-fA-F]{64}$ ]] || { echo "s4: the .sigKey of $f is not a 33-byte compressed key: $k" >&2; return 1; }
+  printf '%s\n' "$k"
+}
 
 # the root that was the leader of round $1+1: the one the offender's own genuine vote of round $1 went to. The offender root logs it itself ("next leader" at that round);
 # the LAST such line of its log is taken (an earlier epoch's log can carry the same round number)
@@ -37,16 +50,19 @@ s4_next_leader_root() {
 # the harness tool (a prebuilt binary in a CI run job, else go run)
 s4_tool() { lane_go_run s4-equivocate "$@"; }
 
+# the signing configuration of the offence's epoch (network, genesis, scheme): the handoff that installed it
+s4_config() { echo "$H3_DIR/candidate-config-$((S4_EPOCH - 1)).json"; }
+
 s4_equivocate() {
-  local d=$S4_DIR cur start R leader a="" b="" n cfg net gen epoch=2 utb=() ra rb t0
+  local d=$S4_DIR cur start R leader a="" b="" n cfg net gen epoch=$S4_EPOCH utb=() ra rb t0
   mkdir -p "$d"
-  [ "$(s4_epoch 1)" = "$epoch" ] || { echo "root 1 is not in epoch $epoch (the joiner is a committee member only there)" >&2; return 1; }
-  cfg=$H3_DIR/candidate-config-1.json   # the first handoff installs epoch 2
+  [ "$(s4_epoch 1)" = "$epoch" ] || { echo "root 1 is not in epoch $epoch (the offender is a committee member of that epoch only)" >&2; return 1; }
+  cfg=$(s4_config)
   net=$(jq -r .network "$cfg"); gen=$(jq -r .genesis "$cfg")
-  [ "$(jq -r .signingScheme "$cfg")" = 2 ] || { echo "epoch 2 is not a scheme 2 epoch" >&2; return 1; }
+  [ "$(jq -r .signingScheme "$cfg")" = 2 ] || { echo "epoch $epoch is not a scheme 2 epoch" >&2; return 1; }
   [ "${UTB_LANE:-0}" != 1 ] || utb=(--utb)
-  start=$(jq -r .activationRound "$H3_DIR/activation-record-2.json")
-  # a round a few rounds back that belongs to epoch 2 and whose next leader is known (the genuine vote of the joiner for that round went to that root, so
+  start=$(jq -r .activationRound "$H3_DIR/activation-record-$epoch.json")
+  # a round a few rounds back that belongs to the epoch and whose next leader is known (the genuine vote of the joiner for that round went to that root, so
   # the two observers are chosen among the others: no journal then holds a genuine third statement of the slot)
   for t0 in $(seq 1 120); do
     cur=$(s4_round 1) || return 1
@@ -54,7 +70,7 @@ s4_equivocate() {
     if [ "$R" -ge $((start + 3)) ] && leader=$(s4_next_leader_root "$R"); then break; fi
     leader=""; sleep 1
   done
-  [ -n "$leader" ] || { echo "no round of epoch 2 with a known next leader (activation round $start, current $cur)" >&2; return 1; }
+  [ -n "$leader" ] || { echo "no round of epoch $epoch with a known next leader (activation round $start, current $cur)" >&2; return 1; }
   for n in 1 2 3 4; do
     [ "$n" != "$leader" ] || continue
     [ "$n" != "$S4_OFFENDER_ROOT" ] || continue   # the offender's own journal holds its genuine vote (never an observer)
@@ -114,6 +130,7 @@ s4_collect_after_rotation() {
   else   # a member that stays: the certificate is epoch 3 (the rotation happened); whether this offender signs it is the quorum's business (the rotation is not about it)
     jq -e '.epoch == 3' "$H3_DIR/first-epoch3-certificate.json" >/dev/null || { echo "the first epoch-3 certificate is missing" >&2; return 1; }
   fi
+  local okey; okey=$(s4_offender_pubkey) || return 1
   s4_snapshot_journal "$a" || return 1
   s4_snapshot_journal "$b" || return 1
   # a collector which holds no runtime state: each scan is a new process reading only the journal copies
@@ -121,7 +138,7 @@ s4_collect_after_rotation() {
   build/ubft evidence scan --journal "$d/journal-root$b.db" >"$d/scan-root$b.json" || return 1
   build/ubft evidence scan --journal "$d/journal-root$a.db" --journal "$d/journal-root$b.db" >"$d/scan-both.json" || return 1
   s4_py journals --delivery "$d/delivery.json" --statements "$d/votes/statements.json" --scan-a "$d/scan-root$a.json" --scan-b "$d/scan-root$b.json" \
-    --scan-both "$d/scan-both.json" --stats "$d/observer-stats-root$a.txt" --stats "$d/observer-stats-root$b.txt" --offender-key "$(jq -r .sigKey.publicKey "test-nodes/root$S4_OFFENDER_ROOT/node-info.json" 2>/dev/null || true)" || return 1
+    --scan-both "$d/scan-both.json" --stats "$d/observer-stats-root$a.txt" --stats "$d/observer-stats-root$b.txt" --offender-key "$okey" || return 1
 }
 
 s4_json_addr() { jq -r ".$1" "$P85_DEPLOY"; }
@@ -134,7 +151,12 @@ s4_assignments() {
   r=$(cat "$H3_DIR/result-id.txt")
   a_j=$(p85_call "$(p85_election)" 'result(bytes32)' "$r" | p85_dec result | jq -r .assignmentID) || return 1
   a_g=$(grep -o '0x[0-9a-fA-F]\{64\}' "$P85_DIR/genesis-assignment.txt" | head -1)
-  echo "$a_j $a_g"
+  if [ "$S4_EPOCH" -ge 3 ]; then   # a later epoch's offender is in K's assignment (the recovery's): the lane's scenario ids hold it
+    [ -n "${P85_K:-}" ] || p85_scenario_ids "$H3_DIR/registry-log.txt" || return 1
+    echo "$a_j $a_g $P85_K"
+  else
+    echo "$a_j $a_g"
+  fi
 }
 
 # one signed transaction of a key, sent to every online validator of the lane's EVM chain (the chain refuses eth_estimateGas: "bound parent hash mismatch", so no
@@ -214,10 +236,10 @@ s4_submit_settle() {
   mkdir -p "$d"
   EV=$(s4_evidence) || return 1
   read -r -a ids <<<"$(s4_assignments)" || return 1
-  key=$(jq -r --arg k "$(jq -r .sigKey.publicKey "test-nodes/root$S4_OFFENDER_ROOT/node-info.json" 2>/dev/null || true)" \
-    'if $k == "" then .Pairs[0].Key else ([.Pairs[] | select((.Key | ascii_downcase | ltrimstr("0x")) == ($k | ascii_downcase | ltrimstr("0x")))][0].Key) end' "$d/scan-both.json")   # the offender's own pair when several offences are in the journals
+  local okey; okey=$(s4_offender_pubkey) || return 1
+  key=$(jq -r --arg k "$okey" '[.Pairs[] | select((.Key | ascii_downcase | ltrimstr("0x")) == ($k | ascii_downcase))][0].Key' "$d/scan-both.json")   # the offender's own pair when several offences are in the journals
   [ -n "$key" ] && [ "$key" != null ] || { echo "the scan over both journals holds no pair of the offender (root $S4_OFFENDER_ROOT)" >&2; return 1; }
-  s4_py resolve --rpc "$(p85_eth)" --custody "$(p85_custody)" --key "$key" --epoch 2 $(for a in "${ids[@]}"; do printf -- '--assignment %s ' "$a"; done) --out "$d/resolved.json" || return 1
+  s4_py resolve --rpc "$(p85_eth)" --custody "$(p85_custody)" --key "$key" --epoch "$S4_EPOCH" $(for a in "${ids[@]}"; do printf -- '--assignment %s ' "$a"; done) --out "$d/resolved.json" || return 1
   EXPOSURE=$(jq -r .exposure "$d/resolved.json"); OTHER_LOTS=$(jq -r '.otherLots[]' "$d/resolved.json" | head -3 | tr '\n' ' ')
   jq -e '.lots|length>=1' "$d/resolved.json" >/dev/null || return 1
   a=$(jq -r .assignment "$d/resolved.json")
@@ -225,8 +247,8 @@ s4_submit_settle() {
   CASE=; OFFENCE=; s4_snapshot before || return 1
   # the control calls, from the real pair (they are eth_calls: nothing is sent): reordered/altered payloads and the identical pair are refused before admission
   s4_tool calldata --journal "$d/journal-root$(jq -r .halfA.root "$d/delivery.json").db" --journal "$d/journal-root$(jq -r .halfB.root "$d/delivery.json").db" \
-    --network-word "$(s4_cast call --rpc-url "$(p85_eth)" "$EV" 'network()(bytes32)' 2>/dev/null | awk '{print $1}')" --root-network "$(jq -r .network "$H3_DIR/candidate-config-1.json")" \
-    --genesis "$(jq -r .genesis "$H3_DIR/candidate-config-1.json")" --exposure "$EXPOSURE" --out "$d/calldata" || return 1
+    --network-word "$(s4_cast call --rpc-url "$(p85_eth)" "$EV" 'network()(bytes32)' 2>/dev/null | awk '{print $1}')" --root-network "$(jq -r .network "$(s4_config)")" \
+    --genesis "$(jq -r .genesis "$(s4_config)")" --exposure "$EXPOSURE" --offender-key "$okey" --out "$d/calldata" || return 1
   local rep; rep=$(cat "$d/reporter.addr")
   s4_py refusal --rpc "$(p85_eth)" --to "$EV" --sender "$rep" --data "$d/calldata/identical.hex" --error 'IdenticalStatements()' || return 1
   s4_py refusal --rpc "$(p85_eth)" --to "$EV" --sender "$rep" --data "$d/calldata/altered.hex" --error 'BadSignature()' || return 1
@@ -256,11 +278,12 @@ s4_submit_once() {
   local out=$1 ev=$2; shift 2
   local ids=() wait=0 f pid settle=()
   for f in "$@"; do [ "$f" = --wait ] && { wait=1; settle=(--settle); } || ids+=(--assignment "$f"); done
-  local d=$S4_DIR eth id
+  local d=$S4_DIR eth id okey
+  okey=$(s4_offender_pubkey) || return 1   # only this offender's pair when the journals hold several offences
   # the lane's validators do not gossip transactions: --eth-rpc lists every online validator (the first decides reads)
   eth=$(s4_eth_all)
   build/ubft evidence submit --journal "$d/journal-root$(jq -r .halfA.root "$d/delivery.json").db" --journal "$d/journal-root$(jq -r .halfB.root "$d/delivery.json").db" \
-    --eth-rpc "$eth" --evidence "$ev" "${ids[@]}" --sender-key "$S4_KEY" ${settle[@]+"${settle[@]}"} >"$out" 2>&1 &
+    --eth-rpc "$eth" --evidence "$ev" "${ids[@]}" --sender-key "$S4_KEY" --offender-key "$okey" ${settle[@]+"${settle[@]}"} >"$out" 2>&1 &
   pid=$!
   if [ "$wait" = 0 ]; then
     for f in $(seq 1 3000); do grep -q "case=" "$out" 2>/dev/null && break; kill -0 "$pid" 2>/dev/null || break; sleep 0.1; done

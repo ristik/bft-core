@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"bytes"
+	"encoding/hex"
 	"encoding/json"
 	"path/filepath"
 	"testing"
@@ -62,4 +63,24 @@ func TestEvidenceScanMergesTheHalvesOfSeparateRoots(t *testing.T) {
 // The submitter reads the case and the settlement cursor after its own transactions: the reader must not be pinned to a block taken before them.
 func TestEvidenceReaderReadsTheHead(t *testing.T) {
 	require.Empty(t, evidenceReader(nil).Block)
+}
+
+// A lane with two offenders in the same journals submits for the one it names (X4 B4's second offence); a key which matches nothing is an error.
+func TestPairsOfOffender(t *testing.T) {
+	a := &rootevidence.SlotRecord{Key: bytes.Repeat([]byte{2}, 33), Round: 541}
+	b := &rootevidence.SlotRecord{Key: bytes.Repeat([]byte{3}, 33), Round: 543}
+	both := []*rootevidence.SlotRecord{a, b}
+	got, err := pairsOfOffender(both, "")
+	require.NoError(t, err)
+	require.Equal(t, both, got)
+	got, err = pairsOfOffender(both, hex.EncodeToString(b.Key))
+	require.NoError(t, err)
+	require.Equal(t, []*rootevidence.SlotRecord{b}, got)
+	got, err = pairsOfOffender(both, "0x"+hex.EncodeToString(a.Key))
+	require.NoError(t, err)
+	require.Equal(t, []*rootevidence.SlotRecord{a}, got)
+	_, err = pairsOfOffender(both, hex.EncodeToString(bytes.Repeat([]byte{4}, 33)))
+	require.ErrorIs(t, err, ErrEvidence)
+	_, err = pairsOfOffender(both, "zz")
+	require.ErrorIs(t, err, ErrEvidence)
 }

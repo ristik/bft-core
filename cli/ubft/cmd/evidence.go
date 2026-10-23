@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"bytes"
 	"context"
 	"encoding/hex"
 	"encoding/json"
@@ -28,7 +29,7 @@ func newEvidenceCmd() *cobra.Command {
 	root := &cobra.Command{Use: "evidence", Short: "root vote evidence: scan observer journals, submit and settle offences"}
 
 	var journals []string
-	var ethRPC, evidenceHex, senderKey string
+	var ethRPC, evidenceHex, senderKey, offenderKey string
 	var assignments []string
 	var settle bool
 
@@ -116,8 +117,12 @@ func newEvidenceCmd() *cobra.Command {
 				also = append(also, c)
 			}
 			s := &rootevidence.Submitter{Reader: rd, Sender: posrelayer.Sender{Client: client, Key: key, ChainID: chain, Also: also}, Evidence: ev, ChainID: chain, Assignments: ids}
+			pairs, err := pairsOfOffender(col.Pairs(), offenderKey)
+			if err != nil {
+				return err
+			}
 			var firstErr error
-			for _, p := range col.Pairs() {
+			for _, p := range pairs {
 				res, err := s.Submit(ctx, p)
 				if err != nil {
 					cmd.PrintErrf("epoch %d round %d %s: %v\n", p.Epoch, p.Round, p.Author, err)
@@ -142,6 +147,7 @@ func newEvidenceCmd() *cobra.Command {
 	submit.Flags().StringVar(&evidenceHex, "evidence", "", "the deployed Evidence module (20-byte hex)")
 	submit.Flags().StringArrayVar(&assignments, "assignment", nil, "a candidate assignment id the offence's exposure is resolved among (repeat)")
 	submit.Flags().StringVar(&senderKey, "sender-key", "", "file holding the 0x-hex private key of the funded account that sends the transactions")
+	submit.Flags().StringVar(&offenderKey, "offender-key", "", "submit only the offences of this public key (hex, as `evidence scan` prints it); default: every offence in the journals")
 	submit.Flags().BoolVar(&settle, "settle", false, "also settle each admitted case (permissionless, resumable)")
 	for _, f := range []string{"journal", "eth-rpc", "evidence", "assignment", "sender-key"} {
 		_ = submit.MarkFlagRequired(f)
@@ -153,6 +159,27 @@ func newEvidenceCmd() *cobra.Command {
 // evidenceReader reads the execution client's latest state: every transaction the submitter sends changes what its next read must see.
 func evidenceReader(client *rpc.Client) posrelayer.RPCReader {
 	return posrelayer.RPCReader{Client: client}
+}
+
+// pairsOfOffender keeps the paired slots of one offender key (hex, optional 0x); an empty key keeps all of them. A key which matches nothing is an error, not a silent no-op.
+func pairsOfOffender(pairs []*rootevidence.SlotRecord, keyHex string) ([]*rootevidence.SlotRecord, error) {
+	if keyHex == "" {
+		return pairs, nil
+	}
+	key, err := hex.DecodeString(strings.TrimPrefix(keyHex, "0x"))
+	if err != nil || len(key) == 0 {
+		return nil, fmt.Errorf("%w: --offender-key is not hex", ErrEvidence)
+	}
+	var out []*rootevidence.SlotRecord
+	for _, p := range pairs {
+		if bytes.Equal(p.Key, key) {
+			out = append(out, p)
+		}
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("%w: no offence of key %s in the journals", ErrEvidence, keyHex)
+	}
+	return out, nil
 }
 
 func parseAddress20(s string) ([20]byte, error) {
