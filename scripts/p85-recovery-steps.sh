@@ -796,6 +796,13 @@ p85_run_lane() {
       P85_STEPS=${P85_STEPS/ p85_restarts/ x4e_request p85_restarts}; P85_STEPS="$P85_STEPS x4e_claim"
     fi
   fi
+  if [ "${X4_ACCT_LANE:-0}" = 1 ]; then   # X4 B6 (scripts/x4pos/acct-lib.sh): accounting snapshots between the phases, the checker last
+    source scripts/x4pos/acct-lib.sh
+    P85_STEPS=${P85_STEPS/p85_baseline/p85_baseline x4a_snapshot}
+    P85_STEPS=${P85_STEPS/ p85_resolved/ p85_resolved x4a_snapshot}
+    P85_STEPS=${P85_STEPS/ p85_epoch_switches/ p85_epoch_switches x4a_snapshot}
+    P85_STEPS="$P85_STEPS x4a_final"
+  fi
   [ "${P85_MODE:-}" != overbound ] || { P85_JOINER_UNITS=3; P85_STEPS="p85_baseline p85_joiner_nodes p85_joiner_onboard p85_election_refused"; }
   for s in $P85_STEPS; do
     p85_step "$s" "$s"
