@@ -574,12 +574,14 @@ class Rehearsal:
         for name in ('trust-base-epoch2.json', 'published-assignment.json'):
             self.expect((work / name).is_file(), f'{name} exists (run pos-proposal first)')
         root_rpc, shard_rpc = operator_rpc.common_urls(compose)
+        subprocess.run(['chmod', '-R', 'a+rX', str(work)], check=True)   # the host's files (mode 0600, root) are read by the nodes, which mount network/ read-only
         # 5 the candidate, from one root; the files are copied out of its container
         self.exec_in('root1', 'rm', '-rf', '/tmp/candidate')
         self.exec_in('root1', 'ubft', 'root', 'handoff', 'q3-candidate', '--next-trust-base', '/network/handoff/trust-base-epoch2.json',
                      '--next-evm-assignment', '/network/handoff/published-assignment.json', '--root-rpc', root_rpc, '--out-dir', '/tmp/candidate')
         for name in ('candidate.cbor', 'config.json', 'v3-body-id.txt', 'root-weights.json', 'evm-weights.json'):
             (work / name).write_bytes(self.exec_in('root1', 'cat', f'/tmp/candidate/{name}', binary=True))
+        subprocess.run(['chmod', '-R', 'a+rX', str(work)], check=True)
         config = json.loads((work / 'config.json').read_text())
         self.expect(config.get('signingScheme') == 2, 'the candidate selects signing scheme 2', str(config)[:200])
         # 6 the readiness receipt of every entity, in its own root
@@ -589,7 +591,6 @@ class Rehearsal:
         code = {k.lower().removeprefix('0x'): v for k, v in spec.items()}[registry]['code']
         code_hash = hashlib.sha256(bytes.fromhex(code.removeprefix('0x'))).hexdigest()
         self.say(f'  pins: execution genesis {genesis}, registry code sha256 {code_hash}')
-        subprocess.run(['chmod', '-R', 'a+rX', str(work)], check=True)
         receipts = []
         for i in range(1, self.n + 1):
             self.exec_in(f'root{i}', 'ubft', 'root', 'handoff', 'q3-readiness', '--candidate', '/network/handoff/candidate.cbor', '--key-conf', '/state/keys.json',
