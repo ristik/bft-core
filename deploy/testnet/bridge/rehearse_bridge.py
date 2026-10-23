@@ -45,6 +45,9 @@ DRIVER_FUNDS = 30 * 10 ** 18   # each driver token locks 1 ETH and gives its rec
 # the driver's fixed recipient, submitter and payee (tests/live/anyage.ts)
 RECIPIENT, SUBMITTER, PAYEE = '0x70997970C51812dc3A010C7d01b50e0d17dc79C8', '0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC', '0x000000000000000000000000000000000000bEEF'
 GATEWAY_MAX_BODY = 16384   # gateway.py MAX_BODY
+# One aggregator answers at most 256 state IDs in one batch (the SDK's BATCH_MAX_STATE_IDS), and the long history's batch holds the mint, every
+# transfer and the burn, so with the single aggregator-go it has at most 254 transfers; the driver also requires more than 64 (the former bound).
+LONG_TRANSFERS_MAX = 254
 
 
 class BridgeRehearsal(Rehearsal):
@@ -282,8 +285,10 @@ def main():
     p.add_argument('--evidence', required=True, type=Path)
     p.add_argument('--cast', default='cast')
     p.add_argument('--stages', default=','.join(s for s, _ in STAGES), help='comma separated, in order')
-    p.add_argument('--long-transfers', type=int, default=320, help='the long-history token\'s transfers')
+    p.add_argument('--long-transfers', type=int, default=250, help=f'the long-history token\'s transfers (65 to {LONG_TRANSFERS_MAX})')
     a = p.parse_args()
+    if not 64 < a.long_transfers <= LONG_TRANSFERS_MAX:
+        p.error(f'--long-transfers must be 65 to {LONG_TRANSFERS_MAX}: one aggregator batch holds 256 state IDs')
     r = BridgeRehearsal(a.generation, a.evidence, a.cast)
     r.long_transfers = a.long_transfers
     wanted = a.stages.split(',')

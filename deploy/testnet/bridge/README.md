@@ -41,7 +41,7 @@ cd /srv/<generation> && sudo docker compose -f compose.yaml -f compose.bridge.ya
 | `roundtrip` | a lock, its proof from validator 1's archive, the mint, 3 transfers and the burn certified by the aggregator, the return proof verified by `eth_call`, then the redemption and the claim with the last validator stopped; it rejoins with the same blocks. The vault's balance rises by the lock and falls back after the claim. |
 | `negatives` | the redeemed envelope is refused a second time, a second claim is refused, and the vault keeps the nullifier |
 | `consolidated` | the SDK's consolidation over the one shard (K = 1 anchor), redeemed and claimed, with the per-SID envelope priced as the control |
-| `long-history` | a token with `--long-transfers` transfers (default 320), consolidated; one gas short reverts and leaves the vault unchanged; then redeemed and claimed |
+| `long-history` | a token with `--long-transfers` transfers (default 250, at most 254: one aggregator batch holds 256 state IDs, the mint, the transfers and the burn), consolidated; one gas short reverts and leaves the vault unchanged; then redeemed and claimed |
 | `backup-restore` | `rehearse.py`'s quiesced backup and restore with the bridge deployed (the endpoint stopped too): the redeemed lock stays spent, and a new round trip completes on the restored generation |
 
 The driver signs with its own key and with the fixed, publicly known keys of its recipient and submitter (`tests/live/anyage.ts`). That is fine on a
