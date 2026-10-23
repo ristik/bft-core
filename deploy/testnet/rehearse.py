@@ -854,7 +854,7 @@ class Rehearsal:
         fenced = [line for line in logs.splitlines() if 'signing-session-fenced' in line]
         (self.evidence / 'handoff' / 'stale-client-credential-shard1.log').write_text('\n'.join(fenced[:40]) + '\n')
         self.say(f'  shard 1 with the pre-advance credential: {len(fenced)} lines "restored authority refused readiness ... signing-session-fenced"')
-        self.expect(len(fenced) > 0, 'the authority fences the old client session: the shard node reads signing-session-fenced and abstains', f'{len(logs.splitlines())} log lines, none fenced')
+        self.expect(len(fenced) > 0, 'the authority fences the old client session: the shard node reads signing-session-fenced and abstains', f'{len(fenced)} of {len(logs.splitlines())} log lines are signing-session-fenced' if fenced else f'{len(logs.splitlines())} log lines, none fenced')
         # put the current credential back: the entity signs again, and the fence is not in the log after the restart
         self.compose('stop', 'shard1')
         shutil.copy(auth / 'client.cred.epoch-2', current)
