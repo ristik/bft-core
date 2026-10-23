@@ -622,6 +622,13 @@ class Rehearsal:
                 for path in ('/api/v1/q3/status', '/api/v1/q3/signers'):
                     status, body = transport.post(i, path, b'{}')
                     self.say(f'  root {i} {path}: {status} {body[:400].decode(errors="replace")}')
+            # the root reads the election's stored proofs from ITS OWN execution client: ask every client the same question
+            election = json.loads((self.gen / 'network' / 'pos-deployment.json').read_text())['election']
+            result = self.view_text(election, 'openResult()(bytes32)').strip()
+            call = [{'to': election, 'data': self.cast_run('calldata', 'publication(bytes32)', result)}, 'latest']
+            for i in range(1, self.n + 1):
+                raw = self.ureth(i, 'eth_call', call)
+                self.say(f'  ureth {i}: block {int(self.ureth(i, "eth_blockNumber"), 16)}, published word {int(raw[2 + 64 * 10:2 + 64 * 11], 16)}, openResult {self.ureth(i, "eth_call", [{"to": election, "data": self.cast_run("calldata", "openResult()")}, "latest"])[:12]}')
         self.expect(run.returncode == 0, 'handoff_ops.py propose', (run.stdout + run.stderr).strip()[-600:])
         accepted = int(run.stdout.strip().splitlines()[-1].split()[1])
         self.expect(accepted >= self.n * 2 // 3 + 1, f'a quorum of the {self.n} roots endorsed the one plan', run.stdout.strip().splitlines()[-1])
