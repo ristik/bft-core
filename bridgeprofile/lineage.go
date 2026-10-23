@@ -235,6 +235,7 @@ func checkSplitBurn(t *TransferTx, lv *levelState) error {
 	if err != nil {
 		return err
 	}
+	// The strict manifest decode makes man.Bytes() equal t.Data, so the predicate check is the one that binds the burn to the manifest.
 	if h := man.ReasonHash(); !bytes.Equal(t.Recipient.Params, h[:]) || !bytes.Equal(man.Bytes(), t.Data) {
 		return ErrSplitBurn
 	}

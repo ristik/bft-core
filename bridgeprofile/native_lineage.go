@@ -16,9 +16,11 @@ var ComposeMarkerV2 = func() (m [32]byte) { copy(m[:], "UNICITY_BRIDGE_COMPOSE_V
 // lockDigest, releaseTo, nullifier, leafCount (words 0 to 11 as in V1, but the root's), partTokenId, partAmount, splitDepth.
 const ComposeOutputBytesV2 = 15 * 32
 
-// ComposeStatusV2 is the V1 status table with the split reasons appended: code i is ComposeStatusV2[i].
+// ComposeStatusV2 is the V1 status table with the split reasons appended, then the two certificate-codec reasons an embedded ancestor
+// proof can raise (V1 projections carry no certificates): code i is ComposeStatusV2[i].
 var ComposeStatusV2 = append(append([]error{}, ComposeStatus...),
-	ErrSplitJustif, ErrSplitProofCount, ErrSplitProofShape, ErrSplitManifest, ErrSplitBurn, ErrSplitProof, ErrSplitSum)
+	ErrSplitJustif, ErrSplitProofCount, ErrSplitProofShape, ErrSplitManifest, ErrSplitBurn, ErrSplitProof, ErrSplitSum,
+	ErrCertScan, ErrCertSigLength)
 
 // ComposeStatusNameV2 is the reason name of a V2 status code ("" for success or an unknown code).
 func ComposeStatusNameV2(code uint64) string {

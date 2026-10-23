@@ -84,7 +84,9 @@ Marker `bytes32("UNICITY_BRIDGE_COMPOSE_V2")`, fifteen words, status table = pro
 | 14 | splitDepth | `d`; 0 is an ordinary redemption |
 
 New statuses, appended in this order: `ErrSplitJustif`, `ErrSplitProofCount`, `ErrSplitProofShape`, `ErrSplitManifest`, `ErrSplitBurn`,
-`ErrSplitProof`, `ErrSplitSum`. The standalone kernel 0x0104 and `prepareLock` are unchanged and depth 0 only; the mint operation of
+`ErrSplitProof`, `ErrSplitSum`, then `ErrCertScan` and `ErrCertSigLength`: the strict decode of an embedded ancestor token scans each
+of its certificates (outside the native/SDK codec intersection is a status, never an unmapped error; protocol 5 projections carry no
+certificates). The standalone kernel 0x0104 and `prepareLock` are unchanged and depth 0 only; the mint operation of
 0x0105 refuses a split reason (`ErrMintJustif`).
 
 **Vault rules assumed by the result** (PR3b): the stored digest equals `lockDigest`; `amount == lockedAmount[nonce]`;
@@ -108,15 +110,17 @@ These are trial values. The oracle's estimate (`TestNativeComposeV2GasByDepth`, 
 | 8 | 27 | 31,616 | 2,649,096 |
 | 32 | 99 | 116,992 | 25,013,536 |
 
-Depth 32 is admitted: there is **no depth, transfer-count or gas cap** (owner §36); the only aggregate bounds are the 2 MiB envelope and
-the gas the caller supplies. The ureth port (PR3a) replaces the trial constants with measured ones; wallets price from the full
+Depth 32 is admitted: there is **no depth, transfer-count or gas cap** (owner §36); depth is bounded only by size (the 2 MiB envelope and
+`MaxTokenBytes` for each nested token) and by the gas the caller supplies. The port must not add a separate cap.
+The oracle decodes each nested token twice (the justification scan, then `DecodeToken`) but charges its items once; the native port
+scans once and charges the same single scan. The ureth port (PR3a) replaces the trial constants with measured ones; wallets price from the full
 estimate before burning.
 
 ## 7. Corpus
 
 `testdata/split-corpus` (format `native-bridge-split-vectors/1`, `BuildSplitCorpus`), separate from the sealed protocol 5 corpus:
 `sum-tree` (trees of 1..256 leaves, depth 255, builder refusals, proof and codec negatives, commitment vectors), `lineage` (depth 0,
-1 with both siblings, 2, 3, 8, fan-out 16 and 256, real and structural embedded proofs, refreshed witnesses, 25 negatives) and
+1 with both siblings, 2, 3, 8, fan-out 16 and 256, real and structural embedded proofs, refreshed witnesses, 27 negatives) and
 `native` (BRIDGE_COMPOSE_V2 twins, exact/short gas, ABI halt). The generator asserts every negative fails for exactly its named
 reason. Regenerate with `BRIDGEPROFILE_UPDATE_SPLIT_CORPUS=1 go test ./bridgeprofile -run TestSplitCorpus`. PR5 seals and imports it.
 

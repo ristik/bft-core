@@ -137,3 +137,28 @@ func TestNativeComposeV2GasByDepth(t *testing.T) {
 		t.Logf("depth %2d: leaves %3d, input %7d B, gas %d", depth, len(lin.Leaves), len(in), gas)
 	}
 }
+
+// Random byte mutations of a depth-2 input never panic: every outcome is a halt or a status of the V2 table (an ancestor's malformed
+// certificate is a status, not an unmapped error).
+func TestNativeComposeV2MutationsNeverPanic(t *testing.T) {
+	e, b := newLineage(t)
+	part, err := b.Real2(t)
+	require.NoError(t, err)
+	b.Return(part, rcpt, part.Amount)
+	in, _ := lineageInput(t, e, b, part, OpReturn)
+	rng := uint64(0x9e3779b97f4a7c15)
+	next := func() uint64 { rng ^= rng << 13; rng ^= rng >> 7; rng ^= rng << 17; return rng }
+	b1 := RefB1{TB: e.TB}
+	seen := map[uint64]int{}
+	for i := 0; i < 3000; i++ {
+		m := append([]byte{}, in...)
+		for k := 0; k < 1+int(next()%3); k++ {
+			m[next()%uint64(len(m))] ^= byte(1 + next()%255)
+		}
+		require.NotPanics(t, func() {
+			_, st, _, _ := NativeComposeV2(m, 1<<40, b1)
+			seen[st]++
+		})
+	}
+	require.Greater(t, seen[uint64(len(ComposeStatus)+7)], 0, "ErrCertScan was exercised")
+}

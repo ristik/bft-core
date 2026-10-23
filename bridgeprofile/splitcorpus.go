@@ -484,6 +484,8 @@ func (g *splitGen) lineages() {
 		m.Root[0] ^= 1
 		return m.Bytes()
 	}}, x40), big.NewInt(40), "ErrSplitProof")
+	neg("lineage-neg-burn-predicate-not-manifest-hash", "the parent burns to a predicate that is not the hash of its (valid) manifest", tw(&SplitHooks{BurnTo: &[32]byte{1}}, x40), big.NewInt(40), "ErrSplitBurn")
+	neg("lineage-neg-ancestor-certificate-outside-codec", "an embedded ancestor certificate outside the native/SDK codec intersection (seal network 65536)", tw(&SplitHooks{ParentToken: CorruptedMintUC}, x40), big.NewInt(40), "ErrCertScan")
 	neg("lineage-neg-not-a-manifest", "the burn data is not a manifest", tw(&SplitHooks{Manifest: func(SplitManifest) []byte { return []byte{0x01} }}, x40), big.NewInt(40), "ErrSplitManifest")
 	neg("lineage-neg-parent-return", "the parent was returned: its burn carries a return reason, not a manifest", tw(&SplitHooks{Manifest: func(SplitManifest) []byte {
 		return ReturnReason(cfg.ChainID, cfg.Vault, cfg.ZeroAddress, cfg.Ty, cfg.Aid, rcpt, big.NewInt(100))

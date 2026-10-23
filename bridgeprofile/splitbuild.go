@@ -41,6 +41,8 @@ type SplitHooks struct {
 	Proof        func(i int, p SumProof) SumProof // the proof embedded in output i
 	ChildMint    func(i int, m *MintTx)           // output i's mint after the commitment is computed (the child is re-signed)
 	ParentSource func(h *History)                 // the parent history after its burn, before it is embedded; the caller re-signs
+	ParentToken  func(token []byte) []byte        // the embedded parent token bytes, before the children's justifications are built
+	BurnTo       *[32]byte                        // the burn predicate's hash instead of H(manifest data)
 	NoSplitBurn  bool                             // end the parent with an ordinary transfer instead of a burn
 }
 
@@ -173,7 +175,7 @@ func (b *LineageBuilder) Split(parent *LineageToken, outs []SplitOut, hk *SplitH
 		if err := parent.H.appendTransfer(&state, owner, sigPred(owner), nil, 1000); err != nil {
 			return nil, err
 		}
-	} else if err := parent.H.appendTransfer(&state, owner, BurnPredicate(H(data)), data, 1000); err != nil {
+	} else if err := parent.H.appendTransfer(&state, owner, BurnPredicate(burnHash(data, hk.BurnTo)), data, 1000); err != nil {
 		return nil, err
 	}
 	if hk.ParentSource != nil {
@@ -181,6 +183,9 @@ func (b *LineageBuilder) Split(parent *LineageToken, outs []SplitOut, hk *SplitH
 	}
 	if err := b.embed(parent); err != nil {
 		return nil, err
+	}
+	if hk.ParentToken != nil {
+		parent.Token = hk.ParentToken(parent.Token)
 	}
 	var out []*LineageToken
 	for i, k := range kids {
@@ -267,4 +272,33 @@ func bytes32x33(b byte) []byte {
 		out[i] = b
 	}
 	return out
+}
+
+func burnHash(data []byte, to *[32]byte) [32]byte {
+	if to != nil {
+		return *to
+	}
+	return H(data)
+}
+
+// Real2 is a depth-2 part under real embedded proofs (for the mutation test).
+func (b *LineageBuilder) Real2(t interface{ Helper() }) (*LineageToken, error) {
+	rb := *b
+	rb.Real = true
+	return rb.Chain(7, big.NewInt(1<<20), 2, "m")
+}
+
+// CorruptedMintUC is a ParentToken hook that replaces the parent mint proof's certificate by one with an out-of-range seal network:
+// outside the native/SDK codec intersection, with every transaction byte (and so every signature) untouched.
+func CorruptedMintUC(token []byte) []byte {
+	t, err := DecodeToken(token)
+	if err != nil {
+		panic(err)
+	}
+	uc, err := replaceCertificateItem(t.MintProof.UC, CUint(65536), 0, 6, 0, 1)
+	if err != nil {
+		panic(err)
+	}
+	t.MintProof.UC = uc
+	return t.Bytes()
 }
