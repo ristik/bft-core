@@ -168,6 +168,28 @@ func TestOperatorHandoffPreparesBeforeEndorsement(t *testing.T) {
 	}
 	prepared := preparedWith(nil)
 
+	t.Run("an intent that reaches a validator after the Prepare of its own plan is accepted; another plan or a lapsed Prepare is refused with the reason", func(t *testing.T) {
+		require.NoError(t, cm.acceptHandoffIntentAtState(plan, state), "idle: the intent is held for the leader")
+		require.NoError(t, cm.acceptHandoffIntentAtState(plan, prepared), "the leader ordered the Prepare before this validator got the intent: the same plan is accepted again")
+		other := prepareRecord
+		other.NextBodyID = bytes.Repeat([]byte{5}, 32)
+		err := cm.acceptHandoffIntentAtState(plan, preparedWith(func(c *evmroot.ControlState) { c.RecordBytes = other.Bytes() }))
+		require.ErrorIs(t, err, ErrHandoffApproval)
+		require.ErrorContains(t, err, "prepared for another plan")
+		lapsedHead := *prepared.CommittedHead
+		block := *lapsedHead.Block
+		block.Round = prepareRecord.OrderedRound + storage.PrepareFreezeLapseRounds + 1
+		lapsedHead.Block = &block
+		lapsed := *prepared
+		lapsed.CommittedHead = &lapsedHead
+		err = cm.acceptHandoffIntentAtState(plan, &lapsed)
+		require.ErrorIs(t, err, ErrHandoffApproval)
+		require.ErrorContains(t, err, "plans attempt 1")
+		wrong := plan
+		wrong.Attempt = 7
+		require.ErrorContains(t, cm.acceptHandoffIntentAtState(wrong, state), "the plan is for attempt 7")
+	})
+
 	t.Run("endorsed parent must be the Prepare-bound parent", func(t *testing.T) {
 		bad := plan
 		bad.FrozenParent = bytes.Repeat([]byte{8}, 32)

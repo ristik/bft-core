@@ -310,16 +310,45 @@ func (x *ConsensusManager) PlanHandoff(next *types.RootTrustBaseV1, proposal *ev
 // AcceptHandoffIntent registers a plan another validator's operator endpoint built, after checking everything about it that needs
 // no signature and no EVM state: the body, the candidate, the attempt this chain expects next.
 func (x *ConsensusManager) AcceptHandoffIntent(plan abdrc.HandoffApprovalMsg) error {
+	state, err := x.blockStore.GetState()
+	if err != nil {
+		return fmt.Errorf("%w: no committed state", ErrHandoffApproval)
+	}
+	return x.acceptHandoffIntentAtState(plan, state)
+}
+
+// acceptHandoffIntentAtState is AcceptHandoffIntent against a given committed state.
+//
+// The leader orders a plan's Prepare as soon as it holds the plan's intent, so an operator that hands the intent to the other validators one after the
+// other can reach a validator whose committed control state already holds that Prepare. The intent is not needed there any more (it is held only so that a
+// leader can order the Prepare, and a validator endorses against the committed Prepare itself), so the same plan is accepted again without being held:
+// the Prepare of this attempt must be committed and not lapsed, and it must be bound to this plan's body. A different plan for the attempt, or an
+// attempt whose Prepare lapsed, is refused with the reason.
+func (x *ConsensusManager) acceptHandoffIntentAtState(plan abdrc.HandoffApprovalMsg, state *abdrc.StateMsg) error {
 	if plan.Signer != "" || len(plan.Signature) != 0 || len(plan.AbortSignature) != 0 || len(plan.FrozenParent) != 0 {
 		return fmt.Errorf("%w: an intent carries no signer, signature or frozen parent", ErrHandoffApproval)
 	}
-	state, err := x.blockStore.GetState()
-	if err != nil || state == nil || state.CommittedHead == nil || state.CommittedHead.Block == nil {
+	if state == nil || state.CommittedHead == nil || state.CommittedHead.Block == nil {
 		return fmt.Errorf("%w: no committed head", ErrHandoffApproval)
 	}
-	attempt, err := plannedAttempt(state.CommittedHead.Control, state.CommittedHead.Block.Round)
+	control, round := state.CommittedHead.Control, state.CommittedHead.Block.Round
+	if control != nil && control.Phase == "prepared" && control.Attempt == plan.Attempt && !storage.PrepareLapsed(control, round) {
+		body, _, err := x.checkPlanBody(&plan)
+		if err != nil {
+			return err
+		}
+		prepared, err := storage.DecodeOrderedHandoffRecord(control.RecordBytes)
+		if err != nil {
+			return fmt.Errorf("%w: the committed Prepare does not decode: %w", ErrHandoffApproval, err)
+		}
+		if id := body.id; !bytes.Equal(id[:], prepared.NextBodyID) {
+			return fmt.Errorf("%w: attempt %d is prepared for another plan", ErrHandoffApproval, plan.Attempt)
+		}
+		return nil
+	}
+	attempt, err := plannedAttempt(control, round)
 	if err != nil {
-		return fmt.Errorf("%w: no plannable attempt in the committed control state: %w", ErrHandoffApproval, err)
+		return fmt.Errorf("%w: no plannable attempt in the committed control state (phase %q): %w", ErrHandoffApproval, controlPhase(control), err)
 	}
 	if plan.Attempt != attempt {
 		return fmt.Errorf("%w: the plan is for attempt %d, this validator's committed state plans attempt %d", ErrHandoffApproval, plan.Attempt, attempt)
@@ -329,6 +358,13 @@ func (x *ConsensusManager) AcceptHandoffIntent(plan abdrc.HandoffApprovalMsg) er
 	}
 	x.setHandoffIntent(plan)
 	return nil
+}
+
+func controlPhase(c *evmroot.ControlState) string {
+	if c == nil {
+		return "none"
+	}
+	return c.Phase
 }
 
 func (x *ConsensusManager) setHandoffIntent(plan abdrc.HandoffApprovalMsg) {
