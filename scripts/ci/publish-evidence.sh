@@ -13,10 +13,10 @@ set -uo pipefail
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd); repo=$(cd "$here/../.." && pwd)
 source "$repo/scripts/lib/portable.sh"
 . "$repo/scripts/lib/reth-pin.sh"   # rethEvidenceValidate / rethEvidenceSecretValues (definitions only)
-ev= out= status=0 nodes= minlogs=0 kind=combined s4=0 x4o=0 x4a=0; extra=()
+ev= out= status=0 nodes= minlogs=0 kind=combined s4=0 x4o=0 x4a=0 x4r=0; extra=()
 while [ $# -gt 0 ]; do case "$1" in
   --evidence) ev=$2; shift 2 ;; --out) out=$2; shift 2 ;; --status) status=$2; shift 2 ;; --nodes) nodes=$2; shift 2 ;;
-  --min-node-logs) minlogs=$2; shift 2 ;; --kind) kind=$2; shift 2 ;; --s4) s4=$2; shift 2 ;; --x4o) x4o=$2; shift 2 ;; --x4a) x4a=$2; shift 2 ;; --extra) extra+=("$2"); shift 2 ;; *) echo "publish-evidence: unknown argument $1" >&2; exit 2 ;; esac; done
+  --min-node-logs) minlogs=$2; shift 2 ;; --kind) kind=$2; shift 2 ;; --s4) s4=$2; shift 2 ;; --x4o) x4o=$2; shift 2 ;; --x4a) x4a=$2; shift 2 ;; --x4r) x4r=$2; shift 2 ;; --extra) extra+=("$2"); shift 2 ;; *) echo "publish-evidence: unknown argument $1" >&2; exit 2 ;; esac; done
 [ -d "$ev" ] && [ -n "$out" ] || { echo "usage: publish-evidence.sh --evidence DIR --out OUT --status N [--nodes DIR] [--min-node-logs N] [--extra PATH]..." >&2; exit 2; }
 name=$(basename "$ev"); mkdir -p "$out"; quarantine="$(cd "$out" && pwd)/../quarantine"; mkdir -p "$quarantine"
 stage=$(mktemp -d); trap 'rm -rf "$stage"' EXIT
@@ -110,6 +110,17 @@ if [ "$x4a" = 1 ]; then   # X4 B6: the accounting snapshots read from the live c
   ! grep -q collectorNotes "${sn:-/nonexistent}" 2>/dev/null || { complete=no; why+=("x4pos/snapshots.jsonl: the collector's cross-check noted a mismatch"); }
   jq -e '.status == "PASS"' "${ac:-/nonexistent}" >/dev/null 2>&1 || { complete=no; why+=("x4pos/accounting.txt: the accounting checker did not PASS"); }
   grep -q 'PASS: x4a: accounting over' "$ev/lane.log" 2>/dev/null || { complete=no; why+=("no 'x4a: accounting over N snapshots' line in lane.log"); }
+fi
+if [ "$x4r" = 1 ]; then   # X4 B6c: the pool's whole life replayed against the recovery chain: it ran dry (a zero-budget interval), was refilled, and a later interval was paid
+  xr=$(find "$pub" -path '*/x4pos/steps/xr/replay-after.txt' | head -n 1)
+  line=$(sed -n 's/^REWARDS-REPLAY ok //p' "${xr:-/nonexistent}" 2>/dev/null | tail -n 1)
+  [ -n "$line" ] || { complete=no; why+=("no REWARDS-REPLAY ok line in x4pos/steps/xr/replay-after.txt"); }
+  [ "$(jq -r '.refilledAfterExhaustion' <<<"${line:-null}" 2>/dev/null)" = true ] && [ "$(jq -r '.zeroBudget // 0' <<<"${line:-null}" 2>/dev/null)" -ge 1 ] 2>/dev/null \
+    && [ "$(jq -r '.paid // 0' <<<"${line:-null}" 2>/dev/null)" -ge 3 ] 2>/dev/null && [ "$(jq -r '.fundings // 0' <<<"${line:-null}" 2>/dev/null)" -ge 1 ] 2>/dev/null \
+    || { complete=no; why+=("the replay does not show a dry pool refilled and then paid (zeroBudget >= 1, fundings >= 1, paid >= 3, refilledAfterExhaustion)"); }
+  [ "$x4a" = 1 ] || { complete=no; why+=("--x4r needs --x4a: the pool's payments are judged by the accounting snapshots"); }
+  pn=$(find "$pub" -path '*/x4pos/snapshots.jsonl' | head -n 1)
+  [ "$(tail -n 1 "${pn:-/nonexistent}" 2>/dev/null | jq -r '.payments | length' 2>/dev/null)" -ge 1 ] 2>/dev/null || { complete=no; why+=("x4pos/snapshots.jsonl: the last snapshot has no pool payment (the Claimed decoding was not exercised)"); }
 fi
 [ -z "${CI_INTERIM:-}" ] || { complete=no; why+=("INTERIM EXPERIMENT, not acceptance evidence: $CI_INTERIM"); }
 if [ "$complete" = no ]; then
