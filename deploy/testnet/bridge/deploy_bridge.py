@@ -10,14 +10,18 @@ network against validator 1's execution client (an operator action: the public g
      generation's genesis-funded faucet keystore (the key never leaves its file);
   3. dnb-tool trust-bundle / pdr, then GENERATION/bridge/lane-config.json for tests/live/anyage.ts and GENERATION/bridge/public/, the one directory
      to publish for testers: the tester page (bridge/tester/index.html), tester-config.json for the bridge tester (native-bridge-plugins tester/), which
-     names the endpoints a tester reaches (--tester-*-url; the defaults are the internal names), and the four public files it names.
+     names the endpoints a tester reaches (--tester-*-url; the defaults are the internal names), and the four public files it names;
+  4. the bridge release manifest (release.py), GENERATION/bridge/public/bridge-release.json.
 Writes everything under GENERATION/bridge/.
 """
 import argparse
 import json
 import os
+import re
 import subprocess
 from pathlib import Path
+
+import release
 
 ETH = 'http://ureth1:8545'
 TAG = 'tnops-bridge:verified'
@@ -106,6 +110,11 @@ def main():
     if a.tester_redeem_eth_url:
         tester['redeemEthUrl'] = a.tester_redeem_eth_url
     (public / 'tester-config.json').write_text(json.dumps(tester, indent=2) + '\n')
+    image = subprocess.check_output(['docker', 'image', 'inspect', '--format={{.Id}}', TAG], text=True).strip()
+    ureth = json.loads((gen / 'compose.yaml').read_text())['services']['ureth1']['entrypoint']
+    max_body = int(re.search(r'^MAX_BODY = (\d+)', (Path(__file__).resolve().parent.parent / 'gateway.py').read_text(), re.M).group(1))
+    manifest_doc = release.build(gen, lambda *args: tools(gen, *args, capture=True), image, ureth, max_body)
+    (public / 'bridge-release.json').write_text(json.dumps(manifest_doc, indent=2) + '\n')
     if os.getuid() == 0:   # the package's services run as 10001 (the lock-proof endpoint reads the trust bundle here)
         subprocess.run(['chown', '-R', '10001:10001', str(work)], check=True)
     print(json.dumps(addr))
