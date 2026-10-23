@@ -4,7 +4,7 @@
   "components": {
     "ureth": {
       "repository": "https://github.com/ristik/ureth.git",
-      "commit": "ef52f3c178ee3c4e6bc8827d1b6fd0b1d3652bc4",
+      "commit": "e23152b53c54f0224f6f74a6082c8a17a8ff1627",
       "package": "unicity-reth",
       "cargoArgs": [
         "build",
@@ -14,7 +14,7 @@
         "unicity-reth"
       ],
       "features": "default (jemalloc)",
-      "note": "ureth#83 merge (B7 PR 3): BRIDGE_COMPOSE_V1 with the 2 MiB envelope, on #82 (embedded-object parity) and #81 (0x0105 streamed composition); includes #75's transaction gossip",
+      "note": "ureth#88 (protocol 6: BRIDGE_COMPOSE_V2 registered at 0x0105, the lineage relation of #84 with #86's oracle parity), on B7 PR 3 (#83: the 2 MiB envelope, #82, #81) and #75's transaction gossip. CANDIDATE: re-pin to the merge of #84/#86/#88",
       "targetedPackages": [
         "reth-unicity-b1",
         "reth-unicity-execution",
