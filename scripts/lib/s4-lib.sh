@@ -267,11 +267,12 @@ s4_submit_once() {
   local out=$1 ev=$2; shift 2
   local ids=() wait=0 f pid settle=()
   for f in "$@"; do [ "$f" = --wait ] && { wait=1; settle=(--settle); } || ids+=(--assignment "$f"); done
-  local d=$S4_DIR eth id
+  local d=$S4_DIR eth id okey
+  okey=$(s4_offender_pubkey) || return 1   # only this offender's pair when the journals hold several offences
   # the lane's validators do not gossip transactions: --eth-rpc lists every online validator (the first decides reads)
   eth=$(s4_eth_all)
   build/ubft evidence submit --journal "$d/journal-root$(jq -r .halfA.root "$d/delivery.json").db" --journal "$d/journal-root$(jq -r .halfB.root "$d/delivery.json").db" \
-    --eth-rpc "$eth" --evidence "$ev" "${ids[@]}" --sender-key "$S4_KEY" ${settle[@]+"${settle[@]}"} >"$out" 2>&1 &
+    --eth-rpc "$eth" --evidence "$ev" "${ids[@]}" --sender-key "$S4_KEY" --offender-key "$okey" ${settle[@]+"${settle[@]}"} >"$out" 2>&1 &
   pid=$!
   if [ "$wait" = 0 ]; then
     for f in $(seq 1 3000); do grep -q "case=" "$out" 2>/dev/null && break; kill -0 "$pid" 2>/dev/null || break; sleep 0.1; done
