@@ -13,10 +13,10 @@ set -uo pipefail
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd); repo=$(cd "$here/../.." && pwd)
 source "$repo/scripts/lib/portable.sh"
 . "$repo/scripts/lib/reth-pin.sh"   # rethEvidenceValidate / rethEvidenceSecretValues (definitions only)
-ev= out= status=0 nodes= minlogs=0 kind=combined s4=0 x4o=0; extra=()
+ev= out= status=0 nodes= minlogs=0 kind=combined s4=0 x4o=0 x4a=0; extra=()
 while [ $# -gt 0 ]; do case "$1" in
   --evidence) ev=$2; shift 2 ;; --out) out=$2; shift 2 ;; --status) status=$2; shift 2 ;; --nodes) nodes=$2; shift 2 ;;
-  --min-node-logs) minlogs=$2; shift 2 ;; --kind) kind=$2; shift 2 ;; --s4) s4=$2; shift 2 ;; --x4o) x4o=$2; shift 2 ;; --extra) extra+=("$2"); shift 2 ;; *) echo "publish-evidence: unknown argument $1" >&2; exit 2 ;; esac; done
+  --min-node-logs) minlogs=$2; shift 2 ;; --kind) kind=$2; shift 2 ;; --s4) s4=$2; shift 2 ;; --x4o) x4o=$2; shift 2 ;; --x4a) x4a=$2; shift 2 ;; --extra) extra+=("$2"); shift 2 ;; *) echo "publish-evidence: unknown argument $1" >&2; exit 2 ;; esac; done
 [ -d "$ev" ] && [ -n "$out" ] || { echo "usage: publish-evidence.sh --evidence DIR --out OUT --status N [--nodes DIR] [--min-node-logs N] [--extra PATH]..." >&2; exit 2; }
 name=$(basename "$ev"); mkdir -p "$out"; quarantine="$(cd "$out" && pwd)/../quarantine"; mkdir -p "$quarantine"
 stage=$(mktemp -d); trap 'rm -rf "$stage"' EXIT
@@ -103,6 +103,13 @@ if [ "$x4o" = 1 ]; then   # X4 B4: the second offence (a staying member, root4),
   [ -n "$(find "$pub" -path '*/s4b/SHA256SUMS' | head -n 1)" ] || { complete=no; why+=("s4b/SHA256SUMS: the second offence's archive is missing"); }
   grep -q "PASS: x4o: the reporter's credit" "$ev/lane.log" 2>/dev/null || { complete=no; why+=("no 'x4o: the reporter's credit = bounty 1 + bounty 2' line in lane.log"); }
   grep -q 'PASS: s4: the reporter claimed exactly the bounty' "$ev/lane.log" 2>/dev/null || { complete=no; why+=("no exact reporter claim line in lane.log"); }
+fi
+if [ "$x4a" = 1 ]; then   # X4 B6: the accounting snapshots read from the live chain and judged by accounting.py (PASS needs at least two snapshots and every invariant)
+  sn=$(find "$pub" -path '*/x4pos/snapshots.jsonl' | head -n 1); ac=$(find "$pub" -path '*/x4pos/accounting.txt' | head -n 1)
+  [ "$(wc -l <"${sn:-/nonexistent}" 2>/dev/null | tr -d ' ')" -ge 4 ] 2>/dev/null || { complete=no; why+=("x4pos/snapshots.jsonl: fewer than 4 accounting snapshots"); }
+  ! grep -q collectorNotes "${sn:-/nonexistent}" 2>/dev/null || { complete=no; why+=("x4pos/snapshots.jsonl: the collector's cross-check noted a mismatch"); }
+  jq -e '.status == "PASS"' "${ac:-/nonexistent}" >/dev/null 2>&1 || { complete=no; why+=("x4pos/accounting.txt: the accounting checker did not PASS"); }
+  grep -q 'PASS: x4a: accounting over' "$ev/lane.log" 2>/dev/null || { complete=no; why+=("no 'x4a: accounting over N snapshots' line in lane.log"); }
 fi
 [ -z "${CI_INTERIM:-}" ] || { complete=no; why+=("INTERIM EXPERIMENT, not acceptance evidence: $CI_INTERIM"); }
 if [ "$complete" = no ]; then
