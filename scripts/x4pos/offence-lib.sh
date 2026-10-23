@@ -52,12 +52,19 @@ x4o_second() {
   # the running K assignment is untouched: the same acknowledged assignment, epoch 3, and a paid transaction certifies after the settlement
   local acked1 lost1 open1 state1; e=$(s4_epoch 1); r0=$(s4_round 1)
   acked1=$(p85_last_acked) || return 1
-  p85_paid 1 >/dev/null || { echo "x4o: a paid transaction did not go through after the second settlement" >&2; return 1; }
+  # the lane runs the execution shard on three of four validators (#728: a round whose leader is the stopped one waits for the round timeout), so one 180 s wait can be too short:
+  # the same paid transaction (the chain nonce is re-read, the hash is the same until it is mined) is waited for up to five times, and the attempts are recorded
+  local paid=0 try
+  for try in 1 2 3 4 5; do
+    if p85_paid 1 >/dev/null; then paid=$try; break; fi
+    echo "x4o: the paid transaction after the second settlement was not certified in attempt $try" >&2
+  done
+  [ "$paid" != 0 ] || { echo "x4o: a paid transaction did not go through after the second settlement in 5 attempts" >&2; return 1; }
   sleep 10; r1=$(s4_round 1)
   open1=$(p85_open_result) || return 1
   if [ "$r" != "$zero" ]; then lost1=$(x4o_lost "$r") || return 1; state1=$(p85_result_state "$r"); else lost1=; state1=; fi
-  jq -n --argjson epoch "$e" --argjson r0 "$r0" --argjson r1 "$r1" --arg acked0 "$acked0" --arg acked1 "$acked1" --arg open1 "$open1" --arg r "$r" --arg lost1 "$lost1" --arg state1 "$state1" \
-    '{epoch: $epoch, roundBefore: $r0, roundAfter: $r1, lastAckedUnchanged: ($acked0 == $acked1), paidTxOk: true, openResultUnchanged: ($open1 == $r), lostAfterSettlement: (if $lost1 == "" then null else ($lost1 | tonumber) end), laterResultStateAfter: (if $state1 == "" then null else ($state1 | tonumber) end)}' >"$X4O_DIR/post-settle.json"
+  jq -n --argjson epoch "$e" --argjson r0 "$r0" --argjson r1 "$r1" --arg acked0 "$acked0" --arg acked1 "$acked1" --arg open1 "$open1" --arg r "$r" --arg lost1 "$lost1" --arg state1 "$state1" --argjson paid "$paid" \
+    '{epoch: $epoch, roundBefore: $r0, roundAfter: $r1, lastAckedUnchanged: ($acked0 == $acked1), paidTxOk: true, paidAttempt: $paid, openResultUnchanged: ($open1 == $r), lostAfterSettlement: (if $lost1 == "" then null else ($lost1 | tonumber) end), laterResultStateAfter: (if $state1 == "" then null else ($state1 | tonumber) end)}' >"$X4O_DIR/post-settle.json"
   jq -e '.epoch == 3 and .roundAfter > .roundBefore and .lastAckedUnchanged and .openResultUnchanged' "$X4O_DIR/post-settle.json" >/dev/null || { echo "x4o: the K assignment moved after the second admission: $(cat "$X4O_DIR/post-settle.json")" >&2; return 1; }
   if [ "$r" != "$zero" ]; then
     [ "$lost1" = 1 ] && [ "$state1" = 1 ] || { echo "x4o: after the settlement the later result is lost=$lost1 state=$state1 (wanted lost, still Reserved)" >&2; return 1; }
