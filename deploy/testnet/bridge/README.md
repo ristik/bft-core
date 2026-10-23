@@ -21,6 +21,7 @@ outstanding locks, retired-key forged histories, the proof refresh across rotati
 | `release.py` | the bridge release manifest, `GENERATION/bridge/public/bridge-release.json` (below) |
 | `tester/index.html` | the tester page: the fake-value disclosure, the network's endpoints (read from `tester-config.json` beside it), the tester's steps and a read of the visitor's vault credit through their EVM wallet |
 | `overlay.py` | `GENERATION/compose.bridge.yaml`, the Compose overlay with the bridge's services |
+| `RECOVERY.md` | the operator's bridge recovery runbook: roles, what depends on what, the checks after any procedure, and each failure's procedure |
 | `rehearse_bridge.py` | the bridge stages of the runner rehearsal (`.github/workflows/testnet-bridge.yml`) |
 
 ## Operator steps

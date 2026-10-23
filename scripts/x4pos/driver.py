@@ -26,6 +26,9 @@ import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import accounting  # noqa: E402
+
 PENDING, RUNNING, DONE, FAILED = "pending", "running", "done", "failed"
 FORMAT = "UNICITY_X4_POS_CAMPAIGN/v1"
 
@@ -289,7 +292,16 @@ class Driver:
                 pending.append(s["id"])
         short = {k: {"required": n, "done": counts.get(k, 0)} for k, n in self.m["required"].items() if counts.get(k, 0) < n}
         status = "FAIL" if failed or late else "INCOMPLETE" if pending or short else "PASS"
-        rep = {"status": status, "manifestSha256": self.sha, "startedUtc": body["startedUtc"], "counts": counts, "failed": failed, "late": late, "pending": pending, "shortOfRequired": short, "unverified": unverified}
+        acct = None
+        if self.m.get("accounting"):   # the accumulated-state checker (accounting.py) over the collector's snapshots: no snapshots, or too few, is not a pass
+            snaps = self.dir / "snapshots.jsonl"
+            acct = accounting.run(snaps) if snaps.exists() else {"status": "INCOMPLETE", "reason": "no snapshots.jsonl: the collector did not run"}
+            (self.dir / "accounting.json").write_text(json.dumps(acct, indent=1, sort_keys=True))
+            if acct["status"] == "FAIL":
+                status = "FAIL"
+            elif acct["status"] != "PASS" and status == "PASS":
+                status = "INCOMPLETE"
+        rep = {"status": status, "accounting": acct, "manifestSha256": self.sha, "startedUtc": body["startedUtc"], "counts": counts, "failed": failed, "late": late, "pending": pending, "shortOfRequired": short, "unverified": unverified}
         (self.dir / "report.json").write_text(json.dumps(rep, indent=1, sort_keys=True))
         return rep
 
