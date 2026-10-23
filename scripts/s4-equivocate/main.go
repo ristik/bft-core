@@ -18,6 +18,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -366,15 +367,35 @@ type evVote struct {
 	SealSignature   []byte
 }
 
+// offenderPairs keeps the paired slots of one offender key; with no key every pair is kept (the single-offender lane). A lane with two offenders in the same journals
+// (X4 B4's second offence) names the offender it submits for.
+func offenderPairs(pairs []*rootevidence.SlotRecord, key []byte) []*rootevidence.SlotRecord {
+	if len(key) == 0 {
+		return pairs
+	}
+	var out []*rootevidence.SlotRecord
+	for _, p := range pairs {
+		if bytes.Equal(p.Key, key) {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
 // Variants returns the canonical submitEvidence call of the single paired slot of the journals and its controls, as hex (no 0x prefix) calldata.
 func Variants(journals []*rootevidence.Journal, network [32]byte, cfg votesig.Config, exposure [32]byte) (map[string][]byte, error) {
+	return VariantsFor(journals, nil, network, cfg, exposure)
+}
+
+// VariantsFor is Variants for the single paired slot of the given offender key (nil: of any key).
+func VariantsFor(journals []*rootevidence.Journal, offenderKey []byte, network [32]byte, cfg votesig.Config, exposure [32]byte) (map[string][]byte, error) {
 	col, err := rootevidence.Collect(journals...)
 	if err != nil {
 		return nil, err
 	}
-	pairs := col.Pairs()
+	pairs := offenderPairs(col.Pairs(), offenderKey)
 	if len(pairs) != 1 {
-		return nil, fmt.Errorf("the journals hold %d offences, the exercise needs exactly one", len(pairs))
+		return nil, fmt.Errorf("the journals hold %d offences (of the offender key given: %t), the exercise needs exactly one", len(pairs), len(offenderKey) > 0)
 	}
 	canonical, err := rootevidence.SubmitCalldata(network, cfg, pairs[0], exposure)
 	if err != nil {
@@ -467,6 +488,7 @@ func runCalldata(args []string) error {
 	rootNetwork := fs.Uint64("root-network", 0, "the root network id N")
 	genesis := fs.String("genesis", "", "the root-chain genesis identity G")
 	exposure := fs.String("exposure", "", "the exposure id (0x + 32 bytes)")
+	offenderKey := fs.String("offender-key", "", "the offender's public key (hex, 33 bytes): the pair of that key is used when the journals hold several offences")
 	out := fs.String("out", "", "the output directory")
 	_ = fs.Parse(args)
 	if len(journals) == 0 || *out == "" || *netWord == "" || *genesis == "" || *exposure == "" {
@@ -490,7 +512,13 @@ func runCalldata(args []string) error {
 	}
 	defer closeAll()
 	cfg := votesig.Config{Scheme: votesig.SchemeDomainBound, Network: *rootNetwork, Genesis: g}
-	v, err := Variants(js, nw, cfg, ex)
+	var ok []byte
+	if *offenderKey != "" {
+		if ok, err = hex.DecodeString(strings.TrimPrefix(*offenderKey, "0x")); err != nil || len(ok) != 33 {
+			return fmt.Errorf("--offender-key is not 33 bytes of hex: %q", *offenderKey)
+		}
+	}
+	v, err := VariantsFor(js, ok, nw, cfg, ex)
 	if err != nil {
 		return err
 	}
