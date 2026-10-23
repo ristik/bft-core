@@ -3,13 +3,14 @@
 at one pinned block. Names are those of the pinned contracts (unicity-pos-contracts b17829ca: CustodyStorage.sol, StakeCustody.sol, RewardPool.sol); nothing here has run against a
 live chain yet, so a wrong event shape shows up as a failed cross-check below, never as a quiet pass.
 
-    collect.py snapshot --rpc URL --cast CAST --custody ADDR --pool ADDR --from-block N --t SECONDS --out snapshots.jsonl
+    collect.py snapshot --rpc URL --cast CAST --custody ADDR --pool ADDR --from-block N --t SECONDS [--genesis-funding WEI] --out snapshots.jsonl
 
 Reads at block B (cast block-number, then every call and log scan pinned to B):
   custody  deposited = sum lots(i).initial over every lot; slashed = sum lots(i).penalized; held = totalFree + totalEncumbered + totalDraining + totalCredits (credits are
            owed and still inside custody); withdrawn = sum CreditClaimed(.., .., amount); balance = the custody account's balance.
            Cross-check (the collector exits 1 and says so if it differs): withdrawn == sum over released lots (category 4) of (initial - penalized) + slashed - totalCredits.
-  pool     funded = sum Funded(.., amount) (the constructor's value included); paid = sum Claimed(.., .., amount); balance = the pool account's balance.
+  pool     funded = --genesis-funding + sum Funded(.., amount). In the P85 lanes the pool's funding is a genesis ALLOC (balance == rewardFunding at block 0, deployment.json), so no
+           Funded log exists for it: the caller passes it explicitly (default 0, right only for a pool funded by calls to fund(), whose Funded logs are then in the sum); paid = sum Claimed(.., .., amount); balance = the pool account's balance.
   payments one entry per pool Claimed event: ["<tx hash>:<log index>", payee, amount]. The pool pays no per-interval amount through a claim, so the (interval, payee) of the checker
            is the event id here: its duplicate rule then catches a repeated log, not a repeated economic payment. That limit is stated in the README.
   cursors  {"nextLotID": n} only: the contracts' other cursors are not read yet.
@@ -83,14 +84,14 @@ def snapshot(a):
     nxt = call(a, block, a.custody, "nextLotID()(uint256)")[0]
     lots = []
     i = 1
-    while i <= nxt + 1:   # nextLotID may be the last id or the next one to assign: walk until a lot with id 0
+    while i <= nxt + 1:   # nextLotID is the last assigned id (lotID = ++nextLotID): walk until an unassigned (all-zero) slot, one past the last, to see none is missing or extra
         v = call(a, block, a.custody, LOTS, i)
         need(len(v) == 13, f"lots({i}) returned {len(v)} values, not 13")
         if v[0] == 0:
             break
-        lots.append({"id": v[0], "initial": v[2], "remaining": v[3], "penalized": v[4], "category": v[5]})
+        lots.append({"identity": v[0], "initial": v[2], "remaining": v[3], "penalized": v[4], "category": v[5]})
         i += 1
-    need(len(lots) >= nxt - 1, f"nextLotID is {nxt} but only {len(lots)} lots exist")
+    need(len(lots) == nxt, f"nextLotID is {nxt} but {len(lots)} lots exist")
     free, enc, drain, credits = (call(a, block, a.custody, f"{n}()(uint256)")[0] for n in ("totalFree", "totalEncumbered", "totalDraining", "totalCredits"))
     deposited, slashed = sum(l["initial"] for l in lots), sum(l["penalized"] for l in lots)
     withdrawn = sum(amount_of(r) for r in logs(a, block, a.custody, CREDIT_CLAIMED))
@@ -102,7 +103,7 @@ def snapshot(a):
     funded_rows, claim_rows = logs(a, block, a.pool, FUNDED), logs(a, block, a.pool, CLAIMED)
     pays = [[f"{r['transactionHash']}:{word(str(r['logIndex'])) if isinstance(r['logIndex'], str) else r['logIndex']}", payee_of(r), amount_of(r)] for r in claim_rows]
     snap = {"t": a.t, "block": block, "cursors": {"nextLotID": nxt},
-            "pool": {"funded": sum(amount_of(r) for r in funded_rows), "paid": sum(p[2] for p in pays), "balance": int(cast(a, "balance", "--rpc-url", a.rpc, "--block", str(block), a.pool).split()[0])},
+            "pool": {"funded": a.genesis_funding + sum(amount_of(r) for r in funded_rows), "paid": sum(p[2] for p in pays), "balance": int(cast(a, "balance", "--rpc-url", a.rpc, "--block", str(block), a.pool).split()[0])},
             "custody": {"deposited": deposited, "withdrawn": withdrawn, "slashed": slashed, "held": held, "balance": int(cast(a, "balance", "--rpc-url", a.rpc, "--block", str(block), a.custody).split()[0])},
             "payments": pays}
     if notes:
@@ -120,6 +121,7 @@ def main(argv=None):
     for k in ("rpc", "cast", "custody", "pool", "out"):
         s.add_argument("--" + k, required=True)
     s.add_argument("--from-block", type=int, required=True, help="the contracts' deploy block: genesis lots are in no event")
+    s.add_argument("--genesis-funding", type=int, default=0, help="wei the pool held at block 0 as a genesis alloc (deployment.json rewardFunding); it emits no Funded log")
     s.add_argument("--t", type=int, required=True, help="seconds since the campaign start (strictly increasing across snapshots)")
     a = p.parse_args(argv)
     try:

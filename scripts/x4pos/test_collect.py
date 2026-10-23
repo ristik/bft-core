@@ -64,7 +64,7 @@ def world(**over):
 
 
 class Collect(unittest.TestCase):
-    def run_collect(self, w, out=None, t=0):
+    def run_collect(self, w, out=None, t=0, extra=()):
         d = tempfile.mkdtemp()
         d = Path(d)
         shim = d / "cast"
@@ -73,7 +73,7 @@ class Collect(unittest.TestCase):
         (d / "w.json").write_text(json.dumps(w))
         out = out or d / "s.jsonl"
         env = {"PATH": "/usr/bin:/bin", "WORLD": str(d / "w.json")}
-        r = subprocess.run([sys.executable, str(HERE / "collect.py"), "snapshot", "--rpc", "x", "--cast", str(shim), "--custody", CUST, "--pool", POOL, "--from-block", "1", "--t", str(t), "--out", str(out)],
+        r = subprocess.run([sys.executable, str(HERE / "collect.py"), "snapshot", "--rpc", "x", "--cast", str(shim), "--custody", CUST, "--pool", POOL, "--from-block", "1", "--t", str(t), "--out", str(out), *extra],
                            capture_output=True, text=True, env=env)
         return r, Path(out)
 
@@ -88,6 +88,22 @@ class Collect(unittest.TestCase):
         self.assertEqual(r2.returncode, 0, r2.stderr)
         self.assertEqual(accounting.run(out)["status"], "PASS")
 
+    def test_a_genesis_funded_pool_has_no_funded_log_and_needs_the_explicit_amount(self):
+        w = world(balances={CUST: 190, POOL: 1000 - 30})
+        w["logs"][POOL + "|Funded(address,uint256)"] = []
+        r, out = self.run_collect(w, extra=("--genesis-funding", "1000"))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(json.loads(out.read_text())["pool"], {"funded": 1000, "paid": 30, "balance": 970})
+        self.run_collect(w, out=out, t=60, extra=("--genesis-funding", "1000"))
+        self.assertEqual(accounting.run(out)["status"], "PASS")
+        r2, out2 = self.run_collect(w)   # without it the pool looks unfunded: funded 0 against a balance of 970 is the false FAIL the flag exists to prevent
+        self.run_collect(w, out=out2, t=60)
+        self.assertEqual(accounting.run(out2)["firstFailure"]["invariant"], "pool")
+
+    def test_funded_logs_add_to_the_genesis_amount(self):
+        r, out = self.run_collect(world(balances={CUST: 190, POOL: 570}), extra=("--genesis-funding", "500"))
+        self.assertEqual(json.loads(out.read_text())["pool"]["funded"], 600)
+
     def test_the_genesis_lots_count_although_no_event_made_them(self):
         r, out = self.run_collect(world())
         self.assertEqual(json.loads(out.read_text())["custody"]["deposited"], 150)
@@ -100,16 +116,13 @@ class Collect(unittest.TestCase):
         self.assertIn("CreditClaimed events 59", r.stderr)
         self.assertIn("collectorNotes", out.read_text())
 
-    def test_nextlotid_one_past_the_last_lot_and_the_last_lot_are_both_walked(self):
-        for n in (2, 3):
-            r, out = self.run_collect(world(nextLotID=n))
-            self.assertEqual(r.returncode, 0, r.stderr)
-            self.assertEqual(json.loads(out.read_text())["custody"]["deposited"], 150)
-
-    def test_a_missing_lot_below_nextlotid_is_refused(self):
-        r, _ = self.run_collect(world(nextLotID=5))
-        self.assertEqual(r.returncode, 1)
-        self.assertIn("only 2 lots exist", r.stderr)
+    def test_nextlotid_is_the_last_assigned_id_and_a_disagreement_either_way_is_refused(self):
+        r, out = self.run_collect(world(nextLotID=2))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        for n, msg in ((5, "nextLotID is 5 but 2 lots exist"), (1, "nextLotID is 1 but 2 lots exist")):
+            r, _ = self.run_collect(world(nextLotID=n))
+            self.assertEqual(r.returncode, 1)
+            self.assertIn(msg, r.stderr)
 
     def test_a_pool_that_paid_more_than_it_funded_fails_the_checker(self):
         w = world()
