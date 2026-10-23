@@ -1,7 +1,7 @@
 {
   "comment": "The bridge release's own inputs to the testnet package (briefs/tnb-without-host.md). build-bridge-image.py checks every checkout against these commits before it builds; deploy/testnet/pins.json stays the node image's. dnb-tool is built from the package's own bft-core checkout (its commit is recorded in artifacts/bridge-images.json): the lock-proof endpoint ships with the package.",
-  "contracts": "d4be6c998157deadff449f5a59d1696e9609d40d",
-  "native-bridge-plugins": "2a6e56b1603b23c53ea7ce1481dd97776c95a910",
+  "contracts": "9d998cbafc861779212f0dde923079dc7b318514",
+  "native-bridge-plugins": "a2a93a852af9c59d1a683e8fb1a3e82dd2a2020d",
   "node": "node:22.23.4-bookworm-slim@sha256:de170b39439eb0e5a3444ad7d60b015614a381e10fecae2e30ec9e735122f38d",
   "go": "golang:1.25.14-bookworm@sha256:3b4a11519ad929d1e1d261a12cff056f0c85b735253d7d861346b9c6f8b36437",
   "foundry": {
