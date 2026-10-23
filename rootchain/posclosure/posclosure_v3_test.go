@@ -64,7 +64,10 @@ func TestAV3HandoffIsAClosureWitness(t *testing.T) {
 	w = good
 	tampered := *f.Snapshot
 	tampered.ShardInfo = append(tampered.ShardInfo[:0:0], f.Snapshot.ShardInfo...)
-	tampered.ShardInfo[0].ShardConfHash = append([]byte{0xff}, tampered.ShardInfo[0].ShardConfHash[1:]...)
+	// flip a bit of the committed hash: setting a fixed byte is a no-op for the 1 in 256 fixtures whose hash already starts with it (#776)
+	tampered.ShardInfo[0].ShardConfHash = append([]byte(nil), f.Snapshot.ShardInfo[0].ShardConfHash...)
+	tampered.ShardInfo[0].ShardConfHash[0] ^= 0xff
+	require.NotEqual(t, f.Snapshot.ShardInfo[0].ShardConfHash, tampered.ShardInfo[0].ShardConfHash, "the tamper must change the committed hash")
 	w.Snapshot = &tampered
 	refuse("a checkpoint whose shard tree is not the committed one", w, closed)
 	w = good
