@@ -157,6 +157,7 @@ func TestNativeComposeV2MutationsNeverPanic(t *testing.T) {
 		}
 		require.NotPanics(t, func() {
 			_, st, _, _ := NativeComposeV2(m, 1<<40, b1)
+			require.Less(t, st, uint64(len(ComposeStatusV2)), "a status of the table")
 			seen[st]++
 		})
 	}

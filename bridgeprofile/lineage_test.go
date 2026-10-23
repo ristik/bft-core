@@ -344,6 +344,7 @@ func TestLineageNegatives(t *testing.T) {
 		}}, want: ErrSplitManifest},
 		{name: "burn predicate is not the hash of the manifest", hk: &SplitHooks{BurnTo: &[32]byte{1}}, want: ErrSplitBurn},
 		{name: "ancestor certificate outside the codec", hk: &SplitHooks{ParentToken: CorruptedMintUC}, want: ErrCertScan},
+		{name: "ancestor signature width", hk: &SplitHooks{ParentToken: CorruptedMintUCSig}, want: ErrCertSigLength},
 		{name: "parent does not end in a burn", hk: &SplitHooks{NoSplitBurn: true}, want: ErrSplitBurn},
 		{name: "partial-part return", amt: big.NewInt(39), want: ErrReturnAmount},
 		{name: "return of more than the part", amt: big.NewInt(100), want: ErrReturnAmount},

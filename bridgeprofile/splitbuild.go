@@ -288,6 +288,20 @@ func (b *LineageBuilder) Real2(t interface{ Helper() }) (*LineageToken, error) {
 	return rb.Chain(7, big.NewInt(1<<20), 2, "m")
 }
 
+// CorruptedMintUCSig is a ParentToken hook that gives the parent mint proof's first seal signature 63 bytes (neither 64 nor 65).
+func CorruptedMintUCSig(token []byte) []byte {
+	t, err := DecodeToken(token)
+	if err != nil {
+		panic(err)
+	}
+	uc, err := replaceCertificateItem(t.MintProof.UC, CBytes(make([]byte, 63)), 0, 6, 0, 7, 1)
+	if err != nil {
+		panic(err)
+	}
+	t.MintProof.UC = uc
+	return t.Bytes()
+}
+
 // CorruptedMintUC is a ParentToken hook that replaces the parent mint proof's certificate by one with an out-of-range seal network:
 // outside the native/SDK codec intersection, with every transaction byte (and so every signature) untouched.
 func CorruptedMintUC(token []byte) []byte {

@@ -181,6 +181,7 @@ type splitGen struct {
 	real   *LineageBuilder
 	fs     *FixtureSet
 	cases  map[string][]Case
+	muts   *MutationFile
 	failed error
 }
 
@@ -225,6 +226,7 @@ func BuildSplitCorpus() (*Corpus, error) {
 	g.commitments()
 	g.lineages()
 	g.nativeTwins()
+	g.mutations()
 	if g.failed != nil {
 		return nil, g.failed
 	}
@@ -486,6 +488,7 @@ func (g *splitGen) lineages() {
 	}}, x40), big.NewInt(40), "ErrSplitProof")
 	neg("lineage-neg-burn-predicate-not-manifest-hash", "the parent burns to a predicate that is not the hash of its (valid) manifest", tw(&SplitHooks{BurnTo: &[32]byte{1}}, x40), big.NewInt(40), "ErrSplitBurn")
 	neg("lineage-neg-ancestor-certificate-outside-codec", "an embedded ancestor certificate outside the native/SDK codec intersection (seal network 65536)", tw(&SplitHooks{ParentToken: CorruptedMintUC}, x40), big.NewInt(40), "ErrCertScan")
+	neg("lineage-neg-ancestor-signature-width", "an embedded ancestor certificate whose seal signature has 63 bytes", tw(&SplitHooks{ParentToken: CorruptedMintUCSig}, x40), big.NewInt(40), "ErrCertSigLength")
 	neg("lineage-neg-not-a-manifest", "the burn data is not a manifest", tw(&SplitHooks{Manifest: func(SplitManifest) []byte { return []byte{0x01} }}, x40), big.NewInt(40), "ErrSplitManifest")
 	neg("lineage-neg-parent-return", "the parent was returned: its burn carries a return reason, not a manifest", tw(&SplitHooks{Manifest: func(SplitManifest) []byte {
 		return ReturnReason(cfg.ChainID, cfg.Vault, cfg.ZeroAddress, cfg.Ty, cfg.Aid, rcpt, big.NewInt(100))
@@ -606,6 +609,13 @@ func (g *splitGen) pack() (*Corpus, error) {
 		return nil, err
 	}
 	out.Files["config/compose-status-v2.json"] = st
+	if g.muts != nil {
+		mb, err := js(g.muts)
+		if err != nil {
+			return nil, err
+		}
+		out.Files["mutation/cases.json"] = mb
+	}
 	return out, nil
 }
 
@@ -617,4 +627,71 @@ func (c *Corpus) SplitFiles() []string {
 	}
 	sort.Strings(names)
 	return names
+}
+
+// MutationFile is a differential-replay file: one valid BRIDGE_COMPOSE_V2 input and many small byte patches of it, each with the
+// outcome the oracle gives. It exists so a second implementation is compared on malformed inputs (every embedded-token, proof and
+// certificate fault) without storing a copy of the input per case.
+type MutationFile struct {
+	Format string         `json:"format"`
+	Base   string         `json:"base"` // the input, hex
+	Claims string         `json:"claims"`
+	Cases  []MutationCase `json:"cases"`
+}
+
+// MutationCase patches Base (xor Patch[i].X into byte Patch[i].O) and expects Expected.
+type MutationCase struct {
+	ID       string      `json:"id"`
+	Patch    []BytePatch `json:"patch"`
+	Expected Expect      `json:"expected"`
+}
+
+// BytePatch is one xor.
+type BytePatch struct {
+	O int  `json:"o"`
+	X byte `json:"x"`
+}
+
+// ReplayMutation applies the patch to base and runs NativeComposeV2 with an unlimited gas allowance.
+func ReplayMutation(base []byte, claims string, patch []BytePatch) Expect {
+	in := append([]byte{}, base...)
+	for _, p := range patch {
+		in[p.O] ^= p.X
+	}
+	b1, err := parseClaims(claims)
+	if err != nil {
+		return errExpect(err)
+	}
+	_, status, gas, halt := NativeComposeV2(in, math.MaxUint64>>1, b1)
+	if halt != nil {
+		return Expect{Status: "halt", Values: map[string]string{"halt": "abi"}}
+	}
+	return Expect{Status: "ok", Values: map[string]string{"status": u64s(status), "statusName": ComposeStatusNameV2(status), "gas": u64s(gas)}}
+}
+
+func (g *splitGen) mutations() {
+	part, err := g.real.Chain(7, big.NewInt(1<<20), 2, "m")
+	g.must(err)
+	g.real.Return(part, rcpt, part.Amount)
+	env, _, cert, err := g.real.Envelope(part, BaseTime+1000)
+	g.must(err)
+	in, err := EncodeComposeInput(OpReturn, g.d.F.Cfg.Bytes(), mustEncodeEnv(g, env))
+	g.must(err)
+	mf := &MutationFile{Format: "native-bridge-split-mutations/1", Base: hx(in), Claims: claimsOf(cert.Anchors...)}
+	rng := uint64(0x9e3779b97f4a7c15)
+	next := func() uint64 { rng ^= rng << 13; rng ^= rng >> 7; rng ^= rng << 17; return rng }
+	for i := 0; i < 400; i++ {
+		var patch []BytePatch
+		for k := 0; k < 1+int(next()%3); k++ {
+			patch = append(patch, BytePatch{O: int(next() % uint64(len(in))), X: byte(1 + next()%255)})
+		}
+		mf.Cases = append(mf.Cases, MutationCase{ID: fmt.Sprintf("mutation-%03d", i), Patch: patch, Expected: ReplayMutation(in, mf.Claims, patch)})
+	}
+	g.muts = mf
+}
+
+func mustEncodeEnv(g *splitGen, env *Envelope) []byte {
+	b, err := env.Encode()
+	g.must(err)
+	return b
 }
