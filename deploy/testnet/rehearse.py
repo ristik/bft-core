@@ -736,6 +736,9 @@ class Rehearsal:
             operator = ['--operator-socket', '/authority/operator.sock', '--operator-credential', '/authority/operator.cred']
             self.exec_in(f'authority{i}', 'ubft', 'signing-authority', 'advance-epoch', *operator, '--trust-base', '/network/handoff/trust-base-epoch2.json',
                          '--shard-conf', f'/network/handoff/shard-conf-{shard_epoch}.json')
+            auth = self.gen / f'validator{i}' / 'auth'
+            shutil.copy(auth / 'client.cred', auth / 'client.cred.pre-epoch-2')   # kept for pos-stale; a credential, so only in the entity's own auth directory
+            os.chmod(auth / 'client.cred.pre-epoch-2', 0o600)
             self.exec_in(f'authority{i}', 'ubft', 'signing-authority', 'replace-session', *operator, '--out', '/authority/client.cred')
             self.compose('start', f'shard{i}')
         # 13 paid work at the new epoch
@@ -751,6 +754,66 @@ class Rehearsal:
             count = self.view(self.REGISTRY, 'recordCount()(uint64)')[0]
             return count if count == self.view(deployment['custody'], 'recordCursor()(uint64)')[0] else None
         self.say(f'  recordCount == recordCursor == {self.wait("the custody has applied every root record", lambda: applied() is not None, 300) and applied()}')
+
+    def exec_rc(self, service, *command):
+        run = subprocess.run(['docker', 'compose', '-f', str(self.gen / 'compose.yaml'), 'exec', '-T', service, *command], text=True, capture_output=True)
+        return run.returncode, run.stdout, run.stderr
+
+    def pos_restart(self):
+        """The TN-1 pod-restart stage on the switched PoS network: one entity at a time (--pods) its execution client, root and shard node are stopped, the survivors
+        certify a transaction, the entity is started again (`start`: the roots keep the container they were recreated with, install flag included) and converges; then every
+        root still certifies at epoch 2 and the custody has applied every root record. Needs pos-advance first."""
+        transport = handoff_ops.DockerTransport(self.gen)
+        self.expect(all(self.root_epoch(i, transport) == 2 for i in range(1, self.n + 1)), 'every root certifies at epoch 2 (run pos-advance first)')
+        self.pod_restart()
+        for i in range(1, self.n + 1):
+            self.wait(f'root {i} certifies at epoch 2 again', lambda i=i: self.root_epoch(i, transport) == 2, 180)
+        deployment = json.loads((self.gen / 'network' / 'pos-deployment.json').read_text())
+        def applied():
+            count = self.view(self.REGISTRY, 'recordCount()(uint64)')[0]
+            return count if count == self.view(deployment['custody'], 'recordCursor()(uint64)')[0] else None
+        self.expect(self.wait('the custody has applied every root record', lambda: applied() is not None, 300), 'recordCursor equals recordCount after the restarts', str(applied()))
+
+    def pos_stale(self):
+        """Credentials of the old epoch after the switch. (1) the authority refuses to be advanced back to the epoch-1 trust base and shard configuration, and its
+        status does not move; (2) a shard node started with its PRE-advance client credential (kept as client.cred.pre-epoch-2 by pos-advance) is not served by the
+        authority: what its logs say is recorded; the current credential is then put back and the entity converges. Needs pos-advance first. The texts are the
+        product's; the first run of this stage records them."""
+        net = self.gen / 'network'
+        operator = ['--operator-socket', '/authority/operator.sock', '--operator-credential', '/authority/operator.cred']
+        def status(i):
+            return json.loads(self.exec_in(f'authority{i}', 'ubft', 'signing-authority', 'status', *operator))
+        before = status(1)
+        rc, out, err = self.exec_rc('authority1', 'ubft', 'signing-authority', 'advance-epoch', *operator, '--trust-base', '/network/trust-base.json',
+                                    '--shard-conf', '/network/full-shard-conf.json')
+        self.say(f'  advance back to epoch 1: exit {rc}: {(out + err).strip()[-300:]}')
+        (self.evidence / 'handoff').mkdir(exist_ok=True)
+        (self.evidence / 'handoff' / 'stale-trust-base.txt').write_text(f'exit {rc}\n{out}{err}')
+        self.expect(rc != 0, 'the authority refuses to be advanced back to the epoch-1 trust base and shard configuration', (out + err).strip()[-300:])
+        after = status(1)
+        self.expect(after == before, 'the refused advance changes nothing in the authority status', f'{before} -> {after}')
+        # (2) the old client credential
+        auth = self.gen / 'validator1' / 'auth'
+        old, current = auth / 'client.cred.pre-epoch-2', auth / 'client.cred'
+        self.expect(old.is_file(), 'the pre-advance credential was kept (run pos-advance first)')
+        shutil.copy(current, auth / 'client.cred.epoch-2')
+        self.compose('stop', 'shard1')
+        shutil.copy(old, current)
+        started = datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+        self.compose('start', 'shard1')
+        time.sleep(30)
+        logs = self.compose('logs', '--no-color', '--since', started, 'shard1', check=False)
+        shown = [line for line in logs.splitlines() if any(word in line.lower() for word in ('credential', 'unauthori', 'session', 'authority', 'refus', 'abstain', 'denied'))]
+        (self.evidence / 'handoff' / 'stale-client-credential-shard1.log').write_text('\n'.join(shown[:60]) + '\n')
+        self.say(f'  shard 1 with the pre-advance credential: {len(shown)} authority-related log lines; first: {shown[0][:400] if shown else None}')
+        # put the current credential back
+        self.compose('stop', 'shard1')
+        shutil.copy(auth / 'client.cred.epoch-2', current)
+        self.compose('start', 'shard1')
+        receipt = json.loads(self.send_via_gateway(self.gen / 'faucet-secrets', '0x' + '55' * 20))
+        self.expect(receipt['status'] == '0x1', 'a transaction through the gateway is mined with the current credential back', receipt['transactionHash'])
+        self.wait('validator 1 has it', lambda: self.ureth(1, 'eth_getTransactionReceipt', [receipt['transactionHash']]), 180)
+        self.expect(bool(shown), 'the authority-related refusal of the old credential is in the shard log', 'no line')
 
     def pod_restart(self):
         """One validator entity at a time: stop its execution client, root and shard node (its signing authority stays live, as the README requires), check what the
@@ -868,7 +931,7 @@ class Rehearsal:
 
 STAGES = (('up', 'up'), ('identity', 'identity'), ('first-tx', 'first_tx'), ('gateway-limits', 'gateway_limits'), ('faucet-guard', 'faucet_guard'), ('load', 'load'), ('pod-restart', 'pod_restart'), ('backup-restore', 'backup_restore'), ('reset', 'reset'))
 # run on a generation made with --pos (the workflow's second generation); not part of the default list
-POS_STAGES = (('pos-smoke', 'pos_smoke'), ('pos-rewards', 'pos_rewards'), ('pos-election', 'pos_election'), ('pos-proposal', 'pos_proposal'), ('pos-propose', 'pos_propose'), ('pos-install', 'pos_install'), ('pos-advance', 'pos_advance'))
+POS_STAGES = (('pos-smoke', 'pos_smoke'), ('pos-rewards', 'pos_rewards'), ('pos-election', 'pos_election'), ('pos-proposal', 'pos_proposal'), ('pos-propose', 'pos_propose'), ('pos-install', 'pos_install'), ('pos-advance', 'pos_advance'), ('pos-restart', 'pos_restart'), ('pos-stale', 'pos_stale'))
 
 
 def main():
