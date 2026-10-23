@@ -652,7 +652,7 @@ class Rehearsal:
     def pos_abort(self):
         """5b step 14, before the handoff is committed: the candidate and the receipts as for the proposal, then the plan, every intent and the endorsement of ONE root (below
         the quorum, so no Freeze follows), then `handoff_ops.py abort` with the exact target on all four roots at once. Expects the committed Abort record from every root, the
-        epoch unchanged at 1 and the EVM certifying again (a paid transaction through the gateway). The proposal stage then plans the next attempt on its own."""
+        epoch unchanged at 1 and the EVM certifying again (a paid transaction through the gateway). Then the proposal's steps 0-4 again for the next attempt (new possession proofs) and the root's candidate for it."""
         work, receipts = self.pos_candidate()
         ops = str(Path(__file__).resolve().parent / 'handoff_ops.py')
         held = subprocess.run([sys.executable, ops, 'hold', str(self.gen), '--ubft', str(self.ubft), '--next-trust-base', str(work / 'trust-base-epoch2.json'),
@@ -675,23 +675,14 @@ class Rehearsal:
         # the EVM is frozen from Prepare: a paid transaction mined shows it certifies again
         self.faucet_send('0x' + '33' * 20, 1)
         self.expect(int(self.call('eth_blockNumber'), 16) > before, 'the execution chain advanced after the Abort')
-        # the next attempt: when does the root plan it again? Asked every 5 s for 90 s, each answer recorded (the stage ends on the first acceptance)
+        # the next attempt needs new approvals: the possession proofs bind the attempt (popContext), so the assignment made for the Aborted attempt is refused by the
+        # root ("invalid proof of possession", run 39962014299). Steps 0-4 again, now at the attempt the root plans (the chain's context names it), then the candidate.
+        self.pos_proposal()
         root_rpc = operator_rpc.common_urls(json.loads((self.gen / 'compose.yaml').read_text()))[0]
-        asked, deadline = [], time.monotonic() + 90
-        while True:
-            try:
-                self.exec_in('root1', 'rm', '-rf', '/tmp/candidate-probe')
-                self.exec_in('root1', 'ubft', 'root', 'handoff', 'q3-candidate', '--next-trust-base', '/network/handoff/trust-base-epoch2.json',
-                             '--next-evm-assignment', '/network/handoff/published-assignment.json', '--root-rpc', root_rpc, '--out-dir', '/tmp/candidate-probe')
-                asked.append(f'{time.strftime("%H:%M:%S")} accepted')
-                break
-            except Failure as refused:
-                asked.append(f'{time.strftime("%H:%M:%S")} {str(refused)[-160:]}')
-                if time.monotonic() > deadline:
-                    break
-                time.sleep(5)
-        (self.evidence / 'handoff' / 'abort-next-attempt.txt').write_text('\n'.join(asked) + '\n')
-        self.expect(asked[-1].endswith('accepted'), f'the root plans the next attempt again ({len(asked)} asks, {len(asked) * 5 - 5} s after the first)', asked[0] + ' ... ' + asked[-1])
+        self.exec_in('root1', 'rm', '-rf', '/tmp/candidate-probe')
+        self.exec_in('root1', 'ubft', 'root', 'handoff', 'q3-candidate', '--next-trust-base', '/network/handoff/trust-base-epoch2.json',
+                     '--next-evm-assignment', '/network/handoff/published-assignment.json', '--root-rpc', root_rpc, '--out-dir', '/tmp/candidate-probe')
+        self.expect(True, 'the root derives the next attempt\'s candidate from the assignment made for it')
 
     def root_epoch(self, i, transport=None):
         """The epoch of root i's committed certificate, or None while it does not answer."""
