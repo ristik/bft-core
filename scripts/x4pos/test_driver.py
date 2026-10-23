@@ -273,6 +273,29 @@ class Execution(unittest.TestCase):
             with self.assertRaises(driver.CursorError):
                 self.drive(small(), d, world, clock).run()
 
+    def accounted(self, d, lines):
+        m = small(); m["accounting"] = True
+        clock = FakeClock()
+        drv = self.drive(m, d, World(), clock)
+        if lines is not None:
+            (Path(d) / "run").mkdir(parents=True, exist_ok=True)
+            (Path(d) / "run" / "snapshots.jsonl").write_text("".join(json.dumps(x) + "\n" for x in lines))
+        return drv.run()
+
+    def test_the_accounting_verdict_gates_the_campaign_status(self):
+        import test_accounting as ta
+        for lines, want in ((None, "INCOMPLETE"), (ta.GOOD[:1], "INCOMPLETE"), (ta.GOOD, "PASS"),
+                            (ta.mutate(1, lambda s: s["pool"].update(balance=71)), "FAIL")):
+            with self.subTest(want=want, snapshots=None if lines is None else len(lines)), tempfile.TemporaryDirectory() as d:
+                rep = self.accounted(d, lines)
+                self.assertEqual(rep["status"], want, rep)
+                self.assertEqual(rep["accounting"]["status"], want, rep["accounting"])
+
+    def test_without_the_accounting_flag_the_report_carries_none(self):
+        with tempfile.TemporaryDirectory() as d:
+            rep = self.drive(small(), d, World(), FakeClock()).run()
+            self.assertEqual((rep["status"], rep["accounting"]), ("PASS", None))
+
     def test_a_late_step_is_a_deadline_failure_and_a_stopped_campaign_is_incomplete(self):
         with tempfile.TemporaryDirectory() as d:
             clock = FakeClock()
