@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width">
+<title>Unicity testnet bridge</title>
+<style>body{max-width:44rem;margin:3rem auto;padding:1rem;font:17px/1.5 system-ui;background:#f6f7fa;color:#17233a}
+.warn{border:2px solid #b3261e;background:#fdeceb;padding:.5rem 1rem;border-radius:6px}code,pre{font:14px ui-monospace,monospace}
+pre{background:#e9ecf2;padding:.6rem;white-space:pre-wrap;overflow-wrap:anywhere}td{padding:.15rem .6rem .15rem 0;vertical-align:top}button{padding:.6rem 1rem;font:inherit}</style>
+<h1>Bridge test ether to Unicity tokens</h1>
+<div class="warn">
+<p><strong>Fake value. Expect to lose everything.</strong></p>
+<ul>
+<li>Bridged tokens are test ether locked in a test vault. They have no value, and no real asset can enter or leave through this bridge.</li>
+<li>The operator may reset this network at any time, without notice or obligation. A reset loses every lock, bridged token and vault credit. Nothing carries over to another network or release, and nothing is compatible with a later one.</li>
+<li>A bridged token exists only in your wallet file. Lose the file and the token is gone for good, and its test ether stays in the vault.</li>
+<li>Nothing here is audited. Never use a key that holds anything of value.</li>
+</ul>
+</div>
+<p>The round trip: lock test ether in the vault on the EVM, mint the bridged token on the Unicity aggregator, transfer it, burn it, and redeem the burn in the vault. The vault then credits the address the burn names, which claims the ether back.</p>
+<h2>This network</h2>
+<table id="network"><tr><td>loading tester-config.json…</td></tr></table>
+<h2>Steps</h2>
+<ol>
+<li>Get the bridge tester: a checkout of <code>native-bridge-plugins</code> at the release's commit (<code>npm ci</code>), or the bridge tools image. Download <a href="tester-config.json">tester-config.json</a> and the four files it names into one directory: <a href="trust-base.bundle.cbor">trust-base.bundle.cbor</a>, <a href="trust-base.genesis.entryid">trust-base.genesis.entryid</a>, <a href="evm-pdr.cbor">evm-pdr.cbor</a> and <a href="bridge-deployment.json">bridge-deployment.json</a>.</li>
+<li><pre>npx tsx tester/bridge-tester.ts init --config tester-config.json</pre>Fund the EVM address it prints with test ether from the faucet.</li>
+<li><pre>npx tsx tester/bridge-tester.ts lock --amount 0.005
+npx tsx tester/bridge-tester.ts mint</pre>Mint soon after locking. The lock-proof endpoint serves a lock only for about 64 blocks after it.</li>
+<li><pre>npx tsx tester/bridge-tester.ts transfer --count 2
+npx tsx tester/bridge-tester.ts burn</pre>The burn returns the token to your wallet's EVM address. <code>--recipient 0x…</code> names another.</li>
+<li><pre>npx tsx tester/bridge-tester.ts redeem
+npx tsx tester/bridge-tester.ts claim
+npx tsx tester/bridge-tester.ts status</pre></li>
+</ol>
+<p>Your wallet is the <code>./bridge-wallet</code> directory. It holds your keys unencrypted, and your tokens.</p>
+<h2>Your vault credit</h2>
+<p>Credited by a redemption and not yet claimed. Read through your EVM wallet: connect it to this network first.</p>
+<p><button id="credit">Connect wallet and read</button></p><pre id="result"></pre>
+<script>
+let cfg;
+const out = document.getElementById('result');
+const row = (k, v) => { const tr = document.createElement('tr'); for (const x of [k, v]) { const td = document.createElement('td'); td.textContent = x; tr.append(td); } return tr; };
+async function init() {
+  cfg = await (await fetch('tester-config.json')).json();
+  const t = document.getElementById('network');
+  t.replaceChildren(row('chain ID', String(cfg.chainId)), row('vault', cfg.vault), row('EVM RPC', cfg.ethUrl), ...(cfg.redeemEthUrl ? [row('redemptions', cfg.redeemEthUrl)] : []),
+    row('aggregator', cfg.aggUrl), row('lock proofs', cfg.lockProofUrl));
+}
+document.getElementById('credit').onclick = async () => {
+  try {
+    if (!cfg) throw Error('tester-config.json did not load.');
+    if (!window.ethereum) throw Error('Install or open an EVM wallet.');
+    const [address] = await ethereum.request({method: 'eth_requestAccounts'});
+    if (Number(BigInt(await ethereum.request({method: 'eth_chainId'}))) !== cfg.chainId) throw Error(`Your wallet is not on chain ${cfg.chainId}.`);
+    // claimable(address): 0x402914f5
+    const data = '0x402914f5' + address.slice(2).toLowerCase().padStart(64, '0');
+    const credit = BigInt(await ethereum.request({method: 'eth_call', params: [{to: cfg.vault, data}, 'latest']}));
+    const ether = `${credit / 10n ** 18n}.${(credit % 10n ** 18n).toString().padStart(18, '0')}`.replace(/\.?0+$/, '');
+    out.textContent = `${address}: ${ether} ETH (${credit} wei) claimable`;
+  } catch (error) { out.textContent = error.message; }
+};
+init().catch(error => { document.getElementById('network').replaceChildren(row('error', error.message)); });
+</script></html>

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Bridge stages of the container-package rehearsal (TN-B #429/#438, briefs/tnb-without-host.md), on a generation that rehearse.py brought up.
 
-    rehearse_bridge.py --generation GEN --evidence DIR [--stages deploy,lockproof,fund,roundtrip,negatives,consolidated,long-history,backup-restore]
+    rehearse_bridge.py --generation GEN --evidence DIR [--stages deploy,lockproof,fund,roundtrip,negatives,tester,consolidated,long-history,backup-restore,custody]
 
   deploy     deploy_bridge.py (TokenVerifier + BridgeVault after genesis, signed with the faucet keystore) and overlay.py (compose.bridge.yaml)
   lockproof  the lock-proof endpoint: a lock through the public gateway, its proof over HTTP equal to `dnb-tool lockproof`'s bytes, malformed (400),
@@ -12,13 +12,22 @@
   roundtrip  the native-bridge-plugins live driver (tests/live/anyage.ts) in the bridge tools image: lock, its proof from validator 1's archive, mint, SAVE_TRANSFERS
              transfers and the burn certified by the package's aggregator, the return proof saved and verified (eth_call), then the redemption and the claim with
              one validator stopped, which rejoins with the same blocks; the vault's balance follows every step (custody)
-  negatives  on chain, after the round trip: the same envelope redeemed again and the claim repeated are both refused, and the vault keeps the nullifier
+  negatives  after the round trip (whose release ran with a validator stopped and restarted): the same envelope redeemed again and the claim repeated
+             are both refused, and the vault keeps the nullifier; the driver's negatives (a conflicting burn of the same state to another address is
+             never certified: the aggregator serves the first burn's proof; a fresh proof of the redeemed burn, under a newer seal, is refused as
+             AlreadyRedeemed). The vault's balance does not move
+  tester     the bridge tester CLI (native-bridge-plugins tester/) as a tester runs it, with its own faucet-funded key and GENERATION/bridge/public/tester-config.json:
+             init, lock, mint (the proof from the lock-proof endpoint), two transfers, burn, redeem, claim and status; a repeated step is refused; the vault
+             pays back exactly what the tester locked
   consolidated, long-history
              the driver's consolidated redeem (K = 1 anchor on the unsharded aggregator, the per-SID envelope priced as the control) and its long history
              (LONG_TRANSFERS transfers, one gas short reverts and leaves the vault unchanged, then redeemed and claimed)
   backup-restore
              the quiesced backup and same-generation restore (rehearse.py) with the bridge deployed: the redeemed lock stays spent, and a new round trip completes on
-             the restored generation
+             the restored generation; the round trip's replays (its envelope, its claim and the driver's negatives) are refused there too
+  custody    the vault's books from its whole event log against its counters and balance: every lock once (nonces 1..lastNonce), every credit
+             once for a lock of the same amount with the nullifier the vault keeps, L = Σ locks, D = Σ credits, P = Σ claims, 0 <= P <= D <= L,
+             the recipients' claimable sums to D - P, and balance = L - P + donations
 Evidence of the package only, as rehearse.py's. No third-party service is contacted.
 """
 import argparse
@@ -26,6 +35,7 @@ import http.client
 import json
 import os
 import secrets
+import shutil
 import subprocess
 import sys
 import time
@@ -51,6 +61,11 @@ GATEWAY_MAX_BODY = 16384   # gateway.py MAX_BODY
 LONG_TRANSFERS_MAX = 254
 # BridgeVault's custom errors at the contracts pin: AlreadyRedeemed(uint256), InsufficientCredit(uint256,uint256)
 ALREADY_REDEEMED, INSUFFICIENT_CREDIT = '0xd36d946d', '0x4eb7eaec'
+# BridgeVault's events at the contracts pin (src/bridge/BridgeVault.sol)
+LOCKED_EVENT = 'Locked(uint256,address,bytes32,address,bytes32,bytes32,uint256,bytes32,bytes32,bytes32,bytes)'
+CREDITED_EVENT, CLAIMED_EVENT, RECEIVED_EVENT = 'RedemptionCredited(uint256,bytes32,address,uint256)', 'Claimed(address,address,uint256)', 'Received(address,uint256)'
+TESTER = 'tester/bridge-tester.ts'   # in the image's native-bridge-plugins checkout
+TESTER_FUNDS, TESTER_LOCK_WEI = 2 * 10 ** 18, 5 * 10 ** 17
 
 
 class BridgeRehearsal(Rehearsal):
@@ -116,6 +131,21 @@ class BridgeRehearsal(Rehearsal):
         if out.returncode != 0:
             raise Failure(f'the driver failed: {args[0]}')
         return out.stdout
+
+    def tester(self, *args, check=True):
+        """One command of the bridge tester CLI in the bridge tools image, on the validators network, with its wallet at /work/tester-wallet. The tester has
+        no driver key and no archive: its mounts are only its wallet, its key file and the published directory (bridge/public), read-only. Returns
+        (exit code, output)."""
+        work = self.gen / 'bridge'
+        out = subprocess.run(['docker', 'run', '--rm', '--read-only', '--network', validators_network(self.gen), '--user', '10001:10001', '-e', 'HOME=/tmp/home',
+                              '--tmpfs', '/tmp', '-v', f'{work / "public"}:/work/public:ro', '-v', f'{work / "tester-wallet"}:/work/tester-wallet',
+                              '-v', f'{work / "tester.key"}:/work/tester.key:ro', TAG, 'npx', '--no-install', 'tsx', TESTER, *args, '--wallet', '/work/tester-wallet'],
+                             text=True, capture_output=True)
+        text = (out.stdout + out.stderr).strip()
+        self.say('  $ bridge-tester ' + ' '.join(args) + '\n    ' + '\n    '.join(text.splitlines()[-12:]))
+        if check and out.returncode != 0:
+            raise Failure(f'the tester failed: {args[0]}')
+        return out.returncode, text
 
     def vault_balance(self):
         return int(self.call('eth_getBalance', [self.addresses()['BridgeVault'], 'latest']), 16)
@@ -243,22 +273,85 @@ class BridgeRehearsal(Rehearsal):
     def roundtrip(self):
         self.round_trip('roundtrip', 3, down=self.n if self.n >= 4 else None)
 
-    def negatives(self):
+    def replays_refused(self, where):
+        """The round trip's redemption and claim, both done: its envelope again and its claim again are refused, the vault keeps its nullifier, and the
+        driver's negatives (a conflicting burn; a fresh proof of the redeemed burn) refuse too. Nothing reaches the vault's balance."""
         run = self.gen / 'bridge/roundtrip'
         saved = json.loads((run / 'saved.json').read_text())
         envelope = (run / 'envelope.bin').read_bytes()
         vault = self.addresses()['BridgeVault']
+        balance = self.vault_balance()
         data = '0x9945e3d3' + (32).to_bytes(32, 'big').hex() + len(envelope).to_bytes(32, 'big').hex() + envelope.hex() + '00' * (-len(envelope) % 32)
         word = lambda n: int(n).to_bytes(32, 'big').hex()
         r = self.inner_response(1, 'eth_call', [{'from': SUBMITTER, 'to': vault, 'data': data}, 'latest'])
         self.expect((r.get('error') or {}).get('data') == ALREADY_REDEEMED + word(saved['nonce']),
-                    'the redeemed envelope is refused a second time (AlreadyRedeemed of its nonce)', json.dumps(r)[:300])
+                    f'{where}: the redeemed envelope is refused a second time (AlreadyRedeemed of its nonce)', json.dumps(r)[:300])
         spent = self.inner_response(1, 'eth_call', [{'to': vault, 'data': self.cast_run('calldata', 'spentNullifier(uint256)', str(saved['nonce']))}, 'latest'])
-        self.expect(spent.get('result', '').lower().removeprefix('0x') == saved['nullifier'].lower().removeprefix('0x'), 'the vault keeps the lock\'s nullifier', spent.get('result', ''))
+        self.expect(spent.get('result', '').lower().removeprefix('0x') == saved['nullifier'].lower().removeprefix('0x'), f'{where}: the vault keeps the lock\'s nullifier', spent.get('result', ''))
         claim = self.cast_run('calldata', 'claim(uint256,address)', str(saved['amountWei']), PAYEE)
         r = self.inner_response(1, 'eth_call', [{'from': RECIPIENT, 'to': vault, 'data': claim}, 'latest'])
         self.expect((r.get('error') or {}).get('data') == INSUFFICIENT_CREDIT + word(0) + word(saved['amountWei']),
-                    'the claim of an already claimed credit is refused (InsufficientCredit: none left)', json.dumps(r)[:300])
+                    f'{where}: the claim of an already claimed credit is refused (InsufficientCredit: none left)', json.dumps(r)[:300])
+        self.driver('negatives', '/work/lane-config.json', '/work/roundtrip/saved.json')
+        out = json.loads((run / 'negatives.json').read_text())
+        self.expect(out['conflictingBurn']['servedTransactionHash'] != out['conflictingBurn']['conflictingTransactionHash'],
+                    f'{where}: a conflicting burn of the same state is never certified (the aggregator serves the first burn\'s proof)', out['conflictingBurn']['submission'])
+        self.expect(out['freshReplay']['revertData'] == ALREADY_REDEEMED + word(saved['nonce']),
+                    f'{where}: a fresh proof of the redeemed burn (seal round {out["freshReplay"]["anchors"][0]["round"]}) is refused as AlreadyRedeemed')
+        (self.evidence / 'roundtrip').mkdir(parents=True, exist_ok=True)
+        (self.evidence / 'roundtrip' / f'negatives-{where}.json').write_bytes((run / 'negatives.json').read_bytes())
+        self.expect(self.vault_balance() == balance, f'{where}: the vault\'s balance did not move', f'{balance} -> {self.vault_balance()}')
+
+    def negatives(self):
+        self.replays_refused('after-roundtrip')
+
+    def tester_stage(self):
+        work = self.gen / 'bridge'
+        shutil.rmtree(work / 'tester-wallet', ignore_errors=True)   # this stage's own wallet: a new one on every run
+        key_file = work / 'tester.key'
+        key = f'0x{secrets.token_hex(32)}'
+        key_file.write_text(key + '\n')
+        os.chmod(key_file, 0o600)
+        if os.getuid() == 0:
+            os.chown(key_file, 10001, 10001)   # read by the tester as the tools user
+        try:
+            self.tester_round_trip(work, key)
+        finally:
+            key_file.unlink(missing_ok=True)
+        self.keep_tester()
+
+    def tester_round_trip(self, work, key):
+        (work / 'tester-wallet').mkdir()
+        if os.getuid() == 0:
+            os.chown(work / 'tester-wallet', 10001, 10001)   # written by the tester as the tools user
+        me = self.cast_run('wallet', 'address', '--private-key', key)
+        self.faucet_send(me, TESTER_FUNDS)
+        self.tester('init', '--config', '/work/public/tester-config.json', '--eth-key-file', '/work/tester.key')
+        before = self.vault_balance()
+        self.tester('lock', '--amount', f'{TESTER_LOCK_WEI}wei')
+        self.expect(self.vault_balance() == before + TESTER_LOCK_WEI, 'the vault holds what the tester locked', str(self.vault_balance() - before))
+        self.tester('mint')
+        code, text = self.tester('mint', check=False)
+        self.expect(code != 0 and 'that step is done' in text, 'a second mint of the same token is refused by the tester', text.splitlines()[-1] if text else '')
+        self.tester('transfer', '--count', '2')
+        self.tester('burn')
+        self.tester('redeem')
+        record = json.loads(next((work / 'tester-wallet/tokens').glob('*/token.json')).read_text())
+        self.expect(record['phase'] == 'redeemed' and record['transfers'] == 2 and record['recipient'].lower() == me.lower(),
+                    'the tester redeemed its token after two transfers, to its own address', json.dumps(record))
+        credit = int(self.inner_response(1, 'eth_call', [{'to': self.addresses()['BridgeVault'], 'data': self.cast_run('calldata', 'claimable(address)', me)}, 'latest'])['result'], 16)
+        self.expect(credit == TESTER_LOCK_WEI, 'the redemption credits the tester exactly the locked amount', str(credit))
+        self.tester('claim')
+        self.expect(self.vault_balance() == before, 'the vault paid back exactly what the tester locked (custody back to where it was)', str(self.vault_balance()))
+        _, text = self.tester('status')
+        self.expect('vault credit 0 wei' in text and 'redeemed, ' in text, 'status shows no credit left and the token redeemed in the vault', text.splitlines()[-1])
+
+    def keep_tester(self):
+        out = self.evidence / 'tester'
+        out.mkdir(parents=True, exist_ok=True)
+        for f in (self.gen / 'bridge/tester-wallet/tokens').glob('*/token.json'):
+            shutil.copy(f, out / f'token-{f.parent.name}.json')
+        shutil.copy(self.gen / 'bridge/public/tester-config.json', out / 'tester-config.json')
 
     def consolidated(self):
         self.driver('consolidated', '/work/lane-config.json', '/work/consolidated')
@@ -283,12 +376,56 @@ class BridgeRehearsal(Rehearsal):
         self.expect(self.call('eth_getCode', [vault, 'latest']) not in (None, '0x'), 'the vault is there on the restored generation')
         spent = self.inner_response(1, 'eth_call', [{'to': vault, 'data': self.cast_run('calldata', 'spentNullifier(uint256)', str(nonce))}, 'latest'])
         self.expect(int(spent.get('result') or '0x0', 16) != 0, 'the lock redeemed before the backup stays spent')
+        self.replays_refused('after-restore')
         self.round_trip('after-restore', 0)
         self.start_endpoint(1)
 
+    def custody(self):
+        vault = self.addresses()['BridgeVault']
+        head = self.ureth(1, 'eth_blockNumber')
+        logs = self.ureth(1, 'eth_getLogs', [{'address': vault, 'fromBlock': '0x0', 'toBlock': head}])
+        topic = {self.cast_run('keccak', sig): name for name, sig in (('locked', LOCKED_EVENT), ('credited', CREDITED_EVENT), ('claimed', CLAIMED_EVENT), ('received', RECEIVED_EVENT))}
+        words = lambda log: [int(log['data'][2 + 64 * i:2 + 64 * (i + 1)], 16) for i in range((len(log['data']) - 2) // 64)]
+        locks, credits, claims, received, recipients = {}, {}, [], 0, set()
+        for log in logs:
+            kind = topic.get(log['topics'][0])
+            if kind == 'locked':   # data: digest, zeroAddress, ty, aid, amount, ...
+                nonce = int(log['topics'][1], 16)
+                self.expect(nonce not in locks, f'lock {nonce} is recorded once')
+                locks[nonce] = words(log)[4]
+            elif kind == 'credited':   # topics: nonce, nullifier, recipient; data: amount
+                nonce = int(log['topics'][1], 16)
+                self.expect(nonce not in credits, f'lock {nonce} is credited once')
+                credits[nonce] = (words(log)[0], log['topics'][2])
+                recipients.add('0x' + log['topics'][3][-40:])
+            elif kind == 'claimed':   # topics: recipient, to; data: amount
+                claims.append(words(log)[0])
+                recipients.add('0x' + log['topics'][1][-40:])
+            elif kind == 'received':
+                received += words(log)[0]
+        view = lambda sig, *args: int(self.ureth(1, 'eth_call', [{'to': vault, 'data': self.cast_run('calldata', sig, *args)}, head]), 16)
+        last = view('lastNonce()')
+        self.expect(sorted(locks) == list(range(1, last + 1)), f'every lock nonce 1..{last} has its one Locked event', str(sorted(locks)))
+        for nonce, (amount, nullifier) in credits.items():
+            self.expect(nonce in locks and amount == locks[nonce], f'lock {nonce} is credited exactly its locked amount', f'{amount} vs {locks.get(nonce)}')
+            spent = self.ureth(1, 'eth_call', [{'to': vault, 'data': self.cast_run('calldata', 'spentNullifier(uint256)', str(nonce))}, head])
+            self.expect(int(spent, 16) == int(nullifier, 16), f'the vault keeps lock {nonce}\'s credited nullifier')
+        for nonce in set(locks) - set(credits):
+            spent = self.ureth(1, 'eth_call', [{'to': vault, 'data': self.cast_run('calldata', 'spentNullifier(uint256)', str(nonce))}, head])
+            self.expect(int(spent, 16) == 0, f'lock {nonce}, never credited, is not spent')
+        L, D, P = sum(locks.values()), sum(a for a, _ in credits.values()), sum(claims)
+        self.expect((view('locked()'), view('credited()'), view('paid()')) == (L, D, P), 'the counters L, D, P equal the sums of the events', f'L={L} D={D} P={P}')
+        self.expect(0 <= P <= D <= L, '0 <= P <= D <= L')
+        owed = sum(view('claimable(address)', r) for r in recipients)
+        self.expect(owed == D - P, 'the credited recipients\' claimable sums to D - P (every credit is either claimable or paid)', f'{owed} vs {D - P}')
+        balance = int(self.ureth(1, 'eth_getBalance', [vault, head]), 16)
+        self.expect(balance == L - P + received, 'the vault holds exactly L - P plus donations (custody conserved)', f'{balance} vs {L} - {P} + {received}')
+        (self.evidence / 'custody.json').write_text(json.dumps({'block': head, 'locks': len(locks), 'credits': len(credits), 'claims': len(claims), 'L': L, 'D': D, 'P': P,
+                                                                'donations': received, 'claimable': owed, 'balance': balance}, indent=2) + '\n')
 
-STAGES = (('deploy', 'deploy'), ('lockproof', 'lockproof'), ('fund', 'fund'), ('roundtrip', 'roundtrip'), ('negatives', 'negatives'),
-          ('consolidated', 'consolidated'), ('long-history', 'long_history'), ('backup-restore', 'backup_restore'))
+
+STAGES = (('deploy', 'deploy'), ('lockproof', 'lockproof'), ('fund', 'fund'), ('roundtrip', 'roundtrip'), ('negatives', 'negatives'), ('tester', 'tester_stage'),
+          ('consolidated', 'consolidated'), ('long-history', 'long_history'), ('backup-restore', 'backup_restore'), ('custody', 'custody'))
 
 
 def main():
