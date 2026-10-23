@@ -110,7 +110,7 @@ jobs:
           POS_STAGES: ${{ inputs.pos_stages }}
         run: |
           sudo -E env "PATH=$PATH" python3 deploy/testnet/rehearse.py --generation /srv/tn-rehearsal-pos --evidence "$RUNNER_TEMP/evidence-pos" \
-            --ubft pinned-bft/build/ubft --stages "${POS_STAGES:-up,identity,first-tx,pos-smoke,pos-rewards,pos-election,pos-proposal,pos-propose}"
+            --ubft pinned-bft/build/ubft --stages "${POS_STAGES:-up,identity,first-tx,pos-smoke,pos-rewards,pos-election,pos-proposal,pos-propose,pos-install}"
       - name: PoS profile, resources and logs
         if: always() && inputs.stages == ''
         run: |

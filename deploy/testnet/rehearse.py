@@ -24,6 +24,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+import handoff
 import handoff_ops
 import operator_rpc
 
@@ -639,6 +640,65 @@ class Rehearsal:
             shutil.copy(path, self.evidence / 'handoff' / path.name)
         shutil.copy(self.gen / 'handoff' / 'log.jsonl', self.evidence / 'handoff' / 'log.jsonl')
 
+    def root_epoch(self, i, transport=None):
+        """The epoch of root i's committed certificate, or None while it does not answer."""
+        transport = transport or handoff_ops.DockerTransport(self.gen)
+        try:
+            status, body = transport.post(i, '/api/v1/q3/signers', b'{}')
+            return json.loads(body).get('epoch') if status == 200 else None
+        except (handoff_ops.HandoffError, ValueError):
+            return None
+
+    def pos_install(self):
+        """5b steps 8-10: the installation barrier of epoch 2 and the activation. No root may have a certificate of epoch 2 before its install restart (checked); each root in
+        turn is stopped, its four stores kept as root.pre-epoch-2, and recreated with `--install-handoff-epoch 2` (the Compose override handoff.py writes; a plain
+        `up -d` would drop the flag); then the first root reports epoch 2, the activation record is read and checked against the candidate, and every shard has logged the
+        activation. Needs pos-propose first (the handoff must be committed)."""
+        compose = json.loads((self.gen / 'compose.yaml').read_text())
+        work = self.gen / 'network' / 'handoff'
+        self.expect((work / 'v3-body-id.txt').is_file(), 'the candidate files exist (run pos-propose first)')
+        transport = handoff_ops.DockerTransport(self.gen)
+        for i in range(1, self.n + 1):
+            self.expect(self.root_epoch(i, transport) == 1, f'root {i} has no certificate of epoch 2 before its install restart')
+        override = self.gen / 'compose.install-epoch-2.json'
+        if not override.exists():
+            override.write_text(json.dumps(handoff.install_override(compose, 2), indent=1) + '\n')
+        files = ['-f', str(self.gen / 'compose.yaml'), '-f', str(override)]
+        for i in range(1, self.n + 1):
+            self.say(f'  installing epoch 2 in root {i}')
+            subprocess.run(['docker', 'compose', *files[:2], 'stop', f'root{i}'], check=True, capture_output=True)
+            state = self.gen / f'validator{i}' / 'root'
+            backup = self.gen / f'validator{i}' / 'root.pre-epoch-2'
+            if not backup.exists():
+                subprocess.run(['cp', '-a', str(state), str(backup)], check=True)
+            run = subprocess.run(['docker', 'compose', *files, 'up', '-d', '--no-deps', '--force-recreate', f'root{i}'], text=True, capture_output=True)
+            self.expect(run.returncode == 0, f'root {i} recreated with the install flag', run.stderr.strip()[-400:])
+            self.wait(f'root {i} answers again', lambda i=i: self.root_epoch(i, transport) is not None, 120)
+        epoch = self.wait('the roots certify at epoch 2', lambda: self.root_epoch(1, transport) == 2, 180)
+        self.expect(epoch, 'root 1 certifies at epoch 2 after the install')
+        for i in range(2, self.n + 1):
+            self.wait(f'root {i} certifies at epoch 2', lambda i=i: self.root_epoch(i, transport) == 2, 120)
+        # 9 the activation record, read from a running root and checked against the candidate
+        root_rpc = operator_rpc.common_urls(compose)[0]
+        self.exec_in('root1', 'ubft', 'root', 'handoff', 'q3-activation', '--root-rpc', root_rpc, '--epoch', '2', '--out', '/tmp/activation.json')
+        record = json.loads(self.exec_in('root1', 'cat', '/tmp/activation.json'))
+        (self.evidence / 'handoff').mkdir(exist_ok=True)
+        (self.evidence / 'handoff' / 'activation-record-2.json').write_text(json.dumps(record, indent=1) + '\n')
+        self.expect(record.get('epoch') == 2 and record.get('signingScheme') == 2, 'the activation record is epoch 2 under scheme 2', str(record)[:200])
+        self.expect(record.get('v3BodyId') == (work / 'v3-body-id.txt').read_text().strip(), 'the activation record names the candidate\'s V3 body id')
+        self.expect(record['activationRound'] >= record['minActivationRound'], 'A* is not below A_min', f'{record["activationRound"]} / {record["minActivationRound"]}')
+        status, body = transport.post(1, '/api/v1/q3/signers', b'{}')
+        self.expect(json.loads(body)['round'] >= record['activationRound'], 'the first epoch-2 certificate is at or above A*')
+        commit = record['commit']
+        self.expect(commit['scheme'] == 1 and commit['epoch'] == 1, 'the Commit is the genesis committee\'s (legacy scheme 1, epoch 1)', f'scheme {commit["scheme"]}, epoch {commit["epoch"]}')
+        # 10 the gate: every shard has activated the root epoch
+        for i in range(1, self.n + 1):
+            def activated(i=i):
+                logs = self.compose('logs', '--no-color', f'shard{i}', check=False)
+                return any('msg="handoff activated"' in line and 'rootEpoch=2' in line for line in logs.splitlines())
+            self.wait(f'shard {i} logs the activation of root epoch 2', activated, 90)
+        self.say('  every shard has activated root epoch 2')
+
     def pod_restart(self):
         """One validator entity at a time: stop its execution client, root and shard node (its signing authority stays live, as the README requires), check what the
         package promises, start them again and check they rejoin. The PUBLIC gateway fails closed while a validator is down (it checks every validator's identity
@@ -755,7 +815,7 @@ class Rehearsal:
 
 STAGES = (('up', 'up'), ('identity', 'identity'), ('first-tx', 'first_tx'), ('gateway-limits', 'gateway_limits'), ('faucet-guard', 'faucet_guard'), ('load', 'load'), ('pod-restart', 'pod_restart'), ('backup-restore', 'backup_restore'), ('reset', 'reset'))
 # run on a generation made with --pos (the workflow's second generation); not part of the default list
-POS_STAGES = (('pos-smoke', 'pos_smoke'), ('pos-rewards', 'pos_rewards'), ('pos-election', 'pos_election'), ('pos-proposal', 'pos_proposal'), ('pos-propose', 'pos_propose'))
+POS_STAGES = (('pos-smoke', 'pos_smoke'), ('pos-rewards', 'pos_rewards'), ('pos-election', 'pos_election'), ('pos-proposal', 'pos_proposal'), ('pos-propose', 'pos_propose'), ('pos-install', 'pos_install'))
 
 
 def main():
