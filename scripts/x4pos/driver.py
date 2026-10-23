@@ -14,7 +14,10 @@ Rules this file enforces and its tests prove:
     was interrupted is adopted only if its check says the effect is already there, re-run only if it is declared restartable, and otherwise FAILS;
   * the manifest is sealed by its sha256 into the cursor: a changed manifest refuses to resume (no late changes to the declared experiment);
   * a step that finishes after its deadline is a deadline violation (FAIL), a campaign that stops early is INCOMPLETE, never a shorter successful one;
-  * steps with no implementation are reported and refuse the run: nothing is stubbed into a pass.
+  * steps with no implementation are reported and refuse the run: nothing is stubbed into a pass;
+  * a `lane` step is a phase of the lane's own shell (chain-dictated timing: the install, the offences, the recovery, the exit request): the driver never starts or schedules it,
+    and counts it done only if its `check` shows the lane's evidence. A lane step without a check is refused, and its deadline is not judged here (it is the lane's);
+  * `notCovered` lists what this campaign does not exercise, each with where it is covered; the report carries it, so a PASS never reads as covering it.
 """
 import argparse
 import hashlib
@@ -66,7 +69,12 @@ def preflight(m, commands=False, root=None):
         errs.append("duplicate step ids")
     by = {s["id"]: s for s in steps}
     interval, tail, policy = m["intervalSeconds"], m["tailSeconds"], m["policy"]
+    for n in m.get("notCovered", []):
+        if not str(n.get("what", "")).strip() or not str(n.get("coveredBy", "")).strip():
+            errs.append(f"notCovered entry {n!r}: needs 'what' and 'coveredBy' (where it is covered instead)")
     for s in steps:
+        if s.get("lane") and not s.get("check"):
+            errs.append(f"{s['id']}: a lane step is verified by its check only; it needs a command check")
         if "check" not in s:
             errs.append(f"{s['id']}: no 'check' declared (a command, or an explicit null with an 'uncheckedReason')")
         elif s["check"] is None and not str(s.get("uncheckedReason", "")).strip():
@@ -105,6 +113,8 @@ def preflight(m, commands=False, root=None):
         for s in steps:
             for key in ("cmd", "check"):
                 argv = s.get(key)
+                if key == "cmd" and s.get("lane"):
+                    continue   # the lane runs it
                 if argv and not (Path(root or ".") / argv[0]).exists():
                     errs.append(f"{s['id']}: {key} {argv[0]} does not exist (not implemented)")
     if errs:
@@ -251,6 +261,18 @@ class Driver:
                 st.update(state=FAILED, reason="a dependency is not done")
                 self.cursor.save()
                 break
+            if s.get("lane"):   # executed by the lane, not by the driver: done iff the lane's evidence shows it
+                ok = bool(s.get("check")) and self._sh(s, "check") == 0
+                now = self.clock.now()
+                if ok:
+                    st.update(state=DONE, finishedUtc=now.isoformat(), external=True, lateSeconds=0.0)
+                else:
+                    st.update(state=FAILED, finishedUtc=now.isoformat(), reason="lane step: the lane's evidence does not show it")
+                self.cursor.save()
+                self.cursor.event(now, event="done" if ok else "failed", step=s["id"], external=True)
+                if not ok:
+                    break
+                continue
             due = self._start() + timedelta(seconds=s["at"])
             wait = (due - self.clock.now()).total_seconds()
             if wait > 0:
@@ -301,7 +323,8 @@ class Driver:
                 status = "FAIL"
             elif acct["status"] != "PASS" and status == "PASS":
                 status = "INCOMPLETE"
-        rep = {"status": status, "accounting": acct, "manifestSha256": self.sha, "startedUtc": body["startedUtc"], "counts": counts, "failed": failed, "late": late, "pending": pending, "shortOfRequired": short, "unverified": unverified}
+        rep = {"status": status, "accounting": acct, "manifestSha256": self.sha, "startedUtc": body["startedUtc"], "counts": counts, "failed": failed, "late": late, "pending": pending, "shortOfRequired": short, "unverified": unverified,
+               "external": [s["id"] for s in self.steps if body["steps"][s["id"]].get("external")], "notCovered": self.m.get("notCovered", [])}
         (self.dir / "report.json").write_text(json.dumps(rep, indent=1, sort_keys=True))
         return rep
 
