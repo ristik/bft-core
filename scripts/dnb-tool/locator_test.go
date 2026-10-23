@@ -11,6 +11,8 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -82,7 +84,7 @@ func archiveOf(t testing.TB, n int) (string, *fakeArchive) {
 func countingLocator(t testing.TB, dir string, f *fakeArchive) (*archiveLocator, *int, *time.Time) {
 	reads, at := 0, time.Unix(1000, 0)
 	l := &archiveLocator{dir: dir, store: f, rescanEvery: 10 * time.Second, now: func() time.Time { return at },
-		listDir:      func(d string) ([]string, error) { reads += 1_000_000; return listNames(d) },
+		listDir:      func(d string, each func([]string) error) error { reads += 1_000_000; return listNames(d, each) },
 		readManifest: func(p string) ([]byte, error) { reads++; return os.ReadFile(p) },
 		contexts:     map[string]archive.Context{}, seen: map[uint64]struct{}{}}
 	require.NoError(t, l.rescan(context.Background()))
@@ -136,6 +138,70 @@ func TestArchiveLocator_ARescanHonoursCancellation(t *testing.T) {
 	cancel()
 	require.ErrorIs(t, l.rescan(ctx), context.Canceled)
 	require.Less(t, len(l.seen), 600, "a cancelled scan stops")
+}
+
+func TestArchiveLocator_ListsTheArchiveInBoundedChunks(t *testing.T) {
+	dir, f := archiveOf(t, 2*listChunk+500)
+	chunks, largest := 0, 0
+	l := &archiveLocator{dir: dir, store: f, rescanEvery: time.Second, now: time.Now, readManifest: os.ReadFile,
+		listDir: func(d string, each func([]string) error) error {
+			return listNames(d, func(names []string) error {
+				chunks, largest = chunks+1, max(largest, len(names))
+				return each(names)
+			})
+		},
+		contexts: map[string]archive.Context{}, seen: map[uint64]struct{}{}}
+	require.NoError(t, l.rescan(context.Background()))
+	require.Len(t, l.seen, 2*listChunk+500, "every record is read")
+	require.GreaterOrEqual(t, chunks, 3)
+	require.LessOrEqual(t, largest, listChunk, "no read of the directory returns more than one chunk")
+}
+
+func TestArchiveLocator_RefusesABlockArchivedUnderTwoContexts(t *testing.T) {
+	dir, f := archiveOf(t, 10)
+	f.hold(t, dir, archive.Request{Context: testContext(1), BlockHash: blockHash(0)}, &archive.Record{}) // block 0 is also held under epoch 0
+	l, _, _ := countingLocator(t, dir, f)
+	_, _, err := l.locate(context.Background(), blockHash(0))
+	require.ErrorContains(t, err, "two Contexts")
+	require.NotErrorIs(t, err, errNotFound, "an inconsistent archive is a server-side fault (502), not a missing block (404)")
+	_, _, err = l.locate(context.Background(), blockHash(1))
+	require.NoError(t, err, "a block under one Context is found")
+}
+
+func TestArchiveLocator_ConcurrentMissesShareOneScan(t *testing.T) {
+	dir, f := archiveOf(t, 10)
+	var listings atomic.Int32
+	started, release := make(chan struct{}), make(chan struct{})
+	at := time.Unix(1000, 0)
+	l := &archiveLocator{dir: dir, store: f, rescanEvery: 10 * time.Second, now: func() time.Time { return at }, readManifest: os.ReadFile,
+		listDir: func(d string, each func([]string) error) error {
+			if listings.Add(1) == 1 {
+				close(started)
+				<-release
+			}
+			return listNames(d, each)
+		},
+		contexts: map[string]archive.Context{}, seen: map[uint64]struct{}{}}
+	// the first scan holds the listing; the others arrive while it runs. One that came after it ended would be throttled (the clock stands
+	// still), so a second listing can only come from a scan started beside the running one.
+	var wg sync.WaitGroup
+	errs := make(chan error, 8)
+	wg.Add(1)
+	go func() { defer wg.Done(); errs <- l.rescan(context.Background()) }()
+	<-started
+	for range 7 {
+		wg.Add(1)
+		go func() { defer wg.Done(); errs <- l.rescan(context.Background()) }()
+	}
+	time.Sleep(50 * time.Millisecond)
+	close(release)
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		require.NoError(t, err)
+	}
+	require.EqualValues(t, 1, listings.Load(), "eight concurrent rescans list the archive once")
+	require.Len(t, l.contexts, 2, "the waiters see the shared scan's result")
 }
 
 // corruptArchive holds every record, all corrupt.

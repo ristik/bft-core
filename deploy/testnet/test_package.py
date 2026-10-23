@@ -154,7 +154,7 @@ class ProofOfStake(unittest.TestCase):
         self.assertIn('--pos-contracts pinned-contracts',workflow)
         self.assertIn('ref: ${{ steps.pins.outputs.contracts }}',workflow)
     def test_the_paired_client_gets_the_registry_genesis_commitment(self):
-        # bft-core tn1 rehearsal: ureth 6e59b68c refuses to start without --unicity.genesis-commitment, which b1-profile does not print
+        # ureth requires --unicity.genesis-commitment (a required argument since 6e59b68c, still at the pinned ureth), and b1-profile does not print it
         slot='0x'+'ab'*32
         class Done: stdout=slot+'\n'
         real=generate.subprocess.run
