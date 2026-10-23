@@ -436,10 +436,11 @@ class Rehearsal:
             raise Failure(f'ubft {" ".join(map(str, args[:4]))}: exit {run.returncode}: {run.stderr.strip()[-500:]}')
         return run.stdout
 
-    def exec_in(self, service, *command):
-        run = subprocess.run(['docker', 'compose', '-f', str(self.gen / 'compose.yaml'), 'exec', '-T', service, *command], text=True, capture_output=True)
+    def exec_in(self, service, *command, binary=False):
+        run = subprocess.run(['docker', 'compose', '-f', str(self.gen / 'compose.yaml'), 'exec', '-T', service, *command], text=not binary, capture_output=True)
         if run.returncode:
-            raise Failure(f'{service}: {" ".join(command[:5])}: exit {run.returncode}: {run.stderr.strip()[-500:]}')
+            stderr = run.stderr if isinstance(run.stderr, str) else run.stderr.decode(errors='replace')
+            raise Failure(f'{service}: {" ".join(command[:5])}: exit {run.returncode}: {stderr.strip()[-500:]}')
         return run.stdout
 
     def entity_ids(self):
@@ -562,6 +563,82 @@ class Rehearsal:
         (kept / 'sha256.txt').write_text('\n'.join(lines) + '\n')
         self.say(f'  {len(lines)} handoff artifacts recorded (sha256.txt)')
 
+    def pos_propose(self):
+        """5b steps 5-7 on the files pos-proposal wrote: the roots' candidate for the epoch-2 trust base and the published assignment (one root derives it), the
+        readiness receipt of EVERY entity made by its own root (its key file, its shard's loopback RPC, its execution client and its Engine JWT, with the operator's own
+        pins of the execution genesis hash and the registry code), then the proposal of that ONE plan to every root by the host wrapper (plan, intent, endorse).
+        The pins are not read from the node under test: the registry code hash comes from the shipped genesis; the genesis block hash is entity 1's, taken once here
+        (as the lane takes it at its start). Stops with the handoff committed at epoch 1; the install is the next stage."""
+        compose = json.loads((self.gen / 'compose.yaml').read_text())
+        work = self.gen / 'network' / 'handoff'
+        for name in ('trust-base-epoch2.json', 'published-assignment.json'):
+            self.expect((work / name).is_file(), f'{name} exists (run pos-proposal first)')
+        root_rpc, shard_rpc = operator_rpc.common_urls(compose)
+        subprocess.run(['chmod', '-R', 'a+rX', str(work)], check=True)   # the host's files (mode 0600, root) are read by the nodes, which mount network/ read-only
+        # 5 the candidate, from one root; the files are copied out of its container
+        self.exec_in('root1', 'rm', '-rf', '/tmp/candidate')
+        try:
+            self.exec_in('root1', 'ubft', 'root', 'handoff', 'q3-candidate', '--next-trust-base', '/network/handoff/trust-base-epoch2.json',
+                         '--next-evm-assignment', '/network/handoff/published-assignment.json', '--root-rpc', root_rpc, '--out-dir', '/tmp/candidate')
+        except Failure as refused:
+            # the root's answer is one line for many causes: ask again without the assignment and on another root, so the report says where the refusal sits
+            for service, extra in (('root1', []), ('root2', ['--next-evm-assignment', '/network/handoff/published-assignment.json'])):
+                try:
+                    self.exec_in(service, 'ubft', 'root', 'handoff', 'q3-candidate', '--next-trust-base', '/network/handoff/trust-base-epoch2.json', *extra,
+                                 '--root-rpc', root_rpc, '--out-dir', '/tmp/candidate-probe')
+                    self.say(f'  probe {service} {"with" if extra else "without"} the assignment: accepted')
+                except Failure as probe:
+                    self.say(f'  probe {service} {"with" if extra else "without"} the assignment: {str(probe)[-200:]}')
+            raise refused
+        for name in ('candidate.cbor', 'config.json', 'v3-body-id.txt', 'root-weights.json', 'evm-weights.json'):
+            (work / name).write_bytes(self.exec_in('root1', 'cat', f'/tmp/candidate/{name}', binary=True))
+        subprocess.run(['chmod', '-R', 'a+rX', str(work)], check=True)
+        config = json.loads((work / 'config.json').read_text())
+        self.expect(config.get('signingScheme') == 2, 'the candidate selects signing scheme 2', str(config)[:200])
+        # 6 the readiness receipt of every entity, in its own root
+        genesis = self.call('eth_getBlockByNumber', ['0x0', False])['hash']
+        spec = json.loads((self.gen / 'network' / 'genesis.json').read_text())['alloc']
+        registry = self.REGISTRY.lower().removeprefix('0x')
+        code = {k.lower().removeprefix('0x'): v for k, v in spec.items()}[registry]['code']
+        code_hash = hashlib.sha256(bytes.fromhex(code.removeprefix('0x'))).hexdigest()
+        self.say(f'  pins: execution genesis {genesis}, registry code sha256 {code_hash}')
+        receipts = []
+        for i in range(1, self.n + 1):
+            self.exec_in(f'root{i}', 'ubft', 'root', 'handoff', 'q3-readiness', '--candidate', '/network/handoff/candidate.cbor', '--key-conf', '/state/keys.json',
+                         '--root-rpc', root_rpc, '--shard-rpc', shard_rpc, '--eth-url', f'http://ureth{i}:8545', '--engine-url', f'http://ureth{i}:8551',
+                         '--jwt-secret', '/jwt/jwt.hex', '--execution-genesis-hash', genesis, '--execution-code-hash', code_hash, '--out', '/tmp/receipt.json')
+            (work / f'receipt-{i}.json').write_text(self.exec_in(f'root{i}', 'cat', '/tmp/receipt.json'))
+            receipts.append(str(work / f'receipt-{i}.json'))
+        self.expect(len(receipts) == self.n, 'one readiness receipt per entity')
+        # 7 propose, as ONE plan, by the host wrapper
+        transport = handoff_ops.DockerTransport(self.gen)
+        run = subprocess.run([sys.executable, str(Path(__file__).resolve().parent / 'handoff_ops.py'), 'propose', str(self.gen), '--ubft', str(self.ubft),
+                              '--next-trust-base', str(work / 'trust-base-epoch2.json'), '--next-evm-assignment', str(work / 'published-assignment.json'),
+                              '--readiness-receipts', ','.join(receipts)], text=True, capture_output=True)
+        (self.evidence / 'handoff').mkdir(exist_ok=True)
+        (self.evidence / 'handoff' / 'propose.log').write_text(run.stdout + run.stderr)
+        if run.returncode:   # the root's refusal is one line for many causes: report what each root holds, so the refusal can be located
+            for i in range(1, self.n + 1):
+                for path in ('/api/v1/q3/status', '/api/v1/q3/signers'):
+                    status, body = transport.post(i, path, b'{}')
+                    self.say(f'  root {i} {path}: {status} {body[:400].decode(errors="replace")}')
+            # the root reads the election's stored proofs from ITS OWN execution client: ask every client the same question
+            election = json.loads((self.gen / 'network' / 'pos-deployment.json').read_text())['election']
+            result = self.view_text(election, 'openResult()(bytes32)').strip()
+            call = [{'to': election, 'data': self.cast_run('calldata', 'publication(bytes32)', result)}, 'latest']
+            for i in range(1, self.n + 1):
+                raw = self.ureth(i, 'eth_call', call)
+                self.say(f'  ureth {i}: block {int(self.ureth(i, "eth_blockNumber"), 16)}, published word {int(raw[2 + 64 * 10:2 + 64 * 11], 16)}, openResult {self.ureth(i, "eth_call", [{"to": election, "data": self.cast_run("calldata", "openResult()")}, "latest"])[:12]}')
+        self.expect(run.returncode == 0, 'handoff_ops.py propose', (run.stdout + run.stderr).strip()[-600:])
+        accepted = int(run.stdout.strip().splitlines()[-1].split()[1])
+        self.expect(accepted >= self.n * 2 // 3 + 1, f'a quorum of the {self.n} roots endorsed the one plan', run.stdout.strip().splitlines()[-1])
+        log = [json.loads(line) for line in (self.gen / 'handoff' / 'log.jsonl').read_text().splitlines()]
+        self.expect(len({row['plan_sha256'] for row in log if row['event'] in ('plan', 'intent', 'endorse')}) == 1, 'every phase of the attempt carries the same plan hash')
+        for path in sorted(work.glob('receipt-*.json')) + [work / 'candidate.cbor', work / 'config.json', work / 'v3-body-id.txt']:
+            self.say(f'  sha256 {hashlib.sha256(path.read_bytes()).hexdigest()}  {path.name}')
+            shutil.copy(path, self.evidence / 'handoff' / path.name)
+        shutil.copy(self.gen / 'handoff' / 'log.jsonl', self.evidence / 'handoff' / 'log.jsonl')
+
     def pod_restart(self):
         """One validator entity at a time: stop its execution client, root and shard node (its signing authority stays live, as the README requires), check what the
         package promises, start them again and check they rejoin. The PUBLIC gateway fails closed while a validator is down (it checks every validator's identity
@@ -678,7 +755,7 @@ class Rehearsal:
 
 STAGES = (('up', 'up'), ('identity', 'identity'), ('first-tx', 'first_tx'), ('gateway-limits', 'gateway_limits'), ('faucet-guard', 'faucet_guard'), ('load', 'load'), ('pod-restart', 'pod_restart'), ('backup-restore', 'backup_restore'), ('reset', 'reset'))
 # run on a generation made with --pos (the workflow's second generation); not part of the default list
-POS_STAGES = (('pos-smoke', 'pos_smoke'), ('pos-rewards', 'pos_rewards'), ('pos-election', 'pos_election'), ('pos-proposal', 'pos_proposal'))
+POS_STAGES = (('pos-smoke', 'pos_smoke'), ('pos-rewards', 'pos_rewards'), ('pos-election', 'pos_election'), ('pos-proposal', 'pos_proposal'), ('pos-propose', 'pos_propose'))
 
 
 def main():

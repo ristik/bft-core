@@ -31,6 +31,7 @@ import time
 import operator_rpc
 
 NOT_PREPARED = 'before the handoff is prepared'
+INTENT_REFUSED = 'invalid operator approval'   # the root's one-line refusal of an intent; many causes, some of them a root that has not yet caught up
 LAPSED = "the Prepare's freeze has lapsed"
 
 # stdlib only: runs in the rpc image, inside one entity's namespace. Prints the status on the first line and the body after it.
@@ -90,9 +91,9 @@ def sha(data):
 
 
 class Wrapper:
-    def __init__(self, transport, entities, log, prepare_timeout=60.0, max_attempts=3, sleep=time.sleep, now=time.monotonic):
+    def __init__(self, transport, entities, log, prepare_timeout=60.0, max_attempts=3, sleep=time.sleep, now=time.monotonic, intent_timeout=15.0):
         self.transport, self.entities, self.log = transport, list(entities), log
-        self.prepare_timeout, self.max_attempts, self.sleep, self.now = prepare_timeout, max_attempts, sleep, now
+        self.prepare_timeout, self.max_attempts, self.sleep, self.now, self.intent_timeout = prepare_timeout, max_attempts, sleep, now, intent_timeout
 
     def record(self, **row):
         self.log(dict(row, time=time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())))
@@ -119,13 +120,30 @@ class Wrapper:
                 return f'entity {entity}: {status} {text}'
             self.sleep(1)
 
+    def intent(self, entity, plan, number):
+        """The plan as this root's intent. A refusal "invalid operator approval" is retried for `intent_timeout` seconds (a root that has not caught up with the state
+        the plan was built from refuses it; the rehearsal saw one root refuse in two runs of three and accept the same plan later). Every refusal is recorded, and one that
+        lasts is the error. Any other refusal is final at once."""
+        deadline = self.now() + self.intent_timeout
+        tries = 0
+        while True:
+            status, body = self.transport.post(entity, '/api/v1/handoff/intent', plan)
+            if 200 <= status < 300:
+                if tries:
+                    self.record(event='intent-accepted-after-refusals', attempt=number, entity=entity, refusals=tries)
+                return
+            text = body.decode(errors='replace')
+            tries += 1
+            self.record(event='intent-refused', attempt=number, entity=entity, status=status, body=text, refusals=tries)
+            if INTENT_REFUSED not in text or self.now() > deadline:
+                raise HandoffError(f'validator {entity} refused the plan: {status} {text}' + (f' ({tries} times in {self.intent_timeout:g} s)' if tries > 1 else ''))
+            self.sleep(1)
+
     def attempt(self, request, number):
         plan = self.plan(request, number)
         self.record(event='plan', attempt=number, request_sha256=sha(request), plan_sha256=sha(plan), entity=self.entities[0])
         for entity in self.entities[1:]:
-            status, body = self.transport.post(entity, '/api/v1/handoff/intent', plan)
-            if not 200 <= status < 300:
-                raise HandoffError(f'validator {entity} refused the plan: {status} {body.decode(errors="replace")}')
+            self.intent(entity, plan, number)
         self.record(event='intent', attempt=number, plan_sha256=sha(plan), entities=self.entities[1:])
         deadline = self.now() + self.prepare_timeout
         with concurrent.futures.ThreadPoolExecutor(max_workers=len(self.entities)) as pool:
