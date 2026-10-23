@@ -847,7 +847,7 @@ class Rehearsal:
         shutil.copy(current, auth / 'client.cred.epoch-2')
         self.compose('stop', 'shard1')
         shutil.copy(old, current)
-        started = datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+        started = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec='microseconds').replace('+00:00', 'Z')   # sub-second: a whole-second stamp reaches back to lines of the same second
         self.compose('start', 'shard1')
         time.sleep(30)
         logs = self.compose('logs', '--no-color', '--since', started, 'shard1', check=False)
@@ -858,7 +858,7 @@ class Rehearsal:
         # put the current credential back: the entity signs again, and the fence is not in the log after the restart
         self.compose('stop', 'shard1')
         shutil.copy(auth / 'client.cred.epoch-2', current)
-        restored = datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+        restored = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec='microseconds').replace('+00:00', 'Z')   # sub-second: a whole-second stamp reaches back to lines of the same second
         self.compose('start', 'shard1')
         receipt = json.loads(self.send_via_gateway(self.gen / 'faucet-secrets', '0x' + '55' * 20))
         self.expect(receipt['status'] == '0x1', 'a transaction through the gateway is mined with the current credential back', receipt['transactionHash'])
