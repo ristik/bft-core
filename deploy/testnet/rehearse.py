@@ -577,8 +577,19 @@ class Rehearsal:
         subprocess.run(['chmod', '-R', 'a+rX', str(work)], check=True)   # the host's files (mode 0600, root) are read by the nodes, which mount network/ read-only
         # 5 the candidate, from one root; the files are copied out of its container
         self.exec_in('root1', 'rm', '-rf', '/tmp/candidate')
-        self.exec_in('root1', 'ubft', 'root', 'handoff', 'q3-candidate', '--next-trust-base', '/network/handoff/trust-base-epoch2.json',
-                     '--next-evm-assignment', '/network/handoff/published-assignment.json', '--root-rpc', root_rpc, '--out-dir', '/tmp/candidate')
+        try:
+            self.exec_in('root1', 'ubft', 'root', 'handoff', 'q3-candidate', '--next-trust-base', '/network/handoff/trust-base-epoch2.json',
+                         '--next-evm-assignment', '/network/handoff/published-assignment.json', '--root-rpc', root_rpc, '--out-dir', '/tmp/candidate')
+        except Failure as refused:
+            # the root's answer is one line for many causes: ask again without the assignment and on another root, so the report says where the refusal sits
+            for service, extra in (('root1', []), ('root2', ['--next-evm-assignment', '/network/handoff/published-assignment.json'])):
+                try:
+                    self.exec_in(service, 'ubft', 'root', 'handoff', 'q3-candidate', '--next-trust-base', '/network/handoff/trust-base-epoch2.json', *extra,
+                                 '--root-rpc', root_rpc, '--out-dir', '/tmp/candidate-probe')
+                    self.say(f'  probe {service} {"with" if extra else "without"} the assignment: accepted')
+                except Failure as probe:
+                    self.say(f'  probe {service} {"with" if extra else "without"} the assignment: {str(probe)[-200:]}')
+            raise refused
         for name in ('candidate.cbor', 'config.json', 'v3-body-id.txt', 'root-weights.json', 'evm-weights.json'):
             (work / name).write_bytes(self.exec_in('root1', 'cat', f'/tmp/candidate/{name}', binary=True))
         subprocess.run(['chmod', '-R', 'a+rX', str(work)], check=True)
