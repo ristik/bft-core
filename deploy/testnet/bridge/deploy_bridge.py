@@ -30,8 +30,9 @@ def validators_network(gen):
 
 def tools(gen, *args, capture=False):
     # only the public network files and the faucet's keystore, read-only (never the validators' or owners' keys); the bridge directory writable at
-    # /work; the image itself is read-only
-    cmd = ['docker', 'run', '--rm', '--read-only', '--network', validators_network(gen), '--user', f'{os.getuid()}:{os.getgid()}', '-e', 'HOME=/work/home',
+    # /work; the image itself is read-only. HOME and every scratch copy live on the tmpfs: GENERATION/bridge is backed up with the generation, and
+    # backup.py restores plain files and directories only
+    cmd = ['docker', 'run', '--rm', '--read-only', '--network', validators_network(gen), '--user', f'{os.getuid()}:{os.getgid()}', '-e', 'HOME=/tmp/home',
            '-v', f'{gen / "network"}:/gen/network:ro', '-v', f'{gen / "faucet-secrets"}:/gen/faucet-secrets:ro', '-v', f'{gen / "bridge"}:/work',
            '--tmpfs', '/tmp', '-w', '/work', TAG, *args]
     return subprocess.run(cmd, check=True, text=True, capture_output=capture).stdout
@@ -58,16 +59,17 @@ def main():
     tools(gen, 'dnb-tool', 'deployment', '--identities', '/gen/network/b1-identities.json', '--agg-conf', ','.join('/gen/' + c for c in confs),
           '--out', '/work/bridge-deployment.json')
     secrets = 'faucet-secrets'
-    # a writable copy of the built contracts (out/ and cache/ included: nothing recompiles, and the image's solc is linked in for --offline)
-    tools(gen, 'bash', '-c', f'set -eo pipefail; rm -rf /work/contracts && cp -R {CONTRACTS} /work/contracts && '
-          'for d in .svm .local/share/svm; do [ ! -e /home/bridge/$d ] || { mkdir -p "$(dirname /work/home/$d)" && ln -sfn /home/bridge/$d /work/home/$d; }; done && '
+    # a writable copy of the built contracts on the tmpfs (out/ and cache/ included: nothing recompiles, and the image's solc is linked in for
+    # --offline); only the broadcast record is kept, as bridge-broadcast.json
+    tools(gen, 'bash', '-c', f'set -eo pipefail; cp -R {CONTRACTS} /tmp/contracts && '
+          'for d in .svm .local/share/svm; do [ ! -e /home/bridge/$d ] || { mkdir -p "$(dirname /tmp/home/$d)" && ln -sfn /home/bridge/$d /tmp/home/$d; }; done && '
           # the script reads its inputs under script/bridge-deploy/ only (foundry.toml fs_permissions), as scripts/lib/agg-lib.sh places them
-          'cp /gen/network/b1-identities.json /work/contracts/script/bridge-deploy/genesis.json && '
-          'cp /work/bridge-deployment.json /work/contracts/script/bridge-deploy/deployment.json && '
-          'cd /work/contracts && BRIDGE_GENESIS=script/bridge-deploy/genesis.json BRIDGE_DEPLOYMENT=script/bridge-deploy/deployment.json '
+          'cp /gen/network/b1-identities.json /tmp/contracts/script/bridge-deploy/genesis.json && '
+          'cp /work/bridge-deployment.json /tmp/contracts/script/bridge-deploy/deployment.json && '
+          'cd /tmp/contracts && BRIDGE_GENESIS=script/bridge-deploy/genesis.json BRIDGE_DEPLOYMENT=script/bridge-deploy/deployment.json '
           f'forge script script/BridgeDeploy.s.sol --offline --rpc-url {ETH} --keystore /gen/{secrets}/keystore.json --password-file /gen/{secrets}/password '
-          f'--broadcast --slow 2>&1 | tee /work/vault-deploy.log')
-    run = json.loads((work / f'contracts/broadcast/BridgeDeploy.s.sol/{manifest["chain_id"]}/run-latest.json').read_text())
+          f'--broadcast --slow 2>&1 | tee /work/vault-deploy.log && cp broadcast/BridgeDeploy.s.sol/{manifest["chain_id"]}/run-latest.json /work/bridge-broadcast.json')
+    run = json.loads((work / 'bridge-broadcast.json').read_text())
     addr = {t['contractName']: t['contractAddress'] for t in run['transactions'] if t.get('contractName') in ('BridgeVault', 'TokenVerifier')}
     if set(addr) != {'BridgeVault', 'TokenVerifier'}:
         raise SystemExit(f'the deploy broadcast has no BridgeVault/TokenVerifier: {addr}')

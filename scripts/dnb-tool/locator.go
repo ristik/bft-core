@@ -6,6 +6,8 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"errors"
+	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -28,8 +30,8 @@ type archiveLocator struct {
 	dir          string
 	store        receiptGetter
 	rescanEvery  time.Duration
-	listDir      func(string) ([]string, error) // the archive's entry names; a test counts the listings
-	readManifest func(string) ([]byte, error)   // os.ReadFile; a test counts the reads
+	listDir      func(string, func([]string) error) error // the archive's entry names, chunk by chunk; a test counts the listings
+	readManifest func(string) ([]byte, error)             // os.ReadFile; a test counts the reads
 	now          func() time.Time
 
 	mu       sync.Mutex
@@ -45,7 +47,8 @@ func newArchiveLocator(ctx context.Context, dir string, store receiptGetter, res
 	return l, l.rescan(ctx)
 }
 
-// locate returns the record of blockHash, or errNotFound when no known Context holds it, after at most one (shared, throttled) rescan.
+// locate returns the record of blockHash, or errNotFound when no known Context holds it, after at most one (shared, throttled) rescan. A block
+// held under two Contexts is an error, never a choice: a block hash names one block, so the archive is not what it claims.
 func (l *archiveLocator) locate(ctx context.Context, blockHash [32]byte) (archive.Request, *archive.Record, error) {
 	q, rec, err := l.lookup(blockHash)
 	if err == nil || !errors.Is(err, errNotFound) {
@@ -64,17 +67,25 @@ func (l *archiveLocator) lookup(blockHash [32]byte) (archive.Request, *archive.R
 		contexts = append(contexts, c)
 	}
 	l.mu.Unlock()
+	var found *archive.Record
+	var at archive.Request
 	for _, c := range contexts {
 		q := archive.Request{Context: c, BlockHash: blockHash}
 		rec, err := l.store.GetReceiptComplete(q)
 		switch {
 		case err == nil:
-			return q, rec, nil
+			if found != nil {
+				return archive.Request{}, nil, fmt.Errorf("block %x is archived under two Contexts", blockHash)
+			}
+			found, at = rec, q
 		case !errors.Is(err, archive.ErrUnavailable):
 			return archive.Request{}, nil, err
 		}
 	}
-	return archive.Request{}, nil, errNotFound
+	if found == nil {
+		return archive.Request{}, nil, errNotFound
+	}
+	return at, found, nil
 }
 
 // rescan reads the manifests of directories not read before, unless a scan ended less than rescanEvery ago; a scan already running is waited
@@ -106,48 +117,63 @@ func (l *archiveLocator) rescan(ctx context.Context) error {
 }
 
 func (l *archiveLocator) scan(ctx context.Context) error {
-	names, err := l.listDir(l.dir)
+	return l.listDir(l.dir, func(names []string) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		for _, name := range names {
+			key, ok := nameKey(name)
+			if !ok {
+				continue
+			}
+			l.mu.Lock()
+			_, done := l.seen[key]
+			l.mu.Unlock()
+			if done {
+				continue
+			}
+			m, err := l.readManifest(filepath.Join(l.dir, name, "manifest"))
+			if err != nil {
+				continue // not published yet (a record is renamed into place complete), or unreadable: the next scan tries again
+			}
+			q, ok := manifestRequest(m)
+			l.mu.Lock()
+			l.seen[key] = struct{}{}
+			if ok {
+				if k, err := archive.EncodeRequest(q); err == nil {
+					l.contexts[string(k[:len(k)-32])] = q.Context // the encoding ends with the block hash: the rest identifies the Context
+				}
+			}
+			l.mu.Unlock()
+		}
+		return nil
+	})
+}
+
+// listChunk is how many entry names one read of the archive directory returns: a listing holds no more than this in memory at a time.
+const listChunk = 1024
+
+// listNames hands each chunk of dir's entry names to each, unsorted (a listing of a large archive need not sort).
+func listNames(dir string, each func([]string) error) error {
+	f, err := os.Open(dir)
 	if err != nil {
 		return err
 	}
-	for i, name := range names {
-		if i%256 == 0 && ctx.Err() != nil {
-			return ctx.Err()
-		}
-		key, ok := nameKey(name)
-		if !ok {
-			continue
-		}
-		l.mu.Lock()
-		_, done := l.seen[key]
-		l.mu.Unlock()
-		if done {
-			continue
-		}
-		m, err := l.readManifest(filepath.Join(l.dir, name, "manifest"))
-		if err != nil {
-			continue // not published yet (a record is renamed into place complete), or unreadable: the next scan tries again
-		}
-		q, ok := manifestRequest(m)
-		l.mu.Lock()
-		l.seen[key] = struct{}{}
-		if ok {
-			if k, err := archive.EncodeRequest(q); err == nil {
-				l.contexts[string(k[:len(k)-32])] = q.Context // the encoding ends with the block hash: the rest identifies the Context
+	defer f.Close()
+	for {
+		names, err := f.Readdirnames(listChunk)
+		if len(names) > 0 {
+			if err := each(names); err != nil {
+				return err
 			}
 		}
-		l.mu.Unlock()
+		if errors.Is(err, io.EOF) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
 	}
-	return nil
-}
-
-func listNames(dir string) ([]string, error) {
-	f, err := os.Open(dir)
-	if err != nil {
-		return nil, err
-	}
-	defer f.Close()
-	return f.Readdirnames(-1) // unsorted: a listing of a large archive need not sort
 }
 
 // nameKey is the first 8 bytes of a v2 record directory's name ("v2-" + hex sha256 of its Request); other entries are not records.

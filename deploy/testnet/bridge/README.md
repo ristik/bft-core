@@ -3,8 +3,11 @@
 TN-B (#429), with B-TEST (#438) as its prerequisite, puts fake-value bridging on the public PoA testnet. This directory adds the bridge to the container package in
 `deploy/testnet` without changing the package's own services. The plan, and the items that do or don't need the host, are in `briefs/tnb-without-host.md`.
 
-Status: **part 1**. That is the bridge tools image, the post-genesis deploy and the lock-proof endpoint. The mint, transfer, burn, redeem and claim stages (part 2) use the package's one
-aggregator: aggregator-go on partition 7, one shard (owner decision 40).
+Status: **part 2**. Part 1 is the bridge tools image, the post-genesis deploy and the lock-proof endpoint. Part 2 adds the bridge's round trip on the package's one
+aggregator (aggregator-go on partition 7, one shard: owner decision 40): lock, mint, transfers, burn, redeem and claim, driven by native-bridge-plugins' live
+driver (`tests/live/anyage.ts`) in the bridge tools image, plus the consolidated and long-history redeems, on-chain negatives and a backup and restore with the
+bridge deployed. Not covered here: a reset with outstanding locks, retired-key forged histories, the proof refresh across rotations and the tester CLI
+(`briefs/tnb-without-host.md`).
 
 ## Files
 
@@ -25,6 +28,25 @@ sudo python3 deploy/testnet/bridge/deploy_bridge.py /srv/<generation> --agg-conf
 sudo python3 deploy/testnet/bridge/overlay.py /srv/<generation>
 cd /srv/<generation> && sudo docker compose -f compose.yaml -f compose.bridge.yaml up -d lockproof
 ```
+
+## The rehearsal stages
+
+`rehearse_bridge.py` runs on a generation that `rehearse.py --stages up,identity` brought up (`.github/workflows/testnet-bridge.yml`):
+
+| stage | what it checks |
+|---|---|
+| `deploy` | TokenVerifier and BridgeVault deployed after genesis and readable through the public gateway; the vault's CFG |
+| `lockproof` | the lock-proof endpoint (below) |
+| `fund` | a driver key for this generation, in `GENERATION/bridge/driver.env` (mode 0600, never in the evidence), funded from the faucet |
+| `roundtrip` | a lock, its proof from validator 1's archive, the mint, 3 transfers and the burn certified by the aggregator, the return proof verified by `eth_call`, then the redemption and the claim with the last validator stopped; it rejoins with the same blocks. The vault's balance rises by the lock and falls back after the claim. |
+| `negatives` | the redeemed envelope is refused a second time, a second claim is refused, and the vault keeps the nullifier |
+| `consolidated` | the SDK's consolidation over the one shard (K = 1 anchor), redeemed and claimed, with the per-SID envelope priced as the control |
+| `long-history` | a token with `--long-transfers` transfers (default 250, at most 254: one aggregator batch holds 256 state IDs, the mint, the transfers and the burn), consolidated; one gas short reverts and leaves the vault unchanged; then redeemed and claimed |
+| `backup-restore` | `rehearse.py`'s quiesced backup and restore with the bridge deployed (the endpoint stopped too): the redeemed lock stays spent, and a new round trip completes on the restored generation |
+
+The driver signs with its own key and with the fixed, publicly known keys of its recipient and submitter (`tests/live/anyage.ts`). That is fine on a
+rehearsal generation, but not on a public network: anyone can spend what those addresses hold. A redeem transaction carries the whole return proof, and the public gateway
+takes request bodies of at most 16 KiB (`gateway.py`). The `roundtrip` stage prints whether its proof fits. Until it does, a tester's redeem goes to an RPC without that limit.
 
 ## The lock-proof endpoint
 
