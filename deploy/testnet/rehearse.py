@@ -675,9 +675,10 @@ class Rehearsal:
         # the EVM is frozen from Prepare: a paid transaction mined shows it certifies again
         self.faucet_send('0x' + '33' * 20, 1)
         self.expect(int(self.call('eth_blockNumber'), 16) > before, 'the execution chain advanced after the Abort')
-        for i in range(1, self.n + 1):
-            lines = [l for l in self.compose('logs', '--no-color', f'root{i}', check=False).splitlines() if 'root handoff abort ordered' in l]
-            self.expect(len(lines) >= 1, f'root {i} logged the ordered Abort', lines[-1][:300] if lines else '')
+        # the root that orders the Abort logs it (not every root does); the committed record every root reported above is the per-root evidence
+        ordered = [l for i in range(1, self.n + 1) for l in self.compose('logs', '--no-color', f'root{i}', check=False).splitlines() if 'root handoff abort ordered' in l]
+        self.expect(len(ordered) >= 1, 'a root logged the ordered Abort', ordered[0][-300:] if ordered else '')
+        (self.evidence / 'handoff' / 'abort-ordered.log').write_text('\n'.join(ordered) + '\n')
 
     def root_epoch(self, i, transport=None):
         """The epoch of root i's committed certificate, or None while it does not answer."""
