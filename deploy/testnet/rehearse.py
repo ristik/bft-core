@@ -489,10 +489,12 @@ class Rehearsal:
                        *(['--evm-pops', proposal / 'evm-pops.json'] if evm_pops else []), '--out', assignment)
         return assignment, proposal, context
 
-    def pos_proposal(self):
+    def pos_proposal(self, resubmit=True):
         """5b steps 0-4 on the election's reserved result: the preflight, the next root trust base (epoch 2, the same four members and weights, signed by each
         root's key), the EVM possession proofs made by the signing authorities over the candidate, their submission to the election and its finalization (sent by
-        the relayer container with a funded owner key), and the assignment rebuilt with the stored proofs. Stops before the candidate, readiness and the proposal."""
+        the relayer container with a funded owner key), and the assignment rebuilt with the stored proofs. Stops before the candidate, readiness and the proposal.
+        `resubmit=False` is the next attempt after an Abort before H: the proofs are made again for it (they bind the attempt) but the election already holds its
+        published result, which an Abort before the Freeze does not close, so nothing is submitted or finalized again."""
         pos = self.manifest.get('pos')
         self.expect(bool(pos), 'the manifest carries a pos block (this generation was made with --pos)')
         compose = json.loads((self.gen / 'compose.yaml').read_text())
@@ -538,17 +540,18 @@ class Rehearsal:
             collected += ['--pop', work / f'evmpop-{i}.json']
         self.host_ubft('pos-relayer', 'assemble', '--candidate', work / 'candidate.hex', '--pos-deployment', net / 'pos-deployment.json', '--attempt', attempt, *collected,
                        '--out', work / 'evm-pops-collected.json')
-        # 3 submit the proofs and finalize the result: the funded owner key of a genesis identity pays
-        identity = json.loads((net / 'pos-plan.json').read_text())['identities'][0]
-        if self.balance(identity['owner']) < 10 ** 17:
-            self.faucet_send(identity['owner'], 10 ** 18)
-        owner_key = self.gen / pos['owner_keys'] / f'identity-{identity["stakingId"]}' / 'owner.key'
-        subprocess.run(['chown', '-R', '10001:10001', str(work)], check=True)
-        for step, extra in (('submit-pops', ['--evm-pops', '/work/evm-pops-collected.json']), ('finalize', [])):
-            status, out = self.relayer(owner_key, step, '--result-id', result, *extra, mounts=[f'{work}:/work:ro'])
-            self.expect(status == 0, f'pos-relayer tx {step}', out.strip()[-500:])
-        raw = self.call('eth_call', [{'to': election, 'data': self.cast_run('calldata', 'publication(bytes32)', result)}, 'latest'])
-        self.expect(int(raw[2 + 64 * 10:2 + 64 * 11], 16) == 1, 'the result is published (the election holds the proofs)')
+        if resubmit:
+            # 3 submit the proofs and finalize the result: the funded owner key of a genesis identity pays
+            identity = json.loads((net / 'pos-plan.json').read_text())['identities'][0]
+            if self.balance(identity['owner']) < 10 ** 17:
+                self.faucet_send(identity['owner'], 10 ** 18)
+            owner_key = self.gen / pos['owner_keys'] / f'identity-{identity["stakingId"]}' / 'owner.key'
+            subprocess.run(['chown', '-R', '10001:10001', str(work)], check=True)
+            for step, extra in (('submit-pops', ['--evm-pops', '/work/evm-pops-collected.json']), ('finalize', [])):
+                status, out = self.relayer(owner_key, step, '--result-id', result, *extra, mounts=[f'{work}:/work:ro'])
+                self.expect(status == 0, f'pos-relayer tx {step}', out.strip()[-500:])
+            raw = self.call('eth_call', [{'to': election, 'data': self.cast_run('calldata', 'publication(bytes32)', result)}, 'latest'])
+            self.expect(int(raw[2 + 64 * 10:2 + 64 * 11], 16) == 1, 'the result is published (the election holds the proofs)')
         # 4 the assignment again, with the stored proofs
         assignment, proposal, _ = self.build_assignment('published', work, result, ids, False, 'evm-pops-collected.json')
         self.expect(assignment.stat().st_size > 0, 'the published assignment is written', str(assignment))
@@ -564,12 +567,9 @@ class Rehearsal:
         (kept / 'sha256.txt').write_text('\n'.join(lines) + '\n')
         self.say(f'  {len(lines)} handoff artifacts recorded (sha256.txt)')
 
-    def pos_propose(self):
-        """5b steps 5-7 on the files pos-proposal wrote: the roots' candidate for the epoch-2 trust base and the published assignment (one root derives it), the
-        readiness receipt of EVERY entity made by its own root (its key file, its shard's loopback RPC, its execution client and its Engine JWT, with the operator's own
-        pins of the execution genesis hash and the registry code), then the proposal of that ONE plan to every root by the host wrapper (plan, intent, endorse).
-        The pins are not read from the node under test: the registry code hash comes from the shipped genesis; the genesis block hash is entity 1's, taken once here
-        (as the lane takes it at its start). Stops with the handoff committed at epoch 1; the install is the next stage."""
+    def pos_candidate(self):
+        """5b steps 5 and 6: the roots' candidate for the epoch-2 trust base and the published assignment (one root derives it) and the readiness receipt of EVERY entity,
+        each made by its own root (see pos_propose). Returns the handoff directory and the receipt files."""
         compose = json.loads((self.gen / 'compose.yaml').read_text())
         work = self.gen / 'network' / 'handoff'
         for name in ('trust-base-epoch2.json', 'published-assignment.json'):
@@ -611,6 +611,15 @@ class Rehearsal:
             (work / f'receipt-{i}.json').write_text(self.exec_in(f'root{i}', 'cat', '/tmp/receipt.json'))
             receipts.append(str(work / f'receipt-{i}.json'))
         self.expect(len(receipts) == self.n, 'one readiness receipt per entity')
+        return work, receipts
+
+    def pos_propose(self):
+        """5b steps 5-7 on the files pos-proposal wrote: the roots' candidate for the epoch-2 trust base and the published assignment (one root derives it), the
+        readiness receipt of EVERY entity made by its own root (its key file, its shard's loopback RPC, its execution client and its Engine JWT, with the operator's own
+        pins of the execution genesis hash and the registry code), then the proposal of that ONE plan to every root by the host wrapper (plan, intent, endorse).
+        The pins are not read from the node under test: the registry code hash comes from the shipped genesis; the genesis block hash is entity 1's, taken once here
+        (as the lane takes it at its start). Stops with the handoff committed at epoch 1; the install is the next stage."""
+        work, receipts = self.pos_candidate()
         # 7 propose, as ONE plan, by the host wrapper
         transport = handoff_ops.DockerTransport(self.gen)
         run = subprocess.run([sys.executable, str(Path(__file__).resolve().parent / 'handoff_ops.py'), 'propose', str(self.gen), '--ubft', str(self.ubft),
@@ -634,6 +643,8 @@ class Rehearsal:
         accepted = int(run.stdout.strip().splitlines()[-1].split()[1])
         self.expect(accepted >= self.n * 2 // 3 + 1, f'a quorum of the {self.n} roots endorsed the one plan', run.stdout.strip().splitlines()[-1])
         log = [json.loads(line) for line in (self.gen / 'handoff' / 'log.jsonl').read_text().splitlines()]
+        held = [n for n, row in enumerate(log) if row['event'] == 'hold']
+        log = log[held[-1] + 1:] if held else log   # a rehearsed Abort (pos-abort) left its held plan in the log: this proposal is what follows it
         self.expect(len({row['plan_sha256'] for row in log if row['event'] in ('plan', 'intent', 'endorse')}) == 1, 'every phase of the attempt carries the same plan hash')
         # the intents were handed over 1.5 s apart (plus the sidecar's second each): the later validators got theirs after the leader had ordered the Prepare, which the
         # root refused before #795. Neither a refusal nor a lapse may appear.
@@ -642,6 +653,41 @@ class Rehearsal:
             self.say(f'  sha256 {hashlib.sha256(path.read_bytes()).hexdigest()}  {path.name}')
             shutil.copy(path, self.evidence / 'handoff' / path.name)
         shutil.copy(self.gen / 'handoff' / 'log.jsonl', self.evidence / 'handoff' / 'log.jsonl')
+
+    def pos_abort(self):
+        """5b step 14, before the handoff is committed: the candidate and the receipts as for the proposal, then the plan, every intent and the endorsement of ONE root (below
+        the quorum, so no Freeze follows), then `handoff_ops.py abort` with the exact target on all four roots at once. Expects the committed Abort record from every root, the
+        epoch unchanged at 1 and the EVM certifying again (a paid transaction through the gateway). Then the proposal's steps 0-4 again for the next attempt (new possession proofs) and the root's candidate for it."""
+        work, receipts = self.pos_candidate()
+        ops = str(Path(__file__).resolve().parent / 'handoff_ops.py')
+        held = subprocess.run([sys.executable, ops, 'hold', str(self.gen), '--ubft', str(self.ubft), '--next-trust-base', str(work / 'trust-base-epoch2.json'),
+                               '--next-evm-assignment', str(work / 'published-assignment.json'), '--readiness-receipts', ','.join(receipts)], text=True, capture_output=True)
+        (self.evidence / 'handoff').mkdir(exist_ok=True)
+        (self.evidence / 'handoff' / 'abort-hold.log').write_text(held.stdout + held.stderr)
+        self.expect(held.returncode == 0, 'one root endorsed the plan, the others hold its intent (the handoff is prepared, not frozen)', (held.stdout + held.stderr).strip()[-500:])
+        target = json.loads(held.stdout.strip().splitlines()[-1])
+        (self.evidence / 'handoff' / 'abort-target.json').write_text(json.dumps(target, indent=1, sort_keys=True) + '\n')
+        self.say(f'  target: attempt {target["attempt"]}, old epoch {target["oldEpoch"]}, successor body {target["nextBodyId"]}')
+        before = int(self.call('eth_blockNumber'), 16)
+        aborted = subprocess.run([sys.executable, ops, 'abort', str(self.gen), '--', '--network', str(target['network']), '--old-epoch', str(target['oldEpoch']),
+                                  '--predecessor-body-id', target['predecessorBodyId'], '--attempt', str(target['attempt']), '--next-body-id', target['nextBodyId'],
+                                  '--timeout', '90s'], text=True, capture_output=True)
+        (self.evidence / 'handoff' / 'abort.log').write_text(aborted.stdout + aborted.stderr)
+        committed = [line for line in aborted.stdout.splitlines() if 'committed Abort record' in line]
+        self.expect(aborted.returncode == 0 and len(committed) == self.n, f'all {self.n} roots report the committed Abort record', (aborted.stdout + aborted.stderr).strip()[-500:])
+        self.expect(len({line.split('record ')[1].split()[0] for line in committed}) == 1, 'they name one Abort record', committed[0])
+        self.expect(all(self.root_epoch(i) == 1 for i in range(1, self.n + 1)), 'every root is still at epoch 1')
+        # the EVM is frozen from Prepare: a paid transaction mined shows it certifies again
+        self.faucet_send('0x' + '33' * 20, 1)
+        self.expect(int(self.call('eth_blockNumber'), 16) > before, 'the execution chain advanced after the Abort')
+        # the next attempt needs new approvals: the possession proofs bind the attempt (popContext), so the assignment made for the Aborted attempt is refused by the
+        # root ("invalid proof of possession", run 39962014299). Steps 0-4 again, now at the attempt the root plans (the chain's context names it), then the candidate.
+        self.pos_proposal(resubmit=False)
+        root_rpc = operator_rpc.common_urls(json.loads((self.gen / 'compose.yaml').read_text()))[0]
+        self.exec_in('root1', 'rm', '-rf', '/tmp/candidate-probe')
+        self.exec_in('root1', 'ubft', 'root', 'handoff', 'q3-candidate', '--next-trust-base', '/network/handoff/trust-base-epoch2.json',
+                     '--next-evm-assignment', '/network/handoff/published-assignment.json', '--root-rpc', root_rpc, '--out-dir', '/tmp/candidate-probe')
+        self.expect(True, 'the root derives the next attempt\'s candidate from the assignment made for it')
 
     def root_epoch(self, i, transport=None):
         """The epoch of root i's committed certificate, or None while it does not answer."""
@@ -801,18 +847,18 @@ class Rehearsal:
         shutil.copy(current, auth / 'client.cred.epoch-2')
         self.compose('stop', 'shard1')
         shutil.copy(old, current)
-        started = datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+        started = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec='microseconds').replace('+00:00', 'Z')   # sub-second: a whole-second stamp reaches back to lines of the same second
         self.compose('start', 'shard1')
         time.sleep(30)
         logs = self.compose('logs', '--no-color', '--since', started, 'shard1', check=False)
         fenced = [line for line in logs.splitlines() if 'signing-session-fenced' in line]
         (self.evidence / 'handoff' / 'stale-client-credential-shard1.log').write_text('\n'.join(fenced[:40]) + '\n')
         self.say(f'  shard 1 with the pre-advance credential: {len(fenced)} lines "restored authority refused readiness ... signing-session-fenced"')
-        self.expect(len(fenced) > 0, 'the authority fences the old client session: the shard node reads signing-session-fenced and abstains', f'{len(logs.splitlines())} log lines, none fenced')
+        self.expect(len(fenced) > 0, 'the authority fences the old client session: the shard node reads signing-session-fenced and abstains', f'{len(fenced)} of {len(logs.splitlines())} log lines are signing-session-fenced' if fenced else f'{len(logs.splitlines())} log lines, none fenced')
         # put the current credential back: the entity signs again, and the fence is not in the log after the restart
         self.compose('stop', 'shard1')
         shutil.copy(auth / 'client.cred.epoch-2', current)
-        restored = datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+        restored = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec='microseconds').replace('+00:00', 'Z')   # sub-second: a whole-second stamp reaches back to lines of the same second
         self.compose('start', 'shard1')
         receipt = json.loads(self.send_via_gateway(self.gen / 'faucet-secrets', '0x' + '55' * 20))
         self.expect(receipt['status'] == '0x1', 'a transaction through the gateway is mined with the current credential back', receipt['transactionHash'])
@@ -937,7 +983,7 @@ class Rehearsal:
 
 STAGES = (('up', 'up'), ('identity', 'identity'), ('first-tx', 'first_tx'), ('gateway-limits', 'gateway_limits'), ('faucet-guard', 'faucet_guard'), ('load', 'load'), ('pod-restart', 'pod_restart'), ('backup-restore', 'backup_restore'), ('reset', 'reset'))
 # run on a generation made with --pos (the workflow's second generation); not part of the default list
-POS_STAGES = (('pos-smoke', 'pos_smoke'), ('pos-rewards', 'pos_rewards'), ('pos-election', 'pos_election'), ('pos-proposal', 'pos_proposal'), ('pos-propose', 'pos_propose'), ('pos-install', 'pos_install'), ('pos-advance', 'pos_advance'), ('pos-restart', 'pos_restart'), ('pos-stale', 'pos_stale'))
+POS_STAGES = (('pos-smoke', 'pos_smoke'), ('pos-rewards', 'pos_rewards'), ('pos-election', 'pos_election'), ('pos-proposal', 'pos_proposal'), ('pos-abort', 'pos_abort'), ('pos-propose', 'pos_propose'), ('pos-install', 'pos_install'), ('pos-advance', 'pos_advance'), ('pos-restart', 'pos_restart'), ('pos-stale', 'pos_stale'))
 
 
 def main():
