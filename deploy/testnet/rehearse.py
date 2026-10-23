@@ -870,6 +870,51 @@ class Rehearsal:
         """pos-restart after the second handoff: the roots were recreated into epoch 3 over the epoch-2 stores and keep that container; the pods restart and stay at epoch 3."""
         self.pos_restart(epoch=3)
 
+    def pos_recreate(self):
+        """A root recreated from compose.yaml ALONE, without any --install-handoff-epoch (the plain `docker compose up -d --force-recreate` an operator runs after a
+        host reboot): it is recreated in its entity's namespace (--no-deps: pod<i> stays). That it came back is NOT shown by its stored latest certificate (the other
+        roots keep certifying without it): root 2 is stopped, which makes root 1 needed for the quorum (4 roots, threshold 3), and the committed round must advance
+        at epoch E with root 1 among the live roots; then root 2 is started again and converges. The container's own entrypoint is inspected for the flag. The flag-less
+        start is what OPERATOR.md step 8 lists as UNVERIFIED; a failure carries the root's last log lines. Run after pos-advance (E=2) or pos-handoff-2 (E=3)."""
+        transport = handoff_ops.DockerTransport(self.gen)
+        epoch = self.root_epoch(1, transport)
+        self.expect(epoch is not None and epoch >= 2 and all(self.root_epoch(i, transport) == epoch for i in range(1, self.n + 1)),
+                    'every root certifies at the same switched epoch (run a handoff first)', str(epoch))
+        def signers(i):
+            try:
+                status, body = transport.post(i, '/api/v1/q3/signers', b'{}')
+                return json.loads(body) if status == 200 else None
+            except (handoff_ops.HandoffError, ValueError):
+                return None
+        before = signers(1)
+        self.expect(before is not None and before['threshold'] == self.n - 1, 'four roots at unit weight: the quorum threshold is 3', json.dumps(before))
+        self.say(f'  recreating root1 from compose.yaml alone (no install flag), epoch {epoch}')
+        self.compose('up', '-d', '--no-deps', '--force-recreate', 'root1')
+        container = self.compose('ps', '-q', 'root1').strip()
+        entry = json.loads(subprocess.run(['docker', 'inspect', '--format', '{{json .Config.Entrypoint}}', container], check=True, text=True, capture_output=True).stdout)
+        (self.evh() / 'recreate-entrypoint.json').write_text(json.dumps(entry, indent=1) + '\n')
+        self.expect('--install-handoff-epoch' not in entry, 'the running root1 container was created without --install-handoff-epoch', ' '.join(entry)[-200:])
+        self.compose('stop', 'root2')
+        try:
+            # root 2 is down: 1, 3 and 4 are all needed, so a round committed now carries root 1's signature
+            start = signers(3)['round']
+            def advanced():
+                one, three = signers(1), signers(3)
+                return one and three and one['epoch'] == epoch and three['epoch'] == epoch and one['round'] > start + 3 and three['round'] > start + 3 and three['quorum'] and len(three['signers']) == self.n - 1
+            self.wait(f'with root 2 stopped the committed round advances at epoch {epoch} on roots 1 and 3, signed by the three live roots', advanced, 240)
+        except Exception:
+            (self.evh() / 'recreate-root.log').write_text(self.compose('logs', '--no-color', '--tail', '80', 'root1', check=False))
+            raise
+        finally:
+            self.compose('start', 'root2')
+        for i in range(1, self.n + 1):
+            self.wait(f'root {i} certifies at epoch {epoch}', lambda i=i: self.root_epoch(i, transport) == epoch, 180)
+        deployment = json.loads((self.gen / 'network' / 'pos-deployment.json').read_text())
+        def applied():
+            count = self.view(self.REGISTRY, 'recordCount()(uint64)')[0]
+            return count if count == self.view(deployment['custody'], 'recordCursor()(uint64)')[0] else None
+        self.expect(self.wait('the custody has applied every root record', lambda: applied() is not None, 300), 'recordCursor equals recordCount after the recreate', str(applied()))
+
     def pos_stale(self):
         """Credentials of the old epoch after the switch. (1) the authority refuses to be advanced back to the epoch-1 trust base and shard configuration, and its
         status does not move; (2) a shard node started with its PRE-advance client credential (kept as client.cred.pre-epoch-2 by pos-advance) is not served by the
@@ -1032,7 +1077,7 @@ class Rehearsal:
 
 STAGES = (('up', 'up'), ('identity', 'identity'), ('first-tx', 'first_tx'), ('gateway-limits', 'gateway_limits'), ('faucet-guard', 'faucet_guard'), ('load', 'load'), ('pod-restart', 'pod_restart'), ('backup-restore', 'backup_restore'), ('reset', 'reset'))
 # run on a generation made with --pos (the workflow's second generation); not part of the default list
-POS_STAGES = (('pos-smoke', 'pos_smoke'), ('pos-rewards', 'pos_rewards'), ('pos-election', 'pos_election'), ('pos-proposal', 'pos_proposal'), ('pos-abort', 'pos_abort'), ('pos-propose', 'pos_propose'), ('pos-install', 'pos_install'), ('pos-advance', 'pos_advance'), ('pos-restart', 'pos_restart'), ('pos-stale', 'pos_stale'), ('pos-handoff-2', 'pos_handoff_2'), ('pos-restart-2', 'pos_restart_2'))
+POS_STAGES = (('pos-smoke', 'pos_smoke'), ('pos-rewards', 'pos_rewards'), ('pos-election', 'pos_election'), ('pos-proposal', 'pos_proposal'), ('pos-abort', 'pos_abort'), ('pos-propose', 'pos_propose'), ('pos-install', 'pos_install'), ('pos-advance', 'pos_advance'), ('pos-restart', 'pos_restart'), ('pos-stale', 'pos_stale'), ('pos-handoff-2', 'pos_handoff_2'), ('pos-restart-2', 'pos_restart_2'), ('pos-recreate', 'pos_recreate'))
 
 
 def main():
