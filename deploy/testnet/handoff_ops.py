@@ -187,15 +187,20 @@ def abort_commands(generation, entities, flags):
     return {i: compose + ['exec', '-T', f'root{i}', 'ubft', 'root', 'handoff', 'abort', *flags, '--root-rpc', root_rpc] for i in entities}
 
 
-def abort_target(transport, entity, plan, old_epoch):
-    """The exact target of Abort for the plan just held (the fields scripts/h6/prepare-handoff.py derives): network, predecessor and attempt from the root's context, the
-    successor body identity as the SHA-256 of the plan's canonical body."""
+def abort_context(transport, entity):
+    """The root's context (network, predecessor, the attempt it plans). Read BEFORE the plan: the root answers only while idle, a committed Prepare makes it refuse."""
     status, body = transport.post(entity, '/api/v1/handoff/evm-assignment/context', b'{}')
     if status != 200:
         raise HandoffError(f'entity {entity} refused the context: {status} {body.decode(errors="replace")}')
-    context, held = json.loads(body), json.loads(plan)
+    return json.loads(body)
+
+
+def abort_target(context, plan, old_epoch):
+    """The exact target of Abort for the plan held (the fields scripts/h6/prepare-handoff.py derives): network, predecessor and attempt from the context read before
+    the plan, the successor body identity as the SHA-256 of the plan's canonical body."""
+    held = json.loads(plan)
     if held['Attempt'] != context['attempt']:
-        raise HandoffError(f'the context plans attempt {context["attempt"]}, the plan is attempt {held["Attempt"]}')
+        raise HandoffError(f'the context planned attempt {context["attempt"]}, the plan is attempt {held["Attempt"]}')
     return {'network': context['network'], 'oldEpoch': old_epoch, 'predecessorBodyId': '0x' + context['predecessor'].removeprefix('0x'),
             'attempt': held['Attempt'], 'nextBodyId': '0x' + sha(base64.b64decode(held['Body'], validate=True))}
 
@@ -252,8 +257,9 @@ def main():
         old_epoch = json.loads(Path(a.generation, 'network', 'trust-base.json').read_text())['epoch']
         with (work / 'log.jsonl').open('a') as log:
             wrapper = Wrapper(transport, transport.entities, lambda row: (log.write(json.dumps(row, sort_keys=True) + '\n'), log.flush()), a.prepare_timeout)
+            context = abort_context(transport, transport.entities[0])
             plan = wrapper.hold(request)
-        print(json.dumps(abort_target(transport, transport.entities[0], plan, old_epoch), sort_keys=True))
+        print(json.dumps(abort_target(context, plan, old_epoch), sort_keys=True))
         return
     with (work / 'log.jsonl').open('a') as log:
         wrapper = Wrapper(transport, transport.entities, lambda row: (log.write(json.dumps(row, sort_keys=True) + '\n'), log.flush(), print(json.dumps(row, sort_keys=True))),

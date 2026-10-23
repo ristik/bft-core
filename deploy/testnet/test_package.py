@@ -522,11 +522,14 @@ class HandoffWrapper(unittest.TestCase):
         self.assertEqual([r['event'] for r in rows],['plan','hold'])
         class Context(self.Fake):
             def post(self,entity,path,body,timeout=10):
-                return (200,json.dumps({'network':7,'attempt':3,'predecessor':'0x'+'ab'*32}).encode()) if path.endswith('/evm-assignment/context') else (200,b'{}')
-        target=handoff_ops.abort_target(Context([1]),1,plan,1)
+                return (200,json.dumps({'network':7,'attempt':3,'predecessor':'0x'+'ab'*32}).encode()) if path.endswith('/evm-assignment/context') else (422,b'invalid operator approval')
+        context=handoff_ops.abort_context(Context([1]),1)
+        target=handoff_ops.abort_target(context,plan,1)
         self.assertEqual(target,{'network':7,'oldEpoch':1,'predecessorBodyId':'0x'+'ab'*32,'attempt':3,'nextBodyId':'0x'+handoff_ops.sha(body)})
-        with self.assertRaisesRegex(handoff_ops.HandoffError,'plans attempt 3'):
-            handoff_ops.abort_target(Context([1]),1,json.dumps({'Attempt':2,'Body':base64.b64encode(body).decode()}).encode(),1)
+        with self.assertRaisesRegex(handoff_ops.HandoffError,'planned attempt 3'):
+            handoff_ops.abort_target(context,json.dumps({'Attempt':2,'Body':base64.b64encode(body).decode()}).encode(),1)
+        with self.assertRaisesRegex(handoff_ops.HandoffError,'refused the context: 422'):
+            handoff_ops.abort_context(type('Busy',(),{'post':lambda self,*a,**k:(422,b'invalid operator approval')})(),1)
     def test_an_endorsement_refused_before_the_prepare_is_retried_until_it_is_prepared(self):
         fake=self.Fake([1,2,3,4],endorse_script={2:[(409,b'endorsed before the handoff is prepared')]*2+[(204,b'')]})
         self.assertEqual(self.wrapper(fake,[]).propose(b'R'),4)
