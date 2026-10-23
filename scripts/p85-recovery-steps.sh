@@ -778,6 +778,14 @@ p85_run_lane() {
       *) P85_STEPS="$P85_STEPS s4_claim" ;;
     esac
   fi
+  if [ "${X4_OFFENCE_LANE:-0}" = 1 ]; then
+    # X4 B4 (scripts/x4pos/offence-lib.sh): a second offence, by a member that stays (root4), delivered in root epoch 3 after offence 1 is done (its own evidence window); one
+    # reporter claim for both bounties
+    [ "${S4_LANE:-0}" = 1 ] || { echo "X4_OFFENCE_LANE needs S4_LANE=1" >&2; exit 1; }
+    source scripts/x4pos/offence-lib.sh
+    P85_STEPS=${P85_STEPS/ s4_check/ s4_check x4o_second}
+    P85_STEPS=${P85_STEPS/ s4_claim/ x4o_claim}
+  fi
   if [ "${X4_EXIT_LANE:-0}" = 1 ]; then   # the request is made before the roots restart (they must keep the pending request), the claim is the lane's last step
     if [ "${S4_LANE:-0}" = 1 ]; then
       # the held offender: it asks before its case is submitted (the chain is healthy then; after the observer roots' restarts it nearly stalls, #728), the exit is probed while

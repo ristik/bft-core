@@ -39,7 +39,7 @@ finalize() {
     evdir=$work/evidence-none; mkdir -p "$evdir"; echo "the lane produced no evidence directory" >"$evdir/lane.log"
   fi
   st=${lane_rc:-1}; [ "$rc" -eq 0 ] || st=$rc
-  scripts/ci/publish-evidence.sh --evidence "$evdir" --out "$out/upload" --kind "$kind" --s4 "${S4_LANE:-0}" --status "$st" --nodes "$repo/test-nodes" --min-node-logs 1 \
+  scripts/ci/publish-evidence.sh --evidence "$evdir" --out "$out/upload" --kind "$kind" --s4 "${S4_LANE:-0}" --x4o "${X4_OFFENCE_LANE:-0}" --status "$st" --nodes "$repo/test-nodes" --min-node-logs 1 \
     --extra "$out/run-lane.log" --extra "$out/lane-stdout.log" --extra "$out/lane-prep.log" --extra "$out/mongo" --extra "$out/p85-stop.log" --extra "$out/host-before.log.gz" --extra "$out/host-after.log.gz" --extra "$out/oom-lines.txt" >"$out/publish.log" 2>&1
   pub_rc=$?; log "publish-evidence exit $pub_rc"; cat "$out/publish.log" | tail -n 8
   return 0
@@ -95,6 +95,10 @@ case "$kind" in x4shadow|x4rewards|x4exit) export REWARD_LANE=0 ;; esac   # the 
 # test says "s4": true (a ci-lane-run/** push; off by default). It adds the roots' observer journals, a harness-signed equivocation by the joiner's root key and the
 # submission through the real Evidence contract after the recovery.
 if [ "$kind" = combined ] && [ "$(jq -r '.s4 // false' scripts/ci/run-inputs.json 2>/dev/null)" = true ]; then export S4_LANE=1; log "S4_LANE=1 (run-inputs s4)"; fi
+# run-inputs "offence2": true (with "s4": true, on the combined or x4exit kind) adds X4 B4's second offence by a staying member (scripts/x4pos/offence-lib.sh)
+if [ "$(jq -r '.offence2 // false' scripts/ci/run-inputs.json 2>/dev/null)" = true ]; then
+  case "$kind" in combined|x4exit) [ "$(jq -r '.s4 // false' scripts/ci/run-inputs.json 2>/dev/null)" = true ] || { log "offence2 needs s4: true"; exit 2; }; export X4_OFFENCE_LANE=1; log "X4_OFFENCE_LANE=1 (run-inputs offence2)" ;; esac
+fi
 export LANE_PINNED=1 LANE_COMMIT_UNDER_TEST=$head UTB_MIN_FREE_GIB=${UTB_MIN_FREE_GIB:-$(jq -r '.runner.minFreeDiskGiB' "$pins")}
 if [ "$kind" = combined ]; then pins_mode=env; else pins_mode=env-core; fi
 scripts/ci/check-pins.sh "$pins_mode" 2>&1 | tee -a "$out/run-lane.log" | grep -q '^FAIL' && die "a component does not match the manifest"
