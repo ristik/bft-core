@@ -1,0 +1,41 @@
+{
+ "format": "native-bridge-split-vectors/1",
+ "nativeBridgeProtoVersion": 6,
+ "notes": [
+  "Protocol 6 split lineage vectors (docs/design/bridge-split-lineage-spec.md). Every fixture value is a DEV fixture input.",
+  "Expectations are produced by the Go oracle; the sum-tree, proof and commitment cases are byte-for-byte the Rust SDK's (state-transition-sdk-rust src/rsmst and src/payment) and the JS and Rust SDKs must reproduce them.",
+  "B1 in lineage cases is the claim set in aux.claims plus the real RSMT_MEMBER_V1, as in the protocol 5 corpus.",
+  "Gas is the trial schedule of the spec (lineage.go split terms); it is an estimate with no ceiling, not a measurement.",
+  "referenceTime and nonce are decimal strings; amounts are minimal big-endian hex unless a field says decimal."
+ ],
+ "fixtures": {
+  "dev": {
+   "name": "dev",
+   "chainId": "31337",
+   "aggregatorPartition": 11,
+   "aggregatorDepth": 1,
+   "aggregatorShards": [
+    {
+     "shardId": "40",
+     "shardConfHash": "7be9f44e7cbbaada6f37b235fe2ca4ee8dc0f7a6b8e2bc948c61d85822d03354"
+    },
+    {
+     "shardId": "c0",
+     "shardConfHash": "2454b35e505ac64f20e434090a81462f9e88b568517bf52010cc54fead2b28cf"
+    }
+   ],
+   "evmPartition": 7,
+   "evmShard": "80",
+   "cfg": "904e554e49434954595f42525f43464703582067e2612f31a85ec23066459c507457fb48904601f97239d32e5624072bf638c3197a695820caebeac2ae70681d59863790957a729cde587d8cd58e7646aeffb08daee1b1d50741805432a7fbc6f9b89dc491883f9e14c66180128f7ddc540000000000000000000000000000000000000000582015d1221607c1642d3d0951caa6dc63498312057e9566ca3f042c28a7d0e3c5c3582084668297231fe7407894c648db9c5255c937eb41393365674bb127c08efc3b3c5820774a6cfc4355b67cd8ad14e46fc047458d34c99b62bb393fcad9e5eda0c6620a54f03c3fad7603b8c0433a87ce8e5c6f30d1002ec55820708bb7987b4678fddd8f9301aaa36750b97eb3efe6b89926e8acaaecfff7db885820630515e749b4049d96de6df090583af5ed3b857c68368bddeba3d437d93ea2a658208821790c225aa50504b70872a7a0966e642ec928064516db740d8b81ef537479",
+   "cfgHash": "67c007348bc786d6a4d31f1c55fa35ef5d42e37eec63a7b91e32594d190a907a",
+   "policyBody": "835818554e49434954595f42525f4147475f504152544954494f4e020b",
+   "policyHash": "8821790c225aa50504b70872a7a0966e642ec928064516db740d8b81ef537479",
+   "vault": "32a7fbc6f9b89dc491883f9e14c66180128f7ddc",
+   "ty": "15d1221607c1642d3d0951caa6dc63498312057e9566ca3f042c28a7d0e3c5c3",
+   "aid": "84668297231fe7407894c648db9c5255c937eb41393365674bb127c08efc3b3c"
+  }
+ },
+ "trustBases": {},
+ "pins": {},
+ "aggregatorAuthorities": {}
+}
