@@ -25,7 +25,7 @@ jobs:
       - run: python3 -m unittest discover -s deploy/testnet/faucet -v
       - uses: actions/checkout@v4
         with:
-          ref: d1e3a5d8e30993e960b0e4a3b98c2d0ed8f7ad93
+          ref: 2c2cafd540d826b501454fb45a71ee9a74163344
           path: pinned-bft
       - run: make -C pinned-bft build
       - run: go build -C pinned-bft -o /tmp/tn-b1genesis ./scripts/b1genesis

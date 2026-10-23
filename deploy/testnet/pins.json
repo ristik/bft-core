@@ -1,6 +1,6 @@
 {
-  "bft": "d1e3a5d8e30993e960b0e4a3b98c2d0ed8f7ad93",
-  "ureth": "ef52f3c178ee3c4e6bc8827d1b6fd0b1d3652bc4",
+  "bft": "2c2cafd540d826b501454fb45a71ee9a74163344",
+  "ureth": "e23152b53c54f0224f6f74a6082c8a17a8ff1627",
   "aggregator-go": "86d93f1e9ba067a6d7bfe6103cdd79ccee58424e",
   "mongo": "mongo:7.0.45@sha256:c53852c00c23ca9f23fc39690350ffa9a80e3642fe8f96879726d8da0abe80a7",
   "runtime": "debian:bookworm-slim@sha256:7c7b2c966bc9ee8cedfeef67e0e279108992c77681fa595db4a9d65c06ccc587",
