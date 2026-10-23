@@ -872,25 +872,43 @@ class Rehearsal:
 
     def pos_recreate(self):
         """A root recreated from compose.yaml ALONE, without any --install-handoff-epoch (the plain `docker compose up -d --force-recreate` an operator runs after a
-        host reboot): it is recreated in its entity's namespace (--no-deps: pod<i> stays), must certify at the installed root epoch again and the custody must have
-        applied every root record. The flag-less start is what OPERATOR.md step 8 lists as UNVERIFIED; this stage settles it (a failure carries the root's last log
-        lines). Run on the current network, after pos-advance (epoch 2) or pos-handoff-2 (epoch 3): the epoch is read from the roots."""
+        host reboot): it is recreated in its entity's namespace (--no-deps: pod<i> stays). That it came back is NOT shown by its stored latest certificate (the other
+        roots keep certifying without it): root 2 is stopped, which makes root 1 needed for the quorum (4 roots, threshold 3), and the committed round must advance
+        at epoch E with root 1 among the live roots; then root 2 is started again and converges. The container's own entrypoint is inspected for the flag. The flag-less
+        start is what OPERATOR.md step 8 lists as UNVERIFIED; a failure carries the root's last log lines. Run after pos-advance (E=2) or pos-handoff-2 (E=3)."""
         transport = handoff_ops.DockerTransport(self.gen)
         epoch = self.root_epoch(1, transport)
         self.expect(epoch is not None and epoch >= 2 and all(self.root_epoch(i, transport) == epoch for i in range(1, self.n + 1)),
                     'every root certifies at the same switched epoch (run a handoff first)', str(epoch))
-        victim = 1
-        self.say(f'  recreating root{victim} from compose.yaml alone (no install flag), epoch {epoch}')
-        self.compose('up', '-d', '--no-deps', '--force-recreate', f'root{victim}')
-        entry = json.loads((self.gen / 'compose.yaml').read_text())['services'][f'root{victim}']['entrypoint']
-        self.expect('--install-handoff-epoch' not in entry, f'root{victim} was recreated without --install-handoff-epoch', ' '.join(entry)[-200:])
+        def signers(i):
+            try:
+                status, body = transport.post(i, '/api/v1/q3/signers', b'{}')
+                return json.loads(body) if status == 200 else None
+            except (handoff_ops.HandoffError, ValueError):
+                return None
+        before = signers(1)
+        self.expect(before is not None and before['threshold'] == self.n - 1, 'four roots at unit weight: the quorum threshold is 3', json.dumps(before))
+        self.say(f'  recreating root1 from compose.yaml alone (no install flag), epoch {epoch}')
+        self.compose('up', '-d', '--no-deps', '--force-recreate', 'root1')
+        container = self.compose('ps', '-q', 'root1').strip()
+        entry = json.loads(subprocess.run(['docker', 'inspect', '--format', '{{json .Config.Entrypoint}}', container], check=True, text=True, capture_output=True).stdout)
+        (self.evh() / 'recreate-entrypoint.json').write_text(json.dumps(entry, indent=1) + '\n')
+        self.expect('--install-handoff-epoch' not in entry, 'the running root1 container was created without --install-handoff-epoch', ' '.join(entry)[-200:])
+        self.compose('stop', 'root2')
         try:
-            self.wait(f'root {victim} certifies at epoch {epoch} again', lambda: self.root_epoch(victim, transport) == epoch, 240)
+            # root 2 is down: 1, 3 and 4 are all needed, so a round committed now carries root 1's signature
+            start = signers(3)['round']
+            def advanced():
+                one, three = signers(1), signers(3)
+                return one and three and one['epoch'] == epoch and three['epoch'] == epoch and one['round'] > start + 3 and three['round'] > start + 3 and three['quorum'] and len(three['signers']) == self.n - 1
+            self.wait(f'with root 2 stopped the committed round advances at epoch {epoch} on roots 1 and 3, signed by the three live roots', advanced, 240)
         except Exception:
-            (self.evh() / 'recreate-root.log').write_text(self.compose('logs', '--no-color', '--tail', '80', f'root{victim}', check=False))
+            (self.evh() / 'recreate-root.log').write_text(self.compose('logs', '--no-color', '--tail', '80', 'root1', check=False))
             raise
+        finally:
+            self.compose('start', 'root2')
         for i in range(1, self.n + 1):
-            self.expect(self.root_epoch(i, transport) == epoch, f'root {i} certifies at epoch {epoch}')
+            self.wait(f'root {i} certifies at epoch {epoch}', lambda i=i: self.root_epoch(i, transport) == epoch, 180)
         deployment = json.loads((self.gen / 'network' / 'pos-deployment.json').read_text())
         def applied():
             count = self.view(self.REGISTRY, 'recordCount()(uint64)')[0]
