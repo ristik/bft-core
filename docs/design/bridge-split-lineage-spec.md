@@ -113,8 +113,27 @@ These are trial values. The oracle's estimate (`TestNativeComposeV2GasByDepth`, 
 Depth 32 is admitted: there is **no depth, transfer-count or gas cap** (owner §36); depth is bounded only by size (the 2 MiB envelope and
 `MaxTokenBytes` for each nested token) and by the gas the caller supplies. The port must not add a separate cap.
 The oracle decodes each nested token twice (the justification scan, then `DecodeToken`) but charges its items once; the native port
-scans once and charges the same single scan. The ureth port (PR3a) replaces the trial constants with measured ones; wallets price from the full
-estimate before burning.
+scans once and charges the same single scan (ureth#84 does).
+
+**Native timing (ureth#84, release build, one machine, median of 30).** `run_v2` through the Rust verifier with the corpus claim
+verdict, so the lineage relation, the anchor and input-record scans and the RSMT memberships are timed; B1's certificate verification
+is not (the V1 bench covers it). Inputs are the oracle's depth chains (2-owner tokens, one seal, structural embedded proofs); the gas
+differs slightly from the table above because the keys differ.
+
+| depth | leaves | input B | gas | median | ns/gas |
+|---|---|---|---|---|---|
+| 0 | 3 | 4,736 | 216,496 | 1.72 ms | 7.9 |
+| 1 | 6 | 7,968 | 382,158 | 3.50 ms | 9.1 |
+| 2 | 9 | 11,328 | 588,478 | 5.07 ms | 8.6 |
+| 8 | 27 | 31,552 | 2,648,468 | 15.6 ms | 5.9 |
+| 32 | 99 | 117,088 | 25,014,478 | 59.4 ms | 2.4 |
+
+The same machine runs revm's SHA256 precompile over 64 KiB at 15.2 ns/gas. The schedule is therefore not under-priced against SHA256
+at any depth, and grows more conservative with depth (the 16 gas/byte nested-prefix term). The cost per leaf is flat at about 0.58 ms
+(signature recovery and hashing), which the 16,000-gas leaf term alone does not cover; the other terms carry the total. **No constant
+is retuned**: the schedule stays as trial values. Still to measure before activation: a depth sweep through the production provider
+with the real registry in the journal (the V1 `bench` example with cases from the Go `genbench`), and the fan-outs 2/16/256 (a
+fan-out only changes the proof steps, 1,500 gas each). Wallets price from the full estimate before burning.
 
 ## 7. Corpus
 
