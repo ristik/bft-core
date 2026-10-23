@@ -237,7 +237,7 @@ s4_submit_settle() {
   # the control calls, from the real pair (they are eth_calls: nothing is sent): reordered/altered payloads and the identical pair are refused before admission
   s4_tool calldata --journal "$d/journal-root$(jq -r .halfA.root "$d/delivery.json").db" --journal "$d/journal-root$(jq -r .halfB.root "$d/delivery.json").db" \
     --network-word "$(s4_cast call --rpc-url "$(p85_eth)" "$EV" 'network()(bytes32)' 2>/dev/null | awk '{print $1}')" --root-network "$(jq -r .network "$H3_DIR/candidate-config-1.json")" \
-    --genesis "$(jq -r .genesis "$H3_DIR/candidate-config-1.json")" --exposure "$EXPOSURE" --out "$d/calldata" || return 1
+    --genesis "$(jq -r .genesis "$H3_DIR/candidate-config-1.json")" --exposure "$EXPOSURE" --offender-key "$okey" --out "$d/calldata" || return 1
   local rep; rep=$(cat "$d/reporter.addr")
   s4_py refusal --rpc "$(p85_eth)" --to "$EV" --sender "$rep" --data "$d/calldata/identical.hex" --error 'IdenticalStatements()' || return 1
   s4_py refusal --rpc "$(p85_eth)" --to "$EV" --sender "$rep" --data "$d/calldata/altered.hex" --error 'BadSignature()' || return 1

@@ -306,6 +306,17 @@ func TestMakeWritesPublicDescriptionOnly(t *testing.T) {
 	}
 }
 
+// A lane with two offenders in the same journals names the one it submits for; without a key every pair is kept (the single-offender lane).
+func TestOffenderPairsSelectsOneKey(t *testing.T) {
+	a := &rootevidence.SlotRecord{Key: bytes.Repeat([]byte{2}, 33), Round: 541}
+	b := &rootevidence.SlotRecord{Key: bytes.Repeat([]byte{3}, 33), Round: 543}
+	both := []*rootevidence.SlotRecord{a, b}
+	require.Equal(t, both, offenderPairs(both, nil))
+	require.Equal(t, []*rootevidence.SlotRecord{a}, offenderPairs(both, a.Key))
+	require.Equal(t, []*rootevidence.SlotRecord{b}, offenderPairs(both, b.Key))
+	require.Empty(t, offenderPairs(both, bytes.Repeat([]byte{4}, 33)))
+}
+
 func hexString(b []byte) string { return gohex.EncodeToString(b) }
 
 // The controls of the live exercise are made from the real pair: the canonical call, the pair the other way round, one statement twice, the committing
