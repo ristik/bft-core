@@ -805,17 +805,21 @@ class Rehearsal:
         self.compose('start', 'shard1')
         time.sleep(30)
         logs = self.compose('logs', '--no-color', '--since', started, 'shard1', check=False)
-        shown = [line for line in logs.splitlines() if any(word in line.lower() for word in ('credential', 'unauthori', 'session', 'authority', 'refus', 'abstain', 'denied'))]
-        (self.evidence / 'handoff' / 'stale-client-credential-shard1.log').write_text('\n'.join(shown[:60]) + '\n')
-        self.say(f'  shard 1 with the pre-advance credential: {len(shown)} authority-related log lines; first: {shown[0][:400] if shown else None}')
-        # put the current credential back
+        fenced = [line for line in logs.splitlines() if 'signing-session-fenced' in line]
+        (self.evidence / 'handoff' / 'stale-client-credential-shard1.log').write_text('\n'.join(fenced[:40]) + '\n')
+        self.say(f'  shard 1 with the pre-advance credential: {len(fenced)} lines "restored authority refused readiness ... signing-session-fenced"')
+        self.expect(len(fenced) > 0, 'the authority fences the old client session: the shard node reads signing-session-fenced and abstains', f'{len(logs.splitlines())} log lines, none fenced')
+        # put the current credential back: the entity signs again, and the fence is not in the log after the restart
         self.compose('stop', 'shard1')
         shutil.copy(auth / 'client.cred.epoch-2', current)
+        restored = datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
         self.compose('start', 'shard1')
         receipt = json.loads(self.send_via_gateway(self.gen / 'faucet-secrets', '0x' + '55' * 20))
         self.expect(receipt['status'] == '0x1', 'a transaction through the gateway is mined with the current credential back', receipt['transactionHash'])
         self.wait('validator 1 has it', lambda: self.ureth(1, 'eth_getTransactionReceipt', [receipt['transactionHash']]), 180)
-        self.expect(bool(shown), 'the authority-related refusal of the old credential is in the shard log', 'no line')
+        time.sleep(20)
+        again = [line for line in self.compose('logs', '--no-color', '--since', restored, 'shard1', check=False).splitlines() if 'signing-session-fenced' in line]
+        self.expect(not again, 'with the current credential the shard node is not fenced', f'{len(again)} fenced lines')
 
     def pod_restart(self):
         """One validator entity at a time: stop its execution client, root and shard node (its signing authority stays live, as the README requires), check what the
