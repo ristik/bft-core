@@ -489,10 +489,12 @@ class Rehearsal:
                        *(['--evm-pops', proposal / 'evm-pops.json'] if evm_pops else []), '--out', assignment)
         return assignment, proposal, context
 
-    def pos_proposal(self):
+    def pos_proposal(self, resubmit=True):
         """5b steps 0-4 on the election's reserved result: the preflight, the next root trust base (epoch 2, the same four members and weights, signed by each
         root's key), the EVM possession proofs made by the signing authorities over the candidate, their submission to the election and its finalization (sent by
-        the relayer container with a funded owner key), and the assignment rebuilt with the stored proofs. Stops before the candidate, readiness and the proposal."""
+        the relayer container with a funded owner key), and the assignment rebuilt with the stored proofs. Stops before the candidate, readiness and the proposal.
+        `resubmit=False` is the next attempt after an Abort before H: the proofs are made again for it (they bind the attempt) but the election already holds its
+        published result, which an Abort before the Freeze does not close, so nothing is submitted or finalized again."""
         pos = self.manifest.get('pos')
         self.expect(bool(pos), 'the manifest carries a pos block (this generation was made with --pos)')
         compose = json.loads((self.gen / 'compose.yaml').read_text())
@@ -538,17 +540,18 @@ class Rehearsal:
             collected += ['--pop', work / f'evmpop-{i}.json']
         self.host_ubft('pos-relayer', 'assemble', '--candidate', work / 'candidate.hex', '--pos-deployment', net / 'pos-deployment.json', '--attempt', attempt, *collected,
                        '--out', work / 'evm-pops-collected.json')
-        # 3 submit the proofs and finalize the result: the funded owner key of a genesis identity pays
-        identity = json.loads((net / 'pos-plan.json').read_text())['identities'][0]
-        if self.balance(identity['owner']) < 10 ** 17:
-            self.faucet_send(identity['owner'], 10 ** 18)
-        owner_key = self.gen / pos['owner_keys'] / f'identity-{identity["stakingId"]}' / 'owner.key'
-        subprocess.run(['chown', '-R', '10001:10001', str(work)], check=True)
-        for step, extra in (('submit-pops', ['--evm-pops', '/work/evm-pops-collected.json']), ('finalize', [])):
-            status, out = self.relayer(owner_key, step, '--result-id', result, *extra, mounts=[f'{work}:/work:ro'])
-            self.expect(status == 0, f'pos-relayer tx {step}', out.strip()[-500:])
-        raw = self.call('eth_call', [{'to': election, 'data': self.cast_run('calldata', 'publication(bytes32)', result)}, 'latest'])
-        self.expect(int(raw[2 + 64 * 10:2 + 64 * 11], 16) == 1, 'the result is published (the election holds the proofs)')
+        if resubmit:
+            # 3 submit the proofs and finalize the result: the funded owner key of a genesis identity pays
+            identity = json.loads((net / 'pos-plan.json').read_text())['identities'][0]
+            if self.balance(identity['owner']) < 10 ** 17:
+                self.faucet_send(identity['owner'], 10 ** 18)
+            owner_key = self.gen / pos['owner_keys'] / f'identity-{identity["stakingId"]}' / 'owner.key'
+            subprocess.run(['chown', '-R', '10001:10001', str(work)], check=True)
+            for step, extra in (('submit-pops', ['--evm-pops', '/work/evm-pops-collected.json']), ('finalize', [])):
+                status, out = self.relayer(owner_key, step, '--result-id', result, *extra, mounts=[f'{work}:/work:ro'])
+                self.expect(status == 0, f'pos-relayer tx {step}', out.strip()[-500:])
+            raw = self.call('eth_call', [{'to': election, 'data': self.cast_run('calldata', 'publication(bytes32)', result)}, 'latest'])
+            self.expect(int(raw[2 + 64 * 10:2 + 64 * 11], 16) == 1, 'the result is published (the election holds the proofs)')
         # 4 the assignment again, with the stored proofs
         assignment, proposal, _ = self.build_assignment('published', work, result, ids, False, 'evm-pops-collected.json')
         self.expect(assignment.stat().st_size > 0, 'the published assignment is written', str(assignment))
@@ -677,7 +680,7 @@ class Rehearsal:
         self.expect(int(self.call('eth_blockNumber'), 16) > before, 'the execution chain advanced after the Abort')
         # the next attempt needs new approvals: the possession proofs bind the attempt (popContext), so the assignment made for the Aborted attempt is refused by the
         # root ("invalid proof of possession", run 39962014299). Steps 0-4 again, now at the attempt the root plans (the chain's context names it), then the candidate.
-        self.pos_proposal()
+        self.pos_proposal(resubmit=False)
         root_rpc = operator_rpc.common_urls(json.loads((self.gen / 'compose.yaml').read_text()))[0]
         self.exec_in('root1', 'rm', '-rf', '/tmp/candidate-probe')
         self.exec_in('root1', 'ubft', 'root', 'handoff', 'q3-candidate', '--next-trust-base', '/network/handoff/trust-base-epoch2.json',
