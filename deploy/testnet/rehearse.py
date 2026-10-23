@@ -649,6 +649,13 @@ class Rehearsal:
         except (handoff_ops.HandoffError, ValueError):
             return None
 
+    def root_listens(self, i, transport):
+        try:
+            transport.post(i, '/api/v1/q3/signers', b'{}')
+            return True
+        except handoff_ops.HandoffError:
+            return False
+
     def pos_install(self):
         """5b steps 8-10: the installation barrier of epoch 2 and the activation. No root may have a certificate of epoch 2 before its install restart (checked); each root in
         turn is stopped, its four stores kept as root.pre-epoch-2, and recreated with `--install-handoff-epoch 2` (the Compose override handoff.py writes; a plain
@@ -673,7 +680,8 @@ class Rehearsal:
                 subprocess.run(['cp', '-a', str(state), str(backup)], check=True)
             run = subprocess.run(['docker', 'compose', *files, 'up', '-d', '--no-deps', '--force-recreate', f'root{i}'], text=True, capture_output=True)
             self.expect(run.returncode == 0, f'root {i} recreated with the install flag', run.stderr.strip()[-400:])
-            self.wait(f'root {i} answers again', lambda i=i: self.root_epoch(i, transport) is not None, 120)
+            # only the listener: a root that has installed epoch 2 certifies nothing until the others are in it too (as in the lane's restart loop)
+            self.wait(f'root {i} listens again', lambda i=i: self.root_listens(i, transport), 120)
         epoch = self.wait('the roots certify at epoch 2', lambda: self.root_epoch(1, transport) == 2, 180)
         self.expect(epoch, 'root 1 certifies at epoch 2 after the install')
         for i in range(2, self.n + 1):
