@@ -401,6 +401,8 @@ class Rehearsal:
         self.say(f'  open result at the start: {before}')
         live = self.view(election, 'liveCount()(uint32)')[0]
         self.expect(live == self.n, 'the election\'s live index holds every genesis identity', str(live))
+        if self.balance(identity['owner']) < 10 ** 17:   # pos-rewards funds the owner; this stage must not depend on it
+            self.faucet_send(identity['owner'], 10 ** 18)
         # a second lot for an existing identity: an eth_call from the owner (one wei is enough, the lot limit is checked after the zero-value check)
         status, text = self.rpc({'jsonrpc': '2.0', 'id': 1, 'method': 'eth_call', 'params': [{
             'from': identity['owner'], 'to': custody, 'value': '0x1', 'data': self.cast_run('calldata', 'bond(uint64)', str(identity['stakingId']))}, 'latest']},
