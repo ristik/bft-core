@@ -809,6 +809,60 @@ class TesterCheck(unittest.TestCase):
         self.assertEqual(self.run_check(self.serve(),'--chain-id','31337','--genesis-hash','0x12')[0],2)
         self.assertEqual(self.run_check('http://127.0.0.1:1/','--chain-id','31337','--genesis-hash',self.GEN)[0],2)
 
+class BridgeRelease(unittest.TestCase):
+    """bridge/release.py on a fake generation, with the image's files and the chain served by a stub of the tools image."""
+    CORPUS='9c'*32;VAULT='0x'+'aa'*20;VERIFIER='0x'+'bb'*20;IMAGE='sha256:'+'11'*32
+    def module(self):
+        import importlib.util
+        spec=importlib.util.spec_from_file_location('release',Path(__file__).parent/'bridge/release.py')
+        m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m);return m
+    def generation(self,tmp,image=None,vault=None):
+        gen=Path(tmp)/'gen';(gen/'bridge').mkdir(parents=True);(gen/'network').mkdir();art=Path(tmp)/'artifacts';art.mkdir()
+        (gen/'manifest.json').write_text(json.dumps({'generation':'tn-x','chain_id':31337,'genesis_hash':'0x'+'ab'*32,'validators':4,'artifacts':{'sources':{'ureth':'u'},'images':{'node':'n'}}}))
+        (art/'bridge-images.json').write_text(json.dumps({'sources':{'contracts':'c'*40,'native-bridge-plugins':'p'*40},'dnb_tool_sha256':'d'*64,'images':{'bridge':image or self.IMAGE}}))
+        (gen/'bridge/bridge-addresses.json').write_text(json.dumps({'BridgeVault':vault or self.VAULT,'TokenVerifier':self.VERIFIER,'CFG':'0x'+'cf'*32}))
+        txs=[{'contractName':'TokenVerifier','transactionType':'CREATE','contractAddress':self.VERIFIER,'hash':'0x01'},
+             {'contractName':'BridgeVault','transactionType':'CREATE','contractAddress':self.VAULT,'hash':'0x02'},
+             {'contractName':'BridgeVault','transactionType':'CALL','contractAddress':self.VAULT,'hash':'0x03'}]   # a later call to the vault is not its deployment
+        (gen/'bridge/bridge-broadcast.json').write_text(json.dumps({'transactions':txs,'receipts':[{'transactionHash':h,'blockNumber':hex(b)} for h,b in (('0x01',7),('0x02',8),('0x03',9))]}))
+        (gen/'network/b1-profile.json').write_text(json.dumps({'maxGas':269547540+60000000,'ordinaryCapacity':60000000}))
+        return gen,art
+    def tools(self,pinned=None):
+        files={'/opt/bridge/native-bridge-plugins/protocol/vectors/MANIFEST.sha256':self.CORPUS+'\n',
+               '/opt/bridge/contracts/script/bridge-golden/corpus-pin.json':json.dumps({'corpus':{'manifestSha256':pinned or self.CORPUS}}),
+               '/opt/bridge/native-bridge-plugins/node_modules/@unicitylabs/state-transition-sdk/package.json':json.dumps({'version':'4.0.0-utb.x'}),
+               '/opt/bridge/native-bridge-plugins/package-lock.json':json.dumps({'packages':{'node_modules/@unicitylabs/state-transition-sdk':{'resolved':'file:sdk.tgz','integrity':'sha512-x'}}}),
+               '/opt/bridge/native-bridge-plugins/node_modules/@unicitylabs/state-transition-sdk/lib/api/IBatchAggregatorClient.js':'export const BATCH_MAX_STATE_IDS = 256;\n'}
+        def run(*args):
+            if args[0]=='cat': return files[args[1]]
+            if args[:2]==('cast','codehash'): return '0x'+args[-1][2:4]*32+'\n'
+            raise AssertionError(args)
+        return run
+    def build(self,gen,art,tools=None,image=None):
+        m=self.module()
+        with patch.object(m,'ARTIFACTS',art):
+            return m.build(gen,tools or self.tools(),image or self.IMAGE,['unicity-reth','node','--rpc.eth-proof-window','64'],16384)
+    def test_the_manifest_joins_the_pins_the_deployment_the_profile_and_the_limits(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            r=self.build(*self.generation(tmp))
+        self.assertEqual(r['contracts']['BridgeVault'],{'address':self.VAULT,'transaction':'0x02','block':8,'codeHash':'0x'+'aa'*32})
+        self.assertEqual(r['contracts']['TokenVerifier']['block'],7);self.assertEqual(r['contracts']['commit'],'c'*40);self.assertEqual(r['contracts']['cfg'],'0x'+'cf'*32)
+        self.assertEqual((r['profile']['corpusDigest'],r['profile']['nativeBridgePlugins'],r['profile']['sdk']['version']),(self.CORPUS,'p'*40,'4.0.0-utb.x'))
+        limits={k:v['value'] for k,v in r['limits'].items()}
+        self.assertEqual((limits['D1envelopeBytes'],limits['D3ordinaryCapacity'],limits['blockGasLimit'],limits['proofWindowBlocks'],limits['gatewayMaxBodyBytes'],limits['aggregatorBatchStateIds']),
+                         (2097152,60000000,329547540,64,16384,256))
+        self.assertIn('at most 254 transfers',r['limits']['aggregatorBatchStateIds']['source'])
+        self.assertEqual((r['package']['generation'],r['bridge']['image']),('tn-x',self.IMAGE))
+    def test_another_image_than_the_recorded_one_is_refused(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaisesRegex(SystemExit,'records'): self.build(*self.generation(tmp,image='sha256:'+'22'*32))
+    def test_plugins_whose_corpus_is_not_the_contracts_pin_are_refused(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaisesRegex(SystemExit,'corpus'): self.build(*self.generation(tmp),tools=self.tools(pinned='00'*32))
+    def test_addresses_that_are_not_the_broadcast_deployments_are_refused(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaisesRegex(SystemExit,'not bridge-addresses'): self.build(*self.generation(tmp,vault='0x'+'cc'*20))
+
 class LoadGenerator(unittest.TestCase):
     """deploy/testnet/loadgen.py against an in-memory node and a fake clock."""
     def module(self):

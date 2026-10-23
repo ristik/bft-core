@@ -3,7 +3,8 @@
 
     rehearse_bridge.py --generation GEN --evidence DIR [--stages deploy,lockproof,fund,roundtrip,negatives,tester,consolidated,long-history,backup-restore,custody]
 
-  deploy     deploy_bridge.py (TokenVerifier + BridgeVault after genesis, signed with the faucet keystore) and overlay.py (compose.bridge.yaml)
+  deploy     deploy_bridge.py (TokenVerifier + BridgeVault after genesis, signed with the faucet keystore) and overlay.py (compose.bridge.yaml); the
+             release manifest (bridge/public/bridge-release.json) against the chain: the contracts' addresses and code, the block gas limit and the limits
   lockproof  the lock-proof endpoint: a lock through the public gateway, its proof over HTTP equal to `dnb-tool lockproof`'s bytes, malformed (400),
              unknown nonce (404), rate limit (429), the endpoint replaced on another validator's archive serving the same bytes, and a lock older than
              ureth's proof window refused as not found (404)
@@ -31,6 +32,7 @@
 Evidence of the package only, as rehearse.py's. No third-party service is contacted.
 """
 import argparse
+import hashlib
 import http.client
 import json
 import os
@@ -212,8 +214,32 @@ class BridgeRehearsal(Rehearsal):
             code = self.call('eth_getCode', [a[name], 'latest'])
             self.expect(code not in (None, '0x'), f'{name} has code at {a[name]} (read through the public gateway)')
         self.expect(len(a['CFG']) == 66 and int(a['CFG'], 16) != 0, 'the vault reports its CFG', a['CFG'])
-        for name in ('bridge-deployment.json', 'bridge-addresses.json', 'vault-deploy.log', 'lane-config.json'):
-            (self.evidence / name).write_bytes((self.gen / 'bridge' / name).read_bytes())
+        for name in ('bridge-deployment.json', 'bridge-addresses.json', 'vault-deploy.log', 'lane-config.json', 'public/bridge-release.json'):
+            (self.evidence / Path(name).name).write_bytes((self.gen / 'bridge' / name).read_bytes())
+        self.check_release(a)
+
+    def check_release(self, a):
+        """The release manifest names what is deployed: each contract's address and code hash as the chain has them, its deploy block, and the limits the
+        package runs with (D1 2 MiB, D3 60M, the block gas limit of the latest block, the proof window, the gateway's body bound, the batch bound)."""
+        rel = json.loads((self.gen / 'bridge/public/bridge-release.json').read_text())
+        for name in ('BridgeVault', 'TokenVerifier'):
+            c = rel['contracts'][name]
+            code = self.call('eth_getCode', [a[name], 'latest'])
+            self.expect(c['address'] == a[name] and c['codeHash'] == self.cast_run('keccak', code), f'the manifest names {name}\'s address and code hash',
+                        f'{c["address"]} {c["codeHash"]}')
+            self.expect(self.call('eth_getTransactionReceipt', [c['transaction']])['blockNumber'] == hex(c['block']), f'{name}\'s deploy transaction is in block {c["block"]}')
+        self.expect(rel['contracts']['cfg'] == a['CFG'], 'the manifest names the vault\'s CFG')
+        limits = {k: v['value'] for k, v in rel['limits'].items()}
+        latest = int(self.call('eth_getBlockByNumber', ['latest', False])['gasLimit'], 16)
+        for what, got, want in (('D1, the redemption envelope bound', limits['D1envelopeBytes'], 2 << 20), ('D3, the ordinary block capacity', limits['D3ordinaryCapacity'], 60_000_000),
+                                ('the block gas limit (the latest block\'s)', limits['blockGasLimit'], latest), ('the proof window', limits['proofWindowBlocks'], PROOF_WINDOW),
+                                ('the gateway\'s body bound', limits['gatewayMaxBodyBytes'], GATEWAY_MAX_BODY),
+                                ('the SDK batch bound (the long history\'s transfer limit + 2)', limits['aggregatorBatchStateIds'], LONG_TRANSFERS_MAX + 2)):
+            self.expect(got == want, f'the manifest\'s {what} is {want}', str(got))
+        self.expect(rel['profile']['b1Profile']['sha256'] == hashlib.sha256((self.gen / 'network/b1-profile.json').read_bytes()).hexdigest(), 'the manifest names this generation\'s B1 profile')
+        self.expect(rel['package']['genesisHash'] == self.call('eth_getBlockByNumber', ['0x0', False])['hash'], 'the manifest names this chain\'s genesis')
+        self.say(f'  release: contracts {rel["contracts"]["commit"][:12]}, plug-ins {rel["profile"]["nativeBridgePlugins"][:12]}, SDK {rel["profile"]["sdk"]["version"]}, '
+                 f'corpus {rel["profile"]["corpusDigest"][:8]}, image {rel["bridge"]["image"][:19]}')
 
     def lockproof(self):
         self.start_endpoint(1)
@@ -294,8 +320,8 @@ class BridgeRehearsal(Rehearsal):
                     f'{where}: the claim of an already claimed credit is refused (InsufficientCredit: none left)', json.dumps(r)[:300])
         self.driver('negatives', '/work/lane-config.json', '/work/roundtrip/saved.json')
         out = json.loads((run / 'negatives.json').read_text())
-        self.expect(out['conflictingBurn']['servedTransactionHash'] != out['conflictingBurn']['conflictingTransactionHash'],
-                    f'{where}: a conflicting burn of the same state is never certified (the aggregator serves the first burn\'s proof)', out['conflictingBurn']['submission'])
+        # the driver asserts the served proof is the first burn's (from the token file) and that the plug-in refuses the conflicting burn
+        self.say(f'  {where}: a conflicting burn of the same state is never certified (submission {out["conflictingBurn"]["submission"]})')
         self.expect(out['freshReplay']['revertData'] == ALREADY_REDEEMED + word(saved['nonce']),
                     f'{where}: a fresh proof of the redeemed burn (seal round {out["freshReplay"]["anchors"][0]["round"]}) is refused as AlreadyRedeemed')
         (self.evidence / 'roundtrip').mkdir(parents=True, exist_ok=True)
@@ -380,16 +406,24 @@ class BridgeRehearsal(Rehearsal):
         self.round_trip('after-restore', 0)
         self.start_endpoint(1)
 
+    def read(self, i, method, params=()):
+        """Validator I's result, or a named failure (an error reply has no result)."""
+        r = self.inner_response(i, method, params)
+        if r.get('result') is None:
+            raise Failure(f'{method} on validator {i}: {json.dumps(r)[:300]}')
+        return r['result']
+
     def custody(self):
         vault = self.addresses()['BridgeVault']
-        head = self.ureth(1, 'eth_blockNumber')
-        logs = self.ureth(1, 'eth_getLogs', [{'address': vault, 'fromBlock': '0x0', 'toBlock': head}])
+        head = self.read(1, 'eth_blockNumber')
+        logs = self.read(1, 'eth_getLogs', [{'address': vault, 'fromBlock': '0x0', 'toBlock': head}])
         topic = {self.cast_run('keccak', sig): name for name, sig in (('locked', LOCKED_EVENT), ('credited', CREDITED_EVENT), ('claimed', CLAIMED_EVENT), ('received', RECEIVED_EVENT))}
         words = lambda log: [int(log['data'][2 + 64 * i:2 + 64 * (i + 1)], 16) for i in range((len(log['data']) - 2) // 64)]
         locks, credits, claims, received, recipients = {}, {}, [], 0, set()
         for log in logs:
             kind = topic.get(log['topics'][0])
-            if kind == 'locked':   # data: digest, zeroAddress, ty, aid, amount, ...
+            # the non-indexed fields in their order at the contracts pin (LOCKED_EVENT): a contracts bump that reorders them fails the counters' check below
+            if kind == 'locked':   # data: digest, zeroAddress, ty, aid, amount, tokenId, salt, rcpt, p0
                 nonce = int(log['topics'][1], 16)
                 self.expect(nonce not in locks, f'lock {nonce} is recorded once')
                 locks[nonce] = words(log)[4]
@@ -403,22 +437,22 @@ class BridgeRehearsal(Rehearsal):
                 recipients.add('0x' + log['topics'][1][-40:])
             elif kind == 'received':
                 received += words(log)[0]
-        view = lambda sig, *args: int(self.ureth(1, 'eth_call', [{'to': vault, 'data': self.cast_run('calldata', sig, *args)}, head]), 16)
+        view = lambda sig, *args: int(self.read(1, 'eth_call', [{'to': vault, 'data': self.cast_run('calldata', sig, *args)}, head]), 16)
         last = view('lastNonce()')
         self.expect(sorted(locks) == list(range(1, last + 1)), f'every lock nonce 1..{last} has its one Locked event', str(sorted(locks)))
         for nonce, (amount, nullifier) in credits.items():
             self.expect(nonce in locks and amount == locks[nonce], f'lock {nonce} is credited exactly its locked amount', f'{amount} vs {locks.get(nonce)}')
-            spent = self.ureth(1, 'eth_call', [{'to': vault, 'data': self.cast_run('calldata', 'spentNullifier(uint256)', str(nonce))}, head])
+            spent = self.read(1, 'eth_call', [{'to': vault, 'data': self.cast_run('calldata', 'spentNullifier(uint256)', str(nonce))}, head])
             self.expect(int(spent, 16) == int(nullifier, 16), f'the vault keeps lock {nonce}\'s credited nullifier')
         for nonce in set(locks) - set(credits):
-            spent = self.ureth(1, 'eth_call', [{'to': vault, 'data': self.cast_run('calldata', 'spentNullifier(uint256)', str(nonce))}, head])
+            spent = self.read(1, 'eth_call', [{'to': vault, 'data': self.cast_run('calldata', 'spentNullifier(uint256)', str(nonce))}, head])
             self.expect(int(spent, 16) == 0, f'lock {nonce}, never credited, is not spent')
         L, D, P = sum(locks.values()), sum(a for a, _ in credits.values()), sum(claims)
         self.expect((view('locked()'), view('credited()'), view('paid()')) == (L, D, P), 'the counters L, D, P equal the sums of the events', f'L={L} D={D} P={P}')
         self.expect(0 <= P <= D <= L, '0 <= P <= D <= L')
         owed = sum(view('claimable(address)', r) for r in recipients)
         self.expect(owed == D - P, 'the credited recipients\' claimable sums to D - P (every credit is either claimable or paid)', f'{owed} vs {D - P}')
-        balance = int(self.ureth(1, 'eth_getBalance', [vault, head]), 16)
+        balance = int(self.read(1, 'eth_getBalance', [vault, head]), 16)
         self.expect(balance == L - P + received, 'the vault holds exactly L - P plus donations (custody conserved)', f'{balance} vs {L} - {P} + {received}')
         (self.evidence / 'custody.json').write_text(json.dumps({'block': head, 'locks': len(locks), 'credits': len(credits), 'claims': len(claims), 'L': L, 'D': D, 'P': P,
                                                                 'donations': received, 'claimable': owed, 'balance': balance}, indent=2) + '\n')
