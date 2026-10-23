@@ -401,10 +401,11 @@ func Replay(fs *FixtureSet, c Case) Expect {
 		id := DeriveTokenID(salt, cfg.Network)
 		k := LockRecord(cfg.ZeroAddress, cfg.Ty, cfg.Aid, amt, id, rcp)
 		d := LockDigest(ch, n, k)
-		slot, spent := LockDigestSlot(n), SpentSlot(n)
+		slot, redeemed, locked := LockDigestSlot(n), RedeemedSlot(n), LockedAmountSlot(n)
 		return okValues("cfg", h32(ch), "salt", h32(salt), "tokenId", h32(id), "mintSourceHash", h32(MintSourceHash(id)),
 			"lockRecord", hx(k), "lockDigest", h32(d), "lockSlot", h32(slot), "lockTrieKey", h32(StorageTrieKey(slot)),
-			"spentSlot", h32(spent), "spentTrieKey", h32(StorageTrieKey(spent)), "storageValueRLP", hx(StorageValueRLP(d)))
+			"redeemedSlot", h32(redeemed), "redeemedTrieKey", h32(StorageTrieKey(redeemed)),
+			"lockedAmountSlot", h32(locked), "lockedAmountTrieKey", h32(StorageTrieKey(locked)), "storageValueRLP", hx(StorageValueRLP(d)))
 	case "unlock":
 		var sh, th [32]byte
 		if len(in) < 64 {
