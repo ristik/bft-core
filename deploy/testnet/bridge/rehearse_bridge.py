@@ -13,6 +13,9 @@
              transfers and the burn certified by the package's aggregator, the return proof saved and verified (eth_call), then the redemption and the claim with
              one validator stopped, which rejoins with the same blocks; the vault's balance follows every step (custody)
   negatives  on chain, after the round trip: the same envelope redeemed again and the claim repeated are both refused, and the vault keeps the nullifier
+  tester     the bridge tester CLI (native-bridge-plugins tester/) as a tester runs it, with its own faucet-funded key and GENERATION/bridge/public/tester-config.json:
+             init, lock, mint (the proof from the lock-proof endpoint), two transfers, burn, redeem, claim and status; a repeated step is refused; the vault
+             pays back exactly what the tester locked
   consolidated, long-history
              the driver's consolidated redeem (K = 1 anchor on the unsharded aggregator, the per-SID envelope priced as the control) and its long history
              (LONG_TRANSFERS transfers, one gas short reverts and leaves the vault unchanged, then redeemed and claimed)
@@ -26,6 +29,7 @@ import http.client
 import json
 import os
 import secrets
+import shutil
 import subprocess
 import sys
 import time
@@ -51,6 +55,8 @@ GATEWAY_MAX_BODY = 16384   # gateway.py MAX_BODY
 LONG_TRANSFERS_MAX = 254
 # BridgeVault's custom errors at the contracts pin: AlreadyRedeemed(uint256), InsufficientCredit(uint256,uint256)
 ALREADY_REDEEMED, INSUFFICIENT_CREDIT = '0xd36d946d', '0x4eb7eaec'
+TESTER = 'tester/bridge-tester.ts'   # in the image's native-bridge-plugins checkout
+TESTER_FUNDS, TESTER_LOCK_WEI = 2 * 10 ** 18, 5 * 10 ** 17
 
 
 class BridgeRehearsal(Rehearsal):
@@ -116,6 +122,18 @@ class BridgeRehearsal(Rehearsal):
         if out.returncode != 0:
             raise Failure(f'the driver failed: {args[0]}')
         return out.stdout
+
+    def tester(self, *args, check=True):
+        """One command of the bridge tester CLI in the bridge tools image, on the validators network, with its wallet at /work/tester-wallet. The tester has
+        no driver key and no archive: only its own key file and the published directory (bridge/public). Returns (exit code, output)."""
+        out = subprocess.run(['docker', 'run', '--rm', '--read-only', '--network', validators_network(self.gen), '--user', '10001:10001', '-e', 'HOME=/tmp/home',
+                              '--tmpfs', '/tmp', '-v', f'{self.gen / "bridge"}:/work', TAG, 'npx', '--no-install', 'tsx', TESTER, *args, '--wallet', '/work/tester-wallet'],
+                             text=True, capture_output=True)
+        text = (out.stdout + out.stderr).strip()
+        self.say('  $ bridge-tester ' + ' '.join(args) + '\n    ' + '\n    '.join(text.splitlines()[-12:]))
+        if check and out.returncode != 0:
+            raise Failure(f'the tester failed: {args[0]}')
+        return out.returncode, text
 
     def vault_balance(self):
         return int(self.call('eth_getBalance', [self.addresses()['BridgeVault'], 'latest']), 16)
@@ -260,6 +278,46 @@ class BridgeRehearsal(Rehearsal):
         self.expect((r.get('error') or {}).get('data') == INSUFFICIENT_CREDIT + word(0) + word(saved['amountWei']),
                     'the claim of an already claimed credit is refused (InsufficientCredit: none left)', json.dumps(r)[:300])
 
+    def tester_stage(self):
+        work = self.gen / 'bridge'
+        shutil.rmtree(work / 'tester-wallet', ignore_errors=True)   # this stage's own wallet: a new one on every run
+        key_file = work / 'tester.key'
+        key = f'0x{secrets.token_hex(32)}'
+        key_file.write_text(key + '\n')
+        os.chmod(key_file, 0o600)
+        if os.getuid() == 0:
+            os.chown(key_file, 10001, 10001)   # read by the tester as the tools user
+        me = self.cast_run('wallet', 'address', '--private-key', key)
+        self.faucet_send(me, TESTER_FUNDS)
+        self.tester('init', '--config', '/work/public/tester-config.json', '--eth-key-file', '/work/tester.key')
+        before = self.vault_balance()
+        self.tester('lock', '--amount', f'{TESTER_LOCK_WEI}wei')
+        self.expect(self.vault_balance() == before + TESTER_LOCK_WEI, 'the vault holds what the tester locked', str(self.vault_balance() - before))
+        self.tester('mint')
+        code, text = self.tester('mint', check=False)
+        self.expect(code != 0 and 'that step is done' in text, 'a second mint of the same token is refused by the tester', text.splitlines()[-1] if text else '')
+        self.tester('transfer', '--count', '2')
+        self.tester('burn')
+        self.tester('redeem')
+        record = json.loads(next((work / 'tester-wallet/tokens').glob('*/token.json')).read_text())
+        self.expect(record['phase'] == 'redeemed' and record['transfers'] == 2 and record['recipient'].lower() == me.lower(),
+                    'the tester redeemed its token after two transfers, to its own address', json.dumps(record))
+        credit = int(self.inner_response(1, 'eth_call', [{'to': self.addresses()['BridgeVault'], 'data': self.cast_run('calldata', 'claimable(address)', me)}, 'latest'])['result'], 16)
+        self.expect(credit == TESTER_LOCK_WEI, 'the redemption credits the tester exactly the locked amount', str(credit))
+        self.tester('claim')
+        self.expect(self.vault_balance() == before, 'the vault paid back exactly what the tester locked (custody back to where it was)', str(self.vault_balance()))
+        _, text = self.tester('status')
+        self.expect('vault credit 0 wei' in text and 'redeemed, ' in text, 'status shows no credit left and the token redeemed in the vault', text.splitlines()[-1])
+        key_file.unlink()
+        self.keep_tester()
+
+    def keep_tester(self):
+        out = self.evidence / 'tester'
+        out.mkdir(parents=True, exist_ok=True)
+        for f in (self.gen / 'bridge/tester-wallet/tokens').glob('*/token.json'):
+            shutil.copy(f, out / f'token-{f.parent.name}.json')
+        shutil.copy(self.gen / 'bridge/public/tester-config.json', out / 'tester-config.json')
+
     def consolidated(self):
         self.driver('consolidated', '/work/lane-config.json', '/work/consolidated')
         self.keep('consolidated', 'consolidated.json')
@@ -287,7 +345,7 @@ class BridgeRehearsal(Rehearsal):
         self.start_endpoint(1)
 
 
-STAGES = (('deploy', 'deploy'), ('lockproof', 'lockproof'), ('fund', 'fund'), ('roundtrip', 'roundtrip'), ('negatives', 'negatives'),
+STAGES = (('deploy', 'deploy'), ('lockproof', 'lockproof'), ('fund', 'fund'), ('roundtrip', 'roundtrip'), ('negatives', 'negatives'), ('tester', 'tester_stage'),
           ('consolidated', 'consolidated'), ('long-history', 'long_history'), ('backup-restore', 'backup_restore'))
 
 
