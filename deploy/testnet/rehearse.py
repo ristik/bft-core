@@ -615,7 +615,7 @@ class Rehearsal:
         transport = handoff_ops.DockerTransport(self.gen)
         run = subprocess.run([sys.executable, str(Path(__file__).resolve().parent / 'handoff_ops.py'), 'propose', str(self.gen), '--ubft', str(self.ubft),
                               '--next-trust-base', str(work / 'trust-base-epoch2.json'), '--next-evm-assignment', str(work / 'published-assignment.json'),
-                              '--readiness-receipts', ','.join(receipts)], text=True, capture_output=True)
+                              '--readiness-receipts', ','.join(receipts), '--intent-delay', '1.5'], text=True, capture_output=True)
         (self.evidence / 'handoff').mkdir(exist_ok=True)
         (self.evidence / 'handoff' / 'propose.log').write_text(run.stdout + run.stderr)
         if run.returncode:   # the root's refusal is one line for many causes: report what each root holds, so the refusal can be located
@@ -635,6 +635,9 @@ class Rehearsal:
         self.expect(accepted >= self.n * 2 // 3 + 1, f'a quorum of the {self.n} roots endorsed the one plan', run.stdout.strip().splitlines()[-1])
         log = [json.loads(line) for line in (self.gen / 'handoff' / 'log.jsonl').read_text().splitlines()]
         self.expect(len({row['plan_sha256'] for row in log if row['event'] in ('plan', 'intent', 'endorse')}) == 1, 'every phase of the attempt carries the same plan hash')
+        # the intents were handed over 1.5 s apart (plus the sidecar's second each): the later validators got theirs after the leader had ordered the Prepare, which the
+        # root refused before #795. Neither a refusal nor a lapse may appear.
+        self.expect(not [row for row in log if row['event'] in ('intent-refused', 'lapsed')], 'slow intent delivery (1.5 s apart) is accepted: no refusal, no lapse', str(log)[-300:])
         for path in sorted(work.glob('receipt-*.json')) + [work / 'candidate.cbor', work / 'config.json', work / 'v3-body-id.txt']:
             self.say(f'  sha256 {hashlib.sha256(path.read_bytes()).hexdigest()}  {path.name}')
             shutil.copy(path, self.evidence / 'handoff' / path.name)

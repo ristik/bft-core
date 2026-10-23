@@ -544,6 +544,12 @@ class HandoffWrapper(unittest.TestCase):
         fake.post=lambda e,p,b,timeout=10:(422,b'no') if (e==3 and p.endswith('/intent')) else original(e,p,b,timeout)
         with self.assertRaisesRegex(handoff_ops.HandoffError,'validator 3 refused the plan'): self.wrapper(fake,[]).propose(b'R')
         self.assertFalse([c for c in fake.calls if c[1].endswith('/endorse')])
+    def test_the_intent_delay_pauses_before_each_intent_only(self):
+        fake=self.Fake([1,2,3,4]);clock=[0.0];slept=[]
+        def sleep(s): slept.append(s);clock[0]+=s
+        wrapper=handoff_ops.Wrapper(fake,[1,2,3,4],[].append,sleep=sleep,now=lambda:clock[0],intent_delay=1.5)
+        self.assertEqual(wrapper.propose(b'R'),4)
+        self.assertEqual(slept,[1.5,1.5,1.5],'one pause for each of the three intents')
     def test_an_intent_refused_because_its_prepare_lapsed_replans_and_any_other_refusal_is_final_and_recorded(self):
         later=(422,b"root handoff: invalid operator approval: the plan is for attempt 0, this validator's committed state plans attempt 1")
         fake=self.Fake([1,2,3,4],plans=[b'PLAN-1',b'PLAN-2']);original=fake.post
