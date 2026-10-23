@@ -681,11 +681,13 @@ class Rehearsal:
         self.say(f'  target: attempt {target["attempt"]}, old epoch {target["oldEpoch"]}, successor body {target["nextBodyId"]}')
         # the EVM is frozen from the Prepare: a transaction sent now is not mined (a few seconds, well inside the 24 rounds before the freeze lapses) ...
         sender, to = self.manifest['faucet_address'], '0x' + '33' * 20
+        frozen_at = int(self.call('eth_blockNumber'), 16)
         nonce = int(self.call('eth_getTransactionCount', [sender, 'latest']), 16)
         sent = self.call('eth_sendRawTransaction', [self.raw_tx(to, nonce, int(self.call('eth_gasPrice'), 16), 1)])
         time.sleep(4)
         self.expect(self.call('eth_getTransactionReceipt', [sent]) is None, 'a transaction sent while the handoff is prepared is not mined (the EVM is frozen)', sent)
         before = int(self.call('eth_blockNumber'), 16)
+        self.expect(before == frozen_at, 'the execution chain did not advance across the 4 s frozen window', f'{frozen_at} -> {before}')
         aborted = subprocess.run([sys.executable, ops, 'abort', str(self.gen), '--', '--network', str(target['network']), '--old-epoch', str(target['oldEpoch']),
                                   '--predecessor-body-id', target['predecessorBodyId'], '--attempt', str(target['attempt']), '--next-body-id', target['nextBodyId'],
                                   '--timeout', '90s'], text=True, capture_output=True)
@@ -849,26 +851,30 @@ class Rehearsal:
         run = subprocess.run(['docker', 'compose', '-f', str(self.gen / 'compose.yaml'), 'exec', '-T', service, *command], text=True, capture_output=True)
         return run.returncode, run.stdout, run.stderr
 
-    def pos_restart(self):
+    def pos_restart(self, epoch=2):
         """The TN-1 pod-restart stage on the switched PoS network: one entity at a time (--pods) its execution client, root and shard node are stopped, the survivors
         certify a transaction, the entity is started again (`start`: the roots keep the container they were recreated with, install flag included) and converges; then every
-        root still certifies at epoch 2 and the custody has applied every root record. Needs pos-advance first."""
+        root still certifies at the root epoch and the custody has applied every root record. Needs pos-advance first (pos-handoff-2 for epoch 3)."""
         transport = handoff_ops.DockerTransport(self.gen)
-        self.expect(all(self.root_epoch(i, transport) == 2 for i in range(1, self.n + 1)), 'every root certifies at epoch 2 (run pos-advance first)')
+        self.expect(all(self.root_epoch(i, transport) == epoch for i in range(1, self.n + 1)), f'every root certifies at epoch {epoch} (run the handoff first)')
         self.pod_restart()
         for i in range(1, self.n + 1):
-            self.wait(f'root {i} certifies at epoch 2 again', lambda i=i: self.root_epoch(i, transport) == 2, 180)
+            self.wait(f'root {i} certifies at epoch {epoch} again', lambda i=i: self.root_epoch(i, transport) == epoch, 180)
         deployment = json.loads((self.gen / 'network' / 'pos-deployment.json').read_text())
         def applied():
             count = self.view(self.REGISTRY, 'recordCount()(uint64)')[0]
             return count if count == self.view(deployment['custody'], 'recordCursor()(uint64)')[0] else None
         self.expect(self.wait('the custody has applied every root record', lambda: applied() is not None, 300), 'recordCursor equals recordCount after the restarts', str(applied()))
 
+    def pos_restart_2(self):
+        """pos-restart after the second handoff: the roots were recreated into epoch 3 over the epoch-2 stores and keep that container; the pods restart and stay at epoch 3."""
+        self.pos_restart(epoch=3)
+
     def pos_stale(self):
         """Credentials of the old epoch after the switch. (1) the authority refuses to be advanced back to the epoch-1 trust base and shard configuration, and its
         status does not move; (2) a shard node started with its PRE-advance client credential (kept as client.cred.pre-epoch-2 by pos-advance) is not served by the
         authority: what its logs say is recorded; the current credential is then put back and the entity converges. Needs pos-advance first. The texts are the
-        product's; the first run of this stage records them."""
+        product's and are recorded in the evidence (stale-trust-base.txt, the shard log excerpt)."""
         net = self.gen / 'network'
         operator = ['--operator-socket', '/authority/operator.sock', '--operator-credential', '/authority/operator.cred']
         def status(i):
@@ -879,7 +885,6 @@ class Rehearsal:
         rc, out, err = self.exec_rc('authority1', 'ubft', 'signing-authority', 'advance-epoch', *operator, '--trust-base', '/network/trust-base.json',
                                     '--shard-conf', '/network/full-shard-conf.json')
         self.say(f'  advance back to epoch 1: exit {rc}: {(out + err).strip()[-300:]}')
-        self.evh()
         (self.evh() / 'stale-trust-base.txt').write_text(f'exit {rc}\n{out}{err}')
         self.expect(rc != 0 and 'signing-context-mismatch' in err, 'the authority refuses to be advanced back to the epoch-1 trust base and shard configuration (signing-context-mismatch)', (out + err).strip()[-300:])
         after = status(1)
@@ -1027,7 +1032,7 @@ class Rehearsal:
 
 STAGES = (('up', 'up'), ('identity', 'identity'), ('first-tx', 'first_tx'), ('gateway-limits', 'gateway_limits'), ('faucet-guard', 'faucet_guard'), ('load', 'load'), ('pod-restart', 'pod_restart'), ('backup-restore', 'backup_restore'), ('reset', 'reset'))
 # run on a generation made with --pos (the workflow's second generation); not part of the default list
-POS_STAGES = (('pos-smoke', 'pos_smoke'), ('pos-rewards', 'pos_rewards'), ('pos-election', 'pos_election'), ('pos-proposal', 'pos_proposal'), ('pos-abort', 'pos_abort'), ('pos-propose', 'pos_propose'), ('pos-install', 'pos_install'), ('pos-advance', 'pos_advance'), ('pos-restart', 'pos_restart'), ('pos-stale', 'pos_stale'), ('pos-handoff-2', 'pos_handoff_2'))
+POS_STAGES = (('pos-smoke', 'pos_smoke'), ('pos-rewards', 'pos_rewards'), ('pos-election', 'pos_election'), ('pos-proposal', 'pos_proposal'), ('pos-abort', 'pos_abort'), ('pos-propose', 'pos_propose'), ('pos-install', 'pos_install'), ('pos-advance', 'pos_advance'), ('pos-restart', 'pos_restart'), ('pos-stale', 'pos_stale'), ('pos-handoff-2', 'pos_handoff_2'), ('pos-restart-2', 'pos_restart_2'))
 
 
 def main():
