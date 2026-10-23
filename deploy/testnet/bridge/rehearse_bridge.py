@@ -567,7 +567,7 @@ class BridgeRehearsal(Rehearsal):
         for (nonce, part), (amount, nullifier, remaining) in credits.items():
             self.expect(nonce in locks and amount > 0, f'part {part[:18]}.. of lock {nonce} is credited a positive amount of a known lock', f'{amount}')
             spent = view('spentPart(uint256,bytes32)', str(nonce), part)
-            self.expect(spent == int(nullifier, 16), f'the vault keeps the credited nullifier of part {part[:18]}.. of lock {nonce}')
+            self.expect(spent == nullifier, f'the vault keeps the credited nullifier of part {part[:18]}.. of lock {nonce}', f'{spent:#x} vs {nullifier:#x}')
             per_lock[nonce] = per_lock.get(nonce, 0) + amount
         for nonce, amount in locks.items():
             redeemed = per_lock.get(nonce, 0)
