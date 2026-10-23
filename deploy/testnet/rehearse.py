@@ -443,12 +443,12 @@ class Rehearsal:
         return run.stdout
 
     def entity_ids(self):
-        """(root node id, EVM node id) of every entity: the root's from its home, the shard node's from its generated command line."""
+        """(root node id, EVM node id) of every entity: the root's from its home, the EVM validator's from its signing authority's generated command line."""
         services = json.loads((self.gen / 'compose.yaml').read_text())['services']
         ids = []
         for i in range(1, self.n + 1):
             root = self.host_ubft('node-id', '--home', self.gen / f'validator{i}' / 'root').strip().splitlines()[-1]
-            command = services[f'shard{i}']['entrypoint']
+            command = services[f'authority{i}']['entrypoint']
             ids.append((root, command[command.index('--node-id') + 1]))
         return ids
 
