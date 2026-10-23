@@ -120,8 +120,8 @@ estimate before burning.
 
 `testdata/split-corpus` (format `native-bridge-split-vectors/1`, `BuildSplitCorpus`), separate from the sealed protocol 5 corpus:
 `sum-tree` (trees of 1..256 leaves, depth 255, builder refusals, proof and codec negatives, commitment vectors), `lineage` (depth 0,
-1 with both siblings, 2, 3, 8, fan-out 16 and 256, real and structural embedded proofs, refreshed witnesses, 27 negatives) and
-`native` (BRIDGE_COMPOSE_V2 twins, exact/short gas, ABI halt). The generator asserts every negative fails for exactly its named
+1 with both siblings, 2, 3, 8, fan-out 16 and 256, real and structural embedded proofs, refreshed witnesses, 28 negatives) and
+`native` (BRIDGE_COMPOSE_V2 twins, exact/short gas, ABI halt) and `mutation` (one real-proof depth-2 input and 400 seeded 1-3 byte patches with the oracle's status and gas, so a second implementation is compared on malformed embedded tokens, proofs and certificates). The generator asserts every negative fails for exactly its named
 reason. Regenerate with `BRIDGEPROFILE_UPDATE_SPLIT_CORPUS=1 go test ./bridgeprofile -run TestSplitCorpus`. PR5 seals and imports it.
 
 ## 8. Open items

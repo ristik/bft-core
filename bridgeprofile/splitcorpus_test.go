@@ -1,6 +1,8 @@
 package bridgeprofile
 
 import (
+	"encoding/hex"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -43,4 +45,21 @@ func TestSplitCorpusReplay(t *testing.T) {
 		}
 	}
 	require.Greater(t, n, 80)
+}
+
+func TestSplitMutationFileReplays(t *testing.T) {
+	c, err := BuildSplitCorpus()
+	require.NoError(t, err)
+	var mf MutationFile
+	require.NoError(t, json.Unmarshal(c.Files["mutation/cases.json"], &mf))
+	base, err := hex.DecodeString(mf.Base)
+	require.NoError(t, err)
+	statuses := map[string]int{}
+	for _, m := range mf.Cases {
+		require.Equal(t, m.Expected, ReplayMutation(base, mf.Claims, m.Patch), m.ID)
+		statuses[m.Expected.Values["statusName"]+m.Expected.Values["halt"]]++
+	}
+	require.Len(t, mf.Cases, 400)
+	require.Greater(t, statuses["ErrCertScan"], 0)
+	t.Logf("statuses over %d mutations: %v", len(mf.Cases), statuses)
 }
