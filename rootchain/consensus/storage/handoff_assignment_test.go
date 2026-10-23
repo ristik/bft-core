@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto"
 	"crypto/sha256"
+	"slices"
 	"sort"
 	"testing"
 	"time"
@@ -578,10 +579,21 @@ func TestRootOnlyCommitteeChangeWithoutEVMBindingIsRefusedAtBlockValidation(t *t
 
 // A validator-set change is never EVM-only: the EVM set changes only together with the committee.
 func TestEVMOnlyAssignmentChangeIsRefusedAtBlockValidation(t *testing.T) {
+	t.Run("the committee listed in the installed order", func(t *testing.T) { evmOnlyRefusedAtBlockValidation(t, false, evmassign.ErrEVMOnly) })
+	// the block path binds the candidate's members to the freeze's successor committee exactly (listed order included), so a reordered
+	// list never reaches the EVM-only rule: it is refused as a context mismatch (the rule itself compares sets, see evmassign's tests)
+	t.Run("the committee listed in another order", func(t *testing.T) { evmOnlyRefusedAtBlockValidation(t, true, evmassign.ErrContext) })
+}
+
+func evmOnlyRefusedAtBlockValidation(t *testing.T, reordered bool, want error) {
 	f := newAssignmentFixture(t)
 	c := f.candidate(t)
 	c.RootMembers = f.rootMembers() // the committee is unchanged; bindings must still pair the (old) committee
 	root := f.rootMembers()
+	if reordered {
+		slices.Reverse(c.RootMembers)
+		require.NotEqual(t, root, c.RootMembers)
+	}
 	c.Bindings = make([]evmassign.Binding, len(root))
 	for i, m := range root {
 		c.Bindings[i] = evmassign.Binding{RootNodeID: m.NodeID, EVMNodeID: f.succ.Validators[i].NodeID}
@@ -599,7 +611,10 @@ func TestEVMOnlyAssignmentChangeIsRefusedAtBlockValidation(t *testing.T) {
 		}
 	}))
 	require.ErrorIs(t, err, ErrHandoffRecord)
-	require.ErrorIs(t, err, evmassign.ErrEVMOnly)
+	require.ErrorIs(t, err, want)
+	if want != evmassign.ErrEVMOnly {
+		require.NotErrorIs(t, err, evmassign.ErrEVMOnly)
+	}
 }
 
 // The kind and continuity rules are judged at block admission, each refusal isolated from the acceptance control
