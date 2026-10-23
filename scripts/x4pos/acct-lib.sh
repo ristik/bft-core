@@ -8,14 +8,18 @@
 X4A_DIR=${X4A_DIR:-$H3_DIR/x4pos}
 
 x4a_snapshot() {
-  local now t0 t last
+  local now t0 t last custody pool
+  # rewards-lib is not sourced in the x4exit lane (REWARD_LANE=0): read the addresses from the deployment file, and refuse empty ones (the first run passed an empty --pool)
+  custody=$(jq -r .custody "$P85_DEPLOY"); pool=$(jq -r .rewardPool "$P85_DEPLOY")
+  case "$custody$pool" in *null*|"") echo "x4a: custody/rewardPool missing in $P85_DEPLOY" >&2; return 1 ;; esac
+  [ -n "$custody" ] && [ -n "$pool" ] || { echo "x4a: empty custody or pool address" >&2; return 1; }
   mkdir -p "$X4A_DIR"
   now=$(date +%s)
   [ -s "$X4A_DIR/t0" ] || echo "$now" >"$X4A_DIR/t0"
   t0=$(cat "$X4A_DIR/t0"); t=$((now - t0))
   last=$(tail -n 1 "$X4A_DIR/snapshots.jsonl" 2>/dev/null | jq -r '.t // -1'); [ -n "$last" ] || last=-1
   if [ "$t" -le "$last" ]; then sleep 1; t=$(($(date +%s) - t0)); fi
-  python3 scripts/x4pos/collect.py snapshot --rpc "$(p85_eth)" --cast "$P85_CAST" --custody "$(p85_custody)" --pool "$(rw_pool)" --from-block 0 \
+  python3 scripts/x4pos/collect.py snapshot --rpc "$(p85_eth)" --cast "$P85_CAST" --custody "$custody" --pool "$pool" --from-block 0 \
     --genesis-funding "$(jq -r .rewardFunding "$P85_DIR/genesis/deployment.json")" --t "$t" --out "$X4A_DIR/snapshots.jsonl" >>"$X4A_DIR/collect.log" || { cat "$X4A_DIR/collect.log" >&2; return 1; }
   echo "PASS: x4a: accounting snapshot at t=$t s"
 }
