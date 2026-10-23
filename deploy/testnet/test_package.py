@@ -544,6 +544,27 @@ class HandoffWrapper(unittest.TestCase):
         fake.post=lambda e,p,b,timeout=10:(422,b'no') if (e==3 and p.endswith('/intent')) else original(e,p,b,timeout)
         with self.assertRaisesRegex(handoff_ops.HandoffError,'validator 3 refused the plan'): self.wrapper(fake,[]).propose(b'R')
         self.assertFalse([c for c in fake.calls if c[1].endswith('/endorse')])
+    def test_an_intent_refused_as_an_invalid_approval_is_retried_for_a_bounded_time_and_every_refusal_is_recorded(self):
+        refused=(422,b'root handoff: invalid operator approval')
+        fake=self.Fake([1,2,3,4]);original=fake.post;seen={'n':0}
+        def post(e,p,b,timeout=10):
+            if e==4 and p.endswith('/intent'):
+                seen['n']+=1
+                if seen['n']<=2: return refused
+            return original(e,p,b,timeout)
+        fake.post=post;rows=[]
+        self.assertEqual(self.wrapper(fake,rows).propose(b'R'),4)
+        self.assertEqual(seen['n'],3)
+        self.assertEqual([r['event'] for r in rows].count('intent-refused'),2)
+        accepted=[r for r in rows if r['event']=='intent-accepted-after-refusals']
+        self.assertEqual((accepted[0]['entity'],accepted[0]['refusals']),(4,2))
+        # one that lasts is the error, after the bounded time, with the count
+        fake=self.Fake([1,2,3,4]);original=fake.post
+        fake.post=lambda e,p,b,timeout=10:refused if (e==4 and p.endswith('/intent')) else original(e,p,b,timeout)
+        rows=[]
+        with self.assertRaisesRegex(handoff_ops.HandoffError,r'validator 4 refused the plan.*invalid operator approval.*times in 5 s'): self.wrapper(fake,rows,intent_timeout=5).propose(b'R')
+        self.assertGreater([r['event'] for r in rows].count('intent-refused'),2)
+        self.assertFalse([c for c in fake.calls if c[1].endswith('/endorse')])
     def test_the_helper_runs_inside_the_entity_namespace_without_privileges_and_the_abort_is_dispatched_to_each_root(self):
         with tempfile.TemporaryDirectory() as tmp:
             cfg,out=EntityNamespace.cfg(self,3);generate.write(out/'compose.yaml',cfg)
