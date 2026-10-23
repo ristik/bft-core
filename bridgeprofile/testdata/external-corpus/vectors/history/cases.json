@@ -1,8 +1,8 @@
 {
  "format": "native-bridge-vectors/3",
- "nativeBridgeProtoVersion": 5,
+ "nativeBridgeProtoVersion": 6,
  "family": "history",
- "fixtureDigest": "905c8444ba567573e2cc1b798be53987006bacdfda2fe63b9349933afbd0f8e1",
+ "fixtureDigest": "c54f84198f89afc6f569c454e1d2bdcc30998ca120e4cc360e5c1142c5d38218",
  "cases": [
   {
    "id": "mint-valid",
