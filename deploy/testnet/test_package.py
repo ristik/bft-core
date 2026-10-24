@@ -21,6 +21,7 @@ import handoff_ops
 import handoff
 import observe
 import joiner
+import pos_join
 import pos_sample
 
 class FakeRelay:
@@ -1053,6 +1054,21 @@ class Joiner(unittest.TestCase):
         want={n:five['services'][n] for n in ('pod5','metrics5','root5','authority5','ureth5','shard5')}
         self.assertEqual(sorted(got),sorted(want))
         for name in want: self.assertEqual(got[name],want[name],name)
+    def test_the_relayer_identity_file_has_the_fields_it_reads_and_no_evm_key(self):
+        f=pos_join.joiner_file('0x'+'1'*64,'0x'+'2'*64,'0x'+'3'*40,'0x'+'4'*40,'rid','eid')
+        self.assertEqual(sorted(f),['evmNodeId','expiry','ownerKey','payee','rootKey','rootNodeId','withdrawal'])
+        self.assertNotIn('evmKey',f,'the EVM key stays in the signing authority')
+    def test_a_fresh_wallet_is_read_from_whatever_cast_prints(self):
+        one={'address':'0x'+'a'*40,'private_key':'0x'+'b'*64}
+        for out in (json.dumps(one),json.dumps([one]),json.dumps({'Address':one['address'],'PrivateKey':one['private_key']}),'Address: %s\nPrivate key: %s'%(one['address'],one['private_key'])):
+            self.assertEqual(pos_join.new_wallet(type('R',(),{'cast_run':lambda self,*a,out=out:out})()),one)
+        with self.assertRaises(RuntimeError): pos_join.new_wallet(type('R',(),{'cast_run':lambda self,*a:'nothing'})())
+    def test_a_transport_with_the_override_knows_the_joiner_pod(self):
+        with tempfile.TemporaryDirectory() as d:
+            gen=Path(d);compose=self.topology(4);(gen/'compose.yaml').write_text(json.dumps(compose))
+            override=gen/'compose.joiner.json';override.write_text(json.dumps({'services':joiner.joiner_services(compose,5,'r4','e4')}))
+            self.assertEqual(handoff_ops.DockerTransport(gen).entities,[1,2,3,4])
+            self.assertEqual(handoff_ops.DockerTransport(gen,override=override).entities,[1,2,3,4,5])
     def test_prepare_makes_the_entity_private_to_its_owner_and_writes_the_override(self):
         import stat
         with tempfile.TemporaryDirectory() as d:
