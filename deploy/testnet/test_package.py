@@ -19,6 +19,7 @@ import pos
 import metrics_relay
 import handoff_ops
 import handoff
+import observe
 
 class FakeRelay:
     def __init__(self): self.calls=[]
@@ -945,5 +946,34 @@ class LoadGenerator(unittest.TestCase):
         s,problems=self.run_load(self.Node(),min_accepted=31)
         self.assertTrue(any('only 30 accepted' in p for p in problems),problems)
 
+
+
+class Observe(unittest.TestCase):
+    def sample(self,rounds,**kw):
+        base={'roots':{str(i+1):{'epoch':1,'round':r} for i,r in enumerate(rounds)},'services':{'root1':{'state':'running','health':None,'restarts':0}},
+              'disk_percent':40.0,'gateway':{'healthz':200,'block':5},'faucet':{'healthz':200,'body':'{}'}}
+        base.update(kw);return base
+    def test_a_healthy_sample_raises_nothing_and_a_head_that_moves_resets_the_stall_clock(self):
+        w=observe.Watch(stall=120)
+        self.assertEqual(w.step(self.sample([10,10,10,10]),0),[])
+        self.assertEqual(w.step(self.sample([60,60,60,60]),100),[])
+        self.assertEqual(w.step(self.sample([60,60,60,60]),200),[],'100 s since the last move is below the 120 s stall')
+        self.assertTrue(any('stopped' in a and 'round 60' in a for a in w.step(self.sample([60,60,60,60]),230)))
+    def test_one_root_moving_is_progress_and_a_root_without_a_head_is_an_alert(self):
+        w=observe.Watch(stall=120);w.step(self.sample([10,10,10,10]),0)
+        alerts=w.step(self.sample([50,10,10,10]),500)
+        self.assertEqual(alerts,[],'the heads are the certified chain: one root ahead is progress')
+        self.assertTrue(any('root 2 gave no certified head' in a for a in w.step(self.sample([60],roots={'1':{'round':60,'epoch':1},'2':{'error':'x'}}),510)))
+    def test_a_down_unhealthy_or_restarted_service_disk_and_gateway_are_alerts(self):
+        w=observe.Watch();w.step(self.sample([1]),0)
+        bad=self.sample([2],services={'root1':{'state':'exited','health':None,'restarts':0},'shard1':{'state':'running','health':'unhealthy','restarts':3}},disk_percent=91.0,
+                        gateway={'healthz':503,'block':None},faucet={'healthz':0,'body':'URLError'})
+        text=' | '.join(w.step(bad,10))
+        for part in ('root1 is exited','shard1 is unhealthy','disk 91.0%','gateway /healthz answered 503','faucet /healthz answered 0'): self.assertIn(part,text)
+        self.assertTrue(any('root1 restarted (0 -> 1)' in a for a in w.step(self.sample([3],services={'root1':{'state':'running','health':None,'restarts':1}}),20)))
+        self.assertFalse(any('restarted' in a for a in w.step(self.sample([4],services={'root1':{'state':'running','health':None,'restarts':1}}),30)),'an unchanged count is not a restart')
+    def test_the_faucet_can_be_left_out(self):
+        s=self.sample([1]);del s['faucet']
+        self.assertEqual(observe.Watch().step(s,0),[])
 
 if __name__=='__main__': unittest.main()
