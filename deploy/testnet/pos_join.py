@@ -14,6 +14,7 @@ import json
 import os
 import re
 import subprocess
+import time
 from pathlib import Path
 
 import handoff_ops
@@ -62,6 +63,13 @@ def pos_joiner(r):
     index = info['index']
     r.say(f'  joiner entity {index}: root {info["root"]}, evm {info["evm"]}')
     val = r.gen / f'validator{index}'
+    # the joiner's authority starts at the scope of the epoch it will sign in (see joiner.set_scope): the successor trust base, over the five roots, exists first
+    r.n = index
+    r.joiners.add(index)
+    r.next_trust_base()
+    work = r.gen / 'network' / 'handoff'
+    subprocess.run(['chmod', '-R', 'a+rX', str(work)], check=True)
+    joiner_lib.set_scope(r.gen, index, r.target, r.successor_shard_epoch(), f'/network/handoff/trust-base-epoch{r.target}.json')
     compose(r, 'up', '-d', '--no-deps', f'authority{index}')
     auth = f'authority{index}'
     operator = ['--operator-socket', '/authority/operator.sock', '--operator-credential', '/authority/operator.cred']
@@ -84,12 +92,12 @@ def pos_joiner(r):
     r.expect(status == 0, 'join register: the joiner has a custody identity', out.strip()[-300:])
     found = re.search(r'custody id (\d+)', out)   # the relayer prints the id on stderr
     ident = int(found.group(1)) if found else 0
-    r.expect(ident > r.n, f'the new identity is numbered after the {r.n} genesis identities', str(ident))
+    r.expect(ident > index - 1, f'the new identity is numbered after the {index - 1} genesis identities', str(ident))
     status, out = r.relayer(identity, 'join', 'bond', '--id', str(ident), '--value-wei', str(BOND_UNIT), *evm, joiner=True, mounts=mounts)
     r.expect(status == 0, 'join bond: one lot of one bond unit', out.strip()[-300:])
     status, out = r.relayer(identity, 'join', 'admit', '--id', str(ident), *evm, joiner=True, mounts=mounts)
     r.expect(status == 0, 'join admit: the delegation to the joiner\'s root and EVM keys', out.strip()[-300:])
-    r.wait('the live index holds five identities', lambda: r.view(election, 'liveCount()(uint32)')[0] == r.n + 1, 120)
+    r.wait('the live index holds five identities', lambda: r.view(election, 'liveCount()(uint32)')[0] == index, 120)
     r.expect(r.view_text(election, 'isIndexed(uint64)(bool)', str(ident)).strip() == 'true', 'the joiner is in the live index', str(ident))
     lots = r.view_text(custody, 'generationLots(uint64,uint64)(uint256[])', str(ident), '1').strip('[]').replace(',', ' ').split()
     r.expect(len(lots) == 1, 'the joiner has one lot (lMax 1)', str(lots))
@@ -99,7 +107,7 @@ def pos_joiner(r):
     # --- part 3: the follower -----------------------------------------------------------------------------------------------------
     compose(r, 'up', '-d', '--no-deps', f'pod{index}', f'ureth{index}')
     compose(r, 'up', '-d', '--no-deps', f'metrics{index}', f'root{index}')
-    transport = handoff_ops.DockerTransport(r.gen, override=r.gen / 'compose.joiner.json')
+    transport = handoff_ops.DockerTransport(r.gen)
     def follower():
         try:
             code, body = transport.post(index, '/api/v1/q3/status', b'{}')
@@ -107,4 +115,46 @@ def pos_joiner(r):
         except (handoff_ops.HandoffError, ValueError):
             return False
     r.expect(r.wait('the joiner\'s root reports itself a follower', follower, 180), 'the joiner\'s root is a follower of the genesis epoch (not a member)')
+    # the joiner's shard node: staging-only until the Commit enrolls its authority (it holds no session yet). A genesis configuration does not name it; what it does at
+    # start is recorded either way
+    compose(r, 'up', '-d', '--no-deps', f'shard{index}')
+    time.sleep(15)   # a start that is refused exits within seconds: look after that
+    running = f'shard{index}' in compose(r, 'ps', '--status', 'running', '--services').split()
+    logs = compose(r, 'logs', '--no-color', '--tail', '40', f'shard{index}', check=False)
+    (r.evidence / f'shard{index}-start.log').write_text(logs)
+    r.say(f'  shard{index} after 15 s: {"running" if running else "NOT running"}; last lines: ' + ' | '.join(logs.strip().splitlines()[-4:])[-600:])
+    r.expect(running, f'the joiner\'s shard node stays up as a staging-only node', logs.strip()[-600:])
+    r.n = index   # from here every stage of this run counts the joiner: its services are in compose_files, its pod in the transport
+    r.joiners.add(index)   # but not as a member of the committee that certifies: it follows until the handoff that names it activates
 
+
+
+def pos_join_signs(r):
+    """After the handoff to five (pos-advance in a run with pos-joiner): the joiner is a member. Four of five roots are the quorum (unit weights), so with root 2 stopped
+    all of roots 1, 3, 4 and 5 are needed: the committed round must advance at the new epoch with the joiner's root among the four signers. Root 2 is then started
+    again and the five converge. A sampled stored certificate would not show that the joiner signs (the other roots certify without it); this does."""
+    joiner = json.loads((r.evidence / 'joiner.json').read_text())
+    transport = handoff_ops.DockerTransport(r.gen)
+    members = list(range(1, r.n + 1))
+    r.expect(len(members) == 5 and not r.joiners, 'five members, no joiner left (pos-advance activated the successor committee)', str(members))
+    r.expect(all(r.root_epoch(i, transport) == r.target for i in members), f'all five roots certify at epoch {r.target}')
+    def signers(i):
+        try:
+            code, body = transport.post(i, '/api/v1/q3/signers', b'{}')
+            return json.loads(body) if code == 200 else None
+        except (handoff_ops.HandoffError, ValueError):
+            return None
+    before = signers(1)
+    r.expect(before is not None and before['threshold'] == 4, 'five roots at unit weight: the quorum threshold is 4', json.dumps(before))
+    r.compose('stop', 'root2')
+    try:
+        start = signers(3)['round']
+        def advanced():
+            one, three = signers(1), signers(3)
+            return bool(one and three and one['epoch'] == r.target and three['epoch'] == r.target and one['round'] > start + 3 and three['round'] > start + 3
+                        and three['quorum'] and len(three['signers']) == 4 and joiner['rootNodeId'] in [x['nodeId'] for x in three['signers']])
+        r.wait('with root 2 stopped the committed round advances, signed by the four live roots, the joiner\'s among them', advanced, 240)
+    finally:
+        r.compose('start', 'root2')
+    for i in members:
+        r.wait(f'root {i} certifies at epoch {r.target}', lambda i=i: r.root_epoch(i, transport) == r.target, 180)

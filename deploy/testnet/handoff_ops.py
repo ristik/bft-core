@@ -57,19 +57,44 @@ class HandoffLapsed(HandoffError):
     """No Freeze followed the Prepare in time: the attempt is dead and the bounded re-plans are used up."""
 
 
+JOINER_OVERRIDE = 'compose.joiner.json'
+RESTORE_OVERRIDE = 'compose.joiner-restore.json'   # exists only while the joiner's shard node is being restored
+
+
+def compose_files(generation):
+    """The `-f` arguments of the generation's Compose files: compose.yaml and, once joiner.py prepared an entity, its override (the joiner's pod, root, shard node,
+    authority and execution client are then entities of every operation like the genesis ones)."""
+    generation = Path(generation)
+    files = ['-f', str(generation / 'compose.yaml')]
+    for name in (JOINER_OVERRIDE, RESTORE_OVERRIDE):
+        if (generation / name).is_file():
+            files += ['-f', str(generation / name)]
+    return files
+
+
+def load_compose(generation):
+    """compose.yaml with the joiner override's services added (see compose_files)."""
+    generation = Path(generation)
+    compose = json.loads((generation / 'compose.yaml').read_text())
+    if (generation / JOINER_OVERRIDE).is_file():
+        compose['services'] = {**compose['services'], **json.loads((generation / JOINER_OVERRIDE).read_text())['services']}
+    if (generation / RESTORE_OVERRIDE).is_file():
+        for name, change in json.loads((generation / RESTORE_OVERRIDE).read_text())['services'].items():
+            compose['services'][name] = {**compose['services'][name], **change}
+    return compose
+
+
 class DockerTransport:
     """HTTP POSTs to an entity's root operator endpoint from inside that entity's network namespace."""
 
-    def __init__(self, generation, project=None, override=None):
-        """`override`: a Compose override file (compose.joiner.json) whose pods are entities of this transport too."""
+    def __init__(self, generation, project=None):
         self.generation = Path(generation)
-        self.files = ['-f', str(self.generation / 'compose.yaml')] + (['-f', str(override)] if override else [])
-        compose = json.loads((self.generation / 'compose.yaml').read_text())
-        extra = json.loads(Path(override).read_text()) if override else {'services': {}}
+        self.files = compose_files(self.generation)
+        compose = load_compose(self.generation)
         self.project = project or compose['name']
         self.image = compose['services']['rpc']['image']
         self.root_rpc = operator_rpc.common_urls(compose)[0]   # the listener the generated Compose file configured, the same on every root
-        self.entities = sorted(int(n[3:]) for n in [*compose['services'], *extra['services']] if n.startswith('pod') and n[3:].isdigit())
+        self.entities = sorted(int(n[3:]) for n in compose['services'] if n.startswith('pod') and n[3:].isdigit())
 
     def holder(self, i):
         done = subprocess.run(['docker', 'compose', *self.files, 'ps', '-q', f'pod{i}'], text=True, capture_output=True)
@@ -189,8 +214,8 @@ class Wrapper:
 
 def abort_commands(generation, entities, flags):
     """Manual Abort: the same target is dispatched locally to every old root (exec in that entity, one --root-rpc), each result collected by the caller."""
-    compose = ['docker', 'compose', '-f', str(Path(generation) / 'compose.yaml')]
-    root_rpc = operator_rpc.common_urls(json.loads((Path(generation) / 'compose.yaml').read_text()))[0]
+    compose = ['docker', 'compose', *compose_files(generation)]
+    root_rpc = operator_rpc.common_urls(load_compose(generation))[0]
     return {i: compose + ['exec', '-T', f'root{i}', 'ubft', 'root', 'handoff', 'abort', *flags, '--root-rpc', root_rpc] for i in entities}
 
 
@@ -242,6 +267,7 @@ def main():
     q.add_argument('--prepare-timeout', type=float, default=60)
     q.add_argument('--max-attempts', type=int, default=3)
     q.add_argument('--intent-delay', type=float, default=0.0, help='seconds to wait before handing each validator the intent (testing slow delivery)')
+    q.add_argument('--committee', help='comma separated entities of the committee being LEFT (default: every entity of the generation); a joiner is not one of them: it gets no intent and endorses nothing')
     h = sub.add_parser('hold')
     h.add_argument('generation', type=Path)
     h.add_argument('--ubft', type=Path, required=True)
@@ -256,6 +282,8 @@ def main():
     r.add_argument('flags', nargs=argparse.REMAINDER)
     a = p.parse_args()
     transport = DockerTransport(a.generation)
+    if getattr(a, 'committee', None):
+        transport.entities = sorted(int(x) for x in a.committee.split(','))
     if a.action == 'abort':
         # all at once: each command waits for the COMMITTED Abort, which needs the approvals of a quorum, so one after another the first would wait out its timeout
         commands = abort_commands(a.generation, transport.entities, [f for f in a.flags if f != '--'])

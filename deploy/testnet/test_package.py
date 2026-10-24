@@ -1064,12 +1064,15 @@ class Joiner(unittest.TestCase):
         for out in (json.dumps(one),json.dumps([one]),json.dumps({'Address':one['address'],'PrivateKey':one['private_key']}),'Address: %s\nPrivate key: %s'%(one['address'],one['private_key'])):
             self.assertEqual(pos_join.new_wallet(type('R',(),{'cast_run':lambda self,*a,out=out:out})()),one)
         with self.assertRaises(RuntimeError): pos_join.new_wallet(type('R',(),{'cast_run':lambda self,*a:'nothing'})())
-    def test_a_transport_with_the_override_knows_the_joiner_pod(self):
+    def test_the_joiner_override_makes_its_services_part_of_every_compose_operation(self):
         with tempfile.TemporaryDirectory() as d:
             gen=Path(d);compose=self.topology(4);(gen/'compose.yaml').write_text(json.dumps(compose))
-            override=gen/'compose.joiner.json';override.write_text(json.dumps({'services':joiner.joiner_services(compose,5,'r4','e4')}))
             self.assertEqual(handoff_ops.DockerTransport(gen).entities,[1,2,3,4])
-            self.assertEqual(handoff_ops.DockerTransport(gen,override=override).entities,[1,2,3,4,5])
+            self.assertEqual(handoff_ops.compose_files(gen),['-f',str(gen/'compose.yaml')])
+            override=gen/'compose.joiner.json';override.write_text(json.dumps({'services':joiner.joiner_services(compose,5,'r4','e4')}))
+            self.assertEqual(handoff_ops.DockerTransport(gen).entities,[1,2,3,4,5])
+            self.assertEqual(handoff_ops.compose_files(gen),['-f',str(gen/'compose.yaml'),'-f',str(override)])
+            self.assertIn('root5',handoff_ops.load_compose(gen)['services']);self.assertEqual(handoff_ops.load_compose(gen)['name'],compose['name'])
     def test_prepare_makes_the_entity_private_to_its_owner_and_writes_the_override(self):
         import stat
         with tempfile.TemporaryDirectory() as d:
@@ -1091,6 +1094,29 @@ class Joiner(unittest.TestCase):
             override=json.loads((gen/'compose.joiner.json').read_text())
             self.assertEqual(sorted(override['services']),['authority5','metrics5','pod5','root5','shard5','ureth5'])
             self.assertIn('id-evm',override['services']['authority5']['entrypoint'])
+    def test_set_scope_moves_only_the_authority_epochs_and_trust_base(self):
+        with tempfile.TemporaryDirectory() as d:
+            gen=Path(d);compose=self.topology(4)
+            services=joiner.joiner_services(compose,5,'r4','e4');(gen/'compose.joiner.json').write_text(json.dumps({'services':services}))
+            joiner.set_scope(gen,5,2,1,'/network/handoff/trust-base-epoch2.json')
+            got=json.loads((gen/'compose.joiner.json').read_text())['services']
+            entry=got['authority5']['entrypoint'];at=lambda f:entry[entry.index(f)+1]
+            self.assertEqual((at('--root-epoch'),at('--shard-epoch'),at('--trust-base')),('2','1','/network/handoff/trust-base-epoch2.json'))
+            self.assertEqual(at('--node-id'),'e4',"the node id is untouched")
+            for name in services:
+                if name!='authority5': self.assertEqual(got[name],services[name],name)
+    def test_the_restore_override_changes_only_the_joiner_shard_entrypoint_and_only_while_it_exists(self):
+        with tempfile.TemporaryDirectory() as d:
+            gen=Path(d);compose=self.topology(4);(gen/'compose.yaml').write_text(json.dumps(compose))
+            services=joiner.joiner_services(compose,5,'r4','e4');(gen/'compose.joiner.json').write_text(json.dumps({'services':services}))
+            plain=handoff_ops.load_compose(gen)['services']['shard5']
+            entry=list(plain['entrypoint']);entry[entry.index('run')]='restore'
+            (gen/handoff_ops.RESTORE_OVERRIDE).write_text(json.dumps({'services':{'shard5':{'entrypoint':entry}}}))
+            got=handoff_ops.load_compose(gen)['services']['shard5']
+            self.assertEqual(got['entrypoint'][2],'restore');self.assertEqual({k:v for k,v in got.items() if k!='entrypoint'},{k:v for k,v in plain.items() if k!='entrypoint'})
+            self.assertEqual(handoff_ops.compose_files(gen)[-1],str(gen/handoff_ops.RESTORE_OVERRIDE))
+            (gen/handoff_ops.RESTORE_OVERRIDE).unlink()
+            self.assertEqual(handoff_ops.load_compose(gen)['services']['shard5']['entrypoint'][2],'run')
     def test_the_genesis_services_are_untouched_and_a_taken_index_is_refused(self):
         four=self.topology(4);before=json.dumps(four,sort_keys=True)
         joiner.joiner_services(four,5,'r4','e4')
