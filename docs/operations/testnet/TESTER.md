@@ -70,3 +70,22 @@ block's hash on your endpoint with the operator's status page for the same heigh
 
 Report to the operator's published reporting channel (the incident owner role answers it): the chain ID and block-zero hash you used, the UTC time, the transaction hash
 or request you sent, the response you got, and the output of `tester-check.py`. Do not send private keys.
+
+## 6. If the network runs the proof-of-stake profile
+
+Only if the operator's `manifest.json` has a `pos` block. Everything in [NOTICE](../../../deploy/testnet/NOTICE.txt) applies, and **stake and reward credits are test value that vanishes on reset**.
+
+An external tester does not bond, exit or claim here: the validator identities, and the owner, withdrawal and payee keys of each, belong to the operator, and a tester has no identity to bond to. What a tester can do is read the contracts and check that the network behaves as published. The `pos` block names the `custody` and `election` addresses; the reward pool address is `rewardPool` in the operator's `network/pos-deployment.json` if the operator publishes that file. `REG=0xff00000000000000000000000000000000000002` is the root-record registry.
+
+```sh
+R=<rpc-url>
+cast call $REG 'progress()(uint64)' --rpc-url $R            # ordinary root rounds: must rise while the network is running
+cast call $REG 'recordCount()(uint64)' --rpc-url $R         # root records
+cast call <custody> 'recordCursor()(uint64)' --rpc-url $R   # records the custody has applied: equal to recordCount when it is caught up
+cast call <election> 'thresholds()(uint256,uint256)' --rpc-url $R   # (round, UC second) at which the next election is due
+cast call <election> 'openResult()(bytes32)' --rpc-url $R   # non-zero while an elected committee is reserved and not yet acknowledged
+cast call <reward-pool> 'available()(uint256)' --rpc-url $R         # the funded balance not yet allocated
+cast balance <reward-pool> --rpc-url $R
+```
+
+A `progress` that stops rising, or `recordCursor` staying below `recordCount` for long, is worth reporting (section 5). Anyone can call the reward pool's permissionless `closeInterval()` (it closes the next interval and credits the committee's payees; it fails with `NothingToDo` when none is due); only a payee can claim its credit, so a tester cannot claim anyone's reward. The operator's staking, exit and claim procedure is [OPERATOR.md section 5c](OPERATOR.md).
