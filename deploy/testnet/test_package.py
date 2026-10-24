@@ -158,12 +158,15 @@ class ProofOfStake(unittest.TestCase):
         class Fake:   # the two helpers it needs: a selector table and an eth_call that fails with a given revert data
             cast='cast'
             def __init__(self,data): self.data=data
-            def cast_run(self,*a): return '0xaaaaaaaa' if a[0]=='sig' else '0xcalldata'
+            def cast_run(self,*a):
+                assert all(isinstance(x,str) for x in a),a   # subprocess takes strings only
+                return '0xaaaaaaaa' if a[0]=='sig' else '0xcalldata'
             def rpc(self,body,ip): return 200,json.dumps({'error':{'data':self.data}})
             def expect(self,ok,what,detail=''):
                 if not ok: raise rehearse.Failure(what)
         Fake.__module__=rehearse.__name__
         pos_owner.expect_reverts(Fake('0xaaaaaaaa00'),'NotOwner()','0x1','0x2','f()')
+        pos_owner.expect_reverts(Fake('0xaaaaaaaa00'),'NotOwner()','0x1','0x2','f(uint256,address)',1,'0x3')   # a number argument (the first run failed on it)
         with self.assertRaises(rehearse.Failure): pos_owner.expect_reverts(Fake('0xbbbbbbbb'),'NotOwner()','0x1','0x2','f()')   # another error
         with self.assertRaises(rehearse.Failure): pos_owner.expect_reverts(Fake(''),'NotOwner()','0x1','0x2','f()')   # no revert at all
     def test_the_paired_client_gets_the_registry_genesis_commitment(self):

@@ -30,7 +30,7 @@ def _ip(r):
 
 def revert_data(r, sender, to, signature, *args, value=0):
     """The revert data (hex string, '' when the call would succeed) of an eth_call from `sender`: the error selector the contract names."""
-    data = r.cast_run('calldata', signature, *args)
+    data = r.cast_run('calldata', signature, *map(str, args))
     status, text = r.rpc({'jsonrpc': '2.0', 'id': 1, 'method': 'eth_call', 'params': [{'from': sender, 'to': to, 'value': hex(value), 'data': data}, 'latest']}, _ip(r))
     r.expect(status == 200, f'eth_call {signature} answers', f'{status} {text[:120]}')
     return str((json.loads(text).get('error') or {}).get('data', ''))
