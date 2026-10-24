@@ -46,3 +46,5 @@ faucet/evidence with its original pins and limits.
 
 All committed evidence is public output; no generated private keys, keystores,
 passwords, client/operator credentials or authority files are included.
+
+The PoS profile's runner rehearsals (TN-S #430/#437) are recorded in [pos-rehearsal.md](pos-rehearsal.md), with their limits.

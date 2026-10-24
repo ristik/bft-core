@@ -1256,6 +1256,7 @@ class Rehearsal:
 
 STAGES = (('up', 'up'), ('identity', 'identity'), ('first-tx', 'first_tx'), ('gateway-limits', 'gateway_limits'), ('faucet-guard', 'faucet_guard'), ('load', 'load'), ('observe', 'observe'), ('pod-restart', 'pod_restart'), ('backup-restore', 'backup_restore'), ('reset', 'reset'))
 # run on a generation made with --pos (the workflow's second generation); not part of the default list
+Rehearsal.pos_resources = pos_sample.pos_resources   # the runner resource smoke lives in pos_sample.py (opt-in until it has run)
 Rehearsal.pos_observe = pos_sample.pos_observe   # the sampler smoke lives in pos_sample.py
 for _method, _stage in pos_crash.METHODS.items():   # the OPT-IN crash-recovery stages live in pos_crash.py (bft-core #843)
     setattr(Rehearsal, _method, _stage)

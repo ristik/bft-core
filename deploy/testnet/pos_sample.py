@@ -13,6 +13,7 @@ Run as `python3 deploy/testnet/pos_sample.py $G --out DIR [--interval 60] [--dur
 """
 import argparse
 import json
+import re
 import subprocess
 import sys
 import time
@@ -77,6 +78,20 @@ def number(word):
     return int(word, 16)
 
 
+STATE_DIRS = ('root', 'evm', 'ureth', 'archive')
+
+
+def state_kb(generation):
+    """{'v<i>/<dir>': kilobytes} of every validator state directory (`du -sk`): the journals and databases the package grows. A directory that cannot be read is left out."""
+    out = {}
+    for path in sorted(Path(generation).glob('validator*')):
+        for name in STATE_DIRS:
+            run = subprocess.run(['du', '-sk', str(path / name)], text=True, capture_output=True)
+            if run.returncode == 0 and run.stdout.split():
+                out[f'v{path.name[len("validator"):]}/{name}'] = int(run.stdout.split()[0])
+    return out
+
+
 def pos_collect(generation):
     """The PoS part of one sample. A view that cannot be read is recorded under `errors`, not raised: an unreadable chain is a finding."""
     deployment = json.loads((Path(generation) / 'network' / 'pos-deployment.json').read_text())
@@ -108,6 +123,7 @@ def pos_collect(generation):
     except (ValueError, OSError) as error:
         errors.append(f'pool balance: {str(error)[:140]}')
     out['pool'] = books
+    out['state_kb'] = state_kb(generation)
     out['errors'] = errors
     return out
 
@@ -165,6 +181,57 @@ def not_healthy(generation):
     and it has no start period), or `unhealthy`. Services without a healthcheck are not listed."""
     ps = subprocess.run(['docker', 'compose', '-f', str(Path(generation) / 'compose.yaml'), 'ps', '-a', '--format', 'json'], text=True, capture_output=True)
     return {row['Service']: row.get('Health') for row in observe.ps_rows(ps.stdout) if row.get('Health') not in (None, '', 'healthy')}
+
+
+UNITS = {'b': 1, 'kib': 1024, 'mib': 1024 ** 2, 'gib': 1024 ** 3, 'kb': 1000, 'mb': 1000 ** 2, 'gb': 1000 ** 3}
+
+
+def parse_mem(text):
+    """(used, limit) bytes of a `docker stats` MemUsage cell such as '345.2MiB / 1.5GiB'."""
+    def one(part):
+        m = re.fullmatch(r'\s*([0-9.]+)\s*([A-Za-z]+)\s*', part)
+        if not m or m.group(2).lower() not in UNITS:
+            raise ValueError(f'memory cell {text!r}')
+        return float(m.group(1)) * UNITS[m.group(2).lower()]
+    used, _, limit = text.partition('/')
+    return one(used), one(limit)
+
+
+def resources(rows, headroom=0.9):
+    """From the sampler's rows (dicts as written to samples.jsonl): per container the highest memory snapshot against its limit, and per state directory the growth in kilobytes
+    between the first and the last sample. Returns (report, over) where `over` lists the containers above `headroom` of their limit."""
+    peak = {}
+    for row in rows:
+        for name, cell in row.get('memory', {}).items():
+            used, limit = parse_mem(cell)
+            if name not in peak or used > peak[name][0]:
+                peak[name] = (used, limit)
+    growth = {k: rows[-1]['pos']['state_kb'].get(k, v) - v for k, v in rows[0]['pos'].get('state_kb', {}).items()}
+    report = {'peak_memory': {n: {'used_mib': round(u / 1024 ** 2, 1), 'limit_mib': round(l / 1024 ** 2, 1), 'fraction': round(u / l, 3)} for n, (u, l) in sorted(peak.items())},
+              'state_growth_kb': growth}
+    return report, sorted(n for n, (u, l) in peak.items() if u > headroom * l)
+
+
+def pos_resources(r):
+    """Rehearsal stage `pos-resources` (opt-in until it has run): the PoS package under its own activity for SAMPLES samples, INTERVAL s apart (the sampler, no alert),
+    recording per container the highest of the SAMPLES memory snapshots (taken INTERVAL s apart: a spike between two snapshots is not seen) against the Compose limit and per state directory the growth in KB (evidence/pos-resources.json). Asserts no sampler alert and
+    that no snapshot of a container is above 90% of its memory limit. A RUNNER measurement of a short window: no extrapolation to a day is made, and the figures that count are the
+    host's (the brief's own wording)."""
+    out = r.evidence / 'pos-resources'
+    samples, interval = 8, 30
+    run = subprocess.run([sys.executable, str(Path(__file__).resolve()), str(r.gen), '--out', str(out), '--samples', str(samples), '--interval', str(interval), '--no-faucet', '--stall', '3600'],
+                         text=True, capture_output=True)
+    r.say('  pos_sample: exit %d: %s' % (run.returncode, ' | '.join((run.stdout + run.stderr).strip().splitlines()[-3:])))
+    r.expect(run.returncode == 0, 'the sampler raises no alert over the window', (run.stdout + run.stderr).strip()[-400:])
+    rows = [json.loads(line) for line in (out / 'samples.jsonl').read_text().splitlines()]
+    r.expect(len(rows) == samples, f'{samples} samples were written', str(len(rows)))
+    report, over = resources(rows)
+    report['window_seconds'] = (samples - 1) * interval
+    (r.evidence / 'pos-resources.json').write_text(json.dumps(report, indent=1) + '\n')
+    r.say('  highest memory snapshot: ' + ' '.join(f'{n.split("-", 3)[-1]}={v["used_mib"]}/{v["limit_mib"]}MiB' for n, v in report['peak_memory'].items()))
+    r.say('  state growth over %d s (KB): %s' % (report['window_seconds'], json.dumps(report['state_growth_kb'])))
+    r.expect(bool(report['peak_memory']), 'the sampler recorded container memory')
+    r.expect(not over, 'no container snapshot above 90% of its memory limit', ', '.join(over))
 
 
 def pos_observe(r):
