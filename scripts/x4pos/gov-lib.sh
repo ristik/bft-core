@@ -12,7 +12,6 @@ POLICY_T='(uint16,uint16,uint16,uint128,uint64,uint64,uint64,uint64,uint64,uint6
 x4g_gov() { jq -r .policy "$P85_DIR/genesis/deployment.json"; }
 x4g_uint() { p85_call "$@" | awk 'NR==1{print $1}'; }   # one unsigned integer answer (annotations like "[1e18]" dropped)
 x4g_roots() { jq -r .registry "$P85_DEPLOY"; }
-x4g_json() { mkdir -p "$X4G_DIR"; jq -n "$@"; }
 
 # the ten Policy fields of the policy in force, as the tuple literal cast wants
 x4g_policy_tuple() {
@@ -26,6 +25,7 @@ print('('+','.join(n)+')')"
 
 x4g_queue() {
   local gov key auth rate new hash nonce tuple data
+  mkdir -p "$X4G_DIR" || return 1   # before any redirect into it: the first live run lost queued.json because the directory was made after the redirect had failed
   gov=$(x4g_gov); key=$P85_DIR/gov-authority.key
   [ -s "$key" ] || { echo "x4g: no governance authority key (X4_GOV_LANE makes the genesis plan keep one)" >&2; return 1; }
   auth=$("$P85_CAST" wallet address --private-key "$(tr -d '[:space:]' <"$key")")
@@ -36,8 +36,9 @@ x4g_queue() {
   data=$("$P85_CAST" calldata "queue($POLICY_T,uint128,bytes32,uint64)" "$tuple" "$new" "$hash" "$nonce")
   RW_SEND_DATA=$data RW_SEND_GAS=${X4G_QUEUE_GAS:-1500000} rw_send_value "$key" "$gov" 0 || return 1
   [ "$(x4g_uint "$gov" 'nextNonce()(uint64)')" = "$((nonce + 1))" ] || { echo "x4g: the queue transaction did not consume nonce $nonce" >&2; return 1; }
-  x4g_json --argjson nonce "$nonce" --arg rate "$rate" --arg new "$new" --argjson id "$(x4g_uint "$gov" 'currentPolicyID()(uint32)')" --argjson p "$(x4g_uint "$(x4g_roots)" 'progress()(uint64)')" --argjson t "$(x4g_uint "$(x4g_roots)" 'ucTime()(uint64)')" \
-    '{nonce: $nonce, rateBefore: $rate, rateProposed: $new, policyIdBefore: $id, queuedAtProgress: $p, queuedAtUcTime: $t}' >"$X4G_DIR/queued.json"
+  jq -n --argjson nonce "$nonce" --arg rate "$rate" --arg new "$new" --argjson id "$(x4g_uint "$gov" 'currentPolicyID()(uint32)')" --argjson p "$(x4g_uint "$(x4g_roots)" 'progress()(uint64)')" --argjson t "$(x4g_uint "$(x4g_roots)" 'ucTime()(uint64)')" \
+    '{nonce: $nonce, rateBefore: $rate, rateProposed: $new, policyIdBefore: $id, queuedAtProgress: $p, queuedAtUcTime: $t}' >"$X4G_DIR/queued.json" || return 1
+  jq -e '.nonce >= 1 and .policyIdBefore >= 1' "$X4G_DIR/queued.json" >/dev/null || { echo "x4g: queued.json is not a record of the queued proposal" >&2; return 1; }
   echo "PASS: x4g: queued nonce $nonce (reward rate $rate -> $new), policy $(jq -r .policyIdBefore "$X4G_DIR/queued.json") in force"
 }
 
@@ -61,7 +62,7 @@ x4g_check() {
   gov=$(x4g_gov); id0=$(jq -r .policyIdBefore "$X4G_DIR/queued.json")
   for i in $(seq 1 "$X4G_WAIT"); do id1=$(x4g_uint "$gov" 'currentPolicyID()(uint32)'); [ "$id1" -gt "$id0" ] && break; sleep 1; done
   rate1=$(x4g_uint "$gov" 'currentRewardRate()(uint128)'); open=$(p85_open_result 2>/dev/null || echo unreadable)
-  x4g_json --argjson id0 "$id0" --argjson id1 "$id1" --arg rate "$rate1" --arg open "$open" --argjson waited "$i" --argjson proposed "$(jq .rateProposed "$X4G_DIR/queued.json")" \
-    '{policyIdBefore: $id0, policyIdAfter: $id1, activated: ($id1 > $id0), rateAfter: $rate, rateProposed: $proposed, openResultAtEnd: $open, waitedSeconds: $waited}' >"$X4G_DIR/outcome.json"
+  jq -n --argjson id0 "$id0" --argjson id1 "$id1" --arg rate "$rate1" --arg open "$open" --argjson waited "$i" --argjson proposed "$(jq .rateProposed "$X4G_DIR/queued.json")" \
+    '{policyIdBefore: $id0, policyIdAfter: $id1, activated: ($id1 > $id0), rateAfter: $rate, rateProposed: $proposed, openResultAtEnd: $open, waitedSeconds: $waited}' >"$X4G_DIR/outcome.json" || return 1
   echo "PASS: x4g: outcome recorded: $(jq -c . "$X4G_DIR/outcome.json")"
 }
