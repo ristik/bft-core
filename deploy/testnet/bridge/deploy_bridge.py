@@ -17,13 +17,13 @@ Writes everything under GENERATION/bridge/.
 import argparse
 import json
 import os
-import re
 import subprocess
 from pathlib import Path
 
 import release
 
 ETH = 'http://ureth1:8545'
+GATEWAY = 'http://rpc:8545'   # the package's public gateway (gateway.py) as the validators network names it
 TAG = 'tnops-bridge:verified'
 CONTRACTS = '/opt/bridge/contracts'
 
@@ -51,9 +51,9 @@ def main():
     p.add_argument('--agg-url', required=True, help='each shard\'s aggregator URL as the driver reaches it, comma separated, same order')
     p.add_argument('--agg-partition', type=int, default=7, help='the aggregation partition the bridge profile names (7, the fixed one)')
     p.add_argument('--agg-shard', default='', help='native shard ID bytes of each shard, hex, comma separated (two or more shards)')
-    p.add_argument('--tester-eth-url', default=ETH, help='the JSON-RPC endpoint testers use (the public gateway\'s name on a public host)')
-    p.add_argument('--tester-redeem-eth-url', default='', help='where testers send redemptions, when the --tester-eth-url gateway cannot take them')
-    p.add_argument('--tester-agg-url', default='', help='the aggregator endpoint testers use (default: the first --agg-url)')
+    p.add_argument('--tester-eth-url', default=GATEWAY, help='the JSON-RPC endpoint testers use (default: the package\'s public gateway; its public name on a host)')
+    p.add_argument('--tester-redeem-eth-url', default='', help='where testers send redemptions, when the --tester-eth-url gateway cannot take them (the package gateway can)')
+    p.add_argument('--tester-agg-url', default=GATEWAY + '/aggregator', help='the aggregator endpoint testers use (default: the package gateway\'s /aggregator route)')
     p.add_argument('--tester-lockproof-url', default='http://lockproof:8090', help='the lock-proof endpoint testers use')
     a = p.parse_args()
     gen = a.generation.resolve()
@@ -106,15 +106,14 @@ def main():
         (public / name).write_bytes((work / name).read_bytes())
     (public / 'index.html').write_bytes((Path(__file__).parent / 'tester/index.html').read_bytes())
     # genesisHash: the tester checks block 0 against it before sending anything (a reset generation keeps the chain ID)
-    tester = {'ethUrl': a.tester_eth_url, 'aggUrl': a.tester_agg_url or urls[0], 'lockProofUrl': a.tester_lockproof_url, 'chainId': manifest['chain_id'],
+    tester = {'ethUrl': a.tester_eth_url, 'aggUrl': a.tester_agg_url, 'lockProofUrl': a.tester_lockproof_url, 'chainId': manifest['chain_id'],
               'genesisHash': manifest['genesis_hash'], 'vault': addr['BridgeVault'], 'files': files}
     if a.tester_redeem_eth_url:
         tester['redeemEthUrl'] = a.tester_redeem_eth_url
     (public / 'tester-config.json').write_text(json.dumps(tester, indent=2) + '\n')
     image = subprocess.check_output(['docker', 'image', 'inspect', '--format={{.Id}}', TAG], text=True).strip()
     ureth = json.loads((gen / 'compose.yaml').read_text())['services']['ureth1']['entrypoint']
-    max_body = int(re.search(r'^MAX_BODY = (\d+)', (Path(__file__).resolve().parent.parent / 'gateway.py').read_text(), re.M).group(1))
-    manifest_doc = release.build(gen, lambda *args: tools(gen, *args, capture=True), image, ureth, max_body)
+    manifest_doc = release.build(gen, lambda *args: tools(gen, *args, capture=True), image, ureth, release.gateway_limits())
     (public / 'bridge-release.json').write_text(json.dumps(manifest_doc, indent=2) + '\n')
     if os.getuid() == 0:   # the package's services run as 10001 (the lock-proof endpoint reads the trust bundle here)
         subprocess.run(['chown', '-R', '10001:10001', str(work)], check=True)
