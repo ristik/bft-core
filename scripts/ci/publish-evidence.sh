@@ -140,6 +140,7 @@ if [ "$x4f" = 1 ]; then   # X4 B7: the four faults, the soak, the final reconcil
   dr=$(find "$pub" -path '*/x4pos/report.json' | head -n 1)
   jq -e '.status == "PASS" and .accounting.status == "PASS" and (.pending | length) == 0 and (.failed | length) == 0 and (.shortOfRequired | length) == 0' "${dr:-/nonexistent}" >/dev/null 2>&1 || { complete=no; why+=("x4pos/report.json: the driver's campaign report is not a PASS with accounting PASS and nothing short of required"); }
   [ -z "$dr" ] || cp "$dr" "$pub/CAMPAIGN-REPORT.json"
+  [ -z "$fd" ] || { for l in "$fd"/*.late; do [ -f "$l" ] && echo "$(basename "$l" .late): started $(cat "$l") s late"; done; } >"$pub/FAULT-LATENESS.txt"
 fi
 [ -z "${CI_INTERIM:-}" ] || { complete=no; why+=("INTERIM EXPERIMENT, not acceptance evidence: $CI_INTERIM"); }
 if [ "$complete" = no ]; then

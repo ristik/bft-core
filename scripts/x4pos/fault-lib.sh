@@ -31,7 +31,7 @@ x4f_wait() { # <campaign step id>
 
 x4f_probe() { # a JSON object of the chain as the roots and the lane's validator see it
   local ri
-  ri=$(h3_root_info | jq -c '{rootRound: .roundNumber, evmRound: (.partitionShards[] | select(.partitionId==8) | .roundNumber)}') || return 1
+  ri=$(h3_root_info | jq -c '{rootRound: (.roundNumber | tonumber), evmRound: (.partitionShards[] | select(.partitionId==8) | .roundNumber | tonumber)}') || return 1
   jq -c --arg open "$(p85_open_result)" --arg acked "$(p85_last_acked)" --argjson head "$(p85_eth_block)" --argjson cursor "$(p85_cursor)" --argjson count "$(p85_log_count)" \
     --argjson lots "$(p85_call "$(p85_custody)" 'nextLotID()(uint256)' | awk '{print $1}')" --argjson credits "$(p85_call "$(p85_custody)" 'totalCredits()(uint256)' | awk '{print $1}')" \
     '. + {openResult: $open, lastAcked: ($acked | ascii_downcase), head: $head, cursor: $cursor, count: $count, lots: $lots, credits: $credits}' <<<"$ri"
@@ -78,12 +78,24 @@ x4f_restart_reth() { # entity
     --engine.persistence-threshold "$d2cPersistenceThreshold" --builder.gaslimit "${URETH_BUILDER_GASLIMIT:-30000000}" \
     $(urethPinUnicityFlags) >>"test-nodes/reth$i/reth.log" 2>&1 &
   echo $! >"test-nodes/reth$i/pid"
-  for _ in $(seq 1 120); do rpc "http://127.0.0.1:$((rethEthBase + i - 1))" eth_blockNumber '[]' | grep -q '"result"' && return 0; sleep 1; done
-  echo "x4f: execution client of entity $i did not answer" >&2; return 1
+  for _ in $(seq 1 120); do rpc "http://127.0.0.1:$((rethEthBase + i - 1))" eth_blockNumber '[]' 2>/dev/null | grep -q '"result"' && break; sleep 1; done
+  rpc "http://127.0.0.1:$((rethEthBase + i - 1))" eth_blockNumber '[]' 2>/dev/null | grep -q '"result"' || { echo "x4f: execution client of entity $i did not answer" >&2; return 1; }
+  # the network is trusted_nodes_only: a restarted client trusts nobody until told (as h3_start_reth does), else it gets no transaction gossip (rev2, #852 nit 1)
+  local j
+  for j in $H3_ONLINE; do
+    [ "$j" != "$i" ] || continue
+    reth_trust "$i" "$j" || echo "WARN x4f: execution client $i could not trust $j" >&2
+    reth_trust "$j" "$i" || echo "WARN x4f: execution client $j could not trust $i" >&2
+  done
 }
 # validator i's block N (hash) over its own RPC
-x4f_block_hash() { # entity number
-  "$P85_CAST" block --rpc-url "http://127.0.0.1:$((rethEthBase + $1 - 1))" "$2" --json 2>/dev/null | jq -r .hash
+x4f_block_hash() { # entity number: the block's hash by eth_getBlockByNumber; an answer without a hash is an error that shows the answer (run 40098367588: cast block --json gave null)
+  local out h
+  out=$(curl -sS --max-time 15 -X POST "http://127.0.0.1:$((rethEthBase + $1 - 1))" -H "Content-Type: application/json" \
+    -d "$(printf '{"jsonrpc":"2.0","id":1,"method":"eth_getBlockByNumber","params":["0x%x",false]}' "$2")") || { echo "x4f: validator $1 did not answer eth_getBlockByNumber" >&2; return 1; }
+  h=$(jq -r '.result.hash // empty' <<<"$out" 2>/dev/null)
+  [ -n "$h" ] || { echo "x4f: validator $1 has no block $2: $(cut -c1-300 <<<"$out")" >&2; return 1; }
+  echo "$h"
 }
 # validator i reaches at least the head validator 1 had (a restarted node catches up): waits up to 240 s
 x4f_caught_up() { # entity targetHead
@@ -155,7 +167,7 @@ x4f_delayed_episode() {
   r0=$(jq -r .rootRound <<<"$before"); e0=$(jq -r .evmRound <<<"$before")
   for i in 1 2 3 4; do x4f_stop_val "$i" || return 1; done
   sleep "$X4F_DELAY"
-  mid=$(h3_root_info | jq -c '{rootRound: .roundNumber, evmRound: (.partitionShards[] | select(.partitionId==8) | .roundNumber)}') || return 1
+  mid=$(h3_root_info | jq -c '{rootRound: (.roundNumber | tonumber), evmRound: (.partitionShards[] | select(.partitionId==8) | .roundNumber | tonumber)}') || return 1
   r1=$(jq -r .rootRound <<<"$mid"); e1=$(jq -r .evmRound <<<"$mid")
   [ "$r1" -gt "$((r0 + X4F_DELAY / 3))" ] || { echo "x4f: the roots did not extend during the outage (round $r0 -> $r1)" >&2; return 1; }
   [ "$e1" -le "$((e0 + 1))" ] || { echo "x4f: the EVM shard kept certifying with all validators stopped (round $e0 -> $e1)" >&2; return 1; }
