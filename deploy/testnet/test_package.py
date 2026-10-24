@@ -20,6 +20,7 @@ import metrics_relay
 import handoff_ops
 import handoff
 import observe
+import joiner
 import pos_sample
 
 class FakeRelay:
@@ -1041,6 +1042,49 @@ class LoadGenerator(unittest.TestCase):
 
 
 
+class Joiner(unittest.TestCase):
+    images={k:'sha256:'+'a'*64 for k in ['node','rpc','guard','signer']}
+    def topology(self,n):
+        with tempfile.TemporaryDirectory() as d:
+            return generate.topology(Path(d),n,{'root':['r%d'%i for i in range(n)],'evm':['e%d'%i for i in range(n)]},self.images,'captcha',['--unicity.network-id','3'],123456,True)
+    def test_the_joiner_services_are_exactly_what_a_generation_of_one_more_validator_writes(self):
+        four,five=self.topology(4),self.topology(5)
+        got=joiner.joiner_services(four,5,'r4','e4')
+        want={n:five['services'][n] for n in ('pod5','metrics5','root5','authority5','ureth5','shard5')}
+        self.assertEqual(sorted(got),sorted(want))
+        for name in want: self.assertEqual(got[name],want[name],name)
+    def test_prepare_makes_the_entity_private_to_its_owner_and_writes_the_override(self):
+        import stat
+        with tempfile.TemporaryDirectory() as d:
+            gen=Path(d)/'gen';gen.mkdir();(gen/'compose.yaml').write_text(json.dumps(self.topology(4)))
+            fake=Path(d)/'ubft'   # the three commands prepare runs: init (makes the home), credential (a file), node-id (prints one)
+            fake.write_text("#!/usr/bin/env python3\nimport sys,os\na=sys.argv[1:]\n"
+                            "if a[1]=='init': os.makedirs(a[a.index('--home')+1])\n"
+                            "elif a[0]=='signing-authority': open(a[a.index('--out')+1],'w').write('c')\n"
+                            "elif a[0]=='node-id': print('id-'+os.path.basename(a[a.index('--home')+1]))\n");fake.chmod(0o755)
+            old=os.umask(0o022)   # a permissive caller: prepare must not inherit it
+            try: out=joiner.prepare(gen,fake)
+            finally: os.umask(old)
+            self.assertEqual((out['index'],out['root'],out['evm']),(5,'id-root','id-evm'))
+            val=gen/'validator5'
+            for path in [val,*val.rglob('*')]:
+                mode=stat.S_IMODE(path.stat().st_mode)
+                self.assertEqual(mode&0o077,0,f'{path} is accessible to group or others: {oct(mode)}')
+            self.assertTrue((val/'jwt'/'jwt.hex').is_file())
+            override=json.loads((gen/'compose.joiner.json').read_text())
+            self.assertEqual(sorted(override['services']),['authority5','metrics5','pod5','root5','shard5','ureth5'])
+            self.assertIn('id-evm',override['services']['authority5']['entrypoint'])
+    def test_the_genesis_services_are_untouched_and_a_taken_index_is_refused(self):
+        four=self.topology(4);before=json.dumps(four,sort_keys=True)
+        joiner.joiner_services(four,5,'r4','e4')
+        self.assertEqual(json.dumps(four,sort_keys=True),before)
+        with self.assertRaisesRegex(ValueError,'already exists'): joiner.joiner_services(four,3,'x','y')
+    def test_incomplete_bootnode_lists_are_refused_rather_than_guessed(self):
+        four=self.topology(4)
+        for name,svc in four['services'].items():
+            if re.fullmatch(r'(root|shard)\d+',name): svc['entrypoint']=[re.sub(r'/dns4/root4/[^,]*,?','',p).rstrip(',') for p in svc['entrypoint']]
+        with self.assertRaisesRegex(ValueError,'not all in the bootnode lists'): joiner.joiner_services(four,5,'r4','e4')
+
 class Observe(unittest.TestCase):
     def sample(self,rounds,**kw):
         base={'roots':{str(i+1):{'epoch':1,'round':r} for i,r in enumerate(rounds)},'services':{'root1':{'state':'running','health':None,'restarts':0}},
@@ -1165,6 +1209,34 @@ class PosSample(unittest.TestCase):
         with patch.object(observe,'get',refuse), patch.object(pos_sample.time,'sleep',lambda s:None):
             with self.assertRaises(ValueError) as e: pos_sample.eth('eth_blockNumber',[])
         self.assertIn('429',str(e.exception));self.assertEqual(len(calls),pos_sample.RETRIES+1,'bounded retries')
+    def test_not_healthy_lists_services_whose_healthcheck_has_not_reported_healthy(self):
+        rows=[{'Service':'rpc','Health':'starting'},{'Service':'root1','Health':'healthy'},{'Service':'shard1','Health':''},{'Service':'x'},{'Service':'ureth1','Health':'unhealthy'}]
+        with patch.object(pos_sample.subprocess,'run',lambda *a,**k:type('R',(),{'stdout':'\n'.join(json.dumps(x) for x in rows)})()):
+            self.assertEqual(pos_sample.not_healthy('/g'),{'rpc':'starting','ureth1':'unhealthy'})
+    def test_the_observe_stage_waits_for_the_health_checks_and_names_what_never_reports(self):
+        import rehearse
+        waits=[]
+        class Fake:
+            evidence=Path(tempfile.mkdtemp());gen=Path('/g')
+            def say(self,x): pass
+            def expect(self,ok,what,detail=''):
+                if not ok: raise rehearse.Failure(what+' '+detail)
+            def wait(self,what,probe,seconds):
+                waits.append((what,seconds));
+                for _ in range(3):
+                    if probe(): return True
+                raise rehearse.Failure(what)
+        states=[{'rpc':'starting'},{'rpc':'starting'},{}]
+        calls=[]
+        def health(g): calls.append(1);return states[min(len(calls)-1,2)]
+        def fail(*a,**k): raise AssertionError('the sampler must not start before the services are healthy')
+        with patch.object(pos_sample,'not_healthy',lambda g:{'rpc':'starting'}), patch.object(pos_sample.subprocess,'run',fail):
+            with self.assertRaises(rehearse.Failure) as e: pos_sample.pos_observe(Fake())
+        self.assertIn("rpc",str(e.exception));self.assertEqual(waits[-1],('every healthchecked service is healthy',180))
+        waits.clear()
+        with patch.object(pos_sample,'not_healthy',health), patch.object(pos_sample.subprocess,'run',lambda *a,**k:(_ for _ in ()).throw(RuntimeError('sampler started'))):
+            with self.assertRaises(RuntimeError): pos_sample.pos_observe(Fake())   # healthy on the third look: only then does it start the sampler
+        self.assertEqual(len(calls),3)
     def test_a_result_that_is_not_whole_words_is_refused(self):
         with self.assertRaises(ValueError): pos_sample.words('0x'+'00'*31)
         with self.assertRaises(ValueError): pos_sample.words('0x')
