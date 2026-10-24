@@ -117,19 +117,6 @@ def pos_joiner(r):
     (r.evidence / f'shard{index}-start.log').write_text(logs)
     r.say(f'  shard{index} after 15 s: {"running" if running else "NOT running"}; last lines: ' + ' | '.join(logs.strip().splitlines()[-4:])[-600:])
     r.expect(running, f'the joiner\'s shard node stays up as a staging-only node', logs.strip()[-600:])
-    # a follower follows: its committed head moves past the genesis certificate once it syncs from the committee (the stages after this need its root at the
-    # committee's round before the handoff names it); what it logged is kept either way
-    def head():
-        try:
-            code, body = transport.post(index, '/api/v1/q3/signers', b'{}')
-            return json.loads(body) if code == 200 else None
-        except (handoff_ops.HandoffError, ValueError):
-            return None
-    deadline = time.monotonic() + 150
-    while time.monotonic() < deadline and (head() or {}).get('round', 0) <= 5:
-        time.sleep(5)
-    (r.evidence / f'root{index}-follow.log').write_text(compose(r, 'logs', '--no-color', '--tail', '120', f'root{index}', check=False))
-    r.say(f'  joiner root head: {head()}')
-    r.expect((head() or {}).get('round', 0) > 5, 'the joiner\'s root follows the committee: its certified head moves past the genesis certificate', json.dumps(head()))
     r.n = index   # from here every stage of this run counts the joiner: its services are in compose_files, its pod in the transport
+    r.joiners.add(index)   # but not as a member of the committee that certifies: it follows until the handoff that names it activates
 

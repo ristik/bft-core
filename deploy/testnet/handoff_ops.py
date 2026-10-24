@@ -262,6 +262,7 @@ def main():
     q.add_argument('--prepare-timeout', type=float, default=60)
     q.add_argument('--max-attempts', type=int, default=3)
     q.add_argument('--intent-delay', type=float, default=0.0, help='seconds to wait before handing each validator the intent (testing slow delivery)')
+    q.add_argument('--committee', help='comma separated entities of the committee being LEFT (default: every entity of the generation); a joiner is not one of them: it gets no intent and endorses nothing')
     h = sub.add_parser('hold')
     h.add_argument('generation', type=Path)
     h.add_argument('--ubft', type=Path, required=True)
@@ -276,6 +277,8 @@ def main():
     r.add_argument('flags', nargs=argparse.REMAINDER)
     a = p.parse_args()
     transport = DockerTransport(a.generation)
+    if getattr(a, 'committee', None):
+        transport.entities = sorted(int(x) for x in a.committee.split(','))
     if a.action == 'abort':
         # all at once: each command waits for the COMMITTED Abort, which needs the approvals of a quorum, so one after another the first would wait out its timeout
         commands = abort_commands(a.generation, transport.entities, [f for f in a.flags if f != '--'])

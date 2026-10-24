@@ -52,7 +52,12 @@ class Rehearsal:
         self.reset_args = {}
         self.ubft = None
         self.target = 2   # the root epoch the handoff being driven installs (pos-handoff-2 drives the next one, 3)
+        self.joiners = set()   # entities started but not yet members of the committee that certifies (pos-joiner adds one, pos-advance clears them)
         self.committed_target = None   # the Abort target of the handoff pos-propose committed (pos-too-late)
+
+    def members(self):
+        """The entities of the committee that certifies now: every entity but the joiners."""
+        return [i for i in range(1, self.n + 1) if i not in self.joiners]
 
     def evh(self):
         """The evidence directory of the handoff being driven (the second handoff keeps its own, the first one's files have the same names)."""
@@ -527,7 +532,7 @@ class Rehearsal:
         self.expect(needed <= running, 'every entity service is running', str(sorted(needed - running)))
         root_rpc = operator_rpc.common_urls(compose)[0]
         transport = handoff_ops.DockerTransport(self.gen)   # one-shot python sidecar in the entity's namespace (the operator listener is loopback there)
-        for i in range(1, self.n + 1):
+        for i in self.members():
             # `ubft q3 signers --out` writes only the signer list, no epoch (the first run of this stage found 5b's step 0 wrong): ask the endpoint it wraps
             status, body = transport.post(i, '/api/v1/q3/signers', b'{}')
             signers = json.loads(body) if status == 200 else {}
@@ -650,7 +655,8 @@ class Rehearsal:
             self.say(f'  no evm-assignment context before the proposal: {error}')
         run = subprocess.run([sys.executable, str(Path(__file__).resolve().parent / 'handoff_ops.py'), 'propose', str(self.gen), '--ubft', str(self.ubft),
                               '--next-trust-base', str(work / f'trust-base-epoch{self.target}.json'), '--next-evm-assignment', str(work / 'published-assignment.json'),
-                              '--readiness-receipts', ','.join(receipts), '--intent-delay', '1.5'], text=True, capture_output=True)
+                              '--readiness-receipts', ','.join(receipts), '--intent-delay', '1.5',
+                              *(['--committee', ','.join(map(str, self.members()))] if self.joiners else [])], text=True, capture_output=True)
         self.evh()
         (self.evh() / 'propose.log').write_text(run.stdout + run.stderr)
         if run.returncode:   # the root's refusal is one line for many causes: report what each root holds, so the refusal can be located
@@ -667,7 +673,7 @@ class Rehearsal:
                 self.say(f'  ureth {i}: block {int(self.ureth(i, "eth_blockNumber"), 16)}, published word {int(raw[2 + 64 * 10:2 + 64 * 11], 16)}, openResult {self.ureth(i, "eth_call", [{"to": election, "data": self.cast_run("calldata", "openResult()")}, "latest"])[:12]}')
         self.expect(run.returncode == 0, 'handoff_ops.py propose', (run.stdout + run.stderr).strip()[-600:])
         accepted = int(run.stdout.strip().splitlines()[-1].split()[1])
-        self.expect(accepted >= self.n * 2 // 3 + 1, f'a quorum of the {self.n} roots endorsed the one plan', run.stdout.strip().splitlines()[-1])
+        self.expect(accepted >= len(self.members()) * 2 // 3 + 1, f'a quorum of the {len(self.members())} roots of the committee endorsed the one plan', run.stdout.strip().splitlines()[-1])
         log = [json.loads(line) for line in wrapper_log.read_text().splitlines()][earlier:]
         self.expect(len({row['plan_sha256'] for row in log if row['event'] in ('plan', 'intent', 'endorse')}) == 1, 'every phase of the attempt carries the same plan hash')
         planned = [row for row in log if row['event'] == 'plan'][-1]
@@ -798,7 +804,7 @@ class Rehearsal:
         work = self.gen / 'network' / 'handoff'
         self.expect((work / 'v3-body-id.txt').is_file(), 'the candidate files exist (run pos-propose first)')
         transport = handoff_ops.DockerTransport(self.gen)
-        for i in range(1, self.n + 1):
+        for i in self.members():
             self.expect(self.root_epoch(i, transport) == self.target - 1, f'root {i} has no certificate of epoch {self.target} before its install restart')
         override = self.gen / f'compose.install-epoch-{self.target}.json'
         if not override.exists():
@@ -886,6 +892,7 @@ class Rehearsal:
             count = self.view(self.REGISTRY, 'recordCount()(uint64)')[0]
             return count if count == self.view(deployment['custody'], 'recordCursor()(uint64)')[0] else None
         self.say(f'  recordCount == recordCursor == {self.wait("the custody has applied every root record", lambda: applied() is not None, 300) and applied()}')
+        self.joiners.clear()   # the successor committee is active: a joiner is a member now
 
     def exec_rc(self, service, *command):
         run = subprocess.run(['docker', 'compose', *handoff_ops.compose_files(self.gen), 'exec', '-T', service, *command], text=True, capture_output=True)
