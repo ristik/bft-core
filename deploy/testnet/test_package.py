@@ -153,6 +153,19 @@ class ProofOfStake(unittest.TestCase):
             self.assertNotIn(name,[n for n,_ in rehearse.STAGES])   # the PoA generation has no registry: the default run must not name them
         self.assertIn('--pos-contracts pinned-contracts',workflow)
         self.assertIn('ref: ${{ steps.pins.outputs.contracts }}',workflow)
+    def test_pos_owner_names_the_revert_selector_it_expects(self):
+        import json,rehearse,pos_owner
+        class Fake:   # the two helpers it needs: a selector table and an eth_call that fails with a given revert data
+            cast='cast'
+            def __init__(self,data): self.data=data
+            def cast_run(self,*a): return '0xaaaaaaaa' if a[0]=='sig' else '0xcalldata'
+            def rpc(self,body,ip): return 200,json.dumps({'error':{'data':self.data}})
+            def expect(self,ok,what,detail=''):
+                if not ok: raise rehearse.Failure(what)
+        Fake.__module__=rehearse.__name__
+        pos_owner.expect_reverts(Fake('0xaaaaaaaa00'),'NotOwner()','0x1','0x2','f()')
+        with self.assertRaises(rehearse.Failure): pos_owner.expect_reverts(Fake('0xbbbbbbbb'),'NotOwner()','0x1','0x2','f()')   # another error
+        with self.assertRaises(rehearse.Failure): pos_owner.expect_reverts(Fake(''),'NotOwner()','0x1','0x2','f()')   # no revert at all
     def test_the_paired_client_gets_the_registry_genesis_commitment(self):
         # ureth requires --unicity.genesis-commitment (a required argument since 6e59b68c, still at the pinned ureth), and b1-profile does not print it
         slot='0x'+'ab'*32

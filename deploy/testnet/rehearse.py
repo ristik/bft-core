@@ -28,6 +28,7 @@ from pathlib import Path
 import handoff
 import handoff_ops
 import operator_rpc
+import pos_owner
 
 PUBLIC_RPC = '127.0.0.1:8545'
 FAUCET = '127.0.0.1:8088'
@@ -1120,7 +1121,8 @@ class Rehearsal:
 
 STAGES = (('up', 'up'), ('identity', 'identity'), ('first-tx', 'first_tx'), ('gateway-limits', 'gateway_limits'), ('faucet-guard', 'faucet_guard'), ('load', 'load'), ('pod-restart', 'pod_restart'), ('backup-restore', 'backup_restore'), ('reset', 'reset'))
 # run on a generation made with --pos (the workflow's second generation); not part of the default list
-POS_STAGES = (('pos-smoke', 'pos_smoke'), ('pos-rewards', 'pos_rewards'), ('pos-election', 'pos_election'), ('pos-proposal', 'pos_proposal'), ('pos-abort', 'pos_abort'), ('pos-propose', 'pos_propose'), ('pos-too-late', 'pos_too_late'), ('pos-install', 'pos_install'), ('pos-advance', 'pos_advance'), ('pos-restart', 'pos_restart'), ('pos-stale', 'pos_stale'), ('pos-handoff-2', 'pos_handoff_2'), ('pos-restart-2', 'pos_restart_2'), ('pos-recreate', 'pos_recreate'))
+Rehearsal.pos_owner = pos_owner.pos_owner   # the owner-key stage lives in pos_owner.py
+POS_STAGES = (('pos-smoke', 'pos_smoke'), ('pos-rewards', 'pos_rewards'), ('pos-election', 'pos_election'), ('pos-proposal', 'pos_proposal'), ('pos-abort', 'pos_abort'), ('pos-propose', 'pos_propose'), ('pos-too-late', 'pos_too_late'), ('pos-install', 'pos_install'), ('pos-advance', 'pos_advance'), ('pos-restart', 'pos_restart'), ('pos-stale', 'pos_stale'), ('pos-handoff-2', 'pos_handoff_2'), ('pos-restart-2', 'pos_restart_2'), ('pos-recreate', 'pos_recreate'), ('pos-owner', 'pos_owner'))
 
 
 def main():
