@@ -805,6 +805,11 @@ p85_run_lane() {
       source scripts/lib/rewards-lib.sh; source scripts/x4pos/rewards-pos-lib.sh
       P85_STEPS=${P85_STEPS/ p85_epoch_switches x4a_snapshot/ p85_epoch_switches x4a_snapshot x4r_intervals x4r_dry_refill x4r_claim x4a_snapshot}
     fi
+    if [ "${X4_GOV_LANE:-0}" = 1 ]; then   # X4 B6e (scripts/x4pos/gov-lib.sh): queue right after the baseline, execute and watch for the activation once the delays have passed (after the exit claim)
+      source scripts/lib/rewards-lib.sh; source scripts/x4pos/gov-lib.sh
+      P85_STEPS=${P85_STEPS/p85_baseline x4a_snapshot/p85_baseline x4a_snapshot x4g_queue}
+      P85_STEPS="$P85_STEPS x4g_execute x4g_check"
+    fi
     P85_STEPS="$P85_STEPS x4a_final"
   fi
   [ "${P85_MODE:-}" != overbound ] || { P85_JOINER_UNITS=3; P85_STEPS="p85_baseline p85_joiner_nodes p85_joiner_onboard p85_election_refused"; }
