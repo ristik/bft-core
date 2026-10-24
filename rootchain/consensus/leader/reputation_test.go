@@ -46,6 +46,22 @@ func Test_ReputationBased_Update(t *testing.T) {
 		require.Equal(t, slotIdx, rl.curIdx, "expected that round leader buffer index is not changed")
 	})
 
+	t.Run("the genesis QC elects nothing", func(t *testing.T) {
+		// the rounds are consecutive, but there is no block before the genesis (#841: the election failed to load round 0); the next epoch's
+		// trust base is not in the store, so this is the reputation branch
+		tbs, err := tbstore.NewTrustBaseStore(memorydb.New(), logger.New(t))
+		require.NoError(t, err)
+		rl, err := NewReputationBased(1, 1, tbs)
+		require.NoError(t, err)
+		loadBlock := func(round uint64) (*storage.ExecutedBlock, error) { return nil, fmt.Errorf("should not get this far") }
+		slotIdx := rl.curIdx
+
+		err = rl.Update(&types.QuorumCert{VoteInfo: &types.RoundInfo{RoundNumber: 1, ParentRoundNumber: 0, Epoch: types.GenesisRootEpoch}}, 2, loadBlock)
+		require.EqualError(t, err, `not updating leaders because rounds are not consecutive {parent: 0, QC: 1, current: 2}`)
+		require.ErrorIs(t, err, ErrNotConsecutive)
+		require.Equal(t, slotIdx, rl.curIdx, "expected that round leader buffer index is not changed")
+	})
+
 	t.Run("invalid input: qc.Round + 1 != currentRound", func(t *testing.T) {
 		rl := &ReputationBased{}
 		loadBlock := func(round uint64) (*storage.ExecutedBlock, error) { return nil, fmt.Errorf("should not get this far") }
@@ -591,6 +607,11 @@ func Test_ReputationBased(t *testing.T) {
 		currentRound++
 		err := processRound(rl, currentRound)
 		require.Error(t, err)
+		if currentRound == 2 {
+			// the QC of the genesis: no election (the same fallback, without walking to a block before the genesis)
+			require.ErrorIs(t, err, ErrNotConsecutive)
+			continue
+		}
 		require.Contains(t, err.Error(), fmt.Sprintf("failed to elect leader for round %d:", currentRound+1))
 	}
 	// validate: blockStore must now contain len(peerIDs) blocks (IOW block per author)

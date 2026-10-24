@@ -13,7 +13,7 @@ on:
         required: false
         default: ''
       pos_stages:
-        description: 'PoS-only run: rehearse.py PoS-profile stages (e.g. up,identity,first-tx,pos-smoke,pos-election,pos-proposal; the joiner: up,identity,first-tx,pos-smoke,pos-joiner,pos-election,pos-proposal,pos-propose,pos-install,pos-advance,pos-join-signs,pos-restart, on a fresh generation, in the join step below); skips the PoA rehearsal'
+        description: 'PoS-only run: rehearse.py PoS-profile stages (e.g. up,identity,first-tx,pos-smoke,pos-election,pos-proposal; the joiner: up,identity,first-tx,pos-smoke,pos-joiner,pos-election,pos-proposal,pos-propose,pos-install,pos-advance,pos-join-signs,pos-restart, on a fresh generation, in the join step below); skips the PoA rehearsal. Opt-in, not in the default list (bft-core #843): pos-crash, pos-crash-ureth, pos-crash-shard, pos-crash-root, pos-crash-ureth-shard (after pos-recreate), pos-crash-e2 (after pos-advance), pos-crash-e1 (after pos-smoke)'
         required: false
         default: ''
 permissions:
