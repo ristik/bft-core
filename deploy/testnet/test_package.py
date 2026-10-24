@@ -528,6 +528,19 @@ class HandoffWrapper(unittest.TestCase):
         self.assertEqual(target,{'network':7,'oldEpoch':1,'predecessorBodyId':'0x'+'ab'*32,'attempt':3,'nextBodyId':'0x'+handoff_ops.sha(body)})
         with self.assertRaisesRegex(handoff_ops.HandoffError,'planned attempt 3'):
             handoff_ops.abort_target(context,json.dumps({'Attempt':2,'Body':base64.b64encode(body).decode()}).encode(),1)
+        with self.assertRaises(ValueError,msg='a tampered plan (a body that is not canonical base64) names no target'):
+            handoff_ops.abort_target(context,json.dumps({'Attempt':3,'Body':'not base64!'}).encode(),1)
+        with self.assertRaises(KeyError,msg='a plan without a body names no target'):
+            handoff_ops.abort_target(context,json.dumps({'Attempt':3}).encode(),1)
+    def test_hold_is_not_held_when_the_first_endorsement_is_refused_and_a_proposal_records_the_plan_identity_abort_names(self):
+        import base64,json
+        body=b'B2';plan=json.dumps({'Attempt':1,'Body':base64.b64encode(body).decode()}).encode()
+        fake=self.Fake([1,2,3,4],plans=[plan],endorse_script={1:[(422,b'refused')]});rows=[]
+        with self.assertRaises(handoff_ops.HandoffError):
+            self.wrapper(fake,rows).hold(b'R')
+        self.assertEqual(rows[-1]['event'],'hold');self.assertEqual(rows[-1]['endorsed'],[],'nothing is held when the endorsement is refused')
+        rows=[];self.wrapper(self.Fake([1,2,3,4],plans=[plan]),rows).propose(b'R')
+        self.assertEqual((rows[0]['plan_attempt'],rows[0]['next_body_id']),(1,'0x'+handoff_ops.sha(body)),'the plan row carries what pos-too-late names in the Abort')
         with self.assertRaisesRegex(handoff_ops.HandoffError,'refused the context: 422'):
             handoff_ops.abort_context(type('Busy',(),{'post':lambda self,*a,**k:(422,b'invalid operator approval')})(),1)
     def test_an_endorsement_refused_before_the_prepare_is_retried_until_it_is_prepared(self):

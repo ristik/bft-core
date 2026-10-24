@@ -48,6 +48,7 @@ class Rehearsal:
         self.reset_args = {}
         self.ubft = None
         self.target = 2   # the root epoch the handoff being driven installs (pos-handoff-2 drives the next one, 3)
+        self.committed_target = None   # the Abort target of the handoff pos-propose committed (pos-too-late)
 
     def evh(self):
         """The evidence directory of the handoff being driven (the second handoff keeps its own, the first one's files have the same names)."""
@@ -638,6 +639,11 @@ class Rehearsal:
         transport = handoff_ops.DockerTransport(self.gen)
         wrapper_log = self.gen / 'handoff' / 'log.jsonl'
         earlier = len(wrapper_log.read_text().splitlines()) if wrapper_log.exists() else 0   # rows of a rehearsed Abort or of the first handoff are not this proposal's
+        try:   # the Abort target needs the context, which the root answers only while idle: read before the plan (pos-too-late names the committed handoff with it)
+            context = handoff_ops.abort_context(transport, 1)
+        except handoff_ops.HandoffError as error:
+            context = None
+            self.say(f'  no evm-assignment context before the proposal: {error}')
         run = subprocess.run([sys.executable, str(Path(__file__).resolve().parent / 'handoff_ops.py'), 'propose', str(self.gen), '--ubft', str(self.ubft),
                               '--next-trust-base', str(work / f'trust-base-epoch{self.target}.json'), '--next-evm-assignment', str(work / 'published-assignment.json'),
                               '--readiness-receipts', ','.join(receipts), '--intent-delay', '1.5'], text=True, capture_output=True)
@@ -660,6 +666,10 @@ class Rehearsal:
         self.expect(accepted >= self.n * 2 // 3 + 1, f'a quorum of the {self.n} roots endorsed the one plan', run.stdout.strip().splitlines()[-1])
         log = [json.loads(line) for line in wrapper_log.read_text().splitlines()][earlier:]
         self.expect(len({row['plan_sha256'] for row in log if row['event'] in ('plan', 'intent', 'endorse')}) == 1, 'every phase of the attempt carries the same plan hash')
+        planned = [row for row in log if row['event'] == 'plan'][-1]
+        self.committed_target = None if context is None or planned['plan_attempt'] != context['attempt'] else {
+            'network': context['network'], 'oldEpoch': self.target - 1, 'predecessorBodyId': '0x' + context['predecessor'].removeprefix('0x'),
+            'attempt': planned['plan_attempt'], 'nextBodyId': planned['next_body_id']}
         # the intents were handed over 1.5 s apart (plus the sidecar's second each): the later validators got theirs after the leader had ordered the Prepare, which the
         # root refused before #795. Neither a refusal nor a lapse may appear.
         self.expect(not [row for row in log if row['event'] in ('intent-refused', 'lapsed')], 'slow intent delivery (1.5 s apart) is accepted: no refusal, no lapse', str(log)[-300:])
@@ -711,6 +721,25 @@ class Rehearsal:
         self.exec_in('root1', 'ubft', 'root', 'handoff', 'q3-candidate', '--next-trust-base', f'/network/handoff/trust-base-epoch{self.target}.json',
                      '--next-evm-assignment', '/network/handoff/published-assignment.json', '--root-rpc', root_rpc, '--out-dir', '/tmp/candidate-probe')
         self.expect('candidate.cbor' in self.exec_in('root1', 'ls', '/tmp/candidate-probe'), 'the root derives the next attempt\'s candidate from the assignment made for it')
+
+    def pos_too_late(self):
+        """5b step 14 after H: the handoff proposed by pos-propose is committed (the roots still certify at the old epoch, the install has not run). An Abort naming that
+        exact handoff is not ordered: every root answers "too late" and the CLI exits non-zero, no Abort record is committed, the epoch does not move and the install
+        (the next stage) still works. Run right after pos-propose."""
+        target = self.committed_target
+        self.expect(target is not None, 'the committed handoff\'s target was read by pos-propose (context before the plan)', str(target))
+        (self.evh() / 'too-late-target.json').write_text(json.dumps(target, indent=1, sort_keys=True) + '\n')
+        before = [self.root_epoch(i) for i in range(1, self.n + 1)]
+        ops = str(Path(__file__).resolve().parent / 'handoff_ops.py')
+        aborted = subprocess.run([sys.executable, ops, 'abort', str(self.gen), '--', '--network', str(target['network']), '--old-epoch', str(target['oldEpoch']),
+                                  '--predecessor-body-id', target['predecessorBodyId'], '--attempt', str(target['attempt']), '--next-body-id', target['nextBodyId'],
+                                  '--timeout', '30s'], text=True, capture_output=True)
+        (self.evh() / 'too-late.log').write_text(aborted.stdout + aborted.stderr)
+        self.say(f'  abort after H: exit {aborted.returncode}: {(aborted.stdout + aborted.stderr).strip()[-600:]}')
+        out = aborted.stdout + aborted.stderr
+        self.expect(aborted.returncode != 0 and out.count('too late') == self.n, f'all {self.n} roots answer "too late" and the abort exits non-zero', out.strip()[-500:])
+        self.expect('committed Abort record' not in out and 'Abort already committed' not in out, 'no Abort record was committed')
+        self.expect([self.root_epoch(i) for i in range(1, self.n + 1)] == before, 'no root changed epoch', str(before))
 
     def pos_handoff_2(self):
         """The second handoff, root epoch 2 to 3, from the epoch-2 network the earlier stages left (pos-stale restored its credentials): the election reserves the next
@@ -1087,7 +1116,7 @@ class Rehearsal:
 
 STAGES = (('up', 'up'), ('identity', 'identity'), ('first-tx', 'first_tx'), ('gateway-limits', 'gateway_limits'), ('faucet-guard', 'faucet_guard'), ('load', 'load'), ('pod-restart', 'pod_restart'), ('backup-restore', 'backup_restore'), ('reset', 'reset'))
 # run on a generation made with --pos (the workflow's second generation); not part of the default list
-POS_STAGES = (('pos-smoke', 'pos_smoke'), ('pos-rewards', 'pos_rewards'), ('pos-election', 'pos_election'), ('pos-proposal', 'pos_proposal'), ('pos-abort', 'pos_abort'), ('pos-propose', 'pos_propose'), ('pos-install', 'pos_install'), ('pos-advance', 'pos_advance'), ('pos-restart', 'pos_restart'), ('pos-stale', 'pos_stale'), ('pos-handoff-2', 'pos_handoff_2'), ('pos-restart-2', 'pos_restart_2'), ('pos-recreate', 'pos_recreate'))
+POS_STAGES = (('pos-smoke', 'pos_smoke'), ('pos-rewards', 'pos_rewards'), ('pos-election', 'pos_election'), ('pos-proposal', 'pos_proposal'), ('pos-abort', 'pos_abort'), ('pos-propose', 'pos_propose'), ('pos-too-late', 'pos_too_late'), ('pos-install', 'pos_install'), ('pos-advance', 'pos_advance'), ('pos-restart', 'pos_restart'), ('pos-stale', 'pos_stale'), ('pos-handoff-2', 'pos_handoff_2'), ('pos-restart-2', 'pos_restart_2'), ('pos-recreate', 'pos_recreate'))
 
 
 def main():

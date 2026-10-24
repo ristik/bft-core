@@ -116,7 +116,7 @@ The oracle decodes each nested token twice (the justification scan, then `Decode
 scans once and charges the same single scan (ureth#84 does).
 
 **Native timing (ureth#84, release build, one machine, median of 30).** `run_v2` through the Rust verifier with the corpus claim
-verdict, so the lineage relation, the anchor and input-record scans and the RSMT memberships are timed; B1's certificate verification
+verdict (no EVM context and no registry journal: not the precompile provider), so the lineage relation, the anchor and input-record scans and the RSMT memberships are timed; B1's certificate verification
 is not (the V1 bench covers it). Inputs are the oracle's depth chains (2-owner tokens, one seal, structural embedded proofs); the gas
 differs slightly from the table above because the keys differ.
 
@@ -145,6 +145,6 @@ reason. Regenerate with `BRIDGEPROFILE_UPDATE_SPLIT_CORPUS=1 go test ./bridgepro
 
 ## 8. Open items
 
-- Measured native constants (PR3a); JS and Rust SDK byte parity and pinned revisions (PR2); fail-closed issuance policies, envelope
+- Measured native constants (PR3a; what is measured and what is still to measure is in section 6); JS and Rust SDK byte parity and pinned revisions (PR2); fail-closed issuance policies, envelope
   witness refresh and durable split/burn/mint recovery in the plug-ins (PR4).
 - Cross-SDK vectors (`state-transition-sdk-js#11` `tests/fixtures/bridge-split/v1`) to be replayed against this oracle before PR5.
