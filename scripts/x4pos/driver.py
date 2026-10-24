@@ -15,7 +15,7 @@ Rules this file enforces and its tests prove:
   * the manifest is sealed by its sha256 into the cursor: a changed manifest refuses to resume (no late changes to the declared experiment);
   * a step that finishes after its deadline is a deadline violation (FAIL), a campaign that stops early is INCOMPLETE, never a shorter successful one;
   * steps with no implementation are reported and refuse the run: nothing is stubbed into a pass;
-  * a `lane` step is a phase of the lane's own shell (chain-dictated timing: the install, the offences, the recovery, the exit request): the driver never starts or schedules it,
+  * a `lane` step (`"lane": true`, no `cmd`, every lane step before the first driver step in step order) is a phase of the lane's own shell (chain-dictated timing: the install, the offences, the recovery, the exit request): the driver never starts or schedules it,
     and counts it done only if its `check` shows the lane's evidence. A lane step without a check is refused, and its deadline is not judged here (it is the lane's);
   * `notCovered` lists what this campaign does not exercise, each with where it is covered; the report carries it, so a PASS never reads as covering it.
 """
@@ -73,8 +73,12 @@ def preflight(m, commands=False, root=None):
         if not str(n.get("what", "")).strip() or not str(n.get("coveredBy", "")).strip():
             errs.append(f"notCovered entry {n!r}: needs 'what' and 'coveredBy' (where it is covered instead)")
     for s in steps:
-        if s.get("lane") and not s.get("check"):
+        if "lane" in s and not isinstance(s["lane"], bool):
+            errs.append(f"{s['id']}: 'lane' must be true or false, not {s['lane']!r}")
+        if s.get("lane") is True and not s.get("check"):
             errs.append(f"{s['id']}: a lane step is verified by its check only; it needs a command check")
+        if s.get("lane") is True and "cmd" in s:
+            errs.append(f"{s['id']}: a lane step has no 'cmd' (the lane runs it; the driver would ignore it silently)")
         if "check" not in s:
             errs.append(f"{s['id']}: no 'check' declared (a command, or an explicit null with an 'uncheckedReason')")
         elif s["check"] is None and not str(s.get("uncheckedReason", "")).strip():
@@ -98,6 +102,14 @@ def preflight(m, commands=False, root=None):
                 earliest = by[after["step"]]["at"] + by[after["step"]]["budgetSeconds"] + delay
                 if s["at"] < earliest:
                     errs.append(f"{s['id']}: starts at {s['at']} s, before the {delay} s the policy needs after {after['step']} (earliest {earliest} s)")
+    # a lane step is checked when the driver reaches it in step order, so the lane's phase must already be over: every lane step comes before the first driver step
+    order = [s for s in sorted(steps, key=lambda s: (s["at"], s["id"]))]
+    seen_driver = None
+    for s in order:
+        if s.get("lane") is True and seen_driver:
+            errs.append(f"{s['id']}: a lane step comes after the driver step {seen_driver} (it would be checked before the lane's phase is over)")
+        elif s.get("lane") is not True and seen_driver is None:
+            seen_driver = s["id"]
     ex = sorted((s for s in steps if s.get("exclusive")), key=lambda s: s["at"])
     for a, b in zip(ex, ex[1:]):
         if b["at"] < a["at"] + a["budgetSeconds"] + policy["settleSeconds"]:
@@ -113,7 +125,7 @@ def preflight(m, commands=False, root=None):
         for s in steps:
             for key in ("cmd", "check"):
                 argv = s.get(key)
-                if key == "cmd" and s.get("lane"):
+                if key == "cmd" and s.get("lane") is True:
                     continue   # the lane runs it
                 if argv and not (Path(root or ".") / argv[0]).exists():
                     errs.append(f"{s['id']}: {key} {argv[0]} does not exist (not implemented)")
@@ -261,7 +273,7 @@ class Driver:
                 st.update(state=FAILED, reason="a dependency is not done")
                 self.cursor.save()
                 break
-            if s.get("lane"):   # executed by the lane, not by the driver: done iff the lane's evidence shows it
+            if s.get("lane") is True:   # executed by the lane, not by the driver: done iff the lane's evidence shows it
                 ok = bool(s.get("check")) and self._sh(s, "check") == 0
                 now = self.clock.now()
                 if ok:
