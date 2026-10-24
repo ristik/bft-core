@@ -20,6 +20,7 @@ import metrics_relay
 import handoff_ops
 import handoff
 import observe
+import pos_sample
 
 class FakeRelay:
     def __init__(self): self.calls=[]
@@ -1004,5 +1005,69 @@ class Observe(unittest.TestCase):
     def test_the_faucet_can_be_left_out(self):
         s=self.sample([1]);del s['faucet']
         self.assertEqual(observe.Watch().step(s,0),[])
+
+class PosSample(unittest.TestCase):
+    def pos(self,**kw):
+        base={'progress':100,'ucTime':50,'recordCount':3,'recordCursor':3,'liveCount':4,'thresholds':['500','300'],'openResult':None,
+              'pool':{'balance':'1000','available':'900','totalCredits':'100','accounted':'1000','nextStart':'0'},'errors':[]}
+        base.update(kw);return base
+    def test_a_healthy_sample_raises_nothing_and_progress_moving_resets_the_stall(self):
+        w=pos_sample.PosWatch(stall=120)
+        self.assertEqual(w.step(self.pos(progress=10),0),[])
+        self.assertEqual(w.step(self.pos(progress=11),100),[])
+        self.assertEqual(w.step(self.pos(progress=11),200),[],'100 s since it last moved is under the stall')
+        self.assertTrue(any('registry progress stopped at 11' in a for a in w.step(self.pos(progress=11),230)))
+    def test_a_custody_behind_the_registry_is_an_alert_only_after_the_lag_and_catching_up_clears_it(self):
+        w=pos_sample.PosWatch(lag=300)
+        self.assertEqual(w.step(self.pos(recordCount=5,recordCursor=3),0),[])
+        self.assertEqual(w.step(self.pos(progress=101,recordCount=5,recordCursor=3),299),[])
+        self.assertTrue(any('custody is behind' in a and '3 of 5' in a for a in w.step(self.pos(progress=102,recordCount=5,recordCursor=3),300)))
+        self.assertEqual(w.step(self.pos(progress=103,recordCount=5,recordCursor=5),310),[],'caught up')
+        self.assertEqual(w.step(self.pos(progress=104,recordCount=6,recordCursor=5),320),[],'the lag clock starts again')
+        self.assertTrue(any('past the registry' in a for a in w.step(self.pos(progress=105,recordCount=3,recordCursor=4),330)))
+    def test_an_election_result_open_too_long_is_an_alert_and_resolving_it_clears_it(self):
+        w=pos_sample.PosWatch(open_limit=3600);r='0x'+'ab'*32
+        self.assertEqual(w.step(self.pos(openResult=r),0),[])
+        self.assertTrue(any('open for 3600 s' in a for a in w.step(self.pos(progress=101,openResult=r),3600)))
+        self.assertEqual(w.step(self.pos(progress=102),3700),[],'resolved')
+        self.assertEqual(w.step(self.pos(progress=103,openResult=r),3800),[],'a new opening is timed from its own start')
+    def test_the_pool_books_and_unreadable_views_are_alerts(self):
+        w=pos_sample.PosWatch()
+        short=self.pos(pool={'balance':'999','available':'900','totalCredits':'100','accounted':'1000','nextStart':'0'})
+        self.assertTrue(any('less than the 1000 it has accounted for' in a for a in w.step(short,0)))
+        self.assertTrue(any('no funded balance left' in a for a in w.step(self.pos(progress=101,pool={'balance':'5','available':'0','totalCredits':'5','accounted':'5','nextStart':'1'}),10)))
+        alerts=w.step({'errors':['recordCursor: eth_call: 403 forbidden'],'pool':{}},30)
+        self.assertEqual(alerts,['unreadable: recordCursor: eth_call: 403 forbidden'])
+    def test_collect_reads_the_views_through_the_gateway_and_records_a_refused_one(self):
+        def word(n): return '0x'+format(n,'064x')
+        by_selector={pos_sample.SELECTORS['progress']:word(7),pos_sample.SELECTORS['ucTime']:word(70),pos_sample.SELECTORS['recordCount']:word(4),
+                     pos_sample.SELECTORS['recordCursor']:word(4),pos_sample.SELECTORS['liveCount']:word(4),pos_sample.SELECTORS['thresholds']:word(500)+word(300)[2:],
+                     pos_sample.SELECTORS['openResult']:word(0),pos_sample.SELECTORS['available']:word(10**18),pos_sample.SELECTORS['totalCredits']:word(2),
+                     pos_sample.SELECTORS['accounted']:word(10**18+2),pos_sample.SELECTORS['nextStart']:word(1000)}
+        refuse=set()
+        def fake(method,params):
+            if method=='eth_getBalance': return hex(10**18+2)
+            data=params[0]['data']
+            if data in refuse: raise ValueError('eth_call: 403 forbidden')
+            return by_selector[data]
+        with tempfile.TemporaryDirectory() as d:
+            Path(d,'network').mkdir();Path(d,'network','pos-deployment.json').write_text(json.dumps({'custody':'0xc','election':'0xe','rewardPool':'0xp'}))
+            with patch.object(pos_sample,'eth',fake):
+                got=pos_sample.pos_collect(d)
+                refuse.add(pos_sample.SELECTORS['recordCursor'])
+                bad=pos_sample.pos_collect(d)
+        self.assertEqual((got['progress'],got['recordCount'],got['recordCursor'],got['openResult'],got['thresholds']),(7,4,4,None,['500','300']))
+        self.assertEqual(got['pool'],{'available':str(10**18),'totalCredits':'2','accounted':str(10**18+2),'nextStart':'1000','balance':str(10**18+2)},'wei amounts are decimal strings')
+        self.assertEqual(got['errors'],[])
+        self.assertNotIn('recordCursor',bad);self.assertEqual(bad['errors'],['recordCursor: eth_call: 403 forbidden'])
+    def test_a_result_that_is_not_whole_words_is_refused(self):
+        with self.assertRaises(ValueError): pos_sample.words('0x'+'00'*31)
+        with self.assertRaises(ValueError): pos_sample.words('0x')
+    def test_the_selectors_are_cast_sig_of_the_views(self):
+        import shutil
+        cast=shutil.which('cast') or str(Path.home()/'.foundry'/'bin'/'cast')
+        if not Path(cast).exists(): self.skipTest('cast is not installed')
+        for name,selector in pos_sample.SELECTORS.items():
+            self.assertEqual(subprocess.run([cast,'sig',name+'()'],text=True,capture_output=True,check=True).stdout.strip(),selector,name)
 
 if __name__=='__main__': unittest.main()

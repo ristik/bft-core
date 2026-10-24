@@ -68,6 +68,19 @@ x4p_reward_interval_check() { # read-only: the replay agrees with the chain and 
 x4p_reward_exhaust_refill() {
   local refill wait out=$X4_STEP_DIR/replay-before.txt i
   refill=$(x4p_arg refillWei 2000000000000000000); wait=$(x4p_arg waitSeconds 900)
+  # awaitPaid=false (the recovery chain, bft-core#814): an election result is always open there, so RewardPool.closeInterval never closes the latest assignment's tail and no later
+  # interval is paid after the refill; the step then requires the dry pool and the funding event, and says nothing about a later payment
+  if [ "$(x4p_arg awaitPaid true)" = false ]; then
+    rw_settle_run "$X4_STEP_DIR/settle-before.log" || return 1
+    x4p_reward_replay "$out" --require-exhaustion || x4p_die "the pool never ran dry before the refill: the genesis funding is too large for this schedule" || return 1
+    if [ "$(x4p_replay_field "$out" fundings)" -lt 1 ]; then
+      build/ubft pos-relayer tx reward fund --eth-rpc "$(rw_eth_all)" --pos-deployment "$P85_DEPLOY" --sender-key "$(p85_sender_key)" --value-wei "$refill" || return 1
+    fi
+    x4p_reward_replay "$X4_STEP_DIR/replay-after.txt" --require-exhaustion || return 1
+    [ "$(x4p_replay_field "$X4_STEP_DIR/replay-after.txt" fundings)" -ge 1 ] || x4p_die "the refill is not in the pool's replayed life" || return 1
+    x4p_log "dry pool ($(x4p_replay_field "$out" zeroBudget) zero-budget interval(s)); refilled $refill wei; no later interval is expected on this chain"
+    return 0
+  fi
   rw_settle_run "$X4_STEP_DIR/settle-before.log" || return 1
   x4p_reward_replay "$out" --require-exhaustion || x4p_die "the pool never ran dry before the refill: the genesis funding is too large for this schedule" || return 1
   [ "$(x4p_replay_field "$out" zeroBudget)" -ge 1 ] || x4p_die "no zero-budget interval was observed before the refill" || return 1
@@ -83,7 +96,13 @@ x4p_reward_exhaust_refill() {
   x4p_reward_conserved || return 1
   x4p_log "refilled $refill wei after $(x4p_replay_field "$X4_STEP_DIR/replay-before.txt" zeroBudget) zero-budget interval(s); $(x4p_replay_field "$X4_STEP_DIR/replay-after.txt" paid) paid interval(s) in all"
 }
-x4p_reward_exhaust_refill_check() { x4p_reward_replay "$X4_STEP_DIR/check-replay.txt" --require-exhaustion --require-refill >/dev/null; }
+x4p_reward_exhaust_refill_check() {
+  if [ "$(x4p_arg awaitPaid true)" = false ]; then
+    x4p_reward_replay "$X4_STEP_DIR/check-replay.txt" --require-exhaustion >/dev/null && [ "$(x4p_replay_field "$X4_STEP_DIR/check-replay.txt" fundings)" -ge 1 ]
+  else
+    x4p_reward_replay "$X4_STEP_DIR/check-replay.txt" --require-exhaustion --require-refill >/dev/null
+  fi
+}
 
 # ---- exits (B3b) ---------------------------------------------------------------------------------------------------------------------------------------------
 # An exit is the owner's one call, requestRetirement(id), on custody: every root started with --pos-deployment and --pos-evm-rpc finds the RetirementRequested log, builds
