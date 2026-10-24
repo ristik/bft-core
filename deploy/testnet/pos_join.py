@@ -33,9 +33,14 @@ def compose(r, *args, check=True):
 
 
 def new_wallet(r):
-    """{'address', 'private_key'} of a fresh key: `cast wallet new --json` prints a list of them in some Foundry versions and a single object in others."""
-    wallet = json.loads(r.cast_run('wallet', 'new', '--json'))
-    return wallet[0] if isinstance(wallet, list) else wallet
+    """{'address', 'private_key'} of a fresh key. `cast wallet new` prints them as text ("Address: 0x..", "Private key: 0x..") and, with --json, as an object or a list
+    of objects whose key names differ between Foundry versions: the 20-byte and the 32-byte hex strings are read from whatever it prints."""
+    text = r.cast_run('wallet', 'new', '--json')
+    address = re.search(r'0x[0-9a-fA-F]{40}(?![0-9a-fA-F])', text)
+    key = re.search(r'0x[0-9a-fA-F]{64}(?![0-9a-fA-F])', text)
+    if not address or not key:
+        raise RuntimeError('cast wallet new printed no address and private key')
+    return {'address': address.group(0), 'private_key': key.group(0)}
 
 
 def exec_in(r, service, *command):
