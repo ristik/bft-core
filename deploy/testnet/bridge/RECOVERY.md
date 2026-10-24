@@ -90,11 +90,16 @@ deployment has one. Until it does, testers cannot redeem from outside: that is a
 
 Symptom: the aggregator's `/health` (port 8080 in validator 1's namespace) fails, or mints and transfers time out.
 
-When MongoDB and its data are intact, the network operator restarts the service:
+When MongoDB and its data are intact, the network operator restarts the service. Intact means the `mongo` service is up and healthy (its
+healthcheck requires the replica set's primary) and answers as primary:
 
 ```sh
-cd /srv/testnet/GEN && docker compose restart aggregator
+cd /srv/testnet/GEN && docker compose ps mongo                                                    # STATUS: Up ... (healthy)
+docker compose exec -T mongo mongosh --quiet --eval 'rs.status().myState'                         # 1 (PRIMARY)
+docker compose restart aggregator
 ```
+
+If `mongo` is not healthy or does not answer 1, do not restart the aggregator: go to procedure 4.
 
 The aggregator resumes from MongoDB, and tokens keep their certified history. A tester whose request was in flight when it stopped sends it again.
 

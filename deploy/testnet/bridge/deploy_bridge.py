@@ -105,8 +105,9 @@ def main():
     for name in files.values():
         (public / name).write_bytes((work / name).read_bytes())
     (public / 'index.html').write_bytes((Path(__file__).parent / 'tester/index.html').read_bytes())
+    # genesisHash: the tester checks block 0 against it before sending anything (a reset generation keeps the chain ID)
     tester = {'ethUrl': a.tester_eth_url, 'aggUrl': a.tester_agg_url or urls[0], 'lockProofUrl': a.tester_lockproof_url, 'chainId': manifest['chain_id'],
-              'vault': addr['BridgeVault'], 'files': files}
+              'genesisHash': manifest['genesis_hash'], 'vault': addr['BridgeVault'], 'files': files}
     if a.tester_redeem_eth_url:
         tester['redeemEthUrl'] = a.tester_redeem_eth_url
     (public / 'tester-config.json').write_text(json.dumps(tester, indent=2) + '\n')

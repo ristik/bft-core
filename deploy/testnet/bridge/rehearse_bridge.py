@@ -350,6 +350,13 @@ class BridgeRehearsal(Rehearsal):
         self.say(f'  {where}: a conflicting burn of the same state is never certified (submission {out["conflictingBurn"]["submission"]})')
         self.expect(out['freshReplay']['revertData'] == PART_ALREADY_REDEEMED + word(saved['nonce']) + part[2:],
                     f'{where}: a fresh proof of the redeemed burn (seal round {out["freshReplay"]["anchors"][0]["round"]}) is refused as PartAlreadyRedeemed')
+        # an unknown-key forgery (not a retired committee: this package has no root handoff, #438): the fresh proof re-signed by unknown keys
+        forged = out['unknownKeyForgery']
+        self.expect(forged['label'].startswith('unknown-key forgery') and 'ErrQuorumNotMet' in forged['pluginRefusal'],
+                    f'{where}: an unknown-key forgery of the fresh proof is refused by the plug-in (ErrQuorumNotMet)', forged['pluginRefusal'][:200])
+        comp = forged['composition']
+        self.expect(comp['revert'].startswith(BRIDGE_REJECTED) and comp['code'] != 0,
+                    f'{where}: and by the composition (BridgeRejected, V2 status {comp["code"]} {comp["name"]})', comp['revert'][:80])
         (self.evidence / 'roundtrip').mkdir(parents=True, exist_ok=True)
         (self.evidence / 'roundtrip' / f'negatives-{where}.json').write_bytes((run / 'negatives.json').read_bytes())
         self.expect(self.vault_balance() == balance, f'{where}: the vault\'s balance did not move', f'{balance} -> {self.vault_balance()}')
@@ -378,6 +385,18 @@ class BridgeRehearsal(Rehearsal):
             os.chown(work / 'tester-wallet', 10001, 10001)   # written by the tester as the tools user
         me = self.cast_run('wallet', 'address', '--private-key', key)
         self.faucet_send(me, TESTER_FUNDS)
+        # a configuration of another generation (its genesis hash): refused before the wallet exists. It sits in the wallet directory (the tester's
+        # only writable mount; never in the published one) and names the published files by absolute path
+        other = json.loads((work / 'public/tester-config.json').read_text())
+        other['genesisHash'] = '0x' + ('11' if other['genesisHash'][2:4] != '11' else '22') * 32
+        other['files'] = {k: f'/work/public/{v}' for k, v in other['files'].items()}
+        (work / 'tester-wallet/other-config.json').write_text(json.dumps(other))
+        try:
+            code, text = self.tester('init', '--config', '/work/tester-wallet/other-config.json', '--eth-key-file', '/work/tester.key', check=False)
+        finally:
+            (work / 'tester-wallet/other-config.json').unlink(missing_ok=True)
+        self.expect(code != 0 and 'another network' in text and not (work / 'tester-wallet/keys.json').exists(),
+                    'the tester refuses a configuration of another generation (genesis hash) before the wallet exists', text.splitlines()[-1] if text else '')
         self.tester('init', '--config', '/work/public/tester-config.json', '--eth-key-file', '/work/tester.key')
         before = self.vault_balance()
         self.tester('lock', '--amount', f'{TESTER_LOCK_WEI}wei')
