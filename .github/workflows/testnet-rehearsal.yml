@@ -118,7 +118,7 @@ jobs:
           sudo chown -R "$(id -u):$(id -g)" "$RUNNER_TEMP/evidence-pos" || true
           if sudo test -f /srv/tn-rehearsal-pos/compose.yaml; then
             docker stats --no-stream --format 'table {{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}\t{{.PIDs}}' > "$RUNNER_TEMP/evidence-pos/docker-stats.txt" || true
-            sudo bash -c "cd /srv/tn-rehearsal-pos && docker compose ps -a > '$RUNNER_TEMP/evidence-pos/compose-ps.txt' && docker compose logs --no-color --timestamps --tail 600 > '$RUNNER_TEMP/evidence-pos/compose-logs.txt'" || true
+            sudo bash -c "cd /srv/tn-rehearsal-pos && F='-f compose.yaml'; [ -f compose.joiner.json ] && F=\"\$F -f compose.joiner.json\"; docker compose \$F ps -a > '$RUNNER_TEMP/evidence-pos/compose-ps.txt' && docker compose \$F logs --no-color --timestamps --tail 600 > '$RUNNER_TEMP/evidence-pos/compose-logs.txt'" || true
             sudo cp /srv/tn-rehearsal-pos/manifest.json "$RUNNER_TEMP/evidence-pos/manifest.json" || true
             sudo cp -r /srv/tn-rehearsal-pos/network "$RUNNER_TEMP/evidence-pos/network" || true   # public material only: no key is ever in network/
             sudo chown -R "$(id -u):$(id -g)" "$RUNNER_TEMP/evidence-pos" || true
