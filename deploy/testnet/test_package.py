@@ -1035,7 +1035,9 @@ class PosSample(unittest.TestCase):
         w=pos_sample.PosWatch()
         short=self.pos(pool={'balance':'999','available':'900','totalCredits':'100','accounted':'1000','nextStart':'0'})
         self.assertTrue(any('less than the 1000 it has accounted for' in a for a in w.step(short,0)))
-        self.assertTrue(any('no funded balance left' in a for a in w.step(self.pos(progress=101,pool={'balance':'5','available':'0','totalCredits':'5','accounted':'5','nextStart':'1'}),10)))
+        self.assertTrue(any('no funded balance left' in a for a in w.step(self.pos(progress=101,pool={'balance':'5','available':'0','totalCredits':'5','accounted':'5','nextStart':'1'}),10)),'0 after it was funded')
+        unfunded=pos_sample.PosWatch()
+        self.assertEqual(unfunded.step(self.pos(pool={'balance':'0','available':'0','totalCredits':'0','accounted':'0','nextStart':'0'}),0),[],'a pool never funded is not exhausted')
         alerts=w.step({'errors':['recordCursor: eth_call: 403 forbidden'],'pool':{}},30)
         self.assertEqual(alerts,['unreadable: recordCursor: eth_call: 403 forbidden'])
     def test_collect_reads_the_views_through_the_gateway_and_records_a_refused_one(self):
