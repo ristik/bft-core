@@ -40,20 +40,22 @@ cd /srv/<generation> && sudo docker compose -f compose.yaml -f compose.bridge.ya
 
 | stage | what it checks |
 |---|---|
-| `deploy` | TokenVerifier and BridgeVault deployed after genesis and readable through the public gateway; the vault's CFG. The release manifest against the chain: each contract's address, code hash and deploy block, the vault's CFG, the genesis, the B1 profile, and the limits (D1 2 MiB, D3 60M, the latest block's gas limit, the proof window, the gateway's body bound, the SDK batch bound) |
+| `deploy` | TokenVerifier and BridgeVault deployed after genesis and readable through the public gateway; the vault's CFG. The release manifest against the chain: each contract's address, code hash and deploy block, the vault's CFG, the genesis, the B1 profile, and the limits (D1 2 MiB, D3 60M, the latest block's gas limit, the proof window, the gateway's three body bounds, the SDK batch bound) |
 | `lockproof` | the lock-proof endpoint (below) |
 | `fund` | a driver key for this generation, in `GENERATION/bridge/driver.env` (mode 0600, never in the evidence), funded from the faucet |
-| `roundtrip` | a lock, its proof from validator 1's archive, the mint, 3 transfers and the burn certified by the aggregator, the return proof verified by `eth_call`, then the redemption and the claim with the last validator stopped; it rejoins with the same blocks. The vault's balance rises by the lock and falls back after the claim. |
-| `negatives` | after the round trip, whose release ran with a validator stopped and restarted: the redeemed envelope is refused a second time (`AlreadyRedeemed`), a second claim is refused (`InsufficientCredit`), and the vault keeps the nullifier. Then the driver's `negatives`: a conflicting burn of the same state to another address is never certified (the aggregator serves the first burn's proof, and the plug-in refuses to build a return proof of the conflicting one); a fresh proof of the redeemed burn, consolidated under a newer seal, is refused as `AlreadyRedeemed`. The vault's balance does not move. |
-| `tester` | the bridge tester CLI as a tester runs it, with only its own faucet-funded key and `bridge/public/`: init, lock, mint, two transfers, burn, redeem, claim and status. A repeated mint is refused, the tester is credited exactly what it locked, and the vault pays it back. It reaches validator 1, the aggregator and the lock-proof endpoint on the internal network (no public route to the aggregator yet, below). |
+| `roundtrip` | a lock, its proof from validator 1's archive, the mint, 3 transfers and the burn certified by the aggregator, the return proof verified by `eth_call`, then the redemption and the claim with the last validator stopped; it rejoins with the same blocks. The vault's balance rises by the lock and falls back after the claim. The redeem transaction fits the gateway's `eth_sendRawTransaction` bound. |
+| `negatives` | after the round trip, whose release ran with a validator stopped and restarted: the redeemed envelope is refused a second time (`PartAlreadyRedeemed`), a second claim is refused (`InsufficientCredit`), and the vault keeps the nullifier. Then the driver's `negatives`: a conflicting burn of the same state to another address is never certified (the aggregator serves the first burn's proof, and the plug-in refuses to build a return proof of the conflicting one); a fresh proof of the redeemed burn, consolidated under a newer seal, is refused as `PartAlreadyRedeemed`; the same fresh proof re-signed by unknown keys (an unknown-key forgery, not a retired committee) is refused by the plug-in (`ErrQuorumNotMet`) and by the composition (`BridgeRejected`). The vault's balance does not move. |
+| `tester` | the bridge tester CLI as a tester runs it, with only its own faucet-funded key and `bridge/public/`: a configuration of another generation (genesis hash) refused before the wallet exists, then init, lock, mint, two transfers, burn, redeem, claim and status. A repeated mint is refused, the tester is credited exactly what it locked, and the vault pays it back. It goes through the public gateway for everything (the chain, the redemption, and the aggregator on `/aggregator`) and reaches the lock-proof endpoint on the internal network. |
+| `split` | the split lane (protocol 6) with the tester CLI: lock 100, split 40 + 60, split the 40 into 15 + 25, redeem 15 (85 remain), its retry refused (`PartAlreadyRedeemed`), the 60's negatives by the driver (the split parent returned, a changed recipient, a changed amount: `BridgeRejected` with their status; out of gas: status 0, vault unchanged) and a duplicate submission credited once, redeem 25 (the lock complete), claim; the vault pays back exactly what was locked |
 | `consolidated` | the SDK's consolidation over the one shard (K = 1 anchor), redeemed and claimed, with the per-SID envelope priced as the control |
 | `long-history` | a token with `--long-transfers` transfers (default 250, at most 254: one aggregator batch holds 256 state IDs, the mint, the transfers and the burn), consolidated; one gas short reverts and leaves the vault unchanged; then redeemed and claimed |
 | `backup-restore` | `rehearse.py`'s quiesced backup and restore with the bridge deployed (the endpoint stopped too): the redeemed lock stays spent, the `negatives` replays are all refused again on the restored generation (the aggregator's spent state included), and a new round trip completes |
 | `custody` | the vault's books from its whole event log: each lock nonce 1..`lastNonce` once; each credit once, for a lock of the same amount, with the nullifier the vault keeps; uncredited locks unspent; the counters L, D, P equal the event sums, with 0 ≤ P ≤ D ≤ L; the recipients' `claimable` sums to D − P; and the balance is L − P plus donations |
 
 The driver signs with its own key and with the fixed, publicly known keys of its recipient and submitter (`tests/live/anyage.ts`). That is fine on a
-rehearsal generation, but not on a public network: anyone can spend what those addresses hold. A redeem transaction carries the whole return proof, and the public gateway
-takes request bodies of at most 16 KiB (`gateway.py`). The `roundtrip` stage prints whether its proof fits. Until it does, a tester's redeem goes to an RPC without that limit.
+rehearsal generation, but not on a public network: anyone can spend what those addresses hold. A redeem transaction carries the whole return proof; the public gateway
+takes `eth_sendRawTransaction` bodies up to 4.5 MiB (`gateway.py` `MAX_RAW_TX_BODY`, every other method 16 KiB), so a redemption up to the 2 MiB envelope fits as
+hex. The `roundtrip` stage checks it.
 
 ## The release manifest
 
@@ -98,12 +100,12 @@ GET /healthz
 `deploy_bridge.py` writes `GENERATION/bridge/public/`, the one directory to publish for testers. It holds the page, `tester-config.json` and the four public
 files that config names: the trust-base bundle, its genesis entry id, the EVM shard's PDR and the deployment document. Publish nothing else from
 `GENERATION/bridge`: it also holds the driver's key (`driver.env`) and the rehearsal's wallets. The config names the endpoints a tester reaches. Set them with
-`--tester-eth-url`, `--tester-redeem-eth-url`, `--tester-agg-url` and `--tester-lockproof-url`; the defaults are the package's internal names, which only the
-rehearsal can reach. A host nginx `location /bridge/ { alias /srv/<generation>/bridge/public/; }` on the faucet's or the RPC's hostname serves it.
+`--tester-eth-url`, `--tester-redeem-eth-url`, `--tester-agg-url` and `--tester-lockproof-url`. The defaults are the package's public gateway as the
+internal network names it (`http://rpc:8545` and its `/aggregator` route; no `redeemEthUrl`, since the gateway takes redemptions) and the lock-proof endpoint's
+internal name; on a host, pass their public names. A host nginx `location /bridge/ { alias /srv/<generation>/bridge/public/; }` on the faucet's or the RPC's hostname serves it.
 
-Not in the package yet, and needed before external testers can run the whole round trip:
-- **A public route to the aggregator.** aggregator-go listens only on the internal `validators` and `aggregator` networks, and nothing publishes it. A tester
-  needs `certification_request`, `get_inclusion_proof.v2` and `get_inclusion_proofs.v1`, behind nginx with the same per-client limits as the RPC.
-- **A route for redemptions.** A redemption carries the whole return proof: 7.8 KB with no transfers and 12.6 KB with three, so 16 to 26 KB as hex. That is
-  more than the public gateway's 16 KiB body limit. Either the gateway takes larger `eth_sendRawTransaction` bodies, or the config's `redeemEthUrl` names
-  another route.
+The public routes (orchestrator decision 2026-10-24): the gateway serves the aggregator on `POST /aggregator` (the state-transition SDK's JSON-RPC methods
+only, 64 KiB bodies, its own limit of 10 requests a second per address and 50 overall, no authentication) and its trust-base pages on
+`GET /api/v1/trustbases`, and takes redemptions as ordinary `eth_sendRawTransaction` bodies. The host nginx routes the three paths (`../nginx.conf.example`).
+Still needed before external testers run the whole round trip on a host: the lock-proof endpoint's public name (a host nginx location in front of
+`127.0.0.1:8090`), and the host's DNS and TLS.

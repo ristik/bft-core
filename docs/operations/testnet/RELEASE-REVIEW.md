@@ -65,7 +65,7 @@ Each row: the check, where to look, and what a pass is. Record `PASS`, `FAIL` (w
 |---|---|---|---|
 | 18 | Per-container limits are set and sum below the host | `mem_limit`/`cpus` totals from `compose.yaml` against `free -m`, `nproc` on the host | total below the host with headroom stated |
 | 19 | Logs, metrics and the journal are bounded | `logging.options` (10 MiB x 3), Prometheus `retention.size`, shard `--journal-candidates`, `--archive-prune` | as stated |
-| 20 | Request size and rate limits hold | 16 KiB body, 10 requests/s per address, 100/s overall; faucet body 2 KiB | refusals observed (row 9) |
+| 20 | Request size and rate limits hold | 16 KiB body (raw transactions 4.5 MiB, two at once), 10 requests/s per address, 100/s overall; the aggregator route 64 KiB, 10/s per address, 50/s overall; faucet body 2 KiB | refusals observed (row 9) |
 | 21 | Measured envelope | the host's own measurements of memory, CPU, disk growth and RPC/proof capacity under the load generator at the selected limits (`loadgen.py`) | numbers recorded with the host and revision; a hosted-runner figure does not count |
 
 ### 1.5 Replay and recovery
