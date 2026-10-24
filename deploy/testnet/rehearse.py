@@ -909,9 +909,11 @@ class Rehearsal:
             self.say(f'  joiner authority {i}: {what}: exit {rc}: {(out + err).strip()[-200:]}')
             return rc
         step('status before', 'status', *operator)
-        rc = step('advance-epoch', 'advance-epoch', *operator, '--trust-base', f'/network/handoff/trust-base-epoch{self.target}.json', '--shard-conf', f'/network/handoff/shard-conf-{shard_epoch}.json')
-        rc = rc or step('complete-enrollment', 'complete-enrollment', *operator, '--shard-conf', f'/network/handoff/shard-conf-{shard_epoch}.json')
-        rc = rc or step('replace-session', 'replace-session', *operator, '--out', '/authority/client.cred')
+        # advance-epoch was refused first (run 40084120471: signing-enrollment-incomplete): an authority is enrolled before it is advanced. Every step is run and recorded
+        # even after a refusal; what must hold at the end is the session
+        step('complete-enrollment', 'complete-enrollment', *operator, '--shard-conf', f'/network/handoff/shard-conf-{shard_epoch}.json')
+        step('advance-epoch', 'advance-epoch', *operator, '--trust-base', f'/network/handoff/trust-base-epoch{self.target}.json', '--shard-conf', f'/network/handoff/shard-conf-{shard_epoch}.json')
+        rc = step('replace-session', 'replace-session', *operator, '--out', '/authority/client.cred')
         step('status after', 'status', *operator)
         (self.evh() / f'joiner-authority-{i}.log').write_text('\n'.join(log))
         self.expect(rc == 0, f'the joiner\'s authority {i} advanced, enrolled and issued its session', log[-1][-400:])
