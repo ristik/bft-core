@@ -74,6 +74,9 @@ def pos_owner(r):
     first = identities[0]
     keys = r.gen / pos['owner_keys'] / f'identity-{first["stakingId"]}'
     payee = first['payee']
+    # what bounds the tail before the settle: the registry progress and whether an election result is open (contracts#72 caps the tail at that result's reservation progress)
+    open_result = r.view_text(deployment['election'], 'openResult()(bytes32)').strip()
+    r.say(f'  before settle: registry progress {r.view(r.REGISTRY, "progress()(uint64)")[0]}, open election result {open_result}')
     status, out = r.relayer(keys / 'owner.key', 'reward', 'settle', '--max-steps', '64')
     r.expect(status == 0, 'reward settle (any key) succeeds against the chain with root records', out.strip()[-300:])
     credit = r.view(pool, 'credits(address)(uint256)', payee)[0]
