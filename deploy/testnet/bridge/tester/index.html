@@ -40,7 +40,7 @@ const row = (k, v) => { const tr = document.createElement('tr'); for (const x of
 async function init() {
   cfg = await (await fetch('tester-config.json')).json();
   const t = document.getElementById('network');
-  t.replaceChildren(row('chain ID', String(cfg.chainId)), row('vault', cfg.vault), row('EVM RPC', cfg.ethUrl), ...(cfg.redeemEthUrl ? [row('redemptions', cfg.redeemEthUrl)] : []),
+  t.replaceChildren(row('chain ID', String(cfg.chainId)), row('genesis', cfg.genesisHash), row('vault', cfg.vault), row('EVM RPC', cfg.ethUrl), ...(cfg.redeemEthUrl ? [row('redemptions', cfg.redeemEthUrl)] : []),
     row('aggregator', cfg.aggUrl), row('lock proofs', cfg.lockProofUrl));
 }
 document.getElementById('credit').onclick = async () => {
