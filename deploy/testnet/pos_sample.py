@@ -160,10 +160,28 @@ class PosWatch:
         return alerts
 
 
+def not_healthy(generation):
+    """{service: health} of every service whose Compose healthcheck has not (yet) reported healthy: `starting` until its first check ran (the gateway's interval is 30 s
+    and it has no start period), or `unhealthy`. Services without a healthcheck are not listed."""
+    ps = subprocess.run(['docker', 'compose', '-f', str(Path(generation) / 'compose.yaml'), 'ps', '-a', '--format', 'json'], text=True, capture_output=True)
+    return {row['Service']: row.get('Health') for row in observe.ps_rows(ps.stdout) if row.get('Health') not in (None, '', 'healthy')}
+
+
 def pos_observe(r):
     """Rehearsal stage `pos-observe`: the sampler run for two samples against the running PoS package (after pos-smoke), as an operator would start it. It exits 0 (no
     alert) and every sample carries the contracts' views as numbers; the record cursor equals the record count and the pool holds exactly its balance books."""
     out = r.evidence / 'pos-observe'
+    # observe.Watch alerts on a health other than healthy: a sampler started right after `up` would see `starting` (rehearsal 40072154515 sampled 27 s after up, before the
+    # gateway's first check). Wait, bounded, for every healthcheck to report; what is still not healthy after that is a finding and the stage fails naming it.
+    bad = {}
+    def settled():
+        nonlocal bad
+        bad = not_healthy(r.gen)
+        return True if not bad else None
+    try:
+        r.wait('every healthchecked service is healthy', settled, 180)
+    except Exception as error:
+        r.expect(False, 'every healthchecked service is healthy before the sampler runs', f'{bad}: {error}')
     run = subprocess.run([sys.executable, str(Path(__file__).resolve()), str(r.gen), '--out', str(out), '--samples', '2', '--interval', '5', '--no-faucet', '--stall', '3600'],
                          text=True, capture_output=True)
     r.say('  pos_sample: exit %d: %s' % (run.returncode, ' | '.join((run.stdout + run.stderr).strip().splitlines()[-4:])))
