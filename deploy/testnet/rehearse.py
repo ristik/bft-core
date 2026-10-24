@@ -1014,6 +1014,7 @@ class Rehearsal:
         self.expect(all(set(x['services']) == declared and not x['missing'] and all(v['state'] == 'running' for v in x['services'].values()) for x in samples),
                     'every declared service (but the signer, not started) was seen running in every sample', str(sorted(declared - set(samples[0]['services']))))
         blocks = [x['gateway']['block'] for x in samples]
+        self.expect(all(isinstance(b, int) for b in blocks), 'the gateway block was readable in every sample', str([x['gateway'] for x in samples][:2]))
         self.expect(blocks[-1] > blocks[0], 'the execution chain\'s block moved between the first and the last sample (an idle chain still produces blocks)', str(blocks))
 
     def pod_restart(self):

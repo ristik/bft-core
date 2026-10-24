@@ -24,13 +24,14 @@ import handoff_ops   # noqa: E402
 
 PUBLIC_RPC = '127.0.0.1:8545'
 FAUCET = '127.0.0.1:8088'
+CLIENT_IP = '203.0.113.200'   # documentation range (RFC 5737)
 
 
-def get(host, path, body=None, timeout=10):
+def get(host, path, body=None, timeout=10, headers=None):
     """(status, text); a refusal is a status, an unreachable server is status 0 with the reason."""
     conn = http.client.HTTPConnection(host, timeout=timeout)
     try:
-        conn.request('POST' if body is not None else 'GET', path, body=body, headers={'Content-Type': 'application/json'} if body is not None else {})
+        conn.request('POST' if body is not None else 'GET', path, body=body, headers=dict({'Content-Type': 'application/json'} if body is not None else {}, **(headers or {})))
         r = conn.getresponse()
         return r.status, r.read().decode(errors='replace')
     except (http.client.HTTPException, OSError) as error:
@@ -73,11 +74,14 @@ def collect(generation, transport, now=time.time, faucet=True):
     sample['disk_percent'] = round(100 * usage.used / usage.total, 1)
     status, text = get(PUBLIC_RPC, '/healthz')
     sample['gateway'] = {'healthz': status}
-    status, text = get(PUBLIC_RPC, '/', json.dumps({'jsonrpc': '2.0', 'id': 1, 'method': 'eth_blockNumber', 'params': []}))
+    # the gateway trusts the client address only from its proxy peer with X-Forwarded-For (nginx sets it in front; here a documentation address stands in, as the rehearsal does)
+    status, text = get(PUBLIC_RPC, '/', json.dumps({'jsonrpc': '2.0', 'id': 1, 'method': 'eth_blockNumber', 'params': []}), headers={'X-Forwarded-For': CLIENT_IP})
     try:
         sample['gateway']['block'] = int(json.loads(text)['result'], 16) if status == 200 else None
     except (ValueError, KeyError, TypeError):
         sample['gateway']['block'] = None
+    if sample['gateway']['block'] is None:
+        sample['gateway']['block_status'] = f'{status} {text[:120]}'
     if faucet:
         status, text = get(FAUCET, '/healthz')
         sample['faucet'] = {'healthz': status, 'body': text[:300]}
@@ -110,6 +114,8 @@ class Watch:
             alerts.append(f'certified heads stopped: no root moved past round {self.best} for {int(at - self.moved_at)} s')
         # the roots keep certifying while a stuck execution shard does not: the README's rule is the roots AND the certified shard heads, here the gateway's block
         block = sample['gateway'].get('block')
+        if block is None:
+            alerts.append(f'the gateway block is unreadable: {sample["gateway"].get("block_status", "no status")}')
         if block is not None and (self.best_block is None or block > self.best_block):
             self.best_block, self.block_moved_at = block, at
         elif self.block_moved_at is None:

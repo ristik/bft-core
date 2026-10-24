@@ -983,6 +983,18 @@ class Observe(unittest.TestCase):
         self.assertTrue(any('execution chain stopped' in a and 'block past 5' in a for a in alerts))
         self.assertFalse(any('certified heads stopped' in a for a in alerts),'the roots did move')
         self.assertEqual(w.step(self.sample([320]*4,gateway={'healthz':200,'block':6}),140),[],'a block that moves clears it')
+    def test_an_unreadable_gateway_block_is_an_alert_with_its_status(self):
+        alerts=observe.Watch().step(self.sample([1],gateway={'healthz':200,'block':None,'block_status':'403 forbidden'}),0)
+        self.assertTrue(any('gateway block is unreadable: 403 forbidden' in a for a in alerts))
+    def test_the_block_request_carries_the_forwarded_address_the_gateway_requires(self):
+        seen={}
+        def fake(host,path,body=None,timeout=10,headers=None):
+            seen['headers']=headers;return 200,'{"result":"0x7"}'
+        with patch.object(observe,'get',fake), patch.object(observe.shutil,'disk_usage',lambda p:type('U',(),{'used':1,'total':10})()), patch.object(observe.subprocess,'run',lambda *a,**k:type('R',(),{'stdout':''})()):
+            with tempfile.TemporaryDirectory() as d:
+                Path(d,'compose.yaml').write_text(json.dumps({'name':'p','services':{}}))
+                sample=observe.collect(d,type('T',(),{'entities':[]})(),faucet=False)
+        self.assertEqual(seen['headers'],{'X-Forwarded-For':observe.CLIENT_IP});self.assertEqual(sample['gateway']['block'],7)
     def test_a_service_with_no_container_is_an_alert_and_ps_is_read_in_both_forms(self):
         self.assertTrue(any('signer has no container' in a for a in observe.Watch().step(self.sample([1],missing=['signer']),0)))
         row={'Service':'root1','State':'running','ID':'x'}
