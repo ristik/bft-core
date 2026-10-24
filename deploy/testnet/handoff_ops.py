@@ -140,7 +140,11 @@ class Wrapper:
 
     def attempt(self, request, number):
         plan = self.plan(request, number)
-        self.record(event='plan', attempt=number, request_sha256=sha(request), plan_sha256=sha(plan), entity=self.entities[0])
+        try:
+            planned, next_body_id = plan_identity(plan)
+        except (ValueError, KeyError, TypeError):   # an opaque plan (a fake transport's): the rows say nothing about its identity, and pos-too-late then refuses to run
+            planned = next_body_id = None
+        self.record(event='plan', attempt=number, request_sha256=sha(request), plan_sha256=sha(plan), entity=self.entities[0], plan_attempt=planned, next_body_id=next_body_id)
         for entity in self.entities[1:]:
             self.intent(entity, plan, number)
         self.record(event='intent', attempt=number, plan_sha256=sha(plan), entities=self.entities[1:])
@@ -195,14 +199,20 @@ def abort_context(transport, entity):
     return json.loads(body)
 
 
+def plan_identity(plan):
+    """(attempt, successor body identity) of a plan: the SHA-256 of its canonical body is what Abort names as the next body."""
+    held = json.loads(plan)
+    return held['Attempt'], '0x' + sha(base64.b64decode(held['Body'], validate=True))
+
+
 def abort_target(context, plan, old_epoch):
     """The exact target of Abort for the plan held (the fields scripts/h6/prepare-handoff.py derives): network, predecessor and attempt from the context read before
     the plan, the successor body identity as the SHA-256 of the plan's canonical body."""
-    held = json.loads(plan)
-    if held['Attempt'] != context['attempt']:
-        raise HandoffError(f'the context planned attempt {context["attempt"]}, the plan is attempt {held["Attempt"]}')
+    attempt, next_body_id = plan_identity(plan)
+    if attempt != context['attempt']:
+        raise HandoffError(f'the context planned attempt {context["attempt"]}, the plan is attempt {attempt}')
     return {'network': context['network'], 'oldEpoch': old_epoch, 'predecessorBodyId': '0x' + context['predecessor'].removeprefix('0x'),
-            'attempt': held['Attempt'], 'nextBodyId': '0x' + sha(base64.b64decode(held['Body'], validate=True))}
+            'attempt': attempt, 'nextBodyId': next_body_id}
 
 
 def build_request(ubft, out, next_trust_base, assignment=None, receipts=None, q3=False):
