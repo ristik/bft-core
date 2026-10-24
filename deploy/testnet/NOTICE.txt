@@ -12,3 +12,11 @@ physical failure domains. No production SLA or continuity promise is made.
 
 There is one aggregator. The root trusts the single aggregator's signature;
 it does not verify the aggregator's tree (no consistency proof).
+
+If this generation runs the proof-of-stake profile (the manifest has a "pos" block): bonded stake, reward
+credits and every balance in the staking, election and reward contracts are test value only. They vanish
+with any reset and nothing is owed for them. The validator identities' owner, withdrawal and payee keys
+are held by the operator. The contracts carry a development governance authority, held by the operator,
+that may queue changes to the reward rate and the protection policy within fixed bounds, each taking
+effect only after fixed delays; it cannot edit credits, payees or election candidates. Elections,
+slashing and exits on this network exercise the mechanics; they are not an economic or security guarantee.

@@ -998,6 +998,26 @@ class Rehearsal:
         again = [line for line in self.compose('logs', '--no-color', '--since', restored, 'shard1', check=False).splitlines() if 'signing-session-fenced' in line]
         self.expect(not again, 'with the current credential the shard node is not fenced', f'{len(again)} fenced lines')
 
+    def observe(self):
+        """The observation sampler (observe.py) as a smoke: four samples five seconds apart on the running generation. It must exit 0 (no alert), write four samples
+        with a certified head from every root, and see the certified round move between the first and the last sample. The faucet guard is not sampled: its /healthz
+        needs the signer, which a rehearsal does not start. The 24-hour interval is the host's."""
+        out = self.evidence / 'observe'
+        run = subprocess.run([sys.executable, str(Path(__file__).resolve().parent / 'observe.py'), str(self.gen), '--out', str(out), '--samples', '4', '--interval', '5', '--no-faucet'],
+                             text=True, capture_output=True)
+        self.say(f'  observe.py: exit {run.returncode}: {(run.stdout + run.stderr).strip()[-400:]}')
+        self.expect(run.returncode == 0, 'the sampler raised no alert on the healthy package', (run.stdout + run.stderr).strip()[-400:])
+        samples = [json.loads(line) for line in (out / 'samples.jsonl').read_text().splitlines()]
+        self.expect(len(samples) == 4 and all(len(x['roots']) == self.n and all('round' in r for r in x['roots'].values()) for x in samples), 'four samples, each with every root\'s certified head')
+        first, last = (max(r['round'] for r in samples[i]['roots'].values()) for i in (0, -1))
+        self.expect(last > first, 'the certified round moved between the first and the last sample', f'{first} -> {last}')
+        declared = set(json.loads((self.gen / 'compose.yaml').read_text())['services']) - {'signer'}
+        self.expect(all(set(x['services']) == declared and not x['missing'] and all(v['state'] == 'running' for v in x['services'].values()) for x in samples),
+                    'every declared service (but the signer, not started) was seen running in every sample', str(sorted(declared - set(samples[0]['services']))))
+        blocks = [x['gateway']['block'] for x in samples]
+        self.expect(all(isinstance(b, int) for b in blocks), 'the gateway block was readable in every sample', str([x['gateway'] for x in samples][:2]))
+        self.expect(blocks[-1] > blocks[0], 'the execution chain\'s block moved between the first and the last sample (an idle chain still produces blocks)', str(blocks))
+
     def pod_restart(self):
         """One validator entity at a time: stop its execution client, root and shard node (its signing authority stays live, as the README requires), check what the
         package promises, start them again and check they rejoin. The PUBLIC gateway fails closed while a validator is down (it checks every validator's identity
@@ -1119,7 +1139,7 @@ class Rehearsal:
         self.expect(receipt['status'] == '0x1', 'a paid transfer on the new network succeeds', receipt['transactionHash'])
         self.say('  note the old generation\'s surviving authority directories (the restore pointed at them) are left on disk by reset.py; a host removes them by hand')
 
-STAGES = (('up', 'up'), ('identity', 'identity'), ('first-tx', 'first_tx'), ('gateway-limits', 'gateway_limits'), ('faucet-guard', 'faucet_guard'), ('load', 'load'), ('pod-restart', 'pod_restart'), ('backup-restore', 'backup_restore'), ('reset', 'reset'))
+STAGES = (('up', 'up'), ('identity', 'identity'), ('first-tx', 'first_tx'), ('gateway-limits', 'gateway_limits'), ('faucet-guard', 'faucet_guard'), ('load', 'load'), ('observe', 'observe'), ('pod-restart', 'pod_restart'), ('backup-restore', 'backup_restore'), ('reset', 'reset'))
 # run on a generation made with --pos (the workflow's second generation); not part of the default list
 Rehearsal.pos_owner = pos_owner.pos_owner   # the owner-key stage lives in pos_owner.py
 POS_STAGES = (('pos-smoke', 'pos_smoke'), ('pos-rewards', 'pos_rewards'), ('pos-election', 'pos_election'), ('pos-proposal', 'pos_proposal'), ('pos-abort', 'pos_abort'), ('pos-propose', 'pos_propose'), ('pos-too-late', 'pos_too_late'), ('pos-install', 'pos_install'), ('pos-advance', 'pos_advance'), ('pos-restart', 'pos_restart'), ('pos-stale', 'pos_stale'), ('pos-handoff-2', 'pos_handoff_2'), ('pos-restart-2', 'pos_restart_2'), ('pos-recreate', 'pos_recreate'), ('pos-owner', 'pos_owner'))

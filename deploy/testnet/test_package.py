@@ -19,6 +19,8 @@ import pos
 import metrics_relay
 import handoff_ops
 import handoff
+import observe
+import pos_sample
 
 class FakeRelay:
     def __init__(self): self.calls=[]
@@ -961,5 +963,127 @@ class LoadGenerator(unittest.TestCase):
         s,problems=self.run_load(self.Node(),min_accepted=31)
         self.assertTrue(any('only 30 accepted' in p for p in problems),problems)
 
+
+
+class Observe(unittest.TestCase):
+    def sample(self,rounds,**kw):
+        base={'roots':{str(i+1):{'epoch':1,'round':r} for i,r in enumerate(rounds)},'services':{'root1':{'state':'running','health':None,'restarts':0}},
+              'disk_percent':40.0,'gateway':{'healthz':200,'block':self.block},'faucet':{'healthz':200,'body':'{}'}}
+        self.block+=1   # the chain moves with every sample unless a test pins the gateway
+        base.update(kw);return base
+    block=0
+    def setUp(self): self.block=0
+    def test_a_healthy_sample_raises_nothing_and_a_head_that_moves_resets_the_stall_clock(self):
+        w=observe.Watch(stall=120)
+        self.assertEqual(w.step(self.sample([10,10,10,10]),0),[])
+        self.assertEqual(w.step(self.sample([60,60,60,60]),100),[])
+        self.assertEqual(w.step(self.sample([60,60,60,60]),200),[],'100 s since the last move is below the 120 s stall')
+        self.assertTrue(any('stopped' in a and 'round 60' in a for a in w.step(self.sample([60,60,60,60]),230)))
+    def test_one_root_moving_is_progress_and_a_root_without_a_head_is_an_alert(self):
+        w=observe.Watch(stall=120);w.step(self.sample([10,10,10,10]),0)
+        alerts=w.step(self.sample([50,10,10,10]),500)
+        self.assertEqual(alerts,[],'the heads are the certified chain: one root ahead is progress')
+        self.assertTrue(any('root 2 gave no certified head' in a for a in w.step(self.sample([60],roots={'1':{'round':60,'epoch':1},'2':{'error':'x'}}),510)))
+    def test_a_down_unhealthy_or_restarted_service_disk_and_gateway_are_alerts(self):
+        w=observe.Watch();w.step(self.sample([1]),0)
+        bad=self.sample([2],services={'root1':{'state':'exited','health':None,'restarts':0},'shard1':{'state':'running','health':'unhealthy','restarts':3}},disk_percent=91.0,
+                        gateway={'healthz':503,'block':None},faucet={'healthz':0,'body':'URLError'})
+        text=' | '.join(w.step(bad,10))
+        for part in ('root1 is exited','shard1 is unhealthy','disk 91.0%','gateway /healthz answered 503','faucet /healthz answered 0'): self.assertIn(part,text)
+        self.assertTrue(any('root1 restarted (0 -> 1)' in a for a in w.step(self.sample([3],services={'root1':{'state':'running','health':None,'restarts':1}}),20)))
+        self.assertFalse(any('restarted' in a for a in w.step(self.sample([4],services={'root1':{'state':'running','health':None,'restarts':1}}),30)),'an unchanged count is not a restart')
+    def test_roots_moving_while_the_execution_chain_does_not_is_an_alert(self):
+        w=observe.Watch(stall=120)
+        pinned={'healthz':200,'block':5}
+        for at,round_ in ((0,10),(60,70),(100,110)): self.assertEqual(w.step(self.sample([round_]*4,gateway=pinned),at),[],'the chain at block 5 for under 120 s from the start')
+        alerts=w.step(self.sample([310]*4,gateway=pinned),130)
+        self.assertTrue(any('execution chain stopped' in a and 'block past 5' in a for a in alerts))
+        self.assertFalse(any('certified heads stopped' in a for a in alerts),'the roots did move')
+        self.assertEqual(w.step(self.sample([320]*4,gateway={'healthz':200,'block':6}),140),[],'a block that moves clears it')
+    def test_an_unreadable_gateway_block_is_an_alert_with_its_status(self):
+        alerts=observe.Watch().step(self.sample([1],gateway={'healthz':200,'block':None,'block_status':'403 forbidden'}),0)
+        self.assertTrue(any('gateway block is unreadable: 403 forbidden' in a for a in alerts))
+    def test_the_block_request_carries_the_forwarded_address_the_gateway_requires(self):
+        seen={}
+        def fake(host,path,body=None,timeout=10,headers=None):
+            seen['headers']=headers;return 200,'{"result":"0x7"}'
+        with patch.object(observe,'get',fake), patch.object(observe.shutil,'disk_usage',lambda p:type('U',(),{'used':1,'total':10})()), patch.object(observe.subprocess,'run',lambda *a,**k:type('R',(),{'stdout':''})()):
+            with tempfile.TemporaryDirectory() as d:
+                Path(d,'compose.yaml').write_text(json.dumps({'name':'p','services':{}}))
+                sample=observe.collect(d,type('T',(),{'entities':[]})(),faucet=False)
+        self.assertEqual(seen['headers'],{'X-Forwarded-For':observe.CLIENT_IP});self.assertEqual(sample['gateway']['block'],7)
+    def test_a_service_with_no_container_is_an_alert_and_ps_is_read_in_both_forms(self):
+        self.assertTrue(any('signer has no container' in a for a in observe.Watch().step(self.sample([1],missing=['signer']),0)))
+        row={'Service':'root1','State':'running','ID':'x'}
+        self.assertEqual(observe.ps_rows(json.dumps([row])),[row],'an array')
+        self.assertEqual(observe.ps_rows(json.dumps(row)+'\n'+json.dumps(row)),[row,row],'one object per line')
+        self.assertEqual(observe.ps_rows(''),[])
+    def test_the_faucet_can_be_left_out(self):
+        s=self.sample([1]);del s['faucet']
+        self.assertEqual(observe.Watch().step(s,0),[])
+
+class PosSample(unittest.TestCase):
+    def pos(self,**kw):
+        base={'progress':100,'ucTime':50,'recordCount':3,'recordCursor':3,'liveCount':4,'thresholds':['500','300'],'openResult':None,
+              'pool':{'balance':'1000','available':'900','totalCredits':'100','accounted':'1000','nextStart':'0'},'errors':[]}
+        base.update(kw);return base
+    def test_a_healthy_sample_raises_nothing_and_progress_moving_resets_the_stall(self):
+        w=pos_sample.PosWatch(stall=120)
+        self.assertEqual(w.step(self.pos(progress=10),0),[])
+        self.assertEqual(w.step(self.pos(progress=11),100),[])
+        self.assertEqual(w.step(self.pos(progress=11),200),[],'100 s since it last moved is under the stall')
+        self.assertTrue(any('registry progress stopped at 11' in a for a in w.step(self.pos(progress=11),230)))
+    def test_a_custody_behind_the_registry_is_an_alert_only_after_the_lag_and_catching_up_clears_it(self):
+        w=pos_sample.PosWatch(lag=300)
+        self.assertEqual(w.step(self.pos(recordCount=5,recordCursor=3),0),[])
+        self.assertEqual(w.step(self.pos(progress=101,recordCount=5,recordCursor=3),299),[])
+        self.assertTrue(any('custody is behind' in a and '3 of 5' in a for a in w.step(self.pos(progress=102,recordCount=5,recordCursor=3),300)))
+        self.assertEqual(w.step(self.pos(progress=103,recordCount=5,recordCursor=5),310),[],'caught up')
+        self.assertEqual(w.step(self.pos(progress=104,recordCount=6,recordCursor=5),320),[],'the lag clock starts again')
+        self.assertTrue(any('past the registry' in a for a in w.step(self.pos(progress=105,recordCount=3,recordCursor=4),330)))
+    def test_an_election_result_open_too_long_is_an_alert_and_resolving_it_clears_it(self):
+        w=pos_sample.PosWatch(open_limit=3600);r='0x'+'ab'*32
+        self.assertEqual(w.step(self.pos(openResult=r),0),[])
+        self.assertTrue(any('open for 3600 s' in a for a in w.step(self.pos(progress=101,openResult=r),3600)))
+        self.assertEqual(w.step(self.pos(progress=102),3700),[],'resolved')
+        self.assertEqual(w.step(self.pos(progress=103,openResult=r),3800),[],'a new opening is timed from its own start')
+    def test_the_pool_books_and_unreadable_views_are_alerts(self):
+        w=pos_sample.PosWatch()
+        short=self.pos(pool={'balance':'999','available':'900','totalCredits':'100','accounted':'1000','nextStart':'0'})
+        self.assertTrue(any('less than the 1000 it has accounted for' in a for a in w.step(short,0)))
+        self.assertTrue(any('no funded balance left' in a for a in w.step(self.pos(progress=101,pool={'balance':'5','available':'0','totalCredits':'5','accounted':'5','nextStart':'1'}),10)))
+        alerts=w.step({'errors':['recordCursor: eth_call: 403 forbidden'],'pool':{}},30)
+        self.assertEqual(alerts,['unreadable: recordCursor: eth_call: 403 forbidden'])
+    def test_collect_reads_the_views_through_the_gateway_and_records_a_refused_one(self):
+        def word(n): return '0x'+format(n,'064x')
+        by_selector={pos_sample.SELECTORS['progress']:word(7),pos_sample.SELECTORS['ucTime']:word(70),pos_sample.SELECTORS['recordCount']:word(4),
+                     pos_sample.SELECTORS['recordCursor']:word(4),pos_sample.SELECTORS['liveCount']:word(4),pos_sample.SELECTORS['thresholds']:word(500)+word(300)[2:],
+                     pos_sample.SELECTORS['openResult']:word(0),pos_sample.SELECTORS['available']:word(10**18),pos_sample.SELECTORS['totalCredits']:word(2),
+                     pos_sample.SELECTORS['accounted']:word(10**18+2),pos_sample.SELECTORS['nextStart']:word(1000)}
+        refuse=set()
+        def fake(method,params):
+            if method=='eth_getBalance': return hex(10**18+2)
+            data=params[0]['data']
+            if data in refuse: raise ValueError('eth_call: 403 forbidden')
+            return by_selector[data]
+        with tempfile.TemporaryDirectory() as d:
+            Path(d,'network').mkdir();Path(d,'network','pos-deployment.json').write_text(json.dumps({'custody':'0xc','election':'0xe','rewardPool':'0xp'}))
+            with patch.object(pos_sample,'eth',fake):
+                got=pos_sample.pos_collect(d)
+                refuse.add(pos_sample.SELECTORS['recordCursor'])
+                bad=pos_sample.pos_collect(d)
+        self.assertEqual((got['progress'],got['recordCount'],got['recordCursor'],got['openResult'],got['thresholds']),(7,4,4,None,['500','300']))
+        self.assertEqual(got['pool'],{'available':str(10**18),'totalCredits':'2','accounted':str(10**18+2),'nextStart':'1000','balance':str(10**18+2)},'wei amounts are decimal strings')
+        self.assertEqual(got['errors'],[])
+        self.assertNotIn('recordCursor',bad);self.assertEqual(bad['errors'],['recordCursor: eth_call: 403 forbidden'])
+    def test_a_result_that_is_not_whole_words_is_refused(self):
+        with self.assertRaises(ValueError): pos_sample.words('0x'+'00'*31)
+        with self.assertRaises(ValueError): pos_sample.words('0x')
+    def test_the_selectors_are_cast_sig_of_the_views(self):
+        import shutil
+        cast=shutil.which('cast') or str(Path.home()/'.foundry'/'bin'/'cast')
+        if not Path(cast).exists(): self.skipTest('cast is not installed')
+        for name,selector in pos_sample.SELECTORS.items():
+            self.assertEqual(subprocess.run([cast,'sig',name+'()'],text=True,capture_output=True,check=True).stdout.strip(),selector,name)
 
 if __name__=='__main__': unittest.main()
