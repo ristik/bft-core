@@ -28,6 +28,7 @@ from pathlib import Path
 import handoff
 import handoff_ops
 import operator_rpc
+import pos_crash
 import pos_join
 import pos_owner
 import pos_sample
@@ -1144,9 +1145,11 @@ class Rehearsal:
 STAGES = (('up', 'up'), ('identity', 'identity'), ('first-tx', 'first_tx'), ('gateway-limits', 'gateway_limits'), ('faucet-guard', 'faucet_guard'), ('load', 'load'), ('observe', 'observe'), ('pod-restart', 'pod_restart'), ('backup-restore', 'backup_restore'), ('reset', 'reset'))
 # run on a generation made with --pos (the workflow's second generation); not part of the default list
 Rehearsal.pos_observe = pos_sample.pos_observe   # the sampler smoke lives in pos_sample.py
+for _method, _stage in pos_crash.METHODS.items():   # the OPT-IN crash-recovery stages live in pos_crash.py (bft-core #843)
+    setattr(Rehearsal, _method, _stage)
 Rehearsal.pos_joiner = pos_join.pos_joiner   # the joiner stage lives in pos_join.py; it is not in the default list (it needs its own fresh generation)
 Rehearsal.pos_owner = pos_owner.pos_owner   # the owner-key stage lives in pos_owner.py
-POS_STAGES = (('pos-smoke', 'pos_smoke'), ('pos-observe', 'pos_observe'), ('pos-rewards', 'pos_rewards'), ('pos-election', 'pos_election'), ('pos-proposal', 'pos_proposal'), ('pos-abort', 'pos_abort'), ('pos-propose', 'pos_propose'), ('pos-too-late', 'pos_too_late'), ('pos-install', 'pos_install'), ('pos-advance', 'pos_advance'), ('pos-restart', 'pos_restart'), ('pos-stale', 'pos_stale'), ('pos-handoff-2', 'pos_handoff_2'), ('pos-restart-2', 'pos_restart_2'), ('pos-recreate', 'pos_recreate'), ('pos-owner', 'pos_owner'), ('pos-joiner', 'pos_joiner'))
+POS_STAGES = (('pos-smoke', 'pos_smoke'), ('pos-observe', 'pos_observe'), ('pos-rewards', 'pos_rewards'), ('pos-election', 'pos_election'), ('pos-proposal', 'pos_proposal'), ('pos-abort', 'pos_abort'), ('pos-propose', 'pos_propose'), ('pos-too-late', 'pos_too_late'), ('pos-install', 'pos_install'), ('pos-advance', 'pos_advance'), ('pos-restart', 'pos_restart'), ('pos-stale', 'pos_stale'), ('pos-handoff-2', 'pos_handoff_2'), ('pos-restart-2', 'pos_restart_2'), ('pos-recreate', 'pos_recreate'), *pos_crash.STAGES, ('pos-owner', 'pos_owner'), ('pos-joiner', 'pos_joiner'))
 
 
 def main():
