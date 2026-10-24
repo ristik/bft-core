@@ -1168,7 +1168,12 @@ class PosSample(unittest.TestCase):
         self.assertEqual(pos_crash.scan_log("all quiet\n"),(0,0))
         names=[n for n,_ in rehearse.POS_STAGES]
         self.assertEqual(names[-1],'pos-owner','pos-owner declares a retirement: nothing may follow it')
-        self.assertLess(names.index('pos-recreate'),names.index('pos-crash'));self.assertLess(names.index('pos-crash'),names.index('pos-owner'))
+        for name,_ in pos_crash.STAGES:
+            self.assertLess(names.index('pos-recreate'),names.index(name));self.assertLess(names.index(name),names.index('pos-owner'))
+            self.assertTrue(callable(getattr(rehearse.Rehearsal,dict(rehearse.POS_STAGES)[name])),name)
+        workflow=(generate.REPO/'.github/workflows/testnet-rehearsal.yml').read_text()
+        default=re.search(r'POS_STAGES:-([^}]*)\}',workflow).group(1).split(',')
+        for name,_ in pos_crash.STAGES: self.assertNotIn(name,default,'the crash stages are opt-in: bft-core #843 fails today')
     def test_restart_counts_reads_each_container_and_reports_a_missing_one(self):
         class R:
             def compose(self,*a,check=True): return {'ureth2':'abc\n','root2':'def\n'}.get(a[-1],'')

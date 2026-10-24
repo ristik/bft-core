@@ -1,20 +1,26 @@
-"""Crash recovery of a validator entity on the switched PoS network (TN-S #430, P8-TEST #437): the unclean counterpart of pos-restart.
+"""Crash recovery of a validator entity on the PoS network (TN-S #430, P8-TEST #437; bft-core issue #843): the unclean counterpart of pos-restart.
 
-Stage `pos-crash`, registered before `pos-owner` (which declares an identity's retirement and so must stay last; this stage changes nothing in the contracts). Precondition:
-the epoch-3 network that pos-handoff-2 and pos-recreate leave. Per entity in --pods (one at a time): its execution client, root and shard node are SIGKILLed together
-(`docker compose kill -s KILL`: no shutdown hook, no flush). Never the pod<i> namespace holder (its loss strands root and shard, OPERATOR lifecycle note) and never authority<i>
-(a restarted authority has a new key, README). The containers carry `restart: unless-stopped`, which Docker applies to a killed container, so the stage first LETS the policy bring
-them back and records that it did; only if they are not running again within RESTART_WAIT seconds does it `compose start` them (as pos-restart does: the container, install flag
-included, is kept) and says so.
+OPT-IN stages, not in the default list: today the all-three-containers crash does NOT recover (issue #843: after SIGKILL of ureth, root and shard of one entity the survivors
+keep certifying, but the restarted execution client stays at its old block and the shard node loops on `execution recovery: finalized-branch conflict`). A failing expectation
+cannot be in the default run; these stages are named explicitly (`--stages` / the workflow's `pos_stages`) to reproduce and to localize it.
 
-Asserted, each entity: the three survivors (threshold 3 of 4) keep certifying (their root rounds advance) and mine a transaction while the entity is down or restarting; the entity's
-three containers run again; its execution client has the transaction mined without it, in the same block; its root's certified head is back at epoch 3 and within a few rounds of
-the survivors'; the custody has applied every root record; a transaction through the public gateway succeeds and every validator has it in the same block. Recorded, not
-asserted: what the entity's root, shard and execution client logged on the unclean start (evidence/pos-crash-<i>.log, counts in the output). A line `panic:`/`panicked at` in
-those logs is a failure.
+Stages (each kills ONE entity, never pod<i> (the namespace holder: its loss strands root and shard, OPERATOR lifecycle note) and never authority<i> (a restarted authority has a
+new key, README)); they differ in WHAT is killed and WHEN:
+  pos-crash          ureth + root + shard, epoch 3 (after pos-handoff-2 and pos-recreate; run before pos-owner, which must stay last)
+  pos-crash-ureth    the execution client only          pos-crash-shard   the shard node only        pos-crash-root   the root only
+  pos-crash-ureth-shard  execution client and shard node
+  pos-crash-e1       all three at epoch 1 (genesis, after pos-smoke)        pos-crash-e2   all three at epoch 2 (after pos-advance)
+Each scenario is its own rehearsal run: a broken entity cannot be repaired, and 3 of 4 roots (the threshold) must stay up for the next one.
 
-NOT shown: that the restarted root VOTES (a head that advances shows it follows and persists the chain; 3 of 4 certify without it, the pos-recreate lesson). That needs a second
-fault with a different root down, a later stage.
+Per scenario: `docker compose kill -s KILL` (no shutdown hook, no flush); the three survivors keep certifying (their root rounds advance) and mine a transaction; the containers
+carry `restart: unless-stopped`, which Docker did NOT apply to a killed container in the first run, so the stage waits RESTART_WAIT s for it, then `compose start`s the killed
+ones (as pos-restart does: the container, install flag included, is kept); then it waits CONVERGE_WAIT s for the entity's execution client to have the survivors' transaction (the
+same block) and its root head to be at the epoch within LAG rounds of the survivors'. EXPECTED (and failing today for the three-container crash): it converges by that first
+restart. If it does not, the stage still records, in evidence/pos-crash-<tag>.json, whether (2) a graceful restart of the execution client, (3) a graceful stop and start of all
+three, recovers it, and keeps the logs of the entity (evidence/pos-crash-<tag>-<service>.log, whole, from the kill): is the conflict a retry loop or permanent state. Only then
+does it fail.
+
+NOT shown: that a restarted root VOTES (an advancing head shows it follows the chain; 3 of 4 certify without it, the pos-recreate lesson).
 """
 import json
 import re
@@ -25,6 +31,7 @@ import time
 import handoff_ops
 
 RESTART_WAIT = 90
+CONVERGE_WAIT = 180
 LAG = 8            # rounds the restarted root's head may trail the best survivor's once it has converged
 BAD = re.compile(r'panic:|panicked at', re.I)
 WARN = re.compile(r'\b(ERROR|WARN)\b|level=(error|warn)', re.I)
@@ -56,76 +63,132 @@ def head(r, i, transport):
         return None
 
 
-def pos_crash(r):
+def block_number(r, i):
+    try:
+        return int(r.ureth(i, 'eth_blockNumber'), 16)
+    except Exception:
+        return None
+
+
+def scenario(r, tag, parts, epoch):
+    """Kill the `parts` ('ureth', 'root', 'shard') of every entity in r.pods (one at a time), restart, check convergence. Writes evidence/pos-crash-<tag>.json."""
     transport = handoff_ops.DockerTransport(r.gen)
     deployment = json.loads((r.gen / 'network' / 'pos-deployment.json').read_text())
     sender, to = r.manifest['faucet_address'], '0x' + '55' * 20
-    r.expect(all((head(r, j, transport) or (None,))[0] == 3 for j in range(1, r.n + 1)), 'precondition: every root certifies at epoch 3 (run the handoffs first)')
+    r.expect(all((head(r, j, transport) or (None,))[0] == epoch for j in range(1, r.n + 1)), f'precondition: every root certifies at epoch {epoch}')
+    rows = []
     for i in r.pods:
-        names = [f'ureth{i}', f'root{i}', f'shard{i}']
+        names = [f'{p}{i}' for p in parts]
+        everything = [f'ureth{i}', f'root{i}', f'shard{i}']
         survivors = [j for j in range(1, r.n + 1) if j != i]
+        row = {'entity': i, 'killed': names, 'epoch': epoch}
+        rows.append(row)
         before_rounds = {j: head(r, j, transport)[1] for j in survivors}
         before_restarts = restart_counts(r, names)
         since = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
-        r.say(f'  SIGKILL of validator {i}: {" ".join(names)} (restart counts {before_restarts})')
-        r.compose('kill', '-s', 'KILL', *names)
-        # the survivors keep certifying
-        for j in survivors:
-            r.wait(f'survivor root {j} certifies past round {before_rounds[j]} with validator {i} killed',
-                   lambda j=j: (head(r, j, transport) or (0, 0))[1] > before_rounds[j] + 2, 180)
-        r.expect(True, f'the {len(survivors)} surviving roots keep certifying while validator {i} is killed')
-        # a transaction the survivors mine (driven directly: the gateway fails closed while a validator is down)
-        nonce = int(r.ureth(survivors[0], 'eth_getTransactionCount', [sender, 'latest']), 16)
-        raw = r.raw_tx(to, nonce, int(r.ureth(survivors[0], 'eth_gasPrice'), 16))
-        tx = r.cast_run('keccak', raw)
-        for j in survivors:
-            reply = r.inner_reply(f'http://ureth{j}:8545', 'eth_sendRawTransaction', [raw])
-            error = str(reply.get('error', '')).lower()
-            known = 'already known' in error or ('nonce too low' in error and r.ureth(j, 'eth_getTransactionReceipt', [tx]) is not None)
-            r.expect(reply.get('result') == tx or known, f'survivor {j} accepts the transaction', json.dumps(reply)[:200])
-        blocks = set()
-        for j in survivors:
-            receipt = r.wait(f'survivor {j} mines it with validator {i} killed', lambda j=j: r.ureth(j, 'eth_getTransactionReceipt', [tx]), 240)
-            r.expect(receipt['status'] == '0x1', f'survivor {j} has a successful receipt', receipt['blockHash'])
-            blocks.add(receipt['blockHash'])
-        r.expect(len(blocks) == 1, 'the survivors agree on the including block')
-        # did the restart policy bring the entity back? otherwise start it, and say which
-        def running():
-            return set(names) <= set(r.compose('ps', '--services', '--status', 'running').split())
+        r.say(f'  SIGKILL of {" ".join(names)} (restart counts {before_restarts}), epoch {epoch}')
         try:
-            r.wait(f'the restart policy brings validator {i} back', running, RESTART_WAIT)
-            r.say(f'  validator {i}: Docker restarted the killed containers by its own policy (restart counts {restart_counts(r, names)})')
-            by = 'the restart policy'
-        except Exception:
-            r.say(f'  validator {i}: not running again after {RESTART_WAIT} s; starting it with compose start (the container and its install flag are kept)')
-            r.compose('start', *names)
-            by = 'compose start'
-        r.wait(f'validator {i} is running', running, 120)
-        after = restart_counts(r, names)
-        if by == 'the restart policy':
-            r.expect(all((after[n] or 0) > (before_restarts[n] or 0) for n in names), f'validator {i}: every killed container shows a restart (policy)', f'{before_restarts} -> {after}')
-        # convergence
-        receipt = r.wait(f'validator {i} catches up to the transaction mined without it', lambda: r.ureth(i, 'eth_getTransactionReceipt', [tx]), 300)
-        r.expect(receipt['blockHash'] in blocks, f'validator {i} has the same block after the crash', receipt['blockHash'])
-        def converged():
-            mine = head(r, i, transport)
-            best = max((head(r, j, transport) or (0, 0))[1] for j in survivors)
-            return mine is not None and mine[0] == 3 and mine[1] + LAG >= best
-        r.wait(f'root {i} is back at epoch 3 within {LAG} rounds of the survivors', converged, 300)
-        r.expect(True, f'root {i} certifies at epoch 3 again, close to the survivors (it follows the chain; that it votes is not shown)')
-        # what the unclean start logged
-        log = r.compose('logs', '--no-color', '--since', since, *names, check=False)
-        (r.evidence / f'pos-crash-{i}.log').write_text(log)
-        panics, warnings = scan_log(log)
-        r.say(f'  validator {i} unclean start: {len(log.splitlines())} log lines, {warnings} error/warn lines, {panics} panics (evidence/pos-crash-{i}.log)')
-        r.expect(panics == 0, f'no panic in the logs of validator {i} after the crash', f'{panics} lines')
+            r.compose('kill', '-s', 'KILL', *names)
+            for j in survivors:
+                r.wait(f'survivor root {j} certifies past round {before_rounds[j]} with {" ".join(names)} killed',
+                       lambda j=j: (head(r, j, transport) or (0, 0))[1] > before_rounds[j] + 2, 180)
+            r.expect(True, f'the {len(survivors)} surviving roots keep certifying while {" ".join(names)} are killed')
+            row['survivors_certify'] = True
+            nonce = int(r.ureth(survivors[0], 'eth_getTransactionCount', [sender, 'latest']), 16)
+            raw = r.raw_tx(to, nonce, int(r.ureth(survivors[0], 'eth_gasPrice'), 16))
+            tx = r.cast_run('keccak', raw)
+            for j in survivors:
+                reply = r.inner_reply(f'http://ureth{j}:8545', 'eth_sendRawTransaction', [raw])
+                error = str(reply.get('error', '')).lower()
+                known = 'already known' in error or ('nonce too low' in error and r.ureth(j, 'eth_getTransactionReceipt', [tx]) is not None)
+                r.expect(reply.get('result') == tx or known, f'survivor {j} accepts the transaction', json.dumps(reply)[:200])
+            blocks = set()
+            for j in survivors:
+                receipt = r.wait(f'survivor {j} mines it with {" ".join(names)} killed', lambda j=j: r.ureth(j, 'eth_getTransactionReceipt', [tx]), 240)
+                r.expect(receipt['status'] == '0x1', f'survivor {j} has a successful receipt', receipt['blockHash'])
+                blocks.add(receipt['blockHash'])
+            r.expect(len(blocks) == 1, 'the survivors agree on the including block')
+            row['survivors_mine'] = True
+
+            def running():
+                return set(names) <= set(r.compose('ps', '--services', '--status', 'running').split())
+
+            try:
+                r.wait('the restart policy brings the killed containers back', running, RESTART_WAIT)
+                row['restart'] = 'policy'
+            except Exception:
+                r.say(f'  not running again after {RESTART_WAIT} s; starting them with compose start (the containers and their install flag are kept)')
+                r.compose('start', *names)
+                row['restart'] = 'compose start'
+            r.wait('the killed containers are running', running, 120)
+            row['restart_counts'] = {'before': before_restarts, 'after': restart_counts(r, names)}
+
+            def converged():
+                receipt = r.ureth(i, 'eth_getTransactionReceipt', [tx])
+                mine = head(r, i, transport)
+                best = max((head(r, j, transport) or (0, 0))[1] for j in survivors)
+                return (receipt is not None and receipt['blockHash'] in blocks and mine is not None and mine[0] == epoch and mine[1] + LAG >= best)
+
+            def try_converge(label, seconds):
+                try:
+                    r.wait(f'entity {i} converges ({label})', converged, seconds)
+                    return True
+                except Exception:
+                    return False
+
+            row['converged_after_restart'] = try_converge('after the restart', CONVERGE_WAIT)
+            row['ureth_block'] = block_number(r, i)
+            row['survivor_block'] = block_number(r, survivors[0])
+            if not row['converged_after_restart']:
+                r.say(f'  entity {i} did not converge (ureth block {row["ureth_block"]}, survivor {row["survivor_block"]}); trying a graceful restart of ureth{i}')
+                r.compose('restart', f'ureth{i}')
+                row['converged_after_ureth_restart'] = try_converge('after a graceful restart of ureth', CONVERGE_WAIT)
+                if not row['converged_after_ureth_restart']:
+                    r.say(f'  still not; graceful stop and start of {" ".join(everything)}')
+                    r.compose('stop', *everything)
+                    r.compose('start', *everything)
+                    row['converged_after_full_graceful_restart'] = try_converge('after a graceful stop/start of all three', CONVERGE_WAIT)
+                    row['ureth_block_final'] = block_number(r, i)
+        finally:
+            for service in everything:
+                log = r.compose('logs', '--no-color', '--since', since, service, check=False)
+                (r.evidence / f'pos-crash-{tag}-{service}.log').write_text(log)
+                panics, warnings = scan_log(log)
+                row.setdefault('logs', {})[service] = {'lines': len(log.splitlines()), 'error_warn': warnings, 'panics': panics}
+            (r.evidence / f'pos-crash-{tag}.json').write_text(json.dumps(rows, indent=1) + '\n')
+            r.say(f'  record: {json.dumps(row)[:900]}')
+        r.expect(row['converged_after_restart'], f'entity {i} converges after SIGKILL of {" ".join(names)} and a restart (bft-core #843: fails today for ureth+root+shard)', json.dumps(row)[:600])
+        r.expect(all(v['panics'] == 0 for v in row['logs'].values()), f'no panic in the logs of entity {i} after the crash', json.dumps(row['logs']))
+
         def applied():
             count = r.view(r.REGISTRY, 'recordCount()(uint64)')[0]
             return count if count == r.view(deployment['custody'], 'recordCursor()(uint64)')[0] else None
+
         r.expect(r.wait('the custody has applied every root record', lambda: applied() is not None, 300), 'recordCursor equals recordCount after the crash', str(applied()))
         r.wait('the public gateway is healthy again', lambda: r.http(sys.modules[type(r).__module__].PUBLIC_RPC, 'GET', '/healthz')[0] == 200, 180)
         gateway = json.loads(r.send_via_gateway(r.gen / 'faucet-secrets', '0x' + '66' * 20))
-        r.expect(gateway['status'] == '0x1', f'a transaction through the public gateway succeeds after validator {i} was crashed', gateway['transactionHash'])
+        r.expect(gateway['status'] == '0x1', f'a transaction through the public gateway succeeds after entity {i} was crashed', gateway['transactionHash'])
         for j in range(1, r.n + 1):
             got = r.wait(f'validator {j} has it', lambda j=j: r.ureth(j, 'eth_getTransactionReceipt', [gateway['transactionHash']]), 120)
             r.expect(got['blockHash'] == gateway['blockHash'], f'validator {j} has it in the same block')
+
+
+# the opt-in stages: (rehearsal stage name, method name, what is killed, root epoch)
+SCENARIOS = (('pos-crash', 'pos_crash', ('ureth', 'root', 'shard'), 3),
+             ('pos-crash-ureth', 'pos_crash_ureth', ('ureth',), 3),
+             ('pos-crash-shard', 'pos_crash_shard', ('shard',), 3),
+             ('pos-crash-root', 'pos_crash_root', ('root',), 3),
+             ('pos-crash-ureth-shard', 'pos_crash_ureth_shard', ('ureth', 'shard'), 3),
+             ('pos-crash-e1', 'pos_crash_e1', ('ureth', 'root', 'shard'), 1),
+             ('pos-crash-e2', 'pos_crash_e2', ('ureth', 'root', 'shard'), 2))
+STAGES = tuple((name, method) for name, method, _, _ in SCENARIOS)
+
+
+def _stage(name, parts, epoch):
+    def stage(r):
+        scenario(r, name, parts, epoch)
+    stage.__doc__ = f'{name}: SIGKILL of {" + ".join(parts)} of one entity at root epoch {epoch} (see the module docstring; opt-in, bft-core #843).'
+    return stage
+
+
+METHODS = {method: _stage(name, parts, epoch) for name, method, parts, epoch in SCENARIOS}

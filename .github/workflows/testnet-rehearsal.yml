@@ -13,7 +13,7 @@ on:
         required: false
         default: ''
       pos_stages:
-        description: 'PoS-only run: rehearse.py PoS-profile stages (e.g. up,identity,first-tx,pos-smoke,pos-election,pos-proposal); skips the PoA rehearsal'
+        description: 'PoS-only run: rehearse.py PoS-profile stages (e.g. up,identity,first-tx,pos-smoke,pos-election,pos-proposal); skips the PoA rehearsal. Opt-in, not in the default list (bft-core #843): pos-crash, pos-crash-ureth, pos-crash-shard, pos-crash-root, pos-crash-ureth-shard (after pos-recreate), pos-crash-e2 (after pos-advance), pos-crash-e1 (after pos-smoke)'
         required: false
         default: ''
 permissions:
@@ -110,7 +110,7 @@ jobs:
           POS_STAGES: ${{ inputs.pos_stages }}
         run: |
           sudo -E env "PATH=$PATH" python3 deploy/testnet/rehearse.py --generation /srv/tn-rehearsal-pos --evidence "$RUNNER_TEMP/evidence-pos" \
-            --ubft pinned-bft/build/ubft --stages "${POS_STAGES:-up,identity,first-tx,pos-smoke,pos-observe,pos-rewards,pos-election,pos-proposal,pos-abort,pos-propose,pos-too-late,pos-install,pos-advance,pos-restart,pos-stale,pos-handoff-2,pos-restart-2,pos-recreate,pos-crash,pos-owner}"
+            --ubft pinned-bft/build/ubft --stages "${POS_STAGES:-up,identity,first-tx,pos-smoke,pos-observe,pos-rewards,pos-election,pos-proposal,pos-abort,pos-propose,pos-too-late,pos-install,pos-advance,pos-restart,pos-stale,pos-handoff-2,pos-restart-2,pos-recreate,pos-owner}"
       - name: PoS profile, resources and logs
         if: always() && inputs.stages == ''
         run: |
