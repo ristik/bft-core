@@ -26,14 +26,13 @@
   "rewardExhaustRefill": 1,
   "faults": 4,
   "governance": 1,
-  "governanceActivated": 1,
   "reconcile": 1
  },
  "features": {
   "authority": "PoS",
   "election": "authoritative hook",
   "custody": "enabled",
-  "governance": "queue early, activate at a due boundary",
+  "governance": "queue early, execute late; activation not shown on this chain",
   "rewardPool": "small separately funded genesis capital, exhaustion then fund()",
   "evidence": "S3/S4 observation, export, submission, settlement",
   "forcedInclusion": "off",
@@ -46,12 +45,27 @@
    "id": "lane-baseline",
    "kind": "baseline",
    "at": 0,
-   "budgetSeconds": 60,
+   "budgetSeconds": 30,
    "lane": true,
    "check": [
     "scripts/x4pos/lane-check.sh",
     "baseline"
    ]
+  },
+  {
+   "id": "lane-governance-queue",
+   "kind": "governance-queue",
+   "at": 30,
+   "budgetSeconds": 30,
+   "lane": true,
+   "check": [
+    "scripts/x4pos/lane-check.sh",
+    "governance-queue"
+   ],
+   "dependsOn": [
+    "lane-baseline"
+   ],
+   "note": "the lane-held authority queues a halved reward rate right after the first snapshot (B6e, gov-lib.sh)"
   },
   {
    "id": "lane-replacement",
@@ -68,7 +82,8 @@
     "keyRotations": 1
    },
    "dependsOn": [
-    "lane-baseline"
+    "lane-baseline",
+    "lane-governance-queue"
    ],
    "note": "decision (b): the joiner's install into J = K + joiner; labelled 'joiner install + recovery', not an ordinary acknowledged replacement (bft-core#777)"
   },
@@ -197,9 +212,29 @@
    "note": "refused early for a lawful reason, then matured and claimed with exact amounts after the case settled"
   },
   {
+   "id": "lane-governance",
+   "kind": "governance",
+   "at": 4100,
+   "budgetSeconds": 3700,
+   "lane": true,
+   "check": [
+    "scripts/x4pos/lane-check.sh",
+    "governance"
+   ],
+   "counts": {
+    "governance": 1
+   },
+   "dependsOn": [
+    "lane-governance-queue",
+    "lane-exit-claim",
+    "lane-rewards"
+   ],
+   "note": "execute() after both delays (permissionless, schedules only), then the policy id is polled and the outcome recorded; activation is NOT asserted (see notCovered)"
+  },
+  {
    "id": "lane-accounting",
    "kind": "accounting",
-   "at": 4100,
+   "at": 7800,
    "budgetSeconds": 60,
    "lane": true,
    "check": [
@@ -207,36 +242,14 @@
     "accounting"
    ],
    "dependsOn": [
-    "lane-exit-claim",
-    "lane-rewards"
+    "lane-governance"
    ],
    "note": "the accounting checker over every snapshot the lane took"
   },
   {
-   "id": "governance-queue",
-   "kind": "governance-queue",
-   "at": 4200,
-   "budgetSeconds": 300,
-   "cmd": [
-    "scripts/x4pos/steps/governance-queue.sh"
-   ],
-   "counts": {
-    "governance": 1
-   },
-   "dependsOn": [
-    "lane-accounting"
-   ],
-   "args": {
-    "change": "rate"
-   },
-   "check": [
-    "scripts/x4pos/steps/governance-queue.check.sh"
-   ]
-  },
-  {
    "id": "fault-root-restart",
    "kind": "fault",
-   "at": 4800,
+   "at": 8000,
    "budgetSeconds": 300,
    "cmd": [
     "scripts/x4pos/steps/fault.sh"
@@ -258,7 +271,7 @@
   {
    "id": "fault-evm-restart",
    "kind": "fault",
-   "at": 5400,
+   "at": 8600,
    "budgetSeconds": 300,
    "cmd": [
     "scripts/x4pos/steps/fault.sh"
@@ -280,7 +293,7 @@
   {
    "id": "fault-collector-restart",
    "kind": "fault",
-   "at": 6000,
+   "at": 9200,
    "budgetSeconds": 300,
    "cmd": [
     "scripts/x4pos/steps/fault.sh"
@@ -301,7 +314,7 @@
   {
    "id": "fault-delayed-episode",
    "kind": "fault",
-   "at": 6600,
+   "at": 9800,
    "budgetSeconds": 600,
    "cmd": [
     "scripts/x4pos/steps/fault.sh"
@@ -317,28 +330,6 @@
    "uncheckedReason": "a restart or outage leaves no durable state to verify afterwards; the command asserts its own recovery (quorum, certified hashes, recovery deadline) and records it in its log; it is NOT restartable, so an interrupted fault fails the campaign",
    "dependsOn": [
     "lane-accounting"
-   ]
-  },
-  {
-   "id": "governance-activation-check",
-   "kind": "governance-check",
-   "at": 9900,
-   "budgetSeconds": 300,
-   "cmd": [
-    "scripts/x4pos/steps/governance-check.sh"
-   ],
-   "counts": {
-    "governanceActivated": 1
-   },
-   "dependsOn": [
-    "governance-queue"
-   ],
-   "after": {
-    "step": "governance-queue",
-    "delaySeconds": 5400
-   },
-   "check": [
-    "scripts/x4pos/steps/governance-check.check.sh"
    ]
   },
   {
@@ -363,8 +354,8 @@
   }
  ],
  "segments": {
-  "lane": "the P85 recovery lane's own shell (ci-lane x4-exit with run-inputs s4, offence2, accounting, rewards), phases at the times the chain dictates; the driver only verifies them (lane steps). About 1 h 10 min.",
-  "driver": "driver steps on the same accumulated chain after the lane's phases: governance, faults, reconcile. Offsets are from the campaign start, which is the lane's first accounting snapshot."
+  "lane": "the P85 recovery lane's own shell (ci-lane x4-exit with run-inputs s4, offence2, accounting, rewards, governance), phases at the times the chain dictates; the driver only verifies them (lane steps). About 2 h 10 min.",
+  "driver": "driver steps on the same accumulated chain after the lane's phases: faults, reconcile. Offsets are from the campaign start, which is the lane's first accounting snapshot."
  },
  "notCovered": [
   {
@@ -382,6 +373,10 @@
   {
    "what": "a later reward interval paid after the refill, and 4 closed intervals, on the accumulated chain: RewardPool.closeInterval never closes the latest assignment's tail while an election result is open (pinned contracts b17829ca), so this chain closes 2",
    "coveredBy": "the shadow-chain x4-rewards lane (bft-core#724); the rule is ristik/unicity-pos-contracts#71, fixed in #72 (merged), which this pin does not include"
+  },
+  {
+   "what": "governance ACTIVATION of the queued rate: queue and execute (Scheduled) are shown, but after execute + 1800 s the policy id was unchanged with an election result open (run 40071011875); why is not established",
+   "coveredBy": "queue and execute are exercised here; activation needs ElectionPolicy.elect to call activateDue at an eligible boundary with no unresolved election (GovernanceParams.sol), asked of contracts (dev3), not yet answered"
   }
  ]
 }

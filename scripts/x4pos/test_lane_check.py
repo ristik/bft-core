@@ -12,9 +12,9 @@ HERE = Path(__file__).resolve().parent
 SCRIPT = HERE / "lane-check.sh"
 ZERO = "0x" + "00" * 32
 STEPS = ("p85_baseline x4a_snapshot p85_joiner_nodes p85_joiner_onboard p85_election_reserved p85_proofs p85_handoff p85_install_activation s4_equivocate p85_j_stalls p85_recovery p85_resolved "
-         "s4_collect_after_rotation x4e_request s4_submit_settle s4_check x4o_second p85_restarts p85_epoch_switches x4r_intervals x4r_dry_refill x4r_claim x4o_claim x4e_claim x4a_final").split()
+         "s4_collect_after_rotation x4e_request s4_submit_settle s4_check x4o_second p85_restarts p85_epoch_switches x4r_intervals x4r_dry_refill x4r_claim x4o_claim x4e_claim x4g_queue x4g_execute x4g_check x4a_final").split()
 PHASES = {"baseline": "p85_baseline", "rewards": "x4r_claim", "replacement": "p85_handoff", "recovery": "p85_resolved", "epoch-switches": "p85_epoch_switches", "offence-1": "s4_check", "offence-2": "x4o_second",
-          "exit-request": "x4e_request", "exit-claim": "x4e_claim", "accounting": "x4a_final"}
+          "exit-request": "x4e_request", "exit-claim": "x4e_claim", "governance-queue": "x4g_queue", "governance": "x4g_check", "accounting": "x4a_final"}
 REPLAY = {"intervals": 2, "zeroBudget": 1, "paid": 1, "fundings": 1, "claims": 0, "refilledAfterExhaustion": True}
 
 
@@ -37,6 +37,8 @@ def fixture(root):
     put(d / "steps/exit-claim/refusal.json", {"outcome": "refused", "lawfulEarly": True})
     put(d / "steps/exit-claim/matured.json", {"creditDelta": 3})
     put(d / "steps/exit-claim/claimed.json", {"received": 3})
+    put(d / "steps/gov/queued.json", {"nonce": 1, "rateBefore": "1000", "rateProposed": "500", "policyIdBefore": 1})
+    put(d / "steps/gov/outcome.json", {"policyIdBefore": 1, "policyIdAfter": 1, "activated": False, "waitedSeconds": 1800})
     return d, s4b
 
 
@@ -77,6 +79,8 @@ class LaneCheck(unittest.TestCase):
                  ("offence-2", self.s4b / "lost-after-admission.txt", "0\n", "lost-after-admission"),
                  ("exit-request", self.d / "steps/exit-request/hold-probe.json", {"outcome": "refused", "reason": "RoundGateNotMet"}, "hold-probe"),
                  ("exit-claim", self.d / "steps/exit-claim/claimed.json", {"received": 0}, "claimed.json"),
+                 ("governance-queue", self.d / "steps/gov/queued.json", {"nonce": 1, "rateBefore": "1000", "rateProposed": "1000", "policyIdBefore": 1}, "queued.json"),
+                 ("governance", self.d / "steps/gov/outcome.json", {"policyIdBefore": 1, "policyIdAfter": 1, "activated": "no", "waitedSeconds": 1800}, "outcome.json"),
                  ("accounting", self.d / "accounting.txt", {"status": "PASS", "snapshots": 3}, "at least 4")]
         for ph, path, doc, msg in cases:
             with self.subTest(ph + " " + path.name + " " + msg):
