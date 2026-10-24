@@ -36,9 +36,9 @@
     },
     "native-bridge-plugins": {
       "repository": "https://github.com/ristik/native-bridge-plugins.git",
-      "commit": "015bccc8fdd1f5685c2bd500ab8942ce2fa30718",
+      "commit": "97f74161fbe0eb4921148d7fa2e4ea05e646f727",
       "branch": "main",
-      "note": "nbp#52 (split PR5, protocol 6: the V2 composition, per-part redemption, anyage.ts on the (nonce, partId) return). CANDIDATE: re-pin to nbp#52's merge; on nbp#40 (B7 PR 3: profile v6, the 2 MiB envelope, long-history)"
+      "note": "the squash merge of nbp#52 (split PR5, protocol 6: the V2 composition, per-part redemption, anyage.ts on the (nonce, partId) return), on nbp#40 (B7 PR 3: profile v6, the 2 MiB envelope, long-history)"
     },
     "state-transition-sdk-js": {
       "repository": "https://github.com/ristik/state-transition-sdk-js.git",
