@@ -55,6 +55,8 @@ p85_step() {
   "$@" || { p85_view "$name:failed" || true; p85_step_die "$name"; }
   p85_view "$name" || true   # the election/custody view at the end of every step, kept with the run (reth state is not)
   p85_pass "$name"
+  # the lane's own record of the steps that passed, read by scripts/x4pos/lane-check.sh (the campaign's lane steps)
+  { mkdir -p "$H3_DIR/x4pos" && echo "$name" >>"$H3_DIR/x4pos/lane-steps.log"; } || true
 }
 
 # ---- chain reads (cast) -------------------------------------------------------------------------------------------------------------------------
