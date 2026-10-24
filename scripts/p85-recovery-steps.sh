@@ -729,6 +729,7 @@ P85_STEPS="p85_baseline p85_joiner_nodes p85_joiner_onboard p85_election_reserve
 p85_run_lane() {
   local s
   mkdir -p "$Q3_DIR" "$P85_DIR/run"; : >"$Q3_DIR/commands.log"
+  mkdir -p "$H3_DIR/x4pos" && : >"$H3_DIR/x4pos/lane-steps.log"   # this run's record of passed steps only (scripts/x4pos/lane-check.sh reads it as evidence; rev2's nit on #831)
   : >"$Q3_DIR/pins.txt"
   H3_RESTORE_TRUST_BASE=test-nodes/trust-base.json
   Q3_GENESIS_IDENTITIES=$P85_DIR/genesis-identities.json
