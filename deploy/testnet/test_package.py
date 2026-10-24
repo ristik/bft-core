@@ -1133,6 +1133,34 @@ class PosSample(unittest.TestCase):
         with patch.object(observe,'get',refuse), patch.object(pos_sample.time,'sleep',lambda s:None):
             with self.assertRaises(ValueError) as e: pos_sample.eth('eth_blockNumber',[])
         self.assertIn('429',str(e.exception));self.assertEqual(len(calls),pos_sample.RETRIES+1,'bounded retries')
+    def test_not_healthy_lists_services_whose_healthcheck_has_not_reported_healthy(self):
+        rows=[{'Service':'rpc','Health':'starting'},{'Service':'root1','Health':'healthy'},{'Service':'shard1','Health':''},{'Service':'x'},{'Service':'ureth1','Health':'unhealthy'}]
+        with patch.object(pos_sample.subprocess,'run',lambda *a,**k:type('R',(),{'stdout':'\n'.join(json.dumps(x) for x in rows)})()):
+            self.assertEqual(pos_sample.not_healthy('/g'),{'rpc':'starting','ureth1':'unhealthy'})
+    def test_the_observe_stage_waits_for_the_health_checks_and_names_what_never_reports(self):
+        import rehearse
+        waits=[]
+        class Fake:
+            evidence=Path(tempfile.mkdtemp());gen=Path('/g')
+            def say(self,x): pass
+            def expect(self,ok,what,detail=''):
+                if not ok: raise rehearse.Failure(what+' '+detail)
+            def wait(self,what,probe,seconds):
+                waits.append((what,seconds));
+                for _ in range(3):
+                    if probe(): return True
+                raise rehearse.Failure(what)
+        states=[{'rpc':'starting'},{'rpc':'starting'},{}]
+        calls=[]
+        def health(g): calls.append(1);return states[min(len(calls)-1,2)]
+        def fail(*a,**k): raise AssertionError('the sampler must not start before the services are healthy')
+        with patch.object(pos_sample,'not_healthy',lambda g:{'rpc':'starting'}), patch.object(pos_sample.subprocess,'run',fail):
+            with self.assertRaises(rehearse.Failure) as e: pos_sample.pos_observe(Fake())
+        self.assertIn("rpc",str(e.exception));self.assertEqual(waits[-1],('every healthchecked service is healthy',180))
+        waits.clear()
+        with patch.object(pos_sample,'not_healthy',health), patch.object(pos_sample.subprocess,'run',lambda *a,**k:(_ for _ in ()).throw(RuntimeError('sampler started'))):
+            with self.assertRaises(RuntimeError): pos_sample.pos_observe(Fake())   # healthy on the third look: only then does it start the sampler
+        self.assertEqual(len(calls),3)
     def test_a_result_that_is_not_whole_words_is_refused(self):
         with self.assertRaises(ValueError): pos_sample.words('0x'+'00'*31)
         with self.assertRaises(ValueError): pos_sample.words('0x')
