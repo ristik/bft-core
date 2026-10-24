@@ -731,6 +731,7 @@ P85_STEPS="p85_baseline p85_joiner_nodes p85_joiner_onboard p85_election_reserve
 p85_run_lane() {
   local s
   mkdir -p "$Q3_DIR" "$P85_DIR/run"; : >"$Q3_DIR/commands.log"
+  mkdir -p "$H3_DIR/x4pos" && : >"$H3_DIR/x4pos/lane-steps.log"   # this run's record of passed steps only (scripts/x4pos/lane-check.sh reads it as evidence; rev2's nit on #831)
   : >"$Q3_DIR/pins.txt"
   H3_RESTORE_TRUST_BASE=test-nodes/trust-base.json
   Q3_GENESIS_IDENTITIES=$P85_DIR/genesis-identities.json
@@ -806,6 +807,11 @@ p85_run_lane() {
     if [ "${X4_REWARDS_POS:-0}" = 1 ]; then   # X4 B6c: the reward steps on this chain (scripts/x4pos/rewards-pos-lib.sh): what the pool can close here is limited by the contract, see that file
       source scripts/lib/rewards-lib.sh; source scripts/x4pos/rewards-pos-lib.sh
       P85_STEPS=${P85_STEPS/ p85_epoch_switches x4a_snapshot/ p85_epoch_switches x4a_snapshot x4r_intervals x4r_dry_refill x4r_claim x4a_snapshot}
+    fi
+    if [ "${X4_GOV_LANE:-0}" = 1 ]; then   # X4 B6e (scripts/x4pos/gov-lib.sh): queue right after the baseline, execute and watch for the activation once the delays have passed (after the exit claim)
+      source scripts/lib/rewards-lib.sh; source scripts/x4pos/gov-lib.sh
+      P85_STEPS=${P85_STEPS/p85_baseline x4a_snapshot/p85_baseline x4a_snapshot x4g_queue}
+      P85_STEPS="$P85_STEPS x4g_execute x4g_check"
     fi
     P85_STEPS="$P85_STEPS x4a_final"
   fi

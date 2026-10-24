@@ -62,7 +62,8 @@ cast send <recipient-address> --value 1000000000000000wei --legacy --private-key
 
 `--legacy` is needed: without it `cast` estimates EIP-1559 fees with `eth_feeHistory`, which the gateway does not allow (it serves `eth_gasPrice` instead), and the send fails.
 
-The gateway accepts the ordinary read methods and `eth_sendRawTransaction`; it refuses signing, admin and Engine methods, batches and bodies over 16 KiB, and answers `429`
+The gateway accepts the ordinary read methods and `eth_sendRawTransaction`; it refuses signing, admin and Engine methods, batches and bodies over 16 KiB (a raw
+transaction, `eth_call` or `eth_estimateGas` may be up to 4.5 MiB, so a bridge redemption fits), and answers `429`
 above 10 requests per second per client IP, and the gateway also has a 100 requests per second budget for everyone together, so a busy network can answer `429` below your own 10 per second. Wait a second and retry. A receipt with status 1 means the transaction is in a block. To check that the block is certified by the network, compare a
 block's hash on your endpoint with the operator's status page for the same height.
 

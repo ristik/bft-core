@@ -44,9 +44,15 @@ Only public RPC (8545), faucet (8088) and Prometheus (9090) bind **host loopback
 No root admin, shard admin, authority or Engine endpoint has a published port.
 The validator network is internal (each ureth serves `eth,net,web3,debug` there: the shard node needs `debug_getRawHeader`; the public gateway allow-lists methods and has no `debug_*`). The faucet's isolated signer has Internet
 access for hCaptcha but cannot reach validators; only its relay bridges networks.
-RPC permits an explicit public method list, no batches, bodies <=16 KiB, eight
+RPC permits an explicit public method list, no batches, bodies <=16 KiB except
+`eth_sendRawTransaction`, `eth_call` and `eth_estimateGas` (<=4.5 MiB, so a
+bridge redemption up to the 2 MiB envelope fits as hex, and so do the call and
+the estimate a wallet makes on it first; at most two such bodies at once), eight
 concurrent upstream jobs, five-second client read timeout, ten requests/IP/second,
-100 requests/second overall and bounded client bookkeeping. Expensive log scans,
+100 requests/second overall and bounded client bookkeeping. The same gateway
+serves the aggregator's JSON-RPC on `POST /aggregator` (the SDK's methods only,
+bodies <=64 KiB) and its trust-base pages on `GET /api/v1/trustbases`, with their
+own limit of ten requests/IP/second and 50/second overall; no authentication. Expensive log scans,
 trace/debug and signing methods are excluded. `eth_call`/estimate run under these
 limits and upstream deadlines; transaction fanout reuses faucet/relay.py and checks
 every validator's chain ID/genesis before sending. A partial broadcast is ambiguous:
@@ -146,7 +152,7 @@ UCT via the faucet, wait for a successful receipt, then submit a signed native
 transfer through `https://rpc.<domain>/`. Record hash, successful receipt, block
 hash and certified shard head. Gateway responses alone do not prove certification.
 Reject old genesis wallet pins, signing/admin/Engine methods, batches, malformed
-JSON, >16 KiB bodies and burst traffic. Capture 400/429 results and verify ordinary
+JSON, >16 KiB bodies (other than raw transactions) and burst traffic. Capture 400/429 results and verify ordinary
 RPC still responds afterwards. A raw externally signed transaction must enter
 **all** paired mempools; the RPC relay handles that fanout.
 
@@ -293,7 +299,8 @@ N=3,4,7; this parsing step needs no Docker daemon. Package tests check the
 signer's generated invocation against the tracked script permissions (the image
 copies a readable script and invokes it through `/bin/sh`), the aggregator-go and
 MongoDB service settings, and rejection of an otherwise valid allowed JSON-RPC request larger
-than 16 KiB before any relay call.
+than 16 KiB before any relay call (`eth_sendRawTransaction`, `eth_call` and `eth_estimateGas` up to 4.5 MiB pass, within two
+large-request slots), and the aggregator route's allow-list, bound and separate rate limit.
 
 CI also builds aggregator-go from `pins.json`'s revision and runs
 `validate-generation.py --aggregator <pinned-binary>`: a native three-root probe

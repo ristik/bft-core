@@ -52,6 +52,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent))
 from rehearse import PROXY_IPS, Failure, Rehearsal   # noqa: E402  (the package's recorder and helpers)
 from deploy_bridge import TAG, validators_network   # noqa: E402
+import release   # noqa: E402
 
 ENDPOINT = '127.0.0.1:8090'
 # a valid first-owner predicate (a signature predicate), the corpus' history/prepare-valid input: the vault's prepareLock refuses a malformed one
@@ -62,7 +63,7 @@ DRIVER = 'tests/live/anyage.ts'   # in the image's native-bridge-plugins checkou
 DRIVER_FUNDS = 30 * 10 ** 18   # each driver token locks 1 ETH and gives its recipient and submitter 1 ETH each
 # the driver's fixed recipient, submitter and payee (tests/live/anyage.ts)
 RECIPIENT, SUBMITTER, PAYEE = '0x70997970C51812dc3A010C7d01b50e0d17dc79C8', '0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC', '0x000000000000000000000000000000000000bEEF'
-GATEWAY_MAX_BODY = 16384   # gateway.py MAX_BODY
+GATEWAY = release.gateway_limits()   # gateway.py's MAX_BODY, MAX_RAW_TX_BODY and AGG_MAX_BODY
 # One aggregator answers at most 256 state IDs in one batch (the SDK's BATCH_MAX_STATE_IDS), and the long history's batch holds the mint, every
 # transfer and the burn, so with the single aggregator-go it has at most 254 transfers; the driver also requires more than 64 (the former bound).
 LONG_TRANSFERS_MAX = 254
@@ -198,8 +199,8 @@ class BridgeRehearsal(Rehearsal):
         amount = int(saved['amountWei'])
         self.expect(self.vault_balance() == before + amount, 'the vault holds the locked amount (custody)', f'{before} + {amount}')
         bytes_ = saved['envelope']['bytes']
-        fits = 2 * bytes_ + 1024 < GATEWAY_MAX_BODY
-        self.say(f'  NOTE the return proof is {bytes_} bytes: a redeem transaction carrying it {"fits" if fits else "does NOT fit"} the public gateway\'s {GATEWAY_MAX_BODY}-byte body limit')
+        self.expect(2 * bytes_ + 1024 < GATEWAY['MAX_RAW_TX_BODY'], f'a redeem transaction carrying the {bytes_}-byte return proof fits the public gateway\'s eth_sendRawTransaction bound',
+                    f'{GATEWAY["MAX_RAW_TX_BODY"]} bytes')
         self.driver('verify', '/work/lane-config.json', f'/work/{run}/saved.json', '--epoch', 'current')
         names = [f'ureth{down}', f'root{down}', f'shard{down}'] if down else []
         if down:
@@ -256,7 +257,9 @@ class BridgeRehearsal(Rehearsal):
         latest = int(self.call('eth_getBlockByNumber', ['latest', False])['gasLimit'], 16)
         for what, got, want in (('D1, the redemption envelope bound', limits['D1envelopeBytes'], 2 << 20), ('D3, the ordinary block capacity', limits['D3ordinaryCapacity'], 60_000_000),
                                 ('the block gas limit (the latest block\'s)', limits['blockGasLimit'], latest), ('the proof window', limits['proofWindowBlocks'], PROOF_WINDOW),
-                                ('the gateway\'s body bound', limits['gatewayMaxBodyBytes'], GATEWAY_MAX_BODY),
+                                ('the gateway\'s body bound', limits['gatewayMaxBodyBytes'], GATEWAY['MAX_BODY']),
+                                ('the gateway\'s raw-transaction body bound', limits['gatewayMaxRawTxBodyBytes'], GATEWAY['MAX_RAW_TX_BODY']),
+                                ('the gateway\'s aggregator body bound', limits['gatewayAggregatorMaxBodyBytes'], GATEWAY['AGG_MAX_BODY']),
                                 ('the SDK batch bound (the long history\'s transfer limit + 2)', limits['aggregatorBatchStateIds'], LONG_TRANSFERS_MAX + 2)):
             self.expect(got == want, f'the manifest\'s {what} is {want}', str(got))
         self.expect(rel['profile']['b1Profile']['sha256'] == hashlib.sha256((self.gen / 'network/b1-profile.json').read_bytes()).hexdigest(), 'the manifest names this generation\'s B1 profile')

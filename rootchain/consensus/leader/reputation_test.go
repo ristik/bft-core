@@ -41,6 +41,12 @@ func Test_ReputationBased_Update(t *testing.T) {
 		require.EqualError(t, err, `not updating leaders because rounds are not consecutive {parent: 1, QC: 1, current: 2}`)
 		require.Equal(t, slotIdx, rl.curIdx, "expected that round leader buffer index is not changed")
 
+		// the genesis QC: the rounds are consecutive, but there is no block before the genesis (#841: the election failed to load round 0)
+		err = rl.Update(&types.QuorumCert{VoteInfo: &types.RoundInfo{RoundNumber: 1, ParentRoundNumber: 0}}, 2, loadBlock)
+		require.EqualError(t, err, `not updating leaders because rounds are not consecutive {parent: 0, QC: 1, current: 2}`)
+		require.ErrorIs(t, err, ErrNotConsecutive)
+		require.Equal(t, slotIdx, rl.curIdx, "expected that round leader buffer index is not changed")
+
 		err = rl.Update(&types.QuorumCert{VoteInfo: &types.RoundInfo{RoundNumber: 1, ParentRoundNumber: 2}}, 2, loadBlock)
 		require.EqualError(t, err, `not updating leaders because rounds are not consecutive {parent: 2, QC: 1, current: 2}`)
 		require.Equal(t, slotIdx, rl.curIdx, "expected that round leader buffer index is not changed")
@@ -591,6 +597,11 @@ func Test_ReputationBased(t *testing.T) {
 		currentRound++
 		err := processRound(rl, currentRound)
 		require.Error(t, err)
+		if currentRound == 2 {
+			// the QC of the genesis: no election (the same fallback, without walking to a block before the genesis)
+			require.ErrorIs(t, err, ErrNotConsecutive)
+			continue
+		}
 		require.Contains(t, err.Error(), fmt.Sprintf("failed to elect leader for round %d:", currentRound+1))
 	}
 	// validate: blockStore must now contain len(peerIDs) blocks (IOW block per author)

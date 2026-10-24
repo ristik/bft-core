@@ -14,8 +14,9 @@ import (
 )
 
 // ErrNotConsecutive is returned by Update when the QC does not extend a chain of three consecutive rounds (a round was skipped by a timeout,
-// which is routine at bootstrap and after any timeout). It is not a failure: no election runs and the leader of the next round falls back to
-// the deterministic round-robin of GetLeaderForRound, identically on every node.
+// which is routine at bootstrap and after any timeout), or when the QC is the genesis QC (parent round 0: there is no block before the genesis
+// to elect from; a root meets it as its high QC after a recovery to the genesis, #841). It is not a failure: no election runs and the leader of
+// the next round falls back to the deterministic round-robin of GetLeaderForRound, identically on every node.
 var ErrNotConsecutive = errors.New("rounds are not consecutive")
 
 /*
@@ -132,7 +133,7 @@ round, it is expected to return either valid block or error.
 func (rb *ReputationBased) Update(qc *abtypes.QuorumCert, currentRound uint64, blockLoader BlockLoader) error {
 	exR := qc.GetParentRound()
 	qcR := qc.GetRound()
-	if exR+1 != qcR || qcR+1 != currentRound {
+	if exR == 0 || exR+1 != qcR || qcR+1 != currentRound {
 		return fmt.Errorf("not updating leaders because %w {parent: %d, QC: %d, current: %d}", ErrNotConsecutive, exR, qcR, currentRound)
 	}
 

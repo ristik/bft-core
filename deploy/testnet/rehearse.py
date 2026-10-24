@@ -29,6 +29,7 @@ import handoff
 import handoff_ops
 import operator_rpc
 import pos_crash
+import pos_join
 import pos_owner
 import pos_sample
 
@@ -232,7 +233,7 @@ class Rehearsal:
         s, _ = self.rpc(b'{not json', b)
         self.expect(s == 400, 'malformed JSON is refused', f'status {s}')
         s, text = self.rpc(json.dumps(dict(ok, params=['x' * 20000])).encode(), b)
-        self.expect(s in (400, 0), 'a body over 16 KiB is refused', f'status {s} {text[:40] if s == 0 else ""}')
+        self.expect(s in (400, 0), 'a body over 16 KiB (an ordinary method) is refused', f'status {s} {text[:40] if s == 0 else ""}')
         s, _ = self.http(PUBLIC_RPC, 'POST', '/other', json.dumps(ok).encode(), {'X-Forwarded-For': b})
         self.expect(s == 400, 'another path is refused', f'status {s}')
         s, _ = self.http(PUBLIC_RPC, 'POST', '/', json.dumps(ok).encode())
@@ -1146,8 +1147,9 @@ STAGES = (('up', 'up'), ('identity', 'identity'), ('first-tx', 'first_tx'), ('ga
 Rehearsal.pos_observe = pos_sample.pos_observe   # the sampler smoke lives in pos_sample.py
 for _method, _stage in pos_crash.METHODS.items():   # the OPT-IN crash-recovery stages live in pos_crash.py (bft-core #843)
     setattr(Rehearsal, _method, _stage)
+Rehearsal.pos_joiner = pos_join.pos_joiner   # the joiner stage lives in pos_join.py; it is not in the default list (it needs its own fresh generation)
 Rehearsal.pos_owner = pos_owner.pos_owner   # the owner-key stage lives in pos_owner.py
-POS_STAGES = (('pos-smoke', 'pos_smoke'), ('pos-observe', 'pos_observe'), ('pos-rewards', 'pos_rewards'), ('pos-election', 'pos_election'), ('pos-proposal', 'pos_proposal'), ('pos-abort', 'pos_abort'), ('pos-propose', 'pos_propose'), ('pos-too-late', 'pos_too_late'), ('pos-install', 'pos_install'), ('pos-advance', 'pos_advance'), ('pos-restart', 'pos_restart'), ('pos-stale', 'pos_stale'), ('pos-handoff-2', 'pos_handoff_2'), ('pos-restart-2', 'pos_restart_2'), ('pos-recreate', 'pos_recreate'), *pos_crash.STAGES, ('pos-owner', 'pos_owner'))
+POS_STAGES = (('pos-smoke', 'pos_smoke'), ('pos-observe', 'pos_observe'), ('pos-rewards', 'pos_rewards'), ('pos-election', 'pos_election'), ('pos-proposal', 'pos_proposal'), ('pos-abort', 'pos_abort'), ('pos-propose', 'pos_propose'), ('pos-too-late', 'pos_too_late'), ('pos-install', 'pos_install'), ('pos-advance', 'pos_advance'), ('pos-restart', 'pos_restart'), ('pos-stale', 'pos_stale'), ('pos-handoff-2', 'pos_handoff_2'), ('pos-restart-2', 'pos_restart_2'), ('pos-recreate', 'pos_recreate'), *pos_crash.STAGES, ('pos-owner', 'pos_owner'), ('pos-joiner', 'pos_joiner'))
 
 
 def main():
