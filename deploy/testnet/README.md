@@ -45,8 +45,9 @@ No root admin, shard admin, authority or Engine endpoint has a published port.
 The validator network is internal (each ureth serves `eth,net,web3,debug` there: the shard node needs `debug_getRawHeader`; the public gateway allow-lists methods and has no `debug_*`). The faucet's isolated signer has Internet
 access for hCaptcha but cannot reach validators; only its relay bridges networks.
 RPC permits an explicit public method list, no batches, bodies <=16 KiB except
-`eth_sendRawTransaction` (<=4.5 MiB, so a bridge redemption up to the 2 MiB
-envelope fits as hex; at most two such bodies at once), eight
+`eth_sendRawTransaction`, `eth_call` and `eth_estimateGas` (<=4.5 MiB, so a
+bridge redemption up to the 2 MiB envelope fits as hex, and so do the call and
+the estimate a wallet makes on it first; at most two such bodies at once), eight
 concurrent upstream jobs, five-second client read timeout, ten requests/IP/second,
 100 requests/second overall and bounded client bookkeeping. The same gateway
 serves the aggregator's JSON-RPC on `POST /aggregator` (the SDK's methods only,
@@ -298,7 +299,7 @@ N=3,4,7; this parsing step needs no Docker daemon. Package tests check the
 signer's generated invocation against the tracked script permissions (the image
 copies a readable script and invokes it through `/bin/sh`), the aggregator-go and
 MongoDB service settings, and rejection of an otherwise valid allowed JSON-RPC request larger
-than 16 KiB before any relay call (an `eth_sendRawTransaction` up to 4.5 MiB passes, within two
+than 16 KiB before any relay call (`eth_sendRawTransaction`, `eth_call` and `eth_estimateGas` up to 4.5 MiB pass, within two
 large-request slots), and the aggregator route's allow-list, bound and separate rate limit.
 
 CI also builds aggregator-go from `pins.json`'s revision and runs

@@ -231,7 +231,7 @@ class Rehearsal:
         s, _ = self.rpc(b'{not json', b)
         self.expect(s == 400, 'malformed JSON is refused', f'status {s}')
         s, text = self.rpc(json.dumps(dict(ok, params=['x' * 20000])).encode(), b)
-        self.expect(s in (400, 0), 'a body over 16 KiB (any method but eth_sendRawTransaction) is refused', f'status {s} {text[:40] if s == 0 else ""}')
+        self.expect(s in (400, 0), 'a body over 16 KiB (an ordinary method) is refused', f'status {s} {text[:40] if s == 0 else ""}')
         s, _ = self.http(PUBLIC_RPC, 'POST', '/other', json.dumps(ok).encode(), {'X-Forwarded-For': b})
         self.expect(s == 400, 'another path is refused', f'status {s}')
         s, _ = self.http(PUBLIC_RPC, 'POST', '/', json.dumps(ok).encode())

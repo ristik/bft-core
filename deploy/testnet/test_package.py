@@ -719,21 +719,27 @@ class PublicRPC(unittest.TestCase):
         self.assertEqual(self.declared(gateway.MAX_RAW_TX_BODY+1),400)   # over every bound: refused on the declared length
         self.assertEqual(self.declared(gateway.AGG_MAX_BODY+1,'/aggregator'),400)
         self.assertEqual(self.relay.calls,[])
-    def test_only_a_raw_transaction_may_exceed_the_ordinary_body_bound(self):
+    def test_only_the_redemption_methods_may_exceed_the_ordinary_body_bound(self):
         raw='0x'+'ab'*(gateway.MAX_BODY+100)   # a body above 16 KiB, far below the raw-transaction bound
         status,result=self.send(json.dumps({'jsonrpc':'2.0','id':5,'method':'eth_sendRawTransaction','params':[raw]}))
         self.assertEqual((status,result['id']),(200,5))
         self.assertEqual(self.relay.calls,[('eth_sendRawTransaction',[raw])])
+        # the call and the estimate a wallet makes on the same calldata first take the same path (bft-core#835 run 40069178284: a split part's redeem)
+        for i,method in enumerate(['eth_call','eth_estimateGas']):
+            status,result=self.send(json.dumps({'jsonrpc':'2.0','id':10+i,'method':method,'params':[{'data':raw},'latest']}))
+            self.assertEqual((status,result['id']),(200,10+i),method)
+        self.assertEqual([m for m,_ in self.relay.calls],['eth_sendRawTransaction','eth_call','eth_estimateGas'])
         # the same size for any other method is refused before the relay
-        self.assertEqual(self.send(json.dumps({'jsonrpc':'2.0','id':6,'method':'eth_call','params':[{'data':raw},'latest']}))[0],400)
-        self.assertEqual(len(self.relay.calls),1)
+        for method in ['eth_getBalance','eth_getCode','eth_getTransactionReceipt']:
+            self.assertEqual(self.send(json.dumps({'jsonrpc':'2.0','id':6,'method':method,'params':[raw,'latest']}))[0],400,method)
+        self.assertEqual(len(self.relay.calls),3)
         # a large body with no free slot is refused (busy), and never reaches the relay
         for _ in range(gateway.LARGE_SLOTS): self.server.large.acquire()
         try:
             self.assertEqual(self.send(json.dumps({'jsonrpc':'2.0','id':7,'method':'eth_sendRawTransaction','params':[raw]}))[0],503)
         finally:
             for _ in range(gateway.LARGE_SLOTS): self.server.large.release()
-        self.assertEqual(len(self.relay.calls),1)
+        self.assertEqual(len(self.relay.calls),3)
         # an ordinary-size body needs no slot
         for _ in range(gateway.LARGE_SLOTS): self.server.large.acquire()
         try:

@@ -2,8 +2,9 @@
 
 Two public routes:
   POST /                    the execution chain's allow-listed methods (PUBLIC), through the relay to every validator. Bodies up to MAX_BODY,
-                            except eth_sendRawTransaction up to MAX_RAW_TX_BODY (a bridge redemption carries its whole return proof: the 2 MiB
-                            direct envelope is about 4.2 MB as hex); at most LARGE_SLOTS bodies above MAX_BODY are read at once.
+                            except LARGE_METHODS up to MAX_RAW_TX_BODY: a bridge redemption carries its whole return proof (the 2 MiB direct
+                            envelope is about 4.2 MB as hex), and a wallet checks it with eth_call and eth_estimateGas on the same calldata before
+                            it sends it; at most LARGE_SLOTS bodies above MAX_BODY are read at once.
   POST /aggregator          the aggregator's JSON-RPC (AGG_METHODS, the state-transition SDK's), bodies up to AGG_MAX_BODY, and
   GET  /api/v1/trustbases   the aggregator's signed trust-base pages (the SDK's refresh resolves this path against the aggregator URL's host):
                             both forwarded to AGG_URL unchanged, with their own rate limit. No authentication (testnet).
@@ -26,6 +27,9 @@ from faucet.relay import Relay
 PUBLIC = frozenset('eth_chainId eth_blockNumber eth_getBlockByNumber eth_getBalance eth_getTransactionCount eth_gasPrice eth_maxPriorityFeePerGas eth_estimateGas eth_call eth_getCode eth_getTransactionReceipt eth_getTransactionByHash eth_sendRawTransaction net_version web3_clientVersion'.split())
 MAX_BODY = 16384
 MAX_RAW_TX_BODY = 4718592   # 4.5 MiB: the 2 MiB envelope as hex in a redeem transaction, with its ABI and JSON framing
+# the methods that may carry a redemption's calldata: its send, and the call and the estimate a wallet makes first (their execution is bounded by the
+# gas the call is given, their concurrency by LARGE_SLOTS)
+LARGE_METHODS = frozenset({'eth_sendRawTransaction', 'eth_call', 'eth_estimateGas'})
 LARGE_SLOTS = 2
 AGG_METHODS = frozenset('certification_request get_inclusion_proof.v2 get_inclusion_proofs.v1 get_block_height get_non_inclusion_proof.v1'.split())
 AGG_MAX_BODY = 65536        # a 256-state get_inclusion_proofs.v1 batch is about 17 KB
@@ -139,14 +143,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if not 0 < length <= MAX_RAW_TX_BODY:
                 raise ValueError('body size')
             if length > MAX_BODY:
-                # only eth_sendRawTransaction may be this large; the method is known only after the read, so few such reads run at once
+                # only LARGE_METHODS may be this large; the method is known only after the read, so few such reads run at once
                 if not self.server.large.acquire(blocking=False):
                     return self.reply(503, {'error': 'busy: too many large requests, retry'})
                 large = True
             body = json.loads(self.rfile.read(length))
             if not isinstance(body, dict) or body.get('jsonrpc') != '2.0' or body.get('method') not in PUBLIC or not isinstance(body.get('params', []), list):
                 raise ValueError('unsupported JSON-RPC request')
-            if length > MAX_BODY and body.get('method') != 'eth_sendRawTransaction':
+            if length > MAX_BODY and body.get('method') not in LARGE_METHODS:
                 raise ValueError('body size')
             if not isinstance(body.get('id'), (str, int, type(None))):
                 raise ValueError('id')

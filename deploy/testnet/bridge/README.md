@@ -54,7 +54,8 @@ cd /srv/<generation> && sudo docker compose -f compose.yaml -f compose.bridge.ya
 
 The driver signs with its own key and with the fixed, publicly known keys of its recipient and submitter (`tests/live/anyage.ts`). That is fine on a
 rehearsal generation, but not on a public network: anyone can spend what those addresses hold. A redeem transaction carries the whole return proof; the public gateway
-takes `eth_sendRawTransaction` bodies up to 4.5 MiB (`gateway.py` `MAX_RAW_TX_BODY`, every other method 16 KiB), so a redemption up to the 2 MiB envelope fits as
+takes `eth_sendRawTransaction`, `eth_call` and `eth_estimateGas` bodies up to 4.5 MiB (`gateway.py` `MAX_RAW_TX_BODY`, `LARGE_METHODS`; every other method
+16 KiB), so a redemption up to the 2 MiB envelope, and the call and the estimate a wallet makes on it first, fit as
 hex. The `roundtrip` stage checks it.
 
 ## The release manifest

@@ -88,7 +88,7 @@ curl -s https://rpc.DOMAIN/ -H 'Content-Type: application/json' \
 ```
 and a certified shard height at or above the receipt's `blockNumber` (a receipt alone is not certification).
 The gateway allows basic `eth_*` reads, call/estimate and `eth_sendRawTransaction` only (no `eth_feeHistory`, no
-batches, 16 KiB bodies except raw transactions up to 4.5 MiB, 10 req/s per IP), and the aggregator on `/aggregator` and
+batches, 16 KiB bodies except raw transactions, `eth_call` and `eth_estimateGas` up to 4.5 MiB, 10 req/s per IP), and the aggregator on `/aggregator` and
 `/api/v1/trustbases` (its own 10 req/s per IP). Open nginx routing last (`nginx.conf.example` routes all three paths).
 
 ### Handoff through the host wrapper (untested on containers)
