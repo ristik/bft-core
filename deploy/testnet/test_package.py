@@ -158,6 +158,15 @@ class ProofOfStake(unittest.TestCase):
             self.assertNotIn(name,[n for n,_ in rehearse.STAGES])   # the PoA generation has no registry: the default run must not name them
         self.assertIn('--pos-contracts pinned-contracts',workflow)
         self.assertIn('ref: ${{ steps.pins.outputs.contracts }}',workflow)
+    def test_every_pos_stage_attached_from_another_module_is_in_the_stage_list(self):
+        # a merge once dropped ('pos-resources', ...) from POS_STAGES while the method stayed attached: the stage silently could not be named (#853)
+        import rehearse
+        listed={method for _,method in rehearse.POS_STAGES}
+        attached={n for n in dir(rehearse.Rehearsal) if n.startswith('pos_') and callable(getattr(rehearse.Rehearsal,n))
+                  and getattr(getattr(rehearse.Rehearsal,n),'__module__','')!=rehearse.__name__}
+        self.assertEqual(sorted(attached-listed),[],'attached stage methods that no stage name reaches')
+        self.assertEqual(len(listed),len(rehearse.POS_STAGES),'a method listed twice')
+        self.assertIn('pos_resources',attached,'the test sees attachments (pos_sample.pos_resources)')
     def test_pos_owner_names_the_revert_selector_it_expects(self):
         import json,rehearse,pos_owner
         class Fake:   # the two helpers it needs: a selector table and an eth_call that fails with a given revert data
