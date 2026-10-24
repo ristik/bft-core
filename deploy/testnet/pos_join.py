@@ -199,8 +199,20 @@ def pos_join_heavy(r):
     topic = r.cast_run('keccak', NO_CANDIDATE)
     def recorded():
         logs = r.ureth(1, 'eth_getLogs', [{'address': election, 'fromBlock': hex(start), 'toBlock': 'latest', 'topics': [topic]}]) or []
-        return [(int(x['data'][2 + 64:2 + 128], 16), int(x['data'][2 + 128:2 + 192], 16)) for x in logs]   # (attempt, reason)
-    got = r.wait('the election records a NoCandidate after the heavy joiner is eligible', recorded, 1500)
+        return [(int(x['data'][2:2 + 64], 16), int(x['data'][2 + 64:2 + 128], 16)) for x in logs]   # data: attempt, reason, origin; (attempt, reason)
+    try:
+        got = r.wait('the election records a NoCandidate after the heavy joiner is eligible', recorded, 1500)
+    except Exception as error:
+        # what the election was doing: its open result, attempt cursor and thresholds against the registry's clock, and every event it emitted since the heavy joiner registered
+        lines = [f'{k}: {r.view_text(election, sig).strip()}' for k, sig in (('openResult', 'openResult()(bytes32)'), ('attemptCursor', 'attemptCursor()(uint64)'),
+                                                                          ('lastAttemptResult', 'lastAttemptResult()(bytes32)'), ('thresholds', 'thresholds()(uint256,uint256)'),
+                                                                          ('liveCount', 'liveCount()(uint32)'))]
+        lines += [f'registry {k}: {r.view_text(r.REGISTRY, sig).strip()}' for k, sig in (('progress', 'progress()(uint64)'), ('ucTime', 'ucTime()(uint64)'), ('recordCount', 'recordCount()(uint64)'))]
+        every = r.ureth(1, 'eth_getLogs', [{'address': election, 'fromBlock': hex(start), 'toBlock': 'latest'}]) or []
+        lines += [f'event {x["topics"][0]} block {int(x["blockNumber"], 16)} data {x["data"][:140]}' for x in every]
+        (r.evidence / 'join-heavy-diagnostics.txt').write_text('\n'.join(lines) + '\n')
+        r.say('  election state at the timeout: ' + ' | '.join(lines)[:1500])
+        raise
     reason = got[0][1]
     r.say(f'  NoCandidate events since block {start}: {got}')
     (r.evidence / 'join-heavy.json').write_text(json.dumps({'stakingId': ident, 'noCandidate': got, 'weightChurn': WEIGHT_CHURN}, indent=1) + '\n')
