@@ -273,6 +273,8 @@ single-host run proves independent failure domains. Test malformed/limited reque
 during observation and confirm recovery of normal requests. Preserve receipts,
 certification logs and before/after manifest IDs. Record failures as failures.
 
+The sampler is `observe.py` (read-only: no key, credential or signing method): `python3 deploy/testnet/observe.py $G --out /secure/path/observe` takes one sample a minute for 24 hours (`--interval`, `--duration`, `--samples`): every root's certified epoch and round, the gateway's `/healthz` and block number, the faucet guard's `/healthz` (its body, with the budget and balance, is kept for the OPERATOR to compare with the reserve: not judged by the tool; the aggregator's `/health` and the `mongo` healthcheck are likewise manual), every service's state, health and restart count, memory of this project's containers and disk use. It prints an `ALERT` and exits 1 for the notification rules above: certified heads stopped for `--stall` seconds (120; no root's round moved, or the execution chain's block at the gateway did not: the roots keep certifying while a stuck shard does not), a service not running or unhealthy, a restart count that went up, disk above `--disk-limit` percent (80), the gateway or faucet not answering 200. The rehearsal runs it as a four-sample smoke (stage `observe`, `--no-faucet`: the faucet guard's health needs the signer, which a rehearsal does not start); that proves the collection and the alert rules on a runner, not a day on the host.
+
 CI runs gateway refusal/topology tests, existing faucet tests, two fresh genesis
 ceremonies with fixture image IDs, Compose validation, Prometheus rule/config
 validation and RPC-image build. It does not run four ureths. Native previous
