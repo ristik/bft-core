@@ -90,7 +90,7 @@ def pos_joiner(r):
     status, out = r.relayer(identity, 'join', 'admit', '--id', str(ident), *evm, joiner=True, mounts=mounts)
     r.expect(status == 0, 'join admit: the delegation to the joiner\'s root and EVM keys', out.strip()[-300:])
     r.wait('the live index holds five identities', lambda: r.view(election, 'liveCount()(uint32)')[0] == r.n + 1, 120)
-    r.expect(r.view(election, 'isIndexed(uint64)(bool)', str(ident))[0] in (True, 'true'), 'the joiner is in the live index', str(ident))
+    r.expect(r.view_text(election, 'isIndexed(uint64)(bool)', str(ident)).strip() == 'true', 'the joiner is in the live index', str(ident))
     lots = r.view_text(custody, 'generationLots(uint64,uint64)(uint256[])', str(ident), '1').strip('[]').replace(',', ' ').split()
     r.expect(len(lots) == 1, 'the joiner has one lot (lMax 1)', str(lots))
     (r.evidence / 'joiner.json').write_text(json.dumps({'index': index, 'stakingId': ident, 'owner': owner['address'], 'withdrawal': withdrawal, 'payee': payee,
