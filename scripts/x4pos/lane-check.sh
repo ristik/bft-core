@@ -13,6 +13,13 @@ ran() { local s; for s in "$@"; do grep -qx "$s" "$log" 2>/dev/null || fail "ste
 zero=0x0000000000000000000000000000000000000000000000000000000000000000
 case "$phase" in
   baseline) ran p85_baseline x4a_snapshot; [ -s "$d/snapshots.jsonl" ] || fail "no accounting snapshot" ;;
+  governance-queue)
+    ran x4g_queue
+    jq -e '.nonce >= 1 and .policyIdBefore >= 1 and (.rateProposed | tonumber) < (.rateBefore | tonumber)' "$d/steps/gov/queued.json" >/dev/null 2>&1 || fail "steps/gov/queued.json is not a record of a queued, lower reward rate" ;;
+  governance)
+    ran x4g_execute x4g_check
+    # activation is RECORDED, not required (it was not reached on this chain: contracts question open): only a boolean outcome for the queued proposal counts
+    jq -e '(.activated | type == "boolean") and .policyIdAfter >= .policyIdBefore and .waitedSeconds > 0' "$d/steps/gov/outcome.json" >/dev/null 2>&1 || fail "steps/gov/outcome.json is not a recorded outcome (boolean activated)" ;;
   rewards)
     ran x4r_intervals x4r_dry_refill x4r_claim
     line=$(sed -n 's/^REWARDS-REPLAY ok //p' "$d/steps/xr/replay-after.txt" 2>/dev/null | tail -n 1)

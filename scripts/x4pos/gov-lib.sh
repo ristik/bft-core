@@ -1,9 +1,9 @@
 # X4 B6e: the governance steps of the PoS campaign, as lane steps (p85_step): x4g_queue (right after the baseline), x4g_execute and x4g_check (late, after the delays). Definitions only: sourcing
 # this file starts nothing. Contract: unicity-pos-contracts b17829ca src/p85/GovernanceParams.sol. `queue` is by the fixed AUTHORITY only (here a key the lane holds: the genesis plan sets the
 # authority to its address when X4_GOV_LANE=1); `execute` is permissionless after BOTH delays (2000 progress rounds, 3600 UC seconds) and only SCHEDULES the proposal; it becomes the policy in
-# force only when ElectionPolicy.elect calls activateDue at its next eligible boundary (no unresolved election). On the recovery chain an election result is open from the baseline on, so
-# whether that ever happens is exactly what this experiment finds out: x4g_check waits X4G_WAIT seconds for the policy ID to move and RECORDS the outcome (activated true/false), it does not
-# assert activation. The campaign counts governanceActivated only when the record says activated.
+# force only when ElectionPolicy.elect calls activateDue at its next eligible boundary (no unresolved election). Activation is NOT reached on this chain: it happens only inside
+# ElectionPolicy.elect, which returns Disabled while any election result is open (dev3's reading of the contracts; here a result is open from the baseline and after the recovery). x4g_check waits
+# X4G_WAIT seconds for the policy ID to move and RECORDS the outcome (activated true/false), it does not assert activation; the campaign lists activation under notCovered.
 
 X4G_DIR=${X4G_DIR:-$H3_DIR/x4pos/steps/gov}
 X4G_WAIT=${X4G_WAIT:-1800}

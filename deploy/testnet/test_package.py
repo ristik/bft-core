@@ -23,6 +23,7 @@ import observe
 import joiner
 import pos_join
 import pos_sample
+import pos_crash
 
 class FakeRelay:
     def __init__(self): self.calls=[]
@@ -1253,6 +1254,25 @@ class PosSample(unittest.TestCase):
         with patch.object(pos_sample,'not_healthy',health), patch.object(pos_sample.subprocess,'run',lambda *a,**k:(_ for _ in ()).throw(RuntimeError('sampler started'))):
             with self.assertRaises(RuntimeError): pos_sample.pos_observe(Fake())   # healthy on the third look: only then does it start the sampler
         self.assertEqual(len(calls),3)
+    def test_pos_crash_scans_logs_and_runs_before_the_stage_that_must_stay_last(self):
+        import rehearse
+        self.assertEqual(pos_crash.scan_log("ok\nlevel=error msg=x\nthread 'main' panicked at src/x.rs\nWARN y\npanic: boom\n"),(2,2))
+        self.assertEqual(pos_crash.scan_log("all quiet\n"),(0,0))
+        names=[n for n,_ in rehearse.POS_STAGES]
+        names=[n for n in names if n!='pos-joiner']   # the joiner runs on its own fresh generation, not after pos-owner on this one
+        self.assertEqual(names[-1],'pos-owner','pos-owner declares a retirement: nothing may follow it')
+        for name,_ in pos_crash.STAGES:
+            self.assertLess(names.index('pos-recreate'),names.index(name));self.assertLess(names.index(name),names.index('pos-owner'))
+            self.assertTrue(callable(getattr(rehearse.Rehearsal,dict(rehearse.POS_STAGES)[name])),name)
+        workflow=(generate.REPO/'.github/workflows/testnet-rehearsal.yml').read_text()
+        default=re.search(r'POS_STAGES:-([^}]*)\}',workflow).group(1).split(',')
+        for name,_ in pos_crash.STAGES: self.assertNotIn(name,default,'the crash stages are opt-in: bft-core #843 fails today')
+    def test_restart_counts_reads_each_container_and_reports_a_missing_one(self):
+        class R:
+            def compose(self,*a,check=True): return {'ureth2':'abc\n','root2':'def\n'}.get(a[-1],'')
+        def run(cmd,**k): return type('P',(),{'stdout':{'abc':'3\n','def':'x\n'}[cmd[-1]]})()
+        with patch.object(pos_crash.subprocess,'run',run):
+            self.assertEqual(pos_crash.restart_counts(R(),['ureth2','root2','shard2']),{'ureth2':3,'root2':None,'shard2':None})
     def test_a_result_that_is_not_whole_words_is_refused(self):
         with self.assertRaises(ValueError): pos_sample.words('0x'+'00'*31)
         with self.assertRaises(ValueError): pos_sample.words('0x')

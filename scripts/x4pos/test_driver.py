@@ -90,14 +90,15 @@ class Preflight(unittest.TestCase):
                 self.assertLessEqual(s["at"] + s["budgetSeconds"], 14400 - m["tailSeconds"], s["id"])
         # v2 (the 2.5 h lane + driver segments, decided with the orchestrator): what the lane can show is required; what it cannot is listed with a pointer, never silently dropped
         r = m["required"]
-        self.assertTrue(r["replacements"] >= 1 and r["offences"] >= 2 and r["exits"] >= 1 and r["rewardIntervals"] >= 2 and r["recoveries"] >= 1 and r["faults"] >= 4 and r["governanceActivated"] >= 1)
+        self.assertTrue(r["replacements"] >= 1 and r["offences"] >= 2 and r["exits"] >= 1 and r["rewardIntervals"] >= 2 and r["recoveries"] >= 1 and r["faults"] >= 4 and r["governance"] >= 1 and "governanceActivated" not in r)
         self.assertNotIn("aborts", r)
         listed = " ".join(n["what"] for n in m["notCovered"]).lower()
         for must in ("abort", "second replacement", "not an offender", "4 closed intervals"):
             self.assertIn(must, listed)
         self.assertTrue(all(n["coveredBy"].strip() for n in m["notCovered"]))
         lanes = [s["id"] for s in m["steps"] if s.get("lane") is True]
-        self.assertEqual(len(lanes), 10)
+        self.assertEqual(len(lanes), 12)
+        self.assertIn("activation", listed)
         self.assertEqual([s["id"] for s in sorted(m["steps"], key=lambda s: (s["at"], s["id"]))][:len(lanes)], lanes)
 
     def test_the_real_campaign_is_refused_to_run_until_every_step_exists(self):
