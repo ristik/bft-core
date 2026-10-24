@@ -13,10 +13,10 @@ set -uo pipefail
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd); repo=$(cd "$here/../.." && pwd)
 source "$repo/scripts/lib/portable.sh"
 . "$repo/scripts/lib/reth-pin.sh"   # rethEvidenceValidate / rethEvidenceSecretValues (definitions only)
-ev= out= status=0 nodes= minlogs=0 kind=combined s4=0 x4o=0 x4a=0 x4r=0; extra=()
+ev= out= status=0 nodes= minlogs=0 kind=combined s4=0 x4o=0 x4a=0 x4r=0 x4g=0; extra=()
 while [ $# -gt 0 ]; do case "$1" in
   --evidence) ev=$2; shift 2 ;; --out) out=$2; shift 2 ;; --status) status=$2; shift 2 ;; --nodes) nodes=$2; shift 2 ;;
-  --min-node-logs) minlogs=$2; shift 2 ;; --kind) kind=$2; shift 2 ;; --s4) s4=$2; shift 2 ;; --x4o) x4o=$2; shift 2 ;; --x4a) x4a=$2; shift 2 ;; --x4r) x4r=$2; shift 2 ;; --extra) extra+=("$2"); shift 2 ;; *) echo "publish-evidence: unknown argument $1" >&2; exit 2 ;; esac; done
+  --min-node-logs) minlogs=$2; shift 2 ;; --kind) kind=$2; shift 2 ;; --s4) s4=$2; shift 2 ;; --x4o) x4o=$2; shift 2 ;; --x4a) x4a=$2; shift 2 ;; --x4r) x4r=$2; shift 2 ;; --x4g) x4g=$2; shift 2 ;; --extra) extra+=("$2"); shift 2 ;; *) echo "publish-evidence: unknown argument $1" >&2; exit 2 ;; esac; done
 [ -d "$ev" ] && [ -n "$out" ] || { echo "usage: publish-evidence.sh --evidence DIR --out OUT --status N [--nodes DIR] [--min-node-logs N] [--extra PATH]..." >&2; exit 2; }
 name=$(basename "$ev"); mkdir -p "$out"; quarantine="$(cd "$out" && pwd)/../quarantine"; mkdir -p "$quarantine"
 stage=$(mktemp -d); trap 'rm -rf "$stage"' EXIT
@@ -121,6 +121,13 @@ if [ "$x4r" = 1 ]; then   # X4 B6c: the rewards that the recovery chain can show
   [ "$x4a" = 1 ] || { complete=no; why+=("--x4r needs --x4a: the pool's payments are judged by the accounting snapshots"); }
   pn=$(find "$pub" -path '*/x4pos/snapshots.jsonl' | head -n 1)
   [ "$(tail -n 1 "${pn:-/nonexistent}" 2>/dev/null | jq -r '.payments | length' 2>/dev/null)" -ge 1 ] 2>/dev/null || { complete=no; why+=("x4pos/snapshots.jsonl: the last snapshot has no pool payment (the Claimed decoding was not exercised)"); }
+fi
+if [ "$x4g" = 1 ]; then   # X4 B6e: the governance experiment ran: queued, executed after both delays, and the outcome (activated or not) is recorded. Activation is REPORTED, not required.
+  gq=$(find "$pub" -path '*/x4pos/steps/gov/queued.json' | head -n 1); go=$(find "$pub" -path '*/x4pos/steps/gov/outcome.json' | head -n 1)
+  jq -e '.nonce >= 1 and (.rateProposed | tonumber) < (.rateBefore | tonumber)' "${gq:-/nonexistent}" >/dev/null 2>&1 || { complete=no; why+=("x4pos/steps/gov/queued.json: no queued proposal"); }
+  jq -e '(.activated | type) == "boolean" and .policyIdAfter >= .policyIdBefore' "${go:-/nonexistent}" >/dev/null 2>&1 || { complete=no; why+=("x4pos/steps/gov/outcome.json: no recorded outcome"); }
+  grep -q 'PASS: x4g: executed nonce' "$ev/lane.log" 2>/dev/null || { complete=no; why+=("no 'x4g: executed nonce' line in lane.log (the proposal was not scheduled)"); }
+  [ -z "$go" ] || echo "governance outcome: $(jq -c . "$go")" >>"$pub/GOVERNANCE-OUTCOME.txt"
 fi
 [ -z "${CI_INTERIM:-}" ] || { complete=no; why+=("INTERIM EXPERIMENT, not acceptance evidence: $CI_INTERIM"); }
 if [ "$complete" = no ]; then

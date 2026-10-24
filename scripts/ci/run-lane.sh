@@ -39,7 +39,7 @@ finalize() {
     evdir=$work/evidence-none; mkdir -p "$evdir"; echo "the lane produced no evidence directory" >"$evdir/lane.log"
   fi
   st=${lane_rc:-1}; [ "$rc" -eq 0 ] || st=$rc
-  scripts/ci/publish-evidence.sh --evidence "$evdir" --out "$out/upload" --kind "$kind" --s4 "${S4_LANE:-0}" --x4o "${X4_OFFENCE_LANE:-0}" --x4a "${X4_ACCT_LANE:-0}" --x4r "${X4_REWARDS_POS:-0}" --status "$st" --nodes "$repo/test-nodes" --min-node-logs 1 \
+  scripts/ci/publish-evidence.sh --evidence "$evdir" --out "$out/upload" --kind "$kind" --s4 "${S4_LANE:-0}" --x4o "${X4_OFFENCE_LANE:-0}" --x4a "${X4_ACCT_LANE:-0}" --x4r "${X4_REWARDS_POS:-0}" --x4g "${X4_GOV_LANE:-0}" --status "$st" --nodes "$repo/test-nodes" --min-node-logs 1 \
     --extra "$out/run-lane.log" --extra "$out/lane-stdout.log" --extra "$out/lane-prep.log" --extra "$out/mongo" --extra "$out/p85-stop.log" --extra "$out/host-before.log.gz" --extra "$out/host-after.log.gz" --extra "$out/oom-lines.txt" >"$out/publish.log" 2>&1
   pub_rc=$?; log "publish-evidence exit $pub_rc"; cat "$out/publish.log" | tail -n 8
   return 0
@@ -107,6 +107,12 @@ fi
 if [ "$(jq -r '.rewards // false' scripts/ci/run-inputs.json 2>/dev/null)" = true ]; then
   [ "${X4_ACCT_LANE:-0}" = 1 ] || { log "rewards needs accounting: true on the x4exit kind"; exit 2; }
   export X4_REWARDS_POS=1 P85_REWARD_FUNDING=${P85_REWARD_FUNDING:-500000000000000000}; log "X4_REWARDS_POS=1 P85_REWARD_FUNDING=$P85_REWARD_FUNDING (run-inputs rewards)"
+fi
+# run-inputs "governance": true (with "accounting": true, x4exit kind) adds X4 B6e's governance experiment: the authority is a lane-held key, a proposal is queued after the baseline, executed after the delays
+# and the lane records whether an election boundary activated it (scripts/x4pos/gov-lib.sh)
+if [ "$(jq -r '.governance // false' scripts/ci/run-inputs.json 2>/dev/null)" = true ]; then
+  [ "${X4_ACCT_LANE:-0}" = 1 ] || { log "governance needs accounting: true on the x4exit kind"; exit 2; }
+  export X4_GOV_LANE=1; log "X4_GOV_LANE=1 (run-inputs governance)"
 fi
 export LANE_PINNED=1 LANE_COMMIT_UNDER_TEST=$head UTB_MIN_FREE_GIB=${UTB_MIN_FREE_GIB:-$(jq -r '.runner.minFreeDiskGiB' "$pins")}
 if [ "$kind" = combined ]; then pins_mode=env; else pins_mode=env-core; fi
