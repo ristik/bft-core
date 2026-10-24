@@ -198,7 +198,7 @@ def parse_mem(text):
 
 
 def resources(rows, headroom=0.9):
-    """From the sampler's rows (dicts as written to samples.jsonl): per container the peak memory against its limit, and per state directory the growth in kilobytes
+    """From the sampler's rows (dicts as written to samples.jsonl): per container the highest memory snapshot against its limit, and per state directory the growth in kilobytes
     between the first and the last sample. Returns (report, over) where `over` lists the containers above `headroom` of their limit."""
     peak = {}
     for row in rows:
@@ -214,8 +214,8 @@ def resources(rows, headroom=0.9):
 
 def pos_resources(r):
     """Rehearsal stage `pos-resources` (opt-in until it has run): the PoS package under its own activity for SAMPLES samples, INTERVAL s apart (the sampler, no alert),
-    recording per container the peak memory against the Compose limit and per state directory the growth in KB (evidence/pos-resources.json). Asserts no sampler alert and
-    that no container peaks above 90% of its memory limit. A RUNNER measurement of a short window: no extrapolation to a day is made, and the figures that count are the
+    recording per container the highest of the SAMPLES memory snapshots (taken INTERVAL s apart: a spike between two snapshots is not seen) against the Compose limit and per state directory the growth in KB (evidence/pos-resources.json). Asserts no sampler alert and
+    that no snapshot of a container is above 90% of its memory limit. A RUNNER measurement of a short window: no extrapolation to a day is made, and the figures that count are the
     host's (the brief's own wording)."""
     out = r.evidence / 'pos-resources'
     samples, interval = 8, 30
@@ -228,10 +228,10 @@ def pos_resources(r):
     report, over = resources(rows)
     report['window_seconds'] = (samples - 1) * interval
     (r.evidence / 'pos-resources.json').write_text(json.dumps(report, indent=1) + '\n')
-    r.say('  peak memory: ' + ' '.join(f'{n.split("-", 3)[-1]}={v["used_mib"]}/{v["limit_mib"]}MiB' for n, v in report['peak_memory'].items()))
+    r.say('  highest memory snapshot: ' + ' '.join(f'{n.split("-", 3)[-1]}={v["used_mib"]}/{v["limit_mib"]}MiB' for n, v in report['peak_memory'].items()))
     r.say('  state growth over %d s (KB): %s' % (report['window_seconds'], json.dumps(report['state_growth_kb'])))
     r.expect(bool(report['peak_memory']), 'the sampler recorded container memory')
-    r.expect(not over, 'no container peaks above 90% of its memory limit', ', '.join(over))
+    r.expect(not over, 'no container snapshot above 90% of its memory limit', ', '.join(over))
 
 
 def pos_observe(r):
