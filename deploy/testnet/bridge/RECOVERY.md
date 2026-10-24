@@ -82,9 +82,9 @@ The endpoint answers 404 and the ether stays in the vault, by design: it is disc
 Symptom: the gateway's `/healthz` fails. Locks, redemptions and claims cannot be sent from outside. The bridge's own services keep working, because
 they use the validators' execution clients on the internal network.
 
-Follow the package's procedure for the gateway and its validators ([README](../README.md)). No bridge step is needed. A redemption larger than the
-gateway's body bound (`limits.gatewayMaxBodyBytes`; a return proof is 16–26 KB as hex) never fits the gateway. It goes to `redeemEthUrl` when the
-deployment has one. Until it does, testers cannot redeem from outside: that is an open owner decision, not a failure.
+Follow the package's procedure for the gateway and its validators ([README](../README.md)). No bridge step is needed. The same gateway carries
+redemptions (`eth_sendRawTransaction` up to `limits.gatewayMaxRawTxBodyBytes`) and the aggregator route (`/aggregator`, `/api/v1/trustbases`): while it
+is down, testers can neither redeem nor mint from outside, and the bridge itself is unaffected.
 
 ### 3. The aggregator stops or restarts
 

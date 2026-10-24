@@ -1,6 +1,6 @@
 {
  "format": "UNICITY_X4_POS_CAMPAIGN/v1",
- "name": "x4-pos-4h",
+ "name": "x4-pos-4h-v2",
  "accounting": true,
  "seed": 20261021,
  "intervalSeconds": 14400,
@@ -16,14 +16,13 @@
   "note": "the P85 genesis terms of unicity-pos-contracts script/P85Genesis.s.sol (evidenceWindow 1000, holds 2000 rounds, timeFloor 3600 s); the exit maturity is the larger of the hold at the declared round time and the UC-time floor, plus a safety margin"
  },
  "required": {
-  "replacements": 2,
-  "keyRotations": 2,
+  "replacements": 1,
+  "keyRotations": 1,
   "recoveries": 1,
-  "aborts": 1,
   "offences": 2,
-  "exitRequests": 2,
-  "exits": 2,
-  "rewardIntervals": 4,
+  "exitRequests": 1,
+  "exits": 1,
+  "rewardIntervals": 2,
   "rewardExhaustRefill": 1,
   "faults": 4,
   "governance": 1,
@@ -44,22 +43,179 @@
  },
  "steps": [
   {
-   "id": "baseline",
+   "id": "lane-baseline",
    "kind": "baseline",
    "at": 0,
-   "budgetSeconds": 300,
-   "cmd": [
-    "scripts/x4pos/steps/baseline.sh"
-   ],
+   "budgetSeconds": 60,
+   "lane": true,
    "check": [
-    "scripts/x4pos/steps/baseline.check.sh"
+    "scripts/x4pos/lane-check.sh",
+    "baseline"
+   ]
+  },
+  {
+   "id": "lane-replacement",
+   "kind": "replace",
+   "at": 60,
+   "budgetSeconds": 120,
+   "lane": true,
+   "check": [
+    "scripts/x4pos/lane-check.sh",
+    "replacement"
    ],
-   "restartable": true
+   "counts": {
+    "replacements": 1,
+    "keyRotations": 1
+   },
+   "dependsOn": [
+    "lane-baseline"
+   ],
+   "note": "decision (b): the joiner's install into J = K + joiner; labelled 'joiner install + recovery', not an ordinary acknowledged replacement (bft-core#777)"
+  },
+  {
+   "id": "lane-recovery",
+   "kind": "recovery",
+   "at": 180,
+   "budgetSeconds": 220,
+   "lane": true,
+   "check": [
+    "scripts/x4pos/lane-check.sh",
+    "recovery"
+   ],
+   "counts": {
+    "recoveries": 1
+   },
+   "dependsOn": [
+    "lane-replacement"
+   ],
+   "note": "J stalls, then the derived recovery back to K"
+  },
+  {
+   "id": "lane-exit-request",
+   "kind": "exit-request",
+   "at": 400,
+   "budgetSeconds": 100,
+   "lane": true,
+   "check": [
+    "scripts/x4pos/lane-check.sh",
+    "exit-request"
+   ],
+   "counts": {
+    "exitRequests": 1
+   },
+   "dependsOn": [
+    "lane-recovery"
+   ],
+   "note": "the held offender's identity asks to exit before its case is submitted; refused for EvidenceHoldPending while the case is admitted and unsettled"
+  },
+  {
+   "id": "lane-offence-1",
+   "kind": "offence",
+   "at": 500,
+   "budgetSeconds": 1000,
+   "lane": true,
+   "check": [
+    "scripts/x4pos/lane-check.sh",
+    "offence-1"
+   ],
+   "counts": {
+    "offences": 1
+   },
+   "dependsOn": [
+    "lane-exit-request"
+   ],
+   "note": "the joiner's root key (S4): delivered in epoch 2, submitted and settled after the recovery"
+  },
+  {
+   "id": "lane-offence-2",
+   "kind": "offence",
+   "at": 1500,
+   "budgetSeconds": 1300,
+   "lane": true,
+   "check": [
+    "scripts/x4pos/lane-check.sh",
+    "offence-2"
+   ],
+   "counts": {
+    "offences": 1
+   },
+   "dependsOn": [
+    "lane-offence-1"
+   ],
+   "note": "root4, a staying member (B4): delivered in epoch 3 with its own evidence window; the later election result is marked lost, the K assignment untouched"
+  },
+  {
+   "id": "lane-epoch-switches",
+   "kind": "epoch-switches",
+   "at": 2800,
+   "budgetSeconds": 100,
+   "lane": true,
+   "check": [
+    "scripts/x4pos/lane-check.sh",
+    "epoch-switches"
+   ],
+   "dependsOn": [
+    "lane-offence-2"
+   ]
+  },
+  {
+   "id": "lane-rewards",
+   "kind": "reward-interval",
+   "at": 2900,
+   "budgetSeconds": 200,
+   "lane": true,
+   "check": [
+    "scripts/x4pos/lane-check.sh",
+    "rewards"
+   ],
+   "counts": {
+    "rewardIntervals": 2,
+    "rewardExhaustRefill": 1
+   },
+   "dependsOn": [
+    "lane-epoch-switches"
+   ],
+   "note": "2 closed intervals, a pool that runs dry, the refill, a payee's exact claim (B6c); a later interval paid after the refill is not reachable on this chain, see notCovered"
+  },
+  {
+   "id": "lane-exit-claim",
+   "kind": "exit-claim",
+   "at": 3100,
+   "budgetSeconds": 1000,
+   "lane": true,
+   "check": [
+    "scripts/x4pos/lane-check.sh",
+    "exit-claim"
+   ],
+   "counts": {
+    "exits": 1
+   },
+   "dependsOn": [
+    "lane-exit-request",
+    "lane-offence-2"
+   ],
+   "note": "refused early for a lawful reason, then matured and claimed with exact amounts after the case settled"
+  },
+  {
+   "id": "lane-accounting",
+   "kind": "accounting",
+   "at": 4100,
+   "budgetSeconds": 60,
+   "lane": true,
+   "check": [
+    "scripts/x4pos/lane-check.sh",
+    "accounting"
+   ],
+   "dependsOn": [
+    "lane-exit-claim",
+    "lane-rewards"
+   ],
+   "note": "the accounting checker over every snapshot the lane took"
   },
   {
    "id": "governance-queue",
    "kind": "governance-queue",
-   "at": 600,
+   "at": 4200,
    "budgetSeconds": 300,
    "cmd": [
     "scripts/x4pos/steps/governance-queue.sh"
@@ -68,7 +224,7 @@
     "governance": 1
    },
    "dependsOn": [
-    "baseline"
+    "lane-accounting"
    ],
    "args": {
     "change": "rate"
@@ -78,325 +234,9 @@
    ]
   },
   {
-   "id": "replace-1",
-   "kind": "replace",
-   "at": 1200,
-   "budgetSeconds": 900,
-   "cmd": [
-    "scripts/x4pos/steps/replace.sh"
-   ],
-   "counts": {
-    "replacements": 1,
-    "keyRotations": 1
-   },
-   "exclusive": true,
-   "dependsOn": [
-    "baseline"
-   ],
-   "args": {
-    "entity": 5,
-    "out": 1
-   },
-   "check": [
-    "scripts/x4pos/steps/replace.check.sh"
-   ]
-  },
-  {
-   "id": "offence-1",
-   "kind": "offence",
-   "at": 2300,
-   "budgetSeconds": 600,
-   "cmd": [
-    "scripts/x4pos/steps/offence.sh"
-   ],
-   "counts": {
-    "offences": 1
-   },
-   "dependsOn": [
-    "replace-1"
-   ],
-   "args": {
-    "offender": "replaced",
-    "retired": false
-   },
-   "check": [
-    "scripts/x4pos/steps/offence.check.sh"
-   ]
-  },
-  {
-   "id": "exit-request-protected",
-   "kind": "exit-request",
-   "at": 3000,
-   "budgetSeconds": 300,
-   "cmd": [
-    "scripts/x4pos/steps/exit-request.sh"
-   ],
-   "counts": {
-    "exitRequests": 1
-   },
-   "dependsOn": [
-    "offence-1"
-   ],
-   "args": {
-    "operator": "protected-offender"
-   },
-   "check": [
-    "scripts/x4pos/steps/exit-request.check.sh"
-   ]
-  },
-  {
-   "id": "exit-request-clean",
-   "kind": "exit-request",
-   "at": 3400,
-   "budgetSeconds": 300,
-   "cmd": [
-    "scripts/x4pos/steps/exit-request.sh"
-   ],
-   "counts": {
-    "exitRequests": 1
-   },
-   "dependsOn": [
-    "replace-1"
-   ],
-   "args": {
-    "operator": "clean"
-   },
-   "check": [
-    "scripts/x4pos/steps/exit-request.check.sh"
-   ]
-  },
-  {
-   "id": "replace-2",
-   "kind": "replace",
-   "at": 3800,
-   "budgetSeconds": 900,
-   "cmd": [
-    "scripts/x4pos/steps/replace.sh"
-   ],
-   "counts": {
-    "replacements": 1,
-    "keyRotations": 1
-   },
-   "exclusive": true,
-   "dependsOn": [
-    "replace-1"
-   ],
-   "args": {
-    "entity": 6,
-    "out": 2
-   },
-   "check": [
-    "scripts/x4pos/steps/replace.check.sh"
-   ]
-  },
-  {
-   "id": "stalled-recovery",
-   "kind": "recovery",
-   "at": 5000,
-   "budgetSeconds": 1500,
-   "cmd": [
-    "scripts/x4pos/steps/recovery.sh"
-   ],
-   "counts": {
-    "recoveries": 1
-   },
-   "exclusive": true,
-   "dependsOn": [
-    "replace-2"
-   ],
-   "args": {
-    "mode": "stalled-successor"
-   },
-   "check": [
-    "scripts/x4pos/steps/recovery.check.sh"
-   ]
-  },
-  {
-   "id": "abort-retry",
-   "kind": "abort",
-   "at": 6800,
-   "budgetSeconds": 900,
-   "cmd": [
-    "scripts/x4pos/steps/abort.sh"
-   ],
-   "counts": {
-    "aborts": 1
-   },
-   "exclusive": true,
-   "dependsOn": [
-    "stalled-recovery"
-   ],
-   "check": [
-    "scripts/x4pos/steps/abort.check.sh"
-   ]
-  },
-  {
-   "id": "offence-2-retired-key",
-   "kind": "offence",
-   "at": 7900,
-   "budgetSeconds": 600,
-   "cmd": [
-    "scripts/x4pos/steps/offence.sh"
-   ],
-   "counts": {
-    "offences": 1
-   },
-   "dependsOn": [
-    "abort-retry"
-   ],
-   "args": {
-    "retired": true
-   },
-   "check": [
-    "scripts/x4pos/steps/offence.check.sh"
-   ]
-  },
-  {
-   "id": "exit-claim-clean",
-   "kind": "exit-claim",
-   "at": 7700,
-   "budgetSeconds": 600,
-   "cmd": [
-    "scripts/x4pos/steps/exit-claim.sh"
-   ],
-   "counts": {
-    "exits": 1
-   },
-   "dependsOn": [
-    "exit-request-clean"
-   ],
-   "after": {
-    "step": "exit-request-clean",
-    "delay": "exitMaturity"
-   },
-   "check": [
-    "scripts/x4pos/steps/exit-claim.check.sh"
-   ]
-  },
-  {
-   "id": "exit-claim-protected",
-   "kind": "exit-claim",
-   "at": 8600,
-   "budgetSeconds": 600,
-   "cmd": [
-    "scripts/x4pos/steps/exit-claim.sh"
-   ],
-   "counts": {
-    "exits": 1
-   },
-   "dependsOn": [
-    "exit-request-protected",
-    "offence-2-retired-key"
-   ],
-   "after": {
-    "step": "exit-request-protected",
-    "delay": "exitMaturity"
-   },
-   "args": {
-    "expectReason": "EvidenceHoldPending"
-   },
-   "check": [
-    "scripts/x4pos/steps/exit-claim.check.sh"
-   ]
-  },
-  {
-   "id": "reward-interval-1",
-   "kind": "reward-interval",
-   "at": 4400,
-   "budgetSeconds": 300,
-   "cmd": [
-    "scripts/x4pos/steps/reward-interval.sh"
-   ],
-   "counts": {
-    "rewardIntervals": 1
-   },
-   "dependsOn": [
-    "baseline"
-   ],
-   "check": [
-    "scripts/x4pos/steps/reward-interval.check.sh"
-   ],
-   "restartable": true
-  },
-  {
-   "id": "reward-interval-2",
-   "kind": "reward-interval",
-   "at": 5600,
-   "budgetSeconds": 300,
-   "cmd": [
-    "scripts/x4pos/steps/reward-interval.sh"
-   ],
-   "counts": {
-    "rewardIntervals": 1
-   },
-   "dependsOn": [
-    "baseline"
-   ],
-   "check": [
-    "scripts/x4pos/steps/reward-interval.check.sh"
-   ],
-   "restartable": true
-  },
-  {
-   "id": "reward-interval-3",
-   "kind": "reward-interval",
-   "at": 7600,
-   "budgetSeconds": 300,
-   "cmd": [
-    "scripts/x4pos/steps/reward-interval.sh"
-   ],
-   "counts": {
-    "rewardIntervals": 1
-   },
-   "dependsOn": [
-    "baseline"
-   ],
-   "check": [
-    "scripts/x4pos/steps/reward-interval.check.sh"
-   ],
-   "restartable": true
-  },
-  {
-   "id": "reward-interval-4",
-   "kind": "reward-interval",
-   "at": 9400,
-   "budgetSeconds": 300,
-   "cmd": [
-    "scripts/x4pos/steps/reward-interval.sh"
-   ],
-   "counts": {
-    "rewardIntervals": 1
-   },
-   "dependsOn": [
-    "baseline"
-   ],
-   "check": [
-    "scripts/x4pos/steps/reward-interval.check.sh"
-   ],
-   "restartable": true
-  },
-  {
-   "id": "reward-exhaust-refill",
-   "kind": "reward-exhaust-refill",
-   "at": 9900,
-   "budgetSeconds": 600,
-   "cmd": [
-    "scripts/x4pos/steps/reward-exhaust-refill.sh"
-   ],
-   "counts": {
-    "rewardExhaustRefill": 1
-   },
-   "dependsOn": [
-    "reward-interval-4"
-   ],
-   "check": [
-    "scripts/x4pos/steps/reward-exhaust-refill.check.sh"
-   ]
-  },
-  {
    "id": "fault-root-restart",
    "kind": "fault",
-   "at": 8100,
+   "at": 4800,
    "budgetSeconds": 300,
    "cmd": [
     "scripts/x4pos/steps/fault.sh"
@@ -410,12 +250,15 @@
     "outageSeconds": 30
    },
    "check": null,
-   "uncheckedReason": "a restart or outage leaves no durable state to verify afterwards; the command asserts its own recovery (quorum, certified hashes, recovery deadline) and records it in its log; it is NOT restartable, so an interrupted fault fails the campaign"
+   "uncheckedReason": "a restart or outage leaves no durable state to verify afterwards; the command asserts its own recovery (quorum, certified hashes, recovery deadline) and records it in its log; it is NOT restartable, so an interrupted fault fails the campaign",
+   "dependsOn": [
+    "lane-accounting"
+   ]
   },
   {
    "id": "fault-evm-restart",
    "kind": "fault",
-   "at": 8800,
+   "at": 5400,
    "budgetSeconds": 300,
    "cmd": [
     "scripts/x4pos/steps/fault.sh"
@@ -429,12 +272,15 @@
     "outageSeconds": 30
    },
    "check": null,
-   "uncheckedReason": "a restart or outage leaves no durable state to verify afterwards; the command asserts its own recovery (quorum, certified hashes, recovery deadline) and records it in its log; it is NOT restartable, so an interrupted fault fails the campaign"
+   "uncheckedReason": "a restart or outage leaves no durable state to verify afterwards; the command asserts its own recovery (quorum, certified hashes, recovery deadline) and records it in its log; it is NOT restartable, so an interrupted fault fails the campaign",
+   "dependsOn": [
+    "lane-accounting"
+   ]
   },
   {
    "id": "fault-collector-restart",
    "kind": "fault",
-   "at": 9300,
+   "at": 6000,
    "budgetSeconds": 300,
    "cmd": [
     "scripts/x4pos/steps/fault.sh"
@@ -447,12 +293,15 @@
     "kind": "collector-reward-worker-restart"
    },
    "check": null,
-   "uncheckedReason": "a restart or outage leaves no durable state to verify afterwards; the command asserts its own recovery (quorum, certified hashes, recovery deadline) and records it in its log; it is NOT restartable, so an interrupted fault fails the campaign"
+   "uncheckedReason": "a restart or outage leaves no durable state to verify afterwards; the command asserts its own recovery (quorum, certified hashes, recovery deadline) and records it in its log; it is NOT restartable, so an interrupted fault fails the campaign",
+   "dependsOn": [
+    "lane-accounting"
+   ]
   },
   {
    "id": "fault-delayed-episode",
    "kind": "fault",
-   "at": 10000,
+   "at": 6600,
    "budgetSeconds": 600,
    "cmd": [
     "scripts/x4pos/steps/fault.sh"
@@ -465,12 +314,15 @@
     "kind": "delayed-evm-root-extension"
    },
    "check": null,
-   "uncheckedReason": "a restart or outage leaves no durable state to verify afterwards; the command asserts its own recovery (quorum, certified hashes, recovery deadline) and records it in its log; it is NOT restartable, so an interrupted fault fails the campaign"
+   "uncheckedReason": "a restart or outage leaves no durable state to verify afterwards; the command asserts its own recovery (quorum, certified hashes, recovery deadline) and records it in its log; it is NOT restartable, so an interrupted fault fails the campaign",
+   "dependsOn": [
+    "lane-accounting"
+   ]
   },
   {
    "id": "governance-activation-check",
    "kind": "governance-check",
-   "at": 10100,
+   "at": 9900,
    "budgetSeconds": 300,
    "cmd": [
     "scripts/x4pos/steps/governance-check.sh"
@@ -483,7 +335,7 @@
    ],
    "after": {
     "step": "governance-queue",
-    "delaySeconds": 6000
+    "delaySeconds": 5400
    },
    "check": [
     "scripts/x4pos/steps/governance-check.check.sh"
@@ -504,7 +356,32 @@
    "check": [
     "scripts/x4pos/steps/reconcile.check.sh"
    ],
-   "restartable": true
+   "restartable": true,
+   "dependsOn": [
+    "lane-accounting"
+   ]
+  }
+ ],
+ "segments": {
+  "lane": "the P85 recovery lane's own shell (ci-lane x4-exit with run-inputs s4, offence2, accounting, rewards), phases at the times the chain dictates; the driver only verifies them (lane steps). About 1 h 10 min.",
+  "driver": "driver steps on the same accumulated chain after the lane's phases: governance, faults, reconcile. Offsets are from the campaign start, which is the lane's first accounting snapshot."
+ },
+ "notCovered": [
+  {
+   "what": "abort/retry of a prepared handoff on the accumulated state",
+   "coveredBy": "the PoS rehearsal of bft-core#808 and the H6 abort lane (ci-lane kind abort), each on its own fresh state"
+  },
+  {
+   "what": "a second replacement; an ordinary acknowledged replacement (the lane does the joiner install + recovery, decision (b))",
+   "coveredBy": "the joiner install + recovery in this campaign (bft-core#777, closed as lane wiring)"
+  },
+  {
+   "what": "an exit by an operator that is not an offender (this lane's one exit is the held offender's, refused on the evidence hold and then claimed)",
+   "coveredBy": "the x4-exit lane without run-inputs s4 (B3b exit steps, bft-core#732 and #774)"
+  },
+  {
+   "what": "a later reward interval paid after the refill, and 4 closed intervals, on the accumulated chain: RewardPool.closeInterval never closes the latest assignment's tail while an election result is open (pinned contracts b17829ca), so this chain closes 2",
+   "coveredBy": "the shadow-chain x4-rewards lane (bft-core#724); the rule is ristik/unicity-pos-contracts#71, fixed in #72 (merged), which this pin does not include"
   }
  ]
 }

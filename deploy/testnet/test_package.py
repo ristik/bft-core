@@ -20,6 +20,8 @@ import metrics_relay
 import handoff_ops
 import handoff
 import observe
+import joiner
+import pos_sample
 
 class FakeRelay:
     def __init__(self): self.calls=[]
@@ -154,6 +156,22 @@ class ProofOfStake(unittest.TestCase):
             self.assertNotIn(name,[n for n,_ in rehearse.STAGES])   # the PoA generation has no registry: the default run must not name them
         self.assertIn('--pos-contracts pinned-contracts',workflow)
         self.assertIn('ref: ${{ steps.pins.outputs.contracts }}',workflow)
+    def test_pos_owner_names_the_revert_selector_it_expects(self):
+        import json,rehearse,pos_owner
+        class Fake:   # the two helpers it needs: a selector table and an eth_call that fails with a given revert data
+            cast='cast'
+            def __init__(self,data): self.data=data
+            def cast_run(self,*a):
+                assert all(isinstance(x,str) for x in a),a   # subprocess takes strings only
+                return '0xaaaaaaaa' if a[0]=='sig' else '0xcalldata'
+            def rpc(self,body,ip): return 200,json.dumps({'error':{'data':self.data}})
+            def expect(self,ok,what,detail=''):
+                if not ok: raise rehearse.Failure(what)
+        Fake.__module__=rehearse.__name__
+        pos_owner.expect_reverts(Fake('0xaaaaaaaa00'),'NotOwner()','0x1','0x2','f()')
+        pos_owner.expect_reverts(Fake('0xaaaaaaaa00'),'NotOwner()','0x1','0x2','f(uint256,address)',1,'0x3')   # a number argument (the first run failed on it)
+        with self.assertRaises(rehearse.Failure): pos_owner.expect_reverts(Fake('0xbbbbbbbb'),'NotOwner()','0x1','0x2','f()')   # another error
+        with self.assertRaises(rehearse.Failure): pos_owner.expect_reverts(Fake(''),'NotOwner()','0x1','0x2','f()')   # no revert at all
     def test_the_paired_client_gets_the_registry_genesis_commitment(self):
         # ureth requires --unicity.genesis-commitment (a required argument since 6e59b68c, still at the pinned ureth), and b1-profile does not print it
         slot='0x'+'ab'*32
@@ -671,11 +689,22 @@ class PublicRPC(unittest.TestCase):
         self.thread.start()
     def tearDown(self):
         self.server.shutdown();self.thread.join();self.server.server_close();self.server.pool.shutdown()
-    def send(self, data):
+    def send(self, data, path='/'):
         conn=http.client.HTTPConnection(*self.server.server_address,timeout=3)
-        conn.request('POST','/',data,{'Content-Type':'application/json'})
+        conn.request('POST',path,data,{'Content-Type':'application/json'})
         response=conn.getresponse(); status=response.status; result=json.loads(response.read());conn.close()
         return status,result
+    def declared(self, length, path='/'):
+        """A request that declares a body of LENGTH and sends a small one: the bound is checked on the declaration, before any read."""
+        conn=http.client.HTTPConnection(*self.server.server_address,timeout=3)
+        conn.request('POST',path,b'{}',{'Content-Type':'application/json','Content-Length':str(length)})
+        response=conn.getresponse(); status=response.status; response.read();conn.close()
+        return status
+    def get(self, path):
+        conn=http.client.HTTPConnection(*self.server.server_address,timeout=3)
+        conn.request('GET',path)
+        response=conn.getresponse(); status=response.status; body=response.read();conn.close()
+        return status,body
     def rpc(self, method):
         return self.send(json.dumps({'jsonrpc':'2.0','id':17,'method':method,'params':[]}))
     def test_public_preserves_id(self):
@@ -686,11 +715,73 @@ class PublicRPC(unittest.TestCase):
             self.assertEqual(self.rpc(method)[0],400)
         self.assertEqual(self.relay.calls,[])
     def test_malformed_batch_and_size(self):
-        for body in ['{','[]','null',json.dumps([{'method':'eth_chainId'}]),json.dumps({'jsonrpc':'2.0','id':1,'method':'eth_sendRawTransaction','params':['0x'+'ab'*gateway.MAX_BODY]})]:
+        for body in ['{','[]','null',json.dumps([{'method':'eth_chainId'}])]:
             self.assertEqual(self.send(body)[0],400)
+        self.assertEqual(self.declared(gateway.MAX_RAW_TX_BODY+1),400)   # over every bound: refused on the declared length
+        self.assertEqual(self.declared(gateway.AGG_MAX_BODY+1,'/aggregator'),400)
         self.assertEqual(self.relay.calls,[])
+    def test_only_the_redemption_methods_may_exceed_the_ordinary_body_bound(self):
+        raw='0x'+'ab'*(gateway.MAX_BODY+100)   # a body above 16 KiB, far below the raw-transaction bound
+        status,result=self.send(json.dumps({'jsonrpc':'2.0','id':5,'method':'eth_sendRawTransaction','params':[raw]}))
+        self.assertEqual((status,result['id']),(200,5))
+        self.assertEqual(self.relay.calls,[('eth_sendRawTransaction',[raw])])
+        # the call and the estimate a wallet makes on the same calldata first take the same path (bft-core#835 run 40069178284: a split part's redeem)
+        for i,method in enumerate(['eth_call','eth_estimateGas']):
+            status,result=self.send(json.dumps({'jsonrpc':'2.0','id':10+i,'method':method,'params':[{'data':raw},'latest']}))
+            self.assertEqual((status,result['id']),(200,10+i),method)
+        self.assertEqual([m for m,_ in self.relay.calls],['eth_sendRawTransaction','eth_call','eth_estimateGas'])
+        # the same size for any other method is refused before the relay
+        for method in ['eth_getBalance','eth_getCode','eth_getTransactionReceipt']:
+            self.assertEqual(self.send(json.dumps({'jsonrpc':'2.0','id':6,'method':method,'params':[raw,'latest']}))[0],400,method)
+        self.assertEqual(len(self.relay.calls),3)
+        # a large body with no free slot is refused (busy), and never reaches the relay
+        for _ in range(gateway.LARGE_SLOTS): self.server.large.acquire()
+        try:
+            self.assertEqual(self.send(json.dumps({'jsonrpc':'2.0','id':7,'method':'eth_sendRawTransaction','params':[raw]}))[0],503)
+        finally:
+            for _ in range(gateway.LARGE_SLOTS): self.server.large.release()
+        self.assertEqual(len(self.relay.calls),3)
+        # an ordinary-size body needs no slot
+        for _ in range(gateway.LARGE_SLOTS): self.server.large.acquire()
+        try:
+            self.assertEqual(self.rpc('eth_chainId')[0],200)
+        finally:
+            for _ in range(gateway.LARGE_SLOTS): self.server.large.release()
+    def test_the_aggregator_route_forwards_the_sdk_methods_only(self):
+        self.server.agg_limit=gateway.Limiter(1000,1000)   # this test is about routing, not the limit
+        seen=[]
+        def fake(url, payload=None, content_type='application/json'):
+            seen.append((url,payload)); return 200,'application/json',b'{"jsonrpc":"2.0","id":1,"result":{"blockNumber":"7"}}'
+        with patch('gateway.upstream',side_effect=fake):
+            for m in sorted(gateway.AGG_METHODS):
+                body=json.dumps({'jsonrpc':'2.0','id':1,'method':m,'params':{}})
+                status,result=self.send(body,'/aggregator')
+                self.assertEqual((status,result['result']['blockNumber']),(200,'7'))
+                self.assertEqual(seen[-1],(gateway.AGG_URL+'/',body.encode()))   # forwarded unchanged
+            n=len(seen)
+            for bad in [json.dumps({'jsonrpc':'2.0','id':1,'method':'eth_sendRawTransaction','params':[]}),json.dumps({'jsonrpc':'2.0','id':1,'method':'admin_x'}),'[]','{',
+                        json.dumps({'jsonrpc':'2.0','id':1,'method':'get_block_height','params':{'x':'a'*gateway.AGG_MAX_BODY}})]:
+                self.assertEqual(self.send(bad,'/aggregator')[0],400)
+            self.assertEqual(len(seen),n)
+            # the trust-base pages: the path and query forwarded, the body and content type passed through
+            with patch('gateway.upstream',return_value=(200,'application/cbor',b'\xd9\x98\x67')) as up:
+                status,body=self.get('/api/v1/trustbases?from=2&max=64')
+                self.assertEqual((status,body),(200,b'\xd9\x98\x67'))
+                up.assert_called_once_with(gateway.AGG_URL+'/api/v1/trustbases?from=2&max=64')
+            self.assertEqual(self.get('/api/v1/other')[0],404)
+        self.assertEqual(self.relay.calls,[])   # nothing of the aggregator route reaches the execution chain
+    def test_the_aggregator_route_has_its_own_rate_limit_and_answers_unavailable(self):
+        body=json.dumps({'jsonrpc':'2.0','id':1,'method':'get_block_height','params':{}})
+        with patch('gateway.upstream',return_value=(200,'application/json',b'{"result":1}')):
+            with patch('gateway.time.monotonic',return_value=self.server.agg_limit.window):
+                for _ in range(10): self.assertEqual(self.send(body,'/aggregator')[0],200)
+                self.assertEqual(self.send(body,'/aggregator')[0],429)
+                self.assertEqual(self.rpc('eth_chainId')[0],200)   # the execution route's limit is separate
+        self.server.agg_limit=gateway.Limiter(10,50)
+        with patch('gateway.upstream',side_effect=OSError('down')):
+            self.assertEqual(self.send(body,'/aggregator')[0],503)
     def test_rate_limit(self):
-        with patch('gateway.time.monotonic',return_value=self.server.window):
+        with patch('gateway.time.monotonic',return_value=self.server.rpc_limit.window):
             for _ in range(10): self.assertEqual(self.rpc('eth_chainId')[0],200)
             self.assertEqual(self.rpc('eth_chainId')[0],429)
     def test_partial_broadcast_is_not_retried(self):
@@ -873,7 +964,7 @@ class BridgeRelease(unittest.TestCase):
     def build(self,gen,art,tools=None,image=None):
         m=self.module()
         with patch.object(m,'ARTIFACTS',art):
-            return m.build(gen,tools or self.tools(),image or self.IMAGE,['unicity-reth','node','--rpc.eth-proof-window','64'],16384)
+            return m.build(gen,tools or self.tools(),image or self.IMAGE,['unicity-reth','node','--rpc.eth-proof-window','64'],m.gateway_limits())
     def test_the_manifest_joins_the_pins_the_deployment_the_profile_and_the_limits(self):
         with tempfile.TemporaryDirectory() as tmp:
             r=self.build(*self.generation(tmp))
@@ -883,6 +974,9 @@ class BridgeRelease(unittest.TestCase):
         limits={k:v['value'] for k,v in r['limits'].items()}
         self.assertEqual((limits['D1envelopeBytes'],limits['D3ordinaryCapacity'],limits['blockGasLimit'],limits['proofWindowBlocks'],limits['gatewayMaxBodyBytes'],limits['aggregatorBatchStateIds']),
                          (2097152,60000000,329547540,64,16384,256))
+        # the gateway's bounds are read from gateway.py, and a redemption up to D1 fits the raw-transaction one as hex with its framing
+        self.assertEqual((limits['gatewayMaxRawTxBodyBytes'],limits['gatewayAggregatorMaxBodyBytes']),(gateway.MAX_RAW_TX_BODY,gateway.AGG_MAX_BODY))
+        self.assertGreater(limits['gatewayMaxRawTxBodyBytes'],2*limits['D1envelopeBytes']+4096)
         self.assertIn('at most 254 transfers',r['limits']['aggregatorBatchStateIds']['source'])
         self.assertEqual((r['package']['generation'],r['bridge']['image']),('tn-x',self.IMAGE))
     def test_another_image_than_the_recorded_one_is_refused(self):
@@ -948,6 +1042,49 @@ class LoadGenerator(unittest.TestCase):
 
 
 
+class Joiner(unittest.TestCase):
+    images={k:'sha256:'+'a'*64 for k in ['node','rpc','guard','signer']}
+    def topology(self,n):
+        with tempfile.TemporaryDirectory() as d:
+            return generate.topology(Path(d),n,{'root':['r%d'%i for i in range(n)],'evm':['e%d'%i for i in range(n)]},self.images,'captcha',['--unicity.network-id','3'],123456,True)
+    def test_the_joiner_services_are_exactly_what_a_generation_of_one_more_validator_writes(self):
+        four,five=self.topology(4),self.topology(5)
+        got=joiner.joiner_services(four,5,'r4','e4')
+        want={n:five['services'][n] for n in ('pod5','metrics5','root5','authority5','ureth5','shard5')}
+        self.assertEqual(sorted(got),sorted(want))
+        for name in want: self.assertEqual(got[name],want[name],name)
+    def test_prepare_makes_the_entity_private_to_its_owner_and_writes_the_override(self):
+        import stat
+        with tempfile.TemporaryDirectory() as d:
+            gen=Path(d)/'gen';gen.mkdir();(gen/'compose.yaml').write_text(json.dumps(self.topology(4)))
+            fake=Path(d)/'ubft'   # the three commands prepare runs: init (makes the home), credential (a file), node-id (prints one)
+            fake.write_text("#!/usr/bin/env python3\nimport sys,os\na=sys.argv[1:]\n"
+                            "if a[1]=='init': os.makedirs(a[a.index('--home')+1])\n"
+                            "elif a[0]=='signing-authority': open(a[a.index('--out')+1],'w').write('c')\n"
+                            "elif a[0]=='node-id': print('id-'+os.path.basename(a[a.index('--home')+1]))\n");fake.chmod(0o755)
+            old=os.umask(0o022)   # a permissive caller: prepare must not inherit it
+            try: out=joiner.prepare(gen,fake)
+            finally: os.umask(old)
+            self.assertEqual((out['index'],out['root'],out['evm']),(5,'id-root','id-evm'))
+            val=gen/'validator5'
+            for path in [val,*val.rglob('*')]:
+                mode=stat.S_IMODE(path.stat().st_mode)
+                self.assertEqual(mode&0o077,0,f'{path} is accessible to group or others: {oct(mode)}')
+            self.assertTrue((val/'jwt'/'jwt.hex').is_file())
+            override=json.loads((gen/'compose.joiner.json').read_text())
+            self.assertEqual(sorted(override['services']),['authority5','metrics5','pod5','root5','shard5','ureth5'])
+            self.assertIn('id-evm',override['services']['authority5']['entrypoint'])
+    def test_the_genesis_services_are_untouched_and_a_taken_index_is_refused(self):
+        four=self.topology(4);before=json.dumps(four,sort_keys=True)
+        joiner.joiner_services(four,5,'r4','e4')
+        self.assertEqual(json.dumps(four,sort_keys=True),before)
+        with self.assertRaisesRegex(ValueError,'already exists'): joiner.joiner_services(four,3,'x','y')
+    def test_incomplete_bootnode_lists_are_refused_rather_than_guessed(self):
+        four=self.topology(4)
+        for name,svc in four['services'].items():
+            if re.fullmatch(r'(root|shard)\d+',name): svc['entrypoint']=[re.sub(r'/dns4/root4/[^,]*,?','',p).rstrip(',') for p in svc['entrypoint']]
+        with self.assertRaisesRegex(ValueError,'not all in the bootnode lists'): joiner.joiner_services(four,5,'r4','e4')
+
 class Observe(unittest.TestCase):
     def sample(self,rounds,**kw):
         base={'roots':{str(i+1):{'epoch':1,'round':r} for i,r in enumerate(rounds)},'services':{'root1':{'state':'running','health':None,'restarts':0}},
@@ -1004,5 +1141,110 @@ class Observe(unittest.TestCase):
     def test_the_faucet_can_be_left_out(self):
         s=self.sample([1]);del s['faucet']
         self.assertEqual(observe.Watch().step(s,0),[])
+
+class PosSample(unittest.TestCase):
+    def pos(self,**kw):
+        base={'progress':100,'ucTime':50,'recordCount':3,'recordCursor':3,'liveCount':4,'thresholds':['500','300'],'openResult':None,
+              'pool':{'balance':'1000','available':'900','totalCredits':'100','accounted':'1000','nextStart':'0'},'errors':[]}
+        base.update(kw);return base
+    def test_a_healthy_sample_raises_nothing_and_progress_moving_resets_the_stall(self):
+        w=pos_sample.PosWatch(stall=120)
+        self.assertEqual(w.step(self.pos(progress=10),0),[])
+        self.assertEqual(w.step(self.pos(progress=11),100),[])
+        self.assertEqual(w.step(self.pos(progress=11),200),[],'100 s since it last moved is under the stall')
+        self.assertTrue(any('registry progress stopped at 11' in a for a in w.step(self.pos(progress=11),230)))
+    def test_a_custody_behind_the_registry_is_an_alert_only_after_the_lag_and_catching_up_clears_it(self):
+        w=pos_sample.PosWatch(lag=300)
+        self.assertEqual(w.step(self.pos(recordCount=5,recordCursor=3),0),[])
+        self.assertEqual(w.step(self.pos(progress=101,recordCount=5,recordCursor=3),299),[])
+        self.assertTrue(any('custody is behind' in a and '3 of 5' in a for a in w.step(self.pos(progress=102,recordCount=5,recordCursor=3),300)))
+        self.assertEqual(w.step(self.pos(progress=103,recordCount=5,recordCursor=5),310),[],'caught up')
+        self.assertEqual(w.step(self.pos(progress=104,recordCount=6,recordCursor=5),320),[],'the lag clock starts again')
+        self.assertTrue(any('past the registry' in a for a in w.step(self.pos(progress=105,recordCount=3,recordCursor=4),330)))
+    def test_an_election_result_open_too_long_is_an_alert_and_resolving_it_clears_it(self):
+        w=pos_sample.PosWatch(open_limit=3600);r='0x'+'ab'*32
+        self.assertEqual(w.step(self.pos(openResult=r),0),[])
+        self.assertTrue(any('open for 3600 s' in a for a in w.step(self.pos(progress=101,openResult=r),3600)))
+        self.assertEqual(w.step(self.pos(progress=102),3700),[],'resolved')
+        self.assertEqual(w.step(self.pos(progress=103,openResult=r),3800),[],'a new opening is timed from its own start')
+    def test_the_pool_books_and_unreadable_views_are_alerts(self):
+        w=pos_sample.PosWatch()
+        short=self.pos(pool={'balance':'999','available':'900','totalCredits':'100','accounted':'1000','nextStart':'0'})
+        self.assertTrue(any('less than the 1000 it has accounted for' in a for a in w.step(short,0)))
+        self.assertTrue(any('no funded balance left' in a for a in w.step(self.pos(progress=101,pool={'balance':'5','available':'0','totalCredits':'5','accounted':'5','nextStart':'1'}),10)),'0 after it was funded')
+        unfunded=pos_sample.PosWatch()
+        self.assertEqual(unfunded.step(self.pos(pool={'balance':'0','available':'0','totalCredits':'0','accounted':'0','nextStart':'0'}),0),[],'a pool never funded is not exhausted')
+        alerts=w.step({'errors':['recordCursor: eth_call: 403 forbidden'],'pool':{}},30)
+        self.assertEqual(alerts,['unreadable: recordCursor: eth_call: 403 forbidden'])
+    def test_collect_reads_the_views_through_the_gateway_and_records_a_refused_one(self):
+        def word(n): return '0x'+format(n,'064x')
+        by_selector={pos_sample.SELECTORS['progress']:word(7),pos_sample.SELECTORS['ucTime']:word(70),pos_sample.SELECTORS['recordCount']:word(4),
+                     pos_sample.SELECTORS['recordCursor']:word(4),pos_sample.SELECTORS['liveCount']:word(4),pos_sample.SELECTORS['thresholds']:word(500)+word(300)[2:],
+                     pos_sample.SELECTORS['openResult']:word(0),pos_sample.SELECTORS['available']:word(10**18),pos_sample.SELECTORS['totalCredits']:word(2),
+                     pos_sample.SELECTORS['accounted']:word(10**18+2),pos_sample.SELECTORS['nextStart']:word(1000)}
+        refuse=set()
+        def fake(method,params):
+            if method=='eth_getBalance': return hex(10**18+2)
+            data=params[0]['data']
+            if data in refuse: raise ValueError('eth_call: 403 forbidden')
+            return by_selector[data]
+        with tempfile.TemporaryDirectory() as d:
+            Path(d,'network').mkdir();Path(d,'network','pos-deployment.json').write_text(json.dumps({'custody':'0xc','election':'0xe','rewardPool':'0xp'}))
+            with patch.object(pos_sample,'eth',fake):
+                got=pos_sample.pos_collect(d)
+                refuse.add(pos_sample.SELECTORS['recordCursor'])
+                bad=pos_sample.pos_collect(d)
+        self.assertEqual((got['progress'],got['recordCount'],got['recordCursor'],got['openResult'],got['thresholds']),(7,4,4,None,['500','300']))
+        self.assertEqual(got['pool'],{'available':str(10**18),'totalCredits':'2','accounted':str(10**18+2),'nextStart':'1000','balance':str(10**18+2)},'wei amounts are decimal strings')
+        self.assertEqual(got['errors'],[])
+        self.assertNotIn('recordCursor',bad);self.assertEqual(bad['errors'],['recordCursor: eth_call: 403 forbidden'])
+    def test_a_rate_limited_call_is_retried_and_a_persistent_refusal_is_named(self):
+        answers=[(429,'{"error":"rate limit"}'),(429,'{"error":"rate limit"}'),(200,'{"result":"0x01"}')]
+        sleeps=[]
+        with patch.object(observe,'get',lambda *a,**k:answers.pop(0)), patch.object(pos_sample.time,'sleep',sleeps.append):
+            self.assertEqual(pos_sample.eth('eth_blockNumber',[]),'0x01')
+        self.assertEqual(len(answers),0);self.assertGreaterEqual(sleeps.count(1),2,'a 429 waits a second before the retry')
+        calls=[]
+        def refuse(*a,**k): calls.append(1);return 429,'{"error":"rate limit"}'
+        with patch.object(observe,'get',refuse), patch.object(pos_sample.time,'sleep',lambda s:None):
+            with self.assertRaises(ValueError) as e: pos_sample.eth('eth_blockNumber',[])
+        self.assertIn('429',str(e.exception));self.assertEqual(len(calls),pos_sample.RETRIES+1,'bounded retries')
+    def test_not_healthy_lists_services_whose_healthcheck_has_not_reported_healthy(self):
+        rows=[{'Service':'rpc','Health':'starting'},{'Service':'root1','Health':'healthy'},{'Service':'shard1','Health':''},{'Service':'x'},{'Service':'ureth1','Health':'unhealthy'}]
+        with patch.object(pos_sample.subprocess,'run',lambda *a,**k:type('R',(),{'stdout':'\n'.join(json.dumps(x) for x in rows)})()):
+            self.assertEqual(pos_sample.not_healthy('/g'),{'rpc':'starting','ureth1':'unhealthy'})
+    def test_the_observe_stage_waits_for_the_health_checks_and_names_what_never_reports(self):
+        import rehearse
+        waits=[]
+        class Fake:
+            evidence=Path(tempfile.mkdtemp());gen=Path('/g')
+            def say(self,x): pass
+            def expect(self,ok,what,detail=''):
+                if not ok: raise rehearse.Failure(what+' '+detail)
+            def wait(self,what,probe,seconds):
+                waits.append((what,seconds));
+                for _ in range(3):
+                    if probe(): return True
+                raise rehearse.Failure(what)
+        states=[{'rpc':'starting'},{'rpc':'starting'},{}]
+        calls=[]
+        def health(g): calls.append(1);return states[min(len(calls)-1,2)]
+        def fail(*a,**k): raise AssertionError('the sampler must not start before the services are healthy')
+        with patch.object(pos_sample,'not_healthy',lambda g:{'rpc':'starting'}), patch.object(pos_sample.subprocess,'run',fail):
+            with self.assertRaises(rehearse.Failure) as e: pos_sample.pos_observe(Fake())
+        self.assertIn("rpc",str(e.exception));self.assertEqual(waits[-1],('every healthchecked service is healthy',180))
+        waits.clear()
+        with patch.object(pos_sample,'not_healthy',health), patch.object(pos_sample.subprocess,'run',lambda *a,**k:(_ for _ in ()).throw(RuntimeError('sampler started'))):
+            with self.assertRaises(RuntimeError): pos_sample.pos_observe(Fake())   # healthy on the third look: only then does it start the sampler
+        self.assertEqual(len(calls),3)
+    def test_a_result_that_is_not_whole_words_is_refused(self):
+        with self.assertRaises(ValueError): pos_sample.words('0x'+'00'*31)
+        with self.assertRaises(ValueError): pos_sample.words('0x')
+    def test_the_selectors_are_cast_sig_of_the_views(self):
+        import shutil
+        cast=shutil.which('cast') or str(Path.home()/'.foundry'/'bin'/'cast')
+        if not Path(cast).exists(): self.skipTest('cast is not installed')
+        for name,selector in pos_sample.SELECTORS.items():
+            self.assertEqual(subprocess.run([cast,'sig',name+'()'],text=True,capture_output=True,check=True).stdout.strip(),selector,name)
 
 if __name__=='__main__': unittest.main()

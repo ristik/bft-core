@@ -44,9 +44,15 @@ Only public RPC (8545), faucet (8088) and Prometheus (9090) bind **host loopback
 No root admin, shard admin, authority or Engine endpoint has a published port.
 The validator network is internal (each ureth serves `eth,net,web3,debug` there: the shard node needs `debug_getRawHeader`; the public gateway allow-lists methods and has no `debug_*`). The faucet's isolated signer has Internet
 access for hCaptcha but cannot reach validators; only its relay bridges networks.
-RPC permits an explicit public method list, no batches, bodies <=16 KiB, eight
+RPC permits an explicit public method list, no batches, bodies <=16 KiB except
+`eth_sendRawTransaction`, `eth_call` and `eth_estimateGas` (<=4.5 MiB, so a
+bridge redemption up to the 2 MiB envelope fits as hex, and so do the call and
+the estimate a wallet makes on it first; at most two such bodies at once), eight
 concurrent upstream jobs, five-second client read timeout, ten requests/IP/second,
-100 requests/second overall and bounded client bookkeeping. Expensive log scans,
+100 requests/second overall and bounded client bookkeeping. The same gateway
+serves the aggregator's JSON-RPC on `POST /aggregator` (the SDK's methods only,
+bodies <=64 KiB) and its trust-base pages on `GET /api/v1/trustbases`, with their
+own limit of ten requests/IP/second and 50/second overall; no authentication. Expensive log scans,
 trace/debug and signing methods are excluded. `eth_call`/estimate run under these
 limits and upstream deadlines; transaction fanout reuses faucet/relay.py and checks
 every validator's chain ID/genesis before sending. A partial broadcast is ambiguous:
@@ -146,7 +152,7 @@ UCT via the faucet, wait for a successful receipt, then submit a signed native
 transfer through `https://rpc.<domain>/`. Record hash, successful receipt, block
 hash and certified shard head. Gateway responses alone do not prove certification.
 Reject old genesis wallet pins, signing/admin/Engine methods, batches, malformed
-JSON, >16 KiB bodies and burst traffic. Capture 400/429 results and verify ordinary
+JSON, >16 KiB bodies (other than raw transactions) and burst traffic. Capture 400/429 results and verify ordinary
 RPC still responds afterwards. A raw externally signed transaction must enter
 **all** paired mempools; the RPC relay handles that fanout.
 
@@ -275,6 +281,8 @@ certification logs and before/after manifest IDs. Record failures as failures.
 
 The sampler is `observe.py` (read-only: no key, credential or signing method): `python3 deploy/testnet/observe.py $G --out /secure/path/observe` takes one sample a minute for 24 hours (`--interval`, `--duration`, `--samples`): every root's certified epoch and round, the gateway's `/healthz` and block number, the faucet guard's `/healthz` (its body, with the budget and balance, is kept for the OPERATOR to compare with the reserve: not judged by the tool; the aggregator's `/health` and the `mongo` healthcheck are likewise manual), every service's state, health and restart count, memory of this project's containers and disk use. It prints an `ALERT` and exits 1 for the notification rules above: certified heads stopped for `--stall` seconds (120; no root's round moved, or the execution chain's block at the gateway did not: the roots keep certifying while a stuck shard does not), a service not running or unhealthy, a restart count that went up, disk above `--disk-limit` percent (80), the gateway or faucet not answering 200. The rehearsal runs it as a four-sample smoke (stage `observe`, `--no-faucet`: the faucet guard's health needs the signer, which a rehearsal does not start); that proves the collection and the alert rules on a runner, not a day on the host.
 
+For a generation made with `--pos`, `pos_sample.py` (same options, same read-only rule, reuses `observe.collect` and `observe.Watch`) adds the contracts' clock and books to every sample, read through the gateway: the registry's `progress()`, `ucTime()`, `recordCount()`, the custody's `recordCursor()`, the election's `thresholds()`, `openResult()`, `liveCount()`, and the reward pool's balance, `available()`, `totalCredits()`, `accounted()`, `nextStart()`. Extra alerts: registry progress stopped (`--stall`), the custody behind the registry's record count for more than `--lag` s, an election result open for more than `--open-limit` s (while one is open the pool closes the tail only up to the reservation progress, contracts#72), the pool holding less than it has accounted for, no funded balance left, an unreadable view. On a rehearsal runner use `--no-faucet`; the gateway needs the forwarded address, which the sampler sets. The rehearsal stage `pos-observe` runs it for two samples against the running package. It samples the package where it runs; it says nothing about a host unless it runs on that host.
+
 CI runs gateway refusal/topology tests, existing faucet tests, two fresh genesis
 ceremonies with fixture image IDs, Compose validation, Prometheus rule/config
 validation and RPC-image build. It does not run four ureths. Native previous
@@ -291,7 +299,8 @@ N=3,4,7; this parsing step needs no Docker daemon. Package tests check the
 signer's generated invocation against the tracked script permissions (the image
 copies a readable script and invokes it through `/bin/sh`), the aggregator-go and
 MongoDB service settings, and rejection of an otherwise valid allowed JSON-RPC request larger
-than 16 KiB before any relay call.
+than 16 KiB before any relay call (`eth_sendRawTransaction`, `eth_call` and `eth_estimateGas` up to 4.5 MiB pass, within two
+large-request slots), and the aggregator route's allow-list, bound and separate rate limit.
 
 CI also builds aggregator-go from `pins.json`'s revision and runs
 `validate-generation.py --aggregator <pinned-binary>`: a native three-root probe

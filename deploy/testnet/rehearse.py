@@ -28,6 +28,8 @@ from pathlib import Path
 import handoff
 import handoff_ops
 import operator_rpc
+import pos_owner
+import pos_sample
 
 PUBLIC_RPC = '127.0.0.1:8545'
 FAUCET = '127.0.0.1:8088'
@@ -229,7 +231,7 @@ class Rehearsal:
         s, _ = self.rpc(b'{not json', b)
         self.expect(s == 400, 'malformed JSON is refused', f'status {s}')
         s, text = self.rpc(json.dumps(dict(ok, params=['x' * 20000])).encode(), b)
-        self.expect(s in (400, 0), 'a body over 16 KiB is refused', f'status {s} {text[:40] if s == 0 else ""}')
+        self.expect(s in (400, 0), 'a body over 16 KiB (an ordinary method) is refused', f'status {s} {text[:40] if s == 0 else ""}')
         s, _ = self.http(PUBLIC_RPC, 'POST', '/other', json.dumps(ok).encode(), {'X-Forwarded-For': b})
         self.expect(s == 400, 'another path is refused', f'status {s}')
         s, _ = self.http(PUBLIC_RPC, 'POST', '/', json.dumps(ok).encode())
@@ -1140,7 +1142,9 @@ class Rehearsal:
 
 STAGES = (('up', 'up'), ('identity', 'identity'), ('first-tx', 'first_tx'), ('gateway-limits', 'gateway_limits'), ('faucet-guard', 'faucet_guard'), ('load', 'load'), ('observe', 'observe'), ('pod-restart', 'pod_restart'), ('backup-restore', 'backup_restore'), ('reset', 'reset'))
 # run on a generation made with --pos (the workflow's second generation); not part of the default list
-POS_STAGES = (('pos-smoke', 'pos_smoke'), ('pos-rewards', 'pos_rewards'), ('pos-election', 'pos_election'), ('pos-proposal', 'pos_proposal'), ('pos-abort', 'pos_abort'), ('pos-propose', 'pos_propose'), ('pos-too-late', 'pos_too_late'), ('pos-install', 'pos_install'), ('pos-advance', 'pos_advance'), ('pos-restart', 'pos_restart'), ('pos-stale', 'pos_stale'), ('pos-handoff-2', 'pos_handoff_2'), ('pos-restart-2', 'pos_restart_2'), ('pos-recreate', 'pos_recreate'))
+Rehearsal.pos_observe = pos_sample.pos_observe   # the sampler smoke lives in pos_sample.py
+Rehearsal.pos_owner = pos_owner.pos_owner   # the owner-key stage lives in pos_owner.py
+POS_STAGES = (('pos-smoke', 'pos_smoke'), ('pos-observe', 'pos_observe'), ('pos-rewards', 'pos_rewards'), ('pos-election', 'pos_election'), ('pos-proposal', 'pos_proposal'), ('pos-abort', 'pos_abort'), ('pos-propose', 'pos_propose'), ('pos-too-late', 'pos_too_late'), ('pos-install', 'pos_install'), ('pos-advance', 'pos_advance'), ('pos-restart', 'pos_restart'), ('pos-stale', 'pos_stale'), ('pos-handoff-2', 'pos_handoff_2'), ('pos-restart-2', 'pos_restart_2'), ('pos-recreate', 'pos_recreate'), ('pos-owner', 'pos_owner'))
 
 
 def main():
