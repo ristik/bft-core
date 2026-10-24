@@ -803,6 +803,10 @@ p85_run_lane() {
     P85_STEPS=${P85_STEPS/p85_baseline/p85_baseline x4a_snapshot}
     P85_STEPS=${P85_STEPS/ p85_resolved/ p85_resolved x4a_snapshot}
     P85_STEPS=${P85_STEPS/ p85_epoch_switches/ p85_epoch_switches x4a_snapshot}
+    if [ "${X4_REWARDS_POS:-0}" = 1 ]; then   # X4 B6c: the reward steps on this chain (scripts/x4pos/rewards-pos-lib.sh): what the pool can close here is limited by the contract, see that file
+      source scripts/lib/rewards-lib.sh; source scripts/x4pos/rewards-pos-lib.sh
+      P85_STEPS=${P85_STEPS/ p85_epoch_switches x4a_snapshot/ p85_epoch_switches x4a_snapshot x4r_intervals x4r_dry_refill x4r_claim x4a_snapshot}
+    fi
     P85_STEPS="$P85_STEPS x4a_final"
   fi
   [ "${P85_MODE:-}" != overbound ] || { P85_JOINER_UNITS=3; P85_STEPS="p85_baseline p85_joiner_nodes p85_joiner_onboard p85_election_refused"; }
