@@ -951,8 +951,11 @@ class LoadGenerator(unittest.TestCase):
 class Observe(unittest.TestCase):
     def sample(self,rounds,**kw):
         base={'roots':{str(i+1):{'epoch':1,'round':r} for i,r in enumerate(rounds)},'services':{'root1':{'state':'running','health':None,'restarts':0}},
-              'disk_percent':40.0,'gateway':{'healthz':200,'block':5},'faucet':{'healthz':200,'body':'{}'}}
+              'disk_percent':40.0,'gateway':{'healthz':200,'block':self.block},'faucet':{'healthz':200,'body':'{}'}}
+        self.block+=1   # the chain moves with every sample unless a test pins the gateway
         base.update(kw);return base
+    block=0
+    def setUp(self): self.block=0
     def test_a_healthy_sample_raises_nothing_and_a_head_that_moves_resets_the_stall_clock(self):
         w=observe.Watch(stall=120)
         self.assertEqual(w.step(self.sample([10,10,10,10]),0),[])
@@ -972,6 +975,20 @@ class Observe(unittest.TestCase):
         for part in ('root1 is exited','shard1 is unhealthy','disk 91.0%','gateway /healthz answered 503','faucet /healthz answered 0'): self.assertIn(part,text)
         self.assertTrue(any('root1 restarted (0 -> 1)' in a for a in w.step(self.sample([3],services={'root1':{'state':'running','health':None,'restarts':1}}),20)))
         self.assertFalse(any('restarted' in a for a in w.step(self.sample([4],services={'root1':{'state':'running','health':None,'restarts':1}}),30)),'an unchanged count is not a restart')
+    def test_roots_moving_while_the_execution_chain_does_not_is_an_alert(self):
+        w=observe.Watch(stall=120)
+        pinned={'healthz':200,'block':5}
+        for at,round_ in ((0,10),(60,70),(100,110)): self.assertEqual(w.step(self.sample([round_]*4,gateway=pinned),at),[],'the chain at block 5 for under 120 s from the start')
+        alerts=w.step(self.sample([310]*4,gateway=pinned),130)
+        self.assertTrue(any('execution chain stopped' in a and 'block past 5' in a for a in alerts))
+        self.assertFalse(any('certified heads stopped' in a for a in alerts),'the roots did move')
+        self.assertEqual(w.step(self.sample([320]*4,gateway={'healthz':200,'block':6}),140),[],'a block that moves clears it')
+    def test_a_service_with_no_container_is_an_alert_and_ps_is_read_in_both_forms(self):
+        self.assertTrue(any('signer has no container' in a for a in observe.Watch().step(self.sample([1],missing=['signer']),0)))
+        row={'Service':'root1','State':'running','ID':'x'}
+        self.assertEqual(observe.ps_rows(json.dumps([row])),[row],'an array')
+        self.assertEqual(observe.ps_rows(json.dumps(row)+'\n'+json.dumps(row)),[row,row],'one object per line')
+        self.assertEqual(observe.ps_rows(''),[])
     def test_the_faucet_can_be_left_out(self):
         s=self.sample([1]);del s['faucet']
         self.assertEqual(observe.Watch().step(s,0),[])

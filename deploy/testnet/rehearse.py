@@ -1010,6 +1010,11 @@ class Rehearsal:
         self.expect(len(samples) == 4 and all(len(x['roots']) == self.n and all('round' in r for r in x['roots'].values()) for x in samples), 'four samples, each with every root\'s certified head')
         first, last = (max(r['round'] for r in samples[i]['roots'].values()) for i in (0, -1))
         self.expect(last > first, 'the certified round moved between the first and the last sample', f'{first} -> {last}')
+        declared = set(json.loads((self.gen / 'compose.yaml').read_text())['services']) - {'signer'}
+        self.expect(all(set(x['services']) == declared and not x['missing'] and all(v['state'] == 'running' for v in x['services'].values()) for x in samples),
+                    'every declared service (but the signer, not started) was seen running in every sample', str(sorted(declared - set(samples[0]['services']))))
+        blocks = [x['gateway']['block'] for x in samples]
+        self.expect(blocks[-1] > blocks[0], 'the execution chain\'s block moved between the first and the last sample (an idle chain still produces blocks)', str(blocks))
 
     def pod_restart(self):
         """One validator entity at a time: stop its execution client, root and shard node (its signing authority stays live, as the README requires), check what the

@@ -39,6 +39,16 @@ def get(host, path, body=None, timeout=10):
         conn.close()
 
 
+def ps_rows(text):
+    """The rows of `docker compose ps --format json`: one JSON object per line on some Compose v2 versions, one JSON array on others."""
+    text = text.strip()
+    if not text:
+        return []
+    if text.startswith('['):
+        return json.loads(text)
+    return [json.loads(line) for line in text.splitlines() if line.strip().startswith('{')]
+
+
 def collect(generation, transport, now=time.time, faucet=True):
     """One sample of the running generation."""
     compose = ['docker', 'compose', '-f', str(Path(generation) / 'compose.yaml')]
@@ -51,14 +61,14 @@ def collect(generation, transport, now=time.time, faucet=True):
         except (handoff_ops.HandoffError, ValueError, KeyError, subprocess.SubprocessError) as error:
             sample['roots'][str(i)] = {'error': str(error)[:200]}
     ps = subprocess.run(compose + ['ps', '-a', '--format', 'json'], text=True, capture_output=True)
-    for line in ps.stdout.splitlines():
-        if not line.strip().startswith('{'):
-            continue
-        row = json.loads(line)
+    for row in ps_rows(ps.stdout):
         restarts = subprocess.run(['docker', 'inspect', '--format', '{{.RestartCount}}', row['ID']], text=True, capture_output=True).stdout.strip()
         sample['services'][row['Service']] = {'state': row.get('State'), 'health': row.get('Health') or None, 'restarts': int(restarts) if restarts.isdigit() else None}
-    stats = subprocess.run(['docker', 'stats', '--no-stream', '--format', '{{.Name}}\t{{.MemUsage}}'], text=True, capture_output=True)
-    sample['memory'] = dict(line.split('\t', 1) for line in stats.stdout.splitlines() if '\t' in line)
+    config = json.loads((Path(generation) / 'compose.yaml').read_text())
+    # the services Compose declares and this sampler expects to run: a missing one is an alert (no container at all would otherwise leave no row to judge)
+    sample['missing'] = sorted(set(config['services']) - set(sample['services']) - (set() if faucet else {'signer'}))
+    stats = subprocess.run(['docker', 'stats', '--no-stream', '--format', '{{.Name}}\t{{.MemUsage}}'], text=True, capture_output=True)   # host-wide: keep this project's containers
+    sample['memory'] = {k: v for k, v in (line.split('\t', 1) for line in stats.stdout.splitlines() if '\t' in line) if k.startswith(config['name'] + '-')}
     usage = shutil.disk_usage(generation)
     sample['disk_percent'] = round(100 * usage.used / usage.total, 1)
     status, text = get(PUBLIC_RPC, '/healthz')
@@ -81,6 +91,8 @@ class Watch:
         self.stall, self.disk_limit = stall, disk_limit
         self.best = None
         self.moved_at = None
+        self.best_block = None
+        self.block_moved_at = None
         self.restarts = {}
 
     def step(self, sample, at):
@@ -96,6 +108,16 @@ class Watch:
             self.moved_at = at
         if at - self.moved_at >= self.stall:
             alerts.append(f'certified heads stopped: no root moved past round {self.best} for {int(at - self.moved_at)} s')
+        # the roots keep certifying while a stuck execution shard does not: the README's rule is the roots AND the certified shard heads, here the gateway's block
+        block = sample['gateway'].get('block')
+        if block is not None and (self.best_block is None or block > self.best_block):
+            self.best_block, self.block_moved_at = block, at
+        elif self.block_moved_at is None:
+            self.block_moved_at = at
+        if at - self.block_moved_at >= self.stall:
+            alerts.append(f'the execution chain stopped: no block past {self.best_block} for {int(at - self.block_moved_at)} s')
+        for name in sample.get('missing', []):
+            alerts.append(f'{name} has no container')
         for name, s in sorted(sample['services'].items()):
             if s['state'] != 'running':
                 alerts.append(f'{name} is {s["state"]}')
