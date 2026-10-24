@@ -92,12 +92,12 @@ def pos_joiner(r):
     r.expect(status == 0, 'join register: the joiner has a custody identity', out.strip()[-300:])
     found = re.search(r'custody id (\d+)', out)   # the relayer prints the id on stderr
     ident = int(found.group(1)) if found else 0
-    r.expect(ident > r.n, f'the new identity is numbered after the {r.n} genesis identities', str(ident))
+    r.expect(ident > index - 1, f'the new identity is numbered after the {index - 1} genesis identities', str(ident))
     status, out = r.relayer(identity, 'join', 'bond', '--id', str(ident), '--value-wei', str(BOND_UNIT), *evm, joiner=True, mounts=mounts)
     r.expect(status == 0, 'join bond: one lot of one bond unit', out.strip()[-300:])
     status, out = r.relayer(identity, 'join', 'admit', '--id', str(ident), *evm, joiner=True, mounts=mounts)
     r.expect(status == 0, 'join admit: the delegation to the joiner\'s root and EVM keys', out.strip()[-300:])
-    r.wait('the live index holds five identities', lambda: r.view(election, 'liveCount()(uint32)')[0] == r.n + 1, 120)
+    r.wait('the live index holds five identities', lambda: r.view(election, 'liveCount()(uint32)')[0] == index, 120)
     r.expect(r.view_text(election, 'isIndexed(uint64)(bool)', str(ident)).strip() == 'true', 'the joiner is in the live index', str(ident))
     lots = r.view_text(custody, 'generationLots(uint64,uint64)(uint256[])', str(ident), '1').strip('[]').replace(',', ' ').split()
     r.expect(len(lots) == 1, 'the joiner has one lot (lMax 1)', str(lots))
