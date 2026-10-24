@@ -375,8 +375,8 @@
    "coveredBy": "the shadow-chain x4-rewards lane (bft-core#724); the rule is ristik/unicity-pos-contracts#71, fixed in #72 (merged), which this pin does not include"
   },
   {
-   "what": "governance ACTIVATION of the queued rate: queue and execute (Scheduled) are shown, but after execute + 1800 s the policy id was unchanged with an election result open (run 40071011875); why is not established",
-   "coveredBy": "queue and execute are exercised here; activation needs ElectionPolicy.elect to call activateDue at an eligible boundary with no unresolved election (GovernanceParams.sol), asked of contracts (dev3), not yet answered"
+   "what": "governance ACTIVATION of the queued rate: queue and execute (Scheduled) are shown, but after execute + 1800 s the policy id was unchanged with an election result open (run 40071011875)",
+   "coveredBy": "not covered. Cause (dev3's reading of contracts src/p85, not observed on the chain): activation runs only inside ElectionPolicy.elect (activateDue), and elect returns Disabled while any election result is open; this chain has one open from the baseline and after the recovery, so no activation however long it waits. It needs the open session resolved and the next cadence threshold"
   }
  ]
 }
