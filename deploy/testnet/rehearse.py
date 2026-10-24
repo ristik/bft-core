@@ -952,14 +952,19 @@ class Rehearsal:
                     shutil.rmtree(path) if path.is_dir() else path.unlink()
         self.compose('up', '-d', '--no-deps', f'ureth{i}')
         self.wait(f'the joiner\'s execution client {i} answers', lambda: self.ureth(i, 'eth_blockNumber') is not None, 180)
-        # the survivors' archives hold the verified trust body of the new epoch only once their shard nodes have restarted under their new sessions and archived it (run
-        # 40091999009: "no archived verified-trust body identity for epoch 2" right after the loop restarted them): ask again for up to two minutes, keep every answer
+        # A survivor's archive holds the verified trust body of the new epoch only once it has archived it, and not every survivor's does at the same time (runs 40091999009 and
+        # 40101751785: "no archived verified-trust body identity for epoch 2" from validator 1's archive for two minutes, while runs 40088831174, 40090246101 and 40094341567
+        # found it on the first attempt): every survivor's archive is asked, in turn, for up to two minutes; every answer is kept
         attempts = []
+        survivors = [j for j in range(1, self.n + 1) if j != i]
         def pinned():
-            run = subprocess.run([str(self.restore_pin), str(self.gen / 'validator1' / 'archive'), str(self.gen / 'network' / 'trust-base.json'), str(val / 'evm' / 'tip')],
-                                 text=True, capture_output=True)
-            attempts.append(f'exit {run.returncode}: {(run.stdout + run.stderr).strip()[-300:]}')
-            return run if run.returncode == 0 else None
+            for j in survivors:
+                run = subprocess.run([str(self.restore_pin), str(self.gen / f'validator{j}' / 'archive'), str(self.gen / 'network' / 'trust-base.json'), str(val / 'evm' / 'tip')],
+                                     text=True, capture_output=True)
+                attempts.append(f'validator {j} archive: exit {run.returncode}: {(run.stdout + run.stderr).strip()[-300:]}')
+                if run.returncode == 0:
+                    return run
+            return None
         try:
             pin = self.wait('a survivor\'s archive holds the verified trust history of the new epoch', pinned, 120)
         except Failure:
