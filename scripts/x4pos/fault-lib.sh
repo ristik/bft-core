@@ -9,7 +9,7 @@
 #   evm-restart       validator 2 (not the one the lane reads) stops and returns in its scope; its head catches up to validator 1's; a paid transaction certifies
 #   pair-restart      validator 3's node AND its execution client (ureth) restart; the head block it retained is byte-identical to validator 1's block of the same number, and the
 #                     reward pool (balance, available, credits) and the custody credits are unchanged: the reward-settling side resumes from durable state (orchestrator, 2026-10-24)
-#   delayed-episode   ALL four EVM validators stop for X4F_DELAY seconds while the roots keep extending: the shard's import of root extensions is delayed as a whole. After they return the
+#   delayed-episode   EVERY online EVM validator stops (three after the recovery) for X4F_DELAY seconds while the roots keep extending: the shard's import of root extensions is delayed as a whole. After they return the
 #                     registry log is contiguous and ordered, the custody cursor has converged, and nothing a gate depends on moved (last acknowledged assignment, open result and its
 #                     lost mark, lot count, credits)
 # The evidence collector (S4) holds no runtime state and its submitter resumes from the on-chain cursor: both offences already show that (submit-1.txt / submit-2.txt), see campaign.json.
@@ -159,19 +159,19 @@ x4f_pair_restart() {
   echo "PASS: x4f: validator 3 and its execution client restarted; block $n identical to validator 1's, reward pool and credits unchanged"
 }
 
-# all four EVM validators are down while the roots continue: the shard imports no root extension for X4F_DELAY seconds, then everything returns
+# every online EVM validator is down (three after the recovery) while the roots continue: the shard imports no root extension for X4F_DELAY seconds, then everything returns
 x4f_delayed_episode() {
   local before mid after epoch i r0 r1 e0 e1 n
   x4f_wait fault-delayed-episode || return 1
   epoch=$(x4f_epoch) || return 1; before=$(x4f_probe) || return 1
   r0=$(jq -r .rootRound <<<"$before"); e0=$(jq -r .evmRound <<<"$before")
-  for i in 1 2 3 4; do x4f_stop_val "$i" || return 1; done
+  for i in $H3_ONLINE; do x4f_stop_val "$i" || return 1; done
   sleep "$X4F_DELAY"
   mid=$(h3_root_info | jq -c '{rootRound: (.roundNumber | tonumber), evmRound: (.partitionShards[] | select(.partitionId==8) | .roundNumber | tonumber)}') || return 1
   r1=$(jq -r .rootRound <<<"$mid"); e1=$(jq -r .evmRound <<<"$mid")
   [ "$r1" -gt "$((r0 + X4F_DELAY / 3))" ] || { echo "x4f: the roots did not extend during the outage (round $r0 -> $r1)" >&2; return 1; }
   [ "$e1" -le "$((e0 + 1))" ] || { echo "x4f: the EVM shard kept certifying with all validators stopped (round $e0 -> $e1)" >&2; return 1; }
-  for i in 1 2 3 4; do x4f_start_val "$i" || return 1; done
+  for i in $H3_ONLINE; do x4f_start_val "$i" || return 1; done
   p85_progress after-delayed-episode 10 120 || return 1
   p85_paid "$epoch" >/dev/null || { echo "x4f: a paid transaction was not certified after the delayed episode" >&2; return 1; }
   for i in $(seq 1 120); do [ "$(p85_cursor)" = "$(p85_log_count)" ] && break; sleep 1; done

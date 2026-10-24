@@ -306,7 +306,7 @@
     "faults": 1
    },
    "exclusive": true,
-   "note": "all four EVM validators stop for 300 s while the roots keep extending (the shard's import of root extensions is delayed as a whole), then return: the registry log is ordered, the cursor converged, no gate state moved"
+   "note": "every online EVM validator (three after the recovery) stops for 300 s while the roots keep extending (the shard's import of root extensions is delayed as a whole), then return: the registry log is ordered, the cursor converged, no gate state moved"
   },
   {
    "id": "lane-soak",
