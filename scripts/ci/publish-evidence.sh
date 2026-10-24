@@ -111,13 +111,13 @@ if [ "$x4a" = 1 ]; then   # X4 B6: the accounting snapshots read from the live c
   jq -e '.status == "PASS"' "${ac:-/nonexistent}" >/dev/null 2>&1 || { complete=no; why+=("x4pos/accounting.txt: the accounting checker did not PASS"); }
   grep -q 'PASS: x4a: accounting over' "$ev/lane.log" 2>/dev/null || { complete=no; why+=("no 'x4a: accounting over N snapshots' line in lane.log"); }
 fi
-if [ "$x4r" = 1 ]; then   # X4 B6c: the pool's whole life replayed against the recovery chain: it ran dry (a zero-budget interval), was refilled, and a later interval was paid
+if [ "$x4r" = 1 ]; then   # X4 B6c: the rewards that the recovery chain can show (RewardPool.closeInterval never closes the latest assignment's tail there): >= 2 closed intervals, a dry pool, the refill, a payee's exact claim as a pool payment
   xr=$(find "$pub" -path '*/x4pos/steps/xr/replay-after.txt' | head -n 1)
   line=$(sed -n 's/^REWARDS-REPLAY ok //p' "${xr:-/nonexistent}" 2>/dev/null | tail -n 1)
   [ -n "$line" ] || { complete=no; why+=("no REWARDS-REPLAY ok line in x4pos/steps/xr/replay-after.txt"); }
-  [ "$(jq -r '.refilledAfterExhaustion' <<<"${line:-null}" 2>/dev/null)" = true ] && [ "$(jq -r '.zeroBudget // 0' <<<"${line:-null}" 2>/dev/null)" -ge 1 ] 2>/dev/null \
-    && [ "$(jq -r '.paid // 0' <<<"${line:-null}" 2>/dev/null)" -ge 3 ] 2>/dev/null && [ "$(jq -r '.fundings // 0' <<<"${line:-null}" 2>/dev/null)" -ge 1 ] 2>/dev/null \
-    || { complete=no; why+=("the replay does not show a dry pool refilled and then paid (zeroBudget >= 1, fundings >= 1, paid >= 3, refilledAfterExhaustion)"); }
+  [ "$(jq -r '.zeroBudget // 0' <<<"${line:-null}" 2>/dev/null)" -ge 1 ] 2>/dev/null && [ "$(jq -r '.intervals // 0' <<<"${line:-null}" 2>/dev/null)" -ge 2 ] 2>/dev/null \
+    && [ "$(jq -r '.fundings // 0' <<<"${line:-null}" 2>/dev/null)" -ge 1 ] 2>/dev/null || { complete=no; why+=("the replay does not show a dry pool that was refilled (intervals >= 2, zeroBudget >= 1, fundings >= 1)"); }
+  grep -q 'PASS: x4r: payee 1 claimed exactly its credit' "$ev/lane.log" 2>/dev/null || { complete=no; why+=("no 'x4r: payee 1 claimed exactly its credit' line in lane.log"); }
   [ "$x4a" = 1 ] || { complete=no; why+=("--x4r needs --x4a: the pool's payments are judged by the accounting snapshots"); }
   pn=$(find "$pub" -path '*/x4pos/snapshots.jsonl' | head -n 1)
   [ "$(tail -n 1 "${pn:-/nonexistent}" 2>/dev/null | jq -r '.payments | length' 2>/dev/null)" -ge 1 ] 2>/dev/null || { complete=no; why+=("x4pos/snapshots.jsonl: the last snapshot has no pool payment (the Claimed decoding was not exercised)"); }

@@ -1,15 +1,16 @@
 # X4 B6c: the reward steps of the PoS campaign on the RECOVERY lane's chain (election, custody, offences, exit on the same accumulated state), not on the shadow chain they were
-# proven on (X4_REWARDS, scripts/x4-shadow-steps.sh). Definitions only: sourcing this file starts nothing. Lane steps (p85_step): x4r_intervals, x4r_exhaust_refill.
+# proven on (X4_REWARDS, scripts/x4-shadow-steps.sh). Definitions only: sourcing this file starts nothing. Lane steps (p85_step): x4r_intervals, x4r_dry_refill, x4r_claim.
 # The pool is a small genesis alloc (P85_REWARD_FUNDING, run-lane sets it for run-inputs "rewards": true), so it runs dry; x4e_run (scripts/p85-recovery-steps.sh) runs the same
 # scripts/x4pos/steps/reward-*.sh the driver runs. NOT yet proven on this chain: whether the settle/replay agree with the K -> J -> K acknowledged history and the slashed lots.
 
-X4R_PROGRESS=${X4R_PROGRESS:-3000}   # the registry's progress (seconds of certified time) waited for before the first settle, as in the shadow rewards lane
-# WHEN: right after the baseline. RewardPool.closeInterval (unicity-pos-contracts b17829ca, src/p85/RewardPool.sol:271-290) reverts NotCaughtUp for the tail of the latest assignment
-# while ELECTION.openResult() != 0; the recovery lane has an open result from p85_election_reserved on, and a later one after the recovery (the one offence 2 uses), so on this
-# chain no interval past the K tail closes once those steps ran (live: x4-rew-1/-2/-3 closed 2 intervals at progress 3600 and none after, with the registry progress and the head advancing).
-# Before the election steps the grid (1000 progress units) closes: 0.5 UCT is ~0.306 UCT an interval (4 members), so interval 1 pays, 2 pays the rest, 3 is at zero budget.
-X4R_MIN_INTERVALS=${X4R_MIN_INTERVALS:-3}
-X4R_EXHAUST_WAIT=${X4R_EXHAUST_WAIT:-3000}
+# WHAT THE CHAIN CAN SHOW. RewardPool.closeInterval (unicity-pos-contracts b17829ca, src/p85/RewardPool.sol:271-290) reverts NotCaughtUp for the TAIL of the latest assignment while
+# ELECTION.openResult() != 0, and on this authoritative-election chain a result is open from the baseline on (live probe, x4-rew-4: openResult non-zero, every cursor equal, closeInterval ->
+# NotCaughtUp). Only ENDED segments close: the genesis K segment (ended by the J install) and the J segment (ended by the recovery) = 2 intervals, at any progress. So on this chain the
+# campaign shows 2 closed intervals, a pool that runs dry (a 0.5 UCT pool: interval 1 takes it all, interval 2 is at zero budget), the refill transaction and a payee's claim, all under the
+# accounting checker. NOT shown here: a LATER interval paid after the refill, or 4 intervals (both are shown by the shadow-chain x4-rewards lane; campaign.json lists them as notCovered).
+# The steps run after the epoch switches, when the J segment has ended.
+X4R_PROGRESS=${X4R_PROGRESS:-3600}   # the registry's progress waited for before the first settle (as in the shadow rewards lane)
+X4R_MIN_INTERVALS=${X4R_MIN_INTERVALS:-2}
 
 # every term of RewardPool.closeInterval's precondition (src/p85/RewardPool.sol:271-290), printed when a reward step fails, so the next run says WHICH one held
 x4r_diag() {
@@ -36,6 +37,25 @@ x4r_intervals() {
   x4e_run ri1 reward-interval.sh "{\"minIntervals\":$X4R_MIN_INTERVALS}" && x4e_run ri1 reward-interval.check.sh "{\"minIntervals\":$X4R_MIN_INTERVALS}" || { x4r_diag; return 1; }
 }
 
-x4r_exhaust_refill() {
-  x4e_run xr reward-exhaust-refill.sh "{\"refillWei\":\"1500000000000000000\",\"waitSeconds\":$X4R_EXHAUST_WAIT}" && x4e_run xr reward-exhaust-refill.check.sh '{}' || { x4r_diag; return 1; }
+# the dry pool and its refill (awaitPaid false: no later interval is expected on this chain)
+x4r_dry_refill() {
+  x4e_run xr reward-exhaust-refill.sh '{"refillWei":"1500000000000000000","awaitPaid":false}' && x4e_run xr reward-exhaust-refill.check.sh '{"awaitPaid":false}' || { x4r_diag; return 1; }
+}
+
+# a payee (genesis payee 1, a key the lane holds) claims its whole credit to a fresh address: exact amounts, the pool's balance, availability and totalCredits move by the credit and
+# nothing else, and the claim is a Claimed event the collector reads (the first live use of its pool-payment decoding)
+x4r_claim() {
+  local pool key payee to credit bal0 pool0 total0
+  pool=$(jq -r .rewardPool "$P85_DEPLOY"); key=$P85_DIR/payee-keys/payee-1.key
+  [ -s "$key" ] || { echo "x4r: no payee key (X4_REWARDS_POS makes the genesis plan keep them)" >&2; return 1; }
+  payee=$("$P85_CAST" wallet address --private-key "$(cat "$key")")
+  credit=$(p85_call "$pool" 'credits(address)(uint256)' "$payee" | awk '{print $1}')
+  python3 -c "import sys;sys.exit(0 if $credit > 0 else 1)" || { echo "x4r: payee 1 has no credit to claim ($credit)" >&2; return 1; }
+  to=0x$(printf 'x4r/reward-recipient' | shasum -a 256 | cut -c1-40)
+  rw_send_value "$(p85_sender_key)" "$payee" "$RW_GAS_WEI" || return 1   # gas for the payee's claim
+  bal0=$("$P85_CAST" balance --rpc-url "$(p85_eth)" "$to"); pool0=$("$P85_CAST" balance --rpc-url "$(p85_eth)" "$pool"); total0=$(p85_call "$pool" 'totalCredits()(uint256)' | awk '{print $1}')
+  build/ubft pos-relayer tx reward claim --eth-rpc "$(rw_eth_all)" --pos-deployment "$P85_DEPLOY" --sender-key "$key" --amount-wei "$credit" --to "$to" || return 1
+  rw_assert "$("$P85_CAST" balance --rpc-url "$(p85_eth)" "$to") == $bal0 + $credit and $pool0 - $("$P85_CAST" balance --rpc-url "$(p85_eth)" "$pool") == $credit and $total0 - $(p85_call "$pool" 'totalCredits()(uint256)' | awk '{print $1}') == $credit and $(p85_call "$pool" 'credits(address)(uint256)' "$payee" | awk '{print $1}') == 0" \
+    "x4r: the claim of $credit wei moved other amounts than the credit" || return 1
+  echo "PASS: x4r: payee 1 claimed exactly its credit $credit wei"
 }
