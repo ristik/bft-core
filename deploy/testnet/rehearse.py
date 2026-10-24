@@ -96,7 +96,7 @@ class Rehearsal:
 
     # --- docker and RPC --------------------------------------------------------------------------------------------------------
     def compose(self, *args, check=True):
-        return subprocess.run(['docker', 'compose', '-f', str(self.gen / 'compose.yaml'), *args], check=check, text=True, capture_output=True).stdout
+        return subprocess.run(['docker', 'compose', *handoff_ops.compose_files(self.gen), *args], check=check, text=True, capture_output=True).stdout
 
     def services(self):
         return self.compose('config', '--services').split()
@@ -342,7 +342,7 @@ class Rehearsal:
     def node_run(self, args, mounts=()):
         """`ubft` (the node image) in a one-shot container on the validators network, with the limits of the package's own services: read-only, no capabilities,
         bounded, uid 10001. `mounts` are 'host:container[:ro]' volumes. Returns the finished process (text stdout and stderr)."""
-        compose = json.loads((self.gen / 'compose.yaml').read_text())
+        compose = handoff_ops.load_compose(self.gen)
         network = subprocess.run(['docker', 'network', 'ls', '-q', '--filter', f'label=com.docker.compose.project={compose["name"]}',
                                   '--filter', 'label=com.docker.compose.network=validators'], check=True, text=True, capture_output=True).stdout.split()
         self.expect(len(network) == 1, 'the generation has one validators network', str(network))
@@ -457,7 +457,7 @@ class Rehearsal:
         return run.stdout
 
     def exec_in(self, service, *command, binary=False):
-        run = subprocess.run(['docker', 'compose', '-f', str(self.gen / 'compose.yaml'), 'exec', '-T', service, *command], text=not binary, capture_output=True)
+        run = subprocess.run(['docker', 'compose', *handoff_ops.compose_files(self.gen), 'exec', '-T', service, *command], text=not binary, capture_output=True)
         if run.returncode:
             stderr = run.stderr if isinstance(run.stderr, str) else run.stderr.decode(errors='replace')
             raise Failure(f'{service}: {" ".join(command[:5])}: exit {run.returncode}: {stderr.strip()[-500:]}')
@@ -465,7 +465,7 @@ class Rehearsal:
 
     def entity_ids(self):
         """(root node id, EVM node id) of every entity: the root's from its home, the EVM validator's from its signing authority's generated command line."""
-        services = json.loads((self.gen / 'compose.yaml').read_text())['services']
+        services = handoff_ops.load_compose(self.gen)['services']
         ids = []
         for i in range(1, self.n + 1):
             root = self.host_ubft('node-id', '--home', self.gen / f'validator{i}' / 'root').strip().splitlines()[-1]
@@ -477,7 +477,7 @@ class Rehearsal:
         """p85_build_assignment: the EVM context, the election's proposal for the result (`reserved` before the proofs exist, with the stored proofs after), every
         member's possession proof made INSIDE its signing authority's namespace (the inputs are copied to the entity's auth directory, which only its authority and
         shard mount), and the assembled EVM assignment. Returns (assignment file, proposal directory name, context file)."""
-        net, root_rpc = self.gen / 'network', operator_rpc.common_urls(json.loads((self.gen / 'compose.yaml').read_text()))[0]
+        net, root_rpc = self.gen / 'network', operator_rpc.common_urls(handoff_ops.load_compose(self.gen))[0]
         self.exec_in('root1', 'ubft', 'root', 'handoff', 'evm-context', '--root-rpc', root_rpc, '--out', '/tmp/context.json')
         context = work / f'{tag}-context.json'
         context.write_text(self.exec_in('root1', 'cat', '/tmp/context.json'))
@@ -516,7 +516,7 @@ class Rehearsal:
         published result, which an Abort before the Freeze does not close, so nothing is submitted or finalized again."""
         pos = self.manifest.get('pos')
         self.expect(bool(pos), 'the manifest carries a pos block (this generation was made with --pos)')
-        compose = json.loads((self.gen / 'compose.yaml').read_text())
+        compose = handoff_ops.load_compose(self.gen)
         net, work = self.gen / 'network', self.gen / 'network' / 'handoff'
         deployment = json.loads((net / 'pos-deployment.json').read_text())
         election = deployment['election']
@@ -589,7 +589,7 @@ class Rehearsal:
     def pos_candidate(self):
         """5b steps 5 and 6: the roots' candidate for the epoch-2 trust base and the published assignment (one root derives it) and the readiness receipt of EVERY entity,
         each made by its own root (see pos_propose). Returns the handoff directory and the receipt files."""
-        compose = json.loads((self.gen / 'compose.yaml').read_text())
+        compose = handoff_ops.load_compose(self.gen)
         work = self.gen / 'network' / 'handoff'
         for name in (f'trust-base-epoch{self.target}.json', 'published-assignment.json'):
             self.expect((work / name).is_file(), f'{name} exists (run pos-proposal first)')
@@ -720,7 +720,7 @@ class Rehearsal:
         # the next attempt needs new approvals: the possession proofs bind the attempt (popContext), so the assignment made for the Aborted attempt is refused by the
         # root ("invalid proof of possession", run 39962014299). Steps 0-4 again, now at the attempt the root plans (the chain's context names it), then the candidate.
         self.pos_proposal(resubmit=False)
-        root_rpc = operator_rpc.common_urls(json.loads((self.gen / 'compose.yaml').read_text()))[0]
+        root_rpc = operator_rpc.common_urls(handoff_ops.load_compose(self.gen))[0]
         self.exec_in('root1', 'rm', '-rf', '/tmp/candidate-probe')
         self.exec_in('root1', 'ubft', 'root', 'handoff', 'q3-candidate', '--next-trust-base', f'/network/handoff/trust-base-epoch{self.target}.json',
                      '--next-evm-assignment', '/network/handoff/published-assignment.json', '--root-rpc', root_rpc, '--out-dir', '/tmp/candidate-probe')
@@ -794,7 +794,7 @@ class Rehearsal:
         turn is stopped, its four stores kept as root.pre-epoch-2, and recreated with `--install-handoff-epoch 2` (the Compose override handoff.py writes; a plain
         `up -d` would drop the flag); then the first root reports epoch 2, the activation record is read and checked against the candidate, and every shard has logged the
         activation. Needs pos-propose first (the handoff must be committed)."""
-        compose = json.loads((self.gen / 'compose.yaml').read_text())
+        compose = handoff_ops.load_compose(self.gen)
         work = self.gen / 'network' / 'handoff'
         self.expect((work / 'v3-body-id.txt').is_file(), 'the candidate files exist (run pos-propose first)')
         transport = handoff_ops.DockerTransport(self.gen)
@@ -803,10 +803,11 @@ class Rehearsal:
         override = self.gen / f'compose.install-epoch-{self.target}.json'
         if not override.exists():
             override.write_text(json.dumps(handoff.install_override(compose, self.target), indent=1) + '\n')
-        files = ['-f', str(self.gen / 'compose.yaml'), '-f', str(override)]
+        base = handoff_ops.compose_files(self.gen)
+        files = base + ['-f', str(override)]
         for i in range(1, self.n + 1):
             self.say(f'  installing epoch {self.target} in root {i}')
-            subprocess.run(['docker', 'compose', *files[:2], 'stop', f'root{i}'], check=True, capture_output=True)
+            subprocess.run(['docker', 'compose', *base, 'stop', f'root{i}'], check=True, capture_output=True)
             state = self.gen / f'validator{i}' / 'root'
             backup = self.gen / f'validator{i}' / f'root.pre-epoch-{self.target}'
             if not backup.exists():
@@ -847,7 +848,7 @@ class Rehearsal:
         signing authority to the new root epoch and shard configuration and a new session for its shard node (the shard is stopped for it and started again with the
         same command; the authority is never recreated), and finally paid work at the new epoch: a transaction through the public gateway is certified on every
         validator, the roots stay at epoch 2 and the custody has applied every root record. Needs pos-install first."""
-        compose = json.loads((self.gen / 'compose.yaml').read_text())
+        compose = handoff_ops.load_compose(self.gen)
         work = self.gen / 'network' / 'handoff'
         transport = handoff_ops.DockerTransport(self.gen)
         self.expect(all(self.root_epoch(i, transport) == self.target for i in range(1, self.n + 1)), f'every root certifies at epoch {self.target} (run pos-install first)')
@@ -887,7 +888,7 @@ class Rehearsal:
         self.say(f'  recordCount == recordCursor == {self.wait("the custody has applied every root record", lambda: applied() is not None, 300) and applied()}')
 
     def exec_rc(self, service, *command):
-        run = subprocess.run(['docker', 'compose', '-f', str(self.gen / 'compose.yaml'), 'exec', '-T', service, *command], text=True, capture_output=True)
+        run = subprocess.run(['docker', 'compose', *handoff_ops.compose_files(self.gen), 'exec', '-T', service, *command], text=True, capture_output=True)
         return run.returncode, run.stdout, run.stderr
 
     def pos_restart(self, epoch=2):
@@ -1013,7 +1014,7 @@ class Rehearsal:
         self.expect(len(samples) == 4 and all(len(x['roots']) == self.n and all('round' in r for r in x['roots'].values()) for x in samples), 'four samples, each with every root\'s certified head')
         first, last = (max(r['round'] for r in samples[i]['roots'].values()) for i in (0, -1))
         self.expect(last > first, 'the certified round moved between the first and the last sample', f'{first} -> {last}')
-        declared = set(json.loads((self.gen / 'compose.yaml').read_text())['services']) - {'signer'}
+        declared = set(handoff_ops.load_compose(self.gen)['services']) - {'signer'}
         self.expect(all(set(x['services']) == declared and not x['missing'] and all(v['state'] == 'running' for v in x['services'].values()) for x in samples),
                     'every declared service (but the signer, not started) was seen running in every sample', str(sorted(declared - set(samples[0]['services']))))
         blocks = [x['gateway']['block'] for x in samples]

@@ -99,7 +99,7 @@ def pos_joiner(r):
     # --- part 3: the follower -----------------------------------------------------------------------------------------------------
     compose(r, 'up', '-d', '--no-deps', f'pod{index}', f'ureth{index}')
     compose(r, 'up', '-d', '--no-deps', f'metrics{index}', f'root{index}')
-    transport = handoff_ops.DockerTransport(r.gen, override=r.gen / 'compose.joiner.json')
+    transport = handoff_ops.DockerTransport(r.gen)
     def follower():
         try:
             code, body = transport.post(index, '/api/v1/q3/status', b'{}')
@@ -107,4 +107,5 @@ def pos_joiner(r):
         except (handoff_ops.HandoffError, ValueError):
             return False
     r.expect(r.wait('the joiner\'s root reports itself a follower', follower, 180), 'the joiner\'s root is a follower of the genesis epoch (not a member)')
+    r.n = index   # from here every stage of this run counts the joiner: its services are in compose_files, its pod in the transport
 
