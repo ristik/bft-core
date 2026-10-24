@@ -32,6 +32,12 @@ def compose(r, *args, check=True):
     return subprocess.run(['docker', 'compose', '-f', str(r.gen / 'compose.yaml'), '-f', str(r.gen / 'compose.joiner.json'), *args], check=check, text=True, capture_output=True).stdout
 
 
+def new_wallet(r):
+    """{'address', 'private_key'} of a fresh key: `cast wallet new --json` prints a list of them in some Foundry versions and a single object in others."""
+    wallet = json.loads(r.cast_run('wallet', 'new', '--json'))
+    return wallet[0] if isinstance(wallet, list) else wallet
+
+
 def exec_in(r, service, *command):
     """`docker compose exec` of a joiner service (the base file does not know it)."""
     run = subprocess.run(['docker', 'compose', '-f', str(r.gen / 'compose.yaml'), '-f', str(r.gen / 'compose.joiner.json'), 'exec', '-T', service, *command], text=True, capture_output=True)
@@ -59,10 +65,8 @@ def pos_joiner(r):
     r.expect((val / 'auth' / 'node-info.json').is_file(), 'the authority wrote its node-info (the EVM validator the successor shard configuration will name)')
 
     # --- part 2: register, bond, admit ---------------------------------------------------------------------------------------------
-    owner_key = r.cast_run('wallet', 'new', '--json')
-    owner = json.loads(owner_key)[0]
-    withdrawal = json.loads(r.cast_run('wallet', 'new', '--json'))[0]['address']
-    payee = json.loads(r.cast_run('wallet', 'new', '--json'))[0]['address']
+    owner = new_wallet(r)
+    withdrawal, payee = new_wallet(r)['address'], new_wallet(r)['address']
     root_key = json.loads((val / 'root' / 'keys.json').read_text())['sigKey']['privateKey']
     identity = val / 'joiner-identity.json'
     fd = os.open(identity, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
