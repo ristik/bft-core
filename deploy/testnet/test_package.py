@@ -1093,6 +1093,17 @@ class Joiner(unittest.TestCase):
             override=json.loads((gen/'compose.joiner.json').read_text())
             self.assertEqual(sorted(override['services']),['authority5','metrics5','pod5','root5','shard5','ureth5'])
             self.assertIn('id-evm',override['services']['authority5']['entrypoint'])
+    def test_set_scope_moves_only_the_authority_epochs_and_trust_base(self):
+        with tempfile.TemporaryDirectory() as d:
+            gen=Path(d);compose=self.topology(4)
+            services=joiner.joiner_services(compose,5,'r4','e4');(gen/'compose.joiner.json').write_text(json.dumps({'services':services}))
+            joiner.set_scope(gen,5,2,1,'/network/handoff/trust-base-epoch2.json')
+            got=json.loads((gen/'compose.joiner.json').read_text())['services']
+            entry=got['authority5']['entrypoint'];at=lambda f:entry[entry.index(f)+1]
+            self.assertEqual((at('--root-epoch'),at('--shard-epoch'),at('--trust-base')),('2','1','/network/handoff/trust-base-epoch2.json'))
+            self.assertEqual(at('--node-id'),'e4',"the node id is untouched")
+            for name in services:
+                if name!='authority5': self.assertEqual(got[name],services[name],name)
     def test_the_genesis_services_are_untouched_and_a_taken_index_is_refused(self):
         four=self.topology(4);before=json.dumps(four,sort_keys=True)
         joiner.joiner_services(four,5,'r4','e4')

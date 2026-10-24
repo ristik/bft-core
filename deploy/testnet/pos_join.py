@@ -63,6 +63,13 @@ def pos_joiner(r):
     index = info['index']
     r.say(f'  joiner entity {index}: root {info["root"]}, evm {info["evm"]}')
     val = r.gen / f'validator{index}'
+    # the joiner's authority starts at the scope of the epoch it will sign in (see joiner.set_scope): the successor trust base, over the five roots, exists first
+    r.n = index
+    r.joiners.add(index)
+    r.next_trust_base()
+    work = r.gen / 'network' / 'handoff'
+    subprocess.run(['chmod', '-R', 'a+rX', str(work)], check=True)
+    joiner_lib.set_scope(r.gen, index, r.target, r.successor_shard_epoch(), f'/network/handoff/trust-base-epoch{r.target}.json')
     compose(r, 'up', '-d', '--no-deps', f'authority{index}')
     auth = f'authority{index}'
     operator = ['--operator-socket', '/authority/operator.sock', '--operator-credential', '/authority/operator.cred']

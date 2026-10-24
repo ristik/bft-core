@@ -513,6 +513,23 @@ class Rehearsal:
                        *(['--evm-pops', proposal / 'evm-pops.json'] if evm_pops else []), '--out', assignment)
         return assignment, proposal, context
 
+    def next_trust_base(self):
+        """The root trust base of epoch `self.target` over every entity (the previous one's successor, unit weights), signed by every root."""
+        work = self.gen / 'network' / 'handoff'
+        work.mkdir(parents=True, exist_ok=True)
+        weights = ','.join(['1'] * self.n)
+        self.host_ubft('trust-base', 'generate', '--home', work, '--network-id', '3', '--epoch', str(self.target), '--epoch-start', str(200000 * (self.target - 1)), '--previous-trust-base', self.previous_trust_base(),
+                       '--root-weights', weights, '--output-file-name', f'trust-base-epoch{self.target}.json',
+                       *[x for i in range(1, self.n + 1) for x in ('--node-info', self.gen / f'validator{i}' / 'root' / 'node-info.json')])
+        for i in range(1, self.n + 1):
+            self.host_ubft('trust-base', 'sign', '--home', self.gen / f'validator{i}' / 'root', '--trust-base', work / f'trust-base-epoch{self.target}.json')
+
+    def successor_shard_epoch(self):
+        """The EVM shard configuration epoch the handoff activates: the one after the last installed (the genesis configuration, or a later one a handoff left)."""
+        work = self.gen / 'network' / 'handoff'
+        installed = max([json.loads((self.gen / 'network' / 'full-shard-conf.json').read_text())['epoch']] + [json.loads(f.read_text())['epoch'] for f in work.glob('shard-conf-*.json')])
+        return installed + 1
+
     def pos_proposal(self, resubmit=True):
         """5b steps 0-4 on the election's reserved result: the preflight, the next root trust base (epoch 2, the same four members and weights, signed by each
         root's key), the EVM possession proofs made by the signing authorities over the candidate, their submission to the election and its finalization (sent by
@@ -541,13 +558,9 @@ class Rehearsal:
         result = self.view_text(election, 'openResult()(bytes32)').strip()
         self.expect(result != zero, 'the election has a reserved result (run pos-election first)')
         ids = self.entity_ids()
-        # 1 the next root trust base
-        weights = ','.join(['1'] * self.n)
-        self.host_ubft('trust-base', 'generate', '--home', work, '--network-id', '3', '--epoch', str(self.target), '--epoch-start', str(200000 * (self.target - 1)), '--previous-trust-base', self.previous_trust_base(),
-                       '--root-weights', weights, '--output-file-name', f'trust-base-epoch{self.target}.json',
-                       *[x for i in range(1, self.n + 1) for x in ('--node-info', self.gen / f'validator{i}' / 'root' / 'node-info.json')])
-        for i in range(1, self.n + 1):
-            self.host_ubft('trust-base', 'sign', '--home', self.gen / f'validator{i}' / 'root', '--trust-base', work / f'trust-base-epoch{self.target}.json')
+        # 1 the next root trust base (a joiner's authority had to start at its scope, so pos-joiner made it already: the same inputs)
+        if not (self.joiners and (work / f'trust-base-epoch{self.target}.json').exists()):
+            self.next_trust_base()
         # 2-3 the assignment with its reserved proofs, the candidate, every authority's proof over it
         assignment, proposal, context = self.build_assignment('reserved', work, result, ids, True)
         attempt = (proposal / 'attempt.txt').read_text().strip()
@@ -861,8 +874,7 @@ class Rehearsal:
         self.expect(all(self.root_epoch(i, transport) == self.target for i in range(1, self.n + 1)), f'every root certifies at epoch {self.target} (run pos-install first)')
         root_rpc = operator_rpc.common_urls(compose)[0]
         # 11 the shard configuration of the activated shard epoch (the EVM partition's epoch after the installed one)
-        installed = max([json.loads((self.gen / 'network' / 'full-shard-conf.json').read_text())['epoch']] + [json.loads(f.read_text())['epoch'] for f in work.glob('shard-conf-*.json')])
-        shard_epoch = installed + 1
+        shard_epoch = self.successor_shard_epoch()
         self.exec_in('root1', 'ubft', 'q3', 'shard-conf', '--root-rpc', root_rpc, '--epoch', str(shard_epoch), '--out', '/tmp/shard-conf.json')
         conf = json.loads(self.exec_in('root1', 'cat', '/tmp/shard-conf.json'))
         self.expect(conf.get('epoch') == shard_epoch and conf.get('partitionId') == 8, f'a root holds the EVM shard configuration of epoch {shard_epoch}', str(conf)[:200])
@@ -899,9 +911,8 @@ class Rehearsal:
         self.joiners.clear()   # the successor committee is active: a joiner is a member now
 
     def advance_joiner(self, i, operator, shard_epoch):
-        """The joiner's authority has never been enrolled (the genesis shard configuration does not name it) and holds no session: each step is run and recorded, in the
-        order the native lane enrolls a joiner after the Commit (advance to the activated scope, complete the enrollment against the activated shard configuration,
-        issue the session), then its shard node is started and what it does is recorded."""
+        """The joiner's authority is pending (the genesis shard configuration does not name it) and holds no session. It started at the successor scope, so after the Commit
+        its enrollment states the activated shard configuration and it issues its session; its shard node is then started and what it does is recorded."""
         log = []
         def step(what, *command):
             rc, out, err = self.exec_rc(f'authority{i}', 'ubft', 'signing-authority', *command)
@@ -909,10 +920,9 @@ class Rehearsal:
             self.say(f'  joiner authority {i}: {what}: exit {rc}: {(out + err).strip()[-200:]}')
             return rc
         step('status before', 'status', *operator)
-        # advance-epoch was refused first (run 40084120471: signing-enrollment-incomplete): an authority is enrolled before it is advanced. Every step is run and recorded
-        # even after a refusal; what must hold at the end is the session
+        # runs 40084120471 and 40085267112: an authority started at the genesis scope refused both orders (advance-epoch: signing-enrollment-incomplete; complete-enrollment:
+        # signing-context-mismatch). It starts at the successor scope now (joiner.set_scope), so its enrollment states the activated shard configuration directly
         step('complete-enrollment', 'complete-enrollment', *operator, '--shard-conf', f'/network/handoff/shard-conf-{shard_epoch}.json')
-        step('advance-epoch', 'advance-epoch', *operator, '--trust-base', f'/network/handoff/trust-base-epoch{self.target}.json', '--shard-conf', f'/network/handoff/shard-conf-{shard_epoch}.json')
         rc = step('replace-session', 'replace-session', *operator, '--out', '/authority/client.cred')
         step('status after', 'status', *operator)
         (self.evh() / f'joiner-authority-{i}.log').write_text('\n'.join(log))

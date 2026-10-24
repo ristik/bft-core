@@ -123,6 +123,18 @@ def _prepare(generation, ubft, index):
     return {'index': index, 'root': node['root'], 'evm': node['evm'], 'override': str(override)}
 
 
+def set_scope(generation, index, root_epoch, shard_epoch, trust_base):
+    """Start the joiner's signing authority at the scope of the epoch it will sign in. An authority admits no epoch later than the one it starts with ("a later epoch is
+    refused, not followed"), its key exists only while it runs (a restart loses it, and the delegation names the key), and it is enrolled against a shard configuration of
+    ITS scope: so the successor scope is fixed before it first starts. `trust_base` is the path INSIDE the container (network/ is mounted at /network)."""
+    path = Path(generation) / 'compose.joiner.json'
+    override = json.loads(path.read_text())
+    entry = override['services'][f'authority{index}']['entrypoint']
+    for flag, value in (('--root-epoch', str(root_epoch)), ('--shard-epoch', str(shard_epoch)), ('--trust-base', trust_base)):
+        entry[entry.index(flag) + 1] = value
+    path.write_text(json.dumps(override, indent=1, sort_keys=True) + '\n')
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument('action', choices=['prepare'])
