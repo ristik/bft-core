@@ -286,7 +286,7 @@ func TestSignedFrontierRefusesBeforeSigner(t *testing.T) {
 	_, err = h.cm.SampleSignedFrontier(context.Background(), signedRequest(t, h, 0x53))
 	require.ErrorIs(t, err, ErrFrontierUnavailable)
 	h.cm.recovery.Clear()
-	h.cm.frontier.latchFault()
+	h.cm.frontier.latchFault(errors.New("test"))
 	_, err = h.cm.SampleSignedFrontier(context.Background(), signedRequest(t, h, 0x54))
 	require.ErrorIs(t, err, ErrFrontierUnavailable)
 	require.Zero(t, counter.frontierCalls.Load())
