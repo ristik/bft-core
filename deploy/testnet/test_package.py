@@ -1062,6 +1062,17 @@ class PosSample(unittest.TestCase):
         self.assertEqual(got['pool'],{'available':str(10**18),'totalCredits':'2','accounted':str(10**18+2),'nextStart':'1000','balance':str(10**18+2)},'wei amounts are decimal strings')
         self.assertEqual(got['errors'],[])
         self.assertNotIn('recordCursor',bad);self.assertEqual(bad['errors'],['recordCursor: eth_call: 403 forbidden'])
+    def test_a_rate_limited_call_is_retried_and_a_persistent_refusal_is_named(self):
+        answers=[(429,'{"error":"rate limit"}'),(429,'{"error":"rate limit"}'),(200,'{"result":"0x01"}')]
+        sleeps=[]
+        with patch.object(observe,'get',lambda *a,**k:answers.pop(0)), patch.object(pos_sample.time,'sleep',sleeps.append):
+            self.assertEqual(pos_sample.eth('eth_blockNumber',[]),'0x01')
+        self.assertEqual(len(answers),0);self.assertGreaterEqual(sleeps.count(1),2,'a 429 waits a second before the retry')
+        calls=[]
+        def refuse(*a,**k): calls.append(1);return 429,'{"error":"rate limit"}'
+        with patch.object(observe,'get',refuse), patch.object(pos_sample.time,'sleep',lambda s:None):
+            with self.assertRaises(ValueError) as e: pos_sample.eth('eth_blockNumber',[])
+        self.assertIn('429',str(e.exception));self.assertEqual(len(calls),pos_sample.RETRIES+1,'bounded retries')
     def test_a_result_that_is_not_whole_words_is_refused(self):
         with self.assertRaises(ValueError): pos_sample.words('0x'+'00'*31)
         with self.assertRaises(ValueError): pos_sample.words('0x')

@@ -31,9 +31,23 @@ SELECTORS = {
 ZERO_WORD = '00' * 32
 
 
+GAP = 0.12        # seconds between two gateway calls: the gateway answers 429 above 10 requests per second per client address (a sample makes a dozen)
+RETRIES = 5
+_last = [0.0]
+
+
 def eth(method, params):
-    """The result of one JSON-RPC call through the gateway (with the forwarded address it requires), or raises ValueError naming the refusal."""
-    status, text = observe.get(observe.PUBLIC_RPC, '/', json.dumps({'jsonrpc': '2.0', 'id': 1, 'method': method, 'params': params}), headers={'X-Forwarded-For': observe.CLIENT_IP})
+    """The result of one JSON-RPC call through the gateway (with the forwarded address it requires), or raises ValueError naming the refusal. Calls are spaced by GAP
+    and a 429 is retried after a second, as the rehearsal's own client does (the first live run of the sampler found 429s in a burst)."""
+    for attempt in range(RETRIES + 1):
+        wait = _last[0] + GAP - time.monotonic()
+        if wait > 0:
+            time.sleep(wait)
+        status, text = observe.get(observe.PUBLIC_RPC, '/', json.dumps({'jsonrpc': '2.0', 'id': 1, 'method': method, 'params': params}), headers={'X-Forwarded-For': observe.CLIENT_IP})
+        _last[0] = time.monotonic()
+        if status != 429 or attempt == RETRIES:
+            break
+        time.sleep(1)
     try:
         body = json.loads(text)
     except ValueError:
