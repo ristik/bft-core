@@ -1,8 +1,9 @@
 """Crash recovery of a validator entity on the PoS network (TN-S #430, P8-TEST #437; bft-core issue #843): the unclean counterpart of pos-restart.
 
-OPT-IN stages, not in the default list: today the all-three-containers crash does NOT recover (issue #843: after SIGKILL of ureth, root and shard of one entity the survivors
-keep certifying, but the restarted execution client stays at its old block and the shard node loops on `execution recovery: finalized-branch conflict`). A failing expectation
-cannot be in the default run; these stages are named explicitly (`--stages` / the workflow's `pos_stages`) to reproduce and to localize it.
+OPT-IN stages, not in the default list: today an entity does NOT recover whenever its EXECUTION CLIENT (ureth) is SIGKILLed, alone or with the shard node or the root, at root
+epoch 1, 2 or 3 (issue #843: the survivors keep certifying, but the restarted ureth stays at its old block and the shard node cannot re-feed it, e.g. `execution recovery:
+finalized-branch conflict`). Killing only the shard node or only the root recovers. A failing expectation cannot be in the default run; these stages are named explicitly
+(`--stages` / the workflow's `pos_stages`) to reproduce and to localize it.
 
 Stages (each kills ONE entity, never pod<i> (the namespace holder: its loss strands root and shard, OPERATOR lifecycle note) and never authority<i> (a restarted authority has a
 new key, README)); they differ in WHAT is killed and WHEN:
@@ -13,10 +14,11 @@ new key, README)); they differ in WHAT is killed and WHEN:
 Each scenario is its own rehearsal run: a broken entity cannot be repaired, and 3 of 4 roots (the threshold) must stay up for the next one.
 
 Per scenario: `docker compose kill -s KILL` (no shutdown hook, no flush); the three survivors keep certifying (their root rounds advance) and mine a transaction; the containers
-carry `restart: unless-stopped`, which Docker did NOT apply to a killed container in the first run, so the stage waits RESTART_WAIT s for it, then `compose start`s the killed
-ones (as pos-restart does: the container, install flag included, is kept); then it waits CONVERGE_WAIT s for the entity's execution client to have the survivors' transaction (the
-same block) and its root head to be at the epoch within LAG rounds of the survivors'. EXPECTED (and failing today for the three-container crash): it converges by that first
-restart. If it does not, the stage still records, in evidence/pos-crash-<tag>.json, whether (2) a graceful restart of the execution client, (3) a graceful stop and start of all
+the containers carry `restart: unless-stopped`, but `docker compose kill` marks a container as manually stopped, so Docker's restart policy is ignored by design (the first run
+showed it was not applied); the stage still waits RESTART_WAIT s in case it is, then `compose start`s the killed ones (as pos-restart does: the container, install flag included,
+is kept); then it waits CONVERGE_WAIT s for the entity's execution client to have the survivors' transaction (the
+same block) and its root head to be at the epoch within LAG rounds of the survivors'. EXPECTED (and failing today whenever ureth is killed, alone or with the shard node or the
+root): it converges by that first restart. If it does not, the stage still records, in evidence/pos-crash-<tag>.json, whether (2) a graceful restart of the execution client, (3) a graceful stop and start of all
 three, recovers it, and keeps the logs of the entity (evidence/pos-crash-<tag>-<service>.log, whole, from the kill): is the conflict a retry loop or permanent state. Only then
 does it fail.
 
@@ -113,7 +115,7 @@ def scenario(r, tag, parts, epoch):
             def running():
                 return set(names) <= set(r.compose('ps', '--services', '--status', 'running').split())
 
-            try:
+            try:   # docker compose kill marks the container manually stopped: `restart: unless-stopped` is ignored by design; waiting is only a check
                 r.wait('the restart policy brings the killed containers back', running, RESTART_WAIT)
                 row['restart'] = 'policy'
             except Exception:
@@ -157,7 +159,7 @@ def scenario(r, tag, parts, epoch):
                 row.setdefault('logs', {})[service] = {'lines': len(log.splitlines()), 'error_warn': warnings, 'panics': panics}
             (r.evidence / f'pos-crash-{tag}.json').write_text(json.dumps(rows, indent=1) + '\n')
             r.say(f'  record: {json.dumps(row)[:900]}')
-        r.expect(row['converged_after_restart'], f'entity {i} converges after SIGKILL of {" ".join(names)} and a restart (bft-core #843: fails today for ureth+root+shard)', json.dumps(row)[:600])
+        r.expect(row['converged_after_restart'], f'entity {i} converges after SIGKILL of {" ".join(names)} and a restart (bft-core #843: fails today whenever ureth is killed)', json.dumps(row)[:600])
         r.expect(all(v['panics'] == 0 for v in row['logs'].values()), f'no panic in the logs of entity {i} after the crash', json.dumps(row['logs']))
 
         def applied():
