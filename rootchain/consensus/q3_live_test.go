@@ -159,6 +159,7 @@ func (c *q3Live) start(i int) {
 	c.cancel[i], c.done[i] = cancel, done
 	c.mu.Unlock()
 	c.offline.Delete(c.replicas[i].id())
+	c.replicas[i].stopRun = func() { c.stop(i) }
 	go func() { done <- cm.Run(ctx) }()
 }
 

@@ -157,7 +157,9 @@ type (
 		qcVoters    metric.Int64Counter
 		susVotes    metric.Int64Counter
 		recoveryReq metric.Int64Counter
-		addBlockDur metric.Float64Histogram
+		// frontierFault counts the latch of the frontier fault (once per process)
+		frontierFault metric.Int64Counter
+		addBlockDur   metric.Float64Histogram
 	}
 )
 
@@ -403,6 +405,9 @@ func NewConsensusManager(
 	if err := consensusManager.initMetrics(observe); err != nil {
 		return nil, fmt.Errorf("initializing metrics: %w", err)
 	}
+	if frontier != nil {
+		frontier.onFirstFault = consensusManager.frontierFaultLatched
+	}
 	manager = consensusManager
 	return consensusManager, nil
 }
@@ -475,7 +480,21 @@ func (x *ConsensusManager) initMetrics(observe Observability) (err error) {
 		return fmt.Errorf("creating counter for recovery attempts: %w", err)
 	}
 
+	x.frontierFault, err = m.Int64Counter("frontier.fault", metric.WithDescription("Latched frontier faults: 1 once the root refuses frontier replies until it restarts"))
+	if err != nil {
+		return fmt.Errorf("creating counter for frontier faults: %w", err)
+	}
+
 	return nil
+}
+
+// frontierFaultLatched reports the first latch of the frontier fault: from now on the root refuses frontier and signed-frontier requests until it
+// restarts, so the reason is logged once, at WARN, and counted.
+func (x *ConsensusManager) frontierFaultLatched(reason error) {
+	x.log.Warn("frontier fault latched: frontier replies are refused until restart", logger.Error(reason))
+	if x.frontierFault != nil {
+		x.frontierFault.Add(context.Background(), 1)
+	}
 }
 
 func (x *ConsensusManager) RequestCertification(ctx context.Context, cr IRChangeRequest) error {
@@ -1329,7 +1348,7 @@ func (x *ConsensusManager) processQC(ctx context.Context, qc *drctypes.QuorumCer
 	certs, err := x.blockStore.ProcessQc(qc)
 	if err != nil {
 		if x.frontier != nil && errors.Is(err, storage.ErrPersistenceUncertain) {
-			x.frontier.latchFault()
+			x.frontier.latchFault(fmt.Errorf("QC of round %d: %w", qc.GetRound(), err))
 		}
 		x.log.WarnContext(ctx, "failure to process QC triggers recovery", logger.Error(err))
 		if e := x.sendRecoveryRequests(ctx, qc); e != nil {
@@ -1769,7 +1788,7 @@ func (x *ConsensusManager) onStateResponse(ctx context.Context, rsp *abdrc.State
 	recoveryWriteStarted := true
 	defer func() {
 		if recoveryWriteStarted && rErr != nil && x.frontier != nil {
-			x.frontier.latchFault()
+			x.frontier.latchFault(fmt.Errorf("recovery failed after its first write: %w", rErr))
 		}
 	}()
 	var blockStore *storage.BlockStore
@@ -1859,7 +1878,7 @@ func (x *ConsensusManager) onStateResponse(ctx context.Context, rsp *abdrc.State
 	} else if err != nil {
 		x.log.ErrorContext(ctx, "failed to update leader selector", logger.Error(err))
 		if x.frontier != nil {
-			x.frontier.latchFault()
+			x.frontier.latchFault(fmt.Errorf("leader selector after recovery: %w", err))
 		}
 	}
 	// Replay is complete. Ordinary live admission errors of the trigger below are not uncertain writes: the latch is armed again once the
@@ -2179,7 +2198,7 @@ func (x *ConsensusManager) updateTrustBase() {
 	trustBase, err := x.trustBaseStore.GetByRound(x.pacemaker.GetCurrentRound())
 	if err != nil {
 		if x.frontier != nil {
-			x.frontier.latchFault()
+			x.frontier.latchFault(fmt.Errorf("trust base of round %d: %w", x.pacemaker.GetCurrentRound(), err))
 		}
 		x.log.Error("failed to update trust base", logger.Error(err))
 		return

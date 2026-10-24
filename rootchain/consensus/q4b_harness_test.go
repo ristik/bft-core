@@ -437,6 +437,7 @@ func (c *q4bLive) start(names ...string) {
 		c.cancel[i], c.done[i] = cancel, done
 		c.mu.Unlock()
 		c.offline.Delete(c.nodes[i].r.id())
+		c.nodes[i].r.stopRun = func() { c.stop(name) }
 		go func() { done <- cm.Run(ctx) }()
 	}
 }
