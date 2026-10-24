@@ -39,7 +39,7 @@ x4r_intervals() {
 
 # the dry pool and its refill (awaitPaid false: no later interval is expected on this chain)
 x4r_dry_refill() {
-  x4e_run xr reward-exhaust-refill.sh '{"refillWei":"1500000000000000000","awaitPaid":false}' && x4e_run xr reward-exhaust-refill.check.sh '{"awaitPaid":false}' || { x4r_diag; return 1; }
+  x4e_run xr reward-exhaust-refill.sh '{"refillWei":"1500000000000000000","awaitPaid":"false"}' && x4e_run xr reward-exhaust-refill.check.sh '{"awaitPaid":"false"}' || { x4r_diag; return 1; }
 }
 
 # a payee (genesis payee 1, a key the lane holds) claims its whole credit to a fresh address: exact amounts, the pool's balance, availability and totalCredits move by the credit and
