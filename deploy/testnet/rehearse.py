@@ -561,7 +561,14 @@ class Rehearsal:
         self.expect(result != zero, 'the election has a reserved result (run pos-election first)')
         ids = self.entity_ids()
         # 1 the next root trust base (a joiner's authority had to start at its scope, so pos-joiner made it already: the same inputs)
-        if not (self.joiners and (work / f'trust-base-epoch{self.target}.json').exists()):
+        if self.joiners and (work / f'trust-base-epoch{self.target}.json').exists():
+            # reused, not rebuilt: it is the successor committee only if the election elected exactly the five entities it names
+            members = self.view_text(election, 'frozenMembers(bytes32)((uint64,uint64,uint64,uint64,bytes32)[])', result)
+            elected = sorted(int(x) for x in re.findall(r'\((\d+),', members.replace('((', '(')))
+            wanted = sorted([int(x['stakingId']) for x in json.loads((net / 'pos-plan.json').read_text())['identities']]
+                            + [json.loads((self.evidence / 'joiner.json').read_text())['stakingId']])
+            self.expect(elected == wanted, 'the election elected exactly the genesis identities and the joiner (the pre-built trust base names them)', f'{elected} / {wanted}')
+        else:
             self.next_trust_base()
         # 2-3 the assignment with its reserved proofs, the candidate, every authority's proof over it
         assignment, proposal, context = self.build_assignment('reserved', work, result, ids, True)
@@ -945,14 +952,19 @@ class Rehearsal:
                     shutil.rmtree(path) if path.is_dir() else path.unlink()
         self.compose('up', '-d', '--no-deps', f'ureth{i}')
         self.wait(f'the joiner\'s execution client {i} answers', lambda: self.ureth(i, 'eth_blockNumber') is not None, 180)
-        # the survivors' archives hold the verified trust body of the new epoch only once their shard nodes have restarted under their new sessions and archived it (run
-        # 40091999009: "no archived verified-trust body identity for epoch 2" right after the loop restarted them): ask again for up to two minutes, keep every answer
+        # A survivor's archive holds the verified trust body of the new epoch only once it has archived it, and not every survivor's does at the same time (runs 40091999009 and
+        # 40101751785: "no archived verified-trust body identity for epoch 2" from validator 1's archive for two minutes, while runs 40088831174, 40090246101 and 40094341567
+        # found it on the first attempt): every survivor's archive is asked, in turn, for up to two minutes; every answer is kept
         attempts = []
+        survivors = [j for j in range(1, self.n + 1) if j != i]
         def pinned():
-            run = subprocess.run([str(self.restore_pin), str(self.gen / 'validator1' / 'archive'), str(self.gen / 'network' / 'trust-base.json'), str(val / 'evm' / 'tip')],
-                                 text=True, capture_output=True)
-            attempts.append(f'exit {run.returncode}: {(run.stdout + run.stderr).strip()[-300:]}')
-            return run if run.returncode == 0 else None
+            for j in survivors:
+                run = subprocess.run([str(self.restore_pin), str(self.gen / f'validator{j}' / 'archive'), str(self.gen / 'network' / 'trust-base.json'), str(val / 'evm' / 'tip')],
+                                     text=True, capture_output=True)
+                attempts.append(f'validator {j} archive: exit {run.returncode}: {(run.stdout + run.stderr).strip()[-300:]}')
+                if run.returncode == 0:
+                    return run
+            return None
         try:
             pin = self.wait('a survivor\'s archive holds the verified trust history of the new epoch', pinned, 120)
         except Failure:
@@ -971,23 +983,26 @@ class Rehearsal:
         entry[entry.index('run')] = 'restore'
         entry += ['--tip-uc', '/state/tip.uc.cbor', '--tip-tr', '/state/tip.tr.cbor', '--trust-body-id', found.group(1)]
         restore_file = self.gen / handoff_ops.RESTORE_OVERRIDE
-        restore_file.write_text(json.dumps({'services': {f'shard{i}': {'entrypoint': entry}}}, indent=1) + '\n')
-        self.compose('up', '-d', '--no-deps', '--force-recreate', f'shard{i}')
-        time.sleep(30)
-        logs = self.compose('logs', '--no-color', '--tail', '60', f'shard{i}', check=False)
-        (self.evh() / f'joiner-shard-{i}-restore.log').write_text(logs)
-        running = f'shard{i}' in self.compose('ps', '--status', 'running', '--services').split()
-        self.say(f'  joiner shard {i} restoring after 30 s: {"running" if running else "NOT running"}: ' + ' | '.join(logs.strip().splitlines()[-3:])[-500:])
-        self.expect(running, f'the joiner\'s shard node {i} runs as a restore under its new session', logs.strip()[-500:])
-        survivor = self.wait(f'the joiner\'s execution client {i} catches up with validator 1', lambda: int(self.ureth(i, 'eth_blockNumber'), 16) + 5 >= int(self.ureth(1, 'eth_blockNumber'), 16), 300)
-        self.expect(survivor, f'the joiner\'s execution client {i} is at validator 1\'s block')
-        # an ordinary node from here on: the restore flags go, the state stays
-        restore_file.unlink()
-        self.compose('up', '-d', '--no-deps', '--force-recreate', f'shard{i}')
-        time.sleep(20)
-        running = f'shard{i}' in self.compose('ps', '--status', 'running', '--services').split()
-        (self.evh() / f'joiner-shard-{i}-run.log').write_text(self.compose('logs', '--no-color', '--tail', '60', f'shard{i}', check=False))
-        self.expect(running, f'the restored shard node {i} runs again as an ordinary node')
+        try:
+            restore_file.write_text(json.dumps({'services': {f'shard{i}': {'entrypoint': entry}}}, indent=1) + '\n')
+            self.compose('up', '-d', '--no-deps', '--force-recreate', f'shard{i}')
+            time.sleep(30)
+            logs = self.compose('logs', '--no-color', '--tail', '60', f'shard{i}', check=False)
+            (self.evh() / f'joiner-shard-{i}-restore.log').write_text(logs)
+            running = f'shard{i}' in self.compose('ps', '--status', 'running', '--services').split()
+            self.say(f'  joiner shard {i} restoring after 30 s: {"running" if running else "NOT running"}: ' + ' | '.join(logs.strip().splitlines()[-3:])[-500:])
+            self.expect(running, f'the joiner\'s shard node {i} runs as a restore under its new session', logs.strip()[-500:])
+            survivor = self.wait(f'the joiner\'s execution client {i} catches up with validator 1', lambda: int(self.ureth(i, 'eth_blockNumber'), 16) + 5 >= int(self.ureth(1, 'eth_blockNumber'), 16), 300)
+            self.expect(survivor, f'the joiner\'s execution client {i} is at validator 1\'s block')
+            # an ordinary node from here on: the restore flags go, the state stays
+            restore_file.unlink()
+            self.compose('up', '-d', '--no-deps', '--force-recreate', f'shard{i}')
+            time.sleep(20)
+            running = f'shard{i}' in self.compose('ps', '--status', 'running', '--services').split()
+            (self.evh() / f'joiner-shard-{i}-run.log').write_text(self.compose('logs', '--no-color', '--tail', '60', f'shard{i}', check=False))
+            self.expect(running, f'the restored shard node {i} runs again as an ordinary node')
+        finally:
+            restore_file.unlink(missing_ok=True)   # a failed restore leaves no override behind for the next Compose call
 
     def exec_rc(self, service, *command):
         run = subprocess.run(['docker', 'compose', *handoff_ops.compose_files(self.gen), 'exec', '-T', service, *command], text=True, capture_output=True)
@@ -1250,10 +1265,11 @@ Rehearsal.pos_resources = pos_sample.pos_resources   # the runner resource smoke
 Rehearsal.pos_observe = pos_sample.pos_observe   # the sampler smoke lives in pos_sample.py
 for _method, _stage in pos_crash.METHODS.items():   # the OPT-IN crash-recovery stages live in pos_crash.py (bft-core #843)
     setattr(Rehearsal, _method, _stage)
+Rehearsal.pos_join_heavy = pos_join.pos_join_heavy
 Rehearsal.pos_join_signs = pos_join.pos_join_signs
 Rehearsal.pos_joiner = pos_join.pos_joiner   # the joiner stages live in pos_join.py; they are not in the default list of the main generation (the join has its own)
 Rehearsal.pos_owner = pos_owner.pos_owner   # the owner-key stage lives in pos_owner.py
-POS_STAGES = (('pos-smoke', 'pos_smoke'), ('pos-observe', 'pos_observe'), ('pos-rewards', 'pos_rewards'), ('pos-joiner', 'pos_joiner'), ('pos-election', 'pos_election'), ('pos-proposal', 'pos_proposal'), ('pos-abort', 'pos_abort'), ('pos-propose', 'pos_propose'), ('pos-too-late', 'pos_too_late'), ('pos-install', 'pos_install'), ('pos-advance', 'pos_advance'), ('pos-join-signs', 'pos_join_signs'), ('pos-restart', 'pos_restart'), ('pos-stale', 'pos_stale'), ('pos-handoff-2', 'pos_handoff_2'), ('pos-restart-2', 'pos_restart_2'), ('pos-recreate', 'pos_recreate'), *pos_crash.STAGES, ('pos-resources', 'pos_resources'), ('pos-owner', 'pos_owner'))
+POS_STAGES = (('pos-smoke', 'pos_smoke'), ('pos-observe', 'pos_observe'), ('pos-rewards', 'pos_rewards'), ('pos-joiner', 'pos_joiner'), ('pos-election', 'pos_election'), ('pos-proposal', 'pos_proposal'), ('pos-abort', 'pos_abort'), ('pos-propose', 'pos_propose'), ('pos-too-late', 'pos_too_late'), ('pos-install', 'pos_install'), ('pos-advance', 'pos_advance'), ('pos-join-signs', 'pos_join_signs'), ('pos-restart', 'pos_restart'), ('pos-join-heavy', 'pos_join_heavy'), ('pos-stale', 'pos_stale'), ('pos-handoff-2', 'pos_handoff_2'), ('pos-restart-2', 'pos_restart_2'), ('pos-recreate', 'pos_recreate'), *pos_crash.STAGES, ('pos-resources', 'pos_resources'), ('pos-owner', 'pos_owner'))
 
 
 def main():

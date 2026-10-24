@@ -158,3 +158,68 @@ def pos_join_signs(r):
         r.compose('start', 'root2')
     for i in members:
         r.wait(f'root {i} certifies at epoch {r.target}', lambda i=i: r.root_epoch(i, transport) == r.target, 180)
+
+
+WEIGHT_CHURN = 4   # ElectionPolicy.Reason: None, InvalidProfile, Cardinality, MembershipChurn, WeightChurn, ReferenceCapacity, ReservationRefused, InternalFailure
+
+
+def pos_join_heavy(r):
+    """Unequal weights on the package (TN-S #437, the design in briefs/tns-joiner-weights-design.md): a SECOND joiner bonds TWO units in its one lot (weight 2) after the
+    committee of five is in place. The election's selection seeds the committee with the incumbents, then outsiders up to nTarget (6), and judges the whole against the
+    incumbent committee: five unit weights to five unit weights and one of weight 2 is D = 2*2/7 = 0.571 > 1/2 (the testnet bound, owner decision 19), so the election records
+    NoCandidate with the reason WeightChurn and the committee of five stays. No handoff is attempted and nothing is installed: this is a refusal, recorded with the contract's
+    own reason. Run after pos-join-signs/pos-restart of the same run. The second joiner needs no signing authority (no handoff names it): its EVM key is a local key."""
+    election, custody = (json.loads((r.gen / 'network' / 'pos-deployment.json').read_text())[k] for k in ('election', 'custody'))
+    r.expect(r.n == 5 and not r.joiners, 'precondition: five members, no joiner pending (the join ran first)')
+    transport = handoff_ops.DockerTransport(r.gen)
+    r.expect(all(r.root_epoch(i, transport) == r.target for i in range(1, 6)), f'all five roots certify at epoch {r.target}')
+    home = r.gen / 'heavy-joiner'
+    home.mkdir(mode=0o700, exist_ok=True)
+    for kind, group in (('root', 'root-node'), ('evm', 'shard-node')):
+        r.host_ubft(group, 'init', '--home', home / kind, '--generate')
+    keys = {kind: json.loads((home / kind / 'keys.json').read_text())['sigKey']['privateKey'] for kind in ('root', 'evm')}
+    node = {kind: r.host_ubft('node-id', '--home', home / kind).strip().splitlines()[-1] for kind in ('root', 'evm')}
+    owner, withdrawal, payee = new_wallet(r), new_wallet(r)['address'], new_wallet(r)['address']
+    identity = home / 'identity.json'
+    fd = os.open(identity, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, 'w') as out:
+        json.dump(dict(joiner_file(owner['private_key'], keys['root'], withdrawal, payee, node['root'], node['evm']), evmKey=keys['evm']), out)
+    r.faucet_send(owner['address'], 2 * BOND_UNIT + 10 ** 18)
+    status, out = r.relayer(identity, 'join', 'register', joiner=True)
+    found = re.search(r'custody id (\d+)', out)
+    r.expect(status == 0 and bool(found), 'join register: the heavy joiner has a custody identity', out.strip()[-300:])
+    ident = int(found.group(1))
+    status, out = r.relayer(identity, 'join', 'bond', '--id', str(ident), '--value-wei', str(2 * BOND_UNIT), joiner=True)
+    r.expect(status == 0, 'join bond: ONE lot of TWO bond units', out.strip()[-300:])
+    status, out = r.relayer(identity, 'join', 'admit', '--id', str(ident), joiner=True)
+    r.expect(status == 0, 'join admit: the delegation (a local EVM key, no handoff will name it)', out.strip()[-300:])
+    r.wait('the live index holds six identities', lambda: r.view(election, 'liveCount()(uint32)')[0] == 6, 120)
+    cursor_before = r.view(election, 'attemptCursor()(uint64)')[0]   # an attempt from here on sees the heavy joiner eligible
+    # The election runs in the system hook, whose events are not in a receipt (run 40097992670: attemptCursor 6, openResult zero, no NoCandidate log): the outcome is read
+    # from its state, the last attempt's stored result: state 2 NoCandidate, and the reason that follows it
+    def outcome():
+        cursor = r.view(election, 'attemptCursor()(uint64)')[0]
+        if cursor <= cursor_before:
+            return None
+        last = r.view_text(election, 'lastAttemptResult()(bytes32)').strip()
+        raw = r.call('eth_call', [{'to': election, 'data': r.cast_run('calldata', 'result(bytes32)', last)}, 'latest'])
+        return {'attempt': cursor, 'result': last, 'state': int(raw[2:66], 16), 'reason': int(raw[66:130], 16)}
+    try:
+        got = r.wait('the election makes an attempt after the heavy joiner is eligible', outcome, 1500)
+    except Exception as error:
+        lines = [f'{k}: {r.view_text(election, sig).strip()}' for k, sig in (('openResult', 'openResult()(bytes32)'), ('attemptCursor', 'attemptCursor()(uint64)'),
+                                                                          ('lastAttemptResult', 'lastAttemptResult()(bytes32)'), ('thresholds', 'thresholds()(uint256,uint256)'),
+                                                                          ('liveCount', 'liveCount()(uint32)'))]
+        lines += [f'registry {k}: {r.view_text(r.REGISTRY, sig).strip()}' for k, sig in (('progress', 'progress()(uint64)'), ('ucTime', 'ucTime()(uint64)'), ('recordCount', 'recordCount()(uint64)'))]
+        lines.append(f'attemptCursor before: {cursor_before}')
+        (r.evidence / 'join-heavy-diagnostics.txt').write_text('\n'.join(lines) + '\n')
+        r.say('  election state at the timeout: ' + ' | '.join(lines)[:1500])
+        raise
+    r.say(f'  the election\'s attempt: {got}')
+    (r.evidence / 'join-heavy.json').write_text(json.dumps(dict(got, stakingId=ident, weightChurn=WEIGHT_CHURN), indent=1) + '\n')
+    r.expect(got['state'] == 2, 'the attempt is a NoCandidate (result state 2), not a reservation', str(got))
+    reason = got['reason']
+    r.expect(reason == WEIGHT_CHURN, f'the reason is WeightChurn ({WEIGHT_CHURN}): five unit weights to five and one of weight 2 is D = 0.571 > 1/2', str(got))
+    zero = '0x' + '00' * 32
+    r.expect(r.view_text(election, 'openResult()(bytes32)').strip() == zero, 'no result is open: nothing was reserved')
+    r.expect(all(r.root_epoch(i, transport) == r.target for i in range(1, 6)), 'the committee of five still certifies at the same epoch')
