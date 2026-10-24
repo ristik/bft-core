@@ -51,6 +51,7 @@ class Rehearsal:
         self.pods = ()
         self.reset_args = {}
         self.ubft = None
+        self.restore_pin = None
         self.target = 2   # the root epoch the handoff being driven installs (pos-handoff-2 drives the next one, 3)
         self.joiners = set()   # entities started but not yet members of the committee that certifies (pos-joiner adds one, pos-advance clears them)
         self.committed_target = None   # the Abort target of the handoff pos-propose committed (pos-too-late)
@@ -927,13 +928,52 @@ class Rehearsal:
         step('status after', 'status', *operator)
         (self.evh() / f'joiner-authority-{i}.log').write_text('\n'.join(log))
         self.expect(rc == 0, f'the joiner\'s authority {i} advanced, enrolled and issued its session', log[-1][-400:])
-        self.compose('start', f'shard{i}')
+        self.restore_joiner(i)
+
+    def restore_joiner(self, i):
+        """The joiner's shard node after the Commit. Its staging run left a candidate without the certificates a node needs (run 40087359371: "durable state is damaged or
+        untrusted"), and the genesis configuration does not name it: it comes back by RESTORING, as the native lane does: its execution client and node state are emptied,
+        the pin (latest certified record, its technical record and the trust history's body id) is read from a survivor's immutable archive, and the node starts as
+        `shard-node restore` under its new session. Once it runs it is started again as an ordinary node (a restore refuses a node that has state)."""
+        self.expect(bool(self.restore_pin), 'the joiner\'s restore needs --restore-pin (scripts/h4-restore-pin of the pinned source)')
+        val = self.gen / f'validator{i}'
+        self.compose('stop', f'shard{i}', f'ureth{i}')
+        for sub, keep in (('evm', {'keys.json', 'node-info.json'}), ('archive', set()), ('ureth', set())):
+            for path in (val / sub).iterdir():
+                if path.name not in keep:
+                    shutil.rmtree(path) if path.is_dir() else path.unlink()
+        self.compose('up', '-d', '--no-deps', f'ureth{i}')
+        self.wait(f'the joiner\'s execution client {i} answers', lambda: self.ureth(i, 'eth_blockNumber') is not None, 180)
+        pin = subprocess.run([str(self.restore_pin), str(self.gen / 'validator1' / 'archive'), str(self.gen / 'network' / 'trust-base.json'), str(val / 'evm' / 'tip')],
+                             text=True, capture_output=True)
+        (self.evh() / f'joiner-restore-pin-{i}.txt').write_text(pin.stdout + pin.stderr)
+        self.expect(pin.returncode == 0, 'a survivor\'s archive yields the restore pin', (pin.stdout + pin.stderr).strip()[-400:])
+        found = re.search(r'bodyID=(0x[0-9a-fA-F]+)', pin.stdout)
+        self.expect(bool(found), 'the pin names the trust history\'s body id', pin.stdout.strip()[-300:])
+        for name in ('tip.uc.cbor', 'tip.tr.cbor'):
+            os.chown(val / 'evm' / name, 10001, 10001)
+        services = handoff_ops.load_compose(self.gen)['services']
+        entry = list(services[f'shard{i}']['entrypoint'])
+        entry[entry.index('run')] = 'restore'
+        entry += ['--tip-uc', '/state/tip.uc.cbor', '--tip-tr', '/state/tip.tr.cbor', '--trust-body-id', found.group(1)]
+        restore_file = self.gen / handoff_ops.RESTORE_OVERRIDE
+        restore_file.write_text(json.dumps({'services': {f'shard{i}': {'entrypoint': entry}}}, indent=1) + '\n')
+        self.compose('up', '-d', '--no-deps', '--force-recreate', f'shard{i}')
         time.sleep(30)
         logs = self.compose('logs', '--no-color', '--tail', '60', f'shard{i}', check=False)
-        (self.evh() / f'joiner-shard-{i}.log').write_text(logs)
+        (self.evh() / f'joiner-shard-{i}-restore.log').write_text(logs)
         running = f'shard{i}' in self.compose('ps', '--status', 'running', '--services').split()
-        self.say(f'  joiner shard {i} after 30 s: {"running" if running else "NOT running"}: ' + ' | '.join(logs.strip().splitlines()[-3:])[-500:])
-        self.expect(running, f'the joiner\'s shard node {i} runs under its new session', logs.strip()[-500:])
+        self.say(f'  joiner shard {i} restoring after 30 s: {"running" if running else "NOT running"}: ' + ' | '.join(logs.strip().splitlines()[-3:])[-500:])
+        self.expect(running, f'the joiner\'s shard node {i} runs as a restore under its new session', logs.strip()[-500:])
+        survivor = self.wait(f'the joiner\'s execution client {i} catches up with validator 1', lambda: int(self.ureth(i, 'eth_blockNumber'), 16) + 5 >= int(self.ureth(1, 'eth_blockNumber'), 16), 300)
+        self.expect(survivor, f'the joiner\'s execution client {i} is at validator 1\'s block')
+        # an ordinary node from here on: the restore flags go, the state stays
+        restore_file.unlink()
+        self.compose('up', '-d', '--no-deps', '--force-recreate', f'shard{i}')
+        time.sleep(20)
+        running = f'shard{i}' in self.compose('ps', '--status', 'running', '--services').split()
+        (self.evh() / f'joiner-shard-{i}-run.log').write_text(self.compose('logs', '--no-color', '--tail', '60', f'shard{i}', check=False))
+        self.expect(running, f'the restored shard node {i} runs again as an ordinary node')
 
     def exec_rc(self, service, *command):
         run = subprocess.run(['docker', 'compose', *handoff_ops.compose_files(self.gen), 'exec', '-T', service, *command], text=True, capture_output=True)
@@ -1207,10 +1247,12 @@ def main():
     for name in ('out', 'ubft', 'b1genesis', 'keygen', 'captcha-sitekey', 'captcha-secret-file'):
         p.add_argument('--reset-' + name, help='the reset stage passes this to generate.py as --' + name + ' (--out: the new generation directory)')
     p.add_argument('--ubft', type=Path, help='the pinned ubft binary, for the handoff stages (they write and read files with it)')
+    p.add_argument('--restore-pin', type=Path, help='scripts/h4-restore-pin built from the pinned source: the joiner\'s shard node is restored from a survivor\'s archive with it')
     p.add_argument('--stages', default=','.join(s for s, _ in STAGES), help='comma separated, in order (the default is the PoA stages; POS_STAGES are named explicitly)')
     a = p.parse_args()
     r = Rehearsal(a.generation, a.evidence, a.cast)
     r.ubft = a.ubft.resolve() if a.ubft else None
+    r.restore_pin = a.restore_pin.resolve() if a.restore_pin else None
     r.pods = tuple(int(x) for x in a.pods.split(',') if x)
     r.reset_args = {k[len('reset_'):]: v for k, v in vars(a).items() if k.startswith('reset_')}
     wanted = a.stages.split(',')

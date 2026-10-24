@@ -1104,6 +1104,18 @@ class Joiner(unittest.TestCase):
             self.assertEqual(at('--node-id'),'e4',"the node id is untouched")
             for name in services:
                 if name!='authority5': self.assertEqual(got[name],services[name],name)
+    def test_the_restore_override_changes_only_the_joiner_shard_entrypoint_and_only_while_it_exists(self):
+        with tempfile.TemporaryDirectory() as d:
+            gen=Path(d);compose=self.topology(4);(gen/'compose.yaml').write_text(json.dumps(compose))
+            services=joiner.joiner_services(compose,5,'r4','e4');(gen/'compose.joiner.json').write_text(json.dumps({'services':services}))
+            plain=handoff_ops.load_compose(gen)['services']['shard5']
+            entry=list(plain['entrypoint']);entry[entry.index('run')]='restore'
+            (gen/handoff_ops.RESTORE_OVERRIDE).write_text(json.dumps({'services':{'shard5':{'entrypoint':entry}}}))
+            got=handoff_ops.load_compose(gen)['services']['shard5']
+            self.assertEqual(got['entrypoint'][2],'restore');self.assertEqual({k:v for k,v in got.items() if k!='entrypoint'},{k:v for k,v in plain.items() if k!='entrypoint'})
+            self.assertEqual(handoff_ops.compose_files(gen)[-1],str(gen/handoff_ops.RESTORE_OVERRIDE))
+            (gen/handoff_ops.RESTORE_OVERRIDE).unlink()
+            self.assertEqual(handoff_ops.load_compose(gen)['services']['shard5']['entrypoint'][2],'run')
     def test_the_genesis_services_are_untouched_and_a_taken_index_is_refused(self):
         four=self.topology(4);before=json.dumps(four,sort_keys=True)
         joiner.joiner_services(four,5,'r4','e4')
