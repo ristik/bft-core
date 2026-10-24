@@ -160,7 +160,6 @@ def pos_join_signs(r):
         r.wait(f'root {i} certifies at epoch {r.target}', lambda i=i: r.root_epoch(i, transport) == r.target, 180)
 
 
-NO_CANDIDATE = 'NoCandidate(bytes32,uint64,uint8,bytes32)'
 WEIGHT_CHURN = 4   # ElectionPolicy.Reason: None, InvalidProfile, Cardinality, MembershipChurn, WeightChurn, ReferenceCapacity, ReservationRefused, InternalFailure
 
 
@@ -186,7 +185,6 @@ def pos_join_heavy(r):
     with os.fdopen(fd, 'w') as out:
         json.dump(dict(joiner_file(owner['private_key'], keys['root'], withdrawal, payee, node['root'], node['evm']), evmKey=keys['evm']), out)
     r.faucet_send(owner['address'], 2 * BOND_UNIT + 10 ** 18)
-    start = int(r.ureth(1, 'eth_blockNumber'), 16)
     status, out = r.relayer(identity, 'join', 'register', joiner=True)
     found = re.search(r'custody id (\d+)', out)
     r.expect(status == 0 and bool(found), 'join register: the heavy joiner has a custody identity', out.strip()[-300:])
@@ -196,26 +194,31 @@ def pos_join_heavy(r):
     status, out = r.relayer(identity, 'join', 'admit', '--id', str(ident), joiner=True)
     r.expect(status == 0, 'join admit: the delegation (a local EVM key, no handoff will name it)', out.strip()[-300:])
     r.wait('the live index holds six identities', lambda: r.view(election, 'liveCount()(uint32)')[0] == 6, 120)
-    topic = r.cast_run('keccak', NO_CANDIDATE)
-    def recorded():
-        logs = r.ureth(1, 'eth_getLogs', [{'address': election, 'fromBlock': hex(start), 'toBlock': 'latest', 'topics': [topic]}]) or []
-        return [(int(x['data'][2:2 + 64], 16), int(x['data'][2 + 64:2 + 128], 16)) for x in logs]   # data: attempt, reason, origin; (attempt, reason)
+    cursor_before = r.view(election, 'attemptCursor()(uint64)')[0]   # an attempt from here on sees the heavy joiner eligible
+    # The election runs in the system hook, whose events are not in a receipt (run 40097992670: attemptCursor 6, openResult zero, no NoCandidate log): the outcome is read
+    # from its state, the last attempt's stored result: state 2 NoCandidate, and the reason that follows it
+    def outcome():
+        cursor = r.view(election, 'attemptCursor()(uint64)')[0]
+        if cursor <= cursor_before:
+            return None
+        last = r.view_text(election, 'lastAttemptResult()(bytes32)').strip()
+        raw = r.call('eth_call', [{'to': election, 'data': r.cast_run('calldata', 'result(bytes32)', last)}, 'latest'])
+        return {'attempt': cursor, 'result': last, 'state': int(raw[2:66], 16), 'reason': int(raw[66:130], 16)}
     try:
-        got = r.wait('the election records a NoCandidate after the heavy joiner is eligible', recorded, 1500)
+        got = r.wait('the election makes an attempt after the heavy joiner is eligible', outcome, 1500)
     except Exception as error:
-        # what the election was doing: its open result, attempt cursor and thresholds against the registry's clock, and every event it emitted since the heavy joiner registered
         lines = [f'{k}: {r.view_text(election, sig).strip()}' for k, sig in (('openResult', 'openResult()(bytes32)'), ('attemptCursor', 'attemptCursor()(uint64)'),
                                                                           ('lastAttemptResult', 'lastAttemptResult()(bytes32)'), ('thresholds', 'thresholds()(uint256,uint256)'),
                                                                           ('liveCount', 'liveCount()(uint32)'))]
         lines += [f'registry {k}: {r.view_text(r.REGISTRY, sig).strip()}' for k, sig in (('progress', 'progress()(uint64)'), ('ucTime', 'ucTime()(uint64)'), ('recordCount', 'recordCount()(uint64)'))]
-        every = r.ureth(1, 'eth_getLogs', [{'address': election, 'fromBlock': hex(start), 'toBlock': 'latest'}]) or []
-        lines += [f'event {x["topics"][0]} block {int(x["blockNumber"], 16)} data {x["data"][:140]}' for x in every]
+        lines.append(f'attemptCursor before: {cursor_before}')
         (r.evidence / 'join-heavy-diagnostics.txt').write_text('\n'.join(lines) + '\n')
         r.say('  election state at the timeout: ' + ' | '.join(lines)[:1500])
         raise
-    reason = got[0][1]
-    r.say(f'  NoCandidate events since block {start}: {got}')
-    (r.evidence / 'join-heavy.json').write_text(json.dumps({'stakingId': ident, 'noCandidate': got, 'weightChurn': WEIGHT_CHURN}, indent=1) + '\n')
+    r.say(f'  the election\'s attempt: {got}')
+    (r.evidence / 'join-heavy.json').write_text(json.dumps(dict(got, stakingId=ident, weightChurn=WEIGHT_CHURN), indent=1) + '\n')
+    r.expect(got['state'] == 2, 'the attempt is a NoCandidate (result state 2), not a reservation', str(got))
+    reason = got['reason']
     r.expect(reason == WEIGHT_CHURN, f'the reason is WeightChurn ({WEIGHT_CHURN}): five unit weights to five and one of weight 2 is D = 0.571 > 1/2', str(got))
     zero = '0x' + '00' * 32
     r.expect(r.view_text(election, 'openResult()(bytes32)').strip() == zero, 'no result is open: nothing was reserved')
