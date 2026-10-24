@@ -65,6 +65,11 @@ p85_prepare_genesis() {
   local conf=${P85_GENESIS_CONF:-test-nodes/shard-conf-${partitionID:-8}_0.json} chain
   chain=$(python3 -c "import json;print(json.load(open('$conf'))['partitionParams']['chain_id'])" 2>/dev/null) || chain=${chainID:-31337}
   mkdir -p "$P85_DIR"
+  # X4_GOV_LANE=1 (X4 B6e): the governance AUTHORITY is the address of a key the lane holds, so the lane can queue a proposal (scripts/x4pos/gov-lib.sh)
+  if [ "${X4_GOV_LANE:-0}" = 1 ]; then
+    [ -s "$P85_DIR/gov-authority.key" ] || { printf '0x%s\n' "$(openssl rand -hex 32)" >"$P85_DIR/gov-authority.key"; chmod 600 "$P85_DIR/gov-authority.key"; }
+    P85_GOVERNANCE_AUTHORITY=$("$P85_CAST" wallet address --private-key "$(tr -d '[:space:]' <"$P85_DIR/gov-authority.key")") || return 1
+  fi
   # REWARD_LANE=1 (T8): the genesis payees hold keys, so the reward step can claim for real
   # X4_HELD_KEYS=1 (the PoS campaign): the genesis owners and withdrawal addresses hold keys the lane keeps, so an incumbent can request retirement and claim
   P85_PLAN_OWNER_KEYS=$([ "${X4_HELD_KEYS:-0}" = 1 ] && echo "$P85_DIR/owner-keys") \

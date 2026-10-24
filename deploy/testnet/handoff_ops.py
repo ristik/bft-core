@@ -60,16 +60,19 @@ class HandoffLapsed(HandoffError):
 class DockerTransport:
     """HTTP POSTs to an entity's root operator endpoint from inside that entity's network namespace."""
 
-    def __init__(self, generation, project=None):
+    def __init__(self, generation, project=None, override=None):
+        """`override`: a Compose override file (compose.joiner.json) whose pods are entities of this transport too."""
         self.generation = Path(generation)
+        self.files = ['-f', str(self.generation / 'compose.yaml')] + (['-f', str(override)] if override else [])
         compose = json.loads((self.generation / 'compose.yaml').read_text())
+        extra = json.loads(Path(override).read_text()) if override else {'services': {}}
         self.project = project or compose['name']
         self.image = compose['services']['rpc']['image']
         self.root_rpc = operator_rpc.common_urls(compose)[0]   # the listener the generated Compose file configured, the same on every root
-        self.entities = sorted(int(n[3:]) for n in compose['services'] if n.startswith('pod') and n[3:].isdigit())
+        self.entities = sorted(int(n[3:]) for n in [*compose['services'], *extra['services']] if n.startswith('pod') and n[3:].isdigit())
 
     def holder(self, i):
-        done = subprocess.run(['docker', 'compose', '-f', str(self.generation / 'compose.yaml'), 'ps', '-q', f'pod{i}'], text=True, capture_output=True)
+        done = subprocess.run(['docker', 'compose', *self.files, 'ps', '-q', f'pod{i}'], text=True, capture_output=True)
         cid = done.stdout.strip()
         if done.returncode != 0 or not cid:
             raise HandoffError(f'pod{i} is not running: {done.stderr.strip()}')
