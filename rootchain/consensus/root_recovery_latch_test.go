@@ -1,6 +1,7 @@
 package consensus
 
 import (
+	"context"
 	"crypto"
 	"errors"
 	"github.com/unicitynetwork/bft-core/rootrecords"
@@ -137,4 +138,29 @@ func TestRecoveryRefusesAnEmptySealAsTheHeadsCommitQc(t *testing.T) {
 	require.False(t, root.frontier.faulted.Load(), "refused at verification, before recovery touches anything")
 	require.True(t, root.recovery.InRecovery(), "a refused state leaves the root in recovery")
 	require.Equal(t, before, root.blockStore.RootAnchor())
+}
+
+// A recovery whose state ends at the genesis leaves the genesis QC as the high QC (parent round 0, round 1, current round 2): in #841 a root formed
+// the QC of round 2 from votes before it held the block, and the peer which answered held the block of round 2 but not yet its QC. There is no block
+// before the genesis to elect a leader from: that is no election (the round-robin fallback, as on every peer, none of which elects from the genesis
+// QC), not a fault, so the frontier stays eligible. Before the fix the election failed to load round 0 and the recovery latched the frontier fault,
+// which only a restart clears: the root refused every signed-frontier request while consensus went on.
+func TestRecoveryToTheGenesisDoesNotLatchTheFrontierFault(t *testing.T) {
+	cms, _ := createConsensusManagers(t, 2, nil)
+	cm, peer := cms[0], cms[1]
+	cm.frontier = &frontierSampler{}
+	state, err := peer.blockStore.GetState()
+	require.NoError(t, err)
+	require.Empty(t, state.Pending, "premise: the peer is at its genesis")
+	genesisQC := state.CommittedHead.Qc
+	require.EqualValues(t, rctypes.GenesisRootRound, genesisQC.GetRound())
+	require.EqualValues(t, 0, genesisQC.GetParentRound(), "premise: the genesis has no parent")
+	_, err = cm.recovery.Set(genesisQC)
+	require.NoError(t, err)
+
+	require.NoError(t, cm.onStateResponse(context.Background(), state))
+	require.False(t, cm.recovery.InRecovery())
+	require.Equal(t, genesisQC.GetRound(), cm.blockStore.GetHighQc().GetRound(), "premise: the genesis QC is the high QC")
+	require.EqualValues(t, rctypes.GenesisRootRound+1, cm.pacemaker.GetCurrentRound())
+	require.False(t, cm.frontier.faulted.Load(), "a recovery to the genesis does not latch the frontier fault")
 }
