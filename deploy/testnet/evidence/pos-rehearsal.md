@@ -8,7 +8,7 @@ What this is: the GitHub Actions runs of `testnet-rehearsal.yml` that exercised 
 |---|---|---|
 | 39766250487 | 818ee8b1b (tn1/pos-1) | first start on the PoS genesis, the 5a smoke: contracts' code at the deployed addresses, election clock rises, no revert (#768). Limits then: `recordCursor == recordCount` was 0 == 0, election not due |
 | 39911010502 | 6916fbcba (tn1/pos-6-proof) | the first handoff of the same four entities at unit weights, epoch 1 to 2: proposal, propose, install barrier, activation gate, authority advance, paid work (`pos-election` ... `pos-advance`) |
-| 40003458692 | 926fd9d09 (tn1/pos-9) | all PoS stages through the second handoff (epoch 3) and the restart after it |
+| 40003458692 | 926fd9d09 (tn1/pos-9) | all PoS stages through `pos-handoff-2` (the second handoff, epoch 2 to 3: install over the epoch-2 stores, activation, paid work) |
 | 40025132181 | f8706fa7e (tn1/pos-12) | adds `pos-recreate`: one root recreated from `compose.yaml` alone, no install flag; the three live roots advanced rounds with another root stopped |
 | 40038068832 | ab3282c2a (tn1/pos-13) | adds `pos-too-late` (Abort after H refused by every root; no Abort record, no epoch move); the full table of OPERATOR 5b rehearsed on a runner |
 | 40063422404 | 23a1ed717 (dev3/pos-owner) | the whole list incl. `pos-owner`: a paid reward claim (half, then the rest, of a 257,750,000,000,000,000 wei credit; exact recipient and pool deltas; refused further claim and claim without credit) and an exit declaration (`NotOwner`, `RetirementRequested`, `RetirementAlreadyRequested`, `GenerationClosing`, `mature` refused by `LotStillReferenced`, nothing released) |
