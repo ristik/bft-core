@@ -7,14 +7,14 @@
 #   scripts/h6/abort-rehearsal-lane.sh --prep-only   # the whole preflight (tools, pins, the attested Ureth, a clean checkout, build/ubft) and --selftest; takes no lock
 #   H6_URETH_ATTESTED=<binary> H6_URETH_ATTESTED_SHA256=<digest> H6_URETH_ATTESTED_PROVENANCE=<briefs/builds/ureth-<commit> dir> scripts/h6/abort-rehearsal-lane.sh
 #
-# Evidence-grade only with the ATTESTED Ureth of the pin (H6_URETH_COMMIT, default ef52f3c1) and a clean checkout whose build/ubft is built from its HEAD.
+# Evidence-grade only with the ATTESTED Ureth of the pin (H6_URETH_COMMIT, default d41d5310) and a clean checkout whose build/ubft is built from its HEAD.
 set -euo pipefail
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 REPO_ROOT=$(cd "$SCRIPT_DIR/../.." && pwd)
 source "$REPO_ROOT/scripts/lib/portable.sh"
 AGRE_ROOT=$(lane_agre_root)
 LOCK_SCRIPT=$(lane_lock_script)
-H6_URETH_COMMIT=${H6_URETH_COMMIT:-ef52f3c178ee3c4e6bc8827d1b6fd0b1d3652bc4}
+H6_URETH_COMMIT=${H6_URETH_COMMIT:-d41d5310329fb56ae288134a0261b234c16effc1}
 EVIDENCE_DIR=${H6_EVIDENCE_DIR:-$AGRE_ROOT/briefs/devnet-runs/h6-abort-$(date -u +%Y%m%dT%H%M%SZ)}
 pass() { printf 'PASS: %s\n' "$1"; }
 fail() { printf 'FAIL: %s\n' "$1" >&2; exit 1; }
