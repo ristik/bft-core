@@ -123,7 +123,7 @@ def topology(out, n, ids, images, captcha, ureth_flags=(), max_gas=30000000, wit
             '--http','--http.addr','0.0.0.0','--http.port','8545','--http.api','eth,net,web3,debug',   # debug: the paired shard node reads debug_getRawHeader for the parent registry witness (without it no validator can lead a round after the first); the validator network is internal and the public gateway allow-lists methods
             '--rpc.eth-proof-window','64','--disable-discovery','--ipcdisable',
             '--log.file.max-files','0',   # no log file: the root filesystem is read-only (reth wants $HOME/.cache/reth/logs) and Docker's json-file driver already rotates stdout
-            '--engine.persistence-threshold','64','--builder.gaslimit',str(max_gas),'--unicity.fee-collector',FEE,*ureth_flags],
+            '--engine.persistence-threshold','2','--builder.gaslimit',str(max_gas),'--unicity.fee-collector',FEE,*ureth_flags],
             ['./validator%d/ureth:/state'%i,'./validator%d/jwt:/jwt:ro'%i,network], memory='1536m',cpu=1.0)
         peers = root_boot + ''.join(',/dns4/shard%d/tcp/9000/p2p/%s'%(j,ids['evm'][j-1]) for j in range(1,n+1) if j!=i)
         service('shard%d'%i, node, ['ubft','shard-node','run','--home','/state','--executor','engine-api',
