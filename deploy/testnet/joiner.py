@@ -92,7 +92,14 @@ def joiner_services(compose, index, root_id, evm_id):
 
 def prepare(generation, ubft, index=None):
     """Create the joiner's material in `generation` and write compose.joiner.json; returns {'index', 'root', 'evm', 'override'}."""
-    generation = Path(generation)
+    previous = os.umask(0o077)   # as generate.py: every private file and directory of the entity (jwt.hex included) is the owner's alone
+    try:
+        return _prepare(Path(generation), ubft, index)
+    finally:
+        os.umask(previous)
+
+
+def _prepare(generation, ubft, index):
     compose = json.loads((generation / 'compose.yaml').read_text())
     index = index or max(entities(compose)) + 1
     if (generation / f'validator{index}').exists():
