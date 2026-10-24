@@ -196,8 +196,8 @@ func TestCheckProfile_UnicityPrecompilesOfAB1Deployment(t *testing.T) {
 		require.ErrorContains(t, err, "missing unicity-b2-sdk3")
 	})
 	t.Run("a B1 deployment refuses a client without the bridge composition", func(t *testing.T) {
-		_, err := checkProfileWith(withNative(func(p map[string]any) { delete(p, "unicity-bridge-compose-v1") }), 31337, unicityNativePrecompiles)
-		require.ErrorContains(t, err, "missing unicity-bridge-compose-v1")
+		_, err := checkProfileWith(withNative(func(p map[string]any) { delete(p, "unicity-bridge-compose-v2") }), 31337, unicityNativePrecompiles)
+		require.ErrorContains(t, err, "missing unicity-bridge-compose-v2")
 	})
 	t.Run("a B1 deployment refuses a moved verifier", func(t *testing.T) {
 		_, err := checkProfileWith(withNative(func(p map[string]any) { p["unicity-b1-cert-batch-v2"] = "0x0000000000000000000000000000000000000200" }), 31337, unicityNativePrecompiles)

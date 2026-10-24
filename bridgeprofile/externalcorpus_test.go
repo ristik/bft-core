@@ -63,7 +63,23 @@ func TestExternalSealedCorpus(t *testing.T) {
 			require.Equal(t, c.Expected, Replay(&fs, c), c.ID)
 		}
 	}
-	generated, err := BuildCorpus()
+	var sfs FixtureSet
+	require.NoError(t, json.Unmarshal(files[SplitDir+"/config/fixtures.json"], &sfs))
+	splitSeen := 0
+	for _, family := range splitFamilies {
+		var cf CaseFile
+		require.NoError(t, json.Unmarshal(files[SplitDir+"/"+family+"/cases.json"], &cf))
+		require.Equal(t, family, cf.Family)
+		require.EqualValues(t, NativeBridgeProtoVersion, cf.Proto)
+		for _, c := range cf.Cases {
+			require.False(t, seen[SplitDir+"/"+c.ID])
+			seen[SplitDir+"/"+c.ID] = true
+			require.Equal(t, c.Expected, ReplaySplit(&sfs, c), c.ID)
+			splitSeen++
+		}
+	}
+	require.Positive(t, splitSeen)
+	generated, err := BuildSealedCorpus()
 	require.NoError(t, err)
 	for name, b := range generated.Files {
 		require.Equal(t, b, files[name], "external companion bytes differ: %s", name)

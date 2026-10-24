@@ -1,6 +1,6 @@
 {
  "format": "native-bridge-vectors/3",
- "nativeBridgeProtoVersion": 5,
+ "nativeBridgeProtoVersion": 6,
  "notes": [
   "Every fixture value is a DEV fixture input, not a production parameter.",
   "Signatures are RFC 6979 deterministic with low-s; every implementation must reproduce them byte for byte.",

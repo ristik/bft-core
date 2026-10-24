@@ -18,7 +18,7 @@ Inputs (trust base, candidate, receipts, assignment) are files written by the ho
 SHA-256 of the request and of the plan and of every attempt (`handoff/log.jsonl`). No key and no authority credential passes through these files.
 
     handoff_ops.py propose <generation> --ubft UBFT --next-trust-base F [--next-evm-assignment F] [--readiness-receipts F,F] [--q3]
-    handoff_ops.py hold    <generation> --ubft UBFT --next-trust-base F [...the propose options]   (rehearsal: plan, intents, ONE endorsement; prints the abort target)
+    handoff_ops.py hold    <generation> --ubft UBFT --next-trust-base F [--old-trust-base F] [...the propose options]   (rehearsal: plan, intents, ONE endorsement; prints the abort target)
     handoff_ops.py abort   <generation> -- <the `ubft root handoff abort` flags except --root-rpc>
 """
 import argparse
@@ -140,7 +140,11 @@ class Wrapper:
 
     def attempt(self, request, number):
         plan = self.plan(request, number)
-        self.record(event='plan', attempt=number, request_sha256=sha(request), plan_sha256=sha(plan), entity=self.entities[0])
+        try:
+            planned, next_body_id = plan_identity(plan)
+        except (ValueError, KeyError, TypeError):   # an opaque plan (a fake transport's): the rows say nothing about its identity, and pos-too-late then refuses to run
+            planned = next_body_id = None
+        self.record(event='plan', attempt=number, request_sha256=sha(request), plan_sha256=sha(plan), entity=self.entities[0], plan_attempt=planned, next_body_id=next_body_id)
         for entity in self.entities[1:]:
             self.intent(entity, plan, number)
         self.record(event='intent', attempt=number, plan_sha256=sha(plan), entities=self.entities[1:])
@@ -195,14 +199,20 @@ def abort_context(transport, entity):
     return json.loads(body)
 
 
+def plan_identity(plan):
+    """(attempt, successor body identity) of a plan: the SHA-256 of its canonical body is what Abort names as the next body."""
+    held = json.loads(plan)
+    return held['Attempt'], '0x' + sha(base64.b64decode(held['Body'], validate=True))
+
+
 def abort_target(context, plan, old_epoch):
     """The exact target of Abort for the plan held (the fields scripts/h6/prepare-handoff.py derives): network, predecessor and attempt from the context read before
     the plan, the successor body identity as the SHA-256 of the plan's canonical body."""
-    held = json.loads(plan)
-    if held['Attempt'] != context['attempt']:
-        raise HandoffError(f'the context planned attempt {context["attempt"]}, the plan is attempt {held["Attempt"]}')
+    attempt, next_body_id = plan_identity(plan)
+    if attempt != context['attempt']:
+        raise HandoffError(f'the context planned attempt {context["attempt"]}, the plan is attempt {attempt}')
     return {'network': context['network'], 'oldEpoch': old_epoch, 'predecessorBodyId': '0x' + context['predecessor'].removeprefix('0x'),
-            'attempt': held['Attempt'], 'nextBodyId': '0x' + sha(base64.b64decode(held['Body'], validate=True))}
+            'attempt': attempt, 'nextBodyId': next_body_id}
 
 
 def build_request(ubft, out, next_trust_base, assignment=None, receipts=None, q3=False):
@@ -232,6 +242,7 @@ def main():
     h = sub.add_parser('hold')
     h.add_argument('generation', type=Path)
     h.add_argument('--ubft', type=Path, required=True)
+    h.add_argument('--old-trust-base', type=Path, help='the trust base of the epoch being left (default: the generation\'s network/trust-base.json, the first handoff\'s)')
     h.add_argument('--next-trust-base', type=Path, required=True)
     h.add_argument('--next-evm-assignment', type=Path)
     h.add_argument('--readiness-receipts')
@@ -254,7 +265,7 @@ def main():
     work.mkdir(mode=0o700, exist_ok=True)
     request = build_request(a.ubft, work / f'plan-request-{int(time.time())}.json', a.next_trust_base, a.next_evm_assignment, a.readiness_receipts, a.q3)
     if a.action == 'hold':
-        old_epoch = json.loads(Path(a.generation, 'network', 'trust-base.json').read_text())['epoch']
+        old_epoch = json.loads((a.old_trust_base or Path(a.generation, 'network', 'trust-base.json')).read_text())['epoch']
         with (work / 'log.jsonl').open('a') as log:
             wrapper = Wrapper(transport, transport.entities, lambda row: (log.write(json.dumps(row, sort_keys=True) + '\n'), log.flush()), a.prepare_timeout)
             context = abort_context(transport, transport.entities[0])

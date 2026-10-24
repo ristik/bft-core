@@ -4,7 +4,7 @@
   "components": {
     "ureth": {
       "repository": "https://github.com/ristik/ureth.git",
-      "commit": "ef52f3c178ee3c4e6bc8827d1b6fd0b1d3652bc4",
+      "commit": "d41d5310329fb56ae288134a0261b234c16effc1",
       "package": "unicity-reth",
       "cargoArgs": [
         "build",
@@ -14,7 +14,7 @@
         "unicity-reth"
       ],
       "features": "default (jemalloc)",
-      "note": "ureth#83 merge (B7 PR 3): BRIDGE_COMPOSE_V1 with the 2 MiB envelope, on #82 (embedded-object parity) and #81 (0x0105 streamed composition); includes #75's transaction gossip",
+      "note": "ureth unicity/main at the merge of #88 (protocol 6: BRIDGE_COMPOSE_V2 registered at 0x0105, the lineage relation of #84 with #86's oracle parity), on B7 PR 3 (#83: the 2 MiB envelope, #82, #81) and #75's transaction gossip",
       "targetedPackages": [
         "reth-unicity-b1",
         "reth-unicity-execution",
@@ -30,15 +30,15 @@
     },
     "contracts": {
       "repository": "https://github.com/ristik/unicity-pos-contracts.git",
-      "commit": "5c9dedc3dc2f15371eec938c06600f94a386b7e2",
-      "note": "contracts#53 merge: GovernanceParams (#50), RewardPool (#51) and the governed worst-case election gas / deployment fields (#53)",
+      "commit": "31b2ec1a9736c8597dc53803da5481117502abbd",
+      "note": "main at the contracts#70 merge: the protocol 6 vault (#67: per-part redemption, slots 6/8/9, RedemptionCredited with partId; #68), on contracts#53 (GovernanceParams #50, RewardPool #51, the governed worst-case election gas / deployment fields)",
       "branch": "main"
     },
     "native-bridge-plugins": {
       "repository": "https://github.com/ristik/native-bridge-plugins.git",
-      "commit": "9c21eb605faa0ea57651d6aa2c4f07b0fd78c202",
+      "commit": "97f74161fbe0eb4921148d7fa2e4ea05e646f727",
       "branch": "main",
-      "note": "nbp#40 merge (B7 PR 3): profile v6 (2 MiB envelope), the PR 3 reseal on nbp#38's parity cases, anyage.ts long-history and in-process redeem signing"
+      "note": "the squash merge of nbp#52 (split PR5, protocol 6: the V2 composition, per-part redemption, anyage.ts on the (nonce, partId) return), on nbp#40 (B7 PR 3: profile v6, the 2 MiB envelope, long-history)"
     },
     "state-transition-sdk-js": {
       "repository": "https://github.com/ristik/state-transition-sdk-js.git",
@@ -79,7 +79,7 @@
     "evmT2Ms": 15000,
     "evmT2Note": "the EVM shard's T2 in the CI lane (milliseconds; the Mac default stays 5000). After the recovery only 3 of the 4 enrolled validators run, so a round needs all three signatures and its latency is the slowest of three: measured first-UC-to-third-signature up to 14.3 s on a standard runner (bft-core#728, run 39554461091), while T2 = 5 s turned every late round into a permanent livelock. 15 s passed the combined lane with all steps; the margin over the measured tail is small, see #728.",
     "longHistory": true,
-    "longHistoryNote": "B7 PR 3 (briefs/dev4-b7-pr3-plan.md 4.2): anyage_step_long_history redeems a token transferred live past every former bridge bound, one gas short (reverts, vault unchanged) and then funded. Needs the 0x0105 stack (ureth with BRIDGE_COMPOSE_V1, contracts with the 0x0105 TokenVerifier) and the nbp driver's long-history command."
+    "longHistoryNote": "B7 PR 3 (briefs/dev4-b7-pr3-plan.md 4.2): anyage_step_long_history redeems a token transferred live past every former bridge bound, one gas short (reverts, vault unchanged) and then funded. Needs the 0x0105 stack (ureth with BRIDGE_COMPOSE_V2 since protocol 6, contracts with the 0x0105 TokenVerifier) and the nbp driver's long-history command."
   },
   "t6": {
     "comment": "T6 pins its own inputs in scripts/t6-rehearsal.sh (its defaults); they differ from the lane's on purpose and are not unified silently. check-pins.sh t6 refuses a script whose defaults differ from this record.",

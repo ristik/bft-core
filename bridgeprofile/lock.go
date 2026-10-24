@@ -15,8 +15,10 @@ const (
 	SlotPaid           = 3
 	SlotEntered        = 4
 	SlotLockDigest     = 5
-	SlotSpentNullifier = 6
+	SlotRedeemedAmount = 6 // protocol 6: mapping(nonce => sum of redeemed part amounts); protocol 5 held spentNullifier here
 	SlotClaimable      = 7
+	SlotLockedAmount   = 8 // mapping(nonce => the lock's amount)
+	SlotSpentPart      = 9 // mapping(nonce => mapping(partId => nullifier))
 )
 
 // DeriveSalt is salt = H(C("UNICITY_BR_SALT", b(cfg), n)).
@@ -100,8 +102,17 @@ func MappingSlot(key []byte, base uint64) [32]byte {
 // LockDigestSlot is the logical slot of lockDigest[n] (base 5).
 func LockDigestSlot(n uint64) [32]byte { return MappingSlot(word(n), SlotLockDigest) }
 
-// SpentSlot is the logical slot of spentNullifier[n] (base 6).
-func SpentSlot(n uint64) [32]byte { return MappingSlot(word(n), SlotSpentNullifier) }
+// RedeemedSlot is the logical slot of redeemedAmount[n] (base 6).
+func RedeemedSlot(n uint64) [32]byte { return MappingSlot(word(n), SlotRedeemedAmount) }
+
+// LockedAmountSlot is the logical slot of lockedAmount[n] (base 8).
+func LockedAmountSlot(n uint64) [32]byte { return MappingSlot(word(n), SlotLockedAmount) }
+
+// SpentPartSlot is the logical slot of spentPart[n][partId] (base 9): keccak256(abi.encode(partId, keccak256(abi.encode(n, 9)))).
+func SpentPartSlot(n uint64, partID [32]byte) [32]byte {
+	inner := MappingSlot(word(n), SlotSpentPart)
+	return keccak(partID[:], inner[:])
+}
 
 // ClaimableSlot is the logical slot of claimable[a] (base 7).
 func ClaimableSlot(a [20]byte) [32]byte { return MappingSlot(a[:], SlotClaimable) }
