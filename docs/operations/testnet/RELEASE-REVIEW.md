@@ -83,7 +83,7 @@ Each row: the check, where to look, and what a pass is. Record `PASS`, `FAIL` (w
 | # | check | where / how | pass |
 |---|---|---|---|
 | 27 | Central operator, one host, arbitrary reset, no value and no SLA are disclosed to users | `NOTICE.txt`, the faucet page, `TESTER.md` | each of the four is stated and reachable from the faucet and RPC landing text |
-| 28 | The failure matrix covers the slice | `docs/pos/x1-failure-matrix.md` section 13 (merged with #766 before this pack is used) | every row MET, MET-WITH-LIMIT with the limit read, or MISSING and listed in the residual limits below |
+| 28 | The failure matrix covers the slice | `docs/pos/x1-failure-matrix.md` sections 13 (TN-1 slice, #766) and 14 (TN-S PoS handoff slice, X-58..X-65; the PoS profile is reviewed only if it is in the release) | every row MET, MET-WITH-LIMIT with the limit read, or MISSING and listed in the residual limits below |
 | 29 | Docs name roles, not persons | `deploy/testnet`, `docs/operations/testnet` | no personal names, handles or addresses |
 | 30 | The single aggregator is trusted, not verified | `network/aggregator-conf.json` has no `proof_type` (aggregator-go sends no SMT consistency proof); `NOTICE.txt` and `TESTER.md` | disclosed: the root accepts the single aggregator's signed state roots without verifying its tree |
 

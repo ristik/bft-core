@@ -15,6 +15,7 @@ import hashlib
 import http.client
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -737,7 +738,10 @@ class Rehearsal:
         (self.evh() / 'too-late.log').write_text(aborted.stdout + aborted.stderr)
         self.say(f'  abort after H: exit {aborted.returncode}: {(aborted.stdout + aborted.stderr).strip()[-600:]}')
         out = aborted.stdout + aborted.stderr
-        self.expect(aborted.returncode != 0 and out.count('too late') == self.n, f'all {self.n} roots answer "too late" and the abort exits non-zero', out.strip()[-500:])
+        # handoff_ops.py abort prints one block per entity: "entity i: exit N" and then that root's output
+        blocks = {int(m.group(1)): (int(m.group(2)), m.group(3)) for m in re.finditer(r'^entity (\d+): exit (\d+)\n(.*?)(?=^entity \d+: exit |\Z)', out, re.M | re.S)}
+        self.expect(aborted.returncode != 0 and sorted(blocks) == list(range(1, self.n + 1)) and all(code != 0 and 'too late' in text for code, text in blocks.values()),
+                    f'each of the {self.n} roots answers "too late" and exits non-zero, and so does the abort', out.strip()[-500:])
         self.expect('committed Abort record' not in out and 'Abort already committed' not in out, 'no Abort record was committed')
         self.expect([self.root_epoch(i) for i in range(1, self.n + 1)] == before, 'no root changed epoch', str(before))
 
