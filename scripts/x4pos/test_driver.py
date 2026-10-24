@@ -88,9 +88,17 @@ class Preflight(unittest.TestCase):
         for s in m["steps"]:
             if s.get("phase") != "final":
                 self.assertLessEqual(s["at"] + s["budgetSeconds"], 14400 - m["tailSeconds"], s["id"])
-        # the minimum scenario of the design
+        # v2 (the 2.5 h lane + driver segments, decided with the orchestrator): what the lane can show is required; what it cannot is listed with a pointer, never silently dropped
         r = m["required"]
-        self.assertTrue(r["replacements"] >= 2 and r["offences"] >= 2 and r["exits"] >= 2 and r["rewardIntervals"] >= 4 and r["recoveries"] >= 1 and r["aborts"] >= 1)
+        self.assertTrue(r["replacements"] >= 1 and r["offences"] >= 2 and r["exits"] >= 1 and r["rewardIntervals"] >= 2 and r["recoveries"] >= 1 and r["faults"] >= 4 and r["governanceActivated"] >= 1)
+        self.assertNotIn("aborts", r)
+        listed = " ".join(n["what"] for n in m["notCovered"]).lower()
+        for must in ("abort", "second replacement", "not an offender", "4 closed intervals"):
+            self.assertIn(must, listed)
+        self.assertTrue(all(n["coveredBy"].strip() for n in m["notCovered"]))
+        lanes = [s["id"] for s in m["steps"] if s.get("lane") is True]
+        self.assertEqual(len(lanes), 10)
+        self.assertEqual([s["id"] for s in sorted(m["steps"], key=lambda s: (s["at"], s["id"]))][:len(lanes)], lanes)
 
     def test_the_real_campaign_is_refused_to_run_until_every_step_exists(self):
         m, _ = driver.load_manifest(REAL)
@@ -113,6 +121,10 @@ class Preflight(unittest.TestCase):
                 self.assertEqual(s["kind"], "fault", f"{s['id']}: only a fault may be unchecked")
                 self.assertTrue(s["uncheckedReason"].strip())
                 self.assertFalse(s.get("restartable"), "an unchecked step cannot be adopted, so it must not be restartable")
+            elif s.get("lane") is True:   # a lane step is verified by the lane's record: lane-check.sh <phase>
+                self.assertEqual(s["check"][0], "scripts/x4pos/lane-check.sh", s["id"])
+                self.assertEqual(len(s["check"]), 2, s["id"])
+                self.assertNotIn("cmd", s, s["id"])
             else:
                 self.assertEqual(s["check"][0].split("/")[-1].rsplit(".check.sh", 1)[1:], [""], s["id"])
 
@@ -351,6 +363,33 @@ class Execution(unittest.TestCase):
         with self.assertRaises(driver.ManifestError) as e:
             driver.preflight(m)
         self.assertIn("a lane step is verified by its check only", str(e.exception))
+
+    def test_the_driver_stops_at_a_failed_lane_step_even_before_an_independent_driver_step(self):
+        m = self.lane_campaign()
+        m["steps"][1]["dependsOn"] = []   # b no longer depends on the lane step: only the stop rule can keep it from running
+        with tempfile.TemporaryDirectory() as d:
+            world = World()
+            rep = self.drive(m, d, world, FakeClock()).run()
+            self.assertEqual(rep["status"], "FAIL")
+            self.assertEqual(world.ran, [])
+
+    def test_a_lane_step_has_no_cmd_comes_before_every_driver_step_and_is_a_real_boolean(self):
+        m = self.lane_campaign()
+        m["steps"][0]["cmd"] = ["cmd"]
+        with self.assertRaises(driver.ManifestError) as e:
+            driver.preflight(m)
+        self.assertIn("has no 'cmd'", str(e.exception))
+        m = self.lane_campaign()
+        m["steps"][0]["lane"] = "false"
+        with self.assertRaises(driver.ManifestError) as e:
+            driver.preflight(m)
+        self.assertIn("'lane' must be true or false", str(e.exception))
+        m = self.lane_campaign()   # make c the lane step: it would be checked after the driver step b
+        m["steps"][2].update(lane=True)
+        del m["steps"][2]["cmd"], m["steps"][2]["restartable"]
+        with self.assertRaises(driver.ManifestError) as e:
+            driver.preflight(m)
+        self.assertIn("comes after the driver step", str(e.exception))
 
     def test_not_covered_entries_need_a_pointer_and_the_report_carries_them(self):
         m = small()
