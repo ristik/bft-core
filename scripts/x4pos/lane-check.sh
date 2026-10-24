@@ -43,6 +43,23 @@ case "$phase" in
     jq -e '.outcome == "refused" and .lawfulEarly == true' "$d/steps/exit-claim/refusal.json" >/dev/null 2>&1 || fail "exit-claim/refusal.json: the early mature was not refused for a lawful reason"
     jq -e '.creditDelta > 0' "$d/steps/exit-claim/matured.json" >/dev/null 2>&1 || fail "exit-claim/matured.json: no credit delta"
     jq -e '.received > 0' "$d/steps/exit-claim/claimed.json" >/dev/null 2>&1 || fail "exit-claim/claimed.json: nothing claimed" ;;
+  fault-root-restart|fault-evm-restart|fault-pair-restart)
+    n=${phase#fault-}; ran "x4f_${n//-/_}"
+    jq -e '.stable == true and .paidTxOk == true and .fault == "'"$n"'"' "$d/steps/faults/$n.json" >/dev/null 2>&1 || fail "steps/faults/$n.json does not show unchanged state and a certified paid transaction"
+    if [ "$n" = pair-restart ]; then
+      jq -e '.byteIdentical == true and .pool.unchanged == true and (.blockHash | length) > 10' "$d/steps/faults/$n.json" >/dev/null 2>&1 || fail "steps/faults/pair-restart.json: the retained block or the reward pool changed"
+    fi ;;
+  fault-delayed-episode)
+    ran x4f_delayed_episode
+    jq -e '.stable == true and .paidTxOk == true and .shardFrozenDuringOutage == true and .rootsExtendedDuringOutage == true and .logOrdered == true and .after.cursor == .after.count and (.during.rootRound > .before.rootRound) and (.during.evmRound <= .before.evmRound + 1)' "$d/steps/faults/delayed-episode.json" >/dev/null 2>&1 || fail "steps/faults/delayed-episode.json does not show a delayed, then recovered shard with ordered records"
+    ;;
+  soak)
+    ran x4f_soak
+    jq -e '.snapshots >= 3' "$d/steps/faults/soak.json" >/dev/null 2>&1 || fail "steps/faults/soak.json: fewer than 3 soak snapshots" ;;
+  reconcile)
+    ran x4f_reconcile
+    jq -e '.converged == true' "$d/steps/faults/reconcile-cursors.json" >/dev/null 2>&1 || fail "steps/faults/reconcile-cursors.json: the records did not converge"
+    jq -e '.conserved == true and .intervals >= 2 and .zeroBudget >= 1 and .fundings >= 1 and .refilledAfterExhaustion == true' "$d/steps/reconcile/reconcile.json" >/dev/null 2>&1 || fail "steps/reconcile/reconcile.json is not a conserved, replayed, refilled pool" ;;
   accounting)
     ran x4a_final
     jq -e '.status == "PASS" and .snapshots >= 4' "$d/accounting.txt" >/dev/null 2>&1 || fail "accounting.txt is not a PASS over at least 4 snapshots" ;;

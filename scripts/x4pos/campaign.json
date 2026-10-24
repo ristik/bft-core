@@ -38,7 +38,8 @@
   "forcedInclusion": "off",
   "bridgeAggregation": "off",
   "checkpointRestore": "off",
-  "feeRewardDistribution": "not distributed"
+  "feeRewardDistribution": "not distributed",
+  "faults": "root quorum restart, validator restart, validator+execution client restart, all EVM validators down for 300 s while the roots extend"
  },
  "steps": [
   {
@@ -215,7 +216,7 @@
    "id": "lane-governance",
    "kind": "governance",
    "at": 4100,
-   "budgetSeconds": 3700,
+   "budgetSeconds": 2400,
    "lane": true,
    "check": [
     "scripts/x4pos/lane-check.sh",
@@ -232,130 +233,136 @@
    "note": "execute() after both delays (permissionless, schedules only), then the policy id is polled and the outcome recorded; activation is NOT asserted (see notCovered)"
   },
   {
+   "id": "fault-root-restart",
+   "kind": "fault",
+   "at": 6600,
+   "budgetSeconds": 600,
+   "lane": true,
+   "check": [
+    "scripts/x4pos/lane-check.sh",
+    "fault-root-restart"
+   ],
+   "dependsOn": [
+    "lane-governance"
+   ],
+   "counts": {
+    "faults": 1
+   },
+   "exclusive": true,
+   "note": "the four running roots restart together in the current root epoch; state identical, a paid transaction certifies"
+  },
+  {
+   "id": "fault-evm-restart",
+   "kind": "fault",
+   "at": 7500,
+   "budgetSeconds": 600,
+   "lane": true,
+   "check": [
+    "scripts/x4pos/lane-check.sh",
+    "fault-evm-restart"
+   ],
+   "dependsOn": [
+    "fault-root-restart"
+   ],
+   "counts": {
+    "faults": 1
+   },
+   "exclusive": true,
+   "note": "validator 2 stops and returns in its scope; its head catches up; a paid transaction certifies"
+  },
+  {
+   "id": "fault-pair-restart",
+   "kind": "fault",
+   "at": 8400,
+   "budgetSeconds": 600,
+   "lane": true,
+   "check": [
+    "scripts/x4pos/lane-check.sh",
+    "fault-pair-restart"
+   ],
+   "dependsOn": [
+    "fault-evm-restart"
+   ],
+   "counts": {
+    "faults": 1
+   },
+   "exclusive": true,
+   "note": "validator 3's node AND its execution client restart: the retained block is byte-identical to validator 1's, the reward pool and the custody credits are unchanged (the reward-settling side resumes from durable state)"
+  },
+  {
+   "id": "fault-delayed-episode",
+   "kind": "fault",
+   "at": 9300,
+   "budgetSeconds": 900,
+   "lane": true,
+   "check": [
+    "scripts/x4pos/lane-check.sh",
+    "fault-delayed-episode"
+   ],
+   "dependsOn": [
+    "fault-pair-restart"
+   ],
+   "counts": {
+    "faults": 1
+   },
+   "exclusive": true,
+   "note": "all four EVM validators stop for 300 s while the roots keep extending (the shard's import of root extensions is delayed as a whole), then return: the registry log is ordered, the cursor converged, no gate state moved"
+  },
+  {
+   "id": "lane-soak",
+   "kind": "soak",
+   "at": 10200,
+   "budgetSeconds": 3000,
+   "lane": true,
+   "check": [
+    "scripts/x4pos/lane-check.sh",
+    "soak"
+   ],
+   "dependsOn": [
+    "fault-delayed-episode"
+   ],
+   "phase": "final",
+   "note": "the chain runs on its own; an accounting snapshot every 1200 s"
+  },
+  {
+   "id": "final-reconcile",
+   "kind": "reconcile",
+   "at": 13200,
+   "budgetSeconds": 900,
+   "lane": true,
+   "check": [
+    "scripts/x4pos/lane-check.sh",
+    "reconcile"
+   ],
+   "dependsOn": [
+    "lane-soak"
+   ],
+   "counts": {
+    "reconcile": 1
+   },
+   "phase": "final",
+   "note": "the registry/custody cursors converged, a last snapshot, the reward pool replayed event by event and conserved"
+  },
+  {
    "id": "lane-accounting",
    "kind": "accounting",
-   "at": 7800,
-   "budgetSeconds": 60,
+   "at": 14100,
+   "budgetSeconds": 120,
    "lane": true,
    "check": [
     "scripts/x4pos/lane-check.sh",
     "accounting"
    ],
    "dependsOn": [
-    "lane-governance"
+    "final-reconcile"
    ],
-   "note": "the accounting checker over every snapshot the lane took"
-  },
-  {
-   "id": "fault-root-restart",
-   "kind": "fault",
-   "at": 8000,
-   "budgetSeconds": 300,
-   "cmd": [
-    "scripts/x4pos/steps/fault.sh"
-   ],
-   "counts": {
-    "faults": 1
-   },
-   "exclusive": true,
-   "args": {
-    "kind": "root-stop-restart",
-    "outageSeconds": 30
-   },
-   "check": null,
-   "uncheckedReason": "a restart or outage leaves no durable state to verify afterwards; the command asserts its own recovery (quorum, certified hashes, recovery deadline) and records it in its log; it is NOT restartable, so an interrupted fault fails the campaign",
-   "dependsOn": [
-    "lane-accounting"
-   ]
-  },
-  {
-   "id": "fault-evm-restart",
-   "kind": "fault",
-   "at": 8600,
-   "budgetSeconds": 300,
-   "cmd": [
-    "scripts/x4pos/steps/fault.sh"
-   ],
-   "counts": {
-    "faults": 1
-   },
-   "exclusive": true,
-   "args": {
-    "kind": "evm-validator-restart",
-    "outageSeconds": 30
-   },
-   "check": null,
-   "uncheckedReason": "a restart or outage leaves no durable state to verify afterwards; the command asserts its own recovery (quorum, certified hashes, recovery deadline) and records it in its log; it is NOT restartable, so an interrupted fault fails the campaign",
-   "dependsOn": [
-    "lane-accounting"
-   ]
-  },
-  {
-   "id": "fault-collector-restart",
-   "kind": "fault",
-   "at": 9200,
-   "budgetSeconds": 300,
-   "cmd": [
-    "scripts/x4pos/steps/fault.sh"
-   ],
-   "counts": {
-    "faults": 1
-   },
-   "exclusive": true,
-   "args": {
-    "kind": "collector-reward-worker-restart"
-   },
-   "check": null,
-   "uncheckedReason": "a restart or outage leaves no durable state to verify afterwards; the command asserts its own recovery (quorum, certified hashes, recovery deadline) and records it in its log; it is NOT restartable, so an interrupted fault fails the campaign",
-   "dependsOn": [
-    "lane-accounting"
-   ]
-  },
-  {
-   "id": "fault-delayed-episode",
-   "kind": "fault",
-   "at": 9800,
-   "budgetSeconds": 600,
-   "cmd": [
-    "scripts/x4pos/steps/fault.sh"
-   ],
-   "counts": {
-    "faults": 1
-   },
-   "exclusive": true,
-   "args": {
-    "kind": "delayed-evm-root-extension"
-   },
-   "check": null,
-   "uncheckedReason": "a restart or outage leaves no durable state to verify afterwards; the command asserts its own recovery (quorum, certified hashes, recovery deadline) and records it in its log; it is NOT restartable, so an interrupted fault fails the campaign",
-   "dependsOn": [
-    "lane-accounting"
-   ]
-  },
-  {
-   "id": "final-reconcile",
-   "kind": "reconcile",
-   "at": 13200,
-   "budgetSeconds": 1000,
-   "cmd": [
-    "scripts/x4pos/steps/reconcile.sh"
-   ],
-   "counts": {
-    "reconcile": 1
-   },
    "phase": "final",
-   "check": [
-    "scripts/x4pos/steps/reconcile.check.sh"
-   ],
-   "restartable": true,
-   "dependsOn": [
-    "lane-accounting"
-   ]
+   "note": "the accounting checker over every snapshot the lane took"
   }
  ],
  "segments": {
-  "lane": "the P85 recovery lane's own shell (ci-lane x4-exit with run-inputs s4, offence2, accounting, rewards, governance), phases at the times the chain dictates; the driver only verifies them (lane steps). About 2 h 10 min.",
-  "driver": "driver steps on the same accumulated chain after the lane's phases: faults, reconcile. Offsets are from the campaign start, which is the lane's first accounting snapshot."
+  "lane": "the whole campaign runs in the P85 recovery lane's own shell (ci-lane x4-exit with run-inputs s4, offence2, accounting, rewards, governance, faults; one job, about 4 h 10 min): chain-dictated phases first, the faults at their offsets (the lane waits for each `at`), a soak, the final reconcile, then the accounting verdict. The faults are lane steps because they act through the lane shell's node control.",
+  "driver": "scripts/x4pos/driver.py runs once at the end of the lane (x4_report) and VERIFIES every step from the lane's record (lane-check.sh) and runs the accounting checker over the snapshots; it executes nothing. Offsets are from the campaign start, which is the lane's first accounting snapshot."
  },
  "notCovered": [
   {
@@ -377,6 +384,10 @@
   {
    "what": "governance ACTIVATION of the queued rate: queue and execute (Scheduled) are shown, but after execute + 1800 s the policy id was unchanged with an election result open (run 40071011875)",
    "coveredBy": "not covered. Cause (dev3's reading of contracts src/p85, not observed on the chain): activation runs only inside ElectionPolicy.elect (activateDue), and elect returns Disabled while any election result is open; this chain has one open from the baseline and after the recovery, so no activation however long it waits. It needs the open session resolved and the next cadence threshold"
+  },
+  {
+   "what": "a fault that restarts the evidence collector as a separate process mid-episode",
+   "coveredBy": "the S4 collector holds no runtime state (each `evidence scan` is a new process over the journal copies) and its submitter is killed after admission and rerun in BOTH offences, resuming from the on-chain cursor (submit-1.txt / submit-2.txt in the lane pack); the fault-pair-restart step is the reward-settling side"
   }
  ]
 }

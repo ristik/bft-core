@@ -39,7 +39,7 @@ finalize() {
     evdir=$work/evidence-none; mkdir -p "$evdir"; echo "the lane produced no evidence directory" >"$evdir/lane.log"
   fi
   st=${lane_rc:-1}; [ "$rc" -eq 0 ] || st=$rc
-  scripts/ci/publish-evidence.sh --evidence "$evdir" --out "$out/upload" --kind "$kind" --s4 "${S4_LANE:-0}" --x4o "${X4_OFFENCE_LANE:-0}" --x4a "${X4_ACCT_LANE:-0}" --x4r "${X4_REWARDS_POS:-0}" --x4g "${X4_GOV_LANE:-0}" --status "$st" --nodes "$repo/test-nodes" --min-node-logs 1 \
+  scripts/ci/publish-evidence.sh --evidence "$evdir" --out "$out/upload" --kind "$kind" --s4 "${S4_LANE:-0}" --x4o "${X4_OFFENCE_LANE:-0}" --x4a "${X4_ACCT_LANE:-0}" --x4r "${X4_REWARDS_POS:-0}" --x4g "${X4_GOV_LANE:-0}" --x4f "${X4_FAULTS_LANE:-0}" --status "$st" --nodes "$repo/test-nodes" --min-node-logs 1 \
     --extra "$out/run-lane.log" --extra "$out/lane-stdout.log" --extra "$out/lane-prep.log" --extra "$out/mongo" --extra "$out/p85-stop.log" --extra "$out/host-before.log.gz" --extra "$out/host-after.log.gz" --extra "$out/oom-lines.txt" >"$out/publish.log" 2>&1
   pub_rc=$?; log "publish-evidence exit $pub_rc"; cat "$out/publish.log" | tail -n 8
   return 0
@@ -113,6 +113,12 @@ fi
 if [ "$(jq -r '.governance // false' scripts/ci/run-inputs.json 2>/dev/null)" = true ]; then
   [ "${X4_ACCT_LANE:-0}" = 1 ] || { log "governance needs accounting: true on the x4exit kind"; exit 2; }
   export X4_GOV_LANE=1; log "X4_GOV_LANE=1 (run-inputs governance)"
+fi
+# run-inputs "faults": true (with "accounting", "rewards" and "governance" on the x4exit kind) adds X4 B7's four faults at their campaign offsets, the soak with periodic snapshots, the final reconcile and the driver's
+# verdict over the lane's record (scripts/x4pos/fault-lib.sh): the 4-hour campaign in one job
+if [ "$(jq -r '.faults // false' scripts/ci/run-inputs.json 2>/dev/null)" = true ]; then
+  [ "${X4_REWARDS_POS:-0}" = 1 ] && [ "${X4_GOV_LANE:-0}" = 1 ] || { log "faults needs accounting, rewards and governance: true on the x4exit kind"; exit 2; }
+  export X4_FAULTS_LANE=1; log "X4_FAULTS_LANE=1 (run-inputs faults)"
 fi
 export LANE_PINNED=1 LANE_COMMIT_UNDER_TEST=$head UTB_MIN_FREE_GIB=${UTB_MIN_FREE_GIB:-$(jq -r '.runner.minFreeDiskGiB' "$pins")}
 if [ "$kind" = combined ]; then pins_mode=env; else pins_mode=env-core; fi
