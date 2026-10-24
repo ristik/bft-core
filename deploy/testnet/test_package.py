@@ -1267,12 +1267,34 @@ class PosSample(unittest.TestCase):
         workflow=(generate.REPO/'.github/workflows/testnet-rehearsal.yml').read_text()
         default=re.search(r'POS_STAGES:-([^}]*)\}',workflow).group(1).split(',')
         for name,_ in pos_crash.STAGES: self.assertNotIn(name,default,'the crash stages are opt-in: bft-core #843 fails today')
+        self.assertNotIn('pos-resources',default,'opt-in until it has run on a runner')
     def test_restart_counts_reads_each_container_and_reports_a_missing_one(self):
         class R:
             def compose(self,*a,check=True): return {'ureth2':'abc\n','root2':'def\n'}.get(a[-1],'')
         def run(cmd,**k): return type('P',(),{'stdout':{'abc':'3\n','def':'x\n'}[cmd[-1]]})()
         with patch.object(pos_crash.subprocess,'run',run):
             self.assertEqual(pos_crash.restart_counts(R(),['ureth2','root2','shard2']),{'ureth2':3,'root2':None,'shard2':None})
+    def test_parse_mem_reads_docker_stats_cells_and_refuses_others(self):
+        used,limit=pos_sample.parse_mem('345.2MiB / 1.5GiB')
+        self.assertAlmostEqual(used/1024**2,345.2);self.assertEqual(limit,1.5*1024**3)
+        self.assertEqual(pos_sample.parse_mem('16B / 16MiB'),(16,16*1024**2))
+        with self.assertRaises(ValueError): pos_sample.parse_mem('-- / --')
+        with self.assertRaises(ValueError): pos_sample.parse_mem('12XB / 1GiB')
+    def test_resources_takes_the_peak_per_container_and_the_growth_per_directory(self):
+        rows=[{'memory':{'p-ureth1-1':'100MiB / 1.5GiB','p-root1-1':'200MiB / 384MiB'},'pos':{'state_kb':{'v1/ureth':1000,'v1/root':50}}},
+              {'memory':{'p-ureth1-1':'900MiB / 1.5GiB','p-root1-1':'300MiB / 384MiB'},'pos':{'state_kb':{'v1/ureth':1600,'v1/root':50}}},
+              {'memory':{'p-ureth1-1':'500MiB / 1.5GiB','p-root1-1':'360MiB / 384MiB'},'pos':{'state_kb':{'v1/ureth':1700,'v1/root':50}}}]
+        report,over=pos_sample.resources(rows)
+        self.assertEqual(report['peak_memory']['p-ureth1-1']['used_mib'],900.0)
+        self.assertEqual(report['state_growth_kb'],{'v1/ureth':700,'v1/root':0})
+        self.assertEqual(over,['p-root1-1'],'360 of 384 MiB is above 90%; 900 of 1536 is not')
+        self.assertEqual(pos_sample.resources(rows,headroom=1.0)[1],[])
+    def test_state_kb_lists_the_validator_state_directories_it_can_read(self):
+        with tempfile.TemporaryDirectory() as d:
+            for p in ('validator1/ureth','validator1/root','validator2/ureth'): Path(d,p).mkdir(parents=True)
+            Path(d,'validator1/ureth','f').write_bytes(b'x'*(64*1024))
+            got=pos_sample.state_kb(d)
+        self.assertEqual(set(got),{'v1/ureth','v1/root','v2/ureth'});self.assertGreaterEqual(got['v1/ureth'],64)
     def test_a_result_that_is_not_whole_words_is_refused(self):
         with self.assertRaises(ValueError): pos_sample.words('0x'+'00'*31)
         with self.assertRaises(ValueError): pos_sample.words('0x')
