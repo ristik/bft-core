@@ -14,6 +14,7 @@ import json
 import os
 import re
 import subprocess
+import time
 from pathlib import Path
 
 import handoff_ops
@@ -107,5 +108,14 @@ def pos_joiner(r):
         except (handoff_ops.HandoffError, ValueError):
             return False
     r.expect(r.wait('the joiner\'s root reports itself a follower', follower, 180), 'the joiner\'s root is a follower of the genesis epoch (not a member)')
+    # the joiner's shard node: staging-only until the Commit enrolls its authority (it holds no session yet). A genesis configuration does not name it; what it does at
+    # start is recorded either way
+    compose(r, 'up', '-d', '--no-deps', f'shard{index}')
+    time.sleep(15)   # a start that is refused exits within seconds: look after that
+    running = f'shard{index}' in compose(r, 'ps', '--status', 'running', '--services').split()
+    logs = compose(r, 'logs', '--no-color', '--tail', '40', f'shard{index}', check=False)
+    (r.evidence / f'shard{index}-start.log').write_text(logs)
+    r.say(f'  shard{index} after 15 s: {"running" if running else "NOT running"}; last lines: ' + ' | '.join(logs.strip().splitlines()[-4:])[-600:])
+    r.expect(running, f'the joiner\'s shard node stays up as a staging-only node', logs.strip()[-600:])
     r.n = index   # from here every stage of this run counts the joiner: its services are in compose_files, its pod in the transport
 
