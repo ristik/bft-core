@@ -320,6 +320,49 @@ class Execution(unittest.TestCase):
             self.assertEqual(rep["status"], "FAIL")
             self.assertTrue(rep["late"])
 
+    def lane_campaign(self):
+        m = small()
+        m["steps"][0].update(lane=True)   # a: the lane's phase; b, c: driver steps
+        del m["steps"][0]["cmd"], m["steps"][0]["restartable"]
+        return m
+
+    def test_a_lane_step_is_verified_by_its_check_and_never_run_or_waited_for(self):
+        with tempfile.TemporaryDirectory() as d:
+            clock, world = FakeClock(), World()
+            world.effects.add("a")   # the lane's evidence is there
+            rep = self.drive(self.lane_campaign(), d, world, clock).run()
+            self.assertEqual((rep["status"], rep["external"]), ("PASS", ["a"]))
+            self.assertEqual(world.ran, ["b", "c"])   # the driver never ran a's command
+            self.assertEqual(clock.slept, [150, 250])
+
+    def test_a_lane_step_whose_evidence_is_missing_fails_the_campaign(self):
+        with tempfile.TemporaryDirectory() as d:
+            world = World()
+            rep = self.drive(self.lane_campaign(), d, world, FakeClock()).run()
+            self.assertEqual(rep["status"], "FAIL")
+            self.assertEqual(rep["failed"][0]["step"], "a")
+            self.assertIn("lane's evidence does not show it", rep["failed"][0]["reason"])
+            self.assertEqual(world.ran, [])
+
+    def test_a_lane_step_without_a_check_is_refused_and_needs_no_command(self):
+        m = self.lane_campaign()
+        driver.preflight(m, commands=False)
+        m["steps"][0].update(check=None, uncheckedReason="x")
+        with self.assertRaises(driver.ManifestError) as e:
+            driver.preflight(m)
+        self.assertIn("a lane step is verified by its check only", str(e.exception))
+
+    def test_not_covered_entries_need_a_pointer_and_the_report_carries_them(self):
+        m = small()
+        m["notCovered"] = [{"what": "abort/retry", "coveredBy": ""}]
+        with self.assertRaises(driver.ManifestError) as e:
+            driver.preflight(m)
+        self.assertIn("coveredBy", str(e.exception))
+        m["notCovered"] = [{"what": "abort/retry", "coveredBy": "the H6 abort lane"}]
+        with tempfile.TemporaryDirectory() as d:
+            rep = self.drive(m, d, World(), FakeClock()).run()
+            self.assertEqual(rep["notCovered"], m["notCovered"])
+
     def test_the_events_log_records_every_start_and_resume(self):
         with tempfile.TemporaryDirectory() as d:
             clock, world = FakeClock(), World(crash=("b", "after"))

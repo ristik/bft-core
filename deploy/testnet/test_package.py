@@ -19,6 +19,7 @@ import pos
 import metrics_relay
 import handoff_ops
 import handoff
+import observe
 
 class FakeRelay:
     def __init__(self): self.calls=[]
@@ -512,6 +513,37 @@ class HandoffWrapper(unittest.TestCase):
         self.assertEqual(fake.calls.index(plans[0]),0,'the plan precedes every intent and endorsement')
         self.assertEqual([r['event'] for r in rows],['plan','intent','endorse'])
         self.assertEqual(rows[0]['plan_sha256'],handoff_ops.sha(b'PLAN-1'));self.assertEqual(rows[0]['request_sha256'],handoff_ops.sha(b'REQUEST'))
+    def test_hold_endorses_at_the_first_entity_only_and_the_abort_target_is_derived_from_the_context_and_the_plan(self):
+        import base64,json
+        body=b'CANONICAL-BODY';plan=json.dumps({'Attempt':3,'Body':base64.b64encode(body).decode()}).encode()
+        fake=self.Fake([1,2,3,4],plans=[plan]);rows=[]
+        self.assertEqual(self.wrapper(fake,rows).hold(b'R'),plan)
+        self.assertEqual([c[0] for c in fake.calls if c[1].endswith('/endorse')],[1],'one endorsement, below the quorum: no Freeze follows')
+        self.assertEqual(sorted(c[0] for c in fake.calls if c[1].endswith('/intent')),[2,3,4])
+        self.assertEqual([r['event'] for r in rows],['plan','hold'])
+        class Context(self.Fake):
+            def post(self,entity,path,body,timeout=10):
+                return (200,json.dumps({'network':7,'attempt':3,'predecessor':'0x'+'ab'*32}).encode()) if path.endswith('/evm-assignment/context') else (422,b'invalid operator approval')
+        context=handoff_ops.abort_context(Context([1]),1)
+        target=handoff_ops.abort_target(context,plan,1)
+        self.assertEqual(target,{'network':7,'oldEpoch':1,'predecessorBodyId':'0x'+'ab'*32,'attempt':3,'nextBodyId':'0x'+handoff_ops.sha(body)})
+        with self.assertRaisesRegex(handoff_ops.HandoffError,'planned attempt 3'):
+            handoff_ops.abort_target(context,json.dumps({'Attempt':2,'Body':base64.b64encode(body).decode()}).encode(),1)
+        with self.assertRaises(ValueError,msg='a tampered plan (a body that is not canonical base64) names no target'):
+            handoff_ops.abort_target(context,json.dumps({'Attempt':3,'Body':'not base64!'}).encode(),1)
+        with self.assertRaises(KeyError,msg='a plan without a body names no target'):
+            handoff_ops.abort_target(context,json.dumps({'Attempt':3}).encode(),1)
+        with self.assertRaisesRegex(handoff_ops.HandoffError,'refused the context: 422'):
+            handoff_ops.abort_context(type('Busy',(),{'post':lambda self,*a,**k:(422,b'invalid operator approval')})(),1)
+    def test_hold_is_not_held_when_the_first_endorsement_is_refused_and_a_proposal_records_the_plan_identity_abort_names(self):
+        import base64,json
+        body=b'B2';plan=json.dumps({'Attempt':1,'Body':base64.b64encode(body).decode()}).encode()
+        fake=self.Fake([1,2,3,4],plans=[plan],endorse_script={1:[(422,b'refused')]});rows=[]
+        with self.assertRaises(handoff_ops.HandoffError):
+            self.wrapper(fake,rows).hold(b'R')
+        self.assertEqual(rows[-1]['event'],'hold');self.assertEqual(rows[-1]['endorsed'],[],'nothing is held when the endorsement is refused')
+        rows=[];self.wrapper(self.Fake([1,2,3,4],plans=[plan]),rows).propose(b'R')
+        self.assertEqual((rows[0]['plan_attempt'],rows[0]['next_body_id']),(1,'0x'+handoff_ops.sha(body)),'the plan row carries what pos-too-late names in the Abort')
     def test_an_endorsement_refused_before_the_prepare_is_retried_until_it_is_prepared(self):
         fake=self.Fake([1,2,3,4],endorse_script={2:[(409,b'endorsed before the handoff is prepared')]*2+[(204,b'')]})
         self.assertEqual(self.wrapper(fake,[]).propose(b'R'),4)
@@ -914,5 +946,63 @@ class LoadGenerator(unittest.TestCase):
         s,problems=self.run_load(self.Node(),min_accepted=31)
         self.assertTrue(any('only 30 accepted' in p for p in problems),problems)
 
+
+
+class Observe(unittest.TestCase):
+    def sample(self,rounds,**kw):
+        base={'roots':{str(i+1):{'epoch':1,'round':r} for i,r in enumerate(rounds)},'services':{'root1':{'state':'running','health':None,'restarts':0}},
+              'disk_percent':40.0,'gateway':{'healthz':200,'block':self.block},'faucet':{'healthz':200,'body':'{}'}}
+        self.block+=1   # the chain moves with every sample unless a test pins the gateway
+        base.update(kw);return base
+    block=0
+    def setUp(self): self.block=0
+    def test_a_healthy_sample_raises_nothing_and_a_head_that_moves_resets_the_stall_clock(self):
+        w=observe.Watch(stall=120)
+        self.assertEqual(w.step(self.sample([10,10,10,10]),0),[])
+        self.assertEqual(w.step(self.sample([60,60,60,60]),100),[])
+        self.assertEqual(w.step(self.sample([60,60,60,60]),200),[],'100 s since the last move is below the 120 s stall')
+        self.assertTrue(any('stopped' in a and 'round 60' in a for a in w.step(self.sample([60,60,60,60]),230)))
+    def test_one_root_moving_is_progress_and_a_root_without_a_head_is_an_alert(self):
+        w=observe.Watch(stall=120);w.step(self.sample([10,10,10,10]),0)
+        alerts=w.step(self.sample([50,10,10,10]),500)
+        self.assertEqual(alerts,[],'the heads are the certified chain: one root ahead is progress')
+        self.assertTrue(any('root 2 gave no certified head' in a for a in w.step(self.sample([60],roots={'1':{'round':60,'epoch':1},'2':{'error':'x'}}),510)))
+    def test_a_down_unhealthy_or_restarted_service_disk_and_gateway_are_alerts(self):
+        w=observe.Watch();w.step(self.sample([1]),0)
+        bad=self.sample([2],services={'root1':{'state':'exited','health':None,'restarts':0},'shard1':{'state':'running','health':'unhealthy','restarts':3}},disk_percent=91.0,
+                        gateway={'healthz':503,'block':None},faucet={'healthz':0,'body':'URLError'})
+        text=' | '.join(w.step(bad,10))
+        for part in ('root1 is exited','shard1 is unhealthy','disk 91.0%','gateway /healthz answered 503','faucet /healthz answered 0'): self.assertIn(part,text)
+        self.assertTrue(any('root1 restarted (0 -> 1)' in a for a in w.step(self.sample([3],services={'root1':{'state':'running','health':None,'restarts':1}}),20)))
+        self.assertFalse(any('restarted' in a for a in w.step(self.sample([4],services={'root1':{'state':'running','health':None,'restarts':1}}),30)),'an unchanged count is not a restart')
+    def test_roots_moving_while_the_execution_chain_does_not_is_an_alert(self):
+        w=observe.Watch(stall=120)
+        pinned={'healthz':200,'block':5}
+        for at,round_ in ((0,10),(60,70),(100,110)): self.assertEqual(w.step(self.sample([round_]*4,gateway=pinned),at),[],'the chain at block 5 for under 120 s from the start')
+        alerts=w.step(self.sample([310]*4,gateway=pinned),130)
+        self.assertTrue(any('execution chain stopped' in a and 'block past 5' in a for a in alerts))
+        self.assertFalse(any('certified heads stopped' in a for a in alerts),'the roots did move')
+        self.assertEqual(w.step(self.sample([320]*4,gateway={'healthz':200,'block':6}),140),[],'a block that moves clears it')
+    def test_an_unreadable_gateway_block_is_an_alert_with_its_status(self):
+        alerts=observe.Watch().step(self.sample([1],gateway={'healthz':200,'block':None,'block_status':'403 forbidden'}),0)
+        self.assertTrue(any('gateway block is unreadable: 403 forbidden' in a for a in alerts))
+    def test_the_block_request_carries_the_forwarded_address_the_gateway_requires(self):
+        seen={}
+        def fake(host,path,body=None,timeout=10,headers=None):
+            seen['headers']=headers;return 200,'{"result":"0x7"}'
+        with patch.object(observe,'get',fake), patch.object(observe.shutil,'disk_usage',lambda p:type('U',(),{'used':1,'total':10})()), patch.object(observe.subprocess,'run',lambda *a,**k:type('R',(),{'stdout':''})()):
+            with tempfile.TemporaryDirectory() as d:
+                Path(d,'compose.yaml').write_text(json.dumps({'name':'p','services':{}}))
+                sample=observe.collect(d,type('T',(),{'entities':[]})(),faucet=False)
+        self.assertEqual(seen['headers'],{'X-Forwarded-For':observe.CLIENT_IP});self.assertEqual(sample['gateway']['block'],7)
+    def test_a_service_with_no_container_is_an_alert_and_ps_is_read_in_both_forms(self):
+        self.assertTrue(any('signer has no container' in a for a in observe.Watch().step(self.sample([1],missing=['signer']),0)))
+        row={'Service':'root1','State':'running','ID':'x'}
+        self.assertEqual(observe.ps_rows(json.dumps([row])),[row],'an array')
+        self.assertEqual(observe.ps_rows(json.dumps(row)+'\n'+json.dumps(row)),[row,row],'one object per line')
+        self.assertEqual(observe.ps_rows(''),[])
+    def test_the_faucet_can_be_left_out(self):
+        s=self.sample([1]);del s['faucet']
+        self.assertEqual(observe.Watch().step(s,0),[])
 
 if __name__=='__main__': unittest.main()

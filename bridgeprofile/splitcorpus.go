@@ -695,3 +695,23 @@ func mustEncodeEnv(g *splitGen, env *Envelope) []byte {
 	g.must(err)
 	return b
 }
+
+// SplitDir is the directory of the split corpus inside the sealed tree.
+const SplitDir = "split"
+
+// BuildSealedCorpus is the one tree the plug-ins seal: the base corpus, and the split corpus under SplitDir, so that one
+// manifest digest covers both.
+func BuildSealedCorpus() (*Corpus, error) {
+	base, err := BuildCorpus()
+	if err != nil {
+		return nil, err
+	}
+	split, err := BuildSplitCorpus()
+	if err != nil {
+		return nil, err
+	}
+	for p, b := range split.Files {
+		base.Files[SplitDir+"/"+p] = b
+	}
+	return base, nil
+}

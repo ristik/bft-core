@@ -502,16 +502,26 @@ func TestLockDigestBindsCfgNonceAndRecord(t *testing.T) {
 }
 
 func TestStorageSlots(t *testing.T) {
-	// Solidity layout: lockDigest at base 5, spent at 6, claimable at 7. The
+	// Solidity layout: lockDigest at base 5, redeemedAmount at 6, claimable at 7, lockedAmount at 8, spentPart at 9. The
 	// logical slot is keccak256(abi.encode(key, base)); the trie key is its
 	// keccak.
 	n1 := LockDigestSlot(1)
 	require.Equal(t, "d0ba1fc4fd1d0c3d0e8ed4a7ca1f0b8fd3d2b5b2cd7e8f6c6c1b0cb3b0c2a9f4"[:0], "")
 	require.NotEqual(t, n1, LockDigestSlot(2))
-	require.NotEqual(t, LockDigestSlot(1), SpentSlot(1))
+	require.NotEqual(t, LockDigestSlot(1), RedeemedSlot(1))
 	var a [20]byte
 	a[19] = 1
-	require.NotEqual(t, ClaimableSlot(a), SpentSlot(1))
+	require.NotEqual(t, ClaimableSlot(a), RedeemedSlot(1))
+	var pid [32]byte
+	pid[31] = 7
+	// cast index bytes32 7 (cast index uint256 1 9): the nested mapping slot of spentPart[1][7].
+	want, err := hex.DecodeString("249e73b6d05bd504eb6e3cb3ae7778c492aea0e392781230aeb97e54b95c661a")
+	require.NoError(t, err)
+	sp := SpentPartSlot(1, pid)
+	require.Equal(t, want, sp[:])
+	require.NotEqual(t, SpentPartSlot(1, pid), SpentPartSlot(2, pid))
+	require.NotEqual(t, SpentPartSlot(1, pid), RedeemedSlot(1))
+	require.NotEqual(t, LockedAmountSlot(1), RedeemedSlot(1))
 	require.NotEqual(t, StorageTrieKey(n1), n1)
 	require.Equal(t, StorageTrieKey(n1), keccak(n1[:]))
 	require.Equal(t, AccountTrieKey(a), keccak(a[:]))
