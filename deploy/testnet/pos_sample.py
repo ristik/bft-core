@@ -13,6 +13,7 @@ Run as `python3 deploy/testnet/pos_sample.py $G --out DIR [--interval 60] [--dur
 """
 import argparse
 import json
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -30,9 +31,23 @@ SELECTORS = {
 ZERO_WORD = '00' * 32
 
 
+GAP = 0.12        # seconds between two gateway calls: the gateway answers 429 above 10 requests per second per client address (a sample makes a dozen)
+RETRIES = 5
+_last = [0.0]
+
+
 def eth(method, params):
-    """The result of one JSON-RPC call through the gateway (with the forwarded address it requires), or raises ValueError naming the refusal."""
-    status, text = observe.get(observe.PUBLIC_RPC, '/', json.dumps({'jsonrpc': '2.0', 'id': 1, 'method': method, 'params': params}), headers={'X-Forwarded-For': observe.CLIENT_IP})
+    """The result of one JSON-RPC call through the gateway (with the forwarded address it requires), or raises ValueError naming the refusal. Calls are spaced by GAP
+    and a 429 is retried after a second, as the rehearsal's own client does (the first live run of the sampler found 429s in a burst)."""
+    for attempt in range(RETRIES + 1):
+        wait = _last[0] + GAP - time.monotonic()
+        if wait > 0:
+            time.sleep(wait)
+        status, text = observe.get(observe.PUBLIC_RPC, '/', json.dumps({'jsonrpc': '2.0', 'id': 1, 'method': method, 'params': params}), headers={'X-Forwarded-For': observe.CLIENT_IP})
+        _last[0] = time.monotonic()
+        if status != 429 or attempt == RETRIES:
+            break
+        time.sleep(1)
     try:
         body = json.loads(text)
     except ValueError:
@@ -106,6 +121,7 @@ class PosWatch:
         self.moved_at = None
         self.behind_since = None
         self.open_since = {}
+        self.funded = False   # the pool was seen with a funded balance: only then is 0 an exhaustion, not an unfunded pool
 
     def step(self, pos, at):
         alerts = [f'unreadable: {e}' for e in pos.get('errors', [])]
@@ -137,9 +153,29 @@ class PosWatch:
         books = pos.get('pool', {})
         if 'balance' in books and 'accounted' in books and int(books['balance']) < int(books['accounted']):
             alerts.append(f'the reward pool holds {books["balance"]} wei, less than the {books["accounted"]} it has accounted for')
-        if books.get('available') == '0':
-            alerts.append('the reward pool has no funded balance left (available 0)')
+        if books.get('available') not in (None, '0'):
+            self.funded = True
+        elif books.get('available') == '0' and self.funded:
+            alerts.append('the reward pool has no funded balance left (available 0 after it was funded)')
         return alerts
+
+
+def pos_observe(r):
+    """Rehearsal stage `pos-observe`: the sampler run for two samples against the running PoS package (after pos-smoke), as an operator would start it. It exits 0 (no
+    alert) and every sample carries the contracts' views as numbers; the record cursor equals the record count and the pool holds exactly its balance books."""
+    out = r.evidence / 'pos-observe'
+    run = subprocess.run([sys.executable, str(Path(__file__).resolve()), str(r.gen), '--out', str(out), '--samples', '2', '--interval', '5', '--no-faucet', '--stall', '3600'],
+                         text=True, capture_output=True)
+    r.say('  pos_sample: exit %d: %s' % (run.returncode, ' | '.join((run.stdout + run.stderr).strip().splitlines()[-4:])))
+    r.expect(run.returncode == 0, 'the sampler runs and raises no alert on the running package', (run.stdout + run.stderr).strip()[-400:])
+    rows = [json.loads(line) for line in (out / 'samples.jsonl').read_text().splitlines()]
+    r.expect(len(rows) == 2, 'two samples were written', str(len(rows)))
+    for row in rows:
+        pos = row['pos']
+        r.expect(not pos['errors'], 'every contract view was readable', str(pos['errors']))
+        r.expect(isinstance(pos['progress'], int) and pos['progress'] > 0 and pos['recordCursor'] == pos['recordCount'], 'the sample has the registry clock and a caught-up custody', json.dumps(pos)[:200])
+        r.expect(int(pos['pool']['balance']) >= int(pos['pool']['accounted']) > 0, 'the pool holds at least what it has accounted for', json.dumps(pos['pool']))
+    r.expect(rows[1]['pos']['progress'] >= rows[0]['pos']['progress'], 'the registry progress did not go backwards', f"{rows[0]['pos']['progress']} -> {rows[1]['pos']['progress']}")
 
 
 def main():
