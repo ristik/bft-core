@@ -1,6 +1,6 @@
 {
-  "artifactVersion": 10,
-  "nativeBridgeProtocolVersion": 5,
+  "artifactVersion": 11,
+  "nativeBridgeProtocolVersion": 6,
   "sdkVersion": "4.0.0",
   "status": "development-provisional-unactivated",
   "identityFamily": "unicity-native",
@@ -13,7 +13,9 @@
     "inclusionProof": 39033,
     "lock": 39049,
     "returnReason": 39048,
-    "value": 39050
+    "value": 39050,
+    "splitJustification": 39044,
+    "splitManifest": 39046
   },
   "versions": {
     "mint": 2,
@@ -74,9 +76,9 @@
   },
   "deferred": [],
   "normativeArtifactSha256": {
-    "protocol/interop.md": "cf9a0330b7512170ee0b1663416a2b56b8e94d34261bbce9aa256672312501d5",
-    "protocol/abi.json": "d836ec1a0eb12b81c92c4fccd5d310aa7b5fd2c7a9119d1fa3b5cf2509eb5685",
-    "protocol/manifest.schema.json": "f256b0ea19ea1f0a390926006b18a7460ecbb63f79f3e3e85040cbf2d710fb05",
+    "protocol/interop.md": "0f251fc28f56bed47e60c4d8bbd8bdf5006586b1be2379d22aa9719eecfb79ac",
+    "protocol/abi.json": "9b27c3eb63334d5a844de81bae9182f30469c1dde73a5250183fc141b47c20ae",
+    "protocol/manifest.schema.json": "64da56587b7754598288f74e70ea3133963a3058f892ed26ec6525bddbd4eef5",
     "protocol/trust-base.md": "445f354723d9ab7247a9c1ec518bebc82993a71e960dae9edb2af2986bb9c628"
   },
   "networkId": {
@@ -92,5 +94,28 @@
     "verification": "one-CERT_BATCH_V2-0x0100-over-the-anchor-table",
     "certificateAge": "any-age-permanent-registry"
   },
-  "limitsNote": "The one resource policy shared by contract, oracle and plug-ins (owner section 36, bft-core briefs/b7-direct-uncapped-design.md section 1): no gas ceiling and no history cap. The composition (BRIDGE_COMPOSE_V1) is bounded by envelopeBytes (the ingress bound), the u16 anchor wire width (aggregatorAnchors) and its gas, and streams the history and the anchor table (bft-core briefs/dev4-b7-native-compose-spec.md section 7); transfers, leaves and semanticBytes are the standalone B2 kernel's own bounds (0x0104, prepareLock); the rest are per-object shape bounds."
+  "limitsNote": "The one resource policy shared by contract, oracle and plug-ins (owner section 36, bft-core briefs/b7-direct-uncapped-design.md section 1): no gas ceiling and no history cap. The composition (BRIDGE_COMPOSE_V2) is bounded by envelopeBytes (the ingress bound), the u16 anchor wire width (aggregatorAnchors) and its gas, and streams the history and the anchor table (bft-core briefs/dev4-b7-native-compose-spec.md section 7); transfers, leaves and semanticBytes are the standalone B2 kernel's own bounds (0x0104, prepareLock); the rest are per-object shape bounds.",
+  "split": {
+    "scope": "one asset, single-parent lineage of any depth, whole-part redemption against the root lock",
+    "sumTreeLeafPrefix": 16,
+    "sumTreeNodePrefix": 17,
+    "maxProofSteps": 256,
+    "proofsPerJustification": 1,
+    "outputDomain": "UNICITY_SPLIT_OUTPUT",
+    "depth": "uncapped: bounded by envelopeBytes and gas",
+    "gas": {
+      "perNestedByte": 16,
+      "perJustificationItem": 20,
+      "perAncestorLeaf": 16000,
+      "edgeBase": 20000,
+      "perProofStep": 1500
+    },
+    "vaultSlots": {
+      "lockDigest": 5,
+      "redeemedAmount": 6,
+      "claimable": 7,
+      "lockedAmount": 8,
+      "spentPart": 9
+    }
+  }
 }
