@@ -840,8 +840,9 @@ class Rehearsal:
         commit = record['commit']
         want = (1, 1) if self.target == 2 else (2, self.target - 1)   # the genesis committee signs in the legacy scheme, a later one in scheme 2
         self.expect((commit['scheme'], commit['epoch']) == want, f'the Commit is the epoch-{want[1]} committee\'s (scheme {want[0]})', f'scheme {commit["scheme"]}, epoch {commit["epoch"]}')
-        # 10 the gate: every shard has activated the root epoch
-        for i in range(1, self.n + 1):
+        # 10 the gate: every shard of the committee that was left has activated the root epoch (a joiner's shard node is staging-only until its authority advances
+        # and it restores: pos-advance checks it)
+        for i in self.members():
             def activated(i=i):
                 logs = self.compose('logs', '--no-color', f'shard{i}', check=False)
                 # the package's logs are JSON: {"message":"handoff activated","rootEpoch":2,...} (the lane's text format was msg="handoff activated" rootEpoch=2)
@@ -872,6 +873,9 @@ class Rehearsal:
             self.say(f'  advancing the authority of entity {i}')
             self.compose('stop', f'shard{i}')
             operator = ['--operator-socket', '/authority/operator.sock', '--operator-credential', '/authority/operator.cred']
+            if i in self.joiners:
+                self.advance_joiner(i, operator, shard_epoch)
+                continue
             self.exec_in(f'authority{i}', 'ubft', 'signing-authority', 'advance-epoch', *operator, '--trust-base', f'/network/handoff/trust-base-epoch{self.target}.json',
                          '--shard-conf', f'/network/handoff/shard-conf-{shard_epoch}.json')
             auth = self.gen / f'validator{i}' / 'auth'
@@ -893,6 +897,31 @@ class Rehearsal:
             return count if count == self.view(deployment['custody'], 'recordCursor()(uint64)')[0] else None
         self.say(f'  recordCount == recordCursor == {self.wait("the custody has applied every root record", lambda: applied() is not None, 300) and applied()}')
         self.joiners.clear()   # the successor committee is active: a joiner is a member now
+
+    def advance_joiner(self, i, operator, shard_epoch):
+        """The joiner's authority has never been enrolled (the genesis shard configuration does not name it) and holds no session: each step is run and recorded, in the
+        order the native lane enrolls a joiner after the Commit (advance to the activated scope, complete the enrollment against the activated shard configuration,
+        issue the session), then its shard node is started and what it does is recorded."""
+        log = []
+        def step(what, *command):
+            rc, out, err = self.exec_rc(f'authority{i}', 'ubft', 'signing-authority', *command)
+            log.append(f'{what}: exit {rc}\n{out}{err}')
+            self.say(f'  joiner authority {i}: {what}: exit {rc}: {(out + err).strip()[-200:]}')
+            return rc
+        step('status before', 'status', *operator)
+        rc = step('advance-epoch', 'advance-epoch', *operator, '--trust-base', f'/network/handoff/trust-base-epoch{self.target}.json', '--shard-conf', f'/network/handoff/shard-conf-{shard_epoch}.json')
+        rc = rc or step('complete-enrollment', 'complete-enrollment', *operator, '--shard-conf', f'/network/handoff/shard-conf-{shard_epoch}.json')
+        rc = rc or step('replace-session', 'replace-session', *operator, '--out', '/authority/client.cred')
+        step('status after', 'status', *operator)
+        (self.evh() / f'joiner-authority-{i}.log').write_text('\n'.join(log))
+        self.expect(rc == 0, f'the joiner\'s authority {i} advanced, enrolled and issued its session', log[-1][-400:])
+        self.compose('start', f'shard{i}')
+        time.sleep(30)
+        logs = self.compose('logs', '--no-color', '--tail', '60', f'shard{i}', check=False)
+        (self.evh() / f'joiner-shard-{i}.log').write_text(logs)
+        running = f'shard{i}' in self.compose('ps', '--status', 'running', '--services').split()
+        self.say(f'  joiner shard {i} after 30 s: {"running" if running else "NOT running"}: ' + ' | '.join(logs.strip().splitlines()[-3:])[-500:])
+        self.expect(running, f'the joiner\'s shard node {i} runs under its new session', logs.strip()[-500:])
 
     def exec_rc(self, service, *command):
         run = subprocess.run(['docker', 'compose', *handoff_ops.compose_files(self.gen), 'exec', '-T', service, *command], text=True, capture_output=True)
