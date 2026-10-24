@@ -127,3 +127,34 @@ def pos_joiner(r):
     r.n = index   # from here every stage of this run counts the joiner: its services are in compose_files, its pod in the transport
     r.joiners.add(index)   # but not as a member of the committee that certifies: it follows until the handoff that names it activates
 
+
+
+def pos_join_signs(r):
+    """After the handoff to five (pos-advance in a run with pos-joiner): the joiner is a member. Four of five roots are the quorum (unit weights), so with root 2 stopped
+    all of roots 1, 3, 4 and 5 are needed: the committed round must advance at the new epoch with the joiner's root among the four signers. Root 2 is then started
+    again and the five converge. A sampled stored certificate would not show that the joiner signs (the other roots certify without it); this does."""
+    joiner = json.loads((r.evidence / 'joiner.json').read_text())
+    transport = handoff_ops.DockerTransport(r.gen)
+    members = list(range(1, r.n + 1))
+    r.expect(len(members) == 5 and not r.joiners, 'five members, no joiner left (pos-advance activated the successor committee)', str(members))
+    r.expect(all(r.root_epoch(i, transport) == r.target for i in members), f'all five roots certify at epoch {r.target}')
+    def signers(i):
+        try:
+            code, body = transport.post(i, '/api/v1/q3/signers', b'{}')
+            return json.loads(body) if code == 200 else None
+        except (handoff_ops.HandoffError, ValueError):
+            return None
+    before = signers(1)
+    r.expect(before is not None and before['threshold'] == 4, 'five roots at unit weight: the quorum threshold is 4', json.dumps(before))
+    r.compose('stop', 'root2')
+    try:
+        start = signers(3)['round']
+        def advanced():
+            one, three = signers(1), signers(3)
+            return bool(one and three and one['epoch'] == r.target and three['epoch'] == r.target and one['round'] > start + 3 and three['round'] > start + 3
+                        and three['quorum'] and len(three['signers']) == 4 and joiner['rootNodeId'] in [x['nodeId'] for x in three['signers']])
+        r.wait('with root 2 stopped the committed round advances, signed by the four live roots, the joiner\'s among them', advanced, 240)
+    finally:
+        r.compose('start', 'root2')
+    for i in members:
+        r.wait(f'root {i} certifies at epoch {r.target}', lambda i=i: r.root_epoch(i, transport) == r.target, 180)

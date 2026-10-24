@@ -13,7 +13,7 @@ on:
         required: false
         default: ''
       pos_stages:
-        description: 'PoS-only run: rehearse.py PoS-profile stages (e.g. up,identity,first-tx,pos-smoke,pos-election,pos-proposal; the joiner: up,identity,first-tx,pos-smoke,pos-joiner, on a fresh generation, not in the default list); skips the PoA rehearsal'
+        description: 'PoS-only run: rehearse.py PoS-profile stages (e.g. up,identity,first-tx,pos-smoke,pos-election,pos-proposal; the joiner: up,identity,first-tx,pos-smoke,pos-joiner,pos-election,pos-proposal,pos-propose,pos-install,pos-advance,pos-join-signs,pos-restart, on a fresh generation, in the join step below); skips the PoA rehearsal'
         required: false
         default: ''
 permissions:
@@ -124,6 +124,31 @@ jobs:
             sudo cp -r /srv/tn-rehearsal-pos/network "$RUNNER_TEMP/evidence-pos/network" || true   # public material only: no key is ever in network/
             sudo chown -R "$(id -u):$(id -g)" "$RUNNER_TEMP/evidence-pos" || true
           fi
+      - name: PoS join profile, generation (a fresh PoS generation, the main one is stopped first, the host ports are the same)
+        if: ${{ inputs.stages == '' && inputs.pos_stages == '' }}
+        run: |
+          if sudo test -f /srv/tn-rehearsal-pos/compose.yaml; then sudo docker compose -f /srv/tn-rehearsal-pos/compose.yaml down; fi
+          umask 077
+          sudo -E env "PATH=$PATH" python3 deploy/testnet/generate.py --out /srv/tn-rehearsal-join --validators 4 --chain-id 31337 \
+            --ubft pinned-bft/build/ubft --b1genesis /tmp/tn-b1genesis --keygen /tmp/tn-keygen \
+            --captcha-sitekey rehearsal-sitekey --captcha-secret-file /tmp/captcha-secret \
+            --pos --pos-contracts pinned-contracts
+      - name: PoS join profile, rehearse (a fifth entity joins - register, bond, delegate, election with five, handoff to five, it signs, restarts)
+        if: ${{ inputs.stages == '' && inputs.pos_stages == '' }}
+        run: |
+          sudo -E env "PATH=$PATH" python3 deploy/testnet/rehearse.py --generation /srv/tn-rehearsal-join --evidence "$RUNNER_TEMP/evidence-join" \
+            --ubft pinned-bft/build/ubft --restore-pin /tmp/tn-h4pin \
+            --stages "up,identity,first-tx,pos-smoke,pos-joiner,pos-election,pos-proposal,pos-propose,pos-install,pos-advance,pos-join-signs,pos-restart"
+      - name: PoS join profile, logs
+        if: always() && inputs.stages == '' && inputs.pos_stages == ''
+        run: |
+          mkdir -p "$RUNNER_TEMP/evidence-join"
+          sudo chown -R "$(id -u):$(id -g)" "$RUNNER_TEMP/evidence-join" || true
+          if sudo test -f /srv/tn-rehearsal-join/compose.yaml; then
+            sudo bash -c "cd /srv/tn-rehearsal-join && F='-f compose.yaml'; [ -f compose.joiner.json ] && F=\"\$F -f compose.joiner.json\"; docker compose \$F ps -a > '$RUNNER_TEMP/evidence-join/compose-ps.txt' && docker compose \$F logs --no-color --timestamps --tail 600 > '$RUNNER_TEMP/evidence-join/compose-logs.txt'" || true
+            sudo cp -r /srv/tn-rehearsal-join/network "$RUNNER_TEMP/evidence-join/network" || true   # public material only
+            sudo chown -R "$(id -u):$(id -g)" "$RUNNER_TEMP/evidence-join" || true
+          fi
       - name: Resources and logs
         if: always()
         run: |
@@ -142,6 +167,12 @@ jobs:
         with:
           name: testnet-rehearsal-evidence
           path: ${{ runner.temp }}/evidence
+      - uses: actions/upload-artifact@v4
+        if: always() && inputs.stages == '' && inputs.pos_stages == ''
+        with:
+          name: testnet-rehearsal-join-evidence
+          path: ${{ runner.temp }}/evidence-join
+          if-no-files-found: ignore
       - uses: actions/upload-artifact@v4
         if: always() && inputs.stages == ''
         with:
