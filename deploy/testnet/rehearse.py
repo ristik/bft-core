@@ -1147,7 +1147,7 @@ STAGES = (('up', 'up'), ('identity', 'identity'), ('first-tx', 'first_tx'), ('ga
 Rehearsal.pos_observe = pos_sample.pos_observe   # the sampler smoke lives in pos_sample.py
 Rehearsal.pos_joiner = pos_join.pos_joiner   # the joiner stage lives in pos_join.py; it is not in the default list (it needs its own fresh generation)
 Rehearsal.pos_owner = pos_owner.pos_owner   # the owner-key stage lives in pos_owner.py
-POS_STAGES = (('pos-smoke', 'pos_smoke'), ('pos-observe', 'pos_observe'), ('pos-rewards', 'pos_rewards'), ('pos-election', 'pos_election'), ('pos-proposal', 'pos_proposal'), ('pos-abort', 'pos_abort'), ('pos-propose', 'pos_propose'), ('pos-too-late', 'pos_too_late'), ('pos-install', 'pos_install'), ('pos-advance', 'pos_advance'), ('pos-restart', 'pos_restart'), ('pos-stale', 'pos_stale'), ('pos-handoff-2', 'pos_handoff_2'), ('pos-restart-2', 'pos_restart_2'), ('pos-recreate', 'pos_recreate'), ('pos-owner', 'pos_owner'), ('pos-joiner', 'pos_joiner'))
+POS_STAGES = (('pos-smoke', 'pos_smoke'), ('pos-observe', 'pos_observe'), ('pos-rewards', 'pos_rewards'), ('pos-joiner', 'pos_joiner'), ('pos-election', 'pos_election'), ('pos-proposal', 'pos_proposal'), ('pos-abort', 'pos_abort'), ('pos-propose', 'pos_propose'), ('pos-too-late', 'pos_too_late'), ('pos-install', 'pos_install'), ('pos-advance', 'pos_advance'), ('pos-restart', 'pos_restart'), ('pos-stale', 'pos_stale'), ('pos-handoff-2', 'pos_handoff_2'), ('pos-restart-2', 'pos_restart_2'), ('pos-recreate', 'pos_recreate'), ('pos-owner', 'pos_owner'))
 
 
 def main():
