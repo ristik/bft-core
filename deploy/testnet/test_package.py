@@ -689,11 +689,22 @@ class PublicRPC(unittest.TestCase):
         self.thread.start()
     def tearDown(self):
         self.server.shutdown();self.thread.join();self.server.server_close();self.server.pool.shutdown()
-    def send(self, data):
+    def send(self, data, path='/'):
         conn=http.client.HTTPConnection(*self.server.server_address,timeout=3)
-        conn.request('POST','/',data,{'Content-Type':'application/json'})
+        conn.request('POST',path,data,{'Content-Type':'application/json'})
         response=conn.getresponse(); status=response.status; result=json.loads(response.read());conn.close()
         return status,result
+    def declared(self, length, path='/'):
+        """A request that declares a body of LENGTH and sends a small one: the bound is checked on the declaration, before any read."""
+        conn=http.client.HTTPConnection(*self.server.server_address,timeout=3)
+        conn.request('POST',path,b'{}',{'Content-Type':'application/json','Content-Length':str(length)})
+        response=conn.getresponse(); status=response.status; response.read();conn.close()
+        return status
+    def get(self, path):
+        conn=http.client.HTTPConnection(*self.server.server_address,timeout=3)
+        conn.request('GET',path)
+        response=conn.getresponse(); status=response.status; body=response.read();conn.close()
+        return status,body
     def rpc(self, method):
         return self.send(json.dumps({'jsonrpc':'2.0','id':17,'method':method,'params':[]}))
     def test_public_preserves_id(self):
@@ -704,11 +715,73 @@ class PublicRPC(unittest.TestCase):
             self.assertEqual(self.rpc(method)[0],400)
         self.assertEqual(self.relay.calls,[])
     def test_malformed_batch_and_size(self):
-        for body in ['{','[]','null',json.dumps([{'method':'eth_chainId'}]),json.dumps({'jsonrpc':'2.0','id':1,'method':'eth_sendRawTransaction','params':['0x'+'ab'*gateway.MAX_BODY]})]:
+        for body in ['{','[]','null',json.dumps([{'method':'eth_chainId'}])]:
             self.assertEqual(self.send(body)[0],400)
+        self.assertEqual(self.declared(gateway.MAX_RAW_TX_BODY+1),400)   # over every bound: refused on the declared length
+        self.assertEqual(self.declared(gateway.AGG_MAX_BODY+1,'/aggregator'),400)
         self.assertEqual(self.relay.calls,[])
+    def test_only_the_redemption_methods_may_exceed_the_ordinary_body_bound(self):
+        raw='0x'+'ab'*(gateway.MAX_BODY+100)   # a body above 16 KiB, far below the raw-transaction bound
+        status,result=self.send(json.dumps({'jsonrpc':'2.0','id':5,'method':'eth_sendRawTransaction','params':[raw]}))
+        self.assertEqual((status,result['id']),(200,5))
+        self.assertEqual(self.relay.calls,[('eth_sendRawTransaction',[raw])])
+        # the call and the estimate a wallet makes on the same calldata first take the same path (bft-core#835 run 40069178284: a split part's redeem)
+        for i,method in enumerate(['eth_call','eth_estimateGas']):
+            status,result=self.send(json.dumps({'jsonrpc':'2.0','id':10+i,'method':method,'params':[{'data':raw},'latest']}))
+            self.assertEqual((status,result['id']),(200,10+i),method)
+        self.assertEqual([m for m,_ in self.relay.calls],['eth_sendRawTransaction','eth_call','eth_estimateGas'])
+        # the same size for any other method is refused before the relay
+        for method in ['eth_getBalance','eth_getCode','eth_getTransactionReceipt']:
+            self.assertEqual(self.send(json.dumps({'jsonrpc':'2.0','id':6,'method':method,'params':[raw,'latest']}))[0],400,method)
+        self.assertEqual(len(self.relay.calls),3)
+        # a large body with no free slot is refused (busy), and never reaches the relay
+        for _ in range(gateway.LARGE_SLOTS): self.server.large.acquire()
+        try:
+            self.assertEqual(self.send(json.dumps({'jsonrpc':'2.0','id':7,'method':'eth_sendRawTransaction','params':[raw]}))[0],503)
+        finally:
+            for _ in range(gateway.LARGE_SLOTS): self.server.large.release()
+        self.assertEqual(len(self.relay.calls),3)
+        # an ordinary-size body needs no slot
+        for _ in range(gateway.LARGE_SLOTS): self.server.large.acquire()
+        try:
+            self.assertEqual(self.rpc('eth_chainId')[0],200)
+        finally:
+            for _ in range(gateway.LARGE_SLOTS): self.server.large.release()
+    def test_the_aggregator_route_forwards_the_sdk_methods_only(self):
+        self.server.agg_limit=gateway.Limiter(1000,1000)   # this test is about routing, not the limit
+        seen=[]
+        def fake(url, payload=None, content_type='application/json'):
+            seen.append((url,payload)); return 200,'application/json',b'{"jsonrpc":"2.0","id":1,"result":{"blockNumber":"7"}}'
+        with patch('gateway.upstream',side_effect=fake):
+            for m in sorted(gateway.AGG_METHODS):
+                body=json.dumps({'jsonrpc':'2.0','id':1,'method':m,'params':{}})
+                status,result=self.send(body,'/aggregator')
+                self.assertEqual((status,result['result']['blockNumber']),(200,'7'))
+                self.assertEqual(seen[-1],(gateway.AGG_URL+'/',body.encode()))   # forwarded unchanged
+            n=len(seen)
+            for bad in [json.dumps({'jsonrpc':'2.0','id':1,'method':'eth_sendRawTransaction','params':[]}),json.dumps({'jsonrpc':'2.0','id':1,'method':'admin_x'}),'[]','{',
+                        json.dumps({'jsonrpc':'2.0','id':1,'method':'get_block_height','params':{'x':'a'*gateway.AGG_MAX_BODY}})]:
+                self.assertEqual(self.send(bad,'/aggregator')[0],400)
+            self.assertEqual(len(seen),n)
+            # the trust-base pages: the path and query forwarded, the body and content type passed through
+            with patch('gateway.upstream',return_value=(200,'application/cbor',b'\xd9\x98\x67')) as up:
+                status,body=self.get('/api/v1/trustbases?from=2&max=64')
+                self.assertEqual((status,body),(200,b'\xd9\x98\x67'))
+                up.assert_called_once_with(gateway.AGG_URL+'/api/v1/trustbases?from=2&max=64')
+            self.assertEqual(self.get('/api/v1/other')[0],404)
+        self.assertEqual(self.relay.calls,[])   # nothing of the aggregator route reaches the execution chain
+    def test_the_aggregator_route_has_its_own_rate_limit_and_answers_unavailable(self):
+        body=json.dumps({'jsonrpc':'2.0','id':1,'method':'get_block_height','params':{}})
+        with patch('gateway.upstream',return_value=(200,'application/json',b'{"result":1}')):
+            with patch('gateway.time.monotonic',return_value=self.server.agg_limit.window):
+                for _ in range(10): self.assertEqual(self.send(body,'/aggregator')[0],200)
+                self.assertEqual(self.send(body,'/aggregator')[0],429)
+                self.assertEqual(self.rpc('eth_chainId')[0],200)   # the execution route's limit is separate
+        self.server.agg_limit=gateway.Limiter(10,50)
+        with patch('gateway.upstream',side_effect=OSError('down')):
+            self.assertEqual(self.send(body,'/aggregator')[0],503)
     def test_rate_limit(self):
-        with patch('gateway.time.monotonic',return_value=self.server.window):
+        with patch('gateway.time.monotonic',return_value=self.server.rpc_limit.window):
             for _ in range(10): self.assertEqual(self.rpc('eth_chainId')[0],200)
             self.assertEqual(self.rpc('eth_chainId')[0],429)
     def test_partial_broadcast_is_not_retried(self):
@@ -891,7 +964,7 @@ class BridgeRelease(unittest.TestCase):
     def build(self,gen,art,tools=None,image=None):
         m=self.module()
         with patch.object(m,'ARTIFACTS',art):
-            return m.build(gen,tools or self.tools(),image or self.IMAGE,['unicity-reth','node','--rpc.eth-proof-window','64'],16384)
+            return m.build(gen,tools or self.tools(),image or self.IMAGE,['unicity-reth','node','--rpc.eth-proof-window','64'],m.gateway_limits())
     def test_the_manifest_joins_the_pins_the_deployment_the_profile_and_the_limits(self):
         with tempfile.TemporaryDirectory() as tmp:
             r=self.build(*self.generation(tmp))
@@ -901,6 +974,9 @@ class BridgeRelease(unittest.TestCase):
         limits={k:v['value'] for k,v in r['limits'].items()}
         self.assertEqual((limits['D1envelopeBytes'],limits['D3ordinaryCapacity'],limits['blockGasLimit'],limits['proofWindowBlocks'],limits['gatewayMaxBodyBytes'],limits['aggregatorBatchStateIds']),
                          (2097152,60000000,329547540,64,16384,256))
+        # the gateway's bounds are read from gateway.py, and a redemption up to D1 fits the raw-transaction one as hex with its framing
+        self.assertEqual((limits['gatewayMaxRawTxBodyBytes'],limits['gatewayAggregatorMaxBodyBytes']),(gateway.MAX_RAW_TX_BODY,gateway.AGG_MAX_BODY))
+        self.assertGreater(limits['gatewayMaxRawTxBodyBytes'],2*limits['D1envelopeBytes']+4096)
         self.assertIn('at most 254 transfers',r['limits']['aggregatorBatchStateIds']['source'])
         self.assertEqual((r['package']['generation'],r['bridge']['image']),('tn-x',self.IMAGE))
     def test_another_image_than_the_recorded_one_is_refused(self):

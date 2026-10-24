@@ -28,14 +28,20 @@ MAX_LOCK_WEI = (1 << 64) - 1   # a token amount is 8 bytes in the bridge profile
 LOCKPROOF_RATE = {'perClientPerSecond': 2, 'globalPerSecond': 20, 'concurrent': 4}   # bft-core scripts/dnb-tool/serve.go defaultProofLimits
 
 
+def gateway_limits():
+    """The public gateway's body bounds, read from gateway.py (the one definition): every method, eth_sendRawTransaction, and the /aggregator route."""
+    text = (HERE.parent / 'gateway.py').read_text()
+    return {k: int(re.search(rf'^{k} = (\d+)', text, re.M).group(1)) for k in ('MAX_BODY', 'MAX_RAW_TX_BODY', 'AGG_MAX_BODY')}
+
+
 def flag(command, name):
     """The value of NAME in a container command (a list), or None."""
     return command[command.index(name) + 1] if name in command else None
 
 
-def build(gen, tools, image_id, ureth_command, gateway_max_body):
+def build(gen, tools, image_id, ureth_command, gateway):
     """The manifest of generation GEN. TOOLS(*args) runs a command in the bridge tools image and returns its output; IMAGE_ID is that image's ID;
-    URETH_COMMAND is validator 1's execution client command (compose.yaml); GATEWAY_MAX_BODY is gateway.py's MAX_BODY."""
+    URETH_COMMAND is validator 1's execution client command (compose.yaml); GATEWAY is gateway_limits()."""
     package = json.loads((gen / 'manifest.json').read_text())
     images = json.loads((ARTIFACTS / 'bridge-images.json').read_text())
     if images['images']['bridge'] != image_id:
@@ -78,7 +84,9 @@ def build(gen, tools, image_id, ureth_command, gateway_max_body):
             'D3ordinaryCapacity': {'value': profile['ordinaryCapacity'], 'source': 'network/b1-profile.json ordinaryCapacity (ubft engine-api b1-profile --ordinary-capacity)'},
             'blockGasLimit': {'value': profile['maxGas'], 'source': 'network/b1-profile.json maxGas: the ordinary capacity plus the system reservation (ureth --builder.gaslimit)'},
             'proofWindowBlocks': {'value': int(flag(ureth_command, '--rpc.eth-proof-window')), 'source': 'compose.yaml ureth --rpc.eth-proof-window: a lock\'s proof can be fetched for this many blocks'},
-            'gatewayMaxBodyBytes': {'value': gateway_max_body, 'source': 'gateway.py MAX_BODY: a redemption larger than this needs another route (tester-config.json redeemEthUrl)'},
+            'gatewayMaxBodyBytes': {'value': gateway['MAX_BODY'], 'source': 'gateway.py MAX_BODY: every public method but LARGE_METHODS'},
+            'gatewayMaxRawTxBodyBytes': {'value': gateway['MAX_RAW_TX_BODY'], 'source': 'gateway.py MAX_RAW_TX_BODY: LARGE_METHODS (eth_sendRawTransaction, eth_call, eth_estimateGas), so a redemption up to the D1 envelope fits as hex'},
+            'gatewayAggregatorMaxBodyBytes': {'value': gateway['AGG_MAX_BODY'], 'source': 'gateway.py AGG_MAX_BODY: the public /aggregator route (its own rate limit)'},
             'lockProofRate': {'value': LOCKPROOF_RATE, 'source': 'bft-core scripts/dnb-tool/serve.go defaultProofLimits, at bridge.sources.bft'},
             'maxLockWei': {'value': str(MAX_LOCK_WEI), 'source': 'the bridge profile\'s 8-byte token amount'},
             'aggregatorBatchStateIds': {'value': batch, 'source': f'state-transition-sdk {sdk["version"]} BATCH_MAX_STATE_IDS: one consolidation holds the mint, the transfers '
