@@ -3,7 +3,7 @@
 name: x4-pos-driver-selftest
 on:
   pull_request:
-    paths: ['scripts/x4pos/**', 'scripts/p85-genesis-plan.py', 'scripts/test_p85_genesis_plan.py', '.github/workflows/x4-pos-driver-selftest.yml']
+    paths: ['scripts/x4pos/**', 'scripts/p85-recovery-steps.sh', 'scripts/lib/s4-lib.sh', 'scripts/p85-genesis-plan.py', 'scripts/test_p85_genesis_plan.py', '.github/workflows/x4-pos-driver-selftest.yml']
   workflow_dispatch:
 permissions:
   contents: read
@@ -19,5 +19,6 @@ jobs:
       - run: python3 scripts/x4pos/test_exit_check.py -v
       - run: python3 scripts/x4pos/test_fault_lib.py -v
       - run: python3 scripts/x4pos/test_lane_check.py -v
+      - run: python3 scripts/x4pos/test_handoff_lib.py -v
       - run: python3 scripts/x4pos/driver.py preflight scripts/x4pos/campaign.json
       - run: python3 scripts/test_p85_genesis_plan.py -v

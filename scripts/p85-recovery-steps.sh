@@ -273,7 +273,7 @@ p85_build_assignment() { # tag mode
   [ "$mode" = published ] && extra+=(--evm-pops "$P85_DIR/run/evm-pops-collected.json")
   q3_x build/ubft pos-relayer proposal "${extra[@]}" --eth-rpc "$(p85_eth)" --pos-deployment "$P85_DEPLOY" --context "$Q3_DIR/$tag-context.json" \
     --result-id "$(cat "$H3_DIR/result-id.txt")" --node-ids "$ids" --trust-base test-nodes/trust-base.json --out-dir "$d" || return 1
-  for id in 1 2 3 4 5; do
+  for id in ${P85_PROOF_ENTITIES:-1 2 3 4 5}; do
     build/ubft root handoff evm-pop --context "$Q3_DIR/$tag-context.json" --validators "$d/validators.json" --identities "$d/identities.json" \
       --node-id "$(evm_validator_id "$id")" --authority-socket "test-nodes/auth$id/operator.sock" --authority-credential "test-nodes/auth$id/operator.cred" \
       >"$Q3_DIR/$tag-pop-$id.json" || return 1
@@ -295,18 +295,22 @@ q3_build_assignment() { # tag ids...
   p85_build_assignment "$tag" published
 }
 
+# The possession proofs of a reserved result and their publication. The defaults are the lane's primary handoff (the five entities of J, root epoch 2); the second
+# handoff of the X4 campaign (scripts/x4pos/handoff-lib.sh) names its own: P85_PROOF_TAG (the files), P85_PROOF_ENTITIES (the members of the result), P85_PROOF_TB_EPOCH
+# (the trust base of the epoch the handoff installs) and P85_PROOF_ROOTS (the roots that plan it).
 p85_proofs() {
-  local r tag=sign i collected=() attempt
+  local r tag=${P85_PROOF_TAG:-sign} i collected=() attempt pop=evmpop
+  [ "$tag" = sign ] || pop=$tag-evmpop
   r=$(cat "$H3_DIR/result-id.txt")
-  H3_ROOTS="1 2 3 4" p85_build_assignment "$tag" reserved || return 1
+  H3_ROOTS="${P85_PROOF_ROOTS:-1 2 3 4}" p85_build_assignment "$tag" reserved || return 1
   build/ubft pos-relayer candidate --context "$Q3_DIR/$tag-context.json" --assignment "$Q3_DIR/$tag-assignment.json" \
-    --next-trust-base test-nodes/trust-base-epoch2.json --out "$Q3_DIR/$tag-candidate.hex" || return 1
+    --next-trust-base "test-nodes/trust-base-epoch${P85_PROOF_TB_EPOCH:-2}.json" --out "$Q3_DIR/$tag-candidate.hex" || return 1
   attempt=$(cat "$Q3_DIR/$tag-proposal/attempt.txt")
-  for i in 1 2 3 4 5; do
+  for i in ${P85_PROOF_ENTITIES:-1 2 3 4 5}; do
     build/ubft pos-relayer sign-pop --candidate "$Q3_DIR/$tag-candidate.hex" --pos-deployment "$P85_DEPLOY" --attempt "$attempt" \
       --authority-socket "test-nodes/auth$i/operator.sock" --authority-credential "test-nodes/auth$i/operator.cred" \
-      --out "$Q3_DIR/evmpop-$i.json" || return 1
-    collected+=(--pop "$Q3_DIR/evmpop-$i.json")
+      --out "$Q3_DIR/$pop-$i.json" || return 1
+    collected+=(--pop "$Q3_DIR/$pop-$i.json")
   done
   build/ubft pos-relayer assemble --candidate "$Q3_DIR/$tag-candidate.hex" --pos-deployment "$P85_DEPLOY" --attempt "$attempt" "${collected[@]}" \
     --out "$P85_DIR/run/evm-pops-collected.json" || return 1
@@ -375,19 +379,25 @@ p85_install_activation() {
 # quorum must remain to order the recovery). Entity 3 loses only its shard node: its reth and signing authority stay up, so the recovery
 # step brings it back into K's scope (K = {1,2,3} of 4 = its quorum 3). Entities 4 and 5 lose everything (an authority's key lives in memory).
 p85_j_stalls() {
-  local i before after pdr
+  local i before after pdr kept="3"
+  # X4_H2_LANE=1 (X4 #856, scripts/x4pos/handoff-lib.sh): entity 4 loses only its shard node, as entity 3 does: its signing authority (a key that lives in memory) and its
+  # execution client stay, so that the campaign's second handoff, a K to K' with the same four members, can name it
+  [ "${X4_H2_LANE:-0}" != 1 ] || kept="3 4"
   for i in 4 5; do
     stop_one_evm_validator "$i" 2>/dev/null || true
+    case " $kept " in *" $i "*) continue ;; esac
     stop_pidfile "test-nodes/reth$i/pid" 'reth.* node' 2>/dev/null || true
     stop_pidfile "test-nodes/auth$i/pid" 'ubft signing-authority run' 2>/dev/null || true
   done
   stop_one_evm_validator 3 2>/dev/null || true
   H3_ONLINE="1 2"
   M2_ADVANCE_NO_REPLICA_WAIT=1 h3_advance_authorities 2 1 1 2 || { echo "authority advance of the retained members into J's scope failed" >&2; return 1; }
-  # entity 3's authority is advanced into J's scope too, but its node stays down
+  # the authorities of the kept entities are advanced into J's scope too, but their nodes stay down
   pdr=$(h3_pdr_file 1) || return 1
-  build/ubft signing-authority advance-epoch --operator-socket "test-nodes/auth3/operator.sock" --operator-credential "test-nodes/auth3/operator.cred" \
-    --trust-base test-nodes/trust-base-epoch2.json --shard-conf "$pdr" || { echo "authority 3 advance into J's scope failed" >&2; return 1; }
+  for i in $kept; do
+    build/ubft signing-authority advance-epoch --operator-socket "test-nodes/auth$i/operator.sock" --operator-credential "test-nodes/auth$i/operator.cred" \
+      --trust-base test-nodes/trust-base-epoch2.json --shard-conf "$pdr" || { echo "authority $i advance into J's scope failed" >&2; return 1; }
+  done
   before=$(p85_eth_block); sleep 45; after=$(p85_eth_block)
   [ "$after" -le "$((before + 1))" ] || { echo "J certified blocks ($before -> $after) with 2 of its 5 validators (majority quorum 3)" >&2; return 1; }
   [ "$(p85_last_acked | tr 'A-F' 'a-f')" = "$(p85_genesis_assignment | tr 'A-F' 'a-f')" ] || { echo "custody moved off the genesis assignment: J was acknowledged" >&2; return 1; }
@@ -416,11 +426,12 @@ p85_recovery_attempt_loop() {
   q3_install_n 3 || return 1
   H3_ROOTS="1 2 3 4"
   Q3_TOTAL_WEIGHT=5 Q3_ROOT_QUORUM=4 q3_activation_n 2 3 || return 1   # epoch 3's Commit is J's (W=5, quorum 4)
-  M2_ADVANCE_NO_REPLICA_WAIT=1 h3_advance_authorities 3 2 1 2 3 || { echo "authority advance into the recovery's scope failed" >&2; return 1; }
-  local i
+  local i back="1 2 3"
+  [ "${X4_H2_LANE:-0}" != 1 ] || back="1 2 3 4"   # entity 4's node returns into K's scope with the others (p85_j_stalls)
+  M2_ADVANCE_NO_REPLICA_WAIT=1 h3_advance_authorities 3 2 $back || { echo "authority advance into the recovery's scope failed" >&2; return 1; }
   for i in $(seq 1 180); do h3_registry_is 2 3 && break; sleep 1; done
   h3_registry_is 2 3 || { echo "registry did not reach shard epoch 2 / root epoch 3 (shard epoch $(h3_slot "$h3_slot_shard"), root epoch $(h3_slot "$h3_slot_root"))" >&2; return 1; }
-  H3_ONLINE="1 2 3"
+  H3_ONLINE="$back"
   p85_paid 3 || { echo "post-recovery paid transaction was not certified at root epoch 3" >&2; return 1; }
 }
 
@@ -650,15 +661,17 @@ PY
 
 # This step restarts after the resolution. It does NOT cover a restart at the pending boundary (the few blocks between J's closure and the
 # RecoveryAck cannot be hit by a timed restart); that is the contract split test's job.
+p85_root_epoch() { curl -fsS "$(h3_rpc_url "$(h3_first_root)")/api/v1/roundInfo" | jq -er .epochNumber; }   # the root epoch the first root certifies in
 p85_restarts() {
-  local log="$H3_DIR/registry-log.txt" before after
+  local log="$H3_DIR/registry-log.txt" before after epoch
   H3_ROOTS="1 2 3 4 5"
   p85_log_dump >"$log" || return 1
   p85_scenario_ids "$log" || return 1
   before=$(p85_snapshot "$log") || return 1
-  H3_ROOTS="1 2 3 4" h3_restart_roots 3 || return 1
+  epoch=$(p85_root_epoch) || return 1   # 3 after the recovery, 4 after the X4 campaign's second handoff
+  H3_ROOTS="1 2 3 4" h3_restart_roots "$epoch" || return 1
   p85_restart_validator 1 || return 1
-  p85_paid 3 || { echo "post-restart paid transaction was not certified" >&2; return 1; }
+  p85_paid "$epoch" || { echo "post-restart paid transaction was not certified" >&2; return 1; }
   p85_progress after-restarts 8
   # nothing the restart could reset: no assignment, anchor, cursor or log entry changed (records ordered since may only have been appended)
   p85_log_dump >"$log" || return 1
@@ -755,6 +768,15 @@ x4e_hold_probe() {
   jq -e '.outcome == "refused" and .reason == "EvidenceHoldPending"' "$d/hold-probe.json" >/dev/null || { echo "the admitted, unsettled case did not hold the exit: $(cat "$d/hold-probe.json")" >&2; return 1; }
   echo "x4e: exit of identity 5 refused for EvidenceHoldPending while the case is admitted and unsettled"
 }
+# the early claim, refused for a LAWFUL reason (the time gate): probed right after offence 1 settled, when the exit is hours from maturity. The claim step's own probe at its start is not a reliable witness: it
+# runs after everything between, and a run with extra steps before it (campaign run 5, bft-core#856) found the exit already matured.
+x4e_early_probe() {
+  local d=$H3_DIR/x4pos/steps/exit-claim
+  mkdir -p "$d"
+  python3 scripts/x4pos/exit_check.py refusal --rpc "$(p85_eth)" --cast "$P85_CAST" --custody "$(p85_custody)" --id 5 >"$d/refusal-early.json" || { cat "$d/refusal-early.json" >&2; return 1; }
+  jq -e '.outcome == "refused" and .lawfulEarly == true' "$d/refusal-early.json" >/dev/null || { echo "x4e: the early mature was not refused for a lawful reason: $(cat "$d/refusal-early.json")" >&2; return 1; }
+  echo "x4e: an early claim of identity 5 is refused for $(jq -r .reason "$d/refusal-early.json")"
+}
 x4e_claim() { x4e_run exit-claim exit-claim.sh "{\"id\":5,\"matureWaitSeconds\":5400}" && x4e_run exit-claim exit-claim.check.sh '{"id":5}'; }
 
 P85_STEPS="p85_baseline p85_joiner_nodes p85_joiner_onboard p85_election_reserved p85_proofs p85_handoff p85_install_activation p85_j_stalls p85_recovery p85_resolved p85_restarts p85_epoch_switches"
@@ -832,13 +854,18 @@ p85_run_lane() {
     source scripts/x4pos/offence-lib.sh
     P85_STEPS=${P85_STEPS/ s4_check/ s4_check x4o_second}
     P85_STEPS=${P85_STEPS/ s4_claim/ x4o_claim}
+    if [ "${X4_H2_LANE:-0}" = 1 ]; then   # X4 #856 (scripts/x4pos/handoff-lib.sh): the election result that opens after the recovery is driven to its Ack (a second handoff, K -> K' with the same members) BEFORE offence 2, which then marks the next result lost and the roots reject it
+      source scripts/x4pos/handoff-lib.sh
+      P85_STEPS=${P85_STEPS/ x4o_second/ x4h_second$([ "${X4_ACCT_LANE:-0}" != 1 ] || echo ' x4a_snapshot') x4o_second}
+    fi
   fi
+  [ "${X4_H2_LANE:-0}" != 1 ] || [ "${X4_OFFENCE_LANE:-0}" = 1 ] || { echo "X4_H2_LANE needs X4_OFFENCE_LANE=1 (and S4_LANE=1)" >&2; exit 1; }
   if [ "${X4_EXIT_LANE:-0}" = 1 ]; then   # the request is made before the roots restart (they must keep the pending request), the claim is the lane's last step
     if [ "${S4_LANE:-0}" = 1 ]; then
       # the held offender: it asks before its case is submitted (the chain is healthy then; after the observer roots' restarts it nearly stalls, #728), the exit is probed while
       # the case is admitted and unsettled, and claimed at the end
       export S4_ADMITTED_HOOK=x4e_hold_probe
-      P85_STEPS=${P85_STEPS/ s4_submit_settle/ x4e_request s4_submit_settle}; P85_STEPS="$P85_STEPS x4e_claim"
+      P85_STEPS=${P85_STEPS/ s4_submit_settle/ x4e_request s4_submit_settle}; P85_STEPS=${P85_STEPS/ s4_check/ s4_check x4e_early_probe}; P85_STEPS="$P85_STEPS x4e_claim"
     else
       P85_STEPS=${P85_STEPS/ p85_restarts/ x4e_request p85_restarts}; P85_STEPS="$P85_STEPS x4e_claim"
     fi
