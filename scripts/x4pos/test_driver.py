@@ -90,16 +90,22 @@ class Preflight(unittest.TestCase):
                 self.assertLessEqual(s["at"] + s["budgetSeconds"], 14400 - m["tailSeconds"], s["id"])
         # v2 (the 2.5 h lane + driver segments, decided with the orchestrator): what the lane can show is required; what it cannot is listed with a pointer, never silently dropped
         r = m["required"]
-        self.assertTrue(r["replacements"] >= 1 and r["offences"] >= 2 and r["exits"] >= 1 and r["rewardIntervals"] >= 2 and r["recoveries"] >= 1 and r["faults"] >= 4 and r["governance"] >= 1 and "governanceActivated" not in r)
+        self.assertTrue(r["replacements"] >= 1 and r["offences"] >= 2 and r["exits"] >= 1 and r["rewardIntervals"] >= 4 and r["recoveries"] >= 1 and r["faults"] >= 4 and r["governance"] >= 1 and "governanceActivated" not in r)
+        # v3 (bft-core#856): the second handoff, the rejection of the lost result and the governance activation are required, no longer listed as not covered
+        self.assertTrue(r["secondHandoffs"] >= 1 and r["rejections"] >= 1 and r["activations"] >= 1)
+        self.assertEqual((m["accountingSpanSeconds"], m["endSeconds"]), (14400, 15300))
+        final = [s for s in m["steps"] if s.get("phase") == "final"]
+        self.assertTrue(all(s["at"] + s["budgetSeconds"] <= m["endSeconds"] for s in final))
         self.assertNotIn("aborts", r)
         listed = " ".join(n["what"] for n in m["notCovered"]).lower()
-        for must in ("abort", "second replacement", "not an offender", "4 closed intervals"):
+        for must in ("abort", "second replacement", "not an offender", "committee"):
             self.assertIn(must, listed)
+        for covered in ("4 closed intervals", "activation"):
+            self.assertNotIn(covered, listed)
         self.assertTrue(all(n["coveredBy"].strip() for n in m["notCovered"]))
         lanes = [s["id"] for s in m["steps"] if s.get("lane") is True]
-        self.assertEqual(len(lanes), 18)
+        self.assertEqual(len(lanes), 19)
         self.assertEqual(len(lanes), len(m["steps"]))   # the whole campaign runs in the lane; the driver only verifies
-        self.assertIn("activation", listed)
         self.assertEqual([s["id"] for s in sorted(m["steps"], key=lambda s: (s["at"], s["id"]))][:len(lanes)], lanes)
 
     def test_the_real_campaign_has_every_command_and_check_it_names(self):
@@ -302,6 +308,31 @@ class Execution(unittest.TestCase):
                 rep = self.accounted(d, lines)
                 self.assertEqual(rep["status"], want, rep)
                 self.assertEqual(rep["accounting"]["status"], want, rep["accounting"])
+
+    def test_snapshots_that_do_not_span_the_declared_interval_are_incomplete(self):
+        import test_accounting as ta
+        for span, want in ((None, "PASS"), (1200, "PASS"), (1201, "INCOMPLETE")):
+            with self.subTest(span=span), tempfile.TemporaryDirectory() as d:
+                m = small(); m["accounting"] = True
+                if span is not None:
+                    m["accountingSpanSeconds"] = span
+                drv = self.drive(m, d, World(), FakeClock())
+                (Path(d) / "run").mkdir(parents=True, exist_ok=True)
+                (Path(d) / "run" / "snapshots.jsonl").write_text("".join(json.dumps(x) + "\n" for x in ta.GOOD))
+                rep = drv.run()
+                self.assertEqual(rep["status"], want, rep)
+                if want != "PASS":
+                    self.assertIn("span", rep["accounting"]["reason"])
+
+    def test_a_final_step_may_end_at_endseconds_and_not_after(self):
+        m = small(); m["endSeconds"] = m["intervalSeconds"] + 50
+        fin = dict(m["steps"][-1], id="z", phase="final", at=m["intervalSeconds"], budgetSeconds=50, dependsOn=[])
+        m["steps"].append(fin)
+        driver.preflight(m)
+        fin["budgetSeconds"] = 51
+        with self.assertRaises(driver.ManifestError) as e:
+            driver.preflight(m)
+        self.assertIn("after", str(e.exception))
 
     def test_without_the_accounting_flag_the_report_carries_none(self):
         with tempfile.TemporaryDirectory() as d:

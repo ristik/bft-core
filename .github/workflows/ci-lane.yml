@@ -256,7 +256,7 @@ jobs:
         kind: ${{ fromJSON(needs.plan.outputs.lanes) }}
     name: run-lane (${{ matrix.kind }})
     runs-on: ubuntu-24.04
-    timeout-minutes: ${{ matrix.kind == 'x4shadow' && 170 || matrix.kind == 'x4rewards' && 90 || matrix.kind == 'x4exit' && 300 || matrix.kind == 'combined' && 90 || 60 }}
+    timeout-minutes: ${{ matrix.kind == 'x4shadow' && 170 || matrix.kind == 'x4rewards' && 90 || matrix.kind == 'x4exit' && 340 || matrix.kind == 'combined' && 90 || 60 }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -292,7 +292,7 @@ jobs:
         env:
           CI_INJECT_FAILURE: ${{ needs.plan.outputs.inject }}
           CI_LANE_KIND: ${{ matrix.kind }}
-          LANE_DEADLINE_MIN: ${{ matrix.kind == 'x4shadow' && '140' || matrix.kind == 'x4rewards' && '70' || matrix.kind == 'x4exit' && '270' || matrix.kind == 'combined' && '70' || '45' }}
+          LANE_DEADLINE_MIN: ${{ matrix.kind == 'x4shadow' && '140' || matrix.kind == 'x4rewards' && '70' || matrix.kind == 'x4exit' && '310' || matrix.kind == 'combined' && '70' || '45' }}
         run: scripts/ci/run-lane.sh "$RUNNER_TEMP/artifacts" "$RUNNER_TEMP/lane" "$RUNNER_TEMP/lane-out"
       - name: Resources of this job
         if: always()

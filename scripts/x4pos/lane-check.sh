@@ -18,21 +18,26 @@ case "$phase" in
     jq -e '.nonce >= 1 and .policyIdBefore >= 1 and (.rateProposed | tonumber) < (.rateBefore | tonumber)' "$d/steps/gov/queued.json" >/dev/null 2>&1 || fail "steps/gov/queued.json is not a record of a queued, lower reward rate" ;;
   governance)
     ran x4g_execute x4g_check
-    # activation is RECORDED, not required (it was not reached on this chain: contracts question open): only a boolean outcome for the queued proposal counts
-    jq -e '(.activated | type == "boolean") and .policyIdAfter >= .policyIdBefore and .waitedSeconds > 0' "$d/steps/gov/outcome.json" >/dev/null 2>&1 || fail "steps/gov/outcome.json is not a recorded outcome (boolean activated)" ;;
+    # the queued rate became the policy in force (bft-core#856: the open results are resolved, so ElectionPolicy.elect reaches activateDue); the outcome file also shows that it was REQUIRED
+    jq -e '.activated == true and .activationRequired == true and .policyIdAfter > .policyIdBefore and (.rateAfter | tonumber) == (.rateProposed | tonumber) and .waitedSeconds > 0' "$d/steps/gov/outcome.json" >/dev/null 2>&1 || fail "steps/gov/outcome.json does not show the queued rate activated (activated true, required, rateAfter = rateProposed)" ;;
   rewards)
     ran x4r_intervals x4r_dry_refill x4r_claim
     line=$(sed -n 's/^REWARDS-REPLAY ok //p' "$d/steps/xr/replay-after.txt" 2>/dev/null | tail -n 1)
-    jq -e '.intervals >= 2 and .zeroBudget >= 1 and .fundings >= 1 and .refilledAfterExhaustion == true' <<<"${line:-null}" >/dev/null 2>&1 || fail "the replay does not show a dry, refilled pool (intervals >= 2, zeroBudget >= 1, fundings >= 1)"
+    jq -e '.intervals >= 4 and .zeroBudget >= 1 and .fundings >= 1 and .refilledAfterExhaustion == true' <<<"${line:-null}" >/dev/null 2>&1 || fail "the replay does not show a dry, refilled pool with 4 closed intervals (intervals >= 4, zeroBudget >= 1, fundings >= 1)"
     [ "$(tail -n 1 "$d/snapshots.jsonl" 2>/dev/null | jq -r '.payments | length' 2>/dev/null)" -ge 1 ] 2>/dev/null || fail "the last snapshot has no pool payment (the payee's claim)" ;;
   replacement) ran p85_joiner_nodes p85_joiner_onboard p85_election_reserved p85_proofs p85_handoff p85_install_activation ;;
   recovery) ran p85_j_stalls p85_recovery p85_resolved ;;
+  second-handoff)
+    ran x4h_second
+    jq -e '.resultState == 3 and .rootEpochBefore == 3 and .rootEpochAfter == 4 and .lastAckedAfter != .lastAckedBefore and .kClosed == true and .k2Open == true and .cursor == .count and .count == .target and (.entities | length) == 4' "$d/steps/handoff2/second-handoff.json" >/dev/null 2>&1 \
+      || fail "steps/handoff2/second-handoff.json does not show the open result acknowledged: K closed, K' open, root epoch 3 -> 4, four members, records reconciled" ;;
   epoch-switches) ran p85_restarts p85_epoch_switches ;;
   offence-1) ran s4_equivocate s4_collect_after_rotation s4_submit_settle s4_check ;;
   offence-2)
     ran x4o_second x4o_claim
-    jq -e '.epoch == 3 and .roundAfterPaidTx > .roundAfterSettle and .lastAckedUnchanged == true and .paidTxOk == true and .openResultUnchanged == true and .lostAfterSettlement == 1 and .laterResultStateAfter == 1' "$s4b/post-settle.json" >/dev/null 2>&1 || fail "$s4b/post-settle.json does not show the K assignment untouched and the later result lost"
-    jq -e --arg z "$zero" '.epoch >= 3 and (.openResult | type == "string") and .openResult != $z and .state == 1 and .predecessorIsK == true and .lostBefore == 0' "$s4b/pre-submit.json" >/dev/null 2>&1 || fail "$s4b/pre-submit.json: offence 2 was not submitted in epoch 3 against a Reserved later result from K"
+    # delivered in epoch 4 (after the second handoff) against a Reserved result from the last acknowledged assignment; the result is lost on the admission and REJECTED by the roots (Closed, 5)
+    jq -e '.epoch == 4 and .roundAfterPaidTx > .roundAfterSettle and .lastAckedUnchanged == true and .paidTxOk == true and .openResultIsNotTheRejected == true and .lostAfterSettlement == 1 and .laterResultStateAfter == 5 and .cursor == .count and .rejectedAfterSeconds >= 0' "$s4b/post-settle.json" >/dev/null 2>&1 || fail "$s4b/post-settle.json does not show the running assignment untouched and the later result lost and rejected by the roots"
+    jq -e --arg z "$zero" '.epoch >= 4 and (.openResult | type == "string") and .openResult != $z and .state == 1 and .predecessorIsLastAcked == true and .lostBefore == 0' "$s4b/pre-submit.json" >/dev/null 2>&1 || fail "$s4b/pre-submit.json: offence 2 was not submitted in epoch 4 against a Reserved later result from the last acknowledged assignment"
     [ "$(cat "$s4b/lost-after-admission.txt" 2>/dev/null)" = 1 ] || fail "$s4b/lost-after-admission.txt: the later result was not seen lost between admission and settlement" ;;
   exit-request)
     ran x4e_request
@@ -59,10 +64,12 @@ case "$phase" in
   reconcile)
     ran x4f_reconcile
     jq -e '.converged == true' "$d/steps/faults/reconcile-cursors.json" >/dev/null 2>&1 || fail "steps/faults/reconcile-cursors.json: the records did not converge"
-    jq -e '.conserved == true and .intervals >= 2 and .zeroBudget >= 1 and .fundings >= 1 and .refilledAfterExhaustion == true' "$d/steps/reconcile/reconcile.json" >/dev/null 2>&1 || fail "steps/reconcile/reconcile.json is not a conserved, replayed, refilled pool" ;;
+    jq -e '.conserved == true and .intervals >= 4 and .zeroBudget >= 1 and .fundings >= 1 and .refilledAfterExhaustion == true' "$d/steps/reconcile/reconcile.json" >/dev/null 2>&1 || fail "steps/reconcile/reconcile.json is not a conserved, replayed, refilled pool" ;;
   accounting)
     ran x4a_final
-    jq -e '.status == "PASS" and .snapshots >= 4' "$d/accounting.txt" >/dev/null 2>&1 || fail "accounting.txt is not a PASS over at least 4 snapshots" ;;
+    need=$(jq -r '.accountingSpanSeconds // 0' "${X4_CAMPAIGN:-$(dirname "$0")/campaign.json}" 2>/dev/null || echo 0)
+    jq -e '.status == "PASS" and .snapshots >= 4' "$d/accounting.txt" >/dev/null 2>&1 || fail "accounting.txt is not a PASS over at least 4 snapshots"
+    jq -e --argjson need "${need:-0}" '.spanSeconds >= $need' "$d/accounting.txt" >/dev/null 2>&1 || fail "accounting.txt: the snapshots span less than the manifest's accountingSpanSeconds ($need)" ;;
   *) fail "unknown phase" ;;
 esac
 echo "lane-check $phase: ok"
