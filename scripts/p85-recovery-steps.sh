@@ -755,6 +755,23 @@ x4e_claim() { x4e_run exit-claim exit-claim.sh "{\"id\":5,\"matureWaitSeconds\":
 
 P85_STEPS="p85_baseline p85_joiner_nodes p85_joiner_onboard p85_election_reserved p85_proofs p85_handoff p85_install_activation p85_j_stalls p85_recovery p85_resolved p85_restarts p85_epoch_switches"
 
+# diagnosis (X4_DIAG=1, bft-core#856 run 4): validator 1 was restarted by p85_restarts; watch 25 minutes that its execution head keeps up with validator 2's, and keep the evidence if it does not
+x4_diag_v1() {
+  local i h1 h2 lag=0 f
+  for i in $(seq 1 50); do
+    h1=$("$P85_CAST" block-number --rpc-url "http://127.0.0.1:$rethEthBase" 2>/dev/null || echo 0); h2=$("$P85_CAST" block-number --rpc-url "http://127.0.0.1:$((rethEthBase + 1))" 2>/dev/null || echo 0)
+    echo "x4diag: t=$((i * 30)) s validator 1 head $h1, validator 2 head $h2"
+    if [ "$((h2 - h1))" -gt 20 ] 2>/dev/null; then lag=$((lag + 1)); else lag=0; fi
+    if [ "$lag" -ge 6 ]; then
+      echo "x4diag: validator 1 lags by more than 20 blocks for 3 minutes" >&2
+      for f in test-nodes/evm1/debug.log; do grep -a "level=WARN\|level=ERROR\|archive replica\|frontier\|journal" "$f" | grep -av "archive recovery source rejected" | head -n 60 | cut -c1-400 >&2; done
+      return 1
+    fi
+    sleep 30
+  done
+  echo "x4diag: validator 1 kept up for 25 minutes"
+}
+
 p85_run_lane() {
   local s
   mkdir -p "$Q3_DIR" "$P85_DIR/run"; : >"$Q3_DIR/commands.log"
@@ -853,6 +870,7 @@ p85_run_lane() {
     P85_STEPS="$P85_STEPS x4a_final"
     [ "${X4_FAULTS_LANE:-0}" != 1 ] || P85_STEPS="$P85_STEPS x4_report"   # the driver's verdict over the lane's whole record (after x4a_final wrote accounting.txt)
   fi
+  if [ "${X4_DIAG:-0}" = 1 ]; then P85_STEPS=${P85_STEPS/ p85_epoch_switches/ p85_epoch_switches x4_diag_v1}; fi   # run 5 only: fail fast and keep evidence if the restarted validator 1 stalls
   [ "${P85_MODE:-}" != overbound ] || { P85_JOINER_UNITS=3; P85_STEPS="p85_baseline p85_joiner_nodes p85_joiner_onboard p85_election_refused"; }
   for s in $P85_STEPS; do
     p85_step "$s" "$s"

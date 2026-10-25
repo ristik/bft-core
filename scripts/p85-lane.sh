@@ -116,6 +116,8 @@ cp -R test-nodes/p85 "$EVIDENCE_DIR/p85" 2>/dev/null || true
 # the execution side's logs only (never its data or keys: the publisher excludes evm*/ reth*/ whole): the last 4000 lines of each validator's node and client log, for a transaction that was never mined
 mkdir -p "$EVIDENCE_DIR/exec-logs"
 for f in test-nodes/evm*/debug.log test-nodes/reth*/reth.log; do [ -f "$f" ] && tail -n 4000 "$f" >"$EVIDENCE_DIR/exec-logs/$(basename "$(dirname "$f")")-$(basename "$f")" 2>/dev/null; done
+# diagnosis of the validator-1 archive stall (bft-core#856 run 4): the non-spam WARN/ERROR/archive/frontier/journal/restart lines of every node from the START, not only the tail
+for f in test-nodes/evm*/debug.log; do [ -f "$f" ] && grep -a "level=WARN\|level=ERROR\|archive replica\|frontier\|journal\|recover\|starting\|started" "$f" | grep -av "archive recovery source rejected" | head -n 8000 >"$EVIDENCE_DIR/exec-logs/$(basename "$(dirname "$f")")-filtered.log" 2>/dev/null; done
 if [ "$ANYAGE_LANE" = 1 ]; then mkdir -p "$EVIDENCE_DIR/aggregator"; for d in test-nodes/agg test-nodes/agg[0-9]; do [ -d "$d" ] && { mkdir -p "$EVIDENCE_DIR/aggregator/$(basename "$d")"; cp "$d"/stdout.log "$d"/logs/*.log "$EVIDENCE_DIR/aggregator/$(basename "$d")/" 2>/dev/null || true; }; done; cp test-nodes/lane-config.json test-nodes/bridge-addresses.json "$EVIDENCE_DIR/" 2>/dev/null || true; fi
 # what the lane's helpers read, kept so a failure can be replayed offline (go run ./scripts/h3-pdr, the weight checks, the trust-base tools): the roots'
 # databases and public node info, the trust bases, the lane's flow directories; not the execution clients' data, the authorities' credentials or keys

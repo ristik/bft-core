@@ -126,6 +126,7 @@ if [ "$(jq -r '.faults // false' scripts/ci/run-inputs.json 2>/dev/null)" = true
   [ "${X4_REWARDS_POS:-0}" = 1 ] && [ "${X4_GOV_LANE:-0}" = 1 ] || { log "faults needs accounting, rewards and governance: true on the x4exit kind"; exit 2; }
   export X4_FAULTS_LANE=1; log "X4_FAULTS_LANE=1 (run-inputs faults)"
 fi
+if [ "$(jq -r '.diag // false' scripts/ci/run-inputs.json 2>/dev/null)" = true ]; then export X4_DIAG=1; log "X4_DIAG=1 (run-inputs diag)"; fi
 export LANE_PINNED=1 LANE_COMMIT_UNDER_TEST=$head UTB_MIN_FREE_GIB=${UTB_MIN_FREE_GIB:-$(jq -r '.runner.minFreeDiskGiB' "$pins")}
 if [ "$kind" = combined ]; then pins_mode=env; else pins_mode=env-core; fi
 scripts/ci/check-pins.sh "$pins_mode" 2>&1 | tee -a "$out/run-lane.log" | grep -q '^FAIL' && die "a component does not match the manifest"
