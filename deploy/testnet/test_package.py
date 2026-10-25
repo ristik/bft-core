@@ -1126,6 +1126,15 @@ class Joiner(unittest.TestCase):
             self.assertEqual(handoff_ops.compose_files(gen)[-1],str(gen/handoff_ops.RESTORE_OVERRIDE))
             (gen/handoff_ops.RESTORE_OVERRIDE).unlink()
             self.assertEqual(handoff_ops.load_compose(gen)['services']['shard5']['entrypoint'][2],'run')
+    def test_the_restore_is_anchored_to_the_activation_records_not_to_what_a_survivor_archived(self):
+        # the package runs the Q3 lane, whose activations are never archived as bundles: a wait for the archive passed only while the newest archived record was of epoch 1
+        import rehearse
+        with tempfile.TemporaryDirectory() as d:
+            r=rehearse.Rehearsal.__new__(rehearse.Rehearsal);r.evidence=Path(d)
+            self.assertEqual(r.restore_body_ids(),'','no activation yet: the stage refuses to run')
+            for sub,epoch,body in (('handoff-epoch3',3,'c'*64),('handoff',2,'b'*64)):
+                (Path(d)/sub).mkdir();(Path(d)/sub/('activation-record-%d.json'%epoch)).write_text(json.dumps({'epoch':epoch,'v3BodyId':body}))
+            self.assertEqual(r.restore_body_ids(),'2=%s,3=%s'%('b'*64,'c'*64))
     def test_the_genesis_services_are_untouched_and_a_taken_index_is_refused(self):
         four=self.topology(4);before=json.dumps(four,sort_keys=True)
         joiner.joiner_services(four,5,'r4','e4')

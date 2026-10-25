@@ -13,10 +13,10 @@ set -uo pipefail
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd); repo=$(cd "$here/../.." && pwd)
 source "$repo/scripts/lib/portable.sh"
 . "$repo/scripts/lib/reth-pin.sh"   # rethEvidenceValidate / rethEvidenceSecretValues (definitions only)
-ev= out= status=0 nodes= minlogs=0 kind=combined s4=0 x4o=0 x4a=0 x4r=0 x4g=0; extra=()
+ev= out= status=0 nodes= minlogs=0 kind=combined s4=0 x4o=0 x4a=0 x4r=0 x4g=0 x4f=0; extra=()
 while [ $# -gt 0 ]; do case "$1" in
   --evidence) ev=$2; shift 2 ;; --out) out=$2; shift 2 ;; --status) status=$2; shift 2 ;; --nodes) nodes=$2; shift 2 ;;
-  --min-node-logs) minlogs=$2; shift 2 ;; --kind) kind=$2; shift 2 ;; --s4) s4=$2; shift 2 ;; --x4o) x4o=$2; shift 2 ;; --x4a) x4a=$2; shift 2 ;; --x4r) x4r=$2; shift 2 ;; --x4g) x4g=$2; shift 2 ;; --extra) extra+=("$2"); shift 2 ;; *) echo "publish-evidence: unknown argument $1" >&2; exit 2 ;; esac; done
+  --min-node-logs) minlogs=$2; shift 2 ;; --kind) kind=$2; shift 2 ;; --s4) s4=$2; shift 2 ;; --x4o) x4o=$2; shift 2 ;; --x4a) x4a=$2; shift 2 ;; --x4r) x4r=$2; shift 2 ;; --x4g) x4g=$2; shift 2 ;; --x4f) x4f=$2; shift 2 ;; --extra) extra+=("$2"); shift 2 ;; *) echo "publish-evidence: unknown argument $1" >&2; exit 2 ;; esac; done
 [ -d "$ev" ] && [ -n "$out" ] || { echo "usage: publish-evidence.sh --evidence DIR --out OUT --status N [--nodes DIR] [--min-node-logs N] [--extra PATH]..." >&2; exit 2; }
 name=$(basename "$ev"); mkdir -p "$out"; quarantine="$(cd "$out" && pwd)/../quarantine"; mkdir -p "$quarantine"
 stage=$(mktemp -d); trap 'rm -rf "$stage"' EXIT
@@ -128,6 +128,19 @@ if [ "$x4g" = 1 ]; then   # X4 B6e: the governance experiment ran: queued, execu
   jq -e '(.activated | type) == "boolean" and .policyIdAfter >= .policyIdBefore' "${go:-/nonexistent}" >/dev/null 2>&1 || { complete=no; why+=("x4pos/steps/gov/outcome.json: no recorded outcome"); }
   grep -q 'PASS: x4g: executed nonce' "$ev/lane.log" 2>/dev/null || { complete=no; why+=("no 'x4g: executed nonce' line in lane.log (the proposal was not scheduled)"); }
   [ -z "$go" ] || echo "governance outcome: $(jq -c . "$go")" >>"$pub/GOVERNANCE-OUTCOME.txt"
+fi
+if [ "$x4f" = 1 ]; then   # X4 B7: the four faults, the soak, the final reconcile and the driver's verdict (the campaign report) ran; each fault's record shows the effect
+  fd=$(find "$pub" -path '*/x4pos/steps/faults' -type d | head -n 1)
+  for f in root-restart evm-restart pair-restart delayed-episode; do
+    jq -e '.stable == true and .paidTxOk == true' "${fd:-/nonexistent}/$f.json" >/dev/null 2>&1 || { complete=no; why+=("x4pos/steps/faults/$f.json: the fault is not recorded as stable with a certified paid transaction"); }
+  done
+  jq -e '.shardFrozenDuringOutage == true and .rootsExtendedDuringOutage == true and .logOrdered == true' "${fd:-/nonexistent}/delayed-episode.json" >/dev/null 2>&1 || { complete=no; why+=("faults/delayed-episode.json: the shard was not shown delayed while the roots extended"); }
+  jq -e '.converged == true' "${fd:-/nonexistent}/reconcile-cursors.json" >/dev/null 2>&1 || { complete=no; why+=("faults/reconcile-cursors.json: the records did not converge"); }
+  jq -e '.snapshots >= 3' "${fd:-/nonexistent}/soak.json" >/dev/null 2>&1 || { complete=no; why+=("faults/soak.json: fewer than 3 soak snapshots"); }
+  dr=$(find "$pub" -path '*/x4pos/report.json' | head -n 1)
+  jq -e '.status == "PASS" and .accounting.status == "PASS" and (.pending | length) == 0 and (.failed | length) == 0 and (.shortOfRequired | length) == 0' "${dr:-/nonexistent}" >/dev/null 2>&1 || { complete=no; why+=("x4pos/report.json: the driver's campaign report is not a PASS with accounting PASS and nothing short of required"); }
+  [ -z "$dr" ] || cp "$dr" "$pub/CAMPAIGN-REPORT.json"
+  [ -z "$fd" ] || { for l in "$fd"/*.late; do [ -f "$l" ] && echo "$(basename "$l" .late): started $(cat "$l") s late"; done; } >"$pub/FAULT-LATENESS.txt"
 fi
 [ -z "${CI_INTERIM:-}" ] || { complete=no; why+=("INTERIM EXPERIMENT, not acceptance evidence: $CI_INTERIM"); }
 if [ "$complete" = no ]; then

@@ -97,15 +97,14 @@ class Preflight(unittest.TestCase):
             self.assertIn(must, listed)
         self.assertTrue(all(n["coveredBy"].strip() for n in m["notCovered"]))
         lanes = [s["id"] for s in m["steps"] if s.get("lane") is True]
-        self.assertEqual(len(lanes), 12)
+        self.assertEqual(len(lanes), 18)
+        self.assertEqual(len(lanes), len(m["steps"]))   # the whole campaign runs in the lane; the driver only verifies
         self.assertIn("activation", listed)
         self.assertEqual([s["id"] for s in sorted(m["steps"], key=lambda s: (s["at"], s["id"]))][:len(lanes)], lanes)
 
-    def test_the_real_campaign_is_refused_to_run_until_every_step_exists(self):
+    def test_the_real_campaign_has_every_command_and_check_it_names(self):
         m, _ = driver.load_manifest(REAL)
-        with self.assertRaises(driver.ManifestError) as e:
-            driver.preflight(m, commands=True, root=HERE.parent.parent)
-        self.assertIn("not implemented", str(e.exception))
+        driver.preflight(m, commands=True, root=HERE.parent.parent)   # raises ManifestError if a check script is missing
 
     def refused(self, mutate, needle):
         m = small()
