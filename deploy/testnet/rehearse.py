@@ -31,6 +31,7 @@ import operator_rpc
 import pos_crash
 import pos_join
 import pos_owner
+import pos_reject
 import pos_sample
 
 PUBLIC_RPC = '127.0.0.1:8545'
@@ -1281,7 +1282,8 @@ Rehearsal.pos_join_heavy = pos_join.pos_join_heavy
 Rehearsal.pos_join_signs = pos_join.pos_join_signs
 Rehearsal.pos_joiner = pos_join.pos_joiner   # the joiner stages live in pos_join.py; they are not in the default list of the main generation (the join has its own)
 Rehearsal.pos_owner = pos_owner.pos_owner   # the owner-key stage lives in pos_owner.py
-POS_STAGES = (('pos-smoke', 'pos_smoke'), ('pos-observe', 'pos_observe'), ('pos-rewards', 'pos_rewards'), ('pos-joiner', 'pos_joiner'), ('pos-election', 'pos_election'), ('pos-proposal', 'pos_proposal'), ('pos-abort', 'pos_abort'), ('pos-propose', 'pos_propose'), ('pos-too-late', 'pos_too_late'), ('pos-install', 'pos_install'), ('pos-advance', 'pos_advance'), ('pos-join-signs', 'pos_join_signs'), ('pos-restart', 'pos_restart'), ('pos-join-heavy', 'pos_join_heavy'), ('pos-stale', 'pos_stale'), ('pos-handoff-2', 'pos_handoff_2'), ('pos-restart-2', 'pos_restart_2'), ('pos-recreate', 'pos_recreate'), *pos_crash.STAGES, ('pos-resources', 'pos_resources'), ('pos-owner', 'pos_owner'))
+Rehearsal.pos_reject = pos_reject.pos_reject   # the automatic RejectResult (#857), opt-in: it waits out a reservation lifetime
+POS_STAGES = (('pos-smoke', 'pos_smoke'), ('pos-observe', 'pos_observe'), ('pos-rewards', 'pos_rewards'), ('pos-joiner', 'pos_joiner'), ('pos-election', 'pos_election'), ('pos-reject', 'pos_reject'), ('pos-proposal', 'pos_proposal'), ('pos-abort', 'pos_abort'), ('pos-propose', 'pos_propose'), ('pos-too-late', 'pos_too_late'), ('pos-install', 'pos_install'), ('pos-advance', 'pos_advance'), ('pos-join-signs', 'pos_join_signs'), ('pos-restart', 'pos_restart'), ('pos-join-heavy', 'pos_join_heavy'), ('pos-stale', 'pos_stale'), ('pos-handoff-2', 'pos_handoff_2'), ('pos-restart-2', 'pos_restart_2'), ('pos-recreate', 'pos_recreate'), *pos_crash.STAGES, ('pos-resources', 'pos_resources'), ('pos-owner', 'pos_owner'))
 
 
 def main():
