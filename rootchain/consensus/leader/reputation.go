@@ -133,7 +133,7 @@ round, it is expected to return either valid block or error.
 func (rb *ReputationBased) Update(qc *abtypes.QuorumCert, currentRound uint64, blockLoader BlockLoader) error {
 	exR := qc.GetParentRound()
 	qcR := qc.GetRound()
-	if exR == 0 || exR+1 != qcR || qcR+1 != currentRound {
+	if exR+1 != qcR || qcR+1 != currentRound {
 		return fmt.Errorf("not updating leaders because %w {parent: %d, QC: %d, current: %d}", ErrNotConsecutive, exR, qcR, currentRound)
 	}
 
@@ -157,6 +157,10 @@ func (rb *ReputationBased) Update(qc *abtypes.QuorumCert, currentRound uint64, b
 			return fmt.Errorf("invalid peer id %q: %w", leaderNode.NodeID, err)
 		}
 	} else {
+		if exR == 0 {
+			// the genesis QC: there is no block before the genesis to elect from (the next-epoch pick above does not walk blocks)
+			return fmt.Errorf("not updating leaders because %w {parent: %d, QC: %d, current: %d}", ErrNotConsecutive, exR, qcR, currentRound)
+		}
 		leader, err = rb.electLeader(qc, blockLoader)
 		if err != nil {
 			return fmt.Errorf("failed to elect leader for round %d: %w", currentRound+1, err)

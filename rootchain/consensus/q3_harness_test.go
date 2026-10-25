@@ -55,10 +55,12 @@ type q3Replica struct {
 	trust         *tbstore.TrustBaseStore
 	history       *trusthistorystore.Store
 	manager       *ConsensusManager
-	rt            *q3active.Runtime
-	shard         *q3active.Guarded
-	authority     *toggledConsumer
-	opened        int
+	// stopRun, set by a live harness while the manager's loop runs, cancels the loop and waits for it to return
+	stopRun   func()
+	rt        *q3active.Runtime
+	shard     *q3active.Guarded
+	authority *toggledConsumer
+	opened    int
 	// incumbent, when set, replaces the fixture's committee as the shard's recorded genesis baseline: the authenticated incumbent the
 	// candidate's recovery authorization is compared with
 	incumbent []evmassign.Identity
@@ -167,6 +169,12 @@ func (r *q3Replica) mustOpen(withQ3 bool) {
 }
 
 func (r *q3Replica) release() {
+	// the loop ends first: a cleanup registered after the harness's own runs before it, and a pacemaker stopped under a running loop races
+	// its round clock (#846)
+	if stop := r.stopRun; stop != nil {
+		r.stopRun = nil
+		stop()
+	}
 	if r.manager != nil {
 		r.manager.pacemaker.Stop()
 		r.manager = nil

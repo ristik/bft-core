@@ -41,14 +41,24 @@ func Test_ReputationBased_Update(t *testing.T) {
 		require.EqualError(t, err, `not updating leaders because rounds are not consecutive {parent: 1, QC: 1, current: 2}`)
 		require.Equal(t, slotIdx, rl.curIdx, "expected that round leader buffer index is not changed")
 
-		// the genesis QC: the rounds are consecutive, but there is no block before the genesis (#841: the election failed to load round 0)
-		err = rl.Update(&types.QuorumCert{VoteInfo: &types.RoundInfo{RoundNumber: 1, ParentRoundNumber: 0}}, 2, loadBlock)
-		require.EqualError(t, err, `not updating leaders because rounds are not consecutive {parent: 0, QC: 1, current: 2}`)
-		require.ErrorIs(t, err, ErrNotConsecutive)
-		require.Equal(t, slotIdx, rl.curIdx, "expected that round leader buffer index is not changed")
-
 		err = rl.Update(&types.QuorumCert{VoteInfo: &types.RoundInfo{RoundNumber: 1, ParentRoundNumber: 2}}, 2, loadBlock)
 		require.EqualError(t, err, `not updating leaders because rounds are not consecutive {parent: 2, QC: 1, current: 2}`)
+		require.Equal(t, slotIdx, rl.curIdx, "expected that round leader buffer index is not changed")
+	})
+
+	t.Run("the genesis QC elects nothing", func(t *testing.T) {
+		// the rounds are consecutive, but there is no block before the genesis (#841: the election failed to load round 0); the next epoch's
+		// trust base is not in the store, so this is the reputation branch
+		tbs, err := tbstore.NewTrustBaseStore(memorydb.New(), logger.New(t))
+		require.NoError(t, err)
+		rl, err := NewReputationBased(1, 1, tbs)
+		require.NoError(t, err)
+		loadBlock := func(round uint64) (*storage.ExecutedBlock, error) { return nil, fmt.Errorf("should not get this far") }
+		slotIdx := rl.curIdx
+
+		err = rl.Update(&types.QuorumCert{VoteInfo: &types.RoundInfo{RoundNumber: 1, ParentRoundNumber: 0, Epoch: types.GenesisRootEpoch}}, 2, loadBlock)
+		require.EqualError(t, err, `not updating leaders because rounds are not consecutive {parent: 0, QC: 1, current: 2}`)
+		require.ErrorIs(t, err, ErrNotConsecutive)
 		require.Equal(t, slotIdx, rl.curIdx, "expected that round leader buffer index is not changed")
 	})
 

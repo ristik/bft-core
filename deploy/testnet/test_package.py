@@ -23,6 +23,7 @@ import observe
 import joiner
 import pos_join
 import pos_sample
+import pos_crash
 
 class FakeRelay:
     def __init__(self): self.calls=[]
@@ -157,6 +158,15 @@ class ProofOfStake(unittest.TestCase):
             self.assertNotIn(name,[n for n,_ in rehearse.STAGES])   # the PoA generation has no registry: the default run must not name them
         self.assertIn('--pos-contracts pinned-contracts',workflow)
         self.assertIn('ref: ${{ steps.pins.outputs.contracts }}',workflow)
+    def test_every_pos_stage_attached_from_another_module_is_in_the_stage_list(self):
+        # a merge once dropped ('pos-resources', ...) from POS_STAGES while the method stayed attached: the stage silently could not be named (#853)
+        import rehearse
+        listed={method for _,method in rehearse.POS_STAGES}
+        attached={n for n in dir(rehearse.Rehearsal) if n.startswith('pos_') and callable(getattr(rehearse.Rehearsal,n))
+                  and getattr(getattr(rehearse.Rehearsal,n),'__module__','')!=rehearse.__name__}
+        self.assertEqual(sorted(attached-listed),[],'attached stage methods that no stage name reaches')
+        self.assertEqual(len(listed),len(rehearse.POS_STAGES),'a method listed twice')
+        self.assertIn('pos_resources',attached,'the test sees attachments (pos_sample.pos_resources)')
     def test_pos_owner_names_the_revert_selector_it_expects(self):
         import json,rehearse,pos_owner
         class Fake:   # the two helpers it needs: a selector table and an eth_call that fails with a given revert data
@@ -1063,12 +1073,15 @@ class Joiner(unittest.TestCase):
         for out in (json.dumps(one),json.dumps([one]),json.dumps({'Address':one['address'],'PrivateKey':one['private_key']}),'Address: %s\nPrivate key: %s'%(one['address'],one['private_key'])):
             self.assertEqual(pos_join.new_wallet(type('R',(),{'cast_run':lambda self,*a,out=out:out})()),one)
         with self.assertRaises(RuntimeError): pos_join.new_wallet(type('R',(),{'cast_run':lambda self,*a:'nothing'})())
-    def test_a_transport_with_the_override_knows_the_joiner_pod(self):
+    def test_the_joiner_override_makes_its_services_part_of_every_compose_operation(self):
         with tempfile.TemporaryDirectory() as d:
             gen=Path(d);compose=self.topology(4);(gen/'compose.yaml').write_text(json.dumps(compose))
-            override=gen/'compose.joiner.json';override.write_text(json.dumps({'services':joiner.joiner_services(compose,5,'r4','e4')}))
             self.assertEqual(handoff_ops.DockerTransport(gen).entities,[1,2,3,4])
-            self.assertEqual(handoff_ops.DockerTransport(gen,override=override).entities,[1,2,3,4,5])
+            self.assertEqual(handoff_ops.compose_files(gen),['-f',str(gen/'compose.yaml')])
+            override=gen/'compose.joiner.json';override.write_text(json.dumps({'services':joiner.joiner_services(compose,5,'r4','e4')}))
+            self.assertEqual(handoff_ops.DockerTransport(gen).entities,[1,2,3,4,5])
+            self.assertEqual(handoff_ops.compose_files(gen),['-f',str(gen/'compose.yaml'),'-f',str(override)])
+            self.assertIn('root5',handoff_ops.load_compose(gen)['services']);self.assertEqual(handoff_ops.load_compose(gen)['name'],compose['name'])
     def test_prepare_makes_the_entity_private_to_its_owner_and_writes_the_override(self):
         import stat
         with tempfile.TemporaryDirectory() as d:
@@ -1090,6 +1103,29 @@ class Joiner(unittest.TestCase):
             override=json.loads((gen/'compose.joiner.json').read_text())
             self.assertEqual(sorted(override['services']),['authority5','metrics5','pod5','root5','shard5','ureth5'])
             self.assertIn('id-evm',override['services']['authority5']['entrypoint'])
+    def test_set_scope_moves_only_the_authority_epochs_and_trust_base(self):
+        with tempfile.TemporaryDirectory() as d:
+            gen=Path(d);compose=self.topology(4)
+            services=joiner.joiner_services(compose,5,'r4','e4');(gen/'compose.joiner.json').write_text(json.dumps({'services':services}))
+            joiner.set_scope(gen,5,2,1,'/network/handoff/trust-base-epoch2.json')
+            got=json.loads((gen/'compose.joiner.json').read_text())['services']
+            entry=got['authority5']['entrypoint'];at=lambda f:entry[entry.index(f)+1]
+            self.assertEqual((at('--root-epoch'),at('--shard-epoch'),at('--trust-base')),('2','1','/network/handoff/trust-base-epoch2.json'))
+            self.assertEqual(at('--node-id'),'e4',"the node id is untouched")
+            for name in services:
+                if name!='authority5': self.assertEqual(got[name],services[name],name)
+    def test_the_restore_override_changes_only_the_joiner_shard_entrypoint_and_only_while_it_exists(self):
+        with tempfile.TemporaryDirectory() as d:
+            gen=Path(d);compose=self.topology(4);(gen/'compose.yaml').write_text(json.dumps(compose))
+            services=joiner.joiner_services(compose,5,'r4','e4');(gen/'compose.joiner.json').write_text(json.dumps({'services':services}))
+            plain=handoff_ops.load_compose(gen)['services']['shard5']
+            entry=list(plain['entrypoint']);entry[entry.index('run')]='restore'
+            (gen/handoff_ops.RESTORE_OVERRIDE).write_text(json.dumps({'services':{'shard5':{'entrypoint':entry}}}))
+            got=handoff_ops.load_compose(gen)['services']['shard5']
+            self.assertEqual(got['entrypoint'][2],'restore');self.assertEqual({k:v for k,v in got.items() if k!='entrypoint'},{k:v for k,v in plain.items() if k!='entrypoint'})
+            self.assertEqual(handoff_ops.compose_files(gen)[-1],str(gen/handoff_ops.RESTORE_OVERRIDE))
+            (gen/handoff_ops.RESTORE_OVERRIDE).unlink()
+            self.assertEqual(handoff_ops.load_compose(gen)['services']['shard5']['entrypoint'][2],'run')
     def test_the_genesis_services_are_untouched_and_a_taken_index_is_refused(self):
         four=self.topology(4);before=json.dumps(four,sort_keys=True)
         joiner.joiner_services(four,5,'r4','e4')
@@ -1253,6 +1289,47 @@ class PosSample(unittest.TestCase):
         with patch.object(pos_sample,'not_healthy',health), patch.object(pos_sample.subprocess,'run',lambda *a,**k:(_ for _ in ()).throw(RuntimeError('sampler started'))):
             with self.assertRaises(RuntimeError): pos_sample.pos_observe(Fake())   # healthy on the third look: only then does it start the sampler
         self.assertEqual(len(calls),3)
+    def test_pos_crash_scans_logs_and_runs_before_the_stage_that_must_stay_last(self):
+        import rehearse
+        self.assertEqual(pos_crash.scan_log("ok\nlevel=error msg=x\nthread 'main' panicked at src/x.rs\nWARN y\npanic: boom\n"),(2,2))
+        self.assertEqual(pos_crash.scan_log("all quiet\n"),(0,0))
+        names=[n for n,_ in rehearse.POS_STAGES]
+        names=[n for n in names if n!='pos-joiner']   # the joiner runs on its own fresh generation, not after pos-owner on this one
+        self.assertEqual(names[-1],'pos-owner','pos-owner declares a retirement: nothing may follow it')
+        for name,_ in pos_crash.STAGES:
+            self.assertLess(names.index('pos-recreate'),names.index(name));self.assertLess(names.index(name),names.index('pos-owner'))
+            self.assertTrue(callable(getattr(rehearse.Rehearsal,dict(rehearse.POS_STAGES)[name])),name)
+        workflow=(generate.REPO/'.github/workflows/testnet-rehearsal.yml').read_text()
+        default=re.search(r'POS_STAGES:-([^}]*)\}',workflow).group(1).split(',')
+        for name,_ in pos_crash.STAGES: self.assertNotIn(name,default,'the crash stages are opt-in: bft-core #843 fails today')
+        self.assertNotIn('pos-resources',default,'opt-in until it has run on a runner')
+    def test_restart_counts_reads_each_container_and_reports_a_missing_one(self):
+        class R:
+            def compose(self,*a,check=True): return {'ureth2':'abc\n','root2':'def\n'}.get(a[-1],'')
+        def run(cmd,**k): return type('P',(),{'stdout':{'abc':'3\n','def':'x\n'}[cmd[-1]]})()
+        with patch.object(pos_crash.subprocess,'run',run):
+            self.assertEqual(pos_crash.restart_counts(R(),['ureth2','root2','shard2']),{'ureth2':3,'root2':None,'shard2':None})
+    def test_parse_mem_reads_docker_stats_cells_and_refuses_others(self):
+        used,limit=pos_sample.parse_mem('345.2MiB / 1.5GiB')
+        self.assertAlmostEqual(used/1024**2,345.2);self.assertEqual(limit,1.5*1024**3)
+        self.assertEqual(pos_sample.parse_mem('16B / 16MiB'),(16,16*1024**2))
+        with self.assertRaises(ValueError): pos_sample.parse_mem('-- / --')
+        with self.assertRaises(ValueError): pos_sample.parse_mem('12XB / 1GiB')
+    def test_resources_takes_the_peak_per_container_and_the_growth_per_directory(self):
+        rows=[{'memory':{'p-ureth1-1':'100MiB / 1.5GiB','p-root1-1':'200MiB / 384MiB'},'pos':{'state_kb':{'v1/ureth':1000,'v1/root':50}}},
+              {'memory':{'p-ureth1-1':'900MiB / 1.5GiB','p-root1-1':'300MiB / 384MiB'},'pos':{'state_kb':{'v1/ureth':1600,'v1/root':50}}},
+              {'memory':{'p-ureth1-1':'500MiB / 1.5GiB','p-root1-1':'360MiB / 384MiB'},'pos':{'state_kb':{'v1/ureth':1700,'v1/root':50}}}]
+        report,over=pos_sample.resources(rows)
+        self.assertEqual(report['peak_memory']['p-ureth1-1']['used_mib'],900.0)
+        self.assertEqual(report['state_growth_kb'],{'v1/ureth':700,'v1/root':0})
+        self.assertEqual(over,['p-root1-1'],'360 of 384 MiB is above 90%; 900 of 1536 is not')
+        self.assertEqual(pos_sample.resources(rows,headroom=1.0)[1],[])
+    def test_state_kb_lists_the_validator_state_directories_it_can_read(self):
+        with tempfile.TemporaryDirectory() as d:
+            for p in ('validator1/ureth','validator1/root','validator2/ureth'): Path(d,p).mkdir(parents=True)
+            Path(d,'validator1/ureth','f').write_bytes(b'x'*(64*1024))
+            got=pos_sample.state_kb(d)
+        self.assertEqual(set(got),{'v1/ureth','v1/root','v2/ureth'});self.assertGreaterEqual(got['v1/ureth'],64)
     def test_a_result_that_is_not_whole_words_is_refused(self):
         with self.assertRaises(ValueError): pos_sample.words('0x'+'00'*31)
         with self.assertRaises(ValueError): pos_sample.words('0x')

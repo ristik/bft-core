@@ -28,6 +28,7 @@ from pathlib import Path
 import handoff
 import handoff_ops
 import operator_rpc
+import pos_crash
 import pos_join
 import pos_owner
 import pos_sample
@@ -51,8 +52,14 @@ class Rehearsal:
         self.pods = ()
         self.reset_args = {}
         self.ubft = None
+        self.restore_pin = None
         self.target = 2   # the root epoch the handoff being driven installs (pos-handoff-2 drives the next one, 3)
+        self.joiners = set()   # entities started but not yet members of the committee that certifies (pos-joiner adds one, pos-advance clears them)
         self.committed_target = None   # the Abort target of the handoff pos-propose committed (pos-too-late)
+
+    def members(self):
+        """The entities of the committee that certifies now: every entity but the joiners."""
+        return [i for i in range(1, self.n + 1) if i not in self.joiners]
 
     def evh(self):
         """The evidence directory of the handoff being driven (the second handoff keeps its own, the first one's files have the same names)."""
@@ -96,7 +103,7 @@ class Rehearsal:
 
     # --- docker and RPC --------------------------------------------------------------------------------------------------------
     def compose(self, *args, check=True):
-        return subprocess.run(['docker', 'compose', '-f', str(self.gen / 'compose.yaml'), *args], check=check, text=True, capture_output=True).stdout
+        return subprocess.run(['docker', 'compose', *handoff_ops.compose_files(self.gen), *args], check=check, text=True, capture_output=True).stdout
 
     def services(self):
         return self.compose('config', '--services').split()
@@ -342,7 +349,7 @@ class Rehearsal:
     def node_run(self, args, mounts=()):
         """`ubft` (the node image) in a one-shot container on the validators network, with the limits of the package's own services: read-only, no capabilities,
         bounded, uid 10001. `mounts` are 'host:container[:ro]' volumes. Returns the finished process (text stdout and stderr)."""
-        compose = json.loads((self.gen / 'compose.yaml').read_text())
+        compose = handoff_ops.load_compose(self.gen)
         network = subprocess.run(['docker', 'network', 'ls', '-q', '--filter', f'label=com.docker.compose.project={compose["name"]}',
                                   '--filter', 'label=com.docker.compose.network=validators'], check=True, text=True, capture_output=True).stdout.split()
         self.expect(len(network) == 1, 'the generation has one validators network', str(network))
@@ -457,7 +464,7 @@ class Rehearsal:
         return run.stdout
 
     def exec_in(self, service, *command, binary=False):
-        run = subprocess.run(['docker', 'compose', '-f', str(self.gen / 'compose.yaml'), 'exec', '-T', service, *command], text=not binary, capture_output=True)
+        run = subprocess.run(['docker', 'compose', *handoff_ops.compose_files(self.gen), 'exec', '-T', service, *command], text=not binary, capture_output=True)
         if run.returncode:
             stderr = run.stderr if isinstance(run.stderr, str) else run.stderr.decode(errors='replace')
             raise Failure(f'{service}: {" ".join(command[:5])}: exit {run.returncode}: {stderr.strip()[-500:]}')
@@ -465,7 +472,7 @@ class Rehearsal:
 
     def entity_ids(self):
         """(root node id, EVM node id) of every entity: the root's from its home, the EVM validator's from its signing authority's generated command line."""
-        services = json.loads((self.gen / 'compose.yaml').read_text())['services']
+        services = handoff_ops.load_compose(self.gen)['services']
         ids = []
         for i in range(1, self.n + 1):
             root = self.host_ubft('node-id', '--home', self.gen / f'validator{i}' / 'root').strip().splitlines()[-1]
@@ -477,7 +484,7 @@ class Rehearsal:
         """p85_build_assignment: the EVM context, the election's proposal for the result (`reserved` before the proofs exist, with the stored proofs after), every
         member's possession proof made INSIDE its signing authority's namespace (the inputs are copied to the entity's auth directory, which only its authority and
         shard mount), and the assembled EVM assignment. Returns (assignment file, proposal directory name, context file)."""
-        net, root_rpc = self.gen / 'network', operator_rpc.common_urls(json.loads((self.gen / 'compose.yaml').read_text()))[0]
+        net, root_rpc = self.gen / 'network', operator_rpc.common_urls(handoff_ops.load_compose(self.gen))[0]
         self.exec_in('root1', 'ubft', 'root', 'handoff', 'evm-context', '--root-rpc', root_rpc, '--out', '/tmp/context.json')
         context = work / f'{tag}-context.json'
         context.write_text(self.exec_in('root1', 'cat', '/tmp/context.json'))
@@ -508,6 +515,23 @@ class Rehearsal:
                        *(['--evm-pops', proposal / 'evm-pops.json'] if evm_pops else []), '--out', assignment)
         return assignment, proposal, context
 
+    def next_trust_base(self):
+        """The root trust base of epoch `self.target` over every entity (the previous one's successor, unit weights), signed by every root."""
+        work = self.gen / 'network' / 'handoff'
+        work.mkdir(parents=True, exist_ok=True)
+        weights = ','.join(['1'] * self.n)
+        self.host_ubft('trust-base', 'generate', '--home', work, '--network-id', '3', '--epoch', str(self.target), '--epoch-start', str(200000 * (self.target - 1)), '--previous-trust-base', self.previous_trust_base(),
+                       '--root-weights', weights, '--output-file-name', f'trust-base-epoch{self.target}.json',
+                       *[x for i in range(1, self.n + 1) for x in ('--node-info', self.gen / f'validator{i}' / 'root' / 'node-info.json')])
+        for i in range(1, self.n + 1):
+            self.host_ubft('trust-base', 'sign', '--home', self.gen / f'validator{i}' / 'root', '--trust-base', work / f'trust-base-epoch{self.target}.json')
+
+    def successor_shard_epoch(self):
+        """The EVM shard configuration epoch the handoff activates: the one after the last installed (the genesis configuration, or a later one a handoff left)."""
+        work = self.gen / 'network' / 'handoff'
+        installed = max([json.loads((self.gen / 'network' / 'full-shard-conf.json').read_text())['epoch']] + [json.loads(f.read_text())['epoch'] for f in work.glob('shard-conf-*.json')])
+        return installed + 1
+
     def pos_proposal(self, resubmit=True):
         """5b steps 0-4 on the election's reserved result: the preflight, the next root trust base (epoch 2, the same four members and weights, signed by each
         root's key), the EVM possession proofs made by the signing authorities over the candidate, their submission to the election and its finalization (sent by
@@ -516,7 +540,7 @@ class Rehearsal:
         published result, which an Abort before the Freeze does not close, so nothing is submitted or finalized again."""
         pos = self.manifest.get('pos')
         self.expect(bool(pos), 'the manifest carries a pos block (this generation was made with --pos)')
-        compose = json.loads((self.gen / 'compose.yaml').read_text())
+        compose = handoff_ops.load_compose(self.gen)
         net, work = self.gen / 'network', self.gen / 'network' / 'handoff'
         deployment = json.loads((net / 'pos-deployment.json').read_text())
         election = deployment['election']
@@ -527,7 +551,7 @@ class Rehearsal:
         self.expect(needed <= running, 'every entity service is running', str(sorted(needed - running)))
         root_rpc = operator_rpc.common_urls(compose)[0]
         transport = handoff_ops.DockerTransport(self.gen)   # one-shot python sidecar in the entity's namespace (the operator listener is loopback there)
-        for i in range(1, self.n + 1):
+        for i in self.members():
             # `ubft q3 signers --out` writes only the signer list, no epoch (the first run of this stage found 5b's step 0 wrong): ask the endpoint it wraps
             status, body = transport.post(i, '/api/v1/q3/signers', b'{}')
             signers = json.loads(body) if status == 200 else {}
@@ -536,13 +560,16 @@ class Rehearsal:
         result = self.view_text(election, 'openResult()(bytes32)').strip()
         self.expect(result != zero, 'the election has a reserved result (run pos-election first)')
         ids = self.entity_ids()
-        # 1 the next root trust base
-        weights = ','.join(['1'] * self.n)
-        self.host_ubft('trust-base', 'generate', '--home', work, '--network-id', '3', '--epoch', str(self.target), '--epoch-start', str(200000 * (self.target - 1)), '--previous-trust-base', self.previous_trust_base(),
-                       '--root-weights', weights, '--output-file-name', f'trust-base-epoch{self.target}.json',
-                       *[x for i in range(1, self.n + 1) for x in ('--node-info', self.gen / f'validator{i}' / 'root' / 'node-info.json')])
-        for i in range(1, self.n + 1):
-            self.host_ubft('trust-base', 'sign', '--home', self.gen / f'validator{i}' / 'root', '--trust-base', work / f'trust-base-epoch{self.target}.json')
+        # 1 the next root trust base (a joiner's authority had to start at its scope, so pos-joiner made it already: the same inputs)
+        if self.joiners and (work / f'trust-base-epoch{self.target}.json').exists():
+            # reused, not rebuilt: it is the successor committee only if the election elected exactly the five entities it names
+            members = self.view_text(election, 'frozenMembers(bytes32)((uint64,uint64,uint64,uint64,bytes32)[])', result)
+            elected = sorted(int(x) for x in re.findall(r'\((\d+),', members.replace('((', '(')))
+            wanted = sorted([int(x['stakingId']) for x in json.loads((net / 'pos-plan.json').read_text())['identities']]
+                            + [json.loads((self.evidence / 'joiner.json').read_text())['stakingId']])
+            self.expect(elected == wanted, 'the election elected exactly the genesis identities and the joiner (the pre-built trust base names them)', f'{elected} / {wanted}')
+        else:
+            self.next_trust_base()
         # 2-3 the assignment with its reserved proofs, the candidate, every authority's proof over it
         assignment, proposal, context = self.build_assignment('reserved', work, result, ids, True)
         attempt = (proposal / 'attempt.txt').read_text().strip()
@@ -589,7 +616,7 @@ class Rehearsal:
     def pos_candidate(self):
         """5b steps 5 and 6: the roots' candidate for the epoch-2 trust base and the published assignment (one root derives it) and the readiness receipt of EVERY entity,
         each made by its own root (see pos_propose). Returns the handoff directory and the receipt files."""
-        compose = json.loads((self.gen / 'compose.yaml').read_text())
+        compose = handoff_ops.load_compose(self.gen)
         work = self.gen / 'network' / 'handoff'
         for name in (f'trust-base-epoch{self.target}.json', 'published-assignment.json'):
             self.expect((work / name).is_file(), f'{name} exists (run pos-proposal first)')
@@ -650,7 +677,8 @@ class Rehearsal:
             self.say(f'  no evm-assignment context before the proposal: {error}')
         run = subprocess.run([sys.executable, str(Path(__file__).resolve().parent / 'handoff_ops.py'), 'propose', str(self.gen), '--ubft', str(self.ubft),
                               '--next-trust-base', str(work / f'trust-base-epoch{self.target}.json'), '--next-evm-assignment', str(work / 'published-assignment.json'),
-                              '--readiness-receipts', ','.join(receipts), '--intent-delay', '1.5'], text=True, capture_output=True)
+                              '--readiness-receipts', ','.join(receipts), '--intent-delay', '1.5',
+                              *(['--committee', ','.join(map(str, self.members()))] if self.joiners else [])], text=True, capture_output=True)
         self.evh()
         (self.evh() / 'propose.log').write_text(run.stdout + run.stderr)
         if run.returncode:   # the root's refusal is one line for many causes: report what each root holds, so the refusal can be located
@@ -667,7 +695,7 @@ class Rehearsal:
                 self.say(f'  ureth {i}: block {int(self.ureth(i, "eth_blockNumber"), 16)}, published word {int(raw[2 + 64 * 10:2 + 64 * 11], 16)}, openResult {self.ureth(i, "eth_call", [{"to": election, "data": self.cast_run("calldata", "openResult()")}, "latest"])[:12]}')
         self.expect(run.returncode == 0, 'handoff_ops.py propose', (run.stdout + run.stderr).strip()[-600:])
         accepted = int(run.stdout.strip().splitlines()[-1].split()[1])
-        self.expect(accepted >= self.n * 2 // 3 + 1, f'a quorum of the {self.n} roots endorsed the one plan', run.stdout.strip().splitlines()[-1])
+        self.expect(accepted >= len(self.members()) * 2 // 3 + 1, f'a quorum of the {len(self.members())} roots of the committee endorsed the one plan', run.stdout.strip().splitlines()[-1])
         log = [json.loads(line) for line in wrapper_log.read_text().splitlines()][earlier:]
         self.expect(len({row['plan_sha256'] for row in log if row['event'] in ('plan', 'intent', 'endorse')}) == 1, 'every phase of the attempt carries the same plan hash')
         planned = [row for row in log if row['event'] == 'plan'][-1]
@@ -720,7 +748,7 @@ class Rehearsal:
         # the next attempt needs new approvals: the possession proofs bind the attempt (popContext), so the assignment made for the Aborted attempt is refused by the
         # root ("invalid proof of possession", run 39962014299). Steps 0-4 again, now at the attempt the root plans (the chain's context names it), then the candidate.
         self.pos_proposal(resubmit=False)
-        root_rpc = operator_rpc.common_urls(json.loads((self.gen / 'compose.yaml').read_text()))[0]
+        root_rpc = operator_rpc.common_urls(handoff_ops.load_compose(self.gen))[0]
         self.exec_in('root1', 'rm', '-rf', '/tmp/candidate-probe')
         self.exec_in('root1', 'ubft', 'root', 'handoff', 'q3-candidate', '--next-trust-base', f'/network/handoff/trust-base-epoch{self.target}.json',
                      '--next-evm-assignment', '/network/handoff/published-assignment.json', '--root-rpc', root_rpc, '--out-dir', '/tmp/candidate-probe')
@@ -794,19 +822,20 @@ class Rehearsal:
         turn is stopped, its four stores kept as root.pre-epoch-2, and recreated with `--install-handoff-epoch 2` (the Compose override handoff.py writes; a plain
         `up -d` would drop the flag); then the first root reports epoch 2, the activation record is read and checked against the candidate, and every shard has logged the
         activation. Needs pos-propose first (the handoff must be committed)."""
-        compose = json.loads((self.gen / 'compose.yaml').read_text())
+        compose = handoff_ops.load_compose(self.gen)
         work = self.gen / 'network' / 'handoff'
         self.expect((work / 'v3-body-id.txt').is_file(), 'the candidate files exist (run pos-propose first)')
         transport = handoff_ops.DockerTransport(self.gen)
-        for i in range(1, self.n + 1):
+        for i in self.members():
             self.expect(self.root_epoch(i, transport) == self.target - 1, f'root {i} has no certificate of epoch {self.target} before its install restart')
         override = self.gen / f'compose.install-epoch-{self.target}.json'
         if not override.exists():
             override.write_text(json.dumps(handoff.install_override(compose, self.target), indent=1) + '\n')
-        files = ['-f', str(self.gen / 'compose.yaml'), '-f', str(override)]
+        base = handoff_ops.compose_files(self.gen)
+        files = base + ['-f', str(override)]
         for i in range(1, self.n + 1):
             self.say(f'  installing epoch {self.target} in root {i}')
-            subprocess.run(['docker', 'compose', *files[:2], 'stop', f'root{i}'], check=True, capture_output=True)
+            subprocess.run(['docker', 'compose', *base, 'stop', f'root{i}'], check=True, capture_output=True)
             state = self.gen / f'validator{i}' / 'root'
             backup = self.gen / f'validator{i}' / f'root.pre-epoch-{self.target}'
             if not backup.exists():
@@ -833,8 +862,9 @@ class Rehearsal:
         commit = record['commit']
         want = (1, 1) if self.target == 2 else (2, self.target - 1)   # the genesis committee signs in the legacy scheme, a later one in scheme 2
         self.expect((commit['scheme'], commit['epoch']) == want, f'the Commit is the epoch-{want[1]} committee\'s (scheme {want[0]})', f'scheme {commit["scheme"]}, epoch {commit["epoch"]}')
-        # 10 the gate: every shard has activated the root epoch
-        for i in range(1, self.n + 1):
+        # 10 the gate: every shard of the committee that was left has activated the root epoch (a joiner's shard node is staging-only until its authority advances
+        # and it restores: pos-advance checks it)
+        for i in self.members():
             def activated(i=i):
                 logs = self.compose('logs', '--no-color', f'shard{i}', check=False)
                 # the package's logs are JSON: {"message":"handoff activated","rootEpoch":2,...} (the lane's text format was msg="handoff activated" rootEpoch=2)
@@ -847,14 +877,13 @@ class Rehearsal:
         signing authority to the new root epoch and shard configuration and a new session for its shard node (the shard is stopped for it and started again with the
         same command; the authority is never recreated), and finally paid work at the new epoch: a transaction through the public gateway is certified on every
         validator, the roots stay at epoch 2 and the custody has applied every root record. Needs pos-install first."""
-        compose = json.loads((self.gen / 'compose.yaml').read_text())
+        compose = handoff_ops.load_compose(self.gen)
         work = self.gen / 'network' / 'handoff'
         transport = handoff_ops.DockerTransport(self.gen)
         self.expect(all(self.root_epoch(i, transport) == self.target for i in range(1, self.n + 1)), f'every root certifies at epoch {self.target} (run pos-install first)')
         root_rpc = operator_rpc.common_urls(compose)[0]
         # 11 the shard configuration of the activated shard epoch (the EVM partition's epoch after the installed one)
-        installed = max([json.loads((self.gen / 'network' / 'full-shard-conf.json').read_text())['epoch']] + [json.loads(f.read_text())['epoch'] for f in work.glob('shard-conf-*.json')])
-        shard_epoch = installed + 1
+        shard_epoch = self.successor_shard_epoch()
         self.exec_in('root1', 'ubft', 'q3', 'shard-conf', '--root-rpc', root_rpc, '--epoch', str(shard_epoch), '--out', '/tmp/shard-conf.json')
         conf = json.loads(self.exec_in('root1', 'cat', '/tmp/shard-conf.json'))
         self.expect(conf.get('epoch') == shard_epoch and conf.get('partitionId') == 8, f'a root holds the EVM shard configuration of epoch {shard_epoch}', str(conf)[:200])
@@ -865,6 +894,9 @@ class Rehearsal:
             self.say(f'  advancing the authority of entity {i}')
             self.compose('stop', f'shard{i}')
             operator = ['--operator-socket', '/authority/operator.sock', '--operator-credential', '/authority/operator.cred']
+            if i in self.joiners:
+                self.advance_joiner(i, operator, shard_epoch)
+                continue
             self.exec_in(f'authority{i}', 'ubft', 'signing-authority', 'advance-epoch', *operator, '--trust-base', f'/network/handoff/trust-base-epoch{self.target}.json',
                          '--shard-conf', f'/network/handoff/shard-conf-{shard_epoch}.json')
             auth = self.gen / f'validator{i}' / 'auth'
@@ -885,9 +917,95 @@ class Rehearsal:
             count = self.view(self.REGISTRY, 'recordCount()(uint64)')[0]
             return count if count == self.view(deployment['custody'], 'recordCursor()(uint64)')[0] else None
         self.say(f'  recordCount == recordCursor == {self.wait("the custody has applied every root record", lambda: applied() is not None, 300) and applied()}')
+        self.joiners.clear()   # the successor committee is active: a joiner is a member now
+
+    def advance_joiner(self, i, operator, shard_epoch):
+        """The joiner's authority is pending (the genesis shard configuration does not name it) and holds no session. It started at the successor scope, so after the Commit
+        its enrollment states the activated shard configuration and it issues its session; its shard node is then started and what it does is recorded."""
+        log = []
+        def step(what, *command):
+            rc, out, err = self.exec_rc(f'authority{i}', 'ubft', 'signing-authority', *command)
+            log.append(f'{what}: exit {rc}\n{out}{err}')
+            self.say(f'  joiner authority {i}: {what}: exit {rc}: {(out + err).strip()[-200:]}')
+            return rc
+        step('status before', 'status', *operator)
+        # runs 40084120471 and 40085267112: an authority started at the genesis scope refused both orders (advance-epoch: signing-enrollment-incomplete; complete-enrollment:
+        # signing-context-mismatch). It starts at the successor scope now (joiner.set_scope), so its enrollment states the activated shard configuration directly
+        step('complete-enrollment', 'complete-enrollment', *operator, '--shard-conf', f'/network/handoff/shard-conf-{shard_epoch}.json')
+        rc = step('replace-session', 'replace-session', *operator, '--out', '/authority/client.cred')
+        step('status after', 'status', *operator)
+        (self.evh() / f'joiner-authority-{i}.log').write_text('\n'.join(log))
+        self.expect(rc == 0, f'the joiner\'s authority {i} advanced, enrolled and issued its session', log[-1][-400:])
+        self.restore_joiner(i)
+
+    def restore_joiner(self, i):
+        """The joiner's shard node after the Commit. Its staging run left a candidate without the certificates a node needs (run 40087359371: "durable state is damaged or
+        untrusted"), and the genesis configuration does not name it: it comes back by RESTORING, as the native lane does: its execution client and node state are emptied,
+        the pin (latest certified record, its technical record and the trust history's body id) is read from a survivor's immutable archive, and the node starts as
+        `shard-node restore` under its new session. Once it runs it is started again as an ordinary node (a restore refuses a node that has state)."""
+        self.expect(bool(self.restore_pin), 'the joiner\'s restore needs --restore-pin (scripts/h4-restore-pin of the pinned source)')
+        val = self.gen / f'validator{i}'
+        self.compose('stop', f'shard{i}', f'ureth{i}')
+        for sub, keep in (('evm', {'keys.json', 'node-info.json'}), ('archive', set()), ('ureth', set())):
+            for path in (val / sub).iterdir():
+                if path.name not in keep:
+                    shutil.rmtree(path) if path.is_dir() else path.unlink()
+        self.compose('up', '-d', '--no-deps', f'ureth{i}')
+        self.wait(f'the joiner\'s execution client {i} answers', lambda: self.ureth(i, 'eth_blockNumber') is not None, 180)
+        # A survivor's archive holds the verified trust body of the new epoch only once it has archived it, and not every survivor's does at the same time (runs 40091999009 and
+        # 40101751785: "no archived verified-trust body identity for epoch 2" from validator 1's archive for two minutes, while runs 40088831174, 40090246101 and 40094341567
+        # found it on the first attempt): every survivor's archive is asked, in turn, for up to two minutes; every answer is kept
+        attempts = []
+        survivors = [j for j in range(1, self.n + 1) if j != i]
+        def pinned():
+            for j in survivors:
+                run = subprocess.run([str(self.restore_pin), str(self.gen / f'validator{j}' / 'archive'), str(self.gen / 'network' / 'trust-base.json'), str(val / 'evm' / 'tip')],
+                                     text=True, capture_output=True)
+                attempts.append(f'validator {j} archive: exit {run.returncode}: {(run.stdout + run.stderr).strip()[-300:]}')
+                if run.returncode == 0:
+                    return run
+            return None
+        try:
+            pin = self.wait('a survivor\'s archive holds the verified trust history of the new epoch', pinned, 120)
+        except Failure:
+            pin = None
+        (self.evh() / f'joiner-restore-pin-{i}.txt').write_text('\n'.join(attempts) + '\n')
+        self.say(f'  restore pin: {len(attempts)} attempt(s): {attempts[-1][:200]}')
+        if pin is None:
+            pin = subprocess.CompletedProcess([], 1, '', attempts[-1] if attempts else '')
+        self.expect(pin.returncode == 0, 'a survivor\'s archive yields the restore pin', (pin.stdout + pin.stderr).strip()[-400:])
+        found = re.search(r'bodyID=(0x[0-9a-fA-F]+)', pin.stdout)
+        self.expect(bool(found), 'the pin names the trust history\'s body id', pin.stdout.strip()[-300:])
+        for name in ('tip.uc.cbor', 'tip.tr.cbor'):
+            os.chown(val / 'evm' / name, 10001, 10001)
+        services = handoff_ops.load_compose(self.gen)['services']
+        entry = list(services[f'shard{i}']['entrypoint'])
+        entry[entry.index('run')] = 'restore'
+        entry += ['--tip-uc', '/state/tip.uc.cbor', '--tip-tr', '/state/tip.tr.cbor', '--trust-body-id', found.group(1)]
+        restore_file = self.gen / handoff_ops.RESTORE_OVERRIDE
+        try:
+            restore_file.write_text(json.dumps({'services': {f'shard{i}': {'entrypoint': entry}}}, indent=1) + '\n')
+            self.compose('up', '-d', '--no-deps', '--force-recreate', f'shard{i}')
+            time.sleep(30)
+            logs = self.compose('logs', '--no-color', '--tail', '60', f'shard{i}', check=False)
+            (self.evh() / f'joiner-shard-{i}-restore.log').write_text(logs)
+            running = f'shard{i}' in self.compose('ps', '--status', 'running', '--services').split()
+            self.say(f'  joiner shard {i} restoring after 30 s: {"running" if running else "NOT running"}: ' + ' | '.join(logs.strip().splitlines()[-3:])[-500:])
+            self.expect(running, f'the joiner\'s shard node {i} runs as a restore under its new session', logs.strip()[-500:])
+            survivor = self.wait(f'the joiner\'s execution client {i} catches up with validator 1', lambda: int(self.ureth(i, 'eth_blockNumber'), 16) + 5 >= int(self.ureth(1, 'eth_blockNumber'), 16), 300)
+            self.expect(survivor, f'the joiner\'s execution client {i} is at validator 1\'s block')
+            # an ordinary node from here on: the restore flags go, the state stays
+            restore_file.unlink()
+            self.compose('up', '-d', '--no-deps', '--force-recreate', f'shard{i}')
+            time.sleep(20)
+            running = f'shard{i}' in self.compose('ps', '--status', 'running', '--services').split()
+            (self.evh() / f'joiner-shard-{i}-run.log').write_text(self.compose('logs', '--no-color', '--tail', '60', f'shard{i}', check=False))
+            self.expect(running, f'the restored shard node {i} runs again as an ordinary node')
+        finally:
+            restore_file.unlink(missing_ok=True)   # a failed restore leaves no override behind for the next Compose call
 
     def exec_rc(self, service, *command):
-        run = subprocess.run(['docker', 'compose', '-f', str(self.gen / 'compose.yaml'), 'exec', '-T', service, *command], text=True, capture_output=True)
+        run = subprocess.run(['docker', 'compose', *handoff_ops.compose_files(self.gen), 'exec', '-T', service, *command], text=True, capture_output=True)
         return run.returncode, run.stdout, run.stderr
 
     def pos_restart(self, epoch=2):
@@ -1013,7 +1131,7 @@ class Rehearsal:
         self.expect(len(samples) == 4 and all(len(x['roots']) == self.n and all('round' in r for r in x['roots'].values()) for x in samples), 'four samples, each with every root\'s certified head')
         first, last = (max(r['round'] for r in samples[i]['roots'].values()) for i in (0, -1))
         self.expect(last > first, 'the certified round moved between the first and the last sample', f'{first} -> {last}')
-        declared = set(json.loads((self.gen / 'compose.yaml').read_text())['services']) - {'signer'}
+        declared = set(handoff_ops.load_compose(self.gen)['services']) - {'signer'}
         self.expect(all(set(x['services']) == declared and not x['missing'] and all(v['state'] == 'running' for v in x['services'].values()) for x in samples),
                     'every declared service (but the signer, not started) was seen running in every sample', str(sorted(declared - set(samples[0]['services']))))
         blocks = [x['gateway']['block'] for x in samples]
@@ -1143,10 +1261,15 @@ class Rehearsal:
 
 STAGES = (('up', 'up'), ('identity', 'identity'), ('first-tx', 'first_tx'), ('gateway-limits', 'gateway_limits'), ('faucet-guard', 'faucet_guard'), ('load', 'load'), ('observe', 'observe'), ('pod-restart', 'pod_restart'), ('backup-restore', 'backup_restore'), ('reset', 'reset'))
 # run on a generation made with --pos (the workflow's second generation); not part of the default list
+Rehearsal.pos_resources = pos_sample.pos_resources   # the runner resource smoke lives in pos_sample.py (opt-in until it has run)
 Rehearsal.pos_observe = pos_sample.pos_observe   # the sampler smoke lives in pos_sample.py
-Rehearsal.pos_joiner = pos_join.pos_joiner   # the joiner stage lives in pos_join.py; it is not in the default list (it needs its own fresh generation)
+for _method, _stage in pos_crash.METHODS.items():   # the OPT-IN crash-recovery stages live in pos_crash.py (bft-core #843)
+    setattr(Rehearsal, _method, _stage)
+Rehearsal.pos_join_heavy = pos_join.pos_join_heavy
+Rehearsal.pos_join_signs = pos_join.pos_join_signs
+Rehearsal.pos_joiner = pos_join.pos_joiner   # the joiner stages live in pos_join.py; they are not in the default list of the main generation (the join has its own)
 Rehearsal.pos_owner = pos_owner.pos_owner   # the owner-key stage lives in pos_owner.py
-POS_STAGES = (('pos-smoke', 'pos_smoke'), ('pos-observe', 'pos_observe'), ('pos-rewards', 'pos_rewards'), ('pos-election', 'pos_election'), ('pos-proposal', 'pos_proposal'), ('pos-abort', 'pos_abort'), ('pos-propose', 'pos_propose'), ('pos-too-late', 'pos_too_late'), ('pos-install', 'pos_install'), ('pos-advance', 'pos_advance'), ('pos-restart', 'pos_restart'), ('pos-stale', 'pos_stale'), ('pos-handoff-2', 'pos_handoff_2'), ('pos-restart-2', 'pos_restart_2'), ('pos-recreate', 'pos_recreate'), ('pos-owner', 'pos_owner'), ('pos-joiner', 'pos_joiner'))
+POS_STAGES = (('pos-smoke', 'pos_smoke'), ('pos-observe', 'pos_observe'), ('pos-rewards', 'pos_rewards'), ('pos-joiner', 'pos_joiner'), ('pos-election', 'pos_election'), ('pos-proposal', 'pos_proposal'), ('pos-abort', 'pos_abort'), ('pos-propose', 'pos_propose'), ('pos-too-late', 'pos_too_late'), ('pos-install', 'pos_install'), ('pos-advance', 'pos_advance'), ('pos-join-signs', 'pos_join_signs'), ('pos-restart', 'pos_restart'), ('pos-join-heavy', 'pos_join_heavy'), ('pos-stale', 'pos_stale'), ('pos-handoff-2', 'pos_handoff_2'), ('pos-restart-2', 'pos_restart_2'), ('pos-recreate', 'pos_recreate'), *pos_crash.STAGES, ('pos-resources', 'pos_resources'), ('pos-owner', 'pos_owner'))
 
 
 def main():
@@ -1158,10 +1281,12 @@ def main():
     for name in ('out', 'ubft', 'b1genesis', 'keygen', 'captcha-sitekey', 'captcha-secret-file'):
         p.add_argument('--reset-' + name, help='the reset stage passes this to generate.py as --' + name + ' (--out: the new generation directory)')
     p.add_argument('--ubft', type=Path, help='the pinned ubft binary, for the handoff stages (they write and read files with it)')
+    p.add_argument('--restore-pin', type=Path, help='scripts/h4-restore-pin built from the pinned source: the joiner\'s shard node is restored from a survivor\'s archive with it')
     p.add_argument('--stages', default=','.join(s for s, _ in STAGES), help='comma separated, in order (the default is the PoA stages; POS_STAGES are named explicitly)')
     a = p.parse_args()
     r = Rehearsal(a.generation, a.evidence, a.cast)
     r.ubft = a.ubft.resolve() if a.ubft else None
+    r.restore_pin = a.restore_pin.resolve() if a.restore_pin else None
     r.pods = tuple(int(x) for x in a.pods.split(',') if x)
     r.reset_args = {k[len('reset_'):]: v for k, v in vars(a).items() if k.startswith('reset_')}
     wanted = a.stages.split(',')

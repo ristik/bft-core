@@ -97,10 +97,12 @@ type frontierSampler struct {
 	runState  atomic.Uint32 // 0 not started, 1 running, 2 stopped
 	eligible  atomic.Bool
 	faulted   atomic.Bool
-	reader    frontierSafetyReader
-	signing   bool
-	author    string
-	signer    abcrypto.Signer
+	// onFirstFault is told the reason of the first latch (set before the manager runs; nil in unit fixtures)
+	onFirstFault func(reason error)
+	reader       frontierSafetyReader
+	signing      bool
+	author       string
+	signer       abcrypto.Signer
 }
 
 func newFrontierSampler(c FrontierSamplerConfig, reader frontierSafetyReader) (*frontierSampler, error) {
@@ -132,10 +134,13 @@ func newFrontierSampler(c FrontierSamplerConfig, reader frontierSafetyReader) (*
 	return &frontierSampler{trust: &trust, scheme: c.Signing, trustHash: sha256.Sum256(ownedEncoding), requests: make(chan frontierRequest, c.QueueSize), pending: make(chan struct{}, c.MaxPending), stopped: make(chan struct{}), reader: reader}, nil
 }
 
-func (s *frontierSampler) latchFault() {
+func (s *frontierSampler) latchFault(reason error) {
 	if s != nil {
-		s.faulted.Store(true)
+		first := !s.faulted.Swap(true)
 		s.eligible.Store(false)
+		if first && s.onFirstFault != nil {
+			s.onFirstFault(reason)
+		}
 	}
 }
 

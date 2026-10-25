@@ -490,3 +490,19 @@ func TestFrontierSamplerTimeoutWriteFailureIsStickyThroughLoop(t *testing.T) {
 	_, err := h.cm.SampleFrontier(context.Background(), h.request(t))
 	require.ErrorIs(t, err, ErrFrontierUnavailable)
 }
+
+// The first latch of the frontier fault is reported once, with its reason: the root refuses frontier replies from then on until it restarts, and
+// later latches change nothing.
+func TestFrontierFaultLatchReportsTheFirstReasonOnce(t *testing.T) {
+	var reasons []error
+	s := &frontierSampler{onFirstFault: func(reason error) { reasons = append(reasons, reason) }}
+	s.eligible.Store(true)
+	first, second := errors.New("first"), errors.New("second")
+	s.latchFault(first)
+	s.latchFault(second)
+	require.True(t, s.faulted.Load())
+	require.False(t, s.eligible.Load())
+	require.Equal(t, []error{first}, reasons, "only the first latch is reported")
+
+	(&frontierSampler{}).latchFault(first) // no hook (a unit fixture): latches without reporting
+}

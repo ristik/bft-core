@@ -2,6 +2,7 @@ package consensus
 
 import (
 	"errors"
+	"fmt"
 
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/storage"
 	drctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
@@ -37,7 +38,7 @@ var _ interface {
 
 func (s *frontierPersistentStore) fault(err error) error {
 	if err != nil {
-		s.sampler.latchFault()
+		s.sampler.latchFault(fmt.Errorf("safety store write: %w", err))
 	}
 	return err
 }

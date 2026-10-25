@@ -14,6 +14,7 @@ import json
 import os
 import re
 import subprocess
+import time
 from pathlib import Path
 
 import handoff_ops
@@ -62,6 +63,13 @@ def pos_joiner(r):
     index = info['index']
     r.say(f'  joiner entity {index}: root {info["root"]}, evm {info["evm"]}')
     val = r.gen / f'validator{index}'
+    # the joiner's authority starts at the scope of the epoch it will sign in (see joiner.set_scope): the successor trust base, over the five roots, exists first
+    r.n = index
+    r.joiners.add(index)
+    r.next_trust_base()
+    work = r.gen / 'network' / 'handoff'
+    subprocess.run(['chmod', '-R', 'a+rX', str(work)], check=True)
+    joiner_lib.set_scope(r.gen, index, r.target, r.successor_shard_epoch(), f'/network/handoff/trust-base-epoch{r.target}.json')
     compose(r, 'up', '-d', '--no-deps', f'authority{index}')
     auth = f'authority{index}'
     operator = ['--operator-socket', '/authority/operator.sock', '--operator-credential', '/authority/operator.cred']
@@ -84,12 +92,12 @@ def pos_joiner(r):
     r.expect(status == 0, 'join register: the joiner has a custody identity', out.strip()[-300:])
     found = re.search(r'custody id (\d+)', out)   # the relayer prints the id on stderr
     ident = int(found.group(1)) if found else 0
-    r.expect(ident > r.n, f'the new identity is numbered after the {r.n} genesis identities', str(ident))
+    r.expect(ident > index - 1, f'the new identity is numbered after the {index - 1} genesis identities', str(ident))
     status, out = r.relayer(identity, 'join', 'bond', '--id', str(ident), '--value-wei', str(BOND_UNIT), *evm, joiner=True, mounts=mounts)
     r.expect(status == 0, 'join bond: one lot of one bond unit', out.strip()[-300:])
     status, out = r.relayer(identity, 'join', 'admit', '--id', str(ident), *evm, joiner=True, mounts=mounts)
     r.expect(status == 0, 'join admit: the delegation to the joiner\'s root and EVM keys', out.strip()[-300:])
-    r.wait('the live index holds five identities', lambda: r.view(election, 'liveCount()(uint32)')[0] == r.n + 1, 120)
+    r.wait('the live index holds five identities', lambda: r.view(election, 'liveCount()(uint32)')[0] == index, 120)
     r.expect(r.view_text(election, 'isIndexed(uint64)(bool)', str(ident)).strip() == 'true', 'the joiner is in the live index', str(ident))
     lots = r.view_text(custody, 'generationLots(uint64,uint64)(uint256[])', str(ident), '1').strip('[]').replace(',', ' ').split()
     r.expect(len(lots) == 1, 'the joiner has one lot (lMax 1)', str(lots))
@@ -99,7 +107,7 @@ def pos_joiner(r):
     # --- part 3: the follower -----------------------------------------------------------------------------------------------------
     compose(r, 'up', '-d', '--no-deps', f'pod{index}', f'ureth{index}')
     compose(r, 'up', '-d', '--no-deps', f'metrics{index}', f'root{index}')
-    transport = handoff_ops.DockerTransport(r.gen, override=r.gen / 'compose.joiner.json')
+    transport = handoff_ops.DockerTransport(r.gen)
     def follower():
         try:
             code, body = transport.post(index, '/api/v1/q3/status', b'{}')
@@ -107,4 +115,111 @@ def pos_joiner(r):
         except (handoff_ops.HandoffError, ValueError):
             return False
     r.expect(r.wait('the joiner\'s root reports itself a follower', follower, 180), 'the joiner\'s root is a follower of the genesis epoch (not a member)')
+    # the joiner's shard node: staging-only until the Commit enrolls its authority (it holds no session yet). A genesis configuration does not name it; what it does at
+    # start is recorded either way
+    compose(r, 'up', '-d', '--no-deps', f'shard{index}')
+    time.sleep(15)   # a start that is refused exits within seconds: look after that
+    running = f'shard{index}' in compose(r, 'ps', '--status', 'running', '--services').split()
+    logs = compose(r, 'logs', '--no-color', '--tail', '40', f'shard{index}', check=False)
+    (r.evidence / f'shard{index}-start.log').write_text(logs)
+    r.say(f'  shard{index} after 15 s: {"running" if running else "NOT running"}; last lines: ' + ' | '.join(logs.strip().splitlines()[-4:])[-600:])
+    r.expect(running, f'the joiner\'s shard node stays up as a staging-only node', logs.strip()[-600:])
+    r.n = index   # from here every stage of this run counts the joiner: its services are in compose_files, its pod in the transport
+    r.joiners.add(index)   # but not as a member of the committee that certifies: it follows until the handoff that names it activates
 
+
+
+def pos_join_signs(r):
+    """After the handoff to five (pos-advance in a run with pos-joiner): the joiner is a member. Four of five roots are the quorum (unit weights), so with root 2 stopped
+    all of roots 1, 3, 4 and 5 are needed: the committed round must advance at the new epoch with the joiner's root among the four signers. Root 2 is then started
+    again and the five converge. A sampled stored certificate would not show that the joiner signs (the other roots certify without it); this does."""
+    joiner = json.loads((r.evidence / 'joiner.json').read_text())
+    transport = handoff_ops.DockerTransport(r.gen)
+    members = list(range(1, r.n + 1))
+    r.expect(len(members) == 5 and not r.joiners, 'five members, no joiner left (pos-advance activated the successor committee)', str(members))
+    r.expect(all(r.root_epoch(i, transport) == r.target for i in members), f'all five roots certify at epoch {r.target}')
+    def signers(i):
+        try:
+            code, body = transport.post(i, '/api/v1/q3/signers', b'{}')
+            return json.loads(body) if code == 200 else None
+        except (handoff_ops.HandoffError, ValueError):
+            return None
+    before = signers(1)
+    r.expect(before is not None and before['threshold'] == 4, 'five roots at unit weight: the quorum threshold is 4', json.dumps(before))
+    r.compose('stop', 'root2')
+    try:
+        start = signers(3)['round']
+        def advanced():
+            one, three = signers(1), signers(3)
+            return bool(one and three and one['epoch'] == r.target and three['epoch'] == r.target and one['round'] > start + 3 and three['round'] > start + 3
+                        and three['quorum'] and len(three['signers']) == 4 and joiner['rootNodeId'] in [x['nodeId'] for x in three['signers']])
+        r.wait('with root 2 stopped the committed round advances, signed by the four live roots, the joiner\'s among them', advanced, 240)
+    finally:
+        r.compose('start', 'root2')
+    for i in members:
+        r.wait(f'root {i} certifies at epoch {r.target}', lambda i=i: r.root_epoch(i, transport) == r.target, 180)
+
+
+WEIGHT_CHURN = 4   # ElectionPolicy.Reason: None, InvalidProfile, Cardinality, MembershipChurn, WeightChurn, ReferenceCapacity, ReservationRefused, InternalFailure
+
+
+def pos_join_heavy(r):
+    """Unequal weights on the package (TN-S #437, the design in briefs/tns-joiner-weights-design.md): a SECOND joiner bonds TWO units in its one lot (weight 2) after the
+    committee of five is in place. The election's selection seeds the committee with the incumbents, then outsiders up to nTarget (6), and judges the whole against the
+    incumbent committee: five unit weights to five unit weights and one of weight 2 is D = 2*2/7 = 0.571 > 1/2 (the testnet bound, owner decision 19), so the election records
+    NoCandidate with the reason WeightChurn and the committee of five stays. No handoff is attempted and nothing is installed: this is a refusal, recorded with the contract's
+    own reason. Run after pos-join-signs/pos-restart of the same run. The second joiner needs no signing authority (no handoff names it): its EVM key is a local key."""
+    election, custody = (json.loads((r.gen / 'network' / 'pos-deployment.json').read_text())[k] for k in ('election', 'custody'))
+    r.expect(r.n == 5 and not r.joiners, 'precondition: five members, no joiner pending (the join ran first)')
+    transport = handoff_ops.DockerTransport(r.gen)
+    r.expect(all(r.root_epoch(i, transport) == r.target for i in range(1, 6)), f'all five roots certify at epoch {r.target}')
+    home = r.gen / 'heavy-joiner'
+    home.mkdir(mode=0o700, exist_ok=True)
+    for kind, group in (('root', 'root-node'), ('evm', 'shard-node')):
+        r.host_ubft(group, 'init', '--home', home / kind, '--generate')
+    keys = {kind: json.loads((home / kind / 'keys.json').read_text())['sigKey']['privateKey'] for kind in ('root', 'evm')}
+    node = {kind: r.host_ubft('node-id', '--home', home / kind).strip().splitlines()[-1] for kind in ('root', 'evm')}
+    owner, withdrawal, payee = new_wallet(r), new_wallet(r)['address'], new_wallet(r)['address']
+    identity = home / 'identity.json'
+    fd = os.open(identity, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, 'w') as out:
+        json.dump(dict(joiner_file(owner['private_key'], keys['root'], withdrawal, payee, node['root'], node['evm']), evmKey=keys['evm']), out)
+    r.faucet_send(owner['address'], 2 * BOND_UNIT + 10 ** 18)
+    status, out = r.relayer(identity, 'join', 'register', joiner=True)
+    found = re.search(r'custody id (\d+)', out)
+    r.expect(status == 0 and bool(found), 'join register: the heavy joiner has a custody identity', out.strip()[-300:])
+    ident = int(found.group(1))
+    status, out = r.relayer(identity, 'join', 'bond', '--id', str(ident), '--value-wei', str(2 * BOND_UNIT), joiner=True)
+    r.expect(status == 0, 'join bond: ONE lot of TWO bond units', out.strip()[-300:])
+    status, out = r.relayer(identity, 'join', 'admit', '--id', str(ident), joiner=True)
+    r.expect(status == 0, 'join admit: the delegation (a local EVM key, no handoff will name it)', out.strip()[-300:])
+    r.wait('the live index holds six identities', lambda: r.view(election, 'liveCount()(uint32)')[0] == 6, 120)
+    cursor_before = r.view(election, 'attemptCursor()(uint64)')[0]   # an attempt from here on sees the heavy joiner eligible
+    # The election runs in the system hook, whose events are not in a receipt (run 40097992670: attemptCursor 6, openResult zero, no NoCandidate log): the outcome is read
+    # from its state, the last attempt's stored result: state 2 NoCandidate, and the reason that follows it
+    def outcome():
+        cursor = r.view(election, 'attemptCursor()(uint64)')[0]
+        if cursor <= cursor_before:
+            return None
+        last = r.view_text(election, 'lastAttemptResult()(bytes32)').strip()
+        raw = r.call('eth_call', [{'to': election, 'data': r.cast_run('calldata', 'result(bytes32)', last)}, 'latest'])
+        return {'attempt': cursor, 'result': last, 'state': int(raw[2:66], 16), 'reason': int(raw[66:130], 16)}
+    try:
+        got = r.wait('the election makes an attempt after the heavy joiner is eligible', outcome, 1500)
+    except Exception as error:
+        lines = [f'{k}: {r.view_text(election, sig).strip()}' for k, sig in (('openResult', 'openResult()(bytes32)'), ('attemptCursor', 'attemptCursor()(uint64)'),
+                                                                          ('lastAttemptResult', 'lastAttemptResult()(bytes32)'), ('thresholds', 'thresholds()(uint256,uint256)'),
+                                                                          ('liveCount', 'liveCount()(uint32)'))]
+        lines += [f'registry {k}: {r.view_text(r.REGISTRY, sig).strip()}' for k, sig in (('progress', 'progress()(uint64)'), ('ucTime', 'ucTime()(uint64)'), ('recordCount', 'recordCount()(uint64)'))]
+        lines.append(f'attemptCursor before: {cursor_before}')
+        (r.evidence / 'join-heavy-diagnostics.txt').write_text('\n'.join(lines) + '\n')
+        r.say('  election state at the timeout: ' + ' | '.join(lines)[:1500])
+        raise
+    r.say(f'  the election\'s attempt: {got}')
+    (r.evidence / 'join-heavy.json').write_text(json.dumps(dict(got, stakingId=ident, weightChurn=WEIGHT_CHURN), indent=1) + '\n')
+    r.expect(got['state'] == 2, 'the attempt is a NoCandidate (result state 2), not a reservation', str(got))
+    reason = got['reason']
+    r.expect(reason == WEIGHT_CHURN, f'the reason is WeightChurn ({WEIGHT_CHURN}): five unit weights to five and one of weight 2 is D = 0.571 > 1/2', str(got))
+    zero = '0x' + '00' * 32
+    r.expect(r.view_text(election, 'openResult()(bytes32)').strip() == zero, 'no result is open: nothing was reserved')
+    r.expect(all(r.root_epoch(i, transport) == r.target for i in range(1, 6)), 'the committee of five still certifies at the same epoch')

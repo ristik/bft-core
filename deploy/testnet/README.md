@@ -283,6 +283,12 @@ The sampler is `observe.py` (read-only: no key, credential or signing method): `
 
 For a generation made with `--pos`, `pos_sample.py` (same options, same read-only rule, reuses `observe.collect` and `observe.Watch`) adds the contracts' clock and books to every sample, read through the gateway: the registry's `progress()`, `ucTime()`, `recordCount()`, the custody's `recordCursor()`, the election's `thresholds()`, `openResult()`, `liveCount()`, and the reward pool's balance, `available()`, `totalCredits()`, `accounted()`, `nextStart()`. Extra alerts: registry progress stopped (`--stall`), the custody behind the registry's record count for more than `--lag` s, an election result open for more than `--open-limit` s (while one is open the pool closes the tail only up to the reservation progress, contracts#72), the pool holding less than it has accounted for, no funded balance left, an unreadable view. On a rehearsal runner use `--no-faucet`; the gateway needs the forwarded address, which the sampler sets. The rehearsal stage `pos-observe` runs it for two samples against the running package. It samples the package where it runs; it says nothing about a host unless it runs on that host.
 
+The hosted-runner rehearsal (`.github/workflows/testnet-rehearsal.yml`) runs THREE generations in turn, each a fresh `generate.py` output on the same host ports (the previous one is stopped
+first): the PoA package (up, identity, first transaction, gateway limits, faucet guard, load, observation smoke, pod restart, backup/restore, reset); a PoS package (the 5a smoke, the
+reward pool, the election, the first handoff, Abort before and after H, restarts, stale credentials, the second handoff, recreate without the install flag, the resource smoke and the
+owner-key operations); and a PoS **join** package (a fifth entity registers, bonds and is delegated, the election has five members, the handoff takes it in, its signature is needed for
+the quorum, it restarts, and a weight-2 candidate is refused by the election). The opt-in crash stages (#843) and `pos_stages` dispatches run on the PoS package only.
+
 CI runs gateway refusal/topology tests, existing faucet tests, two fresh genesis
 ceremonies with fixture image IDs, Compose validation, Prometheus rule/config
 validation and RPC-image build. It does not run four ureths. Native previous
