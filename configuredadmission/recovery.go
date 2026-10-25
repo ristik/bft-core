@@ -30,6 +30,14 @@ type RecoveryExecutor interface {
 	CheckBlockBinding(context.Context, shardnode.Block, shardnode.RoundParams) error
 }
 
+// HeadAdmitter is the execution client's restart admission (engineapi.Adapter): after the client restarts, the tokens it restored from disk are
+// not admitted, and it answers SYNCING to every import until this node has re-authenticated its canonical head from its own trust
+// (engine_admitParentV1). Executors without a paired execution client do not have it.
+type HeadAdmitter interface {
+	PairEnabled() bool
+	AdmitHead(context.Context) error
+}
+
 type RecoveryLimits struct {
 	Blocks   int
 	Bytes    int64
@@ -102,17 +110,19 @@ func (r *ExecutionRecovery) load(ctx context.Context) (recoveryChain, error) {
 	if r.Store == nil && r.snapshot == nil || r.Executor == nil || r.Gate == nil || len(r.Genesis.Hash) != 32 {
 		return recoveryChain{}, fmt.Errorf("%w: incomplete coordinator wiring", ErrRecoveryUnavailable)
 	}
-	var image configuredprogress.JournalSnapshot
-	var err error
-	if r.snapshot != nil {
-		image, err = r.snapshot(ctx)
-	} else {
-		image, err = r.Store.LoadJournal(ctx, r.Context, r.JournalLimits)
-	}
+	image, err := r.loadImage(ctx)
 	if err != nil {
 		return recoveryChain{}, fmt.Errorf("%w: verifying journal: %w", ErrRecoveryUnavailable, err)
 	}
 	return r.chainFromImage(image)
+}
+
+// loadImage reads the verified journal image: the store's, or the deterministic fixture's.
+func (r *ExecutionRecovery) loadImage(ctx context.Context) (configuredprogress.JournalSnapshot, error) {
+	if r.snapshot != nil {
+		return r.snapshot(ctx)
+	}
+	return r.Store.LoadJournal(ctx, r.Context, r.JournalLimits)
 }
 
 func (r *ExecutionRecovery) chainFromImage(image configuredprogress.JournalSnapshot) (recoveryChain, error) {
@@ -282,6 +292,10 @@ func (r *ExecutionRecovery) finality(ctx context.Context, c recoveryChain) (shar
 		return f, fmt.Errorf("%w: finalized identity unavailable: %w", ErrRecoveryUnavailable, err)
 	}
 	if _, ok := c.index(f); !ok {
+		if f.Number < c.base.Number {
+			// below what the journal retains: the archive holds the history in between, whether this block is on it is for replayPrefix to prove
+			return f, fmt.Errorf("%w: %w: finalized %d/%x, retained base %d/%x", ErrRecoveryUnavailable, errBehindBase, f.Number, f.Hash, c.base.Number, c.base.Hash)
+		}
 		return f, fmt.Errorf("%w: finalized %d/%x is outside certified chain to %d/%x", ErrRecoveryConflict, f.Number, f.Hash, c.anchor.Number, c.anchor.Hash)
 	}
 	return f, nil
@@ -313,7 +327,11 @@ func (r *ExecutionRecovery) Recover(ctx context.Context, held *types.UnicityCert
 		trace.acquire, trace.acquired = time.Since(acquireStart), true
 		if fetchErr != nil {
 			trace.acquireErr = fetchErr.Error()
-			return shardnode.BlockRef{}, fmt.Errorf("%w: peer catch-up: %v", err, fetchErr)
+			if errors.Is(fetchErr, ErrRecoveryConflict) {
+				// a proven conflict is not "certified input unavailable": health must tell them apart
+				return shardnode.BlockRef{}, fmt.Errorf("peer catch-up after %v: %w", err, fetchErr)
+			}
+			return shardnode.BlockRef{}, fmt.Errorf("%w: peer catch-up: %w", err, fetchErr)
 		}
 		c, err = r.load(ctx)
 		if err != nil {
@@ -338,6 +356,15 @@ func (r *ExecutionRecovery) recoverChain(ctx context.Context, c recoveryChain, c
 	}
 	finStart := time.Now()
 	f, err := r.finality(ctx, c)
+	if errors.Is(err, errBehindBase) {
+		if err = r.replayPrefix(ctx, c, head, f); err != nil {
+			return head, err
+		}
+		if head, err = r.Executor.Head(ctx); err != nil {
+			return head, fmt.Errorf("%w: executor head RPC: %w", ErrRecoveryUnavailable, err)
+		}
+		f, err = r.finality(ctx, c)
+	}
 	if d := headTook + time.Since(finStart); d >= slowRecoveryStep && r.Log != nil {
 		r.Log.LogAttrs(ctx, slog.LevelDebug, "recovery: slow executor reads", slog.Duration("head", headTook), slog.Duration("finality", time.Since(finStart)))
 	}
@@ -367,6 +394,9 @@ func (r *ExecutionRecovery) recoverChain(ctx context.Context, c recoveryChain, c
 		return c.anchor, nil
 	}
 	if !errors.Is(err, ErrRecoveryUnavailable) {
+		return head, err
+	}
+	if err = r.admitHead(ctx, head); err != nil {
 		return head, err
 	}
 	var used int64
@@ -426,10 +456,10 @@ func (r *ExecutionRecovery) recoverChain(ctx context.Context, c recoveryChain, c
 // A response is only a source of bytes: every link, both UC/TR pairs, the raw
 // header hash, and adapter execution are checked before journal backfill.
 func (r *ExecutionRecovery) acquireMissing(ctx context.Context) error {
-	if r.Store == nil {
+	if r.Store == nil && r.snapshot == nil {
 		return ErrRecoveryUnavailable
 	}
-	image, err := r.Store.LoadJournal(ctx, r.Context, r.JournalLimits)
+	image, err := r.loadImage(ctx)
 	if err != nil {
 		return err
 	}
@@ -463,6 +493,9 @@ func (r *ExecutionRecovery) acquireMissing(ctx context.Context) error {
 	}
 	if finalized.Number <= partial.anchor.Number {
 		if _, err = r.recoverChain(ctx, partial, false); err != nil {
+			if errors.Is(err, ErrRecoveryConflict) {
+				return fmt.Errorf("reaching retained ancestor %x: %w", partial.anchor.Hash, err)
+			}
 			return fmt.Errorf("%w: reaching retained ancestor %x: %w", ErrRecoveryUnavailable, partial.anchor.Hash, err)
 		}
 	}
@@ -683,53 +716,14 @@ func (r *ExecutionRecovery) admitFetched(ctx context.Context, after shardnode.Bl
 			return err
 		}
 		b := e.Block
-		if len(b.Raw) == 0 || len(b.Raw) > configuredprogress.MaxCandidateBytes || len(b.Hash) != 32 || len(b.StateRoot) != 32 || len(b.ParentHash) != 32 || len(e.ParentState) != 32 {
-			return fmt.Errorf("%w: peer candidate has invalid body or identity bounds", ErrRecoveryUnavailable)
+		if err := checkEntryBounds(e); err != nil {
+			return err
 		}
 		total += int64(len(b.Raw))
 		if total > r.limits().Bytes {
 			return fmt.Errorf("%w: peer suffix exceeds byte limit", ErrRecoveryBudget)
 		}
-		if b.Number != parent.Number+1 || !bytes.Equal(b.ParentHash, parent.Hash) || !bytes.Equal(e.ParentState, parent.StateRoot) {
-			return fmt.Errorf("%w: peer suffix broken at %d/%x", ErrRecoveryConflict, b.Number, b.Hash)
-		}
-		if e.AuthorizingUC == nil || e.AuthorizingTR == nil || e.ResultingUC == nil || e.ResultingTR == nil {
-			return fmt.Errorf("%w: missing original or resulting UC/TR for %x", ErrRecoveryUnavailable, b.Hash)
-		}
-		if _, err := rootinput.AuthenticateHistoricalObservationV2(ctx, r.Context.Observation, e.AuthorizingUC, e.AuthorizingTR); err != nil {
-			return fmt.Errorf("%w: original authorization for %x: %w", ErrRecoveryConflict, b.Hash, err)
-		}
-		if _, err := rootinput.AuthenticateHistoricalObservationV2(ctx, r.Context.Observation, e.ResultingUC, e.ResultingTR); err != nil {
-			return fmt.Errorf("%w: resulting certificate for %x: %w", ErrRecoveryConflict, b.Hash, err)
-		}
-		if rootinput.CheckEpochCertificates(e.AuthorizingUC, e.ResultingUC) != nil || !rootPositionAfter(e.ResultingUC.GetRootEpoch(), e.ResultingUC.GetRootRoundNumber(), e.AuthorizingUC.GetRootEpoch(), e.AuthorizingUC.GetRootRoundNumber()) {
-			return fmt.Errorf("%w: authorizing and resulting certificates for %x do not share a forward root history", ErrRecoveryConflict, b.Hash)
-		}
-		ir := e.ResultingUC.InputRecord
-		if e.Round != e.AuthorizingTR.Round || ir == nil || ir.RoundNumber != e.Round || !bytes.Equal(ir.BlockHash, b.Hash) || !bytes.Equal(ir.Hash, b.StateRoot) {
-			return fmt.Errorf("%w: certificate/body association for %x", ErrRecoveryConflict, b.Hash)
-		}
-		if !bytes.Equal(e.AuthorizingUC.InputRecord.Hash, parent.StateRoot) && parent.Number > 0 {
-			return fmt.Errorf("%w: authorizing state differs from parent %x", ErrRecoveryConflict, parent.Hash)
-		}
-		seal, err := shardnode.SealHash(e.AuthorizingUC)
-		if err != nil {
-			return err
-		}
-		p := shardnode.RoundParams{Round: e.Round, Epoch: e.AuthorizingTR.Epoch, Timestamp: e.AuthorizingUC.UnicitySeal.Timestamp, SealHash: seal, Leader: e.AuthorizingTR.Leader, Parent: parent, AuthorizingCertificate: e.AuthorizingUC, AuthorizingTechnicalRecord: e.AuthorizingTR}
-		bindingCtx := ctx
-		if historical, ok := r.Executor.(interface {
-			HistoricalContext(context.Context) context.Context
-		}); ok {
-			bindingCtx = historical.HistoricalContext(ctx)
-		}
-		if err := r.Executor.CheckBlockBinding(bindingCtx, b, p); err != nil {
-			if errors.Is(err, shardnode.ErrBlockBindingUnavailable) {
-				return fmt.Errorf("%w: fetched block binding for %x: %w", ErrRecoveryUnavailable, b.Hash, err)
-			}
-			return fmt.Errorf("%w: fetched block binding for %x: %w", ErrRecoveryInvalid, b.Hash, err)
-		}
-		if err := r.status(ctx, fmt.Sprintf("fetched Verify %d/%x", b.Number, b.Hash), func() (shardnode.Status, error) { return r.Executor.Verify(bindingCtx, b, p) }); err != nil {
+		if _, _, err := r.verifyFetched(ctx, parent, e); err != nil {
 			return err
 		}
 		candidate := configuredprogress.JournalCandidate{Round: e.Round, Number: b.Number, ParentNumber: parent.Number, Hash: b.Hash, StateRoot: b.StateRoot, ParentHash: b.ParentHash, ParentState: e.ParentState, Raw: b.Raw, BlockSize: b.BlockSize, StateSize: b.StateSize, AuthorizingUC: e.AuthorizingUC, AuthorizingTR: e.AuthorizingTR}
@@ -780,6 +774,68 @@ func (r *ExecutionRecovery) admitFetched(ctx context.Context, after shardnode.Bl
 		}
 	}
 	return nil
+}
+
+// checkEntryBounds refuses a fetched entry whose body or identity fields are out of bounds.
+func checkEntryBounds(e shardnode.JournalFetchEntry) error {
+	b := e.Block
+	if len(b.Raw) == 0 || len(b.Raw) > configuredprogress.MaxCandidateBytes || len(b.Hash) != 32 || len(b.StateRoot) != 32 || len(b.ParentHash) != 32 || len(e.ParentState) != 32 {
+		return fmt.Errorf("%w: peer candidate has invalid body or identity bounds", ErrRecoveryUnavailable)
+	}
+	return nil
+}
+
+// verifyFetched is the part of admitting a fetched entry that touches no store: the link to parent, both certificate pairs against the
+// historical context, the certificate/body association, the block binding and the execution client's Verify. Replaying the archived prefix
+// below the journal's base shares it with admission (#843); admission then writes the entry, the prefix replay does not.
+func (r *ExecutionRecovery) verifyFetched(ctx context.Context, parent shardnode.BlockRef, e shardnode.JournalFetchEntry) (shardnode.Block, shardnode.RoundParams, error) {
+	b := e.Block
+	none := func(err error) (shardnode.Block, shardnode.RoundParams, error) {
+		return shardnode.Block{}, shardnode.RoundParams{}, err
+	}
+	if b.Number != parent.Number+1 || !bytes.Equal(b.ParentHash, parent.Hash) || !bytes.Equal(e.ParentState, parent.StateRoot) {
+		return none(fmt.Errorf("%w: peer suffix broken at %d/%x", ErrRecoveryConflict, b.Number, b.Hash))
+	}
+	if e.AuthorizingUC == nil || e.AuthorizingTR == nil || e.ResultingUC == nil || e.ResultingTR == nil {
+		return none(fmt.Errorf("%w: missing original or resulting UC/TR for %x", ErrRecoveryUnavailable, b.Hash))
+	}
+	if _, err := rootinput.AuthenticateHistoricalObservationV2(ctx, r.Context.Observation, e.AuthorizingUC, e.AuthorizingTR); err != nil {
+		return none(fmt.Errorf("%w: original authorization for %x: %w", ErrRecoveryConflict, b.Hash, err))
+	}
+	if _, err := rootinput.AuthenticateHistoricalObservationV2(ctx, r.Context.Observation, e.ResultingUC, e.ResultingTR); err != nil {
+		return none(fmt.Errorf("%w: resulting certificate for %x: %w", ErrRecoveryConflict, b.Hash, err))
+	}
+	if rootinput.CheckEpochCertificates(e.AuthorizingUC, e.ResultingUC) != nil || !rootPositionAfter(e.ResultingUC.GetRootEpoch(), e.ResultingUC.GetRootRoundNumber(), e.AuthorizingUC.GetRootEpoch(), e.AuthorizingUC.GetRootRoundNumber()) {
+		return none(fmt.Errorf("%w: authorizing and resulting certificates for %x do not share a forward root history", ErrRecoveryConflict, b.Hash))
+	}
+	ir := e.ResultingUC.InputRecord
+	if e.Round != e.AuthorizingTR.Round || ir == nil || ir.RoundNumber != e.Round || !bytes.Equal(ir.BlockHash, b.Hash) || !bytes.Equal(ir.Hash, b.StateRoot) {
+		return none(fmt.Errorf("%w: certificate/body association for %x", ErrRecoveryConflict, b.Hash))
+	}
+	if !bytes.Equal(e.AuthorizingUC.InputRecord.Hash, parent.StateRoot) && parent.Number > 0 {
+		return none(fmt.Errorf("%w: authorizing state differs from parent %x", ErrRecoveryConflict, parent.Hash))
+	}
+	seal, err := shardnode.SealHash(e.AuthorizingUC)
+	if err != nil {
+		return none(err)
+	}
+	p := shardnode.RoundParams{Round: e.Round, Epoch: e.AuthorizingTR.Epoch, Timestamp: e.AuthorizingUC.UnicitySeal.Timestamp, SealHash: seal, Leader: e.AuthorizingTR.Leader, Parent: parent, AuthorizingCertificate: e.AuthorizingUC, AuthorizingTechnicalRecord: e.AuthorizingTR}
+	bindingCtx := ctx
+	if historical, ok := r.Executor.(interface {
+		HistoricalContext(context.Context) context.Context
+	}); ok {
+		bindingCtx = historical.HistoricalContext(ctx)
+	}
+	if err := r.Executor.CheckBlockBinding(bindingCtx, b, p); err != nil {
+		if errors.Is(err, shardnode.ErrBlockBindingUnavailable) {
+			return none(fmt.Errorf("%w: fetched block binding for %x: %w", ErrRecoveryUnavailable, b.Hash, err))
+		}
+		return none(fmt.Errorf("%w: fetched block binding for %x: %w", ErrRecoveryInvalid, b.Hash, err))
+	}
+	if err := r.status(ctx, fmt.Sprintf("fetched Verify %d/%x", b.Number, b.Hash), func() (shardnode.Status, error) { return r.Executor.Verify(bindingCtx, b, p) }); err != nil {
+		return none(err)
+	}
+	return b, p, nil
 }
 
 func (r *ExecutionRecovery) commit(ctx context.Context, target shardnode.BlockRef) error {

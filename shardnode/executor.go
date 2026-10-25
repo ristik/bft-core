@@ -24,6 +24,10 @@ type Hash []byte
 // without treating the peer's certified body as invalid.
 var ErrBlockBindingUnavailable = errors.New("shardnode: block binding prerequisite unavailable")
 
+// ErrCertifiedChainForksAnchor marks a verified certified chain that passes an anchor's height without containing the anchor: the anchor (an
+// execution client's finalized block, say) is not on the certified chain, which is a proven conflict and not missing history (#843).
+var ErrCertifiedChainForksAnchor = errors.New("shardnode: certified chain does not contain the anchor")
+
 // ErrLeaderProposalConflict means a different local proposal was already
 // journaled for this authorization. The round must abstain without stopping.
 var ErrLeaderProposalConflict = errors.New("shardnode: leader proposal already retained")

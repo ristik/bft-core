@@ -342,3 +342,70 @@ func TestArchiveCatchUp_AfterTheNodeHoldsTheNewCertificate(t *testing.T) {
 	n.catchUp(t, p, gap, 40)
 	require.EqualValues(t, gap, n.exec.finalized.Number, "the executor is finalized at the target")
 }
+
+// TestArchiveCatchUp_AForkedFinalizedBlockFoundThroughThePlanIsAConflict: bft-core#843, rev's #862 item. An execution client comes back with a
+// finalized block far below the journal's base (a gap longer than one recovery, so the replay goes through the catch-up plan) and that block
+// is not on the certified chain: the plan's verified walk proves it, and the coordinator ends in the terminal conflict with nothing moved.
+func TestArchiveCatchUp_AForkedFinalizedBlockFoundThroughThePlanIsAConflict(t *testing.T) {
+	t.Parallel()
+	const gap = 29
+	p := newPlanFixture(t, gap)
+	p.serve(t, 1, gap)
+	n := newReturningNode(t, p, map[string]*archive.Store{replicaA: p.replica, replicaB: p.second})
+	n.catchUp(t, p, gap, 40)
+	image, err := n.store.LoadJournal(context.Background(), p.f.context, n.limits)
+	require.NoError(t, err)
+	require.NotNil(t, image.Frontier)
+	require.Greater(t, image.Frontier.Anchor.Height, uint64(10), "the journal's base is far above the fork")
+
+	// the production wiring maps a suffix that is too long to the unavailable class, which sends the replay to the plan
+	n.recovery.FetchArchive = func(ctx context.Context, after shardnode.BlockRef, target []byte) ([]shardnode.JournalFetchEntry, error) {
+		entries, err := p.source.FetchSuffix(ctx, after, target)
+		if errors.Is(err, ErrArchiveSuffixTooLong) {
+			return nil, errors.Join(configuredadmission.ErrRecoveryUnavailable, err)
+		}
+		if errors.Is(err, ErrArchiveRecoveryInvalid) {
+			return nil, errors.Join(configuredadmission.ErrRecoveryInvalid, err)
+		}
+		return entries, err
+	}
+	forked := shardnode.BlockRef{Number: 2, Hash: bytes.Repeat([]byte{9}, 32), StateRoot: p.ref(2).StateRoot}
+	n.exec.head, n.exec.finalized = forked, forked
+	_, err = n.recovery.Recover(context.Background(), p.f.entries[gap-1].ResultingUC)
+	require.ErrorIs(t, err, configuredadmission.ErrRecoveryConflict)
+	require.ErrorIs(t, err, shardnode.ErrCertifiedChainForksAnchor)
+	require.True(t, n.recovery.Terminal(err))
+	require.Equal(t, forked, n.exec.finalized, "finality never retreats or moves on a conflict")
+	require.Equal(t, forked, n.exec.head)
+}
+
+// TestArchiveCatchUp_LeavesRoomForTheLiveFollower: bft-core#843. A catch-up that fills the journal exactly leaves the next live follower
+// candidate no slot, and a journal at its limit stops the node for good (rejoined nodes in the pos-crash runs never signed again). After
+// every call the journal keeps free slots, also while it waits for archive copies.
+func TestArchiveCatchUp_LeavesRoomForTheLiveFollower(t *testing.T) {
+	t.Parallel()
+	const gap = 29
+	p := newPlanFixture(t, gap)
+	p.serve(t, 1, gap)
+	n := newReturningNode(t, p, map[string]*archive.Store{replicaA: p.replica, replicaB: p.second})
+	ctx := context.Background()
+	target := p.f.entries[gap-1]
+	headroom := returningLimits.Candidates / 4 // the coordinator's quarter of the journal
+	maxUsed := 0
+	for call := 1; call <= 40; call++ {
+		err := n.recovery.AcquireForCertificate(ctx, target.ResultingUC, target.ResultingTR)
+		image, loadErr := n.store.LoadJournal(ctx, p.f.context, n.limits)
+		require.NoError(t, loadErr)
+		maxUsed = max(maxUsed, len(image.Candidates))
+		require.LessOrEqual(t, len(image.Candidates), n.limits.Candidates-headroom, "call %d: the journal keeps room for the live follower", call)
+		if err == nil {
+			break
+		}
+		require.ErrorIs(t, err, configuredadmission.ErrRecoveryUnavailable)
+		require.False(t, n.recovery.Terminal(err), "call %d: %v", call, err)
+	}
+	head, err := n.recovery.Recover(ctx, target.ResultingUC)
+	require.NoError(t, err)
+	require.EqualValues(t, gap, head.Number)
+	require.Greater(t, maxUsed, 0)
+}
