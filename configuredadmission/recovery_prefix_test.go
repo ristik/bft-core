@@ -380,11 +380,24 @@ func TestRecoveryAdmitsTheRestartedClientsHeadBeforeImporting(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, p.refs[5], head)
 		require.Equal(t, "admit", e.events[0], "the head is admitted before any import")
-		require.Equal(t, 1, e.admitCall)
-		// the coordinator moved the client itself: no second admission on the next call
-		_, err = r.Recover(context.Background(), nil)
+		require.GreaterOrEqual(t, e.admitCall, 1)
+	})
+	t.Run("a client killed after saving exactly the head the coordinator moved it to restarts unadmitted at it", func(t *testing.T) {
+		p := newPrefixNet(t, 6, 3)
+		full := p.image
+		p.image.Candidates = full.Candidates[:2] // blocks 4 and 5
+		p.image.Observations = []configuredprogress.JournalObservation{{UC: p.uc[5], TargetHash: p.refs[5].Hash}}
+		r, e := p.restarted(1)
+		_, err := r.Recover(context.Background(), nil)
 		require.NoError(t, err)
-		require.Equal(t, 1, e.admitCall)
+		require.Equal(t, p.refs[5], e.head)
+		// ureth is killed after it saved block 5 and restarts at 5, unadmitted; block 6 is certified meanwhile
+		e.admitted, e.events = false, nil
+		p.image = full
+		head, err := r.Recover(context.Background(), nil)
+		require.NoError(t, err)
+		require.Equal(t, p.refs[6], head)
+		require.Equal(t, []string{"admit", "verify 6"}, e.events, "admitted again before the import, although 5 is where the coordinator left the client")
 	})
 	t.Run("suffix replay within the retained journal", func(t *testing.T) {
 		p := newPrefixNet(t, 5, 3)
@@ -410,7 +423,7 @@ func TestRecoveryAdmitsTheRestartedClientsHeadBeforeImporting(t *testing.T) {
 		e.admitErr = nil
 		_, err = r.Recover(context.Background(), nil)
 		require.NoError(t, err)
-		require.Equal(t, 2, e.admitCall)
+		require.GreaterOrEqual(t, e.admitCall, 2, "the failed admission is retried")
 	})
 	t.Run("an executor without a paired client is not asked", func(t *testing.T) {
 		p := newPrefixNet(t, 5, 3)

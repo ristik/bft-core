@@ -84,7 +84,6 @@ type ExecutionRecovery struct {
 	catchUpRefused  map[peer.ID]time.Time // providers whose tail's top failed the walk at its first record, and when (rev2 B2)
 	catchUpWarned   []byte                // the target of the last catch-up warning, and when it was logged
 	catchUpWarnedAt time.Time             // (one a minute per target)
-	knownHead       shardnode.Hash        // the execution head this coordinator last moved the client to or admitted: no restart admission is needed to import on it
 }
 
 var (
@@ -852,7 +851,6 @@ func (r *ExecutionRecovery) commit(ctx context.Context, target shardnode.BlockRe
 	head, readErr := r.Executor.Head(ctx)
 	f, finalErr := r.Executor.Finalized(ctx)
 	if readErr == nil && finalErr == nil && equalRef(head, target) && equalRef(f, target) {
-		r.knownHead = bytes.Clone(target.Hash)
 		return nil
 	}
 	if err != nil {
@@ -882,7 +880,6 @@ func (r *ExecutionRecovery) move(ctx context.Context, target, finalized shardnod
 	head, readErr := r.Executor.Head(ctx)
 	f, finalErr := r.Executor.Finalized(ctx)
 	if readErr == nil && finalErr == nil && equalRef(head, target) && equalRef(f, finalized) {
-		r.knownHead = bytes.Clone(target.Hash)
 		return head, nil
 	}
 	if err != nil {

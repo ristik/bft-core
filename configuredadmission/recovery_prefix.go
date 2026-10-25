@@ -1,7 +1,6 @@
 package configuredadmission
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -157,17 +156,17 @@ func (r *ExecutionRecovery) prefixError(cur, base shardnode.BlockRef, err error)
 // admitHead has the restarted execution client's canonical head admitted from this node's own verification before anything is imported on
 // it: a client that restarted holds tokens it restored from disk but has not admitted, and refuses every import (SYNCING, "parent accounting
 // token is not retained") until the node does this; the shard node did it only at its own start, so a client that restarted alone stayed stuck
-// (bft-core#843, a ureth-only kill). It is skipped for a head this coordinator moved the client to itself, and for executors with no paired
-// execution client. A failure leaves signing off and retries: the cause is kept.
+// (bft-core#843, a ureth-only kill). It is not skipped for a head this coordinator moved the client to: a client killed after saving exactly
+// that head restarts unadmitted at it, and nothing here can tell that from a client that did not restart. The admission is a few reads, once
+// per replay. Executors with no paired execution client are not asked. A failure leaves signing off and retries: the cause is kept.
 func (r *ExecutionRecovery) admitHead(ctx context.Context, head shardnode.BlockRef) error {
 	a, ok := r.Executor.(HeadAdmitter)
-	if !ok || !a.PairEnabled() || head.Number == 0 || bytes.Equal(r.knownHead, head.Hash) {
+	if !ok || !a.PairEnabled() || head.Number == 0 {
 		return nil
 	}
 	if err := a.AdmitHead(ctx); err != nil {
 		return fmt.Errorf("%w: restart admission of the execution client's head %d/%x: %w", ErrRecoveryUnavailable, head.Number, head.Hash, err)
 	}
-	r.knownHead = bytes.Clone(head.Hash)
 	if r.Log != nil {
 		r.Log.InfoContext(ctx, "recovery: execution client's head admitted", slog.Uint64("head", head.Number), slog.String("headHash", fmt.Sprintf("%x", head.Hash)))
 	}
