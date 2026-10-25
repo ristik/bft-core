@@ -141,6 +141,443 @@
    ]
   },
   {
+   "name": "skip: a weight-2 outsider alone leaves no feasible change (refused, WeightChurn)",
+   "old": [
+    {
+     "id": 1,
+     "binding": 1,
+     "weight": 1
+    },
+    {
+     "id": 2,
+     "binding": 2,
+     "weight": 1
+    },
+    {
+     "id": 3,
+     "binding": 3,
+     "weight": 1
+    },
+    {
+     "id": 4,
+     "binding": 4,
+     "weight": 1
+    },
+    {
+     "id": 5,
+     "binding": 5,
+     "weight": 1
+    }
+   ],
+   "eligible": [
+    {
+     "id": 1,
+     "binding": 1,
+     "weight": 1
+    },
+    {
+     "id": 2,
+     "binding": 2,
+     "weight": 1
+    },
+    {
+     "id": 3,
+     "binding": 3,
+     "weight": 1
+    },
+    {
+     "id": 4,
+     "binding": 4,
+     "weight": 1
+    },
+    {
+     "id": 5,
+     "binding": 5,
+     "weight": 1
+    },
+    {
+     "id": 6,
+     "binding": 6,
+     "weight": 2
+    }
+   ],
+   "config": {
+    "nMin": 4,
+    "nTarget": 6,
+    "nMax": 16,
+    "maxM": 4,
+    "distNum": 1,
+    "distDen": 2
+   },
+   "reason": 4,
+   "chosen": [],
+   "chosenWeights": []
+  },
+  {
+   "name": "skip: a weight-2 outsider is skipped and the next unit outsider joins",
+   "old": [
+    {
+     "id": 1,
+     "binding": 1,
+     "weight": 1
+    },
+    {
+     "id": 2,
+     "binding": 2,
+     "weight": 1
+    },
+    {
+     "id": 3,
+     "binding": 3,
+     "weight": 1
+    },
+    {
+     "id": 4,
+     "binding": 4,
+     "weight": 1
+    },
+    {
+     "id": 5,
+     "binding": 5,
+     "weight": 1
+    }
+   ],
+   "eligible": [
+    {
+     "id": 1,
+     "binding": 1,
+     "weight": 1
+    },
+    {
+     "id": 2,
+     "binding": 2,
+     "weight": 1
+    },
+    {
+     "id": 3,
+     "binding": 3,
+     "weight": 1
+    },
+    {
+     "id": 4,
+     "binding": 4,
+     "weight": 1
+    },
+    {
+     "id": 5,
+     "binding": 5,
+     "weight": 1
+    },
+    {
+     "id": 6,
+     "binding": 6,
+     "weight": 2
+    },
+    {
+     "id": 7,
+     "binding": 7,
+     "weight": 1
+    }
+   ],
+   "config": {
+    "nMin": 4,
+    "nTarget": 6,
+    "nMax": 16,
+    "maxM": 4,
+    "distNum": 1,
+    "distDen": 2
+   },
+   "reason": 0,
+   "chosen": [
+    1,
+    2,
+    3,
+    4,
+    5,
+    7
+   ],
+   "chosenWeights": [
+    1,
+    1,
+    1,
+    1,
+    1,
+    1
+   ]
+  },
+  {
+   "name": "skip: a weight-3 joiner against four unit members alone is refused (the overbound lane)",
+   "old": [
+    {
+     "id": 1,
+     "binding": 1,
+     "weight": 1
+    },
+    {
+     "id": 2,
+     "binding": 2,
+     "weight": 1
+    },
+    {
+     "id": 3,
+     "binding": 3,
+     "weight": 1
+    },
+    {
+     "id": 4,
+     "binding": 4,
+     "weight": 1
+    }
+   ],
+   "eligible": [
+    {
+     "id": 1,
+     "binding": 1,
+     "weight": 1
+    },
+    {
+     "id": 2,
+     "binding": 2,
+     "weight": 1
+    },
+    {
+     "id": 3,
+     "binding": 3,
+     "weight": 1
+    },
+    {
+     "id": 4,
+     "binding": 4,
+     "weight": 1
+    },
+    {
+     "id": 5,
+     "binding": 5,
+     "weight": 3
+    }
+   ],
+   "config": {
+    "nMin": 4,
+    "nTarget": 6,
+    "nMax": 16,
+    "maxM": 4,
+    "distNum": 1,
+    "distDen": 2
+   },
+   "reason": 4,
+   "chosen": [],
+   "chosenWeights": []
+  },
+  {
+   "name": "skip: a lost incumbent shrinks the committee while the heavy outsider is skipped",
+   "old": [
+    {
+     "id": 1,
+     "binding": 1,
+     "weight": 1
+    },
+    {
+     "id": 2,
+     "binding": 2,
+     "weight": 1
+    },
+    {
+     "id": 3,
+     "binding": 3,
+     "weight": 1
+    },
+    {
+     "id": 4,
+     "binding": 4,
+     "weight": 1
+    },
+    {
+     "id": 5,
+     "binding": 5,
+     "weight": 1
+    }
+   ],
+   "eligible": [
+    {
+     "id": 1,
+     "binding": 1,
+     "weight": 1
+    },
+    {
+     "id": 2,
+     "binding": 2,
+     "weight": 1
+    },
+    {
+     "id": 3,
+     "binding": 3,
+     "weight": 1
+    },
+    {
+     "id": 4,
+     "binding": 4,
+     "weight": 1
+    },
+    {
+     "id": 6,
+     "binding": 6,
+     "weight": 3
+    }
+   ],
+   "config": {
+    "nMin": 4,
+    "nTarget": 6,
+    "nMax": 16,
+    "maxM": 4,
+    "distNum": 1,
+    "distDen": 2
+   },
+   "reason": 0,
+   "chosen": [
+    1,
+    2,
+    3,
+    4
+   ],
+   "chosenWeights": [
+    1,
+    1,
+    1,
+    1
+   ]
+  },
+  {
+   "name": "skip: the incumbents alone break the membership budget",
+   "old": [
+    {
+     "id": 1,
+     "binding": 1,
+     "weight": 1
+    },
+    {
+     "id": 2,
+     "binding": 2,
+     "weight": 1
+    },
+    {
+     "id": 3,
+     "binding": 3,
+     "weight": 1
+    },
+    {
+     "id": 4,
+     "binding": 4,
+     "weight": 1
+    },
+    {
+     "id": 5,
+     "binding": 5,
+     "weight": 1
+    }
+   ],
+   "eligible": [
+    {
+     "id": 1,
+     "binding": 1,
+     "weight": 1
+    },
+    {
+     "id": 2,
+     "binding": 2,
+     "weight": 1
+    },
+    {
+     "id": 6,
+     "binding": 6,
+     "weight": 1
+    },
+    {
+     "id": 7,
+     "binding": 7,
+     "weight": 1
+    },
+    {
+     "id": 8,
+     "binding": 8,
+     "weight": 1
+    }
+   ],
+   "config": {
+    "nMin": 4,
+    "nTarget": 6,
+    "nMax": 16,
+    "maxM": 4,
+    "distNum": 1,
+    "distDen": 2
+   },
+   "reason": 3,
+   "chosen": [],
+   "chosenWeights": []
+  },
+  {
+   "name": "skip: the incumbents left are fewer than the minimum and the outsider is skipped",
+   "old": [
+    {
+     "id": 1,
+     "binding": 1,
+     "weight": 1
+    },
+    {
+     "id": 2,
+     "binding": 2,
+     "weight": 1
+    },
+    {
+     "id": 3,
+     "binding": 3,
+     "weight": 1
+    },
+    {
+     "id": 4,
+     "binding": 4,
+     "weight": 1
+    },
+    {
+     "id": 5,
+     "binding": 5,
+     "weight": 1
+    }
+   ],
+   "eligible": [
+    {
+     "id": 1,
+     "binding": 1,
+     "weight": 1
+    },
+    {
+     "id": 2,
+     "binding": 2,
+     "weight": 1
+    },
+    {
+     "id": 3,
+     "binding": 3,
+     "weight": 1
+    },
+    {
+     "id": 6,
+     "binding": 6,
+     "weight": 3
+    }
+   ],
+   "config": {
+    "nMin": 4,
+    "nTarget": 6,
+    "nMax": 16,
+    "maxM": 4,
+    "distNum": 1,
+    "distDen": 2
+   },
+   "reason": 3,
+   "chosen": [],
+   "chosenWeights": []
+  },
+  {
    "name": "a richer outsider replaces the weakest incumbent",
    "old": [
     {
@@ -4497,9 +4934,35 @@
     "distNum": 1,
     "distDen": 4
    },
-   "reason": 4,
-   "chosen": [],
-   "chosenWeights": []
+   "reason": 0,
+   "chosen": [
+    4,
+    5,
+    12,
+    16,
+    17,
+    18,
+    21,
+    24,
+    26,
+    27,
+    29,
+    33
+   ],
+   "chosenWeights": [
+    7354,
+    1131,
+    3394,
+    6788,
+    2262,
+    10183,
+    11314,
+    2828,
+    7354,
+    1697,
+    9051,
+    1131
+   ]
   },
   {
    "name": "random 5",
@@ -4625,9 +5088,31 @@
     "distNum": 1,
     "distDen": 2
    },
-   "reason": 4,
-   "chosen": [],
-   "chosenWeights": []
+   "reason": 0,
+   "chosen": [
+    4,
+    6,
+    7,
+    14,
+    15,
+    20,
+    25,
+    28,
+    30,
+    56
+   ],
+   "chosenWeights": [
+    10,
+    14,
+    20,
+    18,
+    4,
+    11,
+    9,
+    7,
+    16,
+    6
+   ]
   },
   {
    "name": "random 6",
@@ -5509,9 +5994,35 @@
     "distNum": 1,
     "distDen": 2
    },
-   "reason": 4,
-   "chosen": [],
-   "chosenWeights": []
+   "reason": 0,
+   "chosen": [
+    2,
+    3,
+    4,
+    6,
+    9,
+    10,
+    12,
+    15,
+    18,
+    24,
+    27,
+    28
+   ],
+   "chosenWeights": [
+    2,
+    8,
+    1,
+    16,
+    17,
+    19,
+    15,
+    11,
+    18,
+    3,
+    5,
+    17
+   ]
   },
   {
    "name": "random 12",
@@ -6131,9 +6642,35 @@
     "distNum": 1,
     "distDen": 4
    },
-   "reason": 4,
-   "chosen": [],
-   "chosenWeights": []
+   "reason": 0,
+   "chosen": [
+    2,
+    4,
+    6,
+    7,
+    15,
+    17,
+    19,
+    20,
+    22,
+    25,
+    26,
+    29
+   ],
+   "chosenWeights": [
+    4728,
+    3152,
+    788,
+    2758,
+    1182,
+    1182,
+    7092,
+    394,
+    3940,
+    3546,
+    5910,
+    2758
+   ]
   },
   {
    "name": "random 17",
@@ -7687,9 +8224,27 @@
     "distNum": 1,
     "distDen": 2
    },
-   "reason": 4,
-   "chosen": [],
-   "chosenWeights": []
+   "reason": 0,
+   "chosen": [
+    1,
+    5,
+    9,
+    12,
+    16,
+    17,
+    25,
+    27
+   ],
+   "chosenWeights": [
+    9408,
+    7392,
+    6720,
+    6048,
+    3360,
+    6048,
+    6048,
+    1344
+   ]
   },
   {
    "name": "random 29",
@@ -8667,9 +9222,31 @@
     "distNum": 1,
     "distDen": 4
    },
-   "reason": 4,
-   "chosen": [],
-   "chosenWeights": []
+   "reason": 0,
+   "chosen": [
+    2,
+    6,
+    12,
+    14,
+    15,
+    16,
+    18,
+    20,
+    21,
+    28
+   ],
+   "chosenWeights": [
+    12,
+    4,
+    13,
+    2,
+    1,
+    17,
+    14,
+    9,
+    15,
+    3
+   ]
   },
   {
    "name": "random 36",
@@ -9970,9 +10547,31 @@
     "distNum": 1,
     "distDen": 4
    },
-   "reason": 4,
-   "chosen": [],
-   "chosenWeights": []
+   "reason": 0,
+   "chosen": [
+    1,
+    2,
+    5,
+    6,
+    8,
+    11,
+    13,
+    18,
+    23,
+    30
+   ],
+   "chosenWeights": [
+    5749,
+    2613,
+    4704,
+    5226,
+    8885,
+    5226,
+    5226,
+    522,
+    7317,
+    6794
+   ]
   },
   {
    "name": "random 45",
@@ -10553,9 +11152,35 @@
     "distNum": 2,
     "distDen": 4
    },
-   "reason": 3,
-   "chosen": [],
-   "chosenWeights": []
+   "reason": 0,
+   "chosen": [
+    2,
+    3,
+    5,
+    7,
+    11,
+    14,
+    16,
+    20,
+    22,
+    24,
+    26,
+    28
+   ],
+   "chosenWeights": [
+    5921,
+    9110,
+    1366,
+    5466,
+    1366,
+    1822,
+    6377,
+    4555,
+    9110,
+    7743,
+    6832,
+    5466
+   ]
   },
   {
    "name": "random 49",
@@ -10716,7 +11341,7 @@
     "distNum": 1,
     "distDen": 3
    },
-   "reason": 3,
+   "reason": 4,
    "chosen": [],
    "chosenWeights": []
   },
@@ -10839,9 +11464,31 @@
     "distNum": 2,
     "distDen": 3
    },
-   "reason": 3,
-   "chosen": [],
-   "chosenWeights": []
+   "reason": 0,
+   "chosen": [
+    5,
+    7,
+    8,
+    13,
+    14,
+    16,
+    19,
+    29,
+    30,
+    49
+   ],
+   "chosenWeights": [
+    4,
+    17,
+    15,
+    18,
+    18,
+    5,
+    11,
+    13,
+    14,
+    11
+   ]
   },
   {
    "name": "random 51",
@@ -11002,9 +11649,39 @@
     "distNum": 1,
     "distDen": 3
    },
-   "reason": 4,
-   "chosen": [],
-   "chosenWeights": []
+   "reason": 0,
+   "chosen": [
+    2,
+    5,
+    8,
+    10,
+    11,
+    12,
+    17,
+    20,
+    21,
+    22,
+    25,
+    26,
+    28,
+    32
+   ],
+   "chosenWeights": [
+    17,
+    13,
+    10,
+    13,
+    12,
+    5,
+    6,
+    17,
+    11,
+    8,
+    9,
+    14,
+    6,
+    20
+   ]
   },
   {
    "name": "random 52",
@@ -11604,9 +12281,35 @@
     "distNum": 1,
     "distDen": 2
    },
-   "reason": 4,
-   "chosen": [],
-   "chosenWeights": []
+   "reason": 0,
+   "chosen": [
+    2,
+    8,
+    9,
+    10,
+    18,
+    19,
+    21,
+    22,
+    23,
+    26,
+    30,
+    47
+   ],
+   "chosenWeights": [
+    1,
+    9,
+    14,
+    11,
+    11,
+    1,
+    6,
+    18,
+    3,
+    20,
+    12,
+    1
+   ]
   },
   {
    "name": "random 56",
@@ -13427,9 +14130,25 @@
     "distNum": 1,
     "distDen": 4
    },
-   "reason": 3,
-   "chosen": [],
-   "chosenWeights": []
+   "reason": 0,
+   "chosen": [
+    2,
+    10,
+    11,
+    19,
+    23,
+    24,
+    53
+   ],
+   "chosenWeights": [
+    9680,
+    13404,
+    2978,
+    6702,
+    8191,
+    14893,
+    3723
+   ]
   },
   {
    "name": "random 69",
@@ -13580,9 +14299,37 @@
     "distNum": 1,
     "distDen": 2
    },
-   "reason": 4,
-   "chosen": [],
-   "chosenWeights": []
+   "reason": 0,
+   "chosen": [
+    3,
+    6,
+    8,
+    11,
+    12,
+    13,
+    15,
+    17,
+    18,
+    24,
+    25,
+    28,
+    34
+   ],
+   "chosenWeights": [
+    13,
+    4,
+    8,
+    7,
+    14,
+    4,
+    1,
+    2,
+    5,
+    7,
+    19,
+    5,
+    23
+   ]
   },
   {
    "name": "random 70",
@@ -13703,9 +14450,29 @@
     "distNum": 2,
     "distDen": 3
    },
-   "reason": 3,
-   "chosen": [],
-   "chosenWeights": []
+   "reason": 0,
+   "chosen": [
+    1,
+    7,
+    13,
+    15,
+    17,
+    22,
+    23,
+    27,
+    28
+   ],
+   "chosenWeights": [
+    7,
+    17,
+    14,
+    2,
+    13,
+    9,
+    2,
+    7,
+    14
+   ]
   },
   {
    "name": "random 71",
@@ -14429,9 +15196,21 @@
     "distNum": 1,
     "distDen": 3
    },
-   "reason": 3,
-   "chosen": [],
-   "chosenWeights": []
+   "reason": 0,
+   "chosen": [
+    4,
+    6,
+    13,
+    23,
+    28
+   ],
+   "chosenWeights": [
+    10550,
+    10550,
+    16704,
+    2637,
+    12308
+   ]
   },
   {
    "name": "random 77",
@@ -14634,7 +15413,7 @@
     "distNum": 2,
     "distDen": 2
    },
-   "reason": 3,
+   "reason": 4,
    "chosen": [],
    "chosenWeights": []
   },
@@ -14848,9 +15627,25 @@
     "distNum": 1,
     "distDen": 2
    },
-   "reason": 4,
-   "chosen": [],
-   "chosenWeights": []
+   "reason": 0,
+   "chosen": [
+    3,
+    9,
+    17,
+    19,
+    23,
+    25,
+    30
+   ],
+   "chosenWeights": [
+    3916,
+    14883,
+    7050,
+    11750,
+    10183,
+    14100,
+    2350
+   ]
   },
   {
    "name": "random 81",
@@ -16129,9 +16924,27 @@
     "distNum": 2,
     "distDen": 4
    },
-   "reason": 4,
-   "chosen": [],
-   "chosenWeights": []
+   "reason": 0,
+   "chosen": [
+    11,
+    12,
+    14,
+    20,
+    23,
+    25,
+    26,
+    27
+   ],
+   "chosenWeights": [
+    6,
+    2,
+    3,
+    6,
+    16,
+    7,
+    16,
+    14
+   ]
   },
   {
    "name": "random 90",
@@ -17938,9 +18751,27 @@
     "distNum": 1,
     "distDen": 3
    },
-   "reason": 4,
-   "chosen": [],
-   "chosenWeights": []
+   "reason": 0,
+   "chosen": [
+    3,
+    4,
+    12,
+    19,
+    20,
+    22,
+    23,
+    27
+   ],
+   "chosenWeights": [
+    12,
+    13,
+    15,
+    2,
+    15,
+    14,
+    14,
+    4
+   ]
   },
   {
    "name": "random 103",
@@ -18205,9 +19036,27 @@
     "distNum": 2,
     "distDen": 4
    },
-   "reason": 4,
-   "chosen": [],
-   "chosenWeights": []
+   "reason": 0,
+   "chosen": [
+    4,
+    5,
+    9,
+    16,
+    20,
+    26,
+    27,
+    60
+   ],
+   "chosenWeights": [
+    1328,
+    5312,
+    4648,
+    1992,
+    2988,
+    332,
+    5976,
+    5976
+   ]
   },
   {
    "name": "random 105",
@@ -19657,7 +20506,7 @@
     "distNum": 1,
     "distDen": 2
    },
-   "reason": 3,
+   "reason": 4,
    "chosen": [],
    "chosenWeights": []
   },
@@ -20580,9 +21429,25 @@
     "distNum": 2,
     "distDen": 4
    },
-   "reason": 4,
-   "chosen": [],
-   "chosenWeights": []
+   "reason": 0,
+   "chosen": [
+    8,
+    13,
+    19,
+    23,
+    24,
+    29,
+    53
+   ],
+   "chosenWeights": [
+    3,
+    15,
+    17,
+    8,
+    20,
+    4,
+    21
+   ]
   },
   {
    "name": "random 122",
@@ -21861,9 +22726,27 @@
     "distNum": 2,
     "distDen": 4
    },
-   "reason": 4,
-   "chosen": [],
-   "chosenWeights": []
+   "reason": 0,
+   "chosen": [
+    3,
+    9,
+    13,
+    14,
+    17,
+    18,
+    25,
+    29
+   ],
+   "chosenWeights": [
+    18,
+    2,
+    3,
+    19,
+    10,
+    17,
+    13,
+    16
+   ]
   },
   {
    "name": "random 131",
@@ -22325,9 +23208,25 @@
     "distNum": 1,
     "distDen": 2
    },
-   "reason": 4,
-   "chosen": [],
-   "chosenWeights": []
+   "reason": 0,
+   "chosen": [
+    1,
+    6,
+    7,
+    9,
+    17,
+    22,
+    29
+   ],
+   "chosenWeights": [
+    9,
+    4,
+    15,
+    15,
+    12,
+    1,
+    9
+   ]
   },
   {
    "name": "random 135",
@@ -22886,9 +23785,25 @@
     "distNum": 1,
     "distDen": 3
    },
-   "reason": 4,
-   "chosen": [],
-   "chosenWeights": []
+   "reason": 0,
+   "chosen": [
+    6,
+    8,
+    9,
+    11,
+    16,
+    28,
+    41
+   ],
+   "chosenWeights": [
+    3,
+    2,
+    14,
+    10,
+    13,
+    14,
+    10
+   ]
   },
   {
    "name": "random 139",
@@ -23137,9 +24052,37 @@
     "distNum": 1,
     "distDen": 2
    },
-   "reason": 4,
-   "chosen": [],
-   "chosenWeights": []
+   "reason": 0,
+   "chosen": [
+    1,
+    2,
+    5,
+    10,
+    12,
+    17,
+    20,
+    21,
+    24,
+    25,
+    26,
+    28,
+    29
+   ],
+   "chosenWeights": [
+    6010,
+    2311,
+    2774,
+    3698,
+    6472,
+    5085,
+    1387,
+    3698,
+    7859,
+    1387,
+    6935,
+    6935,
+    8322
+   ]
   },
   {
    "name": "random 141",
@@ -24159,9 +25102,35 @@
     "distNum": 2,
     "distDen": 4
    },
-   "reason": 4,
-   "chosen": [],
-   "chosenWeights": []
+   "reason": 0,
+   "chosen": [
+    6,
+    7,
+    8,
+    11,
+    15,
+    20,
+    21,
+    24,
+    25,
+    27,
+    28,
+    30
+   ],
+   "chosenWeights": [
+    3,
+    20,
+    16,
+    11,
+    14,
+    18,
+    12,
+    18,
+    3,
+    1,
+    2,
+    23
+   ]
   },
   {
    "name": "random 148",
@@ -24519,9 +25488,37 @@
     "distNum": 1,
     "distDen": 4
    },
-   "reason": 4,
-   "chosen": [],
-   "chosenWeights": []
+   "reason": 0,
+   "chosen": [
+    1,
+    2,
+    8,
+    9,
+    10,
+    15,
+    17,
+    21,
+    24,
+    26,
+    28,
+    30,
+    38
+   ],
+   "chosenWeights": [
+    9,
+    11,
+    16,
+    11,
+    2,
+    17,
+    4,
+    15,
+    20,
+    4,
+    9,
+    7,
+    17
+   ]
   },
   {
    "name": "random 150",
@@ -24821,7 +25818,7 @@
     "distNum": 2,
     "distDen": 4
    },
-   "reason": 4,
+   "reason": 3,
    "chosen": [],
    "chosenWeights": []
   },
@@ -24964,9 +25961,33 @@
     "distNum": 2,
     "distDen": 4
    },
-   "reason": 3,
-   "chosen": [],
-   "chosenWeights": []
+   "reason": 0,
+   "chosen": [
+    6,
+    7,
+    9,
+    12,
+    15,
+    17,
+    21,
+    24,
+    25,
+    26,
+    30
+   ],
+   "chosenWeights": [
+    8181,
+    6647,
+    2045,
+    7670,
+    3068,
+    7158,
+    7670,
+    5624,
+    4602,
+    9715,
+    2045
+   ]
   },
   {
    "name": "random 153",
@@ -27436,9 +28457,37 @@
     "distNum": 2,
     "distDen": 3
    },
-   "reason": 3,
-   "chosen": [],
-   "chosenWeights": []
+   "reason": 0,
+   "chosen": [
+    1,
+    3,
+    4,
+    7,
+    14,
+    16,
+    19,
+    20,
+    22,
+    23,
+    24,
+    26,
+    45
+   ],
+   "chosenWeights": [
+    1,
+    5,
+    3,
+    5,
+    3,
+    12,
+    4,
+    4,
+    9,
+    1,
+    7,
+    10,
+    25
+   ]
   },
   {
    "name": "random 170",
@@ -27534,9 +28583,27 @@
     "distNum": 1,
     "distDen": 3
    },
-   "reason": 4,
-   "chosen": [],
-   "chosenWeights": []
+   "reason": 0,
+   "chosen": [
+    2,
+    9,
+    10,
+    11,
+    15,
+    16,
+    22,
+    25
+   ],
+   "chosenWeights": [
+    3,
+    3,
+    16,
+    16,
+    4,
+    13,
+    4,
+    20
+   ]
   },
   {
    "name": "random 171",
@@ -30196,9 +31263,31 @@
     "distNum": 1,
     "distDen": 4
    },
-   "reason": 4,
-   "chosen": [],
-   "chosenWeights": []
+   "reason": 0,
+   "chosen": [
+    1,
+    4,
+    9,
+    11,
+    12,
+    14,
+    20,
+    21,
+    22,
+    23
+   ],
+   "chosenWeights": [
+    18,
+    15,
+    8,
+    18,
+    12,
+    10,
+    8,
+    7,
+    4,
+    11
+   ]
   },
   {
    "name": "random 192",
@@ -30500,9 +31589,31 @@
     "distNum": 2,
     "distDen": 3
    },
-   "reason": 3,
-   "chosen": [],
-   "chosenWeights": []
+   "reason": 0,
+   "chosen": [
+    2,
+    3,
+    5,
+    10,
+    11,
+    13,
+    18,
+    22,
+    24,
+    28
+   ],
+   "chosenWeights": [
+    17,
+    17,
+    8,
+    1,
+    17,
+    14,
+    10,
+    8,
+    9,
+    8
+   ]
   },
   {
    "name": "random 195",
@@ -30764,9 +31875,25 @@
     "distNum": 2,
     "distDen": 4
    },
-   "reason": 4,
-   "chosen": [],
-   "chosenWeights": []
+   "reason": 0,
+   "chosen": [
+    4,
+    10,
+    13,
+    14,
+    17,
+    25,
+    27
+   ],
+   "chosenWeights": [
+    10234,
+    5418,
+    2408,
+    1806,
+    2408,
+    4214,
+    1806
+   ]
   },
   {
    "name": "random 197",
@@ -31026,9 +32153,35 @@
     "distNum": 1,
     "distDen": 3
    },
-   "reason": 4,
-   "chosen": [],
-   "chosenWeights": []
+   "reason": 0,
+   "chosen": [
+    1,
+    3,
+    5,
+    6,
+    9,
+    15,
+    16,
+    17,
+    20,
+    22,
+    23,
+    26
+   ],
+   "chosenWeights": [
+    11,
+    9,
+    7,
+    1,
+    18,
+    7,
+    14,
+    7,
+    17,
+    20,
+    18,
+    1
+   ]
   },
   {
    "name": "random 199",
@@ -31292,9 +32445,35 @@
     "distNum": 1,
     "distDen": 3
    },
-   "reason": 4,
-   "chosen": [],
-   "chosenWeights": []
+   "reason": 0,
+   "chosen": [
+    1,
+    3,
+    4,
+    11,
+    12,
+    15,
+    16,
+    22,
+    25,
+    26,
+    27,
+    29
+   ],
+   "chosenWeights": [
+    9865,
+    5192,
+    3115,
+    5192,
+    5192,
+    9865,
+    5711,
+    2596,
+    6230,
+    519,
+    5711,
+    2596
+   ]
   },
   {
    "name": "random 201",
@@ -31799,7 +32978,7 @@
     "distNum": 2,
     "distDen": 4
    },
-   "reason": 3,
+   "reason": 4,
    "chosen": [],
    "chosenWeights": []
   },
@@ -32471,9 +33650,31 @@
     "distNum": 2,
     "distDen": 2
    },
-   "reason": 3,
-   "chosen": [],
-   "chosenWeights": []
+   "reason": 0,
+   "chosen": [
+    1,
+    13,
+    15,
+    16,
+    20,
+    22,
+    24,
+    25,
+    26,
+    27
+   ],
+   "chosenWeights": [
+    1,
+    2,
+    1,
+    14,
+    4,
+    11,
+    19,
+    13,
+    4,
+    8
+   ]
   },
   {
    "name": "random 210",
@@ -33453,9 +34654,23 @@
     "distNum": 2,
     "distDen": 2
    },
-   "reason": 3,
-   "chosen": [],
-   "chosenWeights": []
+   "reason": 0,
+   "chosen": [
+    1,
+    3,
+    19,
+    21,
+    27,
+    29
+   ],
+   "chosenWeights": [
+    19,
+    16,
+    3,
+    11,
+    19,
+    18
+   ]
   },
   {
    "name": "random 218",
@@ -33541,7 +34756,7 @@
     "distNum": 1,
     "distDen": 3
    },
-   "reason": 3,
+   "reason": 4,
    "chosen": [],
    "chosenWeights": []
   },
@@ -33832,9 +35047,33 @@
     "distNum": 1,
     "distDen": 4
    },
-   "reason": 4,
-   "chosen": [],
-   "chosenWeights": []
+   "reason": 0,
+   "chosen": [
+    1,
+    2,
+    3,
+    4,
+    5,
+    11,
+    25,
+    28,
+    29,
+    30,
+    40
+   ],
+   "chosenWeights": [
+    1456,
+    2912,
+    5460,
+    4368,
+    3640,
+    4004,
+    4004,
+    4732,
+    6188,
+    2548,
+    728
+   ]
   },
   {
    "name": "random 221",
@@ -34240,9 +35479,33 @@
     "distNum": 1,
     "distDen": 4
    },
-   "reason": 4,
-   "chosen": [],
-   "chosenWeights": []
+   "reason": 0,
+   "chosen": [
+    4,
+    6,
+    7,
+    10,
+    12,
+    15,
+    16,
+    20,
+    22,
+    23,
+    26
+   ],
+   "chosenWeights": [
+    16,
+    5,
+    11,
+    19,
+    11,
+    10,
+    20,
+    17,
+    8,
+    15,
+    6
+   ]
   },
   {
    "name": "random 224",
@@ -34557,9 +35820,27 @@
     "distNum": 2,
     "distDen": 3
    },
-   "reason": 3,
-   "chosen": [],
-   "chosenWeights": []
+   "reason": 0,
+   "chosen": [
+    1,
+    4,
+    8,
+    13,
+    20,
+    21,
+    28,
+    54
+   ],
+   "chosenWeights": [
+    4,
+    11,
+    3,
+    14,
+    20,
+    5,
+    16,
+    25
+   ]
   },
   {
    "name": "random 227",
@@ -35946,7 +37227,7 @@
     "distNum": 1,
     "distDen": 2
    },
-   "reason": 3,
+   "reason": 4,
    "chosen": [],
    "chosenWeights": []
   },
@@ -36774,7 +38055,7 @@
     "distNum": 1,
     "distDen": 4
    },
-   "reason": 3,
+   "reason": 4,
    "chosen": [],
    "chosenWeights": []
   },
@@ -37612,7 +38893,7 @@
     "distNum": 1,
     "distDen": 2
    },
-   "reason": 3,
+   "reason": 4,
    "chosen": [],
    "chosenWeights": []
   },
@@ -38672,9 +39953,37 @@
     "distNum": 2,
     "distDen": 4
    },
-   "reason": 4,
-   "chosen": [],
-   "chosenWeights": []
+   "reason": 0,
+   "chosen": [
+    2,
+    7,
+    9,
+    11,
+    14,
+    18,
+    19,
+    22,
+    23,
+    26,
+    28,
+    30,
+    57
+   ],
+   "chosenWeights": [
+    6,
+    19,
+    16,
+    14,
+    14,
+    11,
+    5,
+    12,
+    15,
+    1,
+    13,
+    6,
+    21
+   ]
   },
   {
    "name": "random 256",
@@ -39457,7 +40766,7 @@
     "distNum": 2,
     "distDen": 3
    },
-   "reason": 4,
+   "reason": 3,
    "chosen": [],
    "chosenWeights": []
   },
@@ -40334,9 +41643,33 @@
     "distNum": 1,
     "distDen": 2
    },
-   "reason": 3,
-   "chosen": [],
-   "chosenWeights": []
+   "reason": 0,
+   "chosen": [
+    1,
+    4,
+    7,
+    10,
+    11,
+    14,
+    17,
+    18,
+    19,
+    21,
+    25
+   ],
+   "chosenWeights": [
+    12,
+    14,
+    15,
+    10,
+    20,
+    4,
+    11,
+    1,
+    19,
+    14,
+    10
+   ]
   },
   {
    "name": "random 268",
@@ -40606,7 +41939,7 @@
     "distNum": 1,
     "distDen": 3
    },
-   "reason": 3,
+   "reason": 4,
    "chosen": [],
    "chosenWeights": []
   },
@@ -40699,9 +42032,25 @@
     "distNum": 1,
     "distDen": 4
    },
-   "reason": 4,
-   "chosen": [],
-   "chosenWeights": []
+   "reason": 0,
+   "chosen": [
+    8,
+    10,
+    12,
+    20,
+    27,
+    28,
+    30
+   ],
+   "chosenWeights": [
+    14,
+    9,
+    7,
+    18,
+    12,
+    7,
+    4
+   ]
   },
   {
    "name": "random 271",
@@ -41244,9 +42593,25 @@
     "distNum": 1,
     "distDen": 3
    },
-   "reason": 3,
-   "chosen": [],
-   "chosenWeights": []
+   "reason": 0,
+   "chosen": [
+    3,
+    5,
+    7,
+    9,
+    13,
+    20,
+    24
+   ],
+   "chosenWeights": [
+    2,
+    7,
+    15,
+    7,
+    13,
+    14,
+    11
+   ]
   },
   {
    "name": "random 275",
@@ -43759,9 +45124,31 @@
     "distNum": 2,
     "distDen": 2
    },
-   "reason": 4,
-   "chosen": [],
-   "chosenWeights": []
+   "reason": 0,
+   "chosen": [
+    2,
+    3,
+    14,
+    19,
+    21,
+    26,
+    27,
+    28,
+    29,
+    44
+   ],
+   "chosenWeights": [
+    6996,
+    12594,
+    2798,
+    699,
+    4897,
+    12594,
+    1399,
+    4897,
+    699,
+    17491
+   ]
   },
   {
    "name": "random 293",
@@ -43847,9 +45234,25 @@
     "distNum": 2,
     "distDen": 2
    },
-   "reason": 3,
-   "chosen": [],
-   "chosenWeights": []
+   "reason": 0,
+   "chosen": [
+    11,
+    13,
+    19,
+    20,
+    22,
+    25,
+    26
+   ],
+   "chosenWeights": [
+    20,
+    3,
+    14,
+    9,
+    7,
+    1,
+    15
+   ]
   },
   {
    "name": "random 294",
@@ -44377,9 +45780,25 @@
     "distNum": 1,
     "distDen": 2
    },
-   "reason": 4,
-   "chosen": [],
-   "chosenWeights": []
+   "reason": 0,
+   "chosen": [
+    4,
+    5,
+    13,
+    17,
+    25,
+    29,
+    34
+   ],
+   "chosenWeights": [
+    6,
+    13,
+    15,
+    17,
+    15,
+    3,
+    7
+   ]
   },
   {
    "name": "random 298",
@@ -44480,9 +45899,27 @@
     "distNum": 1,
     "distDen": 2
    },
-   "reason": 3,
-   "chosen": [],
-   "chosenWeights": []
+   "reason": 0,
+   "chosen": [
+    4,
+    5,
+    8,
+    10,
+    17,
+    26,
+    30,
+    48
+   ],
+   "chosenWeights": [
+    17,
+    17,
+    19,
+    3,
+    20,
+    10,
+    16,
+    16
+   ]
   },
   {
    "name": "random 299",
@@ -44907,9 +46344,39 @@
     "distNum": 2,
     "distDen": 3
    },
-   "reason": 4,
-   "chosen": [],
-   "chosenWeights": []
+   "reason": 0,
+   "chosen": [
+    2,
+    3,
+    6,
+    7,
+    12,
+    13,
+    14,
+    16,
+    18,
+    19,
+    20,
+    21,
+    26,
+    33
+   ],
+   "chosenWeights": [
+    14,
+    8,
+    1,
+    6,
+    8,
+    11,
+    17,
+    4,
+    14,
+    17,
+    15,
+    20,
+    5,
+    24
+   ]
   },
   {
    "name": "random 302",
@@ -45005,7 +46472,7 @@
     "distNum": 2,
     "distDen": 3
    },
-   "reason": 3,
+   "reason": 4,
    "chosen": [],
    "chosenWeights": []
   },
@@ -45752,9 +47219,37 @@
     "distNum": 1,
     "distDen": 3
    },
-   "reason": 3,
-   "chosen": [],
-   "chosenWeights": []
+   "reason": 0,
+   "chosen": [
+    2,
+    4,
+    5,
+    9,
+    13,
+    16,
+    17,
+    19,
+    22,
+    24,
+    26,
+    27,
+    28
+   ],
+   "chosenWeights": [
+    20,
+    14,
+    2,
+    20,
+    18,
+    8,
+    5,
+    4,
+    2,
+    14,
+    16,
+    12,
+    19
+   ]
   },
   {
    "name": "random 308",
@@ -47210,9 +48705,31 @@
     "distNum": 1,
     "distDen": 2
    },
-   "reason": 4,
-   "chosen": [],
-   "chosenWeights": []
+   "reason": 0,
+   "chosen": [
+    12,
+    13,
+    19,
+    20,
+    22,
+    23,
+    24,
+    27,
+    28,
+    29
+   ],
+   "chosenWeights": [
+    2,
+    10,
+    7,
+    15,
+    10,
+    13,
+    13,
+    17,
+    8,
+    14
+   ]
   },
   {
    "name": "random 320",
@@ -47536,9 +49053,33 @@
     "distNum": 1,
     "distDen": 3
    },
-   "reason": 3,
-   "chosen": [],
-   "chosenWeights": []
+   "reason": 0,
+   "chosen": [
+    3,
+    4,
+    7,
+    9,
+    11,
+    13,
+    14,
+    15,
+    17,
+    18,
+    20
+   ],
+   "chosenWeights": [
+    8,
+    5,
+    10,
+    18,
+    9,
+    6,
+    18,
+    10,
+    11,
+    16,
+    9
+   ]
   },
   {
    "name": "random 322",
@@ -48934,9 +50475,35 @@
     "distNum": 2,
     "distDen": 4
    },
-   "reason": 4,
-   "chosen": [],
-   "chosenWeights": []
+   "reason": 0,
+   "chosen": [
+    2,
+    3,
+    5,
+    7,
+    8,
+    11,
+    14,
+    16,
+    18,
+    27,
+    29,
+    30
+   ],
+   "chosenWeights": [
+    19,
+    12,
+    4,
+    18,
+    1,
+    11,
+    17,
+    2,
+    3,
+    8,
+    1,
+    19
+   ]
   },
   {
    "name": "random 332",
@@ -49047,7 +50614,7 @@
     "distNum": 1,
     "distDen": 3
    },
-   "reason": 3,
+   "reason": 4,
    "chosen": [],
    "chosenWeights": []
   },
@@ -49200,7 +50767,7 @@
     "distNum": 1,
     "distDen": 3
    },
-   "reason": 3,
+   "reason": 4,
    "chosen": [],
    "chosenWeights": []
   },
@@ -49288,9 +50855,23 @@
     "distNum": 1,
     "distDen": 3
    },
-   "reason": 3,
-   "chosen": [],
-   "chosenWeights": []
+   "reason": 0,
+   "chosen": [
+    4,
+    8,
+    20,
+    21,
+    24,
+    25
+   ],
+   "chosenWeights": [
+    13,
+    10,
+    14,
+    15,
+    10,
+    8
+   ]
   },
   {
    "name": "random 335",
@@ -49381,9 +50962,23 @@
     "distNum": 1,
     "distDen": 2
    },
-   "reason": 4,
-   "chosen": [],
-   "chosenWeights": []
+   "reason": 0,
+   "chosen": [
+    8,
+    9,
+    13,
+    23,
+    27,
+    28
+   ],
+   "chosenWeights": [
+    17,
+    1,
+    17,
+    19,
+    10,
+    7
+   ]
   },
   {
    "name": "random 336",
@@ -50115,9 +51710,33 @@
     "distNum": 1,
     "distDen": 3
    },
-   "reason": 4,
-   "chosen": [],
-   "chosenWeights": []
+   "reason": 0,
+   "chosen": [
+    4,
+    6,
+    8,
+    10,
+    14,
+    16,
+    18,
+    20,
+    21,
+    28,
+    51
+   ],
+   "chosenWeights": [
+    3267,
+    9335,
+    7468,
+    2333,
+    1400,
+    8401,
+    7001,
+    7934,
+    4667,
+    7468,
+    6067
+   ]
   },
   {
    "name": "random 341",
@@ -50238,9 +51857,31 @@
     "distNum": 1,
     "distDen": 4
    },
-   "reason": 4,
-   "chosen": [],
-   "chosenWeights": []
+   "reason": 0,
+   "chosen": [
+    1,
+    5,
+    9,
+    10,
+    13,
+    14,
+    16,
+    22,
+    29,
+    30
+   ],
+   "chosenWeights": [
+    6,
+    18,
+    3,
+    15,
+    2,
+    11,
+    5,
+    12,
+    14,
+    13
+   ]
   },
   {
    "name": "random 342",
@@ -50520,7 +52161,7 @@
     "distNum": 1,
     "distDen": 4
    },
-   "reason": 3,
+   "reason": 4,
    "chosen": [],
    "chosenWeights": []
   },
@@ -51409,9 +53050,31 @@
     "distNum": 1,
     "distDen": 3
    },
-   "reason": 3,
-   "chosen": [],
-   "chosenWeights": []
+   "reason": 0,
+   "chosen": [
+    7,
+    8,
+    11,
+    12,
+    14,
+    20,
+    22,
+    23,
+    25,
+    30
+   ],
+   "chosenWeights": [
+    8,
+    6,
+    6,
+    20,
+    6,
+    10,
+    3,
+    13,
+    11,
+    20
+   ]
   },
   {
    "name": "random 351",
@@ -52105,9 +53768,35 @@
     "distNum": 2,
     "distDen": 4
    },
-   "reason": 4,
-   "chosen": [],
-   "chosenWeights": []
+   "reason": 0,
+   "chosen": [
+    2,
+    3,
+    5,
+    10,
+    12,
+    13,
+    19,
+    24,
+    25,
+    26,
+    29,
+    30
+   ],
+   "chosenWeights": [
+    15,
+    3,
+    11,
+    9,
+    17,
+    8,
+    21,
+    13,
+    13,
+    1,
+    5,
+    4
+   ]
   },
   {
    "name": "random 356",
@@ -52233,7 +53922,7 @@
     "distNum": 1,
     "distDen": 3
    },
-   "reason": 3,
+   "reason": 4,
    "chosen": [],
    "chosenWeights": []
   },
@@ -53325,9 +55014,33 @@
     "distNum": 1,
     "distDen": 2
    },
-   "reason": 4,
-   "chosen": [],
-   "chosenWeights": []
+   "reason": 0,
+   "chosen": [
+    1,
+    2,
+    8,
+    10,
+    11,
+    12,
+    16,
+    17,
+    24,
+    30,
+    51
+   ],
+   "chosenWeights": [
+    1,
+    5,
+    8,
+    18,
+    20,
+    19,
+    20,
+    2,
+    25,
+    13,
+    8
+   ]
   },
   {
    "name": "random 366",
@@ -53606,9 +55319,25 @@
     "distNum": 1,
     "distDen": 2
    },
-   "reason": 3,
-   "chosen": [],
-   "chosenWeights": []
+   "reason": 0,
+   "chosen": [
+    2,
+    5,
+    7,
+    8,
+    9,
+    10,
+    33
+   ],
+   "chosenWeights": [
+    10,
+    14,
+    5,
+    16,
+    17,
+    17,
+    22
+   ]
   },
   {
    "name": "random 368",
@@ -56158,9 +57887,27 @@
     "distNum": 1,
     "distDen": 4
    },
-   "reason": 4,
-   "chosen": [],
-   "chosenWeights": []
+   "reason": 0,
+   "chosen": [
+    7,
+    17,
+    21,
+    22,
+    25,
+    27,
+    28,
+    29
+   ],
+   "chosenWeights": [
+    3784,
+    4128,
+    2408,
+    6880,
+    5504,
+    4128,
+    3440,
+    1720
+   ]
   },
   {
    "name": "random 385",
@@ -56271,9 +58018,27 @@
     "distNum": 1,
     "distDen": 4
    },
-   "reason": 3,
-   "chosen": [],
-   "chosenWeights": []
+   "reason": 0,
+   "chosen": [
+    4,
+    7,
+    8,
+    11,
+    15,
+    21,
+    27,
+    28
+   ],
+   "chosenWeights": [
+    5,
+    4,
+    18,
+    5,
+    11,
+    1,
+    11,
+    8
+   ]
   },
   {
    "name": "random 386",
@@ -56389,9 +58154,29 @@
     "distNum": 1,
     "distDen": 2
    },
-   "reason": 3,
-   "chosen": [],
-   "chosenWeights": []
+   "reason": 0,
+   "chosen": [
+    13,
+    15,
+    16,
+    17,
+    22,
+    23,
+    25,
+    26,
+    27
+   ],
+   "chosenWeights": [
+    5,
+    9,
+    5,
+    3,
+    17,
+    3,
+    8,
+    2,
+    6
+   ]
   },
   {
    "name": "random 387",
@@ -56532,9 +58317,33 @@
     "distNum": 2,
     "distDen": 4
    },
-   "reason": 3,
-   "chosen": [],
-   "chosenWeights": []
+   "reason": 0,
+   "chosen": [
+    3,
+    10,
+    14,
+    18,
+    22,
+    23,
+    24,
+    25,
+    26,
+    29,
+    30
+   ],
+   "chosenWeights": [
+    9,
+    4,
+    12,
+    10,
+    11,
+    20,
+    18,
+    19,
+    11,
+    17,
+    17
+   ]
   },
   {
    "name": "random 388",
@@ -57462,7 +59271,7 @@
     "distNum": 2,
     "distDen": 4
    },
-   "reason": 3,
+   "reason": 4,
    "chosen": [],
    "chosenWeights": []
   },
@@ -60885,9 +62694,23 @@
     "distNum": 2,
     "distDen": 4
    },
-   "reason": 3,
-   "chosen": [],
-   "chosenWeights": []
+   "reason": 0,
+   "chosen": [
+    1,
+    4,
+    5,
+    10,
+    12,
+    19
+   ],
+   "chosenWeights": [
+    19,
+    20,
+    14,
+    20,
+    2,
+    12
+   ]
   },
   {
    "name": "random 419",
@@ -63264,9 +65087,37 @@
     "distNum": 2,
     "distDen": 4
    },
-   "reason": 4,
-   "chosen": [],
-   "chosenWeights": []
+   "reason": 0,
+   "chosen": [
+    5,
+    7,
+    9,
+    11,
+    16,
+    17,
+    18,
+    19,
+    24,
+    25,
+    26,
+    28,
+    29
+   ],
+   "chosenWeights": [
+    12,
+    19,
+    17,
+    11,
+    15,
+    20,
+    17,
+    8,
+    10,
+    13,
+    18,
+    4,
+    19
+   ]
   },
   {
    "name": "random 436",
@@ -64945,9 +66796,25 @@
     "distNum": 1,
     "distDen": 4
    },
-   "reason": 4,
-   "chosen": [],
-   "chosenWeights": []
+   "reason": 0,
+   "chosen": [
+    1,
+    5,
+    10,
+    11,
+    17,
+    29,
+    56
+   ],
+   "chosenWeights": [
+    4,
+    10,
+    17,
+    7,
+    11,
+    17,
+    4
+   ]
   },
   {
    "name": "random 448",
@@ -66010,9 +67877,37 @@
     "distNum": 1,
     "distDen": 2
    },
-   "reason": 3,
-   "chosen": [],
-   "chosenWeights": []
+   "reason": 0,
+   "chosen": [
+    1,
+    2,
+    4,
+    7,
+    9,
+    15,
+    16,
+    17,
+    18,
+    20,
+    21,
+    23,
+    25
+   ],
+   "chosenWeights": [
+    7,
+    7,
+    2,
+    5,
+    2,
+    6,
+    12,
+    6,
+    4,
+    15,
+    20,
+    10,
+    17
+   ]
   },
   {
    "name": "random 455",
@@ -66246,7 +68141,7 @@
     "distNum": 2,
     "distDen": 2
    },
-   "reason": 4,
+   "reason": 3,
    "chosen": [],
    "chosenWeights": []
   },
@@ -67280,9 +69175,31 @@
     "distNum": 1,
     "distDen": 2
    },
-   "reason": 4,
-   "chosen": [],
-   "chosenWeights": []
+   "reason": 0,
+   "chosen": [
+    8,
+    9,
+    11,
+    14,
+    15,
+    18,
+    19,
+    21,
+    23,
+    30
+   ],
+   "chosenWeights": [
+    6346,
+    3966,
+    15865,
+    8725,
+    11898,
+    2379,
+    2379,
+    793,
+    4759,
+    7139
+   ]
   },
   {
    "name": "random 465",
@@ -67443,9 +69360,35 @@
     "distNum": 1,
     "distDen": 2
    },
-   "reason": 4,
-   "chosen": [],
-   "chosenWeights": []
+   "reason": 0,
+   "chosen": [
+    2,
+    4,
+    5,
+    6,
+    8,
+    13,
+    15,
+    19,
+    21,
+    23,
+    24,
+    29
+   ],
+   "chosenWeights": [
+    13,
+    14,
+    2,
+    11,
+    18,
+    12,
+    7,
+    16,
+    11,
+    1,
+    18,
+    3
+   ]
   },
   {
    "name": "random 466",
@@ -67551,9 +69494,27 @@
     "distNum": 1,
     "distDen": 2
    },
-   "reason": 4,
-   "chosen": [],
-   "chosenWeights": []
+   "reason": 0,
+   "chosen": [
+    2,
+    7,
+    13,
+    16,
+    22,
+    23,
+    25,
+    29
+   ],
+   "chosenWeights": [
+    16,
+    11,
+    16,
+    6,
+    7,
+    10,
+    19,
+    5
+   ]
   },
   {
    "name": "random 467",
@@ -68497,9 +70458,23 @@
     "distNum": 1,
     "distDen": 2
    },
-   "reason": 4,
-   "chosen": [],
-   "chosenWeights": []
+   "reason": 0,
+   "chosen": [
+    2,
+    4,
+    10,
+    20,
+    22,
+    30
+   ],
+   "chosenWeights": [
+    6,
+    6,
+    9,
+    14,
+    15,
+    14
+   ]
   },
   {
    "name": "random 474",
@@ -69456,9 +71431,39 @@
     "distNum": 1,
     "distDen": 2
    },
-   "reason": 4,
-   "chosen": [],
-   "chosenWeights": []
+   "reason": 0,
+   "chosen": [
+    9,
+    11,
+    13,
+    14,
+    16,
+    17,
+    18,
+    22,
+    23,
+    24,
+    25,
+    27,
+    29,
+    30
+   ],
+   "chosenWeights": [
+    3704,
+    4939,
+    8232,
+    4528,
+    5351,
+    1646,
+    4116,
+    6586,
+    3704,
+    7409,
+    5351,
+    4939,
+    411,
+    1234
+   ]
   },
   {
    "name": "random 481",
@@ -69733,9 +71738,39 @@
     "distNum": 1,
     "distDen": 3
    },
-   "reason": 3,
-   "chosen": [],
-   "chosenWeights": []
+   "reason": 0,
+   "chosen": [
+    4,
+    7,
+    8,
+    9,
+    11,
+    16,
+    17,
+    19,
+    23,
+    24,
+    25,
+    29,
+    30,
+    51
+   ],
+   "chosenWeights": [
+    12,
+    20,
+    4,
+    5,
+    3,
+    5,
+    2,
+    1,
+    15,
+    10,
+    2,
+    13,
+    16,
+    13
+   ]
   },
   {
    "name": "random 483",
@@ -70708,9 +72743,27 @@
     "distNum": 2,
     "distDen": 4
    },
-   "reason": 4,
-   "chosen": [],
-   "chosenWeights": []
+   "reason": 0,
+   "chosen": [
+    4,
+    5,
+    15,
+    16,
+    23,
+    25,
+    27,
+    54
+   ],
+   "chosenWeights": [
+    8,
+    18,
+    11,
+    6,
+    6,
+    13,
+    6,
+    21
+   ]
   },
   {
    "name": "random 490",
