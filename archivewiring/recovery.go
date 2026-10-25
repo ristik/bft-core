@@ -74,6 +74,10 @@ func (s *RecoverySource) FetchSuffix(ctx context.Context, after shardnode.BlockR
 			return reverse, nil
 		}
 		if entry.Block.Number <= after.Number+1 || len(entry.Block.ParentHash) != 32 {
+			// every record of the walk is verified: a chain that comes down to the anchor's height without containing the anchor proves it is not on it
+			if len(reverse) > 1 || entry.Block.Number > after.Number {
+				return nil, fmt.Errorf("%w: %w: archive suffix does not reach retained anchor", ErrArchiveRecoveryInvalid, shardnode.ErrCertifiedChainForksAnchor)
+			}
 			return nil, fmt.Errorf("%w: archive suffix does not reach retained anchor", ErrArchiveRecoveryInvalid)
 		}
 		current = common.BytesToHash(entry.Block.ParentHash)
