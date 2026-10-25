@@ -751,6 +751,15 @@ x4e_hold_probe() {
   jq -e '.outcome == "refused" and .reason == "EvidenceHoldPending"' "$d/hold-probe.json" >/dev/null || { echo "the admitted, unsettled case did not hold the exit: $(cat "$d/hold-probe.json")" >&2; return 1; }
   echo "x4e: exit of identity 5 refused for EvidenceHoldPending while the case is admitted and unsettled"
 }
+# the early claim, refused for a LAWFUL reason (the time gate): probed right after offence 1 settled, when the exit is hours from maturity. The claim step's own probe at its start is not a reliable witness: it
+# runs after everything between, and a run with extra steps before it (campaign run 5, bft-core#856) found the exit already matured.
+x4e_early_probe() {
+  local d=$H3_DIR/x4pos/steps/exit-claim
+  mkdir -p "$d"
+  python3 scripts/x4pos/exit_check.py refusal --rpc "$(p85_eth)" --cast "$P85_CAST" --custody "$(p85_custody)" --id 5 >"$d/refusal-early.json" || { cat "$d/refusal-early.json" >&2; return 1; }
+  jq -e '.outcome == "refused" and .lawfulEarly == true' "$d/refusal-early.json" >/dev/null || { echo "x4e: the early mature was not refused for a lawful reason: $(cat "$d/refusal-early.json")" >&2; return 1; }
+  echo "x4e: an early claim of identity 5 is refused for $(jq -r .reason "$d/refusal-early.json")"
+}
 x4e_claim() { x4e_run exit-claim exit-claim.sh "{\"id\":5,\"matureWaitSeconds\":5400}" && x4e_run exit-claim exit-claim.check.sh '{"id":5}'; }
 
 P85_STEPS="p85_baseline p85_joiner_nodes p85_joiner_onboard p85_election_reserved p85_proofs p85_handoff p85_install_activation p85_j_stalls p85_recovery p85_resolved p85_restarts p85_epoch_switches"
@@ -826,7 +835,7 @@ p85_run_lane() {
       # the held offender: it asks before its case is submitted (the chain is healthy then; after the observer roots' restarts it nearly stalls, #728), the exit is probed while
       # the case is admitted and unsettled, and claimed at the end
       export S4_ADMITTED_HOOK=x4e_hold_probe
-      P85_STEPS=${P85_STEPS/ s4_submit_settle/ x4e_request s4_submit_settle}; P85_STEPS="$P85_STEPS x4e_claim"
+      P85_STEPS=${P85_STEPS/ s4_submit_settle/ x4e_request s4_submit_settle}; P85_STEPS=${P85_STEPS/ s4_check/ s4_check x4e_early_probe}; P85_STEPS="$P85_STEPS x4e_claim"
     else
       P85_STEPS=${P85_STEPS/ p85_restarts/ x4e_request p85_restarts}; P85_STEPS="$P85_STEPS x4e_claim"
     fi

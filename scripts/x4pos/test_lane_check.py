@@ -12,7 +12,7 @@ HERE = Path(__file__).resolve().parent
 SCRIPT = HERE / "lane-check.sh"
 ZERO = "0x" + "00" * 32
 STEPS = ("p85_baseline x4a_snapshot p85_joiner_nodes p85_joiner_onboard p85_election_reserved p85_proofs p85_handoff p85_install_activation s4_equivocate p85_j_stalls p85_recovery p85_resolved "
-         "s4_collect_after_rotation x4e_request s4_submit_settle s4_check x4h_second x4o_second p85_restarts p85_epoch_switches x4r_intervals x4r_dry_refill x4r_claim x4o_claim x4e_claim x4g_queue x4g_execute x4g_check x4f_root_restart x4f_evm_restart x4f_pair_restart x4f_delayed_episode x4f_soak x4f_reconcile x4a_final").split()
+         "s4_collect_after_rotation x4e_request s4_submit_settle s4_check x4e_early_probe x4h_second x4o_second p85_restarts p85_epoch_switches x4r_intervals x4r_dry_refill x4r_claim x4o_claim x4e_claim x4g_queue x4g_execute x4g_check x4f_root_restart x4f_evm_restart x4f_pair_restart x4f_delayed_episode x4f_soak x4f_reconcile x4a_final").split()
 PHASES = {"baseline": "p85_baseline", "rewards": "x4r_claim", "replacement": "p85_handoff", "recovery": "p85_resolved", "epoch-switches": "p85_epoch_switches", "offence-1": "s4_check", "second-handoff": "x4h_second", "offence-2": "x4o_second",
           "exit-request": "x4e_request", "exit-claim": "x4e_claim", "governance-queue": "x4g_queue", "governance": "x4g_check", "fault-root-restart": "x4f_root_restart", "fault-evm-restart": "x4f_evm_restart", "fault-pair-restart": "x4f_pair_restart",
           "fault-delayed-episode": "x4f_delayed_episode", "soak": "x4f_soak", "reconcile": "x4f_reconcile", "accounting": "x4a_final"}
@@ -44,6 +44,7 @@ def fixture(root):
     put(d / "steps/exit-request/request.json", {"imported": True, "pRet": 4, "tRet": 7})
     put(d / "steps/exit-request/hold-probe.json", {"outcome": "refused", "reason": "EvidenceHoldPending"})
     put(d / "steps/exit-claim/refusal.json", {"outcome": "refused", "lawfulEarly": True})
+    put(d / "steps/exit-claim/refusal-early.json", {"outcome": "refused", "reason": "TimeGateNotMet", "lawfulEarly": True})
     put(d / "steps/exit-claim/matured.json", {"creditDelta": 3})
     put(d / "steps/exit-claim/claimed.json", {"received": 3})
     for n in ("root-restart", "evm-restart"):
@@ -78,6 +79,16 @@ class LaneCheck(unittest.TestCase):
                 r = run(self.d, self.s4b, ph)
                 self.assertEqual(r.returncode, 0, r.stderr)
 
+    def test_a_claim_step_that_found_the_exit_already_matured_is_accepted_when_the_early_probe_refused(self):
+        put(self.d / "steps/exit-claim/refusal.json", {"outcome": "mature-now", "reason": None})
+        self.assertEqual(run(self.d, self.s4b, "exit-claim").returncode, 0)
+
+    def test_the_early_probe_must_be_recorded_for_the_exit_claim(self):
+        put(self.d / "lane-steps.log", "\n".join(s for s in STEPS if s != "x4e_early_probe") + "\n")
+        r = run(self.d, self.s4b, "exit-claim")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("step x4e_early_probe is not recorded", r.stderr)
+
     def test_a_phase_whose_step_is_not_recorded_is_refused(self):
         for ph, step in PHASES.items():
             with self.subTest(ph):
@@ -108,6 +119,9 @@ class LaneCheck(unittest.TestCase):
                  ("second-handoff", self.d / "steps/handoff2/second-handoff.json", dict(HANDOFF, kClosed=False), "second-handoff"),
                  ("second-handoff", self.d / "steps/handoff2/second-handoff.json", dict(HANDOFF, cursor=6), "second-handoff"),
                  ("exit-request", self.d / "steps/exit-request/hold-probe.json", {"outcome": "refused", "reason": "RoundGateNotMet"}, "hold-probe"),
+                 ("exit-claim", self.d / "steps/exit-claim/refusal-early.json", {"outcome": "mature-now"}, "refusal-early.json"),
+                 ("exit-claim", self.d / "steps/exit-claim/refusal-early.json", {"outcome": "refused", "lawfulEarly": False}, "refusal-early.json"),
+                 ("exit-claim", self.d / "steps/exit-claim/refusal.json", {"outcome": "refused", "lawfulEarly": False}, "refusal.json"),
                  ("exit-claim", self.d / "steps/exit-claim/claimed.json", {"received": 0}, "claimed.json"),
                  ("governance-queue", self.d / "steps/gov/queued.json", {"nonce": 1, "rateBefore": "1000", "rateProposed": "1000", "policyIdBefore": 1}, "queued.json"),
                  ("governance", self.d / "steps/gov/outcome.json", {"policyIdBefore": 1, "policyIdAfter": 1, "activated": False, "activationRequired": True, "rateAfter": "1000", "rateProposed": "500", "waitedSeconds": 1800}, "outcome.json"),

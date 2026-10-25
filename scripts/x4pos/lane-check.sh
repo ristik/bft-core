@@ -44,8 +44,10 @@ case "$phase" in
     jq -e '.imported == true and .pRet > 0 and .tRet > 0' "$d/steps/exit-request/request.json" >/dev/null 2>&1 || fail "exit-request/request.json does not show an imported Retirement"
     jq -e '.outcome == "refused" and .reason == "EvidenceHoldPending"' "$d/steps/exit-request/hold-probe.json" >/dev/null 2>&1 || fail "exit-request/hold-probe.json: no EvidenceHoldPending refusal while the case was admitted" ;;
   exit-claim)
-    ran x4e_claim
-    jq -e '.outcome == "refused" and .lawfulEarly == true' "$d/steps/exit-claim/refusal.json" >/dev/null 2>&1 || fail "exit-claim/refusal.json: the early mature was not refused for a lawful reason"
+    ran x4e_early_probe x4e_claim
+    jq -e '.outcome == "refused" and .lawfulEarly == true' "$d/steps/exit-claim/refusal-early.json" >/dev/null 2>&1 || fail "exit-claim/refusal-early.json: the early mature was not refused for a lawful reason"
+    # the claim step's own probe at its start: refused for a lawful reason, or already mature (the gates passed while the lane did other work); never anything else
+    jq -e '(.outcome == "refused" and .lawfulEarly == true) or .outcome == "mature-now"' "$d/steps/exit-claim/refusal.json" >/dev/null 2>&1 || fail "exit-claim/refusal.json: the mature before the claim was neither lawfully refused nor allowed"
     jq -e '.creditDelta > 0' "$d/steps/exit-claim/matured.json" >/dev/null 2>&1 || fail "exit-claim/matured.json: no credit delta"
     jq -e '.received > 0' "$d/steps/exit-claim/claimed.json" >/dev/null 2>&1 || fail "exit-claim/claimed.json: nothing claimed" ;;
   fault-root-restart|fault-evm-restart|fault-pair-restart)
