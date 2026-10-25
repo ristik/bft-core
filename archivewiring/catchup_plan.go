@@ -115,6 +115,10 @@ func (s *RecoverySource) Extend(ctx context.Context, p *ArchivePlan, until time.
 			return fmt.Errorf("%w: archive block %x is at height %d, its child at %d", ErrArchiveRecoveryInvalid, p.next, number, p.heights[n-1])
 		}
 		if number <= p.After.Number {
+			if len(p.walked) > 0 {
+				// a verified chain that came down from above the anchor's height without containing the anchor proves the anchor is not on it
+				return fmt.Errorf("%w: %w: archive chain to %x passes the retained anchor's height %d without reaching it", ErrArchiveRecoveryInvalid, shardnode.ErrCertifiedChainForksAnchor, p.Top, p.After.Number)
+			}
 			return fmt.Errorf("%w: archive chain to %x passes the retained anchor's height %d without reaching it", ErrArchiveRecoveryInvalid, p.Top, p.After.Number)
 		}
 		joins := bytes.Equal(entry.Block.ParentHash, p.After.Hash)
@@ -122,7 +126,7 @@ func (s *RecoverySource) Extend(ctx context.Context, p *ArchivePlan, until time.
 		case joins && number != p.After.Number+1:
 			return fmt.Errorf("%w: archive chain joins the retained anchor at height %d, not %d", ErrArchiveRecoveryInvalid, number, p.After.Number+1)
 		case !joins && (number == p.After.Number+1 || len(entry.Block.ParentHash) != 32):
-			return fmt.Errorf("%w: archive chain to %x does not reach the retained anchor %x", ErrArchiveRecoveryInvalid, p.Top, p.After.Hash)
+			return fmt.Errorf("%w: %w: archive chain to %x does not reach the retained anchor %x", ErrArchiveRecoveryInvalid, shardnode.ErrCertifiedChainForksAnchor, p.Top, p.After.Hash)
 		}
 		// accepted: a refused record above is not recorded, so a resumed walk asks for it again
 		if !local {
