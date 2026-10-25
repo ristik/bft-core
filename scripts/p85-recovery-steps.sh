@@ -306,7 +306,7 @@ p85_proofs() {
 p85_expect_refusal() { # assignment sentinel out receipts
   local out
   if out=$(build/ubft root handoff propose --next-trust-base test-nodes/trust-base-epoch2.json --next-evm-assignment "$1" --readiness-receipts "$4" \
-      --root-rpc "$(h3_root_rpcs)" --max-attempts 1 --prepare-timeout 20s 2>&1); then echo "the plan was accepted: $out" >&2; return 1; fi
+      --root-rpc "$(q3_propose_rpcs)" --max-attempts 1 --prepare-timeout 20s 2>&1); then echo "the plan was accepted: $out" >&2; return 1; fi
   echo "$out" >"$3"
   grep -Fq "$2" "$3" || { echo "refused, but not for \"$2\":" >&2; tail -n 4 "$3" >&2; return 1; }
 }
@@ -325,9 +325,23 @@ p85_controls() { # tag receipts
   p85_expect_refusal "$d/wrong-evm-pop.json" "the primary candidate's EVM proof is refused" "$H3_DIR/control-wrong-proof.txt" "$receipts" || return 1
 }
 
+# The roots reject a reserved result that no root-ordered handoff has started within the reservation lifetime (#857, contracts#73), published or
+# not: the handoff then needs the next result the election reserves. Its proofs are collected again; the root plans at its own next attempt.
+p85_reelect_if_rejected() {
+  local r s
+  r=$(cat "$H3_DIR/result-id.txt") || return 1
+  s=$(p85_result_state "$r") || return 1
+  [ "$s" = 1 ] && return 0
+  [ "$s" = 5 ] || { echo "the reserved result $r is in state $s before its handoff (neither Reserved nor rejected)" >&2; return 1; }
+  echo "the reserved result $r was rejected (Closed) before its handoff: re-electing (#868)"
+  p85_election_reserved || return 1
+  [ "$(cat "$H3_DIR/result-id.txt")" != "$r" ] || { echo "the election holds the rejected result again" >&2; return 1; }
+  p85_proofs
+}
 p85_handoff() {
   H3_ROOTS="1 2 3 4 5"; H3_ONLINE="1 2 3 4 5"
-  Q3_BEFORE_READINESS=p85_joiner_restore Q3_BEFORE_PROPOSE=p85_controls Q3_ENTITIES="1 2 3 4 5" Q3_TOTAL_WEIGHT=5 Q3_ROOT_QUORUM=4 Q3_EVM_QUORUM=3 Q3_WEIGHTS_1="1 1 1 1 1" \
+  p85_reelect_if_rejected || return 1
+  Q3_PROPOSE_ROOTS="1 2 3 4" Q3_BEFORE_READINESS=p85_joiner_restore Q3_BEFORE_PROPOSE=p85_controls Q3_ENTITIES="1 2 3 4 5" Q3_TOTAL_WEIGHT=5 Q3_ROOT_QUORUM=4 Q3_EVM_QUORUM=3 Q3_WEIGHTS_1="1 1 1 1 1" \
     q3_handoff_n 1 2 "1 1 1 1 1" 0 "$P85_DIR/genesis-identities.json" || return 1
 }
 
