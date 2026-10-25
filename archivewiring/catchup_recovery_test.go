@@ -378,3 +378,34 @@ func TestArchiveCatchUp_AForkedFinalizedBlockFoundThroughThePlanIsAConflict(t *t
 	require.Equal(t, forked, n.exec.finalized, "finality never retreats or moves on a conflict")
 	require.Equal(t, forked, n.exec.head)
 }
+
+// TestArchiveCatchUp_LeavesRoomForTheLiveFollower: bft-core#843. A catch-up that fills the journal exactly leaves the next live follower
+// candidate no slot, and a journal at its limit stops the node for good (rejoined nodes in the pos-crash runs never signed again). After
+// every call the journal keeps free slots, also while it waits for archive copies.
+func TestArchiveCatchUp_LeavesRoomForTheLiveFollower(t *testing.T) {
+	t.Parallel()
+	const gap = 29
+	p := newPlanFixture(t, gap)
+	p.serve(t, 1, gap)
+	n := newReturningNode(t, p, map[string]*archive.Store{replicaA: p.replica, replicaB: p.second})
+	ctx := context.Background()
+	target := p.f.entries[gap-1]
+	headroom := returningLimits.Candidates / 4 // the coordinator's quarter of the journal
+	maxUsed := 0
+	for call := 1; call <= 40; call++ {
+		err := n.recovery.AcquireForCertificate(ctx, target.ResultingUC, target.ResultingTR)
+		image, loadErr := n.store.LoadJournal(ctx, p.f.context, n.limits)
+		require.NoError(t, loadErr)
+		maxUsed = max(maxUsed, len(image.Candidates))
+		require.LessOrEqual(t, len(image.Candidates), n.limits.Candidates-headroom, "call %d: the journal keeps room for the live follower", call)
+		if err == nil {
+			break
+		}
+		require.ErrorIs(t, err, configuredadmission.ErrRecoveryUnavailable)
+		require.False(t, n.recovery.Terminal(err), "call %d: %v", call, err)
+	}
+	head, err := n.recovery.Recover(ctx, target.ResultingUC)
+	require.NoError(t, err)
+	require.EqualValues(t, gap, head.Number)
+	require.Greater(t, maxUsed, 0)
+}

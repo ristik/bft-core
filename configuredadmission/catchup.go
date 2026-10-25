@@ -226,13 +226,29 @@ func (r *ExecutionRecovery) catchUpRoomFor(ctx context.Context, n int, target []
 	return wait, nil
 }
 
-// catchUpRoom reports whether the journal can take n more candidates and certificates.
+// catchUpHeadroom is what a catch-up leaves free in the journal: the live follower retains each proposal before it verifies it, and a
+// journal at its limit stops the node for good (ErrBounds is terminal). A catch-up that fills the journal exactly leaves the next live
+// candidate no slot (bft-core#843: the rejoined node's journal was full the moment the catch-up ended and never signed again).
+func (r *ExecutionRecovery) catchUpHeadroom() int { return max(2, r.walkLimit()/4) }
+
+// catchUpRoom reports whether the journal can take n more candidates and certificates and still keep the catch-up's headroom. A stretch
+// whose own length plus the headroom exceeds a limit is held to that limit alone, as before: waiting for room it can never have would
+// stop the catch-up.
 func (r *ExecutionRecovery) catchUpRoom(ctx context.Context, n int) (bool, error) {
 	image, err := r.Store.LoadJournal(ctx, r.Context, r.JournalLimits)
 	if err != nil {
 		return false, fmt.Errorf("%w: verifying journal: %w", ErrRecoveryUnavailable, err)
 	}
-	return len(image.Candidates)+n <= r.walkLimit() && (r.JournalLimits.Observations <= 0 || len(image.Observations)+n <= r.JournalLimits.Observations), nil
+	withHeadroom := func(limit int) int {
+		if n+r.catchUpHeadroom() > limit {
+			return n
+		}
+		return n + r.catchUpHeadroom()
+	}
+	if r.JournalLimits.Observations > 0 && len(image.Observations)+withHeadroom(r.JournalLimits.Observations) > r.JournalLimits.Observations {
+		return false, nil
+	}
+	return len(image.Candidates)+withHeadroom(r.walkLimit()) <= r.walkLimit(), nil
 }
 
 // catchUpWaiting is an availability stop of the catch-up: never a terminal or data class, logged once a minute per target (they repeat
