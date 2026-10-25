@@ -40,7 +40,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: ristik/unicity-pos-contracts
-          ref: 4733947d9af908a4f55bf2b732c66809bdb33f08
+          ref: be6e86fb2cbba828b3331822850f8af34bd0d0fd
           path: pinned-contracts
           submodules: recursive
       - uses: foundry-rs/foundry-toolchain@v1
