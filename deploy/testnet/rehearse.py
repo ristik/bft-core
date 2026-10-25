@@ -938,6 +938,11 @@ class Rehearsal:
         self.expect(rc == 0, f'the joiner\'s authority {i} advanced, enrolled and issued its session', log[-1][-400:])
         self.restore_joiner(i)
 
+    def restore_body_ids(self):
+        """`<epoch>=<V3 body id>` of every activation record of this generation (every handoff's evidence directory), comma-separated, for h4-restore-pin's H4_RESTORE_BODY_IDS."""
+        records = [json.loads(path.read_text()) for path in sorted(self.evidence.glob('handoff*/activation-record-*.json'))]
+        return ','.join(f"{r['epoch']}={r['v3BodyId']}" for r in sorted(records, key=lambda r: r['epoch']))
+
     def restore_joiner(self, i):
         """The joiner's shard node after the Commit. Its staging run left a candidate without the certificates a node needs (run 40087359371: "durable state is damaged or
         untrusted"), and the genesis configuration does not name it: it comes back by RESTORING, as the native lane does: its execution client and node state are emptied,
@@ -952,21 +957,28 @@ class Rehearsal:
                     shutil.rmtree(path) if path.is_dir() else path.unlink()
         self.compose('up', '-d', '--no-deps', f'ureth{i}')
         self.wait(f'the joiner\'s execution client {i} answers', lambda: self.ureth(i, 'eth_blockNumber') is not None, 180)
-        # A survivor's archive holds the verified trust body of the new epoch only once it has archived it, and not every survivor's does at the same time (runs 40091999009 and
-        # 40101751785: "no archived verified-trust body identity for epoch 2" from validator 1's archive for two minutes, while runs 40088831174, 40090246101 and 40094341567
-        # found it on the first attempt): every survivor's archive is asked, in turn, for up to two minutes; every answer is kept
+        # This package runs the Q3 lane, and a Q3 activation is not archived as a handoff bundle, so no survivor's archive ever holds the new epoch's verified-trust body: the tool is
+        # told the V3 body id of every activated epoch from the activation records (H4_RESTORE_BODY_IDS, as every lane does; an operator anchor that the restored node checks against
+        # its verified history and refuses to start on a mismatch). Before this the stage waited for the archive to "hold" the body, and passed only while the survivors' newest
+        # archived record was still of epoch 1 (the pin was then the predecessor's body id, run 40105312249); it failed once an archive had a record of epoch 2 (runs 40091999009,
+        # 40101751785, 40105561580: "neither the archive nor H4_RESTORE_BODY_IDS names epoch 2" for two minutes).
+        bodies = self.restore_body_ids()
+        self.expect(bool(bodies), 'an activation record names the V3 body id the restore is anchored to (run pos-install first)')
+        env = dict(os.environ, H4_RESTORE_BODY_IDS=bodies)
+        newest = bodies.split(',')[-1].split('=')[1]
         attempts = []
         survivors = [j for j in range(1, self.n + 1) if j != i]
         def pinned():
             for j in survivors:
                 run = subprocess.run([str(self.restore_pin), str(self.gen / f'validator{j}' / 'archive'), str(self.gen / 'network' / 'trust-base.json'), str(val / 'evm' / 'tip')],
-                                     text=True, capture_output=True)
+                                     text=True, capture_output=True, env=env)
                 attempts.append(f'validator {j} archive: exit {run.returncode}: {(run.stdout + run.stderr).strip()[-300:]}')
-                if run.returncode == 0:
+                # the pin must be a record of the new epoch: an epoch-1 record also pins (its body id is the predecessor's) and would leave the anchor above untested
+                if run.returncode == 0 and f'bodyID=0x{newest}' in run.stdout:
                     return run
             return None
         try:
-            pin = self.wait('a survivor\'s archive holds the verified trust history of the new epoch', pinned, 120)
+            pin = self.wait('a survivor\'s archive yields a certified record of the new epoch to pin', pinned, 120)
         except Failure:
             pin = None
         (self.evh() / f'joiner-restore-pin-{i}.txt').write_text('\n'.join(attempts) + '\n')
