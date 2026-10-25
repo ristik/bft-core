@@ -2,7 +2,7 @@
   "format": "UNICITY_XREPO_FIXTURES/v1",
   "contracts": {
     "repo": "https://github.com/ristik/unicity-pos-contracts",
-    "commit": "0ed5dc75f4b98fb30172ad5f9e097dc9117039ae"
+    "commit": "e54973988f0dc875476a0007ec29562a42ea6160"
   },
   "fixtures": [
     {"producer": "contracts", "contracts": "test/p85/fixtures/publication.json", "bftCore": ["evmassign/testdata/publication.json", "rootchain/evmstate/testdata/publication.json"],
