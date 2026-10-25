@@ -61,12 +61,17 @@ q3_engine_url() { echo "http://127.0.0.1:$((rethEngineBase + $1 - 1))"; }
 
 q3_eth_url() { echo "http://127.0.0.1:$((rethEthBase + $1 - 1))"; }
 
+# The roots a handoff is planned, intended and endorsed at: the old committee (Q3_PROPOSE_ROOTS, default H3_ROOTS). A joiner root is not one of
+# them: before its activation it follows nothing (proposals go to the committee only) and plans from its installed tip, so it refuses every
+# plan past attempt 0 (#868). Its part is the readiness receipt.
+q3_propose_rpcs() { H3_ROOTS=${Q3_PROPOSE_ROOTS:-$H3_ROOTS} h3_root_rpcs; }
+
 q3_derive_candidate() { # the root's derivation of the V3 candidate for the current attempt (Q3_NEXT_EPOCH, Q3_ASSIGN_TAG, Q3_SUFFIX name the handoff; the first by default)
   local e=${Q3_NEXT_EPOCH:-2} tag=${Q3_ASSIGN_TAG:-cand} suf=${Q3_SUFFIX:-}
   local -a assign=(); [ -n "${Q3_NO_ASSIGNMENT:-}" ] || assign=(--next-evm-assignment "$Q3_DIR/$tag-assignment.json")
   rm -rf "$Q3_DIR/candidate${suf}.d"
   q3_x build/ubft root handoff q3-candidate --next-trust-base "test-nodes/trust-base-epoch${e}.json" \
-    ${assign[@]+"${assign[@]}"} --root-rpc "$(h3_root_rpcs)" --out-dir "$Q3_DIR/candidate${suf}.d" || return 1
+    ${assign[@]+"${assign[@]}"} --root-rpc "$(q3_propose_rpcs)" --out-dir "$Q3_DIR/candidate${suf}.d" || return 1
   cp "$Q3_DIR/candidate${suf}.d/candidate.cbor" "$Q3_DIR/candidate${suf}.cbor"
   cp "$Q3_DIR/candidate${suf}.d/config.json" "$Q3_DIR/candidate-config${suf}.json"
   cp "$Q3_DIR/candidate${suf}.d/v3-body-id.txt" "$Q3_DIR/v3-body-id${suf}.txt"
@@ -101,7 +106,7 @@ q3_attempt() { # a retry rebuilds the proofs of possession, the candidate and th
   # a lane hook sees the complete plan inputs (the receipts exist) before the real proposal: the P85 proof controls mutate it here
   [ -z "${Q3_BEFORE_PROPOSE:-}" ] || "$Q3_BEFORE_PROPOSE" "$tag" "$receipts" || return 1
   q3_x build/ubft root handoff propose --next-trust-base "test-nodes/trust-base-epoch${e}.json" ${assign[@]+"${assign[@]}"} \
-    --root-rpc "$(h3_root_rpcs)" ${Q3_RECOVERY:+--q3}
+    --root-rpc "$(q3_propose_rpcs)" ${Q3_RECOVERY:+--q3}
 }
 
 q3_history_ids() { # out: the verified history identities retained by the first root
