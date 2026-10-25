@@ -27,6 +27,7 @@ type pubFx struct {
 		IncumbentExposureDigest, IncumbentKeyDigest                       string
 	} `json:"expected"`
 	Reserved  pubReads   `json:"reserved"`
+	RLost     pubReads   `json:"reservedLost"`
 	Published pubReads   `json:"published"`
 	Lost      pubReads   `json:"lost"`
 	Election  []pubReads `json:"electionReads"`
@@ -72,6 +73,8 @@ func newPrimaryWorld(t testing.TB, scenario string) primaryWorld {
 	switch scenario {
 	case "reserved":
 		fx.Reserved.into(t, w.election)
+	case "reservedLost":
+		fx.RLost.into(t, w.election)
 	case "lost":
 		fx.Lost.into(t, w.election)
 	default:

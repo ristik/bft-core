@@ -58,7 +58,11 @@ type fixture struct {
 		EVMKey    string `json:"evmKey"`
 		Signature string `json:"signature"`
 	} `json:"pops"`
+	Reserved      reads   `json:"reserved"`
+	ReservedLost  reads   `json:"reservedLost"`
 	Published     reads   `json:"published"`
+	Lost          reads   `json:"lost"`
+	Attempt       uint64  `json:"attempt"`
 	ElectionReads []reads `json:"electionReads"`
 	CustodyReads  []reads `json:"custodyReads"`
 }

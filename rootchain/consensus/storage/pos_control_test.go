@@ -188,7 +188,7 @@ type fakeEVM struct {
 	err         error
 	seen        []byte
 	roots       [][32]byte
-	rejectAsked [2]any
+	rejectAsked [32]byte
 	retireAsked [2]uint64
 }
 
@@ -198,11 +198,18 @@ func (e *fakeEVM) VerifyRetirement(w []byte, root [32]byte, id, gen uint64) (Ret
 	e.retireAsked = [2]uint64{id, gen}
 	return e.retire, e.err
 }
-func (e *fakeEVM) VerifyReject(w []byte, root [32]byte, resultID [32]byte, attempt uint64) (RejectFacts, error) {
+func (e *fakeEVM) VerifyReject(w []byte, root [32]byte, resultID [32]byte) (RejectFacts, error) {
 	e.seen = w
 	e.roots = append(e.roots, root)
-	e.rejectAsked = [2]any{resultID, attempt}
+	e.rejectAsked = resultID
 	return e.reject, e.err
+}
+
+// dueReject are the facts of a result the rule rejects: the open reserved result of an open session over the last acknowledged assignment,
+// exactly ResultReservationLifetimeProgress old at P and not lost.
+func dueReject(res [32]byte) RejectFacts {
+	return RejectFacts{ResultID: res, Reserved: true, Unresolved: true, Bound: true, NoInstalledSession: true,
+		ReservedAt: 10, Progress: 10 + ResultReservationLifetimeProgress}
 }
 
 type evmFx struct {
@@ -242,7 +249,7 @@ func newEVMFx(t *testing.T, op uint64) *evmFx {
 		res := [32]byte{0x5e}
 		f.ctl.Reject = &rctypes.RejectContext{PredecessorBodyID: [32]byte{0x77}, Attempt: 0, EVMBlockHash: pBlock, EVMStateRoot: pRoot}
 		f.ctl.Data = res[:]
-		evm.reject = RejectFacts{ResultID: res, Attempt: 0, Unresolved: true, NoInstalledSession: true}
+		evm.reject = dueReject(res)
 	}
 	return f
 }
@@ -352,16 +359,18 @@ func TestRejectResultClosesTheSessionAndMovesTheAttemptCursor(t *testing.T) {
 	require.Equal(t, f.ctl.Data, f.step.records[0].Data)
 	require.EqualValues(t, 2_000, f.step.records[0].UCTime)
 
-	// the next attempt is attempt one, and a second rejection of attempt zero is stale
+	// the next attempt is attempt one: the same result is not closed twice, and another result at the stale attempt zero is refused
 	f.env.Control = replaced
+	f.ctl.Reject.Attempt = 1
 	_, err = f.run()
-	require.ErrorIs(t, err, ErrPosControlRefused)
-	f.ctl.Reject.Attempt, f.evm.reject.Attempt = 1, 1
-	_, err = f.run()
-	require.ErrorIs(t, err, rootrecords.ErrResultResolved, "the same result is not closed twice")
+	require.ErrorIs(t, err, ErrResolvedResult, "the same result is not closed twice")
 	require.Len(t, f.step.records, 1)
 	fresh := [32]byte{0x5f}
-	f.ctl.Data, f.evm.reject.ResultID = fresh[:], fresh
+	f.ctl.Data, f.evm.reject = fresh[:], dueReject(fresh)
+	f.ctl.Reject.Attempt = 0
+	_, err = f.run()
+	require.ErrorIs(t, err, ErrRejectAttempt)
+	f.ctl.Reject.Attempt = 1
 	next, err := f.run()
 	require.NoError(t, err)
 	require.EqualValues(t, 1, next.Attempt)
@@ -369,34 +378,38 @@ func TestRejectResultClosesTheSessionAndMovesTheAttemptCursor(t *testing.T) {
 }
 
 func TestRejectResultRefusals(t *testing.T) {
-	cases := map[string]func(f *evmFx){
-		"a prepared handoff":  func(f *evmFx) { f.env.Control.Phase = "prepared" },
-		"an endorsed handoff": func(f *evmFx) { f.env.Control.Phase = "endorsed" },
-		"a committed handoff": func(f *evmFx) { f.env.Control.Phase = "committed" },
-		"a pending primary":   func(f *evmFx) { f.step.state.Pending = []rootrecords.PendingH{{Epoch: 1, HRound: 9}} },
-		"another predecessor than the control state's": func(f *evmFx) {
+	cases := map[string]struct {
+		mutate func(f *evmFx)
+		want   error
+	}{
+		"a prepared handoff":  {func(f *evmFx) { f.env.Control.Phase = "prepared"; f.env.Control.OrderedRound = 49 }, ErrRejectNotQuiet},
+		"an endorsed handoff": {func(f *evmFx) { f.env.Control.Phase = "endorsed" }, ErrRejectNotQuiet},
+		"a committed handoff": {func(f *evmFx) { f.env.Control.Phase = "committed" }, ErrRejectNotQuiet},
+		"a pending primary":   {func(f *evmFx) { f.step.state.Pending = []rootrecords.PendingH{{Epoch: 1, HRound: 9}} }, ErrRejectNotQuiet},
+		"a frozen tracker":    {func(f *evmFx) { f.step.state.Frozen = true }, ErrRejectNotQuiet},
+		"another predecessor than the control state's": {func(f *evmFx) {
 			f.ctl.Reject.PredecessorBodyID[0]++
-		},
-		"a stale attempt":                                func(f *evmFx) { f.ctl.Reject.Attempt = 3 },
-		"P is not the latest certified":                  func(f *evmFx) { f.env.LatestEVMRoot = [32]byte{0xff} },
-		"a block hash that is not the certified block's": func(f *evmFx) { f.ctl.Reject.EVMBlockHash[0]++ },
-		"a state root that is not the certified one":     func(f *evmFx) { f.ctl.Reject.EVMStateRoot[0]++ },
-		"another result in the proof":                    func(f *evmFx) { f.evm.reject.ResultID[0]++ },
-		"another attempt in the proof":                   func(f *evmFx) { f.evm.reject.Attempt = 1 },
-		"an already resolved result":                     func(f *evmFx) { f.evm.reject.Unresolved = false },
-		"a competing installed session":                  func(f *evmFx) { f.evm.reject.NoInstalledSession = false },
-		"the proof verifier rejects":                     func(f *evmFx) { f.evm.err = errors.New("bad proof") },
-		"no handoff control state":                       func(f *evmFx) { f.env.Control = nil },
+		}, ErrPosControlRefused},
+		"a stale attempt":                                {func(f *evmFx) { f.ctl.Reject.Attempt = 3 }, ErrRejectAttempt},
+		"P is not the latest certified":                  {func(f *evmFx) { f.env.LatestEVMRoot = [32]byte{0xff} }, ErrNotLatestEVM},
+		"a block hash that is not the certified block's": {func(f *evmFx) { f.ctl.Reject.EVMBlockHash[0]++ }, ErrNotLatestEVM},
+		"a state root that is not the certified one":     {func(f *evmFx) { f.ctl.Reject.EVMStateRoot[0]++ }, ErrNotLatestEVM},
+		"another result in the proof":                    {func(f *evmFx) { f.evm.reject.ResultID[0]++ }, ErrPosControlRefused},
+		"not the election's open reserved result":        {func(f *evmFx) { f.evm.reject.Reserved = false }, ErrRejectNotOpen},
+		"an already resolved session":                    {func(f *evmFx) { f.evm.reject.Unresolved = false }, ErrRejectNotOpen},
+		"a result unbound from the session":              {func(f *evmFx) { f.evm.reject.Bound = false }, ErrRejectNotOpen},
+		"a competing installed session":                  {func(f *evmFx) { f.evm.reject.NoInstalledSession = false }, ErrRejectSuperseded},
+		"a young, unlost reservation":                    {func(f *evmFx) { f.evm.reject.Progress-- }, ErrRejectNotDue},
+		"the proof verifier rejects":                     {func(f *evmFx) { f.evm.err = errors.New("bad proof") }, ErrPosControlRefused},
+		"no handoff control state":                       {func(f *evmFx) { f.env.Control = nil }, ErrPosControls},
 	}
-	for name, mut := range cases {
+	for name, c := range cases {
 		t.Run(name, func(t *testing.T) {
 			f := newEVMFx(t, rctypes.OpRejectResult)
-			mut(f)
+			c.mutate(f)
 			replaced, err := f.run()
-			require.Error(t, err)
-			if name == "no handoff control state" {
-				require.ErrorIs(t, err, ErrPosControls)
-			} else {
+			require.ErrorIs(t, err, c.want)
+			if c.want != ErrPosControls {
 				require.ErrorIs(t, err, ErrPosControlRefused)
 			}
 			require.Nil(t, replaced)
@@ -792,7 +805,7 @@ func TestAQuietParentRoundCertifiesNoBlockHash(t *testing.T) {
 	f.ctl.Reject.EVMBlockHash = [32]byte{}
 	_, err = f.run()
 	require.NoError(t, err)
-	require.Equal(t, [2]any{f.evm.reject.ResultID, uint64(0)}, f.evm.rejectAsked, "the verifier is asked for the control's result and attempt")
+	require.Equal(t, f.evm.reject.ResultID, f.evm.rejectAsked, "the verifier is asked for the control's result (no attempt: contracts#73)")
 	require.Equal(t, [][32]byte{pRoot}, f.evm.roots, "and judges the witness against the certified state root")
 }
 

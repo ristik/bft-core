@@ -41,7 +41,8 @@ type CloseContext struct {
 // RetireContext is the context [evmBlockHash, evmStateRoot] of Retirement: the certified EVM post-state the proofs are checked against.
 type RetireContext struct{ EVMBlockHash, EVMStateRoot [32]byte }
 
-// RejectContext is the context [predecessorBodyID, attempt, evmBlockHash, evmStateRoot] of RejectResult.
+// RejectContext is the context [predecessorBodyID, attempt, evmBlockHash, evmStateRoot] of RejectResult. Attempt is the root's handoff
+// attempt (the next one of its control state), never Election's attempt counter (contracts#73).
 type RejectContext struct {
 	PredecessorBodyID          [32]byte
 	Attempt                    uint64
