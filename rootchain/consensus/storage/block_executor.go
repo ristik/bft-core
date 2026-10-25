@@ -478,6 +478,10 @@ func (x *ExecutedBlock) extendWithAuthority(newBlock *rctypes.BlockData, verifie
 		return nil, err
 	}
 	if replaced != nil {
+		// a control state the next proposal's profile check refuses would halt the chain once committed: refuse the block instead
+		if err := validateControl(replaced); err != nil {
+			return nil, fmt.Errorf("the P85 controls leave an invalid control state: %w", err)
+		}
 		nextShardState.Control = withUnackedParent(nextShardState.Control, replaced)
 	}
 	if nextShardState.Control != nil {

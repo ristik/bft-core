@@ -73,6 +73,13 @@ func validateControl(c *evmroot.ControlState) error {
 	if len(c.PreviousDigest) != 32 {
 		return ErrControlCheckpoint
 	}
+	if c.Phase == "aborted" && len(c.RecordBytes) == 0 {
+		// a RejectResult aborts the root's attempt with no ordered record (contracts#73): no record to check, and no frozen parent
+		if len(c.FrozenParent) != 0 {
+			return ErrControlCheckpoint
+		}
+		return nil
+	}
 	r, err := decodeOrderedRecord(c.RecordBytes)
 	if err != nil || r.Network != c.Network || r.Epoch != c.Epoch || r.Attempt != c.Attempt || r.OrderedRound != c.OrderedRound || !bytes.Equal(r.PredecessorBodyID, c.PredecessorBodyID) {
 		return ErrControlCheckpoint
