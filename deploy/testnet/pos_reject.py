@@ -26,6 +26,7 @@ import handoff_ops
 import operator_rpc
 
 LIFETIME = 1024   # storage.ResultReservationLifetimeProgress
+STALL = 180       # seconds without registry progress that count as a stopped chain
 ZERO = '0x' + '00' * 32
 
 
@@ -73,9 +74,15 @@ def pos_reject(self):
 
     # 2 the roots reject it by themselves
     started = time.monotonic()
+    seen = {'progress': None, 'since': started}
     def closed():
         p = progress()
         self.say(f'  progress {p} (due at {reserved_at + LIFETIME}), R state {result_words()[0]}')
+        if p != seen['progress']:
+            seen['progress'], seen['since'] = p, time.monotonic()
+        # a chain that stops certifying never applies the rejection: say so at once (#863 halted the roots right after the due point)
+        if time.monotonic() - seen['since'] >= STALL:
+            self.expect(False, 'the registry progress keeps rising while the rejection is awaited', f'stuck at {p} for {STALL} s or more')
         return result_words()[0] != 1 or None
     self.wait('the roots order the rejection and the EVM applies it', closed, 1800)
     at = progress()
