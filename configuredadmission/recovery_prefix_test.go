@@ -333,3 +333,140 @@ func (f *fakeCatchUp) Page(ctx context.Context, from shardnode.BlockRef, max int
 }
 func (f *fakeCatchUp) Drop()                                      { f.dropped = true }
 func (f *fakeCatchUp) AdvanceFrontier(context.Context, int) error { return nil }
+
+// restartedExecutor is an execution client that restarted alone: it restored its tokens from disk but has not admitted them, so it answers
+// SYNCING to every import until the node has admitted its head (ureth: "parent accounting token is not retained"). It records the order.
+type restartedExecutor struct {
+	*replayExecutor
+	pair      bool
+	admitted  bool
+	admitErr  error
+	admitCall int
+	events    []string
+}
+
+func (e *restartedExecutor) PairEnabled() bool { return e.pair }
+func (e *restartedExecutor) AdmitHead(context.Context) error {
+	e.admitCall++
+	e.events = append(e.events, "admit")
+	if e.admitErr != nil {
+		return e.admitErr
+	}
+	e.admitted = true
+	return nil
+}
+func (e *restartedExecutor) Verify(ctx context.Context, b shardnode.Block, p shardnode.RoundParams) (shardnode.Status, error) {
+	e.events = append(e.events, fmt.Sprintf("verify %d", b.Number))
+	if e.pair && !e.admitted {
+		return shardnode.StatusSyncing, errors.New("seal import answered SYNCING: parent accounting token is not retained")
+	}
+	return e.replayExecutor.Verify(ctx, b, p)
+}
+
+func (p *prefixNet) restarted(el int) (*ExecutionRecovery, *restartedExecutor) {
+	r, base := p.recovery(el)
+	e := &restartedExecutor{replayExecutor: base, pair: true}
+	r.Executor = e
+	return r, e
+}
+
+// A ureth-only kill: nothing restarts the shard node, so nobody admits the client's restored head, and every import is refused. Recovery
+// admits the head itself, before the first import, in the prefix replay and in the retained-suffix replay (bft-core#843, run 40158278501).
+func TestRecoveryAdmitsTheRestartedClientsHeadBeforeImporting(t *testing.T) {
+	t.Run("prefix replay", func(t *testing.T) {
+		p := newPrefixNet(t, 5, 3)
+		r, e := p.restarted(1)
+		head, err := r.Recover(context.Background(), nil)
+		require.NoError(t, err)
+		require.Equal(t, p.refs[5], head)
+		require.Equal(t, "admit", e.events[0], "the head is admitted before any import")
+		require.Equal(t, 1, e.admitCall)
+		// the coordinator moved the client itself: no second admission on the next call
+		_, err = r.Recover(context.Background(), nil)
+		require.NoError(t, err)
+		require.Equal(t, 1, e.admitCall)
+	})
+	t.Run("suffix replay within the retained journal", func(t *testing.T) {
+		p := newPrefixNet(t, 5, 3)
+		r, e := p.restarted(3)
+		head, err := r.Recover(context.Background(), nil)
+		require.NoError(t, err)
+		require.Equal(t, p.refs[5], head)
+		require.Equal(t, []string{"admit", "verify 4", "verify 5"}, e.events)
+	})
+	t.Run("a client that cannot be admitted is retried with signing off and nothing moves", func(t *testing.T) {
+		p := newPrefixNet(t, 5, 3)
+		r, e := p.restarted(1)
+		errMismatch := errors.New("the retained root input is not this node's derivation")
+		e.admitErr = errMismatch
+		_, err := r.Recover(context.Background(), nil)
+		require.ErrorIs(t, err, ErrRecoveryUnavailable)
+		require.ErrorIs(t, err, errMismatch, "the cause stays in the chain")
+		require.False(t, r.Terminal(err))
+		require.Equal(t, []string{"admit"}, e.events, "no import is attempted on an unadmitted client")
+		require.Empty(t, e.forkchoice)
+		require.Equal(t, p.refs[1], e.finalized)
+		// the next call retries the admission and then recovers
+		e.admitErr = nil
+		_, err = r.Recover(context.Background(), nil)
+		require.NoError(t, err)
+		require.Equal(t, 2, e.admitCall)
+	})
+	t.Run("an executor without a paired client is not asked", func(t *testing.T) {
+		p := newPrefixNet(t, 5, 3)
+		r, e := p.restarted(1)
+		e.pair = false
+		_, err := r.Recover(context.Background(), nil)
+		require.NoError(t, err)
+		require.Zero(t, e.admitCall)
+	})
+}
+
+// rev's #862 items: a finalized block at exactly the base's height with another hash is a proven conflict (the base is certified), never
+// "below the base": the archive is not asked and nothing is replayed.
+func TestRecoveryFinalizedAtTheBaseHeightWithAnotherHashIsAConflict(t *testing.T) {
+	p := newPrefixNet(t, 5, 3)
+	r, e := p.recovery(3)
+	fork := shardnode.BlockRef{Number: 3, Hash: p.refs[2].Hash, StateRoot: p.refs[3].StateRoot}
+	e.head, e.finalized = fork, fork
+	r.FetchArchive = func(context.Context, shardnode.BlockRef, []byte) ([]shardnode.JournalFetchEntry, error) {
+		t.Fatal("the archive is not asked about a block at the base's height")
+		return nil, nil
+	}
+	_, err := r.Recover(context.Background(), nil)
+	require.ErrorIs(t, err, ErrRecoveryConflict)
+	require.NotErrorIs(t, err, ErrRecoveryUnavailable)
+	require.True(t, r.Terminal(err))
+	require.ErrorContains(t, err, "outside certified chain", "found by the finality check against the base, not by a replay that found nothing to do")
+	require.Empty(t, e.verify)
+	require.Empty(t, e.forkchoice)
+	// one block lower, the same hash is only missing history
+	e.head, e.finalized = p.refs[2], p.refs[2]
+	e.known[string(p.refs[2].Hash)] = true
+	r.FetchArchive = p.archive
+	_, err = r.Recover(context.Background(), nil)
+	require.NoError(t, err)
+}
+
+// A source that returns nothing above the point an iteration started at must end the replay, also after an earlier iteration made progress.
+func TestRecoveryPrefixStopsOnASourceThatReturnsNothingNew(t *testing.T) {
+	p := newPrefixNet(t, 7, 6)
+	r, e := p.recovery(1)
+	r.Limits.Blocks = 8
+	calls := 0
+	r.FetchArchive = func(ctx context.Context, after shardnode.BlockRef, target []byte) ([]shardnode.JournalFetchEntry, error) {
+		calls++
+		if calls == 1 {
+			return p.archive(ctx, after, p.refs[3].Hash) // a page to block 3 of the 6 asked for
+		}
+		return nil, nil
+	}
+	start := time.Now()
+	_, err := r.Recover(context.Background(), nil)
+	require.ErrorIs(t, err, ErrRecoveryUnavailable)
+	require.False(t, r.Terminal(err))
+	require.Contains(t, err.Error(), "returned no history above 3/")
+	require.Equal(t, 2, calls)
+	require.Less(t, time.Since(start), time.Second, "no spinning until the deadline")
+	require.Equal(t, p.refs[3], e.finalized, "the progress made is kept")
+}

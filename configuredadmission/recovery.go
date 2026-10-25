@@ -30,6 +30,14 @@ type RecoveryExecutor interface {
 	CheckBlockBinding(context.Context, shardnode.Block, shardnode.RoundParams) error
 }
 
+// HeadAdmitter is the execution client's restart admission (engineapi.Adapter): after the client restarts, the tokens it restored from disk are
+// not admitted, and it answers SYNCING to every import until this node has re-authenticated its canonical head from its own trust
+// (engine_admitParentV1). Executors without a paired execution client do not have it.
+type HeadAdmitter interface {
+	PairEnabled() bool
+	AdmitHead(context.Context) error
+}
+
 type RecoveryLimits struct {
 	Blocks   int
 	Bytes    int64
@@ -76,6 +84,7 @@ type ExecutionRecovery struct {
 	catchUpRefused  map[peer.ID]time.Time // providers whose tail's top failed the walk at its first record, and when (rev2 B2)
 	catchUpWarned   []byte                // the target of the last catch-up warning, and when it was logged
 	catchUpWarnedAt time.Time             // (one a minute per target)
+	knownHead       shardnode.Hash        // the execution head this coordinator last moved the client to or admitted: no restart admission is needed to import on it
 }
 
 var (
@@ -386,6 +395,9 @@ func (r *ExecutionRecovery) recoverChain(ctx context.Context, c recoveryChain, c
 		return c.anchor, nil
 	}
 	if !errors.Is(err, ErrRecoveryUnavailable) {
+		return head, err
+	}
+	if err = r.admitHead(ctx, head); err != nil {
 		return head, err
 	}
 	var used int64
@@ -840,6 +852,7 @@ func (r *ExecutionRecovery) commit(ctx context.Context, target shardnode.BlockRe
 	head, readErr := r.Executor.Head(ctx)
 	f, finalErr := r.Executor.Finalized(ctx)
 	if readErr == nil && finalErr == nil && equalRef(head, target) && equalRef(f, target) {
+		r.knownHead = bytes.Clone(target.Hash)
 		return nil
 	}
 	if err != nil {
@@ -869,6 +882,7 @@ func (r *ExecutionRecovery) move(ctx context.Context, target, finalized shardnod
 	head, readErr := r.Executor.Head(ctx)
 	f, finalErr := r.Executor.Finalized(ctx)
 	if readErr == nil && finalErr == nil && equalRef(head, target) && equalRef(f, finalized) {
+		r.knownHead = bytes.Clone(target.Hash)
 		return head, nil
 	}
 	if err != nil {
