@@ -6,6 +6,7 @@ import (
 	"crypto"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"sync"
 	"sync/atomic"
@@ -593,11 +594,23 @@ func (c *q4bLive) state(name string) q4bState {
 // counted as progress but a stall also needs no new QC.
 func (c *q4bLive) requireStalled(names ...string) {
 	c.t.Helper()
-	time.Sleep(q4Quiesce) // pre-issued messages drain
-	before := map[string]q4bState{}
-	for _, n := range names {
-		before[n] = c.state(n)
+	// Pre-issued messages drain: wait until no stalled node has formed a QC or committed for q4Quiesce. A fixed sleep is not a
+	// drain under load: a commit of pre-fault evidence can land after it (#845). Round advance by timeout is not compared.
+	snap := func() map[string]q4bState {
+		out := map[string]q4bState{}
+		for _, n := range names {
+			s := c.state(n)
+			out[n] = q4bState{HighQC: s.HighQC, Committed: s.Committed}
+		}
+		return out
 	}
+	before, stableSince := snap(), time.Now()
+	require.Eventually(c.t, func() bool {
+		if now := snap(); !maps.Equal(now, before) {
+			before, stableSince = now, time.Now()
+		}
+		return time.Since(stableSince) >= q4Quiesce
+	}, 60*time.Second, 50*time.Millisecond, "pre-issued evidence drains")
 	from := q4bWindowStart()
 	time.Sleep(q4bStall)
 	for _, n := range names {
