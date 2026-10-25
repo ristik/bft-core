@@ -176,7 +176,15 @@ func PrepareLapsed(c *evmroot.ControlState, round uint64) bool {
 
 // PrepareMayFollowLapse reports whether a fresh Prepare (next attempt) may be ordered over a lapsed Prepare at this round.
 func PrepareMayFollowLapse(c *evmroot.ControlState, round uint64) bool {
-	return PrepareLapsed(c, round) && round > c.OrderedRound+PrepareFreezeLapseRounds+PrepareCooldownRounds
+	return PrepareDeadAfterCooldown(c, round)
+}
+
+// PrepareDeadAfterCooldown reports a prepared control state whose freeze lapsed and whose cooldown has passed at this round: the
+// condition under which a fresh Prepare, or a RejectResult, may follow it. The distance is taken by subtraction, so it cannot wrap. It
+// does not make a prepared state quiet for anything else.
+func PrepareDeadAfterCooldown(c *evmroot.ControlState, round uint64) bool {
+	return c != nil && c.Phase == "prepared" && round > c.OrderedRound &&
+		round-c.OrderedRound > PrepareFreezeLapseRounds+PrepareCooldownRounds
 }
 
 // applyHandoffRecord is the control transition of one ordered record. The unacknowledged root-only step (ControlState.UnackedParent) is not

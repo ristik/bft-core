@@ -30,13 +30,22 @@ const (
 	custodySessions            = 35
 )
 
-// ElectionPolicy's declared layout (forge inspect ElectionPolicy storageLayout): network, custody, and the publication mapping, whose
-// struct members are one word each (primaryHash, kCommit, incumbent, incumbentExposureDigest, incumbentKeyDigest, policyDigest,
-// contractsDigest, snapshotDigest, assignmentID, popSetDigest) followed by a packed word: published (1 byte), popCount (4), attempt (8).
+// ElectionPolicy's declared layout (forge inspect ElectionPolicy storageLayout): network, custody, roots (the registry), openResult, the
+// result mapping, and the publication mapping, whose struct members are one word each (primaryHash, kCommit, incumbent,
+// incumbentExposureDigest, incumbentKeyDigest, policyDigest, contractsDigest, snapshotDigest, assignmentID, popSetDigest) followed by a
+// packed word: published (1 byte), popCount (4), attempt (8), lost (1). A Result packs state (1 byte), reason (1), attempt (8), progress
+// (8), ucTime (8) and policyID (4) into its first word; origin, predecessor, assignmentID and snapshotDigest are one word each.
 const (
 	electionNetwork      = 2
 	electionCustody      = 3
+	electionRoots        = 4
+	electionOpenResult   = 12
+	electionResults      = 13
 	electionPublications = 16
+
+	resultStateWord, resultPredecessor, resultAssignment = 0, 2, 3
+	resultStateOffset, resultProgressOffset              = 0, 10
+	resultReserved                                       = 1 // ResultState.Reserved
 
 	pubPrimaryHash, pubKCommit, pubIncumbent, pubIncumbentExposure, pubIncumbentKey = 0, 1, 2, 3, 4
 	pubPolicy, pubContracts, pubSnapshot, pubAssignment, pubPopSet, pubFlags        = 5, 6, 7, 8, 9, 10
@@ -54,7 +63,7 @@ const (
 	retirementImportedOffset         = 0
 	sessionStateSlot                 = 0
 	sessionAssignmentSlot            = 1
-	sessionAttemptSlot               = 3
+	sessionAttemptSlot               = 3 // the election's attempt: declared for the layout check only, no proof reads it (contracts#73)
 	sessionIncumbentSlot             = 4
 	assignmentStateSlot              = 0
 )

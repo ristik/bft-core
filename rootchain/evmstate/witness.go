@@ -23,7 +23,7 @@ var (
 // Witness limits: the control witness budget is 1 MiB per root block.
 const (
 	MaxWitnessBytes = 1 << 20
-	maxAccounts     = 2
+	maxAccounts     = 3 // a RejectResult proves Election, custody and the registry; each verifier also requires its exact count
 	maxSlots        = 4096
 )
 

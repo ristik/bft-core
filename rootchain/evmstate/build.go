@@ -134,6 +134,44 @@ func BuildRetirementWitness(ctx context.Context, src ProofSource, pins Pins, id,
 	return raw, f, err
 }
 
+// BuildRejectWitness collects the witness Authority.VerifyReject reads for a result: the Election, custody and registry accounts at the
+// source's block, with exactly the slots the verifier consumes. It also returns the facts the witness proves, so a caller can tell a
+// rejectable result from one that is not (yet) before it offers anything. Nothing the source answers is trusted: the witness is only as
+// good as the verification against the certified state root.
+func BuildRejectWitness(ctx context.Context, src ProofSource, pins Pins, resultID [32]byte) ([]byte, storage.RejectFacts, error) {
+	var f storage.RejectFacts
+	if pins.Election == ([20]byte{}) {
+		return nil, f, fmt.Errorf("%w: no election is pinned", ErrBuild)
+	}
+	election := &recordingReader{ctx: ctx, src: src, addr: pins.Election, slots: map[[32]byte]SlotProof{}}
+	custody := &recordingReader{ctx: ctx, src: src, addr: pins.Custody, slots: map[[32]byte]SlotProof{}}
+	registry := &recordingReader{ctx: ctx, src: src, addr: pins.Registry, slots: map[[32]byte]SlotProof{}}
+	// One call per account for every slot that does not depend on another (custody's assignment slot depends on the session and is read
+	// afterwards).
+	result := mapSlot(baseSlot(electionResults), resultID[:])
+	session := mapSlot(baseSlot(custodySessions), resultID[:])
+	for _, b := range []struct {
+		r     *recordingReader
+		slots [][32]byte
+	}{
+		{election, [][32]byte{baseSlot(electionNetwork), baseSlot(electionCustody), baseSlot(electionRoots), baseSlot(electionOpenResult),
+			slotWord(result, resultStateWord), slotWord(result, resultPredecessor), slotWord(result, resultAssignment),
+			slotWord(mapSlot(baseSlot(electionPublications), resultID[:]), pubFlags)}},
+		{custody, [][32]byte{baseSlot(custodyNetwork), baseSlot(custodyRoots), slotWord(session, sessionStateSlot),
+			slotWord(session, sessionAssignmentSlot), slotWord(session, sessionIncumbentSlot), baseSlot(custodyLastAckedAssignment)}},
+		{registry, [][32]byte{registryKey("records.progress")}},
+	} {
+		if err := b.r.fetch(b.slots); err != nil {
+			return nil, f, err
+		}
+	}
+	if err := readReject(election, custody, registry, pins, resultID, &f); err != nil {
+		return nil, f, err
+	}
+	raw, err := encodeAccounts(election, custody, registry)
+	return raw, f, err
+}
+
 // encodeAccounts is the canonical witness of the recorded accounts: ascending by address, each with its slots ascending.
 func encodeAccounts(readers ...*recordingReader) ([]byte, error) {
 	var accounts []accountProof

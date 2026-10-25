@@ -112,6 +112,8 @@ func TestRegistrySlotsAreTheSlotsTheEVMReadsAndWrites(t *testing.T) {
 				require.Equal(t, []string{"0x" + hexOf(registryKey("records.count"))}, r.Slots)
 			case "recordTargetCount":
 				require.Equal(t, []string{"0x" + hexOf(registryKey("records.targetCount"))}, r.Slots)
+			case "progress":
+				require.Equal(t, []string{"0x" + hexOf(registryKey("records.progress"))}, r.Slots)
 			case "retirement":
 				require.Equal(t, []string{"0x" + hexOf(registryRetirementKey(sc.ID, sc.Generation))}, r.Slots, sc.Name)
 			default:
@@ -128,4 +130,42 @@ func hexOf(w word32) string {
 		out[2*i], out[2*i+1] = digits[b>>4], digits[b&15]
 	}
 	return string(out)
+}
+
+// Election's slots a RejectResult reads must be the slots the EVM read for the matching getters (publication.json's electionReads), and the
+// packed Result word must decode to the values the contracts stored.
+func TestElectionRejectSlotsAreTheSlotsTheEVMReads(t *testing.T) {
+	fx := loadPubFx(t)
+	resultID := hexWord(t, fx.ResultID)
+	checked := map[string]bool{}
+	for _, r := range fx.Election {
+		switch r.Name {
+		case "network":
+			require.Equal(t, []string{"0x" + hexOf(baseSlot(electionNetwork))}, r.Slots)
+		case "custody":
+			require.Equal(t, []string{"0x" + hexOf(baseSlot(electionCustody))}, r.Slots)
+		case "roots":
+			require.Equal(t, []string{"0x" + hexOf(baseSlot(electionRoots))}, r.Slots)
+		case "openResult":
+			require.Equal(t, []string{"0x" + hexOf(baseSlot(electionOpenResult))}, r.Slots)
+			require.Equal(t, resultID, hexWord(t, r.Words[0]), "the fixture's result is the open one")
+		case "result":
+			base := mapSlot(baseSlot(electionResults), resultID[:])
+			for _, n := range []uint64{resultStateWord, resultPredecessor, resultAssignment} {
+				require.True(t, contains(r.Slots, slotWord(base, n), t), "result word %d", n)
+			}
+			head := hexWord(t, r.Words[indexOf(t, r.Slots, slotWord(base, resultStateWord))])
+			require.EqualValues(t, resultReserved, fieldUint(head, resultStateOffset, 1))
+			require.EqualValues(t, fixtureReservedAt, fieldUint(head, resultProgressOffset, 8))
+			require.EqualValues(t, fx.Attempt, fieldUint(head, 2, 8), "the election's attempt sits between state/reason and progress")
+			require.Equal(t, hexWord(t, fx.Incumbent), hexWord(t, r.Words[indexOf(t, r.Slots, slotWord(base, resultPredecessor))]))
+			require.Equal(t, hexWord(t, fx.AssignmentID), hexWord(t, r.Words[indexOf(t, r.Slots, slotWord(base, resultAssignment))]))
+		default:
+			t.Fatalf("unknown election read %q", r.Name)
+		}
+		checked[r.Name] = true
+	}
+	for _, name := range []string{"network", "custody", "roots", "openResult", "result"} {
+		require.True(t, checked[name], name)
+	}
 }

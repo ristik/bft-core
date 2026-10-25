@@ -292,17 +292,24 @@ in production, and there is no migration (greenroom, one format).
   block certified in the parent, its state root the retained block's; custody's facts at P must show a request, no live exposure or
   lot reference, records caught up and the chain digest verbatim; the carrying block's progress must reach the maximum liability anchor;
   it is refused while any handoff is in flight (a conservative stand-in for "no prepared/session obligation for the generation"); a
-  repeat with the same digest emits nothing, another digest conflicts (`State.Retired`). RejectResult: only at a quiet control state
-  (idle or aborted) with no pending primary, the next attempt of the root's own authority; the unresolved result with no competing
-  session is proven at P; it emits SessionClosed and sets the control state to aborted at that attempt, so the next Prepare is the next
-  attempt. A committed D4 Abort closes the Election result only when its Freeze retained a primary candidate; the abort of a recovery
+  repeat with the same digest emits nothing, another digest conflicts (`State.Retired`). RejectResult (contracts#73, bft-core#857,
+  `briefs/73-reject-result-design.md`): only at a quiet control state (idle, aborted, or a Prepare whose freeze lapsed and whose cooldown
+  has passed, `PrepareDeadAfterCooldown`: carrying round > ordered + 24 + 24), with no committed handoff awaiting its acknowledgement, the
+  progress tracker not frozen and the result not already resolved; it names the next attempt of the root's own authority (0 at idle, else
+  the control state's attempt + 1). Election's attempt counter is not compared with it: the two count different things. One witness proves
+  at P, from the three pinned accounts (Election, custody, registry, with their code hashes and the pointers between them): Election's
+  open result is R and reserved, custody's session of R is open over a reserved assignment whose incumbent is the last acknowledged
+  assignment, R's assignment and predecessor are the session's, R's reservation progress s, the registry's canonical progress p and the
+  publication's `lost` flag. It is due iff `p >= s` and (`lost` or `p - s >= ResultReservationLifetimeProgress`, 1,024). It emits
+  SessionClosed, resolves R in `State.Resolved`, and sets the control state to aborted at that attempt (keeping `UnackedParent`), so the
+  next Prepare is the attempt after it. The bound is an explicit reservation deadline in certified progress, not failure detection: a
+  Prepare ordered first is protected, a rejection ordered first fences R out for good. A committed D4 Abort closes the Election result only when its Freeze retained a primary candidate; the abort of a recovery
   attempt closes nothing. A result resolves once (`State.Resolved`): a repeat Abort projects nothing, and a primary Freeze whose result
   is already resolved is refused, because custody refuses a second SessionClosed or an Ack of a session that is no longer open and its
   record cursor is strict. At most 32 records per block.
-  **Open (architecture):** a Prepare carries no candidate, so a Prepare-only Abort names no result, and the result stays open on custody.
-  RejectResult cannot end it under this attempt rule: after Prepare(N) and Abort the control state is `aborted` at attempt N, the open
-  result is bound to attempt N, and RejectResult requires attempt N+1. Either bind the result in the Prepare record, or allow
-  RejectResult at `aborted` for the aborted attempt when no candidate was frozen. Not implemented until decided.
+  **Decided (#73):** a Prepare carries no candidate and binds no result; a Prepare-only Abort leaves the result open, and RejectResult
+  ends it at the next root attempt once it is due. (The earlier note that the result was bound to root attempt N was mistaken: the
+  candidate binds the actual root attempt through `D4CandidateContextHash`, the result does not.)
 - **Not implemented here:** the on-chain `IRootRecords` implementation in the SealRegistry and its feed from Ureth; the reference model
   above and the vectors are what it must match. The Closure and Retirement digest words (exposure, key history, reference digest) are
   contract-derived and opaque labels in the vectors.

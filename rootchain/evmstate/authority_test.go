@@ -22,14 +22,6 @@ type retirementFx struct {
 	RecordCursor       uint64   `json:"recordCursor"`
 }
 
-type rejectFx struct {
-	SessionState    uint64 `json:"sessionState"`
-	Attempt         uint64 `json:"attempt"`
-	AssignmentState uint64 `json:"assignmentState"`
-	Incumbent       string `json:"incumbent"`
-	LastAcked       string `json:"lastAcked"`
-}
-
 var (
 	custodyAddr  = [20]byte{0x8d, 0x2c, 19: 0x81}
 	registryAddr = [20]byte{0xff, 19: 0x02}
@@ -173,49 +165,6 @@ func TestTheRetirableScenarioIsRetirableAndTheOthersAreNot(t *testing.T) {
 	require.False(t, byName["requested-live"].NoLotReferences, "the genesis exposure still references the lot")
 	require.False(t, byName["stayed-in-j"].Requested)
 	require.False(t, byName["imported"].NotImported)
-}
-
-func TestRejectFactsAreProvenFromTheCertifiedState(t *testing.T) {
-	fx := loadFixture(t, "state-slots.json")
-	n := 0
-	for _, sc := range fx.Scenarios {
-		if sc.Kind != "reject" {
-			continue
-		}
-		var f rejectFx
-		require.NoError(t, json.Unmarshal(sc.Facts, &f))
-		pins := testPins(t)
-		s := setup{pins: pins, custody: custodyOf(t, sc)}
-		w := s.world(t)
-		rc := newRecorder(s.custody)
-		rc.read[baseSlot(custodyNetwork)] = true
-		var facts storage.RejectFacts
-		resultID := hexWord(t, sc.ResultID)
-		require.NoError(t, readReject(rc, resultID, &facts))
-		raw := encode(t, accountsFor(t, w, map[[20]byte]*recorder{pins.Custody: rc}))
-		got, err := Authority{Pins: pins}.VerifyReject(raw, w.root, resultID, f.Attempt)
-		require.NoError(t, err, sc.Name)
-		want := storage.RejectFacts{ResultID: resultID, Attempt: f.Attempt, Unresolved: f.SessionState == 1 && f.AssignmentState == 1,
-			NoInstalledSession: f.Incumbent == f.LastAcked}
-		require.Equal(t, want, got, sc.Name)
-		n++
-	}
-	require.Equal(t, 3, n)
-	// the open session is the unresolved one; acknowledged and closed sessions are not
-	open := func(name string) bool {
-		for _, sc := range fx.Scenarios {
-			if sc.Name == name {
-				var f rejectFx
-				require.NoError(t, json.Unmarshal(sc.Facts, &f))
-				return f.SessionState == 1 && f.AssignmentState == 1
-			}
-		}
-		t.Fatalf("no scenario %s", name)
-		return false
-	}
-	require.True(t, open("session-open"))
-	require.False(t, open("session-acknowledged"))
-	require.False(t, open("session-closed"))
 }
 
 // ---- refusals ----------------------------------------------------------------------------------------------------------------------
@@ -390,8 +339,8 @@ func TestWitnessRefusals(t *testing.T) {
 		}
 	})
 	t.Run("a reject witness where a retirement is judged", func(t *testing.T) {
-		_, err := Authority{Pins: base.s.pins}.VerifyReject(encode(t, clone()), base.w.root, [32]byte{1}, 1)
-		require.ErrorIs(t, err, ErrWitness, "two accounts where one is expected")
+		_, err := Authority{Pins: base.s.pins}.VerifyReject(encode(t, clone()), base.w.root, [32]byte{1})
+		require.ErrorIs(t, err, ErrWitness, "two accounts where three are expected")
 	})
 }
 
@@ -486,41 +435,6 @@ func TestAbsentAccountsAndBoundedLots(t *testing.T) {
 	}
 }
 
-func TestRejectWitnessShapeIsExact(t *testing.T) {
-	fx := loadFixture(t, "state-slots.json")
-	var sc scenario
-	for _, c := range fx.Scenarios {
-		if c.Name == "session-open" {
-			sc = c
-		}
-	}
-	pins := testPins(t)
-	s := setup{pins: pins, custody: custodyOf(t, sc), registry: registryStore(0, 0, 0, 1, 1)}
-	w := s.world(t)
-	rc := newRecorder(s.custody)
-	rc.read[baseSlot(custodyNetwork)] = true
-	resultID := hexWord(t, sc.ResultID)
-	var facts storage.RejectFacts
-	require.NoError(t, readReject(rc, resultID, &facts))
-	accounts := accountsFor(t, w, map[[20]byte]*recorder{pins.Custody: rc})
-	run := func(a []accountProof) error {
-		_, err := Authority{Pins: pins}.VerifyReject(encode(t, a), w.root, resultID, 1)
-		return err
-	}
-	require.NoError(t, run(accounts))
-	// an extra account, even a valid one with nothing read from it
-	reg := accountProof{Addr: pins.Registry[:], Proofs: w.accountProof(t, pins.Registry)}
-	require.ErrorIs(t, run(append(append([]accountProof(nil), accounts...), reg)), ErrWitness)
-	// an extra proven slot on the custody account
-	extra := baseSlot(custodyNetwork + 100)
-	withExtra := accountProof{Addr: accounts[0].Addr, Proofs: accounts[0].Proofs, Slots: append(append([]slotProof(nil), accounts[0].Slots...),
-		slotProof{Slot: extra[:], Value: make([]byte, 32), Proofs: w.slotProof(t, pins.Custody, extra)})}
-	sortSlots(withExtra.Slots)
-	err := run([]accountProof{withExtra})
-	require.ErrorIs(t, err, ErrWitness)
-	require.NotErrorIs(t, err, ErrProof)
-}
-
 func TestLotListIsBoundedByCustodysOwnLimit(t *testing.T) {
 	base := newRetirable(t, nil)
 	sc := base.sc
@@ -543,41 +457,6 @@ func TestLotListIsBoundedByCustodysOwnLimit(t *testing.T) {
 	accounts := accountsFor(t, w, map[[20]byte]*recorder{s.pins.Custody: rc, s.pins.Registry: rr})
 	_, err := Authority{Pins: s.pins}.VerifyRetirement(encode(t, accounts), w.root, sc.ID, sc.Generation)
 	require.ErrorIs(t, err, ErrWitness)
-}
-
-func TestAnUnresolvedResultNeedsBothAnOpenSessionAndAReservedAssignment(t *testing.T) {
-	fx := loadFixture(t, "state-slots.json")
-	var sc scenario
-	for _, c := range fx.Scenarios {
-		if c.Name == "session-open" {
-			sc = c
-		}
-	}
-	resultID := hexWord(t, sc.ResultID)
-	session := mapSlot(baseSlot(custodySessions), resultID[:])
-	base := storageOf(t, sc)
-	assignment := base[slotWord(session, sessionAssignmentSlot)]
-	asgSlot := slotWord(mapSlot(baseSlot(custodyAssignments), assignment[:]), assignmentStateSlot)
-	for name, c := range map[string]struct {
-		session, assignment uint64
-		want                bool
-	}{
-		"open and reserved":                   {sessionOpen, assignmentReserved, true},
-		"open but the assignment was aborted": {sessionOpen, 3, false},
-		"open but the assignment is active":   {sessionOpen, 2, false},
-		"closed but still reserved":           {3, assignmentReserved, false},
-		"acknowledged but still reserved":     {2, assignmentReserved, false},
-	} {
-		store := map[word32]word32{}
-		for k, v := range base {
-			store[k] = v
-		}
-		store[slotWord(session, sessionStateSlot)] = bigWord(c.session)
-		store[asgSlot] = bigWord(c.assignment)
-		var f storage.RejectFacts
-		require.NoError(t, readReject(newRecorder(store), resultID, &f))
-		require.Equal(t, c.want, f.Unresolved, name)
-	}
 }
 
 func TestNonCanonicalStoredValuesAndOversizeWitnessesAreRefused(t *testing.T) {

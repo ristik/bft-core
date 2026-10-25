@@ -41,7 +41,29 @@ var (
 	// ErrWitnessUnavailable reports a control whose retained witness is not available: unavailable, never false, so the block cannot
 	// be voted until it is.
 	ErrWitnessUnavailable = errors.New("P85 control witness unavailable")
+	// ErrRejectNotQuiet reports a RejectResult while a handoff is live: a Prepare not yet lapsed and cooled, an endorsed or committed one,
+	// a committed handoff awaiting its acknowledgement, or a frozen progress tracker. Those end by their own Commit, Ack or Abort.
+	ErrRejectNotQuiet = errors.New("P85 RejectResult: a handoff is live")
+	// ErrRejectAttempt reports a RejectResult that does not name the root's next attempt.
+	ErrRejectAttempt = errors.New("P85 RejectResult: not the root's next attempt")
+	// ErrRejectNotOpen reports a proof that does not show the result as the open, reserved result over custody's open session.
+	ErrRejectNotOpen = errors.New("P85 RejectResult: the result is not the open reserved result of an open session")
+	// ErrRejectSuperseded reports a session whose incumbent is no longer custody's last acknowledged assignment.
+	ErrRejectSuperseded = errors.New("P85 RejectResult: a competing session is installed")
+	// ErrRejectNotDue reports a reservation that is neither proven lost nor ResultReservationLifetimeProgress old at P.
+	ErrRejectNotDue = errors.New("P85 RejectResult: the reservation is neither lost nor expired")
 )
+
+// ResultReservationLifetimeProgress is how many canonical progress rounds an election result may stay reserved before any root validator
+// may reject it (contracts#73, briefs/73-reject-result-design.md): an explicit reservation deadline in the registry's progress clock,
+// which the result's reservation progress is stamped from. A result proven lost needs no age. One consensus constant: no override.
+const ResultReservationLifetimeProgress = 1024
+
+// RejectDue reports whether proven facts make a reservation rejectable by age or loss. The age is taken only after the order check, so
+// it cannot wrap.
+func RejectDue(f RejectFacts) bool {
+	return f.Progress >= f.ReservedAt && (f.Lost || f.Progress-f.ReservedAt >= ResultReservationLifetimeProgress)
+}
 
 // ClosureFacts are what an authenticated terminal bundle establishes about a closed epoch.
 type ClosureFacts struct {
@@ -120,12 +142,23 @@ type RetirementFacts struct {
 	RecordsCaughtUp    bool // custody.recordCursor equals registry.recordCount, which equals its authenticated target count
 }
 
-// RejectFacts are what certified Election and custody state at P establish about an unresolved result.
+// RejectFacts are what certified Election, custody and registry state at P establish about an unresolved result, proven from one state
+// root. They carry no attempt: the election's attempt counter and the root's are unlike counters (contracts#73), and only the root's
+// numbers a RejectResult.
 type RejectFacts struct {
-	ResultID           [32]byte
-	Attempt            uint64
-	Unresolved         bool // the session is open and its assignment still only reserved
-	NoInstalledSession bool // the session extends the last acknowledged assignment: no other session was installed over it
+	ResultID [32]byte
+	// Reserved: ElectionPolicy.openResult is the result and its state is Reserved.
+	Reserved bool
+	// Unresolved: custody's session of the result is open and its assignment is still only reserved.
+	Unresolved bool
+	// Bound: the result's assignment and predecessor are the session's assignment and incumbent.
+	Bound bool
+	// NoInstalledSession: the session extends the last acknowledged assignment: no other session was installed over it.
+	NoInstalledSession bool
+	// ReservedAt is the result's reservation progress, Progress the registry's canonical progress at P: one clock.
+	ReservedAt, Progress uint64
+	// Lost is the publication's irreversible, contract-written coverage loss.
+	Lost bool
 }
 
 // EVMStateAuthority verifies EVM storage-proof witnesses against a certified state root.
@@ -134,7 +167,7 @@ type RejectFacts struct {
 // root), so a witness is only ever judged against a root the root already authenticated.
 type EVMStateAuthority interface {
 	VerifyRetirement(witness []byte, stateRoot [32]byte, id, generation uint64) (RetirementFacts, error)
-	VerifyReject(witness []byte, stateRoot [32]byte, resultID [32]byte, attempt uint64) (RejectFacts, error)
+	VerifyReject(witness []byte, stateRoot [32]byte, resultID [32]byte) (RejectFacts, error)
 }
 
 // PrimaryAuthority verifies the storage-proof witness of a published primary candidate (the election and custody state at the frozen
@@ -317,7 +350,24 @@ func (p *posStep) retire(c rctypes.PosControl, block *rctypes.BlockData, svc *Po
 	return nil
 }
 
-// reject terminates an Election result that never reached a Prepare: SessionClosed, and the attempt cursor moves past it.
+// rejectNext is the root attempt a RejectResult names over the control state at this round: 0 at idle, the next attempt after an Abort or
+// after a Prepare that lapsed and cooled down. A live handoff (a Prepare within its lapse and cooldown, an endorsed or committed one) has
+// no rejection: it ends by its own Commit or Abort.
+func rejectNext(ctl *evmroot.ControlState, round uint64) (uint64, error) {
+	switch {
+	case ctl.Phase == "idle":
+		return 0, nil
+	case ctl.Phase != "aborted" && !PrepareDeadAfterCooldown(ctl, round):
+		return 0, errors.Join(ErrPosControlRefused, ErrRejectNotQuiet, fmt.Errorf("the handoff is %s", ctl.Phase))
+	case ctl.Attempt == ^uint64(0):
+		return 0, fmt.Errorf("%w: attempt cursor exhausted", ErrPosControlRefused)
+	}
+	return ctl.Attempt + 1, nil
+}
+
+// reject terminates an abandoned Election result (contracts#73): one whose handoff is not live, which is the open reserved result of
+// custody's open session at P, and which P proves lost or ResultReservationLifetimeProgress old. SessionClosed, the result resolved for
+// good, and the control state aborted at the root's next attempt.
 func (p *posStep) reject(c rctypes.PosControl, block *rctypes.BlockData, svc *PosServices, env posEnv) (*evmroot.ControlState, error) {
 	ctl := env.Control
 	if ctl == nil {
@@ -325,24 +375,22 @@ func (p *posStep) reject(c rctypes.PosControl, block *rctypes.BlockData, svc *Po
 	}
 	var resultID [32]byte
 	copy(resultID[:], c.Data[0:32])
-	next := uint64(0)
-	switch ctl.Phase {
-	case "idle":
-	case "aborted":
-		if ctl.Attempt == ^uint64(0) {
-			return nil, fmt.Errorf("%w: attempt cursor exhausted", ErrPosControlRefused)
-		}
-		next = ctl.Attempt + 1
-	default:
-		return nil, fmt.Errorf("%w: a handoff is %s: only an Abort ends it", ErrPosControlRefused, ctl.Phase)
+	next, err := rejectNext(ctl, block.Round)
+	if err != nil {
+		return nil, err
 	}
 	switch {
 	case len(p.state.Pending) > 0:
-		return nil, fmt.Errorf("%w: a committed primary awaits its acknowledgement; the open result is its recovery", ErrPosControlRefused)
+		return nil, errors.Join(ErrPosControlRefused, ErrRejectNotQuiet,
+			errors.New("a committed handoff awaits its acknowledgement; the open result is its recovery"))
+	case p.state.Frozen:
+		return nil, errors.Join(ErrPosControlRefused, ErrRejectNotQuiet, errors.New("the progress tracker is frozen at an H"))
+	case p.state.IsResolved(resultID):
+		return nil, errors.Join(ErrPosControlRefused, ErrResolvedResult)
 	case !bytes.Equal(c.Reject.PredecessorBodyID[:], ctl.PredecessorBodyID):
 		return nil, fmt.Errorf("%w: another predecessor than the root's authority", ErrPosControlRefused)
 	case c.Reject.Attempt != next:
-		return nil, fmt.Errorf("%w: attempt %d is not the next attempt %d", ErrPosControlRefused, c.Reject.Attempt, next)
+		return nil, errors.Join(ErrPosControlRefused, ErrRejectAttempt, fmt.Errorf("attempt %d is not the next attempt %d", c.Reject.Attempt, next))
 	}
 	if err := certifiedState(c.Reject.EVMBlockHash, c.Reject.EVMStateRoot, svc, env); err != nil {
 		return nil, err
@@ -351,19 +399,24 @@ func (p *posStep) reject(c rctypes.PosControl, block *rctypes.BlockData, svc *Po
 	if err != nil {
 		return nil, err
 	}
-	f, err := svc.EVM.VerifyReject(witness, c.Reject.EVMStateRoot, resultID, c.Reject.Attempt)
+	f, err := svc.EVM.VerifyReject(witness, c.Reject.EVMStateRoot, resultID)
 	if err != nil {
 		return nil, errors.Join(ErrPosControlRefused, err)
 	}
 	switch {
 	case f.ResultID != resultID:
 		return nil, fmt.Errorf("%w: the proof is of another result", ErrPosControlRefused)
-	case f.Attempt != c.Reject.Attempt:
-		return nil, fmt.Errorf("%w: the session is of another attempt", ErrPosControlRefused)
+	case !f.Reserved:
+		return nil, errors.Join(ErrPosControlRefused, ErrRejectNotOpen, errors.New("the result is not the election's open reserved result"))
 	case !f.Unresolved:
-		return nil, fmt.Errorf("%w: the result is already resolved", ErrPosControlRefused)
+		return nil, errors.Join(ErrPosControlRefused, ErrRejectNotOpen, errors.New("custody's session of the result is not open over a reserved assignment"))
+	case !f.Bound:
+		return nil, errors.Join(ErrPosControlRefused, ErrRejectNotOpen, errors.New("the result's assignment or predecessor is not the session's"))
 	case !f.NoInstalledSession:
-		return nil, fmt.Errorf("%w: a competing session is installed", ErrPosControlRefused)
+		return nil, errors.Join(ErrPosControlRefused, ErrRejectSuperseded)
+	case !RejectDue(f):
+		return nil, errors.Join(ErrPosControlRefused, ErrRejectNotDue,
+			fmt.Errorf("reserved at progress %d, progress %d at P, lost %t", f.ReservedAt, f.Progress, f.Lost))
 	}
 	state, rec, err := p.state.SessionClosed(resultID, block.Round, block.Timestamp)
 	if err != nil {

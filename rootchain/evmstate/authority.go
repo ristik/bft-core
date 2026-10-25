@@ -173,31 +173,95 @@ func readRetirement(custody, registry reader, id, generation uint64, out *storag
 	return nil
 }
 
-// VerifyReject proves the custody session of an Election result (spec section 4).
-func (a Authority) VerifyReject(raw []byte, stateRoot [32]byte, resultID [32]byte, _ uint64) (storage.RejectFacts, error) {
+// VerifyReject proves from one state root what a RejectResult needs (contracts#73, briefs/73-reject-result-design.md): Election's open
+// result, its reservation progress, assignment, predecessor and publication loss, custody's session, assignment and last acknowledged
+// assignment, and the registry's canonical progress. The witness carries exactly the three pinned accounts; Election must name the pinned
+// custody and registry and the deployment's network word, and custody the registry.
+func (a Authority) VerifyReject(raw []byte, stateRoot [32]byte, resultID [32]byte) (storage.RejectFacts, error) {
 	var f storage.RejectFacts
-	custody, _, err := a.accounts(raw, stateRoot, false)
+	w, err := decodeWitness(raw)
 	if err != nil {
 		return f, err
 	}
-	if err := readReject(custody, resultID, &f); err != nil {
+	if len(w.Accounts) != 3 {
+		return f, fmt.Errorf("%w: %d accounts, want election, custody and registry", ErrWitness, len(w.Accounts))
+	}
+	all, err := w.verify(stateRoot)
+	if err != nil {
 		return f, err
 	}
-	return f, custody.unused()
+	election, custody, registry := all[ethcommon.Address(a.Pins.Election)], all[ethcommon.Address(a.Pins.Custody)], all[ethcommon.Address(a.Pins.Registry)]
+	if a.Pins.Election == ([20]byte{}) || election == nil || custody == nil || registry == nil {
+		return f, fmt.Errorf("%w: the witness lacks the election, custody or registry account", ErrWitness)
+	}
+	if election.codeHash != a.Pins.ElectionCode || custody.codeHash != a.Pins.CustodyCode || registry.codeHash != a.Pins.RegistryCode {
+		return f, fmt.Errorf("%w: an election, custody or registry code hash is not the pinned one", ErrProof)
+	}
+	if err := readReject(election, custody, registry, a.Pins, resultID, &f); err != nil {
+		return f, err
+	}
+	return f, errors.Join(election.unused(), custody.unused(), registry.unused())
 }
 
-func readReject(custody reader, resultID [32]byte, f *storage.RejectFacts) error {
+func readReject(election, custody, registry reader, pins Pins, resultID [32]byte, f *storage.RejectFacts) error {
 	f.ResultID = resultID
+	for _, c := range []struct {
+		name string
+		r    reader
+		slot uint64
+	}{{"election", election, electionNetwork}, {"custody", custody, custodyNetwork}} {
+		nw, err := c.r.word(baseSlot(c.slot))
+		if err != nil {
+			return err
+		}
+		if nw != pins.NetworkWord {
+			return fmt.Errorf("%w: %s.network is not the deployment's", ErrProof, c.name)
+		}
+	}
+	for _, p := range []struct {
+		name string
+		r    reader
+		slot uint64
+		want [20]byte
+	}{{"election.custody", election, electionCustody, pins.Custody}, {"election.roots", election, electionRoots, pins.Registry},
+		{"custody.roots", custody, custodyRoots, pins.Registry}} {
+		w, err := p.r.word(baseSlot(p.slot))
+		if err != nil {
+			return err
+		}
+		if [12]byte(w[:12]) != ([12]byte{}) || ethcommon.BytesToAddress(w[:]) != ethcommon.Address(p.want) {
+			return fmt.Errorf("%w: %s is not the pinned contract", ErrProof, p.name)
+		}
+	}
+
+	open, err := election.word(baseSlot(electionOpenResult))
+	if err != nil {
+		return err
+	}
+	result := mapSlot(baseSlot(electionResults), resultID[:])
+	head, err := election.word(slotWord(result, resultStateWord))
+	if err != nil {
+		return err
+	}
+	predecessor, err := election.word(slotWord(result, resultPredecessor))
+	if err != nil {
+		return err
+	}
+	resultAssignmentID, err := election.word(slotWord(result, resultAssignment))
+	if err != nil {
+		return err
+	}
+	flags, err := election.word(slotWord(mapSlot(baseSlot(electionPublications), resultID[:]), pubFlags))
+	if err != nil {
+		return err
+	}
+
 	session := mapSlot(baseSlot(custodySessions), resultID[:])
 	state, err := custody.word(slotWord(session, sessionStateSlot))
 	if err != nil {
 		return err
 	}
 	assignmentID, err := custody.word(slotWord(session, sessionAssignmentSlot))
-	if err != nil {
-		return err
-	}
-	attemptW, err := custody.word(slotWord(session, sessionAttemptSlot))
 	if err != nil {
 		return err
 	}
@@ -213,9 +277,22 @@ func readReject(custody reader, resultID [32]byte, f *storage.RejectFacts) error
 	if err != nil {
 		return err
 	}
-	f.Attempt = fieldUint(attemptW, 0, 8)
+
+	progress, err := registry.word(registryKey("records.progress"))
+	if err != nil {
+		return err
+	}
+	if wordIsBig(progress) {
+		return fmt.Errorf("%w: registry progress %x is not a uint64", ErrProof, progress)
+	}
+
+	f.Reserved = open == resultID && fieldUint(head, resultStateOffset, 1) == resultReserved
 	f.Unresolved = fieldUint(state, 0, 1) == sessionOpen && fieldUint(asg, 0, 1) == assignmentReserved
+	f.Bound = resultAssignmentID == assignmentID && predecessor == incumbent
 	f.NoInstalledSession = incumbent == acked
+	f.ReservedAt = fieldUint(head, resultProgressOffset, 8)
+	f.Progress = fieldUint(progress, 0, 8)
+	f.Lost = fieldUint(flags, pubLostOffset, 1) == 1
 	return nil
 }
 

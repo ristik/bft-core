@@ -1,0 +1,260 @@
+package storage
+
+import (
+	"math"
+	"testing"
+
+	"github.com/stretchr/testify/require"
+
+	"github.com/unicitynetwork/bft-core/evmassign"
+	"github.com/unicitynetwork/bft-core/evmroot"
+	rctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
+	"github.com/unicitynetwork/bft-core/rootrecords"
+)
+
+// The tests of briefs/73-reject-result-design.md ("Required tests") at the control executor; the counter regressions with real
+// contract-derived witnesses are reject_real_test.go.
+
+// Test 3: the age is exact and cannot wrap. Unlost, 1,023 rounds after the reservation refuses and 1,024 accepts; a registry behind the
+// reservation refuses; values near the top of uint64 neither wrap into eligibility nor out of it.
+func TestRejectDueAgeIsExactAndDoesNotWrap(t *testing.T) {
+	const max = math.MaxUint64
+	life := uint64(ResultReservationLifetimeProgress)
+	for _, c := range []struct {
+		name           string
+		reservedAt, at uint64
+		lost, due      bool
+	}{
+		{"one round short", 100, 100 + life - 1, false, false},
+		{"exactly the lifetime", 100, 100 + life, false, true},
+		{"the registry is behind the reservation", 100, 99, false, false},
+		{"lost needs no age", 100, 100, true, true},
+		{"lost does not excuse a registry behind", 100, 99, true, false},
+		{"reserved near the top: reservedAt+life would wrap", max - 5, max, false, false},
+		{"reserved exactly the lifetime below the top", max - life, max, false, true},
+		{"the widest distance", 0, max, false, true},
+		{"the registry at zero under a top reservation", max, 0, true, false},
+	} {
+		got := RejectDue(RejectFacts{ReservedAt: c.reservedAt, Progress: c.at, Lost: c.lost})
+		require.Equal(t, c.due, got, c.name)
+	}
+	require.EqualValues(t, 1024, ResultReservationLifetimeProgress, "one consensus constant")
+}
+
+// Test 3, continued: only proven progress matures a reservation. The same young facts are refused at any carrying round and time.
+func TestRejectIsNotMaturedByTheCarryingRoundOrTime(t *testing.T) {
+	for _, round := range []uint64{50, 50 + ResultReservationLifetimeProgress, 1 << 40} {
+		f := newEVMFx(t, rctypes.OpRejectResult)
+		f.evm.reject.Progress = f.evm.reject.ReservedAt + ResultReservationLifetimeProgress - 1
+		f.block.Round, f.ctl.OrderingRound = round, round
+		f.block.Timestamp = 2_000 + round*1_000
+		_, err := f.run()
+		require.ErrorIs(t, err, ErrRejectNotDue, "round %d", round)
+		require.Empty(t, f.step.records)
+	}
+}
+
+// Test 4 at the executor: a young lost reservation is accepted, the identical unlost one refused.
+func TestRejectOfAYoungResultNeedsItsProvenLoss(t *testing.T) {
+	f := newEVMFx(t, rctypes.OpRejectResult)
+	f.evm.reject.Progress = f.evm.reject.ReservedAt
+	_, err := f.run()
+	require.ErrorIs(t, err, ErrRejectNotDue)
+	f.evm.reject.Lost = true
+	replaced, err := f.run()
+	require.NoError(t, err)
+	require.Equal(t, "aborted", replaced.Phase)
+}
+
+// rejectOver runs the fixture's due rejection over a control state at a carrying round.
+func rejectOver(t *testing.T, ctl *evmroot.ControlState, round, attempt uint64) (*evmfxResult, error) {
+	t.Helper()
+	f := newEVMFx(t, rctypes.OpRejectResult)
+	f.env.Control = ctl
+	f.block.Round, f.ctl.OrderingRound, f.ctl.Reject.Attempt = round, round, attempt
+	replaced, err := f.run()
+	return &evmfxResult{f: f, replaced: replaced}, err
+}
+
+type evmfxResult struct {
+	f        *evmFx
+	replaced *evmroot.ControlState
+}
+
+func preparedAt(round, attempt uint64) *evmroot.ControlState {
+	return &evmroot.ControlState{Network: 7, Epoch: 1, PredecessorBodyID: bytes32(0x77), Phase: "prepared", Attempt: attempt, OrderedRound: round}
+}
+
+// Test 5: a Prepare that lapsed is quiet for a rejection only once its cooldown has passed: at r+24 (still freezing) and r+48 (cooling
+// down) it is refused, at r+49 accepted, aborted at the next attempt. The next Prepare takes the attempt after that, and a late Freeze of
+// the dead attempt stays refused.
+func TestRejectFollowsALapsedPrepareOnlyAfterItsCooldown(t *testing.T) {
+	const r, attempt = uint64(100), uint64(2)
+	lapse, cooldown := uint64(PrepareFreezeLapseRounds), uint64(PrepareCooldownRounds)
+	for _, round := range []uint64{r, r + 1, r + lapse, r + lapse + 1, r + lapse + cooldown} {
+		_, err := rejectOver(t, preparedAt(r, attempt), round, attempt+1)
+		require.ErrorIs(t, err, ErrRejectNotQuiet, "round r+%d", round-r)
+	}
+	res, err := rejectOver(t, preparedAt(r, attempt), r+lapse+cooldown+1, attempt+1)
+	require.NoError(t, err)
+	require.Equal(t, "aborted", res.replaced.Phase)
+	require.EqualValues(t, attempt+1, res.replaced.Attempt)
+	require.Len(t, res.f.step.records, 1)
+	_, err = rejectOver(t, preparedAt(r, attempt), r+lapse+cooldown+1, attempt)
+	require.ErrorIs(t, err, ErrRejectAttempt, "the dead Prepare's own attempt is not the next")
+
+	// the next Prepare uses attempt+2; attempt+1 is the rejection's; a Freeze of the dead attempt is no Prepare
+	auth := testRecordAuthority{predecessor: bytes32(0x77)}
+	round := r + lapse + cooldown + 2
+	record := func(kind string, a uint64) []byte {
+		return (evmroot.OrderedHandoffRecord{Network: 7, Epoch: 1, Attempt: a, OrderedRound: round, PredecessorBodyID: bytes32(0x77),
+			FrozenID: make([]byte, 32), NextBodyID: bytes32(0x44), ActivationRound: round + PrepareActivationFloorRounds + 1,
+			SuccessorTRHash: make([]byte, 32), Kind: kind}).Bytes()
+	}
+	_, err = applyHandoffRecord(res.replaced, record("prepare", attempt+1), 7, 1, round, auth, nil)
+	require.ErrorIs(t, err, ErrHandoffRecord, "the rejection's attempt is not reused")
+	next, err := applyHandoffRecord(res.replaced, record("prepare", attempt+2), 7, 1, round, auth, nil)
+	require.NoError(t, err)
+	require.Equal(t, "prepared", next.Phase)
+	_, err = applyHandoffRecord(res.replaced, record("freeze", attempt), 7, 1, round, auth, nil)
+	require.ErrorIs(t, err, ErrFreezeBeforePrepare, "a late Freeze of the dead attempt is refused")
+}
+
+// The dead-Prepare predicate is the lapse plus the cooldown, by subtraction: a Prepare ordered near the top of uint64 is never dead at a
+// small round (the sum would wrap), and only a prepared state qualifies.
+func TestPrepareDeadAfterCooldownDoesNotWrap(t *testing.T) {
+	gap := uint64(PrepareFreezeLapseRounds + PrepareCooldownRounds)
+	require.False(t, PrepareDeadAfterCooldown(preparedAt(math.MaxUint64-10, 0), 5))
+	require.False(t, PrepareDeadAfterCooldown(preparedAt(100, 0), 100+gap))
+	require.True(t, PrepareDeadAfterCooldown(preparedAt(100, 0), 100+gap+1))
+	require.True(t, PrepareMayFollowLapse(preparedAt(100, 0), 100+gap+1), "the fresh-Prepare rule shares the predicate")
+	for _, phase := range []string{"idle", "aborted", "endorsed", "committed"} {
+		c := preparedAt(100, 0)
+		c.Phase = phase
+		require.False(t, PrepareDeadAfterCooldown(c, 1<<40), phase)
+	}
+}
+
+// Test 6: the same mature facts are accepted in idle and after a Prepare-only Abort, and refused while a handoff is live: a Prepare ordered
+// in the carrying block itself (the control state is the one after the block's handoff record), an endorsed or committed one, a committed
+// handoff awaiting its acknowledgement, a frozen tracker. A primary Abort that already resolved the result leaves nothing to close.
+func TestRejectProtectsALiveHandoff(t *testing.T) {
+	idle := &evmroot.ControlState{Network: 7, Epoch: 1, PredecessorBodyID: bytes32(0x77), Phase: "idle"}
+	_, err := rejectOver(t, idle, 50, 0)
+	require.NoError(t, err, "the control: idle")
+	aborted := *idle
+	aborted.Phase, aborted.Attempt, aborted.OrderedRound = "aborted", 4, 49
+	_, err = rejectOver(t, &aborted, 50, 5)
+	require.NoError(t, err, "after a Prepare-only Abort")
+
+	for name, ctl := range map[string]*evmroot.ControlState{
+		"a Prepare in the carrying block": preparedAt(50, 0),
+		"an endorsed handoff":             {Network: 7, Epoch: 1, PredecessorBodyID: bytes32(0x77), Phase: "endorsed", OrderedRound: 1},
+		"a committed handoff":             {Network: 7, Epoch: 1, PredecessorBodyID: bytes32(0x77), Phase: "committed", OrderedRound: 1},
+	} {
+		_, err := rejectOver(t, ctl, 50, 1)
+		require.ErrorIs(t, err, ErrRejectNotQuiet, name)
+	}
+	for name, mutate := range map[string]func(s *rootrecords.State){
+		"a primary awaiting its acknowledgement":  func(s *rootrecords.State) { s.Pending = []rootrecords.PendingH{{Epoch: 1, HRound: 9}} },
+		"a recovery awaiting its acknowledgement": func(s *rootrecords.State) { s.Pending = []rootrecords.PendingH{{Epoch: 1}, {Epoch: 1, HRound: 9}} },
+		"a frozen tracker":                        func(s *rootrecords.State) { s.Frozen = true },
+	} {
+		f := newEVMFx(t, rctypes.OpRejectResult)
+		mutate(&f.step.state)
+		_, err := f.run()
+		require.ErrorIs(t, err, ErrRejectNotQuiet, name)
+		require.Empty(t, f.step.records, name)
+	}
+
+	// the result's primary was aborted after its Freeze: the Abort closed it, so a rejection of it projects nothing more
+	f := newEVMFx(t, rctypes.OpRejectResult)
+	var res [32]byte
+	copy(res[:], f.ctl.Data)
+	closed, _, err := f.step.state.SessionClosed(res, 40, 1_000)
+	require.NoError(t, err)
+	f.step.state = closed
+	f.env.Control = &aborted
+	f.ctl.Reject.Attempt = 5
+	_, err = f.run()
+	require.ErrorIs(t, err, ErrResolvedResult)
+	require.Empty(t, f.step.records, "no second SessionClosed")
+}
+
+// Test 7 at the executor: an accepted rejection resolves the result for good. The state that carries it survives its own encoding (the
+// checkpoint and restart form); a repeated rejection, at any attempt, and a primary Freeze naming the result are refused, without a record;
+// a root-only step's unacknowledged parent is kept.
+func TestRejectedResultIsFencedForGood(t *testing.T) {
+	af := newAssignmentFixture(t)
+	af.pop.Attempt = 7 // a fresh root attempt: the fence is the result, not the numbering
+	built := af.build(t, af.candidate(t))
+	candidate, err := evmassign.DecodeCandidate(built.preimage)
+	require.NoError(t, err)
+	res := candidate.ResultID()
+
+	f := newEVMFx(t, rctypes.OpRejectResult)
+	f.ctl.Data, f.evm.reject = res[:], dueReject(res)
+	parent := bytes32(0x99)
+	f.env.Control.UnackedParent = parent
+	replaced, err := f.run()
+	require.NoError(t, err)
+	require.Equal(t, parent, replaced.UnackedParent, "the rejection is no acknowledgement of a root-only step")
+	require.True(t, f.step.state.IsResolved(res))
+
+	restored, err := rootrecords.DecodeState(f.step.state.Bytes())
+	require.NoError(t, err)
+	require.True(t, restored.IsResolved(res), "Resolved survives the encoding a checkpoint and a restart read back")
+
+	for _, attempt := range []uint64{0, 1, 2} {
+		g := newEVMFx(t, rctypes.OpRejectResult)
+		g.ctl.Data, g.evm.reject = res[:], dueReject(res)
+		g.step.state = restored
+		g.env.Control = replaced
+		g.ctl.Reject.Attempt = attempt
+		_, err := g.run()
+		require.ErrorIs(t, err, ErrResolvedResult, "attempt %d", attempt)
+		require.Empty(t, g.step.records)
+	}
+
+	// a primary Freeze of the result, under a fresh root attempt, with the publication's old evidence: refused before admission
+	step := posStep{on: true, state: restored}
+	require.ErrorIs(t, step.refuseResolved(built.companion), ErrResolvedResult)
+	require.NoError(t, (&posStep{on: true, state: rootrecords.NewState(1, 1)}).refuseResolved(built.companion),
+		"the control: an unresolved result is admission's to judge")
+}
+
+// Test 7, rev2's note: refuseResolved leaves a Freeze whose companion has no readable candidate to the admission itself. With the result
+// resolved in the store (here by the Abort of its primary; a RejectResult resolves it in the same State.Resolved), a retry of its Freeze is
+// refused with the valid companion by the fence, and with an empty or malformed companion by admission; none changes the control state.
+func TestAFreezeOfAResolvedResultIsRefusedWhateverItsCompanion(t *testing.T) {
+	f := newAssignmentFixture(t)
+	f.useRealOrchestration(t)
+	f.seedFees(t)
+	first := f.build(t, f.candidate(t))
+	require.NoError(t, f.admit(t, first))
+	abort := first.freeze
+	abort.Kind, abort.OrderedRound = "abort", 4
+	f.addAt(t, 4, abort.Bytes(), f.abortCompanionFor(t, abort))
+	candidate, err := evmassign.DecodeCandidate(first.preimage)
+	require.NoError(t, err)
+	pos, err := loadPos(mustBlock(t, f.store, 4).ShardState.Control)
+	require.NoError(t, err)
+	require.True(t, pos.on && pos.state.IsResolved(candidate.ResultID()), "premise: the result is resolved")
+
+	f.pop.Attempt = 1
+	f.base = 5
+	retry := f.build(t, f.candidate(t))
+	f.addAt(t, 5, retry.prepare.Bytes())
+	for name, companion := range map[string][]byte{
+		"the valid companion": retry.companion,
+		"an empty companion":  {},
+		"a truncated one":     retry.companion[:len(retry.companion)/2],
+	} {
+		err := f.tryAt(t, 6, retry.freeze.Bytes(), companion)
+		require.ErrorIs(t, err, ErrHandoffRecord, name)
+		if name == "the valid companion" {
+			require.ErrorIs(t, err, ErrResolvedResult, name)
+		}
+	}
+	require.Equal(t, "prepared", mustBlock(t, f.store, 5).ShardState.Control.Phase, "no refused Freeze changed anything")
+}
