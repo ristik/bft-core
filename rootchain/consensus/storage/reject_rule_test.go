@@ -391,3 +391,43 @@ func TestARejectionLeavesAValidControlCheckpoint(t *testing.T) {
 	stale.Attempt = 5
 	require.ErrorIs(t, validateControl(&stale), ErrControlCheckpoint, "an ordered Abort's record is still checked against the state")
 }
+
+// After a rejection the handoffs resume at the next attempt, through the real store: the rejection at the genesis idle root (attempt 0),
+// then a fresh Prepare at 1 and its Freeze. A Prepare at the rejection's own attempt is refused.
+func TestAFreshHandoffFollowsARejection(t *testing.T) {
+	f := newAssignmentFixture(t)
+	f.useRealOrchestration(t)
+	f.seedEVMState(t)
+	result := [32]byte{0xe5}
+	dep := PosDeployment{RootNetwork: 5}
+	f.store.SetPosServices(&PosServices{Deployment: dep, Authority: &fakeAuthority{}, Witnesses: fakeWitnesses{sha256.Sum256([]byte("accounts")): []byte("accounts")},
+		EVM: &fakeEVM{reject: dueReject(result)}})
+	genesis := mustBlock(t, f.store, 1)
+	require.Equal(t, "idle", genesis.ShardState.Control.Phase)
+	c := rctypes.PosControl{Network: 5, OrderingEpoch: 1, OrderingRound: 2, Op: rctypes.OpRejectResult, Data: result[:],
+		WitnessHash: sha256.Sum256([]byte("accounts")),
+		Reject: &rctypes.RejectContext{PredecessorBodyID: [32]byte(genesis.ShardState.Control.PredecessorBodyID), EVMBlockHash: [32]byte(f.parent),
+			EVMStateRoot: [32]byte(bytes.Repeat([]byte{0xe2}, 32))}}
+	_, err := f.store.Add(&rctypes.BlockData{Version: 3, Round: 2, Epoch: 1, Timestamp: 1_002,
+		Payload: &rctypes.Payload{Version: 3, PosControls: []rctypes.PosControl{c}},
+		Qc:      &rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{RoundNumber: 1, Epoch: 1, CurrentRootHash: genesis.RootHash}}}, nil)
+	require.NoError(t, err)
+	require.Equal(t, "aborted", mustBlock(t, f.store, 2).ShardState.Control.Phase)
+
+	f.pop.Attempt, f.base = 0, 3
+	reused := f.build(t, f.candidate(t))
+	err = f.tryAt(t, 3, reused.prepare.Bytes())
+	require.ErrorIs(t, err, ErrHandoffRecord)
+	require.ErrorContains(t, err, "does not follow the previous attempt 0 from phase aborted", "the rejection's attempt is not reused")
+
+	f.pop.Attempt = 1
+	next := f.build(t, freshResult(f.candidate(t), 0x61))
+	f.addAt(t, 3, next.prepare.Bytes())
+	require.Equal(t, "prepared", mustBlock(t, f.store, 3).ShardState.Control.Phase)
+	f.addAt(t, 4, next.freeze.Bytes(), next.companion)
+	b4 := mustBlock(t, f.store, 4)
+	require.Equal(t, "endorsed", b4.ShardState.Control.Phase)
+	require.EqualValues(t, 1, b4.ShardState.Control.Attempt)
+	_, err = f.store.SuffixParent(4, 1)
+	require.NoError(t, err)
+}
