@@ -759,6 +759,19 @@ x4e_claim() { x4e_run exit-claim exit-claim.sh "{\"id\":5,\"matureWaitSeconds\":
 
 P85_STEPS="p85_baseline p85_joiner_nodes p85_joiner_onboard p85_election_reserved p85_proofs p85_handoff p85_install_activation p85_j_stalls p85_recovery p85_resolved p85_restarts p85_epoch_switches"
 
+# REPRO ONLY (bft-core#876, not for merge): after the reward burst that follows validator 1's restart, watch validator 1 against validator 2 for 12 minutes (status every 20 s), then end the run
+x4_repro_probe() {
+  local i h1 h2
+  for i in $(seq 1 36); do
+    h1=$("$P85_CAST" block-number --rpc-url "http://127.0.0.1:$rethEthBase" 2>/dev/null || echo 0); h2=$("$P85_CAST" block-number --rpc-url "http://127.0.0.1:$((rethEthBase + 1))" 2>/dev/null || echo 0)
+    echo "x4repro: t=$((i * 20)) s validator 1 head $h1, validator 2 head $h2"
+    p85_opstatus "repro-$i"
+    sleep 20
+  done
+  echo "x4repro: probe complete (the run ends here on purpose)" >&2
+  return 1
+}
+
 p85_run_lane() {
   local s
   mkdir -p "$Q3_DIR" "$P85_DIR/run"; : >"$Q3_DIR/commands.log"
@@ -852,6 +865,7 @@ p85_run_lane() {
     P85_STEPS="$P85_STEPS x4a_final"
     [ "${X4_FAULTS_LANE:-0}" != 1 ] || P85_STEPS="$P85_STEPS x4_report"   # the driver's verdict over the lane's whole record (after x4a_final wrote accounting.txt)
   fi
+  P85_STEPS=${P85_STEPS/ x4o_claim/ x4o_claim x4_repro_probe}
   [ "${P85_MODE:-}" != overbound ] || { P85_JOINER_UNITS=3; P85_STEPS="p85_baseline p85_joiner_nodes p85_joiner_onboard p85_election_refused"; }
   [ "${X4_ACCT_LANE:-0}" != 1 ] || p85_opstatus_sampler $$
   for s in $P85_STEPS; do
