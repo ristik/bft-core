@@ -813,7 +813,13 @@ p85_run_lane() {
       P85_STEPS=${P85_STEPS/p85_baseline x4a_snapshot/p85_baseline x4a_snapshot x4g_queue}
       P85_STEPS="$P85_STEPS x4g_execute x4g_check"
     fi
+    if [ "${X4_FAULTS_LANE:-0}" = 1 ]; then   # X4 B7 (scripts/x4pos/fault-lib.sh): four faults at their campaign offsets after the governance wait, the soak with periodic snapshots, the final reconcile
+      [ "${X4_REWARDS_POS:-0}" = 1 ] || { echo "X4_FAULTS_LANE needs X4_REWARDS_POS=1 (the final reconcile replays the reward pool)" >&2; exit 1; }
+      source scripts/x4pos/fault-lib.sh
+      P85_STEPS="$P85_STEPS x4f_root_restart x4f_evm_restart x4f_pair_restart x4f_delayed_episode x4f_soak x4f_reconcile"
+    fi
     P85_STEPS="$P85_STEPS x4a_final"
+    [ "${X4_FAULTS_LANE:-0}" != 1 ] || P85_STEPS="$P85_STEPS x4_report"   # the driver's verdict over the lane's whole record (after x4a_final wrote accounting.txt)
   fi
   [ "${P85_MODE:-}" != overbound ] || { P85_JOINER_UNITS=3; P85_STEPS="p85_baseline p85_joiner_nodes p85_joiner_onboard p85_election_refused"; }
   for s in $P85_STEPS; do
