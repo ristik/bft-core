@@ -172,6 +172,16 @@ func BuildRejectWitness(ctx context.Context, src ProofSource, pins Pins, resultI
 	return raw, f, err
 }
 
+// OpenResult reads Election's open result (zero when none) from the source at its block. It is a discovery hint only: a rejection's
+// witness proves the open result against the certified state root.
+func OpenResult(ctx context.Context, src ProofSource, pins Pins) ([32]byte, error) {
+	if pins.Election == ([20]byte{}) {
+		return [32]byte{}, fmt.Errorf("%w: no election is pinned", ErrBuild)
+	}
+	r := &recordingReader{ctx: ctx, src: src, addr: pins.Election, slots: map[[32]byte]SlotProof{}}
+	return r.word(baseSlot(electionOpenResult))
+}
+
 // encodeAccounts is the canonical witness of the recorded accounts: ascending by address, each with its slots ascending.
 func encodeAccounts(readers ...*recordingReader) ([]byte, error) {
 	var accounts []accountProof

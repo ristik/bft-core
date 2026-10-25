@@ -303,7 +303,11 @@ in production, and there is no migration (greenroom, one format).
   publication's `lost` flag. It is due iff `p >= s` and (`lost` or `p - s >= ResultReservationLifetimeProgress`, 1,024). It emits
   SessionClosed, resolves R in `State.Resolved`, and sets the control state to aborted at that attempt (keeping `UnackedParent`), so the
   next Prepare is the attempt after it. The bound is an explicit reservation deadline in certified progress, not failure detection: a
-  Prepare ordered first is protected, a rejection ordered first fences R out for good. A committed D4 Abort closes the Election result only when its Freeze retained a primary candidate; the abort of a recovery
+  Prepare ordered first is protected, a rejection ordered first fences R out for good. It is offered
+  automatically: every root with the election deployment runs `rootchain/posreject`, which discovers the open result at each candidate
+  parent (`BlockStore.RejectionParent`, the executor's P with the rejection's own quiet rule), builds the witness once the result is due,
+  submits the control to every root (`SubmitPosControl`) and offers it to its own proposals; a leader orders a ready, valid rejection
+  (trial-executed) before a fresh unsigned Prepare, and never preempts a live handoff. Nothing is persisted; a restart rediscovers. A committed D4 Abort closes the Election result only when its Freeze retained a primary candidate; the abort of a recovery
   attempt closes nothing. A result resolves once (`State.Resolved`): a repeat Abort projects nothing, and a primary Freeze whose result
   is already resolved is refused, because custody refuses a second SessionClosed or an Ack of a session that is no longer open and its
   record cursor is strict. At most 32 records per block.

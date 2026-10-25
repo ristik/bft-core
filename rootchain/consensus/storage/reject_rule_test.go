@@ -1,6 +1,8 @@
 package storage
 
 import (
+	"bytes"
+	"crypto"
 	"math"
 	"testing"
 
@@ -124,7 +126,10 @@ func TestRejectFollowsALapsedPrepareOnlyAfterItsCooldown(t *testing.T) {
 // small round (the sum would wrap), and only a prepared state qualifies.
 func TestPrepareDeadAfterCooldownDoesNotWrap(t *testing.T) {
 	gap := uint64(PrepareFreezeLapseRounds + PrepareCooldownRounds)
-	require.False(t, PrepareDeadAfterCooldown(preparedAt(math.MaxUint64-10, 0), 5))
+	// ordered+48 wraps to 37 here: an additive form would call this Prepare dead at round 100 (rev on #858)
+	nearTop := preparedAt(math.MaxUint64-10, 0)
+	require.Less(t, nearTop.OrderedRound+gap, uint64(100), "premise: the sum wraps below the round")
+	require.False(t, PrepareDeadAfterCooldown(nearTop, 100))
 	require.False(t, PrepareDeadAfterCooldown(preparedAt(100, 0), 100+gap))
 	require.True(t, PrepareDeadAfterCooldown(preparedAt(100, 0), 100+gap+1))
 	require.True(t, PrepareMayFollowLapse(preparedAt(100, 0), 100+gap+1), "the fresh-Prepare rule shares the predicate")
@@ -257,4 +262,66 @@ func TestAFreezeOfAResolvedResultIsRefusedWhateverItsCompanion(t *testing.T) {
 		}
 	}
 	require.Equal(t, "prepared", mustBlock(t, f.store, 5).ShardState.Control.Phase, "no refused Freeze changed anything")
+}
+
+// RejectionParent mirrors the executor: no context under a live Prepare, the next attempt after an Abort and after a Prepare dead past its
+// cooldown, the parent's EVM state and the root's authority; RejectionResolved sees a result the branch resolved.
+func TestRejectionParentFollowsTheRejectionRule(t *testing.T) {
+	f := newAssignmentFixture(t)
+	f.useRealOrchestration(t)
+	f.seedEVMState(t)
+	first := f.build(t, f.candidate(t))
+	require.NoError(t, f.admit(t, first)) // Prepare at 2, Freeze at 3
+	_, ok, err := f.store.RejectionParent(2, 3)
+	require.NoError(t, err)
+	require.False(t, ok, "a live Prepare")
+	_, ok, err = f.store.RejectionParent(3, 4)
+	require.NoError(t, err)
+	require.False(t, ok, "an endorsed handoff")
+
+	abort := first.freeze
+	abort.Kind, abort.OrderedRound = "abort", 4
+	f.addAt(t, 4, abort.Bytes(), f.abortCompanionFor(t, abort))
+	rc, ok, err := f.store.RejectionParent(4, 5)
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.EqualValues(t, 1, rc.Attempt, "the next root attempt after the aborted 0")
+	require.Equal(t, f.predecessor, rc.Predecessor[:])
+	require.NotEqual(t, [32]byte{}, rc.Parent.StateRoot)
+	candidate, err := evmassign.DecodeCandidate(first.preimage)
+	require.NoError(t, err)
+	require.True(t, f.store.RejectionResolved(4, candidate.ResultID()), "the Abort of its primary resolved the result on this branch")
+	require.False(t, f.store.RejectionResolved(2, candidate.ResultID()))
+}
+
+func TestRejectionParentAfterALapsedPrepareWaitsForTheCooldown(t *testing.T) {
+	f := newAssignmentFixture(t)
+	f.useRealOrchestration(t)
+	f.seedEVMState(t)
+	first := f.build(t, f.candidate(t))
+	f.addAt(t, 2, first.prepare.Bytes())
+	gap := uint64(PrepareFreezeLapseRounds + PrepareCooldownRounds)
+	for r := uint64(3); r <= 2+gap; r++ {
+		f.addAt(t, r)
+	}
+	_, ok, err := f.store.RejectionParent(2+gap-1, 2+gap)
+	require.NoError(t, err)
+	require.False(t, ok, "the cooldown has not passed")
+	rc, ok, err := f.store.RejectionParent(2+gap, 2+gap+1)
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.EqualValues(t, 1, rc.Attempt)
+}
+
+// seedEVMState is seedFees with a certified EVM state root, the P a control names.
+func (f *assignmentFixture) seedEVMState(t *testing.T) {
+	t.Helper()
+	f.installShard(t, f.current, func(si *ShardInfo) {
+		si.IR.BlockHash = bytes.Clone(f.parent)
+		si.IR.Hash = bytes.Repeat([]byte{0xe2}, 32)
+		si.Fees["ev-a"] = 7
+		var err error
+		si.TR.FeeHash, err = si.feeHash(crypto.SHA256)
+		require.NoError(t, err)
+	})
 }

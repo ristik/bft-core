@@ -20,6 +20,7 @@ import (
 	"github.com/unicitynetwork/bft-core/rootchain/evmstate"
 	"github.com/unicitynetwork/bft-core/rootchain/partitions"
 	"github.com/unicitynetwork/bft-core/rootchain/posclosure"
+	"github.com/unicitynetwork/bft-core/rootchain/posreject"
 	"github.com/unicitynetwork/bft-core/rootchain/posretire"
 	"github.com/unicitynetwork/bft-go-base/types"
 )
@@ -175,7 +176,8 @@ func loadRewardPool(path string) ([20]byte, error) {
 // With an execution-client endpoint (evmRPC) the root also builds the Retirement controls of the identities whose owner requested one
 // (rootchain/posretire): it discovers the requests from custody's log, collects the proofs against the EVM state of each candidate
 // parent and proposes them itself, so the normal exit needs only the owner's on-chain request. retirementState is the file that keeps
-// the discovery cursor and the pending requests across a restart.
+// the discovery cursor and the pending requests across a restart. On a deployment with an election it also runs the RejectResult builder
+// (rootchain/posreject): every root offers the rejection of an abandoned election result once it is due, with nothing persisted.
 func enablePosClosure(ctx context.Context, cm *consensus.ConsensusManager, orchestration *partitions.Orchestration, trustBases posclosure.TrustBases,
 	tb *types.RootTrustBaseV1, shardConfs []*types.PartitionDescriptionRecord, path string, poaGenesis bool, evmRPC, retirementState string) error {
 	if poaGenesis {
@@ -197,6 +199,7 @@ func enablePosClosure(ctx context.Context, cm *consensus.ConsensusManager, orche
 	authority := posclosure.New(posclosure.History{Partition: conf.PartitionID, Shard: conf.ShardID, TrustBases: trustBases, Orchestration: orchestration})
 	var primary storage.PrimaryAuthority
 	var retirements storage.RetirementProposer
+	var rejections storage.RejectProposer
 	if evmRPC != "" {
 		client, err := rpc.Dial(evmRPC)
 		if err != nil {
@@ -205,6 +208,12 @@ func enablePosClosure(ctx context.Context, cm *consensus.ConsensusManager, orche
 		if dep.Election != ([20]byte{}) {
 			cm.SetPrimaryWitnessSource(evmstate.RPCWitnessSource{Client: client, Pins: pins})
 			primary = evmstate.Authority{Pins: pins}
+			svc, err := posreject.New(posreject.Config{Deployment: dep, Pins: pins, Proofs: posreject.Proofs(posretire.RPCProofs(client)),
+				Submit: cm.SubmitPosControl})
+			if err != nil {
+				return errors.Join(ErrPosDeployment, err)
+			}
+			rejections = svc
 		}
 		if retirements, err = newRetirementService(ctx, client, dep, pins, retirementState); err != nil {
 			return err
@@ -218,6 +227,7 @@ func enablePosClosure(ctx context.Context, cm *consensus.ConsensusManager, orche
 		EVM:         evmstate.Authority{Pins: pins},
 		Proposer:    posclosure.Proposer{Source: cm, Authority: authority, Deployment: dep},
 		Retirements: retirements,
+		Rejections:  rejections,
 	})
 	return nil
 }

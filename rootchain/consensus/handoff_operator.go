@@ -1192,6 +1192,10 @@ func (x *ConsensusManager) handoffRecordsForRound(round uint64, parentQC *rctype
 		if intent == nil {
 			return nil, nil
 		}
+		// a due election result is rejected first (contracts#73): the Prepare waits for a later round, its intent kept
+		if x.preferRejection(context.Background(), parentQC.GetRound(), round, parentQC) {
+			return nil, nil
+		}
 		return x.prepareRecordFor(*intent, control, round)
 	}
 	plan, err := x.readyHandoff(expectedAttempt)
