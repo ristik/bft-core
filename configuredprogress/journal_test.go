@@ -108,7 +108,8 @@ func TestJournalUCBeforePayloadAndFullHistoryCapacity(t *testing.T) {
 	require.True(t, image.Candidates[0].Certified)
 	branch := candidateB1(f, bootstrap)
 	branch.Hash = bytes.Repeat([]byte{0xab}, 32)
-	require.ErrorIs(t, s.PutJournalCandidate(context.Background(), f.ctx, limits, branch), ErrBounds)
+	require.ErrorIs(t, s.PutJournalCandidate(context.Background(), f.ctx, limits, branch), ErrCapacity)
+	require.NotErrorIs(t, s.PutJournalCandidate(context.Background(), f.ctx, limits, branch), ErrBounds, "a full journal is back-pressure, not a bound that stops the node")
 	image, err = s.LoadJournal(context.Background(), f.ctx, limits)
 	require.NoError(t, err)
 	require.Len(t, image.Candidates, 1)
@@ -231,4 +232,14 @@ func TestJournalRejectsCorruptForeignAndVersionedRecords(t *testing.T) {
 	require.NoError(t, s.db.Update(func(tx *bolt.Tx) error { return tx.Bucket(bucketName).Put(key, versioned) }))
 	_, err = s.LoadJournal(context.Background(), f.ctx, testJournalLimits)
 	require.ErrorIs(t, err, ErrContext)
+}
+
+// A full journal is ErrCapacity (transient back-pressure); only an entry that could never fit is ErrBounds, which stops the node (bft-core#876).
+func TestJournalFullIsCapacityNotBounds(t *testing.T) {
+	limits := JournalLimits{Candidates: 2, Observations: 2, Bytes: MaxCandidateBytes * 4}
+	require.ErrorIs(t, journalFull(limits, 100), ErrCapacity)
+	require.NotErrorIs(t, journalFull(limits, 100), ErrBounds)
+	require.ErrorIs(t, journalFull(limits, limits.Bytes+1), ErrBounds)
+	require.NotErrorIs(t, journalFull(limits, limits.Bytes+1), ErrCapacity)
+	require.ErrorIs(t, journalFull(JournalLimits{Observations: 1, Bytes: limits.Bytes}, 100), ErrBounds, "a journal with no room for any candidate can never admit one")
 }

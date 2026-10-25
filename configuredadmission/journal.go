@@ -311,6 +311,19 @@ type ProposalJournal struct {
 	Limits  configuredprogress.JournalLimits
 }
 
+// capacityRefusal turns a full journal into a refusal of this round. A full journal is back-pressure (bft-core#876): the round is refused (the leader
+// abstains, a follower rejects the proposal; nothing is signed or published), the node is NOT stopped, and a later round is retained once the certified
+// frontier has pruned room. Nil for any other error.
+func capacityRefusal(err error, locallyBuilt bool) error {
+	if !errors.Is(err, configuredprogress.ErrCapacity) {
+		return nil
+	}
+	if locallyBuilt {
+		return fmt.Errorf("%w: %w", shardnode.ErrLeaderProposalConflict, err)
+	}
+	return fmt.Errorf("%w: %w", shardnode.ErrProposalRejected, err)
+}
+
 func (j ProposalJournal) RetainCandidate(ctx context.Context, b shardnode.Block, p shardnode.RoundParams, locallyBuilt bool) error {
 	if j.Store == nil {
 		return configuredprogress.ErrSettings
@@ -343,6 +356,9 @@ func (j ProposalJournal) RetainCandidate(ctx context.Context, b shardnode.Block,
 				return fmt.Errorf("%w: root epoch advanced during retention", shardnode.ErrProposalRejected)
 			}
 		}
+	}
+	if capErr := capacityRefusal(err, locallyBuilt); capErr != nil {
+		return capErr
 	}
 	if locallyBuilt && errors.Is(err, configuredprogress.ErrLocalProposalConflict) {
 		return fmt.Errorf("%w: %v", shardnode.ErrLeaderProposalConflict, err)

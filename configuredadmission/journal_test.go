@@ -479,7 +479,8 @@ func TestJournalAdmissionWriteFailurePreventsExecutionDelivery(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, s.EnableJournal(context.Background(), ctx, limits))
 	deliveries := 0
-	a, err := (JournalFactory{Store: s, Origin: origin, Limits: limits}).Start(context.Background(), id, adapterGate{}, shardnode.AdmissionCallbacks{
+	var stopped atomic.Bool
+	a, err := (JournalFactory{Store: s, Origin: origin, Limits: limits, OnStop: func(error) { stopped.Store(true) }}).Start(context.Background(), id, adapterGate{}, shardnode.AdmissionCallbacks{
 		AuthenticatedFeed: func(*types.UnicityCertificate, *certification.TechnicalRecord) {},
 		DeliverDurable: func(context.Context, *types.UnicityCertificate, *certification.TechnicalRecord) error {
 			deliveries++
@@ -492,7 +493,13 @@ func TestJournalAdmissionWriteFailurePreventsExecutionDelivery(t *testing.T) {
 	require.NoError(t, a.Submit(context.Background(), bootstrap, bootTR))
 	putAdapterB1(t, s, ctx, limits, chain, bootstrap, bootTR)
 	first, firstTR := signAdapterObservation(t, chain)
-	require.ErrorIs(t, a.Submit(context.Background(), first, firstTR), configuredprogress.ErrBounds)
+	err = a.Submit(context.Background(), first, firstTR)
+	// A full journal is back-pressure (bft-core#876): the certificate is kept to be retried as the frontier frees room, and the node is NOT stopped for good
+	require.ErrorIs(t, err, configuredprogress.ErrCapacity)
+	require.NotErrorIs(t, err, configuredprogress.ErrBounds)
+	require.False(t, stopped.Load(), "a full journal must not be a sticky stop")
+	pending, ok := a.(interface{ Pending() bool })
+	require.True(t, ok && pending.Pending(), "the authenticated certificate stays pending for the retry")
 	require.Equal(t, 1, deliveries, "no execution Commit or signing callback after a failed durable write")
 	state, _, err := s.Load(context.Background(), ctx)
 	require.NoError(t, err)
@@ -500,4 +507,21 @@ func TestJournalAdmissionWriteFailurePreventsExecutionDelivery(t *testing.T) {
 	image, err := s.LoadJournal(context.Background(), ctx, limits)
 	require.NoError(t, err)
 	require.False(t, image.Candidates[0].Certified)
+}
+
+// A full journal refuses the round, it does not stop the node (bft-core#876): the follower rejects the proposal, the leader abstains, both keep the
+// capacity cause, neither is the terminal class; every other error passes through untouched.
+func TestCapacityRefusalIsBackPressure(t *testing.T) {
+	full := fmt.Errorf("durable: %w", configuredprogress.ErrCapacity)
+	f := capacityRefusal(full, false)
+	require.ErrorIs(t, f, shardnode.ErrProposalRejected)
+	require.ErrorIs(t, f, configuredprogress.ErrCapacity)
+	require.False(t, terminalAdmissionError(f))
+	l := capacityRefusal(full, true)
+	require.ErrorIs(t, l, shardnode.ErrLeaderProposalConflict)
+	require.ErrorIs(t, l, configuredprogress.ErrCapacity)
+	require.False(t, terminalAdmissionError(l))
+	require.NoError(t, capacityRefusal(nil, false))
+	require.Nil(t, capacityRefusal(configuredprogress.ErrBounds, false), "an entry that can never fit is not back-pressure")
+	require.Nil(t, capacityRefusal(configuredprogress.ErrConflict, true))
 }

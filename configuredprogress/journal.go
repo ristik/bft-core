@@ -223,6 +223,15 @@ func readJournalMeta(b *bolt.Bucket, dd [32]byte, limits JournalLimits) error {
 	return nil
 }
 
+// journalFull classifies a refused insertion: an entry that would not fit an EMPTY journal (or a journal with no room for any entry of its
+// kind) can never be admitted, which is ErrBounds and stops the node; otherwise the journal is only full for now, ErrCapacity (back-pressure).
+func journalFull(limits JournalLimits, entry int64) error {
+	if entry > limits.Bytes || limits.Candidates <= 0 || limits.Observations <= 0 {
+		return fmt.Errorf("%w: the entry cannot fit the journal's limits", ErrBounds)
+	}
+	return ErrCapacity
+}
+
 func journalCount(b *bolt.Bucket) (candidates, observations int, n int64, err error) {
 	c := b.Cursor()
 	for k, v := c.Seek(journalCandidatePrefix); k != nil && bytes.HasPrefix(k, journalCandidatePrefix); k, v = c.Next() {
@@ -455,7 +464,7 @@ func (s *Store) putJournalCandidate(ctx context.Context, c Context, limits Journ
 					return countErr
 				}
 				if count > limits.Candidates || observed > limits.Observations || total-int64(len(old))+int64(len(raw)) > limits.Bytes {
-					return fmt.Errorf("%w: full-history journal capacity reached", ErrBounds)
+					return journalFull(limits, int64(len(raw)))
 				}
 			}
 			if resultUC != nil {
@@ -546,7 +555,7 @@ func (s *Store) putJournalCandidate(ctx context.Context, c Context, limits Journ
 			return err
 		}
 		if count >= limits.Candidates || observed > limits.Observations || n+int64(len(key)+len(raw)) > limits.Bytes {
-			return fmt.Errorf("%w: full-history journal capacity reached", ErrBounds)
+			return journalFull(limits, int64(len(key)+len(raw)))
 		}
 		if err := s.at("before-candidate-put"); err != nil {
 			return err
@@ -649,7 +658,7 @@ func (s *Store) appendJournalObservation(tx *bolt.Tx, pair *verifiedPair, dd [32
 		return err
 	}
 	if count > limits.Candidates || observed >= limits.Observations || n+int64(len(key)+len(raw)) > limits.Bytes {
-		return fmt.Errorf("%w: full-history journal capacity reached", ErrBounds)
+		return journalFull(limits, int64(len(key)+len(raw)))
 	}
 	if err = s.at("before-journal-observation-put"); err != nil {
 		return err

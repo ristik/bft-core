@@ -200,10 +200,10 @@ func TestAuditRestoreTerminalHistoryExceedsTheHotJournalCap(t *testing.T) {
 		candidate := e.Candidate
 		candidate.LocallyBuilt = false
 		if err := f.journal.PutHistoricalCertifiedJournalCandidate(ctx, f.wf.context, f.limits, candidate, e.ResultingUC, e.ResultingTR); err != nil {
-			require.ErrorIs(t, err, configuredprogress.ErrBounds)
+			require.ErrorIs(t, err, configuredprogress.ErrCapacity)
 			bounded = true
 			break
 		}
 	}
-	require.True(t, bounded, "unfiltered repair of the historical terminals would hit ErrBounds")
+	require.True(t, bounded, "unfiltered repair of the historical terminals would hit ErrCapacity")
 }
