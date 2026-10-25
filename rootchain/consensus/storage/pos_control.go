@@ -57,7 +57,9 @@ var (
 // ResultReservationLifetimeProgress is how many canonical progress rounds an election result may stay reserved before any root validator
 // may reject it (contracts#73, briefs/73-reject-result-design.md): an explicit reservation deadline in the registry's progress clock,
 // which the result's reservation progress is stamped from. A result proven lost needs no age. One consensus constant: no override.
-const ResultReservationLifetimeProgress = 1024
+// 16,384 rounds is about two hours at the observed ~2.2 progress rounds per second: an attended operator handoff's budget, counted from the
+// reservation (publication and approvals neither reset nor protect it; only a root-ordered live handoff does), not a measured SLA.
+const ResultReservationLifetimeProgress = 16384
 
 // RejectDue reports whether proven facts make a reservation rejectable by age or loss. The age is taken only after the order check, so
 // it cannot wrap.

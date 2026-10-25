@@ -18,7 +18,7 @@ import (
 // The tests of briefs/73-reject-result-design.md ("Required tests") at the control executor; the counter regressions with real
 // contract-derived witnesses are reject_real_test.go.
 
-// Test 3: the age is exact and cannot wrap. Unlost, 1,023 rounds after the reservation refuses and 1,024 accepts; a registry behind the
+// Test 3: the age is exact and cannot wrap. Unlost, 16,383 rounds after the reservation refuses and 16,384 accepts; a registry behind the
 // reservation refuses; values near the top of uint64 neither wrap into eligibility nor out of it.
 func TestRejectDueAgeIsExactAndDoesNotWrap(t *testing.T) {
 	const max = math.MaxUint64
@@ -41,7 +41,7 @@ func TestRejectDueAgeIsExactAndDoesNotWrap(t *testing.T) {
 		got := RejectDue(RejectFacts{ReservedAt: c.reservedAt, Progress: c.at, Lost: c.lost})
 		require.Equal(t, c.due, got, c.name)
 	}
-	require.EqualValues(t, 1024, ResultReservationLifetimeProgress, "one consensus constant")
+	require.EqualValues(t, 16384, ResultReservationLifetimeProgress, "one consensus constant")
 }
 
 // Test 3, continued: only proven progress matures a reservation. The same young facts are refused at any carrying round and time.

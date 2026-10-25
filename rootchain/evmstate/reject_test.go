@@ -74,7 +74,7 @@ func TestRejectFactsAreProvenFromTheCertifiedState(t *testing.T) {
 	require.EqualValues(t, 1, loadPubFx(t).Attempt, "premise: the election's attempt is 1")
 }
 
-// The age is judged on proven words, in the registry's progress clock: 1,023 rounds after the reservation the result is not due, 1,024
+// The age is judged on proven words, in the registry's progress clock: 16,383 rounds after the reservation the result is not due, 16,384
 // rounds after it is, and a lost one is due at once (test 3 and 4 of the design, with the three-account proof replayed).
 func TestRejectDueIsJudgedOnProvenProgress(t *testing.T) {
 	for _, c := range []struct {
