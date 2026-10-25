@@ -965,6 +965,7 @@ class Rehearsal:
         bodies = self.restore_body_ids()
         self.expect(bool(bodies), 'an activation record names the V3 body id the restore is anchored to (run pos-install first)')
         env = dict(os.environ, H4_RESTORE_BODY_IDS=bodies)
+        newest = bodies.split(',')[-1].split('=')[1]
         attempts = []
         survivors = [j for j in range(1, self.n + 1) if j != i]
         def pinned():
@@ -972,11 +973,12 @@ class Rehearsal:
                 run = subprocess.run([str(self.restore_pin), str(self.gen / f'validator{j}' / 'archive'), str(self.gen / 'network' / 'trust-base.json'), str(val / 'evm' / 'tip')],
                                      text=True, capture_output=True, env=env)
                 attempts.append(f'validator {j} archive: exit {run.returncode}: {(run.stdout + run.stderr).strip()[-300:]}')
-                if run.returncode == 0:
+                # the pin must be a record of the new epoch: an epoch-1 record also pins (its body id is the predecessor's) and would leave the anchor above untested
+                if run.returncode == 0 and f'bodyID=0x{newest}' in run.stdout:
                     return run
             return None
         try:
-            pin = self.wait('a survivor\'s archive yields a certified record to pin', pinned, 120)
+            pin = self.wait('a survivor\'s archive yields a certified record of the new epoch to pin', pinned, 120)
         except Failure:
             pin = None
         (self.evh() / f'joiner-restore-pin-{i}.txt').write_text('\n'.join(attempts) + '\n')
