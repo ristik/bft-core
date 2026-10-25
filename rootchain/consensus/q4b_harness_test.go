@@ -188,8 +188,18 @@ func (s *q4bStore) observed(b *storage.ExecutedBlock, root bool, write func() er
 	if err := write(); err != nil {
 		return err
 	}
+	if q4bAnchorRoot(b) {
+		return nil
+	}
 	s.live.recordBlock(s.index, b.GetRound(), blk, root)
 	return nil
+}
+
+// q4bAnchorRoot: the epoch anchor root (Round == Anchor.Slot, so its parent round is its own round) is the installed base of the
+// epoch, not a block committed in it. A recovery (NewFromAnchorState) rewrites it as the tree root; recorded, it would export a block
+// that does not extend a lower round and an ordinary commit that never happened.
+func q4bAnchorRoot(b *storage.ExecutedBlock) bool {
+	return b.BlockData.Anchor != nil && b.GetRound() == b.BlockData.Anchor.Slot
 }
 
 func (s *q4bStore) WriteVote(v any) error {
@@ -588,7 +598,7 @@ func (c *q4bLive) requireStalled(names ...string) {
 	for _, n := range names {
 		before[n] = c.state(n)
 	}
-	from := time.Now()
+	from := q4bWindowStart()
 	time.Sleep(q4bStall)
 	for _, n := range names {
 		after := c.state(n)
@@ -598,6 +608,16 @@ func (c *q4bLive) requireStalled(names ...string) {
 	c.mu.Lock()
 	c.windows = append(c.windows, q4replay.Window{Name: "stall", Expect: "stall", Nodes: names, StartMs: from.UnixMilli(), EndMs: time.Now().UnixMilli()})
 	c.mu.Unlock()
+}
+
+// q4bWindowStart opens a stall window at the next whole millisecond. A commit the before-read saw was stamped before that read
+// returned (the stamp is taken in the commit's write, under the block tree lock CurrentState waits on), often in the same
+// millisecond; the checker's window bound is inclusive at millisecond precision, so a window opened in that millisecond would count
+// the commit as made inside it.
+func q4bWindowStart() time.Time {
+	from := time.Now().Truncate(time.Millisecond).Add(time.Millisecond)
+	time.Sleep(time.Until(from))
+	return from
 }
 
 // requireChainsAgree: no two nodes committed different blocks for a common round, and the observer itself saw no conflict.
