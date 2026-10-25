@@ -27,6 +27,9 @@ func (r *ExecutionRecovery) replayPrefix(ctx context.Context, c recoveryChain, h
 	if r.FetchArchive == nil && r.ArchiveCatchUp == nil {
 		return fmt.Errorf("%w: execution is at %d/%x, below the retained base %d/%x, and no archive is configured to replay the pruned history (a restored snapshot needs a compatible execution snapshot)", ErrRecoveryUnavailable, f.Number, f.Hash, c.base.Number, c.base.Hash)
 	}
+	if err := r.admitHead(ctx, head); err != nil {
+		return err
+	}
 	started := time.Now()
 	if r.Log != nil {
 		r.Log.InfoContext(ctx, "recovery: execution is below the retained base, replaying archived history",
@@ -40,6 +43,7 @@ func (r *ExecutionRecovery) replayPrefix(ctx context.Context, c recoveryChain, h
 		if err := ctx.Err(); err != nil {
 			return fmt.Errorf("%w: replaying archived history to height %d: %w", ErrRecoveryUnavailable, c.base.Number, err)
 		}
+		before := cur
 		entries, source, err := r.prefixEntries(ctx, cur, c, started)
 		if err != nil {
 			return err
@@ -84,7 +88,8 @@ func (r *ExecutionRecovery) replayPrefix(ctx context.Context, c recoveryChain, h
 		if stop != "" {
 			return fmt.Errorf("%w: replaying archived history from %s: at height %d of %d (%s)", ErrRecoveryUnavailable, source, cur.Number, c.base.Number, stop)
 		}
-		if last.Number == f.Number && len(entries) == 0 {
+		if cur.Number == before.Number {
+			// a source that returns nothing above where this iteration started would make the loop spin
 			return fmt.Errorf("%w: the archive returned no history above %d/%x", ErrRecoveryUnavailable, cur.Number, cur.Hash)
 		}
 	}
@@ -146,4 +151,24 @@ func (r *ExecutionRecovery) prefixError(cur, base shardnode.BlockRef, err error)
 		return err
 	}
 	return fmt.Errorf("%w: archived history above %d/%x towards the retained base %d/%x: %w", ErrRecoveryUnavailable, cur.Number, cur.Hash, base.Number, base.Hash, err)
+}
+
+// admitHead has the restarted execution client's canonical head admitted from this node's own verification before anything is imported on
+// it: a client that restarted holds tokens it restored from disk but has not admitted, and refuses every import (SYNCING, "parent accounting
+// token is not retained") until the node does this; the shard node did it only at its own start, so a client that restarted alone stayed stuck
+// (bft-core#843, a ureth-only kill). It is not skipped for a head this coordinator moved the client to: a client killed after saving exactly
+// that head restarts unadmitted at it, and nothing here can tell that from a client that did not restart. The admission is a few reads, once
+// per replay. Executors with no paired execution client are not asked. A failure leaves signing off and retries: the cause is kept.
+func (r *ExecutionRecovery) admitHead(ctx context.Context, head shardnode.BlockRef) error {
+	a, ok := r.Executor.(HeadAdmitter)
+	if !ok || !a.PairEnabled() || head.Number == 0 {
+		return nil
+	}
+	if err := a.AdmitHead(ctx); err != nil {
+		return fmt.Errorf("%w: restart admission of the execution client's head %d/%x: %w", ErrRecoveryUnavailable, head.Number, head.Hash, err)
+	}
+	if r.Log != nil {
+		r.Log.InfoContext(ctx, "recovery: execution client's head admitted", slog.Uint64("head", head.Number), slog.String("headHash", fmt.Sprintf("%x", head.Hash)))
+	}
+	return nil
 }

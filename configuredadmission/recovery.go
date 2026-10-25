@@ -30,6 +30,14 @@ type RecoveryExecutor interface {
 	CheckBlockBinding(context.Context, shardnode.Block, shardnode.RoundParams) error
 }
 
+// HeadAdmitter is the execution client's restart admission (engineapi.Adapter): after the client restarts, the tokens it restored from disk are
+// not admitted, and it answers SYNCING to every import until this node has re-authenticated its canonical head from its own trust
+// (engine_admitParentV1). Executors without a paired execution client do not have it.
+type HeadAdmitter interface {
+	PairEnabled() bool
+	AdmitHead(context.Context) error
+}
+
 type RecoveryLimits struct {
 	Blocks   int
 	Bytes    int64
@@ -386,6 +394,9 @@ func (r *ExecutionRecovery) recoverChain(ctx context.Context, c recoveryChain, c
 		return c.anchor, nil
 	}
 	if !errors.Is(err, ErrRecoveryUnavailable) {
+		return head, err
+	}
+	if err = r.admitHead(ctx, head); err != nil {
 		return head, err
 	}
 	var used int64

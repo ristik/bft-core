@@ -35,9 +35,10 @@ type FrontierWorker struct {
 	Log             *slog.Logger
 	// Finalized bounds pruning to the execution head this node has actually
 	// committed. An archive copy can arrive before local EL finality does.
-	Finalized        func(context.Context) (shardnode.BlockRef, error)
-	auditCursor      uint64
-	lastCapacityWarn time.Time
+	Finalized          func(context.Context) (shardnode.BlockRef, error)
+	auditCursor        uint64
+	lastCapacityWarn   time.Time
+	lastNoProgressWarn time.Time
 	// advancing serializes frontier advances: the worker's own passes and Advance from a long catch-up (#769) would otherwise
 	// invalidate each other's planned coverage (frontier.ErrStale) on every pass.
 	advancing sync.Mutex
@@ -152,19 +153,23 @@ func (w *FrontierWorker) advance(ctx context.Context, mark func(string), max int
 		}
 	}
 	var covered []frontier.Coverage
+	stopped := "no certified block above the frontier anchor"
 	availability := ReplicaAvailability{Context: ctx, Host: w.Host, Replicas: w.Replicas, Limits: w.TransportLimits}
 	unreachable := make(map[int]bool) // replicas that failed a read-back in this pass: not asked again for later blocks
 	for _, entry := range certifiedEntries(image) {
 		if entry.Candidate.Number <= height {
 			continue
 		}
+		stopped = fmt.Sprintf("block %d is the first above the frontier anchor %d", entry.Candidate.Number, height)
 		if w.Finalized != nil && entry.Candidate.Number > finalized.Number {
+			stopped = fmt.Sprintf("block %d is above local execution finality %d", entry.Candidate.Number, finalized.Number)
 			break
 		}
 		if w.Finalized != nil && entry.Candidate.Number == finalized.Number && !bytes.Equal(entry.Candidate.Hash, finalized.Hash) {
 			return ErrBinding
 		}
 		if entry.Candidate.Number != height+1 || entry.ResultingUC.GetRootEpoch() < epoch || entry.ResultingUC.GetRootEpoch() == epoch && entry.ResultingUC.GetRootRoundNumber() <= round {
+			stopped = fmt.Sprintf("block %d does not follow the frontier anchor %d (root position %d/%d against the anchor's %d/%d)", entry.Candidate.Number, height, entry.ResultingUC.GetRootEpoch(), entry.ResultingUC.GetRootRoundNumber(), epoch, round)
 			break
 		}
 		var hash, state [32]byte
@@ -177,6 +182,7 @@ func (w *FrontierWorker) advance(ctx context.Context, mark func(string), max int
 				if len(covered) == 0 {
 					return fmt.Errorf("%w: receipt-complete archive record missing for block %x", archive.ErrUnavailable, q.BlockHash)
 				}
+				stopped = fmt.Sprintf("block %d has no receipt-complete local archive record", entry.Candidate.Number)
 				break
 			}
 			return err
@@ -202,6 +208,7 @@ func (w *FrontierWorker) advance(ctx context.Context, mark func(string), max int
 			if len(covered) == 0 {
 				return err
 			}
+			stopped = fmt.Sprintf("block %d: %v", entry.Candidate.Number, err)
 			break
 		}
 		sequence++
@@ -216,6 +223,7 @@ func (w *FrontierWorker) advance(ctx context.Context, mark func(string), max int
 		}
 	}
 	if len(covered) == 0 {
+		w.warnNoProgress(ctx, image, stopped, finalized)
 		return nil
 	}
 	if err := w.Journal.AdvanceFrontier(ctx, w.Context, w.Limits, covered); err != nil {
@@ -237,6 +245,19 @@ func (w *FrontierWorker) warnCapacity(ctx context.Context, image configuredprogr
 	w.Log.WarnContext(ctx, "execution journal is near its limit: pruning needs two verified archive copies", "percent", pct,
 		"candidates", usage.CandidatesUsed, "candidatesCap", usage.CandidatesCap, "observations", usage.ObservationsUsed, "observationsCap", usage.ObservationsCap,
 		"bytes", usage.BytesUsed, "bytesCap", usage.BytesCap)
+}
+
+// warnNoProgress says why a pass that found the journal near a limit covered nothing: without it a full journal with a worker that
+// silently covers zero blocks looks the same as a healthy one (#843: a rejoined node's journal filled and stayed full).
+func (w *FrontierWorker) warnNoProgress(ctx context.Context, image configuredprogress.JournalSnapshot, stopped string, finalized shardnode.BlockRef) {
+	usage := JournalUsage{CandidatesUsed: len(image.Candidates), CandidatesCap: w.Limits.Candidates, ObservationsUsed: len(image.Observations),
+		ObservationsCap: w.Limits.Observations, BytesUsed: image.Bytes, BytesCap: w.Limits.Bytes}
+	if w.Log == nil || usage.Percent() < capacityWarnPercent || time.Since(w.lastNoProgressWarn) < 10*time.Second {
+		return
+	}
+	w.lastNoProgressWarn = time.Now()
+	w.Log.WarnContext(ctx, "certified frontier covered nothing while the journal is near its limit", "reason", stopped, "percent", usage.Percent(),
+		"candidates", usage.CandidatesUsed, "certified", len(certifiedEntries(image)), "finalized", finalized.Number)
 }
 
 // holders names, as indexes into Replicas in canonical order, the two replicas whose verified read-back returned this exact record: the
