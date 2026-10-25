@@ -74,7 +74,8 @@ type Publisher struct {
 	bundleAck       map[uint64]uint8
 	bundleConflict  map[uint64]uint8 // per epoch, the replicas that refused our bundle as semantically different: never retried
 	cursor          int
-	replicaCursor   []int // one per replica, sized in Run
+	localOK         map[[32]byte]struct{} // blocks whose local archive record this process has already written or verified
+	replicaCursor   []int                 // one per replica, sized in Run
 	status          Status
 	replicaProgress []ReplicaProgress
 	warned          map[string]time.Time // last WARN per message and error, see warnThrottled
@@ -347,32 +348,8 @@ func (p *Publisher) pass(ctx context.Context) error {
 		}
 	}
 	sort.Slice(entries, func(i, j int) bool { return entries[i].Candidate.Number < entries[j].Candidate.Number })
-	processed := 0
 	var first error
-	p.mu.Lock()
-	start := p.cursor
-	p.mu.Unlock()
-	for i := 0; i < len(entries); i++ {
-		index := (start + i) % len(entries)
-		e := entries[index]
-		if ctx.Err() != nil {
-			return ctx.Err()
-		}
-		var hash [32]byte
-		copy(hash[:], e.Candidate.Hash)
-		p.mu.Lock()
-		bits := p.ack[hash]
-		p.mu.Unlock()
-		if bits.count() >= replicaCopies {
-			continue
-		}
-		if processed >= 4 {
-			break
-		}
-		processed++
-		p.mu.Lock()
-		p.cursor = (index + 1) % len(entries)
-		p.mu.Unlock()
+	handle := func(e configuredprogress.JournalEntry, hash [32]byte) {
 		q := archive.Request{Context: p.Subject, BlockHash: hash}
 		rec, eerr := p.Archive.GetReceiptComplete(q)
 		if errors.Is(eerr, archive.ErrUnavailable) {
@@ -392,12 +369,82 @@ func (p *Publisher) pass(ctx context.Context) error {
 				}
 			}
 		}
-		if eerr != nil {
-			if first == nil {
-				first = eerr
+		if eerr != nil && first == nil {
+			first = eerr
+		}
+		if eerr == nil {
+			p.mu.Lock()
+			if p.localOK == nil {
+				p.localOK = make(map[[32]byte]struct{})
 			}
+			p.localOK[hash] = struct{}{}
+			p.mu.Unlock()
+		}
+	}
+	// The records still to publish, lowest block first: the frontier prunes contiguously from its anchor, so the lowest block without a local
+	// archive record is the one pruning waits for, and a restart empties the acknowledgements, which makes every journal block pending again.
+	// A pass handles the lowest budget-1 of them that this process has not yet archived locally, and one more from the rotating cursor, so that a record that keeps failing cannot starve the
+	// ones behind it. The budget grows with the journal's fill, because a journal that fills faster than it is published stops the node
+	// (bft-core#843: after a rejoin the pass reached the block the frontier needed only after the journal was full).
+	usage := JournalUsage{CandidatesUsed: len(image.Candidates), CandidatesCap: p.JournalLimits.Candidates, ObservationsUsed: len(image.Observations),
+		ObservationsCap: p.JournalLimits.Observations, BytesUsed: image.Bytes, BytesCap: p.JournalLimits.Bytes}
+	budget := publisherPassRecords
+	if usage.Percent() >= publisherBusyPercent {
+		budget = publisherBusyPassRecords
+	}
+	var pending []int
+	for i, e := range entries {
+		var hash [32]byte
+		copy(hash[:], e.Candidate.Hash)
+		p.mu.Lock()
+		bits := p.ack[hash]
+		_, done := p.localOK[hash]
+		p.mu.Unlock()
+		if bits.count() < replicaCopies && !done {
+			pending = append(pending, i)
+		}
+	}
+	chosen := make(map[int]bool, budget)
+	for _, i := range pending {
+		if len(chosen) >= budget-1 {
+			break
+		}
+		chosen[i] = true
+	}
+	p.mu.Lock()
+	start := p.cursor
+	p.mu.Unlock()
+	if len(entries) > 0 {
+		for k := 0; k < len(entries) && len(chosen) < budget; k++ {
+			index := (start + k) % len(entries)
+			if chosen[index] {
+				continue
+			}
+			var hash [32]byte
+			copy(hash[:], entries[index].Candidate.Hash)
+			p.mu.Lock()
+			bits := p.ack[hash]
+			p.mu.Unlock()
+			if bits.count() >= replicaCopies {
+				continue
+			}
+			chosen[index] = true
+			p.mu.Lock()
+			p.cursor = (index + 1) % len(entries)
+			p.mu.Unlock()
+			break
+		}
+	}
+	for i, e := range entries {
+		if !chosen[i] {
 			continue
 		}
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		var hash [32]byte
+		copy(hash[:], e.Candidate.Hash)
+		handle(e, hash)
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -421,12 +468,25 @@ func (p *Publisher) pass(ctx context.Context) error {
 			delete(p.ack, h)
 		}
 	}
+	for h := range p.localOK {
+		if _, ok := live[h]; !ok {
+			delete(p.localOK, h)
+		}
+	}
 	p.status = status
 	if p.Metrics != nil {
 		p.Metrics.set(status)
 	}
 	return first
 }
+
+// publisherPassRecords is how many records one publication pass handles; the busy budget applies while the journal is at least
+// publisherBusyPercent full.
+const (
+	publisherPassRecords     = 4
+	publisherBusyPassRecords = 16
+	publisherBusyPercent     = 50
+)
 
 func certifiedEntries(image configuredprogress.JournalSnapshot) []configuredprogress.JournalEntry {
 	entries := make([]configuredprogress.JournalEntry, 0, len(image.Candidates))

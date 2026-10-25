@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"sort"
 	"sync"
 	"testing"
 	"time"
@@ -244,4 +245,63 @@ func TestReplicaPassLocalRecordMissingIsNotAReplicaError(t *testing.T) {
 	for _, r := range p.ReplicaProgress() {
 		require.Empty(t, r.Error)
 	}
+}
+
+// bft-core#843: after a restart every journal block is pending again, and the frontier prunes contiguously from its anchor, so the lowest block
+// without a local archive record is the one pruning waits for. A pass takes the lowest unarchived blocks first (and one more from the
+// rotating cursor), not whatever the cursor points at.
+func TestPublisherArchivesTheLowestBlocksFirst(t *testing.T) {
+	t.Parallel()
+	f := newWiringFixture(t, 7) // 7 of 16 candidates: below the busy level, a pass handles 4
+	local, err := archive.Open(t.TempDir())
+	require.NoError(t, err)
+	p := &Publisher{Journal: f.store, Context: f.context, JournalLimits: f.limits, Archive: local, Subject: f.subject, ack: make(map[[32]byte]ackSet), cursor: 3}
+	require.NoError(t, p.pass(context.Background()))
+	// by height: the fixture's entries are not in height order
+	have := func(height uint64) bool {
+		for i, e := range f.entries {
+			if e.Candidate.Number == height {
+				q, _ := f.record(t, i)
+				_, err := local.Get(q)
+				return err == nil
+			}
+		}
+		t.Fatalf("no block at height %d", height)
+		return false
+	}
+	heights := make([]uint64, 0, len(f.entries))
+	for _, e := range f.entries {
+		heights = append(heights, e.Candidate.Number)
+	}
+	sort.Slice(heights, func(i, j int) bool { return heights[i] < heights[j] })
+	for _, h := range heights[:3] {
+		require.True(t, have(h), "height %d is among the lowest three", h)
+	}
+	require.True(t, have(heights[3]), "and one more comes from the rotating cursor (position 3)")
+	for _, h := range heights[4:] {
+		require.False(t, have(h), "height %d waits", h)
+	}
+	// the next pass takes the rest: what this process has archived is not picked again ahead of them
+	require.NoError(t, p.pass(context.Background()))
+	for _, h := range heights {
+		require.True(t, have(h), "height %d", h)
+	}
+}
+
+// A journal that fills faster than it is published stops the node: from half full a pass handles a larger batch.
+func TestPublisherHurriesWhenTheJournalFills(t *testing.T) {
+	t.Parallel()
+	f := newWiringFixture(t, 12) // 12 of 16 candidates
+	local, err := archive.Open(t.TempDir())
+	require.NoError(t, err)
+	p := &Publisher{Journal: f.store, Context: f.context, JournalLimits: f.limits, Archive: local, Subject: f.subject, ack: make(map[[32]byte]ackSet)}
+	require.NoError(t, p.pass(context.Background()))
+	archived := 0
+	for i := range f.entries {
+		q, _ := f.record(t, i)
+		if _, err := local.Get(q); err == nil {
+			archived++
+		}
+	}
+	require.Equal(t, 12, archived, "all twelve in one pass, not four")
 }
