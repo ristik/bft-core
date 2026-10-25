@@ -89,7 +89,7 @@ def pos_reject(self):
     final = result_words()[0]
     self.say(f'  R resolved at progress {at}, {time.monotonic() - started:.0f} s after the wait started')
     self.expect(final == 5, 'R is Closed (resolved by a SessionClosed, the only rejection path)', str(final))
-    self.expect(at >= reserved_at + LIFETIME, 'no earlier than its lifetime (it was not lost)', f'{at} < {reserved_at + LIFETIME}')
+    self.expect(at >= reserved_at + LIFETIME, 'no earlier than its lifetime (it was not lost)', f'resolved at {at}, due at {reserved_at + LIFETIME}')
     self.expect(session_state() != 1, "custody's session of R is no longer open", str(session_state()))
     records1 = self.view(self.REGISTRY, 'recordCount()(uint64)')[0]
     cursor1 = self.view(custody, 'recordCursor()(uint64)')[0]
