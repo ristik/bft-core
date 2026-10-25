@@ -3,6 +3,7 @@ package storage
 import (
 	"bytes"
 	"crypto"
+	"crypto/sha256"
 	"math"
 	"testing"
 
@@ -324,4 +325,69 @@ func (f *assignmentFixture) seedEVMState(t *testing.T) {
 		si.TR.FeeHash, err = si.feeHash(crypto.SHA256)
 		require.NoError(t, err)
 	})
+}
+
+// The halt of the test-9 rehearsal (run 40154398105): a rejection ordered at an idle root left an aborted control state with no ordered
+// record, every later proposal's profile check refused it (ErrControlCheckpoint at SuffixParent) and the roots stopped proposing. Through
+// the real store: the block that orders the rejection, the profile check of the next proposal on it, and that next block.
+func TestTheChainProceedsAfterARejection(t *testing.T) {
+	result := [32]byte{0xe5}
+	evm := &fakeEVM{reject: dueReject(result)}
+	s, svc, b8 := ackedEpochTwo(t, evm, 8)
+	ctl := b8.ShardState.Control
+	require.Equal(t, "idle", ctl.Phase, "premise: the rejection is taken from an idle root")
+	c := rctypes.PosControl{Network: 5, ChainID: svc.Deployment.ChainID, Custody: svc.Deployment.Custody, OrderingEpoch: 2, OrderingRound: 9,
+		Op: rctypes.OpRejectResult, Data: result[:], WitnessHash: sha256.Sum256([]byte("accounts")),
+		Reject: &rctypes.RejectContext{PredecessorBodyID: [32]byte(ctl.PredecessorBodyID), EVMBlockHash: [32]byte(bytes.Repeat([]byte{0x77}, 32)),
+			EVMStateRoot: [32]byte(bytes.Repeat([]byte{0x78}, 32))}}
+	_, err := s.Add(&rctypes.BlockData{Version: 3, Round: 9, Epoch: 2, Timestamp: 1_001,
+		Payload: &rctypes.Payload{Version: 3, PosControls: []rctypes.PosControl{c}},
+		Qc:      &rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{RoundNumber: 8, Epoch: 2, CurrentRootHash: b8.RootHash}}}, nil)
+	require.NoError(t, err)
+	b9 := mustBlock(t, s, 9)
+	require.Equal(t, "aborted", b9.ShardState.Control.Phase)
+	require.Len(t, b9.ShardState.Records, 1)
+	require.Equal(t, rootrecords.KindSessionClosed, b9.ShardState.Records[0].Kind)
+
+	_, err = s.SuffixParent(9, 2)
+	require.NoError(t, err, "the next proposal can be built on the rejection")
+	_, err = s.Add(&rctypes.BlockData{Version: 3, Round: 10, Epoch: 2, Timestamp: 1_002, Payload: &rctypes.Payload{Version: 3},
+		Qc: &rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{RoundNumber: 9, Epoch: 2, CurrentRootHash: b9.RootHash}}}, nil)
+	require.NoError(t, err)
+	require.Equal(t, "aborted", mustBlock(t, s, 10).ShardState.Control.Phase)
+}
+
+// Every state a rejection leaves (from idle, after an ordered Abort, after a dead Prepare) is a valid control checkpoint; a recordless
+// aborted state is valid only without a frozen parent and with the digest link, and an ordered Abort's record is still checked.
+func TestARejectionLeavesAValidControlCheckpoint(t *testing.T) {
+	idle := &evmroot.ControlState{Network: 7, Epoch: 1, PredecessorBodyID: bytes32(0x77), Phase: "idle"}
+	abortRecord := (evmroot.OrderedHandoffRecord{Network: 7, Epoch: 1, Attempt: 4, OrderedRound: 49, PredecessorBodyID: bytes32(0x77),
+		FrozenID: make([]byte, 32), NextBodyID: bytes32(0x44), ActivationRound: 60, SuccessorTRHash: make([]byte, 32), Kind: "abort"}).Bytes()
+	ordered := &evmroot.ControlState{Network: 7, Epoch: 1, PredecessorBodyID: bytes32(0x77), Phase: "aborted", Attempt: 4, OrderedRound: 49,
+		RecordBytes: abortRecord, PreviousDigest: bytes32(0x01)}
+	require.NoError(t, validateControl(ordered), "premise: an ordered Abort's state")
+	for name, c := range map[string]struct {
+		ctl            *evmroot.ControlState
+		round, attempt uint64
+	}{
+		"idle":         {idle, 50, 0},
+		"after abort":  {ordered, 50, 5},
+		"dead Prepare": {preparedAt(100, 2), 100 + PrepareFreezeLapseRounds + PrepareCooldownRounds + 1, 3},
+	} {
+		res, err := rejectOver(t, c.ctl, c.round, c.attempt)
+		require.NoError(t, err, name)
+		require.NoError(t, validateControl(res.replaced), name)
+	}
+
+	res, err := rejectOver(t, idle, 50, 0)
+	require.NoError(t, err)
+	frozen := *res.replaced
+	frozen.FrozenParent = bytes32(0x99)
+	require.ErrorIs(t, validateControl(&frozen), ErrControlCheckpoint, "a recordless aborted state names no frozen parent")
+	unlinked := *res.replaced
+	unlinked.PreviousDigest = nil
+	require.ErrorIs(t, validateControl(&unlinked), ErrControlCheckpoint, "a recordless aborted state keeps the digest link")
+	stale := *ordered
+	stale.Attempt = 5
+	require.ErrorIs(t, validateControl(&stale), ErrControlCheckpoint, "an ordered Abort's record is still checked against the state")
 }

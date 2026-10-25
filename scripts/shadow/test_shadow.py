@@ -159,7 +159,8 @@ class ReferenceElection(unittest.TestCase):
     def test_refusals(self):
         self.assertEqual(ref.expected(make_inputs(retired=(2, 3, 4)))["reason"], "Cardinality")
         over = ref.expected(make_inputs(spares=(5, 6, 7, 8, 9)))
-        self.assertEqual((over["outcome"], over["reason"]), ("NoCandidateRecorded", "MembershipChurn"))
+        # no outsider can be kept (each shifts a quarter of the weight) and the incumbents alone are the committee itself: no feasible change
+        self.assertEqual((over["outcome"], over["reason"]), ("NoCandidateRecorded", "WeightChurn"))
         self.assertEqual(ref.expected(make_inputs(ref_count=4))["reason"], "ReferenceCapacity")
 
     def test_idle_outcomes(self):
@@ -465,6 +466,9 @@ class ForkSafety(unittest.TestCase):
         self.assertFalse(hasattr(rpc, "send"))
 
 
+RECORDED_BEFORE_SKIP = {"00066"}  # recorded refusals of the election before the skip rule
+
+
 class RecordedReplay(unittest.TestCase):
     """A recorded real snapshot (testdata/recorded/*): the reference recomputed offline equals the contract output recorded from the real election on the fork."""
 
@@ -475,6 +479,12 @@ class RecordedReplay(unittest.TestCase):
         for d in dirs:
             inp = adapter.load_inputs(d / "inputs.json")
             contract = jload(d / "contract.json")
+            if d.name in RECORDED_BEFORE_SKIP:
+                # recorded under the contracts that refused the whole election when the complete seed broke the bound; the reference now elects
+                # the best feasible committee (bft-core#854), so the two are expected to differ until the snapshot is recorded again
+                self.assertEqual(contract["outcome"], "NoCandidateRecorded", d.name)
+                self.assertTrue(compare.compare(contract, ref.expected(inp)), d.name)
+                continue
             self.assertEqual(compare.compare(contract, ref.expected(inp)), [], d.name)
             bad = copy.deepcopy(contract)
             bad["attempt"] = bad.get("attempt", 0) + 1

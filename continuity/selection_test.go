@@ -141,7 +141,7 @@ func elect(c selCase) ([]uint64, []uint64, uint8) {
 	}
 	oldMembers := toMembers(c.Old)
 	if _, err := Check(oldMembers, committee(in), policy); err != nil {
-		return nil, nil, churnReason(err)
+		return feasible(c, ranked, old, committee, oldMembers, policy, churnReason(err))
 	}
 	// each remaining outsider, once, in rank order
 	for _, x := range ranked {
@@ -192,6 +192,72 @@ func uniform(from, to, weight uint64) []vMember {
 	return out
 }
 
+// feasible is the election when the complete seed fails a continuity predicate (bft-core#854): not a failed election but the best
+// feasible committee. It starts from the eligible incumbents alone (up to the target; they must pass on their own), then visits each
+// outsider once, in rank order, and keeps it only if the committee with it still passes every predicate; an outsider that would break the
+// bound is skipped. No change is no election: when no outsider could be kept and the incumbents are the old committee itself the election
+// stays refused with the first skipped outsider's reason, as it is when the incumbents alone fail or fewer than the minimum remain.
+func feasible(c selCase, ranked []vMember, old map[uint64]bool, committee func(map[uint64]bool) []Member, oldMembers []Member, policy Policy, seedReason uint8) ([]uint64, []uint64, uint8) {
+	cfg := c.Config
+	in := map[uint64]bool{}
+	for _, m := range ranked {
+		if old[m.ID] && uint64(len(in)) < cfg.NTarget {
+			in[m.ID] = true
+		}
+	}
+	if len(in) == 0 {
+		return nil, nil, seedReason
+	}
+	incumbents := len(in)
+	if _, err := Check(oldMembers, committee(in), policy); err != nil {
+		return nil, nil, churnReason(err)
+	}
+	skipped := uint8(reasonNone)
+	for _, x := range ranked {
+		if old[x.ID] || uint64(len(in)) >= cfg.NTarget {
+			continue
+		}
+		in[x.ID] = true
+		if _, err := Check(oldMembers, committee(in), policy); err != nil {
+			delete(in, x.ID)
+			if skipped == reasonNone {
+				skipped = churnReason(err)
+			}
+		}
+	}
+	if skipped == reasonNone {
+		skipped = reasonCardinality
+	}
+	if uint64(len(in)) < cfg.NMin {
+		return nil, nil, skipped
+	}
+	var out, weights []uint64
+	for id := range in {
+		out = append(out, id)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
+	same := len(in) == incumbents && len(out) == len(c.Old)
+	for i, m := range committee(in) {
+		weights = append(weights, m.Weight)
+		if same && (c.Old[i].ID != out[i] || c.Old[i].Weight != m.Weight || c.Old[i].Binding != bindingOf(c.Eligible, out[i])) {
+			same = false
+		}
+	}
+	if same {
+		return nil, nil, skipped
+	}
+	return out, weights, reasonNone
+}
+
+func bindingOf(e []vMember, id uint64) uint64 {
+	for _, m := range e {
+		if m.ID == id {
+			return m.Binding
+		}
+	}
+	return 0
+}
+
 func selectionCases() []selCase {
 	dev := selConfig{NMin: 4, NTarget: 10, NMax: selectionCeiling, MaxM: 4, DistNum: 1, DistDen: 4}
 	var out []selCase
@@ -203,6 +269,16 @@ func selectionCases() []selCase {
 	}
 	ten := uniform(1, 10, 5)
 	add("an unchanged committee is re-elected", ten, ten, dev)
+	// bft-core#854: an outsider that alone breaks the weight bound is skipped, not a veto on the whole election. The testnet package's
+	// profile: committees of four to six, a distance bound of 1/2.
+	pkg := selConfig{NMin: 4, NTarget: 6, NMax: selectionCeiling, MaxM: 4, DistNum: 1, DistDen: 2}
+	five := uniform(1, 5, 1)
+	add("skip: a weight-2 outsider alone leaves no feasible change (refused, WeightChurn)", five, append(append([]vMember{}, five...), sel(6, 6, 2)), pkg)
+	add("skip: a weight-2 outsider is skipped and the next unit outsider joins", five, append(append([]vMember{}, five...), sel(6, 6, 2), sel(7, 7, 1)), pkg)
+	add("skip: a weight-3 joiner against four unit members alone is refused (the overbound lane)", uniform(1, 4, 1), append(append([]vMember{}, uniform(1, 4, 1)...), sel(5, 5, 3)), pkg)
+	add("skip: a lost incumbent shrinks the committee while the heavy outsider is skipped", five, append(append([]vMember{}, uniform(1, 4, 1)...), sel(6, 6, 3)), pkg)
+	add("skip: the incumbents alone break the membership budget", five, []vMember{sel(1, 1, 1), sel(2, 2, 1), sel(6, 6, 1), sel(7, 7, 1), sel(8, 8, 1)}, pkg)
+	add("skip: the incumbents left are fewer than the minimum and the outsider is skipped", five, []vMember{sel(1, 1, 1), sel(2, 2, 1), sel(3, 3, 1), sel(6, 6, 3)}, pkg)
 	// an outsider with more weight replaces the weakest incumbent
 	richer := append(append([]vMember{}, uniform(1, 9, 5)...), sel(10, 10, 4), sel(11, 11, 9))
 	add("a richer outsider replaces the weakest incumbent", ten, richer, dev)
