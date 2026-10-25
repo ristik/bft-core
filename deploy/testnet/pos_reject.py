@@ -10,7 +10,7 @@ no handoff). With the counters deliberately unlike (the election's attempt for R
    longer open; the registry's record count and custody's cursor have moved on (the SessionClosed was imported and applied); the root's next attempt moved
    past the rejection's (the control state is aborted at the attempt the rejection named). The registry progress the stage reads once it sees R
    Closed bounds when the closure was observed, not when the rejection was ordered: the ordering bound is the rule's own (RejectDue, proven at P);
-3. checks the old material is dead: finalizing R and submitting proofs for R revert (NotReserved);
+3. checks the old material is dead: finalizing R reverts (NotReserved);
 4. waits for the elections to resume: a new result R2 is reserved (its cadence anchor is R's attempt, long past).
 
 The healthy, timely handoff runs alongside in the stages that follow (pos-proposal onwards, on R2): expiry does not replace the normal Ack path.

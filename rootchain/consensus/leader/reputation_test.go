@@ -62,6 +62,19 @@ func Test_ReputationBased_Update(t *testing.T) {
 		require.Equal(t, slotIdx, rl.curIdx, "expected that round leader buffer index is not changed")
 	})
 
+	t.Run("the genesis QC with the next epoch's trust base picks the next epoch leader", func(t *testing.T) {
+		// the guard against the genesis QC sits in the reputation branch only: the next epoch's pick is reached first, here
+		// proven by its error naming the invalid node ID (not ErrNotConsecutive)
+		rl := &ReputationBased{windowSize: 1, trustBaseStore: invalidNextEpochStore(t)}
+		qc := &types.QuorumCert{
+			LedgerCommitInfo: &abt.UnicitySeal{Version: 1, PreviousHash: []byte{0, 0, 0, 0}},
+			VoteInfo:         &types.RoundInfo{RoundNumber: 1, ParentRoundNumber: 0, Epoch: types.GenesisRootEpoch},
+		}
+		err := rl.Update(qc, 2, func(uint64) (*storage.ExecutedBlock, error) { return nil, fmt.Errorf("must not be called") })
+		require.ErrorContains(t, err, `invalid peer id "not-a-peer-id"`)
+		require.NotErrorIs(t, err, ErrNotConsecutive)
+	})
+
 	t.Run("invalid input: qc.Round + 1 != currentRound", func(t *testing.T) {
 		rl := &ReputationBased{}
 		loadBlock := func(round uint64) (*storage.ExecutedBlock, error) { return nil, fmt.Errorf("should not get this far") }
@@ -101,26 +114,12 @@ func Test_ReputationBased_Update(t *testing.T) {
 	})
 
 	t.Run("next epoch leader with invalid peer ID: error names the node ID", func(t *testing.T) {
-		signer, verifier := testsig.CreateSignerAndVerifier(t)
-		key, err := verifier.MarshalPublicKey()
-		require.NoError(t, err)
-		prev := trustbase.NewTrustBase(t, signer).(*abt.RootTrustBaseV1)
-		prevHash, err := prev.Hash(stdcrypto.SHA256)
-		require.NoError(t, err)
-		next, err := abt.NewTrustBase(prev.NetworkID, []*abt.NodeInfo{{NodeID: "not-a-peer-id", SigKey: key, Stake: 1}},
-			abt.WithEpoch(2), abt.WithEpochStart(1), abt.WithPreviousTrustBaseHash(prevHash))
-		require.NoError(t, err)
-		require.NoError(t, next.Sign(prev.RootNodes[0].NodeID, signer)) // signed by the previous epoch validators
-		tbs, err := tbstore.NewTrustBaseStore(memorydb.New(), logger.New(t))
-		require.NoError(t, err)
-		require.NoError(t, tbs.Store(prev))
-		require.NoError(t, tbs.Store(next))
-		rl := &ReputationBased{windowSize: 1, trustBaseStore: tbs}
+		rl := &ReputationBased{windowSize: 1, trustBaseStore: invalidNextEpochStore(t)}
 		qc := &types.QuorumCert{
 			LedgerCommitInfo: &abt.UnicitySeal{Version: 1, PreviousHash: []byte{0, 0, 0, 0}},
 			VoteInfo:         &types.RoundInfo{RoundNumber: 2, ParentRoundNumber: 1, Epoch: 1},
 		}
-		err = rl.Update(qc, 3, func(uint64) (*storage.ExecutedBlock, error) { return nil, fmt.Errorf("must not be called") })
+		err := rl.Update(qc, 3, func(uint64) (*storage.ExecutedBlock, error) { return nil, fmt.Errorf("must not be called") })
 		require.ErrorContains(t, err, `invalid peer id "not-a-peer-id"`)
 	})
 
@@ -690,4 +689,23 @@ func Test_ReputationBased(t *testing.T) {
 	for i := int(startIndex); i <= int(currentRound); i++ {
 		checkAuthor(rl, uint64(i))
 	}
+}
+
+// invalidNextEpochStore holds a signed epoch 2 trust base starting after round 1 whose only validator has an invalid node ID.
+func invalidNextEpochStore(t *testing.T) *tbstore.TrustBaseStore {
+	signer, verifier := testsig.CreateSignerAndVerifier(t)
+	key, err := verifier.MarshalPublicKey()
+	require.NoError(t, err)
+	prev := trustbase.NewTrustBase(t, signer).(*abt.RootTrustBaseV1)
+	prevHash, err := prev.Hash(stdcrypto.SHA256)
+	require.NoError(t, err)
+	next, err := abt.NewTrustBase(prev.NetworkID, []*abt.NodeInfo{{NodeID: "not-a-peer-id", SigKey: key, Stake: 1}},
+		abt.WithEpoch(2), abt.WithEpochStart(1), abt.WithPreviousTrustBaseHash(prevHash))
+	require.NoError(t, err)
+	require.NoError(t, next.Sign(prev.RootNodes[0].NodeID, signer)) // signed by the previous epoch validators
+	tbs, err := tbstore.NewTrustBaseStore(memorydb.New(), logger.New(t))
+	require.NoError(t, err)
+	require.NoError(t, tbs.Store(prev))
+	require.NoError(t, tbs.Store(next))
+	return tbs
 }
