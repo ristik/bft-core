@@ -300,7 +300,7 @@ in production, and there is no migration (greenroom, one format).
   at P, from the three pinned accounts (Election, custody, registry, with their code hashes and the pointers between them): Election's
   open result is R and reserved, custody's session of R is open over a reserved assignment whose incumbent is the last acknowledged
   assignment, R's assignment and predecessor are the session's, R's reservation progress s, the registry's canonical progress p and the
-  publication's `lost` flag. It is due iff `p >= s` and (`lost` or `p - s >= ResultReservationLifetimeProgress`, 1,024). It emits
+  publication's `lost` flag. It is due iff `p >= s` and (`lost` or `p - s >= ResultReservationLifetimeProgress`, 16,384, about two hours at the observed pace). It emits
   SessionClosed, resolves R in `State.Resolved`, and sets the control state to aborted at that attempt (keeping `UnackedParent`), so the
   next Prepare is the attempt after it. The bound is an explicit reservation deadline in certified progress, not failure detection: a
   Prepare ordered first is protected, a rejection ordered first fences R out for good. It is offered
