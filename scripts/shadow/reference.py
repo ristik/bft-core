@@ -154,7 +154,7 @@ def select(o, e, cfg):
     chosen = _committee(e, in_s)
     failed, _ = check(o, chosen, cfg)
     if failed:
-        return _churn_reason(failed), []
+        return _feasible(o, e, cfg, rank, incumbent, _churn_reason(failed))
     for r in rank:
         if incumbent[r] or in_s[r]:
             continue
@@ -172,6 +172,43 @@ def select(o, e, cfg):
             chosen = trial
         else:
             in_s[low], in_s[r] = True, False
+    return 0, chosen
+
+
+def _feasible(o, e, cfg, rank, incumbent, seed_reason):
+    """The complete seed failed a predicate (bft-core#854): the incumbents alone (they must pass), then each outsider once in rank order, kept only
+    if the committee with it still passes; no outsider kept and the incumbents equal to `o` is no election. Same as the contracts' `_feasible`."""
+    in_s = [False] * len(e)
+    count = 0
+    for r in rank:
+        if count < cfg["nTarget"] and incumbent[r]:
+            in_s[r] = True
+            count += 1
+    if count == 0:
+        return seed_reason, []
+    kept = count
+    chosen = _committee(e, in_s)
+    failed, _ = check(o, chosen, cfg)
+    if failed:
+        return _churn_reason(failed), []
+    skipped = 0
+    for r in rank:
+        if count >= cfg["nTarget"] or incumbent[r]:
+            continue
+        in_s[r] = True
+        trial = _committee(e, in_s)
+        failed, _ = check(o, trial, cfg)
+        if failed == 0:
+            chosen = trial
+            count += 1
+        else:
+            in_s[r] = False
+            skipped = skipped or _churn_reason(failed)
+    skipped = skipped or 2
+    if count < cfg["nMin"]:
+        return skipped, []
+    if count == kept and chosen == o:
+        return skipped, []
     return 0, chosen
 
 
