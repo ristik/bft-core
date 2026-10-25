@@ -124,6 +124,36 @@ type RetirementProposer interface {
 	Ordered(id, generation uint64)
 }
 
+// RejectionContext is what a RejectResult in a child of a given parent must name: the EVM state the parent certifies, and the root's
+// authority and next attempt over the control state the child starts from.
+type RejectionContext struct {
+	Parent      EVMParent
+	Predecessor [32]byte
+	Attempt     uint64
+}
+
+// PreparedRejection is a RejectResult control, with its retained witness, built for one RejectionContext: the control carries no ordering
+// position yet (the proposer stamps its block's).
+type PreparedRejection struct {
+	ResultID [32]byte
+	Control  rctypes.PosControl
+	Witness  []byte
+}
+
+// RejectProposer builds the RejectResult of the open election result once it is due (contracts#73): any root validator offers it, so an
+// abandoned result never waits for an operator. Both methods are non-blocking: the proofs are collected off the consensus loop and the
+// leader only uses what is ready for exactly its context. Nothing it builds is trusted: every voter judges the control by the full rule.
+type RejectProposer interface {
+	// Prepare starts discovering the open result at the context's EVM state and collecting its witness, if not done for it yet.
+	Prepare(ctx RejectionContext)
+	// Ready returns the prepared rejection for exactly this context, if the witness is collected and its facts make it due.
+	Ready(ctx RejectionContext) (PreparedRejection, bool)
+	// Resolved tells the proposer the committed root has resolved the result: nothing more to offer for it.
+	Resolved(resultID [32]byte)
+	// Pending lists the results with a prepared rejection, so the caller can tell which of them a committed block has resolved.
+	Pending() [][32]byte
+}
+
 // WitnessSource returns the retained witness bytes by their SHA-256.
 type WitnessSource interface {
 	Witness(hash [32]byte) ([]byte, error)
@@ -193,6 +223,8 @@ type PosServices struct {
 	Proposer   ClosureProposer
 	// Retirements, when set, makes the proposer build the Retirement controls itself (the normal exit needs only the owner's on-chain request).
 	Retirements RetirementProposer
+	// Rejections, when set, makes this root discover and offer the RejectResult of an abandoned election result itself.
+	Rejections RejectProposer
 	// Primary, when set together with Deployment.Election, makes the EVM proof of a primary candidate a condition of its Freeze: the
 	// companion must be version 4 and carry a proof that evmassign.VerifyPrimary accepts against the frozen parent's state root.
 	Primary PrimaryAuthority

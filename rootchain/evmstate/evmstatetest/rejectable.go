@@ -23,6 +23,8 @@ type Rejectable struct {
 	Witness         []byte
 	Facts           storage.RejectFacts
 	ElectionAttempt uint64
+	// Source serves eth_getProof-shaped answers from the state, for builders under test.
+	Source evmstate.ProofSource
 }
 
 // LoadRejectable builds the state of the fixture at path in scenario "reserved", "reservedLost" (marked lost before any publication),
@@ -81,7 +83,7 @@ func LoadRejectable(t testing.TB, path, scenario string, progress uint64) *Rejec
 		contract{addr: r.Pins.Election, codeHash: r.Pins.ElectionCode, storage: election},
 		contract{addr: r.Pins.Custody, codeHash: r.Pins.CustodyCode, storage: custody},
 		contract{addr: r.Pins.Registry, codeHash: r.Pins.RegistryCode, storage: map[[32]byte][32]byte{progressKey: p}})
-	r.StateRoot = w.root
+	r.StateRoot, r.Source = w.root, w
 	r.Witness, r.Facts, err = evmstate.BuildRejectWitness(context.Background(), w, r.Pins, r.ResultID)
 	require.NoError(t, err)
 	verified, err := evmstate.Authority{Pins: r.Pins}.VerifyReject(r.Witness, r.StateRoot, r.ResultID)

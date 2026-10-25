@@ -1294,6 +1294,7 @@ func (x *ConsensusManager) onProposalMsg(ctx context.Context, proposal *abdrc.Pr
 	}
 	// the block is the candidate parent of the next proposal: collect the Retirement proofs against the EVM state it certified
 	x.prepareRetirements(ctx, proposal.Block)
+	x.prepareRejection(ctx, proposal.Block)
 	// make vote
 	voteMsg, err := x.safety.MakeVote(proposal.Block, execStateId, x.blockStore.GetHighQc(), x.pacemaker.LastRoundTC())
 	if err != nil {
@@ -1357,6 +1358,7 @@ func (x *ConsensusManager) processQC(ctx context.Context, qc *drctypes.QuorumCer
 		return fmt.Errorf("QC of round %d not accepted: %w", qc.GetRound(), err)
 	}
 	x.forgetOrderedRetirements()
+	x.forgetResolvedRejections()
 	if shouldSendCertificateBatch(x.params.NetworkProfileVersion, certs) {
 		select {
 		case <-ctx.Done():
@@ -1682,6 +1684,7 @@ func (x *ConsensusManager) processNewRoundEvent(ctx context.Context) {
 		Anchor:    parentAnchor,
 	}
 	if profile == storage.ProfileHandoff && !oldSuffix && parentQC != nil && len(payload.PosControls) < drctypes.MaxPosControls {
+		x.orderRejection(ctx, block, parentRound)
 		x.orderSubmittedControl(ctx, block)
 		x.orderRetirements(ctx, block, parentRound)
 	}

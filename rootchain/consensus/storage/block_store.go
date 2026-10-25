@@ -275,6 +275,65 @@ func (x *BlockStore) RetirementParent(parentRound, round uint64) (EVMParent, boo
 	return out, true, nil
 }
 
+// RejectionParent is what a RejectResult in the block proposed at round, on the block of parentRound, must name. It mirrors the executor's
+// selection of P exactly as RetirementParent does, but judges the control state by the rejection's own rule: idle, aborted, or a Prepare dead
+// after its lapse and cooldown at round (RetirementParent refuses every stored prepared state). It reports false where no rejection can be
+// ordered: no P85 state, an epoch anchor, a pending acknowledgement, a frozen tracker, a live handoff, no usable EVM record. The context is
+// only a proposal: the leader trial-executes the whole block and every voter applies the full rule.
+func (x *BlockStore) RejectionParent(parentRound, round uint64) (RejectionContext, bool, error) {
+	parent, err := x.blockTree.FindBlock(parentRound)
+	if err != nil {
+		return RejectionContext{}, false, err
+	}
+	pos, err := loadPos(parent.ShardState.Control)
+	if err != nil || !pos.on || isEpochAnchorRoot(parent) || parent.ShardState.Control == nil {
+		return RejectionContext{}, false, err
+	}
+	if len(pos.state.Pending) > 0 || pos.state.Frozen {
+		return RejectionContext{}, false, nil
+	}
+	control := parent.ShardState.Control
+	next, err := rejectNext(control, round)
+	if err != nil {
+		return RejectionContext{}, false, nil
+	}
+	confs, err := x.orchestration.ShardConfigs(round)
+	if err != nil {
+		return RejectionContext{}, false, err
+	}
+	start, _, err := parent.ShardState.nextBlockSwitching(confs, x.hash, x.orchestration)
+	if err != nil {
+		return RejectionContext{}, false, err
+	}
+	root, block, ok := certifiedEVM(start, confs)
+	if !ok {
+		return RejectionContext{}, false, nil
+	}
+	out := RejectionContext{Parent: EVMParent{StateRoot: root}, Attempt: next}
+	copy(out.Parent.BlockHash[:], block)
+	copy(out.Predecessor[:], control.PredecessorBodyID)
+	return out, true, nil
+}
+
+// RejectionResolved reports whether the branch ending at parentRound has resolved the election result (closed or acknowledged it).
+func (x *BlockStore) RejectionResolved(parentRound uint64, resultID [32]byte) bool {
+	parent, err := x.blockTree.FindBlock(parentRound)
+	return err == nil && resolvedIn(parent, resultID)
+}
+
+// RejectionCommitted reports whether the committed root has resolved the election result.
+func (x *BlockStore) RejectionCommitted(resultID [32]byte) bool {
+	return resolvedIn(x.blockTree.Root(), resultID)
+}
+
+func resolvedIn(b *ExecutedBlock, resultID [32]byte) bool {
+	if b == nil {
+		return false
+	}
+	pos, err := loadPos(b.ShardState.Control)
+	return err == nil && pos.on && pos.state.IsResolved(resultID)
+}
+
 // RetirementOrdered reports whether the branch ending at parentRound has ordered a Retirement of the generation.
 func (x *BlockStore) RetirementOrdered(parentRound, id, generation uint64) bool {
 	parent, err := x.blockTree.FindBlock(parentRound)
