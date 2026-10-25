@@ -5,5 +5,5 @@
   "mongo": "mongo:7.0.45@sha256:c53852c00c23ca9f23fc39690350ffa9a80e3642fe8f96879726d8da0abe80a7",
   "runtime": "debian:bookworm-slim@sha256:7c7b2c966bc9ee8cedfeef67e0e279108992c77681fa595db4a9d65c06ccc587",
   "python": "python:3.13.12-alpine3.22@sha256:41351b07080ccfaa27bf38dde20de79ee6a0ac74a58c00c6d7a7d96ac4e69716",
-  "contracts": "ec69d8f05ceebe00783275740ceea052f4c8da70"
+  "contracts": "be6e86fb2cbba828b3331822850f8af34bd0d0fd"
 }
