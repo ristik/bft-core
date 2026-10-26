@@ -119,16 +119,13 @@ func (w *FrontierWorker) adoptEquivalent(ctx context.Context, entry configuredpr
 				w.Log.WarnContext(ctx, "archive adoption: "+msg, append([]any{"height", entry.Candidate.Number, "block", fmt.Sprintf("%x", q.BlockHash[:8]), "local", fmt.Sprintf("%x", localDigest[:8]), "offered", fmt.Sprintf("%x", d[:8])}, attrs...)...)
 			}
 		}
-		if len(o.replicas) < replicaCopies {
-			say("another representation is held by too few replicas", "replicas", len(o.replicas))
-			continue
-		}
 		if err := w.equivalentRepresentation(entry, q, local, o.rec); err != nil {
 			say("the offered representation is refused", "err", err)
 			continue
 		}
+		// the availability condition: the exact manifest is read back from two distinct CONFIGURED replicas (the default reads only discovered it)
 		exact := 0
-		for _, i := range o.replicas {
+		for i := range w.Replicas {
 			if availability.VerifyAvailable(w.Replicas[i].String(), q, d) == nil {
 				exact++
 			}

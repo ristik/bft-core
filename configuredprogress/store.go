@@ -174,6 +174,10 @@ func (s *Store) Close() error {
 	s.jc.wg.Wait()
 	return s.db.Close()
 }
+
+// SetFaultHook installs a hook called at the named points of durable operations (crash-cut tests): an error from it fails the operation there. Not for production use.
+func (s *Store) SetFaultHook(f func(point string) error) { s.checkpoint = f }
+
 func (s *Store) at(n string) error {
 	if s.checkpoint != nil {
 		return s.checkpoint(n)

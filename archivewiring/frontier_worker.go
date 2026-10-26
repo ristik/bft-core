@@ -166,6 +166,13 @@ func (w *FrontierWorker) advance(ctx context.Context, mark func(string), max int
 		}
 	}
 	var covered []frontier.Coverage
+	type coveredEntry struct {
+		entry  configuredprogress.JournalEntry
+		q      archive.Request
+		rec    *archive.Record
+		digest [32]byte
+	}
+	var coveredEntries []coveredEntry
 	stopped := "no certified block above the frontier anchor"
 	availability := ReplicaAvailability{Context: ctx, Host: w.Host, Replicas: w.Replicas, Limits: w.TransportLimits}
 	unreachable := make(map[int]bool) // replicas that failed a read-back in this pass: not asked again for later blocks
@@ -243,6 +250,7 @@ func (w *FrontierWorker) advance(ctx context.Context, mark func(string), max int
 			record.Acks[i] = frontier.Acknowledgment{Replica: w.Replicas[index].String(), RequestDigest: ack, ManifestDigest: digest}
 		}
 		covered = append(covered, frontier.Coverage{Anchor: record, Material: rec})
+		coveredEntries = append(coveredEntries, coveredEntry{entry: entry, q: q, rec: rec, digest: digest})
 		height, epoch, round = entry.Candidate.Number, resultUC.GetRootEpoch(), resultUC.GetRootRoundNumber()
 		if len(covered) == max {
 			break
@@ -253,6 +261,19 @@ func (w *FrontierWorker) advance(ctx context.Context, mark func(string), max int
 		return nil
 	}
 	if err := w.Journal.AdvanceFrontier(ctx, w.Context, w.Limits, covered); err != nil {
+		// The legacy two-replica policy plans a whole pass together, so the block that has no two matching copies is found only here: probe the covered blocks in order
+		// for another representation the replicas hold (the derived policy probes at the block itself, above).
+		if w.PolicyDigest == ([32]byte{}) && (errors.Is(err, frontier.ErrAcknowledgment) || errors.Is(err, frontier.ErrUnavailable)) {
+			for _, ce := range coveredEntries {
+				if adopted, aerr := w.adoptEquivalent(ctx, ce.entry, ce.q, ce.rec, ce.digest); aerr != nil {
+					if w.Log != nil {
+						w.Log.WarnContext(ctx, "archive adoption failed", "err", aerr)
+					}
+				} else if adopted {
+					return nil
+				}
+			}
+		}
 		return fmt.Errorf("frontier advance: %w", err)
 	}
 	return w.Journal.PruneFrontier(ctx, w.Context, w.Limits)

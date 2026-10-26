@@ -36,8 +36,12 @@ type divergenceFixture struct {
 
 func newDivergenceFixture(t *testing.T, blocks, diverged int) *divergenceFixture {
 	t.Helper()
+	return newDivergenceFixtureLimits(t, blocks, diverged, configuredprogress.JournalLimits{Candidates: 16, Observations: 32, Bytes: 32 << 20})
+}
+
+func newDivergenceFixtureLimits(t *testing.T, blocks, diverged int, limits configuredprogress.JournalLimits) *divergenceFixture {
+	t.Helper()
 	chain := certifiedchain.New(t, 3, 0)
-	limits := configuredprogress.JournalLimits{Candidates: 16, Observations: 32, Bytes: 32 << 20}
 	d := &divergenceFixture{chain: chain, diverged: diverged, limits: limits}
 	for i := 0; i < 3; i++ {
 		d.replicas = append(d.replicas, newWiringFixtureOpts(t, wiringOpts{blocks: blocks, limits: limits, chain: chain, timeouts: true}))
