@@ -79,7 +79,9 @@ type Server struct {
 }
 
 // SetDefaultRepresentation routes the default read through the journal's archive selection. Call before Register.
-func (s *Server) SetDefaultRepresentation(f func(archive.Request) ([32]byte, bool)) { s.defaultDigest = f }
+func (s *Server) SetDefaultRepresentation(f func(archive.Request) ([32]byte, bool)) {
+	s.defaultDigest = f
+}
 
 func (s *Server) SetBundleVerifier(v BundleVerifier) { s.bundleVerify = v }
 

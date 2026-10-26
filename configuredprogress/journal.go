@@ -104,6 +104,7 @@ type JournalEntry struct {
 	// is made. The association (ResultingUC/TR) is never changed by it.
 	Archive *ArchiveSelection
 }
+
 // ArchiveResult is the resulting pair the archive representation of this block carries: the selected pair if one was selected (bft-core#876), else the association.
 func (e JournalEntry) ArchiveResult() (*types.UnicityCertificate, *certification.TechnicalRecord) {
 	if e.Archive != nil {
