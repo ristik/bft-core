@@ -85,7 +85,7 @@ def preflight(m, commands=False, root=None):
             errs.append(f"{s['id']}: 'check' is null without an 'uncheckedReason'")
         if s["budgetSeconds"] <= 0 or s["at"] < 0:
             errs.append(f"{s['id']}: a non-positive budget or negative offset")
-        limit = interval if s.get("phase") == "final" else interval - tail
+        limit = m.get("endSeconds", interval) if s.get("phase") == "final" else interval - tail   # endSeconds: the last second a final-phase step may end (default the interval)
         if s["at"] + s["budgetSeconds"] > limit:
             errs.append(f"{s['id']}: ends at {s['at'] + s['budgetSeconds']} s, after {limit} s ({'the interval' if s.get('phase') == 'final' else 'the start of the final hold'})")
         for dep in s.get("dependsOn", []):
@@ -330,6 +330,9 @@ class Driver:
         if self.m.get("accounting"):   # the accumulated-state checker (accounting.py) over the collector's snapshots: no snapshots, or too few, is not a pass
             snaps = self.dir / "snapshots.jsonl"
             acct = accounting.run(snaps) if snaps.exists() else {"status": "INCOMPLETE", "reason": "no snapshots.jsonl: the collector did not run"}
+            need = self.m.get("accountingSpanSeconds")   # the snapshots must span the declared interval, not stop at the reconcile before it (bft-core#856)
+            if need and acct["status"] == "PASS" and acct["spanSeconds"] < need:
+                acct = {**acct, "status": "INCOMPLETE", "reason": f"the snapshots span {acct['spanSeconds']} s, less than the {need} s the manifest declares"}
             (self.dir / "accounting.json").write_text(json.dumps(acct, indent=1, sort_keys=True))
             if acct["status"] == "FAIL":
                 status = "FAIL"

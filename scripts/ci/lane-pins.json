@@ -30,8 +30,8 @@
     },
     "contracts": {
       "repository": "https://github.com/ristik/unicity-pos-contracts.git",
-      "commit": "31b2ec1a9736c8597dc53803da5481117502abbd",
-      "note": "main at the contracts#70 merge: the protocol 6 vault (#67: per-part redemption, slots 6/8/9, RedemptionCredited with partId; #68), on contracts#53 (GovernanceParams #50, RewardPool #51, the governed worst-case election gas / deployment fields)",
+      "commit": "be6e86fb2cbba828b3331822850f8af34bd0d0fd",
+      "note": "main at the contracts#77 merge (the testnet package's pin): on the protocol 6 vault (#67, #68) and contracts#53 (GovernanceParams #50, RewardPool #51), the RewardPool tail cap (#72: the tail closes up to the open result's reservation progress), the RejectResult fixtures (#74) and the election's outsider skip (#76); X4 #856 needs #72 for the closed intervals of the accumulated chain",
       "branch": "main"
     },
     "native-bridge-plugins": {
