@@ -234,6 +234,7 @@ func reapplyHandoffTerminalCertificatesWithArchive(ctx context.Context, store ha
 		var q archive.Request
 		q.Context = archiveContext
 		copy(q.BlockHash[:], terminal.uc.InputRecord.BlockHash)
+		// The base representation is read here on purpose (bft-core#876): the record is authenticated below and nothing compares it with a journal-derived manifest; a selected variant certifies the same input record.
 		record, archiveErr := localArchive.Get(q)
 		if errors.Is(archiveErr, archive.ErrUnavailable) {
 			return fmt.Errorf("%w: handoff terminal body %x is unavailable in both journal and archive",
@@ -930,6 +931,10 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 			if e != nil {
 				return fmt.Errorf("starting archive replica: %w", e)
 			}
+			// the default read serves the representation the journal selected for a block (bft-core#876), else the block's own record; the reads that matter for promises ask by exact digest
+			archiveServer.SetDefaultRepresentation(func(q archive.Request) ([32]byte, bool) {
+				return journalStore.ArchiveDigestOf(ctx, journalCtx, limits, q.BlockHash)
+			})
 			if flags.TrustHistoryProfile2 {
 				archiveServer.SetBundleVerifier(archivewiring.BundleAdmission(historicalTrust, node.ShardConfForEpoch))
 			}

@@ -3,6 +3,7 @@ package archivewiring
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -351,11 +352,11 @@ func (p *Publisher) pass(ctx context.Context) error {
 	var first error
 	handle := func(e configuredprogress.JournalEntry, hash [32]byte) {
 		q := archive.Request{Context: p.Subject, BlockHash: hash}
-		rec, eerr := p.Archive.GetReceiptComplete(q)
+		rec, eerr := localRepresentation(p.Archive, q, e)
 		if errors.Is(eerr, archive.ErrUnavailable) {
 			q, rec, eerr = p.fromJournal(ctx, e)
 			if eerr == nil {
-				eerr = p.Archive.Put(q, rec)
+				eerr = putRepresentation(p.Archive, q, rec, e)
 			}
 		} else if eerr == nil {
 			_, expected, verifyErr := p.fromJournal(ctx, e)
@@ -377,7 +378,7 @@ func (p *Publisher) pass(ctx context.Context) error {
 			if p.localOK == nil {
 				p.localOK = make(map[[32]byte]struct{})
 			}
-			p.localOK[hash] = struct{}{}
+			p.localOK[ackKey(e)] = struct{}{}
 			p.mu.Unlock()
 		}
 	}
@@ -394,11 +395,10 @@ func (p *Publisher) pass(ctx context.Context) error {
 	}
 	var pending []int
 	for i, e := range entries {
-		var hash [32]byte
-		copy(hash[:], e.Candidate.Hash)
+		key := ackKey(e)
 		p.mu.Lock()
-		bits := p.ack[hash]
-		_, done := p.localOK[hash]
+		bits := p.ack[key]
+		_, done := p.localOK[key]
 		p.mu.Unlock()
 		if bits.count() < replicaCopies && !done {
 			pending = append(pending, i)
@@ -420,10 +420,8 @@ func (p *Publisher) pass(ctx context.Context) error {
 			if chosen[index] {
 				continue
 			}
-			var hash [32]byte
-			copy(hash[:], entries[index].Candidate.Hash)
 			p.mu.Lock()
-			bits := p.ack[hash]
+			bits := p.ack[ackKey(entries[index])]
 			p.mu.Unlock()
 			if bits.count() >= replicaCopies {
 				continue
@@ -451,8 +449,7 @@ func (p *Publisher) pass(ctx context.Context) error {
 	live := make(map[[32]byte]struct{}, len(entries))
 	var status Status
 	for _, e := range entries {
-		var h [32]byte
-		copy(h[:], e.Candidate.Hash)
+		h := ackKey(e)
 		live[h] = struct{}{}
 		switch n := p.ack[h].count(); {
 		case n >= replicaCopies:
@@ -489,6 +486,42 @@ const (
 	publisherBusyPassRecords = 16
 	publisherBusyPercent     = 50
 )
+
+// ackKey is the key of the publisher's volatile per-block caches (acknowledgements, locally archived): the block hash, mixed with the selected manifest digest once the journal
+// adopted another representation of the block (bft-core#876). An acknowledgement of the OTHER manifest, a transfer in flight when the selection committed, must not count for the
+// selected one.
+func ackKey(e configuredprogress.JournalEntry) [32]byte {
+	var h [32]byte
+	copy(h[:], e.Candidate.Hash)
+	if e.Archive == nil {
+		return h
+	}
+	return sha256.Sum256(append(h[:], e.Archive.NewDigest[:]...))
+}
+
+// localRepresentation is the receipt-complete record of the block's representation in the local archive: the selected one if the journal adopted another representation, the
+// block's own otherwise. A selected representation that is missing is missing: there is no fallback to the other one.
+func localRepresentation(store *archive.Store, q archive.Request, e configuredprogress.JournalEntry) (*archive.Record, error) {
+	if e.Archive != nil {
+		return store.GetExactReceiptComplete(q, e.Archive.NewDigest)
+	}
+	return store.GetReceiptComplete(q)
+}
+
+// putRepresentation stores the block's representation: a variant object when the journal selected another one (and only that one), the block's own record otherwise.
+func putRepresentation(store *archive.Store, q archive.Request, rec *archive.Record, e configuredprogress.JournalEntry) error {
+	if e.Archive == nil {
+		return store.Put(q, rec)
+	}
+	digest, err := archive.ManifestDigest(q, rec)
+	if err != nil {
+		return err
+	}
+	if digest != e.Archive.NewDigest {
+		return ErrBinding
+	}
+	return store.PutVariant(q, rec)
+}
 
 func certifiedEntries(image configuredprogress.JournalSnapshot) []configuredprogress.JournalEntry {
 	entries := make([]configuredprogress.JournalEntry, 0, len(image.Candidates))
@@ -555,9 +588,7 @@ func (p *Publisher) replicaPass(ctx context.Context, index int) error {
 	var todo []int
 	p.mu.Lock()
 	for position, e := range entries {
-		var hash [32]byte
-		copy(hash[:], e.Candidate.Hash)
-		if p.ack[hash]&mask == 0 {
+		if p.ack[ackKey(e)]&mask == 0 {
 			todo = append(todo, position)
 		}
 	}
@@ -576,10 +607,8 @@ func (p *Publisher) replicaPass(ctx context.Context, index int) error {
 		if taken[position] {
 			continue
 		}
-		var hash [32]byte
-		copy(hash[:], entries[position].Candidate.Hash)
 		p.mu.Lock()
-		acked := p.ack[hash]&mask != 0
+		acked := p.ack[ackKey(entries[position])]&mask != 0
 		p.mu.Unlock()
 		if acked {
 			continue
@@ -596,7 +625,7 @@ func (p *Publisher) replicaPass(ctx context.Context, index int) error {
 		var hash [32]byte
 		copy(hash[:], e.Candidate.Hash)
 		q := archive.Request{Context: p.Subject, BlockHash: hash}
-		rec, err := p.Archive.GetReceiptComplete(q)
+		rec, err := localRepresentation(p.Archive, q, e)
 		if errors.Is(err, archive.ErrUnavailable) {
 			// Not a replica failure: this node's own record is not built yet and the local publisher will reconstruct it. Recording it
 			// against the replica made every replica look failed at once, which the operator status reads as a frozen frontier.
@@ -625,7 +654,7 @@ func (p *Publisher) replicaPass(ctx context.Context, index int) error {
 			continue
 		}
 		p.mu.Lock()
-		p.ack[hash] |= mask
+		p.ack[ackKey(e)] |= mask
 		if e.Candidate.Number > p.replicaProgress[index].LastAcknowledgedHeight {
 			p.replicaProgress[index].LastAcknowledgedHeight = e.Candidate.Number
 		}

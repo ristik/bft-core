@@ -535,11 +535,21 @@ func checkCoveredCandidate(b *bolt.Bucket, ctx context.Context, c Context, item 
 	if err != nil {
 		return err
 	}
+	// The pair the archive representation carries: the selected one if a selection was made for the block (bft-core#876), else the journal's own association. A coverage
+	// planned against the other representation is stale: it fails here, inside the transaction that would commit it, and is replanned.
+	wantUC, wantTR := w.ResultingUC, w.ResultingTR
+	if raw := b.Get(archiveSelectionKey(w.Hash)); raw != nil {
+		sw, serr := decodeArchiveSelection(raw)
+		if serr != nil {
+			return serr
+		}
+		wantUC, wantTR = sw.UC, sw.TR
+	}
 	if w.Status != 1 || w.Number != r.Height || !bytes.Equal(w.Hash, r.Subject.BlockHash[:]) || !bytes.Equal(w.StateRoot, r.StateRoot[:]) ||
-		!bytes.Equal(w.AuthorizingUC, item.Material.OriginalUC) || !bytes.Equal(w.AuthorizingTR, item.Material.OriginalTR) || !bytes.Equal(w.ResultingUC, item.Material.ResultingUC) || !bytes.Equal(w.ResultingTR, item.Material.ResultingTR) {
+		!bytes.Equal(w.AuthorizingUC, item.Material.OriginalUC) || !bytes.Equal(w.AuthorizingTR, item.Material.OriginalTR) || !bytes.Equal(wantUC, item.Material.ResultingUC) || !bytes.Equal(wantTR, item.Material.ResultingTR) {
 		return frontier.ErrInvalid
 	}
-	resultUC, _, err := verifiedPairBytes(ctx, c, w.ResultingUC, w.ResultingTR)
+	resultUC, _, err := verifiedPairBytes(ctx, c, wantUC, wantTR)
 	if err != nil {
 		return fmt.Errorf("%w: %v", frontier.ErrInvalid, err)
 	}
