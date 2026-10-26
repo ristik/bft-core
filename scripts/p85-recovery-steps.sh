@@ -44,16 +44,37 @@ p85_chain_report() {
 }
 p85_step_die() {
   local i
+  p85_stop_opstatus
   echo "  FAIL: $*" >&2
   p85_chain_report
   for i in 1 2 3 4 5; do [ -f "test-nodes/root$i/debug.log" ] && { echo "--- tail of root$i/debug.log" >&2; tail -n 6 "test-nodes/root$i/debug.log" | cut -c1-300 >&2; }; done
   q3_teardown
   exit 1
 }
+# The archive and journal state of every execution validator (the shard node's operator status: journal fill, prune frontier, replica acknowledgements, uncovered blocks), one JSON line each into
+# $H3_DIR/operator-status.jsonl: after every step and, in the X4 lane, once a minute (bft-core#876: a validator whose frontier lagged after its restart left only a log tail behind)
+p85_opstatus() { # label
+  local i addr out
+  mkdir -p "$H3_DIR" || return 0
+  for i in 1 2 3 4 5; do
+    addr=$(evm_validator_rpc_addr "$i" 2>/dev/null) || continue
+    out=$(curl -fsS --max-time 4 "http://$addr/api/v1/operator/status" 2>&1 | tr -d '\n') || out="\"unreachable\""
+    [ -n "$out" ] || out="\"unreachable\""
+    printf '{"label":"%s","time":"%s","validator":%s,"status":%s}\n' "$1" "$(date -u +%FT%TZ)" "$i" "$(case "$out" in \{*) echo "$out" ;; *) printf '"%s"' "$(echo "$out" | head -c 200 | tr -d '"')" ;; esac)" >>"$H3_DIR/operator-status.jsonl"
+  done
+  return 0
+}
+p85_opstatus_sampler() { # lane pid: sample while the lane lives. The pid is BASHPID, never $$ (a subshell's $$ is its parent's: the sampler then outlived the lane and the runner's wait on it
+  # held the job until its deadline, 4 hours, in the first repro run of bft-core#876). The lane's exit paths also stop it (p85_stop_opstatus).
+  ( while kill -0 "$1" 2>/dev/null && [ ! -e "$H3_DIR/.opstatus-stop" ]; do p85_opstatus sampler; sleep 60; done ) >/dev/null 2>&1 </dev/null &
+  P85_OPSTATUS_PID=$!
+}
+p85_stop_opstatus() { : >"$H3_DIR/.opstatus-stop" 2>/dev/null; [ -z "${P85_OPSTATUS_PID:-}" ] || kill "$P85_OPSTATUS_PID" 2>/dev/null; return 0; }
 p85_step() {
   local name=$1; shift; echo "--- P85 step: $name"
   "$@" || { p85_view "$name:failed" || true; p85_step_die "$name"; }
   p85_view "$name" || true   # the election/custody view at the end of every step, kept with the run (reth state is not)
+  p85_opstatus "$name" || true
   p85_pass "$name"
   # the lane's own record of the steps that passed, read by scripts/x4pos/lane-check.sh (the campaign's lane steps)
   { mkdir -p "$H3_DIR/x4pos" && echo "$name" >>"$H3_DIR/x4pos/lane-steps.log"; } || true
@@ -836,12 +857,14 @@ p85_run_lane() {
     [ "${X4_FAULTS_LANE:-0}" != 1 ] || P85_STEPS="$P85_STEPS x4_report"   # the driver's verdict over the lane's whole record (after x4a_final wrote accounting.txt)
   fi
   [ "${P85_MODE:-}" != overbound ] || { P85_JOINER_UNITS=3; P85_STEPS="p85_baseline p85_joiner_nodes p85_joiner_onboard p85_election_refused"; }
+  rm -f "$H3_DIR/.opstatus-stop"; [ "${X4_ACCT_LANE:-0}" != 1 ] || p85_opstatus_sampler "$BASHPID"
   for s in $P85_STEPS; do
     p85_step "$s" "$s"
     # CI harness-failure test (scripts/ci/run-lane.sh, workflow input inject_failure=in-lane): the lane fails deliberately after one named step so the failure path's
     # diagnostics can be shown. Honoured only on a GitHub runner; it asserts nothing and weakens nothing, it adds a failing step.
     if [ "${GITHUB_ACTIONS:-}" = true ] && [ -n "${CI_INJECT_FAIL_AFTER:-}" ] && [ "$s" = "$CI_INJECT_FAIL_AFTER" ]; then p85_step "injected-harness-failure-after-$s" false; fi
   done
+  p85_stop_opstatus
   echo "P85 recovery lane: all steps PASSED"
   if [ "${ANYAGE_LANE:-0}" = 1 ]; then echo "any-age final lane: all steps PASSED"; fi
   if [ "${UTB_LANE:-0}" = 1 ]; then echo "UTB lane: all steps PASSED"; fi

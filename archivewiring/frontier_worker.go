@@ -44,8 +44,13 @@ type FrontierWorker struct {
 	advancing sync.Mutex
 }
 
-// passCoverage is how many blocks one worker pass covers.
-const passCoverage = 4
+// passCoverage is how many blocks one worker pass covers; busyPassCoverage while the journal is at least publisherBusyPercent full. A pass every two
+// seconds at four blocks covers two blocks a second, which is about what a transaction burst produces: a journal that is already behind (after a restart
+// every block is pending again) then never catches up and fills (bft-core#876).
+const (
+	passCoverage     = 4
+	busyPassCoverage = 16
+)
 
 func (w *FrontierWorker) Run(ctx context.Context) error {
 	if w.Log == nil {
@@ -130,6 +135,13 @@ func (w *FrontierWorker) advance(ctx context.Context, mark func(string), max int
 		return err
 	}
 	w.warnCapacity(ctx, image)
+	if max == passCoverage {
+		usage := JournalUsage{CandidatesUsed: len(image.Candidates), CandidatesCap: w.Limits.Candidates, ObservationsUsed: len(image.Observations),
+			ObservationsCap: w.Limits.Observations, BytesUsed: image.Bytes, BytesCap: w.Limits.Bytes}
+		if usage.Percent() >= publisherBusyPercent {
+			max = busyPassCoverage
+		}
+	}
 	var finalized shardnode.BlockRef
 	if w.Finalized != nil {
 		finalized, err = w.Finalized(ctx)

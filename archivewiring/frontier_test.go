@@ -185,7 +185,8 @@ func TestFrontierJournalAdvancePruneAndRestart(t *testing.T) {
 
 func TestFrontierPruneSweepKeepsTimeoutRepeatBodies(t *testing.T) {
 	t.Parallel()
-	f := newWiringFixtureWithTimeouts(t, 8)
+	// roomy limits: the journal stays below the busy level, so that a pass covers its usual four blocks (bft-core#876: from half full it covers more)
+	f := newWiringFixtureMode(t, 8, configuredprogress.JournalLimits{Candidates: 64, Observations: 128, Bytes: 32 << 20}, true)
 	local, err := archive.Open(t.TempDir())
 	require.NoError(t, err)
 	first, err := archive.Open(t.TempDir())
