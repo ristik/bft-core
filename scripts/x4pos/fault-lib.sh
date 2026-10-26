@@ -9,7 +9,7 @@
 #   evm-restart       validator 2 (not the one the lane reads) stops and returns in its scope; its head catches up to validator 1's; a paid transaction certifies
 #   pair-restart      validator 3's node AND its execution client (ureth) restart; the head block it retained is byte-identical to validator 1's block of the same number, and the
 #                     reward pool (balance, available, credits) and the custody credits are unchanged: the reward-settling side resumes from durable state (orchestrator, 2026-10-24)
-#   delayed-episode   EVERY online EVM validator stops (three after the recovery) for X4F_DELAY seconds while the roots keep extending: the shard's import of root extensions is delayed as a whole. After they return the
+#   delayed-episode   EVERY online EVM validator stops (four with the handoff lane, three without) for X4F_DELAY seconds while the roots keep extending: the shard's import of root extensions is delayed as a whole. After they return the
 #                     registry log is contiguous and ordered, the custody cursor has converged, and nothing a gate depends on moved (last acknowledged assignment, open result and its
 #                     lost mark, lot count, credits)
 # The evidence collector (S4) holds no runtime state and its submitter resumes from the on-chain cursor: both offences already show that (submit-1.txt / submit-2.txt), see campaign.json.
@@ -159,7 +159,7 @@ x4f_pair_restart() {
   echo "PASS: x4f: validator 3 and its execution client restarted; block $n identical to validator 1's, reward pool and credits unchanged"
 }
 
-# every online EVM validator is down (three after the recovery) while the roots continue: the shard imports no root extension for X4F_DELAY seconds, then everything returns
+# every online EVM validator is down (four with the handoff lane, three without) while the roots continue: the shard imports no root extension for X4F_DELAY seconds, then everything returns
 x4f_delayed_episode() {
   local before mid after epoch i r0 r1 e0 e1 n
   x4f_wait fault-delayed-episode || return 1
@@ -204,7 +204,7 @@ x4f_reconcile() {
   [ "$cursor" = "$count" ] && [ "$count" = "$target" ] || { echo "x4f: the records did not converge: cursor $cursor count $count target $target" >&2; return 1; }
   x4a_snapshot || return 1
   mkdir -p "$X4F_DIR"; jq -n --argjson c "$cursor" --argjson n "$count" --argjson t "$target" '{cursor: $c, count: $n, target: $t, converged: true}' >"$X4F_DIR/reconcile-cursors.json"
-  x4e_run reconcile reconcile.sh '{}' && x4e_run reconcile reconcile.check.sh '{}'
+  x4e_run reconcile reconcile.sh '{}' && x4e_run reconcile reconcile.check.sh "{\"minIntervals\":${X4R_MIN_INTERVALS:-2}}"
 }
 
 # the campaign's verdict: the driver verifies every lane step from the lane's own record and runs the accounting checker over the snapshots (after x4a_final, which writes accounting.txt)
