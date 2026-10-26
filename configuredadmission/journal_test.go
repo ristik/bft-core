@@ -525,3 +525,47 @@ func TestCapacityRefusalIsBackPressure(t *testing.T) {
 	require.Nil(t, capacityRefusal(configuredprogress.ErrBounds, false), "an entry that can never fit is not back-pressure")
 	require.Nil(t, capacityRefusal(configuredprogress.ErrConflict, true))
 }
+
+// RetainCandidate at the candidate cap (bft-core#876): the real store refuses the insertion with ErrCapacity, and the round is refused, not the node stopped:
+// a follower rejects the proposal, the leader abstains, both keep ErrCapacity and neither is the terminal class. Deleting the capacityRefusal call would
+// leave the bare store error, which the round treats as a stop.
+func TestRetainCandidateAtTheCandidateCapRefusesTheRound(t *testing.T) {
+	chain, _, ctx, _ := adapterFixture(t)
+	limits := configuredprogress.JournalLimits{Candidates: 2, Observations: 8, Bytes: 16 << 20}
+	s, err := configuredprogress.OpenConfiguredV2(t.TempDir()+"/journal.db", configuredprogress.Settings{Retain: 2})
+	require.NoError(t, err)
+	defer s.Close()
+	_, _, err = s.Initialize(context.Background(), ctx)
+	require.NoError(t, err)
+	require.NoError(t, s.EnableJournal(context.Background(), ctx, limits))
+	bootstrap, bootTR := journalBootstrap(t, chain)
+	b, parent := chain.Blocks[1], chain.Blocks[0]
+	candidate := func(tag byte) shardnode.Block {
+		return shardnode.Block{Number: b.Number, Hash: bytes.Repeat([]byte{tag}, 32), StateRoot: b.StateRoot.Bytes(), ParentHash: parent.Hash.Bytes(), Raw: []byte{1, 2, 3}, BlockSize: 3}
+	}
+	params := shardnode.RoundParams{Round: b.Round, Parent: shardnode.BlockRef{Number: parent.Number, Hash: parent.Hash.Bytes(), StateRoot: parent.StateRoot.Bytes()},
+		AuthorizingCertificate: bootstrap, AuthorizingTechnicalRecord: bootTR}
+	j := ProposalJournal{Store: s, Context: ctx, Limits: limits}
+	// fill the journal to its candidate cap with distinct proposals of one round (the follower path keeps each of them)
+	filled := false
+	for tag := byte(0xa0); tag < 0xa8; tag++ {
+		err := j.RetainCandidate(context.Background(), candidate(tag), params, false)
+		if err != nil {
+			require.ErrorIs(t, err, configuredprogress.ErrCapacity, "the first refusal is the cap, not a conflict: %v", err)
+			filled = true
+			break
+		}
+	}
+	require.True(t, filled, "the journal never reached its candidate cap")
+
+	follower := j.RetainCandidate(context.Background(), candidate(0xb0), params, false)
+	require.ErrorIs(t, follower, shardnode.ErrProposalRejected)
+	require.ErrorIs(t, follower, configuredprogress.ErrCapacity)
+	require.NotErrorIs(t, follower, configuredprogress.ErrBounds)
+	require.False(t, terminalAdmissionError(follower))
+	leader := j.RetainCandidate(context.Background(), candidate(0xb1), params, true)
+	require.ErrorIs(t, leader, shardnode.ErrLeaderProposalConflict)
+	require.ErrorIs(t, leader, configuredprogress.ErrCapacity)
+	require.NotErrorIs(t, leader, configuredprogress.ErrBounds)
+	require.False(t, terminalAdmissionError(leader))
+}
