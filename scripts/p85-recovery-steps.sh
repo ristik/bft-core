@@ -785,6 +785,23 @@ x4e_claim() { x4e_run exit-claim exit-claim.sh "{\"id\":5,\"matureWaitSeconds\":
 
 P85_STEPS="p85_baseline p85_joiner_nodes p85_joiner_onboard p85_election_reserved p85_proofs p85_handoff p85_install_activation p85_j_stalls p85_recovery p85_resolved p85_restarts p85_epoch_switches"
 
+# REPRO ONLY (bft-core#876, not for merge): the first run of a stalled validator 1 ended 2.5 hours after the stall, so a stall is caught and the lane stopped (with its evidence published) within minutes
+x4_stall_watchdog() { # lane pid
+  ( lag=0
+    while kill -0 "$1" 2>/dev/null && [ ! -e "$H3_DIR/.opstatus-stop" ]; do
+      sleep 30
+      h1=$("$P85_CAST" block-number --rpc-url "http://127.0.0.1:$rethEthBase" 2>/dev/null || echo 0); h2=$("$P85_CAST" block-number --rpc-url "http://127.0.0.1:$((rethEthBase + 1))" 2>/dev/null || echo 0)
+      if [ "${h1:-0}" -gt 0 ] 2>/dev/null && [ "${h2:-0}" -gt "$((h1 + 20))" ] 2>/dev/null; then lag=$((lag + 1)); else lag=0; fi
+      if [ "$lag" -ge 6 ]; then
+        echo "validator 1 head $h1, validator 2 head $h2, for 3 minutes ($(date -u +%FT%TZ))" >"$H3_DIR/.stall"
+        p85_opstatus stall
+        for f in test-nodes/evm1/debug.log; do grep -a "level=WARN\|level=ERROR\|archive\|frontier\|journal\|recover" "$f" | grep -av "archive recovery source rejected" | head -n 400 | cut -c1-400 >"$H3_DIR/stall-evm1-first.log"; tail -n 300 "$f" | cut -c1-400 >"$H3_DIR/stall-evm1-tail.log"; done
+        kill -TERM "$1" 2>/dev/null
+        break
+      fi
+    done ) >/dev/null 2>&1 </dev/null &
+}
+
 p85_run_lane() {
   local s
   mkdir -p "$Q3_DIR" "$P85_DIR/run"; : >"$Q3_DIR/commands.log"
@@ -884,7 +901,8 @@ p85_run_lane() {
     [ "${X4_FAULTS_LANE:-0}" != 1 ] || P85_STEPS="$P85_STEPS x4_report"   # the driver's verdict over the lane's whole record (after x4a_final wrote accounting.txt)
   fi
   [ "${P85_MODE:-}" != overbound ] || { P85_JOINER_UNITS=3; P85_STEPS="p85_baseline p85_joiner_nodes p85_joiner_onboard p85_election_refused"; }
-  rm -f "$H3_DIR/.opstatus-stop"; [ "${X4_ACCT_LANE:-0}" != 1 ] || p85_opstatus_sampler "$BASHPID"
+  rm -f "$H3_DIR/.opstatus-stop" "$H3_DIR/.stall"; [ "${X4_ACCT_LANE:-0}" != 1 ] || p85_opstatus_sampler "$BASHPID"
+  if [ "${X4_ACCT_LANE:-0}" = 1 ]; then x4_stall_watchdog "$BASHPID"; trap 'echo "x4stall: the lane is stopped by the watchdog: $(cat "$H3_DIR/.stall" 2>/dev/null)" >&2; p85_step_die "x4stall watchdog"' TERM; fi
   for s in $P85_STEPS; do
     p85_step "$s" "$s"
     # CI harness-failure test (scripts/ci/run-lane.sh, workflow input inject_failure=in-lane): the lane fails deliberately after one named step so the failure path's
