@@ -696,10 +696,13 @@ func JournalVerifier(store *configuredprogress.Store, c configuredprogress.Conte
 			}
 			return nil
 		}
-		if err := store.VerifyCoveredArchive(ctx, c, limits, q, rec); err == nil {
+		covered := store.VerifyCoveredArchive(ctx, c, limits, q, rec)
+		if covered == nil {
 			return nil
 		}
-		return ErrUncertified
+		// ErrUncertified, with the reason the covered-record check gave: this journal has no hot certified entry for the block, and the covered fallback
+		// then said why it cannot vouch for the offered record (bft-core#876: the bare sentinel hid whether coverage was missing, another manifest, another context or a store error)
+		return fmt.Errorf("%w: block %x has no hot certified entry in this journal, and %w", ErrUncertified, q.BlockHash[:8], covered)
 	}
 }
 

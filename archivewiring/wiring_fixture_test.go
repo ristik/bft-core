@@ -110,7 +110,28 @@ func newWiringFixtureWithTimeouts(t *testing.T, blocks int) *wiringFixture {
 
 func newWiringFixtureMode(t *testing.T, blocks int, limits configuredprogress.JournalLimits, timeouts bool) *wiringFixture {
 	t.Helper()
-	chain := certifiedchain.New(t, 3, 0)
+	return newWiringFixtureOpts(t, wiringOpts{blocks: blocks, limits: limits, timeouts: timeouts})
+}
+
+// wiringOpts parameterize a fixture journal. chain shares one certified chain (trust base, genesis, origin: one archive subject) between several independent
+// journals, which model different validators. associated maps a block number to a root-round offset: that block's journal association is the OTHER valid
+// resulting certificate for the same input record (a repeat at a later root round), while the chain the next block builds on stays the canonical one
+// (bft-core#876: validators can hold different, individually valid first associations for the same execution block).
+type wiringOpts struct {
+	blocks     int
+	limits     configuredprogress.JournalLimits
+	timeouts   bool
+	chain      *certifiedchain.Chain
+	associated map[int]uint64
+}
+
+func newWiringFixtureOpts(t *testing.T, o wiringOpts) *wiringFixture {
+	t.Helper()
+	blocks, limits, timeouts := o.blocks, o.limits, o.timeouts
+	chain := o.chain
+	if chain == nil {
+		chain = certifiedchain.New(t, 3, 0)
+	}
 	var doc map[string]json.RawMessage
 	require.NoError(t, json.Unmarshal(chain.Genesis.GenesisJSON(), &doc))
 	var alloc map[string]json.RawMessage
@@ -170,7 +191,12 @@ func newWiringFixtureMode(t *testing.T, blocks int, limits configuredprogress.Jo
 			rootRound += uint64(number - 1)
 		}
 		resultUC, resultTR := signWiring(t, chain, ir, uint64(number+1), rootRound)
-		admit(resultUC, resultTR)
+		if shift, ok := o.associated[number]; ok {
+			other, otherTR := signWiring(t, chain, ir, uint64(number+1), rootRound+shift)
+			admit(other, otherTR) // this journal's first association for the block: the other valid certificate
+		} else {
+			admit(resultUC, resultTR)
+		}
 		parentUC, parentTR = resultUC, resultTR
 		if timeouts {
 			// A timeout can repeat the same certified input record at the next
