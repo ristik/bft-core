@@ -128,7 +128,7 @@ s4_collect_after_rotation() {
     jq -e --arg id "$(h3_root_id "$S4_OFFENDER_ROOT")" '.epoch == 3 and ([.signers[].nodeId] | index($id) | not)' "$H3_DIR/first-epoch3-certificate.json" >/dev/null \
       || { echo "the first epoch-3 certificate is missing or names the joiner's root" >&2; return 1; }
   else   # a member that stays: the certificate is epoch 3 (the rotation happened); whether this offender signs it is the quorum's business (the rotation is not about it)
-    jq -e '.epoch == 3' "$H3_DIR/first-epoch3-certificate.json" >/dev/null || { echo "the first epoch-3 certificate is missing" >&2; return 1; }
+    jq -e --argjson e "$S4_EPOCH" '.epoch == $e' "$H3_DIR/first-epoch$S4_EPOCH-certificate.json" >/dev/null || { echo "the first epoch-$S4_EPOCH certificate is missing" >&2; return 1; }
   fi
   local okey; okey=$(s4_offender_pubkey) || return 1
   s4_snapshot_journal "$a" || return 1
@@ -153,7 +153,7 @@ s4_assignments() {
   a_g=$(grep -o '0x[0-9a-fA-F]\{64\}' "$P85_DIR/genesis-assignment.txt" | head -1)
   if [ "$S4_EPOCH" -ge 3 ]; then   # a later epoch's offender is in K's assignment (the recovery's): the lane's scenario ids hold it
     [ -n "${P85_K:-}" ] || p85_scenario_ids "$H3_DIR/registry-log.txt" || return 1
-    echo "$a_j $a_g $P85_K"
+    echo "$a_j $a_g $P85_K${P85_K2:+ $P85_K2}"   # P85_K2: the acknowledged assignment of the X4 campaign's second handoff (scripts/x4pos/handoff-lib.sh), where epoch 4's offender is
   else
     echo "$a_j $a_g"
   fi

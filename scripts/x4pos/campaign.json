@@ -1,6 +1,6 @@
 {
  "format": "UNICITY_X4_POS_CAMPAIGN/v1",
- "name": "x4-pos-4h-v2",
+ "name": "x4-pos-4h-v3",
  "accounting": true,
  "seed": 20261021,
  "intervalSeconds": 14400,
@@ -22,24 +22,27 @@
   "offences": 2,
   "exitRequests": 1,
   "exits": 1,
-  "rewardIntervals": 2,
+  "rewardIntervals": 4,
   "rewardExhaustRefill": 1,
   "faults": 4,
   "governance": 1,
-  "reconcile": 1
+  "reconcile": 1,
+  "secondHandoffs": 1,
+  "rejections": 1,
+  "activations": 1
  },
  "features": {
   "authority": "PoS",
-  "election": "authoritative hook",
+  "election": "authoritative hook; a second handoff driven on the accumulated chain; offence 2's lost result rejected by the roots",
   "custody": "enabled",
-  "governance": "queue early, execute late; activation not shown on this chain",
+  "governance": "queue early, execute late; activation asserted (the open results are resolved)",
   "rewardPool": "small separately funded genesis capital, exhaustion then fund()",
   "evidence": "S3/S4 observation, export, submission, settlement",
   "forcedInclusion": "off",
   "bridgeAggregation": "off",
   "checkpointRestore": "off",
   "feeRewardDistribution": "not distributed",
-  "faults": "root quorum restart, validator restart, validator+execution client restart, all EVM validators down for 300 s while the roots extend"
+  "faults": "root quorum restart, validator restart, validator+execution client restart, all EVM validators down for 300 s while the roots extend (each in the four-member K')"
  },
  "steps": [
   {
@@ -143,27 +146,46 @@
    "note": "the joiner's root key (S4): delivered in epoch 2, submitted and settled after the recovery"
   },
   {
+   "id": "lane-second-handoff",
+   "kind": "second-handoff",
+   "at": 1500,
+   "budgetSeconds": 1100,
+   "lane": true,
+   "check": [
+    "scripts/x4pos/lane-check.sh",
+    "second-handoff"
+   ],
+   "counts": {
+    "secondHandoffs": 1
+   },
+   "dependsOn": [
+    "lane-offence-1"
+   ],
+   "note": "the election result that opens after the recovery is driven to its Ack (bft-core#856, scripts/x4pos/handoff-lib.sh): proofs of possession, publication, the root-ordered plan with readiness receipts, the root install of epoch 4, the activation record, the validators into the new scope. K' is K's four members under a new assignment; K is closed. It runs after offence 1 settled and before offence 2, which excludes a fourth identity so that the election (nMin 4) can reserve nothing afterwards"
+  },
+  {
    "id": "lane-offence-2",
    "kind": "offence",
-   "at": 1500,
-   "budgetSeconds": 1300,
+   "at": 2600,
+   "budgetSeconds": 1400,
    "lane": true,
    "check": [
     "scripts/x4pos/lane-check.sh",
     "offence-2"
    ],
    "counts": {
-    "offences": 1
+    "offences": 1,
+    "rejections": 1
    },
    "dependsOn": [
-    "lane-offence-1"
+    "lane-second-handoff"
    ],
-   "note": "root4, a staying member (B4): delivered in epoch 3 with its own evidence window; the later election result is marked lost, the K assignment untouched"
+   "note": "root4, a staying member (B4): delivered in epoch 4 (after the second handoff) with its own evidence window; the result that opened after the handoff is marked lost on the admission and REJECTED by the roots (RejectResult of an unpublishable result, bft-core#857/#871), the running assignment untouched"
   },
   {
    "id": "lane-epoch-switches",
    "kind": "epoch-switches",
-   "at": 2800,
+   "at": 4000,
    "budgetSeconds": 100,
    "lane": true,
    "check": [
@@ -177,27 +199,27 @@
   {
    "id": "lane-rewards",
    "kind": "reward-interval",
-   "at": 2900,
-   "budgetSeconds": 200,
+   "at": 4100,
+   "budgetSeconds": 800,
    "lane": true,
    "check": [
     "scripts/x4pos/lane-check.sh",
     "rewards"
    ],
    "counts": {
-    "rewardIntervals": 2,
+    "rewardIntervals": 4,
     "rewardExhaustRefill": 1
    },
    "dependsOn": [
     "lane-epoch-switches"
    ],
-   "note": "2 closed intervals, a pool that runs dry, the refill, a payee's exact claim (B6c); a later interval paid after the refill is not reachable on this chain, see notCovered"
+   "note": "at least 4 closed intervals on the contracts pin with the tail cap (#72): the ended segments of G, J and K and the tail of K', a pool that runs dry, the refill, a LATER interval paid after it, a payee's exact claim (B6c)"
   },
   {
    "id": "lane-exit-claim",
    "kind": "exit-claim",
-   "at": 3100,
-   "budgetSeconds": 1000,
+   "at": 4900,
+   "budgetSeconds": 900,
    "lane": true,
    "check": [
     "scripts/x4pos/lane-check.sh",
@@ -215,27 +237,28 @@
   {
    "id": "lane-governance",
    "kind": "governance",
-   "at": 4100,
-   "budgetSeconds": 2400,
+   "at": 5800,
+   "budgetSeconds": 1000,
    "lane": true,
    "check": [
     "scripts/x4pos/lane-check.sh",
     "governance"
    ],
    "counts": {
-    "governance": 1
+    "governance": 1,
+    "activations": 1
    },
    "dependsOn": [
     "lane-governance-queue",
     "lane-exit-claim",
     "lane-rewards"
    ],
-   "note": "execute() after both delays (permissionless, schedules only), then the policy id is polled and the outcome recorded; activation is NOT asserted (see notCovered)"
+   "note": "execute() after both delays (permissionless, schedules only), then the queued rate becomes the policy in force at the next election boundary (no result is open: ElectionPolicy.elect runs activateDue first) and the lane ASSERTS it"
   },
   {
    "id": "fault-root-restart",
    "kind": "fault",
-   "at": 6600,
+   "at": 6900,
    "budgetSeconds": 600,
    "lane": true,
    "check": [
@@ -254,7 +277,7 @@
   {
    "id": "fault-evm-restart",
    "kind": "fault",
-   "at": 7500,
+   "at": 7800,
    "budgetSeconds": 600,
    "lane": true,
    "check": [
@@ -273,7 +296,7 @@
   {
    "id": "fault-pair-restart",
    "kind": "fault",
-   "at": 8400,
+   "at": 8700,
    "budgetSeconds": 600,
    "lane": true,
    "check": [
@@ -292,7 +315,7 @@
   {
    "id": "fault-delayed-episode",
    "kind": "fault",
-   "at": 9300,
+   "at": 9600,
    "budgetSeconds": 900,
    "lane": true,
    "check": [
@@ -306,13 +329,13 @@
     "faults": 1
    },
    "exclusive": true,
-   "note": "every online EVM validator (three after the recovery) stops for 300 s while the roots keep extending (the shard's import of root extensions is delayed as a whole), then return: the registry log is ordered, the cursor converged, no gate state moved"
+   "note": "every online EVM validator (four) stops for 300 s while the roots keep extending (the shard's import of root extensions is delayed as a whole), then return: the registry log is ordered, the cursor converged, no gate state moved"
   },
   {
    "id": "lane-soak",
    "kind": "soak",
-   "at": 10200,
-   "budgetSeconds": 3000,
+   "at": 10500,
+   "budgetSeconds": 3900,
    "lane": true,
    "check": [
     "scripts/x4pos/lane-check.sh",
@@ -322,13 +345,13 @@
     "fault-delayed-episode"
    ],
    "phase": "final",
-   "note": "the chain runs on its own; an accounting snapshot every 1200 s"
+   "note": "the chain runs on its own; an accounting snapshot every 1200 s until the final reconcile at 14,400 s (the accounting span is the full interval)"
   },
   {
    "id": "final-reconcile",
    "kind": "reconcile",
-   "at": 13200,
-   "budgetSeconds": 900,
+   "at": 14400,
+   "budgetSeconds": 600,
    "lane": true,
    "check": [
     "scripts/x4pos/lane-check.sh",
@@ -341,12 +364,12 @@
     "reconcile": 1
    },
    "phase": "final",
-   "note": "the registry/custody cursors converged, a last snapshot, the reward pool replayed event by event and conserved"
+   "note": "the registry/custody cursors converged, a last snapshot at the end of the 4 h interval, the reward pool replayed event by event and conserved"
   },
   {
    "id": "lane-accounting",
    "kind": "accounting",
-   "at": 14100,
+   "at": 15000,
    "budgetSeconds": 120,
    "lane": true,
    "check": [
@@ -366,6 +389,10 @@
  },
  "notCovered": [
   {
+   "what": "a handoff that changes the committee on the accumulated chain (the second handoff here is K to K' with the same four members; the joiner install in the first handoff is the only membership change)",
+   "coveredBy": "the joiner install + recovery in this campaign (bft-core#777) and the PoS rehearsal; a second membership change needs identities beyond the genesis four, and offence 2 leaves fewer than the election's minimum of four eligible"
+  },
+  {
    "what": "abort/retry of a prepared handoff on the accumulated state",
    "coveredBy": "the PoS rehearsal of bft-core#808 and the H6 abort lane (ci-lane kind abort), each on its own fresh state"
   },
@@ -378,16 +405,14 @@
    "coveredBy": "the x4-exit lane without run-inputs s4 (B3b exit steps, bft-core#732 and #774)"
   },
   {
-   "what": "a later reward interval paid after the refill, and 4 closed intervals, on the accumulated chain: RewardPool.closeInterval never closes the latest assignment's tail while an election result is open (pinned contracts b17829ca), so this chain closes 2",
-   "coveredBy": "the shadow-chain x4-rewards lane (bft-core#724); the rule is ristik/unicity-pos-contracts#71, fixed in #72 (merged), which this pin does not include"
-  },
-  {
-   "what": "governance ACTIVATION of the queued rate: queue and execute (Scheduled) are shown, but after execute + 1800 s the policy id was unchanged with an election result open (run 40071011875)",
-   "coveredBy": "not covered. Cause (dev3's reading of contracts src/p85, not observed on the chain): activation runs only inside ElectionPolicy.elect (activateDue), and elect returns Disabled while any election result is open; this chain has one open from the baseline and after the recovery, so no activation however long it waits. It needs the open session resolved and the next cadence threshold"
-  },
-  {
    "what": "a fault that restarts the evidence collector as a separate process mid-episode",
    "coveredBy": "the S4 collector holds no runtime state (each `evidence scan` is a new process over the journal copies) and its submitter is killed after admission and rerun in BOTH offences, resuming from the on-chain cursor (submit-1.txt / submit-2.txt in the lane pack); the fault-pair-restart step is the reward-settling side"
+  },
+  {
+   "what": "an election result that is published and then rejected (this campaign rejects a result that is lost before it is published)",
+   "coveredBy": "the pos-reject stage of the testnet rehearsal (bft-core#866, design test 9), which waits out the reservation lifetime of 16,384 progress rounds on a result nobody drives"
   }
- ]
+ ],
+ "endSeconds": 15300,
+ "accountingSpanSeconds": 14400
 }

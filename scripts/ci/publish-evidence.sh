@@ -13,10 +13,10 @@ set -uo pipefail
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd); repo=$(cd "$here/../.." && pwd)
 source "$repo/scripts/lib/portable.sh"
 . "$repo/scripts/lib/reth-pin.sh"   # rethEvidenceValidate / rethEvidenceSecretValues (definitions only)
-ev= out= status=0 nodes= minlogs=0 kind=combined s4=0 x4o=0 x4a=0 x4r=0 x4g=0 x4f=0; extra=()
+ev= out= status=0 nodes= minlogs=0 kind=combined s4=0 x4o=0 x4a=0 x4r=0 x4g=0 x4f=0 x4h=0; extra=()
 while [ $# -gt 0 ]; do case "$1" in
   --evidence) ev=$2; shift 2 ;; --out) out=$2; shift 2 ;; --status) status=$2; shift 2 ;; --nodes) nodes=$2; shift 2 ;;
-  --min-node-logs) minlogs=$2; shift 2 ;; --kind) kind=$2; shift 2 ;; --s4) s4=$2; shift 2 ;; --x4o) x4o=$2; shift 2 ;; --x4a) x4a=$2; shift 2 ;; --x4r) x4r=$2; shift 2 ;; --x4g) x4g=$2; shift 2 ;; --x4f) x4f=$2; shift 2 ;; --extra) extra+=("$2"); shift 2 ;; *) echo "publish-evidence: unknown argument $1" >&2; exit 2 ;; esac; done
+  --min-node-logs) minlogs=$2; shift 2 ;; --kind) kind=$2; shift 2 ;; --s4) s4=$2; shift 2 ;; --x4o) x4o=$2; shift 2 ;; --x4a) x4a=$2; shift 2 ;; --x4r) x4r=$2; shift 2 ;; --x4g) x4g=$2; shift 2 ;; --x4f) x4f=$2; shift 2 ;; --x4h) x4h=$2; shift 2 ;; --extra) extra+=("$2"); shift 2 ;; *) echo "publish-evidence: unknown argument $1" >&2; exit 2 ;; esac; done
 [ -d "$ev" ] && [ -n "$out" ] || { echo "usage: publish-evidence.sh --evidence DIR --out OUT --status N [--nodes DIR] [--min-node-logs N] [--extra PATH]..." >&2; exit 2; }
 name=$(basename "$ev"); mkdir -p "$out"; quarantine="$(cd "$out" && pwd)/../quarantine"; mkdir -p "$quarantine"
 stage=$(mktemp -d); trap 'rm -rf "$stage"' EXIT
@@ -94,15 +94,22 @@ case "$kind" in
     ! grep -q 'NOT EVIDENCE' "$ev/run-mode.txt" 2>/dev/null || { complete=no; why+=("run-mode.txt marks the run NOT EVIDENCE"); } ;;
   *) complete=no; why+=("unknown kind $kind") ;;
 esac
-if [ "$x4o" = 1 ]; then   # X4 B4: the second offence (a staying member, root4), settled after the recovery with no election result open, one claim for both bounties
+if [ "$x4o" = 1 ]; then   # X4 B4: the second offence (a staying member, root4), settled with the later election result lost and REJECTED by the roots, one claim for both bounties
+  e2=3; [ "$x4h" != 1 ] || e2=4   # delivered in the root epoch the lane is in: the recovery's 3, or 4 after the second handoff (X4 #856)
   pre=$(find "$pub" -path '*/s4b/pre-submit.json' | head -n 1); post=$(find "$pub" -path '*/s4b/post-settle.json' | head -n 1)
-  jq -e '.epoch >= 3 and .openResult != "0x0000000000000000000000000000000000000000000000000000000000000000" and .state == 1 and .predecessorIsK == true and .lostBefore == 0' "${pre:-/nonexistent}" >/dev/null 2>&1 || { complete=no; why+=("s4b/pre-submit.json: offence 2 was not submitted in epoch 3 with a Reserved later result from K that was not yet lost"); }
-  jq -e '.epoch == 3 and .roundAfterPaidTx > .roundAfterSettle and .lastAckedUnchanged == true and .paidTxOk == true and .openResultUnchanged == true' "${post:-/nonexistent}" >/dev/null 2>&1 || { complete=no; why+=("s4b/post-settle.json: the K assignment does not show epoch 3 advancing, the same acknowledged assignment and a certified paid transaction after the second settlement"); }
-  jq -e '.lostAfterSettlement == 1 and .laterResultStateAfter == 1' "${post:-/nonexistent}" >/dev/null 2>&1 || { complete=no; why+=("s4b/post-settle.json: the later election result is not lost and still Reserved after the settlement of offence 2"); }
+  jq -e --argjson e "$e2" '.epoch == $e and .openResult != "0x0000000000000000000000000000000000000000000000000000000000000000" and .state == 1 and .predecessorIsLastAcked == true and .lostBefore == 0' "${pre:-/nonexistent}" >/dev/null 2>&1 || { complete=no; why+=("s4b/pre-submit.json: offence 2 was not submitted in epoch $e2 with a Reserved later result from the last acknowledged assignment that was not yet lost"); }
+  jq -e --argjson e "$e2" '.epoch == $e and .roundAfterPaidTx > .roundAfterSettle and .lastAckedUnchanged == true and .paidTxOk == true and .openResultIsNotTheRejected == true and .cursor == .count' "${post:-/nonexistent}" >/dev/null 2>&1 || { complete=no; why+=("s4b/post-settle.json: the running assignment does not show epoch $e2 advancing, the same acknowledged assignment and a certified paid transaction after the second settlement"); }
+  jq -e '.lostAfterSettlement == 1 and .laterResultStateAfter == 5' "${post:-/nonexistent}" >/dev/null 2>&1 || { complete=no; why+=("s4b/post-settle.json: the later election result is not lost and Closed (rejected by the roots) after the settlement of offence 2"); }
   [ "$(cat "$(dirname "${pre:-/nonexistent}")/lost-after-admission.txt" 2>/dev/null)" = 1 ] || { complete=no; why+=("s4b/lost-after-admission.txt: the later result was not seen lost between admission and settlement"); }
   [ -n "$(find "$pub" -path '*/s4b/SHA256SUMS' | head -n 1)" ] || { complete=no; why+=("s4b/SHA256SUMS: the second offence's archive is missing"); }
   grep -q "PASS: x4o: the reporter's credit" "$ev/lane.log" 2>/dev/null || { complete=no; why+=("no 'x4o: the reporter's credit = bounty 1 + bounty 2' line in lane.log"); }
   grep -q 'PASS: s4: the reporter claimed exactly the bounty' "$ev/lane.log" 2>/dev/null || { complete=no; why+=("no exact reporter claim line in lane.log"); }
+fi
+if [ "$x4h" = 1 ]; then   # X4 #856: the second handoff on the accumulated chain was driven to its Ack (K to K' with the same four members, root epoch 3 -> 4)
+  h2=$(find "$pub" -path '*/x4pos/steps/handoff2/second-handoff.json' | head -n 1)
+  jq -e '.resultState == 3 and .rootEpochBefore == 3 and .rootEpochAfter == 4 and .lastAckedAfter != .lastAckedBefore and .kClosed == true and .k2Open == true and .cursor == .count and .count == .target and (.entities | length) == 4' "${h2:-/nonexistent}" >/dev/null 2>&1 || { complete=no; why+=("x4pos/steps/handoff2/second-handoff.json: the open result was not acknowledged (K closed, K' open, root epoch 3 -> 4, four members, records reconciled)"); }
+  grep -q 'PASS: x4h: the election result' "$ev/lane.log" 2>/dev/null || { complete=no; why+=("no 'x4h: the election result ... was driven to its Ack' line in lane.log"); }
+  [ "$x4o" = 1 ] || { complete=no; why+=("--x4h needs --x4o: offence 2 is delivered in the second handoff's epoch"); }
 fi
 if [ "$x4a" = 1 ]; then   # X4 B6: the accounting snapshots read from the live chain and judged by accounting.py (PASS needs at least two snapshots and every invariant)
   sn=$(find "$pub" -path '*/x4pos/snapshots.jsonl' | head -n 1); ac=$(find "$pub" -path '*/x4pos/accounting.txt' | head -n 1)
@@ -115,17 +122,19 @@ if [ "$x4r" = 1 ]; then   # X4 B6c: the rewards that the recovery chain can show
   xr=$(find "$pub" -path '*/x4pos/steps/xr/replay-after.txt' | head -n 1)
   line=$(sed -n 's/^REWARDS-REPLAY ok //p' "${xr:-/nonexistent}" 2>/dev/null | tail -n 1)
   [ -n "$line" ] || { complete=no; why+=("no REWARDS-REPLAY ok line in x4pos/steps/xr/replay-after.txt"); }
-  [ "$(jq -r '.zeroBudget // 0' <<<"${line:-null}" 2>/dev/null)" -ge 1 ] 2>/dev/null && [ "$(jq -r '.intervals // 0' <<<"${line:-null}" 2>/dev/null)" -ge 2 ] 2>/dev/null \
-    && [ "$(jq -r '.fundings // 0' <<<"${line:-null}" 2>/dev/null)" -ge 1 ] 2>/dev/null || { complete=no; why+=("the replay does not show a dry pool that was refilled (intervals >= 2, zeroBudget >= 1, fundings >= 1)"); }
+  mi=2; [ "$x4h" != 1 ] || mi=4   # the recovery chain closes 2 intervals; with the second handoff no result is left open and the tail closes too (4)
+  [ "$(jq -r '.zeroBudget // 0' <<<"${line:-null}" 2>/dev/null)" -ge 1 ] 2>/dev/null && [ "$(jq -r '.intervals // 0' <<<"${line:-null}" 2>/dev/null)" -ge "$mi" ] 2>/dev/null \
+    && [ "$(jq -r '.fundings // 0' <<<"${line:-null}" 2>/dev/null)" -ge 1 ] 2>/dev/null || { complete=no; why+=("the replay does not show a dry pool that was refilled (intervals >= $mi, zeroBudget >= 1, fundings >= 1)"); }
   grep -q 'PASS: x4r: payee 1 claimed exactly its credit' "$ev/lane.log" 2>/dev/null || { complete=no; why+=("no 'x4r: payee 1 claimed exactly its credit' line in lane.log"); }
   [ "$x4a" = 1 ] || { complete=no; why+=("--x4r needs --x4a: the pool's payments are judged by the accounting snapshots"); }
   pn=$(find "$pub" -path '*/x4pos/snapshots.jsonl' | head -n 1)
   [ "$(tail -n 1 "${pn:-/nonexistent}" 2>/dev/null | jq -r '.payments | length' 2>/dev/null)" -ge 1 ] 2>/dev/null || { complete=no; why+=("x4pos/snapshots.jsonl: the last snapshot has no pool payment (the Claimed decoding was not exercised)"); }
 fi
-if [ "$x4g" = 1 ]; then   # X4 B6e: the governance experiment ran: queued, executed after both delays, and the outcome (activated or not) is recorded. Activation is REPORTED, not required.
+if [ "$x4g" = 1 ]; then   # X4 B6e: the governance experiment ran: queued, executed after both delays, and the outcome (activated or not) is recorded. Activation is REPORTED, and REQUIRED with --x4h (X4 #856).
   gq=$(find "$pub" -path '*/x4pos/steps/gov/queued.json' | head -n 1); go=$(find "$pub" -path '*/x4pos/steps/gov/outcome.json' | head -n 1)
   jq -e '.nonce >= 1 and (.rateProposed | tonumber) < (.rateBefore | tonumber)' "${gq:-/nonexistent}" >/dev/null 2>&1 || { complete=no; why+=("x4pos/steps/gov/queued.json: no queued proposal"); }
   jq -e '(.activated | type) == "boolean" and .policyIdAfter >= .policyIdBefore' "${go:-/nonexistent}" >/dev/null 2>&1 || { complete=no; why+=("x4pos/steps/gov/outcome.json: no recorded outcome"); }
+  [ "$x4h" != 1 ] || jq -e '.activated == true and .activationRequired == true and (.rateAfter | tonumber) == (.rateProposed | tonumber)' "${go:-/nonexistent}" >/dev/null 2>&1 || { complete=no; why+=("x4pos/steps/gov/outcome.json: the queued rate was not activated (required with the second handoff lane)"); }
   grep -q 'PASS: x4g: executed nonce' "$ev/lane.log" 2>/dev/null || { complete=no; why+=("no 'x4g: executed nonce' line in lane.log (the proposal was not scheduled)"); }
   [ -z "$go" ] || echo "governance outcome: $(jq -c . "$go")" >>"$pub/GOVERNANCE-OUTCOME.txt"
 fi
