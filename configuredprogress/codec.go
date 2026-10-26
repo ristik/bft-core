@@ -45,7 +45,7 @@ var (
 	// as the archive replicas acknowledge blocks, so the entry fits later. It is NOT ErrBounds (an entry or journal that can never fit,
 	// which stops the node for good): a full journal is back-pressure, the caller keeps the certificate and retries (bft-core#876).
 	ErrCapacity = errors.New("configuredprogress: full-history journal capacity reached")
-	ErrSettings    = errors.New("configuredprogress: invalid settings")
+	ErrSettings = errors.New("configuredprogress: invalid settings")
 )
 
 var outerDec, innerDec cbor.DecMode
