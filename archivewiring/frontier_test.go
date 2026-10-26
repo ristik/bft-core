@@ -181,11 +181,41 @@ func TestFrontierJournalAdvancePruneAndRestart(t *testing.T) {
 	changed := *oldRec
 	changed.Body = append([]byte(nil), oldRec.Header...)
 	require.ErrorIs(t, verify(context.Background(), oldQ, &changed), ErrUncertified)
+
+	// The refusal keeps its cause (bft-core#876): the bare sentinel hid whether coverage was missing, named another block, was made for another context or
+	// covered another manifest. Each stays an ErrUncertified and says which.
+	err = verify(context.Background(), oldQ, &changed)
+	require.ErrorIs(t, err, frontier.ErrInvalid)
+	require.ErrorContains(t, err, "is not the covered manifest", "same block, other bytes")
+	otherBlock := oldQ
+	otherBlock.BlockHash[0] ^= 1
+	err = verify(context.Background(), otherBlock, oldRec)
+	require.ErrorIs(t, err, ErrUncertified)
+	require.ErrorContains(t, err, "names block", "the coverage at that height is for another block")
+	otherContext := oldQ
+	otherContext.Context.ShardEpoch++
+	err = verify(context.Background(), otherContext, oldRec)
+	require.ErrorIs(t, err, ErrUncertified)
+	require.ErrorContains(t, err, "another archive context")
+	// above the anchor there is no coverage yet: unavailable, with the heights
+	_, higher := f.record(t, len(f.entries)-1)
+	var hq archive.Request
+	for i, entry := range f.entries {
+		if entry.Candidate.Number == 6 {
+			hq, _ = f.record(t, i)
+		}
+	}
+	hq.BlockHash[1] ^= 1
+	higherHeader := *higher
+	err = verify(context.Background(), hq, &higherHeader)
+	require.ErrorIs(t, err, ErrUncertified)
+	require.ErrorContains(t, err, "has no hot certified entry")
 }
 
 func TestFrontierPruneSweepKeepsTimeoutRepeatBodies(t *testing.T) {
 	t.Parallel()
-	f := newWiringFixtureWithTimeouts(t, 8)
+	// roomy limits: the journal stays below the busy level, so that a pass covers its usual four blocks (bft-core#876: from half full it covers more)
+	f := newWiringFixtureMode(t, 8, configuredprogress.JournalLimits{Candidates: 64, Observations: 128, Bytes: 32 << 20}, true)
 	local, err := archive.Open(t.TempDir())
 	require.NoError(t, err)
 	first, err := archive.Open(t.TempDir())

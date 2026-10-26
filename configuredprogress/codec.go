@@ -41,7 +41,11 @@ var (
 	ErrConflict    = errors.New("configuredprogress: authenticated progress conflicts")
 	ErrStale       = errors.New("configuredprogress: prepared state changed")
 	ErrBounds      = errors.New("configuredprogress: encoded value exceeds its bound")
-	ErrSettings    = errors.New("configuredprogress: invalid settings")
+	// ErrCapacity: the durable journal has no room for one more entry right now. It is transient: the certified frontier prunes the journal
+	// as the archive replicas acknowledge blocks, so the entry fits later. It is NOT ErrBounds (an entry or journal that can never fit,
+	// which stops the node for good): a full journal is back-pressure, the caller keeps the certificate and retries (bft-core#876).
+	ErrCapacity = errors.New("configuredprogress: full-history journal capacity reached")
+	ErrSettings = errors.New("configuredprogress: invalid settings")
 )
 
 var outerDec, innerDec cbor.DecMode

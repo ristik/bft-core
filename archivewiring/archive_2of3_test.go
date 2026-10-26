@@ -178,7 +178,7 @@ func TestValidReplicas(t *testing.T) {
 func TestFrontierAdvancesAfterAnAcknowledgerOfTheAnchorStops(t *testing.T) {
 	t.Parallel()
 	for stopped := 0; stopped < 3; stopped++ {
-		x := newTwoOfThree(t, 8, [3]bool{true, true, true}, [3]bool{})
+		x := newTwoOfThree(t, 7, [3]bool{true, true, true}, [3]bool{})
 		require.NoError(t, x.worker.Pass(context.Background()))
 		before := x.anchor(t)
 		require.NotNil(t, before)
@@ -198,7 +198,7 @@ func TestFrontierAdvancesAfterAnAcknowledgerOfTheAnchorStops(t *testing.T) {
 func TestFrontierFreezesWhenTwoReplicasStopAfterTheAnchor(t *testing.T) {
 	t.Parallel()
 	for _, stopped := range [][2]int{{0, 1}, {0, 2}, {1, 2}} {
-		x := newTwoOfThree(t, 8, [3]bool{true, true, true}, [3]bool{})
+		x := newTwoOfThree(t, 7, [3]bool{true, true, true}, [3]bool{})
 		require.NoError(t, x.worker.Pass(context.Background()))
 		before := x.anchor(t)
 		x.stop(t, stopped[0])
@@ -212,7 +212,7 @@ func TestFrontierFreezesWhenTwoReplicasStopAfterTheAnchor(t *testing.T) {
 // record of the current policy as soon as two configured replicas hold the promised copy.
 func TestFrontierAdvancesFromAnAnchorWithAnOutsideAcknowledger(t *testing.T) {
 	t.Parallel()
-	x := newTwoOfThree(t, 8, [3]bool{true, true, true}, [3]bool{})
+	x := newTwoOfThree(t, 7, [3]bool{true, true, true}, [3]bool{})
 	require.NoError(t, x.worker.Pass(context.Background()))
 	before := x.anchor(t)
 	require.Equal(t, x.peers[1].String(), before.Acks[1].Replica)
@@ -227,4 +227,17 @@ func TestFrontierAdvancesFromAnAnchorWithAnOutsideAcknowledger(t *testing.T) {
 	require.False(t, after.Migrated())
 	require.Equal(t, x.peers[0].String(), after.Acks[0].Replica)
 	require.Equal(t, x.peers[2].String(), after.Acks[1].Replica)
+}
+
+// A pass every two seconds at four blocks covers two blocks a second, about what a transaction burst produces; a journal that is already behind (after a
+// restart every block is pending again) never catches up and fills (bft-core#876). From half full a pass covers a larger batch.
+func TestFrontierWorkerCoversMoreWhenTheJournalFills(t *testing.T) {
+	t.Parallel()
+	all := [3]bool{true, true, true}
+	quiet := newTwoOfThree(t, 6, all, [3]bool{}) // 6 of 16: below the busy level
+	require.NoError(t, quiet.worker.Pass(context.Background()))
+	require.Equal(t, uint64(passCoverage), quiet.anchor(t).Height, "below the busy level a pass covers four")
+	busy := newTwoOfThree(t, 12, all, [3]bool{}) // 12 of 16
+	require.NoError(t, busy.worker.Pass(context.Background()))
+	require.Equal(t, uint64(12), busy.anchor(t).Height, "from half full a pass covers all twelve")
 }

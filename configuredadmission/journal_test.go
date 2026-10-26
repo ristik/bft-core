@@ -479,7 +479,8 @@ func TestJournalAdmissionWriteFailurePreventsExecutionDelivery(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, s.EnableJournal(context.Background(), ctx, limits))
 	deliveries := 0
-	a, err := (JournalFactory{Store: s, Origin: origin, Limits: limits}).Start(context.Background(), id, adapterGate{}, shardnode.AdmissionCallbacks{
+	var stopped atomic.Bool
+	a, err := (JournalFactory{Store: s, Origin: origin, Limits: limits, OnStop: func(error) { stopped.Store(true) }}).Start(context.Background(), id, adapterGate{}, shardnode.AdmissionCallbacks{
 		AuthenticatedFeed: func(*types.UnicityCertificate, *certification.TechnicalRecord) {},
 		DeliverDurable: func(context.Context, *types.UnicityCertificate, *certification.TechnicalRecord) error {
 			deliveries++
@@ -492,7 +493,13 @@ func TestJournalAdmissionWriteFailurePreventsExecutionDelivery(t *testing.T) {
 	require.NoError(t, a.Submit(context.Background(), bootstrap, bootTR))
 	putAdapterB1(t, s, ctx, limits, chain, bootstrap, bootTR)
 	first, firstTR := signAdapterObservation(t, chain)
-	require.ErrorIs(t, a.Submit(context.Background(), first, firstTR), configuredprogress.ErrBounds)
+	err = a.Submit(context.Background(), first, firstTR)
+	// A full journal is back-pressure (bft-core#876): the certificate is kept to be retried as the frontier frees room, and the node is NOT stopped for good
+	require.ErrorIs(t, err, configuredprogress.ErrCapacity)
+	require.NotErrorIs(t, err, configuredprogress.ErrBounds)
+	require.False(t, stopped.Load(), "a full journal must not be a sticky stop")
+	pending, ok := a.(interface{ Pending() bool })
+	require.True(t, ok && pending.Pending(), "the authenticated certificate stays pending for the retry")
 	require.Equal(t, 1, deliveries, "no execution Commit or signing callback after a failed durable write")
 	state, _, err := s.Load(context.Background(), ctx)
 	require.NoError(t, err)
@@ -500,4 +507,65 @@ func TestJournalAdmissionWriteFailurePreventsExecutionDelivery(t *testing.T) {
 	image, err := s.LoadJournal(context.Background(), ctx, limits)
 	require.NoError(t, err)
 	require.False(t, image.Candidates[0].Certified)
+}
+
+// A full journal refuses the round, it does not stop the node (bft-core#876): the follower rejects the proposal, the leader abstains, both keep the
+// capacity cause, neither is the terminal class; every other error passes through untouched.
+func TestCapacityRefusalIsBackPressure(t *testing.T) {
+	full := fmt.Errorf("durable: %w", configuredprogress.ErrCapacity)
+	f := capacityRefusal(full, false)
+	require.ErrorIs(t, f, shardnode.ErrProposalRejected)
+	require.ErrorIs(t, f, configuredprogress.ErrCapacity)
+	require.False(t, terminalAdmissionError(f))
+	l := capacityRefusal(full, true)
+	require.ErrorIs(t, l, shardnode.ErrLeaderProposalConflict)
+	require.ErrorIs(t, l, configuredprogress.ErrCapacity)
+	require.False(t, terminalAdmissionError(l))
+	require.NoError(t, capacityRefusal(nil, false))
+	require.Nil(t, capacityRefusal(configuredprogress.ErrBounds, false), "an entry that can never fit is not back-pressure")
+	require.Nil(t, capacityRefusal(configuredprogress.ErrConflict, true))
+}
+
+// RetainCandidate at the candidate cap (bft-core#876): the real store refuses the insertion with ErrCapacity, and the round is refused, not the node stopped:
+// a follower rejects the proposal, the leader abstains, both keep ErrCapacity and neither is the terminal class. Deleting the capacityRefusal call would
+// leave the bare store error, which the round treats as a stop.
+func TestRetainCandidateAtTheCandidateCapRefusesTheRound(t *testing.T) {
+	chain, _, ctx, _ := adapterFixture(t)
+	limits := configuredprogress.JournalLimits{Candidates: 2, Observations: 8, Bytes: 16 << 20}
+	s, err := configuredprogress.OpenConfiguredV2(t.TempDir()+"/journal.db", configuredprogress.Settings{Retain: 2})
+	require.NoError(t, err)
+	defer s.Close()
+	_, _, err = s.Initialize(context.Background(), ctx)
+	require.NoError(t, err)
+	require.NoError(t, s.EnableJournal(context.Background(), ctx, limits))
+	bootstrap, bootTR := journalBootstrap(t, chain)
+	b, parent := chain.Blocks[1], chain.Blocks[0]
+	candidate := func(tag byte) shardnode.Block {
+		return shardnode.Block{Number: b.Number, Hash: bytes.Repeat([]byte{tag}, 32), StateRoot: b.StateRoot.Bytes(), ParentHash: parent.Hash.Bytes(), Raw: []byte{1, 2, 3}, BlockSize: 3}
+	}
+	params := shardnode.RoundParams{Round: b.Round, Parent: shardnode.BlockRef{Number: parent.Number, Hash: parent.Hash.Bytes(), StateRoot: parent.StateRoot.Bytes()},
+		AuthorizingCertificate: bootstrap, AuthorizingTechnicalRecord: bootTR}
+	j := ProposalJournal{Store: s, Context: ctx, Limits: limits}
+	// fill the journal to its candidate cap with distinct proposals of one round (the follower path keeps each of them)
+	filled := false
+	for tag := byte(0xa0); tag < 0xa8; tag++ {
+		err := j.RetainCandidate(context.Background(), candidate(tag), params, false)
+		if err != nil {
+			require.ErrorIs(t, err, configuredprogress.ErrCapacity, "the first refusal is the cap, not a conflict: %v", err)
+			filled = true
+			break
+		}
+	}
+	require.True(t, filled, "the journal never reached its candidate cap")
+
+	follower := j.RetainCandidate(context.Background(), candidate(0xb0), params, false)
+	require.ErrorIs(t, follower, shardnode.ErrProposalRejected)
+	require.ErrorIs(t, follower, configuredprogress.ErrCapacity)
+	require.NotErrorIs(t, follower, configuredprogress.ErrBounds)
+	require.False(t, terminalAdmissionError(follower))
+	leader := j.RetainCandidate(context.Background(), candidate(0xb1), params, true)
+	require.ErrorIs(t, leader, shardnode.ErrLeaderProposalConflict)
+	require.ErrorIs(t, leader, configuredprogress.ErrCapacity)
+	require.NotErrorIs(t, leader, configuredprogress.ErrBounds)
+	require.False(t, terminalAdmissionError(leader))
 }

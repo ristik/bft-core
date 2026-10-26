@@ -6,6 +6,7 @@ import (
 	"crypto"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"sync"
 	"sync/atomic"
@@ -188,8 +189,18 @@ func (s *q4bStore) observed(b *storage.ExecutedBlock, root bool, write func() er
 	if err := write(); err != nil {
 		return err
 	}
+	if q4bAnchorRoot(b) {
+		return nil
+	}
 	s.live.recordBlock(s.index, b.GetRound(), blk, root)
 	return nil
+}
+
+// q4bAnchorRoot: the epoch anchor root (Round == Anchor.Slot, so its parent round is its own round) is the installed base of the
+// epoch, not a block committed in it. A recovery (NewFromAnchorState) rewrites it as the tree root; recorded, it would export a block
+// that does not extend a lower round and an ordinary commit that never happened.
+func q4bAnchorRoot(b *storage.ExecutedBlock) bool {
+	return b.BlockData.Anchor != nil && b.GetRound() == b.BlockData.Anchor.Slot
 }
 
 func (s *q4bStore) WriteVote(v any) error {
@@ -583,12 +594,24 @@ func (c *q4bLive) state(name string) q4bState {
 // counted as progress but a stall also needs no new QC.
 func (c *q4bLive) requireStalled(names ...string) {
 	c.t.Helper()
-	time.Sleep(q4Quiesce) // pre-issued messages drain
-	before := map[string]q4bState{}
-	for _, n := range names {
-		before[n] = c.state(n)
+	// Pre-issued messages drain: wait until no stalled node has formed a QC or committed for q4Quiesce. A fixed sleep is not a
+	// drain under load: a commit of pre-fault evidence can land after it (#845). Round advance by timeout is not compared.
+	snap := func() map[string]q4bState {
+		out := map[string]q4bState{}
+		for _, n := range names {
+			s := c.state(n)
+			out[n] = q4bState{HighQC: s.HighQC, Committed: s.Committed}
+		}
+		return out
 	}
-	from := time.Now()
+	before, stableSince := snap(), time.Now()
+	require.Eventually(c.t, func() bool {
+		if now := snap(); !maps.Equal(now, before) {
+			before, stableSince = now, time.Now()
+		}
+		return time.Since(stableSince) >= q4Quiesce
+	}, 60*time.Second, 50*time.Millisecond, "pre-issued evidence drains")
+	from := q4bWindowStart()
 	time.Sleep(q4bStall)
 	for _, n := range names {
 		after := c.state(n)
@@ -598,6 +621,16 @@ func (c *q4bLive) requireStalled(names ...string) {
 	c.mu.Lock()
 	c.windows = append(c.windows, q4replay.Window{Name: "stall", Expect: "stall", Nodes: names, StartMs: from.UnixMilli(), EndMs: time.Now().UnixMilli()})
 	c.mu.Unlock()
+}
+
+// q4bWindowStart opens a stall window at the next whole millisecond. A commit the before-read saw was stamped before that read
+// returned (the stamp is taken in the commit's write, under the block tree lock CurrentState waits on), often in the same
+// millisecond; the checker's window bound is inclusive at millisecond precision, so a window opened in that millisecond would count
+// the commit as made inside it.
+func q4bWindowStart() time.Time {
+	from := time.Now().Truncate(time.Millisecond).Add(time.Millisecond)
+	time.Sleep(time.Until(from))
+	return from
 }
 
 // requireChainsAgree: no two nodes committed different blocks for a common round, and the observer itself saw no conflict.

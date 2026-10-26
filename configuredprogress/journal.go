@@ -100,7 +100,19 @@ type JournalEntry struct {
 	Certified   bool
 	ResultingUC *types.UnicityCertificate
 	ResultingTR *certification.TechnicalRecord
+	// Archive is the resulting pair the ARCHIVE representation of this block carries when it differs from the association above (bft-core#876): nil until a selection
+	// is made. The association (ResultingUC/TR) is never changed by it.
+	Archive *ArchiveSelection
 }
+
+// ArchiveResult is the resulting pair the archive representation of this block carries: the selected pair if one was selected (bft-core#876), else the association.
+func (e JournalEntry) ArchiveResult() (*types.UnicityCertificate, *certification.TechnicalRecord) {
+	if e.Archive != nil {
+		return e.Archive.UC, e.Archive.TR
+	}
+	return e.ResultingUC, e.ResultingTR
+}
+
 type JournalObservation struct {
 	UC         *types.UnicityCertificate
 	TR         *certification.TechnicalRecord
@@ -221,6 +233,15 @@ func readJournalMeta(b *bolt.Bucket, dd [32]byte, limits JournalLimits) error {
 		return ErrContext
 	}
 	return nil
+}
+
+// journalFull classifies a refused insertion: an entry that would not fit an EMPTY journal (or a journal with no room for any entry of its
+// kind) can never be admitted, which is ErrBounds and stops the node; otherwise the journal is only full for now, ErrCapacity (back-pressure).
+func journalFull(limits JournalLimits, entry int64) error {
+	if entry > limits.Bytes || limits.Candidates <= 0 || limits.Observations <= 0 {
+		return fmt.Errorf("%w: the entry cannot fit the journal's limits", ErrBounds)
+	}
+	return ErrCapacity
 }
 
 func journalCount(b *bolt.Bucket) (candidates, observations int, n int64, err error) {
@@ -455,7 +476,7 @@ func (s *Store) putJournalCandidate(ctx context.Context, c Context, limits Journ
 					return countErr
 				}
 				if count > limits.Candidates || observed > limits.Observations || total-int64(len(old))+int64(len(raw)) > limits.Bytes {
-					return fmt.Errorf("%w: full-history journal capacity reached", ErrBounds)
+					return journalFull(limits, int64(len(raw)))
 				}
 			}
 			if resultUC != nil {
@@ -546,7 +567,7 @@ func (s *Store) putJournalCandidate(ctx context.Context, c Context, limits Journ
 			return err
 		}
 		if count >= limits.Candidates || observed > limits.Observations || n+int64(len(key)+len(raw)) > limits.Bytes {
-			return fmt.Errorf("%w: full-history journal capacity reached", ErrBounds)
+			return journalFull(limits, int64(len(key)+len(raw)))
 		}
 		if err := s.at("before-candidate-put"); err != nil {
 			return err
@@ -649,7 +670,7 @@ func (s *Store) appendJournalObservation(tx *bolt.Tx, pair *verifiedPair, dd [32
 		return err
 	}
 	if count > limits.Candidates || observed >= limits.Observations || n+int64(len(key)+len(raw)) > limits.Bytes {
-		return fmt.Errorf("%w: full-history journal capacity reached", ErrBounds)
+		return journalFull(limits, int64(len(key)+len(raw)))
 	}
 	if err = s.at("before-journal-observation-put"); err != nil {
 		return err
@@ -885,6 +906,11 @@ func (s *Store) loadJournalOnce(ctx context.Context, c Context, limits JournalLi
 					return ErrConflict
 				}
 				entry.Certified, entry.ResultingUC, entry.ResultingTR = true, resultUC, resultTR
+				sel, e := readArchiveSelection(ctx, b, c, state.i.descriptorDigest, w)
+				if e != nil {
+					return e
+				}
+				entry.Archive = sel
 			} else if w.Status != 0 || len(w.ResultingUC) != 0 || len(w.ResultingTR) != 0 {
 				return ErrUntrusted
 			}

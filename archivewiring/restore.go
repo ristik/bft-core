@@ -211,6 +211,7 @@ func (r *ArchiveRestore) Restore(ctx context.Context) error {
 	var targetBlock shardnode.Block
 	for i := len(reverse) - 1; i >= 0; i-- {
 		item := reverse[i]
+		// The base representation is read here on purpose (bft-core#876): the record is authenticated below and nothing compares it with a journal-derived manifest; a selected variant certifies the same input record.
 		rec, err := r.Archive.Get(item.q)
 		if err != nil {
 			return err
@@ -358,6 +359,7 @@ func (r *ArchiveRestore) verifiedRestoreRecord(ctx context.Context, q archive.Re
 		}
 		return original, originalTR, result, resultTR, &header, nil
 	}
+	// The base representation is read here on purpose (bft-core#876): the record is authenticated below and nothing compares it with a journal-derived manifest; a selected variant certifies the same input record.
 	if rec, err := r.Archive.Get(q); err == nil {
 		if original, originalTR, result, resultTR, header, checkErr := check(rec); checkErr == nil {
 			return rec, original, originalTR, result, resultTR, header, nil
@@ -677,6 +679,7 @@ func (r *ArchiveRestore) recordTip(ctx context.Context, firstUC *types.UnicityCe
 }
 
 func (r *ArchiveRestore) restoreCandidate(ctx context.Context, resultUC *types.UnicityCertificate, block shardnode.Block, item restoredBlock) (configuredprogress.JournalCandidate, error) {
+	// The base representation is read here on purpose (bft-core#876): the record is authenticated below and nothing compares it with a journal-derived manifest; a selected variant certifies the same input record.
 	rec, err := r.Archive.Get(item.q)
 	if err != nil {
 		return configuredprogress.JournalCandidate{}, err

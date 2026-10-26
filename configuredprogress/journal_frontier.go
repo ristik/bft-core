@@ -357,23 +357,49 @@ func (s *Store) VerifyCoveredArchive(ctx context.Context, c Context, limits Jour
 		if err != nil {
 			return err
 		}
-		if f.Anchor == nil || h > f.Anchor.Height {
-			return frontier.ErrUnavailable
+		// Every refusal keeps its reason (bft-core#876): a replica that refuses a record as "no certified association" must say whether coverage is missing,
+		// names another block, was made for another context, covered another manifest, or fails its certified binding.
+		if f.Anchor == nil {
+			return fmt.Errorf("%w: this journal has no frontier anchor yet", frontier.ErrUnavailable)
+		}
+		if h > f.Anchor.Height {
+			return fmt.Errorf("%w: height %d is above the frontier anchor %d, not yet covered", frontier.ErrUnavailable, h, f.Anchor.Height)
 		}
 		raw := b.Get(coverageKey(h))
 		if raw == nil {
-			return frontier.ErrUnavailable
+			return fmt.Errorf("%w: no coverage record at height %d (coverage base %v)", frontier.ErrUnavailable, h, coverageBaseHeight(b, state.i.descriptorDigest, [32]byte(c.Origin.BlockHash())))
 		}
 		r, err := frontier.DecodeMigrating(raw, *s.frontier)
-		if err != nil || r.Subject.BlockHash != q.BlockHash || !sameCoverageSubject(r.Subject, q) {
-			return frontier.ErrInvalid
+		if err != nil {
+			return fmt.Errorf("%w: the coverage record at height %d does not decode: %v", frontier.ErrInvalid, h, err)
+		}
+		if r.Subject.BlockHash != q.BlockHash {
+			return fmt.Errorf("%w: the coverage at height %d names block %x, not %x", frontier.ErrInvalid, h, r.Subject.BlockHash[:8], q.BlockHash[:8])
+		}
+		if !sameCoverageSubject(r.Subject, q) {
+			return fmt.Errorf("%w: the coverage at height %d was made for another archive context", frontier.ErrInvalid, h)
 		}
 		digest, err := archive.ManifestDigest(q, rec)
-		if err != nil || digest != r.Acks[0].ManifestDigest || digest != r.Acks[1].ManifestDigest || s.frontier.Binding.VerifyCertified(r, rec) != nil {
-			return frontier.ErrInvalid
+		if err != nil {
+			return fmt.Errorf("%w: the offered record has no manifest digest: %v", frontier.ErrInvalid, err)
+		}
+		if digest != r.Acks[0].ManifestDigest || digest != r.Acks[1].ManifestDigest {
+			return fmt.Errorf("%w: the offered record's manifest %x is not the covered manifest %x / %x at height %d (same block, other certificate or bytes)", frontier.ErrInvalid, digest[:8], r.Acks[0].ManifestDigest[:8], r.Acks[1].ManifestDigest[:8], h)
+		}
+		if err := s.frontier.Binding.VerifyCertified(r, rec); err != nil {
+			return fmt.Errorf("%w: the offered record fails the certified binding at height %d: %v", frontier.ErrInvalid, h, err)
 		}
 		return nil
 	})
+}
+
+// coverageBaseHeight is the first height this journal promises coverage for, or "none" (diagnostics only).
+func coverageBaseHeight(b *bolt.Bucket, descriptor [32]byte, origin [32]byte) string {
+	base, _, err := readCoverageBase(b, descriptor, origin)
+	if err != nil || base == nil {
+		return "none"
+	}
+	return fmt.Sprintf("%d", base.Height)
 }
 
 func sameCoverageSubject(a, b archive.Request) bool {
@@ -509,11 +535,21 @@ func checkCoveredCandidate(b *bolt.Bucket, ctx context.Context, c Context, item 
 	if err != nil {
 		return err
 	}
+	// The pair the archive representation carries: the selected one if a selection was made for the block (bft-core#876), else the journal's own association. A coverage
+	// planned against the other representation is stale: it fails here, inside the transaction that would commit it, and is replanned.
+	wantUC, wantTR := w.ResultingUC, w.ResultingTR
+	if raw := b.Get(archiveSelectionKey(w.Hash)); raw != nil {
+		sw, serr := decodeArchiveSelection(raw)
+		if serr != nil {
+			return serr
+		}
+		wantUC, wantTR = sw.UC, sw.TR
+	}
 	if w.Status != 1 || w.Number != r.Height || !bytes.Equal(w.Hash, r.Subject.BlockHash[:]) || !bytes.Equal(w.StateRoot, r.StateRoot[:]) ||
-		!bytes.Equal(w.AuthorizingUC, item.Material.OriginalUC) || !bytes.Equal(w.AuthorizingTR, item.Material.OriginalTR) || !bytes.Equal(w.ResultingUC, item.Material.ResultingUC) || !bytes.Equal(w.ResultingTR, item.Material.ResultingTR) {
+		!bytes.Equal(w.AuthorizingUC, item.Material.OriginalUC) || !bytes.Equal(w.AuthorizingTR, item.Material.OriginalTR) || !bytes.Equal(wantUC, item.Material.ResultingUC) || !bytes.Equal(wantTR, item.Material.ResultingTR) {
 		return frontier.ErrInvalid
 	}
-	resultUC, _, err := verifiedPairBytes(ctx, c, w.ResultingUC, w.ResultingTR)
+	resultUC, _, err := verifiedPairBytes(ctx, c, wantUC, wantTR)
 	if err != nil {
 		return fmt.Errorf("%w: %v", frontier.ErrInvalid, err)
 	}

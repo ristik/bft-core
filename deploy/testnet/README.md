@@ -287,7 +287,7 @@ The hosted-runner rehearsal (`.github/workflows/testnet-rehearsal.yml`) runs THR
 first): the PoA package (up, identity, first transaction, gateway limits, faucet guard, load, observation smoke, pod restart, backup/restore, reset); a PoS package (the 5a smoke, the
 reward pool, the election, the first handoff, Abort before and after H, restarts, stale credentials, the second handoff, recreate without the install flag, the resource smoke and the
 owner-key operations); and a PoS **join** package (a fifth entity registers, bonds and is delegated, the election has five members, the handoff takes it in, its signature is needed for
-the quorum, it restarts, and a weight-2 candidate is refused by the election). The opt-in crash stages (#843) and `pos_stages` dispatches run on the PoS package only.
+the quorum, it restarts, and a weight-2 candidate yields no committee change: unequal weights are not reachable at D <= 1/2, nMax 6, owner decision §42). The opt-in crash stages (#843) and `pos_stages` dispatches run on the PoS package only.
 
 CI runs gateway refusal/topology tests, existing faucet tests, two fresh genesis
 ceremonies with fixture image IDs, Compose validation, Prometheus rule/config

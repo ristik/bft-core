@@ -116,6 +116,9 @@ cp -R test-nodes/p85 "$EVIDENCE_DIR/p85" 2>/dev/null || true
 # the execution side's logs only (never its data or keys: the publisher excludes evm*/ reth*/ whole): the last 4000 lines of each validator's node and client log, for a transaction that was never mined
 mkdir -p "$EVIDENCE_DIR/exec-logs"
 for f in test-nodes/evm*/debug.log test-nodes/reth*/reth.log; do [ -f "$f" ] && tail -n 4000 "$f" >"$EVIDENCE_DIR/exec-logs/$(basename "$(dirname "$f")")-$(basename "$f")" 2>/dev/null; done
+# the history, not only the tail (bft-core#876: a stalled node's log tail is all repetition and the cause is hours earlier): every distinct line shape of each validator's node log from the
+# START, at most 5 of each (time, block hashes and goroutine ids ignored), 6000 lines in all
+for f in test-nodes/evm*/debug.log; do [ -f "$f" ] && awk '{k=$0; sub(/^time=[^ ]* /,"",k); gsub(/[0-9a-f]{16,}/,"H",k); sub(/go_id=[0-9]+/,"",k); if (++n[substr(k,1,150)]<=5) print}' "$f" | head -n 6000 >"$EVIDENCE_DIR/exec-logs/$(basename "$(dirname "$f")")-history.log" 2>/dev/null; done
 if [ "$ANYAGE_LANE" = 1 ]; then mkdir -p "$EVIDENCE_DIR/aggregator"; for d in test-nodes/agg test-nodes/agg[0-9]; do [ -d "$d" ] && { mkdir -p "$EVIDENCE_DIR/aggregator/$(basename "$d")"; cp "$d"/stdout.log "$d"/logs/*.log "$EVIDENCE_DIR/aggregator/$(basename "$d")/" 2>/dev/null || true; }; done; cp test-nodes/lane-config.json test-nodes/bridge-addresses.json "$EVIDENCE_DIR/" 2>/dev/null || true; fi
 # what the lane's helpers read, kept so a failure can be replayed offline (go run ./scripts/h3-pdr, the weight checks, the trust-base tools): the roots'
 # databases and public node info, the trust bases, the lane's flow directories; not the execution clients' data, the authorities' credentials or keys

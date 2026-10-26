@@ -44,7 +44,7 @@ func TestRoundAwareFrontierBreaksUnresolvedObservationDeadlock(t *testing.T) {
 	nextCandidate := configuredprogress.JournalCandidate{Round: 2, Number: 2, ParentNumber: 1,
 		Hash: nextHash[:], StateRoot: nextState[:], ParentHash: parentHash[:], ParentState: parentState[:],
 		Raw: nextRaw, BlockSize: nextSize, AuthorizingUC: firstEntry.ResultingUC, AuthorizingTR: firstEntry.ResultingTR}
-	require.ErrorIs(t, f.store.PutJournalCandidate(ctx, f.context, limits, nextCandidate), configuredprogress.ErrBounds,
+	require.ErrorIs(t, f.store.PutJournalCandidate(ctx, f.context, limits, nextCandidate), configuredprogress.ErrCapacity,
 		"the journal is at its candidate cap")
 
 	ir := &types.InputRecord{Version: 1, RoundNumber: 2, Hash: nextState[:], PreviousHash: bytes.Clone(parentState[:]),

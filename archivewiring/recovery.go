@@ -100,6 +100,7 @@ func (s *RecoverySource) fetchVerifiedEntry(ctx context.Context, q archive.Reque
 func (s *RecoverySource) fetchVerifiedRecord(ctx context.Context, q archive.Request) (shardnode.JournalFetchEntry, *archive.Record, bool, error) {
 	var failures []error
 	if s.Local != nil {
+		// The base representation is read here on purpose (bft-core#876): the record is authenticated below and nothing compares it with a journal-derived manifest; a selected variant certifies the same input record.
 		rec, err := s.Local.Get(q)
 		if err == nil {
 			entry, verifyErr := s.decodeEntry(ctx, q, rec)
