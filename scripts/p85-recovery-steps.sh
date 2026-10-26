@@ -44,6 +44,7 @@ p85_chain_report() {
 }
 p85_step_die() {
   local i
+  p85_stop_opstatus
   echo "  FAIL: $*" >&2
   p85_chain_report
   for i in 1 2 3 4 5; do [ -f "test-nodes/root$i/debug.log" ] && { echo "--- tail of root$i/debug.log" >&2; tail -n 6 "test-nodes/root$i/debug.log" | cut -c1-300 >&2; }; done
@@ -63,9 +64,12 @@ p85_opstatus() { # label
   done
   return 0
 }
-p85_opstatus_sampler() { # lane pid: sample while the lane lives
-  ( while kill -0 "$1" 2>/dev/null; do p85_opstatus sampler; sleep 60; done ) >/dev/null 2>&1 &
+p85_opstatus_sampler() { # lane pid: sample while the lane lives. The pid is BASHPID, never $$ (a subshell's $$ is its parent's: the sampler then outlived the lane and the runner's wait on it
+  # held the job until its deadline, 4 hours, in the first repro run of bft-core#876). The lane's exit paths also stop it (p85_stop_opstatus).
+  ( while kill -0 "$1" 2>/dev/null && [ ! -e "$H3_DIR/.opstatus-stop" ]; do p85_opstatus sampler; sleep 60; done ) >/dev/null 2>&1 </dev/null &
+  P85_OPSTATUS_PID=$!
 }
+p85_stop_opstatus() { : >"$H3_DIR/.opstatus-stop" 2>/dev/null; [ -z "${P85_OPSTATUS_PID:-}" ] || kill "$P85_OPSTATUS_PID" 2>/dev/null; return 0; }
 p85_step() {
   local name=$1; shift; echo "--- P85 step: $name"
   "$@" || { p85_view "$name:failed" || true; p85_step_die "$name"; }
@@ -853,13 +857,14 @@ p85_run_lane() {
     [ "${X4_FAULTS_LANE:-0}" != 1 ] || P85_STEPS="$P85_STEPS x4_report"   # the driver's verdict over the lane's whole record (after x4a_final wrote accounting.txt)
   fi
   [ "${P85_MODE:-}" != overbound ] || { P85_JOINER_UNITS=3; P85_STEPS="p85_baseline p85_joiner_nodes p85_joiner_onboard p85_election_refused"; }
-  [ "${X4_ACCT_LANE:-0}" != 1 ] || p85_opstatus_sampler $$
+  rm -f "$H3_DIR/.opstatus-stop"; [ "${X4_ACCT_LANE:-0}" != 1 ] || p85_opstatus_sampler "$BASHPID"
   for s in $P85_STEPS; do
     p85_step "$s" "$s"
     # CI harness-failure test (scripts/ci/run-lane.sh, workflow input inject_failure=in-lane): the lane fails deliberately after one named step so the failure path's
     # diagnostics can be shown. Honoured only on a GitHub runner; it asserts nothing and weakens nothing, it adds a failing step.
     if [ "${GITHUB_ACTIONS:-}" = true ] && [ -n "${CI_INJECT_FAIL_AFTER:-}" ] && [ "$s" = "$CI_INJECT_FAIL_AFTER" ]; then p85_step "injected-harness-failure-after-$s" false; fi
   done
+  p85_stop_opstatus
   echo "P85 recovery lane: all steps PASSED"
   if [ "${ANYAGE_LANE:-0}" = 1 ]; then echo "any-age final lane: all steps PASSED"; fi
   if [ "${UTB_LANE:-0}" = 1 ]; then echo "UTB lane: all steps PASSED"; fi
