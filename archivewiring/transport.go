@@ -73,7 +73,13 @@ type Server struct {
 	mu           sync.Mutex
 	pending      int
 	byPeer       map[peer.ID]int
+	// defaultDigest names the representation of a block the default read (op 2) serves when this node adopted another valid representation of it (bft-core#876); the block's
+	// own record otherwise.
+	defaultDigest func(archive.Request) ([32]byte, bool)
 }
+
+// SetDefaultRepresentation routes the default read through the journal's archive selection. Call before Register.
+func (s *Server) SetDefaultRepresentation(f func(archive.Request) ([32]byte, bool)) { s.defaultDigest = f }
 
 func (s *Server) SetBundleVerifier(v BundleVerifier) { s.bundleVerify = v }
 
@@ -270,6 +276,35 @@ func (s *Server) serveFrame(ctx context.Context, rw io.ReadWriter, frame []byte)
 		}
 		return typedHandlerError(writeFrame(rw, append([]byte{byte(archive.OK)}, encoded...)))
 	}
+	if op == 6 {
+		// exact-digest read: [6][32-byte manifest digest][request]. The digest is a locator, never a verdict: the store recomputes it from what it returns, and the caller does again.
+		if len(frame) < 1+32+2 {
+			return fmt.Errorf("%w: %w", ErrHandler, archive.ErrInvalid)
+		}
+		var digest [32]byte
+		copy(digest[:], frame[1:33])
+		eq, err := archive.DecodeRequest(frame[33:])
+		if err != nil {
+			return fmt.Errorf("%w: %w", ErrHandler, err)
+		}
+		eqb, _ := archive.EncodeRequest(eq)
+		if !bytes.Equal(eqb[:len(eqb)-32], s.want) {
+			encoded, err := archive.EncodeResponse(archive.Response{Request: eq, Outcome: archive.Invalid})
+			if err != nil {
+				return err
+			}
+			return typedHandlerError(writeFrame(rw, encoded))
+		}
+		answer := archive.Response{Request: eq, Outcome: archive.Unavailable}
+		if rec, err := s.store.GetExact(eq, digest); err == nil {
+			answer = archive.Response{Request: eq, Outcome: archive.OK, Record: rec}
+		}
+		encoded, err := archive.EncodeResponse(answer)
+		if err != nil {
+			return err
+		}
+		return typedHandlerError(writeFrame(rw, encoded))
+	}
 	var q archive.Request
 	var rec *archive.Record
 	var err error
@@ -309,6 +344,14 @@ func (s *Server) serveFrame(ctx context.Context, rw io.ReadWriter, frame []byte)
 		return typedHandlerError(writeFrame(rw, []byte{1}))
 	}
 	answer := s.store.Serve(q)
+	if s.defaultDigest != nil {
+		if digest, selected := s.defaultDigest(q); selected {
+			answer = archive.Response{Request: q, Outcome: archive.Unavailable}
+			if rec, err := s.store.GetExact(q, digest); err == nil {
+				answer = archive.Response{Request: q, Outcome: archive.OK, Record: rec}
+			}
+		}
+	}
 	encoded, err := archive.EncodeResponse(answer)
 	if err != nil {
 		return err
@@ -529,20 +572,41 @@ func PutAndReadBack(ctx context.Context, host shardnode.EvidenceHost, id peer.ID
 	if !bytes.Equal(answer, []byte{1}) {
 		return ErrReplica
 	}
-	request, _ := archive.EncodeRequest(q)
-	answer, err = exchange(ctx, host, id, append([]byte{2}, request...), limits)
+	// the read-back asks for the EXACT manifest that was put: with another representation selected on the replica, the default read would answer with that one
+	readBack, err := FetchExact(ctx, host, id, q, want, limits)
 	if err != nil {
-		return err
-	}
-	readBack, err := archive.DecodeFor(q, answer)
-	if err != nil || readBack.Outcome != archive.OK || readBack.Record == nil {
 		return ErrReplica
 	}
-	got, err := archive.ManifestDigest(q, readBack.Record)
+	got, err := archive.ManifestDigest(q, readBack)
 	if err != nil || got != want {
 		return ErrReplica
 	}
 	return nil
+}
+
+// FetchExact reads, from one configured replica, the stored representation of a block whose manifest digest is the given one (bft-core#876). The digest only locates the object:
+// the answer's own digest is recomputed and compared, and authentication is the caller's responsibility.
+func FetchExact(ctx context.Context, host shardnode.EvidenceHost, id peer.ID, q archive.Request, digest [32]byte, limits Limits) (*archive.Record, error) {
+	if host == nil || id == "" || !limits.valid() {
+		return nil, archive.ErrInvalid
+	}
+	raw, err := archive.EncodeRequest(q)
+	if err != nil {
+		return nil, err
+	}
+	answer, err := exchange(ctx, host, id, append(append([]byte{6}, digest[:]...), raw...), limits)
+	if err != nil {
+		return nil, err
+	}
+	response, err := archive.DecodeFor(q, answer)
+	if err != nil || response.Outcome != archive.OK || response.Record == nil {
+		return nil, ErrReplica
+	}
+	got, err := archive.ManifestDigest(q, response.Record)
+	if err != nil || got != digest {
+		return nil, ErrReplica
+	}
+	return response.Record, nil
 }
 
 // Fetch reads an exact record from one configured replica. Authentication is

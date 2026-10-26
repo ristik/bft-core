@@ -124,21 +124,9 @@ func (v ReplicaAvailability) VerifyAvailable(name string, q archive.Request, exp
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	request, err := archive.EncodeRequest(q)
-	if err != nil {
-		return err
-	}
-	answer, err := exchange(ctx, v.Host, id, append([]byte{2}, request...), v.Limits)
-	if err != nil {
+	// the exact manifest the promise names, whichever representation the replica serves by default (bft-core#876)
+	if _, err := FetchExact(ctx, v.Host, id, q, expected, v.Limits); err != nil {
 		return fmt.Errorf("%w: %v", frontier.ErrUnavailable, err)
-	}
-	response, err := archive.DecodeFor(q, answer)
-	if err != nil || response.Outcome != archive.OK || response.Record == nil {
-		return frontier.ErrUnavailable
-	}
-	got, err := archive.ManifestDigest(q, response.Record)
-	if err != nil || got != expected {
-		return frontier.ErrUnavailable
 	}
 	return nil
 }

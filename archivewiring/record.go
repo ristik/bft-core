@@ -49,6 +49,12 @@ func FromJournal(ctx context.Context, c configuredprogress.Context, subject arch
 	if !e.Certified || e.ResultingUC == nil || e.ResultingTR == nil || e.Candidate.AuthorizingUC == nil || e.Candidate.AuthorizingTR == nil {
 		return archive.Request{}, nil, ErrUncertified
 	}
+	// The resulting pair the archive representation carries: the selected one if this journal adopted another valid representation of the block (bft-core#876: the journal's own
+	// association is untouched), else the association itself. Both go through the same checks below.
+	resultUC, resultTR := e.ResultingUC, e.ResultingTR
+	if e.Archive != nil {
+		resultUC, resultTR = e.Archive.UC, e.Archive.TR
+	}
 	b := e.Candidate
 	if len(b.Hash) != 32 || len(b.StateRoot) != 32 || len(b.ParentHash) != 32 || len(b.ParentState) != 32 {
 		return archive.Request{}, nil, ErrBinding
@@ -56,10 +62,10 @@ func FromJournal(ctx context.Context, c configuredprogress.Context, subject arch
 	if _, err := rootinput.AuthenticateHistoricalObservationV2(ctx, c.Observation, b.AuthorizingUC, b.AuthorizingTR); err != nil {
 		return archive.Request{}, nil, fmt.Errorf("%w: original pair: %v", ErrBinding, err)
 	}
-	if _, err := rootinput.AuthenticateHistoricalObservationV2(ctx, c.Observation, e.ResultingUC, e.ResultingTR); err != nil {
+	if _, err := rootinput.AuthenticateHistoricalObservationV2(ctx, c.Observation, resultUC, resultTR); err != nil {
 		return archive.Request{}, nil, fmt.Errorf("%w: resulting pair: %v", ErrBinding, err)
 	}
-	if e.ResultingUC.InputRecord.RoundNumber != b.Round || !bytes.Equal(e.ResultingUC.InputRecord.BlockHash, b.Hash) || !bytes.Equal(e.ResultingUC.InputRecord.Hash, b.StateRoot) || rootinput.CheckEpochCertificates(b.AuthorizingUC, e.ResultingUC) != nil || b.AuthorizingUC.GetRootEpoch() == e.ResultingUC.GetRootEpoch() && b.AuthorizingUC.GetRootRoundNumber() >= e.ResultingUC.GetRootRoundNumber() {
+	if resultUC.InputRecord.RoundNumber != b.Round || !bytes.Equal(resultUC.InputRecord.BlockHash, b.Hash) || !bytes.Equal(resultUC.InputRecord.Hash, b.StateRoot) || rootinput.CheckEpochCertificates(b.AuthorizingUC, resultUC) != nil || b.AuthorizingUC.GetRootEpoch() == resultUC.GetRootEpoch() && b.AuthorizingUC.GetRootRoundNumber() >= resultUC.GetRootRoundNumber() {
 		return archive.Request{}, nil, ErrBinding
 	}
 	seal, err := shardnode.SealHash(b.AuthorizingUC)
@@ -85,11 +91,11 @@ func FromJournal(ctx context.Context, c configuredprogress.Context, subject arch
 	if err != nil {
 		return archive.Request{}, nil, err
 	}
-	resultingUC, err := types.Cbor.Marshal(e.ResultingUC)
+	resultingUC, err := types.Cbor.Marshal(resultUC)
 	if err != nil {
 		return archive.Request{}, nil, err
 	}
-	resultingTR, err := types.Cbor.Marshal(e.ResultingTR)
+	resultingTR, err := types.Cbor.Marshal(resultTR)
 	if err != nil {
 		return archive.Request{}, nil, err
 	}

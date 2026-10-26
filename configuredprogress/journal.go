@@ -100,7 +100,18 @@ type JournalEntry struct {
 	Certified   bool
 	ResultingUC *types.UnicityCertificate
 	ResultingTR *certification.TechnicalRecord
+	// Archive is the resulting pair the ARCHIVE representation of this block carries when it differs from the association above (bft-core#876): nil until a selection
+	// is made. The association (ResultingUC/TR) is never changed by it.
+	Archive *ArchiveSelection
 }
+// ArchiveResult is the resulting pair the archive representation of this block carries: the selected pair if one was selected (bft-core#876), else the association.
+func (e JournalEntry) ArchiveResult() (*types.UnicityCertificate, *certification.TechnicalRecord) {
+	if e.Archive != nil {
+		return e.Archive.UC, e.Archive.TR
+	}
+	return e.ResultingUC, e.ResultingTR
+}
+
 type JournalObservation struct {
 	UC         *types.UnicityCertificate
 	TR         *certification.TechnicalRecord
@@ -894,6 +905,11 @@ func (s *Store) loadJournalOnce(ctx context.Context, c Context, limits JournalLi
 					return ErrConflict
 				}
 				entry.Certified, entry.ResultingUC, entry.ResultingTR = true, resultUC, resultTR
+				sel, e := readArchiveSelection(ctx, b, c, state.i.descriptorDigest, w)
+				if e != nil {
+					return e
+				}
+				entry.Archive = sel
 			} else if w.Status != 0 || len(w.ResultingUC) != 0 || len(w.ResultingTR) != 0 {
 				return ErrUntrusted
 			}

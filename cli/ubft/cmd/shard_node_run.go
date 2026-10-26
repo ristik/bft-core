@@ -930,6 +930,10 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 			if e != nil {
 				return fmt.Errorf("starting archive replica: %w", e)
 			}
+			// the default read serves the representation the journal selected for a block (bft-core#876), else the block's own record; the reads that matter for promises ask by exact digest
+			archiveServer.SetDefaultRepresentation(func(q archive.Request) ([32]byte, bool) {
+				return journalStore.ArchiveDigestOf(ctx, journalCtx, limits, q.BlockHash)
+			})
 			if flags.TrustHistoryProfile2 {
 				archiveServer.SetBundleVerifier(archivewiring.BundleAdmission(historicalTrust, node.ShardConfForEpoch))
 			}

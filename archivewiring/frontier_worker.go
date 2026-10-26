@@ -36,6 +36,7 @@ type FrontierWorker struct {
 	// Finalized bounds pruning to the execution head this node has actually
 	// committed. An archive copy can arrive before local EL finality does.
 	Finalized          func(context.Context) (shardnode.BlockRef, error)
+	adoptAt            map[[32]byte]time.Time // when the replicas were last probed for another representation of a blocked block (bft-core#876)
 	auditCursor        uint64
 	lastCapacityWarn   time.Time
 	lastNoProgressWarn time.Time
@@ -180,15 +181,17 @@ func (w *FrontierWorker) advance(ctx context.Context, mark func(string), max int
 		if w.Finalized != nil && entry.Candidate.Number == finalized.Number && !bytes.Equal(entry.Candidate.Hash, finalized.Hash) {
 			return ErrBinding
 		}
-		if entry.Candidate.Number != height+1 || entry.ResultingUC.GetRootEpoch() < epoch || entry.ResultingUC.GetRootEpoch() == epoch && entry.ResultingUC.GetRootRoundNumber() <= round {
-			stopped = fmt.Sprintf("block %d does not follow the frontier anchor %d (root position %d/%d against the anchor's %d/%d)", entry.Candidate.Number, height, entry.ResultingUC.GetRootEpoch(), entry.ResultingUC.GetRootRoundNumber(), epoch, round)
+		// the root position of the block's ARCHIVE representation: the selected pair's if the journal adopted another one (bft-core#876), else the association's
+		resultUC, _ := entry.ArchiveResult()
+		if entry.Candidate.Number != height+1 || resultUC.GetRootEpoch() < epoch || resultUC.GetRootEpoch() == epoch && resultUC.GetRootRoundNumber() <= round {
+			stopped = fmt.Sprintf("block %d does not follow the frontier anchor %d (root position %d/%d against the anchor's %d/%d)", entry.Candidate.Number, height, resultUC.GetRootEpoch(), resultUC.GetRootRoundNumber(), epoch, round)
 			break
 		}
 		var hash, state [32]byte
 		copy(hash[:], entry.Candidate.Hash)
 		copy(state[:], entry.Candidate.StateRoot)
 		q := archive.Request{Context: w.Subject, BlockHash: hash}
-		rec, err := w.Archive.GetReceiptComplete(q)
+		rec, err := localRepresentation(w.Archive, q, entry)
 		if err != nil {
 			if errors.Is(err, archive.ErrUnavailable) {
 				if len(covered) == 0 {
@@ -218,18 +221,29 @@ func (w *FrontierWorker) advance(ctx context.Context, mark func(string), max int
 		holders, err := w.holders(availability, q, digest, unreachable)
 		if err != nil {
 			if len(covered) == 0 {
+				// The oldest uncovered block cannot get two matching copies. Another valid representation of it may be the one the replicas hold (bft-core#876): probe, and
+				// adopt it if the rules of adoption.go hold; the next pass plans with the selected one.
+				if errors.Is(err, frontier.ErrAcknowledgment) {
+					if adopted, aerr := w.adoptEquivalent(ctx, entry, q, rec, digest); aerr != nil {
+						if w.Log != nil {
+							w.Log.WarnContext(ctx, "archive adoption failed", "err", aerr)
+						}
+					} else if adopted {
+						return nil
+					}
+				}
 				return err
 			}
 			stopped = fmt.Sprintf("block %d: %v", entry.Candidate.Number, err)
 			break
 		}
 		sequence++
-		record := frontier.Record{Sequence: sequence, Height: entry.Candidate.Number, Epoch: entry.ResultingUC.GetRootEpoch(), Round: entry.ResultingUC.GetRootRoundNumber(), StateRoot: state, Subject: q, PolicyDigest: w.PolicyDigest}
+		record := frontier.Record{Sequence: sequence, Height: entry.Candidate.Number, Epoch: resultUC.GetRootEpoch(), Round: resultUC.GetRootRoundNumber(), StateRoot: state, Subject: q, PolicyDigest: w.PolicyDigest}
 		for i, index := range holders {
 			record.Acks[i] = frontier.Acknowledgment{Replica: w.Replicas[index].String(), RequestDigest: ack, ManifestDigest: digest}
 		}
 		covered = append(covered, frontier.Coverage{Anchor: record, Material: rec})
-		height, epoch, round = entry.Candidate.Number, entry.ResultingUC.GetRootEpoch(), entry.ResultingUC.GetRootRoundNumber()
+		height, epoch, round = entry.Candidate.Number, resultUC.GetRootEpoch(), resultUC.GetRootRoundNumber()
 		if len(covered) == max {
 			break
 		}
@@ -341,7 +355,8 @@ func (w *FrontierWorker) audit(ctx context.Context) error {
 			return nil
 		}
 		for _, r := range page {
-			rec, err := w.Archive.Get(r.Subject)
+			// the promise names an exact manifest: the local copy is that representation, which may be a variant object (bft-core#876)
+			rec, err := w.Archive.GetExact(r.Subject, r.Acks[0].ManifestDigest)
 			if err != nil {
 				verified := false
 				for _, id := range w.Replicas {
@@ -354,7 +369,7 @@ func (w *FrontierWorker) audit(ctx context.Context) error {
 				if !verified {
 					return frontier.ErrUnavailable
 				}
-				if err := w.Archive.Put(r.Subject, rec); err != nil {
+				if err := putExact(w.Archive, r.Subject, rec); err != nil {
 					return err
 				}
 			}
@@ -409,21 +424,19 @@ func (w *FrontierWorker) ensureCopies(ctx context.Context, availability ReplicaA
 }
 
 func readReplica(ctx context.Context, host shardnode.EvidenceHost, id peer.ID, q archive.Request, want [32]byte, limits Limits) (*archive.Record, error) {
-	request, err := archive.EncodeRequest(q)
+	rec, err := FetchExact(ctx, host, id, q, want, limits)
 	if err != nil {
-		return nil, err
-	}
-	answer, err := exchange(ctx, host, id, append([]byte{2}, request...), limits)
-	if err != nil {
-		return nil, err
-	}
-	response, err := archive.DecodeFor(q, answer)
-	if err != nil || response.Outcome != archive.OK || response.Record == nil {
 		return nil, frontier.ErrUnavailable
 	}
-	digest, err := archive.ManifestDigest(q, response.Record)
-	if err != nil || digest != want {
-		return nil, frontier.ErrUnavailable
+	return rec, nil
+}
+
+// putExact stores a representation a promise names: the block's own record when none is stored, else (another representation already holds the request's base object) a variant
+// object. Nothing stored is ever replaced.
+func putExact(store *archive.Store, q archive.Request, rec *archive.Record) error {
+	err := store.Put(q, rec)
+	if errors.Is(err, archive.ErrInvalid) {
+		return store.PutVariant(q, rec)
 	}
-	return response.Record, nil
+	return err
 }
