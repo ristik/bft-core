@@ -675,7 +675,6 @@ func TestSelectionRefusesAPairThatDoesNotFollowTheAuthorization(t *testing.T) {
 	require.Nil(t, h.senderEntry(t).Archive)
 }
 
-
 // A selected object that is missing on a replica makes the DEFAULT read unavailable too; it does not fall back to the other representation (rev's note on op 2).
 func TestServerDefaultReadOfAMissingSelectedObjectIsUnavailable(t *testing.T) {
 	t.Parallel()
