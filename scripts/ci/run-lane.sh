@@ -39,7 +39,7 @@ finalize() {
     evdir=$work/evidence-none; mkdir -p "$evdir"; echo "the lane produced no evidence directory" >"$evdir/lane.log"
   fi
   st=${lane_rc:-1}; [ "$rc" -eq 0 ] || st=$rc
-  scripts/ci/publish-evidence.sh --evidence "$evdir" --out "$out/upload" --kind "$kind" --s4 "${S4_LANE:-0}" --x4o "${X4_OFFENCE_LANE:-0}" --x4a "${X4_ACCT_LANE:-0}" --x4r "${X4_REWARDS_POS:-0}" --x4g "${X4_GOV_LANE:-0}" --x4f "${X4_FAULTS_LANE:-0}" --status "$st" --nodes "$repo/test-nodes" --min-node-logs 1 \
+  scripts/ci/publish-evidence.sh --evidence "$evdir" --out "$out/upload" --kind "$kind" --s4 "${S4_LANE:-0}" --x4o "${X4_OFFENCE_LANE:-0}" --x4a "${X4_ACCT_LANE:-0}" --x4r "${X4_REWARDS_POS:-0}" --x4g "${X4_GOV_LANE:-0}" --x4f "${X4_FAULTS_LANE:-0}" --x4h "${X4_H2_LANE:-0}" --status "$st" --nodes "$repo/test-nodes" --min-node-logs 1 \
     --extra "$out/run-lane.log" --extra "$out/lane-stdout.log" --extra "$out/lane-prep.log" --extra "$out/mongo" --extra "$out/p85-stop.log" --extra "$out/host-before.log.gz" --extra "$out/host-after.log.gz" --extra "$out/oom-lines.txt" >"$out/publish.log" 2>&1
   pub_rc=$?; log "publish-evidence exit $pub_rc"; cat "$out/publish.log" | tail -n 8
   return 0
@@ -98,6 +98,12 @@ if [ "$kind" = combined ] && [ "$(jq -r '.s4 // false' scripts/ci/run-inputs.jso
 # run-inputs "offence2": true (with "s4": true, on the combined or x4exit kind) adds X4 B4's second offence by a staying member (scripts/x4pos/offence-lib.sh)
 if [ "$(jq -r '.offence2 // false' scripts/ci/run-inputs.json 2>/dev/null)" = true ]; then
   case "$kind" in combined|x4exit) [ "$(jq -r '.s4 // false' scripts/ci/run-inputs.json 2>/dev/null)" = true ] || { log "offence2 needs s4: true"; exit 2; }; export X4_OFFENCE_LANE=1; log "X4_OFFENCE_LANE=1 (run-inputs offence2)" ;; esac
+fi
+# run-inputs "handoff2": true (with "offence2": true, on the x4exit kind) adds X4 #856's second handoff on the accumulated chain: entity 4 stays alive through the J stall, the election result that opens after the
+# recovery is driven to its Ack (K to K' with the same four members) before offence 2, and offence 2 then marks the next result lost and the roots reject it (scripts/x4pos/handoff-lib.sh)
+if [ "$(jq -r '.handoff2 // false' scripts/ci/run-inputs.json 2>/dev/null)" = true ]; then
+  [ "$kind" = x4exit ] && [ "${X4_OFFENCE_LANE:-0}" = 1 ] || { log "handoff2 needs offence2: true (and s4: true) on the x4exit kind"; exit 2; }
+  export X4_H2_LANE=1; log "X4_H2_LANE=1 (run-inputs handoff2)"
 fi
 # run-inputs "accounting": true (x4exit kind) adds X4 B6's accounting snapshots between the lane's phases and the checker at the end (scripts/x4pos/acct-lib.sh)
 if [ "$(jq -r '.accounting // false' scripts/ci/run-inputs.json 2>/dev/null)" = true ]; then
