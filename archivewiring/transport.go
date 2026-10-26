@@ -416,6 +416,8 @@ func archiveOperation(op byte) string {
 		return "bundle-get"
 	case 5:
 		return "bundle-put"
+	case 6:
+		return "get-exact"
 	default:
 		return "unknown"
 	}

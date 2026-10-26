@@ -234,6 +234,7 @@ func reapplyHandoffTerminalCertificatesWithArchive(ctx context.Context, store ha
 		var q archive.Request
 		q.Context = archiveContext
 		copy(q.BlockHash[:], terminal.uc.InputRecord.BlockHash)
+		// The base representation is read here on purpose (bft-core#876): the record is authenticated below and nothing compares it with a journal-derived manifest; a selected variant certifies the same input record.
 		record, archiveErr := localArchive.Get(q)
 		if errors.Is(archiveErr, archive.ErrUnavailable) {
 			return fmt.Errorf("%w: handoff terminal body %x is unavailable in both journal and archive",

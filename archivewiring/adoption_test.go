@@ -234,6 +234,10 @@ func TestAdoptionRejectsUncertifiedOrDifferentResult(t *testing.T) {
 		mutate(bad)
 		require.Error(t, w.equivalentRepresentation(entry, h.qBlock, h.recB, bad), name)
 	}
+	// an uninterpreted extension whose VALUE differs (not only an extra key)
+	withLocal, withOffered := clone(h.recB), clone(h.recA)
+	withLocal.Extensions["x-test"], withOffered.Extensions["x-test"] = []byte("one"), []byte("two")
+	require.Error(t, w.equivalentRepresentation(entry, h.qBlock, withLocal, withOffered), "another extension value")
 	// another block entirely (valid, signed, certified), offered for this one
 	_, other := h.replicas[0].record(t, h.replicas[0].indexOf(t, 3))
 	require.Error(t, w.equivalentRepresentation(entry, h.qBlock, h.recB, other), "another block")
@@ -669,4 +673,35 @@ func TestSelectionRefusesAPairThatDoesNotFollowTheAuthorization(t *testing.T) {
 		BlockHash: h.qBlock.BlockHash, Prior: configuredprogress.PairID(h.recB.ResultingUC, h.recB.ResultingTR), OldDigest: h.digestB, NewDigest: [32]byte{1}, UC: uc, TR: tr})
 	require.Error(t, err)
 	require.Nil(t, h.senderEntry(t).Archive)
+}
+
+
+// A selected object that is missing on a replica makes the DEFAULT read unavailable too; it does not fall back to the other representation (rev's note on op 2).
+func TestServerDefaultReadOfAMissingSelectedObjectIsUnavailable(t *testing.T) {
+	t.Parallel()
+	h := newAdoptionHarness(t)
+	ctx := context.Background()
+	for pass := 0; pass < 6; pass++ {
+		_ = h.worker().Pass(ctx)
+	}
+	require.EqualValues(t, adoptionBlocks, h.anchorHeight(t))
+	server := testpeer.CreatePeer(t, testpeer.CreatePeerConfiguration(t))
+	client := testpeer.CreatePeer(t, testpeer.CreatePeerConfiguration(t))
+	client.Network().Peerstore().AddAddrs(server.ID(), server.MultiAddresses(), peerstore.PermanentAddrTTL)
+	srv, err := NewServer(h.local, h.senderJrnl.subject, func(context.Context, archive.Request, *archive.Record) error { return nil }, []peer.ID{client.ID()}, DefaultLimits())
+	require.NoError(t, err)
+	srv.SetDefaultRepresentation(func(q archive.Request) ([32]byte, bool) {
+		return h.senderJrnl.store.ArchiveDigestOf(ctx, h.senderJrnl.context, h.senderJrnl.limits, q.BlockHash)
+	})
+	srv.Register(ctx, server)
+	localDir := reflect.ValueOf(h.local).Elem().FieldByName("dir").String()
+	enc, err := archive.EncodeRequest(h.qBlock)
+	require.NoError(t, err)
+	sum := sha256.Sum256(enc)
+	require.NoError(t, os.RemoveAll(filepath.Join(localDir, "v2-"+hex.EncodeToString(sum[:])+"-"+hex.EncodeToString(h.digestA[:]))))
+	_, err = Fetch(ctx, client, server.ID(), h.qBlock, DefaultLimits())
+	require.Error(t, err, "the default read does not answer B in A's place")
+	got, err := FetchExact(ctx, client, server.ID(), h.qBlock, h.digestB, DefaultLimits())
+	require.NoError(t, err, "B is still available by its exact digest")
+	require.Equal(t, h.digestB, mustDigest(t, h.qBlock, got))
 }

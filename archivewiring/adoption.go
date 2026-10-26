@@ -85,6 +85,13 @@ func (w *FrontierWorker) adoptEquivalent(ctx context.Context, entry configuredpr
 		w.adoptAt = make(map[[32]byte]time.Time)
 	}
 	w.adoptAt[key] = time.Now()
+	if len(w.adoptAt) > 256 { // one entry per blocked block: forget the ones whose retry window has long passed
+		for k, at := range w.adoptAt {
+			if time.Since(at) > 10*adoptionRetry {
+				delete(w.adoptAt, k)
+			}
+		}
+	}
 	type offer struct {
 		rec      *archive.Record
 		replicas []int
