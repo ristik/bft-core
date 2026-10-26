@@ -483,6 +483,8 @@ func (p *Publisher) pass(ctx context.Context) error {
 // publisherPassRecords is how many records one publication pass handles; the busy budget applies while the journal is at least
 // publisherBusyPercent full.
 const (
+	replicaPassRecords       = 4
+	replicaBusyPassRecords   = 16
 	publisherPassRecords     = 4
 	publisherBusyPassRecords = 16
 	publisherBusyPercent     = 50
@@ -540,25 +542,59 @@ func (p *Publisher) replicaPass(ctx context.Context, index int) error {
 	start := p.replicaCursor[index]
 	p.mu.Unlock()
 	var first error
-	processed := 0
-	for j := 0; j < len(entries); j++ {
-		position := (start + j) % len(entries)
-		e := entries[position]
+	// The blocks this replica has not acknowledged, LOWEST first: the frontier prunes contiguously from its anchor, so the lowest unacknowledged block
+	// is the one pruning waits for, and a restart empties the acknowledgements (every block pending again). The budget is replicaPassRecords, replicaBusyPassRecords
+	// while the journal is at least publisherBusyPercent full; all but one slot go to the lowest blocks and one to the rotating cursor, so that a record the replica
+	// keeps refusing cannot starve the ones behind it (bft-core#876).
+	usage := JournalUsage{CandidatesUsed: len(image.Candidates), CandidatesCap: p.JournalLimits.Candidates, ObservationsUsed: len(image.Observations),
+		ObservationsCap: p.JournalLimits.Observations, BytesUsed: image.Bytes, BytesCap: p.JournalLimits.Bytes}
+	budget := replicaPassRecords
+	if usage.Percent() >= publisherBusyPercent {
+		budget = replicaBusyPassRecords
+	}
+	var todo []int
+	p.mu.Lock()
+	for position, e := range entries {
 		var hash [32]byte
 		copy(hash[:], e.Candidate.Hash)
-		p.mu.Lock()
-		bits := p.ack[hash]
-		p.mu.Unlock()
-		if bits&mask != 0 {
-			continue
+		if p.ack[hash]&mask == 0 {
+			todo = append(todo, position)
 		}
-		if processed == 4 {
+	}
+	p.mu.Unlock()
+	chosen := make([]int, 0, budget)
+	taken := make(map[int]bool, budget)
+	for _, position := range todo {
+		if len(chosen) >= budget-1 {
 			break
 		}
-		processed++
+		chosen = append(chosen, position)
+		taken[position] = true
+	}
+	for j := 0; j < len(entries) && len(chosen) < budget; j++ {
+		position := (start + j) % len(entries)
+		if taken[position] {
+			continue
+		}
+		var hash [32]byte
+		copy(hash[:], entries[position].Candidate.Hash)
+		p.mu.Lock()
+		acked := p.ack[hash]&mask != 0
+		p.mu.Unlock()
+		if acked {
+			continue
+		}
+		chosen = append(chosen, position)
+		taken[position] = true
 		p.mu.Lock()
 		p.replicaCursor[index] = (position + 1) % len(entries)
 		p.mu.Unlock()
+		break
+	}
+	for _, position := range chosen {
+		e := entries[position]
+		var hash [32]byte
+		copy(hash[:], e.Candidate.Hash)
 		q := archive.Request{Context: p.Subject, BlockHash: hash}
 		rec, err := p.Archive.GetReceiptComplete(q)
 		if errors.Is(err, archive.ErrUnavailable) {

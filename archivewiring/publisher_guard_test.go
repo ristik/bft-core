@@ -305,3 +305,80 @@ func TestPublisherHurriesWhenTheJournalFills(t *testing.T) {
 	}
 	require.Equal(t, 12, archived, "all twelve in one pass, not four")
 }
+
+// replicaFixture is a journal of n certified blocks, all archived locally, one healthy replica (accepts every record) and a publisher with an empty
+// acknowledgement map: a restarted node.
+func replicaFixture(t *testing.T, n int) (*Publisher, *wiringFixture) {
+	t.Helper()
+	f := newWiringFixture(t, n)
+	local, err := archive.Open(t.TempDir())
+	require.NoError(t, err)
+	for i := range f.entries {
+		q, rec := f.record(t, i)
+		require.NoError(t, local.Put(q, rec))
+	}
+	sender := testpeer.CreatePeer(t, testpeer.CreatePeerConfiguration(t))
+	remote := testpeer.CreatePeer(t, testpeer.CreatePeerConfiguration(t))
+	sender.Network().Peerstore().AddAddrs(remote.ID(), remote.MultiAddresses(), peerstore.PermanentAddrTTL)
+	store, err := archive.Open(t.TempDir())
+	require.NoError(t, err)
+	server, err := NewServer(store, f.subject, func(context.Context, archive.Request, *archive.Record) error { return nil }, []peer.ID{sender.ID()}, DefaultLimits())
+	require.NoError(t, err)
+	server.Register(context.Background(), remote)
+	p := &Publisher{Journal: f.store, Context: f.context, JournalLimits: f.limits, Archive: local, Subject: f.subject, Host: sender, Replicas: []peer.ID{remote.ID()}, Limits: DefaultLimits(),
+		ack: make(map[[32]byte]ackSet), replicaCursor: make([]int, 1), replicaProgress: make([]ReplicaProgress, 1)}
+	return p, f
+}
+
+func (p *Publisher) acknowledgedHeights(f *wiringFixture) map[uint64]bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	out := map[uint64]bool{}
+	for _, e := range f.entries {
+		var h [32]byte
+		copy(h[:], e.Candidate.Hash)
+		out[e.Candidate.Number] = p.ack[h]&1 != 0
+	}
+	return out
+}
+
+func sortedHeights(f *wiringFixture) []uint64 {
+	heights := make([]uint64, 0, len(f.entries))
+	for _, e := range f.entries {
+		heights = append(heights, e.Candidate.Number)
+	}
+	sort.Slice(heights, func(i, j int) bool { return heights[i] < heights[j] })
+	return heights
+}
+
+// After a restart every block is unacknowledged. The frontier prunes contiguously from its anchor, so a replica pass pushes the LOWEST blocks first (and one
+// from the rotating cursor, so that a record the replica keeps refusing cannot starve the rest), not four from wherever the cursor stands (bft-core#876).
+func TestReplicaPassPushesTheLowestBlocksFirst(t *testing.T) {
+	t.Parallel()
+	p, f := replicaFixture(t, 7) // 7 of 16: below the busy level, a pass handles 4
+	p.replicaCursor[0] = 5
+	require.NoError(t, p.replicaPass(context.Background(), 0))
+	got, heights := p.acknowledgedHeights(f), sortedHeights(f)
+	for _, h := range heights[:3] {
+		require.True(t, got[h], "height %d is among the lowest three", h)
+	}
+	require.True(t, got[heights[5]], "and one more comes from the rotating cursor (position 5)")
+	for _, h := range []uint64{heights[3], heights[4], heights[6]} {
+		require.False(t, got[h], "height %d waits", h)
+	}
+	require.NoError(t, p.replicaPass(context.Background(), 0))
+	got = p.acknowledgedHeights(f)
+	for _, h := range heights[:6] {
+		require.True(t, got[h], "the next pass takes the next lowest: height %d", h)
+	}
+}
+
+// From half full a replica pass handles a larger batch: a journal that fills faster than its blocks are acknowledged stops being able to admit.
+func TestReplicaPassHurriesWhenTheJournalFills(t *testing.T) {
+	t.Parallel()
+	p, f := replicaFixture(t, 12) // 12 of 16
+	require.NoError(t, p.replicaPass(context.Background(), 0))
+	for h, ok := range p.acknowledgedHeights(f) {
+		require.True(t, ok, "height %d in one pass, not four", h)
+	}
+}
