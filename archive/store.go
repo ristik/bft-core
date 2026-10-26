@@ -254,6 +254,17 @@ type staged struct {
 // already be published (each of them whole and immutable); the rest leave at most ignored temporary directories, and the caller may
 // put them again. A record that is already stored must be identical, as with Put.
 func (s *Store) PutBatch(qs []Request, recs []*Record) error {
+	return s.putBatch(qs, recs, false)
+}
+
+// PutVariant stores a record that is ANOTHER valid representation of a block already stored under its request (bft-core#876: the same certified block under a different
+// resulting certificate has a different manifest). The base object of the request is never touched: the variant is a separate immutable object addressed by (request, manifest
+// digest), published with the same stage / sync / rename discipline, and a variant that is already stored must be identical. Variants are read with GetExact only.
+func (s *Store) PutVariant(q Request, rec *Record) error {
+	return s.putBatch([]Request{q}, []*Record{rec}, true)
+}
+
+func (s *Store) putBatch(qs []Request, recs []*Record, variant bool) error {
 	if len(qs) != len(recs) || len(qs) == 0 || len(qs) > MaxPutBatch {
 		return ErrInvalid
 	}
@@ -280,6 +291,13 @@ func (s *Store) PutBatch(qs []Request, recs []*Record) error {
 		loc, err := location(q, recordV2(rec))
 		if err != nil {
 			return err
+		}
+		if variant {
+			digest, derr := ManifestDigest(q, rec)
+			if derr != nil {
+				return derr
+			}
+			loc += "-" + hex.EncodeToString(digest[:])
 		}
 		final := filepath.Join(s.dir, loc)
 		encoded, _ := EncodeResponse(Response{q, OK, rec})
@@ -379,7 +397,7 @@ func (s *Store) PutBatch(qs []Request, recs []*Record) error {
 	}
 	// the publications (and, for records that were already stored, their earlier ones) are durable once the store directory is
 	storeErr := s.ops().syncDir(s.dir)
-	if storeErr == nil && s.rounds != nil {
+	if storeErr == nil && s.rounds != nil && !variant {
 		for _, st := range published {
 			s.indexRecord(st.q, st.rec)
 		}
@@ -400,7 +418,7 @@ func (s *Store) storedSameLocked(q Request, rec *Record, final string, encoded [
 	} else if err != nil {
 		return false, err
 	}
-	old, err := s.getVersion(q, recordV2(rec))
+	old, err := s.readDir(q, recordV2(rec), final)
 	if err != nil {
 		return false, err
 	}
@@ -420,6 +438,58 @@ func (s *Store) Get(q Request) (*Record, error) {
 		return r, err
 	}
 	return s.getVersion(q, false)
+}
+
+// GetExact reads the stored representation of the request whose manifest digest is the given one: the base object of the request if it is that manifest, else the variant
+// object stored for it (PutVariant). The digest is a locator, not a verdict: what is returned is re-read, validated and its manifest digest recomputed and compared. A damaged
+// base object does not hide a sound variant; with neither, the result is ErrCorrupt if something was damaged and ErrUnavailable if nothing was stored.
+func (s *Store) GetExact(q Request, digest [32]byte) (*Record, error) {
+	return s.getExact(q, digest, false)
+}
+
+// GetExactReceiptComplete is GetExact restricted to the receipt-complete namespace.
+func (s *Store) GetExactReceiptComplete(q Request, digest [32]byte) (*Record, error) {
+	r, err := s.getExact(q, digest, true)
+	if err != nil {
+		return nil, err
+	}
+	if !validReceiptList(r) {
+		return nil, ErrUnavailable
+	}
+	return r, nil
+}
+
+func (s *Store) getExact(q Request, digest [32]byte, receiptCompleteOnly bool) (*Record, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	versions := []bool{true, false}
+	if receiptCompleteOnly {
+		versions = []bool{true}
+	}
+	damaged := false
+	for _, v2 := range versions {
+		base, err := location(q, v2)
+		if err != nil {
+			return nil, err
+		}
+		for _, name := range []string{base, base + "-" + hex.EncodeToString(digest[:])} {
+			r, err := s.readDir(q, v2, filepath.Join(s.dir, name))
+			if errors.Is(err, ErrUnavailable) {
+				continue
+			}
+			if err != nil {
+				damaged = true
+				continue
+			}
+			if got, derr := ManifestDigest(q, r); derr == nil && got == digest {
+				return r, nil
+			}
+		}
+	}
+	if damaged {
+		return nil, ErrCorrupt
+	}
+	return nil, ErrUnavailable
 }
 
 // GetReceiptComplete reads only the receipt-complete immutable namespace.
@@ -443,7 +513,11 @@ func (s *Store) getVersion(q Request, v2 bool) (*Record, error) {
 	if err != nil {
 		return nil, err
 	}
-	dir := filepath.Join(s.dir, loc)
+	return s.readDir(q, v2, filepath.Join(s.dir, loc))
+}
+
+// readDir reads and validates the record stored in dir for the request.
+func (s *Store) readDir(q Request, v2 bool, dir string) (*Record, error) {
 	m, err := readBounded(filepath.Join(dir, "manifest"), 16<<10)
 	if os.IsNotExist(err) {
 		return nil, ErrUnavailable
