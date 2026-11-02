@@ -14,10 +14,11 @@ reboot on a network you intend to keep. Design detail: [deploy/testnet/README.md
 
 ## 2. Prerequisites
 - One Debian 12/bookworm server (the runtime glibc). It builds the images too: `images.json` records *local* image IDs.
-  Plan 24 GiB RAM, 8 cores, 100 GiB SSD for N=4 (budgets, not measurements) plus off-host backup space.
+  Plan 24 GiB RAM, 8 cores, 100 GiB SSD for N=4 (budgets; measured on a 12-core, 62 GiB server: all containers together 1.3-1.5 GiB idle and 1.9 GiB at 100 transfers/s, +0.6 GiB of disk per 9,000 transfers, see X-56) plus off-host backup space.
+  **On a newer-glibc host (Ubuntu 24.04 was tried) build in the Debian 12 container of step 3b**: `build-images.py` run directly on the host links the binaries against the host's glibc, which the bookworm runtime image does not have.
 - Docker Engine with the Compose v2 plugin (not pinned: record versions), Go 1.27.1 (official tarball), Rust 1.97.1
   (rustup), clang/libclang, make, git, Python 3.11+, jq, curl, and Foundry's `cast` on PATH (v1.8.1 in CI: `generate.py` takes the registry's genesis commitment from the finalized genesis with `cast keccak`, the PoS profile checks code hashes with it, and the rehearsal signs its transactions with it). Work as a non-root user in the `docker` group who
-  owns `/srv/src`; only the commands shown with `sudo` need root (they keep your PATH, so `go` is found).
+  owns `/srv/src`; only the commands shown with `sudo` need root (they keep your PATH, so `go` is found). **`go` and `cast` must be on the host even when the images were built in a container**: `generate.py` runs `go version -m` on the built `ubft`/`b1genesis`, and `generate.py`, `rehearse.py` and `loadgen.py` run `cast`. `sudo` drops a `$HOME`-based PATH, so use `sudo env PATH="$PATH:$HOME/.foundry/bin" …`. The generation directory is owned by uid 10001 with mode 0700: every host tool that reads `manifest.json`, `faucet-secrets/` or the compose file (`observe.py`, `loadgen.py`, `du`) needs `sudo`.
 - Public: TCP 443 (and 80 only for certificate renewal), SSH for operators. Ports 8545 (RPC), 8088 (faucet) and
   9090 (Prometheus) bind host loopback only; never publish them or any validator port. Docker subnets
   172.30.88.0/24 and 172.30.89.0/24 must be free. DNS names, TLS certificates and hCaptcha keys come from the owner.
@@ -47,6 +48,17 @@ EOF
 ```
 Success: it prints the path of `deploy/testnet/artifacts/images.json` (pins, binary SHA-256, local image IDs).
 
+**3b. Building on a host that is not Debian 12.** Build the same step in a Debian 12 container (`deploy/testnet/Dockerfile.builder`: bookworm, Go 1.27.1, Rust 1.97.1, clang, the static Docker CLI), with the Docker socket and `/srv/src` mounted at the same paths. The binaries it produces run on the newer host and in the runtime image; on 12 cores the whole build took 9 minutes. Install `go` (official tarball) and Foundry v1.8.1 on the host as well (§2).
+```sh
+docker build -t tn1-builder:bookworm -f /srv/src/pkg/deploy/testnet/Dockerfile.builder /srv/src/pkg/deploy/testnet
+docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v /srv/src:/srv/src -w /srv/src/pkg tn1-builder:bookworm bash -eo pipefail -c '
+  git config --global --add safe.directory "*"
+  python3 deploy/testnet/build-images.py --bft-source /srv/src/bft-pinned --ureth-source /srv/src/ureth-pinned --aggregator-go-source /srv/src/aggregator-go-pinned
+  go build -o build/tn-keygen ./deploy/testnet/keygen
+  go build -C /srv/src/bft-pinned -o build/b1genesis ./scripts/b1genesis'
+sudo chown -R "$USER" /srv/src   # the container wrote as root
+```
+
 ## 4. Generate a fresh generation and start it
 ```sh
 cd /srv/src/pkg; umask 077; G=/srv/testnet/tn-$(date -u +%Y%m%d)   # tn-<lowercase>, must not exist
@@ -66,6 +78,7 @@ Configure nginx from [nginx.conf.example](../../../deploy/testnet/nginx.conf.exa
 **No container step of this guide has yet run on a live server** ([evidence](../../../deploy/testnet/evidence/README.md)).
 
 ## 5. Verify before opening to the public
+**The gateway refuses a request that did not come through the trusted proxy:** a direct `eth_*` call to `127.0.0.1:8545` answers `400 {"error": "invalid proxy address"}` (`/healthz` is exempt), and so does `tester-check.py` (exit 2). Until nginx is in front, send the header the proxy would set: `-H 'X-Forwarded-For: 203.0.113.9'`; `observe.py` and `loadgen.py` do.
 ```sh
 curl -fsS http://127.0.0.1:8545/healthz; curl -fsS http://127.0.0.1:8088/healthz   # {"head":...}; budget/balance
 docker compose exec -T rpc python3 - <<'EOF'   # every node must print True (chain ID and block zero match)
@@ -268,6 +281,9 @@ block-zero hash and faucet address. The old pin must get 409 (checked before the
 | Every public client gets 429 `rate limit` | nginx is not the trusted proxy peer (172.30.88.1 faucet, 172.30.89.1 rpc), so all clients share one bucket: fix the peer. |
 | `Pool overlaps with other one on this address space` | 172.30.88/89.0/24 in use: free them (the subnets are fixed in generate.py). |
 | Handoff or archive-restore refusals | See the [H6 table](../h6/evidence.md#refusals-stop-at-the-first-unexplained-one). |
+| `400 invalid proxy address` from the gateway, `tester-check.py` exit 2 | The request did not come from the trusted proxy; see the note at the start of §5. |
+| `FileNotFoundError: ... 'go'` although the images were built in a container | The host needs `go` too (`generate.py` runs `go version -m`): install the Go 1.27.1 tarball and link it into `/usr/local/bin`. |
+| `observe.py` alerts every minute `signer has no container` and `the faucet /healthz answered 503` | The rehearsal never starts the faucet signer (no hCaptcha key); start `observe.py` with `--no-faucet` for a package without it. |
 
 ## 9. Rehearsal evidence to record
 - Operator name, date, this guide's commit, host specs, Docker/Compose versions, `images.json`, `manifest.json`.
