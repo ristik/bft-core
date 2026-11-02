@@ -42,7 +42,7 @@ def fixture(root):
         put(d / f"steps/faults/{n}.json", {"fault": n, "stable": True, "paidTxOk": True})
     put(d / "steps/faults/pair-restart.json", {"fault": "pair-restart", "stable": True, "paidTxOk": True, "byteIdentical": True, "blockHash": "0x" + "ab" * 32, "pool": {"unchanged": True}})
     put(d / "steps/faults/delayed-episode.json", {"fault": "delayed-episode", "stable": True, "paidTxOk": True, "shardFrozenDuringOutage": True, "rootsExtendedDuringOutage": True, "logOrdered": True,
-                                                  "before": {"rootRound": 10, "evmRound": 5}, "during": {"rootRound": 120, "evmRound": 5}, "after": {"cursor": 9, "count": 9}})
+                                                  "before": {"rootRound": 10, "evmRound": 3}, "stopped": {"rootRound": 12, "evmRound": 5}, "during": {"rootRound": 120, "evmRound": 5}, "after": {"cursor": 9, "count": 9}})
     put(d / "steps/faults/soak.json", {"snapshots": 8})
     put(d / "steps/faults/reconcile-cursors.json", {"converged": True})
     put(d / "steps/reconcile/reconcile.json", {"conserved": True, "intervals": 2, "zeroBudget": 1, "fundings": 1, "refilledAfterExhaustion": True})
@@ -94,9 +94,11 @@ class LaneCheck(unittest.TestCase):
                  ("fault-evm-restart", self.d / "steps/faults/evm-restart.json", {"fault": "evm-restart", "stable": True, "paidTxOk": False}, "evm-restart.json"),
                  ("fault-pair-restart", self.d / "steps/faults/pair-restart.json", {"fault": "pair-restart", "stable": True, "paidTxOk": True, "byteIdentical": True, "blockHash": "0x" + "ab" * 32, "pool": {"unchanged": False}}, "pair-restart.json"),
                  ("fault-delayed-episode", self.d / "steps/faults/delayed-episode.json", {"fault": "delayed-episode", "stable": True, "paidTxOk": True, "shardFrozenDuringOutage": True, "rootsExtendedDuringOutage": True, "logOrdered": True,
-                                                                                           "before": {"rootRound": 10, "evmRound": 5}, "during": {"rootRound": 10, "evmRound": 5}, "after": {"cursor": 9, "count": 9}}, "delayed-episode.json"),
+                                                                                           "before": {"rootRound": 10, "evmRound": 3}, "stopped": {"rootRound": 12, "evmRound": 5}, "during": {"rootRound": 10, "evmRound": 5}, "after": {"cursor": 9, "count": 9}}, "delayed-episode.json"),
                  ("fault-delayed-episode", self.d / "steps/faults/delayed-episode.json", {"fault": "delayed-episode", "stable": True, "paidTxOk": True, "shardFrozenDuringOutage": False, "rootsExtendedDuringOutage": True, "logOrdered": True,
-                                                                                           "before": {"rootRound": 10, "evmRound": 5}, "during": {"rootRound": 120, "evmRound": 5}, "after": {"cursor": 9, "count": 9}}, "delayed-episode.json"),
+                                                                                           "before": {"rootRound": 10, "evmRound": 3}, "stopped": {"rootRound": 12, "evmRound": 5}, "during": {"rootRound": 120, "evmRound": 5}, "after": {"cursor": 9, "count": 9}}, "delayed-episode.json"),
+                 ("fault-delayed-episode", self.d / "steps/faults/delayed-episode.json", {"fault": "delayed-episode", "stable": True, "paidTxOk": True, "shardFrozenDuringOutage": True, "rootsExtendedDuringOutage": True, "logOrdered": True,
+                                                                                           "before": {"rootRound": 10, "evmRound": 3}, "stopped": {"rootRound": 12, "evmRound": 5}, "during": {"rootRound": 120, "evmRound": 7}, "after": {"cursor": 9, "count": 9}}, "delayed-episode.json"),   # kept certifying 2 rounds after all were stopped
                  ("fault-pair-restart", self.d / "steps/faults/pair-restart.json", {"fault": "pair-restart", "stable": True, "paidTxOk": True, "byteIdentical": False, "blockHash": "0x" + "ab" * 32, "pool": {"unchanged": True}}, "pair-restart.json"),
                  ("reconcile", self.d / "steps/reconcile/reconcile.json", {"conserved": False, "intervals": 2, "zeroBudget": 1, "fundings": 1, "refilledAfterExhaustion": True}, "reconcile.json"),
                  ("soak", self.d / "steps/faults/soak.json", {"snapshots": 1}, "soak.json"),
