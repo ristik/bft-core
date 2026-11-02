@@ -89,20 +89,30 @@ def run(client, sender, sign, rate, duration, ips, ip_prefix, recipients, receip
     while int(result(client, 'eth_getTransactionCount', [sender, 'latest'], first), 16) < nonce + len(accepted) and clock() < deadline:
         sleep(1)
     drained = clock() - start - sent_span
-    per_second = 8 * max(ips, 1)
+    per_second = min(8 * max(ips, 1), 80)   # under the gateway's 100/s overall limit as well as 10/s per address (13 addresses at 8/s was 104/s: the 100/s run on the host died on a 429)
+    receipt_limited = 0
     for k, h in enumerate(accepted):
         if clock() >= deadline:
             break
         if k and k % per_second == 0:
             sleep(1)
-        r = result(client, 'eth_getTransactionReceipt', [h], f'{ip_prefix}{1 + k % ips}' if ips else None)
+        xff = f'{ip_prefix}{1 + k % ips}' if ips else None
+        while True:   # a rate-limited receipt query is counted and asked again after a second, as a submission is
+            status, text = client.post('eth_getTransactionReceipt', [h], xff)
+            if status != 429 or clock() >= deadline:
+                break
+            receipt_limited += 1
+            sleep(1)
+        if status != 200:
+            raise RuntimeError(f'eth_getTransactionReceipt: HTTP {status} {text[:120]}')
+        r = json.loads(text).get('result')
         if r and r['status'] == '0x1':
             mined[h] = True
         elif r:
             failed.add(h)
     missing = [h for h in accepted if h not in mined and h not in failed]
     summary = {'rate_requested': rate, 'rate_achieved': round(len(raws) / sent_span, 2) if sent_span else None, 'ips': ips, 'submitted': len(raws),
-               'accepted': len(accepted), 'rate_limited_429': limited, 'errors': len(errors), 'mined_ok': len(mined), 'mined_failed': len(failed),
+               'accepted': len(accepted), 'rate_limited_429': limited, 'receipt_queries_rate_limited_429': receipt_limited, 'errors': len(errors), 'mined_ok': len(mined), 'mined_failed': len(failed),
                'not_mined_in_time': len(missing), 'submit_latency_s': {'p50': round(statistics.median(latency), 4), 'max': round(max(latency), 4)} if latency else {},
                'drained_after_last_submit_s': round(drained, 2)}
     problems = [*errors[:5], *([f'{len(failed)} accepted transfers mined with a failed status'] if failed else []),

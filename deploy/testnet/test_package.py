@@ -1008,8 +1008,8 @@ class LoadGenerator(unittest.TestCase):
         spec=importlib.util.spec_from_file_location('loadgen',Path(__file__).parent/'loadgen.py')
         m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m);return m
     class Node:
-        def __init__(self,limit_every=0,status='0x1',fail_at=None,mine=True):
-            self.sent=[];self.calls=0;self.limit_every=limit_every;self.status=status;self.fail_at=fail_at;self.mine=mine;self.xff=set()
+        def __init__(self,limit_every=0,status='0x1',fail_at=None,mine=True,receipt_limit=0):
+            self.sent=[];self.calls=0;self.limit_every=limit_every;self.status=status;self.fail_at=fail_at;self.mine=mine;self.xff=set();self.receipt_limit=receipt_limit;self.receipt_calls=0
         def post(self,method,params,xff=None):
             self.xff.add(xff)
             ok=lambda r:(200,json.dumps({'jsonrpc':'2.0','id':1,'result':r}))
@@ -1020,7 +1020,10 @@ class LoadGenerator(unittest.TestCase):
                 if self.limit_every and self.calls%self.limit_every==0: return 429,'limited'
                 if self.fail_at is not None and len(self.sent)==self.fail_at: return 500,'boom'
                 self.sent.append(params[0]);return ok('0x%064x'%len(self.sent))
-            if method=='eth_getTransactionReceipt': return ok({'status':self.status})
+            if method=='eth_getTransactionReceipt':
+                self.receipt_calls+=1
+                if self.receipt_calls<=self.receipt_limit: return 429,'{"error": "rate limit"}'
+                return ok({'status':self.status})
             raise AssertionError(method)
     def run_load(self,node,**kw):
         now=[0.0]
@@ -1048,6 +1051,13 @@ class LoadGenerator(unittest.TestCase):
     def test_rate_limited_submissions_are_counted_and_resent_with_the_same_nonce(self):
         node=self.Node(limit_every=4);s,problems=self.run_load(node)
         self.assertEqual(problems,[]);self.assertGreater(s['rate_limited_429'],0);self.assertEqual(node.sent,[f'raw{i}' for i in range(30)])
+    def test_a_rate_limited_receipt_query_is_counted_and_asked_again_not_a_crash(self):
+        # host run, 100/s over 13 addresses: the receipt phase hit the gateway's overall limit and the tool died with the transfers already sent
+        node=self.Node(receipt_limit=5);s,problems=self.run_load(node,ips=13,receipt_wait=60)
+        self.assertEqual(problems,[]);self.assertEqual((s['accepted'],s['mined_ok']),(30,30));self.assertEqual(s['receipt_queries_rate_limited_429'],5)
+    def test_receipt_queries_are_paced_under_the_overall_limit_of_the_gateway(self):
+        import inspect;src=inspect.getsource(self.module().run)
+        self.assertIn('min(8 * max(ips, 1), 80)',src)
     def test_the_requests_are_spread_over_the_client_addresses(self):
         node=self.Node();self.run_load(node,ips=3)
         self.assertEqual(node.xff,{'203.0.113.1','203.0.113.2','203.0.113.3'})
