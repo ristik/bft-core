@@ -168,6 +168,39 @@ class ProofOfStake(unittest.TestCase):
         self.assertEqual(sorted(attached-listed),[],'attached stage methods that no stage name reaches')
         self.assertEqual(len(listed),len(rehearse.POS_STAGES),'a method listed twice')
         self.assertIn('pos_resources',attached,'the test sees attachments (pos_sample.pos_resources)')
+    def test_the_rotated_epoch_restart_waits_for_the_measured_slowdown_and_still_fails_on_a_stop(self):
+        # bft-core #886: with a validator down the survivors need 51-219 s per transaction from root epoch 2 (PoA, epoch 1: 4-6 s); pos-restart waits MINE_SECONDS_ROTATED,
+        # the PoA pod-restart keeps 240 s, and a transaction that is never mined still ends in a Failure at exactly that limit (a real stop is not hidden)
+        import rehearse
+        self.assertEqual(rehearse.MINE_SECONDS,240)
+        self.assertGreaterEqual(rehearse.MINE_SECONDS_ROTATED,2*219,'twice the slowest of the 36 measured samples')
+        waits=[]
+        class Fake(rehearse.Rehearsal):
+            def __init__(self): self.n,self.pods,self.manifest,self.evidence=3,[1],{'faucet_address':'0x'+'11'*20},Path(tempfile.mkdtemp())
+            def say(self,*a): pass
+            def expect(self,ok,what,detail=''): assert ok,what
+            def compose(self,*a,**k): return ''
+            def http(self,*a,**k): return (503,'')
+            def ureth(self,j,method,params=None): return '0x1'
+            def raw_tx(self,*a): return '0xraw'
+            def cast_run(self,*a): return '0xtx'
+            def inner_reply(self,*a): return {'result':'0xtx'}
+            def wait(self,what,probe,seconds):
+                waits.append((what,seconds))
+                if 'mines it' in what: raise rehearse.Failure(f'{what}: not within {seconds} s (last: None)')
+                return True
+        for limit in (None,rehearse.MINE_SECONDS_ROTATED):
+            waits.clear()
+            with self.assertRaises(rehearse.Failure):
+                Fake().pod_restart() if limit is None else Fake().pod_restart(mine_within=limit)
+            self.assertEqual([x for what,x in waits if 'mines it' in what],[limit or rehearse.MINE_SECONDS])
+        seen=[]
+        class Pos(Fake):
+            def root_epoch(self,i,t): return 2
+            def pod_restart(self,mine_within=rehearse.MINE_SECONDS): seen.append(mine_within); raise rehearse.Failure('stop here')
+            gen=Path(tempfile.mkdtemp())
+        with patch('rehearse.handoff_ops.DockerTransport',lambda gen: None), self.assertRaises(rehearse.Failure): Pos().pos_restart()
+        self.assertEqual(seen,[rehearse.MINE_SECONDS_ROTATED])
     def test_pos_owner_names_the_revert_selector_it_expects(self):
         import json,rehearse,pos_owner
         class Fake:   # the two helpers it needs: a selector table and an eth_call that fails with a given revert data
