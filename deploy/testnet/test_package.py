@@ -1349,4 +1349,79 @@ class PosSample(unittest.TestCase):
         for name,selector in pos_sample.SELECTORS.items():
             self.assertEqual(subprocess.run([cast,'sig',name+'()'],text=True,capture_output=True,check=True).stdout.strip(),selector,name)
 
+class BridgeLoad(unittest.TestCase):
+    """bridge/bridge_load.py without a network: docker stats' text, the summary, and a failed cycle's accounting against a fake rehearsal."""
+    def module(self):
+        sys.path.insert(0,str(Path(__file__).parent/'bridge'))
+        self.addCleanup(sys.path.pop,0)
+        import bridge_load
+        return bridge_load
+    def fake(self,tmp,fail=None,held=None):
+        class Fake:
+            gen=Path(tmp)
+            calls=[]
+            def say(self,text): pass
+            def bridge_compose(self,*a): return ''
+            def cast_run(self,*a): return '0x'+'a'*40
+            def faucet_send(self,to,wei): pass
+            def vault_balance(self):
+                self.reads=getattr(self,'reads',0)+1
+                return 0 if self.reads==1 else held
+            def tester(self,*args,wallet=None,key=None):
+                self.calls.append(args[0])
+                (Path(tmp)/'bridge'/key).read_text()   # the worker's key exists while it runs
+                if args[0]==fail: raise RuntimeError('the tester failed: '+fail)
+        (Path(tmp)/'bridge').mkdir()
+        return Fake()
+    def run_load(self,bl,tmp,fake,max_failures=1):
+        out=Path(tmp)/'out';out.mkdir()
+        load=bl.Load(fake,out,duration=0.05,interval=60,max_failures=max_failures)
+        return load.run(1),json.loads((out/'summary.json').read_text()),out
+    def test_stats_line(self):
+        bl=self.module()
+        line=json.dumps({'Name':'x-ureth1-1','MemUsage':'184.5MiB / 1.5GiB','CPUPerc':'12.50%'})
+        self.assertEqual(bl.parse_stats(line),('x-ureth1-1',184.5*2**20,1.5*2**30,12.5))
+        with self.assertRaises(ValueError): bl.size_bytes('12 parsecs')
+    def test_summary(self):
+        bl=self.module()
+        step=lambda w,c,s,t,ok=True:{'worker':w,'cycle':c,'step':s,'seconds':t,'ok':ok}
+        steps=[step(1,1,'lock',1.0),step(1,1,'claim',2.0),step(1,2,'lock',3.0),step(1,2,'mint',9.0,False)]
+        c=lambda m,cpu:{'c':{'mem':m,'memLimit':2**30,'cpuPct':cpu}}
+        samples=[{'containers':c(2**20,50.0),'diskUsed':1000},{'containers':c(2**21,10.0),'diskUsed':4000}]
+        s=bl.summarize(steps,samples,60)
+        self.assertEqual((s['roundTrips'],s['failedCycles'],s['roundTripsPerMinute']),(1,1,1.0))
+        self.assertEqual(s['stepSeconds']['lock'],{'n':2,'p50':2.0,'p95':3.0,'max':3.0})
+        self.assertNotIn('mint',s['stepSeconds'],'a failed step is not a latency')
+        self.assertEqual(s['services']['c'],{'memPeakMiB':2.0,'memLimitMiB':1024,'cpuPeakPct':50.0})
+        self.assertEqual((s['diskGrowthBytes'],s['diskGrowthPerRoundTripBytes']),(3000,3000))
+    def test_clean_run_passes_and_leaves_no_key_or_wallet(self):
+        bl=self.module()
+        with tempfile.TemporaryDirectory() as tmp:
+            ok,s,out=self.run_load(bl,tmp,self.fake(tmp,held=0))
+            self.assertTrue(ok)
+            self.assertGreater(s['roundTrips'],0)
+            self.assertEqual(list((Path(tmp)/'bridge').iterdir()),[],'keys and finished wallets are removed')
+            self.assertNotIn('0x',(out/'cycles.jsonl').read_text().replace('"ok"',''),'no key in the evidence')
+    def test_failed_cycle_after_the_lock_keeps_its_wallet_and_counts_its_lock(self):
+        bl=self.module()
+        with tempfile.TemporaryDirectory() as tmp:
+            ok,s,_=self.run_load(bl,tmp,self.fake(tmp,fail='redeem',held=bl.TESTER_LOCK_WEI))
+            self.assertFalse(ok,'a failed cycle fails the run')
+            self.assertEqual(s['vault'],{'heldAfterRun':bl.TESTER_LOCK_WEI,'lockedByFailedCycles':bl.TESTER_LOCK_WEI})
+            self.assertTrue((Path(tmp)/'bridge/load-w1-c1').is_dir())
+    def test_vault_mismatch_fails_a_clean_run(self):
+        bl=self.module()
+        with tempfile.TemporaryDirectory() as tmp:
+            ok,s,_=self.run_load(bl,tmp,self.fake(tmp,held=1))
+            self.assertEqual(s['failedCycles'],0)
+            self.assertFalse(ok,'the vault must hold exactly the locks of the failed cycles')
+    def test_worker_stops_after_failures_in_a_row(self):
+        bl=self.module()
+        with tempfile.TemporaryDirectory() as tmp:
+            fake=self.fake(tmp,fail='init',held=0)
+            out=Path(tmp)/'out';out.mkdir()
+            load=bl.Load(fake,out,duration=60,interval=60,max_failures=3)
+            self.assertFalse(load.run(1))
+            self.assertEqual(fake.calls,['init']*3)
+
 if __name__=='__main__': unittest.main()

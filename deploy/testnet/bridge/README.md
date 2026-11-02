@@ -23,6 +23,7 @@ outstanding locks, retired-key forged histories, the proof refresh across rotati
 | `overlay.py` | `GENERATION/compose.bridge.yaml`, the Compose overlay with the bridge's services |
 | `RECOVERY.md` | the operator's bridge recovery runbook: roles, what depends on what, the checks after any procedure, and each failure's procedure |
 | `rehearse_bridge.py` | the bridge stages of the runner rehearsal (`.github/workflows/testnet-bridge.yml`) |
+| `bridge_load.py` | sustained bridge load for the host's measured envelope: parallel testers looping the round trip, sampling this generation's containers and disk (its docstring) |
 
 ## Operator steps
 
