@@ -33,7 +33,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: ristik/aggregator-go
-          ref: 86d93f1e9ba067a6d7bfe6103cdd79ccee58424e
+          ref: 30cca4760c35ef2ac4412389fba86de9ad372cff
           path: pinned-aggregator-go
       # cgo for secp256k1, no rocksdb tag (memory SMT, state in MongoDB), as build-images.py builds it; go.mod's newer toolchain is fetched by GOTOOLCHAIN=auto
       - run: CGO_ENABLED=1 go build -C pinned-aggregator-go -trimpath -o /tmp/tn-aggregator ./cmd/aggregator
