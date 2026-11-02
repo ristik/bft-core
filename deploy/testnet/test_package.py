@@ -9,6 +9,7 @@ import subprocess
 from pathlib import Path
 import tempfile
 import threading
+import time
 import unittest
 from unittest.mock import patch
 
@@ -1032,6 +1033,18 @@ class LoadGenerator(unittest.TestCase):
         node=self.Node();s,problems=self.run_load(node)
         self.assertEqual(problems,[]);self.assertEqual((s['submitted'],s['accepted'],s['mined_ok'],s['rate_limited_429']),(30,30,30,0))
         self.assertEqual(node.sent,[f'raw{i}' for i in range(30)])
+    def test_the_transfers_are_signed_in_parallel_and_still_sent_in_nonce_order(self):
+        # cast decrypts the keystore on every call (about 0.7 s of a core): serial signing made 2,400 transfers a 27 minute preparation on the host
+        import threading
+        live=[0];peak=[0];lock=threading.Lock()
+        def sign(to,n,p):
+            with lock: live[0]+=1;peak[0]=max(peak[0],live[0])
+            time.sleep(0.02)
+            with lock: live[0]-=1
+            return f'raw{n}'
+        node=self.Node();s,problems=self.run_load(node,sign=sign)
+        self.assertEqual(problems,[]);self.assertEqual(node.sent,[f'raw{i}' for i in range(30)])
+        self.assertGreater(peak[0],1 if (os.cpu_count() or 1)>1 else 0)
     def test_rate_limited_submissions_are_counted_and_resent_with_the_same_nonce(self):
         node=self.Node(limit_every=4);s,problems=self.run_load(node)
         self.assertEqual(problems,[]);self.assertGreater(s['rate_limited_429'],0);self.assertEqual(node.sent,[f'raw{i}' for i in range(30)])

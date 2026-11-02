@@ -7,7 +7,7 @@ every accepted transfer's receipt. It FAILS when an accepted transfer is not min
 limit (HTTP 429, counted, never retried), or when fewer than --min-accepted transfers were accepted. It measures the package under that load, nothing about a host
 unless it runs on that host. A summary JSON is written with --out.
 """
-import argparse, http.client, json, statistics, subprocess, sys, time
+import argparse, concurrent.futures, http.client, json, os, statistics, subprocess, sys, time
 from urllib.parse import urlsplit
 
 
@@ -60,7 +60,10 @@ def run(client, sender, sign, rate, duration, ips, ip_prefix, recipients, receip
     nonce = int(result(client, 'eth_getTransactionCount', [sender, 'pending'], first), 16)
     price = int(result(client, 'eth_gasPrice', [], first), 16)
     targets = ['0x%040x' % (0xA0000 + i % recipients) for i in range(count)]
-    raws = [sign(targets[i], nonce + i, price) for i in range(count)]
+    # `cast mktx --keystore` decrypts the keystore (scrypt, ~0.7 s of one core) on every call: signing 2,400 transfers took 27 minutes serially on the host, so the signatures
+    # are made in parallel, one cast per core (map keeps the nonce order)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=os.cpu_count() or 1) as pool:
+        raws = list(pool.map(lambda i: sign(targets[i], nonce + i, price), range(count)))
     accepted, limited, errors, latency = {}, 0, [], []
     start = clock()
     for i, raw in enumerate(raws):
