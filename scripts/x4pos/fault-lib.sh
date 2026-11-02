@@ -16,6 +16,7 @@
 
 X4F_DIR=${X4F_DIR:-$H3_DIR/x4pos/steps/faults}
 X4F_DELAY=${X4F_DELAY:-300}
+X4F_SETTLE=${X4F_SETTLE:-15}   # seconds after the last validator is stopped before the freeze is measured
 X4F_CAMPAIGN=${X4F_CAMPAIGN:-scripts/x4pos/campaign.json}
 
 # sleep until the step's `at` (seconds from the first accounting snapshot); a step already past its time runs at once and records how late
@@ -161,11 +162,16 @@ x4f_pair_restart() {
 
 # every online EVM validator is down (four with the handoff lane, three without) while the roots continue: the shard imports no root extension for X4F_DELAY seconds, then everything returns
 x4f_delayed_episode() {
-  local before mid after epoch i r0 r1 e0 e1 n
+  local before mid stopped after epoch i r0 r1 e0 e1 n
   x4f_wait fault-delayed-episode || return 1
   epoch=$(x4f_epoch) || return 1; before=$(x4f_probe) || return 1
   r0=$(jq -r .rootRound <<<"$before"); e0=$(jq -r .evmRound <<<"$before")
   for i in $H3_ONLINE; do x4f_stop_val "$i" || return 1; done
+  # The baseline of the freeze is taken AFTER the last validator is stopped, once the requests already in flight have been answered (a few seconds): the stops are sequential and the shard
+  # legitimately certifies the rounds its validators had already signed while the earlier ones were going down (campaign run 8: round 6766 -> 6768 across the stops, then frozen).
+  sleep "$X4F_SETTLE"
+  stopped=$(h3_root_info | jq -c '{rootRound: (.roundNumber | tonumber), evmRound: (.partitionShards[] | select(.partitionId==8) | .roundNumber | tonumber)}') || return 1
+  r0=$(jq -r .rootRound <<<"$stopped"); e0=$(jq -r .evmRound <<<"$stopped")
   sleep "$X4F_DELAY"
   mid=$(h3_root_info | jq -c '{rootRound: (.roundNumber | tonumber), evmRound: (.partitionShards[] | select(.partitionId==8) | .roundNumber | tonumber)}') || return 1
   r1=$(jq -r .rootRound <<<"$mid"); e1=$(jq -r .evmRound <<<"$mid")
@@ -177,7 +183,7 @@ x4f_delayed_episode() {
   for i in $(seq 1 120); do [ "$(p85_cursor)" = "$(p85_log_count)" ] && break; sleep 1; done
   n=$(x4f_log_ordered) || return 1
   after=$(x4f_probe) || return 1
-  x4f_write delayed-episode "$before" "$after" "$(jq -n --argjson mid "$mid" --argjson d "$X4F_DELAY" --argjson n "$n" '{outageSeconds: $d, during: $mid, rootsExtendedDuringOutage: true, shardFrozenDuringOutage: true, registryRecords: $n, logOrdered: true, paidTxOk: true}')" fault-delayed-episode || return 1
+  x4f_write delayed-episode "$before" "$after" "$(jq -n --argjson stopped "$stopped" --argjson mid "$mid" --argjson d "$X4F_DELAY" --argjson n "$n" '{outageSeconds: $d, stopped: $stopped, during: $mid, rootsExtendedDuringOutage: true, shardFrozenDuringOutage: true, registryRecords: $n, logOrdered: true, paidTxOk: true}')" fault-delayed-episode || return 1
   jq -e '.stable and .after.cursor == .after.count' "$X4F_DIR/delayed-episode.json" >/dev/null || { echo "x4f: after the delayed episode state changed or the cursor did not converge: $(cat "$X4F_DIR/delayed-episode.json")" >&2; return 1; }
   echo "PASS: x4f: shard import delayed ${X4F_DELAY} s (root round $r0 -> $r1, EVM round $e0 -> $e1), then recovered; registry log ordered ($n records), cursor converged, gates unchanged"
 }

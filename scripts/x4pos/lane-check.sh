@@ -58,7 +58,7 @@ case "$phase" in
     fi ;;
   fault-delayed-episode)
     ran x4f_delayed_episode
-    jq -e '.stable == true and .paidTxOk == true and .shardFrozenDuringOutage == true and .rootsExtendedDuringOutage == true and .logOrdered == true and .after.cursor == .after.count and (.during.rootRound > .before.rootRound) and (.during.evmRound <= .before.evmRound + 1)' "$d/steps/faults/delayed-episode.json" >/dev/null 2>&1 || fail "steps/faults/delayed-episode.json does not show a delayed, then recovered shard with ordered records"
+    jq -e '.stable == true and .paidTxOk == true and .shardFrozenDuringOutage == true and .rootsExtendedDuringOutage == true and .logOrdered == true and .after.cursor == .after.count and (.during.rootRound > .stopped.rootRound) and (.during.evmRound <= .stopped.evmRound + 1)' "$d/steps/faults/delayed-episode.json" >/dev/null 2>&1 || fail "steps/faults/delayed-episode.json does not show a delayed, then recovered shard with ordered records"
     ;;
   soak)
     ran x4f_soak
