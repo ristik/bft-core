@@ -38,10 +38,11 @@ PUBLIC_RPC = '127.0.0.1:8545'
 
 # How long the survivors may take to mine a transaction while one validator is down (pod_restart). 240 s is what the PoA package (root epoch 1, reputation leader
 # selector) needs many times over: it mines in 4-6 s. From root epoch 2 the leader schedule is the fixed round-robin of bootstrap_leader.go, so a stopped root is
-# elected leader again every n-th round and each such slot costs two 10 s local timeouts: bft-core #886 measured 51-219 s (36 samples, 6 rehearsal runs, median
-# ~96 s) and one run beyond 240 s. The rotated-epoch stages (pos-restart, pos-restart-2) wait up to MINE_SECONDS_ROTATED: ~2.7 times the slowest sample, so a chain
-# that has really stopped still fails here. Every run logs the seconds it took (evidence/restart-latency.jsonl) and marks anything over SLOW_MINE_SECONDS, so the
-# slowdown stays visible until the leader schedule is fixed (then lower this back to MINE_SECONDS).
+# elected leader again every n-th round and each such slot costs two 10 s local timeouts; the shard's request is also lost in the round before the dead slot and
+# retried at the same phase every time (bft-core #886, see its phase-lock comment): 51-219 s over 42 samples (median ~96 s), one run beyond 240 s, and a run with
+# a 2 s local timeout that stopped for 10 min. The rotated-epoch stages (pos-restart, pos-restart-2) wait up to MINE_SECONDS_ROTATED: ~2.7 times the slowest sample,
+# so a chain that has really stopped still fails here. Every run logs the seconds it took (evidence/restart-latency.jsonl) and, for the rotated limit, marks anything
+# over SLOW_MINE_SECONDS, so the slowdown stays visible until the leader schedule is fixed (then lower this back to MINE_SECONDS).
 MINE_SECONDS = 240
 MINE_SECONDS_ROTATED = 600
 SLOW_MINE_SECONDS = 30
@@ -1161,6 +1162,14 @@ class Rehearsal:
         self.expect(all(isinstance(b, int) for b in blocks), 'the gateway block was readable in every sample', str([x['gateway'] for x in samples][:2]))
         self.expect(blocks[-1] > blocks[0], 'the execution chain\'s block moved between the first and the last sample (an idle chain still produces blocks)', str(blocks))
 
+    def record_restart_latency(self, i, stall, mine_within, tx):
+        """The seconds the survivors needed to mine a transaction with validator i down: a log line (marked SLOW with the #886 note when the rotated limit is in force and
+        the time is over SLOW_MINE_SECONDS: the note is wrong for a slow PoA run at epoch 1) and a line in evidence/restart-latency.jsonl."""
+        slow = mine_within > MINE_SECONDS and stall > SLOW_MINE_SECONDS
+        self.say(f'  survivors mined it {stall} s after accepting it with validator {i} down' + (f' (SLOW, bft-core #886: a stopped root is elected leader again every {self.n}th round of a handoff epoch)' if slow else ''))
+        with (self.evidence / 'restart-latency.jsonl').open('a') as out:
+            out.write(json.dumps({'validator_down': i, 'seconds_to_mine': stall, 'limit': mine_within, 'tx': tx}) + '\n')
+
     def pod_restart(self, mine_within=MINE_SECONDS):
         """One validator entity at a time: stop its execution client, root and shard node (its signing authority stays live, as the README requires), check what the
         package promises, start them again and check they rejoin. The PUBLIC gateway fails closed while a validator is down (it checks every validator's identity
@@ -1192,10 +1201,7 @@ class Rehearsal:
                 r = self.wait(f'survivor {j} mines it with validator {i} down', lambda j=j: self.ureth(j, 'eth_getTransactionReceipt', [tx]), mine_within)
                 self.expect(r['status'] == '0x1', f'survivor {j} has a successful receipt', r['blockHash'])
                 blocks.add(r['blockHash'])
-            stall = round(time.monotonic() - accepted)
-            self.say(f'  survivors mined it {stall} s after accepting it with validator {i} down' + (f' (SLOW, bft-core #886: a stopped root is elected leader again every {self.n}th round of a handoff epoch)' if stall > SLOW_MINE_SECONDS else ''))
-            with (self.evidence / 'restart-latency.jsonl').open('a') as out:
-                out.write(json.dumps({'validator_down': i, 'seconds_to_mine': stall, 'limit': mine_within, 'tx': tx}) + '\n')
+            self.record_restart_latency(i, round(time.monotonic() - accepted), mine_within, tx)
             self.expect(len(blocks) == 1, 'the survivors agree on the including block')
             self.say(f'  starting validator {i}')
             self.compose('start', *names)
