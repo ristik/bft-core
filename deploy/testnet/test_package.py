@@ -1081,7 +1081,7 @@ class LoadGenerator(unittest.TestCase):
             if method=='eth_getTransactionReceipt':
                 self.receipt_calls+=1
                 if self.receipt_calls<=self.receipt_limit: return 429,'{"error": "rate limit"}'
-                return ok({'status':self.status})
+                return ok({'status':self.status} if self.mine else None)
             raise AssertionError(method)
     def run_load(self,node,**kw):
         now=[0.0]
@@ -1133,6 +1133,7 @@ class LoadGenerator(unittest.TestCase):
     def test_accepted_transfers_that_are_never_mined_fail_the_run(self):
         s,problems=self.run_load(self.Node(mine=False))
         self.assertTrue(any('not mined within' in p for p in problems),problems)
+        self.assertEqual((s['mined_ok'],s['not_mined_in_time']),(0,30),'asked, and the node has no receipt')
     def test_too_few_accepted_fails_the_run(self):
         s,problems=self.run_load(self.Node(),min_accepted=31)
         self.assertTrue(any('only 30 accepted' in p for p in problems),problems)
