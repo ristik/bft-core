@@ -19,6 +19,9 @@ var ErrDuplicateChangeReq = storage.ErrDuplicateChangeReq
 // ErrProofInvalid refuses an IR change whose carried request has a configured consistency proof that does not hold.
 var ErrProofInvalid = errors.New("configured proof of a carried request does not hold")
 
+// ErrRequestStateUnavailable is a request that could not be judged because the shard's committed state is not there: nothing about the request.
+var ErrRequestStateUnavailable = errors.New("no committed state to judge the request")
+
 type (
 	State interface {
 		ShardInfo(partition types.PartitionID, shard types.ShardID) *storage.ShardInfo
@@ -179,10 +182,10 @@ func (x *IRChangeReqVerifier) verifyRequest(rootRound uint64, irChReq *drctypes.
 	si := x.state.ShardInfo(irChReq.Partition, irChReq.Shard)
 	if si == nil {
 		// There shouldn't be an IR change request for a shard with no committed state
-		return nil, nil, nil, fmt.Errorf("missing shard info for partition %d shard %s", irChReq.Partition, irChReq.Shard.String())
+		return nil, nil, nil, fmt.Errorf("%w: missing shard info for partition %d shard %s", ErrRequestStateUnavailable, irChReq.Partition, irChReq.Shard.String())
 	}
 	if si.LastCR == nil {
-		return nil, nil, nil, fmt.Errorf("shard %d %s has no certification response yet", irChReq.Partition, irChReq.Shard.String())
+		return nil, nil, nil, fmt.Errorf("%w: shard %d %s has no certification response yet", ErrRequestStateUnavailable, irChReq.Partition, irChReq.Shard.String())
 	}
 	// verify request
 	luc := si.LastCR.UC

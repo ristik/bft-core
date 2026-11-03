@@ -205,10 +205,10 @@ class ProofOfStake(unittest.TestCase):
         import rehearse
         said=[]
         class Fake(rehearse.Rehearsal):
-            def __init__(self): self.n,self.pods,self.manifest,self.evidence=3,[1],{'faucet_address':'0x'+'11'*20},Path(tempfile.mkdtemp())
+            def __init__(self): self.n,self.pods,self.manifest,self.evidence,self.target=3,[1],{'faucet_address':'0x'+'11'*20},Path(tempfile.mkdtemp()),2
             def say(self,m): said.append(m)
             def expect(self,ok,what,detail=''): assert ok,what
-            def compose(self,*a,**k): return ''
+            def compose(self,*a,**k): return 'a stop window line'
             def http(self,*a,**k): return (503,'')
             def ureth(self,j,method,params=None): return '0x1'
             def raw_tx(self,*a): return '0xraw'
@@ -221,7 +221,11 @@ class ProofOfStake(unittest.TestCase):
         r=Fake()
         with self.assertRaises(rehearse.Failure): r.pod_restart(mine_within=rehearse.MINE_SECONDS_ROTATED)   # past the mining wait: the record is written before anything else can fail
         rows=[json.loads(x) for x in (r.evidence/'restart-latency.jsonl').read_text().splitlines()]
-        self.assertEqual([(x['validator_down'],x['limit'],x['tx']) for x in rows],[(1,rehearse.MINE_SECONDS_ROTATED,'0xtx')])
+        self.assertEqual([(x['validator_down'],x['limit'],x['tx']) for x in rows if x['phase']=='transition'],[(1,rehearse.MINE_SECONDS_ROTATED,'0xtx')])
+        settled=[x for x in rows if x['phase']=='settled']
+        self.assertEqual([x['sample'] for x in settled],list(range(rehearse.SETTLED_SAMPLES)),'where the latency settles, the validator still down')
+        self.assertEqual(rows[0]['phase'],'transition')
+        self.assertEqual((r.evidence/'stop-window-2-v1.log').read_text(),'a stop window line')
         self.assertTrue(any('survivors mined it' in m for m in said))
         for limit,stall,note in ((rehearse.MINE_SECONDS,90,False),(rehearse.MINE_SECONDS_ROTATED,90,True),(rehearse.MINE_SECONDS_ROTATED,5,False)):
             said.clear(); r.record_restart_latency(2,stall,limit,'0xt')

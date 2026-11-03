@@ -885,10 +885,12 @@ func Test_ConsensusManager_messages(t *testing.T) {
 		defer waitExit(t, cancel, done)
 
 		// simulate partition request sent to non-leader node
+		si, err := nonLeaderNode.ShardInfo(partitionID, types.ShardID{})
+		require.NoError(t, err)
 		irCReq := IRChangeRequest{
 			Partition: partitionID,
 			Reason:    Quorum,
-			Requests:  buildBlockCertificationRequest(t, shardNodes, nil),
+			Requests:  buildBlockCertificationRequest(t, shardNodes, si.LastCR),
 		}
 		rcCtx, rcCancel := context.WithTimeout(ctx, nonLeaderNode.pacemaker.minRoundLen)
 		require.NoError(t, nonLeaderNode.RequestCertification(rcCtx, irCReq), "CM doesn't consume IR change request")
@@ -958,10 +960,10 @@ func Test_ConsensusManager_messages(t *testing.T) {
 		require.True(t, sawIRCR, "expected to see the IRCR in one of the next two proposals")
 	})
 
-	t.Run("IR change request arrives late and is forwarded to the next leader", func(t *testing.T) {
+	t.Run("IR change request arriving at a node that is not the next leader is dropped", func(t *testing.T) {
 		// mimic situation where nonLeaderNode was the leader and IRCR was sent to it. However, by
-		// the time msg arrives leader has changed to cmLeader, so we expect nonLeaderNode to
-		// forward the message.
+		// the time msg arrives leader has changed to cmLeader: its ingress holds the request and sends it again, so nonLeaderNode
+		// neither forwards it nor keeps it (#886 S3).
 		cms, rootNet := createConsensusManagers(t, 2, shardNodeInfos)
 		cmLeader := cms[0]
 		nonLeaderNode := cms[1]
@@ -992,16 +994,12 @@ func Test_ConsensusManager_messages(t *testing.T) {
 		require.NoError(t, cmLeader.safety.Sign(cmLeader.trustBase.Load().Epoch, irChReqMsg))
 		rootNet.Send(irChReqMsg, nonLeaderNode.id)
 
-		// non-leader is not the next leader and must forward the request to the leader node
 		select {
-		case <-time.After(3 * cmLeader.pacemaker.maxRoundLen):
-			t.Fatal("haven't seen forwarded proposal before timeout")
+		case <-time.After(2 * time.Second):
 		case irMsg := <-irCh:
-			require.NotNil(t, irMsg)
-			require.Equal(t, irMsg.Author, cmLeader.id.String())
-			require.EqualValues(t, irChReqMsg.IrChangeReq.Partition, irMsg.IrChangeReq.Partition)
-			require.ElementsMatch(t, irChReqMsg.IrChangeReq.Requests, irMsg.IrChangeReq.Requests)
+			t.Fatalf("a recipient that is not the next leader forwarded %v", irMsg)
 		}
+		require.False(t, nonLeaderNode.irReqBuffer.IsChangeInBuffer(partitionID, types.ShardID{}), "nor keeps it")
 	})
 
 	t.Run("state request triggers response", func(t *testing.T) {

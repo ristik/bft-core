@@ -166,6 +166,7 @@ func (x *ConsensusManager) InstallVerifiedEpoch(entry q3format.Entry, proof hand
 	x.handoffAborts = nil
 	x.handoffMu.Unlock()
 	x.leaderSelector = selector
+	x.retained = nil // the shards resubmit under the successor: no root queue crosses an epoch
 	carryRequestHistory(x.irReqVerifier, reqVerifier)
 	x.irReqVerifier = reqVerifier
 	x.t2Timeouts = t2Timeouts

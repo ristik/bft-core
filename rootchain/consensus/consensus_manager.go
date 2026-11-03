@@ -96,8 +96,9 @@ type (
 		net                RootNet
 		pacemaker          *Pacemaker
 		leaderSelector     Leader
-		leaderCheckedRound uint64                                // the last round timeoutUnknownLeader looked at; owned by the manager loop
-		trustBase          atomic.Pointer[types.RootTrustBaseV1] // valid in current round
+		retained           map[types.PartitionShardID]*retainedRequest // the ingress copies of shard requests; owned by the manager loop
+		leaderCheckedRound uint64                                      // the last round timeoutUnknownLeader looked at; owned by the manager loop
+		trustBase          atomic.Pointer[types.RootTrustBaseV1]       // valid in current round
 		trustBaseStore     *trustbase.TrustBaseStore
 		irReqBuffer        *IrReqBuffer
 		safety             *SafetyModule
@@ -153,7 +154,6 @@ type (
 		execMsgDur  metric.Float64Histogram
 		voteCnt     metric.Int64Counter
 		proposedCR  metric.Int64Counter
-		fwdIRCRCnt  metric.Int64Counter
 		qcSize      metric.Int64Counter
 		qcVoters    metric.Int64Counter
 		susVotes    metric.Int64Counter
@@ -449,10 +449,6 @@ func (x *ConsensusManager) initMetrics(observe Observability) (err error) {
 	if err != nil {
 		return fmt.Errorf("creating counter for proposal change requests count: %w", err)
 	}
-	x.fwdIRCRCnt, err = m.Int64Counter("count.fwd.ircr", metric.WithDescription(`Number of IR Change Requests messages forwarded ("lost" messages)`))
-	if err != nil {
-		return fmt.Errorf("creating counter for proposal change requests count: %w", err)
-	}
 
 	x.execMsgCnt, err = m.Int64Counter("exec.msg.count", metric.WithDescription("Number of messages processed by the consensus manager"))
 	if err != nil {
@@ -636,6 +632,7 @@ func (x *ConsensusManager) timeoutUnknownLeader(ctx context.Context) {
 		x.log.DebugContext(ctx, "the round's leader is not known yet: timing the round out", "round", round)
 		x.sendTimeoutVote(ctx)
 	}
+	x.forwardRetained(ctx)
 }
 
 func (x *ConsensusManager) frontierRequests() <-chan frontierRequest {
@@ -853,30 +850,7 @@ func (x *ConsensusManager) onPartitionIRChangeReq(ctx context.Context, req *IRCh
 		return fmt.Errorf("invalid IR change request from partition %s: unknown reason %v", irReq.Partition, req.Reason)
 	}
 
-	nextLeader, err := x.leaderAfter(x.pacemaker.GetCurrentRound())
-	if err != nil {
-		return fmt.Errorf("failed to get next leader to forward IR change request: %w", err)
-	}
-	if nextLeader == x.id {
-		if err := x.bufferIRChange(irReq); err != nil {
-			return fmt.Errorf("failed to add IR change request from partition %s into buffer: %w", irReq.Partition, err)
-		}
-		x.log.DebugContext(ctx, "IR change request buffered", logger.Shard(req.Partition, req.Shard))
-		return nil
-	}
-	// forward to leader
-	irMsg := &abdrc.IrChangeReqMsg{
-		Author:      x.id.String(),
-		IrChangeReq: irReq,
-	}
-	if err := x.safety.Sign(x.trustBase.Load().Epoch, irMsg); err != nil {
-		return fmt.Errorf("failed to sign IR change request from partition %s: %w", irReq.Partition, err)
-	}
-	if err := x.net.Send(ctx, irMsg, nextLeader); err != nil {
-		return fmt.Errorf("failed to send IR change request from partition %s: %w", irReq.Partition, err)
-	}
-	x.log.DebugContext(ctx, fmt.Sprintf("IR change request forwarded to %s", nextLeader.ShortString()), logger.Shard(req.Partition, req.Shard))
-	return nil
+	return x.retainRequest(ctx, irReq)
 }
 
 // SelectRequestHistory selects the view-aware branch of request collection and judgement from a committed request history: the request
@@ -991,28 +965,25 @@ func (x *ConsensusManager) onIRChangeMsg(ctx context.Context, irChangeMsg *abdrc
 	}
 	nextLeader, err := x.leaderAfter(x.pacemaker.GetCurrentRound())
 	if err != nil {
-		return fmt.Errorf("failed to get next leader to forward IR change request: %w", err)
-	}
-	// if the node will be the next leader then buffer the request to be included in the block proposal
-	// todo: if in recovery then forward to next?
-	if nextLeader == x.id {
-		if err := x.bufferIRChange(irChangeMsg.IrChangeReq); err != nil {
-			// if duplicate - the same is already in progress, then it is ok; this is just most likely a delayed request
-			if errors.Is(err, ErrDuplicateChangeReq) {
-				return nil
-			}
-			return fmt.Errorf("failed to add IR change request from %s into buffer: %w", irChangeMsg.Author, err)
+		if errors.Is(err, drctypes.ErrHistoryUnavailable) {
+			return nil // the ingress keeps the request and sends it again when a leader is known
 		}
-		x.log.DebugContext(ctx, fmt.Sprintf("IR change request from node %s buffered", irChangeMsg.Author), logger.Shard(irChangeMsg.IrChangeReq.Partition, irChangeMsg.IrChangeReq.Shard))
+		return fmt.Errorf("failed to get next leader of an IR change request: %w", err)
+	}
+	// A recipient that is not the next leader drops it: its ingress holds the request and sends it again next round, so a forward here
+	// would only add a relay and a hop count to bound (#886 S3).
+	if nextLeader != x.id {
+		x.log.DebugContext(ctx, fmt.Sprintf("IR change request from node %s dropped: this node is not the next leader", irChangeMsg.Author), logger.Shard(irChangeMsg.IrChangeReq.Partition, irChangeMsg.IrChangeReq.Shard))
 		return nil
 	}
-	// todo: AB-549 add max hop count or some sort of TTL?
-	// either this is a completely lost message or because of race we just proposed, forward the original
-	// message again to next leader
-	x.fwdIRCRCnt.Add(ctx, 1, observability.Shard(irChangeMsg.IrChangeReq.Partition, irChangeMsg.IrChangeReq.Shard, attribute.String("reason", irChangeMsg.IrChangeReq.CertReason.String())))
-	if err := x.net.Send(ctx, irChangeMsg, nextLeader); err != nil {
-		return fmt.Errorf("failed to forward IR change request from %s to the next leader: %w", irChangeMsg.Author, err)
+	if err := x.bufferIRChange(irChangeMsg.IrChangeReq); err != nil {
+		// if duplicate - the same is already in progress, then it is ok; this is just most likely a delayed request
+		if errors.Is(err, ErrDuplicateChangeReq) {
+			return nil
+		}
+		return fmt.Errorf("failed to add IR change request from %s into buffer: %w", irChangeMsg.Author, err)
 	}
+	x.log.DebugContext(ctx, fmt.Sprintf("IR change request from node %s buffered", irChangeMsg.Author), logger.Shard(irChangeMsg.IrChangeReq.Partition, irChangeMsg.IrChangeReq.Shard))
 	return nil
 }
 

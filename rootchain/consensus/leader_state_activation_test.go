@@ -1,6 +1,7 @@
 package consensus
 
 import (
+	"bytes"
 	"context"
 	"sync"
 	"sync/atomic"
@@ -177,6 +178,13 @@ func TestUnknownLeaderRoundsAdvanceAtCertificateSpeed(t *testing.T) {
 		_, enabled, err := n.r.manager.RequestView(q3fixture.PartitionID, types.ShardID{})
 		require.NoError(t, err, "%s still serves its request view", n.name)
 		require.True(t, enabled)
+	}
+	// and takes a certification request: retained through the stretch, not refused and not lost for want of a known next leader
+	hash := bytes.Repeat([]byte{0x81}, 32)
+	for _, n := range c.nodes {
+		proof := phaseLockProof(t, c, n.r, hash)
+		require.NotNil(t, proof, "%s", n.name)
+		require.NoError(t, n.r.manager.RequestCertification(context.Background(), *proof), "%s still takes certification requests", n.name)
 	}
 }
 
