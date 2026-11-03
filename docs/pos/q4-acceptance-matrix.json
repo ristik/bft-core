@@ -5,7 +5,7 @@
  "rows": [
   {
    "id": "G1",
-   "title": "Real coupled activation and weighted successor (one authenticated snapshot, root-wrr-v1 from the committed tuple)",
+   "title": "Real coupled activation and weighted successor (one authenticated snapshot, root-reputation-v1 from the committed tuple)",
    "design": "Design v2 section 1, gate 1: real Q3 activation, actual (E, A*), no local selector override.",
    "required": [
     "IN-PROCESS",
@@ -101,7 +101,7 @@
     {
      "kind": "lane",
      "label": "REAL-PROCESS",
-     "step": "leader selector in effect: weight-proportional root-wrr-v1 over the epoch's rounds",
+     "step": "leader selector in effect: weight-proportional root-reputation-v1 over the epoch's rounds",
      "scope": "the roots' own logs: the heavy root leads about two thirds of the epoch's rounds, not the uniform rotation of the legacy selector; REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss); fault rows judge the root quorum by the roots' committed round, the coupled EVM pipeline is judged in the baseline only"
     },
     {
@@ -180,7 +180,7 @@
     {
      "kind": "lane",
      "label": "REAL-PROCESS",
-     "step": "leader selector in effect: weight-proportional root-wrr-v1 over the epoch's rounds",
+     "step": "leader selector in effect: weight-proportional root-reputation-v1 over the epoch's rounds",
      "scope": "scenario B (3,3,2,1); B: the roots' own logs: the schedule follows 3,3,2,1 (each root within three rounds of its weight share); REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss); fault rows judge the root quorum by the roots' committed round, the coupled EVM pipeline is judged in the baseline only",
      "lane": "b"
     },
@@ -1385,7 +1385,7 @@
      "kind": "go-test",
      "label": "IN-PROCESS",
      "package": "./rootchain/consensus",
-     "test": "TestQ4BLiveB/no-fault_control,_schedule_is_root-wrr-v1_from_A*",
+     "test": "TestQ4BLiveB/no-fault_control,_schedule_is_root-reputation-v1_from_A*",
      "scope": "root consensus only; no EVM, no aggregator shard; the schedule asserted from A*"
     },
     {
@@ -1776,8 +1776,8 @@
     {
      "kind": "lane",
      "label": "REAL-PROCESS",
-     "step": "leader selector in effect: weight-proportional root-wrr-v1 over the epoch's rounds",
-     "scope": "root-wrr-v1 observed on real processes over the activated epoch (A only; the exact-priority replay and restart/jump cases stay in-process); REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss); fault rows judge the root quorum by the roots' committed round, the coupled EVM pipeline is judged in the baseline only"
+     "step": "leader selector in effect: weight-proportional root-reputation-v1 over the epoch's rounds",
+     "scope": "root-reputation-v1 observed on real processes over the activated epoch (A only; the exact-priority replay and restart/jump cases stay in-process); REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss); fault rows judge the root quorum by the roots' committed round, the coupled EVM pipeline is judged in the baseline only"
     },
     {
      "kind": "lane-file",
@@ -1788,8 +1788,8 @@
     {
      "kind": "lane",
      "label": "REAL-PROCESS",
-     "step": "leader selector in effect: weight-proportional root-wrr-v1 over the epoch's rounds",
-     "scope": "scenario B (3,3,2,1); root-wrr-v1 observed on real processes over the activated epoch (B); REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss); fault rows judge the root quorum by the roots' committed round, the coupled EVM pipeline is judged in the baseline only",
+     "step": "leader selector in effect: weight-proportional root-reputation-v1 over the epoch's rounds",
+     "scope": "scenario B (3,3,2,1); root-reputation-v1 observed on real processes over the activated epoch (B); REAL-PROCESS root + EVM + three aggregator shards (F8), fresh-B1 stack, roots through the q4shim build; crash model SIGKILL over the retained home (not a power loss); fault rows judge the root quorum by the roots' committed round, the coupled EVM pipeline is judged in the baseline only",
      "lane": "b"
     },
     {
