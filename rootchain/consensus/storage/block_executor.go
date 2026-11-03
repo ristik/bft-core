@@ -198,8 +198,12 @@ func newRootBlock(block *abdrc.CommittedBlock, hash crypto.Hash, orchestration O
 	}, nil
 }
 
-func (x *ExecutedBlock) Extend(newBlock *rctypes.BlockData, verifier IRChangeReqVerifier, orchestration Orchestration, hash crypto.Hash, log *slog.Logger) (*ExecutedBlock, error) {
-	return x.extendWithAuthority(newBlock, verifier, orchestration, hash, log, nil, nil, nil, nil)
+func (x *ExecutedBlock) Extend(newBlock *rctypes.BlockData, verifier IRChangeReqVerifier, orchestration Orchestration, hash crypto.Hash, log *slog.Logger, leaders ...LeaderInputs) (*ExecutedBlock, error) {
+	var inputs LeaderInputs
+	if len(leaders) > 0 {
+		inputs = leaders[0]
+	}
+	return x.extendWithAuthority(newBlock, verifier, orchestration, hash, log, nil, nil, nil, inputs)
 }
 
 func (x *ExecutedBlock) extendWithAuthority(newBlock *rctypes.BlockData, verifier IRChangeReqVerifier, orchestration Orchestration, hash crypto.Hash, log *slog.Logger, authority handoffAuthority, candidates candidateSource, services *PosServices, leaders LeaderInputs) (*ExecutedBlock, error) {

@@ -90,20 +90,21 @@ type (
 		certResultCh chan *certification.CertificationResponse
 		// internal buffer for "certification request" response to allow CM to
 		// continue without waiting validator to consume the response
-		ucSink         chan []*certification.CertificationResponse
-		params         *Parameters
-		id             peer.ID
-		net            RootNet
-		pacemaker      *Pacemaker
-		leaderSelector Leader
-		trustBase      atomic.Pointer[types.RootTrustBaseV1] // valid in current round
-		trustBaseStore *trustbase.TrustBaseStore
-		irReqBuffer    *IrReqBuffer
-		safety         *SafetyModule
-		blockStore     *storage.BlockStore
-		orchestration  Orchestration
-		irReqVerifier  *IRChangeReqVerifier
-		t2Timeouts     *PartitionTimeoutGenerator
+		ucSink             chan []*certification.CertificationResponse
+		params             *Parameters
+		id                 peer.ID
+		net                RootNet
+		pacemaker          *Pacemaker
+		leaderSelector     Leader
+		leaderCheckedRound uint64                                // the last round timeoutUnknownLeader looked at; owned by the manager loop
+		trustBase          atomic.Pointer[types.RootTrustBaseV1] // valid in current round
+		trustBaseStore     *trustbase.TrustBaseStore
+		irReqBuffer        *IrReqBuffer
+		safety             *SafetyModule
+		blockStore         *storage.BlockStore
+		orchestration      Orchestration
+		irReqVerifier      *IRChangeReqVerifier
+		t2Timeouts         *PartitionTimeoutGenerator
 		// viewResolver selects the view-aware branch (Q2-C2) for leader admission, timeouts and payload generation. Production
 		// leaves it nil: the legacy round-only dispatch stays selected.
 		viewResolver ViewResolver
@@ -358,16 +359,23 @@ func NewConsensusManager(
 	var chosenLeader Leader = ls
 	if installedAnchor != nil {
 		chosenLeader, err = newEpochLeader(trustBaseStore, installedAnchor.Epoch, installedAnchor.Slot+1, trustBase.RootNodes,
-			func() (Leader, error) { return newBootstrapLeader(ls, installedAnchor.Slot+1, trustBase.RootNodes) })
+			func() (Leader, error) { return newBootstrapLeader(ls, installedAnchor.Slot+1, trustBase.RootNodes) },
+			func() (Leader, error) {
+				return reputationLeader(cParams.NetworkProfileVersion, installedAnchor, trustBase, trustBaseStore, func() *storage.BlockStore { return manager.blockStore })
+			})
 	} else if cParams.NetworkProfileVersion == storage.ProfileHandoff {
 		// the genesis epoch: its schedule starts at the genesis round, whatever start the trust base records
 		chosenLeader, err = newEpochLeader(trustBaseStore, trustBase.GetEpoch(), max(trustBase.GetEpochStart(), 1), trustBase.RootNodes,
-			func() (Leader, error) { return ls, nil })
+			func() (Leader, error) { return ls, nil },
+			func() (Leader, error) {
+				return reputationLeader(cParams.NetworkProfileVersion, nil, trustBase, trustBaseStore, nil)
+			})
 	}
 	if err != nil {
 		return nil, err
 	}
 
+	bStore.SetLeaderInputs(trustLeaderInputs{store: trustBaseStore})
 	consensusManager := &ConsensusManager{
 		certReqCh:        make(chan certRequest),
 		certResultCh:     make(chan *certification.CertificationResponse),
@@ -576,6 +584,7 @@ func (x *ConsensusManager) Run(ctx context.Context) error {
 		if x.epochAnchor != nil && x.pacemaker.GetCurrentRound() == x.epochAnchor.Slot+1 {
 			x.processNewRoundEvent(ctx)
 		}
+		x.timeoutUnknownLeader(ctx)
 		return x.loop(ctx)
 	})
 
@@ -609,6 +618,24 @@ func (x *ConsensusManager) loop(ctx context.Context) error {
 		case req := <-x.frontierRequests():
 			x.handleFrontierRequest(ctx, req)
 		}
+		x.timeoutUnknownLeader(ctx)
+	}
+}
+
+// timeoutUnknownLeader is the one entry action of a certified round whose leader the committed state cannot name yet (#886 B1), whichever
+// path entered it: the node cannot vote in the round, so it sends its ordinary timeout at once, once for the round, through the same
+// durable signing path as a local timeout. A stretch of such rounds then advances at certificate speed, one real TC at a time, and never
+// jumps; a TC still needs a quorum and a lone lagging node forces nothing. The ordinary timer goes on retransmitting. This is not state
+// recovery (B2): nobody may have the missing history, so it asks no peer and leaves the node's APIs available.
+func (x *ConsensusManager) timeoutUnknownLeader(ctx context.Context) {
+	round := x.pacemaker.GetCurrentRound()
+	if round == x.leaderCheckedRound {
+		return
+	}
+	x.leaderCheckedRound = round
+	if _, err := x.leaderSelector.GetLeaderForRound(round); errors.Is(err, drctypes.ErrHistoryUnavailable) {
+		x.log.DebugContext(ctx, "the round's leader is not known yet: timing the round out", "round", round)
+		x.onLocalTimeout(ctx)
 	}
 }
 
@@ -669,7 +696,10 @@ func (x *ConsensusManager) handlePacemakerEvent(ctx context.Context, event paceM
 	case pmsRoundMatured:
 		nextLeader, err := x.leaderAfter(currentRound)
 		if err != nil {
-			x.log.WarnContext(ctx, "could not determine next leader", logger.Error(err))
+			if !errors.Is(err, drctypes.ErrHistoryUnavailable) {
+				x.log.WarnContext(ctx, "could not determine next leader", logger.Error(err))
+			}
+			return
 		}
 		x.log.DebugContext(ctx, fmt.Sprintf("round has lasted minimum required duration; next leader %s", nextLeader.ShortString()))
 		// round 2 is system bootstrap and is a special case - as there is no proposal no one is sending votes
@@ -1199,7 +1229,9 @@ func (x *ConsensusManager) onTimeoutMsg(ctx context.Context, vote *abdrc.Timeout
 	// if this node is the leader in this round then issue a proposal
 	l, err := x.leaderSelector.GetLeaderForRound(x.pacemaker.GetCurrentRound())
 	if err != nil {
-		x.log.WarnContext(ctx, "could not determine leader for new round, waiting for proposal", logger.Error(err))
+		if !errors.Is(err, drctypes.ErrHistoryUnavailable) { // the loop's entry action times this round out
+			x.log.WarnContext(ctx, "could not determine leader for new round, waiting for proposal", logger.Error(err))
+		}
 		return nil
 	}
 	if l == x.id {
@@ -1521,6 +1553,12 @@ func (x *ConsensusManager) leaderAfter(round uint64) (peer.ID, error) {
 	return x.leaderSelector.GetLeaderForRound(round + 1)
 }
 
+// recoveryRunStart reports the first slot of a recovery run, for a selector that has them.
+func (x *ConsensusManager) recoveryRunStart(round uint64) bool {
+	r, ok := x.leaderSelector.(interface{ RecoveryRunStart(round uint64) bool })
+	return ok && r.RecoveryRunStart(round)
+}
+
 func (x *ConsensusManager) processNewRoundEvent(ctx context.Context) {
 	ctx, span := x.tracer.Start(ctx, "ConsensusManager.processNewRoundEvent")
 	defer span.End()
@@ -1528,7 +1566,9 @@ func (x *ConsensusManager) processNewRoundEvent(ctx context.Context) {
 
 	l, err := x.leaderSelector.GetLeaderForRound(round)
 	if err != nil {
-		x.log.WarnContext(ctx, "could not determine leader for new round, awaiting proposal", "round", round, logger.Error(err))
+		if !errors.Is(err, drctypes.ErrHistoryUnavailable) {
+			x.log.WarnContext(ctx, "could not determine leader for new round, awaiting proposal", "round", round, logger.Error(err))
+		}
 		return
 	}
 	if l != x.id {
@@ -1579,7 +1619,10 @@ func (x *ConsensusManager) processNewRoundEvent(ctx context.Context) {
 		}
 	}
 	var timedOutShards []*types.UnicityCertificate
-	if !oldSuffix {
+	// A recovery run's first proposal carries no T2 timeout requests (rev's binding note on #886): any stall has burned past T2, so it would
+	// time out every shard, and a retained request reaching this leader for the next slot would lose to that pending change and wait for
+	// the next live run. A leader-local choice of payload: validity does not change.
+	if !oldSuffix && !x.recoveryRunStart(round) {
 		if x.viewResolver != nil {
 			timedOutShards, err = x.t2Timeouts.GetT2TimeoutsView(round, branch, x.viewResolver, switching)
 		} else {

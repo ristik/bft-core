@@ -73,6 +73,8 @@ type q3Replica struct {
 	// commit observation); the decorator must embed the store it wraps so that its optional capabilities survive
 	wrapStore  func(storage.BoltDB) PersistentStore
 	wrapSigner func(abcrypto.Signer) abcrypto.Signer
+	// tune, when set, changes the consensus parameters of the node (#886: the timer and round rate of a phase)
+	tune func(*Parameters)
 }
 
 func newQ3Replica(t *testing.T, f *q3fixture.Fixture, node *testutils.TestNode) *q3Replica {
@@ -126,6 +128,9 @@ func (r *q3Replica) open(withQ3 bool) error {
 	r.rt = rt
 	params := *NewConsensusParams()
 	params.NetworkProfileVersion = storage.ProfileHandoff
+	if r.tune != nil {
+		r.tune(&params)
+	}
 	opts := []Option{WithConsensusParams(params), WithRecoveryProfile2(history)}
 	if withQ3 {
 		require.NoError(t, trust.BindSigningAuthority(rt))
@@ -151,8 +156,10 @@ func (r *q3Replica) open(withQ3 bool) error {
 	r.manager = manager
 	if r.opened == 0 {
 		// the first start holds the old epoch's committed checkpoint, as the stopped old committee leaves it
+		inputs := manager.blockStore.LeaderInputs()
 		manager.blockStore, err = storage.NewFromCheckpoint(crypto.SHA256, r.f.Snapshot, db, orchestration, obs.Logger(), storage.ProfileHandoff)
 		require.NoError(t, err)
+		manager.blockStore.SetLeaderInputs(inputs)
 	}
 	r.opened++
 	r.shard = rt.Trust(nil)

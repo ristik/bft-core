@@ -65,11 +65,11 @@ func TestQ4BHandoffArithmetic(t *testing.T) {
 	_, wasOld := ow[d]
 	require.False(t, wasOld, "d is a new identity")
 
-	t.Run("every replica installed epoch 3 from the verified history and runs root-wrr-v1 from A* with its own policy per epoch", func(t *testing.T) {
+	t.Run("every replica installed epoch 3 from the verified history and runs root-reputation-v1 from A* with its own policy per epoch", func(t *testing.T) {
 		for _, n := range c.nodes {
 			start := n.r.manager.epochAnchor.Slot + 1
 			requireWeightedEpoch(t, n.r, 3, start)
-			for epoch, want := range map[uint64]string{2: q3format.LeaderPolicyWeightedV1, 3: q3format.LeaderPolicyWeightedV1} {
+			for epoch, want := range map[uint64]string{2: q3format.LeaderPolicyReputationV1, 3: q3format.LeaderPolicyReputationV1} {
 				got, err := n.r.trust.LeaderPolicy(epoch)
 				require.NoError(t, err)
 				require.Equal(t, want, got, "%s epoch %d", n.name, epoch)

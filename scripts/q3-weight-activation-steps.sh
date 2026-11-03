@@ -468,7 +468,7 @@ want = [w / sum(weights) for w in weights]
 # committees, (6,1,1,1) and (3,3,2,1))
 tol = max(3 / max(total, 1), 0.06)
 proportional = all(abs(a - b) <= tol for a, b in zip(shares, want))
-verdict = "weight-proportional (proposer-priority, root-wrr-v1)" if proportional else "NOT weight-proportional (uniform: the legacy selector, or a schedule that does not follow the weights)"
+verdict = "weight-proportional (proposer-priority, root-reputation-v1)" if proportional else "NOT weight-proportional (uniform: the legacy selector, or a schedule that does not follow the weights)"
 lines.append(f"selector in effect: {verdict}")
 open(out, "w").write("\n".join(lines) + "\n")
 print("\n".join(lines))
