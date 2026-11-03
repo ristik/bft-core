@@ -201,6 +201,31 @@ class ProofOfStake(unittest.TestCase):
             gen=Path(tempfile.mkdtemp())
         with patch('rehearse.handoff_ops.DockerTransport',lambda gen: None), self.assertRaises(rehearse.Failure): Pos().pos_restart()
         self.assertEqual(seen,[rehearse.MINE_SECONDS_ROTATED])
+    def test_the_restart_latency_is_recorded_on_the_passing_path_and_the_note_is_only_for_the_rotated_limit(self):
+        import rehearse
+        said=[]
+        class Fake(rehearse.Rehearsal):
+            def __init__(self): self.n,self.pods,self.manifest,self.evidence=3,[1],{'faucet_address':'0x'+'11'*20},Path(tempfile.mkdtemp())
+            def say(self,m): said.append(m)
+            def expect(self,ok,what,detail=''): assert ok,what
+            def compose(self,*a,**k): return ''
+            def http(self,*a,**k): return (503,'')
+            def ureth(self,j,method,params=None): return '0x1'
+            def raw_tx(self,*a): return '0xraw'
+            def cast_run(self,*a): return '0xtx'
+            def inner_reply(self,*a): return {'result':'0xtx'}
+            def wait(self,what,probe,seconds):
+                if 'mines it' in what: return {'status':'0x1','blockHash':'0xb'}
+                if 'catches up' in what: raise rehearse.Failure('stop after the mining check')
+                return True
+        r=Fake()
+        with self.assertRaises(rehearse.Failure): r.pod_restart(mine_within=rehearse.MINE_SECONDS_ROTATED)   # past the mining wait: the record is written before anything else can fail
+        rows=[json.loads(x) for x in (r.evidence/'restart-latency.jsonl').read_text().splitlines()]
+        self.assertEqual([(x['validator_down'],x['limit'],x['tx']) for x in rows],[(1,rehearse.MINE_SECONDS_ROTATED,'0xtx')])
+        self.assertTrue(any('survivors mined it' in m for m in said))
+        for limit,stall,note in ((rehearse.MINE_SECONDS,90,False),(rehearse.MINE_SECONDS_ROTATED,90,True),(rehearse.MINE_SECONDS_ROTATED,5,False)):
+            said.clear(); r.record_restart_latency(2,stall,limit,'0xt')
+            self.assertEqual('#886' in said[0],note,(limit,stall,said))
     def test_pos_owner_names_the_revert_selector_it_expects(self):
         import json,rehearse,pos_owner
         class Fake:   # the two helpers it needs: a selector table and an eth_call that fails with a given revert data
