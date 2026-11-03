@@ -32,7 +32,9 @@ from pathlib import Path
 
 from rehearse_bridge import TESTER_LOCK_WEI, BridgeRehearsal
 
-WORKER_FUNDS = 5 * 10 ** 18   # the lock comes back with the claim, so this only pays gas
+# The lock comes back with the claim, so this only pays gas. A round trip cost about 0.23 test UCT at M=8 on the host, and the price rises with load: 5 UCT ran the
+# workers out after 22 cycles, so a 20-minute M=8 run needs about 40.
+WORKER_FUNDS = 60 * 10 ** 18
 TRANSFERS = 2
 UNITS = {'B': 1, 'KiB': 2 ** 10, 'MiB': 2 ** 20, 'GiB': 2 ** 30, 'TiB': 2 ** 40, 'kB': 10 ** 3, 'MB': 10 ** 6, 'GB': 10 ** 9, 'TB': 10 ** 12}
 
@@ -75,8 +77,8 @@ def summarize(steps, samples, seconds):
 
 
 class Load:
-    def __init__(self, r, out, duration, interval, max_failures):
-        self.r, self.out, self.duration, self.interval, self.max_failures = r, out, duration, interval, max_failures
+    def __init__(self, r, out, duration, interval, max_failures, funds=WORKER_FUNDS):
+        self.r, self.out, self.duration, self.interval, self.max_failures, self.funds = r, out, duration, interval, max_failures, funds
         self.lock = threading.Lock()
         self.steps, self.samples = [], []
         self.stop = threading.Event()
@@ -106,7 +108,9 @@ class Load:
             for step, args in (('init', ['init', '--config', '/work/public/tester-config.json', '--eth-key-file', '/work/tester.key']), ('lock', ['lock', '--amount', f'{TESTER_LOCK_WEI}wei']),
                                ('mint', ['mint']), ('transfer', ['transfer', '--count', str(TRANSFERS)]), ('burn', ['burn']), ('redeem', ['redeem']), ('claim', ['claim'])):
                 start = time.monotonic()
-                self.r.tester(*args, wallet=wallet, key=key)
+                code, text = self.r.tester(*args, check=False, wallet=wallet, key=key)
+                if code != 0:   # the tester's own last line says why: out of funds is the load tool's budget, not the bridge's limit
+                    raise RuntimeError(f'the tester failed: {step}: {text.splitlines()[-1] if text else ""}')
                 self.record({'worker': worker, 'cycle': n, 'step': step, 'seconds': time.monotonic() - start, 'ok': True})
                 locked = locked or step == 'lock'
         except Exception as error:
@@ -175,7 +179,7 @@ class Load:
                 if os.getuid() == 0:
                     os.chown(work / name, 10001, 10001)
                 keys.append(name)
-                self.r.faucet_send(self.address(key), WORKER_FUNDS)
+                self.r.faucet_send(self.address(key), self.funds)
             before = self.r.vault_balance()
             start = time.monotonic()
             sampler = threading.Thread(target=self.sampler)
@@ -213,10 +217,11 @@ def main():
     p.add_argument('--duration', type=float, default=1200, help='seconds; a cycle under way finishes')
     p.add_argument('--interval', type=float, default=5, help='seconds between samples')
     p.add_argument('--max-failures', type=int, default=3)
+    p.add_argument('--funds', type=int, default=WORKER_FUNDS, help='wei each worker is funded with: it pays the gas of every cycle')
     a = p.parse_args()
     a.out.mkdir(parents=True, exist_ok=True)
     r = BridgeRehearsal(a.generation, a.out, a.cast)
-    return 0 if Load(r, a.out, a.duration, a.interval, a.max_failures).run(a.workers) else 1
+    return 0 if Load(r, a.out, a.duration, a.interval, a.max_failures, a.funds).run(a.workers) else 1
 
 
 if __name__ == '__main__':

@@ -1449,10 +1449,11 @@ class BridgeLoad(unittest.TestCase):
             def vault_balance(self):
                 self.reads=getattr(self,'reads',0)+1
                 return 0 if self.reads==1 else self.held
-            def tester(self,*args,wallet=None,key=None):
+            def tester(self,*args,check=True,wallet=None,key=None):
                 self.calls.append(args[0])
                 (Path(tmp)/'bridge'/key).read_text()   # the worker's key exists while it runs
-                if args[0]==self.fail: raise RuntimeError('the tester failed: '+self.fail)
+                if args[0]==self.fail: return 1,'some output\nerror: 0xabc holds 5 wei, and this needs 9: get test ether from the faucet'
+                return 0,'ok'
         (Path(tmp)/'bridge').mkdir()
         made=Fake();made.fail,made.held,made.calls=fail,held,[]
         return made
@@ -1560,6 +1561,23 @@ class BridgeLoad(unittest.TestCase):
             self.assertTrue(caught.exception.__suppress_context__)
             self.assertEqual([p for p in (Path(tmp)/'bridge').iterdir()],[],'the key file is removed')
             for f in out.iterdir(): self.assertNotIn(key,f.read_text())
+    def test_a_failed_step_records_the_testers_reason(self):
+        bl=self.module()
+        with tempfile.TemporaryDirectory() as tmp:
+            ok,s,out=self.run_load(bl,tmp,self.fake(tmp,fail='redeem',held=bl.TESTER_LOCK_WEI))
+            self.assertFalse(ok)
+            row=json.loads(next(l for l in (out/'cycles.jsonl').read_text().splitlines() if '"ok": false' in l))
+            self.assertIn('get test ether from the faucet',row['error'],'out of funds is the tool\'s budget, not the bridge: the reason must show')
+    def test_workers_are_funded_with_the_configured_amount(self):
+        bl=self.module()
+        with tempfile.TemporaryDirectory() as tmp:
+            fake=self.fake(tmp,held=0)
+            funded=[]
+            fake.faucet_send=lambda to,wei: funded.append(wei)
+            out=Path(tmp)/'out';out.mkdir()
+            bl.Load(fake,out,duration=0.05,interval=60,max_failures=1,funds=123).run(2)
+            self.assertEqual(funded,[123,123])
+            self.assertGreaterEqual(bl.WORKER_FUNDS,40*10**18,'a 20-minute run at M=8 pays about 40 UCT of gas')
     def test_worker_stops_after_failures_in_a_row(self):
         bl=self.module()
         with tempfile.TemporaryDirectory() as tmp:
