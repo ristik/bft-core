@@ -137,3 +137,31 @@ func TestAShardEntrysSealSignaturesAreNotPartOfTheIdentityButItsSealIs(t *testin
 	require.NoError(t, err)
 	require.NotEqual(t, want, got, "a different seal")
 }
+
+// #886: the verifier rebuilds the certified root with the checkpoint's leader-state leaf: a bundle of a reputation epoch verifies only with
+// the leaf the commit QC signed. Without the leaf in snapshotRoot this bundle could never verify.
+func TestBundleWithALeaderStateVerifiesOnlyWithThatLeaf(t *testing.T) {
+	f := handoffbundle.NewWithLeaderState(t)
+	bundle := func() Bundle { return Bundle{Proof: f.Proof, Body: f.Body, Snapshot: f.Snapshot} }
+	_, err := Verify(bundle(), f.Old, f.Partition, f.Shard, f.ConfHash)
+	require.NoError(t, err)
+	raw, err := EncodeBundle(bundle())
+	require.NoError(t, err)
+	decoded, err := DecodeBundle(raw)
+	require.NoError(t, err)
+	require.Equal(t, f.Snapshot.Leader, decoded.Snapshot.Leader, "the leaf survives the wire")
+
+	for name, mutate := range map[string]func(*abdrc.CommittedBlock){
+		"stripped": func(s *abdrc.CommittedBlock) { s.Leader = nil },
+		"voters":   func(s *abdrc.CommittedBlock) { s.Leader.Records[len(s.Leader.Records)-1].Voters = []byte{0b1011} },
+		"genesis":  func(s *abdrc.CommittedBlock) { s.Leader.Genesis[0] ^= 1 },
+	} {
+		tampered := *f.Snapshot
+		tampered.Leader = f.Snapshot.Leader.Clone()
+		mutate(&tampered)
+		b := bundle()
+		b.Snapshot = &tampered
+		_, err := Verify(b, f.Old, f.Partition, f.Shard, f.ConfHash)
+		require.ErrorIs(t, err, ErrBundle, name)
+	}
+}

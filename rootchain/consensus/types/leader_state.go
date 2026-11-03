@@ -185,9 +185,12 @@ func (s *LeaderState) Digest() ([]byte, error) {
 	return sum[:], nil
 }
 
-// LeaderBitmap maps a verified QC's signers to a bitmap over the committee, given in canonical order. A signer outside the committee
+// LeaderBitmap maps a verified QC's signers to a bitmap over the committee, which must be in canonical order. A signer outside the committee
 // cannot pass QC verification, so it is refused rather than dropped, and an empty signer set is not a sample.
 func LeaderBitmap(committee []string, signers []string) ([]byte, error) {
+	if !slices.IsSorted(committee) {
+		return nil, fmt.Errorf("%w: the committee is not in canonical order", ErrLeaderState)
+	}
 	if len(signers) == 0 {
 		return nil, fmt.Errorf("%w: a QC with no signers", ErrLeaderState)
 	}

@@ -20,9 +20,13 @@ var leaderCommittee = []string{"a", "b", "c", "d"}
 type fakeLeaderInputs struct {
 	reputation bool
 	err        error
+	committee  []string
 }
 
 func (f fakeLeaderInputs) LeaderCommittee(uint64) ([]string, bool, error) {
+	if f.committee != nil {
+		return f.committee, f.reputation, f.err
+	}
 	return leaderCommittee, f.reputation, f.err
 }
 
@@ -103,6 +107,9 @@ func TestLeaderRingRefusals(t *testing.T) {
 	s.SetLeaderInputs(fakeLeaderInputs{reputation: false})
 	_, err = s.Add(leaderBlock(s, 2, leaderQC(1, epoch, "a", "b", "c"), nil), nil)
 	require.ErrorIs(t, err, ErrLeaderInputs, "a ring in an epoch of another policy")
+	s.SetLeaderInputs(fakeLeaderInputs{reputation: true, committee: []string{"a", "b", "c"}})
+	_, err = s.Add(leaderBlock(s, 2, leaderQC(1, epoch, "a", "b", "c"), nil), nil)
+	require.ErrorIs(t, err, ErrLeaderInputs, "a ring of four members under a committee of three")
 }
 
 func TestABlockWithoutARingIsUnchanged(t *testing.T) {
@@ -231,4 +238,56 @@ func TestReservedPartitionsCannotBeShards(t *testing.T) {
 	require.False(t, rctypes.ReservedPartition(1))
 	require.EqualValues(t, evmroot.D4ControlPartition, rctypes.ControlPartition)
 	require.NotEqual(t, rctypes.LeaderPartition, rctypes.ControlPartition)
+}
+
+// The producers of the leaf, not a hand-built head: what the store itself hands out, as a state message and as a handoff checkpoint, rebuilds
+// to the certified root only if it carries the leaf.
+func TestLeaderRingTravelsWithWhatTheStoreProduces(t *testing.T) {
+	zero := make([]byte, 32)
+	body, frozen, tr := bytes.Repeat([]byte{1}, 32), bytes.Repeat([]byte{2}, 32), bytes.Repeat([]byte{3}, 32)
+	s := leaderStore(t)
+	installTestFrozenShard(t, s, bytes.Repeat([]byte{0x42}, 32))
+	epoch := s.blockTree.Root().BlockData.Epoch
+
+	state, err := s.blockTree.CurrentState()
+	require.NoError(t, err)
+	require.NotNil(t, state.CommittedHead.Leader, "the state message carries the ring")
+	restored, err := NewRootBlock(state.CommittedHead, crypto.SHA256, s.orchestration, ProfileHandoff)
+	require.NoError(t, err)
+	require.Equal(t, s.blockTree.Root().RootHash, restored.RootHash)
+
+	add := func(round uint64, rec []byte) *ExecutedBlock {
+		t.Helper()
+		_, err := s.Add(leaderBlock(s, round, leaderQC(round-1, epoch, "a", "b", "c"), [][]byte{rec}), nil)
+		require.NoError(t, err)
+		return mustBlock(t, s, round)
+	}
+	add(2, record("prepare", 2, 7, zero, body, zero))
+	add(3, record("freeze", 3, 7, frozen, body, zero))
+	closing := add(4, record("commit", 4, 7, frozen, body, tr))
+	closing.CommitQc = &rctypes.QuorumCert{LedgerCommitInfo: &types.UnicitySeal{Hash: closing.RootHash}}
+	head, _, err := checkpointOf(closing)
+	require.NoError(t, err)
+	require.NotNil(t, head.Leader, "the handoff checkpoint carries the ring")
+	back, err := NewRootBlock(head, crypto.SHA256, s.orchestration, ProfileHandoff)
+	require.NoError(t, err)
+	require.Equal(t, closing.RootHash, back.RootHash)
+
+	// a sealed head's last record is the closing block, whatever the suffix's header round
+	forged := *head
+	forged.Leader = head.Leader.Clone()
+	forged.Leader.Records = append(forged.Leader.Records, rctypes.LeaderRecord{Round: 5, Voters: []byte{0b0111}})
+	_, err = NewRootBlock(&forged, crypto.SHA256, s.orchestration, ProfileHandoff)
+	require.ErrorIs(t, err, rctypes.ErrLeaderState)
+	require.NotErrorIs(t, err, ErrControlCheckpoint, "judged before the root")
+}
+
+// The frontier rebuilds the unicity tree from a copy of the committed state: without the leaf it cannot reach the certified root.
+func TestFrontierCutRebuildsTheRootWithTheLeaderLeaf(t *testing.T) {
+	ring, err := rctypes.NewLeaderState(bytes.Repeat([]byte{7}, 32), 1, 1, 4, 1)
+	require.NoError(t, err)
+	bt, root, key, _ := reviewCutTreeWithLeaves(t, initialControl(5), ring)
+	cut, err := bt.ReadFrontierCutSnapshot(key.PartitionID, root.ShardState.States[key].LastCR.Shard)
+	require.NoError(t, err)
+	require.True(t, bytes.Equal(root.RootHash, cut.RootHash))
 }

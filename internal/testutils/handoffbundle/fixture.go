@@ -46,6 +46,22 @@ func NewBound(t *testing.T, preimage []byte) Fixture { return NewBoundAtShardEpo
 // successor assignment's, so the snapshot carries that epoch's configuration hash (ConfHash).
 func NewBoundAtShardEpoch(t *testing.T, preimage []byte, shardEpoch uint64) Fixture {
 	t.Helper()
+	return newFixture(t, preimage, shardEpoch, nil)
+}
+
+// NewWithLeaderState is New with a leader-state leaf in the certified state, as the checkpoint of a root-reputation-v1 epoch carries: the
+// commit QC signs the root it is a leaf of. The ring is of epoch 1 and its last record is the closing block, round 4.
+func NewWithLeaderState(t *testing.T) Fixture {
+	t.Helper()
+	ring, err := rctypes.NewLeaderState(bytes.Repeat([]byte{7}, 32), 1, 1, 4, 1)
+	require.NoError(t, err)
+	ring, err = ring.Next(4, []byte{0b0111})
+	require.NoError(t, err)
+	return newFixture(t, nil, 0, ring)
+}
+
+func newFixture(t *testing.T, preimage []byte, shardEpoch uint64, ring *rctypes.LeaderState) Fixture {
+	t.Helper()
 	oldNodes := make([]*testutils.TestNode, 4)
 	oldSigners := make(map[string]abcrypto.Signer, 4)
 	for i := range oldNodes {
@@ -100,7 +116,7 @@ func NewBoundAtShardEpoch(t *testing.T, preimage []byte, shardEpoch uint64) Fixt
 		PredecessorBodyID: oldID, Phase: "committed", RecordBytes: record.Bytes(),
 		PreviousDigest: bytes.Repeat([]byte{4}, 32), FrozenParent: bytes.Repeat([]byte{5}, 32)}
 	key := types.PartitionShardID{PartitionID: partition, ShardID: shard.Key()}
-	states := storage.ShardStates{States: map[types.PartitionShardID]*storage.ShardInfo{key: state}, Control: &control}
+	states := storage.ShardStates{States: map[types.PartitionShardID]*storage.ShardInfo{key: state}, Control: &control, Leader: ring}
 	tree, _, err := states.UnicityTree(crypto.SHA256)
 	require.NoError(t, err)
 	path, err := tree.Certificate(evmroot.D4ControlPartition)
@@ -125,7 +141,7 @@ func NewBoundAtShardEpoch(t *testing.T, preimage []byte, shardEpoch uint64) Fixt
 	_, err = handoff.VerifyOldCommitProof(proof, old)
 	require.NoError(t, err)
 	snapshot := &abdrc.CommittedBlock{Block: &rctypes.BlockData{Version: rctypes.VersionHandoff, Epoch: 1, Round: 4,
-		Payload: &rctypes.Payload{Version: rctypes.VersionHandoff}}, Control: &control, CommitQc: qc,
+		Payload: &rctypes.Payload{Version: rctypes.VersionHandoff}}, Control: &control, Leader: ring, CommitQc: qc,
 		ShardInfo: []abdrc.ShardInfo{{Partition: partition, Shard: shard, T2Timeout: state.T2Timeout,
 			RootHash: state.RootHash, PrevEpochStat: state.PrevEpochStat, Stat: state.Stat,
 			PrevEpochFees: state.PrevEpochFees, Fees: state.Fees, IR: state.IR, IRTR: state.TR,

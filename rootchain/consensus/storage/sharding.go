@@ -415,11 +415,12 @@ func (ss ShardStates) MarshalCBOR() ([]byte, error) {
 }
 
 func (ss *ShardStates) UnmarshalCBOR(data []byte) error {
-	var v2 ssItemsV3
-	if err := types.Cbor.Unmarshal(data, &v2); err == nil {
-		if v2.Version != 3 || v2.Control == nil || v2.Leader == nil {
+	var v2, v3 ssItemsV3 // v3 apart: a failed decode can leave it partly filled
+	if err := types.Cbor.Unmarshal(data, &v3); err == nil {
+		if v3.Version != 3 || v3.Control == nil || v3.Leader == nil {
 			return errors.New("invalid leader-state shard state")
 		}
+		v2 = v3
 	} else {
 		var plain ssItemsV2
 		if err := types.Cbor.Unmarshal(data, &plain); err == nil {

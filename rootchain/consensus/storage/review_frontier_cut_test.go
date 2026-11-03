@@ -10,6 +10,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 	"github.com/unicitynetwork/bft-core/evmroot"
+	rctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
 	"github.com/unicitynetwork/bft-go-base/types"
 )
 
@@ -24,11 +25,18 @@ func reviewCutTree(t *testing.T) (*BlockTree, *ExecutedBlock, types.PartitionSha
 // control record, which is a leaf of the unicity tree the root hash commits to.
 func reviewCutTreeWithControl(t *testing.T, control *evmroot.ControlState) (*BlockTree, *ExecutedBlock, types.PartitionShardID, string) {
 	t.Helper()
+	return reviewCutTreeWithLeaves(t, control, nil)
+}
+
+// reviewCutTreeWithLeaves also carries a leader-state leaf (#886).
+func reviewCutTreeWithLeaves(t *testing.T, control *evmroot.ControlState, ring *rctypes.LeaderState) (*BlockTree, *ExecutedBlock, types.PartitionShardID, string) {
+	t.Helper()
 	conf := newShardConf(t)
 	conf.T2Timeout = 5 * time.Second
 	root := genesisBlockWithShard(t, conf)
 	if control != nil {
 		root.ShardState.Control = control
+		root.ShardState.Leader = ring
 		ut, _, err := root.ShardState.UnicityTree(crypto.SHA256)
 		require.NoError(t, err)
 		root.RootHash = ut.RootHash()
