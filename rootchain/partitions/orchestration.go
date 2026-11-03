@@ -190,7 +190,7 @@ func (o *Orchestration) AddShardConfig(shardConf *types.PartitionDescriptionReco
 	if shardConf == nil {
 		return fmt.Errorf("missing shard configuration")
 	}
-	if o.reserveControl && shardConf.PartitionID == rctypes.ControlPartition {
+	if o.reserveControl && rctypes.ReservedPartition(shardConf.PartitionID) {
 		return rctypes.ErrControlPartition
 	}
 	if shardConf.NetworkID != o.networkID {
@@ -232,7 +232,7 @@ func (o *Orchestration) InitGenesisShardConfigs(confs ...*types.PartitionDescrip
 		if conf == nil {
 			return fmt.Errorf("missing shard configuration")
 		}
-		if conf.PartitionID == rctypes.ControlPartition {
+		if rctypes.ReservedPartition(conf.PartitionID) {
 			return rctypes.ErrControlPartition
 		}
 		if conf.NetworkID != o.networkID {

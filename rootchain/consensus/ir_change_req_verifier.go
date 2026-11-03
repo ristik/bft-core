@@ -77,7 +77,7 @@ func (x *IRChangeReqVerifier) VerifyIRChangeReqView(view *storage.RequestRoundVi
 	if irChReq == nil {
 		return nil, fmt.Errorf("IR change request is nil: %w", drctypes.ErrInvalidRequest)
 	}
-	if x.params.NetworkProfileVersion == storage.ProfileHandoff && irChReq.Partition == drctypes.ControlPartition {
+	if x.params.NetworkProfileVersion == storage.ProfileHandoff && drctypes.ReservedPartition(irChReq.Partition) {
 		return nil, drctypes.ErrControlPartition
 	}
 	vr, err := view.VerifyIRChangeReq(irChReq, t2TimeoutToRootRounds(view.T2Timeout(), x.params.BlockRate/2))
@@ -171,7 +171,7 @@ func (x *IRChangeReqVerifier) verifyRequest(rootRound uint64, irChReq *drctypes.
 	if irChReq == nil {
 		return nil, nil, nil, fmt.Errorf("IR change request is nil")
 	}
-	if x.params.NetworkProfileVersion == storage.ProfileHandoff && irChReq.Partition == drctypes.ControlPartition {
+	if x.params.NetworkProfileVersion == storage.ProfileHandoff && drctypes.ReservedPartition(irChReq.Partition) {
 		return nil, nil, nil, drctypes.ErrControlPartition
 	}
 	// Certify input, everything needs to be verified again as if received from partition node, since we cannot trust the leader is honest.

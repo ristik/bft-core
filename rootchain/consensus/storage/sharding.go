@@ -25,6 +25,8 @@ type ShardStates struct {
 	States  map[types.PartitionShardID]*ShardInfo
 	Changed ShardSet              // shards whose state has changed
 	Control *evmroot.ControlState // present only in the handoff network profile
+	// Leader is the leader-state leaf of a root-reputation-v1 epoch (#886). The executor derives it; a block of any other policy has none.
+	Leader *rctypes.LeaderState
 	// Records are the P85 records this block projected (an acknowledgement), in log order; retained when the block commits. Omitted from
 	// the encoding when empty, so a chain that projects none keeps its byte-identical blocks.
 	Records []rootrecords.Record `cbor:",omitempty"`
@@ -65,6 +67,7 @@ func (ss ShardStates) nextBlockSwitching(shardConfs map[types.PartitionShardID]*
 		control.FrozenParent = bytes.Clone(control.FrozenParent)
 		nextBlock.Control = &control
 	}
+	nextBlock.Leader = ss.Leader.Clone()
 	for k, pdr := range shardConfs {
 		if len(pdr.Validators) == 0 {
 			continue //  shard is deleted
@@ -119,6 +122,16 @@ func (ss ShardStates) unicityTree(algo crypto.Hash) (*types.UnicityTree, map[typ
 			return nil, nil, nil, errors.New("control partition is also configured as a shard")
 		}
 		utData = append(utData, &types.UnicityTreeData{Partition: evmroot.D4ControlPartition, ShardTreeRoot: ss.Control.Digest()})
+	}
+	if ss.Leader != nil {
+		if _, exists := schemes[rctypes.LeaderPartition]; exists {
+			return nil, nil, nil, errors.New("leader partition is also configured as a shard")
+		}
+		digest, err := ss.Leader.Digest()
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		utData = append(utData, &types.UnicityTreeData{Partition: rctypes.LeaderPartition, ShardTreeRoot: digest})
 	}
 	shardTrees := make(map[types.PartitionID]types.ShardTree)
 	inputs := make(map[types.PartitionID][]types.ShardTreeInput, len(schemes))
@@ -365,6 +378,15 @@ type ssItemsV2 struct {
 	Control *evmroot.ControlState
 }
 
+type ssItemsV3 struct {
+	_       struct{} `cbor:",toarray"`
+	Version uint32
+	Data    []*ShardInfo
+	Changes ShardSet
+	Control *evmroot.ControlState
+	Leader  *rctypes.LeaderState
+}
+
 func (ss ShardStates) MarshalCBOR() ([]byte, error) {
 	d := ssItems{
 		Version: 1,
@@ -375,6 +397,12 @@ func (ss ShardStates) MarshalCBOR() ([]byte, error) {
 	for _, si := range ss.States {
 		d.Data[idx] = si
 		idx++
+	}
+	if ss.Leader != nil {
+		if ss.Control == nil {
+			return nil, ErrNetworkProfile
+		}
+		return types.Cbor.Marshal(ssItemsV3{Version: 3, Data: d.Data, Changes: d.Changes, Control: ss.Control, Leader: ss.Leader})
 	}
 	if ss.Control != nil {
 		return types.Cbor.Marshal(ssItemsV2{Version: 2, Data: d.Data, Changes: d.Changes, Control: ss.Control})
@@ -387,14 +415,24 @@ func (ss ShardStates) MarshalCBOR() ([]byte, error) {
 }
 
 func (ss *ShardStates) UnmarshalCBOR(data []byte) error {
-	var v2 ssItemsV2
+	var v2 ssItemsV3
 	if err := types.Cbor.Unmarshal(data, &v2); err == nil {
-		if v2.Version != 2 || v2.Control == nil {
-			return errors.New("invalid handoff shard state")
+		if v2.Version != 3 || v2.Control == nil || v2.Leader == nil {
+			return errors.New("invalid leader-state shard state")
 		}
-		ssn := ShardStates{States: make(map[types.PartitionShardID]*ShardInfo, len(v2.Data)), Changed: v2.Changes, Control: v2.Control}
+	} else {
+		var plain ssItemsV2
+		if err := types.Cbor.Unmarshal(data, &plain); err == nil {
+			if plain.Version != 2 || plain.Control == nil {
+				return errors.New("invalid handoff shard state")
+			}
+			v2 = ssItemsV3{Version: plain.Version, Data: plain.Data, Changes: plain.Changes, Control: plain.Control}
+		}
+	}
+	if v2.Version != 0 {
+		ssn := ShardStates{States: make(map[types.PartitionShardID]*ShardInfo, len(v2.Data)), Changed: v2.Changes, Control: v2.Control, Leader: v2.Leader}
 		for _, itm := range v2.Data {
-			if itm == nil || itm.PartitionID == evmroot.D4ControlPartition {
+			if itm == nil || rctypes.ReservedPartition(itm.PartitionID) {
 				return errors.New("invalid handoff shard entry")
 			}
 			key := types.PartitionShardID{PartitionID: itm.PartitionID, ShardID: itm.ShardID.Key()}

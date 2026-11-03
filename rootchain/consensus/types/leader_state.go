@@ -135,8 +135,8 @@ func (s *LeaderState) Valid() error {
 }
 
 func checkLeaderBitmap(voters []byte, members uint64) error {
-	if len(voters) == 0 {
-		return nil
+	if voters == nil {
+		return nil // no sample: nil is its one encoding, an empty bitmap would give the same record another digest
 	}
 	if uint64(len(voters)) != (members+7)/8 {
 		return fmt.Errorf("%w: bitmap of %d bytes for %d members", ErrLeaderState, len(voters), members)
@@ -154,6 +154,9 @@ func checkLeaderBitmap(voters []byte, members uint64) error {
 func (s *LeaderState) Select(cutoff, head uint64, sealed bool) ([]byte, error) {
 	if err := s.Valid(); err != nil {
 		return nil, err
+	}
+	if last := s.Records[len(s.Records)-1].Round; !sealed && last != head {
+		return nil, fmt.Errorf("%w: last record %d, unsealed committed head %d", ErrLeaderState, last, head)
 	}
 	if !sealed && cutoff > head {
 		return nil, fmt.Errorf("%w: cutoff %d, committed head %d", ErrHistoryUnavailable, cutoff, head)

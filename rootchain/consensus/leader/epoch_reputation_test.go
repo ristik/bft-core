@@ -43,6 +43,11 @@ func erRing(t *testing.T, n, start uint64, records ...rctypes.LeaderRecord) *rct
 	return s
 }
 
+func TestEpochReputationParameters(t *testing.T) {
+	require.EqualValues(t, 4, RecoveryRun)
+	require.EqualValues(t, 256, RecoverySpacing)
+}
+
 func TestEpochReputationBootstrapIsTheFullCommittee(t *testing.T) {
 	nodes := erNodes(t, 1, 1, 1, 1, 1)
 	head := LeaderHead{Round: 99}
@@ -182,7 +187,11 @@ func TestEpochReputationARingOfAnotherEpochIsNotHistory(t *testing.T) {
 	require.NoError(t, err)
 	sameEpoch, err = sameEpoch.Next(99, []byte{0b01111})
 	require.NoError(t, err)
-	for name, ring := range map[string]*rctypes.LeaderState{"other epoch": other, "same epoch, other genesis": sameEpoch} {
+	sameGenesis, err := rctypes.NewLeaderState(erGenesis, 1, 50, 5, 50)
+	require.NoError(t, err)
+	sameGenesis, err = sameGenesis.Next(99, []byte{0b01111})
+	require.NoError(t, err)
+	for name, ring := range map[string]*rctypes.LeaderState{"other epoch": other, "same epoch, other genesis": sameEpoch, "same genesis, other epoch": sameGenesis} {
 		// the installed anchor: its committed head keeps the outgoing root, ring and terminal control state; no child is committed
 		head := LeaderHead{Round: 99, State: ring, Sealed: true}
 		e := erSelector(t, nodes, start, 4, &head)
@@ -213,10 +222,12 @@ func TestEpochReputationNonQuorateSampleIsInvalid(t *testing.T) {
 	e := erSelector(t, nodes, 100, 4, &head)
 	_, err := e.GetLeaderForRound(200 + 24)
 	require.ErrorIs(t, err, ErrInvalidSample)
-	head.State.Members = 6
-	head.State.Lag = 28
+	head.State = erRing(t, 6, 100, rctypes.LeaderRecord{Round: 200, Voters: []byte{0b00111111}})
 	_, err = e.GetLeaderForRound(200 + 24)
-	require.ErrorIs(t, err, ErrInvalidSample, "a ring of another committee size")
+	require.ErrorIs(t, err, ErrInvalidSample, "a quorate ring of another committee size")
+	head.State = erRing(t, 5, 99, rctypes.LeaderRecord{Round: 200, Voters: []byte{0b11111}})
+	_, err = e.GetLeaderForRound(200 + 24)
+	require.ErrorIs(t, err, ErrInvalidSample, "a quorate ring from another first round")
 }
 
 func TestEpochReputationWeightedActiveSetKeepsOriginalWeights(t *testing.T) {
@@ -306,6 +317,8 @@ func TestEpochReputationConstructionRefusals(t *testing.T) {
 	nodes := erNodes(t, 1, 1, 1, 1)
 	head := func() (LeaderHead, error) { return LeaderHead{}, nil }
 	_, err := NewEpochReputation(erGenesis, 2, 100, 3, nodes, nil)
+	require.ErrorIs(t, err, ErrInvalidSample)
+	_, err = NewEpochReputation(erGenesis[:31], 2, 100, 3, nodes, head)
 	require.ErrorIs(t, err, ErrInvalidSample)
 	_, err = NewEpochReputation(erGenesis, 2, 100, 0, nodes, head)
 	require.ErrorIs(t, err, ErrInvalidSample)

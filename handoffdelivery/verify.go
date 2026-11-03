@@ -14,6 +14,7 @@ import (
 	"github.com/unicitynetwork/bft-core/evmroot"
 	"github.com/unicitynetwork/bft-core/handoff"
 	"github.com/unicitynetwork/bft-core/network/protocol/abdrc"
+	rctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/votesig"
 	abhash "github.com/unicitynetwork/bft-go-base/hash"
 	"github.com/unicitynetwork/bft-go-base/types"
@@ -195,6 +196,13 @@ func snapshotRoot(s *abdrc.CommittedBlock, partition types.PartitionID, shard ty
 		return nil, nil, ErrBundle
 	}
 	leaves := []*types.UnicityTreeData{{Partition: evmroot.D4ControlPartition, ShardTreeRoot: s.Control.Digest()}}
+	if s.Leader != nil {
+		digest, err := s.Leader.Digest()
+		if err != nil {
+			return nil, nil, errors.Join(ErrBundle, err)
+		}
+		leaves = append(leaves, &types.UnicityTreeData{Partition: rctypes.LeaderPartition, ShardTreeRoot: digest})
+	}
 	for partitionID, entries := range groups {
 		scheme := make(types.ShardingScheme, 0, len(entries))
 		inputs := make([]types.ShardTreeInput, 0, len(entries))

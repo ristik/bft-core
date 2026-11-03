@@ -2,10 +2,12 @@ package types
 
 import (
 	"bytes"
+	"encoding/hex"
 	"math"
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	"github.com/unicitynetwork/bft-go-base/types"
 )
 
 func testLeaderState(t *testing.T, members, start, first uint64) *LeaderState {
@@ -148,6 +150,9 @@ func TestLeaderStateSelect(t *testing.T) {
 	require.NotErrorIs(t, err, ErrHistoryUnavailable)
 
 	// sealed at 108: the terminal state proves no further sample, whatever later suffix header the head has
+	_, err = s.Select(100, 109, false)
+	require.ErrorIs(t, err, ErrLeaderState, "an unsealed head is its ring's last record")
+
 	got, err = s.Select(5000, 108, true)
 	require.NoError(t, err)
 	require.Equal(t, []byte{0b1011}, got)
@@ -180,6 +185,60 @@ func TestLeaderStateDigestBindsEveryField(t *testing.T) {
 		require.NoError(t, err, name)
 		require.NotEqual(t, want, got, name)
 	}
+}
+
+// Two children of one parent, as a fork executes them: neither shares a record or a bitmap with the other or with the parent, with spare
+// capacity and across an eviction.
+func TestLeaderStateSiblingsShareNothing(t *testing.T) {
+	parent := testLeaderState(t, 4, 100, 100)
+	parent, err := parent.Next(105, []byte{0b0111})
+	require.NoError(t, err)
+	snapshot := parent.Clone()
+	for _, rounds := range [][2]uint64{{106, 107}, {300, 301}} { // the second pair evicts
+		a, err := parent.Next(rounds[0], []byte{0b0111})
+		require.NoError(t, err)
+		b, err := parent.Next(rounds[1], []byte{0b1011})
+		require.NoError(t, err)
+		require.Equal(t, rounds[0], a.Records[len(a.Records)-1].Round, "the sibling's append did not overwrite it")
+		require.Equal(t, []byte{0b0111}, a.Records[len(a.Records)-1].Voters)
+		a.Records[0].Round = 1
+		for i := range a.Records {
+			if len(a.Records[i].Voters) != 0 {
+				a.Records[i].Voters[0] = 0
+			}
+		}
+		require.Equal(t, snapshot, parent)
+		require.NotEqual(t, uint64(1), b.Records[0].Round)
+		require.Equal(t, []byte{0b1011}, b.Records[len(b.Records)-1].Voters)
+	}
+	clone := parent.Clone()
+	clone.Genesis[0] ^= 1
+	clone.Records[1].Round = 1
+	clone.Records[2].Voters[0] = 0
+	require.Equal(t, snapshot, parent)
+}
+
+// The leaf's encoding is consensus: this vector changes only with a new policy. It covers the domain, field order and an absent bitmap, nil
+// and empty being one encoding.
+func TestLeaderStateDigestVector(t *testing.T) {
+	s, err := testLeaderState(t, 4, 100, 100).Next(105, []byte{0b0111})
+	require.NoError(t, err)
+	got, err := s.Digest()
+	require.NoError(t, err)
+	require.Equal(t, "e6e9182784431d92fa3b6522bf96fb3cf9c13ebf3377f465bbb73bed7b9f9afa", hex.EncodeToString(got))
+	empty := s.Clone()
+	empty.Records[0].Voters = []byte{}
+	require.ErrorIs(t, empty.Valid(), ErrLeaderState, "a record without a sample has one encoding")
+	_, err = s.Next(106, []byte{})
+	require.ErrorIs(t, err, ErrLeaderState)
+	raw, err := types.Cbor.Marshal(s)
+	require.NoError(t, err)
+	var decoded LeaderState
+	require.NoError(t, types.Cbor.Unmarshal(raw, &decoded))
+	require.NoError(t, decoded.Valid(), "the codec keeps a record without a sample nil")
+	again, err := decoded.Digest()
+	require.NoError(t, err)
+	require.Equal(t, got, again)
 }
 
 func TestLeaderBitmap(t *testing.T) {

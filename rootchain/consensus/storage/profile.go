@@ -150,6 +150,9 @@ func checkStoredSuffix(parent, child *ExecutedBlock) error {
 	if control == nil || control.Phase != "committed" {
 		return nil
 	}
+	if err := sameLeaderState(parent.ShardState.Leader, child.ShardState.Leader); err != nil {
+		return err
+	}
 	if child.BlockData.Payload == nil || !child.BlockData.Payload.IsEmpty() || len(child.ShardState.Changed) != 0 || child.ShardState.Control == nil || !bytes.Equal(child.ShardState.Control.Bytes(), control.Bytes()) || !bytes.Equal(child.RootHash, parent.RootHash) || len(child.ShardState.States) != len(parent.ShardState.States) {
 		return ErrHandoffSuffix
 	}
