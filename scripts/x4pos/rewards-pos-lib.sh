@@ -3,14 +3,15 @@
 # The pool is a small genesis alloc (P85_REWARD_FUNDING, run-lane sets it for run-inputs "rewards": true), so it runs dry; x4e_run (scripts/p85-recovery-steps.sh) runs the same
 # scripts/x4pos/steps/reward-*.sh the driver runs. NOT yet proven on this chain: whether the settle/replay agree with the K -> J -> K acknowledged history and the slashed lots.
 
-# WHAT THE CHAIN CAN SHOW. RewardPool.closeInterval (unicity-pos-contracts b17829ca, src/p85/RewardPool.sol:271-290) reverts NotCaughtUp for the TAIL of the latest assignment while
-# ELECTION.openResult() != 0, and on this authoritative-election chain a result is open from the baseline on (live probe, x4-rew-4: openResult non-zero, every cursor equal, closeInterval ->
-# NotCaughtUp). Only ENDED segments close: the genesis K segment (ended by the J install) and the J segment (ended by the recovery) = 2 intervals, at any progress. So on this chain the
-# campaign shows 2 closed intervals, a pool that runs dry (a 0.5 UCT pool: interval 1 takes it all, interval 2 is at zero budget), the refill transaction and a payee's claim, all under the
-# accounting checker. NOT shown here: a LATER interval paid after the refill, or 4 intervals (both are shown by the shadow-chain x4-rewards lane; campaign.json lists them as notCovered).
+# WHAT THE CHAIN CAN SHOW. RewardPool.closeInterval (unicity-pos-contracts, src/p85/RewardPool.sol) closes the TAIL of the latest assignment only up to the open election result's reservation progress
+# (contracts#72; before it, it reverted NotCaughtUp for the whole tail while ELECTION.openResult() != 0, and a result was open on this chain from the recovery on, bft-core#814). Ended segments close
+# at any progress, and a tail closes interval by interval on the pool's progress grid. On this chain the segments are the genesis K (ended by the J install), J (ended by the recovery), K (ended by the
+# second handoff, X4_H2_LANE) and K' (the tail): with the handoff lane no result is open by the time these steps run (the second handoff's Ack, offence 2's lost result rejected by the roots), so the
+# campaign closes at least X4R_MIN_INTERVALS = 4 intervals, runs the small pool (0.5 UCT: interval 1 takes it all, the later ones are at zero budget) dry, refills it and then sees a LATER interval paid
+# (awaitPaid), and a payee's exact claim, all under the accounting checker. Without the handoff lane (the first design) only the 2 ended segments close and no later interval is paid after the refill.
 # The steps run after the epoch switches, when the J segment has ended.
 X4R_PROGRESS=${X4R_PROGRESS:-3600}   # the registry's progress waited for before the first settle (as in the shadow rewards lane)
-X4R_MIN_INTERVALS=${X4R_MIN_INTERVALS:-2}
+X4R_MIN_INTERVALS=${X4R_MIN_INTERVALS:-$([ "${X4_H2_LANE:-0}" = 1 ] && echo 4 || echo 2)}
 
 # every term of RewardPool.closeInterval's precondition (src/p85/RewardPool.sol:271-290), printed when a reward step fails, so the next run says WHICH one held
 x4r_diag() {
@@ -37,9 +38,11 @@ x4r_intervals() {
   x4e_run ri1 reward-interval.sh "{\"minIntervals\":$X4R_MIN_INTERVALS}" && x4e_run ri1 reward-interval.check.sh "{\"minIntervals\":$X4R_MIN_INTERVALS}" || { x4r_diag; return 1; }
 }
 
-# the dry pool and its refill (awaitPaid false: no later interval is expected on this chain)
+# the dry pool and its refill. With the handoff lane (X4_H2_LANE) a LATER interval must be paid after the refill (awaitPaid, as the shadow chain shows); without it none is expected on this chain
 x4r_dry_refill() {
-  x4e_run xr reward-exhaust-refill.sh '{"refillWei":"1500000000000000000","awaitPaid":"false"}' && x4e_run xr reward-exhaust-refill.check.sh '{"awaitPaid":"false"}' || { x4r_diag; return 1; }
+  local await=false wait=900
+  [ "${X4_H2_LANE:-0}" != 1 ] || { await=true; wait=${X4R_AWAIT_SECONDS:-2400}; }
+  x4e_run xr reward-exhaust-refill.sh "{\"refillWei\":\"1500000000000000000\",\"awaitPaid\":\"$await\",\"waitSeconds\":$wait}" && x4e_run xr reward-exhaust-refill.check.sh "{\"awaitPaid\":\"$await\"}" || { x4r_diag; return 1; }
 }
 
 # a payee (genesis payee 1, a key the lane holds) claims its whole credit to a fresh address: exact amounts, the pool's balance, availability and totalCredits move by the credit and
