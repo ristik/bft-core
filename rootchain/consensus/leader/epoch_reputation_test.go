@@ -257,20 +257,34 @@ func TestEpochReputationCacheNeverChangesAnAnswer(t *testing.T) {
 		return l
 	}
 	r := uint64(200 + 32)
+	// the answer of each active set comes from its own NewWeighted over exactly its members: a cache that collapsed two sets into one
+	// table could only be seen against a reference that shares nothing with it
 	want := make(map[byte]peer.ID)
+	distinct := map[peer.ID]bool{}
 	for _, b := range bitmaps {
-		want[b] = answer(b, r)
+		var active []*types.NodeInfo
+		for i, id := range sortedIDs(t, nodes) {
+			if b&(1<<i) != 0 {
+				for _, n := range nodes {
+					if n.NodeID == id.String() {
+						active = append(active, n)
+					}
+				}
+			}
+		}
+		table, err := NewWeighted(start, active)
+		require.NoError(t, err)
+		want[b], err = table.GetLeaderForRound(r)
+		require.NoError(t, err)
+		distinct[want[b]] = true
+	}
+	require.Greater(t, len(distinct), 1, "the sets must disagree at this round, or a shared table would pass")
+	for _, b := range bitmaps {
+		require.Equal(t, want[b], answer(b, r), "bitmap %07b", b)
 	}
 	require.LessOrEqual(t, len(e.active), activeTableCache)
 	for i := len(bitmaps) - 1; i >= 0; i-- { // the opposite order, the far-evicted ones rebuilt
-		require.Equal(t, want[bitmaps[i]], answer(bitmaps[i], r))
-	}
-	fresh := erSelector(t, nodes, start, 5, &head)
-	for _, b := range bitmaps {
-		head.State = erRing(t, 7, start, rctypes.LeaderRecord{Round: 200, Voters: []byte{b}})
-		l, err := fresh.GetLeaderForRound(r)
-		require.NoError(t, err)
-		require.Equal(t, want[b], l, "no cache or arrival order changes an answer")
+		require.Equal(t, want[bitmaps[i]], answer(bitmaps[i], r), "bitmap %07b", bitmaps[i])
 	}
 }
 
