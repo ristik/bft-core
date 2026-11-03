@@ -1169,6 +1169,7 @@ class Rehearsal:
         """With validator i still down and the fault transition over: SETTLED_SAMPLES transactions, one at a time, each timed from its acceptance to the first survivor's receipt.
         Rounds pass while they run, so the later ones are past the history lag. Recorded, phase 'settled', never judged here: the numbers go to the #886 report."""
         sender, to = self.manifest['faucet_address'], '0x' + '44' * 20
+        tx = None
         for k in range(SETTLED_SAMPLES):
             nonce = int(self.ureth(survivors[0], 'eth_getTransactionCount', [sender, 'latest']), 16)
             raw = self.raw_tx(to, nonce, int(self.ureth(survivors[0], 'eth_gasPrice'), 16))
@@ -1178,6 +1179,7 @@ class Rehearsal:
             self.wait(f'survivor {survivors[0]} mines settled sample {k}', lambda: self.ureth(survivors[0], 'eth_getTransactionReceipt', [tx]), mine_within)
             with (self.evidence / 'restart-latency.jsonl').open('a') as out:
                 out.write(json.dumps({'validator_down': i, 'phase': 'settled', 'sample': k, 'seconds_to_mine': round(time.monotonic() - accepted, 1), 'tx': tx}) + '\n')
+        return tx
 
     def record_restart_latency(self, i, stall, mine_within, tx):
         """The seconds the survivors needed to mine a transaction with validator i down: a log line (marked SLOW with the #886 note when the rotated limit is in force and
@@ -1221,8 +1223,9 @@ class Rehearsal:
                 blocks.add(r['blockHash'])
             self.record_restart_latency(i, round(time.monotonic() - accepted), mine_within, tx)
             self.expect(len(blocks) == 1, 'the survivors agree on the including block')
+            last = tx
             if mine_within > MINE_SECONDS:
-                self.settled_latency(i, survivors, mine_within)
+                last = self.settled_latency(i, survivors, mine_within)
                 # the whole stop window of the survivors' roots and shards: the end-of-run log tail does not reach back to it
                 roots = [f'{kind}{j}' for j in survivors for kind in ('root', 'shard')]
                 (self.evidence / f'stop-window-{self.target}-v{i}.log').write_text(self.compose('logs', '--no-color', '--since', stopped, *roots, check=False))
@@ -1230,6 +1233,8 @@ class Rehearsal:
             self.compose('start', *names)
             r = self.wait(f'validator {i} catches up to the transaction mined without it', lambda: self.ureth(i, 'eth_getTransactionReceipt', [tx]), 300)
             self.expect(r['blockHash'] in blocks, f'validator {i} has the same block after restart', r['blockHash'])
+            # the gateway reads the sender's nonce from a validator: wait until the restarted one has everything mined without it
+            self.wait(f'validator {i} catches up to the last transaction mined without it', lambda: self.ureth(i, 'eth_getTransactionReceipt', [last]), 300)
             self.wait('the public gateway is healthy again', lambda: self.http(PUBLIC_RPC, 'GET', '/healthz')[0] == 200, 120)
             receipt = json.loads(self.send_via_gateway(self.gen / 'faucet-secrets', '0x' + '33' * 20))
             self.expect(receipt['status'] == '0x1', f'a transaction through the public gateway succeeds after validator {i} rejoined', receipt['transactionHash'])
