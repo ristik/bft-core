@@ -177,7 +177,7 @@ func (x *ConsensusManager) InstallEpochBundle(incoming handoffdelivery.Bundle) (
 	selector, err := newEpochLeader(x.trustBaseStore, g.Epoch, g.Start, newTrust.RootNodes,
 		func() (Leader, error) { return newBootstrapLeader(x.leaderSelector, g.Start, newTrust.RootNodes) },
 		func() (Leader, error) {
-			return reputationLeader(x.params.NetworkProfileVersion, a, newTrust, x.trustBaseStore, func() *storage.BlockStore { return x.blockStore })
+			return reputationLeader(x.params.NetworkProfileVersion, a, newTrust, x.trustBaseStore, func() leaderHeads { return x.blockStore })
 		})
 	if err != nil {
 		return nil, err

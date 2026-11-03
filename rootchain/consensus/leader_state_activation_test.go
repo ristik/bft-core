@@ -2,6 +2,7 @@ package consensus
 
 import (
 	"context"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -116,11 +117,21 @@ func TestUnknownLeaderRoundsAdvanceAtCertificateSpeed(t *testing.T) {
 	c := newPhaseLockLive(t, timeout)
 	var drop atomic.Bool
 	base := c.net.filter
+	var sendsMu sync.Mutex
+	sends := map[[2]string]map[uint64]int{} // sender and receiver: timeout votes per round
 	c.net.filter = func(from, to peer.ID, msg any) bool {
 		if drop.Load() {
-			switch msg.(type) {
+			switch m := msg.(type) {
 			case *abdrc.ProposalMsg, *abdrc.VoteMsg:
 				return true
+			case *abdrc.TimeoutMsg:
+				sendsMu.Lock()
+				defer sendsMu.Unlock()
+				k := [2]string{from.String(), to.String()}
+				if sends[k] == nil {
+					sends[k] = map[uint64]int{}
+				}
+				sends[k][m.Timeout.Round]++
 			}
 		}
 		return base(from, to, msg)
@@ -144,6 +155,20 @@ func TestUnknownLeaderRoundsAdvanceAtCertificateSpeed(t *testing.T) {
 	require.Less(t, elapsed, stretch*timeout, "certificate speed, not a local timeout per round")
 
 	require.EqualValues(t, frozenHead, head(), "no commit: every advance was a TC")
+	// the action fires once per round: a retransmission is the ordinary timer's, not one per loop event
+	sendsMu.Lock()
+	var rounds, total int
+	for _, perRound := range sends {
+		for round, n := range perRound {
+			if round >= from {
+				rounds++
+				total += n
+			}
+		}
+	}
+	sendsMu.Unlock()
+	require.NotZero(t, rounds)
+	require.Less(t, total, 2*rounds, "%d timeout sends over %d sender, receiver and round combinations", total, rounds)
 	for _, n := range c.nodes {
 		require.False(t, n.r.manager.recovery.InRecovery(), "%s: unknown history is not state recovery", n.name)
 		require.True(t, n.r.manager.frontier == nil || !n.r.manager.frontier.faulted.Load(), "%s: nor a frontier fault", n.name)
@@ -171,6 +196,25 @@ func TestStateRecoveryKeepsTheLeaderInputs(t *testing.T) {
 		return ring != nil && len(ring.Records) > 3
 	}, 2*time.Minute, 50*time.Millisecond, "the recovered node goes on executing and committing blocks with a ring")
 	require.NotNil(t, m.blockStore.LeaderInputs())
+
+	// and its selector reads the store the recovery put in place: beyond the bootstrap, at a cutoff no store before the recovery could
+	// answer, it names a peer's leader. The head compared is the recovered node's own, which every live peer has reached.
+	peerSelector := c.nodes[c.idx(first[0])].r.manager
+	lag := uint64(4*len(c.nodes) + 4)
+	start := m.epochAnchor.Slot + 1
+	require.Eventually(t, func() bool {
+		head, _, _ := m.blockStore.LeaderHead()
+		round := head + lag
+		if head < start || round < start+lag {
+			return false
+		}
+		mine, err := m.leaderSelector.GetLeaderForRound(round)
+		if err != nil {
+			return false
+		}
+		theirs, err := peerSelector.leaderSelector.GetLeaderForRound(round)
+		return err == nil && mine == theirs
+	}, 2*time.Minute, 50*time.Millisecond, "a recovered node's selector follows the replaced store and agrees with a peer")
 }
 
 // recoveryRunLeader is a selector whose every round is led by one member; start says which rounds begin a recovery run.

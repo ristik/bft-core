@@ -361,7 +361,7 @@ func NewConsensusManager(
 		chosenLeader, err = newEpochLeader(trustBaseStore, installedAnchor.Epoch, installedAnchor.Slot+1, trustBase.RootNodes,
 			func() (Leader, error) { return newBootstrapLeader(ls, installedAnchor.Slot+1, trustBase.RootNodes) },
 			func() (Leader, error) {
-				return reputationLeader(cParams.NetworkProfileVersion, installedAnchor, trustBase, trustBaseStore, func() *storage.BlockStore { return manager.blockStore })
+				return reputationLeader(cParams.NetworkProfileVersion, installedAnchor, trustBase, trustBaseStore, func() leaderHeads { return manager.blockStore })
 			})
 	} else if cParams.NetworkProfileVersion == storage.ProfileHandoff {
 		// the genesis epoch: its schedule starts at the genesis round, whatever start the trust base records
@@ -584,7 +584,6 @@ func (x *ConsensusManager) Run(ctx context.Context) error {
 		if x.epochAnchor != nil && x.pacemaker.GetCurrentRound() == x.epochAnchor.Slot+1 {
 			x.processNewRoundEvent(ctx)
 		}
-		x.timeoutUnknownLeader(ctx)
 		return x.loop(ctx)
 	})
 
@@ -635,7 +634,7 @@ func (x *ConsensusManager) timeoutUnknownLeader(ctx context.Context) {
 	x.leaderCheckedRound = round
 	if _, err := x.leaderSelector.GetLeaderForRound(round); errors.Is(err, drctypes.ErrHistoryUnavailable) {
 		x.log.DebugContext(ctx, "the round's leader is not known yet: timing the round out", "round", round)
-		x.onLocalTimeout(ctx)
+		x.sendTimeoutVote(ctx)
 	}
 }
 
@@ -738,7 +737,11 @@ func (x *ConsensusManager) onLocalTimeout(ctx context.Context) {
 	ctx, span := x.tracer.Start(ctx, "ConsensusManager.onLocalTimeout")
 	defer span.End()
 	x.log.InfoContext(ctx, "local timeout")
+	x.sendTimeoutVote(ctx)
+}
 
+// sendTimeoutVote signs, stores and broadcasts the node's timeout vote of the current round, or sends the one it holds.
+func (x *ConsensusManager) sendTimeoutVote(ctx context.Context) {
 	// has the validator voted in this round, if true send the same (timeout)vote
 	// maybe less than quorum of nodes where operational the last time
 	timeoutVoteMsg := x.pacemaker.GetTimeoutVote()

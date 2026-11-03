@@ -51,6 +51,11 @@ var ErrReputationProfile = errors.New("root-reputation-v1 needs an epoch anchor 
 // member to a certified sample and defeat the exclusion the schedule relies on. Only scheme 2 makes Signatures' keys verified voters.
 var ErrReputationScheme = errors.New("root-reputation-v1 needs a scheme 2 epoch")
 
+// leaderHeads is what a lookup reads from a block store.
+type leaderHeads interface {
+	LeaderHead() (round uint64, state *rctypes.LeaderState, sealed bool)
+}
+
 // signingConfigs resolves the authenticated signing configuration of an epoch (the trust base store).
 type signingConfigs interface {
 	SigningConfig(epoch uint64) (votesig.Config, error)
@@ -58,7 +63,7 @@ type signingConfigs interface {
 
 // reputationLeader is the one constructor of root-reputation-v1, for every install and restart. head reads the block store current at the
 // time of the lookup: a recovery replaces the store.
-func reputationLeader(profile uint64, anchor *rctypes.EpochAnchor, trust *types.RootTrustBaseV1, signing signingConfigs, store func() *storage.BlockStore) (Leader, error) {
+func reputationLeader(profile uint64, anchor *rctypes.EpochAnchor, trust *types.RootTrustBaseV1, signing signingConfigs, store func() leaderHeads) (Leader, error) {
 	if profile != storage.ProfileHandoff || anchor == nil || trust == nil {
 		return nil, ErrReputationProfile
 	}

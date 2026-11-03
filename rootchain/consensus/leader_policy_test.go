@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/stretchr/testify/require"
 	"github.com/unicitynetwork/bft-go-base/types"
 
@@ -153,7 +154,7 @@ func TestEpochLeaderReputationConditions(t *testing.T) {
 	nodes := policyCommittee(t, 3, 2, 2, 2, 2)
 	trust := &types.RootTrustBaseV1{RootNodes: nodes, QuorumThreshold: 8}
 	anchor := &rctypes.EpochAnchor{GenesisID: make([]byte, 32), Epoch: 2, Slot: 39, StateRoot: make([]byte, 32)}
-	store := func() *storage.BlockStore { return nil }
+	store := func() leaderHeads { return nil }
 	scheme2 := fakeSigning{cfg: votesig.Config{Scheme: votesig.SchemeDomainBound}}
 	policies := &fakePolicies{policy: trustbase.LeaderPolicyReputationV1}
 	build := func(profile uint64, a *rctypes.EpochAnchor, signing signingConfigs) func() (Leader, error) {
@@ -172,6 +173,52 @@ func TestEpochLeaderReputationConditions(t *testing.T) {
 	sentinel := errors.New("no history")
 	_, err = newEpochLeader(policies, 2, 40, nodes, nil, build(storage.ProfileHandoff, anchor, fakeSigning{err: sentinel}))
 	require.ErrorIs(t, err, sentinel, "an unknown scheme is not assumed")
+}
+
+type fixedHead struct {
+	round uint64
+	ring  *rctypes.LeaderState
+}
+
+func (f fixedHead) LeaderHead() (uint64, *rctypes.LeaderState, bool) { return f.round, f.ring, false }
+
+// The stake threshold reaches the selector as its sample quorum: on 3,2,2,2,2 with threshold 8, a sample of weight 7 is invalid and one of
+// weight 8 schedules.
+func TestReputationLeaderJudgesASampleByTheStakeThreshold(t *testing.T) {
+	nodes := policyCommittee(t, 3, 2, 2, 2, 2)
+	trust := &types.RootTrustBaseV1{RootNodes: nodes, QuorumThreshold: 8}
+	anchor := &rctypes.EpochAnchor{GenesisID: make([]byte, 32), Epoch: 2, Slot: 39, StateRoot: make([]byte, 32)}
+	ordered := slices.Clone(nodes)
+	slices.SortFunc(ordered, func(a, b *types.NodeInfo) int { return strings.Compare(a.NodeID, b.NodeID) })
+	bitmap := func(wantHeavy bool, lights int) []byte {
+		var b byte
+		for i, n := range ordered {
+			if n.Stake == 3 && wantHeavy {
+				b |= 1 << i
+			}
+			if n.Stake == 2 && lights > 0 {
+				b |= 1 << i
+				lights--
+			}
+		}
+		return []byte{b}
+	}
+	const round = uint64(1000)
+	lookup := func(voters []byte) (peer.ID, error) {
+		ring, err := rctypes.NewLeaderState(anchor.GenesisID, anchor.Epoch, anchor.Slot+1, 5, anchor.Slot+1)
+		require.NoError(t, err)
+		ring, err = ring.Next(round, voters)
+		require.NoError(t, err)
+		l, err := reputationLeader(storage.ProfileHandoff, anchor, trust, fakeSigning{cfg: votesig.Config{Scheme: votesig.SchemeDomainBound}},
+			func() leaderHeads { return fixedHead{round: round, ring: ring} })
+		require.NoError(t, err)
+		return l.GetLeaderForRound(round + 24)
+	}
+	_, err := lookup(bitmap(true, 2)) // 3+2+2
+	require.ErrorIs(t, err, leader.ErrInvalidSample, "weight 7 of threshold 8")
+	got, err := lookup(bitmap(false, 4)) // 2+2+2+2
+	require.NoError(t, err, "weight 8")
+	require.NotEmpty(t, got)
 }
 
 func TestTrustLeaderInputs(t *testing.T) {
