@@ -230,6 +230,29 @@ class ProofOfStake(unittest.TestCase):
         for limit,stall,note in ((rehearse.MINE_SECONDS,90,False),(rehearse.MINE_SECONDS_ROTATED,90,True),(rehearse.MINE_SECONDS_ROTATED,5,False)):
             said.clear(); r.record_restart_latency(2,stall,limit,'0xt')
             self.assertEqual('#886' in said[0],note,(limit,stall,said))
+    def test_a_restarted_validator_catches_up_to_the_last_settled_sample(self):
+        import rehearse
+        said=[]
+        class Fake(rehearse.Rehearsal):
+            def __init__(self): self.n,self.pods,self.manifest,self.evidence,self.target=3,[1],{'faucet_address':'0x'+'11'*20},Path(tempfile.mkdtemp()),2
+            def say(self,m): said.append(m)
+            def expect(self,ok,what,detail=''): assert ok,what
+            def compose(self,*a,**k): return 'a stop window line'
+            def http(self,*a,**k): return (503,'')
+            def ureth(self,j,method,params=None): return '0x1'
+            def raw_tx(self,*a): return '0xraw'
+            def cast_run(self,*a): return '0xtx'
+            def inner_reply(self,*a): return {'result':'0xtx'}
+            def wait(self,what,probe,seconds):
+                if 'mines it' in what: return {'status':'0x1','blockHash':'0xb'}
+                if 'catches up to the last' in what:
+                    self.last=probe()
+                    raise rehearse.Failure('stop after the catch-up wait')
+                if 'catches up' in what: return {'blockHash':'0xb'}
+                return True
+        r=Fake()
+        with self.assertRaises(rehearse.Failure): r.pod_restart(mine_within=rehearse.MINE_SECONDS_ROTATED)   # past the mining waittten before anything else can fail
+        self.assertEqual(r.last,'0x1','the gateway reads the sender nonce from the restarted validator: it must hold the last settled sample first')
     def test_pos_owner_names_the_revert_selector_it_expects(self):
         import json,rehearse,pos_owner
         class Fake:   # the two helpers it needs: a selector table and an eth_call that fails with a given revert data
