@@ -25,7 +25,7 @@
     },
     "aggregator-go": {
       "repository": "https://github.com/ristik/aggregator-go.git",
-      "commit": "30cca4760c35ef2ac4412389fba86de9ad372cff",
+      "commit": "edb2274deb29f2621ceb31836ac3585bc4806239",
       "branch": "integration/enshrined-evm"
     },
     "contracts": {
@@ -42,7 +42,7 @@
     },
     "state-transition-sdk-js": {
       "repository": "https://github.com/ristik/state-transition-sdk-js.git",
-      "commit": "59bc7fb7dfdb935759fbe885eeb3bdc01811bb05",
+      "commit": "5742df42ca29e519ddf64a9ca533d7edac711d4b",
       "branch": "integration/enshrined-evm"
     }
   },
