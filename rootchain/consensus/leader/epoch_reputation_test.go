@@ -10,7 +10,7 @@ import (
 	"github.com/unicitynetwork/bft-go-base/types"
 
 	test "github.com/unicitynetwork/bft-core/internal/testutils/peer"
-	"github.com/unicitynetwork/bft-core/rootchain/consensus/storage"
+	rctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
 )
 
 var erGenesis = bytes.Repeat([]byte{7}, 32)
@@ -32,9 +32,9 @@ func erSelector(t *testing.T, nodes []*types.NodeInfo, start, quorum uint64, hea
 	return e
 }
 
-func erRing(t *testing.T, n, start uint64, records ...storage.LeaderRecord) *storage.LeaderState {
+func erRing(t *testing.T, n, start uint64, records ...rctypes.LeaderRecord) *rctypes.LeaderState {
 	t.Helper()
-	s, err := storage.NewLeaderState(erGenesis, 2, start, n, start)
+	s, err := rctypes.NewLeaderState(erGenesis, 2, start, n, start)
 	require.NoError(t, err)
 	for _, r := range records {
 		s, err = s.Next(r.Round, r.Voters)
@@ -59,7 +59,7 @@ func TestEpochReputationBootstrapIsTheFullCommittee(t *testing.T) {
 	_, err = e.GetLeaderForRound(99)
 	require.ErrorIs(t, err, ErrBeforeStart)
 	_, err = e.GetLeaderForRound(124)
-	require.ErrorIs(t, err, storage.ErrHistoryUnavailable, "the first round after the bootstrap is normal and reads history")
+	require.ErrorIs(t, err, rctypes.ErrHistoryUnavailable, "the first round after the bootstrap is normal and reads history")
 }
 
 func TestEpochReputationRecoveryRunsAreDistributed(t *testing.T) {
@@ -73,7 +73,7 @@ func TestEpochReputationRecoveryRunsAreDistributed(t *testing.T) {
 		// the period's normal rounds read history; with none it is unavailable, never a member
 		for _, r := range []uint64{base, base + RecoverySpacing - RecoveryRun - 1} {
 			_, err := e.GetLeaderForRound(r)
-			require.ErrorIs(t, err, storage.ErrHistoryUnavailable, "round %d", r)
+			require.ErrorIs(t, err, rctypes.ErrHistoryUnavailable, "round %d", r)
 		}
 		runStart := base + RecoverySpacing - RecoveryRun
 		l, err := e.GetLeaderForRound(runStart)
@@ -111,7 +111,7 @@ func TestEpochReputationRecoveryLeadershipIgnoresHistory(t *testing.T) {
 	e := erSelector(t, nodes, start, 4, &head)
 	without, err := e.GetLeaderForRound(run)
 	require.NoError(t, err)
-	head = LeaderHead{Round: run - 1, State: erRing(t, 5, start, storage.LeaderRecord{Round: run - 24 - 1, Voters: []byte{0b01111}})}
+	head = LeaderHead{Round: run - 1, State: erRing(t, 5, start, rctypes.LeaderRecord{Round: run - 24 - 1, Voters: []byte{0b01111}})}
 	with, err := e.GetLeaderForRound(run)
 	require.NoError(t, err)
 	require.Equal(t, without, with, "local availability must not change a leader")
@@ -123,9 +123,9 @@ func TestEpochReputationNormalRoundsUseTheCutoffSample(t *testing.T) {
 	start := uint64(100)
 	bitmap := byte(0b01111) // everyone but ids[4]
 	head := LeaderHead{Round: 200, State: erRing(t, 5, start,
-		storage.LeaderRecord{Round: 150, Voters: []byte{0b11111}},
-		storage.LeaderRecord{Round: 180, Voters: []byte{bitmap}},
-		storage.LeaderRecord{Round: 200, Voters: []byte{bitmap}})}
+		rctypes.LeaderRecord{Round: 150, Voters: []byte{0b11111}},
+		rctypes.LeaderRecord{Round: 180, Voters: []byte{bitmap}},
+		rctypes.LeaderRecord{Round: 200, Voters: []byte{bitmap}})}
 	e := erSelector(t, nodes, start, 4, &head)
 	active := make([]*types.NodeInfo, 0, 4)
 	for _, n := range nodes {
@@ -152,13 +152,13 @@ func TestEpochReputationNormalRoundsUseTheCutoffSample(t *testing.T) {
 	require.Equal(t, wantFull, got)
 
 	_, err = e.GetLeaderForRound(201 + 24)
-	require.ErrorIs(t, err, storage.ErrHistoryUnavailable, "a cutoff above the head")
+	require.ErrorIs(t, err, rctypes.ErrHistoryUnavailable, "a cutoff above the head")
 }
 
 func TestEpochReputationCoveredEmptyPrefixDiffersFromUnavailable(t *testing.T) {
 	nodes := erNodes(t, 1, 1, 1, 1, 1)
 	head := LeaderHead{Round: 130, State: erRing(t, 5, 100)} // committed through 130, no carrier after the first child
-	head.State.Records = append(head.State.Records, storage.LeaderRecord{Round: 130})
+	head.State.Records = append(head.State.Records, rctypes.LeaderRecord{Round: 130})
 	e := erSelector(t, nodes, 100, 4, &head)
 	full, err := NewWeighted(100, nodes)
 	require.NoError(t, err)
@@ -168,48 +168,48 @@ func TestEpochReputationCoveredEmptyPrefixDiffersFromUnavailable(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, want, got)
 	_, err = e.GetLeaderForRound(131 + 24)
-	require.ErrorIs(t, err, storage.ErrHistoryUnavailable)
+	require.ErrorIs(t, err, rctypes.ErrHistoryUnavailable)
 }
 
 func TestEpochReputationARingOfAnotherEpochIsNotHistory(t *testing.T) {
 	nodes := erNodes(t, 1, 1, 1, 1, 1)
 	start := uint64(100)
-	other, err := storage.NewLeaderState(bytes.Repeat([]byte{9}, 32), 1, 50, 5, 50)
+	other, err := rctypes.NewLeaderState(bytes.Repeat([]byte{9}, 32), 1, 50, 5, 50)
 	require.NoError(t, err)
 	other, err = other.Next(99, []byte{0b01111})
 	require.NoError(t, err)
-	sameEpoch, err := storage.NewLeaderState(bytes.Repeat([]byte{9}, 32), 2, 50, 5, 50)
+	sameEpoch, err := rctypes.NewLeaderState(bytes.Repeat([]byte{9}, 32), 2, 50, 5, 50)
 	require.NoError(t, err)
 	sameEpoch, err = sameEpoch.Next(99, []byte{0b01111})
 	require.NoError(t, err)
-	for name, ring := range map[string]*storage.LeaderState{"other epoch": other, "same epoch, other genesis": sameEpoch} {
+	for name, ring := range map[string]*rctypes.LeaderState{"other epoch": other, "same epoch, other genesis": sameEpoch} {
 		// the installed anchor: its committed head keeps the outgoing root, ring and terminal control state; no child is committed
 		head := LeaderHead{Round: 99, State: ring, Sealed: true}
 		e := erSelector(t, nodes, start, 4, &head)
 		_, err := e.GetLeaderForRound(start + 24)
-		require.ErrorIs(t, err, storage.ErrHistoryUnavailable, name)
+		require.ErrorIs(t, err, rctypes.ErrHistoryUnavailable, name)
 	}
 	head := LeaderHead{Round: 99}
 	e := erSelector(t, nodes, start, 4, &head)
 	_, err = e.GetLeaderForRound(start + 24)
-	require.ErrorIs(t, err, storage.ErrHistoryUnavailable, "no ring at all")
+	require.ErrorIs(t, err, rctypes.ErrHistoryUnavailable, "no ring at all")
 }
 
 func TestEpochReputationSealedRingAnswersAboveItsHead(t *testing.T) {
 	nodes := erNodes(t, 1, 1, 1, 1, 1)
-	head := LeaderHead{Round: 5000, Sealed: true, State: erRing(t, 5, 100, storage.LeaderRecord{Round: 200, Voters: []byte{0b01111}})}
+	head := LeaderHead{Round: 5000, Sealed: true, State: erRing(t, 5, 100, rctypes.LeaderRecord{Round: 200, Voters: []byte{0b01111}})}
 	e := erSelector(t, nodes, 100, 4, &head)
 	_, err := e.GetLeaderForRound(5000 + 10000)
 	require.NoError(t, err, "no further sample can exist: the closing block's is the last")
 	unsealed := LeaderHead{Round: 200, State: head.State}
 	e = erSelector(t, nodes, 100, 4, &unsealed)
 	_, err = e.GetLeaderForRound(201 + 24)
-	require.ErrorIs(t, err, storage.ErrHistoryUnavailable)
+	require.ErrorIs(t, err, rctypes.ErrHistoryUnavailable)
 }
 
 func TestEpochReputationNonQuorateSampleIsInvalid(t *testing.T) {
 	nodes := erNodes(t, 1, 1, 1, 1, 1)
-	head := LeaderHead{Round: 200, State: erRing(t, 5, 100, storage.LeaderRecord{Round: 200, Voters: []byte{0b00111}})}
+	head := LeaderHead{Round: 200, State: erRing(t, 5, 100, rctypes.LeaderRecord{Round: 200, Voters: []byte{0b00111}})}
 	e := erSelector(t, nodes, 100, 4, &head)
 	_, err := e.GetLeaderForRound(200 + 24)
 	require.ErrorIs(t, err, ErrInvalidSample)
@@ -231,7 +231,7 @@ func TestEpochReputationWeightedActiveSetKeepsOriginalWeights(t *testing.T) {
 		}
 	}
 	bitmap := byte(0b11111) &^ (1 << heavy)
-	head := LeaderHead{Round: 200, State: erRing(t, 5, 100, storage.LeaderRecord{Round: 200, Voters: []byte{bitmap}})}
+	head := LeaderHead{Round: 200, State: erRing(t, 5, 100, rctypes.LeaderRecord{Round: 200, Voters: []byte{bitmap}})}
 	e := erSelector(t, nodes, 100, 8, &head)
 	got, err := e.GetLeaderForRound(200 + 24)
 	require.NoError(t, err, "weight 8 of 11 is a responsive quorum")
@@ -251,7 +251,7 @@ func TestEpochReputationCacheNeverChangesAnAnswer(t *testing.T) {
 	head := LeaderHead{Round: 200}
 	e := erSelector(t, nodes, start, 5, &head)
 	answer := func(b byte, r uint64) peer.ID {
-		head.State = erRing(t, 7, start, storage.LeaderRecord{Round: 200, Voters: []byte{b}})
+		head.State = erRing(t, 7, start, rctypes.LeaderRecord{Round: 200, Voters: []byte{b}})
 		l, err := e.GetLeaderForRound(r)
 		require.NoError(t, err)
 		return l
@@ -267,7 +267,7 @@ func TestEpochReputationCacheNeverChangesAnAnswer(t *testing.T) {
 	}
 	fresh := erSelector(t, nodes, start, 5, &head)
 	for _, b := range bitmaps {
-		head.State = erRing(t, 7, start, storage.LeaderRecord{Round: 200, Voters: []byte{b}})
+		head.State = erRing(t, 7, start, rctypes.LeaderRecord{Round: 200, Voters: []byte{b}})
 		l, err := fresh.GetLeaderForRound(r)
 		require.NoError(t, err)
 		require.Equal(t, want[b], l, "no cache or arrival order changes an answer")

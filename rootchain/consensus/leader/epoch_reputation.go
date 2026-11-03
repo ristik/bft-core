@@ -12,7 +12,6 @@ import (
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/unicitynetwork/bft-go-base/types"
 
-	"github.com/unicitynetwork/bft-core/rootchain/consensus/storage"
 	rctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
 )
 
@@ -33,7 +32,7 @@ var ErrInvalidSample = errors.New("leader: invalid participation sample")
 // control state is terminal, so that its epoch can take no further sample.
 type LeaderHead struct {
 	Round  uint64
-	State  *storage.LeaderState
+	State  *rctypes.LeaderState
 	Sealed bool
 }
 
@@ -65,7 +64,7 @@ func NewEpochReputation(genesis []byte, epoch, start, quorum uint64, nodes []*ty
 	if err != nil {
 		return nil, err
 	}
-	lag, err := storage.LeaderLag(uint64(len(nodes)))
+	lag, err := rctypes.LeaderLag(uint64(len(nodes)))
 	if err != nil {
 		return nil, err
 	}
@@ -115,7 +114,7 @@ func (e *EpochReputation) GetLeaderForRound(round uint64) (peer.ID, error) {
 	// A ring of another epoch is not history (the installed anchor keeps the outgoing root, ring and terminal control state): every cutoff
 	// here is at or above A, above that head, and unavailable until this epoch's first child commits.
 	if head.State == nil || head.State.Epoch != e.epoch || !bytes.Equal(head.State.Genesis, e.genesis) {
-		return "", fmt.Errorf("%w: cutoff %d, committed head %d holds no history of epoch %d", storage.ErrHistoryUnavailable, cutoff, head.Round, e.epoch)
+		return "", fmt.Errorf("%w: cutoff %d, committed head %d holds no history of epoch %d", rctypes.ErrHistoryUnavailable, cutoff, head.Round, e.epoch)
 	}
 	if head.State.Members != uint64(len(e.nodes)) {
 		return "", fmt.Errorf("%w: ring of %d members, committee of %d", ErrInvalidSample, head.State.Members, len(e.nodes))
