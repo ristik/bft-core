@@ -143,6 +143,26 @@ class Failure(Exception):
     pass
 
 
+def repeated_certificates(log):
+    """The T2 repeats a stop window's shard logs show: a certificate admitted for the shard round of the one before it, at a later root round. It makes a request built
+    on the earlier certificate stale, which is the shape of the #886 two-stage bound. Each once, however many shard nodes logged it."""
+    last, found = {}, {}
+    for line in log.splitlines():
+        name, _, text = line.partition('|')
+        try:
+            entry = json.loads(text)
+        except ValueError:
+            continue
+        if not isinstance(entry, dict) or entry.get('message') != 'certificate admitted':
+            continue
+        node, seen = name.strip(), (entry.get('round'), entry.get('rootRound'))
+        before = last.get(node)
+        if before and before[0] == seen[0] and before[1] != seen[1]:
+            found.setdefault(seen[1], {'shardRound': seen[0], 'rootRound': seen[1], 'firstRootRound': before[1], 'time': entry.get('time')})
+        last[node] = seen
+    return [found[k] for k in sorted(found)]
+
+
 class Rehearsal:
     def __init__(self, generation, evidence, cast):
         self.gen, self.evidence, self.cast = Path(generation).resolve(), Path(evidence), cast
@@ -1359,7 +1379,10 @@ class Rehearsal:
                 last = self.settled_latency(i, survivors, mine_within) or tx
                 # the whole stop window of the survivors' roots and shards: the end-of-run log tail does not reach back to it
                 roots = [f'{kind}{j}' for j in survivors for kind in ('root', 'shard')]
-                (self.evidence / f'stop-window-{self.target}-v{i}.log').write_text(self.compose('logs', '--no-color', '--since', stopped, *roots, check=False))
+                window = self.compose('logs', '--no-color', '--since', stopped, *roots, check=False)
+                (self.evidence / f'stop-window-{self.target}-v{i}.log').write_text(window)
+                with (self.evidence / 'restart-latency.jsonl').open('a') as out:   # tags the window's samples for the #886 two-stage bound
+                    out.write(json.dumps({'validator_down': i, 'phase': 'window', 'repeats': repeated_certificates(window)}) + '\n')
             self.say(f'  starting validator {i}')
             self.compose('start', *names)
             r = self.wait(f'validator {i} catches up to the transaction mined without it', lambda: self.ureth(i, 'eth_getTransactionReceipt', [tx]), 300)

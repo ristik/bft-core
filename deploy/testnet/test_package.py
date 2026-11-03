@@ -239,20 +239,26 @@ class ProofOfStake(unittest.TestCase):
             def expect(self,ok,what,detail=''): assert ok,what
             def compose(self,*a,**k): return 'a stop window line'
             def http(self,*a,**k): return (503,'')
-            def ureth(self,j,method,params=None): return '0x1'
+            hashes=[]
+            def ureth(self,j,method,params=None):
+                if method=='eth_getTransactionReceipt': self.asked=params[0]
+                return '0x1'
             def raw_tx(self,*a): return '0xraw'
-            def cast_run(self,*a): return '0xtx'
-            def inner_reply(self,*a): return {'result':'0xtx'}
+            def cast_run(self,*a):
+                self.hashes.append(f'0xtx{len(self.hashes)}')
+                return self.hashes[-1]
+            def inner_reply(self,*a): return {'result':self.hashes[-1] if self.hashes else '0xtx'}
             def wait(self,what,probe,seconds):
                 if 'mines it' in what: return {'status':'0x1','blockHash':'0xb'}
                 if 'catches up to the last' in what:
-                    self.last=probe()
+                    probe()
                     raise rehearse.Failure('stop after the catch-up wait')
                 if 'catches up' in what: return {'blockHash':'0xb'}
                 return True
         r=Fake()
-        with patch.object(rehearse,'SETTLED_SAMPLES',12),self.assertRaises(rehearse.Failure): r.pod_restart(mine_within=rehearse.MINE_SECONDS_ROTATED)   # past the mining waittten before anything else can fail
-        self.assertEqual(r.last,'0x1','the gateway reads the sender nonce from the restarted validator: it must hold the last settled sample first')
+        with self.assertRaises(rehearse.Failure): r.pod_restart(mine_within=rehearse.MINE_SECONDS_ROTATED)
+        self.assertEqual(r.asked,r.hashes[-1],'the last settled sample, not the transition transaction: the gateway reads the nonce from the restarted validator')
+        self.assertGreater(len(r.hashes),1)
     def settled_fake(self,replies):
         import rehearse
         class Fake(rehearse.Rehearsal):
@@ -408,6 +414,12 @@ class ProofOfStake(unittest.TestCase):
             kept.clear()
             with self.assertRaises(rehearse.Failure): Fake().pod_restart(mine_within=limit)
             self.assertEqual(len(kept),expect,limit)
+    def test_the_window_is_tagged_with_its_t2_repeats(self):
+        import rehearse
+        line=lambda node,shard,root: f'{node}-1  | '+json.dumps({'message':'certificate admitted','round':shard,'rootRound':root,'time':f't{root}'})
+        log='\n'.join([line('shard1',177,612),line('shard3',177,612),'root1-1  | not json',line('shard1',177,624),line('shard3',177,624),line('shard1',179,628),line('shard3',179,628),line('shard1',179,628)])
+        self.assertEqual(rehearse.repeated_certificates(log),[{'shardRound':177,'rootRound':624,'firstRootRound':612,'time':'t624'}],'one repeat, once; the same certificate logged again is not one')
+        self.assertEqual(rehearse.repeated_certificates(line('shard1',1,2)+'\n'+line('shard1',2,3)),[])
     def test_pos_owner_names_the_revert_selector_it_expects(self):
         import json,rehearse,pos_owner
         class Fake:   # the two helpers it needs: a selector table and an eth_call that fails with a given revert data
