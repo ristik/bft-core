@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/stretchr/testify/require"
@@ -60,6 +61,15 @@ func (f *retentionFixture) nextRound() {
 	f.cm.timeoutUnknownLeader(f.ctx)
 }
 
+// requireSends waits for exactly n sends: the mock network delivers from a goroutine, so a count read at once can lag, and it waits a little
+// longer so that one send too many still fails.
+func (f *retentionFixture) requireSends(t *testing.T, n int) {
+	t.Helper()
+	require.Eventually(t, func() bool { return len(f.sends()) >= n }, 5*time.Second, 2*time.Millisecond, "fewer than %d sends", n)
+	time.Sleep(50 * time.Millisecond)
+	require.Len(t, f.sends(), n)
+}
+
 func (f *retentionFixture) sends() []*abdrc.IrChangeReqMsg {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -70,14 +80,14 @@ func (f *retentionFixture) sends() []*abdrc.IrChangeReqMsg {
 func TestRetainedRequestIsSentOncePerRoundUnchanged(t *testing.T) {
 	f := newRetentionFixture(t)
 	require.NoError(t, f.cm.retainRequest(f.ctx, f.request(t)))
-	require.Len(t, f.sends(), 1, "sent on acceptance")
+	f.requireSends(t, 1)
 	f.cm.forwardRetained(f.ctx)
 	f.cm.forwardRetained(f.ctx)
-	require.Len(t, f.sends(), 1, "at most one send per round")
+	f.requireSends(t, 1)
 	for i := 2; i <= 4; i++ {
 		f.nextRound()
 		f.cm.forwardRetained(f.ctx)
-		require.Len(t, f.sends(), i)
+		f.requireSends(t, i)
 	}
 	first, err := types.Cbor.Marshal(f.sends()[0])
 	require.NoError(t, err)
@@ -94,9 +104,9 @@ func TestRetainedRequestSurvivesDuplicateTriggers(t *testing.T) {
 		require.NoError(t, f.cm.retainRequest(f.ctx, req))
 	}
 	require.Len(t, f.cm.retained, 1)
-	require.Len(t, f.sends(), 1, "duplicates in one round add no send")
+	f.requireSends(t, 1)
 	f.nextRound()
-	require.Len(t, f.sends(), 2, "the retry does not depend on the shard")
+	f.requireSends(t, 2)
 }
 
 // When this node is the next leader the copy goes to the proposal buffer, and a proposal clearing that buffer does not end it.
@@ -117,11 +127,11 @@ func TestRetainedRequestWaitsForAKnownLeader(t *testing.T) {
 	f := newRetentionFixture(t)
 	f.cm.leaderSelector = unknownLeader{}
 	require.NoError(t, f.cm.retainRequest(f.ctx, f.request(t)))
-	require.Empty(t, f.sends())
+	f.requireSends(t, 0)
 	require.Contains(t, f.cm.retained, f.shard, "an unknown next leader is not a reason to lose it")
 	f.cm.leaderSelector = constLeader{leader: f.other, nodes: f.cm.Validators()}
 	f.nextRound()
-	require.Len(t, f.sends(), 1, "retried once the leader is known")
+	f.requireSends(t, 1)
 }
 
 type unknownLeader struct{ constLeader }
@@ -140,7 +150,7 @@ func TestRetainedRequestDroppedWhenTheVerifierSaysStale(t *testing.T) {
 	sent := len(f.sends())
 	f.nextRound()
 	require.NotContains(t, f.cm.retained, f.shard)
-	require.Len(t, f.sends(), sent, "and it is not sent")
+	f.requireSends(t, sent)
 }
 
 // Only a verdict on the request drops it. A view that cannot be resolved, and a change pending in the pipeline, say nothing about it.
@@ -197,7 +207,7 @@ func TestRetainRefusesAStaleRequest(t *testing.T) {
 	req.Requests[0].InputRecord.Timestamp = si.LastCR.UC.UnicitySeal.Timestamp + 1
 	require.Error(t, f.cm.retainRequest(f.ctx, req))
 	require.Empty(t, f.cm.retained)
-	require.Empty(t, f.sends())
+	f.requireSends(t, 0)
 }
 
 // No root queue crosses an epoch: the shard resubmits under the successor.
