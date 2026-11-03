@@ -18,10 +18,11 @@ GRID = 1000
 RATE_UNITS = 1000
 
 
-def model(segments, progress, tail_open, start, rate, available, members_of):
+def model(segments, progress, open_reserved_at, start, rate, available, members_of):
     """segments: [(assignment, start, end|None)] in order; members_of(assignment) -> [(weight, payee)]. Returns (credits, next_start, available, intervals).
-    Intervals are half-open [a, b), b the earliest of the owner's end and the next grid point, closed only up to `progress`; the tail (no end) only when
-    no election result is open (tail_open False)."""
+    Intervals are half-open [a, b), b the earliest of the owner's end and the next grid point, closed only up to `progress`. The tail (no end) is limited as
+    RewardPool's advance limits it (src/p85/RewardPool.sol): an open election result's Ack lands above the progress it was reserved at, so with one open
+    (open_reserved_at not None) the tail closes up to min(progress, reservedAt), not nowhere: an open result does not stop a tail interval that ends below it."""
     credits, intervals = {}, 0
     a = start
     seg = 0
@@ -33,12 +34,13 @@ def model(segments, progress, tail_open, start, rate, available, members_of):
         owner, s_start, s_end = segments[seg]
         if a < s_start:
             raise ReplayError(f"timeline gap: the next interval starts at {a}, the owner at {s_start}")
-        if s_end is None and tail_open:
-            break
+        limit = progress
+        if s_end is None and open_reserved_at is not None:
+            limit = min(progress, open_reserved_at)
         b = (a - start) // GRID * GRID + GRID + start
         if s_end is not None and s_end < b:
             b = s_end
-        if b > progress or b <= a:
+        if b > limit or b <= a:
             break
         nominal = rate * (b - a) // RATE_UNITS
         budget = min(nominal, available)
@@ -193,11 +195,14 @@ def check(a):
         return out
 
     progress = c.raw(a.registry, "progress()")[0]
-    tail_open = c.raw(a.election, "openResult()")[0] != 0
+    open_result = c.raw(a.election, "openResult()")[0]
+    tail_open = open_result != 0
+    # ElectionPolicy.Result: state, reason, attempt, progress (the reservedAt RewardPool reads), ...; read at the same pinned block
+    open_reserved_at = c.raw(a.election, "result(bytes32)", "0x" + format(open_result, "064x"))[3] if tail_open else None
     rate = c.raw(a.policy, "currentRewardRate()")[0]
     start = c.raw(a.pool, "START()")[0]
     funded = a.initial_funding + a.extra_funding
-    credits, next_start, available, intervals = model(segments, progress, tail_open, start, rate, funded, members_of)
+    credits, next_start, available, intervals = model(segments, progress, open_reserved_at, start, rate, funded, members_of)
 
     got_next, got_avail, got_total = c.raw(a.pool, "nextStart()")[0], c.raw(a.pool, "available()")[0], c.raw(a.pool, "totalCredits()")[0]
     need(got_next == next_start, f"nextStart {got_next}, recomputed {next_start}")

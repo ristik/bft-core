@@ -3,6 +3,8 @@
 import sys
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import rewards_check as rc  # noqa: E402
@@ -13,8 +15,8 @@ MEMBERS = {"G": [(10, p) for p in G], "J": [(10, p) for p in G[:3]], "K": [(10, 
 
 
 class Model(unittest.TestCase):
-    def run_model(self, segments, progress, tail_open=False, rate=UCT, available=10_000 * UCT):
-        return rc.model(segments, progress, tail_open, 0, rate, available, lambda a: MEMBERS[a])
+    def run_model(self, segments, progress, open_reserved_at=None, rate=UCT, available=10_000 * UCT):
+        return rc.model(segments, progress, open_reserved_at, 0, rate, available, lambda a: MEMBERS[a])
 
     def test_a_single_owner_closes_whole_grid_intervals_only(self):
         credits, nxt, avail, n = self.run_model([("G", 0, None)], 4_321)
@@ -39,9 +41,28 @@ class Model(unittest.TestCase):
         self.assertEqual((nxt, n), (3_000, 5))
         self.assertEqual(credits[G[1]], 3 * UCT // 10 // 4 + (7 * UCT // 10 // 3) * 2 + 13 * UCT // 10 // 4)
 
-    def test_an_open_election_result_keeps_the_tail_open(self):
-        _, nxt, _, n = self.run_model([("G", 0, 300), ("K", 300, None)], 5_000, tail_open=True)
-        self.assertEqual((nxt, n), (300, 1), "only the finished owner's interval closes")
+    def test_an_open_election_result_caps_the_tail_at_its_reservation(self):
+        # run 41626347740 (bft-core#895): the tail starts at 2991, a result is reserved at 3015, and the pool closed to the grid point between them
+        _, nxt, _, n = self.run_model([("G", 0, 2_991), ("K", 2_991, None)], 5_000, open_reserved_at=3_015)
+        self.assertEqual((nxt, n), (3_000, 4), "1000, 2000, the owner's end at 2991, and the tail's grid point 3000")
+
+    def test_no_grid_point_in_the_gap_closes_nothing_of_the_tail(self):
+        # the passing run on bft-core#891 (1806d479): tail from 3021, a result reserved at 3058
+        _, nxt, _, n = self.run_model([("G", 0, 3_021), ("K", 3_021, None)], 5_000, open_reserved_at=3_058)
+        self.assertEqual((nxt, n), (3_021, 4), "the finished owner's intervals only")
+
+    def test_the_cap_is_the_earlier_of_progress_and_the_reservation(self):
+        _, nxt, _, _ = self.run_model([("G", 0, None)], 3_500, open_reserved_at=5_000)
+        self.assertEqual(nxt, 3_000, "progress below the reservation still limits")
+        _, nxt, _, _ = self.run_model([("G", 0, None)], 5_000, open_reserved_at=3_000)
+        self.assertEqual(nxt, 3_000, "a grid point exactly at the reservation closes: the pool refuses only end > limit")
+        _, nxt, _, _ = self.run_model([("G", 0, None)], 5_000, open_reserved_at=2_999)
+        self.assertEqual(nxt, 2_000)
+
+    def test_the_cap_binds_the_tail_only(self):
+        # as in the pool, whose open-result check is inside `if (!s.ended)`: a finished owner closes up to progress whatever is reserved
+        _, nxt, _, _ = self.run_model([("G", 0, 2_600), ("K", 2_600, None)], 5_000, open_reserved_at=2_500)
+        self.assertEqual(nxt, 2_600)
 
     def test_dust_and_exhaustion_with_a_tiny_pool(self):
         credits, _, avail, _ = self.run_model([("G", 0, None)], 3_000, rate=7, available=20)
@@ -53,6 +74,77 @@ class Model(unittest.TestCase):
     def test_a_gap_is_refused(self):
         with self.assertRaises(AssertionError):
             self.run_model([("G", 100, None)], 1_000)
+
+
+class FakeChain:
+    """The contracts' views at a pinned block, for check(): one owner to 2991, then the tail, a result reserved at 3015, and the pool at nextStart."""
+    state = {}
+
+    def __init__(self, rpc, cast, block):
+        self.state = FakeChain.state
+
+    def raw(self, to, sig, *args):
+        st = self.state
+        k = sig.split("(")[0]
+        if k == "segmentCount":
+            return [2]
+        if k == "segmentAt":
+            return {0: [int(GA, 16), 0, 2_991, 1], 1: [int(GK, 16), 2_991, 0, 0]}[args[0]]
+        if k == "assignments":
+            return [0, 0, 0, 0, 0 if int(args[0], 16) == int(GA, 16) else 2_991, 0, 1]
+        if k == "assignmentExposures":
+            return [0, 1, 7]
+        if k == "exposures":
+            return [0, 0, 0, 1, 0, 0, 0, int(PAYEE, 16)]
+        if k == "credits":
+            return [st["credit"]]
+        return [st[k]]
+
+
+GA, GK, PAYEE = "0x" + "aa" * 32, "0x" + "bb" * 32, "0x" + "00" * 12 + "11" * 20
+
+
+class CheckWithAnOpenResult(unittest.TestCase):
+    """check() as the lane runs it: what the pool holds is compared with the model, so the cap cannot excuse a wrong pool."""
+
+    def args(self):
+        return SimpleNamespace(block=976, rpc="r", cast="c", pool="p", custody="k", registry="g", election="e", policy="y", genesis_assignment=GA, initial_funding=10_000 * UCT, extra_funding=0)
+
+    def right(self):
+        credits, nxt, avail, _ = rc.model([(GA, 0, 2_991), (GK, 2_991, None)], 3_500, 3_015, 0, UCT, 10_000 * UCT, lambda a: [(1, PAYEE)])
+        return {"progress": 3_500, "openResult": 9, "result": [3, 0, 2, 3_015], "currentRewardRate": UCT, "START": 0, "nextStart": nxt, "available": avail,
+                "totalCredits": sum(credits.values()), "credit": credits[PAYEE]}
+
+    def run_check(self, **change):
+        state = {**self.right(), **change}
+        FakeChain.state = state
+        original = FakeChain.raw
+
+        def raw(chain, to, sig, *args):
+            return state["result"] if sig.startswith("result") else original(chain, to, sig, *args)
+        balance = SimpleNamespace(stdout=str(100_000 * UCT), returncode=0)
+        with patch.object(rc, "Chain", type("Chain", (FakeChain,), {"raw": raw})), patch.object(rc.subprocess, "run", return_value=balance):
+            rc.check(self.args())
+
+    def test_the_run_that_failed_on_the_old_model_passes(self):
+        self.assertEqual(self.right()["nextStart"], 3_000)
+        self.run_check()
+
+    def test_a_wrong_next_start_still_fails(self):
+        for wrong in (2_991, 3_015, 4_000):
+            with self.assertRaisesRegex(rc.ReplayError, "nextStart"):
+                self.run_check(nextStart=wrong)
+
+    def test_an_over_credit_still_fails(self):
+        right = self.right()
+        with self.assertRaisesRegex(rc.ReplayError, "totalCredits"):
+            self.run_check(totalCredits=right["totalCredits"] + 1)
+        with self.assertRaisesRegex(rc.ReplayError, "credit of"):
+            self.run_check(credit=right["credit"] + 1)
+
+    def test_available_above_the_model_still_fails(self):
+        with self.assertRaisesRegex(rc.ReplayError, "available"):
+            self.run_check(available=self.right()["available"] + 1)
 
 
 class Replay(unittest.TestCase):
