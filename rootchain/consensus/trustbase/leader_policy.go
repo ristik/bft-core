@@ -11,6 +11,8 @@ const (
 	LeaderPolicyLegacy = "legacy"
 	// LeaderPolicyWeightedV1 is the fixed-epoch weighted proposer-priority selector (leader.Weighted).
 	LeaderPolicyWeightedV1 = "root-wrr-v1"
+	// LeaderPolicyReputationV1 follows committed participation with an agreed history cutoff (leader.EpochReputation, #886).
+	LeaderPolicyReputationV1 = "root-reputation-v1"
 )
 
 // ErrLeaderPolicyHistory is returned when the leader policy of an epoch cannot be established from the authenticated history:

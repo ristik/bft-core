@@ -258,7 +258,8 @@ func TestLiveWeightedEpochHeavyValidatorRestartRebroadcastsItsRecordedTimeout(t 
 		require.EqualValues(t, votesig.SchemeDomainBound, qc.Scheme)
 		require.NoError(t, qc.VerifyWith(heavy.trust))
 		led := map[string]int{}
-		for r := uint64(100); r < 109; r++ { // one full cycle of W=9
+		start := heavy.manager.epochAnchor.Slot + 1
+		for r := start; r < start+9; r++ { // one full cycle of W=9, inside the bootstrap: no history needed
 			l, err := heavy.manager.leaderSelector.GetLeaderForRound(r)
 			require.NoError(t, err)
 			led[l.String()]++

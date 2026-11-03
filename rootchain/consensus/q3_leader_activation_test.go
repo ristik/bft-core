@@ -19,6 +19,7 @@ import (
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/leader"
 	tbstore "github.com/unicitynetwork/bft-core/rootchain/consensus/trustbase"
 	drctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
+	rctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
 )
 
 // Q4 #399: the weighted epoch's committed ProtocolConfig selects root-wrr-v1 as part of the one Q3 activation. These tests run the
@@ -68,17 +69,18 @@ func scheduleOf(t *testing.T, l Leader, from uint64, rounds int) []string {
 	return out
 }
 
-// requireWeightedEpoch is the activation premise for one replica: the installed epoch's selector is the weighted one, started at
-// A* with zero priorities, and its schedule is the reference one for the epoch's committed weights.
+// requireWeightedEpoch is the activation premise for one replica: the installed epoch's selector is the committed tuple's, started at
+// A* with zero priorities, and for the whole bootstrap, which reads no history, its schedule is the reference one for the epoch's
+// committed weights.
 func requireWeightedEpoch(t *testing.T, r *q3Replica, epoch, start uint64) {
 	t.Helper()
 	tb := r.manager.trustBase.Load()
 	require.EqualValues(t, epoch, tb.Epoch)
-	require.IsType(t, &leader.Weighted{}, r.manager.leaderSelector, "the committed tuple selects root-wrr-v1")
+	require.IsType(t, &leader.EpochReputation{}, r.manager.leaderSelector, "the committed tuple selects root-reputation-v1")
 	policy, err := r.trust.LeaderPolicy(epoch)
 	require.NoError(t, err)
-	require.Equal(t, tbstore.LeaderPolicyWeightedV1, policy)
-	const rounds = 54
+	require.Equal(t, tbstore.LeaderPolicyReputationV1, policy)
+	rounds := 4*len(tb.RootNodes) + 4
 	require.Equal(t, referenceSchedule(tb.RootNodes, start, rounds), scheduleOf(t, r.manager.leaderSelector, start, rounds))
 	_, err = r.manager.leaderSelector.GetLeaderForRound(start - 1)
 	require.ErrorIs(t, err, leader.ErrBeforeStart, "the schedule has no position before A*")
@@ -87,7 +89,8 @@ func requireWeightedEpoch(t *testing.T, r *q3Replica, epoch, start uint64) {
 func TestPolicyNamesOfTheTupleAndTheStoreAreOne(t *testing.T) {
 	require.Equal(t, q3format.LeaderPolicyWeightedV1, tbstore.LeaderPolicyWeightedV1)
 	require.Equal(t, q3format.LeaderPolicyLegacy, tbstore.LeaderPolicyLegacy)
-	require.Equal(t, tbstore.LeaderPolicyWeightedV1, q3format.Q3Config(5, [32]byte{1}).LeaderPolicy)
+	require.Equal(t, q3format.LeaderPolicyReputationV1, tbstore.LeaderPolicyReputationV1)
+	require.Equal(t, tbstore.LeaderPolicyReputationV1, q3format.Q3Config(5, [32]byte{1}).LeaderPolicy)
 }
 
 // The activation of the weighted epoch selects the weighted selector at A* on every replica, from the committed tuple alone, and the
@@ -139,19 +142,21 @@ func TestQ3ActivationRestartRebuildsTheScheduleFromAStar(t *testing.T) {
 	for i := 0; i < 3; i++ {
 		c.advance(&proposals)
 	}
-	want := scheduleOf(t, c.heavy().manager.leaderSelector, start, 40)
+	want := scheduleOf(t, c.heavy().manager.leaderSelector, start, 20)
 
 	for _, r := range c.replicas {
 		r.restart()
 		requireWeightedEpoch(t, r, 2, start)
-		require.Equal(t, want, scheduleOf(t, r.manager.leaderSelector, start, 40), "a restart agrees with a node that did not restart")
+		require.Equal(t, want, scheduleOf(t, r.manager.leaderSelector, start, 20), "a restart agrees with a node that did not restart")
 	}
-	// a first query far from A* on a cold selector replays from A*, not from the restored round
+	// a first query on a cold selector answers from A*, not from the restored round
 	r := c.replicas[1]
 	r.restart()
-	far, err := r.manager.leaderSelector.GetLeaderForRound(start + 35)
+	far, err := r.manager.leaderSelector.GetLeaderForRound(start + 19)
 	require.NoError(t, err)
-	require.Equal(t, want[35], far.String())
+	require.Equal(t, want[19], far.String())
+	_, err = r.manager.leaderSelector.GetLeaderForRound(start + 35)
+	require.ErrorIs(t, err, rctypes.ErrHistoryUnavailable, "past the bootstrap the committed head decides, and it has not reached that cutoff")
 	near, err := r.manager.leaderSelector.GetLeaderForRound(start)
 	require.NoError(t, err)
 	require.Equal(t, want[0], near.String(), "an earlier round is the zero-priority one")
@@ -175,7 +180,7 @@ func TestQ3ChangedWeightSuccessorResetsTheSchedule(t *testing.T) {
 	require.EqualValues(t, 15, start)
 	for _, r := range retained {
 		requireWeightedEpoch(t, r, 3, start)
-		for epoch, want := range map[uint64]string{1: tbstore.LeaderPolicyLegacy, 2: tbstore.LeaderPolicyWeightedV1, 3: tbstore.LeaderPolicyWeightedV1} {
+		for epoch, want := range map[uint64]string{1: tbstore.LeaderPolicyLegacy, 2: tbstore.LeaderPolicyReputationV1, 3: tbstore.LeaderPolicyReputationV1} {
 			got, err := r.trust.LeaderPolicy(epoch)
 			require.NoError(t, err)
 			require.Equal(t, want, got, "epoch %d keeps the policy its entry committed", epoch)

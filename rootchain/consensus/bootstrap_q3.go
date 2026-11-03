@@ -152,7 +152,10 @@ func (x *ConsensusManager) InstallVerifiedEpoch(entry q3format.Entry, proof hand
 	// the leader policy is a per-epoch property of the authenticated history, as in the V2 install: an epoch that activated the weighted
 	// policy gets the weighted selector, every other the bootstrap one
 	selector, err := newEpochLeader(x.trustBaseStore, g.Epoch, g.Start, newTrust.RootNodes,
-		func() (Leader, error) { return newBootstrapLeader(x.leaderSelector, g.Start, newTrust.RootNodes) })
+		func() (Leader, error) { return newBootstrapLeader(x.leaderSelector, g.Start, newTrust.RootNodes) },
+		func() (Leader, error) {
+			return reputationLeader(x.params.NetworkProfileVersion, a, newTrust, x.trustBaseStore, func() leaderHeads { return x.blockStore })
+		})
 	if err != nil {
 		return nil, err
 	}

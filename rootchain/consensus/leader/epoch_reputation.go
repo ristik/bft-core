@@ -95,6 +95,14 @@ func (e *EpochReputation) recoveryMember(round uint64) (peer.ID, bool) {
 	return e.members[(t/RecoverySpacing)%uint64(len(e.members))], true
 }
 
+// RecoveryRunStart reports whether the round is the first slot of a recovery run.
+func (e *EpochReputation) RecoveryRunStart(round uint64) bool {
+	if round < e.start || round-e.start < e.lag {
+		return false
+	}
+	return (round-e.start-e.lag)%RecoverySpacing == RecoverySpacing-RecoveryRun
+}
+
 // GetLeaderForRound returns the round's leader, or ErrHistoryUnavailable (no leader yet: the caller times the round out, never recovers
 // because of it) or ErrHistoryRefused (an obsolete lookup below the coverage).
 func (e *EpochReputation) GetLeaderForRound(round uint64) (peer.ID, error) {

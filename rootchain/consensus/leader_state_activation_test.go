@@ -1,13 +1,55 @@
 package consensus
 
 import (
+	"context"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
+	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/stretchr/testify/require"
+	"github.com/unicitynetwork/bft-go-base/types"
 
 	"github.com/unicitynetwork/bft-core/internal/testutils/q3fixture"
+	"github.com/unicitynetwork/bft-core/network/protocol/abdrc"
 	rctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
+	"github.com/unicitynetwork/bft-core/rootchain/testutils"
 )
+
+// phaseLockBlockRate with the fixture's T2 of 2.5 s makes T2 12 root rounds (2500/227 + 1), a multiple of the four-round cycle of #886.
+const phaseLockBlockRate = 454 * time.Millisecond
+
+// newPhaseLockLive is four real managers on a real epoch 2 of four equal members. Equal weights make root-wrr-v1 the plain rotation of
+// the sorted committee (TestEpochLeaderUnitWeightsReproduceTheLegacyHandoffSchedule). No node runs until started.
+func newPhaseLockLive(t *testing.T, timeout time.Duration) *q4bLive {
+	t.Helper()
+	f := q3fixture.New(t, q3fixture.Options{Assignment: true, Weights: []uint64{1, 1, 1, 1}})
+	c := newQ4BBase(t, 2, f)
+	tune := func(p *Parameters) { p.BlockRate, p.LocalTimeout = phaseLockBlockRate, timeout }
+	for i, name := range []string{"H", "a", "b", "c"} {
+		r := newQ3Replica(t, f, f.NewNodes[i])
+		r.tune = tune
+		n := &q4bNode{name: name, weight: f.Members[i].Weight, r: r}
+		c.nodes = append(c.nodes, n)
+		c.attach(i, n)
+		r.mustOpen(true)
+		t.Cleanup(r.close)
+		selectRuntimeRequestHistory(t, r)
+	}
+	ctx := context.Background()
+	for _, n := range c.nodes {
+		require.NoError(t, n.r.rt.Recover(ctx))
+		require.NoError(t, n.r.rt.Activate(ctx, n.r.bundle()))
+	}
+	for _, n := range c.nodes {
+		n.r.close()
+		n.r.mustOpen(true)
+		require.NoError(t, n.r.rt.Recover(ctx))
+		selectRuntimeRequestHistory(t, n.r)
+	}
+	return c
+}
 
 type reputationInputs struct {
 	committee  []string
@@ -63,4 +105,160 @@ func TestLeaderRingStartsAtTheAnchorChild(t *testing.T) {
 	require.NoError(t, err)
 	require.EqualValues(t, anchor.Slot+1, late.ShardState.Leader.Start, "a first child well after A: the start is still A")
 	require.Equal(t, []rctypes.LeaderRecord{{Round: anchor.Slot}, {Round: anchor.Slot + 40}}, late.ShardState.Leader.Records)
+}
+
+// #886 B1 and B2 on real managers with durable stores: a quorum with no new commit, no proposal and no vote getting through. Once every
+// cutoff is above the committed head the leader is unknown, and each round ends at certificate speed rather than one local timeout later,
+// every advance on a real TC, with no state recovery and with the node's serving APIs usable throughout.
+func TestUnknownLeaderRoundsAdvanceAtCertificateSpeed(t *testing.T) {
+	t.Parallel()
+	q4Slot(t)
+	const timeout = 2 * time.Second
+	c := newPhaseLockLive(t, timeout)
+	var drop atomic.Bool
+	base := c.net.filter
+	var sendsMu sync.Mutex
+	sends := map[[2]string]map[uint64]int{} // sender and receiver: timeout votes per round
+	c.net.filter = func(from, to peer.ID, msg any) bool {
+		if drop.Load() {
+			switch m := msg.(type) {
+			case *abdrc.ProposalMsg, *abdrc.VoteMsg:
+				return true
+			case *abdrc.TimeoutMsg:
+				sendsMu.Lock()
+				defer sendsMu.Unlock()
+				k := [2]string{from.String(), to.String()}
+				if sends[k] == nil {
+					sends[k] = map[uint64]int{}
+				}
+				sends[k][m.Timeout.Round]++
+			}
+		}
+		return base(from, to, msg)
+	}
+	c.start(c.all()...)
+	c.warm(3, c.all()...)
+	drop.Store(true)
+	head := func() uint64 {
+		round, _, _ := c.nodes[0].r.manager.blockStore.LeaderHead()
+		return round
+	}
+	lag := uint64(4*len(c.nodes) + 4)
+	require.Eventually(t, func() bool { return c.state("H").Round > head()+lag+1 }, 3*time.Minute, 20*time.Millisecond, "the covered rounds time out")
+	frozenHead := head()
+	const stretch = 60
+	from, began := c.state("H").Round, time.Now()
+	require.Eventually(t, func() bool { return c.state("H").Round >= from+stretch }, 2*stretch*timeout, 5*time.Millisecond, "the rounds advance")
+	elapsed := time.Since(began)
+	t.Logf("tau: %d unknown rounds in %s, %s a round (durable stores, %d roots on one machine)", stretch, elapsed, elapsed/stretch, len(c.nodes))
+	// without the immediate timeout each of these rounds costs T plus this same work: faster than T alone is what tells them apart, on any machine
+	require.Less(t, elapsed, stretch*timeout, "certificate speed, not a local timeout per round")
+
+	require.EqualValues(t, frozenHead, head(), "no commit: every advance was a TC")
+	// the action fires once per round: a retransmission is the ordinary timer's, not one per loop event
+	sendsMu.Lock()
+	var rounds, total int
+	for _, perRound := range sends {
+		for round, n := range perRound {
+			if round >= from {
+				rounds++
+				total += n
+			}
+		}
+	}
+	sendsMu.Unlock()
+	require.NotZero(t, rounds)
+	require.Less(t, total, 2*rounds, "%d timeout sends over %d sender, receiver and round combinations", total, rounds)
+	for _, n := range c.nodes {
+		require.False(t, n.r.manager.recovery.InRecovery(), "%s: unknown history is not state recovery", n.name)
+		require.True(t, n.r.manager.frontier == nil || !n.r.manager.frontier.faulted.Load(), "%s: nor a frontier fault", n.name)
+		_, err := n.r.manager.ShardInfo(q3fixture.PartitionID, types.ShardID{})
+		require.NoError(t, err, "%s still serves its shard info", n.name)
+		_, enabled, err := n.r.manager.RequestView(q3fixture.PartitionID, types.ShardID{})
+		require.NoError(t, err, "%s still serves its request view", n.name)
+		require.True(t, enabled)
+	}
+}
+
+// A state recovery replaces the block store, and the replacement must still name the epoch's committee to execution: a node that recovers
+// into a ring has to go on executing blocks. X joins an epoch whose head has one, by recovery, and commits with the others.
+func TestStateRecoveryKeepsTheLeaderInputs(t *testing.T) {
+	t.Parallel()
+	q4Slot(t)
+	c := newPhaseLockLive(t, 2*time.Second)
+	first := c.except("c")
+	c.start(first...)
+	c.warm(4, first...)
+	c.start("c")
+	m := c.nodes[c.idx("c")].r.manager
+	require.Eventually(t, func() bool {
+		_, ring, _ := m.blockStore.LeaderHead()
+		return ring != nil && len(ring.Records) > 3
+	}, 2*time.Minute, 50*time.Millisecond, "the recovered node goes on executing and committing blocks with a ring")
+	require.NotNil(t, m.blockStore.LeaderInputs())
+
+	// and its selector reads the store the recovery put in place: beyond the bootstrap, at a cutoff no store before the recovery could
+	// answer, it names a peer's leader. The head compared is the recovered node's own, which every live peer has reached.
+	peerSelector := c.nodes[c.idx(first[0])].r.manager
+	lag := uint64(4*len(c.nodes) + 4)
+	start := m.epochAnchor.Slot + 1
+	require.Eventually(t, func() bool {
+		head, _, _ := m.blockStore.LeaderHead()
+		round := head + lag
+		if head < start || round < start+lag {
+			return false
+		}
+		mine, err := m.leaderSelector.GetLeaderForRound(round)
+		if err != nil {
+			return false
+		}
+		theirs, err := peerSelector.leaderSelector.GetLeaderForRound(round)
+		return err == nil && mine == theirs
+	}, 2*time.Minute, 50*time.Millisecond, "a recovered node's selector follows the replaced store and agrees with a peer")
+}
+
+// recoveryRunLeader is a selector whose every round is led by one member; start says which rounds begin a recovery run.
+type recoveryRunLeader struct {
+	constLeader
+	start func(round uint64) bool
+}
+
+func (l recoveryRunLeader) RecoveryRunStart(round uint64) bool { return l.start(round) }
+
+// Rev's binding note 2: a stall has burned past T2, so slot s of a recovery run would otherwise time out every shard, and a retained request
+// reaching the leader for s+1 would lose to that pending change. Only that proposal leaves them out.
+func TestRecoveryRunFirstProposalCarriesNoTimeouts(t *testing.T) {
+	_, infos := testutils.CreateTestNodes(t, 2)
+	for name, tc := range map[string]struct {
+		start bool
+		want  int
+	}{"the first slot of a run": {true, 0}, "any other round": {false, 1}} {
+		t.Run(name, func(t *testing.T) {
+			cms, net := createConsensusManagers(t, 2, infos)
+			m := cms[0]
+			proposals := make(chan *abdrc.ProposalMsg, 8)
+			net.SetFirewall(func(from, to peer.ID, msg any) bool {
+				if p, ok := msg.(*abdrc.ProposalMsg); ok && from == m.id {
+					select {
+					case proposals <- p:
+					default:
+					}
+				}
+				return true
+			})
+			m.leaderSelector = recoveryRunLeader{constLeader: constLeader{leader: m.id, nodes: m.Validators()}, start: func(uint64) bool { return tc.start }}
+			ctx := context.Background()
+			high := m.blockStore.GetHighQc().GetRound()
+			m.pacemaker.startNewRound(ctx, high+1000) // far past every shard's T2, as after a stall
+			tcert := &rctypes.TimeoutCert{Timeout: rctypes.NewTimeout(high+999, m.trustBase.Load().Epoch, m.blockStore.GetHighQc())}
+			m.pacemaker.lastRoundTC = tcert
+			m.processNewRoundEvent(ctx)
+			select {
+			case p := <-proposals:
+				require.Len(t, p.Block.Payload.Requests, tc.want)
+			case <-time.After(5 * time.Second):
+				t.Fatal("no proposal")
+			}
+		})
+	}
 }

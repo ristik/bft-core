@@ -248,8 +248,8 @@ func TestLeaderBitmap(t *testing.T) {
 	require.Equal(t, []byte{0b101, 1}, got, "independent of the signers' order")
 	_, err = LeaderBitmap(committee, []string{"a", "z"})
 	require.ErrorIs(t, err, ErrLeaderState)
-	_, err = LeaderBitmap([]string{"b", "a"}, []string{"a"})
-	require.ErrorIs(t, err, ErrLeaderState, "another order would give another bitmap")
+	_, err = LeaderBitmap([]string{"a", "c", "b", "d"}, []string{"a"})
+	require.ErrorIs(t, err, ErrLeaderState, "the search finds this signer in an unsorted committee: only the order check refuses it")
 	_, err = LeaderBitmap(committee, nil)
 	require.ErrorIs(t, err, ErrLeaderState)
 }

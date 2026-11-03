@@ -220,7 +220,7 @@ func TestQ4BLiveA(t *testing.T) {
 // B is the successor of the handoff: h1,h2 weight 3 each, n2 weight 2, the new entity d weight 1 (W=9, Q=7, F=2).
 func TestQ4BLiveB(t *testing.T) {
 	rows := []q4bRow{
-		{"no-fault control, schedule is root-wrr-v1 from A*", func(t *testing.T, c *q4bLive) {
+		{"no-fault control, schedule is root-reputation-v1 from A*", func(t *testing.T, c *q4bLive) {
 			for _, n := range c.nodes {
 				requireWeightedEpoch(t, n.r, 3, n.r.manager.epochAnchor.Slot+1)
 			}

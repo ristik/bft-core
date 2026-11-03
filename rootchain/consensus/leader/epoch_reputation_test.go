@@ -3,6 +3,7 @@ package leader
 import (
 	"bytes"
 	"math"
+	"slices"
 	"testing"
 
 	"github.com/libp2p/go-libp2p/core/peer"
@@ -46,6 +47,18 @@ func erRing(t *testing.T, n, start uint64, records ...rctypes.LeaderRecord) *rct
 func TestEpochReputationParameters(t *testing.T) {
 	require.EqualValues(t, 4, RecoveryRun)
 	require.EqualValues(t, 256, RecoverySpacing)
+}
+
+// Only a run's first slot: rev's binding note 2 leaves T2 timeouts out of exactly that proposal.
+func TestEpochReputationRecoveryRunStart(t *testing.T) {
+	head := LeaderHead{Round: 99}
+	e := erSelector(t, erNodes(t, 1, 1, 1, 1, 1), 100, 4, &head) // D = 24
+	first := uint64(100 + 24 + RecoverySpacing - RecoveryRun)
+	for _, r := range []uint64{99, 100, 123, 124, first - 1, first + 1, first + 3, first + 4} {
+		require.False(t, e.RecoveryRunStart(r), r)
+	}
+	require.True(t, e.RecoveryRunStart(first))
+	require.True(t, e.RecoveryRunStart(first+RecoverySpacing))
 }
 
 func TestEpochReputationBootstrapIsTheFullCommittee(t *testing.T) {
@@ -328,4 +341,148 @@ func TestEpochReputationConstructionRefusals(t *testing.T) {
 	require.ErrorIs(t, err, ErrNoMembers)
 	_, err = NewEpochReputation(erGenesis, 2, math.MaxUint64-1, 3, nodes, head)
 	require.ErrorIs(t, err, ErrInvalidStart, "start + D overflows")
+}
+
+// Gate 7's enumeration (rev's table on #886): a stale sample can leave a committee with no three live leaders in a row, so normal rounds alone
+// cannot commit; the recovery runs are the rescue. For every dead set that leaves a quorum and every quorate stale sample the real selector
+// must give a live member its four consecutive rounds within (b+1) spacings of the stale cutoff running out, b being the dead identities,
+// and the runs must not depend on the sample. A dead set below the quorum has no such guarantee, and a sample below it is invalid.
+func TestEpochReputationEveryStaleSetIsRescued(t *testing.T) {
+	const start = uint64(1000)
+	for _, tc := range []struct {
+		name           string
+		weights        []uint64
+		quorum         uint64
+		wantNoThreeRun int // rev's enumeration on #886, with the real selector: active sets by dead sets with no three live leaders in a row
+	}{
+		{"four equal", []uint64{1, 1, 1, 1}, 3, 12},
+		{"five equal", []uint64{1, 1, 1, 1, 1}, 4, 0},
+		{"seven equal", []uint64{1, 1, 1, 1, 1, 1, 1}, 5, 126},
+		{"ten equal", []uint64{1, 1, 1, 1, 1, 1, 1, 1, 1, 1}, 7, 2070},
+		{"3,2,2,2,2", []uint64{3, 2, 2, 2, 2}, 8, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			nodes := erNodes(t, tc.weights...)
+			n := uint64(len(nodes))
+			lag, err := rctypes.LeaderLag(n)
+			require.NoError(t, err)
+			ids := sortedIDs(t, nodes)
+			weight := map[peer.ID]uint64{}
+			for _, node := range nodes {
+				id, err := peer.Decode(node.NodeID)
+				require.NoError(t, err)
+				weight[id] = node.Stake
+			}
+			setWeight := func(mask uint) (w uint64) {
+				for i, id := range ids {
+					if mask&(1<<i) != 0 {
+						w += weight[id]
+					}
+				}
+				return w
+			}
+			var noThreeRun, stale, dead int
+			head := LeaderHead{}
+			e := erSelector(t, nodes, start, tc.quorum, &head)
+			for live := uint(1); live < 1<<n; live++ {
+				if setWeight(live) < tc.quorum {
+					continue
+				}
+				dead++
+				b := n - uint64(popcountUint(live))
+				// a stale head: every normal cutoff runs out at head+lag, and from there only the recovery runs have a leader
+				head = LeaderHead{Round: start + 50*lag}
+				head.State = erRing(t, n, start, rctypes.LeaderRecord{Round: head.Round, Voters: bitmapOf(live, n)})
+				firstUnknown := head.Round + lag + 1
+				rescued := false
+				for r := firstUnknown; r <= firstUnknown+(b+1)*RecoverySpacing+RecoveryRun && !rescued; r++ {
+					if !e.RecoveryRunStart(r) {
+						continue
+					}
+					l, err := e.GetLeaderForRound(r)
+					require.NoError(t, err)
+					if live&(1<<slices.Index(ids, l)) == 0 {
+						continue
+					}
+					for i := uint64(1); i < RecoveryRun; i++ {
+						same, err := e.GetLeaderForRound(r + i)
+						require.NoError(t, err)
+						require.Equal(t, l, same, "a run is one member's four rounds")
+					}
+					rescued = true
+				}
+				require.True(t, rescued, "live set %b: no live member's run within %d spacings", live, b+1)
+			}
+			require.NotZero(t, dead)
+			// a stale sample against a later dead set: the combination rev counted
+			for sample := uint(1); sample < 1<<n; sample++ {
+				if setWeight(sample) < tc.quorum {
+					continue
+				}
+				// sealed, so that every cutoff of the window reads this one sample
+				head = LeaderHead{Round: start + 50*lag, Sealed: true, State: erRing(t, n, start, rctypes.LeaderRecord{Round: start + 50*lag, Voters: bitmapOf(sample, n)})}
+				for live := uint(1); live < 1<<n-1; live++ { // someone is dead
+					if setWeight(live) < tc.quorum {
+						continue
+					}
+					stale++
+					if !hasThreeLiveRun(t, e, head.Round+lag, live, ids, setWeight(sample)) {
+						noThreeRun++
+					}
+				}
+			}
+			t.Logf("%d live sets, %d sample and live combinations, %d with no three live leaders in a row", dead, stale, noThreeRun)
+			require.Equal(t, tc.wantNoThreeRun, noThreeRun, "the schedules the rescue exists for")
+			// a sample below the quorum is invalid, not a schedule
+			for sample := uint(1); sample < 1<<n; sample++ {
+				if setWeight(sample) >= tc.quorum {
+					continue
+				}
+				head = LeaderHead{Round: start + 50*lag, State: erRing(t, n, start, rctypes.LeaderRecord{Round: start + 50*lag, Voters: bitmapOf(sample, n)})}
+				if e.RecoveryRunStart(head.Round+lag) || (head.Round+lag-start-lag)%RecoverySpacing >= RecoverySpacing-RecoveryRun {
+					continue
+				}
+				_, err := e.GetLeaderForRound(head.Round + lag)
+				require.ErrorIs(t, err, ErrInvalidSample, "sample %b", sample)
+				break
+			}
+		})
+	}
+}
+
+// hasThreeLiveRun looks for three live leaders in a row over two periods of the schedule from first, all normal rounds.
+func hasThreeLiveRun(t *testing.T, e *EpochReputation, first uint64, live uint, ids []peer.ID, period uint64) bool {
+	t.Helper()
+	run := 0
+	for r := first; r < first+2*period+3; r++ {
+		_, recovery := e.recoveryMember(r)
+		require.False(t, recovery, "the window must not reach a recovery run: round %d", r)
+		l, err := e.GetLeaderForRound(r)
+		require.NoError(t, err)
+		if live&(1<<slices.Index(ids, l)) == 0 {
+			run = 0
+			continue
+		}
+		if run++; run == 3 {
+			return true
+		}
+	}
+	return false
+}
+
+func popcountUint(v uint) (n int) {
+	for ; v != 0; v &= v - 1 {
+		n++
+	}
+	return n
+}
+
+func bitmapOf(mask uint, n uint64) []byte {
+	out := make([]byte, (n+7)/8)
+	for i := uint64(0); i < n; i++ {
+		if mask&(1<<i) != 0 {
+			out[i/8] |= 1 << (i % 8)
+		}
+	}
+	return out
 }

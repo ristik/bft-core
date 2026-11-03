@@ -17,6 +17,7 @@ import (
 	tbstore "github.com/unicitynetwork/bft-core/rootchain/consensus/trustbase"
 	rctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
 	"github.com/unicitynetwork/bft-go-base/types"
+	"github.com/unicitynetwork/bft-go-base/types/hex"
 )
 
 func TestQ3InstallRejectsFabricatedSupersession(t *testing.T) {
@@ -235,14 +236,14 @@ func TestQ3InstallPreservesSelectedRequestHistory(t *testing.T) {
 			parent, err = r.manager.blockStore.Block(anchor.Slot)
 			require.NoError(t, err)
 			first := &rctypes.BlockData{Version: 3, Epoch: 2, Round: 7, Anchor: anchor, Payload: &rctypes.Payload{Version: 3}}
-			b7, err := parent.Extend(first, r.manager.irReqVerifier, r.orchestration, crypto.SHA256, r.manager.log)
+			b7, err := parent.Extend(first, r.manager.irReqVerifier, r.orchestration, crypto.SHA256, r.manager.log, r.manager.blockStore.LeaderInputs())
 			require.NoError(t, err)
 			second := &rctypes.BlockData{Version: 3, Epoch: 2, Round: 8, Payload: &rctypes.Payload{Version: 3},
-				Qc: &rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{RoundNumber: 7, Epoch: 2, CurrentRootHash: b7.RootHash}}}
-			b8, err := b7.Extend(second, r.manager.irReqVerifier, r.orchestration, crypto.SHA256, r.manager.log)
+				Qc: &rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{RoundNumber: 7, Epoch: 2, CurrentRootHash: b7.RootHash}, Signatures: map[string]hex.Bytes{r.id().String(): {1}}}}
+			b8, err := b7.Extend(second, r.manager.irReqVerifier, r.orchestration, crypto.SHA256, r.manager.log, r.manager.blockStore.LeaderInputs())
 			require.NoError(t, err)
 			qc8 := &rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{RoundNumber: 8, ParentRoundNumber: 7, Epoch: 2, CurrentRootHash: b8.RootHash},
-				LedgerCommitInfo: &types.UnicitySeal{Version: 1, NetworkID: 5, Epoch: 2, Timestamp: 99, RootChainRoundNumber: 7, Hash: b7.RootHash}}
+				LedgerCommitInfo: &types.UnicitySeal{Version: 1, NetworkID: 5, Epoch: 2, Timestamp: 99, RootChainRoundNumber: 7, Hash: b7.RootHash}, Signatures: map[string]hex.Bytes{r.id().String(): {1}}}
 			if persist {
 				_, err = r.manager.blockStore.Add(first, r.manager.irReqVerifier)
 				require.NoError(t, err)
@@ -254,9 +255,9 @@ func TestQ3InstallPreservesSelectedRequestHistory(t *testing.T) {
 			block := func(req *rctypes.IRChangeReq) *rctypes.BlockData {
 				return &rctypes.BlockData{Version: 3, Epoch: 2, Round: 9, Payload: &rctypes.Payload{Version: 3, Requests: []*rctypes.IRChangeReq{req}}, Qc: qc8}
 			}
-			_, err = b8.Extend(block(lights), r.manager.irReqVerifier, r.orchestration, crypto.SHA256, r.manager.log)
+			_, err = b8.Extend(block(lights), r.manager.irReqVerifier, r.orchestration, crypto.SHA256, r.manager.log, r.manager.blockStore.LeaderInputs())
 			require.ErrorIs(t, err, quorumweight.ErrQuorumNotReached)
-			executed, err := b8.Extend(block(heavy), r.manager.irReqVerifier, r.orchestration, crypto.SHA256, r.manager.log)
+			executed, err := b8.Extend(block(heavy), r.manager.irReqVerifier, r.orchestration, crypto.SHA256, r.manager.log, r.manager.blockStore.LeaderInputs())
 			require.NoError(t, err)
 			if persist {
 				_, err = r.manager.blockStore.Add(block(heavy), r.manager.irReqVerifier)

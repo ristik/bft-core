@@ -273,7 +273,19 @@ func TestLeaderRingTravelsWithWhatTheStoreProduces(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, closing.RootHash, back.RootHash)
 
-	// a sealed head's last record is the closing block, whatever the suffix's header round
+	// a sealed head's last record is the closing block, whatever the suffix's header round: a head in the frozen suffix restores
+	_, err = s.Add(leaderBlock(s, 5, leaderQC(4, epoch, "a", "b", "c"), nil), nil)
+	require.NoError(t, err)
+	suffix := mustBlock(t, s, 5)
+	shards, err := toRecoveryShardInfo(suffix)
+	require.NoError(t, err)
+	suffixHead := &abdrc.CommittedBlock{Block: suffix.BlockData, Control: suffix.ShardState.Control, Leader: suffix.ShardState.Leader, ShardInfo: shards,
+		CommitQc: &rctypes.QuorumCert{LedgerCommitInfo: &types.UnicitySeal{Hash: suffix.RootHash}}}
+	restoredSuffix, err := NewRootBlock(suffixHead, crypto.SHA256, s.orchestration, ProfileHandoff)
+	require.NoError(t, err)
+	require.Equal(t, closing.RootHash, restoredSuffix.RootHash)
+	require.EqualValues(t, 4, restoredSuffix.ShardState.Leader.Records[len(restoredSuffix.ShardState.Leader.Records)-1].Round)
+
 	forged := *head
 	forged.Leader = head.Leader.Clone()
 	forged.Leader.Records = append(forged.Leader.Records, rctypes.LeaderRecord{Round: 5, Voters: []byte{0b0111}})

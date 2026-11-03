@@ -45,6 +45,7 @@ var q4LookupSites = []q4Site{
 	{Func: "onTimeoutMsg", Arg: "x.pacemaker.GetCurrentRound()", Source: "local"},
 	{Func: "onProposalMsg", Arg: "x.pacemaker.GetCurrentRound()", Source: "local"},
 	{Func: "leaderAfter", Arg: "round + 1", Source: "local"},                               // reached only after the math.MaxUint64 refusal
+	{Func: "timeoutUnknownLeader", Arg: "round", Source: "local"},                          // round := x.pacemaker.GetCurrentRound() on the line above
 	{Func: "processNewRoundEvent", Arg: "round", Source: "local"},                          // round := x.pacemaker.GetCurrentRound() on the line above
 	{Func: "voteAfterRecovery", Arg: "x.pacemaker.GetCurrentRound() + 1", Source: "local"}, // the next leader after the vote: the pacemaker's own round
 	{Func: "onVoteMsg", Arg: "vote.VoteInfo.RoundNumber", Source: "message",

@@ -29,6 +29,9 @@ const LeaderPolicyLegacy = "legacy"
 // zero priorities at the epoch's activation round (rootchain/consensus/leader.Weighted).
 const LeaderPolicyWeightedV1 = "root-wrr-v1"
 
+// LeaderPolicyReputationV1 is the selector of an epoch whose schedule follows committed participation (#886): rootchain/consensus/leader.EpochReputation.
+const LeaderPolicyReputationV1 = "root-reputation-v1"
+
 // ProtocolConfig is the one immutable protocol tuple a successor root epoch activates: bounded root weights, Q1 signing
 // scheme 2 with vote codec 2, the D3 quorum profile, the weighted proposer-priority leader selector, the mirrored EVM request
 // policy and unit aggregators. A deployment has one
@@ -49,7 +52,7 @@ type ProtocolConfig struct {
 // Q3Config is the single valid tuple for a chain.
 func Q3Config(network uint64, genesis [32]byte) ProtocolConfig {
 	return ProtocolConfig{Revision: ConfigRevision, Network: network, Genesis: genesis, SigningScheme: 2, VoteCodec: 2,
-		QuorumProfile: "D3", LeaderPolicy: LeaderPolicyWeightedV1, EVMRequestPolicy: "mirrored-root-v1", AggregatorPolicy: "unit-v1"}
+		QuorumProfile: "D3", LeaderPolicy: LeaderPolicyReputationV1, EVMRequestPolicy: "mirrored-root-v1", AggregatorPolicy: "unit-v1"}
 }
 
 // Q3ConfigUTB is the tuple of a deployment whose root epochs sign the successor trust-base entry in the committing votes (envelope version 3).
