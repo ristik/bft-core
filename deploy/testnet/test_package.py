@@ -1446,6 +1446,7 @@ class BridgeLoad(unittest.TestCase):
             def bridge_compose(self,*a): return ''
             def cast_run(self,*a): return '0x'+'a'*40
             def faucet_send(self,to,wei): pass
+            def call(self,method,params=()): return hex(7)
             def vault_balance(self):
                 self.reads=getattr(self,'reads',0)+1
                 return 0 if self.reads==1 else self.held
@@ -1577,7 +1578,25 @@ class BridgeLoad(unittest.TestCase):
             out=Path(tmp)/'out';out.mkdir()
             bl.Load(fake,out,duration=0.05,interval=60,max_failures=1,funds=123).run(2)
             self.assertEqual(funded,[123,123])
-            self.assertGreaterEqual(bl.WORKER_FUNDS,40*10**18,'a 20-minute run at M=8 pays about 40 UCT of gas')
+            self.assertGreaterEqual(bl.WORKER_FUNDS,14*10**18,'twice the gas of a 20-minute run at M=8')
+            self.assertLessEqual(13*bl.WORKER_FUNDS,1000*10**18,'M=1, 4 and 8 fit one generation\'s faucet')
+    def test_main_passes_funds_to_the_load(self):
+        bl=self.module()
+        seen={}
+        class Spy:
+            def __init__(self,r,out,duration,interval,max_failures,funds): seen['funds']=funds
+            def run(self,workers): return True
+        with tempfile.TemporaryDirectory() as tmp,patch.object(bl,'Load',Spy),patch.object(bl,'BridgeRehearsal',lambda *a: object()),\
+             patch.object(sys,'argv',['bridge_load','--generation',tmp,'--out',tmp+'/o','--funds','123']):
+            self.assertEqual(bl.main(),0)
+        self.assertEqual(seen['funds'],123)
+    def test_the_gas_price_is_sampled_and_summarised(self):
+        bl=self.module()
+        with tempfile.TemporaryDirectory() as tmp:
+            fake=self.fake(tmp,held=0)
+            ok,s,out=self.run_load(bl,tmp,fake)
+            self.assertEqual(s['gasPriceWei']['peak'],7)
+            self.assertEqual(json.loads((out/'samples.jsonl').read_text().splitlines()[0])['gasPrice'],7)
     def test_worker_stops_after_failures_in_a_row(self):
         bl=self.module()
         with tempfile.TemporaryDirectory() as tmp:
