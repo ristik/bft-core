@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/unicitynetwork/bft-go-base/types"
 
+	"github.com/unicitynetwork/bft-core/internal/quorumweight"
 	"github.com/unicitynetwork/bft-core/internal/testutils/q3fixture"
 	"github.com/unicitynetwork/bft-core/network/protocol/certification"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/leader"
@@ -240,4 +241,63 @@ func TestRollingRestartCertifiesRetainedRequest(t *testing.T) {
 		time.Sleep(5 * time.Millisecond)
 	}
 	require.Fail(t, "no verdict within 25 minutes")
+}
+
+// On the production branch, the view-aware verifier: a request it refuses is neither sent nor held, and a valid one afterwards takes the slot.
+func TestRetentionRefusesWhatTheViewAwareVerifierRefuses(t *testing.T) {
+	t.Parallel()
+	q4Slot(t)
+	c := newPhaseLockLive(t, 2*time.Second)
+	c.start(c.all()...)
+	c.warm(4, c.all()...)
+	c.stopAll()
+	r := c.nodes[0].r
+	m := r.manager
+	hash := bytes.Repeat([]byte{0x81}, 32)
+	key := types.PartitionShardID{PartitionID: q3fixture.PartitionID, ShardID: types.ShardID{}.Key()}
+	proof := func() *IRChangeRequest {
+		p := phaseLockProof(t, c, r, hash)
+		require.NotNil(t, p)
+		return p
+	}
+	for name, tc := range map[string]struct {
+		mutate func(*IRChangeRequest)
+		want   error
+	}{
+		"below the quorum": {func(p *IRChangeRequest) { p.Requests = p.Requests[:1] }, quorumweight.ErrQuorumNotReached},
+		"bad signature":    {func(p *IRChangeRequest) { p.Requests[0].Signature[0] ^= 1 }, quorumweight.ErrInvalidSignature},
+	} {
+		bad := proof()
+		tc.mutate(bad)
+		require.ErrorIs(t, m.onPartitionIRChangeReq(context.Background(), bad), tc.want, name)
+		require.NotContains(t, m.retained, key, "%s holds no slot", name)
+	}
+	require.NoError(t, m.onPartitionIRChangeReq(context.Background(), proof()), "the valid one is accepted afterwards")
+	require.Contains(t, m.retained, key)
+}
+
+// Rev's reproduction: a below-quorum request first does not delay the valid one.
+func TestARefusedRequestDoesNotDelayTheValidOne(t *testing.T) {
+	t.Parallel()
+	q4Slot(t)
+	c := newPhaseLockLive(t, 2*time.Second)
+	c.start(c.all()...)
+	c.warm(4, c.all()...)
+	hash := bytes.Repeat([]byte{0x81}, 32)
+	r := c.nodes[0].r
+	var accepted uint64
+	require.Eventually(t, func() bool {
+		bad, good := phaseLockProof(t, c, r, hash), phaseLockProof(t, c, r, hash)
+		if bad == nil || good == nil {
+			return false
+		}
+		bad.Requests = bad.Requests[:1]
+		if r.manager.RequestCertification(context.Background(), *bad) != nil || r.manager.RequestCertification(context.Background(), *good) != nil {
+			return false
+		}
+		accepted = c.state("H").Round
+		return true
+	}, time.Minute, 50*time.Millisecond)
+	require.Eventually(t, func() bool { return c.certifiedHash("H", hash) }, 2*time.Minute, 10*time.Millisecond, "the valid request certifies")
+	require.LessOrEqual(t, c.state("H").Round-accepted, uint64(phaseLockRoundsMax))
 }

@@ -26,18 +26,20 @@ type retainedVerdict int
 
 const (
 	retainedValid retainedVerdict = iota
-	// retainedUnknown is a request that cannot be judged right now, or one in the way of a pending change: kept.
+	// retainedUnknown is a request that cannot be judged right now, or one behind a change pending in the pipeline: kept.
 	retainedUnknown
-	retainedStale
+	// retainedRefused is a verifier's verdict on the request itself: stale, or never valid. It is not held, and it holds no slot.
+	retainedRefused
 )
 
-// judgeRetained asks the verifier about a request against the current authenticated state. Only a verdict on the request itself lets go of
-// it: the view-aware branch's stale context, or a refusal by the legacy verifier with the shard's state in hand. A view that cannot be
-// resolved, a state that is not there yet and a change pending in the pipeline say nothing about the request.
+// judgeRetained asks the verifier about a request against the current authenticated state. Every refusal is a verdict on the request (stale,
+// or a bad signature, an unknown signer, too few signers, an invalid proof: all judged against the state in hand, none of them time-dependent)
+// except these, which say nothing about it: a view that cannot be resolved, no committed state yet, a view not active yet and a change
+// pending in the pipeline, its own included while it sits in an uncommitted proposal.
 func (x *ConsensusManager) judgeRetained(req *drctypes.IRChangeReq) (retainedVerdict, error) {
 	round := x.pacemaker.GetCurrentRound() + 1
 	if err := x.refuseFrozenIR(req); err != nil {
-		return retainedStale, err
+		return retainedRefused, err
 	}
 	if x.viewResolver == nil {
 		_, err := x.irReqVerifier.VerifyRequest(round, req)
@@ -47,7 +49,7 @@ func (x *ConsensusManager) judgeRetained(req *drctypes.IRChangeReq) (retainedVer
 		case errors.Is(err, ErrRequestStateUnavailable):
 			return retainedUnknown, err
 		}
-		return retainedStale, err
+		return retainedRefused, err
 	}
 	view, err := x.viewResolver.ResolveView(req.Partition, req.Shard, round, storage.PurposeCertify)
 	if err != nil {
@@ -57,28 +59,28 @@ func (x *ConsensusManager) judgeRetained(req *drctypes.IRChangeReq) (retainedVer
 	return viewVerdict(err), err
 }
 
-// viewVerdict reads the view-aware verifier: only a stale context is a verdict on the request. A change pending in the pipeline, its own
-// among them while it sits in an uncommitted proposal, is why the copy exists.
+// viewVerdict reads the view-aware verifier. A change pending in the pipeline, its own among them while it sits in an uncommitted proposal,
+// is why the copy exists; anything else it refuses cannot hold the shard's slot against a valid request.
 func viewVerdict(err error) retainedVerdict {
 	switch {
 	case err == nil:
 		return retainedValid
-	case errors.Is(err, storage.ErrStaleRequestContext):
-		return retainedStale
+	case errors.Is(err, storage.ErrDuplicateChangeReq), errors.Is(err, storage.ErrPendingChange), errors.Is(err, storage.ErrRequestNotActive):
+		return retainedUnknown
 	}
-	return retainedUnknown
+	return retainedRefused
 }
 
 // retainRequest takes a verified shard request into retention and sends it. The first valid request of a shard stays until it is stale: a
 // different one is not a reason to replace it, as IrReqBuffer does not.
 func (x *ConsensusManager) retainRequest(ctx context.Context, req *drctypes.IRChangeReq) error {
 	verdict, err := x.judgeRetained(req)
-	if verdict == retainedStale {
+	if verdict == retainedRefused {
 		return fmt.Errorf("IR change request from partition %s: %w", req.Partition, err)
 	}
 	key := types.PartitionShardID{PartitionID: req.Partition, ShardID: req.Shard.Key()}
 	if old, found := x.retained[key]; found {
-		if v, _ := x.judgeRetained(old.msg.IrChangeReq); v != retainedStale {
+		if v, _ := x.judgeRetained(old.msg.IrChangeReq); v != retainedRefused {
 			if sameRequest(old.msg.IrChangeReq, req) {
 				return nil // duplicates of the held request: the next round sends it anyway
 			}
@@ -114,8 +116,8 @@ func sameRequest(a, b *drctypes.IRChangeReq) bool {
 func (x *ConsensusManager) forwardRetained(ctx context.Context) {
 	for key, entry := range x.retained {
 		verdict, err := x.judgeRetained(entry.msg.IrChangeReq)
-		if verdict == retainedStale {
-			x.log.DebugContext(ctx, "retained IR change request is stale, dropped", logger.Shard(entry.msg.IrChangeReq.Partition, entry.msg.IrChangeReq.Shard), logger.Error(err))
+		if verdict == retainedRefused {
+			x.log.DebugContext(ctx, "retained IR change request refused by the verifier, dropped", logger.Shard(entry.msg.IrChangeReq.Partition, entry.msg.IrChangeReq.Shard), logger.Error(err))
 			delete(x.retained, key)
 			continue
 		}

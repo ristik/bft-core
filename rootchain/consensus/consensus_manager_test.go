@@ -983,14 +983,18 @@ func Test_ConsensusManager_messages(t *testing.T) {
 		defer waitExit(t, cancel, done)
 
 		// send IRCR to non-leader, simulating message arriving late, leader has changed
+		si, err := nonLeaderNode.ShardInfo(partitionID, types.ShardID{})
+		require.NoError(t, err)
 		irChReqMsg := &abdrc.IrChangeReqMsg{
 			Author: cmLeader.id.String(),
 			IrChangeReq: &drctypes.IRChangeReq{
 				Partition:  partitionID,
 				CertReason: drctypes.Quorum,
-				Requests:   buildBlockCertificationRequest(t, shardNodes[0:2], nil),
+				Requests:   buildBlockCertificationRequest(t, shardNodes[0:2], si.LastCR),
 			},
 		}
+		_, verifyErr := nonLeaderNode.irReqVerifier.VerifyRequest(nonLeaderNode.pacemaker.GetCurrentRound()+1, irChReqMsg.IrChangeReq)
+		require.NoError(t, verifyErr, "a request it would otherwise accept: only the leader check keeps it out of the buffer")
 		require.NoError(t, cmLeader.safety.Sign(cmLeader.trustBase.Load().Epoch, irChReqMsg))
 		rootNet.Send(irChReqMsg, nonLeaderNode.id)
 

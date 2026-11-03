@@ -225,7 +225,8 @@ func TestIRChangeReqVerifier_VerifyIRChangeReq(t *testing.T) {
 		}
 		data, err := ver.VerifyIRChangeReq(2, 1, irChReq)
 		require.Nil(t, data)
-		require.EqualError(t, err, "missing shard info for partition 2 shard ")
+		require.ErrorIs(t, err, ErrRequestStateUnavailable)
+		require.ErrorContains(t, err, "missing shard info for partition 2 shard ")
 	})
 
 	t.Run("duplicate request", func(t *testing.T) {

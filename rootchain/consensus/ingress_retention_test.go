@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/unicitynetwork/bft-go-base/types"
 
+	"github.com/unicitynetwork/bft-core/internal/quorumweight"
 	"github.com/unicitynetwork/bft-core/internal/testutils/q3fixture"
 	"github.com/unicitynetwork/bft-core/network/protocol/abdrc"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/storage"
@@ -147,10 +148,10 @@ func TestRetainedRequestDroppedWhenTheVerifierSaysStale(t *testing.T) {
 	si, err := f.cm.ShardInfo(partitionID, types.ShardID{})
 	require.NoError(t, err)
 	f.cm.retained[f.shard].msg.IrChangeReq.Requests[0].InputRecord.Timestamp = si.LastCR.UC.UnicitySeal.Timestamp + 1
-	sent := len(f.sends())
+	f.requireSends(t, 1) // the send on acceptance: settled before the count that follows
 	f.nextRound()
 	require.NotContains(t, f.cm.retained, f.shard)
-	f.requireSends(t, sent)
+	f.requireSends(t, 1)
 }
 
 // Only a verdict on the request drops it. A view that cannot be resolved, and a change pending in the pipeline, say nothing about it.
@@ -166,9 +167,14 @@ func TestRetainedRequestKeptOnTransientFailure(t *testing.T) {
 	require.Contains(t, f.cm.retained, f.shard)
 
 	require.Equal(t, retainedValid, viewVerdict(nil))
-	require.Equal(t, retainedStale, viewVerdict(fmt.Errorf("x: %w", storage.ErrStaleRequestContext)))
+	require.Equal(t, retainedRefused, viewVerdict(fmt.Errorf("x: %w", storage.ErrStaleRequestContext)))
+	require.Equal(t, retainedRefused, viewVerdict(fmt.Errorf("x: %w", quorumweight.ErrQuorumNotReached)))
+	require.Equal(t, retainedRefused, viewVerdict(fmt.Errorf("x: %w", quorumweight.ErrInvalidSignature)))
+	require.Equal(t, retainedRefused, viewVerdict(fmt.Errorf("x: %w", ErrProofInvalid)))
+	require.Equal(t, retainedRefused, viewVerdict(errors.New("anything else the verifier refuses")), "the default is refusal")
 	require.Equal(t, retainedUnknown, viewVerdict(storage.ErrDuplicateChangeReq), "its own change in an uncommitted proposal")
-	require.Equal(t, retainedUnknown, viewVerdict(errors.New("shard has pending changes in pipeline")))
+	require.Equal(t, retainedUnknown, viewVerdict(fmt.Errorf("x: %w", storage.ErrPendingChange)))
+	require.Equal(t, retainedUnknown, viewVerdict(fmt.Errorf("x: %w", storage.ErrRequestNotActive)))
 
 	missing := &drctypes.IRChangeReq{Partition: partitionID + 1, CertReason: drctypes.Quorum}
 	f.cm.SetViewResolver(nil)
@@ -208,6 +214,19 @@ func TestRetainRefusesAStaleRequest(t *testing.T) {
 	require.Error(t, f.cm.retainRequest(f.ctx, req))
 	require.Empty(t, f.cm.retained)
 	f.requireSends(t, 0)
+}
+
+// Rev's binding condition, through the entry point: a shard request arriving while the next leader is unknown is not refused and not lost.
+func TestShardRequestIsKeptWhileTheNextLeaderIsUnknown(t *testing.T) {
+	f := newRetentionFixture(t)
+	f.cm.leaderSelector = unknownLeader{}
+	req := f.request(t)
+	require.NoError(t, f.cm.onPartitionIRChangeReq(f.ctx, &IRChangeRequest{Partition: req.Partition, Shard: req.Shard, Reason: Quorum, Requests: req.Requests}))
+	require.Contains(t, f.cm.retained, f.shard, "held")
+	f.requireSends(t, 0)
+	f.cm.leaderSelector = constLeader{leader: f.other, nodes: f.cm.Validators()}
+	f.nextRound()
+	f.requireSends(t, 1)
 }
 
 // No root queue crosses an epoch: the shard resubmits under the successor.

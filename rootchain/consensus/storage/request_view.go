@@ -644,7 +644,7 @@ func (v *RequestRoundView) VerifyIRChangeReq(req *rctypes.IRChangeReq, t2Rounds 
 			}
 			return nil, ErrDuplicateChangeReq
 		}
-		return nil, fmt.Errorf("shard %s-%s has pending changes in pipeline", v.target.Partition, v.target.Shard)
+		return nil, fmt.Errorf("%w: shard %s-%s", ErrPendingChange, v.target.Partition, v.target.Shard)
 	}
 	if round < v.prevUC.UnicitySeal.RootChainRoundNumber {
 		return nil, fmt.Errorf("current round %v is in the past, LUC round %v: %w", round, v.prevUC.UnicitySeal.RootChainRoundNumber, ErrStaleRequestContext)
@@ -656,6 +656,9 @@ func (v *RequestRoundView) VerifyIRChangeReq(req *rctypes.IRChangeReq, t2Rounds 
 	digest := sha256.Sum256(raw)
 	return &VerifiedRequest{IR: ir, ViewKey: v.ViewKey(), ProofDigest: digest[:]}, nil
 }
+
+// ErrPendingChange is the refusal of a request while another change of the shard is in the pipeline: nothing about the request itself.
+var ErrPendingChange = errors.New("the shard has pending changes in pipeline")
 
 // ErrDuplicateChangeReq is the refusal of a request whose result is the one already in the pipeline. The consensus package
 // re-exports it, so both verifiers refuse with one identity.
