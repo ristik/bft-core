@@ -497,7 +497,7 @@ func TestPendingChangeIsPartOfTheSnapshotAndTheViewKey(t *testing.T) {
 	other.BlockHash = []byte{0xEF}
 	pending := s.mustResolve(s.snapshot(s.parent, &other), fxActivate-1, 3, fxBody0, PurposeCertify)
 	_, err = pending.VerifyIRChangeReq(req, t2Rounds)
-	require.Error(t, err)
+	require.ErrorIs(t, err, ErrPendingChange, "retention keeps a request behind another pending change: the sentinel is what says so")
 	require.NotErrorIs(t, err, ErrDuplicateChangeReq)
 }
 

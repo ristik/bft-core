@@ -216,6 +216,12 @@ func TestRetainRefusesAStaleRequest(t *testing.T) {
 	f.requireSends(t, 0)
 }
 
+// Only the freeze is a verdict: a failed read of the frozen shard says nothing about the request.
+func TestFrozenVerdict(t *testing.T) {
+	require.Equal(t, retainedRefused, frozenVerdict(fmt.Errorf("x: %w", storage.ErrHandoffFrozen)))
+	require.Equal(t, retainedUnknown, frozenVerdict(errors.New("the store cannot read the frozen shard")))
+}
+
 // Rev's binding condition, through the entry point: a shard request arriving while the next leader is unknown is not refused and not lost.
 func TestShardRequestIsKeptWhileTheNextLeaderIsUnknown(t *testing.T) {
 	f := newRetentionFixture(t)

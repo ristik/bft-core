@@ -39,7 +39,7 @@ const (
 func (x *ConsensusManager) judgeRetained(req *drctypes.IRChangeReq) (retainedVerdict, error) {
 	round := x.pacemaker.GetCurrentRound() + 1
 	if err := x.refuseFrozenIR(req); err != nil {
-		return retainedRefused, err
+		return frozenVerdict(err), err
 	}
 	if x.viewResolver == nil {
 		_, err := x.irReqVerifier.VerifyRequest(round, req)
@@ -57,6 +57,14 @@ func (x *ConsensusManager) judgeRetained(req *drctypes.IRChangeReq) (retainedVer
 	}
 	_, err = x.irReqVerifier.VerifyIRChangeReqView(view, req)
 	return viewVerdict(err), err
+}
+
+// frozenVerdict reads the handoff freeze check: only the freeze itself is a verdict on the request, a failed read of the frozen shard is not.
+func frozenVerdict(err error) retainedVerdict {
+	if errors.Is(err, storage.ErrHandoffFrozen) {
+		return retainedRefused
+	}
+	return retainedUnknown
 }
 
 // viewVerdict reads the view-aware verifier. A change pending in the pipeline, its own among them while it sits in an uncommitted proposal,

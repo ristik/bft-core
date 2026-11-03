@@ -14,6 +14,7 @@ import (
 
 	"github.com/unicitynetwork/bft-core/internal/testutils/q3fixture"
 	"github.com/unicitynetwork/bft-core/network/protocol/abdrc"
+	"github.com/unicitynetwork/bft-core/rootchain/consensus/storage"
 	rctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
 	"github.com/unicitynetwork/bft-core/rootchain/testutils"
 )
@@ -269,4 +270,64 @@ func TestRecoveryRunFirstProposalCarriesNoTimeouts(t *testing.T) {
 			}
 		})
 	}
+}
+
+// Design gate 4: a node that signed and recorded its timeout for a round whose leader is unknown, and died before sending it, says the same
+// thing byte for byte after the restart: the B1 path goes through the same durable signing as a local timeout, and the stalled round then advances.
+func TestRestartInAnUnknownLeaderRoundResendsTheRecordedTimeout(t *testing.T) {
+	t.Parallel()
+	q4Slot(t)
+	c := newPhaseLockLive(t, 2*time.Second)
+	var drop atomic.Bool
+	base := c.net.filter
+	c.net.filter = func(from, to peer.ID, msg any) bool {
+		if drop.Load() {
+			switch msg.(type) {
+			case *abdrc.ProposalMsg, *abdrc.VoteMsg:
+				return true
+			}
+		}
+		return base(from, to, msg)
+	}
+	c.start(c.all()...)
+	c.warm(3, c.all()...)
+	drop.Store(true)
+	h := c.nodes[c.idx("H")]
+	lag := uint64(4*len(c.nodes) + 4)
+	head := func() uint64 {
+		round, _, _ := h.r.manager.blockStore.LeaderHead()
+		return round
+	}
+	require.Eventually(t, func() bool { return c.state("H").Round > head()+lag+1 }, 3*time.Minute, 20*time.Millisecond, "the covered rounds run out")
+
+	h.crash.arm(q4bCutSpec{Point: cutBeforeSend, Kind: storage.DecisionTimeout})
+	select {
+	case <-h.crash.fired:
+	case <-time.After(q4bDeadline):
+		require.FailNow(t, "the timeout was never signed")
+	}
+	c.stop("H")
+	c.stop("c") // a and b are below the quorum: the round can only advance with H's statement
+	h.crash.mu.Lock()
+	epoch, round, wantStatement, wantMessage := h.crash.epoch, h.crash.round, h.crash.statement, h.crash.msg
+	h.crash.mu.Unlock()
+	require.NotNil(t, wantMessage)
+	require.Greater(t, round, head()+lag, "the cut round's leader is unknown")
+	_, err := h.r.manager.leaderSelector.GetLeaderForRound(round)
+	require.ErrorIs(t, err, rctypes.ErrHistoryUnavailable)
+
+	c.restart("H")
+	require.Eventually(t, func() bool { return c.state("a").Round > round }, 2*time.Minute, 20*time.Millisecond, "the round advances with the recorded timeout")
+	drop.Store(false)
+	tr := c.finish()
+	author, sent := h.r.id().String(), 0
+	for _, ev := range tr {
+		if ev.Kind == "attempt" && ev.Msg.Class == q4Timeout && ev.Msg.Author == author && ev.Msg.Epoch == epoch && ev.Msg.Round == round {
+			require.Equal(t, wantStatement, ev.Msg.Statement, "the only statement of the author for the cut round is the recorded one")
+			if bytes.Equal(ev.Msg.Raw, wantMessage) {
+				sent++
+			}
+		}
+	}
+	require.Positive(t, sent, "the recorded timeout goes out after the restart, byte for byte")
 }
