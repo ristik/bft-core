@@ -96,10 +96,14 @@ func newRootBlock(block *abdrc.CommittedBlock, hash crypto.Hash, orchestration O
 		States:  make(map[types.PartitionShardID]*ShardInfo, len(shardConfs)),
 		Changed: ShardSet{},
 		Control: block.Control,
+		Leader:  block.Leader,
+	}
+	if err := validateLeaderState(block); err != nil {
+		return nil, err
 	}
 	for i := range block.ShardInfo {
 		d := &block.ShardInfo[i]
-		if profile == ProfileHandoff && d.Partition == evmroot.D4ControlPartition {
+		if profile == ProfileHandoff && rctypes.ReservedPartition(d.Partition) {
 			return nil, ErrControlCheckpoint
 		}
 		shardKey := types.PartitionShardID{PartitionID: d.Partition, ShardID: d.Shard.Key()}
@@ -195,10 +199,10 @@ func newRootBlock(block *abdrc.CommittedBlock, hash crypto.Hash, orchestration O
 }
 
 func (x *ExecutedBlock) Extend(newBlock *rctypes.BlockData, verifier IRChangeReqVerifier, orchestration Orchestration, hash crypto.Hash, log *slog.Logger) (*ExecutedBlock, error) {
-	return x.extendWithAuthority(newBlock, verifier, orchestration, hash, log, nil, nil, nil)
+	return x.extendWithAuthority(newBlock, verifier, orchestration, hash, log, nil, nil, nil, nil)
 }
 
-func (x *ExecutedBlock) extendWithAuthority(newBlock *rctypes.BlockData, verifier IRChangeReqVerifier, orchestration Orchestration, hash crypto.Hash, log *slog.Logger, authority handoffAuthority, candidates candidateSource, services *PosServices) (*ExecutedBlock, error) {
+func (x *ExecutedBlock) extendWithAuthority(newBlock *rctypes.BlockData, verifier IRChangeReqVerifier, orchestration Orchestration, hash crypto.Hash, log *slog.Logger, authority handoffAuthority, candidates candidateSource, services *PosServices, leaders LeaderInputs) (*ExecutedBlock, error) {
 	bootstrapChild := isEpochAnchorRoot(x)
 	if bootstrapChild && (newBlock.Anchor == nil || !bytes.Equal(newBlock.Anchor.GenesisID, x.BlockData.Anchor.GenesisID) ||
 		newBlock.Anchor.Slot != x.GetRound() || newBlock.Epoch != x.BlockData.Epoch) {
@@ -218,6 +222,8 @@ func (x *ExecutedBlock) extendWithAuthority(newBlock *rctypes.BlockData, verifie
 		control.PreviousDigest = bytes.Clone(control.PreviousDigest)
 		control.FrozenParent = bytes.Clone(control.FrozenParent)
 		unchanged.Control = &control
+		// The closing carrier appended its last record: a suffix keeps the root, so the ring is copied, byte for byte, whatever its header round.
+		unchanged.Leader = x.ShardState.Leader.Clone()
 		for key, previous := range x.ShardState.States {
 			copy := *previous
 			copy.Fees = maps.Clone(previous.Fees)
@@ -377,7 +383,7 @@ func (x *ExecutedBlock) extendWithAuthority(newBlock *rctypes.BlockData, verifie
 	}
 
 	for _, irChReq := range newBlock.Payload.Requests {
-		if x.ShardState.Control != nil && irChReq.Partition == evmroot.D4ControlPartition {
+		if x.ShardState.Control != nil && rctypes.ReservedPartition(irChReq.Partition) {
 			return nil, ErrHandoffRecord
 		}
 		shardKey := types.PartitionShardID{PartitionID: irChReq.Partition, ShardID: irChReq.Shard.Key()}
@@ -488,6 +494,9 @@ func (x *ExecutedBlock) extendWithAuthority(newBlock *rctypes.BlockData, verifie
 		pos.store(nextShardState.Control) // an acknowledgement or a control changes the state the control digest commits
 	}
 	nextShardState.Records = pos.records
+	if nextShardState.Leader, err = nextLeaderState(x, newBlock, bootstrapChild, leaders); err != nil {
+		return nil, err
+	}
 	ut, _, err := nextShardState.UnicityTree(hash)
 	if err != nil {
 		return nil, fmt.Errorf("creating UnicityTree: %w", err)

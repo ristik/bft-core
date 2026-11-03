@@ -148,6 +148,9 @@ type FullSnapshot struct {
 	Shards  []ShardSnapshot
 }
 
+// Leaves are the control leaf and the shard leaves. It has no leader-state leaf (#886), so VerifyHandoff refuses, with ErrD4Snapshot, the
+// checkpoint of a root-reputation-v1 epoch: it fails closed. Its only non-test caller, shardnode/profile2.go, is reached by nothing in
+// production today; the H4 fetcher that would use it needs this leaf added.
 func (s FullSnapshot) Leaves() ([]*base.UnicityTreeData, error) {
 	if s.Control.Phase != "committed" {
 		return nil, ErrD4Control

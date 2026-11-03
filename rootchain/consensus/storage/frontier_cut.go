@@ -76,6 +76,7 @@ func (bt *BlockTree) ReadFrontierCutSnapshot(partition types.PartitionID, shard 
 		}
 		states.Control = &ownedControl
 	}
+	states.Leader = root.ShardState.Leader.Clone() // the rebuilt tree carries this leaf too
 	var requested *certification.CertificationResponse
 	for key, source := range root.ShardState.States {
 		if source == nil || source.IR == nil || source.TR.Round == 0 || len(source.ShardConfHash) == 0 || source.ShardID.Length() > frontierMaxShardBits {

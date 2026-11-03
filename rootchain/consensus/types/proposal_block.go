@@ -22,6 +22,14 @@ var (
 
 const ControlPartition types.PartitionID = 0xFFFFFFFF
 
+// LeaderPartition is the reserved unicity-tree key of the leader-state leaf (#886). Like the control partition it is never a shard.
+const LeaderPartition types.PartitionID = 0xFFFFFFFE
+
+// ReservedPartition reports a partition identifier the root's own leaves use: no shard may have it.
+func ReservedPartition(p types.PartitionID) bool {
+	return p == ControlPartition || p == LeaderPartition
+}
+
 type BlockData struct {
 	_         struct{} `cbor:",toarray"`
 	Version   types.Version

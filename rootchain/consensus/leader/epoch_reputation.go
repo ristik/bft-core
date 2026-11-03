@@ -2,6 +2,7 @@ package leader
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"math"
@@ -57,8 +58,8 @@ type EpochReputation struct {
 
 // NewEpochReputation builds the selector. head reads the manager's current committed head; it is called for every normal-round lookup.
 func NewEpochReputation(genesis []byte, epoch, start, quorum uint64, nodes []*types.NodeInfo, head func() (LeaderHead, error)) (*EpochReputation, error) {
-	if head == nil || quorum == 0 {
-		return nil, fmt.Errorf("%w: no committed head or quorum", ErrInvalidSample)
+	if head == nil || quorum == 0 || len(genesis) != sha256.Size {
+		return nil, fmt.Errorf("%w: no committed head or quorum, or a genesis of %d bytes", ErrInvalidSample, len(genesis))
 	}
 	bootstrap, err := NewWeighted(start, nodes) // refuses an invalid committee or start: nothing below repeats it
 	if err != nil {
@@ -83,7 +84,7 @@ func NewEpochReputation(genesis []byte, epoch, start, quorum uint64, nodes []*ty
 		bootstrap: bootstrap, head: head, active: make(map[string]*Weighted)}, nil
 }
 
-// RecoveryMember returns the recovery member of a round after the bootstrap and whether the round is in a recovery run: the last L rounds
+// recoveryMember returns the recovery member of a round after the bootstrap and whether the round is in a recovery run: the last L rounds
 // of each S-round period, so a period's first S-L rounds are normal and there is no initial sweep. Leadership in a run is unconditional:
 // making it depend on a node's history would make a leader depend on local availability.
 func (e *EpochReputation) recoveryMember(round uint64) (peer.ID, bool) {
@@ -116,8 +117,8 @@ func (e *EpochReputation) GetLeaderForRound(round uint64) (peer.ID, error) {
 	if head.State == nil || head.State.Epoch != e.epoch || !bytes.Equal(head.State.Genesis, e.genesis) {
 		return "", fmt.Errorf("%w: cutoff %d, committed head %d holds no history of epoch %d", rctypes.ErrHistoryUnavailable, cutoff, head.Round, e.epoch)
 	}
-	if head.State.Members != uint64(len(e.nodes)) {
-		return "", fmt.Errorf("%w: ring of %d members, committee of %d", ErrInvalidSample, head.State.Members, len(e.nodes))
+	if head.State.Members != uint64(len(e.nodes)) || head.State.Start != e.start {
+		return "", fmt.Errorf("%w: ring of %d members from round %d, committee of %d from round %d", ErrInvalidSample, head.State.Members, head.State.Start, len(e.nodes), e.start)
 	}
 	voters, err := head.State.Select(cutoff, head.Round, head.Sealed)
 	if err != nil {

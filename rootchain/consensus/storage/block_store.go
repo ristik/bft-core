@@ -28,6 +28,7 @@ type (
 		pos           *PosServices  // the P85 control executor's collaborators; nil refuses every control
 		prefixSource  RecordFetcher // where a checkpoint's missing source-log prefix is fetched from
 		lock          sync.RWMutex
+		leaders       LeaderInputs // the epoch policy and committee the leader-state leaf is derived from (#886)
 		log           *slog.Logger
 		utbBinding    UTBBinding   // nil unless the deployment has a UTB epoch; checked before a certificate is applied
 		utbRetain     UTBRetention // likewise; makes the endorsed entry durable before the certificate is applied
@@ -393,7 +394,7 @@ func (x *BlockStore) TrialExecute(block *rctypes.BlockData, verifier IRChangeReq
 	x.lock.RLock()
 	svc := x.pos
 	x.lock.RUnlock()
-	_, err = parent.extendWithAuthority(block, verifier, x.orchestration, x.hash, x.log, x.handoffAuth, x, svc)
+	_, err = parent.extendWithAuthority(block, verifier, x.orchestration, x.hash, x.log, x.handoffAuth, x, svc, x.leaders)
 	return err
 }
 
@@ -436,6 +437,28 @@ func (x *BlockStore) SetPosServices(s *PosServices) {
 	x.lock.Lock()
 	defer x.lock.Unlock()
 	x.pos = s
+}
+
+// SetLeaderInputs installs what the executor reads about an epoch's leader policy and committee. It must be set before the store executes a
+// block of an epoch with the policy; a replacement store of a recovery gets it like the other collaborators.
+func (x *BlockStore) SetLeaderInputs(l LeaderInputs) {
+	x.lock.Lock()
+	defer x.lock.Unlock()
+	x.leaders = l
+}
+
+// LeaderInputs returns what SetLeaderInputs installed.
+func (x *BlockStore) LeaderInputs() LeaderInputs {
+	x.lock.RLock()
+	defer x.lock.RUnlock()
+	return x.leaders
+}
+
+// LeaderHead is the committed head a leader lookup reads: its round, ring and whether its control state is terminal, so no further sample
+// can exist in its epoch.
+func (x *BlockStore) LeaderHead() (round uint64, state *rctypes.LeaderState, sealed bool) {
+	root := x.blockTree.Root()
+	return root.GetRound(), root.ShardState.Leader, root.ShardState.Control != nil && root.ShardState.Control.Phase == "committed"
 }
 
 func (x *BlockStore) GetDB() PersistentStore {
@@ -534,7 +557,7 @@ func (x *BlockStore) Add(block *rctypes.BlockData, verifier IRChangeReqVerifier)
 	}
 	if x.profile == ProfileHandoff {
 		for _, req := range block.Payload.Requests {
-			if req == nil || req.Partition == rctypes.ControlPartition {
+			if req == nil || rctypes.ReservedPartition(req.Partition) {
 				return nil, rctypes.ErrControlPartition
 			}
 		}
@@ -599,7 +622,7 @@ func (x *BlockStore) Add(block *rctypes.BlockData, verifier IRChangeReqVerifier)
 		}
 	}
 	// Extend state from parent block
-	exeBlock, err := parentBlock.extendWithAuthority(block, verifier, x.orchestration, x.hash, x.log, x.handoffAuth, x, x.pos)
+	exeBlock, err := parentBlock.extendWithAuthority(block, verifier, x.orchestration, x.hash, x.log, x.handoffAuth, x, x.pos, x.leaders)
 	if err != nil {
 		return nil, fmt.Errorf("error processing block round %v, %w", block.Round, err)
 	}

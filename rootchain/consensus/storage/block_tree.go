@@ -540,6 +540,7 @@ func (bt *BlockTree) CurrentState() (*rcnet.StateMsg, error) {
 			Qc:        committedBlock.Qc,
 			CommitQc:  committedBlock.CommitQc,
 			Control:   committedBlock.ShardState.Control,
+			Leader:    committedBlock.ShardState.Leader,
 			Anchor:    anchor,
 		},
 		Pending: pending,
@@ -680,7 +681,7 @@ func checkpointOf(root *ExecutedBlock) (*rcnet.CommittedBlock, *basetypes.Unicit
 		return nil, nil, err
 	}
 	return &rcnet.CommittedBlock{Block: root.BlockData, ShardInfo: shards, Qc: root.Qc,
-		CommitQc: root.CommitQc, Control: root.ShardState.Control}, path, nil
+		CommitQc: root.CommitQc, Control: root.ShardState.Control, Leader: root.ShardState.Leader}, path, nil
 }
 
 // HandoffCheckpoint returns the canonical checkpoint of the committed handoff: the block that carried the commit record, as captured

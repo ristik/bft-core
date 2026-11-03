@@ -70,7 +70,7 @@ func (x *IrReqBuffer) Add(round uint64, irChReq *drctypes.IRChangeReq, ver IRCha
 	if irChReq == nil {
 		return errors.New("ir change request is nil")
 	}
-	if x.profile == storage.ProfileHandoff && irChReq.Partition == drctypes.ControlPartition {
+	if x.profile == storage.ProfileHandoff && drctypes.ReservedPartition(irChReq.Partition) {
 		return drctypes.ErrControlPartition
 	}
 	// special case, timeout cannot be requested, it can only be added to a block by the leader
@@ -190,7 +190,7 @@ func (x *IrReqBuffer) AddView(view *storage.RequestRoundView, irChReq *drctypes.
 	if irChReq == nil {
 		return fmt.Errorf("ir change request is nil: %w", drctypes.ErrInvalidRequest)
 	}
-	if x.profile == storage.ProfileHandoff && irChReq.Partition == drctypes.ControlPartition {
+	if x.profile == storage.ProfileHandoff && drctypes.ReservedPartition(irChReq.Partition) {
 		return drctypes.ErrControlPartition
 	}
 	if irChReq.CertReason == drctypes.T2Timeout {

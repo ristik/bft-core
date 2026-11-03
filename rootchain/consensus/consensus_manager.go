@@ -1829,6 +1829,7 @@ func (x *ConsensusManager) onStateResponse(ctx context.Context, rsp *abdrc.State
 	}
 	// the replacement store executes the recovery blocks and then the live ones: it needs the control collaborators of the one it replaces
 	blockStore.SetPosServices(x.blockStore.PosServices())
+	blockStore.SetLeaderInputs(x.blockStore.LeaderInputs())
 	if x.utbPrevious != nil {
 		blockStore.SetUTBBinding(utbBindingFor(x.utbSigningConfig(), blockStore, x.utbPrevious))
 		if x.utbStore != nil {
@@ -2382,6 +2383,7 @@ func (x *ConsensusManager) validateRecoveryState(rsp *abdrc.StateMsg) error {
 				}
 			}
 			bs.SetPosServices(x.blockStore.PosServices())
+			bs.SetLeaderInputs(x.blockStore.LeaderInputs())
 			if x.utbPrevious != nil {
 				bs.SetUTBBinding(utbBindingFor(x.utbSigningConfig(), bs, x.utbPrevious))
 			}

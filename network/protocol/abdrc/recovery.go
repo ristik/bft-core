@@ -47,9 +47,13 @@ type CommittedBlock struct {
 	CommitQc  *rctypes.QuorumCert   // commit certificate
 	Control   *evmroot.ControlState // version 2 checkpoint control leaf
 	Anchor    *rctypes.EpochAnchor  // verified, noncommittable successor root
+	Leader    *rctypes.LeaderState  // the leader-state leaf of a root-reputation-v1 epoch: the state root binds it, like Control
 }
 
 func (r CommittedBlock) MarshalCBOR() ([]byte, error) {
+	if r.Leader != nil {
+		return types.Cbor.Marshal([]any{uint64(4), r.Block, r.ShardInfo, r.Qc, r.CommitQc, r.Control, r.Anchor, r.Leader})
+	}
 	if r.Anchor != nil {
 		return types.Cbor.Marshal([]any{uint64(3), r.Block, r.ShardInfo, r.Qc, r.CommitQc, r.Control, r.Anchor})
 	}
@@ -60,6 +64,24 @@ func (r CommittedBlock) MarshalCBOR() ([]byte, error) {
 }
 
 func (r *CommittedBlock) UnmarshalCBOR(data []byte) error {
+	var v4 struct {
+		_         struct{} `cbor:",toarray"`
+		Version   uint64
+		Block     *rctypes.BlockData
+		ShardInfo []ShardInfo
+		Qc        *rctypes.QuorumCert
+		CommitQc  *rctypes.QuorumCert
+		Control   *evmroot.ControlState
+		Anchor    *rctypes.EpochAnchor
+		Leader    *rctypes.LeaderState
+	}
+	if err := types.Cbor.Unmarshal(data, &v4); err == nil {
+		if v4.Version != 4 || v4.Control == nil || v4.Leader == nil {
+			return errors.New("invalid leader-state checkpoint")
+		}
+		*r = CommittedBlock{Block: v4.Block, ShardInfo: v4.ShardInfo, Qc: v4.Qc, CommitQc: v4.CommitQc, Control: v4.Control, Anchor: v4.Anchor, Leader: v4.Leader}
+		return nil
+	}
 	var v3 struct {
 		_         struct{} `cbor:",toarray"`
 		Version   uint64
@@ -439,9 +461,17 @@ func (r *CommittedBlock) IsValid() error {
 			return errors.New("invalid control checkpoint")
 		}
 	}
+	if r.Leader != nil {
+		if r.Control == nil || r.Leader.Epoch != r.Control.Epoch {
+			return errors.New("leader state without the control state of its epoch")
+		}
+		if err := r.Leader.Valid(); err != nil {
+			return err
+		}
+	}
 	for _, si := range r.ShardInfo {
-		if r.Control != nil && si.Partition == evmroot.D4ControlPartition {
-			return errors.New("control partition cannot be shard info")
+		if r.Control != nil && rctypes.ReservedPartition(si.Partition) {
+			return errors.New("reserved root partition cannot be shard info")
 		}
 		if err := si.IsValid(); err != nil {
 			return fmt.Errorf("invalid ShardInfo[%s - %s]: %w", si.Partition, si.Shard, err)

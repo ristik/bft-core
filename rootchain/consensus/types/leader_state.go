@@ -135,8 +135,8 @@ func (s *LeaderState) Valid() error {
 }
 
 func checkLeaderBitmap(voters []byte, members uint64) error {
-	if len(voters) == 0 {
-		return nil
+	if voters == nil {
+		return nil // no sample: nil is its one encoding, an empty bitmap would give the same record another digest
 	}
 	if uint64(len(voters)) != (members+7)/8 {
 		return fmt.Errorf("%w: bitmap of %d bytes for %d members", ErrLeaderState, len(voters), members)
@@ -154,6 +154,9 @@ func checkLeaderBitmap(voters []byte, members uint64) error {
 func (s *LeaderState) Select(cutoff, head uint64, sealed bool) ([]byte, error) {
 	if err := s.Valid(); err != nil {
 		return nil, err
+	}
+	if last := s.Records[len(s.Records)-1].Round; !sealed && last != head {
+		return nil, fmt.Errorf("%w: last record %d, unsealed committed head %d", ErrLeaderState, last, head)
 	}
 	if !sealed && cutoff > head {
 		return nil, fmt.Errorf("%w: cutoff %d, committed head %d", ErrHistoryUnavailable, cutoff, head)
@@ -182,9 +185,12 @@ func (s *LeaderState) Digest() ([]byte, error) {
 	return sum[:], nil
 }
 
-// LeaderBitmap maps a verified QC's signers to a bitmap over the committee, given in canonical order. A signer outside the committee
+// LeaderBitmap maps a verified QC's signers to a bitmap over the committee, which must be in canonical order. A signer outside the committee
 // cannot pass QC verification, so it is refused rather than dropped, and an empty signer set is not a sample.
 func LeaderBitmap(committee []string, signers []string) ([]byte, error) {
+	if !slices.IsSorted(committee) {
+		return nil, fmt.Errorf("%w: the committee is not in canonical order", ErrLeaderState)
+	}
 	if len(signers) == 0 {
 		return nil, fmt.Errorf("%w: a QC with no signers", ErrLeaderState)
 	}

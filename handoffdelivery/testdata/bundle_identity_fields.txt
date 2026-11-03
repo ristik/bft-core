@@ -195,6 +195,13 @@ Bundle.Snapshot.Control.PredecessorBodyID hashed
 Bundle.Snapshot.Control.PreviousDigest hashed
 Bundle.Snapshot.Control.RecordBytes hashed
 Bundle.Snapshot.Control.UnackedParent hashed
+Bundle.Snapshot.Leader.Epoch hashed
+Bundle.Snapshot.Leader.Genesis hashed
+Bundle.Snapshot.Leader.Lag hashed
+Bundle.Snapshot.Leader.Members hashed
+Bundle.Snapshot.Leader.Records[].Round hashed
+Bundle.Snapshot.Leader.Records[].Voters hashed
+Bundle.Snapshot.Leader.Start hashed
 Bundle.Snapshot.Qc.Envelope hashed
 Bundle.Snapshot.Qc.LedgerCommitInfo.Epoch hashed
 Bundle.Snapshot.Qc.LedgerCommitInfo.Hash hashed
