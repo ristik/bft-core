@@ -1058,6 +1058,17 @@ class Rehearsal:
         self.say(f'  recordCount == recordCursor == {self.wait("the custody has applied every root record", lambda: applied() is not None, 300) and applied()}')
         self.joiners.clear()   # the successor committee is active: a joiner is a member now
 
+    def expect_restore_running(self, i):
+        """The joiner's restore is up after 30 s. If not, its whole log is kept: the first crash is at the start of it, and each restart only adds a refusal (#905)."""
+        time.sleep(30)
+        logs = self.compose('logs', '--no-color', '--tail', '60', f'shard{i}', check=False)
+        (self.evh() / f'joiner-shard-{i}-restore.log').write_text(logs)
+        running = f'shard{i}' in self.compose('ps', '--status', 'running', '--services').split()
+        self.say(f'  joiner shard {i} restoring after 30 s: {"running" if running else "NOT running"}: ' + ' | '.join(logs.strip().splitlines()[-3:])[-500:])
+        if not running:
+            self.keep_redacted(self.evh() / f'joiner-shard-{i}-restore-whole.log', self.compose('logs', '--no-color', '--timestamps', f'shard{i}', check=False))
+        self.expect(running, f'the joiner\'s shard node {i} runs as a restore under its new session', logs.strip()[-500:])
+
     def advance_joiner(self, i, operator, shard_epoch):
         """The joiner's authority is pending (the genesis shard configuration does not name it) and holds no session. It started at the successor scope, so after the Commit
         its enrollment states the activated shard configuration and it issues its session; its shard node is then started and what it does is recorded."""
@@ -1137,12 +1148,7 @@ class Rehearsal:
         try:
             restore_file.write_text(json.dumps({'services': {f'shard{i}': {'entrypoint': entry}}}, indent=1) + '\n')
             self.compose('up', '-d', '--no-deps', '--force-recreate', f'shard{i}')
-            time.sleep(30)
-            logs = self.compose('logs', '--no-color', '--tail', '60', f'shard{i}', check=False)
-            (self.evh() / f'joiner-shard-{i}-restore.log').write_text(logs)
-            running = f'shard{i}' in self.compose('ps', '--status', 'running', '--services').split()
-            self.say(f'  joiner shard {i} restoring after 30 s: {"running" if running else "NOT running"}: ' + ' | '.join(logs.strip().splitlines()[-3:])[-500:])
-            self.expect(running, f'the joiner\'s shard node {i} runs as a restore under its new session', logs.strip()[-500:])
+            self.expect_restore_running(i)
             survivor = self.wait(f'the joiner\'s execution client {i} catches up with validator 1', lambda: int(self.ureth(i, 'eth_blockNumber'), 16) + 5 >= int(self.ureth(1, 'eth_blockNumber'), 16), 300)
             self.expect(survivor, f'the joiner\'s execution client {i} is at validator 1\'s block')
             # an ordinary node from here on: the restore flags go, the state stays
@@ -1326,17 +1332,22 @@ class Rehearsal:
         name = f'stop-window-{self.target}-v{i}.log'
         if (self.evidence / name).exists():   # pos-restart-2 runs with the target back at 2: it must not overwrite the first window
             name = f'stop-window-{self.target}-v{i}-again.log'
+        self.keep_redacted(self.evidence / name, window)
+
+    def keep_redacted(self, path, text):
+        """`text` in the file `path`, redacted as at CAPTURE_SERVICES. Fails closed: a failed scan or a literal that survives writes nothing and says so; never fails the stage."""
+        name = path.name
         try:
             gen = getattr(self, 'gen', None)
             if not gen:
                 raise SecretScanError('no generation to scan for secrets')
             secrets = known_secrets(gen)
-            lines, _, withheld = redact_log(window, secrets)
+            lines, _, withheld = redact_log(text, secrets)
             body = '\n'.join(lines)
             if any(secret in body for secret in secrets):
                 self.say(f'  {name} NOT kept: a known secret literal survived the redaction')
                 return
-            (self.evidence / name).write_text(body + '\n')
+            path.write_text(body + '\n')
             self.say(f'  kept {name} ({len(lines)} lines, {withheld} withheld)')
         except Exception as error:   # evidence is best effort; the stage's verdict is about the package
             self.say(f'  {name} not kept: {error}')

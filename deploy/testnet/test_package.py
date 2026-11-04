@@ -363,6 +363,26 @@ class ProofOfStake(unittest.TestCase):
             taken=[i for i,l in enumerate(lines) if "compose-logs.txt'" in l and ' logs ' in l]
             self.assertTrue(taken,name)
             for i in taken: self.assertIn('redact_evidence.py',lines[i+1],f'{name}:{i+1} uploads compose logs unredacted')
+    def test_a_failed_restore_keeps_the_whole_log_redacted(self):
+        import rehearse
+        gen=self._secret_generation()
+        whole='fatal error: the first line of the crash\nt2 hunter2-faucet-password\n'
+        class Fake(rehearse.Rehearsal):
+            def __init__(self,up): self.gen,self.dir,self.up=gen,Path(tempfile.mkdtemp()),up
+            def evh(self): return self.dir
+            def say(self,m): pass
+            def expect(self,ok,what,detail=''):
+                if not ok: raise rehearse.Failure(what)
+            def compose(self,*a,**k):
+                if a[0]=='ps': return 'shard5' if self.up else 'shard1'
+                return 'the last lines' if '--tail' in a else whole
+        with patch('rehearse.time.sleep'):
+            r=Fake(False)
+            with self.assertRaisesRegex(rehearse.Failure,'runs as a restore'): r.expect_restore_running(5)
+            out=(r.dir/'joiner-shard-5-restore-whole.log').read_text()
+            self.assertIn('the first line of the crash',out); self.assertNotIn('hunter2',out)
+            r=Fake(True); r.expect_restore_running(5)
+            self.assertFalse((r.dir/'joiner-shard-5-restore-whole.log').exists(),'only a failed restore')
     def test_a_settled_sample_goes_to_every_survivor(self):
         import rehearse
         r=self.settled_fake(lambda url:{'result':'0xtx'})
