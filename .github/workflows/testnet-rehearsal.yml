@@ -139,7 +139,7 @@ jobs:
         run: |
           sudo -E env "PATH=$PATH" python3 deploy/testnet/rehearse.py --generation /srv/tn-rehearsal-join --evidence "$RUNNER_TEMP/evidence-join" \
             --ubft pinned-bft/build/ubft --restore-pin /tmp/tn-h4pin \
-            --stages "up,identity,first-tx,pos-smoke,pos-joiner,pos-election,pos-proposal,pos-propose,pos-install,pos-advance,pos-join-signs,pos-restart,pos-join-heavy"
+            --stages "up,identity,first-tx,pos-smoke,pos-joiner,pos-election,pos-proposal,pos-propose,pos-install,pos-advance,pos-join-signs,pos-join-heavy,pos-restart"   # pos-join-heavy first: it needs the next attempt, and a slow pos-restart can outlast the election cadence (an attempt opened before the joiner is eligible stays open, no handoff follows it in this profile)
       - name: PoS join profile, logs
         if: always() && inputs.stages == '' && inputs.pos_stages == ''
         run: |

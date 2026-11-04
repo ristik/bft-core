@@ -195,6 +195,8 @@ def pos_join_heavy(r):
     r.expect(status == 0, 'join admit: the delegation (a local EVM key, no handoff will name it)', out.strip()[-300:])
     r.wait('the live index holds six identities', lambda: r.view(election, 'liveCount()(uint32)')[0] == 6, 120)
     cursor_before = r.view(election, 'attemptCursor()(uint64)')[0]   # an attempt from here on sees the heavy joiner eligible
+    open_result = r.view_text(election, 'openResult()(bytes32)').strip()
+    r.expect(int(open_result, 16) == 0, 'no result is open when the heavy joiner becomes eligible (an open result stops further attempts: run this stage before a slow one outlasts the election cadence)', open_result)
     # The election runs in the system hook, whose events are not in a receipt (run 40097992670: attemptCursor 6, openResult zero, no NoCandidate log): the outcome is read
     # from its state, the last attempt's stored result: state 2 NoCandidate, and the reason that follows it
     def outcome():
