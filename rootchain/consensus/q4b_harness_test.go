@@ -648,7 +648,7 @@ func (c *q4bLive) requireChainsAgree(names ...string) {
 			for round, blk := range ca {
 				if other, ok := cb[round]; ok {
 					shared++
-					require.Truef(c.t, bytes.Equal(blk.Hash, other.Hash), "%w: round %d, %s and %s", errQ4BChain, round, a, b)
+					require.Truef(c.t, bytes.Equal(blk.Hash, other.Hash), "%v: round %d, %s and %s", errQ4BChain, round, a, b)
 				}
 			}
 			require.NotZero(c.t, shared, "%s and %s share committed rounds", a, b)
