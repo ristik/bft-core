@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Redact a log file in place before it is uploaded as evidence: `redact_evidence.py <generation> <file>...`. The same rules as the rehearsal's stop-window captures
 (rehearse.py, at CAPTURE_SERVICES). Fails closed: when the generation's secrets cannot be scanned, or a known literal survives, the file keeps one line that says so and none
-of its content. Always exits 0, because the upload of the remaining evidence must not depend on it."""
+of its content. A failure it cannot catch (it does not start, an import fails, the rewrite fails) exits non-zero, and each workflow line then overwrites the file itself: never `|| true`."""
 import sys
 from pathlib import Path
 

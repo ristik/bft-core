@@ -362,8 +362,27 @@ class ProofOfStake(unittest.TestCase):
             lines=(Path(__file__).resolve().parents[2]/'.github'/'workflows'/name).read_text().splitlines()
             taken=[i for i,l in enumerate(lines) if "compose-logs.txt'" in l and ' logs ' in l]
             self.assertTrue(taken,name)
-            for i in taken: self.assertIn('redact_evidence.py',lines[i+1],f'{name}:{i+1} uploads compose logs unredacted')
-    def test_a_failed_restore_keeps_the_whole_log_redacted(self):
+            for i in taken:
+                self.assertIn('redact_evidence.py',lines[i+1],f'{name}:{i+1} uploads compose logs unredacted')
+                self._redaction_line_withholds_when_the_script_cannot_start(name,lines[i+1].strip())
+    def _redaction_line_withholds_when_the_script_cannot_start(self,name,line):
+        """Run the workflow's own line from a directory without the script: the raw log must not survive it."""
+        import subprocess
+        home=Path(tempfile.mkdtemp()); fake=home/'bin'; fake.mkdir()
+        (fake/'sudo').write_text('#!/bin/sh\nexec env "$@"\n'); (fake/'sudo').chmod(0o755)
+        temp=home/'runner'
+        for d in ('evidence','evidence-pos','evidence-join'): (temp/d).mkdir(parents=True); (temp/d/'compose-logs.txt').write_text('raw hunter2-secret\n')
+        done=subprocess.run(['bash','-e','-c',line],cwd=home,env={**os.environ,'PATH':f'{fake}:{os.environ["PATH"]}','RUNNER_TEMP':str(temp),'G':str(home)},capture_output=True,text=True)
+        self.assertEqual(done.returncode,0,f'{name}: {line}: {done.stderr}')
+        path=re.search(r'\$RUNNER_TEMP/([^"\']+)',line).group(1)
+        self.assertEqual((temp/path).read_text(),'[log withheld: redaction did not finish]\n',f'{name}: {line}')
+    def test_a_restored_generation_is_scanned_with_its_original(self):
+        import rehearse
+        original=self._secret_generation(); restored=original.with_name(original.name+'-restored'); restored.mkdir()
+        self.assertIn('hunter2-faucet-password',rehearse.known_secrets(restored))
+        shutil.rmtree(original)
+        with self.assertRaises(rehearse.SecretScanError): rehearse.known_secrets(restored)
+    def test_a_restore_keeps_the_whole_log_redacted(self):
         import rehearse
         gen=self._secret_generation()
         whole='fatal error: the first line of the crash\nt2 hunter2-faucet-password\n'
@@ -382,7 +401,13 @@ class ProofOfStake(unittest.TestCase):
             out=(r.dir/'joiner-shard-5-restore-whole.log').read_text()
             self.assertIn('the first line of the crash',out); self.assertNotIn('hunter2',out)
             r=Fake(True); r.expect_restore_running(5)
-            self.assertFalse((r.dir/'joiner-shard-5-restore-whole.log').exists(),'only a failed restore')
+            self.assertIn('the first line of the crash',(r.dir/'joiner-shard-5-restore-whole.log').read_text(),'a restart loop can read as running at the look')
+    def test_every_log_of_a_service_is_kept_redacted(self):
+        here=Path(__file__).resolve().parent
+        for name in ('rehearse.py','pos_crash.py','pos_join.py'):
+            for n,line in enumerate((here/name).read_text().splitlines(),1):
+                if 'head + body' in line: continue   # capture_restart_window, which has redacted it
+                self.assertFalse(re.search(r"\.log'?\)\.write_text\(",line),f'{name}:{n} writes a log raw: {line.strip()}')
     def test_a_settled_sample_goes_to_every_survivor(self):
         import rehearse
         r=self.settled_fake(lambda url:{'result':'0xtx'})
@@ -416,7 +441,7 @@ class ProofOfStake(unittest.TestCase):
                 if 'catches up' in what: return {'blockHash':'0xb'}
                 return True
         r=Fake()
-        with self.assertRaises(rehearse.Failure): r.pod_restart(mine_within=rehearse.MINE_SECONDS_ROTATED)   # past the mining waittten before anything else can fail
+        with self.assertRaises(rehearse.Failure): r.pod_restart(mine_within=rehearse.MINE_SECONDS_ROTATED)   # past the mining wait: the record is written before anything else can fail
         self.assertEqual(rehearse.SETTLED_SAMPLES,0,'at a pin without #886 a sample can wait out its whole limit (run 41737297875)')
         rows=[json.loads(x) for x in (r.evidence/'restart-latency.jsonl').read_text().splitlines()]
         self.assertEqual([x['phase'] for x in rows],['transition','window'],'no samples')

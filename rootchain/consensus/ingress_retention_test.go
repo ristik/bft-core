@@ -312,7 +312,7 @@ func freezeShardAtHighQC(t *testing.T, cm *ConsensusManager, key types.Partition
 	require.Equal(t, key, frozen)
 }
 
-// sendRetained buffers directly when this root leads next, so judgeRetained's freeze check is the only one on this route.
+// sendRetained buffers directly when this root leads next, so judgeRetained's freeze check is the only one before buffering (the proposer filters too, later).
 func TestRetainedRequestOfAFrozenShardIsDroppedAndNotBufferedByTheNextLeader(t *testing.T) {
 	t.Run("not frozen: this route buffers it", func(t *testing.T) {
 		cm, _, key, _ := frozenRetentionFixture(t)

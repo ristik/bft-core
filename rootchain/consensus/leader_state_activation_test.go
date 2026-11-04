@@ -307,7 +307,7 @@ func TestRestartInAnUnknownLeaderRoundResendsTheRecordedTimeout(t *testing.T) {
 		require.FailNow(t, "the timeout was never signed")
 	}
 	c.stop("H")
-	c.stop("c") // a and b are below the quorum: the round can only advance with H's statement
+	c.stop("c") // a and b are below the quorum on their own; c's timeout may already be delivered, the assertion on what was sent is the proof
 	h.crash.mu.Lock()
 	epoch, round, wantStatement, wantMessage := h.crash.epoch, h.crash.round, h.crash.statement, h.crash.msg
 	h.crash.mu.Unlock()
