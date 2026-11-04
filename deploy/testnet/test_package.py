@@ -448,8 +448,8 @@ class ProofOfStake(unittest.TestCase):
                 if 'catches up' in what: return {'blockHash':'0xb'}
                 return True
         r=Fake()
-        with self.assertRaises(rehearse.Failure): r.pod_restart(mine_within=rehearse.MINE_SECONDS_ROTATED)   # past the mining wait: the record is written before anything else can fail
-        self.assertEqual(rehearse.SETTLED_SAMPLES,0,'at a pin without #886 a sample can wait out its whole limit (run 41737297875)')
+        with patch.object(rehearse,'SETTLED_SAMPLES',0),self.assertRaises(rehearse.Failure): r.pod_restart(mine_within=rehearse.MINE_SECONDS_ROTATED)   # past the mining wait: the record is written before anything else can fail
+        self.assertEqual(rehearse.SETTLED_SAMPLES,12,'the pin contains #886: twelve settled samples (0 at a pin without it: run 41737297875)')
         rows=[json.loads(x) for x in (r.evidence/'restart-latency.jsonl').read_text().splitlines()]
         self.assertEqual([x['phase'] for x in rows],['transition','window'],'no samples')
         self.assertEqual(r.asked,'0xtx','the wait falls back to the transition transaction')

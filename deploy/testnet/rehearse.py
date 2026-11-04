@@ -47,9 +47,9 @@ MINE_SECONDS = 240
 MINE_SECONDS_ROTATED = 600
 SLOW_MINE_SECONDS = 30
 # Transactions sent one after another once the first is mined with the validator still down. The first one's time is the fault transition; these show where the
-# latency settles once the schedule has aged the stopped member out (bft-core #886's target: p95 <= 6 s, outside adaptation and recovery runs). 0 until the package's bft pin contains #886: at an older pin the stopped root keeps its turn in the rotation, a
-# sample can wait out its whole limit, and the rehearsal would fail on a number it only records. The pin bump sets 12 (the milestone runs set it on their own branch).
-SETTLED_SAMPLES = 0
+# latency settles once the schedule has aged the stopped member out (bft-core #886's target: p95 <= 6 s, outside adaptation and recovery runs). 12 since the package's bft pin contains #886 (11051123). At an older pin the stopped root keeps its turn in the rotation, a
+# sample can wait out its whole limit and the rehearsal would fail on a number it only records: a branch that pins such a commit sets 0.
+SETTLED_SAMPLES = 12
 
 # bft-core #886 (epoch-1 note): the PoA pod-restart samples are bimodal (a few seconds, or 25-41 s) and the end-of-run compose logs are of a later generation, so nothing
 # says why. The stage therefore keeps the consensus logs of each stop window (below). They are uploaded with the evidence of a PUBLIC repository, so: (1) only the root and
