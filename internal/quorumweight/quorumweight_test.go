@@ -206,15 +206,23 @@ func TestCheckedRoutesGoBaseSealVerificationThroughTheCheckedSum(t *testing.T) {
 	require.NoError(t, good.Verify(Checked(tb)), "heavy plus one light node is a weight quorum")
 	require.ErrorIs(t, sealSignedBy(t, signers, "l1", "l2", "l3").Verify(Checked(tb)), ErrQuorumNotReached)
 
-	// go-base skips a signature of a non-member; the wrapper refuses the whole seal
+	// the seal rule: a signature of a non-member counts for nothing and does not fail an honest quorum (go-base's own verifier agrees)
 	withStranger := sealSignedBy(t, signers, "heavy", "l1", "stranger")
-	require.NoError(t, withStranger.Verify(tb), "unwrapped go-base verifier silently ignores the stranger")
-	require.ErrorIs(t, withStranger.Verify(Checked(tb)), ErrUnknownSigner)
+	require.NoError(t, withStranger.Verify(tb), "unwrapped go-base verifier ignores the stranger")
+	require.NoError(t, withStranger.Verify(Checked(tb)), "so does the seal rule")
+	// ... and a stranger is no weight: without a quorum of members it is not made up for
+	require.ErrorIs(t, sealSignedBy(t, signers, "l1", "l2", "stranger").Verify(Checked(tb)), ErrQuorumNotReached)
 
-	// v1 legacy acceptance is kept: a known member's invalid signature is skipped
+	// a known member's invalid signature is skipped as well
 	bad := sealSignedBy(t, signers, "heavy", "l1", "l2")
 	bad.Signatures["l2"] = []byte{1, 2, 3}
 	require.NoError(t, bad.Verify(Checked(tb)))
+	bad.Signatures["l1"] = []byte{1, 2, 3}
+	require.ErrorIs(t, bad.Verify(Checked(tb)), ErrQuorumNotReached)
+
+	// VerifySigned is not the seal rule: the other certificates it serves still refuse an unknown signer
+	_, err = VerifySigned(tb, []byte("data"), map[string]hex.Bytes{"stranger": {1}})
+	require.ErrorIs(t, err, ErrUnknownSigner)
 
 	// a test double (anything but the production *RootTrustBaseV1) is passed through
 	d := testDouble{}
@@ -302,4 +310,31 @@ func TestNewTrustBaseRefusesWhatGoBaseWouldWrap(t *testing.T) {
 	require.EqualValues(t, 8, got.QuorumThreshold)
 	require.EqualValues(t, 2, got.Epoch)
 	require.Equal(t, "a", got.RootNodes[0].NodeID)
+}
+
+// The same shape, three valid members of four plus a bad extra, is an accepted seal and a rejected successor entry: the seal rule is the
+// upstream rule, the entry rule stays strict (a trust-base entry's witnesses are never judged by the seal adapter).
+func TestSealAcceptedWhereTheSuccessorEntryIsRefused(t *testing.T) {
+	v1, signers := realTrust(t, map[string]uint64{"a": 1, "b": 1, "c": 1, "d": 1}, 3)
+	entry := &types.RootTrustBaseV2{Version: 2, NetworkID: 5, Epoch: 1, EpochStart: 1, RootNodes: v1.RootNodes, QuorumThreshold: 3, PreviousEntryID: make([]byte, 32)}
+	require.NoError(t, entry.VerifyGenesis())
+
+	// the seal: a, b, c valid and d's slot holding a bad witness
+	seal := sealSignedBy(t, signers, "a", "b", "c")
+	seal.Signatures["d"] = []byte{1, 2, 3}
+	require.NoError(t, seal.Verify(Checked(entry)), "the seal holds: the bad extra counts zero")
+	require.NoError(t, seal.Verify(Checked(v1)))
+	require.Error(t, seal.Verify(entry), "the entry's own verifier is strict for the same bytes")
+
+	// the successor entry with the same witnesses
+	next := &types.RootTrustBaseV2{Version: 2, NetworkID: 5, Epoch: 2, EpochStart: 10, RootNodes: v1.RootNodes, QuorumThreshold: 3}
+	id, err := entry.EntryID()
+	require.NoError(t, err)
+	next.PreviousEntryID = id[:]
+	for _, n := range []string{"a", "b", "c"} {
+		require.NoError(t, next.Sign(n, signers[n]))
+	}
+	require.NoError(t, next.VerifySuccessor(entry), "three valid witnesses are a successor")
+	next.Signatures["d"] = []byte{1, 2, 3}
+	require.ErrorIs(t, next.VerifySuccessor(entry), types.ErrTrustBaseV2Signature, "a bad extra witness refuses the successor entry")
 }
