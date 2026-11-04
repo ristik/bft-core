@@ -136,6 +136,9 @@ def topology(out, n, ids, images, captcha, ureth_flags=(), max_gas=30000000, wit
             '--signing-authority-socket','/authority/client.sock','--signing-authority-credential','/authority/client.cred']
             + common,   # no --archive-replica: the node derives its replicas from the shard's validators (the next three in peer-ID order, any two make a block durable)
             [evm,auth,network,'./validator%d/jwt:/jwt:ro'%i,'./validator%d/archive:/archive'%i],memory='512m',cpu=0.75,pod='pod%d'%i)
+        # Go's cgo runtime aborts when pthread_create fails, and at low limits this reproduces the crash of bft-core #905, after which a restore refuses to restart, by design, on the
+        # journal it left. 31 restores peaked at 32 to 80 and none reached the old limit of 128, so that the real crashes hit it is inferred, and what spiked is not known.
+        services['shard%d'%i]['pids_limit']=512
     # The aggregator's signing key stays in its private key file (aggregator/keys.json, read-only mount): nothing secret is in its environment or this manifest.
     # mongod runs directly as the package UID (the image's entrypoint would switch users, which cap_drop ALL forbids); /tmp is the writable HOME of mongosh.
     # It has no authentication: it is reachable only on its own internal network, which only validator 1's namespace (the aggregator's) joins.
