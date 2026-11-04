@@ -50,7 +50,7 @@ SLOW_MINE_SECONDS = 30
 # latency settles once the schedule has aged the stopped member out (bft-core #886's target: p95 <= 6 s, outside adaptation and recovery runs).
 # Settled-latency samples after a restart's fault transition. 0 until the package's bft pin contains #886: at an older pin the stopped root keeps its turn in the rotation, a
 # sample can wait out its whole limit, and the rehearsal would fail on a number it only records. The pin bump sets 12 (the milestone runs set it on their own branch).
-SETTLED_SAMPLES = 0
+SETTLED_SAMPLES = 12
 FAUCET = '127.0.0.1:8088'
 PROXY_IPS = ('203.0.113.', '198.51.100.')   # documentation ranges: the client addresses the nginx in front would have set in X-Forwarded-For
 
