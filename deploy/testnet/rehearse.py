@@ -1324,6 +1324,8 @@ class Rehearsal:
         """The rotated epochs' stop window in evidence/stop-window-<target>-v<i>.log, redacted as at CAPTURE_SERVICES. Fails closed: a failed scan or a literal that survives
         writes nothing and says so; never fails the stage."""
         name = f'stop-window-{self.target}-v{i}.log'
+        if (self.evidence / name).exists():   # pos-restart-2 runs with the target back at 2: it must not overwrite the first window
+            name = f'stop-window-{self.target}-v{i}-again.log'
         try:
             gen = getattr(self, 'gen', None)
             if not gen:
