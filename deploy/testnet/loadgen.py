@@ -89,11 +89,14 @@ def run(client, sender, sign, rate, duration, ips, ip_prefix, recipients, receip
     while int(result(client, 'eth_getTransactionCount', [sender, 'latest'], first), 16) < nonce + len(accepted) and clock() < deadline:
         sleep(1)
     drained = clock() - start - sent_span
+    # the receipts' own deadline: fetching them takes time in proportion to the run, and a long run must not report the ones it had no time to ask about as not mined
+    deadline = clock() + receipt_wait + 2 * len(accepted) / min(8 * max(ips, 1), 80)
     per_second = min(8 * max(ips, 1), 80)   # under the gateway's 100/s overall limit as well as 10/s per address (13 addresses at 8/s was 104/s: the 100/s run on the host died on a 429)
-    receipt_limited = 0
+    receipt_limited, asked = 0, 0
     for k, h in enumerate(accepted):
         if clock() >= deadline:
             break
+        asked = k + 1
         if k and k % per_second == 0:
             sleep(1)
         xff = f'{ip_prefix}{1 + k % ips}' if ips else None
@@ -110,13 +113,15 @@ def run(client, sender, sign, rate, duration, ips, ip_prefix, recipients, receip
             mined[h] = True
         elif r:
             failed.add(h)
-    missing = [h for h in accepted if h not in mined and h not in failed]
+    missing = [h for h in list(accepted)[:asked] if h not in mined and h not in failed]   # asked, and no receipt: the ones never asked about say nothing either way
+    not_asked = len(accepted) - asked
     summary = {'rate_requested': rate, 'rate_achieved': round(len(raws) / sent_span, 2) if sent_span else None, 'ips': ips, 'submitted': len(raws),
                'accepted': len(accepted), 'rate_limited_429': limited, 'receipt_queries_rate_limited_429': receipt_limited, 'errors': len(errors), 'mined_ok': len(mined), 'mined_failed': len(failed),
-               'not_mined_in_time': len(missing), 'submit_latency_s': {'p50': round(statistics.median(latency), 4), 'max': round(max(latency), 4)} if latency else {},
+               'not_mined_in_time': len(missing), 'receipts_not_asked': not_asked, 'submit_latency_s': {'p50': round(statistics.median(latency), 4), 'max': round(max(latency), 4)} if latency else {},
                'drained_after_last_submit_s': round(drained, 2)}
     problems = [*errors[:5], *([f'{len(failed)} accepted transfers mined with a failed status'] if failed else []),
                 *([f'{len(missing)} accepted transfers not mined within {receipt_wait} s'] if missing else []),
+                *([f'{not_asked} accepted transfers not checked: the receipt deadline ran out'] if not_asked else []),
                 *([f'only {len(accepted)} accepted, wanted at least {min_accepted}'] if len(accepted) < min_accepted else [])]
     return summary, problems
 

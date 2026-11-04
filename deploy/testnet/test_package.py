@@ -1136,7 +1136,7 @@ class LoadGenerator(unittest.TestCase):
             if method=='eth_getTransactionReceipt':
                 self.receipt_calls+=1
                 if self.receipt_calls<=self.receipt_limit: return 429,'{"error": "rate limit"}'
-                return ok({'status':self.status})
+                return ok({'status':self.status} if self.mine else None)
             raise AssertionError(method)
     def run_load(self,node,**kw):
         now=[0.0]
@@ -1164,6 +1164,24 @@ class LoadGenerator(unittest.TestCase):
     def test_rate_limited_submissions_are_counted_and_resent_with_the_same_nonce(self):
         node=self.Node(limit_every=4);s,problems=self.run_load(node)
         self.assertEqual(problems,[]);self.assertGreater(s['rate_limited_429'],0);self.assertEqual(node.sent,[f'raw{i}' for i in range(30)])
+    def test_a_long_run_has_the_time_to_ask_for_every_receipt(self):
+        # on the host 9,596 accepted transfers at 8/s: the receipt deadline ended the checks at 3,617 and the rest read as not mined, with the nonce drained in 2 s
+        node=self.Node();s,problems=self.run_load(node,rate=100,duration=96,ips=4,receipt_wait=180)
+        self.assertEqual((s['accepted'],s['mined_ok'],s['not_mined_in_time']),(9600,9600,0))
+        self.assertEqual(problems,[])
+    def test_receipts_the_deadline_left_unasked_are_not_called_not_mined(self):
+        # rev3: a long run on a slow gateway. Each query takes time on the fake clock until the deadline passes
+        node=self.Node();now=[0.0];post=node.post
+        def slow(method,params,xff=None):
+            if method=='eth_getTransactionReceipt': now[0]+=1.0
+            return post(method,params,xff)
+        node.post=slow
+        s,problems=self.module().run(node,'0xaa',lambda to,n,p: f'raw{n}',10,3,0,'203.0.113.',4,5,1,clock=lambda:now[0],sleep=lambda d:now.__setitem__(0,now[0]+d))
+        self.assertGreater(s['receipts_not_asked'],0);self.assertLess(s['mined_ok'],30)
+        self.assertEqual(s['not_mined_in_time'],0,'never asked is not not mined')
+        self.assertEqual(s['mined_ok']+s['receipts_not_asked'],30)
+        self.assertTrue(any('not checked' in p for p in problems),problems)
+        self.assertFalse(any('not mined within' in p for p in problems),problems)
     def test_a_rate_limited_receipt_query_is_counted_and_asked_again_not_a_crash(self):
         # host run, 100/s over 13 addresses: the receipt phase hit the gateway's overall limit and the tool died with the transfers already sent
         node=self.Node(receipt_limit=5);s,problems=self.run_load(node,ips=13,receipt_wait=60)
@@ -1183,6 +1201,7 @@ class LoadGenerator(unittest.TestCase):
     def test_accepted_transfers_that_are_never_mined_fail_the_run(self):
         s,problems=self.run_load(self.Node(mine=False))
         self.assertTrue(any('not mined within' in p for p in problems),problems)
+        self.assertEqual((s['mined_ok'],s['not_mined_in_time']),(0,30),'asked, and the node has no receipt')
     def test_too_few_accepted_fails_the_run(self):
         s,problems=self.run_load(self.Node(),min_accepted=31)
         self.assertTrue(any('only 30 accepted' in p for p in problems),problems)
@@ -1501,13 +1520,15 @@ class BridgeLoad(unittest.TestCase):
             def bridge_compose(self,*a): return ''
             def cast_run(self,*a): return '0x'+'a'*40
             def faucet_send(self,to,wei): pass
+            def call(self,method,params=()): return hex(7)
             def vault_balance(self):
                 self.reads=getattr(self,'reads',0)+1
                 return 0 if self.reads==1 else self.held
-            def tester(self,*args,wallet=None,key=None):
+            def tester(self,*args,check=True,wallet=None,key=None):
                 self.calls.append(args[0])
                 (Path(tmp)/'bridge'/key).read_text()   # the worker's key exists while it runs
-                if args[0]==self.fail: raise RuntimeError('the tester failed: '+self.fail)
+                if args[0]==self.fail: return 1,'some output\nerror: 0xabc holds 5 wei, and this needs 9: get test ether from the faucet'
+                return 0,'ok'
         (Path(tmp)/'bridge').mkdir()
         made=Fake();made.fail,made.held,made.calls=fail,held,[]
         return made
@@ -1615,6 +1636,41 @@ class BridgeLoad(unittest.TestCase):
             self.assertTrue(caught.exception.__suppress_context__)
             self.assertEqual([p for p in (Path(tmp)/'bridge').iterdir()],[],'the key file is removed')
             for f in out.iterdir(): self.assertNotIn(key,f.read_text())
+    def test_a_failed_step_records_the_testers_reason(self):
+        bl=self.module()
+        with tempfile.TemporaryDirectory() as tmp:
+            ok,s,out=self.run_load(bl,tmp,self.fake(tmp,fail='redeem',held=bl.TESTER_LOCK_WEI))
+            self.assertFalse(ok)
+            row=json.loads(next(l for l in (out/'cycles.jsonl').read_text().splitlines() if '"ok": false' in l))
+            self.assertIn('get test ether from the faucet',row['error'],'out of funds is the tool\'s budget, not the bridge: the reason must show')
+    def test_workers_are_funded_with_the_configured_amount(self):
+        bl=self.module()
+        with tempfile.TemporaryDirectory() as tmp:
+            fake=self.fake(tmp,held=0)
+            funded=[]
+            fake.faucet_send=lambda to,wei: funded.append(wei)
+            out=Path(tmp)/'out';out.mkdir()
+            bl.Load(fake,out,duration=0.05,interval=60,max_failures=1,funds=123).run(2)
+            self.assertEqual(funded,[123,123])
+            self.assertGreaterEqual(bl.WORKER_FUNDS,14*10**18,'twice the gas of a 20-minute run at M=8')
+            self.assertLessEqual(13*bl.WORKER_FUNDS,1000*10**18,'M=1, 4 and 8 fit one generation\'s faucet')
+    def test_main_passes_funds_to_the_load(self):
+        bl=self.module()
+        seen={}
+        class Spy:
+            def __init__(self,r,out,duration,interval,max_failures,funds): seen['funds']=funds
+            def run(self,workers): return True
+        with tempfile.TemporaryDirectory() as tmp,patch.object(bl,'Load',Spy),patch.object(bl,'BridgeRehearsal',lambda *a: object()),\
+             patch.object(sys,'argv',['bridge_load','--generation',tmp,'--out',tmp+'/o','--funds','123']):
+            self.assertEqual(bl.main(),0)
+        self.assertEqual(seen['funds'],123)
+    def test_the_gas_price_is_sampled_and_summarised(self):
+        bl=self.module()
+        with tempfile.TemporaryDirectory() as tmp:
+            fake=self.fake(tmp,held=0)
+            ok,s,out=self.run_load(bl,tmp,fake)
+            self.assertEqual(s['gasPriceWei']['peak'],7)
+            self.assertEqual(json.loads((out/'samples.jsonl').read_text().splitlines()[0])['gasPrice'],7)
     def test_worker_stops_after_failures_in_a_row(self):
         bl=self.module()
         with tempfile.TemporaryDirectory() as tmp:
