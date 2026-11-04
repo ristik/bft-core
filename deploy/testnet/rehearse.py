@@ -56,7 +56,12 @@ CAPTURE_SERVICES = ('root', 'shard')
 CAPTURE_MAX_LINES = 6000          # per service and window; the rest is counted, not written
 SECRET_LINE = re.compile(r'(?i)(secret|priv(ate)?[ _-]?key|mnemonic|passphrase|password|credential|\.cred\b|keystore|authorization|bearer|api[ _-]?key|\btoken\b|\bseed\b|ciphertext)')
 WITHHELD_LINE = '[line withheld: it matches a secret pattern]'
-SECRET_FILE = re.compile(r'(?i)(^password$|secret|\.cred(\.|$)|\.key$|^keys?\.json$|^keystore\.json$|^priv)')
+SECRET_FILE = re.compile(r'(?i)(^password$|secret|\.cred(\.|$)|\.key$|^keys?\.json$|^keystore\.json$|^priv|^jwt)')
+SECRET_DIRS = ('faucet-secrets', 'pos-owner-keys', 'auth', 'jwt')   # every file in these is a secret (auth and jwt are what the root and shard services mount besides their own state)
+
+
+class SecretScanError(Exception):
+    """The scan for the generation's secrets could not be completed: nothing derived from the generation's services may be uploaded."""
 SECRET_FIELD = re.compile(r'(?i)(priv|secret|password|seed|mnemonic|ciphertext|crypto)')
 
 
@@ -74,23 +79,26 @@ def _json_secrets(node, out, under_secret=False):
 
 def known_secrets(gen):
     """The literal secrets of a generation: whole contents of the files that are secrets by name (faucet-secrets/*, pos-owner-keys/*, validator*/auth credentials and every
-    *.key/*.cred), and the private fields of its JSON key files. Shallow walk (depth 4, files under 256 KB): the chain data directories are not entered."""
-    found, root = set(), Path(gen)
+    *.key/*.cred), and the private fields of its JSON key files. Shallow walk (depth 4, files under 256 KB): the chain data directories are not entered.
+    Fails closed (SecretScanError): no generation directory, a walk error, a file of the secret kind that cannot be read, or a scan that finds nothing (a real generation
+    always has its faucet password and Engine JWT, so an empty result means the scan did not see it)."""
+    found, root, problems = set(), Path(gen), []
     if not root.is_dir():
-        return found
-    for dirpath, dirnames, filenames in os.walk(root):
+        raise SecretScanError(f'{gen} is not a generation directory')
+    for dirpath, dirnames, filenames in os.walk(root, onerror=lambda error: problems.append(f'{error.filename}: {error.strerror}')):
         depth = len(Path(dirpath).relative_to(root).parts)
         dirnames[:] = [d for d in dirnames if depth < 4 and d not in ('data', 'db', 'static_files', 'reth', 'ureth-data')]
-        in_secret_dir = any(part in ('faucet-secrets', 'pos-owner-keys', 'auth') for part in Path(dirpath).relative_to(root).parts)
+        in_secret_dir = any(part in SECRET_DIRS for part in Path(dirpath).relative_to(root).parts)
         for name in filenames:
             path = Path(dirpath) / name
             if not (in_secret_dir or SECRET_FILE.search(name)):
                 continue
             try:
                 if not path.is_file() or path.stat().st_size > 262144:
-                    continue
+                    continue   # a socket, a link to nowhere or a large file is not a key file
                 text = path.read_text(errors='ignore').strip()
-            except OSError:
+            except OSError as error:
+                problems.append(f'{path}: {error.strerror or error}')
                 continue
             if name.endswith('.json'):
                 try:
@@ -101,6 +109,10 @@ def known_secrets(gen):
             if len(text) >= 8:
                 found.add(text)
                 found.update(t for t in re.findall(r'[A-Za-z0-9+/=_.-]{16,}', text))
+    if problems:
+        raise SecretScanError('; '.join(problems[:5]))
+    if not found:
+        raise SecretScanError(f'no secret found under {gen}')
     return found
 
 
@@ -1246,7 +1258,9 @@ class Rehearsal:
             end = self.utc_stamp(2)
             services = [f'{role}{j}' for role in CAPTURE_SERVICES for j in range(1, self.n + 1)]
             gen = getattr(self, 'gen', None)
-            secrets = known_secrets(gen) if gen else set()   # no generation, no secrets to find (never a walk of the working directory)
+            if not gen:
+                raise SecretScanError('no generation to scan for secrets')
+            secrets = known_secrets(gen)   # raises when the scan is incomplete or empty: then nothing is written
             lines, scrubbed, withheld, truncated = [], 0, 0, 0
             for service in services:
                 text = self.compose('logs', '--no-color', '--timestamps', '--since', start, '--until', end, service, check=False)

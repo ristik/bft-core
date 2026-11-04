@@ -232,18 +232,30 @@ class ProofOfStake(unittest.TestCase):
         (gen/'faucet-secrets'/'keystore.json').write_text(json.dumps({'address':'a'*40,'crypto':{'ciphertext':'c0ffee'*8,'kdf':'scrypt'}}))
         (gen/'validator1'/'auth').mkdir(parents=True); (gen/'validator1'/'auth'/'client.cred').write_text('CREDENTIALBYTES0123456789abcdef\n')
         (gen/'validator1'/'root').mkdir(); (gen/'validator1'/'root'/'keys.json').write_text(json.dumps({'signingKey':{'privateKey':'deadbeef'*8,'publicKey':'pub'+'0'*30}}))
+        (gen/'validator1'/'jwt').mkdir(); (gen/'validator1'/'jwt'/'jwt.hex').write_text('9f'*32+'\n')   # the Engine JWT: mounted by the root, the shard and ureth
         (gen/'validator1'/'data').mkdir(); (gen/'validator1'/'data'/'password').write_text('inside-a-data-dir-never-read')
         (gen/'manifest.json').write_text(json.dumps({'validators':3}))
         return gen
     def test_the_secret_files_of_a_generation_are_found_and_public_fields_are_not(self):
         import rehearse
         found=rehearse.known_secrets(self._secret_generation())
-        for secret in ('hunter2-faucet-password','c0ffee'*8,'CREDENTIALBYTES0123456789abcdef','deadbeef'*8):
+        for secret in ('hunter2-faucet-password','c0ffee'*8,'CREDENTIALBYTES0123456789abcdef','deadbeef'*8,'9f'*32):
             self.assertIn(secret,found)
         self.assertNotIn('pub'+'0'*30,found,'a public key field is not a secret')
         self.assertNotIn('a'*40,found,'the keystore address is public')
         self.assertNotIn('inside-a-data-dir-never-read',found,'chain data directories are not entered')
-        self.assertEqual(rehearse.known_secrets(Path(tempfile.mkdtemp())/'missing'),set())
+    def test_the_secret_scan_fails_closed_when_it_finds_nothing_or_cannot_read(self):
+        import rehearse
+        with self.assertRaises(rehearse.SecretScanError): rehearse.known_secrets(Path(tempfile.mkdtemp())/'missing')
+        with self.assertRaises(rehearse.SecretScanError): rehearse.known_secrets(Path(tempfile.mkdtemp()))   # a generation always has its faucet password and JWT: an empty scan did not see it
+        gen=self._secret_generation()
+        real=Path.read_text
+        def unreadable(self,*a,**k):
+            if self.name=='client.cred': raise PermissionError(13,'Permission denied')
+            return real(self,*a,**k)
+        with patch.object(Path,'read_text',unreadable), self.assertRaises(rehearse.SecretScanError) as e: rehearse.known_secrets(gen)
+        self.assertIn('client.cred',str(e.exception))
+        with patch('rehearse.os.walk',lambda top,onerror=None: (onerror(OSError(13,'Permission denied','/x')),iter(()))[1]), self.assertRaises(rehearse.SecretScanError): rehearse.known_secrets(gen)
     def test_a_log_is_redacted_by_literal_and_by_pattern(self):
         import rehearse
         text='\n'.join(['2026 round 7 local timeout leader=3','2026 loaded key hunter2-faucet-password from disk','2026 config private_key=abcd','2026 Authorization: Bearer x','2026 vote sent'])
@@ -265,16 +277,16 @@ class ProofOfStake(unittest.TestCase):
     def test_the_stop_window_capture_reads_only_root_and_shard_logs_and_keeps_no_secret(self):
         import rehearse
         gen=self._secret_generation()
-        logs={'root2':'t1 local timeout round 9\nt2 key hunter2-faucet-password\nt3 leader 2 down','shard1':'t4 CREDENTIALBYTES0123456789abcdef in line\nt5 proposal sent pub'+'0'*30}
+        logs={'root2':'t1 local timeout round 9\nt2 key hunter2-faucet-password\nt3 leader 2 down','shard1':'t4 CREDENTIALBYTES0123456789abcdef in line\nt5 proposal sent pub'+'0'*30,'shard3':'t6 engine jwt '+'9f'*32+' loaded'}
         Fake,calls=self._capture_fake(logs); r=Fake(gen)
         r.capture_restart_window(2,'2026-11-04T10:00:00.000000Z',41)
         services=[c[1][-1] for c in calls if c[0]=='compose']
         self.assertEqual(services,[f'{role}{j}' for role in ('root','shard') for j in (1,2,3)],'no authority, signer or ureth service is read')
         self.assertTrue(all(c[1][0]=='logs' and '--since' in c[1] and '--until' in c[1] for c in calls if c[0]=='compose'))
         out=(r.evidence/'pod-restart-logs'/'validator2-down-41s.log').read_text()
-        for secret in ('hunter2-faucet-password','CREDENTIALBYTES0123456789abcdef'): self.assertNotIn(secret,out)
+        for secret in ('hunter2-faucet-password','CREDENTIALBYTES0123456789abcdef','9f'*32): self.assertNotIn(secret,out)
         self.assertIn('local timeout round 9',out); self.assertIn('leader 2 down',out); self.assertIn('pub'+'0'*30,out)
-        self.assertIn('2 secret literals scrubbed',out)
+        self.assertIn('3 secret literals scrubbed',out)
     def test_the_stop_window_capture_writes_nothing_when_a_secret_literal_survives(self):
         import rehearse
         gen=self._secret_generation()
@@ -283,10 +295,15 @@ class ProofOfStake(unittest.TestCase):
             r.capture_restart_window(1,'2026-11-04T10:00:00.000000Z',5)
         self.assertFalse((r.evidence/'pod-restart-logs').exists(),'fail closed: nothing is written')
         self.assertTrue(any('NOT kept' in m for k,m in calls if k=='say'))
-        Fake2,_=self._capture_fake({}); r2=Fake2(None)   # no generation: nothing to scan (never the working directory)
+        Fake2,calls2=self._capture_fake({}); r2=Fake2(None)   # no generation: nothing is scanned (never the working directory) and nothing is written
         with patch('rehearse.known_secrets',side_effect=AssertionError('no generation, no scan')):
             r2.capture_restart_window(1,'2026-11-04T10:00:00.000000Z',5)
-        self.assertTrue((r2.evidence/'pod-restart-logs'/'validator1-down-5s.log').is_file())
+        self.assertFalse((r2.evidence/'pod-restart-logs').exists())
+        self.assertTrue(any('not kept' in m for k,m in calls2 if k=='say'))
+        Fake3,calls3=self._capture_fake({'root1':'t1 anything'}); r3=Fake3(Path(tempfile.mkdtemp()))   # a generation the scan finds nothing in: fail closed
+        r3.capture_restart_window(1,'2026-11-04T10:00:00.000000Z',5)
+        self.assertFalse((r3.evidence/'pod-restart-logs').exists())
+        self.assertFalse(any(k=='compose' for k,m in calls3),'no log is even read when the scan is incomplete')
     def test_only_the_poa_pod_restart_keeps_the_stop_window_logs(self):
         import rehearse
         kept=[]
