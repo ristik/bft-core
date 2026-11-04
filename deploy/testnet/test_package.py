@@ -1081,7 +1081,7 @@ class LoadGenerator(unittest.TestCase):
             if method=='eth_getTransactionReceipt':
                 self.receipt_calls+=1
                 if self.receipt_calls<=self.receipt_limit: return 429,'{"error": "rate limit"}'
-                return ok({'status':self.status})
+                return ok({'status':self.status} if self.mine else None)
             raise AssertionError(method)
     def run_load(self,node,**kw):
         now=[0.0]
@@ -1109,6 +1109,11 @@ class LoadGenerator(unittest.TestCase):
     def test_rate_limited_submissions_are_counted_and_resent_with_the_same_nonce(self):
         node=self.Node(limit_every=4);s,problems=self.run_load(node)
         self.assertEqual(problems,[]);self.assertGreater(s['rate_limited_429'],0);self.assertEqual(node.sent,[f'raw{i}' for i in range(30)])
+    def test_a_long_run_has_the_time_to_ask_for_every_receipt(self):
+        # on the host 9,596 accepted transfers at 8/s: the receipt deadline ended the checks at 3,617 and the rest read as not mined, with the nonce drained in 2 s
+        node=self.Node();s,problems=self.run_load(node,rate=100,duration=96,ips=4,receipt_wait=180)
+        self.assertEqual((s['accepted'],s['mined_ok'],s['not_mined_in_time']),(9600,9600,0))
+        self.assertEqual(problems,[])
     def test_a_rate_limited_receipt_query_is_counted_and_asked_again_not_a_crash(self):
         # host run, 100/s over 13 addresses: the receipt phase hit the gateway's overall limit and the tool died with the transfers already sent
         node=self.Node(receipt_limit=5);s,problems=self.run_load(node,ips=13,receipt_wait=60)
@@ -1128,6 +1133,7 @@ class LoadGenerator(unittest.TestCase):
     def test_accepted_transfers_that_are_never_mined_fail_the_run(self):
         s,problems=self.run_load(self.Node(mine=False))
         self.assertTrue(any('not mined within' in p for p in problems),problems)
+        self.assertEqual((s['mined_ok'],s['not_mined_in_time']),(0,30),'asked, and the node has no receipt')
     def test_too_few_accepted_fails_the_run(self):
         s,problems=self.run_load(self.Node(),min_accepted=31)
         self.assertTrue(any('only 30 accepted' in p for p in problems),problems)

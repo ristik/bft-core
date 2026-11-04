@@ -89,6 +89,8 @@ def run(client, sender, sign, rate, duration, ips, ip_prefix, recipients, receip
     while int(result(client, 'eth_getTransactionCount', [sender, 'latest'], first), 16) < nonce + len(accepted) and clock() < deadline:
         sleep(1)
     drained = clock() - start - sent_span
+    # the receipts' own deadline: fetching them takes time in proportion to the run, and a long run must not report the ones it had no time to ask about as not mined
+    deadline = clock() + receipt_wait + 2 * len(accepted) / min(8 * max(ips, 1), 80)
     per_second = min(8 * max(ips, 1), 80)   # under the gateway's 100/s overall limit as well as 10/s per address (13 addresses at 8/s was 104/s: the 100/s run on the host died on a 429)
     receipt_limited = 0
     for k, h in enumerate(accepted):
