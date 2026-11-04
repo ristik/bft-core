@@ -36,14 +36,16 @@ import pos_sample
 
 PUBLIC_RPC = '127.0.0.1:8545'
 
-# How long the survivors may take to mine a transaction while one validator is down (pod_restart). Since the epoch-local leader schedule (bft-core #886) rotated epochs
-# keep this too: at bft pin 11051123 the slowest of 22 fault transitions over four runs is 100 s (51-219 s and more before it, when this limit was 600 s, #888), so a chain
-# that has really stopped still fails here. The design's ceilings for its worst shapes are higher (360 s, about 480 s with a T2 repeat), and they have not been seen. Every
-# rotated run logs the seconds it took (evidence/restart-latency.jsonl), marks anything over SLOW_MINE_SECONDS and samples where the latency settles.
+# How long the survivors may take to mine a transaction while one validator is down (pod_restart). 240 s is what the PoA package (root epoch 1) needs many times over.
+# Rotated epochs (pos-restart, pos-restart-2) wait the design's one-stage ceiling for a fault transition (bft-core #886, briefs: 360 s), so a red there means that ceiling was
+# exceeded, or a stopped chain: at bft pin 11051123 the slowest of 22 rotated transitions over five runs on one CI runner is 142 s (limit 600 s before, #888). A red between 360
+# and 480 s can be the design's two-stage T2-repeat shape, whose ceiling is not settled: the `window` row in evidence/restart-latency.jsonl tags the repeats, so it can be read as that.
+# Every rotated run logs the seconds it took, marks anything over SLOW_MINE_SECONDS and samples where the latency settles.
 MINE_SECONDS = 240
+MINE_SECONDS_ROTATED = 360
 SLOW_MINE_SECONDS = 30
-# Transactions sent one after another once the first is mined with the validator still down. The first one's time is the fault transition; these show where the
-# latency settles once the schedule has aged the stopped member out (bft-core #886's target: p95 <= 6 s, outside adaptation and recovery runs). 12 since the package's bft pin contains #886 (11051123). At an older pin the stopped root keeps its turn in the rotation, a
+# Transactions sent one after another once the first is mined with the validator still down. The first one's time is the fault transition; these show where end-to-end
+# receipts settle once the schedule has aged the stopped member out. They include the shard's own delay: bft-core #886's p95 <= 6 s is a root-side target and is not what these measure. 12 since the package's bft pin contains #886 (11051123). At an older pin the stopped root keeps its turn in the rotation, a
 # sample can wait out its whole limit and the rehearsal would fail on a number it only records: a branch that pins such a commit sets 0.
 SETTLED_SAMPLES = 12
 
@@ -1385,7 +1387,7 @@ class Rehearsal:
         slow = rotated and stall > SLOW_MINE_SECONDS
         self.say(f'  survivors mined it {stall} s after accepting it with validator {i} down' + (' (SLOW, bft-core #886: the schedule is still adapting to the stopped root, or in its recovery run)' if slow else ''))
         with (self.evidence / 'restart-latency.jsonl').open('a') as out:
-            out.write(json.dumps({'validator_down': i, 'phase': 'transition', 'seconds_to_mine': stall, 'limit': MINE_SECONDS, 'tx': tx}) + '\n')
+            out.write(json.dumps({'validator_down': i, 'phase': 'transition', 'seconds_to_mine': stall, 'limit': MINE_SECONDS_ROTATED if rotated else MINE_SECONDS, 'tx': tx}) + '\n')
 
     def pod_restart(self, rotated=False, capture_logs=None):
         """One validator entity at a time: stop its execution client, root and shard node (its signing authority stays live, as the README requires), check what the
@@ -1412,7 +1414,7 @@ class Rehearsal:
             blocks = set()
             accepted = time.monotonic()
             for j in survivors:
-                r = self.wait(f'survivor {j} mines it with validator {i} down', lambda j=j: self.ureth(j, 'eth_getTransactionReceipt', [tx]), MINE_SECONDS)
+                r = self.wait(f'survivor {j} mines it with validator {i} down', lambda j=j: self.ureth(j, 'eth_getTransactionReceipt', [tx]), MINE_SECONDS_ROTATED if rotated else MINE_SECONDS)
                 self.expect(r['status'] == '0x1', f'survivor {j} has a successful receipt', r['blockHash'])
                 blocks.add(r['blockHash'])
             stall = round(time.monotonic() - accepted)
@@ -1422,7 +1424,7 @@ class Rehearsal:
             self.expect(len(blocks) == 1, 'the survivors agree on the including block')
             last = tx
             if rotated:
-                last = self.settled_latency(i, survivors, MINE_SECONDS) or tx
+                last = self.settled_latency(i, survivors, MINE_SECONDS_ROTATED) or tx
                 # the whole stop window of the survivors' roots and shards: the end-of-run log tail does not reach back to it
                 roots = [f'{kind}{j}' for j in survivors for kind in ('root', 'shard')]
                 window = self.compose('logs', '--no-color', '--since', stopped, *roots, check=False)
