@@ -129,11 +129,13 @@ func TestHandoffBundleServeSuffixThenInstallAndInstallThenServe(t *testing.T) {
 	require.NoError(t, err)
 	t.Run("serve suffix install", func(t *testing.T) {
 		cm := stoppedHandoffReplica(t, source)
+		cm.retained = map[types.PartitionShardID]*retainedRequest{{PartitionID: 1}: {}}
 		served, err := cm.HandoffBundle(context.Background(), 2)
 		require.NoError(t, err)
 		require.EqualValues(t, 4, served.Proof.CommitQC.LedgerCommitInfo.RootChainRoundNumber)
 		_, err = cm.InstallEpochGenesis(later.Proof, later.Snapshot, later.Body)
 		require.NoError(t, err)
+		require.Empty(t, cm.retained, "the bundle install drops the retained requests too: no root queue crosses an epoch")
 		retained, err := cm.HandoffBundle(context.Background(), 2)
 		require.NoError(t, err)
 		require.EqualValues(t, 4, retained.Proof.CommitQC.LedgerCommitInfo.RootChainRoundNumber)

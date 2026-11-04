@@ -189,6 +189,7 @@ func (x *ConsensusManager) InstallEpochBundle(incoming handoffdelivery.Bundle) (
 	x.handoffAborts = nil
 	x.handoffMu.Unlock()
 	x.leaderSelector = selector
+	x.retained = nil // the shards resubmit under the successor: no root queue crosses an epoch
 	x.irReqVerifier = reqVerifier
 	x.t2Timeouts = t2Timeouts
 	x.epochAnchor = a

@@ -205,10 +205,10 @@ class ProofOfStake(unittest.TestCase):
         import rehearse
         said=[]
         class Fake(rehearse.Rehearsal):
-            def __init__(self): self.n,self.pods,self.manifest,self.evidence=3,[1],{'faucet_address':'0x'+'11'*20},Path(tempfile.mkdtemp())
+            def __init__(self): self.n,self.pods,self.manifest,self.evidence,self.target=3,[1],{'faucet_address':'0x'+'11'*20},Path(tempfile.mkdtemp()),2
             def say(self,m): said.append(m)
             def expect(self,ok,what,detail=''): assert ok,what
-            def compose(self,*a,**k): return ''
+            def compose(self,*a,**k): return 'a stop window line'
             def http(self,*a,**k): return (503,'')
             def ureth(self,j,method,params=None): return '0x1'
             def raw_tx(self,*a): return '0xraw'
@@ -219,13 +219,93 @@ class ProofOfStake(unittest.TestCase):
                 if 'catches up' in what: raise rehearse.Failure('stop after the mining check')
                 return True
         r=Fake()
-        with self.assertRaises(rehearse.Failure): r.pod_restart(mine_within=rehearse.MINE_SECONDS_ROTATED)   # past the mining wait: the record is written before anything else can fail
+        with patch.object(rehearse,'SETTLED_SAMPLES',12),self.assertRaises(rehearse.Failure): r.pod_restart(mine_within=rehearse.MINE_SECONDS_ROTATED)   # past the mining wait: the record is written before anything else can fail
         rows=[json.loads(x) for x in (r.evidence/'restart-latency.jsonl').read_text().splitlines()]
-        self.assertEqual([(x['validator_down'],x['limit'],x['tx']) for x in rows],[(1,rehearse.MINE_SECONDS_ROTATED,'0xtx')])
+        self.assertEqual([(x['validator_down'],x['limit'],x['tx']) for x in rows if x['phase']=='transition'],[(1,rehearse.MINE_SECONDS_ROTATED,'0xtx')])
+        settled=[x for x in rows if x['phase']=='settled']
+        self.assertEqual([x['sample'] for x in settled],list(range(12)),'where the latency settles, the validator still down')
+        self.assertEqual(rows[0]['phase'],'transition')
+        self.assertEqual((r.evidence/'stop-window-2-v1.log').read_text(),'a stop window line')
         self.assertTrue(any('survivors mined it' in m for m in said))
         for limit,stall,note in ((rehearse.MINE_SECONDS,90,False),(rehearse.MINE_SECONDS_ROTATED,90,True),(rehearse.MINE_SECONDS_ROTATED,5,False)):
             said.clear(); r.record_restart_latency(2,stall,limit,'0xt')
             self.assertEqual('#886' in said[0],note,(limit,stall,said))
+    def test_a_restarted_validator_catches_up_to_the_last_settled_sample(self):
+        import rehearse
+        said=[]
+        class Fake(rehearse.Rehearsal):
+            def __init__(self): self.n,self.pods,self.manifest,self.evidence,self.target=3,[1],{'faucet_address':'0x'+'11'*20},Path(tempfile.mkdtemp()),2
+            def say(self,m): said.append(m)
+            def expect(self,ok,what,detail=''): assert ok,what
+            def compose(self,*a,**k): return 'a stop window line'
+            def http(self,*a,**k): return (503,'')
+            def ureth(self,j,method,params=None): return '0x1'
+            def raw_tx(self,*a): return '0xraw'
+            def cast_run(self,*a): return '0xtx'
+            def inner_reply(self,*a): return {'result':'0xtx'}
+            def wait(self,what,probe,seconds):
+                if 'mines it' in what: return {'status':'0x1','blockHash':'0xb'}
+                if 'catches up to the last' in what:
+                    self.last=probe()
+                    raise rehearse.Failure('stop after the catch-up wait')
+                if 'catches up' in what: return {'blockHash':'0xb'}
+                return True
+        r=Fake()
+        with patch.object(rehearse,'SETTLED_SAMPLES',12),self.assertRaises(rehearse.Failure): r.pod_restart(mine_within=rehearse.MINE_SECONDS_ROTATED)   # past the mining waittten before anything else can fail
+        self.assertEqual(r.last,'0x1','the gateway reads the sender nonce from the restarted validator: it must hold the last settled sample first')
+    def settled_fake(self,replies):
+        import rehearse
+        class Fake(rehearse.Rehearsal):
+            def __init__(self): self.manifest,self.evidence,self.sent={'faucet_address':'0x'+'11'*20},Path(tempfile.mkdtemp()),[]
+            def say(self,m): pass
+            def expect(self,ok,what,detail=''):
+                if not ok: raise rehearse.Failure(what+' '+detail)
+            def ureth(self,j,method,params=None): return None if method=='eth_getTransactionReceipt' else '0x1'
+            def raw_tx(self,*a): return '0xraw'
+            def cast_run(self,*a): return '0xtx'
+            def inner_reply(self,url,method,params=()):
+                self.sent.append(url)
+                return replies(url)
+            def wait(self,what,probe,seconds): return True
+        return Fake()
+    def test_a_settled_sample_goes_to_every_survivor(self):
+        import rehearse
+        r=self.settled_fake(lambda url:{'result':'0xtx'})
+        with patch.object(rehearse,'SETTLED_SAMPLES',2): self.assertEqual(r.settled_latency(2,[1,3,4],600),'0xtx')
+        self.assertEqual(r.sent,[f'http://ureth{j}:8545' for j in (1,3,4)]*2,'the validators have no peers: a pool not sent it never holds it')
+    def test_a_refused_settled_sample_fails_at_once(self):
+        import rehearse
+        r=self.settled_fake(lambda url:{'error':{'message':'replacement underpriced'}} if 'ureth3' in url else {'result':'0xtx'})
+        with patch.object(rehearse,'SETTLED_SAMPLES',2),self.assertRaisesRegex(rehearse.Failure,'survivor 3 accepts'): r.settled_latency(2,[1,3,4],600)
+        self.assertEqual(r.sent,[f'http://ureth{j}:8545' for j in (1,3)],'not after a 600 s wait for its receipt')
+    def test_settled_samples_are_off_until_the_pin_has_886(self):
+        import rehearse
+        said=[]
+        class Fake(rehearse.Rehearsal):
+            def __init__(self): self.n,self.pods,self.manifest,self.evidence,self.target=3,[1],{'faucet_address':'0x'+'11'*20},Path(tempfile.mkdtemp()),2
+            def say(self,m): said.append(m)
+            def expect(self,ok,what,detail=''): assert ok,what
+            def compose(self,*a,**k): return 'a stop window line'
+            def http(self,*a,**k): return (503,'')
+            def ureth(self,j,method,params=None):
+                if method=='eth_getTransactionReceipt': self.asked=params[0]
+                return '0x1'
+            def raw_tx(self,*a): return '0xraw'
+            def cast_run(self,*a): return '0xtx'
+            def inner_reply(self,*a): return {'result':'0xtx'}
+            def wait(self,what,probe,seconds):
+                if 'mines it' in what: return {'status':'0x1','blockHash':'0xb'}
+                if 'catches up to the last' in what:
+                    self.last=probe()
+                    raise rehearse.Failure('stop after the catch-up wait')
+                if 'catches up' in what: return {'blockHash':'0xb'}
+                return True
+        r=Fake()
+        with self.assertRaises(rehearse.Failure): r.pod_restart(mine_within=rehearse.MINE_SECONDS_ROTATED)   # past the mining waittten before anything else can fail
+        self.assertEqual(rehearse.SETTLED_SAMPLES,0,'at a pin without #886 a sample can wait out its whole limit (run 41737297875)')
+        rows=[json.loads(x) for x in (r.evidence/'restart-latency.jsonl').read_text().splitlines()]
+        self.assertEqual([x['phase'] for x in rows],['transition'],'no samples')
+        self.assertEqual(r.asked,'0xtx','the wait falls back to the transition transaction')
     def _secret_generation(self):
         gen=Path(tempfile.mkdtemp())
         (gen/'faucet-secrets').mkdir(); (gen/'faucet-secrets'/'password').write_text('hunter2-faucet-password\n')
@@ -310,7 +390,7 @@ class ProofOfStake(unittest.TestCase):
         import rehearse
         kept=[]
         class Fake(rehearse.Rehearsal):
-            def __init__(self): self.n,self.pods,self.manifest,self.evidence=3,[1],{'faucet_address':'0x'+'11'*20},Path(tempfile.mkdtemp())
+            def __init__(self): self.n,self.pods,self.manifest,self.evidence,self.target=3,[1],{'faucet_address':'0x'+'11'*20},Path(tempfile.mkdtemp()),2
             def say(self,*a): pass
             def expect(self,ok,what,detail=''): assert ok,what
             def compose(self,*a,**k): return ''

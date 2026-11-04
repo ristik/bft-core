@@ -46,6 +46,11 @@ PUBLIC_RPC = '127.0.0.1:8545'
 MINE_SECONDS = 240
 MINE_SECONDS_ROTATED = 600
 SLOW_MINE_SECONDS = 30
+# Transactions sent one after another once the first is mined with the validator still down. The first one's time is the fault transition; these show where the
+# latency settles once the schedule has aged the stopped member out (bft-core #886's target: p95 <= 6 s, outside adaptation and recovery runs).
+# Settled-latency samples after a restart's fault transition. 0 until the package's bft pin contains #886: at an older pin the stopped root keeps its turn in the rotation, a
+# sample can wait out its whole limit, and the rehearsal would fail on a number it only records. The pin bump sets 12 (the milestone runs set it on their own branch).
+SETTLED_SAMPLES = 0
 
 # bft-core #886 (epoch-1 note): the PoA pod-restart samples are bimodal (a few seconds, or 25-41 s) and the end-of-run compose logs are of a later generation, so nothing
 # says why. The stage therefore keeps the consensus logs of each stop window (below). They are uploaded with the evidence of a PUBLIC repository, so: (1) only the root and
@@ -1246,6 +1251,32 @@ class Rehearsal:
         self.expect(all(isinstance(b, int) for b in blocks), 'the gateway block was readable in every sample', str([x['gateway'] for x in samples][:2]))
         self.expect(blocks[-1] > blocks[0], 'the execution chain\'s block moved between the first and the last sample (an idle chain still produces blocks)', str(blocks))
 
+    def send_to_survivors(self, survivors, raw, tx):
+        """The gateway's fan-out with a validator down, each reply checked. The validators have no peers, so a pool that is not sent a transaction never holds it: sent to one
+        survivor it waits for that survivor's turn to lead."""
+        for j in survivors:
+            reply = self.inner_reply(f'http://ureth{j}:8545', 'eth_sendRawTransaction', [raw])
+            error = str(reply.get('error', '')).lower()
+            # "nonce too low" is acceptance only when this survivor already holds the transaction's receipt: the sends are sequential and a fast block can include it first
+            known = 'already known' in error or ('nonce too low' in error and self.ureth(j, 'eth_getTransactionReceipt', [tx]) is not None)
+            self.expect(reply.get('result') == tx or known, f'survivor {j} accepts the transaction', json.dumps(reply)[:200])
+
+    def settled_latency(self, i, survivors, mine_within):
+        """With validator i still down and the fault transition over: SETTLED_SAMPLES transactions, one at a time, each timed from its acceptance to the first survivor's receipt.
+        Rounds pass while they run, so the later ones are past the history lag. Recorded, phase 'settled', never judged here: the numbers go to the #886 report."""
+        sender, to = self.manifest['faucet_address'], '0x' + '44' * 20
+        tx = None
+        for k in range(SETTLED_SAMPLES):
+            nonce = int(self.ureth(survivors[0], 'eth_getTransactionCount', [sender, 'latest']), 16)
+            raw = self.raw_tx(to, nonce, int(self.ureth(survivors[0], 'eth_gasPrice'), 16))
+            tx = self.cast_run('keccak', raw)
+            self.send_to_survivors(survivors, raw, tx)
+            accepted = time.monotonic()
+            self.wait(f'survivor {survivors[0]} mines settled sample {k}', lambda: self.ureth(survivors[0], 'eth_getTransactionReceipt', [tx]), mine_within)
+            with (self.evidence / 'restart-latency.jsonl').open('a') as out:
+                out.write(json.dumps({'validator_down': i, 'phase': 'settled', 'sample': k, 'seconds_to_mine': round(time.monotonic() - accepted, 1), 'tx': tx}) + '\n')
+        return tx
+
     @staticmethod
     def utc_stamp(plus=0):
         """An RFC 3339 UTC time with microseconds (what `docker compose logs --since/--until` takes)."""
@@ -1287,7 +1318,7 @@ class Rehearsal:
         slow = mine_within > MINE_SECONDS and stall > SLOW_MINE_SECONDS
         self.say(f'  survivors mined it {stall} s after accepting it with validator {i} down' + (f' (SLOW, bft-core #886: a stopped root is elected leader again every {self.n}th round of a handoff epoch)' if slow else ''))
         with (self.evidence / 'restart-latency.jsonl').open('a') as out:
-            out.write(json.dumps({'validator_down': i, 'seconds_to_mine': stall, 'limit': mine_within, 'tx': tx}) + '\n')
+            out.write(json.dumps({'validator_down': i, 'phase': 'transition', 'seconds_to_mine': stall, 'limit': mine_within, 'tx': tx}) + '\n')
 
     def pod_restart(self, mine_within=MINE_SECONDS, capture_logs=None):
         """One validator entity at a time: stop its execution client, root and shard node (its signing authority stays live, as the README requires), check what the
@@ -1300,6 +1331,7 @@ class Rehearsal:
             survivors = [j for j in range(1, self.n + 1) if j != i]
             window_start = self.utc_stamp()
             self.say(f'  stopping validator {i}: {" ".join(names)}')
+            stopped = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec='seconds').replace('+00:00', 'Z')
             self.compose('stop', *names)
             self.wait('the public gateway refuses while a validator is down (fail closed)', lambda: self.http(PUBLIC_RPC, 'GET', '/healthz')[0] == 503, 120)
             self.expect(True, f'validator {i} down: the public gateway fails closed (503), no partial broadcast')
@@ -1309,12 +1341,7 @@ class Rehearsal:
             # the hash is the transaction's own (keccak of the raw bytes), not what a node answers: a survivor the transaction has already reached by gossip answers
             # "already known" with no result, which is acceptance of the same transaction; "nonce too low" counts only with the receipt (below); any other error is a refusal
             tx = self.cast_run('keccak', raw)
-            for j in survivors:
-                reply = self.inner_reply(f'http://ureth{j}:8545', 'eth_sendRawTransaction', [raw])
-                error = str(reply.get('error', '')).lower()
-                # "nonce too low" is acceptance only when this survivor already holds the transaction's receipt: the sends are sequential and a fast block can include it first
-                known = 'already known' in error or ('nonce too low' in error and self.ureth(j, 'eth_getTransactionReceipt', [tx]) is not None)
-                self.expect(reply.get('result') == tx or known, f'survivor {j} accepts the transaction', json.dumps(reply)[:200])
+            self.send_to_survivors(survivors, raw, tx)
             self.say(f'  the {len(survivors)} survivors accept transaction {tx}')
             blocks = set()
             accepted = time.monotonic()
@@ -1327,10 +1354,18 @@ class Rehearsal:
             if capture_logs:
                 self.capture_restart_window(i, window_start, stall)
             self.expect(len(blocks) == 1, 'the survivors agree on the including block')
+            last = tx
+            if mine_within > MINE_SECONDS:
+                last = self.settled_latency(i, survivors, mine_within) or tx
+                # the whole stop window of the survivors' roots and shards: the end-of-run log tail does not reach back to it
+                roots = [f'{kind}{j}' for j in survivors for kind in ('root', 'shard')]
+                (self.evidence / f'stop-window-{self.target}-v{i}.log').write_text(self.compose('logs', '--no-color', '--since', stopped, *roots, check=False))
             self.say(f'  starting validator {i}')
             self.compose('start', *names)
             r = self.wait(f'validator {i} catches up to the transaction mined without it', lambda: self.ureth(i, 'eth_getTransactionReceipt', [tx]), 300)
             self.expect(r['blockHash'] in blocks, f'validator {i} has the same block after restart', r['blockHash'])
+            # the gateway reads the sender's nonce from a validator: wait until the restarted one has everything mined without it
+            self.wait(f'validator {i} catches up to the last transaction mined without it', lambda: self.ureth(i, 'eth_getTransactionReceipt', [last]), 300)
             self.wait('the public gateway is healthy again', lambda: self.http(PUBLIC_RPC, 'GET', '/healthz')[0] == 200, 120)
             receipt = json.loads(self.send_via_gateway(self.gen / 'faucet-secrets', '0x' + '33' * 20))
             self.expect(receipt['status'] == '0x1', f'a transaction through the public gateway succeeds after validator {i} rejoined', receipt['transactionHash'])
