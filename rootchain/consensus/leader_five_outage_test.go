@@ -72,7 +72,7 @@ func fiveManagerOutage(t *testing.T, dead string, names []string) {
 		require.NotEqual(t, c.id(dead), got, "the absent member is selected outside its recovery run: round %d", r)
 	}
 
-	// shard certifications: each request goes to a live ingress root that does not lead next
+	// shard certifications: each request goes to the first live root that accepts it, which may lead next and then buffers it itself
 	var rounds []uint64
 	var seconds []float64
 	lastUC := func(name string) uint64 {
