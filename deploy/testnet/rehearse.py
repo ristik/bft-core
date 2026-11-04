@@ -44,10 +44,10 @@ PUBLIC_RPC = '127.0.0.1:8545'
 MINE_SECONDS = 240
 MINE_SECONDS_ROTATED = 360
 SLOW_MINE_SECONDS = 30
-# Transactions sent one after another once the first is mined with the validator still down. The first one's time is the fault transition; these show where end-to-end
-# receipts settle once the schedule has aged the stopped member out. They include the shard's own delay: bft-core #886's p95 <= 6 s is a root-side target and is not what these measure. 12 since the package's bft pin contains #886 (11051123). At an older pin the stopped root keeps its turn in the rotation, a
+# Transactions sent one after another once the first is mined with the validator still down. The first one's time is the fault transition; these show end-to-end receipts
+# from then on: the first ones can still be in the adaptation burst, the later ones are past it, and `since_stop` on each row tells them apart. They include the shard's own delay: bft-core #886's p95 <= 6 s is a root-side target and is not what these measure. 12 since the package's bft pin contains #886 (11051123). At an older pin the stopped root keeps its turn in the rotation, a
 # sample can wait out its whole limit and the rehearsal would fail on a number it only records: a branch that pins such a commit sets 0.
-SETTLED_SAMPLES = 12
+AFTER_TRANSITION_SAMPLES = 12
 
 # bft-core #886 (epoch-1 note): the PoA pod-restart samples are bimodal (a few seconds, or 25-41 s) and the end-of-run compose logs are of a later generation, so nothing
 # says why. The stage therefore keeps the consensus logs of each stop window (below). They are uploaded with the evidence of a PUBLIC repository, so: (1) only the root and
@@ -1304,20 +1304,22 @@ class Rehearsal:
             known = 'already known' in error or ('nonce too low' in error and self.ureth(j, 'eth_getTransactionReceipt', [tx]) is not None)
             self.expect(reply.get('result') == tx or known, f'survivor {j} accepts the transaction', json.dumps(reply)[:200])
 
-    def settled_latency(self, i, survivors, mine_within):
-        """With validator i still down and the fault transition over: SETTLED_SAMPLES transactions, one at a time, each timed from its acceptance to the first survivor's receipt.
-        Rounds pass while they run, so the later ones are past the history lag. Recorded, phase 'settled', never judged here: the numbers go to the #886 report."""
+    def after_transition_latency(self, i, survivors, mine_within, stopped_at):
+        """With validator i still down: AFTER_TRANSITION_SAMPLES transactions, one at a time, each timed from its acceptance to the first survivor's receipt. The first ones can still be in
+        the adaptation burst: they start when the transition transaction mines, which can be 37 s after its acceptance with the burst running about 80 s more, and a T2 repeat in
+        the burst took one sample 81.7 s (bft-core #886, run 41862942889). So phase 'after_transition' says only when they start, and runs before this name call it
+        'settled'. Each row's `since_stop` and `accepted_at` let the report split them. Recorded, never judged here: the numbers go to the #886 report."""
         sender, to = self.manifest['faucet_address'], '0x' + '44' * 20
         tx = None
-        for k in range(SETTLED_SAMPLES):
+        for k in range(AFTER_TRANSITION_SAMPLES):
             nonce = int(self.ureth(survivors[0], 'eth_getTransactionCount', [sender, 'latest']), 16)
             raw = self.raw_tx(to, nonce, int(self.ureth(survivors[0], 'eth_gasPrice'), 16))
             tx = self.cast_run('keccak', raw)
             self.send_to_survivors(survivors, raw, tx)
-            accepted = time.monotonic()
-            self.wait(f'survivor {survivors[0]} mines settled sample {k}', lambda: self.ureth(survivors[0], 'eth_getTransactionReceipt', [tx]), mine_within)
+            accepted, accepted_at = time.monotonic(), self.utc_stamp()
+            self.wait(f'survivor {survivors[0]} mines after-transition sample {k}', lambda: self.ureth(survivors[0], 'eth_getTransactionReceipt', [tx]), mine_within)
             with (self.evidence / 'restart-latency.jsonl').open('a') as out:
-                out.write(json.dumps({'validator_down': i, 'phase': 'settled', 'sample': k, 'seconds_to_mine': round(time.monotonic() - accepted, 1), 'tx': tx}) + '\n')
+                out.write(json.dumps({'validator_down': i, 'phase': 'after_transition', 'sample': k, 'seconds_to_mine': round(time.monotonic() - accepted, 1), 'since_stop': round(accepted - stopped_at, 1), 'accepted_at': accepted_at, 'tx': tx}) + '\n')
         return tx
 
     @staticmethod
@@ -1401,6 +1403,7 @@ class Rehearsal:
             window_start = self.utc_stamp()
             self.say(f'  stopping validator {i}: {" ".join(names)}')
             stopped = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec='seconds').replace('+00:00', 'Z')
+            stopped_at = time.monotonic()
             self.compose('stop', *names)
             self.wait('the public gateway refuses while a validator is down (fail closed)', lambda: self.http(PUBLIC_RPC, 'GET', '/healthz')[0] == 503, 120)
             self.expect(True, f'validator {i} down: the public gateway fails closed (503), no partial broadcast')
@@ -1424,7 +1427,7 @@ class Rehearsal:
             self.expect(len(blocks) == 1, 'the survivors agree on the including block')
             last = tx
             if rotated:
-                last = self.settled_latency(i, survivors, MINE_SECONDS_ROTATED) or tx
+                last = self.after_transition_latency(i, survivors, MINE_SECONDS_ROTATED, stopped_at) or tx
                 # the whole stop window of the survivors' roots and shards: the end-of-run log tail does not reach back to it
                 roots = [f'{kind}{j}' for j in survivors for kind in ('root', 'shard')]
                 window = self.compose('logs', '--no-color', '--since', stopped, *roots, check=False)

@@ -219,18 +219,19 @@ class ProofOfStake(unittest.TestCase):
                 if 'catches up' in what: raise rehearse.Failure('stop after the mining check')
                 return True
         r=Fake(); r.gen=self._secret_generation()
-        with patch.object(rehearse,'SETTLED_SAMPLES',12),self.assertRaises(rehearse.Failure): r.pod_restart(rotated=True)   # past the mining wait: the record is written before anything else can fail
+        with patch.object(rehearse,'AFTER_TRANSITION_SAMPLES',12),self.assertRaises(rehearse.Failure): r.pod_restart(rotated=True)   # past the mining wait: the record is written before anything else can fail
         rows=[json.loads(x) for x in (r.evidence/'restart-latency.jsonl').read_text().splitlines()]
         self.assertEqual([(x['validator_down'],x['limit'],x['tx']) for x in rows if x['phase']=='transition'],[(1,rehearse.MINE_SECONDS_ROTATED,'0xtx')])
-        settled=[x for x in rows if x['phase']=='settled']
-        self.assertEqual([x['sample'] for x in settled],list(range(12)),'where the latency settles, the validator still down')
+        samples=[x for x in rows if x['phase']=='after_transition']
+        self.assertEqual([x['sample'] for x in samples],list(range(12)),'after the transition transaction, the validator still down')
+        self.assertTrue(all(0<=x['since_stop']<60 for x in samples),'timed from this stop: the fake waits for nothing')
         self.assertEqual(rows[0]['phase'],'transition')
         self.assertEqual((r.evidence/'stop-window-2-v1.log').read_text(),'a stop window line\n')
         self.assertTrue(any('survivors mined it' in m for m in said))
         for rotated,stall,note in ((False,90,False),(True,90,True),(True,5,False)):
             said.clear(); r.record_restart_latency(2,stall,rotated,'0xt')
             self.assertEqual('#886' in said[0],note,(rotated,stall,said))
-    def test_a_restarted_validator_catches_up_to_the_last_settled_sample(self):
+    def test_a_restarted_validator_catches_up_to_the_last_after_transition_sample(self):
         import rehearse
         said=[]
         class Fake(rehearse.Rehearsal):
@@ -256,10 +257,10 @@ class ProofOfStake(unittest.TestCase):
                 if 'catches up' in what: return {'blockHash':'0xb'}
                 return True
         r=Fake()
-        with patch.object(rehearse,'SETTLED_SAMPLES',12),self.assertRaises(rehearse.Failure): r.pod_restart(rotated=True)   # past the mining wait
-        self.assertEqual(r.asked,r.hashes[-1],'the last settled sample, not the transition transaction: the gateway reads the nonce from the restarted validator')
+        with patch.object(rehearse,'AFTER_TRANSITION_SAMPLES',12),self.assertRaises(rehearse.Failure): r.pod_restart(rotated=True)   # past the mining wait
+        self.assertEqual(r.asked,r.hashes[-1],'the last after-transition sample, not the transition transaction: the gateway reads the nonce from the restarted validator')
         self.assertGreater(len(r.hashes),1)
-    def settled_fake(self,replies):
+    def after_transition_fake(self,replies):
         import rehearse
         class Fake(rehearse.Rehearsal):
             def __init__(self): self.manifest,self.evidence,self.sent={'faucet_address':'0x'+'11'*20},Path(tempfile.mkdtemp()),[]
@@ -415,17 +416,27 @@ class ProofOfStake(unittest.TestCase):
             for n,line in enumerate((here/name).read_text().splitlines(),1):
                 if 'head + body' in line: continue   # capture_restart_window, which has redacted it
                 self.assertFalse(re.search(r"\.log'?\)\.write_text\(",line),f'{name}:{n} writes a log raw: {line.strip()}')
-    def test_a_settled_sample_goes_to_every_survivor(self):
+    def test_an_after_transition_sample_goes_to_every_survivor(self):
         import rehearse
-        r=self.settled_fake(lambda url:{'result':'0xtx'})
-        with patch.object(rehearse,'SETTLED_SAMPLES',2): self.assertEqual(r.settled_latency(2,[1,3,4],600),'0xtx')
+        r=self.after_transition_fake(lambda url:{'result':'0xtx'})
+        with patch.object(rehearse,'AFTER_TRANSITION_SAMPLES',2): self.assertEqual(r.after_transition_latency(2,[1,3,4],600,0),'0xtx')
         self.assertEqual(r.sent,[f'http://ureth{j}:8545' for j in (1,3,4)]*2,'the validators have no peers: a pool not sent it never holds it')
-    def test_a_refused_settled_sample_fails_at_once(self):
+    def test_an_after_transition_row_says_when_its_sample_was_accepted(self):
+        import datetime,rehearse,time
+        r=self.after_transition_fake(lambda url:{'result':'0xtx'})
+        before=datetime.datetime.now(datetime.timezone.utc)
+        with patch.object(rehearse,'AFTER_TRANSITION_SAMPLES',2): r.after_transition_latency(2,[1,3,4],600,time.monotonic()-100)
+        rows=[json.loads(x) for x in (r.evidence/'restart-latency.jsonl').read_text().splitlines()]
+        self.assertEqual([x['sample'] for x in rows],[0,1])
+        for row in rows:
+            self.assertTrue(100<=row['since_stop']<160,row)   # #886: the report splits the samples still in the adaptation burst on this
+            self.assertLess((datetime.datetime.fromisoformat(row['accepted_at'].replace('Z','+00:00'))-before).total_seconds(),60,row)
+    def test_a_refused_after_transition_sample_fails_at_once(self):
         import rehearse
-        r=self.settled_fake(lambda url:{'error':{'message':'replacement underpriced'}} if 'ureth3' in url else {'result':'0xtx'})
-        with patch.object(rehearse,'SETTLED_SAMPLES',2),self.assertRaisesRegex(rehearse.Failure,'survivor 3 accepts'): r.settled_latency(2,[1,3,4],600)
+        r=self.after_transition_fake(lambda url:{'error':{'message':'replacement underpriced'}} if 'ureth3' in url else {'result':'0xtx'})
+        with patch.object(rehearse,'AFTER_TRANSITION_SAMPLES',2),self.assertRaisesRegex(rehearse.Failure,'survivor 3 accepts'): r.after_transition_latency(2,[1,3,4],600,0)
         self.assertEqual(r.sent,[f'http://ureth{j}:8545' for j in (1,3)],'not after a 600 s wait for its receipt')
-    def test_settled_samples_are_off_until_the_pin_has_886(self):
+    def test_after_transition_samples_are_off_until_the_pin_has_886(self):
         import rehearse
         said=[]
         class Fake(rehearse.Rehearsal):
@@ -448,8 +459,8 @@ class ProofOfStake(unittest.TestCase):
                 if 'catches up' in what: return {'blockHash':'0xb'}
                 return True
         r=Fake()
-        with patch.object(rehearse,'SETTLED_SAMPLES',0),self.assertRaises(rehearse.Failure): r.pod_restart(rotated=True)   # past the mining wait: the record is written before anything else can fail
-        self.assertEqual(rehearse.SETTLED_SAMPLES,12,'the pin contains #886: twelve settled samples (0 at a pin without it: run 41737297875)')
+        with patch.object(rehearse,'AFTER_TRANSITION_SAMPLES',0),self.assertRaises(rehearse.Failure): r.pod_restart(rotated=True)   # past the mining wait: the record is written before anything else can fail
+        self.assertEqual(rehearse.AFTER_TRANSITION_SAMPLES,12,'the pin contains #886: twelve after-transition samples (0 at a pin without it: run 41737297875)')
         rows=[json.loads(x) for x in (r.evidence/'restart-latency.jsonl').read_text().splitlines()]
         self.assertEqual([x['phase'] for x in rows],['transition','window'],'no samples')
         self.assertEqual(r.asked,'0xtx','the wait falls back to the transition transaction')
