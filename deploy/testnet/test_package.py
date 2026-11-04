@@ -233,13 +233,15 @@ class ProofOfStake(unittest.TestCase):
         (gen/'validator1'/'auth').mkdir(parents=True); (gen/'validator1'/'auth'/'client.cred').write_text('CREDENTIALBYTES0123456789abcdef\n')
         (gen/'validator1'/'root').mkdir(); (gen/'validator1'/'root'/'keys.json').write_text(json.dumps({'signingKey':{'privateKey':'deadbeef'*8,'publicKey':'pub'+'0'*30}}))
         (gen/'validator1'/'jwt').mkdir(); (gen/'validator1'/'jwt'/'jwt.hex').write_text('9f'*32+'\n')   # the Engine JWT: mounted by the root, the shard and ureth
+        (gen/'validator1'/'jwt'/'engine-note.txt').write_text('ONLYTHEDIRECTORYRULECATCHESTHIS\n')   # a file in a secret directory is a secret whatever its name
+        (gen/'validator1'/'root'/'jwt.hex.bak').write_text('ONLYTHENAMERULECATCHESTHIS0123\n')   # a secret by its name wherever it is
         (gen/'validator1'/'data').mkdir(); (gen/'validator1'/'data'/'password').write_text('inside-a-data-dir-never-read')
         (gen/'manifest.json').write_text(json.dumps({'validators':3}))
         return gen
     def test_the_secret_files_of_a_generation_are_found_and_public_fields_are_not(self):
         import rehearse
         found=rehearse.known_secrets(self._secret_generation())
-        for secret in ('hunter2-faucet-password','c0ffee'*8,'CREDENTIALBYTES0123456789abcdef','deadbeef'*8,'9f'*32):
+        for secret in ('hunter2-faucet-password','c0ffee'*8,'CREDENTIALBYTES0123456789abcdef','deadbeef'*8,'9f'*32,'ONLYTHEDIRECTORYRULECATCHESTHIS','ONLYTHENAMERULECATCHESTHIS0123'):
             self.assertIn(secret,found)
         self.assertNotIn('pub'+'0'*30,found,'a public key field is not a secret')
         self.assertNotIn('a'*40,found,'the keystore address is public')
