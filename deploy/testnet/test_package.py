@@ -262,7 +262,9 @@ class ProofOfStake(unittest.TestCase):
             def expect(self,ok,what,detail=''): assert ok,what
             def compose(self,*a,**k): return 'a stop window line'
             def http(self,*a,**k): return (503,'')
-            def ureth(self,j,method,params=None): return '0x1'
+            def ureth(self,j,method,params=None):
+                if method=='eth_getTransactionReceipt': self.asked=params[0]
+                return '0x1'
             def raw_tx(self,*a): return '0xraw'
             def cast_run(self,*a): return '0xtx'
             def inner_reply(self,*a): return {'result':'0xtx'}
@@ -278,7 +280,7 @@ class ProofOfStake(unittest.TestCase):
         self.assertEqual(rehearse.SETTLED_SAMPLES,0,'at a pin without #886 a sample can wait out its whole limit (run 41737297875)')
         rows=[json.loads(x) for x in (r.evidence/'restart-latency.jsonl').read_text().splitlines()]
         self.assertEqual([x['phase'] for x in rows],['transition'],'no samples')
-        self.assertEqual(r.last,'0x1','the wait falls back to the transition transaction')
+        self.assertEqual(r.asked,'0xtx','the wait falls back to the transition transaction')
     def test_pos_owner_names_the_revert_selector_it_expects(self):
         import json,rehearse,pos_owner
         class Fake:   # the two helpers it needs: a selector table and an eth_call that fails with a given revert data
