@@ -168,7 +168,7 @@ def pos_join_heavy(r):
     committee of five is in place. The election's selection seeds the committee with the incumbents, then outsiders up to nTarget (6), and judges the whole against the
     incumbent committee: five unit weights to five unit weights and one of weight 2 is D = 2*2/7 = 0.571 > 1/2 (the testnet bound, owner decision 19), so the election records
     NoCandidate with the reason WeightChurn and the committee of five stays. No handoff is attempted and nothing is installed: this is a refusal, recorded with the contract's
-    own reason. Run after pos-join-signs/pos-restart of the same run. The second joiner needs no signing authority (no handoff names it): its EVM key is a local key."""
+    own reason. Run after pos-join-signs and before pos-restart of the same run. The second joiner needs no signing authority (no handoff names it): its EVM key is a local key."""
     election, custody = (json.loads((r.gen / 'network' / 'pos-deployment.json').read_text())[k] for k in ('election', 'custody'))
     r.expect(r.n == 5 and not r.joiners, 'precondition: five members, no joiner pending (the join ran first)')
     transport = handoff_ops.DockerTransport(r.gen)

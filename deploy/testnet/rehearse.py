@@ -1550,7 +1550,7 @@ def main():
         p.add_argument('--reset-' + name, help='the reset stage passes this to generate.py as --' + name + ' (--out: the new generation directory)')
     p.add_argument('--ubft', type=Path, help='the pinned ubft binary, for the handoff stages (they write and read files with it)')
     p.add_argument('--restore-pin', type=Path, help='scripts/h4-restore-pin built from the pinned source: the joiner\'s shard node is restored from a survivor\'s archive with it')
-    p.add_argument('--stages', default=','.join(s for s, _ in STAGES), help='comma separated, in order (the default is the PoA stages; POS_STAGES are named explicitly)')
+    p.add_argument('--stages', default=','.join(s for s, _ in STAGES), help='comma separated; selects stages, which always run in the order of STAGES + POS_STAGES (the default is the PoA stages; POS_STAGES are named explicitly)')
     a = p.parse_args()
     r = Rehearsal(a.generation, a.evidence, a.cast)
     r.ubft = a.ubft.resolve() if a.ubft else None
