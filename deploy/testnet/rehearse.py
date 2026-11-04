@@ -51,6 +51,11 @@ SLOW_MINE_SECONDS = 30
 # Settled-latency samples after a restart's fault transition. 0 until the package's bft pin contains #886: at an older pin the stopped root keeps its turn in the rotation, a
 # sample can wait out its whole limit, and the rehearsal would fail on a number it only records. The pin bump sets 12 (the milestone runs set it on their own branch).
 SETTLED_SAMPLES = 12
+
+
+def next_open_result(open_result, done):
+    """The open result if it is one a handoff can still use: not none, and not the one the last handoff already used."""
+    return open_result if open_result != '0x' + '00' * 32 and open_result != done else None
 FAUCET = '127.0.0.1:8088'
 PROXY_IPS = ('203.0.113.', '198.51.100.')   # documentation ranges: the client addresses the nginx in front would have set in X-Forwarded-For
 
@@ -576,6 +581,7 @@ class Rehearsal:
         zero = '0x' + '00' * 32
         result = self.view_text(election, 'openResult()(bytes32)').strip()
         self.expect(result != zero, 'the election has a reserved result (run pos-election first)')
+        (work / f'result-epoch-{self.target}.txt').write_text(result + '\n')
         ids = self.entity_ids()
         # 1 the next root trust base (a joiner's authority had to start at its scope, so pos-joiner made it already: the same inputs)
         if self.joiners and (work / f'trust-base-epoch{self.target}.json').exists():
@@ -801,9 +807,10 @@ class Rehearsal:
         transport = handoff_ops.DockerTransport(self.gen)
         self.expect(all(self.root_epoch(i, transport) == 2 for i in range(1, self.n + 1)), 'every root certifies at epoch 2 (run the first handoff first)')
         deployment = json.loads((self.gen / 'network' / 'pos-deployment.json').read_text())
-        election, zero = deployment['election'], '0x' + '00' * 32
-        done = self.view_text(election, 'openResult()(bytes32)').strip()
-        self.say(f'  open result at the start: {done} (the first handoff\'s result is {"still open" if done != zero else "closed"})')
+        election = deployment['election']
+        # the handoff just made recorded its result; an open result that is another one is already the next (a slow pos-restart can outlast the cadence)
+        done = (self.gen / 'network' / 'handoff' / 'result-epoch-2.txt').read_text().strip()
+        self.say(f'  the first handoff\'s result: {done}; open result at the start: {self.view_text(election, "openResult()(bytes32)").strip()}')
         polls = [0]
         def ack_state():
             # diagnostic (#886): the root's acknowledgementPending says whether the Ack was produced; recordCount against custody's recordCursor says whether it was applied
@@ -816,7 +823,7 @@ class Rehearsal:
                 self.say(f'  ack state: {ack_state()}')
             out = self.view_text(election, 'openResult()(bytes32)').strip()
             self.say(f'  openResult {out}, progress {self.view(self.REGISTRY, "progress()(uint64)")[0]}, recordCount {self.view(self.REGISTRY, "recordCount()(uint64)")[0]}, recordCursor {self.view(deployment["custody"], "recordCursor()(uint64)")[0]}')
-            return out if out != zero and out != done else None
+            return next_open_result(out, done)
         self.wait('the election reserves the next result', next_result, 1500)
         self.target = 3
         try:

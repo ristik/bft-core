@@ -268,6 +268,13 @@ class ProofOfStake(unittest.TestCase):
                 return replies(url)
             def wait(self,what,probe,seconds): return True
         return Fake()
+    def test_the_next_result_is_any_open_result_but_the_last_handoffs(self):
+        import rehearse
+        done, other, zero = '0x' + 'aa' * 32, '0x' + 'bb' * 32, '0x' + '00' * 32
+        self.assertEqual(rehearse.next_open_result(other, done), other)   # also when it was already open as the stage started
+        self.assertIsNone(rehearse.next_open_result(done, done))
+        self.assertIsNone(rehearse.next_open_result(zero, done))
+
     def test_a_settled_sample_goes_to_every_survivor(self):
         import rehearse
         r=self.settled_fake(lambda url:{'result':'0xtx'})
