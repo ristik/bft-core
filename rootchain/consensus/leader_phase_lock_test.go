@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"os"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -13,8 +15,10 @@ import (
 
 	"github.com/unicitynetwork/bft-core/internal/quorumweight"
 	"github.com/unicitynetwork/bft-core/internal/testutils/q3fixture"
+	"github.com/unicitynetwork/bft-core/network/protocol/abdrc"
 	"github.com/unicitynetwork/bft-core/network/protocol/certification"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/leader"
+	drctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
 )
 
 // #886's phase lock: on four equal members with one down, the request of the shard reaches the live ingress root in the last round
@@ -241,6 +245,124 @@ func TestRollingRestartCertifiesRetainedRequest(t *testing.T) {
 		time.Sleep(5 * time.Millisecond)
 	}
 	require.Fail(t, "no verdict within 25 minutes")
+}
+
+// #886 gate 7, the design's two-stage exception: a T2 repeat is already in the high QC's branch when the shard's request reaches the ingress.
+// The first live run commits the repeat, which makes the retained request truly stale, so only the shard can certify it, and its fresh request
+// comes after a delay R of its own. The covered stretch of the second stage is the design's "about 480 s" at T = 10 s; this bounds it in rounds.
+// R is in root rounds after the commit, explicit: where the fresh request lands relative to the stale samples is the point. By default one
+// placement, in the stale stretch; BFT_GATE7_ALL=1 runs them all, about five minutes each.
+func TestRollingRestartRepeatConsumesTheFirstLiveRun(t *testing.T) {
+	placements := []uint64{8}
+	if os.Getenv("BFT_GATE7_ALL") != "" {
+		placements = []uint64{1, 4, 8, 12, 16, 20, 26}
+	}
+	for _, hold := range placements {
+		t.Run(fmt.Sprintf("fresh %d rounds after the commit", hold), func(t *testing.T) {
+			t.Parallel()
+			q4Slot(t)
+			rollingRestartTwoStages(t, hold)
+		})
+	}
+}
+
+func rollingRestartTwoStages(t *testing.T, hold uint64) {
+	c := newPhaseLockLive(t, 2*time.Second)
+	var armed atomic.Bool
+	var repeatRound atomic.Uint64
+	base := c.net.filter
+	c.net.filter = func(from, to peer.ID, msg any) bool {
+		if p, ok := msg.(*abdrc.ProposalMsg); ok && armed.Load() && p.Block.Payload != nil {
+			for _, req := range p.Block.Payload.Requests {
+				if req.CertReason == drctypes.T2Timeout {
+					repeatRound.CompareAndSwap(0, p.Block.Round)
+				}
+			}
+		}
+		return base(from, to, msg)
+	}
+	x, d := "c", "b"
+	first := c.except(x)
+	c.start(first...)
+	n := uint64(len(c.nodes))
+	d0 := 4*n + 4
+	c.warm(d0+2, first...)
+	survivors := c.except(x, d)
+	m := func(name string) *ConsensusManager { return c.nodes[c.idx(name)].r.manager }
+	lastUC := func(name string) uint64 {
+		si := m(name).blockStore.ShardInfo(q3fixture.PartitionID, types.ShardID{})
+		if si == nil || si.LastCR == nil {
+			return 0
+		}
+		return si.LastCR.UC.UnicitySeal.RootChainRoundNumber
+	}
+	c.stop(d)
+	c.start(x)
+	armed.Store(true)
+	ingress := survivors[0]
+	start, startUC := c.state(ingress).Round, lastUC(ingress)
+	hash := bytes.Repeat([]byte{0x81}, 32)
+
+	// the shape: a repeat, uncommitted, under a QC. Only then does the request arrive, so no retained request can have gone first.
+	require.Eventually(t, func() bool {
+		r := repeatRound.Load()
+		return r != 0 && c.state(ingress).HighQC >= r && lastUC(ingress) == startUC
+	}, q4bDeadline, 5*time.Millisecond, "a T2 repeat in the high QC's branch, not yet committed")
+	repeat := repeatRound.Load()
+	held := phaseLockProof(t, c, c.nodes[c.idx(ingress)].r, hash)
+	require.NotNil(t, held)
+	require.NoError(t, m(ingress).RequestCertification(context.Background(), *held))
+	accepted := c.state(ingress).Round
+	t.Logf("repeat in round %d, under a QC; the request held from round %d, %d rounds after the stop", repeat, accepted, accepted-start)
+
+	// stage one: the first live run commits the repeat, and the same request cannot certify
+	stage1 := start + rollingRestartRounds(n)
+	for lastUC(ingress) == startUC { // plain loops: a failure inside Eventually's goroutine would not stop the test
+		require.LessOrEqual(t, c.state(ingress).Round, stage1, "stage one: no commit of the repeat within the bound")
+		time.Sleep(5 * time.Millisecond)
+	}
+	committed := c.state(ingress).Round
+	require.False(t, c.certifiedHash(ingress, hash), "the first certificate is the repeat, not the held request")
+	view, enabled, err := m(ingress).RequestView(q3fixture.PartitionID, types.ShardID{})
+	require.NoError(t, err)
+	require.True(t, enabled)
+	require.NotEqual(t, held.Requests[0].InputRecord.RoundNumber, view.ExpectedTR().Round, "the repeat moved the expected shard round: the held proof is stale")
+	t.Logf("repeat committed by round %d, %d rounds after the stop, limit %d", committed, committed-start, stage1-start)
+
+	// stage two: only the shard can certify it, so nothing does until it answers after R, and again if a further repeat made that proof stale too
+	committedAt := time.Now()
+	for c.state(ingress).Round < committed+hold {
+		require.False(t, c.certifiedHash(ingress, hash), "certified with no fresh request: the held proof was not stale")
+		require.LessOrEqual(t, c.state(ingress).Round, committed+rollingRestartRounds(n), "stage two: the rounds stopped")
+		time.Sleep(5 * time.Millisecond)
+	}
+	resubmitDelay := time.Since(committedAt)
+	freshDeadline := committed + hold + rollingRestartRounds(n)
+	sends, sentUnder, freshAt := 0, uint64(0), uint64(0)
+	stage2 := uint64(0)
+	for !c.certifiedHash(ingress, hash) {
+		if under := lastUC(ingress); sends == 0 || under != sentUnder {
+			proof := phaseLockProof(t, c, c.nodes[c.idx(ingress)].r, hash)
+			if proof != nil && m(ingress).RequestCertification(context.Background(), *proof) == nil {
+				if sends == 0 {
+					freshAt = c.state(ingress).Round
+					stage2 = freshAt + d0 + 1 + leader.RecoveryRun // the covered stretch and a live run, from the design's accounting
+				}
+				sends++
+				sentUnder = under
+			}
+		}
+		if stage2 != 0 {
+			require.LessOrEqual(t, c.state(ingress).Round, stage2, "stage two: not certified within the covered stretch and a live run of the fresh request")
+		}
+		require.LessOrEqual(t, c.state(ingress).Round, freshDeadline, "stage two: the fresh request was never accepted")
+		time.Sleep(5 * time.Millisecond)
+	}
+	end := c.state(ingress).Round
+	t.Logf("fresh request accepted at round %d after R=%s (%d rounds), certified by round %d: %d rounds and %s, limit %d, %d sends; %d rounds after the stop in all", freshAt, resubmitDelay.Round(time.Millisecond), hold, end, end-freshAt, (time.Since(committedAt) - resubmitDelay).Round(time.Millisecond), stage2-freshAt, sends, end-start)
+	for _, name := range survivors {
+		require.False(t, m(name).recovery.InRecovery(), "%s entered state recovery with no missing certified state", name)
+	}
 }
 
 // On the production branch, the view-aware verifier: a request it refuses is neither sent nor held, and a valid one afterwards takes the slot.
