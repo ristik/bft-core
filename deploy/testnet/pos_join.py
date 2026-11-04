@@ -168,7 +168,7 @@ def pos_join_heavy(r):
     committee of five is in place. The election's selection seeds the committee with the incumbents, then outsiders up to nTarget (6), and judges the whole against the
     incumbent committee: five unit weights to five unit weights and one of weight 2 is D = 2*2/7 = 0.571 > 1/2 (the testnet bound, owner decision 19), so the election records
     NoCandidate with the reason WeightChurn and the committee of five stays. No handoff is attempted and nothing is installed: this is a refusal, recorded with the contract's
-    own reason. Run after pos-join-signs/pos-restart of the same run. The second joiner needs no signing authority (no handoff names it): its EVM key is a local key."""
+    own reason. Run after pos-join-signs and before pos-restart of the same run. The second joiner needs no signing authority (no handoff names it): its EVM key is a local key."""
     election, custody = (json.loads((r.gen / 'network' / 'pos-deployment.json').read_text())[k] for k in ('election', 'custody'))
     r.expect(r.n == 5 and not r.joiners, 'precondition: five members, no joiner pending (the join ran first)')
     transport = handoff_ops.DockerTransport(r.gen)
@@ -195,6 +195,8 @@ def pos_join_heavy(r):
     r.expect(status == 0, 'join admit: the delegation (a local EVM key, no handoff will name it)', out.strip()[-300:])
     r.wait('the live index holds six identities', lambda: r.view(election, 'liveCount()(uint32)')[0] == 6, 120)
     cursor_before = r.view(election, 'attemptCursor()(uint64)')[0]   # an attempt from here on sees the heavy joiner eligible
+    open_result = r.view_text(election, 'openResult()(bytes32)').strip()
+    r.expect(int(open_result, 16) == 0, 'no result is open when the heavy joiner becomes eligible (an open result stops further attempts: run this stage before a slow one outlasts the election cadence)', open_result)
     # The election runs in the system hook, whose events are not in a receipt (run 40097992670: attemptCursor 6, openResult zero, no NoCandidate log): the outcome is read
     # from its state, the last attempt's stored result: state 2 NoCandidate, and the reason that follows it
     def outcome():
