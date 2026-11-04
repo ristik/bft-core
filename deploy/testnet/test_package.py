@@ -1226,6 +1226,9 @@ class Topology(unittest.TestCase):
                 self.assertEqual(agg['depends_on'],{'mongo':{'condition':'service_healthy'}})
                 self.assertIn('aggregator',cfg['services']['pod1']['networks']['validators']['aliases'])
                 self.assertFalse(any('aggregator' in cfg['services']['pod%d'%i]['networks']['validators']['aliases'] for i in range(2,n+1)))
+                # #905: at the shared limit a restore's thread spike aborts the node in pthread_create
+                self.assertEqual({cfg['services']['shard%d'%i]['pids_limit'] for i in range(1,n+1)},{512})
+                self.assertEqual(cfg['services']['root1']['pids_limit'],128)
                 mongo=cfg['services']['mongo']
                 self.assertEqual(mongo['image'],generate.PINS['mongo']);self.assertRegex(mongo['image'],r'^mongo:[0-9.]+@sha256:[0-9a-f]{64}$')
                 self.assertEqual(mongo['networks'],['aggregator']);self.assertNotIn('ports',mongo);self.assertTrue(cfg['networks']['aggregator']['internal'])
