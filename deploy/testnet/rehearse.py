@@ -47,8 +47,7 @@ MINE_SECONDS = 240
 MINE_SECONDS_ROTATED = 600
 SLOW_MINE_SECONDS = 30
 # Transactions sent one after another once the first is mined with the validator still down. The first one's time is the fault transition; these show where the
-# latency settles once the schedule has aged the stopped member out (bft-core #886's target: p95 <= 6 s, outside adaptation and recovery runs).
-# Settled-latency samples after a restart's fault transition. 0 until the package's bft pin contains #886: at an older pin the stopped root keeps its turn in the rotation, a
+# latency settles once the schedule has aged the stopped member out (bft-core #886's target: p95 <= 6 s, outside adaptation and recovery runs). 0 until the package's bft pin contains #886: at an older pin the stopped root keeps its turn in the rotation, a
 # sample can wait out its whole limit, and the rehearsal would fail on a number it only records. The pin bump sets 12 (the milestone runs set it on their own branch).
 SETTLED_SAMPLES = 0
 
@@ -116,6 +115,8 @@ def known_secrets(gen):
                 found.update(t for t in re.findall(r'[A-Za-z0-9+/=_.-]{16,}', text))
     if problems:
         raise SecretScanError('; '.join(problems[:5]))
+    if root.name.endswith('-restored'):   # its authorities stay mounted from the original generation, which pos-restore leaves beside it
+        found |= known_secrets(root.with_name(root.name[:-len('-restored')]))
     if not found:
         raise SecretScanError(f'no secret found under {gen}')
     return found
@@ -135,12 +136,40 @@ def redact_log(text, secrets=()):
         else:
             out.append(line)
     return out, scrubbed, withheld
+RESULT_RESERVED, RESULT_ACKNOWLEDGED = 1, 3   # ElectionPolicy.ResultState
+
+
+def next_open_result(open_result, done):
+    """The open result if a handoff can still use it: not none, and not the one the last handoff used."""
+    return open_result if open_result != '0x' + '00' * 32 and open_result != done else None
+
+
 FAUCET = '127.0.0.1:8088'
 PROXY_IPS = ('203.0.113.', '198.51.100.')   # documentation ranges: the client addresses the nginx in front would have set in X-Forwarded-For
 
 
 class Failure(Exception):
     pass
+
+
+def repeated_certificates(log):
+    """The T2 repeats a stop window's shard logs show: a certificate admitted for the shard round of the one before it, at a later root round. It makes a request built
+    on the earlier certificate stale, which is the shape of the #886 two-stage bound. Each once, however many shard nodes logged it."""
+    last, found = {}, {}
+    for line in log.splitlines():
+        name, _, text = line.partition('|')
+        try:
+            entry = json.loads(text)
+        except ValueError:
+            continue
+        if not isinstance(entry, dict) or entry.get('message') != 'certificate admitted':
+            continue
+        node, seen = name.strip(), (entry.get('round'), entry.get('rootRound'))
+        before = last.get(node)
+        if before and before[0] == seen[0] and before[1] != seen[1]:
+            found.setdefault(seen[1], {'shardRound': seen[0], 'rootRound': seen[1], 'firstRootRound': before[1], 'time': entry.get('time')})
+        last[node] = seen
+    return [found[k] for k in sorted(found)]
 
 
 class Rehearsal:
@@ -510,6 +539,10 @@ class Rehearsal:
         self.say(f'  claim without credit: exit {status}')
         self.expect(self.balance(recipient) == 0 and self.balance(pool) == after, 'a claim by a payee without credit moves nothing out of the pool', f'recipient {self.balance(recipient)}, pool {self.balance(pool)}')
 
+    def result_state(self, election, result):
+        """The stored ResultState of a result."""
+        return int(self.call('eth_call', [{'to': election, 'data': self.cast_run('calldata', 'result(bytes32)', result)}, 'latest'])[2:66], 16)
+
     def pos_election(self):
         """The election reserves a result. The first design gave an identity two units by a second bond; the package's caps are (16, 1, 6): lMax is ONE lot per
         identity and a genesis identity has used it, so that bond is refused with LotCapacity (asserted here: the first run of this stage reverted on it, and
@@ -546,12 +579,11 @@ class Rehearsal:
             self.say('  election clock: ' + clock())
             return open_result()
         result = before or self.wait('the election reserves a result', reserved, 1500)
-        raw = self.call('eth_call', [{'to': election, 'data': self.cast_run('calldata', 'result(bytes32)', result)}, 'latest'])
-        state = int(raw[2:66], 16)   # ResultState: 1 Reserved
+        state = self.result_state(election, result)
         members = self.view_text(election, 'frozenMembers(bytes32)((uint64,uint64,uint64,uint64,bytes32)[])', result)
         (self.evidence / 'pos-election-frozen-members.txt').write_text(members + '\n')
         self.say(f'  result {result}, state {state}: {members}')
-        self.expect(state == 1, 'the open result is Reserved', str(state))
+        self.expect(state == RESULT_RESERVED, 'the open result is Reserved', str(state))
         self.expect(members.count('(') - members.count('((') == self.n, f'the reserved result freezes {self.n} members', members[:200])
         self.expect(before is None, 'no result was open before the stage started', str(before))
 
@@ -660,6 +692,7 @@ class Rehearsal:
         zero = '0x' + '00' * 32
         result = self.view_text(election, 'openResult()(bytes32)').strip()
         self.expect(result != zero, 'the election has a reserved result (run pos-election first)')
+        (work / f'result-epoch-{self.target}.txt').write_text(result + '\n')
         ids = self.entity_ids()
         # 1 the next root trust base (a joiner's authority had to start at its scope, so pos-joiner made it already: the same inputs)
         if self.joiners and (work / f'trust-base-epoch{self.target}.json').exists():
@@ -781,7 +814,7 @@ class Rehearsal:
                               '--readiness-receipts', ','.join(receipts), '--intent-delay', '1.5',
                               *(['--committee', ','.join(map(str, self.members()))] if self.joiners else [])], text=True, capture_output=True)
         self.evh()
-        (self.evh() / 'propose.log').write_text(run.stdout + run.stderr)
+        self.keep_redacted(self.evh() / 'propose.log', run.stdout + run.stderr)
         if run.returncode:   # the root's refusal is one line for many causes: report what each root holds, so the refusal can be located
             for i in range(1, self.n + 1):
                 for path in ('/api/v1/q3/status', '/api/v1/q3/signers'):
@@ -820,7 +853,7 @@ class Rehearsal:
         held = subprocess.run([sys.executable, ops, 'hold', str(self.gen), '--ubft', str(self.ubft), '--old-trust-base', str(self.previous_trust_base()), '--next-trust-base', str(work / f'trust-base-epoch{self.target}.json'),
                                '--next-evm-assignment', str(work / 'published-assignment.json'), '--readiness-receipts', ','.join(receipts)], text=True, capture_output=True)
         self.evh()
-        (self.evh() / 'abort-hold.log').write_text(held.stdout + held.stderr)
+        self.keep_redacted(self.evh() / 'abort-hold.log', held.stdout + held.stderr)
         self.expect(held.returncode == 0, 'one root endorsed the plan, the others hold its intent (the handoff is prepared, not frozen)', (held.stdout + held.stderr).strip()[-500:])
         target = json.loads(held.stdout.strip().splitlines()[-1])
         (self.evh() / 'abort-target.json').write_text(json.dumps(target, indent=1, sort_keys=True) + '\n')
@@ -837,7 +870,7 @@ class Rehearsal:
         aborted = subprocess.run([sys.executable, ops, 'abort', str(self.gen), '--', '--network', str(target['network']), '--old-epoch', str(target['oldEpoch']),
                                   '--predecessor-body-id', target['predecessorBodyId'], '--attempt', str(target['attempt']), '--next-body-id', target['nextBodyId'],
                                   '--timeout', '90s'], text=True, capture_output=True)
-        (self.evh() / 'abort.log').write_text(aborted.stdout + aborted.stderr)
+        self.keep_redacted(self.evh() / 'abort.log', aborted.stdout + aborted.stderr)
         committed = [line for line in aborted.stdout.splitlines() if 'committed Abort record' in line]
         self.expect(aborted.returncode == 0 and len(committed) == self.n, f'all {self.n} roots report the committed Abort record', (aborted.stdout + aborted.stderr).strip()[-500:])
         self.expect(len({line.split('record ')[1].split()[0] for line in committed}) == 1, 'they name one Abort record', committed[0])
@@ -867,7 +900,7 @@ class Rehearsal:
         aborted = subprocess.run([sys.executable, ops, 'abort', str(self.gen), '--', '--network', str(target['network']), '--old-epoch', str(target['oldEpoch']),
                                   '--predecessor-body-id', target['predecessorBodyId'], '--attempt', str(target['attempt']), '--next-body-id', target['nextBodyId'],
                                   '--timeout', '30s'], text=True, capture_output=True)
-        (self.evh() / 'too-late.log').write_text(aborted.stdout + aborted.stderr)
+        self.keep_redacted(self.evh() / 'too-late.log', aborted.stdout + aborted.stderr)
         self.say(f'  abort after H: exit {aborted.returncode}: {(aborted.stdout + aborted.stderr).strip()[-600:]}')
         out = aborted.stdout + aborted.stderr
         # handoff_ops.py abort prints one block per entity: "entity i: exit N" and then that root's output
@@ -885,14 +918,20 @@ class Rehearsal:
         transport = handoff_ops.DockerTransport(self.gen)
         self.expect(all(self.root_epoch(i, transport) == 2 for i in range(1, self.n + 1)), 'every root certifies at epoch 2 (run the first handoff first)')
         deployment = json.loads((self.gen / 'network' / 'pos-deployment.json').read_text())
-        election, zero = deployment['election'], '0x' + '00' * 32
-        done = self.view_text(election, 'openResult()(bytes32)').strip()
-        self.say(f'  open result at the start: {done} (the first handoff\'s result is {"still open" if done != zero else "closed"})')
+        election = deployment['election']
+        # the id the first handoff recorded, not what is open now: a slow pos-restart can outlast the cadence, and then the open result is already the next one
+        recorded = self.gen / 'network' / 'handoff' / 'result-epoch-2.txt'
+        self.expect(recorded.is_file(), 'the first handoff recorded its result (run pos-proposal first)')
+        done = recorded.read_text().strip()
+        self.say(f'  the first handoff\'s result: {done}; open result at the start: {self.view_text(election, "openResult()(bytes32)").strip()}')
         def next_result():
             out = self.view_text(election, 'openResult()(bytes32)').strip()
             self.say(f'  openResult {out}, progress {self.view(self.REGISTRY, "progress()(uint64)")[0]}')
-            return out if out != zero and out != done else None
+            return next_open_result(out, done)
         self.wait('the election reserves the next result', next_result, 1500)
+        # the contract clears openResult on any outcome, so a next result alone does not say how the first one ended
+        state = self.result_state(election, done)
+        self.expect(state == RESULT_ACKNOWLEDGED, 'the first handoff\'s result is Acknowledged', str(state))
         self.target = 3
         try:
             self.pos_proposal()
@@ -1020,6 +1059,17 @@ class Rehearsal:
         self.say(f'  recordCount == recordCursor == {self.wait("the custody has applied every root record", lambda: applied() is not None, 300) and applied()}')
         self.joiners.clear()   # the successor committee is active: a joiner is a member now
 
+    def expect_restore_running(self, i):
+        """The joiner's restore is up after 30 s. Its whole log is kept either way: the first crash is at the start of it, each restart only adds a refusal (#905), and a
+        container in a restart loop can read as running at the moment of the look."""
+        time.sleep(30)
+        logs = self.compose('logs', '--no-color', '--tail', '60', f'shard{i}', check=False)
+        self.keep_redacted(self.evh() / f'joiner-shard-{i}-restore.log', logs)
+        running = f'shard{i}' in self.compose('ps', '--status', 'running', '--services').split()
+        self.say(f'  joiner shard {i} restoring after 30 s: {"running" if running else "NOT running"}: ' + ' | '.join(logs.strip().splitlines()[-3:])[-500:])
+        self.keep_redacted(self.evh() / f'joiner-shard-{i}-restore-whole.log', self.compose('logs', '--no-color', '--timestamps', f'shard{i}', check=False))
+        self.expect(running, f'the joiner\'s shard node {i} runs as a restore under its new session', logs.strip()[-500:])
+
     def advance_joiner(self, i, operator, shard_epoch):
         """The joiner's authority is pending (the genesis shard configuration does not name it) and holds no session. It started at the successor scope, so after the Commit
         its enrollment states the activated shard configuration and it issues its session; its shard node is then started and what it does is recorded."""
@@ -1035,7 +1085,7 @@ class Rehearsal:
         step('complete-enrollment', 'complete-enrollment', *operator, '--shard-conf', f'/network/handoff/shard-conf-{shard_epoch}.json')
         rc = step('replace-session', 'replace-session', *operator, '--out', '/authority/client.cred')
         step('status after', 'status', *operator)
-        (self.evh() / f'joiner-authority-{i}.log').write_text('\n'.join(log))
+        self.keep_redacted(self.evh() / f'joiner-authority-{i}.log', '\n'.join(log))
         self.expect(rc == 0, f'the joiner\'s authority {i} advanced, enrolled and issued its session', log[-1][-400:])
         self.restore_joiner(i)
 
@@ -1099,12 +1149,7 @@ class Rehearsal:
         try:
             restore_file.write_text(json.dumps({'services': {f'shard{i}': {'entrypoint': entry}}}, indent=1) + '\n')
             self.compose('up', '-d', '--no-deps', '--force-recreate', f'shard{i}')
-            time.sleep(30)
-            logs = self.compose('logs', '--no-color', '--tail', '60', f'shard{i}', check=False)
-            (self.evh() / f'joiner-shard-{i}-restore.log').write_text(logs)
-            running = f'shard{i}' in self.compose('ps', '--status', 'running', '--services').split()
-            self.say(f'  joiner shard {i} restoring after 30 s: {"running" if running else "NOT running"}: ' + ' | '.join(logs.strip().splitlines()[-3:])[-500:])
-            self.expect(running, f'the joiner\'s shard node {i} runs as a restore under its new session', logs.strip()[-500:])
+            self.expect_restore_running(i)
             survivor = self.wait(f'the joiner\'s execution client {i} catches up with validator 1', lambda: int(self.ureth(i, 'eth_blockNumber'), 16) + 5 >= int(self.ureth(1, 'eth_blockNumber'), 16), 300)
             self.expect(survivor, f'the joiner\'s execution client {i} is at validator 1\'s block')
             # an ordinary node from here on: the restore flags go, the state stays
@@ -1112,7 +1157,7 @@ class Rehearsal:
             self.compose('up', '-d', '--no-deps', '--force-recreate', f'shard{i}')
             time.sleep(20)
             running = f'shard{i}' in self.compose('ps', '--status', 'running', '--services').split()
-            (self.evh() / f'joiner-shard-{i}-run.log').write_text(self.compose('logs', '--no-color', '--tail', '60', f'shard{i}', check=False))
+            self.keep_redacted(self.evh() / f'joiner-shard-{i}-run.log', self.compose('logs', '--no-color', '--tail', '60', f'shard{i}', check=False))
             self.expect(running, f'the restored shard node {i} runs again as an ordinary node')
         finally:
             restore_file.unlink(missing_ok=True)   # a failed restore leaves no override behind for the next Compose call
@@ -1173,7 +1218,7 @@ class Rehearsal:
                 return one and three and one['epoch'] == epoch and three['epoch'] == epoch and one['round'] > start + 3 and three['round'] > start + 3 and three['quorum'] and len(three['signers']) == self.n - 1
             self.wait(f'with root 2 stopped the committed round advances at epoch {epoch} on roots 1 and 3, signed by the three live roots', advanced, 240)
         except Exception:
-            (self.evh() / 'recreate-root.log').write_text(self.compose('logs', '--no-color', '--tail', '80', 'root1', check=False))
+            self.keep_redacted(self.evh() / 'recreate-root.log', self.compose('logs', '--no-color', '--tail', '80', 'root1', check=False))
             raise
         finally:
             self.compose('start', 'root2')
@@ -1216,7 +1261,7 @@ class Rehearsal:
         time.sleep(30)
         logs = self.compose('logs', '--no-color', '--since', started, 'shard1', check=False)
         fenced = [line for line in logs.splitlines() if 'signing-session-fenced' in line]
-        (self.evh() / 'stale-client-credential-shard1.log').write_text('\n'.join(fenced[:40]) + '\n')
+        self.keep_redacted(self.evh() / 'stale-client-credential-shard1.log', '\n'.join(fenced[:40]) + '\n')
         self.say(f'  shard 1 with the pre-advance credential: {len(fenced)} lines "restored authority refused readiness ... signing-session-fenced"')
         self.expect(len(fenced) > 0, 'the authority fences the old client session: the shard node reads signing-session-fenced and abstains', f'{len(fenced)} of {len(logs.splitlines())} log lines are signing-session-fenced' if fenced else f'{len(logs.splitlines())} log lines, none fenced')
         # put the current credential back: the entity signs again, and the fence is not in the log after the restart
@@ -1282,6 +1327,32 @@ class Rehearsal:
         """An RFC 3339 UTC time with microseconds (what `docker compose logs --since/--until` takes)."""
         return (datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(seconds=plus)).isoformat(timespec='microseconds').replace('+00:00', 'Z')
 
+    def keep_stop_window(self, i, window):
+        """The rotated epochs' stop window in evidence/stop-window-<target>-v<i>.log, redacted as at CAPTURE_SERVICES. Fails closed: a failed scan or a literal that survives
+        writes nothing and says so; never fails the stage."""
+        name = f'stop-window-{self.target}-v{i}.log'
+        if (self.evidence / name).exists():   # pos-restart-2 runs with the target back at 2: it must not overwrite the first window
+            name = f'stop-window-{self.target}-v{i}-again.log'
+        self.keep_redacted(self.evidence / name, window)
+
+    def keep_redacted(self, path, text):
+        """`text` in the file `path`, redacted as at CAPTURE_SERVICES. Fails closed: a failed scan or a literal that survives writes nothing and says so; never fails the stage."""
+        name = path.name
+        try:
+            gen = getattr(self, 'gen', None)
+            if not gen:
+                raise SecretScanError('no generation to scan for secrets')
+            secrets = known_secrets(gen)
+            lines, _, withheld = redact_log(text, secrets)
+            body = '\n'.join(lines)
+            if any(secret in body for secret in secrets):
+                self.say(f'  {name} NOT kept: a known secret literal survived the redaction')
+                return
+            path.write_text(body + '\n')
+            self.say(f'  kept {name} ({len(lines)} lines, {withheld} withheld)')
+        except Exception as error:   # evidence is best effort; the stage's verdict is about the package
+            self.say(f'  {name} not kept: {error}')
+
     def capture_restart_window(self, i, start, stall):
         """Keep the consensus logs (root and shard services only) of the window in which validator i was down, redacted as described at CAPTURE_SERVICES, in
         evidence/pod-restart-logs/validator<i>-down-<seconds>s.log. Best effort for the evidence, strict for secrets: any failure here is said and never fails the stage."""
@@ -1338,8 +1409,7 @@ class Rehearsal:
             nonce = int(self.ureth(survivors[0], 'eth_getTransactionCount', [sender, 'latest']), 16)
             price = int(self.ureth(survivors[0], 'eth_gasPrice'), 16)
             raw = self.raw_tx(to, nonce, price)
-            # the hash is the transaction's own (keccak of the raw bytes), not what a node answers: a survivor the transaction has already reached by gossip answers
-            # "already known" with no result, which is acceptance of the same transaction; "nonce too low" counts only with the receipt (below); any other error is a refusal
+            # the hash is the transaction's own (keccak of the raw bytes), not what a node answers: send_to_survivors says which answers are acceptance
             tx = self.cast_run('keccak', raw)
             self.send_to_survivors(survivors, raw, tx)
             self.say(f'  the {len(survivors)} survivors accept transaction {tx}')
@@ -1359,7 +1429,10 @@ class Rehearsal:
                 last = self.settled_latency(i, survivors, mine_within) or tx
                 # the whole stop window of the survivors' roots and shards: the end-of-run log tail does not reach back to it
                 roots = [f'{kind}{j}' for j in survivors for kind in ('root', 'shard')]
-                (self.evidence / f'stop-window-{self.target}-v{i}.log').write_text(self.compose('logs', '--no-color', '--since', stopped, *roots, check=False))
+                window = self.compose('logs', '--no-color', '--since', stopped, *roots, check=False)
+                self.keep_stop_window(i, window)
+                with (self.evidence / 'restart-latency.jsonl').open('a') as out:   # tags the window's samples for the #886 two-stage bound
+                    out.write(json.dumps({'validator_down': i, 'phase': 'window', 'repeats': repeated_certificates(window)}) + '\n')
             self.say(f'  starting validator {i}')
             self.compose('start', *names)
             r = self.wait(f'validator {i} catches up to the transaction mined without it', lambda: self.ureth(i, 'eth_getTransactionReceipt', [tx]), 300)

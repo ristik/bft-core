@@ -107,6 +107,7 @@ jobs:
           docker stats --no-stream --format 'table {{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}\t{{.PIDs}}' > "$RUNNER_TEMP/evidence/docker-stats.txt" || true
           df -h / > "$RUNNER_TEMP/evidence/df.txt" || true
           sudo bash -c "cd /srv/tn-bridge-1 && docker compose -f compose.yaml -f compose.bridge.yaml ps -a > '$RUNNER_TEMP/evidence/compose-ps.txt' && docker compose -f compose.yaml -f compose.bridge.yaml logs --no-color --timestamps --tail 400 > '$RUNNER_TEMP/evidence/compose-logs.txt'" || true
+          sudo PYTHONDONTWRITEBYTECODE=1 python3 deploy/testnet/redact_evidence.py /srv/tn-bridge-1 "$RUNNER_TEMP/evidence/compose-logs.txt" || sudo bash -c "echo '[log withheld: redaction did not finish]' > '$RUNNER_TEMP/evidence/compose-logs.txt'"
           sudo cp /srv/tn-bridge-1/manifest.json "$RUNNER_TEMP/evidence/manifest.json" || true
           sudo chown -R "$(id -u):$(id -g)" "$RUNNER_TEMP/evidence" || true
           cp deploy/testnet/artifacts/images.json deploy/testnet/artifacts/bridge-images.json "$RUNNER_TEMP/evidence/" || true

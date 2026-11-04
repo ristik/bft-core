@@ -154,7 +154,7 @@ def scenario(r, tag, parts, epoch):
         finally:
             for service in everything:
                 log = r.compose('logs', '--no-color', '--since', since, service, check=False)
-                (r.evidence / f'pos-crash-{tag}-{service}.log').write_text(log)
+                r.keep_redacted(r.evidence / f'pos-crash-{tag}-{service}.log', log)
                 panics, warnings = scan_log(log)
                 row.setdefault('logs', {})[service] = {'lines': len(log.splitlines()), 'error_warn': warnings, 'panics': panics}
             (r.evidence / f'pos-crash-{tag}.json').write_text(json.dumps(rows, indent=1) + '\n')

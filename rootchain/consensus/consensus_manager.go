@@ -621,7 +621,8 @@ func (x *ConsensusManager) loop(ctx context.Context) error {
 // path entered it: the node cannot vote in the round, so it sends its ordinary timeout at once, once for the round, through the same
 // durable signing path as a local timeout. A stretch of such rounds then advances at certificate speed, one real TC at a time, and never
 // jumps; a TC still needs a quorum and a lone lagging node forces nothing. The ordinary timer goes on retransmitting. This is not state
-// recovery (B2): nobody may have the missing history, so it asks no peer and leaves the node's APIs available.
+// recovery (B2): nobody may have the missing history, so it asks no peer and leaves the node's APIs available. Every new round, known leader
+// or not, ends with the retained requests forwarded to its next leader.
 func (x *ConsensusManager) timeoutUnknownLeader(ctx context.Context) {
 	round := x.pacemaker.GetCurrentRound()
 	if round == x.leaderCheckedRound {
@@ -2227,6 +2228,7 @@ func (x *ConsensusManager) updateTrustBase() {
 	if x.trustBase.Load().Epoch != trustBase.Epoch {
 		x.log.Info(fmt.Sprintf("Activated trust base epoch %d", trustBase.Epoch))
 		x.trustBase.Store(trustBase)
+		x.retained = nil // no root queue crosses an epoch
 	}
 }
 

@@ -121,7 +121,7 @@ def pos_joiner(r):
     time.sleep(15)   # a start that is refused exits within seconds: look after that
     running = f'shard{index}' in compose(r, 'ps', '--status', 'running', '--services').split()
     logs = compose(r, 'logs', '--no-color', '--tail', '40', f'shard{index}', check=False)
-    (r.evidence / f'shard{index}-start.log').write_text(logs)
+    r.keep_redacted(r.evidence / f'shard{index}-start.log', logs)
     r.say(f'  shard{index} after 15 s: {"running" if running else "NOT running"}; last lines: ' + ' | '.join(logs.strip().splitlines()[-4:])[-600:])
     r.expect(running, f'the joiner\'s shard node stays up as a staging-only node', logs.strip()[-600:])
     r.n = index   # from here every stage of this run counts the joiner: its services are in compose_files, its pod in the transport
