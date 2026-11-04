@@ -284,7 +284,8 @@ class ProofOfStake(unittest.TestCase):
         self.assertFalse((r.evidence/'pod-restart-logs').exists(),'fail closed: nothing is written')
         self.assertTrue(any('NOT kept' in m for k,m in calls if k=='say'))
         Fake2,_=self._capture_fake({}); r2=Fake2(None)   # no generation: nothing to scan (never the working directory)
-        r2.capture_restart_window(1,'2026-11-04T10:00:00.000000Z',5)
+        with patch('rehearse.known_secrets',side_effect=AssertionError('no generation, no scan')):
+            r2.capture_restart_window(1,'2026-11-04T10:00:00.000000Z',5)
         self.assertTrue((r2.evidence/'pod-restart-logs'/'validator1-down-5s.log').is_file())
     def test_only_the_poa_pod_restart_keeps_the_stop_window_logs(self):
         import rehearse
