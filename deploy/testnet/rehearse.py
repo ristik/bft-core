@@ -804,9 +804,18 @@ class Rehearsal:
         election, zero = deployment['election'], '0x' + '00' * 32
         done = self.view_text(election, 'openResult()(bytes32)').strip()
         self.say(f'  open result at the start: {done} (the first handoff\'s result is {"still open" if done != zero else "closed"})')
+        polls = [0]
+        def ack_state():
+            # diagnostic (#886): the root's acknowledgementPending says whether the Ack was produced; recordCount against custody's recordCursor says whether it was applied
+            status, body = transport.post(1, '/api/v1/handoff/evm-assignment/context', b'{}')
+            pending = json.loads(body).get('acknowledgementPending') if status == 200 else f'HTTP {status}'
+            return f'root1 acknowledgementPending {pending}'
         def next_result():
+            polls[0] += 1
+            if polls[0] % 20 == 1:
+                self.say(f'  ack state: {ack_state()}')
             out = self.view_text(election, 'openResult()(bytes32)').strip()
-            self.say(f'  openResult {out}, progress {self.view(self.REGISTRY, "progress()(uint64)")[0]}')
+            self.say(f'  openResult {out}, progress {self.view(self.REGISTRY, "progress()(uint64)")[0]}, recordCount {self.view(self.REGISTRY, "recordCount()(uint64)")[0]}, recordCursor {self.view(deployment["custody"], "recordCursor()(uint64)")[0]}')
             return out if out != zero and out != done else None
         self.wait('the election reserves the next result', next_result, 1500)
         self.target = 3
