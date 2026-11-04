@@ -1114,6 +1114,19 @@ class LoadGenerator(unittest.TestCase):
         node=self.Node();s,problems=self.run_load(node,rate=100,duration=96,ips=4,receipt_wait=180)
         self.assertEqual((s['accepted'],s['mined_ok'],s['not_mined_in_time']),(9600,9600,0))
         self.assertEqual(problems,[])
+    def test_receipts_the_deadline_left_unasked_are_not_called_not_mined(self):
+        # rev3: a long run on a slow gateway. Each query takes time on the fake clock until the deadline passes
+        node=self.Node();now=[0.0];post=node.post
+        def slow(method,params,xff=None):
+            if method=='eth_getTransactionReceipt': now[0]+=1.0
+            return post(method,params,xff)
+        node.post=slow
+        s,problems=self.module().run(node,'0xaa',lambda to,n,p: f'raw{n}',10,3,0,'203.0.113.',4,5,1,clock=lambda:now[0],sleep=lambda d:now.__setitem__(0,now[0]+d))
+        self.assertGreater(s['receipts_not_asked'],0);self.assertLess(s['mined_ok'],30)
+        self.assertEqual(s['not_mined_in_time'],0,'never asked is not not mined')
+        self.assertEqual(s['mined_ok']+s['receipts_not_asked'],30)
+        self.assertTrue(any('not checked' in p for p in problems),problems)
+        self.assertFalse(any('not mined within' in p for p in problems),problems)
     def test_a_rate_limited_receipt_query_is_counted_and_asked_again_not_a_crash(self):
         # host run, 100/s over 13 addresses: the receipt phase hit the gateway's overall limit and the tool died with the transfers already sent
         node=self.Node(receipt_limit=5);s,problems=self.run_load(node,ips=13,receipt_wait=60)
