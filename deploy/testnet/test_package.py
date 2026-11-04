@@ -219,11 +219,11 @@ class ProofOfStake(unittest.TestCase):
                 if 'catches up' in what: raise rehearse.Failure('stop after the mining check')
                 return True
         r=Fake()
-        with self.assertRaises(rehearse.Failure): r.pod_restart(mine_within=rehearse.MINE_SECONDS_ROTATED)   # past the mining wait: the record is written before anything else can fail
+        with patch.object(rehearse,'SETTLED_SAMPLES',12),self.assertRaises(rehearse.Failure): r.pod_restart(mine_within=rehearse.MINE_SECONDS_ROTATED)   # past the mining wait: the record is written before anything else can fail
         rows=[json.loads(x) for x in (r.evidence/'restart-latency.jsonl').read_text().splitlines()]
         self.assertEqual([(x['validator_down'],x['limit'],x['tx']) for x in rows if x['phase']=='transition'],[(1,rehearse.MINE_SECONDS_ROTATED,'0xtx')])
         settled=[x for x in rows if x['phase']=='settled']
-        self.assertEqual([x['sample'] for x in settled],list(range(rehearse.SETTLED_SAMPLES)),'where the latency settles, the validator still down')
+        self.assertEqual([x['sample'] for x in settled],list(range(12)),'where the latency settles, the validator still down')
         self.assertEqual(rows[0]['phase'],'transition')
         self.assertEqual((r.evidence/'stop-window-2-v1.log').read_text(),'a stop window line')
         self.assertTrue(any('survivors mined it' in m for m in said))
@@ -251,8 +251,34 @@ class ProofOfStake(unittest.TestCase):
                 if 'catches up' in what: return {'blockHash':'0xb'}
                 return True
         r=Fake()
-        with self.assertRaises(rehearse.Failure): r.pod_restart(mine_within=rehearse.MINE_SECONDS_ROTATED)   # past the mining waittten before anything else can fail
+        with patch.object(rehearse,'SETTLED_SAMPLES',12),self.assertRaises(rehearse.Failure): r.pod_restart(mine_within=rehearse.MINE_SECONDS_ROTATED)   # past the mining waittten before anything else can fail
         self.assertEqual(r.last,'0x1','the gateway reads the sender nonce from the restarted validator: it must hold the last settled sample first')
+    def test_settled_samples_are_off_until_the_pin_has_886(self):
+        import rehearse
+        said=[]
+        class Fake(rehearse.Rehearsal):
+            def __init__(self): self.n,self.pods,self.manifest,self.evidence,self.target=3,[1],{'faucet_address':'0x'+'11'*20},Path(tempfile.mkdtemp()),2
+            def say(self,m): said.append(m)
+            def expect(self,ok,what,detail=''): assert ok,what
+            def compose(self,*a,**k): return 'a stop window line'
+            def http(self,*a,**k): return (503,'')
+            def ureth(self,j,method,params=None): return '0x1'
+            def raw_tx(self,*a): return '0xraw'
+            def cast_run(self,*a): return '0xtx'
+            def inner_reply(self,*a): return {'result':'0xtx'}
+            def wait(self,what,probe,seconds):
+                if 'mines it' in what: return {'status':'0x1','blockHash':'0xb'}
+                if 'catches up to the last' in what:
+                    self.last=probe()
+                    raise rehearse.Failure('stop after the catch-up wait')
+                if 'catches up' in what: return {'blockHash':'0xb'}
+                return True
+        r=Fake()
+        with self.assertRaises(rehearse.Failure): r.pod_restart(mine_within=rehearse.MINE_SECONDS_ROTATED)   # past the mining waittten before anything else can fail
+        self.assertEqual(rehearse.SETTLED_SAMPLES,0,'at a pin without #886 a sample can wait out its whole limit (run 41737297875)')
+        rows=[json.loads(x) for x in (r.evidence/'restart-latency.jsonl').read_text().splitlines()]
+        self.assertEqual([x['phase'] for x in rows],['transition'],'no samples')
+        self.assertEqual(r.last,'0x1','the wait falls back to the transition transaction')
     def test_pos_owner_names_the_revert_selector_it_expects(self):
         import json,rehearse,pos_owner
         class Fake:   # the two helpers it needs: a selector table and an eth_call that fails with a given revert data

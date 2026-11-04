@@ -48,7 +48,9 @@ MINE_SECONDS_ROTATED = 600
 SLOW_MINE_SECONDS = 30
 # Transactions sent one after another once the first is mined with the validator still down. The first one's time is the fault transition; these show where the
 # latency settles once the schedule has aged the stopped member out (bft-core #886's target: p95 <= 6 s, outside adaptation and recovery runs).
-SETTLED_SAMPLES = 12
+# Settled-latency samples after a restart's fault transition. 0 until the package's bft pin contains #886: at an older pin the stopped root keeps its turn in the rotation, a
+# sample can wait out its whole limit, and the rehearsal would fail on a number it only records. The pin bump sets 12 (the milestone runs set it on their own branch).
+SETTLED_SAMPLES = 0
 FAUCET = '127.0.0.1:8088'
 PROXY_IPS = ('203.0.113.', '198.51.100.')   # documentation ranges: the client addresses the nginx in front would have set in X-Forwarded-For
 
@@ -1225,7 +1227,7 @@ class Rehearsal:
             self.expect(len(blocks) == 1, 'the survivors agree on the including block')
             last = tx
             if mine_within > MINE_SECONDS:
-                last = self.settled_latency(i, survivors, mine_within)
+                last = self.settled_latency(i, survivors, mine_within) or tx
                 # the whole stop window of the survivors' roots and shards: the end-of-run log tail does not reach back to it
                 roots = [f'{kind}{j}' for j in survivors for kind in ('root', 'shard')]
                 (self.evidence / f'stop-window-{self.target}-v{i}.log').write_text(self.compose('logs', '--no-color', '--since', stopped, *roots, check=False))
