@@ -383,9 +383,12 @@ class ProofOfStake(unittest.TestCase):
         shutil.rmtree(original)
         with self.assertRaises(rehearse.SecretScanError): rehearse.known_secrets(restored)
     def test_the_join_profile_runs_the_heavy_joiner_before_the_slow_restart(self):
+        import rehearse
         text=(Path(__file__).resolve().parents[2]/'.github'/'workflows'/'testnet-rehearsal.yml').read_text()
-        stages=re.search(r'"(up,[^"]*pos-join-heavy[^"]*)"',text).group(1).split(',')
-        self.assertLess(stages.index('pos-join-heavy'),stages.index('pos-restart'),'pos-restart can outlast the election cadence, and the open attempt never sees the heavy joiner')
+        wanted=re.search(r'"(up,[^"]*pos-join-heavy[^"]*)"',text).group(1).split(',')
+        runs=[name for name,_ in rehearse.STAGES+rehearse.POS_STAGES if name in wanted]   # main() walks these and uses --stages only as a filter
+        self.assertEqual(set(runs),set(wanted),'a stage the workflow names does not exist')
+        self.assertLess(runs.index('pos-join-heavy'),runs.index('pos-restart'),'pos-restart can outlast the election cadence, and the open attempt never sees the heavy joiner')
     def test_a_restore_keeps_the_whole_log_redacted(self):
         import rehearse
         gen=self._secret_generation()
