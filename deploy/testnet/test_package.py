@@ -169,11 +169,10 @@ class ProofOfStake(unittest.TestCase):
         self.assertEqual(len(listed),len(rehearse.POS_STAGES),'a method listed twice')
         self.assertIn('pos_resources',attached,'the test sees attachments (pos_sample.pos_resources)')
     def test_the_rotated_epoch_restart_waits_for_the_measured_slowdown_and_still_fails_on_a_stop(self):
-        # bft-core #886: with a validator down the survivors need 51-219 s per transaction from root epoch 2 (PoA, epoch 1: 4-6 s); pos-restart waits MINE_SECONDS_ROTATED,
-        # the PoA pod-restart keeps 240 s, and a transaction that is never mined still ends in a Failure at exactly that limit (a real stop is not hidden)
+        # bft-core #888, #886: every epoch waits 240 s, and a transaction that is never mined still ends in a Failure at exactly that limit (a real stop is not hidden)
         import rehearse
         self.assertEqual(rehearse.MINE_SECONDS,240)
-        self.assertGreaterEqual(rehearse.MINE_SECONDS_ROTATED,2*219,'twice the slowest of the 36 measured samples')
+        self.assertGreaterEqual(rehearse.MINE_SECONDS,2*100,'twice the slowest of 22 fault transitions at bft pin 11051123')
         waits=[]
         class Fake(rehearse.Rehearsal):
             def __init__(self): self.n,self.pods,self.manifest,self.evidence=3,[1],{'faucet_address':'0x'+'11'*20},Path(tempfile.mkdtemp())
@@ -189,18 +188,18 @@ class ProofOfStake(unittest.TestCase):
                 waits.append((what,seconds))
                 if 'mines it' in what: raise rehearse.Failure(f'{what}: not within {seconds} s (last: None)')
                 return True
-        for limit in (None,rehearse.MINE_SECONDS_ROTATED):
+        for rotated in (False,True):
             waits.clear()
             with self.assertRaises(rehearse.Failure):
-                Fake().pod_restart() if limit is None else Fake().pod_restart(mine_within=limit)
-            self.assertEqual([x for what,x in waits if 'mines it' in what],[limit or rehearse.MINE_SECONDS])
+                Fake().pod_restart(rotated=rotated)
+            self.assertEqual([x for what,x in waits if 'mines it' in what],[rehearse.MINE_SECONDS])
         seen=[]
         class Pos(Fake):
             def root_epoch(self,i,t): return 2
-            def pod_restart(self,mine_within=rehearse.MINE_SECONDS): seen.append(mine_within); raise rehearse.Failure('stop here')
+            def pod_restart(self,rotated=False): seen.append(rotated); raise rehearse.Failure('stop here')
             gen=Path(tempfile.mkdtemp())
         with patch('rehearse.handoff_ops.DockerTransport',lambda gen: None), self.assertRaises(rehearse.Failure): Pos().pos_restart()
-        self.assertEqual(seen,[rehearse.MINE_SECONDS_ROTATED])
+        self.assertEqual(seen,[True])
     def test_the_restart_latency_is_recorded_on_the_passing_path_and_the_note_is_only_for_the_rotated_limit(self):
         import rehearse
         said=[]
@@ -219,17 +218,17 @@ class ProofOfStake(unittest.TestCase):
                 if 'catches up' in what: raise rehearse.Failure('stop after the mining check')
                 return True
         r=Fake(); r.gen=self._secret_generation()
-        with patch.object(rehearse,'SETTLED_SAMPLES',12),self.assertRaises(rehearse.Failure): r.pod_restart(mine_within=rehearse.MINE_SECONDS_ROTATED)   # past the mining wait: the record is written before anything else can fail
+        with patch.object(rehearse,'SETTLED_SAMPLES',12),self.assertRaises(rehearse.Failure): r.pod_restart(rotated=True)   # past the mining wait: the record is written before anything else can fail
         rows=[json.loads(x) for x in (r.evidence/'restart-latency.jsonl').read_text().splitlines()]
-        self.assertEqual([(x['validator_down'],x['limit'],x['tx']) for x in rows if x['phase']=='transition'],[(1,rehearse.MINE_SECONDS_ROTATED,'0xtx')])
+        self.assertEqual([(x['validator_down'],x['limit'],x['tx']) for x in rows if x['phase']=='transition'],[(1,rehearse.MINE_SECONDS,'0xtx')])
         settled=[x for x in rows if x['phase']=='settled']
         self.assertEqual([x['sample'] for x in settled],list(range(12)),'where the latency settles, the validator still down')
         self.assertEqual(rows[0]['phase'],'transition')
         self.assertEqual((r.evidence/'stop-window-2-v1.log').read_text(),'a stop window line\n')
         self.assertTrue(any('survivors mined it' in m for m in said))
-        for limit,stall,note in ((rehearse.MINE_SECONDS,90,False),(rehearse.MINE_SECONDS_ROTATED,90,True),(rehearse.MINE_SECONDS_ROTATED,5,False)):
-            said.clear(); r.record_restart_latency(2,stall,limit,'0xt')
-            self.assertEqual('#886' in said[0],note,(limit,stall,said))
+        for rotated,stall,note in ((False,90,False),(True,90,True),(True,5,False)):
+            said.clear(); r.record_restart_latency(2,stall,rotated,'0xt')
+            self.assertEqual('#886' in said[0],note,(rotated,stall,said))
     def test_a_restarted_validator_catches_up_to_the_last_settled_sample(self):
         import rehearse
         said=[]
@@ -256,7 +255,7 @@ class ProofOfStake(unittest.TestCase):
                 if 'catches up' in what: return {'blockHash':'0xb'}
                 return True
         r=Fake()
-        with patch.object(rehearse,'SETTLED_SAMPLES',12),self.assertRaises(rehearse.Failure): r.pod_restart(mine_within=rehearse.MINE_SECONDS_ROTATED)   # past the mining wait
+        with patch.object(rehearse,'SETTLED_SAMPLES',12),self.assertRaises(rehearse.Failure): r.pod_restart(rotated=True)   # past the mining wait
         self.assertEqual(r.asked,r.hashes[-1],'the last settled sample, not the transition transaction: the gateway reads the nonce from the restarted validator')
         self.assertGreater(len(r.hashes),1)
     def settled_fake(self,replies):
@@ -292,7 +291,7 @@ class ProofOfStake(unittest.TestCase):
             def wait(self,what,probe,seconds):
                 if 'mines it' in what: raise rehearse.Failure('stop at the mining wait')
                 return True
-        with self.assertRaises(rehearse.Failure): Fake().pod_restart(mine_within=rehearse.MINE_SECONDS_ROTATED)
+        with self.assertRaises(rehearse.Failure): Fake().pod_restart(rotated=True)
         self.assertEqual(sent,[f'http://ureth{j}:8545' for j in (1,3,4)],'the validators have no peers: a pool not sent it never holds it')
     def test_the_next_result_is_any_open_result_but_the_last_handoffs(self):
         import rehearse
@@ -448,7 +447,7 @@ class ProofOfStake(unittest.TestCase):
                 if 'catches up' in what: return {'blockHash':'0xb'}
                 return True
         r=Fake()
-        with patch.object(rehearse,'SETTLED_SAMPLES',0),self.assertRaises(rehearse.Failure): r.pod_restart(mine_within=rehearse.MINE_SECONDS_ROTATED)   # past the mining wait: the record is written before anything else can fail
+        with patch.object(rehearse,'SETTLED_SAMPLES',0),self.assertRaises(rehearse.Failure): r.pod_restart(rotated=True)   # past the mining wait: the record is written before anything else can fail
         self.assertEqual(rehearse.SETTLED_SAMPLES,12,'the pin contains #886: twelve settled samples (0 at a pin without it: run 41737297875)')
         rows=[json.loads(x) for x in (r.evidence/'restart-latency.jsonl').read_text().splitlines()]
         self.assertEqual([x['phase'] for x in rows],['transition','window'],'no samples')
@@ -551,10 +550,10 @@ class ProofOfStake(unittest.TestCase):
                 if 'mines it' in what: return {'status':'0x1','blockHash':'0xb'}
                 if 'catches up' in what: raise rehearse.Failure('stop after the mining check')
                 return True
-        for limit,expect in ((rehearse.MINE_SECONDS,1),(rehearse.MINE_SECONDS_ROTATED,0)):
+        for rotated,expect in ((False,1),(True,0)):
             kept.clear()
-            with self.assertRaises(rehearse.Failure): Fake().pod_restart(mine_within=limit)
-            self.assertEqual(len(kept),expect,limit)
+            with self.assertRaises(rehearse.Failure): Fake().pod_restart(rotated=rotated)
+            self.assertEqual(len(kept),expect,rotated)
     def test_the_window_is_tagged_with_its_t2_repeats(self):
         import rehearse
         line=lambda node,shard,root: f'{node}-1  | '+json.dumps({'message':'certificate admitted','round':shard,'rootRound':root,'time':f't{root}'})

@@ -36,15 +36,11 @@ import pos_sample
 
 PUBLIC_RPC = '127.0.0.1:8545'
 
-# How long the survivors may take to mine a transaction while one validator is down (pod_restart). 240 s is what the PoA package (root epoch 1, reputation leader
-# selector) needs many times over: it mines in 4-6 s. From root epoch 2 the leader schedule is the fixed round-robin of bootstrap_leader.go, so a stopped root is
-# elected leader again every n-th round and each such slot costs two 10 s local timeouts; the shard's request is also lost in the round before the dead slot and
-# retried at the same phase every time (bft-core #886, see its phase-lock comment): 51-219 s over 42 samples (median ~96 s), one run beyond 240 s, and a run with
-# a 2 s local timeout that stopped for 10 min. The rotated-epoch stages (pos-restart, pos-restart-2) wait up to MINE_SECONDS_ROTATED: ~2.7 times the slowest sample,
-# so a chain that has really stopped still fails here. Every run logs the seconds it took (evidence/restart-latency.jsonl) and, for the rotated limit, marks anything
-# over SLOW_MINE_SECONDS, so the slowdown stays visible until the leader schedule is fixed (then lower this back to MINE_SECONDS).
+# How long the survivors may take to mine a transaction while one validator is down (pod_restart). Since the epoch-local leader schedule (bft-core #886) rotated epochs
+# keep this too: at bft pin 11051123 the slowest of 22 fault transitions over four runs is 100 s (51-219 s and more before it, when this limit was 600 s, #888), so a chain
+# that has really stopped still fails here. The design's ceilings for its worst shapes are higher (360 s, about 480 s with a T2 repeat), and they have not been seen. Every
+# rotated run logs the seconds it took (evidence/restart-latency.jsonl), marks anything over SLOW_MINE_SECONDS and samples where the latency settles.
 MINE_SECONDS = 240
-MINE_SECONDS_ROTATED = 600
 SLOW_MINE_SECONDS = 30
 # Transactions sent one after another once the first is mined with the validator still down. The first one's time is the fault transition; these show where the
 # latency settles once the schedule has aged the stopped member out (bft-core #886's target: p95 <= 6 s, outside adaptation and recovery runs). 12 since the package's bft pin contains #886 (11051123). At an older pin the stopped root keeps its turn in the rotation, a
@@ -1172,7 +1168,7 @@ class Rehearsal:
         root still certifies at the root epoch and the custody has applied every root record. Needs pos-advance first (pos-handoff-2 for epoch 3)."""
         transport = handoff_ops.DockerTransport(self.gen)
         self.expect(all(self.root_epoch(i, transport) == epoch for i in range(1, self.n + 1)), f'every root certifies at epoch {epoch} (run the handoff first)')
-        self.pod_restart(mine_within=MINE_SECONDS_ROTATED)
+        self.pod_restart(rotated=True)
         for i in range(1, self.n + 1):
             self.wait(f'root {i} certifies at epoch {epoch} again', lambda i=i: self.root_epoch(i, transport) == epoch, 180)
         deployment = json.loads((self.gen / 'network' / 'pos-deployment.json').read_text())
@@ -1383,19 +1379,19 @@ class Rehearsal:
         except Exception as error:   # evidence is best effort; the stage's verdict is about the package
             self.say(f'  pod-restart logs of validator {i} not kept: {error}')
 
-    def record_restart_latency(self, i, stall, mine_within, tx):
-        """The seconds the survivors needed to mine a transaction with validator i down: a log line (marked SLOW with the #886 note when the rotated limit is in force and
-        the time is over SLOW_MINE_SECONDS: the note is wrong for a slow PoA run at epoch 1) and a line in evidence/restart-latency.jsonl."""
-        slow = mine_within > MINE_SECONDS and stall > SLOW_MINE_SECONDS
-        self.say(f'  survivors mined it {stall} s after accepting it with validator {i} down' + (f' (SLOW, bft-core #886: a stopped root is elected leader again every {self.n}th round of a handoff epoch)' if slow else ''))
+    def record_restart_latency(self, i, stall, rotated, tx):
+        """The seconds the survivors needed to mine a transaction with validator i down: a log line (marked SLOW with the #886 note in a rotated epoch when the time is over
+        SLOW_MINE_SECONDS: the note is wrong for a slow PoA run at epoch 1) and a line in evidence/restart-latency.jsonl."""
+        slow = rotated and stall > SLOW_MINE_SECONDS
+        self.say(f'  survivors mined it {stall} s after accepting it with validator {i} down' + (' (SLOW, bft-core #886: the schedule is still adapting to the stopped root, or in its recovery run)' if slow else ''))
         with (self.evidence / 'restart-latency.jsonl').open('a') as out:
-            out.write(json.dumps({'validator_down': i, 'phase': 'transition', 'seconds_to_mine': stall, 'limit': mine_within, 'tx': tx}) + '\n')
+            out.write(json.dumps({'validator_down': i, 'phase': 'transition', 'seconds_to_mine': stall, 'limit': MINE_SECONDS, 'tx': tx}) + '\n')
 
-    def pod_restart(self, mine_within=MINE_SECONDS, capture_logs=None):
+    def pod_restart(self, rotated=False, capture_logs=None):
         """One validator entity at a time: stop its execution client, root and shard node (its signing authority stays live, as the README requires), check what the
         package promises, start them again and check they rejoin. The PUBLIC gateway fails closed while a validator is down (it checks every validator's identity
         before it serves or broadcasts): that is asserted, not worked around; the survivors are driven directly, as the gateway would fan out."""
-        capture_logs = (mine_within == MINE_SECONDS) if capture_logs is None else capture_logs   # the PoA stage keeps the logs of each stop window (bft-core #886), the rotated epochs do not
+        capture_logs = (not rotated) if capture_logs is None else capture_logs   # the PoA stage keeps the logs of each stop window (bft-core #886), the rotated epochs do not
         sender, to = self.manifest['faucet_address'], '0x' + '22' * 20
         for i in self.pods:
             names = [f'ureth{i}', f'root{i}', f'shard{i}']
@@ -1416,17 +1412,17 @@ class Rehearsal:
             blocks = set()
             accepted = time.monotonic()
             for j in survivors:
-                r = self.wait(f'survivor {j} mines it with validator {i} down', lambda j=j: self.ureth(j, 'eth_getTransactionReceipt', [tx]), mine_within)
+                r = self.wait(f'survivor {j} mines it with validator {i} down', lambda j=j: self.ureth(j, 'eth_getTransactionReceipt', [tx]), MINE_SECONDS)
                 self.expect(r['status'] == '0x1', f'survivor {j} has a successful receipt', r['blockHash'])
                 blocks.add(r['blockHash'])
             stall = round(time.monotonic() - accepted)
-            self.record_restart_latency(i, stall, mine_within, tx)
+            self.record_restart_latency(i, stall, rotated, tx)
             if capture_logs:
                 self.capture_restart_window(i, window_start, stall)
             self.expect(len(blocks) == 1, 'the survivors agree on the including block')
             last = tx
-            if mine_within > MINE_SECONDS:
-                last = self.settled_latency(i, survivors, mine_within) or tx
+            if rotated:
+                last = self.settled_latency(i, survivors, MINE_SECONDS) or tx
                 # the whole stop window of the survivors' roots and shards: the end-of-run log tail does not reach back to it
                 roots = [f'{kind}{j}' for j in survivors for kind in ('root', 'shard')]
                 window = self.compose('logs', '--no-color', '--since', stopped, *roots, check=False)
