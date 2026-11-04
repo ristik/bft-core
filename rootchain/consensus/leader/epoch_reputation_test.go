@@ -488,8 +488,10 @@ func bitmapOf(mask uint, n uint64) []byte {
 }
 
 // A member that stops voting keeps its slots in the schedule until the first sample without it reaches the cutoff, D rounds later: this is
-// the adaptation of #886, and its size. Each visit costs two root timeouts, the round whose votes go to the dead leader and its own, so with
-// T=10 s the 4-6 visits are the 80-120 s of timeouts the rehearsal's stop windows show (four roots: 41770707042, 41750980966).
+// the adaptation of #886, and its size. Each visit costs two root timeouts, the round whose votes go to the dead leader and its own, about
+// 20 s at T=10 s. Four roots: 5 or 6 visits, and 94-115 s of timeouts in the rehearsal's stop windows (41770707042, 41750980966). Five roots:
+// 4 to 6 visits, so 80-120 s from the selector; the low end has not been seen live (96 and 117 s in 41862942889). This ring records a sample
+// every round, including the rounds a dead leader loses, which a live ring does not: the counts are the selector's, not a live trace.
 func TestEpochReputationADeadMemberAgesOutAfterDRounds(t *testing.T) {
 	for _, tc := range []struct {
 		weights              []uint64

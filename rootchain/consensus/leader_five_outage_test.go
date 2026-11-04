@@ -8,7 +8,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/unicitynetwork/bft-go-base/types"
 
@@ -75,6 +74,7 @@ func fiveManagerOutage(t *testing.T, dead string, names []string) {
 	// shard certifications: each request goes to the first live root that accepts it, which may lead next and then buffers it itself
 	var rounds []uint64
 	var seconds []float64
+	var sendCounts []int
 	lastUC := func(name string) uint64 {
 		si := m(name).blockStore.ShardInfo(q3fixture.PartitionID, types.ShardID{})
 		if si == nil || si.LastCR == nil {
@@ -89,7 +89,7 @@ func fiveManagerOutage(t *testing.T, dead string, names []string) {
 		var at time.Time
 		sends := 0
 		refusals := map[string]int{}
-		ok := assert.Eventually(t, func() bool {
+		certified := func() bool {
 			if ingress != "" && c.certifiedHash(ingress, hash) {
 				return true
 			}
@@ -115,18 +115,25 @@ func fiveManagerOutage(t *testing.T, dead string, names []string) {
 				break
 			}
 			return false
-		}, q4bDeadline, 10*time.Millisecond, "request %d is accepted and certified", i)
-		require.True(t, ok, "request %d: ingress %q, %d sends, refusals %v", i, ingress, sends, refusals)
+		}
+		// a plain loop, not Eventually: its condition may still be running when the failure message reads what the condition writes
+		deadline := time.Now().Add(q4bDeadline)
+		for !certified() {
+			require.Truef(t, time.Now().Before(deadline), "request %d is accepted and certified: ingress %q, %d sends, refusals %v", i, ingress, sends, refusals)
+			time.Sleep(10 * time.Millisecond)
+		}
+		sendCounts = append(sendCounts, sends)
 		rounds = append(rounds, c.state(ingress).Round-first)
 		seconds = append(seconds, time.Since(at).Seconds())
 	}
-	t.Logf("dead %s: root rounds to the certificate %v, seconds %.2f", dead, rounds, seconds)
+	t.Logf("dead %s: root rounds to the certificate %v, seconds %.2f, sends %v", dead, rounds, seconds, sendCounts)
 	require.LessOrEqual(t, slices.Max(rounds), uint64(requestLimit), "request to certificate in root rounds")
 
 	require.Eventually(t, func() bool { return len(c.commitsSince(c.idx(live[0]), mark)) >= minCommits }, q4bDeadline, 50*time.Millisecond, "ordinary commits go on")
 	c.requireChainsAgree(live...)
 
 	// re-entry: the member returns, votes, and is selected again once a committed sample at the cutoff names it
+	returned := c.mark()
 	c.start(dead)
 	require.Eventually(t, func() bool {
 		r := c.state(live[0]).Round
@@ -140,7 +147,20 @@ func fiveManagerOutage(t *testing.T, dead string, names []string) {
 		}
 		return false
 	}, q4bDeadline, 50*time.Millisecond, "the returned member re-enters the schedule")
-	c.requireChainsAgree(live...)
+	// and it commits what the others commit: it may lead a block, which this does not require, but the chains must share rounds with it
+	require.Eventually(t, func() bool {
+		if len(c.commitsSince(c.idx(dead), returned)) == 0 {
+			return false
+		}
+		at := c.committedRound(dead)
+		for _, name := range live {
+			if c.committedRound(name) < at {
+				return false
+			}
+		}
+		return true
+	}, q4bDeadline, 50*time.Millisecond, "the returned member commits, and the others reach its round")
+	c.requireChainsAgree(names...)
 	c.stopAll()
 }
 

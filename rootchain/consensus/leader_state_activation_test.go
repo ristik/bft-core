@@ -310,11 +310,11 @@ func TestRestartInAnUnknownLeaderRoundResendsTheRecordedTimeout(t *testing.T) {
 	}
 	require.Eventually(t, func() bool { return c.state("H").Round > head()+lag+1 }, 3*time.Minute, 20*time.Millisecond, "the covered rounds run out")
 
-	// c leaves first and one round passes, so no timeout of c is left for the cut round: a and b are below the quorum, and the round can only
+	// c leaves first and H and a pass the last round it can have signed, so no timeout of c is left for the cut round: a and b are below the quorum, and the round can only
 	// advance with H's statement. Stopped after the cut, c's timeout could already be delivered, and the round advanced before H had resent anything.
-	stopped := c.state("a").Round
 	c.stop("c")
-	require.Eventually(t, func() bool { return c.state("a").Round > stopped+1 }, q4bDeadline, 20*time.Millisecond, "H, a and b time the rounds out")
+	stopped := c.state("c").Round // the last round c can have signed, read after it stops
+	require.Eventually(t, func() bool { return c.state("a").Round > stopped && c.state("H").Round > stopped }, q4bDeadline, 20*time.Millisecond, "H, a and b time the rounds out")
 	h.crash.arm(q4bCutSpec{Point: cutBeforeSend, Kind: storage.DecisionTimeout})
 	select {
 	case <-h.crash.fired:
