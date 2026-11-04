@@ -46,6 +46,78 @@ PUBLIC_RPC = '127.0.0.1:8545'
 MINE_SECONDS = 240
 MINE_SECONDS_ROTATED = 600
 SLOW_MINE_SECONDS = 30
+
+# bft-core #886 (epoch-1 note): the PoA pod-restart samples are bimodal (a few seconds, or 25-41 s) and the end-of-run compose logs are of a later generation, so nothing
+# says why. The stage therefore keeps the consensus logs of each stop window (below). They are uploaded with the evidence of a PUBLIC repository, so: (1) only the root and
+# shard services are read (never an authority or the signer, which hold credentials, and not ureth: the transaction path is timed, not logged); (2) the literal contents of
+# every known secret file of the generation are removed from every line; (3) a line that matches a secret pattern is withheld whole; (4) a file is written only if no
+# known secret literal is left in it (fail closed: a failed check writes nothing and says so).
+CAPTURE_SERVICES = ('root', 'shard')
+CAPTURE_MAX_LINES = 6000          # per service and window; the rest is counted, not written
+SECRET_LINE = re.compile(r'(?i)(secret|priv(ate)?[ _-]?key|mnemonic|passphrase|password|credential|\.cred\b|keystore|authorization|bearer|api[ _-]?key|\btoken\b|\bseed\b|ciphertext)')
+WITHHELD_LINE = '[line withheld: it matches a secret pattern]'
+SECRET_FILE = re.compile(r'(?i)(^password$|secret|\.cred(\.|$)|\.key$|^keys?\.json$|^keystore\.json$|^priv)')
+SECRET_FIELD = re.compile(r'(?i)(priv|secret|password|seed|mnemonic|ciphertext|crypto)')
+
+
+def _json_secrets(node, out, under_secret=False):
+    """The string values of a key file that are private: every string under a field whose name says so (a key file's public fields stay readable in the logs)."""
+    if isinstance(node, dict):
+        for k, v in node.items():
+            _json_secrets(v, out, under_secret or bool(SECRET_FIELD.search(str(k))))
+    elif isinstance(node, list):
+        for v in node:
+            _json_secrets(v, out, under_secret)
+    elif isinstance(node, str) and under_secret and len(node) >= 12:
+        out.add(node)
+
+
+def known_secrets(gen):
+    """The literal secrets of a generation: whole contents of the files that are secrets by name (faucet-secrets/*, pos-owner-keys/*, validator*/auth credentials and every
+    *.key/*.cred), and the private fields of its JSON key files. Shallow walk (depth 4, files under 256 KB): the chain data directories are not entered."""
+    found, root = set(), Path(gen)
+    if not root.is_dir():
+        return found
+    for dirpath, dirnames, filenames in os.walk(root):
+        depth = len(Path(dirpath).relative_to(root).parts)
+        dirnames[:] = [d for d in dirnames if depth < 4 and d not in ('data', 'db', 'static_files', 'reth', 'ureth-data')]
+        in_secret_dir = any(part in ('faucet-secrets', 'pos-owner-keys', 'auth') for part in Path(dirpath).relative_to(root).parts)
+        for name in filenames:
+            path = Path(dirpath) / name
+            if not (in_secret_dir or SECRET_FILE.search(name)):
+                continue
+            try:
+                if not path.is_file() or path.stat().st_size > 262144:
+                    continue
+                text = path.read_text(errors='ignore').strip()
+            except OSError:
+                continue
+            if name.endswith('.json'):
+                try:
+                    _json_secrets(json.loads(text), found)
+                    continue
+                except ValueError:
+                    pass
+            if len(text) >= 8:
+                found.add(text)
+                found.update(t for t in re.findall(r'[A-Za-z0-9+/=_.-]{16,}', text))
+    return found
+
+
+def redact_log(text, secrets=()):
+    """The lines of `text` with every known secret literal replaced and every line that matches a secret pattern withheld; returns (lines, scrubbed, withheld)."""
+    out, scrubbed, withheld = [], 0, 0
+    for line in text.splitlines():
+        for secret in sorted(secrets, key=len, reverse=True):
+            if secret in line:
+                line = line.replace(secret, '[redacted]')
+                scrubbed += 1
+        if SECRET_LINE.search(line):
+            out.append(WITHHELD_LINE)
+            withheld += 1
+        else:
+            out.append(line)
+    return out, scrubbed, withheld
 FAUCET = '127.0.0.1:8088'
 PROXY_IPS = ('203.0.113.', '198.51.100.')   # documentation ranges: the client addresses the nginx in front would have set in X-Forwarded-For
 
@@ -1162,6 +1234,39 @@ class Rehearsal:
         self.expect(all(isinstance(b, int) for b in blocks), 'the gateway block was readable in every sample', str([x['gateway'] for x in samples][:2]))
         self.expect(blocks[-1] > blocks[0], 'the execution chain\'s block moved between the first and the last sample (an idle chain still produces blocks)', str(blocks))
 
+    @staticmethod
+    def utc_stamp(plus=0):
+        """An RFC 3339 UTC time with microseconds (what `docker compose logs --since/--until` takes)."""
+        return (datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(seconds=plus)).isoformat(timespec='microseconds').replace('+00:00', 'Z')
+
+    def capture_restart_window(self, i, start, stall):
+        """Keep the consensus logs (root and shard services only) of the window in which validator i was down, redacted as described at CAPTURE_SERVICES, in
+        evidence/pod-restart-logs/validator<i>-down-<seconds>s.log. Best effort for the evidence, strict for secrets: any failure here is said and never fails the stage."""
+        try:
+            end = self.utc_stamp(2)
+            services = [f'{role}{j}' for role in CAPTURE_SERVICES for j in range(1, self.n + 1)]
+            gen = getattr(self, 'gen', None)
+            secrets = known_secrets(gen) if gen else set()   # no generation, no secrets to find (never a walk of the working directory)
+            lines, scrubbed, withheld, truncated = [], 0, 0, 0
+            for service in services:
+                text = self.compose('logs', '--no-color', '--timestamps', '--since', start, '--until', end, service, check=False)
+                kept, s1, w1 = redact_log(text, secrets)
+                scrubbed, withheld = scrubbed + s1, withheld + w1
+                truncated += max(0, len(kept) - CAPTURE_MAX_LINES)
+                lines += kept[:CAPTURE_MAX_LINES]
+            body = '\n'.join(lines)
+            if any(secret in body for secret in secrets):
+                self.say(f'  pod-restart logs of validator {i} NOT kept: a known secret literal survived the redaction')
+                return
+            head = (f'# validator {i} down, survivors mined the probe transaction {stall} s after accepting it; window {start} .. {end}\n'
+                    f'# services: {" ".join(services)}; {scrubbed} secret literals scrubbed, {withheld} lines withheld, {truncated} lines beyond {CAPTURE_MAX_LINES} per service dropped\n')
+            out = self.evidence / 'pod-restart-logs'
+            out.mkdir(exist_ok=True)
+            (out / f'validator{i}-down-{stall}s.log').write_text(head + body + '\n')
+            self.say(f'  kept the root/shard logs of the window: pod-restart-logs/validator{i}-down-{stall}s.log ({len(lines)} lines, {withheld} withheld)')
+        except Exception as error:   # evidence is best effort; the stage's verdict is about the package
+            self.say(f'  pod-restart logs of validator {i} not kept: {error}')
+
     def record_restart_latency(self, i, stall, mine_within, tx):
         """The seconds the survivors needed to mine a transaction with validator i down: a log line (marked SLOW with the #886 note when the rotated limit is in force and
         the time is over SLOW_MINE_SECONDS: the note is wrong for a slow PoA run at epoch 1) and a line in evidence/restart-latency.jsonl."""
@@ -1170,14 +1275,16 @@ class Rehearsal:
         with (self.evidence / 'restart-latency.jsonl').open('a') as out:
             out.write(json.dumps({'validator_down': i, 'seconds_to_mine': stall, 'limit': mine_within, 'tx': tx}) + '\n')
 
-    def pod_restart(self, mine_within=MINE_SECONDS):
+    def pod_restart(self, mine_within=MINE_SECONDS, capture_logs=None):
         """One validator entity at a time: stop its execution client, root and shard node (its signing authority stays live, as the README requires), check what the
         package promises, start them again and check they rejoin. The PUBLIC gateway fails closed while a validator is down (it checks every validator's identity
         before it serves or broadcasts): that is asserted, not worked around; the survivors are driven directly, as the gateway would fan out."""
+        capture_logs = (mine_within == MINE_SECONDS) if capture_logs is None else capture_logs   # the PoA stage keeps the logs of each stop window (bft-core #886), the rotated epochs do not
         sender, to = self.manifest['faucet_address'], '0x' + '22' * 20
         for i in self.pods:
             names = [f'ureth{i}', f'root{i}', f'shard{i}']
             survivors = [j for j in range(1, self.n + 1) if j != i]
+            window_start = self.utc_stamp()
             self.say(f'  stopping validator {i}: {" ".join(names)}')
             self.compose('stop', *names)
             self.wait('the public gateway refuses while a validator is down (fail closed)', lambda: self.http(PUBLIC_RPC, 'GET', '/healthz')[0] == 503, 120)
@@ -1201,7 +1308,10 @@ class Rehearsal:
                 r = self.wait(f'survivor {j} mines it with validator {i} down', lambda j=j: self.ureth(j, 'eth_getTransactionReceipt', [tx]), mine_within)
                 self.expect(r['status'] == '0x1', f'survivor {j} has a successful receipt', r['blockHash'])
                 blocks.add(r['blockHash'])
-            self.record_restart_latency(i, round(time.monotonic() - accepted), mine_within, tx)
+            stall = round(time.monotonic() - accepted)
+            self.record_restart_latency(i, stall, mine_within, tx)
+            if capture_logs:
+                self.capture_restart_window(i, window_start, stall)
             self.expect(len(blocks) == 1, 'the survivors agree on the including block')
             self.say(f'  starting validator {i}')
             self.compose('start', *names)

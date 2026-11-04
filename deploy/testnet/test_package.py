@@ -226,6 +226,88 @@ class ProofOfStake(unittest.TestCase):
         for limit,stall,note in ((rehearse.MINE_SECONDS,90,False),(rehearse.MINE_SECONDS_ROTATED,90,True),(rehearse.MINE_SECONDS_ROTATED,5,False)):
             said.clear(); r.record_restart_latency(2,stall,limit,'0xt')
             self.assertEqual('#886' in said[0],note,(limit,stall,said))
+    def _secret_generation(self):
+        gen=Path(tempfile.mkdtemp())
+        (gen/'faucet-secrets').mkdir(); (gen/'faucet-secrets'/'password').write_text('hunter2-faucet-password\n')
+        (gen/'faucet-secrets'/'keystore.json').write_text(json.dumps({'address':'a'*40,'crypto':{'ciphertext':'c0ffee'*8,'kdf':'scrypt'}}))
+        (gen/'validator1'/'auth').mkdir(parents=True); (gen/'validator1'/'auth'/'client.cred').write_text('CREDENTIALBYTES0123456789abcdef\n')
+        (gen/'validator1'/'root').mkdir(); (gen/'validator1'/'root'/'keys.json').write_text(json.dumps({'signingKey':{'privateKey':'deadbeef'*8,'publicKey':'pub'+'0'*30}}))
+        (gen/'validator1'/'data').mkdir(); (gen/'validator1'/'data'/'password').write_text('inside-a-data-dir-never-read')
+        (gen/'manifest.json').write_text(json.dumps({'validators':3}))
+        return gen
+    def test_the_secret_files_of_a_generation_are_found_and_public_fields_are_not(self):
+        import rehearse
+        found=rehearse.known_secrets(self._secret_generation())
+        for secret in ('hunter2-faucet-password','c0ffee'*8,'CREDENTIALBYTES0123456789abcdef','deadbeef'*8):
+            self.assertIn(secret,found)
+        self.assertNotIn('pub'+'0'*30,found,'a public key field is not a secret')
+        self.assertNotIn('a'*40,found,'the keystore address is public')
+        self.assertNotIn('inside-a-data-dir-never-read',found,'chain data directories are not entered')
+        self.assertEqual(rehearse.known_secrets(Path(tempfile.mkdtemp())/'missing'),set())
+    def test_a_log_is_redacted_by_literal_and_by_pattern(self):
+        import rehearse
+        text='\n'.join(['2026 round 7 local timeout leader=3','2026 loaded key hunter2-faucet-password from disk','2026 config private_key=abcd','2026 Authorization: Bearer x','2026 vote sent'])
+        lines,scrubbed,withheld=rehearse.redact_log(text,{'hunter2-faucet-password'})
+        self.assertEqual(lines[0],'2026 round 7 local timeout leader=3')
+        self.assertEqual(lines[-1],'2026 vote sent')
+        self.assertEqual(lines[1],'2026 loaded key [redacted] from disk','a known literal is scrubbed in place')
+        self.assertTrue(all(l==rehearse.WITHHELD_LINE for l in lines[2:4]),lines)
+        self.assertEqual((scrubbed,withheld),(1,2))
+        self.assertFalse(any('hunter2' in l for l in lines))
+    def _capture_fake(self,logs):
+        import rehearse
+        calls=[]
+        class Fake(rehearse.Rehearsal):
+            def __init__(self,gen): self.n,self.evidence,self.gen=3,Path(tempfile.mkdtemp()),gen
+            def say(self,m): calls.append(('say',m))
+            def compose(self,*a,**k): calls.append(('compose',a)); return logs.get(a[-1],'')
+        return Fake,calls
+    def test_the_stop_window_capture_reads_only_root_and_shard_logs_and_keeps_no_secret(self):
+        import rehearse
+        gen=self._secret_generation()
+        logs={'root2':'t1 local timeout round 9\nt2 key hunter2-faucet-password\nt3 leader 2 down','shard1':'t4 CREDENTIALBYTES0123456789abcdef in line\nt5 proposal sent pub'+'0'*30}
+        Fake,calls=self._capture_fake(logs); r=Fake(gen)
+        r.capture_restart_window(2,'2026-11-04T10:00:00.000000Z',41)
+        services=[c[1][-1] for c in calls if c[0]=='compose']
+        self.assertEqual(services,[f'{role}{j}' for role in ('root','shard') for j in (1,2,3)],'no authority, signer or ureth service is read')
+        self.assertTrue(all(c[1][0]=='logs' and '--since' in c[1] and '--until' in c[1] for c in calls if c[0]=='compose'))
+        out=(r.evidence/'pod-restart-logs'/'validator2-down-41s.log').read_text()
+        for secret in ('hunter2-faucet-password','CREDENTIALBYTES0123456789abcdef'): self.assertNotIn(secret,out)
+        self.assertIn('local timeout round 9',out); self.assertIn('leader 2 down',out); self.assertIn('pub'+'0'*30,out)
+        self.assertIn('2 secret literals scrubbed',out)
+    def test_the_stop_window_capture_writes_nothing_when_a_secret_literal_survives(self):
+        import rehearse
+        gen=self._secret_generation()
+        Fake,calls=self._capture_fake({'root1':'t1 value hunter2-faucet-password'}); r=Fake(gen)
+        with patch('rehearse.redact_log',lambda text,secrets=(): (text.splitlines(),0,0)):
+            r.capture_restart_window(1,'2026-11-04T10:00:00.000000Z',5)
+        self.assertFalse((r.evidence/'pod-restart-logs').exists(),'fail closed: nothing is written')
+        self.assertTrue(any('NOT kept' in m for k,m in calls if k=='say'))
+        Fake2,_=self._capture_fake({}); r2=Fake2(None)   # no generation: nothing to scan (never the working directory)
+        r2.capture_restart_window(1,'2026-11-04T10:00:00.000000Z',5)
+        self.assertTrue((r2.evidence/'pod-restart-logs'/'validator1-down-5s.log').is_file())
+    def test_only_the_poa_pod_restart_keeps_the_stop_window_logs(self):
+        import rehearse
+        kept=[]
+        class Fake(rehearse.Rehearsal):
+            def __init__(self): self.n,self.pods,self.manifest,self.evidence=3,[1],{'faucet_address':'0x'+'11'*20},Path(tempfile.mkdtemp())
+            def say(self,*a): pass
+            def expect(self,ok,what,detail=''): assert ok,what
+            def compose(self,*a,**k): return ''
+            def http(self,*a,**k): return (503,'')
+            def ureth(self,j,method,params=None): return '0x1'
+            def raw_tx(self,*a): return '0xraw'
+            def cast_run(self,*a): return '0xtx'
+            def inner_reply(self,*a): return {'result':'0xtx'}
+            def capture_restart_window(self,i,start,stall): kept.append((i,start.endswith('Z'),stall))
+            def wait(self,what,probe,seconds):
+                if 'mines it' in what: return {'status':'0x1','blockHash':'0xb'}
+                if 'catches up' in what: raise rehearse.Failure('stop after the mining check')
+                return True
+        for limit,expect in ((rehearse.MINE_SECONDS,1),(rehearse.MINE_SECONDS_ROTATED,0)):
+            kept.clear()
+            with self.assertRaises(rehearse.Failure): Fake().pod_restart(mine_within=limit)
+            self.assertEqual(len(kept),expect,limit)
     def test_pos_owner_names_the_revert_selector_it_expects(self):
         import json,rehearse,pos_owner
         class Fake:   # the two helpers it needs: a selector table and an eth_call that fails with a given revert data
