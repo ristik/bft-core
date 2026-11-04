@@ -486,3 +486,58 @@ func bitmapOf(mask uint, n uint64) []byte {
 	}
 	return out
 }
+
+// A member that stops voting keeps its slots in the schedule until the first sample without it reaches the cutoff, D rounds later: this is
+// the adaptation of #886, and its size. Each visit costs two root timeouts, the round whose votes go to the dead leader and its own, so with
+// T=10 s the 4-6 visits are the 80-120 s of timeouts the rehearsal's stop windows show (four roots: 41770707042, 41750980966).
+func TestEpochReputationADeadMemberAgesOutAfterDRounds(t *testing.T) {
+	for _, tc := range []struct {
+		weights              []uint64
+		quorum               uint64
+		minVisits, maxVisits int
+	}{
+		{[]uint64{1, 1, 1, 1}, 3, 5, 6},
+		{[]uint64{1, 1, 1, 1, 1}, 4, 4, 6},
+	} {
+		n := uint64(len(tc.weights))
+		lag, err := rctypes.LeaderLag(n)
+		require.NoError(t, err)
+		nodes := erNodes(t, tc.weights...)
+		ids := sortedIDs(t, nodes)
+		start := uint64(100)
+		stop := start + lag + 4 // past the bootstrap, and well before the first recovery run
+		seen := map[int]bool{}
+		for dead := range ids {
+			full := byte(1<<n - 1)
+			without := full &^ (1 << dead)
+			for delay := uint64(0); delay < n; delay++ { // the member's last sample can lag its stop by a few rounds
+				first := stop + delay // the first sample without the member
+				var head LeaderHead
+				state := erRing(t, n, start)
+				e := erSelector(t, nodes, start, tc.quorum, &head)
+				visits := 0
+				for r := start + 1; r < first+lag+2*n; r++ {
+					voters := full
+					if r >= first {
+						voters = without
+					}
+					head = LeaderHead{Round: r - 1, State: state}
+					if r >= stop {
+						got, err := e.GetLeaderForRound(r)
+						require.NoError(t, err, r)
+						if got == ids[dead] {
+							require.Less(t, r, first+lag, "n=%d dead=%d delay=%d: selected once the sample without it is at the cutoff", n, dead, delay)
+							visits++
+						}
+					}
+					state, err = state.Next(r, []byte{voters})
+					require.NoError(t, err)
+				}
+				seen[visits] = true
+				require.GreaterOrEqual(t, visits, tc.minVisits, "n=%d dead=%d delay=%d", n, dead, delay)
+				require.LessOrEqual(t, visits, tc.maxVisits, "n=%d dead=%d delay=%d", n, dead, delay)
+			}
+		}
+		t.Logf("n=%d D=%d visits seen: %v", n, lag, seen)
+	}
+}
