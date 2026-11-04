@@ -1,7 +1,9 @@
 package consensus
 
 import (
+	"bytes"
 	"context"
+	"crypto"
 	"errors"
 	"fmt"
 	"sync"
@@ -11,10 +13,12 @@ import (
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/stretchr/testify/require"
 	"github.com/unicitynetwork/bft-go-base/types"
+	"github.com/unicitynetwork/bft-go-base/types/hex"
 
 	"github.com/unicitynetwork/bft-core/internal/quorumweight"
 	"github.com/unicitynetwork/bft-core/internal/testutils/q3fixture"
 	"github.com/unicitynetwork/bft-core/network/protocol/abdrc"
+	"github.com/unicitynetwork/bft-core/network/protocol/certification"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/storage"
 	drctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
 	"github.com/unicitynetwork/bft-core/rootchain/testutils"
@@ -245,4 +249,101 @@ func TestEpochInstallDropsRetainedRequests(t *testing.T) {
 	for _, r := range c.replicas {
 		require.Empty(t, r.manager.retained)
 	}
+}
+
+// frozenRetentionFixture is a handoff-profile root that is the next leader and holds a request the verifier accepts, so only the freeze check
+// stands between it and the proposal buffer: on this route nothing else asks (the other route's recipient refuses it itself).
+func frozenRetentionFixture(t *testing.T) (*ConsensusManager, *drctypes.IRChangeReq, types.PartitionShardID, *retainedRequest) {
+	t.Helper()
+	c := newQ3Cluster(t, q3fixture.Options{Assignment: true})
+	r := c.replicas[0]
+	selectRuntimeRequestHistory(t, r)
+	anchor := c.activateAll()
+	cm := r.manager
+	// two successor blocks and the QC of the second, as in TestQ3InstallPreservesSelectedRequestHistory: a high QC with a block, which the freeze check reads
+	parent, err := cm.blockStore.Block(anchor.Slot)
+	require.NoError(t, err)
+	first := &drctypes.BlockData{Version: 3, Epoch: 2, Round: 7, Anchor: anchor, Payload: &drctypes.Payload{Version: 3}}
+	b7, err := parent.Extend(first, cm.irReqVerifier, r.orchestration, crypto.SHA256, cm.log, cm.blockStore.LeaderInputs())
+	require.NoError(t, err)
+	second := &drctypes.BlockData{Version: 3, Epoch: 2, Round: 8, Payload: &drctypes.Payload{Version: 3},
+		Qc: &drctypes.QuorumCert{VoteInfo: &drctypes.RoundInfo{RoundNumber: 7, Epoch: 2, CurrentRootHash: b7.RootHash}, Signatures: map[string]hex.Bytes{r.id().String(): {1}}}}
+	b8, err := b7.Extend(second, cm.irReqVerifier, r.orchestration, crypto.SHA256, cm.log, cm.blockStore.LeaderInputs())
+	require.NoError(t, err)
+	_, err = cm.blockStore.Add(first, cm.irReqVerifier)
+	require.NoError(t, err)
+	_, err = cm.blockStore.Add(second, cm.irReqVerifier)
+	require.NoError(t, err)
+	_, err = cm.blockStore.ProcessQc(&drctypes.QuorumCert{VoteInfo: &drctypes.RoundInfo{RoundNumber: 8, ParentRoundNumber: 7, Epoch: 2, CurrentRootHash: b8.RootHash},
+		LedgerCommitInfo: &types.UnicitySeal{Version: 1, NetworkID: 5, Epoch: 2, Timestamp: 99, RootChainRoundNumber: 7, Hash: b7.RootHash}, Signatures: map[string]hex.Bytes{r.id().String(): {1}}})
+	require.NoError(t, err)
+	view, enabled, err := cm.RequestView(q3fixture.PartitionID, types.ShardID{})
+	require.NoError(t, err)
+	require.True(t, enabled)
+	tr := view.ExpectedTR()
+	uc, err := view.PreviousUC()
+	require.NoError(t, err)
+	req := &drctypes.IRChangeReq{Partition: q3fixture.PartitionID, Shard: types.ShardID{}, CertReason: drctypes.Quorum}
+	for _, id := range view.Context().NodeIDs() {
+		bcr := &certification.BlockCertificationRequest{PartitionID: q3fixture.PartitionID, ShardID: types.ShardID{}, NodeID: id, InputRecord: &types.InputRecord{
+			Version: 1, Epoch: tr.Epoch, RoundNumber: tr.Round, PreviousHash: view.PreviousStateHash(), Hash: bytes.Repeat([]byte{0x81}, 32), BlockHash: bytes.Repeat([]byte{0x82}, 32),
+			SummaryValue: []byte{3}, Timestamp: uc.UnicitySeal.Timestamp}}
+		require.NoError(t, bcr.Sign(c.f.EVMSigners[id]))
+		req.Requests = append(req.Requests, bcr)
+	}
+	cm.leaderSelector = constLeader{leader: cm.id, nodes: cm.Validators()}
+	key := types.PartitionShardID{PartitionID: q3fixture.PartitionID, ShardID: types.ShardID{}.Key()}
+	entry := &retainedRequest{msg: &abdrc.IrChangeReqMsg{Author: cm.id.String(), IrChangeReq: req}}
+	cm.retained = map[types.PartitionShardID]*retainedRequest{key: entry}
+	return cm, req, key, entry
+}
+
+func freezeShardAtHighQC(t *testing.T, cm *ConsensusManager, key types.PartitionShardID) {
+	t.Helper()
+	block, err := cm.blockStore.Block(cm.blockStore.GetHighQc().GetRound())
+	require.NoError(t, err)
+	parent := bytes.Repeat([]byte{0x42}, 32)
+	block.ShardState.States[key].IR.BlockHash = parent
+	require.NotNil(t, block.ShardState.Control)
+	block.ShardState.Control.Phase, block.ShardState.Control.FrozenParent = "endorsed", parent
+	frozen, active, err := cm.blockStore.FrozenShardAt(block.GetRound())
+	require.NoError(t, err)
+	require.True(t, active)
+	require.Equal(t, key, frozen)
+}
+
+// sendRetained buffers directly when this root leads next, so judgeRetained's freeze check is the only one on this route.
+func TestRetainedRequestOfAFrozenShardIsDroppedAndNotBufferedByTheNextLeader(t *testing.T) {
+	t.Run("not frozen: this route buffers it", func(t *testing.T) {
+		cm, _, key, _ := frozenRetentionFixture(t)
+		cm.forwardRetained(context.Background())
+		require.Contains(t, cm.retained, key)
+		require.True(t, cm.irReqBuffer.IsChangeInBuffer(q3fixture.PartitionID, types.ShardID{}), "without this the frozen case below proves nothing")
+	})
+	t.Run("frozen: dropped, not buffered", func(t *testing.T) {
+		cm, req, key, _ := frozenRetentionFixture(t)
+		freezeShardAtHighQC(t, cm, key)
+		cm.forwardRetained(context.Background())
+		_, kept := cm.retained[key]
+		buffered := cm.irReqBuffer.IsChangeInBuffer(q3fixture.PartitionID, types.ShardID{})
+		require.Equal(t, [2]bool{false, false}, [2]bool{kept, buffered}, "[kept, buffered]")
+		verdict, err := cm.judgeRetained(req)
+		require.Equal(t, retainedRefused, verdict)
+		require.ErrorIs(t, err, storage.ErrHandoffFrozen)
+	})
+}
+
+// The legacy switch of the active trust base: like the other two epoch paths, no root queue crosses it.
+func TestLegacyTrustBaseSwitchDropsRetainedRequests(t *testing.T) {
+	f := newRetentionFixture(t)
+	require.NoError(t, f.cm.retainRequest(f.ctx, f.request(t)))
+	f.cm.updateTrustBase()
+	require.Contains(t, f.cm.retained, f.shard, "no switch: kept")
+	active := *f.cm.trustBase.Load()
+	stored := active.Epoch
+	active.Epoch++ // the active base differs from the store's for this round: the next update switches
+	f.cm.trustBase.Store(&active)
+	f.cm.updateTrustBase()
+	require.Equal(t, stored, f.cm.trustBase.Load().Epoch, "the switch happened")
+	require.Empty(t, f.cm.retained)
 }
