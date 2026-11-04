@@ -253,6 +253,31 @@ class ProofOfStake(unittest.TestCase):
         r=Fake()
         with patch.object(rehearse,'SETTLED_SAMPLES',12),self.assertRaises(rehearse.Failure): r.pod_restart(mine_within=rehearse.MINE_SECONDS_ROTATED)   # past the mining waittten before anything else can fail
         self.assertEqual(r.last,'0x1','the gateway reads the sender nonce from the restarted validator: it must hold the last settled sample first')
+    def settled_fake(self,replies):
+        import rehearse
+        class Fake(rehearse.Rehearsal):
+            def __init__(self): self.manifest,self.evidence,self.sent={'faucet_address':'0x'+'11'*20},Path(tempfile.mkdtemp()),[]
+            def say(self,m): pass
+            def expect(self,ok,what,detail=''):
+                if not ok: raise rehearse.Failure(what+' '+detail)
+            def ureth(self,j,method,params=None): return None if method=='eth_getTransactionReceipt' else '0x1'
+            def raw_tx(self,*a): return '0xraw'
+            def cast_run(self,*a): return '0xtx'
+            def inner_reply(self,url,method,params=()):
+                self.sent.append(url)
+                return replies(url)
+            def wait(self,what,probe,seconds): return True
+        return Fake()
+    def test_a_settled_sample_goes_to_every_survivor(self):
+        import rehearse
+        r=self.settled_fake(lambda url:{'result':'0xtx'})
+        with patch.object(rehearse,'SETTLED_SAMPLES',2): self.assertEqual(r.settled_latency(2,[1,3,4],600),'0xtx')
+        self.assertEqual(r.sent,[f'http://ureth{j}:8545' for j in (1,3,4)]*2,'the validators have no peers: a pool not sent it never holds it')
+    def test_a_refused_settled_sample_fails_at_once(self):
+        import rehearse
+        r=self.settled_fake(lambda url:{'error':{'message':'replacement underpriced'}} if 'ureth3' in url else {'result':'0xtx'})
+        with patch.object(rehearse,'SETTLED_SAMPLES',2),self.assertRaisesRegex(rehearse.Failure,'survivor 3 accepts'): r.settled_latency(2,[1,3,4],600)
+        self.assertEqual(r.sent,[f'http://ureth{j}:8545' for j in (1,3)],'not after a 600 s wait for its receipt')
     def test_settled_samples_are_off_until_the_pin_has_886(self):
         import rehearse
         said=[]

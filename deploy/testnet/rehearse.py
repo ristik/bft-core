@@ -1167,6 +1167,16 @@ class Rehearsal:
         self.expect(all(isinstance(b, int) for b in blocks), 'the gateway block was readable in every sample', str([x['gateway'] for x in samples][:2]))
         self.expect(blocks[-1] > blocks[0], 'the execution chain\'s block moved between the first and the last sample (an idle chain still produces blocks)', str(blocks))
 
+    def send_to_survivors(self, survivors, raw, tx):
+        """The gateway's fan-out with a validator down, each reply checked. The validators have no peers, so a pool that is not sent a transaction never holds it: sent to one
+        survivor it waits for that survivor's turn to lead."""
+        for j in survivors:
+            reply = self.inner_reply(f'http://ureth{j}:8545', 'eth_sendRawTransaction', [raw])
+            error = str(reply.get('error', '')).lower()
+            # "nonce too low" is acceptance only when this survivor already holds the transaction's receipt: the sends are sequential and a fast block can include it first
+            known = 'already known' in error or ('nonce too low' in error and self.ureth(j, 'eth_getTransactionReceipt', [tx]) is not None)
+            self.expect(reply.get('result') == tx or known, f'survivor {j} accepts the transaction', json.dumps(reply)[:200])
+
     def settled_latency(self, i, survivors, mine_within):
         """With validator i still down and the fault transition over: SETTLED_SAMPLES transactions, one at a time, each timed from its acceptance to the first survivor's receipt.
         Rounds pass while they run, so the later ones are past the history lag. Recorded, phase 'settled', never judged here: the numbers go to the #886 report."""
@@ -1176,7 +1186,7 @@ class Rehearsal:
             nonce = int(self.ureth(survivors[0], 'eth_getTransactionCount', [sender, 'latest']), 16)
             raw = self.raw_tx(to, nonce, int(self.ureth(survivors[0], 'eth_gasPrice'), 16))
             tx = self.cast_run('keccak', raw)
-            self.inner_reply(f'http://ureth{survivors[0]}:8545', 'eth_sendRawTransaction', [raw])
+            self.send_to_survivors(survivors, raw, tx)
             accepted = time.monotonic()
             self.wait(f'survivor {survivors[0]} mines settled sample {k}', lambda: self.ureth(survivors[0], 'eth_getTransactionReceipt', [tx]), mine_within)
             with (self.evidence / 'restart-latency.jsonl').open('a') as out:
@@ -1210,12 +1220,7 @@ class Rehearsal:
             # the hash is the transaction's own (keccak of the raw bytes), not what a node answers: a survivor the transaction has already reached by gossip answers
             # "already known" with no result, which is acceptance of the same transaction; "nonce too low" counts only with the receipt (below); any other error is a refusal
             tx = self.cast_run('keccak', raw)
-            for j in survivors:
-                reply = self.inner_reply(f'http://ureth{j}:8545', 'eth_sendRawTransaction', [raw])
-                error = str(reply.get('error', '')).lower()
-                # "nonce too low" is acceptance only when this survivor already holds the transaction's receipt: the sends are sequential and a fast block can include it first
-                known = 'already known' in error or ('nonce too low' in error and self.ureth(j, 'eth_getTransactionReceipt', [tx]) is not None)
-                self.expect(reply.get('result') == tx or known, f'survivor {j} accepts the transaction', json.dumps(reply)[:200])
+            self.send_to_survivors(survivors, raw, tx)
             self.say(f'  the {len(survivors)} survivors accept transaction {tx}')
             blocks = set()
             accepted = time.monotonic()
