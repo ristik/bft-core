@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"os"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -247,35 +247,28 @@ func TestRollingRestartCertifiesRetainedRequest(t *testing.T) {
 	require.Fail(t, "no verdict within 25 minutes")
 }
 
-// #886 gate 7, the design's two-stage exception: a T2 repeat is already in the high QC's branch when the shard's request reaches the ingress.
-// The first live run commits the repeat, which makes the retained request truly stale, so only the shard can certify it, and its fresh request
-// comes after a delay R of its own. The covered stretch of the second stage is the design's "about 480 s" at T = 10 s; this bounds it in rounds.
-// R is in root rounds after the commit, explicit: where the fresh request lands relative to the stale samples is the point. By default one
-// placement, in the stale stretch; BFT_GATE7_ALL=1 runs them all, about five minutes each.
+// #886 gate 7, the design's two-stage exception, in part: a T2 repeat is in the certified branch when the shard's request reaches the ingress, the
+// first live run commits the repeat, the held proof is stale, and the shard's fresh request certifies after a delay R of its own.
+// This shape has no second covered stretch, at any R: between the stop and the first live run the stale schedule still has two live leaders in a
+// row, so it keeps certifying blocks with X voting, the run commits them, and their records name the live set. Cutoffs right after the commit
+// already select it (rev's probe, #919). So this does not reach the design's "about 480 s" accounting: that needs exactly one certified block
+// after the stop. The limit of stage two below is that accounting's, and here it is far from binding.
 func TestRollingRestartRepeatConsumesTheFirstLiveRun(t *testing.T) {
-	placements := []uint64{8}
-	if os.Getenv("BFT_GATE7_ALL") != "" {
-		placements = []uint64{1, 4, 8, 12, 16, 20, 26}
-	}
-	for _, hold := range placements {
-		t.Run(fmt.Sprintf("fresh %d rounds after the commit", hold), func(t *testing.T) {
-			t.Parallel()
-			q4Slot(t)
-			rollingRestartTwoStages(t, hold)
-		})
-	}
-}
-
-func rollingRestartTwoStages(t *testing.T, hold uint64) {
+	t.Parallel()
+	q4Slot(t)
+	const hold = 8 // R, in root rounds after the commit: explicit, not an instant resubmission
 	c := newPhaseLockLive(t, 2*time.Second)
 	var armed atomic.Bool
-	var repeatRound atomic.Uint64
+	var repeatMu sync.Mutex
+	repeats := map[uint64]bool{} // every round the filter saw a T2 repeat proposed in
 	base := c.net.filter
 	c.net.filter = func(from, to peer.ID, msg any) bool {
 		if p, ok := msg.(*abdrc.ProposalMsg); ok && armed.Load() && p.Block.Payload != nil {
 			for _, req := range p.Block.Payload.Requests {
 				if req.CertReason == drctypes.T2Timeout {
-					repeatRound.CompareAndSwap(0, p.Block.Round)
+					repeatMu.Lock()
+					repeats[p.Block.Round] = true
+					repeatMu.Unlock()
 				}
 			}
 		}
@@ -303,17 +296,19 @@ func rollingRestartTwoStages(t *testing.T, hold uint64) {
 	start, startUC := c.state(ingress).Round, lastUC(ingress)
 	hash := bytes.Repeat([]byte{0x81}, 32)
 
-	// the shape: a repeat, uncommitted, under a QC. Only then does the request arrive, so no retained request can have gone first.
-	require.Eventually(t, func() bool {
-		r := repeatRound.Load()
-		return r != 0 && c.state(ingress).HighQC >= r && lastUC(ingress) == startUC
-	}, q4bDeadline, 5*time.Millisecond, "a T2 repeat in the high QC's branch, not yet committed")
-	repeat := repeatRound.Load()
+	// the shape: a repeat, uncommitted, and the QC on that very block. Only then does the request arrive, so no retained request can have gone first.
+	isRepeat := func(round uint64) bool {
+		repeatMu.Lock()
+		defer repeatMu.Unlock()
+		return repeats[round]
+	}
+	require.Eventually(t, func() bool { return isRepeat(c.state(ingress).HighQC) && lastUC(ingress) == startUC }, q4bDeadline, 5*time.Millisecond, "a T2 repeat certified, not yet committed")
+	highQC := c.state(ingress).HighQC
 	held := phaseLockProof(t, c, c.nodes[c.idx(ingress)].r, hash)
 	require.NotNil(t, held)
 	require.NoError(t, m(ingress).RequestCertification(context.Background(), *held))
 	accepted := c.state(ingress).Round
-	t.Logf("repeat in round %d, under a QC; the request held from round %d, %d rounds after the stop", repeat, accepted, accepted-start)
+	t.Logf("high QC %d when the request was held from round %d, %d rounds after the stop", highQC, accepted, accepted-start)
 
 	// stage one: the first live run commits the repeat, and the same request cannot certify
 	stage1 := start + rollingRestartRounds(n)
@@ -323,6 +318,22 @@ func rollingRestartTwoStages(t *testing.T, hold uint64) {
 	}
 	committed := c.state(ingress).Round
 	require.False(t, c.certifiedHash(ingress, hash), "the first certificate is the repeat, not the held request")
+	// the repeat that consumed the run was in the branch before the request came: a QC at or above a round says nothing about another branch
+	inChain := func() (uint64, bool) {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		repeatMu.Lock()
+		defer repeatMu.Unlock()
+		for round := range c.chains[c.idx(ingress)] {
+			if repeats[round] && round <= highQC && round > start {
+				return round, true
+			}
+		}
+		return 0, false
+	}
+	require.Eventually(t, func() bool { _, ok := inChain(); return ok }, 10*time.Second, 5*time.Millisecond, "a recorded T2 repeat at or below the high QC %d is in the committed chain", highQC)
+	repeat, _ := inChain()
+	t.Logf("repeat of round %d in the committed chain", repeat)
 	view, enabled, err := m(ingress).RequestView(q3fixture.PartitionID, types.ShardID{})
 	require.NoError(t, err)
 	require.True(t, enabled)
@@ -346,14 +357,14 @@ func rollingRestartTwoStages(t *testing.T, hold uint64) {
 			if proof != nil && m(ingress).RequestCertification(context.Background(), *proof) == nil {
 				if sends == 0 {
 					freshAt = c.state(ingress).Round
-					stage2 = freshAt + d0 + 1 + leader.RecoveryRun // the covered stretch and a live run, from the design's accounting
+					stage2 = freshAt + d0 + 1 + leader.RecoveryRun // the design's accounting
 				}
 				sends++
 				sentUnder = under
 			}
 		}
 		if stage2 != 0 {
-			require.LessOrEqual(t, c.state(ingress).Round, stage2, "stage two: not certified within the covered stretch and a live run of the fresh request")
+			require.LessOrEqual(t, c.state(ingress).Round, stage2, "stage two: not certified within the design's covered stretch and a live run")
 		}
 		require.LessOrEqual(t, c.state(ingress).Round, freshDeadline, "stage two: the fresh request was never accepted")
 		time.Sleep(5 * time.Millisecond)
