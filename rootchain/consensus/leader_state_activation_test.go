@@ -26,10 +26,20 @@ const phaseLockBlockRate = 454 * time.Millisecond
 // the sorted committee (TestEpochLeaderUnitWeightsReproduceTheLegacyHandoffSchedule). No node runs until started.
 func newPhaseLockLive(t *testing.T, timeout time.Duration) *q4bLive {
 	t.Helper()
-	f := q3fixture.New(t, q3fixture.Options{Assignment: true, Weights: []uint64{1, 1, 1, 1}})
+	return newEqualLive(t, timeout, "H", "a", "b", "c")
+}
+
+// newEqualLive is real managers, one per name, on a real epoch 2 of equal members. No node runs until started.
+func newEqualLive(t *testing.T, timeout time.Duration, names ...string) *q4bLive {
+	t.Helper()
+	weights := make([]uint64, len(names))
+	for i := range weights {
+		weights[i] = 1
+	}
+	f := q3fixture.New(t, q3fixture.Options{Assignment: true, Weights: weights})
 	c := newQ4BBase(t, 2, f)
 	tune := func(p *Parameters) { p.BlockRate, p.LocalTimeout = phaseLockBlockRate, timeout }
-	for i, name := range []string{"H", "a", "b", "c"} {
+	for i, name := range names {
 		r := newQ3Replica(t, f, f.NewNodes[i])
 		r.tune = tune
 		n := &q4bNode{name: name, weight: f.Members[i].Weight, r: r}

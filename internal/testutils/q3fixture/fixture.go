@@ -45,7 +45,7 @@ const (
 type Options struct {
 	// UTB makes the activation's protocol tuple the envelope-version-3 one (q3format.Q3ConfigUTB).
 	UTB             bool
-	Weights         []uint64 // successor weights in member order; four members
+	Weights         []uint64 // successor weights in member order; four members or more
 	CommitSealRound uint64   // the old committee's commit round (>= the ordered round 4)
 	SignedBy        int      // how many of the four old members sign the commit; default 3 (the unit threshold); fewer is a forgery
 	// After appends an activation to the given fixture's chain: its weighted committee commits this fixture's successor body
@@ -158,7 +158,7 @@ func New(t *testing.T, o Options) *Fixture {
 	if o.Frozen == nil {
 		o.Frozen = bytes.Repeat([]byte{5}, 32)
 	}
-	require.Len(t, o.Weights, 4)
+	require.GreaterOrEqual(t, len(o.Weights), 4)
 	f := &Fixture{FrozenParent: bytes.Clone(o.Frozen), CommitSealRound: o.CommitSealRound}
 	f.UTB = o.UTB || (o.After != nil && o.After.UTB) || (o.Chain != nil && o.Chain.UTB)
 	o.UTB = f.UTB
@@ -196,8 +196,14 @@ func New(t *testing.T, o Options) *Fixture {
 		f.Prev = o.After
 	}
 
-	f.NewNodes = append([]*testutils.TestNode(nil), f.OldNodes[:3]...)
-	f.NewNodes = append(f.NewNodes, testutils.NewTestNode(t))
+	stay := 3 // a primary of four replaces one member; a larger committee keeps all four and adds, as a joiner does (continuity needs more than 2/3 unchanged)
+	if len(o.Weights) > 4 {
+		stay = 4
+	}
+	f.NewNodes = append([]*testutils.TestNode(nil), f.OldNodes[:stay]...)
+	for len(f.NewNodes) < len(o.Weights) {
+		f.NewNodes = append(f.NewNodes, testutils.NewTestNode(t))
+	}
 	if o.Recovery {
 		require.NotNil(t, o.After, "a recovery follows the primary it replaces")
 		require.NotNil(t, o.Installed, "a recovery replaces the primary's installed configuration")
@@ -423,7 +429,7 @@ func (f *Fixture) assignment(t *testing.T, o Options, oldID []byte) [32]byte {
 		}
 		if o.After == nil {
 			// a root member that stays keeps its EVM validator, so the primary differs from K by one replaced member only
-			if j := slices.IndexFunc(f.OldNodes[:3], func(n *testutils.TestNode) bool { return n.PeerConf.ID.String() == m.NodeID }); j >= 0 {
+			if j := slices.IndexFunc(f.OldNodes[:min(max(3, len(f.Members)-1), len(f.OldNodes))], func(n *testutils.TestNode) bool { return n.PeerConf.ID.String() == m.NodeID }); j >= 0 {
 				v := f.ShardConf.Validators[j]
 				kept := &types.NodeInfo{NodeID: v.NodeID, SigKey: bytes.Clone(v.SigKey), Stake: weight}
 				keys[i] = evmKey{f.GenesisEVM[j].Signer, kept}
