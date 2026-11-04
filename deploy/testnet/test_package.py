@@ -218,14 +218,14 @@ class ProofOfStake(unittest.TestCase):
                 if 'mines it' in what: return {'status':'0x1','blockHash':'0xb'}
                 if 'catches up' in what: raise rehearse.Failure('stop after the mining check')
                 return True
-        r=Fake()
+        r=Fake(); r.gen=self._secret_generation()
         with patch.object(rehearse,'SETTLED_SAMPLES',12),self.assertRaises(rehearse.Failure): r.pod_restart(mine_within=rehearse.MINE_SECONDS_ROTATED)   # past the mining wait: the record is written before anything else can fail
         rows=[json.loads(x) for x in (r.evidence/'restart-latency.jsonl').read_text().splitlines()]
         self.assertEqual([(x['validator_down'],x['limit'],x['tx']) for x in rows if x['phase']=='transition'],[(1,rehearse.MINE_SECONDS_ROTATED,'0xtx')])
         settled=[x for x in rows if x['phase']=='settled']
         self.assertEqual([x['sample'] for x in settled],list(range(12)),'where the latency settles, the validator still down')
         self.assertEqual(rows[0]['phase'],'transition')
-        self.assertEqual((r.evidence/'stop-window-2-v1.log').read_text(),'a stop window line')
+        self.assertEqual((r.evidence/'stop-window-2-v1.log').read_text(),'a stop window line\n')
         self.assertTrue(any('survivors mined it' in m for m in said))
         for limit,stall,note in ((rehearse.MINE_SECONDS,90,False),(rehearse.MINE_SECONDS_ROTATED,90,True),(rehearse.MINE_SECONDS_ROTATED,5,False)):
             said.clear(); r.record_restart_latency(2,stall,limit,'0xt')
@@ -256,7 +256,7 @@ class ProofOfStake(unittest.TestCase):
                 if 'catches up' in what: return {'blockHash':'0xb'}
                 return True
         r=Fake()
-        with self.assertRaises(rehearse.Failure): r.pod_restart(mine_within=rehearse.MINE_SECONDS_ROTATED)
+        with patch.object(rehearse,'SETTLED_SAMPLES',12),self.assertRaises(rehearse.Failure): r.pod_restart(mine_within=rehearse.MINE_SECONDS_ROTATED)   # past the mining wait
         self.assertEqual(r.asked,r.hashes[-1],'the last settled sample, not the transition transaction: the gateway reads the nonce from the restarted validator')
         self.assertGreater(len(r.hashes),1)
     def settled_fake(self,replies):
@@ -274,6 +274,92 @@ class ProofOfStake(unittest.TestCase):
                 return replies(url)
             def wait(self,what,probe,seconds): return True
         return Fake()
+    def test_the_transition_transaction_goes_to_every_survivor(self):
+        import rehearse
+        sent=[]
+        class Fake(rehearse.Rehearsal):
+            def __init__(self): self.n,self.pods,self.manifest,self.evidence,self.target=4,[2],{'faucet_address':'0x'+'11'*20},Path(tempfile.mkdtemp()),2
+            def say(self,m): pass
+            def expect(self,ok,what,detail=''): assert ok,what
+            def compose(self,*a,**k): return ''
+            def http(self,*a,**k): return (503,'')
+            def ureth(self,j,method,params=None): return '0x1'
+            def raw_tx(self,*a): return '0xraw'
+            def cast_run(self,*a): return '0xtx'
+            def inner_reply(self,url,method,params=()):
+                sent.append(url)
+                return {'result':'0xtx'}
+            def wait(self,what,probe,seconds):
+                if 'mines it' in what: raise rehearse.Failure('stop at the mining wait')
+                return True
+        with self.assertRaises(rehearse.Failure): Fake().pod_restart(mine_within=rehearse.MINE_SECONDS_ROTATED)
+        self.assertEqual(sent,[f'http://ureth{j}:8545' for j in (1,3,4)],'the validators have no peers: a pool not sent it never holds it')
+    def test_the_next_result_is_any_open_result_but_the_last_handoffs(self):
+        import rehearse
+        done,other,zero='0x'+'aa'*32,'0x'+'bb'*32,'0x'+'00'*32
+        self.assertEqual(rehearse.next_open_result(other,done),other,'also when it was already open as the stage started')
+        self.assertIsNone(rehearse.next_open_result(done,done))
+        self.assertIsNone(rehearse.next_open_result(zero,done))
+    def handoff_2_fake(self,state,open_result='0x'+'bb'*32):
+        import rehearse
+        gen=Path(tempfile.mkdtemp()); (gen/'network'/'handoff').mkdir(parents=True)
+        (gen/'network'/'pos-deployment.json').write_text(json.dumps({'election':'0xe','custody':'0xc'}))
+        (gen/'network'/'handoff'/'result-epoch-2.txt').write_text('0x'+'aa'*32+'\n')
+        class Fake(rehearse.Rehearsal):
+            def __init__(self): self.n,self.gen,self.target=1,gen,2
+            def say(self,m): pass
+            def expect(self,ok,what,detail=''):
+                if not ok: raise rehearse.Failure(what+' '+detail)
+            def root_epoch(self,i,transport=None): return 2
+            def view_text(self,*a): return open_result
+            def view(self,*a): return [0]
+            def wait(self,what,probe,seconds): return probe()
+            def cast_run(self,*a): return '0xdata'
+            def call(self,*a,**k): return '0x'+f'{state:064x}'
+            def pos_proposal(self): raise rehearse.Failure('reached the proposal')
+        return Fake()
+    def test_the_second_handoff_needs_the_first_result_acknowledged(self):
+        import rehearse
+        with patch('rehearse.handoff_ops.DockerTransport'):
+            with self.assertRaisesRegex(rehearse.Failure,'reached the proposal'): self.handoff_2_fake(rehearse.RESULT_ACKNOWLEDGED).pos_handoff_2()
+            with self.assertRaisesRegex(rehearse.Failure,'is Acknowledged'): self.handoff_2_fake(5).pos_handoff_2()   # Closed also clears openResult
+    def test_the_rotated_stop_window_is_kept_redacted_and_fails_closed(self):
+        import rehearse
+        gen=self._secret_generation()
+        said=[]
+        class Fake(rehearse.Rehearsal):
+            def __init__(self,g): self.evidence,self.gen,self.target=Path(tempfile.mkdtemp()),g,2
+            def say(self,m): said.append(m)
+        r=Fake(gen); r.keep_stop_window(2,'t1 local timeout\nt2 key hunter2-faucet-password\nt3 private_key=abc')
+        out=(r.evidence/'stop-window-2-v2.log').read_text()
+        self.assertIn('local timeout',out); self.assertNotIn('hunter2',out); self.assertIn(rehearse.WITHHELD_LINE,out)
+        r=Fake(gen)
+        with patch('rehearse.redact_log',lambda text,secrets=(): (text.splitlines(),0,0)): r.keep_stop_window(1,'t1 hunter2-faucet-password')
+        self.assertFalse((r.evidence/'stop-window-2-v1.log').exists(),'a literal survived: nothing is written')
+        self.assertTrue(any('NOT kept' in m for m in said))
+        for g in (None,Path(tempfile.mkdtemp())):   # no generation, or a scan that finds nothing
+            r=Fake(g); r.keep_stop_window(1,'t1 anything')
+            self.assertFalse((r.evidence/'stop-window-2-v1.log').exists())
+    def test_compose_logs_are_redacted_or_withheld_before_upload(self):
+        import redact_evidence
+        gen=self._secret_generation()
+        log=Path(tempfile.mkdtemp())/'compose-logs.txt'
+        log.write_text('t1 round 7\nt2 hunter2-faucet-password\nt3 private_key=abc\n')
+        redact_evidence.redact_file(gen,log)
+        out=log.read_text()
+        self.assertIn('t1 round 7',out); self.assertNotIn('hunter2',out); self.assertNotIn('abc',out)
+        log.write_text('t1 hunter2-faucet-password\n')
+        redact_evidence.redact_file(Path(tempfile.mkdtemp()),log)   # a scan that finds nothing did not see the generation
+        self.assertTrue(log.read_text().startswith('[log withheld'),log.read_text())
+        log.write_text('t1 hunter2-faucet-password\n')
+        with patch('redact_evidence.redact_log',lambda text,secrets=(): (text.splitlines(),0,0)): redact_evidence.redact_file(gen,log)
+        self.assertNotIn('hunter2',log.read_text(),'a literal survived: none of the content stays')
+    def test_every_workflow_redacts_the_compose_logs_it_uploads(self):
+        for name in ('testnet-rehearsal.yml','testnet-bridge.yml'):
+            lines=(Path(__file__).resolve().parents[2]/'.github'/'workflows'/name).read_text().splitlines()
+            taken=[i for i,l in enumerate(lines) if "compose-logs.txt'" in l and ' logs ' in l]
+            self.assertTrue(taken,name)
+            for i in taken: self.assertIn('redact_evidence.py',lines[i+1],f'{name}:{i+1} uploads compose logs unredacted')
     def test_a_settled_sample_goes_to_every_survivor(self):
         import rehearse
         r=self.settled_fake(lambda url:{'result':'0xtx'})
@@ -310,7 +396,7 @@ class ProofOfStake(unittest.TestCase):
         with self.assertRaises(rehearse.Failure): r.pod_restart(mine_within=rehearse.MINE_SECONDS_ROTATED)   # past the mining waittten before anything else can fail
         self.assertEqual(rehearse.SETTLED_SAMPLES,0,'at a pin without #886 a sample can wait out its whole limit (run 41737297875)')
         rows=[json.loads(x) for x in (r.evidence/'restart-latency.jsonl').read_text().splitlines()]
-        self.assertEqual([x['phase'] for x in rows],['transition'],'no samples')
+        self.assertEqual([x['phase'] for x in rows],['transition','window'],'no samples')
         self.assertEqual(r.asked,'0xtx','the wait falls back to the transition transaction')
     def _secret_generation(self):
         gen=Path(tempfile.mkdtemp())

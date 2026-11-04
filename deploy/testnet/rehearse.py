@@ -135,6 +135,14 @@ def redact_log(text, secrets=()):
         else:
             out.append(line)
     return out, scrubbed, withheld
+RESULT_RESERVED, RESULT_ACKNOWLEDGED = 1, 3   # ElectionPolicy.ResultState
+
+
+def next_open_result(open_result, done):
+    """The open result if a handoff can still use it: not none, and not the one the last handoff used."""
+    return open_result if open_result != '0x' + '00' * 32 and open_result != done else None
+
+
 FAUCET = '127.0.0.1:8088'
 PROXY_IPS = ('203.0.113.', '198.51.100.')   # documentation ranges: the client addresses the nginx in front would have set in X-Forwarded-For
 
@@ -530,6 +538,10 @@ class Rehearsal:
         self.say(f'  claim without credit: exit {status}')
         self.expect(self.balance(recipient) == 0 and self.balance(pool) == after, 'a claim by a payee without credit moves nothing out of the pool', f'recipient {self.balance(recipient)}, pool {self.balance(pool)}')
 
+    def result_state(self, election, result):
+        """The stored ResultState of a result."""
+        return int(self.call('eth_call', [{'to': election, 'data': self.cast_run('calldata', 'result(bytes32)', result)}, 'latest'])[2:66], 16)
+
     def pos_election(self):
         """The election reserves a result. The first design gave an identity two units by a second bond; the package's caps are (16, 1, 6): lMax is ONE lot per
         identity and a genesis identity has used it, so that bond is refused with LotCapacity (asserted here: the first run of this stage reverted on it, and
@@ -566,12 +578,11 @@ class Rehearsal:
             self.say('  election clock: ' + clock())
             return open_result()
         result = before or self.wait('the election reserves a result', reserved, 1500)
-        raw = self.call('eth_call', [{'to': election, 'data': self.cast_run('calldata', 'result(bytes32)', result)}, 'latest'])
-        state = int(raw[2:66], 16)   # ResultState: 1 Reserved
+        state = self.result_state(election, result)
         members = self.view_text(election, 'frozenMembers(bytes32)((uint64,uint64,uint64,uint64,bytes32)[])', result)
         (self.evidence / 'pos-election-frozen-members.txt').write_text(members + '\n')
         self.say(f'  result {result}, state {state}: {members}')
-        self.expect(state == 1, 'the open result is Reserved', str(state))
+        self.expect(state == RESULT_RESERVED, 'the open result is Reserved', str(state))
         self.expect(members.count('(') - members.count('((') == self.n, f'the reserved result freezes {self.n} members', members[:200])
         self.expect(before is None, 'no result was open before the stage started', str(before))
 
@@ -680,6 +691,7 @@ class Rehearsal:
         zero = '0x' + '00' * 32
         result = self.view_text(election, 'openResult()(bytes32)').strip()
         self.expect(result != zero, 'the election has a reserved result (run pos-election first)')
+        (work / f'result-epoch-{self.target}.txt').write_text(result + '\n')
         ids = self.entity_ids()
         # 1 the next root trust base (a joiner's authority had to start at its scope, so pos-joiner made it already: the same inputs)
         if self.joiners and (work / f'trust-base-epoch{self.target}.json').exists():
@@ -905,14 +917,20 @@ class Rehearsal:
         transport = handoff_ops.DockerTransport(self.gen)
         self.expect(all(self.root_epoch(i, transport) == 2 for i in range(1, self.n + 1)), 'every root certifies at epoch 2 (run the first handoff first)')
         deployment = json.loads((self.gen / 'network' / 'pos-deployment.json').read_text())
-        election, zero = deployment['election'], '0x' + '00' * 32
-        done = self.view_text(election, 'openResult()(bytes32)').strip()
-        self.say(f'  open result at the start: {done} (the first handoff\'s result is {"still open" if done != zero else "closed"})')
+        election = deployment['election']
+        # the id the first handoff recorded, not what is open now: a slow pos-restart can outlast the cadence, and then the open result is already the next one
+        recorded = self.gen / 'network' / 'handoff' / 'result-epoch-2.txt'
+        self.expect(recorded.is_file(), 'the first handoff recorded its result (run pos-proposal first)')
+        done = recorded.read_text().strip()
+        self.say(f'  the first handoff\'s result: {done}; open result at the start: {self.view_text(election, "openResult()(bytes32)").strip()}')
         def next_result():
             out = self.view_text(election, 'openResult()(bytes32)').strip()
             self.say(f'  openResult {out}, progress {self.view(self.REGISTRY, "progress()(uint64)")[0]}')
-            return out if out != zero and out != done else None
+            return next_open_result(out, done)
         self.wait('the election reserves the next result', next_result, 1500)
+        # the contract clears openResult on any outcome, so a next result alone does not say how the first one ended
+        state = self.result_state(election, done)
+        self.expect(state == RESULT_ACKNOWLEDGED, 'the first handoff\'s result is Acknowledged', str(state))
         self.target = 3
         try:
             self.pos_proposal()
@@ -1302,6 +1320,25 @@ class Rehearsal:
         """An RFC 3339 UTC time with microseconds (what `docker compose logs --since/--until` takes)."""
         return (datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(seconds=plus)).isoformat(timespec='microseconds').replace('+00:00', 'Z')
 
+    def keep_stop_window(self, i, window):
+        """The rotated epochs' stop window in evidence/stop-window-<target>-v<i>.log, redacted as at CAPTURE_SERVICES. Fails closed: a failed scan or a literal that survives
+        writes nothing and says so; never fails the stage."""
+        name = f'stop-window-{self.target}-v{i}.log'
+        try:
+            gen = getattr(self, 'gen', None)
+            if not gen:
+                raise SecretScanError('no generation to scan for secrets')
+            secrets = known_secrets(gen)
+            lines, _, withheld = redact_log(window, secrets)
+            body = '\n'.join(lines)
+            if any(secret in body for secret in secrets):
+                self.say(f'  {name} NOT kept: a known secret literal survived the redaction')
+                return
+            (self.evidence / name).write_text(body + '\n')
+            self.say(f'  kept {name} ({len(lines)} lines, {withheld} withheld)')
+        except Exception as error:   # evidence is best effort; the stage's verdict is about the package
+            self.say(f'  {name} not kept: {error}')
+
     def capture_restart_window(self, i, start, stall):
         """Keep the consensus logs (root and shard services only) of the window in which validator i was down, redacted as described at CAPTURE_SERVICES, in
         evidence/pod-restart-logs/validator<i>-down-<seconds>s.log. Best effort for the evidence, strict for secrets: any failure here is said and never fails the stage."""
@@ -1358,8 +1395,7 @@ class Rehearsal:
             nonce = int(self.ureth(survivors[0], 'eth_getTransactionCount', [sender, 'latest']), 16)
             price = int(self.ureth(survivors[0], 'eth_gasPrice'), 16)
             raw = self.raw_tx(to, nonce, price)
-            # the hash is the transaction's own (keccak of the raw bytes), not what a node answers: a survivor the transaction has already reached by gossip answers
-            # "already known" with no result, which is acceptance of the same transaction; "nonce too low" counts only with the receipt (below); any other error is a refusal
+            # the hash is the transaction's own (keccak of the raw bytes), not what a node answers: send_to_survivors says which answers are acceptance
             tx = self.cast_run('keccak', raw)
             self.send_to_survivors(survivors, raw, tx)
             self.say(f'  the {len(survivors)} survivors accept transaction {tx}')
@@ -1380,7 +1416,7 @@ class Rehearsal:
                 # the whole stop window of the survivors' roots and shards: the end-of-run log tail does not reach back to it
                 roots = [f'{kind}{j}' for j in survivors for kind in ('root', 'shard')]
                 window = self.compose('logs', '--no-color', '--since', stopped, *roots, check=False)
-                (self.evidence / f'stop-window-{self.target}-v{i}.log').write_text(window)
+                self.keep_stop_window(i, window)
                 with (self.evidence / 'restart-latency.jsonl').open('a') as out:   # tags the window's samples for the #886 two-stage bound
                     out.write(json.dumps({'validator_down': i, 'phase': 'window', 'repeats': repeated_certificates(window)}) + '\n')
             self.say(f'  starting validator {i}')
