@@ -1062,12 +1062,18 @@ class Rehearsal:
     def expect_restore_running(self, i):
         """The joiner's restore is up after 30 s. Its whole log is kept either way: the first crash is at the start of it, each restart only adds a refusal (#905), and a
         container in a restart loop can read as running at the moment of the look."""
-        time.sleep(30)
+        samples = self.sample_pids(i, 30)
         logs = self.compose('logs', '--no-color', '--tail', '60', f'shard{i}', check=False)
         self.keep_redacted(self.evh() / f'joiner-shard-{i}-restore.log', logs)
         running = f'shard{i}' in self.compose('ps', '--status', 'running', '--services').split()
         self.say(f'  joiner shard {i} restoring after 30 s: {"running" if running else "NOT running"}: ' + ' | '.join(logs.strip().splitlines()[-3:])[-500:])
-        self.keep_redacted(self.evh() / f'joiner-shard-{i}-restore-whole.log', self.compose('logs', '--no-color', '--timestamps', f'shard{i}', check=False))
+        tag = getattr(self, 'restore_tag', '0')
+        whole = self.compose('logs', '--no-color', '--timestamps', f'shard{i}', check=False)
+        self.keep_redacted(self.evh() / f'joiner-shard-{i}-restore-whole-{tag}.log', whole)
+        with (self.evh() / 'restore-repeat.jsonl').open('a') as out:
+            out.write(json.dumps({'tag': tag, 'limit': getattr(self, 'restore_pids', None), 'running': running, 'peak': max([s['peak'] or 0 for s in samples], default=None),
+                                  'current_max': max([s['current'] or 0 for s in samples], default=None), 'events_max': max([s['max'] or 0 for s in samples], default=None),
+                                  'n': len(samples), 'head': [l[:220] for l in whole.splitlines() if re.search(r'SIGABRT|pthread_create|fatal error|^\S+\s+\|\s+\S*\s*panic|runtime/cgo|out of memory|PC=', l)][:6]}) + '\n')
         self.expect(running, f'the joiner\'s shard node {i} runs as a restore under its new session', logs.strip()[-500:])
 
     def advance_joiner(self, i, operator, shard_epoch):
@@ -1087,6 +1093,39 @@ class Rehearsal:
         step('status after', 'status', *operator)
         self.keep_redacted(self.evh() / f'joiner-authority-{i}.log', '\n'.join(log))
         self.expect(rc == 0, f'the joiner\'s authority {i} advanced, enrolled and issued its session', log[-1][-400:])
+        self.restore_repeat(i)
+
+    def sample_pids(self, i, seconds):
+        """The shard container's cgroup pid counters once a second (throwaway, #905)."""
+        out, end = [], time.time() + seconds
+        while time.time() < end:
+            row = {'current': None, 'peak': None, 'max': None}
+            try:
+                cid = self.compose('ps', '-q', f'shard{i}', check=False).strip()
+                base = Path(f'/sys/fs/cgroup/system.slice/docker-{cid}.scope')
+                if not base.is_dir():
+                    base = Path(f'/sys/fs/cgroup/docker/{cid}')
+                row['current'] = int((base / 'pids.current').read_text())
+                if (base / 'pids.peak').exists():
+                    row['peak'] = int((base / 'pids.peak').read_text())
+                row['max'] = int((base / 'pids.events').read_text().split()[1])
+            except Exception:
+                pass
+            out.append(row)
+            time.sleep(1)
+        return out
+
+    def restore_repeat(self, i):
+        """Repeat the joiner's restore (throwaway, #905): REPEAT times at the package's limit, then with low pid limits as controls."""
+        plan = [('n%d' % n, None) for n in range(1, int(os.environ.get('RESTORE_REPEAT', '30')) + 1)] + [('lim%d' % l, l) for l in (64, 40, 24, 16)]
+        for tag, limit in plan:
+            self.restore_tag, self.restore_pids = tag, limit
+            try:
+                self.restore_joiner(i)
+                self.say(f'  restore {tag}: ok')
+            except Exception as error:
+                self.say(f'  restore {tag}: {type(error).__name__}: {str(error)[:300]}')
+        self.restore_tag, self.restore_pids = 'final', None
         self.restore_joiner(i)
 
     def restore_body_ids(self):
@@ -1147,7 +1186,7 @@ class Rehearsal:
         entry += ['--tip-uc', '/state/tip.uc.cbor', '--tip-tr', '/state/tip.tr.cbor', '--trust-body-id', found.group(1)]
         restore_file = self.gen / handoff_ops.RESTORE_OVERRIDE
         try:
-            restore_file.write_text(json.dumps({'services': {f'shard{i}': {'entrypoint': entry}}}, indent=1) + '\n')
+            restore_file.write_text(json.dumps({'services': {f'shard{i}': {'entrypoint': entry, **({'pids_limit': self.restore_pids} if getattr(self, 'restore_pids', None) else {})}}}, indent=1) + '\n')
             self.compose('up', '-d', '--no-deps', '--force-recreate', f'shard{i}')
             self.expect_restore_running(i)
             survivor = self.wait(f'the joiner\'s execution client {i} catches up with validator 1', lambda: int(self.ureth(i, 'eth_blockNumber'), 16) + 5 >= int(self.ureth(1, 'eth_blockNumber'), 16), 300)
