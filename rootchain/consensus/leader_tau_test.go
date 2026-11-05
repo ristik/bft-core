@@ -39,8 +39,9 @@ func (r *onLoopResolver) ResolveView(partition types.PartitionID, shard types.Sh
 // #886 gate 9, tau: the time of one unknown-leader round on real managers with durable stores, with every node holding no retained request, then one, then several
 // that its next-leader forwarding verifies on the manager loop. Measurement only, for 468 + 822*tau + R: the mean decides that total. It asserts the shape of the
 // sample, no number: no sampled round lies in a recovery run, whose known leader with proposals dropped takes the full timer, and every node still holds its entries
-// after each row. T does not enter an unknown round. The fixture has one shard, so the extra entries of a row are the shard's request under other keys: each is judged
-// in full, with its proof, as another shard's would be, and an unknown round sends none of them. Four roots share one machine, so a round here also pays for the other
+// after each row. T does not enter an unknown round. The fixture has one shard, so the extra entries of a row are the shard's request under other keys, and an unknown
+// round sends none of them. Each is four signed requests with no configured consistency proof (no proof_type, so NoOpVerifier, and no ZkProof): the rows time no proof
+// verification, which judgeRetained would also run every round per entry on a proof-verifying shard. Four roots share one machine, so a round here also pays for the other
 // three. Set TMPDIR to the disk being measured. Set BFT_GATE9_TAU=1, and BFT_TAU_ROUNDS for more than 120 rounds a row.
 func TestTauOfAnUnknownLeaderRound(t *testing.T) {
 	if os.Getenv("BFT_GATE9_TAU") == "" {
@@ -94,7 +95,8 @@ func TestTauOfAnUnknownLeaderRound(t *testing.T) {
 	measure := func(label string) {
 		var perRound []time.Duration
 		var total time.Duration
-		for done := uint64(0); done < rounds; {
+		done := uint64(0)
+		for done < rounds {
 			chunk := min(rounds-done, longest)
 			clean := func(from uint64) bool {
 				for r := from; r < from+chunk+2; r++ {
@@ -131,17 +133,18 @@ func TestTauOfAnUnknownLeaderRound(t *testing.T) {
 				over++
 			}
 		}
-		t.Logf("%s: %d rounds, mean %s, median %s, p95 %s, p99 %s, p99.9 %s, max %s, %d samples, %d over 60.1 ms", label, rounds, (total / time.Duration(rounds)).Round(10*time.Microsecond),
+		t.Logf("%s: %d rounds, mean %s, median %s, p95 %s, p99 %s, p99.9 %s, max %s, %d samples, %d over 60.1 ms", label, done, (total / time.Duration(done)).Round(10*time.Microsecond),
 			q(.5), q(.95), q(.99), q(.999), perRound[len(perRound)-1], len(perRound), over)
 	}
-	// hold brings every node to the given number of retained entries on its own loop, and fails if it holds another number after that: a dropped entry would flatter a row.
-	hold := func(entries int) {
+	// onLoop counts every node's retained entries on its own loop, first topping them up to the given number if top is set, and fails on any other count: a dropped entry
+	// would flatter a row.
+	onLoop := func(top bool, entries int) {
 		key := types.PartitionShardID{PartitionID: q3fixture.PartitionID, ShardID: types.ShardID{}.Key()}
 		for i, n := range c.nodes {
 			m := n.r.manager
 			held := make(chan int, 1)
 			f := func() {
-				if entry := m.retained[key]; entry != nil {
+				if entry := m.retained[key]; top && entry != nil {
 					for extra := len(m.retained); extra < entries; extra++ {
 						m.retained[types.PartitionShardID{PartitionID: q3fixture.PartitionID + types.PartitionID(extra), ShardID: key.ShardID}] = &retainedRequest{msg: entry.msg}
 					}
@@ -165,9 +168,9 @@ func TestTauOfAnUnknownLeaderRound(t *testing.T) {
 		require.NoError(t, n.r.manager.RequestCertification(context.Background(), *proof))
 	}
 	for _, entries := range []int{1, 4, 16} {
-		hold(entries)
+		onLoop(true, entries)
 		measure(fmt.Sprintf("%d retained entries at every node", entries))
-		hold(entries)
+		onLoop(false, entries)
 	}
 	require.False(t, c.certifiedHash("H", hash), "the rounds stayed unknown")
 }
