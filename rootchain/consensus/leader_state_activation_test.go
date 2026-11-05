@@ -32,11 +32,18 @@ func newPhaseLockLive(t *testing.T, timeout time.Duration) *q4bLive {
 // newEqualLive is real managers, one per name, on a real epoch 2 of equal members. No node runs until started.
 func newEqualLive(t *testing.T, timeout time.Duration, names ...string) *q4bLive {
 	t.Helper()
+	return newEqualLiveOptions(t, timeout, q3fixture.Options{}, names...)
+}
+
+// newEqualLiveOptions is newEqualLive with the fixture's other options, its shards among them.
+func newEqualLiveOptions(t *testing.T, timeout time.Duration, o q3fixture.Options, names ...string) *q4bLive {
+	t.Helper()
 	weights := make([]uint64, len(names))
 	for i := range weights {
 		weights[i] = 1
 	}
-	f := q3fixture.New(t, q3fixture.Options{Assignment: true, Weights: weights})
+	o.Assignment, o.Weights = true, weights
+	f := q3fixture.New(t, o)
 	c := newQ4BBase(t, 2, f)
 	tune := func(p *Parameters) { p.BlockRate, p.LocalTimeout = phaseLockBlockRate, timeout }
 	for i, name := range names {

@@ -139,7 +139,12 @@ func TestSuccessiveCoupledSupersessionInstall(t *testing.T) {
 
 func runtimeRequestHistory(t *testing.T, r *q3Replica) *q3active.RequestHistory {
 	t.Helper()
-	h, err := r.rt.RequestHistory(q3active.RequestHistoryConfig{Candidates: r.manager.blockStore, Anchor: func(types.PartitionID, types.ShardID) (*types.PartitionDescriptionRecord, error) {
+	h, err := r.rt.RequestHistory(q3active.RequestHistoryConfig{Candidates: r.manager.blockStore, Anchor: func(partition types.PartitionID, shard types.ShardID) (*types.PartitionDescriptionRecord, error) {
+		for _, conf := range r.f.ExtraConfs {
+			if conf.PartitionID == partition && conf.ShardID.Equal(shard) {
+				return conf, nil
+			}
+		}
 		return r.f.ShardConf, nil
 	}, HashAlg: crypto.SHA256, Network: q3fixture.Network, Version: 1})
 	require.NoError(t, err)

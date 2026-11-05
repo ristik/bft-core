@@ -82,6 +82,18 @@ type Options struct {
 	WithRecoveryReceipts bool
 	// Params are extra partition parameters of the genesis configuration (the continuity budget, say).
 	Params map[string]string
+	// ExtraShards adds other shards to the certified state, each with its own validators. They take no part in the handoff: they are the
+	// load of a root that serves more than the EVM shard.
+	ExtraShards []ExtraShard
+}
+
+// ExtraShard is a shard besides the EVM shard. A zero T2Timeout takes the EVM shard's.
+type ExtraShard struct {
+	Partition  types.PartitionID
+	Shard      types.ShardID
+	Validators int
+	T2Timeout  time.Duration
+	Params     map[string]string
 }
 
 // Fixture is one activation and everything that authenticates it.
@@ -103,6 +115,8 @@ type Fixture struct {
 	EnvelopeBytes   []byte
 	Snapshot        *abdrc.CommittedBlock
 	ShardConf       *types.PartitionDescriptionRecord
+	ExtraConfs      []*types.PartitionDescriptionRecord
+	ExtraSigners    map[string]abcrypto.Signer // the validators of ExtraConfs by node id
 	Claim           q3format.Claim
 	Candidate       []byte                            // the committed candidate preimage, with Options.Assignment
 	Successor       *types.PartitionDescriptionRecord // the EVM assignment it activates (before the activation round is set)
@@ -295,6 +309,25 @@ func New(t *testing.T, o Options) *Fixture {
 		RecordBytes: record.Bytes(), PreviousDigest: bytes.Repeat([]byte{4}, 32), FrozenParent: bytes.Clone(o.Frozen)}
 	key := types.PartitionShardID{PartitionID: PartitionID, ShardID: types.ShardID{}.Key()}
 	states := storage.ShardStates{States: map[types.PartitionShardID]*storage.ShardInfo{key: state}, Changed: storage.ShardSet{key: {}}, Control: &control}
+	f.ExtraSigners = make(map[string]abcrypto.Signer)
+	for _, e := range o.ExtraShards {
+		nodes, infos := testutils.CreateTestNodes(t, e.Validators)
+		for _, n := range nodes {
+			f.ExtraSigners[n.PeerConf.ID.String()] = n.Signer
+		}
+		t2 := e.T2Timeout
+		if t2 == 0 {
+			t2 = shardConf.T2Timeout
+		}
+		conf := &types.PartitionDescriptionRecord{Version: 1, NetworkID: Network, PartitionID: e.Partition, ShardID: e.Shard,
+			PartitionTypeID: 8, TypeIDLen: 8, UnitIDLen: 256, T2Timeout: t2, Validators: infos, Epoch: 0, EpochStart: 1, PartitionParams: e.Params}
+		f.ExtraConfs = append(f.ExtraConfs, conf)
+		extra, err := storage.NewShardInfo(conf, crypto.SHA256)
+		require.NoError(t, err)
+		extraKey := types.PartitionShardID{PartitionID: conf.PartitionID, ShardID: conf.ShardID.Key()}
+		states.States[extraKey] = extra
+		states.Changed[extraKey] = struct{}{}
+	}
 	tree, _, err := states.UnicityTree(crypto.SHA256)
 	require.NoError(t, err)
 	path, err := tree.Certificate(evmroot.D4ControlPartition)
@@ -352,12 +385,18 @@ func New(t *testing.T, o Options) *Fixture {
 	oldBlock := &storage.ExecutedBlock{HashAlgo: crypto.SHA256, RootHash: tree.RootHash(), ShardState: states}
 	certificates, err := oldBlock.GenerateCertificates(qc, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	require.NoError(t, err)
-	require.Len(t, certificates, 1)
+	require.Len(t, certificates, 1+len(o.ExtraShards))
 	shardInfo := abdrc.ShardInfo{Partition: PartitionID, Shard: types.ShardID{}, T2Timeout: state.T2Timeout, RootHash: state.RootHash,
 		PrevEpochStat: state.PrevEpochStat, Stat: state.Stat, PrevEpochFees: state.PrevEpochFees, Fees: state.Fees, IR: state.IR, IRTR: state.TR,
 		ShardConfHash: state.ShardConfHash, UC: &state.LastCR.UC, TR: &state.LastCR.Technical}
 	f.Snapshot = &abdrc.CommittedBlock{Block: &rctypes.BlockData{Version: rctypes.VersionHandoff, Epoch: oldEpoch, Round: o.CommitSealRound, Payload: &rctypes.Payload{Version: rctypes.VersionHandoff}},
 		ShardInfo: []abdrc.ShardInfo{shardInfo}, Control: &control, CommitQc: qc}
+	for _, conf := range f.ExtraConfs {
+		si := states.States[types.PartitionShardID{PartitionID: conf.PartitionID, ShardID: conf.ShardID.Key()}]
+		f.Snapshot.ShardInfo = append(f.Snapshot.ShardInfo, abdrc.ShardInfo{Partition: conf.PartitionID, Shard: conf.ShardID, T2Timeout: si.T2Timeout, RootHash: si.RootHash,
+			PrevEpochStat: si.PrevEpochStat, Stat: si.Stat, PrevEpochFees: si.PrevEpochFees, Fees: si.Fees, IR: si.IR, IRTR: si.TR,
+			ShardConfHash: si.ShardConfHash, UC: &si.LastCR.UC, TR: &si.LastCR.Technical})
+	}
 
 	ctx := q3format.ContextFor(body, attempt, [32]byte(f.Evidence.CandidateDigest))
 	for i, m := range f.Members {
