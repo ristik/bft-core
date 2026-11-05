@@ -6,10 +6,12 @@ import (
 	"maps"
 	"math/bits"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/stretchr/testify/require"
+	"github.com/unicitynetwork/bft-go-base/types"
 
 	rctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
 )
@@ -104,11 +106,18 @@ type staleCommittee struct {
 
 func newStaleCommittee(t *testing.T, n, quorum uint64, down int) *staleCommittee {
 	t.Helper()
-	weights := make([]uint64, n)
-	for i := range weights {
-		weights[i] = 1
+	return newWeightedStaleCommittee(t, slices.Repeat([]uint64{1}, int(n)), quorum, down)
+}
+
+// newWeightedStaleCommittee gives the weights in the selector's member order, so that a weight's position in the order is the test's to choose.
+func newWeightedStaleCommittee(t *testing.T, weights []uint64, quorum uint64, down int) *staleCommittee {
+	t.Helper()
+	n := uint64(len(weights))
+	nodes := erNodes(t, slices.Repeat([]uint64{1}, len(weights))...)
+	slices.SortFunc(nodes, func(a, b *types.NodeInfo) int { return strings.Compare(a.NodeID, b.NodeID) })
+	for i, node := range nodes {
+		node.Stake = weights[i]
 	}
-	nodes := erNodes(t, weights...)
 	lag, err := rctypes.LeaderLag(n)
 	require.NoError(t, err)
 	c := &staleCommittee{n: n, quorum: quorum, down: down, lag: lag, start: 100, ids: sortedIDs(t, nodes), head: &LeaderHead{}, index: map[peer.ID]int{}, tables: map[uint32][]int8{}}
@@ -129,7 +138,7 @@ func (c *staleCommittee) bitmap(set uint32) []byte {
 	return out
 }
 
-// table is the weighted table of a voter set as a slice of member indices. The set is by the selector's node order, the same as ids here: unit weights, sorted.
+// table is the weighted table of a voter set as a slice of member indices. The set is by the selector's node order, the same as ids here: sorted.
 func (c *staleCommittee) table(t *testing.T, set uint32) []int8 {
 	t.Helper()
 	if tb, ok := c.tables[set]; ok {
@@ -325,4 +334,70 @@ func TestTwoStagesOfLargerStaleSets(t *testing.T) {
 			t.Logf("%s: %d of those shapes have no three live leaders in a row anywhere in the stale table, longest joint %d", tc.name, noTriple, longestNoTriple)
 		})
 	}
+}
+
+// liveTripleEnd is the last round of the first three live leaders in a row after the head, under the stale voters' table and the recovery runs, with no commit on the way.
+func (c *staleCommittee) liveTripleEnd(t *testing.T, stale, dead uint32, headAt uint64) uint64 {
+	t.Helper()
+	staleTable := c.table(t, stale)
+	up := func(r uint64) bool {
+		off := r - c.start - c.lag
+		if off%RecoverySpacing >= RecoverySpacing-RecoveryRun {
+			return dead&(1<<((off/RecoverySpacing)%c.n)) == 0
+		}
+		return dead&(1<<staleTable[(r-c.start)%uint64(len(staleTable))]) == 0
+	}
+	r := headAt + 1
+	for !(up(r) && up(r+1) && up(r+2)) {
+		r++
+	}
+	return r + 2
+}
+
+// The design's weighted responsive-quorum control: (3,2,2,2,2), quorum 8 of 11, weight 3 down and one light member returning. Three voters weigh at most 7, so every sample has at least
+// four, the heavy member and three light ones, and one dead member cannot break every three in a row: from every head a live triple comes up within the covered rounds and no rescue
+// traversal is needed. The four-root stale set of three voters is the control: there the same search leaves the covered rounds. Tables and real-ring samples, with no timing; the live
+// run is TestWeightedRollingRestartCertifies.
+func TestWeightedStaleSets(t *testing.T) {
+	const down, periods = 1, 10
+	var shapes, real int
+	var longest uint64
+	for heavy := range 5 {
+		weights := []uint64{2, 2, 2, 2, 2}
+		weights[heavy] = 3
+		c := newWeightedStaleCommittee(t, weights, 8, down)
+		full := uint32(1<<c.n - 1)
+		dead := uint32(1) << heavy
+		limit := stageAllowance(c.lag, down) + 2*RecoverySpacing
+		for returning := range 5 {
+			if returning == heavy {
+				continue
+			}
+			x := uint32(1) << returning
+			for headAt := c.start + c.lag + 2; headAt < c.start+c.lag+2+RecoverySpacing*periods; headAt++ {
+				end := c.liveTripleEnd(t, full&^x, dead, headAt)
+				require.LessOrEqual(t, end, headAt+c.lag, "heavy %d returning %d head %d: no live triple within the covered rounds", heavy, returning, headAt)
+				longest = max(longest, end-headAt)
+				shapes++
+				if (headAt-c.start)%509 == 0 {
+					w := c.modelWalk(t, full&^x, full&^dead, headAt, 1, limit)
+					require.Equal(t, c.realWalk(t, full&^x, full&^dead, headAt, 1, limit), w, "the tables answer as the real ring: heavy %d returning %d head %d", heavy, returning, headAt)
+					real++
+				}
+			}
+		}
+	}
+	require.NotZero(t, real)
+
+	four := newStaleCommittee(t, 4, 3, 1)
+	covered, beyond := 0, 0
+	for headAt := four.start + four.lag + 2; headAt < four.start+four.lag+2+RecoverySpacing*4; headAt++ {
+		if four.liveTripleEnd(t, 0b1101, 0b0001, headAt) <= headAt+four.lag {
+			covered++
+		} else {
+			beyond++
+		}
+	}
+	require.NotZero(t, beyond, "the search finds the four-root stale set's stall")
+	t.Logf("%d shapes, %d also on the real ring: from every head a live triple ends within %d rounds, of D = 24; the four-root control leaves the covered rounds at %d of %d heads", shapes, real, longest, beyond, beyond+covered)
 }
