@@ -10,13 +10,17 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/stretchr/testify/require"
 	"github.com/unicitynetwork/bft-go-base/types"
 
 	"github.com/unicitynetwork/bft-core/internal/testutils/q3fixture"
+	"github.com/unicitynetwork/bft-core/internal/testutils/rsmtbatch"
+	"github.com/unicitynetwork/bft-core/network/protocol/abdrc"
 	"github.com/unicitynetwork/bft-core/network/protocol/certification"
 	drctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/zkverifier"
@@ -27,14 +31,16 @@ type liveShard struct {
 	partition types.PartitionID
 	shard     types.ShardID
 	rsmt      bool
+	batch     *rsmtbatch.Batch // an RSMT shard's populated pre-state and fresh leaves; nil is one leaf inserted next to one stored
 }
 
 func (s liveShard) String() string { return fmt.Sprintf("%d/%s", s.partition, s.shard) }
 
 var rsmtShardParams = map[string]string{"proof_type": "aggregator_rsmt_v1"}
 
-// traceTopology is the fixture's shards for a deployment row of the design (gate 9): the packaged TN-S, or the F8 mixed topology with its one-validator
-// aggregator shards, its T2 periods and enabled RSMT proofs. The EVM shard keeps the fixture's partition number; every other shard has the deployment's.
+// traceTopology is the fixture's shards for a deployment row of the design (gate 9): the packaged TN-S's two shards and proof types, or the F8 mixed topology with its
+// one-validator aggregator shards, its T2 periods and enabled RSMT proofs. The EVM shard keeps the fixture's partition number; every other shard has the deployment's.
+// T2 sets the repeat phase: the EVM shard has the fixture's 2.5 s in every row, and tns's aggregator takes the same, against the package's 5 s for both.
 func traceTopology(t *testing.T, name string) q3fixture.Options {
 	exec := map[string]string{"proof_type": "exec"}
 	left, right := types.ShardID{}.Split()
@@ -43,7 +49,7 @@ func traceTopology(t *testing.T, name string) q3fixture.Options {
 		return q3fixture.Options{}
 	case "tns":
 		return q3fixture.Options{Params: exec, ExtraShards: []q3fixture.ExtraShard{{Partition: 7, Validators: 1}}}
-	case "f8":
+	case "f8", "f8batch":
 		return q3fixture.Options{Params: exec, ExtraShards: []q3fixture.ExtraShard{
 			{Partition: 9, Shard: left, Validators: 1, T2Timeout: 2500 * time.Millisecond, Params: rsmtShardParams},
 			{Partition: 9, Shard: right, Validators: 1, T2Timeout: 5000 * time.Millisecond, Params: rsmtShardParams},
@@ -54,10 +60,28 @@ func traceTopology(t *testing.T, name string) q3fixture.Options {
 	return q3fixture.Options{}
 }
 
-func liveShards(c *q4bLive) []liveShard {
+// The default-batch load row of the design: each RSMT shard holds 10,000 certified leaves and inserts 1,000 fresh ones.
+const (
+	defaultBatchPreLeaves = 10_000
+	defaultBatchInserted  = 1_000
+)
+
+func liveShards(c *q4bLive, defaultBatch bool) []liveShard {
 	out := []liveShard{{partition: q3fixture.PartitionID}}
+	left, right := types.ShardID{}.Split()
 	for _, conf := range c.nodes[0].r.f.ExtraConfs {
-		out = append(out, liveShard{partition: conf.PartitionID, shard: conf.ShardID, rsmt: conf.PartitionParams["proof_type"] == "aggregator_rsmt_v1"})
+		s := liveShard{partition: conf.PartitionID, shard: conf.ShardID, rsmt: conf.PartitionParams["proof_type"] == "aggregator_rsmt_v1"}
+		if s.rsmt && defaultBatch {
+			keyBit := -1 // the partition's one shard has the whole key space
+			switch {
+			case conf.ShardID.Equal(left):
+				keyBit = 0
+			case conf.ShardID.Equal(right):
+				keyBit = 1
+			}
+			s.batch = rsmtbatch.New(s.String(), keyBit, defaultBatchPreLeaves, defaultBatchInserted)
+		}
+		out = append(out, s)
 	}
 	return out
 }
@@ -80,10 +104,18 @@ func shardRequest(t *testing.T, r *q3Replica, s liveShard, first, tamper bool) *
 	}
 	var proof []byte
 	if s.rsmt {
-		insert := newProofTransition(t, reference)
-		hash, proof = insert.next[:], insert.envelope
+		var prev, next [32]byte
+		if s.batch != nil {
+			prev = s.batch.PreRoot()
+			proof, next, _, err = s.batch.Envelope(reference)
+			require.NoError(t, err)
+		} else {
+			insert := newProofTransition(t, reference)
+			prev, next, proof = insert.prev, insert.next, insert.envelope
+		}
+		hash = next[:]
 		if first {
-			hash, proof = insert.prev[:], nil
+			hash, proof = prev[:], nil
 		} else if tamper {
 			proof = []byte{1, 2, 3}
 		}
@@ -135,7 +167,7 @@ func TestExtraShardsAreCertifiedOnALiveEpoch(t *testing.T) {
 	c := newEqualLiveOptions(t, 2*time.Second, traceTopology(t, "f8"), "H", "a", "b", "c")
 	c.start(c.all()...)
 	c.warm(3, c.all()...)
-	shards := liveShards(c)
+	shards := liveShards(c, false)
 	require.Len(t, shards, 4)
 	establish(t, c, "H", shards)
 	n := c.nodes[c.idx("H")]
@@ -187,7 +219,7 @@ func traceEnvInt(t *testing.T, name string, fallback int) int {
 // #886 gate 9, a real multi-shard rescue: one rolling restart with every survivor holding one real request per shard of a deployment topology (traceTopology), signed by
 // the shard's own validators, each from an established certified state. It reports what happened, window by window, not a per-round mean multiplied up: the unknown-leader window's total and its stalls, the
 // first known and recovery rounds after it, the first commit, the deferred work behind it, and each shard's fresh request and certificate. Measurement only: it asserts
-// no number. Four roots share one machine. Set TMPDIR to the disk being measured. BFT_GATE9_TRACE=1; BFT_TRACE_TOPOLOGY single, tns or f8 (single); BFT_TRACE_DEAD member index by
+// no number. Four roots share one machine. Set TMPDIR to the disk being measured. BFT_GATE9_TRACE=1; BFT_TRACE_TOPOLOGY single, tns, f8 or f8batch, f8 with the default batch (single); BFT_TRACE_DEAD member index by
 // id order (0: the first recovery run is the dead member's); BFT_TRACE_T seconds (10).
 func TestGate9RescueTraceWithRealShards(t *testing.T) {
 	if os.Getenv("BFT_GATE9_TRACE") == "" {
@@ -197,11 +229,27 @@ func TestGate9RescueTraceWithRealShards(t *testing.T) {
 	topology := cmp.Or(os.Getenv("BFT_TRACE_TOPOLOGY"), "single")
 	deadAt := traceEnvInt(t, "BFT_TRACE_DEAD", 0)
 	c := newEqualLiveOptions(t, T, traceTopology(t, topology), "H", "a", "b", "c")
-	shards := liveShards(c)
+	shards := liveShards(c, topology == "f8batch")
 	lag := 4*uint64(len(c.nodes)) + 4
 	names := c.all()
 	slices.SortFunc(names, func(a, b string) int { return strings.Compare(c.id(a).String(), c.id(b).String()) })
 	d, x := names[deadAt%4], names[(deadAt+1)%4]
+	// every forward of a retained request, by the round the watched node is in: the delivery premise of a recovery run is that a request reaches its leader before the run
+	var forwardsMu sync.Mutex
+	forwards := map[string][]uint64{}
+	var currentRound func() uint64
+	base := c.net.filter
+	c.net.filter = func(from, to peer.ID, msg any) bool {
+		if m, ok := msg.(*abdrc.IrChangeReqMsg); ok {
+			forwardsMu.Lock()
+			if currentRound != nil {
+				key := liveShard{partition: m.IrChangeReq.Partition, shard: m.IrChangeReq.Shard}.String()
+				forwards[key] = append(forwards[key], currentRound())
+			}
+			forwardsMu.Unlock()
+		}
+		return base(from, to, msg)
+	}
 	first := c.except(x)
 	c.start(first...)
 	anchor := c.nodes[0].r.manager.epochAnchor.Slot
@@ -228,10 +276,21 @@ func TestGate9RescueTraceWithRealShards(t *testing.T) {
 		}
 		return si.LastCR.UC.UnicitySeal.RootChainRoundNumber
 	}
+	require.Eventually(t, func() bool { // what the node watched reads as established is what establish saw, or a shard would later read as certified with no request sent
+		for _, s := range shards {
+			if !bytes.Equal(shardHash(m(watch), s), shardHash(m(first[0]), s)) {
+				return false
+			}
+		}
+		return true
+	}, 2*time.Minute, 5*time.Millisecond, "the watched node holds the established states")
 	c.stop(d)
 	c.start(x)
 	t0 := time.Now()
 	since := func() time.Duration { return time.Since(t0).Round(time.Millisecond) }
+	forwardsMu.Lock()
+	currentRound = func() uint64 { return m(watch).pacemaker.GetCurrentRound() }
+	forwardsMu.Unlock()
 	counters := func(label string) {
 		if traceCounters != nil {
 			t.Logf("counters at %s: %s", label, traceCounters())
@@ -241,6 +300,15 @@ func TestGate9RescueTraceWithRealShards(t *testing.T) {
 		proof := shardRequest(t, c.nodes[c.idx(watch)].r, s, false, false)
 		require.NotNil(t, proof, s)
 		t.Logf("shard %s: rsmt %v, %d signers, proof %d bytes", s, s.rsmt, len(proof.Requests), len(proof.Requests[0].ZkProof))
+		if s.batch != nil {
+			reference := proof.Requests[0].InputRecord.Timestamp
+			_, _, stats, err := s.batch.Envelope(reference)
+			require.NoError(t, err)
+			verifier := &zkverifier.AggregatorRSMTVerifier{}
+			at := time.Now()
+			require.NoError(t, verifier.VerifyProofAt(proof.Requests[0].ZkProof, proof.Requests[0].InputRecord.PreviousHash, proof.Requests[0].InputRecord.Hash, nil, reference))
+			t.Logf("shard %s: batch %+v; one verification alone %s", s, stats, time.Since(at).Round(10*time.Microsecond))
+		}
 	}
 	established := map[string][]byte{}
 	for _, s := range shards {
@@ -257,6 +325,7 @@ func TestGate9RescueTraceWithRealShards(t *testing.T) {
 	var samples []sample
 	lastRound, roundAt, lastKnown := startRound, t0, known(startRound)
 	var unknownFrom, firstKnownAfter, commitAt time.Time
+	var lastEdge uint64
 	var unknownRound, firstKnownRound, commitRound, commitAtUnknown uint64
 	sentUnder := map[string]uint64{}
 	sendRounds := map[string][]uint64{}
@@ -285,6 +354,11 @@ func TestGate9RescueTraceWithRealShards(t *testing.T) {
 				samples = append(samples, sample{r, gap, lastKnown})
 			}
 			lastRound, roundAt, lastKnown = st.Round, now, known(st.Round)
+		}
+		if !lastKnown && st.Round != lastEdge && known(st.Round+1) && !unknownFrom.IsZero() {
+			lastEdge = st.Round
+			t.Logf("round %d at %s: its leader unknown, the next known", st.Round, since())
+			counters("that round's start")
 		}
 		if !lastKnown && unknownFrom.IsZero() {
 			unknownFrom, unknownRound, commitAtUnknown = now, st.Round, c.committedRound(watch)
@@ -363,7 +437,7 @@ func TestGate9RescueTraceWithRealShards(t *testing.T) {
 	t.Logf("stalls over %s among unknown fast rounds: %d, %s in all, worst round:duration %s", stallAt, len(stalls), stallSum.Round(time.Millisecond), strings.Join(worst, " "))
 	var after []string
 	for _, s := range samples {
-		if s.round >= firstKnownRound && s.round < firstKnownRound+8 || s.round >= commitRound && s.round < commitRound+8 {
+		if s.round+3 >= firstKnownRound && s.round < firstKnownRound+8 || s.round+3 >= commitRound && s.round < commitRound+8 {
 			after = append(after, fmt.Sprintf("%d:%v:%s", s.round, s.known, s.d.Round(time.Millisecond)))
 		}
 	}
@@ -372,6 +446,10 @@ func TestGate9RescueTraceWithRealShards(t *testing.T) {
 	sends := 0
 	var certs []time.Duration
 	for _, p := range shards {
+		forwardsMu.Lock()
+		sent := slices.DeleteFunc(slices.Clone(forwards[p.String()]), func(r uint64) bool { return r+3 < firstKnownRound || (r > firstKnownRound+8 && r+3 < commitRound) })
+		forwardsMu.Unlock()
+		t.Logf("shard %s: sends at rounds %v, certified %s after the stop; forwards around the first known round and the first commit at rounds %v", p, sendRounds[p.String()], certAt[p.String()].Round(time.Millisecond), sent)
 		sends += len(sendRounds[p.String()])
 		if n := len(sendRounds[p.String()]); n > 1 {
 			resend = append(resend, max(sendRounds[p.String()][n-1], commitRound)-commitRound) // the poll can see a new seal before the new commit
