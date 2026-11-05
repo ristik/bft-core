@@ -50,6 +50,12 @@ type CertificationResponse struct {
 	UC        types.UnicityCertificate
 	Status    uint32
 	Message   string
+
+	// PartitionView is an in-process carrier of the canonical partition view bytes sent
+	// as the V2 sidecar. It is never part of the legacy wire format, hashing or storage: it is
+	// kept in memory only and is missing (nil) after a root restart or recovery until the shard
+	// is certified again.
+	PartitionView []byte `cbor:"-" json:"-"`
 }
 
 // IsAccepted reports whether the wrapped UC represents acceptance of the

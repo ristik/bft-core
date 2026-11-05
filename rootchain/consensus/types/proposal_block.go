@@ -18,7 +18,7 @@ var (
 type BlockData struct {
 	_         struct{} `cbor:",toarray"`
 	Version   types.Version
-	Author    string   `json:"author"` // NodeID of the proposer
+	Author    string   `json:"author"` // NodeID of the proposer; not authenticated in a recovered state (see storage.ValidateRecoveryState)
 	Round     uint64   `json:"round"`  // Root round number
 	Epoch     uint64   `json:"epoch"`  // Root epoch to establish valid configuration
 	Timestamp uint64   `json:"timestamp"`
@@ -38,7 +38,10 @@ func (x *Payload) IsValid() error {
 	// there can only be one request per partition shard in a block
 	sysIdSet := map[types.PartitionShardID]struct{}{}
 
-	for _, req := range x.Requests {
+	for i, req := range x.Requests {
+		if req == nil {
+			return fmt.Errorf("IR change request %d is nil", i)
+		}
 		if err := req.IsValid(); err != nil {
 			return fmt.Errorf("invalid IR change request for %s: %w", req.Partition, err)
 		}
