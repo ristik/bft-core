@@ -15,7 +15,7 @@ import (
 
 // The two stages of #886's T2-repeat exception, on the real selector and ring with an abstract chain: a block is certified when its leader and the next one
 // are live, and it commits when the leader after them is too, the three leaders of a commit. This is what a run of the managers cannot give: every id order
-// and phase, with each recovery run's owner. It takes no timing: `rounds` here is the design's round allowance, 281 for a stage with no dead run and 541 for
+// and phase, with each recovery run's owner (over 12 periods: the owner repeats every 4 and the stale table's phase every 3). It takes no timing: `rounds` here is the design's round allowance, 281 for a stage with no dead run and 541 for
 // one with it, and with one dead member in a cycle of four no two adjacent stages can both have one.
 func TestTwoStageAllowanceOverEveryOrderAndPhase(t *testing.T) {
 	const (
@@ -34,13 +34,14 @@ func TestTwoStageAllowanceOverEveryOrderAndPhase(t *testing.T) {
 	shapes, skipped := 0, 0
 	outcomes := map[string]int{}
 	var longest uint64
+	seen := map[uint64]int{}
 	for dead := range ids {
 		for x := range ids {
 			if x == dead {
 				continue
 			}
 			stale, liveSet := full&^(1<<x), full&^(1<<dead)
-			for headAt := start + lag + 2; headAt < start+lag+2+RecoverySpacing*n; headAt++ {
+			for headAt := start + lag + 2; headAt < start+lag+2+RecoverySpacing*12; headAt++ {
 				for _, resubmit := range []uint64{1, 8} {
 					var head LeaderHead
 					state := erRing(t, n, start)
@@ -114,6 +115,9 @@ func TestTwoStageAllowanceOverEveryOrderAndPhase(t *testing.T) {
 					dead2 := deadRuns(fresh, r)
 
 					shapes++
+					if resubmit == 1 {
+						seen[stage2]++
+					}
 					total := stage1 + stage2
 					longest = max(longest, total)
 					require.LessOrEqual(t, dead1+dead2, 1, "dead %d x %d head %d: a dead run in each stage", dead, x, headAt)
@@ -134,6 +138,7 @@ func TestTwoStageAllowanceOverEveryOrderAndPhase(t *testing.T) {
 		}
 	}
 	require.NotZero(t, shapes)
+	t.Logf("stage two rounds at R=1: %v", seen)
 	for _, k := range slices.Sorted(maps.Keys(outcomes)) {
 		t.Logf("%6d  %s", outcomes[k], k)
 	}

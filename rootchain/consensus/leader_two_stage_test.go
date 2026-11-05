@@ -154,7 +154,7 @@ func TestRollingRestartOneCertifiedBlockAfterTheStop(t *testing.T) {
 		defer c.mu.Unlock()
 		after = after[:0]
 		for round := range c.chains[c.idx(ingress)] {
-			if round >= start { // a block below start was certified before the stop, and only commits with the run
+			if round > start { // a block up to start was certified before the stop, and only commits with the run
 				after = append(after, round)
 			}
 		}
