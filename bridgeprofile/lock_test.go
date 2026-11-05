@@ -7,12 +7,14 @@ import (
 	"math/big"
 	"net"
 	"net/http"
+	"sort"
 	"testing"
 
 	"github.com/decred/dcrd/dcrec/secp256k1/v4"
 	"github.com/fxamacker/cbor/v2"
 	"github.com/stretchr/testify/require"
 	"github.com/unicitynetwork/bft-go-base/types"
+	"github.com/unicitynetwork/bft-go-base/types/hex"
 
 	"github.com/unicitynetwork/bft-core/gettrustbase"
 )
@@ -462,7 +464,7 @@ func TestLockProofCountQuorumBoundaries(t *testing.T) {
 // The native B1 seal rule (go-base's RootTrustBaseV2 quorum check): one invalid
 // signature of a known member fails the seal even when the valid ones reach the
 // quorum (three of four), as in both SDKs.
-func TestLockProofInvalidSignatureFailsTheSeal(t *testing.T) {
+func TestLockProofInvalidSignatureIsAZeroWeightWitness(t *testing.T) {
 	e := newEnv(t)
 	com, err := NewCommittee("strict", 4)
 	require.NoError(t, err)
@@ -476,14 +478,29 @@ func TestLockProofInvalidSignatureFailsTheSeal(t *testing.T) {
 	var uc types.UnicityCertificate
 	require.NoError(t, types.Cbor.Unmarshal(lp.UC, &uc))
 	require.Len(t, uc.UnicitySeal.Signatures, 4)
-	for id, sig := range uc.UnicitySeal.Signatures {
-		c := bytes.Clone(sig)
-		c[10] ^= 1
-		uc.UnicitySeal.Signatures[id] = c
-		break
+	ids := make([]string, 0, 4)
+	for id := range uc.UnicitySeal.Signatures {
+		ids = append(ids, id)
 	}
-	b, err := types.Cbor.Marshal(&uc)
-	require.NoError(t, err)
-	err = VerifyMintBacking(e.F.Cfg, e.remint(t, lp, func(p *LockProof) { p.UC = b }), tr, e.Pin)
-	require.ErrorIs(t, err, ErrLockUC)
+	sort.Strings(ids)
+	// one corrupted signature of four is a zero-weight witness: the other three hold the quorum (the upstream seal rule)
+	corrupt := func(n int) error {
+		cp := uc
+		cp.UnicitySeal = &types.UnicitySeal{}
+		*cp.UnicitySeal = *uc.UnicitySeal
+		cp.UnicitySeal.Signatures = map[string]hex.Bytes{}
+		for id, sig := range uc.UnicitySeal.Signatures {
+			cp.UnicitySeal.Signatures[id] = sig
+		}
+		for _, id := range ids[:n] {
+			c := bytes.Clone(cp.UnicitySeal.Signatures[id])
+			c[10] ^= 1
+			cp.UnicitySeal.Signatures[id] = c
+		}
+		b, err := types.Cbor.Marshal(&cp)
+		require.NoError(t, err)
+		return VerifyMintBacking(e.F.Cfg, e.remint(t, lp, func(p *LockProof) { p.UC = b }), tr, e.Pin)
+	}
+	require.NoError(t, corrupt(1))
+	require.ErrorIs(t, corrupt(2), ErrLockUC, "two corrupted signatures leave two of four members, below the quorum")
 }

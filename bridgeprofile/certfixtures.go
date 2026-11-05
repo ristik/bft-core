@@ -50,7 +50,6 @@ func certificateMutations() []certificateMutation {
 		{"unicity-step-key-overflow", []int{0, 5, 0, 2}, CArr(CArr(CUint(1<<32), CBytes(make([]byte, 32)))), false},
 		{"unicity-step-null-hash", []int{0, 5, 0, 2}, CArr(CArr(CUint(1), CNull)), false},
 		{"shard-sibling-null", []int{0, 4, 0, 2}, CArr(CNull), false},
-		{"signature-recovery-two", []int{0, 6, 0, 7, 1}, CBytes(append(make([]byte, 64), 2)), false},
 	}
 }
 

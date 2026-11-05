@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -25,7 +26,7 @@ import (
 // record names the live set before the first live run. X times out with the others, which the rounds need, and until past the covered rounds its
 // votes count only for the last live pair's block. Outcomes, by id order and phase (TestTwoStageAllowanceOverEveryOrderAndPhase enumerates them): it certifies soon, or at the
 // end of the stretch (about 18 rounds), or the stretch ends with no three live leaders in a row and it waits for the next recovery run that is not
-// the dead member's (about 511 rounds). So stage two's limit is the same traversal as stage one's, not the design's D+1+4: see #886. Most of those
+// the dead member's (about 255 or 511 rounds). So stage two's limit is the same traversal as stage one's, not the design's D+1+4: see #886. Most of those
 // rounds pass at certificate speed, so at production timing the cost is in tau, not in timeouts. Takes 5 to 25 minutes: set BFT_GATE7_STRETCH=1.
 func TestRollingRestartOneCertifiedBlockAfterTheStop(t *testing.T) {
 	if os.Getenv("BFT_GATE7_STRETCH") == "" {
@@ -33,10 +34,34 @@ func TestRollingRestartOneCertifiedBlockAfterTheStop(t *testing.T) {
 	}
 	t.Parallel()
 	q4Slot(t)
-	const hold = 8 // R, in root rounds after the commit: one round lands in the run's own tail, and a real shard is not that fast
-	const noDeadRun, withDeadRun, joint = 281, 541, 822
 	c := newPhaseLockLive(t, 2*time.Second)
-	x, d := "c", "b"
+	lag := 4*uint64(len(c.nodes)) + 4
+	// R = 8 rounds: one round lands in the run's own tail, and a real shard is not that fast
+	twoStageRun(t, c, "c", "b", lag+2, 8)
+}
+
+// The outcome no short warm-up reaches: the first live run commits the repeat, and stage two then waits about 255 rounds for the next recovery run. With X
+// first and D second in id order, the enumeration gives 255 rounds at R = 1 for a head well inside the fourth period (about 230 of its 256 positions, by where the period starts), and the head's
+// exact position does not matter. Takes about 37 minutes, most of it the warm-up: set BFT_GATE7_WARMED=1.
+func TestRollingRestartStageTwoWaitsForTheNextRun(t *testing.T) {
+	if os.Getenv("BFT_GATE7_WARMED") == "" {
+		t.Skip("set BFT_GATE7_WARMED=1: over 900 warm rounds and then the two stages")
+	}
+	t.Parallel()
+	q4Slot(t)
+	c := newPhaseLockLive(t, 2*time.Second)
+	lag := 4*uint64(len(c.nodes)) + 4
+	names := c.all()
+	slices.SortFunc(names, func(a, b string) int { return strings.Compare(c.id(a).String(), c.id(b).String()) }) // the selector's member order
+	stageTwo := twoStageRun(t, c, names[0], names[1], 1+lag+3*leader.RecoverySpacing+128, 1)
+	require.GreaterOrEqual(t, stageTwo, uint64(254), "the enumeration's outcome for this order and head is 255 rounds")
+	require.LessOrEqual(t, stageTwo, uint64(256), "the enumeration's outcome for this order and head is 255 rounds")
+}
+
+// twoStageRun warms the cluster with X down to warm rounds past the anchor, then runs the shape; hold is R in root rounds after the commit. It returns stage two's rounds.
+func twoStageRun(t *testing.T, c *q4bLive, x, d string, warm, hold uint64) uint64 {
+	t.Helper()
+	const noDeadRun, withDeadRun, joint = 281, 541, 822
 	n := uint64(len(c.nodes))
 	lag := 4*n + 4
 	var withhold atomic.Bool
@@ -64,7 +89,15 @@ func TestRollingRestartOneCertifiedBlockAfterTheStop(t *testing.T) {
 	}
 	first := c.except(x)
 	c.start(first...)
-	c.warm(lag+2, first...)
+	anchor := c.nodes[0].r.manager.epochAnchor.Slot
+	require.Eventually(t, func() bool {
+		for _, name := range first {
+			if c.committedRound(name) < anchor+warm {
+				return false
+			}
+		}
+		return true
+	}, q4bDeadline+time.Duration(warm)*2*time.Second, 50*time.Millisecond, "the cluster commits live in the activated epoch")
 	survivors := c.except(x, d)
 	m := func(name string) *ConsensusManager { return c.nodes[c.idx(name)].r.manager }
 	ingress := survivors[0]
@@ -124,7 +157,8 @@ func TestRollingRestartOneCertifiedBlockAfterTheStop(t *testing.T) {
 			}
 		}
 	}
-	require.Eventually(t, func() bool { return c.state(ingress).HighQC == r }, q4bDeadline, 5*time.Millisecond, "the block of round %d is certified, and no other", r)
+	stage = 1 // from the stop: the wait for the QC is where most of stage one's full timers are
+	require.Eventually(t, func() bool { sample(); return c.state(ingress).HighQC == r }, q4bDeadline, 5*time.Millisecond, "the block of round %d is certified, and no other", r)
 	repeatMu.Lock()
 	certifiedRepeat := repeats[r]
 	repeatMu.Unlock()
@@ -138,7 +172,6 @@ func TestRollingRestartOneCertifiedBlockAfterTheStop(t *testing.T) {
 
 	stage1 := start + rollingRestartRounds(n)
 	began := time.Now()
-	stage = 1
 	for lastUC() == startUC {
 		sample()
 		require.LessOrEqual(t, c.state(ingress).Round, stage1, "stage one")
@@ -243,4 +276,5 @@ func TestRollingRestartOneCertifiedBlockAfterTheStop(t *testing.T) {
 	for _, name := range survivors {
 		require.False(t, m(name).recovery.InRecovery(), "%s entered state recovery with no missing certified state", name)
 	}
+	return stageTwo
 }

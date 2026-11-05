@@ -3,6 +3,7 @@ package b1ref
 import (
 	"encoding/hex"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/unicitynetwork/bft-core/b1ref/b1gen"
@@ -59,22 +60,24 @@ func TestGroupingParity(t *testing.T) {
 	}
 }
 
-func TestCallerScannerRejectsSignatureShape(t *testing.T) {
+// A signature value of any byte-string length is well formed: the scanner admits it and the quorum decides (it counts zero unless it is an exact
+// canonical recoverable signature of the member). Only an empty value, which upstream's native seal validation refuses, fails later and as invalid.
+func TestSignatureShapesAreNotScannerFailures(t *testing.T) {
 	m := b1gen.Build(corpusSeed)
 	count := 0
 	for _, v := range m.Vectors {
-		if v.Expected.Sentinel != "ErrSigFormat" {
+		if !strings.HasPrefix(v.ID, "quorum.sig.") && !strings.HasPrefix(v.ID, "frozen.signature-length") {
 			continue
 		}
 		raw, _ := hex.DecodeString(v.Request)
 		var pl plan
-		if err := scanBatch(raw, &pl, Standard); !errors.Is(err, ErrSigFormat) {
-			t.Fatalf("%s: %v", v.ID, err)
+		if err := scanBatch(raw, &pl, Standard); err != nil {
+			t.Fatalf("%s: the scanner refused a well-formed signature value: %v", v.ID, err)
 		}
 		count++
 	}
-	if count < 6 {
-		t.Fatal("missing signature format cases", count)
+	if count < 30 {
+		t.Fatal("missing signature shape cases", count)
 	}
 }
 

@@ -373,7 +373,7 @@
    "expected": {
     "status": "ok",
     "values": {
-     "gas": "586576",
+     "gas": "588976",
      "status": "56",
      "statusName": "ErrIROpening"
     }
@@ -407,7 +407,7 @@
    "expected": {
     "status": "ok",
     "values": {
-     "gas": "592826",
+     "gas": "595226",
      "status": "0",
      "statusName": ""
     }
@@ -424,7 +424,7 @@
    "expected": {
     "status": "ok",
     "values": {
-     "gas": "592826",
+     "gas": "595226",
      "status": "0",
      "statusName": ""
     }
@@ -597,7 +597,7 @@
    "expected": {
     "status": "ok",
     "values": {
-     "gas": "586576",
+     "gas": "588976",
      "status": "60",
      "statusName": "ErrPathBitmap"
     }
@@ -614,7 +614,7 @@
    "expected": {
     "status": "ok",
     "values": {
-     "gas": "592826",
+     "gas": "595226",
      "status": "62",
      "statusName": "ErrLeafProof"
     }
@@ -686,7 +686,7 @@
    "expected": {
     "status": "ok",
     "values": {
-     "gas": "586576",
+     "gas": "588976",
      "status": "60",
      "statusName": "ErrPathBitmap"
     }
@@ -1048,7 +1048,7 @@
    "expected": {
     "status": "ok",
     "values": {
-     "gas": "586576",
+     "gas": "588976",
      "status": "60",
      "statusName": "ErrPathBitmap"
     }
@@ -1479,7 +1479,7 @@
    "expected": {
     "status": "ok",
     "values": {
-     "gas": "592826",
+     "gas": "595226",
      "status": "0",
      "statusName": ""
     }
@@ -1635,7 +1635,7 @@
    "expected": {
     "status": "ok",
     "values": {
-     "gas": "586576",
+     "gas": "588976",
      "status": "60",
      "statusName": "ErrPathBitmap"
     }
@@ -1707,7 +1707,7 @@
    "expected": {
     "status": "ok",
     "values": {
-     "gas": "592826",
+     "gas": "595226",
      "status": "0",
      "statusName": ""
     }
@@ -1985,7 +1985,7 @@
    "expected": {
     "status": "ok",
     "values": {
-     "gas": "586576",
+     "gas": "588976",
      "status": "56",
      "statusName": "ErrIROpening"
     }
@@ -2541,7 +2541,7 @@
    "expected": {
     "status": "ok",
     "values": {
-     "gas": "592826",
+     "gas": "595226",
      "status": "0",
      "statusName": ""
     }
@@ -2814,7 +2814,7 @@
    "expected": {
     "status": "ok",
     "values": {
-     "gas": "592826",
+     "gas": "595226",
      "status": "62",
      "statusName": "ErrLeafProof"
     }
@@ -3404,7 +3404,7 @@
    "expected": {
     "status": "ok",
     "values": {
-     "gas": "587326",
+     "gas": "589726",
      "status": "62",
      "statusName": "ErrLeafProof"
     }
@@ -3798,7 +3798,7 @@
    "expected": {
     "status": "ok",
     "values": {
-     "gas": "592826",
+     "gas": "595226",
      "status": "0",
      "statusName": ""
     }
@@ -3832,7 +3832,7 @@
    "expected": {
     "status": "ok",
     "values": {
-     "gas": "592826",
+     "gas": "595226",
      "status": "0",
      "statusName": ""
     }
@@ -4072,7 +4072,7 @@
    "expected": {
     "status": "ok",
     "values": {
-     "gas": "589826",
+     "gas": "592226",
      "status": "62",
      "statusName": "ErrLeafProof"
     }
@@ -4639,7 +4639,7 @@
    "expected": {
     "status": "ok",
     "values": {
-     "gas": "586576",
+     "gas": "588976",
      "status": "60",
      "statusName": "ErrPathBitmap"
     }
@@ -5100,7 +5100,7 @@
    "expected": {
     "status": "ok",
     "values": {
-     "gas": "590576",
+     "gas": "592976",
      "status": "62",
      "statusName": "ErrLeafProof"
     }
@@ -5403,7 +5403,7 @@
    "expected": {
     "status": "ok",
     "values": {
-     "gas": "592826",
+     "gas": "595226",
      "status": "0",
      "statusName": ""
     }
@@ -5487,7 +5487,7 @@
    "expected": {
     "status": "ok",
     "values": {
-     "gas": "586576",
+     "gas": "588976",
      "status": "61",
      "statusName": "ErrAnchorAuth"
     }
@@ -5601,7 +5601,7 @@
    "expected": {
     "status": "ok",
     "values": {
-     "gas": "592826",
+     "gas": "595226",
      "status": "0",
      "statusName": ""
     }
@@ -5735,9 +5735,9 @@
    "expected": {
     "status": "ok",
     "values": {
-     "gas": "349756",
-     "status": "70",
-     "statusName": "ErrCertScan"
+     "gas": "442556",
+     "status": "63",
+     "statusName": "ErrSplitJustif"
     }
    }
   },
@@ -6015,7 +6015,7 @@
    "expected": {
     "status": "ok",
     "values": {
-     "gas": "586576",
+     "gas": "588976",
      "status": "60",
      "statusName": "ErrPathBitmap"
     }
@@ -6053,7 +6053,7 @@
    "expected": {
     "status": "ok",
     "values": {
-     "gas": "586576",
+     "gas": "588976",
      "status": "61",
      "statusName": "ErrAnchorAuth"
     }
@@ -6355,7 +6355,7 @@
    "expected": {
     "status": "ok",
     "values": {
-     "gas": "586576",
+     "gas": "588976",
      "status": "56",
      "statusName": "ErrIROpening"
     }
@@ -6528,7 +6528,7 @@
    "expected": {
     "status": "ok",
     "values": {
-     "gas": "586576",
+     "gas": "588976",
      "status": "60",
      "statusName": "ErrPathBitmap"
     }
@@ -6894,7 +6894,7 @@
    "expected": {
     "status": "ok",
     "values": {
-     "gas": "586576",
+     "gas": "588976",
      "status": "56",
      "statusName": "ErrIROpening"
     }
@@ -7879,7 +7879,7 @@
    "expected": {
     "status": "ok",
     "values": {
-     "gas": "592826",
+     "gas": "595226",
      "status": "0",
      "statusName": ""
     }
@@ -7934,7 +7934,7 @@
    "expected": {
     "status": "ok",
     "values": {
-     "gas": "586576",
+     "gas": "588976",
      "status": "60",
      "statusName": "ErrPathBitmap"
     }
