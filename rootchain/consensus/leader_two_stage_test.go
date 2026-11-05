@@ -41,7 +41,7 @@ func TestRollingRestartOneCertifiedBlockAfterTheStop(t *testing.T) {
 }
 
 // The outcome no short warm-up reaches: the first live run commits the repeat, and stage two then waits about 255 rounds for the next recovery run. With X
-// first and D second in id order, the enumeration gives 255 rounds at R = 1 for a head well inside the fourth period (232 of its 256 positions), and the head's
+// first and D second in id order, the enumeration gives 255 rounds at R = 1 for a head well inside the fourth period (about 230 of its 256 positions, by where the period starts), and the head's
 // exact position does not matter. Takes about 37 minutes, most of it the warm-up: set BFT_GATE7_WARMED=1.
 func TestRollingRestartStageTwoWaitsForTheNextRun(t *testing.T) {
 	if os.Getenv("BFT_GATE7_WARMED") == "" {
@@ -157,7 +157,8 @@ func twoStageRun(t *testing.T, c *q4bLive, x, d string, warm, hold uint64) uint6
 			}
 		}
 	}
-	require.Eventually(t, func() bool { return c.state(ingress).HighQC == r }, q4bDeadline, 5*time.Millisecond, "the block of round %d is certified, and no other", r)
+	stage = 1 // from the stop: the wait for the QC is where most of stage one's full timers are
+	require.Eventually(t, func() bool { sample(); return c.state(ingress).HighQC == r }, q4bDeadline, 5*time.Millisecond, "the block of round %d is certified, and no other", r)
 	repeatMu.Lock()
 	certifiedRepeat := repeats[r]
 	repeatMu.Unlock()
@@ -171,7 +172,6 @@ func twoStageRun(t *testing.T, c *q4bLive, x, d string, warm, hold uint64) uint6
 
 	stage1 := start + rollingRestartRounds(n)
 	began := time.Now()
-	stage = 1
 	for lastUC() == startUC {
 		sample()
 		require.LessOrEqual(t, c.state(ingress).Round, stage1, "stage one")
