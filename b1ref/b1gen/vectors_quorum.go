@@ -50,6 +50,7 @@ func (g *gen) quorum(seed string) {
 		{"s-zero", "s = 0", append(append([]byte{}, good[:32]...), zero...)},
 		{"r-n", "r = n", append(append([]byte{}, n32...), good[32:]...)},
 		{"high-s", "s replaced by n-s (high-s twin of a valid signature): never normalized into acceptance", highS(good)},
+		{"high-s-twin", "the high-s twin (r, n-s, flipped recovery byte) of a valid signature: it recovers to the member's key but s is high, never normalized into acceptance", func() []byte { t := highS(good); t[64] ^= 1; return t }()},
 		{"short", "63-byte signature", good[:63]},
 		{"long", "66-byte signature", append(append([]byte{}, good...), 0)},
 		{"compact", "the 64-byte compact form r||s of a valid signature is not a seal signature", good[:64]},
