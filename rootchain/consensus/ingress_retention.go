@@ -121,7 +121,13 @@ func sameRequest(a, b *drctypes.IRChangeReq) bool {
 }
 
 // forwardRetained is the round-change half of retention: drop what the verifier says is stale, send the rest toward the known next leader.
+// With the next leader unknown nothing can be sent, so nothing is judged: an unknown-leader round must stay cheap (#886), and the first round
+// with a known next leader judges every entry against the state of that round before it sends or buffers any. An unusable copy stays longer but
+// is not used, and a fresh request still replaces it, retainRequest judging the old one.
 func (x *ConsensusManager) forwardRetained(ctx context.Context) {
+	if _, err := x.leaderAfter(x.pacemaker.GetCurrentRound()); errors.Is(err, drctypes.ErrHistoryUnavailable) {
+		return
+	}
 	for key, entry := range x.retained {
 		verdict, err := x.judgeRetained(entry.msg.IrChangeReq)
 		if verdict == retainedRefused {
