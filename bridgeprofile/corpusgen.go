@@ -19,7 +19,7 @@ import (
 )
 
 // semanticProfile is the canonical native-bridge profile artifact, byte for
-// byte native-bridge-plugins protocol/profile-v2.json at the revision this
+// byte native-bridge-plugins protocol/profile-v7.json at the revision this
 // generator was written against.
 //
 //go:embed testdata/semantic-profile.json
