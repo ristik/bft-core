@@ -171,6 +171,12 @@ func (x *BlockStore) ProcessTc(tc *rctypes.TimeoutCert) error {
 	if tc == nil {
 		return fmt.Errorf("error tc is nil")
 	}
+	// Every timeout message carries the previous round's TC, so a node sees each TC about n times: only the first one for its round is written. A synced
+	// commit per message took half of an unknown-leader round on a shared disk (#886). The stored TC is read, not remembered: other paths delete it, and a
+	// failed write leaves it older, so the next copy writes. A store that cannot be read is written to, as before.
+	if last, err := x.storage.ReadLastTC(); err == nil && last != nil && last.GetRound() >= tc.GetRound() {
+		return nil
+	}
 	// persist last known TC
 	if err := x.storage.WriteTC(tc); err != nil {
 		return fmt.Errorf("TC write failed: %w", err)
