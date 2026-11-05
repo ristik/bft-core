@@ -5735,9 +5735,9 @@
    "expected": {
     "status": "ok",
     "values": {
-     "gas": "349756",
-     "status": "70",
-     "statusName": "ErrCertScan"
+     "gas": "442556",
+     "status": "63",
+     "statusName": "ErrSplitJustif"
     }
    }
   },
