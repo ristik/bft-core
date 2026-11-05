@@ -10,7 +10,7 @@ import (
 	"github.com/unicitynetwork/bft-go-base/types"
 )
 
-const legacyGolden = "8401418085186308613141014102d998598701f65820c3c91bb3d460d12c220885d7bf628cabb9e872ee234b176040462396ee03da01f6d9985b83014180f6d9985c830101f6f6"
+const legacyGolden = "8601418085186308613141014102d998598701f65820c3c91bb3d460d12c220885d7bf628cabb9e872ee234b176040462396ee03da01f6d9985b83014180f6d9985c830101f6f60060"
 
 func testResponse(t *testing.T) *CertificationResponse {
 	cr := &CertificationResponse{
@@ -30,7 +30,7 @@ func Test_CertificationResponse_LegacyWireUnchangedByCarrier(t *testing.T) {
 	cr := testResponse(t)
 	plain, err := types.Cbor.Marshal(cr)
 	require.NoError(t, err)
-	require.Equal(t, byte(0x84), plain[0], "legacy response must be an untagged four-element array")
+	require.Equal(t, byte(0x86), plain[0], "legacy response must be an untagged six-element array (the four upstream elements, then status and message)")
 
 	withView := *cr
 	withView.PartitionView = []byte{1, 2, 3}
