@@ -1337,6 +1337,18 @@ func (g *gen) lock() {
 						uc.UnicitySeal.Signatures["16Uiu2HAmNonMember"] = []byte{}
 					})
 				}), "committee-4", "dev")
+			back("backing-quorum-plus-empty-signer-id", "all four members sign and a real signature sits under an empty signer ID: refused by the native seal validation",
+				remint(func(lp *LockProof) {
+					*lp = *p
+					lp.UC = ucMut(p.UC, func(uc *types.UnicityCertificate) {
+						ids := make([]string, 0, len(uc.UnicitySeal.Signatures))
+						for id := range uc.UnicitySeal.Signatures {
+							ids = append(ids, id)
+						}
+						sort.Strings(ids) // deterministic: a copy of the first member's signature
+						uc.UnicitySeal.Signatures[""] = bytes.Clone(uc.UnicitySeal.Signatures[ids[0]])
+					})
+				}), "committee-4", "dev")
 		}
 	}
 	// J mutation after certification.

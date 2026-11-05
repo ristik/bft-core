@@ -75,6 +75,9 @@ func (g *gen) quorum(seed string) {
 		extra(entry{f.vals[3].id, nil}), pre)
 	run("quorum.empty-extra.unknown", "honest quorum plus an empty signature value under an unknown ID: refused by the native seal validation", "ErrNativeInvalid",
 		extra(entry{"mallory", nil}), pre)
+	// An empty signer ID is refused by the same native validation, even with a real signature behind it.
+	run("quorum.empty-id.extra", "honest quorum plus a real signature under an empty signer ID: refused by the native seal validation", "ErrNativeInvalid",
+		extra(entry{"", u.seal.sigs[0].val}), pre)
 	// aliases of the earlier ids whose meaning changed with the rule
 	vflip := recov(good[64] ^ 1)
 	run("quorum.sig.v-ignored", "wrong recovery byte (0/1 swapped) on a needed signature: the parity is not ignored, the member's weight is lost", "ErrQuorum",
