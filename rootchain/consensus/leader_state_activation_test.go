@@ -38,11 +38,13 @@ func newEqualLive(t *testing.T, timeout time.Duration, names ...string) *q4bLive
 // newEqualLiveOptions is newEqualLive with the fixture's other options, its shards among them.
 func newEqualLiveOptions(t *testing.T, timeout time.Duration, o q3fixture.Options, names ...string) *q4bLive {
 	t.Helper()
-	weights := make([]uint64, len(names))
-	for i := range weights {
-		weights[i] = 1
+	if o.Weights == nil {
+		o.Weights = make([]uint64, len(names))
+		for i := range o.Weights {
+			o.Weights[i] = 1
+		}
 	}
-	o.Assignment, o.Weights = true, weights
+	o.Assignment = true
 	f := q3fixture.New(t, o)
 	c := newQ4BBase(t, 2, f)
 	tune := func(p *Parameters) { p.BlockRate, p.LocalTimeout = phaseLockBlockRate, timeout }
