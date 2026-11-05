@@ -626,6 +626,7 @@ func (g *gen) histories() {
 		id, desc string
 		mut      func(h *History)
 		noResign bool
+		post     func(h *History) // after the history is re-signed (so a re-signing does not undo it)
 	}
 	c := f.Cfg
 	just := func(chain uint64, v [20]byte, n uint64) []byte {
@@ -693,6 +694,11 @@ func (g *gen) histories() {
 		{id: "unlock-minter-public-key", desc: "mint unlocked by a non-minter key", noResign: true, mut: func(h *History) {
 			h.MintCD.Unlock = SignUnlock(KeyFromSeed("evil"), h.MintCD.SourceHash, h.MintCD.TxHash)
 		}},
+		{id: "unlock-bad-and-deadline-expired", desc: "a transfer with a bad unlock and an explicit deadline that has expired (t = e+1): the unlock failure comes first, as the unlock is checked before the expiry",
+			mut: func(h *History) { h.Transfers[1].Deadline = DeadlineAt(BaseTime + 1000); h.Times[1] = BaseTime + 1001 },
+			post: func(h *History) {
+				h.CDs[1].Unlock = SignUnlock(KeyFromSeed("evil"), h.CDs[1].SourceHash, h.CDs[1].TxHash)
+			}},
 		{id: "hist-unlock-flipped-parity", desc: "transfer unlock with recovery parity flipped", noResign: true, mut: func(h *History) { h.CDs[2].Unlock[64] ^= 1 }},
 		{id: "hist-unlock-id4", desc: "transfer unlock with recovery ID 4", noResign: true, mut: func(h *History) { h.CDs[2].Unlock[64] = 4 }},
 		{id: "hist-unlock-short", desc: "transfer unlock of 64 bytes", noResign: true, mut: func(h *History) { h.CDs[2].Unlock = h.CDs[2].Unlock[:64] }},
@@ -724,6 +730,9 @@ func (g *gen) histories() {
 		mm.mut(h)
 		if !mm.noResign {
 			g.must(h.Resign(keys))
+		}
+		if mm.post != nil {
+			mm.post(h)
 		}
 		fam := "history"
 		add(mm.id, fam, mm.desc, "return", h)
@@ -1243,6 +1252,22 @@ func (g *gen) lock() {
 		b, err := types.Cbor.Marshal(&uc)
 		g.must(err)
 		return b
+	}
+	// A retired committee beside the current one: epoch 2's own committee signs and a member of the retired epoch-1 committee adds a genuine signature
+	// under its own identity. The retired identity is unknown to epoch 2's committee, so it counts zero and the seal holds (the negatives are
+	// backing-new-committee-old-signer, where the retired committee alone claims epoch 2, and backing-ended-epoch, where it claims its closed epoch).
+	if p := certifiedIn("next-epoch-new-committee", g.newCom, NextEpochStart+5); p != nil {
+		back("backing-new-committee-plus-retired-extra", "sealed in epoch 2 by its new committee, plus a genuine signature of a retired epoch-1 member under its own identity: it counts zero, the seal holds",
+			remint(func(lp *LockProof) {
+				*lp = *p
+				lp.UC = ucMut(p.UC, func(uc *types.UnicityCertificate) {
+					sb, err := uc.UnicitySeal.SigBytes()
+					g.must(err)
+					sig, err := d.Auth.Signer.SignBytes(sb)
+					g.must(err)
+					uc.UnicitySeal.Signatures[d.Auth.NodeID] = sig
+				})
+			}), "next-epoch-new-committee", "dev")
 	}
 	if p := certifiedIn("next-epoch", d.Auth, NextEpochStart+5); p != nil {
 		back("backing-two-faults-epoch-and-root", "sealed in epoch 2, which the installed history does not hold, with a false seal root: the epoch decides (retryable)",
