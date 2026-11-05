@@ -30,15 +30,15 @@
     },
     "contracts": {
       "repository": "https://github.com/ristik/unicity-pos-contracts.git",
-      "commit": "6a1185c500e8290086a1307fe3448cc01c4321cc",
-      "note": "CANDIDATE: contracts#78 (dev2/b1-upstream-seal-rule 6a1185c5): protocol 7 bridge-golden pins; re-pin to the main merge. Before: main at the contracts#77 merge (the testnet package's pin): on the protocol 6 vault (#67, #68) and contracts#53 (GovernanceParams #50, RewardPool #51), the RewardPool tail cap (#72: the tail closes up to the open result's reservation progress), the RejectResult fixtures (#74) and the election's outsider skip (#76); X4 #856 needs #72 for the closed intervals of the accumulated chain",
+      "commit": "7b510f6b5a9cf3987ccc5d7dc77d39f33de12330",
+      "note": "contracts#78 squash-merged to main as 7b510f6b (tree identical to the reviewed 6a1185c5): protocol 7 bridge-golden pins. Before: main at the contracts#77 merge (the testnet package's pin): on the protocol 6 vault (#67, #68) and contracts#53 (GovernanceParams #50, RewardPool #51), the RewardPool tail cap (#72: the tail closes up to the open result's reservation progress), the RejectResult fixtures (#74) and the election's outsider skip (#76); X4 #856 needs #72 for the closed intervals of the accumulated chain",
       "branch": "main"
     },
     "native-bridge-plugins": {
       "repository": "https://github.com/ristik/native-bridge-plugins.git",
       "commit": "838b08ce4304428c9ebcb9b0fbd4b55b260a99d4",
       "branch": "main",
-      "note": "nbp#63 squash-merged to main as 838b08ce (tree identical to the sealed de6eb8df): protocol 7, the upstream seal rule and the 7,200 gas coefficient, vendored JS SDK 75c5be7f. NOTE: this covers nbp only; the contracts pin above is still the CANDIDATE branch commit of contracts#78, not a main merge, and #920 stays open until #78 and its follow-ups are done. Before: the squash merge of nbp#52 (split PR5, protocol 6: the V2 composition, per-part redemption, anyage.ts on the (nonce, partId) return), on nbp#40 (B7 PR 3: profile v6, the 2 MiB envelope, long-history)"
+      "note": "nbp#63 squash-merged to main as 838b08ce (tree identical to the sealed de6eb8df): protocol 7, the upstream seal rule and the 7,200 gas coefficient, vendored JS SDK 75c5be7f. Before: the squash merge of nbp#52 (split PR5, protocol 6: the V2 composition, per-part redemption, anyage.ts on the (nonce, partId) return), on nbp#40 (B7 PR 3: profile v6, the 2 MiB envelope, long-history)"
     },
     "state-transition-sdk-js": {
       "repository": "https://github.com/ristik/state-transition-sdk-js.git",
