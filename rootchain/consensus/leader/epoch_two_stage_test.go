@@ -35,24 +35,31 @@ func TestTwoStageAllowanceOverEveryOrderAndPhase(t *testing.T) {
 	outcomes := map[string]int{}
 	var longest uint64
 	seen := map[uint64]int{}
-	for dead := range ids {
-		for x := range ids {
-			if x == dead {
+	// One selector, and one ring per stale set advanced with the head: a table depends only on its voters and Next leaves its parent untouched, so every shape
+	// starts from the ring at its head. Rebuilding that ring per shape took the race job past its timeout.
+	var head LeaderHead
+	e := erSelector(t, nodes, start, quorum, &head)
+	for x := range ids {
+		stale := full &^ (1 << x)
+		prefix := erRing(t, n, start)
+		for headAt := start + 1; headAt < start+lag+2+RecoverySpacing*12; headAt++ {
+			prefix, err = prefix.Next(headAt, []byte{stale})
+			require.NoError(t, err)
+			if headAt < start+lag+2 {
 				continue
 			}
-			stale, liveSet := full&^(1<<x), full&^(1<<dead)
-			for headAt := start + lag + 2; headAt < start+lag+2+RecoverySpacing*12; headAt++ {
+			for dead := range ids {
+				if dead == x {
+					continue
+				}
+				liveSet := full &^ (1 << dead)
 				for _, resubmit := range []uint64{1, 8} {
-					var head LeaderHead
-					state := erRing(t, n, start)
-					e := erSelector(t, nodes, start, quorum, &head)
+					state := prefix
+					head = LeaderHead{Round: headAt, State: prefix}
 					commit := func(round uint64, voters byte) {
 						state, err = state.Next(round, []byte{voters})
 						require.NoError(t, err)
 						head = LeaderHead{Round: round, State: state}
-					}
-					for r := start + 1; r <= headAt; r++ {
-						commit(r, stale)
 					}
 					known := func(r uint64) (peer.ID, bool) {
 						l, err := e.GetLeaderForRound(r)
