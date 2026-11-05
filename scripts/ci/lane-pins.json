@@ -36,9 +36,9 @@
     },
     "native-bridge-plugins": {
       "repository": "https://github.com/ristik/native-bridge-plugins.git",
-      "commit": "de6eb8dff5cbd4a1b3a2cb90653179eef9a886ea",
+      "commit": "838b08ce4304428c9ebcb9b0fbd4b55b260a99d4",
       "branch": "main",
-      "note": "CANDIDATE: nbp#63 (dev2/b1-upstream-seal-rule de6eb8df): protocol 7, the upstream seal rule and the 7,200 gas coefficient, vendored JS SDK 75c5be7f; re-pin to the main merge. Before: the squash merge of nbp#52 (split PR5, protocol 6: the V2 composition, per-part redemption, anyage.ts on the (nonce, partId) return), on nbp#40 (B7 PR 3: profile v6, the 2 MiB envelope, long-history)"
+      "note": "nbp#63 squash-merged to main as 838b08ce (tree identical to the sealed de6eb8df): protocol 7, the upstream seal rule and the 7,200 gas coefficient, vendored JS SDK 75c5be7f. NOTE: this covers nbp only; the contracts pin above is still the CANDIDATE branch commit of contracts#78, not a main merge, and #920 stays open until #78 and its follow-ups are done. Before: the squash merge of nbp#52 (split PR5, protocol 6: the V2 composition, per-part redemption, anyage.ts on the (nonce, partId) return), on nbp#40 (B7 PR 3: profile v6, the 2 MiB envelope, long-history)"
     },
     "state-transition-sdk-js": {
       "repository": "https://github.com/ristik/state-transition-sdk-js.git",
