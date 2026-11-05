@@ -14,7 +14,7 @@
         "unicity-reth"
       ],
       "features": "default (jemalloc)",
-      "note": "CANDIDATE: ureth#93 (squash merge 870c1d01): the native B1 precompile on the upstream seal rule, 7,200 gas per supplied seal signature (protocol 7, bft-core#920); Before: ureth unicity/main at the merge of #88 (protocol 6: BRIDGE_COMPOSE_V2 registered at 0x0105, the lineage relation of #84 with #86's oracle parity), on B7 PR 3 (#83: the 2 MiB envelope, #82, #81) and #75's transaction gossip",
+      "note": "ureth#93, merged to unicity/main as 870c1d01 (tree identical to the reviewed 62c194bf): the native B1 precompile on the upstream seal rule, 7,200 gas per supplied seal signature (protocol 7, bft-core#920); Before: ureth unicity/main at the merge of #88 (protocol 6: BRIDGE_COMPOSE_V2 registered at 0x0105, the lineage relation of #84 with #86's oracle parity), on B7 PR 3 (#83: the 2 MiB envelope, #82, #81) and #75's transaction gossip",
       "targetedPackages": [
         "reth-unicity-b1",
         "reth-unicity-execution",

@@ -22,6 +22,12 @@ func stageAllowance(lag uint64, dead int) uint64 {
 	return lag + 1 + uint64(dead+1)*RecoverySpacing + 4*uint64(dead) + 4
 }
 
+// The two stages together: until the second live commit the window holds at most b+2 recovery runs, fewer than n in these committees, so no identity owns two and the stages
+// share at most b dead runs. The design adopts this as N_joint, for adjacent stages only, with timely resubmission and no further invalidating repeat: 822, 1106 and 1390 rounds.
+func jointAllowance(lag uint64, down int) uint64 {
+	return 2*(lag+1) + uint64(down+2)*RecoverySpacing + 4*uint64(down) + 8
+}
+
 // twoStageWalk is the abstract chain of the two stages. leaderOf answers from the committed head as the selector does, -1 when the round's leader is unknown; commit records a committed block with the live voters.
 type twoStageWalk struct {
 	stage1, stage2       uint64
@@ -216,6 +222,17 @@ func TestStaleSetModelAgreesWithTheSelector(t *testing.T) {
 	}
 	require.Equal(t, map[uint64]int{2: 12248, 17: 12416, 254: 32, 255: 9128, 510: 16, 511: 3024}, seen, "the table of the real ring")
 	for _, tc := range []struct {
+		n      uint64
+		down   int
+		joint  uint64
+		timers uint64 // 2*(D+1) + 4*b, the full timers the design charges
+	}{{4, 1, 822, 46}, {7, 2, 1106, 74}, {10, 3, 1390, 102}} {
+		lag, err := rctypes.LeaderLag(tc.n)
+		require.NoError(t, err)
+		require.Equal(t, tc.joint, jointAllowance(lag, tc.down), "the design's joint allowance, %d members", tc.n)
+		require.Equal(t, tc.timers, 2*(lag+1)+4*uint64(tc.down), "the design's full timers, %d members", tc.n)
+	}
+	for _, tc := range []struct {
 		n, quorum uint64
 		down      int
 	}{{7, 5, 2}, {10, 7, 3}} {
@@ -239,6 +256,8 @@ func TestStaleSetModelAgreesWithTheSelector(t *testing.T) {
 	}
 }
 
+// Model shapes, not live runs: most do not execute the real ring and none has timing. Ten/three samples the head's position, every 13th over its 70 periods; it is not exhaustive. Many
+// stale sets have a live triple and commit early: the log counts those that do not apart.
 func TestTwoStagesOfLargerStaleSets(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
@@ -254,14 +273,25 @@ func TestTwoStagesOfLargerStaleSets(t *testing.T) {
 			c := newStaleCommittee(t, tc.n, tc.quorum, tc.down)
 			full := uint32(1<<c.n - 1)
 			limit := stageAllowance(c.lag, tc.down) + 2*RecoverySpacing
-			var shapes, noPair int
+			var shapes, noPair, noTriple, headPositions int
+			var longestNoTriple uint64
 			var longest1, longest2, longestJoint uint64
 			maxDead := 0
 			outcomes := map[string]int{}
+			for headAt := c.start + c.lag + 2; headAt < c.start+c.lag+2+RecoverySpacing*tc.periods; headAt += tc.headStep {
+				headPositions++
+			}
 			for _, dead := range subsets(c.n, tc.down) {
 				for _, x := range subsets(c.n, tc.down) {
 					if dead&x != 0 {
 						continue
+					}
+					// the case the design names: the stale table has no three live leaders in a row anywhere in its cycle. Otherwise the walk can commit early on the table alone.
+					staleTable := c.table(t, full&^x)
+					liveTriple := false
+					for i := range staleTable {
+						at := func(k int) uint32 { return uint32(1) << staleTable[(i+k)%len(staleTable)] }
+						liveTriple = liveTriple || (at(0)|at(1)|at(2))&dead == 0
 					}
 					for headAt := c.start + c.lag + 2; headAt < c.start+c.lag+2+RecoverySpacing*tc.periods; headAt += tc.headStep {
 						w := c.modelWalk(t, full&^x, full&^dead, headAt, 1, limit)
@@ -275,6 +305,12 @@ func TestTwoStagesOfLargerStaleSets(t *testing.T) {
 						require.LessOrEqual(t, w.stage2, stageAllowance(c.lag, w.dead2), "dead %b x %b head %d: stage two, %d dead runs", dead, x, headAt, w.dead2)
 						require.LessOrEqual(t, w.dead1, tc.down)
 						require.LessOrEqual(t, w.dead2, tc.down)
+						require.LessOrEqual(t, w.dead1+w.dead2, tc.down, "dead %b x %b head %d: dead runs in the two stages", dead, x, headAt)
+						require.LessOrEqual(t, w.stage1+w.stage2, jointAllowance(c.lag, tc.down), "dead %b x %b head %d: joint", dead, x, headAt)
+						if !liveTriple {
+							noTriple++
+							longestNoTriple = max(longestNoTriple, w.stage1+w.stage2)
+						}
 						longest1, longest2, longestJoint = max(longest1, w.stage1), max(longest2, w.stage2), max(longestJoint, w.stage1+w.stage2)
 						maxDead = max(maxDead, w.dead1+w.dead2)
 						outcomes[fmt.Sprintf("dead runs %d then %d", w.dead1, w.dead2)]++
@@ -285,7 +321,8 @@ func TestTwoStagesOfLargerStaleSets(t *testing.T) {
 			for _, k := range slices.Sorted(maps.Keys(outcomes)) {
 				t.Logf("%8d  %s", outcomes[k], k)
 			}
-			t.Logf("%s: %d placements of the head stepped by %d over %d periods, %d shapes, %d with no live pair among the covered rounds; longest stage one %d of %d with all %d dead runs, stage two %d, joint %d; most dead runs in a shape %d", tc.name, tc.periods*RecoverySpacing/tc.headStep, tc.headStep, tc.periods, shapes, noPair, longest1, stageAllowance(c.lag, tc.down), tc.down, longest2, longestJoint, maxDead)
+			t.Logf("%s: %d head positions stepped by %d over %d periods, %d shapes, %d with no live pair among the covered rounds; longest stage one %d of %d with all %d dead runs, stage two %d, joint %d of %d; most dead runs in a shape %d", tc.name, headPositions, tc.headStep, tc.periods, shapes, noPair, longest1, stageAllowance(c.lag, tc.down), tc.down, longest2, longestJoint, jointAllowance(c.lag, tc.down), maxDead)
+			t.Logf("%s: %d of those shapes have no three live leaders in a row anywhere in the stale table, longest joint %d", tc.name, noTriple, longestNoTriple)
 		})
 	}
 }
