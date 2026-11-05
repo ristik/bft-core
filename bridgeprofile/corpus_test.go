@@ -101,6 +101,8 @@ func TestCorpusCoversTheDesign(t *testing.T) {
 		"backing-quorum-weighted-heavy-last-signers2": "ErrLockUC",
 		"backing-two-faults-epoch-and-root":           "ErrNoEntryForEpoch", "backing-two-faults-pdr-and-signature": "ErrLockPDR",
 		"backing-quorum-plus-non-member": "", "backing-uc-signature-64-bytes": "ErrLockUC",
+		"backing-quorum-plus-empty-extra-known": "ErrLockUC", "backing-quorum-plus-empty-extra-unknown": "ErrLockUC",
+		"token-proof-extra-unknown-junk": "", "token-proof-extra-unknown-65": "", "token-proof-extra-unknown-empty": "",
 		"backing-quorum-plus-bad-extra": "", "backing-quorum-plus-malformed-extra": "", "backing-quorum-plus-compact-extra": "",
 		"trust-genesis-bundle": "", "trust-two-epoch-bundle": "", "trust-other-pin": "ErrTrustBaseDigest",
 		"trust-trailing-byte": "ErrTrustBase", "trust-unwitnessed-successor": "ErrTrustBase",

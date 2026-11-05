@@ -68,6 +68,12 @@ func (g *gen) quorum(seed string) {
 	// check: every other byte-string length is well formed and counts zero.
 	emptySig := withSigs(append([]entry{{u.seal.sigs[0].key, nil}}, u.seal.sigs[1:]...))
 	g.ok("quorum.sig.empty", fam, "an empty byte string as a signature: upstream's native seal validation refuses it", req(claimOf(emptySig)), pre, "ErrNativeInvalid", nil, nil)
+	// An empty value beside a full quorum is the same structural failure, whether its ID is a member's or a stranger's (every other length is a
+	// zero-weight witness; the empty one is refused by the native seal validation, which cannot be told apart from poisoning by design).
+	run("quorum.empty-extra.known", "honest quorum plus an empty signature value under a member's ID: refused by the native seal validation", "ErrNativeInvalid",
+		extra(entry{f.vals[3].id, nil}), pre)
+	run("quorum.empty-extra.unknown", "honest quorum plus an empty signature value under an unknown ID: refused by the native seal validation", "ErrNativeInvalid",
+		extra(entry{"mallory", nil}), pre)
 	// aliases of the earlier ids whose meaning changed with the rule
 	vflip := recov(good[64] ^ 1)
 	run("quorum.sig.v-ignored", "wrong recovery byte (0/1 swapped) on a needed signature: the parity is not ignored, the member's weight is lost", "ErrQuorum",

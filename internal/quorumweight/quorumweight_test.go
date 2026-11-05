@@ -224,7 +224,7 @@ func TestCheckedRoutesGoBaseSealVerificationThroughTheCheckedSum(t *testing.T) {
 	_, err = VerifySigned(tb, []byte("data"), map[string]hex.Bytes{"stranger": {1}})
 	require.ErrorIs(t, err, ErrUnknownSigner)
 
-	// a test double (anything but the production *RootTrustBaseV1) is passed through
+	// a test double (anything but the production *RootTrustBaseV1 and *RootTrustBaseV2) is passed through
 	d := testDouble{}
 	require.Equal(t, types.RootTrustBase(d), Checked(d))
 }

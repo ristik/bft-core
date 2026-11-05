@@ -26,7 +26,7 @@ import (
 // entry's threshold). This is the same function every other UC verification of
 // the repository uses, so a seal has one verdict standalone, token-carried,
 // backing or grouped. The entry's own VerifyQuorumSignatures, the strict check
-// of a successor entry, is not used for seals.
+// of a successor entry, is not used for seals. (The frontier collector's positive count is stricter on purpose: it uses VerifySignedStrict.)
 func verifyNativeUC(entry *types.RootTrustBaseV2, uc *types.UnicityCertificate, partition types.PartitionID, shard types.ShardID, conf []byte) error {
 	return uc.Verify(quorumweight.Checked(entry), stdcrypto.SHA256, partition, shard, conf)
 }

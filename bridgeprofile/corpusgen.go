@@ -874,6 +874,17 @@ func (g *gen) wire() {
 	tadd("token-proof-certificate-not-decodable", "a tagged item that is not an SDK-decodable certificate", replaceOnce(tbts, p0, pr(CUint(1), cd0, CUint(tok.MintProof.T), CBytes(path), CTag(1, CBytes([]byte{1})))))
 	tadd("token-proof-signature-64-bytes", "certificate whose seal signatures are 64 bytes (r||s): well formed, no weight; the token's certificate has no quorum", replaceOnce(tbts, p0, pr(CUint(1), cd0, CUint(tok.MintProof.T), CBytes(path), g.shortSigUC(uc0, 64))))
 	tadd("token-proof-signature-63-bytes", "certificate whose seal signatures are 63 bytes: well formed, no weight", replaceOnce(tbts, p0, pr(CUint(1), cd0, CUint(tok.MintProof.T), CBytes(path), g.shortSigUC(uc0, 63))))
+	// witnesses beside the token certificate's honest quorum: a well-formed junk value counts zero; an empty value is the one structural exception
+	for _, c := range []struct {
+		id, desc string
+		sig      []byte
+	}{
+		{"token-proof-extra-unknown-junk", "a 3-byte witness of an unknown ID beside the honest quorum: the projection is a scan and admits it (the witness counts zero at verification)", []byte{1, 2, 3}},
+		{"token-proof-extra-unknown-65", "a 65-byte witness of an unknown ID beside the honest quorum: it counts zero", bytes.Repeat([]byte{7}, 65)},
+		{"token-proof-extra-unknown-empty", "an empty witness of an unknown ID beside the honest quorum: the projection is a scan and admits it; only verification refuses an empty value (backing-quorum-plus-empty-extra-*)", []byte{}},
+	} {
+		tadd(c.id, c.desc, replaceOnce(tbts, p0, pr(CUint(1), cd0, CUint(tok.MintProof.T), CBytes(path), g.extraSigUC(uc0, "16Uiu2HAmNonMember", c.sig))))
+	}
 	for _, mutation := range certificateMutations() {
 		uc, err := replaceCertificateItem(uc0, mutation.replacement, mutation.path...)
 		g.must(err)
@@ -1302,6 +1313,30 @@ func (g *gen) lock() {
 						uc.UnicitySeal.Signatures[ids[0]] = uc.UnicitySeal.Signatures[ids[0]][:64]
 					})
 				}), "committee-4", "dev")
+			back("backing-quorum-plus-empty-extra-known", "all four members sign and one member's value is empty: refused by the native seal validation",
+				remint(func(lp *LockProof) {
+					*lp = *p
+					lp.UC = ucMut(p.UC, func(uc *types.UnicityCertificate) {
+						ids := make([]string, 0, len(uc.UnicitySeal.Signatures))
+						for id := range uc.UnicitySeal.Signatures {
+							ids = append(ids, id)
+						}
+						sort.Strings(ids) // deterministic: a copy of the first member's signature
+						uc.UnicitySeal.Signatures[ids[0]] = []byte{}
+					})
+				}), "committee-4", "dev")
+			back("backing-quorum-plus-empty-extra-unknown", "all four members sign and a non-member adds an empty value: refused by the native seal validation",
+				remint(func(lp *LockProof) {
+					*lp = *p
+					lp.UC = ucMut(p.UC, func(uc *types.UnicityCertificate) {
+						ids := make([]string, 0, len(uc.UnicitySeal.Signatures))
+						for id := range uc.UnicitySeal.Signatures {
+							ids = append(ids, id)
+						}
+						sort.Strings(ids) // deterministic: a copy of the first member's signature
+						uc.UnicitySeal.Signatures["16Uiu2HAmNonMember"] = []byte{}
+					})
+				}), "committee-4", "dev")
 		}
 	}
 	// J mutation after certification.
@@ -1661,6 +1696,16 @@ func (g *gen) shortSigUC(uc []byte, n int) []byte {
 	for k, sig := range c.UnicitySeal.Signatures {
 		c.UnicitySeal.Signatures[k] = sig[:n]
 	}
+	b, err := types.Cbor.Marshal(&c)
+	g.must(err)
+	return b
+}
+
+// extraSigUC re-encodes a certificate with one more seal signature value under id.
+func (g *gen) extraSigUC(uc []byte, id string, val []byte) []byte {
+	var c types.UnicityCertificate
+	g.must(types.Cbor.Unmarshal(uc, &c))
+	c.UnicitySeal.Signatures[id] = val
 	b, err := types.Cbor.Marshal(&c)
 	g.must(err)
 	return b
