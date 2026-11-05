@@ -226,6 +226,180 @@ func TestFrozenVerdict(t *testing.T) {
 	require.Equal(t, retainedUnknown, frozenVerdict(errors.New("the store cannot read the frozen shard")))
 }
 
+// countingResolver counts the judging of retained requests: judgeRetained resolves a certify view for each. It says nothing about the request.
+type countingResolver struct {
+	n   *int
+	err error
+}
+
+func (r countingResolver) ResolveView(_ types.PartitionID, _ types.ShardID, _ uint64, purpose storage.RequestPurpose) (*storage.RequestRoundView, error) {
+	if purpose == storage.PurposeCertify {
+		*r.n++
+	}
+	return nil, r.err
+}
+
+type brokenLeader struct{ constLeader }
+
+var errBrokenLeader = errors.New("the selector failed")
+
+func (brokenLeader) GetLeaderForRound(uint64) (peer.ID, error) { return "", errBrokenLeader }
+
+// knownFrom has the leaders of the rounds from a first one on, as the round before a recovery run sees them: its own leader unknown, the next known.
+type knownFrom struct {
+	constLeader
+	first uint64
+}
+
+func (l knownFrom) GetLeaderForRound(round uint64) (peer.ID, error) {
+	if round < l.first {
+		return "", drctypes.ErrHistoryUnavailable
+	}
+	return l.leader, nil
+}
+
+// The deferral follows the next round's leader, not this round's: the round before the first known one judges and forwards, or a request misses the first slot of a
+// recovery run, which has only four.
+func TestRoundBeforeTheFirstKnownLeaderForwardsTheRetainedRequest(t *testing.T) {
+	t.Run("another root leads it: judged and sent once", func(t *testing.T) {
+		f := newRetentionFixture(t)
+		n := f.cm.pacemaker.GetCurrentRound() + 3
+		f.cm.leaderSelector = knownFrom{constLeader{leader: f.other, nodes: f.cm.Validators()}, n}
+		require.NoError(t, f.cm.retainRequest(f.ctx, f.request(t)))
+		judged := 0
+		f.cm.SetViewResolver(countingResolver{&judged, errors.New("not resolvable now")})
+
+		f.nextRound()
+		require.Equal(t, n-2, f.cm.pacemaker.GetCurrentRound())
+		require.Zero(t, judged)
+		f.requireSends(t, 0)
+
+		f.nextRound()
+		require.Equal(t, n-1, f.cm.pacemaker.GetCurrentRound())
+		_, err := f.cm.leaderSelector.GetLeaderForRound(n - 1)
+		require.ErrorIs(t, err, drctypes.ErrHistoryUnavailable, "this round's own leader is unknown")
+		require.Equal(t, 1, judged)
+		f.requireSends(t, 1)
+	})
+	t.Run("this root leads it: buffered", func(t *testing.T) {
+		f := newRetentionFixture(t)
+		n := f.cm.pacemaker.GetCurrentRound() + 3
+		f.cm.leaderSelector = knownFrom{constLeader{leader: f.cm.id, nodes: f.cm.Validators()}, n}
+		require.NoError(t, f.cm.retainRequest(f.ctx, f.request(t)))
+
+		f.nextRound()
+		require.Equal(t, n-2, f.cm.pacemaker.GetCurrentRound())
+		require.False(t, f.cm.irReqBuffer.IsChangeInBuffer(partitionID, types.ShardID{}))
+
+		f.nextRound()
+		require.Equal(t, n-1, f.cm.pacemaker.GetCurrentRound())
+		require.True(t, f.cm.irReqBuffer.IsChangeInBuffer(partitionID, types.ShardID{}))
+		f.requireSends(t, 0)
+	})
+}
+
+// An unknown next leader means no judging at all, however many rounds it lasts, and leaves the entry as it was. The first known one judges it,
+// and a transient verdict still sends it.
+func TestUnknownLeaderRoundsDoNotJudgeRetainedRequests(t *testing.T) {
+	f := newRetentionFixture(t)
+	f.cm.leaderSelector = unknownLeader{}
+	require.NoError(t, f.cm.retainRequest(f.ctx, f.request(t)))
+	judged := 0
+	f.cm.SetViewResolver(countingResolver{&judged, errors.New("not resolvable now")})
+	for range 5 {
+		f.nextRound()
+	}
+	require.Zero(t, judged, "the unknown rounds judged nothing")
+	require.Contains(t, f.cm.retained, f.shard)
+	require.Zero(t, f.cm.retained[f.shard].sentAt, "the entry is untouched")
+	f.requireSends(t, 0)
+
+	f.cm.leaderSelector = constLeader{leader: f.other, nodes: f.cm.Validators()}
+	f.nextRound()
+	require.Equal(t, 1, judged, "the first known leader judges it")
+	require.Contains(t, f.cm.retained, f.shard, "a transient verdict keeps it")
+	f.requireSends(t, 1)
+}
+
+// Only the history's own answer defers the judging: any other selector failure leaves the round as it was.
+func TestAnotherLeaderErrorStillJudgesRetainedRequests(t *testing.T) {
+	f := newRetentionFixture(t)
+	require.NoError(t, f.cm.retainRequest(f.ctx, f.request(t)))
+	f.requireSends(t, 1)
+	judged := 0
+	f.cm.SetViewResolver(countingResolver{&judged, errors.New("not resolvable now")})
+	f.cm.leaderSelector = brokenLeader{}
+	f.nextRound()
+	require.Equal(t, 1, judged)
+	require.Contains(t, f.cm.retained, f.shard)
+	f.requireSends(t, 1)
+}
+
+// A copy that went stale in the unknown rounds stays until the first known leader, which refuses it before sending, and a valid one is sent then.
+func TestStaleCopyIsDroppedAtTheFirstKnownLeaderUnsent(t *testing.T) {
+	f := newRetentionFixture(t)
+	f.cm.leaderSelector = unknownLeader{}
+	require.NoError(t, f.cm.retainRequest(f.ctx, f.request(t)))
+	si, err := f.cm.ShardInfo(partitionID, types.ShardID{})
+	require.NoError(t, err)
+	f.cm.retained[f.shard].msg.IrChangeReq.Requests[0].InputRecord.Timestamp = si.LastCR.UC.UnicitySeal.Timestamp + 1
+	f.nextRound()
+	require.Contains(t, f.cm.retained, f.shard, "an unknown leader judges nothing")
+
+	f.cm.leaderSelector = constLeader{leader: f.other, nodes: f.cm.Validators()}
+	f.nextRound()
+	require.NotContains(t, f.cm.retained, f.shard)
+	f.requireSends(t, 0)
+}
+
+// The same when this root is the first known leader: a stale copy is not buffered, a valid one is.
+func TestFirstKnownLeaderBeingThisRootBuffersOnlyAValidCopy(t *testing.T) {
+	for _, stale := range []bool{true, false} {
+		f := newRetentionFixture(t)
+		f.cm.leaderSelector = unknownLeader{}
+		require.NoError(t, f.cm.retainRequest(f.ctx, f.request(t)))
+		if stale {
+			si, err := f.cm.ShardInfo(partitionID, types.ShardID{})
+			require.NoError(t, err)
+			f.cm.retained[f.shard].msg.IrChangeReq.Requests[0].InputRecord.Timestamp = si.LastCR.UC.UnicitySeal.Timestamp + 1
+		}
+		f.nextRound()
+		require.False(t, f.cm.irReqBuffer.IsChangeInBuffer(partitionID, types.ShardID{}))
+
+		f.cm.leaderSelector = constLeader{leader: f.cm.id, nodes: f.cm.Validators()}
+		f.nextRound()
+		require.Equal(t, !stale, f.cm.irReqBuffer.IsChangeInBuffer(partitionID, types.ShardID{}), "stale %v", stale)
+		if stale {
+			require.NotContains(t, f.cm.retained, f.shard)
+		} else {
+			require.Contains(t, f.cm.retained, f.shard, "a valid copy stays after it is buffered")
+		}
+		f.requireSends(t, 0)
+	}
+}
+
+// A stale copy held through the unknown rounds cannot obstruct a fresh request: replacement judges the old one itself.
+func TestFreshRequestReplacesAStaleCopyDuringUnknownRounds(t *testing.T) {
+	f := newRetentionFixture(t)
+	f.cm.leaderSelector = unknownLeader{}
+	held := f.request(t)
+	require.NoError(t, f.cm.retainRequest(f.ctx, held))
+	fresh := f.request(t)
+	require.ErrorIs(t, f.cm.retainRequest(f.ctx, fresh), ErrEquivocation, "while the held one is valid")
+	si, err := f.cm.ShardInfo(partitionID, types.ShardID{})
+	require.NoError(t, err)
+	held.Requests[0].InputRecord.Timestamp = si.LastCR.UC.UnicitySeal.Timestamp + 1
+	f.nextRound()
+	require.Same(t, held, f.cm.retained[f.shard].msg.IrChangeReq)
+	require.NoError(t, f.cm.retainRequest(f.ctx, fresh))
+	require.Same(t, fresh, f.cm.retained[f.shard].msg.IrChangeReq)
+
+	f.cm.leaderSelector = constLeader{leader: f.other, nodes: f.cm.Validators()}
+	f.nextRound()
+	f.requireSends(t, 1)
+	require.Same(t, fresh, f.sends()[0].IrChangeReq)
+}
+
 // Rev's binding condition, through the entry point: a shard request arriving while the next leader is unknown is not refused and not lost.
 func TestShardRequestIsKeptWhileTheNextLeaderIsUnknown(t *testing.T) {
 	f := newRetentionFixture(t)
@@ -330,6 +504,19 @@ func TestRetainedRequestOfAFrozenShardIsDroppedAndNotBufferedByTheNextLeader(t *
 		verdict, err := cm.judgeRetained(req)
 		require.Equal(t, retainedRefused, verdict)
 		require.ErrorIs(t, err, storage.ErrHandoffFrozen)
+	})
+	t.Run("frozen during unknown rounds: kept unjudged, then dropped unbuffered at the first known leader", func(t *testing.T) {
+		cm, _, key, _ := frozenRetentionFixture(t)
+		known := cm.leaderSelector
+		cm.leaderSelector = unknownLeader{}
+		freezeShardAtHighQC(t, cm, key)
+		cm.forwardRetained(context.Background())
+		require.Contains(t, cm.retained, key)
+		cm.leaderSelector = known
+		cm.forwardRetained(context.Background())
+		_, kept := cm.retained[key]
+		buffered := cm.irReqBuffer.IsChangeInBuffer(q3fixture.PartitionID, types.ShardID{})
+		require.Equal(t, [2]bool{false, false}, [2]bool{kept, buffered}, "[kept, buffered]")
 	})
 }
 
