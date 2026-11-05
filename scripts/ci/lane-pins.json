@@ -4,7 +4,7 @@
   "components": {
     "ureth": {
       "repository": "https://github.com/ristik/ureth.git",
-      "commit": "870c1d012297cea6edbcc3ee8969a72a7a7020a8",
+      "commit": "10552af21b31b2118c51d6215cd23cfb80faf33c",
       "package": "unicity-reth",
       "cargoArgs": [
         "build",
@@ -14,7 +14,7 @@
         "unicity-reth"
       ],
       "features": "default (jemalloc)",
-      "note": "ureth#93, merged to unicity/main as 870c1d01 (tree identical to the reviewed 62c194bf): the native B1 precompile on the upstream seal rule, 7,200 gas per supplied seal signature (protocol 7, bft-core#920); Before: ureth unicity/main at the merge of #88 (protocol 6: BRIDGE_COMPOSE_V2 registered at 0x0105, the lineage relation of #84 with #86's oracle parity), on B7 PR 3 (#83: the 2 MiB envelope, #82, #81) and #75's transaction gossip",
+      "note": "ureth unicity/main at the merge of ureth#94 (10552af2: the snapshots of the resealed corpus) on ureth#93 (870c1d01, the native B1 precompile on the upstream seal rule, 7,200 gas per supplied seal signature, protocol 7, bft-core#920). Before: ureth unicity/main at the merge of #88 (protocol 6: BRIDGE_COMPOSE_V2 registered at 0x0105, the lineage relation of #84 with #86's oracle parity), on B7 PR 3 (#83: the 2 MiB envelope, #82, #81) and #75's transaction gossip",
       "targetedPackages": [
         "reth-unicity-b1",
         "reth-unicity-execution",
@@ -30,15 +30,15 @@
     },
     "contracts": {
       "repository": "https://github.com/ristik/unicity-pos-contracts.git",
-      "commit": "e0f46f854492d775b5b09b4418c993de4a8b7619",
-      "note": "CANDIDATE: contracts#78 (dev2/b1-upstream-seal-rule e0f46f85): protocol 7 bridge-golden pins; re-pin to the main merge. Before: main at the contracts#77 merge (the testnet package's pin): on the protocol 6 vault (#67, #68) and contracts#53 (GovernanceParams #50, RewardPool #51), the RewardPool tail cap (#72: the tail closes up to the open result's reservation progress), the RejectResult fixtures (#74) and the election's outsider skip (#76); X4 #856 needs #72 for the closed intervals of the accumulated chain",
+      "commit": "6a1185c500e8290086a1307fe3448cc01c4321cc",
+      "note": "CANDIDATE: contracts#78 (dev2/b1-upstream-seal-rule 6a1185c5): protocol 7 bridge-golden pins; re-pin to the main merge. Before: main at the contracts#77 merge (the testnet package's pin): on the protocol 6 vault (#67, #68) and contracts#53 (GovernanceParams #50, RewardPool #51), the RewardPool tail cap (#72: the tail closes up to the open result's reservation progress), the RejectResult fixtures (#74) and the election's outsider skip (#76); X4 #856 needs #72 for the closed intervals of the accumulated chain",
       "branch": "main"
     },
     "native-bridge-plugins": {
       "repository": "https://github.com/ristik/native-bridge-plugins.git",
-      "commit": "b614f15c40135c98a0eeb8c18d4504c56621cd97",
+      "commit": "de6eb8dff5cbd4a1b3a2cb90653179eef9a886ea",
       "branch": "main",
-      "note": "CANDIDATE: nbp#63 (dev2/b1-upstream-seal-rule b614f15c): protocol 7, the upstream seal rule and the 7,200 gas coefficient, vendored JS SDK 75c5be7f; re-pin to the main merge. Before: the squash merge of nbp#52 (split PR5, protocol 6: the V2 composition, per-part redemption, anyage.ts on the (nonce, partId) return), on nbp#40 (B7 PR 3: profile v6, the 2 MiB envelope, long-history)"
+      "note": "CANDIDATE: nbp#63 (dev2/b1-upstream-seal-rule de6eb8df): protocol 7, the upstream seal rule and the 7,200 gas coefficient, vendored JS SDK 75c5be7f; re-pin to the main merge. Before: the squash merge of nbp#52 (split PR5, protocol 6: the V2 composition, per-part redemption, anyage.ts on the (nonce, partId) return), on nbp#40 (B7 PR 3: profile v6, the 2 MiB envelope, long-history)"
     },
     "state-transition-sdk-js": {
       "repository": "https://github.com/ristik/state-transition-sdk-js.git",
