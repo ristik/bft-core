@@ -4,7 +4,7 @@
   "components": {
     "ureth": {
       "repository": "https://github.com/ristik/ureth.git",
-      "commit": "62c194bf23725444d8616c62474e6f92444e5334",
+      "commit": "870c1d012297cea6edbcc3ee8969a72a7a7020a8",
       "package": "unicity-reth",
       "cargoArgs": [
         "build",
@@ -14,7 +14,7 @@
         "unicity-reth"
       ],
       "features": "default (jemalloc)",
-      "note": "CANDIDATE: ureth#93 (dev2/b1-upstream-seal-rule 62c194bf): the native B1 precompile on the upstream seal rule, 7,200 gas per supplied seal signature (protocol 7, bft-core#920); re-pin to the unicity/main squash merge. Before: ureth unicity/main at the merge of #88 (protocol 6: BRIDGE_COMPOSE_V2 registered at 0x0105, the lineage relation of #84 with #86's oracle parity), on B7 PR 3 (#83: the 2 MiB envelope, #82, #81) and #75's transaction gossip",
+      "note": "CANDIDATE: ureth#93 (squash merge 870c1d01): the native B1 precompile on the upstream seal rule, 7,200 gas per supplied seal signature (protocol 7, bft-core#920); Before: ureth unicity/main at the merge of #88 (protocol 6: BRIDGE_COMPOSE_V2 registered at 0x0105, the lineage relation of #84 with #86's oracle parity), on B7 PR 3 (#83: the 2 MiB envelope, #82, #81) and #75's transaction gossip",
       "targetedPackages": [
         "reth-unicity-b1",
         "reth-unicity-execution",
@@ -36,7 +36,7 @@
     },
     "native-bridge-plugins": {
       "repository": "https://github.com/ristik/native-bridge-plugins.git",
-      "commit": "669ebe85c6a29b9161d3e37e55163834c51ca020",
+      "commit": "b614f15c40135c98a0eeb8c18d4504c56621cd97",
       "branch": "main",
       "note": "CANDIDATE: nbp#63 (dev2/b1-upstream-seal-rule 669ebe85): protocol 7, the upstream seal rule and the 7,200 gas coefficient, vendored JS SDK 75c5be7f; re-pin to the main merge. Before: the squash merge of nbp#52 (split PR5, protocol 6: the V2 composition, per-part redemption, anyage.ts on the (nonce, partId) return), on nbp#40 (B7 PR 3: profile v6, the 2 MiB envelope, long-history)"
     },
