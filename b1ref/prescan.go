@@ -240,10 +240,9 @@ func (r *shapeReader) uc() (out ucShape) {
 	out.sigs = r.collection(majMap, MaxSigsPerSeal, ErrTooManySigs)
 	for i := uint64(0); i < out.sigs && r.err == nil; i++ {
 		r.blob(majText, 0, MaxNodeIDBytes, ErrNodeIDTooLong)
-		sig := r.blob(majBytes, 0, math.MaxUint64, ErrShape)
-		if r.err == nil && ((len(sig) != 64 && len(sig) != 65) || (len(sig) == 65 && sig[64] > 1)) {
-			r.err = ErrSigFormat
-		}
+		// any byte string is a well-formed witness (bounded by the UC and call size limits): whether it counts is decided at quorum
+		// evaluation, where a signature that is not an exact canonical 65-byte recoverable signature of the member contributes zero
+		r.blob(majBytes, 0, math.MaxUint64, ErrShape)
 	}
 	out.sealEnd = r.pos
 	return

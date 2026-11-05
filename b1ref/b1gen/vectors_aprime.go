@@ -5,13 +5,13 @@ func (g *gen) aprime(seed string) {
 	const fam = "Paths/encoding"
 	f := newFixture(seed, 4)
 	pre := f.pre()
-	cs := f.build("a", f.round, f.vals[:3], false)
+	cs := f.build("a", f.round, f.vals[:3], true)
 	u := cs.get(1, "")
-	for _, n := range []int{0, 63, 66} {
+	for _, n := range []int{63, 66} {
 		x := u
 		x.seal.sigs = append([]entry(nil), u.seal.sigs...)
 		x.seal.sigs[0].val = make([]byte, n)
-		g.bad("frozen.signature-length-"+decimal(n), fam, "unsupported signature length", req(claimOf(x)), &pre, "ErrSigFormat")
+		g.ok("frozen.signature-length-"+decimal(n), fam, "a "+decimal(n)+"-byte signature value in place of a needed one: well formed, no weight", req(claimOf(x)), pre, "ErrQuorum", nil, nil)
 	}
 	// Null value is distinct from a null collection: the value is malformed.
 	x := u
@@ -62,7 +62,7 @@ func (g *gen) aprime(seed string) {
 		for i, w := range tc.weights {
 			authority.members[i].weight = w
 		}
-		uc := f.build("a", f.round, f.vals[:tc.n], false).get(1, "")
+		uc := f.build("a", f.round, f.vals[:tc.n], true).get(1, "")
 		g.ok("weighted."+tc.id, "Quorum", "weighted threshold boundary", req(claimOf(uc)), f.preForAuthority(authority), tc.want, &uc.seal, nil)
 	}
 }

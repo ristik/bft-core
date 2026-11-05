@@ -42,7 +42,7 @@ var (
 	ErrRLP           = newSentinel(ErrMalformed, "noncanonical or malformed RLP")
 	// A certificate outside the intersection of the native bounded scan and the SDK 3.0.1 codec.
 	ErrCertScan      = newSentinel(ErrMalformed, "certificate outside the native/SDK codec intersection")
-	ErrCertSigLength = newSentinel(ErrMalformed, "certificate seal signature is neither 64 nor 65 bytes")
+	ErrCertSigLength = newSentinel(ErrMalformed, "certificate seal signature width (no longer produced: any byte-string width is a well-formed witness under the upstream seal rule)")
 )
 
 // Budget reasons.

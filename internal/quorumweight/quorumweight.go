@@ -183,22 +183,62 @@ func verifySigned(tb Verifier, data []byte, signatures map[string]hex.Bytes, str
 	return tally.Weight(), nil
 }
 
-// Checked returns tb with VerifyQuorumSignatures replaced by VerifySigned, so that go-base verifiers that take a
-// RootTrustBase (UnicityCertificate.Verify, UnicitySeal.Verify) decide through the checked arithmetic instead of
-// go-base's unchecked sum. Only the production *RootTrustBaseV1 is wrapped; any other implementation (a test double)
-// is returned unchanged.
-func Checked(tb types.RootTrustBase) types.RootTrustBase {
-	v1, ok := tb.(*types.RootTrustBaseV1)
-	if !ok || v1 == nil {
-		return tb
+// VerifySealSigned is the unicity seal rule (the upstream rule, owner decision 2026-11-04) with the checked sum: every distinct
+// signer ID is judged alone. A signer that is not a member, and a signature that is not valid for its member (tb.VerifySignature: exactly 65
+// bytes, low s, a recovery ID that recovers the member's key), contribute zero and do not fail the seal; the weights of the valid signatures
+// are added with overflow refusal and the sum must reach the threshold. It returns the verified weight.
+//
+// It is for seals only. VerifySigned and VerifySignedStrict stay as they are for the other certificates (votes, handoff proofs, trust-base
+// lineage), and the signatures of a trust-base entry are never judged by this rule.
+func VerifySealSigned(tb Verifier, data []byte, signatures map[string]hex.Bytes) (uint64, error) {
+	threshold := tb.GetQuorumThreshold()
+	if threshold == 0 {
+		return 0, ErrZeroWeight
 	}
-	return checkedTrustBase{RootTrustBase: v1}
+	signers := make([]string, 0, len(signatures))
+	for id := range signatures {
+		signers = append(signers, id)
+	}
+	sort.Strings(signers)
+	var tally Tally
+	for _, id := range signers {
+		stake, err := tb.VerifySignature(data, signatures[id], id)
+		if err != nil {
+			continue // unknown or not valid: counts for nothing
+		}
+		if err := tally.Add(id, stake); err != nil {
+			return 0, err
+		}
+	}
+	if !tally.Reached(threshold) {
+		return tally.Weight(), notReached{weight: tally.Weight(), threshold: threshold}
+	}
+	return tally.Weight(), nil
+}
+
+// Checked returns tb with VerifyQuorumSignatures replaced by VerifySealSigned, so that go-base verifiers that take a
+// RootTrustBase (UnicityCertificate.Verify, UnicitySeal.Verify) judge a seal by the seal rule and decide through the checked
+// arithmetic instead of go-base's unchecked sum. The production trust bases (*RootTrustBaseV1 and the entry *RootTrustBaseV2) are
+// wrapped; any other implementation (a test double) is returned unchanged. The wrapper exists only for UC and seal verification: the
+// entry's own VerifyQuorumSignatures (the strict successor check) is not reachable through it for any other purpose.
+func Checked(tb types.RootTrustBase) types.RootTrustBase {
+	switch v := tb.(type) {
+	case *types.RootTrustBaseV1:
+		if v != nil {
+			return checkedTrustBase{RootTrustBase: v}
+		}
+	case *types.RootTrustBaseV2:
+		if v != nil {
+			return checkedTrustBase{RootTrustBase: v}
+		}
+	}
+	return tb
 }
 
 type checkedTrustBase struct{ types.RootTrustBase }
 
 func (c checkedTrustBase) VerifyQuorumSignatures(data []byte, signatures map[string]hex.Bytes) error {
-	_, err := VerifySigned(c.RootTrustBase, data, signatures)
+	_, err := VerifySealSigned(c.RootTrustBase, data, signatures)
 	return err
 }
 

@@ -16,6 +16,7 @@ import (
 
 	"github.com/fxamacker/cbor/v2"
 	"github.com/stretchr/testify/require"
+	abcrypto "github.com/unicitynetwork/bft-go-base/crypto"
 	"github.com/unicitynetwork/bft-go-base/types"
 
 	"github.com/unicitynetwork/bft-core/gettrustbase"
@@ -243,4 +244,31 @@ func TestUCVerifyTwoShardsOfOnePartition(t *testing.T) {
 	require.ErrorContains(t, run(both, confL), "invalid shard configuration hash", "the right shard's certificate does not verify under the left shard's configuration alone")
 	require.ErrorContains(t, run(both, confL, confOther), "invalid shard configuration hash", "nor under a configuration it was not made under")
 	require.NoError(t, run(token("left.cbor", cert.Anchors[0].UC), confL, confR))
+}
+
+// The printed signed-weight is what the seal rule counted: a member's slot holding junk, and a stranger, are not signed weight.
+func TestSignedWeightCountsVerifiedSignaturesOnly(t *testing.T) {
+	signers := map[string]abcrypto.Signer{}
+	var nodes []*types.NodeInfo
+	for _, id := range []string{"a", "b", "c", "d"} {
+		s, err := abcrypto.NewInMemorySecp256K1Signer()
+		require.NoError(t, err)
+		v, err := s.Verifier()
+		require.NoError(t, err)
+		pub, err := v.MarshalPublicKey()
+		require.NoError(t, err)
+		signers[id] = s
+		nodes = append(nodes, &types.NodeInfo{NodeID: id, SigKey: pub, Stake: 1})
+	}
+	e := &types.RootTrustBaseV2{Version: 2, NetworkID: 5, Epoch: 1, EpochStart: 1, RootNodes: nodes, QuorumThreshold: 3, PreviousEntryID: make([]byte, 32)}
+	require.NoError(t, e.VerifyGenesis())
+	seal := &types.UnicitySeal{Version: 1, NetworkID: 5, RootChainRoundNumber: 3, Epoch: 1, Timestamp: types.GenesisTime + 1, Hash: []byte{1}}
+	for _, id := range []string{"a", "b", "c", "d"} {
+		require.NoError(t, seal.Sign(id, signers[id]))
+	}
+	require.EqualValues(t, 4, signedWeight(e, seal))
+	seal.Signatures["d"] = []byte{1, 2, 3} // junk in a member's slot: present in the map, not signed weight
+	require.EqualValues(t, 3, signedWeight(e, seal))
+	seal.Signatures["stranger"] = seal.Signatures["a"]
+	require.EqualValues(t, 3, signedWeight(e, seal), "an unknown ID adds nothing")
 }

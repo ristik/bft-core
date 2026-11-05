@@ -8,29 +8,29 @@
       "historyBytes": 1364,
       "historySha256": "0edea7193953fdd2b5f374f212c3147d3fcef683138d677116f6d948fe8601c5",
       "envelopeBytes": 5824,
-      "requestBytes": 2182,
-      "requestSha256": "2a6d02630b9728c78aa74be27f9bed3d96850c8cfc7b4920f246d6a3d8f3d65c",
+      "requestBytes": 2191,
+      "requestSha256": "808ecc3d47c855a2d0d5a7706d6b67563591aa4ec5bd3cedea27afe33b5eeb0f",
       "grouping": {
-        "C": 2182,
+        "C": 2191,
         "K": 3,
         "E": 3,
         "S": 3,
         "Q": 9,
         "A": 3,
         "P": 6,
-        "Gas": 250212
+        "Gas": 261156
       },
-      "nativeCharge": 250212,
+      "nativeCharge": 261156,
       "gate": {
         "b2": 106400,
-        "batch": 250212,
+        "batch": 261156,
         "intrinsic": 588360,
         "items": 198000,
         "j": 198,
         "reserve": 1000000,
         "rsmt": 16326,
         "steps": 10,
-        "total": 2159298
+        "total": 2170242
       },
       "nullifier": "9e4cb08724101fa7d43a15987bbfd9dbe372315b918067ee25879f44a03946e8"
     },
@@ -41,29 +41,29 @@
       "historyBytes": 1092,
       "historySha256": "9cab767cc28f821be80738f218a3c29d31e35f0570d86b417bf37d640c54c9cd",
       "envelopeBytes": 4256,
-      "requestBytes": 1490,
-      "requestSha256": "74928881e04a16050e36ecb61133ae1fb812dcd277f217296a3d4999ec7ffac2",
+      "requestBytes": 1496,
+      "requestSha256": "f70c3f51acf725fcbe178aea5cab15e21f5449fea48078bff702b2b23155b691",
       "grouping": {
-        "C": 1490,
+        "C": 1496,
         "K": 2,
         "E": 2,
         "S": 2,
         "Q": 6,
         "A": 2,
         "P": 5,
-        "Gas": 186990
+        "Gas": 194286
       },
-      "nativeCharge": 186990,
+      "nativeCharge": 194286,
       "gate": {
         "b2": 87280,
-        "batch": 186990,
+        "batch": 194286,
         "intrinsic": 437832,
         "items": 140000,
         "j": 140,
         "reserve": 1000000,
         "rsmt": 11900,
         "steps": 9,
-        "total": 1864002
+        "total": 1871298
       },
       "nullifier": "7c17c853b1a4659022aa5eda9a597d7297e9b4e89e50ac617ac0cbd0069de5ea"
     },
@@ -74,29 +74,29 @@
       "historyBytes": 2724,
       "historySha256": "27dd845195c78165151a048c7ec4073383aa43b9acb270836645602c15a31088",
       "envelopeBytes": 14752,
-      "requestBytes": 6356,
-      "requestSha256": "9710f96dfe4923b6f645223797eab0ffaa5aad80ec77e4695be1071e7f8ffa1c",
+      "requestBytes": 6380,
+      "requestSha256": "91f65fb16aa0ffb97b08078e6bdb79ea0a35f112109e078cd042d65ed50746ba",
       "grouping": {
-        "C": 6356,
+        "C": 6380,
         "K": 8,
         "E": 1,
         "S": 1,
         "Q": 3,
         "A": 8,
         "P": 32,
-        "Gas": 262696
+        "Gas": 266680
       },
-      "nativeCharge": 262696,
+      "nativeCharge": 266680,
       "gate": {
         "b2": 203920,
-        "batch": 262696,
+        "batch": 266680,
         "intrinsic": 1445448,
         "items": 509000,
         "j": 509,
         "reserve": 1000000,
         "rsmt": 46076,
         "steps": 46,
-        "total": 3467140
+        "total": 3471124
       },
       "nullifier": "ed2e602b39d586491de5ea3a6ec40725031de659a3d8b5f3ab4bf9219c3cfbee"
     },
@@ -107,29 +107,29 @@
       "historyBytes": 2724,
       "historySha256": "b644765271e78c56affbe8da55e6615318864109b7902b767f7fa358ad39251a",
       "envelopeBytes": 14720,
-      "requestBytes": 6356,
-      "requestSha256": "1968fd8380240fa41cec7ea0fafd5f6cf6bf385cbccc7fafac2677ef3a35e6de",
+      "requestBytes": 6380,
+      "requestSha256": "17cddddf7dd4bb58644964eb693c0e832ee19336316abc4e7aec3e4c5f22d03b",
       "grouping": {
-        "C": 6356,
+        "C": 6380,
         "K": 8,
         "E": 3,
         "S": 8,
         "Q": 24,
         "A": 8,
         "P": 32,
-        "Gas": 448496
+        "Gas": 477680
       },
-      "nativeCharge": 448496,
+      "nativeCharge": 477680,
       "gate": {
         "b2": 203920,
-        "batch": 448496,
+        "batch": 477680,
         "intrinsic": 1442376,
         "items": 509000,
         "j": 509,
         "reserve": 1000000,
         "rsmt": 45314,
         "steps": 45,
-        "total": 3649106
+        "total": 3678290
       },
       "nullifier": "ce7ab0d87019e8cb379f0753b86d9db4c03e8e666336a8ae93bdaa57d9de6e2a"
     },
@@ -140,29 +140,29 @@
       "historyBytes": 2724,
       "historySha256": "b644765271e78c56affbe8da55e6615318864109b7902b767f7fa358ad39251a",
       "envelopeBytes": 14720,
-      "requestBytes": 6356,
-      "requestSha256": "1968fd8380240fa41cec7ea0fafd5f6cf6bf385cbccc7fafac2677ef3a35e6de",
+      "requestBytes": 6380,
+      "requestSha256": "17cddddf7dd4bb58644964eb693c0e832ee19336316abc4e7aec3e4c5f22d03b",
       "grouping": {
-        "C": 6356,
+        "C": 6380,
         "K": 8,
         "E": 3,
         "S": 8,
         "Q": 24,
         "A": 8,
         "P": 32,
-        "Gas": 448496
+        "Gas": 477680
       },
-      "nativeCharge": 448496,
+      "nativeCharge": 477680,
       "gate": {
         "b2": 203920,
-        "batch": 448496,
+        "batch": 477680,
         "intrinsic": 1442376,
         "items": 509000,
         "j": 509,
         "reserve": 1000000,
         "rsmt": 45314,
         "steps": 45,
-        "total": 3649106
+        "total": 3678290
       },
       "nullifier": "ce7ab0d87019e8cb379f0753b86d9db4c03e8e666336a8ae93bdaa57d9de6e2a"
     },
@@ -173,29 +173,29 @@
       "historyBytes": 2724,
       "historySha256": "b644765271e78c56affbe8da55e6615318864109b7902b767f7fa358ad39251a",
       "envelopeBytes": 14720,
-      "requestBytes": 6356,
-      "requestSha256": "835497d8eceaec6c143e10eedf7d1c31a13354655a2c9591c487f64f31efbdb8",
+      "requestBytes": 6380,
+      "requestSha256": "d563c8181885adc8f8324aea2183d03c23684e8c421eebd6dcbc3cc8f66cb0fb",
       "grouping": {
-        "C": 6356,
+        "C": 6380,
         "K": 8,
         "E": 1,
         "S": 1,
         "Q": 3,
         "A": 8,
         "P": 32,
-        "Gas": 262696
+        "Gas": 266680
       },
-      "nativeCharge": 262696,
+      "nativeCharge": 266680,
       "gate": {
         "b2": 203920,
-        "batch": 262696,
+        "batch": 266680,
         "intrinsic": 1442376,
         "items": 509000,
         "j": 509,
         "reserve": 1000000,
         "rsmt": 45314,
         "steps": 45,
-        "total": 3463306
+        "total": 3467290
       },
       "nullifier": "ce7ab0d87019e8cb379f0753b86d9db4c03e8e666336a8ae93bdaa57d9de6e2a"
     }

@@ -19,7 +19,7 @@ import (
 )
 
 // semanticProfile is the canonical native-bridge profile artifact, byte for
-// byte native-bridge-plugins protocol/profile-v2.json at the revision this
+// byte native-bridge-plugins protocol/profile-v7.json at the revision this
 // generator was written against.
 //
 //go:embed testdata/semantic-profile.json
@@ -626,6 +626,7 @@ func (g *gen) histories() {
 		id, desc string
 		mut      func(h *History)
 		noResign bool
+		post     func(h *History) // after the history is re-signed (so a re-signing does not undo it)
 	}
 	c := f.Cfg
 	just := func(chain uint64, v [20]byte, n uint64) []byte {
@@ -693,6 +694,11 @@ func (g *gen) histories() {
 		{id: "unlock-minter-public-key", desc: "mint unlocked by a non-minter key", noResign: true, mut: func(h *History) {
 			h.MintCD.Unlock = SignUnlock(KeyFromSeed("evil"), h.MintCD.SourceHash, h.MintCD.TxHash)
 		}},
+		{id: "unlock-bad-and-deadline-expired", desc: "a transfer with a bad unlock and an explicit deadline that has expired (t = e+1): the unlock failure comes first, as the unlock is checked before the expiry",
+			mut: func(h *History) { h.Transfers[1].Deadline = DeadlineAt(BaseTime + 1000); h.Times[1] = BaseTime + 1001 },
+			post: func(h *History) {
+				h.CDs[1].Unlock = SignUnlock(KeyFromSeed("evil"), h.CDs[1].SourceHash, h.CDs[1].TxHash)
+			}},
 		{id: "hist-unlock-flipped-parity", desc: "transfer unlock with recovery parity flipped", noResign: true, mut: func(h *History) { h.CDs[2].Unlock[64] ^= 1 }},
 		{id: "hist-unlock-id4", desc: "transfer unlock with recovery ID 4", noResign: true, mut: func(h *History) { h.CDs[2].Unlock[64] = 4 }},
 		{id: "hist-unlock-short", desc: "transfer unlock of 64 bytes", noResign: true, mut: func(h *History) { h.CDs[2].Unlock = h.CDs[2].Unlock[:64] }},
@@ -724,6 +730,9 @@ func (g *gen) histories() {
 		mm.mut(h)
 		if !mm.noResign {
 			g.must(h.Resign(keys))
+		}
+		if mm.post != nil {
+			mm.post(h)
 		}
 		fam := "history"
 		add(mm.id, fam, mm.desc, "return", h)
@@ -872,8 +881,19 @@ func (g *gen) wire() {
 	tadd("token-proof-extra-sibling", "a sibling beyond the bitmap", replaceOnce(tbts, p0, pr(CUint(1), cd0, CUint(tok.MintProof.T), CBytes(append(bytes.Clone(path), make([]byte, 32)...)), uc0)))
 	tadd("token-proof-no-certificate", "null certificate", replaceOnce(tbts, p0, pr(CUint(1), cd0, CUint(tok.MintProof.T), CBytes(path), CNull)))
 	tadd("token-proof-certificate-not-decodable", "a tagged item that is not an SDK-decodable certificate", replaceOnce(tbts, p0, pr(CUint(1), cd0, CUint(tok.MintProof.T), CBytes(path), CTag(1, CBytes([]byte{1})))))
-	tadd("token-proof-signature-64-bytes", "certificate whose seal signatures are 64 bytes (r||s): inside the B1 profile rule", replaceOnce(tbts, p0, pr(CUint(1), cd0, CUint(tok.MintProof.T), CBytes(path), g.shortSigUC(uc0, 64))))
-	tadd("token-proof-signature-63-bytes", "certificate whose seal signatures are 63 bytes", replaceOnce(tbts, p0, pr(CUint(1), cd0, CUint(tok.MintProof.T), CBytes(path), g.shortSigUC(uc0, 63))))
+	tadd("token-proof-signature-64-bytes", "certificate whose seal signatures are 64 bytes (r||s): well formed, no weight; the token's certificate has no quorum", replaceOnce(tbts, p0, pr(CUint(1), cd0, CUint(tok.MintProof.T), CBytes(path), g.shortSigUC(uc0, 64))))
+	tadd("token-proof-signature-63-bytes", "certificate whose seal signatures are 63 bytes: well formed, no weight", replaceOnce(tbts, p0, pr(CUint(1), cd0, CUint(tok.MintProof.T), CBytes(path), g.shortSigUC(uc0, 63))))
+	// witnesses beside the token certificate's honest quorum: a well-formed junk value counts zero; an empty value is the one structural exception
+	for _, c := range []struct {
+		id, desc string
+		sig      []byte
+	}{
+		{"token-proof-extra-unknown-junk", "a 3-byte witness of an unknown ID beside the honest quorum: the projection is a scan and admits it (the witness counts zero at verification)", []byte{1, 2, 3}},
+		{"token-proof-extra-unknown-65", "a 65-byte witness of an unknown ID beside the honest quorum: it counts zero", bytes.Repeat([]byte{7}, 65)},
+		{"token-proof-extra-unknown-empty", "an empty witness of an unknown ID beside the honest quorum: the projection is a scan and admits it; only verification refuses an empty value (backing-quorum-plus-empty-extra-*)", []byte{}},
+	} {
+		tadd(c.id, c.desc, replaceOnce(tbts, p0, pr(CUint(1), cd0, CUint(tok.MintProof.T), CBytes(path), g.extraSigUC(uc0, "16Uiu2HAmNonMember", c.sig))))
+	}
 	for _, mutation := range certificateMutations() {
 		uc, err := replaceCertificateItem(uc0, mutation.replacement, mutation.path...)
 		g.must(err)
@@ -1099,7 +1119,7 @@ func (g *gen) lock() {
 				uc.UnicitySeal.Signatures[k] = flip(uc.UnicitySeal.Signatures[k], 3)
 			}
 		})},
-		{"backing-uc-signature-64-bytes", "every seal signature cut to 64 bytes (r||s): accepted by the B1 profile rule, as by both SDKs", reUC(func(uc *types.UnicityCertificate) {
+		{"backing-uc-signature-64-bytes", "every seal signature cut to 64 bytes (r||s): well-formed witnesses that carry no recovery ID and no weight, so the seal has no quorum", reUC(func(uc *types.UnicityCertificate) {
 			for k, sig := range uc.UnicitySeal.Signatures {
 				uc.UnicitySeal.Signatures[k] = sig[:64]
 			}
@@ -1233,6 +1253,22 @@ func (g *gen) lock() {
 		g.must(err)
 		return b
 	}
+	// A retired committee beside the current one: epoch 2's own committee signs and a member of the retired epoch-1 committee adds a genuine signature
+	// under its own identity. The retired identity is unknown to epoch 2's committee, so it counts zero and the seal holds (the negatives are
+	// backing-new-committee-old-signer, where the retired committee alone claims epoch 2, and backing-ended-epoch, where it claims its closed epoch).
+	if p := certifiedIn("next-epoch-new-committee", g.newCom, NextEpochStart+5); p != nil {
+		back("backing-new-committee-plus-retired-extra", "sealed in epoch 2 by its new committee, plus a genuine signature of a retired epoch-1 member under its own identity: it counts zero, the seal holds",
+			remint(func(lp *LockProof) {
+				*lp = *p
+				lp.UC = ucMut(p.UC, func(uc *types.UnicityCertificate) {
+					sb, err := uc.UnicitySeal.SigBytes()
+					g.must(err)
+					sig, err := d.Auth.Signer.SignBytes(sb)
+					g.must(err)
+					uc.UnicitySeal.Signatures[d.Auth.NodeID] = sig
+				})
+			}), "next-epoch-new-committee", "dev")
+	}
 	if p := certifiedIn("next-epoch", d.Auth, NextEpochStart+5); p != nil {
 		back("backing-two-faults-epoch-and-root", "sealed in epoch 2, which the installed history does not hold, with a false seal root: the epoch decides (retryable)",
 			remint(func(lp *LockProof) {
@@ -1249,12 +1285,12 @@ func (g *gen) lock() {
 				}
 			})
 		}), "pinned", "dev")
-	// The strict seal rule: a full quorum plus one signature of a non-member is refused.
+	// The seal rule is the upstream rule: a full quorum plus a signature of a non-member is valid (the non-member counts zero).
 	if ti, err := g.fs.trustInput("committee-4"); err == nil {
 		com, err := NewCommittee("quorum-4", 4)
 		g.must(err)
 		if p, err := d.World.Certified(f, com, d.EVMPDR, ti, DevRootRound, 5, 9); err == nil {
-			back("backing-quorum-plus-non-member", "all four members sign and a non-member adds a signature: the seal fails",
+			back("backing-quorum-plus-non-member", "all four members sign and a non-member adds a signature: the non-member counts zero, the seal holds",
 				remint(func(lp *LockProof) {
 					*lp = *p
 					lp.UC = ucMut(p.UC, func(uc *types.UnicityCertificate) {
@@ -1264,6 +1300,78 @@ func (g *gen) lock() {
 						}
 						sort.Strings(ids) // deterministic: a copy of the first member's signature
 						uc.UnicitySeal.Signatures["16Uiu2HAmNonMember"] = bytes.Clone(uc.UnicitySeal.Signatures[ids[0]])
+					})
+				}), "committee-4", "dev")
+			back("backing-quorum-plus-bad-extra", "all four members sign and one signature is corrupted: three valid members hold the quorum",
+				remint(func(lp *LockProof) {
+					*lp = *p
+					lp.UC = ucMut(p.UC, func(uc *types.UnicityCertificate) {
+						ids := make([]string, 0, len(uc.UnicitySeal.Signatures))
+						for id := range uc.UnicitySeal.Signatures {
+							ids = append(ids, id)
+						}
+						sort.Strings(ids) // deterministic: a copy of the first member's signature
+						uc.UnicitySeal.Signatures[ids[0]] = flip(uc.UnicitySeal.Signatures[ids[0]], 3)
+					})
+				}), "committee-4", "dev")
+			back("backing-quorum-plus-malformed-extra", "all four members sign and a non-member adds a 3-byte witness: it counts zero",
+				remint(func(lp *LockProof) {
+					*lp = *p
+					lp.UC = ucMut(p.UC, func(uc *types.UnicityCertificate) {
+						ids := make([]string, 0, len(uc.UnicitySeal.Signatures))
+						for id := range uc.UnicitySeal.Signatures {
+							ids = append(ids, id)
+						}
+						sort.Strings(ids) // deterministic: a copy of the first member's signature
+						uc.UnicitySeal.Signatures["16Uiu2HAmNonMember"] = []byte{1, 2, 3}
+					})
+				}), "committee-4", "dev")
+			back("backing-quorum-plus-compact-extra", "all four members sign and one signature is cut to the 64-byte compact form: it counts zero, three valid members hold the quorum",
+				remint(func(lp *LockProof) {
+					*lp = *p
+					lp.UC = ucMut(p.UC, func(uc *types.UnicityCertificate) {
+						ids := make([]string, 0, len(uc.UnicitySeal.Signatures))
+						for id := range uc.UnicitySeal.Signatures {
+							ids = append(ids, id)
+						}
+						sort.Strings(ids) // deterministic: a copy of the first member's signature
+						uc.UnicitySeal.Signatures[ids[0]] = uc.UnicitySeal.Signatures[ids[0]][:64]
+					})
+				}), "committee-4", "dev")
+			back("backing-quorum-plus-empty-extra-known", "all four members sign and one member's value is empty: refused by the native seal validation",
+				remint(func(lp *LockProof) {
+					*lp = *p
+					lp.UC = ucMut(p.UC, func(uc *types.UnicityCertificate) {
+						ids := make([]string, 0, len(uc.UnicitySeal.Signatures))
+						for id := range uc.UnicitySeal.Signatures {
+							ids = append(ids, id)
+						}
+						sort.Strings(ids) // deterministic: a copy of the first member's signature
+						uc.UnicitySeal.Signatures[ids[0]] = []byte{}
+					})
+				}), "committee-4", "dev")
+			back("backing-quorum-plus-empty-extra-unknown", "all four members sign and a non-member adds an empty value: refused by the native seal validation",
+				remint(func(lp *LockProof) {
+					*lp = *p
+					lp.UC = ucMut(p.UC, func(uc *types.UnicityCertificate) {
+						ids := make([]string, 0, len(uc.UnicitySeal.Signatures))
+						for id := range uc.UnicitySeal.Signatures {
+							ids = append(ids, id)
+						}
+						sort.Strings(ids) // deterministic: a copy of the first member's signature
+						uc.UnicitySeal.Signatures["16Uiu2HAmNonMember"] = []byte{}
+					})
+				}), "committee-4", "dev")
+			back("backing-quorum-plus-empty-signer-id", "all four members sign and a real signature sits under an empty signer ID: refused by the native seal validation",
+				remint(func(lp *LockProof) {
+					*lp = *p
+					lp.UC = ucMut(p.UC, func(uc *types.UnicityCertificate) {
+						ids := make([]string, 0, len(uc.UnicitySeal.Signatures))
+						for id := range uc.UnicitySeal.Signatures {
+							ids = append(ids, id)
+						}
+						sort.Strings(ids) // deterministic: a copy of the first member's signature
+						uc.UnicitySeal.Signatures[""] = bytes.Clone(uc.UnicitySeal.Signatures[ids[0]])
 					})
 				}), "committee-4", "dev")
 		}
@@ -1625,6 +1733,16 @@ func (g *gen) shortSigUC(uc []byte, n int) []byte {
 	for k, sig := range c.UnicitySeal.Signatures {
 		c.UnicitySeal.Signatures[k] = sig[:n]
 	}
+	b, err := types.Cbor.Marshal(&c)
+	g.must(err)
+	return b
+}
+
+// extraSigUC re-encodes a certificate with one more seal signature value under id.
+func (g *gen) extraSigUC(uc []byte, id string, val []byte) []byte {
+	var c types.UnicityCertificate
+	g.must(types.Cbor.Unmarshal(uc, &c))
+	c.UnicitySeal.Signatures[id] = val
 	b, err := types.Cbor.Marshal(&c)
 	g.must(err)
 	return b
