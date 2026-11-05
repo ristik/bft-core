@@ -104,6 +104,9 @@ func (r *q3Replica) open(withQ3 bool) error {
 	require.NoError(t, err)
 	r.orchestration = orchestration
 	require.NoError(t, orchestration.AddShardConfig(r.f.ShardConf))
+	for _, conf := range r.f.ExtraConfs {
+		require.NoError(t, orchestration.AddShardConfig(conf))
+	}
 	// the shard's authenticated genesis baseline: the committee the first handoff's recovery authorization names
 	baseline := r.f.Incumbent
 	if r.incumbent != nil {
