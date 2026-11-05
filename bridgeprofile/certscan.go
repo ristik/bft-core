@@ -7,7 +7,8 @@ import (
 	"github.com/unicitynetwork/bft-go-base/types"
 )
 
-// SDKSignatureLength is the only seal signature width the SDK 3.0.1 certificate codec accepts. Native B1 also admits 64 bytes.
+// SDKSignatureLength is the width of a seal signature that can count: the canonical recoverable r||s||v. Any other byte-string width is a
+// well-formed witness that contributes zero (the upstream seal rule); it is never a scan failure.
 const SDKSignatureLength = 65
 
 // scanCertificate is the bounded certificate scan every embedded or token-carried certificate passes before any allocation
@@ -55,10 +56,7 @@ func scanCertificate(raw []byte) error {
 		if !sig.isBytes() {
 			return ErrCertScan
 		}
-		// 64 bytes (r||s) or 65 with an ignored recovery suffix, as both SDKs and native B1
-		if n := len(sig.data); n != SDKSignatureLength-1 && n != SDKSignatureLength {
-			return fmt.Errorf("%w: %d bytes", ErrCertSigLength, len(sig.data))
-		}
+		// the width is not checked here: a signature that is not exactly 65 canonical bytes counts zero at the quorum
 	}
 	if _, err := b1ref.ScanUC(raw); err != nil {
 		return fmt.Errorf("%w: %w", ErrCertScan, err)

@@ -40,24 +40,24 @@ the per-SID path with every leaf under its own seal (protocol 5's worst case). T
 
 | N | m | L | K | E | S | Q | batch | gate (consolidated) | gate (per SID) | envelope B | view B |
 |---|---|---|---|---|---|---|---|---|---|---|---|
-| 4 | 1 | 8 | 1 | 1 | 1 | 4 | 131,208 | 2,114,314 | 3,608,136 | 6,432 | 193 |
-| 4 | 1 | 16 | 1 | 1 | 1 | 4 | 131,208 | 2,805,714 | 6,007,608 | 11,296 | 193 |
-| 4 | 2 | 8 | 2 | 1 | 1 | 4 | 149,940 | 2,293,470 | 3,647,064 | 7,552 | 382 |
-| 4 | 2 | 16 | 2 | 1 | 1 | 4 | 149,940 | 2,954,198 | 6,085,464 | 12,160 | 382 |
-| 4 | 4 | 8 | 4 | 1 | 1 | 4 | 191,992 | 2,695,186 | 3,685,992 | 10,112 | 760 |
-| 4 | 4 | 16 | 4 | 1 | 1 | 4 | 191,992 | 3,325,242 | 6,163,320 | 14,464 | 760 |
-| 4 | 8 | 8 | 8 | 1 | 1 | 4 | 291,272 | 3,556,920 | 3,724,920 | 15,584 | 1,516 |
-| 4 | 8 | 16 | 8 | 1 | 1 | 4 | 291,272 | 4,171,640 | 6,241,176 | 19,808 | 1,516 |
-| 16 | 1 | 8 | 1 | 1 | 1 | 16 | 226,632 | 2,375,050 | 5,694,024 | 7,904 | 193 |
-| 16 | 1 | 16 | 1 | 1 | 1 | 16 | 226,632 | 3,066,450 | **10,179,384** | 12,768 | 193 |
-| 16 | 2 | 8 | 2 | 1 | 1 | 16 | 268,788 | 2,742,942 | 5,732,952 | 10,496 | 382 |
-| 16 | 2 | 16 | 2 | 1 | 1 | 16 | 268,788 | 3,403,670 | **10,257,240** | 15,104 | 382 |
-| 16 | 4 | 8 | 4 | 1 | 1 | 16 | 357,688 | 3,522,130 | 5,771,880 | 16,000 | 760 |
-| 16 | 4 | 16 | 4 | 1 | 1 | 16 | 357,688 | 4,152,186 | **10,335,096** | 20,352 | 760 |
-| 16 | 8 | 8 | 8 | 1 | 1 | 16 | 550,664 | 5,138,808 | 5,810,808 | 27,360 | 1,516 |
-| 16 | 8 | 16 | 8 | 1 | 1 | 16 | 550,664 | 5,753,528 | **10,412,952** | 31,584 | 1,516 |
+| 4 | 1 | 8 | 1 | 1 | 1 | 4 | 136,008 | 2,119,114 | 3,646,536 | 6,432 | 193 |
+| 4 | 1 | 16 | 1 | 1 | 1 | 4 | 136,008 | 2,810,514 | 6,084,408 | 11,296 | 193 |
+| 4 | 2 | 8 | 2 | 1 | 1 | 4 | 154,740 | 2,298,270 | 3,685,464 | 7,552 | 382 |
+| 4 | 2 | 16 | 2 | 1 | 1 | 4 | 154,740 | 2,958,998 | 6,162,264 | 12,160 | 382 |
+| 4 | 4 | 8 | 4 | 1 | 1 | 4 | 196,792 | 2,699,986 | 3,724,392 | 10,112 | 760 |
+| 4 | 4 | 16 | 4 | 1 | 1 | 4 | 196,792 | 3,330,042 | 6,240,120 | 14,464 | 760 |
+| 4 | 8 | 8 | 8 | 1 | 1 | 4 | 296,072 | 3,561,720 | 3,763,320 | 15,584 | 1,516 |
+| 4 | 8 | 16 | 8 | 1 | 1 | 4 | 296,072 | 4,176,440 | 6,317,976 | 19,808 | 1,516 |
+| 16 | 1 | 8 | 1 | 1 | 1 | 16 | 245,832 | 2,394,250 | 5,847,624 | 7,904 | 193 |
+| 16 | 1 | 16 | 1 | 1 | 1 | 16 | 245,832 | 3,085,650 | **10,486,584** | 12,768 | 193 |
+| 16 | 2 | 8 | 2 | 1 | 1 | 16 | 287,988 | 2,762,142 | 5,886,552 | 10,496 | 382 |
+| 16 | 2 | 16 | 2 | 1 | 1 | 16 | 287,988 | 3,422,870 | **10,564,440** | 15,104 | 382 |
+| 16 | 4 | 8 | 4 | 1 | 1 | 16 | 376,888 | 3,541,330 | 5,925,480 | 16,000 | 760 |
+| 16 | 4 | 16 | 4 | 1 | 1 | 16 | 376,888 | 4,171,386 | **10,642,296** | 20,352 | 760 |
+| 16 | 8 | 8 | 8 | 1 | 1 | 16 | 569,864 | 5,158,008 | 5,964,408 | 27,360 | 1,516 |
+| 16 | 8 | 16 | 8 | 1 | 1 | 16 | 569,864 | 5,772,728 | **10,720,152** | 31,584 | 1,516 |
 
-Read: consolidation is always the cheaper bundle, and the per-SID path costs about 10.4M at 16 members and 16 leaves (bold, over
+Read: consolidation is always the cheaper bundle, and the per-SID path costs about 10.7M at 16 members and 16 leaves (the signature term is 7,200 per supplied signature, protocol 7) (bold, over
 the former 7M ceiling). Each additional shard under the shared seal costs about 0.15–0.2M at 4 members and 0.3–0.4M at 16 (UC bytes
 and items of the repeated seal copy). The leaf and history-byte terms grow with L.
 
@@ -84,7 +84,7 @@ above the former 7M, unrefused. A token whose leaves each carry their own certif
 `native.go` is the executable reference for the `0x0105` precompile (briefs/dev4-b7-native-compose-spec.md): `NativeCompose` runs
 `Compose`'s relation over `abi.encode(uint8 op, bytes cfg, bytes envelope)` and returns the fixed 384-byte output (marker, status,
 the ten result fields, leaf count), a status code from the append-only `ComposeStatus` table (`config/compose-status.json` in the
-corpus) and the gas metered by the trial schedule `100000 + 2B + 20J + 16000L + 6000Q + 29900E + 2000A + 250P + 50K⌈log2 K⌉`, each
+corpus) and the gas metered by the trial schedule `100000 + 2B + 20J + 16000L + 7200Q + 29900E + 2000A + 250P + 50K⌈log2 K⌉`, each
 charge taken before the work it pays for (the doc comment of `NativeCompose` lists the order). Only a non-canonical ABI and out of
 gas halt. The corpus carries a `native-<id>` twin of every `compose` case plus a halt, an unknown operation, and a valid return at
 exactly its charge and one gas short.

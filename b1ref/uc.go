@@ -324,9 +324,6 @@ func shapeSeal(it *item, maxSigs uint64) (*item, error) {
 		if key.major != majText || val.major != majBytes {
 			return nil, ErrShape
 		}
-		if (len(val.data) != 64 && len(val.data) != 65) || (len(val.data) == 65 && val.data[64] > 1) {
-			return nil, ErrSigFormat
-		}
 		if len(key.data) > MaxNodeIDBytes {
 			return nil, ErrNodeIDTooLong
 		}

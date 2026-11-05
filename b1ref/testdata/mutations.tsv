@@ -26,3 +26,10 @@ conflict-predicate	b1ref/batch.go	s/bytes.Equal(claims\[j\].shardBytes, claims\[
 conflict-call-site	b1ref/batch.go	s/if conflicts(claims, pl, i) {/if false \&\& conflicts(claims, pl, i) {/	survives	contract 7a.1: two different claims for one shard under one seal cannot both pass binding and folds without a collision, so no real vector reaches the call site; the predicate itself is the conflict-predicate row
 q-cap	b1ref/prescan.go	s/if pl.q > MaxBatchSigs {/if false {/	survives	contract 7a.8: Q <= 256 follows from K <= 16 and 16 signatures per seal; no request can exceed it without failing an earlier bound
 cert-steps-cap	b1ref/prescan.go	s/if certSteps += u.steps; certSteps > MaxCertSteps {/if certSteps += u.steps; false {/	survives	contract 7a.8: 4,608 = 16 * (256 + 32) follows from the per-claim bounds
+unknown-extra-poisons	b1ref/batch.go	/auth.members\[string(kv\[0\])\]/,/^\t\t}$/ s/continue/return ErrQuorum/	red	an unknown signer ID contributes zero; it must not fail an honest quorum
+bad-extra-poisons	b1ref/batch.go	/checkSignature(&m, kv\[1\], sigBytes)/,/^\t\t}$/ s/continue/return ErrQuorum/	red	a known member's invalid signature contributes zero; it must not fail an honest quorum
+compact-accepted	b1ref/verify.go	s/len(sig) != 65 || sig\[64\] > abcrypto.MaxRecoveryID/len(sig) < 64/;s/ver.VerifyBytes(sig, sigBytes)/ver.(abcrypto.CompactVerifier).VerifyCompactBytes(sig[:64], sigBytes)/	red	the 64-byte compact form carries no recovery ID and is not a seal signature
+recovery-id-range	b1ref/verify.go	s/sig\[64\] > abcrypto.MaxRecoveryID/sig[64] > 1/	red	recovery IDs 2 and 3 are legal and genuine (quorum.sig.v2-genuine, v3-genuine)
+unearned-weight	b1ref/batch.go	s/good += m.weight/good += 1/	red	a valid member contributes its listed weight, not one vote
+signature-work-uncounted	b1ref/batch.go	s/work(\"signature\") \/\/ one evaluation/_ = 0 \/\/ one evaluation/	red	every supplied signature is evaluated and counted, whatever its outcome
+quorum-threshold-off	b1ref/batch.go	s/if good < auth.threshold {/if good+1 < auth.threshold {/	red	the quorum is exactly the threshold

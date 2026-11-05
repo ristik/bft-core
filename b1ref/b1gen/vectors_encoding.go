@@ -37,7 +37,7 @@ func customUC(f *fixture, part uint32, shard string, sibs [][32]byte, steps []pa
 		}
 	}
 	u.seal = sealSpec{network: f.network, round: f.round, epoch: f.epoch, timestamp: genesisTime + 6000, prev: r.hash(), root: h}
-	u.seal.signWith(signers, false)
+	u.seal.signWith(signers, true)
 	return u
 }
 
@@ -67,7 +67,7 @@ func (g *gen) encoding(seed string) {
 	f := newFixture(seed, 4)
 	pre := f.pre()
 	q := f.vals[:3]
-	cs := f.build("a", f.round, q, false)
+	cs := f.build("a", f.round, q, true)
 	u := cs.get(1, "")
 	u2 := cs.get(2, "0")
 	c := claimOf(u)

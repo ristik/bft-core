@@ -121,30 +121,27 @@ func sealRelation(c *claim, cm *common, epochs map[uint64]*epochAuth) error {
 	return verifySignatures(c, auth)
 }
 
-// verifySignatures checks every supplied signature over SHA256(Seal.SigBytes()) and then the weighted quorum. Any unknown signer
-// or bad signature fails the seal even when the rest reach quorum; the loop does not stop early.
+// verifySignatures sums the weight of the supplied signatures that are valid and checks the weighted quorum. A signature that does not count - an
+// unknown signer ID, a width or recovery ID that is not canonical, a scalar out of range, a high s, a recovery that fails or yields another key -
+// contributes zero and does not fail the seal: an extra cannot poison an honest quorum. Every supplied signature is still charged (gas is by
+// request), and the loop does not stop early.
 func verifySignatures(c *claim, auth *epochAuth) error {
 	sigBytes, err := c.uc.UnicitySeal.SigBytes()
 	if err != nil {
 		return fmt.Errorf("%w: %v", ErrFold, err)
 	}
 	work("quorum")
-	var first error
 	good := uint64(0)
 	for _, kv := range c.sigs.pairs() {
+		work("signature") // one evaluation per supplied signature, whatever its outcome (gas is by request)
 		m, ok := auth.members[string(kv[0])]
 		if !ok {
-			first = firstErr(first, ErrUnknownSigner)
 			continue
 		}
 		if err := checkSignature(&m, kv[1], sigBytes); err != nil {
-			first = firstErr(first, err)
 			continue
 		}
 		good += m.weight
-	}
-	if first != nil {
-		return first
 	}
 	if good < auth.threshold {
 		return ErrQuorum

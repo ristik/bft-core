@@ -55,7 +55,7 @@ const (
 	gasPerMember   = 1000
 	epochWords     = 11 + 8*MaxMembers
 	EpochGas       = gasPerMember*MaxMembers + gasPerRead*epochWords // 29,900 per distinct declared epoch, at the member ceiling
-	gasPerSig      = 6000
+	gasPerSig      = 7200                                            // profile 7: 6,000 repriced by the measured recovery/verification ratio (briefs/upstream-seal-rule-b1.md, gas decision 2026-11-05); a relative repricing, not an absolute execution-time bound
 	gasPerClaim    = 2000
 	gasPerPathStep = 250
 	rsmtBaseGas    = 2000
@@ -64,7 +64,7 @@ const (
 // ScanGas is G_scan = 60,000 + 16*C + 500*K*(K-1), reserved before the full structural scan.
 func ScanGas(c, k uint64) uint64 { return scanBaseGas + gasPerByte*c + gasPerPair*k*(k-1) }
 
-// BatchGas is G_batch = G_scan + 1,100 + 29,900*E + 6,000*Q + 2,000*A + 250*P over the grouped request. Operands are bounded by
+// BatchGas is G_batch = G_scan + 1,100 + 29,900*E + 7,200*Q + 2,000*A + 250*P over the grouped request. Operands are bounded by
 // the limits above, so it cannot overflow.
 func BatchGas(c, k, e, q, a, p uint64) uint64 {
 	return ScanGas(c, k) + gasPerRead*commonReads + EpochGas*e + gasPerSig*q + gasPerClaim*a + gasPerPathStep*p
