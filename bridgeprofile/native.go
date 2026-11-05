@@ -30,7 +30,7 @@ const (
 	ComposePerByte      uint64 = 2
 	ComposePerItem      uint64 = 20
 	ComposePerLeaf      uint64 = 16_000
-	ComposePerSignature uint64 = 6_000
+	ComposePerSignature uint64 = 7_200
 	ComposePerEpoch     uint64 = 29_900
 	ComposePerClaim     uint64 = 2_000
 	ComposePerStep      uint64 = 250
@@ -184,7 +184,7 @@ func historyLeaves(history []byte) uint64 {
 //  3. The envelope is decoded (DecodeEnvelope); the policy body is checked (CheckPolicyBody) and its J charged once it passes.
 //  4. The history's J (when it scans) and 16000*L (historyLeaves) are charged, then the kernel (VerifyMint or VerifyReturn) runs.
 //  5. PlanAnchors; then the anchor scans in computeGate's order (ScanAnchor, the bridge item scan, the b1ref grouping): the UC and IR
-//     openings' J is charged once the item scan passes, and 6000*Q + 29900*E + 2000*A + 250*P_cert + 50*K*ceil(log2 K) once the
+//     openings' J is charged once the item scan passes, and 7200*Q + 29900*E + 2000*A + 250*P_cert + 50*K*ceil(log2 K) once the
 //     grouping passes; then every leaf path's shape (LeafPathGas).
 //  6. B1 authenticates the anchor table; each anchor's IR is opened and the leaf times are compared.
 //  7. Per leaf: 250*p_i, then its RSMT membership.

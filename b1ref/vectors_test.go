@@ -350,7 +350,7 @@ func TestGasParity(t *testing.T) {
 	for _, v := range m.Vectors {
 		if strings.HasPrefix(v.ID, "price.epoch-ceiling.") {
 			g := v.Expected.Grouping
-			rest[v.Expected.Gas-16*g.C-6000*g.Q] = true
+			rest[v.Expected.Gas-16*g.C-7200*g.Q] = true
 		}
 	}
 	if len(rest) != 1 {
@@ -468,7 +468,7 @@ func TestRecoveryByteIsBinding(t *testing.T) {
 
 // TestMaxGas pins the schedule's maximum: K = E = A = 16, Q = 256, P = 4,608 at the byte cap.
 func TestMaxGas(t *testing.T) {
-	if g := b1ref.BatchGas(b1ref.MaxCallBytes, 16, 16, 256, 16, 4608); g != 7_573_804 {
+	if g := b1ref.BatchGas(b1ref.MaxCallBytes, 16, 16, 256, 16, 4608); g != 7_881_004 {
 		t.Fatalf("batch worst case %d", g)
 	}
 	if g := b1ref.RSMTGas(12392, 256); g != 264_522 {
