@@ -96,6 +96,79 @@ func TestHandleTcError(t *testing.T) {
 	require.NoError(t, bStore.ProcessTc(tc))
 }
 
+// Each TC arrives about n times, once in every timeout message of the next round; #886's tau pays a synced commit for each write.
+func TestProcessTcWritesARoundsTCOnce(t *testing.T) {
+	tcFor := func(round uint64, marker byte) *rctypes.TimeoutCert {
+		return &rctypes.TimeoutCert{Timeout: &rctypes.Timeout{Round: round}, Signatures: map[string]*rctypes.TimeoutVote{string(marker): {}}}
+	}
+	type store struct {
+		tc       *rctypes.TimeoutCert
+		writes   int
+		writeErr error
+		readErr  error
+	}
+	blockStore := func(s *store) *BlockStore {
+		return &BlockStore{storage: mockPersistentStore{
+			readLastTC: func() (*rctypes.TimeoutCert, error) { return s.tc, s.readErr },
+			writeTC: func(tc *rctypes.TimeoutCert) error {
+				s.writes++
+				if s.writeErr != nil {
+					return s.writeErr
+				}
+				s.tc = tc
+				return nil
+			},
+		}}
+	}
+	t.Run("the first copy of a round, and no other", func(t *testing.T) {
+		s := &store{}
+		bs := blockStore(s)
+		first := tcFor(5, 1)
+		require.NoError(t, bs.ProcessTc(first))
+		require.Equal(t, 1, s.writes)
+		require.NoError(t, bs.ProcessTc(tcFor(5, 1)))
+		require.NoError(t, bs.ProcessTc(tcFor(5, 2))) // another quorum of the same round
+		require.Equal(t, 1, s.writes)
+		require.Same(t, first, s.tc)
+	})
+	t.Run("a higher round is written, a lower one does not replace it", func(t *testing.T) {
+		s := &store{}
+		bs := blockStore(s)
+		require.NoError(t, bs.ProcessTc(tcFor(5, 1)))
+		six := tcFor(6, 1)
+		require.NoError(t, bs.ProcessTc(six))
+		require.Equal(t, 2, s.writes)
+		require.Same(t, six, s.tc)
+		require.NoError(t, bs.ProcessTc(tcFor(5, 1)))
+		require.Equal(t, 2, s.writes)
+		require.Same(t, six, s.tc)
+	})
+	t.Run("a failed write is tried again by the next copy", func(t *testing.T) {
+		boom := errors.New("write failed")
+		s := &store{writeErr: boom}
+		bs := blockStore(s)
+		require.ErrorIs(t, bs.ProcessTc(tcFor(5, 1)), boom)
+		require.Nil(t, s.tc)
+		s.writeErr = nil
+		require.NoError(t, bs.ProcessTc(tcFor(5, 1)))
+		require.Equal(t, 2, s.writes)
+		require.NotNil(t, s.tc)
+	})
+	t.Run("a store that cannot be read is written to", func(t *testing.T) {
+		s := &store{tc: tcFor(5, 1), readErr: errors.New("read failed")}
+		require.NoError(t, blockStore(s).ProcessTc(tcFor(5, 2)))
+		require.Equal(t, 1, s.writes)
+	})
+	t.Run("a TC deleted from the store is written again", func(t *testing.T) {
+		s := &store{}
+		bs := blockStore(s)
+		require.NoError(t, bs.ProcessTc(tcFor(5, 1)))
+		s.tc = nil // as an epoch anchor's install does
+		require.NoError(t, bs.ProcessTc(tcFor(5, 1)))
+		require.Equal(t, 2, s.writes)
+	})
+}
+
 /*
 Round can get both TC and QC - validators vote for the proposal and then time out, the QC
 can be formed of the votes sent before the timeout. The block of the round must be still
