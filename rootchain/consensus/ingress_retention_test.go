@@ -245,6 +245,59 @@ var errBrokenLeader = errors.New("the selector failed")
 
 func (brokenLeader) GetLeaderForRound(uint64) (peer.ID, error) { return "", errBrokenLeader }
 
+// knownFrom has the leaders of the rounds from a first one on, as the round before a recovery run sees them: its own leader unknown, the next known.
+type knownFrom struct {
+	constLeader
+	first uint64
+}
+
+func (l knownFrom) GetLeaderForRound(round uint64) (peer.ID, error) {
+	if round < l.first {
+		return "", drctypes.ErrHistoryUnavailable
+	}
+	return l.leader, nil
+}
+
+// The deferral follows the next round's leader, not this round's: the round before the first known one judges and forwards, or a request misses the first slot of a
+// recovery run, which has only four.
+func TestRoundBeforeTheFirstKnownLeaderForwardsTheRetainedRequest(t *testing.T) {
+	t.Run("another root leads it: judged and sent once", func(t *testing.T) {
+		f := newRetentionFixture(t)
+		n := f.cm.pacemaker.GetCurrentRound() + 3
+		f.cm.leaderSelector = knownFrom{constLeader{leader: f.other, nodes: f.cm.Validators()}, n}
+		require.NoError(t, f.cm.retainRequest(f.ctx, f.request(t)))
+		judged := 0
+		f.cm.SetViewResolver(countingResolver{&judged, errors.New("not resolvable now")})
+
+		f.nextRound()
+		require.Equal(t, n-2, f.cm.pacemaker.GetCurrentRound())
+		require.Zero(t, judged)
+		f.requireSends(t, 0)
+
+		f.nextRound()
+		require.Equal(t, n-1, f.cm.pacemaker.GetCurrentRound())
+		_, err := f.cm.leaderSelector.GetLeaderForRound(n - 1)
+		require.ErrorIs(t, err, drctypes.ErrHistoryUnavailable, "this round's own leader is unknown")
+		require.Equal(t, 1, judged)
+		f.requireSends(t, 1)
+	})
+	t.Run("this root leads it: buffered", func(t *testing.T) {
+		f := newRetentionFixture(t)
+		n := f.cm.pacemaker.GetCurrentRound() + 3
+		f.cm.leaderSelector = knownFrom{constLeader{leader: f.cm.id, nodes: f.cm.Validators()}, n}
+		require.NoError(t, f.cm.retainRequest(f.ctx, f.request(t)))
+
+		f.nextRound()
+		require.Equal(t, n-2, f.cm.pacemaker.GetCurrentRound())
+		require.False(t, f.cm.irReqBuffer.IsChangeInBuffer(partitionID, types.ShardID{}))
+
+		f.nextRound()
+		require.Equal(t, n-1, f.cm.pacemaker.GetCurrentRound())
+		require.True(t, f.cm.irReqBuffer.IsChangeInBuffer(partitionID, types.ShardID{}))
+		f.requireSends(t, 0)
+	})
+}
+
 // An unknown next leader means no judging at all, however many rounds it lasts, and leaves the entry as it was. The first known one judges it,
 // and a transient verdict still sends it.
 func TestUnknownLeaderRoundsDoNotJudgeRetainedRequests(t *testing.T) {
@@ -257,6 +310,7 @@ func TestUnknownLeaderRoundsDoNotJudgeRetainedRequests(t *testing.T) {
 		f.nextRound()
 	}
 	require.Zero(t, judged, "the unknown rounds judged nothing")
+	require.Contains(t, f.cm.retained, f.shard)
 	require.Zero(t, f.cm.retained[f.shard].sentAt, "the entry is untouched")
 	f.requireSends(t, 0)
 
@@ -317,6 +371,8 @@ func TestFirstKnownLeaderBeingThisRootBuffersOnlyAValidCopy(t *testing.T) {
 		require.Equal(t, !stale, f.cm.irReqBuffer.IsChangeInBuffer(partitionID, types.ShardID{}), "stale %v", stale)
 		if stale {
 			require.NotContains(t, f.cm.retained, f.shard)
+		} else {
+			require.Contains(t, f.cm.retained, f.shard, "a valid copy stays after it is buffered")
 		}
 		f.requireSends(t, 0)
 	}
