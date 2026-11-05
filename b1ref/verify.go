@@ -55,24 +55,18 @@ func finishCert(in []byte, pl *plan, st State, pins Pins) (Verdict, error) {
 
 var curveN = ethcrypto.S256().Params().N
 
-func firstErr(cur, next error) error {
-	if cur != nil {
-		return cur
-	}
-	return next
-}
-
 func checkSignature(m *member, sig, sigBytes []byte) error {
 	if err := checkSignatureFormat(sig); err != nil {
 		return err
 	}
-	work("signature")
 	return verifySealSignature(m.ver, sig, sigBytes)
 }
 
-// CheckSealSignature is the B1 profile's rule for one seal signature, for a caller that holds the member's verifier (the oracle of another profile
-// that must accept exactly what B1 accepts): 64 bytes, or 65 with a recovery byte 0 or 1 (ErrSigFormat otherwise); r and s in range and s low
-// (ErrSigRange); then the compact verification of r||s against the member's key (ErrSigInvalid). It is the rule of checkSignature, without the gas.
+// CheckSealSignature is the seal signature rule, the upstream rule (owner decision 2026-11-04), for one signature of a known member whose verifier
+// the caller holds: nil iff the signature is exactly 65 bytes r||s||v with 1 <= r < n, 1 <= s <= n/2 and a recovery ID v in 0..3 that recovers, over
+// SHA-256(sigBytes), to the member's key. Any other signature does not count: ErrSigFormat (width or recovery ID), ErrSigRange (scalar range or
+// high s) or ErrSigInvalid (recovery fails or yields another key) say why, but none of them rejects a seal: a caller sums the weight of the
+// signatures that return nil. It is the rule of checkSignature, without the gas.
 func CheckSealSignature(ver abcrypto.Verifier, sig, sigBytes []byte) error {
 	if err := checkSignatureFormat(sig); err != nil {
 		return err
@@ -81,10 +75,7 @@ func CheckSealSignature(ver abcrypto.Verifier, sig, sigBytes []byte) error {
 }
 
 func checkSignatureFormat(sig []byte) error {
-	if len(sig) != 64 && len(sig) != 65 {
-		return ErrSigFormat
-	}
-	if len(sig) == 65 && sig[64] > 1 {
+	if len(sig) != 65 || sig[64] > abcrypto.MaxRecoveryID {
 		return ErrSigFormat
 	}
 	r := new(big.Int).SetBytes(sig[:32])
@@ -96,8 +87,10 @@ func checkSignatureFormat(sig []byte) error {
 	return nil
 }
 
+// verifySealSignature is the one recovery: the base library's recoverable verifier recovers the key from (hash, r, s, v) and compares it with the
+// member's key; there is no second verification and no alternative parity.
 func verifySealSignature(ver abcrypto.Verifier, sig, sigBytes []byte) error {
-	if err := verifyCompact(ver, sig, sigBytes); err != nil {
+	if err := ver.VerifyBytes(sig, sigBytes); err != nil {
 		return ErrSigInvalid
 	}
 	return nil
@@ -204,18 +197,3 @@ func work(kind string) {
 		onWork(kind)
 	}
 }
-
-// verifyCompact is the frozen profile's signature rule, explicitly: the first 64 bytes (r||s) are verified against the member's key by the base
-// library's compact verifier, after the length, recovery-byte (0 or 1 when present) and range checks above. The recoverable verifier
-// (Verifier.VerifyBytes) takes only canonical 65-byte signatures with a recovery ID, which is the native message rule and not this profile's: the
-// profile's acceptance of 64-byte signatures and of recovery bytes 0 and 1 is part of what its Go, Rust and contract implementations agree on, and a
-// library bump must not change it silently.
-func verifyCompact(v abcrypto.Verifier, sig, msg []byte) error {
-	cv, ok := v.(abcrypto.CompactVerifier)
-	if !ok {
-		return errCompactUnsupported
-	}
-	return cv.VerifyCompactBytes(sig[:64], msg)
-}
-
-var errCompactUnsupported = errors.New("the member's verifier has no compact verification")

@@ -20,7 +20,9 @@ func TestLockCertificateIntersectionScan(t *testing.T) {
 	}
 	require.NoError(t, verify(func(*LockProof) {}))
 
-	// The B1 profile seal rule (briefs/nbp-sdk-migration.md section 12): 64 bytes (r||s) or 65 with recovery byte 0/1.
+	// The seal rule is the upstream rule: only an exact canonical 65-byte recoverable signature of a member counts; any other byte string is a
+	// well-formed witness that counts zero. Replacing every signature leaves no quorum (ErrLockUC); adding such a witness beside the honest
+	// quorum changes nothing.
 	truncated := func(n int) func(p *LockProof) {
 		return func(p *LockProof) {
 			var uc types.UnicityCertificate
@@ -39,8 +41,10 @@ func TestLockCertificateIntersectionScan(t *testing.T) {
 			p.UC = b
 		}
 	}
-	t.Run("65 byte seal signature truncated to 64 is accepted", func(t *testing.T) {
-		require.NoError(t, verify(truncated(64)))
+	t.Run("every 65 byte seal signature truncated to 64 has no weight", func(t *testing.T) {
+		err := verify(truncated(64))
+		require.ErrorIs(t, err, ErrLockUC)
+		require.NotErrorIs(t, err, ErrCertScan, "a 64-byte value is a well-formed witness")
 	})
 	recovery := func(f func(byte) byte) func(p *LockProof) {
 		return func(p *LockProof) {
@@ -56,16 +60,32 @@ func TestLockCertificateIntersectionScan(t *testing.T) {
 			p.UC = b
 		}
 	}
-	t.Run("recovery byte swapped between 0 and 1 is ignored", func(t *testing.T) {
-		require.NoError(t, verify(recovery(func(v byte) byte { return v ^ 1 })))
+	t.Run("recovery byte swapped between 0 and 1 is binding", func(t *testing.T) {
+		require.ErrorIs(t, verify(recovery(func(v byte) byte { return v ^ 1 })), ErrLockUC)
 	})
 	t.Run("recovery byte 2", func(t *testing.T) {
 		require.ErrorIs(t, verify(recovery(func(byte) byte { return 2 })), ErrLockUC)
 	})
-	t.Run("63 byte seal signature", func(t *testing.T) {
+	t.Run("63 byte seal signatures have no weight", func(t *testing.T) {
 		err := verify(truncated(63))
-		require.ErrorIs(t, err, ErrCertSigLength)
 		require.ErrorIs(t, err, ErrLockUC)
+		require.NotErrorIs(t, err, ErrCertScan)
+	})
+	extra := func(id string, sig []byte) func(p *LockProof) {
+		return func(p *LockProof) {
+			var uc types.UnicityCertificate
+			require.NoError(t, types.Cbor.Unmarshal(p.UC, &uc))
+			uc.UnicitySeal.Signatures[id] = sig
+			b, err := types.Cbor.Marshal(&uc)
+			require.NoError(t, err)
+			p.UC = b
+		}
+	}
+	t.Run("unknown signer or malformed witnesses beside the honest quorum change nothing", func(t *testing.T) {
+		require.NoError(t, verify(extra("not-a-member", bytes.Repeat([]byte{1}, 65))))
+		require.NoError(t, verify(extra("not-a-member", []byte{1, 2, 3})))
+		require.NoError(t, verify(extra("not-a-member", bytes.Repeat([]byte{1}, 64))))
+		require.NoError(t, verify(extra("not-a-member", bytes.Repeat([]byte{1}, 4000))))
 	})
 
 	t.Run("summary over the native sublimit", func(t *testing.T) {
@@ -117,13 +137,11 @@ func TestTokenProjectionDecodesEveryCertificate(t *testing.T) {
 		require.NoError(t, err)
 		return b
 	}
-	t.Run("signature truncated to 64 bytes is in the B1 profile", func(t *testing.T) {
-		_, err := ProjectToken(replaceUC(cut(64)))
-		require.NoError(t, err)
-	})
-	t.Run("signature truncated to 63 bytes", func(t *testing.T) {
-		_, err := ProjectToken(replaceUC(cut(63)))
-		require.ErrorIs(t, err, ErrCertSigLength)
+	t.Run("signatures of any width are well formed witnesses for the scan", func(t *testing.T) {
+		for _, n := range []int{64, 63, 1} {
+			_, err := ProjectToken(replaceUC(cut(n)))
+			require.NoError(t, err, "width %d", n)
+		}
 	})
 }
 

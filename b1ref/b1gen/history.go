@@ -117,11 +117,11 @@ func (h *History) uc(s Seal, part uint32, shard string) ucSpec {
 	for _, i := range s.Signers {
 		signers = append(signers, h.vals[i])
 	}
-	u := f.build(s.Variant, s.Round, signers, false).get(part, shard)
+	u := f.build(s.Variant, s.Round, signers, true).get(part, shard)
 	if s.BadLast {
 		n := len(u.seal.sigs) - 1
 		u.seal.sigs = append([]entry{}, u.seal.sigs...)
-		u.seal.sigs[n] = entry{u.seal.sigs[n].key, h.vals[s.Signers[n]].sign([]byte("other"), false)}
+		u.seal.sigs[n] = entry{u.seal.sigs[n].key, h.vals[s.Signers[n]].sign([]byte("other"), true)}
 	}
 	return u
 }

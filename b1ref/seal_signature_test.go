@@ -10,10 +10,10 @@ import (
 	"github.com/unicitynetwork/bft-core/b1ref/b1gen"
 )
 
-// CheckSealSignature is the B1 rule for one seal signature, exported for the profiles that must accept what B1 accepts: 64 bytes, or 65 with a
-// recovery byte 0 or 1 (ignored), compact verification, never the native recoverable rule. The golden corpus exercises the same rule end to end
-// (its valid seals are 64-byte signatures, quorum.sig.v-present is the 65-byte form and quorum.sig.v-ignored swaps the recovery byte).
-func TestCheckSealSignatureIsTheB1Rule(t *testing.T) {
+// CheckSealSignature is the seal rule for one signature, the upstream rule (owner decision 2026-11-04): exactly 65 bytes r||s||v, 1 <= r < n,
+// 1 <= s <= n/2, v in 0..3, one recovery to the member's key over SHA-256 of the seal bytes. It is the base library's recoverable verifier, with the
+// reason a signature does not count. The golden corpus exercises the same rule end to end.
+func TestCheckSealSignatureIsTheUpstreamRule(t *testing.T) {
 	m, _ := loadGolden(t)
 	val := b1gen.ValidatorForTest(m.Seed, "node00")
 	other := b1gen.ValidatorForTest(m.Seed, "node01")
@@ -27,15 +27,8 @@ func TestCheckSealSignatureIsTheB1Rule(t *testing.T) {
 	if len(sig65) != 65 || len(sig64) != 64 {
 		t.Fatalf("premise: signature lengths %d and %d", len(sig65), len(sig64))
 	}
-
-	for name, sig := range map[string][]byte{
-		"64 bytes":                          sig64,
-		"65 bytes, recovery byte as signed": sig65,
-		"65 bytes, recovery byte swapped":   append(append([]byte{}, sig65[:64]...), sig65[64]^1),
-	} {
-		if err := b1ref.CheckSealSignature(ver, sig, msg); err != nil {
-			t.Fatalf("%s must be accepted: %v", name, err)
-		}
+	if err := b1ref.CheckSealSignature(ver, sig65, msg); err != nil {
+		t.Fatalf("the canonical 65-byte signature must count: %v", err)
 	}
 
 	refuse := func(name string, want error, sig, data []byte) {
@@ -44,23 +37,31 @@ func TestCheckSealSignatureIsTheB1Rule(t *testing.T) {
 			t.Fatalf("%s: got %v, want %v", name, err, want)
 		}
 	}
+	withV := func(v byte) []byte { return append(append([]byte{}, sig65[:64]...), v) }
+	refuse("the compact 64-byte form", b1ref.ErrSigFormat, sig64, msg)
 	refuse("63 bytes", b1ref.ErrSigFormat, sig64[:63], msg)
 	refuse("66 bytes", b1ref.ErrSigFormat, append(append([]byte{}, sig65...), 0), msg)
-	refuse("recovery byte 2", b1ref.ErrSigFormat, append(append([]byte{}, sig65[:64]...), 2), msg)
-	refuse("recovery byte 255", b1ref.ErrSigFormat, append(append([]byte{}, sig65[:64]...), 255), msg)
-	refuse("another message", b1ref.ErrSigInvalid, sig64, []byte("other bytes"))
-	refuse("another member's signature", b1ref.ErrSigInvalid, other.Sign(msg, false), msg)
+	refuse("empty", b1ref.ErrSigFormat, nil, msg)
+	refuse("recovery byte 4", b1ref.ErrSigFormat, withV(4), msg)
+	refuse("recovery byte 27", b1ref.ErrSigFormat, withV(27), msg)
+	refuse("recovery byte 255", b1ref.ErrSigFormat, withV(255), msg)
+	refuse("the other parity", b1ref.ErrSigInvalid, withV(sig65[64]^1), msg)
+	refuse("a legal recovery byte that does not recover the key", b1ref.ErrSigInvalid, withV(2), msg)
+	refuse("another message", b1ref.ErrSigInvalid, sig65, []byte("other bytes"))
+	refuse("another member's signature", b1ref.ErrSigInvalid, other.Sign(msg, true), msg)
 
 	n := ethcrypto.S256().Params().N
-	high := append([]byte{}, sig64...)
-	hs := new(big.Int).Sub(n, new(big.Int).SetBytes(sig64[32:64])).FillBytes(make([]byte, 32))
-	copy(high[32:], hs)
-	refuse("high s", b1ref.ErrSigRange, high, msg)
-	refuse("s zero", b1ref.ErrSigRange, append(append([]byte{}, sig64[:32]...), make([]byte, 32)...), msg)
-	refuse("r zero", b1ref.ErrSigRange, append(make([]byte, 32), sig64[32:]...), msg)
+	high := append([]byte{}, sig65...)
+	hs := new(big.Int).Sub(n, new(big.Int).SetBytes(sig65[32:64])).FillBytes(make([]byte, 32))
+	copy(high[32:64], hs)
+	refuse("high s (never normalized)", b1ref.ErrSigRange, high, msg)
+	refuse("s zero", b1ref.ErrSigRange, append(append([]byte{}, sig65[:32]...), append(make([]byte, 32), sig65[64])...), msg)
+	refuse("r zero", b1ref.ErrSigRange, append(make([]byte, 32), sig65[32:]...), msg)
 
-	// the native rule refuses what B1 accepts: the two are different rules (see TestRecoveryByteIsPolicy)
-	if ver.VerifyBytes(sig64, msg) == nil {
-		t.Fatal("the native verifier must refuse the compact form that B1 accepts")
+	// there is one rule: the base library's recoverable verifier agrees with CheckSealSignature on every one of these
+	for _, sig := range [][]byte{sig65, sig64, sig64[:63], withV(0), withV(1), withV(2), withV(3), withV(255), high} {
+		if (ver.VerifyBytes(sig, msg) == nil) != (b1ref.CheckSealSignature(ver, sig, msg) == nil) {
+			t.Fatalf("the base verifier and CheckSealSignature disagree on %x", sig)
+		}
 	}
 }

@@ -4,13 +4,9 @@ import (
 	"bytes"
 	stdcrypto "crypto"
 	"fmt"
-	"slices"
-	"sort"
 
 	"github.com/unicitynetwork/bft-go-base/types"
-	"github.com/unicitynetwork/bft-go-base/types/hex"
 
-	"github.com/unicitynetwork/bft-core/b1ref"
 	"github.com/unicitynetwork/bft-core/gettrustbase"
 	"github.com/unicitynetwork/bft-core/internal/quorumweight"
 )
@@ -23,50 +19,16 @@ import (
 
 // verifyNativeUC is the Go SDK's UC verification (input record, shard and
 // unicity trees, seal hash) under entry, the trust-base entry of the seal's
-// epoch (TrustInput.entryFor), with the seal's signatures judged by the B1
-// profile rule (b1Seal), the rule the bridge contract and both SDKs apply.
+// epoch (TrustInput.entryFor), with the seal's signatures judged by the seal
+// rule, the upstream rule: quorumweight.Checked wraps the entry in the seal
+// quorum (unknown signers and signatures that do not recover to their member
+// contribute zero, valid weights are summed overflow-checked and must reach the
+// entry's threshold). This is the same function every other UC verification of
+// the repository uses, so a seal has one verdict standalone, token-carried,
+// backing or grouped. The entry's own VerifyQuorumSignatures, the strict check
+// of a successor entry, is not used for seals. (The frontier collector's positive count is stricter on purpose: it uses VerifySignedStrict.)
 func verifyNativeUC(entry *types.RootTrustBaseV2, uc *types.UnicityCertificate, partition types.PartitionID, shard types.ShardID, conf []byte) error {
-	// routed through quorumweight.Checked like every production UC verification (it wraps only V1 trust bases; b1Seal's own
-	// tally is overflow-checked)
-	return uc.Verify(quorumweight.Checked(b1Seal{entry}), stdcrypto.SHA256, partition, shard, conf)
-}
-
-// b1Seal is a trust-base entry whose quorum check is the B1 profile seal rule:
-// every supplied signature must be a member's and pass b1ref.CheckSealSignature
-// (64 bytes or 65 with recovery byte 0/1, r and low s in range, compact
-// verification of r||s), any other signer or signature fails the seal, and the
-// valid signers' weights must reach the entry's threshold, overflow-checked.
-// The entry's own check (65-byte recoverable signatures) is the native message
-// rule, not the seal profile's (briefs/nbp-sdk-migration.md section 12).
-type b1Seal struct{ *types.RootTrustBaseV2 }
-
-func (s b1Seal) VerifyQuorumSignatures(data []byte, signatures map[string]hex.Bytes) error {
-	ids := make([]string, 0, len(signatures))
-	for id := range signatures {
-		ids = append(ids, id)
-	}
-	sort.Strings(ids) // a deterministic error for a seal with several bad signatures
-	var tally quorumweight.Tally
-	for _, id := range ids {
-		i := slices.IndexFunc(s.RootNodes, func(n *types.NodeInfo) bool { return n != nil && n.NodeID == id })
-		if i < 0 {
-			return fmt.Errorf("%w: %q", quorumweight.ErrUnknownSigner, id)
-		}
-		ver, err := s.RootNodes[i].SigVerifier()
-		if err != nil {
-			return fmt.Errorf("%w: %q: %v", quorumweight.ErrInvalidSignature, id, err)
-		}
-		if err := b1ref.CheckSealSignature(ver, signatures[id], data); err != nil {
-			return fmt.Errorf("%w: %q: %w", quorumweight.ErrInvalidSignature, id, err)
-		}
-		if err := tally.Add(id, s.RootNodes[i].Stake); err != nil {
-			return err
-		}
-	}
-	if !tally.Reached(s.QuorumThreshold) {
-		return fmt.Errorf("%w: signed weight %d, threshold %d", quorumweight.ErrQuorumNotReached, tally.Weight(), s.QuorumThreshold)
-	}
-	return nil
+	return uc.Verify(quorumweight.Checked(entry), stdcrypto.SHA256, partition, shard, conf)
 }
 
 // TrustInput is the network's Unicity Trust Base history, installed from a

@@ -28,7 +28,7 @@ func (g *gen) worked(seed string) {
 		at := func(e uint64, shard string) claimSpec {
 			f := *base
 			f.epoch = e
-			return claimOf(f.build("worked", 1000*(e+1)+500, f.vals, false).get(1, shard))
+			return claimOf(f.build("worked", 1000*(e+1)+500, f.vals, true).get(1, shard))
 		}
 		for _, a := range []int{1, 4, 8, 16} {
 			var shared, distinct []claimSpec

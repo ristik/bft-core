@@ -78,7 +78,7 @@ func (w *TokenWorld) Certify(specs []AnchorSpec) ([]Anchor, error) {
 		for _, i := range DefaultSigners(k.e) {
 			signers = append(signers, w.h.vals[i])
 		}
-		cs := f.build(fmt.Sprintf("token/%d/%d", k.e, k.r), k.r, signers, false)
+		cs := f.build(fmt.Sprintf("token/%d/%d", k.e, k.r), k.r, signers, true)
 		for _, i := range groups[k] {
 			u := cs.get(1, specs[i].Shard)
 			c := claimOf(u)

@@ -448,17 +448,23 @@ func cmdUCVerify(args []string) error {
 		if err := verifyUnderConfs(uc, quorumweight.Checked(e), partition, pdrs, hashes); err != nil {
 			return fmt.Errorf("certificate %d (epoch %d, seal round %d) does not verify under its epoch's committee: %w", i, epoch, round, err)
 		}
-		var signed uint64
-		for _, m := range e.RootNodes {
-			if _, ok := uc.UnicitySeal.Signatures[m.NodeID]; ok {
-				signed += m.Stake
-			}
-		}
+		signed := signedWeight(e, uc.UnicitySeal)
 		id, _ := e.EntryID()
 		fmt.Printf("certificate %d: epoch %d seal round %d verified under entry 0x%x: signers %d signed-weight %d threshold %d, activation interval ok\n",
 			i, epoch, round, id, len(uc.UnicitySeal.Signatures), signed, e.QuorumThreshold)
 	}
 	return nil
+}
+
+// signedWeight is the weight the seal rule counted: the verified signatures of members, not the member IDs present in the witness map (a slot
+// holding junk, an unknown ID and any signature that does not recover to its member's key count zero).
+func signedWeight(e *types.RootTrustBaseV2, seal *types.UnicitySeal) uint64 {
+	sigBytes, err := seal.SigBytes()
+	if err != nil {
+		return 0
+	}
+	w, _ := quorumweight.VerifySealSigned(e, sigBytes, seal.Signatures)
+	return w
 }
 
 func readPDR(path string) (*types.PartitionDescriptionRecord, error) {

@@ -34,8 +34,10 @@ func (g *gen) anyAge(seed string) {
 	run("time.scheme-1.ok", "an old scheme 1 epoch", hseal(2, 2500, "a"), pre, "")
 	run("time.scheme-2.ok", "a scheme 2 epoch", hseal(6, 6500, "a"), pre, "")
 	g.ok("time.schemes.mixed.ok", fam, "scheme 1 and scheme 2 epochs in one batch", req(claimOf(h.uc(hseal(2, 2500, "a"), 1, "")), claimOf(h.uc(hseal(6, 6500, "a"), 1, ""))), pre, "", nil, nil)
-	run("time.wrong-set", "seal of epoch 3 signed by the next set (node04 is not a member of epoch 3)",
-		Seal{Epoch: 3, Round: 3500, Variant: "a", Signers: []int{1, 2, 4}}, pre, "ErrUnknownSigner")
+	run("time.wrong-set", "seal of epoch 3 signed by the next set (node04 is not a member of epoch 3): the unknown signer counts zero, one signer short",
+		Seal{Epoch: 3, Round: 3500, Variant: "a", Signers: []int{1, 2, 4}}, pre, "ErrQuorum")
+	run("time.wrong-set.extra", "seal of epoch 3 signed by its own quorum and by a member of the next set: the unknown extra counts zero, the seal is valid",
+		Seal{Epoch: 3, Round: 3500, Variant: "a", Signers: []int{1, 2, 3, 4}}, pre, "")
 	run("time.quorum-short", "two of four signatures", Seal{Epoch: 6, Round: 6500, Variant: "a", Signers: []int{1, 2}}, pre, "ErrQuorum")
 
 	g3 := NewHistory(seed, 3)
@@ -157,10 +159,13 @@ func (g *gen) reuse(seed string) {
 	bad.BadLast = true
 	extra := a
 	extra.Signers = []int{1, 2, 3, 4}
-	g.ok("reuse.witness.verified-first", fam, "a verified seal, then the same unsigned seal with one bad signature: a separate group, false",
-		req(c(a, 1, ""), c(bad, 3, "")), pre, "ErrSigInvalid", nil, nil)
+	g.ok("reuse.witness.verified-first", fam, "a verified seal, then the same unsigned seal with one bad signature: a separate group, its quorum short, false",
+		req(c(a, 1, ""), c(bad, 3, "")), pre, "ErrQuorum", nil, nil)
 	g.ok("reuse.witness.altered-first", fam, "the altered seal first, then the verified one: same verdict and gas",
-		req(c(bad, 3, ""), c(a, 1, "")), pre, "ErrSigInvalid", nil, nil)
+		req(c(bad, 3, ""), c(a, 1, "")), pre, "ErrQuorum", nil, nil)
+	badExtra := extra
+	badExtra.BadLast = true
+	ok("reuse.witness.bad-extra", "a seal of four valid signatures, then the same unsigned seal whose last signature is bad: two groups, both valid (the bad one is a zero-weight extra), no cached verdict shared", c(extra, 1, ""), c(badExtra, 3, ""))
 	ok("reuse.witness.extra-signature", "the same unsigned seal with an extra valid signature: two groups, both valid", c(a, 1, ""), c(extra, 3, ""))
 
 	good := c(a, 1, "")
@@ -183,7 +188,7 @@ func (g *gen) reuse(seed string) {
 	// maximal seal (sixteen signatures from a sixteen-member epoch) repeated in every occurrence.
 	big := newFixture(seed+"/16", 16)
 	bp := big.pre()
-	cs := big.build("a", big.round, big.vals, false)
+	cs := big.build("a", big.round, big.vals, true)
 	var all []claimSpec
 	for _, k := range [][2]interface{}{{uint32(1), ""}, {uint32(2), "0"}, {uint32(2), "1"}, {uint32(3), ""}, {uint32(4), ""}, {uint32(5), ""}, {uint32(6), ""}, {uint32(7), ""}} {
 		all = append(all, claimOf(cs.get(k[0].(uint32), k[1].(string))))

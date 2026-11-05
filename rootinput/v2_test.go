@@ -352,7 +352,12 @@ func TestV2QuorumSubsetAuthenticationAndContextRefusals(t *testing.T) {
 	require.NoError(t, foreignUC.UnicitySeal.Sign(foreignID.String(), foreign))
 	_, err = AuthenticateObservationV2(context.Background(), c, foreignUC, tr)
 	require.ErrorIs(t, err, ErrUnauthenticated)
-	require.ErrorIs(t, err, quorumweight.ErrUnknownSigner, "a non-member signer must be rejected (D3 section 3)")
+	require.ErrorIs(t, err, quorumweight.ErrQuorumNotReached, "a non-member signer counts zero: two members and a stranger are one short")
+	// the seal rule: a stranger beside an honest quorum changes nothing
+	withStranger := makeUC(0, 1, 2)
+	require.NoError(t, withStranger.UnicitySeal.Sign(foreignID.String(), foreign))
+	_, err = AuthenticateObservationV2(context.Background(), c, withStranger, tr)
+	require.NoError(t, err)
 
 	valid := makeUC(0, 1, 2)
 	wrongPartition := c

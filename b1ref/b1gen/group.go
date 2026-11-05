@@ -164,5 +164,5 @@ func grouping(req []byte) (Grouping, []occ) {
 
 // batchGas is G_batch (contract section 5), written out independently of the oracle.
 func batchGas(g Grouping) uint64 {
-	return 60000 + 16*g.C + 500*g.K*(g.K-1) + 100*11 + (1000*16+100*(11+8*16))*g.E + 6000*g.Q + 2000*g.A + 250*g.P
+	return 60000 + 16*g.C + 500*g.K*(g.K-1) + 100*11 + (1000*16+100*(11+8*16))*g.E + 7200*g.Q + 2000*g.A + 250*g.P
 }
