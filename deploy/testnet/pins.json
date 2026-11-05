@@ -1,9 +1,9 @@
 {
   "bft": "c05cbefa6aa21e4a8840c0a7910e33429fe2ece2",
-  "ureth": "870c1d012297cea6edbcc3ee8969a72a7a7020a8",
+  "ureth": "10552af21b31b2118c51d6215cd23cfb80faf33c",
   "aggregator-go": "edb2274deb29f2621ceb31836ac3585bc4806239",
   "mongo": "mongo:7.0.45@sha256:c53852c00c23ca9f23fc39690350ffa9a80e3642fe8f96879726d8da0abe80a7",
   "runtime": "debian:bookworm-slim@sha256:7c7b2c966bc9ee8cedfeef67e0e279108992c77681fa595db4a9d65c06ccc587",
   "python": "python:3.13.12-alpine3.22@sha256:41351b07080ccfaa27bf38dde20de79ee6a0ac74a58c00c6d7a7d96ac4e69716",
-  "contracts": "e0f46f854492d775b5b09b4418c993de4a8b7619"
+  "contracts": "6a1185c500e8290086a1307fe3448cc01c4321cc"
 }

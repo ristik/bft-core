@@ -11,7 +11,7 @@
 
 # the attested Ureth of the single B1 layout (briefs/builds/ureth-d41d5310); a lane's <LANE>_URETH_COMMIT overrides it
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/portable.sh"
-LANE_URETH_PIN=870c1d012297cea6edbcc3ee8969a72a7a7020a8
+LANE_URETH_PIN=10552af21b31b2118c51d6215cd23cfb80faf33c
 
 lane_pass() { printf 'PASS: %s\n' "$1"; }
 lane_fail() { printf 'FAIL: %s\n' "$1" >&2; exit 1; }
