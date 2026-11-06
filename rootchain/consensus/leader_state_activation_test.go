@@ -38,6 +38,12 @@ func newEqualLive(t *testing.T, timeout time.Duration, names ...string) *q4bLive
 // newEqualLiveOptions is newEqualLive with the fixture's other options, its shards among them.
 func newEqualLiveOptions(t *testing.T, timeout time.Duration, o q3fixture.Options, names ...string) *q4bLive {
 	t.Helper()
+	return newEqualLiveOn(t, timeout, o, nil, names...)
+}
+
+// newEqualLiveOn is newEqualLiveOptions with setup called on the cluster before its nodes are attached, to put them on another network.
+func newEqualLiveOn(t *testing.T, timeout time.Duration, o q3fixture.Options, setup func(*q4bLive), names ...string) *q4bLive {
+	t.Helper()
 	if o.Weights == nil {
 		o.Weights = make([]uint64, len(names))
 		for i := range o.Weights {
@@ -47,6 +53,9 @@ func newEqualLiveOptions(t *testing.T, timeout time.Duration, o q3fixture.Option
 	o.Assignment = true
 	f := q3fixture.New(t, o)
 	c := newQ4BBase(t, 2, f)
+	if setup != nil {
+		setup(c)
+	}
 	tune := func(p *Parameters) { p.BlockRate, p.LocalTimeout = phaseLockBlockRate, timeout }
 	for i, name := range names {
 		r := newQ3Replica(t, f, f.NewNodes[i])

@@ -30,6 +30,8 @@ func TestEnvelopesVerify(t *testing.T) {
 		require.Equal(t, c.inserted, s.EnvelopeLeaves)
 		require.Equal(t, c.inserted, s.New)
 		require.Equal(t, len(env), s.Bytes)
+		// every junction of the tree is one of these, and every subtree below a split is one of these: a miscount of either breaks the identity
+		require.Equal(t, s.Junctions+1, s.Opaque+s.New+s.OpenJunctions+s.OpenLeaves, "%+v", s)
 
 		require.ErrorIs(t, verify(t, env, b.PreRoot(), next, tau+1), rsmt.ErrRootMismatch, "another reference time")
 		other := next
@@ -37,6 +39,13 @@ func TestEnvelopesVerify(t *testing.T) {
 		require.ErrorIs(t, verify(t, env, b.PreRoot(), other, tau), rsmt.ErrRootMismatch, "another new root")
 		require.ErrorIs(t, verify(t, env, other, next, tau), rsmt.ErrRootMismatch, "another old root")
 	}
+}
+
+// The shape of the row posted on #886 (shard 9/0 of the default batch): the identity above does not catch an open leaf counted as opaque.
+func TestPublishedRowStats(t *testing.T) {
+	_, _, s, err := New("9/0", 0, 10_000, 1_000).Envelope(1000)
+	require.NoError(t, err)
+	require.Equal(t, Stats{PreLeaves: 10_000, Inserted: 1_000, EnvelopeLeaves: 1_000, Bytes: 212_480, Opaque: 2_091, New: 1_000, Junctions: 4_009, OpenJunctions: 222, OpenLeaves: 697}, s)
 }
 
 func TestKeysAreDistinctAndInTheirHalf(t *testing.T) {
