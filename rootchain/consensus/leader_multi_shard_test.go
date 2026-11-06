@@ -22,6 +22,7 @@ import (
 	"github.com/unicitynetwork/bft-core/internal/testutils/rsmtbatch"
 	"github.com/unicitynetwork/bft-core/network/protocol/abdrc"
 	"github.com/unicitynetwork/bft-core/network/protocol/certification"
+	"github.com/unicitynetwork/bft-core/rootchain/consensus/leader"
 	drctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/zkverifier"
 )
@@ -224,7 +225,8 @@ func traceEnvInt(t *testing.T, name string, fallback int) int {
 // the shard's own validators, each from an established certified state. It reports what happened, window by window, not a per-round mean multiplied up: the unknown-leader window's total and its stalls, the
 // first known and recovery rounds after it, the first commit, the deferred work behind it, and each shard's fresh request and certificate. Measurement only: it asserts
 // no number. Four roots share one machine. Set TMPDIR to the disk being measured. BFT_GATE9_TRACE=1; BFT_TRACE_TOPOLOGY single, tns, f8 or f8batch, f8 with the default batch (single); BFT_TRACE_DEAD member index by
-// id order (0: the first recovery run is the dead member's); BFT_TRACE_T seconds (10). BFT_TRACE_TRANSPORT=libp2p runs it on the production network: see liveTransport.
+// id order (0: the first recovery run is the dead member's); BFT_TRACE_T seconds (10); BFT_TRACE_BLOCK_RATE_MS (454; production's default is 900). BFT_TRACE_TRANSPORT=libp2p runs it on the
+// production network: see liveTransport. BFT_TRACE_STEADY rounds after the last certificate measure rho.
 func TestGate9RescueTraceWithRealShards(t *testing.T) {
 	if os.Getenv("BFT_GATE9_TRACE") == "" {
 		t.Skip("set BFT_GATE9_TRACE=1: a measurement, not a regression test")
@@ -240,7 +242,8 @@ func TestGate9RescueTraceWithRealShards(t *testing.T) {
 		transport = newLiveTransport(t)
 		setup = transport.install
 	}
-	c := newEqualLiveOn(t, T, options, setup, "H", "a", "b", "c")
+	blockRate := time.Duration(traceEnvInt(t, "BFT_TRACE_BLOCK_RATE_MS", int(phaseLockBlockRate/time.Millisecond))) * time.Millisecond
+	c := newEqualLiveRate(t, T, blockRate, options, setup, "H", "a", "b", "c")
 	submit := func(name string, req *IRChangeRequest) error {
 		return c.nodes[c.idx(name)].r.manager.RequestCertification(context.Background(), *req)
 	}
@@ -345,7 +348,7 @@ func TestGate9RescueTraceWithRealShards(t *testing.T) {
 		established[s.String()] = shardHash(m(watch), s)
 	}
 	startRound, startCommit := c.state(watch).Round, c.committedRound(watch)
-	t.Logf("T=%s, topology %s, %s, dead index %d, start round %d, committed %d, stopped %s", T, topology, shards, deadAt, startRound, startCommit, d)
+	t.Logf("T=%s, block rate %s, topology %s, %s, dead index %d, start round %d, committed %d, stopped %s", T, blockRate, topology, shards, deadAt, startRound, startCommit, d)
 
 	type sample struct {
 		round uint64
@@ -496,4 +499,160 @@ func TestGate9RescueTraceWithRealShards(t *testing.T) {
 	}
 	t.Logf("certified: first shard %s, median %s, last %s after the stop; from the first commit to the last certificate %s over %d rounds; stop to last certificate %d rounds, %d sends", certs[0].Round(time.Millisecond), certs[len(certs)/2].Round(time.Millisecond),
 		certs[len(certs)-1].Round(time.Millisecond), end.Sub(commitAt).Round(time.Millisecond), c.state(watch).Round-commitRound, c.state(watch).Round-startRound, sends)
+
+	// rho: BFT_TRACE_STEADY more rounds with the dead member still down and the returned one up, every shard sending a fresh request as soon as
+	// it reads its new certificate. The test generates and signs those requests, so how soon a shard sends again is this harness's, not a real shard's R.
+	if steady := uint64(traceEnvInt(t, "BFT_TRACE_STEADY", 0)); steady > 0 {
+		selector, ok := m(watch).leaderSelector.(*leader.EpochReputation)
+		require.True(t, ok)
+		clock := startRoundClock(m(watch))
+		from := c.state(watch).Round
+		certs := map[string]int{}
+		for c.state(watch).Round < from+steady {
+			require.True(t, time.Now().Before(t0.Add(steadyDeadline(T, steady))), "the steady phase did not reach %d rounds", steady)
+			st := c.state(watch)
+			for _, p := range shards {
+				if seal(p) != sentUnder[p.String()] {
+					certs[p.String()]++
+					send(p, st.Round)
+				}
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+		rounds := clock.halt()
+		t.Logf("steady phase: %d rounds from %d with %s down, certificates per shard %v", steady, from, d, certs)
+		reportRho(t, rounds, selector.RecoveryRunStart, c.id(d))
+	}
+}
+
+// steadyDeadline allows every steady round a timer and a second.
+func steadyDeadline(T time.Duration, rounds uint64) time.Duration {
+	return 40*time.Minute + time.Duration(rounds)*(T+time.Second)
+}
+
+// #886 gate 9, the size the five libp2p rescue traces did not reach: the three default-batch RSMT envelopes (about 212 KB each) in one proposal of
+// about 635 KB, on the production transport at its unchanged limits (liveTransport), with every root up. A batch shard makes its one transition
+// (rsmtbatch has one pre-state), so each run is one packing: it builds the three shards' requests, waits for a round to begin and sends them to
+// every root at once, so the next leader holds all three when it proposes. A T2 repeat landing between building and sending makes a request
+// stale (the fixture's batch shards have T2 periods of 2.5, 5 and 7.5 s): then it builds and sends again. It requires a proposal carrying all
+// three and all three certified under one seal, and skips a run whose requests were split: it did not reach the size. The trace patch records
+// wire sizes and receipt and handling times. Repeat the run for more samples.
+// BFT_GATE9_PACKED=1; BFT_TRACE_T and BFT_TRACE_BLOCK_RATE_MS as in the rescue trace.
+func TestGate9ThreeEnvelopesInOneProposal(t *testing.T) {
+	if os.Getenv("BFT_GATE9_PACKED") == "" {
+		t.Skip("set BFT_GATE9_PACKED=1: a measurement on the production transport, not a regression test")
+	}
+	T := time.Duration(traceEnvInt(t, "BFT_TRACE_T", 10)) * time.Second
+	blockRate := time.Duration(traceEnvInt(t, "BFT_TRACE_BLOCK_RATE_MS", int(phaseLockBlockRate/time.Millisecond))) * time.Millisecond
+	options := traceTopology(t, "f8batch")
+	options.PeerEVM = true
+	transport := newLiveTransport(t)
+	c := newEqualLiveRate(t, T, blockRate, options, transport.install, "H", "a", "b", "c")
+	transport.addShards(c.nodes[0].r.f)
+	var batch []liveShard
+	for _, s := range liveShards(c, true) {
+		if s.batch != nil {
+			batch = append(batch, s)
+		}
+	}
+	require.Len(t, batch, 3)
+	// every proposal a leader sends, by round: which of the three shards it carries
+	var mu sync.Mutex
+	carried := map[uint64][]string{}
+	transport.tap = func(msg any) {
+		p, ok := msg.(*abdrc.ProposalMsg)
+		if !ok || p.Block.Payload == nil {
+			return
+		}
+		var in []string
+		for _, req := range p.Block.Payload.Requests {
+			key := liveShard{partition: req.Partition, shard: req.Shard}.String()
+			if slices.ContainsFunc(batch, func(s liveShard) bool { return s.String() == key }) {
+				in = append(in, key)
+			}
+		}
+		if len(in) > 0 {
+			mu.Lock()
+			carried[p.Block.Round] = in
+			mu.Unlock()
+		}
+	}
+	all := c.all()
+	transport.up(c, all...)
+	c.start(all...)
+	lag := 4*uint64(len(c.nodes)) + 4
+	c.warm(lag+2, all...)
+	establish(t, c, all[0], liveShards(c, true), transport.submit)
+	watch := all[0]
+	m := c.nodes[c.idx(watch)].r.manager
+	seal := func(p liveShard) uint64 {
+		si := m.blockStore.ShardInfo(p.partition, p.shard)
+		if si == nil || si.LastCR == nil {
+			return 0
+		}
+		return si.LastCR.UC.UnicitySeal.RootChainRoundNumber
+	}
+	t.Logf("T=%s, block rate %s, shards %v", T, blockRate, batch)
+	before := map[string][]byte{}
+	for _, s := range batch {
+		before[s.String()] = shardHash(m, s)
+	}
+	certified := func() bool {
+		for _, s := range batch {
+			if bytes.Equal(shardHash(m, s), before[s.String()]) {
+				return false
+			}
+		}
+		return true
+	}
+	var sends []uint64
+	var firstSent time.Time
+	deadline := time.Now().Add(3 * time.Minute)
+	for !certified() {
+		require.True(t, time.Now().Before(deadline), "the three shards certified within 3 minutes, sends at rounds %v", sends)
+		var proofs []*IRChangeRequest
+		for _, s := range batch {
+			proof := shardRequest(t, c.nodes[c.idx(watch)].r, s, false, false)
+			require.NotNil(t, proof, s)
+			proofs = append(proofs, proof)
+		}
+		from := c.state(watch).Round
+		require.Eventually(t, func() bool { return c.state(watch).Round > from }, 2*T, time.Millisecond, "a round begins")
+		sends = append(sends, c.state(watch).Round)
+		if firstSent.IsZero() {
+			firstSent = time.Now()
+		}
+		for _, name := range all {
+			for _, proof := range proofs {
+				require.NoError(t, transport.submit(name, proof))
+			}
+		}
+		// a leader that holds the three proposes them within a few rounds; past that, a repeat made them stale
+		for wait := time.Now().Add(8 * blockRate); time.Now().Before(wait) && !certified(); {
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
+	certifiedAfter := time.Since(firstSent)
+	seals := map[uint64]int{}
+	for _, s := range batch {
+		seals[seal(s)]++
+	}
+	mu.Lock()
+	var rounds []string
+	packed := uint64(0)
+	for r := sends[0]; r <= c.state(watch).Round; r++ {
+		if in, ok := carried[r]; ok {
+			rounds = append(rounds, fmt.Sprintf("%d:%v", r, in))
+			if len(in) == 3 {
+				packed = r
+			}
+		}
+	}
+	mu.Unlock()
+	t.Logf("sends at rounds %v; all three certified %s after the first, seals %v; proposals carrying them %s; packed at round %d", sends, certifiedAfter.Round(time.Millisecond), seals, strings.Join(rounds, " "), packed)
+	transport.reportDelivery(firstSent, batch, func(s liveShard) []byte { return shardHash(m, s) })
+	if packed == 0 {
+		t.Skip("NOT PACKED: no proposal carried the three envelopes (a repeat split them), so this run did not reach the size; not a transport result")
+	}
+	require.Len(t, seals, 1, "the three were not certified under one seal")
 }
