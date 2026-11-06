@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"path/filepath"
 	"testing"
 	"time"
@@ -49,6 +50,8 @@ type chainShard struct {
 	key string
 	// epochs lists the root rounds at which the epochs 0, 1, ... of the shard start
 	epochStarts []uint64
+	// params are the partition parameters of every epoch's configuration (the proof configuration among them)
+	params map[string]string
 }
 
 func newTestChain(t testing.TB, shards ...chainShard) *testChain {
@@ -95,7 +98,7 @@ func newTestChainOn(t testing.TB, dir string, db PersistentStore, shards ...chai
 			require.NoError(t, orch.AddShardConfig(&types.PartitionDescriptionRecord{
 				Version: 1, NetworkID: 5, PartitionID: s.partition, PartitionTypeID: 1, ShardID: types.ShardID{},
 				UnitIDLen: 256, TypeIDLen: 32, T2Timeout: 2500 * time.Millisecond,
-				Validators: []*types.NodeInfo{node.info}, Epoch: uint64(epoch), EpochStart: start,
+				Validators: []*types.NodeInfo{node.info}, Epoch: uint64(epoch), EpochStart: start, PartitionParams: maps.Clone(s.params),
 			}))
 		}
 	}

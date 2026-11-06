@@ -137,6 +137,9 @@ func newRootBlock(block *abdrc.CommittedBlock, hash crypto.Hash, orchestration O
 			Fees:          d.Fees,
 			IR:            d.IR,
 			TR:            d.IRTR,
+			// The head carries no partition parameters: they are the local configuration's, whose hash was checked against the head's above.
+			// Without them a verifier with no request history takes the shard for one without a proof and accepts any proof (#941).
+			PartitionParams: maps.Clone(shardConf.PartitionParams),
 		}
 		if recovery {
 			if err := validateRecoveredFields(d, shardConf); err != nil {
