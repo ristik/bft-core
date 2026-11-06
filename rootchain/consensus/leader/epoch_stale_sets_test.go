@@ -154,22 +154,38 @@ func (c *staleCommittee) table(t *testing.T, set uint32) []int8 {
 	return tb
 }
 
+// runOwner is the owner of round r's recovery run, if r is in one.
+func (c *staleCommittee) runOwner(r uint64) (int, bool) {
+	off := r - c.start - c.lag
+	if off%RecoverySpacing >= RecoverySpacing-RecoveryRun {
+		return int((off / RecoverySpacing) % c.n), true
+	}
+	return 0, false
+}
+
+// tableLeader is round r's leader in the schedule of a table: its recovery run's owner, else the table's.
+func (c *staleCommittee) tableLeader(table []int8, r uint64) int {
+	if owner, ok := c.runOwner(r); ok {
+		return owner
+	}
+	return int(table[(r-c.start)%uint64(len(table))])
+}
+
 // modelWalk answers leaders from the tables without a ring: a recovery run's owner, else the table of the newest record at or below the cutoff, unknown above head+lag.
 func (c *staleCommittee) modelWalk(t *testing.T, stale, live uint32, headAt, resubmit, limit uint64) twoStageWalk {
 	staleT, liveT := c.table(t, stale), c.table(t, live)
 	head, firstLive := headAt, uint64(1<<62)
 	leaderOf := func(r uint64) int {
-		off := r - c.start - c.lag
-		if off%RecoverySpacing >= RecoverySpacing-RecoveryRun {
-			return int((off / RecoverySpacing) % c.n)
+		if owner, ok := c.runOwner(r); ok {
+			return owner
 		}
 		if r > head+c.lag {
 			return -1
 		}
 		if r-c.lag >= firstLive {
-			return int(liveT[(r-c.start)%uint64(len(liveT))])
+			return c.tableLeader(liveT, r)
 		}
-		return int(staleT[(r-c.start)%uint64(len(staleT))])
+		return c.tableLeader(staleT, r)
 	}
 	runStart := func(r uint64) bool {
 		return (r-c.start-c.lag)%RecoverySpacing == RecoverySpacing-RecoveryRun
@@ -337,26 +353,26 @@ func TestTwoStagesOfLargerStaleSets(t *testing.T) {
 }
 
 // liveTripleEnd is the last round of the first three live leaders in a row after the head, under the stale voters' table and the recovery runs, with no commit on the way.
+// The search is bounded: past the covered rounds every dead member's run and then a live member's run come within (dead+1)*S rounds, and a live run is four live
+// leaders in a row; not finding one by then fails the test.
 func (c *staleCommittee) liveTripleEnd(t *testing.T, stale, dead uint32, headAt uint64) uint64 {
 	t.Helper()
 	staleTable := c.table(t, stale)
-	up := func(r uint64) bool {
-		off := r - c.start - c.lag
-		if off%RecoverySpacing >= RecoverySpacing-RecoveryRun {
-			return dead&(1<<((off/RecoverySpacing)%c.n)) == 0
+	up := func(r uint64) bool { return dead&(1<<c.tableLeader(staleTable, r)) == 0 }
+	bound := headAt + c.lag + uint64(bits.OnesCount32(dead)+1)*RecoverySpacing + RecoveryRun
+	for r := headAt + 1; r+2 <= bound; r++ {
+		if up(r) && up(r+1) && up(r+2) {
+			return r + 2
 		}
-		return dead&(1<<staleTable[(r-c.start)%uint64(len(staleTable))]) == 0
 	}
-	r := headAt + 1
-	for !(up(r) && up(r+1) && up(r+2)) {
-		r++
-	}
-	return r + 2
+	require.Failf(t, "no live triple", "stale %b dead %b head %d: none by round %d", stale, dead, headAt, bound)
+	return 0
 }
 
 // The design's weighted responsive-quorum control: (3,2,2,2,2), quorum 8 of 11, weight 3 down and one light member returning. Three voters weigh at most 7, so every sample has at least
 // four, the heavy member and three light ones, and one dead member cannot break every three in a row: from every head a live triple comes up within the covered rounds and no rescue
-// traversal is needed. The four-root stale set of three voters is the control: there the same search leaves the covered rounds. Tables and real-ring samples, with no timing; the live
+// traversal is needed. Heads: every position over ten periods (two cycles of the five run owners). The table has its own period, so this is not every joint phase of table
+// and runs; the argument above, not the range, is why no head can do worse. The four-root stale set of three voters is the control: there the same search leaves the covered rounds. Tables and real-ring samples, with no timing; the live
 // run is TestWeightedRollingRestartCertifies.
 func TestWeightedStaleSets(t *testing.T) {
 	const down, periods = 1, 10

@@ -87,7 +87,9 @@ func liveShards(c *q4bLive, defaultBatch bool) []liveShard {
 }
 
 // shardRequest is the same pending request of a shard under the view its ingress root collects under, signed by its own validators. first is the shard's first state
-// from no previous root. Otherwise an RSMT shard inserts a leaf next to its stored one, with a valid envelope under the request's reference time, and tamper breaks it.
+// from no previous root. Otherwise an RSMT shard inserts its batch, or without one a leaf next to its stored one, with a valid envelope under the request's reference
+// time, and tamper breaks it. Generating a batch's envelope here takes tens of milliseconds per shard, in the process the roots share: on that row, R is not quite
+// the 0 of an immediate resubmission.
 func shardRequest(t *testing.T, r *q3Replica, s liveShard, first, tamper bool) *IRChangeRequest {
 	t.Helper()
 	view, enabled, err := r.manager.RequestView(s.partition, s.shard)
@@ -144,7 +146,7 @@ func shardHash(m *ConsensusManager, s liveShard) []byte {
 }
 
 // establish certifies every shard's first state, so that an RSMT shard's next request is a proved transition from a certified root and not the first-state exception.
-func establish(t *testing.T, c *q4bLive, name string, shards []liveShard) {
+func establish(t *testing.T, c *q4bLive, name string, shards []liveShard, submit func(name string, req *IRChangeRequest) error) {
 	t.Helper()
 	n := c.nodes[c.idx(name)]
 	for _, s := range shards {
@@ -154,7 +156,7 @@ func establish(t *testing.T, c *q4bLive, name string, shards []liveShard) {
 				return true
 			}
 			if proof := shardRequest(t, n.r, s, true, false); proof != nil {
-				_ = n.r.manager.RequestCertification(context.Background(), *proof)
+				_ = submit(name, proof)
 			}
 			return false
 		}, 3*time.Minute, 200*time.Millisecond, "shard %s", s)
@@ -169,7 +171,9 @@ func TestExtraShardsAreCertifiedOnALiveEpoch(t *testing.T) {
 	c.warm(3, c.all()...)
 	shards := liveShards(c, false)
 	require.Len(t, shards, 4)
-	establish(t, c, "H", shards)
+	establish(t, c, "H", shards, func(name string, req *IRChangeRequest) error {
+		return c.nodes[c.idx(name)].r.manager.RequestCertification(context.Background(), *req)
+	})
 	n := c.nodes[c.idx("H")]
 	for _, s := range shards {
 		if !s.rsmt {
@@ -220,7 +224,7 @@ func traceEnvInt(t *testing.T, name string, fallback int) int {
 // the shard's own validators, each from an established certified state. It reports what happened, window by window, not a per-round mean multiplied up: the unknown-leader window's total and its stalls, the
 // first known and recovery rounds after it, the first commit, the deferred work behind it, and each shard's fresh request and certificate. Measurement only: it asserts
 // no number. Four roots share one machine. Set TMPDIR to the disk being measured. BFT_GATE9_TRACE=1; BFT_TRACE_TOPOLOGY single, tns, f8 or f8batch, f8 with the default batch (single); BFT_TRACE_DEAD member index by
-// id order (0: the first recovery run is the dead member's); BFT_TRACE_T seconds (10).
+// id order (0: the first recovery run is the dead member's); BFT_TRACE_T seconds (10). BFT_TRACE_TRANSPORT=libp2p runs it on the production network: see liveTransport.
 func TestGate9RescueTraceWithRealShards(t *testing.T) {
 	if os.Getenv("BFT_GATE9_TRACE") == "" {
 		t.Skip("set BFT_GATE9_TRACE=1: a measurement, not a regression test")
@@ -228,7 +232,22 @@ func TestGate9RescueTraceWithRealShards(t *testing.T) {
 	T := time.Duration(traceEnvInt(t, "BFT_TRACE_T", 10)) * time.Second
 	topology := cmp.Or(os.Getenv("BFT_TRACE_TOPOLOGY"), "single")
 	deadAt := traceEnvInt(t, "BFT_TRACE_DEAD", 0)
-	c := newEqualLiveOptions(t, T, traceTopology(t, topology), "H", "a", "b", "c")
+	options := traceTopology(t, topology)
+	var transport *liveTransport
+	var setup func(*q4bLive)
+	if os.Getenv("BFT_TRACE_TRANSPORT") == "libp2p" {
+		options.PeerEVM = true
+		transport = newLiveTransport(t)
+		setup = transport.install
+	}
+	c := newEqualLiveOn(t, T, options, setup, "H", "a", "b", "c")
+	submit := func(name string, req *IRChangeRequest) error {
+		return c.nodes[c.idx(name)].r.manager.RequestCertification(context.Background(), *req)
+	}
+	if transport != nil {
+		transport.addShards(c.nodes[0].r.f)
+		submit = transport.submit
+	}
 	shards := liveShards(c, topology == "f8batch")
 	lag := 4*uint64(len(c.nodes)) + 4
 	names := c.all()
@@ -238,8 +257,7 @@ func TestGate9RescueTraceWithRealShards(t *testing.T) {
 	var forwardsMu sync.Mutex
 	forwards := map[string][]uint64{}
 	var currentRound func() uint64
-	base := c.net.filter
-	c.net.filter = func(from, to peer.ID, msg any) bool {
+	tapForward := func(msg any) {
 		if m, ok := msg.(*abdrc.IrChangeReqMsg); ok {
 			forwardsMu.Lock()
 			if currentRound != nil {
@@ -248,9 +266,17 @@ func TestGate9RescueTraceWithRealShards(t *testing.T) {
 			}
 			forwardsMu.Unlock()
 		}
+	}
+	base := c.net.filter
+	c.net.filter = func(from, to peer.ID, msg any) bool {
+		tapForward(msg)
 		return base(from, to, msg)
 	}
 	first := c.except(x)
+	if transport != nil {
+		transport.tap = tapForward
+		transport.up(c, first...)
+	}
 	c.start(first...)
 	anchor := c.nodes[0].r.manager.epochAnchor.Slot
 	require.Eventually(t, func() bool { // at T = 10 s the down member costs about two timers a cycle
@@ -261,7 +287,7 @@ func TestGate9RescueTraceWithRealShards(t *testing.T) {
 		}
 		return true
 	}, 15*time.Minute, 50*time.Millisecond, "the cluster commits live in the activated epoch")
-	establish(t, c, first[0], shards)
+	establish(t, c, first[0], shards, submit)
 	survivors := c.except(x, d)
 	watch := survivors[0]
 	m := func(name string) *ConsensusManager { return c.nodes[c.idx(name)].r.manager }
@@ -285,6 +311,10 @@ func TestGate9RescueTraceWithRealShards(t *testing.T) {
 		return true
 	}, 2*time.Minute, 5*time.Millisecond, "the watched node holds the established states")
 	c.stop(d)
+	if transport != nil {
+		transport.down(c, d)
+		transport.up(c, x)
+	}
 	c.start(x)
 	t0 := time.Now()
 	since := func() time.Duration { return time.Since(t0).Round(time.Millisecond) }
@@ -333,7 +363,7 @@ func TestGate9RescueTraceWithRealShards(t *testing.T) {
 	send := func(p liveShard, round uint64) {
 		accepted := false
 		for _, name := range survivors {
-			if proof := shardRequest(t, c.nodes[c.idx(name)].r, p, false, false); proof != nil && m(name).RequestCertification(context.Background(), *proof) == nil {
+			if proof := shardRequest(t, c.nodes[c.idx(name)].r, p, false, false); proof != nil && submit(name, proof) == nil {
 				accepted = true
 			}
 		}
@@ -398,6 +428,9 @@ func TestGate9RescueTraceWithRealShards(t *testing.T) {
 	}
 	end := time.Now()
 	counters("the last certificate")
+	if transport != nil {
+		transport.reportDelivery(t0, shards, func(s liveShard) []byte { return shardHash(m(watch), s) })
+	}
 	require.False(t, unknownFrom.IsZero(), "no unknown round")
 	require.False(t, commitAt.IsZero(), "no commit")
 
