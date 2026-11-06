@@ -44,6 +44,12 @@ func newEqualLiveOptions(t *testing.T, timeout time.Duration, o q3fixture.Option
 // newEqualLiveOn is newEqualLiveOptions with setup called on the cluster before its nodes are attached, to put them on another network.
 func newEqualLiveOn(t *testing.T, timeout time.Duration, o q3fixture.Options, setup func(*q4bLive), names ...string) *q4bLive {
 	t.Helper()
+	return newEqualLiveRate(t, timeout, phaseLockBlockRate, o, setup, names...)
+}
+
+// newEqualLiveRate is newEqualLiveOn at another block rate: a round lasts at least half of it (the pacemaker's minimum round).
+func newEqualLiveRate(t *testing.T, timeout, blockRate time.Duration, o q3fixture.Options, setup func(*q4bLive), names ...string) *q4bLive {
+	t.Helper()
 	if o.Weights == nil {
 		o.Weights = make([]uint64, len(names))
 		for i := range o.Weights {
@@ -56,7 +62,7 @@ func newEqualLiveOn(t *testing.T, timeout time.Duration, o q3fixture.Options, se
 	if setup != nil {
 		setup(c)
 	}
-	tune := func(p *Parameters) { p.BlockRate, p.LocalTimeout = phaseLockBlockRate, timeout }
+	tune := func(p *Parameters) { p.BlockRate, p.LocalTimeout = blockRate, timeout }
 	for i, name := range names {
 		r := newQ3Replica(t, f, f.NewNodes[i])
 		r.tune = tune
