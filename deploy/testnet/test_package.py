@@ -100,7 +100,7 @@ class B1Layout(unittest.TestCase):
                 self.assertEqual(shard[shard.index('--b1-profile')+1],'/network/b1-profile.json')
                 self.assertIn('--q3-lane',shard);self.assertNotIn('--registry-layout',shard)
                 root=svc['root%d'%i]['entrypoint']
-                self.assertIn('--q3-lane',root);self.assertEqual(root[root.index('--genesis-identities')+1],'/network/genesis-identities.json')
+                self.assertIn('--q3-lane',root);self.assertIn('--b1-registry',root);self.assertEqual(root[root.index('--genesis-identities')+1],'/network/genesis-identities.json')
 
 class Aggregator(unittest.TestCase):
     def test_the_workflows_build_the_pinned_aggregator_go(self):
@@ -641,7 +641,7 @@ class ProofOfStake(unittest.TestCase):
                 cfg=generate.topology(out,3,ids,images,'captcha',(),30000000,with_pos)
                 for i in (1,2,3):
                     root=cfg['services']['root%d'%i]['entrypoint']
-                    self.assertIn('--q3-lane',root);self.assertIn('--profile-3',root)
+                    self.assertIn('--q3-lane',root);self.assertIn('--b1-registry',root);self.assertIn('--profile-3',root)
                     if with_pos:
                         self.assertEqual(root[root.index('--pos-deployment')+1],'/network/pos-deployment.json')
                         self.assertEqual(root[root.index('--pos-genesis-identities')+1],'/network/pos-genesis-identities.json')

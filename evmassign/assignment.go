@@ -62,7 +62,7 @@ const (
 	// B1MaxValidators guard.
 	MaxValidators = 256
 	// B1MaxValidators is the member ceiling of the B1 registry entry (b1state.MaxMembers; keep, it prices gas). A root handoff in a B1-enabled
-	// deployment above it could not be imported by the installed registry, so it is refused at admission (see q3active.Runtime.RequireB1Members);
+	// deployment above it could not be imported by the installed registry, so it is refused at admission (see q3active.Config.MemberCeiling);
 	// a no-EVM root does not inherit it.
 	B1MaxValidators = 16
 	// KeyLen is the compressed secp256k1 signing key width.
