@@ -13,11 +13,12 @@ import (
 // retained with the companion, so a replay judges the same bytes.
 
 const (
-	// MaxPrimaryWitnessBytes bounds the witness; MaxPrimaryProofBytes the whole proof (the witness plus up to 32 signatures).
+	// MaxPrimaryWitnessBytes bounds the witness; MaxPrimaryProofBytes the whole proof (the witness plus up to MaxPrimaryPoPs signatures, each at most
+	// 8+33+65+16 bytes, plus 1,024 of structure): 512 KiB + 31,232 + 1,024 = 556,544 bytes.
 	MaxPrimaryWitnessBytes = 512 << 10
-	MaxPrimaryProofBytes   = MaxPrimaryWitnessBytes + 32*(8+33+65+16) + 1024
-	// MaxPrimaryPoPs is the committee ceiling.
-	MaxPrimaryPoPs = 32
+	MaxPrimaryProofBytes   = MaxPrimaryWitnessBytes + MaxPrimaryPoPs*(8+33+65+16) + 1024
+	// MaxPrimaryPoPs is the committee ceiling: a native resource bound of 256 (owner §49), independent of the B1 registry's 16.
+	MaxPrimaryPoPs = 256
 )
 
 // ErrPrimaryProofEncoding reports a proof that is oversized, not canonical or malformed.
