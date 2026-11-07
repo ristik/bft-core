@@ -31,7 +31,7 @@ var (
 )
 
 const (
-	maxEntryBytes = 64 << 10 // generous bound for 16 members; entries beyond it cannot be stored
+	maxEntryBytes = 128 << 10 // the largest valid entry is 95,365 bytes (the 16-member deployment profile needs about 6 KiB); entries beyond it cannot be stored
 	prefix        = "utb/e/"
 )
 
