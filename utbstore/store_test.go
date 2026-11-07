@@ -2,6 +2,9 @@ package utbstore
 
 import (
 	"bytes"
+	"encoding/hex"
+	"encoding/json"
+	"os"
 	"path/filepath"
 	"sort"
 	"testing"
@@ -325,4 +328,29 @@ func TestRangePaging(t *testing.T) {
 	require.Len(t, got, 1, "the byte budget bounds the page")
 	require.True(t, more)
 	require.EqualValues(t, 3, next)
+}
+
+// The per-entry cap is 128 KiB (the largest valid entry is 95,365 bytes): bytes over it are refused as too long, whatever they decode to. The 16-member
+// deployment profile is a separate rule: a 256-member entry is within the cap and is refused for its members.
+func TestTheEntryCapIsInBytesAndTheProfileIsInMembers(t *testing.T) {
+	ns := nodes(t, 4)
+	c := chain(t, ns, 1, ns[:3])
+	s := open(t, memorydb.New(), c[0])
+
+	_, err := s.Append(make([]byte, maxEntryBytes+1))
+	require.ErrorIs(t, err, ErrEntry)
+	require.Contains(t, err.Error(), "bytes")
+
+	data, err := os.ReadFile("../gettrustbase/testdata/max-entry-v1.json")
+	require.NoError(t, err)
+	var f struct {
+		Entry string `json:"entry"`
+	}
+	require.NoError(t, json.Unmarshal(data, &f))
+	big, err := hex.DecodeString(f.Entry)
+	require.NoError(t, err)
+	require.Less(t, len(big), maxEntryBytes)
+	_, err = s.Append(big)
+	require.ErrorIs(t, err, ErrEntry)
+	require.NotContains(t, err.Error(), "bytes", "within the byte cap; it is the member profile or the chain that refuses it")
 }
