@@ -337,7 +337,8 @@ func TestParkedApprovalsAreBoundedOnePerSignerAndExpire(t *testing.T) {
 		x.parkApproval(&abdrc.HandoffApprovalMsg{Signer: string(rune('A'+i%64)) + string(rune('a'+i/64))}, result)
 	}
 	x.primaryCache.mu.Lock()
-	require.LessOrEqual(t, len(x.primaryCache.parked), maxParkedApprovals, "a flood cannot grow the set")
+	require.Equal(t, 256, maxParkedApprovals, "§49: one parked approval per signer, up to the 256-member ceiling")
+	require.Equal(t, maxParkedApprovals, len(x.primaryCache.parked), "a flood fills the set to its bound and cannot grow it")
 	x.primaryCache.mu.Unlock()
 
 	x2 := managerFor(true)

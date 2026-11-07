@@ -85,6 +85,9 @@ type Options struct {
 	// ExtraShards adds other shards to the certified state, each with its own validators. They take no part in the handoff: they are the
 	// load of a root that serves more than the EVM shard.
 	ExtraShards []ExtraShard
+	// PeerEVM gives every EVM validator of the successor a real peer identity, as the production ingress subscribes a request's sender by its
+	// node id; otherwise a replaced member is named evm-N, which only a harness calling the manager directly can use.
+	PeerEVM bool
 }
 
 // ExtraShard is a shard besides the EVM shard. A zero T2Timeout takes the EVM shard's.
@@ -116,7 +119,8 @@ type Fixture struct {
 	Snapshot        *abdrc.CommittedBlock
 	ShardConf       *types.PartitionDescriptionRecord
 	ExtraConfs      []*types.PartitionDescriptionRecord
-	ExtraSigners    map[string]abcrypto.Signer // the validators of ExtraConfs by node id
+	ExtraSigners    map[string]abcrypto.Signer     // the validators of ExtraConfs by node id
+	ShardNodes      map[string]*testutils.TestNode // the shard validators with a real peer identity by node id, for a harness on a real transport
 	Claim           q3format.Claim
 	Candidate       []byte                            // the committed candidate preimage, with Options.Assignment
 	Successor       *types.PartitionDescriptionRecord // the EVM assignment it activates (before the activation round is set)
@@ -310,10 +314,14 @@ func New(t *testing.T, o Options) *Fixture {
 	key := types.PartitionShardID{PartitionID: PartitionID, ShardID: types.ShardID{}.Key()}
 	states := storage.ShardStates{States: map[types.PartitionShardID]*storage.ShardInfo{key: state}, Changed: storage.ShardSet{key: {}}, Control: &control}
 	f.ExtraSigners = make(map[string]abcrypto.Signer)
+	if f.ShardNodes == nil {
+		f.ShardNodes = make(map[string]*testutils.TestNode)
+	}
 	for _, e := range o.ExtraShards {
 		nodes, infos := testutils.CreateTestNodes(t, e.Validators)
 		for _, n := range nodes {
 			f.ExtraSigners[n.PeerConf.ID.String()] = n.Signer
+			f.ShardNodes[n.PeerConf.ID.String()] = n
 		}
 		t2 := e.T2Timeout
 		if t2 == 0 {
@@ -474,8 +482,25 @@ func (f *Fixture) assignment(t *testing.T, o Options, oldID []byte) [32]byte {
 				keys[i] = evmKey{f.GenesisEVM[j].Signer, kept}
 				validators[i] = keys[i].info
 				f.EVMSigners[kept.NodeID] = keys[i].signer
+				if f.ShardNodes == nil {
+					f.ShardNodes = make(map[string]*testutils.TestNode)
+				}
+				f.ShardNodes[kept.NodeID] = f.GenesisEVM[j]
 				continue
 			}
+		}
+		if o.PeerEVM {
+			node := testutils.NewTestNode(t)
+			info := node.NodeInfo(t)
+			info.Stake = weight
+			keys[i] = evmKey{node.Signer, info}
+			validators[i] = info
+			f.EVMSigners[info.NodeID] = node.Signer
+			if f.ShardNodes == nil {
+				f.ShardNodes = make(map[string]*testutils.TestNode)
+			}
+			f.ShardNodes[info.NodeID] = node
+			continue
 		}
 		signer, err := abcrypto.NewInMemorySecp256K1Signer()
 		require.NoError(t, err)

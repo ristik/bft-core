@@ -208,10 +208,10 @@ func NewCollector(p Profile) (*Collector, error) {
 	if p.TrustBase == nil || p.NetworkID == 0 || p.PartitionID == 0 || p.RootEpoch == 0 || len(p.FullShardConfHash) != sha256.Size || len(p.GenesisOriginIdentity) != sha256.Size || len(p.Nonce) != sha256.Size || p.ShardID.Length() > 4096 {
 		return nil, ErrProfile
 	}
-	if p.TrustBase.Version != 1 || len(p.TrustBase.RootNodes) == 0 || len(p.TrustBase.RootNodes) > 64 || p.TrustBase.NetworkID != p.NetworkID || p.TrustBase.Epoch != p.RootEpoch {
+	if p.TrustBase.Version != 1 || len(p.TrustBase.RootNodes) == 0 || len(p.TrustBase.RootNodes) > MaxRoots || p.TrustBase.NetworkID != p.NetworkID || p.TrustBase.Epoch != p.RootEpoch {
 		return nil, ErrProfile
 	}
-	if len(p.TrustBase.Signatures) > 64 || len(p.TrustBase.StateHash)+len(p.TrustBase.ChangeRecordHash)+len(p.TrustBase.PreviousEntryHash) > frontiercodec.MaxReply {
+	if len(p.TrustBase.Signatures) > MaxRoots || len(p.TrustBase.StateHash)+len(p.TrustBase.ChangeRecordHash)+len(p.TrustBase.PreviousEntryHash) > frontiercodec.MaxReply {
 		return nil, ErrProfile
 	}
 	total := len(p.TrustBase.StateHash) + len(p.TrustBase.ChangeRecordHash) + len(p.TrustBase.PreviousEntryHash)
@@ -605,7 +605,7 @@ func strictSignatures(trust *types.RootTrustBaseV1, signatures map[string]hex.By
 }
 
 func signatureBounds(signatures map[string]hex.Bytes) error {
-	if len(signatures) == 0 || len(signatures) > 64 {
+	if len(signatures) == 0 || len(signatures) > MaxRoots {
 		return ErrUnauthentic
 	}
 	for author, sig := range signatures {
@@ -687,8 +687,15 @@ func cloneVerifiedCut(v VerifiedCut) VerifiedCut {
 	return v
 }
 
+// MaxRoots is the committee ceiling of a frontier trust base, trust signatures and UC/QC signatures: the native 256 (owner §49). The CBOR map
+// parser allows maxMapPairs = 256 + 16 of structural slack; that is a parse allowance, not 272 voting identities.
+const (
+	MaxRoots    = 256
+	maxMapPairs = MaxRoots + 16
+)
+
 func strictMode(tags cbor.TagsMode) cbor.DecMode {
-	dm, err := (cbor.DecOptions{DupMapKey: cbor.DupMapKeyEnforcedAPF, IndefLength: cbor.IndefLengthForbidden, TagsMd: tags, MaxNestedLevels: 32, MaxArrayElements: 8192, MaxMapPairs: 128, ExtraReturnErrors: cbor.ExtraDecErrorUnknownField}).DecMode()
+	dm, err := (cbor.DecOptions{DupMapKey: cbor.DupMapKeyEnforcedAPF, IndefLength: cbor.IndefLengthForbidden, TagsMd: tags, MaxNestedLevels: 32, MaxArrayElements: 8192, MaxMapPairs: maxMapPairs, ExtraReturnErrors: cbor.ExtraDecErrorUnknownField}).DecMode()
 	if err != nil {
 		panic(err)
 	}

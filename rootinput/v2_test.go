@@ -21,6 +21,7 @@ import (
 	"github.com/unicitynetwork/bft-core/registryproof"
 	abcrypto "github.com/unicitynetwork/bft-go-base/crypto"
 	"github.com/unicitynetwork/bft-go-base/types"
+	"github.com/unicitynetwork/bft-go-base/types/hex"
 )
 
 type v2Fixture struct {
@@ -547,4 +548,27 @@ func TestV2DeriveRefusesAnyZeroValueInput(t *testing.T) {
 			require.ErrorIs(t, err, ErrV2Context)
 		})
 	}
+}
+
+// §49: the observation profile binding admits a root trust base of up to 256 roots and 256 signatures, and refuses 257 of either; the 1 MiB
+// aggregate budget is unchanged.
+func TestObservationProfileBindingAdmitsUp256Roots(t *testing.T) {
+	ctx := ObservationContextV2{NetworkID: 5, PartitionID: 8, ShardConfHash: bytes.Repeat([]byte{1}, 32), RootEpoch: 1}
+	tb := func(roots, sigs int) *types.RootTrustBaseV1 {
+		out := &types.RootTrustBaseV1{Version: 1, NetworkID: 5, Epoch: 1, Signatures: map[string]hex.Bytes{}}
+		for i := 0; i < roots; i++ {
+			out.RootNodes = append(out.RootNodes, &types.NodeInfo{NodeID: fmt.Sprintf("root%03d", i), SigKey: bytes.Repeat([]byte{2}, 33), Stake: 1})
+		}
+		for i := 0; i < sigs; i++ {
+			out.Signatures[fmt.Sprintf("root%03d", i)] = bytes.Repeat([]byte{3}, 65)
+		}
+		return out
+	}
+	require.Equal(t, 256, MaxObservationRoots)
+	_, err := ObservationProfileBindingV2(ctx, tb(256, 256))
+	require.NoError(t, err)
+	_, err = ObservationProfileBindingV2(ctx, tb(257, 0))
+	require.ErrorIs(t, err, ErrV2Context)
+	_, err = ObservationProfileBindingV2(ctx, tb(256, 257))
+	require.ErrorIs(t, err, ErrV2Context)
 }

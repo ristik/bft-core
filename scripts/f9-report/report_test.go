@@ -140,3 +140,26 @@ func TestApplyMetricsMarksMissingRequiredMeasurementsIncomplete(t *testing.T) {
 	require.False(t, out.Complete)
 	require.NotEmpty(t, out.Errors)
 }
+
+// §49: the report tool samples up to 256 nodes (a resource bound), and not one more.
+func TestLoadConfigAcceptsExactly256Nodes(t *testing.T) {
+	t.Parallel()
+	cfg := func(n int) string {
+		nodes := make([]string, n)
+		for i := range nodes {
+			nodes[i] = fmt.Sprintf(`{"name":"n%03d","status_url":"http://localhost:%d","metrics_url":"http://localhost:%d","archive_dir":"/tmp/n%03d"}`, i, 10000+i, 10000+i, i)
+		}
+		return `{"nodes":[` + strings.Join(nodes, ",") + `],"samples":2,"interval":"0s"}`
+	}
+	require.Equal(t, 256, maxNodes)
+	dir := t.TempDir()
+	ok := filepath.Join(dir, "ok.json")
+	require.NoError(t, os.WriteFile(ok, []byte(cfg(256)), 0600))
+	got, err := loadConfig(ok)
+	require.NoError(t, err)
+	require.Len(t, got.Nodes, 256)
+	over := filepath.Join(dir, "over.json")
+	require.NoError(t, os.WriteFile(over, []byte(cfg(257)), 0600))
+	_, err = loadConfig(over)
+	require.ErrorContains(t, err, "between 1 and 256")
+}
