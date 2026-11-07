@@ -22,7 +22,13 @@ table of at most 64 KiB, built once from verified context in at most n*B steps; 
 
 Supported: committees of up to 256 members (§49; the cost of the selector at 128 and 256 members is benchmarked in `rootchain/consensus/leader`), total weight up to B, every round from the epoch start to `math.MaxUint64`.
 Budget: constructor plus lookup at most **2 s**, no concurrent caller waits longer, at most 512 KiB and 2,048 allocations. These are the
-budgets frozen before the change and are not widened. `TestQ4QueryCostGate` asserts every mandatory row (n=100 at d=10^6, d~6x10^5, near
+budgets frozen before the change, for committees of up to 100 members, and are not widened for them. **Re-derived for §49 (256 members):** the
+latency and byte budgets stay absolute (at 256 members and the worst total the constructor takes about 28 ms and 332 KiB); the allocation count
+cannot, because the construction allocates about ten times per member (the decoded peer id, the duplicate map entry, the sorted entry), so it
+measured 2,621 at 256 members against the 2,048 frozen for 100. The count budget therefore keeps the frozen per-member ratio (2,048 per 100
+members = 20.48 each, 5,243 at 256: `q4AllocCountBudgetFor`) and is reported under `derived`, not `frozen`, in the cost report. That is a
+change of an acceptance budget made for the owner's wider envelope; it stands only once the owner or arch accepts it (otherwise the
+allocations of `NewWeighted` have to be cut to fit 2,048). `TestQ4QueryCostGate` asserts every mandatory row (n=100 at d=10^6, d~6x10^5, near
 MaxUint64, worst-period inputs; cold restart, old query, eight synchronized concurrent callers, rebuild after cache eviction); none is
 measured-only. The before-change baseline (the replaying selector: 2.0 s on the Q4-C host and 4.0 s on the #489 host at n=100, d=10^6,
 growing with d, blocking every concurrent caller; its test weights exceeded the committed-weight cap that now applies) is kept as a

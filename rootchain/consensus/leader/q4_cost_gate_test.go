@@ -76,6 +76,13 @@ type q4CostReport struct {
 		AllocBytes uint64  `json:"allocBytes"`
 		Allocs     uint64  `json:"allocs"`
 	} `json:"frozen"`
+	// Derived is the allocation-count budget of the §49 envelope (256 members) at the frozen per-member ratio; the frozen figures above are the
+	// ones fixed for 100 members and are not changed.
+	Derived struct {
+		Members int    `json:"members"`
+		Allocs  uint64 `json:"allocs"`
+		Rule    string `json:"rule"`
+	} `json:"derived"`
 	Profile string      `json:"profile"`
 	Host    string      `json:"host"`
 	Rows    []q4CostRow `json:"rows"`
@@ -176,8 +183,10 @@ func q4Distances(start uint64) []uint64 {
 // only. Q4_COST_OUT=<file> keeps the measurements as JSON for the acceptance report.
 func TestQ4QueryCostGate(t *testing.T) {
 	rep := q4CostReport{Profile: "bounded period table (mandatory rows)", Host: fmt.Sprintf("%s/%s %d cpu %s", runtime.GOOS, runtime.GOARCH, runtime.NumCPU(), runtime.Version())}
-	rep.Frozen.Members, rep.Frozen.TotalB = q4MaxMembers, weightcap.B
-	rep.Frozen.BudgetMs, rep.Frozen.AllocBytes, rep.Frozen.Allocs = float64(q4LatencyBudget)/1e6, q4AllocBytesBudget, q4AllocCountBudgetFor(q4MaxMembers)
+	rep.Frozen.Members, rep.Frozen.TotalB = q4BudgetMembers, weightcap.B
+	rep.Frozen.BudgetMs, rep.Frozen.AllocBytes, rep.Frozen.Allocs = float64(q4LatencyBudget)/1e6, q4AllocBytesBudget, q4AllocCountBudget
+	rep.Derived.Members, rep.Derived.Allocs = q4MaxMembers, q4AllocCountBudgetFor(q4MaxMembers)
+	rep.Derived.Rule = "the frozen allocation count per member (2,048 per 100 members), rounded up"
 	const start = 1
 	for _, in := range q4Inputs() {
 		nodes := q4Members(t, in.weights)
