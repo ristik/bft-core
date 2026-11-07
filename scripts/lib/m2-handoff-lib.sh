@@ -38,6 +38,11 @@ m2_start_root() { # node installEpoch bootnode  (an empty install epoch starts a
     declare -F "${M2_ROOT_FLAGS_FN:-}" >/dev/null || { echo "m2_start_root: the P85 lane's M2_ROOT_FLAGS_FN is not a defined function" >&2; return 1; }
     shardConfArgs+=(--q3-lane $("$M2_ROOT_FLAGS_FN" "$node" "http://127.0.0.1:${rethEthBase:-18545}"))
   fi
+  # a root of a deployment whose EVM shards carry the B1 registry (--b1-profile) refuses a handoff above the registry's 16 members at admission, as
+  # the shards do (owner §49: the generic limit is 256, the B1 member ceiling stays 16)
+  if [ -n "${EVM_B1_PROFILE:-}" ]; then
+    case " ${shardConfArgs[*]} " in *" --q3-lane "*) shardConfArgs+=(--b1-registry) ;; esac
+  fi
   port=$(m2_rpc_port "$node")
   if [ "${F8_MIXED_LANE:-0}" = 1 ]; then
     for conf in test-nodes/shard-conf-f8-a-left.json test-nodes/shard-conf-f8-a-right.json test-nodes/shard-conf-f8-b-left.json; do

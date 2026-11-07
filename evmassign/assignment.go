@@ -57,9 +57,14 @@ func SameCommittee(a, b []RootMember) bool { return sameCommittee(a, b) }
 const EVMPartitionTypeID types.PartitionTypeID = 8
 
 const (
-	// MaxValidators bounds the successor set so the candidate stays far below
-	// the 1 MiB freeze companion limit; it equals the B1 registry member ceiling (b1state.MaxMembers), so every validator set a root epoch can carry is admissible as a B1 entry.
-	MaxValidators = 16
+	// MaxValidators bounds the successor set of an EVM assignment as a native resource ceiling (owner §49): 256 members, the same bound as the
+	// trust base entry (utbentry.MaxMembers). It does not depend on the B1 registry; a deployment that carries B1 has the separate
+	// B1MaxValidators guard.
+	MaxValidators = 256
+	// B1MaxValidators is the member ceiling of the B1 registry entry (b1state.MaxMembers; keep, it prices gas). A root handoff in a B1-enabled
+	// deployment above it could not be imported by the installed registry, so it is refused at admission (see q3active.Config.MemberCeiling);
+	// a no-EVM root does not inherit it.
+	B1MaxValidators = 16
 	// KeyLen is the compressed secp256k1 signing key width.
 	KeyLen = 33
 
