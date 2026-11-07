@@ -20,7 +20,7 @@ The weighted leader schedule is periodic with period W/gcd(weights), so with the
 **B = 65,536** (`internal/weightcap`, enforced at every admission point before a weight commits) the selector holds one immutable period
 table of at most 64 KiB, built once from verified context in at most n*B steps; a lookup is O(1), read-only and allocation-free.
 
-Supported: committees of up to 100 members, total weight up to B, every round from the epoch start to `math.MaxUint64`.
+Supported: committees of up to 256 members (§49; the cost of the selector at 128 and 256 members is benchmarked in `rootchain/consensus/leader`), total weight up to B, every round from the epoch start to `math.MaxUint64`.
 Budget: constructor plus lookup at most **2 s**, no concurrent caller waits longer, at most 512 KiB and 2,048 allocations. These are the
 budgets frozen before the change and are not widened. `TestQ4QueryCostGate` asserts every mandatory row (n=100 at d=10^6, d~6x10^5, near
 MaxUint64, worst-period inputs; cold restart, old query, eight synchronized concurrent callers, rebuild after cache eviction); none is
