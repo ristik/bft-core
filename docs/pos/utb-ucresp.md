@@ -14,7 +14,7 @@ message is exactly what it was.
 - `CertificationResponseV3 = [3, [partition, shard, technicalRecord, uc, status, message], partitionView | null, trustBaseUpdates]`. The wrapped response is the
   legacy response with the same meaning (the wrapped UC is the last-good certificate whatever the status; the view is optional, null when omitted or over its
   limit, never an empty string, and is never part of the UC). `trustBaseUpdates` is a list of **at most two**
-  entries (`MaxTrustBaseUpdates`), each at most 64 KiB, each the canonical bytes of a `types.RootTrustBaseV2` (tag 39000, version 2) as the root's
+  entries (`MaxTrustBaseUpdates`), each at most 128 KiB, each the canonical bytes of a `types.RootTrustBaseV2` (tag 39000, version 2) as the root's
   `utbstore` holds them, ascending by epoch. The genesis is never attached. Bounds are enforced when encoding and when decoding.
 
 ## Root side

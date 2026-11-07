@@ -27,7 +27,7 @@ type node struct {
 func nodes(t *testing.T, n int) []node {
 	out := make([]node, n)
 	for i := range out {
-		s, err := abcrypto.NewInMemorySecp256K1SignerFromKey(bytes.Repeat([]byte{byte(i + 1)}, 32))
+		s, err := abcrypto.NewInMemorySecp256K1SignerFromKey(append(make([]byte, 30), byte((i+1)>>8), byte(i+1)))
 		require.NoError(t, err)
 		v, _ := s.Verifier()
 		pk, err := v.MarshalPublicKey()
@@ -96,14 +96,20 @@ func TestBuilderRefusesFactsThatDoNotExtendThePredecessor(t *testing.T) {
 	})
 }
 
-func TestBuilderEnforcesTheDeploymentMemberLimit(t *testing.T) {
+func TestBuilderEnforcesTheMemberCeiling(t *testing.T) {
+	// §49: 256, go-base's own bound and independent of the B1 registry's 16
+	require.Equal(t, 256, utb.MaxMembers)
 	ns := nodes(t, utb.MaxMembers+1)
-	_, err := utb.BuildUnsigned(nil, facts(ns[:utb.MaxMembers], 1, 1))
-	require.NoError(t, err, "16 members are admitted")
+	e, err := utb.BuildUnsigned(nil, facts(ns[:utb.MaxMembers], 1, 1))
+	require.NoError(t, err, "256 members are admitted")
+	require.Len(t, e.RootNodes, 256)
 	_, err = utb.BuildUnsigned(nil, facts(ns, 1, 1))
-	require.ErrorIs(t, err, utb.ErrFacts, "17 are not, although go-base would decode them")
+	require.ErrorIs(t, err, utb.ErrFacts, "257 are not")
 	_, err = utb.BuildUnsigned(nil, facts(nil, 1, 1))
 	require.ErrorIs(t, err, utb.ErrFacts)
+	// 17 members are admitted too: the B1 registry's 16 is a separate guard at admission of a B1-enabled deployment
+	_, err = utb.BuildUnsigned(nil, facts(ns[:17], 1, 1))
+	require.NoError(t, err)
 }
 
 func TestBuilderRefusesInvalidMembersAndThreshold(t *testing.T) {

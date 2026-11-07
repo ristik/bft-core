@@ -89,8 +89,10 @@ func Decode(b []byte) (*types.RootTrustBaseV2, error) {
 	return e, nil
 }
 
-// MaxMembers is the deployment's committee ceiling (the admitted 16-member profile). It no longer follows evmassign.MaxValidators (§49: the EVM assignment limit is 256 and the B1 guard is separate).
-const MaxMembers = 16
+// MaxMembers is the committee ceiling of a trust base entry: 256 (owner §49), the same as go-base's decoder bound. It is a native resource ceiling for
+// allocation and key validation; it does not depend on the B1 registry's 16 members (a gas bound that a B1-enabled deployment enforces separately at
+// admission, evmassign.B1MaxValidators). Quorum and signature validity are unchanged.
+const MaxMembers = 256
 
 // ValidateShape is types.RootTrustBaseV2.Validate for an entry that may still lack its signatures: Validate requires a non-genesis entry to carry a
 // non-empty signature map, so an unsigned one is checked as a copy with a placeholder. Signatures are verified by VerifySuccessor, never here.

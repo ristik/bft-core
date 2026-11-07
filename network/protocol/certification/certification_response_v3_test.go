@@ -175,3 +175,12 @@ func TestResponseV3ViewGuards(t *testing.T) {
 	hand.PartitionView = []byte{}
 	require.ErrorIs(t, hand.IsValid(), ErrResponseV3, "an empty view is null or absent, never an empty string")
 }
+
+// §49: an attached entry may be as large as the per-entry cap everywhere, 128 KiB (the largest valid entry is 95,365 bytes); the frame limit follows.
+func TestTheAttachedEntryCapIs128KiB(t *testing.T) {
+	require.Equal(t, 128<<10, MaxTrustBaseUpdateBytes)
+	require.Equal(t, MaxCertificationResponseV2Frame+2*(128<<10), MaxCertificationResponseV3Frame)
+	base := v3Base(t)
+	require.NoError(t, NewCertificationResponseV3(base, [][]byte{entryBytes(1, 95_365), entryBytes(2, 95_365)}).IsValid(), "two maximum-size valid entries")
+	require.Error(t, NewCertificationResponseV3(base, [][]byte{entryBytes(1, 128<<10+1)}).IsValid())
+}
