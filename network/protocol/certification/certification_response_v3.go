@@ -18,8 +18,9 @@ const (
 	// MaxTrustBaseUpdates bounds the signed trust-base entries attached to one response: the current UC signer epoch's successor, or the two entries a
 	// folded transition needs. Several missed epochs are fetched (GetTrustBase), never attached; the whole chain is never sent.
 	MaxTrustBaseUpdates = 2
-	// MaxTrustBaseUpdateBytes bounds one attached entry (the 16-member profile fits with room to spare).
-	MaxTrustBaseUpdateBytes = 64 << 10
+	// MaxTrustBaseUpdateBytes bounds one attached entry: 128 KiB (owner §49), the per-entry cap everywhere (the largest valid entry, 256 members with 128-byte
+	// ids and all 256 predecessor signatures, is 95,365 bytes). The frame limit below is derived from it.
+	MaxTrustBaseUpdateBytes = 128 << 10
 
 	// MaxCertificationResponseV3Frame is the limit for the CBOR payload (excluding the varint length prefix) of a V3 frame: the V2 limit plus the entries.
 	// Entries and signatures are never truncated to fit; the partition view is the only optional part and is omitted on its own size.

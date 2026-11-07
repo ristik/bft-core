@@ -30,7 +30,7 @@ type node struct {
 func nodes(t *testing.T, n int) []node {
 	out := make([]node, n)
 	for i := range out {
-		s, err := abcrypto.NewInMemorySecp256K1SignerFromKey(bytes.Repeat([]byte{byte(i + 1)}, 32))
+		s, err := abcrypto.NewInMemorySecp256K1SignerFromKey(append(make([]byte, 30), byte((i+1)>>8), byte(i+1)))
 		require.NoError(t, err)
 		v, _ := s.Verifier()
 		pk, _ := v.MarshalPublicKey()
@@ -148,14 +148,16 @@ func TestRefusals(t *testing.T) {
 		_, err = s.Append(append(enc(t, c[2]), 0))
 		require.ErrorIs(t, err, ErrEntry)
 	})
-	t.Run("more members than the deployment admits", func(t *testing.T) {
+	t.Run("more members than the ceiling admits", func(t *testing.T) {
+		// §49: the ceiling is 256, go-base's own entry bound, so the entry decoder refuses a 257th member before the store's own check is reached; the
+		// store's check stays as the second layer and must never be lower than go-base's.
+		require.Equal(t, types.MaxTrustBaseV2Members, utb.MaxMembers)
+		require.Equal(t, 256, utb.MaxMembers)
 		many := nodes(t, utb.MaxMembers+1)
-		g, err := types.DecodeRootTrustBaseV2(mustBig(t, many))
-		require.NoError(t, err)
-		_, err = Open(memorydb.New(), g, pin(t, g))
-		require.ErrorIs(t, err, ErrGenesis)
+		_, err := types.DecodeRootTrustBaseV2(mustBig(t, many))
+		require.ErrorContains(t, err, "257 members")
 	})
-	t.Run("a successor with more members than the deployment admits", func(t *testing.T) {
+	t.Run("a successor with more members than the ceiling admits", func(t *testing.T) {
 		many := nodes(t, utb.MaxMembers+1)
 		var ms []*types.NodeInfo
 		for _, n := range many {
@@ -163,11 +165,11 @@ func TestRefusals(t *testing.T) {
 		}
 		sort.Slice(ms, func(i, j int) bool { return ms[i].NodeID < ms[j].NodeID })
 		id, _ := c[1].EntryID()
-		e := &types.RootTrustBaseV2{Version: 2, NetworkID: 5, Epoch: 3, EpochStart: 900, RootNodes: ms, QuorumThreshold: 12, PreviousEntryID: id[:]}
+		e := &types.RootTrustBaseV2{Version: 2, NetworkID: 5, Epoch: 3, EpochStart: 900, RootNodes: ms, QuorumThreshold: 172, PreviousEntryID: id[:]}
 		for _, n := range ns[:3] {
 			require.NoError(t, e.Sign(n.id, n.signer))
 		}
-		require.NoError(t, e.VerifySuccessor(c[1]), "go-base accepts it")
+		require.ErrorContains(t, e.VerifySuccessor(c[1]), "257 members", "go-base refuses it as well")
 		_, err := s.Append(enc(t, e))
 		require.ErrorIs(t, err, ErrEntry)
 	})
@@ -330,9 +332,10 @@ func TestRangePaging(t *testing.T) {
 	require.EqualValues(t, 3, next)
 }
 
-// The per-entry cap is 128 KiB (the largest valid entry is 95,365 bytes): bytes over it are refused as too long, whatever they decode to. The 16-member
-// deployment profile is a separate rule: a 256-member entry is within the cap and is refused for its members.
-func TestTheEntryCapIsInBytesAndTheProfileIsInMembers(t *testing.T) {
+// The per-entry cap is 128 KiB (the largest valid entry is 95,365 bytes): bytes over it are refused as too long, whatever they decode to. The member
+// ceiling is 256 (§49): the shared maximum-size chain - 256 members with 128-byte ids and all 256 predecessor signatures - is a valid history, it
+// is appended and survives a reopen. (The 16-member limit it replaces was the B1 registry's gas bound, now a separate admission guard.)
+func TestTheEntryCapIsInBytesAndTheMemberCeilingIs256(t *testing.T) {
 	ns := nodes(t, 4)
 	c := chain(t, ns, 1, ns[:3])
 	s := open(t, memorydb.New(), c[0])
@@ -344,13 +347,37 @@ func TestTheEntryCapIsInBytesAndTheProfileIsInMembers(t *testing.T) {
 	data, err := os.ReadFile("../gettrustbase/testdata/max-entry-v1.json")
 	require.NoError(t, err)
 	var f struct {
-		Entry string `json:"entry"`
+		Genesis   string `json:"genesis"`
+		GenesisID string `json:"genesisId"`
+		Entry     string `json:"entry"`
 	}
 	require.NoError(t, json.Unmarshal(data, &f))
+	rawGenesis, err := hex.DecodeString(f.Genesis)
+	require.NoError(t, err)
 	big, err := hex.DecodeString(f.Entry)
 	require.NoError(t, err)
 	require.Less(t, len(big), maxEntryBytes)
+	genesis, err := types.DecodeRootTrustBaseV2(rawGenesis)
+	require.NoError(t, err)
+	require.Len(t, genesis.RootNodes, 256)
+	pin, err := genesis.EntryID()
+	require.NoError(t, err)
+	require.Equal(t, f.GenesisID, hex.EncodeToString(pin[:]))
+
+	// the chain of the fixture is not this test's 4-member chain: the entry is refused by the chain, not by the byte cap or the member ceiling
 	_, err = s.Append(big)
 	require.ErrorIs(t, err, ErrEntry)
-	require.NotContains(t, err.Error(), "bytes", "within the byte cap; it is the member profile or the chain that refuses it")
+	require.NotContains(t, err.Error(), "bytes")
+	require.NotContains(t, err.Error(), "members")
+
+	// on its own chain the 256-member entry is accepted, persisted, and reloaded
+	db := memorydb.New()
+	big256, err := Open(db, genesis, pin)
+	require.NoError(t, err)
+	fresh, err := big256.Append(big)
+	require.NoError(t, err)
+	require.True(t, fresh)
+	reopened, err := Open(db, genesis, pin)
+	require.NoError(t, err)
+	require.EqualValues(t, 2, reopened.Tip().Epoch)
 }
