@@ -31,7 +31,7 @@ const (
 	// Transport caps (design §7). A client may lower the budgets, never raise the server's.
 	DefaultMaxEntries   = 64
 	DefaultMaxResponse  = 1 << 20
-	MaxEntryBytes       = 64 << 10
+	MaxEntryBytes       = 128 << 10 // the largest valid entry (256 members, 128-byte node ids, 256 signatures) is 95,365 bytes
 	MaxRequestBytes     = 1 << 10
 	envelopeBound       = 256 // network, status, epochs, end id, array heads: well above the real size
 	maxNesting          = 16
@@ -96,6 +96,11 @@ type Response struct {
 }
 
 func decMode(maxArray int) cbor.DecMode {
+	// The entries are embedded as raw items whose member lists are arrays too: an array bound tied to the number of entries alone would refuse a valid
+	// single entry with a large committee (the page's own entry count is checked explicitly by DecodeResponse).
+	if min := types.MaxTrustBaseV2Members + 16; maxArray < min {
+		maxArray = min
+	}
 	if maxArray < maxArrayElementsMin {
 		maxArray = maxArrayElementsMin
 	}
