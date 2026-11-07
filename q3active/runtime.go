@@ -43,6 +43,8 @@ var (
 	ErrSnapshot = errors.New("q3active: the snapshot is not the activation's")
 	// ErrConflict is returned when a legacy view disagrees with the verified history for an epoch.
 	ErrConflict = errors.New("q3active: trust base differs from the verified history")
+	// ErrMemberCeiling is returned for a handoff whose committee is larger than the configured ceiling (Config.MemberCeiling).
+	ErrMemberCeiling = errors.New("q3active: the committee is above the deployment's member ceiling")
 )
 
 // RootSink is the root consensus manager (rootchain/consensus.ConsensusManager). InstallVerifiedEpoch must be idempotent for the
@@ -72,6 +74,10 @@ type Config struct {
 	// UTBGenesis makes the genesis epoch a UTB epoch: the deployment endorses the signed trust-base entry from its first handoff, and every activation
 	// must carry the UTB protocol tuple.
 	UTBGenesis bool
+	// MemberCeiling, when positive, refuses at admission a handoff whose committee has more members (ErrMemberCeiling). Zero is the native
+	// bound only. A deployment that carries the B1 registry sets evmassign.B1MaxValidators (the registry's gas-priced 16): a larger committee
+	// could not be imported by the installed registry, so it must not be admitted. A no-EVM deployment leaves it zero.
+	MemberCeiling int
 }
 
 // Participants are the five installers. They exist only after the runtime does (the manager takes the runtime as its gate and
@@ -84,13 +90,15 @@ type Participants struct {
 
 // Runtime is the verified history, the install journal and the published snapshot of one process.
 type Runtime struct {
-	mu        sync.Mutex // serialises activation and recovery
-	journal   *q3install.Journal
-	hist      atomic.Pointer[q3format.History]
-	snap      atomic.Pointer[Snapshot] // the installer's provisional snapshot: private until its epoch is journaled complete
-	active    atomic.Pointer[Snapshot] // the published active context: the provisional one once its epoch is complete
-	parts     atomic.Pointer[Participants]
-	completed sync.Map // epoch -> struct{}: journaled complete in this process
+	// memberCeiling is Config.MemberCeiling.
+	memberCeiling int
+	mu            sync.Mutex // serialises activation and recovery
+	journal       *q3install.Journal
+	hist          atomic.Pointer[q3format.History]
+	snap          atomic.Pointer[Snapshot] // the installer's provisional snapshot: private until its epoch is journaled complete
+	active        atomic.Pointer[Snapshot] // the published active context: the provisional one once its epoch is complete
+	parts         atomic.Pointer[Participants]
+	completed     sync.Map // epoch -> struct{}: journaled complete in this process
 }
 
 // ErrNotAttached is returned when an activation or recovery is asked before the participants were attached.
@@ -103,7 +111,7 @@ func New(cfg Config) (*Runtime, error) {
 	if cfg.Genesis == nil {
 		return nil, q3install.ErrComponents
 	}
-	r := &Runtime{}
+	r := &Runtime{memberCeiling: cfg.MemberCeiling}
 	j, err := q3install.Open(q3install.Config{DB: cfg.DB, Bundles: r.verify, Components: map[q3install.Step]q3install.Component{
 		q3install.StepRoot:      &rootComponent{r: r},
 		q3install.StepSafety:    &consumerComponent{r: r, name: "safety", pick: func(p *Participants) Consumer { return p.Safety }},
@@ -252,8 +260,12 @@ func (r *Runtime) verify(raw []byte, committed q3format.Claim) error {
 	if err != nil {
 		return err
 	}
-	if e, err := next.ForEpoch(committed.Epoch); err != nil || e.Claim() != committed {
+	e, err := next.ForEpoch(committed.Epoch)
+	if err != nil || e.Claim() != committed {
 		return fmt.Errorf("%w: the verified history derives another record for epoch %d", ErrBundle, committed.Epoch)
+	}
+	if r.memberCeiling > 0 && e.MemberCount() > r.memberCeiling {
+		return fmt.Errorf("%w: epoch %d has %d members, the ceiling is %d", ErrMemberCeiling, committed.Epoch, e.MemberCount(), r.memberCeiling)
 	}
 	return nil
 }
