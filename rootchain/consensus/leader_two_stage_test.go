@@ -34,7 +34,7 @@ func TestRollingRestartOneCertifiedBlockAfterTheStop(t *testing.T) {
 	}
 	t.Parallel()
 	q4Slot(t)
-	c := newPhaseLockLive(t, 2*time.Second)
+	c := newPhaseLockLive(t, twoStageT(t))
 	lag := 4*uint64(len(c.nodes)) + 4
 	// R = 8 rounds: one round lands in the run's own tail, and a real shard is not that fast
 	twoStageRun(t, c, "c", "b", lag+2, 8)
@@ -49,13 +49,24 @@ func TestRollingRestartStageTwoWaitsForTheNextRun(t *testing.T) {
 	}
 	t.Parallel()
 	q4Slot(t)
-	c := newPhaseLockLive(t, 2*time.Second)
+	c := newPhaseLockLive(t, twoStageT(t))
 	lag := 4*uint64(len(c.nodes)) + 4
 	names := c.all()
 	slices.SortFunc(names, func(a, b string) int { return strings.Compare(c.id(a).String(), c.id(b).String()) }) // the selector's member order
 	stageTwo := twoStageRun(t, c, names[0], names[1], 1+lag+3*leader.RecoverySpacing+128, 1)
 	require.GreaterOrEqual(t, stageTwo, uint64(254), "the enumeration's outcome for this order and head is 255 rounds")
 	require.LessOrEqual(t, stageTwo, uint64(256), "the enumeration's outcome for this order and head is 255 rounds")
+}
+
+// twoStageT is T for the two-stage runs: BFT_TRACE_T seconds, 2 by default. Set TMPDIR to the disk being measured.
+func twoStageT(t *testing.T) time.Duration {
+	return time.Duration(traceEnvInt(t, "BFT_TRACE_T", 2)) * time.Second
+}
+
+// twoStageHold is BFT_TRACE_R_MS: with it set, the fresh request also waits that long after the repeat's commit is seen, a measured shard R in
+// place of a count of rounds.
+func twoStageHold(t *testing.T) time.Duration {
+	return time.Duration(traceEnvInt(t, "BFT_TRACE_R_MS", 0)) * time.Millisecond
 }
 
 // twoStageRun warms the cluster with X down to warm rounds past the anchor, then runs the shape; hold is R in root rounds after the commit. It returns stage two's rounds.
@@ -158,7 +169,7 @@ func twoStageRun(t *testing.T, c *q4bLive, x, d string, warm, hold uint64) uint6
 		}
 	}
 	stage = 1 // from the stop: the wait for the QC is where most of stage one's full timers are
-	require.Eventually(t, func() bool { sample(); return c.state(ingress).HighQC == r }, q4bDeadline, 5*time.Millisecond, "the block of round %d is certified, and no other", r)
+	require.Eventually(t, func() bool { sample(); return c.state(ingress).HighQC == r }, q4bDeadline+time.Duration(lag+2)*c.nodes[0].r.manager.params.LocalTimeout, 5*time.Millisecond, "the block of round %d is certified, and no other", r)
 	repeatMu.Lock()
 	certifiedRepeat := repeats[r]
 	repeatMu.Unlock()
@@ -212,7 +223,8 @@ func twoStageRun(t *testing.T, c *q4bLive, x, d string, warm, hold uint64) uint6
 	t.Logf("in the %d rounds from the commit, D leads %v and X leads %v", lag+leader.RecoveryRun, deadSlots, xSlots)
 
 	stage = 2
-	for c.state(ingress).Round < committed+hold {
+	holdFor, seenAt := twoStageHold(t), time.Now()
+	for c.state(ingress).Round < committed+hold || time.Since(seenAt) < holdFor {
 		sample()
 		require.False(t, c.certifiedHash(ingress, hash), "certified with no fresh request: the held proof was not stale")
 		time.Sleep(5 * time.Millisecond)
@@ -267,6 +279,7 @@ func twoStageRun(t *testing.T, c *q4bLive, x, d string, warm, hold uint64) uint6
 		}
 		return noDeadRun
 	}
+	t.Logf("T=%s, R held for %d rounds and at least %s after the commit was seen", c.nodes[0].r.manager.params.LocalTimeout, hold, holdFor)
 	t.Logf("fresh request at round %d after R=%d rounds, certified by %d: stage one %d rounds, stage two %d, total %d of %d, %s, %d sends", freshAt, hold, end, stageOne, stageTwo, stageOne+stageTwo, joint, time.Since(began).Round(time.Second), sends)
 	t.Logf("recovery runs %v; rounds by class, stage one %+v, stage two %+v", runs, classes[1], classes[2])
 	require.LessOrEqual(t, deadIn[1]+deadIn[2], 1, "a dead run in each stage: %v", runs)

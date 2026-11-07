@@ -24,6 +24,7 @@ type leaf struct {
 // Batch is one shard's pre-state and the leaves it inserts.
 type Batch struct {
 	pre, fresh []leaf
+	preRoot    [32]byte // computed once: a shard's request takes it for every resubmission
 }
 
 // Stats is what specifies a proof's cost, beyond the count of its batch.
@@ -63,6 +64,7 @@ func New(seed string, keyBit, preLeaves, inserted int) *Batch {
 	byKey := func(a, b leaf) int { return bytes.Compare(a.key[:], b.key[:]) }
 	slices.SortFunc(b.pre, byKey)
 	slices.SortFunc(b.fresh, byKey)
+	b.preRoot = root(b.pre)
 	return b
 }
 
@@ -92,7 +94,7 @@ func root(leaves []leaf) [32]byte {
 }
 
 // PreRoot is the root of the pre-state.
-func (b *Batch) PreRoot() [32]byte { return root(b.pre) }
+func (b *Batch) PreRoot() [32]byte { return b.preRoot }
 
 // Envelope is the insertion of the batch under the reference time, its new root and its shape.
 func (b *Batch) Envelope(referenceTime uint64) ([]byte, [32]byte, Stats, error) {
