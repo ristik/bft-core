@@ -77,6 +77,14 @@ func (e Entry) Start() uint64 { return e.start } // the actual activation bounda
 func (e Entry) EarliestActivation() uint64 { return e.earliest }
 func (e Entry) Version() uint64            { return e.version }
 
+// MemberCount is the number of members of this epoch's committee.
+func (e Entry) MemberCount() int {
+	if e.tb == nil {
+		return 0
+	}
+	return len(e.tb.RootNodes)
+}
+
 // Scheme is the explicit signing scheme of the epoch: 1 for every legacy epoch, the tuple's for a V3 epoch.
 func (e Entry) Scheme() uint64               { return e.scheme }
 func (e Entry) BodyID() [32]byte             { return e.bodyID }

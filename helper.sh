@@ -123,6 +123,8 @@ function start_root_nodes() {
           [ -s test-nodes/genesis-identities.json ] || q3_prepare_genesis_identities || exit 1
           profileArgs+=(--q3-lane --genesis-identities test-nodes/genesis-identities.json)
         fi
+        # the shards of a B1 deployment (--b1-profile) refuse a committee above the registry's 16 members; the roots admit the handoff with the same bound
+        [ -z "${EVM_B1_PROFILE:-}" ] || profileArgs+=(--b1-registry)
       fi
       if [ "${P85_LANE:-0}" = 1 ]; then
         # proof of stake (briefs/p85-recovery-lane.md): the coupled runtime, the P85 control executor and the genesis committee as K

@@ -26,8 +26,12 @@ import (
 const q3JournalDBFileName = "q3-journal.db"
 
 // newRootQ3Runtime opens the install journal and rebuilds the verified history from the pinned genesis trust base and every staged bundle.
-func newRootQ3Runtime(journal keyvaluedb.KeyValueDB, genesis *types.RootTrustBaseV1, utbGenesis bool) (*q3active.Runtime, error) {
-	rt, err := q3active.New(q3active.Config{DB: journal, Genesis: genesis, UTBGenesis: utbGenesis})
+func newRootQ3Runtime(journal keyvaluedb.KeyValueDB, genesis *types.RootTrustBaseV1, utbGenesis, b1Registry bool) (*q3active.Runtime, error) {
+	cfg := q3active.Config{DB: journal, Genesis: genesis, UTBGenesis: utbGenesis}
+	if b1Registry {
+		cfg.MemberCeiling = evmassign.B1MaxValidators // the installed registry imports at most 16 members per epoch
+	}
+	rt, err := q3active.New(cfg)
 	if err != nil {
 		return nil, fmt.Errorf("q3 runtime: %w", err)
 	}

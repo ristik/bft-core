@@ -38,6 +38,7 @@ import (
 	"github.com/unicitynetwork/bft-core/configuredadmission"
 	"github.com/unicitynetwork/bft-core/configuredprogress"
 	"github.com/unicitynetwork/bft-core/engineapi"
+	"github.com/unicitynetwork/bft-core/evmassign"
 	"github.com/unicitynetwork/bft-core/frontier"
 	"github.com/unicitynetwork/bft-core/handoff"
 	"github.com/unicitynetwork/bft-core/handoffdelivery"
@@ -744,7 +745,7 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 			if closer, ok := b1Journal.(io.Closer); ok {
 				defer closer.Close()
 			}
-			b1rt, jErr := q3active.New(q3active.Config{DB: b1Journal, Genesis: trustBases[0], UTBGenesis: flags.UTBGenesisFile != ""})
+			b1rt, jErr := q3active.New(q3active.Config{DB: b1Journal, Genesis: trustBases[0], UTBGenesis: flags.UTBGenesisFile != "", MemberCeiling: evmassign.B1MaxValidators})
 			if jErr != nil {
 				return fmt.Errorf("b1 authority runtime: %w", jErr)
 			}
@@ -767,7 +768,11 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 			if closer, ok := journalDB.(io.Closer); ok {
 				defer closer.Close()
 			}
-			if q3rt, jErr = q3active.New(q3active.Config{DB: journalDB, Genesis: trustBases[0], UTBGenesis: flags.UTBGenesisFile != ""}); jErr != nil {
+			q3Ceiling := 0 // a deployment that carries the B1 registry cannot import a committee above its 16 members
+			if flags.B1Profile != "" {
+				q3Ceiling = evmassign.B1MaxValidators
+			}
+			if q3rt, jErr = q3active.New(q3active.Config{DB: journalDB, Genesis: trustBases[0], UTBGenesis: flags.UTBGenesisFile != "", MemberCeiling: q3Ceiling}); jErr != nil {
 				return fmt.Errorf("q3 runtime: %w", jErr)
 			}
 			if q3Admit, jErr = wireQ3Pair(executor, q3rt, uint64(shardConf.NetworkID), origin.Valid(), [32]byte(origin.BlockHash())); jErr != nil {

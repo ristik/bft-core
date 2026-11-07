@@ -249,6 +249,11 @@ func TestValidateSuccessorIsolatedMutations(t *testing.T) {
 		}
 		require.ErrorIs(t, ValidateSet(infos), ErrValidators)
 		require.NoError(t, ValidateSet(infos[:MaxValidators]))
+		// §49: the bound is the literal 256 (a native resource ceiling), the B1 guard stays 16
+		require.Equal(t, 256, MaxValidators)
+		require.Equal(t, 16, B1MaxValidators)
+		require.Len(t, infos, 257)
+		require.NoError(t, ValidateSet(infos[:256]))
 	})
 	t.Run("short key", func(t *testing.T) {
 		infos := []*types.NodeInfo{{NodeID: "a", SigKey: []byte{2, 3}, Stake: 1}}

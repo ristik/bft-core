@@ -85,6 +85,7 @@ type (
 		InstallHandoffEpoch      uint64
 		Q3Lane                   bool // the Q3 acceptance lane: a verified Q3 history, the install journal and the V3 handoff pipeline
 		Q3JournalDBFile          string
+		B1Registry               bool // the deployment carries the B1 registry: a handoff above its 16 members is refused at admission
 
 		BlockRate        uint32
 		MaxRequests      uint   // certification request channel capacity
@@ -161,6 +162,7 @@ func rootNodeRunCmd(baseFlags *baseFlags) *cobra.Command {
 	cmd.Flags().BoolVar(&flags.Q3Lane, "q3-lane", false, "run the Q3 acceptance lane: verified Q3 history, install journal and V3 handoffs (requires --profile-3)")
 	cmd.Flags().StringVar(&flags.Q3JournalDBFile, "q3-journal-db", "",
 		fmt.Sprintf("Q3 install journal database (default: %s)", filepath.Join("$UBFT_HOME", q3JournalDBFileName)))
+	cmd.Flags().BoolVar(&flags.B1Registry, "b1-registry", false, "the deployment carries the B1 registry: refuse a handoff whose committee is above the registry's 16 members (a gas bound); a no-EVM deployment leaves it off (requires --q3-lane)")
 	cmd.Flags().StringVar(&flags.UTBGenesisFile, "utb-genesis", "", "enable the signed trust-base entry (UTB) profile: the canonical genesis entry file (see: trust-base utb-genesis); requires --utb-genesis-id and profile 2")
 	cmd.Flags().StringVar(&flags.UTBGenesisID, "utb-genesis-id", "", "the EntryID of the UTB genesis entry (0x-prefixed SHA-256): the pin the genesis file must match")
 	cmd.Flags().StringVar(&flags.UTBCaptureUCResp, "utb-capture-ucresp", "", "lane diagnostics: directory to write each distinct version 2 certification response that carries entries to, before it is sent")
@@ -310,6 +312,9 @@ func rootNodeRun(ctx context.Context, flags *rootNodeRunFlags) error {
 	if flags.Q3Lane && !flags.HandoffProfile {
 		return errors.New("q3-lane requires profile 3")
 	}
+	if flags.B1Registry && !flags.Q3Lane {
+		return errors.New("b1-registry requires q3-lane")
+	}
 	if flags.UTBGenesisFile != "" {
 		trustBaseStore.EnableUTBProfile() // the first voting epoch is a UTB epoch whether or not a verified Q3 history later takes over the answers
 	}
@@ -322,7 +327,7 @@ func rootNodeRun(ctx context.Context, flags *rootNodeRunFlags) error {
 		if closer, ok := journalDB.(io.Closer); ok {
 			defer closer.Close()
 		}
-		if q3rt, err = newRootQ3Runtime(journalDB, trustBase, flags.UTBGenesisFile != ""); err != nil {
+		if q3rt, err = newRootQ3Runtime(journalDB, trustBase, flags.UTBGenesisFile != "", flags.B1Registry); err != nil {
 			return err
 		}
 		// the first trust base is the pinned genesis the verified history is rooted in; the store accepts a V3 epoch's projection only

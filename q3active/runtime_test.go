@@ -603,3 +603,37 @@ func TestRequestHistoryServesTheActivatedAssignmentOfItsShard(t *testing.T) {
 		}
 	})
 }
+
+// A deployment that carries the B1 registry configures a member ceiling (evmassign.B1MaxValidators, 16): a handoff above it is refused at
+// admission, before anything is staged, and one at it is admitted. A runtime without a ceiling (a no-EVM deployment) has the native bound only.
+func TestAHandoffAboveTheMemberCeilingIsRefusedAtAdmission(t *testing.T) {
+	f := q3fixture.New(t, q3fixture.Options{})
+	n := len(f.Members)
+	require.Greater(t, n, 1)
+
+	start := func(ceiling int) (*q3active.Runtime, *process) {
+		p := newProcess(t, f)
+		rt, err := q3active.New(q3active.Config{DB: p.DB, Genesis: f.Old, MemberCeiling: ceiling})
+		require.NoError(t, err)
+		p.Attach(rt)
+		return rt, p
+	}
+	t.Run("one member above the ceiling", func(t *testing.T) {
+		rt, p := start(n - 1)
+		require.ErrorIs(t, rt.Activate(ctx, p.bundle()), q3active.ErrMemberCeiling)
+		require.Error(t, rt.Admit(2), "the epoch is not in the verified history")
+		require.Nil(t, rt.Snapshot())
+		it := p.DB.First()
+		defer it.Close()
+		require.False(t, it.Valid(), "nothing was staged by a refused admission")
+	})
+	t.Run("at the ceiling", func(t *testing.T) {
+		rt, p := start(n)
+		require.NoError(t, rt.Activate(ctx, p.bundle()))
+		require.NoError(t, rt.Admit(2))
+	})
+	t.Run("no ceiling", func(t *testing.T) {
+		rt, p := start(0)
+		require.NoError(t, rt.Activate(ctx, p.bundle()))
+	})
+}
