@@ -1,6 +1,7 @@
 package consensus
 
 import (
+	"context"
 	"path/filepath"
 	"testing"
 	"time"
@@ -27,7 +28,9 @@ func TestRecoveredRootRefusesABrokenEnvelope(t *testing.T) {
 	c.start(c.all()...)
 	c.warm(3, c.all()...)
 	shards := liveShards(c, false)
-	establish(t, c, "H", shards)
+	establish(t, c, "H", shards, func(name string, req *IRChangeRequest) error {
+		return c.nodes[c.idx(name)].r.manager.RequestCertification(context.Background(), *req)
+	})
 	for _, name := range c.all() { // a still state: no T2 repeat moves a shard between building a request and judging it
 		c.stop(name)
 	}
