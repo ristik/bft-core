@@ -37,7 +37,7 @@ type parkedApproval struct {
 }
 
 const (
-	maxParkedApprovals = 32
+	maxParkedApprovals = 256 // one per signer while the facts arrive: the committee ceiling (evmassign.MaxPrimaryPoPs)
 	parkedApprovalTTL  = 2 * time.Minute
 )
 

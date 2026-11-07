@@ -89,7 +89,7 @@ func Decode(b []byte) (*types.RootTrustBaseV2, error) {
 	return e, nil
 }
 
-// MaxMembers is the deployment's committee ceiling (the admitted 16-member profile); a test in package utb pins it to evmassign.MaxValidators.
+// MaxMembers is the deployment's committee ceiling (the admitted 16-member profile). It no longer follows evmassign.MaxValidators (§49: the EVM assignment limit is 256 and the B1 guard is separate).
 const MaxMembers = 16
 
 // ValidateShape is types.RootTrustBaseV2.Validate for an entry that may still lack its signatures: Validate requires a non-genesis entry to carry a

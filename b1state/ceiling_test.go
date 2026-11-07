@@ -7,9 +7,10 @@ import (
 	"github.com/unicitynetwork/bft-core/evmassign"
 )
 
-// A root epoch's validator set becomes a B1 registry entry (rootinput.Derive); a set above the entry's member ceiling would make admission
-// refuse the epoch. The upstream caps must not exceed it.
-func TestUpstreamCommitteeCapsFitTheB1MemberCeiling(t *testing.T) {
-	require.LessOrEqual(t, evmassign.MaxValidators, MaxMembers)
+// The generic EVM assignment limit is a native resource bound (256, owner §49) and no longer follows the B1 registry; a B1-enabled deployment
+// guards its own, equal to the registry's member ceiling (a gas bound that stays 16).
+func TestTheB1GuardIsTheRegistryCeiling(t *testing.T) {
+	require.Equal(t, MaxMembers, evmassign.B1MaxValidators)
+	require.Greater(t, evmassign.MaxValidators, MaxMembers)
 	require.LessOrEqual(t, ElectMaxCommittee, MaxMembers)
 }

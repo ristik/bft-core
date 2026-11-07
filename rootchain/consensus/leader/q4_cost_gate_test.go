@@ -23,7 +23,7 @@ import (
 // the distance to the round, of any cache and of the epoch's age. The envelope is therefore the profile bound itself and the whole
 // round space, not a distance limit:
 //
-//	supported membership   n <= 100 (weightcap.MaxMembers), total committed weight <= B = 65,536
+//	supported membership   n <= 256 (weightcap.MaxMembers), total committed weight <= B = 65,536
 //	supported distance     every round from the epoch start to math.MaxUint64
 //	latency budget         2 s for constructor plus lookup (a cold restart or a first catch-up jump), and for any caller waiting behind it
 //	allocation budget      at most 512 KiB and 2,048 allocations for constructor plus lookup; a lookup alone allocates nothing
@@ -36,8 +36,20 @@ const (
 	q4MaxMembers       = weightcap.MaxMembers
 	q4LatencyBudget    = 2 * time.Second
 	q4AllocBytesBudget = 512 << 10
-	q4AllocCountBudget = 2048
+	q4AllocCountBudget = 2048 // for q4BudgetMembers members; see q4AllocCountBudgetFor
+	q4BudgetMembers    = 100  // the committee the allocation budget was frozen for
 )
+
+// q4AllocCountBudgetFor is the allocation-count budget of a committee of n members. The construction allocates per member (the decoded peer id,
+// the duplicate map entry, the sorted entry: about ten each), so the count scales with n. The budget keeps the per-member ratio it was frozen at
+// (2,048 allocations for 100 members, 20.48 each); the owner's §49 envelope of 256 members therefore allows 5,243. Latency (2 s) and bytes
+// (512 KiB) stay absolute: at 256 members the worst total builds in about 28 ms and 332 KiB.
+func q4AllocCountBudgetFor(members int) uint64 {
+	if members <= q4BudgetMembers {
+		return q4AllocCountBudget
+	}
+	return (uint64(members)*q4AllocCountBudget + q4BudgetMembers - 1) / q4BudgetMembers
+}
 
 // q4CostRow is one measurement.
 type q4CostRow struct {
@@ -64,6 +76,13 @@ type q4CostReport struct {
 		AllocBytes uint64  `json:"allocBytes"`
 		Allocs     uint64  `json:"allocs"`
 	} `json:"frozen"`
+	// Derived is the allocation-count budget of the §49 envelope (256 members) at the frozen per-member ratio; the frozen figures above are the
+	// ones fixed for 100 members and are not changed.
+	Derived struct {
+		Members int    `json:"members"`
+		Allocs  uint64 `json:"allocs"`
+		Rule    string `json:"rule"`
+	} `json:"derived"`
 	Profile string      `json:"profile"`
 	Host    string      `json:"host"`
 	Rows    []q4CostRow `json:"rows"`
@@ -84,6 +103,10 @@ func q4Inputs() []q4Input {
 	n100[1]++
 	n100[2]--
 	return []q4Input{
+		{"n=128 unit weights (period 128)", q4Equal(128, 1)},
+		{"n=256 unit weights (period 256)", q4Equal(256, 1)},
+		{"n=128 worst period (total B, gcd 1)", q4WorstTotal(128)},
+		{"n=256 worst period (total B, gcd 1)", q4WorstTotal(256)},
 		{"n=100 worst period (total B, gcd 1)", n100},
 		{"n=100 equal weights (period 100)", func() []uint64 {
 			w := make([]uint64, 100)
@@ -95,6 +118,24 @@ func q4Inputs() []q4Input {
 		{"n=4 6,1,1,1 (period 9)", []uint64{6, 1, 1, 1}},
 		{"n=3 worst period (B/2, B/2-1, 1)", []uint64{weightcap.B / 2, weightcap.B/2 - 1, 1}},
 	}
+}
+
+// q4Equal is n members of weight w.
+func q4Equal(n int, w uint64) []uint64 {
+	out := make([]uint64, n)
+	for i := range out {
+		out[i] = w
+	}
+	return out
+}
+
+// q4WorstTotal is n members (n a power of two) whose weights sum to exactly B with gcd 1, so the period is B, the longest there can be:
+// B/n each, one member one above and another one below.
+func q4WorstTotal(n int) []uint64 {
+	out := q4Equal(n, weightcap.B/uint64(n))
+	out[0]++
+	out[1]--
+	return out
 }
 
 func q4Members(t testing.TB, ws []uint64) []*types.NodeInfo {
@@ -129,7 +170,7 @@ func q4Mem(f func()) (bytes, allocs uint64, elapsed time.Duration) {
 }
 
 func q4Within(r q4CostRow, elapsed time.Duration) bool {
-	return r.Supported && elapsed <= q4LatencyBudget && r.AllocBytes <= q4AllocBytesBudget && r.Allocs <= q4AllocCountBudget
+	return r.Supported && elapsed <= q4LatencyBudget && r.AllocBytes <= q4AllocBytesBudget && r.Allocs <= q4AllocCountBudgetFor(r.Members)
 }
 
 // q4Distances are the mandatory query distances past the epoch start: the old Q4 rows, d~6e5, d=1e6 and the top of the round space.
@@ -142,8 +183,10 @@ func q4Distances(start uint64) []uint64 {
 // only. Q4_COST_OUT=<file> keeps the measurements as JSON for the acceptance report.
 func TestQ4QueryCostGate(t *testing.T) {
 	rep := q4CostReport{Profile: "bounded period table (mandatory rows)", Host: fmt.Sprintf("%s/%s %d cpu %s", runtime.GOOS, runtime.GOARCH, runtime.NumCPU(), runtime.Version())}
-	rep.Frozen.Members, rep.Frozen.TotalB = q4MaxMembers, weightcap.B
+	rep.Frozen.Members, rep.Frozen.TotalB = q4BudgetMembers, weightcap.B
 	rep.Frozen.BudgetMs, rep.Frozen.AllocBytes, rep.Frozen.Allocs = float64(q4LatencyBudget)/1e6, q4AllocBytesBudget, q4AllocCountBudget
+	rep.Derived.Members, rep.Derived.Allocs = q4MaxMembers, q4AllocCountBudgetFor(q4MaxMembers)
+	rep.Derived.Rule = "the frozen allocation count per member (2,048 per 100 members), rounded up"
 	const start = 1
 	for _, in := range q4Inputs() {
 		nodes := q4Members(t, in.weights)
