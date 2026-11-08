@@ -348,7 +348,9 @@ func fiveLateCollectorFailure(t *testing.T, victim string, names []string) {
 	stoppedAt := time.Now()
 	c.stop(victim)
 	commits := c.mark()
-	require.Eventually(t, func() bool { return len(c.commitsSince(c.idx(watch), commits)) > 0 && c.committedRound(watch) > failedAt }, q4bDeadline, 10*time.Millisecond, "the others commit again")
+	require.Eventually(t, func() bool {
+		return len(c.commitsSince(c.idx(watch), commits)) > 0 && c.committedRound(watch) > failedAt
+	}, q4bDeadline, 10*time.Millisecond, "the others commit again")
 	t.Logf("%s failed as collector in round %d; next commit by round %d, %s later", victim, failedAt, c.committedRound(watch), time.Since(stoppedAt).Round(time.Millisecond))
 
 	// the active set change: once the committed head is a lag past the failure, every cutoff of the normal schedule is a sample without the victim

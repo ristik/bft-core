@@ -26,8 +26,8 @@ import (
 // before the dead slot, at every repeat UC, because T2 (12 root rounds) is a multiple of the four-round leader cycle.
 const (
 	phaseLockT2Rounds  = 12
-	phaseLockRoundsMax = 8 // additional root rounds after live ingress acceptance
-	phaseLockPeriods   = 4 // T2 periods a lost request is resubmitted for, at the same phase, before the run counts as locked
+	phaseLockRoundsMax = 8                // additional root rounds after live ingress acceptance
+	phaseLockPeriods   = 4                // T2 periods a lost request is resubmitted for, at the same phase, before the run counts as locked
 	phaseLockBudget    = 50 * time.Second // the design's wall-clock budget for those 8 rounds at production T = 10 s and rho <= 1 s
 )
 
@@ -137,7 +137,9 @@ func phaseLockRun(t *testing.T, c *q4bLive, dead string, phase func(round uint64
 // phaseAt is the request's phase k of the four-round cycle: the dead member leads the k-th round after the next one (k = 0: the next leader is
 // the dead member; k = 1: the logged lock, the next leader is the last live one before the dead slot; k = 3: the dead member led this round).
 func phaseAt(k uint64) func(round uint64, leaderOf func(uint64) peer.ID, dead peer.ID) bool {
-	return func(round uint64, leaderOf func(uint64) peer.ID, dead peer.ID) bool { return leaderOf(round+1+k) == dead }
+	return func(round uint64, leaderOf func(uint64) peer.ID, dead peer.ID) bool {
+		return leaderOf(round+1+k) == dead
+	}
 }
 
 func TestPhaseLockedRequestCertifies(t *testing.T) {
