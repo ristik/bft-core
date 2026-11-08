@@ -359,7 +359,14 @@ teardown_scenario() {
   stop_proc "$dir" root 'ubft root-node run'
 }
 
-port_listening() { lsof -nP -iTCP:"$1" -sTCP:LISTEN >/dev/null 2>&1; }
+# LISTEN check via lsof where installed; a host without lsof (the Linux test host) falls back to a TCP connect, never "not listening" by default.
+port_listening() {
+  if command -v lsof >/dev/null 2>&1; then
+    lsof -nP -iTCP:"$1" -sTCP:LISTEN >/dev/null 2>&1
+  else
+    (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null
+  fi
+}
 
 wait_port_free() { # <port> <timeout seconds>
   local waited=0

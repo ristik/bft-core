@@ -84,6 +84,7 @@ type (
 	}
 
 	ConsensusManager struct {
+		profile loopProfile // scaling-run measurement aid, see loop_profile.go
 		// channel via which validator sends "certification requests" to CM
 		certReqCh chan certRequest
 		// channel via which CM sends "certification request" response to validator
@@ -600,9 +601,11 @@ func (x *ConsensusManager) loop(ctx context.Context) error {
 				return fmt.Errorf("root network received channel has been closed")
 			}
 			x.log.LogAttrs(ctx, logger.LevelTrace, fmt.Sprintf("received %T", msg), logger.Data(msg))
+			handled := time.Now()
 			if err := x.handleRootNetMsg(ctx, msg); err != nil {
 				x.log.WarnContext(ctx, fmt.Sprintf("processing %T", msg), logger.Error(err))
 			}
+			x.profile.observe(msg, time.Since(handled))
 		case req := <-x.certReqCh:
 			ctx := trace.ContextWithRemoteSpanContext(ctx, req.rsc)
 			if err := x.onPartitionIRChangeReq(ctx, &req.ircr); err != nil {
@@ -614,6 +617,7 @@ func (x *ConsensusManager) loop(ctx context.Context) error {
 			x.handleFrontierRequest(ctx, req)
 		}
 		x.timeoutUnknownLeader(ctx)
+		x.profile.report(x.log, time.Now())
 	}
 }
 

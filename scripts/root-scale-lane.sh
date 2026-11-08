@@ -68,7 +68,7 @@ else
 fi
 
 source helper.sh
-export ROOT_LOG_LEVEL=info
+export ROOT_LOG_LEVEL=info ROOT_DEBUG_ROOTS="${ROOT_DEBUG_ROOTS:-1}"   # root1 at debug: its per-round leader lines show where dead leaders fall
 rm -rf test-nodes && mkdir test-nodes
 
 # --- setup --------------------------------------------------------------------------------------
@@ -78,6 +78,7 @@ init_evm_validators "$validators" >>"$evidence/setup.log" 2>&1
 generate_evm_shard_conf "$validators" "$partition_id" 31337 5000 exec >>"$evidence/setup.log" 2>&1 || exit 1
 generate_log_configuration "test-nodes/*/" >>"$evidence/setup.log" 2>&1
 echo "setup $(( $(date +%s) - t0 )) s"
+for i in $(seq 1 "$roots"); do id=$(build/ubft node-id --home "test-nodes/root$i" | tail -n1); echo "$i,$id,16*${id: -6}"; done >"$evidence/node-ids.csv"
 tbq=$(grep -o '"quorumThreshold": *[0-9]*' test-nodes/trust-base.json | grep -o '[0-9]*$')
 if [ "${tbq:-}" = "$quorum" ]; then pass "trust base quorumThreshold = $quorum"; else fail "trust base quorumThreshold=${tbq:-?}, expected $quorum"; fi
 
@@ -154,6 +155,8 @@ rpc_up "$one" && pass "root$one restarted and listening" || fail "root$one did n
 wait_rounds 3 90 && pass "certification continues after root$one rejoined" || fail "no progress after root$one rejoined"
 
 echo "=== control: $quorum live ($maxdown down) must progress ==="
+event() { echo "$(date -u +%FT%TZ) $*" >>"$evidence/events.txt"; }
+event "progress control: stopping $maxdown roots"
 downs=$(pick $((maxdown + 1)) "")   # one spare, used for the stall control
 echo "down set (seed $seed, in stop order): $downs" | tee "$evidence/down-set.txt"
 n=0; last=""
@@ -163,6 +166,7 @@ for d in $downs; do
 done
 spare=$(echo "$downs" | awk '{print $NF}')
 sleep 5
+event "progress control: $maxdown roots stopped, waiting for $progwait s at most"
 echo "live roots now: $(snapshot | cut -d, -f2)"
 cpu_ticks() { # utime+stime ticks of every live root, one "root,ticks" line each
   local f i p
@@ -198,7 +202,7 @@ if [ "$progressed" = 1 ]; then pass "$quorum live / $maxdown down: shard progres
 snapshot | tee "$evidence/control-progress-resources.csv"
 
 echo "=== control: $((quorum - 1)) live ($((maxdown + 1)) down) must stall ==="
-stop_root "$spare"; sleep 20          # let in-flight rounds drain
+event "stall control: stopping one more root ($spare)"; stop_root "$spare"; sleep 20          # let in-flight rounds drain
 s0=$(shard_round); sleep "$window"; s1=$(shard_round)
 echo "stall window: round $s0 -> $s1 over ${window}s with live roots $(snapshot | cut -d, -f2)" | tee "$evidence/control-stall.txt"
 if [ "$s1" -eq "$s0" ]; then pass "$((quorum - 1)) live / $((maxdown + 1)) down: no new certification in ${window}s (stall)"; else fail "$((quorum - 1)) live: shard advanced $s0 -> $s1 (no stall; control invalid)"; fi
@@ -206,10 +210,14 @@ live_after=$(snapshot | cut -d, -f2)
 [ "$live_after" -eq $((quorum - 1)) ] && pass "stall control: the $live_after live roots are all still running (not crashed)" || fail "expected $((quorum - 1)) live roots, found $live_after"
 
 echo "=== restart one root: progress must resume (control validity) ==="
-start_root "$spare"
+event "resume: restarting root$spare"; start_root "$spare"
 if wait_rounds 5 "$resumewait"; then pass "quorum restored ($quorum live): certification resumed (round $(shard_round))"; else fail "no resume after restoring quorum"; fi
 
 echo "=== evidence ==="
+event "end"
+# the consensus loop's per-message-type time (root1 and every other root) and root1's per-round leader lines (root1 runs at debug)
+grep -h "consensus loop" test-nodes/root*/debug.log 2>/dev/null | gzip >"$evidence/loop-profile-all-roots.log.gz"
+grep -h "next leader\|local timeout\|timeout quorum" test-nodes/root1/debug.log 2>/dev/null | gzip >"$evidence/root1-rounds.log.gz"
 for i in $(seq 1 "$roots"); do
   grep -ciE 'panic|fatal error|SIGABRT|pthread_create' "test-nodes/root$i/debug.log" 2>/dev/null | sed "s/^/root$i,/"
 done | awk -F, '$2>0' >"$evidence/abort-lines.txt"
