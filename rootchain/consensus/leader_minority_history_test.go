@@ -220,12 +220,9 @@ func TestMinorityWithoutHistoryFollowsTheQuorum(t *testing.T) {
 	back := c.mark()
 	// if a stale sample stalled the quorum, commits come back through the rescue: allow the traversal to a live recovery run
 	require.Eventually(t, func() bool { return len(c.commitsSince(c.idx(minority), back)) >= 3 }, q4bDeadline+time.Duration(2*leader.RecoverySpacing+lag+8)*2*time.Second, 20*time.Millisecond, "the minority commits again")
-	fresh := bytes.Repeat([]byte{0x85}, 32)
-	require.Eventually(t, func() bool {
-		proof := phaseLockProof(t, c, c.nodes[c.idx(minority)].r, fresh)
-		return proof != nil && c.nodes[c.idx(minority)].r.manager.RequestCertification(context.Background(), *proof) == nil
-	}, q4bDeadline, 50*time.Millisecond, "the minority takes a fresh request")
-	require.Eventually(t, func() bool { return c.certifiedHash(watch, fresh) }, q4bDeadline, 10*time.Millisecond, "the request the minority took certifies")
+	// submitted at the minority as a shard does, again under each new certificate of the shard (the idle fixture shard repeats every T2)
+	s := fiveRequest(t, c, []string{minority}, bytes.Repeat([]byte{0x85}, 32), q4bDeadline)
+	t.Logf("phase 3: a request taken by the minority certified %d rounds after acceptance, %d sends", s.rounds, s.sends)
 	r := c.state(watch).Round + 1
 	mine, err := c.nodes[c.idx(minority)].r.manager.leaderSelector.GetLeaderForRound(r)
 	require.NoError(t, err)
