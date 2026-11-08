@@ -30,7 +30,7 @@ const (
 	OverallDuration  = 30 * time.Second
 	ExchangeDuration = 5 * time.Second
 	ReceiptLifetime  = 5 * time.Minute
-	MaxPeers         = 64
+	MaxPeers         = frontierclient.MaxRoots // every root of the largest native committee (owner §49: 256); at 64 a node with more roots could not start bootstrap freshness (ErrSettings)
 	MaxPasses        = 2
 	PassBackoff      = 5 * time.Second
 	// MaintainPoll is how often Maintain rechecks a live receipt. A receipt is

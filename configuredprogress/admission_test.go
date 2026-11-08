@@ -167,7 +167,10 @@ func TestAdmissionRetryBudgetIsNotRenewedByDuplicateDelivery(t *testing.T) {
 	select {
 	case <-deliveries:
 	case <-time.After(2 * time.Second):
-		t.Fatal("delivery was not attempted")
+		// #904: say where the episode stood, so a recurrence shows whether an earlier step failed (LastError) or the coordinator is
+		// waiting out a cooldown, instead of only that nothing arrived.
+		st := c.Status()
+		t.Fatalf("delivery was not attempted: episode active=%v, pending first=%v latest=%v delivery=%v, last error: %v", st.EpisodeActive, st.PendingFirst, st.PendingLatest, st.DeliveryPending, st.LastError)
 	}
 	_, err = c.Submit(context.Background(), u, tr)
 	require.NoError(t, err)

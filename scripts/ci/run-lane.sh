@@ -77,8 +77,8 @@ unpack contracts "$AGRE_ROOT"
 export P85_CONTRACTS=$AGRE_ROOT/contracts NBP_DIR=$AGRE_ROOT/native-bridge-plugins UTB_SDK_JS=$AGRE_ROOT/state-transition-sdk-js
 [ ! -d "$P85_CONTRACTS/.ci-svm" ] || { mkdir -p "$HOME/.svm"; cp -R "$P85_CONTRACTS/.ci-svm/." "$HOME/.svm/" 2>/dev/null || true; }
 
-# Foundry at the pinned release, verified by the digest of the downloaded archive
-scripts/ci/install-foundry.sh "$work/dl" >>"$out/run-lane.log" 2>&1 || die "cannot install the pinned Foundry"
+# Foundry at the pinned release, verified by the digest of the archive (cached by digest in ~/.cache/unicity-foundry, bounded retries)
+scripts/ci/install-foundry.sh >>"$out/run-lane.log" 2>&1 || die "cannot install the pinned Foundry"
 export PATH="$HOME/.foundry/bin:$repo/scripts/ci/shim:$PATH"
 export DNB_AGG_SHARDS=$(jq -r '.lane.aggShards // 1' "$pins")
 # the EVM shard's T2 (setup-evm-nodes.sh reads EVM_T2_MS; unset = 5000): scripts/ci/lane-pins.json lane.evmT2Ms, see its note and bft-core#728

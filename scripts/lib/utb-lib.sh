@@ -147,6 +147,9 @@ utb_wait_agg_tip() { # want seconds
   return 1
 }
 
+# true if the JSONL on stdin holds a version 3 response received with at least one attached trust-base entry
+utb_u2_attachment_seen() { jq -e -s 'any(.[]; .msg=="received CertificationResponseV3" and (.trustBaseUpdates // 0) >= 1)' >/dev/null 2>&1; }
+
 # The aggregator takes an entry either from the response that carries it (the message path appends, never fetches) or from its own catch-up worker, which is
 # asynchronous, coalesced and also woken by every handshake: which one is first is a race, and it is not a property of the root. U2 asserts what is not racy and records
 # the rest: (1) the aggregator received version 3 responses carrying an attachment (the root attached the entry), (2) the aggregator added epoch 2 (tip 2), from a
@@ -201,6 +204,11 @@ utb_step_u2() {
   utb_ev extract --bundle "$t" --epoch 2 --out "$out/entries/ordinary-handoff.cbor" || return 1
   # the aggregator logs asynchronously: wait for the line which shows epoch 2 added (from a response or by its catch-up) before the log is read
   for n in $(seq 1 60); do utb_agg_lines_since 0 | jq -e -s 'any(.[]; (.msg=="trust-base entries appended from certification response" and .tip==2) or (.msg=="trust-base catch-up finished" and .tip==2 and (.added//0)>=1))' >/dev/null 2>&1 && break; sleep 1; done
+  # ... and for the first response that carries an attachment. The two are independent: the aggregator's catch-up can add epoch 2 seconds before the root's first
+  # attached response reaches it (lane run 42476320969, #965: catch-up added epoch 2 at 12:24:31.5, the first attached response arrived at 12:24:36.5, the step read
+  # the log at ~12:24:32 and failed "never received ... an attachment" although the root attached the entry). Reading the log at the moment epoch 2 shows up made
+  # assertion (1) of utb_u2_evidence a race; it now waits for its own event, and still fails if none arrives within the same 60 s.
+  for n in $(seq 1 60); do utb_agg_lines_since 0 | utb_u2_attachment_seen && break; sleep 1; done
   utb_agg_lines_since 0 | jq -c 'select(.msg=="received CertificationResponseV3" or .msg=="trust-base entries appended from certification response" or .msg=="trust-base catch-up started" or .msg=="trust-base catch-up finished" or .msg=="trust-base gap in certification response" or .msg=="trust-base update already held" or .msg=="dropping an invalid trust-base update")' >"$out/handoff/aggregator-ordinary.jsonl"
   utb_u2_evidence "$out/handoff/aggregator-ordinary.jsonl" "$out/handoff/ordinary-ack.log" || return 1
   # the real message the root sent: captured just before it was sent
@@ -673,6 +681,10 @@ utb_selftest() {
   utb_st_no "U2 evidence: an 'already held' line below tip 2 does not show epoch 2 consumed" bash -c "source '$cwd/scripts/lib/utb-lib.sh'; utb_u2_evidence '$u2/heldtip1.jsonl' '$u2/o7'"
   utb_st_no "U2 evidence: an attachment dropped as invalid fails it" bash -c "source '$cwd/scripts/lib/utb-lib.sh'; utb_u2_evidence '$u2/dropped.jsonl' '$u2/o8'"
   utb_st "U2 evidence: the catch-up case records that the attachments were consumed" bash -c "grep -q '^consumed: 1 attachments read after the catch-up' '$u2/o1'"
+  # the wait of utb_step_u2 for the attachment: seen once a response with trustBaseUpdates >= 1 is in the log, not before (the 12:24:31 catch-up-first case of run 42476320969)
+  utb_st "U2 attachment wait: a response with an attachment is seen" bash -c "source '$cwd/scripts/lib/utb-lib.sh'; utb_u2_attachment_seen <'$u2/response.jsonl'"
+  utb_st_no "U2 attachment wait: the catch-up having added epoch 2 is not an attachment" bash -c "source '$cwd/scripts/lib/utb-lib.sh'; utb_u2_attachment_seen <'$u2/noattach.jsonl'"
+  utb_st_no "U2 attachment wait: responses carrying zero attachments are not an attachment" bash -c "source '$cwd/scripts/lib/utb-lib.sh'; printf '%s\\n' '{\"msg\":\"received CertificationResponseV3\",\"trustBaseUpdates\":0}' | utb_u2_attachment_seen"
   utb_st_no "U2 evidence: no response carried an attachment" bash -c "source '$cwd/scripts/lib/utb-lib.sh'; utb_u2_evidence '$u2/noattach.jsonl' '$u2/o3'"
   utb_st_no "U2 evidence: epoch 2 was not added" bash -c "source '$cwd/scripts/lib/utb-lib.sh'; utb_u2_evidence '$u2/noadd.jsonl' '$u2/o4'"
   utb_st_no "U2 evidence: a failed catch-up is not an add" bash -c "source '$cwd/scripts/lib/utb-lib.sh'; utb_u2_evidence '$u2/failedcatchup.jsonl' '$u2/o5'"
