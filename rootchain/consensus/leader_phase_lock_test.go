@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"os"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -27,6 +28,7 @@ const (
 	phaseLockT2Rounds  = 12
 	phaseLockRoundsMax = 8 // additional root rounds after live ingress acceptance
 	phaseLockPeriods   = 4 // T2 periods a lost request is resubmitted for, at the same phase, before the run counts as locked
+	phaseLockBudget    = 50 * time.Second // the design's wall-clock budget for those 8 rounds at production T = 10 s and rho <= 1 s
 )
 
 // phaseLockRotation replaces the selector with the plain rotation of the committee, the design's isolated retention regression: the phase
@@ -79,8 +81,8 @@ func healthyPhase(next, afterNext, dead peer.ID, leaderBefore peer.ID) bool {
 
 // phaseLockRun submits at the given phase. A request not certified is submitted again at the same phase each
 // T2 period, as the shard's resubmission on a repeat UC does. It returns the rounds from the first acceptance to the certificate, or
-// false if the run locked.
-func phaseLockRun(t *testing.T, c *q4bLive, dead string, phase func(round uint64, leaderOf func(uint64) peer.ID, dead peer.ID) bool) (uint64, bool) {
+// false if the run locked, and the wall time from the first acceptance to the certificate.
+func phaseLockRun(t *testing.T, c *q4bLive, dead string, phase func(round uint64, leaderOf func(uint64) peer.ID, dead peer.ID) bool) (uint64, time.Duration, bool) {
 	t.Helper()
 	live := c.except(dead)
 	c.start(live...)
@@ -94,13 +96,14 @@ func phaseLockRun(t *testing.T, c *q4bLive, dead string, phase func(round uint64
 	hash := bytes.Repeat([]byte{0x81}, 32)
 	var ingress string
 	first, lastSent := uint64(0), uint64(0)
-	deadline := time.Now().Add(q4bDeadline * 3)
+	var acceptedAt time.Time
+	deadline := time.Now().Add(q4bDeadline * 3 * max(1, m(live[0]).params.LocalTimeout/(2*time.Second)))
 	for time.Now().Before(deadline) {
 		if ingress != "" && c.certifiedHash(ingress, hash) {
-			return c.state(ingress).Round - first, true
+			return c.state(ingress).Round - first, time.Since(acceptedAt), true
 		}
 		if first != 0 && c.state(live[0]).Round > first+phaseLockT2Rounds*phaseLockPeriods {
-			return 0, false
+			return 0, 0, false
 		}
 		for _, name := range live {
 			round := c.state(name).Round
@@ -119,7 +122,7 @@ func phaseLockRun(t *testing.T, c *q4bLive, dead string, phase func(round uint64
 				continue
 			}
 			if first == 0 {
-				first, ingress = round, name
+				first, ingress, acceptedAt = round, name, time.Now()
 			}
 			lastSent = round
 			t.Logf("request accepted by %s at round %d, next leader %s, dead %s", name, round, next.ShortString(), c.id(dead).ShortString())
@@ -128,27 +131,48 @@ func phaseLockRun(t *testing.T, c *q4bLive, dead string, phase func(round uint64
 		time.Sleep(5 * time.Millisecond)
 	}
 	require.Fail(t, "the phase of the request never came")
-	return 0, false
+	return 0, 0, false
+}
+
+// phaseAt is the request's phase k of the four-round cycle: the dead member leads the k-th round after the next one (k = 0: the next leader is
+// the dead member; k = 1: the logged lock, the next leader is the last live one before the dead slot; k = 3: the dead member led this round).
+func phaseAt(k uint64) func(round uint64, leaderOf func(uint64) peer.ID, dead peer.ID) bool {
+	return func(round uint64, leaderOf func(uint64) peer.ID, dead peer.ID) bool { return leaderOf(round+1+k) == dead }
 }
 
 func TestPhaseLockedRequestCertifies(t *testing.T) {
-	// neither correctness nor the round bound may depend on the timer's relation to the phase: every dead placement at T = 2 s, as in the
-	// failing experiment, and production T once
-	for _, row := range []struct {
+	// neither correctness nor the round bound may depend on the timer's relation to the phase: every dead placement at the logged lock phase at
+	// T = 2 s, as in the failing experiment, and production T once. BFT_GATE5_ALL=1 runs the design's whole gate: every dead placement at every
+	// phase of the cycle, at both T (32 runs, about an hour), with the 50 s budget asserted at T = 10 s.
+	type row struct {
 		dead    string
+		phase   uint64
 		timeout time.Duration
-	}{{"H", 2 * time.Second}, {"a", 2 * time.Second}, {"b", 2 * time.Second}, {"c", 2 * time.Second}, {"c", 10 * time.Second}} {
-		t.Run(fmt.Sprintf("dead %s, T=%s", row.dead, row.timeout), func(t *testing.T) {
+	}
+	rows := []row{{"H", 1, 2 * time.Second}, {"a", 1, 2 * time.Second}, {"b", 1, 2 * time.Second}, {"c", 1, 2 * time.Second}, {"c", 1, 10 * time.Second}}
+	if os.Getenv("BFT_GATE5_ALL") != "" {
+		rows = rows[:0]
+		for _, timeout := range []time.Duration{2 * time.Second, 10 * time.Second} {
+			for _, dead := range []string{"H", "a", "b", "c"} {
+				for k := range uint64(4) {
+					rows = append(rows, row{dead, k, timeout})
+				}
+			}
+		}
+	}
+	for _, row := range rows {
+		t.Run(fmt.Sprintf("dead %s, phase %d, T=%s", row.dead, row.phase, row.timeout), func(t *testing.T) {
 			t.Parallel()
 			q4Slot(t)
 			c := newPhaseLockLive(t, row.timeout)
 			phaseLockRotation(t, c)
-			rounds, certified := phaseLockRun(t, c, row.dead, func(round uint64, leaderOf func(uint64) peer.ID, dead peer.ID) bool {
-				return lockedPhase(leaderOf(round+1), leaderOf(round+2), dead)
-			})
-			require.True(t, certified, "the request locked to the phase before the dead slot: not certified in %d T2 periods of %d root rounds", phaseLockPeriods, phaseLockT2Rounds)
+			rounds, elapsed, certified := phaseLockRun(t, c, row.dead, phaseAt(row.phase))
+			require.True(t, certified, "the request locked to its phase: not certified in %d T2 periods of %d root rounds", phaseLockPeriods, phaseLockT2Rounds)
 			require.LessOrEqual(t, rounds, uint64(phaseLockRoundsMax), fmt.Sprintf("certified %d rounds after acceptance", rounds))
-			t.Logf("certified %d rounds after acceptance", rounds)
+			if row.timeout >= 10*time.Second {
+				require.LessOrEqual(t, elapsed, phaseLockBudget, "the production budget for the retained request")
+			}
+			t.Logf("certified %d rounds and %s after acceptance", rounds, elapsed.Round(time.Millisecond))
 		})
 	}
 }
@@ -160,7 +184,7 @@ func TestPhaseLockControlHealthyPhaseCertifies(t *testing.T) {
 	q4Slot(t)
 	c := newPhaseLockLive(t, 2*time.Second)
 	phaseLockRotation(t, c)
-	rounds, certified := phaseLockRun(t, c, "c", func(round uint64, leaderOf func(uint64) peer.ID, dead peer.ID) bool {
+	rounds, _, certified := phaseLockRun(t, c, "c", func(round uint64, leaderOf func(uint64) peer.ID, dead peer.ID) bool {
 		return healthyPhase(leaderOf(round+1), leaderOf(round+2), dead, leaderOf(round))
 	})
 	require.True(t, certified)
