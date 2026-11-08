@@ -149,7 +149,7 @@ function start_root_nodes() {
                     --trust-base test-nodes/trust-base.json \
                     --rpc-server-address "$rpcHost:$rpcPort" \
                     --log-format text \
-                    --log-level debug \
+                    --log-level "${ROOT_LOG_LEVEL:-debug}" \
                     --metrics prometheus \
                     ${profileArgs[@]+"${profileArgs[@]}"} \
                     >> test-nodes/root$i/debug.log 2>&1 &
