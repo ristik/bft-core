@@ -1076,7 +1076,7 @@ class Rehearsal:
                 return None
         return None
 
-    ABORT_LINES = re.compile(r'SIGABRT|pthread_create|fatal error|runtime/cgo|^\S*\s*\|?\s*panic:|out of memory|PC=')
+    ABORT_LINES = re.compile(r'SIGABRT|pthread_create|fatal error|runtime/cgo|\bpanic:|out of memory|PC=')
 
     def observe_restore(self, i, tag, seconds=30):
         """Watch the joiner's restore start for `seconds`: the effective pid limit of its container (docker inspect, not what was asked for), the cgroup's pid counters

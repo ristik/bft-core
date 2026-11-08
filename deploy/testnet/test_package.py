@@ -390,6 +390,16 @@ class ProofOfStake(unittest.TestCase):
         runs=[name for name,_ in rehearse.STAGES+rehearse.POS_STAGES if name in wanted]   # main() walks these and uses --stages only as a filter
         self.assertEqual(set(runs),set(wanted),'a stage the workflow names does not exist')
         self.assertLess(runs.index('pos-join-heavy'),runs.index('pos-restart'),'pos-restart can outlast the election cadence, and the open attempt never sees the heavy joiner')
+    def test_the_restore_abort_pattern_matches_compose_log_lines(self):
+        """#905: `compose logs --timestamps` prefixes a line with the service and the time, so a panic is not at the start of the line."""
+        import rehearse
+        hit=rehearse.Rehearsal.ABORT_LINES
+        for line in ('shard5-1  | 2026-11-08T13:57:36.388735271Z panic: runtime error: index out of range',
+                     'shard5-1  | 2026-11-08T13:57:36.388735271Z runtime/cgo: pthread_create failed: Resource temporarily unavailable',
+                     'shard5-1  | 2026-11-08T13:57:36.390850679Z SIGABRT: abort', 'shard5-1  | fatal error: all goroutines are asleep', 'panic: boom'):
+            self.assertTrue(hit.search(line),line)
+        for line in ('shard5-1  | 2026-11-08T13:57:36Z goroutine 1 [running]:', 'shard5-1  | Error: restore requires a fresh BFT data directory: /state/execution-journal.db already exists'):
+            self.assertFalse(hit.search(line),line)
     def test_a_restore_keeps_the_whole_log_redacted(self):
         import rehearse
         gen=self._secret_generation()
