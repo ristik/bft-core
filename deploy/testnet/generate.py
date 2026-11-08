@@ -64,7 +64,7 @@ AGGREGATOR_PORT, AGGREGATOR_BFT_PORT = 8080, 9200   # in validator 1's namespace
 # aggregator-go needs MongoDB as a replica set (transactions and change streams): one member, initiated by the healthcheck on its first run.
 MONGO_REPLICA_SET = "try { quit(rs.status().myState === 1 ? 0 : 1) } catch (e) { rs.initiate({_id: 'rs0', members: [{_id: 0, host: 'mongo:27017'}]}); quit(1) }"
 
-def aggregator_environment(root_boot, rpc_bind):
+def aggregator_environment(root_boot, rpc_bind, utb=None):
     """aggregator-go reads its configuration from the environment. One full-range shard runs SHARDING_MODE=standalone with BFT (aggregator-go refuses
     bft-shard mode for the empty shard ID, scripts/lib/agg-lib.sh). Its signing key is the shard-node key file; BFT_RPC_ADDRESS is root 1's operator
     endpoint, which serves the trust bases of later root epochs and is loopback-only: hence the aggregator shares validator 1's namespace."""
@@ -74,13 +74,27 @@ def aggregator_environment(root_boot, rpc_bind):
         'LOG_LEVEL':'info','LOG_FORMAT':'json','SIGNING_KEY_FILE':'/state/keys.json',
         'BFT_ENABLED':'true','BFT_ADDRESS':'/ip4/0.0.0.0/tcp/%d'%AGGREGATOR_BFT_PORT,'BFT_ANNOUNCE_ADDRESSES':'/dns4/aggregator/tcp/%d'%AGGREGATOR_BFT_PORT,
         'BFT_BOOTSTRAP_ADDRESSES':root_boot,'BFT_RPC_ADDRESS':'http://'+operator_rpc.listen(rpc_bind,operator_rpc.ROOT_PORT),
-        'BFT_SHARD_CONF_FILE':'/network/aggregator-conf.json','BFT_TRUST_BASE_FILES':'/network/trust-base.json'}
+        'BFT_SHARD_CONF_FILE':'/network/aggregator-conf.json','BFT_TRUST_BASE_FILES':'/network/trust-base.json',
+        # the integration aggregator's UTB mode (enabled by the pin; the genesis entry file is the fresh chain's history; its own append-only store). In this mode it uses neither the V1
+        # trust-base files nor root REST for authority: the history it verifies and routes from comes from the roots (V3 attachments and GetTrustBase)
+        **({'UTB_GENESIS_FILE':UTB_GENESIS_FILE,'UTB_GENESIS_ID':utb,'UTB_ENTRIES_DB':UTB_AGGREGATOR_DIR+'/utb-entries.db'} if utb else {})}
 
 def write(path, obj):
     path.write_text(json.dumps(obj, indent=2) + '\n')
 
-def topology(out, n, ids, images, captcha, ureth_flags=(), max_gas=30000000, with_pos=False, rpc_bind=operator_rpc.DEFAULT_BIND):
-    """JSON is a YAML subset, accepted directly by Docker Compose."""
+UTB_GENESIS_FILE = '/network/utb-genesis.cbor'   # the mounted genesis entry; the pin below is passed separately, never read from it at runtime
+UTB_ENTRIES_DB = '/state/utb-entries.db'
+UTB_AGGREGATOR_DIR = '/utb'   # the aggregator's own writable store (its /state is the read-only key mount)
+
+def utb_node_flags(pin):
+    """The signed trust-base entry (UTB) profile of a root or shard node: the genesis entry, its EntryID as the separately recorded pin, and the node's own entries store on its persistent
+    volume (the root's /state and the shard's /state are the entity's validatorN/root and validatorN/evm). Empty without a pin: the package is then exactly the one without UTB."""
+    if not pin: return []
+    if not re.fullmatch(r'0x[0-9a-f]{64}', pin): raise ValueError('the UTB genesis EntryID must be 0x followed by 64 lowercase hex digits')
+    return ['--utb-genesis', UTB_GENESIS_FILE, '--utb-genesis-id', pin, '--utb-entries-db', UTB_ENTRIES_DB]
+
+def topology(out, n, ids, images, captcha, ureth_flags=(), max_gas=30000000, with_pos=False, rpc_bind=operator_rpc.DEFAULT_BIND, utb=None):
+    """JSON is a YAML subset, accepted directly by Docker Compose. `utb`: the pinned EntryID of the UTB genesis entry (0x..), or None for the package without the signed history."""
     services = {}
     def service(name, image, command, mounts=(), memory='256m', cpu=0.5, networks=None, pod=None, **extra):
         # `pod`: the service joins the network namespace of that holder (network_mode), so it has no networks or DNS name of its own
@@ -109,7 +123,7 @@ def topology(out, n, ids, images, captcha, ureth_flags=(), max_gas=30000000, wit
             '--bootnodes', ','.join('/dns4/root%d/tcp/8000/p2p/%s' % (j,ids['root'][j-1]) for j in range(1,n+1) if j!=i),
             '--profile-3','--q3-lane','--b1-registry'] + (pos.root_flags(i) if with_pos else ['--genesis-identities','/network/genesis-identities.json']) + [
             '--shard-conf','/network/full-shard-conf.json','--shard-conf','/network/aggregator-conf.json',
-            '--rpc-server-address',operator_rpc.listen(rpc_bind,operator_rpc.ROOT_PORT),'--metrics','prometheus'] + common,
+            '--rpc-server-address',operator_rpc.listen(rpc_bind,operator_rpc.ROOT_PORT),'--metrics','prometheus'] + utb_node_flags(utb) + common,
             ['./validator%d/root:/state'%i,network,'./validator%d/jwt:/jwt:ro'%i], memory='384m', pod='pod%d'%i)   # the entity's Engine JWT, read-only: q3-readiness runs in the root (it holds the entity's keys.json) and checks its own Engine endpoint
         service('authority%d'%i, node, ['ubft','signing-authority','run','--home','/authority',
             '--client-socket','/authority/client.sock','--operator-socket','/authority/operator.sock',
@@ -134,7 +148,7 @@ def topology(out, n, ids, images, captcha, ureth_flags=(), max_gas=30000000, wit
             '--execution-journal','/state/execution-journal.db','--archive-store','/archive',
             '--archive-prune','--journal-candidates','32','--trust-history-profile-2','--rpc-server-address',operator_rpc.listen(rpc_bind,operator_rpc.SHARD_PORT),'--metrics','prometheus',
             '--signing-authority-socket','/authority/client.sock','--signing-authority-credential','/authority/client.cred']
-            + common,   # no --archive-replica: the node derives its replicas from the shard's validators (the next three in peer-ID order, any two make a block durable)
+            + utb_node_flags(utb) + common,   # no --archive-replica: the node derives its replicas from the shard's validators (the next three in peer-ID order, any two make a block durable)
             [evm,auth,network,'./validator%d/jwt:/jwt:ro'%i,'./validator%d/archive:/archive'%i],memory='512m',cpu=0.75,pod='pod%d'%i)
         # Go's cgo runtime aborts when pthread_create fails, and at low limits this reproduces the crash of bft-core #905, after which a restore refuses to restart, by design, on the
         # journal it left. 31 restores peaked at 32 to 80 and none reached the old limit of 128, so that the real crashes hit it is inferred, and what spiked is not known.
@@ -148,8 +162,8 @@ def topology(out, n, ids, images, captcha, ureth_flags=(), max_gas=30000000, wit
     services['mongo']['pids_limit']=256   # mongod runs ~85 threads idle, plus one per connection (the aggregator's pool is 20)
     services['mongo']['tmpfs'].append('/data/configdb:size=1m,mode=1777')   # the image declares it a volume: unused here, and no anonymous volume per recreate
     services['mongo']['stop_grace_period']='30s'   # a clean mongod shutdown before backup.py archives the stopped generation
-    service('aggregator',node,['aggregator'],['./aggregator:/state:ro',network],memory='512m',cpu=0.75,pod='pod1',
-        environment=aggregator_environment(root_boot,rpc_bind),depends_on={'mongo':{'condition':'service_healthy'}})
+    service('aggregator',node,['aggregator'],['./aggregator:/state:ro',network]+(['./aggregator-utb:'+UTB_AGGREGATOR_DIR] if utb else []),memory='512m',cpu=0.75,pod='pod1',
+        environment=aggregator_environment(root_boot,rpc_bind,utb),depends_on={'mongo':{'condition':'service_healthy'}})
     service('rpc',images['rpc'],['python3','-u','gateway.py'],[network],memory='128m',networks=['validators','edge'],environment={'TRUSTED_PROXY_IP':'172.30.89.1'},
         ports=['127.0.0.1:8545:8545'],healthcheck={'test':['CMD','python3','-c',"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8545/healthz', timeout=10)"],'interval':'30s','timeout':'12s','retries':3})
     service('relay',images['guard'],['python3','-u','relay.py'],['./network/network.json:/config/network.json:ro'],memory='128m',networks=['validators','faucet'])
@@ -182,6 +196,7 @@ def main():
     p.add_argument('--pos-weights',default=None,help='proof-of-stake genesis weights, comma separated, one per validator (default all 1; the genesis rules accept only 1, see pos.genesis_weights)')
     p.add_argument('--pos-cadence-rounds',type=int,default=pos.CADENCE_ROUNDS,help='election cadence: ordinary root rounds after the last acknowledged rotation')
     p.add_argument('--pos-cadence-seconds',type=int,default=pos.CADENCE_SECONDS,help='election cadence: UC seconds after the last acknowledged rotation')
+    p.add_argument('--utb',action='store_true',help='the signed trust-base entry (UTB) profile: the roots produce and serve the signed history, shard nodes and the aggregator verify it from the genesis entry pinned in the manifest')
     p.add_argument('--captcha-sitekey',required=True)
     p.add_argument('--captcha-secret-file',required=True,type=Path)
     a=p.parse_args()
@@ -236,6 +251,19 @@ def main():
             out.mkdir(parents=True)
             (out/'network').mkdir()
             shutil.copy2(home/'trust-base.json',out/'network/trust-base.json')
+            utb_pin=None
+            if a.utb:
+                # The pin is the EntryID of the genesis entry derived from THIS trust base at generation time, recorded in the manifest and passed to every process as its own
+                # argument; no process derives its trust from the file it validates. The tool's --check recomputes the manifest from the files.
+                text=cli('trust-base','utb-manifest','--trust-base',home/'trust-base.json','--out-dir',home/'utb')
+                found=re.search(r'^utb genesis id +(0x[0-9a-f]{64})$',text,re.M)
+                if not found: raise RuntimeError('the manifest tool printed no UTB genesis id:\n'+text)
+                utb_pin=found.group(1)
+                cli('trust-base','utb-manifest','--check',home/'utb/utb-manifest.json')
+                shutil.copy2(home/'utb/utb-genesis.cbor',out/'network/utb-genesis.cbor')
+                shutil.copy2(home/'utb/utb-manifest.json',out/'network/utb-manifest.json')
+                (out/'network/utb-genesis.id').write_text(utb_pin+'\n')
+                (out/'aggregator-utb').mkdir()   # the aggregator's append-only history store (its other mount is read-only)
             cli('shard-node','init','--home',out/'aggregator','--generate')
             for i in range(1,a.validators+1):
                 (out/f'validator{i}').mkdir()
@@ -378,9 +406,11 @@ def main():
             validator_rpc_urls=[f'http://ureth{i}:8545' for i in range(1,a.validators+1)],captcha_sitekey=a.captcha_sitekey)
         write(out/'network/network.json',network)
         flags=[*flags,'--unicity.genesis-commitment='+genesis_commitment(json.loads((home/'genesis.json').read_text()))]
-        write(out/'compose.yaml',topology(out,a.validators,{'root':roots,'evm':evms},records['images'],a.captcha_sitekey,flags,max_gas,bool(genesis),a.rpc_bind))
+        write(out/'compose.yaml',topology(out,a.validators,{'root':roots,'evm':evms},records['images'],a.captcha_sitekey,flags,max_gas,bool(genesis),a.rpc_bind,utb_pin))
         manifest={'offline_validation_only':a.offline_validation,'generation':out.name,'chain_id':a.chain_id,'genesis_hash':'0x'+block,'validators':a.validators,'operator_rpc':{'bind':a.rpc_bind,'root_port':operator_rpc.ROOT_PORT,'shard_port':operator_rpc.SHARD_PORT},
             'faucet_address':next(iter(alloc)), 'artifacts':records,
+            'utb':({'genesis_id':utb_pin,'genesis_sha256':hashlib.sha256((out/'network/utb-genesis.cbor').read_bytes()).hexdigest(),'genesis_file':'network/utb-genesis.cbor',
+                    'aggregator_store':'aggregator-utb'} if utb_pin else None),
             'pos':({'genesis_assignment':genesis.assignment,'first_pass_assignment':genesis.first,'custody':genesis.deployment['custody'],'election':genesis.deployment['election'],
                     'contracts':PINS['contracts'],'owner_keys':'pos-owner-keys','cadence_rounds':a.pos_cadence_rounds,'cadence_seconds':a.pos_cadence_seconds} if genesis else None),
             'authority_status':{str(i):json.loads(authority(i,'status','--operator-socket',out/f'validator{i}/auth/operator.sock','--operator-credential',out/f'validator{i}/auth/operator.cred')) for i in range(1,a.validators+1)} if not a.offline_validation else {},
