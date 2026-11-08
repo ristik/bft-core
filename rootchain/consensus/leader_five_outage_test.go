@@ -28,7 +28,8 @@ const (
 
 // #886 gate 6: five real managers on a real epoch 2, one never started. By default one placement; BFT_GATE6_ALL=1 runs every placement,
 // which takes minutes each. BFT_GATE6_REQUESTS sets the number of shard requests (8 by default), BFT_GATE6_DEADRUN=1 adds one request across
-// the dead member's own recovery run (up to five periods away: minutes), and BFT_TRACE_T sets T in seconds (2 by default; 10 is production).
+// the dead member's own recovery run (up to five periods away: minutes), and BFT_TRACE_T sets T in seconds (2 by default; 10 is production),
+// BFT_TRACE_BLOCK_RATE_MS the block rate (454 ms by default; 900 is production).
 // At T = 2 s wall times do not stand in for the 60 s target, which charges production timers: rounds do, and every sample is logged by phase.
 // The wall-clock targets are asserted only with BFT_GATE6_TIMING=1, on a machine the run has to itself (the host run): on a shared laptop the
 // rounds themselves slow down and the seconds measure the machine.
@@ -145,6 +146,11 @@ func reportFive(t *testing.T, label string, samples []fiveSample) (normal []time
 	return byPhase["normal"]
 }
 
+// gate6BlockRate is the cluster's block rate: the fixture's 454 ms by default, BFT_TRACE_BLOCK_RATE_MS for production's 900 ms.
+func gate6BlockRate(t *testing.T) time.Duration {
+	return time.Duration(traceEnvInt(t, "BFT_TRACE_BLOCK_RATE_MS", int(phaseLockBlockRate/time.Millisecond))) * time.Millisecond
+}
+
 // gate6Timing says whether the wall-clock targets are asserted (BFT_GATE6_TIMING=1).
 func gate6Timing() bool { return os.Getenv("BFT_GATE6_TIMING") != "" }
 
@@ -162,7 +168,7 @@ func fiveManagerOutage(t *testing.T, dead string, names []string) {
 	)
 	requests := traceEnvInt(t, "BFT_GATE6_REQUESTS", 8)
 	T := time.Duration(traceEnvInt(t, "BFT_TRACE_T", 2)) * time.Second
-	c := newEqualLive(t, T, names...)
+	c := newEqualLiveRate(t, T, gate6BlockRate(t), q3fixture.Options{}, nil, names...)
 	live := c.except(dead)
 	c.start(live...)
 	lag, err := rctypes.LeaderLag(uint64(len(names)))
@@ -321,7 +327,7 @@ func TestFiveManagerLateCollectorFailure(t *testing.T) {
 func fiveLateCollectorFailure(t *testing.T, victim string, names []string) {
 	const requestLimit = 16
 	T := time.Duration(traceEnvInt(t, "BFT_TRACE_T", 2)) * time.Second
-	c := newEqualLive(t, T, names...)
+	c := newEqualLiveRate(t, T, gate6BlockRate(t), q3fixture.Options{}, nil, names...)
 	c.start(names...)
 	lag, err := rctypes.LeaderLag(uint64(len(names)))
 	require.NoError(t, err)
