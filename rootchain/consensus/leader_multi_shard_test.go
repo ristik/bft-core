@@ -432,7 +432,7 @@ func TestGate9RescueTraceWithRealShards(t *testing.T) {
 	end := time.Now()
 	counters("the last certificate")
 	if transport != nil {
-		transport.reportDelivery(t0, shards, func(s liveShard) []byte { return shardHash(m(watch), s) })
+		transport.reportDelivery(t0, "the stop", shards, func(s liveShard) []byte { return shardHash(m(watch), s) })
 	}
 	require.False(t, unknownFrom.IsZero(), "no unknown round")
 	require.False(t, commitAt.IsZero(), "no commit")
@@ -534,7 +534,7 @@ func steadyDeadline(T time.Duration, rounds uint64) time.Duration {
 // about 635 KB, on the production transport at its unchanged limits (liveTransport), with every root up. A batch shard makes its one transition
 // (rsmtbatch has one pre-state), so each run is one packing: it builds the three shards' requests, waits for a round to begin and sends them to
 // every root at once, so the next leader holds all three when it proposes. A T2 repeat landing between building and sending makes a request
-// stale (the fixture's batch shards have T2 periods of 2.5, 5 and 7.5 s): then it builds and sends again. It requires a proposal carrying all
+// stale (the fixture's batch shards have T2 periods of 2.5, 5 and 7.5 s): seeing that repeat, it builds and sends again. It requires a proposal carrying all
 // three and all three certified under one seal, and skips a run whose requests were split: it did not reach the size. The trace patch records
 // wire sizes and receipt and handling times. Repeat the run for more samples.
 // BFT_GATE9_PACKED=1; BFT_TRACE_T and BFT_TRACE_BLOCK_RATE_MS as in the rescue trace.
@@ -627,8 +627,22 @@ func TestGate9ThreeEnvelopesInOneProposal(t *testing.T) {
 				require.NoError(t, transport.submit(name, proof))
 			}
 		}
-		// a leader that holds the three proposes them within a few rounds; past that, a repeat made them stale
-		for wait := time.Now().Add(8 * blockRate); time.Now().Before(wait) && !certified(); {
+		// sent again only when one of them is seen to be stale: a new certificate of a shard still waiting is a T2 repeat, under which its
+		// proof can no longer certify
+		under := map[string]uint64{}
+		for _, s := range batch {
+			under[s.String()] = seal(s)
+		}
+		stale := func() bool {
+			for _, s := range batch {
+				if bytes.Equal(shardHash(m, s), before[s.String()]) && seal(s) != under[s.String()] {
+					return true
+				}
+			}
+			return false
+		}
+		for !certified() && !stale() {
+			require.True(t, time.Now().Before(deadline), "the three shards certified within 3 minutes, sends at rounds %v", sends)
 			time.Sleep(5 * time.Millisecond)
 		}
 	}
@@ -650,7 +664,7 @@ func TestGate9ThreeEnvelopesInOneProposal(t *testing.T) {
 	}
 	mu.Unlock()
 	t.Logf("sends at rounds %v; all three certified %s after the first, seals %v; proposals carrying them %s; packed at round %d", sends, certifiedAfter.Round(time.Millisecond), seals, strings.Join(rounds, " "), packed)
-	transport.reportDelivery(firstSent, batch, func(s liveShard) []byte { return shardHash(m, s) })
+	transport.reportDelivery(firstSent, "the first send", batch, func(s liveShard) []byte { return shardHash(m, s) })
 	if packed == 0 {
 		t.Skip("NOT PACKED: no proposal carried the three envelopes (a repeat split them), so this run did not reach the size; not a transport result")
 	}

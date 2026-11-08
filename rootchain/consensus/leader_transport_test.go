@@ -209,8 +209,9 @@ func (x *liveTransport) submit(name string, req *IRChangeRequest) error {
 	return nil
 }
 
-// reportDelivery requires every shard's fresh certificate at the shard's own validators, not only in a root's store, and logs when it came.
-func (x *liveTransport) reportDelivery(t0 time.Time, shards []liveShard, hash func(liveShard) []byte) {
+// reportDelivery requires every shard's fresh certificate at the shard's own validators, not only in a root's store, and logs when it came,
+// counted from t0, which origin names ("the stop", "the first send").
+func (x *liveTransport) reportDelivery(t0 time.Time, origin string, shards []liveShard, hash func(liveShard) []byte) {
 	x.t.Helper()
 	for _, s := range shards {
 		want := hash(s)
@@ -233,7 +234,7 @@ func (x *liveTransport) reportDelivery(t0 time.Time, shards []liveShard, hash fu
 			}
 		}
 		x.mu.Unlock()
-		x.t.Logf("shard %s: fresh certificate first received by a validator %s after the stop; %d receipts at %d validators", s, first.Sub(t0).Round(time.Millisecond), n, len(nodes))
+		x.t.Logf("shard %s: fresh certificate first received by a validator %s after %s; %d receipts at %d validators", s, first.Sub(t0).Round(time.Millisecond), origin, n, len(nodes))
 	}
 }
 
