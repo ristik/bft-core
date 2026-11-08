@@ -30,6 +30,9 @@
   backup-restore
              the quiesced backup and same-generation restore (rehearse.py) with the bridge deployed: the redeemed lock stays spent, and a new round trip completes on
              the restored generation; the round trip's replays (its envelope, its claim and the driver's negatives) are refused there too
+  pos-epoch1, pos-redeem
+             opt-in, on a generation made with --pos --utb: the bridge across a PoS root handoff (bft-core #430 row 2), run between rehearse.py's
+             handoff stages; see bridge_pos.py for the sequence of invocations and what each checks
   custody    the vault's books from its whole event log against its counters and balance: every lock once (nonces 1..lastNonce), every credit
              once per (lock, part) with the nullifier the vault keeps, each lock's parts at most its amount and its lockedAmount/redeemedAmount/remaining
              equal to its events, L = Σ locks, D = Σ credits, P = Σ claims, 0 <= P <= D <= L,
@@ -53,6 +56,7 @@ sys.path.insert(0, str(HERE.parent))
 from rehearse import PROXY_IPS, Failure, Rehearsal   # noqa: E402  (the package's recorder and helpers)
 from deploy_bridge import TAG, validators_network   # noqa: E402
 import release   # noqa: E402
+from bridge_pos import BridgePos   # noqa: E402
 
 ENDPOINT = '127.0.0.1:8090'
 # a valid first-owner predicate (a signature predicate), the corpus' history/prepare-valid input: the vault's prepareLock refuses a malformed one
@@ -81,7 +85,7 @@ TESTER_FUNDS, TESTER_LOCK_WEI = 2 * 10 ** 18, 5 * 10 ** 17
 SPLIT_UNIT = 10 ** 13
 
 
-class BridgeRehearsal(Rehearsal):
+class BridgeRehearsal(BridgePos, Rehearsal):
     def bridge_compose(self, *args, check=True):
         return subprocess.run(['docker', 'compose', '-f', str(self.gen / 'compose.yaml'), '-f', str(self.gen / 'compose.bridge.yaml'), *args],
                               check=check, text=True, capture_output=True).stdout
@@ -145,12 +149,13 @@ class BridgeRehearsal(Rehearsal):
             raise Failure(f'the driver failed: {args[0]}')
         return out.stdout
 
-    def tester(self, *args, check=True, wallet='tester-wallet', key='tester.key'):
+    def tester(self, *args, check=True, wallet='tester-wallet', key='tester.key', env=None):
         """One command of the bridge tester CLI in the bridge tools image, on the validators network, with its wallet at /work/WALLET. The tester has
         no driver key and no archive: its mounts are only its wallet, its key file and the published directory (bridge/public), read-only. Returns
         (exit code, output)."""
         work = self.gen / 'bridge'
-        out = subprocess.run(['docker', 'run', '--rm', '--read-only', '--network', validators_network(self.gen), '--user', '10001:10001', '-e', 'HOME=/tmp/home',
+        extra = [x for k, v in (env or {}).items() for x in ('-e', f'{k}={v}')]
+        out = subprocess.run(['docker', 'run', '--rm', '--read-only', '--network', validators_network(self.gen), '--user', '10001:10001', '-e', 'HOME=/tmp/home', *extra,
                               '--tmpfs', '/tmp', '-v', f'{work / "public"}:/work/public:ro', '-v', f'{work / wallet}:/work/{wallet}',
                               '-v', f'{work / key}:/work/tester.key:ro', TAG, 'npx', '--no-install', 'tsx', TESTER, *args, '--wallet', f'/work/{wallet}'],
                              text=True, capture_output=True)
@@ -608,7 +613,10 @@ class BridgeRehearsal(Rehearsal):
 
 
 STAGES = (('deploy', 'deploy'), ('lockproof', 'lockproof'), ('fund', 'fund'), ('roundtrip', 'roundtrip'), ('negatives', 'negatives'), ('tester', 'tester_stage'), ('split', 'split_stage'),
-          ('consolidated', 'consolidated'), ('long-history', 'long_history'), ('backup-restore', 'backup_restore'), ('custody', 'custody'))
+          ('consolidated', 'consolidated'), ('long-history', 'long_history'), ('backup-restore', 'backup_restore'), ('pos-epoch1', 'pos_epoch1'), ('pos-redeem', 'pos_redeem'),
+          ('custody', 'custody'))
+# opt-in: only on a --pos --utb generation, around rehearse.py's handoff stages (bridge_pos.py)
+POS_STAGES = ('pos-epoch1', 'pos-redeem')
 
 
 def main():
@@ -616,7 +624,7 @@ def main():
     p.add_argument('--generation', required=True, type=Path)
     p.add_argument('--evidence', required=True, type=Path)
     p.add_argument('--cast', default='cast')
-    p.add_argument('--stages', default=','.join(s for s, _ in STAGES), help='comma separated, in order')
+    p.add_argument('--stages', default=','.join(s for s, _ in STAGES if s not in POS_STAGES), help='comma separated, in order (pos-epoch1 and pos-redeem only when named)')
     p.add_argument('--long-transfers', type=int, default=250, help=f'the long-history token\'s transfers (65 to {LONG_TRANSFERS_MAX})')
     a = p.parse_args()
     if not 64 < a.long_transfers <= LONG_TRANSFERS_MAX:
