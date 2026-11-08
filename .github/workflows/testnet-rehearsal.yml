@@ -16,6 +16,18 @@ on:
         description: 'PoS-only run: rehearse.py PoS-profile stages (e.g. up,identity,first-tx,pos-smoke,pos-election,pos-proposal; the joiner: up,identity,first-tx,pos-smoke,pos-joiner,pos-election,pos-proposal,pos-propose,pos-install,pos-advance,pos-join-signs,pos-join-heavy,pos-restart, on a fresh generation, in the join step below); skips the PoA rehearsal. Opt-in, not in the default list: pos-reject (after pos-election: the automatic RejectResult of an unpublished result, bft-core #857, ~2 h), pos-resources (after pos-recreate) and, for bft-core #843, pos-crash, pos-crash-ureth, pos-crash-shard, pos-crash-root, pos-crash-ureth-shard (after pos-recreate), pos-crash-e2 (after pos-advance), pos-crash-e1 (after pos-smoke)'
         required: false
         default: ''
+      join_stages:
+        description: 'Join-profile-only run (skips the PoA and the main PoS rehearsals): rehearse.py stages for the join generation, e.g. up,identity,first-tx,pos-smoke,pos-joiner,pos-election,pos-proposal,pos-propose,pos-install,pos-advance,pos-restore-repeat (bft-core #905: the joiner restore repeated with pid evidence and a low-limit control)'
+        required: false
+        default: ''
+      restore_repeat:
+        description: 'pos-restore-repeat: number of restores at the package pid limit (default 20)'
+        required: false
+        default: '20'
+      restore_controls:
+        description: 'pos-restore-repeat: low pid limits as the control, comma separated; the lowest must reproduce pthread_create failed (default 24,16)'
+        required: false
+        default: '24,16'
 permissions:
   contents: read
 concurrency:
@@ -87,7 +99,7 @@ jobs:
             --ubft pinned-bft/build/ubft --b1genesis /tmp/tn-b1genesis --keygen /tmp/tn-keygen \
             --captcha-sitekey rehearsal-sitekey --captcha-secret-file /tmp/captcha-secret
       - name: Rehearse
-        if: ${{ inputs.pos_stages == '' }}
+        if: ${{ inputs.pos_stages == '' && inputs.join_stages == '' }}
         env:
           STAGES: ${{ inputs.stages }}
         run: |
@@ -95,7 +107,7 @@ jobs:
             --reset-out /srv/tn-rehearsal-2 --reset-ubft pinned-bft/build/ubft --reset-b1genesis /tmp/tn-b1genesis --reset-keygen /tmp/tn-keygen \
             --reset-captcha-sitekey rehearsal-sitekey --reset-captcha-secret-file /tmp/captcha-secret ${STAGES:+--stages "$STAGES"}
       - name: PoS profile, generation (the PoA generation is stopped first, the host ports are the same)
-        if: ${{ inputs.stages == '' }}
+        if: ${{ inputs.stages == '' && inputs.join_stages == '' }}
         run: |
           for d in /srv/tn-rehearsal-2 /srv/tn-rehearsal-1-restored /srv/tn-rehearsal-1; do
             if sudo test -f "$d/compose.yaml"; then sudo docker compose -f "$d/compose.yaml" down; fi
@@ -106,14 +118,14 @@ jobs:
             --captcha-sitekey rehearsal-sitekey --captcha-secret-file /tmp/captcha-secret \
             --pos --pos-contracts pinned-contracts
       - name: PoS profile, rehearse (first start, the 5a smoke, owner keys, the reward pool, the election, the handoff proposal)
-        if: ${{ inputs.stages == '' }}
+        if: ${{ inputs.stages == '' && inputs.join_stages == '' }}
         env:
           POS_STAGES: ${{ inputs.pos_stages }}
         run: |
           sudo -E env "PATH=$PATH" python3 deploy/testnet/rehearse.py --generation /srv/tn-rehearsal-pos --evidence "$RUNNER_TEMP/evidence-pos" \
             --ubft pinned-bft/build/ubft --restore-pin /tmp/tn-h4pin --stages "${POS_STAGES:-up,identity,first-tx,pos-smoke,pos-observe,pos-rewards,pos-election,pos-proposal,pos-abort,pos-propose,pos-too-late,pos-install,pos-advance,pos-restart,pos-stale,pos-handoff-2,pos-restart-2,pos-recreate,pos-owner}"
       - name: PoS profile, resources and logs
-        if: always() && inputs.stages == ''
+        if: always() && inputs.stages == '' && inputs.join_stages == ''
         run: |
           mkdir -p "$RUNNER_TEMP/evidence-pos"
           sudo chown -R "$(id -u):$(id -g)" "$RUNNER_TEMP/evidence-pos" || true
@@ -136,10 +148,15 @@ jobs:
             --pos --pos-contracts pinned-contracts
       - name: PoS join profile, rehearse (a fifth entity joins - register, bond, delegate, election with five, handoff to five, it signs, restarts)
         if: ${{ inputs.stages == '' && inputs.pos_stages == '' }}
+        env:
+          JOIN_STAGES: ${{ inputs.join_stages }}
+          RESTORE_REPEAT: ${{ inputs.restore_repeat }}
+          RESTORE_CONTROLS: ${{ inputs.restore_controls }}
         run: |
           sudo -E env "PATH=$PATH" python3 deploy/testnet/rehearse.py --generation /srv/tn-rehearsal-join --evidence "$RUNNER_TEMP/evidence-join" \
             --ubft pinned-bft/build/ubft --restore-pin /tmp/tn-h4pin \
-            --stages "up,identity,first-tx,pos-smoke,pos-joiner,pos-election,pos-proposal,pos-propose,pos-install,pos-advance,pos-join-signs,pos-join-heavy,pos-restart"
+            --restore-repeat "${RESTORE_REPEAT:-20}" --restore-controls "${RESTORE_CONTROLS:-24,16}" \
+            --stages "${JOIN_STAGES:-up,identity,first-tx,pos-smoke,pos-joiner,pos-election,pos-proposal,pos-propose,pos-install,pos-advance,pos-join-signs,pos-join-heavy,pos-restart}"
       - name: PoS join profile, logs
         if: always() && inputs.stages == '' && inputs.pos_stages == ''
         run: |
@@ -177,7 +194,7 @@ jobs:
           path: ${{ runner.temp }}/evidence-join
           if-no-files-found: ignore
       - uses: actions/upload-artifact@v4
-        if: always() && inputs.stages == ''
+        if: always() && inputs.stages == '' && inputs.join_stages == ''
         with:
           name: testnet-rehearsal-pos-evidence
           path: ${{ runner.temp }}/evidence-pos
