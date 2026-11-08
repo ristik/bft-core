@@ -318,3 +318,7 @@ partition-7 certified round and state root to advance. HTTP admission or empty
 rounds alone cannot pass. No EVM validator or faucet is started by this probe;
 it does not supply the owner-server deployment, recovery or campaign evidence
 required above. Local validation is deferred to PR CI for this revision.
+
+### Signed trust-base history (UTB) profile
+
+`generate.py --utb` gives every root, shard node and the aggregator the signed-history profile with one pin (the genesis EntryID in `network/utb-genesis.id`, passed as its own argument). `--utb-aggregator integration` (default) is the integration aggregator (genesis entry file, own append-only store); `--utb-aggregator upstream` is the upstream-facing aggregator (a one-entry tagged bundle `network/utb-bundle.cbor`, `UTB_EXPECTED_NETWORK`, its history in its MongoDB). The images must be built with the matching `build-images.py --aggregator-variant` (pins `aggregator-go` / `aggregator-go-upstream`); `generate.py` refuses a mismatch. After the handoff stages, the rehearsal stage `utb-live` checks that the aggregator's history holds exactly the roots' epochs, each entry admitted once, nothing refused and no version 1 trust base consulted.
