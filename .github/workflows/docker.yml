@@ -16,6 +16,8 @@ env:
 
 jobs:
   docker:
+    # Publish only from the upstream repository, never from a fork.
+    if: github.repository == 'unicitynetwork/bft-core'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
