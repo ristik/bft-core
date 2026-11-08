@@ -206,22 +206,34 @@ func writeUnsynced(open *[]*os.File, path string, b []byte) error {
 	return err
 }
 
-// syncAndCloseAll syncs the files concurrently and closes each. It returns only after every sync has returned, and reports every
-// failure of a sync or a close: the caller publishes nothing unless all of them succeeded.
+// MaxConcurrentFileSyncs bounds the file syncs a put has in flight. A blocked fsync can hold an OS thread, and a full batch has up
+// to 832 files (bft-core#913); the sync of a batch still overlaps on the device, but never occupies more than this many threads.
+const MaxConcurrentFileSyncs = 16
+
+// syncAndCloseAll syncs the files, at most MaxConcurrentFileSyncs at a time, and closes each. It returns only after every sync has
+// returned, and reports every failure of a sync or a close: the caller publishes nothing unless all of them succeeded.
 func (s *Store) syncAndCloseAll(files []*os.File) error {
 	errs := make([]error, len(files))
+	next := make(chan int)
 	var wg sync.WaitGroup
-	for i, h := range files {
+	for range min(MaxConcurrentFileSyncs, len(files)) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			err := s.ops().syncFile(h)
-			if closeErr := h.Close(); err == nil {
-				err = closeErr
+			for i := range next {
+				h := files[i]
+				err := s.ops().syncFile(h)
+				if closeErr := h.Close(); err == nil {
+					err = closeErr
+				}
+				errs[i] = err
 			}
-			errs[i] = err
 		}()
 	}
+	for i := range files {
+		next <- i
+	}
+	close(next)
 	wg.Wait()
 	return errors.Join(errs...)
 }
