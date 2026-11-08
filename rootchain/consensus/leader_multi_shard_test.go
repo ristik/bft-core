@@ -23,6 +23,7 @@ import (
 	"github.com/unicitynetwork/bft-core/network/protocol/abdrc"
 	"github.com/unicitynetwork/bft-core/network/protocol/certification"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/leader"
+	"github.com/unicitynetwork/bft-core/rootchain/consensus/storage"
 	drctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/zkverifier"
 )
@@ -97,7 +98,6 @@ func shardRequest(t *testing.T, r *q3Replica, s liveShard, first, tamper bool) *
 	if err != nil || !enabled {
 		return nil
 	}
-	tr := view.ExpectedTR()
 	prev, err := view.PreviousUC()
 	require.NoError(t, err)
 	reference := prev.UnicitySeal.Timestamp
@@ -123,6 +123,13 @@ func shardRequest(t *testing.T, r *q3Replica, s liveShard, first, tamper bool) *
 			proof = []byte{1, 2, 3}
 		}
 	}
+	return signedShardRequest(t, r, s, view, hash, proof, reference)
+}
+
+// signedShardRequest is the request of every validator of the shard for the transition to hash under the view, each signed with its own key.
+func signedShardRequest(t *testing.T, r *q3Replica, s liveShard, view *storage.RequestRoundView, hash, proof []byte, reference uint64) *IRChangeRequest {
+	t.Helper()
+	tr := view.ExpectedTR()
 	out := &IRChangeRequest{Partition: s.partition, Shard: s.shard, Reason: Quorum}
 	for _, id := range view.Context().NodeIDs() {
 		signer := r.f.EVMSigners[id]
