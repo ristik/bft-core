@@ -8,13 +8,15 @@
 # A same-host functional smoke, not a WAN, Byzantine or performance guarantee ("single server, one operator").
 #
 # Run from the repository root (helper.sh's ownership checks require the checkout as cwd). Stops only pids it recorded.
-# Usage: scripts/root-scale-lane.sh [-r roots] [-v validators] [-e evidenceDir] [-s seed] [-w windowSeconds] [-k keep] [-S samplerSeconds]
+# Host lock (briefs/host-test-plan-2026-11-02.md): -L <lockDir> (e.g. ~/host-lock) makes the driver take <lockDir>/<name>-root-scale itself, refuse when
+# anyone else holds a file there, and release it on every exit. A run on a shared host MUST pass -L; without it the driver warns.
+# Usage: scripts/root-scale-lane.sh [-r roots] [-v validators] [-e evidenceDir] [-s seed] [-w windowSeconds] [-k keep] [-S samplerSeconds] [-L lockDir] [-N holderName]
 set +u
-roots=16 validators=4 partition_id=8 evidence="" seed=1 window=60 keep=false sample=5
-while getopts "hr:v:e:s:w:kS:" o; do
+roots=16 validators=4 partition_id=8 evidence="" seed=1 window=60 keep=false sample=5 lockdir="" holder=${USER:-run}
+while getopts "hr:v:e:s:w:kS:L:N:" o; do
   case "$o" in
   r) roots=$OPTARG ;; v) validators=$OPTARG ;; e) evidence=$OPTARG ;; s) seed=$OPTARG ;;
-  w) window=$OPTARG ;; k) keep=true ;; S) sample=$OPTARG ;;
+  w) window=$OPTARG ;; k) keep=true ;; S) sample=$OPTARG ;; L) lockdir=$OPTARG ;; N) holder=$OPTARG ;;
   *) sed -n 1,14p "$0"; exit 0 ;;
   esac
 done
@@ -37,15 +39,26 @@ source helper.sh
 export ROOT_LOG_LEVEL=info
 rm -rf test-nodes && mkdir test-nodes
 
-SAMPLER=""
+SAMPLER="" mylock=""
 cleanup() {
   [ -z "$SAMPLER" ] || kill "$SAMPLER" 2>/dev/null
   if [ "$keep" != true ]; then
     stop_evm_validators
     stop_root_nodes
   fi
+  [ -z "$mylock" ] || { rm -f "$mylock"; echo "host lock released: $mylock"; }
 }
 trap cleanup EXIT
+if [ -n "$lockdir" ]; then
+  mkdir -p "$lockdir"
+  others=$(ls -A "$lockdir")
+  [ -z "$others" ] || { echo "STOP: host lock is held by: $others" >&2; trap - EXIT; exit 1; }
+  mylock="$lockdir/$holder-root-scale"
+  printf 'name=%s\ngeneration=root-scale-%s\npurpose=bft-core root-scale-lane %s roots (single server, one operator)\nstart=%s\n' "$holder" "$roots" "$roots" "$(date -u +%FT%TZ)" >"$mylock"
+  echo "host lock taken: $mylock"
+else
+  echo "WARNING: no -L lockDir: this run holds no host lock; use it on a shared host only under a lock taken by hand" >&2
+fi
 
 # --- setup --------------------------------------------------------------------------------------
 t0=$(date +%s)
