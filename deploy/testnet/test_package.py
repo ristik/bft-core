@@ -451,7 +451,7 @@ class ProofOfStake(unittest.TestCase):
     def test_the_join_profile_runs_the_heavy_joiner_before_the_slow_restart(self):
         import rehearse
         text=(Path(__file__).resolve().parents[2]/'.github'/'workflows'/'testnet-rehearsal.yml').read_text()
-        wanted=re.search(r'"(up,[^"]*pos-join-heavy[^"]*)"',text).group(1).split(',')
+        wanted=re.search(r'"(?:\$\{JOIN_STAGES:-)?(up,[^"}]*pos-join-heavy[^"}]*)\}?"',text).group(1).split(',')   # the default list; JOIN_STAGES overrides it (#905)
         runs=[name for name,_ in rehearse.STAGES+rehearse.POS_STAGES if name in wanted]   # main() walks these and uses --stages only as a filter
         self.assertEqual(set(runs),set(wanted),'a stage the workflow names does not exist')
         self.assertLess(runs.index('pos-join-heavy'),runs.index('pos-restart'),'pos-restart can outlast the election cadence, and the open attempt never sees the heavy joiner')
