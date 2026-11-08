@@ -156,7 +156,18 @@ func twoStageRun(t *testing.T, c *q4bLive, x, d string, warm, hold uint64) twoSt
 	target.Store(1 << 62)
 	withhold.Store(true)
 	c.stop(d)
-	head, _, _ := m(ingress).blockStore.LeaderHead()
+	// the shape starts from where the survivors' commits stopped: blocks in flight at the stop can still commit (at T = 10 s the repeat of the round
+	// after the head committed before the request was held, run 1 on the host), so read the head and the shard's certificate only once the
+	// committed head has stood still for a while
+	headNow := func() uint64 { h, _, _ := m(ingress).blockStore.LeaderHead(); return h }
+	quiet := max(3*time.Second, 6*c.nodes[0].r.manager.params.BlockRate)
+	for at, since, deadline := headNow(), time.Now(), time.Now().Add(q4bDeadline); time.Since(since) < quiet; time.Sleep(20 * time.Millisecond) {
+		require.True(t, time.Now().Before(deadline), "the survivors' committed head settles after the stop")
+		if h := headNow(); h != at {
+			at, since = h, time.Now()
+		}
+	}
+	head := headNow()
 	leaderOf := func(round uint64) peer.ID {
 		l, err := m(ingress).leaderSelector.GetLeaderForRound(round)
 		if err != nil {
