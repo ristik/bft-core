@@ -113,7 +113,16 @@ func (v3 CertificationResponseV3) MarshalCBOR() ([]byte, error) {
 		return nil, err
 	}
 	type wire CertificationResponseV3
-	return types.Cbor.Marshal(wire(v3))
+	data, err := types.Cbor.Marshal(wire(v3))
+	if err != nil {
+		return nil, err
+	}
+	// the send side of the frame limit the shards enforce on receive (#952): a payload above MaxCertificationResponseV3Frame (1 MiB + 2 x 128 KiB) would
+	// be refused by every receiver, so it is never produced
+	if len(data) > MaxCertificationResponseV3Frame {
+		return nil, fmt.Errorf("%w: payload of %d bytes exceeds the frame limit %d", ErrResponseV3, len(data), MaxCertificationResponseV3Frame)
+	}
+	return data, nil
 }
 
 // UnmarshalCBOR is strict where the format has meaning: exactly the four-element array, version 3, a view that is a definite-length byte string
