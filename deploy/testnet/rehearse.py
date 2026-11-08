@@ -1249,6 +1249,37 @@ class Rehearsal:
         run = subprocess.run(['docker', 'compose', *handoff_ops.compose_files(self.gen), 'exec', '-T', service, *command], text=True, capture_output=True)
         return run.returncode, run.stdout, run.stderr
 
+    def utb_live(self):
+        """The live UTB source on the package built with --utb (either aggregator): after the handoffs the roots certify at epoch E, and the aggregator's history must hold exactly
+        epochs 1..E, each admitted once and from the roots (V3 attachment or GetTrustBase), with nothing refused and no version 1 fallback. Evidence is the aggregator's own log
+        (messages 'trust-base entries appended from certification response' / 'trust-base catch-up finished' with the tip), kept redacted; the source of every epoch is recorded.
+        Needs the handoffs first (pos-advance gives E=2, pos-handoff-2 E=3)."""
+        utb = self.manifest.get('utb')
+        self.expect(utb is not None, 'the generation has the signed trust-base profile (generate.py --utb)')
+        transport = handoff_ops.DockerTransport(self.gen)
+        epoch = self.root_epoch(1, transport)
+        self.expect(epoch is not None and epoch >= 2 and all(self.root_epoch(i, transport) == epoch for i in range(1, self.n + 1)), 'every root certifies at the same switched epoch', str(epoch))
+        def tips():
+            lines = []
+            for raw in self.compose('logs', '--no-color', 'aggregator', check=False).splitlines():
+                at = raw.find('{')
+                if at < 0: continue
+                try: lines.append(json.loads(raw[at:]))
+                except ValueError: continue
+            return lines
+        def tip_of(lines):
+            held = [line['tip'] for line in lines if line.get('msg') in ('trust-base entries appended from certification response', 'trust-base catch-up finished') and isinstance(line.get('tip'), int)]
+            return max(held) if held else None
+        self.expect(self.wait(f'the aggregator holds epoch {epoch}', lambda: tip_of(tips()) == epoch, 180), 'the aggregator history tip equals the roots\' epoch', str(tip_of(tips())))
+        lines = tips()
+        # every step of the tip is one authenticated entry from a root: appended from a response, or fetched
+        steps = [(line['msg'], line['tip'], line.get('added', 0)) for line in lines if line.get('msg') in ('trust-base entries appended from certification response', 'trust-base catch-up finished') and line.get('added', 0)]
+        self.expect(sum(added for _, _, added in steps) == epoch - 1, f'epochs 2..{epoch} were each admitted exactly once', json.dumps(steps))
+        refused = [line for line in lines if line.get('msg') in ('dropping an invalid trust-base update',) or 'version 1' in str(line.get('error', ''))]
+        self.expect(not refused, 'no trust-base update was refused and no version 1 trust base was consulted', json.dumps(refused)[:300])
+        self.keep_redacted(self.evh() / 'utb-live-aggregator.log', '\n'.join(json.dumps(line) for line in lines if 'trust-base' in str(line.get('msg', ''))) + '\n')
+        (self.evh() / 'utb-live-steps.json').write_text(json.dumps({'epoch': epoch, 'aggregator': utb.get('aggregator', 'integration'), 'steps': steps}, indent=1) + '\n')
+
     def pos_restart(self, epoch=2):
         """The TN-1 pod-restart stage on the switched PoS network: one entity at a time (--pods) its execution client, root and shard node are stopped, the survivors
         certify a transaction, the entity is started again (`start`: the roots keep the container they were recreated with, install flag included) and converges; then every
@@ -1624,6 +1655,8 @@ Rehearsal.pos_owner = pos_owner.pos_owner   # the owner-key stage lives in pos_o
 Rehearsal.pos_reject = pos_reject.pos_reject   # the automatic RejectResult (#857), opt-in: it waits out a reservation lifetime
 # The order here is the order they run in: --stages only selects. pos-join-heavy is before pos-restart: it needs the next election attempt, and a slow pos-restart can outlast the cadence, leaving an attempt open that never sees the joiner.
 POS_STAGES = (('pos-smoke', 'pos_smoke'), ('pos-observe', 'pos_observe'), ('pos-rewards', 'pos_rewards'), ('pos-joiner', 'pos_joiner'), ('pos-election', 'pos_election'), ('pos-reject', 'pos_reject'), ('pos-proposal', 'pos_proposal'), ('pos-abort', 'pos_abort'), ('pos-propose', 'pos_propose'), ('pos-too-late', 'pos_too_late'), ('pos-install', 'pos_install'), ('pos-advance', 'pos_advance'), ('pos-restore-repeat', 'pos_restore_repeat'), ('pos-join-signs', 'pos_join_signs'), ('pos-join-heavy', 'pos_join_heavy'), ('pos-restart', 'pos_restart'), ('pos-stale', 'pos_stale'), ('pos-handoff-2', 'pos_handoff_2'), ('pos-restart-2', 'pos_restart_2'), ('pos-recreate', 'pos_recreate'), *pos_crash.STAGES, ('pos-resources', 'pos_resources'), ('pos-owner', 'pos_owner'))
+# Stages of the package built with --utb (the signed trust-base history, either aggregator): not in the hosted-runner rehearsal, whose package is the one without it. They run after the PoS stages.
+UTB_STAGES = (('utb-live', 'utb_live'),)
 
 
 def main():
@@ -1648,12 +1681,12 @@ def main():
     r.pods = tuple(int(x) for x in a.pods.split(',') if x)
     r.reset_args = {k[len('reset_'):]: v for k, v in vars(a).items() if k.startswith('reset_')}
     wanted = a.stages.split(',')
-    unknown = set(wanted) - {s for s, _ in STAGES + POS_STAGES}
+    unknown = set(wanted) - {s for s, _ in STAGES + POS_STAGES + UTB_STAGES}
     if unknown:
         p.error(f'unknown stages {sorted(unknown)}')
     code = 0
     try:
-        for name, method in STAGES + POS_STAGES:
+        for name, method in STAGES + POS_STAGES + UTB_STAGES:
             if name in wanted:
                 r.stage(name, getattr(r, method))
     except Exception:
