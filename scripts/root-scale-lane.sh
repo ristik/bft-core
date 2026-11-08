@@ -35,30 +35,38 @@ quorum=$((roots * 2 / 3 + 1))
 maxdown=$((roots - quorum))
 echo "roots=$roots quorum=$quorum progress with $maxdown down, stall with $((maxdown + 1)) down, seed=$seed" | tee "$evidence/params.txt"
 
-source helper.sh
-export ROOT_LOG_LEVEL=info
-rm -rf test-nodes && mkdir test-nodes
-
+# The host lock comes first: nothing below (sourcing, rm -rf test-nodes, starting processes) happens unless we hold it.
 SAMPLER="" mylock=""
 cleanup() {
   [ -z "$SAMPLER" ] || kill "$SAMPLER" 2>/dev/null
   if [ "$keep" != true ]; then
-    stop_evm_validators
-    stop_root_nodes
+    declare -F stop_evm_validators >/dev/null && stop_evm_validators
+    declare -F stop_root_nodes >/dev/null && stop_root_nodes
+    [ -z "$mylock" ] || { rm -f "$mylock"; echo "host lock released: $mylock"; }
+  elif [ -n "$mylock" ]; then
+    echo "-k: roots and shard keep running, so the host lock stays: $mylock (remove it after stopping them)"
   fi
-  [ -z "$mylock" ] || { rm -f "$mylock"; echo "host lock released: $mylock"; }
 }
 trap cleanup EXIT
 if [ -n "$lockdir" ]; then
   mkdir -p "$lockdir"
-  others=$(ls -A "$lockdir")
-  [ -z "$others" ] || { echo "STOP: host lock is held by: $others" >&2; trap - EXIT; exit 1; }
+  [ -z "$(ls -A "$lockdir")" ] || { echo "STOP: host lock is held by: $(ls -A "$lockdir" | tr '\n' ' ')" >&2; trap - EXIT; exit 1; }
   mylock="$lockdir/$holder-root-scale"
-  printf 'name=%s\ngeneration=root-scale-%s\npurpose=bft-core root-scale-lane %s roots (single server, one operator)\nstart=%s\n' "$holder" "$roots" "$roots" "$(date -u +%FT%TZ)" >"$mylock"
+  # noclobber: never overwrite a file somebody else created in the gap; then re-check that we are the only holder
+  if ! ( set -C; printf 'name=%s\ngeneration=root-scale-%s\npurpose=bft-core root-scale-lane %s roots (single server, one operator)\nstart=%s\n' "$holder" "$roots" "$roots" "$(date -u +%FT%TZ)" >"$mylock" ) 2>/dev/null; then
+    echo "STOP: could not create $mylock (exists)" >&2; mylock=""; trap - EXIT; exit 1
+  fi
+  if [ "$(ls -A "$lockdir" | wc -l | tr -d ' ')" != 1 ]; then
+    echo "STOP: another holder appeared while taking the lock: $(ls -A "$lockdir" | tr '\n' ' ')" >&2; rm -f "$mylock"; mylock=""; trap - EXIT; exit 1
+  fi
   echo "host lock taken: $mylock"
 else
   echo "WARNING: no -L lockDir: this run holds no host lock; use it on a shared host only under a lock taken by hand" >&2
 fi
+
+source helper.sh
+export ROOT_LOG_LEVEL=info
+rm -rf test-nodes && mkdir test-nodes
 
 # --- setup --------------------------------------------------------------------------------------
 t0=$(date +%s)
