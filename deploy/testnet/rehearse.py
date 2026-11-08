@@ -181,6 +181,7 @@ class Rehearsal:
         self.reset_args = {}
         self.ubft = None
         self.restore_pin = None
+        self.restore_repeat_count, self.restore_control_limits = 20, (24, 16)   # pos-restore-repeat (#905)
         self.target = 2   # the root epoch the handoff being driven installs (pos-handoff-2 drives the next one, 3)
         self.joiners = set()   # entities started but not yet members of the committee that certifies (pos-joiner adds one, pos-advance clears them)
         self.committed_target = None   # the Abort target of the handoff pos-propose committed (pos-too-late)
@@ -1057,16 +1058,93 @@ class Rehearsal:
         self.say(f'  recordCount == recordCursor == {self.wait("the custody has applied every root record", lambda: applied() is not None, 300) and applied()}')
         self.joiners.clear()   # the successor committee is active: a joiner is a member now
 
+    PID_SAMPLE_SECONDS = 0.25
+
+    def pid_counters(self, container):
+        """The container cgroup's pid counters (threads count: a Go thread is a task): (current, peak or None, events max or None), or None when the cgroup is not readable."""
+        for base in (Path(f'/sys/fs/cgroup/system.slice/docker-{container}.scope'), Path(f'/sys/fs/cgroup/docker/{container}'), Path(f'/sys/fs/cgroup/pids/docker/{container}')):
+            if not (base / 'pids.current').exists():
+                continue
+            try:
+                current = int((base / 'pids.current').read_text())
+                peak = int((base / 'pids.peak').read_text()) if (base / 'pids.peak').exists() else None
+                events = None
+                if (base / 'pids.events').exists():
+                    events = int(dict(line.split() for line in (base / 'pids.events').read_text().splitlines()).get('max', 0))
+                return current, peak, events
+            except (OSError, ValueError):
+                return None
+        return None
+
+    ABORT_LINES = re.compile(r'SIGABRT|pthread_create|fatal error|runtime/cgo|\bpanic:|out of memory|PC=')
+
+    def observe_restore(self, i, tag, seconds=30):
+        """Watch the joiner's restore start for `seconds`: the effective pid limit of its container (docker inspect, not what was asked for), the cgroup's pid counters
+        sampled four times a second, and its whole log (the first crash is at the start of it, #905). Returns the record, also appended to restore-repeat.jsonl."""
+        container = self.compose('ps', '-q', f'shard{i}', check=False).strip()
+        limit = None
+        if container:
+            inspect = subprocess.run(['docker', 'inspect', '--format', '{{.HostConfig.PidsLimit}}', container], text=True, capture_output=True)
+            limit = int(inspect.stdout.strip()) if inspect.returncode == 0 and inspect.stdout.strip().lstrip('-').isdigit() else None
+        current_max, peak, events, samples, end = 0, None, 0, 0, time.time() + seconds
+        while time.time() < end:
+            got = self.pid_counters(container) if container else None
+            if got:
+                samples += 1
+                current_max = max(current_max, got[0])
+                peak = max(peak or 0, got[1] or 0) or peak
+                events = max(events, got[2] or 0)
+            time.sleep(self.PID_SAMPLE_SECONDS)
+        running = f'shard{i}' in self.compose('ps', '--status', 'running', '--services').split()
+        whole = self.compose('logs', '--no-color', '--timestamps', f'shard{i}', check=False)
+        self.keep_redacted(self.evh() / f'joiner-shard-{i}-restore-whole-{tag}.log', whole)
+        lines = whole.splitlines()
+        record = {'tag': tag, 'pidsLimit': limit, 'running': running, 'samples': samples, 'currentMax': current_max, 'peak': peak, 'eventsMax': events,
+                  'peakOrMax': max(current_max, peak or 0), 'pthreadCreateFailed': any('pthread_create failed' in l for l in lines),
+                  'freshDirRefusal': any('restore requires a fresh BFT data directory' in l for l in lines),
+                  'head': [l[:220] for l in lines if self.ABORT_LINES.search(l)][:6]}
+        with (self.evh() / 'restore-repeat.jsonl').open('a') as out:
+            out.write(json.dumps(record) + '\n')
+        self.say(f'  restore {tag}: limit {limit} peak {record["peakOrMax"]} (current max {current_max}, pids.events max {events}, {samples} samples) {"running" if running else "NOT running"}'
+                 + (' PTHREAD_CREATE FAILED' if record['pthreadCreateFailed'] else ''))
+        return record
+
     def expect_restore_running(self, i):
         """The joiner's restore is up after 30 s. Its whole log is kept either way: the first crash is at the start of it, each restart only adds a refusal (#905), and a
         container in a restart loop can read as running at the moment of the look."""
-        time.sleep(30)
+        record = self.observe_restore(i, 'main')
         logs = self.compose('logs', '--no-color', '--tail', '60', f'shard{i}', check=False)
         self.keep_redacted(self.evh() / f'joiner-shard-{i}-restore.log', logs)
-        running = f'shard{i}' in self.compose('ps', '--status', 'running', '--services').split()
-        self.say(f'  joiner shard {i} restoring after 30 s: {"running" if running else "NOT running"}: ' + ' | '.join(logs.strip().splitlines()[-3:])[-500:])
+        self.say(f'  joiner shard {i} restoring after 30 s: {"running" if record["running"] else "NOT running"}: ' + ' | '.join(logs.strip().splitlines()[-3:])[-500:])
         self.keep_redacted(self.evh() / f'joiner-shard-{i}-restore-whole.log', self.compose('logs', '--no-color', '--timestamps', f'shard{i}', check=False))
-        self.expect(running, f'the joiner\'s shard node {i} runs as a restore under its new session', logs.strip()[-500:])
+        self.expect(record['running'], f'the joiner\'s shard node {i} runs as a restore under its new session', logs.strip()[-500:])
+
+    def pos_restore_repeat(self):
+        """#905: the joiner's restore repeated at the package's pid limit, with the pid evidence of each, then at deliberately low limits as the control, then once more in full.
+        Needs pos-advance first (the joiner is a member and has been restored once). The repeats and controls are start-up probes (the crash was in the first seconds):
+        each empties the joiner's state (a restore refuses a node that has state, the documented way is a fresh directory) and starts `shard-node restore` again; the final
+        restore is the whole stage, catch-up included, and leaves an ordinary node. The control must reproduce `pthread_create failed` at its lowest limit, or the run says
+        nothing about the limit (the experiment is then reported as invalid, not as a pass)."""
+        i = self.n
+        repeat, controls = self.restore_repeat_count, self.restore_control_limits
+        self.expect(repeat >= 1 and controls, 'pos-restore-repeat needs --restore-repeat >= 1 and at least one --restore-controls limit')
+        (self.evh() / 'restore-repeat.jsonl').unlink(missing_ok=True)
+        base = [self.restore_joiner(i, tag=f'n{n}', probe=True) for n in range(1, repeat + 1)]
+        low = [self.restore_joiner(i, tag=f'lim{limit}', limit=limit, probe=True) for limit in sorted(controls, reverse=True)]
+        bad = [r['tag'] for r in base if not r['running'] or r['pthreadCreateFailed'] or r['eventsMax'] or r['head']]
+        counters = [r for r in base if r['samples'] and r['pidsLimit']]
+        summary = {'package': {'repeats': len(base), 'limit': sorted({r['pidsLimit'] for r in base}), 'peakMax': max((r['peakOrMax'] for r in base), default=None),
+                               'peakAll': [r['peakOrMax'] for r in base], 'failed': bad},
+                   'controls': [{k: r[k] for k in ('tag', 'pidsLimit', 'peakOrMax', 'running', 'pthreadCreateFailed', 'freshDirRefusal', 'eventsMax', 'head')} for r in low]}
+        (self.evh() / 'restore-repeat.json').write_text(json.dumps(summary, indent=1) + '\n')
+        self.expect(len(counters) == len(base), 'the shard container\'s pid counters and effective limit were readable for every repeat (cgroup path)', json.dumps(summary['package']))
+        self.expect(not bad, f'every restore at the package limit ran without an abort, a pthread_create failure or a pids.events max: failed {bad}', json.dumps(summary['package']))
+        self.expect(all(r['peakOrMax'] < r['pidsLimit'] for r in base), 'every repeat stayed under the package pid limit', json.dumps(summary['package']))
+        lowest = min(low, key=lambda r: r['pidsLimit'] or 0)
+        self.expect(lowest['pthreadCreateFailed'], f'the control reproduces pthread_create failed at its lowest limit {lowest["pidsLimit"]} (if not, the control is INVALID and the repeats prove nothing about the limit)', json.dumps(summary['controls']))
+        crashed = [r for r in low if r['pthreadCreateFailed']]
+        self.expect(all(r['freshDirRefusal'] for r in crashed), 'a crashed restore is refused on restart until the directory is fresh (the documented partial-restore refusal)', json.dumps(summary['controls']))
+        self.restore_joiner(i, tag='final')
 
     def advance_joiner(self, i, operator, shard_epoch):
         """The joiner's authority is pending (the genesis shard configuration does not name it) and holds no session. It started at the successor scope, so after the Commit
@@ -1092,7 +1170,7 @@ class Rehearsal:
         records = [json.loads(path.read_text()) for path in sorted(self.evidence.glob('handoff*/activation-record-*.json'))]
         return ','.join(f"{r['epoch']}={r['v3BodyId']}" for r in sorted(records, key=lambda r: r['epoch']))
 
-    def restore_joiner(self, i):
+    def restore_joiner(self, i, tag=None, limit=None, probe=False):
         """The joiner's shard node after the Commit. Its staging run left a candidate without the certificates a node needs (run 40087359371: "durable state is damaged or
         untrusted"), and the genesis configuration does not name it: it comes back by RESTORING, as the native lane does: its execution client and node state are emptied,
         the pin (latest certified record, its technical record and the trust history's body id) is read from a survivor's immutable archive, and the node starts as
@@ -1145,8 +1223,15 @@ class Rehearsal:
         entry += ['--tip-uc', '/state/tip.uc.cbor', '--tip-tr', '/state/tip.tr.cbor', '--trust-body-id', found.group(1)]
         restore_file = self.gen / handoff_ops.RESTORE_OVERRIDE
         try:
-            restore_file.write_text(json.dumps({'services': {f'shard{i}': {'entrypoint': entry}}}, indent=1) + '\n')
+            restore_file.write_text(json.dumps({'services': {f'shard{i}': {'entrypoint': entry, **({'pids_limit': limit} if limit else {})}}}, indent=1) + '\n')
             self.compose('up', '-d', '--no-deps', '--force-recreate', f'shard{i}')
+            if probe:   # #905 repeats and controls: observe the start-up only; the next call empties the state again
+                record = self.observe_restore(i, tag)
+                if record['pthreadCreateFailed'] and not record['freshDirRefusal']:   # the restart policy retries, and the retry is the refusal
+                    time.sleep(20)
+                    later = self.observe_restore(i, tag + '-after', seconds=1)   # the whole log now holds the crash and the refusals
+                    record = later | {'tag': tag, 'peakOrMax': max(record['peakOrMax'], later['peakOrMax']), 'samples': record['samples'], 'head': record['head'] or later['head']}
+                return record
             self.expect_restore_running(i)
             survivor = self.wait(f'the joiner\'s execution client {i} catches up with validator 1', lambda: int(self.ureth(i, 'eth_blockNumber'), 16) + 5 >= int(self.ureth(1, 'eth_blockNumber'), 16), 300)
             self.expect(survivor, f'the joiner\'s execution client {i} is at validator 1\'s block')
@@ -1538,7 +1623,7 @@ Rehearsal.pos_joiner = pos_join.pos_joiner   # the joiner stages live in pos_joi
 Rehearsal.pos_owner = pos_owner.pos_owner   # the owner-key stage lives in pos_owner.py
 Rehearsal.pos_reject = pos_reject.pos_reject   # the automatic RejectResult (#857), opt-in: it waits out a reservation lifetime
 # The order here is the order they run in: --stages only selects. pos-join-heavy is before pos-restart: it needs the next election attempt, and a slow pos-restart can outlast the cadence, leaving an attempt open that never sees the joiner.
-POS_STAGES = (('pos-smoke', 'pos_smoke'), ('pos-observe', 'pos_observe'), ('pos-rewards', 'pos_rewards'), ('pos-joiner', 'pos_joiner'), ('pos-election', 'pos_election'), ('pos-reject', 'pos_reject'), ('pos-proposal', 'pos_proposal'), ('pos-abort', 'pos_abort'), ('pos-propose', 'pos_propose'), ('pos-too-late', 'pos_too_late'), ('pos-install', 'pos_install'), ('pos-advance', 'pos_advance'), ('pos-join-signs', 'pos_join_signs'), ('pos-join-heavy', 'pos_join_heavy'), ('pos-restart', 'pos_restart'), ('pos-stale', 'pos_stale'), ('pos-handoff-2', 'pos_handoff_2'), ('pos-restart-2', 'pos_restart_2'), ('pos-recreate', 'pos_recreate'), *pos_crash.STAGES, ('pos-resources', 'pos_resources'), ('pos-owner', 'pos_owner'))
+POS_STAGES = (('pos-smoke', 'pos_smoke'), ('pos-observe', 'pos_observe'), ('pos-rewards', 'pos_rewards'), ('pos-joiner', 'pos_joiner'), ('pos-election', 'pos_election'), ('pos-reject', 'pos_reject'), ('pos-proposal', 'pos_proposal'), ('pos-abort', 'pos_abort'), ('pos-propose', 'pos_propose'), ('pos-too-late', 'pos_too_late'), ('pos-install', 'pos_install'), ('pos-advance', 'pos_advance'), ('pos-restore-repeat', 'pos_restore_repeat'), ('pos-join-signs', 'pos_join_signs'), ('pos-join-heavy', 'pos_join_heavy'), ('pos-restart', 'pos_restart'), ('pos-stale', 'pos_stale'), ('pos-handoff-2', 'pos_handoff_2'), ('pos-restart-2', 'pos_restart_2'), ('pos-recreate', 'pos_recreate'), *pos_crash.STAGES, ('pos-resources', 'pos_resources'), ('pos-owner', 'pos_owner'))
 
 
 def main():
@@ -1551,11 +1636,15 @@ def main():
         p.add_argument('--reset-' + name, help='the reset stage passes this to generate.py as --' + name + ' (--out: the new generation directory)')
     p.add_argument('--ubft', type=Path, help='the pinned ubft binary, for the handoff stages (they write and read files with it)')
     p.add_argument('--restore-pin', type=Path, help='scripts/h4-restore-pin built from the pinned source: the joiner\'s shard node is restored from a survivor\'s archive with it')
+    p.add_argument('--restore-repeat', type=int, default=20, help='pos-restore-repeat: restores at the package pid limit (#905)')
+    p.add_argument('--restore-controls', default='24,16', help='pos-restore-repeat: deliberately low pid limits, the control; the lowest must reproduce pthread_create failed')
     p.add_argument('--stages', default=','.join(s for s, _ in STAGES), help='comma separated; selects stages, which always run in the order of STAGES + POS_STAGES (the default is the PoA stages; POS_STAGES are named explicitly)')
     a = p.parse_args()
     r = Rehearsal(a.generation, a.evidence, a.cast)
     r.ubft = a.ubft.resolve() if a.ubft else None
     r.restore_pin = a.restore_pin.resolve() if a.restore_pin else None
+    r.restore_repeat_count = a.restore_repeat
+    r.restore_control_limits = tuple(int(x) for x in a.restore_controls.split(',') if x)
     r.pods = tuple(int(x) for x in a.pods.split(',') if x)
     r.reset_args = {k[len('reset_'):]: v for k, v in vars(a).items() if k.startswith('reset_')}
     wanted = a.stages.split(',')
