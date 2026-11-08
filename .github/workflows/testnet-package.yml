@@ -43,10 +43,8 @@ jobs:
           ref: 7b510f6b5a9cf3987ccc5d7dc77d39f33de12330
           path: pinned-contracts
           submodules: recursive
-      - uses: foundry-rs/foundry-toolchain@v1
-        with:
-          # the contracts' own CI pin: the registry's runtime bytecode and code hash are protocol surface
-          version: v1.8.1
+      # Foundry v1.8.1 (the contracts' own CI pin: the registry's runtime bytecode and code hash are protocol surface), the digest-pinned release archive
+      - uses: ./.github/actions/foundry
       - run: python3 deploy/testnet/validate-generation.py --ubft pinned-bft/build/ubft --keygen /tmp/tn-keygen --b1genesis /tmp/tn-b1genesis --check-prometheus --aggregator /tmp/tn-aggregator --pos-contracts pinned-contracts
       - run: docker build -f deploy/testnet/Dockerfile.rpc deploy/testnet -t testnet-rpc:test
       - run: docker run --rm --entrypoint python3 testnet-rpc:test -c 'import gateway; assert "eth_sign" not in gateway.PUBLIC'

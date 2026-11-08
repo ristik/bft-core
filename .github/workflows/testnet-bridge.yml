@@ -71,9 +71,7 @@ jobs:
           ref: ${{ steps.pins.outputs.nbp }}
           path: pinned-nbp
       - run: sudo apt-get update && sudo apt-get install -y clang libclang-dev libssl-dev pkg-config protobuf-compiler
-      - uses: foundry-rs/foundry-toolchain@v1
-        with:
-          version: v1.8.1   # cast: offline signing of the rehearsal's transactions
+      - uses: ./.github/actions/foundry   # Foundry v1.8.1 (digest-pinned archive): cast, offline signing of the rehearsal's transactions
       - uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
