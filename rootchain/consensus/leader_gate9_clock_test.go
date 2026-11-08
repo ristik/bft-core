@@ -1,7 +1,9 @@
 package consensus
 
 import (
+	"context"
 	"fmt"
+	"runtime/trace"
 	"slices"
 	"sync"
 	"testing"
@@ -70,6 +72,10 @@ func startRoundClock(m *ConsensusManager) *roundClock {
 				l := leaders[r]
 				delete(leaders, r)
 				c.rounds = append(c.rounds, clockRound{round: r, start: lastAt, end: now, certified: qc >= r, skipped: round-last > 1, leader: l.leader, known: l.known})
+				if d := now.Sub(lastAt); d > 900*time.Millisecond && trace.IsEnabled() {
+					// a marker at the end of a slow round, for a runtime trace (-test.trace) to be read back from: no cost without one
+					trace.Log(context.Background(), "slow-round", fmt.Sprintf("%d %d", r, d.Nanoseconds()))
+				}
 			}
 			c.mu.Unlock()
 			last, lastAt = round, now
