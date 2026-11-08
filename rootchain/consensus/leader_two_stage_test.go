@@ -53,9 +53,30 @@ func TestRollingRestartStageTwoWaitsForTheNextRun(t *testing.T) {
 	lag := 4*uint64(len(c.nodes)) + 4
 	names := c.all()
 	slices.SortFunc(names, func(a, b string) int { return strings.Compare(c.id(a).String(), c.id(b).String()) }) // the selector's member order
-	stageTwo := twoStageRun(t, c, names[0], names[1], 1+lag+3*leader.RecoverySpacing+128, 1)
-	require.GreaterOrEqual(t, stageTwo, uint64(254), "the enumeration's outcome for this order and head is 255 rounds")
-	require.LessOrEqual(t, stageTwo, uint64(256), "the enumeration's outcome for this order and head is 255 rounds")
+	got := twoStageRun(t, c, names[0], names[1], 1+lag+3*leader.RecoverySpacing+128, 1)
+	require.GreaterOrEqual(t, got.stageTwo, uint64(254), "the enumeration's outcome for this order and head is 255 rounds")
+	require.LessOrEqual(t, got.stageTwo, uint64(256), "the enumeration's outcome for this order and head is 255 rounds")
+}
+
+// #886 gate 7, the long second traversal: the same warmed head as above, but D owns the recovery run after the first live one. In the fourth period the
+// stretch ends unknown and the run of the fourth member in id order commits the repeat; stage two's stretch has no live triple either (the stale table
+// still has D in every third slot), so the fresh request waits through the next run, D's (four full timers), for the one after it, X's: about 511 rounds,
+// the phase dev4 saw twice at T = 2 s (#922) and the reason stage two has the dead run's allowance. It requires that run sequence, not only the count.
+// Takes about 45 minutes at T = 2 s: set BFT_GATE7_LONG=1; BFT_TRACE_T=10 is the production timer (the host run).
+func TestRollingRestartStageTwoTraversesADeadRun(t *testing.T) {
+	if os.Getenv("BFT_GATE7_LONG") == "" {
+		t.Skip("set BFT_GATE7_LONG=1: over 900 warm rounds and then about 630 rounds of the two stages")
+	}
+	t.Parallel()
+	q4Slot(t)
+	c := newPhaseLockLive(t, twoStageT(t))
+	lag := 4*uint64(len(c.nodes)) + 4
+	names := c.all()
+	slices.SortFunc(names, func(a, b string) int { return strings.Compare(c.id(a).String(), c.id(b).String()) }) // the selector's member order
+	// D first in id order: it owns the run of the fifth period, right after the fourth member's; X second owns the sixth
+	got := twoStageRun(t, c, names[1], names[0], 1+lag+3*leader.RecoverySpacing+128, max(1, uint64(traceEnvInt(t, "BFT_TRACE_R_ROUNDS", 1))))
+	require.GreaterOrEqual(t, got.stageTwo, uint64(2*leader.RecoverySpacing-8), "stage two waits through D's run for X's")
+	require.Equal(t, []string{"live", "D", "X"}, got.ownersAfterHead(3), "the runs: the first live one commits the repeat, then D's, then X's, runs %v", got.runs)
 }
 
 // twoStageT is T for the two-stage runs: BFT_TRACE_T seconds, 2 by default. Set TMPDIR to the disk being measured.
@@ -69,8 +90,23 @@ func twoStageHold(t *testing.T) time.Duration {
 	return time.Duration(traceEnvInt(t, "BFT_TRACE_R_MS", 0)) * time.Millisecond
 }
 
-// twoStageRun warms the cluster with X down to warm rounds past the anchor, then runs the shape; hold is R in root rounds after the commit. It returns stage two's rounds.
-func twoStageRun(t *testing.T, c *q4bLive, x, d string, warm, hold uint64) uint64 {
+// twoStageResult is what twoStageRun saw: the two stages in rounds and every recovery run from the head, as round:owner (D, X or live).
+type twoStageResult struct {
+	stageOne, stageTwo uint64
+	runs               []string
+}
+
+// ownersAfterHead is the owners of the first k recovery runs.
+func (r twoStageResult) ownersAfterHead(k int) (out []string) {
+	for _, run := range r.runs[:min(k, len(r.runs))] {
+		out = append(out, run[strings.Index(run, ":")+1:])
+	}
+	return out
+}
+
+// twoStageRun warms the cluster with X down to warm rounds past the anchor, then runs the shape; hold is R in root rounds after the commit.
+// It logs every wall time against its own origin, by UTC time: X's return, the request held, the repeat's commit, the fresh request, the certificate.
+func twoStageRun(t *testing.T, c *q4bLive, x, d string, warm, hold uint64) twoStageResult {
 	t.Helper()
 	const noDeadRun, withDeadRun, joint = 281, 541, 822
 	n := uint64(len(c.nodes))
@@ -81,20 +117,18 @@ func twoStageRun(t *testing.T, c *q4bLive, x, d string, warm, hold uint64) uint6
 	repeats := map[uint64]bool{} // every round the filter saw a T2 repeat proposed in, whichever block ends up certified
 	base := c.net.filter
 	c.net.filter = func(from, to peer.ID, msg any) bool {
-		if withhold.Load() {
-			// X's votes count for the target's block alone until the live run, past the covered rounds: the run's own votes need X
-			if v, ok := msg.(*abdrc.VoteMsg); ok && from == c.id(x) && v.VoteInfo.RoundNumber != target.Load() && v.VoteInfo.RoundNumber <= target.Load()+lag {
-				return true
-			}
-			if p, ok := msg.(*abdrc.ProposalMsg); ok && p.Block.Payload != nil {
-				for _, req := range p.Block.Payload.Requests {
-					if req.CertReason == drctypes.T2Timeout {
-						repeatMu.Lock()
-						repeats[p.Block.Round] = true
-						repeatMu.Unlock()
-					}
+		if p, ok := msg.(*abdrc.ProposalMsg); ok && p.Block.Payload != nil {
+			for _, req := range p.Block.Payload.Requests {
+				if req.CertReason == drctypes.T2Timeout {
+					repeatMu.Lock()
+					repeats[p.Block.Round] = true
+					repeatMu.Unlock()
 				}
 			}
+		}
+		// X's votes count for the target's block alone until the live run, past the covered rounds: the run's own votes need X
+		if v, ok := msg.(*abdrc.VoteMsg); ok && withhold.Load() && from == c.id(x) && v.VoteInfo.RoundNumber != target.Load() && v.VoteInfo.RoundNumber <= target.Load()+lag {
+			return true
 		}
 		return base(from, to, msg)
 	}
@@ -122,7 +156,18 @@ func twoStageRun(t *testing.T, c *q4bLive, x, d string, warm, hold uint64) uint6
 	target.Store(1 << 62)
 	withhold.Store(true)
 	c.stop(d)
-	head, _, _ := m(ingress).blockStore.LeaderHead()
+	// the shape starts from where the survivors' commits stopped: blocks in flight at the stop can still commit (at T = 10 s the repeat of the round
+	// after the head committed before the request was held, run 1 on the host), so read the head and the shard's certificate only once the
+	// committed head has stood still for a while
+	headNow := func() uint64 { h, _, _ := m(ingress).blockStore.LeaderHead(); return h }
+	quiet := max(3*time.Second, 6*c.nodes[0].r.manager.params.BlockRate)
+	for at, since, deadline := headNow(), time.Now(), time.Now().Add(q4bDeadline); time.Since(since) < quiet; time.Sleep(20 * time.Millisecond) {
+		require.True(t, time.Now().Before(deadline), "the survivors' committed head settles after the stop")
+		if h := headNow(); h != at {
+			at, since = h, time.Now()
+		}
+	}
+	head := headNow()
 	leaderOf := func(round uint64) peer.ID {
 		l, err := m(ingress).leaderSelector.GetLeaderForRound(round)
 		if err != nil {
@@ -142,6 +187,7 @@ func twoStageRun(t *testing.T, c *q4bLive, x, d string, warm, hold uint64) uint6
 	require.NotZero(t, r, "a live pair among the covered rounds")
 	target.Store(r)
 	c.start(x)
+	returned := time.Now()
 	start, startUC := c.state(ingress).Round, lastUC()
 	t.Logf("head %d, covered to %d, target %d, start %d", head, head+lag, r, start)
 	// the round trace of the design's gate 7, from the ingress's view: unknown leader, or a known one that got a QC, or a known one that did not, which is a full timer
@@ -170,27 +216,26 @@ func twoStageRun(t *testing.T, c *q4bLive, x, d string, warm, hold uint64) uint6
 	}
 	stage = 1 // from the stop: the wait for the QC is where most of stage one's full timers are
 	require.Eventually(t, func() bool { sample(); return c.state(ingress).HighQC == r }, q4bDeadline+time.Duration(lag+2)*c.nodes[0].r.manager.params.LocalTimeout, 5*time.Millisecond, "the block of round %d is certified, and no other", r)
-	repeatMu.Lock()
-	certifiedRepeat := repeats[r]
-	repeatMu.Unlock()
-	require.True(t, certifiedRepeat, "the certified block of round %d is a repeat", r)
+	// the shape needs a T2 repeat in round r's certified, uncommitted branch: in r's own block or in a certified ancestor above the committed head
+	// (which one depends on where the shard's T2 period falls against the stop). It is checked on the committed chain once the run commits.
 	require.EqualValues(t, startUC, lastUC())
 	hash := bytes.Repeat([]byte{0x81}, 32)
 	held := phaseLockProof(t, c, c.nodes[c.idx(ingress)].r, hash)
 	require.NotNil(t, held)
 	require.NoError(t, m(ingress).RequestCertification(context.Background(), *held))
-	t.Logf("round %d certified with its repeat, request held at round %d", r, c.state(ingress).Round)
+	heldAt := time.Now()
+	t.Logf("round %d certified with its repeat, request held at round %d, %s after X returned", r, c.state(ingress).Round, heldAt.Sub(returned).Round(time.Millisecond))
 
 	stage1 := start + rollingRestartRounds(n)
-	began := time.Now()
 	for lastUC() == startUC {
 		sample()
 		require.LessOrEqual(t, c.state(ingress).Round, stage1, "stage one")
 		time.Sleep(5 * time.Millisecond)
 	}
-	committed := c.state(ingress).Round
+	committed, committedAt := c.state(ingress).Round, time.Now()
 	require.False(t, c.certifiedHash(ingress, hash))
-	t.Logf("repeat committed by round %d, %d after start, limit %d, %s", committed, committed-start, stage1-start, time.Since(began).Round(time.Second))
+	t.Logf("repeat committed by round %d, %d rounds after X returned (round %d), limit %d; %s after X returned, %s after the request was held", committed, committed-start, start, stage1-start,
+		committedAt.Sub(returned).Round(time.Millisecond), committedAt.Sub(heldAt).Round(time.Millisecond))
 	// exactly one certified block after the stop: the committed chain has r and then only the run, past the covered rounds
 	var after []uint64
 	require.Eventually(t, func() bool {
@@ -206,6 +251,18 @@ func twoStageRun(t *testing.T, c *q4bLive, x, d string, warm, hold uint64) uint6
 		return len(after) >= 2
 	}, 10*time.Second, 5*time.Millisecond, "the run's commit reaches the chain")
 	require.Equal(t, r, after[0], "the first committed block after the stop, of %v", after)
+	var repeatAt []uint64
+	c.mu.Lock()
+	repeatMu.Lock()
+	for round := range c.chains[c.idx(ingress)] {
+		if round > head && round <= r && repeats[round] {
+			repeatAt = append(repeatAt, round)
+		}
+	}
+	repeatMu.Unlock()
+	c.mu.Unlock()
+	require.NotEmpty(t, repeatAt, "a T2 repeat in the committed branch above the head %d, up to round %d", head, r)
+	t.Logf("the run committed the T2 repeat of round %v (head %d, target %d)", repeatAt, head, r)
 	require.Greater(t, after[1], head+lag, "no other certified block before the run, of %v", after)
 	view, enabled, err := m(ingress).RequestView(q3fixture.PartitionID, types.ShardID{})
 	require.NoError(t, err)
@@ -229,14 +286,14 @@ func twoStageRun(t *testing.T, c *q4bLive, x, d string, warm, hold uint64) uint6
 		require.False(t, c.certifiedHash(ingress, hash), "certified with no fresh request: the held proof was not stale")
 		time.Sleep(5 * time.Millisecond)
 	}
-	began = time.Now()
 	sends, sentUnder, freshAt, stage2 := 0, uint64(0), uint64(0), uint64(0)
+	var freshSent time.Time
 	for !c.certifiedHash(ingress, hash) {
 		sample()
 		if under := lastUC(); sends == 0 || under != sentUnder {
 			if proof := phaseLockProof(t, c, c.nodes[c.idx(ingress)].r, hash); proof != nil && m(ingress).RequestCertification(context.Background(), *proof) == nil {
 				if sends == 0 {
-					freshAt = c.state(ingress).Round
+					freshAt, freshSent = c.state(ingress).Round, time.Now()
 					stage2 = freshAt + rollingRestartRounds(n)
 				}
 				sends++
@@ -249,7 +306,7 @@ func twoStageRun(t *testing.T, c *q4bLive, x, d string, warm, hold uint64) uint6
 		require.LessOrEqual(t, c.state(ingress).Round, committed+hold+rollingRestartRounds(n), "stage two: the fresh request was never accepted")
 		time.Sleep(5 * time.Millisecond)
 	}
-	end := c.state(ingress).Round
+	end, certifiedAt := c.state(ingress).Round, time.Now()
 	selector, ok := m(ingress).leaderSelector.(*leader.EpochReputation)
 	require.True(t, ok)
 	// every recovery run on the way, its owner read from the selector, and the allocation: one stage has the dead run's allowance at most, the other the plain one
@@ -280,7 +337,11 @@ func twoStageRun(t *testing.T, c *q4bLive, x, d string, warm, hold uint64) uint6
 		return noDeadRun
 	}
 	t.Logf("T=%s, R held for %d rounds and at least %s after the commit was seen", c.nodes[0].r.manager.params.LocalTimeout, hold, holdFor)
-	t.Logf("fresh request at round %d after R=%d rounds, certified by %d: stage one %d rounds, stage two %d, total %d of %d, %s, %d sends", freshAt, hold, end, stageOne, stageTwo, stageOne+stageTwo, joint, time.Since(began).Round(time.Second), sends)
+	t.Logf("fresh request at round %d after R=%d rounds, certified by %d: stage one %d rounds, stage two %d, total %d of %d, %d sends", freshAt, hold, end, stageOne, stageTwo, stageOne+stageTwo, joint, sends)
+	utc := func(at time.Time) string { return at.UTC().Format("15:04:05.000") }
+	t.Logf("wall clock, UTC: X returned %s, request held %s, repeat committed %s, fresh request %s, certified %s", utc(returned), utc(heldAt), utc(committedAt), utc(freshSent), utc(certifiedAt))
+	t.Logf("wall clock, each from its own origin: X returned to certified %s; request held to certified %s; held to repeat committed %s; R (commit seen to fresh request) %s; fresh request to certified %s",
+		certifiedAt.Sub(returned).Round(time.Millisecond), certifiedAt.Sub(heldAt).Round(time.Millisecond), committedAt.Sub(heldAt).Round(time.Millisecond), freshSent.Sub(committedAt).Round(time.Millisecond), certifiedAt.Sub(freshSent).Round(time.Millisecond))
 	t.Logf("recovery runs %v; rounds by class, stage one %+v, stage two %+v", runs, classes[1], classes[2])
 	require.LessOrEqual(t, deadIn[1]+deadIn[2], 1, "a dead run in each stage: %v", runs)
 	require.LessOrEqual(t, stageOne, limit(deadIn[1]), "stage one, runs %v", runs)
@@ -289,5 +350,5 @@ func twoStageRun(t *testing.T, c *q4bLive, x, d string, warm, hold uint64) uint6
 	for _, name := range survivors {
 		require.False(t, m(name).recovery.InRecovery(), "%s entered state recovery with no missing certified state", name)
 	}
-	return stageTwo
+	return twoStageResult{stageOne: stageOne, stageTwo: stageTwo, runs: runs}
 }
