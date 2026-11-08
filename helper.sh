@@ -95,6 +95,11 @@ function collect_shard_conf_args() {
   done
 }
 
+# port_listening <port>: something accepts a TCP connection on the port. No lsof needed (the Linux test host has none: an lsof-based wait never ends).
+function port_listening() {
+  (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null || (exec 3<>"/dev/tcp/localhost/$1") 2>/dev/null
+}
+
 function start_root_nodes() {
   # use root node 1 as bootstrap node
   local bootNode=""
@@ -156,10 +161,17 @@ function start_root_nodes() {
     nodePID=$!
     echo "$nodePID" > "test-nodes/root$i/pid"
     # wait until node starts listening on RPC port OR exits because of some error
-    until lsof -i:$rpcPort >/dev/null || ! ps -p $nodePID >/dev/null
+    # bounded (ROOT_START_WAIT_S, default 120): a port that never opens must fail the start, not hang it
+    local waited=0
+    until port_listening "$rpcPort" || ! ps -p $nodePID >/dev/null
     do
       echo -n "."
       sleep 0.200
+      waited=$((waited + 1))
+      if [ "$waited" -ge $(( ${ROOT_START_WAIT_S:-120} * 5 )) ]; then
+        echo "root$i RPC port $rpcPort not listening after ${ROOT_START_WAIT_S:-120} s" >&2
+        exit 1
+      fi
     done
 
     if ! ps -p $nodePID >/dev/null; then
