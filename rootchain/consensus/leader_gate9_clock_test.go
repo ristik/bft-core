@@ -146,9 +146,17 @@ func reportRho(t *testing.T, rounds []clockRound, runStart func(uint64) bool, de
 	t.Logf("unknown leader (not rho): %s; skipped by the poll: %d", durations(unknown, time.Second), skipped)
 	// The tax of the dead member: the window's time in rounds that did not certify, against its whole time. Over a window of whole
 	// cycles (a multiple of members*S rounds) it holds the same number of the dead member's runs wherever it starts.
+	// The rounds a poll skipped share one interval: it counts once, and as lost if any of its rounds did not certify.
+	rounds = slices.Clone(rounds)
 	var lost, all time.Duration
 	deadRuns := 0
-	for _, r := range rounds {
+	for i, r := range rounds {
+		if i+1 < len(rounds) && r.skipped && rounds[i+1].skipped && rounds[i+1].start.Equal(r.start) {
+			if !r.certified {
+				rounds[i+1].certified = false // the interval's verdict travels to its last round, which counts it
+			}
+			continue
+		}
 		all += r.d()
 		if !r.certified {
 			lost += r.d()

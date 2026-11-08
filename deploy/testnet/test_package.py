@@ -102,6 +102,71 @@ class B1Layout(unittest.TestCase):
                 root=svc['root%d'%i]['entrypoint']
                 self.assertIn('--q3-lane',root);self.assertIn('--b1-registry',root);self.assertEqual(root[root.index('--genesis-identities')+1],'/network/genesis-identities.json')
 
+class UtbProfile(unittest.TestCase):
+    """P1 live UTB source (briefs/pos-utb-live-source-plan.md, step 1): every root, shard node and the aggregator get the signed-history profile with the SAME pin,
+    which is passed as its own argument next to the mounted genesis entry; without a pin the package is exactly the one without the profile."""
+    PIN='0x'+'ab'*32
+    images={k:'sha256:'+'a'*64 for k in ['node','rpc','guard','signer']}
+    def topo(self,n,pin):
+        with tempfile.TemporaryDirectory() as tmp:
+            out=Path(tmp)/'tn-fixture';out.mkdir()
+            return generate.topology(out,n,{'root':['r%d'%i for i in range(n)],'evm':['e%d'%i for i in range(n)]},self.images,'captcha',(),30000000,False,'127.0.0.1',pin)
+    def flags(self,entry):
+        at=entry.index('--utb-genesis')
+        return entry[at:at+6]
+    def test_every_root_and_shard_node_carries_the_pin_and_its_own_store(self):
+        cfg=self.topo(4,self.PIN)
+        for i in (1,2,3,4):
+            for part in ('root','shard'):
+                entry=cfg['services']['%s%d'%(part,i)]['entrypoint']
+                self.assertEqual(self.flags(entry),['--utb-genesis','/network/utb-genesis.cbor','--utb-genesis-id',self.PIN,'--utb-entries-db','/state/utb-entries.db'],part+str(i))
+                state=[m for m in cfg['services']['%s%d'%(part,i)]['volumes'] if m.endswith(':/state')]
+                self.assertEqual(len(state),1,'the store lives on the entity\'s persistent volume')
+                self.assertNotIn(':ro',state[0])
+    def test_the_aggregator_gets_the_pin_and_a_writable_store_of_its_own(self):
+        agg=self.topo(4,self.PIN)['services']['aggregator']
+        env=agg['environment']
+        self.assertEqual((env['UTB_GENESIS_FILE'],env['UTB_GENESIS_ID'],env['UTB_ENTRIES_DB']),('/network/utb-genesis.cbor',self.PIN,'/utb/utb-entries.db'))
+        self.assertIn('./aggregator-utb:/utb',agg['volumes'])
+        self.assertIn('./aggregator:/state:ro',agg['volumes'],'the signing key mount stays read-only')
+        self.assertNotIn('UTB_BUNDLE_FILE',env,'a fresh chain starts from the genesis entry, not from a bundle')
+    def test_without_a_pin_the_package_is_the_one_without_the_profile(self):
+        plain,off=self.topo(4,None),self.topo(4,None)
+        self.assertEqual(plain,off)
+        for name,svc in plain['services'].items():
+            self.assertFalse(any(str(x).startswith('--utb') for x in svc['entrypoint']),name)
+        env=plain['services']['aggregator']['environment']
+        self.assertFalse([k for k in env if k.startswith('UTB_')])
+        self.assertNotIn('./aggregator-utb:/utb',plain['services']['aggregator']['volumes'])
+    def test_a_malformed_pin_is_refused(self):
+        for bad in ('ab'*32,'0x'+'AB'*32,'0x'+'ab'*31,'0x'):
+            with self.assertRaises(ValueError,msg=bad): self.topo(4,bad)
+    def test_a_joiner_entity_gets_the_profile_with_its_own_store(self):
+        four=self.topo(4,self.PIN);five=self.topo(5,self.PIN)
+        got=joiner.joiner_services(four,5,'r4','e4')
+        for name in ('root5','shard5'):
+            self.assertEqual(got[name],five['services'][name],name)
+            self.assertEqual(self.flags(got[name]['entrypoint'])[3],self.PIN)
+    def test_the_tool_derives_the_pin_the_package_passes(self):
+        """With the real ubft binary (skipped without one): the pin generate.py reads from `trust-base utb-manifest` is the genesis EntryID of the same trust base, and the manifest checks out."""
+        ubft=generate.REPO/'build/ubft'
+        if not ubft.is_file(): self.skipTest('build/ubft is not built')
+        import subprocess
+        with tempfile.TemporaryDirectory() as tmp:
+            home=Path(tmp)
+            ids=[]
+            for i in (1,2,3):
+                subprocess.run([str(ubft),'root-node','init','--home',str(home/('root%d'%i)),'--generate'],check=True,capture_output=True)
+            subprocess.run([str(ubft),'trust-base','generate','--home',str(home),'--epoch','1','--epoch-start','1','--network-id','3']+sum((['--node-info',str(home/('root%d/node-info.json'%i))] for i in (1,2,3)),[]),check=True,capture_output=True)
+            for i in (1,2,3): subprocess.run([str(ubft),'trust-base','sign','--home',str(home/('root%d'%i)),'--trust-base',str(home/'trust-base.json')],check=True,capture_output=True)
+            text=subprocess.run([str(ubft),'trust-base','utb-manifest','--trust-base',str(home/'trust-base.json'),'--out-dir',str(home/'utb')],check=True,capture_output=True,text=True).stdout
+            found=re.search(r'^utb genesis id +(0x[0-9a-f]{64})$',text,re.M)
+            self.assertTrue(found,text)
+            subprocess.run([str(ubft),'trust-base','utb-manifest','--check',str(home/'utb/utb-manifest.json')],check=True,capture_output=True)
+            self.assertTrue((home/'utb/utb-genesis.cbor').is_file())
+            self.assertEqual(generate.utb_node_flags(found.group(1))[3],found.group(1))
+
+
 class Aggregator(unittest.TestCase):
     def test_the_workflows_build_the_pinned_aggregator_go(self):
         for name in ('testnet-package.yml','testnet-rehearsal.yml','testnet-bridge.yml'):

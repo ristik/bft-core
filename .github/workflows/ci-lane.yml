@@ -224,9 +224,7 @@ jobs:
           nohup scripts/ci/sample-resources.sh "$RUNNER_TEMP/res/build-sources.tsv" 5 "$RUNNER_TEMP" >/dev/null 2>&1 &
           echo $! >"$RUNNER_TEMP/res/sampler.pid"
       - name: Install the pinned Foundry
-        run: |
-          scripts/ci/install-foundry.sh
-          echo "$HOME/.foundry/bin" >>"$GITHUB_PATH"
+        uses: ./.github/actions/foundry
       - name: Pinned sources (contracts with its forge build, the NBP driver, the JS SDK)
         run: scripts/ci/prepare-sources.sh "$RUNNER_TEMP/sources-out" "$RUNNER_TEMP/sources-work"
       - name: Resources of this job
@@ -288,6 +286,8 @@ jobs:
           nohup scripts/ci/sample-resources.sh "$RUNNER_TEMP/res/run-lane.tsv" 5 "$RUNNER_TEMP" >/dev/null 2>&1 &
           echo $! >"$RUNNER_TEMP/res/sampler.pid"
           { uname -a; nproc; free -m; df -h; echo "image ${ImageVersion:-?}"; } >"$RUNNER_TEMP/res/runner.txt"
+      - name: Pinned Foundry (cache restore and bounded-retry install; run-lane.sh reuses the verified archive)
+        uses: ./.github/actions/foundry
       - name: The lane
         env:
           CI_INJECT_FAILURE: ${{ needs.plan.outputs.inject }}
@@ -420,6 +420,8 @@ jobs:
           python3 scripts/ci/classify.py selftest
           scripts/ci/gate.sh selftest
           scripts/ci/check-pins.sh selftest
+          scripts/ci/install-foundry-selftest.sh
+          scripts/ci/install-foundry-selftest.sh
           scripts/ci/publish-selftest.sh
 
   lane-gate:

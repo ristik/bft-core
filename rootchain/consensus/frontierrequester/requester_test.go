@@ -6,6 +6,8 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+
+	"github.com/unicitynetwork/bft-core/rootchain/consensus/frontierclient"
 )
 
 type fixedClock struct{ now time.Time }
@@ -37,4 +39,11 @@ func TestReceiptExpiryAndReplacementInvalidateCopiesBeforeEvidenceAccess(t *test
 	r.clock = fixedClock{now: now.Add(-time.Second)}
 	r.generation = 2
 	require.ErrorIs(t, r.Validate(receipt), ErrInvalidated)
+}
+
+// Owner §49: the committee may have 256 roots and bootstrap freshness passes every root of the trust base as a peer
+// (configuredadmission.RootPeers), so the requester must accept as many peers as the frontier collector accepts roots.
+func TestMaxPeersCoversTheLargestCommittee(t *testing.T) {
+	require.Equal(t, frontierclient.MaxRoots, MaxPeers)
+	require.GreaterOrEqual(t, MaxPeers, 256)
 }

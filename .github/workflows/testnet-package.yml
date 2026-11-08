@@ -33,7 +33,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: ristik/aggregator-go
-          ref: edb2274deb29f2621ceb31836ac3585bc4806239
+          ref: 009974a72560c1f224fef99ada9fbf475f1488a7
           path: pinned-aggregator-go
       # cgo for secp256k1, no rocksdb tag (memory SMT, state in MongoDB), as build-images.py builds it; go.mod's newer toolchain is fetched by GOTOOLCHAIN=auto
       - run: CGO_ENABLED=1 go build -C pinned-aggregator-go -trimpath -o /tmp/tn-aggregator ./cmd/aggregator
@@ -43,10 +43,8 @@ jobs:
           ref: 7b510f6b5a9cf3987ccc5d7dc77d39f33de12330
           path: pinned-contracts
           submodules: recursive
-      - uses: foundry-rs/foundry-toolchain@v1
-        with:
-          # the contracts' own CI pin: the registry's runtime bytecode and code hash are protocol surface
-          version: v1.8.1
+      # Foundry v1.8.1 (the contracts' own CI pin: the registry's runtime bytecode and code hash are protocol surface), the digest-pinned release archive
+      - uses: ./.github/actions/foundry
       - run: python3 deploy/testnet/validate-generation.py --ubft pinned-bft/build/ubft --keygen /tmp/tn-keygen --b1genesis /tmp/tn-b1genesis --check-prometheus --aggregator /tmp/tn-aggregator --pos-contracts pinned-contracts
       - run: docker build -f deploy/testnet/Dockerfile.rpc deploy/testnet -t testnet-rpc:test
       - run: docker run --rm --entrypoint python3 testnet-rpc:test -c 'import gateway; assert "eth_sign" not in gateway.PUBLIC'
