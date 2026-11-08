@@ -298,9 +298,12 @@ func fiveReturnLeads(t *testing.T, c *q4bLive, selector *leader.EpochReputation,
 
 // #886 gate 6, a late failure: five members run and every sample names all five; one fails while it collects the votes of the current proposal (the
 // next leader), so that round and its own fail. The active set changes once the cutoffs pass the failure: from then on the failed member leads only its
-// recovery runs, shard requests certify within the normal-phase limits, and when it returns it leads a committed block again. BFT_GATE6_LATE_ALL=1
-// fails each member in turn.
+// recovery runs, shard requests certify within the normal-phase limits, and when it returns it leads a committed block again. About four minutes:
+// set BFT_GATE6_LATE=1; BFT_GATE6_LATE_ALL=1 fails each member in turn.
 func TestFiveManagerLateCollectorFailure(t *testing.T) {
+	if os.Getenv("BFT_GATE6_LATE") == "" && os.Getenv("BFT_GATE6_LATE_ALL") == "" {
+		t.Skip("set BFT_GATE6_LATE=1: a five-root cluster for about four minutes")
+	}
 	names := []string{"H", "a", "b", "c", "d"}
 	victims := []string{"b"}
 	if os.Getenv("BFT_GATE6_LATE_ALL") != "" {

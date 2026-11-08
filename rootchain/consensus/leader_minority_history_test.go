@@ -3,6 +3,7 @@ package consensus
 import (
 	"bytes"
 	"context"
+	"os"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -242,7 +243,11 @@ func TestMinorityWithoutHistoryFollowsTheQuorum(t *testing.T) {
 //
 // Counting votes instead of weight would get both wrong: one member is at most f by count, and two of five are more. T is 5 s, so a round at
 // certificate speed is far from a round that waits for the timer even on a loaded machine.
+// Two five-root clusters for about four minutes (the second needs the rescue after the window): set BFT_GATE4_WEIGHTED=1.
 func TestWeightedTimeoutEscalationOfMembersWithoutHistory(t *testing.T) {
+	if os.Getenv("BFT_GATE4_WEIGHTED") == "" {
+		t.Skip("set BFT_GATE4_WEIGHTED=1: two five-root clusters, about four minutes")
+	}
 	const timeout = 5 * time.Second
 	weights := []uint64{3, 2, 2, 2, 2}
 	names := []string{"H", "a", "b", "c", "d"}
