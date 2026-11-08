@@ -1141,7 +1141,7 @@ class Rehearsal:
         self.expect(not bad, f'every restore at the package limit ran without an abort, a pthread_create failure or a pids.events max: failed {bad}', json.dumps(summary['package']))
         self.expect(all(r['peakOrMax'] < r['pidsLimit'] for r in base), 'every repeat stayed under the package pid limit', json.dumps(summary['package']))
         lowest = min(low, key=lambda r: r['pidsLimit'] or 0)
-        self.expect(lowest['pthreadCreateFailed'], f'CONTROL INVALID: no pthread_create failure at the lowest limit {lowest["pidsLimit"]}; the repeats above prove nothing about the limit', json.dumps(summary['controls']))
+        self.expect(lowest['pthreadCreateFailed'], f'the control reproduces pthread_create failed at its lowest limit {lowest["pidsLimit"]} (if not, the control is INVALID and the repeats prove nothing about the limit)', json.dumps(summary['controls']))
         crashed = [r for r in low if r['pthreadCreateFailed']]
         self.expect(all(r['freshDirRefusal'] for r in crashed), 'a crashed restore is refused on restart until the directory is fresh (the documented partial-restore refusal)', json.dumps(summary['controls']))
         self.restore_joiner(i, tag='final')
