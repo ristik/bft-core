@@ -64,7 +64,7 @@ AGGREGATOR_PORT, AGGREGATOR_BFT_PORT = 8080, 9200   # in validator 1's namespace
 # aggregator-go needs MongoDB as a replica set (transactions and change streams): one member, initiated by the healthcheck on its first run.
 MONGO_REPLICA_SET = "try { quit(rs.status().myState === 1 ? 0 : 1) } catch (e) { rs.initiate({_id: 'rs0', members: [{_id: 0, host: 'mongo:27017'}]}); quit(1) }"
 
-def aggregator_environment(root_boot, rpc_bind, utb=None):
+def aggregator_environment(root_boot, rpc_bind, utb=None, utb_aggregator='integration'):
     """aggregator-go reads its configuration from the environment. One full-range shard runs SHARDING_MODE=standalone with BFT (aggregator-go refuses
     bft-shard mode for the empty shard ID, scripts/lib/agg-lib.sh). Its signing key is the shard-node key file; BFT_RPC_ADDRESS is root 1's operator
     endpoint, which serves the trust bases of later root epochs and is loopback-only: hence the aggregator shares validator 1's namespace."""
@@ -77,7 +77,20 @@ def aggregator_environment(root_boot, rpc_bind, utb=None):
         'BFT_SHARD_CONF_FILE':'/network/aggregator-conf.json','BFT_TRUST_BASE_FILES':'/network/trust-base.json',
         # the integration aggregator's UTB mode (enabled by the pin; the genesis entry file is the fresh chain's history; its own append-only store). In this mode it uses neither the V1
         # trust-base files nor root REST for authority: the history it verifies and routes from comes from the roots (V3 attachments and GetTrustBase)
-        **({'UTB_GENESIS_FILE':UTB_GENESIS_FILE,'UTB_GENESIS_ID':utb,'UTB_ENTRIES_DB':UTB_AGGREGATOR_DIR+'/utb-entries.db'} if utb else {})}
+        **(utb_aggregator_environment(utb,utb_aggregator) if utb else {})}
+
+TRUST_BASE_NETWORK_ID = 3   # `trust-base generate --network-id`: the package's network
+UTB_BUNDLE_FILE = '/network/utb-bundle.cbor'
+
+def utb_aggregator_environment(pin, variant):
+    """The aggregator's side of the UTB profile. The integration aggregator (ristik/aggregator-go integration/enshrined-evm) starts from the genesis entry and keeps its own append-only
+    store. The upstream-facing aggregator (Mongo trust-base history, the fork's main) starts from a tagged BUNDLE (here the one-entry bundle of the genesis, pin passed separately) and
+    the network it expects; its history is the durable tail in its own MongoDB. The two read the same names with different meaning (owner-questions Q25): each is configured explicitly."""
+    if variant == 'upstream':
+        return {'UTB_BUNDLE_FILE':UTB_BUNDLE_FILE,'UTB_GENESIS_ID':pin,'UTB_EXPECTED_NETWORK':str(TRUST_BASE_NETWORK_ID)}
+    if variant == 'integration':
+        return {'UTB_GENESIS_FILE':UTB_GENESIS_FILE,'UTB_GENESIS_ID':pin,'UTB_ENTRIES_DB':UTB_AGGREGATOR_DIR+'/utb-entries.db'}
+    raise ValueError('unknown UTB aggregator variant '+repr(variant))
 
 def write(path, obj):
     path.write_text(json.dumps(obj, indent=2) + '\n')
@@ -93,7 +106,7 @@ def utb_node_flags(pin):
     if not re.fullmatch(r'0x[0-9a-f]{64}', pin): raise ValueError('the UTB genesis EntryID must be 0x followed by 64 lowercase hex digits')
     return ['--utb-genesis', UTB_GENESIS_FILE, '--utb-genesis-id', pin, '--utb-entries-db', UTB_ENTRIES_DB]
 
-def topology(out, n, ids, images, captcha, ureth_flags=(), max_gas=30000000, with_pos=False, rpc_bind=operator_rpc.DEFAULT_BIND, utb=None):
+def topology(out, n, ids, images, captcha, ureth_flags=(), max_gas=30000000, with_pos=False, rpc_bind=operator_rpc.DEFAULT_BIND, utb=None, utb_aggregator='integration'):
     """JSON is a YAML subset, accepted directly by Docker Compose. `utb`: the pinned EntryID of the UTB genesis entry (0x..), or None for the package without the signed history."""
     services = {}
     def service(name, image, command, mounts=(), memory='256m', cpu=0.5, networks=None, pod=None, **extra):
@@ -162,8 +175,8 @@ def topology(out, n, ids, images, captcha, ureth_flags=(), max_gas=30000000, wit
     services['mongo']['pids_limit']=256   # mongod runs ~85 threads idle, plus one per connection (the aggregator's pool is 20)
     services['mongo']['tmpfs'].append('/data/configdb:size=1m,mode=1777')   # the image declares it a volume: unused here, and no anonymous volume per recreate
     services['mongo']['stop_grace_period']='30s'   # a clean mongod shutdown before backup.py archives the stopped generation
-    service('aggregator',node,['aggregator'],['./aggregator:/state:ro',network]+(['./aggregator-utb:'+UTB_AGGREGATOR_DIR] if utb else []),memory='512m',cpu=0.75,pod='pod1',
-        environment=aggregator_environment(root_boot,rpc_bind,utb),depends_on={'mongo':{'condition':'service_healthy'}})
+    service('aggregator',node,['aggregator'],['./aggregator:/state:ro',network]+(['./aggregator-utb:'+UTB_AGGREGATOR_DIR] if utb and utb_aggregator == 'integration' else []),memory='512m',cpu=0.75,pod='pod1',
+        environment=aggregator_environment(root_boot,rpc_bind,utb,utb_aggregator),depends_on={'mongo':{'condition':'service_healthy'}})
     service('rpc',images['rpc'],['python3','-u','gateway.py'],[network],memory='128m',networks=['validators','edge'],environment={'TRUSTED_PROXY_IP':'172.30.89.1'},
         ports=['127.0.0.1:8545:8545'],healthcheck={'test':['CMD','python3','-c',"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8545/healthz', timeout=10)"],'interval':'30s','timeout':'12s','retries':3})
     service('relay',images['guard'],['python3','-u','relay.py'],['./network/network.json:/config/network.json:ro'],memory='128m',networks=['validators','faucet'])
@@ -197,6 +210,7 @@ def main():
     p.add_argument('--pos-cadence-rounds',type=int,default=pos.CADENCE_ROUNDS,help='election cadence: ordinary root rounds after the last acknowledged rotation')
     p.add_argument('--pos-cadence-seconds',type=int,default=pos.CADENCE_SECONDS,help='election cadence: UC seconds after the last acknowledged rotation')
     p.add_argument('--utb',action='store_true',help='the signed trust-base entry (UTB) profile: the roots produce and serve the signed history, shard nodes and the aggregator verify it from the genesis entry pinned in the manifest')
+    p.add_argument('--utb-aggregator',choices=('integration','upstream'),default='integration',help='with --utb: which aggregator the images carry (build-images.py --aggregator-variant): the integration aggregator (genesis entry file, own store) or the upstream-facing one (one-entry bundle, expected network, history in its MongoDB)')
     p.add_argument('--captcha-sitekey',required=True)
     p.add_argument('--captcha-secret-file',required=True,type=Path)
     a=p.parse_args()
@@ -218,7 +232,10 @@ def main():
     if not re.fullmatch(r'tn-[a-z0-9][a-z0-9_-]*',out.name): p.error('generation directory name must be tn- followed by lowercase letters/digits/dashes')
     if out.exists(): p.error('output exists: choose a new generation directory')
     records=json.loads(a.images.read_text())
-    if records['sources'] != PINS: p.error('image source pins differ')
+    expected_sources = dict(PINS)
+    if a.utb_aggregator == 'upstream': expected_sources['aggregator-go'] = PINS['aggregator-go-upstream']
+    if a.utb_aggregator != 'integration' and not a.utb: p.error('--utb-aggregator needs --utb')
+    if records['sources'] != expected_sources: p.error('image source pins differ'+(' (build-images.py --aggregator-variant upstream for the upstream-facing aggregator)' if a.utb_aggregator == 'upstream' else ''))
     if any(not re.fullmatch(r'sha256:[0-9a-f]{64}',records['images'].get(k,'')) for k in ('node','guard','signer','rpc')):
         p.error('images must be immutable local image IDs from build-images.py')
     ubft=str(a.ubft.resolve())
@@ -263,7 +280,13 @@ def main():
                 shutil.copy2(home/'utb/utb-genesis.cbor',out/'network/utb-genesis.cbor')
                 shutil.copy2(home/'utb/utb-manifest.json',out/'network/utb-manifest.json')
                 (out/'network/utb-genesis.id').write_text(utb_pin+'\n')
-                (out/'aggregator-utb').mkdir()   # the aggregator's append-only history store (its other mount is read-only)
+                if a.utb_aggregator == 'upstream':
+                    # the one-entry release bundle (the genesis, tagged and verified against the pin) from the tool that owns the format; the aggregator's history is its MongoDB
+                    cli('trust-base','utb-export','--utb-genesis',home/'utb/utb-genesis.cbor','--utb-genesis-id',utb_pin,'--utb-entries-db',home/'utb/export.db','--out',home/'utb/utb-bundle.cbor')
+                    cli('trust-base','utb-verify','--bundle',home/'utb/utb-bundle.cbor','--utb-genesis-id',utb_pin)
+                    shutil.copy2(home/'utb/utb-bundle.cbor',out/'network/utb-bundle.cbor')
+                else:
+                    (out/'aggregator-utb').mkdir()   # the aggregator's append-only history store (its other mount is read-only)
             cli('shard-node','init','--home',out/'aggregator','--generate')
             for i in range(1,a.validators+1):
                 (out/f'validator{i}').mkdir()
@@ -406,11 +429,13 @@ def main():
             validator_rpc_urls=[f'http://ureth{i}:8545' for i in range(1,a.validators+1)],captcha_sitekey=a.captcha_sitekey)
         write(out/'network/network.json',network)
         flags=[*flags,'--unicity.genesis-commitment='+genesis_commitment(json.loads((home/'genesis.json').read_text()))]
-        write(out/'compose.yaml',topology(out,a.validators,{'root':roots,'evm':evms},records['images'],a.captcha_sitekey,flags,max_gas,bool(genesis),a.rpc_bind,utb_pin))
+        write(out/'compose.yaml',topology(out,a.validators,{'root':roots,'evm':evms},records['images'],a.captcha_sitekey,flags,max_gas,bool(genesis),a.rpc_bind,utb_pin,a.utb_aggregator))
         manifest={'offline_validation_only':a.offline_validation,'generation':out.name,'chain_id':a.chain_id,'genesis_hash':'0x'+block,'validators':a.validators,'operator_rpc':{'bind':a.rpc_bind,'root_port':operator_rpc.ROOT_PORT,'shard_port':operator_rpc.SHARD_PORT},
             'faucet_address':next(iter(alloc)), 'artifacts':records,
             'utb':({'genesis_id':utb_pin,'genesis_sha256':hashlib.sha256((out/'network/utb-genesis.cbor').read_bytes()).hexdigest(),'genesis_file':'network/utb-genesis.cbor',
-                    'aggregator_store':'aggregator-utb'} if utb_pin else None),
+                    'aggregator':a.utb_aggregator,
+                    **({'bundle_file':'network/utb-bundle.cbor','bundle_sha256':hashlib.sha256((out/'network/utb-bundle.cbor').read_bytes()).hexdigest(),'expected_network':TRUST_BASE_NETWORK_ID}
+                       if a.utb_aggregator == 'upstream' else {'aggregator_store':'aggregator-utb'})} if utb_pin else None),
             'pos':({'genesis_assignment':genesis.assignment,'first_pass_assignment':genesis.first,'custody':genesis.deployment['custody'],'election':genesis.deployment['election'],
                     'contracts':PINS['contracts'],'owner_keys':'pos-owner-keys','cadence_rounds':a.pos_cadence_rounds,'cadence_seconds':a.pos_cadence_seconds} if genesis else None),
             'authority_status':{str(i):json.loads(authority(i,'status','--operator-socket',out/f'validator{i}/auth/operator.sock','--operator-credential',out/f'validator{i}/auth/operator.cred')) for i in range(1,a.validators+1)} if not a.offline_validation else {},

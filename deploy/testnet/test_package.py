@@ -130,6 +130,32 @@ class UtbProfile(unittest.TestCase):
         self.assertIn('./aggregator-utb:/utb',agg['volumes'])
         self.assertIn('./aggregator:/state:ro',agg['volumes'],'the signing key mount stays read-only')
         self.assertNotIn('UTB_BUNDLE_FILE',env,'a fresh chain starts from the genesis entry, not from a bundle')
+    def test_the_upstream_facing_aggregator_gets_the_bundle_pin_and_network_and_no_bolt_store(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out=Path(tmp)/'tn-fixture';out.mkdir()
+            roots,evms=['r%d'%i for i in range(4)],['e%d'%i for i in range(4)]
+            cfg=generate.topology(out,4,{'root':roots,'evm':evms},self.images,'captcha',(),30000000,False,'127.0.0.1',self.PIN,'upstream')
+        agg=cfg['services']['aggregator']
+        env=agg['environment']
+        self.assertEqual((env['UTB_BUNDLE_FILE'],env['UTB_GENESIS_ID'],env['UTB_EXPECTED_NETWORK']),('/network/utb-bundle.cbor',self.PIN,str(generate.TRUST_BASE_NETWORK_ID)))
+        for name in ('UTB_GENESIS_FILE','UTB_ENTRIES_DB'):
+            self.assertNotIn(name,env,'the two aggregators read the same names with different meaning: each gets only its own')
+        self.assertNotIn('./aggregator-utb:/utb',agg['volumes'])
+        self.assertIn('./aggregator:/state:ro',agg['volumes'])
+        integration=self.topo(4,self.PIN)
+        for name in cfg['services']:
+            if name != 'aggregator': self.assertEqual(cfg['services'][name],integration['services'][name],name)
+    def test_an_unknown_aggregator_variant_is_refused(self):
+        with self.assertRaises(ValueError): generate.utb_aggregator_environment(self.PIN,'other')
+    def test_the_upstream_aggregator_pin_is_a_full_commit_and_differs_from_the_integration_one(self):
+        pins=json.loads((Path(__file__).parent/'pins.json').read_text())
+        self.assertRegex(pins['aggregator-go-upstream'],r'^[0-9a-f]{40}$')
+        self.assertNotEqual(pins['aggregator-go-upstream'],pins['aggregator-go'])
+    def test_the_utb_stages_are_methods_outside_the_default_and_pos_lists(self):
+        import rehearse
+        for name,method in rehearse.UTB_STAGES:
+            self.assertTrue(callable(getattr(rehearse.Rehearsal,method)),name)
+            self.assertNotIn(name,[n for n,_ in rehearse.STAGES+rehearse.POS_STAGES],'the hosted rehearsal package has no signed history: its default run must not name them')
     def test_without_a_pin_the_package_is_the_one_without_the_profile(self):
         plain,off=self.topo(4,None),self.topo(4,None)
         self.assertEqual(plain,off)

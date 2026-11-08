@@ -18,13 +18,18 @@ def main():
     p = argparse.ArgumentParser()
     for name in ('bft', 'ureth', 'aggregator-go'):
         p.add_argument('--' + name + '-source', required=True, type=pathlib.Path)
+    p.add_argument('--aggregator-variant', choices=('integration', 'upstream'), default='integration',
+                   help='which aggregator the aggregator-go source must be: the integration aggregator (pin aggregator-go) or the upstream-facing one (pin aggregator-go-upstream: Mongo trust-base history, UTB_BUNDLE_FILE)')
     a = p.parse_args()
+    sources = dict(PINS)
+    if a.aggregator_variant == 'upstream':
+        sources['aggregator-go'] = PINS['aggregator-go-upstream']
     artifacts = HERE / 'artifacts'
     artifacts.mkdir(exist_ok=True)
     records = {}
     for name, binary in (('bft', 'ubft'), ('ureth', 'unicity-reth'), ('aggregator-go', 'aggregator')):
         src = getattr(a, name.replace('-', '_') + '_source').resolve()
-        if run('git', '-C', str(src), 'rev-parse', 'HEAD') != PINS[name]:
+        if run('git', '-C', str(src), 'rev-parse', 'HEAD') != sources[name]:
             raise SystemExit(name + ' source pin mismatch')
         if run('git', '-C', str(src), 'status', '--porcelain', '--untracked-files=no'):
             raise SystemExit(name + ' dirty source')
@@ -58,7 +63,7 @@ def main():
         images[kind] = run('docker', 'image', 'inspect', '--format={{.Id}}', tag)
     subprocess.run(['docker', 'build', '-t', 'tnops-rpc:verified', '-f', str(HERE / 'Dockerfile.rpc'), str(HERE)], check=True)
     images['rpc'] = run('docker', 'image', 'inspect', '--format={{.Id}}', 'tnops-rpc:verified')
-    (artifacts / 'images.json').write_text(json.dumps({'sources': PINS, 'binary_sha256': records, 'images': images}, indent=2) + '\n')
+    (artifacts / 'images.json').write_text(json.dumps({'sources': sources, 'binary_sha256': records, 'images': images}, indent=2) + '\n')
     print(artifacts / 'images.json')
 
 if __name__ == '__main__':
