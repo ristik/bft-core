@@ -117,20 +117,18 @@ func twoStageRun(t *testing.T, c *q4bLive, x, d string, warm, hold uint64) twoSt
 	repeats := map[uint64]bool{} // every round the filter saw a T2 repeat proposed in, whichever block ends up certified
 	base := c.net.filter
 	c.net.filter = func(from, to peer.ID, msg any) bool {
-		if withhold.Load() {
-			// X's votes count for the target's block alone until the live run, past the covered rounds: the run's own votes need X
-			if v, ok := msg.(*abdrc.VoteMsg); ok && from == c.id(x) && v.VoteInfo.RoundNumber != target.Load() && v.VoteInfo.RoundNumber <= target.Load()+lag {
-				return true
-			}
-			if p, ok := msg.(*abdrc.ProposalMsg); ok && p.Block.Payload != nil {
-				for _, req := range p.Block.Payload.Requests {
-					if req.CertReason == drctypes.T2Timeout {
-						repeatMu.Lock()
-						repeats[p.Block.Round] = true
-						repeatMu.Unlock()
-					}
+		if p, ok := msg.(*abdrc.ProposalMsg); ok && p.Block.Payload != nil {
+			for _, req := range p.Block.Payload.Requests {
+				if req.CertReason == drctypes.T2Timeout {
+					repeatMu.Lock()
+					repeats[p.Block.Round] = true
+					repeatMu.Unlock()
 				}
 			}
+		}
+		// X's votes count for the target's block alone until the live run, past the covered rounds: the run's own votes need X
+		if v, ok := msg.(*abdrc.VoteMsg); ok && withhold.Load() && from == c.id(x) && v.VoteInfo.RoundNumber != target.Load() && v.VoteInfo.RoundNumber <= target.Load()+lag {
+			return true
 		}
 		return base(from, to, msg)
 	}
@@ -207,10 +205,8 @@ func twoStageRun(t *testing.T, c *q4bLive, x, d string, warm, hold uint64) twoSt
 	}
 	stage = 1 // from the stop: the wait for the QC is where most of stage one's full timers are
 	require.Eventually(t, func() bool { sample(); return c.state(ingress).HighQC == r }, q4bDeadline+time.Duration(lag+2)*c.nodes[0].r.manager.params.LocalTimeout, 5*time.Millisecond, "the block of round %d is certified, and no other", r)
-	repeatMu.Lock()
-	certifiedRepeat := repeats[r]
-	repeatMu.Unlock()
-	require.True(t, certifiedRepeat, "the certified block of round %d is a repeat", r)
+	// the shape needs a T2 repeat in round r's certified, uncommitted branch: in r's own block or in a certified ancestor above the committed head
+	// (which one depends on where the shard's T2 period falls against the stop). It is checked on the committed chain once the run commits.
 	require.EqualValues(t, startUC, lastUC())
 	hash := bytes.Repeat([]byte{0x81}, 32)
 	held := phaseLockProof(t, c, c.nodes[c.idx(ingress)].r, hash)
@@ -244,6 +240,18 @@ func twoStageRun(t *testing.T, c *q4bLive, x, d string, warm, hold uint64) twoSt
 		return len(after) >= 2
 	}, 10*time.Second, 5*time.Millisecond, "the run's commit reaches the chain")
 	require.Equal(t, r, after[0], "the first committed block after the stop, of %v", after)
+	var repeatAt []uint64
+	c.mu.Lock()
+	repeatMu.Lock()
+	for round := range c.chains[c.idx(ingress)] {
+		if round > head && round <= r && repeats[round] {
+			repeatAt = append(repeatAt, round)
+		}
+	}
+	repeatMu.Unlock()
+	c.mu.Unlock()
+	require.NotEmpty(t, repeatAt, "a T2 repeat in the committed branch above the head %d, up to round %d", head, r)
+	t.Logf("the run committed the T2 repeat of round %v (head %d, target %d)", repeatAt, head, r)
 	require.Greater(t, after[1], head+lag, "no other certified block before the run, of %v", after)
 	view, enabled, err := m(ingress).RequestView(q3fixture.PartitionID, types.ShardID{})
 	require.NoError(t, err)

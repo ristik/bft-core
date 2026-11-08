@@ -14,6 +14,7 @@ import (
 
 	"github.com/unicitynetwork/bft-core/internal/testutils/q3fixture"
 	"github.com/unicitynetwork/bft-core/network/protocol/abdrc"
+	"github.com/unicitynetwork/bft-core/rootchain/consensus/leader"
 	drctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
 )
 
@@ -78,13 +79,59 @@ func (x *timeoutTally) count(author peer.ID) int {
 	return len(x.rounds[author.String()])
 }
 
-// requireNoFault: whatever recovery a node did, it latched no frontier fault and still serves its shard info.
+// liveRoundsCertify follows watch's rounds until it reaches until and requires that every round whose leader and next leader (by watch's selector)
+// are known and not the minority ended with its own QC: the leader proposes and the collector forms the QC, so a lone timeout that forced a TC
+// would show here. Which rounds commit depends on the sampled QC signers (a sample that names the minority but leaves out a live member gives a
+// stale rotation with no three live leaders in a row, the design's stall), so commits are logged, not required. It returns the rounds checked.
+func liveRoundsCertify(t *testing.T, c *q4bLive, watch, minority string, until uint64) (checked int) {
+	t.Helper()
+	m := c.nodes[c.idx(watch)].r.manager
+	type seen struct {
+		leader, next peer.ID
+		known        bool
+	}
+	rounds := map[uint64]seen{}
+	look := func(r uint64) seen {
+		l, err1 := m.leaderSelector.GetLeaderForRound(r)
+		n, err2 := m.leaderSelector.GetLeaderForRound(r + 1)
+		return seen{l, n, err1 == nil && err2 == nil}
+	}
+	last := c.state(watch).Round
+	rounds[last] = look(last)
+	var failed []uint64
+	deadline := time.Now().Add(3 * q4bDeadline)
+	for last < until {
+		require.True(t, time.Now().Before(deadline), "the rounds go on")
+		st := c.state(watch)
+		if _, ok := rounds[st.Round]; !ok {
+			rounds[st.Round] = look(st.Round)
+		}
+		for ; last < st.Round; last++ {
+			r, ok := rounds[last]
+			if !ok || !r.known || r.leader == c.id(minority) || r.next == c.id(minority) || st.Round > last+1 {
+				continue // a round the poll did not see begin, or one the minority leads or collects, or skipped
+			}
+			checked++
+			if st.HighQC < last {
+				failed = append(failed, last)
+			}
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	// the round in which the minority lost its history may have lost its own vote collection: one is allowed
+	require.LessOrEqual(t, len(failed), 1, "rounds with a live leader and a live collector that got no QC: %v of %d", failed, checked)
+	return checked
+}
+
+// requireNoFault: whatever recovery a node did, it latched no frontier fault, and outside a recovery it serves its shard info.
 func requireNoFault(t *testing.T, c *q4bLive, name string) {
 	t.Helper()
 	m := c.nodes[c.idx(name)].r.manager
 	require.True(t, m.frontier == nil || !m.frontier.faulted.Load(), "%s: no frontier fault", name)
-	_, err := m.ShardInfo(q3fixture.PartitionID, types.ShardID{})
-	require.NoError(t, err, "%s serves its shard info", name)
+	if !m.recovery.InRecovery() {
+		_, err := m.ShardInfo(q3fixture.PartitionID, types.ShardID{})
+		require.NoError(t, err, "%s serves its shard info", name)
+	}
 }
 
 // requireServing checks B2 at a node whose only trouble is missing history: no state recovery, no frontier fault, its APIs usable, and a
@@ -110,7 +157,9 @@ func requireServing(t *testing.T, c *q4bLive, name string, hash []byte) {
 //  2. it hears them again, still without history: their proposals carry QCs of blocks it never executed, authenticated evidence of missing
 //     certified state, so it may enter real state recovery (the design's "others supply a QC/state-recovery trigger"). It still times every
 //     round out at once, and still forces no TC: the others commit on.
-//  3. its history is back: it names the others' leaders, votes and commits with them, and the request it retained certifies.
+//  3. its history is back: it names the others' leaders, votes and commits with them, and a request it takes certifies. (The one it retained
+//     in phase 1 is not required to: the shard's T2 repeats meanwhile made that proof stale, and the verifier drops a stale request; a shard
+//     resubmits under its new certificate, as this does.)
 func TestMinorityWithoutHistoryFollowsTheQuorum(t *testing.T) {
 	t.Parallel()
 	q4Slot(t)
@@ -140,13 +189,12 @@ func TestMinorityWithoutHistoryFollowsTheQuorum(t *testing.T) {
 	from := c.state(watch).Round
 	tally.armed.Store(true)
 	gap.from.Store(c.state(minority).Round)
-	require.Eventually(t, func() bool { return c.state(watch).Round >= from+window }, 3*q4bDeadline, 20*time.Millisecond, "the rounds go on")
+	checked := liveRoundsCertify(t, c, watch, minority, from+window)
 	_, err := c.nodes[c.idx(minority)].r.manager.leaderSelector.GetLeaderForRound(c.state(minority).Round)
 	require.ErrorIs(t, err, drctypes.ErrHistoryUnavailable, "premise: the minority has no leader for its round")
 	require.Positive(t, tally.count(c.id(minority)), "B1: the minority times its round out")
-	commits := len(c.commitsSince(c.idx(watch), mark))
-	t.Logf("phase 1: %d rounds, %d commits at %s; the minority timed out %d rounds", c.state(watch).Round-from, commits, watch, tally.count(c.id(minority)))
-	require.GreaterOrEqual(t, commits, window/4, "the quorum commits on, by QC")
+	t.Logf("phase 1: %d rounds, %d with a live leader and collector all certified, %d commits at %s; the minority timed out %d rounds", c.state(watch).Round-from, checked,
+		len(c.commitsSince(c.idx(watch), mark)), watch, tally.count(c.id(minority)))
 	hash := bytes.Repeat([]byte{0x83}, 32)
 	requireServing(t, c, minority, hash)
 	held := c.state(watch).Round
@@ -159,21 +207,25 @@ func TestMinorityWithoutHistoryFollowsTheQuorum(t *testing.T) {
 	mark = c.mark()
 	from = c.state(watch).Round
 	before := tally.count(c.id(minority))
-	require.Eventually(t, func() bool { return c.state(watch).Round >= from+window }, 3*q4bDeadline, 20*time.Millisecond, "the rounds go on")
-	commits = len(c.commitsSince(c.idx(watch), mark))
+	checked = liveRoundsCertify(t, c, watch, minority, from+window)
 	timeouts := tally.count(c.id(minority)) - before
-	t.Logf("phase 2: %d rounds, %d commits at %s; the minority timed out %d more rounds (the others: %d, %d, %d in all); in recovery now: %v", c.state(watch).Round-from, commits, watch,
-		timeouts, tally.count(c.id(quorum[0])), tally.count(c.id(quorum[1])), tally.count(c.id(quorum[2])), c.nodes[c.idx(minority)].r.manager.recovery.InRecovery())
+	t.Logf("phase 2: %d rounds, %d with a live leader and collector all certified, %d commits at %s; the minority timed out %d more rounds (the others: %d, %d, %d in all); in recovery now: %v",
+		c.state(watch).Round-from, checked, len(c.commitsSince(c.idx(watch), mark)), watch, timeouts, tally.count(c.id(quorum[0])), tally.count(c.id(quorum[1])), tally.count(c.id(quorum[2])),
+		c.nodes[c.idx(minority)].r.manager.recovery.InRecovery())
 	require.GreaterOrEqual(t, timeouts, window/4, "B1: it times out the rounds it now hears of")
-	// a lone timeout weighs 1 of 4 (f = 1): with it forcing a TC every round would end by TC and nothing would commit
-	require.GreaterOrEqual(t, commits, window/4, "the quorum commits on, by QC")
 	requireNoFault(t, c, minority)
 
 	// 3: history back
 	gap.from.Store(0)
 	back := c.mark()
-	require.Eventually(t, func() bool { return len(c.commitsSince(c.idx(minority), back)) >= 3 }, q4bDeadline, 20*time.Millisecond, "the minority commits again")
-	require.Eventually(t, func() bool { return c.certifiedHash(watch, hash) }, q4bDeadline, 10*time.Millisecond, "the request the minority retained certifies")
+	// if a stale sample stalled the quorum, commits come back through the rescue: allow the traversal to a live recovery run
+	require.Eventually(t, func() bool { return len(c.commitsSince(c.idx(minority), back)) >= 3 }, q4bDeadline+time.Duration(2*leader.RecoverySpacing+lag+8)*2*time.Second, 20*time.Millisecond, "the minority commits again")
+	fresh := bytes.Repeat([]byte{0x85}, 32)
+	require.Eventually(t, func() bool {
+		proof := phaseLockProof(t, c, c.nodes[c.idx(minority)].r, fresh)
+		return proof != nil && c.nodes[c.idx(minority)].r.manager.RequestCertification(context.Background(), *proof) == nil
+	}, q4bDeadline, 50*time.Millisecond, "the minority takes a fresh request")
+	require.Eventually(t, func() bool { return c.certifiedHash(watch, fresh) }, q4bDeadline, 10*time.Millisecond, "the request the minority took certifies")
 	r := c.state(watch).Round + 1
 	mine, err := c.nodes[c.idx(minority)].r.manager.leaderSelector.GetLeaderForRound(r)
 	require.NoError(t, err)
@@ -222,13 +274,18 @@ func TestWeightedTimeoutEscalationOfMembersWithoutHistory(t *testing.T) {
 			from := c.state(watch).Round
 			const window = 30
 			began := time.Now()
-			require.Eventually(t, func() bool { return c.state(watch).Round >= from+window }, 3*q4bDeadline, 5*time.Millisecond, "the rounds go on")
+			checked := 0
+			if c.weight(tc.without...) <= 3 {
+				// its timeouts weigh at most f: every round the rest lead and collect still gets its QC (commits depend on the sampled signers)
+				checked = liveRoundsCertify(t, c, watch, tc.without[0], from+window)
+			} else {
+				require.Eventually(t, func() bool { return c.state(watch).Round >= from+window }, 3*q4bDeadline, 5*time.Millisecond, "the rounds go on")
+			}
 			elapsed := time.Since(began)
 			commits := len(c.commitsSince(c.idx(watch), mark))
-			t.Logf("%s without history: %d rounds in %s (%s a round), %d commits", tc.without, window, elapsed.Round(time.Millisecond), elapsed/window, commits)
-			if c.weight(tc.without...) <= 3 {
-				require.GreaterOrEqual(t, commits, window/4, "weight at most f: the rest commit by QC")
-			} else {
+			t.Logf("%s without history: %d rounds in %s (%s a round), %d commits, %d rounds with a live leader and collector checked", tc.without, c.state(watch).Round-from,
+				elapsed.Round(time.Millisecond), elapsed/time.Duration(max(1, c.state(watch).Round-from)), commits, checked)
+			if c.weight(tc.without...) > 3 {
 				require.Less(t, elapsed, window*timeout, "weight over f escalates: the rounds end at certificate speed, not after T each")
 				require.EqualValues(t, head, c.state(watch).Committed, "and no QC: nothing commits")
 			}
@@ -240,8 +297,12 @@ func TestWeightedTimeoutEscalationOfMembersWithoutHistory(t *testing.T) {
 			for _, g := range gaps {
 				g.from.Store(0)
 			}
+			// with weight over f nothing committed for the whole window, so every node's cutoffs are now past its head too: commits resume through
+			// the design's rescue, a traversal to a live recovery run (up to two spacings at certificate speed), not at once
 			back := c.mark()
-			require.Eventually(t, func() bool { return len(c.commitsSince(c.idx(watch), back)) >= 3 }, q4bDeadline, 20*time.Millisecond, "with history back, commits resume")
+			resumed := time.Now()
+			require.Eventually(t, func() bool { return len(c.commitsSince(c.idx(watch), back)) >= 3 }, q4bDeadline+time.Duration(2*leader.RecoverySpacing+lag+8)*(time.Second+timeout/2), 20*time.Millisecond, "with history back, commits resume")
+			t.Logf("commits resumed %s after the history came back, at round %d", time.Since(resumed).Round(time.Millisecond), c.state(watch).Round)
 			c.requireChainsAgree(c.all()...)
 			c.stopAll()
 		})
