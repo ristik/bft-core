@@ -104,6 +104,45 @@ func durations(ds []time.Duration, over time.Duration) string {
 	return fmt.Sprintf("%d rounds, median %s, p95 %s, p99 %s, max %s, %d over %s", len(ds), q(50), q(95), q(99), ds[len(ds)-1].Round(10*time.Microsecond), n, over)
 }
 
+// clockClass names a round's class as reportRho counts it.
+func clockClass(r clockRound, dead peer.ID) string {
+	switch {
+	case r.skipped:
+		return "skipped"
+	case !r.known:
+		return "unknown"
+	case r.leader == dead:
+		return "dead-led"
+	case !r.certified:
+		return "uncertified"
+	}
+	return "rho"
+}
+
+// reportRhoTail lists every rho sample over the limit with its neighbours, so a slow round can be placed: after a timeout, in or next to a
+// recovery run, or among ordinary rounds (a stall on the round's own path).
+func reportRhoTail(t *testing.T, rounds []clockRound, inRun map[uint64]bool, dead peer.ID, over time.Duration) {
+	t.Helper()
+	if len(rounds) == 0 {
+		return
+	}
+	t0 := rounds[0].start
+	for i, r := range rounds {
+		if clockClass(r, dead) != "rho" || r.d() <= over {
+			continue
+		}
+		near := ""
+		for j := max(0, i-2); j <= min(len(rounds)-1, i+2); j++ {
+			if j != i {
+				n := rounds[j]
+				near += fmt.Sprintf(" %d:%s:%s", n.round, clockClass(n, dead), n.d().Round(time.Millisecond))
+			}
+		}
+		t.Logf("rho over %s: round %d, %s, at +%s, leader %s, in a recovery run %v; around:%s", over, r.round, r.d().Round(time.Millisecond),
+			r.start.Sub(t0).Round(time.Millisecond), r.leader.ShortString(), inRun[r.round], near)
+	}
+}
+
 // reportRho classifies the rounds a clock saw by their leader and outcome. rho in the design bounds a successful known-leader round, forwarding
 // included: those are the rounds certified under a known live leader, recovery runs included. Rounds the dead member leads, rounds with an
 // unknown leader and rounds a poll skipped are reported apart and are not rho samples.
@@ -144,6 +183,7 @@ func reportRho(t *testing.T, rounds []clockRound, runStart func(uint64) bool, de
 	t.Logf("led by the dead member (timers, not rho): %s", durations(deadLed, time.Second))
 	t.Logf("known live leader, not certified (not rho): %s", durations(uncertified, time.Second))
 	t.Logf("unknown leader (not rho): %s; skipped by the poll: %d", durations(unknown, time.Second), skipped)
+	reportRhoTail(t, rounds, inRun, dead, time.Second)
 	// The tax of the dead member: the window's time in rounds that did not certify, against its whole time. Over a window of whole
 	// cycles (a multiple of members*S rounds) it holds the same number of the dead member's runs wherever it starts.
 	// The rounds a poll skipped share one interval: it counts once, and as lost if any of its rounds did not certify.
