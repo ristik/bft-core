@@ -1,10 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"math/big"
 	"net/http"
@@ -247,7 +249,7 @@ func TestLockProofSource_MapsNoLockAndARefusalToNotFound(t *testing.T) {
 	defer rpc.Close()
 	l, _, _ := countingLocator(t, dir, f)
 	vault := common.HexToAddress("0xe5d2db50c8d119078fa4d75e04bf93995793a06a")
-	s := &lockProofSource{archive: l, ethURL: rpc.URL, vault: vault, pdr: pdr, pdrHash: pdrHash}
+	s := &lockProofSource{archive: l, ethURL: rpc.URL, vault: vault, pdrs: map[[32]byte][]byte{pdrHash: pdr}}
 	proof := func(value string) string {
 		return fmt.Sprintf(`{"jsonrpc":"2.0","id":1,"result":{"address":"%s","accountProof":["0x01"],"storageProof":[{"value":"%s","proof":["0x02"]}]}}`, vault.Hex(), value)
 	}
@@ -268,4 +270,67 @@ func TestLockProofSource_MapsNoLockAndARefusalToNotFound(t *testing.T) {
 	_, err = s.build(context.Background(), hdr.Hash(), 1)
 	require.Error(t, err)
 	require.NotErrorIs(t, err, errNotFound, "an unreachable client is not not-found")
+}
+
+// TestLockProofSource_ProvesUnderTheConfigurationTheCertificateCommitsTo: two shard epochs' configurations held; a block certified under either is
+// proven with that one's PDR, and a block under a configuration not held is refused (not served under another).
+func TestLockProofSource_ProvesUnderTheConfigurationTheCertificateCommitsTo(t *testing.T) {
+	dir := t.TempDir()
+	conf := func(name string, epoch uint64) string {
+		raw, err := json.Marshal(&types.PartitionDescriptionRecord{Version: 1, NetworkID: 3, PartitionID: 8, PartitionTypeID: 8, Epoch: epoch, EpochStart: epoch * 100,
+			T2Timeout: 2500 * time.Millisecond, ShardID: types.ShardID{}})
+		require.NoError(t, err)
+		path := filepath.Join(dir, name)
+		require.NoError(t, os.WriteFile(path, raw, 0o600))
+		return path
+	}
+	pdrs, err := loadPDRs([]string{conf("e0.json", 0), conf("e1.json", 1)})
+	require.NoError(t, err)
+	require.Len(t, pdrs, 2, "two shard epochs, two configurations")
+	_, err = loadPDRs(nil)
+	require.Error(t, err, "at least one configuration")
+	s := &lockProofSource{pdrs: pdrs}
+	for h, want := range pdrs {
+		got, err := s.pdrFor(h[:])
+		require.NoError(t, err)
+		require.Equal(t, want, got, "the configuration whose hash the certificate names")
+	}
+	other := sha256.Sum256([]byte("another configuration"))
+	_, err = s.pdrFor(other[:])
+	require.ErrorContains(t, err, "none of the 2 full shard configurations")
+	_, err = s.pdrFor(nil)
+	require.Error(t, err, "a certificate without a configuration hash")
+
+	// and build uses it: a block certified under the second configuration gets that PDR in its lock proof
+	var second [32]byte
+	for h, pdr := range pdrs {
+		var c types.PartitionDescriptionRecord
+		require.NoError(t, types.Cbor.Unmarshal(pdr, &c))
+		if c.Epoch == 1 {
+			second = h
+		}
+	}
+	header, err := rlp.EncodeToBytes(&gethtypes.Header{Number: big.NewInt(30), Difficulty: big.NewInt(0)})
+	require.NoError(t, err)
+	var hdr gethtypes.Header
+	require.NoError(t, rlp.DecodeBytes(header, &hdr))
+	uc, err := types.Cbor.Marshal(&types.UnicityCertificate{ShardConfHash: second[:]})
+	require.NoError(t, err)
+	adir, f := t.TempDir(), &fakeArchive{records: map[string]*archive.Record{}}
+	f.hold(t, adir, archive.Request{Context: testContext(0), BlockHash: hdr.Hash()}, &archive.Record{Header: header, ResultingUC: uc})
+	vault := common.HexToAddress("0xe5d2db50c8d119078fa4d75e04bf93995793a06a")
+	rpc := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = fmt.Fprintf(w, `{"jsonrpc":"2.0","id":1,"result":{"address":"%s","accountProof":["0x01"],"storageProof":[{"value":"0x1","proof":["0x02"]}]}}`, vault.Hex())
+	}))
+	defer rpc.Close()
+	l, _, _ := countingLocator(t, adir, f)
+	s = &lockProofSource{archive: l, ethURL: rpc.URL, vault: vault, pdrs: pdrs}
+	lp, err := s.build(context.Background(), hdr.Hash(), 1)
+	require.NoError(t, err)
+	require.True(t, bytes.Contains(lp, pdrs[second]), "the lock proof carries the second epoch's configuration")
+	first := pdrs
+	delete(first, second)
+	for _, pdr := range first {
+		require.False(t, bytes.Contains(lp, pdr), "and not the first's")
+	}
 }

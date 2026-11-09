@@ -450,7 +450,12 @@ class BridgePos:
         epoch1 = json.loads((work / 'pos-epoch1.json').read_text())
         genesis = int(epoch1['trust']['genesisEpoch'])
         me = epoch1['wallet']
-        self.start_endpoint(1)   # validator 1 was restarted: the lock-proof endpoint reads its archive again
+        # validator 1 was restarted, and the shard epoch advanced at each handoff: the endpoint is restarted with every shard epoch's configuration
+        # (overlay.py), so a lock certified under the current shard epoch is served (it is proven under the configuration its certificate commits to)
+        self.start_endpoint(1)
+        overlay = json.loads((self.gen / 'compose.bridge.yaml').read_text())['services']['lockproof']['entrypoint']
+        confs = [overlay[k + 1] for k, x in enumerate(overlay) if x == '--full-shard-conf']
+        self.expect(len(confs) >= 3, 'the lock-proof endpoint holds the genesis shard configuration and each handoff\'s', ' '.join(confs))
         held = self.held_trust()
         self.expect(int(held['tipEpoch']) == genesis + 1, 'a fresh process reloads the main wallet\'s durable history to epoch 2 (as pos-redeem left it)', held['tipEpoch'])
         before = self.vault_balance()

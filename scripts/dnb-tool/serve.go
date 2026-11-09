@@ -31,14 +31,15 @@ func lockProofServe(args []string) error {
 	archiveDir := fs.String("archive", "", "a validator's immutable archive v2 directory (mounted read-only)")
 	ethURL := fs.String("eth-url", "", "the paired client's plain endpoint")
 	vaultText := fs.String("vault", "", "vault address")
-	fullConf := fs.String("full-shard-conf", "", "the EVM shard's full configuration (as registered with the root chain)")
+	var fullConfs shardConfs
+	fs.Var(&fullConfs, "full-shard-conf", "the EVM shard's full configuration (as registered with the root chain); repeat it for each shard epoch's")
 	trustBundlePath := fs.String("trust-bundle", "", "the trust-base release bundle (trust-bundle)")
 	cfgHash := fs.String("cfg", "", "the vault's CFG")
 	trustedProxy := fs.String("trusted-proxy", "", "the one peer address whose X-Forwarded-For names the client")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	src, err := newLockProofSource(context.Background(), *archiveDir, *ethURL, *vaultText, *fullConf, *trustBundlePath, *cfgHash)
+	src, err := newLockProofSource(context.Background(), *archiveDir, *ethURL, *vaultText, fullConfs, *trustBundlePath, *cfgHash)
 	if err != nil {
 		return err
 	}
