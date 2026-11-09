@@ -14,7 +14,6 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/unicitynetwork/bft-core/gettrustbase"
 	"github.com/unicitynetwork/bft-core/network/protocol/certification"
 	"github.com/unicitynetwork/bft-core/rootchain/testutils/ucfixture"
 	"github.com/unicitynetwork/bft-go-base/types"
@@ -188,13 +187,13 @@ func TestCorpusProducerEquivalence(t *testing.T) {
 			require.Equal(t, get("response-v1.cbor"), upstreamLegacy(t, wireLegacy))
 
 			// the authority: the bundle's single genesis entry, pinned by its own EntryID
-			bundle, err := gettrustbase.DecodeBundle(get(ctx.TrustBase), gettrustbase.BundleLimits{MaxBytes: len(get(ctx.TrustBase)), MaxEntries: 1})
+			bundle, err := types.DecodeTrustBaseBundle(get(ctx.TrustBase), types.TrustBaseLimits{MaxBytes: len(get(ctx.TrustBase)), MaxEntries: 1})
 			require.NoError(t, err)
 			require.Len(t, bundle.Entries, 1)
 			trust := bundle.Entries[0]
 			genesisID, err := trust.EntryID()
 			require.NoError(t, err)
-			require.NoError(t, gettrustbase.VerifyBundle(bundle, genesisID))
+			require.NoError(t, types.VerifyTrustBaseBundle(bundle, genesisID))
 			require.NoError(t, trust.VerifyGenesis())
 			view, err := types.DecodePartitionViewV1(v2.PartitionView)
 			require.NoError(t, err)

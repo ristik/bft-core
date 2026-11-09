@@ -20,7 +20,6 @@ import (
 	"math"
 	"slices"
 
-	"github.com/unicitynetwork/bft-core/gettrustbase"
 	"github.com/unicitynetwork/bft-core/network/protocol/certification"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/storage"
 	rctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
@@ -206,7 +205,7 @@ func (p *Producer) TrustBaseBundle() ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	return gettrustbase.EncodeBundle([][]byte{raw})
+	return types.EncodeTrustBaseBundle([][]byte{raw})
 }
 
 // Quorum is the number of root signatures a seal needs.

@@ -15,7 +15,7 @@ import (
 )
 
 // Shared GetTrustBase response vectors (testdata/v1/vectors.json) for the SDK decoders: ranges that do not start at the genesis, paged ranges, every
-// non-OK status, and the responses DecodeResponse refuses. The entries are the three-entry chain (epochs 1..3) of the shared trust-base vectors
+// non-OK status, and the responses types.DecodeTrustBaseResponse refuses. The entries are the three-entry chain (epochs 1..3) of the shared trust-base vectors
 // (bft-go-base testdata/trust-base-v2/v1/vectors.json, bundle "three entries, epochs 1..3"), so an SDK that holds them can also append them.
 //
 // Regenerate:  GTB_V2_VECTORS=<path of that file> GTB_UPDATE_VECTORS=1 go test ./gettrustbase -run TestSharedResponseVectors
@@ -89,7 +89,7 @@ func buildVectors(t *testing.T, chainHex []string) vectorSet {
 		if r.Entries == nil {
 			r.Entries = []cbor.RawMessage{}
 		}
-		b, err := types.Cbor.MarshalTaggedValue(ResponseTag, &r)
+		b, err := types.Cbor.MarshalTaggedValue(types.TrustBaseResponseTag, &r)
 		require.NoError(t, err)
 		return b
 	}
@@ -142,7 +142,7 @@ func buildVectors(t *testing.T, chainHex []string) vectorSet {
 		switch s {
 		case 3:
 		default:
-			ok(fmt.Sprintf("status %d (%s), nothing else", s, Status(s)), R(s, 0, 0, nil, nil, nil), nil)
+			ok(fmt.Sprintf("status %d (%s), nothing else", s, types.TrustBaseStatus(s)), R(s, 0, 0, nil, nil, nil), nil)
 		}
 	}
 	ok("status 3 NotYetAvailable: from 4 is past the tip (3): nothing newer", R(3, 4, 3, ids[2], nil, nil), nil)
@@ -193,7 +193,7 @@ func buildVectors(t *testing.T, chainHex []string) vectorSet {
 	bad("version 2", func() []byte { r := R(0, 1, 3, ids[2], rm(0, 1, 2), nil); r.Version = 2; return enc(r) }(), "encoding")
 	bad("end entry id of 31 bytes", enc(R(0, 1, 3, ids[2][:31], rm(0, 1, 2), nil)), "encoding")
 	nul := rawRespNullEntries{Version: 1, Network: network, FromEpoch: 1, EffectiveEnd: 3, EndEntryID: ids[2]}
-	nb, err := types.Cbor.MarshalTaggedValue(ResponseTag, &nul)
+	nb, err := types.Cbor.MarshalTaggedValue(types.TrustBaseResponseTag, &nul)
 	require.NoError(t, err)
 	bad("entries is null, not an array", nb, "encoding")
 	good := enc(R(0, 1, 3, ids[2], rm(0, 1, 2), nil))
@@ -226,11 +226,9 @@ func TestSharedResponseVectors(t *testing.T) {
 			if b.Name == "three entries, epochs 1..3" {
 				raw, err := hex.DecodeString(b.Hex)
 				require.NoError(t, err)
-				_, es, err := DecodeResponse(raw, Limits{MaxBytes: 1 << 20, MaxEntries: 64})
+				r, es, err := types.DecodeTrustBaseResponse(raw, types.TrustBaseLimits{MaxBytes: 1 << 20, MaxEntries: 64})
 				require.NoError(t, err)
 				require.Len(t, es, 3)
-				var r Response
-				require.NoError(t, decodeTagged(raw, ResponseTag, 64, &r))
 				for _, e := range r.Entries {
 					chain = append(chain, hx(e))
 				}
@@ -255,15 +253,15 @@ func TestSharedResponseVectors(t *testing.T) {
 	for _, c := range set.Cases {
 		raw, err := hex.DecodeString(c.Hex)
 		require.NoError(t, err, c.Name)
-		resp, entries, derr := DecodeResponse(raw, Limits{MaxBytes: 1 << 20, MaxEntries: 64})
+		resp, entries, derr := types.DecodeTrustBaseResponse(raw, types.TrustBaseLimits{MaxBytes: 1 << 20, MaxEntries: 64})
 		if c.Error != "" {
 			refused++
 			require.Error(t, derr, c.Name)
 			switch c.Error {
 			case "encoding":
-				require.True(t, errors.Is(derr, ErrEncoding), "%s: %v", c.Name, derr)
+				require.True(t, errors.Is(derr, types.ErrTrustBaseResponseEncoding), "%s: %v", c.Name, derr)
 			case "response":
-				require.True(t, errors.Is(derr, ErrResponse), "%s: %v", c.Name, derr)
+				require.True(t, errors.Is(derr, types.ErrTrustBaseResponse), "%s: %v", c.Name, derr)
 			default:
 				t.Fatalf("%s: unknown error class %q", c.Name, c.Error)
 			}

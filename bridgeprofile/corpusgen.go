@@ -14,8 +14,6 @@ import (
 
 	"github.com/decred/dcrd/dcrec/secp256k1/v4"
 	"github.com/unicitynetwork/bft-go-base/types"
-
-	"github.com/unicitynetwork/bft-core/gettrustbase"
 )
 
 // semanticProfile is the canonical native-bridge profile artifact, byte for
@@ -1805,12 +1803,12 @@ func (g *gen) trustInputs() {
 		raw = append(raw, b)
 	}
 	if fid, err := forged.EntryID(); err == nil {
-		r := &gettrustbase.Response{Version: gettrustbase.Version, Network: forged.NetworkID, Status: gettrustbase.StatusOK, FromEpoch: d.TB.Epoch,
+		r := &types.TrustBaseResponse{Version: types.TrustBaseResponseVersion, Network: forged.NetworkID, Status: types.TrustBaseStatusOK, FromEpoch: d.TB.Epoch,
 			EffectiveEnd: forged.Epoch, EndEntryID: fid[:]}
 		for _, b := range raw {
 			r.Entries = append(r.Entries, b)
 		}
-		b, err := types.Cbor.MarshalTaggedValue(gettrustbase.ResponseTag, r)
+		b, err := types.Cbor.MarshalTaggedValue(types.TrustBaseResponseTag, r)
 		g.must(err)
 		add("trust-unwitnessed-successor", "epoch 2 is signed by its own committee, not by epoch 1's", b, d.TB)
 	}

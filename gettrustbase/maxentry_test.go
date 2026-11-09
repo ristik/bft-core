@@ -27,25 +27,25 @@ func TestTheLargestValidEntryFitsThePageCodecAndAnItemOverTheCapIsRefused(t *tes
 	require.NoError(t, err)
 	require.Equal(t, f.EntryBytes, len(entry))
 	require.Greater(t, len(entry), 64<<10, "the old cap refused this entry")
-	require.Less(t, len(entry), MaxEntryBytes)
+	require.Less(t, len(entry), types.MaxTrustBaseEntryBytes)
 
 	bundle, err := hex.DecodeString(f.Bundle)
 	require.NoError(t, err)
-	resp, entries, err := DecodeResponse(bundle, PageLimits)
+	resp, entries, err := types.DecodeTrustBaseResponse(bundle, types.TrustBasePageLimits)
 	require.NoError(t, err, "a page of the genesis and the largest valid entry")
 	require.Len(t, entries, 2)
 	require.Len(t, entries[1].RootNodes, 256)
-	require.Equal(t, StatusOK, resp.Status)
+	require.Equal(t, types.TrustBaseStatusOK, resp.Status)
 
 	// a well-formed item over the cap is refused
-	junk, err := types.Cbor.Marshal(make([]byte, MaxEntryBytes))
+	junk, err := types.Cbor.Marshal(make([]byte, types.MaxTrustBaseEntryBytes))
 	require.NoError(t, err)
 	id, err := hex.DecodeString(f.GenesisID)
 	require.NoError(t, err)
-	over := &Response{Version: 1, Network: 5, Status: StatusOK, FromEpoch: 1, EffectiveEnd: 1, EndEntryID: id, Entries: []cbor.RawMessage{junk}}
+	over := &types.TrustBaseResponse{Version: 1, Network: 5, Status: types.TrustBaseStatusOK, FromEpoch: 1, EffectiveEnd: 1, EndEntryID: id, Entries: []cbor.RawMessage{junk}}
 	b, err := over.Encode()
 	require.NoError(t, err)
-	_, _, err = DecodeResponse(b, Limits{MaxBytes: len(b), MaxEntries: 4})
-	require.ErrorIs(t, err, ErrResponse)
+	_, _, err = types.DecodeTrustBaseResponse(b, types.TrustBaseLimits{MaxBytes: len(b), MaxEntries: 4})
+	require.ErrorIs(t, err, types.ErrTrustBaseResponse)
 	require.Contains(t, err.Error(), "entry of")
 }
