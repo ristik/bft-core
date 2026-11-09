@@ -85,8 +85,9 @@ type (
 
 	ConsensusManager struct {
 		// timeoutVerify verifies a timeout message; nil is TimeoutMsg.Verify against the trust base store (a test seam counts the calls)
-		timeoutVerify func(*abdrc.TimeoutMsg) error
-		profile       loopProfile // scaling-run measurement aid, see loop_profile.go
+		timeoutVerify  func(*abdrc.TimeoutMsg) error
+		profile        loopProfile // scaling-run measurement aid, see loop_profile.go
+		certCacheStart time.Time   // start of the current verified-certificate cache report period
 		// channel via which validator sends "certification requests" to CM
 		certReqCh chan certRequest
 		// channel via which CM sends "certification request" response to validator
@@ -624,6 +625,7 @@ func (x *ConsensusManager) loop(ctx context.Context) error {
 		}
 		x.timeoutUnknownLeader(ctx)
 		x.profile.report(x.log, time.Now())
+		x.reportCertCache(time.Now())
 	}
 }
 

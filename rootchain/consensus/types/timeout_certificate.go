@@ -319,6 +319,28 @@ func (x *TimeoutCert) IsValid() error {
 }
 
 func (x *TimeoutCert) Verify(tbs *trustbase.TrustBaseStore) error {
+	gen := tbs.VerifyGeneration()
+	var key trustbase.CertKey
+	cacheable := false
+	if x != nil && x.Timeout != nil {
+		epochs := []uint64{x.Timeout.Epoch}
+		if hqc := x.Timeout.HighQc; hqc != nil && hqc.VoteInfo != nil {
+			epochs = append(epochs, hqc.VoteInfo.Epoch)
+		}
+		key, cacheable = certCacheKey(tbs, trustbase.CertTC, x, 0, x.Scheme, epochs...)
+	}
+	if cacheable && tbs.CertVerified(key) {
+		return nil
+	}
+	err := x.verify(tbs)
+	if err == nil && cacheable {
+		verifyCertHook()
+		tbs.RememberCert(key, gen)
+	}
+	return err
+}
+
+func (x *TimeoutCert) verify(tbs *trustbase.TrustBaseStore) error {
 	if err := x.IsValid(); err != nil {
 		return fmt.Errorf("invalid certificate: %w", err)
 	}

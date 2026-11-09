@@ -418,6 +418,25 @@ func (x *QuorumCert) VerifyWith(tbs *trustbase.TrustBaseStore) error {
 	if x == nil || x.VoteInfo == nil {
 		return errVoteInfoIsNil
 	}
+	// A certificate that verified before, under the same context, is not verified again: only this function's own work is skipped (the callers'
+	// processing, timestamp and branch checks are not part of it). The generation is captured before anything is read.
+	gen := tbs.VerifyGeneration()
+	key, cacheable := certCacheKey(tbs, trustbase.CertQC, x, x.VoteInfo.Version, x.Scheme, x.VoteInfo.Epoch)
+	if cacheable && tbs.CertVerified(key) {
+		return nil
+	}
+	err := x.verifyWith(tbs)
+	if err == nil && cacheable {
+		verifyCertHook()
+		tbs.RememberCert(key, gen)
+	}
+	return err
+}
+
+func (x *QuorumCert) verifyWith(tbs *trustbase.TrustBaseStore) error {
+	if x == nil || x.VoteInfo == nil {
+		return errVoteInfoIsNil
+	}
 	tb, err := tbs.GetByEpoch(x.VoteInfo.Epoch)
 	if err != nil {
 		return fmt.Errorf("failed to get trust base for QC verification, epoch %d: %w", x.VoteInfo.Epoch, err)
