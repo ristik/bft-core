@@ -15,7 +15,7 @@
              one validator stopped, which rejoins with the same blocks; the vault's balance follows every step (custody)
   negatives  after the round trip (whose release ran with a validator stopped and restarted): the same envelope redeemed again and the claim repeated
              are both refused, and the vault keeps the nullifier; the driver's negatives (a conflicting burn of the same state to another address is
-             never certified: the aggregator serves the first burn's proof; a fresh proof of the redeemed burn, under a newer seal, is refused as
+             not certified once later blocks are built: after a sentinel submitted later is certified, the aggregator still serves the first burn's proof; a fresh proof of the redeemed burn, under a newer seal, is refused as
              PartAlreadyRedeemed). The vault's balance does not move
   tester     the bridge tester CLI (native-bridge-plugins tester/) as a tester runs it, with its own faucet-funded key and GENERATION/bridge/public/tester-config.json:
              init, lock, mint (the proof from the lock-proof endpoint), two transfers, burn, redeem, claim and status; a repeated step is refused; the vault
@@ -355,8 +355,15 @@ class BridgeRehearsal(SdkClients, BridgePos, Rehearsal):
                     f'{where}: the claim of an already claimed credit is refused (InsufficientCredit: none left)', json.dumps(r)[:300])
         self.driver('negatives', '/work/lane-config.json', '/work/roundtrip/saved.json')
         out = json.loads((run / 'negatives.json').read_text())
-        # the driver asserts the served proof is the first burn's (from the token file) and that the plug-in refuses the conflicting burn
-        self.say(f'  {where}: a conflicting burn of the same state is never certified (submission {out["conflictingBurn"]["submission"]})')
+        # the driver asserts the served proof is the first burn's (from the token file), read after later blocks (nbp tests/live/conflict.ts), and that the
+        # plug-in refuses the conflicting burn; the wait it records is checked here too
+        cb = out['conflictingBurn']
+        wt = cb.get('waited') or {}
+        self.expect(bool(wt) and int(wt['settledAtBlock']) >= int(wt['submittedAtBlock']) + 2 and wt['sentinelStateId']
+                    and wt['firstRead']['transactionHash'] == wt['reRead']['transactionHash'] == cb['servedTransactionHash'] != cb['conflictingTransactionHash'],
+                    f'{where}: a conflicting burn of the same state is not certified once later blocks are built (submission {cb["submission"]} at block '
+                    f'{wt.get("submittedAtBlock")}; a sentinel submitted after it certified; re-read at block {wt.get("settledAtBlock")}: the first burn\'s proof is still served)',
+                    json.dumps(wt)[:400])
         self.expect(out['freshReplay']['revertData'] == PART_ALREADY_REDEEMED + word(saved['nonce']) + part[2:],
                     f'{where}: a fresh proof of the redeemed burn (seal round {out["freshReplay"]["anchors"][0]["round"]}) is refused as PartAlreadyRedeemed')
         # an unknown-key forgery (not a retired committee: this package has no root handoff, #438): the fresh proof re-signed by unknown keys
