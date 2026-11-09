@@ -1076,6 +1076,18 @@ func runLossCycles(t *testing.T, w *shardWorld, cycles int, silent string, rBudg
 	pausedSeen := 0
 	for k := 1; k <= cycles || (silent != "" && pausedSeen == 0 && k <= 4*cycles); k++ { // with a paused validator, run on until a repeat has named it (the premise of the test)
 		w.waitFor("the previous marker is applied everywhere live", 5*time.Minute, func() bool { return live(func(_ string, e *retainingExecutor) bool { return e.poolSize() == 0 }) })
+		// every cycle starts from a common checkpoint: all live validators on the same executor head (a validator still catching up from the previous cycle would
+		// make this cycle's outcome the previous one's)
+		w.waitFor("the live validators are on one executor head", 5*time.Minute, func() bool {
+			var first []byte
+			return live(func(_ string, e *retainingExecutor) bool {
+				h, _ := e.Head(context.Background())
+				if first == nil {
+					first = h.Hash
+				}
+				return bytes.Equal(first, h.Hash)
+			})
+		})
 		marker := []byte(fmt.Sprintf("pending-976-cycle-%d", k))
 		u, armed := w.stallAfterLoss(marker)
 		head, _ := w.shards[w.ids[0]].exec.Head(context.Background())
@@ -1106,7 +1118,10 @@ func runLossCycles(t *testing.T, w *shardWorld, cycles int, silent string, rBudg
 				repeats = append(repeats, s)
 			}
 		}
-		require.NotEmpty(t, repeats)
+		if len(repeats) == 0 {
+			w.dump("cycle premise violated: the pending block certified with no T2 repeat of u first, so the loss was not total")
+		}
+		require.NotEmpty(t, repeats, "cycle %d: the pending block certified without a T2 repeat of u first (premise: every request was lost)", k)
 		attempts := attemptsOf(w.requestsSince(armed), expected.Hash, w.threshold())
 		assigned := map[attemptKey]bool{}
 		const margin = 100 * time.Millisecond // a request can precede the sampler's first sighting of the certificate it answers
