@@ -285,6 +285,20 @@ block-zero hash and faucet address. The old pin must get 409 (checked before the
 | `FileNotFoundError: ... 'go'` although the images were built in a container | The host needs `go` too (`generate.py` runs `go version -m`): install the Go 1.27.1 tarball and link it into `/usr/local/bin`. |
 | `observe.py` alerts every minute `signer has no container` and `the faucet /healthz answered 503` | The rehearsal never starts the faucet signer (no hCaptcha key); start `observe.py` with `--no-faucet` for a package without it. |
 
+### 8a. A shard's request is lost at every root, or certification does not progress (bft-core#976)
+
+Nothing at the roots replays a shard request after every root that held it (the per-validator buffer, the retained aggregated request, the leader's buffer: all in memory) has restarted or been replaced, and nothing detects the loss. What recovers the shard, when the **premises** hold, is the roots' own T2 timer, which does not depend on a request: a repeat of the shard's last input record is certified from `u + floor(T2 / (block rate / 2)) + 1` root rounds after the shard's last certificate `u`, and the shard then builds and sends a **new** request. The original signed request is not delivered: a repeat supersedes its authorization. The shard's unchanged re-send (on a duplicate of the certificate it holds, for example after the 30 s inactivity handshake) is a second path with its own limits: at most 10 re-sends, at least 5 s apart, to the same two ingress roots; 30 s is an inactivity threshold polled every 5 s, not a delivery deadline.
+
+**Premises:** a responsive root quorum, a live shard leader and shard quorum, a working executor and subscription, and reachable ingress roots. No finite bound holds when they do not (a root timeout can take 10 s, quorum loss halts advancement, a pending change or configuration switch suppresses T2 proposals, and the first proposal of a recovery run carries no repeat). Account for the recovery as `time to an eligible repeat proposal + its commit + shard delivery, application and fresh-request acceptance (R) + the fresh request's certification`; R was measured on the package at about 1 s only on successful cycles, and #886 records cycles with a paused next shard leader where no fresh request came.
+
+**What the shard reports** (in memory, reset by a restart; thresholds are operational, not a T2 deadline; set `PendingWarnAfter` negative to silence the warning):
+- `shardnode.request.outstanding_age` (s): time since the first submission of the pending request on the certificate the shard still holds; zero when none is pending. A re-send does not restart it; a certificate that advances the round, or a repeat, retires it.
+- `shardnode.uc.consecutive_repeats`: repeats accepted since the last non-repeat certificate.
+- `shardnode.certification.no_progress_age` (s): time since the last non-repeat certificate while work remains. Rebuilt attempts do not reset it.
+- A warning `certification work has not progressed` (once per minute) when either age passes 60 s or 3 repeats follow each other.
+
+A rising `no_progress_age` with repeats is a shard that is rebuilding without being certified: check the roots' quorum and the shard leader first, not the request.
+
 ## 9. Rehearsal evidence to record
 - Operator name, date, this guide's commit, host specs, Docker/Compose versions, `images.json`, `manifest.json`.
 - Every command with its output and exit code; UTC timestamps; `docker compose ps` before/after each operation.
