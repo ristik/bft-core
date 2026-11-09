@@ -47,7 +47,7 @@ lane_preflight() {
   got=$(lane_sha256 "$bin")
   [ "$got" = "$attested" ] || lane_fail "$LANE preflight: $bin sha256 $got is not the attested $attested (provenance $LANE_PROVENANCE)"
   [ -z "$(git -C "$REPO_ROOT" status --porcelain --untracked-files=no)" ] || lane_fail "$LANE preflight: the checkout has uncommitted changes (an evidence run needs a clean one)"
-  go version -m "$REPO_ROOT/build/ubft" | grep -q "vcs.revision=$head" || lane_fail "$LANE preflight: build/ubft is not built from HEAD $head (make build)"
+  go version -m "$REPO_ROOT/build/ubft" | grep -q "vcs.revision=${LANE_PRODUCT_COMMIT:-$head}" || lane_fail "$LANE preflight: build/ubft is not built from ${LANE_PRODUCT_COMMIT:-$head} (HEAD $head unless a pinned product run; make build)"
   ! go version -m "$REPO_ROOT/build/ubft" | grep -q 'vcs.modified=true' || lane_fail "$LANE preflight: build/ubft was built from a modified tree"
   LANE_RUN_MODE="RUN MODE: evidence run: attested prebuilt Ureth $bin sha256=$got commit=$reported (provenance $LANE_PROVENANCE); everything else from this checkout at $head"
 }

@@ -97,7 +97,7 @@ preflight() {
   [ -z "$(git -C "$REPO_ROOT" status --porcelain --untracked-files=no)" ] || missing+=("a clean checkout (uncommitted changes)")
   [ -x "$REPO_ROOT/build/ubft" ] || missing+=("build/ubft (make build)")
   if [ -x "$REPO_ROOT/build/ubft" ]; then
-    go version -m "$REPO_ROOT/build/ubft" | grep -q "vcs.revision=$(git -C "$REPO_ROOT" rev-parse HEAD)" || missing+=("build/ubft is not built from HEAD (make build)")
+    go version -m "$REPO_ROOT/build/ubft" | grep -q "vcs.revision=${LANE_PRODUCT_COMMIT:-$(git -C "$REPO_ROOT" rev-parse HEAD)}" || missing+=("build/ubft is not built from HEAD (make build)")
     go version -m "$REPO_ROOT/build/ubft" | grep -q 'vcs.modified=true' && missing+=("build/ubft was built from a modified tree")
   fi
   [ "${#missing[@]}" -eq 0 ] || { echo "FAIL: preflight: ${missing[*]}" >&2; exit 1; }

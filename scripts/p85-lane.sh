@@ -44,7 +44,7 @@ else
   [ -z "$(git -C "$REPO_ROOT" status --porcelain --untracked-files=no)" ] || fail "the checkout has uncommitted changes: an evidence run needs a clean one"
   [ -x "$REPO_ROOT/build/ubft" ] || fail "build/ubft is missing (make build)"
   head=$(git -C "$REPO_ROOT" rev-parse HEAD)
-  lane_buildinfo "$REPO_ROOT/build/ubft" | grep -q "vcs.revision=$head" || fail "build/ubft is not built from HEAD $head (make build)"
+  lane_buildinfo "$REPO_ROOT/build/ubft" | grep -q "vcs.revision=${LANE_PRODUCT_COMMIT:-$head}" || fail "build/ubft is not built from ${LANE_PRODUCT_COMMIT:-$head} (HEAD $head unless a pinned product run; make build)"
   ! lane_buildinfo "$REPO_ROOT/build/ubft" | grep -q 'vcs.modified=true' || fail "build/ubft was built from a modified tree"
   RUN_MODE="RUN MODE: evidence run: attested prebuilt Ureth $M2_URETH_BIN sha256=$got commit=$M2_URETH_COMMIT (provenance $PROVENANCE); everything else from this checkout at $head"
 fi

@@ -24,6 +24,11 @@ on:
         type: choice
         options: [combined, overbound, abort, t6, ureth-targeted, all-live, x4-shadow, x4-rewards, x4-exit, build-only]
         default: combined
+      product:
+        description: "checkout (default): ubft and the Go tools are built from the commit under test | pinned: from the bft-core commit pinned in scripts/ci/lane-pins.json (a campaign run; the harness stays the commit under test)"
+        type: choice
+        options: [checkout, pinned]
+        default: checkout
       inject_failure:
         description: "Harness failure to test the failure path (honoured only by this workflow): none | after-builds | in-lane"
         type: choice
@@ -52,6 +57,7 @@ jobs:
     outputs:
       sha: ${{ steps.in.outputs.sha }}
       inject: ${{ steps.in.outputs.inject }}
+      product: ${{ steps.in.outputs.product }}
       lanes: ${{ steps.in.outputs.lanes }}
       t6: ${{ steps.in.outputs.t6 }}
       targeted: ${{ steps.in.outputs.targeted }}
@@ -72,18 +78,21 @@ jobs:
           EVENT: ${{ github.event_name }}
           IN_LANE: ${{ inputs.lane }}
           IN_INJECT: ${{ inputs.inject_failure }}
+          IN_PRODUCT: ${{ inputs.product }}
           PR_BASE: ${{ github.event.pull_request.base.sha }}
           PR_DRAFT: ${{ github.event.pull_request.draft }}
         run: |
           set -euo pipefail
           note=; selftests=false
+          product=checkout   # only a dispatch or a ci-lane-run/** push can ask for the pinned product; pull requests and the nightly never do
           if [ "$EVENT" = pull_request ]; then
             lane=pr; inject=none
-          elif [ "$EVENT" = workflow_dispatch ]; then lane=$IN_LANE; inject=$IN_INJECT
+          elif [ "$EVENT" = workflow_dispatch ]; then lane=$IN_LANE; inject=$IN_INJECT; product=${IN_PRODUCT:-checkout}
           elif [ "$EVENT" = schedule ]; then lane=nightly; inject=none
-          else lane=$(jq -r .lane scripts/ci/run-inputs.json); inject=$(jq -r .inject_failure scripts/ci/run-inputs.json); fi
+          else lane=$(jq -r .lane scripts/ci/run-inputs.json); inject=$(jq -r .inject_failure scripts/ci/run-inputs.json); product=$(jq -r '.product // "checkout"' scripts/ci/run-inputs.json); fi
           case "$lane" in combined|overbound|abort|t6|ureth-targeted|all-live|x4-shadow|x4-rewards|x4-exit|nightly|build-only|pr) ;; *) echo "bad lane $lane" >&2; exit 1 ;; esac
           case "$inject" in none|after-builds|in-lane) ;; *) echo "bad inject_failure $inject" >&2; exit 1 ;; esac
+          case "$product" in checkout|pinned) ;; *) echo "bad product $product" >&2; exit 1 ;; esac
           lanes='[]'; t6=false; targeted=false
           case "$lane" in
             combined|overbound|abort) lanes="[\"$lane\"]" ;;
@@ -116,10 +125,10 @@ jobs:
           need_lane_builds=false; [ "$lanes" = '[]' ] && [ "$lane" != build-only ] || need_lane_builds=true
           need_ureth=false; [ "$lanes" != '[]' ] || [ "$t6" = true ] || [ "$lane" = build-only ] && need_ureth=true
           sha=$(git rev-parse HEAD)
-          { echo "sha=$sha"; echo "inject=$inject"; echo "lanes=$lanes"; echo "t6=$t6"; echo "targeted=$targeted"
+          { echo "sha=$sha"; echo "inject=$inject"; echo "product=$product"; echo "lanes=$lanes"; echo "t6=$t6"; echo "targeted=$targeted"
             echo "need_ureth=$need_ureth"; echo "need_lane_builds=$need_lane_builds"; echo "selftests=$selftests"; echo "note=$note"; } >>"$GITHUB_OUTPUT"
           echo "lane=$lane inject_failure=$inject lanes=$lanes t6=$t6 targeted=$targeted selftests=$selftests commit under test=$sha"
-          { echo "### ci-lane plan"; echo "- event: $EVENT, lane: $lane, inject_failure: $inject"; echo "- commit under test: \`$sha\` ($(git log -1 --format=%s | cut -c1-100))"
+          { echo "### ci-lane plan"; echo "- event: $EVENT, lane: $lane, inject_failure: $inject, product: $product"; echo "- commit under test: \`$sha\` ($(git log -1 --format=%s | cut -c1-100))"
             echo "- selected: lanes=$lanes t6=$t6 ureth-targeted=$targeted selftests=$selftests"; [ -z "$note" ] || echo "- $note"
             case "$EVENT" in push|pull_request) ;; *) echo "- resolved once from \`integration/enshrined-evm\`; every job checks out this SHA" ;; esac
             # a draft pull request is not classified (c and src are unset; under set -u they must not be read)
@@ -182,6 +191,17 @@ jobs:
           mkdir -p "$RUNNER_TEMP/res"
           nohup scripts/ci/sample-resources.sh "$RUNNER_TEMP/res/build-tools.tsv" 5 "$RUNNER_TEMP" >/dev/null 2>&1 &
           echo $! >"$RUNNER_TEMP/res/sampler.pid"
+      - name: Check out the pinned bft-core product (product=pinned only)
+        if: ${{ needs.plan.outputs.product == 'pinned' }}
+        run: |
+          set -euo pipefail
+          repo=$(jq -er '.components["bft-core"].repository' scripts/ci/lane-pins.json); commit=$(jq -er '.components["bft-core"].commit' scripts/ci/lane-pins.json)
+          d="$RUNNER_TEMP/product"; rm -rf "$d"; mkdir -p "$d"
+          git -C "$d" init -q; git -C "$d" fetch -q --depth 1 "$repo" "$commit"; git -C "$d" checkout -q --detach FETCH_HEAD
+          git -C "$d" remote add origin "$repo"
+          scripts/ci/check-pins.sh git bft-core "$d"
+          echo "PRODUCT_DIR=$d" >>"$GITHUB_ENV"
+          echo "- product: pinned bft-core \`$commit\` (harness: \`${{ needs.plan.outputs.sha }}\`)" >>"$GITHUB_STEP_SUMMARY"
       - name: Build the Go side, the aggregator from its pin, and run the chain-free self-tests
         env:
           AGRE_ROOT: ${{ runner.temp }}/agre-build
