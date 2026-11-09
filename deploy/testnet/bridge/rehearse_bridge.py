@@ -30,7 +30,7 @@
   backup-restore
              the quiesced backup and same-generation restore (rehearse.py) with the bridge deployed: the redeemed lock stays spent, and a new round trip completes on
              the restored generation; the round trip's replays (its envelope, its claim and the driver's negatives) are refused there too
-  pos-epoch1, pos-redeem
+  pos-epoch1, pos-redeem, pos-historical
              opt-in, on a generation made with --pos --utb: the bridge across a PoS root handoff (bft-core #430 row 2), run between rehearse.py's
              handoff stages; see bridge_pos.py for the sequence of invocations and what each checks
   custody    the vault's books from its whole event log against its counters and balance: every lock once (nonces 1..lastNonce), every credit
@@ -613,10 +613,10 @@ class BridgeRehearsal(BridgePos, Rehearsal):
 
 
 STAGES = (('deploy', 'deploy'), ('lockproof', 'lockproof'), ('fund', 'fund'), ('roundtrip', 'roundtrip'), ('negatives', 'negatives'), ('tester', 'tester_stage'), ('split', 'split_stage'),
-          ('consolidated', 'consolidated'), ('long-history', 'long_history'), ('backup-restore', 'backup_restore'), ('pos-epoch1', 'pos_epoch1'), ('pos-redeem', 'pos_redeem'),
+          ('consolidated', 'consolidated'), ('long-history', 'long_history'), ('backup-restore', 'backup_restore'), ('pos-epoch1', 'pos_epoch1'), ('pos-redeem', 'pos_redeem'), ('pos-historical', 'pos_historical'),
           ('custody', 'custody'))
 # opt-in: only on a --pos --utb generation, around rehearse.py's handoff stages (bridge_pos.py)
-POS_STAGES = ('pos-epoch1', 'pos-redeem')
+POS_STAGES = ('pos-epoch1', 'pos-redeem', 'pos-historical')
 
 
 def main():
@@ -624,7 +624,7 @@ def main():
     p.add_argument('--generation', required=True, type=Path)
     p.add_argument('--evidence', required=True, type=Path)
     p.add_argument('--cast', default='cast')
-    p.add_argument('--stages', default=','.join(s for s, _ in STAGES if s not in POS_STAGES), help='comma separated, in order (pos-epoch1 and pos-redeem only when named)')
+    p.add_argument('--stages', default=','.join(s for s, _ in STAGES if s not in POS_STAGES), help='comma separated, in order (the pos-* stages only when named)')
     p.add_argument('--ubft', type=Path, help='the pinned ubft binary: pos-redeem verifies the roots\' served history with it (rehearse.py utb_history)')
     p.add_argument('--long-transfers', type=int, default=250, help=f'the long-history token\'s transfers (65 to {LONG_TRANSFERS_MAX})')
     a = p.parse_args()

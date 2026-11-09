@@ -1,11 +1,11 @@
 """The bridge across a PoS root handoff (bft-core #430 row 2; briefs/pos-release-rerun-plan.md §4.1 preflight, arch §8/§9): two stages of rehearse_bridge.py
 on a generation made with generate.py --pos --utb, run around rehearse.py's handoff stages, which order their own list. Because of that, the sequence is
-three invocations on one generation:
+four invocations on one generation (the workflow then runs rehearse.py utb-live):
 
     rehearse.py        --stages up,identity,first-tx,pos-smoke
     rehearse_bridge.py --stages deploy,fund,pos-epoch1          (the epoch-1 artifacts, before the election; within the declared cadence)
     rehearse.py        --stages pos-election,pos-proposal,pos-propose,pos-install,pos-advance
-    rehearse_bridge.py --stages pos-redeem,custody              (after activation)
+    rehearse_bridge.py --stages pos-redeem,pos-historical,custody   (after activation)
 
   pos-epoch1  The bridge client's trust and the epoch-1 artifacts, before the root install:
               - the deployed bundle's genesis EntryID is the generation's UTB genesis id (manifest utb.genesis_id): the one history the roots extend;
@@ -13,7 +13,8 @@ three invocations on one generation:
                 block can acquire a newer seal, so the epoch is read, not inferred);
               - the wallet's held trust, still the shipped genesis only;
               - the on-chain B1 registry's imported tip (SealRegistry storage) before the handoff;
-              - the offline cache: the token file and its record, kept in the evidence (no key).
+              - a second token B, locked, minted AND burned in epoch 1 and left unspent: the historical artifact for pos-historical;
+              - the offline cache: the token files and their records, kept in the evidence (no key).
   pos-redeem  After activation, with the same wallet:
               - the B1 registry imported the new epoch: its bodyID (the activated handoff's V3 body id) and member count (at most the priced 16-member ceiling,
                 B1Layout.MAX_MEMBERS);
@@ -25,6 +26,13 @@ three invocations on one generation:
                 roots' served history (utb_history, under --ubft), persisted (trust-history.cbor); the shipped bundle on disk is unchanged (no history replaced from a file);
               - the release manifest still names what the chain runs (check_release), so the deploy survives activation.
 
+  pos-historical  The separate epoch-1 artifact redeemed after activation on the per-SID path (tester redeem --per-sid: no consolidation, no fallback):
+              - the submitted envelope is the redeem transaction's input as the chain holds it (eth_getTransactionByHash, the redeem(bytes) calldata of
+                envelope.bin), and its anchors carry the epoch-1 seal (decoded from the envelope, not inferred from the token's age);
+              - the redeem's receipt succeeded after the B1 registry had imported the new epoch, the vault credits exactly the lock and the claim pays it.
+  Negatives check the vault's whole state, not its balance alone (a redeem creates credit before any claim): balance, the wallet's claimable, the
+  lock's remaining and redeemed amounts and the credited total.
+
 Not here: the lagging replica and range repair, the public SDK clients, the restarts, and the replay negatives beyond the bridge's own stages (§4.2
 steps 6-8). Those are stage work after this preflight.
 """
@@ -33,7 +41,6 @@ import json
 import os
 import secrets
 import shutil
-from pathlib import Path
 
 from rehearse import Failure   # noqa: E402  (rehearse_bridge.py puts the package directory on sys.path first)
 
@@ -96,6 +103,22 @@ class BridgePos:
 
     # ---- the stages -----------------------------------------------------------------------------------------------------------
     def pos_epoch1(self):
+        try:
+            self.pos_epoch1_steps()
+        except Exception:
+            (self.gen / 'bridge' / POS_KEY).unlink(missing_ok=True)   # the later invocations will not run: the key goes now
+            raise
+
+    def tokens(self):
+        return sorted(p.name for p in (self.gen / 'bridge' / POS_WALLET / 'tokens').iterdir() if (p / 'token.json').exists())
+
+    def vault_state(self, nonce, who):
+        # what a redeem changes, not only the balance: balance, the recipient's claimable, the lock's remaining and redeemed amounts, the credited total
+        view = lambda sig, *args: int(self.vault_view(sig, *args), 16)
+        return {'balance': self.vault_balance(), 'claimable': view('claimable(address)', who), 'remaining': view('remaining(uint256)', str(nonce)),
+                'redeemed': view('redeemedAmount(uint256)', str(nonce)), 'credited': view('credited()')}
+
+    def pos_epoch1_steps(self):
         utb = self.manifest.get('utb')
         self.expect(bool(self.manifest.get('pos')) and bool(utb), 'the generation is a PoS generation with the signed trust-base history (--pos --utb)')
         work = self.gen / 'bridge'
@@ -118,11 +141,20 @@ class BridgePos:
         self.pos_tester('init', '--config', '/work/public/tester-config.json', '--eth-key-file', '/work/tester.key')
         before = self.vault_balance()
         self.pos_tester('lock', '--amount', f'{POS_LOCK_WEI}wei')
-        self.pos_tester('mint')
-        self.expect(self.vault_balance() == before + POS_LOCK_WEI, 'the vault holds the epoch-1 lock', str(self.vault_balance() - before))
+        (token_a,) = self.tokens()
+        self.pos_tester('mint', '--token', token_a)
+        # token B: the separate historical artifact, burned in epoch 1 too, redeemed only after activation (pos-historical)
+        self.pos_tester('lock', '--amount', f'{POS_LOCK_WEI}wei')
+        (token_b,) = set(self.tokens()) - {token_a}
+        self.pos_tester('mint', '--token', token_b)
+        self.pos_tester('burn', '--token', token_b)
+        self.expect(self.vault_balance() == before + 2 * POS_LOCK_WEI, 'the vault holds both epoch-1 locks', str(self.vault_balance() - before))
         trust = self.held_trust()
-        record = json.loads(next((work / POS_WALLET / 'tokens').glob('*/token.json')).read_text())
-        seals = self.held_trust(token=str(record['nonce']))['seals']
+        record = json.loads((work / POS_WALLET / 'tokens' / token_a / 'token.json').read_text())
+        seals = self.held_trust(token=token_a)['seals']
+        seals_b = self.held_trust(token=token_b)['seals']
+        self.expect(all(int(s['rootEpoch']) == int(trust['genesisEpoch']) for s in seals_b),
+                    'token B\'s mint and burn are sealed at the genesis root epoch (read from their seals)', json.dumps(seals_b))
         genesis = int(trust['genesisEpoch'])
         self.expect(int(trust['tipEpoch']) == genesis, 'the wallet holds the shipped genesis entry only', f'epoch {genesis}')
         self.expect(all(int(s['rootEpoch']) == genesis for s in seals), f'the mint\'s proof is sealed at the genesis root epoch {genesis} (read from its seal)',
@@ -130,13 +162,21 @@ class BridgePos:
         b1 = self.b1_state()
         self.expect(b1['importedTip'] == genesis, 'the B1 registry\'s imported tip is the genesis epoch before the handoff', json.dumps(b1))
         cache = self.keep_pos('epoch1')
-        state = {'pin': pin, 'shippedBundleSha256': shipped, 'wallet': me, 'lockWei': POS_LOCK_WEI, 'token': record['nonce'], 'seals': seals,
+        state = {'pin': pin, 'shippedBundleSha256': shipped, 'wallet': me, 'lockWei': POS_LOCK_WEI, 'token': token_a, 'lockNonce': record['nonce'], 'seals': seals,
+                 'tokenB': token_b, 'lockNonceB': json.loads((work / POS_WALLET / 'tokens' / token_b / 'token.json').read_text())['nonce'], 'sealsB': seals_b,
                  'trust': trust, 'b1': b1, 'vaultBefore': before, 'offlineCache': str(cache)}
         self.record('epoch1', state)
         # the next invocation (pos-redeem, after rehearse.py's handoff) has its own evidence directory: the state travels in the generation (no secret in it)
         (work / 'pos-epoch1.json').write_text(json.dumps(state, indent=2) + '\n')
 
     def pos_redeem(self):
+        try:
+            self.pos_redeem_steps()
+        except Exception:
+            (self.gen / 'bridge' / POS_KEY).unlink(missing_ok=True)
+            raise
+
+    def pos_redeem_steps(self):
         work = self.gen / 'bridge'
         epoch1 = json.loads((work / 'pos-epoch1.json').read_text())
         genesis = int(epoch1['trust']['genesisEpoch'])
@@ -165,13 +205,14 @@ class BridgePos:
         if os.getuid() == 0:
             for p in [work / copy, *(work / copy).rglob('*')]:
                 os.chown(p, 10001, 10001)
-        balance = self.vault_balance()
+        state = self.vault_state(epoch1['lockNonce'], epoch1['wallet'])
         try:
             code, text = self.tester('redeem', '--token', nonce, check=False, wallet=copy, key=POS_KEY, env={'BRIDGE_TRUST_FETCH': '0'})
         finally:
             shutil.rmtree(work / copy, ignore_errors=True)
         self.expect(code != 0 and 'ErrNoEntryForEpoch' in text, 'with the fetch disabled the redeem fails with ErrNoEntryForEpoch', text.splitlines()[-1] if text else '')
-        self.expect(self.vault_balance() == balance, 'the refused redeem did not move the vault')
+        after = self.vault_state(epoch1['lockNonce'], epoch1['wallet'])
+        self.expect(after == state, 'the refused redeem changed nothing in the vault (balance, claimable, remaining, redeemed, credited)', json.dumps(after))
         # the redeem with the live trust refresh
         code, text = self.pos_tester('redeem', '--token', nonce)
         fetches = [line.strip() for line in text.splitlines() if 'trust: fetched' in line]
@@ -199,11 +240,48 @@ class BridgePos:
                                                          'data': self.cast_run('calldata', 'claimable(address)', epoch1['wallet'])}, 'latest'])['result'], 16)
         self.expect(credit == POS_LOCK_WEI, 'the redemption across the handoff credits exactly the epoch-1 lock', str(credit))
         self.pos_tester('claim')
-        self.expect(self.vault_balance() == epoch1['vaultBefore'], 'the vault paid back the epoch-1 lock', str(self.vault_balance()))
+        self.expect(self.vault_balance() == epoch1['vaultBefore'] + POS_LOCK_WEI, 'the vault paid back lock A (token B\'s lock still held)', str(self.vault_balance()))
         self.check_release(self.addresses())
         cache = self.keep_pos('redeemed')
         self.record('redeem', {'b1': b1, 'newEpoch': new, 'bodyId': f'0x{body:064x}', 'members': members, 'seals': seals, 'fetches': fetches,
                                'trust': held, 'roots': roots, 'credit': credit, 'evidence': str(cache)})
-        self.record('result', {'stage': '430-bridge-pos-preflight', 'generation': self.gen.name, 'epochs': [genesis, new], 'pass': True})
-        if Path(work / POS_KEY).exists():
-            (work / POS_KEY).unlink()
+        self.record('result-redeem', {'stage': '430-bridge-pos pos-redeem (consolidated)', 'generation': self.gen.name, 'epochs': [genesis, new], 'pass': True})
+
+    def pos_historical(self):
+        try:
+            self.pos_historical_steps()
+        finally:
+            (self.gen / 'bridge' / POS_KEY).unlink(missing_ok=True)   # the last stage that needs the wallet's key
+
+    def pos_historical_steps(self):
+        work = self.gen / 'bridge'
+        epoch1 = json.loads((work / 'pos-epoch1.json').read_text())
+        genesis = int(epoch1['trust']['genesisEpoch'])
+        token, nonce, me = epoch1['tokenB'], epoch1['lockNonceB'], epoch1['wallet']
+        b1 = self.b1_state()
+        self.expect(b1['importedTip'] > genesis, 'the redeem comes after activation: the B1 registry holds the new epoch', json.dumps(b1))
+        before = self.vault_state(nonce, me)
+        self.expect(before['remaining'] == POS_LOCK_WEI and before['claimable'] == 0, 'token B\'s lock is unspent and nothing is claimable', json.dumps(before))
+        self.pos_tester('redeem', '--token', token, '--per-sid')
+        _, text = self.pos_tester('envelope', '--token', token)
+        env = json.loads(text[text.index('{'):text.rindex('}') + 1])
+        record = json.loads((work / POS_WALLET / 'tokens' / token / 'token.json').read_text())
+        tx = self.ureth(1, 'eth_getTransactionByHash', [record['redeemTx']])
+        submitted = self.cast_run('calldata', 'redeem(bytes)', '0x' + env['envelopeHex'])
+        self.expect(tx is not None and tx['input'].lower() == submitted.lower(), 'the decoded envelope is the redeem transaction\'s input as the chain holds it',
+                    f'{record["redeemTx"]} {env["bytes"]} bytes sha256 {env["sha256"][:16]}')
+        epochs = sorted({int(a['rootEpoch']) for a in env['anchors']})
+        self.expect(genesis in epochs, f'the submitted envelope carries an epoch-{genesis} seal ({len(env["anchors"])} anchors, per-SID)',
+                    json.dumps([(a['partition'], a['rootEpoch'], a['rootRound']) for a in env['anchors']]))
+        receipt = self.ureth(1, 'eth_getTransactionReceipt', [record['redeemTx']])
+        self.expect(receipt['status'] == '0x1', 'the redeem succeeded on chain after activation', f'block {int(receipt["blockNumber"], 16)}, gas {int(receipt["gasUsed"], 16)}')
+        credited = self.vault_state(nonce, me)
+        self.expect(credited['claimable'] == POS_LOCK_WEI and credited['remaining'] == 0 and credited['redeemed'] == POS_LOCK_WEI,
+                    'the vault credits exactly token B\'s lock (claimable, remaining 0, redeemed)', json.dumps(credited))
+        self.pos_tester('claim')
+        self.expect(self.vault_balance() == epoch1['vaultBefore'], 'the vault paid back both epoch-1 locks', str(self.vault_balance()))
+        cache = self.keep_pos('historical')
+        self.record('historical', {'token': token, 'lockNonce': nonce, 'redeemTx': record['redeemTx'], 'envelope': {k: env[k] for k in ('bytes', 'sha256', 'anchors')},
+                                   'anchorEpochs': epochs, 'receipt': {'block': int(receipt['blockNumber'], 16), 'gasUsed': int(receipt['gasUsed'], 16)},
+                                   'b1': b1, 'before': before, 'credited': credited, 'evidence': str(cache)})
+        self.record('result-historical', {'stage': '430-bridge-pos pos-historical (per-SID)', 'generation': self.gen.name, 'anchorEpochs': epochs, 'pass': True})

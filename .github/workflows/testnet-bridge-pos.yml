@@ -110,7 +110,7 @@ jobs:
       - name: 3. The handoff (election, proposal, propose, install, advance)
         run: sudo -E env "PATH=$PATH" python3 deploy/testnet/rehearse.py --generation /srv/tn-bridge-pos --evidence "$RUNNER_TEMP/evidence/3-handoff" --ubft pinned-bft/build/ubft --stages pos-election,pos-proposal,pos-propose,pos-install,pos-advance
       - name: 4. The redeem across the handoff, with the bridge client's live trust refresh; custody
-        run: sudo -E env "PATH=$PATH" python3 deploy/testnet/bridge/rehearse_bridge.py --generation /srv/tn-bridge-pos --evidence "$RUNNER_TEMP/evidence/4-bridge-redeem" --ubft pinned-bft/build/ubft --stages pos-redeem,custody
+        run: sudo -E env "PATH=$PATH" python3 deploy/testnet/bridge/rehearse_bridge.py --generation /srv/tn-bridge-pos --evidence "$RUNNER_TEMP/evidence/4-bridge-redeem" --ubft pinned-bft/build/ubft --stages pos-redeem,pos-historical,custody
       - name: 5. The roots' signed history (utb-live)
         run: sudo -E env "PATH=$PATH" python3 deploy/testnet/rehearse.py --generation /srv/tn-bridge-pos --evidence "$RUNNER_TEMP/evidence/5-utb-live" --ubft pinned-bft/build/ubft --stages utb-live
       - name: Resources and logs
