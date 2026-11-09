@@ -197,7 +197,8 @@ jobs:
           set -euo pipefail
           repo=$(jq -er '.components["bft-core"].repository' scripts/ci/lane-pins.json); commit=$(jq -er '.components["bft-core"].commit' scripts/ci/lane-pins.json)
           d="$RUNNER_TEMP/product"; rm -rf "$d"; mkdir -p "$d"
-          git -C "$d" init -q; git -C "$d" fetch -q "$repo" "$commit"   # full history: the aggregator's bft-core pin is checked against the product; git -C "$d" checkout -q --detach FETCH_HEAD
+          # full history (no --depth): the aggregator's bft-core pin is checked against the product
+          git -C "$d" init -q; git -C "$d" fetch -q "$repo" "$commit"; git -C "$d" checkout -q --detach FETCH_HEAD
           git -C "$d" remote add origin "$repo"
           scripts/ci/check-pins.sh git bft-core "$d"
           echo "PRODUCT_DIR=$d" >>"$GITHUB_ENV"
