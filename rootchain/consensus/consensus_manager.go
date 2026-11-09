@@ -87,6 +87,8 @@ type (
 		// timeoutVerify verifies a timeout message; nil is TimeoutMsg.Verify against the trust base store (a test seam counts the calls)
 		timeoutVerify func(*abdrc.TimeoutMsg) error
 		profile       loopProfile // scaling-run measurement aid, see loop_profile.go
+		shadow        *certShadow // shadow certificate counters (UBFT_SHADOW_CERT=1), see cert_shadow.go; nil otherwise
+		msgSeq        uint64      // ordinal of the root network message being handled
 		// channel via which validator sends "certification requests" to CM
 		certReqCh chan certRequest
 		// channel via which CM sends "certification request" response to validator
@@ -594,6 +596,12 @@ func (x *ConsensusManager) Run(ctx context.Context) error {
 }
 
 func (x *ConsensusManager) loop(ctx context.Context) error {
+	if x.shadow == nil {
+		x.shadow = shadowFromEnv()
+	}
+	if x.shadow != nil {
+		x.trustBaseStore.SetCertObserver(x.shadow)
+	}
 	for {
 		select {
 		case <-ctx.Done():
@@ -604,6 +612,8 @@ func (x *ConsensusManager) loop(ctx context.Context) error {
 			}
 			x.log.LogAttrs(ctx, logger.LevelTrace, fmt.Sprintf("received %T", msg), logger.Data(msg))
 			handled := time.Now()
+			x.msgSeq++
+			x.shadow.begin(msg, x.msgSeq, x.pacemaker.GetCurrentRound())
 			if err := x.handleRootNetMsg(ctx, msg); err != nil {
 				if _, isTimeout := msg.(*abdrc.TimeoutMsg); isTimeout && errors.Is(err, quorumweight.ErrDuplicateSigner) {
 					x.log.DebugContext(ctx, fmt.Sprintf("processing %T", msg), logger.Error(err)) // a retransmission of a counted timeout vote is routine
@@ -611,6 +621,7 @@ func (x *ConsensusManager) loop(ctx context.Context) error {
 					x.log.WarnContext(ctx, fmt.Sprintf("processing %T", msg), logger.Error(err))
 				}
 			}
+			x.shadow.end()
 			x.profile.observe(msg, time.Since(handled))
 		case req := <-x.certReqCh:
 			ctx := trace.ContextWithRemoteSpanContext(ctx, req.rsc)
@@ -624,6 +635,7 @@ func (x *ConsensusManager) loop(ctx context.Context) error {
 		}
 		x.timeoutUnknownLeader(ctx)
 		x.profile.report(x.log, time.Now())
+		x.shadow.report(x.log, time.Now())
 	}
 }
 
