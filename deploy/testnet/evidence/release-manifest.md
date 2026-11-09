@@ -83,5 +83,5 @@ Enabled: PoS profile (`--pos`), caps 16,1,6, unit weights. Disabled: `--utb` on 
 
 - The independent release review/readiness decision (Q26) is unanswered and is not satisfied by this manifest.
 - No whole-host reboot in this refresh; the prior destructive-reset result and its limit (memory-only authority keys, owner Q23) stand as they are.
-- `utb-live` (bft-core #978) has not yet run on a live `--utb` generation; its first run is the evidence for it.
+- `utb-live` (bft-core #978) has run once on a live `--utb` generation: the #979 preflight (run 42546603859, GitHub-hosted runner) verified the served history 1..2, the replay matched, and both controls failed as they should. That is one CI generation at two epochs; the checker does not page histories over 64 entries and does not compare against the roots' own store.
 - Not covered by the campaign: a membership change on the accumulated chain, a non-offender exit there, a separate collector-restart fault.
