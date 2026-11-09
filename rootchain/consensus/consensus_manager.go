@@ -87,6 +87,7 @@ type (
 		// timeoutVerify verifies a timeout message; nil is TimeoutMsg.Verify against the trust base store (a test seam counts the calls)
 		timeoutVerify func(*abdrc.TimeoutMsg) error
 		shadow        *certShadow    // shadow certificate counters (UBFT_SHADOW_CERT=1), see cert_shadow.go; nil otherwise
+		retx          *timeoutRetx   // experimental spaced retransmission of the recorded timeout vote (UBFT_TIMEOUT_BACKOFF_C>=2), see timeout_retransmit.go; nil = the old behaviour
 		backoff       *backoffShadow // shadow model of a timeout rebroadcast backoff (UBFT_SHADOW_BACKOFF=1), see backoff_shadow.go; nil otherwise
 		msgSeq        uint64         // ordinal of the root network message being handled
 		profile       loopProfile    // scaling-run measurement aid, see loop_profile.go
@@ -606,10 +607,15 @@ func (x *ConsensusManager) loop(ctx context.Context) error {
 	if x.backoff == nil && x.params != nil {
 		x.backoff = backoffShadowFromEnv(x.params.LocalTimeout)
 	}
+	if x.retx == nil && x.params != nil {
+		x.retx = timeoutRetxFromEnv(x.params.LocalTimeout)
+	}
 	for {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
+		case <-x.retx.Chan():
+			x.onRetransmitTimer(ctx)
 		case msg, ok := <-x.net.ReceivedChannel():
 			if !ok {
 				return fmt.Errorf("root network received channel has been closed")
@@ -638,6 +644,11 @@ func (x *ConsensusManager) loop(ctx context.Context) error {
 			x.handleFrontierRequest(ctx, req)
 		}
 		x.timeoutUnknownLeader(ctx)
+		if x.retx != nil {
+			epoch, round, held := x.heldTimeoutVote()
+			x.retx.retire(epoch, round, held)
+		}
+		x.retx.report(x.log, time.Now())
 		x.profile.report(x.log, time.Now())
 		x.shadow.report(x.log, time.Now())
 		x.backoff.report(x.log, time.Now())
@@ -658,7 +669,7 @@ func (x *ConsensusManager) timeoutUnknownLeader(ctx context.Context) {
 	x.leaderCheckedRound = round
 	if _, err := x.leaderSelector.GetLeaderForRound(round); errors.Is(err, drctypes.ErrHistoryUnavailable) {
 		x.log.DebugContext(ctx, "the round's leader is not known yet: timing the round out", "round", round)
-		x.sendTimeoutVote(ctx)
+		x.sendTimeoutVoteFor(ctx, retxImmediate)
 	}
 	x.forwardRetained(ctx)
 }
@@ -762,15 +773,37 @@ func (x *ConsensusManager) onLocalTimeout(ctx context.Context) {
 	ctx, span := x.tracer.Start(ctx, "ConsensusManager.onLocalTimeout")
 	defer span.End()
 	x.log.InfoContext(ctx, "local timeout")
-	x.sendTimeoutVote(ctx)
+	x.sendTimeoutVoteFor(ctx, retxTick)
+}
+
+// onRetransmitTimer is the scheduled attempt of the experimental retransmission (timeout_retransmit.go): it re-sends the recorded vote of the round
+// when the schedule says it is due, and does nothing for a round that has moved on.
+func (x *ConsensusManager) onRetransmitTimer(ctx context.Context) {
+	if epoch, round, held := x.heldTimeoutVote(); held && x.retx.due(epoch, round) {
+		x.sendTimeoutVoteFor(ctx, retxScheduled)
+	}
+}
+
+// heldTimeoutVote is the epoch and round of the timeout vote the pacemaker holds for its current round, if it holds one.
+func (x *ConsensusManager) heldTimeoutVote() (epoch, round uint64, held bool) {
+	v := x.pacemaker.GetTimeoutVote()
+	if v == nil || v.Timeout == nil || v.Timeout.Round != x.pacemaker.GetCurrentRound() {
+		return 0, 0, false
+	}
+	return v.Timeout.Epoch, v.Timeout.Round, true
 }
 
 // sendTimeoutVote signs, stores and broadcasts the node's timeout vote of the current round, or sends the one it holds.
-func (x *ConsensusManager) sendTimeoutVote(ctx context.Context) {
+func (x *ConsensusManager) sendTimeoutVote(ctx context.Context) { x.sendTimeoutVoteFor(ctx, retxTick) }
+
+func (x *ConsensusManager) sendTimeoutVoteFor(ctx context.Context, trig retxTrigger) {
 	// has the validator voted in this round, if true send the same (timeout)vote
 	// maybe less than quorum of nodes where operational the last time
 	timeoutVoteMsg := x.pacemaker.GetTimeoutVote()
-	rebroadcast := timeoutVoteMsg != nil // the round's vote was already sent: this attempt is a repeat (shadow backoff model only)
+	rebroadcast := timeoutVoteMsg != nil // the round's vote was already sent: this attempt is a repeat
+	if rebroadcast && trig == retxTick && !x.retx.allowTick(timeoutVoteMsg.Timeout.Epoch, timeoutVoteMsg.Timeout.Round) {
+		return // the experimental schedule owns the repeats of a round whose vote it has sent
+	}
 	if timeoutVoteMsg == nil {
 		// create timeout vote
 		qc := x.blockStore.GetHighQc()
@@ -829,8 +862,18 @@ func (x *ConsensusManager) sendTimeoutVote(ctx context.Context) {
 	x.log.LogAttrs(ctx, logger.LevelTrace, "broadcasting timeout vote")
 	x.log.InfoContext(ctx, "broadcast timeout vote", "round", x.pacemaker.GetCurrentRound(), "messageID", timeoutMessageID(timeoutVoteMsg))
 	x.backoff.attempt(x.pacemaker.GetCurrentRound(), rebroadcast)
-	if err := x.net.Send(ctx, timeoutVoteMsg, x.Validators()...); err != nil {
-		x.log.WarnContext(ctx, "error on broadcasting timeout vote", logger.Error(err))
+	sendErr := x.net.Send(ctx, timeoutVoteMsg, x.Validators()...)
+	if sendErr != nil {
+		x.log.WarnContext(ctx, "error on broadcasting timeout vote", logger.Error(sendErr))
+	}
+	switch {
+	case x.retx == nil:
+	case !rebroadcast || (trig == retxTick && !x.retx.active):
+		x.retx.firstSent(timeoutVoteMsg.Timeout.Epoch, timeoutVoteMsg.Timeout.Round, sendErr != nil)
+	case trig == retxScheduled:
+		x.retx.scheduledSent(sendErr != nil)
+	default:
+		x.retx.immediateRepeat(sendErr != nil)
 	}
 	x.voteCnt.Add(ctx, 1, attrSetVoteForTC)
 }
@@ -1238,6 +1281,7 @@ func (x *ConsensusManager) onTimeoutMsg(ctx context.Context, vote *abdrc.Timeout
 	}
 	if vote.Timeout.Round == x.pacemaker.GetCurrentRound() {
 		x.backoff.registered(vote.Timeout.Round) // a new signer of the current round (shadow backoff model only)
+		x.retx.registered(vote.Timeout.Epoch, vote.Timeout.Round)
 	}
 	if tc == nil {
 		x.log.LogAttrs(ctx, logger.LevelTrace, fmt.Sprintf("processed timeout vote for round %d, no quorum yet", vote.Timeout.Round))
