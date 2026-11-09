@@ -12,7 +12,7 @@ const loopProfileInterval = 30 * time.Second
 
 // loopProfile is a measurement aid for scaling runs (briefs/dev2-128-root-experiment-design.md): per root network message type, how many
 // messages the single consensus loop handled and how long it spent in handleRootNetMsg (which includes the signature checks of the
-// message), and how much of the interval the loop was busy. It is touched only by the loop goroutine and costs two clock reads per message.
+// message), and how much of the interval the loop spent in root network message handling (busyMs is that time only: certification requests, frontier requests and timers are not in it, so it is not the loop's total utilisation). It is touched only by the loop goroutine and costs two clock reads per message.
 type loopProfile struct {
 	start  time.Time
 	byType map[reflect.Type]*loopStat
@@ -66,7 +66,7 @@ func (p *loopProfile) report(log *slog.Logger, now time.Time) {
 		log.Info("consensus loop profile", "type", t.String(), "count", s.count, "totalMs", s.total.Milliseconds(),
 			"avgUs", s.total.Microseconds()/int64(s.count), "maxMs", s.max.Milliseconds(), "intervalMs", wall.Milliseconds())
 	}
-	log.Info("consensus loop busy", "busyMs", p.busy.Milliseconds(), "intervalMs", wall.Milliseconds(),
+	log.Info("consensus loop busy", "rootNetBusyMs", p.busy.Milliseconds(), "intervalMs", wall.Milliseconds(),
 		"timeoutVerifyHits", p.verifyHits, "timeoutVerifyMisses", p.verifyMisses, "timeoutDigestUs", p.digestTime.Microseconds())
 	p.start, p.byType, p.busy, p.verifyHits, p.verifyMisses, p.digestTime = now, nil, 0, 0, 0, 0
 }
