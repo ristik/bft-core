@@ -37,6 +37,8 @@ type TrustBaseStore struct {
 	// verifyGen and certCacheP: the verified-certificate cache and the generation that invalidates it (cert_cache.go)
 	verifyGen  atomic.Uint64
 	certCacheP atomic.Pointer[certCache]
+	// certObserver is the optional measurement hook of cert_observer.go
+	certObserver atomic.Pointer[certObserverBox]
 }
 
 // GenesisPin identifies the local genesis quorum certificate by the hash of its vote info and the signed bytes of its commit info. It is

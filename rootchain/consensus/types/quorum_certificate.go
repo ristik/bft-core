@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"time"
 
 	"github.com/fxamacker/cbor/v2"
 
@@ -414,23 +415,34 @@ func (x *QuorumCert) VerifyScheme(tb types.RootTrustBase, cfg votesig.Config, pi
 
 // VerifyWith resolves the certificate's own epoch in the store (its trust base and its signing configuration) and verifies
 // it by that epoch's rule; the genesis pin is the store's.
+//
+// A certificate that verified before, under the same context, is not verified again: only this function's own work is skipped (the callers'
+// processing, timestamp and branch checks are not part of it). The generation is captured before anything is read. The measurement observer
+// (CertObserver, #985) sees real verifications only: it is never consulted by the cache, it is not called on a hit, and on a miss it is called
+// once, after the real verification and after the cache has been told (never between CertVerified and RememberCert).
 func (x *QuorumCert) VerifyWith(tbs *trustbase.TrustBaseStore) error {
 	if x == nil || x.VoteInfo == nil {
 		return errVoteInfoIsNil
 	}
-	// A certificate that verified before, under the same context, is not verified again: only this function's own work is skipped (the callers'
-	// processing, timestamp and branch checks are not part of it). The generation is captured before anything is read.
 	gen := tbs.VerifyGeneration()
 	key, cacheable := certCacheKey(tbs, trustbase.CertQC, x, x.VoteInfo.Version, x.Scheme, x.VoteInfo.Epoch)
 	if cacheable && tbs.CertVerified(key) {
 		return nil
 	}
+	start := time.Now()
 	err := x.verifyWith(tbs)
-	if err == nil && cacheable {
+	took := time.Since(start)
+	if err != nil {
+		return err
+	}
+	if cacheable {
 		verifyCertHook()
 		tbs.RememberCert(key, gen)
 	}
-	return err
+	if o := tbs.CertObserver(); o != nil {
+		o.ObserveCert("QC", x, x.VoteInfo.Epoch, x.GetRound(), x.signingScheme(), len(x.Signatures), took)
+	}
+	return nil
 }
 
 func (x *QuorumCert) verifyWith(tbs *trustbase.TrustBaseStore) error {
