@@ -68,6 +68,14 @@ func NewAt(genesis shardnode.BlockRef) *Fake {
 	return f
 }
 
+// ExpectedBlock is the block a Fake builds on parent from exactly these entries, so a harness can name the block of a piece of work it queued and recognise it
+// in a certificate. It is the same computation as Build.
+func ExpectedBlock(parent shardnode.BlockRef, entries ...[]byte) shardnode.BlockRef {
+	number := parent.Number + 1
+	stateRoot, blockHash := computeRoots(parent.StateRoot, number, entries)
+	return shardnode.BlockRef{Number: number, Hash: blockHash, StateRoot: stateRoot}
+}
+
 // AddEntries queues opaque entries to be included in the next block this
 // instance builds.
 func (f *Fake) AddEntries(entries ...[]byte) {

@@ -23,8 +23,9 @@ import (
 func ingressLossBudget(c *q4bLive) uint64 { return uint64(len(c.nodes)) + 3 }
 
 type shardCert struct {
-	seal uint64
-	ir   *types.InputRecord
+	seal   uint64
+	ir     *types.InputRecord
+	leader string // the shard leader the certificate's technical record names for the next round
 }
 
 func shardCertOf(m *ConsensusManager) *shardCert {
@@ -32,7 +33,7 @@ func shardCertOf(m *ConsensusManager) *shardCert {
 	if si == nil || si.LastCR == nil {
 		return nil
 	}
-	return &shardCert{seal: si.LastCR.UC.UnicitySeal.RootChainRoundNumber, ir: si.LastCR.UC.InputRecord}
+	return &shardCert{seal: si.LastCR.UC.UnicitySeal.RootChainRoundNumber, ir: si.LastCR.UC.InputRecord, leader: si.LastCR.Technical.Leader}
 }
 
 // establishShardCertificate gives the shard a first certificate of a known hash and returns it.

@@ -9,7 +9,7 @@ import (
 )
 
 func init() {
-	consensus.SetNewRootNode(func(p *network.Peer, n *network.LibP2PNetwork, cm *consensus.ConsensusManager, obs network.Observability) (interface {
+	consensus.SetNewRootNode(func(p *network.Peer, n consensus.RootPartitionNet, cm *consensus.ConsensusManager, obs network.Observability) (interface {
 		Run(context.Context) error
 	}, error) {
 		return rootchain.New(p, n, cm, obs)
