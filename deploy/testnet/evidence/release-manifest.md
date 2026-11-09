@@ -15,7 +15,7 @@
 
 **A-only.** Aggregator A = ristik/aggregator-go `integration/enshrined-evm`. The upstream-facing aggregator B and the UTB feeder (aggregator-go #16/#17, bft-core #967's variant) are **not accepted by this release**; `aggregator-go-upstream` in `deploy/testnet/pins.json` (12ab9074) is the image variant #967 added and is not exercised by any stage listed here. An A pass does not accept B. B needs a merged feeder pin, its own manifest revision and the affected live-source and bridge reruns.
 
-Bridge across a PoS transition (#430 row 2): **PENDING(bft-core#979 preflight result and ristik/native-bridge-plugins#67 merge)**. If either fails or slips, this release is the PoS-only manifest and #430's bridge row stays open for a later manifest revision.
+Bridge across a PoS transition (#430 row 2): the §4.1 preflight **passed in CI** (bft-core#979 run 42546603859 at 4baaca59, GitHub-hosted runner, `--pos --utb`, aggregator A, epoch 1→2; dev4's summary `briefs/dev4-bridge-pos-preflight-2026-11-09.md`, with arch's review pending). That is CI evidence only: not a host run, and not the accepted bridge-on-PoS row. Still PENDING(arch's review of the preflight; owner merge of ristik/native-bridge-plugins#67; #979 re-pinned to #67's merge commit and out of draft). If any of them slips, this release is the PoS-only manifest and #430's bridge row stays open for a later manifest revision.
 
 ## 3. Components
 
@@ -26,7 +26,7 @@ Bridge across a PoS transition (#430 row 2): **PENDING(bft-core#979 preflight re
 | unicity-pos-contracts | `7b510f6b5a9cf3987ccc5d7dc77d39f33de12330` | `pins.json`, `bridge/pins.json`, `lane-pins.json` | retained; `main` 4a32df9d adds golden-reference files, `src/` unchanged since be6e86fb |
 | aggregator-go A | `009974a72560c1f224fef99ada9fbf475f1488a7` | `pins.json`, `lane-pins.json` | integration head |
 | native-bridge-plugins (corpus and joined checks) | `838b08ce4304428c9ebcb9b0fbd4b55b260a99d4` | `bridge/pins.json`, `lane-pins.json` | retained; `main` f1c4a6a8 changes joined-test pins only |
-| native-bridge-plugins (**bridge consumer**) | PENDING(merge commit of nbp#67; head f3c8c337 today, SDK pin unchanged at 75c5be7) | `bridge/pins.json` | until it merges, 838b08ce is not that consumer's complete source |
+| native-bridge-plugins (**bridge consumer**) | PENDING(merge commit of nbp#67, merged by the owner; the preflight ran on its unmerged head 948d429a; SDK pin unchanged at 75c5be7) | `bridge/pins.json` | until it merges, 838b08ce is not that consumer's complete source |
 | Foundry | 1.8.1, sha256 `37b45855232e57624d90113b049ca54f0c92055bb5c1997fcbdc3076c7b89c10` | `bridge/pins.json` | unchanged |
 
 Reference updates ureth #95, contracts #79, nbp #64: **not taken**. If taken before freeze, their exact revisions replace the rows above and the affected corpus and joined checks are re-run; old evidence is not relabelled.
@@ -56,7 +56,7 @@ The bridge does not use JS `main` and has no `TrustBaseSession` cache here; that
 |---|---|---|---|
 | core (G1), crash, owner, resources | off | 400 rounds / 300 s (rehearsal) | 16,1,6 |
 | crash e1, crash e2, join | off | as above | as above |
-| bridge preflight (bft-core#979) | on | 1500 rounds / 1200 s (declared there) | PENDING(from #979) |
+| bridge generation (bft-core#979 recipe) | on (`--pos --utb`, aggregator A integration) | 1500 rounds / 1200 s (declared in its `generation-recipe.json`) | PENDING(read from `generation-recipe.json`) |
 | campaign (lane `x4-exit`) | per lane | per lane | per lane |
 
 Test values, recorded, not testnet decisions. Each generation records its own setting in `generation.txt` (driver revision 2). Results from different cadences are not cross-read.
@@ -67,7 +67,7 @@ PENDING(exact command and toolchain per component: ubft in `tn1-builder:bookworm
 
 ## 8. Features
 
-Enabled: PoS profile (`--pos`), caps 16,1,6, unit weights. Disabled: `--utb` on every generation except the bridge preflight; B/feeder; unequal genesis weights (the `pos-join-heavy` stage is the refusal control only). PENDING(final list after #979).
+Enabled: PoS profile (`--pos`), caps 16,1,6, unit weights. Disabled: `--utb` on every generation except the bridge preflight; B/feeder; unequal genesis weights (the `pos-join-heavy` stage is the refusal control only). `--utb` on the bridge generation. Bridge-client trust refresh (`withTrustRefresh` through the pinned SDK's `fetchTrustBaseEntries`, nbp#67) once #67 is merged. PENDING(final list after arch's review of the preflight).
 
 ## 9. Runs this manifest covers (filled as they complete)
 
