@@ -216,7 +216,7 @@ if wait_rounds 5 "$resumewait"; then pass "quorum restored ($quorum live): certi
 echo "=== evidence ==="
 event "end"
 # the consensus loop's per-message-type time (root1 and every other root) and root1's per-round leader lines (root1 runs at debug)
-grep -h "consensus loop" test-nodes/root*/debug.log 2>/dev/null | gzip >"$evidence/loop-profile-all-roots.log.gz"
+grep -h "consensus loop\|consensus shadow" test-nodes/root*/debug.log 2>/dev/null | gzip >"$evidence/loop-profile-all-roots.log.gz"
 grep -h "next leader\|local timeout\|timeout quorum" test-nodes/root1/debug.log 2>/dev/null | gzip >"$evidence/root1-rounds.log.gz"
 for i in $(seq 1 "$roots"); do
   grep -ciE 'panic|fatal error|SIGABRT|pthread_create' "test-nodes/root$i/debug.log" 2>/dev/null | sed "s/^/root$i,/"
