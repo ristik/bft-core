@@ -1,6 +1,6 @@
 {
-  "comment": "The three public SDKs the acceptance clients (js/, rust/, java/) are built against, each a ristik fork at its main commit. The Dockerfiles clone the repo, fetch exactly this commit and refuse a checkout whose HEAD differs. Base images are pinned by digest in the Dockerfiles (node: the digest of deploy/testnet/bridge/pins.json; rust and eclipse-temurin: resolved with docker buildx imagetools inspect on 2026-11-09).",
-  "js": {"repo": "https://github.com/ristik/state-transition-sdk-js", "commit": "41cb7ddbbac0c0c2c3037a4dc61ba97de365b83d"},
-  "rust": {"repo": "https://github.com/ristik/state-transition-sdk-rust", "commit": "4be1330dbc8d880431a84d0831728c46291e394c"},
+  "comment": "The three public SDKs the acceptance clients (js/, rust/, java/) are built against, each a ristik fork at the head of its staging branch integration/enshrined-evm (the PoS line, the 4.0.0 API; JS sdk-js#28, Rust sdk-rust#29; Java's staging branch is at its main commit). The Dockerfiles clone the repo, fetch exactly this commit and refuse a checkout whose HEAD differs. Base images are pinned by digest in the Dockerfiles (node: the digest of deploy/testnet/bridge/pins.json; rust and eclipse-temurin: resolved with docker buildx imagetools inspect on 2026-11-09).",
+  "js": {"repo": "https://github.com/ristik/state-transition-sdk-js", "commit": "c5840ef5f59201c52ea6cf7034ee02cb48d54007"},
+  "rust": {"repo": "https://github.com/ristik/state-transition-sdk-rust", "commit": "de79e6c1e393a1846b75bca0640b9ec9a55aa143"},
   "java": {"repo": "https://github.com/ristik/state-transition-sdk-java", "commit": "9fe6bf8ff16eaee162faea0c00404bc7d330b77b"}
 }
