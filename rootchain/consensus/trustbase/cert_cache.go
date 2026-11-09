@@ -4,7 +4,6 @@ import (
 	"container/list"
 	"sort"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/votesig"
@@ -189,5 +188,3 @@ func (s *TrustBaseStore) CertContextFor(epochs ...uint64) (CertContext, bool) {
 	}
 	return ctx, ctx.N > 0
 }
-
-var _ = atomic.Uint64{}

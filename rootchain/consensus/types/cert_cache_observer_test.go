@@ -10,6 +10,11 @@ import (
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/trustbase"
 )
 
+// Note on the observer's cache check: tbs.CertVerified counts a HIT in the cache statistics (it is the production lookup). The check below therefore
+// adds one hit per observed certificate to the counters that the tests read with TakeCertCacheStats. The assertions that compare hit counts take
+// the statistics after a call that is not observed (a hit), and read the first miss's counters before any hit assertion, so the extra count never
+// enters a compared number; keep that in mind when adding assertions.
+//
 // countingObserver is the shadow's side of the contract: it counts the calls it is told about and, at each call, whether the certificate was
 // already in the cache (a call must come after the cache learned of the verification, never between CertVerified and RememberCert).
 type countingObserver struct {
