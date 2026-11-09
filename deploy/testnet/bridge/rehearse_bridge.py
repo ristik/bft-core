@@ -15,7 +15,7 @@
              one validator stopped, which rejoins with the same blocks; the vault's balance follows every step (custody)
   negatives  after the round trip (whose release ran with a validator stopped and restarted): the same envelope redeemed again and the claim repeated
              are both refused, and the vault keeps the nullifier; the driver's negatives (a conflicting burn of the same state to another address is
-             never certified: the aggregator serves the first burn's proof; a fresh proof of the redeemed burn, under a newer seal, is refused as
+             not certified once later blocks are built: after a sentinel submitted later is certified, the aggregator still serves the first burn's proof; a fresh proof of the redeemed burn, under a newer seal, is refused as
              PartAlreadyRedeemed). The vault's balance does not move
   tester     the bridge tester CLI (native-bridge-plugins tester/) as a tester runs it, with its own faucet-funded key and GENERATION/bridge/public/tester-config.json:
              init, lock, mint (the proof from the lock-proof endpoint), two transfers, burn, redeem, claim and status; a repeated step is refused; the vault
@@ -30,6 +30,9 @@
   backup-restore
              the quiesced backup and same-generation restore (rehearse.py) with the bridge deployed: the redeemed lock stays spent, and a new round trip completes on
              the restored generation; the round trip's replays (its envelope, its claim and the driver's negatives) are refused there too
+  pos-epoch1, pos-redeem, pos-historical, pos-gap, pos-agg-restart, pos-after-restart, pos-replays, pos-sdk-clients
+             opt-in, on a generation made with --pos --utb: the bridge across a PoS root handoff (bft-core #430 row 2), run between rehearse.py's
+             handoff stages; see bridge_pos.py for the sequence of invocations and what each checks
   custody    the vault's books from its whole event log against its counters and balance: every lock once (nonces 1..lastNonce), every credit
              once per (lock, part) with the nullifier the vault keeps, each lock's parts at most its amount and its lockedAmount/redeemedAmount/remaining
              equal to its events, L = Σ locks, D = Σ credits, P = Σ claims, 0 <= P <= D <= L,
@@ -53,6 +56,8 @@ sys.path.insert(0, str(HERE.parent))
 from rehearse import PROXY_IPS, Failure, Rehearsal   # noqa: E402  (the package's recorder and helpers)
 from deploy_bridge import TAG, validators_network   # noqa: E402
 import release   # noqa: E402
+from bridge_pos import BridgePos   # noqa: E402
+from sdk_clients import SdkClients   # noqa: E402
 
 ENDPOINT = '127.0.0.1:8090'
 # a valid first-owner predicate (a signature predicate), the corpus' history/prepare-valid input: the vault's prepareLock refuses a malformed one
@@ -81,7 +86,7 @@ TESTER_FUNDS, TESTER_LOCK_WEI = 2 * 10 ** 18, 5 * 10 ** 17
 SPLIT_UNIT = 10 ** 13
 
 
-class BridgeRehearsal(Rehearsal):
+class BridgeRehearsal(SdkClients, BridgePos, Rehearsal):
     def bridge_compose(self, *args, check=True):
         return subprocess.run(['docker', 'compose', '-f', str(self.gen / 'compose.yaml'), '-f', str(self.gen / 'compose.bridge.yaml'), *args],
                               check=check, text=True, capture_output=True).stdout
@@ -145,12 +150,13 @@ class BridgeRehearsal(Rehearsal):
             raise Failure(f'the driver failed: {args[0]}')
         return out.stdout
 
-    def tester(self, *args, check=True, wallet='tester-wallet', key='tester.key'):
+    def tester(self, *args, check=True, wallet='tester-wallet', key='tester.key', env=None, docker_args=()):
         """One command of the bridge tester CLI in the bridge tools image, on the validators network, with its wallet at /work/WALLET. The tester has
         no driver key and no archive: its mounts are only its wallet, its key file and the published directory (bridge/public), read-only. Returns
-        (exit code, output)."""
+        (exit code, output). docker_args are extra docker run options (pos-gap's --add-host to its trust recorder)."""
         work = self.gen / 'bridge'
-        out = subprocess.run(['docker', 'run', '--rm', '--read-only', '--network', validators_network(self.gen), '--user', '10001:10001', '-e', 'HOME=/tmp/home',
+        extra = [x for k, v in (env or {}).items() for x in ('-e', f'{k}={v}')]
+        out = subprocess.run(['docker', 'run', '--rm', '--read-only', '--network', validators_network(self.gen), '--user', '10001:10001', '-e', 'HOME=/tmp/home', *extra, *docker_args,
                               '--tmpfs', '/tmp', '-v', f'{work / "public"}:/work/public:ro', '-v', f'{work / wallet}:/work/{wallet}',
                               '-v', f'{work / key}:/work/tester.key:ro', TAG, 'npx', '--no-install', 'tsx', TESTER, *args, '--wallet', f'/work/{wallet}'],
                              text=True, capture_output=True)
@@ -349,8 +355,15 @@ class BridgeRehearsal(Rehearsal):
                     f'{where}: the claim of an already claimed credit is refused (InsufficientCredit: none left)', json.dumps(r)[:300])
         self.driver('negatives', '/work/lane-config.json', '/work/roundtrip/saved.json')
         out = json.loads((run / 'negatives.json').read_text())
-        # the driver asserts the served proof is the first burn's (from the token file) and that the plug-in refuses the conflicting burn
-        self.say(f'  {where}: a conflicting burn of the same state is never certified (submission {out["conflictingBurn"]["submission"]})')
+        # the driver asserts the served proof is the first burn's (from the token file), read after later blocks (nbp tests/live/conflict.ts), and that the
+        # plug-in refuses the conflicting burn; the wait it records is checked here too
+        cb = out['conflictingBurn']
+        wt = cb.get('waited') or {}
+        self.expect(bool(wt) and int(wt['settledAtBlock']) >= int(wt['submittedAtBlock']) + 2 and wt['sentinelStateId']
+                    and wt['firstRead']['transactionHash'] == wt['reRead']['transactionHash'] == cb['servedTransactionHash'] != cb['conflictingTransactionHash'],
+                    f'{where}: a conflicting burn of the same state is not certified once later blocks are built (submission {cb["submission"]} at block '
+                    f'{wt.get("submittedAtBlock")}; a sentinel submitted after it certified; re-read at block {wt.get("settledAtBlock")}: the first burn\'s proof is still served)',
+                    json.dumps(wt)[:400])
         self.expect(out['freshReplay']['revertData'] == PART_ALREADY_REDEEMED + word(saved['nonce']) + part[2:],
                     f'{where}: a fresh proof of the redeemed burn (seal round {out["freshReplay"]["anchors"][0]["round"]}) is refused as PartAlreadyRedeemed')
         # an unknown-key forgery (not a retired committee: this package has no root handoff, #438): the fresh proof re-signed by unknown keys
@@ -608,7 +621,10 @@ class BridgeRehearsal(Rehearsal):
 
 
 STAGES = (('deploy', 'deploy'), ('lockproof', 'lockproof'), ('fund', 'fund'), ('roundtrip', 'roundtrip'), ('negatives', 'negatives'), ('tester', 'tester_stage'), ('split', 'split_stage'),
-          ('consolidated', 'consolidated'), ('long-history', 'long_history'), ('backup-restore', 'backup_restore'), ('custody', 'custody'))
+          ('consolidated', 'consolidated'), ('long-history', 'long_history'), ('backup-restore', 'backup_restore'), ('pos-epoch1', 'pos_epoch1'), ('pos-redeem', 'pos_redeem'), ('pos-historical', 'pos_historical'), ('pos-gap', 'pos_gap'), ('pos-agg-restart', 'pos_agg_restart'), ('pos-after-restart', 'pos_after_restart'), ('pos-replays', 'pos_replays'), ('pos-sdk-clients', 'pos_sdk_clients'),
+          ('custody', 'custody'))
+# opt-in: only on a --pos --utb generation, around rehearse.py's handoff stages (bridge_pos.py)
+POS_STAGES = ('pos-epoch1', 'pos-redeem', 'pos-historical', 'pos-gap', 'pos-agg-restart', 'pos-after-restart', 'pos-replays', 'pos-sdk-clients')
 
 
 def main():
@@ -616,13 +632,15 @@ def main():
     p.add_argument('--generation', required=True, type=Path)
     p.add_argument('--evidence', required=True, type=Path)
     p.add_argument('--cast', default='cast')
-    p.add_argument('--stages', default=','.join(s for s, _ in STAGES), help='comma separated, in order')
+    p.add_argument('--stages', default=','.join(s for s, _ in STAGES if s not in POS_STAGES), help='comma separated, in order (the pos-* stages only when named)')
+    p.add_argument('--ubft', type=Path, help='the pinned ubft binary: pos-redeem verifies the roots\' served history with it (rehearse.py utb_history)')
     p.add_argument('--long-transfers', type=int, default=250, help=f'the long-history token\'s transfers (65 to {LONG_TRANSFERS_MAX})')
     a = p.parse_args()
     if not 64 < a.long_transfers <= LONG_TRANSFERS_MAX:
         p.error(f'--long-transfers must be 65 to {LONG_TRANSFERS_MAX}: one aggregator batch holds 256 state IDs')
     r = BridgeRehearsal(a.generation, a.evidence, a.cast)
     r.long_transfers = a.long_transfers
+    r.ubft = a.ubft.resolve() if a.ubft else None
     wanted = a.stages.split(',')
     unknown = set(wanted) - {s for s, _ in STAGES}
     if unknown:
