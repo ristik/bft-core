@@ -157,7 +157,10 @@ class BridgePos:
         rec = work / 'trust-recorder'
         shutil.rmtree(rec, ignore_errors=True)
         rec.mkdir()
-        os.chmod(rec, 0o777)
+        if os.getuid() == 0:   # the recorder runs as 10001 (as the tester's wallet copies are chowned above)
+            os.chown(rec, 10001, 10001)
+        else:
+            os.chmod(rec, 0o777)
         name = f'{self.gen.name}-trust-recorder'
         subprocess.run(['docker', 'rm', '-f', name], capture_output=True)
         subprocess.run(['docker', 'run', '-d', '--rm', '--name', name, '--network', validators_network(self.gen), '--user', '10001:10001', '--read-only',
@@ -173,6 +176,9 @@ class BridgePos:
             subprocess.run(['docker', 'rm', '-f', name], capture_output=True)
         out = rec / 'pages.jsonl'
         records = [json.loads(line) for line in out.read_text().splitlines()] if out.exists() else []
+        if out.exists():   # kept with the evidence whatever the tester's outcome
+            (self.evidence / 'pos-bridge').mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(out, self.evidence / 'pos-bridge' / f'trust-recorder-{args[0]}.jsonl')
         if code != 0:
             raise Failure(f'the tester failed: {args[0]}')
         return code, text, records
