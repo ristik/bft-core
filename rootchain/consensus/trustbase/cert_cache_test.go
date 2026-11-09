@@ -59,3 +59,44 @@ func TestCertCacheStoresPerGenerationAndRefusesAStaleInsert(t *testing.T) {
 	s.RememberCert(k, s.VerifyGeneration())
 	require.True(t, s.CertVerified(k))
 }
+
+// A live reinstall: a projection installed through either entry point advances the generation, an idempotent reinstall of the same one does not, and
+// a bound authority's answer is re-read on every lookup (the context follows it without any mutator running).
+func TestVerifyGenerationOnProjectionInstallsAndAuthorityAnswers(t *testing.T) {
+	s := threeEpochStore(t)
+	old, err := s.GetByEpoch(3)
+	require.NoError(t, err)
+	next := successorOf(t, old, 4)
+
+	before := s.VerifyGeneration()
+	_, err = s.InstallV2Projection(next)
+	require.NoError(t, err)
+	installed := s.VerifyGeneration()
+	require.Greater(t, installed, before, "InstallV2Projection of a new epoch")
+	_, err = s.InstallV2Projection(next)
+	require.NoError(t, err)
+	require.Equal(t, installed, s.VerifyGeneration(), "the identical projection again changes nothing")
+
+	// through the verified-history entry point
+	s2 := threeEpochStore(t)
+	history := historyOf{1: legacy(), 2: legacy(), 3: legacy(), 4: cfg2()}
+	require.NoError(t, s2.BindSigningAuthority(history))
+	genAfterBind := s2.VerifyGeneration()
+	old2, err := s2.GetByEpoch(3)
+	require.NoError(t, err)
+	_, err = s2.InstallVerified(successorOf(t, old2, 4), cfg2())
+	require.NoError(t, err)
+	require.Greater(t, s2.VerifyGeneration(), genAfterBind, "InstallVerified")
+
+	// the bound history answers for itself: a changed answer is a different context at the next lookup, with no generation change
+	ctx1, ok := s2.CertContextFor(4)
+	require.True(t, ok)
+	genBefore := s2.VerifyGeneration()
+	changed := cfg2()
+	changed.Genesis = [32]byte{42}
+	history[4] = changed
+	ctx2, ok := s2.CertContextFor(4)
+	require.True(t, ok)
+	require.NotEqual(t, ctx1, ctx2)
+	require.Equal(t, genBefore, s2.VerifyGeneration())
+}

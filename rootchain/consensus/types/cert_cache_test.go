@@ -269,3 +269,18 @@ func TestCertCacheConcurrentUseWithContextChanges(t *testing.T) {
 	}()
 	wg.Wait()
 }
+
+// A real context change through the verifier: a legacy QC remembered under the legacy configuration is refused once its epoch activates the
+// domain-bound scheme, never served from the old context.
+func TestCertCacheSigningActivationInvalidatesALegacyResult(t *testing.T) {
+	sb := newStructBuilder(t, 3)
+	tbs := sb.trustBaseStore
+	qc := sb.QC(t, 42)
+	require.NoError(t, qc.VerifyWith(tbs))
+	require.NoError(t, qc.VerifyWith(tbs))
+	require.Equal(t, 1, tbs.TakeCertCacheStats().Hits[trustbase.CertQC])
+
+	require.NoError(t, tbs.ActivateSigning(1, votesig.Config{Scheme: votesig.SchemeDomainBound, Network: 5, Genesis: [32]byte{1}}))
+	require.ErrorIs(t, qc.VerifyWith(tbs), votesig.ErrScheme)
+	require.Zero(t, tbs.TakeCertCacheStats().Hits[trustbase.CertQC])
+}
