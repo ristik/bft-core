@@ -145,6 +145,22 @@ class UtbProfile(unittest.TestCase):
         integration=self.topo(4,self.PIN)
         for name in cfg['services']:
             if name != 'aggregator': self.assertEqual(cfg['services'][name],integration['services'][name],name)
+    def test_the_upstream_aggregator_history_lives_on_its_own_persistent_mongo_volume_and_the_bundle_is_read_only(self):
+        """Case 3 of briefs/utb-acceptance-host-plan.md, checked statically: the history (the durable tail of the upstream-facing aggregator) is in its MongoDB on a
+        persistent volume of the package, the shipped bundle is only ever mounted read-only, and exactly one service reads UTB_BUNDLE_FILE."""
+        with tempfile.TemporaryDirectory() as tmp:
+            out=Path(tmp)/'tn-fixture';out.mkdir()
+            cfg=generate.topology(out,4,{'root':['r%d'%i for i in range(4)],'evm':['e%d'%i for i in range(4)]},self.images,'captcha',(),30000000,False,'127.0.0.1',self.PIN,'upstream')
+        svc=cfg['services']
+        self.assertIn('./mongo:/data/db',svc['mongo']['volumes'],'the tail survives a recreated aggregator')
+        from urllib.parse import urlparse
+        self.assertEqual(urlparse(svc['aggregator']['environment']['MONGODB_URI']).hostname,'mongo','the history is in the package\'s own mongo service')
+        network=[m for m in svc['aggregator']['volumes'] if m.endswith(':/network:ro')]
+        self.assertEqual(len(network),1,'the bundle comes from the read-only network mount')
+        self.assertTrue(svc['aggregator']['environment']['UTB_BUNDLE_FILE'].startswith('/network/'),'the bundle is read from the read-only network mount, not from /state or anywhere writable')
+        readers=[n for n,s in svc.items() if 'UTB_BUNDLE_FILE' in s.get('environment',{})]
+        self.assertEqual(readers,['aggregator'],'one history owner per database: no other service reads the bundle as its history')
+        self.assertNotIn('./aggregator-utb:/utb',svc['aggregator']['volumes'],'no second (bolt) history next to the Mongo one')
     def test_an_unknown_aggregator_variant_is_refused(self):
         with self.assertRaises(ValueError): generate.utb_aggregator_environment(self.PIN,'other')
     def test_the_upstream_aggregator_pin_is_a_full_commit_and_differs_from_the_integration_one(self):
