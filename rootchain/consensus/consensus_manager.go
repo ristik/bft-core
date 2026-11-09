@@ -602,7 +602,9 @@ func (x *ConsensusManager) loop(ctx context.Context) error {
 			}
 			x.log.LogAttrs(ctx, logger.LevelTrace, fmt.Sprintf("received %T", msg), logger.Data(msg))
 			handled := time.Now()
-			if err := x.handleRootNetMsg(ctx, msg); err != nil {
+			if err := x.handleRootNetMsg(ctx, msg); errors.Is(err, errDuplicateTimeoutVote) {
+				x.log.DebugContext(ctx, fmt.Sprintf("processing %T", msg), logger.Error(err)) // retransmissions are routine, not a warning
+			} else if err != nil {
 				x.log.WarnContext(ctx, fmt.Sprintf("processing %T", msg), logger.Error(err))
 			}
 			x.profile.observe(msg, time.Since(handled))
@@ -1153,6 +1155,9 @@ func (x *ConsensusManager) voteQuorumInfo() QuorumInfo {
 	return trust
 }
 
+// errDuplicateTimeoutVote marks the early refusal of a timeout vote whose signer already has a counted vote for the round.
+var errDuplicateTimeoutVote = errors.New("timeout vote already counted")
+
 // onTimeoutMsg handles timeout vote messages from other root validators
 // Timeout votes are broadcast to all nodes on local timeout and all validators try to assemble
 // timeout certificate independently.
@@ -1161,6 +1166,12 @@ func (x *ConsensusManager) onTimeoutMsg(ctx context.Context, vote *abdrc.Timeout
 	defer span.End()
 	if vote.Timeout.Round < x.pacemaker.GetCurrentRound() {
 		return fmt.Errorf("stale timeout vote for round %d from %s", vote.Timeout.Round, vote.Author)
+	}
+	// A repeat of a vote that is already counted (a retransmission) is refused before any signature or high QC is verified: the answer is
+	// the one RegisterTimeoutVote would give, without the cost. Only counted votes are looked up, and a vote is counted only after the checks
+	// below, so an unverified message cannot cause this refusal for a valid one (#982).
+	if x.pacemaker.HasTimeoutVote(vote.Author, vote.Timeout.Round, vote.Timeout.Epoch) {
+		return fmt.Errorf("%w: %w: %s already voted in round %d", errDuplicateTimeoutVote, quorumweight.ErrDuplicateSigner, vote.Author, vote.Timeout.Round)
 	}
 	// verify signature on vote
 	if err := vote.Verify(x.trustBaseStore); err != nil {
