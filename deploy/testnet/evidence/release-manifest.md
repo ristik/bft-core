@@ -85,3 +85,36 @@ Enabled: PoS profile (`--pos`), caps 16,1,6, unit weights. Disabled: `--utb` on 
 - No whole-host reboot in this refresh; the prior destructive-reset result and its limit (memory-only authority keys, owner Q23) stand as they are.
 - `utb-live` (bft-core #978) has run once on a live `--utb` generation: the #979 preflight (run 42546603859, GitHub-hosted runner) verified the served history 1..2, the replay matched, and both controls failed as they should. That is one CI generation at two epochs; the checker does not page histories over 64 entries and does not compare against the roots' own store.
 - Not covered by the campaign: a membership change on the accumulated chain, a non-offender exit there, a separate collector-restart fault.
+
+## 11. Acceptance checklist (what each row must show before it is cited as passed)
+
+A row is cited only with its evidence path, the manifest revision, the run SHA and the limits. A missing item is stated as missing, never rounded to pass. PoS host rows (a-f) are dev3's; the bridge row (g) is dev4's stage, listed here so the final summary has one place.
+
+| # | Row | Pass requires | Negative / control |
+|---|---|---|---|
+| a | core (G1) | every stage of `up … pos-recreate` PASS; `pos-restart-2` shows every root at epoch 3; no `finalized-branch conflict` (if one occurs: logs kept, classified on the evidence, whatever #916's state) | the `pos-abort` / `pos-too-late` stages are part of the list; their expected refusals are asserted, not skipped |
+| b | crash at epoch 3 | `pos-crash`, `-ureth`, `-shard`, `-root`, `-ureth-shard` PASS (records in `pos-crash-<tag>.json`, logs of the entity kept) | convergence after the first restart is asserted; a failure keeps the #843 evidence |
+| c | owner | `pos-owner` PASS after the crash stages | |
+| d | crash at epoch 1, crash at epoch 2 | each on its own fresh generation; `pos-crash-e1` at epoch 1, `pos-crash-e2` at epoch 2 | |
+| e | join 4->5 | `pos-joiner … pos-advance`, `pos-restore-repeat`, `pos-join-signs`, `pos-join-heavy`, `pos-restart` PASS (epoch 2) | the low-limit restore run is an **expected negative control** and must reproduce `pthread_create failed` at the lowest limit, or the experiment is reported invalid, not passed; `pos-join-heavy` records the WeightChurn refusal |
+| f | resources | >= 1 h on G1 at verified epoch 3, `--no-faucet`, no external load: 0 sampler alerts; peak memory and disk reported against 4 Nov (53 samples, peak <= 34% of limits, disk 4.9%) | the load-free window is stated |
+| g | bridge across a PoS transition (#430 row 2) | dev4's list (plan §4.2-4.3): epoch-1 artifacts redeemed after 1->2 and 2->3 on the per-SID path with their actual epoch-1 anchors; the epoch-3 gap repaired on a separate lagging consumer (`maxEntries=1`); public SDK clients cold / warm / restarted; restarts; a recorded fresh-process reload; `custody` L = D = P | fetch disabled fails with the typed error and the vault state is identical before and after; missing middle entry, signatures below `floor(2W/3)+1`, wrong network; duplicate redeem/claim, conflicting burn, tampered proof with whole-state checks |
+| h | `utb-live` on each `--utb` generation | served history verifies 1..tip from the pinned genesis, replay idempotent, both controls fail as they should | |
+| i | campaign refresh (R1) | `complete=yes`; accounting span >= 14400 s; second handoff K->K', unpublishable result rejected, governance activation, 4 reward intervals, faults executed; pack complete, scans clean; frontier lag reported (not thresholded) | failed attempts kept with run id and attempt number; an injected negative is interpreted only with a passing positive control |
+
+Cross-cutting: for every stop/kill stage the full transition, certification and receipt timestamps are kept; "awaiting round N block from leader" names a shard leader, and the root leader/collector come from the root logs; one measured network on the host; host lock entry `~/host-lock/dev3-<generation>`.
+
+## 12. Evidence layout
+
+Host evidence (driver revision 2): `~/evidence/430-437-pos-host-<DAY>/`
+
+| Path | Content |
+|---|---|
+| `driver.log` | every driver line with a UTC timestamp, including the running-container count after each teardown |
+| `pins.json`, `checkouts.txt`, `images.json`, `host-env.txt`, `build-*.log` | what was built: the pin file copy, `git rev-parse` of every checkout, image ids, tool versions |
+| `network/`, `network.sha256`, `manifest.json`, `verify-genesis.log`, `generate*.log` | public generation material only (never `pos-owner-keys/` or `faucet-secrets/`) |
+| `core/`, `crash/`, `owner/`, `e12-a/` (epoch 1), `e2/`, `join/` | each: `rehearse.log`, `result.json`, `generation.txt` (name, `utb` on/off, cadence), per-stage JSON and kept logs, `compose-ps.txt`, `docker-stats.txt` |
+| `resources/` | `compose-limits.txt`, `sample/samples.jsonl`, `sampler.log` |
+| `NOT-RUN.txt` | what did not run (written by `finish`) |
+
+Bridge evidence: `~/evidence/430-bridge-pos-<date>/` (dev4: `result.json`, `generation-recipe.json`, the redeem envelopes and hashes, `utb-history-<label>.cbor`, wallet histories). Campaign evidence: the `ci-lane-run/<name>` run's pack (run id, attempt number, the pack's checker output). The final summary on #437 / #59 / #430 cites: the manifest revision (commit of this file), the harness SHA, the driver sha256, each run SHA and id, the evidence directories above, and the limits of section 10.
