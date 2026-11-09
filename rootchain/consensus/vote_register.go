@@ -36,6 +36,8 @@ type (
 	}
 
 	VoteRegister struct {
+		// the complete timeout messages that were verified and counted this round, by author (never persisted)
+		verifiedTimeouts map[string]verifiedTimeout
 		// Hash of ConsensusInfo to signatures/votes for it
 		hashToSignatures map[voteID]*ConsensusWithSignatures
 		// Tracks all timeout votes for this round
@@ -304,19 +306,43 @@ func maxFaultyWeight(quorum QuorumInfo) uint64 {
 	return 0
 }
 
-// HasTimeoutVote reports whether a timeout vote of this author for this round and epoch is already counted in the certificate being formed.
-// Only votes that passed the whole verification of onTimeoutMsg are ever added, so a true answer says a verified vote is held: the
-// caller may refuse a repeat of it without checking the repeat's signatures.
-func (v *VoteRegister) HasTimeoutVote(author string, round, epoch uint64) bool {
-	tc := v.timeoutCert
-	if tc == nil || tc.Timeout == nil || tc.Timeout.Round != round || tc.Timeout.Epoch != epoch {
-		return false
+// verifyContext is the authenticated configuration a timeout message was verified under: the signing configuration of every epoch whose
+// trust base or rule the verification used (the vote's epoch, its high QC's, its last TC's and that TC's high QC's). A trust base of an
+// installed epoch never changes (TrustBaseStore.Store refuses a second one), so epoch plus signing configuration identify the rules.
+type verifyContext struct {
+	n      int
+	epochs [4]uint64
+	cfgs   [4]votesig.Config
+}
+
+// verifiedTimeout is the memory of one counted timeout vote: the digest of the complete message that was verified and registered.
+type verifiedTimeout struct {
+	round, epoch uint64
+	digest       [32]byte
+	ctx          verifyContext
+}
+
+// VerifiedTimeoutHit reports whether the author's counted vote of this round and epoch was exactly this message (same digest of the
+// complete envelope) verified under the same context. A hit lets the caller skip only the message's signature verification.
+func (v *VoteRegister) VerifiedTimeoutHit(author string, round, epoch uint64, digest [32]byte, ctx verifyContext) bool {
+	e, ok := v.verifiedTimeouts[author]
+	return ok && e.round == round && e.epoch == epoch && e.digest == digest && e.ctx == ctx
+}
+
+// NoteVerifiedTimeout remembers the digest of a message that was verified AND counted. The first remembered digest of an author is kept: a
+// different message of the same author never replaces it.
+func (v *VoteRegister) NoteVerifiedTimeout(author string, round, epoch uint64, digest [32]byte, ctx verifyContext) {
+	if _, ok := v.verifiedTimeouts[author]; ok {
+		return
 	}
-	_, found := tc.Signatures[author]
-	return found
+	if v.verifiedTimeouts == nil {
+		v.verifiedTimeouts = make(map[string]verifiedTimeout)
+	}
+	v.verifiedTimeouts[author] = verifiedTimeout{round: round, epoch: epoch, digest: digest, ctx: ctx}
 }
 
 func (v *VoteRegister) Reset() {
+	clear(v.verifiedTimeouts)
 	clear(v.hashToSignatures)
 	clear(v.authorToVote)
 	v.timeoutCert = nil
