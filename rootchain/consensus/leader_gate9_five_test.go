@@ -34,11 +34,11 @@ import (
 // <= 60 s across a dead run, the unknown-leader window to its commit <= 75 s, every shard's first fresh certificate after the stop <= 360 s.
 //
 // BFT_GATE9_FIVE=1; BFT_GATE9_FIVE_ALL=1 runs each placement in turn, otherwise BFT_TRACE_DEAD (an index by id order); BFT_TRACE_T seconds (10),
-// BFT_TRACE_BLOCK_RATE_MS (900), BFT_TRACE_TOPOLOGY (f8batch; tns and single also run), BFT_GATE9_FIVE_BATCH_S (20), BFT_GATE9_FIVE_ROUNDS (a whole cycle; less for a smoke run). About 35 minutes a placement.
+// BFT_TRACE_BLOCK_RATE_MS (900), BFT_TRACE_TOPOLOGY (f8batch; tns and single also run), BFT_GATE9_FIVE_BATCH_S (20), BFT_GATE9_FIVE_ROUNDS (a whole cycle; less for a smoke run). About 28 minutes a placement (8,354 s for all five on the 8 Nov host).
 // The roots, the shard validators and the request generator share one process on one machine: single-host evidence, not separate hosts or a WAN.
 func TestGate9FiveRootsOnLibp2p(t *testing.T) {
 	if os.Getenv("BFT_GATE9_FIVE") == "" {
-		t.Skip("set BFT_GATE9_FIVE=1: a measurement of about 35 minutes a placement")
+		t.Skip("set BFT_GATE9_FIVE=1: a measurement of about 28 minutes a placement")
 	}
 	names := []string{"H", "a", "b", "c", "d"}
 	placements := []int{traceEnvInt(t, "BFT_TRACE_DEAD", 0)}
@@ -220,6 +220,8 @@ func fiveOnLibp2p(t *testing.T, names []string, deadAt int) {
 				for _, rc := range transport.receipts(f.s, f.seen) {
 					f.seen++
 					reference, ours := f.sent[string(rc.hash)]
+					// Only the first receipt of a pending request is a sample. A later T2 repeat of a certificate already ours also matches f.sent,
+					// but by then the request is no longer pending, so it is skipped here.
 					if !f.pending || !ours {
 						continue
 					}
@@ -284,6 +286,9 @@ func fiveOnLibp2p(t *testing.T, names []string, deadAt int) {
 					normal = append(normal, s.elapsed)
 				case "dead run":
 					require.LessOrEqual(t, s.elapsed, gate6DeadRun, "%s: shard %s from round %d certified within 60 s across a dead run", label, s.shard, s.from)
+				case "restart":
+					// a request begun before the adaptation after the stop is over spans the stopped member's timed-out rounds: the dead-run bound
+					require.LessOrEqual(t, s.elapsed, gate6DeadRun, "%s: shard %s from round %d certified within 60 s across the rolling restart", label, s.shard, s.from)
 				}
 			}
 			require.NotEmpty(t, normal, label)
