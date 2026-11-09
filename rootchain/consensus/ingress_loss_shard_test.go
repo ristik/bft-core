@@ -682,7 +682,18 @@ func (w *shardWorld) stallAfterLoss(marker []byte) (u certSample, armed time.Tim
 	w.addPending(marker)
 	w.waitFor("the shard stalls with every request dropped", 3*time.Minute, func() bool {
 		u = w.lastCert()
-		return w.c.state("H").Round >= u.seal+ingressLossBudget(w.c)+2 && time.Since(u.at) > 3*time.Second
+		// Pace-independent: in root rounds (a round is about BlockRate/2, anywhere from ~230 ms on a CI runner to far more on a loaded host), with a short floor for
+		// deliveries in flight, and only once no root has a change of the shard in a proposal. A T2 repeat of u that is itself in flight is waited out, not mistaken
+		// for a lost request; the next repeat is 12 rounds later, the window between is wide enough at every pace seen.
+		if w.c.state("H").Round < u.seal+ingressLossBudget(w.c)+2 || time.Since(u.at) < 500*time.Millisecond {
+			return false
+		}
+		for _, name := range w.c.all() {
+			if w.c.nodes[w.c.idx(name)].r.manager.blockStore.IsChangeInProgress(w.c.state(name).Round, q3fixture.PartitionID, types.ShardID{}) != nil {
+				return false
+			}
+		}
+		return true
 	})
 	return u, armed
 }
@@ -722,7 +733,12 @@ func TestIngressLossWithRealShardsRecoversThroughTheT2Repeat(t *testing.T) {
 	}
 	require.NotEmpty(t, lost, "premise: the shard's attempt was sent and dropped")
 	for _, name := range w.c.all() {
-		require.Nil(t, w.c.nodes[w.c.idx(name)].r.manager.blockStore.IsChangeInProgress(w.c.state(name).Round, q3fixture.PartitionID, types.ShardID{}), "%s has no change of the shard in a proposal", name)
+		if ch := w.c.nodes[w.c.idx(name)].r.manager.blockStore.IsChangeInProgress(w.c.state(name).Round, q3fixture.PartitionID, types.ShardID{}); ch != nil {
+			// the only change that may be in flight is the roots' own T2 repeat of u (it needs no request); anything else is a request that got into a proposal
+			same, err := types.EqualIR(u.ir, ch)
+			require.NoError(t, err)
+			require.True(t, same, "%s has no change of the shard in a proposal other than a repeat of u", name)
+		}
 	}
 	eligible := u.seal + t2Rounds(w.h)
 	t.Logf("last certificate u: root round %d; a repeat is eligible from round %d; dropped requests per root %v (%d distinct signed requests); pending entry held by %d validators; expected block %x", u.seal, eligible, dropped, len(lost), len(w.ids), expected.Hash[:6])
@@ -822,9 +838,9 @@ func (x *liveTransport) introduceShards() {
 // is tried well inside the roots' T2 (12 root rounds), a repeat cannot win the race, and the budget can be exhausted in a short window.
 func retryOptions(maxResubmits int) shardnode.BFTClientOptions {
 	o := shardnode.DefaultBFTClientOptions
-	o.HeartbeatInterval = 200 * time.Millisecond
-	o.InactivityTimeout = time.Second
-	o.ResubmitMinInterval = 400 * time.Millisecond
+	o.HeartbeatInterval = 100 * time.Millisecond
+	o.InactivityTimeout = 400 * time.Millisecond
+	o.ResubmitMinInterval = 150 * time.Millisecond
 	o.MaxResubmits = maxResubmits
 	return o
 }
@@ -920,7 +936,7 @@ func TestIngressLossWithRealShardsRecoversThroughTheDuplicateResend(t *testing.T
 		return true
 	})
 	hs0 := w.handshakesSince(armed)[0]
-	t.Logf("inactivity %s, spacing %s, re-send budget 10, T2=%d root rounds; u=%d, T2 eligible from %d, certified at %d", time.Second, 400*time.Millisecond, t2Rounds(w.h), u.seal, eligible, fresh.seal)
+	t.Logf("inactivity %s, spacing %s, re-send budget 10, T2=%d root rounds; u=%d, T2 eligible from %d, certified at %d", retryOptions(10).InactivityTimeout, retryOptions(10).ResubmitMinInterval, t2Rounds(w.h), u.seal, eligible, fresh.seal)
 	t.Logf("  last certificate -> first handshake after the loss   %s", hs0.at.Sub(u.at).Round(time.Millisecond))
 	t.Logf("  first handshake -> first byte-identical re-send delivered   %s", resent[0].at.Sub(hs0.at).Round(time.Millisecond))
 	t.Logf("  first re-send delivered -> certified   %s; applied at all validators %s later; %d validators re-sent", fresh.at.Sub(resent[0].at).Round(time.Millisecond), applied.Sub(fresh.at).Round(time.Millisecond), len(nodes))
@@ -972,7 +988,7 @@ func TestIngressLossWithRealShardsAfterTheResendBudgetIsExhausted(t *testing.T) 
 	head, _ := w.shards[w.ids[0]].exec.Head(context.Background())
 	expected := executortest.ExpectedBlock(head, marker)
 	eligible := u.seal + t2Rounds(w.h)
-	quiet := 2 * time.Second
+	quiet := 3 * spacing // three re-send periods without a single delivery of a lost request
 	time.Sleep(quiet)
 	for _, e := range w.requestsSince(opened) {
 		_, was := lostFP[e.fp]
@@ -1002,7 +1018,7 @@ func TestIngressLossWithRealShardsAfterTheResendBudgetIsExhausted(t *testing.T) 
 		_, was := lostFP[e.fp]
 		require.False(t, was, "the request that certified is a new attempt, not a re-send")
 	}
-	t.Logf("re-send budget %d (spent against the drop), inactivity %s; u=%d, T2 eligible from %d; the pending block certified at root round %d, %s after the last certificate (%d repeat(s) first)", budget, time.Second, u.seal, eligible, fresh.seal, fresh.at.Sub(u.at).Round(time.Millisecond), repeats)
+	t.Logf("re-send budget %d (spent against the drop), inactivity %s; u=%d, T2 eligible from %d; the pending block certified at root round %d, %s after the last certificate (%d repeat(s) first)", budget, retryOptions(budget).InactivityTimeout, u.seal, eligible, fresh.seal, fresh.at.Sub(u.at).Round(time.Millisecond), repeats)
 }
 
 // attemptReport is what the roots' wrappers saw of ONE attempt (the one built after one particular repeat), measured from that repeat's certificate.
