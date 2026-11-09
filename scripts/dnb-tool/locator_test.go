@@ -328,9 +328,10 @@ func TestLockProofSource_ProvesUnderTheConfigurationTheCertificateCommitsTo(t *t
 	lp, err := s.build(context.Background(), hdr.Hash(), 1)
 	require.NoError(t, err)
 	require.True(t, bytes.Contains(lp, pdrs[second]), "the lock proof carries the second epoch's configuration")
-	first := pdrs
-	delete(first, second)
-	for _, pdr := range first {
+	for h, pdr := range pdrs {
+		if h == second {
+			continue
+		}
 		require.False(t, bytes.Contains(lp, pdr), "and not the first's")
 	}
 }

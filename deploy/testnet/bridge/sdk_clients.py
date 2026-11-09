@@ -33,7 +33,7 @@ import utbcbor   # noqa: E402
 
 LANGS = ('js', 'rust', 'java')
 TRUST_BASE_NETWORK_ID = 3   # generate.py TRUST_BASE_NETWORK_ID (`trust-base generate --network-id`): the package's network; the clients also check the shipped genesis declares it
-MIN_TIP = 3   # run after the second handoff (root epoch 3)
+MIN_TIP_ABOVE_GENESIS = 2   # run after the second handoff (root epoch genesis + 2)
 RUN_TIMEOUT = 600
 
 
@@ -109,7 +109,9 @@ class SdkClients:
         images = self.build_sdk_clients()
 
         tip0, _, history0 = self.utb_history('sdk-clients-before', self.sdk_pin)
-        self.expect(int(tip0) >= MIN_TIP, f'the roots serve a history to at least epoch {MIN_TIP} (after the second handoff)', str(tip0))
+        genesis = self.utb_genesis_epoch()
+        min_tip = genesis + MIN_TIP_ABOVE_GENESIS
+        self.expect(int(tip0) >= min_tip, f'the roots serve a history to at least epoch {min_tip} (after the second handoff)', str(tip0))
         shutil.copy(history0, out / 'served-history-before.cbor')
         negatives = out / 'negatives'
         shutil.rmtree(negatives, ignore_errors=True)
@@ -136,7 +138,7 @@ class SdkClients:
         served = self.served_ids(history1)
         checks, failed = [], []
         for lang in LANGS:
-            for ok, what, detail in sdkaccept.check_runs(lang, self.sdk_pins()[lang]['commit'], results[lang], served, (int(tip0), int(tip1)), min_tip=MIN_TIP):
+            for ok, what, detail in sdkaccept.check_runs(lang, self.sdk_pins()[lang]['commit'], results[lang], served, (int(tip0), int(tip1)), min_tip=min_tip, genesis=genesis):
                 checks.append({'ok': ok, 'what': what, 'detail': detail})
                 if not ok:
                     failed.append((what, detail))

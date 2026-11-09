@@ -413,17 +413,25 @@ class BridgePos:
                 'locks': locks, 'b1': self.b1_state()}
 
     def pos_agg_restart(self):
+        try:
+            self.pos_agg_restart_steps()
+        except Exception:
+            (self.gen / 'bridge' / POS_KEY).unlink(missing_ok=True)   # the later invocations will not run: the key goes now
+            raise
+
+    def pos_agg_restart_steps(self):
         """The aggregator restarted at epoch 3: its history is reloaded (the same verified tip and EntryID, and a replay of that history answered as the same), and
         it keeps serving the chain; its log after the restart shows no refused trust-base update. Needs --ubft (the offline verifier)."""
         self.expect(bool(self.ubft), 'pos-agg-restart needs --ubft (the offline verifier)')
         pin = self.manifest['utb']['genesis_id']
         tip, tip_id, _ = self.utb_history('agg-before-restart', pin)
-        self.expect(int(tip) >= 3, 'before the restart the aggregator serves the history to epoch 3', str(tip))
+        want = self.utb_genesis_epoch() + 2   # after the second handoff
+        self.expect(int(tip) >= want, f'before the restart the aggregator serves the history to epoch {want}', str(tip))
         since = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(time.time() - 1))   # the host's clock: the docker daemon's, which --since reads
         self.say('  restarting the aggregator')
         self.compose('restart', 'aggregator')
         def served():
-            status, body = self.utb_page('from=1&maxEntries=64')
+            status, body = self.utb_page(f'from={self.utb_genesis_epoch()}&maxEntries=64')
             return True if status == 200 and body else None
         self.wait('the restarted aggregator serves its history', served, 180)
         after_tip, after_id, _ = self.utb_history('agg-after-restart', pin)
