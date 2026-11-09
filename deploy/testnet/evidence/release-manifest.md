@@ -63,7 +63,17 @@ Test values, recorded, not testnet decisions. Each generation records its own se
 
 ## 7. Builds
 
-PENDING(exact command and toolchain per component: ubft in `tn1-builder:bookworm` via `make build`; ureth `cargo build --release --locked -p unicity-reth`, nightly pin as in `lane-pins.json`; aggregator-go; images by `build-images.py`; resulting image ids and binary sha256 from `artifacts/images.json`, filled from the run's evidence, not from this PR).
+Every binary is built from the pinned source at the manifest, on Linux; a binary of an earlier build is **not** reused unless its sha256 is identical and recorded. Commands as the package runs them (`deploy/testnet/build-images.py` checks each source against `pins.json` and refuses a dirty tree):
+
+| Component | Command (cwd = pinned source) | Toolchain |
+|---|---|---|
+| ubft (node images and host tools) | `make build` (host: in `tn1-builder:bookworm`, host tools `go build ./scripts/b1genesis ./scripts/h4-restore-pin ./cli/ubft` and `./deploy/testnet/keygen`) | Go 1.25.14 (`lane-pins.json` toolchains; the builder image's version is recorded in `build-ubft.log`) |
+| ureth | `cargo build --locked --release -p unicity-reth` | Rust 1.97.1 per `lane-pins.json` toolchains (the ureth repo's own nightly pin applies to its fmt gate, not to this build): PENDING(confirm against the build log) |
+| aggregator-go A | `CGO_ENABLED=1 go build -trimpath -o build/aggregator ./cmd/aggregator` (no rocksdb tag: memory SMT backend, state in MongoDB) | Go 1.25.14 |
+| node image and the faucet/rpc images | `build-images.py --bft-source … --ureth-source … --aggregator-go-source …` (tags `tnops-*:verified`, or `trackc-<bft8>` on the host driver) | Docker; base images by digest in `pins.json` (`runtime`, `python`, `mongo`) |
+| bridge tools | `deploy/testnet/bridge/build-bridge-image.py` from `bridge/pins.json` (contracts, nbp, node, go, Foundry 1.8.1) | recorded in `artifacts/bridge-images.json` |
+
+Results recorded **from the run, not from this PR**: PENDING(`artifacts/images.json` and `artifacts/bridge-images.json` of each build: binary sha256 of `ubft`, `unicity-reth`, `aggregator`, and the image ids; copied to the evidence directory as `images.json`).
 
 ## 8. Features
 
