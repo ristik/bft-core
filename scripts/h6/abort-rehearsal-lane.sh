@@ -101,7 +101,7 @@ preflight() {
     go version -m "$REPO_ROOT/build/ubft" | grep -q 'vcs.modified=true' && missing+=("build/ubft was built from a modified tree")
   fi
   [ "${#missing[@]}" -eq 0 ] || { echo "FAIL: preflight: ${missing[*]}" >&2; exit 1; }
-  pass "preflight: tools, lock helper, the attested Ureth ($H6_URETH_COMMIT, sha256 verified, provenance agrees), a clean checkout and build/ubft built from HEAD"
+  pass "preflight: tools, lock helper, the attested Ureth ($H6_URETH_COMMIT, sha256 verified, provenance agrees), a clean checkout and build/ubft built from $([ -n "${LANE_PRODUCT_COMMIT:-}" ] && echo "the pinned product ${LANE_PRODUCT_COMMIT:0:10} (harness HEAD)" || echo HEAD)"
 }
 
 case "${1:-}" in
@@ -125,7 +125,7 @@ preflight
 cp -R "$H6_URETH_ATTESTED_PROVENANCE" "$EVIDENCE_DIR/ureth-provenance"
 printf 'RUN MODE: attested prebuilt Ureth %s sha256=%s commit=%s (provenance %s); everything else from this clean checkout (evidence run)\n' \
   "$H6_URETH_ATTESTED" "$H6_URETH_ATTESTED_SHA256" "$H6_URETH_COMMIT" "$H6_URETH_ATTESTED_PROVENANCE" | tee "$EVIDENCE_DIR/run-mode.txt"
-echo "bft-core head=$(git rev-parse HEAD) branch=$(git rev-parse --abbrev-ref HEAD) ureth=$H6_URETH_COMMIT ubft sha256=$(sha256 build/ubft)" | tee "$EVIDENCE_DIR/heads.txt"
+echo "bft-core head=${LANE_PRODUCT_COMMIT:-$(git rev-parse HEAD)}${LANE_PRODUCT_COMMIT:+ harness=$(git rev-parse HEAD)} branch=$(git rev-parse --abbrev-ref HEAD) ureth=$H6_URETH_COMMIT ubft sha256=$(sha256 build/ubft)" | tee "$EVIDENCE_DIR/heads.txt"
 
 # A signal to the lane stops the scenario child and waits for its own teardown, by the child's pid alone (an orphaned child keeps restarting nodes here).
 DEVNET_PIDFILE=
