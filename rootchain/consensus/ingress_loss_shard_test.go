@@ -834,6 +834,11 @@ func (x *liveTransport) introduceShards() {
 	}
 }
 
+// wideT2 is the shard's T2 in the windows that must show a re-send winning the race against a repeat: about 44 root rounds instead of the fixture's 12, so the
+// outcome does not depend on how fast the host happens to run the handshake and re-send path (a runner and a loaded laptop differ by several times). The T2
+// window itself keeps the fixture's T2.
+const wideT2 = 10 * time.Second
+
 // retryOptions are the shard client's options for the windows that exercise the duplicate-triggered re-send: short inactivity and spacing, so the re-send path
 // is tried well inside the roots' T2 (12 root rounds), a repeat cannot win the race, and the budget can be exhausted in a short window.
 func retryOptions(maxResubmits int) shardnode.BFTClientOptions {
@@ -858,7 +863,7 @@ func (w *shardWorld) distinctNodes(evs []requestEvent) map[string]bool {
 // byte-identical re-send of the signed request.
 func TestIngressLossWithRealShardsRecoversThroughTheDuplicateResend(t *testing.T) {
 	requireLive976(t)
-	w := newShardWorld(t, shardWorldConfig{names: liveRootNames(), options: q3fixture.Options{PeerEVM: true}, timeout: 2 * time.Second, blockRate: phaseLockBlockRate, shardOpts: retryOptions(10)})
+	w := newShardWorld(t, shardWorldConfig{names: liveRootNames(), options: q3fixture.Options{PeerEVM: true, EVMT2: wideT2}, timeout: 2 * time.Second, blockRate: phaseLockBlockRate, shardOpts: retryOptions(10)})
 	w.waitFor("the real shard certifies", 2*time.Minute, func() bool { return w.certCount() >= 4 })
 
 	marker := []byte("pending-976-dup")
@@ -952,7 +957,7 @@ func TestIngressLossWithRealShardsRecoversThroughTheDuplicateResend(t *testing.T
 func TestIngressLossWithRealShardsAfterTheResendBudgetIsExhausted(t *testing.T) {
 	requireLive976(t)
 	const budget = 2
-	w := newShardWorld(t, shardWorldConfig{names: liveRootNames(), options: q3fixture.Options{PeerEVM: true}, timeout: 2 * time.Second, blockRate: phaseLockBlockRate, shardOpts: retryOptions(budget)})
+	w := newShardWorld(t, shardWorldConfig{names: liveRootNames(), options: q3fixture.Options{PeerEVM: true, EVMT2: wideT2}, timeout: 2 * time.Second, blockRate: phaseLockBlockRate, shardOpts: retryOptions(budget)})
 	w.waitFor("the real shard certifies", 2*time.Minute, func() bool { return w.certCount() >= 4 })
 
 	marker := []byte("pending-976-exhausted")
