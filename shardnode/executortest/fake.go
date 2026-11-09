@@ -60,6 +60,14 @@ func New() *Fake {
 	}
 }
 
+// NewAt returns a Fake whose genesis, and so its head, is the given block: for a harness whose roots already hold a certified state of the shard that
+// the fake has to continue from. Every validator of one shard must be given the same genesis.
+func NewAt(genesis shardnode.BlockRef) *Fake {
+	f := New()
+	f.genesis, f.head = genesis, genesis
+	return f
+}
+
 // AddEntries queues opaque entries to be included in the next block this
 // instance builds.
 func (f *Fake) AddEntries(entries ...[]byte) {
