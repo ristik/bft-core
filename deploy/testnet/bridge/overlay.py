@@ -11,7 +11,8 @@ Run after deploy_bridge.py, which writes GENERATION/bridge/ (addresses, CFG, tru
 Replacing the endpoint is stopping it and starting it again, on the same or another validator's archive (--archive-of): it holds no state.
 On a PoS generation every shard epoch has its own EVM shard configuration (the handoff writes network/handoff/shard-conf-<epoch>.json): the endpoint is
 given the genesis one and each of those, and proves a block under the one its certificate commits to. After a handoff, rerun this and restart the
-endpoint, or a lock certified under the new shard epoch is not served.
+endpoint, or a lock certified under the new shard epoch is not served. The restart is a lane workaround: picking up a new configuration without one
+is ristik/bft-core#996.
 """
 import argparse
 import json

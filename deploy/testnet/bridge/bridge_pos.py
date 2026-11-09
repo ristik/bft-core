@@ -54,7 +54,7 @@ eight invocations on one generation (the workflow then runs rehearse.py utb-live
                      again (A epoch 2, B per-SID epoch 1, C and D epoch 3: PartAlreadyRedeemed), a claimed credit claimed again (InsufficientCredit); and per
                      token A, B, C (tester replays): the envelope mined again (status 0), a fresh consolidated proof under the epoch-3 seal (PartAlreadyRedeemed:
                      refused on the nullifier, not for its age), that proof with its recipient changed and re-signed by unknown keys (BridgeRejected; the plug-in
-                     ErrQuorumNotMet), and a conflicting burn of the burned state (never certified). Then custody (the existing checker) over all four locks.
+                     ErrQuorumNotMet), and a conflicting burn of the burned state (not certified once later blocks are built). Then custody (the existing checker) over all four locks.
 
 Not here: the gap through a deliberately suppressed push offer (§4.2 step 6 as written: this is the pull client's gap). The public SDK clients (step 7) are
 sdk_clients.py's pos-sdk-clients.
@@ -499,7 +499,7 @@ class BridgePos:
           - the claim of a credit already claimed: InsufficientCredit (none left);
           - per token (tester replays, under the held trust): the redeemed envelope mined again (status 0), a fresh consolidated proof of the redeemed burn
             under the epoch-3 seal (PartAlreadyRedeemed: refused on the nullifier, not for its age), that proof with its return recipient changed and re-signed by
-            unknown keys (BridgeRejected; the plug-in ErrQuorumNotMet), and a conflicting burn of the pre-burn state (never certified: the first burn's proof is served)."""
+            unknown keys (BridgeRejected; the plug-in ErrQuorumNotMet), and a conflicting burn of the pre-burn state (not certified: after a sentinel submitted later is certified, the first burn's proof is still served)."""
         work = self.gen / 'bridge'
         epoch1 = json.loads((work / 'pos-epoch1.json').read_text())
         d = json.loads((work / 'pos-after-restart.json').read_text())
@@ -541,13 +541,18 @@ class BridgePos:
             self.expect(fresh == [epoch] and (name == 'C' or orig != fresh),
                         f'token {name}: a fresh proof of its redeemed burn under the epoch-{epoch} seal (redeemed under epoch {orig}) is refused as PartAlreadyRedeemed',
                         out['freshReplay']['refusal'][:80])
-            self.expect(out['changedRecipient']['status'] != 0, f'token {name}: the fresh proof with its return recipient changed is refused by the composition (BridgeRejected, V2 status {out["changedRecipient"]["status"]})')
+            self.expect(out['changedRecipient']['status'] == 36, f'token {name}: the fresh proof with its return recipient changed is refused by the composition (BridgeRejected, V2 status {out["changedRecipient"]["status"]}, ErrCDMismatch is 36)')
             forged = out['unknownKeyForgery']
-            self.expect('ErrQuorumNotMet' in forged['pluginRefusal'] and forged['status'] != 0,
-                        f'token {name}: re-signed by unknown keys, refused by the plug-in (ErrQuorumNotMet) and the composition (V2 status {forged["status"]})', forged['pluginRefusal'][:160])
+            self.expect('ErrQuorumNotMet' in forged['pluginRefusal'] and forged['status'] == 61,
+                        f'token {name}: re-signed by unknown keys, refused by the plug-in (ErrQuorumNotMet) and the composition (V2 status {forged["status"]}, ErrAnchorAuth is 61)', forged['pluginRefusal'][:160])
             cb = out['conflictingBurn']
+            wt = cb.get('waited') or {}
+            self.expect(bool(wt) and int(wt['settledAtBlock']) >= int(wt['submittedAtBlock']) + 2 and wt['sentinelStateId']
+                        and wt['firstRead']['transactionHash'] == wt['reRead']['transactionHash'] == cb['servedTransactionHash'],
+                        f'token {name}: the conflict\'s verdict is read after a later block (submitted at block {wt.get("submittedAtBlock")}; a sentinel submitted after it certified; '
+                        f're-read at block {wt.get("settledAtBlock")}, the same certified transaction as the first read)', json.dumps(wt)[:300])
             self.expect(cb['servedTransactionHash'] != cb['conflictingTransactionHash'] and cb['pluginRefusal'],
-                        f'token {name}: a conflicting burn of its burned state is never certified (submission {cb["submission"]}; the first burn\'s proof is served)', cb['pluginRefusal'][:160])
+                        f'token {name}: a conflicting burn of its burned state is not certified once later blocks are built (submission {cb["submission"]}; the first burn\'s proof is still served)', cb['pluginRefusal'][:160])
             (self.evidence / 'pos-bridge').mkdir(parents=True, exist_ok=True)
             (self.evidence / 'pos-bridge' / f'replays-{name}.json').write_bytes((work / wallet / 'tokens' / token / 'replays.json').read_bytes())
             record['tokens'][name].update({'originalEpochs': orig, 'freshEpochs': fresh, 'minedReplay': mined['tx']})
