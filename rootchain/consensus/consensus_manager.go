@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"maps"
 	"math"
+	"os"
 	"slices"
 	"sync"
 	"sync/atomic"
@@ -84,6 +85,13 @@ type (
 	}
 
 	ConsensusManager struct {
+		// timeoutVerify verifies a timeout message; nil is TimeoutMsg.Verify against the trust base store (a test seam counts the calls)
+		timeoutVerify  func(*abdrc.TimeoutMsg) error
+		shadow         *certShadow    // shadow certificate counters (UBFT_SHADOW_CERT=1), see cert_shadow.go; nil otherwise
+		backoff        *backoffShadow // shadow model of a timeout rebroadcast backoff (UBFT_SHADOW_BACKOFF=1), see backoff_shadow.go; nil otherwise
+		msgSeq         uint64         // ordinal of the root network message being handled
+		profile        loopProfile    // scaling-run measurement aid, see loop_profile.go
+		certCacheStart time.Time      // start of the current verified-certificate cache report period
 		// channel via which validator sends "certification requests" to CM
 		certReqCh chan certRequest
 		// channel via which CM sends "certification request" response to validator
@@ -591,6 +599,18 @@ func (x *ConsensusManager) Run(ctx context.Context) error {
 }
 
 func (x *ConsensusManager) loop(ctx context.Context) error {
+	if os.Getenv("UBFT_CERT_CACHE") == "0" {
+		x.trustBaseStore.SetCertCacheCapacity(0) // measurement: the verified-certificate cache off, e.g. for the shadow's baseline of repeats
+	}
+	if x.shadow == nil {
+		x.shadow = shadowFromEnv()
+	}
+	if x.shadow != nil {
+		x.trustBaseStore.SetCertObserver(x.shadow)
+	}
+	if x.backoff == nil && x.params != nil {
+		x.backoff = backoffShadowFromEnv(x.params.LocalTimeout)
+	}
 	for {
 		select {
 		case <-ctx.Done():
@@ -600,9 +620,18 @@ func (x *ConsensusManager) loop(ctx context.Context) error {
 				return fmt.Errorf("root network received channel has been closed")
 			}
 			x.log.LogAttrs(ctx, logger.LevelTrace, fmt.Sprintf("received %T", msg), logger.Data(msg))
+			x.msgSeq++
+			x.shadow.begin(msg, x.msgSeq, x.pacemaker.GetCurrentRound())
+			handled := time.Now()
 			if err := x.handleRootNetMsg(ctx, msg); err != nil {
-				x.log.WarnContext(ctx, fmt.Sprintf("processing %T", msg), logger.Error(err))
+				if _, isTimeout := msg.(*abdrc.TimeoutMsg); isTimeout && errors.Is(err, quorumweight.ErrDuplicateSigner) {
+					x.log.DebugContext(ctx, fmt.Sprintf("processing %T", msg), logger.Error(err)) // a retransmission of a counted timeout vote is routine
+				} else {
+					x.log.WarnContext(ctx, fmt.Sprintf("processing %T", msg), logger.Error(err))
+				}
 			}
+			x.shadow.end()
+			x.profile.observe(msg, time.Since(handled))
 		case req := <-x.certReqCh:
 			ctx := trace.ContextWithRemoteSpanContext(ctx, req.rsc)
 			if err := x.onPartitionIRChangeReq(ctx, &req.ircr); err != nil {
@@ -614,6 +643,10 @@ func (x *ConsensusManager) loop(ctx context.Context) error {
 			x.handleFrontierRequest(ctx, req)
 		}
 		x.timeoutUnknownLeader(ctx)
+		x.profile.report(x.log, time.Now())
+		x.shadow.report(x.log, time.Now())
+		x.backoff.report(x.log, time.Now())
+		x.reportCertCache(time.Now())
 	}
 }
 
@@ -743,6 +776,7 @@ func (x *ConsensusManager) sendTimeoutVote(ctx context.Context) {
 	// has the validator voted in this round, if true send the same (timeout)vote
 	// maybe less than quorum of nodes where operational the last time
 	timeoutVoteMsg := x.pacemaker.GetTimeoutVote()
+	rebroadcast := timeoutVoteMsg != nil // the round's vote was already sent: this attempt is a repeat (shadow backoff model only)
 	if timeoutVoteMsg == nil {
 		// create timeout vote
 		qc := x.blockStore.GetHighQc()
@@ -800,6 +834,7 @@ func (x *ConsensusManager) sendTimeoutVote(ctx context.Context) {
 	// broadcast timeout vote
 	x.log.LogAttrs(ctx, logger.LevelTrace, "broadcasting timeout vote")
 	x.log.InfoContext(ctx, "broadcast timeout vote", "round", x.pacemaker.GetCurrentRound(), "messageID", timeoutMessageID(timeoutVoteMsg))
+	x.backoff.attempt(x.pacemaker.GetCurrentRound(), rebroadcast)
 	if err := x.net.Send(ctx, timeoutVoteMsg, x.Validators()...); err != nil {
 		x.log.WarnContext(ctx, "error on broadcasting timeout vote", logger.Error(err))
 	}
@@ -1158,9 +1193,17 @@ func (x *ConsensusManager) onTimeoutMsg(ctx context.Context, vote *abdrc.Timeout
 	if vote.Timeout.Round < x.pacemaker.GetCurrentRound() {
 		return fmt.Errorf("stale timeout vote for round %d from %s", vote.Timeout.Round, vote.Author)
 	}
-	// verify signature on vote
-	if err := vote.Verify(x.trustBaseStore); err != nil {
-		return fmt.Errorf("invalid timeout vote: %w", err)
+	// A message that is byte for byte one already verified and counted in this round (a retransmission) is not verified again: only vote.Verify
+	// is skipped. Everything else below runs as before, in the same order, so a certificate it carries is still processed (#982).
+	digest, vctx, cacheable := x.timeoutCacheKey(vote)
+	if cacheable && x.pacemaker.VerifiedTimeoutHit(vote.Author, vote.Timeout.Round, vote.Timeout.Epoch, digest, vctx) {
+		x.profile.verifyHits++
+	} else {
+		x.profile.verifyMisses++
+		// verify signature on vote
+		if err := x.verifyTimeoutVote(vote); err != nil {
+			return fmt.Errorf("invalid timeout vote: %w", err)
+		}
 	}
 	if err := x.checkWeightEpoch(vote.Timeout.Epoch); err != nil {
 		return err
@@ -1190,9 +1233,17 @@ func (x *ConsensusManager) onTimeoutMsg(ctx context.Context, vote *abdrc.Timeout
 	// the highQC is the same for both rounds. So checking the lastTC helps the instance into latest TO round.
 	x.processTC(ctx, vote.LastTC)
 
-	tc, err := x.pacemaker.RegisterTimeoutVote(ctx, vote, x.voteQuorumInfo())
+	// the register remembers the exact message once it is verified, counted and its weight accounted (before processTC below can end the round)
+	var remember []timeoutMemo
+	if cacheable {
+		remember = []timeoutMemo{{digest: digest, ctx: vctx}}
+	}
+	tc, err := x.pacemaker.RegisterTimeoutVote(ctx, vote, x.voteQuorumInfo(), remember...)
 	if err != nil {
 		return fmt.Errorf("failed to register timeout vote: %w", err)
+	}
+	if vote.Timeout.Round == x.pacemaker.GetCurrentRound() {
+		x.backoff.registered(vote.Timeout.Round) // a new signer of the current round (shadow backoff model only)
 	}
 	if tc == nil {
 		x.log.LogAttrs(ctx, logger.LevelTrace, fmt.Sprintf("processed timeout vote for round %d, no quorum yet", vote.Timeout.Round))

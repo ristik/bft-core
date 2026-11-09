@@ -27,9 +27,17 @@ const (
 )
 
 // newRootNode makes the production root node of a manager. rootchain imports this package, so an external test file of this test binary sets it.
-var newRootNode func(p *network.Peer, partitionNet *network.LibP2PNetwork, cm *ConsensusManager, obs network.Observability) (interface {
+var newRootNode func(p *network.Peer, partitionNet RootPartitionNet, cm *ConsensusManager, obs network.Observability) (interface {
 	Run(context.Context) error
 }, error)
+
+// RootPartitionNet is what the production root node needs of its partition network (rootchain.PartitionNet). A harness may wrap the libp2p one, to drop
+// or observe the messages shards send.
+type RootPartitionNet interface {
+	Send(ctx context.Context, msg any, receivers ...peer.ID) error
+	SendCertificationResponse(ctx context.Context, cr *certification.CertificationResponse, receivers ...peer.ID) error
+	ReceivedChannel() <-chan any
+}
 
 // tappedNet is the production consensus network. Send also shows the message to the trace; receiving is the production queue itself.
 type tappedNet struct {
@@ -77,6 +85,8 @@ type liveTransport struct {
 	certs  map[string][]certReceipt
 	online []*rootHost
 	names  map[string]peer.ID
+	// wrap, when set, replaces the partition network a root node is given (the node's name and the libp2p network): a harness's drop and observation point.
+	wrap func(name string, n *network.LibP2PNetwork) RootPartitionNet
 }
 
 func newLiveTransport(t *testing.T) *liveTransport {
@@ -115,7 +125,11 @@ func (x *liveTransport) install(c *q4bLive) {
 	}
 	c.run = func(i int, cm *ConsensusManager) func(context.Context) error {
 		h := x.roots[c.nodes[i].r.id()]
-		node, err := newRootNode(h.peer, h.partition, cm, x.obs)
+		var pn RootPartitionNet = h.partition
+		if x.wrap != nil {
+			pn = x.wrap(c.nodes[i].name, h.partition)
+		}
+		node, err := newRootNode(h.peer, pn, cm, x.obs)
 		require.NoError(x.t, err)
 		return node.Run
 	}
@@ -247,7 +261,7 @@ func (x *liveTransport) reportDelivery(t0 time.Time, origin string, shards []liv
 }
 
 // SetNewRootNode is for the external test file that may import rootchain.
-func SetNewRootNode(f func(p *network.Peer, partitionNet *network.LibP2PNetwork, cm *ConsensusManager, obs network.Observability) (interface {
+func SetNewRootNode(f func(p *network.Peer, partitionNet RootPartitionNet, cm *ConsensusManager, obs network.Observability) (interface {
 	Run(context.Context) error
 }, error)) {
 	newRootNode = f

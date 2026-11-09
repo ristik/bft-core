@@ -95,6 +95,11 @@ function collect_shard_conf_args() {
   done
 }
 
+# port_listening <port>: something accepts a TCP connection on the port. No lsof needed (the Linux test host has none: an lsof-based wait never ends).
+function port_listening() {
+  (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null || (exec 3<>"/dev/tcp/localhost/$1") 2>/dev/null
+}
+
 function start_root_nodes() {
   # use root node 1 as bootstrap node
   local bootNode=""
@@ -142,6 +147,9 @@ function start_root_nodes() {
       collect_shard_conf_args
       profileArgs+=(${shardConfArgs[@]+"${shardConfArgs[@]}"})
     fi
+    # ROOT_DEBUG_ROOTS="1 2": those roots log at debug whatever ROOT_LOG_LEVEL says (one root's round/leader lines without 128 debug logs)
+    local rootLogLevel="${ROOT_LOG_LEVEL:-debug}"
+    case " ${ROOT_DEBUG_ROOTS:-} " in *" $i "*) rootLogLevel=debug ;; esac
     UBFT_Q4_SHIM_DIR="${Q4_SHIM_DIR:+$Q4_SHIM_DIR/root$i}" ${Q4_ROOT_BIN:-build/ubft} root-node run \
                     --home test-nodes/root$i \
                     --address "/ip4/127.0.0.1/tcp/$p2pPort" \
@@ -149,17 +157,24 @@ function start_root_nodes() {
                     --trust-base test-nodes/trust-base.json \
                     --rpc-server-address "$rpcHost:$rpcPort" \
                     --log-format text \
-                    --log-level "${ROOT_LOG_LEVEL:-debug}" \
+                    --log-level "$rootLogLevel" \
                     --metrics prometheus \
                     ${profileArgs[@]+"${profileArgs[@]}"} \
                     >> test-nodes/root$i/debug.log 2>&1 &
     nodePID=$!
     echo "$nodePID" > "test-nodes/root$i/pid"
     # wait until node starts listening on RPC port OR exits because of some error
-    until lsof -i:$rpcPort >/dev/null || ! ps -p $nodePID >/dev/null
+    # bounded (ROOT_START_WAIT_S, default 120): a port that never opens must fail the start, not hang it
+    local waited=0
+    until port_listening "$rpcPort" || ! ps -p $nodePID >/dev/null
     do
       echo -n "."
       sleep 0.200
+      waited=$((waited + 1))
+      if [ "$waited" -ge $(( ${ROOT_START_WAIT_S:-120} * 5 )) ]; then
+        echo "root$i RPC port $rpcPort not listening after ${ROOT_START_WAIT_S:-120} s" >&2
+        exit 1
+      fi
     done
 
     if ! ps -p $nodePID >/dev/null; then
