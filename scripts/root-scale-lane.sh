@@ -15,11 +15,11 @@
 #   signature-verification symbols to the evidence; per-root CPU (utime+stime ticks) is always sampled in cpu-per-root.csv during that control.
 # Usage: scripts/root-scale-lane.sh [-r roots] [-v validators] [-e evidenceDir] [-s seed] [-w windowSeconds] [-k keep] [-S samplerSeconds] [-L lockDir] [-N holderName]
 set +u
-roots=16 validators=4 partition_id=8 evidence="" seed=1 window=60 keep=false sample=5 lockdir="" holder=${USER:-run} progwait=180 resumewait=240 perfsecs=0
-while getopts "hr:v:e:s:w:kS:L:N:P:R:C:" o; do
+roots=16 validators=4 partition_id=8 evidence="" seed=1 window=60 keep=false sample=5 lockdir="" tmpdir="" holder=${USER:-run} progwait=180 resumewait=240 perfsecs=0
+while getopts "hr:v:e:s:w:kS:L:N:P:R:C:T:" o; do
   case "$o" in
   r) roots=$OPTARG ;; v) validators=$OPTARG ;; e) evidence=$OPTARG ;; s) seed=$OPTARG ;;
-  w) window=$OPTARG ;; k) keep=true ;; S) sample=$OPTARG ;; L) lockdir=$OPTARG ;; N) holder=$OPTARG ;; P) progwait=$OPTARG ;; R) resumewait=$OPTARG ;; C) perfsecs=$OPTARG ;;
+  w) window=$OPTARG ;; k) keep=true ;; S) sample=$OPTARG ;; L) lockdir=$OPTARG ;; N) holder=$OPTARG ;; P) progwait=$OPTARG ;; R) resumewait=$OPTARG ;; C) perfsecs=$OPTARG ;; T) tmpdir=$OPTARG ;;
   *) sed -n 1,14p "$0"; exit 0 ;;
   esac
 done
@@ -45,7 +45,8 @@ cleanup() {
   if [ "$keep" != true ]; then
     declare -F stop_evm_validators >/dev/null && stop_evm_validators
     declare -F stop_root_nodes >/dev/null && stop_root_nodes
-    [ -z "$mylock" ] || { rm -f "$mylock"; echo "host lock released: $mylock"; }
+    [ -z "${tmpcleanup:-}" ] || { rm -rf "$tmpcleanup"; rm -f test-nodes; }
+  [ -z "$mylock" ] || { rm -f "$mylock"; echo "host lock released: $mylock"; }
   elif [ -n "$mylock" ]; then
     echo "-k: roots and shard keep running, so the host lock stays: $mylock (remove it after stopping them)"
   fi
@@ -69,7 +70,15 @@ fi
 
 source helper.sh
 export ROOT_LOG_LEVEL=info ROOT_DEBUG_ROOTS="${ROOT_DEBUG_ROOTS:-1}"   # root1 at debug: its per-round leader lines show where dead leaders fall
-rm -rf test-nodes && mkdir test-nodes
+rm -rf test-nodes
+if [ -n "$tmpdir" ]; then
+  # measurement control (-T <dir on tmpfs>): every node's data directory and log lives on that memory-backed directory, so no node writes to the disk;
+  # test-nodes is a symlink to it. Not a configuration: the data does not survive the run.
+  rm -rf "$tmpdir/test-nodes" && mkdir -p "$tmpdir/test-nodes" && ln -s "$tmpdir/test-nodes" test-nodes
+  tmpcleanup="$tmpdir/test-nodes"
+else
+  mkdir test-nodes
+fi
 
 # --- setup --------------------------------------------------------------------------------------
 t0=$(date +%s)
