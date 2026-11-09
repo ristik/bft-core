@@ -101,6 +101,8 @@ class BridgePos:
         pin = (work / 'trust-base.genesis.entryid').read_text().strip().lower().removeprefix('0x')
         self.expect(pin == utb['genesis_id'].lower().removeprefix('0x'), 'the bridge\'s trust pin is the generation\'s UTB genesis entry id (one history)', pin[:16])
         shipped = hashlib.sha256((work / 'public/trust-base.bundle.cbor').read_bytes()).hexdigest()
+        # the lock-proof endpoint on validator 1's archive (the lockproof stage starts it on the PoA generation; this sequence does not run that stage)
+        self.start_endpoint(1)
         # the wallet and its key stay in GENERATION/bridge between the invocations (the key never in the evidence)
         shutil.rmtree(work / POS_WALLET, ignore_errors=True)
         (work / POS_WALLET).mkdir()
@@ -179,6 +181,16 @@ class BridgePos:
                     and int(held['tipEpoch']) >= new, f'the held history is contiguous from the pinned genesis to epoch {held["tipEpoch"]}', json.dumps(ids))
         self.expect(ids[new].removeprefix('0x') == f'{body:064x}', f'the wallet\'s epoch-{new} EntryID is the B1 registry\'s bodyID', ids[new][:18])
         self.expect((work / POS_WALLET / 'trust-history.cbor').exists(), 'the wallet persisted its grown history')
+        # the roots' served history (rehearse.py utb_history, verified offline from the pinned genesis with ubft): the wallet's entry at that tip is the same entry
+        roots = None
+        if self.ubft:
+            tip, tip_id, _ = self.utb_history('bridge-redeem', self.manifest['utb']['genesis_id'])
+            roots = {'tip': tip, 'tipEntryId': tip_id}
+            mine = ids.get(int(tip))
+            self.expect(mine is not None and mine.removeprefix('0x') == str(tip_id).lower().removeprefix('0x'),
+                        f'the wallet\'s epoch-{tip} EntryID is the one in the roots\' served history', str(tip_id)[:18])
+        else:
+            self.say('  (no --ubft: the comparison with the roots\' served history is skipped; the B1 registry\'s bodyID was compared above)')
         credit = int(self.inner_response(1, 'eth_call', [{'to': self.addresses()['BridgeVault'],
                                                          'data': self.cast_run('calldata', 'claimable(address)', epoch1['wallet'])}, 'latest'])['result'], 16)
         self.expect(credit == POS_LOCK_WEI, 'the redemption across the handoff credits exactly the epoch-1 lock', str(credit))
@@ -187,7 +199,7 @@ class BridgePos:
         self.check_release(self.addresses())
         cache = self.keep_pos('redeemed')
         self.record('redeem', {'b1': b1, 'newEpoch': new, 'bodyId': f'0x{body:064x}', 'members': members, 'seals': seals, 'fetches': fetches,
-                               'trust': held, 'credit': credit, 'evidence': str(cache)})
+                               'trust': held, 'roots': roots, 'credit': credit, 'evidence': str(cache)})
         self.record('result', {'stage': '430-bridge-pos-preflight', 'generation': self.gen.name, 'epochs': [genesis, new], 'pass': True})
         if Path(work / POS_KEY).exists():
             (work / POS_KEY).unlink()

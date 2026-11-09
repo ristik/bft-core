@@ -625,12 +625,14 @@ def main():
     p.add_argument('--evidence', required=True, type=Path)
     p.add_argument('--cast', default='cast')
     p.add_argument('--stages', default=','.join(s for s, _ in STAGES if s not in POS_STAGES), help='comma separated, in order (pos-epoch1 and pos-redeem only when named)')
+    p.add_argument('--ubft', type=Path, help='the pinned ubft binary: pos-redeem verifies the roots\' served history with it (rehearse.py utb_history)')
     p.add_argument('--long-transfers', type=int, default=250, help=f'the long-history token\'s transfers (65 to {LONG_TRANSFERS_MAX})')
     a = p.parse_args()
     if not 64 < a.long_transfers <= LONG_TRANSFERS_MAX:
         p.error(f'--long-transfers must be 65 to {LONG_TRANSFERS_MAX}: one aggregator batch holds 256 state IDs')
     r = BridgeRehearsal(a.generation, a.evidence, a.cast)
     r.long_transfers = a.long_transfers
+    r.ubft = a.ubft.resolve() if a.ubft else None
     wanted = a.stages.split(',')
     unknown = set(wanted) - {s for s, _ in STAGES}
     if unknown:
