@@ -89,7 +89,14 @@ type LibP2PNetwork struct {
 
 	// framesHook, when set (tests), observes the per dispatch certification frames cache
 	framesHook func(*certificationFrames)
+
+	// streamReadTimeout, when set (tests), replaces defaultStreamReadTimeout. Set before the first stream arrives, never changed afterwards.
+	streamReadTimeout time.Duration
 }
+
+// defaultStreamReadTimeout bounds the whole life of an incoming stream on the receiving side, from the start of its handler until the sender
+// closes it (the loop in streamHandlerForProtocol waits for a next frame until the sender's Close): it is not per frame.
+const defaultStreamReadTimeout = 1000 * time.Millisecond
 
 /*
 NewLibP2PNetwork creates a new libp2p network without protocols (protocols need to be
@@ -282,7 +289,11 @@ func (n *LibP2PNetwork) streamHandlerForProtocol(protocolID string, ctor func() 
 			}
 		}()
 		// set reader timeout - node should not wait here forever
-		err := s.SetReadDeadline(time.Now().Add(1000 * time.Millisecond))
+		timeout := n.streamReadTimeout
+		if timeout == 0 {
+			timeout = defaultStreamReadTimeout
+		}
+		err := s.SetReadDeadline(time.Now().Add(timeout))
 		if err != nil {
 			n.log.Warn(fmt.Sprintf("failed to set read deadline for stream %q", protocolID))
 			return

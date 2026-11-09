@@ -1,0 +1,73 @@
+package org.unicitylabs.sdk.api.bft.trustbase;
+
+// UTB SDK acceptance (scripts/utb-sdk-accept.sh): the Java SDK's fetch loop against running aggregator trust-base servers. AGG_MANIFEST names the manifest
+// the Go harness writes. Copied to src/test/java/org/unicitylabs/sdk/api/bft/trustbase/ZZAggInteropTest.java by the script; never committed to the SDK.
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import java.io.File;
+import java.nio.file.Files;
+import java.util.List;
+import org.junit.jupiter.api.Assumptions;
+import org.junit.jupiter.api.Test;
+import org.unicitylabs.sdk.api.HttpTrustBaseSource;
+import org.unicitylabs.sdk.api.NetworkId;
+import org.unicitylabs.sdk.util.HexConverter;
+
+class ZZAggInteropTest {
+
+  private static JsonNode server(String name) throws Exception {
+    String path = System.getenv("AGG_MANIFEST");
+    Assumptions.assumeTrue(path != null, "AGG_MANIFEST not set");
+    return new ObjectMapper().readTree(new File(path)).get(name);
+  }
+
+  private static byte[] pin(JsonNode s) {
+    return HexConverter.decode(s.get("pin").asText().replaceFirst("^0x", ""));
+  }
+
+  private static TrustBaseUpdateOptions options(JsonNode s, int maxEntries) {
+    return TrustBaseUpdateOptions.defaults().withNetwork(NetworkId.fromId((short) s.get("network").asInt()))
+        .withLimits(new TrustBaseRangeLimits(1 << 20, maxEntries));
+  }
+
+  @Test
+  void aGenesisOnlyClientBuildsTheGrownHistoryFromThePinAlone() throws Exception {
+    JsonNode a = server("a");
+    TrustBaseHistory history = TrustBaseHistory.create(pin(a));
+    HttpTrustBaseSource source = new HttpTrustBaseSource(a.get("url").asText(), null);
+    int added = TrustBaseUpdater.update(TrustBaseUpdateTarget.of(history), List.of(source), options(a, 4));
+    assertEquals(a.get("epochs").asInt(), added);
+    assertEquals(a.get("epochs").asLong(), history.getTip().orElseThrow().getEpoch());
+    assertEquals(0, TrustBaseUpdater.update(TrustBaseUpdateTarget.of(history), List.of(source), options(a, 4)), "then up to date");
+  }
+
+  @Test
+  void aBundleClientAndAOnePerPageClientReachTheSameTip() throws Exception {
+    JsonNode a3 = server("a3");
+    TrustBaseBundle bundle = TrustBaseBundle.decode(Files.readAllBytes(new File(a3.get("bundle").asText()).toPath()), new TrustBaseBundleLimits(1 << 20, 64));
+    TrustBaseHistory history = TrustBaseHistory.fromBundle(bundle, pin(a3));
+    assertEquals(a3.get("bundleEpochs").asLong(), history.getTip().orElseThrow().getEpoch());
+    HttpTrustBaseSource source = new HttpTrustBaseSource(a3.get("url").asText(), null);
+    TrustBaseUpdater.update(TrustBaseUpdateTarget.of(history), List.of(source), options(a3, 1));
+    assertEquals(a3.get("epochs").asLong(), history.getTip().orElseThrow().getEpoch());
+  }
+
+  @Test
+  void aForkedAggregatorIsRefusedAndTheHeldHistoryIsKept() throws Exception {
+    // the client holds the honest prefix (3 entries); the fork shares the genesis and diverges at epoch 2, so its entry 4 does not extend the held tip
+    JsonNode a3 = server("a3");
+    JsonNode fork = server("fork");
+    TrustBaseBundle bundle = TrustBaseBundle.decode(Files.readAllBytes(new File(a3.get("bundle").asText()).toPath()), new TrustBaseBundleLimits(1 << 20, 64));
+    TrustBaseHistory history = TrustBaseHistory.fromBundle(bundle, pin(a3));
+    long tip = history.getTip().orElseThrow().getEpoch();
+    assertThrows(TrustBaseException.class, () -> TrustBaseUpdater.update(TrustBaseUpdateTarget.of(history),
+        List.of(new HttpTrustBaseSource(fork.get("url").asText(), null)), options(a3, 64)));
+    assertEquals(tip, history.getTip().orElseThrow().getEpoch());
+    assertTrue(history.getEntries().size() == tip, "no entry of the fork was kept");
+  }
+}
