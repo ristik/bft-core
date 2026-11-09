@@ -156,10 +156,12 @@ class UtbProfile(unittest.TestCase):
         for name,method in rehearse.UTB_STAGES:
             self.assertTrue(callable(getattr(rehearse.Rehearsal,method)),name)
             self.assertNotIn(name,[n for n,_ in rehearse.STAGES+rehearse.POS_STAGES],'the hosted rehearsal package has no signed history: its default run must not name them')
-    def utb_live_fixture(self,roots_epoch=3,served_tip=3,replay_tip=None,wrong_snapshot_answers_history=False,verifier_accepts_tampered=False):
+    def utb_live_fixture(self,roots_epoch=3,served_tip=3,replay_tip=None,wrong_snapshot_answers_history=False,verifier_accepts_tampered=False,wrong_snapshot_answers_reserialised=False,genesis_epoch=None,first_epoch=1):
         """A Rehearsal whose gateway and offline verifier are fakes: the served history is a pure function of (tip, query). Returns (instance, calls)."""
         import rehearse
         ev=Path(tempfile.mkdtemp());calls=[]
+        if genesis_epoch is not None:
+            (ev/'network').mkdir();(ev/'network'/'trust-base.json').write_text(json.dumps({'epoch':genesis_epoch}))
         pin=self.PIN
         def tip_id(t): return '0x'+('%02x'%t)*32
         class Fake(rehearse.Rehearsal):
@@ -177,14 +179,15 @@ class UtbProfile(unittest.TestCase):
                 calls.append(query)
                 if 'snapshotEnd=' in query:
                     t=int(re.search(r'snapshotEnd=(\d+)',query).group(1));want=re.search(r'snapshotEntryId=(0x[0-9a-f]{64})',query).group(1)
+                    if want!=tip_id(t) and wrong_snapshot_answers_reserialised: return 200,b'T%d:sum%d#x' % (t,t)   # the same history in other bytes
                     if want!=tip_id(t) and not wrong_snapshot_answers_history: return 409,b'conflict'
                     u=replay_tip if replay_tip is not None else t;return 200,b'T%d:sum%d' % (u,u)
                 return 200,b'T%d:sum%d' % (served_tip,served_tip)
             def utb_verify(self,path,pin_):
                 data=Path(path).read_bytes()
-                m=re.fullmatch(rb'T(\d+):sum(\d+)',data)
+                m=re.fullmatch(rb'T(\d+):sum(\d+)(?:#x)?',data)
                 if not m or m.group(1)!=m.group(2): return (verifier_accepts_tampered and data!=b'conflict'),(1 if verifier_accepts_tampered else None),(3 if verifier_accepts_tampered else None),('0x'+'ab'*32 if verifier_accepts_tampered else None),'bad'
-                t=int(m.group(1));return True,1,t,tip_id(t),'ok'
+                t=int(m.group(1));return True,first_epoch,t,tip_id(t),'ok'
         return Fake(),calls
     def run_utb_live(self,**kw):
         import rehearse
@@ -205,6 +208,14 @@ class UtbProfile(unittest.TestCase):
     def test_utb_live_control_fails_when_a_wrong_snapshot_is_answered_with_the_held_history(self):
         import rehearse
         with self.assertRaises(rehearse.Failure): self.run_utb_live(wrong_snapshot_answers_history=True)
+    def test_utb_live_control_fails_when_a_wrong_snapshot_is_answered_with_the_same_history_in_other_bytes(self):
+        import rehearse
+        with self.assertRaises(rehearse.Failure): self.run_utb_live(wrong_snapshot_answers_reserialised=True)
+    def test_utb_live_follows_the_genesis_epoch_of_the_generation_not_a_constant_1(self):
+        import rehearse
+        fake,calls=self.run_utb_live(roots_epoch=6,served_tip=6,genesis_epoch=5,first_epoch=5)
+        self.assertTrue(all(c.startswith('from=5&') for c in calls),calls)
+        with self.assertRaises(rehearse.Failure): self.run_utb_live(roots_epoch=6,served_tip=6,genesis_epoch=5,first_epoch=1)
     def test_utb_live_control_fails_when_the_verifier_accepts_a_tampered_file(self):
         import rehearse
         with self.assertRaises(rehearse.Failure): self.run_utb_live(verifier_accepts_tampered=True)

@@ -190,8 +190,8 @@ func (x *Pacemaker) RegisterVote(vote *abdrc.VoteMsg, quorum QuorumInfo) (*types
 RegisterTimeoutVote registers time-out vote from root node (including vote from self) and tries to assemble
 a timeout quorum certificate for the round.
 */
-func (x *Pacemaker) RegisterTimeoutVote(ctx context.Context, vote *abdrc.TimeoutMsg, quorum QuorumInfo) (*types.TimeoutCert, error) {
-	tc, voteCnt, err := x.pendingVotes.InsertTimeoutVote(vote, quorum)
+func (x *Pacemaker) RegisterTimeoutVote(ctx context.Context, vote *abdrc.TimeoutMsg, quorum QuorumInfo, remember ...timeoutMemo) (*types.TimeoutCert, error) {
+	tc, voteCnt, err := x.pendingVotes.InsertTimeoutVote(vote, quorum, remember...)
 	if err != nil {
 		return nil, fmt.Errorf("inserting to pending votes: %w", err)
 	}
@@ -200,6 +200,11 @@ func (x *Pacemaker) RegisterTimeoutVote(ctx context.Context, vote *abdrc.Timeout
 		x.setState(ctx, pmsRoundTimeout)
 	}
 	return tc, nil
+}
+
+// VerifiedTimeoutHit: this exact timeout message was already verified and counted in the current round.
+func (x *Pacemaker) VerifiedTimeoutHit(author string, round, epoch uint64, digest [32]byte, ctx verifyContext) bool {
+	return x.pendingVotes.VerifiedTimeoutHit(author, round, epoch, digest, ctx)
 }
 
 // AdvanceRoundQC - trigger next round/view on quorum certificate

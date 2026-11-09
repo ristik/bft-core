@@ -181,7 +181,8 @@ pc0=$(mktemp); pc1=$(mktemp); cpu_ticks >"$pc0"; ct0=$(date +%s)
 if [ "$perfsecs" -gt 0 ] && command -v perf >/dev/null 2>&1; then
   rp=$(cat test-nodes/root1/pid)
   ( sleep 20; sudo perf record -F 99 -g -p "$rp" -o "$evidence/perf-root1.data" -- sleep "$perfsecs" >"$evidence/perf-record.log" 2>&1
-    sudo perf report -i "$evidence/perf-root1.data" --stdio --no-children --sort symbol -g none 2>/dev/null | grep -v '^#' | grep -v '^$' | head -80 >"$evidence/perf-root1-top.txt" ) &
+    sudo perf report -i "$evidence/perf-root1.data" --stdio --no-children --sort symbol -g none 2>/dev/null | grep -v '^#' | grep -v '^$' | head -80 >"$evidence/perf-root1-top.txt"
+    sudo chown "$(id -u):$(id -g)" "$evidence/perf-root1.data" 2>/dev/null || true ) &   # the raw data is root-owned: keep evidence cleanup unprivileged
   PERFJOB=$!
 fi
 progressed=0; w=0; want=$(( $(shard_round) + 5 ))
@@ -191,7 +192,8 @@ while [ "$w" -lt "$progwait" ]; do
   sleep 1; w=$((w + 1))
 done
 ct1=$(date +%s); cpu_ticks >"$pc1"
-join -t, <(sort -t, -k1,1 "$pc0") <(sort -t, -k1,1 "$pc1") | awk -F, -v dt=$((ct1 - ct0)) 'BEGIN{print "root,cpu_percent_of_one_core"} {printf "%s,%.1f\n",$1,($3-$2)/100/dt*100}' >"$evidence/cpu-per-root.csv"
+tck=$(getconf CLK_TCK 2>/dev/null || echo 100)
+join -t, <(sort -t, -k1,1 "$pc0") <(sort -t, -k1,1 "$pc1") | awk -F, -v dt=$((ct1 - ct0)) -v tck="$tck" 'BEGIN{print "root,cpu_percent_of_one_core"} {printf "%s,%.1f\n",$1,($3-$2)/tck/dt*100}' >"$evidence/cpu-per-root.csv"
 rm -f "$pc0" "$pc1"
 [ -z "${PERFJOB:-}" ] || wait "$PERFJOB" 2>/dev/null
 if [ -s "$evidence/perf-root1-top.txt" ]; then
