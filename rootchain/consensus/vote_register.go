@@ -180,7 +180,7 @@ func (v *VoteRegister) InsertVote(vote *abdrc.VoteMsg, quorumInfo QuorumInfo) (*
 InsertTimeoutVote returns non nil TC when quorum has been achieved.
 Second return value is number of signatures in the TC.
 */
-func (v *VoteRegister) InsertTimeoutVote(timeout *abdrc.TimeoutMsg, quorumInfo QuorumInfo) (*drctypes.TimeoutCert, uint64, error) {
+func (v *VoteRegister) InsertTimeoutVote(timeout *abdrc.TimeoutMsg, quorumInfo QuorumInfo, remember ...timeoutMemo) (*drctypes.TimeoutCert, uint64, error) {
 	// Create partial timeout cert on first vote received
 	scheme := timeoutScheme(timeout)
 	if v.timeoutCert == nil {
@@ -203,6 +203,11 @@ func (v *VoteRegister) InsertTimeoutVote(timeout *abdrc.TimeoutMsg, quorumInfo Q
 	sigCount, err := signedTimeoutWeight(v.timeoutCert.Signatures, quorumInfo)
 	if err != nil {
 		return nil, 0, fmt.Errorf("timeout vote weight: %w", err)
+	}
+	// The vote is counted and its weight accounted: only now is the exact message remembered (an error above, including one after Add has
+	// stored the signature, remembers nothing).
+	if len(remember) > 0 {
+		v.NoteVerifiedTimeout(timeout.Author, timeout.Timeout.Round, timeout.Timeout.Epoch, remember[0].digest, remember[0].ctx)
 	}
 	if reached(sigCount, quorumInfo) {
 		return v.timeoutCert, sigCount, nil
@@ -313,6 +318,12 @@ type verifyContext struct {
 	n      int
 	epochs [4]uint64
 	cfgs   [4]votesig.Config
+}
+
+// timeoutMemo is what the handler asks the register to remember once the vote is verified, counted and its weight accounted.
+type timeoutMemo struct {
+	digest [32]byte
+	ctx    verifyContext
 }
 
 // verifiedTimeout is the memory of one counted timeout vote: the digest of the complete message that was verified and registered.
