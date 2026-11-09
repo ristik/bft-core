@@ -69,8 +69,10 @@ func (s *TrustBaseStore) BindSigningAuthority(a SigningAuthority) error {
 	if s.signing.authority != nil && !sameAuthority(s.signing.authority, a) {
 		return fmt.Errorf("%w: another authority is bound", ErrSigningHistory)
 	}
-	s.signing.authority = a
-	s.bumpVerifyGeneration()
+	if s.signing.authority == nil { // binding the authority already bound changes nothing
+		s.signing.authority = a
+		s.bumpVerifyGeneration()
+	}
 	return nil
 }
 

@@ -320,15 +320,7 @@ func (x *TimeoutCert) IsValid() error {
 
 func (x *TimeoutCert) Verify(tbs *trustbase.TrustBaseStore) error {
 	gen := tbs.VerifyGeneration()
-	var key trustbase.CertKey
-	cacheable := false
-	if x != nil && x.Timeout != nil {
-		epochs := []uint64{x.Timeout.Epoch}
-		if hqc := x.Timeout.HighQc; hqc != nil && hqc.VoteInfo != nil {
-			epochs = append(epochs, hqc.VoteInfo.Epoch)
-		}
-		key, cacheable = certCacheKey(tbs, trustbase.CertTC, x, 0, x.Scheme, epochs...)
-	}
+	key, cacheable := timeoutCertCacheKey(tbs, x)
 	if cacheable && tbs.CertVerified(key) {
 		return nil
 	}
@@ -408,4 +400,23 @@ func (x *TimeoutCert) verify(tbs *trustbase.TrustBaseStore) error {
 		}
 	}
 	return nil
+}
+
+// timeoutCertCacheKey is the key of a timeout certificate in the verified-certificate cache. A hit on it skips the verification of the nested high QC
+// too, so the nested QC must satisfy the same no-key rule as a QC verified on its own (certCacheKey): a scheme 2 high QC whose in-memory vote info is not
+// version 1 carries a field the wire form does not, and the TC is then verified without the cache.
+func timeoutCertCacheKey(tbs *trustbase.TrustBaseStore, x *TimeoutCert) (trustbase.CertKey, bool) {
+	if x == nil || x.Timeout == nil {
+		return trustbase.CertKey{}, false
+	}
+	epochs := []uint64{x.Timeout.Epoch}
+	if hqc := x.Timeout.HighQc; hqc != nil {
+		if hqc.VoteInfo != nil {
+			if hqc.Scheme == votesig.SchemeDomainBound && hqc.VoteInfo.Version != 1 {
+				return trustbase.CertKey{}, false
+			}
+			epochs = append(epochs, hqc.VoteInfo.Epoch)
+		}
+	}
+	return certCacheKey(tbs, trustbase.CertTC, x, 0, x.Scheme, epochs...)
 }

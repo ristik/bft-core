@@ -100,3 +100,17 @@ func TestVerifyGenerationOnProjectionInstallsAndAuthorityAnswers(t *testing.T) {
 	require.NotEqual(t, ctx1, ctx2)
 	require.Equal(t, genBefore, s2.VerifyGeneration())
 }
+
+// Binding the verified history changes what every signing lookup answers from then on: the generation advances (a no-op rebind does not).
+func TestBindSigningAuthorityAdvancesTheGeneration(t *testing.T) {
+	s := threeEpochStore(t)
+	before := s.VerifyGeneration()
+	h := &pointerHistory{historyOf{1: legacy(), 2: legacy(), 3: legacy()}}
+	require.NoError(t, s.BindSigningAuthority(h))
+	bound := s.VerifyGeneration()
+	require.Greater(t, bound, before)
+	require.NoError(t, s.BindSigningAuthority(h), "binding the same authority again is a no-op")
+	require.Equal(t, bound, s.VerifyGeneration())
+	require.Error(t, s.BindSigningAuthority(&pointerHistory{}), "another authority is refused")
+	require.Equal(t, bound, s.VerifyGeneration(), "a refused bind changes nothing")
+}

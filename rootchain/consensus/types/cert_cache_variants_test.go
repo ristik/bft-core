@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"crypto"
 	"crypto/sha256"
+	"errors"
 	"sort"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -292,4 +294,125 @@ func TestCertCacheNestedQCFromAnotherEpoch(t *testing.T) {
 	err = agrees(t, r.store, "nested qc changed", func() error { return changed.Verify(r.store) })
 	require.Error(t, err)
 	require.Zero(t, r.store.TakeCertCacheStats().Hits[trustbase.CertTC])
+}
+
+// --- a bound authority whose answer changes with no call on the store ------------------------------------------------------------------------
+
+// movingAuthority is a verified-history stand-in whose answer for an epoch can change at any time: nothing tells the store.
+type movingAuthority struct {
+	mu  sync.Mutex
+	cfg map[uint64]votesig.Config
+}
+
+func (a *movingAuthority) Signing(epoch uint64) (votesig.Config, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if c, ok := a.cfg[epoch]; ok {
+		return c, nil
+	}
+	return votesig.Config{}, errors.New("epoch not in the history")
+}
+
+func (a *movingAuthority) LeaderPolicy(uint64) (string, error) {
+	return trustbase.LeaderPolicyLegacy, nil
+}
+
+func (a *movingAuthority) set(epoch uint64, c votesig.Config) {
+	a.mu.Lock()
+	a.cfg[epoch] = c
+	a.mu.Unlock()
+}
+
+// nestedEpochFixture is the TC of epoch 2 with a legacy high QC of epoch 1, the stores' authority bound to a movingAuthority.
+func nestedEpochFixture(t *testing.T) (r *epochRig, auth *movingAuthority, qc *QuorumCert, tc *TimeoutCert, network uint64) {
+	t.Helper()
+	r = newEpochRig(t)
+	tb1, err := r.store.GetByEpoch(1)
+	require.NoError(t, err)
+	network = uint64(tb1.NetworkID)
+	legacyCfg := votesig.Config{Scheme: votesig.SchemeLegacy, Network: network}
+	auth = &movingAuthority{cfg: map[uint64]votesig.Config{1: legacyCfg, 2: legacyCfg}}
+	require.NoError(t, r.store.BindSigningAuthority(auth))
+
+	info := &RoundInfo{RoundNumber: 10, ParentRoundNumber: 9, Epoch: 1, Timestamp: 1670314583523, CurrentRootHash: bytes.Repeat([]byte{4}, 32)}
+	h, err := info.Hash(crypto.SHA256)
+	require.NoError(t, err)
+	seal := &base.UnicitySeal{Version: 1, PreviousHash: h}
+	sig, err := r.signer.SignBytes(testcertificates.UnicitySealBytes(t, seal))
+	require.NoError(t, err)
+	qc = &QuorumCert{VoteInfo: info, LedgerCommitInfo: seal, Signatures: map[string]hex.Bytes{"node": sig}}
+	timeout := &Timeout{Epoch: 2, Round: 11, HighQc: qc}
+	vsig, err := r.signer.SignBytes(BytesFromTimeoutVote(timeout, "node", &TimeoutVote{HqcRound: 10}))
+	require.NoError(t, err)
+	tc = &TimeoutCert{Timeout: timeout, Signatures: map[string]*TimeoutVote{"node": {HqcRound: 10, Signature: vsig}}}
+	return r, auth, qc, tc, network
+}
+
+// The authority's answer for the QC's epoch changes (the epoch now requires the UTB envelope, which a legacy certificate lacks) and no store method
+// is called: the remembered result is not served, the verifier refuses, and the cache agrees with the uncached verifier.
+func TestCertCacheFollowsABoundAuthoritysChangedAnswerForAQC(t *testing.T) {
+	r, auth, qc, _, network := nestedEpochFixture(t)
+	require.NoError(t, qc.VerifyWith(r.store))
+	require.NoError(t, recodeQC(t, qc).VerifyWith(r.store))
+	require.Equal(t, 1, r.store.TakeCertCacheStats().Hits[trustbase.CertQC])
+
+	genBefore := r.store.VerifyGeneration()
+	auth.set(1, votesig.Config{Scheme: votesig.SchemeLegacy, Network: network, UTB: true})
+	require.Equal(t, genBefore, r.store.VerifyGeneration(), "nothing told the store")
+
+	err := agrees(t, r.store, "authority changed", func() error { return recodeQC(t, qc).VerifyWith(r.store) })
+	require.Error(t, err, "a legacy certificate of an epoch that now requires the UTB envelope")
+	s := r.store.TakeCertCacheStats()
+	require.Zero(t, s.Hits[trustbase.CertQC], "not served from the old answer")
+}
+
+// The same for a TC whose NESTED high QC's epoch changes while the TC's own epoch does not: the nested epoch is part of the TC's context.
+func TestCertCacheFollowsABoundAuthoritysChangedAnswerForATCsNestedEpoch(t *testing.T) {
+	r, auth, _, tc, network := nestedEpochFixture(t)
+	require.NoError(t, tc.Verify(r.store))
+	require.NoError(t, recodeTC(t, tc).Verify(r.store))
+	require.Equal(t, 1, r.store.TakeCertCacheStats().Hits[trustbase.CertTC])
+
+	genBefore := r.store.VerifyGeneration()
+	auth.set(1, votesig.Config{Scheme: votesig.SchemeLegacy, Network: network, UTB: true}) // epoch 1 only; the TC's epoch 2 is untouched
+	require.Equal(t, genBefore, r.store.VerifyGeneration())
+
+	err := agrees(t, r.store, "nested epoch answer changed", func() error { return recodeTC(t, tc).Verify(r.store) })
+	require.Error(t, err)
+	require.Zero(t, r.store.TakeCertCacheStats().Hits[trustbase.CertTC], "the TC is not served from the old answer of its nested QC's epoch")
+
+	// and the TC's own epoch: changing only epoch 2's answer is a miss as well
+	r2, auth2, _, tc2, network2 := nestedEpochFixture(t)
+	require.NoError(t, tc2.Verify(r2.store))
+	auth2.set(2, votesig.Config{Scheme: votesig.SchemeDomainBound, Network: network2, Genesis: [32]byte{5}}) // a legacy TC of an epoch that now signs domain-bound
+	err = agrees(t, r2.store, "own epoch answer changed", func() error { return recodeTC(t, tc2).Verify(r2.store) })
+	require.Error(t, err)
+	require.Zero(t, r2.store.TakeCertCacheStats().Hits[trustbase.CertTC])
+}
+
+// A TC hit skips the nested QC's verification, so the nested QC obeys the QC no-key rule: a scheme 2 high QC whose in-memory vote info is not
+// version 1 (a field the wire form does not carry) gives the TC no key.
+func TestCertCacheTimeoutCertKeyAppliesTheNestedQCNoKeyRule(t *testing.T) {
+	r, _, qc, tc, _ := nestedEpochFixture(t)
+	_, ok := timeoutCertCacheKey(r.store, tc)
+	require.True(t, ok, "a legacy nested QC")
+
+	scheme2 := recodeTC(t, tc)
+	scheme2.Timeout.HighQc.Scheme = votesig.SchemeDomainBound
+	scheme2.Timeout.HighQc.VoteInfo.Version = 1
+	_, ok = timeoutCertCacheKey(r.store, scheme2)
+	require.True(t, ok, "version 1: the wire form carries it")
+
+	scheme2.Timeout.HighQc.VoteInfo.Version = 0
+	_, ok = timeoutCertCacheKey(r.store, scheme2)
+	require.False(t, ok, "a scheme 2 nested QC with an in-memory version the wire form cannot carry: no key")
+	scheme2.Timeout.HighQc.VoteInfo.Version = 2
+	_, ok = timeoutCertCacheKey(r.store, scheme2)
+	require.False(t, ok)
+
+	// the same rule on the QC's own key, for reference
+	q := recodeQC(t, qc)
+	q.Scheme, q.VoteInfo.Version = votesig.SchemeDomainBound, 0
+	_, ok = certCacheKey(r.store, trustbase.CertQC, q, q.VoteInfo.Version, q.Scheme, q.VoteInfo.Epoch)
+	require.False(t, ok)
 }
