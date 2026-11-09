@@ -304,6 +304,18 @@ func maxFaultyWeight(quorum QuorumInfo) uint64 {
 	return 0
 }
 
+// HasTimeoutVote reports whether a timeout vote of this author for this round and epoch is already counted in the certificate being formed.
+// Only votes that passed the whole verification of onTimeoutMsg are ever added, so a true answer says a verified vote is held: the
+// caller may refuse a repeat of it without checking the repeat's signatures.
+func (v *VoteRegister) HasTimeoutVote(author string, round, epoch uint64) bool {
+	tc := v.timeoutCert
+	if tc == nil || tc.Timeout == nil || tc.Timeout.Round != round || tc.Timeout.Epoch != epoch {
+		return false
+	}
+	_, found := tc.Signatures[author]
+	return found
+}
+
 func (v *VoteRegister) Reset() {
 	clear(v.hashToSignatures)
 	clear(v.authorToVote)

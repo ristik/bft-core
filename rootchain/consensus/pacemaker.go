@@ -202,6 +202,11 @@ func (x *Pacemaker) RegisterTimeoutVote(ctx context.Context, vote *abdrc.Timeout
 	return tc, nil
 }
 
+// HasTimeoutVote is true when a verified timeout vote of this author for this round and epoch is already counted.
+func (x *Pacemaker) HasTimeoutVote(author string, round, epoch uint64) bool {
+	return x.pendingVotes.HasTimeoutVote(author, round, epoch)
+}
+
 // AdvanceRoundQC - trigger next round/view on quorum certificate
 func (x *Pacemaker) AdvanceRoundQC(ctx context.Context, qc *types.QuorumCert) bool {
 	ctx, span := x.tracer.Start(ctx, "Pacemaker.AdvanceRoundQC")
