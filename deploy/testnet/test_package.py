@@ -2159,4 +2159,68 @@ class BridgeLoad(unittest.TestCase):
             self.assertFalse(load.run(1))
             self.assertEqual(fake.calls,['init']*3)
 
+
+class BridgePosGap(unittest.TestCase):
+    """bridge/bridge_pos.py pos-gap's checks without a network: the tester's update reported once (the SDK's TrustBaseUpdater follows the page cursors
+    itself), the recorded one-entry pages, and trust_recorder.mjs forwarding and recording against a stub upstream."""
+    def module(self):
+        for d in ('bridge','sdk-clients'):
+            sys.path.insert(0,str(Path(__file__).parent/d)); self.addCleanup(sys.path.remove,str(Path(__file__).parent/d))
+        import bridge_pos, utbcbor
+        return bridge_pos, utbcbor
+    def page(self,u,frm,maxe,epochs,nxt,http=200,snap=None,status=0):
+        entries=[u.encode(u.Tag(u.ENTRY_TAG,[2,3,e,e*10,[],1,b'\x11'*32,None,b'\x00'*32,None])) for e in epochs]
+        q=f'from={frm}&maxEntries={maxe}'+(f'&snapshotEnd={snap}&snapshotEntryId=0x{"ab"*32}' if snap else '')
+        return {'path':'/api/v1/trustbases?'+q,'http':http,'body':u.response(3,status,frm,3,b'\xab'*32,entries,nxt).hex() if http==200 else ''}
+    def test_one_aggregate_fetch_event(self):
+        bp,_=self.module()
+        new='  $ bridge-tester redeem\n  trust: fetched from epoch 2 (max 1): 2 appended, tip 1 -> 3\nredeemed'
+        old='  trust: fetched from epoch 2 (max 1): 1 appended, tip 1 -> 2\n  trust: fetched from epoch 3 (max 1): 1 appended, tip 2 -> 3'
+        self.assertEqual(bp.gap_fetches(new),bp.gap_fetches_want(1,3))
+        self.assertNotEqual(bp.gap_fetches(old),bp.gap_fetches_want(1,3))
+        self.assertNotEqual(bp.gap_fetches(new+'\n  trust: fetched from epoch 4 (max 1): 0 appended, tip 3 -> 3'),bp.gap_fetches_want(1,3))
+        self.assertEqual(bp.gap_fetches_want(2,4),['trust: fetched from epoch 3 (max 1): 2 appended, tip 2 -> 4'])
+    def test_one_entry_pages(self):
+        bp,u=self.module()
+        good=[self.page(u,2,1,[2],3),self.page(u,3,1,[3],None,snap=3)]
+        pages=bp.trust_pages(good)
+        self.assertEqual([(p['from'],p['maxEntries'],p['snapshotEnd'],p['epochs'],p['next']) for p in pages],[(2,1,None,[2],3),(3,1,3,[3],None)])
+        self.assertTrue(bp.one_entry_pages(pages,1,3))
+        for bad in ([self.page(u,2,2,[2,3],None)],                                   # one two-entry page: not one-entry pages
+                    [self.page(u,2,1,[2],3)],                                        # epoch 3 never requested
+                    good+[self.page(u,4,1,[],None)],                                 # an extra request
+                    [self.page(u,2,1,[2],3),self.page(u,3,2,[3],None)],              # the second page not capped at 1
+                    [self.page(u,2,1,[2],3),self.page(u,3,1,[],None)],               # answered without its entry
+                    [self.page(u,2,1,[2],3),self.page(u,3,1,[3],None,http=502)],     # not served
+                    [self.page(u,2,1,[2],3),self.page(u,3,1,[3],None,status=1)],     # served with a non-OK status
+                    [self.page(u,3,1,[3],None),self.page(u,2,1,[2],3)]):             # out of order
+            self.assertFalse(bp.one_entry_pages(bp.trust_pages(bad),1,3),json.dumps(bp.trust_pages(bad)))
+    def test_recorder_forwards_and_records(self):
+        if not shutil.which('node'): self.skipTest('node not installed')
+        body=bytes.fromhex('d99857')+b'page'
+        class Up(http.server.BaseHTTPRequestHandler):
+            def log_message(self,*a): pass
+            def do_GET(self):
+                self.send_response(200); self.send_header('Content-Type','application/cbor'); self.send_header('Content-Length',str(len(body))); self.end_headers(); self.wfile.write(body)
+            def do_POST(self):
+                n=int(self.headers['Content-Length']); d=self.rfile.read(n)
+                self.send_response(200); self.send_header('Content-Length',str(len(d))); self.end_headers(); self.wfile.write(d)
+        up=http.server.ThreadingHTTPServer(('127.0.0.1',0),Up); threading.Thread(target=up.serve_forever,daemon=True).start(); self.addCleanup(up.shutdown)
+        with tempfile.TemporaryDirectory() as tmp:
+            import socket
+            with socket.socket() as so: so.bind(('127.0.0.1',0)); port=so.getsockname()[1]
+            out=Path(tmp)/'pages.jsonl'
+            proc=subprocess.Popen(['node',str(Path(__file__).parent/'bridge/trust_recorder.mjs')],stdout=subprocess.PIPE,text=True,
+                                  env={**os.environ,'UPSTREAM':f'http://127.0.0.1:{up.server_port}','PORT':str(port),'OUT':str(out)})
+            self.addCleanup(proc.kill)
+            self.assertIn('listening',proc.stdout.readline())
+            c=http.client.HTTPConnection('127.0.0.1',port,timeout=10)
+            c.request('GET','/api/v1/trustbases?from=2&maxEntries=1'); r=c.getresponse()
+            self.assertEqual((r.status,r.read(),r.getheader('Content-Type')),(200,body,'application/cbor'))
+            c.request('POST','/aggregator',body=b'{"x":1}',headers={'Content-Type':'application/json'}); r=c.getresponse()
+            self.assertEqual(r.read(),b'{"x":1}')
+            c.request('GET','/api/v1/trustbases/other'); c.getresponse().read()
+            rec=[json.loads(l) for l in out.read_text().splitlines()]
+            self.assertEqual(rec,[{'path':'/api/v1/trustbases?from=2&maxEntries=1','http':200,'body':body.hex()}])
+
 if __name__=='__main__': unittest.main()

@@ -4,7 +4,7 @@
 name: testnet-bridge-pos
 on:
   pull_request:
-    paths: ['deploy/testnet/bridge/bridge_pos.py', 'deploy/testnet/bridge/sdk_clients.py', 'deploy/testnet/bridge/rehearse_bridge.py', 'deploy/testnet/bridge/overlay.py',
+    paths: ['deploy/testnet/bridge/bridge_pos.py', 'deploy/testnet/bridge/sdk_clients.py', 'deploy/testnet/bridge/rehearse_bridge.py', 'deploy/testnet/bridge/overlay.py', 'deploy/testnet/bridge/trust_recorder.mjs',
             'deploy/testnet/bridge/pins.json', 'deploy/testnet/sdk-clients/**', 'scripts/dnb-tool/**', '.github/workflows/testnet-bridge-pos.yml']
   workflow_dispatch:
     inputs:

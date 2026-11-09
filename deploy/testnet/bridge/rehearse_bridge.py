@@ -150,13 +150,13 @@ class BridgeRehearsal(SdkClients, BridgePos, Rehearsal):
             raise Failure(f'the driver failed: {args[0]}')
         return out.stdout
 
-    def tester(self, *args, check=True, wallet='tester-wallet', key='tester.key', env=None):
+    def tester(self, *args, check=True, wallet='tester-wallet', key='tester.key', env=None, docker_args=()):
         """One command of the bridge tester CLI in the bridge tools image, on the validators network, with its wallet at /work/WALLET. The tester has
         no driver key and no archive: its mounts are only its wallet, its key file and the published directory (bridge/public), read-only. Returns
-        (exit code, output)."""
+        (exit code, output). docker_args are extra docker run options (pos-gap's --add-host to its trust recorder)."""
         work = self.gen / 'bridge'
         extra = [x for k, v in (env or {}).items() for x in ('-e', f'{k}={v}')]
-        out = subprocess.run(['docker', 'run', '--rm', '--read-only', '--network', validators_network(self.gen), '--user', '10001:10001', '-e', 'HOME=/tmp/home', *extra,
+        out = subprocess.run(['docker', 'run', '--rm', '--read-only', '--network', validators_network(self.gen), '--user', '10001:10001', '-e', 'HOME=/tmp/home', *extra, *docker_args,
                               '--tmpfs', '/tmp', '-v', f'{work / "public"}:/work/public:ro', '-v', f'{work / wallet}:/work/{wallet}',
                               '-v', f'{work / key}:/work/tester.key:ro', TAG, 'npx', '--no-install', 'tsx', TESTER, *args, '--wallet', f'/work/{wallet}'],
                              text=True, capture_output=True)

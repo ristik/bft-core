@@ -39,8 +39,9 @@ eight invocations on one generation (the workflow then runs rehearse.py utb-live
               - the redeem's receipt succeeded after the B1 registry had imported the new epoch, the vault credits exactly the lock and the claim pays it.
   pos-gap     After the second handoff (2 -> 3), the controlled gap: the lagging wallet still holds only the genesis entry, while the source (the
               aggregator) retains entry 2. Token C is transferred and burned at epoch 3; with the fetch disabled the redeem fails (ErrNoEntryForEpoch) and
-              the vault's whole state is unchanged; then the redeem with one-entry pages (BRIDGE_TRUST_MAX_ENTRIES=1) repairs the range: exactly the
-              fetches from epoch 2 and from epoch 3, one entry each; a fresh process then holds 1..3 contiguous from the pin, its epoch-3 EntryID the
+              the vault's whole state is unchanged; then the redeem with one-entry pages (BRIDGE_TRUST_MAX_ENTRIES=1) repairs the range: the tester's
+              requests, recorded by a pass-through in front of its aggregator host (trust_recorder.mjs), are exactly the pages from epoch 2 and from
+              epoch 3 with maxEntries=1, each answered with that one entry, and its update completes once (2 appended, tip 1 -> 3); a fresh process then holds 1..3 contiguous from the pin, its epoch-3 EntryID the
               roots' served one and its epoch-2 EntryID the main wallet's; the B1 registry imported epoch 3 (bodyID the second handoff's V3 body id,
               at most 16 members); exact credit and the claim. This is the pull client's gap (a consumer that missed entry 2), not the push-offer path.
   Negatives check the vault's whole state, not its balance alone (a redeem creates credit before any claim): balance, the wallet's claimable, the
@@ -85,6 +86,44 @@ def _word(n):
     return f'{n:064x}'
 
 
+def gap_fetches(text):
+    """The tester's `trust: fetched` lines: one per completed update (the SDK's TrustBaseUpdater follows every page cursor, then reports once)."""
+    return [line.strip() for line in text.splitlines() if 'trust: fetched' in line]
+
+
+def gap_fetches_want(genesis, third):
+    """pos-gap's update: one completion, from the epoch after the held genesis, appending every missing entry (nbp trustrefresh.test.ts: two one-entry
+    requests, one aggregate event)."""
+    return [f'trust: fetched from epoch {genesis + 1} (max 1): {third - genesis} appended, tip {genesis} -> {third}']
+
+
+def trust_pages(records):
+    """The trust-base requests trust_recorder.mjs recorded, decoded: the query, the HTTP status and, for a served response, its status, entry epochs
+    and cursor (sdk-clients/utbcbor.py; nothing is verified here, the tester verified the entries)."""
+    import sys
+    from pathlib import Path
+    from urllib.parse import parse_qs, urlsplit
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'sdk-clients'))
+    import utbcbor
+    pages = []
+    for r in records:
+        q = {k: v[0] for k, v in parse_qs(urlsplit(r['path']).query).items()}
+        page = {k: (int(q[k]) if k in q else None) for k in ('from', 'maxEntries', 'snapshotEnd')}
+        page['http'] = r['http']
+        if r['http'] == 200:
+            resp = utbcbor.parse_response(bytes.fromhex(r['body']))
+            page.update(status=resp['status'], epochs=[utbcbor.entry_fields(e)[2] for e in resp['entries']], end=resp['end'], next=resp['next'])
+        pages.append(page)
+    return pages
+
+
+def one_entry_pages(pages, genesis, third):
+    """True when the pages are exactly the range repair in one-entry pages: from each missing epoch in turn, maxEntries=1, each served (status OK) with the one
+    entry of the epoch asked for."""
+    return ([p['from'] for p in pages] == list(range(genesis + 1, third + 1))
+            and all(p['maxEntries'] == 1 and p.get('status') == 0 and p.get('epochs') == [p['from']] for p in pages))
+
+
 class BridgePos:
     """Mixed into BridgeRehearsal: self is the rehearsal (call, expect, say, cast_run, tester, faucet_send, vault_balance)."""
 
@@ -104,6 +143,40 @@ class BridgePos:
         return {'genesisEpoch': self.b1_load(self.b1_field_name('b1.genesisEpoch')), 'importedTip': self.b1_load(self.b1_field_name('b1.importedTipEpoch'))}
 
     # ---- the wallet -----------------------------------------------------------------------------------------------------------
+    def recorded_tester(self, *args, wallet, key, env=None):
+        """One tester command with its trust-base page traffic recorded: the tester's aggregator host (tester-config.json aggUrl) resolves to a
+        trust_recorder.mjs container on the validators network (docker run --add-host), which forwards every request unchanged to that host and
+        records each GET /api/v1/trustbases. Returns (exit code, output, the recorded requests)."""
+        import subprocess
+        from pathlib import Path
+        from urllib.parse import urlsplit
+        from deploy_bridge import TAG, validators_network
+        work = self.gen / 'bridge'
+        agg = urlsplit(json.loads((work / 'public/tester-config.json').read_text())['aggUrl'])
+        port = agg.port or 80
+        rec = work / 'trust-recorder'
+        shutil.rmtree(rec, ignore_errors=True)
+        rec.mkdir()
+        os.chmod(rec, 0o777)
+        name = f'{self.gen.name}-trust-recorder'
+        subprocess.run(['docker', 'rm', '-f', name], capture_output=True)
+        subprocess.run(['docker', 'run', '-d', '--rm', '--name', name, '--network', validators_network(self.gen), '--user', '10001:10001', '--read-only',
+                        '-e', f'UPSTREAM=http://{agg.hostname}:{port}', '-e', f'PORT={port}', '-e', 'OUT=/rec/pages.jsonl', '-v', f'{rec}:/rec',
+                        '-v', f'{Path(__file__).resolve().parent / "trust_recorder.mjs"}:/opt/trust_recorder.mjs:ro', '--entrypoint', 'node', TAG,
+                        '/opt/trust_recorder.mjs'], check=True, capture_output=True, text=True)
+        try:
+            self.wait('the trust recorder to listen', lambda: 'listening' in subprocess.run(['docker', 'logs', name], capture_output=True, text=True).stdout, 60)
+            ip = subprocess.check_output(['docker', 'inspect', '-f', '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}', name], text=True).strip()
+            self.expect(bool(ip), 'the trust recorder has an address on the validators network', ip)
+            code, text = self.tester(*args, check=False, wallet=wallet, key=key, env=env, docker_args=('--add-host', f'{agg.hostname}:{ip}'))
+        finally:
+            subprocess.run(['docker', 'rm', '-f', name], capture_output=True)
+        out = rec / 'pages.jsonl'
+        records = [json.loads(line) for line in out.read_text().splitlines()] if out.exists() else []
+        if code != 0:
+            raise Failure(f'the tester failed: {args[0]}')
+        return code, text, records
+
     def pos_tester(self, *args, check=True, env=None):
         return self.tester(*args, check=check, wallet=POS_WALLET, key=POS_KEY, env=env)
 
@@ -339,11 +412,13 @@ class BridgePos:
         after = self.vault_state(nonce, me)
         self.expect(after == state, 'the refused redeem changed nothing in the vault', json.dumps(after))
         # the range repair: one-entry pages from the held tip
-        _, text = self.lag_tester('redeem', '--token', token, env={'BRIDGE_TRUST_MAX_ENTRIES': '1'})
-        fetches = [line.strip() for line in text.splitlines() if 'trust: fetched' in line]
-        want = [f'trust: fetched from epoch {genesis + 1} (max 1): 1 appended, tip {genesis} -> {genesis + 1}',
-                f'trust: fetched from epoch {third} (max 1): 1 appended, tip {genesis + 1} -> {third}']
-        self.expect(fetches == want, 'the lagging wallet repaired the range in one-entry pages: from epoch 2, then from epoch 3', '; '.join(fetches))
+        _, text, records = self.recorded_tester('redeem', '--token', token, wallet=LAG_WALLET, key=POS_KEY, env={'BRIDGE_TRUST_MAX_ENTRIES': '1'})
+        pages = trust_pages(records)
+        self.expect(one_entry_pages(pages, genesis, third),
+                    f'the lagging wallet requested the range in one-entry pages: from epoch {genesis + 1}, then from epoch {third}, each answered with that one entry',
+                    json.dumps(pages))
+        fetches = gap_fetches(text)
+        self.expect(fetches == gap_fetches_want(genesis, third), f'and its update completed once: {third - genesis} appended, tip {genesis} -> {third}', '; '.join(fetches))
         held = self.tester('trust', wallet=LAG_WALLET, key=POS_KEY)[1]   # a fresh process: what it reloads from its durable history
         held = json.loads(held[held.index('{'):held.rindex('}') + 1])
         ids = {int(e['epoch']): e['entryId'].lower() for e in held['entries']}
@@ -365,7 +440,7 @@ class BridgePos:
         self.expect(self.vault_balance() == epoch1['vaultBefore'], 'the vault paid back all three epoch-1 locks', str(self.vault_balance()))
         cache = self.keep_pos('gap', wallet=LAG_WALLET)
         self.record('gap', {'token': token, 'lockNonce': nonce, 'b1': b1, 'epoch': third, 'bodyId': f'0x{body:064x}', 'members': members, 'seals': seals,
-                            'fetches': fetches, 'trust': held, 'roots': roots, 'credited': credited, 'evidence': str(cache)})
+                            'fetches': fetches, 'pages': pages, 'trust': held, 'roots': roots, 'credited': credited, 'evidence': str(cache)})
         self.record('result-gap', {'stage': '430-bridge-pos pos-gap (2 -> 3, one-entry pages)', 'generation': self.gen.name, 'epochs': [genesis, third], 'pass': True})
 
     def pos_historical_steps(self):
