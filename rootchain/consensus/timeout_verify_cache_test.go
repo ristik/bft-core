@@ -180,3 +180,169 @@ func TestVerifiedTimeoutRegisterKeysAndKeepsTheFirstDigest(t *testing.T) {
 	r.Reset()
 	require.False(t, r.VerifiedTimeoutHit("a", 5, 1, d1, ctx))
 }
+
+// realQCTimeouts drives an anchored epoch through its first certified round and then makes every replica time out the next one: the votes
+// carry a real, non-anchor high QC (the QC of round anchor.Slot+1, a quorum of real signatures). Returns the replicas, ordered, and each
+// one's round-(anchor.Slot+2) timeout vote.
+func realQCTimeouts(t *testing.T) (replicas []*anchorReplica, votes []*abdrc.TimeoutMsg, round uint64) {
+	t.Helper()
+	byID, anchor, _ := newAnchorReplicas(t, 4)
+	ctx := context.Background()
+	firstLeader, err := firstReplica(byID).manager.leaderSelector.GetLeaderForRound(anchor.Slot + 1)
+	require.NoError(t, err)
+	byID[firstLeader].manager.processNewRoundEvent(ctx)
+	proposal := byID[firstLeader].net.WaitRootProposal(t)
+	for _, r := range byID {
+		require.NoError(t, r.manager.onProposalMsg(ctx, proposal))
+	}
+	nextLeader, err := firstReplica(byID).manager.leaderSelector.GetLeaderForRound(anchor.Slot + 2)
+	require.NoError(t, err)
+	byID[nextLeader].manager.pacemaker.setState(ctx, pmsRoundMatured)
+	for _, r := range byID {
+		if byID[nextLeader].manager.pacemaker.GetCurrentRound() > anchor.Slot+1 {
+			break
+		}
+		vs := r.net.SentMessages(network.ProtocolRootVote)
+		require.Len(t, vs, 1)
+		require.NoError(t, byID[nextLeader].manager.onVoteMsg(ctx, vs[0].Message.(*abdrc.VoteMsg)))
+	}
+	proposal = byID[nextLeader].net.WaitRootProposal(t)
+	for _, r := range byID {
+		r.net.ResetSentMessages(network.ProtocolRootVote)
+		require.NoError(t, r.manager.onProposalMsg(ctx, proposal))
+	}
+	round = anchor.Slot + 2
+	for _, r := range byID {
+		require.Equal(t, round, r.manager.pacemaker.GetCurrentRound())
+		r.manager.onLocalTimeout(ctx)
+		replicas = append(replicas, r)
+		msgs := r.net.SentMessages(network.ProtocolRootTimeout)
+		require.NotEmpty(t, msgs)
+		v := msgs[0].Message.(*abdrc.TimeoutMsg)
+		require.NotNil(t, v.Timeout.HighQc, "a real QC, not an anchor")
+		require.EqualValues(t, round-1, v.Timeout.HighQc.VoteInfo.RoundNumber)
+		votes = append(votes, v)
+	}
+	return replicas, votes, round
+}
+
+// timeoutCertOf feeds the first three votes to a replica other than the author of votes[0] and returns the timeout certificate it formed.
+func timeoutCertOf(t *testing.T, replicas []*anchorReplica, votes []*abdrc.TimeoutMsg) *drctypes.TimeoutCert {
+	t.Helper()
+	ctx := context.Background()
+	b := replicas[len(replicas)-1]
+	for _, v := range votes[:3] {
+		require.NoError(t, b.manager.onTimeoutMsg(ctx, recodeTimeout(t, v)))
+	}
+	tc := b.manager.pacemaker.lastRoundTC
+	require.NotNil(t, tc, "three of four timeout votes form the certificate")
+	return tc
+}
+
+// A same-round changed QC under a still-valid vote signature (the signature covers the high QC's round, not its content) is a different
+// message: it is verified and refused, and the counted original is untouched.
+func TestChangedHighQCOfTheSameRoundIsVerifiedAndRefused(t *testing.T) {
+	replicas, votes, round := realQCTimeouts(t)
+	rx := replicas[0]
+	ctx := context.Background()
+	calls := countVerifications(rx.manager)
+	v := votes[1]
+	require.NoError(t, rx.manager.onTimeoutMsg(ctx, v))
+	require.Equal(t, 1, *calls)
+
+	changed := recodeTimeout(t, v)
+	changed.Timeout.HighQc.VoteInfo.Timestamp++ // content of the QC, same round: the vote's own signature is still valid
+	require.Equal(t, v.Timeout.HighQc.VoteInfo.RoundNumber, changed.Timeout.HighQc.VoteInfo.RoundNumber)
+	err := rx.manager.onTimeoutMsg(ctx, changed)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "invalid timeout vote")
+	require.Equal(t, 2, *calls, "a miss: it was verified")
+
+	fewer := recodeTimeout(t, v)
+	for id := range fewer.Timeout.HighQc.Signatures {
+		delete(fewer.Timeout.HighQc.Signatures, id) // witnesses removed, same round
+		break
+	}
+	err = rx.manager.onTimeoutMsg(ctx, fewer)
+	require.Error(t, err)
+	require.Equal(t, 3, *calls)
+	require.ErrorIs(t, rx.manager.onTimeoutMsg(ctx, recodeTimeout(t, v)), quorumweight.ErrDuplicateSigner)
+	require.Equal(t, 3, *calls, "the original still hits")
+	require.Equal(t, round, rx.manager.pacemaker.GetCurrentRound())
+}
+
+// A copy of a counted vote that carries a valid later timeout certificate is a different message: it misses, is verified, and its
+// certificate still advances the receiver. (An early drop on signer/round/epoch would have lost this.) An identical replay advances nothing.
+func TestChangedLastTCOfACountedVoteStillAdvancesTheReceiver(t *testing.T) {
+	replicas, votes, round := realQCTimeouts(t)
+	ctx := context.Background()
+	rx := replicas[0]
+	tc := timeoutCertOf(t, replicas, votes)
+	calls := countVerifications(rx.manager)
+	v := votes[1]
+	require.NoError(t, rx.manager.onTimeoutMsg(ctx, v))
+	require.Equal(t, round, rx.manager.pacemaker.GetCurrentRound())
+	require.ErrorIs(t, rx.manager.onTimeoutMsg(ctx, recodeTimeout(t, v)), quorumweight.ErrDuplicateSigner)
+	require.Equal(t, 1, *calls)
+	require.Equal(t, round, rx.manager.pacemaker.GetCurrentRound(), "an identical replay moves nothing")
+
+	withTC := recodeTimeout(t, v)
+	withTC.LastTC = tc
+	_ = rx.manager.onTimeoutMsg(ctx, withTC) // the registration may refuse the repeat signer; the certificate is processed before that
+	require.Equal(t, 2, *calls, "a miss: verified")
+	require.Equal(t, round+1, rx.manager.pacemaker.GetCurrentRound(), "its timeout certificate advanced the receiver")
+}
+
+// Consecutive timeouts: a lagging replica catches up through the last TC of a later round's timeout vote, with the verification done once
+// and an identical replay verified no more.
+func TestConsecutiveTimeoutCatchUpThroughTheLastTC(t *testing.T) {
+	replicas, votes, round := realQCTimeouts(t)
+	ctx := context.Background()
+	tc := timeoutCertOf(t, replicas, votes)
+	lagging := replicas[0]
+	require.Equal(t, round, lagging.manager.pacemaker.GetCurrentRound())
+	// another replica advanced with the certificate and times out the next round: its vote carries the last TC
+	other := replicas[len(replicas)-1]
+	require.Equal(t, round+1, other.manager.pacemaker.GetCurrentRound())
+	other.net.ResetSentMessages(network.ProtocolRootTimeout)
+	other.manager.onLocalTimeout(ctx)
+	next := other.net.SentMessages(network.ProtocolRootTimeout)[0].Message.(*abdrc.TimeoutMsg)
+	require.NotNil(t, next.LastTC)
+	require.Equal(t, tc.GetRound(), next.LastTC.GetRound())
+
+	calls := countVerifications(lagging.manager)
+	require.NoError(t, lagging.manager.onTimeoutMsg(ctx, next))
+	require.Equal(t, 1, *calls)
+	require.Equal(t, round+1, lagging.manager.pacemaker.GetCurrentRound(), "the lagging replica caught up through the last TC")
+	require.ErrorIs(t, lagging.manager.onTimeoutMsg(ctx, recodeTimeout(t, next)), quorumweight.ErrDuplicateSigner)
+	require.Equal(t, 1, *calls, "the replay hit: not verified again")
+}
+
+// A real context change through the handler: after the vote was counted, the epoch activates the domain-bound scheme. The same bytes now
+// have another signing configuration, so they miss and are verified, and the legacy form is refused with the scheme error.
+func TestSigningConfigChangeInvalidatesTheRememberedMessage(t *testing.T) {
+	replicas, votes, _ := realQCTimeouts(t)
+	ctx := context.Background()
+	rx := replicas[0]
+	calls := countVerifications(rx.manager)
+	v := votes[1]
+	require.NoError(t, rx.manager.onTimeoutMsg(ctx, v))
+	require.ErrorIs(t, rx.manager.onTimeoutMsg(ctx, recodeTimeout(t, v)), quorumweight.ErrDuplicateSigner)
+	require.Equal(t, 1, *calls)
+
+	require.NoError(t, rx.manager.trustBaseStore.ActivateSigning(v.Timeout.Epoch, domainBoundConfig()))
+	err := rx.manager.onTimeoutMsg(ctx, recodeTimeout(t, v))
+	require.ErrorIs(t, err, votesig.ErrScheme)
+	require.Equal(t, 2, *calls, "the changed context is a miss")
+}
+
+// A message whose epoch has no installed trust base or signing configuration gets no key at all: nothing is remembered or found for it.
+func TestNoKeyWithoutASigningConfiguration(t *testing.T) {
+	receiver, votes := timeoutVotesOf(t)
+	v := recodeTimeout(t, votes[0])
+	v.Timeout.Epoch = 99
+	_, _, ok := receiver.manager.timeoutCacheKey(v)
+	require.False(t, ok)
+	_, _, ok = receiver.manager.timeoutCacheKey(votes[0])
+	require.True(t, ok)
+}
