@@ -3,6 +3,7 @@ package shardnode
 import (
 	"bytes"
 	"context"
+	"errors"
 	"log/slog"
 	"strings"
 	"sync"
@@ -151,4 +152,83 @@ func TestThePendingWarningIsOperationalAndRateLimited(t *testing.T) {
 
 	var nilMetrics *Metrics
 	nilMetrics.recordPending(ctx, PendingDiagnostics{})
+}
+
+// The production EVM shard adopts certificates through journal admission (deliverConfigured), not through handleCertificationResponse; the figures must
+// move there too, and a configured retry of a failed apply (a duplicate, not adopted) must not count (rev3, #995).
+func TestThePendingFiguresMoveOnTheConfiguredAdoptionPath(t *testing.T) {
+	ctx := context.Background()
+	sink := &admissionSink{errors: []error{nil, errors.New("executor unavailable")}}
+	c, f := newAdmissionTestClient(t, sink, &admissionTestNet{})
+	factory := &admissionTestFactory{}
+	cancel, done := startAdmissionClient(t, c, factory, sink)
+	defer func() { cancel(); require.ErrorIs(t, <-done, context.Canceled) }()
+	factory.mu.Lock()
+	deliver := factory.callbacks.DeliverDurable
+	factory.mu.Unlock()
+	w := &pendingWorld{f: f, zero: make([]byte, 32), pdr: &types.PartitionDescriptionRecord{Version: 1, NetworkID: 5, PartitionID: authPartitionID, T2Timeout: 2500000000}}
+	deliverUC := func(uc *types.UnicityCertificate) error {
+		r := f.respond(uc)
+		return deliver(ctx, &r.UC, &r.Technical)
+	}
+
+	require.NoError(t, deliverUC(f.ucMine)) // the first certificate: progress
+	progress := c.lastProgress
+	require.False(t, progress.IsZero())
+	require.Zero(t, c.pendingDiagnostics(time.Now()).ConsecutiveRepeats)
+
+	repeat := w.uc(t, 4, 60)
+	require.Error(t, deliverUC(repeat), "the apply of the repeat fails: the delivery will be retried")
+	require.Equal(t, 1, c.pendingDiagnostics(time.Now()).ConsecutiveRepeats, "a repeat adopted through the configured path counts")
+	require.NoError(t, deliverUC(repeat), "the retry of the failed apply")
+	d := c.pendingDiagnostics(progress.Add(25 * time.Second))
+	require.Equal(t, 1, d.ConsecutiveRepeats, "the retry is a duplicate: not adopted, not counted")
+	require.Equal(t, 25*time.Second, d.NoProgressAge, "work remains and the clock runs from the last progress")
+
+	require.NoError(t, deliverUC(w.uc(t, 5, 70)))
+	d = c.pendingDiagnostics(time.Now().Add(time.Hour))
+	require.Zero(t, d.ConsecutiveRepeats)
+	require.Zero(t, d.NoProgressAge)
+}
+
+// Run seeds the progress clock, so a node that starts into a run of repeats reports a no-progress age (rev3's nit on #995).
+func TestRunSeedsTheProgressClock(t *testing.T) {
+	sink := &admissionSink{}
+	c, _ := newAdmissionTestClient(t, sink, &admissionTestNet{})
+	c.mu.Lock()
+	require.True(t, c.lastProgress.IsZero(), "premise: nothing has run yet")
+	c.mu.Unlock()
+	factory := &admissionTestFactory{}
+	cancel, done := startAdmissionClient(t, c, factory, sink)
+	defer func() { cancel(); require.ErrorIs(t, <-done, context.Canceled) }()
+	c.mu.Lock()
+	seeded := c.lastProgress
+	c.consecutiveRepeats = 1 // as if the first certificates seen were repeats
+	c.mu.Unlock()
+	require.False(t, seeded.IsZero())
+	require.Equal(t, 7*time.Second, c.pendingDiagnostics(seeded.Add(7*time.Second)).NoProgressAge)
+}
+
+func TestNegativeWarningOptionsAreDefinedNotAccidental(t *testing.T) {
+	ctx := context.Background()
+	// a negative RepeatWarnAfter: the repeat count alone never warns
+	w := newPendingWorld(t, BFTClientOptions{RepeatWarnAfter: -1, PendingWarnAfter: time.Hour, PendingWarnEvery: time.Millisecond})
+	rec := &recordedLog{}
+	w.c.log = slog.New(slog.NewTextHandler(rec, nil))
+	w.accept(t, w.uc(t, 5, 55))
+	for i := 0; i < 5; i++ {
+		w.accept(t, w.uc(t, 5, 60+uint64(i)))
+	}
+	w.c.reportPending(ctx)
+	require.Zero(t, rec.warnings())
+	// a negative PendingWarnEvery does not remove the rate limit: it means the default
+	w2 := newPendingWorld(t, BFTClientOptions{PendingWarnAfter: time.Millisecond, PendingWarnEvery: -1})
+	rec2 := &recordedLog{}
+	w2.c.log = slog.New(slog.NewTextHandler(rec2, nil))
+	require.NoError(t, w2.c.Submit(ctx, pendingRequest(w2.f)))
+	time.Sleep(5 * time.Millisecond)
+	for i := 0; i < 5; i++ {
+		w2.c.reportPending(ctx)
+	}
+	require.Equal(t, 1, rec2.warnings())
 }

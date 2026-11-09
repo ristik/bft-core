@@ -61,9 +61,10 @@ type BFTClientOptions struct {
 	// before a warning is logged (zero: DefaultPendingWarnAfter; negative disables the warning, not the gauges). An operational threshold, not a
 	// delivery deadline: it says nothing about T2 (#976).
 	PendingWarnAfter time.Duration
-	// RepeatWarnAfter is the number of consecutive repeat certificates that raises the same warning (zero: DefaultRepeatWarnAfter).
+	// RepeatWarnAfter is the number of consecutive repeat certificates that raises the same warning (zero: DefaultRepeatWarnAfter; negative: the
+	// repeat count alone never warns).
 	RepeatWarnAfter int
-	// PendingWarnEvery is the least time between two such warnings (zero: DefaultPendingWarnEvery).
+	// PendingWarnEvery is the least time between two such warnings (zero or negative: DefaultPendingWarnEvery).
 	PendingWarnEvery time.Duration
 	// StartupHandshakeInterval is how often the handshake is re-sent until the first certificate arrives (zero
 	// disables the early retry). A root that has not yet loaded the shard drops the handshake without an answer; waiting
@@ -197,8 +198,9 @@ type BFTClient struct {
 	// pending exactly while that certificate is the held one (a certificate that advances the round replaces the held one, and
 	// the next Submit replaces this).
 	outstanding *outstandingRequest
-	// consecutiveRepeats counts the repeat certificates accepted since the last non-repeat one, and lastProgress is when that last non-repeat
-	// certificate was accepted (#976). Both are in memory: a restart resets them, and the diagnostics built on them say so.
+	// consecutiveRepeats counts the repeat certificates adopted since the last non-repeat one, and lastProgress is when that last non-repeat
+	// certificate was adopted, seeded at Run so a node that starts into a run of repeats still has an age (#976). Both are updated by
+	// noteAdoptedLocked on BOTH adoption paths and are in memory: a restart resets them, and the diagnostics built on them say so.
 	consecutiveRepeats int
 	lastProgress       time.Time
 	lastPendingWarn    time.Time
@@ -398,6 +400,9 @@ func (c *BFTClient) Run(ctx context.Context) error {
 	if c.running {
 		c.mu.Unlock()
 		return ErrClientRunning
+	}
+	if c.lastProgress.IsZero() {
+		c.lastProgress = time.Now() // a node that starts into a run of repeats still has a no-progress age
 	}
 	hasDriver := c.driver != nil
 	factory, gate := c.admissionFactory, c.admissionGate
@@ -1123,6 +1128,7 @@ func (c *BFTClient) deliverConfigured(ctx context.Context, uc *types.UnicityCert
 	}
 	if class != UCDuplicate {
 		c.luc = cursor
+		c.noteAdoptedLocked(class) // a retry of a failed apply is a duplicate: it adopts nothing and counts nothing
 	}
 	sink := c.admissionSink
 	metrics, health := c.metrics, c.health
@@ -1325,11 +1331,7 @@ func (c *BFTClient) handleCertificationResponse(ctx context.Context, cr *certifi
 		return nil
 	}
 	c.luc = &cr.UC
-	if class == UCRepeat {
-		c.consecutiveRepeats++
-	} else {
-		c.consecutiveRepeats, c.lastProgress = 0, time.Now()
-	}
+	c.noteAdoptedLocked(class)
 	metrics := c.metrics
 	health := c.health
 	c.mu.Unlock()
@@ -1425,6 +1427,17 @@ func (c *BFTClient) sendRequest(ctx context.Context, req *certification.BlockCer
 	return c.net.Send(ctx, req, rootIDs...)
 }
 
+// noteAdoptedLocked counts a certificate the client has just ADOPTED as its held one, on either adoption path (the legacy one in
+// handleCertificationResponse and the configured one in deliverConfigured): a repeat extends the run of repeats, anything else is progress. A
+// duplicate is not adopted and never reaches here. c.mu must be held.
+func (c *BFTClient) noteAdoptedLocked(class UCClass) {
+	if class == UCRepeat {
+		c.consecutiveRepeats++
+		return
+	}
+	c.consecutiveRepeats, c.lastProgress = 0, time.Now()
+}
+
 // PendingDiagnostics is what the shard knows about work that has not been certified yet (#976). It is built from this process's memory only: a
 // restart resets every figure, and nothing here is evidence about the roots.
 type PendingDiagnostics struct {
@@ -1458,16 +1471,22 @@ func (c *BFTClient) pendingDiagnostics(now time.Time) PendingDiagnostics {
 func (c *BFTClient) reportPending(ctx context.Context) {
 	now := time.Now()
 	d := c.pendingDiagnostics(now)
-	c.metrics.recordPending(ctx, d)
+	c.mu.Lock()
+	metrics := c.metrics
+	c.mu.Unlock()
+	metrics.recordPending(ctx, d)
 	warnAfter, repeats, every := c.opts.PendingWarnAfter, c.opts.RepeatWarnAfter, c.opts.PendingWarnEvery
 	if warnAfter == 0 {
 		warnAfter = DefaultPendingWarnAfter
 	}
-	if repeats == 0 {
+	switch {
+	case repeats == 0:
 		repeats = DefaultRepeatWarnAfter
+	case repeats < 0:
+		repeats = int(^uint(0) >> 1) // negative: the repeat count alone never warns
 	}
-	if every == 0 {
-		every = DefaultPendingWarnEvery
+	if every <= 0 {
+		every = DefaultPendingWarnEvery // zero or negative: the default; the rate limit cannot be removed
 	}
 	if warnAfter < 0 || c.log == nil {
 		return

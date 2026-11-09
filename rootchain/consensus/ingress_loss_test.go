@@ -61,6 +61,9 @@ func t2Rounds(m *ConsensusManager) uint64 {
 // certifies a repeat of the shard's last input record no earlier than its eligibility and within the premise budget after it; a fresh request
 // then certifies as a non-repeat.
 func TestIngressLossIsRecoveredByTheRootsT2Repeat(t *testing.T) {
+	if testing.Short() {
+		t.Skip("about 30-50 s: a live four-manager cluster")
+	}
 	c := newPhaseLockLive(t, 2*time.Second)
 	c.start(c.all()...)
 	c.warm(8, c.all()...)
@@ -107,6 +110,9 @@ func TestIngressLossIsRecoveredByTheRootsT2Repeat(t *testing.T) {
 // The loss boundary is asserted before the others return: no block of H's branch carries a change for the shard, so the request is in no
 // persisted proposal that could still commit (an uncommitted block is persisted too, so "not committed" would not establish it).
 func TestIngressLossAfterTheSoleHolderRestarts(t *testing.T) {
+	if testing.Short() {
+		t.Skip("about 30-50 s: a live four-manager cluster")
+	}
 	for _, restart := range []bool{false, true} {
 		name := "holder kept (control)"
 		if restart {
