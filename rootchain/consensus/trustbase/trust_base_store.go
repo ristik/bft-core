@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"sort"
 	"sync"
+	"sync/atomic"
 
 	"github.com/unicitynetwork/bft-go-base/types"
 	"github.com/unicitynetwork/bft-go-base/util"
@@ -33,6 +34,8 @@ type TrustBaseStore struct {
 	signing signingRegistry
 	// leaderPolicy is the history of the epochs that activated a leader selection policy (leader_policy.go).
 	leaderPolicy leaderPolicyRegistry
+	// certObserver is the optional measurement hook of cert_observer.go
+	certObserver atomic.Pointer[certObserverBox]
 }
 
 // GenesisPin identifies the local genesis quorum certificate by the hash of its vote info and the signed bytes of its commit info. It is

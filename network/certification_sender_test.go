@@ -46,7 +46,8 @@ func registerReceiver(t *testing.T, sender *Peer, p *Peer, kind recvKind) (*Peer
 	sender.Network().Peerstore().AddAddrs(p.ID(), p.MultiAddresses(), peerstore.PermanentAddrTTL)
 	var descs []ReceiveProtocolDescription
 	if kind != recvV2Only {
-		descs = append(descs, ReceiveProtocolDescription{ProtocolID: ProtocolUnicityCertificates, TypeFn: func() any { return &certification.CertificationResponse{} }})
+		descs = append(descs, ReceiveProtocolDescription{ProtocolID: ProtocolUnicityCertificates, MaxFrameSize: certification.MaxCertificationResponseV1Frame,
+			TypeFn: func() any { return &certification.CertificationResponse{} }})
 	}
 	if kind != recvLegacy {
 		descs = append(descs, ReceiveProtocolDescription{ProtocolID: ProtocolUnicityCertificatesV2, MaxFrameSize: certification.MaxCertificationResponseV2Frame,
@@ -139,16 +140,15 @@ func Test_SendCertificationResponse_OversizeViewIsOmitted(t *testing.T) {
 	require.NoError(t, v2.Legacy().IsValid())
 }
 
-func Test_SendCertificationResponse_FrameTooLargeUsesLegacy(t *testing.T) {
+// A response too large for the V2 envelope falls back to the legacy frame, which has the same limit (#956): one that fits neither is refused on the send side
+// and nothing is written, instead of a frame every shard would drop.
+func Test_SendCertificationResponse_FrameTooLargeInEveryFormatIsRefused(t *testing.T) {
 	senderPeer, senderNw := newCertSender(t)
 	p, nw := newCertReceiver(t, senderPeer, recvBoth)
 	cr := testCertResponse(t, nil)
 	cr.Technical.Leader = string(bytes.Repeat([]byte{'a'}, certification.MaxCertificationResponseV2Frame))
-	require.NoError(t, senderNw.SendCertificationResponse(context.Background(), cr, p.ID()))
-	// selected before sending: legacy path, no v2 attempt
-	legacy, ok := recv(t, nw).(*certification.CertificationResponse)
-	require.True(t, ok)
-	require.Equal(t, cr.Technical.Leader, legacy.Technical.Leader)
+	err := senderNw.SendCertificationResponse(context.Background(), cr, p.ID())
+	require.ErrorIs(t, err, ErrLegacyFrameTooLarge)
 	requireNoMore(t, nw)
 }
 

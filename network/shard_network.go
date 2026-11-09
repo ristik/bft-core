@@ -66,13 +66,14 @@ func NewShardNetwork(peer *Peer, obs Observability, opts ShardNetworkOptions) (*
 	return n, nil
 }
 
-// shardReceiveProtocols are the certification response protocols a shard receives. V2 and V3 frames are bounded by their declared payload limits, checked
-// against the announced length before anything is allocated; the legacy V1 response has no defined limit.
+// shardReceiveProtocols are the certification response protocols a shard receives. V1, V2 and V3 frames are bounded by their declared payload limits, checked
+// against the announced length before anything is allocated (V1 is derived from V2's, see MaxCertificationResponseV1Frame).
 func shardReceiveProtocols() []ReceiveProtocolDescription {
 	return []ReceiveProtocolDescription{
 		{
-			ProtocolID: ProtocolUnicityCertificates,
-			TypeFn:     func() any { return &certification.CertificationResponse{} },
+			ProtocolID:   ProtocolUnicityCertificates,
+			TypeFn:       func() any { return &certification.CertificationResponse{} },
+			MaxFrameSize: certification.MaxCertificationResponseV1Frame,
 		},
 		{
 			ProtocolID:   ProtocolUnicityCertificatesV2,

@@ -1,0 +1,130 @@
+import { readFileSync } from 'node:fs';
+
+import { TrustBaseHistory } from '../../../../../src/api/bft/trustbase/TrustBaseHistory.js';
+import { TrustBaseUpdateError } from '../../../../../src/api/bft/trustbase/TrustBaseError.js';
+import { TrustBaseUpdater } from '../../../../../src/api/bft/trustbase/TrustBaseUpdater.js';
+import { AggregatorClient } from '../../../../../src/api/AggregatorClient.js';
+import { IRequestOptions } from '../../../../../src/api/IRequestOptions.js';
+import { ITrustBaseRequest, ITrustBaseSource } from '../../../../../src/api/ITrustBaseSource.js';
+import { NetworkId } from '../../../../../src/api/NetworkId.js';
+import { HexConverter } from '../../../../../src/util/HexConverter.js';
+
+// Scratch interop: the clean JS stack's TrustBaseUpdater against running aggregator trust-base servers (grown histories). AGG_MANIFEST names the
+// manifest the Go harness writes.
+interface IServer { url: string; pin: string; epochs: number; bundleEpochs: number; network: number }
+const manifestPath = process.env.AGG_MANIFEST;
+const maybe = manifestPath ? describe : describe.skip;
+const servers = (): Record<string, IServer> => JSON.parse(readFileSync(manifestPath!, 'utf8')) as Record<string, IServer>;
+const empty = (s: IServer): TrustBaseHistory => TrustBaseHistory.create(HexConverter.decode(s.pin.replace(/^0x/, '')));
+const client = (s: IServer): AggregatorClient => new AggregatorClient(s.url);
+const net = (s: IServer): NetworkId => NetworkId.fromId(s.network);
+
+/** Records every request a source is asked and can cut a source off after some calls. */
+class Spy implements ITrustBaseSource {
+  public readonly requests: ITrustBaseRequest[] = [];
+  public constructor(private readonly inner: ITrustBaseSource, private readonly failAfter = Number.POSITIVE_INFINITY) {}
+  public getTrustBasePage(request: ITrustBaseRequest, options?: IRequestOptions): Promise<Uint8Array> {
+    this.requests.push(request);
+    if (this.requests.length > this.failAfter) {
+      return Promise.reject(new Error('source went away'));
+    }
+    return this.inner.getTrustBasePage(request, options);
+  }
+}
+
+maybe('the clean JS stack (TrustBaseUpdater) against the aggregator trust-base route', () => {
+  it('builds the history from an empty one with only the pin, over several pages that follow a frozen snapshot', async () => {
+    const a = servers().a; // a genesis-only bundle, grown to 12 by Append
+    expect(a.bundleEpochs).toBe(1);
+    const history = empty(a);
+    const spy = new Spy(client(a));
+    const added = await TrustBaseUpdater.update(history, [spy], { network: net(a) });
+    expect(added).toBe(a.epochs);
+    expect(history.tip?.epoch).toBe(BigInt(a.epochs));
+
+    const paged = empty(a);
+    const spy2 = new Spy(client(a));
+    // a small page budget forces paging: the updater takes its page size from the limits
+    await TrustBaseUpdater.update(paged, [spy2], { network: net(a), limits: { maxBytes: 1 << 20, maxEntries: 4 } });
+    expect(paged.tip?.epoch).toBe(BigInt(a.epochs));
+    expect(spy2.requests.length).toBeGreaterThan(2);
+    expect(spy2.requests[0].snapshot).toBeNull();
+    for (const r of spy2.requests.slice(1)) {
+      expect(r.snapshot).not.toBeNull();
+      expect(r.snapshot?.end).toBe(BigInt(a.epochs));
+    }
+    expect(spy2.requests.map((r) => r.fromEpoch)).toEqual([1n, 5n, 9n]);
+  });
+
+  it('a 3-entry bundle grown to the tip, then up to date', async () => {
+    const a3 = servers().a3;
+    const history = empty(a3);
+    expect(await TrustBaseUpdater.update(history, [client(a3)], { network: net(a3) })).toBe(a3.epochs);
+    expect(await TrustBaseUpdater.update(history, [client(a3)])).toBe(0); // nothing newer is a result, not an error
+  });
+
+  it('pages by bytes with a 256-member committee (the clean stack admits it)', async () => {
+    const big = servers().big;
+    const history = empty(big);
+    const spy = new Spy(client(big));
+    await TrustBaseUpdater.update(history, [spy], { network: net(big) });
+    expect(history.tip?.epoch).toBe(BigInt(big.epochs));
+    expect(spy.requests.length).toBeGreaterThan(1); // 52 large entries do not fit one 1 MiB page
+  }, 300000);
+
+  it('an older replica after a full first page: the snapshot is not on the older one; the full source finishes', async () => {
+    const a = servers().a;
+    const older = servers().older;
+    const history = empty(a);
+    // source 0 serves one page of 3 and goes away; source 1 only has epochs up to 6; the call ends by throwing with the verified prefix kept
+    const first = new Spy(client(a), 1);
+    const lagging = new Spy(client(older));
+    await expect(
+      TrustBaseUpdater.update(history, [first, lagging], { network: net(a), limits: { maxBytes: 1 << 20, maxEntries: 3 }, rounds: 1 }),
+    ).rejects.toBeInstanceOf(TrustBaseUpdateError);
+    expect(history.tip?.epoch).toBe(3n);
+    expect(lagging.requests[0].snapshot?.end).toBe(BigInt(a.epochs)); // asked with the frozen end of the full source
+    // a later call with the full source completes from the held tip
+    await TrustBaseUpdater.update(history, [client(a)], {});
+    expect(history.tip?.epoch).toBe(BigInt(a.epochs));
+  });
+
+  it('a mismatched snapshot is dropped once and the other history is then refused entry by entry', async () => {
+    const a = servers().a;
+    const fork = servers().fork;
+    const history = empty(a);
+    const first = new Spy(client(a), 1);
+    const other = new Spy(client(fork));
+    await expect(
+      TrustBaseUpdater.update(history, [first, other], { network: net(a), limits: { maxBytes: 1 << 20, maxEntries: 3 }, rounds: 1 }),
+    ).rejects.toBeInstanceOf(TrustBaseUpdateError);
+    expect(history.tip?.epoch).toBe(3n); // what was verified stays
+    expect(other.requests[0].snapshot).not.toBeNull();
+    expect(other.requests.length).toBeGreaterThan(1);
+    expect(other.requests[1].snapshot).toBeNull(); // the mismatch dropped the snapshot and asked again without it
+  });
+
+  it('a server of another network is refused', async () => {
+    const a = servers().a;
+    const history = empty(a);
+    await expect(TrustBaseUpdater.update(history, [client(servers().othernet)], { network: net(a), rounds: 1 })).rejects.toBeInstanceOf(
+      TrustBaseUpdateError,
+    );
+    expect(history.tip).toBeNull();
+  });
+
+  it('a server behind the aggregator active epoch serves its verified prefix', async () => {
+    const b = servers().behind;
+    const history = empty(b);
+    const added = await TrustBaseUpdater.update(history, [client(b)], { network: net(b) });
+    expect(added).toBe(b.epochs);
+    expect(history.tip?.epoch).toBe(BigInt(b.epochs));
+  });
+
+  it('a server that contradicts its own authority answers Unavailable: a failure, not a result', async () => {
+    const c = servers().conflict;
+    const history = empty(c);
+    await expect(TrustBaseUpdater.update(history, [client(c)], { network: net(c), rounds: 1 })).rejects.toBeInstanceOf(TrustBaseUpdateError);
+    expect(history.tip).toBeNull();
+  });
+});

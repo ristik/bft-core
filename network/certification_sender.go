@@ -15,6 +15,9 @@ import (
 	"github.com/unicitynetwork/bft-go-base/types"
 )
 
+// ErrLegacyFrameTooLarge: the legacy V1 payload would exceed certification.MaxCertificationResponseV1Frame, which every shard refuses on receive.
+var ErrLegacyFrameTooLarge = errors.New("legacy certification response above the frame limit")
+
 // certificationFrames lazily serializes and caches the framed v1 and v2 payloads of
 // a single dispatch so they are shared between all recipients.
 type certificationFrames struct {
@@ -46,6 +49,11 @@ func (f *certificationFrames) legacy() ([]byte, error) {
 		data, err := types.Cbor.Marshal(f.cr)
 		if err != nil {
 			f.v1Err = fmt.Errorf("marshaling %T as CBOR: %w", f.cr, err)
+			return
+		}
+		if len(data) > certification.MaxCertificationResponseV1Frame {
+			// the send side of the frame limit the shards enforce on receive (#956): never written to a stream
+			f.v1Err = fmt.Errorf("%w: payload of %d bytes exceeds the frame limit %d", ErrLegacyFrameTooLarge, len(data), certification.MaxCertificationResponseV1Frame)
 			return
 		}
 		f.v1 = frameMsg(data)
