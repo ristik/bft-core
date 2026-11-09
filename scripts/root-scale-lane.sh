@@ -213,7 +213,16 @@ live_after=$(snapshot | cut -d, -f2)
 
 echo "=== restart one root: progress must resume (control validity) ==="
 event "resume: restarting root$spare"; start_root "$spare"
-if wait_rounds 5 "$resumewait"; then pass "quorum restored ($quorum live): certification resumed (round $(shard_round))"; else fail "no resume after restoring quorum"; fi
+# resume latency: from the moment the restored root was started to the first fresh certification (shard round above the stalled one) and to 5 rounds
+rs0=$(shard_round); rt0=$(date +%s); first_s=""; five_s=""; rw=0
+while [ "$rw" -lt "$resumewait" ]; do
+  cur=$(shard_round)
+  [ -n "$first_s" ] || { [ "$cur" -le "$rs0" ] || first_s=$(( $(date +%s) - rt0 )); }
+  [ "$cur" -lt $((rs0 + 5)) ] || { five_s=$(( $(date +%s) - rt0 )); break; }
+  sleep 1; rw=$((rw + 1))
+done
+echo "resume latency: first fresh certification after ${first_s:-none} s, 5 rounds after ${five_s:-none} s (from starting root$spare; stalled at round $rs0; wait limit ${resumewait} s)" | tee "$evidence/resume-latency.txt"
+if [ -n "$five_s" ]; then pass "quorum restored ($quorum live): certification resumed (round $(shard_round))"; else fail "no resume after restoring quorum"; fi
 
 echo "=== evidence ==="
 event "end"
