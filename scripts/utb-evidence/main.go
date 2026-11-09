@@ -97,12 +97,12 @@ func fetchRange(base string, from uint64) ([][]byte, error) {
 		if resp.StatusCode != http.StatusOK {
 			return nil, fmt.Errorf("GET %s: HTTP %d: %s", base, resp.StatusCode, strings.TrimSpace(string(body)))
 		}
-		r, _, err := gettrustbase.DecodeResponse(body, gettrustbase.PageLimits)
+		r, _, err := types.DecodeTrustBaseResponse(body, types.TrustBasePageLimits)
 		if err != nil {
 			return nil, fmt.Errorf("page %d: %w", page, err)
 		}
-		if r.Status != gettrustbase.StatusOK {
-			if r.Status == gettrustbase.StatusNotYetAvailable && len(raw) == 0 {
+		if r.Status != types.TrustBaseStatusOK {
+			if r.Status == types.TrustBaseStatusNotYetAvailable && len(raw) == 0 {
 				return nil, nil // the server holds nothing at or after `from`
 			}
 			return nil, fmt.Errorf("page %d: status %s", page, r.Status)
@@ -133,24 +133,24 @@ func cmdFetch(args []string) error {
 	if len(raw) == 0 {
 		return errors.New("the endpoint returned no entries")
 	}
-	bundle, err := gettrustbase.EncodeBundle(raw)
+	bundle, err := types.EncodeTrustBaseBundle(raw)
 	if err != nil {
 		return err
 	}
 	if err := os.WriteFile(*out, bundle, 0o644); err != nil {
 		return err
 	}
-	b, _ := gettrustbase.DecodeBundle(bundle, gettrustbase.BundleLimits{MaxBytes: len(bundle), MaxEntries: len(raw)})
+	b, _ := types.DecodeTrustBaseBundle(bundle, types.TrustBaseLimits{MaxBytes: len(bundle), MaxEntries: len(raw)})
 	fmt.Printf("fetched %d entries: epochs %d..%d (%d bytes)\n", len(raw), b.Entries[0].Epoch, b.Tip().Epoch, len(bundle))
 	return nil
 }
 
-func readBundle(path string) (*gettrustbase.Bundle, error) {
+func readBundle(path string) (*types.TrustBaseBundle, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}
-	return gettrustbase.DecodeBundle(data, gettrustbase.BundleLimits{MaxBytes: len(data), MaxEntries: len(data)/16 + 1})
+	return types.DecodeTrustBaseBundle(data, types.TrustBaseLimits{MaxBytes: len(data), MaxEntries: len(data)/16 + 1})
 }
 
 func cmdVerify(args []string) error {
@@ -166,7 +166,7 @@ func cmdVerify(args []string) error {
 	if err != nil {
 		return err
 	}
-	if err := gettrustbase.VerifyBundle(b, pin); err != nil {
+	if err := types.VerifyTrustBaseBundle(b, pin); err != nil {
 		return err
 	}
 	gid, _ := b.Entries[0].EntryID()

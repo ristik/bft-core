@@ -100,7 +100,7 @@ func TestFetchRefusesATamperedHistory(t *testing.T) {
 	bad := bytes.Clone(chain.Entries[0])
 	bad[len(bad)-9] ^= 1 // inside a signature
 	raw = append(raw, g, bad)
-	bundle, err := gettrustbase.EncodeBundle(raw)
+	bundle, err := types.EncodeTrustBaseBundle(raw)
 	if err != nil {
 		t.Skip("the codec already refuses this tamper:", err)
 	}
@@ -139,7 +139,7 @@ func TestUCVerifyChecksEachCertificateUnderItsOwnEpoch(t *testing.T) {
 	g, _ := chain.Genesis.MarshalCBOR()
 	raw := [][]byte{g}
 	raw = append(raw, chain.Entries...)
-	bundle, err := gettrustbase.EncodeBundle(raw)
+	bundle, err := types.EncodeTrustBaseBundle(raw)
 	require.NoError(t, err)
 	bundleFile := filepath.Join(dir, "b.cbor")
 	require.NoError(t, os.WriteFile(bundleFile, bundle, 0o644))
@@ -199,7 +199,7 @@ func TestUCVerifyTwoShardsOfOnePartition(t *testing.T) {
 	require.NoError(t, err)
 	gen, err := types.Cbor.Marshal(tb)
 	require.NoError(t, err)
-	bundle, err := gettrustbase.EncodeBundle([][]byte{gen})
+	bundle, err := types.EncodeTrustBaseBundle([][]byte{gen})
 	require.NoError(t, err)
 	bundleFile := filepath.Join(dir, "b.cbor")
 	require.NoError(t, os.WriteFile(bundleFile, bundle, 0o644))

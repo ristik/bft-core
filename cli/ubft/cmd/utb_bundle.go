@@ -111,7 +111,7 @@ func trustBaseUTBVerifyCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if err := gettrustbase.VerifyBundle(bundle, pin); err != nil {
+			if err := types.VerifyTrustBaseBundle(bundle, pin); err != nil {
 				return err
 			}
 			tipID, err := bundle.Tip().EntryID()
@@ -128,7 +128,7 @@ func trustBaseUTBVerifyCmd() *cobra.Command {
 	return cmd
 }
 
-func readBundle(path string) (*gettrustbase.Bundle, error) {
+func readBundle(path string) (*types.TrustBaseBundle, error) {
 	info, err := os.Stat(path)
 	if err != nil {
 		return nil, err
@@ -141,5 +141,5 @@ func readBundle(path string) (*gettrustbase.Bundle, error) {
 		return nil, err
 	}
 	// entries are bounded by the file itself: each is at least a few bytes, so the file size bounds the count
-	return gettrustbase.DecodeBundle(data, gettrustbase.BundleLimits{MaxBytes: len(data), MaxEntries: len(data)/16 + 1})
+	return types.DecodeTrustBaseBundle(data, types.TrustBaseLimits{MaxBytes: len(data), MaxEntries: len(data)/16 + 1})
 }

@@ -15,8 +15,6 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/unicitynetwork/bft-go-base/types"
 	"github.com/unicitynetwork/bft-go-base/types/hex"
-
-	"github.com/unicitynetwork/bft-core/gettrustbase"
 )
 
 var errNetwork = errors.New("network is disabled in this test")
@@ -331,8 +329,8 @@ func TestTrustInputInstallation(t *testing.T) {
 	}
 	fid, err := forged.EntryID()
 	require.NoError(t, err)
-	b, err := types.Cbor.MarshalTaggedValue(gettrustbase.ResponseTag, &gettrustbase.Response{Version: gettrustbase.Version, Network: 3,
-		Status: gettrustbase.StatusOK, FromEpoch: 1, EffectiveEnd: 2, EndEntryID: fid[:], Entries: []cbor.RawMessage{raw(e.TB), raw(forged)}})
+	b, err := types.Cbor.MarshalTaggedValue(types.TrustBaseResponseTag, &types.TrustBaseResponse{Version: types.TrustBaseResponseVersion, Network: 3,
+		Status: types.TrustBaseStatusOK, FromEpoch: 1, EffectiveEnd: 2, EndEntryID: fid[:], Entries: []cbor.RawMessage{raw(e.TB), raw(forged)}})
 	require.NoError(t, err)
 	_, err = LoadTrustInput(b, id)
 	require.ErrorIs(t, err, ErrTrustBase)
