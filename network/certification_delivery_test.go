@@ -320,6 +320,10 @@ func Test_SendCertificationResponse_DeliveredWithLatencyWithinTimeout(t *testing
 
 	for _, kind := range []recvKind{recvLegacy, recvBoth} {
 		p, nw := newCertReceiver(t, senderPeer, kind)
+		// The receiver's stream deadline (1 s by default) runs from the start of its handler until the sender closes the stream, so it also counts the
+		// sender's injected delays while it reads the handshake reply. That is a property of the product, not of what this test asserts (the exchange
+		// itself): on a loaded runner it reset the stream under the sender (#950). The deadline is out of the way here; see the control below.
+		nw.streamReadTimeout = recvBound
 		// connection setup and identify are not part of the send
 		require.NoError(t, senderPeer.host.Connect(context.Background(), peer.AddrInfo{ID: p.ID()}))
 		cm.reset()
@@ -336,6 +340,29 @@ func Test_SendCertificationResponse_DeliveredWithLatencyWithinTimeout(t *testing
 		require.True(t, st[0].firstWriteHeader)
 		require.Zero(t, st[0].repliesBeforeLastWrite, "no negotiation exchange before the payload")
 	}
+}
+
+// Control for the test above (#950): the receiver's stream deadline is the whole life of the stream up to the sender's Close, not per frame. With the
+// injected latency above the deadline the certificate is DELIVERED (the handler had it before the deadline) and the sender is told "stream reset" while it
+// waits for the handshake reply: the signature of the CI failure. This pins the mechanism, so the test above cannot go back to depending on it unseen.
+func Test_SendCertificationResponse_ReceiverStreamDeadlineSpansTheSendersClose(t *testing.T) {
+	const latency, deadline = 300 * time.Millisecond, 100 * time.Millisecond
+	cm := &countingMuxer{delay: latency}
+	conf, err := NewPeerConfiguration(randomTestAddressStr, nil, generateKeyPair(t), nil, nil)
+	require.NoError(t, err)
+	senderPeer, err := newPeer(context.Background(), conf, logger.New(t), nil, libp2p.Muxer("/yamux/1.0.0", cm))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = senderPeer.Close() })
+	senderNw, err := NewLibP2PRootChainNetwork(senderPeer, 10, 30*time.Second, observability.Default(t))
+	require.NoError(t, err)
+	p, nw := newCertReceiver(t, senderPeer, recvBoth)
+	nw.streamReadTimeout = deadline
+	require.NoError(t, senderPeer.host.Connect(context.Background(), peer.AddrInfo{ID: p.ID()}))
+	err = senderNw.sendCertificationFrame(context.Background(), p.ID(), []string{ProtocolUnicityCertificatesV2, ProtocolUnicityCertificates},
+		ProtocolUnicityCertificates, &certificationFrames{cr: testCertResponse(t, nil)})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "stream reset")
+	recv(t, nw) // delivered all the same
 }
 
 // A receiver which is connected and identified but no longer services new streams: the send is

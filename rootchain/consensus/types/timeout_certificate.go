@@ -3,6 +3,7 @@ package types
 import (
 	"bytes"
 	"fmt"
+	"time"
 
 	base "github.com/unicitynetwork/bft-go-base/types"
 	"github.com/unicitynetwork/bft-go-base/types/hex"
@@ -319,13 +320,27 @@ func (x *TimeoutCert) IsValid() error {
 }
 
 func (x *TimeoutCert) Verify(tbs *trustbase.TrustBaseStore) error {
+	start := time.Now()
+	var nested time.Duration
+	err := x.verify(tbs, &nested)
+	if err == nil {
+		if o := tbs.CertObserver(); o != nil {
+			o.ObserveCert("TC", x, x.Timeout.Epoch, x.GetRound(), x.signingScheme(), len(x.Signatures), time.Since(start)-nested)
+		}
+	}
+	return err
+}
+
+func (x *TimeoutCert) verify(tbs *trustbase.TrustBaseStore, nested *time.Duration) error {
 	if err := x.IsValid(); err != nil {
 		return fmt.Errorf("invalid certificate: %w", err)
 	}
 
+	nestedStart := time.Now()
 	if err := x.Timeout.Verify(tbs); err != nil {
 		return fmt.Errorf("invalid timeout data: %w", err)
 	}
+	*nested = time.Since(nestedStart)
 
 	tb, err := tbs.GetByEpoch(x.Timeout.Epoch)
 	if err != nil {
