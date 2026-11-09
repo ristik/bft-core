@@ -128,6 +128,7 @@ func TestCertShadowSeesOnlySuccessfulVerificationsAndChangesNothing(t *testing.T
 	replicas, votes, round := shadowRealQCTimeouts(t)
 	ctx := context.Background()
 	rx := replicas[0]
+	rx.manager.trustBaseStore.SetCertCacheCapacity(0) // the repeats are only visible to the shadow with the cache off (see the both-on test)
 	shadow := newCertShadow()
 	rx.manager.shadow = shadow
 	rx.manager.trustBaseStore.SetCertObserver(shadow)

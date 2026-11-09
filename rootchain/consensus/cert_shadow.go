@@ -22,6 +22,12 @@ const (
 	certShadowInterval = 30 * time.Second
 )
 
+// shadowCountsNote is printed on every shadow line: the shadow is a CertObserver, which the verifier calls once per REAL verification that succeeded. A
+// verification the verified-certificate cache answered (a hit) is not a verification and is not observed, so with the cache on the repeat counters
+// drop towards zero and the cache's own counters (the "consensus cert cache" line) hold the repeats. For the repeat structure of the traffic itself,
+// run with the cache off (UBFT_CERT_CACHE=0).
+const shadowCountsNote = "real verifications only (cache hits are not observed)"
+
 // certShadow counts, for every successful QC/TC verification, whether the same complete certificate (same encoding, same epoch and scheme)
 // was verified before — within the same message, in the same round by another message, or in an earlier round still in the LRU — and the
 // verification time such a repeat would have saved. It is a trustbase.CertObserver installed on the manager's trust base store.
@@ -148,12 +154,12 @@ func (c *certShadow) report(log *slog.Logger, now time.Time) {
 	}
 	wall := now.Sub(c.start)
 	for k, s := range c.stats {
-		log.Info("consensus shadow cert", "msg", k.msg, "kind", k.kind, "scheme", k.scheme, "calls", s.calls, "signatures", s.signatures,
+		log.Info("consensus shadow cert", "counts", shadowCountsNote, "msg", k.msg, "kind", k.kind, "scheme", k.scheme, "calls", s.calls, "signatures", s.signatures,
 			"intraMsgHits", s.intraMsg, "sameRoundHits", s.sameRound, "crossRoundHits", s.crossRound,
 			"verifyMs", s.verify.Milliseconds(), "wouldSaveIntraMs", s.saveIntra.Milliseconds(),
 			"wouldSaveSameRoundMs", s.saveSameRound.Milliseconds(), "wouldSaveCrossRoundMs", s.saveCross.Milliseconds(), "intervalMs", wall.Milliseconds())
 	}
-	log.Info("consensus shadow cert overhead", "overheadUs", c.overhead.Microseconds(), "entries", c.lru.Len(), "capacity", certShadowCapacity,
+	log.Info("consensus shadow cert overhead", "counts", shadowCountsNote, "overheadUs", c.overhead.Microseconds(), "entries", c.lru.Len(), "capacity", certShadowCapacity,
 		"evicted", c.evicted, "intervalMs", wall.Milliseconds())
 	c.stats, c.overhead, c.evicted, c.start = map[shadowKey]*shadowStat{}, 0, 0, now
 }

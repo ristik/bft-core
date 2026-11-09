@@ -34,6 +34,9 @@ type TrustBaseStore struct {
 	signing signingRegistry
 	// leaderPolicy is the history of the epochs that activated a leader selection policy (leader_policy.go).
 	leaderPolicy leaderPolicyRegistry
+	// verifyGen and certCacheP: the verified-certificate cache and the generation that invalidates it (cert_cache.go)
+	verifyGen  atomic.Uint64
+	certCacheP atomic.Pointer[certCache]
 	// certObserver is the optional measurement hook of cert_observer.go
 	certObserver atomic.Pointer[certObserverBox]
 }
@@ -50,6 +53,7 @@ func (s *TrustBaseStore) SetGenesisPin(p *GenesisPin) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.genesis = p
+	s.bumpVerifyGeneration()
 }
 
 // GenesisPin is the pin recorded by SetGenesisPin, or nil: with none, no round-1 QC verifies.
@@ -200,6 +204,7 @@ func (s *TrustBaseStore) Store(trustBase types.RootTrustBase) error {
 	if err := s.db.Write(toDBKey(version, epoch), trustBase); err != nil {
 		return fmt.Errorf("failed to store trust base for epoch %d: %w", epoch, err)
 	}
+	s.bumpVerifyGeneration()
 	s.log.Info(fmt.Sprintf("Added trust base epoch %d, epoch start %d", epoch, trustBase.GetEpochStart()))
 	return nil
 }

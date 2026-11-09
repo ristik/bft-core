@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"maps"
 	"math"
+	"os"
 	"slices"
 	"sync"
 	"sync/atomic"
@@ -85,11 +86,12 @@ type (
 
 	ConsensusManager struct {
 		// timeoutVerify verifies a timeout message; nil is TimeoutMsg.Verify against the trust base store (a test seam counts the calls)
-		timeoutVerify func(*abdrc.TimeoutMsg) error
-		shadow        *certShadow    // shadow certificate counters (UBFT_SHADOW_CERT=1), see cert_shadow.go; nil otherwise
-		backoff       *backoffShadow // shadow model of a timeout rebroadcast backoff (UBFT_SHADOW_BACKOFF=1), see backoff_shadow.go; nil otherwise
-		msgSeq        uint64         // ordinal of the root network message being handled
-		profile       loopProfile    // scaling-run measurement aid, see loop_profile.go
+		timeoutVerify  func(*abdrc.TimeoutMsg) error
+		shadow         *certShadow    // shadow certificate counters (UBFT_SHADOW_CERT=1), see cert_shadow.go; nil otherwise
+		backoff        *backoffShadow // shadow model of a timeout rebroadcast backoff (UBFT_SHADOW_BACKOFF=1), see backoff_shadow.go; nil otherwise
+		msgSeq         uint64         // ordinal of the root network message being handled
+		profile        loopProfile    // scaling-run measurement aid, see loop_profile.go
+		certCacheStart time.Time      // start of the current verified-certificate cache report period
 		// channel via which validator sends "certification requests" to CM
 		certReqCh chan certRequest
 		// channel via which CM sends "certification request" response to validator
@@ -597,6 +599,9 @@ func (x *ConsensusManager) Run(ctx context.Context) error {
 }
 
 func (x *ConsensusManager) loop(ctx context.Context) error {
+	if os.Getenv("UBFT_CERT_CACHE") == "0" {
+		x.trustBaseStore.SetCertCacheCapacity(0) // measurement: the verified-certificate cache off, e.g. for the shadow's baseline of repeats
+	}
 	if x.shadow == nil {
 		x.shadow = shadowFromEnv()
 	}
@@ -641,6 +646,7 @@ func (x *ConsensusManager) loop(ctx context.Context) error {
 		x.profile.report(x.log, time.Now())
 		x.shadow.report(x.log, time.Now())
 		x.backoff.report(x.log, time.Now())
+		x.reportCertCache(time.Now())
 	}
 }
 
