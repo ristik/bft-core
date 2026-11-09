@@ -17,6 +17,9 @@ type loopProfile struct {
 	start  time.Time
 	byType map[reflect.Type]*loopStat
 	busy   time.Duration
+	// timeout votes: verifications skipped (exact message already verified and counted) and done, and the time spent on digests
+	verifyHits, verifyMisses int
+	digestTime               time.Duration
 }
 
 type loopStat struct {
@@ -63,6 +66,7 @@ func (p *loopProfile) report(log *slog.Logger, now time.Time) {
 		log.Info("consensus loop profile", "type", t.String(), "count", s.count, "totalMs", s.total.Milliseconds(),
 			"avgUs", s.total.Microseconds()/int64(s.count), "maxMs", s.max.Milliseconds(), "intervalMs", wall.Milliseconds())
 	}
-	log.Info("consensus loop busy", "rootNetBusyMs", p.busy.Milliseconds(), "intervalMs", wall.Milliseconds())
-	p.start, p.byType, p.busy = now, nil, 0
+	log.Info("consensus loop busy", "rootNetBusyMs", p.busy.Milliseconds(), "intervalMs", wall.Milliseconds(),
+		"timeoutVerifyHits", p.verifyHits, "timeoutVerifyMisses", p.verifyMisses, "timeoutDigestUs", p.digestTime.Microseconds())
+	p.start, p.byType, p.busy, p.verifyHits, p.verifyMisses, p.digestTime = now, nil, 0, 0, 0, 0
 }

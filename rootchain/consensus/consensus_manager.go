@@ -84,8 +84,10 @@ type (
 	}
 
 	ConsensusManager struct {
-		phases  phaseProfile // time per step of proposal handling (measurement), see phase_profile.go
-		profile loopProfile  // scaling-run measurement aid, see loop_profile.go
+		// timeoutVerify verifies a timeout message; nil is TimeoutMsg.Verify against the trust base store (a test seam counts the calls)
+		timeoutVerify func(*abdrc.TimeoutMsg) error
+		phases        phaseProfile // time per step of proposal handling (measurement), see phase_profile.go
+		profile       loopProfile  // scaling-run measurement aid, see loop_profile.go
 		// channel via which validator sends "certification requests" to CM
 		certReqCh chan certRequest
 		// channel via which CM sends "certification request" response to validator
@@ -604,7 +606,11 @@ func (x *ConsensusManager) loop(ctx context.Context) error {
 			x.log.LogAttrs(ctx, logger.LevelTrace, fmt.Sprintf("received %T", msg), logger.Data(msg))
 			handled := time.Now()
 			if err := x.handleRootNetMsg(ctx, msg); err != nil {
-				x.log.WarnContext(ctx, fmt.Sprintf("processing %T", msg), logger.Error(err))
+				if _, isTimeout := msg.(*abdrc.TimeoutMsg); isTimeout && errors.Is(err, quorumweight.ErrDuplicateSigner) {
+					x.log.DebugContext(ctx, fmt.Sprintf("processing %T", msg), logger.Error(err)) // a retransmission of a counted timeout vote is routine
+				} else {
+					x.log.WarnContext(ctx, fmt.Sprintf("processing %T", msg), logger.Error(err))
+				}
 			}
 			x.profile.observe(msg, time.Since(handled))
 		case req := <-x.certReqCh:
@@ -1164,9 +1170,17 @@ func (x *ConsensusManager) onTimeoutMsg(ctx context.Context, vote *abdrc.Timeout
 	if vote.Timeout.Round < x.pacemaker.GetCurrentRound() {
 		return fmt.Errorf("stale timeout vote for round %d from %s", vote.Timeout.Round, vote.Author)
 	}
-	// verify signature on vote
-	if err := vote.Verify(x.trustBaseStore); err != nil {
-		return fmt.Errorf("invalid timeout vote: %w", err)
+	// A message that is byte for byte one already verified and counted in this round (a retransmission) is not verified again: only vote.Verify
+	// is skipped. Everything else below runs as before, in the same order, so a certificate it carries is still processed (#982).
+	digest, vctx, cacheable := x.timeoutCacheKey(vote)
+	if cacheable && x.pacemaker.VerifiedTimeoutHit(vote.Author, vote.Timeout.Round, vote.Timeout.Epoch, digest, vctx) {
+		x.profile.verifyHits++
+	} else {
+		x.profile.verifyMisses++
+		// verify signature on vote
+		if err := x.verifyTimeoutVote(vote); err != nil {
+			return fmt.Errorf("invalid timeout vote: %w", err)
+		}
 	}
 	if err := x.checkWeightEpoch(vote.Timeout.Epoch); err != nil {
 		return err
@@ -1196,7 +1210,12 @@ func (x *ConsensusManager) onTimeoutMsg(ctx context.Context, vote *abdrc.Timeout
 	// the highQC is the same for both rounds. So checking the lastTC helps the instance into latest TO round.
 	x.processTC(ctx, vote.LastTC)
 
-	tc, err := x.pacemaker.RegisterTimeoutVote(ctx, vote, x.voteQuorumInfo())
+	// the register remembers the exact message once it is verified, counted and its weight accounted (before processTC below can end the round)
+	var remember []timeoutMemo
+	if cacheable {
+		remember = []timeoutMemo{{digest: digest, ctx: vctx}}
+	}
+	tc, err := x.pacemaker.RegisterTimeoutVote(ctx, vote, x.voteQuorumInfo(), remember...)
 	if err != nil {
 		return fmt.Errorf("failed to register timeout vote: %w", err)
 	}
