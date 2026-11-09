@@ -30,7 +30,7 @@
   backup-restore
              the quiesced backup and same-generation restore (rehearse.py) with the bridge deployed: the redeemed lock stays spent, and a new round trip completes on
              the restored generation; the round trip's replays (its envelope, its claim and the driver's negatives) are refused there too
-  pos-epoch1, pos-redeem, pos-historical, pos-gap, pos-agg-restart, pos-after-restart, pos-replays
+  pos-epoch1, pos-redeem, pos-historical, pos-gap, pos-agg-restart, pos-after-restart, pos-replays, pos-sdk-clients
              opt-in, on a generation made with --pos --utb: the bridge across a PoS root handoff (bft-core #430 row 2), run between rehearse.py's
              handoff stages; see bridge_pos.py for the sequence of invocations and what each checks
   custody    the vault's books from its whole event log against its counters and balance: every lock once (nonces 1..lastNonce), every credit
@@ -57,6 +57,7 @@ from rehearse import PROXY_IPS, Failure, Rehearsal   # noqa: E402  (the package'
 from deploy_bridge import TAG, validators_network   # noqa: E402
 import release   # noqa: E402
 from bridge_pos import BridgePos   # noqa: E402
+from sdk_clients import SdkClients   # noqa: E402
 
 ENDPOINT = '127.0.0.1:8090'
 # a valid first-owner predicate (a signature predicate), the corpus' history/prepare-valid input: the vault's prepareLock refuses a malformed one
@@ -85,7 +86,7 @@ TESTER_FUNDS, TESTER_LOCK_WEI = 2 * 10 ** 18, 5 * 10 ** 17
 SPLIT_UNIT = 10 ** 13
 
 
-class BridgeRehearsal(BridgePos, Rehearsal):
+class BridgeRehearsal(SdkClients, BridgePos, Rehearsal):
     def bridge_compose(self, *args, check=True):
         return subprocess.run(['docker', 'compose', '-f', str(self.gen / 'compose.yaml'), '-f', str(self.gen / 'compose.bridge.yaml'), *args],
                               check=check, text=True, capture_output=True).stdout
@@ -613,10 +614,10 @@ class BridgeRehearsal(BridgePos, Rehearsal):
 
 
 STAGES = (('deploy', 'deploy'), ('lockproof', 'lockproof'), ('fund', 'fund'), ('roundtrip', 'roundtrip'), ('negatives', 'negatives'), ('tester', 'tester_stage'), ('split', 'split_stage'),
-          ('consolidated', 'consolidated'), ('long-history', 'long_history'), ('backup-restore', 'backup_restore'), ('pos-epoch1', 'pos_epoch1'), ('pos-redeem', 'pos_redeem'), ('pos-historical', 'pos_historical'), ('pos-gap', 'pos_gap'), ('pos-agg-restart', 'pos_agg_restart'), ('pos-after-restart', 'pos_after_restart'), ('pos-replays', 'pos_replays'),
+          ('consolidated', 'consolidated'), ('long-history', 'long_history'), ('backup-restore', 'backup_restore'), ('pos-epoch1', 'pos_epoch1'), ('pos-redeem', 'pos_redeem'), ('pos-historical', 'pos_historical'), ('pos-gap', 'pos_gap'), ('pos-agg-restart', 'pos_agg_restart'), ('pos-after-restart', 'pos_after_restart'), ('pos-replays', 'pos_replays'), ('pos-sdk-clients', 'pos_sdk_clients'),
           ('custody', 'custody'))
 # opt-in: only on a --pos --utb generation, around rehearse.py's handoff stages (bridge_pos.py)
-POS_STAGES = ('pos-epoch1', 'pos-redeem', 'pos-historical', 'pos-gap', 'pos-agg-restart', 'pos-after-restart', 'pos-replays')
+POS_STAGES = ('pos-epoch1', 'pos-redeem', 'pos-historical', 'pos-gap', 'pos-agg-restart', 'pos-after-restart', 'pos-replays', 'pos-sdk-clients')
 
 
 def main():

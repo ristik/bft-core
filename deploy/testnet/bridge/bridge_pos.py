@@ -10,6 +10,7 @@ eight invocations on one generation (the workflow then runs rehearse.py utb-live
     rehearse_bridge.py --stages pos-gap                         (at epoch 3)
     rehearse.py        --stages pos-restart-2                   (each entity's execution client, root and shard node stopped and restarted, at epoch 3)
     rehearse_bridge.py --stages pos-agg-restart,pos-after-restart,pos-replays,custody
+    rehearse_bridge.py --stages pos-sdk-clients                 (the public JS/Rust/Java SDK clients: sdk_clients.py)
 
   pos-epoch1  The bridge client's trust and the epoch-1 artifacts, before the root install:
               - the deployed bundle's genesis EntryID is the generation's UTB genesis id (manifest utb.genesis_id): the one history the roots extend;
@@ -55,7 +56,8 @@ eight invocations on one generation (the workflow then runs rehearse.py utb-live
                      refused on the nullifier, not for its age), that proof with its recipient changed and re-signed by unknown keys (BridgeRejected; the plug-in
                      ErrQuorumNotMet), and a conflicting burn of the burned state (never certified). Then custody (the existing checker) over all four locks.
 
-Not here: the gap through a deliberately suppressed push offer (§4.2 step 6 as written: this is the pull client's gap), and the public SDK clients (step 7).
+Not here: the gap through a deliberately suppressed push offer (§4.2 step 6 as written: this is the pull client's gap). The public SDK clients (step 7) are
+sdk_clients.py's pos-sdk-clients.
 """
 import hashlib
 import json

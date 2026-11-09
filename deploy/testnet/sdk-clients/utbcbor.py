@@ -7,7 +7,6 @@ is the real entry with fewer signatures, a wrong-network genesis is the real gen
 """
 import hashlib
 import json
-import struct
 import sys
 from pathlib import Path
 

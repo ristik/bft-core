@@ -4,7 +4,7 @@
 name: testnet-bridge-pos
 on:
   pull_request:
-    paths: ['deploy/testnet/bridge/bridge_pos.py', '.github/workflows/testnet-bridge-pos.yml']
+    paths: ['deploy/testnet/bridge/bridge_pos.py', 'deploy/testnet/bridge/sdk_clients.py', 'deploy/testnet/sdk-clients/**', '.github/workflows/testnet-bridge-pos.yml']
   workflow_dispatch:
     inputs:
       cadence_seconds:
@@ -119,8 +119,10 @@ jobs:
         run: sudo -E env "PATH=$PATH" python3 deploy/testnet/rehearse.py --generation /srv/tn-bridge-pos --evidence "$RUNNER_TEMP/evidence/7-restart-2" --ubft pinned-bft/build/ubft --stages pos-restart-2
       - name: 8. The aggregator restarted, the bridge after the restarts, the replay negatives; custody
         run: sudo -E env "PATH=$PATH" python3 deploy/testnet/bridge/rehearse_bridge.py --generation /srv/tn-bridge-pos --evidence "$RUNNER_TEMP/evidence/8-bridge-restarts-replays" --ubft pinned-bft/build/ubft --stages pos-agg-restart,pos-after-restart,pos-replays,custody
-      - name: 9. The roots' signed history (utb-live)
-        run: sudo -E env "PATH=$PATH" python3 deploy/testnet/rehearse.py --generation /srv/tn-bridge-pos --evidence "$RUNNER_TEMP/evidence/9-utb-live" --ubft pinned-bft/build/ubft --stages utb-live
+      - name: 9. The public SDK clients (JS, Rust, Java main; cold, warm, restart; typed negatives with controls)
+        run: sudo -E env "PATH=$PATH" python3 deploy/testnet/bridge/rehearse_bridge.py --generation /srv/tn-bridge-pos --evidence "$RUNNER_TEMP/evidence/9-sdk-clients" --ubft pinned-bft/build/ubft --stages pos-sdk-clients
+      - name: 10. The roots' signed history (utb-live)
+        run: sudo -E env "PATH=$PATH" python3 deploy/testnet/rehearse.py --generation /srv/tn-bridge-pos --evidence "$RUNNER_TEMP/evidence/10-utb-live" --ubft pinned-bft/build/ubft --stages utb-live
       - name: The tester wallets' key removed (whichever step stopped)
         if: always()
         run: sudo rm -f /srv/tn-bridge-pos/bridge/pos-tester.key
