@@ -31,7 +31,7 @@ func TestRequestRoundTripAndStrictDecode(t *testing.T) {
 
 	for name, bad := range map[string][]byte{
 		"trailing byte": append(bytes.Clone(b), 0),
-		"wrong tag":     retag(t, b, ResponseTag),
+		"wrong tag":     retag(t, b, types.TrustBaseResponseTag),
 		"truncated":     b[:len(b)-1],
 		"oversize":      append(bytes.Clone(b), make([]byte, MaxRequestBytes)...),
 	} {
@@ -66,53 +66,57 @@ func retag(t *testing.T, b []byte, tag types.CborTag) []byte {
 func TestResponseDecodeRejectsEveryStructuralViolation(t *testing.T) {
 	es := chain(t, nodes(t, 4), 5)
 	rs := raw(t, es)
-	good := func() *Response {
+	good := func() *types.TrustBaseResponse {
 		id := idOf(t, es[3])
-		return &Response{Version: 1, Network: testNetwork, Status: StatusOK, FromEpoch: 2, EffectiveEnd: 4, EndEntryID: id[:],
+		return &types.TrustBaseResponse{Version: 1, Network: testNetwork, Status: types.TrustBaseStatusOK, FromEpoch: 2, EffectiveEnd: 4, EndEntryID: id[:],
 			Entries: []cbor.RawMessage{rs[1], rs[2], rs[3]}}
 	}
-	enc := func(r *Response) []byte {
+	enc := func(r *types.TrustBaseResponse) []byte {
 		b, err := r.Encode()
 		require.NoError(t, err)
 		return b
 	}
-	_, decoded, err := DecodeResponse(enc(good()), PageLimits)
+	_, decoded, err := types.DecodeTrustBaseResponse(enc(good()), types.TrustBasePageLimits)
 	require.NoError(t, err)
 	require.Len(t, decoded, 3)
 
-	mut := map[string]func(*Response){
-		"first entry is not from":       func(r *Response) { r.FromEpoch = 3 },
-		"gap":                           func(r *Response) { r.Entries = []cbor.RawMessage{rs[1], rs[3]} },
-		"duplicate":                     func(r *Response) { r.Entries = []cbor.RawMessage{rs[1], rs[1], rs[2]} },
-		"descending":                    func(r *Response) { r.Entries = []cbor.RawMessage{rs[3], rs[2], rs[1]} },
-		"ends before end without next":  func(r *Response) { r.EffectiveEnd = 5 },
-		"beyond the effective end":      func(r *Response) { r.EffectiveEnd = 3 },
-		"wrong cursor":                  func(r *Response) { r.EffectiveEnd = 6; r.NextEpoch = u64(6) },
-		"cursor past end":               func(r *Response) { r.NextEpoch = u64(5) },
-		"wrong end id":                  func(r *Response) { r.EndEntryID = bytes.Repeat([]byte{1}, 32) },
-		"no end id":                     func(r *Response) { r.EndEntryID = nil },
-		"short end id":                  func(r *Response) { r.EndEntryID = r.EndEntryID[:3] },
-		"other network":                 func(r *Response) { r.Network = 6 },
-		"OK without entries":            func(r *Response) { r.Entries = nil },
-		"unknown status":                func(r *Response) { r.Status = 99; r.Entries = nil },
-		"version":                       func(r *Response) { r.Version = 2 },
-		"garbage entry":                 func(r *Response) { r.Entries = []cbor.RawMessage{{0x01}} },
-		"error status with entries":     func(r *Response) { r.Status = StatusBusy },
-		"error status with cursor":      func(r *Response) { r.Status = StatusBusy; r.Entries = nil; r.NextEpoch = u64(3) },
-		"too many entries for the page": func(r *Response) { r.Entries = []cbor.RawMessage{rs[1], rs[2], rs[3]} },
+	mut := map[string]func(*types.TrustBaseResponse){
+		"first entry is not from":      func(r *types.TrustBaseResponse) { r.FromEpoch = 3 },
+		"gap":                          func(r *types.TrustBaseResponse) { r.Entries = []cbor.RawMessage{rs[1], rs[3]} },
+		"duplicate":                    func(r *types.TrustBaseResponse) { r.Entries = []cbor.RawMessage{rs[1], rs[1], rs[2]} },
+		"descending":                   func(r *types.TrustBaseResponse) { r.Entries = []cbor.RawMessage{rs[3], rs[2], rs[1]} },
+		"ends before end without next": func(r *types.TrustBaseResponse) { r.EffectiveEnd = 5 },
+		"beyond the effective end":     func(r *types.TrustBaseResponse) { r.EffectiveEnd = 3 },
+		"wrong cursor":                 func(r *types.TrustBaseResponse) { r.EffectiveEnd = 6; r.NextEpoch = u64(6) },
+		"cursor past end":              func(r *types.TrustBaseResponse) { r.NextEpoch = u64(5) },
+		"wrong end id":                 func(r *types.TrustBaseResponse) { r.EndEntryID = bytes.Repeat([]byte{1}, 32) },
+		"no end id":                    func(r *types.TrustBaseResponse) { r.EndEntryID = nil },
+		"short end id":                 func(r *types.TrustBaseResponse) { r.EndEntryID = r.EndEntryID[:3] },
+		"other network":                func(r *types.TrustBaseResponse) { r.Network = 6 },
+		"OK without entries":           func(r *types.TrustBaseResponse) { r.Entries = nil },
+		"unknown status":               func(r *types.TrustBaseResponse) { r.Status = 99; r.Entries = nil },
+		"version":                      func(r *types.TrustBaseResponse) { r.Version = 2 },
+		"garbage entry":                func(r *types.TrustBaseResponse) { r.Entries = []cbor.RawMessage{{0x01}} },
+		"error status with entries":    func(r *types.TrustBaseResponse) { r.Status = types.TrustBaseStatusBusy },
+		"error status with cursor": func(r *types.TrustBaseResponse) {
+			r.Status = types.TrustBaseStatusBusy
+			r.Entries = nil
+			r.NextEpoch = u64(3)
+		},
+		"too many entries for the page": func(r *types.TrustBaseResponse) { r.Entries = []cbor.RawMessage{rs[1], rs[2], rs[3]} },
 	}
 	for name, m := range mut {
 		r := good()
 		m(r)
-		lim := PageLimits
+		lim := types.TrustBasePageLimits
 		if name == "too many entries for the page" {
 			lim.MaxEntries = 2
 		}
-		_, _, err := DecodeResponse(enc(r), lim)
+		_, _, err := types.DecodeTrustBaseResponse(enc(r), lim)
 		require.Error(t, err, name)
 	}
 	// each link rule alone: consecutive epochs with a broken link, and a linked run that skips an epoch
-	relinked := func(i int, edit func(*types.RootTrustBaseV2)) *Response {
+	relinked := func(i int, edit func(*types.RootTrustBaseV2)) *types.TrustBaseResponse {
 		cp := *es[i]
 		edit(&cp)
 		b, err := cp.MarshalCBOR()
@@ -121,22 +125,22 @@ func TestResponseDecodeRejectsEveryStructuralViolation(t *testing.T) {
 		r.Entries = []cbor.RawMessage{rs[1], b, rs[3]}
 		return r
 	}
-	_, _, err = DecodeResponse(enc(relinked(2, func(e *types.RootTrustBaseV2) { e.PreviousEntryID = bytes.Repeat([]byte{4}, 32) })), PageLimits)
-	require.ErrorIs(t, err, ErrResponse, "broken link, consecutive epochs")
+	_, _, err = types.DecodeTrustBaseResponse(enc(relinked(2, func(e *types.RootTrustBaseV2) { e.PreviousEntryID = bytes.Repeat([]byte{4}, 32) })), types.TrustBasePageLimits)
+	require.ErrorIs(t, err, types.ErrTrustBaseResponse, "broken link, consecutive epochs")
 	skip := relinked(2, func(e *types.RootTrustBaseV2) { e.Epoch += 5 })
 	skip.Entries, skip.EffectiveEnd, skip.NextEpoch = skip.Entries[:2], 20, u64(9) // the run ends at the skipping entry, so only its epoch can refuse it
-	_, _, err = DecodeResponse(enc(skip), PageLimits)
-	require.ErrorIs(t, err, ErrResponse, "skipped epoch, intact link")
+	_, _, err = types.DecodeTrustBaseResponse(enc(skip), types.TrustBasePageLimits)
+	require.ErrorIs(t, err, types.ErrTrustBaseResponse, "skipped epoch, intact link")
 
 	b := enc(good())
 	for name, bad := range map[string][]byte{"trailing": append(bytes.Clone(b), 0), "wrong tag": retag(t, b, RequestTag), "truncated": b[:len(b)-2]} {
-		_, _, err := DecodeResponse(bad, PageLimits)
+		_, _, err := types.DecodeTrustBaseResponse(bad, types.TrustBasePageLimits)
 		require.Error(t, err, name)
 	}
-	_, _, err = DecodeResponse(b, Limits{MaxBytes: len(b) - 1, MaxEntries: 64})
-	require.ErrorIs(t, err, ErrEncoding, "byte budget is checked before decoding")
+	_, _, err = types.DecodeTrustBaseResponse(b, types.TrustBaseLimits{MaxBytes: len(b) - 1, MaxEntries: 64})
+	require.ErrorIs(t, err, types.ErrTrustBaseResponseEncoding, "byte budget is checked before decoding")
 	// a non-OK response with no entries is fine and carries no hole
-	ok, _, err := DecodeResponse(enc(&Response{Version: 1, Network: testNetwork, Status: StatusNotYetAvailable, Entries: []cbor.RawMessage{}}), PageLimits)
+	ok, _, err := types.DecodeTrustBaseResponse(enc(&types.TrustBaseResponse{Version: 1, Network: testNetwork, Status: types.TrustBaseStatusNotYetAvailable, Entries: []cbor.RawMessage{}}), types.TrustBasePageLimits)
 	require.NoError(t, err)
-	require.Equal(t, StatusNotYetAvailable, ok.Status)
+	require.Equal(t, types.TrustBaseStatusNotYetAvailable, ok.Status)
 }

@@ -27,10 +27,10 @@ func TestVerifyBundleAdmitsThe256MemberChain(t *testing.T) {
 	var pin [types.TrustBaseV2IDLen]byte
 	copy(pin[:], pinBytes)
 
-	b, err := DecodeBundle(raw, BundleLimits{MaxBytes: 1 << 20, MaxEntries: 1 << 16})
+	b, err := types.DecodeTrustBaseBundle(raw, types.TrustBaseLimits{MaxBytes: 1 << 20, MaxEntries: 1 << 16})
 	require.NoError(t, err)
 	require.Len(t, b.Entries[1].RootNodes, 256)
-	require.NoError(t, VerifyBundle(b, pin))
+	require.NoError(t, types.VerifyTrustBaseBundle(b, pin))
 
 	// one damaged signature of the 256: refused
 	for id, sig := range b.Entries[1].Signatures {
@@ -38,5 +38,5 @@ func TestVerifyBundleAdmitsThe256MemberChain(t *testing.T) {
 		b.Entries[1].Signatures[id] = sig
 		break
 	}
-	require.ErrorIs(t, VerifyBundle(b, pin), ErrBundleChain)
+	require.ErrorIs(t, types.VerifyTrustBaseBundle(b, pin), types.ErrTrustBaseBundleChain)
 }

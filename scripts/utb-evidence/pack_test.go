@@ -17,7 +17,6 @@ import (
 	"github.com/unicitynetwork/bft-go-base/types"
 	"github.com/unicitynetwork/bft-go-base/util"
 
-	"github.com/unicitynetwork/bft-core/gettrustbase"
 	testcertificates "github.com/unicitynetwork/bft-core/internal/testutils/certificates"
 	"github.com/unicitynetwork/bft-core/internal/testutils/utbchain"
 	"github.com/unicitynetwork/bft-core/network/protocol/certification"
@@ -84,9 +83,9 @@ func buildPack(t *testing.T, ubft, tool string) string {
 
 	// the histories
 	g, _ := chain.Genesis.MarshalCBOR()
-	initial, err := gettrustbase.EncodeBundle([][]byte{g})
+	initial, err := types.EncodeTrustBaseBundle([][]byte{g})
 	require.NoError(t, err)
-	final, err := gettrustbase.EncodeBundle(append([][]byte{g}, chain.Entries...))
+	final, err := types.EncodeTrustBaseBundle(append([][]byte{g}, chain.Entries...))
 	require.NoError(t, err)
 	put("bundle/initial.cbor", initial)
 	put("bundle/final.cbor", final)
@@ -239,7 +238,7 @@ func TestEvidencePackIsCheckedByTheToolsAndEveryBadByteIsRefused(t *testing.T) {
 		"an edited refusal text":                                                                  {func(p string) { write(t, p, "history/client-before-sync.txt", []byte("refused\n")) }, "not the verifier's refusal"},
 		"a synced history that stops at epoch 2": {func(p string) {
 			g, _ := chain.Genesis.MarshalCBOR()
-			b, err := gettrustbase.EncodeBundle([][]byte{g, chain.Entries[0]})
+			b, err := types.EncodeTrustBaseBundle([][]byte{g, chain.Entries[0]})
 			require.NoError(t, err)
 			write(t, p, "history/client-synced.cbor", b)
 		}, "does not end at tip 3"},

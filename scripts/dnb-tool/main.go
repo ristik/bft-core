@@ -28,7 +28,6 @@ import (
 	"github.com/unicitynetwork/bft-core/archive"
 	"github.com/unicitynetwork/bft-core/b1ref"
 	"github.com/unicitynetwork/bft-core/bridgeprofile"
-	"github.com/unicitynetwork/bft-core/gettrustbase"
 	"github.com/unicitynetwork/bft-core/q3format"
 	"github.com/unicitynetwork/bft-core/utb"
 	"github.com/unicitynetwork/bft-go-base/types"
@@ -233,7 +232,7 @@ func newLockProofSource(ctx context.Context, archiveDir, ethURL, vaultText, full
 		return nil, err
 	}
 	// trustBaseId is the genesis EntryID of the history the bundle carries
-	decoded, err := gettrustbase.DecodeBundle(bundle, gettrustbase.BundleLimits{MaxBytes: 1 << 20, MaxEntries: 1 << 16})
+	decoded, err := types.DecodeTrustBaseBundle(bundle, types.TrustBaseLimits{MaxBytes: 1 << 20, MaxEntries: 1 << 16})
 	if err != nil {
 		return nil, err
 	}
