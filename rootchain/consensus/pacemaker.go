@@ -202,9 +202,14 @@ func (x *Pacemaker) RegisterTimeoutVote(ctx context.Context, vote *abdrc.Timeout
 	return tc, nil
 }
 
-// HasTimeoutVote is true when a verified timeout vote of this author for this round and epoch is already counted.
-func (x *Pacemaker) HasTimeoutVote(author string, round, epoch uint64) bool {
-	return x.pendingVotes.HasTimeoutVote(author, round, epoch)
+// VerifiedTimeoutHit: this exact timeout message was already verified and counted in the current round.
+func (x *Pacemaker) VerifiedTimeoutHit(author string, round, epoch uint64, digest [32]byte, ctx verifyContext) bool {
+	return x.pendingVotes.VerifiedTimeoutHit(author, round, epoch, digest, ctx)
+}
+
+// NoteVerifiedTimeout remembers a timeout message that was verified and counted; the register forgets it with the round.
+func (x *Pacemaker) NoteVerifiedTimeout(author string, round, epoch uint64, digest [32]byte, ctx verifyContext) {
+	x.pendingVotes.NoteVerifiedTimeout(author, round, epoch, digest, ctx)
 }
 
 // AdvanceRoundQC - trigger next round/view on quorum certificate
