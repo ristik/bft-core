@@ -15,18 +15,18 @@
 
 **A-only.** Aggregator A = ristik/aggregator-go `integration/enshrined-evm`. The upstream-facing aggregator B and the UTB feeder (aggregator-go #16/#17, bft-core #967's variant) are **not accepted by this release**; `aggregator-go-upstream` in `deploy/testnet/pins.json` (12ab9074) is the image variant #967 added and is not exercised by any stage listed here. An A pass does not accept B. B needs a merged feeder pin, its own manifest revision and the affected live-source and bridge reruns.
 
-Bridge across a PoS transition (#430 row 2): the §4.1 preflight **passed in CI** (bft-core#979 run 42546603859 at 4baaca59, GitHub-hosted runner, `--pos --utb`, aggregator A, epoch 1→2; dev4's summary `briefs/dev4-bridge-pos-preflight-2026-11-09.md`, with arch's review pending). A second CI run, **42555135158 at 6a88e290** (nbp d352e88a), redeemed a separate epoch-1 token on the per-SID path after activation, with both anchors sealed at root epoch 1 (receipt succeeded, vault credited exactly the lock); run 42546603859 stays separate evidence with its original pins. A fourth CI run, **42584403015 at f7963086** (the full #979 workflow: all 10 steps passed: restarts, aggregator restart, replays, SDK clients, custody, `utb-live`; dev4, #979 comment 6736397010). A third CI run, **42570597750 at e52080d9** (the pos-gap preflight, bft-core#979 comment 6733978274): 2->3, a lagging wallet repairs epochs 2 and 3 in one-entry pages, a fresh process reloads 1..3, EntryIDs matched, exact credit, custody balanced. That is CI evidence only: not a host run, and not the accepted bridge-on-PoS row. arch (dev4's brief): host execution/reservation not yet at the published pins; still to do before it: the freeze of the pins below, the host run itself, and the owner merges (every step of the bridge stage has a CI pass above, on unmerged nbp). Still PENDING(arch's review of the preflight; owner merge of ristik/native-bridge-plugins#67; #979 re-pinned to #67's merge commit and out of draft). If any of them slips, this release is the PoS-only manifest and #430's bridge row stays open for a later manifest revision.
+Bridge across a PoS transition (#430 row 2): the §4.1 preflight **passed in CI** (bft-core#979 run 42546603859 at 4baaca59, GitHub-hosted runner, `--pos --utb`, aggregator A, epoch 1→2; dev4's summary `briefs/dev4-bridge-pos-preflight-2026-11-09.md`, with arch's review pending). A second CI run, **42555135158 at 6a88e290** (nbp d352e88a), redeemed a separate epoch-1 token on the per-SID path after activation, with both anchors sealed at root epoch 1 (receipt succeeded, vault credited exactly the lock); run 42546603859 stays separate evidence with its original pins. A fourth CI run, **42584403015 at f7963086** (the full #979 workflow: all 10 steps passed: restarts, aggregator restart, replays, SDK clients, custody, `utb-live`; dev4, #979 comment 6736397010). A third CI run, **42570597750 at e52080d9** (the pos-gap preflight, bft-core#979 comment 6733978274): 2->3, a lagging wallet repairs epochs 2 and 3 in one-entry pages, a fresh process reloads 1..3, EntryIDs matched, exact credit, custody balanced. That is CI evidence only: not a host run, and not the accepted bridge-on-PoS row. arch (dev4's brief): host execution/reservation not yet at the published pins; still to do before it: the freeze of the pins below, the host run itself, and the owner merges (every step of the bridge stage has a CI pass above, on unmerged nbp). Done since: nbp#67, #68 and #69 merged into nbp main (#69 = `51f3664c`; §57, no owner merge needed) and #979 re-pinned to that merge commit (45a5b391). Still PENDING(arch's review of the preflight; #979 merged through the queue). If any of them slips, this release is the PoS-only manifest and #430's bridge row stays open for a later manifest revision.
 
 ## 3. Components
 
 | Component | Commit | Source | Why this one |
 |---|---|---|---|
-| bft-core (product) | `ecb67b1f8542bae014c532d064c205306451b7c2` | `pins.json: bft`; images and host tools are built from it | retained; the `ecb67b1f..` delta has no production Go change (arch), and its script/workflow/helper changes are the harness, recorded above. PENDING(re-read the delta at freeze: `git diff ecb67b1f..<harness SHA> -- ':!*_test.go'` file list) |
+| bft-core (product) | `ecb67b1f8542bae014c532d064c205306451b7c2` | `pins.json: bft`; images and host tools are built from it | retained (default of owner question Q30). **The earlier statement "the `ecb67b1f..` delta has no production Go change" no longer holds**: at `integration/enshrined-evm` dc70ca25 it changes 27 production Go files (+1203/-53; `git diff ecb67b1f..<harness SHA> --stat -- '*.go' ':!*_test.go'`): the verified-certificate cache (#982/#992), the V1 certification response frame limit (#993), the configuredprogress journal fix (#994), shard pending-work diagnostics (#995), the receiver stream deadline hook (#987, test only), loop profile and env-gated shadow counters (#980/#986, measurement), fixtures. None of it is in the pinned product; the pin stays at `ecb67b1f` unless Q30 is decided the other way. The delta list is re-run at the harness SHA when this merges. |
 | ureth | `10552af21b31b2118c51d6215cd23cfb80faf33c` | `pins.json`, `lane-pins.json` | retained; `unicity/main` 7b2bc1b6 differs by corpus files only |
 | unicity-pos-contracts | `7b510f6b5a9cf3987ccc5d7dc77d39f33de12330` | `pins.json`, `bridge/pins.json`, `lane-pins.json` | retained; `main` 4a32df9d adds golden-reference files, `src/` unchanged since be6e86fb |
 | aggregator-go A | `009974a72560c1f224fef99ada9fbf475f1488a7` | `pins.json`, `lane-pins.json` | integration head |
 | native-bridge-plugins (corpus and joined checks) | `838b08ce4304428c9ebcb9b0fbd4b55b260a99d4` | `bridge/pins.json`, `lane-pins.json` | retained; `main` f1c4a6a8 changes joined-test pins only |
-| native-bridge-plugins (**bridge consumer**) | PENDING(merge commit of **nbp#68**, stacked on #67, and the follow-up PR dev4 named; merged by the owner; the latest CI run pins the unmerged **8d7436ba**; #67 carries the trust-refresh wiring, #68 the accepted-prefix persistence fix. The preflights ran on unmerged heads: 948d429a (#67), d352e88a (#68 on #67 1442ba2e). SDK pin unchanged at 75c5be7) | `bridge/pins.json` | until it merges, 838b08ce is not that consumer's complete source |
+| native-bridge-plugins (**bridge consumer**) | `51f3664c80fe7f099e970cf95842ca19c2e9e393` (nbp main; merge commit of nbp#69, which contains #67 `d0723124` (trust-refresh wiring) and #68 `a466adac` (accepted-prefix persistence, redeem `--per-sid` and envelope); all three merged into nbp main under §57; tree identical to the reviewed `b8bc3fe1`) | `bridge/pins.json` (bft-core#979, commit 45a5b391 onward) | the preflights ran on the unmerged heads 948d429a (#67) and d352e88a (#68 on #67), then on 8d7436ba; the pin is now the merged commit. SDK pin unchanged at 75c5be7 |
 | Foundry | 1.8.1, sha256 `37b45855232e57624d90113b049ca54f0c92055bb5c1997fcbdc3076c7b89c10` | `bridge/pins.json` | unchanged |
 
 Reference updates ureth #95, contracts #79, nbp #64: **not taken**. If taken before freeze, their exact revisions replace the rows above and the affected corpus and joined checks are re-run; old evidence is not relabelled.
@@ -35,9 +35,9 @@ Reference updates ureth #95, contracts #79, nbp #64: **not taken**. If taken bef
 
 | File | Role | Change in this PR |
 |---|---|---|
-| `deploy/testnet/pins.json` | node images | none (PENDING(confirm at freeze)) |
-| `deploy/testnet/bridge/pins.json` | bridge tools (built from their own pins; `dnb-tool` from the package's own bft-core checkout, recorded in `artifacts/bridge-images.json`) | PENDING(nbp bridge-consumer pin once #67 merges) |
-| `scripts/ci/lane-pins.json` | CI lanes | none (PENDING(decide whether the lane's nbp row follows the bridge consumer pin)) |
+| `deploy/testnet/pins.json` | node images | none in this PR (the node images are not touched by #979; re-confirm with `git diff` at the harness SHA) |
+| `deploy/testnet/bridge/pins.json` | bridge tools (built from their own pins; `dnb-tool` from the package's own bft-core checkout, recorded in `artifacts/bridge-images.json`) | in bft-core#979 (not in this PR): `native-bridge-plugins` 838b08ce → 51f3664c |
+| `scripts/ci/lane-pins.json` | CI lanes | none: the lane's nbp row stays `838b08ce` (corpus and joined checks; `main` only adds the bridge-consumer tester work and joined-test pins, none of which the lane runs); it does not follow the bridge consumer pin |
 
 A changed package contract pin does not reach the bridge tools.
 
@@ -45,8 +45,8 @@ A changed package contract pin does not reach the bridge tools.
 
 | Consumer | Revision |
 |---|---|
-| public SDK fetch/cache acceptance clients | JS `41cb7ddbbac0c0c2c3037a4dc61ba97de365b83d`; Rust `4be1330dbc8d880431a84d0831728c46291e394c`; Java `9fe6bf8ff16eaee162faea0c00404bc7d330b77b` (ristik `main`, as pinned in `deploy/testnet/sdk-clients/pins.json` of #979; PENDING(that file merged to integration, heads re-read at freeze)) |
-| the bridge's own SDK | `75c5be7f` via nbp's vendored tarball; PENDING(tarball sha256 and lockfile identity of the bridge-consumer nbp commit) |
+| public SDK fetch/cache acceptance clients | JS `41cb7ddbbac0c0c2c3037a4dc61ba97de365b83d`; Rust `4be1330dbc8d880431a84d0831728c46291e394c`; Java `9fe6bf8ff16eaee162faea0c00404bc7d330b77b` (ristik `main`, as pinned in `deploy/testnet/sdk-clients/pins.json` of #979; the file is in bft-core#979, not yet on integration; the three commits are the ones #979 pins at its head 77ffc027, and the JS and Java staging heads have moved since (java#101 `0c24027f`, JS #206 at f35b19c6): re-read and decide at freeze whether the acceptance clients follow the staging branches) |
+| the bridge's own SDK | `75c5be7fd4d02ef4306b9b1ff14c4365c7468009` (ristik/state-transition-sdk-js) via nbp's vendored tarball `vendor/unicitylabs-state-transition-sdk-4.0.0-utb.75c5be7.tgz`, sha256 `e7dcc47e6999646e0717139878916def6c5fc0edbeec95b1e73db5c4f75f6f5d` (identical at nbp 838b08ce and 51f3664c; `vendor/state-transition-sdk.provenance.json` names the build); bridge-core tarball `unicitylabs-bridge-core-0.1.0-bridge.2.tgz` sha256 `61bb461800dc17368b4afd5e07207667951e540eef85165e8bdc361d7898e596`; `package-lock.json` sha256 `e6c02499460b8978a99c42bb599a1846c07971976a2e093ddd3e04248a2f8028` (nbp 51f3664c) |
 
 The bridge does not use JS `main` and has no `TrustBaseSession` cache here; that is a separate port, not assumed.
 
@@ -56,7 +56,7 @@ The bridge does not use JS `main` and has no `TrustBaseSession` cache here; that
 |---|---|---|---|
 | core (G1), crash, owner, resources | off | 400 rounds / 300 s (rehearsal) | 16,1,6 |
 | crash e1, crash e2, join | off | as above | as above |
-| bridge generation (bft-core#979 recipe) | on (`--pos --utb`, aggregator A integration) | 1500 rounds / 1200 s (declared in its `generation-recipe.json`) | PENDING(read from `generation-recipe.json`) |
+| bridge generation (bft-core#979 recipe) | on (`--pos --utb`, aggregator A integration) | 1500 rounds / 1200 s (the declared dispatch inputs `cadence_rounds`/`cadence_seconds` of the preflight run 42584403015; `testnet-bridge-pos.yml` writes them to the run's `generation-recipe.json`; workflow defaults are 800 / 600) | as the generation's own caps, read from that run's `generation-recipe.json` at freeze |
 | campaign (lane `x4-exit`) | per lane | per lane | per lane |
 
 Test values, recorded, not testnet decisions. Each generation records its own setting in `generation.txt` (driver revision 2). Results from different cadences are not cross-read.
@@ -77,7 +77,7 @@ Results recorded **from the run, not from this PR**: PENDING(`artifacts/images.j
 
 ## 8. Features
 
-Enabled: PoS profile (`--pos`), caps 16,1,6, unit weights. Disabled: `--utb` on every generation except the bridge preflight; B/feeder; unequal genesis weights (the `pos-join-heavy` stage is the refusal control only). `--utb` on the bridge generation. Bridge-client trust refresh (`withTrustRefresh` through the pinned SDK's `fetchTrustBaseEntries`, nbp#67) once #67 is merged. PENDING(final list after arch's review of the preflight).
+Enabled: PoS profile (`--pos`), caps 16,1,6, unit weights. Disabled: `--utb` on every generation except the bridge preflight; B/feeder; unequal genesis weights (the `pos-join-heavy` stage is the refusal control only). `--utb` on the bridge generation. Bridge-client trust refresh (`withTrustRefresh` through the pinned SDK's `fetchTrustBaseEntries`, nbp#67, merged). PENDING(final list after arch's review of the preflight).
 
 ## 9. Runs this manifest covers (filled as they complete)
 
