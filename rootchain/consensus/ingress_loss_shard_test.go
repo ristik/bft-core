@@ -870,8 +870,8 @@ func TestIngressLossWithRealShardsRecoversThroughTheDuplicateResend(t *testing.T
 		lostEvents = w.requestsSince(armed)
 		return len(w.distinctNodes(lostEvents)) == len(w.ids)
 	})
-	w.setDrop(nil) // lost on the way: the drop ends, nothing is replayed
-	opened := time.Now()
+	opened := time.Now() // before the drop ends: a re-send delivered the instant it lifts must not fall between the two
+	w.setDrop(nil)       // lost on the way: the drop ends, nothing is replayed
 	u := w.lastCert()
 	lost := map[[32]byte]bool{}
 	for _, e := range lostEvents {
@@ -905,6 +905,11 @@ func TestIngressLossWithRealShardsRecoversThroughTheDuplicateResend(t *testing.T
 		}
 	}
 	nodes := w.distinctNodes(resent)
+	if len(nodes) < w.threshold() {
+		for _, e := range w.requestsSince(armed) {
+			t.Logf("  DIAG request %s from %s at %s: round %d block %x lost-fp %v dropped %v", e.at.Format("15:04:05.000"), shortID(e.node), e.root, e.round, e.blockHash[:min(4, len(e.blockHash))], lost[e.fp], e.dropped)
+		}
+	}
 	require.GreaterOrEqual(t, len(nodes), w.threshold(), "at least the request threshold of validators re-sent their lost request, byte-identical (delivered to a root; admission is shown by the certification)")
 	// The trigger is an authenticated duplicate of the held certificate, not necessarily the answer to the shard's own handshake: the roots also deliver the held
 	// certificate on their own, and on a loaded host every re-send can come that way. So no handshake is required; for each validator whether one of the
@@ -1063,7 +1068,8 @@ func runLossCycles(t *testing.T, w *shardWorld, cycles int, silent string, rBudg
 		return true
 	}
 	w.waitFor("the live validators certify", 3*time.Minute, func() bool { return w.certCount() >= 3 })
-	for k := 1; k <= cycles; k++ {
+	pausedSeen := 0
+	for k := 1; k <= cycles || (silent != "" && pausedSeen == 0 && k <= 4*cycles); k++ { // with a paused validator, run on until a repeat has named it (the premise of the test)
 		w.waitFor("the previous marker is applied everywhere live", 5*time.Minute, func() bool { return live(func(_ string, e *retainingExecutor) bool { return e.poolSize() == 0 }) })
 		marker := []byte(fmt.Sprintf("pending-976-cycle-%d", k))
 		u, armed := w.stallAfterLoss(marker)
@@ -1151,6 +1157,9 @@ func runLossCycles(t *testing.T, w *shardWorld, cycles int, silent string, rBudg
 		row.toCertified = certified.at.Sub(repeats[0].at)
 		row.toApplied = applied.Sub(repeats[0].at)
 		rows = append(rows, row)
+		if row.pausedLeader {
+			pausedSeen++
+		}
 		desc := func(r attemptReport) string {
 			if !r.exists {
 				return "no request of the attempt was delivered"
