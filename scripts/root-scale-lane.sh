@@ -228,6 +228,10 @@ echo "=== evidence ==="
 event "end"
 # the consensus loop's per-message-type time (root1 and every other root) and root1's per-round leader lines (root1 runs at debug)
 grep -h "consensus loop" test-nodes/root*/debug.log 2>/dev/null | gzip >"$evidence/loop-profile-all-roots.log.gz"
+grep -h "consensus timeout backoff" test-nodes/root*/debug.log 2>/dev/null | gzip >"$evidence/timeout-backoff-all-roots.log.gz"
+for i in $(seq 1 "$roots"); do   # timeout-vote broadcasts made by each root (first sends and repeats), whatever the mode
+  printf '%s,%s\n' "$i" "$(grep -c "broadcast timeout vote" "test-nodes/root$i/debug.log" 2>/dev/null)"
+done >"$evidence/timeout-broadcasts-per-root.csv"
 grep -h "next leader\|local timeout\|timeout quorum" test-nodes/root1/debug.log 2>/dev/null | gzip >"$evidence/root1-rounds.log.gz"
 for i in $(seq 1 "$roots"); do
   grep -ciE 'panic|fatal error|SIGABRT|pthread_create' "test-nodes/root$i/debug.log" 2>/dev/null | sed "s/^/root$i,/"
