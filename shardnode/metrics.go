@@ -29,6 +29,9 @@ type Metrics struct {
 	pauseStartAt      metric.Float64Gauge
 	pauseEndAt        metric.Float64Gauge
 	pauseDuration     metric.Float64Histogram
+	outstandingAge    metric.Float64Gauge
+	consecRepeats     metric.Int64Gauge
+	noProgressAge     metric.Float64Gauge
 	certMu            sync.Mutex
 	previousCertAt    time.Time
 	previousEpoch     uint64
@@ -100,7 +103,28 @@ func NewMetrics(meter metric.Meter) (*Metrics, error) {
 		metric.WithExplicitBucketBoundaries(0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60, 300)); err != nil {
 		return nil, fmt.Errorf("creating certification.pause_duration histogram: %w", err)
 	}
+	if m.outstandingAge, err = meter.Float64Gauge("shardnode.request.outstanding_age",
+		metric.WithDescription("Seconds since the first submission of the pending certification request on the held certificate; zero when none is pending. In-memory: a restart resets it (#976)"), metric.WithUnit("s")); err != nil {
+		return nil, fmt.Errorf("creating request.outstanding_age gauge: %w", err)
+	}
+	if m.consecRepeats, err = meter.Int64Gauge("shardnode.uc.consecutive_repeats",
+		metric.WithDescription("Repeat certificates accepted since the last non-repeat one; reset by a restart (#976)")); err != nil {
+		return nil, fmt.Errorf("creating uc.consecutive_repeats gauge: %w", err)
+	}
+	if m.noProgressAge, err = meter.Float64Gauge("shardnode.certification.no_progress_age",
+		metric.WithDescription("Seconds since the last non-repeat certificate while work remains (a pending request or a repeat being rebuilt after); zero otherwise. Rebuilt attempts do not reset it; a restart does (#976)"), metric.WithUnit("s")); err != nil {
+		return nil, fmt.Errorf("creating certification.no_progress_age gauge: %w", err)
+	}
 	return m, nil
+}
+
+func (m *Metrics) recordPending(ctx context.Context, d PendingDiagnostics) {
+	if m == nil {
+		return
+	}
+	m.outstandingAge.Record(ctx, d.OutstandingAge.Seconds())
+	m.consecRepeats.Record(ctx, int64(d.ConsecutiveRepeats))
+	m.noProgressAge.Record(ctx, d.NoProgressAge.Seconds())
 }
 
 func (m *Metrics) recordRoundCertified(ctx context.Context, rootEpoch uint64) {

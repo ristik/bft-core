@@ -57,6 +57,14 @@ type BFTClientOptions struct {
 	ResubmitMinInterval time.Duration
 	// MaxResubmits bounds the re-sends of one pending request (zero: DefaultMaxResubmits; negative disables re-sending).
 	MaxResubmits int
+	// PendingWarnAfter is how long a certification request may be pending, or the shard may go without a non-repeat certificate while work remains,
+	// before a warning is logged (zero: DefaultPendingWarnAfter; negative disables the warning, not the gauges). An operational threshold, not a
+	// delivery deadline: it says nothing about T2 (#976).
+	PendingWarnAfter time.Duration
+	// RepeatWarnAfter is the number of consecutive repeat certificates that raises the same warning (zero: DefaultRepeatWarnAfter).
+	RepeatWarnAfter int
+	// PendingWarnEvery is the least time between two such warnings (zero: DefaultPendingWarnEvery).
+	PendingWarnEvery time.Duration
 	// StartupHandshakeInterval is how often the handshake is re-sent until the first certificate arrives (zero
 	// disables the early retry). A root that has not yet loaded the shard drops the handshake without an answer; waiting
 	// a full InactivityTimeout for the next one let a validator fall far behind the cluster (H3 lane run3).
@@ -96,6 +104,10 @@ const startupFixedAttempts = 5
 const (
 	DefaultResubmitMinInterval = 5 * time.Second
 	DefaultMaxResubmits        = 10
+	// The pending-work diagnostics (#976): operational defaults, not deadlines.
+	DefaultPendingWarnAfter = 60 * time.Second
+	DefaultRepeatWarnAfter  = 3
+	DefaultPendingWarnEvery = 60 * time.Second
 )
 
 var DefaultBFTClientOptions = BFTClientOptions{
@@ -185,6 +197,11 @@ type BFTClient struct {
 	// pending exactly while that certificate is the held one (a certificate that advances the round replaces the held one, and
 	// the next Submit replaces this).
 	outstanding *outstandingRequest
+	// consecutiveRepeats counts the repeat certificates accepted since the last non-repeat one, and lastProgress is when that last non-repeat
+	// certificate was accepted (#976). Both are in memory: a restart resets them, and the diagnostics built on them say so.
+	consecutiveRepeats int
+	lastProgress       time.Time
+	lastPendingWarn    time.Time
 	// resubmitWanted is set by the configured-mode feed observer, which performs no network I/O, to ask Run to re-send.
 	resubmitWanted bool
 
@@ -228,10 +245,11 @@ func (c *BFTClient) classifyUC(prev, next *types.UnicityCertificate) (UCClass, e
 // outstandingRequest is a submitted certification request awaiting the certificate of its round. The signed request is kept
 // as submitted: a re-send puts the same bytes on the wire, it never re-signs or rebuilds.
 type outstandingRequest struct {
-	req      *certification.BlockCertificationRequest
-	on       deliveryAttempt // the held certificate the request was submitted on
-	lastSent time.Time
-	resent   int
+	req       *certification.BlockCertificationRequest
+	on        deliveryAttempt // the held certificate the request was submitted on
+	firstSent time.Time       // the first submission of this logical attempt: a re-send never changes it (lastSent does)
+	lastSent  time.Time
+	resent    int
 }
 
 // deliveryAttempt identifies one certificate for retry purposes. Rounds are enough: a UCDuplicate
@@ -512,6 +530,7 @@ func (c *BFTClient) Run(ctx context.Context) error {
 			startupAttempt++
 			startup.Reset(startupHandshakeDelay(c.opts.StartupHandshakeInterval, c.opts.InactivityTimeout, startupAttempt))
 		case <-heartbeat.C:
+			c.reportPending(ctx)
 			last := time.UnixMilli(c.lastCertResponseTime.Load())
 			if time.Since(last) > c.opts.InactivityTimeout {
 				if c.log != nil {
@@ -1306,6 +1325,11 @@ func (c *BFTClient) handleCertificationResponse(ctx context.Context, cr *certifi
 		return nil
 	}
 	c.luc = &cr.UC
+	if class == UCRepeat {
+		c.consecutiveRepeats++
+	} else {
+		c.consecutiveRepeats, c.lastProgress = 0, time.Now()
+	}
 	metrics := c.metrics
 	health := c.health
 	c.mu.Unlock()
@@ -1382,7 +1406,8 @@ func (c *BFTClient) Submit(ctx context.Context, req *certification.BlockCertific
 	// to ask for one this round.
 	c.mu.Lock()
 	c.submittedSinceHandshake = true
-	c.outstanding = &outstandingRequest{req: req, on: deliveryAttempt{partitionRound: luc.GetRoundNumber(), rootRound: luc.GetRootRoundNumber()}, lastSent: time.Now()}
+	now := time.Now()
+	c.outstanding = &outstandingRequest{req: req, on: deliveryAttempt{partitionRound: luc.GetRoundNumber(), rootRound: luc.GetRootRoundNumber()}, firstSent: now, lastSent: now}
 	c.mu.Unlock()
 	return nil
 }
@@ -1398,6 +1423,69 @@ func (c *BFTClient) sendRequest(ctx context.Context, req *certification.BlockCer
 		return fmt.Errorf("selecting root nodes for certification: %w", err)
 	}
 	return c.net.Send(ctx, req, rootIDs...)
+}
+
+// PendingDiagnostics is what the shard knows about work that has not been certified yet (#976). It is built from this process's memory only: a
+// restart resets every figure, and nothing here is evidence about the roots.
+type PendingDiagnostics struct {
+	// Pending is true while a request is outstanding on the certificate this node still holds. A certificate that advances the round, or a repeat,
+	// retires it (the next Submit starts a new logical attempt).
+	Pending bool
+	// OutstandingAge is the time since the FIRST submission of the pending request (a re-send does not restart it), zero when nothing is pending.
+	OutstandingAge time.Duration
+	// ConsecutiveRepeats counts the repeat certificates accepted since the last non-repeat one.
+	ConsecutiveRepeats int
+	// NoProgressAge is the time since the last non-repeat certificate was accepted, while work remains (a request is pending, or the last certificate
+	// was a repeat the shard is still rebuilding after); zero when no work remains. Rebuilt attempts do not reset it.
+	NoProgressAge time.Duration
+}
+
+// pendingDiagnostics reads the figures at now.
+func (c *BFTClient) pendingDiagnostics(now time.Time) PendingDiagnostics {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	d := PendingDiagnostics{ConsecutiveRepeats: c.consecutiveRepeats}
+	if o := c.outstanding; o != nil && c.luc != nil && o.on == (deliveryAttempt{partitionRound: c.luc.GetRoundNumber(), rootRound: c.luc.GetRootRoundNumber()}) {
+		d.Pending, d.OutstandingAge = true, now.Sub(o.firstSent)
+	}
+	if (d.Pending || c.consecutiveRepeats > 0) && !c.lastProgress.IsZero() {
+		d.NoProgressAge = now.Sub(c.lastProgress)
+	}
+	return d
+}
+
+// reportPending records the gauges and, past the operational thresholds, logs one warning per PendingWarnEvery. Called on the heartbeat.
+func (c *BFTClient) reportPending(ctx context.Context) {
+	now := time.Now()
+	d := c.pendingDiagnostics(now)
+	c.metrics.recordPending(ctx, d)
+	warnAfter, repeats, every := c.opts.PendingWarnAfter, c.opts.RepeatWarnAfter, c.opts.PendingWarnEvery
+	if warnAfter == 0 {
+		warnAfter = DefaultPendingWarnAfter
+	}
+	if repeats == 0 {
+		repeats = DefaultRepeatWarnAfter
+	}
+	if every == 0 {
+		every = DefaultPendingWarnEvery
+	}
+	if warnAfter < 0 || c.log == nil {
+		return
+	}
+	if d.OutstandingAge < warnAfter && d.NoProgressAge < warnAfter && d.ConsecutiveRepeats < repeats {
+		return
+	}
+	c.mu.Lock()
+	due := now.Sub(c.lastPendingWarn) >= every
+	if due {
+		c.lastPendingWarn = now
+	}
+	c.mu.Unlock()
+	if due {
+		c.log.WarnContext(ctx, "certification work has not progressed: the roots have not certified what this shard submitted (in-memory figures, reset by a restart)",
+			slog.Bool("pending", d.Pending), slog.Duration("outstandingAge", d.OutstandingAge.Round(time.Second)),
+			slog.Int("consecutiveRepeats", d.ConsecutiveRepeats), slog.Duration("noProgressAge", d.NoProgressAge.Round(time.Second)))
+	}
 }
 
 // resubmitPending re-sends the pending certification request when a root has just shown, by answering with the certificate this
