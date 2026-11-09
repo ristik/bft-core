@@ -25,6 +25,9 @@ type leaf struct {
 type Batch struct {
 	pre, fresh []leaf
 	preRoot    [32]byte // computed once: a shard's request takes it for every resubmission
+	seed       string
+	keyBit     int
+	generation int // 0 for New's batch, one more for each Next
 }
 
 // Stats is what specifies a proof's cost, beyond the count of its batch.
@@ -35,37 +38,66 @@ type Stats struct {
 
 // New derives distinct deterministic hash-distributed keys. keyBit fixes the first key bit to keep them in a shard's half of the key space; -1 leaves it free.
 func New(seed string, keyBit, preLeaves, inserted int) *Batch {
-	derive := func(kind string, i int) [32]byte {
-		var n [8]byte
-		binary.BigEndian.PutUint64(n[:], uint64(i))
-		h := sha256.Sum256(slices.Concat([]byte(seed), []byte(kind), n[:]))
-		return h
-	}
-	key := func(kind string, i int) [32]byte {
-		k := derive(kind, i)
-		switch keyBit {
-		case 0:
-			k[0] &= 0x7f
-		case 1:
-			k[0] |= 0x80
-		}
-		return k
-	}
-	b := &Batch{}
+	b := &Batch{seed: seed, keyBit: keyBit}
 	for i := range preLeaves {
-		tx := derive("pre-tx", i)
+		tx := b.derive("pre-tx", i)
 		stored := rsmt.LeafValue(tx[:], preStateTime)
-		b.pre = append(b.pre, leaf{key("pre-key", i), stored[:]})
+		b.pre = append(b.pre, leaf{b.key("pre-key", i), stored[:]})
 	}
-	for i := range inserted {
-		tx := derive("new-tx", i)
-		b.fresh = append(b.fresh, leaf{key("new-key", i), tx[:]})
-	}
-	byKey := func(a, b leaf) int { return bytes.Compare(a.key[:], b.key[:]) }
+	b.fresh = b.freshLeaves(inserted)
 	slices.SortFunc(b.pre, byKey)
-	slices.SortFunc(b.fresh, byKey)
 	b.preRoot = root(b.pre)
 	return b
+}
+
+// Next is the shard's following batch once this one is certified under referenceTime: its leaves join the pre-state with the values the
+// verifier stores for them, and as many fresh keys as this batch inserted are derived for the next generation. A shard that certifies a batch
+// after each certificate makes a chain of real transitions, each from the root the last one certified.
+func (b *Batch) Next(referenceTime uint64) *Batch {
+	n := &Batch{seed: b.seed, keyBit: b.keyBit, generation: b.generation + 1, pre: slices.Clone(b.pre)}
+	for _, l := range b.fresh {
+		stored := rsmt.LeafValue(l.value, referenceTime)
+		n.pre = append(n.pre, leaf{l.key, stored[:]})
+	}
+	slices.SortFunc(n.pre, byKey)
+	n.fresh = n.freshLeaves(len(b.fresh))
+	n.preRoot = root(n.pre)
+	return n
+}
+
+func byKey(a, b leaf) int { return bytes.Compare(a.key[:], b.key[:]) }
+
+func (b *Batch) derive(kind string, i int) [32]byte {
+	var n [8]byte
+	binary.BigEndian.PutUint64(n[:], uint64(i)) // #nosec G115 i is a leaf index
+	return sha256.Sum256(slices.Concat([]byte(b.seed), []byte(kind), n[:]))
+}
+
+// key derives a key in the batch's half of the key space.
+func (b *Batch) key(kind string, i int) [32]byte {
+	k := b.derive(kind, i)
+	switch b.keyBit {
+	case 0:
+		k[0] &= 0x7f
+	case 1:
+		k[0] |= 0x80
+	}
+	return k
+}
+
+// freshLeaves are the generation's inserted leaves, sorted; generation 0 keeps New's original derivation.
+func (b *Batch) freshLeaves(inserted int) []leaf {
+	tag := ""
+	if b.generation > 0 {
+		tag = fmt.Sprintf("-%d", b.generation)
+	}
+	var out []leaf
+	for i := range inserted {
+		tx := b.derive("new-tx"+tag, i)
+		out = append(out, leaf{b.key("new-key"+tag, i), tx[:]})
+	}
+	slices.SortFunc(out, byKey)
+	return out
 }
 
 // firstDiff is the first bit at which two different keys differ.
@@ -158,7 +190,7 @@ func (b *Batch) Envelope(referenceTime uint64) ([]byte, [32]byte, Stats, error) 
 		stored := rsmt.LeafValue(l.value, referenceTime)
 		merged = append(merged, leaf{l.key, stored[:]})
 	}
-	slices.SortFunc(merged, func(a, b leaf) int { return bytes.Compare(a.key[:], b.key[:]) })
+	slices.SortFunc(merged, byKey)
 	env, err := rsmt.EncodeEnvelope(declared, proof)
 	if err != nil {
 		return nil, [32]byte{}, s, fmt.Errorf("encoding the envelope: %w", err)

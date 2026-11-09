@@ -68,3 +68,22 @@ func TestDefaultBatchShape(t *testing.T) {
 	require.Greater(t, s.Opaque, 500)
 	t.Logf("%+v", s)
 }
+
+// A chain of batches: each Next starts from the root the last envelope certified, under the reference time it was certified at, and the next
+// envelope verifies from there and not from the old pre-state.
+func TestNextChainsFromTheCertifiedRoot(t *testing.T) {
+	b := New("chain", 1, 1_000, 100)
+	for i, tau := range []uint64{1000, 1007, 2000} {
+		env, next, s, err := b.Envelope(tau)
+		require.NoError(t, err)
+		require.NoError(t, verify(t, env, b.PreRoot(), next, tau), "generation %d", i)
+		require.Equal(t, 1_000+100*i, s.PreLeaves)
+		n := b.Next(tau)
+		require.Equal(t, next, n.PreRoot(), "generation %d: the next pre-state is the certified root", i)
+		require.NotEqual(t, b.Next(tau+1).PreRoot(), n.PreRoot(), "the stored values depend on the reference time")
+		nextEnv, nextRoot, _, err := n.Envelope(tau + 1)
+		require.NoError(t, err)
+		require.ErrorIs(t, verify(t, nextEnv, b.PreRoot(), nextRoot, tau+1), rsmt.ErrRootMismatch, "not from the old pre-state")
+		b = n
+	}
+}

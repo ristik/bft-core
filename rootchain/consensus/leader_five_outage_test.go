@@ -139,7 +139,10 @@ func reportFive(t *testing.T, label string, samples []fiveSample) (normal []time
 		rows = append(rows, fmt.Sprintf("%s:%d/%s/%d", s.phase, s.rounds, s.elapsed.Round(time.Millisecond), s.sends))
 	}
 	t.Logf("%s: samples (phase:rounds/seconds/sends) %s", label, strings.Join(rows, " "))
-	for _, phase := range []string{"normal", "live run", "dead run"} {
+	for _, phase := range []string{"normal", "live run", "dead run", "restart"} {
+		if phase == "restart" && len(byPhase[phase]) == 0 {
+			continue // only a rolling restart has one
+		}
 		t.Logf("%s, %s: %s", label, phase, durations(byPhase[phase], gate6NormalP95))
 	}
 	t.Logf("%s, unconditional: %s", label, durations(all, gate6NormalP95))
@@ -266,26 +269,8 @@ func fiveReturnLeads(t *testing.T, c *q4bLive, selector *leader.EpochReputation,
 		return false
 	}, q4bDeadline, 50*time.Millisecond, "the returned member re-enters the schedule")
 	// and leads a block the others commit: a normal-schedule round after its return whose committed block it authored
-	led := func() uint64 {
-		c.mu.Lock()
-		rounds := make([]uint64, 0, len(c.chains[c.idx(live[0])]))
-		for r := range c.chains[c.idx(live[0])] {
-			if r > returnedAt {
-				rounds = append(rounds, r)
-			}
-		}
-		c.mu.Unlock()
-		slices.Sort(rounds)
-		for _, r := range rounds {
-			b, err := c.nodes[c.idx(live[0])].r.manager.blockStore.Block(r)
-			if err == nil && b.BlockData != nil && b.BlockData.Author == c.id(member).String() && !inRecoveryRun(selector, r) {
-				return r
-			}
-		}
-		return 0
-	}
 	var at uint64
-	require.Eventually(t, func() bool { at = led(); return at != 0 }, q4bDeadline, 50*time.Millisecond, "the returned member leads a committed block outside a recovery run")
+	require.Eventually(t, func() bool { at = ledCommit(c, selector, member, live[0], returnedAt); return at != 0 }, q4bDeadline, 50*time.Millisecond, "the returned member leads a committed block outside a recovery run")
 	t.Logf("%s returned at round %d and led the committed block of round %d", member, returnedAt, at)
 	require.Eventually(t, func() bool {
 		if len(c.commitsSince(c.idx(member), returned)) == 0 {
@@ -391,6 +376,26 @@ func fiveLateCollectorFailure(t *testing.T, victim string, names []string) {
 	c.requireChainsAgree(live...)
 	fiveReturnLeads(t, c, selector, victim, live, names)
 	c.stopAll()
+}
+
+// ledCommit is the first round after the given one, outside a recovery run, whose block observer committed and member authored; 0 if none yet.
+func ledCommit(c *q4bLive, selector *leader.EpochReputation, member, observer string, after uint64) uint64 {
+	c.mu.Lock()
+	rounds := make([]uint64, 0, len(c.chains[c.idx(observer)]))
+	for r := range c.chains[c.idx(observer)] {
+		if r > after {
+			rounds = append(rounds, r)
+		}
+	}
+	c.mu.Unlock()
+	slices.Sort(rounds)
+	for _, r := range rounds {
+		b, err := c.nodes[c.idx(observer)].r.manager.blockStore.Block(r)
+		if err == nil && b.BlockData != nil && b.BlockData.Author == c.id(member).String() && !inRecoveryRun(selector, r) {
+			return r
+		}
+	}
+	return 0
 }
 
 func inRecoveryRun(s *leader.EpochReputation, round uint64) bool {

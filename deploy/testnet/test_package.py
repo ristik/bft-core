@@ -130,6 +130,89 @@ class UtbProfile(unittest.TestCase):
         self.assertIn('./aggregator-utb:/utb',agg['volumes'])
         self.assertIn('./aggregator:/state:ro',agg['volumes'],'the signing key mount stays read-only')
         self.assertNotIn('UTB_BUNDLE_FILE',env,'a fresh chain starts from the genesis entry, not from a bundle')
+    def test_the_upstream_facing_aggregator_gets_the_bundle_pin_and_network_and_no_bolt_store(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out=Path(tmp)/'tn-fixture';out.mkdir()
+            roots,evms=['r%d'%i for i in range(4)],['e%d'%i for i in range(4)]
+            cfg=generate.topology(out,4,{'root':roots,'evm':evms},self.images,'captcha',(),30000000,False,'127.0.0.1',self.PIN,'upstream')
+        agg=cfg['services']['aggregator']
+        env=agg['environment']
+        self.assertEqual((env['UTB_BUNDLE_FILE'],env['UTB_GENESIS_ID'],env['UTB_EXPECTED_NETWORK']),('/network/utb-bundle.cbor',self.PIN,str(generate.TRUST_BASE_NETWORK_ID)))
+        for name in ('UTB_GENESIS_FILE','UTB_ENTRIES_DB'):
+            self.assertNotIn(name,env,'the two aggregators read the same names with different meaning: each gets only its own')
+        self.assertNotIn('./aggregator-utb:/utb',agg['volumes'])
+        self.assertIn('./aggregator:/state:ro',agg['volumes'])
+        integration=self.topo(4,self.PIN)
+        for name in cfg['services']:
+            if name != 'aggregator': self.assertEqual(cfg['services'][name],integration['services'][name],name)
+    def test_an_unknown_aggregator_variant_is_refused(self):
+        with self.assertRaises(ValueError): generate.utb_aggregator_environment(self.PIN,'other')
+    def test_the_upstream_aggregator_pin_is_a_full_commit_and_differs_from_the_integration_one(self):
+        pins=json.loads((Path(__file__).parent/'pins.json').read_text())
+        self.assertRegex(pins['aggregator-go-upstream'],r'^[0-9a-f]{40}$')
+        self.assertNotEqual(pins['aggregator-go-upstream'],pins['aggregator-go'])
+    def test_the_utb_stages_are_methods_outside_the_default_and_pos_lists(self):
+        import rehearse
+        for name,method in rehearse.UTB_STAGES:
+            self.assertTrue(callable(getattr(rehearse.Rehearsal,method)),name)
+            self.assertNotIn(name,[n for n,_ in rehearse.STAGES+rehearse.POS_STAGES],'the hosted rehearsal package has no signed history: its default run must not name them')
+    def utb_live_fixture(self,roots_epoch=3,served_tip=3,replay_tip=None,wrong_snapshot_answers_history=False,verifier_accepts_tampered=False):
+        """A Rehearsal whose gateway and offline verifier are fakes: the served history is a pure function of (tip, query). Returns (instance, calls)."""
+        import rehearse
+        ev=Path(tempfile.mkdtemp());calls=[]
+        pin=self.PIN
+        def tip_id(t): return '0x'+('%02x'%t)*32
+        class Fake(rehearse.Rehearsal):
+            def __init__(self): self.n,self.manifest,self.ubft,self.gen,self.evidence=4,{'utb':{'genesis_id':pin,'aggregator':'integration'}},'/bin/ubft',ev,ev
+            def say(self,*a): pass
+            def evh(self): return ev
+            def compose(self,*a,**k): return ''
+            def root_epoch(self,i,t): return roots_epoch
+            def wait(self,what,probe,seconds):
+                r=probe()
+                if not r: raise rehearse.Failure(what)
+                return r
+            def keep_redacted(self,path,text): path.write_text(text)
+            def utb_page(self,query):
+                calls.append(query)
+                if 'snapshotEnd=' in query:
+                    t=int(re.search(r'snapshotEnd=(\d+)',query).group(1));want=re.search(r'snapshotEntryId=(0x[0-9a-f]{64})',query).group(1)
+                    if want!=tip_id(t) and not wrong_snapshot_answers_history: return 409,b'conflict'
+                    u=replay_tip if replay_tip is not None else t;return 200,b'T%d:sum%d' % (u,u)
+                return 200,b'T%d:sum%d' % (served_tip,served_tip)
+            def utb_verify(self,path,pin_):
+                data=Path(path).read_bytes()
+                m=re.fullmatch(rb'T(\d+):sum(\d+)',data)
+                if not m or m.group(1)!=m.group(2): return (verifier_accepts_tampered and data!=b'conflict'),(1 if verifier_accepts_tampered else None),(3 if verifier_accepts_tampered else None),('0x'+'ab'*32 if verifier_accepts_tampered else None),'bad'
+                t=int(m.group(1));return True,1,t,tip_id(t),'ok'
+        return Fake(),calls
+    def run_utb_live(self,**kw):
+        import rehearse
+        fake,calls=self.utb_live_fixture(**kw)
+        with patch('rehearse.handoff_ops.DockerTransport',lambda gen: None): fake.utb_live()
+        return fake,calls
+    def test_utb_live_accepts_a_tip_ahead_of_the_roots_epoch_and_does_not_count_log_lines(self):
+        fake,calls=self.run_utb_live(roots_epoch=3,served_tip=4)   # a finalized future entry: tip 4 while the roots certify at 3
+        steps=json.loads((fake.evh()/'utb-live-steps.json').read_text())
+        self.assertEqual((steps['rootsEpoch'],steps['tipEpoch']),(3,4))
+        self.assertTrue(any('snapshotEnd=4' in c for c in calls),'the replay asks for exactly the first history')
+    def test_utb_live_refuses_a_history_that_does_not_reach_the_roots_epoch(self):
+        import rehearse
+        with self.assertRaises(rehearse.Failure): self.run_utb_live(roots_epoch=3,served_tip=2)
+    def test_utb_live_refuses_a_replay_that_answers_a_different_history(self):
+        import rehearse
+        with self.assertRaises(rehearse.Failure): self.run_utb_live(roots_epoch=3,served_tip=3,replay_tip=4)
+    def test_utb_live_control_fails_when_a_wrong_snapshot_is_answered_with_the_held_history(self):
+        import rehearse
+        with self.assertRaises(rehearse.Failure): self.run_utb_live(wrong_snapshot_answers_history=True)
+    def test_utb_live_control_fails_when_the_verifier_accepts_a_tampered_file(self):
+        import rehearse
+        with self.assertRaises(rehearse.Failure): self.run_utb_live(verifier_accepts_tampered=True)
+    def test_the_offline_verifier_output_is_parsed_exactly(self):
+        import rehearse
+        m=rehearse.Rehearsal.UTB_VERIFIED.search('ok: epochs 1..3, tip 0x'+'cd'*32+'\n')
+        self.assertEqual((m.group(1),m.group(2),m.group(3)),('1','3','0x'+'cd'*32))
+        self.assertIsNone(rehearse.Rehearsal.UTB_VERIFIED.search('ok: epochs 1..3, tip 0xabc'))
     def test_without_a_pin_the_package_is_the_one_without_the_profile(self):
         plain,off=self.topo(4,None),self.topo(4,None)
         self.assertEqual(plain,off)
