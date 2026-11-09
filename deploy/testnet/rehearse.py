@@ -1249,36 +1249,97 @@ class Rehearsal:
         run = subprocess.run(['docker', 'compose', *handoff_ops.compose_files(self.gen), 'exec', '-T', service, *command], text=True, capture_output=True)
         return run.returncode, run.stdout, run.stderr
 
+    UTB_VERIFIED = re.compile(r'^ok: epochs (\d+)\.\.(\d+), tip (0x[0-9a-f]{64})$', re.M)
+
+    def utb_page(self, query):
+        """(status, bytes) of GET /api/v1/trustbases?query through the public gateway, as a client behind the proxy. The body is binary CBOR: it is never decoded as text."""
+        conn = http.client.HTTPConnection(PUBLIC_RPC, timeout=20)
+        try:
+            conn.request('GET', '/api/v1/trustbases?' + query, headers={'X-Forwarded-For': PROXY_IPS[0] + '10'})
+            response = conn.getresponse()
+            return response.status, response.read()
+        finally:
+            conn.close()
+
+    def utb_verify(self, path, pin):
+        """(ok, first epoch, tip epoch, tip EntryID, output) of the pinned ubft's offline verifier on a bundle file: genesis EntryID equals the pin, epochs contiguous, every entry
+        linked to its predecessor's EntryID and signed by a quorum of the predecessor (strict), nothing after the tip."""
+        run = subprocess.run([self.ubft, 'trust-base', 'utb-verify', '--bundle', str(path), '--utb-genesis-id', pin], text=True, capture_output=True)
+        found = self.UTB_VERIFIED.search(run.stdout)
+        if run.returncode or not found:
+            return False, None, None, None, (run.stdout + run.stderr).strip()[-300:]
+        return True, int(found.group(1)), int(found.group(2)), found.group(3), run.stdout.strip()
+
+    def utb_history(self, label, pin, snapshot=None):
+        """The aggregator's served history as ONE complete page from the genesis (a bundle: status OK, no cursor), verified offline by `ubft trust-base utb-verify` against the
+        pinned genesis EntryID. `snapshot` = (tip epoch, tip EntryID) asks the server to answer for exactly that history (snapshotEnd / snapshotEntryId): an answer that is not
+        the held history is refused, so a replay of the same history is idempotent and a conflicting replacement cannot pass. Returns (tip epoch, tip EntryID, file)."""
+        query = 'from=1&maxEntries=64' + (f'&snapshotEnd={snapshot[0]}&snapshotEntryId={snapshot[1]}' if snapshot else '')
+        status, body = self.utb_page(query)
+        self.expect(status == 200 and len(body) > 0, f'the aggregator serves its history ({label})', f'HTTP {status}, {len(body)} bytes')
+        path = self.evh() / f'utb-history-{label}.cbor'
+        path.write_bytes(body)
+        ok, first, tip, tip_id, out = self.utb_verify(path, pin)
+        self.expect(ok, f'the served history verifies offline against the pinned genesis ({label})', out)
+        self.expect(first == 1, f'the history starts at the genesis epoch ({label})', str(first))
+        if snapshot:
+            self.expect((tip, tip_id) == tuple(snapshot), f'the replay answers for exactly the first history ({label})', f'{tip} {tip_id}')
+        return tip, tip_id, path
+
     def utb_live(self):
-        """The live UTB source on the package built with --utb (either aggregator): after the handoffs the roots certify at epoch E, and the aggregator's history must hold exactly
-        epochs 1..E, each admitted once and from the roots (V3 attachment or GetTrustBase), with nothing refused and no version 1 fallback. Evidence is the aggregator's own log
-        (messages 'trust-base entries appended from certification response' / 'trust-base catch-up finished' with the tip), kept redacted; the source of every epoch is recorded.
-        Needs the handoffs first (pos-advance gives E=2, pos-handoff-2 E=3)."""
+        """The live UTB source on the package built with --utb (the integration aggregator; the upstream one when its feeder is merged): the aggregator's SERVED history, not its
+        log lines, is the evidence. After the handoffs the roots certify at epoch E; the history the aggregator serves must (1) reach at least E (it may be ahead: a finalized
+        future entry is allowed, so the tip is NOT compared with the active epoch), (2) verify offline from the pinned genesis EntryID to its tip: one entry per epoch,
+        contiguous, each linked to its predecessor and signed by the predecessor's quorum, (3) answer a replay of the same history (snapshot = that tip and EntryID) with the
+        same history, so nothing was replaced, (4) be refused when the snapshot names a different EntryID (control: the replay check can fail), and (5) fail the offline
+        verifier when one byte is changed (control: the verifier checks). The aggregator's own log is kept as supplementary evidence and must show no refused update and no
+        version 1 fallback; how many log lines an epoch produced is not asserted (restarts and replicas replay). Needs the handoffs first and --ubft."""
         utb = self.manifest.get('utb')
         self.expect(utb is not None, 'the generation has the signed trust-base profile (generate.py --utb)')
+        self.expect(bool(self.ubft), 'the stage needs --ubft (the offline verifier)')
+        pin = utb['genesis_id']
         transport = handoff_ops.DockerTransport(self.gen)
         epoch = self.root_epoch(1, transport)
         self.expect(epoch is not None and epoch >= 2 and all(self.root_epoch(i, transport) == epoch for i in range(1, self.n + 1)), 'every root certifies at the same switched epoch', str(epoch))
-        def tips():
-            lines = []
-            for raw in self.compose('logs', '--no-color', 'aggregator', check=False).splitlines():
-                at = raw.find('{')
-                if at < 0: continue
-                try: lines.append(json.loads(raw[at:]))
-                except ValueError: continue
-            return lines
-        def tip_of(lines):
-            held = [line['tip'] for line in lines if line.get('msg') in ('trust-base entries appended from certification response', 'trust-base catch-up finished') and isinstance(line.get('tip'), int)]
-            return max(held) if held else None
-        self.expect(self.wait(f'the aggregator holds epoch {epoch}', lambda: tip_of(tips()) == epoch, 180), 'the aggregator history tip equals the roots\' epoch', str(tip_of(tips())))
-        lines = tips()
-        # every step of the tip is one authenticated entry from a root: appended from a response, or fetched
-        steps = [(line['msg'], line['tip'], line.get('added', 0)) for line in lines if line.get('msg') in ('trust-base entries appended from certification response', 'trust-base catch-up finished') and line.get('added', 0)]
-        self.expect(sum(added for _, _, added in steps) == epoch - 1, f'epochs 2..{epoch} were each admitted exactly once', json.dumps(steps))
+        def reached():
+            status, body = self.utb_page('from=1&maxEntries=64')
+            if status != 200 or not body:
+                return None
+            probe = self.evh() / 'utb-history-probe.cbor'
+            probe.write_bytes(body)
+            ok, _, tip, _, _ = self.utb_verify(probe, pin)
+            return tip if ok and tip >= epoch else None
+        self.expect(self.wait(f'the aggregator serves a verifying history reaching epoch {epoch}', reached, 180), 'the aggregator history reaches the roots\' epoch')
+        tip, tip_id, first_file = self.utb_history('first', pin)
+        self.expect(tip >= epoch, 'the verified tip is at least the roots\' epoch', f'tip {tip}, roots {epoch}')
+        # replay: the same history again, asked for by its tip and EntryID
+        again_tip, again_id, again_file = self.utb_history('replay', pin, (tip, tip_id))
+        self.expect((again_tip, again_id) == (tip, tip_id), 'the replay is the same history (same tip epoch and EntryID; a different valid witness of the same EntryID is a replay)')
+        # control 1: a snapshot naming another EntryID must not be answered with the history
+        wrong = '0x' + ('00' if not tip_id.endswith('00') else '01') * 32
+        status, body = self.utb_page(f'from=1&maxEntries=64&snapshotEnd={tip}&snapshotEntryId={wrong}')
+        control = self.evh() / 'utb-history-wrong-snapshot.cbor'
+        control.write_bytes(body)
+        ok, _, _, control_id, _ = self.utb_verify(control, pin)
+        self.expect(not (status == 200 and ok and control_id == tip_id and body == first_file.read_bytes()), 'a replay naming another EntryID is not answered with the held history (control)', f'HTTP {status}')
+        # control 2: the offline verifier refuses a changed byte
+        raw = bytearray(first_file.read_bytes())
+        raw[len(raw) // 2] ^= 0x01
+        tampered = self.evh() / 'utb-history-tampered.cbor'
+        tampered.write_bytes(bytes(raw))
+        self.expect(not self.utb_verify(tampered, pin)[0], 'the offline verifier refuses a history with one changed byte (control)')
+        # supplementary: the aggregator's own log, kept; refusals and the version 1 fallback are failures
+        lines = []
+        for raw_line in self.compose('logs', '--no-color', 'aggregator', check=False).splitlines():
+            at = raw_line.find('{')
+            if at < 0: continue
+            try: lines.append(json.loads(raw_line[at:]))
+            except ValueError: continue
         refused = [line for line in lines if line.get('msg') in ('dropping an invalid trust-base update',) or 'version 1' in str(line.get('error', ''))]
         self.expect(not refused, 'no trust-base update was refused and no version 1 trust base was consulted', json.dumps(refused)[:300])
         self.keep_redacted(self.evh() / 'utb-live-aggregator.log', '\n'.join(json.dumps(line) for line in lines if 'trust-base' in str(line.get('msg', ''))) + '\n')
-        (self.evh() / 'utb-live-steps.json').write_text(json.dumps({'epoch': epoch, 'aggregator': utb.get('aggregator', 'integration'), 'steps': steps}, indent=1) + '\n')
+        (self.evh() / 'utb-live-steps.json').write_text(json.dumps({'rootsEpoch': epoch, 'tipEpoch': tip, 'tipEntryId': tip_id, 'genesisId': pin, 'aggregator': utb.get('aggregator', 'integration'),
+                                                                     'checked': ['verifies offline from the pinned genesis', 'contiguous, one entry per epoch', 'replay answers the same history', 'wrong-snapshot control', 'tampered-byte control']}, indent=1) + '\n')
 
     def pos_restart(self, epoch=2):
         """The TN-1 pod-restart stage on the switched PoS network: one entity at a time (--pods) its execution client, root and shard node are stopped, the survivors
