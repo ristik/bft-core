@@ -59,6 +59,73 @@ type retainingExecutor struct {
 	*executortest.Fake
 	mu      sync.Mutex
 	pending [][]byte
+	pool    *blockPool
+}
+
+// blockPool is what a real execution client's own peer-to-peer block sync is to the shard node: every block any validator's executor built or verified, by
+// hash, so an executor that did not receive a disseminated block (a late leader under this host's load) can still import it when the roots certify it. The
+// plain fake answers SYNCING for ever, because nothing supplies the block; reth does not.
+type blockPool struct {
+	mu     sync.Mutex
+	blocks map[string]shardnode.Block
+}
+
+func (p *blockPool) put(b shardnode.Block) {
+	if len(b.Raw) == 0 {
+		return
+	}
+	p.mu.Lock()
+	p.blocks[string(b.Hash)] = b
+	p.mu.Unlock()
+}
+
+func (p *blockPool) get(hash []byte) (shardnode.Block, bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	b, ok := p.blocks[string(hash)]
+	return b, ok
+}
+
+func (e *retainingExecutor) Seal(ctx context.Context, id shardnode.BuildID) (shardnode.Block, error) {
+	b, err := e.Fake.Seal(ctx, id)
+	if err == nil {
+		e.pool.put(b)
+	}
+	return b, err
+}
+
+func (e *retainingExecutor) Verify(ctx context.Context, b shardnode.Block, p shardnode.RoundParams) (shardnode.Status, error) {
+	st, err := e.Fake.Verify(ctx, b, p)
+	if err == nil && st == shardnode.StatusValid {
+		e.pool.put(b)
+	}
+	return st, err
+}
+
+// importFromPeers imports the chain from the executor's head up to hash out of the pool, oldest first, each block verified against the then-current head.
+func (e *retainingExecutor) importFromPeers(ctx context.Context, hash shardnode.Hash) {
+	var chain []shardnode.Block
+	want := hash
+	head, _ := e.Fake.Head(ctx)
+	for len(chain) < 64 {
+		b, ok := e.pool.get(want)
+		if !ok {
+			return
+		}
+		chain = append([]shardnode.Block{b}, chain...)
+		if bytes.Equal(b.ParentHash, head.Hash) {
+			break
+		}
+		want = b.ParentHash
+	}
+	for _, b := range chain {
+		if st, err := e.Fake.Verify(ctx, b, shardnode.RoundParams{}); err != nil || st != shardnode.StatusValid {
+			return
+		}
+		if _, err := e.Fake.Commit(ctx, b.Hash); err != nil {
+			return
+		}
+	}
 }
 
 func (e *retainingExecutor) add(entries ...[]byte) {
@@ -84,6 +151,10 @@ func (e *retainingExecutor) Build(ctx context.Context, p shardnode.RoundParams) 
 func (e *retainingExecutor) Commit(ctx context.Context, hash shardnode.Hash) (shardnode.Status, error) {
 	before, _ := e.Fake.Head(ctx)
 	st, err := e.Fake.Commit(ctx, hash)
+	if err == nil && st == shardnode.StatusSyncing {
+		e.importFromPeers(ctx, hash)
+		st, err = e.Fake.Commit(ctx, hash)
+	}
 	if after, herr := e.Fake.Head(ctx); herr == nil && after.Number > before.Number {
 		e.mu.Lock()
 		e.pending = nil
@@ -439,14 +510,27 @@ func addRealShards(t *testing.T, x *liveTransport, c *q4bLive, opts shardnode.BF
 		peers = append(peers, p.ID())
 	}
 	out := map[string]*realShard{}
+	pool := &blockPool{blocks: map[string]shardnode.Block{}}
 	for _, id := range ids {
 		h := hosts[id]
 		diss, err := shardnode.NewNetDisseminator(h.peer, x.obs, peers)
 		require.NoError(t, err)
-		exec := &retainingExecutor{Fake: executortest.NewAt(genesis)}
+		exec := &retainingExecutor{Fake: executortest.NewAt(genesis), pool: pool}
 		node, err := shardnode.New(h.peer, h.net, f.EVMSigners[id], q3fixture.PartitionID, types.ShardID{}, si.ShardConfHash, managerTrust{m: m, old: f.Old}, exec, diss, nil,
 			slog.New(slog.NewTextHandler(&testLogWriter{t: t, prefix: id[len(id)-6:]}, &slog.HandlerOptions{Level: slog.LevelInfo})), opts)
 		require.NoError(t, err)
+		// as the production shard node is configured: the follower's wait for the leader's block follows the shard's own T2, and certificates are served
+		node.SetAwaitTimeout(shardnode.AwaitTimeoutForT2(f.ShardConf.T2Timeout))
+		// A validator that misses a block (a late leader under this host's load) cannot continue without a catch-up (docs/troubleshooting.md: it must resync), which
+		// this package does not model; the authenticated-evidence recovery is the production mechanism for it, switched on here with the other validators as providers.
+		recovery := shardnode.DefaultRecoveryOptions()
+		recovery.Recover = true
+		for _, p := range peers {
+			if p != h.peer.ID() {
+				recovery.Providers = append(recovery.Providers, p)
+			}
+		}
+		require.NoError(t, node.EnableRecovery(recovery))
 		out[id] = &realShard{t: t, id: id, node: node, exec: exec}
 	}
 	return out
@@ -515,7 +599,7 @@ func TestIngressLossWithRealShardsRecoversThroughTheT2Repeat(t *testing.T) {
 	}
 	opts := shardnode.DefaultBFTClientOptions
 	opts.MaxResubmits = -1
-	w := newShardWorld(t, shardWorldConfig{names: []string{"H", "a", "b", "c"}, options: q3fixture.Options{PeerEVM: true}, timeout: 2 * time.Second, blockRate: phaseLockBlockRate, shardOpts: opts})
+	w := newShardWorld(t, shardWorldConfig{names: liveRootNames(), options: q3fixture.Options{PeerEVM: true}, timeout: 2 * time.Second, blockRate: phaseLockBlockRate, shardOpts: opts})
 	w.waitFor("the real shard certifies", 2*time.Minute, func() bool { return w.certCount() >= 4 })
 
 	t.Logf("before the drop: %d certificates sampled, %d requests seen at the roots", w.certCount(), len(w.requestsSince(time.Time{})))
@@ -617,7 +701,7 @@ func TestIngressLossWithRealShardsRecoversThroughTheT2Repeat(t *testing.T) {
 		applied = time.Now()
 		return true
 	})
-	t.Logf("T=%s, block rate %s, T2=%d root rounds, shard: 1 (EVM, 4 validators, fake executor), no other shard load; four non-overlapping terms from the last certificate:", 2*time.Second, phaseLockBlockRate, t2Rounds(w.h))
+	t.Logf("T=%s, block rate %s, T2=%d root rounds, %d roots, shard: 1 (EVM, %d validators, fake executor), no other shard load; four non-overlapping terms from the last certificate:", 2*time.Second, phaseLockBlockRate, t2Rounds(w.h), len(w.c.nodes), len(w.ids))
 	t.Logf("  L_eligible: u -> first T2 proposal            %s", prop.at.Sub(u.at).Round(time.Millisecond))
 	t.Logf("  C_repeat:   proposal -> repeat certified      %s (root round %d, %d after eligibility)", repeat.at.Sub(prop.at).Round(time.Millisecond), repeat.seal, repeat.seal-eligible)
 	first := accepted[0].at
@@ -671,7 +755,7 @@ func TestIngressLossWithRealShardsRecoversThroughTheDuplicateResend(t *testing.T
 	if testing.Short() {
 		t.Skip("a live four-root cluster with four real shard nodes")
 	}
-	w := newShardWorld(t, shardWorldConfig{names: []string{"H", "a", "b", "c"}, options: q3fixture.Options{PeerEVM: true}, timeout: 2 * time.Second, blockRate: phaseLockBlockRate, shardOpts: retryOptions(10)})
+	w := newShardWorld(t, shardWorldConfig{names: liveRootNames(), options: q3fixture.Options{PeerEVM: true}, timeout: 2 * time.Second, blockRate: phaseLockBlockRate, shardOpts: retryOptions(10)})
 	w.waitFor("the real shard certifies", 2*time.Minute, func() bool { return w.certCount() >= 4 })
 
 	marker := []byte("pending-976-dup")
@@ -719,6 +803,7 @@ func TestIngressLossWithRealShardsRecoversThroughTheDuplicateResend(t *testing.T
 	}
 	nodes := w.distinctNodes(resent)
 	require.GreaterOrEqual(t, len(nodes), 3, "a quorum of the validators re-sent their lost request, byte-identical")
+	withHandshake := false
 	for node := range nodes {
 		var firstResend time.Time
 		for _, e := range resent {
@@ -735,9 +820,12 @@ func TestIngressLossWithRealShardsRecoversThroughTheDuplicateResend(t *testing.T
 				own = own || h.node == node
 			}
 		}
-		require.True(t, any, "validator %s re-sent without any handshake of the shard before it", shortID(node))
-		t.Logf("  validator %s: first re-send preceded by its own handshake: %v", shortID(node), own)
+		// The trigger is an authenticated duplicate of the held certificate, not necessarily an answer to a handshake: the roots also deliver the held
+		// certificate on their own. So the handshake is reported, and required of at least one validator below.
+		withHandshake = withHandshake || any
+		t.Logf("  validator %s: first re-send preceded by a handshake of the shard: %v, by its own: %v", shortID(node), any, own)
 	}
+	require.True(t, withHandshake, "at least one validator's re-send followed a handshake of the shard")
 	var applied time.Time
 	w.waitFor("every validator applies the certified block", time.Minute, func() bool {
 		for _, e := range w.executors() {
@@ -762,7 +850,7 @@ func TestIngressLossWithRealShardsAfterTheResendBudgetIsExhausted(t *testing.T) 
 		t.Skip("a live four-root cluster with four real shard nodes")
 	}
 	const budget = 2
-	w := newShardWorld(t, shardWorldConfig{names: []string{"H", "a", "b", "c"}, options: q3fixture.Options{PeerEVM: true}, timeout: 2 * time.Second, blockRate: phaseLockBlockRate, shardOpts: retryOptions(budget)})
+	w := newShardWorld(t, shardWorldConfig{names: liveRootNames(), options: q3fixture.Options{PeerEVM: true}, timeout: 2 * time.Second, blockRate: phaseLockBlockRate, shardOpts: retryOptions(budget)})
 	w.waitFor("the real shard certifies", 2*time.Minute, func() bool { return w.certCount() >= 4 })
 
 	marker := []byte("pending-976-exhausted")
@@ -923,7 +1011,7 @@ func TestIngressLossWithRealShardsPausedNextLeaderHasNoFiniteR(t *testing.T) {
 	}
 	opts := shardnode.DefaultBFTClientOptions
 	opts.MaxResubmits = -1
-	w := newShardWorld(t, shardWorldConfig{names: []string{"H", "a", "b", "c"}, options: q3fixture.Options{PeerEVM: true}, timeout: 2 * time.Second, blockRate: phaseLockBlockRate, shardOpts: opts, silentLast: 1})
+	w := newShardWorld(t, shardWorldConfig{names: liveRootNames(), options: q3fixture.Options{PeerEVM: true}, timeout: 2 * time.Second, blockRate: phaseLockBlockRate, shardOpts: opts, silentLast: 1})
 	cycles := traceEnvInt(t, "BFT_976_CYCLES", 8)
 	rows := runLossCycles(t, w, cycles, w.ids[len(w.ids)-1], 8*time.Second)
 	live, pausedN, liveFresh, pausedFresh := 0, 0, 0, 0
@@ -956,7 +1044,7 @@ func TestIngressLossWithRealShardsFirstAttemptRate(t *testing.T) {
 	}
 	opts := shardnode.DefaultBFTClientOptions
 	opts.MaxResubmits = -1
-	w := newShardWorld(t, shardWorldConfig{names: []string{"H", "a", "b", "c"}, options: q3fixture.Options{PeerEVM: true}, timeout: 2 * time.Second, blockRate: phaseLockBlockRate, shardOpts: opts})
+	w := newShardWorld(t, shardWorldConfig{names: liveRootNames(), options: q3fixture.Options{PeerEVM: true}, timeout: 2 * time.Second, blockRate: phaseLockBlockRate, shardOpts: opts})
 	rows := runLossCycles(t, w, traceEnvInt(t, "BFT_976_CYCLES", 8), "", 8*time.Second)
 	first, behindFail := 0, 0
 	for _, r := range rows {
@@ -967,4 +1055,44 @@ func TestIngressLossWithRealShardsFirstAttemptRate(t *testing.T) {
 		}
 	}
 	t.Logf("summary over %d cycles: certified on the first attempt after the repeat %d; needed another repeat %d (of which %d had first-wave requests at a root that had not yet shown the repeat)", len(rows), first, len(rows)-first, behindFail)
+}
+
+// Control for the loss cycles: the same shards, executors and roots, no request is ever dropped. Entries are queued one after another; every one must be
+// applied at every validator with all heads equal. A divergence here is not the loss path's.
+func TestRealShardsWithoutLossApplyEveryEntry(t *testing.T) {
+	if testing.Short() {
+		t.Skip("a live four-root cluster with four real shard nodes; minutes")
+	}
+	w := newShardWorld(t, shardWorldConfig{names: liveRootNames(), options: q3fixture.Options{PeerEVM: true}, timeout: 2 * time.Second, blockRate: phaseLockBlockRate, shardOpts: shardnode.DefaultBFTClientOptions})
+	w.waitFor("the real shard certifies", 2*time.Minute, func() bool { return w.certCount() >= 4 })
+	n := traceEnvInt(t, "BFT_976_ENTRIES", 20)
+	for k := 1; k <= n; k++ {
+		marker := []byte(fmt.Sprintf("pending-976-control-%d", k))
+		w.addPending(marker)
+		start := time.Now()
+		w.waitFor("the entry is applied at every validator", 3*time.Minute, func() bool {
+			var first []byte
+			for _, e := range w.executors() {
+				if e.poolSize() != 0 {
+					return false
+				}
+				h, _ := e.Head(context.Background())
+				if first == nil {
+					first = h.Hash
+				} else if !bytes.Equal(first, h.Hash) {
+					return false
+				}
+			}
+			return true
+		})
+		t.Logf("entry %d applied at all validators after %s", k, time.Since(start).Round(time.Millisecond))
+	}
+}
+
+// liveRootNames is the roots of these windows: four, or five with BFT_976_ROOTS=5 (the gate 9 committee size).
+func liveRootNames() []string {
+	if os.Getenv("BFT_976_ROOTS") == "5" {
+		return []string{"H", "a", "b", "c", "d"}
+	}
+	return []string{"H", "a", "b", "c"}
 }
