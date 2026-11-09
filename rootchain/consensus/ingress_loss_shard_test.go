@@ -18,6 +18,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/unicitynetwork/bft-go-base/types"
 
+	"github.com/unicitynetwork/bft-core/internal/quorumweight"
 	"github.com/unicitynetwork/bft-core/internal/testutils/q3fixture"
 	"github.com/unicitynetwork/bft-core/network"
 	"github.com/unicitynetwork/bft-core/network/protocol/abdrc"
@@ -31,7 +32,19 @@ import (
 // #976 part 2: the REAL shard driver (the production shardnode.Node: BFTClient, round driver, net disseminator; a deterministic fake executor that keeps its
 // pending work until a block carrying it is committed, as a mempool does) for the fixture's EVM validators, on the same libp2p transport as the roots. The
 // roots' ingress is the drop and observation point: requests the shards send are dropped there on purpose, so no root holds them. Nothing here replaces
-// a request the shard built: every request the roots accept is one a validator signed and sent.
+// a request the shard built: every request delivered to a root is one a validator signed and sent. "Delivered" is the wrapper's view, before the root validates
+// it; see requestEvent.
+//
+// STAND-INS AND LIMITS (read before quoting any number from these tests):
+//   - Executor: a deterministic FAKE (no EVM, no reth). Its sync is replaced by blockPool, an OPTIMISTIC availability model: it holds only blocks a fixture
+//     validator's executor itself built (Seal) or verified valid (Verify), by hash, and importFromPeers verifies each against the importing head and commits it
+//     directly. It does not model reth sync, its deadlines, or unavailable peers; it never creates or replaces a request, and the certificate / evidence admission
+//     path is the production one. No claim about execution-sync safety or latency follows from a pass.
+//   - Authenticated-evidence recovery is ENABLED (Recover, providers = the other validators, DefaultRecoveryOptions otherwise): an enabled premise.
+//   - The follower's await timeout is AwaitTimeoutForT2(T2), as the CLI sets it.
+//   - MaxResubmits = -1 is the TEST-ONLY control that withholds the duplicate-triggered re-send, to isolate the T2 path.
+//   - One shard (EVM, 4 or 5 validators), no f8batch proof load (no RSMT shards, no ~212 KB batches), no other shard traffic. One host, loopback libp2p.
+//   - Root rounds and shard rounds share the host with whatever else runs on it; the figures are observations of this profile, not bounds.
 
 // managerTrust serves the trust bases the shard's certificates name: the live epoch of the manager, and the fixture's earlier one (the genesis certificate of
 // the shard is from it).
@@ -163,14 +176,90 @@ func (e *retainingExecutor) Commit(ctx context.Context, hash shardnode.Hash) (sh
 	return st, err
 }
 
+// requestEvent is one request DELIVERED to a root's transport wrapper (lossyNet), before rootchain.Node validates, buffers or counts it. A non-dropped event
+// therefore means "the network handed it to the root node", not "the root admitted it"; admission is observed only through what the roots go on to certify.
 type requestEvent struct {
 	at        time.Time
 	root      string
 	node      string
 	round     uint64
+	epoch     uint64
+	prev      []byte
 	blockHash []byte
 	fp        [32]byte // of the signed bytes: a byte-identical re-send has the same
 	dropped   bool
+}
+
+// attemptKey identifies one logical attempt of the shard: the request context its validators sign (shard round, epoch and the previous certified state). A
+// later attempt, built after a later repeat, has another round, so retries cannot be counted into an earlier attempt.
+type attemptKey struct {
+	round, epoch uint64
+	prev         string
+}
+
+func (e requestEvent) attempt() attemptKey { return attemptKey{e.round, e.epoch, string(e.prev)} }
+
+func keyOfIR(ir *types.InputRecord) attemptKey {
+	return attemptKey{ir.RoundNumber, ir.Epoch, string(ir.PreviousHash)}
+}
+
+// certSampleResolution is the uncertainty of every time taken from the certificate sampler (it polls the roots every few ms). Latencies that involve a
+// certificate time are reported with it; request times are the wrapper's own clock and carry no such error.
+const certSampleResolution = 10 * time.Millisecond
+
+// span reports a latency taken against a sampled certificate time as an interval, never a point and never a negative number.
+func span(d time.Duration) string {
+	lo, hi := d-certSampleResolution, d+certSampleResolution
+	if hi < 0 {
+		return fmt.Sprintf("the request preceded the first sighting by %s (resolution %s)", (-d).Round(time.Millisecond), certSampleResolution)
+	}
+	return fmt.Sprintf("[%s, %s]", max(lo, 0).Round(time.Millisecond), hi.Round(time.Millisecond))
+}
+
+// attemptStats is what the wrappers saw of one attempt's non-dropped requests for a block.
+type attemptStats struct {
+	key        attemptKey
+	first      time.Time       // the first request of the attempt delivered to any root
+	nodes      map[string]bool // distinct validators whose request for the attempt was delivered to any root
+	quorumAt   time.Time       // the time a single root had threshold distinct validators' requests delivered (zero: never); still before validation
+	quorumRoot string
+}
+
+// attemptsOf groups the non-dropped requests for block by attempt. threshold is the shard's request threshold.
+func attemptsOf(evs []requestEvent, block []byte, threshold int) map[attemptKey]*attemptStats {
+	out := map[attemptKey]*attemptStats{}
+	perRoot := map[attemptKey]map[string]map[string]bool{}
+	sorted := slices.Clone(evs)
+	slices.SortFunc(sorted, func(a, b requestEvent) int { return a.at.Compare(b.at) })
+	for _, e := range sorted {
+		if e.dropped || !bytes.Equal(e.blockHash, block) {
+			continue
+		}
+		k := e.attempt()
+		st := out[k]
+		if st == nil {
+			st = &attemptStats{key: k, first: e.at, nodes: map[string]bool{}}
+			out[k] = st
+			perRoot[k] = map[string]map[string]bool{}
+		}
+		st.nodes[e.node] = true
+		if perRoot[k][e.root] == nil {
+			perRoot[k][e.root] = map[string]bool{}
+		}
+		perRoot[k][e.root][e.node] = true
+		if st.quorumAt.IsZero() && len(perRoot[k][e.root]) >= threshold {
+			st.quorumAt, st.quorumRoot = e.at, e.root
+		}
+	}
+	return out
+}
+
+// threshold is the shard's request threshold for its validators (unit weights): the majority the production quorum arithmetic computes, not a constant. It is
+// the shard's request majority, not the roots' consensus threshold.
+func (w *shardWorld) threshold() int {
+	q, err := quorumweight.MajorityThreshold(uint64(len(w.ids)))
+	require.NoError(w.t, err)
+	return int(q)
 }
 
 // lossyNet is the partition network a root node is given: it forwards what arrives, except the requests the world decides to drop.
@@ -244,7 +333,7 @@ func (w *shardWorld) judge(root string, req *certification.BlockCertificationReq
 	raw, _ := types.Cbor.Marshal(req)
 	ev := requestEvent{at: time.Now(), root: root, node: req.NodeID, fp: sha256.Sum256(raw)}
 	if req.InputRecord != nil {
-		ev.round, ev.blockHash = req.InputRecord.RoundNumber, bytes.Clone(req.InputRecord.BlockHash)
+		ev.round, ev.epoch, ev.prev, ev.blockHash = req.InputRecord.RoundNumber, req.InputRecord.Epoch, bytes.Clone(req.InputRecord.PreviousHash), bytes.Clone(req.InputRecord.BlockHash)
 	}
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -659,23 +748,16 @@ func TestIngressLossWithRealShardsRecoversThroughTheT2Repeat(t *testing.T) {
 		}
 		return false
 	})
-	accepted := []requestEvent{}
+	// The attempt that certified, and only its requests: a later retry cannot satisfy an earlier attempt's condition.
+	key := keyOfIR(fresh.ir)
+	attempts := attemptsOf(w.requestsSince(opened), expected.Hash, w.threshold())
 	for _, e := range w.requestsSince(opened) {
-		if !e.dropped {
-			accepted = append(accepted, e)
-		}
+		require.False(t, !e.dropped && lost[e.fp], "no byte-identical re-send: %s from %s", e.root, shortID(e.node))
 	}
-	require.NotEmpty(t, accepted)
-	for _, e := range accepted {
-		require.False(t, lost[e.fp], "no byte-identical re-send: %s from %s", e.root, shortID(e.node))
-	}
-	acceptedBy := map[string]bool{}
-	for _, e := range accepted {
-		if bytes.Equal(e.blockHash, expected.Hash) {
-			acceptedBy[e.node] = true
-		}
-	}
-	require.GreaterOrEqual(t, len(acceptedBy), 3, "a quorum of the validators sent the new attempt for the pending block")
+	st := attempts[key]
+	require.NotNil(t, st, "requests of the attempt that certified were delivered to the roots")
+	require.GreaterOrEqual(t, len(st.nodes), w.threshold(), "the certified attempt was signed and sent by at least the shard's request threshold of validators")
+	require.False(t, st.quorumAt.IsZero(), "a threshold of distinct validators' requests of that attempt reached a common root (delivered to its ingress; the root's own admission is shown by the certification that followed)")
 	same, err = types.EqualIR(repeat.ir, fresh.ir)
 	require.NoError(t, err)
 	require.False(t, same, "the new attempt certified as new work, not another repeat")
@@ -701,13 +783,13 @@ func TestIngressLossWithRealShardsRecoversThroughTheT2Repeat(t *testing.T) {
 		applied = time.Now()
 		return true
 	})
-	t.Logf("T=%s, block rate %s, T2=%d root rounds, %d roots, shard: 1 (EVM, %d validators, fake executor), no other shard load; four non-overlapping terms from the last certificate:", 2*time.Second, phaseLockBlockRate, t2Rounds(w.h), len(w.c.nodes), len(w.ids))
+	t.Logf("T=%s, block rate %s, T2=%d root rounds, %d roots, shard: 1 (EVM, %d validators, fake executor, shared block pool), request threshold %d, no other shard load; non-overlapping terms from the last certificate:", 2*time.Second, phaseLockBlockRate, t2Rounds(w.h), len(w.c.nodes), len(w.ids), w.threshold())
 	t.Logf("  L_eligible: u -> first T2 proposal            %s", prop.at.Sub(u.at).Round(time.Millisecond))
 	t.Logf("  C_repeat:   proposal -> repeat certified      %s (root round %d, %d after eligibility)", repeat.at.Sub(prop.at).Round(time.Millisecond), repeat.seal, repeat.seal-eligible)
-	first := accepted[0].at
-	t.Logf("  R:          repeat certified -> first fresh request accepted at a root   %s (observation resolution ~5 ms; negative means the request preceded the poll)", first.Sub(repeat.at).Round(time.Millisecond))
-	t.Logf("  C_fresh:    first accepted -> certified       %s (root round %d, %d after the repeat)", fresh.at.Sub(first).Round(time.Millisecond), fresh.seal, fresh.seal-repeat.seal)
-	t.Logf("  applied at all four validators %s after certification", applied.Sub(fresh.at).Round(time.Millisecond))
+	t.Logf("  R (first arrival):  repeat certified -> first request of the certified attempt delivered to a root   %s", span(st.first.Sub(repeat.at)))
+	t.Logf("  R (quorum delivered): repeat certified -> %d distinct validators' requests of that attempt delivered to common root %s   %s (delivery, before the root validates)", w.threshold(), st.quorumRoot, span(st.quorumAt.Sub(repeat.at)))
+	t.Logf("  C_fresh:    quorum delivered -> certified     %s (root round %d, %d after the repeat)", span(fresh.at.Sub(st.quorumAt)), fresh.seal, fresh.seal-repeat.seal)
+	t.Logf("  tail: certified -> applied at all %d validators %s (end to end; not attributed to a cause: it includes the slowest validator's receipt, import and apply)", len(w.ids), applied.Sub(fresh.at).Round(time.Millisecond))
 }
 
 // introduceShards gives every root and every shard validator the others' addresses (liveTransport.up does it for shards that exist when the roots come up).
@@ -802,7 +884,7 @@ func TestIngressLossWithRealShardsRecoversThroughTheDuplicateResend(t *testing.T
 		}
 	}
 	nodes := w.distinctNodes(resent)
-	require.GreaterOrEqual(t, len(nodes), 3, "a quorum of the validators re-sent their lost request, byte-identical")
+	require.GreaterOrEqual(t, len(nodes), w.threshold(), "at least the request threshold of validators re-sent their lost request, byte-identical (delivered to a root; admission is shown by the certification)")
 	withHandshake := false
 	for node := range nodes {
 		var firstResend time.Time
@@ -839,8 +921,8 @@ func TestIngressLossWithRealShardsRecoversThroughTheDuplicateResend(t *testing.T
 	hs0 := w.handshakesSince(armed)[0]
 	t.Logf("inactivity %s, spacing %s, re-send budget 10, T2=%d root rounds; u=%d, T2 eligible from %d, certified at %d", time.Second, 400*time.Millisecond, t2Rounds(w.h), u.seal, eligible, fresh.seal)
 	t.Logf("  last certificate -> first handshake after the loss   %s", hs0.at.Sub(u.at).Round(time.Millisecond))
-	t.Logf("  first handshake -> first byte-identical re-send accepted   %s", resent[0].at.Sub(hs0.at).Round(time.Millisecond))
-	t.Logf("  first re-send accepted -> certified   %s; applied at all validators %s later; %d validators re-sent", fresh.at.Sub(resent[0].at).Round(time.Millisecond), applied.Sub(fresh.at).Round(time.Millisecond), len(nodes))
+	t.Logf("  first handshake -> first byte-identical re-send delivered   %s", resent[0].at.Sub(hs0.at).Round(time.Millisecond))
+	t.Logf("  first re-send delivered -> certified   %s; applied at all validators %s later; %d validators re-sent", fresh.at.Sub(resent[0].at).Round(time.Millisecond), applied.Sub(fresh.at).Round(time.Millisecond), len(nodes))
 }
 
 // Exhausted-retry control: the same loss, but the drop lasts until every validator has used its whole re-send budget (2) against it. Nothing re-sends after
@@ -917,20 +999,37 @@ func TestIngressLossWithRealShardsAfterTheResendBudgetIsExhausted(t *testing.T) 
 	t.Logf("re-send budget %d (spent against the drop), inactivity %s; u=%d, T2 eligible from %d; the pending block certified at root round %d, %s after the last certificate (%d repeat(s) first)", budget, time.Second, u.seal, eligible, fresh.seal, fresh.at.Sub(u.at).Round(time.Millisecond), repeats)
 }
 
-type cycleRow struct {
-	cycle        int
-	leader       string
-	pausedLeader bool
-	fresh        bool          // a quorum of validators' requests for the pending block reached the ingress roots within the budget of the repeat
-	firstTry     bool          // ... and that attempt certified: no further repeat was needed
-	toApplied    time.Duration // from the first repeat to the block applied at every live validator
-	repeats      int           // repeats of the last certificate before the block certified
-	behind       int           // requests of the first fresh wave that reached a root that had not yet shown the repeat
-	waveRequests int
+// attemptReport is what the roots' wrappers saw of ONE attempt (the one built after one particular repeat), measured from that repeat's certificate.
+type attemptReport struct {
+	exists   bool          // any request of the attempt was delivered to a root
+	nodes    int           // distinct validators whose request of the attempt was delivered
+	arrival  time.Duration // repeat certificate -> first request of the attempt delivered (certificate-sample resolution applies)
+	quorumOK bool          // a threshold of distinct validators' requests reached ONE root (delivery; the root's validation comes after)
+	quorum   time.Duration // repeat certificate -> that moment
+	behind   int           // requests of the first 2 s that reached a root which had not yet shown the repeat
+	wave     int
 }
 
-// runLossCycles repeats the T2 window (drop every request, wait for the repeat, let the shard's own new attempt through) on one cluster. A cycle's first fresh
-// wave is classified against what each receiving root had shown when the request arrived.
+type cycleRow struct {
+	cycle        int
+	leader       string // named by the FIRST repeat
+	pausedLeader bool
+	repeats      int // repeats of the last certificate before the block certified
+	first        attemptReport
+	final        attemptReport // the attempt that certified (the same as first when repeats == 1)
+	finalLeader  string        // named by the last repeat
+	finalPaused  bool
+	toFinalReq   time.Duration // first repeat -> first request of the certified attempt delivered
+	toCertified  time.Duration // first repeat -> the block certified
+	toApplied    time.Duration // first repeat -> applied at every live validator
+	certifiedKey attemptKey
+}
+
+func (r cycleRow) firstTry() bool { return r.repeats == 1 }
+
+// runLossCycles repeats the T2 window (drop every request, wait for the repeat, let the shard's own new attempt through) on one cluster. Everything is per
+// attempt: the attempt after repeat k is the earliest not-yet-assigned attempt whose first request was delivered after repeat k's certificate (and before repeat
+// k+1's), so a later retry cannot satisfy an earlier attempt's condition. Times from a repeat carry the certificate-sampling resolution.
 func runLossCycles(t *testing.T, w *shardWorld, cycles int, silent string, rBudget time.Duration) []cycleRow {
 	var rows []cycleRow
 	live := func(f func(id string, e *retainingExecutor) bool) bool {
@@ -950,61 +1049,113 @@ func runLossCycles(t *testing.T, w *shardWorld, cycles int, silent string, rBudg
 		expected := executortest.ExpectedBlock(head, marker)
 		w.waitFor("the roots propose the T2 repeat", 3*time.Minute, func() bool { _, ok := w.firstT2Proposal(armed); return ok })
 		w.setDrop(nil)
-		var repeat certSample
-		w.waitFor("the repeat is certified", 2*time.Minute, func() bool {
-			if cs := w.certsSince(u.seal); len(cs) > 0 {
-				repeat = cs[0]
-				return true
+		w.waitFor("the repeat is certified", 2*time.Minute, func() bool { return len(w.certsSince(u.seal)) > 0 })
+		var certified certSample
+		w.waitFor("the block certifies", 6*time.Minute, func() bool {
+			for _, s := range w.certsSince(u.seal) {
+				if bytes.Equal(s.ir.BlockHash, expected.Hash) {
+					certified = s
+					return true
+				}
 			}
 			return false
 		})
-		r := cycleRow{cycle: k, leader: shortID(repeat.leader), pausedLeader: silent != "" && repeat.leader == silent}
-		for time.Now().Before(repeat.at.Add(rBudget)) && !r.fresh {
-			by := map[string]bool{}
-			for _, e := range w.requestsSince(repeat.at) {
-				if !e.dropped && bytes.Equal(e.blockHash, expected.Hash) {
-					by[e.node] = true
-				}
-			}
-			r.fresh = len(by) >= 3
-			time.Sleep(20 * time.Millisecond)
-		}
-		// the first wave: requests for the pending block that arrived within the first 2 s after the repeat, against what the receiving root had shown
-		w.mu.Lock()
-		for _, e := range w.events {
-			if e.dropped || e.at.Before(repeat.at) || e.at.After(repeat.at.Add(2*time.Second)) || !bytes.Equal(e.blockHash, expected.Hash) {
-				continue
-			}
-			r.waveRequests++
-			if at, ok := w.sight[e.root][repeat.seal]; !ok || at.After(e.at) {
-				r.behind++
-			}
-		}
-		w.mu.Unlock()
 		w.waitFor("the pending block is applied at the live validators", 6*time.Minute, func() bool {
 			return live(func(_ string, e *retainingExecutor) bool {
 				h, _ := e.Head(context.Background())
 				return bytes.Equal(h.Hash, expected.Hash)
 			})
 		})
-		r.toApplied = time.Since(repeat.at)
+		applied := time.Now()
+		var repeats []certSample
 		for _, s := range w.certsSince(u.seal) {
-			if same, _ := types.EqualIR(u.ir, s.ir); same {
-				r.repeats++
+			if same, _ := types.EqualIR(u.ir, s.ir); same && s.seal < certified.seal {
+				repeats = append(repeats, s)
 			}
 		}
-		r.firstTry = r.repeats == 1
-		rows = append(rows, r)
-		t.Logf("cycle %d: repeat names leader %s (paused: %v); a quorum's requests reached the roots within %s: %v; certified on that attempt: %v (repeats before the block certified: %d); first wave %d requests, %d at a root that had not yet shown the repeat; repeat -> applied %s",
-			k, r.leader, r.pausedLeader, rBudget, r.fresh, r.firstTry, r.repeats, r.waveRequests, r.behind, r.toApplied.Round(time.Millisecond))
+		require.NotEmpty(t, repeats)
+		attempts := attemptsOf(w.requestsSince(armed), expected.Hash, w.threshold())
+		assigned := map[attemptKey]bool{}
+		const margin = 100 * time.Millisecond // a request can precede the sampler's first sighting of the certificate it answers
+		report := func(i int) attemptReport {
+			from := repeats[i].at.Add(-margin)
+			to := applied.Add(time.Hour)
+			if i+1 < len(repeats) {
+				to = repeats[i+1].at.Add(-margin)
+			}
+			var best *attemptStats
+			for key, st := range attempts {
+				if assigned[key] || st.first.Before(from) || !st.first.Before(to) {
+					continue
+				}
+				if best == nil || st.first.Before(best.first) {
+					best = st
+				}
+			}
+			if best == nil {
+				return attemptReport{}
+			}
+			assigned[best.key] = true
+			r := attemptReport{exists: true, nodes: len(best.nodes), arrival: best.first.Sub(repeats[i].at), quorumOK: !best.quorumAt.IsZero()}
+			if r.quorumOK {
+				r.quorum = best.quorumAt.Sub(repeats[i].at)
+			}
+			w.mu.Lock()
+			for _, e := range w.events {
+				if e.dropped || e.attempt() != best.key || e.at.After(repeats[i].at.Add(2*time.Second)) {
+					continue
+				}
+				r.wave++
+				if at, ok := w.sight[e.root][repeats[i].seal]; !ok || at.After(e.at) {
+					r.behind++
+				}
+			}
+			w.mu.Unlock()
+			return r
+		}
+		row := cycleRow{cycle: k, leader: shortID(repeats[0].leader), pausedLeader: silent != "" && repeats[0].leader == silent, repeats: len(repeats), certifiedKey: keyOfIR(certified.ir)}
+		for i := range repeats {
+			r := report(i)
+			if i == 0 {
+				row.first = r
+			}
+			if i == len(repeats)-1 {
+				row.final = r
+			}
+		}
+		last := repeats[len(repeats)-1]
+		row.finalLeader, row.finalPaused = shortID(last.leader), silent != "" && last.leader == silent
+		row.toFinalReq = last.at.Sub(repeats[0].at) + row.final.arrival
+		row.toCertified = certified.at.Sub(repeats[0].at)
+		row.toApplied = applied.Sub(repeats[0].at)
+		rows = append(rows, row)
+		desc := func(r attemptReport) string {
+			if !r.exists {
+				return "no request of the attempt was delivered"
+			}
+			q := "threshold NOT reached at any single root"
+			if r.quorumOK {
+				q = fmt.Sprintf("threshold at one root after %s", span(r.quorum))
+			}
+			return fmt.Sprintf("first request after %s, %d validators, %s; first 2 s: %d requests, %d at a root that had not yet shown the repeat", span(r.arrival), r.nodes, q, r.wave, r.behind)
+		}
+		t.Logf("cycle %d: %d repeat(s) before the block certified. FIRST repeat names %s (paused: %v): %s.", k, row.repeats, row.leader, row.pausedLeader, desc(row.first))
+		if row.repeats > 1 {
+			t.Logf("cycle %d:   CERTIFIED attempt followed the last repeat (names %s, paused: %v): %s; first repeat -> that attempt's first request %s; -> certified %s; -> applied %s (all from the first repeat's certificate)",
+				k, row.finalLeader, row.finalPaused, desc(row.final), row.toFinalReq.Round(time.Millisecond), row.toCertified.Round(time.Millisecond), row.toApplied.Round(time.Millisecond))
+		} else {
+			t.Logf("cycle %d:   certified on that attempt; first repeat -> certified %s; -> applied %s", k, row.toCertified.Round(time.Millisecond), row.toApplied.Round(time.Millisecond))
+		}
 		w.waitFor("the live pools are empty", time.Minute, func() bool { return live(func(_ string, e *retainingExecutor) bool { return e.poolSize() == 0 }) })
 	}
 	return rows
 }
 
 // Paused-next-leader cases: the shard's last validator (in id order) is never started. A repeat names the next shard leader; when that is the paused validator
-// no block is built and no fresh request exists, so R has no finite value for that cycle. Every cycle is reported, the unsuccessful ones included, and the
-// assertion is per kind: a live named leader produces its fresh request within the budget, the paused one does not.
+// the followers abstain (no block from the named leader) and NO request exists for THAT attempt, so the first-attempt R is unavailable. That is not a
+// finite-or-infinite statement about the work: the technical round advances on the timeout, a later repeat can name a live leader, and that attempt's request,
+// its non-repeat certificate and the application are reported per cycle, with the time from the first repeat. The assertions are per kind and per attempt, and
+// the eventual chain is asserted for every cycle, so a paused leader cannot be averaged away and a stuck chain is a failure, not an expected negative.
 func TestIngressLossWithRealShardsPausedNextLeaderHasNoFiniteR(t *testing.T) {
 	if testing.Short() {
 		t.Skip("a live four-root cluster with three real shard nodes; minutes")
@@ -1014,30 +1165,40 @@ func TestIngressLossWithRealShardsPausedNextLeaderHasNoFiniteR(t *testing.T) {
 	w := newShardWorld(t, shardWorldConfig{names: liveRootNames(), options: q3fixture.Options{PeerEVM: true}, timeout: 2 * time.Second, blockRate: phaseLockBlockRate, shardOpts: opts, silentLast: 1})
 	cycles := traceEnvInt(t, "BFT_976_CYCLES", 8)
 	rows := runLossCycles(t, w, cycles, w.ids[len(w.ids)-1], 8*time.Second)
-	live, pausedN, liveFresh, pausedFresh := 0, 0, 0, 0
+	live, pausedN, liveReq, pausedReq := 0, 0, 0, 0
+	var evTimes []string
 	for _, r := range rows {
+		// the eventual chain, for every cycle: a later attempt named a live leader, its requests reached the roots, the block certified (not a repeat) and applied
+		require.False(t, r.finalPaused, "cycle %d: the attempt that certified followed a repeat naming a live leader", r.cycle)
+		require.True(t, r.final.exists, "cycle %d: requests of the certified attempt were delivered to the roots", r.cycle)
 		if r.pausedLeader {
 			pausedN++
-			if r.fresh {
-				pausedFresh++
+			if r.first.exists {
+				pausedReq++
 			}
+			require.Greater(t, r.repeats, 1, "cycle %d: the first repeat named the paused validator; a later repeat is what started the attempt that certified", r.cycle)
+			evTimes = append(evTimes, fmt.Sprintf("cycle %d: first repeat -> certified attempt's first request %s, -> certified %s, -> applied %s", r.cycle, r.toFinalReq.Round(time.Millisecond), r.toCertified.Round(time.Millisecond), r.toApplied.Round(time.Millisecond)))
 		} else {
 			live++
-			if r.fresh {
-				liveFresh++
+			if r.first.exists {
+				liveReq++
 			}
 		}
 	}
-	t.Logf("summary over %d cycles: live named leader %d (fresh request within the budget: %d); paused named leader %d (fresh request within the budget: %d)", len(rows), live, liveFresh, pausedN, pausedFresh)
+	t.Logf("summary over %d cycles: live named leader %d (an attempt followed with requests delivered: %d); paused named leader %d (requests of that attempt: %d). For the paused cycles the first-attempt R is UNAVAILABLE (no request for that attempt); time from the first repeat through the later repeat(s) to the eventual live-leader request, and on to application:", len(rows), live, liveReq, pausedN, pausedReq)
+	for _, s := range evTimes {
+		t.Logf("  %s", s)
+	}
 	require.Positive(t, pausedN, "premise: at least one repeat named the paused validator as the next leader")
-	require.Equal(t, live, liveFresh, "a live named leader produced its fresh request within the budget every time")
-	require.Zero(t, pausedFresh, "a paused named leader produced none: R has no finite value for those cycles")
+	require.Equal(t, live, liveReq, "a live named leader's attempt had requests delivered every time")
+	require.Zero(t, pausedReq, "no request exists for an attempt whose named leader is paused: the first-attempt R is unavailable for those cycles")
 }
 
-// All four validators live and the re-send withheld: how often does the shard's first new attempt after a repeat certify without another repeat? Not an
-// assertion on the rate: the attempt can reach an ingress root that has not yet shown the repeat, is refused there ("another request context"), and is not
-// retained, so the next recovery is the next T2 (or the duplicate re-send, which this control withholds). The test asserts eventual certification and
-// reports the rate, the extra stages, and the evidence for the cause of each failed first attempt.
+// All validators live and the re-send withheld: how often does the shard's first new attempt after a repeat certify without another repeat? Not an assertion on
+// the rate (arch: retain the misses, do not change deadlines to pass them, cause open). The test asserts that every cycle's pending block eventually certifies
+// and applies, and reports per attempt: arrival, quorum delivered at a common root, and the evidence for each missed first attempt as it can be known from the
+// wrappers: requests delivered, at which roots, and whether those roots had shown the repeat. Their cause (admission, quorum assembly, forwarding, proposal
+// inclusion, supersession by the next repeat) is NOT established here.
 func TestIngressLossWithRealShardsFirstAttemptRate(t *testing.T) {
 	if testing.Short() {
 		t.Skip("a live four-root cluster with four real shard nodes; minutes")
@@ -1046,15 +1207,20 @@ func TestIngressLossWithRealShardsFirstAttemptRate(t *testing.T) {
 	opts.MaxResubmits = -1
 	w := newShardWorld(t, shardWorldConfig{names: liveRootNames(), options: q3fixture.Options{PeerEVM: true}, timeout: 2 * time.Second, blockRate: phaseLockBlockRate, shardOpts: opts})
 	rows := runLossCycles(t, w, traceEnvInt(t, "BFT_976_CYCLES", 8), "", 8*time.Second)
-	first, behindFail := 0, 0
+	first, noQuorum, behindFail := 0, 0, 0
 	for _, r := range rows {
-		if r.firstTry {
+		if r.firstTry() {
 			first++
-		} else if r.behind > 0 {
+			continue
+		}
+		if !r.first.quorumOK {
+			noQuorum++
+		}
+		if r.first.behind > 0 {
 			behindFail++
 		}
 	}
-	t.Logf("summary over %d cycles: certified on the first attempt after the repeat %d; needed another repeat %d (of which %d had first-wave requests at a root that had not yet shown the repeat)", len(rows), first, len(rows)-first, behindFail)
+	t.Logf("summary over %d cycles: certified on the first attempt after the repeat %d; needed another repeat %d (of which: threshold never delivered to a single root %d; had first-wave requests at a root that had not yet shown the repeat %d). Causes not established.", len(rows), first, len(rows)-first, noQuorum, behindFail)
 }
 
 // Control for the loss cycles: the same shards, executors and roots, no request is ever dropped. Entries are queued one after another; every one must be
