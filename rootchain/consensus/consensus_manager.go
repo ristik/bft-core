@@ -84,7 +84,8 @@ type (
 	}
 
 	ConsensusManager struct {
-		profile loopProfile // scaling-run measurement aid, see loop_profile.go
+		phases  phaseProfile // time per step of proposal handling (measurement), see phase_profile.go
+		profile loopProfile  // scaling-run measurement aid, see loop_profile.go
 		// channel via which validator sends "certification requests" to CM
 		certReqCh chan certRequest
 		// channel via which CM sends "certification request" response to validator
@@ -618,6 +619,7 @@ func (x *ConsensusManager) loop(ctx context.Context) error {
 		}
 		x.timeoutUnknownLeader(ctx)
 		x.profile.report(x.log, time.Now())
+		x.phases.report(x.log, time.Now())
 	}
 }
 
@@ -1248,6 +1250,8 @@ func (x *ConsensusManager) checkRecoveryNeeded(qc *drctypes.QuorumCert) error {
 func (x *ConsensusManager) onProposalMsg(ctx context.Context, proposal *abdrc.ProposalMsg) error {
 	ctx, span := x.tracer.Start(ctx, "ConsensusManager.onProposalMsg")
 	defer span.End()
+	ph := x.phases.begin()
+	defer ph.rest()
 	if proposal.Block.Round < x.pacemaker.GetCurrentRound() {
 		return fmt.Errorf("stale proposal for round %d from %s", proposal.Block.Round, proposal.Block.Author)
 	}
@@ -1255,12 +1259,15 @@ func (x *ConsensusManager) onProposalMsg(ctx context.Context, proposal *abdrc.Pr
 	if err := proposal.Verify(x.trustBaseStore); err != nil {
 		return fmt.Errorf("invalid proposal: %w", err)
 	}
+	ph.lap("verify")
 	if err := x.validateProposalParent(proposal.Block); err != nil {
 		return err
 	}
+	ph.lap("validateParent")
 	if err := x.validateTimeoutCert(proposal.LastRoundTc); err != nil {
 		return err
 	}
+	ph.lap("validateLastTC")
 	// Check current state against new QC
 	if proposal.Block.Qc != nil {
 		if err := x.checkRecoveryNeeded(proposal.Block.Qc); err != nil {
@@ -1272,6 +1279,7 @@ func (x *ConsensusManager) onProposalMsg(ctx context.Context, proposal *abdrc.Pr
 		}
 	}
 	// Is from valid leader
+	ph.lap("recoveryCheck")
 	l, err := x.leaderSelector.GetLeaderForRound(proposal.Block.Round)
 	if err != nil {
 		return fmt.Errorf("could not determine leader for round %d to verify proposal: %w", proposal.Block.Round, err)
@@ -1283,17 +1291,21 @@ func (x *ConsensusManager) onProposalMsg(ctx context.Context, proposal *abdrc.Pr
 	if err := x.safety.validateVoteTimestamp(proposal.Block); err != nil {
 		return fmt.Errorf("proposal timestamp: %w", err)
 	}
+	ph.lap("leaderAndTimestamp")
 	// Every proposal must carry a QC or TC for previous round
 	// Process QC first, update round
 	if err = x.processQC(ctx, proposal.Block.Qc); err != nil {
 		// recovery was requested, nothing is executed or voted on top of a QC which was not accepted
 		return fmt.Errorf("proposal QC: %w", err)
 	}
+	ph.lap("processQC")
 	x.processTC(ctx, proposal.LastRoundTc)
+	ph.lap("processTC")
 	// the witnesses of the block's controls are not in the proposal: fetch what is missing from the root nodes, the author first
 	if err := x.fetchWitnesses(ctx, x.blockStore, proposal.Block); err != nil {
 		return fmt.Errorf("proposal controls: %w", err)
 	}
+	ph.lap("fetchWitnesses")
 	// execute proposed payload
 	start := time.Now()
 	execStateId, err := x.blockStore.Add(proposal.Block, x.irReqVerifier)
@@ -1303,20 +1315,24 @@ func (x *ConsensusManager) onProposalMsg(ctx context.Context, proposal *abdrc.Pr
 		// cannot send vote, so just return and wait for local timeout or new proposal (and try to recover then)
 		return fmt.Errorf("failed to execute proposal: %w", err)
 	}
+	ph.lap("execute")
 	// the block is the candidate parent of the next proposal: collect the Retirement proofs against the EVM state it certified
 	x.prepareRetirements(ctx, proposal.Block)
 	x.prepareRejection(ctx, proposal.Block)
+	ph.lap("prepare")
 	// make vote
 	voteMsg, err := x.safety.MakeVote(proposal.Block, execStateId, x.blockStore.GetHighQc(), x.pacemaker.LastRoundTC())
 	if err != nil {
 		// wait for timeout, if others make progress this node will need to recover
 		return fmt.Errorf("failed to sign vote: %w", err)
 	}
+	ph.lap("makeVote")
 	x.log.InfoContext(ctx, "signed vote", "round", proposal.Block.Round, "messageID", voteMessageID(voteMsg))
 	// stored before it is sent, and not sent if it cannot be stored (see onLocalTimeout); the round then ends by timeout
 	if err = x.blockStore.StoreLastVote(voteMsg); err != nil {
 		return fmt.Errorf("vote not sent: storing it failed: %w", err)
 	}
+	ph.lap("storeVote")
 	x.pacemaker.SetVoted(voteMsg)
 	nextLeader, err := x.leaderAfter(x.pacemaker.GetCurrentRound())
 	if err != nil {
@@ -1327,7 +1343,9 @@ func (x *ConsensusManager) onProposalMsg(ctx context.Context, proposal *abdrc.Pr
 	if err = x.net.Send(ctx, voteMsg, nextLeader); err != nil {
 		return fmt.Errorf("failed to send vote to next leader: %w", err)
 	}
+	ph.lap("sendVote")
 	x.replayVoteBuffer(ctx)
+	ph.lap("replayVotes")
 	// if everything goes fine, but the node is in recovery state, then clear it
 	// most likely ended up here because proposal was late and votes arrived before
 	if x.recovery.Clear() != nil {
