@@ -60,6 +60,7 @@ type certReceipt struct {
 	at   time.Time
 	node string
 	hash []byte
+	seal uint64 // the certificate's root round: a later one with the same hash is a T2 repeat
 }
 
 // liveTransport puts a live cluster on the production path over same-host TCP: libp2p hosts with the nodes' keys, framing, the receive queues, the
@@ -167,7 +168,7 @@ func (x *liveTransport) receive(id string, msg any) {
 	key := liveShard{partition: cr.Partition, shard: cr.Shard}.String()
 	x.mu.Lock()
 	defer x.mu.Unlock()
-	x.certs[key] = append(x.certs[key], certReceipt{at: time.Now(), node: id, hash: bytes.Clone(cr.UC.InputRecord.Hash)})
+	x.certs[key] = append(x.certs[key], certReceipt{at: time.Now(), node: id, hash: bytes.Clone(cr.UC.InputRecord.Hash), seal: cr.UC.UnicitySeal.RootChainRoundNumber})
 }
 
 // up gives the named nodes, and everybody already up, each other's addresses, and the shards theirs.
@@ -192,6 +193,13 @@ func (x *liveTransport) up(c *q4bLive, names ...string) {
 }
 
 func (x *liveTransport) down(c *q4bLive, name string) { x.closeRoot(x.roots[c.id(name)]) }
+
+// receipts are the certificates of a shard its validators received, from the from'th on.
+func (x *liveTransport) receipts(s liveShard, from int) []certReceipt {
+	x.mu.Lock()
+	defer x.mu.Unlock()
+	return slices.Clone(x.certs[s.String()][min(from, len(x.certs[s.String()])):])
+}
 
 // submit is each validator sending its own signed request to the root over its shard network. The send is asynchronous: its success says nothing about
 // delivery, which the trace reads at the receiver.
