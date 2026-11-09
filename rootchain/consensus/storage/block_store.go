@@ -9,6 +9,7 @@ import (
 	"github.com/unicitynetwork/bft-core/rootrecords"
 	"log/slog"
 	"sync"
+	"time"
 
 	"github.com/unicitynetwork/bft-core/evmroot"
 	"github.com/unicitynetwork/bft-core/network/protocol/abdrc"
@@ -480,6 +481,8 @@ func (x *BlockStore) ProcessQc(qc *rctypes.QuorumCert) ([]*certification.Certifi
 	// in timestamp, epoch or parent). The retained block is checked with the shared predicate before the stale-QC
 	// short circuit, so that a stale QC cannot authorize anything built on a mismatching block. A QC of pruned history
 	// (no retained block) stays a no-op.
+	stepAt := time.Now()
+	step := func(name string) { now := time.Now(); ObserveStep("ProcessQc."+name, now.Sub(stepAt)); stepAt = now }
 	if qc.VoteInfo != nil {
 		if b, err := x.blockTree.FindBlock(qc.GetRound()); err == nil {
 			if err = CheckQcOfBlock(qc, b); err != nil {
@@ -487,6 +490,7 @@ func (x *BlockStore) ProcessQc(qc *rctypes.QuorumCert) ([]*certification.Certifi
 			}
 		}
 	}
+	step("checkLocalBlock")
 	// if we have processed it already then skip (in case we are the next leader we have already handled the QC)
 	if x.GetHighQc().GetRound() >= qc.GetRound() {
 		// stale qc
@@ -503,6 +507,7 @@ func (x *BlockStore) ProcessQc(qc *rctypes.QuorumCert) ([]*certification.Certifi
 			return nil, err
 		}
 	}
+	step("utbBinding")
 	// the finalized entry survives before the certificate is inserted, so before any commit, certificate or installation it enables is visible; a
 	// failure leaves the certificate unapplied (a retry is not mistaken for a stale certificate)
 	if x.utbRetain != nil && qc.UTB != nil && !alreadyCommitted {
@@ -514,6 +519,7 @@ func (x *BlockStore) ProcessQc(qc *rctypes.QuorumCert) ([]*certification.Certifi
 	if err := x.blockTree.InsertQc(qc); err != nil {
 		return nil, fmt.Errorf("failed to insert QC into block tree: %w", err)
 	}
+	step("InsertQc")
 	// If the QC does not serve as commit QC, then we are done.
 	// Non-commit QC has LedgerCommitInfo.RootChainRoundNumber == 0. It used to be LedgerCommitInfo.Hash == nil,
 	// but now this is a committable value for new shards that have not yet agreed on the genesis state.
@@ -526,6 +532,7 @@ func (x *BlockStore) ProcessQc(qc *rctypes.QuorumCert) ([]*certification.Certifi
 	if err != nil {
 		return nil, fmt.Errorf("committing new root block: %w", err)
 	}
+	step("Commit")
 	x.logHandoffOutcome(x.blockTree.Root())
 	return ucs, nil
 }

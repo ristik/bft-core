@@ -60,7 +60,7 @@ func (db BoltDB) StoreHandoffBody(id, body []byte) error {
 	if len(id) != 32 || !validHandoffBodySize(len(body)) {
 		return ErrHandoffRecord
 	}
-	return db.db.Update(func(tx *bbolt.Tx) error {
+	return db.update("StoreHandoffBody", func(tx *bbolt.Tx) error {
 		b := tx.Bucket(bucketMetadata)
 		if b == nil {
 			return ErrHandoffRecord
@@ -95,7 +95,7 @@ func (db BoltDB) StoreHandoffCandidate(id, candidate []byte) error {
 	if len(id) != 32 || len(candidate) == 0 || len(candidate) > 1<<20 {
 		return ErrHandoffRecord
 	}
-	return db.db.Update(func(tx *bbolt.Tx) error {
+	return db.update("StoreHandoffCandidate", func(tx *bbolt.Tx) error {
 		b := tx.Bucket(bucketMetadata)
 		if b == nil {
 			return ErrHandoffRecord
@@ -130,7 +130,7 @@ func (db BoltDB) StoreHandoffReceipts(id, receipts []byte) error {
 	if len(id) != 32 || len(receipts) == 0 || len(receipts) > 1<<20 {
 		return ErrHandoffRecord
 	}
-	return db.db.Update(func(tx *bbolt.Tx) error {
+	return db.update("StoreHandoffReceipts", func(tx *bbolt.Tx) error {
 		b := tx.Bucket(bucketMetadata)
 		if b == nil {
 			return ErrHandoffRecord
@@ -168,7 +168,7 @@ func (db BoltDB) StoreHandoffCheckpoint(epoch uint64, data []byte) error {
 	}
 	var number [8]byte
 	binary.BigEndian.PutUint64(number[:], epoch)
-	return db.db.Update(func(tx *bbolt.Tx) error {
+	return db.update("StoreHandoffCheckpoint", func(tx *bbolt.Tx) error {
 		b := tx.Bucket(bucketMetadata)
 		if b == nil {
 			return ErrHandoffRecord
@@ -203,7 +203,7 @@ func (db BoltDB) StoreHandoffBundle(epoch uint64, data []byte) error {
 	}
 	var number [8]byte
 	binary.BigEndian.PutUint64(number[:], epoch)
-	return db.db.Update(func(tx *bbolt.Tx) error {
+	return db.update("StoreHandoffBundle", func(tx *bbolt.Tx) error {
 		b := tx.Bucket(bucketMetadata)
 		if b == nil {
 			return ErrHandoffRecord
@@ -273,7 +273,7 @@ func NewBoltStorage(file string, opts ...BoltOption) (db BoltDB, err error) {
 	}()
 
 	if newDB {
-		if err := db.db.Update(initBuckets); err != nil {
+		if err := db.update("HandoffBundle", initBuckets); err != nil {
 			return db, fmt.Errorf("initializing new database: %w", err)
 		}
 		return db, nil
@@ -353,7 +353,7 @@ func (db BoltDB) WriteBlock(block *ExecutedBlock, root bool) error {
 	if err != nil {
 		return fmt.Errorf("serializing block: %w", err)
 	}
-	return db.db.Update(func(tx *bbolt.Tx) error { return writeBlockTx(tx, block, data, root) })
+	return db.update("WriteBlock", func(tx *bbolt.Tx) error { return writeBlockTx(tx, block, data, root) })
 }
 
 // writeBlockTx is WriteBlock inside an open transaction, with the block already serialized.
@@ -439,7 +439,7 @@ func (db BoltDB) WriteTC(tc *rctypes.TimeoutCert) error {
 	if err != nil {
 		return fmt.Errorf("serializing TimeoutCert: %w", err)
 	}
-	return db.db.Update(func(tx *bbolt.Tx) error {
+	return db.update("WriteTC", func(tx *bbolt.Tx) error {
 		b := tx.Bucket(bucketCertificates)
 		if b == nil {
 			return errNoCertificatesBucket
@@ -497,7 +497,7 @@ func (db BoltDB) WriteVote(vote any) (err error) {
 		return fmt.Errorf("vote info serialization failed: %w", err)
 	}
 
-	return db.db.Update(func(tx *bbolt.Tx) error {
+	return db.update("WriteVote", func(tx *bbolt.Tx) error {
 		b := tx.Bucket(bucketVotes)
 		if b == nil {
 			return errNoVoteBucket
@@ -598,7 +598,7 @@ func (db BoltDB) GetHighestVotedRound() (round uint64) {
 }
 
 func (db BoltDB) SetHighestVotedRound(round uint64) error {
-	return db.db.Update(func(tx *bbolt.Tx) error {
+	return db.update("SetHighestVotedRound", func(tx *bbolt.Tx) error {
 		b := tx.Bucket(bucketSafety)
 		if b == nil {
 			return errNoSafetyBucket
@@ -628,7 +628,7 @@ func (db BoltDB) GetHighestQcRound() (round uint64) {
 }
 
 func (db BoltDB) SetHighestQcRound(qcRound, votedRound uint64) error {
-	return db.db.Update(func(tx *bbolt.Tx) error {
+	return db.update("SetHighestQcRound", func(tx *bbolt.Tx) error {
 		b := tx.Bucket(bucketSafety)
 		if b == nil {
 			return errNoSafetyBucket
@@ -659,7 +659,7 @@ func (db BoltDB) InstallEpochAnchorSafety(a *rctypes.EpochAnchor) error {
 	if err := a.IsValid(); err != nil {
 		return err
 	}
-	return db.db.Update(func(tx *bbolt.Tx) error {
+	return db.update("InstallEpochAnchorSafety", func(tx *bbolt.Tx) error {
 		b := tx.Bucket(bucketSafety)
 		if b == nil {
 			return errNoSafetyBucket
@@ -723,7 +723,7 @@ func (db BoltDB) installEpochAnchorRootWithFault(block *ExecutedBlock, a *rctype
 		}
 		return afterWrite(name)
 	}
-	return db.db.Update(func(tx *bbolt.Tx) error {
+	return db.update("installEpochAnchorRootWithFault", func(tx *bbolt.Tx) error {
 		blocks := tx.Bucket(bucketBlocks)
 		safety := tx.Bucket(bucketSafety)
 		votes := tx.Bucket(bucketVotes)
@@ -875,7 +875,7 @@ func (db BoltDB) NetworkProfile() (profile uint64, found bool, _ error) {
 
 // SetNetworkProfile records the profile of a store that holds no blocks yet; once recorded it is never changed.
 func (db BoltDB) SetNetworkProfile(profile uint64) error {
-	return db.db.Update(func(tx *bbolt.Tx) error {
+	return db.update("SetNetworkProfile", func(tx *bbolt.Tx) error {
 		b := tx.Bucket(bucketMetadata)
 		if b == nil {
 			return errors.New("metadata bucket not found")

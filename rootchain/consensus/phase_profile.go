@@ -4,6 +4,8 @@ import (
 	"log/slog"
 	"sort"
 	"time"
+
+	"github.com/unicitynetwork/bft-core/rootchain/consensus/storage"
 )
 
 // phaseProfile is a measurement aid (scaling runs, ristik/bft-core#982): the time the consensus loop spends in each step of handling a
@@ -71,6 +73,11 @@ func (p *phaseProfile) report(log *slog.Logger, now time.Time) {
 		s := p.phases[n]
 		log.Info("consensus proposal phase", "phase", n, "count", s.count, "totalMs", s.total.Milliseconds(),
 			"avgUs", s.total.Microseconds()/int64(s.count), "maxMs", s.max.Milliseconds(), "intervalMs", now.Sub(p.start).Milliseconds())
+	}
+	for _, w := range storage.TakeWriteTimings() {
+		log.Info("consensus storage write", "op", w.Name, "count", w.Count, "totalMs", w.Total.Milliseconds(),
+			"avgUs", w.Total.Microseconds()/int64(w.Count), "maxMs", w.Max.Milliseconds(), "commitWriteMs", w.CommitWrite.Milliseconds(),
+			"intervalMs", now.Sub(p.start).Milliseconds())
 	}
 	p.start, p.phases = now, nil
 }

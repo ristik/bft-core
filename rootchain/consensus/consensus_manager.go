@@ -86,6 +86,7 @@ type (
 	ConsensusManager struct {
 		// timeoutVerify verifies a timeout message; nil is TimeoutMsg.Verify against the trust base store (a test seam counts the calls)
 		timeoutVerify func(*abdrc.TimeoutMsg) error
+		proposalQC    bool         // processQC is being run for a proposal (records its steps under "qc.", measurement)
 		phases        phaseProfile // time per step of proposal handling (measurement), see phase_profile.go
 		profile       loopProfile  // scaling-run measurement aid, see loop_profile.go
 		// channel via which validator sends "certification requests" to CM
@@ -1313,7 +1314,10 @@ func (x *ConsensusManager) onProposalMsg(ctx context.Context, proposal *abdrc.Pr
 	ph.lap("leaderAndTimestamp")
 	// Every proposal must carry a QC or TC for previous round
 	// Process QC first, update round
-	if err = x.processQC(ctx, proposal.Block.Qc); err != nil {
+	x.proposalQC = true
+	err = x.processQC(ctx, proposal.Block.Qc)
+	x.proposalQC = false
+	if err != nil {
 		// recovery was requested, nothing is executed or voted on top of a QC which was not accepted
 		return fmt.Errorf("proposal QC: %w", err)
 	}
@@ -1382,6 +1386,13 @@ func (x *ConsensusManager) processQC(ctx context.Context, qc *drctypes.QuorumCer
 	if qc == nil {
 		return nil
 	}
+	qcLap := x.phases.begin()
+	lap := func(name string) {
+		if x.proposalQC {
+			qcLap.lap("qc." + name)
+		}
+	}
+	defer lap("tail")
 	if x.epochAnchor != nil && (qc.VoteInfo == nil || qc.VoteInfo.Epoch != x.epochAnchor.Epoch) {
 		return fmt.Errorf("QC is not of the epoch %d of the installed anchor", x.epochAnchor.Epoch)
 	}
@@ -1394,7 +1405,9 @@ func (x *ConsensusManager) processQC(ctx context.Context, qc *drctypes.QuorumCer
 			return fmt.Errorf("QC of round %d does not match the executed block: %w", qc.GetRound(), err)
 		}
 	}
+	lap("timestampProof")
 	certs, err := x.blockStore.ProcessQc(qc)
+	lap("blockStore.ProcessQc")
 	if err != nil {
 		if x.frontier != nil && errors.Is(err, storage.ErrPersistenceUncertain) {
 			x.frontier.latchFault(fmt.Errorf("QC of round %d: %w", qc.GetRound(), err))
@@ -1415,12 +1428,15 @@ func (x *ConsensusManager) processQC(ctx context.Context, qc *drctypes.QuorumCer
 		}
 	}
 
+	lap("ucSink")
 	if !x.pacemaker.AdvanceRoundQC(ctx, qc) {
 		return nil
 	}
 
+	lap("advanceRound")
 	// Round was advanced, we could have a new trust base.
 	x.updateTrustBase()
+	lap("updateTrustBase")
 
 	// in the "DiemBFT v4" pseudocode the process_certificate_qc first calls
 	// leaderSelector.Update and after that pacemaker.AdvanceRound - we do it the
