@@ -59,7 +59,8 @@ class BridgePos:
         return '0x' + self.cast_run('keccak', f'unicity.seal-registry/{name}')[2:]
 
     def b1_load(self, slot):
-        return int(self.call('eth_getStorageAt', [SEAL_REGISTRY, slot, 'latest']), 16)
+        # the operator's read, inside the validators network: the public gateway does not serve eth_getStorageAt
+        return int(self.ureth(1, 'eth_getStorageAt', [SEAL_REGISTRY, slot, 'latest']), 16)
 
     def b1_entry(self, epoch, field):
         prefix = self.b1_field_name('b1.entry')[2:]
