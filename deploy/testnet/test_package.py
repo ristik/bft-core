@@ -153,9 +153,11 @@ class UtbProfile(unittest.TestCase):
             cfg=generate.topology(out,4,{'root':['r%d'%i for i in range(4)],'evm':['e%d'%i for i in range(4)]},self.images,'captcha',(),30000000,False,'127.0.0.1',self.PIN,'upstream')
         svc=cfg['services']
         self.assertIn('./mongo:/data/db',svc['mongo']['volumes'],'the tail survives a recreated aggregator')
-        self.assertIn('mongo',svc['aggregator']['environment']['MONGODB_URI'])
+        from urllib.parse import urlparse
+        self.assertEqual(urlparse(svc['aggregator']['environment']['MONGODB_URI']).hostname,'mongo','the history is in the package\'s own mongo service')
         network=[m for m in svc['aggregator']['volumes'] if m.endswith(':/network:ro')]
         self.assertEqual(len(network),1,'the bundle comes from the read-only network mount')
+        self.assertTrue(svc['aggregator']['environment']['UTB_BUNDLE_FILE'].startswith('/network/'),'the bundle is read from the read-only network mount, not from /state or anywhere writable')
         readers=[n for n,s in svc.items() if 'UTB_BUNDLE_FILE' in s.get('environment',{})]
         self.assertEqual(readers,['aggregator'],'one history owner per database: no other service reads the bundle as its history')
         self.assertNotIn('./aggregator-utb:/utb',svc['aggregator']['volumes'],'no second (bolt) history next to the Mongo one')
