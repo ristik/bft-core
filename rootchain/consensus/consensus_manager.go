@@ -1208,13 +1208,14 @@ func (x *ConsensusManager) onTimeoutMsg(ctx context.Context, vote *abdrc.Timeout
 	// the highQC is the same for both rounds. So checking the lastTC helps the instance into latest TO round.
 	x.processTC(ctx, vote.LastTC)
 
-	tc, err := x.pacemaker.RegisterTimeoutVote(ctx, vote, x.voteQuorumInfo())
+	// the register remembers the exact message once it is verified, counted and its weight accounted (before processTC below can end the round)
+	var remember []timeoutMemo
+	if cacheable {
+		remember = []timeoutMemo{{digest: digest, ctx: vctx}}
+	}
+	tc, err := x.pacemaker.RegisterTimeoutVote(ctx, vote, x.voteQuorumInfo(), remember...)
 	if err != nil {
 		return fmt.Errorf("failed to register timeout vote: %w", err)
-	}
-	// verified AND counted: remember the exact message (before processTC below can end the round and clear the register)
-	if cacheable {
-		x.pacemaker.NoteVerifiedTimeout(vote.Author, vote.Timeout.Round, vote.Timeout.Epoch, digest, vctx)
 	}
 	if tc == nil {
 		x.log.LogAttrs(ctx, logger.LevelTrace, fmt.Sprintf("processed timeout vote for round %d, no quorum yet", vote.Timeout.Round))

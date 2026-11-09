@@ -186,33 +186,63 @@ func TestVerifiedTimeoutRegisterKeysAndKeepsTheFirstDigest(t *testing.T) {
 // one's round-(anchor.Slot+2) timeout vote.
 func realQCTimeouts(t *testing.T) (replicas []*anchorReplica, votes []*abdrc.TimeoutMsg, round uint64) {
 	t.Helper()
+	replicas, votes, round, _, _ = realQCTimeoutsWith(t, false)
+	return replicas, votes, round
+}
+
+// realQCTimeoutsWith with lag=true leaves one replica (neither of the two leaders) without both proposals: it has not seen the blocks the high
+// QC certifies. It is returned apart (not among replicas or votes), with the two proposals it missed.
+func realQCTimeoutsWith(t *testing.T, lag bool) (replicas []*anchorReplica, votes []*abdrc.TimeoutMsg, round uint64, lagger *anchorReplica, missed []*abdrc.ProposalMsg) {
+	t.Helper()
 	byID, anchor, _ := newAnchorReplicas(t, 4)
 	ctx := context.Background()
 	firstLeader, err := firstReplica(byID).manager.leaderSelector.GetLeaderForRound(anchor.Slot + 1)
 	require.NoError(t, err)
-	byID[firstLeader].manager.processNewRoundEvent(ctx)
-	proposal := byID[firstLeader].net.WaitRootProposal(t)
-	for _, r := range byID {
-		require.NoError(t, r.manager.onProposalMsg(ctx, proposal))
-	}
 	nextLeader, err := firstReplica(byID).manager.leaderSelector.GetLeaderForRound(anchor.Slot + 2)
 	require.NoError(t, err)
+	if lag {
+		for id, r := range byID {
+			if id != firstLeader && id != nextLeader {
+				lagger = r
+				break
+			}
+		}
+		require.NotNil(t, lagger)
+	}
+	byID[firstLeader].manager.processNewRoundEvent(ctx)
+	proposal := byID[firstLeader].net.WaitRootProposal(t)
+	missed = append(missed, proposal)
+	for _, r := range byID {
+		if r != lagger {
+			require.NoError(t, r.manager.onProposalMsg(ctx, proposal))
+		}
+	}
 	byID[nextLeader].manager.pacemaker.setState(ctx, pmsRoundMatured)
 	for _, r := range byID {
 		if byID[nextLeader].manager.pacemaker.GetCurrentRound() > anchor.Slot+1 {
 			break
 		}
 		vs := r.net.SentMessages(network.ProtocolRootVote)
+		if r == lagger {
+			continue
+		}
 		require.Len(t, vs, 1)
 		require.NoError(t, byID[nextLeader].manager.onVoteMsg(ctx, vs[0].Message.(*abdrc.VoteMsg)))
 	}
 	proposal = byID[nextLeader].net.WaitRootProposal(t)
+	missed = append(missed, proposal)
 	for _, r := range byID {
+		if r == lagger {
+			continue
+		}
 		r.net.ResetSentMessages(network.ProtocolRootVote)
 		require.NoError(t, r.manager.onProposalMsg(ctx, proposal))
 	}
 	round = anchor.Slot + 2
 	for _, r := range byID {
+		if r == lagger {
+			continue
+		}
 		require.Equal(t, round, r.manager.pacemaker.GetCurrentRound())
 		r.manager.onLocalTimeout(ctx)
 		replicas = append(replicas, r)
@@ -223,7 +253,7 @@ func realQCTimeouts(t *testing.T) (replicas []*anchorReplica, votes []*abdrc.Tim
 		require.EqualValues(t, round-1, v.Timeout.HighQc.VoteInfo.RoundNumber)
 		votes = append(votes, v)
 	}
-	return replicas, votes, round
+	return replicas, votes, round, lagger, missed
 }
 
 // timeoutCertOf feeds the first three votes to a replica other than the author of votes[0] and returns the timeout certificate it formed.
@@ -345,4 +375,91 @@ func TestNoKeyWithoutASigningConfiguration(t *testing.T) {
 	require.False(t, ok)
 	_, _, ok = receiver.manager.timeoutCacheKey(votes[0])
 	require.True(t, ok)
+}
+
+// First copy meets a receiver that has not seen the certified blocks: it needs recovery, is not counted and nothing is remembered. After
+// the receiver catches up, the same message is verified again, counted and remembered; its replay then hits.
+func TestRecoveryFirstThenRetryIsVerifiedAgainAndRemembered(t *testing.T) {
+	_, votes, _, lagger, missed := realQCTimeoutsWith(t, true)
+	ctx := context.Background()
+	calls := countVerifications(lagger.manager)
+	v := votes[0]
+
+	err := lagger.manager.onTimeoutMsg(ctx, v)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "recovery")
+	require.Equal(t, 1, *calls)
+	require.False(t, lagger.manager.pacemaker.VerifiedTimeoutHit(v.Author, v.Timeout.Round, v.Timeout.Epoch, mustDigest(t, lagger.manager, v), mustCtx(t, lagger.manager, v)), "an uncounted message is not remembered")
+
+	for _, p := range missed { // the receiver catches up
+		require.NoError(t, lagger.manager.onProposalMsg(ctx, p))
+	}
+	require.NoError(t, lagger.manager.onTimeoutMsg(ctx, recodeTimeout(t, v)), "the retry is processed and counted")
+	require.Equal(t, 2, *calls, "it was verified again, not served from the first attempt")
+	require.ErrorIs(t, lagger.manager.onTimeoutMsg(ctx, recodeTimeout(t, v)), quorumweight.ErrDuplicateSigner)
+	require.Equal(t, 2, *calls, "now it hits")
+}
+
+func mustDigest(t *testing.T, m *ConsensusManager, v *abdrc.TimeoutMsg) [32]byte {
+	t.Helper()
+	d, _, ok := m.timeoutCacheKey(v)
+	require.True(t, ok)
+	return d
+}
+
+func mustCtx(t *testing.T, m *ConsensusManager, v *abdrc.TimeoutMsg) verifyContext {
+	t.Helper()
+	_, c, ok := m.timeoutCacheKey(v)
+	require.True(t, ok)
+	return c
+}
+
+// The certificate a replayed (hit) message carries is still processed: with the stored last TC older than it (a failed or lost write), the
+// replay writes it, and the verification was not repeated.
+func TestCertificateOfAHitIsStillProcessedAndPersisted(t *testing.T) {
+	replicas, votes, round := realQCTimeouts(t)
+	ctx := context.Background()
+	tc := timeoutCertOf(t, replicas, votes)
+	lagging := replicas[0]
+	other := replicas[len(replicas)-1]
+	other.net.ResetSentMessages(network.ProtocolRootTimeout)
+	other.manager.onLocalTimeout(ctx)
+	next := other.net.SentMessages(network.ProtocolRootTimeout)[0].Message.(*abdrc.TimeoutMsg)
+	require.NotNil(t, next.LastTC)
+
+	calls := countVerifications(lagging.manager)
+	require.NoError(t, lagging.manager.onTimeoutMsg(ctx, next))
+	last, err := lagging.db.ReadLastTC()
+	require.NoError(t, err)
+	require.Equal(t, tc.GetRound(), last.GetRound(), "the first copy persisted its last TC")
+
+	// a lost write: the stored TC is older than the one the message carries
+	stale := &drctypes.TimeoutCert{Timeout: &drctypes.Timeout{Epoch: tc.Timeout.Epoch, Round: round - 1}, Signatures: map[string]*drctypes.TimeoutVote{}}
+	require.NoError(t, lagging.db.WriteTC(stale))
+	last, err = lagging.db.ReadLastTC()
+	require.NoError(t, err)
+	require.Equal(t, round-1, last.GetRound())
+
+	require.ErrorIs(t, lagging.manager.onTimeoutMsg(ctx, recodeTimeout(t, next)), quorumweight.ErrDuplicateSigner)
+	require.Equal(t, 1, *calls, "the replay hit: not verified again")
+	last, err = lagging.db.ReadLastTC()
+	require.NoError(t, err)
+	require.Equal(t, tc.GetRound(), last.GetRound(), "the hit still processed its certificate: the write was retried")
+}
+
+type unknownMembers struct{}
+
+func (unknownMembers) GetQuorumThreshold() uint64      { return 3 }
+func (unknownMembers) GetMaxFaultyNodes() uint64       { return 1 }
+func (unknownMembers) GetRootNodes() []*types.NodeInfo { return nil }
+
+// A weight error after the signature was added to the certificate leaves nothing remembered: the vote is not a verified, counted one.
+func TestWeightFailureAfterAddRemembersNothing(t *testing.T) {
+	var r VoteRegister
+	vote := &abdrc.TimeoutMsg{Timeout: &drctypes.Timeout{Round: 5, Epoch: 1}, Author: "stranger", Signature: []byte{1}}
+	ctx := verifyContext{n: 1}
+	_, _, err := r.InsertTimeoutVote(vote, profile2QuorumInfo{QuorumInfo: unknownMembers{}}, timeoutMemo{digest: [32]byte{7}, ctx: ctx})
+	require.ErrorIs(t, err, quorumweight.ErrUnknownSigner)
+	require.Contains(t, r.timeoutCert.Signatures, "stranger", "the signature was added before the weight failed")
+	require.False(t, r.VerifiedTimeoutHit("stranger", 5, 1, [32]byte{7}, ctx), "and nothing was remembered")
 }
