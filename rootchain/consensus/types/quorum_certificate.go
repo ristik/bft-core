@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"time"
 
 	"github.com/fxamacker/cbor/v2"
 
@@ -415,6 +416,17 @@ func (x *QuorumCert) VerifyScheme(tb types.RootTrustBase, cfg votesig.Config, pi
 // VerifyWith resolves the certificate's own epoch in the store (its trust base and its signing configuration) and verifies
 // it by that epoch's rule; the genesis pin is the store's.
 func (x *QuorumCert) VerifyWith(tbs *trustbase.TrustBaseStore) error {
+	start := time.Now()
+	err := x.verifyWith(tbs)
+	if err == nil {
+		if o := tbs.CertObserver(); o != nil {
+			o.ObserveCert("QC", x, x.VoteInfo.Epoch, x.GetRound(), x.signingScheme(), len(x.Signatures), time.Since(start))
+		}
+	}
+	return err
+}
+
+func (x *QuorumCert) verifyWith(tbs *trustbase.TrustBaseStore) error {
 	if x == nil || x.VoteInfo == nil {
 		return errVoteInfoIsNil
 	}
