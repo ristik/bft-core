@@ -1,0 +1,53 @@
+name: 976-live
+
+# Opt-in live real-shard tests of #976 (rootchain/consensus/ingress_loss_shard_test.go). They take minutes each on a quiet host, so they are skipped in go-ci's
+# default `go test ./...` (BFT_976_LIVE is unset there) and run here instead, several times, so a flake shows as a count and not as a timeout of the main suite.
+# The same-host load of a shared runner is part of the profile; failures are kept as artifacts.
+on:
+  pull_request:
+    paths:
+      - 'rootchain/consensus/ingress_loss_shard_test.go'
+      - 'rootchain/consensus/leader_transport*_test.go'
+      - 'shardnode/executortest/**'
+      - '.github/workflows/976-live.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  live:
+    name: live run ${{ matrix.run }} (${{ matrix.roots }} roots)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        run: [1, 2, 3]
+        roots: [4]
+        include:
+          - run: 1
+            roots: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+          cache-dependency-path: go.sum
+      - name: Live tests
+        env:
+          BFT_976_LIVE: '1'
+          BFT_976_ROOTS: ${{ matrix.roots }}
+          BFT_976_CYCLES: '4'
+          BFT_976_ENTRIES: '8'
+        run: |
+          set -o pipefail
+          go test ./rootchain/consensus -run 'TestIngressLossWithRealShards|TestRealShardsWithoutLoss' -count=1 -timeout 40m -v 2>&1 | tee live-log.txt
+      - name: Keep the log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: live-${{ matrix.roots }}roots-run${{ matrix.run }}
+          path: live-log.txt
+          retention-days: 14

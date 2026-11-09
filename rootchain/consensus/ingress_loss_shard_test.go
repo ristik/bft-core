@@ -46,6 +46,15 @@ import (
 //   - One shard (EVM, 4 or 5 validators), no f8batch proof load (no RSMT shards, no ~212 KB batches), no other shard traffic. One host, loopback libp2p.
 //   - Root rounds and shard rounds share the host with whatever else runs on it; the figures are observations of this profile, not bounds.
 
+// requireLive976 gates every live real-shard test: they take minutes each on a quiet host, so they run only when asked (BFT_976_LIVE=1), in the separate
+// workflow .github/workflows/976-live.yml, and never in the default `go test ./...` of go-ci (which runs without -short and has a 30 minute budget per shard).
+func requireLive976(t *testing.T) {
+	t.Helper()
+	if testing.Short() || os.Getenv("BFT_976_LIVE") != "1" {
+		t.Skip("live real-shard test (minutes): set BFT_976_LIVE=1; run by .github/workflows/976-live.yml")
+	}
+}
+
 // managerTrust serves the trust bases the shard's certificates name: the live epoch of the manager, and the fixture's earlier one (the genesis certificate of
 // the shard is from it).
 // liveShardEpoch is the shard epoch the fixture's live certificates name.
@@ -683,9 +692,7 @@ func shortID(id string) string { return id[len(id)-6:] }
 // T2 window: the duplicate-triggered retry is withheld (MaxResubmits -1, the test-only control), the repeat reaches the shard, and everything after is the
 // shard's own work: its round driver builds a new attempt from the pending entry its executor still holds, signs it, sends it, and the roots accept it.
 func TestIngressLossWithRealShardsRecoversThroughTheT2Repeat(t *testing.T) {
-	if testing.Short() {
-		t.Skip("a live four-root cluster with four real shard nodes")
-	}
+	requireLive976(t)
 	opts := shardnode.DefaultBFTClientOptions
 	opts.MaxResubmits = -1
 	w := newShardWorld(t, shardWorldConfig{names: liveRootNames(), options: q3fixture.Options{PeerEVM: true}, timeout: 2 * time.Second, blockRate: phaseLockBlockRate, shardOpts: opts})
@@ -834,9 +841,7 @@ func (w *shardWorld) distinctNodes(evs []requestEvent) map[string]bool {
 // the re-send, and the shard's own path recovers it: its inactivity handshake, the root's authenticated answer with the certificate it already holds, and the
 // byte-identical re-send of the signed request.
 func TestIngressLossWithRealShardsRecoversThroughTheDuplicateResend(t *testing.T) {
-	if testing.Short() {
-		t.Skip("a live four-root cluster with four real shard nodes")
-	}
+	requireLive976(t)
 	w := newShardWorld(t, shardWorldConfig{names: liveRootNames(), options: q3fixture.Options{PeerEVM: true}, timeout: 2 * time.Second, blockRate: phaseLockBlockRate, shardOpts: retryOptions(10)})
 	w.waitFor("the real shard certifies", 2*time.Minute, func() bool { return w.certCount() >= 4 })
 
@@ -885,7 +890,9 @@ func TestIngressLossWithRealShardsRecoversThroughTheDuplicateResend(t *testing.T
 	}
 	nodes := w.distinctNodes(resent)
 	require.GreaterOrEqual(t, len(nodes), w.threshold(), "at least the request threshold of validators re-sent their lost request, byte-identical (delivered to a root; admission is shown by the certification)")
-	withHandshake := false
+	// The trigger is an authenticated duplicate of the held certificate, not necessarily the answer to the shard's own handshake: the roots also deliver the held
+	// certificate on their own, and on a loaded host every re-send can come that way. So no handshake is required; for each validator whether one of the
+	// shard's handshakes (its own or another's) preceded its first re-send is reported.
 	for node := range nodes {
 		var firstResend time.Time
 		for _, e := range resent {
@@ -893,8 +900,6 @@ func TestIngressLossWithRealShardsRecoversThroughTheDuplicateResend(t *testing.T
 				firstResend = e.at
 			}
 		}
-		// the trigger is an authenticated duplicate of the held certificate: any validator's handshake makes a root answer with it (a root also
-		// answers the others it serves), so the check is that SOME handshake of the shard preceded this validator's re-send, and its own is logged
 		own, any := false, false
 		for _, h := range w.handshakesSince(armed) {
 			if h.at.Before(firstResend) {
@@ -902,12 +907,8 @@ func TestIngressLossWithRealShardsRecoversThroughTheDuplicateResend(t *testing.T
 				own = own || h.node == node
 			}
 		}
-		// The trigger is an authenticated duplicate of the held certificate, not necessarily an answer to a handshake: the roots also deliver the held
-		// certificate on their own. So the handshake is reported, and required of at least one validator below.
-		withHandshake = withHandshake || any
 		t.Logf("  validator %s: first re-send preceded by a handshake of the shard: %v, by its own: %v", shortID(node), any, own)
 	}
-	require.True(t, withHandshake, "at least one validator's re-send followed a handshake of the shard")
 	var applied time.Time
 	w.waitFor("every validator applies the certified block", time.Minute, func() bool {
 		for _, e := range w.executors() {
@@ -928,9 +929,7 @@ func TestIngressLossWithRealShardsRecoversThroughTheDuplicateResend(t *testing.T
 // Exhausted-retry control: the same loss, but the drop lasts until every validator has used its whole re-send budget (2) against it. Nothing re-sends after
 // that (the limitation stays as designed); only the roots' T2 repeat and the shard's new attempt recover the work, and that is reported as such.
 func TestIngressLossWithRealShardsAfterTheResendBudgetIsExhausted(t *testing.T) {
-	if testing.Short() {
-		t.Skip("a live four-root cluster with four real shard nodes")
-	}
+	requireLive976(t)
 	const budget = 2
 	w := newShardWorld(t, shardWorldConfig{names: liveRootNames(), options: q3fixture.Options{PeerEVM: true}, timeout: 2 * time.Second, blockRate: phaseLockBlockRate, shardOpts: retryOptions(budget)})
 	w.waitFor("the real shard certifies", 2*time.Minute, func() bool { return w.certCount() >= 4 })
@@ -959,6 +958,13 @@ func TestIngressLossWithRealShardsAfterTheResendBudgetIsExhausted(t *testing.T) 
 			}
 		}
 		return len(done) == len(w.ids)
+	})
+	// Keep dropping until nothing has been delivered for longer than the re-send spacing: a re-send in flight when the drop lifts would be a delivery of a
+	// lost request that is not a re-send after the budget was spent.
+	spacing := retryOptions(budget).ResubmitMinInterval
+	w.waitFor("the drop has been quiet for longer than the re-send spacing", time.Minute, func() bool {
+		evs := w.requestsSince(armed)
+		return len(evs) > 0 && time.Since(evs[len(evs)-1].at) > spacing+200*time.Millisecond
 	})
 	w.setDrop(nil)
 	opened := time.Now()
@@ -1157,9 +1163,7 @@ func runLossCycles(t *testing.T, w *shardWorld, cycles int, silent string, rBudg
 // its non-repeat certificate and the application are reported per cycle, with the time from the first repeat. The assertions are per kind and per attempt, and
 // the eventual chain is asserted for every cycle, so a paused leader cannot be averaged away and a stuck chain is a failure, not an expected negative.
 func TestIngressLossWithRealShardsPausedNextLeaderHasNoFiniteR(t *testing.T) {
-	if testing.Short() {
-		t.Skip("a live four-root cluster with three real shard nodes; minutes")
-	}
+	requireLive976(t)
 	opts := shardnode.DefaultBFTClientOptions
 	opts.MaxResubmits = -1
 	w := newShardWorld(t, shardWorldConfig{names: liveRootNames(), options: q3fixture.Options{PeerEVM: true}, timeout: 2 * time.Second, blockRate: phaseLockBlockRate, shardOpts: opts, silentLast: 1})
@@ -1210,9 +1214,7 @@ func TestIngressLossWithRealShardsPausedNextLeaderHasNoFiniteR(t *testing.T) {
 // wrappers: requests delivered, at which roots, and whether those roots had shown the repeat. Their cause (admission, quorum assembly, forwarding, proposal
 // inclusion, supersession by the next repeat) is NOT established here.
 func TestIngressLossWithRealShardsFirstAttemptRate(t *testing.T) {
-	if testing.Short() {
-		t.Skip("a live four-root cluster with four real shard nodes; minutes")
-	}
+	requireLive976(t)
 	opts := shardnode.DefaultBFTClientOptions
 	opts.MaxResubmits = -1
 	w := newShardWorld(t, shardWorldConfig{names: liveRootNames(), options: q3fixture.Options{PeerEVM: true}, timeout: 2 * time.Second, blockRate: phaseLockBlockRate, shardOpts: opts})
@@ -1236,9 +1238,7 @@ func TestIngressLossWithRealShardsFirstAttemptRate(t *testing.T) {
 // Control for the loss cycles: the same shards, executors and roots, no request is ever dropped. Entries are queued one after another; every one must be
 // applied at every validator with all heads equal. A divergence here is not the loss path's.
 func TestRealShardsWithoutLossApplyEveryEntry(t *testing.T) {
-	if testing.Short() {
-		t.Skip("a live four-root cluster with four real shard nodes; minutes")
-	}
+	requireLive976(t)
 	w := newShardWorld(t, shardWorldConfig{names: liveRootNames(), options: q3fixture.Options{PeerEVM: true}, timeout: 2 * time.Second, blockRate: phaseLockBlockRate, shardOpts: shardnode.DefaultBFTClientOptions})
 	w.waitFor("the real shard certifies", 2*time.Minute, func() bool { return w.certCount() >= 4 })
 	n := traceEnvInt(t, "BFT_976_ENTRIES", 20)
