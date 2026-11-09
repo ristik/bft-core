@@ -10,11 +10,11 @@ on:
       cadence_seconds:
         description: 'election cadence in UC seconds (generate.py --pos-cadence-seconds): room for the bridge deploy and the epoch-1 lock/mint before the election'
         required: false
-        default: '1200'
+        default: '600'
       cadence_rounds:
         description: 'election cadence in ordinary root rounds (generate.py --pos-cadence-rounds)'
         required: false
-        default: '1500'
+        default: '800'
 permissions:
   contents: read
 concurrency:
@@ -25,8 +25,8 @@ jobs:
     runs-on: ubuntu-22.04
     timeout-minutes: 240
     env:
-      CADENCE_SECONDS: ${{ inputs.cadence_seconds || '1200' }}
-      CADENCE_ROUNDS: ${{ inputs.cadence_rounds || '1500' }}
+      CADENCE_SECONDS: ${{ inputs.cadence_seconds || '600' }}
+      CADENCE_ROUNDS: ${{ inputs.cadence_rounds || '800' }}
     steps:
       - uses: actions/checkout@v4
       - name: Free disk (the ureth release build is large)
@@ -109,10 +109,14 @@ jobs:
         run: sudo -E env "PATH=$PATH" python3 deploy/testnet/bridge/rehearse_bridge.py --generation /srv/tn-bridge-pos --evidence "$RUNNER_TEMP/evidence/2-bridge-epoch1" --stages deploy,fund,pos-epoch1
       - name: 3. The handoff (election, proposal, propose, install, advance)
         run: sudo -E env "PATH=$PATH" python3 deploy/testnet/rehearse.py --generation /srv/tn-bridge-pos --evidence "$RUNNER_TEMP/evidence/3-handoff" --ubft pinned-bft/build/ubft --stages pos-election,pos-proposal,pos-propose,pos-install,pos-advance
-      - name: 4. The redeem across the handoff, with the bridge client's live trust refresh; custody
-        run: sudo -E env "PATH=$PATH" python3 deploy/testnet/bridge/rehearse_bridge.py --generation /srv/tn-bridge-pos --evidence "$RUNNER_TEMP/evidence/4-bridge-redeem" --ubft pinned-bft/build/ubft --stages pos-redeem,pos-historical,custody
-      - name: 5. The roots' signed history (utb-live)
-        run: sudo -E env "PATH=$PATH" python3 deploy/testnet/rehearse.py --generation /srv/tn-bridge-pos --evidence "$RUNNER_TEMP/evidence/5-utb-live" --ubft pinned-bft/build/ubft --stages utb-live
+      - name: 4. The redeems across the handoff: consolidated with the live trust refresh, and the per-SID historical anchor
+        run: sudo -E env "PATH=$PATH" python3 deploy/testnet/bridge/rehearse_bridge.py --generation /srv/tn-bridge-pos --evidence "$RUNNER_TEMP/evidence/4-bridge-redeem" --ubft pinned-bft/build/ubft --stages pos-redeem,pos-historical
+      - name: 5. The second handoff (root epoch 2 -> 3)
+        run: sudo -E env "PATH=$PATH" python3 deploy/testnet/rehearse.py --generation /srv/tn-bridge-pos --evidence "$RUNNER_TEMP/evidence/5-handoff-2" --ubft pinned-bft/build/ubft --stages pos-handoff-2
+      - name: 6. The gap at epoch 3 (a lagging wallet repairs the range in one-entry pages); custody
+        run: sudo -E env "PATH=$PATH" python3 deploy/testnet/bridge/rehearse_bridge.py --generation /srv/tn-bridge-pos --evidence "$RUNNER_TEMP/evidence/6-bridge-gap" --ubft pinned-bft/build/ubft --stages pos-gap,custody
+      - name: 7. The roots' signed history (utb-live)
+        run: sudo -E env "PATH=$PATH" python3 deploy/testnet/rehearse.py --generation /srv/tn-bridge-pos --evidence "$RUNNER_TEMP/evidence/7-utb-live" --ubft pinned-bft/build/ubft --stages utb-live
       - name: Resources and logs
         if: always()
         run: |
