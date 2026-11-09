@@ -1019,12 +1019,15 @@ func (s *Store) loadJournalOnce(ctx context.Context, c Context, limits JournalLi
 			if anchorUC != nil && candidate.Candidate.AuthorizingUC.GetRootEpoch() == anchorUC.GetRootEpoch() && candidate.Candidate.AuthorizingUC.GetRootRoundNumber() == anchorUC.GetRootRoundNumber() && candidate.Candidate.AuthorizingUC.GetRoundNumber() == anchorUC.GetRoundNumber() {
 				foundAuthorization = true
 			}
-			if anchorUC != nil && candidate.Certified && candidate.ResultingUC.GetRootEpoch() == anchorUC.GetRootEpoch() && candidate.ResultingUC.GetRootRoundNumber() == anchorUC.GetRootRoundNumber() && candidate.ResultingUC.GetRoundNumber() == anchorUC.GetRoundNumber() && bytes.Equal(candidate.Candidate.Hash, anchorUC.InputRecord.BlockHash) {
+			// The pair a coverage is committed against is the one the ARCHIVE representation carries: the selected pair if a selection was made (bft-core#876, checkCoveredCandidate),
+			// else the association. Comparing the association alone makes a covered, selected block fail here once its observations are pruned (bft-core#991).
+			archiveUC, archiveTR := candidate.ArchiveResult()
+			if anchorUC != nil && candidate.Certified && archiveUC.GetRootEpoch() == anchorUC.GetRootEpoch() && archiveUC.GetRootRoundNumber() == anchorUC.GetRootRoundNumber() && archiveUC.GetRoundNumber() == anchorUC.GetRoundNumber() && bytes.Equal(candidate.Candidate.Hash, anchorUC.InputRecord.BlockHash) {
 				// Pruning removes the anchor body's authorizing observation while
 				// retaining the body itself. The frontier transaction checked the
 				// exact original and resulting pairs against this candidate.
 				originalUC, originalTR, originalErr := pairBytes(candidate.Candidate.AuthorizingUC, candidate.Candidate.AuthorizingTR)
-				resultUC, resultTR, resultErr := pairBytes(candidate.ResultingUC, candidate.ResultingTR)
+				resultUC, resultTR, resultErr := pairBytes(archiveUC, archiveTR)
 				if originalErr == nil && resultErr == nil &&
 					bytes.Equal(originalUC, out.Frontier.Record.OriginalUC) && bytes.Equal(originalTR, out.Frontier.Record.OriginalTR) &&
 					bytes.Equal(resultUC, out.Frontier.Record.ResultingUC) && bytes.Equal(resultTR, out.Frontier.Record.ResultingTR) {
