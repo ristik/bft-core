@@ -1270,18 +1270,25 @@ class Rehearsal:
             return False, None, None, None, (run.stdout + run.stderr).strip()[-300:]
         return True, int(found.group(1)), int(found.group(2)), found.group(3), run.stdout.strip()
 
+    def utb_genesis_epoch(self):
+        """The epoch of the generation's genesis trust base (network/trust-base.json, `epoch`; 1 when the file does not say), the first epoch the served history must start at."""
+        try:
+            return int(json.loads((self.gen / 'network' / 'trust-base.json').read_text()).get('epoch', 1))
+        except (OSError, ValueError, AttributeError):
+            return 1
+
     def utb_history(self, label, pin, snapshot=None):
         """The aggregator's served history as ONE complete page from the genesis (a bundle: status OK, no cursor), verified offline by `ubft trust-base utb-verify` against the
         pinned genesis EntryID. `snapshot` = (tip epoch, tip EntryID) asks the server to answer for exactly that history (snapshotEnd / snapshotEntryId): an answer that is not
         the held history is refused, so a replay of the same history is idempotent and a conflicting replacement cannot pass. Returns (tip epoch, tip EntryID, file)."""
-        query = 'from=1&maxEntries=64' + (f'&snapshotEnd={snapshot[0]}&snapshotEntryId={snapshot[1]}' if snapshot else '')
+        query = f'from={self.utb_genesis_epoch()}&maxEntries=64' + (f'&snapshotEnd={snapshot[0]}&snapshotEntryId={snapshot[1]}' if snapshot else '')
         status, body = self.utb_page(query)
         self.expect(status == 200 and len(body) > 0, f'the aggregator serves its history ({label})', f'HTTP {status}, {len(body)} bytes')
         path = self.evh() / f'utb-history-{label}.cbor'
         path.write_bytes(body)
         ok, first, tip, tip_id, out = self.utb_verify(path, pin)
         self.expect(ok, f'the served history verifies offline against the pinned genesis ({label})', out)
-        self.expect(first == 1, f'the history starts at the genesis epoch ({label})', str(first))
+        self.expect(first == self.utb_genesis_epoch(), f'the history starts at the genesis epoch ({label})', f'first {first}, genesis {self.utb_genesis_epoch()}')
         if snapshot:
             self.expect((tip, tip_id) == tuple(snapshot), f'the replay answers for exactly the first history ({label})', f'{tip} {tip_id}')
         return tip, tip_id, path
@@ -1302,14 +1309,14 @@ class Rehearsal:
         epoch = self.root_epoch(1, transport)
         self.expect(epoch is not None and epoch >= 2 and all(self.root_epoch(i, transport) == epoch for i in range(1, self.n + 1)), 'every root certifies at the same switched epoch', str(epoch))
         def reached():
-            status, body = self.utb_page('from=1&maxEntries=64')
+            status, body = self.utb_page(f'from={self.utb_genesis_epoch()}&maxEntries=64')
             if status != 200 or not body:
                 return None
             probe = self.evh() / 'utb-history-probe.cbor'
             probe.write_bytes(body)
             ok, _, tip, _, _ = self.utb_verify(probe, pin)
             return tip if ok and tip >= epoch else None
-        self.expect(self.wait(f'the aggregator serves a verifying history reaching epoch {epoch}', reached, 180), 'the aggregator history reaches the roots\' epoch')
+        self.wait(f'the aggregator serves a verifying history reaching epoch {epoch}', reached, 180)   # raises Failure on timeout
         tip, tip_id, first_file = self.utb_history('first', pin)
         self.expect(tip >= epoch, 'the verified tip is at least the roots\' epoch', f'tip {tip}, roots {epoch}')
         # replay: the same history again, asked for by its tip and EntryID
@@ -1317,11 +1324,11 @@ class Rehearsal:
         self.expect((again_tip, again_id) == (tip, tip_id), 'the replay is the same history (same tip epoch and EntryID; a different valid witness of the same EntryID is a replay)')
         # control 1: a snapshot naming another EntryID must not be answered with the history
         wrong = '0x' + ('00' if not tip_id.endswith('00') else '01') * 32
-        status, body = self.utb_page(f'from=1&maxEntries=64&snapshotEnd={tip}&snapshotEntryId={wrong}')
+        status, body = self.utb_page(f'from={self.utb_genesis_epoch()}&maxEntries=64&snapshotEnd={tip}&snapshotEntryId={wrong}')
         control = self.evh() / 'utb-history-wrong-snapshot.cbor'
         control.write_bytes(body)
         ok, _, _, control_id, _ = self.utb_verify(control, pin)
-        self.expect(not (status == 200 and ok and control_id == tip_id and body == first_file.read_bytes()), 'a replay naming another EntryID is not answered with the held history (control)', f'HTTP {status}')
+        self.expect(not (status == 200 and ok and control_id == tip_id), 'a replay naming another EntryID is not answered with the held history (control)', f'HTTP {status}')
         # control 2: the offline verifier refuses a changed byte
         raw = bytearray(first_file.read_bytes())
         raw[len(raw) // 2] ^= 0x01
