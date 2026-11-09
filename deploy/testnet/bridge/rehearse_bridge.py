@@ -30,7 +30,7 @@
   backup-restore
              the quiesced backup and same-generation restore (rehearse.py) with the bridge deployed: the redeemed lock stays spent, and a new round trip completes on
              the restored generation; the round trip's replays (its envelope, its claim and the driver's negatives) are refused there too
-  pos-epoch1, pos-redeem, pos-historical, pos-gap
+  pos-epoch1, pos-redeem, pos-historical, pos-gap, pos-agg-restart, pos-after-restart, pos-replays
              opt-in, on a generation made with --pos --utb: the bridge across a PoS root handoff (bft-core #430 row 2), run between rehearse.py's
              handoff stages; see bridge_pos.py for the sequence of invocations and what each checks
   custody    the vault's books from its whole event log against its counters and balance: every lock once (nonces 1..lastNonce), every credit
@@ -613,10 +613,10 @@ class BridgeRehearsal(BridgePos, Rehearsal):
 
 
 STAGES = (('deploy', 'deploy'), ('lockproof', 'lockproof'), ('fund', 'fund'), ('roundtrip', 'roundtrip'), ('negatives', 'negatives'), ('tester', 'tester_stage'), ('split', 'split_stage'),
-          ('consolidated', 'consolidated'), ('long-history', 'long_history'), ('backup-restore', 'backup_restore'), ('pos-epoch1', 'pos_epoch1'), ('pos-redeem', 'pos_redeem'), ('pos-historical', 'pos_historical'), ('pos-gap', 'pos_gap'),
+          ('consolidated', 'consolidated'), ('long-history', 'long_history'), ('backup-restore', 'backup_restore'), ('pos-epoch1', 'pos_epoch1'), ('pos-redeem', 'pos_redeem'), ('pos-historical', 'pos_historical'), ('pos-gap', 'pos_gap'), ('pos-agg-restart', 'pos_agg_restart'), ('pos-after-restart', 'pos_after_restart'), ('pos-replays', 'pos_replays'),
           ('custody', 'custody'))
 # opt-in: only on a --pos --utb generation, around rehearse.py's handoff stages (bridge_pos.py)
-POS_STAGES = ('pos-epoch1', 'pos-redeem', 'pos-historical', 'pos-gap')
+POS_STAGES = ('pos-epoch1', 'pos-redeem', 'pos-historical', 'pos-gap', 'pos-agg-restart', 'pos-after-restart', 'pos-replays')
 
 
 def main():

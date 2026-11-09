@@ -1,13 +1,15 @@
 """The bridge across a PoS root handoff (bft-core #430 row 2; briefs/pos-release-rerun-plan.md §4.1 preflight, arch §8/§9): two stages of rehearse_bridge.py
 on a generation made with generate.py --pos --utb, run around rehearse.py's handoff stages, which order their own list. Because of that, the sequence is
-six invocations on one generation (the workflow then runs rehearse.py utb-live):
+eight invocations on one generation (the workflow then runs rehearse.py utb-live):
 
     rehearse.py        --stages up,identity,first-tx,pos-smoke
     rehearse_bridge.py --stages deploy,fund,pos-epoch1          (the epoch-1 artifacts, before the election; within the declared cadence)
     rehearse.py        --stages pos-election,pos-proposal,pos-propose,pos-install,pos-advance
     rehearse_bridge.py --stages pos-redeem,pos-historical   (after activation)
     rehearse.py        --stages pos-handoff-2                   (root epoch 2 -> 3)
-    rehearse_bridge.py --stages pos-gap,custody                 (at epoch 3)
+    rehearse_bridge.py --stages pos-gap                         (at epoch 3)
+    rehearse.py        --stages pos-restart-2                   (each entity's execution client, root and shard node stopped and restarted, at epoch 3)
+    rehearse_bridge.py --stages pos-agg-restart,pos-after-restart,pos-replays,custody
 
   pos-epoch1  The bridge client's trust and the epoch-1 artifacts, before the root install:
               - the deployed bundle's genesis EntryID is the generation's UTB genesis id (manifest utb.genesis_id): the one history the roots extend;
@@ -43,14 +45,24 @@ six invocations on one generation (the workflow then runs rehearse.py utb-live):
   Negatives check the vault's whole state, not its balance alone (a redeem creates credit before any claim): balance, the wallet's claimable, the
   lock's remaining and redeemed amounts and the credited total.
 
-Not here: the lagging replica and range repair, the public SDK clients, the restarts, and the replay negatives beyond the bridge's own stages (§4.2
-steps 6-8). Those are stage work after this preflight.
+  pos-agg-restart    The aggregator restarted: the same verified history (tip epoch and EntryID) reloaded, a replay of it answered as the same, and no refused
+                     trust-base update or finalized-branch conflict in its log after the restart.
+  pos-after-restart  After the pods' and the aggregator's restarts, token D round-trips at epoch 3 with the main wallet: a fresh process reloads its durable
+                     history (to epoch 2), fetches entry 3 from the restarted aggregator, ends with the lagging wallet's EntryIDs 1..3; exact credit and claim.
+  pos-replays        The replay negatives at epoch 3, against the vault's whole state and the B1 tip (unchanged after all of them): every redeemed envelope
+                     again (A epoch 2, B per-SID epoch 1, C and D epoch 3: PartAlreadyRedeemed), a claimed credit claimed again (InsufficientCredit); and per
+                     token A, B, C (tester replays): the envelope mined again (status 0), a fresh consolidated proof under the epoch-3 seal (PartAlreadyRedeemed:
+                     refused on the nullifier, not for its age), that proof with its recipient changed and re-signed by unknown keys (BridgeRejected; the plug-in
+                     ErrQuorumNotMet), and a conflicting burn of the burned state (never certified). Then custody (the existing checker) over all four locks.
+
+Not here: the gap through a deliberately suppressed push offer (§4.2 step 6 as written: this is the pull client's gap), and the public SDK clients (step 7).
 """
 import hashlib
 import json
 import os
 import secrets
 import shutil
+import time
 
 from rehearse import Failure   # noqa: E402  (rehearse_bridge.py puts the package directory on sys.path first)
 
@@ -62,7 +74,9 @@ F_PRESENT, F_BODY_ID, F_MEMBER_COUNT = 0, 2, 9
 POS_WALLET, POS_KEY = 'pos-wallet', 'pos-tester.key'
 LAG_WALLET = 'pos-lagging-wallet'   # pos-gap's consumer: its own wallet directory and durable history, never refreshed before the gap
 POS_LOCK_WEI = 3 * 10 ** 17
-POS_FUNDS = 2 * 10 ** 18   # three locks of POS_LOCK_WEI and their gas
+POS_FUNDS = 2 * 10 ** 18   # four locks of POS_LOCK_WEI (A, B, C, and D after the restarts; each claimed back before the next) and their gas
+# BridgeVault errors (as rehearse_bridge.py; not imported from it, which imports this module)
+PART_ALREADY_REDEEMED, INSUFFICIENT_CREDIT = '0xe8f8709e', '0x4eb7eaec'
 
 
 def _word(n):
@@ -282,8 +296,9 @@ class BridgePos:
     def pos_gap(self):
         try:
             self.pos_gap_steps()
-        finally:
-            (self.gen / 'bridge' / POS_KEY).unlink(missing_ok=True)   # the last stage that needs the wallets' key
+        except Exception:
+            (self.gen / 'bridge' / POS_KEY).unlink(missing_ok=True)   # the later invocations will not run: the key goes now
+            raise
 
     def pos_gap_steps(self):
         work = self.gen / 'bridge'
@@ -383,3 +398,154 @@ class BridgePos:
                                    'anchorEpochs': epochs, 'receipt': {'block': int(receipt['blockNumber'], 16), 'gasUsed': int(receipt['gasUsed'], 16)},
                                    'b1': b1, 'before': before, 'credited': credited, 'evidence': str(cache)})
         self.record('result-historical', {'stage': '430-bridge-pos pos-historical (per-SID)', 'generation': self.gen.name, 'anchorEpochs': epochs, 'pass': True})
+
+    # ---- after the second handoff: the aggregator restart, the bridge after the restarts, the replay negatives --------------------
+    def pos_whole_state(self, epoch1, extra=()):
+        """The vault's whole state for every lock of these stages (not the balance alone), and the B1 registry's tip: what no refused operation may change."""
+        me = epoch1['wallet']
+        view = lambda sig, *args: self.vault_view(sig, *args)
+        locks = {}
+        for name, nonce in (('A', epoch1['lockNonce']), ('B', epoch1['lockNonceB']), ('C', epoch1['lockNonceC']), *extra):
+            locks[name] = {'remaining': int(view('remaining(uint256)', str(nonce)), 16), 'redeemed': int(view('redeemedAmount(uint256)', str(nonce)), 16)}
+        return {'balance': self.vault_balance(), 'credited': int(view('credited()'), 16), 'claimable': int(view('claimable(address)', me), 16),
+                'locks': locks, 'b1': self.b1_state()}
+
+    def pos_agg_restart(self):
+        """The aggregator restarted at epoch 3: its history is reloaded (the same verified tip and EntryID, and a replay of that history answered as the same), and
+        it keeps serving the chain; its log after the restart shows no refused trust-base update. Needs --ubft (the offline verifier)."""
+        self.expect(bool(self.ubft), 'pos-agg-restart needs --ubft (the offline verifier)')
+        pin = self.manifest['utb']['genesis_id']
+        tip, tip_id, _ = self.utb_history('agg-before-restart', pin)
+        self.expect(int(tip) >= 3, 'before the restart the aggregator serves the history to epoch 3', str(tip))
+        since = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(time.time() - 1))   # the host's clock: the docker daemon's, which --since reads
+        self.say('  restarting the aggregator')
+        self.compose('restart', 'aggregator')
+        def served():
+            status, body = self.utb_page('from=1&maxEntries=64')
+            return True if status == 200 and body else None
+        self.wait('the restarted aggregator serves its history', served, 180)
+        after_tip, after_id, _ = self.utb_history('agg-after-restart', pin)
+        self.expect((int(after_tip), str(after_id).lower()) == (int(tip), str(tip_id).lower()),
+                    'the restarted aggregator reloaded the same history (tip epoch and EntryID)', f'{after_tip} {after_id}')
+        self.utb_history('agg-after-restart-replay', pin, (after_tip, after_id))
+        logs = self.compose('logs', '--no-color', '--since', since, 'aggregator', check=False)
+        refused = [line for line in logs.splitlines() if 'dropping an invalid trust-base update' in line or 'finalized-branch conflict' in line]
+        self.expect(not refused, 'after the restart the aggregator refused no trust-base update and reported no finalized-branch conflict', ' | '.join(refused)[:300])
+        self.record('agg-restart', {'before': {'tip': tip, 'tipEntryId': tip_id}, 'after': {'tip': after_tip, 'tipEntryId': after_id}, 'logSince': since})
+
+    def pos_after_restart(self):
+        try:
+            self.pos_after_restart_steps()
+        except Exception:
+            (self.gen / 'bridge' / POS_KEY).unlink(missing_ok=True)
+            raise
+
+    def pos_after_restart_steps(self):
+        """After the pods' restarts (rehearse.py pos-restart-2) and the aggregator's (pos-agg-restart), a round trip at epoch 3 with the main wallet: its held history
+        (to epoch 2, from pos-redeem) is reloaded by a fresh process, entry 3 is fetched from the restarted aggregator, the vault credits exactly the lock and the claim
+        pays it. Token D is the replay stage's artifact too."""
+        work = self.gen / 'bridge'
+        epoch1 = json.loads((work / 'pos-epoch1.json').read_text())
+        genesis = int(epoch1['trust']['genesisEpoch'])
+        me = epoch1['wallet']
+        self.start_endpoint(1)   # validator 1 was restarted: the lock-proof endpoint reads its archive again
+        held = self.held_trust()
+        self.expect(int(held['tipEpoch']) == genesis + 1, 'a fresh process reloads the main wallet\'s durable history to epoch 2 (as pos-redeem left it)', held['tipEpoch'])
+        before = self.vault_balance()
+        known = set(self.tokens())
+        self.pos_tester('lock', '--amount', f'{POS_LOCK_WEI}wei')
+        (token,) = set(self.tokens()) - known
+        nonce = json.loads((work / POS_WALLET / 'tokens' / token / 'token.json').read_text())['nonce']
+        self.pos_tester('mint', '--token', token)
+        self.pos_tester('transfer', '--count', '1', '--token', token)
+        self.pos_tester('burn', '--token', token)
+        seals = self.held_trust(token=token)['seals']
+        self.expect(all(int(x['rootEpoch']) >= genesis + 2 for x in seals[1:]), 'token D\'s transfer and burn are sealed at epoch 3', json.dumps(seals))
+        _, text = self.pos_tester('redeem', '--token', token)
+        fetches = [line.strip() for line in text.splitlines() if 'trust: fetched' in line]
+        self.expect(any(f'tip {genesis + 1} -> {genesis + 2}' in f for f in fetches), 'the main wallet fetched entry 3 from the restarted aggregator', '; '.join(fetches))
+        after = self.held_trust()
+        ids = {int(e['epoch']): e['entryId'].lower() for e in after['entries']}
+        lag = self.tester('trust', wallet=LAG_WALLET, key=POS_KEY)[1]   # the lagging wallet's durable history (pos-gap), reloaded
+        lag_ids = {int(e['epoch']): e['entryId'].lower() for e in json.loads(lag[lag.index('{'):lag.rindex('}') + 1])['entries']}
+        self.expect(ids == lag_ids and sorted(ids) == list(range(genesis, genesis + 3)),
+                    'the main wallet\'s history 1..3 is the lagging wallet\'s, entry for entry (the same EntryIDs)', json.dumps(ids))
+        state = self.vault_state(nonce, me)
+        self.expect(state['claimable'] == POS_LOCK_WEI and state['remaining'] == 0 and state['redeemed'] == POS_LOCK_WEI, 'the vault credits exactly token D\'s lock', json.dumps(state))
+        self.pos_tester('claim')
+        self.expect(self.vault_balance() == before, 'the vault paid back token D\'s lock', str(self.vault_balance()))
+        state_file = {'tokenD': token, 'lockNonceD': nonce}
+        (work / 'pos-after-restart.json').write_text(json.dumps(state_file, indent=2) + '\n')
+        self.record('after-restart', {'token': token, 'lockNonce': nonce, 'seals': seals, 'fetches': fetches, 'trust': after, 'credited': state,
+                                      'evidence': str(self.keep_pos('after-restart'))})
+
+    def pos_replays(self):
+        try:
+            self.pos_replays_steps()
+        finally:
+            (self.gen / 'bridge' / POS_KEY).unlink(missing_ok=True)   # the last stage that needs the wallets' key
+
+    def pos_replays_steps(self):
+        """The replay negatives at epoch 3, against the vault's whole state (every lock's remaining and redeemed amounts, the credited total, the wallet's claimable,
+        the balance, the B1 tip), which must be unchanged after all of them:
+          - every redeemed envelope again, as the chain holds it (A sealed at epoch 2, B per-SID at epoch 1, C and D at epoch 3): PartAlreadyRedeemed of its lock and token;
+          - the claim of a credit already claimed: InsufficientCredit (none left);
+          - per token (tester replays, under the held trust): the redeemed envelope mined again (status 0), a fresh consolidated proof of the redeemed burn
+            under the epoch-3 seal (PartAlreadyRedeemed: refused on the nullifier, not for its age), that proof with its return recipient changed and re-signed by
+            unknown keys (BridgeRejected; the plug-in ErrQuorumNotMet), and a conflicting burn of the pre-burn state (never certified: the first burn's proof is served)."""
+        work = self.gen / 'bridge'
+        epoch1 = json.loads((work / 'pos-epoch1.json').read_text())
+        d = json.loads((work / 'pos-after-restart.json').read_text())
+        me = epoch1['wallet']
+        word = lambda n: int(n).to_bytes(32, 'big').hex()
+        extra = (('D', d['lockNonceD']),)
+        before = self.pos_whole_state(epoch1, extra)
+        self.expect(all(v['remaining'] == 0 and v['redeemed'] == POS_LOCK_WEI for v in before['locks'].values()) and before['claimable'] == 0,
+                    'every lock of these stages is redeemed and claimed (the replays start from a settled vault)', json.dumps(before))
+        tokens = {'A': (POS_WALLET, epoch1['token'], epoch1['lockNonce']), 'B': (POS_WALLET, epoch1['tokenB'], epoch1['lockNonceB']),
+                  'C': (LAG_WALLET, epoch1['tokenC'], epoch1['lockNonceC']), 'D': (POS_WALLET, d['tokenD'], d['lockNonceD'])}
+        record = {'before': before, 'tokens': {}}
+        for name, (wallet, token, nonce) in tokens.items():
+            rec = json.loads((work / wallet / 'tokens' / token / 'token.json').read_text())
+            tx = self.ureth(1, 'eth_getTransactionByHash', [rec['redeemTx']])
+            _, part = self.credited(rec['redeemTx'])[:2]
+            r = self.inner_response(1, 'eth_call', [{'from': me, 'to': self.addresses()['BridgeVault'], 'data': tx['input']}, 'latest'])
+            want = PART_ALREADY_REDEEMED + word(nonce) + part[2:]
+            self.expect((r.get('error') or {}).get('data') == want, f'token {name}\'s redeemed envelope is refused again (PartAlreadyRedeemed of lock {nonce} and its token)', json.dumps(r)[:300])
+            record['tokens'][name] = {'token': token, 'lockNonce': nonce, 'redeemTx': rec['redeemTx'], 'replayRefusal': want}
+        claim = self.cast_run('calldata', 'claim(uint256,address)', str(POS_LOCK_WEI), me)
+        r = self.inner_response(1, 'eth_call', [{'from': me, 'to': self.addresses()['BridgeVault'], 'data': claim}, 'latest'])
+        self.expect((r.get('error') or {}).get('data') == INSUFFICIENT_CREDIT + word(0) + word(POS_LOCK_WEI),
+                    'the claim of an already claimed credit is refused (InsufficientCredit: none left)', json.dumps(r)[:300])
+        record['duplicateClaim'] = (r.get('error') or {}).get('data')
+        epoch = self.b1_state()['importedTip']
+        for name, (wallet, token, nonce) in tokens.items():
+            if name == 'D':
+                continue   # D is sealed at epoch 3 already: its fresh proof is not of a newer epoch; A, B and C carry the cross-epoch cases
+            _, text = self.tester('replays', '--token', token, wallet=wallet, key=POS_KEY)
+            out = json.loads((work / wallet / 'tokens' / token / 'replays.json').read_text())
+            mined = out['duplicate']['mined']
+            rc = self.ureth(1, 'eth_getTransactionReceipt', [mined['tx']])
+            self.expect(rc is not None and rc['status'] == '0x0', f'token {name}: its redeemed envelope, mined again, reverted on chain', f'{mined["tx"]} block {int(rc["blockNumber"], 16) if rc else "?"}')
+            orig = sorted({int(a['rootEpoch']) for a in out['duplicate']['originalAnchors']})
+            fresh = sorted({int(a['rootEpoch']) for a in out['freshReplay']['anchors']})
+            # A (redeemed under epoch 2) and B (per-SID, epoch 1) cross epochs; C was redeemed at epoch 3, so its fresh proof is a newer round of the same epoch
+            # (the tester asserts the fresh seal's round is newer than every redeemed anchor's)
+            self.expect(fresh == [epoch] and (name == 'C' or orig != fresh),
+                        f'token {name}: a fresh proof of its redeemed burn under the epoch-{epoch} seal (redeemed under epoch {orig}) is refused as PartAlreadyRedeemed',
+                        out['freshReplay']['refusal'][:80])
+            self.expect(out['changedRecipient']['status'] != 0, f'token {name}: the fresh proof with its return recipient changed is refused by the composition (BridgeRejected, V2 status {out["changedRecipient"]["status"]})')
+            forged = out['unknownKeyForgery']
+            self.expect('ErrQuorumNotMet' in forged['pluginRefusal'] and forged['status'] != 0,
+                        f'token {name}: re-signed by unknown keys, refused by the plug-in (ErrQuorumNotMet) and the composition (V2 status {forged["status"]})', forged['pluginRefusal'][:160])
+            cb = out['conflictingBurn']
+            self.expect(cb['servedTransactionHash'] != cb['conflictingTransactionHash'] and cb['pluginRefusal'],
+                        f'token {name}: a conflicting burn of its burned state is never certified (submission {cb["submission"]}; the first burn\'s proof is served)', cb['pluginRefusal'][:160])
+            (self.evidence / 'pos-bridge').mkdir(parents=True, exist_ok=True)
+            (self.evidence / 'pos-bridge' / f'replays-{name}.json').write_bytes((work / wallet / 'tokens' / token / 'replays.json').read_bytes())
+            record['tokens'][name].update({'originalEpochs': orig, 'freshEpochs': fresh, 'minedReplay': mined['tx']})
+        after = self.pos_whole_state(epoch1, extra)
+        self.expect(after == before, 'no replay changed the vault\'s whole state or the B1 registry (every lock, credited, claimable, balance, B1 tip)', json.dumps(after))
+        record['after'] = after
+        self.record('replays', record)
+        self.record('result-replays', {'stage': '430-bridge-pos pos-replays (epoch 3)', 'generation': self.gen.name, 'pass': True})
