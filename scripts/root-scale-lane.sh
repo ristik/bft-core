@@ -10,13 +10,16 @@
 # Run from the repository root (helper.sh's ownership checks require the checkout as cwd). Stops only pids it recorded.
 # Host lock (briefs/host-test-plan-2026-11-02.md): -L <lockDir> (e.g. ~/host-lock) makes the driver take <lockDir>/<name>-root-scale itself, refuse when
 # anyone else holds a file there, and release it on every exit. A run on a shared host MUST pass -L; without it the driver warns.
+# -P secs: how long the quorum-live progress control may take (default 180); -R secs: resume wait (240); -C secs: during that control, CPU-profile
+#   root1 with `sudo perf record -g -p <its pid>` for that long (Linux, sudo needed: perf_event_paranoid=4) and write the top symbols and the share of
+#   signature-verification symbols to the evidence; per-root CPU (utime+stime ticks) is always sampled in cpu-per-root.csv during that control.
 # Usage: scripts/root-scale-lane.sh [-r roots] [-v validators] [-e evidenceDir] [-s seed] [-w windowSeconds] [-k keep] [-S samplerSeconds] [-L lockDir] [-N holderName]
 set +u
-roots=16 validators=4 partition_id=8 evidence="" seed=1 window=60 keep=false sample=5 lockdir="" holder=${USER:-run}
-while getopts "hr:v:e:s:w:kS:L:N:" o; do
+roots=16 validators=4 partition_id=8 evidence="" seed=1 window=60 keep=false sample=5 lockdir="" holder=${USER:-run} progwait=180 resumewait=240 perfsecs=0
+while getopts "hr:v:e:s:w:kS:L:N:P:R:C:" o; do
   case "$o" in
   r) roots=$OPTARG ;; v) validators=$OPTARG ;; e) evidence=$OPTARG ;; s) seed=$OPTARG ;;
-  w) window=$OPTARG ;; k) keep=true ;; S) sample=$OPTARG ;; L) lockdir=$OPTARG ;; N) holder=$OPTARG ;;
+  w) window=$OPTARG ;; k) keep=true ;; S) sample=$OPTARG ;; L) lockdir=$OPTARG ;; N) holder=$OPTARG ;; P) progwait=$OPTARG ;; R) resumewait=$OPTARG ;; C) perfsecs=$OPTARG ;;
   *) sed -n 1,14p "$0"; exit 0 ;;
   esac
 done
@@ -65,7 +68,7 @@ else
 fi
 
 source helper.sh
-export ROOT_LOG_LEVEL=info
+export ROOT_LOG_LEVEL=info ROOT_DEBUG_ROOTS="${ROOT_DEBUG_ROOTS:-1}"   # root1 at debug: its per-round leader lines show where dead leaders fall
 rm -rf test-nodes && mkdir test-nodes
 
 # --- setup --------------------------------------------------------------------------------------
@@ -75,6 +78,7 @@ init_evm_validators "$validators" >>"$evidence/setup.log" 2>&1
 generate_evm_shard_conf "$validators" "$partition_id" 31337 5000 exec >>"$evidence/setup.log" 2>&1 || exit 1
 generate_log_configuration "test-nodes/*/" >>"$evidence/setup.log" 2>&1
 echo "setup $(( $(date +%s) - t0 )) s"
+for i in $(seq 1 "$roots"); do id=$(build/ubft node-id --home "test-nodes/root$i" | tail -n1); echo "$i,$id,16*${id: -6}"; done >"$evidence/node-ids.csv"
 tbq=$(grep -o '"quorumThreshold": *[0-9]*' test-nodes/trust-base.json | grep -o '[0-9]*$')
 if [ "${tbq:-}" = "$quorum" ]; then pass "trust base quorumThreshold = $quorum"; else fail "trust base quorumThreshold=${tbq:-?}, expected $quorum"; fi
 
@@ -151,6 +155,8 @@ rpc_up "$one" && pass "root$one restarted and listening" || fail "root$one did n
 wait_rounds 3 90 && pass "certification continues after root$one rejoined" || fail "no progress after root$one rejoined"
 
 echo "=== control: $quorum live ($maxdown down) must progress ==="
+event() { echo "$(date -u +%FT%TZ) $*" >>"$evidence/events.txt"; }
+event "progress control: stopping $maxdown roots"
 downs=$(pick $((maxdown + 1)) "")   # one spare, used for the stall control
 echo "down set (seed $seed, in stop order): $downs" | tee "$evidence/down-set.txt"
 n=0; last=""
@@ -160,12 +166,45 @@ for d in $downs; do
 done
 spare=$(echo "$downs" | awk '{print $NF}')
 sleep 5
+event "progress control: $maxdown roots stopped, waiting for $progwait s at most"
 echo "live roots now: $(snapshot | cut -d, -f2)"
-if wait_rounds 5 180; then pass "$quorum live / $maxdown down: shard progressed to round $(shard_round)"; else fail "$quorum live / $maxdown down: no progress in 180 s"; fi
+cpu_ticks() { # utime+stime ticks of every live root, one "root,ticks" line each
+  local f i p
+  for f in test-nodes/root*/pid; do
+    i=${f#test-nodes/root}; i=${i%/pid}; p=$(cat "$f" 2>/dev/null) || continue
+    [ -r "/proc/$p/stat" ] || continue
+    awk -v i="$i" '{sub(/^.*\) /, ""); print i "," $12 + $13}' "/proc/$p/stat"
+  done
+}
+timeline="$evidence/progress-timeline.csv"; echo "time,shardRound,liveRoots" >"$timeline"
+pc0=$(mktemp); pc1=$(mktemp); cpu_ticks >"$pc0"; ct0=$(date +%s)
+if [ "$perfsecs" -gt 0 ] && command -v perf >/dev/null 2>&1; then
+  rp=$(cat test-nodes/root1/pid)
+  ( sleep 20; sudo perf record -F 99 -g -p "$rp" -o "$evidence/perf-root1.data" -- sleep "$perfsecs" >"$evidence/perf-record.log" 2>&1
+    sudo perf report -i "$evidence/perf-root1.data" --stdio --no-children --sort symbol -g none 2>/dev/null | grep -v '^#' | grep -v '^$' | head -80 >"$evidence/perf-root1-top.txt"
+    sudo chown "$(id -u):$(id -g)" "$evidence/perf-root1.data" 2>/dev/null || true ) &   # the raw data is root-owned: keep evidence cleanup unprivileged
+  PERFJOB=$!
+fi
+progressed=0; w=0; want=$(( $(shard_round) + 5 ))
+while [ "$w" -lt "$progwait" ]; do
+  if [ $((w % 15)) -eq 0 ]; then echo "$(date -u +%T),$(shard_round),$(snapshot | cut -d, -f2)" >>"$timeline"; fi
+  [ "$(shard_round)" -lt "$want" ] || { progressed=1; break; }
+  sleep 1; w=$((w + 1))
+done
+ct1=$(date +%s); cpu_ticks >"$pc1"
+tck=$(getconf CLK_TCK 2>/dev/null || echo 100)
+join -t, <(sort -t, -k1,1 "$pc0") <(sort -t, -k1,1 "$pc1") | awk -F, -v dt=$((ct1 - ct0)) -v tck="$tck" 'BEGIN{print "root,cpu_percent_of_one_core"} {printf "%s,%.1f\n",$1,($3-$2)/tck/dt*100}' >"$evidence/cpu-per-root.csv"
+rm -f "$pc0" "$pc1"
+[ -z "${PERFJOB:-}" ] || wait "$PERFJOB" 2>/dev/null
+if [ -s "$evidence/perf-root1-top.txt" ]; then
+  awk '{p=$1; sub(/%/,"",p); tot+=p; if (tolower($0) ~ /verif|secp|ecdsa|schnorr|btcec|ecmult/) v+=p} END{printf "root1 perf: %.1f%% of samples in signature-verification symbols (sum over the top 80 symbols covering %.1f%%)\n", v, tot}' "$evidence/perf-root1-top.txt" | tee "$evidence/perf-verify-share.txt"
+fi
+echo "progress control took ${w} s, progressed=$progressed" | tee "$evidence/control-progress-time.txt"
+if [ "$progressed" = 1 ]; then pass "$quorum live / $maxdown down: shard progressed to round $(shard_round) in ${w} s"; else fail "$quorum live / $maxdown down: no progress in ${progwait} s"; fi
 snapshot | tee "$evidence/control-progress-resources.csv"
 
 echo "=== control: $((quorum - 1)) live ($((maxdown + 1)) down) must stall ==="
-stop_root "$spare"; sleep 20          # let in-flight rounds drain
+event "stall control: stopping one more root ($spare)"; stop_root "$spare"; sleep 20          # let in-flight rounds drain
 s0=$(shard_round); sleep "$window"; s1=$(shard_round)
 echo "stall window: round $s0 -> $s1 over ${window}s with live roots $(snapshot | cut -d, -f2)" | tee "$evidence/control-stall.txt"
 if [ "$s1" -eq "$s0" ]; then pass "$((quorum - 1)) live / $((maxdown + 1)) down: no new certification in ${window}s (stall)"; else fail "$((quorum - 1)) live: shard advanced $s0 -> $s1 (no stall; control invalid)"; fi
@@ -173,10 +212,14 @@ live_after=$(snapshot | cut -d, -f2)
 [ "$live_after" -eq $((quorum - 1)) ] && pass "stall control: the $live_after live roots are all still running (not crashed)" || fail "expected $((quorum - 1)) live roots, found $live_after"
 
 echo "=== restart one root: progress must resume (control validity) ==="
-start_root "$spare"
-if wait_rounds 5 240; then pass "quorum restored ($quorum live): certification resumed (round $(shard_round))"; else fail "no resume after restoring quorum"; fi
+event "resume: restarting root$spare"; start_root "$spare"
+if wait_rounds 5 "$resumewait"; then pass "quorum restored ($quorum live): certification resumed (round $(shard_round))"; else fail "no resume after restoring quorum"; fi
 
 echo "=== evidence ==="
+event "end"
+# the consensus loop's per-message-type time (root1 and every other root) and root1's per-round leader lines (root1 runs at debug)
+grep -h "consensus loop" test-nodes/root*/debug.log 2>/dev/null | gzip >"$evidence/loop-profile-all-roots.log.gz"
+grep -h "next leader\|local timeout\|timeout quorum" test-nodes/root1/debug.log 2>/dev/null | gzip >"$evidence/root1-rounds.log.gz"
 for i in $(seq 1 "$roots"); do
   grep -ciE 'panic|fatal error|SIGABRT|pthread_create' "test-nodes/root$i/debug.log" 2>/dev/null | sed "s/^/root$i,/"
 done | awk -F, '$2>0' >"$evidence/abort-lines.txt"
