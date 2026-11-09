@@ -1,15 +1,17 @@
 # PoS release manifest: DN-S / TN-S re-run (DRAFT)
 
-**Status: DRAFT. Every `PENDING(...)` marker below must be resolved, or the row explicitly narrowed, before this merges.** `grep -n 'PENDING(' deploy/testnet/evidence/release-manifest.md` must print nothing at freeze. Plan: `briefs/pos-release-rerun-plan.md` (revision 2, arch-approved as preparation plan, §9). Nothing in this file is a run result.
+**Status: DRAFT. Every `PENDING(...)` marker below must be resolved, or the row explicitly narrowed, before this merges.** `grep -n 'PENDING(' deploy/testnet/evidence/release-manifest.md` must print nothing at freeze. Plan: `briefs/pos-release-rerun-plan.md` (revision 2, arch-approved as preparation plan, §9; **§10 (arch, 2026-11-09) supersedes the product-pin direction of §1.3: ONE full rerun on a newer, explicitly frozen product SHA**, no preliminary rerun at `ecb67b1f`). Nothing in this file is a run result.
 
 ## 1. Identity
 
 | Name | Value |
 |---|---|
 | manifest revision | the commit of this file (cited from outside: a file cannot contain its own SHA) |
-| harness SHA | the bft-core commit this PR lands on (scripts, `rehearse.py`, lane scripts): PENDING(merge commit) |
+| **product SHA** | **PENDING(the frozen SHA: one reviewed, immutable `integration/enshrined-evm` commit that contains §58 step 1 (bft-core#1001, open at 81d1dd4e), #984 (`724b93fa3`) and #994 (`91d66c389`) plus whatever else is actually in it; selected only after #1001 merges and dev4's #979 re-pin is in; no moving integration tip)**. bft-core itself is pinned to it, for the package and for the CI campaign (§4) |
+| harness SHA | the bft-core commit this PR lands on (scripts, `rehearse.py`, lane scripts): PENDING(merge commit). Recorded independently of the product SHA; with a separate product checkout when they differ |
 | host driver | `briefs/host-track-c.sh`, **revision 2, sha256 `b06158ceb0e28499edefc98a047e5f4ea4a23e2050b703db192dfe975994e487`** (outside any repository; any edit changes this hash and is recorded with the run) |
-| run SHA | per run: the checked-out commit plus image and binary hashes, recorded in that run's evidence. A `ci-lane-run/*` run may be an **audited inputs-only child** of the manifest commit (diff = `scripts/ci/run-inputs.json` only) |
+| run SHA | per run: the checked-out commit plus image and binary hashes, recorded in that run's evidence. A `ci-lane-run/*` run may be an **audited inputs-only child** of the manifest commit (diff = `scripts/ci/run-inputs.json` only); **it must not silently become the product source**: the product is the pinned SHA above, whatever commit the run checks out |
+| baseline | the retained 4 Nov results and the later CI preflights, under their original revisions (product `ecb67b1f`), cadence, loads and environment. They stay side by side with the new run and are not re-run |
 
 ## 2. Scope
 
@@ -21,7 +23,7 @@ Bridge across a PoS transition (#430 row 2): the §4.1 preflight **passed in CI*
 
 | Component | Commit | Source | Why this one |
 |---|---|---|---|
-| bft-core (product) | `ecb67b1f8542bae014c532d064c205306451b7c2` | `pins.json: bft`; images and host tools are built from it | retained (default of owner question Q30). **The earlier statement "the `ecb67b1f..` delta has no production Go change" no longer holds**: at `integration/enshrined-evm` dc70ca25 it changes 27 production Go files (+1203/-53; `git diff ecb67b1f..<harness SHA> --stat -- '*.go' ':!*_test.go'`): the verified-certificate cache (#982/#992), the V1 certification response frame limit (#993), the configuredprogress journal fix (#994), shard pending-work diagnostics (#995), the receiver stream deadline hook (#987, test only), loop profile and env-gated shadow counters (#980/#986, measurement), fixtures. None of it is in the pinned product; the pin stays at `ecb67b1f` unless Q30 is decided the other way. The delta list is re-run at the harness SHA when this merges. |
+| bft-core (product) | PENDING(frozen SHA, see §1) | `pins.json: bft`; images and host tools are built from it | arch §10: the product is the newer frozen commit, not `ecb67b1f` (`ecb67b1f8542bae014c532d064c205306451b7c2` stays the **baseline** of the existing evidence and is not re-run). The complete `ecb67b1f..<product SHA>` product delta is listed here at the freeze, by file (`git diff ecb67b1f..<product SHA> --stat -- '*.go' ':!*_test.go'`) and by change, **not described as harness-only**. At `integration/enshrined-evm` dc70ca25 it is 27 production Go files (+1203/-53): the verified-certificate cache and timeout replay skip (#982/#992, #984), the V1 certification response frame limit (#993), the configuredprogress journal fix (#994), shard pending-work diagnostics (#995), the receiver stream deadline hook (#987, test only), loop profile and env-gated shadow counters (#980/#986, measurement), fixtures; #1001 and anything else merged before the freeze are added. PENDING(final list at the product SHA) |
 | ureth | `10552af21b31b2118c51d6215cd23cfb80faf33c` | `pins.json`, `lane-pins.json` | retained; `unicity/main` 7b2bc1b6 differs by corpus files only |
 | unicity-pos-contracts | `7b510f6b5a9cf3987ccc5d7dc77d39f33de12330` | `pins.json`, `bridge/pins.json`, `lane-pins.json` | retained; `main` 4a32df9d adds golden-reference files, `src/` unchanged since be6e86fb |
 | aggregator-go A | `009974a72560c1f224fef99ada9fbf475f1488a7` | `pins.json`, `lane-pins.json` | integration head |
@@ -35,9 +37,9 @@ Reference updates ureth #95, contracts #79, nbp #64: **not taken**. If taken bef
 
 | File | Role | Change in this PR |
 |---|---|---|
-| `deploy/testnet/pins.json` | node images | none in this PR (the node images are not touched by #979; re-confirm with `git diff` at the harness SHA) |
+| `deploy/testnet/pins.json` | node images | the freeze commit sets `bft` to the product SHA (§1); PENDING(rest of the file re-confirmed with `git diff` at the freeze; #979 does not touch the node images) |
 | `deploy/testnet/bridge/pins.json` | bridge tools (built from their own pins; `dnb-tool` from the package's own bft-core checkout, recorded in `artifacts/bridge-images.json`) | in bft-core#979 (not in this PR): `native-bridge-plugins` 838b08ce → 51f3664c |
-| `scripts/ci/lane-pins.json` | CI lanes | none: the lane's nbp row stays `838b08ce` (corpus and joined checks; `main` only adds the bridge-consumer tester work and joined-test pins, none of which the lane runs); it does not follow the bridge consumer pin |
+| `scripts/ci/lane-pins.json` | CI lanes | **adds the bft-core product pin** (arch §10: `lane-pins.json` has none today and the lane builds its own checkout): the product SHA is selected and enforced in the lane's build/check path, with a separate product checkout when the harness commit differs, so the CI campaign builds the same immutable product as the package. The nbp row stays `838b08ce` (corpus and joined checks; `main` only adds the bridge-consumer tester work and joined-test pins, none of which the lane runs); it does not follow the bridge consumer pin. PENDING(the enforcing change and its check: a separate PR, listed here when merged) |
 
 A changed package contract pin does not reach the bridge tools.
 
@@ -77,6 +79,8 @@ Results recorded **from the run, not from this PR**: PENDING(`artifacts/images.j
 
 ## 8. Features
 
+**Measured behavior switches are explicit, never inherited:** the product's optional instrumentation (`UBFT_SHADOW_CERT=1` certificate-verification shadow counters, the per-message-type loop profile, the backoff shadow and cache-report counters) is OFF in every acceptance run unless a row says otherwise; a run that turns one on records it with its inputs. PENDING(the exact variable names and defaults, read from the frozen product SHA).
+
 Enabled: PoS profile (`--pos`), caps 16,1,6, unit weights. Disabled: `--utb` on every generation except the bridge preflight; B/feeder; unequal genesis weights (the `pos-join-heavy` stage is the refusal control only). `--utb` on the bridge generation. Bridge-client trust refresh (`withTrustRefresh` through the pinned SDK's `fetchTrustBaseEntries`, nbp#67, merged). PENDING(final list after arch's review of the preflight).
 
 ## 9. Runs this manifest covers (filled as they complete)
@@ -91,6 +95,8 @@ Enabled: PoS profile (`--pos`), caps 16,1,6, unit weights. Disabled: `--utb` on 
 
 ## 10. Residual assumptions
 
+- **Comparison with 4 Nov.** The new results are compared with the old artifacts under their original revisions, cadence, loads and environment. No controlled performance comparison is claimed across differing inputs. A regression is attributed by a focused old/new reproducer or a bisect, not by a second full host campaign (arch §10).
+- **Later merges.** SDK and aggregator upstream merges under §58 get their own manifest revisions and the affected acceptance reruns; they do not automatically repeat the whole campaign, and this run does not accept changes that are not in the pinned set.
 - The independent release review/readiness decision (Q26) is unanswered and is not satisfied by this manifest.
 - No whole-host reboot in this refresh; the prior destructive-reset result and its limit (memory-only authority keys, owner Q23) stand as they are.
 - `utb-live` (bft-core #978) has run once on a live `--utb` generation: the #979 preflight (run 42546603859, GitHub-hosted runner) verified the served history 1..2, the replay matched, and both controls failed as they should. That is one CI generation at two epochs; the checker does not page histories over 64 entries and does not compare against the roots' own store.
@@ -112,7 +118,7 @@ A row is cited only with its evidence path, the manifest revision, the run SHA a
 | h | `utb-live` on each `--utb` generation | served history verifies 1..tip from the pinned genesis, replay idempotent, both controls fail as they should | |
 | i | campaign refresh (R1) | `complete=yes`; accounting span >= 14400 s; second handoff K->K', unpublishable result rejected, governance activation, 4 reward intervals, faults executed; pack complete, scans clean; frontier lag reported (not thresholded) | failed attempts kept with run id and attempt number; an injected negative is interpreted only with a passing positive control |
 
-Cross-cutting: for every stop/kill stage the full transition, certification and receipt timestamps are kept; "awaiting round N block from leader" names a shard leader, and the root leader/collector come from the root logs; one measured network on the host; host lock entry `~/host-lock/dev3-<generation>`.
+Cross-cutting: the product is identified by its pinned SHA **and** by the binaries and images actually run (`artifacts/images.json`, `artifacts/bridge-images.json`: sha256 of `ubft`, `unicity-reth`, `aggregator`, image ids), recorded apart from the harness, manifest and run SHAs; a run whose binaries do not carry the pinned product SHA is not evidence for this manifest. The run exercises the restart/recovery and UTB paths of the included fixes (the crash and restart stages a, b, d, e; `utb-live` h), not only a build of them. For every stop/kill stage the full transition, certification and receipt timestamps are kept; "awaiting round N block from leader" names a shard leader, and the root leader/collector come from the root logs; one measured network on the host; host lock entry `~/host-lock/dev3-<generation>`.
 
 ## 12. Evidence layout
 
