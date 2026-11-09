@@ -15,14 +15,14 @@ three invocations on one generation:
               - the on-chain B1 registry's imported tip (SealRegistry storage) before the handoff;
               - the offline cache: the token file and its record, kept in the evidence (no key).
   pos-redeem  After activation, with the same wallet:
-              - the B1 registry imported the new epoch: its bodyID (the entry id) and member count (at most the priced 16-member ceiling,
+              - the B1 registry imported the new epoch: its bodyID (the activated handoff's V3 body id) and member count (at most the priced 16-member ceiling,
                 B1Layout.MAX_MEMBERS);
               - a transfer and the burn certified at the new epoch; the seal epochs recorded;
               - the negative first: on a copy of the wallet, BRIDGE_TRUST_FETCH=0 redeem fails with ErrNoEntryForEpoch and the vault does not move;
               - then the redeem: the client fetches the missing contiguous entries from the aggregator through its pinned SDK, appends (each
                 authenticated from its predecessor), persists and retries, the vault credits exactly the lock, the claim pays it back;
-              - the wallet's held history afterwards: genesis = the pin, contiguous to a tip at the new epoch, the new epoch's EntryID equal to the
-                registry's bodyID, persisted (trust-history.cbor); the shipped bundle on disk is unchanged (no history replaced from a file);
+              - the wallet's held history afterwards: genesis = the pin, contiguous to a tip at the new epoch, the tip's EntryID equal to the
+                roots' served history (utb_history, under --ubft), persisted (trust-history.cbor); the shipped bundle on disk is unchanged (no history replaced from a file);
               - the release manifest still names what the chain runs (check_release), so the deploy survives activation.
 
 Not here: the lagging replica and range repair, the public SDK clients, the restarts, and the replay negatives beyond the bridge's own stages (§4.2
@@ -180,7 +180,10 @@ class BridgePos:
         ids = {int(e['epoch']): e['entryId'].lower() for e in held['entries']}
         self.expect(held['pin'].lower() == epoch1['pin'] and int(held['genesisEpoch']) == genesis and sorted(ids) == list(range(genesis, int(held['tipEpoch']) + 1))
                     and int(held['tipEpoch']) >= new, f'the held history is contiguous from the pinned genesis to epoch {held["tipEpoch"]}', json.dumps(ids))
-        self.expect(ids[new].removeprefix('0x') == f'{body:064x}', f'the wallet\'s epoch-{new} EntryID is the B1 registry\'s bodyID', ids[new][:18])
+        # the registry's bodyID of a handoff entry is the handoff's V3 body id (b1state BodyKind 2: the activated body), not the trust-base EntryID: it is
+        # compared with the body id of the handoff rehearse.py drove (its candidate's v3-body-id.txt, which the activation record names)
+        v3 = (self.gen / 'network/handoff/v3-body-id.txt').read_text().strip().lower().removeprefix('0x')
+        self.expect(v3 == f'{body:064x}', f'the B1 registry\'s epoch-{new} bodyID is the activated handoff\'s V3 body id', v3[:16])
         self.expect((work / POS_WALLET / 'trust-history.cbor').exists(), 'the wallet persisted its grown history')
         # the roots' served history (rehearse.py utb_history, verified offline from the pinned genesis with ubft): the wallet's entry at that tip is the same entry
         roots = None
