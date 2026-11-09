@@ -1042,7 +1042,7 @@ func (s *Store) loadJournalOnce(ctx context.Context, c Context, limits JournalLi
 				// replica acknowledgments. Recheck every certified coordinate.
 				if raw := b.Get(coverageKey(candidate.Candidate.Number)); raw != nil {
 					covered, e := frontier.DecodeMigrating(raw, *s.frontier)
-					if e == nil && covered.Height == candidate.Candidate.Number && (covered.Epoch == candidate.ResultingUC.GetRootEpoch() || covered.Epoch == 0 && candidate.ResultingUC.GetRootEpoch() == c.Observation.RootEpoch) && covered.Round == candidate.ResultingUC.GetRootRoundNumber() &&
+					if e == nil && covered.Height == candidate.Candidate.Number && (covered.Epoch == archiveUC.GetRootEpoch() || covered.Epoch == 0 && archiveUC.GetRootEpoch() == c.Observation.RootEpoch) && covered.Round == archiveUC.GetRootRoundNumber() &&
 						covered.Sequence < out.Frontier.Anchor.Sequence && bytes.Equal(covered.Subject.BlockHash[:], candidate.Candidate.Hash) &&
 						bytes.Equal(covered.StateRoot[:], candidate.Candidate.StateRoot) {
 						foundResult = true
