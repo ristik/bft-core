@@ -42,12 +42,18 @@ if [ "$DRY" = 1 ]; then
   exit 0
 fi
 WORK=${WORK:-$(mktemp -d)}; mkdir -p "$WORK"; SERVER_PID=""
-cleanup() { [ -z "$SERVER_PID" ] || kill "$SERVER_PID" 2>/dev/null || true; rm -f "$AGG_GO_DIR/internal/gateway/zz_interop_test.go"
+cleanup() {
+  if [ -n "$SERVER_PID" ]; then kill "$SERVER_PID" 2>/dev/null || true; wait "$SERVER_PID" 2>/dev/null || true; fi
+  rm -f "$AGG_GO_DIR/internal/gateway/zz_interop_test.go"
   for s in "${sdks[@]}"; do rm -f "${DIR[$s]}/${DEST[$s]}"; done; }
 trap cleanup EXIT
 cp "$ASSETS/zz_interop_test.go.txt" "$AGG_GO_DIR/internal/gateway/zz_interop_test.go"
-say "starting the grown-history servers (aggregator route, in process)"
-( cd "$AGG_GO_DIR" && UTB_INTEROP_DIR="$WORK" go test ./internal/gateway/ -run TestZZServeForSDKs -timeout 0 -count=1 -v >"$WORK/server.log" 2>&1 ) &
+say "building the grown-history server (aggregator route, in process)"
+SERVER_BIN="$WORK/utb-sdk-accept-server.test"
+( cd "$AGG_GO_DIR" && go test -c -o "$SERVER_BIN" ./internal/gateway/ ) >"$WORK/build.log" 2>&1 || { tail -20 "$WORK/build.log" >&2; fail "the server did not build"; }
+rm -f "$AGG_GO_DIR/internal/gateway/zz_interop_test.go"
+# exec: the background process IS the test binary, so $! is what cleanup kills and waits for (a wrapper subshell would leave the binary serving after the script exits)
+( cd "$AGG_GO_DIR/internal/gateway" && UTB_INTEROP_DIR="$WORK" exec "$SERVER_BIN" -test.run TestZZServeForSDKs -test.timeout 0 -test.count=1 -test.v >"$WORK/server.log" 2>&1 ) &
 SERVER_PID=$!
 for _ in $(seq 1 120); do [ -f "$WORK/manifest.json" ] && break; kill -0 "$SERVER_PID" 2>/dev/null || { tail -20 "$WORK/server.log" >&2; fail "the server exited before writing the manifest"; }; sleep 1; done
 [ -f "$WORK/manifest.json" ] || fail "no manifest after 120 s"
