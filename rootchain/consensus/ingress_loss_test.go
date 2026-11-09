@@ -142,7 +142,18 @@ func TestIngressLossAfterTheSoleHolderRestarts(t *testing.T) {
 			ready := c.state("H").Round
 			c.start("a", "b", "c")
 			if !restart {
-				require.Eventually(t, func() bool { return c.certifiedHash("H", hash1) }, 5*time.Minute, 100*time.Millisecond)
+				// the boundary check can see a request in a proposal: once the quorum is back, the retained request enters one before it certifies
+				seen := false
+				require.Eventually(t, func() bool {
+					for _, name := range c.all() {
+						m := c.nodes[c.idx(name)].r.manager
+						if m.blockStore.IsChangeInProgress(c.state(name).Round, q3fixture.PartitionID, types.ShardID{}) != nil {
+							seen = true
+						}
+					}
+					return c.certifiedHash("H", hash1)
+				}, 5*time.Minute, 20*time.Millisecond)
+				require.True(t, seen, "the loss-boundary probe (IsChangeInProgress on the tree tip) does see the request while it is in a proposal")
 				got := shardCertOf(h)
 				t.Logf("the retained request certified at root round %d, %d rounds after the others were started (%s)", got.seal, c.state("H").Round-ready, time.Since(t0).Round(100*time.Millisecond))
 				require.LessOrEqual(t, c.state("H").Round-ready, ingressLossBudget(c), "the control certifies quickly once the quorum returns")
