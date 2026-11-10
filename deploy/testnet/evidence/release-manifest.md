@@ -73,7 +73,7 @@ The bridge does not use JS `main` and has no `TrustBaseSession` cache here; that
 | bridge generation (bft-core#979 recipe) | on (`--pos --utb`, aggregator A integration) | **800 rounds / 600 s** (arch, plan §11: the reviewed current recipe, the workflow defaults; the generated recipe is recorded before the generation starts; the 1500 / 1200 of the preflight run 42584403015 is separate historical evidence) | caps 16,1,6 (`deploy/testnet/pos.py:CAPS`) |
 | campaign (lane `x4-exit`) | per lane | per lane | per lane |
 
-Test values, recorded, not testnet decisions. Each generation records its own setting in `generation.txt` (driver revision 2). Results from different cadences are not cross-read.
+Test values, recorded, not testnet decisions. Each generation records its own setting in `generation.txt` (driver revisions 2 to 4, section 9.1). Results from different cadences are not cross-read.
 
 ## 7. Builds
 
@@ -81,7 +81,7 @@ Every binary is built from the pinned source at the manifest, on Linux; a binary
 
 | Component | Command (cwd = pinned source) | Toolchain |
 |---|---|---|
-| ubft (node images and host tools) | `make build` (host: in `tn1-builder:bookworm`, host tools `go build ./scripts/b1genesis ./scripts/h4-restore-pin ./cli/ubft` and `./deploy/testnet/keygen`) | Go 1.25.14 (`lane-pins.json` toolchains; the builder image's version is recorded in `build-ubft.log`) |
+| ubft (node images and host tools) | `make build` (host: in `tn1-builder:bookworm`, host tools `go build ./scripts/b1genesis ./scripts/h4-restore-pin ./cli/ubft` and `./deploy/testnet/keygen`) | Go 1.25.14 is the CI lane's toolchain (`lane-pins.json`); **the host builds ran in `tn1-builder:bookworm` with go 1.27.1** (`build-ubft.log`, section 9.1), so the host binaries' hashes are recorded, not assumed equal to a CI build |
 | ureth | `cargo build --locked --release -p unicity-reth` | Rust 1.97.1 per `lane-pins.json` toolchains (the ureth repo's own nightly pin applies to its fmt gate, not to this build): confirmed: the build-ureth job of ci-lane run 42710230020 installs Rust `1.97.1` and builds `unicity-reth v2.5.0` with `--release --locked` (12 m 33 s) |
 | aggregator-go A | `CGO_ENABLED=1 go build -trimpath -o build/aggregator ./cmd/aggregator` (no rocksdb tag: memory SMT backend, state in MongoDB) | Go 1.25.14 |
 | node image and the faucet/rpc images | `build-images.py --bft-source … --ureth-source … --aggregator-go-source …` (tags `tnops-*:verified`, or `trackc-<bft8>` on the host driver) | Docker; base images by digest in `pins.json` (`runtime`, `python`, `mongo`) |
@@ -102,6 +102,8 @@ Enabled: PoS profile (`--pos`), caps 16,1,6, unit weights. Disabled: `--utb` on 
 | R1 campaign refresh (lane `x4-exit`, run-9 inputs **plus `"product":"pinned"`**; the 340/310-minute budgets and an accounting span of at least 14400 s preserved; actual binary and image hashes recorded separately from the source pins) | PENDING | PENDING |
 | host: core, crash e3, owner, resources, e1, e2, join | `~/evidence/430-437-pos-host-20261110/` on the server; section 9.1 | core 18/18, crash 5/5, owner, e1 5/5, e2 12/12, resources 54 samples 0 alerts: PASS. **join: `pos-join-heavy` FAILED in the first join generation (kept, issue #1006); the rerun generation `join2` passed 13/13.** Not one clean pass of the planned join list: section 9.1 |
 | bridge across a PoS transition (#430 row 2; dev4, host lock 04:58:57-05:59:26Z, window 05:04-05:58Z, single server, one operator) | `~/evidence/430-bridge-pos-host-20261110/` on the server; result comment ristik/bft-core#430 `issuecomment-6760275241`; driver `host-430-bridge-pos.sh` sha256 `fea7500e…a305`; bridge image `sha256:3b6b1d6f…a3d`, dnb-tool sha256 `3c5709e6…7e09`; node images reused from the slot-1 build (`images.json`, ids and sources checked) | `testnet-bridge-pos.yml` steps 1-10, recipe `--pos --utb`, 4 validators, aggregator A, 600 s / 800 rounds, caps 16,1,6: every stage PASS. **Step 9 attempt 1 FAILED** while building the Java client image (`apt-get update`: Ubuntu mirror sync, Packages.gz size mismatch, before any client ran; `9-sdk-clients/pos-bridge/sdk-clients/build-java.log`); step 9b repeated the stage on the same generation and passed (131 ok checks). Not one clean pass of the planned list. Limits as dev4's comment: no WAN/DNS/TLS, no second operator, unit weights and 4 members, no endurance or power loss, lock-proof endpoint restarted per handoff (#996), aggregator A only. Not a #430 completion or TN-S verdict |
+
+**R1 inputs:** R1 still runs from harness `983102b7` with the lane's own pins (nbp `838b08ce`, sdk-js `75c5be7f`) until bft-core#1007 (lane on nbp `73bee544` / sdk-js `c5840ef5`) is merged; R1 does not run from the tip after #1007. A run from a later tip is a different input set and is recorded as such.
 
 4 Nov results stay side by side with these; neither replaces the other, and neither closes #437/#59 alone.
 
@@ -132,7 +134,7 @@ Limits: one server, 12 cores, libp2p over same-host TCP, one operator; no whole-
 - **Later merges.** SDK and aggregator upstream merges under §58 get their own manifest revisions and the affected acceptance reruns; they do not automatically repeat the whole campaign, and this run does not accept changes that are not in the pinned set.
 - The independent release review/readiness decision (Q26) is unanswered and is not satisfied by this manifest.
 - No whole-host reboot in this refresh; the prior destructive-reset result and its limit (memory-only authority keys, owner Q23) stand as they are.
-- `utb-live` (bft-core #978) has run once on a live `--utb` generation: the #979 preflight (run 42546603859, GitHub-hosted runner) verified the served history 1..2, the replay matched, and both controls failed as they should. That is one CI generation at two epochs; the checker does not page histories over 64 entries and does not compare against the roots' own store.
+- `utb-live` (bft-core #978) has run on two live `--utb` generations: the #979 preflight in CI (run 42546603859, GitHub-hosted runner) verified the served history 1..2, the replay matched, and both controls failed as they should; and dev4's host bridge generation of 2026-11-10 (step 10, 15 checks, #430 comment 6760275241; `briefs/pos-acceptance-ledger.md` U2). Both are small histories at a few epochs; the checker does not page histories over 64 entries and does not compare against the roots' own store.
 - Not covered by the campaign: a membership change on the accumulated chain, a non-offender exit there, a separate collector-restart fault.
 
 ## 11. Acceptance checklist (what each row must show before it is cited as passed)
@@ -155,7 +157,7 @@ Cross-cutting: the product is identified by its pinned SHA **and** by the binari
 
 ## 12. Evidence layout
 
-Host evidence (driver revision 2): `~/evidence/430-437-pos-host-<DAY>/`
+Host evidence (driver revisions 2 to 4, section 9.1): `~/evidence/430-437-pos-host-<DAY>/`
 
 | Path | Content |
 |---|---|
