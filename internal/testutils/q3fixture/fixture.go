@@ -43,6 +43,8 @@ const (
 
 // Options shape the fixture. The zero value is the 6,1,1,1 activation at A*=7 with the old commit sealed at round 4.
 type Options struct {
+	// EVMT2 is the EVM shard's T2 timeout; zero keeps the fixture's 2.5 s. A test that needs a recovery path to finish well before a T2 repeat is eligible widens it.
+	EVMT2 time.Duration
 	// UTB makes the activation's protocol tuple the envelope-version-3 one (q3format.Q3ConfigUTB).
 	UTB             bool
 	Weights         []uint64 // successor weights in member order; four members or more
@@ -261,8 +263,12 @@ func New(t *testing.T, o Options) *Fixture {
 	genesisEVM, validators := testutils.CreateTestNodes(t, 4)
 	// The fixture's primary replaces one of four members while the weights move from unit to the heavy member; the distance budget is
 	// widened so that these tests exercise installation and replay, not the budget (continuity has its own tests).
+	t2 := 2500 * time.Millisecond
+	if o.EVMT2 > 0 {
+		t2 = o.EVMT2
+	}
 	shardConf = &types.PartitionDescriptionRecord{Version: 1, NetworkID: Network, PartitionID: PartitionID, ShardID: types.ShardID{},
-		PartitionTypeID: 8, TypeIDLen: 8, UnitIDLen: 256, T2Timeout: 2500 * time.Millisecond, Validators: validators, Epoch: 0, EpochStart: 1,
+		PartitionTypeID: 8, TypeIDLen: 8, UnitIDLen: 256, T2Timeout: t2, Validators: validators, Epoch: 0, EpochStart: 1,
 		PartitionParams: map[string]string{storage.ParamContinuityMaxDist: "2/1"}}
 	maps.Copy(shardConf.PartitionParams, o.Params)
 	f.GenesisEVM = genesisEVM

@@ -7,7 +7,6 @@ import (
 
 	"github.com/unicitynetwork/bft-go-base/types"
 
-	"github.com/unicitynetwork/bft-core/gettrustbase"
 	"github.com/unicitynetwork/bft-core/internal/quorumweight"
 )
 
@@ -54,21 +53,21 @@ func (t *TrustInput) Network() types.NetworkID { return t.Entries[0].NetworkID }
 func (t *TrustInput) Tip() *types.RootTrustBaseV2 { return t.Entries[len(t.Entries)-1] }
 
 // trustBundleLimits is the installation budget of a release bundle.
-var trustBundleLimits = gettrustbase.BundleLimits{MaxBytes: 1 << 20, MaxEntries: 1 << 16}
+var trustBundleLimits = types.TrustBaseLimits{MaxBytes: 1 << 20, MaxEntries: 1 << 16}
 
 // LoadTrustInput installs a release bundle under the pinned genesis EntryID:
 // complete (no continuation), contiguous from its genesis, every link witnessed
 // by the predecessor's strict quorum. A bundle whose genesis is another is
 // ErrTrustBaseDigest; anything else that does not install is ErrTrustBase.
 func LoadTrustInput(bundle []byte, pin [32]byte) (*TrustInput, error) {
-	b, err := gettrustbase.DecodeBundle(bundle, trustBundleLimits)
+	b, err := types.DecodeTrustBaseBundle(bundle, trustBundleLimits)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrTrustBase, err)
 	}
 	if id, err := b.Entries[0].EntryID(); err != nil || id != pin {
 		return nil, ErrTrustBaseDigest
 	}
-	if err := gettrustbase.VerifyBundle(b, pin); err != nil {
+	if err := types.VerifyTrustBaseBundle(b, pin); err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrTrustBase, err)
 	}
 	return &TrustInput{Bundle: bytes.Clone(bundle), Entries: b.Entries, id: pin}, nil
@@ -84,7 +83,7 @@ func TrustBundle(entries ...*types.RootTrustBaseV2) ([]byte, error) {
 		}
 		raw = append(raw, b)
 	}
-	return gettrustbase.EncodeBundle(raw)
+	return types.EncodeTrustBaseBundle(raw)
 }
 
 // entryFor selects the entry of the seal's epoch: another network is

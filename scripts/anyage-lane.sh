@@ -59,7 +59,8 @@ preflight() {
   check "clean checkout" bash -c "[ -z \"\$(git -C '$REPO_ROOT' status --porcelain --untracked-files=no)\" ]"
   head=$(git -C "$REPO_ROOT" rev-parse HEAD)
   check "HEAD contains origin/integration/enshrined-evm (incl. #611)" git -C "$REPO_ROOT" merge-base --is-ancestor origin/integration/enshrined-evm HEAD
-  if [ -x "$REPO_ROOT/build/ubft" ] && lane_buildinfo "$REPO_ROOT/build/ubft" 2>/dev/null | grep -q "vcs.revision=$head" && ! lane_buildinfo "$REPO_ROOT/build/ubft" | grep -q 'vcs.modified=true'; then yes "build/ubft is built from HEAD ${head:0:10}"; else no "build/ubft is missing or not built from HEAD ${head:0:10} (make build)"; fi
+  bdesc="HEAD ${head:0:10}"; [ -z "${LANE_PRODUCT_COMMIT:-}" ] || bdesc="the pinned product ${LANE_PRODUCT_COMMIT:0:10} (harness HEAD ${head:0:10})"
+  if [ -x "$REPO_ROOT/build/ubft" ] && lane_buildinfo "$REPO_ROOT/build/ubft" 2>/dev/null | grep -q "vcs.revision=${LANE_PRODUCT_COMMIT:-$head}" && ! lane_buildinfo "$REPO_ROOT/build/ubft" | grep -q 'vcs.modified=true'; then yes "build/ubft is built from $bdesc"; else no "build/ubft is missing or not built from $bdesc (make build)"; fi
   echo "-- ureth (attested build)"
   if [ -n "${M2_URETH_BIN:-}" ] && [ -x "$M2_URETH_BIN" ] && [ -n "${M2_URETH_COMMIT:-}" ]; then
     rep=$("$M2_URETH_BIN" --version 2>&1 | sed -n 's/^Commit SHA: //p' | head -1)

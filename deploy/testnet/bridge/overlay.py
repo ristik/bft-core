@@ -9,6 +9,10 @@ Run after deploy_bridge.py, which writes GENERATION/bridge/ (addresses, CFG, tru
              RPC gateway, as 172.30.89.1). It reads validator N's certified-block archive through a read-only mount and asks that validator's ureth for
              eth_getProof, so a proof is available only while ureth's proof window (--rpc.eth-proof-window) still covers the lock's block.
 Replacing the endpoint is stopping it and starting it again, on the same or another validator's archive (--archive-of): it holds no state.
+On a PoS generation every shard epoch has its own EVM shard configuration (the handoff writes network/handoff/shard-conf-<epoch>.json): the endpoint is
+given the genesis one and each of those, and proves a block under the one its certificate commits to. After a handoff, rerun this and restart the
+endpoint, or a lock certified under the new shard epoch is not served. The restart is a lane workaround: picking up a new configuration without one
+is ristik/bft-core#996.
 """
 import argparse
 import json
@@ -27,6 +31,13 @@ def hardened(**svc):
     return base
 
 
+def shard_confs(gen):
+    """The EVM shard configurations the endpoint holds, as paths in its /network mount: the genesis one, then each shard epoch's from the handoffs."""
+    handoff = sorted((f for f in (gen / 'network' / 'handoff').glob('shard-conf-*.json') if re.fullmatch(r'shard-conf-\d+\.json', f.name)),
+                     key=lambda f: int(f.stem.rsplit('-', 1)[1]))
+    return ['/network/full-shard-conf.json', *(f'/network/handoff/{f.name}' for f in handoff)]
+
+
 def main():
     p = argparse.ArgumentParser()
     p.add_argument('generation', type=Path)
@@ -41,11 +52,12 @@ def main():
         raise SystemExit('artifacts/bridge-images.json has no verified bridge image (build-bridge-image.py)')
     addr = json.loads((gen / 'bridge/bridge-addresses.json').read_text())
     i = a.archive_of
+    confs = shard_confs(gen)
     services = {'lockproof': hardened(
         image=image, mem_limit='256m', cpus=0.5,   # 256m: the archive locator keeps an 8-byte key per archived block
         networks=['validators', 'edge'], ports=['127.0.0.1:8090:8090'],
         entrypoint=['dnb-tool', 'lockproof-serve', '--listen', '0.0.0.0:8090', '--archive', '/archive', '--eth-url', f'http://ureth{i}:8545',
-                    '--vault', addr['BridgeVault'], '--cfg', addr['CFG'], '--full-shard-conf', '/network/full-shard-conf.json',
+                    '--vault', addr['BridgeVault'], '--cfg', addr['CFG'], *[x for c in confs for x in ('--full-shard-conf', c)],
                     '--trust-bundle', '/bridge/trust-base.bundle.cbor', '--trusted-proxy', TRUSTED_PROXY],
         volumes=[f'./validator{i}/archive:/archive:ro', './network:/network:ro', './bridge:/bridge:ro'],
         healthcheck={'test': ['CMD', 'node', '-e', "fetch('http://127.0.0.1:8090/healthz').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"],

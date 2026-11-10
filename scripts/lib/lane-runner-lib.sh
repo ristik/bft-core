@@ -47,9 +47,9 @@ lane_preflight() {
   got=$(lane_sha256 "$bin")
   [ "$got" = "$attested" ] || lane_fail "$LANE preflight: $bin sha256 $got is not the attested $attested (provenance $LANE_PROVENANCE)"
   [ -z "$(git -C "$REPO_ROOT" status --porcelain --untracked-files=no)" ] || lane_fail "$LANE preflight: the checkout has uncommitted changes (an evidence run needs a clean one)"
-  go version -m "$REPO_ROOT/build/ubft" | grep -q "vcs.revision=$head" || lane_fail "$LANE preflight: build/ubft is not built from HEAD $head (make build)"
+  go version -m "$REPO_ROOT/build/ubft" | grep -q "vcs.revision=${LANE_PRODUCT_COMMIT:-$head}" || lane_fail "$LANE preflight: build/ubft is not built from ${LANE_PRODUCT_COMMIT:-$head} (HEAD $head unless a pinned product run; make build)"
   ! go version -m "$REPO_ROOT/build/ubft" | grep -q 'vcs.modified=true' || lane_fail "$LANE preflight: build/ubft was built from a modified tree"
-  LANE_RUN_MODE="RUN MODE: evidence run: attested prebuilt Ureth $bin sha256=$got commit=$reported (provenance $LANE_PROVENANCE); everything else from this checkout at $head"
+  LANE_RUN_MODE="RUN MODE: evidence run: attested prebuilt Ureth $bin sha256=$got commit=$reported (provenance $LANE_PROVENANCE); everything else from this checkout at $head${LANE_PRODUCT_COMMIT:+; ubft and the Go tools from the pinned product bft-core $LANE_PRODUCT_COMMIT}"
 }
 
 # lane_rugregator_preflight <dev run 0|1> [provenance dir]: the rugregator checkout at the F8 pin (scripts/f8-rugregator-pin.sh, sourced by the caller)
@@ -128,7 +128,7 @@ lane_begin() {
   [ -z "${LANE_RUGREGATOR_PROVENANCE:-}" ] || cp -R "$LANE_RUGREGATOR_PROVENANCE" "$dir/rugregator-provenance"
   # the machine's own sleep/wake record around the run: a run across a suspend is not evidence, and this shows it without reading the machine later
   host_evidence before "$(host_evidence_file "$dir" before)"
-  echo "bft-core head=$(git -C "$REPO_ROOT" rev-parse HEAD) branch=$(git -C "$REPO_ROOT" rev-parse --abbrev-ref HEAD) ureth=$LANE_URETH_COMMIT ubft sha256=$(lane_sha256 "$REPO_ROOT/build/ubft")${LANE_RUGREGATOR_SHA256:+ rugregator=$F8_RUGREGATOR_PIN rugregator sha256=$LANE_RUGREGATOR_SHA256}" | tee "$dir/heads.txt"
+  echo "bft-core head=${LANE_PRODUCT_COMMIT:-$(git -C "$REPO_ROOT" rev-parse HEAD)}${LANE_PRODUCT_COMMIT:+ harness=$(git -C "$REPO_ROOT" rev-parse HEAD)} branch=$(git -C "$REPO_ROOT" rev-parse --abbrev-ref HEAD) ureth=$LANE_URETH_COMMIT ubft sha256=$(lane_sha256 "$REPO_ROOT/build/ubft")${LANE_RUGREGATOR_SHA256:+ rugregator=$F8_RUGREGATOR_PIN rugregator sha256=$LANE_RUGREGATOR_SHA256}" | tee "$dir/heads.txt"
   LANE_EVIDENCE_DIR=$dir
   trap lane_stop_devnet EXIT
   trap 'exit 130' INT

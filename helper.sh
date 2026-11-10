@@ -147,6 +147,9 @@ function start_root_nodes() {
       collect_shard_conf_args
       profileArgs+=(${shardConfArgs[@]+"${shardConfArgs[@]}"})
     fi
+    # ROOT_DEBUG_ROOTS="1 2": those roots log at debug whatever ROOT_LOG_LEVEL says (one root's round/leader lines without 128 debug logs)
+    local rootLogLevel="${ROOT_LOG_LEVEL:-debug}"
+    case " ${ROOT_DEBUG_ROOTS:-} " in *" $i "*) rootLogLevel=debug ;; esac
     UBFT_Q4_SHIM_DIR="${Q4_SHIM_DIR:+$Q4_SHIM_DIR/root$i}" ${Q4_ROOT_BIN:-build/ubft} root-node run \
                     --home test-nodes/root$i \
                     --address "/ip4/127.0.0.1/tcp/$p2pPort" \
@@ -154,7 +157,7 @@ function start_root_nodes() {
                     --trust-base test-nodes/trust-base.json \
                     --rpc-server-address "$rpcHost:$rpcPort" \
                     --log-format text \
-                    --log-level "${ROOT_LOG_LEVEL:-debug}" \
+                    --log-level "$rootLogLevel" \
                     --metrics prometheus \
                     ${profileArgs[@]+"${profileArgs[@]}"} \
                     >> test-nodes/root$i/debug.log 2>&1 &

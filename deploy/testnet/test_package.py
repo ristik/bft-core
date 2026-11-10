@@ -145,6 +145,22 @@ class UtbProfile(unittest.TestCase):
         integration=self.topo(4,self.PIN)
         for name in cfg['services']:
             if name != 'aggregator': self.assertEqual(cfg['services'][name],integration['services'][name],name)
+    def test_the_upstream_aggregator_history_lives_on_its_own_persistent_mongo_volume_and_the_bundle_is_read_only(self):
+        """Case 3 of briefs/utb-acceptance-host-plan.md, checked statically: the history (the durable tail of the upstream-facing aggregator) is in its MongoDB on a
+        persistent volume of the package, the shipped bundle is only ever mounted read-only, and exactly one service reads UTB_BUNDLE_FILE."""
+        with tempfile.TemporaryDirectory() as tmp:
+            out=Path(tmp)/'tn-fixture';out.mkdir()
+            cfg=generate.topology(out,4,{'root':['r%d'%i for i in range(4)],'evm':['e%d'%i for i in range(4)]},self.images,'captcha',(),30000000,False,'127.0.0.1',self.PIN,'upstream')
+        svc=cfg['services']
+        self.assertIn('./mongo:/data/db',svc['mongo']['volumes'],'the tail survives a recreated aggregator')
+        from urllib.parse import urlparse
+        self.assertEqual(urlparse(svc['aggregator']['environment']['MONGODB_URI']).hostname,'mongo','the history is in the package\'s own mongo service')
+        network=[m for m in svc['aggregator']['volumes'] if m.endswith(':/network:ro')]
+        self.assertEqual(len(network),1,'the bundle comes from the read-only network mount')
+        self.assertTrue(svc['aggregator']['environment']['UTB_BUNDLE_FILE'].startswith('/network/'),'the bundle is read from the read-only network mount, not from /state or anywhere writable')
+        readers=[n for n,s in svc.items() if 'UTB_BUNDLE_FILE' in s.get('environment',{})]
+        self.assertEqual(readers,['aggregator'],'one history owner per database: no other service reads the bundle as its history')
+        self.assertNotIn('./aggregator-utb:/utb',svc['aggregator']['volumes'],'no second (bolt) history next to the Mongo one')
     def test_an_unknown_aggregator_variant_is_refused(self):
         with self.assertRaises(ValueError): generate.utb_aggregator_environment(self.PIN,'other')
     def test_the_upstream_aggregator_pin_is_a_full_commit_and_differs_from_the_integration_one(self):
@@ -156,10 +172,12 @@ class UtbProfile(unittest.TestCase):
         for name,method in rehearse.UTB_STAGES:
             self.assertTrue(callable(getattr(rehearse.Rehearsal,method)),name)
             self.assertNotIn(name,[n for n,_ in rehearse.STAGES+rehearse.POS_STAGES],'the hosted rehearsal package has no signed history: its default run must not name them')
-    def utb_live_fixture(self,roots_epoch=3,served_tip=3,replay_tip=None,wrong_snapshot_answers_history=False,verifier_accepts_tampered=False):
+    def utb_live_fixture(self,roots_epoch=3,served_tip=3,replay_tip=None,wrong_snapshot_answers_history=False,verifier_accepts_tampered=False,wrong_snapshot_answers_reserialised=False,genesis_epoch=None,first_epoch=1):
         """A Rehearsal whose gateway and offline verifier are fakes: the served history is a pure function of (tip, query). Returns (instance, calls)."""
         import rehearse
         ev=Path(tempfile.mkdtemp());calls=[]
+        if genesis_epoch is not None:
+            (ev/'network').mkdir();(ev/'network'/'trust-base.json').write_text(json.dumps({'epoch':genesis_epoch}))
         pin=self.PIN
         def tip_id(t): return '0x'+('%02x'%t)*32
         class Fake(rehearse.Rehearsal):
@@ -177,14 +195,15 @@ class UtbProfile(unittest.TestCase):
                 calls.append(query)
                 if 'snapshotEnd=' in query:
                     t=int(re.search(r'snapshotEnd=(\d+)',query).group(1));want=re.search(r'snapshotEntryId=(0x[0-9a-f]{64})',query).group(1)
+                    if want!=tip_id(t) and wrong_snapshot_answers_reserialised: return 200,b'T%d:sum%d#x' % (t,t)   # the same history in other bytes
                     if want!=tip_id(t) and not wrong_snapshot_answers_history: return 409,b'conflict'
                     u=replay_tip if replay_tip is not None else t;return 200,b'T%d:sum%d' % (u,u)
                 return 200,b'T%d:sum%d' % (served_tip,served_tip)
             def utb_verify(self,path,pin_):
                 data=Path(path).read_bytes()
-                m=re.fullmatch(rb'T(\d+):sum(\d+)',data)
+                m=re.fullmatch(rb'T(\d+):sum(\d+)(?:#x)?',data)
                 if not m or m.group(1)!=m.group(2): return (verifier_accepts_tampered and data!=b'conflict'),(1 if verifier_accepts_tampered else None),(3 if verifier_accepts_tampered else None),('0x'+'ab'*32 if verifier_accepts_tampered else None),'bad'
-                t=int(m.group(1));return True,1,t,tip_id(t),'ok'
+                t=int(m.group(1));return True,first_epoch,t,tip_id(t),'ok'
         return Fake(),calls
     def run_utb_live(self,**kw):
         import rehearse
@@ -205,6 +224,14 @@ class UtbProfile(unittest.TestCase):
     def test_utb_live_control_fails_when_a_wrong_snapshot_is_answered_with_the_held_history(self):
         import rehearse
         with self.assertRaises(rehearse.Failure): self.run_utb_live(wrong_snapshot_answers_history=True)
+    def test_utb_live_control_fails_when_a_wrong_snapshot_is_answered_with_the_same_history_in_other_bytes(self):
+        import rehearse
+        with self.assertRaises(rehearse.Failure): self.run_utb_live(wrong_snapshot_answers_reserialised=True)
+    def test_utb_live_follows_the_genesis_epoch_of_the_generation_not_a_constant_1(self):
+        import rehearse
+        fake,calls=self.run_utb_live(roots_epoch=6,served_tip=6,genesis_epoch=5,first_epoch=5)
+        self.assertTrue(all(c.startswith('from=5&') for c in calls),calls)
+        with self.assertRaises(rehearse.Failure): self.run_utb_live(roots_epoch=6,served_tip=6,genesis_epoch=5,first_epoch=1)
     def test_utb_live_control_fails_when_the_verifier_accepts_a_tampered_file(self):
         import rehearse
         with self.assertRaises(rehearse.Failure): self.run_utb_live(verifier_accepts_tampered=True)
@@ -2131,5 +2158,69 @@ class BridgeLoad(unittest.TestCase):
             load=bl.Load(fake,out,duration=60,interval=60,max_failures=3)
             self.assertFalse(load.run(1))
             self.assertEqual(fake.calls,['init']*3)
+
+
+class BridgePosGap(unittest.TestCase):
+    """bridge/bridge_pos.py pos-gap's checks without a network: the tester's update reported once (the SDK's TrustBaseUpdater follows the page cursors
+    itself), the recorded one-entry pages, and trust_recorder.mjs forwarding and recording against a stub upstream."""
+    def module(self):
+        for d in ('bridge','sdk-clients'):
+            sys.path.insert(0,str(Path(__file__).parent/d)); self.addCleanup(sys.path.remove,str(Path(__file__).parent/d))
+        import bridge_pos, utbcbor
+        return bridge_pos, utbcbor
+    def page(self,u,frm,maxe,epochs,nxt,http=200,snap=None,status=0):
+        entries=[u.encode(u.Tag(u.ENTRY_TAG,[2,3,e,e*10,[],1,b'\x11'*32,None,b'\x00'*32,None])) for e in epochs]
+        q=f'from={frm}&maxEntries={maxe}'+(f'&snapshotEnd={snap}&snapshotEntryId=0x{"ab"*32}' if snap else '')
+        return {'path':'/api/v1/trustbases?'+q,'http':http,'body':u.response(3,status,frm,3,b'\xab'*32,entries,nxt).hex() if http==200 else ''}
+    def test_one_aggregate_fetch_event(self):
+        bp,_=self.module()
+        new='  $ bridge-tester redeem\n  trust: fetched from epoch 2 (max 1): 2 appended, tip 1 -> 3\nredeemed'
+        old='  trust: fetched from epoch 2 (max 1): 1 appended, tip 1 -> 2\n  trust: fetched from epoch 3 (max 1): 1 appended, tip 2 -> 3'
+        self.assertEqual(bp.gap_fetches(new),bp.gap_fetches_want(1,3))
+        self.assertNotEqual(bp.gap_fetches(old),bp.gap_fetches_want(1,3))
+        self.assertNotEqual(bp.gap_fetches(new+'\n  trust: fetched from epoch 4 (max 1): 0 appended, tip 3 -> 3'),bp.gap_fetches_want(1,3))
+        self.assertEqual(bp.gap_fetches_want(2,4),['trust: fetched from epoch 3 (max 1): 2 appended, tip 2 -> 4'])
+    def test_one_entry_pages(self):
+        bp,u=self.module()
+        good=[self.page(u,2,1,[2],3),self.page(u,3,1,[3],None,snap=3)]
+        pages=bp.trust_pages(good)
+        self.assertEqual([(p['from'],p['maxEntries'],p['snapshotEnd'],p['epochs'],p['next']) for p in pages],[(2,1,None,[2],3),(3,1,3,[3],None)])
+        self.assertTrue(bp.one_entry_pages(pages,1,3))
+        for bad in ([self.page(u,2,2,[2,3],None)],                                   # one two-entry page: not one-entry pages
+                    [self.page(u,2,1,[2],3)],                                        # epoch 3 never requested
+                    good+[self.page(u,4,1,[],None)],                                 # an extra request
+                    [self.page(u,2,1,[2],3),self.page(u,3,2,[3],None)],              # the second page not capped at 1
+                    [self.page(u,2,1,[2],3),self.page(u,3,1,[],None)],               # answered without its entry
+                    [self.page(u,2,1,[2],3),self.page(u,3,1,[3],None,http=502)],     # not served
+                    [self.page(u,2,1,[2],3),self.page(u,3,1,[3],None,status=1)],     # served with a non-OK status
+                    [self.page(u,3,1,[3],None),self.page(u,2,1,[2],3)]):             # out of order
+            self.assertFalse(bp.one_entry_pages(bp.trust_pages(bad),1,3),json.dumps(bp.trust_pages(bad)))
+    def test_recorder_forwards_and_records(self):
+        if not shutil.which('node'): self.skipTest('node not installed')
+        body=bytes.fromhex('d99857')+b'page'
+        class Up(http.server.BaseHTTPRequestHandler):
+            def log_message(self,*a): pass
+            def do_GET(self):
+                self.send_response(200); self.send_header('Content-Type','application/cbor'); self.send_header('Content-Length',str(len(body))); self.end_headers(); self.wfile.write(body)
+            def do_POST(self):
+                n=int(self.headers['Content-Length']); d=self.rfile.read(n)
+                self.send_response(200); self.send_header('Content-Length',str(len(d))); self.end_headers(); self.wfile.write(d)
+        up=http.server.ThreadingHTTPServer(('127.0.0.1',0),Up); threading.Thread(target=up.serve_forever,daemon=True).start(); self.addCleanup(up.shutdown)
+        with tempfile.TemporaryDirectory() as tmp:
+            import socket
+            with socket.socket() as so: so.bind(('127.0.0.1',0)); port=so.getsockname()[1]
+            out=Path(tmp)/'pages.jsonl'
+            proc=subprocess.Popen(['node',str(Path(__file__).parent/'bridge/trust_recorder.mjs')],stdout=subprocess.PIPE,text=True,
+                                  env={**os.environ,'UPSTREAM':f'http://127.0.0.1:{up.server_port}','PORT':str(port),'OUT':str(out)})
+            self.addCleanup(proc.kill)
+            self.assertIn('listening',proc.stdout.readline())
+            c=http.client.HTTPConnection('127.0.0.1',port,timeout=10)
+            c.request('GET','/api/v1/trustbases?from=2&maxEntries=1'); r=c.getresponse()
+            self.assertEqual((r.status,r.read(),r.getheader('Content-Type')),(200,body,'application/cbor'))
+            c.request('POST','/aggregator',body=b'{"x":1}',headers={'Content-Type':'application/json'}); r=c.getresponse()
+            self.assertEqual(r.read(),b'{"x":1}')
+            c.request('GET','/api/v1/trustbases/other'); c.getresponse().read()
+            rec=[json.loads(l) for l in out.read_text().splitlines()]
+            self.assertEqual(rec,[{'path':'/api/v1/trustbases?from=2&maxEntries=1','http':200,'body':body.hex()}])
 
 if __name__=='__main__': unittest.main()

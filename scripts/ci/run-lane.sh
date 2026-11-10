@@ -66,6 +66,12 @@ if [ "$kind" = combined ]; then
   export AGG_COMMIT=$agg_commit AGG_BIN=$AGRE_ROOT/builds/aggregator-${agg_commit:0:8}/aggregator; chmod +x "$AGG_BIN"
 fi
 ( cd "$art/tools" && p_sha256 -c sha256.txt >/dev/null ) || die "the tools artifact does not match its sha256.txt"
+# the product the binaries were built from (build-tools.sh): the commit under test, or in a pinned run (product=pinned) exactly the bft-core pin of the manifest
+product=$(tr -d '[:space:]' <"$art/tools/product-commit.txt" 2>/dev/null) || die "the tools artifact has no product-commit.txt"
+if [ "$product" != "$head" ]; then
+  scripts/ci/check-pins.sh component bft-core "$product" | tee -a "$out/run-lane.log" | grep -q '^ok' || die "the product commit $product is neither the commit under test nor the bft-core pin"
+  export LANE_PRODUCT_COMMIT=$product; log "pinned product run: binaries built from bft-core $product, harness $head"
+fi
 export LANE_SELFTEST_LOG=$art/tools/selftest/utb-lane-selftest.log
 
 unpack() { # NAME DEST

@@ -3,6 +3,7 @@ package types
 import (
 	"bytes"
 	"fmt"
+	"time"
 
 	base "github.com/unicitynetwork/bft-go-base/types"
 	"github.com/unicitynetwork/bft-go-base/types/hex"
@@ -318,14 +319,42 @@ func (x *TimeoutCert) IsValid() error {
 	return nil
 }
 
+// Verify verifies the certificate; a certificate that verified before under the same context is not verified again (see VerifyWith for the
+// cache and the observer: the measurement observer sees real verifications only, never consulted by the cache and not called between CertVerified
+// and RememberCert). The observer's self time of a TC excludes its nested QC, which is observed on its own.
 func (x *TimeoutCert) Verify(tbs *trustbase.TrustBaseStore) error {
+	gen := tbs.VerifyGeneration()
+	key, cacheable := timeoutCertCacheKey(tbs, x)
+	if cacheable && tbs.CertVerified(key) {
+		return nil
+	}
+	start := time.Now()
+	var nested time.Duration
+	err := x.verify(tbs, &nested)
+	took := time.Since(start) - nested
+	if err != nil {
+		return err
+	}
+	if cacheable {
+		verifyCertHook()
+		tbs.RememberCert(key, gen)
+	}
+	if o := tbs.CertObserver(); o != nil {
+		o.ObserveCert("TC", x, x.Timeout.Epoch, x.GetRound(), x.signingScheme(), len(x.Signatures), took)
+	}
+	return nil
+}
+
+func (x *TimeoutCert) verify(tbs *trustbase.TrustBaseStore, nested *time.Duration) error {
 	if err := x.IsValid(); err != nil {
 		return fmt.Errorf("invalid certificate: %w", err)
 	}
 
+	nestedStart := time.Now()
 	if err := x.Timeout.Verify(tbs); err != nil {
 		return fmt.Errorf("invalid timeout data: %w", err)
 	}
+	*nested = time.Since(nestedStart)
 
 	tb, err := tbs.GetByEpoch(x.Timeout.Epoch)
 	if err != nil {
@@ -386,4 +415,23 @@ func (x *TimeoutCert) Verify(tbs *trustbase.TrustBaseStore) error {
 		}
 	}
 	return nil
+}
+
+// timeoutCertCacheKey is the key of a timeout certificate in the verified-certificate cache. A hit on it skips the verification of the nested high QC
+// too, so the nested QC must satisfy the same no-key rule as a QC verified on its own (certCacheKey): a scheme 2 high QC whose in-memory vote info is not
+// version 1 carries a field the wire form does not, and the TC is then verified without the cache.
+func timeoutCertCacheKey(tbs *trustbase.TrustBaseStore, x *TimeoutCert) (trustbase.CertKey, bool) {
+	if x == nil || x.Timeout == nil {
+		return trustbase.CertKey{}, false
+	}
+	epochs := []uint64{x.Timeout.Epoch}
+	if hqc := x.Timeout.HighQc; hqc != nil {
+		if hqc.VoteInfo != nil {
+			if hqc.Scheme == votesig.SchemeDomainBound && hqc.VoteInfo.Version != 1 {
+				return trustbase.CertKey{}, false
+			}
+			epochs = append(epochs, hqc.VoteInfo.Epoch)
+		}
+	}
+	return certCacheKey(tbs, trustbase.CertTC, x, 0, x.Scheme, epochs...)
 }
