@@ -494,10 +494,15 @@ func Test_CountingMuxerDumpNamesTheStreamsAndGoroutines(t *testing.T) {
 	p, nw := newCertReceiver(t, senderPeer, recvBoth)
 	require.NoError(t, senderNw.SendCertificationResponse(context.Background(), testCertResponse(t, nil), p.ID()))
 	recv(t, nw)
-	out := cm.dump()
+	// the receiver's handler returns before the sender's lazy handshake read has completed (the reply is read by a goroutine of its own), so the read
+	// is awaited as a condition, never assumed to be there (bound: a lost reply only)
+	var out string
+	require.Eventually(t, func() bool {
+		out = cm.dump()
+		return strings.Contains(out, "read ")
+	}, recvBound, 10*time.Millisecond)
 	require.Contains(t, out, "cert=true")
 	require.Contains(t, out, "write ")
-	require.Contains(t, out, "read ")
 	require.Contains(t, out, "first write by: goroutine")
 	require.Contains(t, out, "goroutine ")
 }
