@@ -1707,13 +1707,15 @@ class Joiner(unittest.TestCase):
         for out in (json.dumps(one),json.dumps([one]),json.dumps({'Address':one['address'],'PrivateKey':one['private_key']}),'Address: %s\nPrivate key: %s'%(one['address'],one['private_key'])):
             self.assertEqual(pos_join.new_wallet(type('R',(),{'cast_run':lambda self,*a,out=out:out})()),one)
         with self.assertRaises(RuntimeError): pos_join.new_wallet(type('R',(),{'cast_run':lambda self,*a:'nothing'})())
-    def test_the_join_stages_run_before_the_slow_restore_stage(self):
+    def test_the_heavy_joiner_runs_before_the_slow_restore_stage_and_signing_is_proved_after_it(self):
         """#1006: pos-restore-repeat outlasts several election cadences; an attempt that came due meanwhile leaves a result open that only the automatic RejectResult
-        clears (16384 progress rounds), so pos-join-heavy, which needs none open, runs right after pos-join-signs and before it."""
+        clears (16384 progress rounds), so pos-join-heavy, which needs none open, runs straight after pos-advance, before it. pos-join-signs runs after the repeated
+        restores (arch): it proves the joiner still signs after them."""
         import rehearse
         names=[n for n,_ in rehearse.POS_STAGES]
-        order=['pos-advance','pos-join-signs','pos-join-heavy','pos-restore-repeat','pos-restart']
+        order=['pos-advance','pos-join-heavy','pos-restore-repeat','pos-join-signs','pos-restart']
         self.assertEqual([names.index(n) for n in order],sorted(names.index(n) for n in order),'stage order: '+' < '.join(order))
+        self.assertEqual(names.index('pos-advance')+1,names.index('pos-join-heavy'),'nothing slow between the advance and the heavy joiner')
         self.assertEqual(names.index('pos-join-heavy')+1,names.index('pos-restore-repeat'),'nothing slow between the heavy joiner and the election attempt it provokes')
         src=Path(pos_join.__file__).read_text()
         body=src[src.index('def pos_join_heavy'):]
