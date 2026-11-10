@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"runtime"
 	"runtime/pprof"
 	"strings"
 	"sync"
@@ -95,13 +96,27 @@ func (c *countingConn) OpenStream(ctx context.Context) (network.MuxedStream, err
 	return cs, nil
 }
 
+// AcceptStream wraps the inbound streams as well, as a pure trace (no delay): it shows what the receiver's side of the muxer got and when (#1004).
+func (c *countingConn) AcceptStream() (network.MuxedStream, error) {
+	s, err := c.MuxedConn.AcceptStream()
+	if err != nil {
+		return nil, err
+	}
+	cs := &countingStream{MuxedStream: s, opened: time.Now(), inbound: true}
+	c.m.mu.Lock()
+	c.m.streams = append(c.m.streams, cs)
+	c.m.mu.Unlock()
+	return cs, nil
+}
+
 type countingStream struct {
 	network.MuxedStream
-	delay  time.Duration
-	opened time.Time
-	mu     sync.Mutex
-	cert   bool
-	trace  []string // every read and write with its offset from the open, size and error (diagnostic for #1004)
+	inbound bool // accepted by this side: traced only; it is a certificate stream once its data names one
+	delay   time.Duration
+	opened  time.Time
+	mu      sync.Mutex
+	cert    bool
+	trace   []string // every read and write with its offset from the open, size and error (diagnostic for #1004)
 	streamStats
 }
 
@@ -112,19 +127,40 @@ func (s *countingStream) note(format string, args ...any) {
 	s.mu.Unlock()
 }
 
+// caller is the stack of the goroutine making the first read or write: who touched the stream first decides whether the lazy handshake was started by a
+// Read (which writes the handshake alone) or by the Write (which sends it with the payload in one write).
+func caller() string {
+	buf := make([]byte, 4096)
+	buf = buf[:runtime.Stack(buf, false)]
+	return strings.ReplaceAll(strings.TrimSpace(string(buf)), "\n", "\n      ")
+}
+
 // dump is the failure diagnostic of the latency test (#1004): per certificate stream the counters and the timed read/write trace, then every goroutine.
 // It runs only on a failure, so the next occurrence says which side was waiting for what.
 func (m *countingMuxer) dump() string {
+	return m.streamsDump() + "goroutines:\n" + goroutines()
+}
+
+func goroutines() string {
+	var b strings.Builder
+	_ = pprof.Lookup("goroutine").WriteTo(&b, 2)
+	return b.String()
+}
+
+// streamsDump is the per-stream part of dump.
+func (m *countingMuxer) streamsDump() string {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	var b strings.Builder
 	for i, s := range m.streams {
 		s.mu.Lock()
-		fmt.Fprintf(&b, "stream %d cert=%v writes=%d reads=%d repliesBeforeLastWrite=%d\n  %s\n", i, s.cert, s.writes, s.reads, s.repliesBeforeLastWrite, strings.Join(s.trace, "\n  "))
+		if !s.cert {
+			s.mu.Unlock()
+			continue
+		}
+		fmt.Fprintf(&b, "stream %d inbound=%v cert=%v writes=%d reads=%d repliesBeforeLastWrite=%d\n  %s\n", i, s.inbound, s.cert, s.writes, s.reads, s.repliesBeforeLastWrite, strings.Join(s.trace, "\n  "))
 		s.mu.Unlock()
 	}
-	b.WriteString("goroutines:\n")
-	_ = pprof.Lookup("goroutine").WriteTo(&b, 2)
 	return b.String()
 }
 
@@ -137,6 +173,9 @@ func (s *countingStream) Write(b []byte) (int, error) {
 		s.firstWriteLen = len(b)
 		s.firstWriteHeader = bytes.HasPrefix(b, []byte("\x13/multistream/1.0.0\n"))
 		s.readsBeforeFirstWrite = s.reads
+	}
+	if s.writes == 0 && s.cert {
+		s.trace = append(s.trace, "first write by: "+caller())
 	}
 	s.writes++
 	s.repliesBeforeLastWrite = s.reads - s.readsBeforeFirstWrite
@@ -151,8 +190,19 @@ func (s *countingStream) Write(b []byte) (int, error) {
 }
 
 func (s *countingStream) Read(b []byte) (int, error) {
+	s.mu.Lock()
+	first := s.reads == 0 && len(s.trace) == 0 && !s.inbound
+	s.mu.Unlock()
+	if first {
+		s.note("first read by: %s", caller())
+	}
 	n, err := s.MuxedStream.Read(b)
-	s.note("read %d bytes err=%v", n, err)
+	s.note("read %d bytes (asked %d) err=%v", n, len(b), err)
+	if s.inbound && n > 0 && bytes.Contains(b[:n], []byte("/ab/certificates/")) {
+		s.mu.Lock()
+		s.cert = true
+		s.mu.Unlock()
+	}
 	if n > 0 {
 		s.mu.Lock()
 		s.reads++
@@ -350,7 +400,14 @@ func Test_SendCertificationResponse_DeliveredWithLatencyWithinTimeout(t *testing
 	require.NoError(t, err)
 
 	for _, kind := range []recvKind{recvLegacy, recvBoth} {
-		p, nw := newCertReceiver(t, senderPeer, kind)
+		// the receiver's muxer traces what it accepted (#1004): did the sender's payload bytes reach it
+		rm := &countingMuxer{}
+		rconf, rerr := NewPeerConfiguration(randomTestAddressStr, nil, generateKeyPair(t), nil, nil)
+		require.NoError(t, rerr)
+		rp, rerr := newPeer(context.Background(), rconf, logger.New(t), nil, libp2p.Muxer("/yamux/1.0.0", rm))
+		require.NoError(t, rerr)
+		t.Cleanup(func() { _ = rp.Close() })
+		p, nw := registerReceiver(t, senderPeer, rp, kind)
 		// The receiver's stream deadline (1 s by default) runs from the start of its handler until the sender closes the stream, so it also counts the
 		// sender's injected delays while it reads the handshake reply. That is a property of the product, not of what this test asserts (the exchange
 		// itself): on a loaded runner it reset the stream under the sender (#950). The deadline is out of the way here; see the control below.
@@ -363,7 +420,7 @@ func Test_SendCertificationResponse_DeliveredWithLatencyWithinTimeout(t *testing
 			ProtocolUnicityCertificates, &certificationFrames{cr: testCertResponse(t, nil)})
 		cancel()
 		if err != nil {
-			t.Logf("#1004 diagnostic (kind %d): the send failed with %v\n%s", kind, err, cm.dump())
+			t.Logf("#1004 diagnostic (kind %d): the send failed with %v\nSENDER\n%s\nRECEIVER\n%s", kind, err, cm.dump(), rm.streamsDump())
 		}
 		require.NoError(t, err)
 		recv(t, nw)
@@ -441,5 +498,6 @@ func Test_CountingMuxerDumpNamesTheStreamsAndGoroutines(t *testing.T) {
 	require.Contains(t, out, "cert=true")
 	require.Contains(t, out, "write ")
 	require.Contains(t, out, "read ")
+	require.Contains(t, out, "first write by: goroutine")
 	require.Contains(t, out, "goroutine ")
 }
