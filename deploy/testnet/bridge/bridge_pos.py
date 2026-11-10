@@ -51,6 +51,8 @@ eight invocations on one generation (the workflow then runs rehearse.py utb-live
                      trust-base update or finalized-branch conflict in its log after the restart.
   pos-after-restart  After the pods' and the aggregator's restarts, token D round-trips at epoch 3 with the main wallet: a fresh process reloads its durable
                      history (to epoch 2), fetches entry 3 from the restarted aggregator, ends with the lagging wallet's EntryIDs 1..3; exact credit and claim.
+                     The lock-proof endpoint is the container started at pos-epoch1 (same id and start time, no restart): token D's lock UC commits to the
+                     shard configuration the second handoff published after it started, found by the endpoint's rescan of the handoff directory (#996).
   pos-replays        The replay negatives at epoch 3, against the vault's whole state and the B1 tip (unchanged after all of them): every redeemed envelope
                      again (A epoch 2, B per-SID epoch 1, C and D epoch 3: PartAlreadyRedeemed), a claimed credit claimed again (InsufficientCredit); and per
                      token A, B, C (tester replays): the envelope mined again (status 0), a fresh consolidated proof under the epoch-3 seal (PartAlreadyRedeemed:
@@ -84,6 +86,24 @@ PART_ALREADY_REDEEMED, INSUFFICIENT_CREDIT = '0xe8f8709e', '0x4eb7eaec'
 
 def _word(n):
     return f'{n:064x}'
+
+
+def lockproof_conf(lockproof):
+    """(ShardConfHash of the lock's UC, SHA-256 of the configuration the proof carries, that configuration's epoch and partition) from a LockProof's
+    canonical encoding [version, cfg, trustBaseID, PDR, UC, header, accountNodes, storageNodes] (bridgeprofile/lockproof.go); the UC is tag 39001
+    [version, inputRecord, trHash, shardConfHash, ...], the PDR tag 39008 [version, networkID, partitionID, ..., epoch (field 12), ...]
+    (bft-go-base types). Decoded with sdk-clients/utbcbor.py; nothing is verified here."""
+    import sys
+    from pathlib import Path
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'sdk-clients'))
+    import utbcbor
+    lp = utbcbor.decode(lockproof)
+    pdr_raw, uc_raw = lp[3], lp[4]
+    untag = lambda raw, tag: (lambda t: t.value if isinstance(t, utbcbor.Tag) and t.tag == tag else None)(utbcbor.decode(raw))
+    uc, pdr = untag(uc_raw, 39001), untag(pdr_raw, 39008)
+    if uc is None or pdr is None:
+        raise ValueError('not a UC (tag 39001) and a PDR (tag 39008)')
+    return {'ucShardConfHash': uc[3].hex(), 'pdrSha256': hashlib.sha256(pdr_raw).hexdigest(), 'pdrEpoch': pdr[12], 'pdrPartition': pdr[2]}
 
 
 def gap_fetches(text):
@@ -141,6 +161,15 @@ class BridgePos:
 
     def b1_state(self):
         return {'genesisEpoch': self.b1_load(self.b1_field_name('b1.genesisEpoch')), 'importedTip': self.b1_load(self.b1_field_name('b1.importedTipEpoch'))}
+
+    # ---- the lock-proof endpoint ------------------------------------------------------------------------------------------------
+    def endpoint_identity(self):
+        """The running lock-proof container: its id, start time and entrypoint (docker inspect)."""
+        import subprocess
+        cid = self.bridge_compose('ps', '-q', 'lockproof').strip()
+        self.expect(bool(cid), 'the lock-proof endpoint runs')
+        info = json.loads(subprocess.check_output(['docker', 'inspect', cid], text=True))[0]
+        return {'id': info['Id'], 'startedAt': info['State']['StartedAt'], 'restartCount': info['RestartCount'], 'entrypoint': info['Config']['Entrypoint']}
 
     # ---- the wallet -----------------------------------------------------------------------------------------------------------
     def recorded_tester(self, *args, wallet, key, env=None):
@@ -234,8 +263,14 @@ class BridgePos:
         pin = (work / 'trust-base.genesis.entryid').read_text().strip().lower().removeprefix('0x')
         self.expect(pin == utb['genesis_id'].lower().removeprefix('0x'), 'the bridge\'s trust pin is the generation\'s UTB genesis entry id (one history)', pin[:16])
         shipped = hashlib.sha256((work / 'public/trust-base.bundle.cbor').read_bytes()).hexdigest()
-        # the lock-proof endpoint on validator 1's archive (the lockproof stage starts it on the PoA generation; this sequence does not run that stage)
+        # the lock-proof endpoint on validator 1's archive (the lockproof stage starts it on the PoA generation; this sequence does not run that stage).
+        # It is started once, here, before any handoff, and never restarted by this sequence: pos-after-restart checks it is the same container (#996).
         self.start_endpoint(1)
+        endpoint = self.endpoint_identity()
+        ep = endpoint['entrypoint']
+        self.expect(ep.count('--full-shard-conf') == 1 and ep[ep.index('--shard-conf-dir') + 1] == '/network/handoff',
+                    'the endpoint holds the genesis shard configuration and reads the handoff directory', ' '.join(ep))
+        (work / 'pos-endpoint.json').write_text(json.dumps(endpoint, indent=2) + '\n')
         # the wallet and its key stay in GENERATION/bridge between the invocations (the key never in the evidence)
         shutil.rmtree(work / POS_WALLET, ignore_errors=True)
         (work / POS_WALLET).mkdir()
@@ -539,12 +574,9 @@ class BridgePos:
         epoch1 = json.loads((work / 'pos-epoch1.json').read_text())
         genesis = int(epoch1['trust']['genesisEpoch'])
         me = epoch1['wallet']
-        # validator 1 was restarted, and the shard epoch advanced at each handoff: the endpoint is restarted with every shard epoch's configuration
-        # (overlay.py), so a lock certified under the current shard epoch is served (it is proven under the configuration its certificate commits to)
-        self.start_endpoint(1)
-        overlay = json.loads((self.gen / 'compose.bridge.yaml').read_text())['services']['lockproof']['entrypoint']
-        confs = [overlay[k + 1] for k, x in enumerate(overlay) if x == '--full-shard-conf']
-        self.expect(len(confs) >= 3, 'the lock-proof endpoint holds the genesis shard configuration and each handoff\'s', ' '.join(confs))
+        # the shard epoch advanced at each handoff and validator 1 was restarted; the endpoint started at pos-epoch1 is NOT restarted (#996): token D,
+        # locked now, must be proven under the configuration the second handoff published after the endpoint started, found by its rescan
+        endpoint = json.loads((work / 'pos-endpoint.json').read_text())
         held = self.held_trust()
         self.expect(int(held['tipEpoch']) == genesis + 1, 'a fresh process reloads the main wallet\'s durable history to epoch 2 (as pos-redeem left it)', held['tipEpoch'])
         before = self.vault_balance()
@@ -560,6 +592,27 @@ class BridgePos:
         _, text = self.pos_tester('redeem', '--token', token)
         fetches = [line.strip() for line in text.splitlines() if 'trust: fetched' in line]
         self.expect(any(f'tip {genesis + 1} -> {genesis + 2}' in f for f in fetches), 'the main wallet fetched entry 3 from the restarted aggregator', '; '.join(fetches))
+        served_by = self.endpoint_identity()
+        self.expect(served_by['id'] == endpoint['id'] and served_by['startedAt'] == endpoint['startedAt'] and served_by['restartCount'] == 0,
+                    'token D\'s lock proof came from the endpoint started at pos-epoch1, never restarted or recreated', json.dumps({'then': endpoint, 'now': served_by}))
+        handoff = self.gen / 'network' / 'handoff'
+        published = {int(f.stem.rsplit('-', 1)[1]): f for f in handoff.glob('shard-conf-*.json') if f.stem.rsplit('-', 1)[1].isdigit()}
+        newest = max(published)
+        conf = lockproof_conf((work / POS_WALLET / 'tokens' / token / 'lockproof.cbor').read_bytes())
+        # the newest published file's hash as dnb-tool computes it (dnb-tool pdr, the CBOR the endpoint keys), next to D's commitment
+        from deploy_bridge import tools
+        conf['newestFile'] = published[newest].name
+        conf['newestFileSha256'] = tools(self.gen, 'sh', '-c', f"dnb-tool pdr --full-shard-conf /gen/network/handoff/{published[newest].name} --out /tmp/p "
+                                                              "&& sha256sum /tmp/p", capture=True).split()[0]
+        # the endpoint's own account of D (configuration loads, rescans, any refused request): kept, since the tester also retries a 502
+        (self.evidence / 'pos-bridge').mkdir(parents=True, exist_ok=True)
+        (self.evidence / 'pos-bridge' / 'lockproof-endpoint.log').write_text(self.bridge_compose('logs', '--no-color', '--timestamps', 'lockproof'))
+        started = endpoint['startedAt']
+        published_at = time.strftime('%Y-%m-%dT%H:%M:%S', time.gmtime(published[newest].stat().st_mtime))
+        self.expect(conf['ucShardConfHash'] == conf['pdrSha256'] == conf['newestFileSha256'] and conf['pdrPartition'] == 8 and conf['pdrEpoch'] == newest and newest >= 2
+                    and published_at > started[:19],
+                    f'token D\'s lock UC commits to the shard configuration of epoch {newest}, the one the second handoff published at {published_at}, '
+                    f'after the endpoint started ({started[:19]}): found without a restart', json.dumps(conf))
         after = self.held_trust()
         ids = {int(e['epoch']): e['entryId'].lower() for e in after['entries']}
         lag = self.tester('trust', wallet=LAG_WALLET, key=POS_KEY)[1]   # the lagging wallet's durable history (pos-gap), reloaded
@@ -570,7 +623,7 @@ class BridgePos:
         self.expect(state['claimable'] == POS_LOCK_WEI and state['remaining'] == 0 and state['redeemed'] == POS_LOCK_WEI, 'the vault credits exactly token D\'s lock', json.dumps(state))
         self.pos_tester('claim')
         self.expect(self.vault_balance() == before, 'the vault paid back token D\'s lock', str(self.vault_balance()))
-        state_file = {'tokenD': token, 'lockNonceD': nonce}
+        state_file = {'tokenD': token, 'lockNonceD': nonce, 'endpoint': served_by, 'lockConf': conf}
         (work / 'pos-after-restart.json').write_text(json.dumps(state_file, indent=2) + '\n')
         self.record('after-restart', {'token': token, 'lockNonce': nonce, 'seals': seals, 'fetches': fetches, 'trust': after, 'credited': state,
                                       'evidence': str(self.keep_pos('after-restart'))})

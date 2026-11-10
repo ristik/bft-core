@@ -179,13 +179,14 @@ func lockProof(args []string) error {
 	nonce := fs.Uint64("nonce", 0, "lock nonce")
 	var fullConfs shardConfs
 	fs.Var(&fullConfs, "full-shard-conf", "the EVM shard's full configuration (as registered with the root chain); repeat it for each shard epoch's")
+	confDir := fs.String("shard-conf-dir", "", "a directory of shard-conf-<epoch>.json files (a handoff's), read again when a block names a configuration not held")
 	trustBundlePath := fs.String("trust-bundle", "", "the trust-base release bundle (trust-bundle)")
 	cfgHash := fs.String("cfg", "", "the vault's CFG")
 	out := fs.String("out", "", "output path")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	src, err := newLockProofSource(context.Background(), *archiveDir, *ethURL, *vaultText, fullConfs, *trustBundlePath, *cfgHash)
+	src, err := newLockProofSource(context.Background(), *archiveDir, *ethURL, *vaultText, fullConfs, *confDir, *trustBundlePath, *cfgHash)
 	if err != nil {
 		return err
 	}
@@ -201,14 +202,15 @@ func lockProof(args []string) error {
 // locator's Contexts (a locator, never evidence).
 //
 // The EVM shard's configuration changes at each shard epoch (a PoS handoff advances the shard authorities): a block is proven under the configuration
-// its own certificate commits to (ShardConfHash), chosen from every configuration the operator gives, so a lock made before a handoff and one made after
-// it are both served.
+// its own certificate commits to (ShardConfHash), chosen from the operator's explicit configurations and its handoff directory (confSet), so a lock
+// made before a handoff and one made after it are both served, and a configuration published after the endpoint started is found without a
+// restart (#996).
 type lockProofSource struct {
 	archive     *archiveLocator
 	ethURL      string
 	vault       common.Address
 	cfg         [32]byte
-	pdrs        map[[32]byte][]byte // CBOR PDR by its SHA-256 (the hash a UC's ShardConfHash names)
+	confs       *confSet // CBOR PDR by its SHA-256 (the hash a UC's ShardConfHash names)
 	trustBaseID [32]byte
 }
 
@@ -218,10 +220,11 @@ type shardConfs []string
 func (c *shardConfs) String() string     { return strings.Join(*c, ",") }
 func (c *shardConfs) Set(v string) error { *c = append(*c, v); return nil }
 
-// loadPDRs reads each full shard configuration (JSON) and keys its CBOR encoding by SHA-256.
-func loadPDRs(paths []string) (map[[32]byte][]byte, error) {
-	if len(paths) == 0 {
-		return nil, errors.New("no --full-shard-conf given")
+// loadPDRs reads each explicit full shard configuration (JSON) and keys its CBOR encoding by SHA-256. Any failure is a startup failure; at
+// least one is required unless a configuration directory is given.
+func loadPDRs(paths []string, haveDir bool) (map[[32]byte][]byte, error) {
+	if len(paths) == 0 && !haveDir {
+		return nil, errors.New("no --full-shard-conf or --shard-conf-dir given")
 	}
 	pdrs := make(map[[32]byte][]byte, len(paths))
 	for _, p := range paths {
@@ -229,11 +232,10 @@ func loadPDRs(paths []string) (map[[32]byte][]byte, error) {
 		if err != nil {
 			return nil, err
 		}
-		var conf types.PartitionDescriptionRecord
-		if err := json.Unmarshal(raw, &conf); err != nil {
-			return nil, fmt.Errorf("%s: %w", p, err)
+		if len(raw) > maxConfFileBytes {
+			return nil, fmt.Errorf("%s: larger than %d bytes", p, maxConfFileBytes)
 		}
-		pdr, err := types.Cbor.Marshal(&conf)
+		pdr, err := encodeConf(raw)
 		if err != nil {
 			return nil, fmt.Errorf("%s: %w", p, err)
 		}
@@ -242,26 +244,14 @@ func loadPDRs(paths []string) (map[[32]byte][]byte, error) {
 	return pdrs, nil
 }
 
-// pdrFor is the configuration a certificate commits to, or an error naming how many were held.
-func (s *lockProofSource) pdrFor(shardConfHash []byte) ([]byte, error) {
-	var h [32]byte
-	if len(shardConfHash) == len(h) {
-		copy(h[:], shardConfHash)
-		if pdr, ok := s.pdrs[h]; ok {
-			return pdr, nil
-		}
-	}
-	return nil, fmt.Errorf("none of the %d full shard configurations is the configuration the block's certificate commits to (%x)", len(s.pdrs), shardConfHash)
-}
-
 // errNotFound marks a request for a block the archive does not (yet) hold or a nonce with no lock at that block.
 var errNotFound = errors.New("not found")
 
 // archiveRescanEvery bounds how often a lookup that misses rereads the archive directory for Contexts not yet seen.
 const archiveRescanEvery = 10 * time.Second
 
-func newLockProofSource(ctx context.Context, archiveDir, ethURL, vaultText string, fullConfs []string, trustBundlePath, cfgHash string) (*lockProofSource, error) {
-	pdrs, err := loadPDRs(fullConfs)
+func newLockProofSource(ctx context.Context, archiveDir, ethURL, vaultText string, fullConfs []string, confDir, trustBundlePath, cfgHash string) (*lockProofSource, error) {
+	confs, err := newConfSet(fullConfs, confDir)
 	if err != nil {
 		return nil, err
 	}
@@ -286,7 +276,7 @@ func newLockProofSource(ctx context.Context, archiveDir, ethURL, vaultText strin
 	if err != nil {
 		return nil, err
 	}
-	s := &lockProofSource{archive: locator, ethURL: ethURL, vault: common.HexToAddress(vaultText), pdrs: pdrs, trustBaseID: tbID}
+	s := &lockProofSource{archive: locator, ethURL: ethURL, vault: common.HexToAddress(vaultText), confs: confs, trustBaseID: tbID}
 	copy(s.cfg[:], common.HexToHash(cfgHash).Bytes())
 	return s, nil
 }
@@ -307,7 +297,7 @@ func (s *lockProofSource) build(ctx context.Context, blockHash common.Hash, nonc
 	if err := types.Cbor.Unmarshal(rec.ResultingUC, &uc); err != nil {
 		return nil, err
 	}
-	pdr, err := s.pdrFor(uc.ShardConfHash)
+	pdr, err := s.confs.lookup(ctx, uc.ShardConfHash)
 	if err != nil {
 		return nil, err
 	}

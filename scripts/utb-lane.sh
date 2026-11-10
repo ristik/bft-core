@@ -139,7 +139,7 @@ preflight() {
     no "set AGG_BIN to the aggregator built by: AGG_COMMIT=<40 hex> $0 --build-aggregator"
   fi
   echo "-- the JS SDK client (ristik/state-transition-sdk-js integration/enshrined-evm, built)"
-  if [ -n "${UTB_SDK_JS:-}" ] && [ -f "$UTB_SDK_JS/lib/util/TrustBaseUtils.js" ]; then
+  if [ -n "${UTB_SDK_JS:-}" ] && [ -f "$UTB_SDK_JS/lib/api/bft/verification/verifyWithUpdate.js" ]; then
     yes "UTB_SDK_JS $UTB_SDK_JS"
     check "UTB_SDK_JS is a clean git checkout" bash -c "[ -z \"\$(git -C '$UTB_SDK_JS' status --porcelain --untracked-files=no)\" ]"
     if [ "${LANE_PINNED:-0}" = 1 ]; then note "UTB_SDK_JS is the manifest's pin (checked above), not a branch-tip ancestry query"; else
