@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/unicitynetwork/bft-go-base/types"
@@ -150,6 +151,9 @@ func (s *confSet) rescan(ctx context.Context) error {
 		c = &confScan{done: make(chan struct{})}
 		s.inFlight = c
 		s.scans++
+		if !s.lastScan.IsZero() {
+			log.Printf("shard configuration not held: rescanning %s", s.dir) // at most once per rescanEvery
+		}
 		hook := s.hook
 		go func() {
 			if hook != nil {
@@ -210,9 +214,11 @@ func (s *confSet) scan() error {
 				}
 				continue
 			}
-			if err := s.add(sha256.Sum256(pdr), pdr); err != nil {
+			h := sha256.Sum256(pdr)
+			if err := s.add(h, pdr); err != nil {
 				return err
 			}
+			log.Printf("shard configuration %s loaded: %x", name, h) // once per published file
 			s.mu.Lock()
 			s.loaded[name] = struct{}{}
 			s.mu.Unlock()
@@ -232,7 +238,8 @@ func readConfFile(path string, e os.DirEntry) ([]byte, int64, error) {
 	if !e.Type().IsRegular() {
 		return nil, 0, fmt.Errorf("not a regular file (%v)", e.Type())
 	}
-	f, err := os.Open(path) // #nosec G304 -- a name in the operator's configuration directory, matched by confFileName
+	// O_NOFOLLOW: a name replaced by a symlink between the listing and the open is refused, not followed
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0) // #nosec G304 -- a name in the operator's configuration directory, matched by confFileName
 	if err != nil {
 		return nil, 0, err
 	}
