@@ -2223,4 +2223,39 @@ class BridgePosGap(unittest.TestCase):
             rec=[json.loads(l) for l in out.read_text().splitlines()]
             self.assertEqual(rec,[{'path':'/api/v1/trustbases?from=2&maxEntries=1','http':200,'body':body.hex()}])
 
+
+class BridgePosEndpoint(unittest.TestCase):
+    """#996 without a network: the lock-proof endpoint's overlay reads the handoff directory instead of listing configurations, and pos-after-restart's
+    decoding of a lock proof's UC commitment and carried configuration (a LockProof encoded by Go: bridgeprofile.LockProof.Bytes, PDR of epoch 2)."""
+    LOCKPROOF='880158200000000000000000000000000000000000000000000000000000000000000000582000000000000000000000000000000000000000000000000000000000000000005819d998608f010308418008f60000f61a9502f900f6f60218c8f65840d998598701d9985a8a010002f6f6f600f600f6f6582043568fbecc1221e929aa3dc9e1b525d32abdd41f6ffcdafab6ff77d6c7a41761d9985b83014180f6f6f641c08080'
+    HASH='43568fbecc1221e929aa3dc9e1b525d32abdd41f6ffcdafab6ff77d6c7a41761'
+    def module(self):
+        for d in ('bridge','sdk-clients'):
+            sys.path.insert(0,str(Path(__file__).parent/d)); self.addCleanup(sys.path.remove,str(Path(__file__).parent/d))
+        import bridge_pos
+        return bridge_pos
+    def test_lockproof_conf(self):
+        bp=self.module()
+        c=bp.lockproof_conf(bytes.fromhex(self.LOCKPROOF))
+        self.assertEqual(c,{'ucShardConfHash':self.HASH,'pdrSha256':self.HASH,'pdrEpoch':2,'pdrPartition':8})
+        raw=bytearray(bytes.fromhex(self.LOCKPROOF)); i=raw.find(bytes.fromhex(self.HASH)); raw[i]^=1   # the UC's commitment altered
+        c=bp.lockproof_conf(bytes(raw))
+        self.assertNotEqual(c['ucShardConfHash'],c['pdrSha256'])
+    def test_overlay_reads_the_handoff_directory(self):
+        import importlib.util
+        spec=importlib.util.spec_from_file_location('overlay',Path(__file__).parent/'bridge/overlay.py'); ov=importlib.util.module_from_spec(spec); spec.loader.exec_module(ov)
+        with tempfile.TemporaryDirectory() as tmp:
+            gen=Path(tmp)/'tn-x'; (gen/'bridge').mkdir(parents=True); (gen/'network/handoff').mkdir(parents=True)
+            (gen/'network/handoff/shard-conf-1.json').write_text('{}')
+            (gen/'manifest.json').write_text(json.dumps({'validators':4}))
+            (gen/'bridge/bridge-addresses.json').write_text(json.dumps({'BridgeVault':'0x'+'11'*20,'CFG':'0x'+'22'*32}))
+            art=Path(tmp)/'artifacts'; art.mkdir(); (art/'bridge-images.json').write_text(json.dumps({'images':{'bridge':'sha256:'+'a'*64}}))
+            with patch.object(ov,'HERE',Path(tmp)/'bridge'), patch.object(sys,'argv',['overlay.py',str(gen)]), patch('builtins.print'):
+                ov.main()
+            ep=json.loads((gen/'compose.bridge.yaml').read_text())['services']['lockproof']['entrypoint']
+        self.assertEqual(ep.count('--full-shard-conf'),1)
+        self.assertEqual(ep[ep.index('--full-shard-conf')+1],'/network/full-shard-conf.json')
+        self.assertEqual(ep[ep.index('--shard-conf-dir')+1],'/network/handoff')
+        self.assertFalse(any('shard-conf-1' in x for x in ep),'a handoff file is found by the endpoint, not listed by the overlay')
+
 if __name__=='__main__': unittest.main()
