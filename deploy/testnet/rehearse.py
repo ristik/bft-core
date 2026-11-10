@@ -1026,7 +1026,13 @@ class Rehearsal:
         self.exec_in('root1', 'ubft', 'q3', 'shard-conf', '--root-rpc', root_rpc, '--epoch', str(shard_epoch), '--out', '/tmp/shard-conf.json')
         conf = json.loads(self.exec_in('root1', 'cat', '/tmp/shard-conf.json'))
         self.expect(conf.get('epoch') == shard_epoch and conf.get('partitionId') == 8, f'a root holds the EVM shard configuration of epoch {shard_epoch}', str(conf)[:200])
-        (work / f'shard-conf-{shard_epoch}.json').write_text(json.dumps(conf, indent=1) + '\n')
+        # published atomically before any authority advances: a temporary name the lock-proof endpoint's scanner does not match, closed and made
+        # readable, then renamed into place (bft-core#996: the endpoint picks the new configuration up from this directory without a restart)
+        tmp = work / f'.shard-conf-{shard_epoch}.json.tmp'
+        with open(tmp, 'w') as f:
+            f.write(json.dumps(conf, indent=1) + '\n')
+        os.chmod(tmp, 0o644)
+        os.replace(tmp, work / f'shard-conf-{shard_epoch}.json')
         subprocess.run(['chmod', '-R', 'a+rX', str(work)], check=True)
         # 12 the authorities and the shard nodes, one entity at a time
         for i in range(1, self.n + 1):

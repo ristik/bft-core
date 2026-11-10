@@ -19,11 +19,13 @@ import (
 // lockProofServe is the testnet's lock-proof endpoint (TN-B, briefs/tnb-without-host.md): stateless, read-only (a read-only archive mount and eth_getProof on
 // the paired client) and rate limited. It serves exactly what `dnb-tool lockproof` writes:
 //
-//	dnb-tool lockproof-serve --listen 0.0.0.0:8090 --archive /archive --eth-url http://shard1:8545 --vault 0x.. --cfg 0x.. --full-shard-conf F --trust-bundle B
+//	dnb-tool lockproof-serve --listen 0.0.0.0:8090 --archive /archive --eth-url http://shard1:8545 --vault 0x.. --cfg 0x.. --full-shard-conf F [--shard-conf-dir D] --trust-bundle B
 //
 //	GET /v1/lockproof?block=0x<32-byte hash>&nonce=<decimal>  200 application/cbor (the canonical LockProof)
-//	                                                          400 malformed, 404 block not archived (yet) or no lock with that nonce there,
-//	                                                          429 rate limited or busy, 502 the paired client failed
+//	                                                          400 malformed, 404 block not archived (yet), no lock with that nonce there, a block
+//	                                                          older than the paired client's proof window, or no configuration held (yet) for the
+//	                                                          block's ShardConfHash after a (throttled) rescan of D; 429 rate limited or busy;
+//	                                                          502 the paired client failed, or a configuration scan failed or hit a resource bound
 //	GET /healthz                                              200
 func lockProofServe(args []string) error {
 	fs := flag.NewFlagSet("lockproof-serve", flag.ContinueOnError)
@@ -33,13 +35,14 @@ func lockProofServe(args []string) error {
 	vaultText := fs.String("vault", "", "vault address")
 	var fullConfs shardConfs
 	fs.Var(&fullConfs, "full-shard-conf", "the EVM shard's full configuration (as registered with the root chain); repeat it for each shard epoch's")
+	confDir := fs.String("shard-conf-dir", "", "a directory of shard-conf-<epoch>.json files (a handoff's), read again when a block names a configuration not held")
 	trustBundlePath := fs.String("trust-bundle", "", "the trust-base release bundle (trust-bundle)")
 	cfgHash := fs.String("cfg", "", "the vault's CFG")
 	trustedProxy := fs.String("trusted-proxy", "", "the one peer address whose X-Forwarded-For names the client")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	src, err := newLockProofSource(context.Background(), *archiveDir, *ethURL, *vaultText, fullConfs, *trustBundlePath, *cfgHash)
+	src, err := newLockProofSource(context.Background(), *archiveDir, *ethURL, *vaultText, fullConfs, *confDir, *trustBundlePath, *cfgHash)
 	if err != nil {
 		return err
 	}

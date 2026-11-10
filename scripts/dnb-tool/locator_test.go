@@ -249,7 +249,7 @@ func TestLockProofSource_MapsNoLockAndARefusalToNotFound(t *testing.T) {
 	defer rpc.Close()
 	l, _, _ := countingLocator(t, dir, f)
 	vault := common.HexToAddress("0xe5d2db50c8d119078fa4d75e04bf93995793a06a")
-	s := &lockProofSource{archive: l, ethURL: rpc.URL, vault: vault, pdrs: map[[32]byte][]byte{pdrHash: pdr}}
+	s := &lockProofSource{archive: l, ethURL: rpc.URL, vault: vault, confs: confSetOf(map[[32]byte][]byte{pdrHash: pdr})}
 	proof := func(value string) string {
 		return fmt.Sprintf(`{"jsonrpc":"2.0","id":1,"result":{"address":"%s","accountProof":["0x01"],"storageProof":[{"value":"%s","proof":["0x02"]}]}}`, vault.Hex(), value)
 	}
@@ -284,22 +284,24 @@ func TestLockProofSource_ProvesUnderTheConfigurationTheCertificateCommitsTo(t *t
 		require.NoError(t, os.WriteFile(path, raw, 0o600))
 		return path
 	}
-	pdrs, err := loadPDRs([]string{conf("e0.json", 0), conf("e1.json", 1)})
+	pdrs, err := loadPDRs([]string{conf("e0.json", 0), conf("e1.json", 1)}, false)
 	require.NoError(t, err)
 	require.Len(t, pdrs, 2, "two shard epochs, two configurations")
-	_, err = loadPDRs(nil)
+	_, err = loadPDRs(nil, false)
 	require.Error(t, err, "at least one configuration")
-	s := &lockProofSource{pdrs: pdrs}
+	set := confSetOf(pdrs)
 	for h, want := range pdrs {
-		got, err := s.pdrFor(h[:])
+		got, err := set.lookup(context.Background(), h[:])
 		require.NoError(t, err)
 		require.Equal(t, want, got, "the configuration whose hash the certificate names")
 	}
 	other := sha256.Sum256([]byte("another configuration"))
-	_, err = s.pdrFor(other[:])
-	require.ErrorContains(t, err, "none of the 2 full shard configurations")
-	_, err = s.pdrFor(nil)
+	_, err = set.lookup(context.Background(), other[:])
+	require.ErrorIs(t, err, errNotFound)
+	require.ErrorContains(t, err, "none of the 2 shard configurations held")
+	_, err = set.lookup(context.Background(), nil)
 	require.Error(t, err, "a certificate without a configuration hash")
+	require.NotErrorIs(t, err, errNotFound, "a malformed hash is corruption, not a miss")
 
 	// and build uses it: a block certified under the second configuration gets that PDR in its lock proof
 	var second [32]byte
@@ -324,7 +326,7 @@ func TestLockProofSource_ProvesUnderTheConfigurationTheCertificateCommitsTo(t *t
 	}))
 	defer rpc.Close()
 	l, _, _ := countingLocator(t, adir, f)
-	s = &lockProofSource{archive: l, ethURL: rpc.URL, vault: vault, pdrs: pdrs}
+	s := &lockProofSource{archive: l, ethURL: rpc.URL, vault: vault, confs: set}
 	lp, err := s.build(context.Background(), hdr.Hash(), 1)
 	require.NoError(t, err)
 	require.True(t, bytes.Contains(lp, pdrs[second]), "the lock proof carries the second epoch's configuration")
