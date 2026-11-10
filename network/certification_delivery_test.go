@@ -3,8 +3,11 @@ package network
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"net"
+	"runtime/pprof"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -85,7 +88,7 @@ func (c *countingConn) OpenStream(ctx context.Context) (network.MuxedStream, err
 	if err != nil {
 		return nil, err
 	}
-	cs := &countingStream{MuxedStream: s, delay: c.m.delay}
+	cs := &countingStream{MuxedStream: s, delay: c.m.delay, opened: time.Now()}
 	c.m.mu.Lock()
 	c.m.streams = append(c.m.streams, cs)
 	c.m.mu.Unlock()
@@ -94,10 +97,35 @@ func (c *countingConn) OpenStream(ctx context.Context) (network.MuxedStream, err
 
 type countingStream struct {
 	network.MuxedStream
-	delay time.Duration
-	mu    sync.Mutex
-	cert  bool
+	delay  time.Duration
+	opened time.Time
+	mu     sync.Mutex
+	cert   bool
+	trace  []string // every read and write with its offset from the open, size and error (diagnostic for #1004)
 	streamStats
+}
+
+// note records one stream event for dump.
+func (s *countingStream) note(format string, args ...any) {
+	s.mu.Lock()
+	s.trace = append(s.trace, fmt.Sprintf("+%v %s", time.Since(s.opened).Round(time.Millisecond), fmt.Sprintf(format, args...)))
+	s.mu.Unlock()
+}
+
+// dump is the failure diagnostic of the latency test (#1004): per certificate stream the counters and the timed read/write trace, then every goroutine.
+// It runs only on a failure, so the next occurrence says which side was waiting for what.
+func (m *countingMuxer) dump() string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var b strings.Builder
+	for i, s := range m.streams {
+		s.mu.Lock()
+		fmt.Fprintf(&b, "stream %d cert=%v writes=%d reads=%d repliesBeforeLastWrite=%d\n  %s\n", i, s.cert, s.writes, s.reads, s.repliesBeforeLastWrite, strings.Join(s.trace, "\n  "))
+		s.mu.Unlock()
+	}
+	b.WriteString("goroutines:\n")
+	_ = pprof.Lookup("goroutine").WriteTo(&b, 2)
+	return b.String()
 }
 
 func (s *countingStream) Write(b []byte) (int, error) {
@@ -117,11 +145,14 @@ func (s *countingStream) Write(b []byte) (int, error) {
 	if cert {
 		time.Sleep(s.delay)
 	}
-	return s.MuxedStream.Write(b)
+	n, err := s.MuxedStream.Write(b)
+	s.note("write %d bytes (asked %d) err=%v", n, len(b), err)
+	return n, err
 }
 
 func (s *countingStream) Read(b []byte) (int, error) {
 	n, err := s.MuxedStream.Read(b)
+	s.note("read %d bytes err=%v", n, err)
 	if n > 0 {
 		s.mu.Lock()
 		s.reads++
@@ -331,6 +362,9 @@ func Test_SendCertificationResponse_DeliveredWithLatencyWithinTimeout(t *testing
 		err := senderNw.sendCertificationFrame(ctx, p.ID(), []string{ProtocolUnicityCertificatesV2, ProtocolUnicityCertificates},
 			ProtocolUnicityCertificates, &certificationFrames{cr: testCertResponse(t, nil)})
 		cancel()
+		if err != nil {
+			t.Logf("#1004 diagnostic (kind %d): the send failed with %v\n%s", kind, err, cm.dump())
+		}
 		require.NoError(t, err)
 		recv(t, nw)
 		requireNoMore(t, nw)
@@ -394,4 +428,18 @@ func Test_SendCertificationResponse_StalledReceiverIsBounded(t *testing.T) {
 	}
 	requireNoMore(t, nw)
 	require.Len(t, cm.stats(), 1, "one stream, nothing resent")
+}
+
+// The failure diagnostic of the latency test (#1004) is only useful if it works when it is needed: after a send it names the certificate stream with its
+// timed events, and it carries the goroutine dump.
+func Test_CountingMuxerDumpNamesTheStreamsAndGoroutines(t *testing.T) {
+	senderPeer, senderNw, cm := newCountingCertSender(t)
+	p, nw := newCertReceiver(t, senderPeer, recvBoth)
+	require.NoError(t, senderNw.SendCertificationResponse(context.Background(), testCertResponse(t, nil), p.ID()))
+	recv(t, nw)
+	out := cm.dump()
+	require.Contains(t, out, "cert=true")
+	require.Contains(t, out, "write ")
+	require.Contains(t, out, "read ")
+	require.Contains(t, out, "goroutine ")
 }
