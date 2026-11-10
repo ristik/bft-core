@@ -100,10 +100,31 @@ Enabled: PoS profile (`--pos`), caps 16,1,6, unit weights. Disabled: `--utb` on 
 | Run | Evidence | Result |
 |---|---|---|
 | R1 campaign refresh (lane `x4-exit`, run-9 inputs **plus `"product":"pinned"`**; the 340/310-minute budgets and an accounting span of at least 14400 s preserved; actual binary and image hashes recorded separately from the source pins) | PENDING | PENDING |
-| host: core, crash e3, owner, resources, e1, e2, join | PENDING | PENDING |
+| host: core, crash e3, owner, resources, e1, e2, join | `~/evidence/430-437-pos-host-20261110/` on the server; section 9.1 | core 18/18, crash 5/5, owner, e1 5/5, e2 12/12, resources 54 samples 0 alerts: PASS. **join: `pos-join-heavy` FAILED in the first join generation (kept, issue #1006); the rerun generation `join2` passed 13/13.** Not one clean pass of the planned join list: section 9.1 |
 | bridge across a PoS transition | PENDING | PENDING |
 
 4 Nov results stay side by side with these; neither replaces the other, and neither closes #437/#59 alone.
+
+### 9.1 Host sequence, 2026-11-10 (dev3; slot 1 prep 01:46-01:55Z, slot 2 01:56-04:57Z; one measured network, the host lock held throughout, 0 containers before and after)
+
+Inputs as frozen (section 1): product `3d4fa198639c1a47d12c09171a1d2ea53d660e45`, harness checkout `983102b73bcb7d3877f99818bf914d68bea9fb39`, ureth `10552af2`, aggregator-go `b3909de4`, contracts `7b510f6b`. Every binary was built on the host from its pin in `tn1-builder:bookworm` (go 1.27.1, cargo/rustc 1.97.1, `--locked --release`; the lane's Go 1.25.14 is the CI toolchain, not this builder). **Hashes of what ran** (`artifacts/images.json`, copied to the evidence directory): `ubft` sha256 `06ba245401e61def4ed15052d791658be844245da77012b7b473bcaf1b29ccde`, `unicity-reth` `2690a860be07d3f61fdd94ff6ee585dd2b1dc37cb186b90e12492ada3ac124fb`, `aggregator` `28d2704ce9658c4d935790db24d883eb84e0526a002a14e90cf8717844ffee79`; images node `sha256:cca4efb272345ea01d5c4c136953e5ffc870e5d2bc9c88674146672aa59c7145`, guard `dd41279a…`, signer `18cdcab3…`, rpc `ceb5b072…` (tag `trackc-3d4fa198`). Genesis: `verify-genesis` passed on the generated G1 (`verify-genesis.log`). `--utb` off on every generation of this sequence.
+
+**Driver.** Revision 2 (`b06158ce…`) could not run `prep` (it reuses earlier ureth/aggregator builds whose sources are no longer the pins). Phases `prep` to `join` ran as **revision 3** (`cded79c074d8864bfd576ce48f702e7fa6111f659ad336005e917190ec1f5da6`; `host-track-c-images.py` revision 2 `25940e47…`); `join2` and `finish` ran as **revision 4** (`c020aba3790ac95c732584968dae8ff8c90d53cc4554f3aae0414f5d4766c9ce`), which adds only the `join2` phases to revision 3. Both diffs are against revision 2 and touch no other phase.
+
+| Phase | Generation | Result | Time (Z) |
+|---|---|---|---|
+| core | G1, 4 members, unit weights | 18/18 PASS (`up` … `pos-recreate`) | 01:56-02:23 |
+| crash (epoch 3) | G1 | 5/5 PASS | 02:24-02:48 |
+| owner | G1 | `pos-owner` PASS | 02:50 |
+| resources | G1 at verified epoch 3 | 54 samples, 60 s apart, no external load, **0 alerts**; peak container memory 42% of its limit (the rpc container, 53.8 of 128 MiB; 4 Nov: peak at most 34%, 53 samples); host filesystem 9.0-9.1% used (4 Nov: 4.9%; the filesystem also holds other agents' evidence, so the two are not the same measure); block 990 to 3419. No regression is claimed: 4 Nov's peak container is not recorded here, so the 42% vs 34% difference is **not explained** | 02:50-03:52 |
+| e1 | own fresh generation | `up`, `identity`, `first-tx`, `pos-smoke`, `pos-crash-e1` PASS | 03:53-03:58 |
+| e2 | own fresh generation | 12/12 PASS (setup, handoff 1 to 2, `pos-crash-e2`) | 04:00-04:10 |
+| join, first generation | fresh | 12 PASS, **`pos-join-heavy` FAIL**, `pos-restart` not run | 04:13-04:33 |
+| join2 | fresh | 13/13 PASS (`pos-restore-repeat` not repeated) | 04:36-04:56 |
+
+**The join failure, in full (nothing dropped).** At 04:33:24Z `pos-join-heavy` failed its check that no election result is open after the heavy joiner's `admit` (`deploy/testnet/pos_join.py:199`): `openResult()` was `0x6bf4770470fe11a4d8bd19aa004ec1d18615532bfcd01aa73938ab16da910f33`, not zero. That is not the handoff-1 result (`0x603b762d…`, reserved 04:16:58Z, installed, `pos-advance` PASS 04:19:09Z). `pos-restore-repeat` ran about 800 s (04:19:09-04:32:29Z) against a 300 s election cadence, so a second election attempt came due during it. Classification: **harness ordering/timing, not shown to be a product defect**; the stage's own message names the hazard. **Not directly observed:** the time `0x6bf4…` opened, its state and whether it would have lapsed are not in the evidence (election events are not in receipts, the stages do not record `openResult()` between themselves, the generation was taken down afterwards); filed as bft-core#1006 with the proposals. The first generation's `pos-restore-repeat` (20 restores plus the expected negative controls lim16 and lim24: `PTHREAD_CREATE FAILED`, as designed) and `pos-join-signs` PASSED and count for the join row; `pos-join-heavy` and `pos-restart` PASSED only on `join2`, a different generation, 12 minutes later, with its own `pos-restore-repeat` absent. The first generation's container logs are kept (`join/container-logs/`, 36 files).
+
+Limits: one server, 12 cores, libp2p over same-host TCP, one operator; no whole-host outage (G4), unequal weights, public DNS/TLS, hCaptcha, Alertmanager, second operator or independent review (`NOT-RUN.txt`). Bridge generation and R1: not in this section.
 
 ## 10. Residual assumptions
 
