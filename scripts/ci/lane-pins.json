@@ -42,15 +42,15 @@
     },
     "native-bridge-plugins": {
       "repository": "https://github.com/ristik/native-bridge-plugins.git",
-      "commit": "838b08ce4304428c9ebcb9b0fbd4b55b260a99d4",
+      "commit": "73bee544de82f52c399c60587a39332bdf6fd686",
       "branch": "main",
-      "note": "nbp#63 squash-merged to main as 838b08ce (tree identical to the sealed de6eb8df): protocol 7, the upstream seal rule and the 7,200 gas coefficient, vendored JS SDK 75c5be7f. Before: the squash merge of nbp#52 (split PR5, protocol 6: the V2 composition, per-part redemption, anyage.ts on the (nonce, partId) return), on nbp#40 (B7 PR 3: profile v6, the 2 MiB envelope, long-history)"
+      "note": "nbp#71 merged to main as 73bee544: the port to the reconciled staging SDK heads (JS c5840ef5 re-vendored, Rust unicity-token de79e6c1). Before: nbp#63 squash-merged to main as 838b08ce (tree identical to the sealed de6eb8df): protocol 7, the upstream seal rule and the 7,200 gas coefficient, vendored JS SDK 75c5be7f. Before: the squash merge of nbp#52 (split PR5, protocol 6: the V2 composition, per-part redemption, anyage.ts on the (nonce, partId) return), on nbp#40 (B7 PR 3: profile v6, the 2 MiB envelope, long-history)"
     },
     "state-transition-sdk-js": {
       "repository": "https://github.com/ristik/state-transition-sdk-js.git",
-      "commit": "75c5be7fd4d02ef4306b9b1ff14c4365c7468009",
+      "commit": "c5840ef5f59201c52ea6cf7034ee02cb48d54007",
       "branch": "integration/enshrined-evm",
-      "note": "sdk-js#18 merge (the upstream seal rule on the integration branch)"
+      "note": "sdk-js#28 merge c5840ef5 on the integration branch: the reconciled 4.0.0 UTB v2 API (before: 75c5be7f, sdk-js#18)"
     }
   },
   "toolchains": {

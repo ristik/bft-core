@@ -43,5 +43,5 @@ pack native-bridge-plugins "$n"
 s=$work/state-transition-sdk-js
 checkout state-transition-sdk-js "$s"
 ( cd "$s" && npm ci --no-audit --no-fund --silent && npm run build --silent && npm prune --omit=dev --silent )
-[ -f "$s/lib/util/TrustBaseUtils.js" ] || { echo "prepare-sources: the SDK build has no lib/util/TrustBaseUtils.js" >&2; exit 1; }
+[ -f "$s/lib/api/bft/verification/verifyWithUpdate.js" ] || { echo "prepare-sources: the SDK build has no lib/api/bft/verification/verifyWithUpdate.js" >&2; exit 1; }
 pack state-transition-sdk-js "$s"
