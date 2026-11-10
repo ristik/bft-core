@@ -552,6 +552,32 @@ class ProofOfStake(unittest.TestCase):
         with patch('rehearse.redact_log',lambda text,secrets=(): (text.splitlines(),0,0)):
             out=printed(r,lambda: r.say(r.scrub('x hunter2-faucet-password',True)))
         self.assertNotIn('hunter2',out,'a literal that survives the redaction is withheld')
+    def test_a_secret_written_mid_run_is_redacted_after_a_rescan(self):
+        import rehearse,io,contextlib
+        gen=self._secret_generation()
+        class Fake(rehearse.Rehearsal):
+            def __init__(self,g): self.gen,self.log,self.results=g,io.StringIO(),[]
+        def said(r,text):
+            with contextlib.redirect_stdout(io.StringIO()): r.say(text)
+            return r.log.getvalue().splitlines()[-1]
+        r=Fake(gen); said(r,'first line')   # the generation is scanned here
+        late,owner='latekey'+'ab'*20,'ownerkey'+'cd'*20
+        (gen/'heavy-joiner'/'root').mkdir(parents=True); (gen/'heavy-joiner'/'root'/'keys.json').write_text(json.dumps({'sigKey':{'privateKey':late}}))
+        (gen/'heavy-joiner'/'identity.json').write_text(json.dumps({'ownerKey':owner,'payee':'0x'+'1'*40}))
+        (gen/'validator2'/'auth').mkdir(parents=True); (gen/'validator2'/'auth'/'operator.cred').write_text('LATECREDENTIAL0123456789abcdef\n')
+        self.assertIn(late,said(r,'x '+late),'documents the cache: a key written after the scan is not known until a rescan')
+        r.rescan()
+        for secret in (late,owner,'LATECREDENTIAL0123456789abcdef'): self.assertNotIn(secret,said(r,'y '+secret))
+        self.assertIn('0x'+'1'*40,said(r,'payee 0x'+'1'*40),'the public fields of an identity file stay readable')
+        (gen/'heavy-joiner'/'evm').mkdir(); (gen/'heavy-joiner'/'evm'/'keys.json').write_text(json.dumps({'sigKey':{'privateKey':'second'+'ef'*20}}))
+        with contextlib.redirect_stdout(io.StringIO()): r.stage('s',lambda: None)   # a stage starts with a fresh scan
+        self.assertNotIn('second'+'ef'*20,said(r,'z second'+'ef'*20))
+        def failing():
+            (gen/'heavy-joiner'/'third.key').write_text('thirdkey'+'01'*20+'\n')   # written inside the stage, after its first lines
+            said(r,'inside'); raise rehearse.Failure('wrote '+'thirdkey'+'01'*20)
+        with contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaises(rehearse.Failure): r.stage('f',failing)
+        self.assertNotIn('thirdkey',r.log.getvalue().splitlines()[-1],'a key written inside the failing stage is scanned for before its FAIL line')
     def test_compose_logs_are_redacted_or_withheld_before_upload(self):
         import redact_evidence
         gen=self._secret_generation()

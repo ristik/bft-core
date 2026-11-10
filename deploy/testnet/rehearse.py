@@ -58,13 +58,13 @@ CAPTURE_SERVICES = ('root', 'shard')
 CAPTURE_MAX_LINES = 6000          # per service and window; the rest is counted, not written
 SECRET_LINE = re.compile(r'(?i)(secret|priv(ate)?[ _-]?key|mnemonic|passphrase|password|credential|\.cred\b|keystore|authorization|bearer|api[ _-]?key|\btoken\b|\bseed\b|ciphertext)')
 WITHHELD_LINE = '[line withheld: it matches a secret pattern]'
-SECRET_FILE = re.compile(r'(?i)(^password$|secret|\.cred(\.|$)|\.key$|^keys?\.json$|^keystore\.json$|^priv|^jwt)')
+SECRET_FILE = re.compile(r'(?i)(^password$|identity\.json$|secret|\.cred(\.|$)|\.key$|^keys?\.json$|^keystore\.json$|^priv|^jwt)')
 SECRET_DIRS = ('faucet-secrets', 'pos-owner-keys', 'auth', 'jwt')   # every file in these is a secret (auth and jwt are what the root and shard services mount besides their own state)
 
 
 class SecretScanError(Exception):
     """The scan for the generation's secrets could not be completed: nothing derived from the generation's services may be uploaded."""
-SECRET_FIELD = re.compile(r'(?i)(priv|secret|password|seed|mnemonic|ciphertext|crypto)')
+SECRET_FIELD = re.compile(r'(?i)(priv|secret|password|seed|mnemonic|ciphertext|crypto|owner[_-]?key|evm[_-]?key)')
 
 
 def _json_secrets(node, out, under_secret=False):
@@ -224,6 +224,11 @@ class Rehearsal:
         except Exception as error:
             return f'[output withheld: the secret scan failed: {error}]'
 
+    def rescan(self):
+        """Scan the generation again at the next `scrub`: a key or credential written after the last scan (a joiner's, a restarted authority's) is a secret from then on.
+        Called at the start of every stage and after the stages' own key writes."""
+        self._scrub_gen = None
+
     @staticmethod
     def _literals(text, secrets):
         out = []
@@ -255,6 +260,7 @@ class Rehearsal:
             return None
 
     def stage(self, name, fn):
+        self.rescan()
         self.say(f'== {name}')
         if name in POS_STAGE_NAMES and (state := self.election_state()):
             self.say(f'  election at the start of {name}: {state}')
@@ -263,6 +269,7 @@ class Rehearsal:
         except Exception as error:   # a failed stage is recorded as failed, then the run stops: later stages depend on it
             if name in POS_STAGE_NAMES and (state := self.election_state()):
                 self.say(f'  election at the failure of {name}: {state}')
+            self.rescan()   # a failure's text is printed after whatever the stage wrote
             self.say(f'FAIL {name}: {error}')
             self.results.append((name, 'FAIL', self.scrub(str(error))))   # result.json is uploaded with the evidence
             raise
