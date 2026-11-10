@@ -44,9 +44,9 @@ else
   [ -z "$(git -C "$REPO_ROOT" status --porcelain --untracked-files=no)" ] || fail "the checkout has uncommitted changes: an evidence run needs a clean one"
   [ -x "$REPO_ROOT/build/ubft" ] || fail "build/ubft is missing (make build)"
   head=$(git -C "$REPO_ROOT" rev-parse HEAD)
-  lane_buildinfo "$REPO_ROOT/build/ubft" | grep -q "vcs.revision=$head" || fail "build/ubft is not built from HEAD $head (make build)"
+  lane_buildinfo "$REPO_ROOT/build/ubft" | grep -q "vcs.revision=${LANE_PRODUCT_COMMIT:-$head}" || fail "build/ubft is not built from ${LANE_PRODUCT_COMMIT:-$head} (HEAD $head unless a pinned product run; make build)"
   ! lane_buildinfo "$REPO_ROOT/build/ubft" | grep -q 'vcs.modified=true' || fail "build/ubft was built from a modified tree"
-  RUN_MODE="RUN MODE: evidence run: attested prebuilt Ureth $M2_URETH_BIN sha256=$got commit=$M2_URETH_COMMIT (provenance $PROVENANCE); everything else from this checkout at $head"
+  RUN_MODE="RUN MODE: evidence run: attested prebuilt Ureth $M2_URETH_BIN sha256=$got commit=$M2_URETH_COMMIT (provenance $PROVENANCE); everything else from this checkout at $head${LANE_PRODUCT_COMMIT:+; ubft and the Go tools from the pinned product bft-core $LANE_PRODUCT_COMMIT}"
 fi
 
 if [ "${P85_LANE_LOCKED:-0}" != 1 ]; then
@@ -62,7 +62,7 @@ printf '%s %s\n' "$PPID" "$$" >"$EVIDENCE_DIR/.runner-pids"
 echo "$RUN_MODE" | tee "$EVIDENCE_DIR/run-mode.txt"
 [ -z "${PROVENANCE:-}" ] || cp -R "$PROVENANCE" "$EVIDENCE_DIR/ureth-provenance"
 host_evidence before "$(host_evidence_file "$EVIDENCE_DIR" before)"
-echo "bft-core head=$(git rev-parse HEAD) ureth=$M2_URETH_COMMIT ubft sha256=$(shasum -a 256 build/ubft | cut -d' ' -f1)" | tee "$EVIDENCE_DIR/heads.txt"
+echo "bft-core head=${LANE_PRODUCT_COMMIT:-$(git rev-parse HEAD)}${LANE_PRODUCT_COMMIT:+ harness=$(git rev-parse HEAD)} ureth=$M2_URETH_COMMIT ubft sha256=$(shasum -a 256 build/ubft | cut -d' ' -f1)" | tee "$EVIDENCE_DIR/heads.txt"
 if [ "${ANYAGE_LANE:-0}" = 1 ]; then
   echo "contracts head=$(git -C "$P85_CONTRACTS" rev-parse HEAD) nbp head=$(git -C "${NBP_DIR:?set NBP_DIR}" rev-parse HEAD) aggregator sha256=$(shasum -a 256 "${AGG_BIN:?set AGG_BIN}" | cut -d' ' -f1) dnb-tool sha256=$(shasum -a 256 "${DNB_TOOL:?set DNB_TOOL}" | cut -d' ' -f1)" | tee -a "$EVIDENCE_DIR/heads.txt"
 fi

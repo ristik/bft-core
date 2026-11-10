@@ -39,10 +39,10 @@ type Config struct {
 
 func (c Config) withDefaults() Config {
 	if c.MaxEntries == 0 {
-		c.MaxEntries = DefaultMaxEntries
+		c.MaxEntries = types.DefaultTrustBaseMaxEntries
 	}
 	if c.MaxResponseBytes == 0 {
-		c.MaxResponseBytes = DefaultMaxResponse
+		c.MaxResponseBytes = types.DefaultTrustBaseMaxResponse
 	}
 	if c.Timeout == 0 {
 		c.Timeout = 5 * time.Second
@@ -73,8 +73,8 @@ type Server struct {
 // NewServer checks that one maximum-size entry plus the envelope fits the response budget (otherwise startup is refused, design §7).
 func NewServer(src Source, cfg Config) (*Server, error) {
 	cfg = cfg.withDefaults()
-	if cfg.MaxEntries < 1 || cfg.MaxWorkers < 1 || cfg.MaxPerPeer < 1 || cfg.MaxResponseBytes < MaxEntryBytes+envelopeBound {
-		return nil, fmt.Errorf("%w: %d entries, %d response bytes (one entry needs %d)", ErrConfig, cfg.MaxEntries, cfg.MaxResponseBytes, MaxEntryBytes+envelopeBound)
+	if cfg.MaxEntries < 1 || cfg.MaxWorkers < 1 || cfg.MaxPerPeer < 1 || cfg.MaxResponseBytes < types.MaxTrustBaseEntryBytes+types.TrustBaseResponseEnvelopeBound {
+		return nil, fmt.Errorf("%w: %d entries, %d response bytes (one entry needs %d)", ErrConfig, cfg.MaxEntries, cfg.MaxResponseBytes, types.MaxTrustBaseEntryBytes+types.TrustBaseResponseEnvelopeBound)
 	}
 	g, err := src.Entry(src.GenesisEpoch())
 	if err != nil {
@@ -83,24 +83,24 @@ func NewServer(src Source, cfg Config) (*Server, error) {
 	return &Server{src: src, network: g.NetworkID, cfg: cfg, workers: make(chan struct{}, cfg.MaxWorkers), perPeer: map[peer.ID]int{}}, nil
 }
 
-func (s *Server) reply(st Status) *Response {
-	return &Response{Version: Version, Network: s.network, Status: st, Entries: []cbor.RawMessage{}}
+func (s *Server) reply(st types.TrustBaseStatus) *types.TrustBaseResponse {
+	return &types.TrustBaseResponse{Version: types.TrustBaseResponseVersion, Network: s.network, Status: st, Entries: []cbor.RawMessage{}}
 }
 
 // Respond answers one request from one snapshot of the finalized history.
-func (s *Server) Respond(req *Request) *Response {
+func (s *Server) Respond(req *Request) *types.TrustBaseResponse {
 	if req.Version != Version || req.MaxEntries == 0 || req.MaxBytes == 0 {
-		return s.reply(StatusInvalidRequest)
+		return s.reply(types.TrustBaseStatusInvalidRequest)
 	}
 	if req.Network != s.network {
-		return s.reply(StatusWrongNetwork)
+		return s.reply(types.TrustBaseStatusWrongNetwork)
 	}
 	genesis := s.src.GenesisEpoch()
 	if req.FromEpoch < genesis || (req.ToEpoch != nil && *req.ToEpoch < req.FromEpoch) ||
 		(req.SnapshotEnd == nil) != (req.SnapshotEntryID == nil) ||
 		(req.SnapshotEnd != nil && (len(req.SnapshotEntryID) != entryIDLen || req.FromEpoch > *req.SnapshotEnd ||
 			(req.ToEpoch != nil && *req.ToEpoch < *req.SnapshotEnd))) {
-		return s.reply(StatusInvalidRequest)
+		return s.reply(types.TrustBaseStatusInvalidRequest)
 	}
 	tip := s.src.Tip()
 
@@ -109,54 +109,54 @@ func (s *Server) Respond(req *Request) *Response {
 	if req.SnapshotEnd != nil {
 		// the page continues a frozen snapshot: local history must reach it and agree on its end
 		if tip.Epoch < *req.SnapshotEnd {
-			r := s.reply(StatusNotYetAvailable)
+			r := s.reply(types.TrustBaseStatusNotYetAvailable)
 			r.FromEpoch, r.EffectiveEnd, r.EndEntryID = req.FromEpoch, tip.Epoch, endID
 			return r
 		}
 		e, err := s.src.Entry(*req.SnapshotEnd)
 		if err != nil {
-			return s.reply(StatusUnavailable)
+			return s.reply(types.TrustBaseStatusUnavailable)
 		}
 		id, err := e.EntryID()
 		if err != nil {
-			return s.reply(StatusUnavailable)
+			return s.reply(types.TrustBaseStatusUnavailable)
 		}
 		if !bytes.Equal(id[:], req.SnapshotEntryID) {
-			return s.reply(StatusHistoryMismatch)
+			return s.reply(types.TrustBaseStatusHistoryMismatch)
 		}
 		end, endID = *req.SnapshotEnd, id[:]
 	} else if req.ToEpoch != nil && *req.ToEpoch < end {
 		e, err := s.src.Entry(*req.ToEpoch)
 		if err != nil {
-			return s.reply(StatusUnavailable)
+			return s.reply(types.TrustBaseStatusUnavailable)
 		}
 		id, err := e.EntryID()
 		if err != nil {
-			return s.reply(StatusUnavailable)
+			return s.reply(types.TrustBaseStatusUnavailable)
 		}
 		end, endID = *req.ToEpoch, id[:]
 	}
 	if req.FromEpoch > end {
 		// nothing at or after from yet (a requested end ahead of the tip is clamped, not an error)
-		r := s.reply(StatusNotYetAvailable)
+		r := s.reply(types.TrustBaseStatusNotYetAvailable)
 		r.FromEpoch, r.EffectiveEnd, r.EndEntryID = req.FromEpoch, tip.Epoch, tip.EntryID[:]
 		return r
 	}
 
 	maxEntries := min(int(req.MaxEntries), s.cfg.MaxEntries)
-	maxBytes := min(int(req.MaxBytes), s.cfg.MaxResponseBytes) - envelopeBound
+	maxBytes := min(int(req.MaxBytes), s.cfg.MaxResponseBytes) - types.TrustBaseResponseEnvelopeBound
 	if maxBytes < 1 {
-		return s.reply(StatusLimitTooSmall)
+		return s.reply(types.TrustBaseStatusLimitTooSmall)
 	}
 	entries, next, more, err := s.src.Range(req.FromEpoch, end, maxEntries, maxBytes)
 	switch {
 	case errors.Is(err, utbstore.ErrBudget):
-		return s.reply(StatusLimitTooSmall)
+		return s.reply(types.TrustBaseStatusLimitTooSmall)
 	case err != nil || len(entries) == 0:
 		// finalized history must be contiguous: a hole is an internal fault, never an absent epoch
-		return s.reply(StatusUnavailable)
+		return s.reply(types.TrustBaseStatusUnavailable)
 	}
-	r := s.reply(StatusOK)
+	r := s.reply(types.TrustBaseStatusOK)
 	r.FromEpoch, r.EffectiveEnd, r.EndEntryID = req.FromEpoch, end, endID
 	for _, e := range entries {
 		r.Entries = append(r.Entries, e)
@@ -200,26 +200,26 @@ func (s *Server) handle(stream libp2pnet.Stream) {
 	_ = stream.SetDeadline(time.Now().Add(s.cfg.Timeout))
 	from := stream.Conn().RemotePeer()
 	if !s.acquire(from) {
-		_ = writeFrame(stream, s.encode(s.reply(StatusBusy)))
+		_ = writeFrame(stream, s.encode(s.reply(types.TrustBaseStatusBusy)))
 		return
 	}
 	defer s.release(from)
 	raw, err := readFrame(bufio.NewReader(stream), MaxRequestBytes)
-	var resp *Response
+	var resp *types.TrustBaseResponse
 	if err != nil {
-		resp = s.reply(StatusInvalidRequest)
+		resp = s.reply(types.TrustBaseStatusInvalidRequest)
 	} else if req, derr := DecodeRequest(raw); derr != nil {
-		resp = s.reply(StatusInvalidRequest)
+		resp = s.reply(types.TrustBaseStatusInvalidRequest)
 	} else {
 		resp = s.Respond(req)
 	}
 	_ = writeFrame(stream, s.encode(resp))
 }
 
-func (s *Server) encode(r *Response) []byte {
+func (s *Server) encode(r *types.TrustBaseResponse) []byte {
 	b, err := r.Encode()
 	if err != nil || len(b) > s.cfg.MaxResponseBytes {
-		b, _ = s.reply(StatusUnavailable).Encode()
+		b, _ = s.reply(types.TrustBaseStatusUnavailable).Encode()
 	}
 	return b
 }
@@ -253,18 +253,18 @@ func readFrame(r *bufio.Reader, max int) ([]byte, error) {
 type Client struct {
 	Peer        *network.Peer
 	Timeout     time.Duration // default 5 s
-	MaxResponse int           // default DefaultMaxResponse
+	MaxResponse int           // default types.DefaultTrustBaseMaxResponse
 }
 
 // Page sends one request and decodes the response with the page limits.
-func (c *Client) Page(ctx context.Context, id peer.ID, req *Request) (*Response, [][]byte, error) {
+func (c *Client) Page(ctx context.Context, id peer.ID, req *Request) (*types.TrustBaseResponse, [][]byte, error) {
 	timeout := c.Timeout
 	if timeout == 0 {
 		timeout = 5 * time.Second
 	}
 	maxResp := c.MaxResponse
 	if maxResp == 0 {
-		maxResp = DefaultMaxResponse
+		maxResp = types.DefaultTrustBaseMaxResponse
 	}
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
@@ -286,7 +286,7 @@ func (c *Client) Page(ctx context.Context, id peer.ID, req *Request) (*Response,
 	if err != nil {
 		return nil, nil, err
 	}
-	resp, _, err := DecodeResponse(raw, Limits{MaxBytes: maxResp, MaxEntries: DefaultMaxEntries})
+	resp, _, err := types.DecodeTrustBaseResponse(raw, types.TrustBaseLimits{MaxBytes: maxResp, MaxEntries: types.DefaultTrustBaseMaxEntries})
 	if err != nil {
 		return nil, nil, err
 	}

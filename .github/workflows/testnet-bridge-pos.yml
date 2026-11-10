@@ -1,0 +1,146 @@
+# The bridge across a PoS root handoff, preflight (bft-core #430 row 2; briefs/pos-release-rerun-plan.md §4.1, arch §8/§9): one --pos --utb generation
+# (aggregator A, the integration variant), the bridge deployed and its epoch-1 artifacts made before the election, the handoff driven by rehearse.py,
+# then the redeem across it with the bridge client's live trust refresh (deploy/testnet/bridge/bridge_pos.py). A hosted-runner smoke, not the host run.
+name: testnet-bridge-pos
+on:
+  pull_request:
+    paths: ['deploy/testnet/bridge/bridge_pos.py', 'deploy/testnet/bridge/sdk_clients.py', 'deploy/testnet/bridge/rehearse_bridge.py', 'deploy/testnet/bridge/overlay.py', 'deploy/testnet/bridge/trust_recorder.mjs',
+            'deploy/testnet/bridge/pins.json', 'deploy/testnet/sdk-clients/**', 'scripts/dnb-tool/**', '.github/workflows/testnet-bridge-pos.yml']
+  workflow_dispatch:
+    inputs:
+      cadence_seconds:
+        description: 'election cadence in UC seconds (generate.py --pos-cadence-seconds): room for the bridge deploy and the epoch-1 lock/mint before the election'
+        required: false
+        default: '600'
+      cadence_rounds:
+        description: 'election cadence in ordinary root rounds (generate.py --pos-cadence-rounds)'
+        required: false
+        default: '800'
+permissions:
+  contents: read
+concurrency:
+  group: testnet-bridge-pos-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  preflight:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 240
+    env:
+      CADENCE_SECONDS: ${{ inputs.cadence_seconds || '600' }}
+      CADENCE_ROUNDS: ${{ inputs.cadence_rounds || '800' }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Free disk (the ureth release build is large)
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /opt/hostedtoolcache/CodeQL
+          df -h /
+      - id: pins
+        run: |
+          python3 - <<'E' >> "$GITHUB_OUTPUT"
+          import json
+          p = json.load(open('deploy/testnet/pins.json'))
+          for k in ('bft', 'ureth', 'aggregator-go', 'contracts'):
+              print(f"{k.replace('-', '_')}={p[k]}")
+          b = json.load(open('deploy/testnet/bridge/pins.json'))
+          print(f"bridge_contracts={b['contracts']}")
+          print(f"nbp={b['native-bridge-plugins']}")
+          E
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.pins.outputs.bft }}
+          path: pinned-bft
+      - uses: actions/checkout@v4
+        with:
+          repository: ristik/ureth
+          ref: ${{ steps.pins.outputs.ureth }}
+          path: pinned-ureth
+      - uses: actions/checkout@v4
+        with:
+          repository: ristik/aggregator-go
+          ref: ${{ steps.pins.outputs.aggregator_go }}
+          path: pinned-aggregator-go
+      - uses: actions/checkout@v4
+        with:
+          repository: ristik/unicity-pos-contracts
+          ref: ${{ steps.pins.outputs.contracts }}
+          path: pinned-contracts
+          submodules: recursive   # the PoS profile's genesis is built from a clean checkout at the package pin (generate.py refuses any other)
+      - uses: actions/checkout@v4
+        with:
+          repository: ristik/unicity-pos-contracts
+          ref: ${{ steps.pins.outputs.bridge_contracts }}
+          path: pinned-bridge-contracts
+          submodules: recursive   # the bridge tools image's contracts, at bridge/pins.json
+      - uses: actions/checkout@v4
+        with:
+          repository: ristik/native-bridge-plugins
+          ref: ${{ steps.pins.outputs.nbp }}
+          path: pinned-nbp
+      - run: sudo apt-get update && sudo apt-get install -y clang libclang-dev libssl-dev pkg-config protobuf-compiler
+      - uses: ./.github/actions/foundry   # Foundry v1.8.1 (digest-pinned archive)
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+          workspaces: |
+            pinned-ureth
+      - name: Build the node images from the pinned sources (aggregator A, the integration variant)
+        run: python3 deploy/testnet/build-images.py --bft-source pinned-bft --ureth-source pinned-ureth --aggregator-go-source pinned-aggregator-go
+      - name: Build the bridge tools image (dnb-tool from this checkout, contracts and plug-ins at bridge/pins.json)
+        run: python3 deploy/testnet/bridge/build-bridge-image.py --contracts-source pinned-bridge-contracts --nbp-source pinned-nbp
+      - run: go build -o /tmp/tn-keygen ./deploy/testnet/keygen
+      - run: go build -C pinned-bft -o /tmp/tn-b1genesis ./scripts/b1genesis
+      - name: Generate a --pos --utb generation (the cadence declared for the epoch-1 bridge steps)
+        run: |
+          umask 077
+          echo rehearsal-not-a-real-secret > /tmp/captcha-secret
+          sudo -E env "PATH=$PATH" python3 deploy/testnet/generate.py --out /srv/tn-bridge-pos --validators 4 --chain-id 31337 \
+            --ubft pinned-bft/build/ubft --b1genesis /tmp/tn-b1genesis --keygen /tmp/tn-keygen \
+            --captcha-sitekey rehearsal-sitekey --captcha-secret-file /tmp/captcha-secret \
+            --pos --pos-contracts pinned-contracts --utb \
+            --pos-cadence-seconds "$CADENCE_SECONDS" --pos-cadence-rounds "$CADENCE_ROUNDS"
+          mkdir -p "$RUNNER_TEMP/evidence"
+          echo "{\"cadenceSeconds\": $CADENCE_SECONDS, \"cadenceRounds\": $CADENCE_ROUNDS, \"utbAggregator\": \"integration\"}" > "$RUNNER_TEMP/evidence/generation-recipe.json"
+      - name: 1. Package up, the 5a smoke (epoch 1)
+        run: sudo -E env "PATH=$PATH" python3 deploy/testnet/rehearse.py --generation /srv/tn-bridge-pos --evidence "$RUNNER_TEMP/evidence/1-package" --ubft pinned-bft/build/ubft --stages up,identity,first-tx,pos-smoke
+      - name: 2. Bridge deploy and the epoch-1 artifacts (before the election and the root install)
+        run: sudo -E env "PATH=$PATH" python3 deploy/testnet/bridge/rehearse_bridge.py --generation /srv/tn-bridge-pos --evidence "$RUNNER_TEMP/evidence/2-bridge-epoch1" --stages deploy,fund,pos-epoch1
+      - name: 3. The handoff (election, proposal, propose, install, advance)
+        run: sudo -E env "PATH=$PATH" python3 deploy/testnet/rehearse.py --generation /srv/tn-bridge-pos --evidence "$RUNNER_TEMP/evidence/3-handoff" --ubft pinned-bft/build/ubft --stages pos-election,pos-proposal,pos-propose,pos-install,pos-advance
+      - name: '4. The redeems across the handoff: consolidated with the live trust refresh, and the per-SID historical anchor'
+        run: sudo -E env "PATH=$PATH" python3 deploy/testnet/bridge/rehearse_bridge.py --generation /srv/tn-bridge-pos --evidence "$RUNNER_TEMP/evidence/4-bridge-redeem" --ubft pinned-bft/build/ubft --stages pos-redeem,pos-historical
+      - name: 5. The second handoff (root epoch 2 -> 3)
+        run: sudo -E env "PATH=$PATH" python3 deploy/testnet/rehearse.py --generation /srv/tn-bridge-pos --evidence "$RUNNER_TEMP/evidence/5-handoff-2" --ubft pinned-bft/build/ubft --stages pos-handoff-2
+      - name: 6. The gap at epoch 3 (a lagging wallet repairs the range in one-entry pages)
+        run: sudo -E env "PATH=$PATH" python3 deploy/testnet/bridge/rehearse_bridge.py --generation /srv/tn-bridge-pos --evidence "$RUNNER_TEMP/evidence/6-bridge-gap" --ubft pinned-bft/build/ubft --stages pos-gap
+      - name: 7. The pods restarted at epoch 3 (each entity's execution client, root and shard node)
+        run: sudo -E env "PATH=$PATH" python3 deploy/testnet/rehearse.py --generation /srv/tn-bridge-pos --evidence "$RUNNER_TEMP/evidence/7-restart-2" --ubft pinned-bft/build/ubft --stages pos-restart-2
+      - name: 8. The aggregator restarted, the bridge after the restarts, the replay negatives; custody
+        run: sudo -E env "PATH=$PATH" python3 deploy/testnet/bridge/rehearse_bridge.py --generation /srv/tn-bridge-pos --evidence "$RUNNER_TEMP/evidence/8-bridge-restarts-replays" --ubft pinned-bft/build/ubft --stages pos-agg-restart,pos-after-restart,pos-replays,custody
+      - name: 9. The public SDK clients (JS, Rust, Java main; cold, warm, restart; typed negatives with controls)
+        run: sudo -E env "PATH=$PATH" python3 deploy/testnet/bridge/rehearse_bridge.py --generation /srv/tn-bridge-pos --evidence "$RUNNER_TEMP/evidence/9-sdk-clients" --ubft pinned-bft/build/ubft --stages pos-sdk-clients
+      - name: 10. The roots' signed history (utb-live)
+        run: sudo -E env "PATH=$PATH" python3 deploy/testnet/rehearse.py --generation /srv/tn-bridge-pos --evidence "$RUNNER_TEMP/evidence/10-utb-live" --ubft pinned-bft/build/ubft --stages utb-live
+      - name: The tester wallets' key removed (whichever step stopped)
+        if: always()
+        run: sudo rm -f /srv/tn-bridge-pos/bridge/pos-tester.key
+      - name: Resources and logs
+        if: always()
+        run: |
+          mkdir -p "$RUNNER_TEMP/evidence"
+          sudo chown -R "$(id -u):$(id -g)" "$RUNNER_TEMP/evidence"
+          docker stats --no-stream --format 'table {{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}\t{{.PIDs}}' > "$RUNNER_TEMP/evidence/docker-stats.txt" || true
+          df -h / > "$RUNNER_TEMP/evidence/df.txt" || true
+          sudo bash -c "cd /srv/tn-bridge-pos && F='-f compose.yaml'; [ -f compose.bridge.yaml ] && F=\"\$F -f compose.bridge.yaml\"; docker compose \$F ps -a > '$RUNNER_TEMP/evidence/compose-ps.txt' && docker compose \$F logs --no-color --timestamps --tail 600 > '$RUNNER_TEMP/evidence/compose-logs.txt'" || true
+          sudo PYTHONDONTWRITEBYTECODE=1 python3 deploy/testnet/redact_evidence.py /srv/tn-bridge-pos "$RUNNER_TEMP/evidence/compose-logs.txt" || sudo bash -c "echo '[log withheld: redaction did not finish]' > '$RUNNER_TEMP/evidence/compose-logs.txt'"
+          sudo cp /srv/tn-bridge-pos/manifest.json "$RUNNER_TEMP/evidence/manifest.json" || true
+          sudo chown -R "$(id -u):$(id -g)" "$RUNNER_TEMP/evidence" || true
+          cp deploy/testnet/artifacts/images.json deploy/testnet/artifacts/bridge-images.json "$RUNNER_TEMP/evidence/" || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: testnet-bridge-pos-evidence
+          path: ${{ runner.temp }}/evidence

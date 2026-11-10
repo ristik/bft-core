@@ -1707,6 +1707,35 @@ class Joiner(unittest.TestCase):
         for out in (json.dumps(one),json.dumps([one]),json.dumps({'Address':one['address'],'PrivateKey':one['private_key']}),'Address: %s\nPrivate key: %s'%(one['address'],one['private_key'])):
             self.assertEqual(pos_join.new_wallet(type('R',(),{'cast_run':lambda self,*a,out=out:out})()),one)
         with self.assertRaises(RuntimeError): pos_join.new_wallet(type('R',(),{'cast_run':lambda self,*a:'nothing'})())
+    def test_the_heavy_joiner_runs_before_the_slow_restore_stage_and_signing_is_proved_after_it(self):
+        """#1006: pos-restore-repeat outlasts several election cadences; an attempt that came due meanwhile leaves a result open that only the automatic RejectResult
+        clears (16384 progress rounds), so pos-join-heavy, which needs none open, runs straight after pos-advance, before it. pos-join-signs runs after the repeated
+        restores (arch): it proves the joiner still signs after them."""
+        import rehearse
+        names=[n for n,_ in rehearse.POS_STAGES]
+        order=['pos-advance','pos-join-heavy','pos-restore-repeat','pos-join-signs','pos-restart']
+        self.assertEqual([names.index(n) for n in order],sorted(names.index(n) for n in order),'stage order: '+' < '.join(order))
+        self.assertEqual(names.index('pos-advance')+1,names.index('pos-join-heavy'),'nothing slow between the advance and the heavy joiner')
+        self.assertEqual(names.index('pos-join-heavy')+1,names.index('pos-restore-repeat'),'nothing slow between the heavy joiner and the election attempt it provokes')
+        src=Path(pos_join.__file__).read_text()
+        body=src[src.index('def pos_join_heavy'):]
+        self.assertLess(body.index("'openResult()(bytes32)'"),body.index('cursor_before = '),'the cursor is read with no result open')
+    def test_the_pos_stage_boundaries_log_the_election_state(self):
+        import rehearse
+        gen=Path(tempfile.mkdtemp()); (gen/'network').mkdir(); (gen/'network'/'pos-deployment.json').write_text(json.dumps({'election':'0xe'}))
+        said=[]
+        class Fake(rehearse.Rehearsal):
+            def __init__(self,g): self.gen,self.results=g,[]
+            def say(self,m): said.append(m)
+            def view_text(self,*a): return '0x'+'cc'*32
+            def view(self,*a): return [9]
+        r=Fake(gen); r.stage('pos-join-heavy',lambda:None); r.stage('up',lambda:None)
+        self.assertEqual([m for m in said if m.startswith('  election at')],[f'  election at the start of pos-join-heavy: openResult 0x{"cc"*32}, attemptCursor 9',f'  election at the end of pos-join-heavy: openResult 0x{"cc"*32}, attemptCursor 9'],'PoS stages only')
+        said.clear()
+        def boom(): raise rehearse.Failure('x')
+        with self.assertRaises(rehearse.Failure): r.stage('pos-join-heavy',boom)
+        self.assertTrue(any('at the failure of pos-join-heavy' in m for m in said))
+        self.assertIsNone(Fake(Path(tempfile.mkdtemp())).election_state(),'no election: nothing logged, nothing raised')
     def test_the_joiner_override_makes_its_services_part_of_every_compose_operation(self):
         with tempfile.TemporaryDirectory() as d:
             gen=Path(d);compose=self.topology(4);(gen/'compose.yaml').write_text(json.dumps(compose))
@@ -2158,5 +2187,104 @@ class BridgeLoad(unittest.TestCase):
             load=bl.Load(fake,out,duration=60,interval=60,max_failures=3)
             self.assertFalse(load.run(1))
             self.assertEqual(fake.calls,['init']*3)
+
+
+class BridgePosGap(unittest.TestCase):
+    """bridge/bridge_pos.py pos-gap's checks without a network: the tester's update reported once (the SDK's TrustBaseUpdater follows the page cursors
+    itself), the recorded one-entry pages, and trust_recorder.mjs forwarding and recording against a stub upstream."""
+    def module(self):
+        for d in ('bridge','sdk-clients'):
+            sys.path.insert(0,str(Path(__file__).parent/d)); self.addCleanup(sys.path.remove,str(Path(__file__).parent/d))
+        import bridge_pos, utbcbor
+        return bridge_pos, utbcbor
+    def page(self,u,frm,maxe,epochs,nxt,http=200,snap=None,status=0):
+        entries=[u.encode(u.Tag(u.ENTRY_TAG,[2,3,e,e*10,[],1,b'\x11'*32,None,b'\x00'*32,None])) for e in epochs]
+        q=f'from={frm}&maxEntries={maxe}'+(f'&snapshotEnd={snap}&snapshotEntryId=0x{"ab"*32}' if snap else '')
+        return {'path':'/api/v1/trustbases?'+q,'http':http,'body':u.response(3,status,frm,3,b'\xab'*32,entries,nxt).hex() if http==200 else ''}
+    def test_one_aggregate_fetch_event(self):
+        bp,_=self.module()
+        new='  $ bridge-tester redeem\n  trust: fetched from epoch 2 (max 1): 2 appended, tip 1 -> 3\nredeemed'
+        old='  trust: fetched from epoch 2 (max 1): 1 appended, tip 1 -> 2\n  trust: fetched from epoch 3 (max 1): 1 appended, tip 2 -> 3'
+        self.assertEqual(bp.gap_fetches(new),bp.gap_fetches_want(1,3))
+        self.assertNotEqual(bp.gap_fetches(old),bp.gap_fetches_want(1,3))
+        self.assertNotEqual(bp.gap_fetches(new+'\n  trust: fetched from epoch 4 (max 1): 0 appended, tip 3 -> 3'),bp.gap_fetches_want(1,3))
+        self.assertEqual(bp.gap_fetches_want(2,4),['trust: fetched from epoch 3 (max 1): 2 appended, tip 2 -> 4'])
+    def test_one_entry_pages(self):
+        bp,u=self.module()
+        good=[self.page(u,2,1,[2],3),self.page(u,3,1,[3],None,snap=3)]
+        pages=bp.trust_pages(good)
+        self.assertEqual([(p['from'],p['maxEntries'],p['snapshotEnd'],p['epochs'],p['next']) for p in pages],[(2,1,None,[2],3),(3,1,3,[3],None)])
+        self.assertTrue(bp.one_entry_pages(pages,1,3))
+        for bad in ([self.page(u,2,2,[2,3],None)],                                   # one two-entry page: not one-entry pages
+                    [self.page(u,2,1,[2],3)],                                        # epoch 3 never requested
+                    good+[self.page(u,4,1,[],None)],                                 # an extra request
+                    [self.page(u,2,1,[2],3),self.page(u,3,2,[3],None)],              # the second page not capped at 1
+                    [self.page(u,2,1,[2],3),self.page(u,3,1,[],None)],               # answered without its entry
+                    [self.page(u,2,1,[2],3),self.page(u,3,1,[3],None,http=502)],     # not served
+                    [self.page(u,2,1,[2],3),self.page(u,3,1,[3],None,status=1)],     # served with a non-OK status
+                    [self.page(u,3,1,[3],None),self.page(u,2,1,[2],3)]):             # out of order
+            self.assertFalse(bp.one_entry_pages(bp.trust_pages(bad),1,3),json.dumps(bp.trust_pages(bad)))
+    def test_recorder_forwards_and_records(self):
+        if not shutil.which('node'): self.skipTest('node not installed')
+        body=bytes.fromhex('d99857')+b'page'
+        class Up(http.server.BaseHTTPRequestHandler):
+            def log_message(self,*a): pass
+            def do_GET(self):
+                self.send_response(200); self.send_header('Content-Type','application/cbor'); self.send_header('Content-Length',str(len(body))); self.end_headers(); self.wfile.write(body)
+            def do_POST(self):
+                n=int(self.headers['Content-Length']); d=self.rfile.read(n)
+                self.send_response(200); self.send_header('Content-Length',str(len(d))); self.end_headers(); self.wfile.write(d)
+        up=http.server.ThreadingHTTPServer(('127.0.0.1',0),Up); threading.Thread(target=up.serve_forever,daemon=True).start(); self.addCleanup(up.shutdown)
+        with tempfile.TemporaryDirectory() as tmp:
+            import socket
+            with socket.socket() as so: so.bind(('127.0.0.1',0)); port=so.getsockname()[1]
+            out=Path(tmp)/'pages.jsonl'
+            proc=subprocess.Popen(['node',str(Path(__file__).parent/'bridge/trust_recorder.mjs')],stdout=subprocess.PIPE,text=True,
+                                  env={**os.environ,'UPSTREAM':f'http://127.0.0.1:{up.server_port}','PORT':str(port),'OUT':str(out)})
+            self.addCleanup(proc.kill)
+            self.assertIn('listening',proc.stdout.readline())
+            c=http.client.HTTPConnection('127.0.0.1',port,timeout=10)
+            c.request('GET','/api/v1/trustbases?from=2&maxEntries=1'); r=c.getresponse()
+            self.assertEqual((r.status,r.read(),r.getheader('Content-Type')),(200,body,'application/cbor'))
+            c.request('POST','/aggregator',body=b'{"x":1}',headers={'Content-Type':'application/json'}); r=c.getresponse()
+            self.assertEqual(r.read(),b'{"x":1}')
+            c.request('GET','/api/v1/trustbases/other'); c.getresponse().read()
+            rec=[json.loads(l) for l in out.read_text().splitlines()]
+            self.assertEqual(rec,[{'path':'/api/v1/trustbases?from=2&maxEntries=1','http':200,'body':body.hex()}])
+
+
+class BridgePosEndpoint(unittest.TestCase):
+    """#996 without a network: the lock-proof endpoint's overlay reads the handoff directory instead of listing configurations, and pos-after-restart's
+    decoding of a lock proof's UC commitment and carried configuration (a LockProof encoded by Go: bridgeprofile.LockProof.Bytes, PDR of epoch 2)."""
+    LOCKPROOF='880158200000000000000000000000000000000000000000000000000000000000000000582000000000000000000000000000000000000000000000000000000000000000005819d998608f010308418008f60000f61a9502f900f6f60218c8f65840d998598701d9985a8a010002f6f6f600f600f6f6582043568fbecc1221e929aa3dc9e1b525d32abdd41f6ffcdafab6ff77d6c7a41761d9985b83014180f6f6f641c08080'
+    HASH='43568fbecc1221e929aa3dc9e1b525d32abdd41f6ffcdafab6ff77d6c7a41761'
+    def module(self):
+        for d in ('bridge','sdk-clients'):
+            sys.path.insert(0,str(Path(__file__).parent/d)); self.addCleanup(sys.path.remove,str(Path(__file__).parent/d))
+        import bridge_pos
+        return bridge_pos
+    def test_lockproof_conf(self):
+        bp=self.module()
+        c=bp.lockproof_conf(bytes.fromhex(self.LOCKPROOF))
+        self.assertEqual(c,{'ucShardConfHash':self.HASH,'pdrSha256':self.HASH,'pdrEpoch':2,'pdrPartition':8})
+        raw=bytearray(bytes.fromhex(self.LOCKPROOF)); i=raw.find(bytes.fromhex(self.HASH)); raw[i]^=1   # the UC's commitment altered
+        c=bp.lockproof_conf(bytes(raw))
+        self.assertNotEqual(c['ucShardConfHash'],c['pdrSha256'])
+    def test_overlay_reads_the_handoff_directory(self):
+        import importlib.util
+        spec=importlib.util.spec_from_file_location('overlay',Path(__file__).parent/'bridge/overlay.py'); ov=importlib.util.module_from_spec(spec); spec.loader.exec_module(ov)
+        with tempfile.TemporaryDirectory() as tmp:
+            gen=Path(tmp)/'tn-x'; (gen/'bridge').mkdir(parents=True); (gen/'network/handoff').mkdir(parents=True)
+            (gen/'network/handoff/shard-conf-1.json').write_text('{}')
+            (gen/'manifest.json').write_text(json.dumps({'validators':4}))
+            (gen/'bridge/bridge-addresses.json').write_text(json.dumps({'BridgeVault':'0x'+'11'*20,'CFG':'0x'+'22'*32}))
+            art=Path(tmp)/'artifacts'; art.mkdir(); (art/'bridge-images.json').write_text(json.dumps({'images':{'bridge':'sha256:'+'a'*64}}))
+            with patch.object(ov,'HERE',Path(tmp)/'bridge'), patch.object(sys,'argv',['overlay.py',str(gen)]), patch('builtins.print'):
+                ov.main()
+            ep=json.loads((gen/'compose.bridge.yaml').read_text())['services']['lockproof']['entrypoint']
+        self.assertEqual(ep.count('--full-shard-conf'),1)
+        self.assertEqual(ep[ep.index('--full-shard-conf')+1],'/network/full-shard-conf.json')
+        self.assertEqual(ep[ep.index('--shard-conf-dir')+1],'/network/handoff')
+        self.assertFalse(any('shard-conf-1' in x for x in ep),'a handoff file is found by the endpoint, not listed by the overlay')
 
 if __name__=='__main__': unittest.main()

@@ -219,14 +219,29 @@ class Rehearsal:
             raise Failure(f'{what}' + (f': {detail}' if detail else ''))
         self.say(f'  ok   {what}' + (f' ({detail})' if detail else ''))
 
+    def election_state(self):
+        """The election's open result and attempt cursor, for the stage boundaries of the PoS stages (#1006: the attempts run in the system hook, their events are not in a
+        receipt, so a result that opened between two stages was not explainable afterwards). None where there is no election or it cannot be read."""
+        try:
+            election = json.loads((self.gen / 'network' / 'pos-deployment.json').read_text())['election']
+            return f'openResult {self.view_text(election, "openResult()(bytes32)").strip()}, attemptCursor {self.view(election, "attemptCursor()(uint64)")[0]}'
+        except Exception:
+            return None
+
     def stage(self, name, fn):
         self.say(f'== {name}')
+        if name in POS_STAGE_NAMES and (state := self.election_state()):
+            self.say(f'  election at the start of {name}: {state}')
         try:
             fn()
         except Exception as error:   # a failed stage is recorded as failed, then the run stops: later stages depend on it
+            if name in POS_STAGE_NAMES and (state := self.election_state()):
+                self.say(f'  election at the failure of {name}: {state}')
             self.say(f'FAIL {name}: {error}')
             self.results.append((name, 'FAIL', str(error)))
             raise
+        if name in POS_STAGE_NAMES and (state := self.election_state()):
+            self.say(f'  election at the end of {name}: {state}')
         self.say(f'PASS {name}')
         self.results.append((name, 'PASS', ''))
 
@@ -1026,7 +1041,13 @@ class Rehearsal:
         self.exec_in('root1', 'ubft', 'q3', 'shard-conf', '--root-rpc', root_rpc, '--epoch', str(shard_epoch), '--out', '/tmp/shard-conf.json')
         conf = json.loads(self.exec_in('root1', 'cat', '/tmp/shard-conf.json'))
         self.expect(conf.get('epoch') == shard_epoch and conf.get('partitionId') == 8, f'a root holds the EVM shard configuration of epoch {shard_epoch}', str(conf)[:200])
-        (work / f'shard-conf-{shard_epoch}.json').write_text(json.dumps(conf, indent=1) + '\n')
+        # published atomically before any authority advances: a temporary name the lock-proof endpoint's scanner does not match, closed and made
+        # readable, then renamed into place (bft-core#996: the endpoint picks the new configuration up from this directory without a restart)
+        tmp = work / f'.shard-conf-{shard_epoch}.json.tmp'
+        with open(tmp, 'w') as f:
+            f.write(json.dumps(conf, indent=1) + '\n')
+        os.chmod(tmp, 0o644)
+        os.replace(tmp, work / f'shard-conf-{shard_epoch}.json')
         subprocess.run(['chmod', '-R', 'a+rX', str(work)], check=True)
         # 12 the authorities and the shard nodes, one entity at a time
         for i in range(1, self.n + 1):
@@ -1722,7 +1743,8 @@ Rehearsal.pos_joiner = pos_join.pos_joiner   # the joiner stages live in pos_joi
 Rehearsal.pos_owner = pos_owner.pos_owner   # the owner-key stage lives in pos_owner.py
 Rehearsal.pos_reject = pos_reject.pos_reject   # the automatic RejectResult (#857), opt-in: it waits out a reservation lifetime
 # The order here is the order they run in: --stages only selects. pos-join-heavy is before pos-restart: it needs the next election attempt, and a slow pos-restart can outlast the cadence, leaving an attempt open that never sees the joiner.
-POS_STAGES = (('pos-smoke', 'pos_smoke'), ('pos-observe', 'pos_observe'), ('pos-rewards', 'pos_rewards'), ('pos-joiner', 'pos_joiner'), ('pos-election', 'pos_election'), ('pos-reject', 'pos_reject'), ('pos-proposal', 'pos_proposal'), ('pos-abort', 'pos_abort'), ('pos-propose', 'pos_propose'), ('pos-too-late', 'pos_too_late'), ('pos-install', 'pos_install'), ('pos-advance', 'pos_advance'), ('pos-restore-repeat', 'pos_restore_repeat'), ('pos-join-signs', 'pos_join_signs'), ('pos-join-heavy', 'pos_join_heavy'), ('pos-restart', 'pos_restart'), ('pos-stale', 'pos_stale'), ('pos-handoff-2', 'pos_handoff_2'), ('pos-restart-2', 'pos_restart_2'), ('pos-recreate', 'pos_recreate'), *pos_crash.STAGES, ('pos-resources', 'pos_resources'), ('pos-owner', 'pos_owner'))
+POS_STAGES = (('pos-smoke', 'pos_smoke'), ('pos-observe', 'pos_observe'), ('pos-rewards', 'pos_rewards'), ('pos-joiner', 'pos_joiner'), ('pos-election', 'pos_election'), ('pos-reject', 'pos_reject'), ('pos-proposal', 'pos_proposal'), ('pos-abort', 'pos_abort'), ('pos-propose', 'pos_propose'), ('pos-too-late', 'pos_too_late'), ('pos-install', 'pos_install'), ('pos-advance', 'pos_advance'), ('pos-join-heavy', 'pos_join_heavy'), ('pos-restore-repeat', 'pos_restore_repeat'), ('pos-join-signs', 'pos_join_signs'), ('pos-restart', 'pos_restart'), ('pos-stale', 'pos_stale'), ('pos-handoff-2', 'pos_handoff_2'), ('pos-restart-2', 'pos_restart_2'), ('pos-recreate', 'pos_recreate'), *pos_crash.STAGES, ('pos-resources', 'pos_resources'), ('pos-owner', 'pos_owner'))
+POS_STAGE_NAMES = frozenset(n for n, _ in POS_STAGES)
 # Stages of the package built with --utb (the signed trust-base history, either aggregator): not in the hosted-runner rehearsal, whose package is the one without it. They run after the PoS stages.
 UTB_STAGES = (('utb-live', 'utb_live'),)
 
