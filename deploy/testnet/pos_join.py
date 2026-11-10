@@ -163,39 +163,12 @@ def pos_join_signs(r):
 WEIGHT_CHURN = 4   # ElectionPolicy.Reason: None, InvalidProfile, Cardinality, MembershipChurn, WeightChurn, ReferenceCapacity, ReservationRefused, InternalFailure
 
 
-ZERO_WORD = '0x' + '00' * 32
-OPEN_RESULT_WAIT = 1500   # s, as the outcome wait below: several election cadences (the testnet's is 300 s)
-
-
-def await_no_open_result(r, election, seconds=OPEN_RESULT_WAIT):
-    """An election attempt never reserves a result while one is open; a result nobody proposes stays open until it is settled, and then attempts resume. The stage runs
-    after pos-restore-repeat, which outlasts several cadences, so an attempt may have come due meanwhile and reserved a result for the live set at that time (#1006: the
-    heavy joiner was not yet in the set, the result was the incumbents' own). The stage therefore waits, bounded, for the open result to clear and records what it saw
-    (the result, the cursor, the time), instead of failing on a race of the harness' own making. A result that does not clear within the bound is still a failure."""
-    seen = []
-
-    def clear():
-        word = r.view_text(election, 'openResult()(bytes32)').strip()
-        if int(word, 16) == 0:
-            return True
-        if not seen or seen[-1][0] != word:
-            seen.append((word, r.view(election, 'attemptCursor()(uint64)')[0], time.strftime('%H:%M:%SZ', time.gmtime())))
-            r.say(f'  a result is open ({word}, attemptCursor {seen[-1][1]}): waiting for it to be settled before the heavy joiner is judged')
-        return False
-    if clear():
-        return
-    try:
-        r.wait('no result is open when the heavy joiner becomes eligible (an open result stops further attempts)', clear, seconds)
-    finally:
-        (r.evidence / 'join-heavy-open-result.txt').write_text(''.join(f'{t} openResult {w} attemptCursor {c}\n' for w, c, t in seen))
-
-
 def pos_join_heavy(r):
     """Unequal weights on the package (TN-S #437, the design in briefs/tns-joiner-weights-design.md): a SECOND joiner bonds TWO units in its one lot (weight 2) after the
     committee of five is in place. The election's selection seeds the committee with the incumbents, then outsiders up to nTarget (6), and judges the whole against the
     incumbent committee: five unit weights to five unit weights and one of weight 2 is D = 2*2/7 = 0.571 > 1/2 (the testnet bound, owner decision 19), so the election records
     NoCandidate with the reason WeightChurn and the committee of five stays. No handoff is attempted and nothing is installed: this is a refusal, recorded with the contract's
-    own reason. Run after pos-join-signs and before pos-restart of the same run. The second joiner needs no signing authority (no handoff names it): its EVM key is a local key."""
+    own reason. Run right after pos-join-signs, before pos-restore-repeat and pos-restart of the same run (#1006: restore-repeat outlasts several election cadences, an attempt that came due meanwhile left a result open that only the automatic RejectResult clears). The second joiner needs no signing authority (no handoff names it): its EVM key is a local key."""
     election, custody = (json.loads((r.gen / 'network' / 'pos-deployment.json').read_text())[k] for k in ('election', 'custody'))
     r.expect(r.n == 5 and not r.joiners, 'precondition: five members, no joiner pending (the join ran first)')
     transport = handoff_ops.DockerTransport(r.gen)
@@ -221,8 +194,9 @@ def pos_join_heavy(r):
     status, out = r.relayer(identity, 'join', 'admit', '--id', str(ident), joiner=True)
     r.expect(status == 0, 'join admit: the delegation (a local EVM key, no handoff will name it)', out.strip()[-300:])
     r.wait('the live index holds six identities', lambda: r.view(election, 'liveCount()(uint32)')[0] == 6, 120)
-    cursor_before = r.view(election, 'attemptCursor()(uint64)')[0]   # an attempt from here on sees the heavy joiner eligible
-    await_no_open_result(r, election)
+    open_result = r.view_text(election, 'openResult()(bytes32)').strip()
+    r.expect(int(open_result, 16) == 0, 'no result is open when the heavy joiner becomes eligible (an open result stops further attempts, and a reservation nobody publishes clears only by the automatic RejectResult after 16384 progress rounds: run this stage straight after pos-join-signs, before pos-restore-repeat, never after a stage that outlasts the election cadence, #1006)', open_result)
+    cursor_before = r.view(election, 'attemptCursor()(uint64)')[0]   # read with no result open: an attempt from here on sees the heavy joiner eligible
     # The election runs in the system hook, whose events are not in a receipt (run 40097992670: attemptCursor 6, openResult zero, no NoCandidate log): the outcome is read
     # from its state, the last attempt's stored result: state 2 NoCandidate, and the reason that follows it
     def outcome():

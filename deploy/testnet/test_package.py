@@ -1707,31 +1707,17 @@ class Joiner(unittest.TestCase):
         for out in (json.dumps(one),json.dumps([one]),json.dumps({'Address':one['address'],'PrivateKey':one['private_key']}),'Address: %s\nPrivate key: %s'%(one['address'],one['private_key'])):
             self.assertEqual(pos_join.new_wallet(type('R',(),{'cast_run':lambda self,*a,out=out:out})()),one)
         with self.assertRaises(RuntimeError): pos_join.new_wallet(type('R',(),{'cast_run':lambda self,*a:'nothing'})())
-    def heavy_wait_fake(self,words):
-        """A rehearsal whose openResult() answers `words` in turn (the last one repeats); wait() polls like the real one, without sleeping."""
+    def test_the_join_stages_run_before_the_slow_restore_stage(self):
+        """#1006: pos-restore-repeat outlasts several election cadences; an attempt that came due meanwhile leaves a result open that only the automatic RejectResult
+        clears (16384 progress rounds), so pos-join-heavy, which needs none open, runs right after pos-join-signs and before it."""
         import rehearse
-        said=[]; ev=Path(tempfile.mkdtemp()); answers=list(words)
-        class Fake(rehearse.Rehearsal):
-            def __init__(self): self.evidence=ev
-            def say(self,m): said.append(m)
-            def view_text(self,*a): return answers.pop(0) if len(answers)>1 else answers[0]
-            def view(self,*a): return [7]
-            def wait(self,what,probe,seconds):
-                for _ in range(5):
-                    if probe(): return True
-                raise rehearse.Failure(f'{what}: not within {seconds} s')
-        return Fake(),said,ev
-    def test_the_heavy_joiner_waits_for_an_open_result_and_records_it(self):
-        zero,other='0x'+'00'*32,'0x'+'bb'*32
-        r,said,ev=self.heavy_wait_fake([zero]); pos_join.await_no_open_result(r,'0xe')
-        self.assertFalse((ev/'join-heavy-open-result.txt').exists(),'nothing open: nothing recorded')
-        r,said,ev=self.heavy_wait_fake([other,other,zero]); pos_join.await_no_open_result(r,'0xe')
-        rec=(ev/'join-heavy-open-result.txt').read_text()
-        self.assertIn(other,rec); self.assertIn('attemptCursor 7',rec); self.assertEqual(rec.count(other),1,'one line per distinct open result')
-        self.assertTrue(any('a result is open' in m for m in said))
-        r,said,ev=self.heavy_wait_fake([other])   # never settled: still a failure, with the record kept
-        with self.assertRaisesRegex(__import__('rehearse').Failure,'no result is open'): pos_join.await_no_open_result(r,'0xe')
-        self.assertIn(other,(ev/'join-heavy-open-result.txt').read_text())
+        names=[n for n,_ in rehearse.POS_STAGES]
+        order=['pos-advance','pos-join-signs','pos-join-heavy','pos-restore-repeat','pos-restart']
+        self.assertEqual([names.index(n) for n in order],sorted(names.index(n) for n in order),'stage order: '+' < '.join(order))
+        self.assertEqual(names.index('pos-join-heavy')+1,names.index('pos-restore-repeat'),'nothing slow between the heavy joiner and the election attempt it provokes')
+        src=Path(pos_join.__file__).read_text()
+        body=src[src.index('def pos_join_heavy'):]
+        self.assertLess(body.index("'openResult()(bytes32)'"),body.index('cursor_before = '),'the cursor is read with no result open')
     def test_the_pos_stage_boundaries_log_the_election_state(self):
         import rehearse
         gen=Path(tempfile.mkdtemp()); (gen/'network').mkdir(); (gen/'network'/'pos-deployment.json').write_text(json.dumps({'election':'0xe'}))
