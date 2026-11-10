@@ -23,6 +23,12 @@
       ],
       "targetedNote": "the plan's targeted selectors (briefs/ci-lane-migration-plan.md section 1): any-age/batch/layout/provider vectors, system-hook ordering and gas, certified RPC/recovery, persistence. Not cargo test --workspace and no generic Ethereum suites."
     },
+    "bft-core": {
+      "repository": "https://github.com/ristik/bft-core.git",
+      "commit": "3d4fa198639c1a47d12c09171a1d2ea53d660e45",
+      "branch": "integration/enshrined-evm",
+      "note": "the frozen PoS release product SHA (deploy/testnet/evidence/release-manifest.md, arch plan section 10): enforced only when a run asks for product=pinned (a campaign run: dispatch input, or run-inputs.json on a ci-lane-run/** branch). Pull request, scheduled and default runs build the checkout under test and do not read this pin. In a pinned run ubft and the Go tools are built from a separate checkout of exactly this commit; the harness (scripts, workflow) stays the checkout's own"
+    },
     "aggregator-go": {
       "repository": "https://github.com/ristik/aggregator-go.git",
       "commit": "b3909de4c8c0dc4682fbb6c7ff9732e7c1771207",

@@ -434,7 +434,7 @@ utb_step_final() {
   comp=$(python3 -c "import json;print(' '.join('--component %s=%s' % kv for kv in json.load(open('test-nodes/utb/utb-manifest.json')).get('components',{}).items()))")
   "$UBFT" trust-base utb-manifest --trust-base "$out/manifest/trust-base.json" --out-dir "$out/manifest" --relative-paths $comp >/dev/null || return 1
   [ "$(python3 -c "import json;print(json.load(open('$out/manifest/utb-manifest.json'))['derived']['utbGenesisEntryId'])")" = "$(utb_pin)" ] || { echo "the pack manifest's genesis is not the deployment's" >&2; return 1; }
-  { echo "bft-core $(git rev-parse HEAD) ubft sha256 $(shasum -a 256 "$UBFT" | cut -d' ' -f1)"; echo "utb-evidence sha256 $(shasum -a 256 "$UTB_EVIDENCE" | cut -d' ' -f1)"; echo "aggregator sha256 $(shasum -a 256 "$AGG_BIN" | cut -d' ' -f1)"
+  { echo "bft-core ${LANE_PRODUCT_COMMIT:-$(git rev-parse HEAD)}${LANE_PRODUCT_COMMIT:+ harness=$(git rev-parse HEAD)} ubft sha256 $(shasum -a 256 "$UBFT" | cut -d' ' -f1)"; echo "utb-evidence sha256 $(shasum -a 256 "$UTB_EVIDENCE" | cut -d' ' -f1)"; echo "aggregator sha256 $(shasum -a 256 "$AGG_BIN" | cut -d' ' -f1)"
     echo "native-bridge-plugins $(git -C "${NBP_DIR:?}" rev-parse HEAD) (prerequisite: its live driver reads the trust-base release bundle, native-bridge-plugins#27; reads trust-base.bundle.cbor: $(grep -c 'trust-base.bundle.cbor' "$NBP_DIR/tests/live/anyage.ts") places)"
     echo "state-transition-sdk-js $(git -C "${UTB_SDK_JS:?}" rev-parse HEAD)"
     echo "aggregator shards: ${aggShards:-1} (${aggShardIDs[*]:-0x80})"; } >"$out/manifest/build.txt"
