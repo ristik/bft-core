@@ -219,14 +219,29 @@ class Rehearsal:
             raise Failure(f'{what}' + (f': {detail}' if detail else ''))
         self.say(f'  ok   {what}' + (f' ({detail})' if detail else ''))
 
+    def election_state(self):
+        """The election's open result and attempt cursor, for the stage boundaries of the PoS stages (#1006: the attempts run in the system hook, their events are not in a
+        receipt, so a result that opened between two stages was not explainable afterwards). None where there is no election or it cannot be read."""
+        try:
+            election = json.loads((self.gen / 'network' / 'pos-deployment.json').read_text())['election']
+            return f'openResult {self.view_text(election, "openResult()(bytes32)").strip()}, attemptCursor {self.view(election, "attemptCursor()(uint64)")[0]}'
+        except Exception:
+            return None
+
     def stage(self, name, fn):
         self.say(f'== {name}')
+        if name in POS_STAGE_NAMES and (state := self.election_state()):
+            self.say(f'  election at the start of {name}: {state}')
         try:
             fn()
         except Exception as error:   # a failed stage is recorded as failed, then the run stops: later stages depend on it
+            if name in POS_STAGE_NAMES and (state := self.election_state()):
+                self.say(f'  election at the failure of {name}: {state}')
             self.say(f'FAIL {name}: {error}')
             self.results.append((name, 'FAIL', str(error)))
             raise
+        if name in POS_STAGE_NAMES and (state := self.election_state()):
+            self.say(f'  election at the end of {name}: {state}')
         self.say(f'PASS {name}')
         self.results.append((name, 'PASS', ''))
 
@@ -1728,7 +1743,8 @@ Rehearsal.pos_joiner = pos_join.pos_joiner   # the joiner stages live in pos_joi
 Rehearsal.pos_owner = pos_owner.pos_owner   # the owner-key stage lives in pos_owner.py
 Rehearsal.pos_reject = pos_reject.pos_reject   # the automatic RejectResult (#857), opt-in: it waits out a reservation lifetime
 # The order here is the order they run in: --stages only selects. pos-join-heavy is before pos-restart: it needs the next election attempt, and a slow pos-restart can outlast the cadence, leaving an attempt open that never sees the joiner.
-POS_STAGES = (('pos-smoke', 'pos_smoke'), ('pos-observe', 'pos_observe'), ('pos-rewards', 'pos_rewards'), ('pos-joiner', 'pos_joiner'), ('pos-election', 'pos_election'), ('pos-reject', 'pos_reject'), ('pos-proposal', 'pos_proposal'), ('pos-abort', 'pos_abort'), ('pos-propose', 'pos_propose'), ('pos-too-late', 'pos_too_late'), ('pos-install', 'pos_install'), ('pos-advance', 'pos_advance'), ('pos-restore-repeat', 'pos_restore_repeat'), ('pos-join-signs', 'pos_join_signs'), ('pos-join-heavy', 'pos_join_heavy'), ('pos-restart', 'pos_restart'), ('pos-stale', 'pos_stale'), ('pos-handoff-2', 'pos_handoff_2'), ('pos-restart-2', 'pos_restart_2'), ('pos-recreate', 'pos_recreate'), *pos_crash.STAGES, ('pos-resources', 'pos_resources'), ('pos-owner', 'pos_owner'))
+POS_STAGES = (('pos-smoke', 'pos_smoke'), ('pos-observe', 'pos_observe'), ('pos-rewards', 'pos_rewards'), ('pos-joiner', 'pos_joiner'), ('pos-election', 'pos_election'), ('pos-reject', 'pos_reject'), ('pos-proposal', 'pos_proposal'), ('pos-abort', 'pos_abort'), ('pos-propose', 'pos_propose'), ('pos-too-late', 'pos_too_late'), ('pos-install', 'pos_install'), ('pos-advance', 'pos_advance'), ('pos-join-heavy', 'pos_join_heavy'), ('pos-restore-repeat', 'pos_restore_repeat'), ('pos-join-signs', 'pos_join_signs'), ('pos-restart', 'pos_restart'), ('pos-stale', 'pos_stale'), ('pos-handoff-2', 'pos_handoff_2'), ('pos-restart-2', 'pos_restart_2'), ('pos-recreate', 'pos_recreate'), *pos_crash.STAGES, ('pos-resources', 'pos_resources'), ('pos-owner', 'pos_owner'))
+POS_STAGE_NAMES = frozenset(n for n, _ in POS_STAGES)
 # Stages of the package built with --utb (the signed trust-base history, either aggregator): not in the hosted-runner rehearsal, whose package is the one without it. They run after the PoS stages.
 UTB_STAGES = (('utb-live', 'utb_live'),)
 
