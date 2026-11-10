@@ -208,13 +208,39 @@ class Rehearsal:
         self.chain_id, self.genesis = self.manifest['chain_id'], self.manifest['genesis_hash'].lower()
 
     # --- recording -------------------------------------------------------------------------------------------------------------
+    def scrub(self, text, patterns=False):
+        """`text` for the job log: every known secret literal of the generation replaced; with `patterns` (service log tails) also every line that matches a secret pattern
+        withheld. Fails closed: if the generation cannot be scanned, or a literal survives, the text is replaced by a notice; never raises. The scan is made once per
+        generation directory (a cache keyed by it), not per line."""
+        try:
+            if getattr(self, '_scrub_gen', None) != getattr(self, 'gen', None):
+                self._scrub_secrets, self._scrub_gen = known_secrets(self.gen), self.gen
+            secrets = self._scrub_secrets
+            lines = redact_log(text, secrets)[0] if patterns else self._literals(text, secrets)   # the driver's own words may contain 'token' or 'credential': only service tails get the patterns
+            body = '\n'.join(lines)
+            if any(secret in body for secret in secrets):
+                return '[output withheld: a known secret literal survived the redaction]'
+            return body
+        except Exception as error:
+            return f'[output withheld: the secret scan failed: {error}]'
+
+    @staticmethod
+    def _literals(text, secrets):
+        out = []
+        for line in text.splitlines():
+            for secret in sorted(secrets, key=len, reverse=True):
+                line = line.replace(secret, '[redacted]')
+            out.append(line)
+        return out
+
     def say(self, text):
-        line = f'{datetime.datetime.now(datetime.timezone.utc).strftime("%H:%M:%SZ")} {text}'
+        line = f'{datetime.datetime.now(datetime.timezone.utc).strftime("%H:%M:%SZ")} {self.scrub(text)}'
         print(line, flush=True)
         self.log.write(line + '\n')
         self.log.flush()
 
     def expect(self, condition, what, detail=''):
+        """A Failure's text is scrubbed where `stage` prints and records it, and a passing detail where `say` prints it; a service log tail is passed through `scrub(tail, True)` first."""
         if not condition:
             raise Failure(f'{what}' + (f': {detail}' if detail else ''))
         self.say(f'  ok   {what}' + (f' ({detail})' if detail else ''))
@@ -238,7 +264,7 @@ class Rehearsal:
             if name in POS_STAGE_NAMES and (state := self.election_state()):
                 self.say(f'  election at the failure of {name}: {state}')
             self.say(f'FAIL {name}: {error}')
-            self.results.append((name, 'FAIL', str(error)))
+            self.results.append((name, 'FAIL', self.scrub(str(error))))   # result.json is uploaded with the evidence
             raise
         if name in POS_STAGE_NAMES and (state := self.election_state()):
             self.say(f'  election at the end of {name}: {state}')
@@ -326,7 +352,7 @@ class Rehearsal:
             self.say('  not running: ' + ' '.join(missing()))
             self.say(self.compose('ps', '-a', check=False))
             for name in missing()[:4]:
-                self.say(f'--- last log of {name}\n' + self.compose('logs', '--no-color', '--tail', '25', name, check=False))
+                self.say(f'--- last log of {name}\n' + self.scrub(self.compose('logs', '--no-color', '--tail', '25', name, check=False), True))
             raise
         running = set(self.compose('ps', '--services', '--status', 'running').split())
         self.expect(True, 'every non-authority service except the signer is running', f'{len(start)} services')
@@ -1136,9 +1162,9 @@ class Rehearsal:
         record = self.observe_restore(i, 'main')
         logs = self.compose('logs', '--no-color', '--tail', '60', f'shard{i}', check=False)
         self.keep_redacted(self.evh() / f'joiner-shard-{i}-restore.log', logs)
-        self.say(f'  joiner shard {i} restoring after 30 s: {"running" if record["running"] else "NOT running"}: ' + ' | '.join(logs.strip().splitlines()[-3:])[-500:])
+        self.say(f'  joiner shard {i} restoring after 30 s: {"running" if record["running"] else "NOT running"}: ' + self.scrub(' | '.join(logs.strip().splitlines()[-3:])[-500:], True))
         self.keep_redacted(self.evh() / f'joiner-shard-{i}-restore-whole.log', self.compose('logs', '--no-color', '--timestamps', f'shard{i}', check=False))
-        self.expect(record['running'], f'the joiner\'s shard node {i} runs as a restore under its new session', logs.strip()[-500:])
+        self.expect(record['running'], f'the joiner\'s shard node {i} runs as a restore under its new session', self.scrub(logs.strip()[-500:], True))
 
     def pos_restore_repeat(self):
         """#905: the joiner's restore repeated at the package's pid limit, with the pid evidence of each, then at deliberately low limits as the control, then once more in full.

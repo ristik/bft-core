@@ -519,6 +519,39 @@ class ProofOfStake(unittest.TestCase):
         for g in (None,Path(tempfile.mkdtemp())):   # no generation, or a scan that finds nothing
             r=Fake(g); r.keep_stop_window(1,'t1 anything')
             self.assertFalse((r.evidence/'stop-window-2-v1.log').exists())
+    def test_the_driver_output_is_redacted_before_it_reaches_the_job_log(self):
+        import rehearse,io,contextlib
+        gen=self._secret_generation()
+        class Fake(rehearse.Rehearsal):
+            def __init__(self,g): self.gen,self.log,self.results=g,io.StringIO(),[]
+        def printed(r,fn):
+            out=io.StringIO()
+            with contextlib.redirect_stdout(out): fn()
+            return out.getvalue()+r.log.getvalue()
+        r=Fake(gen)
+        out=printed(r,lambda: r.say('relayer: exit 1: key hunter2-faucet-password rejected'))
+        self.assertNotIn('hunter2',out); self.assertIn('[redacted]',out)
+        out=printed(r,lambda: r.say(r.scrub('the token is checked\nservice line hunter2-faucet-password\nprivate_key=abc',True)))
+        self.assertNotIn('hunter2',out); self.assertNotIn('private_key',out); self.assertIn(rehearse.WITHHELD_LINE,out)
+        self.assertIn('the token is checked',printed(r,lambda: r.say('the token is checked')),'the driver\'s own words are not withheld by pattern')
+        def failing_stage():
+            raise rehearse.Failure('ubft: exit 1: hunter2-faucet-password')
+        with contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaises(rehearse.Failure): r.stage('s',failing_stage)
+        self.assertNotIn('hunter2',r.log.getvalue()); self.assertNotIn('hunter2',r.results[-1][2])
+        calls=[]
+        orig=rehearse.known_secrets
+        with patch('rehearse.known_secrets',lambda g: calls.append(g) or orig(g)):
+            r=Fake(gen)
+            for _ in range(5): printed(r,lambda: r.say('a line'))
+        self.assertEqual(len(calls),1,'the generation is scanned once, not per line')
+        for g in (Path(tempfile.mkdtemp()),Path(tempfile.mkdtemp())/'missing'):   # a scan that finds nothing or fails: the text is withheld, nothing raises
+            r=Fake(g); out=printed(r,lambda: r.say('stderr hunter2-faucet-password'))
+            self.assertNotIn('hunter2',out); self.assertIn('output withheld',out)
+        r=Fake(gen)
+        with patch('rehearse.redact_log',lambda text,secrets=(): (text.splitlines(),0,0)):
+            out=printed(r,lambda: r.say(r.scrub('x hunter2-faucet-password',True)))
+        self.assertNotIn('hunter2',out,'a literal that survives the redaction is withheld')
     def test_compose_logs_are_redacted_or_withheld_before_upload(self):
         import redact_evidence
         gen=self._secret_generation()
