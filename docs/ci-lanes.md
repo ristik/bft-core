@@ -40,8 +40,10 @@ in `build-tools`; the run job's preflight checks its recorded result for this ve
 
 ## Pins
 
-`scripts/ci/lane-pins.json` is the reviewed input manifest: full commits of ureth, aggregator-go, contracts, native-bridge-plugins and the JS SDK, the
+`scripts/ci/lane-pins.json` is the reviewed input manifest: full commits of ureth, aggregator-go, contracts, native-bridge-plugins and the JS SDK (and of bft-core itself, below), the
 Rust / Go / Node versions, the Foundry release and its archive digest, the Mongo image digest. It is **not** `deploy/testnet/pins.json`.
+
+**Pinned product (campaign runs).** `components["bft-core"]` is the frozen PoS release product commit. A pull request, the nightly and a default dispatch build `ubft` and the Go tools from the commit under test and never read it. A dispatch with `product: pinned`, or `"product": "pinned"` in `scripts/ci/run-inputs.json` of a `ci-lane-run/**` branch, builds them instead from a separate clean checkout of exactly that commit (`build-tools.sh` with `PRODUCT_DIR`, verified by `check-pins.sh git bft-core`); the harness (workflow, scripts, self-tests) stays the commit under test. The tools artifact records `product-commit.txt`; the run job accepts a product that is not the commit under test only when it equals the pin, and exports it as `LANE_PRODUCT_COMMIT`, which the binaries' stamp checks in the lane preflights use in place of HEAD. The plan's job summary records `product: pinned`.
 `scripts/ci/check-pins.sh` verifies each downloaded or built component against it and refuses a wrong pin (`check-pins.sh selftest` is the negative test);
 `LANE_PINNED=1` makes `utb-lane.sh`'s preflight use these checks instead of live `gh pr view` queries and branch-tip ancestry
 (`HEAD` is the recorded commit under test; an unpinned checkout is refused). The ureth binary is re-verified on download: its sha256 against

@@ -88,6 +88,13 @@ case "${1:-}" in
     n=$((n + 1)); if "$0" t6 >/dev/null 2>&1; then echo "  ok    the T6 script's defaults match the record"; else echo "  FAIL  the T6 script's defaults do not match the record"; fails=$((fails + 1)); fi
     jq '.t6.contracts.commit="0123456789abcdef0123456789abcdef01234567"' "$PINS" >"$t/t6a.json"; jq '.t6.foundry.linuxSha256="00"' "$PINS" >"$t/t6b.json"
     for m in t6a t6b; do n=$((n + 1)); if PINS=$t/$m.json "$0" t6 >/dev/null 2>&1; then echo "  FAIL  a T6 record that differs from the script ($m) was accepted"; fails=$((fails + 1)); else echo "  ok    a T6 record that differs from the script ($m) is refused"; fi; done
+    # the campaign's product pin (product=pinned): the real manifest carries a full bft-core commit; a product checkout at it is accepted by name, one elsewhere (the harness) is refused
+    n=$((n + 1)); if [[ "$(pin_of bft-core)" =~ ^[0-9a-f]{40}$ ]]; then echo "  ok    the manifest pins bft-core to a full commit"; else echo "  FAIL  the manifest has no full bft-core commit"; fails=$((fails + 1)); fi
+    mkdir "$t/product" && git -C "$t/product" init -q && git -C "$t/product" -c user.email=a@b -c user.name=a commit -q --allow-empty -m p
+    printf '{"components":{"bft-core":{"commit":"%s"}}}\n' "$(git -C "$t/product" rev-parse HEAD)" >"$t/pins5.json"
+    n=$((n + 1)); if PINS=$t/pins5.json "$0" git bft-core "$t/product" >/dev/null 2>&1; then echo "  ok    a product checkout at the bft-core pin is accepted"; else echo "  FAIL  a product checkout at the bft-core pin was refused"; fails=$((fails + 1)); fi
+    printf '{"components":{"bft-core":{"commit":"%s"}}}\n' "$good" >"$t/pins6.json"
+    n=$((n + 1)); if PINS=$t/pins6.json "$0" git bft-core "$t/product" >/dev/null 2>&1; then echo "  FAIL  a checkout that is not the bft-core pin was accepted as the product"; fails=$((fails + 1)); else echo "  ok    a checkout that is not the bft-core pin is refused as the product"; fi
     echo "check-pins self-test: $n cases, $fails failures"; [ "$fails" -eq 0 ]; exit $? ;;
   *) echo "usage: $0 component NAME VALUE | git NAME DIR | env | env-core | t6 | selftest" >&2; exit 2 ;;
 esac
