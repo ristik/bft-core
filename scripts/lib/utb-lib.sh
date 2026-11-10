@@ -308,7 +308,7 @@ utb_step_u4() {
 # post-recovery certificate's unknown epoch, fetches the entries from the aggregator's GetTrustBase endpoint (the SDK's own fetch-and-retry loop) and verifies it.
 utb_step_u4b() {
   local out; out=$(utb_dir); mkdir -p "$out/sdk"
-  [ -f "${UTB_SDK_JS:?UTB_SDK_JS (a built state-transition-sdk-js checkout) is not set}/lib/util/TrustBaseUtils.js" ] || { echo "UTB_SDK_JS ($UTB_SDK_JS) is not a built SDK (npm ci && npm run build)" >&2; return 1; }
+  [ -f "${UTB_SDK_JS:?UTB_SDK_JS (a built state-transition-sdk-js checkout) is not set}/lib/api/bft/verification/verifyWithUpdate.js" ] || { echo "UTB_SDK_JS ($UTB_SDK_JS) is not a built SDK (npm ci && npm run build)" >&2; return 1; }
   git -C "$UTB_SDK_JS" rev-parse HEAD >"$out/sdk/sdk-commit.txt" 2>/dev/null || { echo "UTB_SDK_JS is not a git checkout" >&2; return 1; }
   node "$PWD/scripts/utb-sdk-client/check.mjs" --sdk "$UTB_SDK_JS" --url "http://127.0.0.1:$(agg_port 1)" --genesis test-nodes/utb-genesis.cbor --pin "$(utb_pin)" \
     --uc "$out/proofs/post-recovery-token.cbor" --expect-tip 3 --entry "2=$out/entries/ordinary-handoff.cbor" --entry "3=$out/entries/recovery.cbor" --out "$out/sdk/client.log" || return 1
