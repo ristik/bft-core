@@ -599,9 +599,17 @@ class BridgePos:
         published = {int(f.stem.rsplit('-', 1)[1]): f for f in handoff.glob('shard-conf-*.json') if f.stem.rsplit('-', 1)[1].isdigit()}
         newest = max(published)
         conf = lockproof_conf((work / POS_WALLET / 'tokens' / token / 'lockproof.cbor').read_bytes())
+        # the newest published file's hash as dnb-tool computes it (dnb-tool pdr, the CBOR the endpoint keys), next to D's commitment
+        from deploy_bridge import tools
+        conf['newestFile'] = published[newest].name
+        conf['newestFileSha256'] = tools(self.gen, 'sh', '-c', f"dnb-tool pdr --full-shard-conf /gen/network/handoff/{published[newest].name} --out /tmp/p "
+                                                              "&& sha256sum /tmp/p", capture=True).split()[0]
+        # the endpoint's own account of D (configuration loads, rescans, any refused request): kept, since the tester also retries a 502
+        (self.evidence / 'pos-bridge').mkdir(parents=True, exist_ok=True)
+        (self.evidence / 'pos-bridge' / 'lockproof-endpoint.log').write_text(self.bridge_compose('logs', '--no-color', '--timestamps', 'lockproof'))
         started = endpoint['startedAt']
         published_at = time.strftime('%Y-%m-%dT%H:%M:%S', time.gmtime(published[newest].stat().st_mtime))
-        self.expect(conf['ucShardConfHash'] == conf['pdrSha256'] and conf['pdrPartition'] == 8 and conf['pdrEpoch'] == newest and newest >= 2
+        self.expect(conf['ucShardConfHash'] == conf['pdrSha256'] == conf['newestFileSha256'] and conf['pdrPartition'] == 8 and conf['pdrEpoch'] == newest and newest >= 2
                     and published_at > started[:19],
                     f'token D\'s lock UC commits to the shard configuration of epoch {newest}, the one the second handoff published at {published_at}, '
                     f'after the endpoint started ({started[:19]}): found without a restart', json.dumps(conf))
