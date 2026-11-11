@@ -110,8 +110,10 @@ class GuardTests(unittest.TestCase):
             other = dict(body, address='0x' + '58'*20)
             # A definite signer refusal (captcha failed or rate limited) releases the reservation.
             backend.side_effect = signer_status(429)
+            calls = backend.call_count
             self.assertEqual(claim(body), 429)
             self.assertEqual(claim(body), 429)
+            self.assertEqual(backend.call_count, calls + 2)  # both reached the signer
             with self.guard.db() as db:
                 self.assertEqual(db.execute('SELECT count(*) FROM claims').fetchone()[0], 0)
             # Any other signer error stays uncertain and keeps the reservation.
