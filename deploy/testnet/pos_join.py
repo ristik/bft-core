@@ -85,6 +85,7 @@ def pos_joiner(r):
     fd = os.open(identity, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, 'w') as out:
         json.dump(joiner_file(owner['private_key'], root_key, withdrawal, payee, info['root'], info['evm']), out)
+    r.rescan()   # the identity file and the joiner's authority credentials are secrets the generation scan did not see at the start
     r.faucet_send(owner['address'], BOND_UNIT + 10 ** 18)   # the one bond unit and the gas of three transactions
     mounts = [f'{val / "auth"}:/auth']
     evm = ['--evm-authority-socket', '/auth/operator.sock', '--evm-authority-credential', '/auth/operator.cred']
@@ -122,8 +123,8 @@ def pos_joiner(r):
     running = f'shard{index}' in compose(r, 'ps', '--status', 'running', '--services').split()
     logs = compose(r, 'logs', '--no-color', '--tail', '40', f'shard{index}', check=False)
     r.keep_redacted(r.evidence / f'shard{index}-start.log', logs)
-    r.say(f'  shard{index} after 15 s: {"running" if running else "NOT running"}; last lines: ' + ' | '.join(logs.strip().splitlines()[-4:])[-600:])
-    r.expect(running, f'the joiner\'s shard node stays up as a staging-only node', logs.strip()[-600:])
+    r.say(f'  shard{index} after 15 s: {"running" if running else "NOT running"}; last lines: ' + r.scrub(' | '.join(logs.strip().splitlines()[-4:])[-600:], True))
+    r.expect(running, f'the joiner\'s shard node stays up as a staging-only node', r.scrub(logs.strip()[-600:], True))
     r.n = index   # from here every stage of this run counts the joiner: its services are in compose_files, its pod in the transport
     r.joiners.add(index)   # but not as a member of the committee that certifies: it follows until the handoff that names it activates
 
@@ -177,6 +178,7 @@ def pos_join_heavy(r):
     home.mkdir(mode=0o700, exist_ok=True)
     for kind, group in (('root', 'root-node'), ('evm', 'shard-node')):
         r.host_ubft(group, 'init', '--home', home / kind, '--generate')
+    r.rescan()   # the new key files below are secrets from here on
     keys = {kind: json.loads((home / kind / 'keys.json').read_text())['sigKey']['privateKey'] for kind in ('root', 'evm')}
     node = {kind: r.host_ubft('node-id', '--home', home / kind).strip().splitlines()[-1] for kind in ('root', 'evm')}
     owner, withdrawal, payee = new_wallet(r), new_wallet(r)['address'], new_wallet(r)['address']
@@ -184,6 +186,7 @@ def pos_join_heavy(r):
     fd = os.open(identity, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, 'w') as out:
         json.dump(dict(joiner_file(owner['private_key'], keys['root'], withdrawal, payee, node['root'], node['evm']), evmKey=keys['evm']), out)
+    r.rescan()
     r.faucet_send(owner['address'], 2 * BOND_UNIT + 10 ** 18)
     status, out = r.relayer(identity, 'join', 'register', joiner=True)
     found = re.search(r'custody id (\d+)', out)
