@@ -92,13 +92,15 @@ Each claim is 0.01 UCT (18 decimals), one reservation per normalized address and
 IP per rolling 24 hours, with at most 100 reservations (1 UCT) in any 24 hours.
 The signer additionally enforces upstream's address/IP limits and verifies
 hCaptcha. Gateway reservations survive process/container restarts and are committed
-**before** submitting to the signer. Failed CAPTCHA tokens, backend failures and
-ambiguous timeouts consume a reservation, intentionally. A client can receive
+**before** submitting to the signer. Backend failures and ambiguous timeouts
+consume a reservation, intentionally. A signer 429 (failed CAPTCHA or its own rate
+limit, both answered before any transfer) releases the reservation. A client can receive
 503 after a transaction was accepted; inspect the wallet/chain before intervening.
 Never automatically replay a request. Shared NAT users share the IP cap.
 
 400 means malformed address/body or missing CAPTCHA; 409 means the client network
-pin differs; 429 means address/IP/global reservation limits; 503 means unavailable,
+pin differs; 429 means address/IP/global reservation limits, or a failed CAPTCHA
+(retry allowed); 503 means unavailable,
 exhausted, mismatched backend/network or uncertain submission. A 200 response
 contains the broadcast transaction hash, not a finality guarantee. Check its
 successful receipt and certified/finalized state before relying on the funds.

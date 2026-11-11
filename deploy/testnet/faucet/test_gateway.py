@@ -100,6 +100,29 @@ class GuardTests(unittest.TestCase):
             self.assertEqual(claim(body), 503)
             self.assertEqual(claim(body), 429)
 
+            def signer_status(code):
+                def fail(*args):
+                    raise urllib.error.HTTPError('http://signer/api/claim', code, 'signer', {}, None)
+                return fail
+
+            with self.guard.db() as db:
+                db.execute('DELETE FROM claims')
+            other = dict(body, address='0x' + '58'*20)
+            # A definite signer refusal (captcha failed or rate limited) releases the reservation.
+            backend.side_effect = signer_status(429)
+            self.assertEqual(claim(body), 429)
+            self.assertEqual(claim(body), 429)
+            with self.guard.db() as db:
+                self.assertEqual(db.execute('SELECT count(*) FROM claims').fetchone()[0], 0)
+            # Any other signer error stays uncertain and keeps the reservation.
+            backend.side_effect = signer_status(500)
+            self.assertEqual(claim(body), 503)
+            backend.side_effect = None
+            self.assertEqual(claim(body), 429)
+            self.assertEqual(claim(other), 429)
+            with self.guard.db() as db:
+                self.assertEqual(db.execute('SELECT count(*) FROM claims').fetchone()[0], 1)
+
 
 class RelayTests(unittest.TestCase):
     def test_geth_zero_argument_rpc_omits_params(self):

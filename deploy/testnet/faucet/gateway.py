@@ -92,6 +92,12 @@ class Guard:
             db.execute('INSERT INTO claims VALUES (?, ?, ?)', (time.time(), address, ip))
         return True
 
+    def release(self, address, ip):
+        # Only for a definite refusal by the signer (nothing was sent). reserve() admits at
+        # most one live row per address and per IP, so this deletes exactly that reservation.
+        with self.db() as db:
+            db.execute('DELETE FROM claims WHERE address=? AND ip=?', (address, ip))
+
 
 class Handler(http.server.BaseHTTPRequestHandler):
     def reply(self, code, data):
@@ -160,9 +166,19 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if not guard.reserve(address.lower(), ip):
                 self.reply(429, dict(message='One claim per address and IP per 24 hours; daily total capped'))
                 return
-            result = request(cfg['backend_url'] + '/api/claim', {'address': address},
-                             {'Content-Type': 'application/json', 'h-captcha-response': token,
-                              'X-Forwarded-For': ip})
+            try:
+                result = request(cfg['backend_url'] + '/api/claim', {'address': address},
+                                 {'Content-Type': 'application/json', 'h-captcha-response': token,
+                                  'X-Forwarded-For': ip})
+            except urllib.error.HTTPError as error:
+                # The pinned signer answers 429 only from its captcha and rate-limit
+                # middlewares, which run before the transfer handler: nothing was sent.
+                if error.code != 429:
+                    raise
+                error.close()
+                guard.release(address.lower(), ip)
+                self.reply(429, dict(message='Captcha verification failed or rate limited; try again'))
+                return
             self.reply(200, result)
         except Exception as error:
             # Never echo upstream errors (RPC credentials, internal URLs, signer details).
