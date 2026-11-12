@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """Fresh disposable genesis and N-validator Compose package; never reuses a home."""
 import argparse
+from decimal import Decimal, InvalidOperation
 import hashlib
+import ipaddress
 import json
 import os
 from pathlib import Path
@@ -30,6 +32,57 @@ EVM_CONTINUITY_MAX_DISTANCE = '1/2'
 # nodes' Update admission, exactly as scripts/dnb-devnet.sh and the Q3 lanes use it. W_cert is the lanes' value.
 # B (epochs one block may install) and the P85 evidence/hold windows; certificate age no longer expires, so there is no W_cert.
 MAX_EPOCHS, DELTA_EV, DELTA_HOLD = 2, 16, 17
+
+# The faucet (faucet/README.md): one claim pays FAUCET_PAYOUT UCT; the faucet account starts with FAUCET_BALANCE UCT (keygen's default too). 200 UCT covers a
+# demo wallet's 100 UCT bond plus gas (owner decision 2026-11-12); 50,000 UCT is 250 claims, five days at 50 a day.
+FAUCET_PAYOUT, FAUCET_BALANCE, FAUCET_DAILY_CLAIMS = '200', '50000', 50
+# The two bridged networks whose gateway address a service trusts as its proxy: the faucet guard trusts the faucet network's gateway, the RPC gateway and the
+# lock-proof endpoint trust the edge network's (the address the host's nginx reaches published ports from). Docker refuses a second network on a subnet in
+# use, also by a stopped generation's networks, so two generations on one host need different subnets (--faucet-subnet, --edge-subnet).
+DEFAULT_SUBNETS = {'faucet': '172.30.88.0/24', 'edge': '172.30.89.0/24'}
+
+def uct_wei(text, what):
+    """Wei of a decimal number of UCT (18 decimals), exactly: '200' -> 200 * 10**18. Refuses anything else."""
+    if not isinstance(text, str) or not re.fullmatch(r'[0-9]+(\.[0-9]+)?', text): raise ValueError(f'{what} must be a decimal number of UCT, got {text!r}')
+    try: wei = Decimal(text) * 10**18
+    except InvalidOperation: raise ValueError(f'{what} must be a decimal number of UCT, got {text!r}')
+    if wei <= 0 or wei != wei.to_integral_value(): raise ValueError(f'{what} must be positive with at most 18 decimals, got {text!r}')
+    return int(wei)
+
+def faucet_settings(payout, balance, daily_claims, per_ip=False):
+    """The faucet's settings, checked before any key exists: the network.json values (payout, its two-payout reserve, the daily cap, the per-IP limit) and the
+    faucet account's genesis balance in wei. The balance must pay at least one day's cap above the reserve."""
+    payout_wei, balance_wei = uct_wei(payout, '--faucet-payout'), uct_wei(balance, '--faucet-balance')
+    if not 1 <= daily_claims <= 10000: raise ValueError(f'--faucet-daily-claims must be 1..10000, got {daily_claims}')
+    reserve = 2 * payout_wei
+    if balance_wei < reserve + daily_claims * payout_wei:
+        raise ValueError(f'--faucet-balance {balance} UCT does not cover one day of claims ({daily_claims} x {payout} UCT) above the reserve of two payouts')
+    return {'network': {'payout': payout, 'minimum_balance_wei': reserve, 'daily_claims': daily_claims, 'limit_per_ip': bool(per_ip)}, 'balance_wei': balance_wei}
+
+def bridged_subnets(faucet=DEFAULT_SUBNETS['faucet'], edge=DEFAULT_SUBNETS['edge']):
+    """{'faucet': {'subnet', 'gateway'}, 'edge': {...}}: private IPv4 networks of /16../28 that do not overlap, each gateway its first host address."""
+    out = {}
+    for name, text in (('faucet', faucet), ('edge', edge)):
+        try: net = ipaddress.ip_network(text, strict=True)
+        except ValueError as e: raise ValueError(f'--{name}-subnet {text!r}: {e}')
+        if net.version != 4 or not net.is_private or not 16 <= net.prefixlen <= 28:
+            raise ValueError(f'--{name}-subnet {text!r} must be a private IPv4 network of /16 to /28')
+        out[name] = {'subnet': str(net), 'gateway': str(net.network_address + 1)}
+    if ipaddress.ip_network(out['faucet']['subnet']).overlaps(ipaddress.ip_network(out['edge']['subnet'])):
+        raise ValueError('--faucet-subnet and --edge-subnet overlap')
+    return out
+
+def subnet_conflicts(wanted, existing):
+    """[(our network, docker network, its subnet)] for each of WANTED's subnets that overlaps one in EXISTING ({docker network name: [subnets]})."""
+    return [(name, other, sub) for name, n in wanted.items() for other, subs in sorted(existing.items()) for sub in subs
+            if ipaddress.ip_network(sub, strict=False).version == 4 and ipaddress.ip_network(n['subnet']).overlaps(ipaddress.ip_network(sub, strict=False))]
+
+def docker_subnets():
+    """{network name: [its IPAM subnets]} of every Docker network on this host, running or not (a stopped generation's networks still hold theirs)."""
+    ids = subprocess.check_output(['docker', 'network', 'ls', '-q'], text=True).split()
+    if not ids: return {}
+    nets = json.loads(subprocess.check_output(['docker', 'network', 'inspect', *ids], text=True))
+    return {n['Name']: [c['Subnet'] for c in ((n.get('IPAM') or {}).get('Config') or []) if c.get('Subnet')] for n in nets}
 
 def ureth_flags_of(profile_output):
     """The `ureth flags:` line `engine-api b1-profile` prints: the bindings that pin the paired client to the profile."""
@@ -106,8 +159,11 @@ def utb_node_flags(pin):
     if not re.fullmatch(r'0x[0-9a-f]{64}', pin): raise ValueError('the UTB genesis EntryID must be 0x followed by 64 lowercase hex digits')
     return ['--utb-genesis', UTB_GENESIS_FILE, '--utb-genesis-id', pin, '--utb-entries-db', UTB_ENTRIES_DB]
 
-def topology(out, n, ids, images, captcha, ureth_flags=(), max_gas=30000000, with_pos=False, rpc_bind=operator_rpc.DEFAULT_BIND, utb=None, utb_aggregator='integration'):
-    """JSON is a YAML subset, accepted directly by Docker Compose. `utb`: the pinned EntryID of the UTB genesis entry (0x..), or None for the package without the signed history."""
+def topology(out, n, ids, images, captcha, ureth_flags=(), max_gas=30000000, with_pos=False, rpc_bind=operator_rpc.DEFAULT_BIND, utb=None, utb_aggregator='integration', *,
+             payout=FAUCET_PAYOUT, subnets=None):
+    """JSON is a YAML subset, accepted directly by Docker Compose. `utb`: the pinned EntryID of the UTB genesis entry (0x..), or None for the package without the signed history.
+    `payout`: the faucet signer's payout per claim (UCT, network.json's). `subnets`: bridged_subnets(), the faucet and edge networks."""
+    subnets = subnets or bridged_subnets()
     services = {}
     def service(name, image, command, mounts=(), memory='256m', cpu=0.5, networks=None, pod=None, **extra):
         # `pod`: the service joins the network namespace of that holder (network_mode), so it has no networks or DNS name of its own
@@ -179,11 +235,11 @@ def topology(out, n, ids, images, captcha, ureth_flags=(), max_gas=30000000, wit
     services['mongo']['stop_grace_period']='30s'   # a clean mongod shutdown before backup.py archives the stopped generation
     service('aggregator',node,['aggregator'],['./aggregator:/state:ro',network]+(['./aggregator-utb:'+UTB_AGGREGATOR_DIR] if utb and utb_aggregator == 'integration' else []),memory='512m',cpu=0.75,pod='pod1',
         environment=aggregator_environment(root_boot,rpc_bind,utb,utb_aggregator),depends_on={'mongo':{'condition':'service_healthy'}})
-    service('rpc',images['rpc'],['python3','-u','gateway.py'],[network],memory='128m',networks=['validators','edge'],environment={'TRUSTED_PROXY_IP':'172.30.89.1'},
+    service('rpc',images['rpc'],['python3','-u','gateway.py'],[network],memory='128m',networks=['validators','edge'],environment={'TRUSTED_PROXY_IP':subnets['edge']['gateway']},
         ports=['127.0.0.1:8545:8545'],healthcheck={'test':['CMD','python3','-c',"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8545/healthz', timeout=10)"],'interval':'30s','timeout':'12s','retries':3})
     service('relay',images['guard'],['python3','-u','relay.py'],['./network/network.json:/config/network.json:ro'],memory='128m',networks=['validators','faucet'])
     service('signer',images['signer'],['/bin/sh','/app/backend-entrypoint.sh'],memory='512m',networks=['faucet'],
-        environment={'WEB3_PROVIDER':'http://relay:8545','HCAPTCHA_SITEKEY':captcha},secrets=['faucet_keystore','faucet_password','hcaptcha_secret'])
+        environment={'WEB3_PROVIDER':'http://relay:8545','HCAPTCHA_SITEKEY':captcha,'FAUCET_PAYOUT':payout},secrets=['faucet_keystore','faucet_password','hcaptcha_secret'])
     service('faucet',images['guard'],['python3','-u','gateway.py'],['./network/network.json:/config/network.json:ro','./claims:/state'],
         memory='128m',networks=['faucet'],ports=['127.0.0.1:8088:8080'],depends_on=['signer'])
     service('prometheus','prom/prometheus:v3.2.1@sha256:6927e0919a144aa7616fd0137d4816816d42f6b816de3af269ab065250859a62',
@@ -191,7 +247,7 @@ def topology(out, n, ids, images, captcha, ureth_flags=(), max_gas=30000000, wit
         ['./monitoring/prometheus.json:/etc/prometheus/prometheus.json:ro','./monitoring/alerts.json:/etc/prometheus/alerts.json:ro','./metrics:/prometheus'],
         memory='256m',networks=['validators','faucet'],user='10001:10001',ports=['127.0.0.1:9090:9090'])
     return {'name':out.name,'services':services,
-        'networks':{'validators':{'internal':True},'aggregator':{'internal':True},'faucet':{'ipam':{'config':[{'subnet':'172.30.88.0/24','gateway':'172.30.88.1'}]}},'edge':{'ipam':{'config':[{'subnet':'172.30.89.0/24','gateway':'172.30.89.1'}]}}},
+        'networks':{'validators':{'internal':True},'aggregator':{'internal':True},'faucet':{'ipam':{'config':[dict(subnets['faucet'])]}},'edge':{'ipam':{'config':[dict(subnets['edge'])]}}},
         'secrets':{'faucet_keystore':{'file':'./faucet-secrets/keystore.json'},'faucet_password':{'file':'./faucet-secrets/password'},
                    'hcaptcha_secret':{'file':'./faucet-secrets/hcaptcha-secret'}}}
 
@@ -215,7 +271,17 @@ def main():
     p.add_argument('--utb-aggregator',choices=('integration','upstream'),default='integration',help='with --utb: which aggregator the images carry (build-images.py --aggregator-variant): the integration aggregator (genesis entry file, own store) or the upstream-facing one (one-entry bundle, expected network, history in its MongoDB)')
     p.add_argument('--captcha-sitekey',required=True)
     p.add_argument('--captcha-secret-file',required=True,type=Path)
+    p.add_argument('--faucet-payout',default=FAUCET_PAYOUT,help=f'UCT per faucet claim, decimal (default {FAUCET_PAYOUT}): the signer\'s payout and the guard\'s check of it')
+    p.add_argument('--faucet-balance',default=FAUCET_BALANCE,help=f'the faucet account\'s genesis balance, UCT, decimal (default {FAUCET_BALANCE})')
+    p.add_argument('--faucet-daily-claims',type=int,default=FAUCET_DAILY_CLAIMS,help=f'claims in any 24 hours (default {FAUCET_DAILY_CLAIMS})')
+    p.add_argument('--faucet-per-ip-limit',action='store_true',help='also one claim per client IP per 24 hours (off by default: clients behind one NAT would share a claim)')
+    p.add_argument('--faucet-subnet',default=DEFAULT_SUBNETS['faucet'],help=f'the faucet network (default {DEFAULT_SUBNETS["faucet"]}); its first address is the guard\'s trusted proxy')
+    p.add_argument('--edge-subnet',default=DEFAULT_SUBNETS['edge'],help=f'the edge network (default {DEFAULT_SUBNETS["edge"]}); its first address is the RPC gateway\'s and the lock-proof endpoint\'s trusted proxy')
     a=p.parse_args()
+    try:
+        faucet=faucet_settings(a.faucet_payout,a.faucet_balance,a.faucet_daily_claims,a.faucet_per_ip_limit)
+        subnets=bridged_subnets(a.faucet_subnet,a.edge_subnet)
+    except ValueError as e: p.error(str(e))
     if a.pos and a.pos_contracts is None: p.error('--pos needs --pos-contracts')
     try: operator_rpc.check_bind(a.rpc_bind)
     except operator_rpc.BindError as e: p.error(str(e))
@@ -250,6 +316,9 @@ def main():
         subprocess.run(['docker','info'],check=True,stdout=subprocess.DEVNULL)
         for image in records['images'].values():
             subprocess.run(['docker','image','inspect',image],check=True,stdout=subprocess.DEVNULL)
+        # before any key: compose would fail only at `up`, after the authorities hold their keys in memory (the 2026-11-12 dev generation hit this)
+        clash=subnet_conflicts(subnets,docker_subnets())
+        if clash: p.error('subnet in use: '+'; '.join(f'--{ours}-subnet overlaps Docker network {other} ({sub})' for ours,other,sub in clash)+'. Choose free subnets, or remove that (stopped) generation\'s network.')
     os.umask(0o077)
     processes=[]
     with tempfile.TemporaryDirectory(prefix='tn-',dir='/tmp') as tmp:
@@ -294,7 +363,7 @@ def main():
                 (out/f'validator{i}').mkdir()
                 auth=out/f'validator{i}/auth'; auth.mkdir()
                 cli('signing-authority','credential','--out',auth/'operator.cred')
-            write(out/'compose.yaml',topology(out,a.validators,{'root':roots,'evm':evms},records['images'],a.captcha_sitekey))
+            write(out/'compose.yaml',topology(out,a.validators,{'root':roots,'evm':evms},records['images'],a.captcha_sitekey,payout=a.faucet_payout,subnets=subnets))
             def authority(i,*args):
                 auth=out/f'validator{i}/auth'
                 if a.offline_validation:
@@ -345,7 +414,8 @@ def main():
             if genesis: print(genesis.check_hook_gas(home/'b1-profile.json'))
             flags=ureth_flags_of(profile_out)
             max_gas=int(json.loads((home/'b1-profile.json').read_text())['maxGas'])
-            alloc=json.loads(subprocess.check_output([str(a.keygen.resolve()),str(home/'faucet-secrets')],text=True))
+            alloc=json.loads(subprocess.check_output([str(a.keygen.resolve()),str(home/'faucet-secrets'),str(faucet['balance_wei'])],text=True))
+            if [v.get('balance') for v in alloc.values()] != [str(faucet['balance_wei'])]: raise SystemExit('keygen did not fund the faucet account with --faucet-balance')
             write(home/'funded.json',funded_base_genesis(a.chain_id,max_gas,alloc,secrets.token_hex(32)))
             if genesis:
                 # The id of the custody genesis is the FULL configuration's: finalize once without the PoS accounts, take the id from that configuration, then add the accounts.
@@ -428,12 +498,14 @@ def main():
             {'alert':'TestnetRPCFailures','expr':'increase(tn_rpc_upstream_errors_total[5m]) > 0','labels':{'severity':'warning'},'annotations':{'summary':'RPC identity or upstream failures'}}]}]})
         network=json.loads((HERE/'faucet/network.example.json').read_text())
         network.update(chain_id=a.chain_id,genesis_hash='0x'+block,funding_address=next(iter(alloc)),
-            validator_rpc_urls=[f'http://ureth{i}:8545' for i in range(1,a.validators+1)],captcha_sitekey=a.captcha_sitekey)
+            validator_rpc_urls=[f'http://ureth{i}:8545' for i in range(1,a.validators+1)],captcha_sitekey=a.captcha_sitekey,
+            trusted_proxy_ip=subnets['faucet']['gateway'],**faucet['network'])
         write(out/'network/network.json',network)
         flags=[*flags,'--unicity.genesis-commitment='+genesis_commitment(json.loads((home/'genesis.json').read_text()))]
-        write(out/'compose.yaml',topology(out,a.validators,{'root':roots,'evm':evms},records['images'],a.captcha_sitekey,flags,max_gas,bool(genesis),a.rpc_bind,utb_pin,a.utb_aggregator))
+        write(out/'compose.yaml',topology(out,a.validators,{'root':roots,'evm':evms},records['images'],a.captcha_sitekey,flags,max_gas,bool(genesis),a.rpc_bind,utb_pin,a.utb_aggregator,payout=a.faucet_payout,subnets=subnets))
         manifest={'offline_validation_only':a.offline_validation,'generation':out.name,'chain_id':a.chain_id,'genesis_hash':'0x'+block,'validators':a.validators,'operator_rpc':{'bind':a.rpc_bind,'root_port':operator_rpc.ROOT_PORT,'shard_port':operator_rpc.SHARD_PORT},
             'faucet_address':next(iter(alloc)), 'artifacts':records,
+            'faucet':{**faucet['network'],'genesis_balance_wei':str(faucet['balance_wei'])},'networks':subnets,
             'utb':({'genesis_id':utb_pin,'genesis_sha256':hashlib.sha256((out/'network/utb-genesis.cbor').read_bytes()).hexdigest(),'genesis_file':'network/utb-genesis.cbor',
                     'aggregator':a.utb_aggregator,
                     **({'bundle_file':'network/utb-bundle.cbor','bundle_sha256':hashlib.sha256((out/'network/utb-bundle.cbor').read_bytes()).hexdigest(),'expected_network':TRUST_BASE_NETWORK_ID}

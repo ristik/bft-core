@@ -1,5 +1,6 @@
 """Network guard and durable budget for the pinned chainflag transfer service."""
 from contextlib import contextmanager
+from decimal import Decimal
 import http.server
 import ipaddress
 import json
@@ -10,6 +11,9 @@ import sqlite3
 import time
 import urllib.error
 import urllib.request
+
+
+PAYOUT = re.compile(r'[0-9]+(\.[0-9]+)?')
 
 
 def request(url, data=None, headers=None):
@@ -32,6 +36,9 @@ class Guard:
             raise ValueError('positive budget and reserve required')
         if not config.get('dev_only') and not config.get('captcha_sitekey'):
             raise ValueError('public faucet requires hCaptcha')
+        # The payout the signer must report (its -faucet.amount, UCT): one value, generate.py --faucet-payout, written here and into the signer's environment.
+        if not isinstance(config.get('payout'), str) or not PAYOUT.fullmatch(config['payout']) or Decimal(config['payout']) <= 0:
+            raise ValueError('payout required: a positive decimal number of UCT, as a string')
         self.state = state
         with self.db() as db:
             db.execute('CREATE TABLE IF NOT EXISTS identity (pin TEXT NOT NULL)')
@@ -65,7 +72,7 @@ class Guard:
         if self.rpc('eth_getBlockByNumber', ['0x0', False])['hash'].lower() != self.cfg['genesis_hash']:
             raise ValueError('RPC genesis mismatch')
         info = request(self.cfg['backend_url'] + '/api/info')
-        if info['account'].lower() != self.cfg['funding_address'].lower() or info['payout'] != '0.01':
+        if info['account'].lower() != self.cfg['funding_address'].lower() or not same_payout(info.get('payout'), self.cfg['payout']):
             raise ValueError('backend funding account or payout mismatch')
         if not self.cfg.get('dev_only') and info.get('hcaptcha_sitekey') != self.cfg['captcha_sitekey']:
             raise ValueError('backend captcha mismatch')
@@ -79,13 +86,18 @@ class Guard:
             raise ValueError('daily budget exhausted')
         return dict(status='ready', balance_wei=str(balance), remaining_claims=remaining)
 
+    def per_ip(self):
+        # Off by default (owner decision 2026-11-12): an audience behind one NAT would share one claim. Per address, the daily cap and hCaptcha stay.
+        return bool(self.cfg.get('limit_per_ip'))
+
     def reserve(self, address, ip):
         # Commit before calling the signer. Timeout/crash is ambiguous; never automatically
         # refund a reservation, which could permit a second transfer after a lost response.
         with self.db() as db:
             db.execute('BEGIN IMMEDIATE')
             db.execute('DELETE FROM claims WHERE ts <= ?', (time.time() - 86400,))
-            if db.execute('SELECT 1 FROM claims WHERE address=? OR ip=?', (address, ip)).fetchone():
+            taken = ('SELECT 1 FROM claims WHERE address=? OR ip=?', (address, ip)) if self.per_ip() else ('SELECT 1 FROM claims WHERE address=?', (address,))
+            if db.execute(*taken).fetchone():
                 return False
             if db.execute('SELECT count(*) FROM claims').fetchone()[0] >= self.cfg['daily_claims']:
                 return False
@@ -94,9 +106,14 @@ class Guard:
 
     def release(self, address, ip):
         # Only for a definite refusal by the signer (nothing was sent). reserve() admits at
-        # most one live row per address and per IP, so this deletes exactly that reservation.
+        # most one live row per address, so this deletes exactly that reservation.
         with self.db() as db:
             db.execute('DELETE FROM claims WHERE address=? AND ip=?', (address, ip))
+
+
+def same_payout(reported, configured):
+    """The signer's /api/info payout (Go's FormatFloat of -faucet.amount: '200', '0.01') against the configured one, as numbers."""
+    return isinstance(reported, str) and bool(PAYOUT.fullmatch(reported)) and Decimal(reported) == Decimal(configured)
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
@@ -119,7 +136,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.wfile.write(body)
         elif self.path == '/api/network':
             cfg = self.server.guard.cfg
-            self.reply(200, {k: cfg[k] for k in ('chain_id', 'genesis_hash', 'captcha_sitekey')})
+            self.reply(200, {**{k: cfg[k] for k in ('chain_id', 'genesis_hash', 'captcha_sitekey', 'payout')}, 'limit_per_ip': self.server.guard.per_ip()})
         elif self.path == '/healthz':
             try:
                 self.reply(200, self.server.guard.health())
@@ -164,12 +181,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
         try:
             guard.health()
             if not guard.reserve(address.lower(), ip):
-                self.reply(429, dict(message='One claim per address and IP per 24 hours; daily total capped'))
+                self.reply(429, dict(message=('One claim per address and IP per 24 hours; daily total capped' if guard.per_ip() else
+                                              'One claim per address per 24 hours; daily total capped')))
                 return
             try:
+                # The pinned signer keys its own 24 h limiter on the address AND on this header's value (proxycount 1). Without the per-IP limit the guard
+                # names the address there, so the signer's second key is the address too and clients behind one NAT are not limited together.
                 result = request(cfg['backend_url'] + '/api/claim', {'address': address},
                                  {'Content-Type': 'application/json', 'h-captcha-response': token,
-                                  'X-Forwarded-For': ip})
+                                  'X-Forwarded-For': ip if guard.per_ip() else address.lower()})
             except urllib.error.HTTPError as error:
                 # The pinned signer answers 429 only from its captcha and rate-limit
                 # middlewares, which run before the transfer handler: nothing was sent.
