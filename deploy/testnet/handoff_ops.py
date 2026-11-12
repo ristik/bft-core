@@ -282,6 +282,11 @@ def main():
     r.add_argument('flags', nargs=argparse.REMAINDER)
     a = p.parse_args()
     transport = DockerTransport(a.generation)
+    if a.action != 'abort':
+        import remote_entity   # an entity on another machine (remote_entity.py register): its root is reached through that machine's agent
+        remote = remote_entity.load(a.generation)
+        if remote:
+            transport = remote_entity.EntityTransport(transport, remote)
     if getattr(a, 'committee', None):
         transport.entities = sorted(int(x) for x in a.committee.split(','))
     if a.action == 'abort':
