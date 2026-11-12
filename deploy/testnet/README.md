@@ -267,6 +267,25 @@ the account that pays for the transaction):
 - `claim`: the payee, the sender being the payee (`--amount-wei`, `--to` the recipient). It pays out a credit the payee has earned.
 - `fund`: adds value to the pool (`--value-wei`). Only value sent through `fund` is allocated to rewards: a plain transfer to the pool address is not.
 
+## Driving a handoff (PoS profile)
+
+When the election reserves a result, the roots reject it unless its handoff is prepared within 16,384 registry progress rounds (about two hours). One host command
+drives it (owner decision 2026-11-12; no daemon yet, the command is its core):
+
+```bash
+sudo -E env "PATH=$PATH" python3 deploy/testnet/handoff_drive.py $G [<resultID>] --ubft $UBFT [--restore-pin $H4PIN] [--plan]
+```
+
+It runs OPERATOR.md 5b (the rehearsal's pos-proposal, pos-propose, pos-install and pos-advance) as the steps `preflight`, `trust-base`, `proposal`, `propose`,
+`install`, `advance`, `lockproof`, `verify`, each printed with its timing and recorded in `$G/handoff/log.jsonl` (event `drive`). After a failure the same
+command continues after the last completed step or sub-step (a root already installed, an entity already advanced). It refuses, and changes nothing, when the
+reservation has fewer than `--min-window-rounds` (1800) rounds left before the Prepare, or when the election's members are not the committee, a prepared joiner
+(`--joiner STAKINGID=ENTITY` or `$G/handoff/joiners.json`) or a retirement (`--allow-unrehearsed-retirement`: never rehearsed). Only roots are recreated (with
+`compose.install-epoch-N.json`) and shard nodes stopped and started; signing authorities are never restarted. The lock-proof endpoint is recreated only when it
+does not rescan `network/handoff` (#996). `verify` checks every root at the new epoch, the result Acknowledged (and the block that acknowledged it), the served
+`/api/v1/trustbases` history reaching the epoch (with `--utb`), new blocks and `recordCursor == recordCount`. `--plan` prints the result, the epochs, the change and
+the window. Unrelated no-change results that nobody drives keep being rejected in between; that is harmless.
+
 ## Observation/fault campaign and evidence limits
 
 Second operator records checkout, pins, image IDs/hashes, host specs, exact commands
