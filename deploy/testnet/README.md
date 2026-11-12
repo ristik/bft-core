@@ -286,6 +286,46 @@ does not rescan `network/handoff` (#996). `verify` checks every root at the new 
 `/api/v1/trustbases` history reaching the epoch (with `--utb`), new blocks and `recordCursor == recordCount`. `--plan` prints the result, the epochs, the change and
 the window. Unrelated no-change results that nobody drives keep being rejected in between; that is harmless.
 
+### A validator on another machine (a laptop behind NAT)
+
+`remote_joiner.py` (on the laptop) and `remote_entity.py` (on the host) add a fifth entity whose services run on a laptop's docker (colima on macOS was the
+target) and whose keys never leave it: root and shard node keys in docker volumes of the laptop's VM, the EVM key in its signing authority's memory, the owner,
+withdrawal and payee keys in a volume (`evm_keys.py`, standard library). Only public material crosses: node ids and node-info, trust bases and the joiner's
+signature, possession proofs, readiness receipts, shard configurations, the restore pin. The handoff drive runs each of that entity's per-entity steps (trust-base
+sign, evm-pop, sign-pop, q3-readiness, the root's install restart, complete-enrollment or advance-epoch and replace-session, the shard node's restore) through the
+laptop's agent instead of `docker compose exec`; `handoff_ops.py propose` reaches its root the same way once it is an incumbent.
+
+```bash
+python3 deploy/testnet/remote_joiner.py init --host $HOST --generation $GEN   # keys, volumes, compose.json; host: ~/rjoin/$GEN, relay container, registration
+python3 deploy/testnet/remote_joiner.py start                                 # peer stubs, pod, ureth, root (follower); agent + ssh tunnel under caffeinate
+python3 deploy/testnet/remote_joiner.py join [--stop-after bonded]            # host unit: fund, register, bond, [drive the open result], prepare, admit, drive
+```
+
+Network: one `ssh -N` from the laptop, with no TCP listener on the host and no sshd change (`GatewayPorts no` stays): the host container
+`<generation>-laptop-relay` (rpc image, `tunnel_relay.py`, uid of the ssh user, `--restart unless-stopped`) sits on the internal `validators` network with the
+aliases `root5`/`shard5` and joins TCP and Unix sockets in `~/rjoin/<generation>/sock/` (mode 0700):
+
+| laptop (127.0.0.1) | ssh | host socket | host target |
+|---|---|---|---|
+| 18001-18004 | -L | `root<i>.sock` | `root<i>:8000` |
+| 19001-19004 | -L | `shard<i>.sock` | `shard<i>:9000` |
+| 18541-18544 | -L | `ureth<i>.sock` | `ureth<i>:8545` (the join transactions, sent to every pool) |
+| 28000 (colima publishes `pod5:8000`) | -R | `root5.sock` | the relay's `root5:8000` |
+| 29000 (`pod5:9000`) | -R | `shard5.sock` | the relay's `shard5:9000` |
+| 28700 (the agent) | -R | `agent.sock` | the drive (root), bearer token |
+
+On the laptop, peer stubs `peer1..4` (aliases `root<i>`, `shard<i>`, `ureth<i>`) forward to the `-L` ports through `host.docker.internal`; the laptop's root and
+shard node announce `/dns4/root5/tcp/8000` and `/dns4/shard5/tcp/9000`. Operator RPCs (8002, 9101) never cross the tunnel.
+
+`join` funds the owner from the faucet account (100 UCT and gas; the faucet key stays on the host), registers and bonds (the laptop signs), and then prepares only
+right after an acknowledgement, driving an open result that predates the joiner first: the trust base of E+1 over the committee and the joiner, the joiner's
+authority started at that scope, `admitDelegation`. While `$G/handoff/remote-joiners/5.json` says `prepared`, `handoff_drive.py` refuses a result that leaves the
+joiner out (it would move the epoch past the authority's scope) unless `--allow-excluding-joiner`; `--require-member ENTITY` makes the same refusal explicit.
+
+With five unit weights the quorum is four: while the laptop is away the network has no fault tolerance left. Do not sleep the laptop, restart colima or its VM,
+or `docker compose down` its project: a restarted signing authority is a new EVM key that the delegation does not name, and nothing replaces it yet.
+`remote_entity.py retire-plan` prints the retirement sequence; nothing runs it (a retirement is still refused by default by the drive).
+
 ## Observation/fault campaign and evidence limits
 
 Second operator records checkout, pins, image IDs/hashes, host specs, exact commands
