@@ -558,6 +558,20 @@ func (s *Store) putJournalCandidate(ctx context.Context, c Context, limits Journ
 				return e
 			}
 		}
+		var durableUC *types.UnicityCertificate
+		var durableTR *certification.TechnicalRecord
+		if state.i.observed != nil {
+			durableUC, durableTR = state.i.observed.observation.Certificate(), state.i.observed.observation.TechnicalRecord()
+		}
+		// A local proposal for a round the root has closed (below the durable TR round) and that is not the round of the durable certified input
+		// record can never be certified, and it may stand in for a dead local proposal that evictDeadCandidates removed for the same
+		// authorization: every evicted round r has IR.RoundNumber < r < TR.Round at eviction, and since the root accepts no request for r after
+		// that, no later durable certificate has IR.RoundNumber == r. Declining it keeps the one-local-proposal-per-authorization rule across
+		// eviction (bft-core#1019).
+		if v.LocallyBuilt && !historical && w.Status == 0 && durableUC != nil && durableUC.InputRecord != nil && v.Round < durableTR.Round && v.Round != durableUC.InputRecord.RoundNumber {
+			return fmt.Errorf("%w: %w: local proposal for round %d is in a round the durable certificate closed (certified round %d, next round %d); refusing publication",
+				ErrConflict, ErrLocalProposalConflict, v.Round, durableUC.InputRecord.RoundNumber, durableTR.Round)
+		}
 		raw, err := encodeCandidate(w)
 		if err != nil {
 			return err
@@ -565,6 +579,18 @@ func (s *Store) putJournalCandidate(ctx context.Context, c Context, limits Journ
 		count, observed, n, err := journalCount(b)
 		if err != nil {
 			return err
+		}
+		if (count >= limits.Candidates || n+int64(len(key)+len(raw)) > limits.Bytes) && durableUC != nil {
+			// At the bound, first free the uncertified candidates the durable certificate proves dead (bft-core#1019).
+			evicted, e := evictDeadCandidates(b, durableUC, durableTR)
+			if e != nil {
+				return e
+			}
+			if evicted > 0 {
+				if count, observed, n, err = journalCount(b); err != nil {
+					return err
+				}
+			}
 		}
 		if count >= limits.Candidates || observed > limits.Observations || n+int64(len(key)+len(raw)) > limits.Bytes {
 			return journalFull(limits, int64(len(key)+len(raw)))
@@ -668,6 +694,31 @@ func (s *Store) appendJournalObservation(tx *bolt.Tx, pair *verifiedPair, dd [32
 	count, observed, n, err := journalCount(b)
 	if err != nil {
 		return err
+	}
+	if observed >= limits.Observations || n+int64(len(key)+len(raw)) > limits.Bytes {
+		// At the bound, first free the history this authenticated certificate supersedes (bft-core#1019): the uncertified candidates it proves
+		// dead (which also releases their authorizing observations), then the earlier repeats of the same certified input record.
+		evicted, e := evictDeadCandidates(b, uc, tr)
+		if e != nil {
+			return e
+		}
+		irBytes, e := canonicalIR(uc)
+		if e != nil {
+			return e
+		}
+		resolvedTarget := target
+		if w.Unresolved {
+			resolvedTarget = nil
+		}
+		superseded, e := evictSupersededObservations(b, key, uc.GetRootEpoch(), w.RootRound, resolvedTarget, irBytes)
+		if e != nil {
+			return e
+		}
+		if evicted+superseded > 0 {
+			if count, observed, n, err = journalCount(b); err != nil {
+				return err
+			}
+		}
 	}
 	if count > limits.Candidates || observed >= limits.Observations || n+int64(len(key)+len(raw)) > limits.Bytes {
 		return journalFull(limits, int64(len(key)+len(raw)))
