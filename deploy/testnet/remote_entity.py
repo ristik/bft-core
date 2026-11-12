@@ -380,7 +380,7 @@ class Join:
 
     def drive(self, result, *extra):
         """handoff_drive.py as a child (its own journal, resumable): returns its exit status."""
-        cmd = [sys.executable, str(self.here / 'handoff_drive.py'), str(self.gen), result, '--ubft', str(self.ubft), '--cast', self.cast,
+        cmd = [sys.executable, str(self.here / 'handoff_drive.py'), str(self.gen), *([result] if result else []), '--ubft', str(self.ubft), '--cast', self.cast,
                *(['--restore-pin', str(self.restore_pin)] if self.restore_pin else []), *extra]
         say('$ ' + ' '.join(cmd[1:]))
         return subprocess.run(cmd).returncode
@@ -403,7 +403,7 @@ class Join:
         if r.state == 'member':
             say('already a member: nothing to do')
             return 0
-        if st.get('follower') is not True:
+        if st.get('follower') is not True and r.state in ('registered', 'bonded'):
             raise RuntimeError('the laptop root does not report itself a follower: remote_joiner.py up, and check the tunnel')
         owner = r.info['accounts']['owner']
         # 1. funding: the bond unit and the gas of three transactions, from the faucet account (its key stays on the host; the drive's path)
@@ -465,6 +465,16 @@ class Join:
                     return 0
                 self.prepare(ident)
                 break
+        # a drive of the join that stopped after its Prepare (the journal's unfinished drive) is resumed, whatever result is open now
+        unfinished = self.hd.Journal(self.gen / 'handoff' / 'log.jsonl').last_drive()
+        if unfinished and ident in self.members_of(unfinished[0]):
+            say(f'resuming the unfinished drive of {unfinished[0]} to epoch {unfinished[1]}')
+            rc = self.drive(None, '--require-member', str(self.entity))
+            if rc != 0:
+                raise RuntimeError(f'handoff_drive stopped (exit {rc}): rerun the same command (the drive resumes from handoff/log.jsonl)')
+            self.save(state='member', memberSince=time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()))
+            say(f'DONE: entity {self.entity} (the laptop) is a member')
+            return 0
         # 4. the election's next result must name the joiner; then the drive, with this transport
         result = d.wait('the election reserves a result', lambda: d.open_result(), 1200)
         members = self.members_of(result)

@@ -385,7 +385,7 @@ class Drive(rehearse.Rehearsal):
         needed = {f'{role}{i}' for i in set(info['old']) | set(info['new']) for role in roles}
         if not needed <= running:
             raise Refused(f'entity services not running: {sorted(needed - running)}')
-        for i in self.joiners:
+        for i in (self.joiners if not info['proposed'] else ()):   # once proposed, the joiner's root has installed the new epoch: it is no follower any more
             status, body = self.transport.post(i, '/api/v1/q3/status', b'{}')
             if status != 200 or json.loads(body).get('follower') is not True:
                 raise Refused(f'joiner entity {i}: its root is not a follower ({status} {body[:200]!r}); start it as pos_join.py part 3 does')
