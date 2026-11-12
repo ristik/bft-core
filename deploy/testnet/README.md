@@ -329,7 +329,8 @@ result per hour, no drive log, and the unit does not fail.
 `bonded`, `prepared` or `retiring` (from `remote_joiner.py init` until the join's drive makes it a `member`), logging that once an hour: the join drives its own
 results, and a timer drive of a no-change result under a prepared joiner would move the epoch past its authority's scope. A timer pass that started just before
 the marker appeared can still hold the lock: the join's drives wait for it (exit 5, retried every 10 s for at most `--busy-wait`, 600 s). A joiner that never
-completes keeps the timer down: finish the join, or move its file aside, before relying on unattended handoffs again.
+completes keeps the timer down: finish the join, or move its file aside, before relying on unattended handoffs again. After a join the committee is
+[1..5]: a timer still on `--members 1,2,3,4` then skips every later result (one hourly line each), so restart it with the new `--members`.
 
 ### A validator on another machine (a laptop behind NAT)
 
