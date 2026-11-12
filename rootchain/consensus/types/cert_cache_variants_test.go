@@ -5,6 +5,7 @@ import (
 	"crypto"
 	"crypto/sha256"
 	"errors"
+	"slices"
 	"sort"
 	"sync"
 	"testing"
@@ -86,7 +87,8 @@ func TestCertCacheScheme2VoteAndSealMutationsAgreeWithTheVerifier(t *testing.T) 
 	s := tbs.TakeCertCacheStats()
 	require.Equal(t, 1, s.Hits[trustbase.CertQC], "the decoded copy of a scheme 2 certificate is a hit")
 
-	corrupt := func(m map[string]hex.Bytes, id string) { m[id] = append(hex.Bytes{0}, m[id][1:]...) }
+	// flip the first byte (never a no-op, unlike setting it to a constant the random signature may already have: a 1/256 flake)
+	corrupt := func(m map[string]hex.Bytes, id string) { sig := slices.Clone(m[id]); sig[0] ^= 0xff; m[id] = sig }
 	variants := map[string]func(c *QuorumCert){
 		"a vote signature":      func(c *QuorumCert) { corrupt(c.Signatures, r.ids[0]) },
 		"a seal signature":      func(c *QuorumCert) { corrupt(c.SealSignatures, r.ids[1]) },
@@ -151,7 +153,9 @@ func TestCertCacheUTBEnvelopeVariantsAgreeWithTheVerifier(t *testing.T) {
 	require.NoError(t, err)
 	variants := map[string]func(c *QuorumCert){
 		"an endorsement signature": func(c *QuorumCert) {
-			c.UTB.Signatures[r.ids[0]] = append(hex.Bytes{0}, c.UTB.Signatures[r.ids[0]][1:]...)
+			sig := slices.Clone(c.UTB.Signatures[r.ids[0]])
+			sig[0] ^= 0xff // flipped: setting a constant is a no-op when the random signature already has it
+			c.UTB.Signatures[r.ids[0]] = sig
 		},
 		"an endorser gone":   func(c *QuorumCert) { delete(c.UTB.Signatures, r.ids[1]) }, // unequal signer sets
 		"the endorsed entry": func(c *QuorumCert) { c.UTB.Unsigned = wrongUnsigned },
