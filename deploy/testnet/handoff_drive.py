@@ -31,9 +31,15 @@ Membership: the elected identities (frozenMembers of the result) map to entities
 (or <generation>/handoff/joiners.json, {"<stakingId>": entity}). A joiner must have been prepared and started as a follower before the election (pos_join.py
 part 1-3); its trust base of epoch E+1 then already exists and is reused when it names exactly the elected roots. A retirement (an incumbent not elected) has
 never been rehearsed on the package: the drive refuses it unless --allow-unrehearsed-retirement.
+
+Unattended use (handoff_auto.py, a timer): --only-if-members 1,2,3,4 drives a result only when its elected committee is exactly those entities (exit 4,
+SKIPPED, before any step otherwise), so a join or a retirement stays an operator act. A drive holds <generation>/handoff/drive.lock for its whole run; a
+second drive started meanwhile exits 5 (BUSY) and changes nothing. --funder DIR (keystore.json, password) pays the owner's gas top-up from an operator
+account instead of the faucet account, whose nonces belong to the public faucet's signer.
 """
 import argparse
 import datetime
+import fcntl
 import hashlib
 import json
 import os
@@ -181,8 +187,9 @@ class Journal:
 class Drive(rehearse.Rehearsal):
     """The rehearsal's primitives (gateway calls, exec in a service, one-shot node containers, the relayer, the scrubbed log) on a generation in service."""
 
-    def __init__(self, generation, cast, ubft, restore_pin=None, joiners=None):
+    def __init__(self, generation, cast, ubft, restore_pin=None, joiners=None, funder=None):
         generation = Path(generation).resolve()
+        self.funder = Path(funder).resolve() if funder else None
         super().__init__(generation, generation / 'handoff' / 'drive', cast)
         self.ubft, self.restore_pin = Path(ubft).resolve(), (Path(restore_pin).resolve() if restore_pin else None)
         self.n = max(handoff_ops.DockerTransport(self.gen).entities)   # every entity of the generation, a prepared joiner's included
@@ -196,6 +203,18 @@ class Drive(rehearse.Rehearsal):
         self.election, self.custody = self.deployment['election'], self.deployment['custody']
         self.root_rpc, self.shard_rpc = operator_rpc.common_urls(handoff_ops.load_compose(self.gen))
         self.old, self.new = [], []   # entities of the committee being left / elected
+
+    def fund(self, to, wei):
+        """A value transfer from the --funder account (an operator keystore), or from the faucet account without one."""
+        if self.funder is None:
+            return self.faucet_send(to, wei)
+        sender = funder_address(self.funder)
+        nonce = int(self.call('eth_getTransactionCount', [sender, 'pending']), 16)
+        raw = self.cast_run('mktx', '--keystore', str(self.funder / 'keystore.json'), '--password-file', str(self.funder / 'password'), '--legacy', '--nonce', str(nonce),
+                            '--gas-price', str(int(self.call('eth_gasPrice'), 16)), '--gas-limit', '21000', '--chain', str(self.chain_id), '--value', str(wei), to)
+        sent = self.call('eth_sendRawTransaction', [raw])
+        receipt = self.wait(f'the funding of {to} is mined', lambda: self.call('eth_getTransactionReceipt', [sent]), 180)
+        self.expect(receipt['status'] == '0x1', f'{wei} wei reach {to} from the operator account {sender}', sent)
 
     def evh(self):
         path = self.evidence / f'epoch{self.target}'
@@ -438,8 +457,8 @@ class Drive(rehearse.Rehearsal):
         if not self.published(result):
             identity = json.loads((self.net / 'pos-plan.json').read_text())['identities'][0]
             if self.balance(identity['owner']) < 10 ** 17:
-                self.say(f'  funding the owner of identity {identity["stakingId"]} with 1 UCT for gas (faucet account)')
-                self.faucet_send(identity['owner'], 10 ** 18)
+                self.say(f'  funding the owner of identity {identity["stakingId"]} with 1 UCT for gas ({"operator account" if self.funder else "faucet account"})')
+                self.fund(identity['owner'], 10 ** 18)
             owner_key = self.gen / self.manifest['pos']['owner_keys'] / f'identity-{identity["stakingId"]}' / 'owner.key'
             subprocess.run(['chown', '-R', '10001:10001', str(self.work)], check=True)
             for step, extra in (('submit-pops', ['--evm-pops', '/work/evm-pops-collected.json']), ('finalize', [])):
@@ -701,6 +720,37 @@ class Drive(rehearse.Rehearsal):
         return detail | {'blocks': [first, later], 'records': records}
 
 
+def funder_address(directory):
+    """The 0x address a V3 keystore names (its `address` field); the key itself is never read here."""
+    address = json.loads((Path(directory) / 'keystore.json').read_text()).get('address', '')
+    if not re.fullmatch(r'(0x)?[0-9a-fA-F]{40}', address) or not (Path(directory) / 'password').is_file():
+        raise Refused(f'--funder {directory}: needs keystore.json with an address and a password file')
+    return '0x' + address.removeprefix('0x')
+
+
+def parse_members(text):
+    try:
+        members = sorted(int(x) for x in text.split(','))
+    except ValueError:
+        raise argparse.ArgumentTypeError(f'--only-if-members wants entity numbers, comma separated, got {text!r}')
+    if not members or members[0] < 1 or len(set(members)) != len(members):
+        raise argparse.ArgumentTypeError(f'--only-if-members wants distinct entity numbers from 1, got {text!r}')
+    return members
+
+
+def hold_lock(generation):
+    """The open lock file of the generation's drives (handoff/drive.lock), locked exclusively; None when another drive holds it."""
+    path = Path(generation) / 'handoff' / 'drive.lock'
+    path.parent.mkdir(parents=True, exist_ok=True)
+    handle = open(path, 'a')
+    try:
+        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        handle.close()
+        return None
+    return handle
+
+
 def parse_joiners(values):
     out = {}
     for value in values or ():
@@ -724,10 +774,23 @@ def main(argv=None):
                    help='auto: recreate the lock-proof endpoint only when it does not rescan network/handoff (pre-#996)')
     p.add_argument('--allow-unrehearsed-retirement', action='store_true')
     p.add_argument('--plan', action='store_true', help='print what the drive would do and the window, change nothing')
+    p.add_argument('--only-if-members', type=parse_members, help='drive only when the elected committee is exactly these entities (e.g. 1,2,3,4); else exit 4 before any step')
+    p.add_argument('--funder', type=Path, help='a directory with keystore.json and password: the operator account that pays the owner\'s gas top-up (default: the faucet account)')
     a = p.parse_args(argv)
     if os.geteuid() != 0:
         p.error('run as root (sudo -E env PATH=$PATH ...): the generation directory is uid 10001, mode 0700')
-    d = Drive(a.generation, a.cast, a.ubft, a.restore_pin, parse_joiners(a.joiner))
+    lock = None
+    if not a.plan:
+        lock = hold_lock(Path(a.generation).resolve())
+        if lock is None:
+            print('BUSY: another handoff-drive holds handoff/drive.lock; nothing done', flush=True)
+            return 5
+    d = Drive(a.generation, a.cast, a.ubft, a.restore_pin, parse_joiners(a.joiner), a.funder)
+    if d.funder:
+        try:
+            funder_address(d.funder)
+        except Refused as refusal:
+            p.error(str(refusal))
     journal = Journal(d.gen / 'handoff' / 'log.jsonl', echo=d.say)
     started = time.monotonic()
     try:
@@ -736,6 +799,9 @@ def main(argv=None):
         info['proposed'] = journal.done('propose')
         d.say(f'== handoff-drive {info["result"]} -> root epoch {info["target"]}: {info["kind"]}, committee {info["old"]} -> {info["new"]}, roots {info["epochs"]}')
         d.say('   steps done earlier: ' + (', '.join(s for s in STEPS if journal.done(s)) or 'none'))
+        if a.only_if_members is not None and info['new'] != a.only_if_members:
+            d.say(f'SKIPPED: the elected committee {info["new"]} is not {a.only_if_members} (--only-if-members); drive {info["result"]} by hand')
+            return 4
         if a.plan:
             if not info['proposed']:
                 d.check_window(info['result'], a.min_window_rounds)

@@ -317,6 +317,13 @@ does not rescan `network/handoff` (#996). `verify` checks every root at the new 
 `/api/v1/trustbases` history reaching the epoch (with `--utb`), new blocks and `recordCursor == recordCount`. `--plan` prints the result, the epochs, the change and
 the window. Unrelated no-change results that nobody drives keep being rejected in between; that is harmless.
 
+Unattended (Q35): `handoff_auto.py $G --members 1,2,3,4 --log DIR -- --ubft $UBFT [--funder DIR]` is one pass for a timer (its docstring has a
+`systemd-run --user --on-calendar` line). It runs the drive with `--only-if-members`: a result whose elected committee is anything else (a joiner, a retirement)
+is skipped before any step (exit 4) and stays an operator act. Every drive, manual or not, holds `$G/handoff/drive.lock`; one started meanwhile exits 5 and
+does nothing. `--funder` (a directory with `keystore.json` and `password`) pays the owner's gas top-up from an operator account, so the drive does not
+take nonces from the faucet account, which the public faucet's signer uses. Each pass appends a line to `DIR/auto.log` and keeps the output of a pass that did
+something in `DIR/drive-<time>.log`.
+
 ## Observation/fault campaign and evidence limits
 
 Second operator records checkout, pins, image IDs/hashes, host specs, exact commands

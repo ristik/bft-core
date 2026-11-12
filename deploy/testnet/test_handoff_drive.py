@@ -257,5 +257,99 @@ class BackupAndAckBlock(unittest.TestCase):
         self.assertEqual(d.ack_block('0xr', 100), (60, None))
 
 
+
+class Unattended(unittest.TestCase):
+    """--only-if-members, the drive lock and --funder (Q35: a timer drives only the host committee's results, one drive at a time, never from the faucet
+    account), and handoff_auto.py's pass."""
+    def test_members_are_parsed(self):
+        self.assertEqual(hd.parse_members('4,1,3,2'), [1, 2, 3, 4])
+        for bad in ('', '1,,2', 'a', '0,1', '1,1', '-1'):
+            with self.assertRaises(Exception, msg=bad):
+                hd.parse_members(bad)
+
+    def test_one_drive_holds_the_lock(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            first = hd.hold_lock(tmp)
+            self.assertIsNotNone(first)
+            self.assertIsNone(hd.hold_lock(tmp), 'a second drive is refused while the first runs')
+            first.close()
+            again = hd.hold_lock(tmp)
+            self.assertIsNotNone(again, 'free again after the first ends')
+            again.close()
+
+    def test_the_funder_is_a_keystore_directory(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp)
+            (d / 'keystore.json').write_text(json.dumps({'address': 'ab' * 20}))
+            with self.assertRaises(hd.Refused):
+                hd.funder_address(d)   # no password file
+            (d / 'password').write_text('x')
+            self.assertEqual(hd.funder_address(d), '0x' + 'ab' * 20)
+            (d / 'keystore.json').write_text(json.dumps({'address': 'nope'}))
+            with self.assertRaises(hd.Refused):
+                hd.funder_address(d)
+
+    def run_main(self, tmp, new, *extra):
+        gen = Path(tmp) / 'tn-x'
+        (gen / 'handoff').mkdir(parents=True)
+        drive = unittest.mock.MagicMock()
+        drive.gen = gen
+        drive.funder = None
+        drive.plan.return_value = {'result': '0x' + '11' * 32, 'target': 3, 'epochs': {1: 2}, 'old': [1, 2, 3, 4], 'new': new, 'kind': 'x', 'electedIds': new}
+        with unittest.mock.patch.object(hd.os, 'geteuid', return_value=0), unittest.mock.patch.object(hd, 'Drive', return_value=drive), \
+                unittest.mock.patch('builtins.print'):
+            code = hd.main([str(gen), '--ubft', '/x', *extra])
+        return code, drive
+
+    def test_another_committee_is_skipped_before_any_step(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            code, drive = self.run_main(tmp, [1, 2, 3, 4, 5], '--only-if-members', '1,2,3,4')
+        self.assertEqual(code, 4)
+        for step in ('step_preflight', 'step_trust_base', 'step_proposal', 'step_propose', 'step_install', 'step_advance'):
+            getattr(drive, step).assert_not_called()
+        self.assertIn('SKIPPED', ' '.join(str(c) for c in drive.say.call_args_list))
+
+    def test_the_expected_committee_is_driven(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            code, drive = self.run_main(tmp, [1, 2, 3, 4], '--only-if-members', '1,2,3,4', '--plan')
+        self.assertEqual(code, 0)
+        drive.check_window.assert_called()
+
+    def test_a_busy_lock_changes_nothing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / 'tn-x' / 'handoff').mkdir(parents=True)
+            held = hd.hold_lock(Path(tmp) / 'tn-x')
+            try:
+                with unittest.mock.patch.object(hd.os, 'geteuid', return_value=0), unittest.mock.patch.object(hd, 'Drive') as drive, \
+                        unittest.mock.patch('builtins.print'):
+                    code = hd.main([str(Path(tmp) / 'tn-x'), '--ubft', '/x'])
+            finally:
+                held.close()
+        self.assertEqual(code, 5)
+        drive.assert_not_called()
+
+    def test_the_auto_pass_logs_and_maps_exit_codes(self):
+        import handoff_auto as ha
+        self.assertEqual(ha.outcome(3, 'x\nREFUSED: the election has no open result, and handoff/log.jsonl has no unfinished drive\n'), ('idle: no open result', True))
+        self.assertTrue(ha.outcome(5, 'BUSY')[1])
+        self.assertFalse(ha.outcome(4, 'SKIPPED: x')[1])
+        self.assertFalse(ha.outcome(3, 'REFUSED: the reservation window is about to lapse')[1])
+        with tempfile.TemporaryDirectory() as tmp:
+            log = Path(tmp) / 'log'
+            for code, out in ((3, 'REFUSED: the election has no open result, and'), (0, '== handoff-drive DONE: root epoch 3 active'), (4, 'SKIPPED: the elected committee')):
+                done = unittest.mock.Mock(returncode=code, stdout=out)
+                with unittest.mock.patch.object(ha.subprocess, 'run', return_value=done) as run:
+                    self.assertEqual(ha.main([str(Path(tmp) / 'tn-x'), '--members', '1,2,3,4', '--log', str(log), '--', '--ubft', '/u']), 0 if code == 3 else code)
+                cmd = run.call_args.args[0]
+                self.assertEqual(cmd[cmd.index('--only-if-members') + 1], '1,2,3,4')
+                self.assertIn('--ubft', cmd)
+            lines = (log / 'auto.log').read_text().splitlines()
+            self.assertEqual(len(lines), 3)
+            self.assertIn('idle', lines[0]); self.assertIn('driven', lines[1]); self.assertIn('skipped', lines[2])
+            self.assertEqual(len(list(log.glob('drive-*.log'))) >= 1, True, 'a pass that did something keeps its output')
+            with self.assertRaises(SystemExit), unittest.mock.patch('sys.stderr'):
+                ha.main([str(Path(tmp) / 'tn-x'), '--members', '1,2,3,4', '--log', str(log), '--', '--ubft', '/u', '--joiner', '5=5'])
+
+
 if __name__ == '__main__':
     unittest.main()
