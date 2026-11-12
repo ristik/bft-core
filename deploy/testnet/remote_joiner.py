@@ -761,7 +761,7 @@ def start(lap):
     say(json.dumps(lap.status(), sort_keys=True))
 
 
-def join(lap, dry_run=False, stop_after=None, allow_dirty=False):
+def join(lap, dry_run=False, stop_after=None, allow_dirty=False, funder=None):
     """remote_entity.py join on the host, as a transient `systemd-run --user` unit (a dropped ssh session of this laptop must not kill a drive half way), its log
     followed here until it ends. Rerunning resumes: the host's state is in handoff/remote-joiners/<J>.json and the drive's journal."""
     s = lap.state
@@ -771,7 +771,7 @@ def join(lap, dry_run=False, stop_after=None, allow_dirty=False):
     say(f'laptop checkout {HERE}: commit {version["commit"]}, dirty {version["dirty"]}, digest {version["digest"][:16]} (the host refuses a different deployed copy)')
     cmd = (f'sudo env PATH="$PATH:$(dirname {shlex.quote(s["hostCast"])})" python3 -u {s["hostDir"]}/testnet/remote_entity.py join {s["hostGeneration"]} '
            f'--entity {lap.entity} --ubft {s["hostUbft"]} --restore-pin {s["hostRestorePin"]} --cast {s["hostCast"]}' + (' --dry-run' if dry_run else '') + (f' --stop-after {stop_after}' if stop_after else '')
-           + f' --source-digest {version["digest"]}' + (' --allow-dirty' if allow_dirty else ''))
+           + f' --source-digest {version["digest"]}' + (' --allow-dirty' if allow_dirty else '') + (f' --funder {shlex.quote(funder)}' if funder else ''))
     unit = f'laptop-join-{int(time.time())}'
     log = f'{s["hostDir"]}/{unit}.log'
     script = (f'systemd-run --user --quiet --collect --unit={unit} bash -c {shlex.quote(f"{cmd} > {log} 2>&1; echo EXIT=$? >> {log}")} && '
@@ -791,6 +791,8 @@ def main(argv=None):
     p.add_argument('--dry-run', action='store_true')
     p.add_argument('--allow-dirty', action='store_true', help='init/join: deploy or run a dirty, uncommitted or mismatched copy of deploy/testnet on the host')
     p.add_argument('--stop-after', choices=('bonded', 'caught-up'), help='join: stop after the bond, or after the result names the joiner and its nodes caught up')
+    p.add_argument('--funder', help='join: a directory ON THE HOST with keystore.json and password, the operator account that pays the owner\'s 100 UCT bond and gas '
+                   '(default: the faucet account)')
     a = p.parse_args(argv)
     home = a.home or (f'~/unicity-joiner/{a.generation}' if a.generation else None)
     if home is None:
@@ -813,7 +815,7 @@ def main(argv=None):
                 pid = lap.home / 'run' / f'{name}.pid'
                 print(f'{name}: ' + (f'pid {pid.read_text().strip()}' if pid.is_file() else 'not started'))
         elif a.action == 'join':
-            return join(lap, a.dry_run, a.stop_after, a.allow_dirty)
+            return join(lap, a.dry_run, a.stop_after, a.allow_dirty, a.funder)
         elif a.action == 'agent':
             serve_agent(lap)
         elif a.action == 'tunnel':

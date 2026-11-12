@@ -27,7 +27,7 @@ Every root and shard node of the generation dials root<J>/shard<J> by these alia
     remote_entity.py join         <generation> --entity J --ubft UBFT --restore-pin H4PIN [--cast CAST] [--dry-run]
     remote_entity.py retire-plan  <generation> --entity J                                              (prints the retirement sequence; changes nothing)
 
-`join` is the whole act (briefs/laptop-join-runbook.md): fund the laptop's owner from the faucet account (100 UCT bond + gas), register and bond (the
+`join` is the whole act (briefs/laptop-join-runbook.md): fund the laptop's owner from the operator account (--funder) or the faucet account (100 UCT bond + gas), register and bond (the
 laptop signs), then, right after an acknowledged handoff (driving the open no-change result first if there is one) the trust base of E+1 over the
 committee and the joiner, the joiner's signing authority started at that scope, admitDelegation; then the election's next result must name the joiner
 and handoff_drive.py drives it with this transport. While the joiner is `prepared`, handoff_drive refuses a result that leaves it out (the epoch would move
@@ -392,14 +392,20 @@ def say(text):
     print(f'{time.strftime("%H:%M:%SZ", time.gmtime())} {text}', flush=True)
 
 
+BUSY = 5             # handoff_drive.py's exit when another drive holds handoff/drive.lock (a timer pass, handoff_auto.py, or an operator)
+BUSY_WAIT = 600      # how long a join waits for that drive to finish before it gives up (a drive takes ~2 min)
+BUSY_POLL = 10
+
+
 class Join:
-    def __init__(self, generation, entity, ubft, restore_pin, cast, dry_run=False, here=None, stop_after=None):
+    def __init__(self, generation, entity, ubft, restore_pin, cast, dry_run=False, here=None, stop_after=None, funder=None, busy_wait=BUSY_WAIT):
         import handoff_drive
         self.hd = handoff_drive
         self.gen, self.entity, self.ubft, self.restore_pin, self.cast, self.dry = Path(generation).resolve(), entity, ubft, restore_pin, cast, dry_run
         self.here = Path(here or Path(__file__).resolve().parent)
         self.stop_after = stop_after
-        self.d = handoff_drive.Drive(self.gen, cast, ubft, restore_pin)
+        self.funder, self.busy_wait = (Path(funder).resolve() if funder else None), busy_wait
+        self.d = handoff_drive.Drive(self.gen, cast, ubft, restore_pin, funder=self.funder)
         if entity not in self.d.remote:
             raise RuntimeError(f'entity {entity} is not registered (remote_entity.py register)')
         self.r = self.d.remote[entity]
@@ -409,11 +415,21 @@ class Join:
         self.r.save()
 
     def drive(self, result, *extra):
-        """handoff_drive.py as a child (its own journal, resumable): returns its exit status."""
+        """handoff_drive.py as a child (its own journal, resumable): returns its exit status. While another drive holds handoff/drive.lock (exit 5: a timer
+        pass that started before the join's marker stood it down, or an operator) it waits and retries, for at most busy_wait seconds."""
         cmd = [sys.executable, str(self.here / 'handoff_drive.py'), str(self.gen), *([result] if result else []), '--ubft', str(self.ubft), '--cast', self.cast,
-               *(['--restore-pin', str(self.restore_pin)] if self.restore_pin else []), *extra]
+               *(['--restore-pin', str(self.restore_pin)] if self.restore_pin else []), *(['--funder', str(self.funder)] if self.funder else []), *extra]
         say('$ ' + ' '.join(cmd[1:]))
-        return subprocess.run(cmd).returncode
+        deadline = time.monotonic() + self.busy_wait
+        while True:
+            rc = subprocess.run(cmd).returncode
+            if rc != BUSY:
+                return rc
+            if time.monotonic() >= deadline:
+                say(f'another drive still holds handoff/drive.lock after {self.busy_wait} s: giving up (rerun the same command)')
+                return rc
+            say(f'another drive holds handoff/drive.lock: retrying in {BUSY_POLL} s')
+            time.sleep(BUSY_POLL)
 
     def custody_lots(self, ident):
         return self.d.view_text(self.d.custody, 'generationLots(uint64,uint64)(uint256[])', str(ident), '1').strip('[]').replace(',', ' ').split()
@@ -436,15 +452,15 @@ class Join:
         if st.get('follower') is not True and r.state in ('registered', 'bonded'):
             raise RuntimeError('the laptop root does not report itself a follower: remote_joiner.py up, and check the tunnel')
         owner = r.info['accounts']['owner']
-        # 1. funding: the bond unit and the gas of three transactions, from the faucet account (its key stays on the host; the drive's path)
+        # 1. funding: the bond unit and the gas of three transactions, from the operator account (--funder) or else the faucet account; the key stays on the host
         need = BOND_UNIT + GAS if r.state in ('registered',) else GAS // 2
         have = d.balance(owner)
         say(f'owner {owner}: {have / 1e18:.4f} UCT')
         if have < need and r.state in ('registered', 'bonded'):
             if self.dry:
-                say(f'[dry-run] would fund {owner} with {(need - have) / 1e18:.4f} UCT from the faucet account')
+                say(f'[dry-run] would fund {owner} with {(need - have) / 1e18:.4f} UCT from the {"operator account " + str(self.funder) if self.funder else "faucet account"}')
             else:
-                d.faucet_send(owner, need - have)
+                d.fund(owner, need - have)
         # 2. register and bond, signed on the laptop (any time: an identity without a delegation is not eligible)
         if r.state == 'registered':
             ident = r.info.get('stakingId')
@@ -607,6 +623,9 @@ def main(argv=None):
             s.add_argument('--ubft', type=Path, required=True)
             s.add_argument('--restore-pin', type=Path, required=True)
             s.add_argument('--cast', default='cast')
+            s.add_argument('--funder', type=Path, help='a directory with keystore.json and password on the host: the operator account that funds the owner (bond and gas) '
+                           'and the drives\' gas top-ups (default: the faucet account, whose nonces the public faucet uses)')
+            s.add_argument('--busy-wait', type=int, default=BUSY_WAIT, help='seconds a drive waits for another one holding handoff/drive.lock')
             s.add_argument('--dry-run', action='store_true')
             s.add_argument('--source-digest', help='the laptop checkout\'s tree_digest (remote_joiner.py join passes it): refused when the deployed copy differs')
             s.add_argument('--allow-dirty', action='store_true', help='run a copy that is not the recorded, clean, committed one')
@@ -640,7 +659,7 @@ def main(argv=None):
             say(f'REFUSED: {refusal}')
             return 3
         try:
-            return Join(a.generation, a.entity, a.ubft, a.restore_pin, a.cast, a.dry_run, stop_after=a.stop_after).run()
+            return Join(a.generation, a.entity, a.ubft, a.restore_pin, a.cast, a.dry_run, stop_after=a.stop_after, funder=a.funder, busy_wait=a.busy_wait).run()
         except Exception as error:
             say(f'STOPPED: {error}')
             return 1
