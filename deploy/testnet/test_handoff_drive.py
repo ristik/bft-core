@@ -332,14 +332,14 @@ class Unattended(unittest.TestCase):
         import handoff_auto as ha
         self.assertEqual(ha.outcome(3, 'x\nREFUSED: the election has no open result, and handoff/log.jsonl has no unfinished drive\n'), ('idle: no open result', True))
         self.assertTrue(ha.outcome(5, 'BUSY')[1])
-        self.assertFalse(ha.outcome(4, 'SKIPPED: x')[1])
+        self.assertTrue(ha.outcome(4, 'SKIPPED: x')[1])
         self.assertFalse(ha.outcome(3, 'REFUSED: the reservation window is about to lapse')[1])
         with tempfile.TemporaryDirectory() as tmp:
             log = Path(tmp) / 'log'
             for code, out in ((3, 'REFUSED: the election has no open result, and'), (0, '== handoff-drive DONE: root epoch 3 active'), (4, 'SKIPPED: the elected committee')):
                 done = unittest.mock.Mock(returncode=code, stdout=out)
                 with unittest.mock.patch.object(ha.subprocess, 'run', return_value=done) as run:
-                    self.assertEqual(ha.main([str(Path(tmp) / 'tn-x'), '--members', '1,2,3,4', '--log', str(log), '--', '--ubft', '/u']), 0 if code == 3 else code)
+                    self.assertEqual(ha.main([str(Path(tmp) / 'tn-x'), '--members', '1,2,3,4', '--log', str(log), '--', '--ubft', '/u']), 0 if code in (3, 4) else code)
                 cmd = run.call_args.args[0]
                 self.assertEqual(cmd[cmd.index('--only-if-members') + 1], '1,2,3,4')
                 self.assertIn('--ubft', cmd)
@@ -349,6 +349,50 @@ class Unattended(unittest.TestCase):
             self.assertEqual(len(list(log.glob('drive-*.log'))) >= 1, True, 'a pass that did something keeps its output')
             with self.assertRaises(SystemExit), unittest.mock.patch('sys.stderr'):
                 ha.main([str(Path(tmp) / 'tn-x'), '--members', '1,2,3,4', '--log', str(log), '--', '--ubft', '/u', '--joiner', '5=5'])
+
+
+    def test_the_auto_pass_stands_down_for_a_remote_joiner(self):
+        import handoff_auto as ha
+        with tempfile.TemporaryDirectory() as tmp:
+            gen, log = Path(tmp) / 'tn-x', Path(tmp) / 'log'
+            joiners = gen / 'handoff' / 'remote-joiners'
+            joiners.mkdir(parents=True)
+            (joiners / '5.json').write_text(json.dumps({'state': 'member'}))
+            (joiners / 'notes.json').write_text('{}')   # not an entity file
+            self.assertEqual(ha.joining(gen), [])
+            for state in ('registered', 'bonded', 'prepared', 'retiring'):
+                (joiners / '5.json').write_text(json.dumps({'state': state}))
+                self.assertEqual(ha.joining(gen), [(5, state)])
+            (joiners / '6.json').write_text('not json')
+            self.assertEqual(ha.joining(gen), [(5, 'retiring'), (6, 'unreadable')])
+            (joiners / '6.json').unlink()
+            (joiners / '5.json').write_text(json.dumps({'state': 'prepared'}))
+            with unittest.mock.patch.object(ha.subprocess, 'run') as run:
+                for _ in range(3):
+                    self.assertEqual(ha.main([str(gen), '--members', '1,2,3,4', '--log', str(log), '--', '--ubft', '/u']), 0)
+            run.assert_not_called()   # no drive while the joiner is prepared
+            lines = (log / 'auto.log').read_text().splitlines()
+            self.assertEqual(len(lines), 1, 'a repeated stand-down is logged once an hour')
+            self.assertIn('stand down: remote joiner(s) 5 prepared', lines[0])
+
+    def test_a_skipped_pass_is_idle_and_logged_hourly(self):
+        import handoff_auto as ha
+        result = '0x' + 'ab' * 32
+        out = f'== handoff-drive {result} -> root epoch 6\nSKIPPED: the elected committee [1, 2, 3, 4, 5] is not [1, 2, 3, 4] (--only-if-members); drive {result} by hand\n'
+        with tempfile.TemporaryDirectory() as tmp:
+            log = Path(tmp) / 'log'
+            done = unittest.mock.Mock(returncode=4, stdout=out)
+            with unittest.mock.patch.object(ha.subprocess, 'run', return_value=done):
+                codes = [ha.main([str(Path(tmp) / 'tn-x'), '--members', '1,2,3,4', '--log', str(log), '--', '--ubft', '/u']) for _ in range(5)]
+            self.assertEqual(codes, [0] * 5, 'a skip never fails the unit')
+            lines = (log / 'auto.log').read_text().splitlines()
+            self.assertEqual(len(lines), 1)
+            self.assertIn('skipped', lines[0]); self.assertIn('hourly', lines[0])
+            self.assertEqual(list(log.glob('drive-*.log')), [], 'no full log for a skip')
+            other = unittest.mock.Mock(returncode=4, stdout=out.replace('ab', 'cd'))
+            with unittest.mock.patch.object(ha.subprocess, 'run', return_value=other):
+                ha.main([str(Path(tmp) / 'tn-x'), '--members', '1,2,3,4', '--log', str(log), '--', '--ubft', '/u'])
+            self.assertEqual(len((log / 'auto.log').read_text().splitlines()), 2, 'another result gets its own line')
 
 
 if __name__ == '__main__':
