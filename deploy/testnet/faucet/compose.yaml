@@ -6,6 +6,7 @@ services:
     environment:
       WEB3_PROVIDER: http://relay:8545
       HCAPTCHA_SITEKEY: ${HCAPTCHA_SITEKEY:?Set hCaptcha site key}
+      FAUCET_PAYOUT: ${FAUCET_PAYOUT:?Set the payout per claim in UCT, equal to network.json payout}
     secrets: [faucet_keystore, faucet_password, hcaptcha_secret]
     networks: [faucet]
     read_only: true

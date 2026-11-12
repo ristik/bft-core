@@ -2346,4 +2346,127 @@ class BridgePosEndpoint(unittest.TestCase):
         self.assertEqual(ep[ep.index('--shard-conf-dir')+1],'/network/handoff')
         self.assertFalse(any('shard-conf-1' in x for x in ep),'a handoff file is found by the endpoint, not listed by the overlay')
 
+class StagingKnobs(unittest.TestCase):
+    """The staging generation's settings as generator options (2026-11-12 dev generation workarounds): the faucet's payout, genesis balance, daily cap and
+    per-IP limit; the faucet/edge subnets and their trusted proxies; the bridge's kept lock-proof endpoint (serve) and the public routes (public_routes.py)."""
+    def images(self): return {'node':'sha256:'+'1'*64,'rpc':'sha256:'+'2'*64,'guard':'sha256:'+'3'*64,'signer':'sha256:'+'4'*64}
+    def topo(self,**kw):
+        with tempfile.TemporaryDirectory() as d:
+            return generate.topology(Path(d),4,{'root':['r%d'%i for i in range(4)],'evm':['e%d'%i for i in range(4)]},self.images(),'captcha',**kw)
+    def test_faucet_defaults_cover_demo_claims(self):
+        f=generate.faucet_settings(generate.FAUCET_PAYOUT,generate.FAUCET_BALANCE,generate.FAUCET_DAILY_CLAIMS)
+        self.assertEqual(f['network'],{'payout':'200','minimum_balance_wei':400*10**18,'daily_claims':50,'limit_per_ip':False})
+        self.assertEqual(f['balance_wei'],50000*10**18)
+        self.assertGreaterEqual(f['balance_wei']//(200*10**18),200,'the default balance pays at least 200 claims of 200 UCT')
+        self.assertEqual(generate.faucet_settings('0.01','1000',100,True)['network'],{'payout':'0.01','minimum_balance_wei':2*10**16,'daily_claims':100,'limit_per_ip':True})
+        # keygen's own default is the same balance (a generation made without the flag still pays the default claims)
+        self.assertIn('const DefaultFaucetBalanceWei = "%d"'%(50000*10**18),(Path(__file__).parent/'keygen/main.go').read_text())
+    def test_faucet_settings_refuse_bad_values(self):
+        self.assertEqual(generate.uct_wei('1.5','x'),15*10**17)
+        for bad in ('','0','-1','1e3','.5','5.','abc','0.0000000000000000001',' 1'):
+            with self.assertRaises(ValueError,msg=bad): generate.uct_wei(bad,'x')
+        for args in (('200','10000',50),('200','50000',0),('200','50000',10001),('0','50000',50)):
+            with self.assertRaises(ValueError,msg=args): generate.faucet_settings(*args)
+        generate.faucet_settings('200','10400',50)   # exactly the reserve plus one day
+    def test_payout_reaches_the_signer(self):
+        cfg=self.topo()
+        self.assertEqual(cfg['services']['signer']['environment']['FAUCET_PAYOUT'],'200')
+        self.assertEqual(self.topo(payout='0.5')['services']['signer']['environment']['FAUCET_PAYOUT'],'0.5')
+        entry=(Path(__file__).parent/'faucet/backend-entrypoint.sh').read_text()
+        self.assertIn('-faucet.amount "$FAUCET_PAYOUT"',entry); self.assertNotIn('0.01',entry)
+        self.assertNotIn("!= '0.01'",(Path(__file__).parent/'faucet/gateway.py').read_text(),'the guard checks the configured payout, not a constant')
+    def test_subnets_are_options(self):
+        cfg=self.topo()
+        self.assertEqual(cfg['networks']['faucet']['ipam']['config'],[{'subnet':'172.30.88.0/24','gateway':'172.30.88.1'}])
+        self.assertEqual(cfg['networks']['edge']['ipam']['config'],[{'subnet':'172.30.89.0/24','gateway':'172.30.89.1'}])
+        self.assertEqual(cfg['services']['rpc']['environment']['TRUSTED_PROXY_IP'],'172.30.89.1')
+        nets=generate.bridged_subnets('172.30.90.0/24','172.30.91.0/24')
+        self.assertEqual(nets,{'faucet':{'subnet':'172.30.90.0/24','gateway':'172.30.90.1'},'edge':{'subnet':'172.30.91.0/24','gateway':'172.30.91.1'}})
+        cfg=self.topo(subnets=nets)
+        self.assertEqual(cfg['networks']['edge']['ipam']['config'],[{'subnet':'172.30.91.0/24','gateway':'172.30.91.1'}])
+        self.assertEqual(cfg['services']['rpc']['environment']['TRUSTED_PROXY_IP'],'172.30.91.1')
+        self.assertNotIn('172.30.8',json.dumps(cfg))
+        for f,e in (('172.30.90.0/24','172.30.90.0/25'),('8.8.8.0/24','172.30.91.0/24'),('172.30.90.1/24','172.30.91.0/24'),('172.30.0.0/8','172.30.91.0/24'),('fd00::/64','172.30.91.0/24'),('x','172.30.91.0/24')):
+            with self.assertRaises(ValueError,msg=(f,e)): generate.bridged_subnets(f,e)
+    def test_subnet_preflight_names_the_conflict(self):
+        nets=generate.bridged_subnets()
+        existing={'tn-old_faucet':['172.30.88.0/24'],'bridge':['172.17.0.0/16'],'tn-old_validators':['172.30.0.0/16','fd00::/64'],'none':[]}
+        self.assertEqual(generate.subnet_conflicts(nets,existing),[('faucet','tn-old_faucet','172.30.88.0/24'),('faucet','tn-old_validators','172.30.0.0/16'),('edge','tn-old_validators','172.30.0.0/16')])
+        self.assertEqual(generate.subnet_conflicts(generate.bridged_subnets('10.250.1.0/24','10.250.2.0/24'),existing),[])
+        with patch.object(generate.subprocess,'check_output',side_effect=['a b\n',json.dumps([{'Name':'x','IPAM':{'Config':[{'Subnet':'172.30.88.0/24','Gateway':'172.30.88.1'}]}},{'Name':'host','IPAM':{'Config':None}}])]):
+            self.assertEqual(generate.docker_subnets(),{'x':['172.30.88.0/24'],'host':[]})
+    def test_the_generator_refuses_bad_faucet_and_subnet_options_before_any_key(self):
+        base=[sys.executable,str(Path(__file__).parent/'generate.py'),'--out','/nonexistent/tn-x','--validators','4','--ubft','x','--keygen','x','--b1genesis','x','--images','x','--captcha-sitekey','a','--captcha-secret-file','x']
+        for extra,want in ((['--faucet-payout','0'],'--faucet-payout'),(['--faucet-balance','100'],'--faucet-balance'),(['--faucet-subnet','172.30.89.0/24'],'overlap'),(['--edge-subnet','8.8.8.0/24'],'--edge-subnet')):
+            done=subprocess.run(base+extra,text=True,capture_output=True)
+            self.assertEqual(done.returncode,2,extra); self.assertIn(want,done.stderr)
+    def overlay(self,manifest):
+        import importlib.util
+        spec=importlib.util.spec_from_file_location('overlay',Path(__file__).parent/'bridge/overlay.py'); ov=importlib.util.module_from_spec(spec); spec.loader.exec_module(ov)
+        with tempfile.TemporaryDirectory() as tmp:
+            gen=Path(tmp)/'tn-x'; (gen/'bridge').mkdir(parents=True)
+            (gen/'manifest.json').write_text(json.dumps(manifest))
+            (gen/'bridge/bridge-addresses.json').write_text(json.dumps({'BridgeVault':'0x'+'11'*20,'CFG':'0x'+'22'*32}))
+            art=Path(tmp)/'artifacts'; art.mkdir(); (art/'bridge-images.json').write_text(json.dumps({'images':{'bridge':'sha256:'+'a'*64}}))
+            with patch.object(ov,'HERE',Path(tmp)/'bridge'), patch.object(sys,'argv',['overlay.py',str(gen)]), patch('builtins.print'):
+                ov.main()
+            ep=json.loads((gen/'compose.bridge.yaml').read_text())['services']['lockproof']['entrypoint']
+        return ep[ep.index('--trusted-proxy')+1]
+    def test_the_lockproof_endpoint_trusts_the_generation_edge_gateway(self):
+        self.assertEqual(self.overlay({'validators':4}),'172.30.89.1')   # a manifest from before the option
+        self.assertEqual(self.overlay({'validators':4,'networks':generate.bridged_subnets('172.30.90.0/24','172.30.91.0/24')}),'172.30.91.1')
+    def test_the_bridge_serve_stage_is_kept_and_opt_in(self):
+        sys.path.insert(0,str(Path(__file__).parent/'bridge')); self.addCleanup(sys.path.remove,str(Path(__file__).parent/'bridge'))
+        for d in ('sdk-clients',): sys.path.insert(0,str(Path(__file__).parent/d)); self.addCleanup(sys.path.remove,str(Path(__file__).parent/d))
+        import rehearse_bridge as rb
+        names=[n for n,_ in rb.STAGES]
+        self.assertEqual(names[:3],['deploy','serve','lockproof'])
+        r=rb.BridgeRehearsal.__new__(rb.BridgeRehearsal); r.gen=Path('/g'); calls=[]
+        r.bridge_compose=lambda *a,**k: calls.append(a); r.wait=lambda *a,**k: True; r.http=lambda *a: (200,''); r.say=lambda *a: None
+        r.proof=lambda *a,**k: (400,b''); r.expect=lambda ok,*a: self.assertTrue(ok)
+        with patch.object(rb.subprocess,'run') as run: r.serve()
+        self.assertEqual(calls,[('up','-d','--no-deps','lockproof')],'started without --force-recreate, nothing else touched')
+        self.assertIn('overlay.py',run.call_args.args[0][1])
+    def generation(self,tmp,bridge=True):
+        gen=Path(tmp)/'tn-pos-staging-x'; (gen/'bridge/public').mkdir(parents=True)
+        (gen/'compose.yaml').write_text(json.dumps(self.topo()))
+        if bridge:
+            (gen/'compose.bridge.yaml').write_text(json.dumps({'services':{'lockproof':{'ports':['127.0.0.1:8090:8090']}}}))
+            (gen/'bridge/public/tester-config.json').write_text(json.dumps({'ethUrl':'http://rpc:8545','aggUrl':'http://rpc:8545/aggregator','lockProofUrl':'http://lockproof:8090',
+                'redeemEthUrl':'http://x','chainId':5587796,'vault':'0x'+'11'*20,'files':{'trustBundle':'trust-base.bundle.cbor'}}))
+            (gen/'bridge/public/trust-base.bundle.cbor').write_bytes(b'\xa0')
+        return gen
+    def test_public_routes(self):
+        import public_routes
+        with tempfile.TemporaryDirectory() as tmp:
+            gen=self.generation(tmp)
+            with patch('builtins.print'): public_routes.main([str(gen),'--hostname','pos.staging.unicity.network'])
+            routes=(gen/'public/nginx/routes.conf').read_text(); zones=(gen/'public/nginx/zones.conf').read_text()
+            for loc in ('location = /rpc ','location = /aggregator ','location = /api/v1/trustbases ','location /faucet/ ','location = /api/network ','location = /api/claim ',
+                        'location /lockproof/ ','location /bridge/ ','location /demo/ '):
+                self.assertIn(loc,routes)
+            self.assertIn('proxy_pass http://127.0.0.1:8545/;',routes); self.assertIn('proxy_pass http://127.0.0.1:8088/;',routes); self.assertIn('proxy_pass http://127.0.0.1:8090/;',routes)
+            self.assertIn('alias /var/www/pos-staging/bridge/;',routes); self.assertIn('alias /var/www/pos-staging/demo/;',routes)
+            self.assertEqual(routes.count('{'),routes.count('}'))
+            for zone in set(re.findall(r'zone=(\w+)',routes))|set(re.findall(r'limit_conn (\w+)',routes)):
+                self.assertIn(f'zone={zone}:',zones)
+            tester=json.loads((gen/'public/bridge/tester-config.json').read_text())
+            self.assertEqual((tester['ethUrl'],tester['aggUrl'],tester['lockProofUrl']),('https://pos.staging.unicity.network/rpc','https://pos.staging.unicity.network/aggregator','https://pos.staging.unicity.network/lockproof'))
+            self.assertNotIn('redeemEthUrl',tester); self.assertEqual(tester['vault'],'0x'+'11'*20)
+            self.assertEqual((gen/'public/bridge/trust-base.bundle.cbor').read_bytes(),b'\xa0')
+            self.assertIn('lockProofUrl": "http://lockproof:8090',(gen/'bridge/public/tester-config.json').read_text(),'the rehearsal\'s own config keeps the internal names')
+            with self.assertRaises(SystemExit), patch('sys.stderr'): public_routes.main([str(gen),'--hostname','pos.staging.unicity.network'])   # never overwrites
+    def test_public_routes_without_the_bridge_and_bad_input(self):
+        import public_routes
+        with tempfile.TemporaryDirectory() as tmp:
+            gen=self.generation(tmp,bridge=False)
+            with patch('builtins.print'): public_routes.main([str(gen),'--hostname','pos.example.org','--web-root','/srv/www/'])
+            routes=(gen/'public/nginx/routes.conf').read_text()
+            self.assertNotIn('lockproof',routes); self.assertNotIn('/bridge/',routes); self.assertIn('alias /srv/www/demo/;',routes)
+            self.assertFalse((gen/'public/bridge').exists())
+            for args in (['--hostname','Pos.Example.org'],['--hostname','x;y'],['--hostname','a.org','--web-root','rel/dir'],['--hostname','a.org','--web-root','/a b'],['--hostname','a.org','--web-root','/a/../b']):
+                with self.assertRaises(SystemExit,msg=args), patch('sys.stderr'): public_routes.main([str(gen),*args,'--out',str(Path(tmp)/'o')])
+            bad=json.loads((gen/'compose.yaml').read_text()); bad['services']['rpc']['ports']=['0.0.0.0:8545:8545']
+            with self.assertRaises(SystemExit): public_routes.loopback_port(bad,'rpc',8545)
+
 if __name__=='__main__': unittest.main()

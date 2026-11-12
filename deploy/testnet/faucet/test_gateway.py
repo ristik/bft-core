@@ -17,7 +17,7 @@ def config():
     return dict(chain_id=31337, genesis_hash='0x' + '12' * 32,
                 funding_address='0x' + '34' * 20, rpc_url='http://rpc',
                 backend_url='http://signer', captcha_sitekey='site', daily_claims=10,
-                minimum_balance_wei=20000000000000000, dev_only=False,
+                minimum_balance_wei=400000000000000000000, dev_only=False, payout='200',
                 validator_rpc_urls=['http://v1', 'http://v2'])
 
 
@@ -33,11 +33,35 @@ class GuardTests(unittest.TestCase):
         self.assertTrue(self.guard.reserve('a', '1'))
         restarted = gateway.Guard(self.cfg, self.state)
         self.assertFalse(restarted.reserve('a', '2'))
-        self.assertFalse(restarted.reserve('b', '1'))
+        self.assertTrue(restarted.reserve('b', '1'))   # no per-IP limit by default: one claim per address
+        self.assertFalse(restarted.reserve('b', '3'))
         changed = dict(self.cfg, genesis_hash='0x' + '99' * 32)
         with self.assertRaises(ValueError):
             gateway.Guard(changed, self.state)
         gateway.Guard(changed, str(Path(self.tmp.name) / 'reset.sqlite'))
+
+    def test_per_ip_limit_when_configured(self):
+        guard = gateway.Guard(dict(self.cfg, limit_per_ip=True), str(Path(self.tmp.name) / 'per-ip.sqlite'))
+        self.assertTrue(guard.reserve('a', '1'))
+        self.assertFalse(guard.reserve('b', '1'))
+        self.assertFalse(guard.reserve('a', '2'))
+        self.assertTrue(guard.reserve('c', '2'))
+        # the setting is part of the pinned configuration: flipping it needs a fresh state volume
+        with self.assertRaises(ValueError):
+            gateway.Guard(dict(self.cfg, limit_per_ip=True), self.state)
+
+    def test_payout_is_required_and_positive(self):
+        for bad in (None, 200, '', '0', '0.0', '-1', '1e3', '.5', '5.', '1,5', ' 200'):
+            cfg = dict(self.cfg, payout=bad)
+            if bad is None:
+                del cfg['payout']
+            with self.assertRaises(ValueError, msg=repr(bad)):
+                gateway.Guard(cfg, str(Path(self.tmp.name) / 'payout.sqlite'))
+        for good, reported in (('200', '200'), ('0.01', '0.01'), ('200.0', '200'), ('1.50', '1.5')):
+            gateway.Guard(dict(self.cfg, payout=good), str(Path(self.tmp.name) / f'payout-{good}.sqlite'))
+            self.assertTrue(gateway.same_payout(reported, good))
+        for reported in ('0.01', '2000', '', None, 200, '2e2'):
+            self.assertFalse(gateway.same_payout(reported, '200'), repr(reported))
 
     def test_atomic_concurrent_claims(self):
         with concurrent.futures.ThreadPoolExecutor(8) as pool:
@@ -56,9 +80,12 @@ class GuardTests(unittest.TestCase):
         def rpc(method, params):
             return {'eth_chainId': hex(31337), 'eth_getBlockByNumber': {'hash': self.cfg['genesis_hash']},
                     'eth_getBalance': hex(self.cfg['minimum_balance_wei'])}[method]
-        info = {'account': self.cfg['funding_address'], 'payout': '0.01', 'hcaptcha_sitekey': 'site'}
+        info = {'account': self.cfg['funding_address'], 'payout': '200', 'hcaptcha_sitekey': 'site'}
         with patch.object(self.guard, 'rpc', side_effect=rpc), patch.object(gateway, 'request', return_value=info):
             self.assertEqual(self.guard.health()['status'], 'ready')
+            for payout in ('0.01', '20', None):   # a signer started with another -faucet.amount (the old hard-coded 0.01) is refused
+                with patch.dict(info, payout=payout), self.assertRaises(ValueError):
+                    self.guard.health()
             for method, bad in [('eth_chainId', '0x1'), ('eth_getBlockByNumber', {'hash': '0x' + '99'*32}), ('eth_getBalance', '0x0')]:
                 with patch.object(self.guard, 'rpc', side_effect=lambda m, p: bad if m == method else rpc(m, p)):
                     with self.assertRaises(ValueError):
@@ -92,8 +119,11 @@ class GuardTests(unittest.TestCase):
             self.assertEqual(claim(body, token=''), 400)
             backend.assert_not_called()
             self.assertEqual(claim(body), 200)
-            self.assertEqual(claim(dict(body, address='0x' + '57'*20), forged='9.9.9.9'), 429)
-            self.assertEqual(backend.call_count, 1)
+            self.assertEqual(claim(body, forged='9.9.9.9'), 429)   # the same address again
+            # another address from the same client: no per-IP limit, and the signer is told the address as its client key
+            self.assertEqual(claim(dict(body, address='0x' + '57'*20), forged='9.9.9.9'), 200)
+            self.assertEqual(backend.call_count, 2)
+            self.assertEqual([c.args[2]['X-Forwarded-For'] for c in backend.call_args_list], ['0x' + '56'*20, '0x' + '57'*20])
             with self.guard.db() as db:
                 db.execute('DELETE FROM claims')
             backend.side_effect = TimeoutError()
@@ -121,9 +151,41 @@ class GuardTests(unittest.TestCase):
             self.assertEqual(claim(body), 503)
             backend.side_effect = None
             self.assertEqual(claim(body), 429)
-            self.assertEqual(claim(other), 429)
+            self.assertEqual(claim(other), 200)
             with self.guard.db() as db:
-                self.assertEqual(db.execute('SELECT count(*) FROM claims').fetchone()[0], 1)
+                self.assertEqual(db.execute('SELECT count(*) FROM claims').fetchone()[0], 2)
+
+    def test_network_page_names_payout_and_limit(self):
+        server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), gateway.Handler)
+        server.guard = self.guard
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        got = json.load(urllib.request.urlopen(f'http://127.0.0.1:{server.server_port}/api/network'))
+        self.assertEqual(got, dict(chain_id=31337, genesis_hash=self.cfg['genesis_hash'], captcha_sitekey='site', payout='200', limit_per_ip=False))
+
+    def test_per_ip_mode_names_the_client_ip_to_the_signer(self):
+        guard = gateway.Guard(dict(self.cfg, limit_per_ip=True), str(Path(self.tmp.name) / 'per-ip-http.sqlite'))
+        server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), gateway.Handler)
+        server.guard = guard
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        url = f'http://127.0.0.1:{server.server_port}/api/claim'
+
+        def claim(address):
+            body = dict(address=address, chain_id=31337, genesis_hash=self.cfg['genesis_hash'])
+            try:
+                return urllib.request.urlopen(urllib.request.Request(url, json.dumps(body).encode(), {'h-captcha-response': 'c'})).status
+            except urllib.error.HTTPError as error:
+                error.close()
+                return error.code
+
+        with patch.object(guard, 'health', return_value={'status': 'ready'}), patch.object(gateway, 'request', return_value={'msg': 'tx'}) as backend:
+            self.assertEqual(claim('0x' + '56'*20), 200)
+            self.assertEqual(claim('0x' + '57'*20), 429)   # same client IP (not from the trusted proxy: the socket peer)
+            self.assertEqual(backend.call_count, 1)
+            self.assertEqual(backend.call_args.args[2]['X-Forwarded-For'], '127.0.0.1')
 
 
 class RelayTests(unittest.TestCase):

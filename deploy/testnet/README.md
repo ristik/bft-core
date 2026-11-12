@@ -140,9 +140,13 @@ Configure host nginx with [nginx.conf.example](nginx.conf.example) and the
 [faucet nginx example](faucet/nginx.conf.example); provide real names and TLS
 certificates, `nginx -t`, then reload. Only open host TCP 443 (80 for certificate
 renewal if needed), with SSH restricted to operators. Do not publish 8545/8088/9090.
-Bridge subnets 172.30.88.0/24 and 172.30.89.0/24 must be unused. Verify Docker's
-actual proxy socket peer: faucet trusts only 172.30.88.1 and RPC only 172.30.89.1;
-nginx must overwrite X-Forwarded-For. Adjust the exact peer config deliberately if
+The bridged faucet and edge subnets (`--faucet-subnet`, `--edge-subnet`; default
+172.30.88.0/24 and 172.30.89.0/24) must be unused: generate.py refuses, before any key
+exists, a subnet that overlaps any Docker network on the host, including a stopped
+generation's. Give a second generation on the same host other subnets. Verify Docker's
+actual proxy socket peer: the faucet guard trusts only the faucet network's first address,
+the RPC gateway and the lock-proof endpoint only the edge network's (the manifest's
+`networks`); nginx must overwrite X-Forwarded-For. Adjust the exact peer config deliberately if
 the host differs. Never disable hCaptcha publicly. Publish NOTICE.txt, the current
 chain/genesis manifest, wallet setup, status URL and the incident-owner role's reporting channel.
 [TESTER.md](../../docs/operations/testnet/TESTER.md) is the wallet and transaction page for external testers; it points them at `tester-check.py`, which checks an endpoint against the published chain ID and block-zero hash.
@@ -155,6 +159,30 @@ Reject old genesis wallet pins, signing/admin/Engine methods, batches, malformed
 JSON, >16 KiB bodies (other than raw transactions) and burst traffic. Capture 400/429 results and verify ordinary
 RPC still responds afterwards. A raw externally signed transaction must enter
 **all** paired mempools; the RPC relay handles that fanout.
+
+## One public host name (staging)
+
+The faucet's settings are generator options: `--faucet-payout` (UCT per claim, default
+200), `--faucet-balance` (the faucet account's genesis balance, default 50,000 UCT),
+`--faucet-daily-claims` (default 50) and `--faucet-per-ip-limit` (off by default; see
+[faucet/README.md](faucet/README.md)). The manifest records them under `faucet`.
+
+A public generation with the bridge, behind one name (e.g. pos.staging.unicity.network):
+
+```
+generate.py --out /srv/testnet/tn-NAME ... --pos --utb [--faucet-subnet A --edge-subnet B]
+rehearse.py --generation G --evidence E --stages up,identity,first-tx,pos-smoke
+docker compose -f G/compose.yaml --project-directory G up -d --no-deps signer
+bridge/rehearse_bridge.py --generation G --evidence E --stages deploy,serve,tester,custody
+public_routes.py G --hostname NAME [--web-root /var/www/pos-staging]
+```
+
+`serve` starts the lock-proof endpoint to stay (no `--force-recreate`); the other bridge
+stages that stop or replace services are for disposable generations. `public_routes.py`
+writes `G/public/nginx/{zones,routes}.conf` (/rpc, /aggregator, /api/v1/trustbases,
+/faucet/ with /api/network and /api/claim, /lockproof/, /bridge/, /demo/) and
+`G/public/bridge/` (the published bridge files, tester-config.json with the public URLs);
+its docstring has the install steps. Rehearse on loopback before installing the routes.
 
 ## Monitoring, logs and incidents
 

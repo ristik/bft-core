@@ -3,7 +3,7 @@
 <title>Unicity test UCT faucet</title>
 <style>body{max-width:40rem;margin:4rem auto;padding:1rem;font:18px system-ui;background:#f6f7fa;color:#17233a}button{padding:1rem;font:inherit}pre{white-space:pre-wrap;overflow-wrap:anywhere}</style>
 <h1>Test UCT for gas</h1>
-<p>Get 0.01 UCT. One claim per wallet and IP every 24 hours, subject to availability.</p>
+<p id="terms">Test UCT, one claim per wallet every 24 hours, subject to availability.</p>
 <p><strong>No real value.</strong> This testnet may reset at any time. UCT and other assets may disappear without notice or obligation.</p>
 <p>Connect an EVM wallet configured for this testnet. Its chain ID and block-zero hash must match.</p>
 <div id="captcha"></div><p><button id="claim" disabled>Connect wallet and claim</button></p><pre id="result"></pre>
@@ -14,6 +14,8 @@ const output = document.getElementById('result');
 async function init() {
   network = await (await fetch('/api/network')).json();
   output.textContent = `Chain ID: ${network.chain_id}\nGenesis: ${network.genesis_hash}`;
+  document.getElementById('terms').textContent =
+    `Get ${network.payout} UCT. One claim per wallet${network.limit_per_ip ? ' and IP' : ''} every 24 hours, subject to availability.`;
   if (network.captcha_sitekey) {
     const deadline = Date.now() + 10000;
     while (!window.hcaptcha) {
