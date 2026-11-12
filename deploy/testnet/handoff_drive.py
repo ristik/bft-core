@@ -205,6 +205,17 @@ class Drive(rehearse.Rehearsal):
         records = [json.loads(p.read_text()) for p in sorted(self.evidence.glob('epoch*/activation-record-*.json'))]
         return ','.join(f"{r['epoch']}={r['v3BodyId']}" for r in sorted(records, key=lambda r: r['epoch']))
 
+    def scrub(self, text, patterns=False):
+        """rehearse's scrub, with the secret scan retried: on a live generation the shard's archive renames its `.writing-*` files while the scan walks it, and
+        a vanished file fails the scan (fail-closed: the line is withheld)."""
+        for _ in range(5):
+            out = super().scrub(text, patterns)
+            if not out.startswith('[output withheld: the secret scan failed'):
+                return out
+            self.rescan()
+            time.sleep(0.2)
+        return out
+
     def host_ubft(self, *args):
         """rehearse's host_ubft without its per-call 'ok' line (the drive calls it dozens of times)."""
         run = subprocess.run([str(self.ubft), *map(str, args)], text=True, capture_output=True)
