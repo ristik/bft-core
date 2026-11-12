@@ -695,13 +695,18 @@ func (s *Store) appendJournalObservation(tx *bolt.Tx, pair *verifiedPair, dd [32
 	if err != nil {
 		return err
 	}
+	// Every committed certificate frees the uncertified candidates it proves dead (bft-core#1019, rule 1), not only at the bound: once a
+	// certificate of the stuck height is admitted no single certificate can prove them dead any more, so candidates left for later could
+	// only be freed by the frontier, which cannot pass the stuck height on a node that must first catch up to it. Their authorizing
+	// observations become evictable with them.
+	evicted, err := evictDeadCandidates(b, uc, tr)
+	if err != nil {
+		return err
+	}
+	superseded := 0
 	if observed >= limits.Observations || n+int64(len(key)+len(raw)) > limits.Bytes {
-		// At the bound, first free the history this authenticated certificate supersedes (bft-core#1019): the uncertified candidates it proves
-		// dead (which also releases their authorizing observations), then the earlier repeats of the same certified input record.
-		evicted, e := evictDeadCandidates(b, uc, tr)
-		if e != nil {
-			return e
-		}
+		// At the observation bound, also free the earlier repeats of the same certified input record (rule 2). Their supersession does not
+		// depend on progress, so it can wait for the bound (or for EvictSuperseded, which a catch-up calls before it checks for room).
 		irBytes, e := canonicalIR(uc)
 		if e != nil {
 			return e
@@ -710,14 +715,13 @@ func (s *Store) appendJournalObservation(tx *bolt.Tx, pair *verifiedPair, dd [32
 		if w.Unresolved {
 			resolvedTarget = nil
 		}
-		superseded, e := evictSupersededObservations(b, key, uc.GetRootEpoch(), w.RootRound, resolvedTarget, irBytes)
-		if e != nil {
+		if superseded, e = evictSupersededObservations(b, key, uc.GetRootEpoch(), w.RootRound, resolvedTarget, irBytes); e != nil {
 			return e
 		}
-		if evicted+superseded > 0 {
-			if count, observed, n, err = journalCount(b); err != nil {
-				return err
-			}
+	}
+	if evicted+superseded > 0 {
+		if count, observed, n, err = journalCount(b); err != nil {
+			return err
 		}
 	}
 	if count > limits.Candidates || observed >= limits.Observations || n+int64(len(key)+len(raw)) > limits.Bytes {

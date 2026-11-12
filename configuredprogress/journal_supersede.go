@@ -2,7 +2,10 @@ package configuredprogress
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
+	"errors"
+	"fmt"
 
 	"github.com/unicitynetwork/bft-core/network/protocol/certification"
 	"github.com/unicitynetwork/bft-go-base/types"
@@ -131,7 +134,10 @@ func evictSupersededObservations(b *bolt.Bucket, newKey []byte, newEpoch, newRoo
 			continue // the newest observation of its block, or not a repeat of it
 		}
 		if _, needed := authorizations[[3]uint64{e.epoch, e.root, e.round}]; needed {
-			continue // a retained candidate's authorization
+			// A retained candidate's authorization. Defensive: a live candidate is authorized by its block's newest repeat, and rule 1 runs on
+			// every certificate, so this matters only for a candidate rule 1 has not freed yet (a follower's late copy of a closed round, or a
+			// journal written before #1019). LoadJournal requires a local candidate's authorization to be present.
+			continue
 		}
 		candidateRaw := b.Get(journalCandidateKey(e.target))
 		if candidateRaw == nil {
@@ -168,4 +174,47 @@ func retainedAuthorizationCoordinates(b *bolt.Bucket) (map[[3]uint64]struct{}, e
 		out[[3]uint64{uc.GetRootEpoch(), uc.GetRootRoundNumber(), uc.GetRoundNumber()}] = struct{}{}
 	}
 	return out, nil
+}
+
+// EvictSuperseded frees, against the durable progress certificate, the history the two rules above prove superseded, in one transaction. It is
+// what a catch-up calls before it decides the journal has no room (bft-core#1019): a node that accumulated a stall's history below the bounds,
+// or under a binary that never evicted, otherwise waits for room only the frontier could make. A concurrent commit is not an error: that
+// commit evicts against its own certificate, and the caller re-reads the journal.
+func (s *Store) EvictSuperseded(ctx context.Context, c Context, limits JournalLimits) (candidates, observations int, err error) {
+	if !s.journal {
+		return 0, 0, fmt.Errorf("%w: journal not enabled", ErrSettings)
+	}
+	if err := limits.check(); err != nil {
+		return 0, 0, err
+	}
+	state, _, err := s.Load(ctx, c)
+	if err != nil {
+		return 0, 0, err
+	}
+	if state.i.observed == nil {
+		return 0, 0, nil
+	}
+	uc, tr := state.i.observed.observation.Certificate(), state.i.observed.observation.TechnicalRecord()
+	err = s.db.Update(func(tx *bolt.Tx) error {
+		b := tx.Bucket(bucketName)
+		if !imageMatches(b, state.i) {
+			return ErrStale
+		}
+		if err := readJournalMeta(b, state.i.descriptorDigest, limits); err != nil {
+			return err
+		}
+		var e error
+		if candidates, e = evictDeadCandidates(b, uc, tr); e != nil {
+			return e
+		}
+		observations, e = evictSupersededObservations(b, nil, 0, 0, nil, nil)
+		return e
+	})
+	if errors.Is(err, ErrStale) {
+		return 0, 0, nil
+	}
+	if err != nil {
+		return 0, 0, err
+	}
+	return candidates, observations, nil
 }
