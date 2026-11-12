@@ -278,7 +278,10 @@ sudo -E env "PATH=$PATH" python3 deploy/testnet/handoff_drive.py $G [<resultID>]
 
 It runs OPERATOR.md 5b (the rehearsal's pos-proposal, pos-propose, pos-install and pos-advance) as the steps `preflight`, `trust-base`, `proposal`, `propose`,
 `install`, `advance`, `lockproof`, `verify`, each printed with its timing and recorded in `$G/handoff/log.jsonl` (event `drive`). After a failure the same
-command continues after the last completed step or sub-step (a root already installed, an entity already advanced). It refuses, and changes nothing, when the
+command continues after the last completed step or sub-step (a root already installed, an entity already advanced). The trust base's epoch start is set above the root's current round
+(at least the rehearsal's `200000*(N-1)` for epoch N); it is a numbering floor in the file, not a round the install waits for: the activation round comes from the
+committed handoff. An entity's advance is three sub-steps (`advance-epoch`, `replace-session`, `shard-start`); the authority's `status` is read first, so an advance
+it already holds is never sent again (the authority refuses a repeat), and `client.cred.pre-epoch-N` is kept once and never overwritten. It refuses, and changes nothing, when the
 reservation has fewer than `--min-window-rounds` (1800) rounds left before the Prepare, or when the election's members are not the committee, a prepared joiner
 (`--joiner STAKINGID=ENTITY` or `$G/handoff/joiners.json`) or a retirement (`--allow-unrehearsed-retirement`: never rehearsed). Only roots are recreated (with
 `compose.install-epoch-N.json`) and shard nodes stopped and started; signing authorities are never restarted. The lock-proof endpoint is recreated only when it
