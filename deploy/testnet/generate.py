@@ -159,10 +159,12 @@ def topology(out, n, ids, images, captcha, ureth_flags=(), max_gas=30000000, wit
             '--engine-url','http://ureth%d:8551'%i,'--eth-url','http://ureth%d:8545'%i,
             '--jwt-secret','/jwt/jwt.hex','--engine-fee-collector',FEE,'--b1-profile','/network/b1-profile.json','--q3-lane',
             '--execution-journal','/state/execution-journal.db','--archive-store','/archive',
-            '--archive-prune','--journal-candidates','32','--trust-history-profile-2','--rpc-server-address',operator_rpc.listen(rpc_bind,operator_rpc.SHARD_PORT),'--metrics','prometheus',
+            '--archive-prune','--journal-candidates','256','--trust-history-profile-2','--rpc-server-address',operator_rpc.listen(rpc_bind,operator_rpc.SHARD_PORT),'--metrics','prometheus',
             '--signing-authority-socket','/authority/client.sock','--signing-authority-credential','/authority/client.cred']
             + utb_node_flags(utb) + common,   # no --archive-replica: the node derives its replicas from the shard's validators (the next three in peer-ID order, any two make a block durable)
-            [evm,auth,network,'./validator%d/jwt:/jwt:ro'%i,'./validator%d/archive:/archive'%i],memory='512m',cpu=0.75,pod='pod%d'%i)
+            [evm,auth,network,'./validator%d/jwt:/jwt:ro'%i,'./validator%d/archive:/archive'%i],memory='2048m',cpu=1.5,pod='pod%d'%i)
+        # 2 GiB / 1.5 CPU, not 512 MiB / 0.75 (#1018): the cgroup also pays the kernel's dentry/inode cache of the per-block archive tree (about 490 MiB of 512 MiB
+        # after 25 h on staging), and at 512 MiB the shards swapped until the round deadlines failed. The journal bound is the shard node's default 256 again, not 32 (#1019).
         # Go's cgo runtime aborts when pthread_create fails, and at low limits this reproduces the crash of bft-core #905, after which a restore refuses to restart, by design, on the
         # journal it left. 31 restores peaked at 32 to 80 and none reached the old limit of 128, so that the real crashes hit it is inferred, and what spiked is not known.
         services['shard%d'%i]['pids_limit']=512
