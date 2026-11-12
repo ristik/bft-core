@@ -231,6 +231,9 @@ class RemoteEntity:
     def restore_start(self, uc, tr, body_id):
         return self.client.op('restore-start', timeout=600, uc_b64=b64(uc), tr_b64=b64(tr), body_id=body_id)
 
+    def seed_archive(self):
+        return self.client.op('seed-archive', timeout=1800)
+
     def restore_finish(self):
         return self.client.op('restore-finish', timeout=300)
 
@@ -469,6 +472,13 @@ class Join:
         if ident not in members:
             raise RuntimeError(f'the result leaves the joiner (custody id {ident}) out: not driven (the drive refuses it while the joiner is prepared). '
                                'Look at the election\'s reason (lastAttemptResult) before anything else')
+        # the joiner's root and shard node brought to the current epoch (handoff_drive.catch_up_remote; the drive repeats it as a no-op): on a network past its
+        # first handoff this is the slow part (the shard node's restore fetches every archive record through the tunnel), so it can be run ahead of an audience
+        d.target, d.new, d.joiners = int(r.info['preparedFor']), sorted(set(certifying_entities(d)) | {self.entity}), {self.entity}
+        d.catch_up_remote(self.entity)
+        if self.stop_after == 'caught-up':
+            say(f'stopping after the catch-up (--stop-after caught-up): result {result} names the joiner and has to be driven within its window; `join` drives it')
+            return 0
         rc = self.drive(result, '--require-member', str(self.entity))
         if rc != 0:
             raise RuntimeError(f'handoff_drive stopped (exit {rc}): rerun the same command (the drive resumes from handoff/log.jsonl)')
@@ -508,6 +518,21 @@ def certifying_entities(d):
     return sorted([i for i in d.transport.docker.entities] + [i for i, r in d.remote.items() if r.state == 'member'])
 
 
+def archive_tar(generation, source, out=None):
+    """The complete record directories (v2-*) of entity `source`'s shard archive as a tar stream on stdout: the certified blocks every shard node replicates
+    to its peers anyway (no key material). The laptop seeds its archive with it (remote_joiner.op_restore_start): its node then walks its archive locally,
+    where a fetch through the tunnel costs ~7 round trips per record and a catch-up of a thousand blocks never finishes within its deadline."""
+    import tarfile
+    archive = Path(generation) / f'validator{int(source)}' / 'archive'
+    with tarfile.open(fileobj=out or sys.stdout.buffer, mode='w|') as tar:
+        for record in sorted(archive.iterdir()):
+            if record.is_dir() and record.name.startswith('v2-'):   # renamed into place when complete; .writing-* partials are skipped
+                try:
+                    tar.add(record, arcname=record.name)
+                except FileNotFoundError:
+                    continue
+
+
 def retire_plan(generation, entity):
     """The retirement of the laptop entity, as steps; nothing is run (never rehearsed on the package: the drive refuses a retirement by default)."""
     info = load(generation)[entity].info
@@ -526,11 +551,13 @@ def retire_plan(generation, entity):
 def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest='action', required=True)
-    for name in ('relay-up', 'relay-status', 'register', 'status', 'join', 'retire-plan'):
+    for name in ('relay-up', 'relay-status', 'register', 'status', 'join', 'retire-plan', 'archive-tar'):
         s = sub.add_parser(name)
         s.add_argument('generation', type=Path)
-        if name != 'relay-status':
+        if name not in ('relay-status', 'archive-tar'):
             s.add_argument('--entity', type=int, required=True)
+        if name == 'archive-tar':
+            s.add_argument('--source', type=int, default=1, help='the genesis entity whose archive is streamed')
         if name in ('relay-up', 'register'):
             s.add_argument('--sock-dir', type=Path, required=True)
         if name == 'relay-up':
@@ -541,7 +568,8 @@ def main(argv=None):
             s.add_argument('--restore-pin', type=Path, required=True)
             s.add_argument('--cast', default='cast')
             s.add_argument('--dry-run', action='store_true')
-            s.add_argument('--stop-after', choices=('bonded',), help='fund, register and bond only (ahead of the audience: the timed part is the rest)')
+            s.add_argument('--stop-after', choices=('bonded', 'caught-up'), help='bonded: fund, register and bond only; caught-up: also prepare, wait for the result '
+                           'naming the joiner and bring its root and shard node to the current epoch (ahead of an audience; the drive is the rest)')
     a = p.parse_args(argv)
     if a.action == 'relay-up':
         print(json.dumps(relay_up(a.generation, a.entity, a.sock_dir, a.script, a.uid), indent=1))
@@ -554,6 +582,8 @@ def main(argv=None):
     elif a.action == 'status':
         r = load(a.generation)[a.entity]
         print(json.dumps({'state': r.state, 'stakingId': r.info.get('stakingId'), 'laptop': r.status()}, indent=1, sort_keys=True))
+    elif a.action == 'archive-tar':
+        archive_tar(a.generation, a.source)
     elif a.action == 'retire-plan':
         print('\n'.join(retire_plan(a.generation, a.entity)))
     elif a.action == 'join':

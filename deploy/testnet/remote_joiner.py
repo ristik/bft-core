@@ -62,6 +62,44 @@ SUBNET = '10.231.5.0/24'   # the laptop's validators network: not one of the hos
 OPERATOR = ['--operator-socket', '/authority/operator.sock', '--operator-credential', '/authority/operator.cred']
 
 
+SEED = r'''
+import os, shutil, sys, tarfile
+ROOT = sys.argv[1] if len(sys.argv) > 1 else '/a'
+t = tarfile.open(fileobj=sys.stdin.buffer, mode='r|')
+added = kept = 0
+current = None
+def finish(rec):
+    global added, kept
+    if rec is None:
+        return
+    final, tmp = os.path.join(ROOT, rec), os.path.join(ROOT, '.seed-' + rec)
+    if os.path.exists(final):
+        shutil.rmtree(tmp, ignore_errors=True); kept += 1
+    elif os.path.isdir(tmp):
+        try:
+            os.rename(tmp, final); added += 1
+        except OSError:   # the running node wrote the same record meanwhile: its own copy stays
+            shutil.rmtree(tmp, ignore_errors=True); kept += 1
+for m in t:
+    parts = m.name.split('/')
+    if not parts[0].startswith('v2-') or len(parts) > 2:
+        continue
+    if parts[0] != current:
+        finish(current); current = parts[0]
+    if os.path.exists(os.path.join(ROOT, current)):
+        continue
+    tmp = os.path.join(ROOT, '.seed-' + current)
+    os.makedirs(tmp, mode=0o700, exist_ok=True)
+    if m.isfile() and len(parts) == 2:
+        p = os.path.join(tmp, parts[1])
+        with open(p, 'wb') as out:
+            out.write(t.extractfile(m).read())
+        os.chmod(p, 0o600)
+finish(current)
+print('added', added, 'kept', kept)
+'''   # a record directory is placed by rename once complete, and only when missing (the seeding of a running node's archive never touches a record it has)
+
+
 def now():
     return time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
 
@@ -248,13 +286,15 @@ class Laptop:
 
     def status(self):
         services = self.services_state()
-        out = {'entity': self.entity, 'services': services, 'rootNodeId': self.state['rootNodeId'], 'evmNodeId': self.state['evmNodeId'],
+        out = {'entity': self.entity, 'services': services, 'restoring': (self.home / 'compose.restore.json').is_file(), 'rootNodeId': self.state['rootNodeId'], 'evmNodeId': self.state['evmNodeId'],
                'accounts': self.state['accounts'], 'authorityScope': self.state.get('authorityScope')}
         if services.get(f'root{self.entity}') == 'running':
             for key, path in (('follower', '/api/v1/q3/status'), ('signers', '/api/v1/q3/signers')):
                 try:
                     code, body = self.root_post(path)
                     data = json.loads(body) if code == 200 else None
+                    if key == 'follower' and data:
+                        out['activeEpoch'] = data.get('activeEpoch')
                     out[key] = data.get('follower') if key == 'follower' and data else data
                 except (Failure, ValueError, subprocess.TimeoutExpired):
                     out[key] = None
@@ -320,9 +360,13 @@ class Laptop:
         return {'text': self.exec(f'root{j}', 'cat', '/tmp/receipt.json').stdout}
 
     def root_epoch(self):
+        """The root's epoch: its committed certificate's (q3/signers) or, for a follower that holds none (422), its installed one (q3/status activeEpoch)."""
         try:
             code, body = self.root_post('/api/v1/q3/signers')
-            return json.loads(body).get('epoch') if code == 200 else None
+            if code == 200:
+                return json.loads(body).get('epoch')
+            code, body = self.root_post('/api/v1/q3/status')
+            return json.loads(body).get('activeEpoch') if code == 200 else None
         except (Failure, ValueError, subprocess.TimeoutExpired):
             return None
 
@@ -384,6 +428,23 @@ class Laptop:
             raise Failure(f'{step}: exit {done.returncode}: {text}')
         return {'step': step, 'out': text}
 
+    def seed_archive(self):
+        """The host survivor's archive records this node lacks, streamed over this machine's own ssh (remote_entity.py archive-tar): its node walks them locally."""
+        s = self.state
+        source = subprocess.Popen(['ssh', '-o', 'BatchMode=yes', s['host'], f'sudo python3 {s["hostDir"]}/testnet/remote_entity.py archive-tar {s["hostGeneration"]} | gzip -1'],
+                                  stdout=subprocess.PIPE)
+        gunzip = subprocess.Popen(['gunzip'], stdin=source.stdout, stdout=subprocess.PIPE)
+        done = subprocess.run(['docker', 'run', '--rm', '-i', '--user', '10001:10001', '--read-only', '--cap-drop', 'ALL', '-v', f'{self.vol("archive")}:/a',
+                               '--entrypoint', 'python3', self.rpc_image, '-c', SEED], stdin=gunzip.stdout, capture_output=True, text=True)
+        source.wait()
+        gunzip.wait()
+        if done.returncode or source.returncode:
+            raise Failure(f'seeding the archive: ssh exit {source.returncode}, seed exit {done.returncode}: {done.stderr.strip()[-300:]}')
+        return done.stdout.strip()
+
+    def op_seed_archive(self):
+        return {'seeded': self.seed_archive()}
+
     def op_restore_start(self, uc_b64, tr_b64, body_id):
         """rehearse.restore_joiner, the laptop half: the execution client's and the shard node's state emptied (its keys kept), the pin written, `shard-node restore`."""
         if not re.fullmatch(r'0x[0-9a-fA-F]+', body_id):
@@ -393,6 +454,7 @@ class Laptop:
         wipe = ('find /evm -mindepth 1 -maxdepth 1 ! -name keys.json ! -name node-info.json -exec rm -rf {} + && '
                 'find /archive -mindepth 1 -maxdepth 1 -exec rm -rf {} + && find /ureth -mindepth 1 -maxdepth 1 -exec rm -rf {} +')
         self.one(self.node_image, ['-c', wipe], [f'{self.vol("evm")}:/evm', f'{self.vol("archive")}:/archive', f'{self.vol("ureth")}:/ureth'], entrypoint='sh')
+        seeded = self.seed_archive()   # before the restore: its fetch from the pinned tip to genesis then finds every record locally
         self.dc('up', '-d', '--no-deps', f'ureth{j}')
         self.wait(f'the execution client {j} answers', lambda: self.ureth_head() is not None, 180)
         self.vol_write('evm', 'tip.uc.cbor', base64.b64decode(uc_b64), 0o600)
@@ -401,7 +463,7 @@ class Laptop:
         (self.home / 'compose.restore.json').write_text(json.dumps({'services': {f'shard{j}': {'entrypoint': entry}}}, indent=1) + '\n')
         self.dc('up', '-d', '--no-deps', '--force-recreate', f'shard{j}')
         time.sleep(10)
-        return {'started': True, 'shard': self.services_state().get(f'shard{j}'), 'head': self.ureth_head()}
+        return {'started': True, 'shard': self.services_state().get(f'shard{j}'), 'head': self.ureth_head(), 'seeded': seeded}
 
     def op_restore_finish(self):
         j = self.entity
@@ -465,7 +527,7 @@ class Laptop:
 
     OPS = {'status': 'op_status', 'root-post': 'op_root_post', 'logs': 'op_logs', 'put-network': 'op_put_network', 'trust-base-sign': 'op_trust_base_sign',
            'evm-pop': 'op_evm_pop', 'sign-pop': 'op_sign_pop', 'readiness': 'op_readiness', 'install-root': 'op_install_root',
-           'authority-status': 'op_authority_status', 'authority-step': 'op_authority_step', 'restore-start': 'op_restore_start', 'restore-finish': 'op_restore_finish', 'start-authority': 'op_start_authority', 'tx': 'op_tx'}
+           'authority-status': 'op_authority_status', 'authority-step': 'op_authority_step', 'restore-start': 'op_restore_start', 'seed-archive': 'op_seed_archive', 'restore-finish': 'op_restore_finish', 'start-authority': 'op_start_authority', 'tx': 'op_tx'}
     READS = frozenset(('status', 'root-post', 'logs', 'authority-status'))
 
     def dispatch(self, name, args):
@@ -572,7 +634,7 @@ def init(host, generation, home, mac_host):
     say(f'entity {entity}: root {root_id}, evm {evm_id}, owner {accounts["owner"]}')
     # the host: this checkout's deploy/testnet, the relay, the public facts
     sources = sorted(p.name for p in HERE.glob('*.py'))
-    tarball = run(['tar', '-C', str(HERE), '-cf', '-', *sources], text=False).stdout
+    tarball = run(['tar', '--no-xattrs', '-C', str(HERE), '-cf', '-', *sources], text=False).stdout
     ssh(host, f'mkdir -p {host_dir}/testnet && tar -C {host_dir}/testnet -xf -', input=tarball, text=False)
     py = f'sudo python3 {host_dir}/testnet/remote_entity.py'
     say(ssh(host, f'{py} relay-up {host_gen} --entity {entity} --sock-dir {sock_dir} --uid $(id -u)').stdout.strip())
@@ -707,7 +769,7 @@ def main(argv=None):
     p.add_argument('--generation')
     p.add_argument('--mac-host', default='host.docker.internal', help='how a container of the docker VM reaches the Mac\'s loopback (colima: host.docker.internal)')
     p.add_argument('--dry-run', action='store_true')
-    p.add_argument('--stop-after', choices=('bonded',), help='join: fund, register and bond only')
+    p.add_argument('--stop-after', choices=('bonded', 'caught-up'), help='join: stop after the bond, or after the result names the joiner and its nodes caught up')
     a = p.parse_args(argv)
     home = a.home or (f'~/unicity-joiner/{a.generation}' if a.generation else None)
     if home is None:

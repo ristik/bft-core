@@ -356,5 +356,27 @@ class RemoteAdvance(unittest.TestCase):
         self.assertEqual(self.steps(), [])
 
 
+class ArchiveSeed(unittest.TestCase):
+    def test_records_are_streamed_and_only_missing_ones_placed(self):
+        import io, subprocess, sys, tarfile as tf
+        with tempfile.TemporaryDirectory() as d:
+            gen, dest = Path(d) / 'gen', Path(d) / 'dest'
+            archive = gen / 'validator1' / 'archive'
+            for name in ('v2-aa', 'v2-bb', '.writing-cc'):
+                (archive / name).mkdir(parents=True)
+                (archive / name / 'header.chunk').write_bytes(name.encode())
+            (dest / 'v2-aa').mkdir(parents=True)
+            (dest / 'v2-aa' / 'header.chunk').write_bytes(b'mine')
+            stream = io.BytesIO()
+            re_.archive_tar(gen, 1, stream)
+            names = tf.open(fileobj=io.BytesIO(stream.getvalue())).getnames()
+            self.assertNotIn('.writing-cc', ' '.join(names), 'a partial record is never streamed')
+            done = subprocess.run([sys.executable, '-c', rj.SEED, str(dest)], input=stream.getvalue(), capture_output=True, check=True)
+            self.assertEqual(done.stdout.decode().strip(), 'added 1 kept 1')
+            self.assertEqual((dest / 'v2-aa' / 'header.chunk').read_bytes(), b'mine', 'a record the node has is never touched')
+            self.assertEqual((dest / 'v2-bb' / 'header.chunk').read_bytes(), b'v2-bb')
+            self.assertEqual(sorted(p.name for p in dest.iterdir()), ['v2-aa', 'v2-bb'], 'no temporary directory left')
+
+
 if __name__ == '__main__':
     unittest.main()
