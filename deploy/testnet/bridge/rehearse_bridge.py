@@ -5,6 +5,10 @@
 
   deploy     deploy_bridge.py (TokenVerifier + BridgeVault after genesis, signed with the faucet keystore) and overlay.py (compose.bridge.yaml); the
              release manifest (bridge/public/bridge-release.json) against the chain: the contracts' addresses and code, the block gas limit and the limits
+  serve      the lock-proof endpoint started to stay, for a generation that is kept running (a public staging network): overlay.py, then
+             `up -d --no-deps lockproof` without --force-recreate (an endpoint already running on this configuration is left alone; nothing else is touched),
+             healthy, and a malformed request refused (400). The stages below that stop or replace services (lockproof, roundtrip, negatives,
+             backup-restore, the pos-* ones) are for disposable generations
   lockproof  the lock-proof endpoint: a lock through the public gateway, its proof over HTTP equal to `dnb-tool lockproof`'s bytes, malformed (400),
              unknown nonce (404), rate limit (429), the endpoint replaced on another validator's archive serving the same bytes, and a lock older than
              ureth's proof window refused as not found (404)
@@ -272,6 +276,14 @@ class BridgeRehearsal(SdkClients, BridgePos, Rehearsal):
         self.expect(rel['package']['genesisHash'] == self.call('eth_getBlockByNumber', ['0x0', False])['hash'], 'the manifest names this chain\'s genesis')
         self.say(f'  release: contracts {rel["contracts"]["commit"][:12]}, plug-ins {rel["profile"]["nativeBridgePlugins"][:12]}, SDK {rel["profile"]["sdk"]["version"]}, '
                  f'corpus {rel["profile"]["corpusDigest"][:8]}, image {rel["bridge"]["image"][:19]}')
+
+    def serve(self):
+        subprocess.run([sys.executable, str(HERE / 'overlay.py'), str(self.gen)], check=True, capture_output=True)
+        self.bridge_compose('up', '-d', '--no-deps', 'lockproof')
+        self.wait('the lock-proof endpoint is healthy', lambda: self.http(ENDPOINT, 'GET', '/healthz')[0] == 200, 60)
+        s, _ = self.proof('0x00', 1, PROXY_IPS[1] + '33', '/v1/lockproof?block=0x00&nonce=1')
+        self.expect(s == 400, 'a malformed request is refused (400)', f'status {s}')
+        self.say(f'  lock-proof endpoint on {ENDPOINT}, archive of validator 1')
 
     def lockproof(self):
         self.start_endpoint(1)
@@ -620,7 +632,7 @@ class BridgeRehearsal(SdkClients, BridgePos, Rehearsal):
                                                                 'donations': received, 'claimable': owed, 'balance': balance}, indent=2) + '\n')
 
 
-STAGES = (('deploy', 'deploy'), ('lockproof', 'lockproof'), ('fund', 'fund'), ('roundtrip', 'roundtrip'), ('negatives', 'negatives'), ('tester', 'tester_stage'), ('split', 'split_stage'),
+STAGES = (('deploy', 'deploy'), ('serve', 'serve'), ('lockproof', 'lockproof'), ('fund', 'fund'), ('roundtrip', 'roundtrip'), ('negatives', 'negatives'), ('tester', 'tester_stage'), ('split', 'split_stage'),
           ('consolidated', 'consolidated'), ('long-history', 'long_history'), ('backup-restore', 'backup_restore'), ('pos-epoch1', 'pos_epoch1'), ('pos-redeem', 'pos_redeem'), ('pos-historical', 'pos_historical'), ('pos-gap', 'pos_gap'), ('pos-agg-restart', 'pos_agg_restart'), ('pos-after-restart', 'pos_after_restart'), ('pos-replays', 'pos_replays'), ('pos-sdk-clients', 'pos_sdk_clients'),
           ('custody', 'custody'))
 # opt-in: only on a --pos --utb generation, around rehearse.py's handoff stages (bridge_pos.py)
@@ -632,7 +644,7 @@ def main():
     p.add_argument('--generation', required=True, type=Path)
     p.add_argument('--evidence', required=True, type=Path)
     p.add_argument('--cast', default='cast')
-    p.add_argument('--stages', default=','.join(s for s, _ in STAGES if s not in POS_STAGES), help='comma separated, in order (the pos-* stages only when named)')
+    p.add_argument('--stages', default=','.join(s for s, _ in STAGES if s not in POS_STAGES and s != 'serve'), help='comma separated, in order (the pos-* stages only when named)')
     p.add_argument('--ubft', type=Path, help='the pinned ubft binary: pos-redeem verifies the roots\' served history with it (rehearse.py utb_history)')
     p.add_argument('--long-transfers', type=int, default=250, help=f'the long-history token\'s transfers (65 to {LONG_TRANSFERS_MAX})')
     a = p.parse_args()

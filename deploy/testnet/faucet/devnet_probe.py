@@ -60,7 +60,8 @@ def main():
                funding_address=faucet, rpc_url='http://127.0.0.1:18845',
                backend_url='http://127.0.0.1:18846', validator_rpc_urls=urls,
                minimum_balance_wei=20000000000000000, daily_claims=10,
-               captcha_sitekey='', dev_only=True)
+               captcha_sitekey='', dev_only=True, payout='0.01',
+               limit_per_ip=True)   # this probe's evidence includes the same-IP refusal (the package default has no per-IP limit)
     evidence = dict(config=cfg, upstream_revision='e7572628addc86c634d8acc3a61d5899667f0e33',
                     faucet_address=faucet, fresh_wallet=wallet,
                     initial_balance=rpc('eth_getBalance', [wallet, 'latest']))

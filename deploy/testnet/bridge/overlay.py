@@ -6,7 +6,7 @@
 
 Run after deploy_bridge.py, which writes GENERATION/bridge/ (addresses, CFG, trust bundle). Services:
   lockproof  `dnb-tool lockproof-serve`: the stateless, read-only, rate-limited lock-proof endpoint on 127.0.0.1:8090 (the host's nginx publishes it like the
-             RPC gateway, as 172.30.89.1). It reads validator N's certified-block archive through a read-only mount and asks that validator's ureth for
+             RPC gateway, as the edge network's gateway, 172.30.89.1 by default). It reads validator N's certified-block archive through a read-only mount and asks that validator's ureth for
              eth_getProof, so a proof is available only while ureth's proof window (--rpc.eth-proof-window) still covers the lock's block.
 Replacing the endpoint is stopping it and starting it again, on the same or another validator's archive (--archive-of): it holds no state.
 On a PoS generation every shard epoch has its own EVM shard configuration (the handoff publishes network/handoff/shard-conf-<epoch>.json, atomically,
@@ -21,7 +21,12 @@ import re
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-TRUSTED_PROXY = '172.30.89.1'   # the edge network's gateway, the address the host's nginx reaches containers from (generate.py)
+TRUSTED_PROXY = '172.30.89.1'   # the edge network's default gateway, the address the host's nginx reaches containers from (generate.py DEFAULT_SUBNETS)
+
+
+def trusted_proxy(manifest):
+    """The edge network's gateway as the generation's manifest records it (generate.py --edge-subnet); a manifest from before the option has the default."""
+    return ((manifest.get('networks') or {}).get('edge') or {}).get('gateway') or TRUSTED_PROXY
 
 
 def hardened(**svc):
@@ -38,7 +43,8 @@ def main():
     p.add_argument('--archive-of', type=int, default=1, help='the validator whose archive and ureth the endpoint reads')
     a = p.parse_args()
     gen = a.generation.resolve()
-    n = json.loads((gen / 'manifest.json').read_text())['validators']
+    manifest = json.loads((gen / 'manifest.json').read_text())
+    n = manifest['validators']
     if not 1 <= a.archive_of <= n:
         raise SystemExit(f'--archive-of must be 1..{n}')
     image = json.loads((HERE.parent / 'artifacts/bridge-images.json').read_text())['images']['bridge']
@@ -51,7 +57,7 @@ def main():
         networks=['validators', 'edge'], ports=['127.0.0.1:8090:8090'],
         entrypoint=['dnb-tool', 'lockproof-serve', '--listen', '0.0.0.0:8090', '--archive', '/archive', '--eth-url', f'http://ureth{i}:8545',
                     '--vault', addr['BridgeVault'], '--cfg', addr['CFG'], '--full-shard-conf', '/network/full-shard-conf.json', '--shard-conf-dir', '/network/handoff',
-                    '--trust-bundle', '/bridge/trust-base.bundle.cbor', '--trusted-proxy', TRUSTED_PROXY],
+                    '--trust-bundle', '/bridge/trust-base.bundle.cbor', '--trusted-proxy', trusted_proxy(manifest)],
         volumes=[f'./validator{i}/archive:/archive:ro', './network:/network:ro', './bridge:/bridge:ro'],
         healthcheck={'test': ['CMD', 'node', '-e', "fetch('http://127.0.0.1:8090/healthz').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"],
                      'interval': '30s', 'timeout': '10s', 'retries': 3})}

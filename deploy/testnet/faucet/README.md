@@ -88,18 +88,24 @@ the provided Compose deployment cannot publish that mode through its container I
 
 ## Limits, failure and monitoring
 
-Each claim is 0.01 UCT (18 decimals), one reservation per normalized address and
-IP per rolling 24 hours, with at most 100 reservations (1 UCT) in any 24 hours.
-The signer additionally enforces upstream's address/IP limits and verifies
-hCaptcha. Gateway reservations survive process/container restarts and are committed
+Each claim pays `payout` UCT (network.json; the signer's `FAUCET_PAYOUT`, the same
+value: the guard's health check refuses a signer that reports another). The package
+default is 200 UCT (`generate.py --faucet-payout`), enough for a demo wallet's 100 UCT
+bond plus gas, with at most `daily_claims` (default 50) reservations in any 24 hours and
+one per normalized address per rolling 24 hours. There is no per-IP limit by default
+(owner decision 2026-11-12: an audience behind one office NAT would share one claim);
+`limit_per_ip: true` (`generate.py --faucet-per-ip-limit`) restores one claim per address
+and per IP. The signer's own upstream limiter keys on the address and on the client
+named in `X-Forwarded-For`; without the per-IP limit the guard sends the address there,
+so both of the signer's keys are the address. The signer verifies hCaptcha. Gateway reservations survive process/container restarts and are committed
 **before** submitting to the signer. Backend failures and ambiguous timeouts
 consume a reservation, intentionally. A signer 429 (failed CAPTCHA or its own rate
 limit, both answered before any transfer) releases the reservation. A client can receive
 503 after a transaction was accepted; inspect the wallet/chain before intervening.
-Never automatically replay a request. Shared NAT users share the IP cap.
+Never automatically replay a request. With `limit_per_ip`, shared NAT users share the IP cap.
 
 400 means malformed address/body or missing CAPTCHA; 409 means the client network
-pin differs; 429 means address/IP/global reservation limits, or a failed CAPTCHA
+pin differs; 429 means address (and, with `limit_per_ip`, IP) or global reservation limits, or a failed CAPTCHA
 (retry allowed); 503 means unavailable,
 exhausted, mismatched backend/network or uncertain submission. A 200 response
 contains the broadcast transaction hash, not a finality guarantee. Check its
@@ -108,8 +114,10 @@ Only simple EOA wallets are supported (upstream uses a fixed 21,000 transfer gas
 
 `GET /healthz` is the monitoring endpoint: 200 includes remaining claims and the
 faucet balance in wei; 503 is fail-closed. It checks chain/genesis, signer address,
-payout, CAPTCHA site key, minimum balance and the rolling budget. Default minimum
-balance is 0.02 UCT; this is an operational reserve, not a guaranteed gas quote.
+payout, CAPTCHA site key, minimum balance and the rolling budget. generate.py sets the
+minimum balance to two payouts (400 UCT at the default); this is an operational reserve,
+not a guaranteed gas quote. The faucet account's genesis balance is
+`generate.py --faucet-balance` (default 50,000 UCT, 250 claims at 200 UCT).
 Insufficient gas funds or a stuck nonce also cause the signer to refuse transfers.
 Alert on Docker unhealthy status, 503s, low balance and signer broadcast errors;
 inspect `docker compose logs --tail=100 signer gateway relay`. No transaction is
