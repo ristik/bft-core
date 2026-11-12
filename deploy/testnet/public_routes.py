@@ -4,7 +4,9 @@
     public_routes.py GENERATION --hostname pos.staging.unicity.network [--web-root /var/www/pos-staging] [--out GENERATION/public]
 
 It writes, and changes nothing else (no nginx reload, no copy into the web root):
-  OUT/nginx/zones.conf   the limit_req/limit_conn zones the routes name (nginx `http` context; include once)
+  OUT/nginx/zones.conf   the limit_req/limit_conn zones the routes name (nginx `http` context; include once). It REPLACES the zones of
+                         nginx.conf.example and faucet/nginx.conf.example (same names): a host that has those must drop them, or nginx -t
+                         fails with a duplicate zone
   OUT/nginx/routes.conf  the locations (nginx `server` context: the host's server block includes it), every upstream on the host loopback port the
                          generation's compose files publish:
                            /rpc                 the RPC gateway (JSON-RPC POST)
@@ -67,7 +69,7 @@ def routes(ports, web_root, generation):
     """routes.conf: the locations, for nginx's server context."""
     proxy = '    proxy_set_header X-Forwarded-For $remote_addr;\n    proxy_set_header Host $host;\n'
     out = [f'# Public routes of generation {generation} (written by deploy/testnet/public_routes.py). Upstreams bind the host loopback.\n',
-           f"""# RPC: the gateway takes JSON-RPC POSTs at its "/".
+           f"""# RPC: the gateway takes JSON-RPC POSTs at its "/". POST only, on purpose: no OPTIONS, so no CORS preflight; the clients are same-origin (/demo/) or not browsers.
 location = /rpc {{
     limit_except POST {{ deny all; }}
     limit_conn tn_conn 4;
