@@ -297,5 +297,64 @@ class DriveGuard(unittest.TestCase):
         self.assertEqual(self.drive('prepared', allow=True)['kind'], 'no-change')
 
 
+class RemoteAdvance(unittest.TestCase):
+    """handoff_drive.advance_remote: the laptop's switch as the same resumable sub-steps, status first."""
+
+    def setUp(self):
+        self.calls = []
+        test = self
+
+        class Remote:
+            status = {'rootEpoch': 4, 'shardEpoch': 3, 'enrollmentComplete': True, 'generation': 1}
+
+            def put(self, files):
+                test.calls.append(('put', sorted(files)))
+
+            def authority_status(self):
+                return dict(self.status)
+
+            def authority_step(self, step, target, shard_epoch):
+                test.calls.append((step, target, shard_epoch))
+                if step == 'advance-epoch':
+                    self.status.update(rootEpoch=target, shardEpoch=shard_epoch)
+                return {'step': step}
+        self.remote = Remote()
+        d = hd.Drive.__new__(hd.Drive)
+        d.remote, d.target, d.joiners = {5: self.remote}, 5, set()
+        d.work = Path(tempfile.mkdtemp())
+        d.say = lambda text: None
+        d.expect = lambda ok, what, detail='': None if ok else (_ for _ in ()).throw(AssertionError(what))
+        d.restore_remote = lambda i: test.calls.append(('restore', i))
+        self.d = d
+        self.journal = hd.Journal(d.work / 'log.jsonl', echo=lambda line: None)
+
+    def steps(self):
+        return [c[0] for c in self.calls if c[0] != 'put']
+
+    def test_an_incumbent_advances_once_and_a_rerun_sends_nothing_again(self):
+        self.journal.run('advance', lambda: self.d.advance_entity(5, 4, self.journal), sub='entity5')
+        self.assertEqual(self.steps(), ['advance-epoch', 'replace-session', 'shard-start'])
+        self.calls.clear()
+        self.d.advance_remote(5, 4, self.journal)
+        self.assertEqual(self.steps(), [], 'every sub-step is in the journal')
+
+    def test_an_advance_the_journal_missed_is_read_from_the_laptops_status(self):
+        self.remote.status.update(rootEpoch=5, shardEpoch=4)
+        self.d.advance_remote(5, 4, self.journal)
+        self.assertEqual(self.steps(), ['replace-session', 'shard-start'])
+
+    def test_a_joiner_enrolls_takes_its_session_and_restores(self):
+        self.d.joiners = {5}
+        self.remote.status.update(enrollmentComplete=False, shardEpoch=4, rootEpoch=5)
+        self.d.advance_remote(5, 4, self.journal)
+        self.assertEqual(self.steps(), ['complete-enrollment', 'replace-session', 'restore'])
+
+    def test_a_key_lost_on_the_laptop_stops_the_drive(self):
+        self.remote.status.update(keyLost=True)
+        with self.assertRaises(hd.Refused):
+            self.d.advance_remote(5, 4, self.journal)
+        self.assertEqual(self.steps(), [])
+
+
 if __name__ == '__main__':
     unittest.main()

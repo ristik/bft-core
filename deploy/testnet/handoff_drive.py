@@ -10,7 +10,7 @@ It drives OPERATOR.md 5b for the election's reserved result, the same sequence t
   preflight    every entity service running, the roots of the committee being left at one epoch E (or the successor epoch, on a resume), the result Reserved, the
                reservation window (16,384 registry progress rounds, storage.ResultReservationLifetimeProgress) not about to lapse, the membership change classified
   trust-base   the root trust base of epoch E+1 over the elected members (unit weights), signed in each member's root home; its epoch start is above the root's
-               current round (the rehearsal's 200000*(E) is kept as the floor)
+               current round, with the rehearsal's 200000*(N-1) for epoch N as the floor (a numbering floor in the file: the install does not wait for that round)
   proposal     the EVM context, the election's proposal, each member's EVM possession proof made in its own signing authority, the candidate, each authority's
                sign-pop, assemble, submit-pops and finalize (skipped when the election already holds the publication), the published assignment
   propose      the roots' candidate, every successor entity's readiness receipt made by its own root, then `handoff_ops.py propose` (plan, intent, endorse) to the
@@ -57,6 +57,7 @@ ZERO = '0x' + '00' * 32
 STEPS = ('preflight', 'trust-base', 'proposal', 'propose', 'install', 'advance', 'lockproof', 'verify')
 WINDOW_STEPS = frozenset(('trust-base', 'proposal', 'propose'))   # the steps before the Prepare: the window must still be open for them
 BRIDGE_OVERRIDE = 'compose.bridge.yaml'
+OPERATOR = ('--operator-socket', '/authority/operator.sock', '--operator-credential', '/authority/operator.cred')
 
 
 class Refused(RuntimeError):
@@ -181,6 +182,7 @@ class Journal:
 # --- the drive -------------------------------------------------------------------------------------------------------------------
 class Drive(rehearse.Rehearsal):
     """The rehearsal's primitives (gateway calls, exec in a service, one-shot node containers, the relayer, the scrubbed log) on a generation in service."""
+    remote, require, allow_excluding = {}, frozenset(), False   # set by __init__ (remote_entity.load): defaults for a Drive made without it
 
     def __init__(self, generation, cast, ubft, restore_pin=None, joiners=None, require=(), allow_excluding=False):
         generation = Path(generation).resolve()
@@ -208,8 +210,17 @@ class Drive(rehearse.Rehearsal):
         return path
 
     def restore_body_ids(self):
-        records = [json.loads(p.read_text()) for p in sorted(self.evidence.glob('epoch*/activation-record-*.json'))]
-        return ','.join(f"{r['epoch']}={r['v3BodyId']}" for r in sorted(records, key=lambda r: r['epoch']))
+        """`<epoch>=<V3 body id>` of every activated epoch 2..target: the drive's own activation records, and for an epoch a drive did not install (an earlier
+        rehearse run, a manual handoff) the record read from root 1 (`q3-activation`)."""
+        found = {}
+        for path in sorted(self.evidence.glob('epoch*/activation-record-*.json')):
+            record = json.loads(path.read_text())
+            found[record['epoch']] = record['v3BodyId']
+        for epoch in range(2, self.target + 1):
+            if epoch not in found:
+                self.exec_in('root1', 'ubft', 'root', 'handoff', 'q3-activation', '--root-rpc', self.root_rpc, '--epoch', str(epoch), '--out', '/tmp/drive-activation.json')
+                found[epoch] = json.loads(self.exec_in('root1', 'cat', '/tmp/drive-activation.json'))['v3BodyId']
+        return ','.join(f'{e}={found[e]}' for e in sorted(found))
 
     def scrub(self, text, patterns=False):
         """rehearse's scrub, with the secret scan retried: on a live generation the shard's archive renames its `.writing-*` files while the scan walks it, and
@@ -563,7 +574,12 @@ class Drive(rehearse.Rehearsal):
         subprocess.run(['docker', 'compose', *base, 'stop', f'root{i}'], check=True, capture_output=True)
         state, backup = self.gen / f'validator{i}' / 'root', self.gen / f'validator{i}' / f'root.pre-epoch-{self.target}'
         if not backup.exists():
-            subprocess.run(['cp', '-a', str(state), str(backup)], check=True)
+            # copied under a temporary name and renamed when complete: an interrupted copy is never taken for the rollback copy
+            partial = backup.with_name(backup.name + '.partial')
+            if partial.exists():
+                shutil.rmtree(partial)
+            subprocess.run(['cp', '-a', str(state), str(partial)], check=True)
+            os.rename(partial, backup)
         run = subprocess.run(['docker', 'compose', *files, 'up', '-d', '--no-deps', '--force-recreate', f'root{i}'], text=True, capture_output=True)
         self.expect(run.returncode == 0, f'root {i} recreated with the install flag', run.stderr.strip()[-400:])
         self.wait(f'root {i} listens again', lambda: self.root_listens(i, self.transport), 120)
@@ -595,31 +611,115 @@ class Drive(rehearse.Rehearsal):
             self.wait(f'shard {i} logs the activation of root epoch {self.target}', activated, 120)
         return {'activationRound': record['activationRound'], 'v3BodyId': record['v3BodyId']}
 
-    def advance_entity(self, i, shard_epoch):
-        if i in self.remote:
-            conf = self.work / f'shard-conf-{shard_epoch}.json'
-            self.remote[i].put({f'handoff/{conf.name}': conf, f'handoff/trust-base-epoch{self.target}.json': self.work / f'trust-base-epoch{self.target}.json'})
-            detail = self.remote[i].advance(self.target, shard_epoch, i in self.joiners)
-            self.say(f'  remote entity {i}: ' + ' | '.join(detail.get('log', []))[-600:])
-            if i in self.joiners:
-                self.restore_remote(i)
-                return {'joiner': True, 'remote': True}
-            return {'remote': True}
-        operator = ['--operator-socket', '/authority/operator.sock', '--operator-credential', '/authority/operator.cred']
-        self.compose('stop', f'shard{i}')
-        if i in self.joiners:
-            self.advance_joiner(i, operator, shard_epoch)   # complete-enrollment, replace-session, the restore of its shard node (rehearse)
-            return {'joiner': True}
-        self.exec_in(f'authority{i}', 'ubft', 'signing-authority', 'advance-epoch', *operator, '--trust-base', f'/network/handoff/trust-base-epoch{self.target}.json',
-                     '--shard-conf', f'/network/handoff/shard-conf-{shard_epoch}.json')
+    def authority_status(self, i):
+        """`signing-authority status` of entity i (its enrollment: rootEpoch, shardEpoch, enrollmentComplete, generation, faulted, keyLost)."""
+        return json.loads(self.exec_in(f'authority{i}', 'ubft', 'signing-authority', 'status', *OPERATOR))
+
+    def keep_credential(self, i):
+        """The entity's client credential before the switch, kept once as client.cred.pre-epoch-N (never overwritten: a rerun after the replace-session would
+        otherwise keep the NEW session's credential under the old name)."""
         auth = self.gen / f'validator{i}' / 'auth'
         kept = auth / f'client.cred.pre-epoch-{self.target}'
-        shutil.copy(auth / 'client.cred', kept)
-        os.chmod(kept, 0o600)
-        os.chown(kept, 10001, 10001)
-        self.exec_in(f'authority{i}', 'ubft', 'signing-authority', 'replace-session', *operator, '--out', '/authority/client.cred')
-        self.compose('start', f'shard{i}')
+        if kept.exists():
+            return
+        tmp = auth / f'.client.cred.pre-epoch-{self.target}.tmp'
+        shutil.copy(auth / 'client.cred', tmp)
+        os.chmod(tmp, 0o600)
+        os.chown(tmp, 10001, 10001)
+        os.rename(tmp, kept)
+
+    def advance_entity(self, i, shard_epoch, journal):
+        """Entity i's switch as sub-steps (advance/entity<i>/...), each resumable. The authority refuses a repeated advance (signingauthority/advance.go), so its
+        status is read first and an advance it already holds is not sent again; replace-session may be repeated (the newest session wins: the shard is stopped
+        until the credential it starts with is written); the shard is started last. The shard is stopped inside each authority sub-step, so a rerun that finds
+        them all done leaves it running."""
+        unit = f'entity{i}'
+        if i in self.remote:
+            return self.advance_remote(i, shard_epoch, journal)
+        def stop():
+            self.compose('stop', f'shard{i}')
+        def advanced(status):
+            return status.get('rootEpoch') == self.target and status.get('shardEpoch') == shard_epoch
+        def healthy(status):
+            if status.get('faulted') or status.get('keyLost'):
+                raise Refused(f'authority {i} reports faulted={status.get("faulted")} keyLost={status.get("keyLost")}: stop and inspect it; the drive will not continue')
+            return status
+        if i in self.joiners:
+            def enroll():
+                status = healthy(self.authority_status(i))
+                if status.get('enrollmentComplete') and status.get('shardEpoch') == shard_epoch:
+                    return {'already': True, 'generation': status.get('generation')}
+                stop()
+                self.exec_in(f'authority{i}', 'ubft', 'signing-authority', 'complete-enrollment', *OPERATOR, '--shard-conf', f'/network/handoff/shard-conf-{shard_epoch}.json')
+                return {'generation': self.authority_status(i).get('generation')}
+            journal.run('advance', enroll, sub=f'{unit}/complete-enrollment')
+            def session():
+                stop()
+                self.exec_in(f'authority{i}', 'ubft', 'signing-authority', 'replace-session', *OPERATOR, '--out', '/authority/client.cred')
+                return {'generation': self.authority_status(i).get('generation')}
+            journal.run('advance', session, sub=f'{unit}/replace-session')
+            journal.run('advance', lambda: self.restore_joiner(i) or {}, sub=f'{unit}/restore')   # empties and restores its shard node, then runs it (rehearse)
+            return {'joiner': True}
+        def advance():
+            status = healthy(self.authority_status(i))
+            if advanced(status):
+                return {'already': True, 'generation': status.get('generation')}
+            stop()
+            self.keep_credential(i)
+            self.exec_in(f'authority{i}', 'ubft', 'signing-authority', 'advance-epoch', *OPERATOR, '--trust-base', f'/network/handoff/trust-base-epoch{self.target}.json',
+                         '--shard-conf', f'/network/handoff/shard-conf-{shard_epoch}.json')
+            return {'generation': self.authority_status(i).get('generation')}
+        journal.run('advance', advance, sub=f'{unit}/advance-epoch')
+        def session():
+            status = healthy(self.authority_status(i))
+            self.expect(advanced(status), f'authority {i} holds root epoch {self.target} and shard epoch {shard_epoch} before its new session', str(status)[:200])
+            stop()
+            self.exec_in(f'authority{i}', 'ubft', 'signing-authority', 'replace-session', *OPERATOR, '--out', '/authority/client.cred')
+            return {'generation': self.authority_status(i).get('generation')}
+        journal.run('advance', session, sub=f'{unit}/replace-session')
+        journal.run('advance', lambda: self.compose('start', f'shard{i}') and {}, sub=f'{unit}/shard-start')
         return {}
+
+    def advance_remote(self, i, shard_epoch, journal):
+        """advance_entity for an entity on another machine: the same sub-steps and status checks, each order run there by its agent (remote_joiner.py)."""
+        remote, unit = self.remote[i], f'entity{i}'
+        conf = self.work / f'shard-conf-{shard_epoch}.json'
+        remote.put({f'handoff/{conf.name}': conf, f'handoff/trust-base-epoch{self.target}.json': self.work / f'trust-base-epoch{self.target}.json'})
+        def healthy(status):
+            if status.get('faulted') or status.get('keyLost'):
+                raise Refused(f'authority {i} (laptop) reports faulted={status.get("faulted")} keyLost={status.get("keyLost")}: stop and inspect it')
+            return status
+        def advanced(status):
+            return status.get('rootEpoch') == self.target and status.get('shardEpoch') == shard_epoch
+        if i in self.joiners:
+            def enroll():
+                status = healthy(remote.authority_status())
+                if status.get('enrollmentComplete') and status.get('shardEpoch') == shard_epoch:
+                    return {'already': True, 'generation': status.get('generation')}
+                remote.authority_step('complete-enrollment', self.target, shard_epoch)
+                return {'generation': remote.authority_status().get('generation')}
+            journal.run('advance', enroll, sub=f'{unit}/complete-enrollment')
+            def session():
+                remote.authority_step('replace-session', self.target, shard_epoch)
+                return {'generation': remote.authority_status().get('generation')}
+            journal.run('advance', session, sub=f'{unit}/replace-session')
+            journal.run('advance', lambda: self.restore_remote(i) or {}, sub=f'{unit}/restore')
+            return {'joiner': True, 'remote': True}
+        def advance():
+            status = healthy(remote.authority_status())
+            if advanced(status):
+                return {'already': True, 'generation': status.get('generation')}
+            remote.authority_step('advance-epoch', self.target, shard_epoch)   # the laptop keeps client.cred.pre-epoch-N once, then advances
+            return {'generation': remote.authority_status().get('generation')}
+        journal.run('advance', advance, sub=f'{unit}/advance-epoch')
+        def session():
+            status = healthy(remote.authority_status())
+            self.expect(advanced(status), f'authority {i} (laptop) holds root epoch {self.target} and shard epoch {shard_epoch} before its new session', str(status)[:200])
+            remote.authority_step('replace-session', self.target, shard_epoch)
+            return {'generation': remote.authority_status().get('generation')}
+        journal.run('advance', session, sub=f'{unit}/replace-session')
+        journal.run('advance', lambda: remote.authority_step('shard-start', self.target, shard_epoch) and {}, sub=f'{unit}/shard-start')
+        return {'remote': True}
 
     def step_advance(self, journal):
         transport = self.transport
@@ -637,7 +737,7 @@ class Drive(rehearse.Rehearsal):
             return {'shardEpoch': shard_epoch}
         journal.run('advance', publish, sub='shard-conf')
         for i in self.new:
-            journal.run('advance', lambda i=i: self.advance_entity(i, shard_epoch), sub=f'entity{i}')
+            journal.run('advance', lambda i=i: self.advance_entity(i, shard_epoch, journal), sub=f'entity{i}')
         return {'shardEpoch': shard_epoch}
 
     def restore_remote(self, i):
@@ -692,7 +792,8 @@ class Drive(rehearse.Rehearsal):
         return {'bridge': True, 'restarted': restart, 'rescansHandoffDir': rescans, 'healthy': bool(healthy)}
 
     def ack_block(self, result, head):
-        """The first block whose state has the result Acknowledged (bisect on eth_call at a block; None when the client keeps no state that far back)."""
+        """(the first block whose state has the result Acknowledged, None) by bisection on eth_call at a block; (None, why) when the client keeps no state that
+        far back or the lookup failed (a transport error is reported, not hidden)."""
         data = self.cast_run('calldata', 'result(bytes32)', result)
         def acked(block):
             raw = self.ureth(1, 'eth_call', [{'to': self.election, 'data': data}, hex(block)])
@@ -702,13 +803,13 @@ class Drive(rehearse.Rehearsal):
         lo, hi = max(0, head - 20000), head
         try:
             if acked(lo):
-                return None
+                return None, f'already acknowledged at block {lo}, the oldest one looked at'
             while hi - lo > 1:
                 mid = (lo + hi) // 2
                 lo, hi = (lo, mid) if acked(mid) else (mid, hi)
-            return hi
-        except Exception:
-            return None
+            return hi, None
+        except Exception as error:   # no state at a block, or the RPC failed: the step still passes (the result IS acknowledged), the reason is recorded
+            return None, f'{type(error).__name__}: {error}'[:300]
 
     def step_verify(self, result, journal):
         transport = self.transport
@@ -716,10 +817,10 @@ class Drive(rehearse.Rehearsal):
         self.expect(all(e == self.target for e in epochs.values()), f'every elected root certifies at epoch {self.target}', str(epochs))
         state = self.wait(f'the election records {result[:10]}.. Acknowledged', lambda: self.result_words(result)[0] == rehearse.RESULT_ACKNOWLEDGED, 600)
         head = int(self.call('eth_blockNumber'), 16)
-        block = self.ack_block(result, head)
+        block, why = self.ack_block(result, head)
         self.expect(bool(state), 'the result is Acknowledged', str(self.result_words(result)[0]))
-        self.say(f'  acknowledged by block {block} (head {head})')
-        detail = {'epochs': epochs, 'acknowledged': True, 'ackBlock': block}
+        self.say(f'  acknowledged by block {block} (head {head})' + (f'; the block is unknown: {why}' if why else ''))
+        detail = {'epochs': epochs, 'acknowledged': True, 'ackBlock': block, **({'ackBlockUnknown': why} if why else {})}
         utb = self.manifest.get('utb')
         if utb:
             def reached():

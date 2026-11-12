@@ -355,27 +355,34 @@ class Laptop:
         self.wait(f'root {j} listens again', lambda: self.root_post('/api/v1/q3/signers')[0] in (200, 400, 409, 422, 503), 120)
         return {'backup': backup}
 
-    def op_advance(self, epoch, shard_epoch, joiner):
-        j, log = self.entity, []
+    def op_authority_status(self):
+        return json.loads(self.exec(f'authority{self.entity}', 'ubft', 'signing-authority', 'status', *OPERATOR).stdout)
+
+    def op_authority_step(self, step, epoch, shard_epoch):
+        """One order of the entity's switch (handoff_drive.advance_remote runs them as resumable sub-steps, status first). The shard node is stopped before an
+        authority order and started only by `shard-start` (a joiner's comes back by its restore). The kept credential is written once, never overwritten."""
+        j, epoch, shard_epoch = self.entity, int(epoch), int(shard_epoch)
         auth = f'authority{j}'
-        def step(what, *command):
-            done = self.exec(auth, 'ubft', 'signing-authority', *command, check=False)
-            log.append(f'{what}: exit {done.returncode}: {(done.stdout + done.stderr).strip()[-200:]}')
-            if done.returncode:
-                raise Failure(f'{what}: ' + log[-1])
+        conf = f'/network/handoff/shard-conf-{shard_epoch}.json'
+        if step == 'shard-start':
+            self.dc('start', f'shard{j}')
+            return {'started': True}
+        if step not in ('complete-enrollment', 'advance-epoch', 'replace-session'):
+            raise Failure(f'{step}: not an authority order')
         self.dc('stop', f'shard{j}')
-        conf = f'/network/handoff/shard-conf-{int(shard_epoch)}.json'
-        if joiner:
-            step('status before', 'status', *OPERATOR)
-            step('complete-enrollment', 'complete-enrollment', *OPERATOR, '--shard-conf', conf)
-            step('replace-session', 'replace-session', *OPERATOR, '--out', '/authority/client.cred')
-            step('status after', 'status', *OPERATOR)
-            return {'log': log}   # the shard node comes back by its restore (op_restore_start)
-        step('advance-epoch', 'advance-epoch', *OPERATOR, '--trust-base', f'/network/handoff/trust-base-epoch{int(epoch)}.json', '--shard-conf', conf)
-        self.exec(auth, 'cp', '/authority/client.cred', f'/authority/client.cred.pre-epoch-{int(epoch)}')
-        step('replace-session', 'replace-session', *OPERATOR, '--out', '/authority/client.cred')
-        self.dc('start', f'shard{j}')
-        return {'log': log}
+        if step == 'complete-enrollment':
+            command = ['complete-enrollment', *OPERATOR, '--shard-conf', conf]
+        elif step == 'advance-epoch':
+            kept = f'/authority/client.cred.pre-epoch-{epoch}'
+            self.exec(auth, 'sh', '-c', f'test -e {kept} || (cp /authority/client.cred {kept}.tmp && chmod 600 {kept}.tmp && mv {kept}.tmp {kept})')
+            command = ['advance-epoch', *OPERATOR, '--trust-base', f'/network/handoff/trust-base-epoch{epoch}.json', '--shard-conf', conf]
+        else:
+            command = ['replace-session', *OPERATOR, '--out', '/authority/client.cred']
+        done = self.exec(auth, 'ubft', 'signing-authority', *command, check=False)
+        text = (done.stdout + done.stderr).strip()[-300:]
+        if done.returncode:
+            raise Failure(f'{step}: exit {done.returncode}: {text}')
+        return {'step': step, 'out': text}
 
     def op_restore_start(self, uc_b64, tr_b64, body_id):
         """rehearse.restore_joiner, the laptop half: the execution client's and the shard node's state emptied (its keys kept), the pin written, `shard-node restore`."""
@@ -457,9 +464,9 @@ class Laptop:
         return out
 
     OPS = {'status': 'op_status', 'root-post': 'op_root_post', 'logs': 'op_logs', 'put-network': 'op_put_network', 'trust-base-sign': 'op_trust_base_sign',
-           'evm-pop': 'op_evm_pop', 'sign-pop': 'op_sign_pop', 'readiness': 'op_readiness', 'install-root': 'op_install_root', 'advance': 'op_advance',
-           'restore-start': 'op_restore_start', 'restore-finish': 'op_restore_finish', 'start-authority': 'op_start_authority', 'tx': 'op_tx'}
-    READS = frozenset(('status', 'root-post', 'logs'))
+           'evm-pop': 'op_evm_pop', 'sign-pop': 'op_sign_pop', 'readiness': 'op_readiness', 'install-root': 'op_install_root',
+           'authority-status': 'op_authority_status', 'authority-step': 'op_authority_step', 'restore-start': 'op_restore_start', 'restore-finish': 'op_restore_finish', 'start-authority': 'op_start_authority', 'tx': 'op_tx'}
+    READS = frozenset(('status', 'root-post', 'logs', 'authority-status'))
 
     def dispatch(self, name, args):
         if name not in self.OPS:

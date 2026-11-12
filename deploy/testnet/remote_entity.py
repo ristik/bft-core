@@ -220,8 +220,13 @@ class RemoteEntity:
     def install_root(self, target):
         return self.client.op('install-root', timeout=300, epoch=int(target))
 
-    def advance(self, target, shard_epoch, joiner):
-        return self.client.op('advance', timeout=300, epoch=int(target), shard_epoch=int(shard_epoch), joiner=bool(joiner))
+    def authority_status(self):
+        """`signing-authority status` on the laptop (rootEpoch, shardEpoch, enrollmentComplete, generation, faulted, keyLost)."""
+        return self.client.op('authority-status', timeout=60)
+
+    def authority_step(self, step, target, shard_epoch):
+        """One order of the switch on the laptop: complete-enrollment | advance-epoch | replace-session (the shard node stopped first) | shard-start."""
+        return self.client.op('authority-step', timeout=300, step=step, epoch=int(target), shard_epoch=int(shard_epoch))
 
     def restore_start(self, uc, tr, body_id):
         return self.client.op('restore-start', timeout=600, uc_b64=b64(uc), tr_b64=b64(tr), body_id=body_id)
