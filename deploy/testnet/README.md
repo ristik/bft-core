@@ -325,6 +325,24 @@ right after an acknowledgement, driving an open result that predates the joiner 
 authority started at that scope, `admitDelegation`. While `$G/handoff/remote-joiners/5.json` says `prepared`, `handoff_drive.py` refuses a result that leaves the
 joiner out (it would move the epoch past the authority's scope) unless `--allow-excluding-joiner`; `--require-member ENTITY` makes the same refusal explicit.
 
+Prerequisites and what they expose:
+
+- The ssh user needs **passwordless sudo on the host**. `init` (relay container, registration), `join` (the drive) and the archive seeding run
+  `sudo` over a BatchMode ssh session, and the generation directory is uid 10001, mode 0700.
+- The host runs **the laptop's copy of `deploy/testnet/*.py` as root**. `init` refuses a dirty or uncommitted checkout and records the commit, the
+  dirty flag and a digest of the copy in `~/rjoin/<gen>/testnet/SOURCE.json`. `join` logs that record in its run log. Both refuse a copy whose digest is not the
+  recorded one, or not the laptop checkout's. `--allow-dirty` overrides these checks.
+- The laptop gets **the host validators' execution-client RPC on its loopback** (`127.0.0.1:18541-18544` -> `ureth1..4:8545`). That is the full HTTP API
+  the package enables, `eth,net,web3,debug`, unauthenticated, and it is not the gateway's allow-listed subset. The join transactions need it. Anyone with a shell on
+  the laptop can use it while the tunnel is up. The root and shard peer ports (18001-18004, 19001-19004) are libp2p, authenticated by peer id. The operator
+  RPCs (8002, 9101) are never forwarded.
+
+Trust model: the laptop's keys never leave it, but **the laptop adds no independence against a compromised host**. Its agent signs what the host's drive
+asks: trust bases, possession proofs, readiness receipts and the session orders. It checks only that a trust base names its own root, and that the operation
+is one of its fixed list. A host that runs the drive can therefore make the laptop sign a successor of its choosing, as it can with its own four entities.
+The separation protects the laptop's keys from being copied, not the laptop's vote from being steered. An independent fifth validator needs its own operator
+deciding what it signs (for example, checking the trust base and the assignment against the election's published result before signing). That is not built.
+
 With five unit weights the quorum is four: while the laptop is away the network has no fault tolerance left. Do not sleep the laptop, restart colima or its VM,
 or `docker compose down` its project: a restarted signing authority is a new EVM key that the delegation does not name, and nothing replaces it yet.
 `remote_entity.py retire-plan` prints the retirement sequence; nothing runs it (a retirement is still refused by default by the drive).

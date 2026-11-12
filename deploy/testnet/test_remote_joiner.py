@@ -378,5 +378,44 @@ class ArchiveSeed(unittest.TestCase):
             self.assertEqual(sorted(p.name for p in dest.iterdir()), ['v2-aa', 'v2-bb'], 'no temporary directory left')
 
 
+class SourceCheck(unittest.TestCase):
+    """The host runs the laptop-copied deploy/testnet with sudo: a copy is run only when it is the recorded clean commit and the laptop's own checkout."""
+
+    def deployed(self, d, **record):
+        (Path(d) / 'a.py').write_text('x = 1\n')
+        digest = re_.tree_digest(d)
+        (Path(d) / 'SOURCE.json').write_text(json.dumps(dict({'commit': 'abc', 'dirty': False, 'digest': digest}, **record)))
+        return digest
+
+    def test_the_recorded_clean_copy_runs(self):
+        with tempfile.TemporaryDirectory() as d:
+            digest = self.deployed(d)
+            self.assertIsNone(re_.source_check(d, digest, False))
+            self.assertEqual(re_.tree_digest(d), digest, 'SOURCE.json itself is not part of the digest')
+
+    def test_dirty_edited_mismatched_or_unrecorded_copies_are_refused_unless_allowed(self):
+        with tempfile.TemporaryDirectory() as d:
+            digest = self.deployed(d, dirty=True)
+            self.assertIn('dirty', re_.source_check(d, digest, False))
+            self.assertIsNone(re_.source_check(d, digest, True))
+        with tempfile.TemporaryDirectory() as d:
+            digest = self.deployed(d)
+            self.assertIn('laptop', re_.source_check(d, 'f' * 64, False), 'the laptop checkout is another tree')
+            (Path(d) / 'a.py').write_text('x = 2\n')
+            self.assertIn('not the copy recorded', re_.source_check(d, digest, False), 'edited on the host after the deploy')
+            (Path(d) / 'SOURCE.json').unlink()
+            self.assertIn('missing', re_.source_check(d, None, False))
+            self.assertIsNone(re_.source_check(d, None, True))
+
+    def test_the_laptop_states_its_commit_and_cleanliness(self):
+        version = rj.source_version()
+        self.assertEqual(set(version), {'commit', 'dirty', 'digest'})
+        self.assertEqual(version['digest'], re_.tree_digest(rj.HERE))
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / 'a.py').write_text('x\n')
+            outside = rj.source_version(Path(d))
+            self.assertTrue(outside['dirty'] and outside['commit'] is None, 'no git checkout: treated as dirty')
+
+
 if __name__ == '__main__':
     unittest.main()

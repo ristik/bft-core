@@ -558,7 +558,16 @@ def ensure_images(host, images):
         run(['docker', 'image', 'inspect', i])
 
 
-def init(host, generation, home, mac_host):
+def source_version(here=HERE):
+    """The commit and the cleanliness of the deploy/testnet this laptop copies to the host (where it runs with sudo), and the copy's digest."""
+    git = lambda *args: subprocess.run(['git', '-C', str(here), *args], capture_output=True, text=True)
+    head = git('rev-parse', 'HEAD')
+    status = git('status', '--porcelain', '--', '.')
+    return {'commit': head.stdout.strip() if head.returncode == 0 else None, 'dirty': status.returncode != 0 or bool(status.stdout.strip()),
+            'digest': remote_entity.tree_digest(here)}
+
+
+def init(host, generation, home, mac_host, allow_dirty=False):
     home = Path(home).expanduser().resolve()
     home.mkdir(mode=0o700, parents=True, exist_ok=True)
     (home / 'run').mkdir(mode=0o700, exist_ok=True)
@@ -633,9 +642,15 @@ def init(host, generation, home, mac_host):
     lap.save()
     say(f'entity {entity}: root {root_id}, evm {evm_id}, owner {accounts["owner"]}')
     # the host: this checkout's deploy/testnet, the relay, the public facts
+    version = source_version()
+    if (version['dirty'] or not version['commit']) and not allow_dirty:
+        raise Failure(f'{HERE} is dirty or not a git checkout (commit {version["commit"]}): the host runs this code with sudo; commit it, or pass --allow-dirty')
     sources = sorted(p.name for p in HERE.glob('*.py'))
     tarball = run(['tar', '--no-xattrs', '-C', str(HERE), '-cf', '-', *sources], text=False).stdout
     ssh(host, f'mkdir -p {host_dir}/testnet && tar -C {host_dir}/testnet -xf -', input=tarball, text=False)
+    record = dict(version, deployedAt=now(), deployedFrom=str(HERE))
+    ssh(host, f'cat > {host_dir}/testnet/SOURCE.json', input=json.dumps(record, indent=1, sort_keys=True) + '\n')
+    say(f'deployed {HERE} to {host}:{host_dir}/testnet: commit {version["commit"]}, dirty {version["dirty"]}, digest {version["digest"][:16]}')
     py = f'sudo python3 {host_dir}/testnet/remote_entity.py'
     say(ssh(host, f'{py} relay-up {host_gen} --entity {entity} --sock-dir {sock_dir} --uid $(id -u)').stdout.strip())
     public = {'rootNodeId': root_id, 'evmNodeId': evm_id, 'nodeInfo': node_info, 'accounts': accounts, 'token': token_file.read_text().strip()}
@@ -746,12 +761,17 @@ def start(lap):
     say(json.dumps(lap.status(), sort_keys=True))
 
 
-def join(lap, dry_run=False, stop_after=None):
+def join(lap, dry_run=False, stop_after=None, allow_dirty=False):
     """remote_entity.py join on the host, as a transient `systemd-run --user` unit (a dropped ssh session of this laptop must not kill a drive half way), its log
     followed here until it ends. Rerunning resumes: the host's state is in handoff/remote-joiners/<J>.json and the drive's journal."""
     s = lap.state
+    version = source_version()
+    if (version['dirty'] or not version['commit']) and not allow_dirty:
+        raise Failure(f'{HERE} is dirty or not a git checkout (commit {version["commit"]}): commit and redeploy (init), or pass --allow-dirty')
+    say(f'laptop checkout {HERE}: commit {version["commit"]}, dirty {version["dirty"]}, digest {version["digest"][:16]} (the host refuses a different deployed copy)')
     cmd = (f'sudo env PATH="$PATH:$(dirname {shlex.quote(s["hostCast"])})" python3 -u {s["hostDir"]}/testnet/remote_entity.py join {s["hostGeneration"]} '
-           f'--entity {lap.entity} --ubft {s["hostUbft"]} --restore-pin {s["hostRestorePin"]} --cast {s["hostCast"]}' + (' --dry-run' if dry_run else '') + (f' --stop-after {stop_after}' if stop_after else ''))
+           f'--entity {lap.entity} --ubft {s["hostUbft"]} --restore-pin {s["hostRestorePin"]} --cast {s["hostCast"]}' + (' --dry-run' if dry_run else '') + (f' --stop-after {stop_after}' if stop_after else '')
+           + f' --source-digest {version["digest"]}' + (' --allow-dirty' if allow_dirty else ''))
     unit = f'laptop-join-{int(time.time())}'
     log = f'{s["hostDir"]}/{unit}.log'
     script = (f'systemd-run --user --quiet --collect --unit={unit} bash -c {shlex.quote(f"{cmd} > {log} 2>&1; echo EXIT=$? >> {log}")} && '
@@ -769,6 +789,7 @@ def main(argv=None):
     p.add_argument('--generation')
     p.add_argument('--mac-host', default='host.docker.internal', help='how a container of the docker VM reaches the Mac\'s loopback (colima: host.docker.internal)')
     p.add_argument('--dry-run', action='store_true')
+    p.add_argument('--allow-dirty', action='store_true', help='init/join: deploy or run a dirty, uncommitted or mismatched copy of deploy/testnet on the host')
     p.add_argument('--stop-after', choices=('bonded', 'caught-up'), help='join: stop after the bond, or after the result names the joiner and its nodes caught up')
     a = p.parse_args(argv)
     home = a.home or (f'~/unicity-joiner/{a.generation}' if a.generation else None)
@@ -781,7 +802,7 @@ def main(argv=None):
         if a.action == 'init':
             if not (a.host and a.generation):
                 p.error('init needs --host and --generation')
-            init(a.host, a.generation, home, a.mac_host)
+            init(a.host, a.generation, home, a.mac_host, a.allow_dirty)
             return 0
         lap = Laptop(home)
         if a.action == 'start':
@@ -792,7 +813,7 @@ def main(argv=None):
                 pid = lap.home / 'run' / f'{name}.pid'
                 print(f'{name}: ' + (f'pid {pid.read_text().strip()}' if pid.is_file() else 'not started'))
         elif a.action == 'join':
-            return join(lap, a.dry_run, a.stop_after)
+            return join(lap, a.dry_run, a.stop_after, a.allow_dirty)
         elif a.action == 'agent':
             serve_agent(lap)
         elif a.action == 'tunnel':

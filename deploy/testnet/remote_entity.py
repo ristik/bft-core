@@ -2,6 +2,9 @@
 """The host side of a validator entity that runs on ANOTHER machine (a laptop behind NAT): its per-entity handoff steps run there, through the laptop's
 agent (remote_joiner.py agent), and only public material travels: trust bases, proposals, candidates, possession proofs, receipts, shard configurations,
 restore pins. The entity's root key, shard key, EVM key (inside its signing authority) and its owner, withdrawal and payee keys never leave the laptop.
+Trust: the laptop signs what this host's drive asks (it checks only that a trust base names its root): it keeps its keys, it adds no independence against a
+compromised host (README, "A validator on another machine"). The code here runs as root and is the laptop's copy: SOURCE.json records its commit and digest,
+and `join` refuses a dirty, uncommitted or mismatched copy unless --allow-dirty.
 
 Networking (the laptop opens ONE `ssh -N`, remote_joiner.py tunnel; nothing on the host listens on TCP for it, sshd has GatewayPorts no):
 
@@ -60,6 +63,33 @@ NAME = re.compile(r'^handoff/[A-Za-z0-9][A-Za-z0-9._-]*$')
 
 class AgentError(RuntimeError):
     """The laptop's agent did not answer, or refused: the step did not happen there (or its outcome is unknown: retry the drive)."""
+
+
+def tree_digest(directory):
+    """SHA-256 over the sorted (name, SHA-256 of content) of the *.py files of `directory`: the code the host runs as root, as copied from the laptop."""
+    import hashlib
+    h = hashlib.sha256()
+    for path in sorted(Path(directory).glob('*.py')):
+        h.update(path.name.encode() + b'\0' + hashlib.sha256(path.read_bytes()).hexdigest().encode() + b'\n')
+    return h.hexdigest()
+
+
+def source_check(here, expected, allow_dirty):
+    """The copy of deploy/testnet this host runs (with sudo) against the laptop's statement of it (SOURCE.json, written by remote_joiner.py init): the
+    reason to refuse, or None. A copy whose digest differs from the recorded one, a dirty or uncommitted source, or no record at all is refused unless
+    --allow-dirty."""
+    record_path = Path(here) / 'SOURCE.json'
+    if not record_path.is_file():
+        return None if allow_dirty else f'{record_path} is missing: deploy with remote_joiner.py init (it records the laptop\'s commit), or pass --allow-dirty'
+    record = json.loads(record_path.read_text())
+    actual = tree_digest(here)
+    if actual != record.get('digest'):
+        return None if allow_dirty else f'the code in {here} (digest {actual[:12]}) is not the copy recorded in SOURCE.json ({str(record.get("digest"))[:12]}): redeploy, or --allow-dirty'
+    if expected and expected != record.get('digest'):
+        return None if allow_dirty else f'the laptop\'s checkout (digest {expected[:12]}) is not the deployed copy ({str(record.get("digest"))[:12]}): rerun remote_joiner.py init, or --allow-dirty'
+    if record.get('dirty') or not record.get('commit'):
+        return None if allow_dirty else f'the deployed copy came from a dirty or uncommitted tree (commit {record.get("commit")}, dirty {record.get("dirty")}): commit it, or --allow-dirty'
+    return None
 
 
 def relay_name(generation):
@@ -578,6 +608,8 @@ def main(argv=None):
             s.add_argument('--restore-pin', type=Path, required=True)
             s.add_argument('--cast', default='cast')
             s.add_argument('--dry-run', action='store_true')
+            s.add_argument('--source-digest', help='the laptop checkout\'s tree_digest (remote_joiner.py join passes it): refused when the deployed copy differs')
+            s.add_argument('--allow-dirty', action='store_true', help='run a copy that is not the recorded, clean, committed one')
             s.add_argument('--stop-after', choices=('bonded', 'caught-up'), help='bonded: fund, register and bond only; caught-up: also prepare, wait for the result '
                            'naming the joiner and bring its root and shard node to the current epoch (ahead of an audience; the drive is the rest)')
     a = p.parse_args(argv)
@@ -599,6 +631,14 @@ def main(argv=None):
     elif a.action == 'join':
         if os.geteuid() != 0:
             p.error('run as root (the generation directory is uid 10001, mode 0700)')
+        here = Path(__file__).resolve().parent
+        record = json.loads((here / 'SOURCE.json').read_text()) if (here / 'SOURCE.json').is_file() else {}
+        say(f'source: {here} digest {tree_digest(here)[:16]}, recorded commit {record.get("commit")} dirty {record.get("dirty")} '
+            f'(deployed {record.get("deployedAt")}), laptop checkout digest {(a.source_digest or "?")[:16]}')
+        refusal = source_check(here, a.source_digest, a.allow_dirty)
+        if refusal:
+            say(f'REFUSED: {refusal}')
+            return 3
         try:
             return Join(a.generation, a.entity, a.ubft, a.restore_pin, a.cast, a.dry_run, stop_after=a.stop_after).run()
         except Exception as error:
