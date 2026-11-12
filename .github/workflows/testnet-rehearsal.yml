@@ -4,7 +4,10 @@ name: testnet-rehearsal
 # verifies hCaptcha, is not started). Manual: it builds ureth from source, which takes the better part of an hour.
 on:
   pull_request:
-    # a change to the package (it is long, but the package changes rarely and this is the only run of it as containers)
+    # Opt-in: it takes over an hour, so it runs only on a PR labelled `rehearse` (add the label to start it; later pushes rerun it while the label stays).
+    # Use it when a PR changes what it runs: generate.py, compose/images, pins.json, rehearse.py, or the node code it boots. Tooling with unit tests
+    # (handoff_drive, remote_joiner, ...) is covered by testnet-package. A change to the package's paths alone no longer starts it.
+    types: [labeled, synchronize, reopened]
     paths: ['deploy/testnet/**', '.github/workflows/testnet-rehearsal.yml']
   workflow_dispatch:
     inputs:
@@ -32,9 +35,11 @@ permissions:
   contents: read
 concurrency:
   group: testnet-rehearsal-${{ github.ref }}
-  cancel-in-progress: false
+  # a newer push supersedes the run in progress on the same PR
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 jobs:
   rehearse:
+    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'rehearse')
     # ubuntu-22.04 (glibc 2.35), not -latest (2.39): a binary needs a glibc no newer than the runtime image's (bookworm, 2.36). The first run built on 2.39 and
     # build-images.py's own --help check in the runtime image refused it, as the package README says (build on Debian 12 or older).
     runs-on: ubuntu-22.04
