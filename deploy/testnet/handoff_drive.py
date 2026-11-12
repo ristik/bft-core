@@ -48,12 +48,14 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 
 import handoff
 import handoff_ops
 import operator_rpc
 import rehearse
+import remote_entity
 
 LIFETIME = 16384            # storage.ResultReservationLifetimeProgress: a result not prepared within this many registry progress rounds is rejected by the roots
 MIN_WINDOW_ROUNDS = 1800    # default margin: the steps up to the Prepare take ~10 min; at ~2 rounds/s this is ~15 min
@@ -186,18 +188,23 @@ class Journal:
 # --- the drive -------------------------------------------------------------------------------------------------------------------
 class Drive(rehearse.Rehearsal):
     """The rehearsal's primitives (gateway calls, exec in a service, one-shot node containers, the relayer, the scrubbed log) on a generation in service."""
+    remote, require, allow_excluding = {}, frozenset(), False   # set by __init__ (remote_entity.load): defaults for a Drive made without it
 
-    def __init__(self, generation, cast, ubft, restore_pin=None, joiners=None, funder=None):
+    def __init__(self, generation, cast, ubft, restore_pin=None, joiners=None, require=(), allow_excluding=False, funder=None):
         generation = Path(generation).resolve()
         self.funder = Path(funder).resolve() if funder else None
         super().__init__(generation, generation / 'handoff' / 'drive', cast)
         self.ubft, self.restore_pin = Path(ubft).resolve(), (Path(restore_pin).resolve() if restore_pin else None)
-        self.n = max(handoff_ops.DockerTransport(self.gen).entities)   # every entity of the generation, a prepared joiner's included
+        # entities on another machine (remote_entity.py register): their per-entity steps run through the laptop's agent
+        self.remote = remote_entity.load(self.gen)
+        docker = handoff_ops.DockerTransport(self.gen)
+        self.n = max(docker.entities + list(self.remote))   # every entity of the generation, a prepared joiner's (local or remote) included
         self.joiner_map = dict(joiners or {})
         saved = self.gen / 'handoff' / 'joiners.json'
         if saved.is_file():
             self.joiner_map = {**json.loads(saved.read_text()), **self.joiner_map}
-        self.transport = handoff_ops.DockerTransport(self.gen)
+        self.transport = remote_entity.EntityTransport(docker, self.remote)
+        self.require, self.allow_excluding = set(require or ()), allow_excluding
         self.net, self.work = self.gen / 'network', self.gen / 'network' / 'handoff'
         self.deployment = json.loads((self.net / 'pos-deployment.json').read_text())
         self.election, self.custody = self.deployment['election'], self.deployment['custody']
@@ -253,6 +260,20 @@ class Drive(rehearse.Rehearsal):
         return run.stdout
 
     # --- reads ---
+    def running(self):
+        """The running services of the generation's Compose project, and those of every remote entity whose agent answers."""
+        out = set(self.compose('ps', '--services', '--status', 'running').split())
+        for remote in self.remote.values():
+            try:
+                out |= remote.running()
+            except remote_entity.AgentError as error:
+                self.say(f'  remote entity {remote.entity}: {error}')
+        return out
+
+    def pending_remote(self):
+        """Remote entities prepared for a join (their delegation admitted, their authority at the successor scope) but not yet members."""
+        return {i for i, r in self.remote.items() if r.state == 'prepared'}
+
     def root_info(self, i):
         status, body = self.transport.post(i, '/api/v1/q3/signers', b'{}')
         if status != 200:
@@ -260,11 +281,18 @@ class Drive(rehearse.Rehearsal):
         return json.loads(body)
 
     def root_node_id(self, i):
+        if i in self.remote:
+            return self.remote[i].root_node_id
         return self.host_ubft('node-id', '--home', self.gen / f'validator{i}' / 'root').strip().splitlines()[-1]
 
     def evm_node_id(self, i):
+        if i in self.remote:
+            return self.remote[i].evm_node_id
         command = handoff_ops.load_compose(self.gen)['services'][f'authority{i}']['entrypoint']
         return command[command.index('--node-id') + 1]
+
+    def node_info(self, i):
+        return self.remote[i].node_info_path() if i in self.remote else self.gen / f'validator{i}' / 'root' / 'node-info.json'
 
     def progress(self):
         return self.view(self.REGISTRY, 'progress()(uint64)')[0]
@@ -309,10 +337,11 @@ class Drive(rehearse.Rehearsal):
     # --- the plan ---
     def plan(self, result_arg, journal):
         """Target epoch, result, committees and the kind of change, from the chain and the roots (and the journal on a resume)."""
-        running = set(self.compose('ps', '--services', '--status', 'running').split())
+        running = self.running()
         epochs = {}
+        pending = {i for i, r in self.remote.items() if r.state != 'member'}   # a remote follower's root is at no epoch of the committee
         for i in range(1, self.n + 1):
-            if f'root{i}' in running:
+            if f'root{i}' in running and i not in pending:
                 try:
                     epochs[i] = self.root_info(i).get('epoch')
                 except (Refused, handoff_ops.HandoffError, ValueError):
@@ -354,6 +383,12 @@ class Drive(rehearse.Rehearsal):
         self.new = sorted(mapping[x] for x in ids)
         kind = classify(self.old, self.new)
         self.joiners = set(self.new) - set(self.old)
+        left_out = sorted((self.require | (self.pending_remote() if not self.allow_excluding else set())) - set(self.new))
+        if left_out:
+            raise Refused(f'the result {result} elects {self.new} and leaves out entity {left_out}, '
+                          + ('which --require-member names' if set(left_out) <= self.require else 'a remote joiner prepared for this join (its authority is at the scope of '
+                             'the next epoch: driving this result moves the epoch past it, briefs/handoff-drive-2026-11-12.md gaps 2-3)')
+                          + '. Let it lapse, or rerun with --allow-excluding-joiner if the join is abandoned')
         return {'result': result, 'target': target, 'epochs': epochs, 'old': self.old, 'new': self.new, 'kind': kind, 'electedIds': ids}
 
     # --- steps ---
@@ -363,13 +398,13 @@ class Drive(rehearse.Rehearsal):
         if info['kind'] == 'retire' and not allow_retire:
             raise Refused(f'retirement {sorted(set(info["old"]) - set(info["new"]))}: a handoff without an incumbent was never rehearsed on the package '
                           '(research note section 3, retirement 3); rerun with --allow-unrehearsed-retirement to drive it anyway')
-        running = set(self.compose('ps', '--services', '--status', 'running').split())
+        running = self.running()
         # once proposed, a root or shard may be down mid-install or mid-advance (the steps start them again); an authority never is (its key is only in memory)
         roles = ('pod', 'authority', 'ureth') if info['proposed'] else ('pod', 'root', 'shard', 'authority', 'ureth')
         needed = {f'{role}{i}' for i in set(info['old']) | set(info['new']) for role in roles}
         if not needed <= running:
             raise Refused(f'entity services not running: {sorted(needed - running)}')
-        for i in self.joiners:
+        for i in (self.joiners if not info['proposed'] else ()):   # once proposed, the joiner's root has installed the new epoch: it is no follower any more
             status, body = self.transport.post(i, '/api/v1/q3/status', b'{}')
             if status != 200 or json.loads(body).get('follower') is not True:
                 raise Refused(f'joiner entity {i}: its root is not a follower ({status} {body[:200]!r}); start it as pos_join.py part 3 does')
@@ -379,6 +414,13 @@ class Drive(rehearse.Rehearsal):
         return detail
 
     def step_trust_base(self, result):
+        detail = self.ensure_trust_base()
+        (self.work / f'result-epoch-{self.target}.txt').write_text(result + '\n')
+        return detail
+
+    def ensure_trust_base(self):
+        """handoff/trust-base-epoch<target>.json over self.new, signed by every member in its own root home (a remote member on its machine). A file that names the
+        elected roots and carries every signature is reused: a remote joiner's was made when it was prepared, and its authority started at that scope."""
         self.work.mkdir(parents=True, exist_ok=True)
         path = self.work / f'trust-base-epoch{self.target}.json'
         want = {self.root_node_id(i) for i in self.new}
@@ -394,10 +436,15 @@ class Drive(rehearse.Rehearsal):
             start = epoch_start(self.target, self.root_info(self.old[0])['round'], previous.get('epochStartRound', 0))
             self.host_ubft('trust-base', 'generate', '--home', self.work, '--network-id', str(previous['networkId']), '--epoch', str(self.target), '--epoch-start', str(start),
                            '--previous-trust-base', self.trust_base_file(self.target - 1), '--root-weights', ','.join(['1'] * len(self.new)),
-                           '--output-file-name', path.name, *[x for i in self.new for x in ('--node-info', self.gen / f'validator{i}' / 'root' / 'node-info.json')])
-        for i in self.new:
-            self.host_ubft('trust-base', 'sign', '--home', self.gen / f'validator{i}' / 'root', '--trust-base', path)
-        (self.work / f'result-epoch-{self.target}.txt').write_text(result + '\n')
+                           '--output-file-name', path.name, *[x for i in self.new for x in ('--node-info', self.node_info(i))])
+        signed = set((json.loads(path.read_text()).get('signatures') or {}))
+        for i in sorted(self.new, key=lambda i: i in self.remote):   # the host's roots first: the laptop gets the file once, signs last
+            if self.root_node_id(i) in signed:
+                continue
+            if i in self.remote:
+                self.remote[i].sign_trust_base(path)
+            else:
+                self.host_ubft('trust-base', 'sign', '--home', self.gen / f'validator{i}' / 'root', '--trust-base', path)
         tb = json.loads(path.read_text())
         return {'file': str(path), 'epochStartRound': tb.get('epochStartRound'), 'signatures': len(tb.get('signatures') or {})}
 
@@ -419,6 +466,10 @@ class Drive(rehearse.Rehearsal):
         proposal = work / f'{tag}-proposal'
         pops = []
         for i, (_, evm) in ids.items():
+            if i in self.remote:
+                (work / f'{tag}-pop-{i}.json').write_text(self.remote[i].evm_pop(context, proposal / 'validators.json', proposal / 'identities.json'))
+                pops.append(str(work / f'{tag}-pop-{i}.json'))
+                continue
             auth = self.gen / f'validator{i}' / 'auth'
             for name, source in (('context.json', context), ('validators.json', proposal / 'validators.json'), ('identities.json', proposal / 'identities.json')):
                 shutil.copy(source, auth / name)
@@ -443,6 +494,10 @@ class Drive(rehearse.Rehearsal):
         self.host_ubft('pos-relayer', 'candidate', '--context', context, '--assignment', assignment, '--next-trust-base', tb, '--out', self.work / 'candidate.hex')
         collected = []
         for i in self.new:
+            if i in self.remote:
+                (self.work / f'evmpop-{i}.json').write_text(self.remote[i].sign_pop(self.work / 'candidate.hex', attempt))
+                collected += ['--pop', self.work / f'evmpop-{i}.json']
+                continue
             auth = self.gen / f'validator{i}' / 'auth'
             for name, source in (('candidate.hex', self.work / 'candidate.hex'), ('pos-deployment.json', self.net / 'pos-deployment.json')):
                 shutil.copy(source, auth / name)
@@ -495,13 +550,52 @@ class Drive(rehearse.Rehearsal):
         code = {k.lower().removeprefix('0x'): v for k, v in spec.items()}[self.REGISTRY.lower().removeprefix('0x')]['code']
         code_hash = hashlib.sha256(bytes.fromhex(code.removeprefix('0x'))).hexdigest()
         receipts = []
+        for i in sorted(self.joiners & set(self.remote)):
+            self.catch_up_remote(i)
         for i in self.new:
+            if i in self.remote:
+                (work / f'receipt-{i}.json').write_text(self.remote[i].readiness(work / 'candidate.cbor', genesis, code_hash))
+                receipts.append(str(work / f'receipt-{i}.json'))
+                continue
             self.exec_in(f'root{i}', 'ubft', 'root', 'handoff', 'q3-readiness', '--candidate', '/network/handoff/candidate.cbor', '--key-conf', '/state/keys.json',
                          '--root-rpc', self.root_rpc, '--shard-rpc', self.shard_rpc, '--eth-url', f'http://ureth{i}:8545', '--engine-url', f'http://ureth{i}:8551',
                          '--jwt-secret', '/jwt/jwt.hex', '--execution-genesis-hash', genesis, '--execution-code-hash', code_hash, '--out', '/tmp/receipt.json')
             (work / f'receipt-{i}.json').write_text(self.exec_in(f'root{i}', 'cat', '/tmp/receipt.json'))
             receipts.append(str(work / f'receipt-{i}.json'))
         return receipts
+
+    def catch_up_remote(self, i):
+        """A remote joiner's root started at the genesis trust base and, as a non-member, receives no consensus traffic: on a network past its first handoff it
+        stays at epoch 1, and its readiness is refused ("the candidate is not the next epoch of this chain"). Its install restart to the CURRENT epoch makes it
+        fetch and verify every activation bundle from the incumbents (installQ3Epochs; it stays a follower), so that the candidate is its next epoch."""
+        current = self.target - 1
+        epoch = self.follower_epoch(i)
+        if epoch is not None and epoch > current:
+            raise Refused(f'the joiner\'s root {i} is at epoch {epoch}, past the epoch {current} being left')
+        if epoch != current:
+            self.say(f'  remote joiner {i}: its root is at epoch {epoch}; install restart to epoch {current} (activation bundles from the incumbents)')
+            self.remote[i].install_root(current)
+            self.wait(f'the joiner\'s root {i} installed epoch {current}', lambda: self.follower_epoch(i) == current, 300)
+        if current >= 3 and self.remote[i].info.get('shardCaughtUp') != current:
+            # the shard node's own follower installs epoch 2 and then needs the terminal records of the previous EVM configuration, which a staging-only node
+            # has in neither journal nor archive: its verified history stays at epoch 2 and its stage of the candidate is refused. Restored from a survivor's
+            # pin of the CURRENT epoch, its history tip is that epoch (the restore after its enrollment repeats this at the new epoch).
+            self.say(f'  remote joiner {i}: its shard node is restored at epoch {current} before its readiness (a staging-only node cannot follow past epoch 2)')
+            target, self.target = self.target, current
+            try:
+                self.restore_remote(i, follow=False)
+            finally:
+                self.target = target
+            self.remote[i].info['shardCaughtUp'] = current
+            self.remote[i].save()
+
+    def follower_epoch(self, i):
+        """The installed epoch of a root that holds no quorum certificate (a follower: q3/signers answers 422), from q3/status."""
+        try:
+            status, body = self.transport.post(i, '/api/v1/q3/status', b'{}')
+            return json.loads(body).get('activeEpoch') if status == 200 else None
+        except (handoff_ops.HandoffError, ValueError):
+            return None
 
     def step_propose(self, result, journal):
         recorded = journal.value('proposal', 'rootAttempt')
@@ -553,6 +647,9 @@ class Drive(rehearse.Rehearsal):
         files = base + ['-f', str(override)]
         roots = sorted(set(self.old) | set(self.new))
         for i in roots:
+            if i in self.remote:
+                journal.run('install', lambda i=i: self.remote[i].install_root(self.target), sub=f'root{i}')
+                continue
             journal.run('install', lambda i=i: self.install_root(i, files, base), sub=f'root{i}')
         for i in roots:
             self.wait(f'root {i} certifies at epoch {self.target}', lambda i=i: self.root_epoch(i, self.transport) == self.target, 300)
@@ -563,7 +660,7 @@ class Drive(rehearse.Rehearsal):
         self.expect(record.get('v3BodyId') == (self.work / 'v3-body-id.txt').read_text().strip(), 'the activation record names the candidate\'s V3 body id')
         for i in sorted(set(self.old) & set(self.new)):
             def activated(i=i):
-                logs = self.compose('logs', '--no-color', '--since', '30m', f'shard{i}', check=False)
+                logs = self.remote[i].logs(f'shard{i}') if i in self.remote else self.compose('logs', '--no-color', '--since', '30m', f'shard{i}', check=False)
                 return any('"message":"handoff activated"' in line and f'"rootEpoch":{self.target},' in line for line in logs.splitlines())
             self.wait(f'shard {i} logs the activation of root epoch {self.target}', activated, 120)
         return {'activationRound': record['activationRound'], 'v3BodyId': record['v3BodyId']}
@@ -591,6 +688,8 @@ class Drive(rehearse.Rehearsal):
         until the credential it starts with is written); the shard is started last. The shard is stopped inside each authority sub-step, so a rerun that finds
         them all done leaves it running."""
         unit = f'entity{i}'
+        if i in self.remote:
+            return self.advance_remote(i, shard_epoch, journal)
         def stop():
             self.compose('stop', f'shard{i}')
         def advanced(status):
@@ -635,6 +734,47 @@ class Drive(rehearse.Rehearsal):
         journal.run('advance', lambda: self.compose('start', f'shard{i}') and {}, sub=f'{unit}/shard-start')
         return {}
 
+    def advance_remote(self, i, shard_epoch, journal):
+        """advance_entity for an entity on another machine: the same sub-steps and status checks, each order run there by its agent (remote_joiner.py)."""
+        remote, unit = self.remote[i], f'entity{i}'
+        conf = self.work / f'shard-conf-{shard_epoch}.json'
+        remote.put({f'handoff/{conf.name}': conf, f'handoff/trust-base-epoch{self.target}.json': self.work / f'trust-base-epoch{self.target}.json'})
+        def healthy(status):
+            if status.get('faulted') or status.get('keyLost'):
+                raise Refused(f'authority {i} (laptop) reports faulted={status.get("faulted")} keyLost={status.get("keyLost")}: stop and inspect it')
+            return status
+        def advanced(status):
+            return status.get('rootEpoch') == self.target and status.get('shardEpoch') == shard_epoch
+        if i in self.joiners:
+            def enroll():
+                status = healthy(remote.authority_status())
+                if status.get('enrollmentComplete') and status.get('shardEpoch') == shard_epoch:
+                    return {'already': True, 'generation': status.get('generation')}
+                remote.authority_step('complete-enrollment', self.target, shard_epoch)
+                return {'generation': remote.authority_status().get('generation')}
+            journal.run('advance', enroll, sub=f'{unit}/complete-enrollment')
+            def session():
+                remote.authority_step('replace-session', self.target, shard_epoch)
+                return {'generation': remote.authority_status().get('generation')}
+            journal.run('advance', session, sub=f'{unit}/replace-session')
+            journal.run('advance', lambda: self.restore_remote(i) or {}, sub=f'{unit}/restore')
+            return {'joiner': True, 'remote': True}
+        def advance():
+            status = healthy(remote.authority_status())
+            if advanced(status):
+                return {'already': True, 'generation': status.get('generation')}
+            remote.authority_step('advance-epoch', self.target, shard_epoch)   # the laptop keeps client.cred.pre-epoch-N once, then advances
+            return {'generation': remote.authority_status().get('generation')}
+        journal.run('advance', advance, sub=f'{unit}/advance-epoch')
+        def session():
+            status = healthy(remote.authority_status())
+            self.expect(advanced(status), f'authority {i} (laptop) holds root epoch {self.target} and shard epoch {shard_epoch} before its new session', str(status)[:200])
+            remote.authority_step('replace-session', self.target, shard_epoch)
+            return {'generation': remote.authority_status().get('generation')}
+        journal.run('advance', session, sub=f'{unit}/replace-session')
+        journal.run('advance', lambda: remote.authority_step('shard-start', self.target, shard_epoch) and {}, sub=f'{unit}/shard-start')
+        return {'remote': True}
+
     def step_advance(self, journal):
         transport = self.transport
         self.expect(all(self.root_epoch(i, transport) == self.target for i in self.new), f'every elected root certifies at epoch {self.target}')
@@ -653,6 +793,63 @@ class Drive(rehearse.Rehearsal):
         for i in self.new:
             journal.run('advance', lambda i=i: self.advance_entity(i, shard_epoch, journal), sub=f'entity{i}')
         return {'shardEpoch': shard_epoch}
+
+    def restore_remote(self, i, follow=True):
+        """rehearse.restore_joiner for an entity on another machine: the pin (the latest certified record of the new epoch, its technical record, the trust
+        history's body id) is read HERE from a survivor's archive and shipped; the laptop empties its shard node's and execution client's state, restores, catches up."""
+        self.expect(bool(self.restore_pin), 'the joiner\'s restore needs --restore-pin (scripts/h4-restore-pin of the pinned source)')
+        if follow:
+            status = self.remote[i].status()
+            head, chain = status.get('urethHead'), int(self.ureth(1, 'eth_blockNumber'), 16)
+            if not status.get('restoring') and status.get('services', {}).get(f'shard{i}') == 'running' and head and head + 5 >= chain:
+                self.say(f'  remote entity {i}: its shard node already runs at the head ({head} of {chain}): restored earlier')   # a resumed drive does not wipe it
+                return
+        bodies = self.restore_body_ids()
+        self.expect(bool(bodies), 'an activation record names the V3 body id the restore is anchored to')
+        env = dict(os.environ, H4_RESTORE_BODY_IDS=bodies)
+        newest = bodies.split(',')[-1].split('=')[1]
+        out = Path(tempfile.mkdtemp(prefix='drive-pin-'))
+        attempts = []
+        try:
+            def pinned():
+                for j in sorted(set(self.new) - set(self.remote)):
+                    run = subprocess.run([str(self.restore_pin), str(self.gen / f'validator{j}' / 'archive'), str(self.net / 'trust-base.json'), str(out / 'tip')],
+                                         text=True, capture_output=True, env=env)
+                    attempts.append(f'validator {j} archive: exit {run.returncode}: {(run.stdout + run.stderr).strip()[-300:]}')
+                    if run.returncode == 0 and f'bodyID=0x{newest}' in run.stdout:
+                        return run
+                return None
+            pin = self.wait('a survivor\'s archive yields a certified record of the new epoch to pin', pinned, 180)
+            (self.evh() / f'joiner-restore-pin-{i}.txt').write_text('\n'.join(attempts) + '\n')
+            body = re.search(r'bodyID=(0x[0-9a-fA-F]+)', pin.stdout)
+            self.expect(bool(body), 'the pin names the trust history\'s body id', pin.stdout.strip()[-300:])
+            started = self.remote[i].restore_start((out / 'tip.uc.cbor').read_bytes(), (out / 'tip.tr.cbor').read_bytes(), body.group(1))
+            self.say(f'  remote entity {i}: restore started: {started}')
+        finally:
+            shutil.rmtree(out, ignore_errors=True)
+        seen = []
+        def replayed():
+            head = self.remote[i].status().get('urethHead')
+            seen.append(head)
+            self.say(f'  remote entity {i}: execution client at {head} (replaying to the pin)')
+            return head and len(seen) >= 5 and len(set(seen[-5:])) == 1
+        if not follow:
+            # before its Commit the node is no member: it gets no certificate and never follows the head. Its replay to the pin is all it can do, and enough:
+            # the pin's record is its verified history's tip (what its readiness needs)
+            self.wait(f'the laptop\'s execution client {i} replays to the pin', replayed, 7200)
+            return
+        # restore mode stops at the pin (it asks its archive for nothing later): once replayed, it runs as an ordinary node, which walks its seeded archive
+        # and follows the certificates it now receives as a member
+        self.wait(f'the laptop\'s execution client {i} replays to the pin', replayed, 7200)
+        self.remote[i].seed_archive()   # the records certified during the replay
+        finished = self.remote[i].restore_finish()
+        self.expect(finished.get('running') is True, f'the laptop\'s shard node {i} runs as an ordinary node', str(finished)[:300])
+        def caught_up():
+            head = self.remote[i].status().get('urethHead')
+            target = int(self.ureth(1, 'eth_blockNumber'), 16)
+            self.say(f'  remote entity {i}: execution client at {head}, validator 1 at {target}')
+            return head is not None and head + 5 >= target
+        self.wait(f'the laptop\'s execution client {i} catches up with validator 1', caught_up, 3600)
 
     def step_lockproof(self, mode):
         overlay = self.gen / BRIDGE_OVERRIDE
@@ -773,6 +970,10 @@ def main(argv=None):
     p.add_argument('--lockproof-restart', choices=('auto', 'always', 'never'), default='auto',
                    help='auto: recreate the lock-proof endpoint only when it does not rescan network/handoff (pre-#996)')
     p.add_argument('--allow-unrehearsed-retirement', action='store_true')
+    p.add_argument('--require-member', type=int, action='append', default=[], metavar='ENTITY',
+                   help='refuse a result that does not elect this entity (a joiner being prepared); repeatable')
+    p.add_argument('--allow-excluding-joiner', action='store_true',
+                   help='drive a result that leaves out a remote joiner prepared for this join (handoff/remote-joiners/*.json, state prepared): abandons that join')
     p.add_argument('--plan', action='store_true', help='print what the drive would do and the window, change nothing')
     p.add_argument('--only-if-members', type=parse_members, help='drive only when the elected committee is exactly these entities (e.g. 1,2,3,4); else exit 4 before any step')
     p.add_argument('--funder', type=Path, help='a directory with keystore.json and password: the operator account that pays the owner\'s gas top-up (default: the faucet account)')
@@ -785,7 +986,7 @@ def main(argv=None):
         if lock is None:
             print('BUSY: another handoff-drive holds handoff/drive.lock; nothing done', flush=True)
             return 5
-    d = Drive(a.generation, a.cast, a.ubft, a.restore_pin, parse_joiners(a.joiner), a.funder)
+    d = Drive(a.generation, a.cast, a.ubft, a.restore_pin, parse_joiners(a.joiner), a.require_member, a.allow_excluding_joiner, a.funder)
     if d.funder:
         try:
             funder_address(d.funder)
