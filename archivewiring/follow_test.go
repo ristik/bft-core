@@ -2,6 +2,7 @@ package archivewiring
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -10,9 +11,12 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/unicitynetwork/bft-core/archive"
 	"github.com/unicitynetwork/bft-core/configuredadmission"
+	"github.com/unicitynetwork/bft-core/configuredprogress"
+	"github.com/unicitynetwork/bft-core/frontier"
 	testpeer "github.com/unicitynetwork/bft-core/internal/testutils/peer"
 	"github.com/unicitynetwork/bft-core/network"
 	"github.com/unicitynetwork/bft-core/network/protocol/certification"
+	"github.com/unicitynetwork/bft-core/rootinput"
 	"github.com/unicitynetwork/bft-core/shardnode"
 	"github.com/unicitynetwork/bft-go-base/types"
 )
@@ -172,4 +176,85 @@ func TestHeadFollowerReoffersAnUnacceptedHead(t *testing.T) {
 	now = now.Add(time.Minute)
 	require.False(t, h.Poll(context.Background()), "held: never offered again")
 	require.Equal(t, 2, offers)
+}
+
+// freshNode is a returning node whose journal is fresh: no bootstrap certificate, as on a joiner that never contacted a root.
+func freshNode(t *testing.T, p *planFixture) *returningNode {
+	t.Helper()
+	ctx := context.Background()
+	store, err := configuredprogress.OpenConfiguredV2(t.TempDir()+"/journal.db", configuredprogress.Settings{Retain: 8})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, store.Close()) })
+	_, _, err = store.Initialize(ctx, p.f.context)
+	require.NoError(t, err)
+	require.NoError(t, store.EnableJournal(ctx, p.f.context, returningLimits))
+	names := []peer.ID{"first", "second"}
+	policy := frontier.Policy{Context: p.f.subject, Replicas: [2]string{names[0].String(), names[1].String()},
+		Binding: CertifiedBinding{Context: p.f.context, Subject: p.f.subject}, Availability: fixtureAvailability{stores: map[string]*archive.Store{replicaA: p.replica, replicaB: p.second}}}
+	require.NoError(t, store.EnableFrontier(ctx, p.f.context, returningLimits, policy))
+	exec := newRestoreExecutorFixture(p.genesis)
+	worker := &FrontierWorker{Journal: store, Context: p.f.context, Limits: returningLimits, Archive: p.local, Subject: p.f.subject, Replicas: names, Finalized: exec.Finalized}
+	recovery := &configuredadmission.ExecutionRecovery{Store: store, Context: p.f.context, JournalLimits: returningLimits, Executor: exec, Gate: shardnode.NewFinalityGate(),
+		Genesis: p.genesis, Limits: configuredadmission.RecoveryLimits{Blocks: 8, Bytes: 4 << 20, Deadline: 20 * time.Second},
+		FetchArchive: p.source.FetchSuffix, ArchiveCatchUp: &CatchUp{Source: p.source, Frontier: worker}}
+	return &returningNode{limits: returningLimits, store: store, exec: exec, worker: worker, recovery: recovery}
+}
+
+// admit is what the node's journal admission does with an offered certificate: authenticate, prepare, catch up the gap, commit.
+func (n *returningNode) admit(t *testing.T, p *planFixture, uc *types.UnicityCertificate, tr *certification.TechnicalRecord) error {
+	ctx := context.Background()
+	o, err := rootinput.AuthenticateObservationV2(ctx, p.f.context.Observation, uc, tr)
+	if err != nil {
+		return err
+	}
+	prepared, _, err := n.store.PrepareObservation(ctx, p.f.context, o)
+	if errors.Is(err, configuredprogress.ErrUnavailable) || errors.Is(err, configuredprogress.ErrConflict) {
+		for calls := 0; calls < 60; calls++ {
+			if err = n.recovery.AcquireForCertificate(ctx, uc, tr); err == nil {
+				break
+			}
+		}
+		if err != nil {
+			return err
+		}
+		prepared, _, err = n.store.PrepareObservation(ctx, p.f.context, o)
+	}
+	if err != nil {
+		return err
+	}
+	_, _, err = n.store.CommitObservation(prepared)
+	return err
+}
+
+// #1050, failure 1: a joiner's journal is fresh (its bootstrap certificate normally comes from a root quorum, which a non-active follower
+// never asks). Without a root-free bootstrap the archive head is never admitted; with it, the follower takes the bootstrap certificate from
+// its sources' first certified record, and the head is then admitted and executed through the archive catch-up.
+func TestAFreshFollowerBootstrapsFromItsSourcesWithoutARoot(t *testing.T) {
+	t.Parallel()
+	const total = 12
+	p := newPlanFixture(t, total)
+	p.serve(t, 1, total)
+
+	stuck := freshNode(t, p)
+	head := p.f.entries[total-1]
+	err := stuck.admit(t, p, head.ResultingUC, head.ResultingTR)
+	require.Error(t, err, "the failure of the exit gate: a fresh journal must begin with the bootstrap certificate")
+
+	n := freshNode(t, p)
+	needs := true
+	h := &HeadFollower{Binding: CertifiedBinding{Context: p.f.context, Subject: p.f.subject}, Host: p.source.Host, Limits: DefaultLimits(),
+		Sources: func() []peer.ID { return p.source.Replicas }, NeedsBootstrap: func() bool { return needs },
+		Offer: func(uc *types.UnicityCertificate, tr *certification.TechnicalRecord) bool {
+			require.NoError(t, n.admit(t, p, uc, tr))
+			return true
+		}}
+	require.True(t, h.Poll(context.Background()), "the bootstrap certificate is offered")
+	st, _, err := n.store.Load(context.Background(), p.f.context)
+	require.NoError(t, err)
+	_, observed := st.Observed()
+	require.True(t, observed, "admitted as the journal's bootstrap certificate")
+	needs = false
+	require.True(t, h.Poll(context.Background()), "then the head")
+	n.catchUp(t, p, total, 40) // the admission's retries page the gap in from the archive
+	require.EqualValues(t, total, n.exec.finalized.Number, "executed to the archive head, root-free")
 }

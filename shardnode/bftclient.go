@@ -628,7 +628,7 @@ func (c *BFTClient) Run(ctx context.Context) error {
 				startupC = nil
 				break
 			}
-			if c.log != nil {
+			if c.log != nil && !c.isFollower() { // a follower sends no handshake (sendHandshake is a no-op): nothing to report
 				c.log.WarnContext(ctx, "no certificate yet, re-sending handshake", slog.Int("attempt", startupAttempt+1))
 			}
 			if err := c.sendHandshake(ctx); err != nil && c.log != nil {
@@ -647,7 +647,7 @@ func (c *BFTClient) Run(ctx context.Context) error {
 			c.reportPending(ctx)
 			last := time.UnixMilli(c.lastCertResponseTime.Load())
 			if time.Since(last) > c.opts.InactivityTimeout {
-				if c.log != nil {
+				if c.log != nil && !c.isFollower() {
 					c.log.WarnContext(ctx, "inactivity timeout exceeded, re-sending handshake")
 				}
 				if c.log != nil {

@@ -770,8 +770,11 @@ def start(lap):
     if lap.state.get('authorityScope') and services.get(f'authority{j}') != 'running':
         say(f'WARNING: authority{j} was started at {lap.state["authorityScope"]} and is not running: its EVM key is lost (a VM restart?). '
             'It is NOT restarted: the delegation names the lost key')
-    if lap.state.get('authorityScope') and services.get(f'shard{j}') != 'running' and services.get(f'authority{j}') == 'running':
-        lap.dc('start', f'shard{j}')
+    # the shard node runs from start as a root-free follower (--follow-source), well before its join, so that it follows several epochs
+    # before its activation (#1050). It needs no authority to follow: its signing client connects lazily, at its first request, which only
+    # an activated, enrolled node makes. The authority is still started at the prepare, at the scope its delegation names.
+    if services.get(f'shard{j}') != 'running':
+        lap.dc('up', '-d', '--no-deps', f'shard{j}')
     lap.wait('the root reports itself a follower or a member', lambda: lap.status().get('follower') is not None or lap.root_epoch(), 180, every=5)
     say(json.dumps(lap.status(), sort_keys=True))
 

@@ -1369,6 +1369,20 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 		}
 		// Frontier enablement is part of the archive setup that follows the replica validation: it runs from this one action after the
 		// persisted replay on a plain run, and after CatchUp and before the archive replay on a restore.
+		// the terminal repair's archive: local, then (verified downstream) the node's non-root archive sources (#1050: a follower that
+		// installed an epoch from its mirrors holds no terminal body of it)
+		terminalArchive := func() handoffArchiveReader {
+			if archiveLocal == nil {
+				return nil
+			}
+			return remoteFallbackArchive{local: archiveLocal,
+				sources: func() []libp2ppeer.ID {
+					return follower.nonRoot(append(append(followSourceIDs(followSources), readableArchiveReplicas(replicaPolicy, archiveReplicas)...), activePeers.Peers()...))
+				},
+				fetch: func(id libp2ppeer.ID, q archive.Request) (*archive.Record, error) {
+					return archivewiring.Fetch(ctx, archiveHost, id, q, archiveTransportLimits)
+				}}
+		}
 		enableArchiveFrontier := func(ctx context.Context) error {
 			if archiveLocal == nil || !flags.ArchivePrune {
 				return nil
@@ -1404,7 +1418,7 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 			}
 			// The terminal repair runs only now, against the authenticated frontier and restore base: a terminal they already discharge
 			// is skipped, not resurrected into the hot journal (the frontier cannot be enabled any earlier, as it needs the validated set).
-			if err := repairUndischargedHandoffTerminals(ctx, journalStore, archiveLocal, archiveSubject, journalCtx, limits, restoredHandoffTerminals); err != nil {
+			if err := repairUndischargedHandoffTerminals(ctx, journalStore, terminalArchive(), archiveSubject, journalCtx, limits, restoredHandoffTerminals); err != nil {
 				flags.observe.Logger().Error("profile2 handoff terminal repair failed", "error", err)
 				return fmt.Errorf("repairing saved handoff observations: %w", err)
 			}
@@ -1461,7 +1475,7 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 			if flags.TrustHistoryProfile2 {
 				repairRestoredHandoffs = func(ctx context.Context) error {
 					restoringHandoffHistory = false
-					return repairUndischargedHandoffTerminals(ctx, journalStore, archiveLocal,
+					return repairUndischargedHandoffTerminals(ctx, journalStore, terminalArchive(),
 						archiveSubject, journalCtx, limits, restoredHandoffTerminals)
 				}
 			}
@@ -1505,6 +1519,9 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 		// `shard-node restore` (D-M2-1) is unchanged and independent of it.
 		freshness := &configuredadmission.Freshness{Opener: peer, TrustBase: trustBases[0], Logger: flags.observe.Logger()}
 		freshness.Signing = freshnessSigning(q3rt, flags.UTBGenesisFile != "", trustBases[0])
+		if follower.enabled {
+			freshness.RootFree = func() bool { return !role.active() }
+		}
 		coordinator := &configuredadmission.ExecutionRecovery{Freshness: freshness, Store: journalStore, Context: journalCtx, JournalLimits: limits, Executor: recoveryExecutor, Gate: node.FinalityGate(), Log: flags.observe.Logger(), Genesis: genesis, Limits: configuredadmission.DefaultRecoveryLimits()}
 		server, serverErr := shardnode.NewJournalServer(configuredadmission.JournalProvider{Store: journalStore, Context: journalCtx, Limits: limits}, shardnode.DefaultJournalTransportLimits())
 		if serverErr != nil {
@@ -1522,7 +1539,16 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 				source.Followed = func() []libp2ppeer.ID { return follower.nonRoot(followSourceIDs(followSources)) }
 				// the root-free certificate source: the newest verified archive head, offered while this node is not active
 				headFollower = &archivewiring.HeadFollower{Binding: archivewiring.CertifiedBinding{Context: journalCtx, Subject: archiveSubject},
-					Host: archiveHost, Limits: archiveTransportLimits, Active: role.active, Offer: node.FollowCertificate, Accepted: node.Holds, Log: flags.observe.Logger(),
+					Host: archiveHost, Limits: archiveTransportLimits, Active: role.active, Offer: node.FollowCertificate, Accepted: node.Holds,
+					// a fresh journal begins with the bootstrap certificate: taken from the sources' first record, never from a root quorum
+					NeedsBootstrap: func() bool {
+						st, _, err := journalStore.Load(ctx, journalCtx)
+						if err != nil {
+							return false
+						}
+						_, observed := st.Observed()
+						return !observed
+					}, Log: flags.observe.Logger(),
 					Sources: func() []libp2ppeer.ID {
 						return follower.nonRoot(append(append(followSourceIDs(followSources), readableArchiveReplicas(replicaPolicy, archiveReplicas)...), activePeers.Peers()...))
 					}}
