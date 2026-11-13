@@ -467,7 +467,7 @@ class Laptop:
         wipe = ('find /evm -mindepth 1 -maxdepth 1 ! -name keys.json ! -name node-info.json -exec rm -rf {} + && '
                 'find /archive -mindepth 1 -maxdepth 1 -exec rm -rf {} + && find /ureth -mindepth 1 -maxdepth 1 -exec rm -rf {} +')
         self.one(self.node_image, ['-c', wipe], [f'{self.vol("evm")}:/evm', f'{self.vol("archive")}:/archive', f'{self.vol("ureth")}:/ureth'], entrypoint='sh')
-        seeded = self.seed_archive()   # before the restore: its fetch from the pinned tip to genesis then finds every record locally
+        seeded = None   # NOT seeded here: `shard-node restore` refuses an archive directory that is not empty (it fetches every record itself, from peers)
         self.dc('up', '-d', '--no-deps', f'ureth{j}')
         self.wait(f'the execution client {j} answers', lambda: self.ureth_head() is not None, 180)
         self.vol_write('evm', 'tip.uc.cbor', base64.b64decode(uc_b64), 0o600)
