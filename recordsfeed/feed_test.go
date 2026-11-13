@@ -6,12 +6,14 @@ import (
 	"crypto"
 	"encoding/binary"
 	"errors"
+	"sync/atomic"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 	"github.com/unicitynetwork/bft-go-base/types"
 
 	"github.com/unicitynetwork/bft-core/evmroot"
+	"github.com/unicitynetwork/bft-core/keyvaluedb"
 	"github.com/unicitynetwork/bft-core/keyvaluedb/memorydb"
 	"github.com/unicitynetwork/bft-core/rootinput"
 	"github.com/unicitynetwork/bft-core/rootrecords"
@@ -405,41 +407,80 @@ func (m mirrorRemote) Records(_ context.Context, from uint64, max int) ([]rootre
 	return m.s.Records(from, max)
 }
 
-// Historical root-free recovery does not depend on the bounded in-memory cache: a mirror that verified more origins than the cache holds,
-// then restarted (its derived caches wiped, its durable store kept), still serves every historical cut, and a follower catching up from
-// the first origin verifies all of them through that mirror alone.
-func TestHistoricalCutsOutliveTheCacheAndARestart(t *testing.T) {
+// Historical root-free recovery survives the bounded cache and a restart, through the production construction only (NewSource, then
+// SetCutStore): a mirror that verified more origins than its cache holds restarts with nothing but its durable store, restores its record
+// log from it, and a follower catching up from the first origin verifies every origin through that mirror alone.
+func TestHistoricalCutsAndRecordsOutliveTheCacheAndARestart(t *testing.T) {
 	defer func(n int) { maxMirroredCuts = n }(maxMirroredCuts)
 	maxMirroredCuts = 4 // the bound is an optimization; the test exceeds it many times over
-	store := KVCutStore{DB: memorydb.New()}
+	db := memorydb.New()
 	type origin struct {
-		cut    Cut
 		origin evmroot.RootOriginV2
-		chain  chain
 	}
 	var origins []origin
-	mirror := NewSource()
-	mirror.SetCutStore(store)
+	remote := &fakeRemote{}
+	mirror := NewSource(remote)
+	require.NoError(t, mirror.SetCutStore(KVCutStore{DB: db}))
 	for i := 0; i < 40; i++ {
 		c := buildChain(t, 3+i)
 		cut, o := c.cutOf(t, uint64(500+10*i), uint64(9_000+i))
-		mirror.remotes = []Remote{&fakeRemote{cut: cut, records: c.records}}
+		remote.cut, remote.records = cut, c.records
 		_, err := mirror.Cursor(context.Background(), o)
 		require.NoError(t, err)
-		origins = append(origins, origin{cut, o, c})
+		origins = append(origins, origin{o})
 	}
-	restarted := NewSource() // a restart: nothing in memory
-	restarted.SetCutStore(store)
-	last := origins[len(origins)-1].chain
-	restarted.log = append(restarted.log, last.records...) // its verified log (retained with the archive)
+	require.NoError(t, mirror.PersistenceError())
+
+	restarted := NewSource() // the process restarted: only the durable store
+	require.NoError(t, restarted.SetCutStore(KVCutStore{DB: db}))
 	follower := NewSource(mirrorRemote{restarted})
 	for i, o := range origins {
 		_, err := follower.Cursor(context.Background(), o.origin)
 		require.NoError(t, err, "origin %d", i)
 	}
-	// the control: the cache alone has lost the early cuts
-	_, err := mirror.cutsOnly(origins[0].origin)
-	require.ErrorIs(t, err, ErrUnavailable, "the in-memory cache no longer holds the first origin's cut")
+	_, err := restarted.Record(0)
+	require.ErrorIs(t, err, ErrUnavailable, "a record loaded from disk is not used by the node itself before a cut re-authenticates it")
+	_, err = mirror.cutsOnly(origins[0].origin)
+	require.ErrorIs(t, err, ErrUnavailable, "the control: the in-memory cache alone has lost the first origin's cut")
+}
+
+// failingDB fails every write after the first n.
+type failingDB struct {
+	keyvaluedb.KeyValueDB
+	writes atomic.Int32
+	n      int32
+}
+
+func (d *failingDB) Write(k []byte, v any) error {
+	if d.writes.Add(1) > d.n {
+		return errors.New("disk full")
+	}
+	return d.KeyValueDB.Write(k, v)
+}
+
+// A retention failure is surfaced, not silently turned into the volatile cache: the source reports it (and its hook fires) while its own
+// verification keeps working; a retained log that does not verify is refused at load.
+func TestRetentionFailuresAreSurfaced(t *testing.T) {
+	c := buildChain(t, 5)
+	cut, o := c.cutOf(t, 500, 9_000)
+	src := NewSource(&fakeRemote{cut: cut, records: c.records})
+	db := &failingDB{KeyValueDB: memorydb.New(), n: 2}
+	require.NoError(t, src.SetCutStore(KVCutStore{DB: db}))
+	var hooked []error
+	src.OnPersistError(func(err error) { hooked = append(hooked, err) })
+	_, err := src.Cursor(context.Background(), o)
+	require.NoError(t, err, "verification does not depend on retention")
+	require.Error(t, src.PersistenceError())
+	require.NotEmpty(t, hooked)
+
+	// a tampered retained log: the second record's identifier no longer chains
+	good := memorydb.New()
+	store := KVCutStore{DB: good}
+	require.NoError(t, store.AppendRecords(c.records))
+	bad := c.records[1]
+	bad.ID[0] ^= 0xff
+	require.NoError(t, store.AppendRecords([]rootrecords.Record{bad}))
+	require.ErrorIs(t, NewSource().SetCutStore(store), ErrAuth)
 }
 
 func (s *Source) cutsOnly(o evmroot.RootOriginV2) (Cut, error) {

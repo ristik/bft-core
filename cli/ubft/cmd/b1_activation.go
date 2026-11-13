@@ -633,7 +633,7 @@ func newB1PairConfig(p b1state.Profile, rt *q3active.Runtime, ethURL string, tim
 // then the mirrors (shard nodes serving the cuts and records they verified). A root-free follower that is not active asks the mirrors only.
 // What any source serves is believed only after it verified against the unicity tree root of the certificate the pair holds, so no source
 // is trusted and any of them will do.
-func attachRecordsFeed(cfg *b1paired.Config, host recordsfeed.Libp2p, roots []libp2ppeer.AddrInfo, role *rootFreeRole, cuts recordsfeed.CutStore) {
+func attachRecordsFeed(cfg *b1paired.Config, host recordsfeed.Libp2p, roots []libp2ppeer.AddrInfo, role *rootFreeRole, cuts recordsfeed.CutStore, onPersistErr func(error)) error {
 	opener := recordsfeed.FromLibp2p(host)
 	remotes := make([]recordsfeed.Remote, 0, len(roots)+recordsMirrorSlots)
 	for _, r := range roots {
@@ -649,7 +649,12 @@ func attachRecordsFeed(cfg *b1paired.Config, host recordsfeed.Libp2p, roots []li
 	}
 	source := recordsfeed.NewSource(remotes...)
 	if cuts != nil {
-		source.SetCutStore(cuts) // every verified cut is kept durably, for followers' historical recovery
+		// every verified cut and record is kept durably, for followers' historical recovery; a retained log that does not verify refuses
+		// startup, and a later retention failure is reported (the node then no longer promises historical availability)
+		if err := source.SetCutStore(cuts); err != nil {
+			return fmt.Errorf("restoring the retained root records: %w", err)
+		}
+		source.OnPersistError(onPersistErr)
 	}
 	cfg.Records = source
 	if host, ok := host.(interface {
@@ -658,6 +663,7 @@ func attachRecordsFeed(cfg *b1paired.Config, host recordsfeed.Libp2p, roots []li
 		// this node mirrors what it verified to followers; the server bounds streams in total and per peer
 		host.RegisterProtocolHandler(recordsfeed.ProtocolID, recordsfeed.NewServer(source, func(libp2ppeer.ID) bool { return true }).Handler)
 	}
+	return nil
 }
 
 // recordsMirrorSlots is how many mirrors a records lookup tries, each as its own remote so that one serving a wrong chain is skipped.

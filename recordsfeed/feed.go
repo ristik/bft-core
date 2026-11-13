@@ -120,16 +120,63 @@ type Source struct {
 	// store, when set, retains every verified cut durably, so that this node can serve a historical cut long after it left the bounded
 	// in-memory cache and across restarts: the mirror's retention guarantee for root-free historical recovery is "every cut it verified".
 	store CutStore
+	// checked is how many leading records of log have had every served field authenticated by a cut in this process. Records loaded from
+	// the durable store are chain-verified at load (VerifyAfter), but a Closure's closed-epoch field is not covered by its identifier: until
+	// a cut re-authenticates it, such a record is mirrored (the follower authenticates it itself) but not used by this node.
+	checked int
+	// persistErr is the first durable-retention failure; once set, this source no longer promises historical availability.
+	persistErr   error
+	onPersistErr func(error)
 }
 
-// CutStore durably retains verified cuts by key.
+// CutStore durably retains verified cuts and the verified record log.
 type CutStore interface {
 	PutCut(key CutKey, cut Cut) error
 	GetCut(key CutKey) (Cut, bool, error)
+	// AppendRecords stores records that continue the stored log at their own indexes; LoadRecords returns the stored log in order.
+	AppendRecords(records []rootrecords.Record) error
+	LoadRecords() ([]rootrecords.Record, error)
 }
 
-// SetCutStore attaches durable cut retention. Call before use.
-func (s *Source) SetCutStore(store CutStore) { s.store = store }
+// SetCutStore attaches durable retention and restores the verified record log from it (chain-verified from index 0). Call before use.
+// A store whose log does not verify is refused: nothing from it is mirrored.
+func (s *Source) SetCutStore(store CutStore) error {
+	records, err := store.LoadRecords()
+	if err != nil {
+		return fmt.Errorf("%w: loading the retained record log: %v", ErrUnavailable, err)
+	}
+	if err := rootrecords.VerifyAfter(nil, records); err != nil {
+		return errors.Join(ErrAuth, fmt.Errorf("the retained record log does not verify: %w", err))
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.store, s.log, s.checked = store, records, 0
+	return nil
+}
+
+// OnPersistError installs a hook for durable-retention failures (logging, status).
+func (s *Source) OnPersistError(f func(error)) { s.onPersistErr = f }
+
+// PersistenceError reports the first durable-retention failure, nil while every verified cut and record was retained.
+func (s *Source) PersistenceError() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.persistErr
+}
+
+// persistFailed records a retention failure (s.mu not held).
+func (s *Source) persistFailed(err error) {
+	s.mu.Lock()
+	first := s.persistErr == nil
+	if first {
+		s.persistErr = err
+	}
+	hook := s.onPersistErr
+	s.mu.Unlock()
+	if hook != nil {
+		hook(err)
+	}
+}
 
 // maxMirroredCuts bounds the verified cuts a source keeps in memory; older ones are served from the durable store (SetCutStore).
 var maxMirroredCuts = 4096
@@ -165,7 +212,9 @@ func (s *Source) Records(from uint64, max int) ([]rootrecords.Record, error) {
 
 func (s *Source) retainCut(key CutKey, cut Cut) {
 	if s.store != nil {
-		_ = s.store.PutCut(key, cut) // best effort: a failed write only loses this node's ability to mirror the cut later
+		if err := s.store.PutCut(key, cut); err != nil {
+			s.persistFailed(fmt.Errorf("retaining the cut of %+v: %w", key, err))
+		}
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -231,7 +280,7 @@ func (s *Source) cursorFrom(ctx context.Context, remote Remote, origin evmroot.R
 func (s *Source) Record(index uint64) (rootrecords.Record, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if index >= uint64(len(s.log)) {
+	if index >= uint64(s.checked) {
 		return rootrecords.Record{}, fmt.Errorf("%w: record %d", ErrUnavailable, index)
 	}
 	return s.log[index], nil
@@ -248,7 +297,10 @@ func (s *Source) extend(ctx context.Context, remote Remote, state rootrecords.St
 		if s.log[state.Count-1].ID != state.Tip {
 			return fmt.Errorf("%w: the verified log differs from the log the origin authenticates", ErrAuth)
 		}
-		return nil
+		return s.recheck(state)
+	}
+	if err := s.recheck(state); err != nil {
+		return err
 	}
 	var prev *rootrecords.Record
 	if n := len(s.log); n > 0 {
@@ -279,7 +331,30 @@ func (s *Source) extend(ctx context.Context, remote Remote, state rootrecords.St
 	if staged[len(staged)-1].ID != state.Tip {
 		return fmt.Errorf("%w: the records end at another tip than the origin's", ErrAuth)
 	}
+	if s.store != nil {
+		if err := s.store.AppendRecords(staged); err != nil {
+			s.mu.Unlock()
+			s.persistFailed(fmt.Errorf("retaining records %d..: %w", staged[0].Index, err))
+			s.mu.Lock()
+		}
+	}
 	s.log = append(s.log, staged...)
+	s.checked = len(s.log)
+	return nil
+}
+
+// recheck authenticates the closed-epoch field of the loaded records the state covers (s.mu held). The state's tip already binds their
+// identifiers: the chain was verified at load and its last covered record is the tip.
+func (s *Source) recheck(state rootrecords.State) error {
+	end := min(uint64(len(s.log)), state.Count)
+	for i := uint64(s.checked); i < end; i++ {
+		if err := authenticateClosedEpoch(s.log[i], state); err != nil {
+			return err
+		}
+	}
+	if int(end) > s.checked {
+		s.checked = int(end)
+	}
 	return nil
 }
 

@@ -37,6 +37,7 @@ import (
 	"github.com/unicitynetwork/bft-core/archive"
 	"github.com/unicitynetwork/bft-core/archivepolicy"
 	"github.com/unicitynetwork/bft-core/archivewiring"
+	"github.com/unicitynetwork/bft-core/b1paired"
 	"github.com/unicitynetwork/bft-core/b1state"
 	"github.com/unicitynetwork/bft-core/certifiedstore"
 	"github.com/unicitynetwork/bft-core/configuredadmission"
@@ -793,7 +794,9 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 			if verifierContext.B1, jErr = newB1PairConfig(b1Profile, b1rt, flags.EthURL, 10*time.Second); jErr != nil {
 				return jErr
 			}
-			attachRecordsFeed(verifierContext.B1, peer, bootNodes, follower, openRecordCuts(flags.ExecutionJournal))
+			if jErr = attachShardRecordsFeed(verifierContext.B1, peer, bootNodes, follower, flags.ExecutionJournal, flags.observe.Logger()); jErr != nil {
+				return jErr
+			}
 			// The execution client is the paired ureth: every build and import carries the pair binding its own gate compares.
 			if q3Admit, jErr = wireQ3Pair(executor, b1rt, uint64(shardConf.NetworkID), origin.Valid(), [32]byte(origin.BlockHash())); jErr != nil {
 				return jErr
@@ -827,7 +830,9 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 				if verifierContext.B1, jErr = newB1PairConfig(b1Profile, q3rt, flags.EthURL, 10*time.Second); jErr != nil {
 					return jErr
 				}
-				attachRecordsFeed(verifierContext.B1, peer, bootNodes, follower, openRecordCuts(flags.ExecutionJournal))
+				if jErr = attachShardRecordsFeed(verifierContext.B1, peer, bootNodes, follower, flags.ExecutionJournal, flags.observe.Logger()); jErr != nil {
+					return jErr
+				}
 			}
 		}
 	}
@@ -2258,16 +2263,27 @@ func shardQ3Follower(rt q3shard.Q3Activator, anchor uint64, bootLocators []libp2
 	return &q3shard.Q3Follower{Runtime: rt, AnchorEpoch: anchor, CurrentRoots: bootLocators, Mirrors: mirrors, NonActive: nonActive, IsRoot: isRoot, Fetch: fetch}
 }
 
-// openRecordCuts opens the durable store of verified root-record cuts next to the execution journal (nil without a journal, or when it
-// cannot be opened: the node then mirrors only its in-memory cuts). It is opened where the records feed is attached, after the restore
-// checks, so that nothing is written before them.
-func openRecordCuts(journal string) recordsfeed.CutStore {
+// openRecordCuts opens the durable store of verified root-record cuts and records next to the execution journal (nil without a journal).
+// It is opened where the records feed is attached, after the restore checks, so that nothing is written before them. A store that cannot
+// be opened is an error: the node does not silently fall back to the volatile cache.
+func openRecordCuts(journal string) (recordsfeed.CutStore, error) {
 	if journal == "" {
-		return nil
+		return nil, nil
 	}
 	db, err := boltdb.New(journal + ".cuts")
 	if err != nil {
-		return nil
+		return nil, fmt.Errorf("opening the root-record store %s: %w", journal+".cuts", err)
 	}
-	return recordsfeed.KVCutStore{DB: db}
+	return recordsfeed.KVCutStore{DB: db}, nil
+}
+
+// attachShardRecordsFeed is attachRecordsFeed with the shard node's durable store and its failure reporting.
+func attachShardRecordsFeed(cfg *b1paired.Config, host recordsfeed.Libp2p, roots []libp2ppeer.AddrInfo, role *rootFreeRole, journal string, log *slog.Logger) error {
+	cuts, err := openRecordCuts(journal)
+	if err != nil {
+		return err
+	}
+	return attachRecordsFeed(cfg, host, roots, role, cuts, func(err error) {
+		log.Error("root-record retention failed: this node no longer mirrors its full record history", "error", err)
+	})
 }
