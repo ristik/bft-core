@@ -112,3 +112,34 @@ func TestClientSendIsBoundToTheOriginatingRoleToken(t *testing.T) {
 	require.EqualValues(t, 1, net.sends.Load(), "the old request does not leave under the new role")
 	require.NoError(t, client.sendRequest(withRoleToken(ctx, 9), req, f.ucMine))
 }
+
+// Round to client: a request signed under token 7 and answered (the round's completed cache), re-delivered after the role was re-published
+// under token 9, reaches neither the client's network nor is it rebuilt; the signed bytes stay cached. Under the original token the replay
+// re-sends exactly them, through the real client.
+func TestRoundReplayThroughTheClientKeepsTheOriginatingToken(t *testing.T) {
+	f := newConfBindingFixture(t)
+	net := &countingNet{lateRootNet: lateRootNet{received: make(chan any, 4), ready: true}}
+	client, err := NewBFTClient(testpeer.CreatePeer(t, testpeer.CreatePeerConfiguration(t)), net, f.signer, authPartitionID, types.ShardID{}, f.confMine,
+		stubTrustBaseStore{tb: f.tb}, &firstUCDriver{got: make(chan struct{})}, nil, BFTClientOptions{HandshakeNodes: 1, CertNodes: 1})
+	require.NoError(t, err)
+	require.NoError(t, client.SeedLUC(f.ucMine))
+	role := &tokenRole{}
+	role.active.Store(true)
+	role.token.Store(7)
+	client.SetRole(role)
+	r := NewRound("leader", authPartitionID, types.ShardID{}, &stubExecutor{}, NewLoopbackDisseminator(), f.signer, client, nil)
+	r.SetRole(role)
+	uc := &types.UnicityCertificate{Version: 1, InputRecord: &types.InputRecord{Version: 1}, UnicitySeal: &types.UnicitySeal{Version: 1, RootChainRoundNumber: 1, Timestamp: 1000}}
+	tr := &certification.TechnicalRecord{Round: 1, Leader: "leader", StatHash: []byte{1}, FeeHash: []byte{1}}
+	signed := &certification.BlockCertificationRequest{PartitionID: authPartitionID, InputRecord: &types.InputRecord{Version: 1, RoundNumber: 1}}
+	r.completed = &completedRound{round: 1, partitionRound: uc.GetRoundNumber(), rootRound: uc.GetRootRoundNumber(), req: signed, token: 7}
+	ctx := context.Background()
+
+	require.NoError(t, r.HandleCertificate(ctx, uc, tr))
+	require.EqualValues(t, 1, net.sends.Load(), "replayed under its own token")
+
+	role.token.Store(9) // re-published, active again
+	require.NoError(t, r.HandleCertificate(ctx, uc, tr))
+	require.EqualValues(t, 1, net.sends.Load(), "not sent under the new token")
+	require.Same(t, signed, r.completed.req, "the signed bytes are kept, never rebuilt or re-signed")
+}

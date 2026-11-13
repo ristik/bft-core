@@ -193,6 +193,9 @@ type completedRound struct {
 	partitionRound uint64 // the certificate that authorized it
 	rootRound      uint64
 	req            *certification.BlockCertificationRequest
+	// token is the role token the request was signed under. A replay sends these bytes only under that token; when it has ended the
+	// cache is kept (the authorization is answered, so nothing is rebuilt or re-signed) and the replay abstains.
+	token uint64
 }
 
 func (c *completedRound) authorizes(uc *types.UnicityCertificate, exp Expectation) bool {
@@ -757,7 +760,11 @@ func (r *Round) HandleCertificate(ctx context.Context, uc *types.UnicityCertific
 			r.log.DebugContext(ctx, "re-delivery of an authorization already answered: re-sending the identical signed request",
 				slog.Uint64("round", exp.Round), slog.Uint64("partitionRound", uc.GetRoundNumber()))
 		}
-		return r.send(ctx, r.completed.req, exp.Round)
+		if !r.role.Load().admits(r.completed.token) {
+			r.health.updateVoting(false, nonVotingFollower)
+			return nil // signed under a role that has ended: kept, never rebuilt, re-signed or sent under another token
+		}
+		return r.sendUnder(ctx, r.completed.req, exp.Round, r.completed.token)
 	}
 
 	// RE-DELIVERY OF AN AUTHORIZATION THE SIGNER ALREADY REFUSED. Nothing was signed, so there is
@@ -883,6 +890,10 @@ func (r *Round) HandleCertificate(ctx context.Context, uc *types.UnicityCertific
 		}
 		if err := binder.CheckBlockBinding(ctx, block, params); err != nil {
 			return fmt.Errorf("retaining follower candidate: %w", err)
+		}
+		if r.leaseLost() { // after the wait for the leader and the binding check, immediately before the speculative journal write
+			r.health.updateVoting(false, nonVotingFollower)
+			return nil
 		}
 		if err := r.journal.RetainCandidate(ctx, block, params, false); err != nil {
 			// A follower's candidate and its provenance came from the leader.
@@ -1071,6 +1082,7 @@ func (r *Round) HandleCertificate(ctx context.Context, uc *types.UnicityCertific
 		partitionRound: uc.GetRoundNumber(),
 		rootRound:      uc.GetRootRoundNumber(),
 		req:            req,
+		token:          r.leaseToken,
 	}
 	r.health.updateSubmitted(exp.Round)
 	r.health.updateVoting(true, "")
@@ -1101,10 +1113,15 @@ const submitRetries = 2
 const submitRetryInterval = 100 * time.Millisecond
 
 func (r *Round) send(ctx context.Context, req *certification.BlockCertificationRequest, round uint64) error {
-	if r.leaseLost() {
+	return r.sendUnder(ctx, req, round, r.leaseToken)
+}
+
+// sendUnder sends signed bytes bound to the role token they were signed under: the round and the client admit the send only under it.
+func (r *Round) sendUnder(ctx context.Context, req *certification.BlockCertificationRequest, round uint64, token uint64) error {
+	if !r.role.Load().admits(token) {
 		return ErrFollower
 	}
-	ctx = withRoleToken(ctx, r.leaseToken) // the client admits each send of these bytes only under this token
+	ctx = withRoleToken(ctx, token)
 	var err error
 	for attempt := 0; ; attempt++ {
 		if err = r.submitter.Submit(ctx, req); err == nil {
