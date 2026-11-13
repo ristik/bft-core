@@ -254,3 +254,80 @@ func TestRound_RetirementWhileBuildingWithholdsTheSignature(t *testing.T) {
 		})
 	}
 }
+
+// actionRecorder records the irreversible leader actions and can end the role at a chosen point.
+type actionRecorder struct {
+	shardnode.Executor
+	mu                    sync.Mutex
+	builds, seals         int
+	duringPrepare, during func()
+}
+
+func (e *actionRecorder) PrepareBuild(_ context.Context, p shardnode.RoundParams) (func(context.Context) (shardnode.BuildID, error), error) {
+	e.duringPrepare() // slow preparation: the role may end here, before the Engine call
+	return func(ctx context.Context) (shardnode.BuildID, error) {
+		e.mu.Lock()
+		e.builds++
+		e.mu.Unlock()
+		e.during()
+		return e.Executor.Build(ctx, p)
+	}, nil
+}
+
+func (e *actionRecorder) Seal(ctx context.Context, id shardnode.BuildID) (shardnode.Block, error) {
+	e.mu.Lock()
+	e.seals++
+	e.mu.Unlock()
+	return e.Executor.Seal(ctx, id)
+}
+
+type publishRecorder struct {
+	shardnode.Disseminator
+	published atomic.Int32
+}
+
+func (d *publishRecorder) Publish(ctx context.Context, round uint64, b shardnode.Block) error {
+	d.published.Add(1)
+	return d.Disseminator.Publish(ctx, round, b)
+}
+
+// The lease is checked immediately before each irreversible action, not only once per round: a role that ends during the slow build
+// preparation stops the Engine build itself, and one that ends during the build stops the seal, the publication and the request.
+func TestRound_RoleEndingBeforeEachLeaderActionStopsIt(t *testing.T) {
+	ctx := context.Background()
+	for name, tc := range map[string]struct {
+		prepare, build      bool // end the role during preparation / during the build
+		builds, seals, pubs int
+		sent                bool
+	}{
+		"unchanged (control)":    {false, false, 1, 1, 1, true},
+		"retired during prepare": {true, false, 0, 0, 0, false},
+		"retired during build":   {false, true, 1, 0, 0, false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			role := &leaseRole{}
+			role.active.Store(true)
+			end := func(when bool) func() {
+				return func() {
+					if when {
+						role.active.Store(false)
+					}
+				}
+			}
+			exec := &actionRecorder{Executor: executortest.New(), duringPrepare: end(tc.prepare), during: end(tc.build)}
+			signer, err := abcrypto.NewInMemorySecp256K1Signer()
+			require.NoError(t, err)
+			pub := &publishRecorder{Disseminator: shardnode.NewLoopbackDisseminator()}
+			sub := &recordingSubmitter{}
+			r := shardnode.NewRound("leader", types.PartitionID(8), types.ShardID{}, exec, pub, signer, sub, nil)
+			r.SetRole(role)
+			_ = r.HandleCertificate(ctx, genesisUC(1000), tr(1, 0, "leader"))
+			require.Equal(t, tc.builds, exec.builds, "Engine builds")
+			require.Equal(t, tc.seals, exec.seals, "seals")
+			require.EqualValues(t, tc.pubs, pub.published.Load(), "publications")
+			sub.mu.Lock()
+			defer sub.mu.Unlock()
+			require.Equal(t, tc.sent, len(sub.got) == 1)
+		})
+	}
+}

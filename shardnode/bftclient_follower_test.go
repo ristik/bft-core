@@ -2,11 +2,14 @@ package shardnode
 
 import (
 	"context"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/stretchr/testify/require"
 	testpeer "github.com/unicitynetwork/bft-core/internal/testutils/peer"
+	"github.com/unicitynetwork/bft-core/network/protocol/certification"
 	"github.com/unicitynetwork/bft-go-base/types"
 )
 
@@ -66,4 +69,46 @@ func TestFollowerClientSendsNothingToRootsAndDeliversFollowedCertificates(t *tes
 	client.RoleChanged()
 	require.Eventually(t, func() bool { net.mu.Lock(); defer net.mu.Unlock(); return net.handshakes > 0 }, 5*time.Second, 10*time.Millisecond,
 		"promoted, it subscribes to the roots at once, not at the next heartbeat")
+}
+
+type tokenRole struct {
+	token  atomic.Uint64
+	active atomic.Bool
+}
+
+func (r *tokenRole) Lease() (uint64, bool) { return r.token.Load(), r.active.Load() }
+
+type countingNet struct {
+	lateRootNet
+	sends atomic.Int32
+}
+
+func (n *countingNet) Send(ctx context.Context, msg any, ids ...peer.ID) error {
+	if _, ok := msg.(*certification.BlockCertificationRequest); ok {
+		n.sends.Add(1)
+	}
+	return n.lateRootNet.Send(ctx, msg, ids...)
+}
+
+// A request leaves only under the role token it was produced under: after a revocation and re-publication (active again, a new token)
+// neither the send nor a re-send of the old bytes goes out.
+func TestClientSendIsBoundToTheOriginatingRoleToken(t *testing.T) {
+	f := newConfBindingFixture(t)
+	net := &countingNet{lateRootNet: lateRootNet{received: make(chan any, 4), ready: true}}
+	client, err := NewBFTClient(testpeer.CreatePeer(t, testpeer.CreatePeerConfiguration(t)), net, f.signer, authPartitionID, types.ShardID{}, f.confMine,
+		stubTrustBaseStore{tb: f.tb}, &firstUCDriver{got: make(chan struct{})}, nil, BFTClientOptions{HandshakeNodes: 1, CertNodes: 1})
+	require.NoError(t, err)
+	role := &tokenRole{}
+	role.active.Store(true)
+	role.token.Store(7)
+	client.SetRole(role)
+	req := &certification.BlockCertificationRequest{PartitionID: authPartitionID}
+	ctx := context.Background()
+
+	require.NoError(t, client.sendRequest(withRoleToken(ctx, 7), req, f.ucMine))
+	require.EqualValues(t, 1, net.sends.Load())
+	role.token.Store(9) // revoked and re-published: active again under another token
+	require.ErrorIs(t, client.sendRequest(withRoleToken(ctx, 7), req, f.ucMine), ErrFollower)
+	require.EqualValues(t, 1, net.sends.Load(), "the old request does not leave under the new role")
+	require.NoError(t, client.sendRequest(withRoleToken(ctx, 9), req, f.ucMine))
 }

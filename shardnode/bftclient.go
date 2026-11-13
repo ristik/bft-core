@@ -333,6 +333,9 @@ type outstandingRequest struct {
 	firstSent time.Time       // the first submission of this logical attempt: a re-send never changes it (lastSent does)
 	lastSent  time.Time
 	resent    int
+	// token is the role token the request was produced under (bound), so that a re-send is admitted only under that same role.
+	token uint64
+	bound bool
 }
 
 // deliveryAttempt identifies one certificate for retry purposes. Rounds are enough: a UCDuplicate
@@ -1504,7 +1507,9 @@ func (c *BFTClient) Submit(ctx context.Context, req *certification.BlockCertific
 	c.mu.Lock()
 	c.submittedSinceHandshake = true
 	now := time.Now()
-	c.outstanding = &outstandingRequest{req: req, on: deliveryAttempt{partitionRound: luc.GetRoundNumber(), rootRound: luc.GetRootRoundNumber()}, firstSent: now, lastSent: now}
+	token, bound := roleTokenOf(ctx)
+	c.outstanding = &outstandingRequest{req: req, on: deliveryAttempt{partitionRound: luc.GetRoundNumber(), rootRound: luc.GetRootRoundNumber()}, firstSent: now, lastSent: now,
+		token: token, bound: bound}
 	c.mu.Unlock()
 	return nil
 }
@@ -1522,7 +1527,12 @@ func (c *BFTClient) sendRequest(ctx context.Context, req *certification.BlockCer
 	if err != nil {
 		return fmt.Errorf("selecting root nodes for certification: %w", err)
 	}
-	if c.isFollower() { // the final check, immediately before the request leaves
+	// the final check, immediately before the request leaves: the role must still be the one the request was produced under
+	if token, bound := roleTokenOf(ctx); bound {
+		if !c.role.Load().admits(token) {
+			return ErrFollower
+		}
+	} else if c.isFollower() {
 		return ErrFollower
 	}
 	return c.net.Send(ctx, req, rootIDs...)
@@ -1643,6 +1653,9 @@ func (c *BFTClient) resubmitPending(ctx context.Context, held *types.UnicityCert
 	o.resent++
 	o.lastSent = time.Now()
 	req, attempt := o.req, o.resent
+	if o.bound {
+		ctx = withRoleToken(ctx, o.token) // a re-send stays bound to the role the request was produced under
+	}
 	c.mu.Unlock()
 
 	if err := c.sendRequest(ctx, req, held); err != nil {

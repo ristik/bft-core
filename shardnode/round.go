@@ -832,6 +832,10 @@ func (r *Round) HandleCertificate(ctx context.Context, uc *types.UnicityCertific
 	}
 	block, params, err := r.produceBlock(ctx, head, exp, sealHash, leader, uc, tr, readinessTicket)
 	if err != nil {
+		if errors.Is(err, ErrFollower) { // the role ended before one of the round's irreversible actions: an abstention, not a failure
+			r.health.updateVoting(false, nonVotingFollower)
+			return nil
+		}
 		if errors.Is(err, errReadinessRevoked) {
 			r.recordReadinessRevoked(ctx, err)
 			return nil
@@ -1100,6 +1104,7 @@ func (r *Round) send(ctx context.Context, req *certification.BlockCertificationR
 	if r.leaseLost() {
 		return ErrFollower
 	}
+	ctx = withRoleToken(ctx, r.leaseToken) // the client admits each send of these bytes only under this token
 	var err error
 	for attempt := 0; ; attempt++ {
 		if err = r.submitter.Submit(ctx, req); err == nil {
@@ -1485,6 +1490,9 @@ func (r *Round) buildFinal(ctx context.Context, params RoundParams, held *types.
 	if err := r.revalidateChildReadiness(ctx, ticket, held); err != nil {
 		return "", err
 	}
+	if r.leaseLost() { // after the slow preparation and the gate, immediately before the Engine call
+		return "", ErrFollower
+	}
 	return build(ctx)
 }
 
@@ -1737,6 +1745,9 @@ func (r *Round) produceBlock(ctx context.Context, head BlockRef, exp Expectation
 		if err != nil {
 			return Block{}, params, fmt.Errorf("build: %w", err)
 		}
+		if r.leaseLost() {
+			return Block{}, params, ErrFollower
+		}
 		block, err := r.executor.Seal(ctx, id)
 		r.metrics.recordBuildDuration(ctx, time.Since(buildStart))
 		if err != nil {
@@ -1749,6 +1760,9 @@ func (r *Round) produceBlock(ctx context.Context, head BlockRef, exp Expectation
 				r.metrics.recordRecoveryStop(ctx)
 				return Block{}, params, err
 			}
+			if r.leaseLost() {
+				return Block{}, params, ErrFollower
+			}
 			if err := r.journal.RetainCandidate(ctx, block, params, true); err != nil {
 				if errors.Is(err, ErrLeaderProposalConflict) {
 					return Block{}, params, err
@@ -1759,6 +1773,9 @@ func (r *Round) produceBlock(ctx context.Context, head BlockRef, exp Expectation
 			}
 		}
 		if r.disseminator != nil {
+			if r.leaseLost() {
+				return Block{}, params, ErrFollower
+			}
 			if err := r.disseminator.Publish(ctx, exp.Round, block); err != nil {
 				return Block{}, params, fmt.Errorf("publishing round %d block: %w", exp.Round, err)
 			}
