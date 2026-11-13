@@ -468,5 +468,54 @@ class JoinAndTimer(unittest.TestCase):
         self.assertIn('--funder /srv/tn-x/operator-secrets', run.call_args.args[0][-1])
 
 
+class RemoteRestore(unittest.TestCase):
+    """handoff_drive.restore_remote: before the readiness it returns once the pinned epoch is activated; after the Commit a restore from the left epoch's
+    pin is kept (no second wipe), anything else gets a full restore."""
+
+    def drive(self, status, caught_up=None):
+        d = hd.Drive.__new__(hd.Drive)
+        test = self
+        self.calls = []
+        states = iter(status) if isinstance(status, list) else None
+
+        class Remote:
+            info = {'shardCaughtUp': caught_up} if caught_up is not None else {}
+
+            def status(self):
+                return dict(next(states)) if states else dict(status)
+
+            def seed_archive(self):
+                test.calls.append('seed')
+
+            def restore_finish(self):
+                test.calls.append('finish')
+                return {'running': True}
+        d.remote, d.target, d.restore_pin = {5: Remote()}, 30, Path('/bin/true')
+        d.say = lambda text: None
+        d.expect = lambda ok, what, detail='': None if ok else (_ for _ in ()).throw(AssertionError(what))
+        d.ureth = lambda i, method: hex(1000)
+        d.wait = lambda what, probe, seconds: [probe() for _ in range(12)][-1] or (_ for _ in ()).throw(AssertionError(what))
+        d.start_remote_restore = lambda i: self.calls.append('restore')
+        return d
+
+    def test_before_the_readiness_it_returns_once_the_pinned_epoch_is_activated(self):
+        d = self.drive({'services': {'shard5': 'running'}, 'shardActivatedEpoch': 30, 'urethHead': 0, 'restoring': True})
+        d.restore_remote(5, follow=False)
+        self.assertEqual(self.calls, ['restore'], 'no replay is awaited before the readiness')
+
+    def test_after_the_commit_a_restore_from_the_left_epochs_pin_is_kept(self):
+        d = self.drive({'services': {'shard5': 'running'}, 'urethHead': 1000, 'restoring': True}, caught_up=29)
+        d.restore_remote(5)
+        self.assertEqual(self.calls, ['seed', 'finish'], 'no second wipe and restore: replay, seed, ordinary run')
+
+    def test_any_other_state_gets_the_full_restore(self):
+        d = self.drive({'services': {'shard5': 'running'}, 'urethHead': 1000, 'restoring': True}, caught_up=12)
+        d.restore_remote(5)
+        self.assertEqual(self.calls, ['restore', 'seed', 'finish'], 'a pin of another epoch is not kept')
+        d = self.drive({'services': {'shard5': 'running'}, 'urethHead': 1000, 'restoring': False}, caught_up=29)
+        d.restore_remote(5)
+        self.assertEqual(self.calls, [], 'a node already running at the head is left alone')
+
+
 if __name__ == '__main__':
     unittest.main()
