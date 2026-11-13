@@ -2,6 +2,7 @@ package q3active
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 
@@ -93,6 +94,17 @@ func (r *Runtime) StagedBundle(epoch uint64) (b Bundle, ok bool, err error) {
 		return b, err == nil, err
 	}
 	return Bundle{}, false, nil
+}
+
+// StagedBundleAt is StagedBundle by one indexed, cancellation-aware read of the epoch's stage (q3install.Journal.StagedEpoch): bounded
+// work whatever the history's length, and no journal lock held, so an untrusted reader cannot contend with activation or recovery.
+func (r *Runtime) StagedBundleAt(ctx context.Context, epoch uint64) (b Bundle, ok bool, err error) {
+	a, ok, err := r.journal.StagedEpoch(ctx, epoch)
+	if err != nil || !ok {
+		return Bundle{}, false, err
+	}
+	b, _, err = DecodeBundle(a.Bundle)
+	return b, err == nil, err
 }
 
 // BundleFor assembles the staged bundle of the activation a validator holds the evidence of (consensus.Q3ActivationEvidence): the link, the
