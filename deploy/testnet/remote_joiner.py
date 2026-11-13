@@ -301,10 +301,21 @@ class Laptop:
 
     def shard_activated_epoch(self):
         """The latest root epoch the shard node logged as activated ("handoff activated"): its verified history's tip, which the join's readiness needs at
-        the epoch being left. None while it logged none in its recent output."""
-        text = self.dc('logs', '--no-color', '--tail', '3000', f'shard{self.entity}', check=False)
-        found = re.findall(r'"message":"handoff activated","rootEpoch":(\d+)', text)
-        return int(found[-1]) if found else None
+        the epoch being left. A restore logs its activations at its start and then thousands of replay lines: the whole log of the running container is
+        scanned, and the last epoch found is kept per container start (the json-file log rotates)."""
+        cid = self.dc('ps', '-q', f'shard{self.entity}').strip()
+        if not cid:
+            return None
+        started = run(['docker', 'inspect', '--format', '{{.State.StartedAt}}', cid], check=False).stdout.strip()
+        logs = run(['docker', 'logs', '--since', started, cid], check=False) if started else None
+        found = re.findall(r'"message":"handoff activated","rootEpoch":(\d+)', (logs.stdout + logs.stderr) if logs else '')
+        cache = self.state.get('shardActivated') or {}
+        if found:
+            cache = {'started': started, 'epoch': int(found[-1])}
+            self.state['shardActivated'] = cache
+            self.save()
+            return cache['epoch']
+        return cache.get('epoch') if cache.get('started') == started else None
 
     def status(self):
         services = self.services_state()
