@@ -601,8 +601,8 @@ class Laptop:
         chain = json.loads(self.vol_read('network', 'genesis.json'))['config']['chainId']
         urls = ' '.join(f'http://ureth{i}:8545' for i in remote_entity.GENESIS_ENTITIES)
         quoted = ' '.join(shlex.quote(str(a)) for a in args)
-        script = (f'set -e; export ETH_PRIVATE_KEY="$(cat /wallet/{signer}.key)"; '
-                  f'raw=$(/tools/cast mktx --legacy --rpc-url http://ureth1:8545 --chain {chain} {custody} {shlex.quote(signature)} {quoted}); unset ETH_PRIVATE_KEY; '
+        script = (f'set -e; '   # cast mktx ignores ETH_PRIVATE_KEY: the key goes as an argument inside this one-shot container only
+                  f'raw=$(/tools/cast mktx --legacy --rpc-url http://ureth1:8545 --chain {chain} --private-key "$(cat /wallet/{signer}.key)" {custody} {shlex.quote(signature)} {quoted}); '
                   f'for u in {urls}; do /tools/cast publish --rpc-url $u "$raw" >/dev/null 2>&1 || true; done; '
                   f'h=$(/tools/cast keccak "$raw"); echo "tx $h"; /tools/cast receipt --rpc-url http://ureth1:8545 --confirmations 1 "$h" status blockNumber')
         done = self.one(self.node_image, ['-c', script], [f'{self.vol("wallet")}:/wallet:ro', f'{self.vol("tools")}:/tools:ro', f'{self.vol("network")}:/network:ro'],
