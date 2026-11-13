@@ -34,16 +34,24 @@ func batchFixture(t *testing.T, n int) ([]Request, []*Record) {
 	return qs, recs
 }
 
-// leftovers lists the store directory's temporary directories.
+// leftovers lists the temporary files and directories in the store directory and its fan-out directories.
 func leftovers(t *testing.T, s *Store) (out []string) {
 	t.Helper()
-	entries, err := os.ReadDir(s.dir)
-	if err != nil {
-		t.Fatal(err)
+	dirs := []string{s.dir}
+	if shards, err := os.ReadDir(filepath.Join(s.dir, recordDir)); err == nil {
+		for _, sh := range shards {
+			dirs = append(dirs, filepath.Join(s.dir, recordDir, sh.Name()))
+		}
 	}
-	for _, e := range entries {
-		if strings.HasPrefix(e.Name(), ".writing-") {
-			out = append(out, e.Name())
+	for _, d := range dirs {
+		entries, err := os.ReadDir(d)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, e := range entries {
+			if strings.HasPrefix(e.Name(), ".writing-") {
+				out = append(out, filepath.Join(d, e.Name()))
+			}
 		}
 	}
 	return out
@@ -85,15 +93,15 @@ func TestPutBatchStoresEveryRecordAsPutDoes(t *testing.T) {
 		if !bytes.Equal(a, b) {
 			t.Fatalf("record %d differs between PutBatch and Put", i)
 		}
-		// the on-disk form is the same too: same directory name, same manifest bytes
+		// the on-disk form is the same too: the same packed file under the same name
 		loc, _ := location(qs[i], recordV2(recs[i]))
-		ma, err := os.ReadFile(batched.dir + "/" + loc + "/manifest")
+		ma, err := os.ReadFile(batched.packedPath(loc))
 		if err != nil {
 			t.Fatal(err)
 		}
-		mb, err := os.ReadFile(single.dir + "/" + loc + "/manifest")
+		mb, err := os.ReadFile(single.packedPath(loc))
 		if err != nil || !bytes.Equal(ma, mb) {
-			t.Fatalf("record %d: manifests differ (%v)", i, err)
+			t.Fatalf("record %d: packed files differ (%v)", i, err)
 		}
 	}
 	if left := leftovers(t, batched); len(left) != 0 {
@@ -247,6 +255,8 @@ func (l *opLog) do(kind, storeDir, path string, real func() error) error {
 	}
 	if kind == "sync-dir" && path == storeDir {
 		kind = "sync-store"
+	} else if kind == "sync-dir" && path == filepath.Join(storeDir, recordDir) {
+		kind = "sync-records"
 	}
 	l.seen[kind]++
 	fail := l.failOn[kind] == l.seen[kind]
@@ -296,10 +306,20 @@ func (l *opLog) last(kind string) int {
 	return -1
 }
 
-// The durability rule of a put, observed: every file of every record is synced before any temporary directory is, every temporary
-// directory before any record is published by its rename, and the store directory after the last rename and before the put returns.
-// Each file, each directory and the store are synced exactly once; nothing is skipped.
-func TestPutBatchSyncsFilesThenDirectoriesThenPublishesThenSyncsTheStore(t *testing.T) {
+// fanouts is the number of distinct fan-out directories the records are published in.
+func fanouts(qs []Request, recs []*Record) int {
+	dirs := map[string]bool{}
+	for i := range qs {
+		loc, _ := location(qs[i], recordV2(recs[i]))
+		dirs[shardOf(loc)] = true
+	}
+	return len(dirs)
+}
+
+// The durability rule of a put, observed: the packed layout's directories are made and their parents synced once, on the first write;
+// every record's file is synced before any record is published by its rename, and every fan-out directory a record was published in is
+// synced after the last rename and before the put returns. Each file and each such directory is synced exactly once; nothing is skipped.
+func TestPutBatchSyncsFilesThenPublishesThenSyncsTheirDirectories(t *testing.T) {
 	const n = 4
 	qs, recs := batchFixture(t, n)
 	s, err := Open(t.TempDir())
@@ -311,52 +331,51 @@ func TestPutBatchSyncsFilesThenDirectoriesThenPublishesThenSyncsTheStore(t *test
 	if err := s.PutBatch(qs, recs); err != nil {
 		t.Fatal(err)
 	}
-	fields, _ := allFields(recs[0])
-	filesPerRecord := len(fields) + 1 // the chunks and the manifest
-	if got := log.count("sync-file"); got != n*filesPerRecord {
-		t.Fatalf("%d file syncs, want %d (every chunk and manifest of every record): %v", got, n*filesPerRecord, log.events)
+	dirs := fanouts(qs, recs)
+	if !slices.Equal(log.events[:2], []string{"sync-records", "sync-store"}) {
+		t.Fatalf("the first write makes the layout's directories durable first: %v", log.events)
 	}
-	if got := log.count("sync-dir"); got != n {
-		t.Fatalf("%d temporary-directory syncs, want %d", got, n)
+	if got := log.count("sync-file"); got != n {
+		t.Fatalf("%d file syncs, want %d (one packed file per record): %v", got, n, log.events)
 	}
 	if got := log.count("rename"); got != n {
 		t.Fatalf("%d renames, want %d", got, n)
 	}
-	if got := log.count("sync-store"); got != 1 {
-		t.Fatalf("%d store-directory syncs, want 1", got)
+	if got := log.count("sync-dir"); got != dirs {
+		t.Fatalf("%d fan-out directory syncs, want %d", got, dirs)
 	}
-	if log.last("sync-file") > log.first("sync-dir") {
-		t.Fatalf("a temporary directory was synced before every file was: %v", log.events)
+	if log.last("sync-file") > log.first("rename") {
+		t.Fatalf("a record was published before every file was synced: %v", log.events)
 	}
-	if log.last("sync-dir") > log.first("rename") {
-		t.Fatalf("a record was published before every temporary directory was synced: %v", log.events)
+	if log.last("rename") > log.first("sync-dir") {
+		t.Fatalf("a fan-out directory was synced before the last publication: %v", log.events)
 	}
-	if log.last("rename") > log.first("sync-store") {
-		t.Fatalf("the store directory was synced before the last publication: %v", log.events)
-	}
-	if log.events[len(log.events)-1] != "sync-store" || len(log.events) != n*filesPerRecord+2*n+1 {
-		t.Fatalf("the put did not end with the store directory's sync, or did something else: %v", log.events)
+	if log.events[len(log.events)-1] != "sync-dir" || len(log.events) != 2+2*n+dirs {
+		t.Fatalf("the put did not end with the directories' syncs, or did something else: %v", log.events)
 	}
 
-	// a single Put is the same sequence for one record
+	// a single Put on a store whose directories are made is the same sequence for one record
 	one := &opLog{}
 	q, r := fixture()
 	single, err := Open(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
+	if err := single.prepareRecordDirs(); err != nil {
+		t.Fatal(err)
+	}
 	one.install(single)
 	if err := single.Put(q, r); err != nil {
 		t.Fatal(err)
 	}
-	want := append(slices.Repeat([]string{"sync-file"}, filesPerRecord), "sync-dir", "rename", "sync-store")
-	if !slices.Equal(one.events, want) {
+	if want := []string{"sync-file", "rename", "sync-dir"}; !slices.Equal(one.events, want) {
 		t.Fatalf("Put: %v, want %v", one.events, want)
 	}
 }
 
-// A failed sync is never ignored. A file or temporary-directory sync that fails publishes nothing and the put returns the failure;
-// a failed store-directory sync is returned too (the records are renamed by then, and the caller is told they are not durable).
+// A failed sync is never ignored. A file sync, or a sync of the layout's directories, that fails publishes nothing and the put returns the
+// failure; a failed fan-out directory sync is returned too (the records are renamed by then, and the caller is told they are not durable),
+// and the next put syncs that directory again before it reports success.
 func TestPutBatchReturnsAFailedSyncAndPublishesNothingBeforeIt(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
@@ -364,11 +383,11 @@ func TestPutBatchReturnsAFailedSyncAndPublishesNothingBeforeIt(t *testing.T) {
 		occurrence int
 		published  int
 	}{
+		{"the records directory's sync", "sync-records", 1, 0},
+		{"the store directory's sync", "sync-store", 1, 0},
 		{"the first file sync", "sync-file", 1, 0},
-		{"a file sync of the last record", "sync-file", 4*11 - 1, 0},
-		{"the first temporary-directory sync", "sync-dir", 1, 0},
-		{"the last temporary-directory sync", "sync-dir", 4, 0},
-		{"the store-directory sync", "sync-store", 1, 4},
+		{"the last file sync", "sync-file", 4, 0},
+		{"a fan-out directory sync", "sync-dir", 1, 4},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			qs, recs := batchFixture(t, 4)
@@ -385,19 +404,23 @@ func TestPutBatchReturnsAFailedSyncAndPublishesNothingBeforeIt(t *testing.T) {
 			if got := log.count("rename"); got != tc.published {
 				t.Fatalf("%d records published, want %d: %v", got, tc.published, log.events)
 			}
-			if tc.published == 0 && log.count("sync-store") != 0 {
-				t.Fatalf("the store directory was synced although nothing was to be published: %v", log.events)
+			if tc.published == 0 && log.count("sync-dir") != 0 {
+				t.Fatalf("a fan-out directory was synced although nothing was published: %v", log.events)
 			}
 			if left := leftovers(t, s); len(left) != 0 {
-				t.Fatalf("temporary directories left: %v", left)
+				t.Fatalf("temporary files left: %v", left)
 			}
 			if indexed := indexedCount(s); indexed != 0 {
 				t.Fatalf("%d records indexed by a put that did not return nil", indexed)
 			}
-			// with the disk working again the same batch goes through
-			s.disk = nil
+			// with the disk working again the same batch goes through, and a directory whose sync failed is synced again
+			again := &opLog{}
+			again.install(s)
 			if err := s.PutBatch(qs, recs); err != nil {
 				t.Fatalf("putting the batch again: %v", err)
+			}
+			if tc.published != 0 && again.count("sync-dir") != fanouts(qs, recs) {
+				t.Fatalf("the directories of the published records are synced again: %v", again.events)
 			}
 		})
 	}
@@ -417,8 +440,8 @@ func TestPutBatchMakesAPartlyPublishedBatchDurableBeforeReturningTheError(t *tes
 	if err := s.PutBatch(qs, recs); !errors.Is(err, errInjected) {
 		t.Fatalf("the failed rename was not returned: %v", err)
 	}
-	if log.count("rename") != 2 || log.count("sync-store") != 1 || log.last("rename") > log.first("sync-store") {
-		t.Fatalf("two records published, then the store directory synced, is what must have happened: %v", log.events)
+	if log.count("rename") != 2 || log.count("sync-dir") != fanouts(qs[:2], recs[:2]) || log.last("rename") > log.first("sync-dir") {
+		t.Fatalf("two records published, then their directories synced, is what must have happened: %v", log.events)
 	}
 	if indexed := indexedCount(s); indexed != 2 {
 		t.Fatalf("%d records indexed, want the 2 that were published", indexed)
@@ -483,20 +506,22 @@ func TestGetDoesNotWaitForAPutsFileSyncs(t *testing.T) {
 	}
 }
 
-// The publication still happens under the lock: between a record's rename and the store directory's sync no reader sees it, so
+// The publication still happens under the lock: between a record's rename and its directory's sync no reader sees it, so
 // nothing is read back that a crash could still lose.
-func TestARecordIsNotReadableBeforeTheStoreDirectoryIsSynced(t *testing.T) {
+func TestARecordIsNotReadableBeforeItsDirectoryIsSynced(t *testing.T) {
 	q, r := fixture()
 	s, err := Open(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
+	loc, _ := location(q, recordV2(r))
+	fanout := filepath.Dir(s.packedPath(loc))
 	renamed, release := make(chan struct{}), make(chan struct{})
 	s.disk = &diskOps{
 		syncFile: (*os.File).Sync,
 		syncDir: func(dir string) error {
-			if dir == s.dir {
-				close(renamed) // the store directory is synced after the rename: the record is in place, not yet durable
+			if dir == fanout {
+				close(renamed) // its directory is synced after the rename: the record is in place, not yet durable
 				<-release
 			}
 			return syncDir(dir)
@@ -544,8 +569,8 @@ func TestConcurrentPutsOfOneRecord(t *testing.T) {
 		both := make(chan struct{})
 		s.disk.syncFile = func(f *os.File) error {
 			mu.Lock()
-			if dir := filepath.Dir(f.Name()); !stagedDirs[dir] {
-				stagedDirs[dir] = true
+			if name := f.Name(); !stagedDirs[name] {
+				stagedDirs[name] = true
 				if len(stagedDirs) == 2 {
 					close(both)
 				}

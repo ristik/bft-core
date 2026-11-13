@@ -422,11 +422,10 @@ func TestSelectedRepresentationMissingAfterReopenStaysUnavailable(t *testing.T) 
 	h.finalized = 2 // keep block 2 hot: the frontier stops at the finality bound and block 2 is not pruned yet
 	h.reopenSender(t, localDir)
 	// lose A's object (the base object B stays)
-	enc, err := archive.EncodeRequest(h.qBlock)
+	paths, err := archive.RecordPaths(localDir, h.qBlock, &h.digestA)
 	require.NoError(t, err)
-	sum := sha256.Sum256(enc)
-	for _, name := range []string{"v2-" + hex.EncodeToString(sum[:]) + "-" + hex.EncodeToString(h.digestA[:])} {
-		require.NoError(t, os.RemoveAll(filepath.Join(localDir, name)))
+	for _, p := range paths {
+		require.NoError(t, os.RemoveAll(p))
 	}
 	_, err = h.local.GetExact(h.qBlock, h.digestA)
 	require.Error(t, err)
