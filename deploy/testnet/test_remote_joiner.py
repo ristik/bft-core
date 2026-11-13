@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import socket
+import subprocess
 import tempfile
 import threading
 import unittest
@@ -190,7 +191,10 @@ class Registry(unittest.TestCase):
             self.assertEqual(os.stat(gen / 'handoff' / 'remote-joiners' / '5.json').st_mode & 0o777, 0o600)
             loaded = re_.load(gen)
             self.assertEqual(list(loaded), [5], 'the node-info file beside it is not an entity')
-            self.assertEqual((loaded[5].root_node_id, loaded[5].state, loaded[5].client.sock), ('R5', 'registered', '/s/agent.sock'))
+            self.assertEqual((loaded[5].root_node_id, loaded[5].state, loaded[5].client.sock), ('R5', 'follower', '/s/agent.sock'),
+                             'a registered laptop is a follower until its join starts')
+            import handoff_auto
+            self.assertNotIn('follower', handoff_auto.JOINING, 'the unattended timer keeps driving while the laptop only follows')
             with self.assertRaises(ValueError):
                 re_.register(gen, 5, '/s', dict(public, rootNodeId='OTHER', nodeInfo={'nodeId': 'OTHER'}))
             with self.assertRaises(ValueError):
@@ -461,6 +465,8 @@ class SourceCheck(unittest.TestCase):
             digest = self.deployed(d)
             self.assertIsNone(re_.source_check(d, digest, False))
             self.assertEqual(re_.tree_digest(d), digest, 'SOURCE.json itself is not part of the digest')
+            (Path(d) / '._a.py').write_bytes(b'appledouble')
+            self.assertEqual(re_.tree_digest(d), digest, 'macOS tar\'s AppleDouble ._*.py files are not part of the digest')
 
     def test_dirty_edited_mismatched_or_unrecorded_copies_are_refused_unless_allowed(self):
         with tempfile.TemporaryDirectory() as d:
@@ -529,6 +535,94 @@ class JoinAndTimer(unittest.TestCase):
                 unittest.mock.patch.object(rj.subprocess, 'run', return_value=unittest.mock.Mock(returncode=0)) as run, unittest.mock.patch.object(rj, 'say'):
             rj.join(lap, funder='/srv/tn-x/operator-secrets')
         self.assertIn('--funder /srv/tn-x/operator-secrets', run.call_args.args[0][-1])
+
+
+class LinuxHostAndSubnet(unittest.TestCase):
+    """#1043: on a Linux docker host the tunnel's -L listeners bind the --mac-host bridge gateway (a container cannot reach the host's loopback); the
+    laptop's validators subnet follows the project name (two generations' joiner projects side by side)."""
+
+    def test_the_listeners_bind_an_ip_mac_host_else_loopback(self):
+        self.assertEqual(rj.forward_bind('172.17.0.1'), '172.17.0.1')
+        self.assertEqual(rj.forward_bind('host.docker.internal'), '127.0.0.1')
+        cmd = rj.tunnel_command('h', 5, '/s', '172.17.0.1')
+        listeners = [cmd[k + 1] for k, a in enumerate(cmd) if a == '-L']
+        self.assertTrue(listeners and all(x.startswith('172.17.0.1:') for x in listeners))
+        remote = [cmd[k + 1] for k, a in enumerate(cmd) if a == '-R']
+        self.assertTrue(all(':127.0.0.1:' in x for x in remote), 'the -R targets stay the laptop\'s loopback')
+
+    def test_the_subnet_is_per_project_and_never_a_host_network(self):
+        a, b = rj.subnet('tn-a-joiner5'), rj.subnet('tn-b-joiner5')
+        self.assertEqual(a, rj.subnet('tn-a-joiner5'))
+        self.assertNotEqual(a, b)
+        for net in (a, b):
+            self.assertRegex(net, r'^10\.231\.\d+\.0/24$')
+
+
+class ColdRestore(unittest.TestCase):
+    """handoff_drive.restore_remote is only the explicit --cold-restore: a restore found running is never kept, it starts over (empties and pins)."""
+
+    def test_a_running_restore_is_not_kept(self):
+        d = hd.Drive.__new__(hd.Drive)
+
+        class Started(Exception):
+            pass
+
+        class Remote:
+            info = {'shardCaughtUp': 29}
+
+            def status(self):
+                return {'services': {'shard5': 'running'}, 'urethHead': 998, 'restoring': True}
+        d.remote, d.target, d.restore_pin = {5: Remote()}, 30, Path('/bin/true')
+        d.say = lambda text: None
+        d.expect = lambda ok, what, detail='': None if ok else (_ for _ in ()).throw(AssertionError(what))
+        d.ureth = lambda i, method: hex(1000)
+
+        def restore_body_ids():
+            raise Started()
+        d.restore_body_ids = restore_body_ids
+        for follow in (True, False):
+            with self.assertRaises(Started, msg=f'follow={follow}: the full cold restore, whatever restore runs already'):
+                d.restore_remote(5, follow=follow)
+
+
+class FollowerCatchUp(unittest.TestCase):
+    """remote_entity.py catch-up brings a follower's shard node to the current epoch and leaves its root to the join drive (installed after q3-candidate)."""
+
+    def test_the_root_is_left_to_the_join_drive(self):
+        calls = []
+        d = hd.Drive.__new__(hd.Drive)
+        d.target, d.cold_restore, d.say = 4, False, lambda text: None
+        d.follower_epoch = lambda i: 1
+
+        class Remote:
+            info = {}
+
+            def install_root(self, target):
+                calls.append(('install', target))
+
+            def save(self):
+                pass
+        d.remote = {5: Remote()}
+        d.follow_joiner = lambda i, epoch, promoted: calls.append(('follow', i, epoch, promoted))
+        d.catch_up_remote(5, root=False)
+        self.assertEqual(calls, [('follow', 5, 3, False)], 'no install restart of the follower root; no log-scraped shortcut')
+
+
+class JoinExclusion(unittest.TestCase):
+    """astra #1029 finding 2: a joiner whose authority may run at the successor scope blocks every result that leaves it out."""
+
+    def test_preparing_and_prepared_are_pending(self):
+        d = hd.Drive.__new__(hd.Drive)
+
+        class R:
+            def __init__(self, state):
+                self.state = state
+        d.remote = {5: R('preparing'), 6: R('prepared'), 7: R('bonded'), 8: R('member'), 9: R('follower')}
+        self.assertEqual(d.pending_remote(), {5, 6})
+        import handoff_auto
+        self.assertIn('preparing', handoff_auto.JOINING, 'the timer stands down too')
+        self.assertIn('preparing', re_.STATES)
+
 
 
 if __name__ == '__main__':

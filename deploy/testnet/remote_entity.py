@@ -55,7 +55,7 @@ PORTS = {
     'agent': 28700,         # Mac 127.0.0.1:28700 (remote_joiner.py agent)               <-ssh -R- <sock-dir>/agent.sock
 }
 GENESIS_ENTITIES = (1, 2, 3, 4)
-STATES = ('registered', 'bonded', 'prepared', 'member', 'retiring')
+STATES = ('follower', 'registered', 'bonded', 'preparing', 'prepared', 'member', 'retiring', 'retired')   # preparing: written under drive.lock BEFORE the authority starts at the successor scope   # follower: known to the host, keeping up, not joining (the timer does not stand down)
 BOND_UNIT = 100 * 10 ** 18
 GAS = 2 * 10 ** 18
 NAME = re.compile(r'^handoff/[A-Za-z0-9][A-Za-z0-9._-]*$')
@@ -69,7 +69,7 @@ def tree_digest(directory):
     """SHA-256 over the sorted (name, SHA-256 of content) of the *.py files of `directory`: the code the host runs as root, as copied from the laptop."""
     import hashlib
     h = hashlib.sha256()
-    for path in sorted(Path(directory).glob('*.py')):
+    for path in sorted(p for p in Path(directory).glob('*.py') if not p.name.startswith('.')):   # not macOS tar's AppleDouble ._*.py
         h.update(path.name.encode() + b'\0' + hashlib.sha256(path.read_bytes()).hexdigest().encode() + b'\n')
     return h.hexdigest()
 
@@ -104,12 +104,13 @@ def relay_forwards(entity, genesis=GENESIS_ENTITIES):
     return out
 
 
-def ssh_forwards(entity, sock_dir, genesis=GENESIS_ENTITIES):
-    """The -L and -R arguments of the laptop's one `ssh -N` (ports in PORTS)."""
+def ssh_forwards(entity, sock_dir, genesis=GENESIS_ENTITIES, bind='127.0.0.1'):
+    """The -L and -R arguments of the laptop's one `ssh -N` (ports in PORTS). The -L listeners bind `bind`: loopback on a Mac (colima reaches it as
+    host.docker.internal), the docker bridge gateway on a Linux docker host (a container cannot reach the host's loopback)."""
     out = []
     for i in genesis:
-        out += ['-L', f'127.0.0.1:{PORTS["root_local"] + i}:{sock_dir}/root{i}.sock', '-L', f'127.0.0.1:{PORTS["shard_local"] + i}:{sock_dir}/shard{i}.sock',
-                '-L', f'127.0.0.1:{PORTS["ureth_local"] + i}:{sock_dir}/ureth{i}.sock']
+        out += ['-L', f'{bind}:{PORTS["root_local"] + i}:{sock_dir}/root{i}.sock', '-L', f'{bind}:{PORTS["shard_local"] + i}:{sock_dir}/shard{i}.sock',
+                '-L', f'{bind}:{PORTS["ureth_local"] + i}:{sock_dir}/ureth{i}.sock']
     out += ['-R', f'{sock_dir}/root{entity}.sock:127.0.0.1:{PORTS["root_remote"]}', '-R', f'{sock_dir}/shard{entity}.sock:127.0.0.1:{PORTS["shard_remote"]}',
             '-R', f'{sock_dir}/agent.sock:127.0.0.1:{PORTS["agent"]}']
     return out
@@ -267,6 +268,9 @@ class RemoteEntity:
     def restore_finish(self):
         return self.client.op('restore-finish', timeout=300)
 
+    def custody_tx(self, signature, *args):
+        return self.client.op('custody-tx', timeout=300, signature=signature, args=[str(a) for a in args])
+
     def start_authority(self, root_epoch, shard_epoch):
         return self.client.op('start-authority', timeout=180, root_epoch=int(root_epoch), shard_epoch=int(shard_epoch))
 
@@ -338,7 +342,7 @@ def register(generation, entity, sock_dir, public):
         raise ValueError(f'entity {entity} is registered with root {old.get("rootNodeId")}: another laptop identity (move {path} aside to start over)')
     info = {**old, 'entity': entity, 'rootNodeId': public['rootNodeId'], 'evmNodeId': public['evmNodeId'], 'accounts': public['accounts'],
             'token': public['token'], 'agentSocket': str(Path(sock_dir) / 'agent.sock'), 'sockDir': str(sock_dir)}
-    info.setdefault('state', 'registered')
+    info.setdefault('state', 'follower')   # `join` makes it 'registered' when the join starts; until then the unattended handoffs go on
     save_info(generation, info)
     return {k: v for k, v in info.items() if k != 'token'}
 
@@ -395,6 +399,7 @@ def say(text):
 BUSY = 5             # handoff_drive.py's exit when another drive holds handoff/drive.lock (a timer pass, handoff_auto.py, or an operator)
 BUSY_WAIT = 600      # how long a join waits for that drive to finish before it gives up (a drive takes ~2 min)
 BUSY_POLL = 10
+ARCHIVE_WAIT = 3600
 
 
 class Join:
@@ -449,20 +454,29 @@ class Join:
         if r.state == 'member':
             say('already a member: nothing to do')
             return 0
-        if st.get('follower') is not True and r.state in ('registered', 'bonded'):
+        if r.state == 'preparing':
+            raise RuntimeError('a prepare was interrupted (state preparing): the authority may already run at the successor scope and the admit may or may not have '
+                               'landed. Not resumed automatically: check isIndexed and the authority, then set the state by hand (prepared or bonded)')
+        if r.state == 'follower':
+            if self.dry:
+                say('[dry-run] would start the join: state follower -> registered (the unattended timer stands down from here)')
+            else:
+                self.save(state='registered')
+                say('the join starts: state follower -> registered (the unattended timer stands down until the join ends)')
+        if st.get('follower') is not True and r.state in ('follower', 'registered', 'bonded'):
             raise RuntimeError('the laptop root does not report itself a follower: remote_joiner.py up, and check the tunnel')
         owner = r.info['accounts']['owner']
         # 1. funding: the bond unit and the gas of three transactions, from the operator account (--funder) or else the faucet account; the key stays on the host
-        need = BOND_UNIT + GAS if r.state in ('registered',) else GAS // 2
+        need = BOND_UNIT + GAS if r.state in ('follower', 'registered') else GAS // 2
         have = d.balance(owner)
         say(f'owner {owner}: {have / 1e18:.4f} UCT')
-        if have < need and r.state in ('registered', 'bonded'):
+        if have < need and r.state in ('follower', 'registered', 'bonded'):
             if self.dry:
                 say(f'[dry-run] would fund {owner} with {(need - have) / 1e18:.4f} UCT from the {"operator account " + str(self.funder) if self.funder else "faucet account"}')
             else:
                 d.fund(owner, need - have)
         # 2. register and bond, signed on the laptop (any time: an identity without a delegation is not eligible)
-        if r.state == 'registered':
+        if r.state in ('follower', 'registered'):
             ident = r.info.get('stakingId')
             if not ident:
                 if self.dry:
@@ -509,7 +523,21 @@ class Join:
                 if self.dry:
                     say('[dry-run] would prepare now: trust base, the authority at its scope, admitDelegation')
                     return 0
-                self.prepare(ident)
+                lock = self.locked('prepare')
+                try:
+                    # re-checked under the lock: no drive runs now, and none can start before 'preparing' is on record
+                    if self.fresh_state() != 'bonded':
+                        raise RuntimeError(f'entity {self.entity} became {r.state} meanwhile: another join workflow? (one at a time)')
+                    if d.open_result():
+                        say('a result opened meanwhile: back to the quiet point')
+                        continue
+                    rounds, seconds = self.due()
+                    if rounds < 160 or seconds < 90:
+                        continue
+                    self.save(state='preparing')
+                    self.prepare(ident)
+                finally:
+                    lock.close()
                 break
         # a drive of the join that stopped after its Prepare (the journal's unfinished drive) is resumed, whatever result is open now
         unfinished = self.hd.Journal(self.gen / 'handoff' / 'log.jsonl').last_drive()
@@ -522,25 +550,178 @@ class Join:
             say(f'DONE: entity {self.entity} (the laptop) is a member')
             return 0
         # 4. the election's next result must name the joiner; then the drive, with this transport
-        result = d.wait('the election reserves a result', lambda: d.open_result(), 1200)
+        rounds, seconds = self.due()   # the cadence may be long (3600 rounds / 1800 s): wait for the due point, with a margin
+        result = d.wait('the election reserves a result', lambda: d.open_result(), max(1200, seconds + 600))
         members = self.members_of(result)
         say(f'result {result} elects {members}')
         if ident not in members:
             raise RuntimeError(f'the result leaves the joiner (custody id {ident}) out: not driven (the drive refuses it while the joiner is prepared). '
                                'Look at the election\'s reason (lastAttemptResult) before anything else')
-        # the joiner's root and shard node brought to the current epoch (handoff_drive.catch_up_remote; the drive repeats it as a no-op): on a network past its
-        # first handoff this is the slow part (the shard node's restore fetches every archive record through the tunnel), so it can be run ahead of an audience
-        d.target, d.new, d.joiners = int(r.info['preparedFor']), sorted(set(certifying_entities(d)) | {self.entity}), {self.entity}
-        d.catch_up_remote(self.entity)
-        if self.stop_after == 'caught-up':
-            say(f'stopping after the catch-up (--stop-after caught-up): result {result} names the joiner and has to be driven within its window; `join` drives it')
-            return 0
+        # no catch-up here: the drive makes it after q3-candidate and the host entities' readiness (a follower is served root records and archive records
+        # only once a staged candidate names it, root_node.go:1010-1013, shard_node_run.go:948)
         rc = self.drive(result, '--require-member', str(self.entity))
         if rc != 0:
             raise RuntimeError(f'handoff_drive stopped (exit {rc}): rerun the same command (the drive resumes from handoff/log.jsonl)')
         self.save(state='member', memberSince=time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()))
         say(f'DONE: entity {self.entity} (the laptop) is a member')
         return 0
+
+    def retire(self):
+        """The laptop entity leaves: its owner (on the laptop) requests the retirement, the next result that elects the committee without it is driven
+        (--allow-unrehearsed-retirement; a result still naming it, reserved before the request, is driven as a no-change first), then its validator
+        services stop cleanly (volumes and keys kept: the withdrawal key claims the bond once mature). The timer stands down while 'retiring'."""
+        d, r = self.d, self.r
+        ident = int(r.info['stakingId'])
+        if r.state == 'member':
+            out = r.custody_tx('requestRetirement(uint64)', ident)
+            say(f'requestRetirement({ident}) by the owner {out.get("address")}: {out.get("out", "")[-200:]}')
+            self.save(state='retiring', retirementRequestedAt=time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()))
+        elif r.state not in ('retiring', 'retired'):
+            raise RuntimeError(f'entity {self.entity} is {r.state}, not a member, retiring or retired')
+        started = time.monotonic()
+        while r.state != 'retired':
+            unfinished = self.hd.Journal(self.gen / 'handoff' / 'log.jsonl').last_drive()
+            result = unfinished[0] if unfinished else d.wait('the election reserves a result', lambda: d.open_result(), 1200)
+            members = self.members_of(result)
+            say(f'result {result} elects {members}' + (' (an unfinished drive, resumed)' if unfinished else ''))
+            if ident in members:
+                say('it still names the retiring laptop (reserved before the request): driven as a no-change, the next one excludes it')
+                rc = self.drive(None if unfinished else result)
+                if rc != 0:
+                    raise RuntimeError(f'the drive stopped (exit {rc}): rerun the same command')
+                continue
+            rc = self.drive(None if unfinished else result, '--allow-unrehearsed-retirement')
+            if rc != 0:
+                raise RuntimeError(f'the retirement drive stopped (exit {rc}): rerun the same command (it resumes)')
+            break
+        if r.state != 'retired':
+            self.save(state='retired', retiredAt=time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()))
+        say(f'entity {self.entity} left the committee in {time.monotonic() - started:.0f} s')
+        self.wait_archive_migration()
+        say('stopping its validator services (keys and volumes kept)')
+        say(f'  {r.client.op("stop-validator", timeout=300)}')
+        say('next: custody.mature([lot]) once the holds pass (holdRetirement 2000 rounds, timeFloor 3600 s, evidence holds), then claim(amount, to) by the '
+            'withdrawal key: `remote_entity.py claim` (not run automatically)')
+        return 0
+
+    def archive_policies(self):
+        """Every host writer's archivePolicy section (`ubft shard-node status` inside its shard container; bft-core#1034)."""
+        out = {}
+        for i in GENESIS_ENTITIES:
+            p = docker('exec', f'{self.gen.name}-shard{i}-1', 'ubft', 'shard-node', 'status', '--url', 'http://127.0.0.1:9101', '--timeout', '30s', check=False)
+            try:
+                out[i] = json.loads(p.stdout).get('archivePolicy')
+            except ValueError:
+                out[i] = {'error': (p.stderr or p.stdout).strip()[-200:]}
+        return out
+
+    def wait_archive_migration(self, seconds=ARCHIVE_WAIT):
+        """Before the retired validator stops: every remaining writer must report migrationComplete and no retained holder naming it
+        (docs/operations/m2-runbook.md, bft-core#1034). Until then the retired shard still holds copies the network depends on."""
+        evm = self.r.evm_node_id
+        started = time.monotonic()
+        last = None
+        while True:
+            pol = self.archive_policies()
+            view = {i: (p or {}).get('error') or (f"v{p.get('version')} e{p.get('shardEpoch')} retained={len(p.get('retained') or [])}"
+                                                   f"{'(names it)' if evm in (p.get('retained') or []) else ''} backlog={p.get('migrationBacklog')} "
+                                                   f"complete={p.get('migrationComplete')}" if p else 'no archivePolicy') for i, p in pol.items()}
+            if view != last:
+                say(f'archive policy after {time.monotonic() - started:.0f} s: {json.dumps(view)}')
+                last = view
+            done = all(p and not p.get('error') and p.get('migrationComplete') and evm not in (p.get('retained') or []) for p in pol.values())
+            if done:
+                say(f'archive migration complete on every host writer in {time.monotonic() - started:.0f} s: {json.dumps(pol)}')
+                return
+            if time.monotonic() - started > seconds:
+                raise RuntimeError(f'the archive migration is not complete after {seconds} s: the retired validator is NOT stopped; rerun retire later')
+            time.sleep(10)
+
+    def claim(self):
+        """After the retirement: custody.mature(lots) once its gates pass (signed by the laptop's owner key), then claim(credit, withdrawal) by the
+        laptop's withdrawal key (its gas topped up from the operator account). Prints the gates and refuses (exit 3) while they are not met."""
+        d, r = self.d, self.r
+        if r.state != 'retired':
+            raise RuntimeError(f'entity {self.entity} is {r.state}: claim only after the retirement')
+        ident = int(r.info['stakingId'])
+        lots = [int(x) for x in self.custody_lots(ident)]
+        withdrawal = r.info['accounts']['withdrawal']
+        p, t = d.progress(), d.view(d.REGISTRY, 'ucTime()(uint64)')[0]
+        lot_sig = 'lots(uint256)(uint64,uint64,uint128,uint128,uint128,uint8,uint16,uint32,uint64,uint64,uint64,uint64,uint64)'
+        pending = []
+        for lot in lots:
+            f = [int(x.split()[0]) for x in d.view_text(d.custody, lot_sig, str(lot)).splitlines()]
+            imported, p_ret, t_ret = [int(x.split()[0]) if x.split()[0].isdigit() else x.split()[0] == 'true'
+                                      for x in d.view_text(d.custody, 'retirements(uint64,uint64)(bool,uint64,uint64)', str(f[0]), str(f[1])).splitlines()]
+            if f[5] == 4:   # CAT_RELEASED: matured already
+                continue
+            round_gate, time_gate = max(p_ret + f[8], f[10]) + 1, max(t_ret + f[9], f[12])
+            say(f'lot {lot}: refCount {f[7]}, retirement imported {imported}, rounds {p} / {round_gate}, evidence {p} / {f[11] + 1}, time {t} / {time_gate} '
+                f'(~{max(0, time_gate - t) / 60:.0f} min)')
+            if not imported or f[7] or p < max(round_gate, f[11] + 1) or t < time_gate:
+                pending.append(lot)
+        if pending:
+            say(f'not yet: lots {pending} are held')
+            return 3
+        matured = [lot for lot in lots]
+        credit = d.view(d.custody, 'credit(address)(uint256)', withdrawal)[0]
+        if credit == 0 and matured:
+            out = r.custody_tx('mature(uint256[])', '[' + ','.join(map(str, matured)) + ']')
+            say(f'mature({matured}) by the owner: {out.get("out", "")[-160:]}')
+            credit = d.view(d.custody, 'credit(address)(uint256)', withdrawal)[0]
+        say(f'credit of the withdrawal address {withdrawal}: {credit / 1e18:.4f} UCT')
+        if credit:
+            if d.balance(withdrawal) < 10 ** 16:
+                d.fund(withdrawal, 5 * 10 ** 16)   # its gas, from the operator account (--funder)
+            out = r.custody_tx('claim(uint256,address)', credit, withdrawal)
+            say(f'claim({credit / 1e18:.4f} UCT -> {withdrawal}) by the withdrawal key: {out.get("out", "")[-160:]}')
+            say(f'balance of {withdrawal}: {d.balance(withdrawal) / 1e18:.4f} UCT; credit left {d.view(d.custody, "credit(address)(uint256)", withdrawal)[0]}')
+        self.save(claimedAt=time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()))
+        return 0
+
+    def catch_up(self):
+        """Bring the laptop entity to the CURRENT epoch without joining (it stays a follower, nothing is registered on chain): its root install-restarted to
+        the epoch, its shard node restored at it (archive seeded from a host survivor first). A later join then only replays the blocks since."""
+        d = self.d
+        lock = self.locked('catch-up')
+        try:
+            if self.fresh_state() not in ('follower', 'prepared'):
+                raise RuntimeError(f'entity {self.entity} is {self.r.state}: a catch-up runs only for a follower or a prepared joiner')
+            return self._catch_up()
+        finally:
+            lock.close()
+
+    def _catch_up(self):
+        d = self.d
+        epochs = {i: d.root_info(i).get('epoch') for i in certifying_entities(d)}
+        if len(set(epochs.values())) != 1:
+            raise RuntimeError(f'the committee\'s roots are at different epochs {epochs}: a handoff is running, try again in a few minutes')
+        current = next(iter(epochs.values()))
+        d.target, d.new, d.joiners = current + 1, sorted(set(certifying_entities(d)) | {self.entity}), {self.entity}
+        started = time.monotonic()
+        d.catch_up_remote(self.entity, root=False)
+        st = self.r.status()
+        say(f'caught up to epoch {current} in {time.monotonic() - started:.0f} s: root activeEpoch {st.get("activeEpoch")}, execution client {st.get("urethHead")}, '
+            f'chain {int(d.ureth(1, "eth_blockNumber"), 16)}, shard health {st.get("shardHealth")}')
+        return 0
+
+    def locked(self, what):
+        """The generation's handoff/drive.lock (handoff_drive.hold_lock, the lock every drive holds), waited for up to busy_wait: a join's prepare and a
+        catch-up exclude every handoff while they run (astra's review of #1029, finding 2)."""
+        deadline = time.monotonic() + self.busy_wait
+        while True:
+            handle = self.hd.hold_lock(self.gen)
+            if handle:
+                return handle
+            if time.monotonic() > deadline:
+                raise RuntimeError(f'{what}: another drive holds handoff/drive.lock for over {self.busy_wait} s')
+            say(f'{what}: a drive holds handoff/drive.lock; waiting')
+            time.sleep(10)
+
+    def fresh_state(self):
+        """This entity's state as the file says now (another process, a drive, may have changed it)."""
+        self.r.info = json.loads((info_dir(self.gen) / f'{self.entity}.json').read_text())
+        return self.r.state
 
     def prepare(self, ident):
         """The trust base of E+1 over the current committee and the joiner (signed by every member, the joiner on the laptop), the joiner's authority started at
@@ -607,7 +788,7 @@ def retire_plan(generation, entity):
 def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest='action', required=True)
-    for name in ('relay-up', 'relay-status', 'register', 'status', 'join', 'retire-plan', 'archive-tar'):
+    for name in ('relay-up', 'relay-status', 'register', 'status', 'join', 'catch-up', 'retire', 'claim', 'retire-plan', 'archive-tar'):
         s = sub.add_parser(name)
         s.add_argument('generation', type=Path)
         if name not in ('relay-status', 'archive-tar'):
@@ -619,7 +800,7 @@ def main(argv=None):
         if name == 'relay-up':
             s.add_argument('--script', type=Path, default=Path(__file__).resolve().parent / 'tunnel_relay.py')
             s.add_argument('--uid', type=int, default=int(os.environ.get('SUDO_UID', os.getuid())))
-        if name == 'join':
+        if name in ('join', 'catch-up', 'retire', 'claim'):
             s.add_argument('--ubft', type=Path, required=True)
             s.add_argument('--restore-pin', type=Path, required=True)
             s.add_argument('--cast', default='cast')
@@ -629,8 +810,7 @@ def main(argv=None):
             s.add_argument('--dry-run', action='store_true')
             s.add_argument('--source-digest', help='the laptop checkout\'s tree_digest (remote_joiner.py join passes it): refused when the deployed copy differs')
             s.add_argument('--allow-dirty', action='store_true', help='run a copy that is not the recorded, clean, committed one')
-            s.add_argument('--stop-after', choices=('bonded', 'caught-up'), help='bonded: fund, register and bond only; caught-up: also prepare, wait for the result '
-                           'naming the joiner and bring its root and shard node to the current epoch (ahead of an audience; the drive is the rest)')
+            s.add_argument('--stop-after', choices=('bonded',), help='bonded: fund, register and bond only (ahead of an audience; the rest is the timed part)')
     a = p.parse_args(argv)
     if a.action == 'relay-up':
         print(json.dumps(relay_up(a.generation, a.entity, a.sock_dir, a.script, a.uid), indent=1))
@@ -647,7 +827,7 @@ def main(argv=None):
         archive_tar(a.generation, a.source)
     elif a.action == 'retire-plan':
         print('\n'.join(retire_plan(a.generation, a.entity)))
-    elif a.action == 'join':
+    elif a.action in ('join', 'catch-up', 'retire', 'claim'):
         if os.geteuid() != 0:
             p.error('run as root (the generation directory is uid 10001, mode 0700)')
         here = Path(__file__).resolve().parent
@@ -659,7 +839,8 @@ def main(argv=None):
             say(f'REFUSED: {refusal}')
             return 3
         try:
-            return Join(a.generation, a.entity, a.ubft, a.restore_pin, a.cast, a.dry_run, stop_after=a.stop_after, funder=a.funder, busy_wait=a.busy_wait).run()
+            j = Join(a.generation, a.entity, a.ubft, a.restore_pin, a.cast, a.dry_run, stop_after=a.stop_after, funder=a.funder, busy_wait=a.busy_wait)
+            return {'catch-up': j.catch_up, 'retire': j.retire, 'claim': j.claim}.get(a.action, j.run)()
         except Exception as error:
             say(f'STOPPED: {error}')
             return 1

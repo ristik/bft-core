@@ -39,8 +39,8 @@ account instead of the faucet account, whose nonces belong to the public faucet'
 """
 import argparse
 import datetime
-import fcntl
 import hashlib
+import fcntl
 import json
 import os
 from pathlib import Path
@@ -291,7 +291,7 @@ class Drive(rehearse.Rehearsal):
 
     def pending_remote(self):
         """Remote entities prepared for a join (their delegation admitted, their authority at the successor scope) but not yet members."""
-        return {i for i, r in self.remote.items() if r.state == 'prepared'}
+        return {i for i, r in self.remote.items() if r.state in ('preparing', 'prepared')}   # preparing: its authority may already run at the successor scope
 
     def root_info(self, i):
         status, body = self.transport.post(i, '/api/v1/q3/signers', b'{}')
@@ -473,7 +473,9 @@ class Drive(rehearse.Rehearsal):
         self.exec_in('root1', 'ubft', 'root', 'handoff', 'evm-context', '--root-rpc', self.root_rpc, '--out', '/tmp/context.json')
         context = work / f'{tag}-context.json'
         context.write_text(self.exec_in('root1', 'cat', '/tmp/context.json'))
-        ids = {i: (self.root_node_id(i), self.evm_node_id(i)) for i in self.new}
+        # the relayer resolves the incumbent committee's node ids too (a retiring member is in K but not elected): every entity of old and new is named,
+        # the possession proofs below are made by the elected ones only
+        ids = {i: (self.root_node_id(i), self.evm_node_id(i)) for i in sorted(set(self.old) | set(self.new))}
         subprocess.run(['chown', '-R', '10001:10001', str(work)], check=True)
         args = ['pos-relayer', 'proposal', *(['--reserved'] if reserved else []), '--eth-rpc', 'http://ureth1:8545', '--pos-deployment', '/deployment.json',
                 '--context', f'/work/{tag}-context.json', '--result-id', result, '--node-ids', ','.join(f'{r},{e}' for r, e in ids.values()),
@@ -484,7 +486,7 @@ class Drive(rehearse.Rehearsal):
         self.expect(run.returncode == 0, f'{tag}: pos-relayer proposal', run.stderr.strip()[-500:])
         proposal = work / f'{tag}-proposal'
         pops = []
-        for i, (_, evm) in ids.items():
+        for i, (_, evm) in ((i, ids[i]) for i in self.new):
             if i in self.remote:
                 (work / f'{tag}-pop-{i}.json').write_text(self.remote[i].evm_pop(context, proposal / 'validators.json', proposal / 'identities.json'))
                 pops.append(str(work / f'{tag}-pop-{i}.json'))
@@ -569,9 +571,13 @@ class Drive(rehearse.Rehearsal):
         code = {k.lower().removeprefix('0x'): v for k, v in spec.items()}[self.REGISTRY.lower().removeprefix('0x')]['code']
         code_hash = hashlib.sha256(bytes.fromhex(code.removeprefix('0x'))).hexdigest()
         receipts = []
-        for i in sorted(self.joiners & set(self.remote)):
-            self.catch_up_remote(i)
-        for i in self.new:
+        # the host entities' receipts first: each readiness stages the candidate in that entity's shard node, whose archive server then admits the
+        # joiner the candidate names (activePeers.Stage, shard_node_run.go). Only then can a remote joiner's shard node restore from those replicas
+        # (before, they refuse a non-member: run of 2026-11-13 00:35, "unavailable from both replicas"); its catch-up comes next, then its receipt
+        late = sorted(self.joiners & set(self.remote))
+        for i in [j for j in self.new if j not in late] + late:
+            if i in late:
+                self.catch_up_remote(i)
             if i in self.remote:
                 (work / f'receipt-{i}.json').write_text(self.remote[i].readiness(work / 'candidate.cbor', genesis, code_hash))
                 receipts.append(str(work / f'receipt-{i}.json'))
@@ -583,7 +589,7 @@ class Drive(rehearse.Rehearsal):
             receipts.append(str(work / f'receipt-{i}.json'))
         return receipts
 
-    def catch_up_remote(self, i):
+    def catch_up_remote(self, i, root=True):
         """A remote joiner's root started at the genesis trust base and, as a non-member, receives no consensus traffic: on a network past its first handoff it
         stays at epoch 1, and its readiness is refused ("the candidate is not the next epoch of this chain"). Its install restart to the CURRENT epoch makes it
         fetch and verify every activation bundle from the incumbents (installQ3Epochs; it stays a follower), so that the candidate is its next epoch."""
@@ -591,7 +597,10 @@ class Drive(rehearse.Rehearsal):
         epoch = self.follower_epoch(i)
         if epoch is not None and epoch > current:
             raise Refused(f'the joiner\'s root {i} is at epoch {epoch}, past the epoch {current} being left')
-        if epoch != current:
+        if epoch != current and not root:
+            self.say(f'  remote joiner {i}: its root is at epoch {epoch}: left to the join drive (a follower root fetches the records an install needs only '
+                     'once a staged candidate names it, after q3-candidate)')
+        elif epoch != current:
             self.say(f'  remote joiner {i}: its root is at epoch {epoch}; install restart to epoch {current} (activation bundles from the incumbents)')
             self.remote[i].install_root(current)
             self.wait(f'the joiner\'s root {i} installed epoch {current}', lambda: self.follower_epoch(i) == current, 300)
@@ -675,8 +684,10 @@ class Drive(rehearse.Rehearsal):
                 journal.run('install', lambda i=i: self.remote[i].install_root(self.target), sub=f'root{i}')
                 continue
             journal.run('install', lambda i=i: self.install_root(i, files, base), sub=f'root{i}')
-        for i in roots:
+        for i in sorted(self.new):
             self.wait(f'root {i} certifies at epoch {self.target}', lambda i=i: self.root_epoch(i, self.transport) == self.target, 300)
+        for i in sorted(set(roots) - set(self.new)):   # a leaver installs the epoch (it holds the commit) but certifies nothing in it: it is a follower there
+            self.wait(f'the leaving root {i} installed epoch {self.target}', lambda i=i: self.follower_epoch(i) == self.target or self.root_epoch(i, self.transport) == self.target, 300)
         self.exec_in('root1', 'ubft', 'root', 'handoff', 'q3-activation', '--root-rpc', self.root_rpc, '--epoch', str(self.target), '--out', '/tmp/activation.json')
         record = json.loads(self.exec_in('root1', 'cat', '/tmp/activation.json'))
         (self.evh() / f'activation-record-{self.target}.json').write_text(json.dumps(record, indent=1) + '\n')
