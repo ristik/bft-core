@@ -288,6 +288,13 @@ class Laptop:
         done = self.one(self.rpc_image, ['-c', code], network=self.network(), entrypoint='python3', check=False)
         return int(done.stdout.strip()) if done.returncode == 0 and done.stdout.strip().isdigit() else None
 
+    def shard_activated_epoch(self):
+        """The latest root epoch the shard node logged as activated ("handoff activated"): its verified history's tip, which the join's readiness needs at
+        the epoch being left. None while it logged none in its recent output."""
+        text = self.dc('logs', '--no-color', '--tail', '3000', f'shard{self.entity}', check=False)
+        found = re.findall(r'"message":"handoff activated","rootEpoch":(\d+)', text)
+        return int(found[-1]) if found else None
+
     def status(self):
         services = self.services_state()
         out = {'entity': self.entity, 'services': services, 'restoring': (self.home / 'compose.restore.json').is_file(), 'rootNodeId': self.state['rootNodeId'], 'evmNodeId': self.state['evmNodeId'],
@@ -307,6 +314,8 @@ class Laptop:
                 out['signers'] = len(out['signers'].get('signers') or [])
         if services.get(f'ureth{self.entity}') == 'running':
             out['urethHead'] = self.ureth_head()
+        if services.get(f'shard{self.entity}') == 'running':
+            out['shardActivatedEpoch'] = self.shard_activated_epoch()
         return out
 
     # --- the agent's operations (the host's drive asks; the outputs are public) ---

@@ -558,10 +558,10 @@ class Join:
         current = next(iter(epochs.values()))
         d.target, d.new, d.joiners = current + 1, sorted(set(certifying_entities(d)) | {self.entity}), {self.entity}
         started = time.monotonic()
-        d.catch_up_remote(self.entity)
+        d.catch_up_remote(self.entity, root=False)
         st = self.r.status()
         say(f'caught up to epoch {current} in {time.monotonic() - started:.0f} s: root activeEpoch {st.get("activeEpoch")}, execution client {st.get("urethHead")}, '
-            f'chain {int(d.ureth(1, "eth_blockNumber"), 16)}')
+            f'chain {int(d.ureth(1, "eth_blockNumber"), 16)}, shard activated epoch {st.get("shardActivatedEpoch")}')
         return 0
 
     def prepare(self, ident):

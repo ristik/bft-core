@@ -564,7 +564,7 @@ class Drive(rehearse.Rehearsal):
             receipts.append(str(work / f'receipt-{i}.json'))
         return receipts
 
-    def catch_up_remote(self, i):
+    def catch_up_remote(self, i, root=True):
         """A remote joiner's root started at the genesis trust base and, as a non-member, receives no consensus traffic: on a network past its first handoff it
         stays at epoch 1, and its readiness is refused ("the candidate is not the next epoch of this chain"). Its install restart to the CURRENT epoch makes it
         fetch and verify every activation bundle from the incumbents (installQ3Epochs; it stays a follower), so that the candidate is its next epoch."""
@@ -572,11 +572,19 @@ class Drive(rehearse.Rehearsal):
         epoch = self.follower_epoch(i)
         if epoch is not None and epoch > current:
             raise Refused(f'the joiner\'s root {i} is at epoch {epoch}, past the epoch {current} being left')
-        if epoch != current:
+        if epoch != current and not root:
+            self.say(f'  remote joiner {i}: its root is at epoch {epoch}: left to the join drive (a follower root fetches the records an install needs only '
+                     'once a staged candidate names it, after q3-candidate)')
+        elif epoch != current:
             self.say(f'  remote joiner {i}: its root is at epoch {epoch}; install restart to epoch {current} (activation bundles from the incumbents)')
             self.remote[i].install_root(current)
             self.wait(f'the joiner\'s root {i} installed epoch {current}', lambda: self.follower_epoch(i) == current, 300)
-        if current >= 3 and self.remote[i].info.get('shardCaughtUp') != current:
+        shard_epoch = self.remote[i].status().get('shardActivatedEpoch')
+        if current >= 3 and shard_epoch == current:
+            self.say(f'  remote joiner {i}: its shard node has activated epoch {current} by itself: no restore needed')
+            self.remote[i].info['shardCaughtUp'] = current
+            self.remote[i].save()
+        elif current >= 3 and self.remote[i].info.get('shardCaughtUp') != current:
             # the shard node's own follower installs epoch 2 and then needs the terminal records of the previous EVM configuration, which a staging-only node
             # has in neither journal nor archive: its verified history stays at epoch 2 and its stage of the candidate is refused. Restored from a survivor's
             # pin of the CURRENT epoch, its history tip is that epoch (the restore after its enrollment repeats this at the new epoch).
