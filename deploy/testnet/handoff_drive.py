@@ -604,8 +604,8 @@ class Drive(rehearse.Rehearsal):
             self.say(f'  remote joiner {i}: its root is at epoch {epoch}; install restart to epoch {current} (activation bundles from the incumbents)')
             self.remote[i].install_root(current)
             self.wait(f'the joiner\'s root {i} installed epoch {current}', lambda: self.follower_epoch(i) == current, 300)
-        shard_epoch = self.remote[i].status().get('shardActivatedEpoch')
-        if current >= 3 and shard_epoch == current:
+        shard_epoch = self.remote[i].status().get('shardActivatedEpoch') if self.cold_restore else None   # the follower path asks the node itself (follow_joiner)
+        if self.cold_restore and current >= 3 and shard_epoch == current:
             self.say(f'  remote joiner {i}: its shard node has activated epoch {current} by itself: no restore needed')
             self.remote[i].info['shardCaughtUp'] = current
             self.remote[i].save()
@@ -626,8 +626,9 @@ class Drive(rehearse.Rehearsal):
                 self.follow_joiner(i, current, promoted=False)   # before the election: following the current epoch, not active
             self.remote[i].info['shardCaughtUp'] = current
             self.remote[i].save()
-        if current >= 3:
-            # a restoring node opens its operator listener only after its archive fetch and replay: the readiness needs it (also on a resumed drive)
+        if current >= 3 and self.cold_restore:
+            # a restoring node opens its operator listener only after its archive fetch and replay: the readiness needs it (also on a resumed drive);
+            # a follower is ready by follow_joiner's own check
             def serving():
                 st = self.remote[i].status()
                 self.say(f'  remote joiner {i}: shard activated epoch {st.get("shardActivatedEpoch")}, operator RPC {"up" if st.get("shardRpc") else "not yet"}, '
