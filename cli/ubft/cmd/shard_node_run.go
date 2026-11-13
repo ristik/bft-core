@@ -631,6 +631,13 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 	// A root-free follower bootstraps from its follow sources only and keeps every known root closed while it is not active (the role is
 	// read on each connection: activation opens the roots without a restart). The roots' addresses are still learned, for that moment.
 	follower := newRootFreeRole(len(followSources) != 0, trustBases)
+	if utbEntries != nil {
+		// every authenticated UTB entry retained before a restart names a root committee, whether or not its activation followed: learned
+		// here, before any follower networking opens (OnEntry fires only for entries appended from now on)
+		if err := seedRootsFromUTB(follower, utbEntries); err != nil {
+			return err
+		}
+	}
 
 	peerBoot := bootNodes
 	if follower.enabled {

@@ -2,12 +2,14 @@ package cmd
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"sync/atomic"
 
 	libp2ppeer "github.com/libp2p/go-libp2p/core/peer"
 	"github.com/unicitynetwork/bft-core/q3active"
 	"github.com/unicitynetwork/bft-core/q3shard"
+	"github.com/unicitynetwork/bft-core/utbstore"
 	"github.com/unicitynetwork/bft-go-base/types"
 )
 
@@ -234,4 +236,24 @@ func (r *shardRole) published() (uint64, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.completedEpoch, active
+}
+
+// utbEntries is the part of a utbstore.Store root seeding reads.
+type utbEntries interface {
+	GenesisEpoch() uint64
+	Tip() utbstore.Tip
+	Entry(epoch uint64) (*types.RootTrustBaseV2, error)
+}
+
+// seedRootsFromUTB records the committee of every entry the UTB store holds. The store authenticated each entry from its predecessor when it
+// was appended and re-validates the whole chain from the pin when it is opened, so these are authenticated committees.
+func seedRootsFromUTB(r *rootFreeRole, store utbEntries) error {
+	for e := store.GenesisEpoch(); e <= store.Tip().Epoch; e++ {
+		entry, err := store.Entry(e)
+		if err != nil {
+			return fmt.Errorf("reading retained trust-base entry %d: %w", e, err)
+		}
+		r.addRootNodes(entry.RootNodes)
+	}
+	return nil
 }

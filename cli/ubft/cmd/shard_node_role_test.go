@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"sync/atomic"
@@ -10,10 +11,15 @@ import (
 	libp2ppeer "github.com/libp2p/go-libp2p/core/peer"
 	"github.com/libp2p/go-libp2p/core/peerstore"
 	"github.com/stretchr/testify/require"
+	abcrypto "github.com/unicitynetwork/bft-go-base/crypto"
 	"github.com/unicitynetwork/bft-go-base/types"
 
 	"github.com/unicitynetwork/bft-core/internal/testutils/logger"
+	"github.com/unicitynetwork/bft-core/internal/testutils/utbchain"
+	"github.com/unicitynetwork/bft-core/keyvaluedb/memorydb"
 	"github.com/unicitynetwork/bft-core/network"
+	"github.com/unicitynetwork/bft-core/utb"
+	"github.com/unicitynetwork/bft-core/utbstore"
 )
 
 // The role opens only when the activation naming this node has completed, in the installer and in the runtime. A suspended activation
@@ -108,4 +114,55 @@ func followKeyPair(t *testing.T) *network.PeerKeyPair {
 	pubRaw, err := pub.Raw()
 	require.NoError(t, err)
 	return &network.PeerKeyPair{PublicKey: pubRaw, PrivateKey: privRaw}
+}
+
+// The restart interval: a successor committee was authenticated and stored in the UTB store, the process stopped before its Q3 activation,
+// and after the restart the mirror follower resumes after the stored tip (OnEntry never fires for it). The committee is a root committee
+// from the startup seeding on, before any follower networking.
+func TestRootsAreSeededFromTheRetainedUTBEntriesAtStartup(t *testing.T) {
+	genesisCommittee := utbchain.Committee(t)
+	var successor []utbchain.Member
+	for i := 0; i < 4; i++ {
+		s, err := abcrypto.NewInMemorySecp256K1SignerFromKey(bytes.Repeat([]byte{byte(0x40 + i)}, 32))
+		require.NoError(t, err)
+		v, _ := s.Verifier()
+		pk, _ := v.MarshalPublicKey()
+		pub, err := libp2pcrypto.UnmarshalSecp256k1PublicKey(pk)
+		require.NoError(t, err)
+		id, err := libp2ppeer.IDFromPublicKey(pub)
+		require.NoError(t, err)
+		successor = append(successor, utbchain.Member{ID: id.String(), Key: pk, Signer: s})
+	}
+	g, err := utb.BuildUnsigned(nil, utbchain.Facts(genesisCommittee, 1, 1))
+	require.NoError(t, err)
+	next, err := utb.BuildUnsigned(g, utbchain.Facts(successor, 2, 200))
+	require.NoError(t, err)
+	for _, m := range genesisCommittee[:3] {
+		require.NoError(t, next.Sign(m.ID, m.Signer))
+	}
+	raw, err := next.MarshalCBOR()
+	require.NoError(t, err)
+	pin, err := g.EntryID()
+	require.NoError(t, err)
+
+	db := memorydb.New()
+	before, err := utbstore.Open(db, g, pin)
+	require.NoError(t, err)
+	added, err := before.Append(raw) // authenticated and persisted; the process then stops
+	require.NoError(t, err)
+	require.True(t, added)
+
+	after, err := utbstore.Open(db, g, pin) // the restart re-validates the retained chain from the pin
+	require.NoError(t, err)
+	unseeded := newRootFreeRole(true, nil)
+	newRoot, err := libp2ppeer.Decode(successor[0].ID)
+	require.NoError(t, err)
+	require.False(t, unseeded.deny(newRoot), "the control: without seeding the stored committee is unknown")
+	seeded := newRootFreeRole(true, nil)
+	require.NoError(t, seedRootsFromUTB(seeded, after))
+	for _, m := range append(genesisCommittee, successor...) {
+		id, err := libp2ppeer.Decode(m.ID)
+		require.NoError(t, err)
+		require.True(t, seeded.deny(id), "root %s", m.ID)
+	}
 }
