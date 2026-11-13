@@ -58,7 +58,11 @@ VOLUMES = ('root', 'evm', 'auth', 'ureth', 'archive', 'jwt', 'network', 'wallet'
 PRIVATE = ('root', 'evm', 'auth', 'ureth', 'archive', 'jwt', 'wallet', 'work')
 ROOT_POSTS = ('/api/v1/q3/signers', '/api/v1/q3/status', '/api/v1/handoff/plan', '/api/v1/handoff/intent', '/api/v1/handoff/endorse',
               '/api/v1/handoff/evm-assignment/context')
-SUBNET = '10.231.5.0/24'   # the laptop's validators network: not one of the host's 172.x container networks (their announced addresses are not dialable here)
+def subnet(project):
+    """The laptop's validators network: 10.231.<n>.0/24 with n from the project name (two generations' joiner projects may exist side by side, one stopped),
+    never one of the host's 172.x container networks (their announced addresses are not dialable here)."""
+    import hashlib
+    return f'10.231.{16 + hashlib.sha256(project.encode()).digest()[0] % 224}.0/24'
 OPERATOR = ['--operator-socket', '/authority/operator.sock', '--operator-credential', '/authority/operator.cred']
 
 
@@ -158,7 +162,7 @@ def laptop_compose(host_compose, entity, root_id, evm_id, project, mac_host='hos
             'restart': 'unless-stopped', 'mem_limit': '64m', 'cpus': 0.2, 'pids_limit': 64, 'read_only': True, 'cap_drop': ['ALL'],
             'security_opt': ['no-new-privileges:true'], 'logging': {'driver': 'json-file', 'options': {'max-size': '10m', 'max-file': '3'}}}
     used = sorted({m.split(':')[0] for svc in services.values() for m in svc.get('volumes', [])})
-    return {'name': project, 'services': services, 'networks': {'validators': {'ipam': {'config': [{'subnet': SUBNET}]}}},
+    return {'name': project, 'services': services, 'networks': {'validators': {'ipam': {'config': [{'subnet': subnet(project)}]}}},
             'volumes': {v: {'external': True, 'name': f'{project}_{v}'} for v in used}}
 
 
