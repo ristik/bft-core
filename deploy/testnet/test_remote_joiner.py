@@ -367,9 +367,10 @@ class RemoteAdvance(unittest.TestCase):
 
 
 class FollowJoiner(unittest.TestCase):
-    """handoff_drive.follow_joiner: the idempotent replacement of the post-election restore: start the retained follower, wait for the head."""
+    """handoff_drive.follow_joiner: the idempotent replacement of the post-election restore: start the retained follower, wait until the node
+    itself reports an active role and a certified round at the head."""
 
-    def drive(self, running, heads):
+    def drive(self, running, reports):
         calls, test = [], self
 
         class Remote:
@@ -381,26 +382,41 @@ class FollowJoiner(unittest.TestCase):
                 running.add('shard5')
 
             def status(self):
-                return {'urethHead': heads.pop(0) if len(heads) > 1 else heads[0]}
+                return {'shardHealth': reports.pop(0) if len(reports) > 1 else reports[0]}
 
             def restore_start(self, *a):
                 test.fail('the follower path must never empty or restore')
+
+        class Docker:
+            def shard_health(self, i):
+                return {'role': 'active', 'roleEpoch': 5, 'lastUCRound': 100, 'executionRecovery': 'ready'}
         d = hd.Drive.__new__(hd.Drive)
-        d.remote, d.target = {5: Remote()}, 5
+        d.remote, d.target, d.docker = {5: Remote()}, 5, Docker()
         d.say = lambda text: None
-        d.ureth = lambda i, method, params=(): hex(100)
         d.wait = lambda what, fn, seconds: next(r for r in iter(fn, None) if r)
         return d, calls
 
     def test_a_stopped_follower_is_started_on_its_state_and_awaited(self):
-        d, calls = self.drive(set(), [90, 97])
+        follower = {'role': 'follower', 'roleEpoch': 4, 'lastUCRound': 99, 'executionRecovery': 'ready'}
+        ready = {'role': 'active', 'roleEpoch': 5, 'lastUCRound': 99, 'executionRecovery': 'ready'}
+        d, calls = self.drive(set(), [None, follower, ready])
         d.follow_joiner(5)
         self.assertEqual(calls, ['shard-start'])
 
     def test_a_running_follower_is_left_alone(self):
-        d, calls = self.drive({'shard5'}, [100])
+        d, calls = self.drive({'shard5'}, [{'role': 'active', 'roleEpoch': 5, 'lastUCRound': 100, 'executionRecovery': 'ready'}])
         d.follow_joiner(5)
         self.assertEqual(calls, [], 'a rerun changes nothing')
+
+    def test_readiness_is_the_nodes_own_role_and_certified_round(self):
+        ref = {'lastUCRound': 100}
+        ok = {'role': 'active', 'roleEpoch': 5, 'lastUCRound': 99, 'executionRecovery': 'ready'}
+        self.assertTrue(hd.follower_ready(ok, ref, 5))
+        self.assertFalse(hd.follower_ready({**ok, 'role': 'follower'}, ref, 5), 'not promoted')
+        self.assertFalse(hd.follower_ready({**ok, 'roleEpoch': 4}, ref, 5), 'promoted for an older epoch')
+        self.assertFalse(hd.follower_ready({**ok, 'lastUCRound': 90}, ref, 5), 'certified rounds behind')
+        self.assertFalse(hd.follower_ready({**ok, 'lastUCRound': 150}, ref, 5), 'ahead of the incumbent: divergent, not ready')
+        self.assertFalse(hd.follower_ready({**ok, 'executionRecovery': 'unready'}, ref, 5))
 
 class ArchiveSeed(unittest.TestCase):
     def test_records_are_streamed_and_only_missing_ones_placed(self):

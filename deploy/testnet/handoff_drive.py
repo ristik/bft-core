@@ -185,6 +185,17 @@ class Journal:
         return detail
 
 
+def follower_ready(mine, reference, target):
+    """A promoted follower's own report, compared with an incumbent's: active at the target epoch or later, execution recovery ready, and its
+    certified (admitted) round within two of the incumbent's, never ahead of it by more."""
+    if mine.get('role') != 'active' or (mine.get('roleEpoch') or 0) < target:
+        return False
+    if mine.get('executionRecovery') not in ('ready', None, ''):
+        return False
+    have, want = mine.get('lastUCRound') or 0, reference.get('lastUCRound') or 0
+    return have > 0 and want - 2 <= have <= want + 2
+
+
 # --- the drive -------------------------------------------------------------------------------------------------------------------
 class Drive(rehearse.Rehearsal):
     """The rehearsal's primitives (gateway calls, exec in a service, one-shot node containers, the relayer, the scrubbed log) on a generation in service."""
@@ -207,6 +218,7 @@ class Drive(rehearse.Rehearsal):
         if saved.is_file():
             self.joiner_map = {**json.loads(saved.read_text()), **self.joiner_map}
         self.transport = remote_entity.EntityTransport(docker, self.remote)
+        self.docker = docker
         self.require, self.allow_excluding = set(require or ()), allow_excluding
         self.net, self.work = self.gen / 'network', self.gen / 'network' / 'handoff'
         self.deployment = json.loads((self.net / 'pos-deployment.json').read_text())
@@ -811,25 +823,29 @@ class Drive(rehearse.Rehearsal):
     def follow_joiner(self, i):
         """Idempotent replacement of the post-election restore (phase 1 follower). The joiner's shard node runs as a root-free follower from its
         provisioning on (--follow-source): it installs each activation from the incumbents' mirrors and executes the certified blocks from their
-        archives, and the verified activation naming it promotes it in the same process. This only (re)starts the shard container on its RETAINED
-        state (an authority order stops it) and waits until its execution client is at the chain head. Nothing is emptied, pinned or replayed.
+        archives, and the completed activation naming it publishes its role as active in the same process. This only (re)starts the shard
+        container on its RETAINED state (an authority order stops it) and waits until the node itself reports ready: its published role is
+        active at the target epoch or later, its execution recovery is ready, and its certified round (admitted certificates, not an execution
+        RPC height) is within two rounds of validator 1's. Nothing is emptied, pinned or replayed, and a timeout is a failure, never a restore.
 
         Not yet the hot-promotion latency objective: an authority order still stops and restarts the shard process (state kept)."""
         remote = self.remote.get(i)
         if remote is not None:
             if f'shard{i}' not in remote.running():
                 remote.authority_step('shard-start', self.target, 0)
-            head = lambda: remote.status().get('urethHead')
+            health = lambda: remote.status().get('shardHealth')
         else:
             self.compose('start', f'shard{i}')
-            def head():
-                raw = self.ureth(i, 'eth_blockNumber')
-                return int(raw, 16) if raw else None
-        def caught_up():
-            mine, chain = head(), int(self.ureth(1, 'eth_blockNumber'), 16)
-            self.say(f'  joiner {i}: follower execution head {mine}, validator 1 at {chain}')
-            return mine is not None and mine + 5 >= chain
-        self.wait(f'the joiner {i} follows the chain head (no restore)', caught_up, 3600)
+            health = lambda: self.docker.shard_health(i)
+        def ready():
+            mine, reference = health(), self.docker.shard_health(1)
+            if not mine or not reference:
+                self.say(f'  joiner {i}: shard health not readable yet')
+                return False
+            self.say(f'  joiner {i}: role {mine.get("role")} at epoch {mine.get("roleEpoch")}, recovery {mine.get("executionRecovery")}, '
+                     f'certified round {mine.get("lastUCRound")} (validator 1 {reference.get("lastUCRound")})')
+            return follower_ready(mine, reference, self.target)
+        self.wait(f'the joiner {i} is active and certified at the head (no restore)', ready, 3600)
 
     def restore_remote(self, i, follow=True):
         """rehearse.restore_joiner for an entity on another machine: the pin (the latest certified record of the new epoch, its technical record, the trust

@@ -925,6 +925,9 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 		}
 		node.SetRole(role)
 		role.subscribe(node.RoleChanged) // a published promotion subscribes to the roots at once
+		reportRole := func() { epoch, active := role.published(); node.Health().UpdateRole(active, epoch) }
+		role.subscribe(reportRole)
+		reportRole()
 	}
 
 	// The adapter authenticates certificates under the same per-epoch configuration set as the admission, not under a scan of every

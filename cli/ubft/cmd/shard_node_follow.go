@@ -227,3 +227,11 @@ func (a notifyingActivator) Activate(ctx context.Context, b q3active.Bundle) err
 	a.role.notify()
 	return err
 }
+
+// published is the role's completed epoch and active bit, for health reporting.
+func (r *shardRole) published() (uint64, bool) {
+	_, active := r.Lease()
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.completedEpoch, active
+}

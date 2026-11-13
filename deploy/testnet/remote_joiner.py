@@ -278,6 +278,17 @@ class Laptop:
         status, _, payload = done.stdout.partition(b'\n')
         return int(status), payload
 
+    def shard_health(self, timeout=10):
+        """The shard node's /api/v1/health (published role, certified round, execution recovery), read inside its namespace; None if unreadable."""
+        cmd = ['docker', 'run', '--rm', '--network', f'container:{self.pod_id()}', '--read-only', '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges:true',
+               '--user', '10001:10001', '--entrypoint', 'python3', self.rpc_image, '-c', handoff_ops.GET_HELPER, self.urls()[1] + '/api/v1/health', str(timeout)]
+        done = run(cmd, check=False, timeout=timeout + 60)
+        status, _, payload = (done.stdout if isinstance(done.stdout, str) else done.stdout.decode()).partition('\n')
+        try:
+            return json.loads(payload) if done.returncode == 0 and status == '200' else None
+        except ValueError:
+            return None
+
     def ureth_head(self):
         code = ('import json,urllib.request as u;r=u.Request("http://ureth%d:8545",json.dumps({"jsonrpc":"2.0","id":1,"method":"eth_blockNumber","params":[]}).encode(),'
                 '{"Content-Type":"application/json"});print(int(json.loads(u.urlopen(r,timeout=5).read())["result"],16))' % self.entity)
@@ -288,6 +299,8 @@ class Laptop:
         services = self.services_state()
         out = {'entity': self.entity, 'services': services, 'restoring': (self.home / 'compose.restore.json').is_file(), 'rootNodeId': self.state['rootNodeId'], 'evmNodeId': self.state['evmNodeId'],
                'accounts': self.state['accounts'], 'authorityScope': self.state.get('authorityScope')}
+        if services.get(f'shard{self.entity}') == 'running':
+            out['shardHealth'] = self.shard_health()
         if services.get(f'root{self.entity}') == 'running':
             for key, path in (('follower', '/api/v1/q3/status'), ('signers', '/api/v1/q3/signers')):
                 try:

@@ -40,6 +40,8 @@ type Health struct {
 	certifiedRecordReadinessDetail string
 	executionRecovery              string
 	executionRecoveryDetail        string
+	role                           string
+	roleEpoch                      uint64
 
 	updatedAt time.Time
 }
@@ -68,11 +70,15 @@ type Snapshot struct {
 	CertifiedRecordDetail string `json:"certifiedRecordDetail,omitempty"`
 	// CertifiedRecordReadiness names the record gate's verdict for the last round it evaluated, and
 	// is empty without the gate.
-	CertifiedRecordReadiness       string    `json:"certifiedRecordReadiness,omitempty"`
-	CertifiedRecordReadinessDetail string    `json:"certifiedRecordReadinessDetail,omitempty"`
-	ExecutionRecovery              string    `json:"executionRecovery,omitempty"`
-	ExecutionRecoveryDetail        string    `json:"executionRecoveryDetail,omitempty"`
-	UpdatedAt                      time.Time `json:"updatedAt"`
+	CertifiedRecordReadiness       string `json:"certifiedRecordReadiness,omitempty"`
+	CertifiedRecordReadinessDetail string `json:"certifiedRecordReadinessDetail,omitempty"`
+	ExecutionRecovery              string `json:"executionRecovery,omitempty"`
+	ExecutionRecoveryDetail        string `json:"executionRecoveryDetail,omitempty"`
+	// Role is the published role ("active" or "follower") and RoleEpoch the completed activation epoch it was published at; empty without
+	// a role (a node that is not a root-free follower).
+	Role      string    `json:"role,omitempty"`
+	RoleEpoch uint64    `json:"roleEpoch,omitempty"`
+	UpdatedAt time.Time `json:"updatedAt"`
 
 	// SecondsSinceUpdate is computed at snapshot time, not stored — see
 	// (*Health).Snapshot. It's the field worth alerting on: a healthy
@@ -169,6 +175,20 @@ func (h *Health) updateExecutionRecovery(outcome, detail string) {
 	h.updatedAt = time.Now()
 }
 
+// UpdateRole records the published role (see RoleLease) for operators and orchestration.
+func (h *Health) UpdateRole(active bool, epoch uint64) {
+	if h == nil {
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.role, h.roleEpoch = "follower", epoch
+	if active {
+		h.role = "active"
+	}
+	h.updatedAt = time.Now()
+}
+
 func (h *Health) updateSubmitted(round uint64) {
 	if h == nil {
 		return
@@ -203,6 +223,8 @@ func (h *Health) Snapshot() Snapshot {
 		CertifiedRecordReadinessDetail: h.certifiedRecordReadinessDetail,
 		ExecutionRecovery:              h.executionRecovery,
 		ExecutionRecoveryDetail:        h.executionRecoveryDetail,
+		Role:                           h.role,
+		RoleEpoch:                      h.roleEpoch,
 		UpdatedAt:                      h.updatedAt,
 	}
 	if !h.updatedAt.IsZero() {
