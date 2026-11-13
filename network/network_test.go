@@ -48,7 +48,7 @@ func TestNewRootNodeLibP2PNetwork_Ok(t *testing.T) {
 	net, err := NewLibP2PRootChainNetwork(peer, 1000, time.Second, observability.Default(t))
 	require.NoError(t, err)
 	require.NotNil(t, net)
-	require.Equal(t, cap(net.ReceivedChannel()), 1000)
+	require.Equal(t, cap(net.receivedMsgs), 1000, "the receive queue; ReceivedChannel hands it over through the ingress forwarder")
 	require.Equal(t, 4, len(net.sendProtocols), "the legacy and the version 2 certificate protocols, two entries each")
 }
 

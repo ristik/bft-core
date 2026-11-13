@@ -208,7 +208,7 @@ func TestFrontierSamplerRealLoopLifecycleAndVerifiedSample(t *testing.T) {
 	require.Error(t, h.cm.Run(context.Background()), "enabled manager must reject a second Run owner")
 	si, err := h.cm.ShardInfo(partitionID, shardID)
 	require.NoError(t, err)
-	require.NoError(t, h.cm.RequestCertification(context.Background(), IRChangeRequest{Partition: partitionID, Shard: shardID, Reason: Quorum, Requests: buildBlockCertificationRequest(t, h.shardNodes, si.LastCR)}))
+	require.NoError(t, h.cm.RequestCertification(context.Background(), IRChangeRequest{RootEpoch: h.cm.InstalledRootEpoch(), Partition: partitionID, Shard: shardID, Reason: Quorum, Requests: buildBlockCertificationRequest(t, h.shardNodes, si.LastCR)}))
 	h.commitRoundTwo(t)
 	sample, err := h.cm.SampleFrontier(context.Background(), h.request(t))
 	require.NoError(t, err)

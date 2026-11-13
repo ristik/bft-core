@@ -191,7 +191,7 @@ func Test_ConsensusManager_onPartitionIRChangeReq(t *testing.T) {
 	si, err := cm.ShardInfo(partitionID, shardID)
 	require.NoError(t, err)
 
-	req := &IRChangeRequest{
+	req := &IRChangeRequest{RootEpoch: cm.InstalledRootEpoch(),
 		Partition: partitionID,
 		Reason:    Quorum,
 		Requests:  buildBlockCertificationRequest(t, shardNodes, si.LastCR),
@@ -839,7 +839,7 @@ func Test_ConsensusManager_messages(t *testing.T) {
 		require.NoError(t, err)
 
 		// simulate root validator node sending IRCR to consensus manager
-		irCReq := IRChangeRequest{
+		irCReq := IRChangeRequest{RootEpoch: cms[0].InstalledRootEpoch(),
 			Partition: partitionID,
 			Reason:    Quorum,
 			Requests:  buildBlockCertificationRequest(t, shardNodes, si.LastCR),
@@ -887,7 +887,7 @@ func Test_ConsensusManager_messages(t *testing.T) {
 		// simulate partition request sent to non-leader node
 		si, err := nonLeaderNode.ShardInfo(partitionID, types.ShardID{})
 		require.NoError(t, err)
-		irCReq := IRChangeRequest{
+		irCReq := IRChangeRequest{RootEpoch: nonLeaderNode.InstalledRootEpoch(),
 			Partition: partitionID,
 			Reason:    Quorum,
 			Requests:  buildBlockCertificationRequest(t, shardNodes, si.LastCR),
@@ -2120,4 +2120,26 @@ func (s *votedRoundStorage) SetHighestVotedRound(round uint64) error {
 func (s *votedRoundStorage) SetHighestQcRound(qcRound, votedRound uint64) error {
 	s.round = max(s.round, votedRound)
 	return s.SafetyStorage.SetHighestQcRound(qcRound, votedRound)
+}
+
+// A change the collector counted from a request held in another root epoch is refused in this one, before it reaches the buffer
+// (#1032); the same change of the installed epoch is buffered.
+func Test_ConsensusManager_refusesAChangeOfAnotherRootEpoch(t *testing.T) {
+	mockNet := testnetwork.NewRootMockNetwork()
+	cm, _, shardNodes := initConsensusManager(t, mockNet)
+	ctx, ctxCancel := context.WithCancel(context.Background())
+	defer ctxCancel()
+	go func() { require.ErrorIs(t, cm.Run(ctx), context.Canceled) }()
+	require.Eventually(t, func() bool { return cm.pacemaker.GetCurrentRound() > 0 }, test.WaitDuration, test.WaitShortTick)
+	si, err := cm.ShardInfo(partitionID, shardID)
+	require.NoError(t, err)
+	req := &IRChangeRequest{Partition: partitionID, Reason: Quorum, Requests: buildBlockCertificationRequest(t, shardNodes, si.LastCR),
+		RootEpoch: cm.InstalledRootEpoch() + 1}
+	require.ErrorIs(t, cm.onPartitionIRChangeReq(context.Background(), req), ErrChangeOfAnotherRootEpoch)
+	require.False(t, cm.irReqBuffer.IsChangeInBuffer(partitionID, shardID))
+	req.RootEpoch = 0
+	require.ErrorIs(t, cm.onPartitionIRChangeReq(context.Background(), req), ErrChangeOfAnotherRootEpoch, "no epoch: fail closed")
+	req.RootEpoch = cm.InstalledRootEpoch()
+	require.NoError(t, cm.onPartitionIRChangeReq(context.Background(), req))
+	require.True(t, cm.irReqBuffer.IsChangeInBuffer(partitionID, shardID))
 }

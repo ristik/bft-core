@@ -405,7 +405,7 @@ func TestShardRequestIsKeptWhileTheNextLeaderIsUnknown(t *testing.T) {
 	f := newRetentionFixture(t)
 	f.cm.leaderSelector = unknownLeader{}
 	req := f.request(t)
-	require.NoError(t, f.cm.onPartitionIRChangeReq(f.ctx, &IRChangeRequest{Partition: req.Partition, Shard: req.Shard, Reason: Quorum, Requests: req.Requests}))
+	require.NoError(t, f.cm.onPartitionIRChangeReq(f.ctx, &IRChangeRequest{RootEpoch: f.cm.InstalledRootEpoch(), Partition: req.Partition, Shard: req.Shard, Reason: Quorum, Requests: req.Requests}))
 	require.Contains(t, f.cm.retained, f.shard, "held")
 	f.requireSends(t, 0)
 	f.cm.leaderSelector = constLeader{leader: f.other, nodes: f.cm.Validators()}
