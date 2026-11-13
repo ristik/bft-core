@@ -83,6 +83,10 @@ def joiner_services(compose, index, root_id, evm_id):
             # a shard node lists every root of its generation, its own entity's included, then the other shard nodes (generate.topology)
             entry[at] = ','.join([f'/dns4/root{j}/tcp/8000/p2p/{roots[j]}' for j in present] + [f'/dns4/root{index}/tcp/8000/p2p/{root_id}']
                                  + [f'/dns4/shard{j}/tcp/9000/p2p/{evms[j]}' for j in present])
+            # phase 1 follower: until the verified activation naming it, the joiner follows from the genesis shard nodes (their mirrors and
+            # archives) and keeps every root closed; it is provisioned once and never emptied or restored on the election path
+            if '--follow-source' not in entry:
+                entry += ['--follow-source', ','.join(f'/dns4/shard{j}/tcp/9000/p2p/{evms[j]}' for j in present)]
         if part == 'authority':
             at = entry.index('--node-id') + 1
             entry[at] = evm_id

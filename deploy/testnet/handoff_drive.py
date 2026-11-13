@@ -190,8 +190,11 @@ class Drive(rehearse.Rehearsal):
     """The rehearsal's primitives (gateway calls, exec in a service, one-shot node containers, the relayer, the scrubbed log) on a generation in service."""
     remote, require, allow_excluding = {}, frozenset(), False   # set by __init__ (remote_entity.load): defaults for a Drive made without it
 
-    def __init__(self, generation, cast, ubft, restore_pin=None, joiners=None, require=(), allow_excluding=False, funder=None):
+    cold_restore = False   # set by __init__: the explicit cold bootstrap (wipe, pin, replay) instead of the follower
+
+    def __init__(self, generation, cast, ubft, restore_pin=None, joiners=None, require=(), allow_excluding=False, funder=None, cold_restore=False):
         generation = Path(generation).resolve()
+        self.cold_restore = cold_restore
         self.funder = Path(funder).resolve() if funder else None
         super().__init__(generation, generation / 'handoff' / 'drive', cast)
         self.ubft, self.restore_pin = Path(ubft).resolve(), (Path(restore_pin).resolve() if restore_pin else None)
@@ -580,12 +583,17 @@ class Drive(rehearse.Rehearsal):
             # the shard node's own follower installs epoch 2 and then needs the terminal records of the previous EVM configuration, which a staging-only node
             # has in neither journal nor archive: its verified history stays at epoch 2 and its stage of the candidate is refused. Restored from a survivor's
             # pin of the CURRENT epoch, its history tip is that epoch (the restore after its enrollment repeats this at the new epoch).
-            self.say(f'  remote joiner {i}: its shard node is restored at epoch {current} before its readiness (a staging-only node cannot follow past epoch 2)')
-            target, self.target = self.target, current
-            try:
-                self.restore_remote(i, follow=False)
-            finally:
-                self.target = target
+            if self.cold_restore:
+                self.say(f'  remote joiner {i}: its shard node is restored at epoch {current} before its readiness (--cold-restore)')
+                target, self.target = self.target, current
+                try:
+                    self.restore_remote(i, follow=False)
+                finally:
+                    self.target = target
+            else:
+                # the root-free follower (--follow-source) installs every activation from the incumbents' mirrors and executes the certified blocks
+                # from their archives: nothing is emptied, pinned or replayed here
+                self.follow_joiner(i)
             self.remote[i].info['shardCaughtUp'] = current
             self.remote[i].save()
 
@@ -712,7 +720,10 @@ class Drive(rehearse.Rehearsal):
                 self.exec_in(f'authority{i}', 'ubft', 'signing-authority', 'replace-session', *OPERATOR, '--out', '/authority/client.cred')
                 return {'generation': self.authority_status(i).get('generation')}
             journal.run('advance', session, sub=f'{unit}/replace-session')
-            journal.run('advance', lambda: self.restore_joiner(i) or {}, sub=f'{unit}/restore')   # empties and restores its shard node, then runs it (rehearse)
+            if self.cold_restore:
+                journal.run('advance', lambda: self.restore_joiner(i) or {}, sub=f'{unit}/restore')   # empties and restores its shard node (rehearse)
+            else:
+                journal.run('advance', lambda: self.follow_joiner(i) or {}, sub=f'{unit}/follow')   # the same follower, started again on its retained state
             return {'joiner': True}
         def advance():
             status = healthy(self.authority_status(i))
@@ -757,7 +768,10 @@ class Drive(rehearse.Rehearsal):
                 remote.authority_step('replace-session', self.target, shard_epoch)
                 return {'generation': remote.authority_status().get('generation')}
             journal.run('advance', session, sub=f'{unit}/replace-session')
-            journal.run('advance', lambda: self.restore_remote(i) or {}, sub=f'{unit}/restore')
+            if self.cold_restore:
+                journal.run('advance', lambda: self.restore_remote(i) or {}, sub=f'{unit}/restore')
+            else:
+                journal.run('advance', lambda: self.follow_joiner(i) or {}, sub=f'{unit}/follow')
             return {'joiner': True, 'remote': True}
         def advance():
             status = healthy(remote.authority_status())
@@ -793,6 +807,29 @@ class Drive(rehearse.Rehearsal):
         for i in self.new:
             journal.run('advance', lambda i=i: self.advance_entity(i, shard_epoch, journal), sub=f'entity{i}')
         return {'shardEpoch': shard_epoch}
+
+    def follow_joiner(self, i):
+        """Idempotent replacement of the post-election restore (phase 1 follower). The joiner's shard node runs as a root-free follower from its
+        provisioning on (--follow-source): it installs each activation from the incumbents' mirrors and executes the certified blocks from their
+        archives, and the verified activation naming it promotes it in the same process. This only (re)starts the shard container on its RETAINED
+        state (an authority order stops it) and waits until its execution client is at the chain head. Nothing is emptied, pinned or replayed.
+
+        Not yet the hot-promotion latency objective: an authority order still stops and restarts the shard process (state kept)."""
+        remote = self.remote.get(i)
+        if remote is not None:
+            if f'shard{i}' not in remote.running():
+                remote.authority_step('shard-start', self.target, 0)
+            head = lambda: remote.status().get('urethHead')
+        else:
+            self.compose('start', f'shard{i}')
+            def head():
+                raw = self.ureth(i, 'eth_blockNumber')
+                return int(raw, 16) if raw else None
+        def caught_up():
+            mine, chain = head(), int(self.ureth(1, 'eth_blockNumber'), 16)
+            self.say(f'  joiner {i}: follower execution head {mine}, validator 1 at {chain}')
+            return mine is not None and mine + 5 >= chain
+        self.wait(f'the joiner {i} follows the chain head (no restore)', caught_up, 3600)
 
     def restore_remote(self, i, follow=True):
         """rehearse.restore_joiner for an entity on another machine: the pin (the latest certified record of the new epoch, its technical record, the trust
@@ -964,7 +1001,9 @@ def main(argv=None):
     p.add_argument('result', nargs='?', help='the election result to drive (default: the open one, or the unfinished drive in handoff/log.jsonl)')
     p.add_argument('--ubft', type=Path, required=True, help='the pinned ubft binary of the generation')
     p.add_argument('--cast', default='cast')
-    p.add_argument('--restore-pin', type=Path, help='h4-restore-pin (scripts/h4-restore-pin built from the pinned source): needed for a joiner')
+    p.add_argument('--restore-pin', type=Path, help='h4-restore-pin (scripts/h4-restore-pin built from the pinned source): needed for --cold-restore')
+    p.add_argument('--cold-restore', action='store_true',
+                   help='the explicit cold bootstrap of a joiner (empty its state, pin, replay) instead of the root-free follower; never needed on the election path')
     p.add_argument('--joiner', action='append', help='STAKINGID=ENTITY of a prepared joiner (also read from handoff/joiners.json)')
     p.add_argument('--min-window-rounds', type=int, default=MIN_WINDOW_ROUNDS, help='refuse the steps before the Prepare with fewer progress rounds left')
     p.add_argument('--lockproof-restart', choices=('auto', 'always', 'never'), default='auto',
@@ -986,7 +1025,7 @@ def main(argv=None):
         if lock is None:
             print('BUSY: another handoff-drive holds handoff/drive.lock; nothing done', flush=True)
             return 5
-    d = Drive(a.generation, a.cast, a.ubft, a.restore_pin, parse_joiners(a.joiner), a.require_member, a.allow_excluding_joiner, a.funder)
+    d = Drive(a.generation, a.cast, a.ubft, a.restore_pin, parse_joiners(a.joiner), a.require_member, a.allow_excluding_joiner, a.funder, a.cold_restore)
     if d.funder:
         try:
             funder_address(d.funder)

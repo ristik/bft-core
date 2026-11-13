@@ -446,7 +446,9 @@ class Laptop:
         return {'seeded': self.seed_archive()}
 
     def op_restore_start(self, uc_b64, tr_b64, body_id):
-        """rehearse.restore_joiner, the laptop half: the execution client's and the shard node's state emptied (its keys kept), the pin written, `shard-node restore`."""
+        """The explicit COLD bootstrap of an empty or new node (handoff_drive --cold-restore only; never on the election path): the execution client's
+        and the shard node's state emptied (its keys kept), the pin written, `shard-node restore`. A provisioned joiner instead runs as a root-free
+        follower (--follow-source) from the start and is promoted by its verified activation (handoff_drive.follow_joiner): nothing is emptied."""
         if not re.fullmatch(r'0x[0-9a-fA-F]+', body_id):
             raise Failure('bad body id')
         j = self.entity

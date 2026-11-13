@@ -26,6 +26,15 @@ import pos_join
 import pos_sample
 import pos_crash
 
+
+def strip_follow(svc):
+    """The joiner's shard service without its --follow-source pair (the one flag a joiner has and a genesis validator has not), and that pair's value."""
+    import copy as _copy
+    svc=_copy.deepcopy(svc); entry=svc['entrypoint']
+    if '--follow-source' not in entry: return svc,None
+    at=entry.index('--follow-source'); value=entry[at+1]; del entry[at:at+2]
+    return svc,value
+
 class FakeRelay:
     def __init__(self): self.calls=[]
     def call(self, method, params):
@@ -254,6 +263,7 @@ class UtbProfile(unittest.TestCase):
     def test_a_joiner_entity_gets_the_profile_with_its_own_store(self):
         four=self.topo(4,self.PIN);five=self.topo(5,self.PIN)
         got=joiner.joiner_services(four,5,'r4','e4')
+        got['shard5'],_=strip_follow(got['shard5'])
         for name in ('root5','shard5'):
             self.assertEqual(got[name],five['services'][name],name)
             self.assertEqual(self.flags(got[name]['entrypoint'])[3],self.PIN)
@@ -1756,7 +1766,10 @@ class Joiner(unittest.TestCase):
         got=joiner.joiner_services(four,5,'r4','e4')
         want={n:five['services'][n] for n in ('pod5','metrics5','root5','authority5','ureth5','shard5')}
         self.assertEqual(sorted(got),sorted(want))
+        got['shard5'],follow=strip_follow(got['shard5'])
         for name in want: self.assertEqual(got[name],want[name],name)
+        # the one difference: the joiner follows the genesis shard nodes, never a root, until its activation
+        self.assertEqual([a.split('/')[2] for a in follow.split(',')],['shard1','shard2','shard3','shard4'])
     def test_the_relayer_identity_file_has_the_fields_it_reads_and_no_evm_key(self):
         f=pos_join.joiner_file('0x'+'1'*64,'0x'+'2'*64,'0x'+'3'*40,'0x'+'4'*40,'rid','eid')
         self.assertEqual(sorted(f),['evmNodeId','expiry','ownerKey','payee','rootKey','rootNodeId','withdrawal'])

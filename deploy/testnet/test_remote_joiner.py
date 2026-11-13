@@ -326,6 +326,8 @@ class RemoteAdvance(unittest.TestCase):
         d.say = lambda text: None
         d.expect = lambda ok, what, detail='': None if ok else (_ for _ in ()).throw(AssertionError(what))
         d.restore_remote = lambda i: test.calls.append(('restore', i))
+        d.follow_joiner = lambda i: test.calls.append(('follow', i))
+        d.cold_restore = False
         self.d = d
         self.journal = hd.Journal(d.work / 'log.jsonl', echo=lambda line: None)
 
@@ -344,11 +346,18 @@ class RemoteAdvance(unittest.TestCase):
         self.d.advance_remote(5, 4, self.journal)
         self.assertEqual(self.steps(), ['replace-session', 'shard-start'])
 
-    def test_a_joiner_enrolls_takes_its_session_and_restores(self):
+    def test_a_joiner_enrolls_takes_its_session_and_follows_without_a_restore(self):
         self.d.joiners = {5}
         self.remote.status.update(enrollmentComplete=False, shardEpoch=4, rootEpoch=5)
         self.d.advance_remote(5, 4, self.journal)
+        self.assertEqual(self.steps(), ['complete-enrollment', 'replace-session', 'follow'])
+
+    def test_the_cold_restore_is_only_the_explicit_operation(self):
+        self.d.joiners, self.d.cold_restore = {5}, True
+        self.remote.status.update(enrollmentComplete=False, shardEpoch=4, rootEpoch=5)
+        self.d.advance_remote(5, 4, self.journal)
         self.assertEqual(self.steps(), ['complete-enrollment', 'replace-session', 'restore'])
+
 
     def test_a_key_lost_on_the_laptop_stops_the_drive(self):
         self.remote.status.update(keyLost=True)
@@ -356,6 +365,42 @@ class RemoteAdvance(unittest.TestCase):
             self.d.advance_remote(5, 4, self.journal)
         self.assertEqual(self.steps(), [])
 
+
+class FollowJoiner(unittest.TestCase):
+    """handoff_drive.follow_joiner: the idempotent replacement of the post-election restore: start the retained follower, wait for the head."""
+
+    def drive(self, running, heads):
+        calls, test = [], self
+
+        class Remote:
+            def running(self):
+                return set(running)
+
+            def authority_step(self, step, target, shard_epoch):
+                calls.append(step)
+                running.add('shard5')
+
+            def status(self):
+                return {'urethHead': heads.pop(0) if len(heads) > 1 else heads[0]}
+
+            def restore_start(self, *a):
+                test.fail('the follower path must never empty or restore')
+        d = hd.Drive.__new__(hd.Drive)
+        d.remote, d.target = {5: Remote()}, 5
+        d.say = lambda text: None
+        d.ureth = lambda i, method, params=(): hex(100)
+        d.wait = lambda what, fn, seconds: next(r for r in iter(fn, None) if r)
+        return d, calls
+
+    def test_a_stopped_follower_is_started_on_its_state_and_awaited(self):
+        d, calls = self.drive(set(), [90, 97])
+        d.follow_joiner(5)
+        self.assertEqual(calls, ['shard-start'])
+
+    def test_a_running_follower_is_left_alone(self):
+        d, calls = self.drive({'shard5'}, [100])
+        d.follow_joiner(5)
+        self.assertEqual(calls, [], 'a rerun changes nothing')
 
 class ArchiveSeed(unittest.TestCase):
     def test_records_are_streamed_and_only_missing_ones_placed(self):
