@@ -19,7 +19,7 @@ func TestFollowerClientSendsNothingToRootsAndDeliversFollowedCertificates(t *tes
 	driver := &firstUCDriver{got: make(chan struct{})}
 	client, err := NewBFTClient(testpeer.CreatePeer(t, testpeer.CreatePeerConfiguration(t)), net, f.signer, authPartitionID, types.ShardID{}, f.confMine,
 		stubTrustBaseStore{tb: f.tb}, driver, nil,
-		BFTClientOptions{HandshakeNodes: 1, CertNodes: 1, HeartbeatInterval: 20 * time.Millisecond, InactivityTimeout: 10 * time.Millisecond, StartupHandshakeInterval: 10 * time.Millisecond})
+		BFTClientOptions{HandshakeNodes: 1, CertNodes: 1, HeartbeatInterval: time.Hour, InactivityTimeout: 10 * time.Millisecond, StartupHandshakeInterval: 10 * time.Millisecond})
 	require.NoError(t, err)
 	follower := make(chan bool, 1)
 	follower <- true
@@ -61,6 +61,7 @@ func TestFollowerClientSendsNothingToRootsAndDeliversFollowedCertificates(t *tes
 	}
 
 	follower <- false
+	client.RoleChanged()
 	require.Eventually(t, func() bool { net.mu.Lock(); defer net.mu.Unlock(); return net.handshakes > 0 }, 5*time.Second, 10*time.Millisecond,
-		"promoted, it subscribes to the roots")
+		"promoted, it subscribes to the roots at once, not at the next heartbeat")
 }

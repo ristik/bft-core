@@ -217,8 +217,36 @@ type BFTClient struct {
 	follower atomic.Pointer[func() bool]
 	// followed carries certificates from a non-root follow source into Run, where they are handled exactly as a root's response.
 	followed chan *certification.CertificationResponse
-	// wasFollower is Run's memory of the last role it saw: the first heartbeat after a promotion handshakes at once.
+	// wasFollower is Run's memory of the last role it saw: a promotion handshakes at once (RoleChanged, else the next heartbeat).
 	wasFollower bool
+	roleWake    chan struct{}
+}
+
+// RoleChanged tells Run that the follower predicate may have changed (a verified activation installed or retired this node), so that a
+// promotion subscribes to the roots now instead of at the next heartbeat. It never blocks.
+func (c *BFTClient) RoleChanged() {
+	select {
+	case c.roleWake <- struct{}{}:
+	default:
+	}
+}
+
+// checkRole handshakes with the roots when the node has just stopped being a follower.
+func (c *BFTClient) checkRole(ctx context.Context) {
+	follower := c.isFollower()
+	if follower == c.wasFollower {
+		return
+	}
+	c.wasFollower = follower
+	if follower {
+		return
+	}
+	if c.log != nil {
+		c.log.InfoContext(ctx, "promoted from follower: subscribing to the roots")
+	}
+	if err := c.sendHandshake(ctx); err != nil && c.log != nil {
+		c.log.ErrorContext(ctx, "handshake after promotion failed", slog.String("err", err.Error()))
+	}
 }
 
 // ErrFollower refuses root traffic while this client is a non-active follower.
@@ -346,6 +374,7 @@ func NewBFTClient(
 		log:            log,
 		opts:           opts,
 		followed:       make(chan *certification.CertificationResponse, 4),
+		roleWake:       make(chan struct{}, 1),
 	}
 	c.lastCertResponseTime.Store(time.Now().UnixMilli())
 	return c, nil
@@ -576,16 +605,10 @@ func (c *BFTClient) Run(ctx context.Context) error {
 			}
 			startupAttempt++
 			startup.Reset(startupHandshakeDelay(c.opts.StartupHandshakeInterval, c.opts.InactivityTimeout, startupAttempt))
+		case <-c.roleWake:
+			c.checkRole(ctx)
 		case <-heartbeat.C:
-			if follower := c.isFollower(); follower != c.wasFollower {
-				c.wasFollower = follower
-				if !follower {
-					// promoted: subscribe to the roots now rather than at the inactivity timeout
-					if err := c.sendHandshake(ctx); err != nil && c.log != nil {
-						c.log.ErrorContext(ctx, "handshake after promotion failed", slog.String("err", err.Error()))
-					}
-				}
-			}
+			c.checkRole(ctx)
 			c.reportPending(ctx)
 			last := time.UnixMilli(c.lastCertResponseTime.Load())
 			if time.Since(last) > c.opts.InactivityTimeout {

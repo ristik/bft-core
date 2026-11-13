@@ -184,6 +184,9 @@ func (n *Node) SetFollowerRole(nonActive func() bool) {
 	n.round.SetFollowerRole(nonActive)
 }
 
+// RoleChanged tells the node that its follower predicate may have changed (see BFTClient.RoleChanged).
+func (n *Node) RoleChanged() { n.client.RoleChanged() }
+
 // FollowCertificate offers a certificate from a non-root follow source (see BFTClient.FollowCertificate).
 func (n *Node) FollowCertificate(uc *types.UnicityCertificate, tr *certification.TechnicalRecord) bool {
 	return n.client.FollowCertificate(uc, tr)

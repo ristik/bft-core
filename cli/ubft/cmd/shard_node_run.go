@@ -1238,6 +1238,7 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 					if tb, tbErr := q3Trust.Verified().GetByEpoch(ctx, epoch); tbErr == nil {
 						follower.addRoots(tb)
 					}
+					node.RoleChanged() // an activation naming this node promotes it now (same process, same state)
 					refreshArchivePolicy()
 				},
 			}
