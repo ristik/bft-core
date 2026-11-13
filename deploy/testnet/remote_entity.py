@@ -585,8 +585,19 @@ def archive_tar(generation, source, out=None):
             if record.is_dir() and record.name.startswith('v2-'):   # renamed into place when complete; .writing-* partials are skipped
                 try:
                     tar.add(record, arcname=record.name)
-                except FileNotFoundError:
+                except FileNotFoundError:   # migrated to the packed layout meanwhile: streamed from records/ below
                     continue
+        # the packed layout (bft-core#1049): one file per record, records/<hh>/v2-*, placed complete; .writing-* temporaries are skipped
+        records = archive / 'records'
+        for shard in sorted(records.iterdir()) if records.is_dir() else []:
+            if not shard.is_dir() or len(shard.name) != 2:
+                continue
+            for record in sorted(shard.iterdir()):
+                if record.is_file() and record.name.startswith('v2-'):
+                    try:
+                        tar.add(record, arcname=f'records/{shard.name}/{record.name}')
+                    except FileNotFoundError:
+                        continue
 
 
 def retire_plan(generation, entity):

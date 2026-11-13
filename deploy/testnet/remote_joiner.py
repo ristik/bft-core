@@ -68,25 +68,51 @@ ROOT = sys.argv[1] if len(sys.argv) > 1 else '/a'
 t = tarfile.open(fileobj=sys.stdin.buffer, mode='r|')
 added = kept = 0
 current = None
+def held(rec):
+    # a record the node has, in either archive layout (bft-core#1049): its directory, or its packed file records/<hh>/<rec>
+    return os.path.exists(os.path.join(ROOT, rec)) or os.path.exists(os.path.join(ROOT, 'records', rec[3:5], rec))
 def finish(rec):
     global added, kept
     if rec is None:
         return
     final, tmp = os.path.join(ROOT, rec), os.path.join(ROOT, '.seed-' + rec)
-    if os.path.exists(final):
+    if held(rec):
         shutil.rmtree(tmp, ignore_errors=True); kept += 1
     elif os.path.isdir(tmp):
         try:
             os.rename(tmp, final); added += 1
         except OSError:   # the running node wrote the same record meanwhile: its own copy stays
             shutil.rmtree(tmp, ignore_errors=True); kept += 1
+def packed(m, shard, rec):
+    # one packed record file: written and synced under a temporary name in its fan-out directory, then linked into place, which (unlike a
+    # rename) never replaces a record the node placed meanwhile
+    global added, kept
+    if len(shard) != 2 or rec[3:5] != shard or not m.isfile():
+        return
+    if held(rec):
+        kept += 1; return
+    d = os.path.join(ROOT, 'records', shard)
+    os.makedirs(d, mode=0o700, exist_ok=True)
+    tmp = os.path.join(d, '.seed-' + rec)
+    with open(tmp, 'wb') as out:
+        out.write(t.extractfile(m).read()); out.flush(); os.fsync(out.fileno())
+    os.chmod(tmp, 0o600)
+    try:
+        os.link(tmp, os.path.join(d, rec)); added += 1
+    except FileExistsError:
+        kept += 1
+    os.unlink(tmp)
 for m in t:
     parts = m.name.split('/')
+    if parts[0] == 'records' and len(parts) == 3 and parts[2].startswith('v2-'):
+        finish(current); current = None
+        packed(m, parts[1], parts[2])
+        continue
     if not parts[0].startswith('v2-') or len(parts) > 2:
         continue
     if parts[0] != current:
         finish(current); current = parts[0]
-    if os.path.exists(os.path.join(ROOT, current)):
+    if held(current):
         continue
     tmp = os.path.join(ROOT, '.seed-' + current)
     os.makedirs(tmp, mode=0o700, exist_ok=True)

@@ -378,6 +378,36 @@ class ArchiveSeed(unittest.TestCase):
             self.assertEqual((dest / 'v2-bb' / 'header.chunk').read_bytes(), b'v2-bb')
             self.assertEqual(sorted(p.name for p in dest.iterdir()), ['v2-aa', 'v2-bb'], 'no temporary directory left')
 
+    def test_packed_records_are_streamed_and_placed_without_replacing_either_layout(self):
+        """bft-core#1049: a record is one file, records/<hh>/v2-<hash>. The survivor streams both layouts; the seed places a packed record only
+        when the node holds it in neither layout, and never replaces a file."""
+        import io, subprocess, sys, tarfile as tf
+        with tempfile.TemporaryDirectory() as d:
+            gen, dest = Path(d) / 'gen', Path(d) / 'dest'
+            archive = gen / 'validator1' / 'archive'
+            for name in ('v2-aa1', 'v2-bb1', 'v2-cc1', '.writing-dd1'):
+                (archive / 'records' / name[3:5]).mkdir(parents=True, exist_ok=True)
+                (archive / 'records' / name[3:5] / name).write_bytes(name.encode())
+            (archive / 'v2-ee1').mkdir(parents=True)   # an unmigrated directory beside them
+            (archive / 'v2-ee1' / 'manifest').write_bytes(b'v2-ee1')
+            (dest / 'records' / 'aa').mkdir(parents=True)
+            (dest / 'records' / 'aa' / 'v2-aa1').write_bytes(b'mine')   # held packed
+            (dest / 'v2-bb1').mkdir(parents=True)                      # held as a directory
+            (dest / 'v2-bb1' / 'manifest').write_bytes(b'mine')
+            stream = io.BytesIO()
+            re_.archive_tar(gen, 1, stream)
+            names = tf.open(fileobj=io.BytesIO(stream.getvalue())).getnames()
+            self.assertIn('records/cc/v2-cc1', names)
+            self.assertNotIn('.writing-dd1', ' '.join(names), 'a temporary file is never streamed')
+            done = subprocess.run([sys.executable, '-c', rj.SEED, str(dest)], input=stream.getvalue(), capture_output=True, check=True)
+            self.assertEqual(done.stdout.decode().strip(), 'added 2 kept 2', done.stderr.decode())
+            self.assertEqual((dest / 'records' / 'aa' / 'v2-aa1').read_bytes(), b'mine', 'a packed record the node has is never touched')
+            self.assertFalse((dest / 'records' / 'bb' / 'v2-bb1').exists(), 'a record held as a directory is not placed packed beside it')
+            self.assertEqual((dest / 'records' / 'cc' / 'v2-cc1').read_bytes(), b'v2-cc1')
+            self.assertEqual((dest / 'v2-ee1' / 'manifest').read_bytes(), b'v2-ee1', 'a directory is placed as a directory')
+            left = [p.name for p in dest.rglob('.seed-*')]
+            self.assertEqual(left, [], 'no temporary left')
+
 
 class SourceCheck(unittest.TestCase):
     """The host runs the laptop-copied deploy/testnet with sudo: a copy is run only when it is the recorded clean commit and the laptop's own checkout."""
