@@ -288,6 +288,15 @@ func (s *Source) Record(index uint64) (rootrecords.Record, error) {
 
 // extend verifies the records up to the state's length against its tip and retains them.
 func (s *Source) extend(ctx context.Context, remote Remote, state rootrecords.State) error {
+	// A retention failure is recorded under the lock, with the extension published atomically; the external hook runs after the unlock
+	// (the deferred calls run in reverse: unlock first, then the report).
+	var report error
+	var hook func(error)
+	defer func() {
+		if report != nil && hook != nil {
+			hook(report)
+		}
+	}()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if state.Count == 0 {
@@ -297,9 +306,15 @@ func (s *Source) extend(ctx context.Context, remote Remote, state rootrecords.St
 		if s.log[state.Count-1].ID != state.Tip {
 			return fmt.Errorf("%w: the verified log differs from the log the origin authenticates", ErrAuth)
 		}
-		return s.recheck(state)
+		// the tip binds the covered prefix: its loaded records become usable once their closed epochs check
+		if err := s.checkLoaded(state, state.Count); err != nil {
+			return err
+		}
+		s.checked = max(s.checked, int(state.Count))
+		return nil
 	}
-	if err := s.recheck(state); err != nil {
+	// the whole loaded log is covered; it becomes usable only once the suffix below joins it and ends at the tip
+	if err := s.checkLoaded(state, uint64(len(s.log))); err != nil {
 		return err
 	}
 	var prev *rootrecords.Record
@@ -333,9 +348,11 @@ func (s *Source) extend(ctx context.Context, remote Remote, state rootrecords.St
 	}
 	if s.store != nil {
 		if err := s.store.AppendRecords(staged); err != nil {
-			s.mu.Unlock()
-			s.persistFailed(fmt.Errorf("retaining records %d..: %w", staged[0].Index, err))
-			s.mu.Lock()
+			report = fmt.Errorf("retaining records %d..: %w", staged[0].Index, err)
+			if s.persistErr == nil {
+				s.persistErr = report
+			}
+			hook = s.onPersistErr
 		}
 	}
 	s.log = append(s.log, staged...)
@@ -343,17 +360,13 @@ func (s *Source) extend(ctx context.Context, remote Remote, state rootrecords.St
 	return nil
 }
 
-// recheck authenticates the closed-epoch field of the loaded records the state covers (s.mu held). The state's tip already binds their
-// identifiers: the chain was verified at load and its last covered record is the tip.
-func (s *Source) recheck(state rootrecords.State) error {
-	end := min(uint64(len(s.log)), state.Count)
+// checkLoaded authenticates the closed-epoch field of the not yet usable loaded records below end (s.mu held). It changes nothing: the
+// caller makes them usable only once the chain they belong to binds to the cut's tip.
+func (s *Source) checkLoaded(state rootrecords.State, end uint64) error {
 	for i := uint64(s.checked); i < end; i++ {
 		if err := authenticateClosedEpoch(s.log[i], state); err != nil {
 			return err
 		}
-	}
-	if int(end) > s.checked {
-		s.checked = int(end)
 	}
 	return nil
 }
