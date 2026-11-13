@@ -45,6 +45,8 @@ type (
 		KeyPair               *PeerKeyPair    // keypair for the peer.
 		BootstrapPeers        []peer.AddrInfo // a list of seed peers to connect to.
 		BootstrapConnectRetry *BootstrapConnectRetry
+		// Gater, when set, gates every connection (see RoleGater).
+		Gater *RoleGater
 	}
 
 	// BootstrapConnectRetry contains the number of times to retry connecting to bootstrap peers and the delay between retries.
@@ -123,6 +125,9 @@ func newPeer(ctx context.Context, conf *PeerConfiguration, log *slog.Logger, pro
 			return res
 		})
 		opts = append(opts, addrsFactory)
+	}
+	if conf.Gater != nil {
+		opts = append(opts, libp2p.ConnectionGater(conf.Gater))
 	}
 	opts = append(opts, extra...)
 	h, err := libp2p.New(opts...)

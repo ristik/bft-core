@@ -24,6 +24,7 @@ import (
 	"github.com/ainvaltin/httpsrv"
 	"github.com/ethereum/go-ethereum/common"
 	libp2ppeer "github.com/libp2p/go-libp2p/core/peer"
+	libp2ppeerstore "github.com/libp2p/go-libp2p/core/peerstore"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/spf13/cobra"
@@ -318,6 +319,7 @@ type shardNodeRunFlags struct {
 	JournalBytes         int64
 	ArchiveStore         string
 	ArchiveReplicas      []string
+	FollowSources        []string // non-root bootstrap peers; set, roots are refused while this node is not active
 	ArchivePrune         bool
 	TrustHistoryProfile2 bool
 	UTBGenesisFile       string // enables the signed trust-base entry (UTB) profile: the canonical genesis entry (trust-base utb-genesis)
@@ -440,6 +442,8 @@ protocol and docs/engine-api-adapter-plan.md for how this command's pieces fit t
 		"maximum retained hot journal bytes with --execution-journal; pruning requires --archive-prune")
 	cmd.Flags().StringVar(&flags.ArchiveStore, "archive-store", "",
 		"local certified archive directory; requires --execution-journal. Replicas are derived from the shard's validators (the next three after this node in peer-ID order, any two sufficing) unless exactly two --archive-replica peer IDs are given")
+	cmd.Flags().StringSliceVar(&flags.FollowSources, "follow-source", nil,
+		"libp2p multiaddress of a non-root peer (shard validator or archive replica) to bootstrap from while this node is not an active validator; with it set, root connections are refused until activation")
 	cmd.Flags().StringSliceVar(&flags.ArchiveReplicas, "archive-replica", nil,
 		"explicit replica peer ID; set exactly twice with --archive-store to replace the derived replica set with this fixed pair (both required)")
 	cmd.Flags().BoolVar(&flags.ArchivePrune, "archive-prune", false,
@@ -614,13 +618,30 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 		Count: flags.BootstrapConnectRetryCount,
 		Delay: flags.BootstrapConnectRetryDelay,
 	}
-	peerConf, err := network.NewPeerConfiguration(flags.Address, flags.AnnounceAddresses, authKeyPair, bootNodes, bootstrapConnectRetry)
+	followSources, err := getBootStrapNodes(flags.FollowSources)
+	if err != nil {
+		return fmt.Errorf("follow sources parameter error: %w", err)
+	}
+	// A root-free follower bootstraps from its follow sources only and keeps every known root closed while it is not active (the role is
+	// read on each connection: activation opens the roots without a restart). The roots' addresses are still learned, for that moment.
+	follower := newRootFreeRole(len(followSources) != 0, bootNodes, trustBases)
+	peerBoot := bootNodes
+	if follower.enabled {
+		peerBoot = followSources
+	}
+	peerConf, err := network.NewPeerConfiguration(flags.Address, flags.AnnounceAddresses, authKeyPair, peerBoot, bootstrapConnectRetry)
 	if err != nil {
 		return fmt.Errorf("creating peer configuration: %w", err)
 	}
+	peerConf.Gater = &network.RoleGater{Deny: follower.deny}
 	peer, err := network.NewPeer(ctx, peerConf, flags.observe.Logger(), flags.observe.PrometheusRegisterer())
 	if err != nil {
 		return fmt.Errorf("creating peer: %w", err)
+	}
+	if follower.enabled {
+		for _, root := range bootNodes {
+			peer.Network().Peerstore().AddAddrs(root.ID, root.Addrs, libp2ppeerstore.PermanentAddrTTL)
+		}
 	}
 
 	shardNet, err := network.NewShardNetwork(peer, flags.observe, network.DefaultShardNetworkOptions)
@@ -807,6 +828,7 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 	if err != nil {
 		return fmt.Errorf("deriving the shard peers: %w", err)
 	}
+	follower.setRole(activePeers.Member)
 	// Every shard-membership consumer (block dissemination, the archive and journal servers, the journal suffix and evidence providers)
 	// follows this set: the genesis validators until a verified assignment step is installed, then the active assignment's.
 	disseminator, err := buildDisseminator(peer, flags.observe, shardConf.Validators, activePeers, flags.TrustHistoryProfile2)
@@ -1184,6 +1206,9 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 				Activate:             q3Trust.ActivateQ3,
 				Log: func(epoch uint64) {
 					flags.observe.Logger().Info("handoff activated", "rootEpoch", epoch, "q3", true)
+					if tb, tbErr := q3Trust.Verified().GetByEpoch(ctx, epoch); tbErr == nil {
+						follower.addRoots(tb)
+					}
 					refreshArchivePolicy()
 				},
 			}
@@ -1201,10 +1226,10 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 				return fmt.Errorf("q3 activation mirror: %w", mirrorErr)
 			}
 			mirror.Register(peer)
-			mirrorPeers := q3MirrorPeers(activePeers, archiveReplicas)
-			// a restore, or a node that is not a validator of the installed assignment, is a non-active party: mirrors only
+			mirrorPeers := q3MirrorPeers(activePeers, append(followSourceIDs(followSources), archiveReplicas...))
+			// a node that is not a validator of the installed assignment is a non-active party: mirrors only
 			q3Follower = shardQ3Follower(q3rt, trustBases[0].GetEpoch(), currentRoots, mirrorPeers,
-				func() bool { return flags.Restore || !activePeers.Member() },
+				func() bool { return !activePeers.Member() },
 				knownRoots(trustBases[0].GetEpoch(), q3rt.ActiveEpoch, q3Trust.Verified().GetByEpoch),
 				func(ctx context.Context, id libp2ppeer.ID, epoch uint64) (q3active.Bundle, error) {
 					return q3delivery.Request(ctx, peer, id, epoch)
