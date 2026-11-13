@@ -272,7 +272,7 @@ class Drive(rehearse.Rehearsal):
 
     def pending_remote(self):
         """Remote entities prepared for a join (their delegation admitted, their authority at the successor scope) but not yet members."""
-        return {i for i, r in self.remote.items() if r.state == 'prepared'}
+        return {i for i, r in self.remote.items() if r.state in ('preparing', 'prepared')}   # preparing: its authority may already run at the successor scope
 
     def root_info(self, i):
         status, body = self.transport.post(i, '/api/v1/q3/signers', b'{}')

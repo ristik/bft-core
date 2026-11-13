@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import socket
+import subprocess
 import tempfile
 import threading
 import unittest
@@ -515,6 +516,66 @@ class RemoteRestore(unittest.TestCase):
         d = self.drive({'services': {'shard5': 'running'}, 'urethHead': 1000, 'restoring': False}, caught_up=29)
         d.restore_remote(5)
         self.assertEqual(self.calls, [], 'a node already running at the head is left alone')
+
+
+class RootRecoverGuard(unittest.TestCase):
+    """astra #1029 finding 1: a root that may have signed is never rolled back to a pre-install backup."""
+
+    def laptop(self, state, follower=True):
+        lap = rj.Laptop.__new__(rj.Laptop)
+        lap.state, lap.entity, lap.project = dict(state, rootNodeId='R5'), 5, 'p'
+        lap.calls = []
+        lap.save = lambda: None
+        lap.vol = lambda name: f'p_{name}'
+        lap.services_state = lambda: {'root5': 'running'}
+        lap.root_post = lambda path, body=b'{}': (200, json.dumps({'follower': follower}).encode())
+        lap.dc = lambda *a, **k: lap.calls.append(('dc',) + a)
+        lap.one = lambda *a, **k: lap.calls.append(('one',))
+        return lap
+
+    def recover(self, lap):
+        original = rj.run
+        rj.run = lambda cmd, check=True, **k: subprocess.CompletedProcess(cmd, 0, '', '')
+        try:
+            return lap.op_root_recover(31)
+        finally:
+            rj.run = original
+
+    def test_a_root_that_was_ever_a_member_is_refused(self):
+        lap = self.laptop({'rootEverMember': '2026-11-13T01:31:59Z', 'rootBackups': {'p_root-pre-epoch-31': {'neverMember': True}}})
+        with self.assertRaises(rj.Failure):
+            self.recover(lap)
+        self.assertEqual(lap.calls, [], 'nothing stopped or overwritten')
+
+    def test_a_backup_not_taken_as_a_follower_is_refused(self):
+        lap = self.laptop({'rootBackups': {'p_root-pre-epoch-31': {'neverMember': False}}})
+        with self.assertRaises(rj.Failure):
+            self.recover(lap)
+        lap = self.laptop({})
+        with self.assertRaises(rj.Failure):
+            self.recover(lap)
+
+    def test_a_root_reporting_membership_now_is_refused_and_remembered(self):
+        lap = self.laptop({'rootBackups': {'p_root-pre-epoch-31': {'neverMember': True}}}, follower=False)
+        with self.assertRaises(rj.Failure):
+            self.recover(lap)
+        self.assertTrue(lap.state.get('rootEverMember'))
+
+
+class JoinExclusion(unittest.TestCase):
+    """astra #1029 finding 2: a joiner whose authority may run at the successor scope blocks every result that leaves it out."""
+
+    def test_preparing_and_prepared_are_pending(self):
+        d = hd.Drive.__new__(hd.Drive)
+
+        class R:
+            def __init__(self, state):
+                self.state = state
+        d.remote = {5: R('preparing'), 6: R('prepared'), 7: R('bonded'), 8: R('member'), 9: R('follower')}
+        self.assertEqual(d.pending_remote(), {5, 6})
+        import handoff_auto
+        self.assertIn('preparing', handoff_auto.JOINING, 'the timer stands down too')
+        self.assertIn('preparing', re_.STATES)
 
 
 if __name__ == '__main__':

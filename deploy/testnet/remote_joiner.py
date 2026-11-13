@@ -317,6 +317,12 @@ class Laptop:
             return cache['epoch']
         return cache.get('epoch') if cache.get('started') == started else None
 
+    def note_member(self):
+        """Once this root has been a member (it may have voted), its store is never rolled back (op_root_recover refuses)."""
+        if not self.state.get('rootEverMember'):
+            self.state['rootEverMember'] = now()
+            self.save()
+
     def status(self):
         services = self.services_state()
         out = {'entity': self.entity, 'services': services, 'restoring': (self.home / 'compose.restore.json').is_file(), 'rootNodeId': self.state['rootNodeId'], 'evmNodeId': self.state['evmNodeId'],
@@ -331,6 +337,9 @@ class Laptop:
                     out[key] = data.get('follower') if key == 'follower' and data else data
                 except (Failure, ValueError, subprocess.TimeoutExpired):
                     out[key] = None
+            if out.get('follower') is False or (isinstance(out.get('signers'), dict) and self.state['rootNodeId'] in
+                                                [x.get('nodeId') for x in out['signers'].get('signers') or []]):
+                self.note_member()
             if isinstance(out.get('signers'), dict):
                 out['epoch'], out['round'] = out['signers'].get('epoch'), out['signers'].get('round')
                 out['signers'] = len(out['signers'].get('signers') or [])
@@ -429,6 +438,15 @@ class Laptop:
         self.dc('stop', f'root{j}')
         backup = self.vol(f'root-pre-epoch-{epoch}')
         if run(['docker', 'volume', 'inspect', backup], check=False).returncode:
+            try:
+                code, body = self.root_post('/api/v1/q3/status')
+                follower = code == 200 and json.loads(body).get('follower') is True and not self.state.get('rootEverMember')
+            except (Failure, ValueError, subprocess.TimeoutExpired):
+                follower = False   # unknown: counted as a possible member (never recoverable from this backup)
+            if not follower:
+                self.note_member()
+            self.state.setdefault('rootBackups', {})[backup] = {'at': now(), 'neverMember': follower}
+            self.save()
             run(['docker', 'volume', 'create', backup])
             self.one(self.node_image, ['-c', 'cp -a /state/. /backup/'], [f'{self.vol("root")}:/state:ro', f'{backup}:/backup'], user='0:0', entrypoint='sh')
         self.dc('up', '-d', '--no-deps', '--force-recreate', f'root{j}', extra=[override])
@@ -443,6 +461,16 @@ class Laptop:
         backup = self.vol(f'root-pre-epoch-{epoch}')
         if run(['docker', 'volume', 'inspect', backup], check=False).returncode:
             raise Failure(f'no backup volume {backup}')
+        # astra's review of #1029, finding 1: the store holds the safety module's record of what the root key signed; rolling it back could let the key
+        # vote twice. Only a root that was never a member (it never signed) is recovered, from a backup taken while it was a follower
+        if self.state.get('rootEverMember'):
+            raise Failure(f'refused: this root has been a member since {self.state["rootEverMember"]} (it may have voted); its store is never rolled back')
+        if not (self.state.get('rootBackups') or {}).get(backup, {}).get('neverMember'):
+            raise Failure(f'refused: {backup} is not recorded as taken while this root was a follower that never signed')
+        code, body = self.root_post('/api/v1/q3/status') if self.services_state().get(f'root{j}') == 'running' else (0, b'')
+        if code == 200 and json.loads(body).get('follower') is False:
+            self.note_member()
+            raise Failure('refused: the root reports itself a member now')
         self.dc('stop', f'root{j}')
         self.one(self.node_image, ['-c', 'find /state -mindepth 1 -maxdepth 1 -exec rm -rf {} + && cp -a /backup/. /state/'],
                  [f'{self.vol("root")}:/state', f'{backup}:/backup:ro'], user='0:0', entrypoint='sh')

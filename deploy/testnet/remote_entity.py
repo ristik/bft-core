@@ -55,7 +55,7 @@ PORTS = {
     'agent': 28700,         # Mac 127.0.0.1:28700 (remote_joiner.py agent)               <-ssh -R- <sock-dir>/agent.sock
 }
 GENESIS_ENTITIES = (1, 2, 3, 4)
-STATES = ('follower', 'registered', 'bonded', 'prepared', 'member', 'retiring', 'retired')   # follower: known to the host, keeping up, not joining (the timer does not stand down)
+STATES = ('follower', 'registered', 'bonded', 'preparing', 'prepared', 'member', 'retiring', 'retired')   # preparing: written under drive.lock BEFORE the authority starts at the successor scope   # follower: known to the host, keeping up, not joining (the timer does not stand down)
 BOND_UNIT = 100 * 10 ** 18
 GAS = 2 * 10 ** 18
 NAME = re.compile(r'^handoff/[A-Za-z0-9][A-Za-z0-9._-]*$')
@@ -457,6 +457,9 @@ class Join:
         if r.state == 'member':
             say('already a member: nothing to do')
             return 0
+        if r.state == 'preparing':
+            raise RuntimeError('a prepare was interrupted (state preparing): the authority may already run at the successor scope and the admit may or may not have '
+                               'landed. Not resumed automatically: check isIndexed and the authority, then set the state by hand (prepared or bonded)')
         if r.state == 'follower':
             if self.dry:
                 say('[dry-run] would start the join: state follower -> registered (the unattended timer stands down from here)')
@@ -523,7 +526,21 @@ class Join:
                 if self.dry:
                     say('[dry-run] would prepare now: trust base, the authority at its scope, admitDelegation')
                     return 0
-                self.prepare(ident)
+                lock = self.locked('prepare')
+                try:
+                    # re-checked under the lock: no drive runs now, and none can start before 'preparing' is on record
+                    if self.fresh_state() != 'bonded':
+                        raise RuntimeError(f'entity {self.entity} became {r.state} meanwhile: another join workflow? (one at a time)')
+                    if d.open_result():
+                        say('a result opened meanwhile: back to the quiet point')
+                        continue
+                    rounds, seconds = self.due()
+                    if rounds < 160 or seconds < 90:
+                        continue
+                    self.save(state='preparing')
+                    self.prepare(ident)
+                finally:
+                    lock.close()
                 break
         # a drive of the join that stopped after its Prepare (the journal's unfinished drive) is resumed, whatever result is open now
         unfinished = self.hd.Journal(self.gen / 'handoff' / 'log.jsonl').last_drive()
@@ -590,6 +607,16 @@ class Join:
         """Bring the laptop entity to the CURRENT epoch without joining (it stays a follower, nothing is registered on chain): its root install-restarted to
         the epoch, its shard node restored at it (archive seeded from a host survivor first). A later join then only replays the blocks since."""
         d = self.d
+        lock = self.locked('catch-up')
+        try:
+            if self.fresh_state() not in ('follower', 'prepared'):
+                raise RuntimeError(f'entity {self.entity} is {self.r.state}: a catch-up runs only for a follower or a prepared joiner')
+            return self._catch_up()
+        finally:
+            lock.close()
+
+    def _catch_up(self):
+        d = self.d
         epochs = {i: d.root_info(i).get('epoch') for i in certifying_entities(d)}
         if len(set(epochs.values())) != 1:
             raise RuntimeError(f'the committee\'s roots are at different epochs {epochs}: a handoff is running, try again in a few minutes')
@@ -601,6 +628,24 @@ class Join:
         say(f'caught up to epoch {current} in {time.monotonic() - started:.0f} s: root activeEpoch {st.get("activeEpoch")}, execution client {st.get("urethHead")}, '
             f'chain {int(d.ureth(1, "eth_blockNumber"), 16)}, shard activated epoch {st.get("shardActivatedEpoch")}')
         return 0
+
+    def locked(self, what):
+        """The generation's handoff/drive.lock (handoff_drive.hold_lock, the lock every drive holds), waited for up to busy_wait: a join's prepare and a
+        catch-up exclude every handoff while they run (astra's review of #1029, finding 2)."""
+        deadline = time.monotonic() + self.busy_wait
+        while True:
+            handle = self.hd.hold_lock(self.gen)
+            if handle:
+                return handle
+            if time.monotonic() > deadline:
+                raise RuntimeError(f'{what}: another drive holds handoff/drive.lock for over {self.busy_wait} s')
+            say(f'{what}: a drive holds handoff/drive.lock; waiting')
+            time.sleep(10)
+
+    def fresh_state(self):
+        """This entity's state as the file says now (another process, a drive, may have changed it)."""
+        self.r.info = json.loads((info_dir(self.gen) / f'{self.entity}.json').read_text())
+        return self.r.state
 
     def prepare(self, ident):
         """The trust base of E+1 over the current committee and the joiner (signed by every member, the joiner on the laptop), the joiner's authority started at
