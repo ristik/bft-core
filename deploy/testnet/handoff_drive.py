@@ -673,8 +673,10 @@ class Drive(rehearse.Rehearsal):
                 journal.run('install', lambda i=i: self.remote[i].install_root(self.target), sub=f'root{i}')
                 continue
             journal.run('install', lambda i=i: self.install_root(i, files, base), sub=f'root{i}')
-        for i in roots:
+        for i in sorted(self.new):
             self.wait(f'root {i} certifies at epoch {self.target}', lambda i=i: self.root_epoch(i, self.transport) == self.target, 300)
+        for i in sorted(set(roots) - set(self.new)):   # a leaver installs the epoch (it holds the commit) but certifies nothing in it: it is a follower there
+            self.wait(f'the leaving root {i} installed epoch {self.target}', lambda i=i: self.follower_epoch(i) == self.target or self.root_epoch(i, self.transport) == self.target, 300)
         self.exec_in('root1', 'ubft', 'root', 'handoff', 'q3-activation', '--root-rpc', self.root_rpc, '--epoch', str(self.target), '--out', '/tmp/activation.json')
         record = json.loads(self.exec_in('root1', 'cat', '/tmp/activation.json'))
         (self.evh() / f'activation-record-{self.target}.json').write_text(json.dumps(record, indent=1) + '\n')
