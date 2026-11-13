@@ -267,6 +267,11 @@ class RemoteEntity:
     def restore_finish(self):
         return self.client.op('restore-finish', timeout=300)
 
+    def root_recover(self, epoch):
+        """An interrupted install of `epoch` (issue #1028: the restart's recovery runs before the record fetcher exists and crash-loops): the root's store
+        from its pre-install backup, the root recreated without the install flag."""
+        return self.client.op('root-recover', timeout=300, epoch=int(epoch))
+
     def start_authority(self, root_epoch, shard_epoch):
         return self.client.op('start-authority', timeout=180, root_epoch=int(root_epoch), shard_epoch=int(shard_epoch))
 
@@ -534,13 +539,8 @@ class Join:
         if ident not in members:
             raise RuntimeError(f'the result leaves the joiner (custody id {ident}) out: not driven (the drive refuses it while the joiner is prepared). '
                                'Look at the election\'s reason (lastAttemptResult) before anything else')
-        # the joiner's root and shard node brought to the current epoch (handoff_drive.catch_up_remote; the drive repeats it as a no-op): on a network past its
-        # first handoff this is the slow part (the shard node's restore fetches every archive record through the tunnel), so it can be run ahead of an audience
-        d.target, d.new, d.joiners = int(r.info['preparedFor']), sorted(set(certifying_entities(d)) | {self.entity}), {self.entity}
-        d.catch_up_remote(self.entity)
-        if self.stop_after == 'caught-up':
-            say(f'stopping after the catch-up (--stop-after caught-up): result {result} names the joiner and has to be driven within its window; `join` drives it')
-            return 0
+        # no catch-up here: the drive makes it after q3-candidate and the host entities' readiness (a follower is served root records and archive records
+        # only once a staged candidate names it, root_node.go:1010-1013, shard_node_run.go:948)
         rc = self.drive(result, '--require-member', str(self.entity))
         if rc != 0:
             raise RuntimeError(f'handoff_drive stopped (exit {rc}): rerun the same command (the drive resumes from handoff/log.jsonl)')
@@ -651,8 +651,7 @@ def main(argv=None):
             s.add_argument('--dry-run', action='store_true')
             s.add_argument('--source-digest', help='the laptop checkout\'s tree_digest (remote_joiner.py join passes it): refused when the deployed copy differs')
             s.add_argument('--allow-dirty', action='store_true', help='run a copy that is not the recorded, clean, committed one')
-            s.add_argument('--stop-after', choices=('bonded', 'caught-up'), help='bonded: fund, register and bond only; caught-up: also prepare, wait for the result '
-                           'naming the joiner and bring its root and shard node to the current epoch (ahead of an audience; the drive is the rest)')
+            s.add_argument('--stop-after', choices=('bonded',), help='bonded: fund, register and bond only (ahead of an audience; the rest is the timed part)')
     a = p.parse_args(argv)
     if a.action == 'relay-up':
         print(json.dumps(relay_up(a.generation, a.entity, a.sock_dir, a.script, a.uid), indent=1))

@@ -409,8 +409,26 @@ class Laptop:
             run(['docker', 'volume', 'create', backup])
             self.one(self.node_image, ['-c', 'cp -a /state/. /backup/'], [f'{self.vol("root")}:/state:ro', f'{backup}:/backup'], user='0:0', entrypoint='sh')
         self.dc('up', '-d', '--no-deps', '--force-recreate', f'root{j}', extra=[override])
-        self.wait(f'root {j} listens again', lambda: self.root_post('/api/v1/q3/signers')[0] in (200, 400, 409, 422, 503), 120)
+        # an install of many epochs fetches every activation bundle through the tunnel before the operator listener starts
+        self.wait(f'root {j} listens again', lambda: self.root_post('/api/v1/q3/signers')[0] in (200, 400, 409, 422, 503), 900)
         return {'backup': backup}
+
+    def op_root_recover(self, epoch):
+        """Issue #1028: after an interrupted install of `epoch` every restart fails in the Q3 recovery (it runs before the record fetcher is installed). The
+        store goes back to its pre-install backup (volume <project>_root-pre-epoch-N) and the root runs again without the install flag."""
+        j, epoch = self.entity, int(epoch)
+        backup = self.vol(f'root-pre-epoch-{epoch}')
+        if run(['docker', 'volume', 'inspect', backup], check=False).returncode:
+            raise Failure(f'no backup volume {backup}')
+        self.dc('stop', f'root{j}')
+        self.one(self.node_image, ['-c', 'find /state -mindepth 1 -maxdepth 1 -exec rm -rf {} + && cp -a /backup/. /state/'],
+                 [f'{self.vol("root")}:/state', f'{backup}:/backup:ro'], user='0:0', entrypoint='sh')
+        override = self.home / f'compose.install-epoch-{epoch}.json'
+        if override.exists():
+            override.rename(self.home / 'run' / f'{override.name}.failed-{int(time.time())}')
+        self.dc('up', '-d', '--no-deps', '--force-recreate', f'root{j}')
+        self.wait(f'root {j} listens again', lambda: self.root_post('/api/v1/q3/status')[0] == 200, 180)
+        return {'recovered': backup, 'epoch': self.root_epoch()}
 
     def op_authority_status(self):
         return json.loads(self.exec(f'authority{self.entity}', 'ubft', 'signing-authority', 'status', *OPERATOR).stdout)
@@ -539,7 +557,7 @@ class Laptop:
         return out
 
     OPS = {'status': 'op_status', 'root-post': 'op_root_post', 'logs': 'op_logs', 'put-network': 'op_put_network', 'trust-base-sign': 'op_trust_base_sign',
-           'evm-pop': 'op_evm_pop', 'sign-pop': 'op_sign_pop', 'readiness': 'op_readiness', 'install-root': 'op_install_root',
+           'evm-pop': 'op_evm_pop', 'sign-pop': 'op_sign_pop', 'readiness': 'op_readiness', 'install-root': 'op_install_root', 'root-recover': 'op_root_recover',
            'authority-status': 'op_authority_status', 'authority-step': 'op_authority_step', 'restore-start': 'op_restore_start', 'seed-archive': 'op_seed_archive', 'restore-finish': 'op_restore_finish', 'start-authority': 'op_start_authority', 'tx': 'op_tx'}
     READS = frozenset(('status', 'root-post', 'logs', 'authority-status'))
 
@@ -804,7 +822,7 @@ def main(argv=None):
     p.add_argument('--mac-host', default='host.docker.internal', help='how a container of the docker VM reaches the Mac\'s loopback (colima: host.docker.internal)')
     p.add_argument('--dry-run', action='store_true')
     p.add_argument('--allow-dirty', action='store_true', help='init/join: deploy or run a dirty, uncommitted or mismatched copy of deploy/testnet on the host')
-    p.add_argument('--stop-after', choices=('bonded', 'caught-up'), help='join: stop after the bond, or after the result names the joiner and its nodes caught up')
+    p.add_argument('--stop-after', choices=('bonded',), help='join: stop after the bond')
     p.add_argument('--funder', help='join: a directory ON THE HOST with keystore.json and password, the operator account that pays the owner\'s 100 UCT bond and gas '
                    '(default: the faucet account)')
     a = p.parse_args(argv)
