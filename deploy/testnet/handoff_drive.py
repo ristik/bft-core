@@ -454,7 +454,9 @@ class Drive(rehearse.Rehearsal):
         self.exec_in('root1', 'ubft', 'root', 'handoff', 'evm-context', '--root-rpc', self.root_rpc, '--out', '/tmp/context.json')
         context = work / f'{tag}-context.json'
         context.write_text(self.exec_in('root1', 'cat', '/tmp/context.json'))
-        ids = {i: (self.root_node_id(i), self.evm_node_id(i)) for i in self.new}
+        # the relayer resolves the incumbent committee's node ids too (a retiring member is in K but not elected): every entity of old and new is named,
+        # the possession proofs below are made by the elected ones only
+        ids = {i: (self.root_node_id(i), self.evm_node_id(i)) for i in sorted(set(self.old) | set(self.new))}
         subprocess.run(['chown', '-R', '10001:10001', str(work)], check=True)
         args = ['pos-relayer', 'proposal', *(['--reserved'] if reserved else []), '--eth-rpc', 'http://ureth1:8545', '--pos-deployment', '/deployment.json',
                 '--context', f'/work/{tag}-context.json', '--result-id', result, '--node-ids', ','.join(f'{r},{e}' for r, e in ids.values()),
@@ -465,7 +467,7 @@ class Drive(rehearse.Rehearsal):
         self.expect(run.returncode == 0, f'{tag}: pos-relayer proposal', run.stderr.strip()[-500:])
         proposal = work / f'{tag}-proposal'
         pops = []
-        for i, (_, evm) in ids.items():
+        for i, (_, evm) in ((i, ids[i]) for i in self.new):
             if i in self.remote:
                 (work / f'{tag}-pop-{i}.json').write_text(self.remote[i].evm_pop(context, proposal / 'validators.json', proposal / 'identities.json'))
                 pops.append(str(work / f'{tag}-pop-{i}.json'))
