@@ -9,9 +9,11 @@ import (
 	"github.com/libp2p/go-libp2p/core/peerstore"
 	"github.com/stretchr/testify/require"
 	"github.com/unicitynetwork/bft-core/archive"
+	"github.com/unicitynetwork/bft-core/configuredadmission"
 	testpeer "github.com/unicitynetwork/bft-core/internal/testutils/peer"
 	"github.com/unicitynetwork/bft-core/network"
 	"github.com/unicitynetwork/bft-core/network/protocol/certification"
+	"github.com/unicitynetwork/bft-core/shardnode"
 	"github.com/unicitynetwork/bft-go-base/types"
 )
 
@@ -93,4 +95,53 @@ func TestHeadFollowerOffersTheNewestVerifiedHeadOnly(t *testing.T) {
 	h.offered, h.Interval = nil, 10*time.Millisecond
 	require.NoError(t, h.Run(ctx))
 	require.Len(t, offered, 1, "an active node takes its certificates from the roots, not the follower")
+}
+
+// The continuous root-free follower end to end below the process: a node that starts empty follows the archive head, the journal
+// admission's archive catch-up executes the missing suffix, and as the chain grows the node extends from its retained journal and
+// execution state. A process restart in the middle keeps the state and continues: nothing is restored or wiped, and the executor's
+// finalized head only moves forward.
+func TestHeadFollowerFollowsIncrementallyFromRetainedState(t *testing.T) {
+	t.Parallel()
+	const total = 24
+	p := newPlanFixture(t, total)
+	p.serve(t, 1, 10)
+	n := newReturningNode(t, p, map[string]*archive.Store{replicaA: p.replica, replicaB: p.second})
+	recovery := n.recovery
+	var finalized []uint64
+	offer := func(uc *types.UnicityCertificate, tr *certification.TechnicalRecord) bool {
+		ctx := context.Background()
+		for calls := 0; calls < 60; calls++ {
+			err := recovery.AcquireForCertificate(ctx, uc, tr)
+			if err == nil {
+				head, err := recovery.Recover(ctx, uc)
+				require.NoError(t, err)
+				finalized = append(finalized, head.Number)
+				return true
+			}
+			require.ErrorIs(t, err, configuredadmission.ErrRecoveryUnavailable)
+			require.False(t, recovery.Terminal(err), "%v", err)
+		}
+		t.Fatal("the followed head was not reached")
+		return false
+	}
+	h := &HeadFollower{Binding: CertifiedBinding{Context: p.f.context, Subject: p.f.subject}, Host: p.source.Host, Limits: DefaultLimits(),
+		Sources: func() []peer.ID { return p.source.Replicas }, Offer: offer}
+
+	require.True(t, h.Poll(context.Background()))
+	require.EqualValues(t, 10, n.exec.finalized.Number, "followed from empty to the archive head")
+
+	p.serve(t, 11, 17)
+	require.True(t, h.Poll(context.Background()))
+	require.EqualValues(t, 17, n.exec.finalized.Number, "extended from the retained state")
+
+	// a process restart that keeps its state: a new coordinator over the same journal and execution client
+	recovery = &configuredadmission.ExecutionRecovery{Store: n.store, Context: p.f.context, JournalLimits: n.limits, Executor: n.exec, Gate: shardnode.NewFinalityGate(),
+		Genesis: p.genesis, Limits: n.recovery.Limits, FetchArchive: p.source.FetchSuffix, ArchiveCatchUp: &CatchUp{Source: p.source, Frontier: n.worker}}
+	h.offered = nil
+	p.serve(t, 18, total)
+	require.True(t, h.Poll(context.Background()))
+	require.EqualValues(t, total, n.exec.finalized.Number, "continued after the restart without a restore")
+	require.Equal(t, []uint64{10, 17, total}, finalized, "the finalized head only moves forward")
+	require.False(t, h.Poll(context.Background()), "nothing newer: nothing offered")
 }
