@@ -39,8 +39,9 @@ func NewLibP2PRootChainNetwork(self *Peer, capacity uint, sendCertificateTimeout
 
 	receiveProtocolDescriptions := []ReceiveProtocolDescription{
 		{
-			ProtocolID: ProtocolBlockCertification,
-			TypeFn:     func() any { return &certification.BlockCertificationRequest{} },
+			ProtocolID:   ProtocolBlockCertification,
+			TypeFn:       func() any { return &certification.BlockCertificationRequest{} },
+			MaxFrameSize: certification.MaxBlockCertificationRequestFrame,
 		},
 		{
 			ProtocolID: ProtocolHandshake,

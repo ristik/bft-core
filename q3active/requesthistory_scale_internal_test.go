@@ -1,11 +1,14 @@
 package q3active
 
 import (
+	"bytes"
 	"crypto"
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 	"github.com/unicitynetwork/bft-core/internal/testutils/q3fixture"
@@ -24,11 +27,19 @@ func (c requestScaleCandidates) HandoffCandidate(id []byte) ([]byte, error) {
 // one admitted. The history is the fixtures' own verified one: an install envelope carries at most q3format.MaxLinks links, so a chain
 // of hundreds of epochs is not installed through the journal here; what is measured is the request history over it.
 func requestScaleRuntime(t *testing.T, epochs int) (*Runtime, *q3fixture.Fixture) {
+	rt, fixtures := requestScaleChain(t, epochs)
+	return rt, fixtures[0]
+}
+
+// requestScaleChain is requestScaleRuntime with every fixture of the chain, first activation first.
+func requestScaleChain(t *testing.T, epochs int) (*Runtime, []*q3fixture.Fixture) {
 	t.Helper()
 	first := q3fixture.New(t, q3fixture.Options{Assignment: true})
 	tip := first
+	all := []*q3fixture.Fixture{first}
 	for e := 3; e <= epochs; e++ {
 		tip = q3fixture.New(t, q3fixture.Options{After: tip, LastLinkOnly: true})
+		all = append(all, tip)
 	}
 	require.NotNil(t, tip.History)
 	require.EqualValues(t, epochs, tip.History.Tip().Epoch())
@@ -37,7 +48,7 @@ func requestScaleRuntime(t *testing.T, epochs int) (*Runtime, *q3fixture.Fixture
 	for e := 2; e <= epochs; e++ {
 		rt.completed.Store(uint64(e), struct{}{})
 	}
-	return rt, first
+	return rt, all
 }
 
 func requestScaleAnchor(conf *types.PartitionDescriptionRecord) AnchorSource {
@@ -102,8 +113,141 @@ func TestRequestResolutionCostIsFlatInEpochs(t *testing.T) {
 		})
 		ns[epochs] = res.NsPerOp()
 		t.Logf("epochs=%d: %d ns/op, %d B/op, %d allocs/op", epochs, res.NsPerOp(), res.AllocedBytesPerOp(), res.AllocsPerOp())
+		cold := testing.Benchmark(func(b *testing.B) {
+			for range b.N {
+				fresh, err := rt.RequestHistory(RequestHistoryConfig{Candidates: requestScaleCandidates{string(id[:]): first.Candidate}, HashAlg: crypto.SHA256,
+					Network: q3fixture.Network, Version: 1, Anchor: requestScaleAnchor(first.ShardConf)})
+				require.NoError(t, err)
+				_, err = fresh.RequestChain(partition, types.ShardID{})
+				require.NoError(t, err)
+			}
+		})
+		t.Logf("epochs=%d: cold derivation %d ns/op, %d B/op, %d allocs/op", epochs, cold.NsPerOp(), cold.AllocedBytesPerOp(), cold.AllocsPerOp())
 	}
 	if os.Getenv("Q3_SCALE_EPOCHS") == "" {
 		require.Less(t, ns[34], 3*ns[2], "a resolution at 34 epochs costs about what it costs at 2")
+	}
+}
+
+// sliceHistory hides RequestChain: the resolver then validates the chain slice from the anchor on every resolution, as before #1032.
+type sliceHistory struct{ h *RequestHistory }
+
+func (s sliceHistory) Chain(p types.PartitionID, sh types.ShardID) ([]*storage.RequestActivation, error) {
+	return s.h.Chain(p, sh)
+}
+func (s sliceHistory) Network() uint64 { return s.h.Network() }
+func (s sliceHistory) Version() uint64 { return s.h.Version() }
+func (s sliceHistory) RootIdentity(round uint64) (uint64, []byte, error) {
+	return s.h.RootIdentity(round)
+}
+
+// The cached, incrementally derived chain resolves exactly the views a cold derivation validated from the anchor resolves: for every root
+// interval of the history (each a different authorising root identity), for collection and certification, and for two different parents.
+func TestCachedChainResolvesTheViewsOfAColdRebuild(t *testing.T) {
+	rt, fixtures := requestScaleChain(t, 12)
+	first := fixtures[0]
+	id := first.Body.Identity()
+	cfg := func() RequestHistoryConfig {
+		return RequestHistoryConfig{Candidates: requestScaleCandidates{string(id[:]): first.Candidate}, HashAlg: crypto.SHA256, Network: q3fixture.Network,
+			Version: 1, Anchor: requestScaleAnchor(first.ShardConf)}
+	}
+	cached, err := rt.RequestHistory(cfg())
+	require.NoError(t, err)
+	partition := q3fixture.PartitionID + 2
+	parent := requestScaleParent(t, first.ShardConf, partition)
+	other := requestScaleParent(t, first.ShardConf, partition)
+	other.RootHash = bytes.Repeat([]byte{7}, 32)
+	other.LastCR.UC.InputRecord.Hash = other.RootHash
+	resolved := 0
+	for epoch := uint64(1); epoch <= rt.History().Tip().Epoch(); epoch++ {
+		e, err := rt.History().ForEpoch(epoch)
+		require.NoError(t, err)
+		for _, round := range []uint64{e.Start() + 1, e.Start() + 3} {
+			for _, purpose := range []storage.RequestPurpose{storage.PurposeCollect, storage.PurposeCertify} {
+				for i, p := range []*storage.ShardInfo{parent, other} {
+					parentID := bytes.Repeat([]byte{byte(i + 1)}, 32)
+					fresh, err := rt.RequestHistory(cfg())
+					require.NoError(t, err)
+					want, werr := storage.ResolveParentView(sliceHistory{fresh}, nil, p, parentID, round, crypto.SHA256, purpose, nil)
+					got, gerr := storage.ResolveParentView(cached, nil, p, parentID, round, crypto.SHA256, purpose, nil)
+					require.Equal(t, werr == nil, gerr == nil, "epoch %d round %d: %v / %v", epoch, round, werr, gerr)
+					if werr != nil {
+						continue
+					}
+					resolved++
+					require.Equal(t, want.ViewKey(), got.ViewKey(), "epoch %d round %d purpose %d", epoch, round, purpose)
+					require.Equal(t, want.AssignmentKey(), got.AssignmentKey())
+					require.Equal(t, want.ExpectedTR(), got.ExpectedTR())
+					require.Equal(t, want.Threshold(), got.Threshold())
+					require.Equal(t, want.TotalWeight(), got.TotalWeight())
+				}
+			}
+		}
+	}
+	require.Greater(t, resolved, 40, "views of every root interval were compared")
+}
+
+// Readers resolving concurrently with activations (the history extended epoch by epoch) and recoveries (Invalidate) always get a chain
+// that is a prefix-consistent derivation of the history they read, and finish on the chain a fresh derivation produces. Run with -race.
+func TestRequestHistoryUnderConcurrentActivationAndRecovery(t *testing.T) {
+	rt, fixtures := requestScaleChain(t, 10)
+	first := fixtures[0]
+	id := first.Body.Identity()
+	cfg := RequestHistoryConfig{Candidates: requestScaleCandidates{string(id[:]): first.Candidate}, HashAlg: crypto.SHA256, Network: q3fixture.Network,
+		Version: 1, Anchor: requestScaleAnchor(first.ShardConf)}
+	// start at the first activation only, and replay the activations while readers run
+	rt.hist.Store(fixtures[0].History)
+	hist, err := rt.RequestHistory(cfg)
+	require.NoError(t, err)
+	partitions := []types.PartitionID{q3fixture.PartitionID + 1, q3fixture.PartitionID + 2, q3fixture.PartitionID + 3}
+	done := make(chan struct{})
+	var wg sync.WaitGroup
+	for r := 0; r < 4; r++ {
+		wg.Add(1)
+		go func(r int) {
+			defer wg.Done()
+			for i := 0; ; i++ {
+				select {
+				case <-done:
+					return
+				default:
+				}
+				p := partitions[(r+i)%len(partitions)]
+				c, err := hist.RequestChain(p, types.ShardID{})
+				if err != nil {
+					t.Errorf("resolution: %v", err)
+					return
+				}
+				acts := c.Activations()
+				for j := 1; j < len(acts); j++ {
+					if acts[j].PDRHash() == nil || len(acts[j].RootBody()) == 0 {
+						t.Errorf("incomplete entry %d", j)
+						return
+					}
+				}
+			}
+		}(r)
+	}
+	for i, f := range fixtures[1:] {
+		rt.hist.Store(f.History)
+		if i%3 == 2 {
+			hist.Invalidate()
+		}
+		time.Sleep(time.Millisecond)
+	}
+	close(done)
+	wg.Wait()
+	fresh, err := rt.RequestHistory(cfg)
+	require.NoError(t, err)
+	for _, p := range partitions {
+		want, err := fresh.Chain(p, types.ShardID{})
+		require.NoError(t, err)
+		got, err := hist.Chain(p, types.ShardID{})
+		require.NoError(t, err)
+		require.Len(t, got, len(want))
+		for i := range want {
+			require.Equal(t, want[i].RootBody(), got[i].RootBody())
+			require.Equal(t, want[i].PDRHash(), got[i].PDRHash())
+		}
 	}
 }

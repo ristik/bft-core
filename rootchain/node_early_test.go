@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto"
-	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -77,9 +77,10 @@ func TestNearFutureRequestIsReplayedOnTheCertificate(t *testing.T) {
 	f.setParent(1, f.pdr)
 	f.cm.res <- f.si.LastCR
 	select {
-	case ref := <-f.node.replay: // what the partition loop receives
-		require.Equal(t, shardRef{partition: 1, shard: types.ShardID{}}, ref)
-		f.node.replayEarly(ctx, ref)
+	case <-f.node.early.notify: // what the partition loop receives
+		refs := f.node.early.takeReady()
+		require.Equal(t, []shardRef{{partition: 1, shard: types.ShardID{}}}, refs)
+		f.node.replayEarly(ctx, refs[0])
 	case <-time.After(2 * time.Second):
 		t.Fatal("the certificate did not signal the held requests")
 	}
@@ -194,8 +195,8 @@ func TestHeldRequestAtAnActivationBoundaryIsJudgedUnderTheNewAssignment(t *testi
 	}
 }
 
-// The buffer's bounds: one request per node, a cap per shard and on shards, a round behind the held one is refused, a later round
-// replaces it, and an entry expires at its first deadline however often it is held again.
+// The buffer's bounds: one request per node and round, a cap per shard, on rounds per shard and on shards, a size cap per request and
+// a byte budget, and an entry expires at its first deadline however often it is held again.
 func TestEarlyRequestBufferBoundsAndExpiry(t *testing.T) {
 	nodes, _ := testutils.CreateTestNodes(t, 1)
 	now := time.Unix(1000, 0)
@@ -211,9 +212,8 @@ func TestEarlyRequestBufferBoundsAndExpiry(t *testing.T) {
 		require.NoError(t, b.hold(req(1, string(rune('a'+i)), 5), time.Time{}))
 	}
 	require.ErrorIs(t, b.hold(req(1, "overflow", 5), time.Time{}), errEarlyFull)
-	require.ErrorIs(t, b.hold(req(1, "late", 4), time.Time{}), errEarlyBehind)
-	require.NoError(t, b.hold(req(1, "a", 6), time.Time{}), "a later round replaces the held one")
-	require.Equal(t, 1, b.len())
+	require.ErrorIs(t, b.hold(req(1, "a", 6), time.Time{}), errEarlyFull, "a newer round never displaces what is held")
+	require.Equal(t, earlyRequestsPerShard, b.len())
 
 	for p := 2; p <= earlyRequestShards; p++ {
 		require.NoError(t, b.hold(req(types.PartitionID(p), "a", 5), time.Time{}))
@@ -223,13 +223,136 @@ func TestEarlyRequestBufferBoundsAndExpiry(t *testing.T) {
 	// expiry at the first deadline, also across a take and a re-hold
 	now = now.Add(earlyRequestTTL / 2)
 	taken := b.take(1, types.ShardID{})
-	require.Len(t, taken, 1)
+	require.Len(t, taken, earlyRequestsPerShard)
 	require.NoError(t, b.hold(taken[0].req, taken[0].deadline))
 	now = now.Add(earlyRequestTTL/2 + time.Millisecond)
 	require.Zero(t, b.len(), "everything expired")
+	require.Zero(t, b.bytes, "and its bytes are released")
 	require.Empty(t, b.shardsHeld())
 	require.Error(t, b.hold(taken[0].req, taken[0].deadline), "an expired entry is never held again")
-	require.True(t, errors.Is(b.hold(req(1, "a", 5), time.Time{}), nil), "the buffer is usable after expiry")
+	require.NoError(t, b.hold(req(1, "a", 5), time.Time{}), "the buffer is usable after expiry")
+}
+
+// Two rounds per shard at most, each its own set: a request for the round after the held one (the context advanced before the held set
+// was replayed) is held beside it, a third round is refused, and the held set is replayed first.
+func TestEarlyRequestBufferKeepsAHeldRoundBesideANewerOne(t *testing.T) {
+	nodes, _ := testutils.CreateTestNodes(t, 1)
+	b := newEarlyRequests()
+	req := func(node string, round uint64) *certification.BlockCertificationRequest {
+		r := &certification.BlockCertificationRequest{PartitionID: 1, NodeID: node, InputRecord: &types.InputRecord{Version: 1, RoundNumber: round,
+			PreviousHash: []byte{1}, Hash: []byte{2}, BlockHash: []byte{3}, SummaryValue: []byte{4}, Timestamp: 1}}
+		require.NoError(t, r.Sign(nodes[0].Signer))
+		return r
+	}
+	for _, n := range []string{"a", "b", "c"} {
+		require.NoError(t, b.hold(req(n, 5), time.Time{}))
+	}
+	require.NoError(t, b.hold(req("a", 6), time.Time{}))
+	require.ErrorIs(t, b.hold(req("a", 7), time.Time{}), errEarlyFull)
+	taken := b.take(1, types.ShardID{})
+	require.Len(t, taken, 4, "the held quorum of round 5 is intact")
+	for i := 0; i < 3; i++ {
+		require.EqualValues(t, 5, taken[i].req.IRRound(), "the older round first")
+	}
+	require.EqualValues(t, 6, taken[3].req.IRRound())
+}
+
+// A request whose encoding is larger than the per-request bound (its proof is verified only at admission) is not held, and the byte
+// budget bounds what all held requests may carry.
+func TestEarlyRequestBufferBoundsTheBytesItHolds(t *testing.T) {
+	nodes, _ := testutils.CreateTestNodes(t, 1)
+	b := newEarlyRequests()
+	req := func(partition types.PartitionID, proof int) *certification.BlockCertificationRequest {
+		r := &certification.BlockCertificationRequest{PartitionID: partition, NodeID: fmt.Sprintf("n%d", partition), InputRecord: &types.InputRecord{Version: 1, RoundNumber: 5,
+			PreviousHash: []byte{1}, Hash: []byte{2}, BlockHash: []byte{3}, SummaryValue: []byte{4}, Timestamp: 1}, ZkProof: make([]byte, proof)}
+		require.NoError(t, r.Sign(nodes[0].Signer))
+		return r
+	}
+	require.ErrorIs(t, b.hold(req(1, 8<<20), time.Time{}), errEarlyTooLarge, "an 8 MB proof is never retained unverified")
+	require.Zero(t, b.len())
+	near := earlyRequestMaxBytes - 4096
+	n := 0
+	for p := types.PartitionID(1); ; p++ {
+		err := b.hold(req(p, near), time.Time{})
+		if err != nil {
+			require.ErrorIs(t, err, errEarlyFull)
+			break
+		}
+		n++
+	}
+	require.LessOrEqual(t, b.bytes, earlyRequestBudget)
+	require.Equal(t, earlyRequestBudget/earlyRequestMaxBytes, n, "the budget, not the shard count, bounds large requests")
+
+	// one signer's bytes over all shards are bounded on their own
+	s := newEarlyRequests()
+	held := 0
+	for p := types.PartitionID(1); p <= 10; p++ {
+		r := req(p, near)
+		r.NodeID = "one"
+		require.NoError(t, r.Sign(nodes[0].Signer))
+		if err := s.hold(r, time.Time{}); err != nil {
+			require.ErrorIs(t, err, errEarlyFull)
+			break
+		}
+		held++
+	}
+	require.Equal(t, earlyRequestsPerSigner/earlyRequestMaxBytes, held, "the signer budget")
+}
+
+// epochCM is the fixture's manager with an installed root epoch.
+type epochCM struct {
+	*viewCM
+	epoch uint64
+}
+
+func (c *epochCM) InstalledRootEpoch() uint64 { return c.epoch }
+
+// The T6 failure mode (#1032): a request held in the closing root epoch must not be admitted after the activation, where it would be
+// certified without the transition the new epoch's first block carries. It is dropped at replay; one held and replayed within one
+// epoch is admitted.
+func TestAHeldRequestIsNeverCarriedAcrossARootActivation(t *testing.T) {
+	f := newFixture(t, fxOpts{})
+	cm := &epochCM{viewCM: f.cm, epoch: 1}
+	f.node.consensusManager = cm
+	_, _, reqs := f.futureRequests(9, 0, 1, 2)
+	for _, r := range reqs {
+		require.NoError(t, f.submit(r))
+	}
+	require.Equal(t, 3, f.node.early.len())
+	f.setParent(1, f.pdr)
+	cm.epoch = 2 // the commit that advanced the shard's context also activated the next root epoch
+	f.replay()
+	require.Zero(t, f.node.early.len())
+	require.Zero(t, f.counted(), "nothing of the closed epoch is counted")
+	require.Empty(t, f.certs())
+
+	// within one epoch the same flow certifies
+	g := newFixture(t, fxOpts{})
+	g.node.consensusManager = &epochCM{viewCM: g.cm, epoch: 2}
+	_, _, reqs = g.futureRequests(9, 0, 1, 2)
+	for _, r := range reqs {
+		require.NoError(t, g.submit(r))
+	}
+	g.setParent(1, g.pdr)
+	g.replay()
+	require.Len(t, g.certs(), 1)
+}
+
+// A newer request reaching the node before the replay of a ready held quorum does not displace it: after the commit the held quorum is
+// certified.
+func TestANewerRequestDoesNotEvictAReadyHeldQuorum(t *testing.T) {
+	f := newFixture(t, fxOpts{})
+	_, next, reqs := f.futureRequests(9, 0, 1, 2)
+	for _, r := range reqs {
+		require.NoError(t, f.submit(r))
+	}
+	f.setParent(1, f.pdr) // the commit applies, the replay has not run yet
+	// a request two rounds ahead of the held ones' predecessor: one ahead of the context now in force
+	newer := f.request(3, next, 9, func(r *certification.BlockCertificationRequest) { r.InputRecord.RoundNumber++ })
+	require.NoError(t, f.submit(newer), "held beside the ready set")
+	require.Equal(t, 4, f.node.early.len())
+	f.replay()
+	require.Len(t, f.certs(), 1, "the held quorum is certified")
 }
 
 // The legacy dispatch (no view-aware branch selected, before the first activation) holds a near-future request the same way.
@@ -263,4 +386,79 @@ func (f *fixture) viewEnabled() *storage.RequestRoundView {
 	f.cm.enabled = was
 	f.cm.mu.Unlock()
 	return v
+}
+
+// Ready signals are never lost: many shards becoming ready at once wake the loop once and are all drained.
+func TestReplaySignalsAreNotLost(t *testing.T) {
+	nodes, _ := testutils.CreateTestNodes(t, 1)
+	b := newEarlyRequests()
+	for p := types.PartitionID(1); p <= 50; p++ {
+		r := &certification.BlockCertificationRequest{PartitionID: p, NodeID: "a", InputRecord: &types.InputRecord{Version: 1, RoundNumber: 5,
+			PreviousHash: []byte{1}, Hash: []byte{2}, BlockHash: []byte{3}, SummaryValue: []byte{4}, Timestamp: 1}}
+		require.NoError(t, r.Sign(nodes[0].Signer))
+		require.NoError(t, b.hold(r, time.Time{}))
+	}
+	for p := types.PartitionID(1); p <= 60; p++ { // ten shards without held requests are not marked
+		b.markReady(p, types.ShardID{})
+	}
+	<-b.notify
+	require.Len(t, b.takeReady(), 50)
+	select {
+	case <-b.notify:
+		t.Fatal("one wake-up for all of them")
+	default:
+	}
+}
+
+// A refusal under a view that is no longer in force is judged again: an activation that admits a new member between the resolution
+// and the check does not refuse the member's request.
+func TestMembershipRefusalIsJudgedAgainUnderTheCurrentView(t *testing.T) {
+	f := newFixture(t, fxOpts{})
+	// the current assignment lacks node 3; the next one holds it
+	without := *f.pdr
+	without.Validators = f.pdr.Validators[:3]
+	f.setParent(0, &without)
+	oldSI, oldID := f.si, f.parentID
+	f.setParent(1, f.pdr)
+	next := f.view()
+	newSI, newID := f.si, f.parentID
+	req := f.request(3, next, 9, nil)
+	calls := 0
+	anchorOld, err := storage.NewRequestAnchor(&without, crypto.SHA256, fxRootEp, fxBody, fxVersion)
+	require.NoError(t, err)
+	anchorNew, err := storage.NewRequestAnchor(f.pdr, crypto.SHA256, fxRootEp, fxBody, fxVersion)
+	require.NoError(t, err)
+	hist := &switchingHistory{old: anchorOld, new: anchorNew}
+	parent := func(types.PartitionID, types.ShardID) (*storage.ShardInfo, []byte, *types.InputRecord, error) {
+		calls++
+		if calls == 1 {
+			return oldSI, oldID, nil, nil
+		}
+		hist.switched = true
+		return newSI, newID, nil, nil
+	}
+	resolver, err := consensus.NewRequestViewResolver(hist, crypto.SHA256, parent, nil)
+	require.NoError(t, err)
+	f.cm.resolver = resolver
+	require.NoError(t, f.submit(req))
+	require.Equal(t, 2, calls)
+	require.Equal(t, 1, f.counted())
+}
+
+// switchingHistory serves the old anchor until the activation switches it to the new one.
+type switchingHistory struct {
+	old, new *storage.RequestActivation
+	switched bool
+}
+
+func (h *switchingHistory) Chain(types.PartitionID, types.ShardID) ([]*storage.RequestActivation, error) {
+	if h.switched {
+		return []*storage.RequestActivation{h.new}, nil
+	}
+	return []*storage.RequestActivation{h.old}, nil
+}
+func (*switchingHistory) Network() uint64 { return fxNetwork }
+func (*switchingHistory) Version() uint64 { return fxVersion }
+func (*switchingHistory) RootIdentity(uint64) (uint64, []byte, error) {
+	return fxRootEp, fxBody, nil
 }

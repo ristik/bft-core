@@ -120,10 +120,11 @@ func (h *RequestHistory) Chain(partition types.PartitionID, shard types.ShardID)
 // immutable and covers every epoch of the verified history; an epoch that cannot be served is the same error Chain returns, and the
 // epochs before it stay derived.
 func (h *RequestHistory) RequestChain(partition types.PartitionID, shard types.ShardID) (*storage.RequestChain, error) {
-	hist := h.rt.History() // one immutable view for the whole derivation
 	key := types.PartitionShardID{PartitionID: partition, ShardID: shard.Key()}
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	// read under the lock: a reader that loaded the history before an Invalidate never stores a chain derived from it after the Invalidate
+	hist := h.rt.History() // one immutable view for the whole derivation
 	sc := h.chains[key]
 	if sc != nil && sc.hist != hist && !extends(hist, sc.claims) {
 		sc = nil // not an extension of what the chain was derived from: derive it again from the anchor
@@ -138,16 +139,31 @@ func (h *RequestHistory) RequestChain(partition types.PartitionID, shard types.S
 		h.chains[key] = sc
 	}
 	sc.hist = hist
+	// the missing epochs are derived in turn and appended in one Extend: a cold derivation copies the chain once, not once per epoch
 	tip := hist.Tip().Epoch()
+	var (
+		next   []*storage.RequestActivation
+		claims []q3format.Claim
+		last   = sc.chain.Tip()
+		failed error
+	)
 	for epoch := uint64(len(sc.claims)) + 1; epoch <= tip; epoch++ {
-		e, next, err := h.derive(hist, sc.chain, partition, shard, epoch)
+		e, act, err := h.derive(hist, last, partition, shard, epoch)
 		if err != nil {
-			return nil, err
+			failed = err
+			break
 		}
-		if sc.chain, err = sc.chain.Extend(next); err != nil {
+		next, claims, last = append(next, act), append(claims, e.Claim()), act
+	}
+	if len(next) > 0 {
+		chain, err := sc.chain.Extend(next...)
+		if err != nil {
 			return nil, errors.Join(ErrRequestHistory, err)
 		}
-		sc.claims = append(sc.claims, e.Claim())
+		sc.chain, sc.claims = chain, append(sc.claims, claims...)
+	}
+	if failed != nil {
+		return nil, failed // the epochs before it stay derived
 	}
 	return sc.chain, nil
 }
@@ -192,8 +208,7 @@ func (h *RequestHistory) anchor(hist *q3format.History, partition types.Partitio
 }
 
 // derive is the entry of the shard's chain for one activated epoch, following the chain derived so far.
-func (h *RequestHistory) derive(hist *q3format.History, chain *storage.RequestChain, partition types.PartitionID, shard types.ShardID, epoch uint64) (q3format.Entry, *storage.RequestActivation, error) {
-	last := chain.Tip()
+func (h *RequestHistory) derive(hist *q3format.History, last *storage.RequestActivation, partition types.PartitionID, shard types.ShardID, epoch uint64) (q3format.Entry, *storage.RequestActivation, error) {
 	e, err := hist.ForEpoch(epoch)
 	if err != nil {
 		// a missing interior epoch is not the end of the history (defense in depth: a verified history is contiguous, so this is
