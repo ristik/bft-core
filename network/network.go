@@ -136,11 +136,18 @@ func NewLibP2PNetwork(self *Peer, capacity uint, obs Observability) (*LibP2PNetw
 	return n, nil
 }
 
-// ReceivedChannel is the channel of received messages. A forwarder hands each queued message over, with or without an ingress budget, so
-// that Close behaves the same in both configurations: the forwarder stops and closes this channel, never the producers' queue. With a
-// budget, a message's reservation is released as the consumer takes it, whoever the consumer is.
+// ReceivedChannel is the channel of received messages. Without an ingress budget it is the buffered receive queue itself, so a consumer
+// sees the backlog (len) and can coalesce it. With an ingress budget registered, a forwarder hands each queued message over and releases
+// its reservation once the consumer takes it, whoever the consumer is; the channel is then unbuffered.
 func (n *LibP2PNetwork) ReceivedChannel() <-chan any {
 	n.outOnce.Do(func() {
+		n.ingressMu.Lock()
+		budgets := n.ingress
+		n.ingressMu.Unlock()
+		if len(budgets) == 0 {
+			n.out = n.receivedMsgs
+			return
+		}
 		out := make(chan any)
 		n.out = out
 		n.forwarding.Store(true)
@@ -331,9 +338,10 @@ func (n *LibP2PNetwork) drain() {
 	}
 }
 
-// Close stops the delivery of received messages, budgeted or not: the forwarder exits and closes the consumer's channel, and every message
-// queued now or received later is dropped (with its reservation released, under a budget). The producers' queue itself is never closed:
-// stream handlers may still be sending to it. It is idempotent.
+// Close stops the delivery of received messages: every message queued now or received later is dropped, with its reservation released
+// under an ingress budget. It is idempotent. The consumer's channel is closed only for a network with an ingress budget, once its
+// forwarder has stopped. An unbudgeted network's channel is the receive queue itself, which stream handlers may still be sending to, so it
+// is never closed: its consumer stops through its own context.
 func (n *LibP2PNetwork) Close() {
 	n.closeOnce.Do(func() {
 		close(n.done)

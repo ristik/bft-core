@@ -122,43 +122,47 @@ func TestCloseReleasesForwardedAndQueuedReservations(t *testing.T) {
 	nw.Close() // idempotent
 }
 
-// Without an ingress budget Close behaves the same (review r4): the consumer's channel is closed, queued messages are dropped, and nothing
-// is queued afterwards; the producers' queue is not closed under the stream handlers.
+// Without an ingress budget the documented contract (review r4/r5): Close drops what is queued and refuses later messages, but the consumer's
+// channel, the buffered receive queue itself, is neither replaced nor closed; its consumer stops through its own context.
 func TestReview1033UnbudgetedCloseLeavesConsumerOpen(t *testing.T) {
 	p := createPeer(t)
 	t.Cleanup(func() { _ = p.Close() })
 	nw, err := NewLibP2PNetwork(p, 8, observability.Default(t))
 	require.NoError(t, err)
 	out := nw.ReceivedChannel()
+	require.Equal(t, 8, cap(out), "the buffered receive queue itself: a consumer sees its backlog")
 	from := peer.ID("sender")
 	for _, s := range []string{"a", "b"} {
 		require.NoError(t, nw.receivedMsg(from, "test/u", &testStrMsg{Info: s}))
 	}
+	require.Equal(t, 2, len(out))
 	nw.Close()
-	deadline := time.After(time.Second)
-	for {
-		select {
-		case _, ok := <-out:
-			if !ok {
-				require.Error(t, nw.receivedMsg(from, "test/u", &testStrMsg{Info: "late"}), "nothing is queued after Close")
-				require.Empty(t, nw.receivedMsgs)
-				nw.Close() // idempotent
-				return
-			}
-		case <-deadline:
-			t.Fatal("an unbudgeted network's consumer channel stays open after Close")
-		}
+	require.Zero(t, len(out), "queued messages are dropped")
+	require.Error(t, nw.receivedMsg(from, "test/u", &testStrMsg{Info: "late"}), "nothing is queued after Close")
+	select {
+	case m, ok := <-out:
+		t.Fatalf("the unbudgeted consumer channel delivered %v (open %v) after Close", m, ok)
+	case <-time.After(100 * time.Millisecond): // open and empty, as documented
 	}
+	nw.Close() // idempotent
 }
 
-// Close before the consumer ever asked for its channel: the channel it gets afterwards is closed.
-func TestCloseBeforeReceivedChannel(t *testing.T) {
+// Close before the consumer of a budgeted network asked for its channel: the channel it gets afterwards is closed.
+func TestBudgetedCloseBeforeReceivedChannel(t *testing.T) {
 	p := createPeer(t)
 	t.Cleanup(func() { _ = p.Close() })
 	nw, err := NewLibP2PNetwork(p, 8, observability.Default(t))
 	require.NoError(t, err)
-	require.NoError(t, nw.receivedMsg(peer.ID("s"), "test/u", &testStrMsg{Info: "a"}))
+	budget := NewIngressBudget(1<<20, 1<<20)
+	require.NoError(t, nw.registerReceiveProtocol(ReceiveProtocolDescription{
+		ProtocolID: "test/b", TypeFn: func() any { return &testStrMsg{} }, MaxFrameSize: 1 << 10, Ingress: budget,
+	}))
+	msg := &testStrMsg{Info: "a"}
+	require.True(t, budget.reserve(peer.ID("s"), 10))
+	budget.queue(msg, peer.ID("s"), 10)
+	require.NoError(t, nw.receivedMsg(peer.ID("s"), "test/b", msg))
 	nw.Close()
+	require.Zero(t, budget.Used(), "the queued message is dropped and released")
 	select {
 	case _, ok := <-nw.ReceivedChannel():
 		require.False(t, ok)
