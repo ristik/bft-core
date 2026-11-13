@@ -933,6 +933,15 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 		role.subscribe(reportRole)
 		reportRole()
 	}
+	// the evidence the health report is about (bft-core#1057): this node, its network and shard, the installed configuration and the verified
+	// activation history; reported now and again on every installed assignment, completed activation and role change
+	bindingSource := shardBindingSource{self: peer.ID(), shard: shardConf, installed: activePeers.Installed, confHash: node.ShardConfForEpoch}
+	if q3rt != nil {
+		bindingSource.history = q3rt.HistoryEntries
+	}
+	reportBinding := func() { node.Health().UpdateBinding(bindingSource.binding()) }
+	role.subscribe(reportBinding)
+	reportBinding()
 
 	// The adapter authenticates certificates under the same per-epoch configuration set as the admission, not under a scan of every
 	// installed assignment. Set before Run.
@@ -1163,6 +1172,7 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 					if err := installVerifiedAssignment(node, activePeers, bundle, step); err != nil {
 						return err
 					}
+					reportBinding()
 					if err := noteJoinerStep(signing, bundle, step, node.ShardConfForEpoch); err != nil {
 						return err
 					}
@@ -1198,6 +1208,7 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 					}
 					flags.observe.Logger().Info("handoff activated", "rootEpoch", bundle.Body.Epoch)
 					refreshArchivePolicy()
+					reportBinding()
 					return nil
 				}}
 			if archiveLocal != nil {
@@ -1254,6 +1265,7 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 						return err
 					}
 					role.assignmentInstalled(activePeers.Member())
+					reportBinding()
 					return nil
 				},
 				NoteJoiner: func(view handoffdelivery.Bundle, step handoff.AssignmentStep) error {
@@ -1273,6 +1285,7 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 					// the activation is complete: publish its role (it opens only once the runtime has completed the epoch too)
 					role.activationCompleted(epoch, activePeers.Member())
 					refreshArchivePolicy()
+					reportBinding()
 				},
 			}
 			apply := installer.Apply

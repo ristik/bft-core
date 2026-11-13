@@ -42,8 +42,46 @@ type Health struct {
 	executionRecoveryDetail        string
 	role                           string
 	roleEpoch                      uint64
+	binding                        *Binding
 
 	updatedAt time.Time
+}
+
+// Binding is what this node's health report is evidence OF (bft-core#1057): which node, of which network and shard, under which installed
+// shard configuration and which verified activation history. Orchestration compares it with what it expects and with an incumbent's; it
+// authorizes nothing here, and the node's role (RoleLease) and its signing authority stay the only signing decisions.
+type Binding struct {
+	NodeID string `json:"nodeId"`
+	// SigKey is the key the installed configuration names for this node (hex), empty while it does not name it (Member false).
+	SigKey      string `json:"sigKey,omitempty"`
+	NetworkID   uint64 `json:"networkId"`
+	PartitionID uint64 `json:"partitionId"`
+	ShardID     string `json:"shardId"`
+	// ShardEpoch and ShardConfHash (hex) are the installed (verified) shard configuration's.
+	ShardEpoch    uint64 `json:"shardEpoch"`
+	ShardConfHash string `json:"shardConfHash,omitempty"`
+	Member        bool   `json:"member"`
+	// History is the verified activation history (root epoch and V3 body id, hex) from the pinned genesis to the tip: the authenticated
+	// ancestry a later epoch is checked against. Empty without a Q3 runtime.
+	History []HistoryEntry `json:"history,omitempty"`
+}
+
+// HistoryEntry is one epoch of the verified activation history.
+type HistoryEntry struct {
+	Epoch  uint64 `json:"epoch"`
+	BodyID string `json:"bodyId"`
+}
+
+// UpdateBinding replaces the binding evidence (a copy is kept).
+func (h *Health) UpdateBinding(b Binding) {
+	if h == nil {
+		return
+	}
+	b.History = append([]HistoryEntry(nil), b.History...)
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.binding = &b
+	h.updatedAt = time.Now()
 }
 
 func NewHealth() *Health {
@@ -76,8 +114,10 @@ type Snapshot struct {
 	ExecutionRecoveryDetail        string `json:"executionRecoveryDetail,omitempty"`
 	// Role is the published role ("active" or "follower") and RoleEpoch the completed activation epoch it was published at; empty without
 	// a role (a node that is not a root-free follower).
-	Role      string    `json:"role,omitempty"`
-	RoleEpoch uint64    `json:"roleEpoch,omitempty"`
+	Role      string `json:"role,omitempty"`
+	RoleEpoch uint64 `json:"roleEpoch,omitempty"`
+	// Binding names the node, network, shard, installed configuration and verified history the report is about; nil until set.
+	Binding   *Binding  `json:"binding,omitempty"`
 	UpdatedAt time.Time `json:"updatedAt"`
 
 	// SecondsSinceUpdate is computed at snapshot time, not stored — see
@@ -226,6 +266,11 @@ func (h *Health) Snapshot() Snapshot {
 		Role:                           h.role,
 		RoleEpoch:                      h.roleEpoch,
 		UpdatedAt:                      h.updatedAt,
+	}
+	if h.binding != nil {
+		b := *h.binding
+		b.History = append([]HistoryEntry(nil), b.History...)
+		s.Binding = &b
 	}
 	if !h.updatedAt.IsZero() {
 		s.SecondsSinceUpdate = time.Since(h.updatedAt).Seconds()
