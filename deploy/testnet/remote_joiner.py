@@ -649,8 +649,9 @@ def init(host, generation, home, mac_host, allow_dirty=False):
     version = source_version()
     if (version['dirty'] or not version['commit']) and not allow_dirty:
         raise Failure(f'{HERE} is dirty or not a git checkout (commit {version["commit"]}): the host runs this code with sudo; commit it, or pass --allow-dirty')
-    sources = sorted(p.name for p in HERE.glob('*.py'))
-    tarball = run(['tar', '--no-xattrs', '-C', str(HERE), '-cf', '-', *sources], text=False).stdout
+    sources = sorted(p.name for p in HERE.glob('*.py') if not p.name.startswith('.'))
+    tarball = subprocess.run(['tar', '--no-xattrs', '-C', str(HERE), '-cf', '-', *sources], capture_output=True, check=True,
+                             env=dict(os.environ, COPYFILE_DISABLE='1')).stdout   # no AppleDouble ._* members (macOS tar)
     ssh(host, f'mkdir -p {host_dir}/testnet && tar -C {host_dir}/testnet -xf -', input=tarball, text=False)
     record = dict(version, deployedAt=now(), deployedFrom=str(HERE))
     ssh(host, f'cat > {host_dir}/testnet/SOURCE.json', input=json.dumps(record, indent=1, sort_keys=True) + '\n')

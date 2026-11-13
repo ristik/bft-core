@@ -69,7 +69,7 @@ def tree_digest(directory):
     """SHA-256 over the sorted (name, SHA-256 of content) of the *.py files of `directory`: the code the host runs as root, as copied from the laptop."""
     import hashlib
     h = hashlib.sha256()
-    for path in sorted(Path(directory).glob('*.py')):
+    for path in sorted(p for p in Path(directory).glob('*.py') if not p.name.startswith('.')):   # not macOS tar's AppleDouble ._*.py
         h.update(path.name.encode() + b'\0' + hashlib.sha256(path.read_bytes()).hexdigest().encode() + b'\n')
     return h.hexdigest()
 

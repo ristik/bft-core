@@ -396,6 +396,8 @@ class SourceCheck(unittest.TestCase):
             digest = self.deployed(d)
             self.assertIsNone(re_.source_check(d, digest, False))
             self.assertEqual(re_.tree_digest(d), digest, 'SOURCE.json itself is not part of the digest')
+            (Path(d) / '._a.py').write_bytes(b'appledouble')
+            self.assertEqual(re_.tree_digest(d), digest, 'macOS tar\'s AppleDouble ._*.py files are not part of the digest')
 
     def test_dirty_edited_mismatched_or_unrecorded_copies_are_refused_unless_allowed(self):
         with tempfile.TemporaryDirectory() as d:
