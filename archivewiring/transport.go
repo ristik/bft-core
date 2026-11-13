@@ -136,6 +136,8 @@ func (s *Server) handlePublic(stream libp2pnetwork.Stream, id peer.ID) {
 		return
 	}
 	defer s.leavePublic(id)
+	// the socket deadline is the public budget's (a peer withholding its request blocks in readFrame, which no context interrupts)
+	_ = stream.SetDeadline(time.Now().Add(s.public.Deadline))
 	ctx, cancel := context.WithTimeout(s.ctx, s.public.Deadline)
 	defer cancel()
 	frame, err := readFrame(stream, archive.MaxRequestBytes+64)
