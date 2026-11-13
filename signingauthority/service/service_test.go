@@ -847,3 +847,32 @@ func rawCall(t *testing.T, dial Dialer, req wireRequest) (wireResponse, error) {
 	}
 	return response, nil
 }
+
+// Phase 2: the operator replaces the session while the shard process keeps running. A ReloadingClient refused as fenced reads the new
+// credential and asks again under it, in the same process; a credential that did not change is not a reason to retry, and a fenced step
+// after a reservation is not retried (the round abstains, the next one uses the new session).
+func TestAReloadingClientFollowsASessionReplacementInProcess(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t)
+	var mu sync.Mutex
+	current := f.admit(t).ex.credential
+	load := func() ([]byte, error) { mu.Lock(); defer mu.Unlock(); return append([]byte(nil), current...), nil }
+	client, err := NewReloadingClient(ClientConfig{Dial: f.clientDir}, load)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = client.Close() })
+	_, err = client.Reserve(ctx, f.request())
+	require.NoError(t, err)
+
+	replaced := f.admit(t) // the operator's replace-session (an advance-epoch fences the same way)
+	mu.Lock()
+	current = replaced.ex.credential
+	mu.Unlock()
+	authorization, err := client.Reserve(ctx, f.request())
+	require.NoError(t, err, "fenced, reloaded, and admitted under the new session without a restart")
+	require.EqualValues(t, 6, authorization.AssignedRound)
+
+	f.admit(t) // fenced again, but the credential file was not updated: refused, not retried forever
+	_, err = client.Reserve(ctx, f.request())
+	require.ErrorIs(t, err, signingauthority.ErrFenced)
+	require.ErrorIs(t, client.Sign(ctx), signingauthority.ErrFenced, "a fenced continuation is reported, not retried")
+}
