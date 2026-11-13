@@ -183,7 +183,7 @@ func TestQ3FollowerActiveAsksRootsThenMirrors(t *testing.T) {
 
 type stagedRuntime map[uint64]q3active.Bundle
 
-func (s stagedRuntime) StagedBundle(epoch uint64) (q3active.Bundle, bool, error) {
+func (s stagedRuntime) StagedBundleAt(_ context.Context, epoch uint64) (q3active.Bundle, bool, error) {
 	b, ok := s[epoch]
 	return b, ok, nil
 }

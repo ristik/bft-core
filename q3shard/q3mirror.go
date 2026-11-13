@@ -8,9 +8,10 @@ import (
 	"github.com/unicitynetwork/bft-core/q3active"
 )
 
-// StagedBundles is the part of the shard's q3active.Runtime a mirror serves from: the activations its journal staged, exactly as staged.
+// StagedBundles is the part of the shard's q3active.Runtime a mirror serves from: one activation its journal staged, exactly as staged, by an
+// indexed read (never a scan of the journal and never under its lock).
 type StagedBundles interface {
-	StagedBundle(epoch uint64) (q3active.Bundle, bool, error)
+	StagedBundleAt(ctx context.Context, epoch uint64) (q3active.Bundle, bool, error)
 }
 
 // ErrNotMirrored is returned for an epoch this node holds no staged activation of.
@@ -25,11 +26,11 @@ type MirrorProvider struct {
 }
 
 // Q3Bundle implements q3delivery.Provider.
-func (m MirrorProvider) Q3Bundle(_ context.Context, epoch uint64) (q3active.Bundle, error) {
+func (m MirrorProvider) Q3Bundle(ctx context.Context, epoch uint64) (q3active.Bundle, error) {
 	if m.Runtime == nil {
 		return q3active.Bundle{}, ErrNotMirrored
 	}
-	b, ok, err := m.Runtime.StagedBundle(epoch)
+	b, ok, err := m.Runtime.StagedBundleAt(ctx, epoch)
 	if err != nil {
 		return q3active.Bundle{}, fmt.Errorf("%w: epoch %d: %v", ErrNotMirrored, epoch, err)
 	}
