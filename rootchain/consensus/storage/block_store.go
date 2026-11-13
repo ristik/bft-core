@@ -9,6 +9,7 @@ import (
 	"github.com/unicitynetwork/bft-core/rootrecords"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 
 	"github.com/unicitynetwork/bft-core/evmroot"
 	"github.com/unicitynetwork/bft-core/network/protocol/abdrc"
@@ -28,7 +29,8 @@ type (
 		pos           *PosServices  // the P85 control executor's collaborators; nil refuses every control
 		prefixSource  RecordFetcher // where a checkpoint's missing source-log prefix is fetched from
 		lock          sync.RWMutex
-		leaders       LeaderInputs // the epoch policy and committee the leader-state leaf is derived from (#886)
+		rootID        atomic.Pointer[committedRootID] // the identity of the last committed root block read, computed once per root
+		leaders       LeaderInputs                    // the epoch policy and committee the leader-state leaf is derived from (#886)
 		log           *slog.Logger
 		utbBinding    UTBBinding   // nil unless the deployment has a UTB epoch; checked before a certificate is applied
 		utbRetain     UTBRetention // likewise; makes the endorsed entry durable before the certificate is applied
@@ -753,6 +755,41 @@ func (x *BlockStore) ShardInfo(partition types.PartitionID, shard types.ShardID)
 		return si
 	}
 	return nil
+}
+
+// committedRootID is the block hash of one committed root block.
+type committedRootID struct {
+	block *ExecutedBlock
+	id    []byte
+}
+
+// CommittedShardParent is the committed parent a shard's requests are collected against: the shard's state in the committed root
+// block and that block's identity, both from ONE read of the root (#1032), so a commit between two reads can never pair the state of
+// one block with the identity of another. A shard the root does not hold is a nil state. The identity is computed once per root.
+func (x *BlockStore) CommittedShardParent(partition types.PartitionID, shard types.ShardID) (*ShardInfo, []byte, error) {
+	x.lock.RLock()
+	defer x.lock.RUnlock()
+	root := x.blockTree.Root()
+	id, err := x.committedID(root)
+	if err != nil {
+		return nil, nil, err
+	}
+	return root.ShardState.States[types.PartitionShardID{PartitionID: partition, ShardID: shard.Key()}], id, nil
+}
+
+func (x *BlockStore) committedID(root *ExecutedBlock) ([]byte, error) {
+	if c := x.rootID.Load(); c != nil && c.block == root {
+		return bytes.Clone(c.id), nil
+	}
+	if root == nil || root.BlockData == nil {
+		return nil, fmt.Errorf("no committed root block")
+	}
+	id, err := root.BlockData.Hash(crypto.SHA256)
+	if err != nil {
+		return nil, err
+	}
+	x.rootID.Store(&committedRootID{block: root, id: id})
+	return bytes.Clone(id), nil
 }
 
 func (x *BlockStore) GetState() (*abdrc.StateMsg, error) {

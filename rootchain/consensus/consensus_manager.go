@@ -897,13 +897,11 @@ func (x *ConsensusManager) SelectRequestHistory(h storage.RequestHistory) error 
 	if h == nil {
 		return ErrNoRequestHistory
 	}
+	// the committed parent: the shard's state and the identity of its block from one read of the committed root (#1032), never two
+	// reads a commit can fall between
 	parent := func(p types.PartitionID, s types.ShardID) (*storage.ShardInfo, []byte, *types.InputRecord, error) {
-		state, err := x.blockStore.GetState()
-		if err != nil {
-			return nil, nil, nil, err
-		}
-		id, err := state.CommittedHead.Block.Hash(crypto.SHA256)
-		return x.blockStore.ShardInfo(p, s), id, nil, err
+		si, id, err := x.blockStore.CommittedShardParent(p, s)
+		return si, id, nil, err
 	}
 	resolver, err := NewRequestViewResolver(h, crypto.SHA256, parent, nil)
 	if err != nil {
@@ -1939,6 +1937,10 @@ func (x *ConsensusManager) onStateResponse(ctx context.Context, rsp *abdrc.State
 	x.blockStore = blockStore
 	x.irReqVerifier = reqVerifier
 	x.t2Timeouts = t2TimeoutGen
+	// nothing derived from the request history before the recovery is served after it without being derived again
+	if inv, ok := reqVerifier.RequestHistory().(interface{ Invalidate() }); ok {
+		inv.Invalidate()
+	}
 	// exit recovery status and replay buffered messages
 	x.log.DebugContext(ctx, "completed recovery")
 	triggerMsg := x.recovery.Clear()

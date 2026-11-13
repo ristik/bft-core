@@ -1,0 +1,266 @@
+package rootchain
+
+import (
+	"bytes"
+	"context"
+	"crypto"
+	"errors"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/require"
+
+	"github.com/unicitynetwork/bft-core/rootchain/testutils"
+	"github.com/unicitynetwork/bft-core/network/protocol/certification"
+	"github.com/unicitynetwork/bft-core/rootchain/consensus"
+	"github.com/unicitynetwork/bft-core/rootchain/consensus/storage"
+	"github.com/unicitynetwork/bft-go-base/types"
+)
+
+// futureRequests are the signed requests of the given nodes for the round after the current one: built under the view the shard's
+// next committed parent resolves to, then the fixture is put back on the current parent. The shard nodes hold the certificate of the
+// current round already; this root has not applied its commit yet.
+func (f *fixture) futureRequests(group byte, nodes ...int) (current, next *storage.RequestRoundView, reqs []*certification.BlockCertificationRequest) {
+	f.t.Helper()
+	current = f.view()
+	f.setParent(1, f.pdr)
+	next = f.view()
+	for _, i := range nodes {
+		reqs = append(reqs, f.request(i, next, group, nil))
+	}
+	f.setParent(0, f.pdr)
+	require.Equal(f.t, current.ViewKey(), f.view().ViewKey(), "premise: back on the current parent")
+	require.Equal(f.t, current.ExpectedTR().Round+1, next.ExpectedTR().Round, "premise: the requests are one round ahead")
+	return current, next, reqs
+}
+
+func (f *fixture) replay() {
+	f.node.replayEarly(context.Background(), shardRef{partition: 1, shard: types.ShardID{}})
+}
+
+// A request for round N+1 that arrives while the committed context is at N is held, counted for nothing and not answered; after the
+// commit it is admitted under the new context and counted toward the quorum.
+func TestNearFutureRequestIsHeldThenCountedAfterTheCommit(t *testing.T) {
+	f := newFixture(t, fxOpts{}) // unit: quorum 3 of 4
+	_, _, reqs := f.futureRequests(9, 0, 1, 2)
+	for _, r := range reqs {
+		require.NoError(t, f.submit(r), "held, not refused")
+	}
+	require.Zero(t, f.counted(), "nothing is counted before the matching context exists")
+	require.Empty(t, f.certs())
+	require.Zero(t, f.sentCount(), "no rejection carrying the old certificate is sent")
+	require.Equal(t, 3, f.node.early.len())
+
+	f.replay() // before the commit: still ahead, held again
+	require.Zero(t, f.counted())
+	require.Equal(t, 3, f.node.early.len())
+
+	f.setParent(1, f.pdr) // the commit of round N applies
+	f.replay()
+	require.Zero(t, f.node.early.len())
+	certs := f.certs()
+	require.Len(t, certs, 1, "the three held requests, revalidated under the new context, are the quorum")
+	require.Equal(t, consensus.Quorum, certs[0].Reason)
+	require.Len(t, certs[0].Requests, 3)
+}
+
+// The certificate of the commit wakes the held requests through the node's own loops.
+func TestNearFutureRequestIsReplayedOnTheCertificate(t *testing.T) {
+	f := newFixture(t, fxOpts{})
+	_, _, reqs := f.futureRequests(9, 0, 1, 2)
+	for _, r := range reqs {
+		require.NoError(t, f.submit(r))
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = f.node.handleConsensus(ctx) }()
+	f.setParent(1, f.pdr)
+	f.cm.res <- f.si.LastCR
+	select {
+	case ref := <-f.node.replay: // what the partition loop receives
+		require.Equal(t, shardRef{partition: 1, shard: types.ShardID{}}, ref)
+		f.node.replayEarly(ctx, ref)
+	case <-time.After(2 * time.Second):
+		t.Fatal("the certificate did not signal the held requests")
+	}
+	require.Len(t, f.certs(), 1)
+}
+
+// The parent is committed while the request is being resolved: the first view is the old one, a view resolved again is the new one.
+// The request is judged again under the new view and counted at once, never refused as stale.
+func TestCommitDuringResolutionIsResolvedAgain(t *testing.T) {
+	f := newFixture(t, fxOpts{})
+	old := *f
+	_, next, reqs := f.futureRequests(9, 0)
+	oldSI, oldID := old.si, old.parentID
+	f.setParent(1, f.pdr)
+	newSI, newID := f.si, f.parentID
+	anchor, err := storage.NewRequestAnchor(f.pdr, crypto.SHA256, fxRootEp, fxBody, fxVersion)
+	require.NoError(t, err)
+	calls := 0
+	parent := func(types.PartitionID, types.ShardID) (*storage.ShardInfo, []byte, *types.InputRecord, error) {
+		calls++
+		if calls == 1 {
+			return oldSI, oldID, nil, nil // read before the commit applied
+		}
+		return newSI, newID, nil, nil
+	}
+	resolver, err := consensus.NewRequestViewResolver(fxHistory{anchor}, crypto.SHA256, parent, nil)
+	require.NoError(t, err)
+	f.cm.resolver = resolver
+	require.NoError(t, f.submit(reqs[0]))
+	require.Equal(t, 2, calls, "resolved again after the stale refusal")
+	require.Equal(t, 1, f.counted(), "counted under the new view at once")
+	require.Zero(t, f.node.early.len(), "nothing held")
+	require.Equal(t, QuorumInProgress, f.node.incomingRequests.IsConsensusReceived(1, types.ShardID{}, next))
+}
+
+// Only an authentic request exactly one round ahead is held; everything else is refused as before.
+func TestOnlyAuthenticNextRoundRequestsAreHeld(t *testing.T) {
+	t.Run("two rounds ahead", func(t *testing.T) {
+		f := newFixture(t, fxOpts{})
+		v := f.view()
+		err := f.submit(f.request(0, v, 9, func(r *certification.BlockCertificationRequest) { r.InputRecord.RoundNumber += 2 }))
+		require.ErrorIs(t, err, storage.ErrStaleRequestContext)
+		require.Zero(t, f.node.early.len())
+		require.Equal(t, 1, f.sentCount())
+	})
+	t.Run("not a member", func(t *testing.T) {
+		f := newFixture(t, fxOpts{})
+		_, _, reqs := f.futureRequests(9, 0)
+		reqs[0].NodeID = "not-a-member"
+		require.ErrorIs(t, f.submit(reqs[0]), storage.ErrNodeNotInTrustBase)
+		require.Zero(t, f.node.early.len())
+	})
+	t.Run("bad signature", func(t *testing.T) {
+		f := newFixture(t, fxOpts{})
+		_, _, reqs := f.futureRequests(9, 0)
+		reqs[0].InputRecord.Hash = []byte{10}
+		require.Error(t, f.submit(reqs[0]))
+		require.Zero(t, f.node.early.len())
+	})
+	t.Run("a held request that is invalid under the committed context is refused then", func(t *testing.T) {
+		f := newFixture(t, fxOpts{})
+		cur := f.view()
+		// one round ahead but on another previous state: authentic, held, and refused once the context it claims is committed
+		req := f.request(0, cur, 9, func(r *certification.BlockCertificationRequest) {
+			r.InputRecord.RoundNumber++
+			r.InputRecord.PreviousHash = bytes.Repeat([]byte{7}, 32)
+		})
+		require.NoError(t, f.submit(req))
+		require.Equal(t, 1, f.node.early.len())
+		f.setParent(1, f.pdr)
+		f.replay()
+		require.Zero(t, f.node.early.len())
+		require.Zero(t, f.counted(), "full revalidation refuses it")
+		require.Equal(t, 1, f.sentCount(), "and the node is told why")
+	})
+}
+
+// Two different requests of one node for the same future round: the first stays held, the second is refused (and answered).
+func TestConflictingNearFutureRequestsAreRefused(t *testing.T) {
+	f := newFixture(t, fxOpts{})
+	_, next, reqs := f.futureRequests(9, 0)
+	other := f.request(0, next, 10, nil)
+	require.NoError(t, f.submit(reqs[0]))
+	require.NoError(t, f.submit(reqs[0]), "the same bytes again are idempotent")
+	err := f.submit(other)
+	require.ErrorIs(t, err, errEarlyConflict)
+	require.ErrorIs(t, err, storage.ErrStaleRequestContext)
+	require.Equal(t, 1, f.sentCount())
+	require.Equal(t, 1, f.node.early.len())
+	f.setParent(1, f.pdr)
+	f.replay()
+	require.Equal(t, 1, f.counted(), "the first request is the one counted")
+}
+
+// At an activation boundary the commit installs another assignment: the held request is judged under it, and a node the new
+// assignment does not hold is not counted.
+func TestHeldRequestAtAnActivationBoundaryIsJudgedUnderTheNewAssignment(t *testing.T) {
+	f := newFixture(t, fxOpts{})
+	_, _, reqs := f.futureRequests(9, 0, 1, 2, 3)
+	for _, r := range reqs {
+		require.NoError(t, f.submit(r))
+	}
+	// the successor assignment drops node 3
+	succ := *f.pdr
+	succ.Validators = f.pdr.Validators[:3]
+	f.setParent(1, &succ)
+	f.replay()
+	certs := f.certs()
+	require.Len(t, certs, 1, "three of the new three members are a quorum")
+	for _, r := range certs[0].Requests {
+		require.NotEqual(t, f.infos[3].NodeID, r.NodeID, "the dropped member is not counted")
+	}
+}
+
+// The buffer's bounds: one request per node, a cap per shard and on shards, a round behind the held one is refused, a later round
+// replaces it, and an entry expires at its first deadline however often it is held again.
+func TestEarlyRequestBufferBoundsAndExpiry(t *testing.T) {
+	nodes, _ := testutils.CreateTestNodes(t, 1)
+	now := time.Unix(1000, 0)
+	b := newEarlyRequests()
+	b.now = func() time.Time { return now }
+	req := func(partition types.PartitionID, node string, round uint64) *certification.BlockCertificationRequest {
+		r := &certification.BlockCertificationRequest{PartitionID: partition, NodeID: node, InputRecord: &types.InputRecord{Version: 1, RoundNumber: round,
+			PreviousHash: []byte{1}, Hash: []byte{2}, BlockHash: []byte{3}, SummaryValue: []byte{4}, Timestamp: 1}}
+		require.NoError(t, r.Sign(nodes[0].Signer))
+		return r
+	}
+	for i := range earlyRequestsPerShard {
+		require.NoError(t, b.hold(req(1, string(rune('a'+i)), 5), time.Time{}))
+	}
+	require.ErrorIs(t, b.hold(req(1, "overflow", 5), time.Time{}), errEarlyFull)
+	require.ErrorIs(t, b.hold(req(1, "late", 4), time.Time{}), errEarlyBehind)
+	require.NoError(t, b.hold(req(1, "a", 6), time.Time{}), "a later round replaces the held one")
+	require.Equal(t, 1, b.len())
+
+	for p := 2; p <= earlyRequestShards; p++ {
+		require.NoError(t, b.hold(req(types.PartitionID(p), "a", 5), time.Time{}))
+	}
+	require.ErrorIs(t, b.hold(req(types.PartitionID(earlyRequestShards+1), "a", 5), time.Time{}), errEarlyFull)
+
+	// expiry at the first deadline, also across a take and a re-hold
+	now = now.Add(earlyRequestTTL / 2)
+	taken := b.take(1, types.ShardID{})
+	require.Len(t, taken, 1)
+	require.NoError(t, b.hold(taken[0].req, taken[0].deadline))
+	now = now.Add(earlyRequestTTL/2 + time.Millisecond)
+	require.Zero(t, b.len(), "everything expired")
+	require.Empty(t, b.shardsHeld())
+	require.Error(t, b.hold(taken[0].req, taken[0].deadline), "an expired entry is never held again")
+	require.True(t, errors.Is(b.hold(req(1, "a", 5), time.Time{}), nil), "the buffer is usable after expiry")
+}
+
+// The legacy dispatch (no view-aware branch selected, before the first activation) holds a near-future request the same way.
+func TestLegacyDispatchHoldsTheNextRoundRequest(t *testing.T) {
+	f := newFixture(t, fxOpts{})
+	_, _, reqs := f.futureRequests(9, 0, 1, 2)
+	f.cm.enabled = false
+	for _, r := range reqs {
+		require.NoError(t, f.submit(r), "held under the committed ShardInfo, not refused")
+	}
+	require.Zero(t, f.sentCount())
+	require.Zero(t, f.counted())
+	require.Equal(t, 3, f.node.early.len())
+	f.setParent(1, f.pdr)
+	f.replay()
+	require.Len(t, f.certs(), 1, "admitted under the advanced ShardInfo, a quorum of three")
+	two := f.request(3, f.viewEnabled(), 9, func(r *certification.BlockCertificationRequest) { r.InputRecord.RoundNumber += 2 })
+	require.Error(t, f.submit(two), "two rounds ahead is refused")
+	require.Zero(t, f.node.early.len())
+}
+
+// viewEnabled is the view the collector would resolve, whether or not the branch is selected.
+func (f *fixture) viewEnabled() *storage.RequestRoundView {
+	f.t.Helper()
+	f.cm.mu.Lock()
+	was := f.cm.enabled
+	f.cm.enabled = true
+	f.cm.mu.Unlock()
+	v := f.view()
+	f.cm.mu.Lock()
+	f.cm.enabled = was
+	f.cm.mu.Unlock()
+	return v
+}

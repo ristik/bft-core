@@ -1,6 +1,7 @@
 package rootchain
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -69,7 +70,9 @@ type (
 		net              PartitionNet
 		consensusManager ConsensusManager
 		zkRegistry       *zkverifier.Registry
-		offers           EntryOffers // nil: the legacy certificate protocol only
+		offers           EntryOffers    // nil: the legacy certificate protocol only
+		early            *earlyRequests // near-future requests held until the committed context advances (#1032)
+		replay           chan shardRef  // shards whose committed context advanced: their held requests are admitted again
 
 		log    *slog.Logger
 		tracer trace.Tracer
@@ -108,6 +111,8 @@ func New(
 		net:              pNet,
 		consensusManager: cm,
 		zkRegistry:       zkverifier.NewRegistry(),
+		early:            newEarlyRequests(),
+		replay:           make(chan shardRef, earlyRequestShards),
 		log:              observe.Logger(),
 		tracer:           observe.Tracer("rootchain.node"),
 	}
@@ -160,10 +165,19 @@ func (v *Node) GetPeer() *network.Peer {
 
 // handle messages from partition nodes
 func (v *Node) partitionMsgLoop(ctx context.Context) error {
+	sweep := time.NewTicker(earlyRequestSweep)
+	defer sweep.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
+		case ref := <-v.replay:
+			v.replayEarly(ctx, ref)
+		case <-sweep.C:
+			// a certificate that did not reach this loop (or a context that advanced without one) must not strand a held request
+			for _, ref := range v.early.shardsHeld() {
+				v.replayEarly(ctx, ref)
+			}
 		case msg, ok := <-v.net.ReceivedChannel():
 			if !ok {
 				return fmt.Errorf("partition channel closed")
@@ -298,7 +312,13 @@ func (v *Node) onHandshake(ctx context.Context, req *handshake.Handshake) error 
 onBlockCertificationRequest handles Certification Request from shard nodes.
 Shard nodes can only extend the stored/certified state.
 */
-func (v *Node) onBlockCertificationRequest(ctx context.Context, req *certification.BlockCertificationRequest) (rErr error) {
+func (v *Node) onBlockCertificationRequest(ctx context.Context, req *certification.BlockCertificationRequest) error {
+	return v.admitRequest(ctx, req, time.Time{})
+}
+
+// admitRequest is onBlockCertificationRequest; held is the first deadline of a near-future request admitted again after it was
+// held, zero for a request just received.
+func (v *Node) admitRequest(ctx context.Context, req *certification.BlockCertificationRequest, held time.Time) (rErr error) {
 	ctx, span := v.tracer.Start(ctx, "node.onBlockCertificationRequest")
 	defer span.End()
 	if profile, ok := v.consensusManager.(interface{ HandoffProfileEnabled() bool }); ok && profile.HandoffProfileEnabled() && req != nil && req.PartitionID == rctypes.ControlPartition {
@@ -315,7 +335,14 @@ func (v *Node) onBlockCertificationRequest(ctx context.Context, req *certificati
 			return fmt.Errorf("resolving the request view of shard %s - %s: %w", req.PartitionID, req.ShardID, err)
 		}
 		if enabled {
-			return v.collectUnderView(ctx, req, view)
+			resolve := func() (requestAdmission, error) {
+				view, _, err := src.RequestView(req.PartitionID, req.ShardID)
+				if err != nil || view == nil {
+					return nil, err
+				}
+				return view, nil
+			}
+			return v.collectUnderView(ctx, req, view, resolve, held)
 		}
 	}
 
@@ -325,6 +352,15 @@ func (v *Node) onBlockCertificationRequest(ctx context.Context, req *certificati
 	}
 	// we got the shard info thus it's a valid partition/shard
 	if err := si.ValidRequest(req); err != nil {
+		if legacyNearFuture(si, req) {
+			herr := v.early.hold(req, held)
+			if herr == nil {
+				v.log.DebugContext(ctx, fmt.Sprintf("holding the request of round %d until the commit of round %d applies", req.IRRound(), si.LastCR.Technical.Round),
+					logger.Shard(req.PartitionID, req.ShardID))
+				return nil
+			}
+			err = errors.Join(err, herr)
+		}
 		err = fmt.Errorf("invalid block certification request: %w", err)
 		if se := v.sendRejection(ctx, req.NodeID, si.LastCR, certification.CertStatusRequestInvalid, err); se != nil {
 			err = errors.Join(err, fmt.Errorf("sending latest cert: %w", se))
@@ -355,6 +391,44 @@ func (v *Node) onBlockCertificationRequest(ctx context.Context, req *certificati
 	return v.countRequest(ctx, req, si, false)
 }
 
+// legacyNearFuture reports whether a request refused under the committed ShardInfo is the authentic request of the round right after
+// the expected one: of this shard, signed by a member, one round ahead (#1032).
+func legacyNearFuture(si *storage.ShardInfo, req *certification.BlockCertificationRequest) bool {
+	if si == nil || si.LastCR == nil || req.PartitionID != si.PartitionID || !req.ShardID.Equal(si.ShardID) || req.IRRound() != si.LastCR.Technical.Round+1 {
+		return false
+	}
+	return si.Verify(req.NodeID, func(ver abcrypto.Verifier) error { return req.IsValid(ver) }) == nil
+}
+
+// viewChanged reports whether a view resolved again is another view than the first: another key, or another expected record.
+func viewChanged(a, b requestAdmission) bool {
+	type keyed interface{ ViewKey() []byte }
+	if ka, ok := a.(keyed); ok {
+		if kb, ok := b.(keyed); ok {
+			return !bytes.Equal(ka.ViewKey(), kb.ViewKey())
+		}
+	}
+	ta, tb := a.ExpectedTR(), b.ExpectedTR()
+	return ta.Round != tb.Round || ta.Epoch != tb.Epoch
+}
+
+// replayEarly admits again, from scratch, the requests held for a shard; one still ahead is held again under its first deadline.
+func (v *Node) replayEarly(ctx context.Context, ref shardRef) {
+	for _, e := range v.early.take(ref.partition, ref.shard) {
+		if err := v.admitRequest(ctx, e.req, e.deadline); err != nil {
+			v.log.DebugContext(ctx, "held near-future request refused", logger.Shard(ref.partition, ref.shard), logger.Error(err))
+		}
+	}
+}
+
+// signalReplay asks the partition loop to admit the shard's held requests again; a full queue is left to the periodic sweep.
+func (v *Node) signalReplay(partition types.PartitionID, shard types.ShardID) {
+	select {
+	case v.replay <- shardRef{partition: partition, shard: shard}:
+	default:
+	}
+}
+
 // requestAdmission is what collector admission uses of a resolved request view; *storage.RequestRoundView is the one
 // implementation (it is an interface so that the collection-only branch can be driven without a committed successor).
 type requestAdmission interface {
@@ -372,14 +446,39 @@ var _ requestAdmission = (*storage.RequestRoundView)(nil)
 // shard continuity (ValidRequest), the proof dispatched from the view's PDR, partition parameters and expected shard epoch,
 // and the buffer counted with the view's weights, assignment and shard-round tag. The committed ShardInfo is consulted for
 // nothing but the last response a rejection carries. A view resolved before its activation round collects only.
-func (v *Node) collectUnderView(ctx context.Context, req *certification.BlockCertificationRequest, view requestAdmission) error {
+//
+// A request refused as stale is judged again under a view resolved anew when the committed parent changed meanwhile (resolve may be
+// nil). A request for the round right after the view's expected one, whose sender passed membership and signature, is held (#1032)
+// rather than refused: it is admitted from scratch when the committed context advances. held is its first deadline when it is being
+// admitted again, else zero.
+func (v *Node) collectUnderView(ctx context.Context, req *certification.BlockCertificationRequest, view requestAdmission,
+	resolve func() (requestAdmission, error), held time.Time) error {
 	lastCR := func() *certification.CertificationResponse {
 		if si, err := v.consensusManager.ShardInfo(req.PartitionID, req.ShardID); err == nil && si != nil {
 			return si.LastCR
 		}
 		return nil
 	}
-	if err := view.ValidRequest(req); err != nil {
+	err := view.ValidRequest(req)
+	if err != nil && errors.Is(err, storage.ErrStaleRequestContext) && resolve != nil {
+		// the parent may have been committed during the resolution: never refuse as stale under a parent that is no longer the committed one
+		if again, rerr := resolve(); rerr == nil && again != nil && viewChanged(view, again) {
+			view = again
+			err = view.ValidRequest(req)
+		}
+	}
+	if err != nil && errors.Is(err, storage.ErrStaleRequestContext) && req.IRRound() == view.ExpectedTR().Round+1 {
+		// ValidRequest compares the round only after membership, signature and shard passed under this view: the request is
+		// authentic and exactly one round ahead. It is counted for nothing until it is admitted under the committed context.
+		herr := v.early.hold(req, held)
+		if herr == nil {
+			v.log.DebugContext(ctx, fmt.Sprintf("holding the request of round %d until the commit of round %d applies", req.IRRound(), view.ExpectedTR().Round),
+				logger.Shard(req.PartitionID, req.ShardID))
+			return nil
+		}
+		err = errors.Join(err, herr)
+	}
+	if err != nil {
 		err = fmt.Errorf("invalid block certification request: %w", err)
 		if se := v.sendRejection(ctx, req.NodeID, lastCR(), certification.CertStatusRequestInvalid, err); se != nil {
 			err = errors.Join(err, fmt.Errorf("sending latest cert: %w", se))
@@ -505,6 +604,8 @@ func (v *Node) handleConsensus(ctx context.Context) error {
 			}
 			v.subscription.Send(ctx, cr)
 			v.incomingRequests.Clear(ctx, cr.Partition, cr.Shard)
+			// the committed context of the shard advanced: requests held for the round after it are admitted again
+			v.signalReplay(cr.Partition, cr.Shard)
 		}
 	}
 }

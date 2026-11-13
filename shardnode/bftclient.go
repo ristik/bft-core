@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math/rand/v2"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -57,6 +58,10 @@ type BFTClientOptions struct {
 	ResubmitMinInterval time.Duration
 	// MaxResubmits bounds the re-sends of one pending request (zero: DefaultMaxResubmits; negative disables re-sending).
 	MaxResubmits int
+	// ResendInterval is the base of the timed re-send of a pending request (see resendStale): the request is sent again, unchanged, once
+	// ResendInterval plus a random jitter of up to half of it has passed since its last send without progress (zero: DefaultResendInterval;
+	// negative disables the timed re-send, the duplicate-triggered one stays). The re-sends count toward MaxResubmits.
+	ResendInterval time.Duration
 	// PendingWarnAfter is how long a certification request may be pending, or the shard may go without a non-repeat certificate while work remains,
 	// before a warning is logged (zero: DefaultPendingWarnAfter; negative disables the warning, not the gauges). An operational threshold, not a
 	// delivery deadline: it says nothing about T2 (#976).
@@ -105,6 +110,9 @@ const startupFixedAttempts = 5
 const (
 	DefaultResubmitMinInterval = 5 * time.Second
 	DefaultMaxResubmits        = 10
+	DefaultResendInterval      = 1500 * time.Millisecond
+	// resendCheckEvery is how often Run looks for a pending request due for a timed re-send.
+	resendCheckEvery = 250 * time.Millisecond
 	// The pending-work diagnostics (#976): operational defaults, not deadlines.
 	DefaultPendingWarnAfter = 60 * time.Second
 	DefaultRepeatWarnAfter  = 3
@@ -252,6 +260,7 @@ type outstandingRequest struct {
 	firstSent time.Time       // the first submission of this logical attempt: a re-send never changes it (lastSent does)
 	lastSent  time.Time
 	resent    int
+	jitter    time.Duration // the random part of the next timed re-send's delay, drawn once per send
 }
 
 // deliveryAttempt identifies one certificate for retry purposes. Rounds are enough: a UCDuplicate
@@ -454,6 +463,8 @@ func (c *BFTClient) Run(ctx context.Context) error {
 
 	heartbeat := time.NewTicker(c.opts.HeartbeatInterval)
 	defer heartbeat.Stop()
+	resend := time.NewTicker(resendCheckEvery)
+	defer resend.Stop()
 
 	// Until the first certificate arrives, re-send the handshake early (see StartupHandshakeInterval).
 	var startupC <-chan time.Time
@@ -534,6 +545,8 @@ func (c *BFTClient) Run(ctx context.Context) error {
 			}
 			startupAttempt++
 			startup.Reset(startupHandshakeDelay(c.opts.StartupHandshakeInterval, c.opts.InactivityTimeout, startupAttempt))
+		case <-resend.C:
+			c.resendStale(ctx, time.Now())
 		case <-heartbeat.C:
 			c.reportPending(ctx)
 			last := time.UnixMilli(c.lastCertResponseTime.Load())
@@ -1409,7 +1422,8 @@ func (c *BFTClient) Submit(ctx context.Context, req *certification.BlockCertific
 	c.mu.Lock()
 	c.submittedSinceHandshake = true
 	now := time.Now()
-	c.outstanding = &outstandingRequest{req: req, on: deliveryAttempt{partitionRound: luc.GetRoundNumber(), rootRound: luc.GetRootRoundNumber()}, firstSent: now, lastSent: now}
+	c.outstanding = &outstandingRequest{req: req, on: deliveryAttempt{partitionRound: luc.GetRoundNumber(), rootRound: luc.GetRootRoundNumber()}, firstSent: now, lastSent: now,
+		jitter: c.resendJitter()}
 	c.mu.Unlock()
 	return nil
 }
@@ -1517,7 +1531,7 @@ func (c *BFTClient) reportPending(ctx context.Context) {
 //   - trigger: only an authenticated UCDuplicate of the held certificate (same partition and root round), as a handshake answer is;
 //     an older, newer or repeat certificate never triggers (those are ignored or restart the round);
 //   - action: the same signed bytes, never re-signed or rebuilt, once per trigger;
-//   - bounds: at least ResubmitMinInterval between sends of the request, at most MaxResubmits re-sends of it, no timer of its own.
+//   - bounds: at least ResubmitMinInterval between sends of the request, at most MaxResubmits re-sends of it; the timed re-send is resendStale.
 //
 // The roots take a repeated byte-identical request as idempotent: a node's request is stored once, and one whose quorum is already
 // decided re-issues the certification request to the current leader (rootchain.Node.countRequest).
@@ -1540,7 +1554,7 @@ func (c *BFTClient) resubmitPending(ctx context.Context, held *types.UnicityCert
 		return
 	}
 	o.resent++
-	o.lastSent = time.Now()
+	o.lastSent, o.jitter = time.Now(), c.resendJitter()
 	req, attempt := o.req, o.resent
 	c.mu.Unlock()
 
@@ -1554,6 +1568,59 @@ func (c *BFTClient) resubmitPending(ctx context.Context, held *types.UnicityCert
 		c.log.InfoContext(ctx, "certification request still outstanding after a duplicate certificate, re-sent unchanged",
 			slog.Uint64("round", req.InputRecord.RoundNumber), slog.Int("attempt", attempt),
 			slog.Uint64("heldRootRound", held.GetRootRoundNumber()))
+	}
+}
+
+// resendInterval is the configured base of the timed re-send, or a negative value when it is disabled.
+func (c *BFTClient) resendInterval() time.Duration {
+	if d := c.opts.ResendInterval; d != 0 {
+		return d
+	}
+	return DefaultResendInterval
+}
+
+// resendJitter draws the random part of a timed re-send's delay: up to half the interval, so that the validators of a shard, which all
+// submit on the same certificate, do not re-send in step (#1032).
+func (c *BFTClient) resendJitter() time.Duration {
+	d := c.resendInterval()
+	if d <= 1 {
+		return 0
+	}
+	return time.Duration(rand.Int64N(int64(d / 2)))
+}
+
+// resendStale is the timed complement of resubmitPending (#1032): a request still pending on the certificate this node holds, with no
+// progress for the interval plus its jitter since its last send, is sent again, the same signed bytes, to the roots selected from the held
+// certificate. It does not wait for a duplicate certificate: a request a lagging root dropped (or one lost on the way) is otherwise only
+// recovered by T2. A certificate that advances the round, or a repeat, retires the request and with it every further re-send; MaxResubmits
+// bounds them together with the duplicate-triggered ones.
+func (c *BFTClient) resendStale(ctx context.Context, now time.Time) {
+	every := c.resendInterval()
+	limit := c.opts.MaxResubmits
+	if limit == 0 {
+		limit = DefaultMaxResubmits
+	}
+	c.mu.Lock()
+	o, held := c.outstanding, c.luc
+	if every < 0 || limit < 0 || o == nil || held == nil || o.on != (deliveryAttempt{partitionRound: held.GetRoundNumber(), rootRound: held.GetRootRoundNumber()}) ||
+		o.resent >= limit || now.Sub(o.lastSent) < every+o.jitter {
+		c.mu.Unlock()
+		return
+	}
+	o.resent++
+	o.lastSent, o.jitter = now, c.resendJitter()
+	req, attempt := o.req, o.resent
+	c.mu.Unlock()
+
+	if err := c.sendRequest(ctx, req, held); err != nil {
+		if c.log != nil {
+			c.log.WarnContext(ctx, "timed re-send of the pending certification request failed", slog.Int("attempt", attempt), slog.String("err", err.Error()))
+		}
+		return
+	}
+	if c.log != nil {
+		c.log.InfoContext(ctx, "certification request still outstanding, re-sent unchanged", slog.Uint64("round", req.InputRecord.RoundNumber),
+			slog.Int("attempt", attempt), slog.Uint64("heldRootRound", held.GetRootRoundNumber()))
 	}
 }
 

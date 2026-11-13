@@ -521,9 +521,9 @@ func TestCollectionOnlyViewNeverCertifies(t *testing.T) {
 	v := f.view()
 	co := collectionOnly{v}
 	ctx := context.Background()
-	require.NoError(t, f.node.collectUnderView(ctx, f.request(1, v, 9, nil), co))
+	require.NoError(t, f.node.collectUnderView(ctx, f.request(1, v, 9, nil), co, nil, time.Time{}))
 	require.Equal(t, 1, f.counted(), "requests are counted under a collection-only view")
-	require.NoError(t, f.node.collectUnderView(ctx, f.request(0, v, 9, nil), co), "the quorum is reached")
+	require.NoError(t, f.node.collectUnderView(ctx, f.request(0, v, 9, nil), co, nil, time.Time{}), "the quorum is reached")
 	require.Empty(t, f.certs(), "but a collection-only view is never a certification capability")
 	require.Zero(t, f.counted(), "the decided outcome was not kept")
 	// from the activation round on the same requests are counted and certified

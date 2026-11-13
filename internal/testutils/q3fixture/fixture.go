@@ -87,6 +87,9 @@ type Options struct {
 	// ExtraShards adds other shards to the certified state, each with its own validators. They take no part in the handoff: they are the
 	// load of a root that serves more than the EVM shard.
 	ExtraShards []ExtraShard
+	// LastLinkOnly keeps only this fixture's own link in its envelope (a chain longer than an envelope may carry, extended link by link
+	// through Runtime.BundleFor).
+	LastLinkOnly bool
 	// PeerEVM gives every EVM validator of the successor a real peer identity, as the production ingress subscribes a request's sender by its
 	// node id; otherwise a replaced member is named evm-N, which only a harness calling the manager directly can use.
 	PeerEVM bool
@@ -134,6 +137,7 @@ type Fixture struct {
 	BaseAssignment  [32]byte                 // its assignment hash
 	Authorization   *evmassign.Authorization // the recovery authorization the candidate carries
 	Prev            *Fixture                 // the first activation this one follows, with Options.After
+	History         *q3format.History        // the verified history through this activation, when it is a valid one
 	GenesisEVM      []*testutils.TestNode    // the EVM validators of the genesis configuration (K's EVM members, which the primary keeps three of)
 }
 
@@ -204,8 +208,11 @@ func New(t *testing.T, o Options) *Fixture {
 	bodyEpoch, aMin, activate, ordered := uint64(2), uint64(7), uint64(7), uint64(4)
 	hOld := f.NewHistory(t) // the verified history up to the committee that commits this handoff
 	if o.After != nil {
-		h, err := hOld.VerifyEnvelope(o.After.Envelope)
-		require.NoError(t, err, "the preceding activations must be valid")
+		h := o.After.History
+		if h == nil || !o.LastLinkOnly {
+			h, err = hOld.VerifyEnvelope(o.After.Envelope)
+			require.NoError(t, err, "the preceding activations must be valid")
+		}
 		hOld = h
 		tip := h.Tip()
 		oldCfg, err = h.Signing(tip.Epoch())
@@ -441,10 +448,11 @@ func New(t *testing.T, o Options) *Fixture {
 		next, err := hOld.WithV3(f.Link)
 		require.NoError(t, err, "the fixture must be a valid activation")
 		f.Claim = next.Tip().Claim()
+		f.History = next
 	}
 	f.Link.Claim = f.Claim
 	f.Envelope = q3format.Envelope{RootInput: []byte{0xAB}, TargetParent: bytes.Clone(o.Frozen), Links: []q3format.Link{f.Link}}
-	if o.After != nil { // retain the whole lineage so the history rebuilds from the genesis alone
+	if o.After != nil && !o.LastLinkOnly { // retain the whole lineage so the history rebuilds from the genesis alone
 		f.Envelope.Links = append(append([]q3format.Link(nil), o.After.Envelope.Links...), f.Link)
 	}
 	f.EnvelopeBytes, err = f.Envelope.Encode()
