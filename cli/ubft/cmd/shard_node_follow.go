@@ -26,7 +26,7 @@ func (r *rootFreeRole) nonActive() bool { return r != nil && r.enabled && !r.act
 // setMirrors installs the non-root evidence holders (follow sources, archive replicas, installed validators).
 func (r *rootFreeRole) setMirrors(m func() []libp2ppeer.ID) { r.mirrors.Store(&m) }
 
-// mirrorPeers is the current mirror list; empty before setMirrors.
+// mirrorPeers is the current mirror list without any known root identity; empty before setMirrors.
 func (r *rootFreeRole) mirrorPeers() []libp2ppeer.ID {
 	if r == nil {
 		return nil
@@ -35,7 +35,28 @@ func (r *rootFreeRole) mirrorPeers() []libp2ppeer.ID {
 	if m == nil {
 		return nil
 	}
-	return (*m)()
+	return r.nonRoot((*m)())
+}
+
+// nonRoot drops every known root identity from a source list: a mirror or follow source is a non-root role by definition, so a root
+// listed as one (a misconfiguration or a co-located role) is not asked through it, whatever the node's role. The transport gater refuses
+// roots too while the node is non-active; this makes the separation explicit at source selection.
+func (r *rootFreeRole) nonRoot(ids []libp2ppeer.ID) []libp2ppeer.ID {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	out := make([]libp2ppeer.ID, 0, len(ids))
+	seen := make(map[libp2ppeer.ID]struct{}, len(ids))
+	for _, id := range ids {
+		if _, root := r.roots[id]; root {
+			continue
+		}
+		if _, dup := seen[id]; dup {
+			continue
+		}
+		seen[id] = struct{}{}
+		out = append(out, id)
+	}
+	return out
 }
 
 func newRootFreeRole(enabled bool, boot []libp2ppeer.AddrInfo, trust []*types.RootTrustBaseV1) *rootFreeRole {

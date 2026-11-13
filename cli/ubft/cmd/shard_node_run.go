@@ -1465,12 +1465,12 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 			source := &archivewiring.RecoverySource{Context: journalCtx, Subject: archiveSubject, Local: archiveLocal, Host: archiveHost,
 				Replicas: archiveReplicas, Policy: replicaPolicy, Limits: archiveTransportLimits, MaxBlocks: configuredadmission.DefaultRecoveryLimits().Blocks, Log: flags.observe.Logger()}
 			if follower.enabled {
-				source.Followed = func() []libp2ppeer.ID { return followSourceIDs(followSources) }
+				source.Followed = func() []libp2ppeer.ID { return follower.nonRoot(followSourceIDs(followSources)) }
 				// the root-free certificate source: the newest verified archive head, offered while this node is not active
 				headFollower = &archivewiring.HeadFollower{Binding: archivewiring.CertifiedBinding{Context: journalCtx, Subject: archiveSubject},
 					Host: archiveHost, Limits: archiveTransportLimits, Active: activePeers.Member, Offer: node.FollowCertificate, Log: flags.observe.Logger(),
 					Sources: func() []libp2ppeer.ID {
-						return append(append(followSourceIDs(followSources), readableArchiveReplicas(replicaPolicy, archiveReplicas)...), activePeers.Peers()...)
+						return follower.nonRoot(append(append(followSourceIDs(followSources), readableArchiveReplicas(replicaPolicy, archiveReplicas)...), activePeers.Peers()...))
 					}}
 			}
 			archiveCatchUp = &archivewiring.CatchUp{Source: source}

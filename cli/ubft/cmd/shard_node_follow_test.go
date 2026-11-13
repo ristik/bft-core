@@ -37,3 +37,14 @@ func TestRootFreeRoleDeniesKnownRootsWhileNonActive(t *testing.T) {
 	off := newRootFreeRole(false, []libp2ppeer.AddrInfo{{ID: boot}}, nil)
 	require.False(t, off.deny(boot), "without --follow-source nothing is refused")
 }
+
+// A root identity listed as a mirror or follow source is dropped at source selection, whatever the role.
+func TestRootFreeRoleDropsRootsFromMirrorLists(t *testing.T) {
+	boot, epochRoot, mirror := followTestID(t), followTestID(t), followTestID(t)
+	r := newRootFreeRole(true, []libp2ppeer.AddrInfo{{ID: boot}}, []*types.RootTrustBaseV1{{RootNodes: []*types.NodeInfo{{NodeID: epochRoot.String()}}}})
+	r.setMirrors(func() []libp2ppeer.ID { return []libp2ppeer.ID{boot, mirror, epochRoot, mirror} })
+	require.Equal(t, []libp2ppeer.ID{mirror}, r.mirrorPeers())
+	r.setRole(func() bool { return true })
+	require.Equal(t, []libp2ppeer.ID{mirror}, r.mirrorPeers(), "an active node's mirrors are still non-root sources")
+	require.Equal(t, []libp2ppeer.ID{mirror}, r.nonRoot([]libp2ppeer.ID{epochRoot, mirror, boot}))
+}
