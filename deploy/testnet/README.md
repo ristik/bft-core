@@ -36,7 +36,8 @@ and bounded Docker JSON logs (30 MiB/service). Each pod caps memory at about 4.2
 plus a 16 MiB namespace holder and a 64 MiB metrics relay); shared services cap another 2.375 GiB, approximately **19.2 GiB for N=4** and
 **15.0 GiB for N=3**, plus Docker/OS/page cache/build overhead. Plan at least 24 GiB
 server RAM, 8 cores, 100 GiB initial SSD and off-host backup space; these are initial
-planning budgets, not measured capacity. On the shared 16 GiB development Mac use
+planning budgets, not measured capacity. Each root node gets `--root-cpus` CPUs (default 2: its per-round work grows with the epoch count, and
+at 0.5 the staging roots were throttled after 34 handoffs). On the shared 16 GiB development Mac use
 N=3 only when memory is available. Never build Rust while rehearsing the cluster.
 Monitor disks: retention bounds metrics/logs but does not bound chain databases.
 
@@ -317,6 +318,21 @@ does not rescan `network/handoff` (#996). `verify` checks every root at the new 
 `/api/v1/trustbases` history reaching the epoch (with `--utb`), new blocks and `recordCursor == recordCount`. `--plan` prints the result, the epochs, the change and
 the window. Unrelated no-change results that nobody drives keep being rejected in between; that is harmless.
 
+Unattended (Q35): `handoff_auto.py $G --members 1,2,3,4 --log DIR -- --ubft $UBFT [--funder DIR]` is one pass for a timer (its docstring has a
+`systemd-run --user --on-calendar` line). It runs the drive with `--only-if-members`: a result whose elected committee is anything else (a joiner, a retirement)
+is skipped before any step (exit 4) and stays an operator act. Every drive, manual or not, holds `$G/handoff/drive.lock`; one started meanwhile exits 5 and
+does nothing. `--funder` (a directory with `keystore.json` and `password`) pays the owner's gas top-up from an operator account, so the drive does not
+take nonces from the faucet account, which the public faucet's signer uses. Each pass appends a line to `DIR/auto.log` and keeps the output of a pass that drove,
+stopped or was refused in `DIR/drive-<time>.log`. A skip (exit 4, e.g. an operator's join drive that stopped half way) is an idle pass: one `auto.log` line per
+result per hour, no drive log, and the unit does not fail.
+
+**The timer and a laptop join.** The pass stands down, without starting a drive, while any `$G/handoff/remote-joiners/<entity>.json` is `registered`,
+`bonded`, `prepared` or `retiring` (from `remote_joiner.py init` until the join's drive makes it a `member`), logging that once an hour: the join drives its own
+results, and a timer drive of a no-change result under a prepared joiner would move the epoch past its authority's scope. A timer pass that started just before
+the marker appeared can still hold the lock: the join's drives wait for it (exit 5, retried every 10 s for at most `--busy-wait`, 600 s). A joiner that never
+completes keeps the timer down: finish the join, or move its file aside, before relying on unattended handoffs again. After a join the committee is
+[1..5]: a timer still on `--members 1,2,3,4` then skips every later result (one hourly line each), so restart it with the new `--members`.
+
 ### A validator on another machine (a laptop behind NAT)
 
 `remote_joiner.py` (on the laptop) and `remote_entity.py` (on the host) add a fifth entity whose services run on a laptop's docker (colima on macOS was the
@@ -348,7 +364,8 @@ aliases `root5`/`shard5` and joins TCP and Unix sockets in `~/rjoin/<generation>
 On the laptop, peer stubs `peer1..4` (aliases `root<i>`, `shard<i>`, `ureth<i>`) forward to the `-L` ports through `host.docker.internal`; the laptop's root and
 shard node announce `/dns4/root5/tcp/8000` and `/dns4/shard5/tcp/9000`. Operator RPCs (8002, 9101) never cross the tunnel.
 
-`join` funds the owner from the faucet account (100 UCT and gas; the faucet key stays on the host), registers and bonds (the laptop signs), and then prepares only
+`join` funds the owner from the operator account given as `--funder DIR` (a directory on the host with `keystore.json` and `password`), or else from the faucet
+account (100 UCT and gas; the key stays on the host), and passes `--funder` on to its drives; it registers and bonds (the laptop signs), and then prepares only
 right after an acknowledgement, driving an open result that predates the joiner first: the trust base of E+1 over the committee and the joiner, the joiner's
 authority started at that scope, `admitDelegation`. While `$G/handoff/remote-joiners/5.json` says `prepared`, `handoff_drive.py` refuses a result that leaves the
 joiner out (it would move the epoch past the authority's scope) unless `--allow-excluding-joiner`; `--require-member ENTITY` makes the same refusal explicit.

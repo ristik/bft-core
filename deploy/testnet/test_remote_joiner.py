@@ -9,6 +9,7 @@ import socket
 import tempfile
 import threading
 import unittest
+import unittest.mock
 
 import evm_keys
 import handoff_drive as hd
@@ -415,6 +416,51 @@ class SourceCheck(unittest.TestCase):
             (Path(d) / 'a.py').write_text('x\n')
             outside = rj.source_version(Path(d))
             self.assertTrue(outside['dirty'] and outside['commit'] is None, 'no git checkout: treated as dirty')
+
+
+
+class JoinAndTimer(unittest.TestCase):
+    """#1025 review: the join's drives wait for a timer pass holding handoff/drive.lock (exit 5) instead of stopping, for a bounded time, and --funder reaches
+    the funding and the child drives."""
+    def join(self, funder=None, busy_wait=30):
+        j = re_.Join.__new__(re_.Join)
+        j.gen, j.ubft, j.restore_pin, j.cast, j.here = Path('/g'), Path('/u'), None, 'cast', Path('/pkg')
+        j.funder, j.busy_wait = (Path(funder) if funder else None), busy_wait
+        return j
+
+    def test_a_busy_drive_is_retried_then_runs(self):
+        j = self.join(funder='/srv/ops')
+        codes = iter([5, 5, 0])
+        with unittest.mock.patch.object(re_.subprocess, 'run', side_effect=lambda cmd: unittest.mock.Mock(returncode=next(codes))) as run, \
+                unittest.mock.patch.object(re_.time, 'sleep') as sleep, unittest.mock.patch.object(re_, 'say'):
+            self.assertEqual(j.drive('0xr', '--require-member', '5'), 0)
+        self.assertEqual(run.call_count, 3)
+        self.assertEqual(sleep.call_count, 2)
+        cmd = run.call_args.args[0]
+        self.assertEqual(cmd[cmd.index('--funder') + 1], '/srv/ops', 'the drive pays gas from the operator account too')
+        self.assertIn('--require-member', cmd)
+
+    def test_a_busy_wait_is_bounded(self):
+        j = self.join(busy_wait=0)
+        with unittest.mock.patch.object(re_.subprocess, 'run', return_value=unittest.mock.Mock(returncode=5)) as run, \
+                unittest.mock.patch.object(re_.time, 'sleep'), unittest.mock.patch.object(re_, 'say'):
+            self.assertEqual(j.drive(None), 5)
+        self.assertEqual(run.call_count, 1)
+
+    def test_other_failures_are_not_retried(self):
+        j = self.join()
+        with unittest.mock.patch.object(re_.subprocess, 'run', return_value=unittest.mock.Mock(returncode=1)) as run, unittest.mock.patch.object(re_, 'say'):
+            self.assertEqual(j.drive(None), 1)
+        self.assertEqual(run.call_count, 1)
+        self.assertNotIn('--funder', run.call_args.args[0], 'no funder: the faucet account, as before')
+
+    def test_the_laptop_passes_the_funder_to_the_host(self):
+        lap = unittest.mock.Mock(entity=5, state={'hostCast': '/h/cast', 'hostDir': '/h/rjoin', 'hostGeneration': '/srv/tn-x', 'hostUbft': '/h/ubft',
+                                                  'hostRestorePin': '/h/pin', 'host': 'h'})
+        with unittest.mock.patch.object(rj, 'source_version', return_value={'dirty': False, 'commit': 'c', 'digest': 'd' * 64}), \
+                unittest.mock.patch.object(rj.subprocess, 'run', return_value=unittest.mock.Mock(returncode=0)) as run, unittest.mock.patch.object(rj, 'say'):
+            rj.join(lap, funder='/srv/tn-x/operator-secrets')
+        self.assertIn('--funder /srv/tn-x/operator-secrets', run.call_args.args[0][-1])
 
 
 if __name__ == '__main__':

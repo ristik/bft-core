@@ -40,6 +40,10 @@ FAUCET_PAYOUT, FAUCET_BALANCE, FAUCET_DAILY_CLAIMS = '200', '50000', 50
 # lock-proof endpoint trust the edge network's (the address the host's nginx reaches published ports from). Docker refuses a second network on a subnet in
 # use, also by a stopped generation's networks, so two generations on one host need different subnets (--faucet-subnet, --edge-subnet).
 DEFAULT_SUBNETS = {'faucet': '172.30.88.0/24', 'edge': '172.30.89.0/24'}
+# The root nodes' CPU quota. 2, not 0.5: a root's per-round work grows with the epoch count (every handoff adds an epoch), and on tn-pos-staging-20261113 (a
+# handoff every ~8 min) the roots ran at their 0.5 quota with 34 % of cgroup periods throttled at 34 epochs, while the EVM slowed from 0.62 to 0.15 blocks/s.
+# The install restart recreates a root from compose.yaml (compose.install-epoch-N.json sets no limits), so the quota holds across handoffs.
+ROOT_CPUS = 2.0
 
 def uct_wei(text, what):
     """Wei of a decimal number of UCT (18 decimals), exactly: '200' -> 200 * 10**18. Refuses anything else."""
@@ -160,9 +164,9 @@ def utb_node_flags(pin):
     return ['--utb-genesis', UTB_GENESIS_FILE, '--utb-genesis-id', pin, '--utb-entries-db', UTB_ENTRIES_DB]
 
 def topology(out, n, ids, images, captcha, ureth_flags=(), max_gas=30000000, with_pos=False, rpc_bind=operator_rpc.DEFAULT_BIND, utb=None, utb_aggregator='integration', *,
-             payout=FAUCET_PAYOUT, subnets=None):
+             payout=FAUCET_PAYOUT, subnets=None, root_cpus=ROOT_CPUS):
     """JSON is a YAML subset, accepted directly by Docker Compose. `utb`: the pinned EntryID of the UTB genesis entry (0x..), or None for the package without the signed history.
-    `payout`: the faucet signer's payout per claim (UCT, network.json's). `subnets`: bridged_subnets(), the faucet and edge networks."""
+    `payout`: the faucet signer's payout per claim (UCT, network.json's). `subnets`: bridged_subnets(), the faucet and edge networks. `root_cpus`: each root's CPU quota."""
     subnets = subnets or bridged_subnets()
     services = {}
     def service(name, image, command, mounts=(), memory='256m', cpu=0.5, networks=None, pod=None, **extra):
@@ -193,7 +197,7 @@ def topology(out, n, ids, images, captcha, ureth_flags=(), max_gas=30000000, wit
             '--profile-3','--q3-lane','--b1-registry'] + (pos.root_flags(i) if with_pos else ['--genesis-identities','/network/genesis-identities.json']) + [
             '--shard-conf','/network/full-shard-conf.json','--shard-conf','/network/aggregator-conf.json',
             '--rpc-server-address',operator_rpc.listen(rpc_bind,operator_rpc.ROOT_PORT),'--metrics','prometheus'] + utb_node_flags(utb) + common,
-            ['./validator%d/root:/state'%i,network,'./validator%d/jwt:/jwt:ro'%i], memory='384m', pod='pod%d'%i)   # the entity's Engine JWT, read-only: q3-readiness runs in the root (it holds the entity's keys.json) and checks its own Engine endpoint
+            ['./validator%d/root:/state'%i,network,'./validator%d/jwt:/jwt:ro'%i], memory='384m', cpu=root_cpus, pod='pod%d'%i)   # the entity's Engine JWT, read-only: q3-readiness runs in the root (it holds the entity's keys.json) and checks its own Engine endpoint
         service('authority%d'%i, node, ['ubft','signing-authority','run','--home','/authority',
             '--client-socket','/authority/client.sock','--operator-socket','/authority/operator.sock',
             '--operator-credential','/authority/operator.cred','--authority-id','paired-evm-%d'%i,
@@ -276,8 +280,10 @@ def main():
     p.add_argument('--faucet-daily-claims',type=int,default=FAUCET_DAILY_CLAIMS,help=f'claims in any 24 hours (default {FAUCET_DAILY_CLAIMS})')
     p.add_argument('--faucet-per-ip-limit',action='store_true',help='also one claim per client IP per 24 hours (off by default: clients behind one NAT would share a claim)')
     p.add_argument('--faucet-subnet',default=DEFAULT_SUBNETS['faucet'],help=f'the faucet network (default {DEFAULT_SUBNETS["faucet"]}); its first address is the guard\'s trusted proxy')
+    p.add_argument('--root-cpus',type=float,default=ROOT_CPUS,help=f'each root node\'s CPU quota (default {ROOT_CPUS}; 0.25..8)')
     p.add_argument('--edge-subnet',default=DEFAULT_SUBNETS['edge'],help=f'the edge network (default {DEFAULT_SUBNETS["edge"]}); its first address is the RPC gateway\'s and the lock-proof endpoint\'s trusted proxy')
     a=p.parse_args()
+    if not 0.25 <= a.root_cpus <= 8: p.error(f'--root-cpus must be 0.25..8, got {a.root_cpus}')
     try:
         faucet=faucet_settings(a.faucet_payout,a.faucet_balance,a.faucet_daily_claims,a.faucet_per_ip_limit)
         subnets=bridged_subnets(a.faucet_subnet,a.edge_subnet)
@@ -363,7 +369,7 @@ def main():
                 (out/f'validator{i}').mkdir()
                 auth=out/f'validator{i}/auth'; auth.mkdir()
                 cli('signing-authority','credential','--out',auth/'operator.cred')
-            write(out/'compose.yaml',topology(out,a.validators,{'root':roots,'evm':evms},records['images'],a.captcha_sitekey,payout=a.faucet_payout,subnets=subnets))
+            write(out/'compose.yaml',topology(out,a.validators,{'root':roots,'evm':evms},records['images'],a.captcha_sitekey,payout=a.faucet_payout,subnets=subnets,root_cpus=a.root_cpus))
             def authority(i,*args):
                 auth=out/f'validator{i}/auth'
                 if a.offline_validation:
@@ -502,10 +508,10 @@ def main():
             trusted_proxy_ip=subnets['faucet']['gateway'],**faucet['network'])
         write(out/'network/network.json',network)
         flags=[*flags,'--unicity.genesis-commitment='+genesis_commitment(json.loads((home/'genesis.json').read_text()))]
-        write(out/'compose.yaml',topology(out,a.validators,{'root':roots,'evm':evms},records['images'],a.captcha_sitekey,flags,max_gas,bool(genesis),a.rpc_bind,utb_pin,a.utb_aggregator,payout=a.faucet_payout,subnets=subnets))
+        write(out/'compose.yaml',topology(out,a.validators,{'root':roots,'evm':evms},records['images'],a.captcha_sitekey,flags,max_gas,bool(genesis),a.rpc_bind,utb_pin,a.utb_aggregator,payout=a.faucet_payout,subnets=subnets,root_cpus=a.root_cpus))
         manifest={'offline_validation_only':a.offline_validation,'generation':out.name,'chain_id':a.chain_id,'genesis_hash':'0x'+block,'validators':a.validators,'operator_rpc':{'bind':a.rpc_bind,'root_port':operator_rpc.ROOT_PORT,'shard_port':operator_rpc.SHARD_PORT},
             'faucet_address':next(iter(alloc)), 'artifacts':records,
-            'faucet':{**faucet['network'],'genesis_balance_wei':str(faucet['balance_wei'])},'networks':subnets,
+            'faucet':{**faucet['network'],'genesis_balance_wei':str(faucet['balance_wei'])},'networks':subnets,'root_cpus':a.root_cpus,
             'utb':({'genesis_id':utb_pin,'genesis_sha256':hashlib.sha256((out/'network/utb-genesis.cbor').read_bytes()).hexdigest(),'genesis_file':'network/utb-genesis.cbor',
                     'aggregator':a.utb_aggregator,
                     **({'bundle_file':'network/utb-bundle.cbor','bundle_sha256':hashlib.sha256((out/'network/utb-bundle.cbor').read_bytes()).hexdigest(),'expected_network':TRUST_BASE_NETWORK_ID}
