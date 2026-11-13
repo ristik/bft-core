@@ -282,6 +282,46 @@ func (p *Peer) RegisterProtocolHandler(protocolID string, handler network.Stream
 	})
 }
 
+// Prewarm opens (or keeps) a connection to each peer whose address is known, concurrently, and protects it from the connection manager's
+// trimming under tag: the channels a node will use the moment it becomes active are open before it needs them. A peer the role gater
+// denies is skipped. It returns the peers connected.
+func (p *Peer) Prewarm(ctx context.Context, tag string, ids []peer.ID) []peer.ID {
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	var done []peer.ID
+	for _, id := range ids {
+		if id == p.host.ID() || p.gater().denied(id) {
+			continue
+		}
+		wg.Add(1)
+		go func(id peer.ID) {
+			defer wg.Done()
+			if err := p.host.Connect(ctx, peer.AddrInfo{ID: id, Addrs: p.host.Peerstore().Addrs(id)}); err != nil {
+				return
+			}
+			p.host.ConnManager().Protect(id, tag)
+			mu.Lock()
+			done = append(done, id)
+			mu.Unlock()
+		}(id)
+	}
+	wg.Wait()
+	return done
+}
+
+// Unprotect releases the trimming protection of tag for every peer not in keep.
+func (p *Peer) Unprotect(tag string, keep []peer.ID) {
+	kept := make(map[peer.ID]struct{}, len(keep))
+	for _, id := range keep {
+		kept[id] = struct{}{}
+	}
+	for _, id := range p.host.Network().Peers() {
+		if _, ok := kept[id]; !ok {
+			p.host.ConnManager().Unprotect(id, tag)
+		}
+	}
+}
+
 // gater is the configured role gater, nil without one (or without a configuration, as some tests build a Peer).
 func (p *Peer) gater() *RoleGater {
 	if p.conf == nil {

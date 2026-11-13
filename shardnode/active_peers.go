@@ -37,6 +37,15 @@ type ActivePeers struct {
 	// member is whether this node itself is a validator of the installed set (the set never contains it). A node that is not a member is
 	// a non-active party: it takes evidence from blocks and mirrors, never from roots.
 	member bool
+	// onStage, when set, is told the peers of each accepted stage (outside the lock), so that their channels can be prewarmed.
+	onStage func([]peer.ID)
+}
+
+// OnStage installs the hook told the peers of each accepted stage.
+func (a *ActivePeers) OnStage(f func([]peer.ID)) {
+	a.mu.Lock()
+	a.onStage = f
+	a.mu.Unlock()
 }
 
 // NewActivePeers starts with the genesis validators as the shard epoch 0 set.
@@ -168,8 +177,16 @@ func (a *ActivePeers) Stage(ids []string) error {
 		}
 	}
 	a.mu.Lock()
-	defer a.mu.Unlock()
 	a.staged = set
+	hook := a.onStage
+	a.mu.Unlock()
+	if hook != nil {
+		ids := make([]peer.ID, 0, len(set))
+		for id := range set {
+			ids = append(ids, id)
+		}
+		hook(ids)
+	}
 	return nil
 }
 

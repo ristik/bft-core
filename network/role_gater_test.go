@@ -91,3 +91,32 @@ func TestRoleGaterRevokesExistingRootConnectionsOnRetirement(t *testing.T) {
 	require.Equal(t, 1, node.RevokeDenied())
 	require.Eventually(t, func() bool { return len(node.host.Network().ConnsToPeer(later.ID())) == 0 }, 5*time.Second, 20*time.Millisecond)
 }
+
+// Prewarming opens the channels a node will need when it becomes active, concurrently, and skips a peer the role gater denies.
+func TestPrewarmConnectsKnownPeersAndRespectsTheGater(t *testing.T) {
+	log := logger.New(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	start := func(gater *RoleGater) *Peer {
+		conf, err := NewPeerConfiguration(randomTestAddressStr, nil, generateKeyPair(t), nil, nil)
+		require.NoError(t, err)
+		conf.Gater = gater
+		p, err := NewPeer(ctx, conf, log, nil)
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = p.Close() })
+		return p
+	}
+	a, b, denied := start(nil), start(nil), start(nil)
+	node := start(&RoleGater{Deny: func(id peer.ID) bool { return id == denied.ID() }})
+	for _, p := range []*Peer{a, b, denied} {
+		node.host.Peerstore().AddAddrs(p.ID(), p.MultiAddresses(), peerstore.PermanentAddrTTL)
+	}
+	got := node.Prewarm(ctx, "members", []peer.ID{a.ID(), b.ID(), denied.ID(), node.ID()})
+	require.ElementsMatch(t, []peer.ID{a.ID(), b.ID()}, got)
+	require.NotEmpty(t, node.host.Network().ConnsToPeer(a.ID()))
+	require.Empty(t, node.host.Network().ConnsToPeer(denied.ID()))
+	require.True(t, node.host.ConnManager().IsProtected(a.ID(), "members"))
+	node.Unprotect("members", []peer.ID{b.ID()})
+	require.False(t, node.host.ConnManager().IsProtected(a.ID(), "members"))
+	require.True(t, node.host.ConnManager().IsProtected(b.ID(), "members"))
+}

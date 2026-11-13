@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	libp2ppeer "github.com/libp2p/go-libp2p/core/peer"
 	"github.com/unicitynetwork/bft-core/q3active"
@@ -256,4 +257,60 @@ func seedRootsFromUTB(r *rootFreeRole, store utbEntries) error {
 		r.addRootNodes(entry.RootNodes)
 	}
 	return nil
+}
+
+// memberPrewarm opens the channels a member needs before it needs them (phase 2): the shard peers of the installed and staged assignments,
+// and, once the role is active, the root committee of the active epoch. Each warm-up runs in the background with a bound and never blocks
+// the caller (an installer, a staging request, a role publication).
+type memberPrewarm struct {
+	peer interface {
+		Prewarm(ctx context.Context, tag string, ids []libp2ppeer.ID) []libp2ppeer.ID
+	}
+	log interface {
+		Debug(msg string, args ...any)
+	}
+}
+
+const prewarmTimeout = 10 * time.Second
+
+func (w *memberPrewarm) shard(ctx context.Context, ids []libp2ppeer.ID) {
+	w.run(ctx, "shard-members", ids)
+}
+
+func (w *memberPrewarm) roots(ctx context.Context, tb *types.RootTrustBaseV1) {
+	var ids []libp2ppeer.ID
+	for _, n := range tb.RootNodes {
+		if n == nil {
+			continue
+		}
+		if id, err := libp2ppeer.Decode(n.NodeID); err == nil {
+			ids = append(ids, id)
+		}
+	}
+	w.run(ctx, "root-committee", ids)
+}
+
+func (w *memberPrewarm) run(ctx context.Context, tag string, ids []libp2ppeer.ID) {
+	if w == nil || w.peer == nil || len(ids) == 0 {
+		return
+	}
+	go func() {
+		ctx, cancel := context.WithTimeout(ctx, prewarmTimeout)
+		defer cancel()
+		got := w.peer.Prewarm(ctx, tag, ids)
+		if w.log != nil {
+			w.log.Debug("prewarmed member channels", "tag", tag, "asked", len(ids), "connected", len(got))
+		}
+	}()
+}
+
+// decodePeerIDs decodes node IDs, skipping any that is not a peer ID.
+func decodePeerIDs(raw []string) []libp2ppeer.ID {
+	out := make([]libp2ppeer.ID, 0, len(raw))
+	for _, s := range raw {
+		if id, err := libp2ppeer.Decode(s); err == nil {
+			out = append(out, id)
+		}
+	}
+	return out
 }

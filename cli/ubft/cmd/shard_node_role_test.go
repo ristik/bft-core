@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"sync"
 	"sync/atomic"
 	"testing"
 
@@ -165,4 +166,32 @@ func TestRootsAreSeededFromTheRetainedUTBEntriesAtStartup(t *testing.T) {
 		require.NoError(t, err)
 		require.True(t, seeded.deny(id), "root %s", m.ID)
 	}
+}
+
+type recordingPrewarm struct {
+	mu   sync.Mutex
+	tags map[string][]libp2ppeer.ID
+	done chan struct{}
+}
+
+func (r *recordingPrewarm) Prewarm(_ context.Context, tag string, ids []libp2ppeer.ID) []libp2ppeer.ID {
+	r.mu.Lock()
+	r.tags[tag] = append(r.tags[tag], ids...)
+	r.mu.Unlock()
+	r.done <- struct{}{}
+	return ids
+}
+
+// The shard members are warmed at once, the root committee by its authenticated identities, both in the background.
+func TestMemberPrewarmWarmsShardPeersAndTheRootCommittee(t *testing.T) {
+	rec := &recordingPrewarm{tags: map[string][]libp2ppeer.ID{}, done: make(chan struct{}, 2)}
+	w := &memberPrewarm{peer: rec}
+	shard, root := followTestID(t), followTestID(t)
+	w.shard(context.Background(), []libp2ppeer.ID{shard})
+	w.roots(context.Background(), &types.RootTrustBaseV1{RootNodes: []*types.NodeInfo{{NodeID: root.String()}, nil, {NodeID: "not a peer id"}}})
+	<-rec.done
+	<-rec.done
+	require.Equal(t, []libp2ppeer.ID{shard}, rec.tags["shard-members"])
+	require.Equal(t, []libp2ppeer.ID{root}, rec.tags["root-committee"])
+	require.Equal(t, []libp2ppeer.ID{shard}, decodePeerIDs([]string{shard.String(), "bad"}))
 }

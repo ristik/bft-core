@@ -865,6 +865,17 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 	role := newShardRole(trustBases[0].GetEpoch(), activePeers.Member(), runtimeEpoch)
 	follower.setRole(role.active)
 	role.subscribe(follower.changed)
+	// prewarmed member channels (phase 2): the shard peers of the installed and the staged assignment are kept connected; once the role is
+	// active, the current root committee too. A non-active node never dials a root (the gater refuses it), so roots are warmed at promotion.
+	warm := &memberPrewarm{peer: peer, log: flags.observe.Logger()}
+	activePeers.OnStage(func(ids []libp2ppeer.ID) { warm.shard(ctx, ids) }) // the successor assignment's peers, before its activation
+	role.subscribe(func() {
+		if role.active() && q3rt != nil && q3Trust != nil {
+			if tb, err := q3Trust.Verified().GetByEpoch(ctx, q3rt.ActiveEpoch()); err == nil {
+				warm.roots(ctx, tb)
+			}
+		}
+	})
 	follower.setMirrors(q3MirrorPeers(activePeers, followSourceIDs(followSources)))
 	var headFollower *archivewiring.HeadFollower
 	// Every shard-membership consumer (block dissemination, the archive and journal servers, the journal suffix and evidence providers)
@@ -1254,6 +1265,7 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 						return err
 					}
 					role.assignmentInstalled(activePeers.Member())
+					warm.shard(ctx, activePeers.Peers())
 					return nil
 				},
 				NoteJoiner: func(view handoffdelivery.Bundle, step handoff.AssignmentStep) error {
