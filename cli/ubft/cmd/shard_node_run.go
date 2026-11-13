@@ -61,6 +61,7 @@ import (
 	"github.com/unicitynetwork/bft-core/shardnode"
 	"github.com/unicitynetwork/bft-core/shardnode/executortest"
 	"github.com/unicitynetwork/bft-core/signingauthority"
+	"github.com/unicitynetwork/bft-core/utbmirror"
 	"github.com/unicitynetwork/bft-core/utbprofile"
 	"github.com/unicitynetwork/bft-core/utbstore"
 )
@@ -640,6 +641,14 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 	peer, err := network.NewPeer(ctx, peerConf, flags.observe.Logger(), flags.observe.PrometheusRegisterer())
 	if err != nil {
 		return fmt.Errorf("creating peer: %w", err)
+	}
+	var utbFollower *utbmirror.Follower
+	if utbEntries != nil {
+		// this node mirrors the finalized trust-base entries it holds; a root-free follower extends its own chain from the mirrors
+		peer.RegisterProtocolHandler(utbmirror.Protocol, utbmirror.NewServer(utbEntries).Handler)
+		if len(followSources) != 0 {
+			utbFollower = &utbmirror.Follower{Store: utbEntries, Host: peer, Mirrors: follower.mirrorPeers, Log: flags.observe.Logger()}
+		}
 	}
 	if follower.enabled {
 		for _, root := range bootNodes {
@@ -1627,6 +1636,9 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 	}
 	if headFollower != nil {
 		g.Go(func() error { return headFollower.Run(gctx) })
+	}
+	if utbFollower != nil {
+		g.Go(func() error { return utbFollower.Run(gctx) })
 	}
 	return g.Wait()
 }
