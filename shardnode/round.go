@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	abcrypto "github.com/unicitynetwork/bft-go-base/crypto"
@@ -32,6 +33,7 @@ type Submitter interface {
 // protocol knowledge beyond the certification/types packages — those live
 // in BFTClient.
 type Round struct {
+	follower    atomic.Pointer[func() bool] // see SetFollowerRole
 	nodeID      string
 	partitionID types.PartitionID
 	shardID     types.ShardID
@@ -317,6 +319,18 @@ func NewRound(nodeID string, partitionID types.PartitionID, shardID types.ShardI
 // block — see awaitTimeout. Deployments that know their shard's T2 should
 // set this below it, so a stalled leader is discovered and abstained from
 // well before the root chain would time the round out anyway.
+// SetFollowerRole installs the non-active predicate: while it is true the round observes, recovers and commits what is certified, then
+// stops. It never builds, verifies a proposal, disseminates, reserves a signature or sends a request. Call before the first certificate.
+func (r *Round) SetFollowerRole(nonActive func() bool) { r.follower.Store(&nonActive) }
+
+func (r *Round) isFollower() bool {
+	f := r.follower.Load()
+	return f != nil && (*f)()
+}
+
+// nonVotingFollower is the health reason of a non-active follower.
+const nonVotingFollower = "non-active follower: follows certified blocks, does not build or sign"
+
 func (r *Round) SetAwaitTimeout(d time.Duration) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -640,6 +654,11 @@ func (r *Round) HandleCertificate(ctx context.Context, uc *types.UnicityCertific
 	r.health.updateExecutorStatus(true, "")
 	if r.journalRecovery != nil && !sameBlockRef(head, recoveredHead) {
 		return fmt.Errorf("shardnode: executor identity changed immediately after journal recovery: got %d/%x, certified %d/%x", head.Number, head.Hash, recoveredHead.Number, recoveredHead.Hash)
+	}
+	// THE FOLLOWER BOUNDARY. A non-active node has now observed and executed what is certified; it produces nothing for the next round.
+	if r.isFollower() {
+		r.health.updateVoting(false, nonVotingFollower)
+		return nil
 	}
 	if r.executorGenesis == nil {
 		g, gerr := r.executor.GenesisBlock(ctx)
@@ -1056,6 +1075,9 @@ const submitRetries = 2
 const submitRetryInterval = 100 * time.Millisecond
 
 func (r *Round) send(ctx context.Context, req *certification.BlockCertificationRequest, round uint64) error {
+	if r.isFollower() {
+		return ErrFollower
+	}
 	var err error
 	for attempt := 0; ; attempt++ {
 		if err = r.submitter.Submit(ctx, req); err == nil {

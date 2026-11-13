@@ -211,6 +211,41 @@ type BFTClient struct {
 	// firstResponse is set once any certification response has arrived; it ends the early startup handshake retry.
 	firstResponse atomic.Bool
 	profile2      *Profile2Consumer
+
+	// follower, when set and true, makes this client a non-active follower: it sends nothing to the roots (no handshake, no request) and
+	// takes certificates only from FollowCertificate. Read on every use, so a promotion takes effect at the next one.
+	follower atomic.Pointer[func() bool]
+	// followed carries certificates from a non-root follow source into Run, where they are handled exactly as a root's response.
+	followed chan *certification.CertificationResponse
+	// wasFollower is Run's memory of the last role it saw: the first heartbeat after a promotion handshakes at once.
+	wasFollower bool
+}
+
+// ErrFollower refuses root traffic while this client is a non-active follower.
+var ErrFollower = errors.New("shardnode: non-active follower: no root traffic")
+
+// SetFollowerRole installs the non-active predicate (see BFTClient.follower). Call before Run.
+func (c *BFTClient) SetFollowerRole(nonActive func() bool) { c.follower.Store(&nonActive) }
+
+func (c *BFTClient) isFollower() bool {
+	f := c.follower.Load()
+	return f != nil && (*f)()
+}
+
+// FollowCertificate hands Run a certificate obtained from a non-root source (an archive record's resulting pair). It is untrusted until Run
+// verifies it through the same admission as a root's response. It never blocks: with the queue full the newest offer is dropped, and the
+// follow source offers again. It reports whether the offer was queued.
+func (c *BFTClient) FollowCertificate(uc *types.UnicityCertificate, tr *certification.TechnicalRecord) bool {
+	if uc == nil || tr == nil {
+		return false
+	}
+	cr := &certification.CertificationResponse{Partition: c.partitionID, Shard: c.shardID, UC: *uc, Technical: *tr}
+	select {
+	case c.followed <- cr:
+		return true
+	default:
+		return false
+	}
 }
 
 // SetProfile2Consumer enables the proof-gated epoch boundary before Run.
@@ -310,6 +345,7 @@ func NewBFTClient(
 		driver:         driver,
 		log:            log,
 		opts:           opts,
+		followed:       make(chan *certification.CertificationResponse, 4),
 	}
 	c.lastCertResponseTime.Store(time.Now().UnixMilli())
 	return c, nil
@@ -448,6 +484,7 @@ func (c *BFTClient) Run(ctx context.Context) error {
 		}()
 	}
 
+	c.wasFollower = c.isFollower()
 	if err := c.initialHandshake(ctx); err != nil {
 		return fmt.Errorf("initial handshake: %w", err)
 	}
@@ -521,6 +558,11 @@ func (c *BFTClient) Run(ctx context.Context) error {
 			if deliver(msg) {
 				return errors.New("shardnode: network received channel closed")
 			}
+		case cr := <-c.followed:
+			// a follow source's certificate: the same verification, admission and driver as a root's response
+			if err := c.handleCertificationResponse(ctx, cr); err != nil && c.log != nil {
+				c.log.DebugContext(ctx, "followed certificate not admitted", slog.String("err", err.Error()))
+			}
 		case <-startupC:
 			if c.firstResponse.Load() {
 				startupC = nil
@@ -535,6 +577,15 @@ func (c *BFTClient) Run(ctx context.Context) error {
 			startupAttempt++
 			startup.Reset(startupHandshakeDelay(c.opts.StartupHandshakeInterval, c.opts.InactivityTimeout, startupAttempt))
 		case <-heartbeat.C:
+			if follower := c.isFollower(); follower != c.wasFollower {
+				c.wasFollower = follower
+				if !follower {
+					// promoted: subscribe to the roots now rather than at the inactivity timeout
+					if err := c.sendHandshake(ctx); err != nil && c.log != nil {
+						c.log.ErrorContext(ctx, "handshake after promotion failed", slog.String("err", err.Error()))
+					}
+				}
+			}
 			c.reportPending(ctx)
 			last := time.UnixMilli(c.lastCertResponseTime.Load())
 			if time.Since(last) > c.opts.InactivityTimeout {
@@ -692,6 +743,9 @@ func (c *BFTClient) initialHandshake(ctx context.Context) error {
 }
 
 func (c *BFTClient) sendHandshake(ctx context.Context) error {
+	if c.isFollower() {
+		return nil // a non-active follower does not subscribe to the roots; its certificates come from FollowCertificate
+	}
 	c.mu.Lock()
 	luc := c.luc
 	c.mu.Unlock()
@@ -1416,6 +1470,9 @@ func (c *BFTClient) Submit(ctx context.Context, req *certification.BlockCertific
 
 // sendRequest puts req on the wire to the root nodes selected from luc.
 func (c *BFTClient) sendRequest(ctx context.Context, req *certification.BlockCertificationRequest, luc *types.UnicityCertificate) error {
+	if c.isFollower() {
+		return ErrFollower
+	}
 	tb, err := c.trustBaseStore.GetByEpoch(ctx, luc.GetRootEpoch())
 	if err != nil {
 		return fmt.Errorf("loading trust base for epoch %d: %w", luc.GetRootEpoch(), err)

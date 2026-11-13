@@ -3,6 +3,7 @@ package shardnode_test
 import (
 	"context"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -181,4 +182,30 @@ func certifyFrom(req *certification.BlockCertificationRequest, rootRound, timest
 		InputRecord: req.InputRecord,
 		UnicitySeal: &types.UnicitySeal{Version: 1, RootChainRoundNumber: rootRound, Timestamp: timestamp},
 	}
+}
+
+// A non-active follower observes what is certified but never builds or signs: no request reaches the submitter while the role holds,
+// even when the technical record names it leader. Promotion (the role turning false) lets the same round, same state, take part at the
+// next certificate, without a restart.
+func TestRound_FollowerNeverBuildsOrSignsUntilPromoted(t *testing.T) {
+	ctx := context.Background()
+	exec := executortest.New()
+	sub := &recordingSubmitter{}
+	r, nodeID := newTestRound(t, exec, sub)
+	var active atomic.Bool
+	r.SetFollowerRole(func() bool { return !active.Load() })
+
+	require.NoError(t, r.HandleCertificate(ctx, genesisUC(1000), tr(1, 0, nodeID)))
+	require.NoError(t, r.HandleCertificate(ctx, genesisUC(1001), tr(1, 0, nodeID)))
+	sub.mu.Lock()
+	require.Empty(t, sub.got, "a follower sends no certification request")
+	sub.mu.Unlock()
+	head, err := exec.Head(ctx)
+	require.NoError(t, err)
+	require.Empty(t, head.Hash, "a follower builds nothing")
+
+	active.Store(true)
+	require.NoError(t, r.HandleCertificate(ctx, genesisUC(1002), tr(1, 0, nodeID)))
+	req := sub.last(t)
+	require.Equal(t, uint64(1), req.InputRecord.RoundNumber, "promoted, it takes part from the next certificate")
 }
