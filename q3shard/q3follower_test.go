@@ -126,3 +126,76 @@ func TestQ3FollowerRunWaitsForTheNextBundleAndStopsOnCancel(t *testing.T) {
 	require.ErrorIs(t, (*Q3Follower)(nil).CatchUp(context.Background(), 2), ErrQ3FollowerConfig)
 	require.ErrorIs(t, (&Q3Follower{Runtime: act}).Run(context.Background()), ErrQ3FollowerConfig)
 }
+
+// A non-active node (joiner, syncing replica, external follower) takes activation evidence from mirrors only: a root is never dialled, even
+// when every mirror fails. This is the transport boundary: Fetch is the only way the follower reaches a peer.
+func TestQ3FollowerNonActiveNeverAsksARoot(t *testing.T) {
+	all := ids(t, 5)
+	roots, old, mirrors := all[:2], all[2:3], all[3:]
+	isRoot := map[peer.ID]bool{roots[0]: true, roots[1]: true, old[0]: true}
+	act := &fakeActivator{active: 1, refuse: map[string]bool{"forged": true}}
+	var asked []peer.ID
+	f := &Q3Follower{Runtime: act, AnchorEpoch: 1, CurrentRoots: roots, OldRoots: func(context.Context, uint64) []peer.ID { return old },
+		Mirrors: func() []peer.ID { return mirrors }, NonActive: func() bool { return true },
+		Fetch: func(_ context.Context, id peer.ID, epoch uint64) (q3active.Bundle, error) {
+			require.False(t, isRoot[id], "a non-active node dialled root %s", id)
+			asked = append(asked, id)
+			if id == mirrors[0] {
+				return q3active.Bundle{Candidate: []byte("forged")}, nil // a mirror serving bytes the history refuses
+			}
+			return q3active.Bundle{Candidate: []byte("good")}, nil
+		}}
+	require.NoError(t, f.CatchUp(context.Background(), 2))
+	require.Equal(t, []peer.ID{mirrors[0], mirrors[1]}, asked, "a refused mirror is followed by the next mirror")
+	require.Equal(t, []uint64{2}, act.activated)
+
+	// every mirror unavailable: the follower fails rather than falling back to a root
+	asked = nil
+	f.Fetch = func(_ context.Context, id peer.ID, _ uint64) (q3active.Bundle, error) {
+		require.False(t, isRoot[id], "a non-active node dialled root %s", id)
+		asked = append(asked, id)
+		return q3active.Bundle{}, errors.New("not staged here")
+	}
+	err := f.CatchUp(context.Background(), 3)
+	require.ErrorIs(t, err, ErrQ3Unavailable)
+	require.Equal(t, mirrors, asked)
+}
+
+// An active node asks the roots first (the fastest path), then the old committee, then the mirrors as backup; each peer once per round.
+func TestQ3FollowerActiveAsksRootsThenMirrors(t *testing.T) {
+	all := ids(t, 4)
+	roots, mirrors := all[:2], all[2:]
+	act := &fakeActivator{active: 1}
+	var asked []peer.ID
+	f := &Q3Follower{Runtime: act, AnchorEpoch: 1, CurrentRoots: roots,
+		Mirrors:   func() []peer.ID { return append([]peer.ID{roots[1]}, mirrors...) }, // a peer listed twice is asked once
+		NonActive: func() bool { return false },
+		Fetch: func(_ context.Context, id peer.ID, _ uint64) (q3active.Bundle, error) {
+			asked = append(asked, id)
+			if id != mirrors[1] {
+				return q3active.Bundle{}, errors.New("unavailable")
+			}
+			return q3active.Bundle{Candidate: []byte("good")}, nil
+		}}
+	require.NoError(t, f.CatchUp(context.Background(), 2))
+	require.Equal(t, []peer.ID{roots[0], roots[1], mirrors[0], mirrors[1]}, asked)
+}
+
+type stagedRuntime map[uint64]q3active.Bundle
+
+func (s stagedRuntime) StagedBundle(epoch uint64) (q3active.Bundle, bool, error) {
+	b, ok := s[epoch]
+	return b, ok, nil
+}
+
+func TestMirrorProviderServesOnlyStagedActivations(t *testing.T) {
+	staged := q3active.Bundle{Envelope: []byte{1}, Candidate: []byte("c")}
+	m := MirrorProvider{Runtime: stagedRuntime{2: staged}}
+	got, err := m.Q3Bundle(context.Background(), 2)
+	require.NoError(t, err)
+	require.Equal(t, staged, got, "served exactly as staged")
+	_, err = m.Q3Bundle(context.Background(), 3)
+	require.ErrorIs(t, err, ErrNotMirrored)
+	_, err = MirrorProvider{}.Q3Bundle(context.Background(), 2)
+	require.ErrorIs(t, err, ErrNotMirrored)
+}

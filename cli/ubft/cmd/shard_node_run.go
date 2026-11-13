@@ -1194,7 +1194,17 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 			if err := q3rt.Attach(q3active.Participants{Root: sink, Safety: q3rt.Trust(nil), Shard: q3Trust.Guarded(), Authority: q3rt.Trust(nil)}); err != nil {
 				return fmt.Errorf("q3 runtime: %w", err)
 			}
+			// This node mirrors the activations its journal staged, for non-active parties that must not ask the roots (phase 1 follower).
+			mirror, mirrorErr := q3delivery.NewServer(q3shard.MirrorProvider{Runtime: q3rt})
+			if mirrorErr != nil {
+				return fmt.Errorf("q3 activation mirror: %w", mirrorErr)
+			}
+			mirror.Register(peer)
+			mirrorPeers := q3MirrorPeers(activePeers, archiveReplicas)
 			q3Follower = &q3shard.Q3Follower{Runtime: q3rt, AnchorEpoch: trustBases[0].GetEpoch(), CurrentRoots: currentRoots,
+				Mirrors: mirrorPeers,
+				// a restore, or a node that is not a validator of the installed assignment, is a non-active party: mirrors only
+				NonActive: func() bool { return flags.Restore || !activePeers.Member() },
 				Fetch: func(ctx context.Context, id libp2ppeer.ID, epoch uint64) (q3active.Bundle, error) {
 					return q3delivery.Request(ctx, peer, id, epoch)
 				}}
@@ -2106,4 +2116,12 @@ func freshnessSigning(q3rt *q3active.Runtime, utb bool, anchor *types.RootTrustB
 		return func(uint64) (votesig.Config, error) { return cfg, nil }
 	}
 	return nil
+}
+
+// q3MirrorPeers lists the non-root holders of activation evidence: the installed assignment's other validators, then the archive replicas.
+func q3MirrorPeers(active *shardnode.ActivePeers, replicas []libp2ppeer.ID) func() []libp2ppeer.ID {
+	fixed := append([]libp2ppeer.ID(nil), replicas...)
+	return func() []libp2ppeer.ID {
+		return append(active.Peers(), fixed...)
+	}
 }
