@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"maps"
 	"slices"
+	"sort"
 	"time"
 
 	"github.com/unicitynetwork/bft-go-base/types"
@@ -166,7 +167,8 @@ type RequestSnapshot struct {
 	network   uint64
 	partition types.PartitionID
 	shard     types.ShardID
-	chain     []*RequestActivation
+	chain     []*RequestActivation // a validated RequestChain's entries: immutable, shared, never written
+	base      []int                // base[i] is the real activation entry i is or continues
 	parent    shardParent
 	frozen    *ShardInfo // private copy of the parent state, the base of the derived successor technical record
 	parentID  []byte
@@ -181,49 +183,33 @@ func NewRequestSnapshot(network uint64, hashAlg crypto.Hash, parent *ShardInfo, 
 	if parent == nil || parent.LastCR == nil || len(chain) == 0 || len(parentID) == 0 {
 		return nil, fmt.Errorf("%w: no verified parent state or activation history", ErrAssignmentHistory)
 	}
-	first := chain[0]
-	if first == nil || first.start != 0 || first.continuation {
-		return nil, fmt.Errorf("%w: history does not begin at a trusted anchor", ErrAssignmentHistory)
+	c, err := NewRequestChain(network, chain...)
+	if err != nil {
+		return nil, err
 	}
-	for i, a := range chain {
-		if a == nil || a.pdr.PartitionID != parent.PartitionID || !a.pdr.ShardID.Equal(parent.ShardID) {
-			return nil, fmt.Errorf("%w: activation %d is not of shard %s-%s", ErrAssignmentHistory, i, parent.PartitionID, parent.ShardID)
-		}
-		if i == 0 {
-			continue
-		}
-		p := chain[i-1]
-		if a.start <= p.start || a.rootEpoch <= p.rootEpoch || a.pdr.NetworkID != p.pdr.NetworkID {
-			return nil, fmt.Errorf("%w: activation %d does not follow activation %d", ErrAssignmentHistory, i, i-1)
-		}
-		if a.continuation {
-			// the same assignment under the next root interval: identical configuration, context, version and original commitment, the
-			// next root epoch, and the very body the previous interval was authorised by
-			if a.pdr.Epoch != p.pdr.Epoch || a.rootEpoch != p.rootEpoch+1 || p.rootEpoch == ^uint64(0) || !bytes.Equal(a.predecessorRootBody, p.rootBody) ||
-				!bytes.Equal(a.confHash, p.confHash) || a.ctx != p.ctx || a.version != p.version || !bytes.Equal(a.trHash, p.trHash) || !samePDR(a.pdr, p.pdr) {
-				return nil, fmt.Errorf("%w: continuation %d is not the continuation of activation %d", ErrAssignmentHistory, i, i-1)
-			}
-			continue
-		}
-		if p.pdr.Epoch == ^uint64(0) || a.pdr.Epoch != p.pdr.Epoch+1 {
-			return nil, fmt.Errorf("%w: activation %d does not follow activation %d", ErrAssignmentHistory, i, i-1)
-		}
+	return NewRequestSnapshotOf(c, hashAlg, parent, parentID, pending)
+}
+
+// NewRequestSnapshotOf is NewRequestSnapshot over an already validated chain: only the parent's binding to the chain is checked, so its
+// cost does not depend on the length of the history.
+func NewRequestSnapshotOf(c *RequestChain, hashAlg crypto.Hash, parent *ShardInfo, parentID []byte, pending *types.InputRecord) (*RequestSnapshot, error) {
+	if parent == nil || parent.LastCR == nil || c == nil || c.Len() == 0 || len(parentID) == 0 {
+		return nil, fmt.Errorf("%w: no verified parent state or activation history", ErrAssignmentHistory)
 	}
+	if c.partition != parent.PartitionID || !c.shard.Equal(parent.ShardID) {
+		return nil, fmt.Errorf("%w: activation 0 is not of shard %s-%s", ErrAssignmentHistory, parent.PartitionID, parent.ShardID)
+	}
+	network := c.network
 	// the network is authenticated by the history and the previous UC, never asserted beside them
-	for i, a := range chain {
-		if uint64(a.pdr.NetworkID) != network {
-			return nil, fmt.Errorf("%w: snapshot network %d, activation %d is of network %d", quorumweight.ErrRequestContext, network, i, a.pdr.NetworkID)
-		}
-	}
 	if seal := parent.LastCR.UC.UnicitySeal; seal == nil || uint64(seal.NetworkID) != network {
 		return nil, fmt.Errorf("%w: snapshot network %d, previous UC is of another network or unsealed", quorumweight.ErrRequestContext, network)
 	}
-	idx := slices.IndexFunc(chain, func(a *RequestActivation) bool { return a.pdr.Epoch == parent.TR.Epoch })
+	idx := c.ofShardEpoch(parent.TR.Epoch)
 	if idx < 0 {
 		return nil, fmt.Errorf("%w: no activation for shard epoch %d", ErrAssignmentHistory, parent.TR.Epoch)
 	}
-	if !bytes.Equal(chain[idx].confHash, parent.ShardConfHash) {
-		return nil, fmt.Errorf("%w: parent state is under configuration %x, history has %x", quorumweight.ErrRequestContext, parent.ShardConfHash, chain[idx].confHash)
+	if !bytes.Equal(c.acts[idx].confHash, parent.ShardConfHash) {
+		return nil, fmt.Errorf("%w: parent state is under configuration %x, history has %x", quorumweight.ErrRequestContext, parent.ShardConfHash, c.acts[idx].confHash)
 	}
 	ucDigest, err := parent.LastCR.UC.Hash(hashAlg)
 	if err != nil {
@@ -246,7 +232,7 @@ func NewRequestSnapshot(network uint64, hashAlg crypto.Hash, parent *ShardInfo, 
 	frozen.TR, frozen.ShardConfHash = cloneTR(parent.TR), bytes.Clone(parent.ShardConfHash)
 	frozen.PartitionParams = maps.Clone(parent.PartitionParams)
 	s := &RequestSnapshot{frozen: &frozen, network: network, partition: parent.PartitionID, shard: parent.ShardID, parentID: bytes.Clone(parentID), hashAlg: hashAlg,
-		chain: slices.Clone(chain), parent: shardParent{tr: cloneTR(parent.TR), lastTR: cloneTR(parent.LastCR.Technical), uc: uc, ucDigest: ucDigest,
+		chain: c.acts, base: c.base, parent: shardParent{tr: cloneTR(parent.TR), lastTR: cloneTR(parent.LastCR.Technical), uc: uc, ucDigest: ucDigest,
 			rootHash: bytes.Clone(parent.RootHash), confHash: bytes.Clone(parent.ShardConfHash), pending: pend}}
 	return s, nil
 }
@@ -338,6 +324,12 @@ func assignmentKey(a *RequestActivation, hashAlg crypto.Hash) []byte {
 // activation, the purpose and the pending-change snapshot.
 func (v *RequestRoundView) AssignmentKey() []byte { return bytes.Clone(v.assignKey) }
 func (v *RequestRoundView) ViewKey() []byte       { return bytes.Clone(v.viewKey) }
+
+// RootAuthority is the root epoch and body identity that authorise the view's target round, encoded as one comparable value.
+func (v *RequestRoundView) RootAuthority() []byte {
+	out := binary.BigEndian.AppendUint64(nil, v.target.RootEpoch)
+	return append(out, v.target.RootBodyID...)
+}
 
 // Identity is the assignment identity the buffer tags tallies with: the AssignmentKey, never the shard epoch alone.
 func (v *RequestRoundView) Identity() string { return hex.EncodeToString(v.assignKey) }
@@ -435,12 +427,8 @@ func ResolveRequestContext(q RequestQuery, snap *RequestSnapshot) (*RequestRound
 		return nil, fmt.Errorf("%w: parent %x, snapshot parent %x", quorumweight.ErrRequestContext, q.ParentID, snap.parentID)
 	}
 	// the assignment in force at the target round: the latest activation starting at or before it
-	idx := -1
-	for i, a := range snap.chain {
-		if a.start <= q.RootRound {
-			idx = i
-		}
-	}
+	// starts strictly rise along a validated chain
+	idx := sort.Search(len(snap.chain), func(i int) bool { return snap.chain[i].start > q.RootRound }) - 1
 	if idx < 0 {
 		return nil, fmt.Errorf("%w: no assignment in force at root round %d", ErrAssignmentHistory, q.RootRound)
 	}
@@ -512,9 +500,7 @@ func ResolveRequestContext(q RequestQuery, snap *RequestSnapshot) (*RequestRound
 func expectedTR(snap *RequestSnapshot, idx int) (certification.TechnicalRecord, error) {
 	// a continuation is a later root interval of the same assignment, not a shard transition: the logic below runs against the original
 	// assignment, with its original commitment, however many continuations followed it
-	for idx > 0 && snap.chain[idx].continuation {
-		idx--
-	}
+	idx = snap.base[idx]
 	act, p := snap.chain[idx], snap.parent
 	switch {
 	case idx > 0 && act.pdr.Epoch > 0 && p.lastTR.Epoch < act.pdr.Epoch:
@@ -714,11 +700,30 @@ func ResolveParentView(h RequestHistory, pending *types.InputRecord, parent *Sha
 	if parent == nil {
 		return nil, fmt.Errorf("%w: no verified parent state", ErrAssignmentHistory)
 	}
-	chain, err := h.Chain(parent.PartitionID, parent.ShardID)
-	if err != nil {
-		return nil, errors.Join(ErrAssignmentHistory, err)
+	var chain *RequestChain
+	if src, ok := h.(RequestChainSource); ok {
+		// the history maintains the validated chain incrementally: nothing here walks the installed epochs (#1032)
+		c, err := src.RequestChain(parent.PartitionID, parent.ShardID)
+		if err != nil {
+			return nil, errors.Join(ErrAssignmentHistory, err)
+		}
+		if c == nil || c.network != h.Network() {
+			return nil, fmt.Errorf("%w: the request chain is not of network %d", quorumweight.ErrRequestContext, h.Network())
+		}
+		chain = c
+	} else {
+		acts, err := h.Chain(parent.PartitionID, parent.ShardID)
+		if err != nil {
+			return nil, errors.Join(ErrAssignmentHistory, err)
+		}
+		if parent.LastCR == nil || len(acts) == 0 || len(parentID) == 0 {
+			return nil, fmt.Errorf("%w: no verified parent state or activation history", ErrAssignmentHistory)
+		}
+		if chain, err = NewRequestChain(h.Network(), acts...); err != nil {
+			return nil, err
+		}
 	}
-	snap, err := NewRequestSnapshot(h.Network(), hashAlg, parent, parentID, pending, chain...)
+	snap, err := NewRequestSnapshotOf(chain, hashAlg, parent, parentID, pending)
 	if err != nil {
 		return nil, err
 	}

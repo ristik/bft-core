@@ -36,7 +36,8 @@ and bounded Docker JSON logs (30 MiB/service). Each pod caps memory at about 4.2
 plus a 16 MiB namespace holder and a 64 MiB metrics relay); shared services cap another 2.375 GiB, approximately **19.2 GiB for N=4** and
 **15.0 GiB for N=3**, plus Docker/OS/page cache/build overhead. Plan at least 24 GiB
 server RAM, 8 cores, 100 GiB initial SSD and off-host backup space; these are initial
-planning budgets, not measured capacity. On the shared 16 GiB development Mac use
+planning budgets, not measured capacity. Each root node gets `--root-cpus` CPUs (default 2: its per-round work grows with the epoch count, and
+at 0.5 the staging roots were throttled after 34 handoffs). On the shared 16 GiB development Mac use
 N=3 only when memory is available. Never build Rust while rehearsing the cluster.
 Monitor disks: retention bounds metrics/logs but does not bound chain databases.
 
@@ -407,7 +408,7 @@ The sampler is `observe.py` (read-only: no key, credential or signing method): `
 
 For a generation made with `--pos`, `pos_sample.py` (same options, same read-only rule, reuses `observe.collect` and `observe.Watch`) adds the contracts' clock and books to every sample, read through the gateway: the registry's `progress()`, `ucTime()`, `recordCount()`, the custody's `recordCursor()`, the election's `thresholds()`, `openResult()`, `liveCount()`, and the reward pool's balance, `available()`, `totalCredits()`, `accounted()`, `nextStart()`. Extra alerts: registry progress stopped (`--stall`), the custody behind the registry's record count for more than `--lag` s, an election result open for more than `--open-limit` s (while one is open the pool closes the tail only up to the reservation progress, contracts#72), the pool holding less than it has accounted for, no funded balance left, an unreadable view. On a rehearsal runner use `--no-faucet`; the gateway needs the forwarded address, which the sampler sets. The rehearsal stage `pos-observe` runs it for two samples against the running package. It samples the package where it runs; it says nothing about a host unless it runs on that host.
 
-The hosted-runner rehearsal (`.github/workflows/testnet-rehearsal.yml`) runs THREE generations in turn, each a fresh `generate.py` output on the same host ports (the previous one is stopped
+The hosted-runner rehearsal (`.github/workflows/testnet-rehearsal.yml`; over an hour, so opt-in: it runs on any PR labelled `rehearse`, or by workflow_dispatch) runs THREE generations in turn, each a fresh `generate.py` output on the same host ports (the previous one is stopped
 first): the PoA package (up, identity, first transaction, gateway limits, faucet guard, load, observation smoke, pod restart, backup/restore, reset); a PoS package (the 5a smoke, the
 reward pool, the election, the first handoff, Abort before and after H, restarts, stale credentials, the second handoff, recreate without the install flag, the resource smoke and the
 owner-key operations); and a PoS **join** package (a fifth entity registers, bonds and is delegated, the election has five members, the handoff takes it in, its signature is needed for

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"sync"
 	"time"
 
@@ -29,7 +30,14 @@ type FrontierWorker struct {
 	// PolicyDigest, when set, binds new frontier records to the archive policy that selected Replicas (two or three, canonical order):
 	// each record then names the two replicas that actually hold a verified copy. Zero keeps the legacy two-replica records, for
 	// exactly two Replicas.
-	PolicyDigest    [32]byte
+	PolicyDigest [32]byte
+	// Policy, when set, is the versioned policy Replicas and PolicyDigest follow (bft-core#1030): each pass adopts a switch durably in
+	// the journal before it plans under it, verifies the promised history on the new replicas, and releases the retained holders of
+	// earlier policies only after that. Nil keeps Replicas and PolicyDigest fixed.
+	Policy *ReplicaPolicy
+	// BundleVerifier compares a replica's activation bundle with the local one by content when the bytes differ (a migration verifies
+	// the retained bundles on the current replicas). Nil compares bytes.
+	BundleVerifier  BundleVerifier
 	Host            shardnode.EvidenceHost
 	TransportLimits Limits
 	Log             *slog.Logger
@@ -41,8 +49,15 @@ type FrontierWorker struct {
 	lastCapacityWarn   time.Time
 	lastNoProgressWarn time.Time
 	// advancing serializes frontier advances: the worker's own passes and Advance from a long catch-up (#769) would otherwise
-	// invalidate each other's planned coverage (frontier.ErrStale) on every pass.
+	// invalidate each other's planned coverage (frontier.ErrStale) on every pass. It also guards the policy state below: a policy
+	// switch is adopted only between advances.
 	advancing sync.Mutex
+	applied   bool     // the journal's frontier policy is Policy's snapshot of digest appliedAt
+	appliedAt [32]byte //
+	retained  []peer.ID
+	migration *configuredprogress.ArchiveMigration
+	// beforeAdopt, in tests, runs between the policy snapshot and its adoption.
+	beforeAdopt func()
 }
 
 // passCoverage is how many blocks one worker pass covers; busyPassCoverage while the journal is at least publisherBusyPercent full. A pass every two
@@ -91,10 +106,24 @@ func (w *FrontierWorker) Pass(ctx context.Context) error {
 	return err
 }
 
+func (w *FrontierWorker) configValid() bool {
+	return w.Journal != nil && w.Archive != nil && validReplicas(w.Replicas) && (w.PolicyDigest != ([32]byte{}) || len(w.Replicas) == 2)
+}
+
 func (w *FrontierWorker) pass(ctx context.Context, mark func(string)) error {
-	if w.Journal == nil || w.Archive == nil || !validReplicas(w.Replicas) || w.PolicyDigest == ([32]byte{}) && len(w.Replicas) != 2 {
+	w.advancing.Lock()
+	defer w.advancing.Unlock()
+	if err := w.syncPolicy(ctx); err != nil {
+		return err
+	}
+	mark("policy")
+	if !w.configValid() {
 		return ErrConfig
 	}
+	if err := w.migrate(ctx); err != nil && w.Log != nil && ctx.Err() == nil {
+		w.Log.WarnContext(ctx, "archive policy migration waiting: retained replicas stay required holders", "err", err)
+	}
+	mark("migrate")
 	err := w.audit(ctx)
 	mark("audit")
 	if err != nil {
@@ -108,15 +137,19 @@ func (w *FrontierWorker) pass(ctx context.Context, mark func(string)) error {
 // two replicas. A long catch-up (#769) calls it after each admitted page so that the journal stays inside its limits. It does not
 // advance past a block it cannot cover; that is not an error unless no block is covered and the first one is missing.
 func (w *FrontierWorker) Advance(ctx context.Context, max int) error {
-	if w.Journal == nil || w.Archive == nil || !validReplicas(w.Replicas) || w.PolicyDigest == ([32]byte{}) && len(w.Replicas) != 2 || max <= 0 {
+	w.advancing.Lock()
+	defer w.advancing.Unlock()
+	if err := w.syncPolicy(ctx); err != nil {
+		return err
+	}
+	if !w.configValid() || max <= 0 {
 		return ErrConfig
 	}
 	return w.advance(ctx, func(string) {}, max)
 }
 
+// advance runs under w.advancing.
 func (w *FrontierWorker) advance(ctx context.Context, mark func(string), max int) error {
-	w.advancing.Lock()
-	defer w.advancing.Unlock()
 	err := w.Journal.VerifyFrontierCopies(ctx, w.Context, w.Limits)
 	mark("verifyCopies")
 	if err != nil {
@@ -359,7 +392,7 @@ func (w *FrontierWorker) audit(ctx context.Context) error {
 	if quota < 4 {
 		quota = 4
 	}
-	availability := ReplicaAvailability{Context: ctx, Host: w.Host, Replicas: w.Replicas, Limits: w.TransportLimits}
+	availability := ReplicaAvailability{Context: ctx, Host: w.Host, Replicas: w.readable(), Limits: w.TransportLimits}
 	binding := CertifiedBinding{Context: w.Context, Subject: w.Subject}
 	down := make(map[peer.ID]bool)
 	for quota > 0 {
@@ -377,28 +410,11 @@ func (w *FrontierWorker) audit(ctx context.Context) error {
 		}
 		for _, r := range page {
 			// the promise names an exact manifest: the local copy is that representation, which may be a variant object (bft-core#876)
-			rec, err := w.Archive.GetExact(r.Subject, r.Acks[0].ManifestDigest)
+			rec, err := w.promisedMaterial(ctx, binding, r)
 			if err != nil {
-				verified := false
-				for _, id := range w.Replicas {
-					rec, err = readReplica(ctx, w.Host, id, r.Subject, r.Acks[0].ManifestDigest, w.TransportLimits)
-					if err == nil && binding.VerifyCertified(r, rec) == nil {
-						verified = true
-						break
-					}
-				}
-				if !verified {
-					return frontier.ErrUnavailable
-				}
-				if err := putExact(w.Archive, r.Subject, rec); err != nil {
-					return err
-				}
+				return err
 			}
-			digest, err := archive.ManifestDigest(r.Subject, rec)
-			if err != nil || digest != r.Acks[0].ManifestDigest || binding.VerifyCertified(r, rec) != nil {
-				return frontier.ErrInvalid
-			}
-			if w.ensureCopies(ctx, availability, down, r, rec) < replicaCopies {
+			if w.ensureCopies(ctx, availability, down, r, rec, true) < replicaCopies {
 				return frontier.ErrUnavailable
 			}
 			w.auditCursor = r.Height
@@ -408,12 +424,51 @@ func (w *FrontierWorker) audit(ctx context.Context) error {
 	return nil
 }
 
+// promisedMaterial is the exact representation a promise names: the local copy, else one read back from a current or retained replica
+// and verified against the certified binding, which then restores the local copy.
+func (w *FrontierWorker) promisedMaterial(ctx context.Context, binding CertifiedBinding, r frontier.Record) (*archive.Record, error) {
+	rec, err := w.Archive.GetExact(r.Subject, r.Acks[0].ManifestDigest)
+	if err != nil {
+		verified := false
+		for _, id := range w.readable() {
+			rec, err = readReplica(ctx, w.Host, id, r.Subject, r.Acks[0].ManifestDigest, w.TransportLimits)
+			if err == nil && binding.VerifyCertified(r, rec) == nil {
+				verified = true
+				break
+			}
+		}
+		if !verified {
+			return nil, frontier.ErrUnavailable
+		}
+		if err := putExact(w.Archive, r.Subject, rec); err != nil {
+			return nil, err
+		}
+	}
+	digest, err := archive.ManifestDigest(r.Subject, rec)
+	if err != nil || digest != r.Acks[0].ManifestDigest || binding.VerifyCertified(r, rec) != nil {
+		return nil, frontier.ErrInvalid
+	}
+	return rec, nil
+}
+
+// readable is the current replicas, then the retained holders of earlier policies.
+func (w *FrontierWorker) readable() []peer.ID {
+	out := slices.Clone(w.Replicas)
+	for _, id := range w.retained {
+		if !slices.Contains(out, id) {
+			out = append(out, id)
+		}
+	}
+	return out
+}
+
 // ensureCopies counts the configured replicas holding a verified copy of the position after repairing what it can. It keeps going past two:
 // the acknowledgers come first, so the two copies pruning needs are restored before the optional third, and a replica that returns after
 // pruning is backfilled by the same bounded sweep. Callers need only replicaCopies. A failed replica is rewritten from the local record;
 // down collects the replicas that failed both the read and the rewrite, for the rest of the pass. A retired replica (dropped, or outside
-// the configured set) is neither verified nor repaired.
-func (w *FrontierWorker) ensureCopies(ctx context.Context, availability ReplicaAvailability, down map[peer.ID]bool, r frontier.Record, rec *archive.Record) int {
+// the configured set) is neither verified nor repaired. With retained set, a retained holder of an earlier policy that still serves the
+// exact copy counts as well (it is read, never written): the promise keeps two copies across a switch until the current replicas hold them.
+func (w *FrontierWorker) ensureCopies(ctx context.Context, availability ReplicaAvailability, down map[peer.ID]bool, r frontier.Record, rec *archive.Record, retained bool) int {
 	ackers := make(map[peer.ID]bool, len(r.Acks))
 	var order []peer.ID
 	for _, ack := range r.Acks {
@@ -440,6 +495,21 @@ func (w *FrontierWorker) ensureCopies(ctx context.Context, availability ReplicaA
 			continue
 		}
 		copies++
+	}
+	if retained {
+		for _, id := range w.retained {
+			if copies >= replicaCopies {
+				break
+			}
+			if down[id] || slices.Contains(w.Replicas, id) {
+				continue
+			}
+			if availability.VerifyAvailable(id.String(), r.Subject, r.Acks[0].ManifestDigest) != nil {
+				down[id] = true
+				continue
+			}
+			copies++
+		}
 	}
 	return copies
 }

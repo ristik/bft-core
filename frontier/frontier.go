@@ -86,8 +86,18 @@ type Policy struct {
 	// Eligible, when set, replaces Replicas: the policy's 2 or 3 replicas in
 	// canonical order, any two of which may acknowledge a position. PolicyDigest
 	// is the digest of that policy and is nonzero whenever Eligible is set.
-	Eligible        []string
-	PolicyDigest    [32]byte
+	Eligible     []string
+	PolicyDigest [32]byte
+	// Historical, with an Eligible policy, names the replicas of earlier
+	// policies of this writer (its durable policy lineage, bft-core#1030): a
+	// historical record acknowledged by one of them is accepted although no
+	// acknowledger is still eligible. It never makes a name acknowledge anew.
+	Historical []string
+	// Retained names the replicas of earlier policies that still hold
+	// copies this writer promised and has not yet verified on the current
+	// replicas: they count towards the two copies a promised position needs
+	// (never towards a new one), so a retirement does not lower K.
+	Retained        []string
 	MinimumSequence uint64 // authenticated lower bound supplied by the recovery owner
 	Binding         CertifiedBinding
 	Availability    ReplicaAvailability
@@ -142,6 +152,27 @@ func eligibleValid(p Policy) bool {
 	return true
 }
 
+// known reports whether name is a replica of an earlier policy in the lineage.
+func (p Policy) known(name string) bool {
+	for _, list := range [][]string{p.Historical, p.Retained} {
+		for _, n := range list {
+			if n == name {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func namesValid(names []string) bool {
+	for _, n := range names {
+		if len(n) == 0 || len(n) > 64 {
+			return false
+		}
+	}
+	return true
+}
+
 func (p Policy) eligibleIndex(name string) int {
 	for i, e := range p.Eligible {
 		if e == name {
@@ -156,7 +187,8 @@ func (p Policy) eligibleIndex(name string) int {
 // canonical order under this policy's digest. Nothing else is current: a legacy
 // (version 1 or 2) record, a record of an earlier policy or one naming a replica
 // outside the policy is historical evidence, accepted only when historical is
-// set and one of its acknowledgments is by a currently eligible replica.
+// set and one of its acknowledgments is by a currently eligible replica or by a
+// replica of the policy lineage (Historical, Retained).
 func acksValid(r Record, p Policy, historical bool) error {
 	if r.Acks[0].Replica == "" || r.Acks[0].Replica == r.Acks[1].Replica || r.Acks[1].Replica == "" {
 		return ErrContext
@@ -170,7 +202,7 @@ func acksValid(r Record, p Policy, historical bool) error {
 			return nil
 		}
 	}
-	if historical && (i0 >= 0 || i1 >= 0) {
+	if historical && (i0 >= 0 || i1 >= 0 || p.known(r.Acks[0].Replica) || p.known(r.Acks[1].Replica)) {
 		return nil
 	}
 	return ErrContext
@@ -181,7 +213,10 @@ func (p Policy) ReplicasValid() bool { return policyReplicasValid(p) }
 
 func policyReplicasValid(p Policy) bool {
 	if len(p.Eligible) != 0 {
-		return eligibleValid(p)
+		return eligibleValid(p) && namesValid(p.Historical) && namesValid(p.Retained)
+	}
+	if len(p.Historical) != 0 || len(p.Retained) != 0 {
+		return false // the legacy pair migrates by its own rule (migrateAcks)
 	}
 	return len(p.Replicas[0]) != 0 && len(p.Replicas[0]) <= 64 && len(p.Replicas[1]) != 0 && len(p.Replicas[1]) <= 64 && p.Replicas[0] != p.Replicas[1]
 }
@@ -331,7 +366,38 @@ func migrateAcks(r Record, p Policy) (Record, error) {
 	return out, nil
 }
 
+// DecodeUnchecked parses a persisted record and checks its checksum and
+// canonical encoding, without any policy: it is for reading the acknowledger
+// names of durable evidence (the policy lineage), never for accepting it.
+func DecodeUnchecked(raw []byte) (Record, error) {
+	return parse(raw)
+}
+
 func decode(raw []byte, p Policy, migrate bool) (Record, error) {
+	out, err := parse(raw)
+	if err != nil {
+		return Record{}, err
+	}
+	if migrate {
+		if len(p.Eligible) == 0 {
+			if out, err = migrateAcks(out, p); err != nil {
+				return Record{}, err
+			}
+		} else {
+			out.Historical = acksValid(out, p, false) != nil
+		}
+		err = validHistorical(out, p)
+	} else {
+		err = valid(out, p)
+	}
+	if err != nil {
+		return Record{}, err
+	}
+	return out, nil
+}
+
+// parse decodes the record's fields, checksum and canonical encoding.
+func parse(raw []byte) (Record, error) {
 	var out Record
 	if len(raw) > MaxBytes || len(raw) < len(domain)+1+24+32+4+2*(1+64)+32 {
 		return out, ErrInvalid
@@ -397,23 +463,7 @@ func decode(raw []byte, p Policy, migrate bool) (Record, error) {
 	if remaining != 0 {
 		return Record{}, ErrInvalid
 	}
-	persisted := out
-	if migrate {
-		if len(p.Eligible) == 0 {
-			if out, err = migrateAcks(out, p); err != nil {
-				return Record{}, err
-			}
-		} else {
-			out.Historical = acksValid(out, p, false) != nil
-		}
-		err = validHistorical(out, p)
-	} else {
-		err = valid(out, p)
-	}
-	if err != nil {
-		return Record{}, err
-	}
-	again, err := encodeRecord(persisted)
+	again, err := encodeRecord(out)
 	if err != nil || !bytes.Equal(payload[len(domain)+1:len(payload)-remaining], again[len(domain)+1:len(again)-32]) {
 		return Record{}, ErrInvalid
 	}

@@ -877,6 +877,12 @@ func (x *ConsensusManager) onPartitionIRChangeReq(ctx context.Context, req *IRCh
 	if err := x.refuseFrozenIR(irReq); err != nil {
 		return err
 	}
+	// a change is certified only in the root epoch its collector counted it in (#1032); a change that names none is refused (fail
+	// closed). The installed epoch changes only on this loop (trust-base update) or while consensus is stopped (an activation installs
+	// before Run), so the check is serialized with activation.
+	if req.RootEpoch == 0 || req.RootEpoch != x.InstalledRootEpoch() {
+		return fmt.Errorf("%w: change counted in root epoch %d, root epoch %d is installed", ErrChangeOfAnotherRootEpoch, req.RootEpoch, x.InstalledRootEpoch())
+	}
 	switch req.Reason {
 	case Quorum:
 		irReq.CertReason = drctypes.Quorum
@@ -897,13 +903,11 @@ func (x *ConsensusManager) SelectRequestHistory(h storage.RequestHistory) error 
 	if h == nil {
 		return ErrNoRequestHistory
 	}
+	// the committed parent: the shard's state and the identity of its block from one read of the committed root (#1032), never two
+	// reads a commit can fall between
 	parent := func(p types.PartitionID, s types.ShardID) (*storage.ShardInfo, []byte, *types.InputRecord, error) {
-		state, err := x.blockStore.GetState()
-		if err != nil {
-			return nil, nil, nil, err
-		}
-		id, err := state.CommittedHead.Block.Hash(crypto.SHA256)
-		return x.blockStore.ShardInfo(p, s), id, nil, err
+		si, id, err := x.blockStore.CommittedShardParent(p, s)
+		return si, id, nil, err
 	}
 	resolver, err := NewRequestViewResolver(h, crypto.SHA256, parent, nil)
 	if err != nil {
@@ -913,6 +917,9 @@ func (x *ConsensusManager) SelectRequestHistory(h storage.RequestHistory) error 
 	x.SetViewResolver(resolver)
 	return nil
 }
+
+// ErrChangeOfAnotherRootEpoch refuses a certification request whose collector counted it under another root epoch than the installed one.
+var ErrChangeOfAnotherRootEpoch = errors.New("certification request of another root epoch")
 
 // ErrNoRequestHistory is returned when the view-aware branch is selected without a request history.
 var ErrNoRequestHistory = errors.New("consensus: no request history to select")
@@ -1939,6 +1946,10 @@ func (x *ConsensusManager) onStateResponse(ctx context.Context, rsp *abdrc.State
 	x.blockStore = blockStore
 	x.irReqVerifier = reqVerifier
 	x.t2Timeouts = t2TimeoutGen
+	// nothing derived from the request history before the recovery is served after it without being derived again
+	if inv, ok := reqVerifier.RequestHistory().(interface{ Invalidate() }); ok {
+		inv.Invalidate()
+	}
 	// exit recovery status and replay buffered messages
 	x.log.DebugContext(ctx, "completed recovery")
 	triggerMsg := x.recovery.Clear()

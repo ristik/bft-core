@@ -2468,5 +2468,25 @@ class StagingKnobs(unittest.TestCase):
                 with self.assertRaises(SystemExit,msg=args), patch('sys.stderr'): public_routes.main([str(gen),*args,'--out',str(Path(tmp)/'o')])
             bad=json.loads((gen/'compose.yaml').read_text()); bad['services']['rpc']['ports']=['0.0.0.0:8545:8545']
             with self.assertRaises(SystemExit): public_routes.loopback_port(bad,'rpc',8545)
+class RootCpus(unittest.TestCase):
+    """The roots' CPU quota (staging slowdown, 2026-11-13): 2 by default, an option, and the only service it changes."""
+    def topo(self,**kw):
+        images={'node':'sha256:'+'1'*64,'rpc':'sha256:'+'2'*64,'guard':'sha256:'+'3'*64,'signer':'sha256:'+'4'*64}
+        with tempfile.TemporaryDirectory() as d:
+            return generate.topology(Path(d),4,{'root':['r%d'%i for i in range(4)],'evm':['e%d'%i for i in range(4)]},images,'captcha',**kw)
+    def test_roots_get_two_cpus_by_default_and_the_option(self):
+        base,custom=self.topo(),self.topo(root_cpus=3.5)
+        for i in range(1,5):
+            self.assertEqual(base['services'][f'root{i}']['cpus'],2.0)
+            self.assertEqual(custom['services'][f'root{i}']['cpus'],3.5)
+        for name,svc in base['services'].items():
+            if not name.startswith('root'): self.assertEqual(svc['cpus'],custom['services'][name]['cpus'],name)
+        self.assertEqual(base['services']['shard1']['cpus'],1.5)
+    def test_the_generator_refuses_an_out_of_range_quota_before_any_key(self):
+        for bad in ('0.1','9'):
+            done=subprocess.run([sys.executable,str(Path(__file__).parent/'generate.py'),'--out','/nonexistent/tn-x','--validators','4','--ubft','x','--keygen','x','--b1genesis','x',
+                '--images','x','--captcha-sitekey','a','--captcha-secret-file','x','--root-cpus',bad],text=True,capture_output=True)
+            self.assertEqual(done.returncode,2,bad); self.assertIn('--root-cpus',done.stderr)
+
 
 if __name__=='__main__': unittest.main()

@@ -18,5 +18,8 @@ type (
 		Shard     types.ShardID
 		Reason    CertReqReason
 		Requests  []*certification.BlockCertificationRequest
+		// RootEpoch is the only root epoch the change may be certified in: the epoch its collector counted every request of the proof
+		// in (#1032). The manager refuses it under any other installed epoch, serialized with activation, and refuses a zero one.
+		RootEpoch uint64
 	}
 )
