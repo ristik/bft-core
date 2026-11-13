@@ -371,6 +371,20 @@ def registry_lock(generation, wait=None):
         handle.close()
 
 
+def workflow_lock(generation, entity):
+    """The per-entity lock of a whole join, retire, claim or catch-up command (handoff/remote-joiners/<J>.workflow): one workflow of an entity at a
+    time, apart from handoff/drive.lock (which a drive takes and releases inside it). Non-blocking: None while another command of the entity runs."""
+    d = info_dir(generation)
+    d.mkdir(mode=0o700, parents=True, exist_ok=True)
+    handle = open(d / f'{int(entity)}.workflow', 'a')
+    try:
+        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        handle.close()
+        return None
+    return handle
+
+
 def write_atomic(path, data, mode=0o600):
     """`data` (bytes) at `path`, durably and atomically: a unique temporary file beside it (fsynced), renamed over it, the directory fsynced."""
     path = Path(path)
@@ -537,13 +551,15 @@ ARCHIVE_WAIT = 3600
 
 
 class Join:
-    def __init__(self, generation, entity, ubft, restore_pin, cast, dry_run=False, here=None, stop_after=None, funder=None, busy_wait=BUSY_WAIT):
+    def __init__(self, generation, entity, ubft, restore_pin, cast, dry_run=False, here=None, stop_after=None, funder=None, busy_wait=BUSY_WAIT,
+                 evidence_retained=None):
         import handoff_drive
         self.hd = handoff_drive
         self.gen, self.entity, self.ubft, self.restore_pin, self.cast, self.dry = Path(generation).resolve(), entity, ubft, restore_pin, cast, dry_run
         self.here = Path(here or Path(__file__).resolve().parent)
         self.stop_after = stop_after
         self.funder, self.busy_wait = (Path(funder).resolve() if funder else None), busy_wait
+        self.evidence_retained = evidence_retained   # retire: the operator's recorded evidence-availability statement; without it nothing is stopped
         self.d = handoff_drive.Drive(self.gen, cast, ubft, restore_pin, funder=self.funder)
         if entity not in self.d.remote:
             raise RuntimeError(f'entity {entity} is not registered (remote_entity.py register)')
@@ -617,11 +633,16 @@ class Join:
                 if self.dry:
                     say('[dry-run] would register (root-key PoP) and bond 100 UCT')
                     return 0
-                out = r.tx('register')
-                ident = int(out['id'])
+                # an earlier run may have registered and then lost its save (a lock timeout): its id is on chain, and a second
+                # registration of the same root key would only revert
+                ident = self.registered_id()
+                if ident:
+                    say(f'the laptop\'s root key is registered already: custody id {ident} (an earlier run); not registered again')
+                else:
+                    ident = int(r.tx('register')['id'])
+                    say(f'registered: custody id {ident}')
                 self.save(stakingId=ident)
                 map_joiner(self.gen, ident, self.entity)
-                say(f'registered: custody id {ident}')
             if not self.custody_lots(ident):
                 r.tx('bond', id=ident, value_wei=str(BOND_UNIT))
             lots = self.custody_lots(ident)
@@ -707,12 +728,19 @@ class Join:
         services stop cleanly (volumes and keys kept: the withdrawal key claims the bond once mature). The timer stands down while 'retiring'."""
         d, r = self.d, self.r
         ident = int(r.info['stakingId'])
-        if r.state == 'member':
-            out = r.custody_tx('requestRetirement(uint64)', ident)
-            say(f'requestRetirement({ident}) by the owner {out.get("address")}: {out.get("out", "")[-200:]}')
-            self.save(state='retiring', retirementRequestedAt=time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()))
-        elif r.state not in ('retiring', 'retired'):
+        if r.state not in ('member', 'retiring', 'retired'):
             raise RuntimeError(f'entity {self.entity} is {r.state}, not a member, retiring or retired')
+        if r.state == 'member':
+            # the intent is on record before the transaction: a rerun after a lost save or a failed send reads the custody instead of sending twice
+            self.save(state='retiring')
+        if r.state == 'retiring':
+            if self.retirement_requested(ident):
+                say(f'custody id {ident}: its retirement is requested on chain already: not sent again')
+            else:
+                out = r.custody_tx('requestRetirement(uint64)', ident)
+                say(f'requestRetirement({ident}) by the owner {out.get("address")}: {out.get("out", "")[-200:]}')
+            if not r.info.get('retirementRequestedAt'):
+                self.save(retirementRequestedAt=time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()))
         started = time.monotonic()
         result = None
         while r.state != 'retired':
@@ -734,10 +762,21 @@ class Join:
             # the shard epoch the excluding handoff activated (its drive's advance step): the archive policies must have been evaluated at it
             self.save(state='retired', retiredAt=time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()), retiredShardEpoch=activated_shard_epoch(self.gen, result))
         say(f'entity {self.entity} left the committee in {time.monotonic() - started:.0f} s')
+        if not self.evidence_retained:
+            # astra (briefs/astra-q-1029-1043-answer.md, Q4): the archive gate covers this writer's archive only. Without a recorded statement that the
+            # surviving providers hold the UTB/Q3 lineage, the record cuts and logs and the other recovery evidence through the handoff, the retired
+            # validator is not decommissioned: it keeps running and serving as a follower
+            say('the retired validator keeps running as a follower: stopping it needs --evidence-retained NOTE, the operator\'s recorded statement that '
+                'the surviving providers hold the UTB/Q3 lineage, the record cuts and logs and the other recovery evidence through this handoff '
+                '(the archive gate alone does not establish it)')
+            return 0
         if not r.info.get('retiredShardEpoch'):
             raise RuntimeError('the shard epoch activated by the handoff that excluded this entity is not recorded (retiredShardEpoch): the archive gate '
                                'cannot be checked, the retired validator is NOT stopped. Set it by hand from the drive journal (advance shardEpoch)')
         self.wait_archive_migration(int(r.info['retiredShardEpoch']))
+        self.save(evidencePrerequisite={'note': self.evidence_retained, 'at': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
+                                        'shardEpoch': int(r.info['retiredShardEpoch'])})
+        say(f'evidence prerequisite recorded: {self.evidence_retained!r}')
         say('stopping its validator services (keys and volumes kept)')
         say(f'  {r.client.op("stop-validator", timeout=300)}')
         say('next: custody.mature([lot]) once the holds pass (holdRetirement 2000 rounds, timeFloor 3600 s, evidence holds), then claim(amount, to) by the '
@@ -763,7 +802,7 @@ class Join:
         last = None
         while True:
             pol = self.archive_policies()
-            view = {i: archive_gate(p, evm, activated) or 'ok' for i, p in pol.items()}
+            view = {i: archive_gate(p, evm, activated, self.expected_replicas(i, p)) or 'ok' for i, p in pol.items()}
             if view != last:
                 say(f'archive policy after {time.monotonic() - started:.0f} s (shard epoch {activated} or later): {json.dumps(view)}')
                 last = view
@@ -775,6 +814,37 @@ class Join:
             if time.monotonic() - started > seconds:
                 raise RuntimeError(f'the archive migration is not complete after {seconds} s: the retired validator is NOT stopped; rerun retire later')
             time.sleep(10)
+
+    def expected_replicas(self, i, policy):
+        """The replicas host writer i must report at the shard epoch its policy was checked at: archivepolicy.Select over that epoch's installed shard
+        configuration (network/handoff/shard-conf-<epoch>.json, written by the drive's advance step); None when it cannot be derived (fail closed)."""
+        epoch = policy.get('checkedShardEpoch') if isinstance(policy, dict) else None
+        conf = self.d.work / f'shard-conf-{epoch}.json'
+        if not isinstance(epoch, int) or not conf.is_file():
+            return None
+        try:
+            validators = [v['nodeId'] for v in json.loads(conf.read_text())['validators']]
+            return select_replicas(self.d.evm_node_id(i), validators)
+        except (KeyError, TypeError, ValueError):
+            return None
+
+    def registered_id(self):
+        """The custody id the laptop's root key is registered under, or None: keyOwner(keccak256 of the compressed root key the laptop's node-info
+        names; posrelayer registers exactly that encoding). A registration owned by another account than the laptop's owner refuses the join."""
+        key = json.loads(self.r.node_info_path().read_text()).get('sigKey', '')
+        if not re.fullmatch(r'0x0[23][0-9a-fA-F]{64}', key):
+            raise RuntimeError(f'the laptop\'s node-info names no compressed root key: {key!r}')
+        ident = self.d.view(self.d.custody, 'keyOwner(bytes32)(uint64,uint8)', self.d.cast_run('keccak', key))[0]
+        if not ident:
+            return None
+        owner = self.d.view_text(self.d.custody, POSITIONS, str(ident)).splitlines()[0].split()[0]
+        if owner.lower() != self.r.info['accounts']['owner'].lower():
+            raise RuntimeError(f'the laptop\'s root key is registered as custody id {ident} by {owner}, not by the laptop\'s owner')
+        return int(ident)
+
+    def retirement_requested(self, ident):
+        """custody.positions(id).retirementRequested."""
+        return self.d.view_text(self.d.custody, POSITIONS, str(ident)).splitlines()[-1].strip() == 'true'
 
     def claim(self):
         """After the retirement: custody.mature(lots) once its gates pass (signed by the laptop's owner key), then claim(credit, withdrawal) by the
@@ -819,8 +889,9 @@ class Join:
         return 0
 
     def catch_up(self):
-        """Bring the laptop entity to the CURRENT epoch without joining (it stays a follower, nothing is registered on chain): its root install-restarted to
-        the epoch, its shard node restored at it (archive seeded from a host survivor first). A later join then only replays the blocks since."""
+        """Bring the laptop entity to the CURRENT epoch without joining (it stays a follower, nothing is registered on chain): its shard node follows the
+        epoch as a root-free follower (handoff_drive.catch_up_remote(root=False) -> follow_joiner, readiness from the node's own health; --cold-restore
+        is not used here). Its root is left to the join drive, which installs it after q3-candidate."""
         d = self.d
         lock = self.locked('catch-up')
         try:
@@ -831,6 +902,7 @@ class Join:
             lock.close()
 
     def _catch_up(self):
+        """catch_up under handoff/drive.lock: the committee's common epoch, then the follower's catch-up to it."""
         d = self.d
         epochs = {i: d.root_info(i).get('epoch') for i in certifying_entities(d)}
         if len(set(epochs.values())) != 1:
@@ -889,24 +961,57 @@ class Join:
         say(f'prepared for epoch {target}: the next attempt is due in {rounds} rounds / {seconds} s')
 
 
-def archive_gate(policy, retiree, activated):
+POSITIONS = 'positions(uint64)(address,address,bytes32,bytes32,uint64,uint64,uint32,uint32,bool)'
+ARCHIVE_K, ARCHIVE_MAX_REPLICAS = 2, 3   # archivepolicy.K and archivepolicy.MaxReplicas
+B58 = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz'
+
+
+def peer_bytes(peer_id):
+    """The raw multihash bytes of a base58btc libp2p peer ID (string(peer.ID) in Go, which archivepolicy orders by)."""
+    n = 0
+    for ch in peer_id:
+        n = n * 58 + B58.index(ch)
+    raw = n.to_bytes((n.bit_length() + 7) // 8, 'big') if n else b''
+    return b'\0' * (len(peer_id) - len(peer_id.lstrip('1'))) + raw
+
+
+def select_replicas(writer, validators):
+    """archivepolicy.Select's replicas for `writer` over the installed validators (archivepolicy/policy.go): the others in raw byte order, the
+    MaxReplicas after the writer in circular order, sorted. None with fewer than K others."""
+    others = sorted({v for v in validators if v and v != writer}, key=peer_bytes)
+    if len(others) < ARCHIVE_K:
+        return None
+    me = peer_bytes(writer)
+    start = next((k for k, v in enumerate(others) if peer_bytes(v) > me), len(others))
+    chosen = [others[(start + k) % len(others)] for k in range(min(len(others), ARCHIVE_MAX_REPLICAS))]
+    return sorted(chosen, key=peer_bytes)
+
+
+def archive_gate(policy, retiree, activated, expected):
     """Why one host writer's archivePolicy (`shard-node status`) does not yet allow stopping the retired validator `retiree` (its EVM node id), or None.
-    The writer must follow the assignment that excludes it: the policy was evaluated at the shard epoch `activated` of the excluding handoff or later
-    (checkedShardEpoch, bft-core#1044; a node without it reports shardEpoch, the epoch its policy was derived at, so one whose replica set did not
-    change waits until the timeout: fail closed), the retiree is no current replica and no retained holder, and the migration is complete. Without the
-    epoch and replica checks a writer still on the old policy (the retiree an active replica, nothing retained) passes: migrationComplete is
-    len(retained) == 0 when no migration exists."""
-    if not isinstance(policy, dict):
+    The writer must follow the assignment that excludes it (astra, briefs/astra-q-1029-1043-answer.md Q4): its policy was checked at the shard epoch
+    `activated` of the excluding handoff or later (checkedShardEpoch, bft-core#1044: a node without the field fails closed; shardEpoch is no
+    substitute, it stays at the derivation epoch), it reports exactly the replicas `expected` that the installed assignment derives for it (None:
+    not derivable, fail closed), the retiree is no current replica and no retained holder, and the migration is complete. An unavailable or
+    unreadable report fails closed."""
+    if not isinstance(policy, dict) or not policy:
         return 'no archivePolicy'
     if policy.get('error'):
         return f"unreadable: {policy['error']}"
-    epoch = policy.get('checkedShardEpoch', policy.get('shardEpoch'))
-    if not isinstance(epoch, int) or epoch < activated:
-        return f'policy evaluated at shard epoch {epoch}, before {activated}'
-    if retiree in (policy.get('replicas') or []):
+    epoch = policy.get('checkedShardEpoch')
+    if not isinstance(epoch, int):
+        return 'no checkedShardEpoch (a node without bft-core#1047): fail closed'
+    if epoch < activated:
+        return f'policy checked at shard epoch {epoch}, before {activated}'
+    replicas = policy.get('replicas') or []
+    if retiree in replicas:
         return 'the retiree is still a current replica'
     if retiree in (policy.get('retained') or []):
         return f"the retiree is a retained holder (backlog {policy.get('migrationBacklog')})"
+    if expected is None:
+        return f'the replicas the shard epoch {epoch} assignment derives for this writer are unknown'
+    if sorted(replicas) != sorted(expected):
+        return f'replicas {replicas} are not the derived {expected}'
     if policy.get('migrationComplete') is not True:
         return f"migration not complete (backlog {policy.get('migrationBacklog')})"
     return None
@@ -983,6 +1088,10 @@ def main(argv=None):
             s.add_argument('--source-digest', help='the laptop checkout\'s tree_digest (remote_joiner.py join passes it): refused when the deployed copy differs')
             s.add_argument('--allow-dirty', action='store_true', help='run a copy that is not the recorded, clean, committed one')
             s.add_argument('--stop-after', choices=('bonded',), help='bonded: fund, register and bond only (ahead of an audience; the rest is the timed part)')
+        if name == 'retire':
+            s.add_argument('--evidence-retained', metavar='NOTE', help='the operator\'s statement, recorded in the registry, that the surviving providers hold '
+                           'the UTB/Q3 lineage, the record cuts and logs and the other recovery evidence through the handoff: only then does retire stop the '
+                           'validator (after the archive gate); without it the retired validator keeps running as a follower')
     a = p.parse_args(argv)
     if a.action == 'relay-up':
         print(json.dumps(relay_up(a.generation, a.entity, a.sock_dir, a.script, a.uid), indent=1))
@@ -1010,14 +1119,24 @@ def main(argv=None):
         if refusal:
             say(f'REFUSED: {refusal}')
             return 3
+        workflow = workflow_lock(a.generation.resolve(), a.entity)
+        if workflow is None:
+            say(f'REFUSED: another join, retire, claim or catch-up of entity {a.entity} is running (one workflow of an entity at a time)')
+            return 3
         try:
-            j = Join(a.generation, a.entity, a.ubft, a.restore_pin, a.cast, a.dry_run, stop_after=a.stop_after, funder=a.funder, busy_wait=a.busy_wait)
+            j = Join(a.generation, a.entity, a.ubft, a.restore_pin, a.cast, a.dry_run, stop_after=a.stop_after, funder=a.funder, busy_wait=a.busy_wait,
+                     evidence_retained=getattr(a, 'evidence_retained', None))
             return {'catch-up': j.catch_up, 'retire': j.retire, 'claim': j.claim}.get(a.action, j.run)()
         except Exception as error:
             say(f'STOPPED: {error}')
             return 1
+        finally:
+            workflow.close()
     return 0
 
 
 if __name__ == '__main__':
+    # one copy of this module: handoff_drive's `import remote_entity` must find this one, or the lock tracking (_HELD, holding) would be split
+    # between two module objects
+    sys.modules['remote_entity'] = sys.modules['__main__']
     sys.exit(main())

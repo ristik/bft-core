@@ -398,11 +398,25 @@ deciding what it signs (for example, checking the trust base and the assignment 
 
 With five unit weights the quorum is four: while the laptop is away the network has no fault tolerance left. Do not sleep the laptop, restart colima or its VM,
 or `docker compose down` its project: a restarted signing authority is a new EVM key that the delegation does not name, and nothing replaces it yet.
-`remote_entity.py retire-plan` prints the retirement sequence. `remote_joiner.py retire` runs it: the owner's requestRetirement (signed on the laptop), then
-the drive of the result that excludes the entity (`--allow-unrehearsed-retirement`). It then waits until every host writer's `archivePolicy` passes, and only
-then stops the validator services; volumes and keys are kept. To pass, a writer must have evaluated its policy at the shard epoch the excluding handoff
-activated (`checkedShardEpoch`, or `shardEpoch` on a node without it, bft-core#1044), and the retiree must be in neither `replicas` nor `retained`, with
-`migrationComplete`. This is necessary, not sufficient (m2-runbook). `remote_joiner.py claim` matures and claims the bond once its holds pass.
+`remote_entity.py retire-plan` prints the retirement sequence. `remote_joiner.py retire` runs it:
+1. It records `retiring`, then sends the owner's requestRetirement (signed on the laptop) unless custody already shows one. A rerun never sends it twice.
+2. It drives the result that excludes the entity (`--allow-unrehearsed-retirement`).
+3. It leaves the retired validator running as a follower, unless the operator passes `--evidence-retained NOTE`. NOTE is a statement, recorded in the
+   registry, that the surviving providers hold the UTB/Q3 lineage, the record cuts and logs and the other recovery evidence through this handoff.
+4. With that statement, it waits until every host writer's `archivePolicy` passes the gate, records the statement, and only then stops the validator
+   services. Volumes and keys are kept.
+
+A writer passes the gate when:
+- its `checkedShardEpoch` is at least the shard epoch the excluding handoff activated. A node without that field (before bft-core#1047) fails closed,
+  and `shardEpoch` is not used;
+- its `replicas` are exactly the ones archivepolicy derives for it from that epoch's installed shard configuration;
+- the retiree is in neither `replicas` nor `retained`;
+- `migrationComplete` is true.
+
+An unreadable report fails closed.
+
+`remote_joiner.py claim` matures and claims the bond once its holds pass. A join reuses an on-chain registration of the laptop's root key instead of
+registering again. One join, retire, claim or catch-up command per entity runs at a time; another is refused.
 
 ## Observation/fault campaign and evidence limits
 

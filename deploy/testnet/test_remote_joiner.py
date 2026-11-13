@@ -778,40 +778,80 @@ class FollowerCatchUp(unittest.TestCase):
         self.assertEqual(calls, [('follow', 5, 3, False)], 'no install restart of the follower root; no log-scraped shortcut')
 
 
+# archivepolicy.Select over real peer IDs, from Go (a one-off run of the archivepolicy package): [writer, validators, replicas]
+SELECT_VECTORS = [
+    ["16Uiu2HAmSun24qPUv5D6v9ThcBAgSRNPXrekv3sbVGRRvb47c8gt", ["16Uiu2HAmSun24qPUv5D6v9ThcBAgSRNPXrekv3sbVGRRvb47c8gt", "16Uiu2HAkxgVhuh497qx4dk9Gvktr3YZRKpgdfQwcemu6v2GJfws5", "16Uiu2HAmPNTKE3UwmteT6mZHE5qkEHZzoSXt1xweTPouujgmkKYe", "16Uiu2HAmPLKg4VDCzw7tEAgjb7bkSBHe1aKUcwsJ2iBT9g1bmq3N"], ["16Uiu2HAkxgVhuh497qx4dk9Gvktr3YZRKpgdfQwcemu6v2GJfws5", "16Uiu2HAmPLKg4VDCzw7tEAgjb7bkSBHe1aKUcwsJ2iBT9g1bmq3N", "16Uiu2HAmPNTKE3UwmteT6mZHE5qkEHZzoSXt1xweTPouujgmkKYe"]],
+    ["16Uiu2HAkxgVhuh497qx4dk9Gvktr3YZRKpgdfQwcemu6v2GJfws5", ["16Uiu2HAmSun24qPUv5D6v9ThcBAgSRNPXrekv3sbVGRRvb47c8gt", "16Uiu2HAkxgVhuh497qx4dk9Gvktr3YZRKpgdfQwcemu6v2GJfws5", "16Uiu2HAmPNTKE3UwmteT6mZHE5qkEHZzoSXt1xweTPouujgmkKYe", "16Uiu2HAmPLKg4VDCzw7tEAgjb7bkSBHe1aKUcwsJ2iBT9g1bmq3N"], ["16Uiu2HAmPLKg4VDCzw7tEAgjb7bkSBHe1aKUcwsJ2iBT9g1bmq3N", "16Uiu2HAmPNTKE3UwmteT6mZHE5qkEHZzoSXt1xweTPouujgmkKYe", "16Uiu2HAmSun24qPUv5D6v9ThcBAgSRNPXrekv3sbVGRRvb47c8gt"]],
+    ["16Uiu2HAmPNTKE3UwmteT6mZHE5qkEHZzoSXt1xweTPouujgmkKYe", ["16Uiu2HAmSun24qPUv5D6v9ThcBAgSRNPXrekv3sbVGRRvb47c8gt", "16Uiu2HAkxgVhuh497qx4dk9Gvktr3YZRKpgdfQwcemu6v2GJfws5", "16Uiu2HAmPNTKE3UwmteT6mZHE5qkEHZzoSXt1xweTPouujgmkKYe", "16Uiu2HAmPLKg4VDCzw7tEAgjb7bkSBHe1aKUcwsJ2iBT9g1bmq3N"], ["16Uiu2HAkxgVhuh497qx4dk9Gvktr3YZRKpgdfQwcemu6v2GJfws5", "16Uiu2HAmPLKg4VDCzw7tEAgjb7bkSBHe1aKUcwsJ2iBT9g1bmq3N", "16Uiu2HAmSun24qPUv5D6v9ThcBAgSRNPXrekv3sbVGRRvb47c8gt"]],
+    ["16Uiu2HAmPLKg4VDCzw7tEAgjb7bkSBHe1aKUcwsJ2iBT9g1bmq3N", ["16Uiu2HAmSun24qPUv5D6v9ThcBAgSRNPXrekv3sbVGRRvb47c8gt", "16Uiu2HAkxgVhuh497qx4dk9Gvktr3YZRKpgdfQwcemu6v2GJfws5", "16Uiu2HAmPNTKE3UwmteT6mZHE5qkEHZzoSXt1xweTPouujgmkKYe", "16Uiu2HAmPLKg4VDCzw7tEAgjb7bkSBHe1aKUcwsJ2iBT9g1bmq3N"], ["16Uiu2HAkxgVhuh497qx4dk9Gvktr3YZRKpgdfQwcemu6v2GJfws5", "16Uiu2HAmPNTKE3UwmteT6mZHE5qkEHZzoSXt1xweTPouujgmkKYe", "16Uiu2HAmSun24qPUv5D6v9ThcBAgSRNPXrekv3sbVGRRvb47c8gt"]],
+    ["16Uiu2HAmSun24qPUv5D6v9ThcBAgSRNPXrekv3sbVGRRvb47c8gt", ["16Uiu2HAmSun24qPUv5D6v9ThcBAgSRNPXrekv3sbVGRRvb47c8gt", "16Uiu2HAkxgVhuh497qx4dk9Gvktr3YZRKpgdfQwcemu6v2GJfws5", "16Uiu2HAmPNTKE3UwmteT6mZHE5qkEHZzoSXt1xweTPouujgmkKYe", "16Uiu2HAmPLKg4VDCzw7tEAgjb7bkSBHe1aKUcwsJ2iBT9g1bmq3N", "16Uiu2HAmFPCBNky2TuzD2QhMGQdEkYmn6Vvi6DURHLysmRir5RZM"], ["16Uiu2HAkxgVhuh497qx4dk9Gvktr3YZRKpgdfQwcemu6v2GJfws5", "16Uiu2HAmFPCBNky2TuzD2QhMGQdEkYmn6Vvi6DURHLysmRir5RZM", "16Uiu2HAmPLKg4VDCzw7tEAgjb7bkSBHe1aKUcwsJ2iBT9g1bmq3N"]],
+    ["16Uiu2HAkxgVhuh497qx4dk9Gvktr3YZRKpgdfQwcemu6v2GJfws5", ["16Uiu2HAmSun24qPUv5D6v9ThcBAgSRNPXrekv3sbVGRRvb47c8gt", "16Uiu2HAkxgVhuh497qx4dk9Gvktr3YZRKpgdfQwcemu6v2GJfws5", "16Uiu2HAmPNTKE3UwmteT6mZHE5qkEHZzoSXt1xweTPouujgmkKYe", "16Uiu2HAmPLKg4VDCzw7tEAgjb7bkSBHe1aKUcwsJ2iBT9g1bmq3N", "16Uiu2HAmFPCBNky2TuzD2QhMGQdEkYmn6Vvi6DURHLysmRir5RZM"], ["16Uiu2HAmFPCBNky2TuzD2QhMGQdEkYmn6Vvi6DURHLysmRir5RZM", "16Uiu2HAmPLKg4VDCzw7tEAgjb7bkSBHe1aKUcwsJ2iBT9g1bmq3N", "16Uiu2HAmPNTKE3UwmteT6mZHE5qkEHZzoSXt1xweTPouujgmkKYe"]],
+    ["16Uiu2HAmPNTKE3UwmteT6mZHE5qkEHZzoSXt1xweTPouujgmkKYe", ["16Uiu2HAmSun24qPUv5D6v9ThcBAgSRNPXrekv3sbVGRRvb47c8gt", "16Uiu2HAkxgVhuh497qx4dk9Gvktr3YZRKpgdfQwcemu6v2GJfws5", "16Uiu2HAmPNTKE3UwmteT6mZHE5qkEHZzoSXt1xweTPouujgmkKYe", "16Uiu2HAmPLKg4VDCzw7tEAgjb7bkSBHe1aKUcwsJ2iBT9g1bmq3N", "16Uiu2HAmFPCBNky2TuzD2QhMGQdEkYmn6Vvi6DURHLysmRir5RZM"], ["16Uiu2HAkxgVhuh497qx4dk9Gvktr3YZRKpgdfQwcemu6v2GJfws5", "16Uiu2HAmFPCBNky2TuzD2QhMGQdEkYmn6Vvi6DURHLysmRir5RZM", "16Uiu2HAmSun24qPUv5D6v9ThcBAgSRNPXrekv3sbVGRRvb47c8gt"]],
+    ["16Uiu2HAmPLKg4VDCzw7tEAgjb7bkSBHe1aKUcwsJ2iBT9g1bmq3N", ["16Uiu2HAmSun24qPUv5D6v9ThcBAgSRNPXrekv3sbVGRRvb47c8gt", "16Uiu2HAkxgVhuh497qx4dk9Gvktr3YZRKpgdfQwcemu6v2GJfws5", "16Uiu2HAmPNTKE3UwmteT6mZHE5qkEHZzoSXt1xweTPouujgmkKYe", "16Uiu2HAmPLKg4VDCzw7tEAgjb7bkSBHe1aKUcwsJ2iBT9g1bmq3N", "16Uiu2HAmFPCBNky2TuzD2QhMGQdEkYmn6Vvi6DURHLysmRir5RZM"], ["16Uiu2HAkxgVhuh497qx4dk9Gvktr3YZRKpgdfQwcemu6v2GJfws5", "16Uiu2HAmPNTKE3UwmteT6mZHE5qkEHZzoSXt1xweTPouujgmkKYe", "16Uiu2HAmSun24qPUv5D6v9ThcBAgSRNPXrekv3sbVGRRvb47c8gt"]],
+    ["16Uiu2HAmFPCBNky2TuzD2QhMGQdEkYmn6Vvi6DURHLysmRir5RZM", ["16Uiu2HAmSun24qPUv5D6v9ThcBAgSRNPXrekv3sbVGRRvb47c8gt", "16Uiu2HAkxgVhuh497qx4dk9Gvktr3YZRKpgdfQwcemu6v2GJfws5", "16Uiu2HAmPNTKE3UwmteT6mZHE5qkEHZzoSXt1xweTPouujgmkKYe", "16Uiu2HAmPLKg4VDCzw7tEAgjb7bkSBHe1aKUcwsJ2iBT9g1bmq3N", "16Uiu2HAmFPCBNky2TuzD2QhMGQdEkYmn6Vvi6DURHLysmRir5RZM"], ["16Uiu2HAmPLKg4VDCzw7tEAgjb7bkSBHe1aKUcwsJ2iBT9g1bmq3N", "16Uiu2HAmPNTKE3UwmteT6mZHE5qkEHZzoSXt1xweTPouujgmkKYe", "16Uiu2HAmSun24qPUv5D6v9ThcBAgSRNPXrekv3sbVGRRvb47c8gt"]],
+]
+
+
 class ArchiveGate(unittest.TestCase):
-    """#1043 review: the retire gate before stop-validator. A writer still on the old policy (the retiree a current replica, nothing retained, so
-    migrationComplete) must not pass."""
+    """The retire gate before stop-validator (#1043 review; astra, briefs/astra-q-1029-1043-answer.md Q4). A writer still on the old policy, one that
+    reports other replicas than its installed assignment derives, one without checkedShardEpoch, or an unavailable report does not pass."""
     R = '16Uiu2RETIREE'
+    EXPECTED = ['A', 'B', 'C']
 
     def policy(self, **over):
-        return {'version': 7, 'shardEpoch': 6, 'checkedShardEpoch': 6, 'replicas': ['A', 'B', 'C'], 'retained': [], 'migrationBacklog': 0,
+        return {'version': 7, 'shardEpoch': 6, 'checkedShardEpoch': 6, 'replicas': list(self.EXPECTED), 'retained': [], 'migrationBacklog': 0,
                 'migrationComplete': True, **over}
 
+    def gate(self, policy, activated=6, expected=EXPECTED):
+        return re_.archive_gate(policy, self.R, activated, expected)
+
     def test_the_old_policy_does_not_pass(self):
-        old = self.policy(shardEpoch=4, checkedShardEpoch=4, replicas=['A', self.R, 'C'])
-        self.assertIsNotNone(re_.archive_gate(old, self.R, 6))
-        self.assertIsNotNone(re_.archive_gate(self.policy(replicas=['A', self.R, 'C']), self.R, 6), 'the retiree still a replica at the new epoch')
-        self.assertIsNotNone(re_.archive_gate(self.policy(shardEpoch=5, checkedShardEpoch=5), self.R, 6), 'evaluated before the excluding epoch')
+        self.assertIsNotNone(self.gate(self.policy(shardEpoch=4, checkedShardEpoch=4, replicas=['A', self.R, 'C'])))
+        self.assertIsNotNone(self.gate(self.policy(replicas=['A', self.R, 'C'])), 'the retiree still a replica at the new epoch')
+        self.assertIsNotNone(self.gate(self.policy(shardEpoch=5, checkedShardEpoch=5)), 'checked before the excluding epoch')
+
+    def test_only_the_checked_epoch_counts(self):
+        """#1044: shardEpoch stays at the derivation epoch; checkedShardEpoch follows the installed assignment. No fallback: fail closed."""
+        self.assertIsNone(self.gate(self.policy(shardEpoch=2, checkedShardEpoch=6)), 'a kept policy checked at the new epoch')
+        legacy = {k: v for k, v in self.policy().items() if k != 'checkedShardEpoch'}
+        self.assertIsNotNone(self.gate(legacy), 'a node without checkedShardEpoch: fail closed, even with shardEpoch at the new epoch')
+        self.assertIsNotNone(self.gate(self.policy(checkedShardEpoch='6')))
+
+    def test_the_replicas_must_be_the_derived_ones(self):
+        self.assertIsNotNone(self.gate(self.policy(replicas=['A', 'B', 'D'])), 'equal epochs are not the right assignment')
+        self.assertIsNotNone(self.gate(self.policy(), expected=None), 'not derivable: fail closed')
+        self.assertIsNone(self.gate(self.policy(replicas=['C', 'A', 'B'])), 'the order does not matter')
 
     def test_a_retained_holder_or_an_open_migration_does_not_pass(self):
-        self.assertIsNotNone(re_.archive_gate(self.policy(retained=[self.R], migrationComplete=False, migrationBacklog=3), self.R, 6))
-        self.assertIsNotNone(re_.archive_gate(self.policy(retained=[self.R]), self.R, 6))
-        self.assertIsNotNone(re_.archive_gate(self.policy(migrationComplete=False), self.R, 6))
+        self.assertIsNotNone(self.gate(self.policy(retained=[self.R], migrationComplete=False, migrationBacklog=3)))
+        self.assertIsNotNone(self.gate(self.policy(retained=[self.R])))
+        self.assertIsNotNone(self.gate(self.policy(migrationComplete=False)))
+        self.assertIsNotNone(self.gate(self.policy(migrationComplete='true')))
 
-    def test_unreadable_or_absent_does_not_pass(self):
-        for bad in (None, {}, {'error': 'timeout'}, self.policy(checkedShardEpoch=None, shardEpoch=None)):
-            self.assertIsNotNone(re_.archive_gate(bad, self.R, 6), repr(bad))
+    def test_unavailable_or_unreadable_does_not_pass(self):
+        for bad in (None, {}, {'error': 'timeout'}, 'garbage'):
+            self.assertIsNotNone(self.gate(bad), repr(bad))
 
     def test_the_new_policy_passes(self):
-        self.assertIsNone(re_.archive_gate(self.policy(), self.R, 6))
-        self.assertIsNone(re_.archive_gate(self.policy(shardEpoch=7, checkedShardEpoch=7), self.R, 6))
+        self.assertIsNone(self.gate(self.policy()))
+        self.assertIsNone(self.gate(self.policy(shardEpoch=7, checkedShardEpoch=7)))
 
-    def test_a_writer_whose_replicas_never_named_it_passes_by_the_checked_epoch(self):
-        """#1044: its policy is kept (shardEpoch stays at its derivation) while checkedShardEpoch follows the installed assignment."""
-        kept = self.policy(shardEpoch=2, checkedShardEpoch=6)
-        self.assertIsNone(re_.archive_gate(kept, self.R, 6))
-        legacy = {k: v for k, v in kept.items() if k != 'checkedShardEpoch'}
-        self.assertIsNotNone(re_.archive_gate(legacy, self.R, 6), 'a node without checkedShardEpoch: its derivation epoch, fail closed')
+    def test_select_replicas_is_archivepolicy_select(self):
+        for writer, validators, replicas in SELECT_VECTORS:
+            self.assertEqual(re_.select_replicas(writer, validators), replicas or None, writer)
+        self.assertIsNone(re_.select_replicas('a', ['a', 'b']), 'fewer than K others')
+
+    def test_the_expected_replicas_come_from_the_checked_epochs_configuration(self):
+        writer, validators, replicas = SELECT_VECTORS[-1]
+        with tempfile.TemporaryDirectory() as tmp:
+            j = re_.Join.__new__(re_.Join)
+            j.d = unittest.mock.Mock(work=Path(tmp), evm_node_id=lambda i: writer)
+            (Path(tmp) / 'shard-conf-6.json').write_text(json.dumps({'validators': [{'nodeId': v} for v in validators]}))
+            self.assertEqual(j.expected_replicas(1, {'checkedShardEpoch': 6}), replicas)
+            self.assertIsNone(j.expected_replicas(1, {'checkedShardEpoch': 7}), 'no configuration of that epoch: unknown')
+            self.assertIsNone(j.expected_replicas(1, {}), 'no checked epoch')
+            (Path(tmp) / 'shard-conf-8.json').write_text('{}')
+            self.assertIsNone(j.expected_replicas(1, {'checkedShardEpoch': 8}), 'an unreadable configuration')
 
     def test_the_activated_epoch_is_the_excluding_drives(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -824,41 +864,286 @@ class ArchiveGate(unittest.TestCase):
             self.assertEqual(re_.activated_shard_epoch(gen, '0xexcl'), 6)
             self.assertIsNone(re_.activated_shard_epoch(gen, '0xnone'))
 
-    def test_retire_from_retired_without_the_epoch_stops_nothing(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            gen = Path(tmp)
-            (gen / 'handoff').mkdir()
-            write_record(gen, 5, 'retired', stakingId=12)
-            j = re_.Join.__new__(re_.Join)
-            j.gen, j.entity, j.d = gen, 5, unittest.mock.Mock()
-            j.r = re_.load(gen)[5]
-            j.r.client = unittest.mock.Mock()
-            j.wait_archive_migration = unittest.mock.Mock()
-            with unittest.mock.patch.object(re_, 'say'), self.assertRaises(RuntimeError):
-                j.retire()
-            j.wait_archive_migration.assert_not_called()
-            j.r.client.op.assert_not_called()
-            re_.update_info(gen, 5, {'retiredShardEpoch': 6})
-            j.r = re_.load(gen)[5]
-            j.r.client = unittest.mock.Mock()
-            j.r.client.op.return_value = {'stopped': {}}
-            with unittest.mock.patch.object(re_, 'say'):
-                self.assertEqual(j.retire(), 0)
-            j.wait_archive_migration.assert_called_once_with(6)
-            self.assertEqual(j.r.client.op.call_args.args[0], 'stop-validator')
-
     def test_the_wait_stops_nothing_until_every_writer_passes(self):
         j = re_.Join.__new__(re_.Join)
         j.r = unittest.mock.Mock(evm_node_id=self.R)
+        j.expected_replicas = lambda i, p: list(self.EXPECTED)
         views = iter([{1: self.policy(shardEpoch=4, checkedShardEpoch=4, replicas=['A', self.R, 'C']), 2: self.policy()},
                       {1: self.policy(), 2: self.policy()}])
         j.archive_policies = lambda: next(views)
         with unittest.mock.patch.object(re_, 'say'), unittest.mock.patch.object(re_.time, 'sleep') as sleep:
             j.wait_archive_migration(6)
         self.assertEqual(sleep.call_count, 1, 'one more pass after the old-policy writer')
-        j.archive_policies = lambda: {1: self.policy(replicas=[self.R])}
+        j.archive_policies = lambda: {1: self.policy(), 2: {'error': 'unreachable'}}
         with unittest.mock.patch.object(re_, 'say'), unittest.mock.patch.object(re_.time, 'sleep'), self.assertRaises(RuntimeError):
             j.wait_archive_migration(6, seconds=-1)
+
+
+class Retire(unittest.TestCase):
+    """remote_entity Join.retire: the intent is on record before the transaction, the request is sent only when none is on chain, and the retired
+    validator is stopped only after the archive gate AND a recorded evidence-availability statement (#1055 review; astra Q4)."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.gen = Path(self.tmp.name)
+        (self.gen / 'handoff').mkdir()
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def join(self, state, requested=False, evidence=None, **extra):
+        write_record(self.gen, 5, state, stakingId=12, **extra)
+        j = re_.Join.__new__(re_.Join)
+        j.gen, j.entity, j.evidence_retained = self.gen, 5, evidence
+        j.d = unittest.mock.Mock()
+        j.r = re_.load(self.gen)[5]
+        j.r.client = unittest.mock.Mock()
+        j.r.client.op.return_value = {'stopped': {}}
+        j.r.custody_tx = unittest.mock.Mock(return_value={'address': '0xowner', 'out': 'tx 0x1'})
+        self.requested = requested
+        j.retirement_requested = lambda ident: self.requested
+        j.hd = unittest.mock.Mock()
+        j.hd.Journal.return_value.last_drive.return_value = None
+        j.d.wait.return_value = '0xexcl'
+        j.members_of = lambda result: [1, 2, 3, 4]
+        j.drive = unittest.mock.Mock(return_value=0)
+        j.wait_archive_migration = unittest.mock.Mock()
+        return j
+
+    def file(self):
+        return json.loads((re_.info_dir(self.gen) / '5.json').read_text())
+
+    def test_the_intent_is_saved_before_the_transaction(self):
+        j = self.join('member')
+        order = []
+        real_save = j.save
+        j.save = lambda **c: (order.append(('save', c.get('state'))), real_save(**c))
+        j.r.custody_tx.side_effect = lambda *a: (order.append(('tx', a[0])), {'out': ''})[1]
+        with unittest.mock.patch.object(re_, 'say'), unittest.mock.patch.object(re_, 'activated_shard_epoch', return_value=6):
+            self.assertEqual(j.retire(), 0)
+        self.assertEqual(order[:2], [('save', 'retiring'), ('tx', 'requestRetirement(uint64)')])
+        self.assertEqual(self.file()['state'], 'retired')
+
+    def test_a_lost_save_sends_nothing_and_a_rerun_sends_once(self):
+        j = self.join('member')
+        with unittest.mock.patch.object(re_, 'say'), unittest.mock.patch.object(j, 'save', side_effect=re_.RegistryError('lock timeout')), \
+                self.assertRaises(re_.RegistryError):
+            j.retire()
+        j.r.custody_tx.assert_not_called()
+        self.assertEqual(self.file()['state'], 'member')
+
+    def test_a_rerun_does_not_send_a_request_that_is_on_chain(self):
+        j = self.join('retiring', requested=True)
+        with unittest.mock.patch.object(re_, 'say'), unittest.mock.patch.object(re_, 'activated_shard_epoch', return_value=6):
+            self.assertEqual(j.retire(), 0)
+        j.r.custody_tx.assert_not_called()
+        j = self.join('retiring', requested=False)
+        with unittest.mock.patch.object(re_, 'say'), unittest.mock.patch.object(re_, 'activated_shard_epoch', return_value=6):
+            j.retire()
+        j.r.custody_tx.assert_called_once_with('requestRetirement(uint64)', 12)
+
+    def test_without_the_evidence_statement_the_validator_keeps_running(self):
+        j = self.join('retired', retiredShardEpoch=6)
+        with unittest.mock.patch.object(re_, 'say'):
+            self.assertEqual(j.retire(), 0)
+        j.wait_archive_migration.assert_not_called()
+        j.r.client.op.assert_not_called()
+        self.assertNotIn('evidencePrerequisite', self.file())
+
+    def test_with_it_the_gate_then_the_record_then_the_stop(self):
+        j = self.join('retired', evidence='UTB/Q3 lineage and records held by roots 1-4 (checked 2026-11-14)', retiredShardEpoch=6)
+        j.wait_archive_migration.side_effect = lambda e: self.assertNotIn('evidencePrerequisite', self.file(), 'recorded after the gate')
+        with unittest.mock.patch.object(re_, 'say'):
+            self.assertEqual(j.retire(), 0)
+        j.wait_archive_migration.assert_called_once_with(6)
+        self.assertEqual(self.file()['evidencePrerequisite']['shardEpoch'], 6)
+        self.assertEqual(j.r.client.op.call_args.args[0], 'stop-validator')
+
+    def test_without_the_epoch_nothing_stops(self):
+        j = self.join('retired', evidence='held')
+        with unittest.mock.patch.object(re_, 'say'), self.assertRaises(RuntimeError):
+            j.retire()
+        j.wait_archive_migration.assert_not_called()
+        j.r.client.op.assert_not_called()
+
+
+class Register(unittest.TestCase):
+    """remote_entity Join.run: an existing on-chain registration of the laptop's root key is reused, never registered twice (#1055 review)."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.gen = Path(self.tmp.name)
+        (self.gen / 'handoff').mkdir()
+        write_record(self.gen, 5, 'registered', accounts={'owner': '0xAbC'})
+        (re_.info_dir(self.gen) / '5-node-info.json').write_text(json.dumps({'nodeId': 'R5', 'sigKey': '0x02' + 'ab' * 32}))
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def join(self, existing):
+        j = re_.Join.__new__(re_.Join)
+        j.gen, j.entity, j.dry, j.stop_after, j.funder = self.gen, 5, False, 'bonded', None
+        j.d = unittest.mock.Mock()
+        j.d.balance.return_value = 10 ** 24
+        j.r = re_.load(self.gen)[5]
+        j.r.client = unittest.mock.Mock()
+        j.r.client.op.return_value = {'follower': True, 'services': {}}
+        j.r.tx = unittest.mock.Mock(return_value={'id': 13})
+        j.registered_id = lambda: existing
+        j.custody_lots = lambda ident: ['1']
+        return j
+
+    def test_an_existing_registration_is_reused(self):
+        j = self.join(existing=12)
+        with unittest.mock.patch.object(re_, 'say'):
+            self.assertEqual(j.run(), 0)
+        self.assertNotIn(unittest.mock.call('register'), j.r.tx.call_args_list)
+        self.assertEqual(json.loads((re_.info_dir(self.gen) / '5.json').read_text())['stakingId'], 12)
+        self.assertEqual(json.loads((self.gen / 'handoff' / 'joiners.json').read_text()), {'12': 5})
+
+    def test_otherwise_it_registers(self):
+        j = self.join(existing=None)
+        with unittest.mock.patch.object(re_, 'say'):
+            self.assertEqual(j.run(), 0)
+        j.r.tx.assert_any_call('register')
+        self.assertEqual(json.loads((re_.info_dir(self.gen) / '5.json').read_text())['stakingId'], 13)
+
+    def test_the_lookup_is_by_the_root_keys_hash_and_owner(self):
+        j = re_.Join.__new__(re_.Join)
+        j.r = re_.load(self.gen)[5]
+        j.d = unittest.mock.Mock(custody='0xcustody')
+        j.d.cast_run.return_value = '0xhash'
+        j.d.view.return_value = [12, 1]
+        j.d.view_text.return_value = '0xabc\n0xwithdrawal\n0x00\n0x00\n1\n0\n1\n1\nfalse'
+        self.assertEqual(j.registered_id(), 12)
+        j.d.cast_run.assert_called_with('keccak', '0x02' + 'ab' * 32)
+        self.assertEqual(j.d.view.call_args.args[1:], ('keyOwner(bytes32)(uint64,uint8)', '0xhash'))
+        j.d.view_text.return_value = '0xother\n0xw\n0x00\n0x00\n1\n0\n1\n1\nfalse'
+        with self.assertRaises(RuntimeError):
+            j.registered_id()
+        j.d.view.return_value = [0, 0]
+        self.assertIsNone(j.registered_id())
+        j.d.view_text.return_value = '0xabc\n0xw\n0x00\n0x00\n1\n0\n1\n1\ntrue'
+        self.assertTrue(j.retirement_requested(12))
+
+
+class WorkflowAndModule(unittest.TestCase):
+    """One join/retire/claim/catch-up command of an entity at a time; and remote_entity run as a script is one module with handoff_drive's
+    (the lock tracking is not split between two copies, #1055 review)."""
+
+    def test_one_workflow_of_an_entity_at_a_time(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            first = re_.workflow_lock(Path(tmp), 5)
+            self.assertIsNotNone(first)
+            self.assertIsNone(re_.workflow_lock(Path(tmp), 5), 'a second command of entity 5 is refused')
+            other = re_.workflow_lock(Path(tmp), 6)
+            self.assertIsNotNone(other, 'another entity is independent')
+            first.close()
+            again = re_.workflow_lock(Path(tmp), 5)
+            self.assertIsNotNone(again)
+            for h in (other, again):
+                h.close()
+            self.assertEqual(sorted(p.name for p in re_.info_dir(Path(tmp)).iterdir()), ['5.workflow', '6.workflow'], 'load() ignores them')
+
+    def test_run_as_a_script_it_is_the_module_handoff_drive_imports(self):
+        import sys
+        here = Path(re_.__file__).resolve().parent
+        with tempfile.TemporaryDirectory() as tmp:
+            gen = Path(tmp)
+            (gen / 'handoff').mkdir()
+            write_record(gen, 5, 'member', stakingId=12, accounts={'owner': '0x1'})
+            driver = f'''
+import runpy, sys
+sys.path.insert(0, {str(here)!r})
+sys.argv = ['remote_entity.py', 'retire-plan', {str(gen)!r}, '--entity', '5']
+try:
+    runpy.run_path({str(here / 'remote_entity.py')!r}, run_name='__main__')
+except SystemExit as e:
+    assert not e.code, e.code
+import handoff_drive, remote_entity
+assert handoff_drive.remote_entity is remote_entity, 'two copies'
+lock = handoff_drive.hold_lock({str(gen)!r})
+assert lock and remote_entity.holding({str(gen)!r}), 'the drive lock is seen by the script copy'
+remote_entity.update_info({str(gen)!r}, 5, {{'note': 1}}, wait=0)
+print('ONE-MODULE-OK')
+'''
+            done = subprocess.run([sys.executable, '-c', driver], capture_output=True, text=True, cwd=str(here))
+            self.assertEqual(done.returncode, 0, done.stderr[-2000:])
+            self.assertIn('ONE-MODULE-OK', done.stdout)
+            self.assertIn('requestRetirement', done.stdout, 'the script ran its main')
+
+
+class ColdRestoreScope(unittest.TestCase):
+    """The explicit cold restore empties only the selected execution and bootstrap stores, never the signing authority's anti-equivocation and
+    session history (astra Q2), and it ends with the node's own runtime readiness, not an execution height."""
+
+    def test_only_the_execution_and_bootstrap_volumes_are_mounted(self):
+        self.assertEqual(rj.COLD_RESTORE_VOLUMES, ('evm', 'archive', 'ureth'))
+        for kept in ('auth', 'root', 'wallet', 'tools', 'network', 'jwt', 'work'):
+            self.assertNotIn(kept, rj.COLD_RESTORE_VOLUMES)
+        lap = rj.Laptop.__new__(rj.Laptop)
+        lap.entity, lap.node_image, lap.home = 5, 'img', Path(tempfile.mkdtemp())
+        mounts = []
+        lap.vol = lambda name: f'p_{name}'
+        lap.dc = lambda *a, **k: ''
+        lap.one = lambda image, cmd, volumes=(), **k: mounts.append(list(volumes))
+        lap.wait = lambda *a, **k: None
+        lap.ureth_head = lambda: 1
+        lap.vol_write = lambda *a: None
+        lap.compose = lambda: {'services': {'shard5': {'entrypoint': ['ubft', 'shard-node', 'run']}}}
+        lap.services_state = lambda: {}
+        with unittest.mock.patch.object(rj.time, 'sleep'):
+            lap.op_restore_start('AA==', 'AA==', '0xab')
+        self.assertEqual(mounts, [['p_evm:/evm', 'p_archive:/archive', 'p_ureth:/ureth']], 'one wipe, of these three volumes only')
+
+    def test_the_wipe_keeps_the_keys_and_touches_nothing_else(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for name in ('evm', 'archive', 'ureth', 'auth'):
+                (root / name).mkdir()
+            for rel in ('evm/keys.json', 'evm/node-info.json', 'evm/blocks.db', 'evm/tip.uc.cbor', 'archive/v2-aa', 'ureth/db', 'auth/session.db', 'auth/operator.cred'):
+                (root / rel).write_text('x')
+            script = rj.COLD_RESTORE_WIPE.replace('/evm', str(root / 'evm')).replace('/archive', str(root / 'archive')).replace('/ureth', str(root / 'ureth'))
+            subprocess.run(['sh', '-c', script], check=True)
+            left = sorted(str(p.relative_to(root)) for p in root.rglob('*') if p.is_file())
+            self.assertEqual(left, ['auth/operator.cred', 'auth/session.db', 'evm/keys.json', 'evm/node-info.json'])
+
+    def test_a_cold_restore_ends_with_the_runtime_readiness(self):
+        d = hd.Drive.__new__(hd.Drive)
+        calls = []
+
+        class Remote:
+            def status(self):
+                return {'urethHead': 900, 'restoring': True}
+
+            def restore_start(self, uc, tr, body):
+                calls.append('start')
+
+            def seed_archive(self):
+                calls.append('seed')
+
+            def restore_finish(self):
+                calls.append('finish')
+                return {'running': True}
+        tmp = Path(tempfile.mkdtemp())
+        d.remote, d.target, d.restore_pin, d.new, d.gen, d.net = {5: Remote()}, 30, Path('/bin/true'), [1, 5], tmp, tmp
+        d.say = lambda text: None
+        d.expect = lambda ok, what, detail='': None if ok else (_ for _ in ()).throw(AssertionError(what))
+        d.restore_body_ids = lambda: '30=ab'
+        d.evh = lambda: tmp
+        d.wait = lambda what, fn, seconds: next(r for r in (fn() for _ in range(20)) if r)
+        d.wait_ready = lambda i, epoch, promoted, how: calls.append(('ready', epoch, promoted))
+
+        def pin(cmd, **k):
+            out = Path(cmd[-1]).parent
+            (out / 'tip.uc.cbor').write_bytes(b'u')
+            (out / 'tip.tr.cbor').write_bytes(b't')
+            return subprocess.CompletedProcess(cmd, 0, 'bodyID=0xab', '')
+        for follow in (False, True):
+            calls.clear()
+            with unittest.mock.patch.object(hd.subprocess, 'run', side_effect=pin):
+                d.restore_remote(5, follow=follow)
+            self.assertEqual(calls, ['start', 'seed', 'finish', ('ready', 30, follow)], f'follow={follow}: always a full restore, then readiness')
 
 
 if __name__ == '__main__':
