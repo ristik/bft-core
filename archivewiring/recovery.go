@@ -38,7 +38,10 @@ type RecoverySource struct {
 	Host     shardnode.EvidenceHost
 	Replicas []peer.ID
 	// Policy, when set, replaces Replicas with its current snapshot's readable replicas (the current ones, then the retained holders).
-	Policy    *ReplicaPolicy
+	Policy *ReplicaPolicy
+	// Followed, when set, lists extra non-root sources (follow sources) asked after the replicas: a non-active follower reads them under
+	// their public budget. Their records are verified exactly like a replica's.
+	Followed  func() []peer.ID
 	Limits    Limits
 	MaxBlocks int
 	Log       *slog.Logger
@@ -119,6 +122,9 @@ func (s *RecoverySource) fetchVerifiedRecord(ctx context.Context, q archive.Requ
 	replicas := s.Replicas
 	if s.Policy != nil {
 		replicas = s.Policy.Snapshot().Readable()
+	}
+	if s.Followed != nil {
+		replicas = append(append([]peer.ID(nil), replicas...), s.Followed()...)
 	}
 	for _, id := range replicas {
 		if id == "" || s.Host == nil {

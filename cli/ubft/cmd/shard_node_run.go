@@ -832,6 +832,7 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 		return fmt.Errorf("deriving the shard peers: %w", err)
 	}
 	follower.setRole(activePeers.Member)
+	var headFollower *archivewiring.HeadFollower
 	// Every shard-membership consumer (block dissemination, the archive and journal servers, the journal suffix and evidence providers)
 	// follows this set: the genesis validators until a verified assignment step is installed, then the active assignment's.
 	disseminator, err := buildDisseminator(peer, flags.observe, shardConf.Validators, activePeers, flags.TrustHistoryProfile2)
@@ -886,6 +887,15 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 	if err != nil {
 		return fmt.Errorf("creating shard node: %w", err)
 	}
+	if follower.enabled {
+		// a root-free follower: while this node is not a validator of the installed assignment it takes certificates from its follow
+		// sources only, executes what is certified, and never builds, signs or sends anything to a root
+		if flags.ExecutionJournal == "" || flags.ArchiveStore == "" {
+			return errors.New("--follow-source requires --execution-journal and --archive-store")
+		}
+		node.SetFollowerRole(func() bool { return !activePeers.Member() })
+	}
+
 	// The adapter authenticates certificates under the same per-epoch configuration set as the admission, not under a scan of every
 	// installed assignment. Set before Run.
 	verifierContext.SetConfForEpoch(node.ShardConfForEpoch)
@@ -993,7 +1003,7 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 			archiveServer.SetLogger(flags.observe.Logger())
 			if flags.ArchivePublicReads {
 				// non-active followers read (never write) under their own budget, apart from the validators' slots
-				if e := archiveServer.SetPublicReads(archivewiring.Limits{Deadline: archiveTransportLimits.Deadline, Pending: 4, PerPeer: 1}); e != nil {
+				if e := archiveServer.SetPublicReads(archivewiring.Limits{Deadline: archiveTransportLimits.Deadline, Pending: 4, PerPeer: 2}); e != nil {
 					return fmt.Errorf("archive public reads: %w", e)
 				}
 			}
@@ -1443,6 +1453,15 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 		if archiveLocal != nil {
 			source := &archivewiring.RecoverySource{Context: journalCtx, Subject: archiveSubject, Local: archiveLocal, Host: archiveHost,
 				Replicas: archiveReplicas, Policy: replicaPolicy, Limits: archiveTransportLimits, MaxBlocks: configuredadmission.DefaultRecoveryLimits().Blocks, Log: flags.observe.Logger()}
+			if follower.enabled {
+				source.Followed = func() []libp2ppeer.ID { return followSourceIDs(followSources) }
+				// the root-free certificate source: the newest verified archive head, offered while this node is not active
+				headFollower = &archivewiring.HeadFollower{Binding: archivewiring.CertifiedBinding{Context: journalCtx, Subject: archiveSubject},
+					Host: archiveHost, Limits: archiveTransportLimits, Active: activePeers.Member, Offer: node.FollowCertificate, Log: flags.observe.Logger(),
+					Sources: func() []libp2ppeer.ID {
+						return append(append(followSourceIDs(followSources), readableArchiveReplicas(replicaPolicy, archiveReplicas)...), activePeers.Peers()...)
+					}}
+			}
 			archiveCatchUp = &archivewiring.CatchUp{Source: source}
 			coordinator.FetchArchive = func(ctx context.Context, after shardnode.BlockRef, target []byte) ([]shardnode.JournalFetchEntry, error) {
 				entries, fetchErr := source.FetchSuffix(ctx, after, target)
@@ -1604,6 +1623,9 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 	}
 	if q3Follower != nil {
 		g.Go(func() error { return q3Follower.Run(gctx) })
+	}
+	if headFollower != nil {
+		g.Go(func() error { return headFollower.Run(gctx) })
 	}
 	return g.Wait()
 }
