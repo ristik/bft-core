@@ -185,12 +185,16 @@ class Journal:
         return detail
 
 
-def follower_ready(mine, reference, target):
-    """A promoted follower's own report, compared with an incumbent's: active at the target epoch or later, execution recovery ready, and its
-    certified (admitted) round within two of the incumbent's, never ahead of it by more."""
-    if mine.get('role') != 'active' or (mine.get('roleEpoch') or 0) < target:
+def follower_ready(mine, reference, epoch, promoted):
+    """A follower's own report, compared with an incumbent's. Before the election (promoted False) the joiner is a non-active follower by
+    design: it must have installed the current epoch's activation (roleEpoch >= epoch), with either role, and follow the incumbents' certified
+    progress. After it (promoted True) its role must be active at the target epoch. Either way its execution recovery must be explicitly
+    ready (missing or empty is not ready) and its certified (admitted) round within two of the incumbent's, never ahead by more."""
+    if mine.get('executionRecovery') != 'ready':
         return False
-    if mine.get('executionRecovery') not in ('ready', None, ''):
+    if (mine.get('roleEpoch') or 0) < epoch or mine.get('role') not in ('active', 'follower'):
+        return False
+    if promoted and mine.get('role') != 'active':
         return False
     have, want = mine.get('lastUCRound') or 0, reference.get('lastUCRound') or 0
     return have > 0 and want - 2 <= have <= want + 2
@@ -605,7 +609,7 @@ class Drive(rehearse.Rehearsal):
             else:
                 # the root-free follower (--follow-source) installs every activation from the incumbents' mirrors and executes the certified blocks
                 # from their archives: nothing is emptied, pinned or replayed here
-                self.follow_joiner(i)
+                self.follow_joiner(i, current, promoted=False)   # before the election: following the current epoch, not active
             self.remote[i].info['shardCaughtUp'] = current
             self.remote[i].save()
 
@@ -735,7 +739,7 @@ class Drive(rehearse.Rehearsal):
             if self.cold_restore:
                 journal.run('advance', lambda: self.restore_joiner(i) or {}, sub=f'{unit}/restore')   # empties and restores its shard node (rehearse)
             else:
-                journal.run('advance', lambda: self.follow_joiner(i) or {}, sub=f'{unit}/follow')   # the same follower, started again on its retained state
+                journal.run('advance', lambda: self.follow_joiner(i, self.target, promoted=True) or {}, sub=f'{unit}/follow')   # the same follower, started again on its retained state
             return {'joiner': True}
         def advance():
             status = healthy(self.authority_status(i))
@@ -783,7 +787,7 @@ class Drive(rehearse.Rehearsal):
             if self.cold_restore:
                 journal.run('advance', lambda: self.restore_remote(i) or {}, sub=f'{unit}/restore')
             else:
-                journal.run('advance', lambda: self.follow_joiner(i) or {}, sub=f'{unit}/follow')
+                journal.run('advance', lambda: self.follow_joiner(i, self.target, promoted=True) or {}, sub=f'{unit}/follow')
             return {'joiner': True, 'remote': True}
         def advance():
             status = healthy(remote.authority_status())
@@ -820,13 +824,13 @@ class Drive(rehearse.Rehearsal):
             journal.run('advance', lambda i=i: self.advance_entity(i, shard_epoch, journal), sub=f'entity{i}')
         return {'shardEpoch': shard_epoch}
 
-    def follow_joiner(self, i):
-        """Idempotent replacement of the post-election restore (phase 1 follower). The joiner's shard node runs as a root-free follower from its
+    def follow_joiner(self, i, epoch, promoted):
+        """Idempotent replacement of the joiner restores (phase 1 follower). The joiner's shard node runs as a root-free follower from its
         provisioning on (--follow-source): it installs each activation from the incumbents' mirrors and executes the certified blocks from their
         archives, and the completed activation naming it publishes its role as active in the same process. This only (re)starts the shard
-        container on its RETAINED state (an authority order stops it) and waits until the node itself reports ready: its published role is
-        active at the target epoch or later, its execution recovery is ready, and its certified round (admitted certificates, not an execution
-        RPC height) is within two rounds of validator 1's. Nothing is emptied, pinned or replayed, and a timeout is a failure, never a restore.
+        container on its RETAINED state (an authority order stops it) and waits until the node itself reports ready (follower_ready): before
+        the election (promoted False) caught up in the current epoch as a follower, after it (promoted True) active at the target epoch.
+        Nothing is emptied, pinned or replayed, and a timeout is a failure, never a restore.
 
         Not yet the hot-promotion latency objective: an authority order still stops and restarts the shard process (state kept)."""
         remote = self.remote.get(i)
@@ -844,8 +848,9 @@ class Drive(rehearse.Rehearsal):
                 return False
             self.say(f'  joiner {i}: role {mine.get("role")} at epoch {mine.get("roleEpoch")}, recovery {mine.get("executionRecovery")}, '
                      f'certified round {mine.get("lastUCRound")} (validator 1 {reference.get("lastUCRound")})')
-            return follower_ready(mine, reference, self.target)
-        self.wait(f'the joiner {i} is active and certified at the head (no restore)', ready, 3600)
+            return follower_ready(mine, reference, epoch, promoted)
+        what = 'active at epoch %d' % epoch if promoted else 'following epoch %d' % epoch
+        self.wait(f'the joiner {i} is {what} and certified at the head (no restore)', ready, 3600)
 
     def restore_remote(self, i, follow=True):
         """rehearse.restore_joiner for an entity on another machine: the pin (the latest certified record of the new epoch, its technical record, the trust

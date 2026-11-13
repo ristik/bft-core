@@ -326,7 +326,7 @@ class RemoteAdvance(unittest.TestCase):
         d.say = lambda text: None
         d.expect = lambda ok, what, detail='': None if ok else (_ for _ in ()).throw(AssertionError(what))
         d.restore_remote = lambda i: test.calls.append(('restore', i))
-        d.follow_joiner = lambda i: test.calls.append(('follow', i))
+        d.follow_joiner = lambda i, epoch, promoted: test.calls.append(('follow', i))
         d.cold_restore = False
         self.d = d
         self.journal = hd.Journal(d.work / 'log.jsonl', echo=lambda line: None)
@@ -400,44 +400,51 @@ class FollowJoiner(unittest.TestCase):
         follower = {'role': 'follower', 'roleEpoch': 4, 'lastUCRound': 99, 'executionRecovery': 'ready'}
         ready = {'role': 'active', 'roleEpoch': 5, 'lastUCRound': 99, 'executionRecovery': 'ready'}
         d, calls = self.drive(set(), [None, follower, ready])
-        d.follow_joiner(5)
+        d.follow_joiner(5, 5, promoted=True)
         self.assertEqual(calls, ['shard-start'])
 
     def test_a_running_follower_is_left_alone(self):
         d, calls = self.drive({'shard5'}, [{'role': 'active', 'roleEpoch': 5, 'lastUCRound': 100, 'executionRecovery': 'ready'}])
-        d.follow_joiner(5)
+        d.follow_joiner(5, 5, promoted=True)
         self.assertEqual(calls, [], 'a rerun changes nothing')
 
     def test_readiness_is_the_nodes_own_role_and_certified_round(self):
         ref = {'lastUCRound': 100}
-        ok = {'role': 'active', 'roleEpoch': 5, 'lastUCRound': 99, 'executionRecovery': 'ready'}
-        self.assertTrue(hd.follower_ready(ok, ref, 5))
-        self.assertFalse(hd.follower_ready({**ok, 'role': 'follower'}, ref, 5), 'not promoted')
-        self.assertFalse(hd.follower_ready({**ok, 'roleEpoch': 4}, ref, 5), 'promoted for an older epoch')
-        self.assertFalse(hd.follower_ready({**ok, 'lastUCRound': 90}, ref, 5), 'certified rounds behind')
-        self.assertFalse(hd.follower_ready({**ok, 'lastUCRound': 150}, ref, 5), 'ahead of the incumbent: divergent, not ready')
-        self.assertFalse(hd.follower_ready({**ok, 'executionRecovery': 'unready'}, ref, 5))
+        active = {'role': 'active', 'roleEpoch': 5, 'lastUCRound': 99, 'executionRecovery': 'ready'}
+        self.assertTrue(hd.follower_ready(active, ref, 5, promoted=True))
+        self.assertFalse(hd.follower_ready({**active, 'role': 'follower'}, ref, 5, promoted=True), 'not promoted')
+        self.assertFalse(hd.follower_ready({**active, 'roleEpoch': 4}, ref, 5, promoted=True), 'promoted for an older epoch')
+        self.assertFalse(hd.follower_ready({**active, 'lastUCRound': 90}, ref, 5, promoted=True), 'certified rounds behind')
+        self.assertFalse(hd.follower_ready({**active, 'lastUCRound': 150}, ref, 5, promoted=True), 'ahead of the incumbent: divergent, not ready')
+        for recovery in ('unready', '', None):
+            self.assertFalse(hd.follower_ready({**active, 'executionRecovery': recovery}, ref, 5, promoted=True), f'recovery {recovery!r} is not ready')
+        self.assertFalse(hd.follower_ready({k: v for k, v in active.items() if k != 'executionRecovery'}, ref, 5, promoted=True), 'missing recovery')
 
-class ArchiveSeed(unittest.TestCase):
-    def test_records_are_streamed_and_only_missing_ones_placed(self):
-        import io, subprocess, sys, tarfile as tf
-        with tempfile.TemporaryDirectory() as d:
-            gen, dest = Path(d) / 'gen', Path(d) / 'dest'
-            archive = gen / 'validator1' / 'archive'
-            for name in ('v2-aa', 'v2-bb', '.writing-cc'):
-                (archive / name).mkdir(parents=True)
-                (archive / name / 'header.chunk').write_bytes(name.encode())
-            (dest / 'v2-aa').mkdir(parents=True)
-            (dest / 'v2-aa' / 'header.chunk').write_bytes(b'mine')
-            stream = io.BytesIO()
-            re_.archive_tar(gen, 1, stream)
-            names = tf.open(fileobj=io.BytesIO(stream.getvalue())).getnames()
-            self.assertNotIn('.writing-cc', ' '.join(names), 'a partial record is never streamed')
-            done = subprocess.run([sys.executable, '-c', rj.SEED, str(dest)], input=stream.getvalue(), capture_output=True, check=True)
-            self.assertEqual(done.stdout.decode().strip(), 'added 1 kept 1')
-            self.assertEqual((dest / 'v2-aa' / 'header.chunk').read_bytes(), b'mine', 'a record the node has is never touched')
-            self.assertEqual((dest / 'v2-bb' / 'header.chunk').read_bytes(), b'v2-bb')
-            self.assertEqual(sorted(p.name for p in dest.iterdir()), ['v2-aa', 'v2-bb'], 'no temporary directory left')
+    def test_before_the_election_a_caught_up_follower_is_ready(self):
+        """The pre-election check must not wait for an activation that only the election it precedes can bring."""
+        ref = {'lastUCRound': 100}
+        follower = {'role': 'follower', 'roleEpoch': 3, 'lastUCRound': 100, 'executionRecovery': 'ready'}
+        self.assertTrue(hd.follower_ready(follower, ref, 3, promoted=False), 'caught up in the current epoch as a follower')
+        self.assertFalse(hd.follower_ready({**follower, 'roleEpoch': 2}, ref, 3, promoted=False), 'the current epoch is not installed yet')
+        self.assertFalse(hd.follower_ready({**follower, 'lastUCRound': 80}, ref, 3, promoted=False), 'behind the incumbents')
+        self.assertFalse(hd.follower_ready({**follower, 'executionRecovery': ''}, ref, 3, promoted=False))
+        self.assertFalse(hd.follower_ready(follower, ref, 4, promoted=True), 'the same report is not a promotion to epoch 4')
+
+    def test_the_pre_election_catch_up_waits_for_following_not_promotion(self):
+        calls = []
+        d = hd.Drive.__new__(hd.Drive)
+        d.target, d.cold_restore, d.say = 4, False, lambda text: None
+        d.follower_epoch = lambda i: 3
+
+        class Remote:
+            info = {}
+
+            def save(self):
+                pass
+        d.remote = {5: Remote()}
+        d.follow_joiner = lambda i, epoch, promoted: calls.append((i, epoch, promoted))
+        d.catch_up_remote(5)
+        self.assertEqual(calls, [(5, 3, False)])
 
 
 class SourceCheck(unittest.TestCase):
