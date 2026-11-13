@@ -714,6 +714,7 @@ class Join:
         elif r.state not in ('retiring', 'retired'):
             raise RuntimeError(f'entity {self.entity} is {r.state}, not a member, retiring or retired')
         started = time.monotonic()
+        result = None
         while r.state != 'retired':
             unfinished = self.hd.Journal(self.gen / 'handoff' / 'log.jsonl').last_drive()
             result = unfinished[0] if unfinished else d.wait('the election reserves a result', lambda: d.open_result(), 1200)
@@ -730,9 +731,13 @@ class Join:
                 raise RuntimeError(f'the retirement drive stopped (exit {rc}): rerun the same command (it resumes)')
             break
         if r.state != 'retired':
-            self.save(state='retired', retiredAt=time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()))
+            # the shard epoch the excluding handoff activated (its drive's advance step): the archive policies must have been evaluated at it
+            self.save(state='retired', retiredAt=time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()), retiredShardEpoch=activated_shard_epoch(self.gen, result))
         say(f'entity {self.entity} left the committee in {time.monotonic() - started:.0f} s')
-        self.wait_archive_migration()
+        if not r.info.get('retiredShardEpoch'):
+            raise RuntimeError('the shard epoch activated by the handoff that excluded this entity is not recorded (retiredShardEpoch): the archive gate '
+                               'cannot be checked, the retired validator is NOT stopped. Set it by hand from the drive journal (advance shardEpoch)')
+        self.wait_archive_migration(int(r.info['retiredShardEpoch']))
         say('stopping its validator services (keys and volumes kept)')
         say(f'  {r.client.op("stop-validator", timeout=300)}')
         say('next: custody.mature([lot]) once the holds pass (holdRetirement 2000 rounds, timeFloor 3600 s, evidence holds), then claim(amount, to) by the '
@@ -750,23 +755,22 @@ class Join:
                 out[i] = {'error': (p.stderr or p.stdout).strip()[-200:]}
         return out
 
-    def wait_archive_migration(self, seconds=ARCHIVE_WAIT):
-        """Before the retired validator stops: every remaining writer must report migrationComplete and no retained holder naming it
-        (docs/operations/m2-runbook.md, bft-core#1034). Until then the retired shard still holds copies the network depends on."""
+    def wait_archive_migration(self, activated, seconds=ARCHIVE_WAIT):
+        """Before the retired validator stops: every remaining host writer must pass archive_gate for it at the shard epoch `activated` that the excluding
+        handoff installed (docs/operations/m2-runbook.md, bft-core#1034). Until then the retired shard still holds copies the network depends on."""
         evm = self.r.evm_node_id
         started = time.monotonic()
         last = None
         while True:
             pol = self.archive_policies()
-            view = {i: (p or {}).get('error') or (f"v{p.get('version')} e{p.get('shardEpoch')} retained={len(p.get('retained') or [])}"
-                                                   f"{'(names it)' if evm in (p.get('retained') or []) else ''} backlog={p.get('migrationBacklog')} "
-                                                   f"complete={p.get('migrationComplete')}" if p else 'no archivePolicy') for i, p in pol.items()}
+            view = {i: archive_gate(p, evm, activated) or 'ok' for i, p in pol.items()}
             if view != last:
-                say(f'archive policy after {time.monotonic() - started:.0f} s: {json.dumps(view)}')
+                say(f'archive policy after {time.monotonic() - started:.0f} s (shard epoch {activated} or later): {json.dumps(view)}')
                 last = view
-            done = all(p and not p.get('error') and p.get('migrationComplete') and evm not in (p.get('retained') or []) for p in pol.values())
-            if done:
+            if all(v == 'ok' for v in view.values()):
                 say(f'archive migration complete on every host writer in {time.monotonic() - started:.0f} s: {json.dumps(pol)}')
+                say('this is necessary, not sufficient, for powering it off: the migration covers this writer\'s promised archive records and bundles only, '
+                    'not UTB/Q3 history, record proofs or evidence held outside the archive (m2-runbook)')
                 return
             if time.monotonic() - started > seconds:
                 raise RuntimeError(f'the archive migration is not complete after {seconds} s: the retired validator is NOT stopped; rerun retire later')
@@ -883,6 +887,39 @@ class Join:
         self.save(state='prepared', preparedFor=target, shardEpoch=shard_epoch, preparedAt=time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()))
         rounds, seconds = self.due()
         say(f'prepared for epoch {target}: the next attempt is due in {rounds} rounds / {seconds} s')
+
+
+def archive_gate(policy, retiree, activated):
+    """Why one host writer's archivePolicy (`shard-node status`) does not yet allow stopping the retired validator `retiree` (its EVM node id), or None.
+    The writer must follow the assignment that excludes it: the policy was evaluated at the shard epoch `activated` of the excluding handoff or later
+    (checkedShardEpoch, bft-core#1044; a node without it reports shardEpoch, the epoch its policy was derived at, so one whose replica set did not
+    change waits until the timeout: fail closed), the retiree is no current replica and no retained holder, and the migration is complete. Without the
+    epoch and replica checks a writer still on the old policy (the retiree an active replica, nothing retained) passes: migrationComplete is
+    len(retained) == 0 when no migration exists."""
+    if not isinstance(policy, dict):
+        return 'no archivePolicy'
+    if policy.get('error'):
+        return f"unreadable: {policy['error']}"
+    epoch = policy.get('checkedShardEpoch', policy.get('shardEpoch'))
+    if not isinstance(epoch, int) or epoch < activated:
+        return f'policy evaluated at shard epoch {epoch}, before {activated}'
+    if retiree in (policy.get('replicas') or []):
+        return 'the retiree is still a current replica'
+    if retiree in (policy.get('retained') or []):
+        return f"the retiree is a retained holder (backlog {policy.get('migrationBacklog')})"
+    if policy.get('migrationComplete') is not True:
+        return f"migration not complete (backlog {policy.get('migrationBacklog')})"
+    return None
+
+
+def activated_shard_epoch(generation, result):
+    """The shard epoch the drive of `result` activated (its journal's advance step), or None."""
+    import handoff_drive
+    found = None
+    for row in handoff_drive.Journal(Path(generation) / 'handoff' / 'log.jsonl').rows():
+        if row.get('result') == result and row.get('step') == 'advance' and not row.get('sub') and row.get('status') == 'done' and isinstance(row.get('shardEpoch'), int):
+            found = row['shardEpoch']
+    return found
 
 
 def certifying_entities(d):

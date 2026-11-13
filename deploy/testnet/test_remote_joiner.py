@@ -595,29 +595,6 @@ class ColdRestore(unittest.TestCase):
                 d.restore_remote(5, follow=follow)
 
 
-class FollowerCatchUp(unittest.TestCase):
-    """remote_entity.py catch-up brings a follower's shard node to the current epoch and leaves its root to the join drive (installed after q3-candidate)."""
-
-    def test_the_root_is_left_to_the_join_drive(self):
-        calls = []
-        d = hd.Drive.__new__(hd.Drive)
-        d.target, d.cold_restore, d.say = 4, False, lambda text: None
-        d.follower_epoch = lambda i: 1
-
-        class Remote:
-            info = {}
-
-            def install_root(self, target):
-                calls.append(('install', target))
-
-            def save(self):
-                pass
-        d.remote = {5: Remote()}
-        d.follow_joiner = lambda i, epoch, promoted: calls.append(('follow', i, epoch, promoted))
-        d.catch_up_remote(5, root=False)
-        self.assertEqual(calls, [('follow', 5, 3, False)], 'no install restart of the follower root; no log-scraped shortcut')
-
-
 class RegistryWrites(unittest.TestCase):
     """The registry of remote entities (handoff/remote-joiners/<J>.json): every write under handoff/drive.lock, over the CURRENT file, only legal and
     not stale state changes, written to a unique temporary file, fsynced and renamed (#1029 review)."""
@@ -777,6 +754,111 @@ class JoinExclusion(unittest.TestCase):
                 with self.assertRaises(hd.Refused, msg=repr(bad)):
                     d.pending_remote()
 
+
+class FollowerCatchUp(unittest.TestCase):
+    """remote_entity.py catch-up brings a follower's shard node to the current epoch and leaves its root to the join drive (installed after q3-candidate)."""
+
+    def test_the_root_is_left_to_the_join_drive(self):
+        calls = []
+        d = hd.Drive.__new__(hd.Drive)
+        d.target, d.cold_restore, d.say = 4, False, lambda text: None
+        d.follower_epoch = lambda i: 1
+
+        class Remote:
+            info = {}
+
+            def install_root(self, target):
+                calls.append(('install', target))
+
+            def save(self):
+                pass
+        d.remote = {5: Remote()}
+        d.follow_joiner = lambda i, epoch, promoted: calls.append(('follow', i, epoch, promoted))
+        d.catch_up_remote(5, root=False)
+        self.assertEqual(calls, [('follow', 5, 3, False)], 'no install restart of the follower root; no log-scraped shortcut')
+
+
+class ArchiveGate(unittest.TestCase):
+    """#1043 review: the retire gate before stop-validator. A writer still on the old policy (the retiree a current replica, nothing retained, so
+    migrationComplete) must not pass."""
+    R = '16Uiu2RETIREE'
+
+    def policy(self, **over):
+        return {'version': 7, 'shardEpoch': 6, 'checkedShardEpoch': 6, 'replicas': ['A', 'B', 'C'], 'retained': [], 'migrationBacklog': 0,
+                'migrationComplete': True, **over}
+
+    def test_the_old_policy_does_not_pass(self):
+        old = self.policy(shardEpoch=4, checkedShardEpoch=4, replicas=['A', self.R, 'C'])
+        self.assertIsNotNone(re_.archive_gate(old, self.R, 6))
+        self.assertIsNotNone(re_.archive_gate(self.policy(replicas=['A', self.R, 'C']), self.R, 6), 'the retiree still a replica at the new epoch')
+        self.assertIsNotNone(re_.archive_gate(self.policy(shardEpoch=5, checkedShardEpoch=5), self.R, 6), 'evaluated before the excluding epoch')
+
+    def test_a_retained_holder_or_an_open_migration_does_not_pass(self):
+        self.assertIsNotNone(re_.archive_gate(self.policy(retained=[self.R], migrationComplete=False, migrationBacklog=3), self.R, 6))
+        self.assertIsNotNone(re_.archive_gate(self.policy(retained=[self.R]), self.R, 6))
+        self.assertIsNotNone(re_.archive_gate(self.policy(migrationComplete=False), self.R, 6))
+
+    def test_unreadable_or_absent_does_not_pass(self):
+        for bad in (None, {}, {'error': 'timeout'}, self.policy(checkedShardEpoch=None, shardEpoch=None)):
+            self.assertIsNotNone(re_.archive_gate(bad, self.R, 6), repr(bad))
+
+    def test_the_new_policy_passes(self):
+        self.assertIsNone(re_.archive_gate(self.policy(), self.R, 6))
+        self.assertIsNone(re_.archive_gate(self.policy(shardEpoch=7, checkedShardEpoch=7), self.R, 6))
+
+    def test_a_writer_whose_replicas_never_named_it_passes_by_the_checked_epoch(self):
+        """#1044: its policy is kept (shardEpoch stays at its derivation) while checkedShardEpoch follows the installed assignment."""
+        kept = self.policy(shardEpoch=2, checkedShardEpoch=6)
+        self.assertIsNone(re_.archive_gate(kept, self.R, 6))
+        legacy = {k: v for k, v in kept.items() if k != 'checkedShardEpoch'}
+        self.assertIsNotNone(re_.archive_gate(legacy, self.R, 6), 'a node without checkedShardEpoch: its derivation epoch, fail closed')
+
+    def test_the_activated_epoch_is_the_excluding_drives(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            gen = Path(tmp)
+            j = hd.Journal(gen / 'handoff' / 'log.jsonl', '0xother', 5, echo=lambda line: None)
+            j.write('advance', 'done', shardEpoch=5)
+            j = hd.Journal(gen / 'handoff' / 'log.jsonl', '0xexcl', 6, echo=lambda line: None)
+            j.write('advance', 'done', sub='shard-conf', shardEpoch=99)
+            j.write('advance', 'done', shardEpoch=6)
+            self.assertEqual(re_.activated_shard_epoch(gen, '0xexcl'), 6)
+            self.assertIsNone(re_.activated_shard_epoch(gen, '0xnone'))
+
+    def test_retire_from_retired_without_the_epoch_stops_nothing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            gen = Path(tmp)
+            (gen / 'handoff').mkdir()
+            write_record(gen, 5, 'retired', stakingId=12)
+            j = re_.Join.__new__(re_.Join)
+            j.gen, j.entity, j.d = gen, 5, unittest.mock.Mock()
+            j.r = re_.load(gen)[5]
+            j.r.client = unittest.mock.Mock()
+            j.wait_archive_migration = unittest.mock.Mock()
+            with unittest.mock.patch.object(re_, 'say'), self.assertRaises(RuntimeError):
+                j.retire()
+            j.wait_archive_migration.assert_not_called()
+            j.r.client.op.assert_not_called()
+            re_.update_info(gen, 5, {'retiredShardEpoch': 6})
+            j.r = re_.load(gen)[5]
+            j.r.client = unittest.mock.Mock()
+            j.r.client.op.return_value = {'stopped': {}}
+            with unittest.mock.patch.object(re_, 'say'):
+                self.assertEqual(j.retire(), 0)
+            j.wait_archive_migration.assert_called_once_with(6)
+            self.assertEqual(j.r.client.op.call_args.args[0], 'stop-validator')
+
+    def test_the_wait_stops_nothing_until_every_writer_passes(self):
+        j = re_.Join.__new__(re_.Join)
+        j.r = unittest.mock.Mock(evm_node_id=self.R)
+        views = iter([{1: self.policy(shardEpoch=4, checkedShardEpoch=4, replicas=['A', self.R, 'C']), 2: self.policy()},
+                      {1: self.policy(), 2: self.policy()}])
+        j.archive_policies = lambda: next(views)
+        with unittest.mock.patch.object(re_, 'say'), unittest.mock.patch.object(re_.time, 'sleep') as sleep:
+            j.wait_archive_migration(6)
+        self.assertEqual(sleep.call_count, 1, 'one more pass after the old-policy writer')
+        j.archive_policies = lambda: {1: self.policy(replicas=[self.R])}
+        with unittest.mock.patch.object(re_, 'say'), unittest.mock.patch.object(re_.time, 'sleep'), self.assertRaises(RuntimeError):
+            j.wait_archive_migration(6, seconds=-1)
 
 
 if __name__ == '__main__':
