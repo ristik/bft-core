@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -1205,6 +1206,7 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 				Mirrors: mirrorPeers,
 				// a restore, or a node that is not a validator of the installed assignment, is a non-active party: mirrors only
 				NonActive: func() bool { return flags.Restore || !activePeers.Member() },
+				IsRoot:    knownRoots(currentRoots, trustBases[0].GetEpoch(), q3rt.ActiveEpoch, q3Trust.Verified().GetByEpoch),
 				Fetch: func(ctx context.Context, id libp2ppeer.ID, epoch uint64) (q3active.Bundle, error) {
 					return q3delivery.Request(ctx, peer, id, epoch)
 				}}
@@ -2123,5 +2125,40 @@ func q3MirrorPeers(active *shardnode.ActivePeers, replicas []libp2ppeer.ID) func
 	fixed := append([]libp2ppeer.ID(nil), replicas...)
 	return func() []libp2ppeer.ID {
 		return append(active.Peers(), fixed...)
+	}
+}
+
+// knownRoots names every root identity this node knows: the bootnodes and the committee of every verified epoch from the anchor to the
+// active one. The set is rebuilt only when the active epoch moves, so a lookup is a map read.
+func knownRoots(boot []libp2ppeer.ID, anchor uint64, active func() uint64, trust func(context.Context, uint64) (*types.RootTrustBaseV1, error)) func(libp2ppeer.ID) bool {
+	var mu sync.Mutex
+	var builtAt uint64
+	set := map[libp2ppeer.ID]struct{}{}
+	return func(id libp2ppeer.ID) bool {
+		mu.Lock()
+		defer mu.Unlock()
+		if top := active(); top != builtAt || len(set) == 0 {
+			set = map[libp2ppeer.ID]struct{}{}
+			for _, b := range boot {
+				set[b] = struct{}{}
+			}
+			for e := anchor; e <= max(top, anchor); e++ {
+				tb, err := trust(context.Background(), e)
+				if err != nil || tb == nil {
+					continue
+				}
+				for _, n := range tb.RootNodes {
+					if n == nil {
+						continue
+					}
+					if pid, err := libp2ppeer.Decode(n.NodeID); err == nil {
+						set[pid] = struct{}{}
+					}
+				}
+			}
+			builtAt = top
+		}
+		_, ok := set[id]
+		return ok
 	}
 }

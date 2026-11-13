@@ -36,6 +36,9 @@ type Q3Follower struct {
 	// non-active node takes activation evidence from mirrors only and never asks a root: roots and old roots are not even dialled. An
 	// active node asks the roots first and falls back to the mirrors. Nil means active (the roots-first policy).
 	NonActive func() bool
+	// IsRoot, when set, names every known root identity (any verified epoch's committee). A non-active node never asks a peer it names,
+	// nor a current or old root, even when that identity also appears in the mirror list. May be nil.
+	IsRoot func(peer.ID) bool
 	// Fetch asks one peer (a root or a mirror) for the bundle of a successor epoch.
 	Fetch func(ctx context.Context, root peer.ID, epoch uint64) (q3active.Bundle, error)
 	// Retry is the pause between rounds of fetching a bundle no root serves yet; zero is one second.
@@ -78,15 +81,25 @@ func (f *Q3Follower) activate(ctx context.Context, epoch uint64) error {
 // sources is the order in which the bundle of epoch is asked for: mirrors only for a non-active node, roots first then mirrors for an active
 // one. A peer is asked at most once per round.
 func (f *Q3Follower) sources(ctx context.Context, epoch uint64) []peer.ID {
+	var roots []peer.ID
+	roots = append(roots, f.CurrentRoots...)
+	if f.OldRoots != nil {
+		roots = append(roots, f.OldRoots(ctx, epoch-1)...)
+	}
+	nonActive := f.NonActive != nil && f.NonActive()
 	var out []peer.ID
-	if f.NonActive == nil || !f.NonActive() {
-		out = append(out, f.CurrentRoots...)
-		if f.OldRoots != nil {
-			out = append(out, f.OldRoots(ctx, epoch-1)...)
-		}
+	if !nonActive {
+		out = append(out, roots...)
 	}
 	if f.Mirrors != nil {
 		out = append(out, f.Mirrors()...)
+	}
+	excluded := make(map[peer.ID]struct{}, len(roots))
+	if nonActive {
+		// role separation, not just deduplication: a root identity is never a mirror for a non-active node, whichever list names it
+		for _, id := range roots {
+			excluded[id] = struct{}{}
+		}
 	}
 	seen := make(map[peer.ID]struct{}, len(out))
 	unique := out[:0]
@@ -95,6 +108,12 @@ func (f *Q3Follower) sources(ctx context.Context, epoch uint64) []peer.ID {
 			continue
 		}
 		seen[id] = struct{}{}
+		if _, ok := excluded[id]; ok {
+			continue
+		}
+		if nonActive && f.IsRoot != nil && f.IsRoot(id) {
+			continue
+		}
 		unique = append(unique, id)
 	}
 	return unique
