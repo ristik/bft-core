@@ -553,7 +553,8 @@ class Join:
             say(f'DONE: entity {self.entity} (the laptop) is a member')
             return 0
         # 4. the election's next result must name the joiner; then the drive, with this transport
-        result = d.wait('the election reserves a result', lambda: d.open_result(), 1200)
+        rounds, seconds = self.due()   # the cadence may be long (3600 rounds / 1800 s): wait for the due point, with a margin
+        result = d.wait('the election reserves a result', lambda: d.open_result(), max(1200, seconds + 600))
         members = self.members_of(result)
         say(f'result {result} elects {members}')
         if ident not in members:
