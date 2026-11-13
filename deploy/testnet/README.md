@@ -36,7 +36,8 @@ and bounded Docker JSON logs (30 MiB/service). Each pod caps memory at about 4.2
 plus a 16 MiB namespace holder and a 64 MiB metrics relay); shared services cap another 2.375 GiB, approximately **19.2 GiB for N=4** and
 **15.0 GiB for N=3**, plus Docker/OS/page cache/build overhead. Plan at least 24 GiB
 server RAM, 8 cores, 100 GiB initial SSD and off-host backup space; these are initial
-planning budgets, not measured capacity. On the shared 16 GiB development Mac use
+planning budgets, not measured capacity. Each root node gets `--root-cpus` CPUs (default 2: its per-round work grows with the epoch count, and
+at 0.5 the staging roots were throttled after 34 handoffs). On the shared 16 GiB development Mac use
 N=3 only when memory is available. Never build Rust while rehearsing the cluster.
 Monitor disks: retention bounds metrics/logs but does not bound chain databases.
 
