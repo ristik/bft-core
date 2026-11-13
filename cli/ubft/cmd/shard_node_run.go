@@ -1202,14 +1202,13 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 			}
 			mirror.Register(peer)
 			mirrorPeers := q3MirrorPeers(activePeers, archiveReplicas)
-			q3Follower = &q3shard.Q3Follower{Runtime: q3rt, AnchorEpoch: trustBases[0].GetEpoch(), CurrentRoots: currentRoots,
-				Mirrors: mirrorPeers,
-				// a restore, or a node that is not a validator of the installed assignment, is a non-active party: mirrors only
-				NonActive: func() bool { return flags.Restore || !activePeers.Member() },
-				IsRoot:    knownRoots(trustBases[0].GetEpoch(), q3rt.ActiveEpoch, q3Trust.Verified().GetByEpoch),
-				Fetch: func(ctx context.Context, id libp2ppeer.ID, epoch uint64) (q3active.Bundle, error) {
+			// a restore, or a node that is not a validator of the installed assignment, is a non-active party: mirrors only
+			q3Follower = shardQ3Follower(q3rt, trustBases[0].GetEpoch(), currentRoots, mirrorPeers,
+				func() bool { return flags.Restore || !activePeers.Member() },
+				knownRoots(trustBases[0].GetEpoch(), q3rt.ActiveEpoch, q3Trust.Verified().GetByEpoch),
+				func(ctx context.Context, id libp2ppeer.ID, epoch uint64) (q3active.Bundle, error) {
 					return q3delivery.Request(ctx, peer, id, epoch)
-				}}
+				})
 			catcher = q3Follower
 		}
 		var restoreLineage func(context.Context) error
@@ -2159,4 +2158,11 @@ func knownRoots(anchor uint64, active func() uint64, trust func(context.Context,
 		_, ok := set[id]
 		return ok
 	}
+}
+
+// shardQ3Follower is the shard node's activation follower. bootLocators are the configured bootnodes, which may mix roots and shard peers:
+// only those isRoot authenticates are treated as roots, so an incumbent shard listed as a bootnode remains a mirror a non-active node asks.
+func shardQ3Follower(rt q3shard.Q3Activator, anchor uint64, bootLocators []libp2ppeer.ID, mirrors func() []libp2ppeer.ID, nonActive func() bool,
+	isRoot func(libp2ppeer.ID) bool, fetch func(context.Context, libp2ppeer.ID, uint64) (q3active.Bundle, error)) *q3shard.Q3Follower {
+	return &q3shard.Q3Follower{Runtime: rt, AnchorEpoch: anchor, CurrentRoots: bootLocators, Mirrors: mirrors, NonActive: nonActive, IsRoot: isRoot, Fetch: fetch}
 }

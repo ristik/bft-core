@@ -86,6 +86,17 @@ func (f *Q3Follower) sources(ctx context.Context, epoch uint64) []peer.ID {
 	if f.OldRoots != nil {
 		roots = append(roots, f.OldRoots(ctx, epoch-1)...)
 	}
+	if f.IsRoot != nil {
+		// the configured lists are locators that may mix roots and shard peers (a generated node lists both as bootnodes): with authenticated
+		// root identities available, only those are roots, and a listed shard peer is a mirror like any other
+		authenticated := roots[:0]
+		for _, id := range roots {
+			if f.IsRoot(id) {
+				authenticated = append(authenticated, id)
+			}
+		}
+		roots = authenticated
+	}
 	nonActive := f.NonActive != nil && f.NonActive()
 	var out []peer.ID
 	if !nonActive {
@@ -94,24 +105,24 @@ func (f *Q3Follower) sources(ctx context.Context, epoch uint64) []peer.ID {
 	if f.Mirrors != nil {
 		out = append(out, f.Mirrors()...)
 	}
-	excluded := make(map[peer.ID]struct{}, len(roots))
-	if nonActive {
-		// role separation, not just deduplication: a root identity is never a mirror for a non-active node, whichever list names it
+	// role separation, not just deduplication: for a non-active node a root identity is never a source, whichever list names it. With
+	// IsRoot that is every authenticated root identity; without it, every identity the root lists name.
+	isRoot := f.IsRoot
+	if isRoot == nil {
+		listed := make(map[peer.ID]struct{}, len(roots))
 		for _, id := range roots {
-			excluded[id] = struct{}{}
+			listed[id] = struct{}{}
 		}
+		isRoot = func(id peer.ID) bool { _, ok := listed[id]; return ok }
 	}
 	seen := make(map[peer.ID]struct{}, len(out))
-	unique := out[:0]
+	unique := make([]peer.ID, 0, len(out))
 	for _, id := range out {
 		if _, ok := seen[id]; ok {
 			continue
 		}
 		seen[id] = struct{}{}
-		if _, ok := excluded[id]; ok {
-			continue
-		}
-		if nonActive && f.IsRoot != nil && f.IsRoot(id) {
+		if nonActive && isRoot(id) {
 			continue
 		}
 		unique = append(unique, id)

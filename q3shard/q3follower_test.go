@@ -228,3 +228,24 @@ func TestQ3FollowerNonActiveExcludesRootsListedAsMirrors(t *testing.T) {
 	require.ErrorIs(t, f.CatchUp(context.Background(), 2), ErrQ3Unavailable)
 	require.Equal(t, []peer.ID{current, old, other, mirror}, asked, "an active node: roots first")
 }
+
+// Mixed root lists (bootnodes naming roots and shard peers): with authenticated root identities only those are roots. A shard peer named
+// among the "roots" is a mirror for a non-active node, and an active node does not ask it as a root.
+func TestQ3FollowerRootListsAreFilteredByAuthenticatedIdentity(t *testing.T) {
+	all := ids(t, 3)
+	root, shard, mirror := all[0], all[1], all[2]
+	act := &fakeActivator{active: 1}
+	var asked []peer.ID
+	nonActive := true
+	f := &Q3Follower{Runtime: act, AnchorEpoch: 1, CurrentRoots: []peer.ID{root, shard}, Mirrors: func() []peer.ID { return []peer.ID{shard, mirror} },
+		NonActive: func() bool { return nonActive }, IsRoot: func(id peer.ID) bool { return id == root },
+		Fetch: func(_ context.Context, id peer.ID, _ uint64) (q3active.Bundle, error) {
+			asked = append(asked, id)
+			return q3active.Bundle{}, errors.New("unavailable")
+		}}
+	require.ErrorIs(t, f.CatchUp(context.Background(), 2), ErrQ3Unavailable)
+	require.Equal(t, []peer.ID{shard, mirror}, asked, "the listed shard peer is asked; the root is not")
+	asked, nonActive = nil, false
+	require.ErrorIs(t, f.CatchUp(context.Background(), 2), ErrQ3Unavailable)
+	require.Equal(t, []peer.ID{root, shard, mirror}, asked, "active: only the authenticated root as a root, then the mirrors")
+}
