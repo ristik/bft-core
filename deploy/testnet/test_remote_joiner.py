@@ -372,6 +372,18 @@ class RemoteAdvance(unittest.TestCase):
         self.assertEqual(self.steps(), [])
 
 
+EXPECT = {'nodeId': '16Uiu2JOINER', 'bodyId': 'b5', 'sigKey': '0x02aa'}
+
+
+def incumbent_binding(**over):
+    return {'nodeId': '16Uiu2EVM1', 'sigKey': '02bb', 'networkId': 5, 'partitionId': 8, 'shardId': '', 'shardEpoch': 4, 'shardConfHash': 'c4',
+            'member': True, 'history': [{'epoch': e, 'bodyId': f'b{e}'} for e in range(1, 6)], **over}
+
+
+def joiner_binding(**over):
+    return {**incumbent_binding(), 'nodeId': '16Uiu2JOINER', 'sigKey': '02aa', **over}
+
+
 class FollowJoiner(unittest.TestCase):
     """handoff_drive.follow_joiner: the idempotent replacement of the post-election restore: start the retained follower, wait until the node
     itself reports an active role and a certified round at the head."""
@@ -388,16 +400,18 @@ class FollowJoiner(unittest.TestCase):
                 running.add('shard5')
 
             def status(self):
-                return {'shardHealth': reports.pop(0) if len(reports) > 1 else reports[0]}
+                report = reports.pop(0) if len(reports) > 1 else reports[0]
+                return {'shardHealth': report and {'binding': joiner_binding(), **report}}   # about the expected node (#1057)
 
             def restore_start(self, *a):
                 test.fail('the follower path must never empty or restore')
 
         class Docker:
             def shard_health(self, i):
-                return {'role': 'active', 'roleEpoch': 5, 'lastUCRound': 100, 'executionRecovery': 'ready'}
+                return {'role': 'active', 'roleEpoch': 5, 'lastUCRound': 100, 'executionRecovery': 'ready', 'binding': incumbent_binding()}
         d = hd.Drive.__new__(hd.Drive)
         d.remote, d.target, d.docker = {5: Remote()}, 5, Docker()
+        d.binding_expectation = lambda i, epoch, promoted, reference: dict(EXPECT)
         d.say = lambda text: None
         d.wait = lambda what, fn, seconds: next(r for r in iter(fn, None) if r)
         return d, calls
@@ -1145,6 +1159,69 @@ class ColdRestoreScope(unittest.TestCase):
                 d.restore_remote(5, follow=follow)
             self.assertEqual(calls, ['start', 'seed', 'finish', ('ready', 30, follow)], f'follow={follow}: always a full restore, then readiness')
 
+
+
+class HealthBinding(unittest.TestCase):
+    """bft-core#1057 (astra Q3): follower readiness is evidence about the intended node under the intended assignment, not progress alone."""
+    REF = {'lastUCRound': 100}
+
+    def ready(self, binding, epoch=5, promoted=True, expect=EXPECT, reference=None):
+        mine = {'role': 'active', 'roleEpoch': epoch, 'lastUCRound': 100, 'executionRecovery': 'ready', 'binding': binding}
+        return hd.follower_ready(mine, reference or {**self.REF, 'binding': incumbent_binding()}, epoch, promoted, expect)
+
+    def test_the_expected_node_and_assignment_is_ready(self):
+        self.assertTrue(self.ready(joiner_binding()))
+        self.assertIsNone(hd.binding_refusal({'binding': joiner_binding()}, {'binding': incumbent_binding()}, 5, True, EXPECT))
+
+    def test_progress_without_a_binding_is_not_ready(self):
+        self.assertFalse(self.ready(None))
+        self.assertFalse(self.ready(joiner_binding(), reference=dict(self.REF)), 'no incumbent binding to compare with')
+        self.assertFalse(self.ready(joiner_binding(), expect={}), 'nothing expected: nothing proven')
+
+    def test_another_node_network_or_shard_is_not_ready(self):
+        self.assertFalse(self.ready(joiner_binding(nodeId='16Uiu2OTHER')))
+        self.assertFalse(self.ready(joiner_binding(networkId=6)))
+        self.assertFalse(self.ready(joiner_binding(partitionId=7)))
+        self.assertFalse(self.ready(joiner_binding(shardId='01')))
+
+    def test_the_expected_handoff_must_be_in_the_verified_ancestry(self):
+        self.assertFalse(self.ready(joiner_binding(history=[{'epoch': e, 'bodyId': f'b{e}'} for e in range(1, 5)])), 'not activated yet')
+        forked = [{'epoch': e, 'bodyId': ('x5' if e == 5 else f'b{e}')} for e in range(1, 6)]
+        self.assertFalse(self.ready(joiner_binding(history=forked)), 'another activation at the epoch')
+        self.assertFalse(self.ready(joiner_binding(), expect=dict(EXPECT, bodyId=None)), 'the roots\' record could not be read')
+        later = [{'epoch': e, 'bodyId': f'b{e}'} for e in range(1, 8)]
+        self.assertTrue(self.ready(joiner_binding(history=later), epoch=5), 'a later epoch with the expected handoff in its ancestry')
+        diverged = [{'epoch': 3, 'bodyId': 'zz'}, {'epoch': 5, 'bodyId': 'b5'}]
+        self.assertFalse(self.ready(joiner_binding(history=diverged)), 'a history the incumbent does not share')
+        self.assertTrue(self.ready(joiner_binding(history=[{'epoch': 5, 'bodyId': '0xB5'}])), 'hex is compared normalised')
+
+    def test_after_the_election_the_installed_configuration_must_name_it_with_its_key(self):
+        self.assertFalse(self.ready(joiner_binding(member=False)))
+        self.assertFalse(self.ready(joiner_binding(sigKey='02cc')))
+        self.assertFalse(self.ready(joiner_binding(), expect=dict(EXPECT, sigKey=None)), 'the expected key is unknown')
+        self.assertFalse(self.ready(joiner_binding(shardConfHash='c5')), 'another installed configuration than the incumbent\'s')
+        self.assertFalse(self.ready(joiner_binding(shardEpoch=3)))
+        self.assertFalse(self.ready(joiner_binding(shardConfHash='')))
+
+    def test_before_the_election_it_need_not_be_named(self):
+        pre = joiner_binding(member=False, sigKey='', shardEpoch=3, shardConfHash='c3', history=[{'epoch': e, 'bodyId': f'b{e}'} for e in range(1, 5)])
+        self.assertTrue(self.ready(pre, epoch=4, promoted=False, expect=dict(EXPECT, bodyId='b4', sigKey=None)))
+        self.assertFalse(self.ready(pre, epoch=4, promoted=False, expect=dict(EXPECT, nodeId='16Uiu2OTHER', bodyId='b4')))
+
+    def test_the_expectation_comes_from_the_registry_the_roots_and_the_installed_configuration(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            d = hd.Drive.__new__(hd.Drive)
+            d.work, d.evidence = Path(tmp) / 'work', Path(tmp) / 'evidence'
+            (d.evidence / 'epoch5').mkdir(parents=True)
+            d.work.mkdir()
+            (d.evidence / 'epoch5' / 'activation-record-5.json').write_text(json.dumps({'v3BodyId': 'b5'}))
+            (d.work / 'shard-conf-4.json').write_text(json.dumps({'validators': [{'nodeId': '16Uiu2EVM1', 'sigKey': '0x02bb'},
+                                                                                  {'nodeId': '16Uiu2JOINER', 'sigKey': '0x02aa'}]}))
+            d.evm_node_id = lambda i: '16Uiu2JOINER'
+            exp = d.binding_expectation(5, 5, True, {'binding': incumbent_binding()})
+            self.assertEqual(exp, {'nodeId': '16Uiu2JOINER', 'bodyId': 'b5', 'sigKey': '0x02aa'})
+            self.assertIsNone(d.binding_expectation(5, 5, True, {'binding': incumbent_binding(shardEpoch=9)})['sigKey'], 'no such configuration')
+            self.assertIsNone(d.binding_expectation(5, 5, False, {'binding': incumbent_binding()})['sigKey'], 'before the election no key')
 
 if __name__ == '__main__':
     unittest.main()

@@ -184,7 +184,49 @@ class Journal:
         return detail
 
 
-def follower_ready(mine, reference, epoch, promoted):
+def norm_hex(value):
+    """A hex string as the comparisons use it: lower case, without 0x; '' for anything else."""
+    return value.lower().removeprefix('0x') if isinstance(value, str) else ''
+
+
+def binding_refusal(mine, reference, epoch, promoted, expect):
+    """Why joiner health report `mine` is not evidence about the intended node under the intended assignment, or None (bft-core#1057; astra,
+    briefs/astra-q-1029-1043-answer.md Q3). `reference` is a host incumbent's report (validator 1), `expect` what the drive expects: nodeId
+    (the joiner's registered EVM node id), bodyId (the activation body of `epoch`, from the roots' activation record) and, after the election,
+    sigKey (the key the installed shard configuration names for the joiner). Checked:
+      - the report is about the expected node, of the incumbent's network, partition and shard;
+      - the expected handoff is in the node's verified activation history at `epoch` (a later epoch counts only with it in its ancestry), and
+        that history agrees with the incumbent's on every epoch both hold;
+      - after the election: the node's installed configuration is the incumbent's (shard epoch and configuration hash) and names it, with the
+        expected key.
+    This decides only whether the drive may call the join complete; the node's role and its signing authority decide what it signs."""
+    mb, rb = (mine or {}).get('binding'), (reference or {}).get('binding')
+    if not isinstance(mb, dict) or not isinstance(rb, dict):
+        return 'no binding in the health report'
+    if not expect or not expect.get('nodeId') or mb.get('nodeId') != expect['nodeId']:
+        return f"the report is about node {mb.get('nodeId')}, not {(expect or {}).get('nodeId')}"
+    for key in ('networkId', 'partitionId', 'shardId'):
+        if mb.get(key) is None or mb.get(key) != rb.get(key):
+            return f'{key} {mb.get(key)} is not the incumbent\'s {rb.get(key)}'
+    mine_h = {e.get('epoch'): norm_hex(e.get('bodyId')) for e in mb.get('history') or []}
+    ref_h = {e.get('epoch'): norm_hex(e.get('bodyId')) for e in rb.get('history') or []}
+    want = norm_hex(expect.get('bodyId'))
+    if not want or mine_h.get(epoch) != want:
+        return f'the expected activation {want or "?"} of epoch {epoch} is not in the node\'s verified history ({mine_h.get(epoch) or "absent"})'
+    if any(ref_h[e] != body for e, body in mine_h.items() if e in ref_h):
+        return 'the node\'s verified history differs from the incumbent\'s'
+    if promoted:
+        if mb.get('member') is not True:
+            return 'the installed configuration does not name the node'
+        if not norm_hex(expect.get('sigKey')) or norm_hex(mb.get('sigKey')) != norm_hex(expect.get('sigKey')):
+            return f"the installed configuration names key {mb.get('sigKey')} for it, not {expect.get('sigKey')}"
+        if not mb.get('shardConfHash') or (mb.get('shardEpoch'), norm_hex(mb.get('shardConfHash'))) != (rb.get('shardEpoch'), norm_hex(rb.get('shardConfHash'))):
+            return (f"installed configuration {mb.get('shardEpoch')}/{mb.get('shardConfHash')} is not the incumbent's "
+                    f"{rb.get('shardEpoch')}/{rb.get('shardConfHash')}")
+    return None
+
+
+def follower_ready(mine, reference, epoch, promoted, expect=None):
     """A follower's own report, compared with an incumbent's. Before the election (promoted False) the joiner is a non-active follower by
     design: it must have installed the current epoch's activation (roleEpoch >= epoch), with either role, and follow the incumbents' certified
     progress. After it (promoted True) its role must be active at the target epoch. Either way its execution recovery must be explicitly
@@ -196,7 +238,11 @@ def follower_ready(mine, reference, epoch, promoted):
     if promoted and mine.get('role') != 'active':
         return False
     have, want = mine.get('lastUCRound') or 0, reference.get('lastUCRound') or 0
-    return have > 0 and want - 2 <= have <= want + 2
+    if not (have > 0 and want - 2 <= have <= want + 2):
+        return False
+    # progress alone is not completion: the report must be about the intended node and assignment (bft-core#1057); without an
+    # expectation this is only the progress predicate
+    return expect is None or binding_refusal(mine, reference, epoch, promoted, expect) is None
 
 
 # --- the drive -------------------------------------------------------------------------------------------------------------------
@@ -861,16 +907,50 @@ class Drive(rehearse.Rehearsal):
         the follower path and of the explicit cold restore alike; a timeout is a failure."""
         remote = self.remote.get(i)
         health = (lambda: remote.status().get('shardHealth')) if remote is not None else (lambda: self.docker.shard_health(i))
+        expected = {}
         def ready():
             mine, reference = health(), self.docker.shard_health(1)
             if not mine or not reference:
                 self.say(f'  joiner {i}: shard health not readable yet')
                 return False
+            if not expected:
+                expected.update(self.binding_expectation(i, epoch, promoted, reference))
+            refusal = binding_refusal(mine, reference, epoch, promoted, expected)
             self.say(f'  joiner {i}: role {mine.get("role")} at epoch {mine.get("roleEpoch")}, recovery {mine.get("executionRecovery")}, '
-                     f'certified round {mine.get("lastUCRound")} (validator 1 {reference.get("lastUCRound")})')
-            return follower_ready(mine, reference, epoch, promoted)
+                     f'certified round {mine.get("lastUCRound")} (validator 1 {reference.get("lastUCRound")}), binding {refusal or "ok"}')
+            if refusal and promoted and expected.get('sigKey') is None:
+                expected.clear()   # the installed configuration may not be written yet: derive the expectation again on the next poll
+            return follower_ready(mine, reference, epoch, promoted, expected)
         what = 'active at epoch %d' % epoch if promoted else 'following epoch %d' % epoch
         self.wait(f'the joiner {i} is {what} and certified at the head ({how})', ready, 3600)
+
+    def binding_expectation(self, i, epoch, promoted, reference):
+        """What joiner i's health binding must say (binding_refusal): its EVM node id as registered, the activation body of `epoch` as the roots
+        record it, and after the election the signing key the installed shard configuration names for it (network/handoff/shard-conf-<N>.json
+        of the incumbent's installed shard epoch, as the drive fetched it from a root). A value that cannot be read stays None: the check fails."""
+        node_id = self.evm_node_id(i)
+        out = {'nodeId': node_id, 'bodyId': self.activation_body(epoch), 'sigKey': None}
+        if promoted:
+            shard_epoch = ((reference or {}).get('binding') or {}).get('shardEpoch')
+            conf = self.work / f'shard-conf-{shard_epoch}.json'
+            try:
+                named = [v for v in json.loads(conf.read_text())['validators'] if v.get('nodeId') == node_id]
+                out['sigKey'] = named[0].get('sigKey') if len(named) == 1 else None
+            except (OSError, ValueError, KeyError, TypeError):
+                pass
+        return out
+
+    def activation_body(self, epoch):
+        """The V3 body id of the activation of root epoch `epoch` as the roots record it (the drive's activation record, else root 1's
+        `q3-activation`), or None."""
+        path = self.evidence / f'epoch{epoch}' / f'activation-record-{epoch}.json'
+        try:
+            if path.is_file():
+                return json.loads(path.read_text()).get('v3BodyId')
+            self.exec_in('root1', 'ubft', 'root', 'handoff', 'q3-activation', '--root-rpc', self.root_rpc, '--epoch', str(epoch), '--out', '/tmp/drive-activation.json')
+            return json.loads(self.exec_in('root1', 'cat', '/tmp/drive-activation.json')).get('v3BodyId')
+        except (rehearse.Failure, OSError, ValueError):
+            return None
 
     def restore_remote(self, i, follow=True):
         """The explicit cold restore (--cold-restore only) of an entity on another machine: the pin (the latest certified record of the epoch, its technical
