@@ -64,6 +64,12 @@ def subnet(project):
     import hashlib
     return f'10.231.{16 + hashlib.sha256(project.encode()).digest()[0] % 224}.0/24'
 OPERATOR = ['--operator-socket', '/authority/operator.sock', '--operator-credential', '/authority/operator.cred']
+# The explicit cold restore (op_restore_start) empties ONLY the selected execution and bootstrap stores: the shard node's home (its keys and node-info
+# kept), its archive and the execution client's data. It never mounts the signing authority's volume (`auth`: the authority's anti-equivocation and
+# session history, the operator credential), the root's store, the wallet or the tunnel tools (astra, briefs/astra-q-1029-1043-answer.md Q2).
+COLD_RESTORE_VOLUMES = ('evm', 'archive', 'ureth')
+COLD_RESTORE_WIPE = ('find /evm -mindepth 1 -maxdepth 1 ! -name keys.json ! -name node-info.json -exec rm -rf {} + && '
+                     'find /archive -mindepth 1 -maxdepth 1 -exec rm -rf {} + && find /ureth -mindepth 1 -maxdepth 1 -exec rm -rf {} +')
 
 
 SEED = r'''
@@ -412,7 +418,9 @@ class Laptop:
     def op_install_root(self, epoch):
         """rehearse.pos_install for this root: stop, keep its store in the volume <project>_root-pre-epoch-N (once), recreate with the install flag.
         The copy is forensic only: nothing restores a root store from it (it holds the safety module's record of what the root key signed). An
-        install interrupted before the checkpoint's record prefix was retained completes on the root's next start (bft-core#1028)."""
+        install interrupted before the checkpoint's record prefix was retained completes on the root's next start only with bft-core#1046 (the
+        record fetcher installed before the Q3 recovery) in the pinned image; without it every restart fails in the recovery: the root stays down,
+        nothing is rolled back (fail closed)."""
         epoch, j = int(epoch), self.entity
         if self.root_epoch() == epoch:
             return {'already': True}
@@ -483,9 +491,7 @@ class Laptop:
             raise Failure('bad body id')
         j = self.entity
         self.dc('stop', f'shard{j}', f'ureth{j}')
-        wipe = ('find /evm -mindepth 1 -maxdepth 1 ! -name keys.json ! -name node-info.json -exec rm -rf {} + && '
-                'find /archive -mindepth 1 -maxdepth 1 -exec rm -rf {} + && find /ureth -mindepth 1 -maxdepth 1 -exec rm -rf {} +')
-        self.one(self.node_image, ['-c', wipe], [f'{self.vol("evm")}:/evm', f'{self.vol("archive")}:/archive', f'{self.vol("ureth")}:/ureth'], entrypoint='sh')
+        self.one(self.node_image, ['-c', COLD_RESTORE_WIPE], [f'{self.vol(v)}:/{v}' for v in COLD_RESTORE_VOLUMES], entrypoint='sh')
         seeded = None   # NOT seeded here: `shard-node restore` refuses an archive directory that is not empty (it fetches every record itself, from peers)
         self.dc('up', '-d', '--no-deps', f'ureth{j}')
         self.wait(f'the execution client {j} answers', lambda: self.ureth_head() is not None, 180)
@@ -833,7 +839,7 @@ def start(lap):
     say(json.dumps(lap.status(), sort_keys=True))
 
 
-def join(lap, dry_run=False, stop_after=None, allow_dirty=False, funder=None, action='join'):
+def join(lap, dry_run=False, stop_after=None, allow_dirty=False, funder=None, action='join', evidence_retained=None):
     """remote_entity.py join on the host, as a transient `systemd-run --user` unit (a dropped ssh session of this laptop must not kill a drive half way), its log
     followed here until it ends. Rerunning resumes: the host's state is in handoff/remote-joiners/<J>.json and the drive's journal."""
     s = lap.state
@@ -843,7 +849,8 @@ def join(lap, dry_run=False, stop_after=None, allow_dirty=False, funder=None, ac
     say(f'laptop checkout {HERE}: commit {version["commit"]}, dirty {version["dirty"]}, digest {version["digest"][:16]} (the host refuses a different deployed copy)')
     cmd = (f'sudo env PATH="$PATH:$(dirname {shlex.quote(s["hostCast"])})" python3 -u {s["hostDir"]}/testnet/remote_entity.py {action} {s["hostGeneration"]} '
            f'--entity {lap.entity} --ubft {s["hostUbft"]} --restore-pin {s["hostRestorePin"]} --cast {s["hostCast"]}' + (' --dry-run' if dry_run else '') + (f' --stop-after {stop_after}' if stop_after else '')
-           + f' --source-digest {version["digest"]}' + (' --allow-dirty' if allow_dirty else '') + (f' --funder {shlex.quote(funder)}' if funder else ''))
+           + f' --source-digest {version["digest"]}' + (' --allow-dirty' if allow_dirty else '') + (f' --funder {shlex.quote(funder)}' if funder else '')
+           + (f' --evidence-retained {shlex.quote(evidence_retained)}' if evidence_retained else ''))
     unit = f'laptop-{action}-{int(time.time())}'
     log = f'{s["hostDir"]}/{unit}.log'
     script = (f'systemd-run --user --quiet --collect --unit={unit} bash -c {shlex.quote(f"{cmd} > {log} 2>&1; echo EXIT=$? >> {log}")} && '
@@ -861,6 +868,8 @@ def main(argv=None):
     p.add_argument('--generation')
     p.add_argument('--mac-host', default='host.docker.internal', help='how a container of the docker VM reaches the Mac\'s loopback (colima: host.docker.internal)')
     p.add_argument('--dry-run', action='store_true')
+    p.add_argument('--evidence-retained', metavar='NOTE', help='retire: the recorded statement that the surviving providers hold the UTB/Q3 lineage, record cuts '
+                   'and logs through the handoff; only then is the retired validator stopped (otherwise it keeps running as a follower)')
     p.add_argument('--allow-dirty', action='store_true', help='init/join: deploy or run a dirty, uncommitted or mismatched copy of deploy/testnet on the host')
     p.add_argument('--stop-after', choices=('bonded',), help='join: stop after the bond')
     p.add_argument('--funder', help='join: a directory ON THE HOST with keystore.json and password, the operator account that pays the owner\'s 100 UCT bond and gas '
@@ -889,7 +898,7 @@ def main(argv=None):
         elif a.action == 'join':
             return join(lap, a.dry_run, a.stop_after, a.allow_dirty, a.funder)
         elif a.action == 'retire':   # requestRetirement (owner key, here), the handoff that leaves it out, the clean stop
-            return join(lap, allow_dirty=a.allow_dirty, action='retire', funder=a.funder)
+            return join(lap, allow_dirty=a.allow_dirty, action='retire', funder=a.funder, evidence_retained=a.evidence_retained)
         elif a.action == 'claim':   # mature (owner key) and claim (withdrawal key) after the retirement, once the holds pass
             return join(lap, allow_dirty=a.allow_dirty, action='claim', funder=a.funder)
         elif a.action == 'catch-up':   # the follower to the current epoch (root install restart, shard restore): no chain transaction, the timer keeps driving

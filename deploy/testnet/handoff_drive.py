@@ -852,10 +852,15 @@ class Drive(rehearse.Rehearsal):
         if remote is not None:
             if f'shard{i}' not in remote.running():
                 remote.authority_step('shard-start', self.target, 0)
-            health = lambda: remote.status().get('shardHealth')
         else:
             self.compose('start', f'shard{i}')
-            health = lambda: self.docker.shard_health(i)
+        self.wait_ready(i, epoch, promoted, 'no restore')
+
+    def wait_ready(self, i, epoch, promoted, how):
+        """Wait until joiner i's shard node itself reports follower_ready (its /api/v1/health against validator 1's): the one completion check of
+        the follower path and of the explicit cold restore alike; a timeout is a failure."""
+        remote = self.remote.get(i)
+        health = (lambda: remote.status().get('shardHealth')) if remote is not None else (lambda: self.docker.shard_health(i))
         def ready():
             mine, reference = health(), self.docker.shard_health(1)
             if not mine or not reference:
@@ -865,18 +870,16 @@ class Drive(rehearse.Rehearsal):
                      f'certified round {mine.get("lastUCRound")} (validator 1 {reference.get("lastUCRound")})')
             return follower_ready(mine, reference, epoch, promoted)
         what = 'active at epoch %d' % epoch if promoted else 'following epoch %d' % epoch
-        self.wait(f'the joiner {i} is {what} and certified at the head (no restore)', ready, 3600)
+        self.wait(f'the joiner {i} is {what} and certified at the head ({how})', ready, 3600)
 
     def restore_remote(self, i, follow=True):
-        """rehearse.restore_joiner for an entity on another machine: the pin (the latest certified record of the new epoch, its technical record, the trust
-        history's body id) is read HERE from a survivor's archive and shipped; the laptop empties its shard node's and execution client's state, restores, catches up."""
+        """The explicit cold restore (--cold-restore only) of an entity on another machine: the pin (the latest certified record of the epoch, its technical
+        record, the trust history's body id) is read HERE from a survivor's archive and shipped; the laptop empties ONLY its selected execution and
+        bootstrap stores (remote_joiner.COLD_RESTORE_VOLUMES: never the signing authority's anti-equivocation and session history), restores, and runs
+        the node again. It always starts over: no height or log shortcut decides that an earlier restore is done (astra, briefs/astra-q-1029-1043-answer.md
+        Q2). It ends with the same runtime readiness as the follower path (wait_ready: the node's own health; a close execution height is not
+        completion): following the current epoch before the election (follow False), active at the target after it."""
         self.expect(bool(self.restore_pin), 'the joiner\'s restore needs --restore-pin (scripts/h4-restore-pin of the pinned source)')
-        if follow:
-            status = self.remote[i].status()
-            head, chain = status.get('urethHead'), int(self.ureth(1, 'eth_blockNumber'), 16)
-            if not status.get('restoring') and status.get('services', {}).get(f'shard{i}') == 'running' and head and head + 5 >= chain:
-                self.say(f'  remote entity {i}: its shard node already runs at the head ({head} of {chain}): restored earlier')   # a resumed drive does not wipe it
-                return
         bodies = self.restore_body_ids()
         self.expect(bool(bodies), 'an activation record names the V3 body id the restore is anchored to')
         env = dict(os.environ, H4_RESTORE_BODY_IDS=bodies)
@@ -906,23 +909,13 @@ class Drive(rehearse.Rehearsal):
             seen.append(head)
             self.say(f'  remote entity {i}: execution client at {head} (replaying to the pin)')
             return head and len(seen) >= 5 and len(set(seen[-5:])) == 1
-        if not follow:
-            # before its Commit the node is no member: it gets no certificate and never follows the head. Its replay to the pin is all it can do, and enough:
-            # the pin's record is its verified history's tip (what its readiness needs)
-            self.wait(f'the laptop\'s execution client {i} replays to the pin', replayed, 7200)
-            return
-        # restore mode stops at the pin (it asks its archive for nothing later): once replayed, it runs as an ordinary node, which walks its seeded archive
-        # and follows the certificates it now receives as a member
+        # restore mode stops at the pin (it asks its archive for nothing later): that only ends restore mode, it is not completion. The node then runs
+        # as provisioned (the root-free follower), walks its seeded archive and follows the head, and is done only when it reports itself ready
         self.wait(f'the laptop\'s execution client {i} replays to the pin', replayed, 7200)
         self.remote[i].seed_archive()   # the records certified during the replay
         finished = self.remote[i].restore_finish()
-        self.expect(finished.get('running') is True, f'the laptop\'s shard node {i} runs as an ordinary node', str(finished)[:300])
-        def caught_up():
-            head = self.remote[i].status().get('urethHead')
-            target = int(self.ureth(1, 'eth_blockNumber'), 16)
-            self.say(f'  remote entity {i}: execution client at {head}, validator 1 at {target}')
-            return head is not None and head + 5 >= target
-        self.wait(f'the laptop\'s execution client {i} catches up with validator 1', caught_up, 3600)
+        self.expect(finished.get('running') is True, f'the laptop\'s shard node {i} runs again', str(finished)[:300])
+        self.wait_ready(i, self.target, follow, 'after a cold restore')
 
     def step_lockproof(self, mode):
         overlay = self.gen / BRIDGE_OVERRIDE
