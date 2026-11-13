@@ -319,6 +319,7 @@ type shardNodeRunFlags struct {
 	JournalBytes         int64
 	ArchiveStore         string
 	ArchiveReplicas      []string
+	ArchivePublicReads   bool     // serve archive reads to non-validators under a separate budget
 	FollowSources        []string // non-root bootstrap peers; set, roots are refused while this node is not active
 	ArchivePrune         bool
 	TrustHistoryProfile2 bool
@@ -442,6 +443,8 @@ protocol and docs/engine-api-adapter-plan.md for how this command's pieces fit t
 		"maximum retained hot journal bytes with --execution-journal; pruning requires --archive-prune")
 	cmd.Flags().StringVar(&flags.ArchiveStore, "archive-store", "",
 		"local certified archive directory; requires --execution-journal. Replicas are derived from the shard's validators (the next three after this node in peer-ID order, any two sufficing) unless exactly two --archive-replica peer IDs are given")
+	cmd.Flags().BoolVar(&flags.ArchivePublicReads, "archive-public-reads", false,
+		"serve archive reads (never writes) to peers that are not validators, such as root-free followers, under a separate bounded budget")
 	cmd.Flags().StringSliceVar(&flags.FollowSources, "follow-source", nil,
 		"libp2p multiaddress of a non-root peer (shard validator or archive replica) to bootstrap from while this node is not an active validator; with it set, root connections are refused until activation")
 	cmd.Flags().StringSliceVar(&flags.ArchiveReplicas, "archive-replica", nil,
@@ -988,6 +991,12 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 			// replica policy) keeps this service until the current replicas hold them; it gets no journal, evidence or consensus access.
 			archiveServer.SetPeerAuthorizer(func(id libp2ppeer.ID) bool { return activePeers.Allowed(id) || replicaPolicy.Holder(id) })
 			archiveServer.SetLogger(flags.observe.Logger())
+			if flags.ArchivePublicReads {
+				// non-active followers read (never write) under their own budget, apart from the validators' slots
+				if e := archiveServer.SetPublicReads(archivewiring.Limits{Deadline: archiveTransportLimits.Deadline, Pending: 4, PerPeer: 1}); e != nil {
+					return fmt.Errorf("archive public reads: %w", e)
+				}
+			}
 			archiveServer.Register(ctx, peer)
 		}
 		// refreshArchivePolicy re-derives the replicas from the installed assignment and switches the versioned policy when they changed.

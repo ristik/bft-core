@@ -569,3 +569,58 @@ func TestHandlerExitsAtItsDeadlineWhenThePeerStopsReading(t *testing.T) {
 		t.Fatalf("reservations leaked after the handler exited: pending=%d byPeer=%v", s.pending, s.byPeer)
 	}
 }
+
+// A non-active follower reads the archive without being a validator: with public reads on, an unauthorized peer is served reads under
+// their own budget, is refused every write by name, and never takes the validators' slots.
+func TestPublicReadsServeFollowersAndRefuseTheirWrites(t *testing.T) {
+	t.Parallel()
+	q, rec := transportFixture()
+	follower := testpeer.CreatePeer(t, testpeer.CreatePeerConfiguration(t))
+	remote := testpeer.CreatePeer(t, testpeer.CreatePeerConfiguration(t))
+	follower.Network().Peerstore().AddAddrs(remote.ID(), remote.MultiAddresses(), peerstore.PermanentAddrTTL)
+	store, err := archive.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Put(q, rec); err != nil {
+		t.Fatal(err)
+	}
+	server, err := NewServer(store, q.Context, func(context.Context, archive.Request, *archive.Record) error { return nil }, []peer.ID{"validator"}, DefaultLimits())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := server.SetPublicReads(Limits{Deadline: 5 * time.Second, Pending: 2, PerPeer: 1}); err != nil {
+		t.Fatal(err)
+	}
+	server.Register(context.Background(), remote)
+
+	got, err := Fetch(context.Background(), follower, remote.ID(), q, DefaultLimits())
+	if err != nil || !equalRecord(q, rec, got) {
+		t.Fatalf("a follower reads a record: %v", err)
+	}
+	if _, _, err := FetchLatest(context.Background(), follower, remote.ID(), archive.RoundRequest{Context: q.Context, Round: ^uint64(0)}, DefaultLimits()); errors.Is(err, ErrPeerNotAllowed) {
+		t.Fatalf("a follower may ask for the archive head: %v", err)
+	}
+	if _, err := FetchBundle(context.Background(), follower, remote.ID(), archive.BundleRequest{Context: q.Context, Epoch: 2}, DefaultLimits()); errors.Is(err, ErrPeerNotAllowed) {
+		t.Fatalf("a follower may read activation bundles: %v", err)
+	}
+	if err := PutAndReadBack(context.Background(), follower, remote.ID(), q, rec, DefaultLimits()); !errors.Is(err, ErrPeerNotAllowed) {
+		t.Fatalf("a follower's write must be refused by name, got %v", err)
+	}
+
+	if err := server.reservePublic("f1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := server.reservePublic("f1"); !errors.Is(err, ErrPeerLimit) {
+		t.Fatalf("one follower's share: %v", err)
+	}
+	if err := server.reservePublic("f2"); err != nil {
+		t.Fatal(err)
+	}
+	if err := server.reservePublic("f3"); !errors.Is(err, ErrPendingLimit) {
+		t.Fatalf("the public budget: %v", err)
+	}
+	if err := server.reservePending("validator"); err != nil {
+		t.Fatalf("followers never take the validators' slots: %v", err)
+	}
+}

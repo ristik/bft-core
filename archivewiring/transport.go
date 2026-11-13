@@ -76,6 +76,84 @@ type Server struct {
 	// defaultDigest names the representation of a block the default read (op 2) serves when this node adopted another valid representation of it (bft-core#876); the block's
 	// own record otherwise.
 	defaultDigest func(archive.Request) ([32]byte, bool)
+	// public, when set, admits read-only operations from peers this node does not authorize (non-active followers), under their own
+	// budget: they never use the validators' slots and never write.
+	public        *Limits
+	publicPending int
+	publicByPeer  map[peer.ID]int
+}
+
+// SetPublicReads admits reads (get, get-exact, get-latest, bundle-get) from any peer, bounded by limits.Pending concurrent public
+// streams and limits.PerPeer per peer, separate from the authorized validators' budget. Writes stay authorized-only. Call before Register.
+func (s *Server) SetPublicReads(limits Limits) error {
+	if !limits.valid() {
+		return archive.ErrInvalid
+	}
+	s.public, s.publicByPeer = &limits, map[peer.ID]int{}
+	return nil
+}
+
+func (s *Server) authorized(id peer.ID) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.authorize != nil {
+		return s.authorize(id)
+	}
+	_, ok := s.allowed[id]
+	return ok
+}
+
+// readOperation reports whether op only reads the store.
+func readOperation(op byte) bool { return op == 2 || op == 3 || op == 4 || op == 6 }
+
+func (s *Server) reservePublic(id peer.ID) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.publicPending >= s.public.Pending {
+		return ErrPendingLimit
+	}
+	if s.publicByPeer[id] >= s.public.PerPeer {
+		return ErrPeerLimit
+	}
+	s.publicPending++
+	s.publicByPeer[id]++
+	return nil
+}
+
+func (s *Server) leavePublic(id peer.ID) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.publicPending--
+	if s.publicByPeer[id]--; s.publicByPeer[id] <= 0 {
+		delete(s.publicByPeer, id)
+	}
+}
+
+// handlePublic serves one read of a peer this node does not authorize.
+func (s *Server) handlePublic(stream libp2pnetwork.Stream, id peer.ID) {
+	if err := s.reservePublic(id); err != nil {
+		s.rejectNamed(stream, id, err)
+		return
+	}
+	defer s.leavePublic(id)
+	ctx, cancel := context.WithTimeout(s.ctx, s.public.Deadline)
+	defer cancel()
+	frame, err := readFrame(stream, archive.MaxRequestBytes+64)
+	if err != nil || len(frame) == 0 {
+		if err == nil {
+			err = archive.ErrInvalid
+		}
+		s.reject(stream, id, "unknown", fmt.Errorf("%w: %w", ErrHandler, err), false)
+		return
+	}
+	operation := archiveOperation(frame[0])
+	if !readOperation(frame[0]) {
+		s.reject(stream, id, operation, ErrPeerNotAllowed, true)
+		return
+	}
+	if err := s.serveFrame(ctx, stream, frame); err != nil {
+		s.reject(stream, id, operation, typedHandlerError(err), true)
+	}
 }
 
 // SetDefaultRepresentation routes the default read through the journal's archive selection. Call before Register.
@@ -168,6 +246,10 @@ func (s *Server) handle(stream libp2pnetwork.Stream) {
 	defer stream.Close()
 	id := stream.Conn().RemotePeer()
 	_ = stream.SetDeadline(time.Now().Add(s.limits.Deadline))
+	if s.public != nil && !s.authorized(id) {
+		s.handlePublic(stream, id)
+		return
+	}
 	if err := s.reservePending(id); err != nil {
 		if errors.Is(err, ErrPeerNotAllowed) {
 			// A peer this node does not (yet) authorize is told so, by name, without reading its request: a joiner that reached
