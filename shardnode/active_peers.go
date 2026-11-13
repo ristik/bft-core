@@ -34,6 +34,9 @@ type ActivePeers struct {
 	// is only the genesis one, which may still name a validator that a later step retired. A held set authorizes nobody (a peer refused
 	// in that window retries; see archivewiring.ErrPeerNotAllowed) rather than authorizing a stale set.
 	held bool
+	// member is whether this node itself is a validator of the installed set (the set never contains it). A node that is not a member is
+	// a non-active party: it takes evidence from blocks and mirrors, never from roots.
+	member bool
 }
 
 // NewActivePeers starts with the genesis validators as the shard epoch 0 set.
@@ -43,7 +46,7 @@ func NewActivePeers(self peer.ID, genesis []*types.NodeInfo) (*ActivePeers, erro
 	if err != nil {
 		return nil, err
 	}
-	a.set = set
+	a.set, a.member = set, names(self, genesis)
 	return a, nil
 }
 
@@ -83,8 +86,29 @@ func (a *ActivePeers) Install(epoch uint64, validators []*types.NodeInfo) error 
 		}
 		return nil
 	}
-	a.epoch, a.set, a.staged = epoch, set, nil
+	a.epoch, a.set, a.staged, a.member = epoch, set, nil, names(a.self, validators)
 	return nil
+}
+
+// names reports whether the validators include self.
+func names(self peer.ID, validators []*types.NodeInfo) bool {
+	for _, v := range validators {
+		if v == nil {
+			continue
+		}
+		if id, err := peer.Decode(v.NodeID); err == nil && id == self {
+			return true
+		}
+	}
+	return false
+}
+
+// Member reports whether this node is a validator of the installed (active) assignment. It is a role fact for source selection only:
+// whether the node may sign is decided by its signing gates and authority, never by this.
+func (a *ActivePeers) Member() bool {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.member
 }
 
 func sameSet(a, b map[peer.ID]struct{}) bool {
