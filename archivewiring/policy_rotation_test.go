@@ -19,25 +19,33 @@ import (
 	"github.com/unicitynetwork/bft-core/frontier"
 	testpeer "github.com/unicitynetwork/bft-core/internal/testutils/peer"
 	"github.com/unicitynetwork/bft-core/network"
+	"github.com/unicitynetwork/bft-go-base/types"
 )
 
+// The tests of this file are not parallel: each runs several libp2p hosts and independent journals, and in parallel they starve the
+// time-bounded catch-up tests of this package. Sequential tests run before the parallel ones.
+
 // rotationNet is a writer with a local archive, a publisher and a frontier worker following a versioned replica policy, and n archive
-// replicas (bft-core#1030). A replica accepts a publication only while accept[i] is set (a lagging replica, or a replacement that cannot
-// yet vouch for the record, refuses) and only above floor[i] (a replacement restored at that height has no association below it). A
-// stopped replica neither answers nor accepts.
+// replicas (bft-core#1030). Each replica is an independent validator: its own journal of the same certified chain, its own archive, and
+// the production verifier chain (its journal and coverage, then the verified historical import over its own archive). A replica accepts
+// a publication only while accept[i] is set (a lagging replica refuses), and its journal knows no block at or below floor[i] (a
+// replacement restored at that height has no association below it; its restored history is whatever its archive holds). A stopped
+// replica neither answers nor accepts.
 type rotationNet struct {
-	f       *wiringFixture
-	sender  *network.Peer
-	remotes []*network.Peer
-	peers   []peer.ID
-	stores  []*archive.Store
-	accept  []*atomic.Bool
-	floor   []*atomic.Uint64
-	journal atomic.Pointer[configuredprogress.Store]
-	local   *archive.Store
-	policy  *ReplicaPolicy
-	worker  *FrontierWorker
-	stopPub func()
+	f        *wiringFixture
+	sender   *network.Peer
+	remotes  []*network.Peer
+	peers    []peer.ID
+	stores   []*archive.Store
+	journals []*wiringFixture
+	accept   []*atomic.Bool
+	bundles  []*atomic.Bool // the replica accepts activation bundles
+	floor    []*atomic.Uint64
+	journal  atomic.Pointer[configuredprogress.Store]
+	local    *archive.Store
+	policy   *ReplicaPolicy
+	worker   *FrontierWorker
+	stopPub  func()
 }
 
 func newRotationNet(t *testing.T, blocks, n int, holds []bool) *rotationNet {
@@ -53,20 +61,36 @@ func newRotationNet(t *testing.T, blocks, n int, holds []bool) *rotationNet {
 		x.remotes, x.peers = append(x.remotes, remote), append(x.peers, remote.ID())
 		store, err := archive.Open(t.TempDir())
 		require.NoError(t, err)
-		x.stores = append(x.stores, store)
-		accept, floor := &atomic.Bool{}, &atomic.Uint64{}
+		own := newWiringFixtureOpts(t, wiringOpts{blocks: blocks, limits: f.limits, chain: f.chain})
+		x.stores, x.journals = append(x.stores, store), append(x.journals, own)
+		accept, bundles, floor := &atomic.Bool{}, &atomic.Bool{}, &atomic.Uint64{}
 		accept.Store(true)
-		x.accept, x.floor = append(x.accept, accept), append(x.floor, floor)
-		verify := func(ctx context.Context, q archive.Request, rec *archive.Record) error {
+		bundles.Store(true)
+		x.accept, x.bundles, x.floor = append(x.accept, accept), append(x.bundles, bundles), append(x.floor, floor)
+		journal := JournalVerifier(own.store, own.context, own.limits, own.subject)
+		history := HistoryVerifier(store, CertifiedBinding{Context: own.context, Subject: own.subject})
+		verify := ChainVerifiers(func(ctx context.Context, q archive.Request, rec *archive.Record) error {
 			var header gethtypes.Header
-			if !accept.Load() || rlp.DecodeBytes(rec.Header, &header) != nil || header.Number.Uint64() <= floor.Load() {
-				return fmt.Errorf("%w: this replica has no association for the block", ErrUncertified)
+			if rlp.DecodeBytes(rec.Header, &header) != nil || header.Number.Uint64() <= floor.Load() {
+				return fmt.Errorf("%w: below this replica's restore base", ErrUncertified)
 			}
-			return JournalVerifier(x.journal.Load(), f.context, f.limits, f.subject)(ctx, q, rec)
+			return journal(ctx, q, rec)
+		}, history)
+		lagging := func(ctx context.Context, q archive.Request, rec *archive.Record) error {
+			if !accept.Load() {
+				return fmt.Errorf("%w: this replica lags", ErrUncertified)
+			}
+			return verify(ctx, q, rec)
 		}
 		x.sender.Network().Peerstore().AddAddrs(remote.ID(), remote.MultiAddresses(), peerstore.PermanentAddrTTL)
-		server, err := NewServer(store, f.subject, verify, []peer.ID{x.sender.ID()}, DefaultLimits())
+		server, err := NewServer(store, f.subject, lagging, []peer.ID{x.sender.ID()}, DefaultLimits())
 		require.NoError(t, err)
+		server.SetBundleVerifier(func(context.Context, archive.BundleRequest, []byte) error {
+			if !bundles.Load() {
+				return errors.New("this replica does not take bundles now")
+			}
+			return nil
+		})
 		server.Register(context.Background(), remote)
 	}
 	for i := range f.entries {
@@ -104,7 +128,7 @@ func (x *rotationNet) start(t *testing.T, members []int, tag string) {
 	var err error
 	x.policy, err = NewReplicaPolicy(x.ids(members), digest, encoded, 0)
 	require.NoError(t, err)
-	_, err = EnableDerivedFrontier(context.Background(), x.journal.Load(), x.f.context, x.f.limits, x.f.subject, x.sender, DefaultLimits(), x.policy)
+	_, err = EnableDerivedFrontier(context.Background(), x.journal.Load(), x.f.context, x.f.limits, x.f.subject, x.sender, DefaultLimits(), x.policy, x.policy.Snapshot())
 	require.NoError(t, err)
 	x.newWorker()
 }
@@ -185,7 +209,6 @@ func names2(r *frontier.Record) []string { return []string{r.Acks[0].Replica, r.
 // policy to the installed assignment's replicas: the replacement receives the pending blocks and the promised history, the frontier
 // moves on with two copies (never one), and the retired replica stops being a holder.
 func TestRetirementWithAnotherReplicaUnavailableSwitchesWithoutStall(t *testing.T) {
-	t.Parallel()
 	x := newRotationNet(t, 7, 4, []bool{true, true, true, false})
 	x.start(t, []int{0, 1, 2}, "p0")
 	require.NoError(t, x.worker.Pass(context.Background()))
@@ -219,7 +242,6 @@ func TestRetirementWithAnotherReplicaUnavailableSwitchesWithoutStall(t *testing.
 // being covered by fewer, and the retired machine is reported as still needed. Once the replacement catches up, the frontier moves to
 // the head, the history is migrated to it, and the retired replica is released and may be powered off.
 func TestRetainedHolderCoversThePromiseUntilTheReplacementCatchesUp(t *testing.T) {
-	t.Parallel()
 	x := newRotationNet(t, 7, 4, []bool{true, true, true, false})
 	x.start(t, []int{0, 1, 2}, "p0")
 	require.NoError(t, x.worker.Pass(context.Background()))
@@ -252,11 +274,10 @@ func TestRetainedHolderCoversThePromiseUntilTheReplacementCatchesUp(t *testing.T
 	require.NoError(t, x.worker.Pass(context.Background()), "the promise no longer depends on the retired replica")
 }
 
-// A replacement restored above some promised heights cannot accept their records (no association below its restore base), while it
-// takes every new block: the frontier moves on at once, and the history stays with the retained holder until another current replica
-// holds it.
-func TestReplacementBelowItsRestoreBaseKeepsTheRetainedHolder(t *testing.T) {
-	t.Parallel()
+// A replacement whose journal knows nothing at or below height 4 (restored there) and whose archive does not hold those blocks either
+// (nothing to import from) cannot take the history, while it takes every new block: the frontier moves on at once, and the history
+// stays with the retained holder until another current replica holds it. (A real restore holds them: see the verified import test.)
+func TestReplacementWithoutTheHistoryKeepsTheRetainedHolder(t *testing.T) {
 	x := newRotationNet(t, 7, 4, []bool{true, true, false, false})
 	x.start(t, []int{0, 1}, "p0") // a three-validator shard: a two-of-two policy
 	require.NoError(t, x.worker.Pass(context.Background()))
@@ -284,7 +305,6 @@ func TestReplacementBelowItsRestoreBaseKeepsTheRetainedHolder(t *testing.T) {
 // A join that adds a replica: a two-of-two policy (any outage stops pruning) becomes two of three. Nothing earlier is retained, so the
 // switch is complete at once, the new replica receives everything, and from then on one stopped replica no longer stops the frontier.
 func TestJoinAddsAReplica(t *testing.T) {
-	t.Parallel()
 	x := newRotationNet(t, 7, 3, []bool{true, true, false})
 	x.start(t, []int{0, 1}, "p0")
 	require.NoError(t, x.worker.Pass(context.Background()))
@@ -305,7 +325,6 @@ func TestJoinAddsAReplica(t *testing.T) {
 // the lineage existed). The lineage is read from the coverage, both old acknowledgers are retained holders, and the migration moves the
 // promise to the new replicas before releasing them.
 func TestRestartWithOldPolicyRecordsAndZeroOverlap(t *testing.T) {
-	t.Parallel()
 	ctx := context.Background()
 	x := newRotationNet(t, 7, 5, []bool{true, true, false, false, false})
 	old := x.ids([]int{0, 1})
@@ -342,7 +361,6 @@ func TestRestartWithOldPolicyRecordsAndZeroOverlap(t *testing.T) {
 // resumes where its durable record says: the restart keeps the persisted policy and its switch height instead of re-deriving a new digest
 // and starting over, retained holders stay retained throughout, and the migration completes once the replacement catches up.
 func TestCrashInterruptedMigrationResumes(t *testing.T) {
-	t.Parallel()
 	ctx := context.Background()
 	x := newRotationNet(t, 7, 4, []bool{true, true, false, false})
 	x.start(t, []int{0, 1, 2}, "p0")
@@ -393,7 +411,7 @@ func TestCrashInterruptedMigrationResumes(t *testing.T) {
 	switched, err := x.policy.Switch(x.ids([]int{0, 2, 3}), sha256.Sum256([]byte("p1 at a later epoch")), []byte("p1 at a later epoch"), 3)
 	require.NoError(t, err)
 	require.False(t, switched, "the same replicas keep the persisted policy and its digest")
-	_, err = EnableDerivedFrontier(ctx, reopened, x.f.context, x.f.limits, x.f.subject, x.sender, DefaultLimits(), x.policy)
+	_, err = EnableDerivedFrontier(ctx, reopened, x.f.context, x.f.limits, x.f.subject, x.sender, DefaultLimits(), x.policy, x.policy.Snapshot())
 	require.NoError(t, err)
 	require.Equal(t, persisted, x.migration(t), "a restart does not restart the migration")
 	require.True(t, x.policy.Holder(x.peers[1]))
@@ -435,4 +453,180 @@ func TestReplicaPolicySwitchAndAdopt(t *testing.T) {
 	require.False(t, p.Holder(b))
 	_, err = p.Switch([]peer.ID{a}, [32]byte{4}, []byte{4}, 3)
 	require.ErrorIs(t, err, ErrConfig)
+}
+
+// The incident shape with a restored replacement (astra review of #1034): of the old replicas A/B/C, C retires and is gone and B is
+// unavailable; the replacement D was restored at height 4, so its journal has no association for heights 1-4, and its archive holds
+// them as its restore authenticated them, in another valid representation than the writer promised. The verified historical import
+// takes the writer's exact representation next to D's own: the history reaches two current copies (A and D), the frontier reaches the
+// head, and C is released, with B still down.
+func TestRestoredReplacementTakesTheHistoryByVerifiedImport(t *testing.T) {
+	var err error
+	x := newRotationNet(t, 7, 4, []bool{true, true, true, false})
+	x.start(t, []int{0, 1, 2}, "p0")
+	require.NoError(t, x.worker.Pass(context.Background()))
+	require.Equal(t, uint64(4), x.frontier(t).Anchor.Height)
+
+	// D's restored history: heights 1-4 as another validator first associated them (a repeat certificate at a later root round)
+	for i, e := range x.f.entries {
+		if e.Candidate.Number <= 4 {
+			q, rec := x.f.record(t, i)
+			variant := *rec
+			var uc types.UnicityCertificate
+			require.NoError(t, types.Cbor.Unmarshal(rec.ResultingUC, &uc))
+			repeat, repeatTR := signWiring(t, x.f.chain, uc.InputRecord, e.Candidate.Number+1, uc.GetRootRoundNumber()+50)
+			variant.ResultingUC, err = types.Cbor.Marshal(repeat)
+			require.NoError(t, err)
+			variant.ResultingTR, err = types.Cbor.Marshal(repeatTR)
+			require.NoError(t, err)
+			require.NoError(t, CertifiedBinding{Context: x.f.context, Subject: x.f.subject}.VerifyCertified(mustCertified(t, q, &variant), &variant), "a valid representation")
+			d, _ := archive.ManifestDigest(q, &variant)
+			wd, _ := archive.ManifestDigest(q, rec)
+			require.NotEqual(t, wd, d, "another representation than the writer's")
+			require.NoError(t, x.stores[3].Put(q, &variant))
+		}
+	}
+	x.floor[3].Store(4)
+	x.stop(t, 2) // C retired and gone
+	x.stop(t, 1) // B unavailable
+	x.switchTo(t, []int{0, 1, 3}, "p1", 2)
+	x.publish(t)
+	x.passUntil(t, "the frontier reaches the head", x.anchoredAt(t, 7))
+	x.passUntil(t, "the history is imported by the replacement and C released", x.complete(t))
+	for i, e := range x.f.entries {
+		if e.Candidate.Number <= 4 {
+			q, rec := x.f.record(t, i)
+			d, _ := archive.ManifestDigest(q, rec)
+			_, err := x.stores[3].GetExact(q, d)
+			require.NoError(t, err, "height %d: the writer's exact representation", e.Candidate.Number)
+		}
+	}
+	require.False(t, x.policy.Holder(x.peers[2]))
+}
+
+// The import never takes a block the replica does not already hold authenticated, nor a record that differs from the held block, nor
+// certificates that do not certify it.
+func TestHistoryVerifierRefusesUnknownOrDifferentBlocks(t *testing.T) {
+	f := newWiringFixture(t, 3)
+	store, err := archive.Open(t.TempDir())
+	require.NoError(t, err)
+	verify := HistoryVerifier(store, CertifiedBinding{Context: f.context, Subject: f.subject})
+	q, rec := f.record(t, 1)
+	require.ErrorIs(t, verify(context.Background(), q, rec), ErrUncertified, "an unknown block")
+	require.NoError(t, store.Put(q, rec))
+	require.NoError(t, verify(context.Background(), q, rec))
+	changed := *rec
+	changed.Body = append([]byte(nil), rec.Body...)
+	changed.Body[len(changed.Body)-1] ^= 1
+	require.ErrorIs(t, verify(context.Background(), q, &changed), ErrBinding, "another body")
+	_, wrong := f.record(t, 2)
+	forged := *rec
+	forged.ResultingUC, forged.ResultingTR = wrong.ResultingUC, wrong.ResultingTR
+	require.ErrorIs(t, verify(context.Background(), q, &forged), ErrBinding, "certificates of another block")
+}
+
+// Activation between the worker's policy snapshot and its adoption (astra review of #1034, finding 1): the worker adopts the snapshot it
+// took, whole, and the next pass adopts the newer policy. The newer policy's migration is never completed by a verification on the
+// older policy's replicas: its replicas D and E hold nothing, so its earlier replicas stay retained.
+func TestActivationBetweenSnapshotAndAdoptionNeverMixesPolicies(t *testing.T) {
+	x := newRotationNet(t, 7, 5, []bool{true, true, true, false, false})
+	x.start(t, []int{0, 1, 2}, "p0")
+	require.NoError(t, x.worker.Pass(context.Background()))
+	x.accept[3].Store(false)
+	x.accept[4].Store(false)
+	x.switchTo(t, []int{0, 1, 3}, "p1", 2)
+	var once atomic.Bool
+	x.worker.beforeAdopt = func() {
+		if once.CompareAndSwap(false, true) {
+			x.switchTo(t, []int{0, 3, 4}, "p2", 3)
+		}
+	}
+	for i := 0; i < 6; i++ {
+		_ = x.worker.Pass(context.Background())
+	}
+	m := x.migration(t)
+	require.Equal(t, sha256.Sum256([]byte("p2")), m.Digest)
+	require.Equal(t, names(x.ids([]int{0, 3, 4})), m.Replicas)
+	require.False(t, m.Complete(), "only A of {A, D, E} holds the history")
+	require.Contains(t, m.Retained, x.peers[1].String())
+	require.Equal(t, x.policy.Snapshot().Digest, x.worker.PolicyDigest)
+	require.True(t, x.policy.Holder(x.peers[1]))
+}
+
+// A catch-up's Advance can perform the first adoption (or a switch); its context is canceled when the recovery returns (astra review of
+// #1034, finding 2). The availability checker installed then must not keep that cancellation: the next passes advance the frontier.
+func TestCanceledCatchUpContextDoesNotStallTheFrontier(t *testing.T) {
+	x := newRotationNet(t, 7, 3, []bool{true, true, true})
+	x.start(t, []int{0, 1, 2}, "p0")
+	x.newWorker() // not yet synchronized: the catch-up's Advance adopts
+	recovery, cancel := context.WithCancel(context.Background())
+	require.NoError(t, x.worker.Advance(recovery, 4))
+	require.Equal(t, uint64(4), x.frontier(t).Anchor.Height)
+	cancel()
+	x.passUntil(t, "the frontier reaches the head after the recovery's context is canceled", x.anchoredAt(t, 7))
+	// and once more through a switch adopted inside a canceled-later Advance
+	x.switchTo(t, []int{0, 2, 1}, "p1", 2)
+	recovery, cancel = context.WithCancel(context.Background())
+	_ = x.worker.Advance(recovery, 4)
+	cancel()
+	require.NoError(t, x.worker.Pass(context.Background()))
+}
+
+// A migration is complete only when every retained activation bundle also has two current, read-verified remote copies (astra review of
+// #1034, finding 4): the block history alone does not release the earlier replica.
+func TestMigrationWaitsForActivationBundles(t *testing.T) {
+	x := newRotationNet(t, 7, 4, []bool{true, true, true, true})
+	q := archive.BundleRequest{Context: x.f.subject, Epoch: 2}
+	raw := []byte("an activation bundle")
+	for _, s := range []*archive.Store{x.local, x.stores[0], x.stores[1]} {
+		_, err := s.PutBundle(q, raw, nil)
+		require.NoError(t, err)
+	}
+	x.start(t, []int{0, 1, 2}, "p0")
+	require.NoError(t, x.worker.Pass(context.Background()))
+	x.bundles[2].Store(false)
+	x.bundles[3].Store(false)
+	x.switchTo(t, []int{0, 2, 3}, "p1", 2)
+	for i := 0; i < 4; i++ {
+		_ = x.worker.Pass(context.Background())
+	}
+	m := x.migration(t)
+	require.Zero(t, m.Backlog(), "every block position is verified on the current replicas")
+	require.False(t, m.Complete(), "one current replica holds the bundle")
+	require.True(t, x.policy.Holder(x.peers[1]))
+	x.bundles[3].Store(true)
+	x.passUntil(t, "the bundle reaches a second current replica", x.complete(t))
+	got, err := FetchBundle(context.Background(), x.sender, x.peers[3], q, DefaultLimits())
+	require.NoError(t, err)
+	require.Equal(t, raw, got)
+}
+
+// Reading is not the durability policy: a restore may read from the policy's replicas and its retained holders (astra review of #1034,
+// finding 5), and a node without pruning grants no retained holder archive access (finding 6).
+func TestRestoreSourcesAndUntrackedPolicy(t *testing.T) {
+	a, b, c, d, e := peer.ID("a"), peer.ID("b"), peer.ID("c"), peer.ID("d"), peer.ID("e")
+	require.True(t, validSources([]peer.ID{a, b, c, d}))
+	require.False(t, validSources([]peer.ID{a, a}))
+	require.False(t, validSources([]peer.ID{a}))
+	p, err := NewReplicaPolicy([]peer.ID{a, b, c}, [32]byte{1}, []byte{1}, 0)
+	require.NoError(t, err)
+	_, err = p.Switch([]peer.ID{a, d, e}, [32]byte{2}, []byte{2}, 1)
+	require.NoError(t, err)
+	require.Len(t, p.Snapshot().Readable(), 5)
+	require.True(t, validSources(p.Snapshot().Readable()))
+	untracked, err := NewReplicaPolicy([]peer.ID{a, b, c}, [32]byte{1}, []byte{1}, 0)
+	require.NoError(t, err)
+	untracked.Untracked()
+	switched, err := untracked.Switch([]peer.ID{a, d, e}, [32]byte{2}, []byte{2}, 1)
+	require.NoError(t, err)
+	require.True(t, switched)
+	require.Empty(t, untracked.Snapshot().Retained)
+	require.False(t, untracked.Holder(b))
+}
+
+func mustCertified(t *testing.T, q archive.Request, rec *archive.Record) frontier.Record {
+	t.Helper()
+	r, err := certifiedRecordOf(q, rec)
+	require.NoError(t, err)
+	return r
 }

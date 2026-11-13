@@ -39,6 +39,20 @@ func (a ackSet) count() int {
 	return n
 }
 
+// validSources reports whether r is a usable list of archive sources to read from: two or more distinct, non-empty peer IDs (bounded).
+// Reading is not the durability policy: a policy's replicas plus the retained holders of earlier policies may be more than three.
+func validSources(r []peer.ID) bool {
+	if len(r) < replicaCopies || len(r) > 16 {
+		return false
+	}
+	for i, id := range r {
+		if id == "" || slices.Contains(r[:i], id) {
+			return false
+		}
+	}
+	return true
+}
+
 // validReplicas reports whether r is a usable replica list: two or three distinct, non-empty peer IDs.
 func validReplicas(r []peer.ID) bool {
 	if len(r) < replicaCopies || len(r) > 3 {

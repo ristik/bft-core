@@ -19,9 +19,12 @@ import (
 // towards K for promised positions; it is never published to and never acknowledges a new one, and it may use this node's archive
 // service (not its journal, evidence or consensus services) until it is released.
 type ReplicaPolicy struct {
-	mu      sync.Mutex
-	snap    ReplicaPolicySnapshot
-	changed chan struct{}
+	// untracked: nobody owns storage obligations (no pruning, so no frontier worker to verify and release them). A switch then retains
+	// no holder, so no retired peer gains archive access that nothing would ever release.
+	untracked bool
+	mu        sync.Mutex
+	snap      ReplicaPolicySnapshot
+	changed   chan struct{}
 }
 
 // ReplicaPolicySnapshot is one version of the policy.
@@ -65,6 +68,9 @@ func NewReplicaPolicy(replicas []peer.ID, digest [32]byte, encoded []byte, epoch
 		changed: make(chan struct{})}, nil
 }
 
+// Untracked makes switches retain no holders: for a node without pruning, whose archive promises nothing that a holder would keep.
+func (p *ReplicaPolicy) Untracked() { p.mu.Lock(); p.untracked = true; p.mu.Unlock() }
+
 // Snapshot returns the current version.
 func (p *ReplicaPolicy) Snapshot() ReplicaPolicySnapshot {
 	p.mu.Lock()
@@ -99,7 +105,7 @@ func (p *ReplicaPolicy) Switch(replicas []peer.ID, digest [32]byte, encoded []by
 	}
 	// Until the worker adopts the switch, every earlier replica still counts as a holder: nothing is released by the switch itself.
 	retained := p.snap.Readable()
-	retained = slices.DeleteFunc(retained, func(id peer.ID) bool { return slices.Contains(replicas, id) })
+	retained = slices.DeleteFunc(retained, func(id peer.ID) bool { return p.untracked || slices.Contains(replicas, id) })
 	p.snap = ReplicaPolicySnapshot{Version: p.snap.Version, Replicas: slices.Clone(replicas), Digest: digest, Encoded: slices.Clone(encoded), Epoch: epoch, Retained: retained}
 	p.bump()
 	return true, nil

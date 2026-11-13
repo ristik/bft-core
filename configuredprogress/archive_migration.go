@@ -42,17 +42,18 @@ type ArchiveMigration struct {
 	Digest   [32]byte //
 	Replicas []string // the policy's replicas, canonical order
 	Lineage  []string // replicas of earlier policies named by durable coverage: accepted as historical acknowledgers, never as new ones
-	Retained []string // earlier replicas still counted as holders of the positions in (Through, Since]; empty once complete
+	Retained []string // earlier replicas still counted as holders of what this writer promised; empty once complete
 	Since    uint64   // the frontier height when the policy was adopted: every later coverage record is acknowledged under it
 	Through  uint64   // every promised position at or below this height has two verified copies on Replicas (or is below the coverage base)
 }
 
-// Complete reports whether every position promised before the switch is verified on the current replicas.
-func (m ArchiveMigration) Complete() bool { return m.Through >= m.Since }
+// Complete reports whether no earlier replica is still a holder: every block position promised before the switch, and every retained
+// activation bundle, was verified on two current replicas (or nothing earlier was retained at all).
+func (m ArchiveMigration) Complete() bool { return len(m.Retained) == 0 }
 
-// Backlog is the number of promised positions still to verify on the current replicas.
+// Backlog is the number of promised block positions still to verify on the current replicas.
 func (m ArchiveMigration) Backlog() uint64 {
-	if m.Complete() {
+	if m.Complete() || m.Through >= m.Since {
 		return 0
 	}
 	return m.Since - m.Through
@@ -90,7 +91,7 @@ func readArchiveMigration(b *bolt.Bucket, dd [32]byte) (ArchiveMigration, bool, 
 		return ArchiveMigration{}, false, err
 	}
 	if w.Version != journalVersion || !bytes.Equal(w.Descriptor, dd[:]) || len(w.Policy) == 0 || len(w.Replicas) < 2 || len(w.Replicas) > 3 ||
-		!namesValid(w.Replicas) || !namesValid(w.Lineage) || !namesValid(w.Retained) || w.Through >= w.Since && len(w.Retained) != 0 {
+		!namesValid(w.Replicas) || !namesValid(w.Lineage) || !namesValid(w.Retained) || w.Through > w.Since {
 		return ArchiveMigration{}, false, fmt.Errorf("%w: archive policy migration record", ErrContext)
 	}
 	m := ArchiveMigration{Policy: w.Policy, Digest: sha256.Sum256(w.Policy), Replicas: w.Replicas, Lineage: w.Lineage, Retained: w.Retained, Since: w.Since, Through: w.Through}
@@ -230,6 +231,7 @@ func (s *Store) AdoptArchivePolicy(ctx context.Context, c Context, limits Journa
 		if found {
 			next.Lineage = union(replicas, previous.Lineage, previous.Replicas, previous.Retained)
 			if previous.Complete() {
+				// every promise was verified on the previous replicas
 				next.Retained = union(replicas, previous.Replicas)
 			} else {
 				next.Retained = union(replicas, previous.Replicas, previous.Retained)
@@ -245,7 +247,7 @@ func (s *Store) AdoptArchivePolicy(ctx context.Context, c Context, limits Journa
 		if next.Since < next.Through {
 			next.Since = next.Through
 		}
-		if len(next.Retained) == 0 || next.Complete() {
+		if len(next.Retained) == 0 {
 			next.Retained, next.Through = nil, next.Since
 		}
 		raw, err := encodeArchiveMigration(dd, next)
@@ -264,10 +266,12 @@ func (s *Store) AdoptArchivePolicy(ctx context.Context, c Context, limits Journa
 	return out, err
 }
 
-// AdvanceArchiveMigration records that every promised position at or below through has two verified copies on the replicas of the
-// policy with this digest. It never moves backwards; at the switch height the migration is complete and the retained holders are
-// released. A record of another policy (a switch in between) is ErrStale: that verification belongs to a policy no longer in force.
-func (s *Store) AdvanceArchiveMigration(ctx context.Context, c Context, limits JournalLimits, digest [32]byte, through uint64) (ArchiveMigration, error) {
+// AdvanceArchiveMigration records that every promised position at or below through has two verified copies on replicas, the replicas of
+// the policy with this digest. It never moves backwards. release says the caller also verified every other retained obligation (the
+// activation bundles) on two of them: only with it, and only at the switch height, is the migration complete and are the retained holders
+// released. A record of another policy or replica set (a switch in between) is ErrStale: that verification belongs to a policy no longer
+// in force.
+func (s *Store) AdvanceArchiveMigration(ctx context.Context, c Context, limits JournalLimits, digest [32]byte, replicas []string, through uint64, release bool) (ArchiveMigration, error) {
 	state, _, err := s.Load(ctx, c)
 	if err != nil {
 		return ArchiveMigration{}, err
@@ -286,18 +290,18 @@ func (s *Store) AdvanceArchiveMigration(ctx context.Context, c Context, limits J
 		if err != nil {
 			return err
 		}
-		if !found || m.Digest != digest {
+		if !found || m.Digest != digest || !slices.Equal(m.Replicas, replicas) {
 			return fmt.Errorf("%w: the archive policy in force changed", ErrStale)
-		}
-		if through <= m.Through || m.Complete() {
-			out = m
-			return nil
 		}
 		if through > m.Since {
 			through = m.Since
 		}
+		if m.Complete() || through < m.Through || through == m.Through && !(release && through >= m.Since) {
+			out = m
+			return nil
+		}
 		m.Through = through
-		if m.Complete() {
+		if release && m.Through >= m.Since {
 			m.Retained = nil
 		}
 		raw, err := encodeArchiveMigration(dd, m)

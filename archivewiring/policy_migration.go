@@ -47,16 +47,18 @@ func FrontierPolicy(ctx context.Context, c configuredprogress.Context, subject a
 			readable = append(readable, id)
 		}
 	}
+	// The availability checker outlives the operation that installs it (a catch-up's Advance among them, whose context is canceled when it
+	// returns): it keeps the values of ctx but never its cancellation. Each read-back is bounded by the transport limits.
 	return frontier.Policy{Context: subject, Eligible: names(replicas), PolicyDigest: digest, Historical: slices.Clone(m.Lineage), Retained: slices.Clone(m.Retained),
-		Binding: CertifiedBinding{Context: c, Subject: subject}, Availability: ReplicaAvailability{Context: ctx, Host: host, Replicas: readable, Limits: limits}}
+		Binding: CertifiedBinding{Context: c, Subject: subject}, Availability: ReplicaAvailability{Context: context.WithoutCancel(ctx), Host: host, Replicas: readable, Limits: limits}}
 }
 
-// EnableDerivedFrontier adopts the snapshot's derived policy durably in the journal and enables (or switches) the journal's frontier to
-// it, then publishes the migration state to the policy. It is the startup half of what the frontier worker does on a switch; nothing
-// may advance the frontier concurrently. It returns the migration state.
+// EnableDerivedFrontier adopts the given snapshot's derived policy durably in the journal and enables (or switches) the journal's frontier
+// to it, then publishes the migration state to the policy (ignored there if the policy has switched again meanwhile). Every step uses
+// this one snapshot: an activation in between is adopted by the next call, never mixed into this one. It is the startup half of what the
+// frontier worker does on a switch; nothing may advance the frontier concurrently. It returns the migration state.
 func EnableDerivedFrontier(ctx context.Context, journal *configuredprogress.Store, c configuredprogress.Context, limits configuredprogress.JournalLimits,
-	subject archive.Context, host shardnode.EvidenceHost, transport Limits, policy *ReplicaPolicy) (configuredprogress.ArchiveMigration, error) {
-	snap := policy.Snapshot()
+	subject archive.Context, host shardnode.EvidenceHost, transport Limits, policy *ReplicaPolicy, snap ReplicaPolicySnapshot) (configuredprogress.ArchiveMigration, error) {
 	if snap.Digest == ([32]byte{}) {
 		return configuredprogress.ArchiveMigration{}, ErrConfig
 	}
@@ -64,8 +66,8 @@ func EnableDerivedFrontier(ctx context.Context, journal *configuredprogress.Stor
 	if err != nil {
 		return m, fmt.Errorf("adopting the archive policy: %w", err)
 	}
-	if m.Digest != snap.Digest {
-		return m, fmt.Errorf("%w: the adopted archive policy digest differs", ErrConfig)
+	if m.Digest != snap.Digest || !slices.Equal(m.Replicas, names(snap.Replicas)) {
+		return m, fmt.Errorf("%w: the adopted archive policy is not the snapshot's", ErrConfig)
 	}
 	fp := FrontierPolicy(ctx, c, subject, host, transport, snap.Replicas, snap.Digest, m)
 	err = journal.ReplaceFrontierPolicy(ctx, c, limits, fp)
@@ -92,7 +94,10 @@ func (w *FrontierWorker) syncPolicy(ctx context.Context) error {
 	if w.applied && w.appliedAt == snap.Digest {
 		return nil
 	}
-	m, err := EnableDerivedFrontier(ctx, w.Journal, w.Context, w.Limits, w.Subject, w.Host, w.TransportLimits, w.Policy)
+	if w.beforeAdopt != nil {
+		w.beforeAdopt() // tests: an activation between the snapshot and its adoption
+	}
+	m, err := EnableDerivedFrontier(ctx, w.Journal, w.Context, w.Limits, w.Subject, w.Host, w.TransportLimits, w.Policy, snap)
 	if err != nil {
 		return fmt.Errorf("switching the archive policy: %w", err)
 	}
@@ -107,44 +112,59 @@ func (w *FrontierWorker) syncPolicy(ctx context.Context) error {
 }
 
 // migrate verifies one page of the history promised before the switch on the current replicas, rewriting a missing copy from the
-// local record (a replica accepts it only if its own journal or coverage vouches for it), and records the progress durably. Retained
-// holders are released only when every promised position up to the switch has two verified copies on the current replicas; until then
-// they count towards K. It never fails the pass: the regular audit and advance go on. Runs under w.advancing.
+// local record (a replica accepts it only if its own journal, coverage or verified history vouches for it), and records the progress
+// durably. Retained holders are released only when every promised block position up to the switch AND every retained activation bundle
+// has two verified copies on the current replicas; until then they count towards K. The worker's replicas, digest and migration state
+// are one adopted snapshot, checked again by the progress commit. It never fails the pass: the regular audit and advance go on. Runs
+// under w.advancing.
 func (w *FrontierWorker) migrate(ctx context.Context) error {
 	if w.Policy == nil || w.migration == nil || w.migration.Complete() || w.Host == nil {
 		return nil
 	}
 	m := *w.migration
-	page, err := w.Journal.LoadCoverage(ctx, w.Context, w.Limits, m.Through, migrationPage)
-	if err != nil {
-		return err
+	if m.Digest != w.PolicyDigest || !slices.Equal(m.Replicas, names(w.Replicas)) {
+		return fmt.Errorf("%w: the migration state is not the adopted policy's", ErrConfig)
 	}
 	through := m.Through
 	var stopped error
-	if len(page) == 0 {
-		through = m.Since // nothing is promised above the verified height (or the coverage base) up to the switch
-	}
-	binding := CertifiedBinding{Context: w.Context, Subject: w.Subject}
-	availability := ReplicaAvailability{Context: ctx, Host: w.Host, Replicas: w.readable(), Limits: w.TransportLimits}
-	down := make(map[peer.ID]bool)
-	for _, r := range page {
-		if r.Height > m.Since {
-			through = m.Since
-			break
-		}
-		rec, err := w.promisedMaterial(ctx, binding, r)
+	if through < m.Since {
+		page, err := w.Journal.LoadCoverage(ctx, w.Context, w.Limits, m.Through, migrationPage)
 		if err != nil {
-			stopped = fmt.Errorf("height %d: %w", r.Height, err)
-			break
+			return err
 		}
-		if n := w.ensureCopies(ctx, availability, down, r, rec, false); n < replicaCopies {
-			stopped = fmt.Errorf("%w: height %d: %d of %d current replicas hold a verified copy, two required", frontier.ErrAcknowledgment, r.Height, n, len(w.Replicas))
-			break
+		if len(page) == 0 {
+			through = m.Since // nothing is promised above the verified height (or the coverage base) up to the switch
 		}
-		through = r.Height
+		binding := CertifiedBinding{Context: w.Context, Subject: w.Subject}
+		availability := ReplicaAvailability{Context: ctx, Host: w.Host, Replicas: w.readable(), Limits: w.TransportLimits}
+		down := make(map[peer.ID]bool)
+		for _, r := range page {
+			if r.Height > m.Since {
+				through = m.Since
+				break
+			}
+			rec, err := w.promisedMaterial(ctx, binding, r)
+			if err != nil {
+				stopped = fmt.Errorf("height %d: %w", r.Height, err)
+				break
+			}
+			if n := w.ensureCopies(ctx, availability, down, r, rec, false); n < replicaCopies {
+				stopped = fmt.Errorf("%w: height %d: %d of %d current replicas hold a verified copy, two required", frontier.ErrAcknowledgment, r.Height, n, len(w.Replicas))
+				break
+			}
+			through = r.Height
+		}
 	}
-	if through > m.Through {
-		next, err := w.Journal.AdvanceArchiveMigration(ctx, w.Context, w.Limits, m.Digest, through)
+	release := false
+	if through >= m.Since && stopped == nil {
+		if err := w.ensureBundles(ctx); err != nil {
+			stopped = err
+		} else {
+			release = true
+		}
+	}
+	if through > m.Through || release {
+		next, err := w.Journal.AdvanceArchiveMigration(ctx, w.Context, w.Limits, m.Digest, m.Replicas, through, release)
 		if err != nil {
 			return err
 		}
@@ -153,6 +173,34 @@ func (w *FrontierWorker) migrate(ctx context.Context) error {
 		}
 	}
 	return stopped
+}
+
+// ensureBundles requires every activation bundle this node's archive retains to have two current replicas holding it, read back and
+// matching (the same bytes, or the same handoff under BundleVerifier), rewriting it where it is missing. The writer's own copy does not
+// count. Runs under w.advancing.
+func (w *FrontierWorker) ensureBundles(ctx context.Context) error {
+	epochs, err := w.Archive.BundleEpochs(w.Subject)
+	if err != nil {
+		return err
+	}
+	for _, epoch := range epochs {
+		q := archive.BundleRequest{Context: w.Subject, Epoch: epoch}
+		raw, err := w.Archive.GetBundle(q)
+		if err != nil {
+			return err
+		}
+		copies := 0
+		for _, id := range w.Replicas {
+			got, ferr := FetchBundle(ctx, w.Host, id, q, w.TransportLimits)
+			if ferr == nil && readBackMatches(ctx, q, w.BundleVerifier, got, raw) || PutBundleAndReadBack(ctx, w.Host, id, q, raw, w.TransportLimits, w.BundleVerifier) == nil {
+				copies++
+			}
+		}
+		if copies < replicaCopies {
+			return fmt.Errorf("%w: activation bundle of epoch %d: %d of %d current replicas hold it, two required", frontier.ErrAcknowledgment, epoch, copies, len(w.Replicas))
+		}
+	}
+	return nil
 }
 
 // setMigration applies a migration state of the policy in force: a release of retained holders switches the journal's frontier policy

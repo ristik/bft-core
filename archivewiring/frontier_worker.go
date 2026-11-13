@@ -34,7 +34,10 @@ type FrontierWorker struct {
 	// Policy, when set, is the versioned policy Replicas and PolicyDigest follow (bft-core#1030): each pass adopts a switch durably in
 	// the journal before it plans under it, verifies the promised history on the new replicas, and releases the retained holders of
 	// earlier policies only after that. Nil keeps Replicas and PolicyDigest fixed.
-	Policy          *ReplicaPolicy
+	Policy *ReplicaPolicy
+	// BundleVerifier compares a replica's activation bundle with the local one by content when the bytes differ (a migration verifies
+	// the retained bundles on the current replicas). Nil compares bytes.
+	BundleVerifier  BundleVerifier
 	Host            shardnode.EvidenceHost
 	TransportLimits Limits
 	Log             *slog.Logger
@@ -53,6 +56,8 @@ type FrontierWorker struct {
 	appliedAt [32]byte //
 	retained  []peer.ID
 	migration *configuredprogress.ArchiveMigration
+	// beforeAdopt, in tests, runs between the policy snapshot and its adoption.
+	beforeAdopt func()
 }
 
 // passCoverage is how many blocks one worker pass covers; busyPassCoverage while the journal is at least publisherBusyPercent full. A pass every two

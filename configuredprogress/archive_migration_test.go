@@ -56,20 +56,27 @@ func TestArchiveMigrationLifecycle(t *testing.T) {
 		}
 		return nil
 	})
-	_, err = s.AdvanceArchiveMigration(ctx, j.c, j.limits, m.Digest, 1)
+	_, err = s.AdvanceArchiveMigration(ctx, j.c, j.limits, m.Digest, p1, 1, true)
 	require.Error(t, err)
 	s.SetFaultHook(nil)
 	m, _, err = s.LoadArchiveMigration(ctx, j.c, j.limits)
 	require.NoError(t, err)
 	require.Zero(t, m.Through)
 	require.Equal(t, []string{"second"}, m.Retained)
-	m, err = s.AdvanceArchiveMigration(ctx, j.c, j.limits, m.Digest, 7)
+	_, err = s.AdvanceArchiveMigration(ctx, j.c, j.limits, m.Digest, []string{"first", "third", "fifth"}, 1, true)
+	require.ErrorIs(t, err, ErrStale, "verified on another replica set")
+	m, err = s.AdvanceArchiveMigration(ctx, j.c, j.limits, m.Digest, p1, 7, false)
+	require.NoError(t, err)
+	require.False(t, m.Complete(), "the blocks are verified, the other obligations not yet")
+	require.Equal(t, uint64(1), m.Through)
+	require.Zero(t, m.Backlog())
+	m, err = s.AdvanceArchiveMigration(ctx, j.c, j.limits, m.Digest, p1, 7, true)
 	require.NoError(t, err)
 	require.True(t, m.Complete())
 	require.Equal(t, uint64(1), m.Through, "clamped to the switch height")
 	require.Empty(t, m.Retained, "complete: the retained holders are released")
 	require.Equal(t, []string{"second"}, m.Lineage, "the lineage stays: the coverage still names it")
-	back, err := s.AdvanceArchiveMigration(ctx, j.c, j.limits, m.Digest, 0)
+	back, err := s.AdvanceArchiveMigration(ctx, j.c, j.limits, m.Digest, p1, 0, true)
 	require.NoError(t, err)
 	require.Equal(t, m, back, "never backwards")
 
@@ -85,7 +92,7 @@ func TestArchiveMigrationLifecycle(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, []string{"first", "fourth", "third"}, m3.Retained)
 	require.Equal(t, []string{"first", "fourth", "second", "third"}, m3.Lineage)
-	_, err = s.AdvanceArchiveMigration(ctx, j.c, j.limits, m2.Digest, 1)
+	_, err = s.AdvanceArchiveMigration(ctx, j.c, j.limits, m2.Digest, p2, 1, true)
 	require.ErrorIs(t, err, ErrStale, "the verification of a replaced policy does not count")
 
 	// No acknowledger of the anchor (first, second) is eligible: the lineage carries it.
@@ -125,8 +132,9 @@ func TestArchiveMigrationLifecycle(t *testing.T) {
 	require.Equal(t, snap.Anchor.Height, snap.Floor, "the pruned prefix stays valid")
 }
 
-// Nothing below a restored journal's coverage base is this writer's promise: a migration starts at the base and is complete when no
-// position above it is covered yet.
+// Nothing below a restored journal's coverage base is this writer's block promise: a migration starts at the base, with no block backlog
+// when nothing above it is covered yet. It is still not complete while an earlier replica is retained: the other obligations (activation
+// bundles) must be verified first.
 func TestArchiveMigrationStartsAtTheCoverageBase(t *testing.T) {
 	ctx := context.Background()
 	s, c, _, item, limits := frontierTestSetup(t, t.TempDir()+"/journal.db")
@@ -137,10 +145,14 @@ func TestArchiveMigrationStartsAtTheCoverageBase(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, anchor.Height, m.Through)
 	require.Equal(t, anchor.Height, m.Since)
-	require.True(t, m.Complete())
-	require.Empty(t, m.Retained)
-	m, err = s.AdoptArchivePolicy(ctx, c, limits, []byte("p2"), []string{"a", "b", "d"})
+	require.True(t, m.Complete(), "nothing earlier to retain")
+	p2 := []string{"a", "b", "d"}
+	m, err = s.AdoptArchivePolicy(ctx, c, limits, []byte("p2"), p2)
 	require.NoError(t, err)
-	require.True(t, m.Complete(), "a restored writer has nothing below its base to migrate")
-	require.Empty(t, m.Retained)
+	require.Zero(t, m.Backlog(), "a restored writer has no block promise below its base")
+	require.Equal(t, []string{"c"}, m.Retained)
+	require.False(t, m.Complete())
+	m, err = s.AdvanceArchiveMigration(ctx, c, limits, m.Digest, p2, m.Since, true)
+	require.NoError(t, err)
+	require.True(t, m.Complete())
 }

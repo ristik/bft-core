@@ -91,7 +91,8 @@ type OperatorStatus struct {
 }
 
 // PolicyReport is the archive replica policy in force and its migration (bft-core#1030). A retired machine that is a retained holder
-// still holds copies this writer promised: it is safe to power off only once no writer reports it as retained (migration complete).
+// still holds copies this writer promised. No writer reporting it as retained is necessary before powering it off, not sufficient: see
+// MigrationScope.
 type PolicyReport struct {
 	Version          uint64   `json:"version"`
 	Digest           string   `json:"digest,omitempty"`
@@ -102,11 +103,14 @@ type PolicyReport struct {
 	MigrationThrough uint64   `json:"migrationThrough,omitempty"`
 	MigrationBacklog uint64   `json:"migrationBacklog"`
 	MigrationDone    bool     `json:"migrationComplete"`
+	// MigrationScope says what completion proves: not UTB/Q3 history, record proofs or evidence outside the archive.
+	MigrationScope string `json:"migrationScope"`
 }
 
 // PolicyReportOf reports a policy snapshot.
 func PolicyReportOf(s ReplicaPolicySnapshot) *PolicyReport {
-	r := &PolicyReport{Version: s.Version, ShardEpoch: s.Epoch, Replicas: names(s.Replicas), Retained: names(s.Retained), MigrationDone: len(s.Retained) == 0}
+	r := &PolicyReport{Version: s.Version, ShardEpoch: s.Epoch, Replicas: names(s.Replicas), Retained: names(s.Retained), MigrationDone: len(s.Retained) == 0,
+		MigrationScope: "this writer's promised block records and retained activation bundles only"}
 	if s.Digest != ([32]byte{}) {
 		r.Digest = fmt.Sprintf("0x%x", s.Digest)
 	}

@@ -934,6 +934,9 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 			if replicaPolicy, e = archivewiring.NewReplicaPolicy(archiveReplicas, archiveDigest, archivePolicyEncoded, 0); e != nil {
 				return e
 			}
+			if !flags.ArchivePrune {
+				replicaPolicy.Untracked() // no frontier worker owns storage obligations: a switch grants no retired peer archive access
+			}
 			archiveHost, e = archivewiring.NewPeerGatedHost(peer, archiveTransportLimits.PerPeer)
 			if e != nil {
 				return e
@@ -942,7 +945,10 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 			if !ok {
 				return errors.New("receipt-complete archive requires an EVM adapter")
 			}
-			archiveServer, e := archivewiring.NewServer(archiveLocal, archiveSubject, archivewiring.JournalVerifier(journalStore, journalCtx, limits, archiveSubject, receiptSource), archiveAllowed, archiveTransportLimits)
+			archiveServer, e := archivewiring.NewServer(archiveLocal, archiveSubject, archivewiring.ChainVerifiers(
+				archivewiring.JournalVerifier(journalStore, journalCtx, limits, archiveSubject, receiptSource),
+				// the verified historical import: another representation of a block this node holds authenticated (its restored history)
+				archivewiring.HistoryVerifier(archiveLocal, archivewiring.CertifiedBinding{Context: journalCtx, Subject: archiveSubject})), archiveAllowed, archiveTransportLimits)
 			if e != nil {
 				return fmt.Errorf("starting archive replica: %w", e)
 			}
@@ -1250,7 +1256,7 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 			journalStore.SetLogger(flags.observe.Logger())
 			if archiveDigest != ([32]byte{}) {
 				// the derived policy of the installed assignment, adopted durably with its lineage before the frontier is authenticated
-				if _, e := archivewiring.EnableDerivedFrontier(ctx, journalStore, journalCtx, limits, archiveSubject, archiveHost, archiveTransportLimits, replicaPolicy); e != nil {
+				if _, e := archivewiring.EnableDerivedFrontier(ctx, journalStore, journalCtx, limits, archiveSubject, archiveHost, archiveTransportLimits, replicaPolicy, replicaPolicy.Snapshot()); e != nil {
 					return fmt.Errorf("authenticating certified frontier: %w", e)
 				}
 				return nil
@@ -1432,6 +1438,9 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 			defer func() { cancelArchive(); <-archiveDone; _ = metrics.Close() }()
 			if flags.ArchivePrune {
 				worker := &archivewiring.FrontierWorker{Journal: journalStore, Context: journalCtx, Limits: limits, Archive: archiveLocal, Subject: archiveSubject, Replicas: archiveReplicas, PolicyDigest: archiveDigest, Policy: replicaPolicy, Host: archiveHost, TransportLimits: archiveTransportLimits, Log: flags.observe.Logger(), Finalized: recoveryExecutor.Finalized}
+				if flags.TrustHistoryProfile2 {
+					worker.BundleVerifier = archivewiring.BundleAdmission(historicalTrust, node.ShardConfForEpoch)
+				}
 				if archiveCatchUp != nil {
 					// without the frontier pruning the journal behind it, a catch-up would only fill the journal: it is wired only here
 					archiveCatchUp.Frontier = worker
