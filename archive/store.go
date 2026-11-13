@@ -148,7 +148,17 @@ type diskOps struct {
 	rename   func(from, to string) error
 }
 
-var realDiskOps = diskOps{syncFile: (*os.File).Sync, syncDir: syncDir, rename: os.Rename}
+var realDiskOps = diskOps{syncFile: (*os.File).Sync, syncDir: syncDir, rename: publishNoReplace}
+
+// publishNoReplace gives the synced temporary file from its final name and removes the temporary name: a hard link, which unlike a rename
+// never replaces a file already at to (os.ErrExist then). A record is immutable, and another writer of the directory (a joiner's archive
+// seed) may have placed one there.
+func publishNoReplace(from, to string) error {
+	if err := os.Link(from, to); err != nil {
+		return err
+	}
+	return os.Remove(from)
+}
 
 func (s *Store) ops() diskOps {
 	if s.disk != nil {
@@ -404,7 +414,17 @@ func (s *Store) publishPacked(items []staged, packed [][]byte, exists func(Reque
 		} else if stored {
 			continue
 		}
-		if publishErr = s.ops().rename(it.tmp, it.final); publishErr != nil {
+		if publishErr = s.ops().rename(it.tmp, it.final); errors.Is(publishErr, os.ErrExist) {
+			// placed by another writer since the check: it must be this record
+			if stored, publishErr = exists(it.q, it.v2, it.name, it.encoded); publishErr == nil && !stored {
+				publishErr = ErrInvalid
+			}
+			if publishErr != nil {
+				break
+			}
+			continue
+		}
+		if publishErr != nil {
 			break
 		}
 		published = append(published, it)

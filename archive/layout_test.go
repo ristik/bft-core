@@ -377,3 +377,37 @@ func writePacked(t *testing.T, s *Store, name string, q Request, rec *Record) {
 }
 
 func sorted(s []string) []string { s = slices.Clone(s); slices.Sort(s); return s }
+
+// A record file placed in the store by another writer between a put's check and its publication (a joiner's seed) is never replaced: an
+// identical one makes the put a no-op, a different one is refused.
+func TestPublicationNeverReplacesAFilePlacedMeanwhile(t *testing.T) {
+	for _, differ := range []bool{false, true} {
+		q, rec := fixture()
+		s, err := Open(t.TempDir())
+		if err != nil {
+			t.Fatal(err)
+		}
+		placed := rec
+		if differ {
+			other := *rec
+			other.Body = []byte("placed by a seed")
+			placed = &other
+		}
+		loc, _ := location(q, recordV2(rec))
+		s.disk = &diskOps{syncFile: (*os.File).Sync, syncDir: syncDir, rename: func(from, to string) error {
+			writePacked(t, s, loc, q, placed) // the other writer is first
+			return publishNoReplace(from, to)
+		}}
+		err = s.Put(q, rec)
+		if differ && !errors.Is(err, ErrInvalid) || !differ && err != nil {
+			t.Fatalf("differ=%v: %v", differ, err)
+		}
+		got, err := s.Get(q)
+		if err != nil || !bytes.Equal(got.Body, placed.Body) {
+			t.Fatalf("differ=%v: the placed record is kept: %v", differ, err)
+		}
+		if left := leftovers(t, s); len(left) != 0 {
+			t.Fatalf("temporary files left: %v", left)
+		}
+	}
+}
