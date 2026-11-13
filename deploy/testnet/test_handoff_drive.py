@@ -180,11 +180,11 @@ class AdvanceResume(unittest.TestCase):
         self.fake.fail_once.add('replace-session')
         with self.assertRaises(hd.rehearse.Failure):
             self.run_entity()
-        self.assertEqual(self.shard, ['stop', 'stop'], 'the shard is stopped (by each authority sub-step) and stays stopped after the failure')
+        self.assertEqual(self.shard, [], 'phase 2: the shard keeps running through the authority sub-steps, and after the failure')
         self.assertTrue(self.journal.done('advance', 'entity1/advance-epoch'))
         self.run_entity()
         self.assertEqual([v for _, v in self.fake.calls].count('advance-epoch'), 1, 'the advance is sent once')
-        self.assertEqual(self.shard, ['stop', 'stop', 'stop', 'start'], 'stopped again for the new session, started last')
+        self.assertEqual(self.shard, ['start'], 'never stopped for the new session (it reloads its credential in-process); the last step starts it if needed')
         self.assertEqual((self.auth / 'client.cred').read_text(), 'session 3')
         self.assertEqual((self.auth / 'client.cred.pre-epoch-3').read_text(), 'session 1', 'the kept credential is the one before the switch')
         self.assertTrue(self.journal.done('advance', 'entity1'))

@@ -708,14 +708,14 @@ class Drive(rehearse.Rehearsal):
 
     def advance_entity(self, i, shard_epoch, journal):
         """Entity i's switch as sub-steps (advance/entity<i>/...), each resumable. The authority refuses a repeated advance (signingauthority/advance.go), so its
-        status is read first and an advance it already holds is not sent again; replace-session may be repeated (the newest session wins: the shard is stopped
-        until the credential it starts with is written); the shard is started last. The shard is stopped inside each authority sub-step, so a rerun that finds
-        them all done leaves it running."""
+        status is read first and an advance it already holds is not sent again; replace-session may be repeated (the newest session wins). The shard node
+        keeps running through every authority order (phase 2): an order fences its session and the node reads the replaced credential in-process
+        (service.ReloadingClient); the last sub-step only starts a node that is not running."""
         unit = f'entity{i}'
         if i in self.remote:
             return self.advance_remote(i, shard_epoch, journal)
         def stop():
-            self.compose('stop', f'shard{i}')
+            pass   # phase 2: authority orders no longer stop the shard node (it follows the session replacement in-process)
         def advanced(status):
             return status.get('rootEpoch') == self.target and status.get('shardEpoch') == shard_epoch
         def healthy(status):
