@@ -80,7 +80,7 @@ func activatingProof(env q3format.Envelope) (handoff.OldCommitProof, error) {
 
 // StagedBundle is the bundle of an activation exactly as the journal staged it, for a node that has already installed (or begun to install)
 // that epoch: it needs no live evidence from the committed tree, which no longer holds the old tip once the roots have moved on. ok is false
-// when the journal holds no activation of the epoch.
+// when the journal holds no activation of the epoch. It scans the journal: a serving path uses StagedBundleAt, one indexed read.
 func (r *Runtime) StagedBundle(epoch uint64) (b Bundle, ok bool, err error) {
 	staged, err := r.journal.Staged()
 	if err != nil {
@@ -114,15 +114,12 @@ func (r *Runtime) StagedBundleAt(ctx context.Context, epoch uint64) (b Bundle, o
 // activation the journal already holds is returned as the journal staged it. Nothing the caller passes is trusted: a link the history does
 // not authenticate is an error.
 func (r *Runtime) BundleFor(l q3format.Link, head *abdrc.CommittedBlock, candidate []byte) (Bundle, error) {
-	staged, err := r.journal.Staged()
-	if err != nil {
-		return Bundle{}, err
-	}
-	for _, a := range staged {
-		if a.Claim.Epoch == l.Body.Epoch {
-			b, _, err := DecodeBundle(a.Bundle)
-			return b, err // already staged: serve exactly what the journal holds
+	if a, ok, err := r.journal.StagedEpoch(context.Background(), l.Body.Epoch); err != nil || ok { // one indexed read, never a journal scan
+		if err != nil {
+			return Bundle{}, err
 		}
+		b, _, err := DecodeBundle(a.Bundle)
+		return b, err // already staged: serve exactly what the journal holds
 	}
 	h := r.History()
 	if _, err := h.ForEpoch(l.Body.Epoch); err == nil {
