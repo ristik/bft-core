@@ -1,23 +1,65 @@
 package cmd
 
 import (
+	"context"
 	"sync"
 	"sync/atomic"
 
 	libp2ppeer "github.com/libp2p/go-libp2p/core/peer"
+	"github.com/unicitynetwork/bft-core/q3active"
+	"github.com/unicitynetwork/bft-core/q3shard"
 	"github.com/unicitynetwork/bft-go-base/types"
 )
 
-// rootFreeRole is the transport-boundary policy of a root-free follower (`--follow-source`): while this node is not a validator of the
-// installed assignment, every known root is refused in both directions. Roots are known from the configured bootnodes and every
-// verified trust base (the genesis ones at start, each activated epoch's as it activates). Until the active set exists the node counts
-// as non-active. Disabled, it refuses nothing.
+// rootFreeRole is the transport-boundary policy of a root-free follower (`--follow-source`): while this node's published role is not
+// active (see shardRole), every known root is refused in both directions. Roots are known only from authenticated committee data: every
+// verified trust base (the genesis ones at start, each activated epoch's as it activates) and every authenticated UTB entry. A bootnode
+// is not a root by being a bootnode: generated joiners list incumbent shard nodes there, and those are its follow sources. Until the role
+// exists the node counts as non-active. Disabled, it refuses nothing.
 type rootFreeRole struct {
 	enabled bool
 	mu      sync.RWMutex
 	roots   map[libp2ppeer.ID]struct{}
 	member  atomic.Pointer[func() bool]
 	mirrors atomic.Pointer[func() []libp2ppeer.ID]
+	// revoke, when set, closes connections to peers that deny now covers (Peer.RevokeDenied); called on every change of role or roots.
+	revoke atomic.Pointer[func()]
+}
+
+// setRevoke installs the connection revocation the role calls on every change.
+func (r *rootFreeRole) setRevoke(f func()) { r.revoke.Store(&f) }
+
+// changed revokes connections that are denied now. A no-op when disabled or before setRevoke.
+func (r *rootFreeRole) changed() {
+	if r == nil || !r.enabled {
+		return
+	}
+	if f := r.revoke.Load(); f != nil {
+		(*f)()
+	}
+}
+
+// addRootNodes records the members of an authenticated committee (a verified trust base's or an authenticated UTB entry's).
+func (r *rootFreeRole) addRootNodes(nodes []*types.NodeInfo) {
+	if r == nil {
+		return
+	}
+	added := false
+	r.mu.Lock()
+	for _, n := range nodes {
+		if n == nil {
+			continue
+		}
+		if id, err := libp2ppeer.Decode(n.NodeID); err == nil {
+			if _, ok := r.roots[id]; !ok {
+				r.roots[id], added = struct{}{}, true
+			}
+		}
+	}
+	r.mu.Unlock()
+	if added {
+		r.changed()
+	}
 }
 
 // nonActive reports whether the node is a root-free follower that is not active now: it must not ask roots for anything.
@@ -59,11 +101,8 @@ func (r *rootFreeRole) nonRoot(ids []libp2ppeer.ID) []libp2ppeer.ID {
 	return out
 }
 
-func newRootFreeRole(enabled bool, boot []libp2ppeer.AddrInfo, trust []*types.RootTrustBaseV1) *rootFreeRole {
+func newRootFreeRole(enabled bool, trust []*types.RootTrustBaseV1) *rootFreeRole {
 	r := &rootFreeRole{enabled: enabled, roots: map[libp2ppeer.ID]struct{}{}}
-	for _, b := range boot {
-		r.roots[b.ID] = struct{}{}
-	}
 	for _, tb := range trust {
 		r.addRoots(tb)
 	}
@@ -72,22 +111,12 @@ func newRootFreeRole(enabled bool, boot []libp2ppeer.AddrInfo, trust []*types.Ro
 
 // addRoots records the root committee of a verified trust base.
 func (r *rootFreeRole) addRoots(tb *types.RootTrustBaseV1) {
-	if r == nil || tb == nil {
-		return
-	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	for _, n := range tb.RootNodes {
-		if n == nil {
-			continue
-		}
-		if id, err := libp2ppeer.Decode(n.NodeID); err == nil {
-			r.roots[id] = struct{}{}
-		}
+	if tb != nil {
+		r.addRootNodes(tb.RootNodes)
 	}
 }
 
-// setRole installs the membership predicate (ActivePeers.Member).
+// setRole installs the active predicate (the published role, shardRole).
 func (r *rootFreeRole) setRole(member func() bool) { r.member.Store(&member) }
 
 // active reports whether the node is an active validator; false until the role is known.
@@ -113,4 +142,88 @@ func followSourceIDs(sources []libp2ppeer.AddrInfo) []libp2ppeer.ID {
 		out = append(out, s.ID)
 	}
 	return out
+}
+
+// shardRole is the node's published role (shardnode.RoleLease): active only once the activation that names this node as a validator has
+// COMPLETED, every installation step of the installer and the runtime's completion, and non-active at once when an installed assignment
+// no longer names it. A suspended or failed activation never opens the role. The token names the completed activation epoch, so work begun
+// under an earlier publication ends at its next lease check. Every change runs onChange (connection revocation, the promotion wake).
+type shardRole struct {
+	anchor          uint64 // the pinned genesis epoch: complete by definition (the runtime reports 0 until its first activation)
+	mu              sync.Mutex
+	completedEpoch  uint64
+	completedMember bool
+	revoked         bool
+	// activeEpoch is the runtime's completed activation epoch (q3active.Runtime.ActiveEpoch); nil when there is no V3 runtime.
+	activeEpoch func() uint64
+	onChange    []func()
+}
+
+func newShardRole(anchor uint64, member bool, activeEpoch func() uint64) *shardRole {
+	return &shardRole{anchor: anchor, completedEpoch: anchor, completedMember: member, activeEpoch: activeEpoch}
+}
+
+// Lease implements shardnode.RoleLease.
+func (r *shardRole) Lease() (uint64, bool) {
+	r.mu.Lock()
+	epoch, member, revoked := r.completedEpoch, r.completedMember, r.revoked
+	r.mu.Unlock()
+	active := member && !revoked && (epoch <= r.anchor || r.activeEpoch == nil || r.activeEpoch() >= epoch)
+	token := epoch << 1
+	if active {
+		token |= 1
+	}
+	return token, active
+}
+
+// active is the lease's active bit.
+func (r *shardRole) active() bool { _, a := r.Lease(); return a }
+
+// assignmentInstalled is called when a verified assignment step is installed, before the rest of its activation: an assignment without
+// this node revokes the role at once; one with it changes nothing until the activation completes.
+func (r *shardRole) assignmentInstalled(member bool) {
+	if member {
+		return
+	}
+	r.mu.Lock()
+	r.revoked = true
+	r.mu.Unlock()
+	r.notify()
+}
+
+// activationCompleted publishes the role of a completed activation.
+func (r *shardRole) activationCompleted(epoch uint64, member bool) {
+	r.mu.Lock()
+	r.completedEpoch, r.completedMember, r.revoked = epoch, member, false
+	r.mu.Unlock()
+	r.notify()
+}
+
+func (r *shardRole) notify() {
+	r.mu.Lock()
+	hooks := append([]func(){}, r.onChange...)
+	r.mu.Unlock()
+	for _, f := range hooks {
+		f()
+	}
+}
+
+// subscribe adds a change hook.
+func (r *shardRole) subscribe(f func()) {
+	r.mu.Lock()
+	r.onChange = append(r.onChange, f)
+	r.mu.Unlock()
+}
+
+// notifyingActivator is the follower's runtime: after an activation completes in the runtime (its journal completion, which advances the
+// active epoch the role waits for), the role is re-published so that a promotion takes effect at once.
+type notifyingActivator struct {
+	q3shard.Q3Activator
+	role *shardRole
+}
+
+func (a notifyingActivator) Activate(ctx context.Context, b q3active.Bundle) error {
+	err := a.Q3Activator.Activate(ctx, b)
+	a.role.notify()
+	return err
 }

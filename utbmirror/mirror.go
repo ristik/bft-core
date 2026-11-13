@@ -4,6 +4,7 @@
 package utbmirror
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"errors"
@@ -152,6 +153,8 @@ type Follower struct {
 	Store   Store
 	Host    Host
 	Mirrors func() []peer.ID
+	// OnEntry, when set, receives each entry this follower appended (authenticated by the store), in epoch order.
+	OnEntry func(*types.RootTrustBaseV2)
 	// Interval is the pause between rounds; zero is two seconds.
 	Interval time.Duration
 	Log      *slog.Logger
@@ -178,6 +181,11 @@ func (f *Follower) Sync(ctx context.Context) int {
 				if ok {
 					added++
 					progressed = true
+					if f.OnEntry != nil {
+						if e, err := types.DecodeRootTrustBaseV2(raw); err == nil {
+							f.OnEntry(e)
+						}
+					}
 				}
 			}
 			if !progressed {
@@ -234,7 +242,7 @@ func readFrame(r io.Reader, v any, max int) error {
 	if err := types.Cbor.Unmarshal(body, v); err != nil {
 		return fmt.Errorf("%w: %v", ErrMirror, err)
 	}
-	if again, err := types.Cbor.Marshal(v); err != nil || len(again) != size {
+	if again, err := types.Cbor.Marshal(v); err != nil || !bytes.Equal(again, body) {
 		return fmt.Errorf("%w: not canonical", ErrMirror)
 	}
 	return nil

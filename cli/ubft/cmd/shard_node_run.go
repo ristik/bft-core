@@ -628,7 +628,7 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 	}
 	// A root-free follower bootstraps from its follow sources only and keeps every known root closed while it is not active (the role is
 	// read on each connection: activation opens the roots without a restart). The roots' addresses are still learned, for that moment.
-	follower := newRootFreeRole(len(followSources) != 0, bootNodes, trustBases)
+	follower := newRootFreeRole(len(followSources) != 0, trustBases)
 	peerBoot := bootNodes
 	if follower.enabled {
 		peerBoot = followSources
@@ -647,9 +647,12 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 		// this node mirrors the finalized trust-base entries it holds; a root-free follower extends its own chain from the mirrors
 		peer.RegisterProtocolHandler(utbmirror.Protocol, utbmirror.NewServer(utbEntries).Handler)
 		if len(followSources) != 0 {
-			utbFollower = &utbmirror.Follower{Store: utbEntries, Host: peer, Mirrors: follower.mirrorPeers, Log: flags.observe.Logger()}
+			utbFollower = &utbmirror.Follower{Store: utbEntries, Host: peer, Mirrors: follower.mirrorPeers, Log: flags.observe.Logger(),
+				// an authenticated successor's committee is a root committee from the moment it authenticates, before its Q3 activation
+				OnEntry: func(e *types.RootTrustBaseV2) { follower.addRootNodes(e.RootNodes) }}
 		}
 	}
+	follower.setRevoke(func() { peer.RevokeDenied() })
 	if follower.enabled {
 		for _, root := range bootNodes {
 			peer.Network().Peerstore().AddAddrs(root.ID, root.Addrs, libp2ppeerstore.PermanentAddrTTL)
@@ -840,7 +843,14 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 	if err != nil {
 		return fmt.Errorf("deriving the shard peers: %w", err)
 	}
-	follower.setRole(activePeers.Member)
+	// the published role: active only once the activation naming this node has completed; revoked at once by an assignment without it
+	var runtimeEpoch func() uint64
+	if q3rt != nil {
+		runtimeEpoch = q3rt.ActiveEpoch
+	}
+	role := newShardRole(trustBases[0].GetEpoch(), activePeers.Member(), runtimeEpoch)
+	follower.setRole(role.active)
+	role.subscribe(follower.changed)
 	follower.setMirrors(q3MirrorPeers(activePeers, followSourceIDs(followSources)))
 	var headFollower *archivewiring.HeadFollower
 	// Every shard-membership consumer (block dissemination, the archive and journal servers, the journal suffix and evidence providers)
@@ -903,7 +913,8 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 		if flags.ExecutionJournal == "" || flags.ArchiveStore == "" {
 			return errors.New("--follow-source requires --execution-journal and --archive-store")
 		}
-		node.SetFollowerRole(func() bool { return !activePeers.Member() })
+		node.SetRole(role)
+		role.subscribe(node.RoleChanged) // a published promotion subscribes to the roots at once
 	}
 
 	// The adapter authenticates certificates under the same per-epoch configuration set as the admission, not under a scan of every
@@ -1222,7 +1233,11 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 				},
 				Transition: verifierContext.InstallVerifiedTransition,
 				InstallAssignment: func(view handoffdelivery.Bundle, step handoff.AssignmentStep) error {
-					return installVerifiedAssignment(node, activePeers, view, step)
+					if err := installVerifiedAssignment(node, activePeers, view, step); err != nil {
+						return err
+					}
+					role.assignmentInstalled(activePeers.Member())
+					return nil
 				},
 				NoteJoiner: func(view handoffdelivery.Bundle, step handoff.AssignmentStep) error {
 					if err := noteJoinerStep(signing, view, step, node.ShardConfForEpoch); err != nil {
@@ -1238,7 +1253,8 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 					if tb, tbErr := q3Trust.Verified().GetByEpoch(ctx, epoch); tbErr == nil {
 						follower.addRoots(tb)
 					}
-					node.RoleChanged() // an activation naming this node promotes it now (same process, same state)
+					// the activation is complete: publish its role (it opens only once the runtime has completed the epoch too)
+					role.activationCompleted(epoch, activePeers.Member())
 					refreshArchivePolicy()
 				},
 			}
@@ -1257,9 +1273,9 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 			}
 			mirror.Register(peer)
 			mirrorPeers := q3MirrorPeers(activePeers, append(followSourceIDs(followSources), archiveReplicas...))
-			// a node that is not a validator of the installed assignment is a non-active party: mirrors only
-			q3Follower = shardQ3Follower(q3rt, trustBases[0].GetEpoch(), currentRoots, mirrorPeers,
-				func() bool { return !activePeers.Member() },
+			// a node whose published role is not active is a non-active party: mirrors only
+			q3Follower = shardQ3Follower(notifyingActivator{Q3Activator: q3rt, role: role}, trustBases[0].GetEpoch(), currentRoots, mirrorPeers,
+				func() bool { return !role.active() },
 				knownRoots(trustBases[0].GetEpoch(), q3rt.ActiveEpoch, q3Trust.Verified().GetByEpoch),
 				func(ctx context.Context, id libp2ppeer.ID, epoch uint64) (q3active.Bundle, error) {
 					return q3delivery.Request(ctx, peer, id, epoch)
@@ -1468,7 +1484,7 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 				source.Followed = func() []libp2ppeer.ID { return follower.nonRoot(followSourceIDs(followSources)) }
 				// the root-free certificate source: the newest verified archive head, offered while this node is not active
 				headFollower = &archivewiring.HeadFollower{Binding: archivewiring.CertifiedBinding{Context: journalCtx, Subject: archiveSubject},
-					Host: archiveHost, Limits: archiveTransportLimits, Active: activePeers.Member, Offer: node.FollowCertificate, Log: flags.observe.Logger(),
+					Host: archiveHost, Limits: archiveTransportLimits, Active: role.active, Offer: node.FollowCertificate, Log: flags.observe.Logger(),
 					Sources: func() []libp2ppeer.ID {
 						return follower.nonRoot(append(append(followSourceIDs(followSources), readableArchiveReplicas(replicaPolicy, archiveReplicas)...), activePeers.Peers()...))
 					}}
