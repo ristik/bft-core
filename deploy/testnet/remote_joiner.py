@@ -735,7 +735,7 @@ def init(host, generation, home, mac_host, allow_dirty=False):
     extract = 'import io,sys,tarfile;t=tarfile.open(fileobj=io.BytesIO(sys.stdin.buffer.read()));t.extractall("/network",filter="data")'
     lap.one(lap.rpc_image, ['-c', extract], [f'{lap.vol("network")}:/network'], entrypoint='python3', input=tar, text=False)
     lap.one(lap.node_image, ['-c', 'chmod -R a+rX /network'], [f'{lap.vol("network")}:/network'], entrypoint='sh')
-    (home / 'network-files.txt').write_text(lap.one(lap.node_image, ['-c', 'cd /network && ls -la . handoff'], [f'{lap.vol("network")}:/network:ro'], entrypoint='sh').stdout)
+    (home / 'network-files.txt').write_text(lap.one(lap.node_image, ['-c', 'cd /network && ls -la . $(test -d handoff && echo handoff)'], [f'{lap.vol("network")}:/network:ro'], entrypoint='sh').stdout)
     # the keys, made where they stay
     have = lambda volume, rel: lap.one(lap.node_image, ['-c', f'test -e /v/{rel}'], [f'{lap.vol(volume)}:/v:ro'], entrypoint='sh', check=False).returncode == 0
     if not have('root', 'keys.json'):
