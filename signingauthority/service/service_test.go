@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -875,4 +876,87 @@ func TestAReloadingClientFollowsASessionReplacementInProcess(t *testing.T) {
 	_, err = client.Reserve(ctx, f.request())
 	require.ErrorIs(t, err, signingauthority.ErrFenced)
 	require.ErrorIs(t, client.Sign(ctx), signingauthority.ErrFenced, "a fenced continuation is reported, not retried")
+}
+
+// Astra's probe of #1054, inverted: a fenced Reserve retried under the new session stays within ONE configured budget (400 ms), even
+// when the first attempt used most of it and the retry stalls.
+func TestAReloadRetryStaysWithinOneConfiguredBudget(t *testing.T) {
+	f := newFixture(t)
+	old := f.admit(t).ex.credential
+	fresh := f.admit(t).ex.credential
+	var loads, dials atomic.Int32
+	load := func() ([]byte, error) {
+		if loads.Add(1) == 1 {
+			return old, nil
+		}
+		return fresh, nil
+	}
+	dial := func(ctx context.Context) (net.Conn, error) {
+		if dials.Add(1) == 1 {
+			select {
+			case <-time.After(250 * time.Millisecond):
+				return f.clientDir(ctx)
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+		}
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	c, err := NewReloadingClient(ClientConfig{Dial: dial, Timeout: 400 * time.Millisecond}, load)
+	require.NoError(t, err)
+	defer c.Close()
+	started := time.Now()
+	_, err = c.Reserve(context.Background(), f.request())
+	require.Error(t, err)
+	require.EqualValues(t, 2, dials.Load(), "fenced, reloaded, retried")
+	require.Less(t, time.Since(started), 550*time.Millisecond, "one budget for the call, not one per attempt")
+
+	// an earlier caller deadline is kept
+	c2, err := NewReloadingClient(ClientConfig{Dial: dial, Timeout: time.Hour}, func() ([]byte, error) { return fresh, nil })
+	require.NoError(t, err)
+	defer c2.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	started = time.Now()
+	_, err = c2.Reserve(ctx, f.request())
+	require.Error(t, err)
+	require.Less(t, time.Since(started), 300*time.Millisecond)
+}
+
+// A fenced continuation (Sign, RetainResponse, Release) under a changed credential is reported, not retried, and the next operation uses
+// the new session; a cancelled caller does not reload; an older reload never replaces a newer installation.
+func TestReloadingClientContinuationsCancellationAndOrdering(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t)
+	var mu sync.Mutex
+	current := f.admit(t).ex.credential
+	var loads atomic.Int32
+	load := func() ([]byte, error) { loads.Add(1); mu.Lock(); defer mu.Unlock(); return append([]byte(nil), current...), nil }
+	c, err := NewReloadingClient(ClientConfig{Dial: f.clientDir, Timeout: 5 * time.Second}, load)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = c.Close() })
+	_, err = c.Reserve(ctx, f.request())
+	require.NoError(t, err)
+
+	replaced := f.admit(t)
+	mu.Lock()
+	current = replaced.ex.credential
+	mu.Unlock()
+	before := c.client()
+	require.ErrorIs(t, c.Sign(ctx), signingauthority.ErrFenced, "the continuation of the fenced session is reported")
+	require.NotSame(t, before, c.client(), "and the new session is installed for what follows")
+	_, err = c.Reserve(ctx, f.request())
+	require.NoError(t, err, "the next operation runs under the new session")
+
+	cancelled, cancel := context.WithCancel(ctx)
+	cancel()
+	n := loads.Load()
+	require.False(t, c.reload(cancelled, c.client()))
+	require.Equal(t, n, loads.Load(), "a cancelled caller does not even read the credential")
+
+	stale := before // a reload that started from a client already replaced
+	require.True(t, c.reload(ctx, stale), "it reports the newer client current")
+	require.Same(t, c.client(), c.client())
+	require.NotSame(t, stale, c.client(), "and never puts an older one back")
 }

@@ -11,12 +11,19 @@ import (
 
 // ReloadingClient is a Client that follows session replacement in-process: when the authority refuses an operation as fenced (the
 // operator advanced the epoch or replaced the session), it reads the current credential again and, when it changed, connects under the
-// new one. The shard process keeps running through every authority order; nothing is restarted to pick up a new session (phase 2).
+// new one. The shard process keeps running through every authority order (phase 2).
 //
-// Only a Reserve that was fenced is retried under the new session: the authority refused it before reserving anything, so the same
-// request is the first attempt of the new session. A fenced Sign, RetainResponse or Release is not retried (the reservation it continues
-// belongs to the fenced session); the round abstains and the next round uses the new session. The authority's own high-water record is
-// what makes every signature unique; this client only chooses which session to ask.
+// Timeout. One call of the wrapper has one budget: the configured timeout from the moment the call starts, or the caller's earlier
+// deadline. A fenced Reserve (or RestoreStatus) is retried once under the new session within that same budget, never with a fresh one.
+//
+// Retries. Only a fenced Reserve is retried: the authority refused it before reserving anything. A fenced Sign, RetainResponse or Release
+// is reported (the round abstains); the next operation uses the new session. The wrapper does NOT bind a Reserve→Release sequence to one
+// session: each operation uses the client current when it starts. What keeps that safe is the authority itself (it checks the presented
+// credential on every operation, rejects a reservation of another enrollment, and keeps its high-water record across sessions).
+//
+// Reload. A reload reads the credential without holding any lock, installs the new client only if the client it replaces is still the
+// current one (so a slower, older read never overwrites a newer installation), and closes the replaced client in the background (a close
+// waits for its exchange slot, which no caller waits behind). A cancelled caller does not reload and does not retry.
 type ReloadingClient struct {
 	load    func() ([]byte, error)
 	cfg     ClientConfig
@@ -48,65 +55,94 @@ func (r *ReloadingClient) client() *Client {
 	return r.current
 }
 
-// reload switches to the current credential if it differs from the one in use, and reports whether it did.
-func (r *ReloadingClient) reload() bool {
+// budget is the call's one deadline: the configured timeout from now, or the caller's earlier deadline.
+func (r *ReloadingClient) budget(ctx context.Context) (context.Context, context.CancelFunc) {
+	if r.cfg.Timeout <= 0 {
+		return context.WithCancel(ctx)
+	}
+	return context.WithTimeout(ctx, r.cfg.Timeout)
+}
+
+// reload switches from used to the current credential if it differs, and reports whether a newer client is now current. It does nothing
+// for a cancelled caller, holds no lock while reading the credential or closing, and never replaces a client installed after used.
+func (r *ReloadingClient) reload(ctx context.Context, used *Client) bool {
+	if ctx.Err() != nil {
+		return false
+	}
 	cred, err := r.load()
-	if err != nil {
+	if err != nil || ctx.Err() != nil {
 		return false
 	}
 	r.mu.Lock()
-	defer r.mu.Unlock()
+	if r.current != used {
+		// another reload already replaced the client this call used: that one is current, use it
+		r.mu.Unlock()
+		return true
+	}
 	if bytes.Equal(cred, r.cred) {
+		r.mu.Unlock()
 		return false
 	}
 	cfg := r.cfg
 	cfg.Credential = cred
 	next, err := NewClient(cfg)
 	if err != nil {
+		r.mu.Unlock()
 		return false
 	}
-	_ = r.current.Close()
+	old := r.current
 	r.current, r.cred = next, bytes.Clone(cred)
+	r.mu.Unlock()
+	go func() { _ = old.Close() }() // waits for its in-flight exchange, behind no caller
 	return true
 }
 
 func fenced(err error) bool { return errors.Is(err, signingauthority.ErrFenced) }
 
 func (r *ReloadingClient) Reserve(ctx context.Context, req signingauthority.Request) (*signingauthority.Authorization, error) {
-	auth, err := r.client().Reserve(ctx, req)
-	if fenced(err) && r.reload() {
+	ctx, cancel := r.budget(ctx)
+	defer cancel()
+	used := r.client()
+	auth, err := used.Reserve(ctx, req)
+	if fenced(err) && r.reload(ctx, used) {
 		return r.client().Reserve(ctx, req)
 	}
 	return auth, err
 }
 
 func (r *ReloadingClient) Sign(ctx context.Context) error {
-	err := r.client().Sign(ctx)
+	used := r.client()
+	err := used.Sign(ctx)
 	if fenced(err) {
-		r.reload()
+		r.reload(ctx, used)
 	}
 	return err
 }
 
 func (r *ReloadingClient) RetainResponse(ctx context.Context) error {
-	err := r.client().RetainResponse(ctx)
+	used := r.client()
+	err := used.RetainResponse(ctx)
 	if fenced(err) {
-		r.reload()
+		r.reload(ctx, used)
 	}
 	return err
 }
 
 func (r *ReloadingClient) Release(ctx context.Context, round uint64, digest [32]byte) ([]byte, error) {
-	out, err := r.client().Release(ctx, round, digest)
+	used := r.client()
+	out, err := used.Release(ctx, round, digest)
 	if fenced(err) {
-		r.reload()
+		r.reload(ctx, used)
 	}
 	return out, err
 }
 
 func (r *ReloadingClient) RestoreStatus(ctx context.Context) (signingauthority.Status, error) {
-	status, err := r.client().RestoreStatus(ctx)
-	if fenced(err) && r.reload() {
+	ctx, cancel := r.budget(ctx)
+	defer cancel()
+	used := r.client()
+	status, err := used.RestoreStatus(ctx)
+	if fenced(err) && r.reload(ctx, used) {
 		return r.client().RestoreStatus(ctx)
 	}
 	return status, err
