@@ -695,7 +695,8 @@ def init(host, generation, home, mac_host, allow_dirty=False):
     if entities != list(remote_entity.GENESIS_ENTITIES):
         raise Failure(f'the host generation has entities {entities}; this tool joins a fifth to the four genesis entities')
     entity = max(entities) + 1
-    project = f'{generation}-joiner{entity}'
+    project = (json.loads((home / 'state.json').read_text()).get('project') if (home / 'state.json').is_file() else None) or f'{generation}-joiner{entity}'
+    # a second identity for the same entity (after a retirement) needs its own project: state.json may name it before init
     images = {'node': host_compose['services'][f'root{entities[0]}']['image'], 'rpc': host_compose['services']['rpc']['image']}
     ensure_images(host, list(images.values()))
     state_path = home / 'state.json'
@@ -901,7 +902,7 @@ def join(lap, dry_run=False, stop_after=None, allow_dirty=False, funder=None, ac
 
 def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument('action', choices=('init', 'start', 'status', 'join', 'catch-up', 'retire', 'agent', 'tunnel', 'background-stop', 'retire-plan'))
+    p.add_argument('action', choices=('init', 'start', 'status', 'join', 'catch-up', 'retire', 'claim', 'agent', 'tunnel', 'background-stop', 'retire-plan'))
     p.add_argument('--home', help='this entity\'s directory on the laptop (default ~/unicity-joiner/<generation>)')
     p.add_argument('--host')
     p.add_argument('--generation')
@@ -936,6 +937,8 @@ def main(argv=None):
             return join(lap, a.dry_run, a.stop_after, a.allow_dirty, a.funder)
         elif a.action == 'retire':   # requestRetirement (owner key, here), the handoff that leaves it out, the clean stop
             return join(lap, allow_dirty=a.allow_dirty, action='retire', funder=a.funder)
+        elif a.action == 'claim':   # mature (owner key) and claim (withdrawal key) after the retirement, once the holds pass
+            return join(lap, allow_dirty=a.allow_dirty, action='claim', funder=a.funder)
         elif a.action == 'catch-up':   # the follower to the current epoch (root install restart, shard restore): no chain transaction, the timer keeps driving
             return join(lap, allow_dirty=a.allow_dirty, action='catch-up')
         elif a.action == 'agent':

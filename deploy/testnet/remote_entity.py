@@ -603,6 +603,48 @@ class Join:
             'withdrawal key: `remote_entity.py claim` (not run automatically)')
         return 0
 
+    def claim(self):
+        """After the retirement: custody.mature(lots) once its gates pass (signed by the laptop's owner key), then claim(credit, withdrawal) by the
+        laptop's withdrawal key (its gas topped up from the operator account). Prints the gates and refuses (exit 3) while they are not met."""
+        d, r = self.d, self.r
+        if r.state != 'retired':
+            raise RuntimeError(f'entity {self.entity} is {r.state}: claim only after the retirement')
+        ident = int(r.info['stakingId'])
+        lots = [int(x) for x in self.custody_lots(ident)]
+        withdrawal = r.info['accounts']['withdrawal']
+        p, t = d.progress(), d.view(d.REGISTRY, 'ucTime()(uint64)')[0]
+        lot_sig = 'lots(uint256)(uint64,uint64,uint128,uint128,uint128,uint8,uint16,uint32,uint64,uint64,uint64,uint64,uint64)'
+        pending = []
+        for lot in lots:
+            f = [int(x.split()[0]) for x in d.view_text(d.custody, lot_sig, str(lot)).splitlines()]
+            imported, p_ret, t_ret = [int(x.split()[0]) if x.split()[0].isdigit() else x.split()[0] == 'true'
+                                      for x in d.view_text(d.custody, 'retirements(uint64,uint64)(bool,uint64,uint64)', str(f[0]), str(f[1])).splitlines()]
+            if f[5] == 4:   # CAT_RELEASED: matured already
+                continue
+            round_gate, time_gate = max(p_ret + f[8], f[10]) + 1, max(t_ret + f[9], f[12])
+            say(f'lot {lot}: refCount {f[7]}, retirement imported {imported}, rounds {p} / {round_gate}, evidence {p} / {f[11] + 1}, time {t} / {time_gate} '
+                f'(~{max(0, time_gate - t) / 60:.0f} min)')
+            if not imported or f[7] or p < max(round_gate, f[11] + 1) or t < time_gate:
+                pending.append(lot)
+        if pending:
+            say(f'not yet: lots {pending} are held')
+            return 3
+        matured = [lot for lot in lots]
+        credit = d.view(d.custody, 'credit(address)(uint256)', withdrawal)[0]
+        if credit == 0 and matured:
+            out = r.custody_tx('mature(uint256[])', '[' + ','.join(map(str, matured)) + ']')
+            say(f'mature({matured}) by the owner: {out.get("out", "")[-160:]}')
+            credit = d.view(d.custody, 'credit(address)(uint256)', withdrawal)[0]
+        say(f'credit of the withdrawal address {withdrawal}: {credit / 1e18:.4f} UCT')
+        if credit:
+            if d.balance(withdrawal) < 10 ** 16:
+                d.fund(withdrawal, 5 * 10 ** 16)   # its gas, from the operator account (--funder)
+            out = r.custody_tx('claim(uint256,address)', credit, withdrawal)
+            say(f'claim({credit / 1e18:.4f} UCT -> {withdrawal}) by the withdrawal key: {out.get("out", "")[-160:]}')
+            say(f'balance of {withdrawal}: {d.balance(withdrawal) / 1e18:.4f} UCT; credit left {d.view(d.custody, "credit(address)(uint256)", withdrawal)[0]}')
+        self.save(claimedAt=time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()))
+        return 0
+
     def catch_up(self):
         """Bring the laptop entity to the CURRENT epoch without joining (it stays a follower, nothing is registered on chain): its root install-restarted to
         the epoch, its shard node restored at it (archive seeded from a host survivor first). A later join then only replays the blocks since."""
@@ -712,7 +754,7 @@ def retire_plan(generation, entity):
 def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest='action', required=True)
-    for name in ('relay-up', 'relay-status', 'register', 'status', 'join', 'catch-up', 'retire', 'retire-plan', 'archive-tar'):
+    for name in ('relay-up', 'relay-status', 'register', 'status', 'join', 'catch-up', 'retire', 'claim', 'retire-plan', 'archive-tar'):
         s = sub.add_parser(name)
         s.add_argument('generation', type=Path)
         if name not in ('relay-status', 'archive-tar'):
@@ -724,7 +766,7 @@ def main(argv=None):
         if name == 'relay-up':
             s.add_argument('--script', type=Path, default=Path(__file__).resolve().parent / 'tunnel_relay.py')
             s.add_argument('--uid', type=int, default=int(os.environ.get('SUDO_UID', os.getuid())))
-        if name in ('join', 'catch-up', 'retire'):
+        if name in ('join', 'catch-up', 'retire', 'claim'):
             s.add_argument('--ubft', type=Path, required=True)
             s.add_argument('--restore-pin', type=Path, required=True)
             s.add_argument('--cast', default='cast')
@@ -751,7 +793,7 @@ def main(argv=None):
         archive_tar(a.generation, a.source)
     elif a.action == 'retire-plan':
         print('\n'.join(retire_plan(a.generation, a.entity)))
-    elif a.action in ('join', 'catch-up', 'retire'):
+    elif a.action in ('join', 'catch-up', 'retire', 'claim'):
         if os.geteuid() != 0:
             p.error('run as root (the generation directory is uid 10001, mode 0700)')
         here = Path(__file__).resolve().parent
@@ -764,7 +806,7 @@ def main(argv=None):
             return 3
         try:
             j = Join(a.generation, a.entity, a.ubft, a.restore_pin, a.cast, a.dry_run, stop_after=a.stop_after, funder=a.funder, busy_wait=a.busy_wait)
-            return {'catch-up': j.catch_up, 'retire': j.retire}.get(a.action, j.run)()
+            return {'catch-up': j.catch_up, 'retire': j.retire, 'claim': j.claim}.get(a.action, j.run)()
         except Exception as error:
             say(f'STOPPED: {error}')
             return 1
