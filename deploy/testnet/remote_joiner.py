@@ -604,7 +604,7 @@ class Laptop:
         script = (f'set -e; '   # cast mktx ignores ETH_PRIVATE_KEY: the key goes as an argument inside this one-shot container only
                   f'raw=$(/tools/cast mktx --legacy --rpc-url http://ureth1:8545 --chain {chain} --private-key "$(cat /wallet/{signer}.key)" {custody} {shlex.quote(signature)} {quoted}); '
                   f'for u in {urls}; do /tools/cast publish --rpc-url $u "$raw" >/dev/null 2>&1 || true; done; '
-                  f'h=$(/tools/cast keccak "$raw"); echo "tx $h"; /tools/cast receipt --rpc-url http://ureth1:8545 --confirmations 1 "$h" status blockNumber')
+                  f'h=$(/tools/cast keccak "$raw"); echo "tx $h"; /tools/cast receipt --rpc-url http://ureth1:8545 --confirmations 1 --json "$h" | tr -d "\\n" | grep -oE "\\"(status|blockNumber)\\":\\"0x[0-9a-f]+\\""')
         done = self.one(self.node_image, ['-c', script], [f'{self.vol("wallet")}:/wallet:ro', f'{self.vol("tools")}:/tools:ro', f'{self.vol("network")}:/network:ro'],
                         network=self.network(), entrypoint='sh', check=False)
         out = (done.stdout + done.stderr).strip()
