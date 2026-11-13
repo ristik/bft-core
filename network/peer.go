@@ -268,7 +268,7 @@ func (p *Peer) Network() network.Network {
 
 // RegisterProtocolHandler sets the protocol stream handler for given protocol.
 func (p *Peer) RegisterProtocolHandler(protocolID string, handler network.StreamHandler) {
-	gater := p.conf.Gater
+	gater := p.gater()
 	p.host.SetStreamHandler(libp2pprotocol.ID(protocolID), func(s network.Stream) {
 		if gater.denied(s.Conn().RemotePeer()) { // a stream over a connection opened before the role changed
 			_ = s.Reset()
@@ -278,15 +278,24 @@ func (p *Peer) RegisterProtocolHandler(protocolID string, handler network.Stream
 	})
 }
 
+// gater is the configured role gater, nil without one (or without a configuration, as some tests build a Peer).
+func (p *Peer) gater() *RoleGater {
+	if p.conf == nil {
+		return nil
+	}
+	return p.conf.Gater
+}
+
 // RevokeDenied closes every open connection to a peer the gater now denies (a role change or a newly learned root). New connections and
 // streams are refused by the gater itself; this ends the ones that already exist.
 func (p *Peer) RevokeDenied() int {
-	if p.conf.Gater == nil {
+	gater := p.gater()
+	if gater == nil {
 		return 0
 	}
 	closed := 0
 	for _, id := range p.host.Network().Peers() {
-		if p.conf.Gater.denied(id) {
+		if gater.denied(id) {
 			_ = p.host.Network().ClosePeer(id)
 			closed++
 		}
@@ -301,7 +310,7 @@ func (p *Peer) RemoveProtocolHandler(protocolID string) {
 
 // CreateStream opens a new stream to given peer p, and writes a libp2p protocol header with given ProtocolID.
 func (p *Peer) CreateStream(ctx context.Context, peerID peer.ID, protocolID string) (network.Stream, error) {
-	if p.conf.Gater.denied(peerID) {
+	if p.gater().denied(peerID) {
 		return nil, ErrGated
 	}
 	return p.host.NewStream(ctx, peerID, libp2pprotocol.ID(protocolID))
@@ -317,7 +326,7 @@ func (p *Peer) CreateStreamPreferred(ctx context.Context, peerID peer.ID, protoc
 	if len(protocolIDs) == 0 {
 		return nil, errors.New("at least one protocol must be offered")
 	}
-	if p.conf.Gater.denied(peerID) {
+	if p.gater().denied(peerID) {
 		return nil, ErrGated
 	}
 	ids := make([]libp2pprotocol.ID, len(protocolIDs))
