@@ -40,7 +40,6 @@ account instead of the faucet account, whose nonces belong to the public faucet'
 import argparse
 import datetime
 import hashlib
-import fcntl
 import json
 import os
 from pathlib import Path
@@ -1005,16 +1004,9 @@ def parse_members(text):
 
 
 def hold_lock(generation):
-    """The open lock file of the generation's drives (handoff/drive.lock), locked exclusively; None when another drive holds it."""
-    path = Path(generation) / 'handoff' / 'drive.lock'
-    path.parent.mkdir(parents=True, exist_ok=True)
-    handle = open(path, 'a')
-    try:
-        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except BlockingIOError:
-        handle.close()
-        return None
-    return handle
+    """The open lock file of the generation's drives (handoff/drive.lock), locked exclusively; None when another drive holds it. remote_entity's: the
+    registry writes of this process then know it holds the lock (they take it themselves otherwise)."""
+    return remote_entity.hold_lock(generation)
 
 
 def parse_joiners(values):

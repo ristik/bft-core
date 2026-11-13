@@ -537,6 +537,14 @@ class JoinAndTimer(unittest.TestCase):
         self.assertIn('--funder /srv/tn-x/operator-secrets', run.call_args.args[0][-1])
 
 
+def write_record(gen, entity, state, **extra):
+    """A registry record as register() leaves it, written directly (a test fixture, not a registry write)."""
+    d = re_.info_dir(gen)
+    d.mkdir(parents=True, exist_ok=True)
+    (d / f'{entity}.json').write_text(json.dumps({'entity': entity, 'state': state, 'rootNodeId': f'R{entity}', 'evmNodeId': f'E{entity}',
+                                                  'agentSocket': '/s/agent.sock', 'token': 't', 'accounts': {}, **extra}))
+
+
 class LinuxHostAndSubnet(unittest.TestCase):
     """#1043: on a Linux docker host the tunnel's -L listeners bind the --mac-host bridge gateway (a container cannot reach the host's loopback); the
     laptop's validators subnet follows the project name (two generations' joiner projects side by side)."""
@@ -606,6 +614,123 @@ class FollowerCatchUp(unittest.TestCase):
         d.follow_joiner = lambda i, epoch, promoted: calls.append(('follow', i, epoch, promoted))
         d.catch_up_remote(5, root=False)
         self.assertEqual(calls, [('follow', 5, 3, False)], 'no install restart of the follower root; no log-scraped shortcut')
+
+
+class RegistryWrites(unittest.TestCase):
+    """The registry of remote entities (handoff/remote-joiners/<J>.json): every write under handoff/drive.lock, over the CURRENT file, only legal and
+    not stale state changes, written to a unique temporary file, fsynced and renamed (#1029 review)."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.gen = Path(self.tmp.name)
+        (self.gen / 'handoff').mkdir()
+        write_record(self.gen, 5, 'bonded')
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def entity(self):
+        return re_.load(self.gen)[5]
+
+    def file(self):
+        return json.loads((re_.info_dir(self.gen) / '5.json').read_text())
+
+    def other_holder(self):
+        """handoff/drive.lock held by another open file (another process: a drive)."""
+        import fcntl
+        handle = open(self.gen / 'handoff' / 'drive.lock', 'a')
+        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return handle
+
+    def test_a_write_waits_for_the_lock_and_writes_nothing_without_it(self):
+        holder = self.other_holder()
+        try:
+            with self.assertRaises(re_.RegistryError):
+                re_.update_info(self.gen, 5, {'stakingId': 9}, wait=0)
+            with unittest.mock.patch.object(re_, 'BUSY_WAIT', 0), self.assertRaises(re_.RegistryError):
+                self.entity().save()
+            with unittest.mock.patch.object(re_, 'BUSY_WAIT', 0), self.assertRaises(re_.RegistryError):
+                re_.register(self.gen, 5, '/s', {'rootNodeId': 'R5', 'evmNodeId': 'E5', 'nodeInfo': {'nodeId': 'R5'}, 'accounts': {}, 'token': 't'})
+            with unittest.mock.patch.object(re_, 'BUSY_WAIT', 0), self.assertRaises(re_.RegistryError):
+                re_.map_joiner(self.gen, 7, 5)
+            with self.assertRaises(re_.RegistryError):
+                re_.save_info(self.gen, {'entity': 5, 'state': 'member'})
+        finally:
+            holder.close()
+        self.assertEqual(self.file()['state'], 'bonded')
+        self.assertNotIn('stakingId', self.file())
+        self.assertFalse((self.gen / 'handoff' / 'joiners.json').exists())
+        re_.update_info(self.gen, 5, {'stakingId': 9}, wait=0)
+        self.assertEqual(self.file()['stakingId'], 9, 'written once the lock is free')
+
+    def test_the_holder_of_the_lock_writes_without_waiting_for_itself(self):
+        lock = hd.hold_lock(self.gen)
+        try:
+            self.assertTrue(re_.holding(self.gen))
+            re_.update_info(self.gen, 5, {'state': 'preparing'}, wait=0)
+        finally:
+            lock.close()
+        self.assertFalse(re_.holding(self.gen))
+        self.assertEqual(self.file()['state'], 'preparing')
+
+    def test_a_stale_copy_keeps_the_other_writers_change(self):
+        stale = self.entity()   # read at bonded, like a Join made before another process prepared
+        re_.update_info(self.gen, 5, {'state': 'preparing', 'preparedFor': 4})
+        stale.info['stakingId'] = 9
+        stale.save()
+        self.assertEqual((self.file()['state'], self.file()['preparedFor'], self.file()['stakingId']), ('preparing', 4, 9),
+                         'only the field this writer changed is written over the current file')
+        self.assertEqual(stale.state, 'preparing', 'and the writer reloads it')
+
+    def test_a_stale_state_change_is_refused(self):
+        stale = self.entity()
+        re_.update_info(self.gen, 5, {'state': 'preparing'})
+        stale.info['state'] = 'preparing'
+        with self.assertRaises(re_.RegistryError):
+            stale.save()   # it read bonded: its prepare would be a second one
+
+    def test_no_downgrade_from_preparing_prepared_or_member(self):
+        for have, want in (('preparing', 'bonded'), ('prepared', 'bonded'), ('prepared', 'preparing'), ('member', 'prepared'), ('member', 'bonded'),
+                           ('retired', 'member'), ('bonded', 'prepared'), ('follower', 'member')):
+            write_record(self.gen, 5, have)
+            with self.assertRaises(re_.RegistryError, msg=f'{have} -> {want}'):
+                re_.update_info(self.gen, 5, {'state': want}, expect_state=have)
+            self.assertEqual(self.file()['state'], have)
+
+    def test_the_legal_path_and_a_repeat(self):
+        write_record(self.gen, 5, 'follower')
+        for want in ('registered', 'bonded', 'preparing', 'prepared', 'member', 'member', 'retiring', 'retired'):
+            r = self.entity()
+            r.info['state'] = want
+            r.save()
+            self.assertEqual(self.file()['state'], want)
+
+    def test_the_write_is_atomic_durable_and_private(self):
+        synced = []
+        real = os.fsync
+        with unittest.mock.patch.object(re_.os, 'fsync', side_effect=lambda fd: (synced.append(fd), real(fd))[1]):
+            re_.update_info(self.gen, 5, {'stakingId': 9})
+        self.assertGreaterEqual(len(synced), 2, 'the file and its directory')
+        d = re_.info_dir(self.gen)
+        self.assertEqual(os.stat(d / '5.json').st_mode & 0o777, 0o600, 'it holds the agent token')
+        self.assertEqual(sorted(p.name for p in d.iterdir()), ['5.json'], 'no temporary file left')
+        with unittest.mock.patch.object(re_.os, 'replace', side_effect=OSError('disk full')), self.assertRaises(OSError):
+            re_.update_info(self.gen, 5, {'stakingId': 10})
+        self.assertEqual(self.file()['stakingId'], 9, 'a failed write leaves the record as it was')
+        self.assertEqual(sorted(p.name for p in d.iterdir()), ['5.json'])
+        names = set()
+        real_mkstemp = tempfile.mkstemp
+        with unittest.mock.patch.object(re_.tempfile, 'mkstemp', side_effect=lambda **k: (lambda r: (names.add(r[1]), r)[1])(real_mkstemp(**k))):
+            re_.update_info(self.gen, 5, {'a': 1})
+            re_.update_info(self.gen, 5, {'b': 2})
+        self.assertEqual(len(names), 2, 'a unique temporary file per write')
+
+    def test_an_unreadable_record_is_refused(self):
+        (re_.info_dir(self.gen) / '5.json').write_text('{not json')
+        with self.assertRaises(re_.RegistryError):
+            re_.update_info(self.gen, 5, {'stakingId': 9})
+        with self.assertRaises(re_.RegistryError):
+            re_.fresh_states(self.gen)
 
 
 class JoinExclusion(unittest.TestCase):

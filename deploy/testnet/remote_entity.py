@@ -35,6 +35,9 @@ and the joiner's authority scope go stale, briefs/handoff-drive-2026-11-12.md ga
 """
 import argparse
 import base64
+import contextlib
+import copy
+import fcntl
 import http.client
 import json
 import os
@@ -55,7 +58,14 @@ PORTS = {
     'agent': 28700,         # Mac 127.0.0.1:28700 (remote_joiner.py agent)               <-ssh -R- <sock-dir>/agent.sock
 }
 GENESIS_ENTITIES = (1, 2, 3, 4)
-STATES = ('follower', 'registered', 'bonded', 'preparing', 'prepared', 'member', 'retiring', 'retired')   # preparing: written under drive.lock BEFORE the authority starts at the successor scope   # follower: known to the host, keeping up, not joining (the timer does not stand down)
+# follower: known to the host, keeping up, not joining (the timer does not stand down); preparing: written under drive.lock BEFORE the authority starts at
+# the successor scope
+STATES = ('follower', 'registered', 'bonded', 'preparing', 'prepared', 'member', 'retiring', 'retired')
+# The only state changes a writer may make (update_info): forward along the join, then the retirement. Nothing goes back: a writer holding a stale copy
+# cannot downgrade preparing, prepared or member (it would re-open a prepare whose authority may already run at the successor scope, or forget a
+# membership). An interrupted prepare is resolved by hand (Join.run says how).
+TRANSITIONS = {'follower': ('registered',), 'registered': ('bonded',), 'bonded': ('preparing',), 'preparing': ('prepared',), 'prepared': ('member',),
+               'member': ('retiring',), 'retiring': ('retired',), 'retired': ()}
 BOND_UNIT = 100 * 10 ** 18
 GAS = 2 * 10 ** 18
 NAME = re.compile(r'^handoff/[A-Za-z0-9][A-Za-z0-9._-]*$')
@@ -63,6 +73,10 @@ NAME = re.compile(r'^handoff/[A-Za-z0-9][A-Za-z0-9._-]*$')
 
 class AgentError(RuntimeError):
     """The laptop's agent did not answer, or refused: the step did not happen there (or its outcome is unknown: retry the drive)."""
+
+
+class RegistryError(RuntimeError):
+    """The registry (handoff/remote-joiners/<J>.json) refused a write (an illegal or stale state change) or cannot be read: nothing was written."""
 
 
 def tree_digest(directory):
@@ -180,6 +194,7 @@ class RemoteEntity:
 
     def __init__(self, generation, info, client=None):
         self.gen, self.info = Path(generation), info
+        self.base = copy.deepcopy(info)   # the copy as read: save() writes only what this process changed since
         self.entity = int(info['entity'])
         self.client = client or AgentClient(info['agentSocket'], info['token'])
 
@@ -278,7 +293,18 @@ class RemoteEntity:
         return self.client.op('tx', timeout=300, step=step, **args)
 
     def save(self):
-        save_info(self.gen, self.info)
+        """The fields this process changed in `info` since it read it, written over the registry's CURRENT file under handoff/drive.lock (update_info):
+        a field another process changed meanwhile is kept, and a state change from a stale copy is refused."""
+        change = {k: v for k, v in self.info.items() if self.base.get(k, _ABSENT) != v}
+        expect = self.base.get('state', 'registered') if 'state' in change else None
+        self.info = update_info(self.gen, self.entity, change, expect_state=expect)
+        self.base = copy.deepcopy(self.info)
+
+    def reload(self):
+        """The registry's current file (read_info)."""
+        self.info = read_info(self.gen, self.entity)
+        self.base = copy.deepcopy(self.info)
+        return self.info
 
 
 class EntityTransport:
@@ -300,15 +326,120 @@ def info_dir(generation):
     return Path(generation) / 'handoff' / 'remote-joiners'
 
 
+_ABSENT = object()
+_HELD = {}   # resolved generation -> the open handoff/drive.lock this process holds (hold_lock)
+
+
+def hold_lock(generation):
+    """The open lock file of the generation's drives (handoff/drive.lock), locked exclusively; None when another process holds it. Every drive holds it
+    for its whole run (handoff_drive.main), a join's prepare and a catch-up while they run, and every registry write while it writes."""
+    path = Path(generation) / 'handoff' / 'drive.lock'
+    path.parent.mkdir(parents=True, exist_ok=True)
+    handle = open(path, 'a')
+    try:
+        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        handle.close()
+        return None
+    _HELD[str(Path(generation).resolve())] = handle
+    return handle
+
+
+def holding(generation):
+    """Whether this process holds the generation's handoff/drive.lock now (a second flock of its own would wait for itself)."""
+    handle = _HELD.get(str(Path(generation).resolve()))
+    return handle is not None and not handle.closed
+
+
+@contextlib.contextmanager
+def registry_lock(generation, wait=None):
+    """handoff/drive.lock for a registry write: the one this process holds already, or taken here (waiting up to `wait` s for a drive, default BUSY_WAIT)."""
+    if holding(generation):
+        yield
+        return
+    deadline = time.monotonic() + (BUSY_WAIT if wait is None else wait)
+    while True:
+        handle = hold_lock(generation)
+        if handle:
+            break
+        if time.monotonic() >= deadline:
+            raise RegistryError(f'the registry of {generation}: another process holds handoff/drive.lock: nothing written')
+        time.sleep(1)
+    try:
+        yield
+    finally:
+        handle.close()
+
+
+def write_atomic(path, data, mode=0o600):
+    """`data` (bytes) at `path`, durably and atomically: a unique temporary file beside it (fsynced), renamed over it, the directory fsynced."""
+    path = Path(path)
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f'.{path.name}.', suffix='.tmp')
+    try:
+        os.fchmod(fd, mode)
+        with os.fdopen(fd, 'wb') as out:
+            out.write(data)
+            out.flush()
+            os.fsync(out.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(tmp)
+        raise
+    dfd = os.open(path.parent, os.O_RDONLY)
+    try:
+        os.fsync(dfd)
+    finally:
+        os.close(dfd)
+
+
 def save_info(generation, info):
+    """The registry file of info's entity, written whole: only under handoff/drive.lock (update_info and register are the callers)."""
+    if not holding(generation):
+        raise RegistryError('a registry write outside handoff/drive.lock')
     d = info_dir(generation)
     d.mkdir(mode=0o700, parents=True, exist_ok=True)
-    path = d / f'{int(info["entity"])}.json'
-    tmp = path.with_suffix('.tmp')
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)   # it holds the agent's bearer token
-    with os.fdopen(fd, 'w') as out:
-        json.dump(info, out, indent=1, sort_keys=True)
-    os.replace(tmp, path)
+    write_atomic(d / f'{int(info["entity"])}.json', json.dumps(info, indent=1, sort_keys=True).encode())   # 0600: it holds the agent's bearer token
+
+
+def read_info(generation, entity):
+    """Entity J's registry file as it is now. Unreadable or not an entity record: RegistryError (a reader that guards a drive fails closed on it)."""
+    path = info_dir(generation) / f'{int(entity)}.json'
+    try:
+        info = json.loads(path.read_text())
+    except (OSError, ValueError) as error:
+        raise RegistryError(f'{path}: unreadable ({type(error).__name__}: {error})') from None
+    if not isinstance(info, dict) or info.get('entity') != int(entity) or info.get('state', 'registered') not in STATES:
+        raise RegistryError(f'{path}: not a registry record of entity {entity} with a known state')
+    return info
+
+
+def update_info(generation, entity, change, expect_state=None, wait=None):
+    """Every change of a registered entity's record: under handoff/drive.lock, the CURRENT file reloaded, `change` applied to it and written atomically.
+    A state change must be one of TRANSITIONS (or no change), and with `expect_state` the file must still be in that state (the writer's copy is not
+    stale). Returns the record written."""
+    with registry_lock(generation, wait):
+        info = read_info(generation, entity)
+        if 'state' in change:
+            have, want = info.get('state', 'registered'), change['state']
+            if expect_state is not None and have != expect_state:
+                raise RegistryError(f'entity {entity}: its state is {have} now, not {expect_state} as this writer read it: {want} not written (stale copy)')
+            if want != have and want not in TRANSITIONS.get(have, ()):
+                raise RegistryError(f'entity {entity}: {have} -> {want} is not a legal state change: not written')
+        info.update(change)
+        save_info(generation, info)
+        return info
+
+
+def fresh_states(generation):
+    """{entity: state} of every registered remote entity, read now; RegistryError if any record is unreadable (the drive's guard fails closed on it)."""
+    out = {}
+    d = info_dir(generation)
+    if d.is_dir():
+        for path in sorted(d.glob('*.json')):
+            if path.stem.isdigit():
+                out[int(path.stem)] = read_info(generation, int(path.stem)).get('state', 'registered')
+    return out
 
 
 def load(generation):
@@ -335,24 +466,27 @@ def register(generation, entity, sock_dir, public):
         raise ValueError('the node-info carries a private key: refused')
     d = info_dir(generation)
     d.mkdir(mode=0o700, parents=True, exist_ok=True)
-    (d / f'{entity}-node-info.json').write_text(json.dumps(public['nodeInfo'], indent=2) + '\n')
-    path = d / f'{entity}.json'
-    old = json.loads(path.read_text()) if path.is_file() else {}
-    if old and old.get('rootNodeId') != public['rootNodeId']:
-        raise ValueError(f'entity {entity} is registered with root {old.get("rootNodeId")}: another laptop identity (move {path} aside to start over)')
-    info = {**old, 'entity': entity, 'rootNodeId': public['rootNodeId'], 'evmNodeId': public['evmNodeId'], 'accounts': public['accounts'],
-            'token': public['token'], 'agentSocket': str(Path(sock_dir) / 'agent.sock'), 'sockDir': str(sock_dir)}
-    info.setdefault('state', 'follower')   # `join` makes it 'registered' when the join starts; until then the unattended handoffs go on
-    save_info(generation, info)
+    with registry_lock(generation):   # the existing record is read and replaced under the lock: a drive or a join never sees it half written
+        path = d / f'{entity}.json'
+        old = read_info(generation, entity) if path.exists() else {}
+        if old and old.get('rootNodeId') != public['rootNodeId']:
+            raise ValueError(f'entity {entity} is registered with root {old.get("rootNodeId")}: another laptop identity (move {path} aside to start over)')
+        write_atomic(d / f'{entity}-node-info.json', (json.dumps(public['nodeInfo'], indent=2) + '\n').encode(), 0o644)
+        # the public facts are refreshed; the state and what the join recorded are kept
+        info = {**old, 'entity': entity, 'rootNodeId': public['rootNodeId'], 'evmNodeId': public['evmNodeId'], 'accounts': public['accounts'],
+                'token': public['token'], 'agentSocket': str(Path(sock_dir) / 'agent.sock'), 'sockDir': str(sock_dir)}
+        info.setdefault('state', 'follower')   # `join` makes it 'registered' when the join starts; until then the unattended handoffs go on
+        save_info(generation, info)
     return {k: v for k, v in info.items() if k != 'token'}
 
 
 def map_joiner(generation, staking_id, entity):
-    """handoff/joiners.json, the drive's stakingId -> entity map."""
+    """handoff/joiners.json, the drive's stakingId -> entity map (read and replaced under handoff/drive.lock)."""
     path = Path(generation) / 'handoff' / 'joiners.json'
-    current = json.loads(path.read_text()) if path.is_file() else {}
-    current[str(staking_id)] = int(entity)
-    path.write_text(json.dumps(current, indent=1, sort_keys=True) + '\n')
+    with registry_lock(generation):
+        current = json.loads(path.read_text()) if path.is_file() else {}
+        current[str(staking_id)] = int(entity)
+        write_atomic(path, (json.dumps(current, indent=1, sort_keys=True) + '\n').encode(), 0o644)
 
 
 # --- the relay ---------------------------------------------------------------------------------------------------------------------
@@ -416,6 +550,7 @@ class Join:
         self.r = self.d.remote[entity]
 
     def save(self, **change):
+        """`change` written to the registry under handoff/drive.lock (RemoteEntity.save: reloaded, legal and not stale, atomic)."""
         self.r.info.update(change)
         self.r.save()
 
@@ -720,7 +855,7 @@ class Join:
 
     def fresh_state(self):
         """This entity's state as the file says now (another process, a drive, may have changed it)."""
-        self.r.info = json.loads((info_dir(self.gen) / f'{self.entity}.json').read_text())
+        self.r.reload()
         return self.r.state
 
     def prepare(self, ident):
