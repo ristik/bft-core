@@ -93,7 +93,9 @@ func readArchiveMigration(b *bolt.Bucket, dd [32]byte) (ArchiveMigration, bool, 
 	}
 	var w archiveMigrationWire
 	if err := decodePayload(payload, &w); err != nil {
-		return ArchiveMigration{}, false, err
+		// the only other layout is the eight-field record of pre-merge revisions of bft-core#1034, which no deployment ran: not migrated
+		return ArchiveMigration{}, false, fmt.Errorf("%w: the archive policy migration record (journal/archive-migration) does not decode as the nine-field layout; "+
+			"a record written by a pre-merge revision of bft-core#1034 is not readable: reset this journal: %v", ErrContext, err)
 	}
 	if w.Version != journalVersion || !bytes.Equal(w.Descriptor, dd[:]) || len(w.Policy) == 0 || len(w.Replicas) < 2 || len(w.Replicas) > 3 ||
 		!namesValid(w.Replicas) || !namesValid(w.Lineage) || !namesValid(w.Retained) || w.Through > w.Since {

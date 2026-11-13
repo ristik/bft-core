@@ -8,6 +8,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 	"github.com/unicitynetwork/bft-core/frontier"
+	bolt "go.etcd.io/bbolt"
 )
 
 func derivedPolicy(j rotationJournal, encoded string, replicas []string, m ArchiveMigration) frontier.Policy {
@@ -196,4 +197,34 @@ func TestArchiveMigrationTracksBundlesApartFromRetainedHolders(t *testing.T) {
 	m, err = r.AdoptArchivePolicy(ctx, j.c, j.limits, []byte("p1 again"), superset)
 	require.NoError(t, err)
 	require.True(t, m.Complete(), "the same replicas keep the verified state")
+}
+
+// A migration record of the pre-merge eight-field layout (earlier revisions of bft-core#1034) is refused with a reason that names it.
+func TestArchiveMigrationRefusesThePreMergeLayoutByName(t *testing.T) {
+	ctx := context.Background()
+	j := newRotationJournal(t, true)
+	s, err := j.reopen(t, [2]string{"first", "second"}, &namedAvailability{}, nil)
+	require.NoError(t, err)
+	state, _, err := s.Load(ctx, j.c)
+	require.NoError(t, err)
+	dd := state.i.descriptorDigest
+	type eightFields struct {
+		_          struct{} `cbor:",toarray"`
+		Version    uint64
+		Descriptor []byte
+		Policy     []byte
+		Replicas   []string
+		Lineage    []string
+		Retained   []string
+		Since      uint64
+		Through    uint64
+	}
+	p, err := marshal(eightFields{Version: journalVersion, Descriptor: dd[:], Policy: []byte("p1"), Replicas: []string{"a", "b"}})
+	require.NoError(t, err)
+	raw, err := encodeEnvelope(journalArchiveMigrationKind, p, archiveMigrationLimit)
+	require.NoError(t, err)
+	require.NoError(t, s.db.Update(func(tx *bolt.Tx) error { return tx.Bucket(bucketName).Put(journalArchiveMigrationKey, raw) }))
+	_, _, err = s.LoadArchiveMigration(ctx, j.c, j.limits)
+	require.ErrorIs(t, err, ErrContext)
+	require.ErrorContains(t, err, "pre-merge revision of bft-core#1034")
 }
