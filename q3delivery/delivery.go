@@ -15,6 +15,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"sync"
 	"time"
 
 	libp2pnetwork "github.com/libp2p/go-libp2p/core/network"
@@ -34,6 +35,8 @@ const (
 	maxResponseBytes = 24 << 20
 	requestDeadline  = 20 * time.Second
 	maxConcurrent    = 8
+	// maxPerPeer bounds one peer's concurrent requests, so that a single non-root reader cannot hold every slot.
+	maxPerPeer = 2
 )
 
 type request struct {
@@ -62,6 +65,8 @@ type Host interface {
 type Server struct {
 	provider Provider
 	slots    chan struct{}
+	mu       sync.Mutex
+	perPeer  map[peer.ID]int
 }
 
 // NewServer serves bundles from provider.
@@ -69,14 +74,39 @@ func NewServer(provider Provider) (*Server, error) {
 	if provider == nil {
 		return nil, errors.New("q3delivery: missing provider")
 	}
-	return &Server{provider: provider, slots: make(chan struct{}, maxConcurrent)}, nil
+	return &Server{provider: provider, slots: make(chan struct{}, maxConcurrent), perPeer: map[peer.ID]int{}}, nil
 }
 
 // Register installs the stream handler on host.
 func (s *Server) Register(host Host) { host.RegisterProtocolHandler(Protocol, s.handle) }
 
+// reservePeer takes one of the peer's request slots, or reports that it holds them all.
+func (s *Server) reservePeer(id peer.ID) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.perPeer[id] >= maxPerPeer {
+		return false
+	}
+	s.perPeer[id]++
+	return true
+}
+
+func (s *Server) releasePeer(id peer.ID) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.perPeer[id]--; s.perPeer[id] <= 0 {
+		delete(s.perPeer, id)
+	}
+}
+
 func (s *Server) handle(stream libp2pnetwork.Stream) {
 	defer stream.Close()
+	id := stream.Conn().RemotePeer()
+	if !s.reservePeer(id) {
+		_ = stream.Reset()
+		return
+	}
+	defer s.releasePeer(id)
 	select {
 	case s.slots <- struct{}{}:
 		defer func() { <-s.slots }()

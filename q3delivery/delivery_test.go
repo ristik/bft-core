@@ -6,6 +6,8 @@ import (
 	"io"
 	"testing"
 
+	"github.com/libp2p/go-libp2p/core/peer"
+
 	"github.com/stretchr/testify/require"
 	"github.com/unicitynetwork/bft-core/internal/testutils/q3fixture"
 	"github.com/unicitynetwork/bft-core/q3active"
@@ -88,4 +90,17 @@ func TestTheExchangeRefusesEachWrongThingAndAsksNoProviderForABadEpoch(t *testin
 
 	_, err = NewServer(nil)
 	require.Error(t, err)
+}
+
+func TestServerBoundsOnePeersConcurrentRequests(t *testing.T) {
+	s, err := NewServer(&fakeProvider{err: errors.New("none")})
+	require.NoError(t, err)
+	a, b := peer.ID("a"), peer.ID("b")
+	for range maxPerPeer {
+		require.True(t, s.reservePeer(a))
+	}
+	require.False(t, s.reservePeer(a), "one peer cannot hold more than its share")
+	require.True(t, s.reservePeer(b), "another peer is still served")
+	s.releasePeer(a)
+	require.True(t, s.reservePeer(a))
 }
