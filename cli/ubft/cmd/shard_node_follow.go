@@ -2,11 +2,13 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"sync/atomic"
 
 	libp2ppeer "github.com/libp2p/go-libp2p/core/peer"
+	"github.com/unicitynetwork/bft-core/archive"
 	"github.com/unicitynetwork/bft-core/q3active"
 	"github.com/unicitynetwork/bft-core/q3shard"
 	"github.com/unicitynetwork/bft-core/utbstore"
@@ -256,4 +258,27 @@ func seedRootsFromUTB(r *rootFreeRole, store utbEntries) error {
 		r.addRootNodes(entry.RootNodes)
 	}
 	return nil
+}
+
+// remoteFallbackArchive is the terminal repair's archive: the local store first, then the node's non-root archive sources (follow sources,
+// replicas, installed validators). A follower that installed an epoch from its mirrors never executed that epoch's terminal block, so after
+// a restart the body is in neither its journal nor its archive; it is fetched here. A fetched record is evidence only: the repair verifies
+// it against the terminal certificate (block hash and state root) before anything is written.
+type remoteFallbackArchive struct {
+	local   handoffArchiveReader
+	sources func() []libp2ppeer.ID
+	fetch   func(id libp2ppeer.ID, q archive.Request) (*archive.Record, error)
+}
+
+func (a remoteFallbackArchive) Get(q archive.Request) (*archive.Record, error) {
+	rec, err := a.local.Get(q)
+	if err == nil || !errors.Is(err, archive.ErrUnavailable) || a.fetch == nil || a.sources == nil {
+		return rec, err
+	}
+	for _, id := range a.sources() {
+		if got, ferr := a.fetch(id, q); ferr == nil && got != nil {
+			return got, nil
+		}
+	}
+	return nil, err
 }
