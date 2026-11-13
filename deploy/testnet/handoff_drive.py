@@ -836,7 +836,9 @@ class Drive(rehearse.Rehearsal):
             if not status.get('restoring') and status.get('services', {}).get(f'shard{i}') == 'running' and head and head + 5 >= chain:
                 self.say(f'  remote entity {i}: its shard node already runs at the head ({head} of {chain}): restored earlier')   # a resumed drive does not wipe it
                 return
-            kept = bool(status.get('restoring')) and remote.info.get('shardCaughtUp') == self.target - 1
+            # a restore still running is kept (no second wipe) when it is the pin of the epoch left, or when it already follows the head (as a member it
+            # receives certificates, so a restore started after the Commit replays to the head and keeps up: b-generation join, 2026-11-13 04:12)
+            kept = bool(status.get('restoring')) and (remote.info.get('shardCaughtUp') == self.target - 1 or (head is not None and head + 5 >= chain))
         if kept:
             self.say(f'  remote entity {i}: its restore from the epoch-{self.target - 1} pin is kept (no wipe): waiting for its replay, then it runs as a member')
         else:
@@ -855,8 +857,10 @@ class Drive(rehearse.Rehearsal):
         def replayed():
             head = remote.status().get('urethHead')
             seen.append(head)
-            self.say(f'  remote entity {i}: execution client at {head} (restoring to the pin)')
-            return head and len(seen) >= 10 and len(set(seen[-10:])) == 1
+            chain = int(self.ureth(1, 'eth_blockNumber'), 16)
+            self.say(f'  remote entity {i}: execution client at {head} of {chain} (restoring)')
+            # done when it stands still at its pin (a non-member) or when it has reached the head and follows it (a member gets certificates)
+            return head and ((len(seen) >= 10 and len(set(seen[-10:])) == 1) or head + 5 >= chain)
         self.wait(f'the laptop\'s execution client {i} replays to the pin', replayed, 4 * 3600)
         # restore mode stops at the pin (it asks its archive for nothing later): it then runs as an ordinary node, which walks its seeded archive and
         # follows the certificates it now receives as a member

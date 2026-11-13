@@ -509,10 +509,20 @@ class RemoteRestore(unittest.TestCase):
         d.restore_remote(5)
         self.assertEqual(self.calls, ['seed', 'finish'], 'no second wipe and restore: replay, seed, ordinary run')
 
-    def test_any_other_state_gets_the_full_restore(self):
-        d = self.drive({'services': {'shard5': 'running'}, 'urethHead': 1000, 'restoring': True}, caught_up=12)
+    def test_a_restore_that_already_follows_the_head_is_kept(self):
+        d = self.drive({'services': {'shard5': 'running'}, 'urethHead': 998, 'restoring': True})
         d.restore_remote(5)
-        self.assertEqual(self.calls, ['restore', 'seed', 'finish'], 'a pin of another epoch is not kept')
+        self.assertEqual(self.calls, ['seed', 'finish'], 'a member restoring after the Commit reaches the head: kept, finished, no wipe')
+
+    def test_any_other_state_gets_the_full_restore(self):
+        d = self.drive({'services': {'shard5': 'running'}, 'urethHead': 400, 'restoring': True}, caught_up=12)
+        d.ureth = lambda i, method: hex(1000)
+        calls = self.calls
+        try:
+            d.restore_remote(5)
+        except AssertionError:
+            pass   # the fake replay never reaches the head: only the decision matters here
+        self.assertEqual(calls[:1], ['restore'], 'a pin of another epoch, far behind the head, is not kept')
         d = self.drive({'services': {'shard5': 'running'}, 'urethHead': 1000, 'restoring': False}, caught_up=29)
         d.restore_remote(5)
         self.assertEqual(self.calls, [], 'a node already running at the head is left alone')
