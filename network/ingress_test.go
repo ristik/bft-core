@@ -121,3 +121,48 @@ func TestCloseReleasesForwardedAndQueuedReservations(t *testing.T) {
 	require.Zero(t, budget.Used())
 	nw.Close() // idempotent
 }
+
+// Without an ingress budget Close behaves the same (review r4): the consumer's channel is closed, queued messages are dropped, and nothing
+// is queued afterwards; the producers' queue is not closed under the stream handlers.
+func TestReview1033UnbudgetedCloseLeavesConsumerOpen(t *testing.T) {
+	p := createPeer(t)
+	t.Cleanup(func() { _ = p.Close() })
+	nw, err := NewLibP2PNetwork(p, 8, observability.Default(t))
+	require.NoError(t, err)
+	out := nw.ReceivedChannel()
+	from := peer.ID("sender")
+	for _, s := range []string{"a", "b"} {
+		require.NoError(t, nw.receivedMsg(from, "test/u", &testStrMsg{Info: s}))
+	}
+	nw.Close()
+	deadline := time.After(time.Second)
+	for {
+		select {
+		case _, ok := <-out:
+			if !ok {
+				require.Error(t, nw.receivedMsg(from, "test/u", &testStrMsg{Info: "late"}), "nothing is queued after Close")
+				require.Empty(t, nw.receivedMsgs)
+				nw.Close() // idempotent
+				return
+			}
+		case <-deadline:
+			t.Fatal("an unbudgeted network's consumer channel stays open after Close")
+		}
+	}
+}
+
+// Close before the consumer ever asked for its channel: the channel it gets afterwards is closed.
+func TestCloseBeforeReceivedChannel(t *testing.T) {
+	p := createPeer(t)
+	t.Cleanup(func() { _ = p.Close() })
+	nw, err := NewLibP2PNetwork(p, 8, observability.Default(t))
+	require.NoError(t, err)
+	require.NoError(t, nw.receivedMsg(peer.ID("s"), "test/u", &testStrMsg{Info: "a"}))
+	nw.Close()
+	select {
+	case _, ok := <-nw.ReceivedChannel():
+		require.False(t, ok)
+	case <-time.After(time.Second):
+		t.Fatal("not closed")
+	}
+}

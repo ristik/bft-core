@@ -59,7 +59,7 @@ func Test_newLibP2PNetwork(t *testing.T) {
 		net, err := NewLibP2PNetwork(peer, 10, observability.NOPObservability())
 		require.NoError(t, err)
 		require.NotNil(t, net.self)
-		require.Equal(t, cap(net.ReceivedChannel()), 10)
+		require.Equal(t, cap(net.receivedMsgs), 10)
 		require.Equal(t, 0, len(net.sendProtocols))
 	})
 

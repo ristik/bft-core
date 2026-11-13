@@ -136,17 +136,11 @@ func NewLibP2PNetwork(self *Peer, capacity uint, obs Observability) (*LibP2PNetw
 	return n, nil
 }
 
-// ReceivedChannel is the channel of received messages. With an ingress budget registered, a message's reservation is released as the
-// consumer takes it, whoever the consumer is: a forwarder hands each queued message over and releases it once taken.
+// ReceivedChannel is the channel of received messages. A forwarder hands each queued message over, with or without an ingress budget, so
+// that Close behaves the same in both configurations: the forwarder stops and closes this channel, never the producers' queue. With a
+// budget, a message's reservation is released as the consumer takes it, whoever the consumer is.
 func (n *LibP2PNetwork) ReceivedChannel() <-chan any {
 	n.outOnce.Do(func() {
-		n.ingressMu.Lock()
-		budgets := n.ingress
-		n.ingressMu.Unlock()
-		if len(budgets) == 0 {
-			n.out = n.receivedMsgs
-			return
-		}
 		out := make(chan any)
 		n.out = out
 		n.forwarding.Store(true)
@@ -337,8 +331,9 @@ func (n *LibP2PNetwork) drain() {
 	}
 }
 
-// Close stops the delivery of received messages: the ingress forwarder exits, and every message queued now or received later is dropped
-// with its reservation released. It is idempotent. The consumer's channel is closed once the forwarder has stopped.
+// Close stops the delivery of received messages, budgeted or not: the forwarder exits and closes the consumer's channel, and every message
+// queued now or received later is dropped (with its reservation released, under a budget). The producers' queue itself is never closed:
+// stream handlers may still be sending to it. It is idempotent.
 func (n *LibP2PNetwork) Close() {
 	n.closeOnce.Do(func() {
 		close(n.done)
