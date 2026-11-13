@@ -269,6 +269,10 @@ func (p *Peer) Network() network.Network {
 // RegisterProtocolHandler sets the protocol stream handler for given protocol.
 func (p *Peer) RegisterProtocolHandler(protocolID string, handler network.StreamHandler) {
 	gater := p.gater()
+	if gater == nil {
+		p.host.SetStreamHandler(libp2pprotocol.ID(protocolID), handler)
+		return
+	}
 	p.host.SetStreamHandler(libp2pprotocol.ID(protocolID), func(s network.Stream) {
 		if gater.denied(s.Conn().RemotePeer()) { // a stream over a connection opened before the role changed
 			_ = s.Reset()
