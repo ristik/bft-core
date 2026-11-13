@@ -164,3 +164,10 @@ func (a *ActivePeers) Peers() []peer.ID {
 
 // EvidenceProviders makes ActivePeers the evidence ProviderSource: who to ask follows the active assignment.
 func (a *ActivePeers) EvidenceProviders() []peer.ID { return a.Peers() }
+
+// Epoch is the shard epoch of the installed set (zero for the genesis set).
+func (a *ActivePeers) Epoch() uint64 {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.epoch
+}

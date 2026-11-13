@@ -356,6 +356,7 @@ func (s *Store) PutHistoricalCertifiedJournalCandidate(ctx context.Context, c Co
 
 func (s *Store) putJournalCandidate(ctx context.Context, c Context, limits JournalLimits, v JournalCandidate, historical bool,
 	resultUC *types.UnicityCertificate, resultTR *certification.TechnicalRecord) error {
+	fp := s.frontierP()
 	if !s.journal {
 		return fmt.Errorf("%w: journal not enabled", ErrSettings)
 	}
@@ -413,8 +414,8 @@ func (s *Store) putJournalCandidate(ctx context.Context, c Context, limits Journ
 		if err := readJournalMeta(b, state.i.descriptorDigest, limits); err != nil {
 			return err
 		}
-		if s.frontier != nil {
-			frontierImage, e := readFrontier(b, state.i.descriptorDigest, *s.frontier)
+		if fp != nil {
+			frontierImage, e := readFrontier(b, state.i.descriptorDigest, *fp)
 			if e != nil {
 				return e
 			}
@@ -885,6 +886,7 @@ func (s *Store) loadJournalFull(ctx context.Context, c Context, limits JournalLi
 }
 
 func (s *Store) loadJournalOnce(ctx context.Context, c Context, limits JournalLimits, useMemo bool) (JournalSnapshot, ProgressToken, journalStamp, bool, error) {
+	fp := s.frontierP()
 	loadStart := time.Now()
 	state, token, err := s.load(ctx, c, useMemo)
 	if err == nil && useMemo {
@@ -910,8 +912,8 @@ func (s *Store) loadJournalOnce(ctx context.Context, c Context, limits JournalLi
 			return err
 		}
 		var anchorUC *types.UnicityCertificate
-		if s.frontier != nil {
-			frontierImage, e := readFrontier(b, state.i.descriptorDigest, *s.frontier)
+		if fp != nil {
+			frontierImage, e := readFrontier(b, state.i.descriptorDigest, *fp)
 			if e != nil {
 				return e
 			}
@@ -1096,7 +1098,7 @@ func (s *Store) loadJournalOnce(ctx context.Context, c Context, limits JournalLi
 				// with the frontier after checking this exact candidate and both
 				// replica acknowledgments. Recheck every certified coordinate.
 				if raw := b.Get(coverageKey(candidate.Candidate.Number)); raw != nil {
-					covered, e := frontier.DecodeMigrating(raw, *s.frontier)
+					covered, e := frontier.DecodeMigrating(raw, *fp)
 					if e == nil && covered.Height == candidate.Candidate.Number && (covered.Epoch == archiveUC.GetRootEpoch() || covered.Epoch == 0 && archiveUC.GetRootEpoch() == c.Observation.RootEpoch) && covered.Round == archiveUC.GetRootRoundNumber() &&
 						covered.Sequence < out.Frontier.Anchor.Sequence && bytes.Equal(covered.Subject.BlockHash[:], candidate.Candidate.Hash) &&
 						bytes.Equal(covered.StateRoot[:], candidate.Candidate.StateRoot) {

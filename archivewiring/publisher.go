@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"regexp"
+	"slices"
 	"sort"
 	"sync"
 	"time"
@@ -69,6 +70,10 @@ type Publisher struct {
 	Metrics        *Metrics
 	BundleVerifier BundleVerifier
 	ReceiptSource  ReceiptSource
+	// Policy, when set, is the versioned replica policy Replicas follows (bft-core#1030): on a switch the per-replica loops stop, the
+	// acknowledgements of replicas that stay are kept, and loops for the new set start. Retained holders of earlier policies are not
+	// published to.
+	Policy *ReplicaPolicy
 
 	mu              sync.Mutex
 	ack             map[[32]byte]ackSet
@@ -228,6 +233,14 @@ func (p *Publisher) Validate() error {
 // outside the certification path. One pass processes at most four records and
 // rotates its starting point so a failed replica cannot starve later records.
 func (p *Publisher) Run(ctx context.Context) error {
+	var changed <-chan struct{}
+	if p.Policy != nil {
+		changed = p.Policy.Changed()
+		snap := p.Policy.Snapshot()
+		p.mu.Lock()
+		p.Replicas = snap.Replicas
+		p.mu.Unlock()
+	}
 	if err := p.Validate(); err != nil {
 		return err
 	}
@@ -243,31 +256,36 @@ func (p *Publisher) Run(ctx context.Context) error {
 	}
 	p.sizeState()
 	p.mu.Unlock()
-	var workers sync.WaitGroup
-	for i := range p.Replicas {
-		workers.Add(1)
-		go func(index int) {
-			defer workers.Done()
-			p.replicaLoop(ctx, index)
-		}(i)
-	}
-	workers.Add(1)
-	go func() {
-		defer workers.Done()
-		ticker := time.NewTicker(2 * time.Second)
-		defer ticker.Stop()
-		for {
-			if err := p.publishBundles(ctx); err != nil && ctx.Err() == nil {
-				p.warnThrottled(ctx, "handoff bundle replication waiting", err)
-			}
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-			}
+	start := func() func() {
+		replicaCtx, cancel := context.WithCancel(ctx)
+		var workers sync.WaitGroup
+		for i := range p.Replicas {
+			workers.Add(1)
+			go func(index int) {
+				defer workers.Done()
+				p.replicaLoop(replicaCtx, index)
+			}(i)
 		}
-	}()
-	defer workers.Wait()
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			ticker := time.NewTicker(2 * time.Second)
+			defer ticker.Stop()
+			for {
+				if err := p.publishBundles(replicaCtx); err != nil && replicaCtx.Err() == nil {
+					p.warnThrottled(replicaCtx, "handoff bundle replication waiting", err)
+				}
+				select {
+				case <-replicaCtx.Done():
+					return
+				case <-ticker.C:
+				}
+			}
+		}()
+		return func() { cancel(); workers.Wait() }
+	}
+	stop := start()
+	defer func() { stop() }()
 	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
 	for {
@@ -277,9 +295,57 @@ func (p *Publisher) Run(ctx context.Context) error {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
+		case <-changed:
+			changed = p.Policy.Changed()
+			snap := p.Policy.Snapshot()
+			if !slices.Equal(snap.Replicas, p.Replicas) && validReplicas(snap.Replicas) {
+				stop()
+				p.switchReplicas(snap.Replicas)
+				p.Log.InfoContext(ctx, "archive publisher follows the replica policy", "replicas", names(snap.Replicas), "version", snap.Version)
+				stop = start()
+			}
 		case <-ticker.C:
 		}
 	}
+}
+
+// switchReplicas replaces the replica set while no replica loop runs. The volatile acknowledgements, bundle state and diagnostics of a
+// replica that stays move to its new index; a new replica starts with none (everything still pending is published to it).
+func (p *Publisher) switchReplicas(next []peer.ID) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.sizeState()
+	old := p.Replicas
+	to := make([]int, len(old))
+	for i, id := range old {
+		to[i] = slices.Index(next, id)
+	}
+	remap := func(bits uint8) uint8 {
+		var out uint8
+		for i := range old {
+			if bits&(1<<i) != 0 && to[i] >= 0 {
+				out |= 1 << to[i]
+			}
+		}
+		return out
+	}
+	for k, v := range p.ack {
+		p.ack[k] = ackSet(remap(uint8(v)))
+	}
+	for k, v := range p.bundleAck {
+		p.bundleAck[k] = remap(v)
+	}
+	for k, v := range p.bundleConflict {
+		p.bundleConflict[k] = remap(v)
+	}
+	cursor, progress := make([]int, len(next)), make([]ReplicaProgress, len(next))
+	for j, id := range next {
+		progress[j].Replica = id.String()
+		if i := slices.Index(old, id); i >= 0 {
+			cursor[j], progress[j] = p.replicaCursor[i], p.replicaProgress[i]
+		}
+	}
+	p.Replicas, p.replicaCursor, p.replicaProgress = slices.Clone(next), cursor, progress
 }
 
 func (p *Publisher) publishBundles(ctx context.Context) error {

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"slices"
 
 	gethtypes "github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/rlp"
@@ -86,6 +87,33 @@ type OperatorStatus struct {
 	Replicas          []ReplicaReport  `json:"replicas"`
 	Archive           ArchiveHealth    `json:"archive"`
 	Authority         *AuthorityReport `json:"authority,omitempty"`
+	Policy            *PolicyReport    `json:"archivePolicy,omitempty"`
+}
+
+// PolicyReport is the archive replica policy in force and its migration (bft-core#1030). A retired machine that is a retained holder
+// still holds copies this writer promised: it is safe to power off only once no writer reports it as retained (migration complete).
+type PolicyReport struct {
+	Version          uint64   `json:"version"`
+	Digest           string   `json:"digest,omitempty"`
+	ShardEpoch       uint64   `json:"shardEpoch"`
+	Replicas         []string `json:"replicas"`
+	Retained         []string `json:"retained,omitempty"`
+	MigrationSince   uint64   `json:"migrationSince,omitempty"`
+	MigrationThrough uint64   `json:"migrationThrough,omitempty"`
+	MigrationBacklog uint64   `json:"migrationBacklog"`
+	MigrationDone    bool     `json:"migrationComplete"`
+}
+
+// PolicyReportOf reports a policy snapshot.
+func PolicyReportOf(s ReplicaPolicySnapshot) *PolicyReport {
+	r := &PolicyReport{Version: s.Version, ShardEpoch: s.Epoch, Replicas: names(s.Replicas), Retained: names(s.Retained), MigrationDone: len(s.Retained) == 0}
+	if s.Digest != ([32]byte{}) {
+		r.Digest = fmt.Sprintf("0x%x", s.Digest)
+	}
+	if m := s.Migration; m != nil {
+		r.MigrationSince, r.MigrationThrough, r.MigrationBacklog, r.MigrationDone = m.Since, m.Through, m.Backlog(), m.Complete() && len(s.Retained) == 0
+	}
+	return r
 }
 
 // ReadOperatorStatus uses the node's existing authenticated journal and archive
@@ -151,7 +179,10 @@ func ReadOperatorStatus(ctx context.Context, journal *configuredprogress.Store, 
 		}
 		name := id.String()
 		report := ReplicaReport{Replica: name}
-		if i < len(progress) {
+		// by name when the publisher names its replicas (across a policy switch the indexes can differ for a moment), else by index
+		if j := slices.IndexFunc(progress, func(rp ReplicaProgress) bool { return rp.Replica == name }); j >= 0 {
+			report.LastAcknowledgedHeight, report.Error = progress[j].LastAcknowledgedHeight, progress[j].Error
+		} else if i < len(progress) && slices.IndexFunc(replicas, func(id peer.ID) bool { return id.String() == progress[i].Replica }) < 0 {
 			report.LastAcknowledgedHeight = progress[i].LastAcknowledgedHeight
 			report.Error = progress[i].Error
 		}

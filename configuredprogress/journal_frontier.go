@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"fmt"
+	"slices"
 
 	"github.com/ethereum/go-ethereum/common"
 	gethtypes "github.com/ethereum/go-ethereum/core/types"
@@ -107,6 +108,21 @@ func sameFrontierContext(c Context, p frontier.Policy) bool {
 // before activating pruning. The local anchor is authenticated against the
 // certified journal; replica availability is checked only before advancement.
 func (s *Store) EnableFrontier(ctx context.Context, c Context, limits JournalLimits, p frontier.Policy) error {
+	return s.setFrontier(ctx, c, limits, p, false)
+}
+
+// ReplaceFrontierPolicy switches an enabled frontier to another archive policy of the same writer and subject (bft-core#1030: the replicas
+// re-derived from a newly installed assignment). The durable frontier must authenticate under the new policy, its lineage included,
+// before the switch; a refusal keeps the policy in force. Nothing durable is rewritten: records of the old policy stay as they are and
+// decode as historical evidence.
+func (s *Store) ReplaceFrontierPolicy(ctx context.Context, c Context, limits JournalLimits, p frontier.Policy) error {
+	if s.frontierP() == nil {
+		return ErrSettings
+	}
+	return s.setFrontier(ctx, c, limits, p, true)
+}
+
+func (s *Store) setFrontier(ctx context.Context, c Context, limits JournalLimits, p frontier.Policy, replace bool) error {
 	if !s.journal || p.Binding == nil || p.Availability == nil || !sameFrontierContext(c, p) || !p.ReplicasValid() {
 		return ErrContext
 	}
@@ -118,7 +134,6 @@ func (s *Store) EnableFrontier(ctx context.Context, c Context, limits JournalLim
 		return err
 	}
 	p.Context.ExecutionIdentity = bytes.Clone(p.Context.ExecutionIdentity)
-	s.frontier = &p
 	var persisted FrontierSnapshot
 	err = s.db.View(func(tx *bolt.Tx) error {
 		b := tx.Bucket(bucketName)
@@ -126,16 +141,21 @@ func (s *Store) EnableFrontier(ctx context.Context, c Context, limits JournalLim
 		persisted, err = readFrontier(b, state.i.descriptorDigest, p)
 		return err
 	})
-	if err == nil && persisted.Anchor != nil && persisted.Anchor.Migrated() {
+	if err == nil && persisted.Anchor != nil && persisted.Anchor.Migrated() && len(p.Eligible) == 0 {
 		err = s.migrateReplicaPair(persisted.Anchor, p)
 	}
 	if err != nil {
-		s.frontier = nil
 		return err
 	}
-	_, err = s.LoadJournal(ctx, c, limits)
-	if err != nil {
-		s.frontier = nil
+	previous := s.frontier.Swap(&p)
+	s.DropJournalView() // a cached image decoded its anchor under the previous policy
+	if _, err = s.LoadJournal(ctx, c, limits); err != nil {
+		if replace {
+			s.frontier.Store(previous)
+		} else {
+			s.frontier.Store(nil)
+		}
+		s.DropJournalView()
 	}
 	return err
 }
@@ -229,7 +249,8 @@ func readFrontier(b *bolt.Bucket, dd [32]byte, policy frontier.Policy) (Frontier
 }
 
 func (s *Store) LoadFrontier(ctx context.Context, c Context, limits JournalLimits) (FrontierSnapshot, error) {
-	if s.frontier == nil {
+	fp := s.frontierP()
+	if fp == nil {
 		return FrontierSnapshot{}, ErrSettings
 	}
 	state, _, err := s.Load(ctx, c)
@@ -242,7 +263,7 @@ func (s *Store) LoadFrontier(ctx context.Context, c Context, limits JournalLimit
 		if err := readJournalMeta(b, state.i.descriptorDigest, limits); err != nil {
 			return err
 		}
-		out, err = readFrontier(b, state.i.descriptorDigest, *s.frontier)
+		out, err = readFrontier(b, state.i.descriptorDigest, *fp)
 		if err != nil {
 			return err
 		}
@@ -256,17 +277,20 @@ func (s *Store) LoadFrontier(ctx context.Context, c Context, limits JournalLimit
 // has lost its durability: either acknowledging replica under a legacy pair, or
 // fewer than two copies over the configured replicas under an Eligible policy.
 func (s *Store) VerifyFrontierCopies(ctx context.Context, c Context, limits JournalLimits) error {
+	fp := s.frontierP()
 	f, err := s.LoadFrontier(ctx, c, limits)
 	if err != nil || f.Anchor == nil {
 		return err
 	}
-	if len(s.frontier.Eligible) != 0 {
+	if len(fp.Eligible) != 0 {
 		// Any two configured replicas holding the promised copy keep the promise, whoever acknowledged it: one stopped acknowledger
 		// (or one outside the current set) must not freeze the frontier while another configured replica still holds the record.
+		// A replica of an earlier policy that still holds promised copies (Retained, bft-core#1030) counts too, until the current
+		// replicas are verified to hold them.
 		copies := 0
 		var last error
-		for _, name := range s.frontier.Eligible {
-			if err := s.frontier.Availability.VerifyAvailable(name, f.Anchor.Subject, f.Anchor.Acks[0].ManifestDigest); err != nil {
+		for _, name := range append(slices.Clone(fp.Eligible), fp.Retained...) {
+			if err := fp.Availability.VerifyAvailable(name, f.Anchor.Subject, f.Anchor.Acks[0].ManifestDigest); err != nil {
 				last = err
 				continue
 			}
@@ -274,13 +298,13 @@ func (s *Store) VerifyFrontierCopies(ctx context.Context, c Context, limits Jour
 				return nil
 			}
 		}
-		return fmt.Errorf("%w: %d of %d configured replicas hold the promised copy, two required: %v", frontier.ErrUnavailable, copies, len(s.frontier.Eligible), last)
+		return fmt.Errorf("%w: %d of %d configured or retained replicas hold the promised copy, two required: %v", frontier.ErrUnavailable, copies, len(fp.Eligible)+len(fp.Retained), last)
 	}
 	for _, ack := range f.Anchor.Acks {
 		if ack.Dropped() {
 			continue // a retired replica's acknowledgment no longer counts
 		}
-		if err := s.frontier.Availability.VerifyAvailable(ack.Replica, f.Anchor.Subject, ack.ManifestDigest); err != nil {
+		if err := fp.Availability.VerifyAvailable(ack.Replica, f.Anchor.Subject, ack.ManifestDigest); err != nil {
 			return fmt.Errorf("%w: %v", frontier.ErrUnavailable, err)
 		}
 	}
@@ -290,7 +314,8 @@ func (s *Store) VerifyFrontierCopies(ctx context.Context, c Context, limits Jour
 // LoadCoverage returns a bounded page of committed archive promises for paced
 // audits. The cursor is an EVM height, not a journal entry index.
 func (s *Store) LoadCoverage(ctx context.Context, c Context, limits JournalLimits, after uint64, max int) ([]frontier.Record, error) {
-	if s.frontier == nil || max < 1 || max > 64 {
+	fp := s.frontierP()
+	if fp == nil || max < 1 || max > 64 {
 		return nil, ErrSettings
 	}
 	state, _, err := s.Load(ctx, c)
@@ -310,7 +335,7 @@ func (s *Store) LoadCoverage(ctx context.Context, c Context, limits JournalLimit
 		if after < base.Height {
 			after = base.Height
 		}
-		f, err := readFrontier(b, state.i.descriptorDigest, *s.frontier)
+		f, err := readFrontier(b, state.i.descriptorDigest, *fp)
 		if err != nil || f.Anchor == nil {
 			return err
 		}
@@ -322,7 +347,7 @@ func (s *Store) LoadCoverage(ctx context.Context, c Context, limits JournalLimit
 			if raw == nil {
 				return frontier.ErrInvalid
 			}
-			r, err := frontier.DecodeMigrating(raw, *s.frontier)
+			r, err := frontier.DecodeMigrating(raw, *fp)
 			if err != nil || r.Height != h {
 				return frontier.ErrInvalid
 			}
@@ -336,7 +361,8 @@ func (s *Store) LoadCoverage(ctx context.Context, c Context, limits JournalLimit
 // VerifyCoveredArchive licenses repair of a pruned record only when the
 // journal committed its exact request and manifest before deletion.
 func (s *Store) VerifyCoveredArchive(ctx context.Context, c Context, limits JournalLimits, q archive.Request, rec *archive.Record) error {
-	if s.frontier == nil || rec == nil {
+	fp := s.frontierP()
+	if fp == nil || rec == nil {
 		return frontier.ErrUnavailable
 	}
 	var header gethtypes.Header
@@ -353,7 +379,7 @@ func (s *Store) VerifyCoveredArchive(ctx context.Context, c Context, limits Jour
 		if err := readJournalMeta(b, state.i.descriptorDigest, limits); err != nil {
 			return err
 		}
-		f, err := readFrontier(b, state.i.descriptorDigest, *s.frontier)
+		f, err := readFrontier(b, state.i.descriptorDigest, *fp)
 		if err != nil {
 			return err
 		}
@@ -369,7 +395,7 @@ func (s *Store) VerifyCoveredArchive(ctx context.Context, c Context, limits Jour
 		if raw == nil {
 			return fmt.Errorf("%w: no coverage record at height %d (coverage base %v)", frontier.ErrUnavailable, h, coverageBaseHeight(b, state.i.descriptorDigest, [32]byte(c.Origin.BlockHash())))
 		}
-		r, err := frontier.DecodeMigrating(raw, *s.frontier)
+		r, err := frontier.DecodeMigrating(raw, *fp)
 		if err != nil {
 			return fmt.Errorf("%w: the coverage record at height %d does not decode: %v", frontier.ErrInvalid, h, err)
 		}
@@ -386,7 +412,7 @@ func (s *Store) VerifyCoveredArchive(ctx context.Context, c Context, limits Jour
 		if digest != r.Acks[0].ManifestDigest || digest != r.Acks[1].ManifestDigest {
 			return fmt.Errorf("%w: the offered record's manifest %x is not the covered manifest %x / %x at height %d (same block, other certificate or bytes)", frontier.ErrInvalid, digest[:8], r.Acks[0].ManifestDigest[:8], r.Acks[1].ManifestDigest[:8], h)
 		}
-		if err := s.frontier.Binding.VerifyCertified(r, rec); err != nil {
+		if err := fp.Binding.VerifyCertified(r, rec); err != nil {
 			return fmt.Errorf("%w: the offered record fails the certified binding at height %d: %v", frontier.ErrInvalid, h, err)
 		}
 		return nil
@@ -413,7 +439,8 @@ func sameCoverageSubject(a, b archive.Request) bool {
 // all local obligations and the previous frontier before committing the new
 // frontier, anchor material and covered-range evidence together.
 func (s *Store) AdvanceFrontier(ctx context.Context, c Context, limits JournalLimits, covered []frontier.Coverage) error {
-	if s.frontier == nil || len(covered) == 0 {
+	fp := s.frontierP()
+	if fp == nil || len(covered) == 0 {
 		return ErrSettings
 	}
 	image, err := s.LoadJournal(ctx, c, limits)
@@ -444,9 +471,9 @@ func (s *Store) AdvanceFrontier(ctx context.Context, c Context, limits JournalLi
 				break
 			}
 		}
-		_, err = frontier.PlanAdvanceFromRestoreEpoch(image.Restored.Height, baseEpoch, image.Restored.RootRound, next, *s.frontier, covered, obligations)
+		_, err = frontier.PlanAdvanceFromRestoreEpoch(image.Restored.Height, baseEpoch, image.Restored.RootRound, next, *fp, covered, obligations)
 	} else {
-		_, err = frontier.PlanAdvance(current.Anchor, next, *s.frontier, covered, obligations)
+		_, err = frontier.PlanAdvance(current.Anchor, next, *fp, covered, obligations)
 	}
 	if err != nil {
 		return err
@@ -470,7 +497,7 @@ func (s *Store) AdvanceFrontier(ctx context.Context, c Context, limits JournalLi
 	}
 	encoded := make([][]byte, len(covered))
 	for i, item := range covered {
-		encoded[i], err = frontier.Encode(item.Anchor, *s.frontier)
+		encoded[i], err = frontier.Encode(item.Anchor, *fp)
 		if err != nil {
 			return err
 		}
@@ -494,7 +521,7 @@ func (s *Store) AdvanceFrontier(ctx context.Context, c Context, limits JournalLi
 		if err := readJournalMeta(b, state.i.descriptorDigest, limits); err != nil {
 			return err
 		}
-		prior, err := readFrontier(b, state.i.descriptorDigest, *s.frontier)
+		prior, err := readFrontier(b, state.i.descriptorDigest, *fp)
 		if err != nil {
 			return err
 		}
@@ -653,7 +680,8 @@ func checkPruneCoverage(b *bolt.Bucket, policy frontier.Policy, baseHeight uint6
 // PruneFrontier is a second Bolt transaction. The deletion and floor advance
 // are atomic. Repeating it after a crash is safe.
 func (s *Store) PruneFrontier(ctx context.Context, c Context, limits JournalLimits) error {
-	if s.frontier == nil {
+	fp := s.frontierP()
+	if fp == nil {
 		return ErrSettings
 	}
 	state, _, err := s.Load(ctx, c)
@@ -672,7 +700,7 @@ func (s *Store) PruneFrontier(ctx context.Context, c Context, limits JournalLimi
 		if err != nil {
 			return err
 		}
-		f, err := readFrontier(b, state.i.descriptorDigest, *s.frontier)
+		f, err := readFrontier(b, state.i.descriptorDigest, *fp)
 		if err != nil || f.Anchor == nil {
 			if err != nil {
 				return err
@@ -738,7 +766,7 @@ func (s *Store) PruneFrontier(ctx context.Context, c Context, limits JournalLimi
 				}
 				if w.Status == 1 {
 					if !bytes.Equal(w.Hash, restoredHash) {
-						if err := checkPruneCoverage(b, *s.frontier, coverageBase.Height, w); err != nil {
+						if err := checkPruneCoverage(b, *fp, coverageBase.Height, w); err != nil {
 							return err
 						}
 					}
@@ -802,7 +830,8 @@ func (s *Store) frontierPresent() (bool, error) {
 }
 
 func (s *Store) requireFrontierPolicy(b *bolt.Bucket) error {
-	if s.frontier == nil && (b.Get(journalFrontierKey) != nil || b.Get(journalFloorKey) != nil) {
+	fp := s.frontierP()
+	if fp == nil && (b.Get(journalFrontierKey) != nil || b.Get(journalFloorKey) != nil) {
 		return fmt.Errorf("%w: pruned journal requires authenticated frontier policy", ErrSettings)
 	}
 	return nil

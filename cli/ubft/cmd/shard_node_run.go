@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -16,6 +17,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/ainvaltin/httpsrv"
@@ -886,6 +888,11 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 		var archiveHost shardnode.EvidenceHost
 		var archiveReplicas []libp2ppeer.ID
 		var archiveDigest [32]byte // digest of the derived archive policy; zero with an explicit replica pair (legacy 2-of-2 records)
+		var archivePolicyEncoded []byte
+		// The versioned policy every archive consumer follows (bft-core#1030). Derived from the genesis set here; re-derived from the
+		// installed assignment after the replay and on every activation (refreshArchivePolicy). An explicit pair never switches.
+		var replicaPolicy *archivewiring.ReplicaPolicy
+		var archivePolicyLive atomic.Bool
 		var archiveAllowed []libp2ppeer.ID
 		var publisher *archivewiring.Publisher
 		archiveTransportLimits := archivewiring.DefaultLimits()
@@ -920,8 +927,11 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 				return e
 			}
 			// Structure only: membership is checked against the installed set after the replay (admitArchivePeers).
-			archiveReplicas, archiveDigest, e = archiveReplicaSet(flags.ArchiveReplicas, peer.ID(), archiveAllowed, trustBases[0].GetEpoch())
+			archiveReplicas, archiveDigest, archivePolicyEncoded, e = archiveReplicaSet(flags.ArchiveReplicas, peer.ID(), archiveAllowed, trustBases[0].GetEpoch())
 			if e != nil {
+				return e
+			}
+			if replicaPolicy, e = archivewiring.NewReplicaPolicy(archiveReplicas, archiveDigest, archivePolicyEncoded, 0); e != nil {
 				return e
 			}
 			archiveHost, e = archivewiring.NewPeerGatedHost(peer, archiveTransportLimits.PerPeer)
@@ -944,10 +954,69 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 				archiveServer.SetBundleVerifier(archivewiring.BundleAdmission(historicalTrust, node.ShardConfForEpoch))
 			}
 			// Who may fetch from and publish to this node's archive is the validator set of the ACTIVE assignment, not the genesis one:
-			// a joiner must be able to restore before it can acknowledge, and a retired validator must not keep access.
-			archiveServer.SetPeerAuthorizer(activePeers.Allowed)
+			// a joiner must be able to restore before it can acknowledge, and a retired validator must not keep access. The one
+			// exception is archive-only: a retired replica that still holds copies this node promised (a retained holder of the
+			// replica policy) keeps this service until the current replicas hold them; it gets no journal, evidence or consensus access.
+			archiveServer.SetPeerAuthorizer(func(id libp2ppeer.ID) bool { return activePeers.Allowed(id) || replicaPolicy.Holder(id) })
 			archiveServer.SetLogger(flags.observe.Logger())
 			archiveServer.Register(ctx, peer)
+		}
+		// refreshArchivePolicy re-derives the replicas from the installed assignment and switches the versioned policy when they changed.
+		// It is in-memory only and never fails an activation: the frontier worker adopts a switch durably before it plans under it. Before
+		// the persisted replay has finished (archivePolicyLive) the installed set is still being rebuilt, and it does nothing.
+		refreshArchivePolicy := func() {
+			if replicaPolicy == nil || len(flags.ArchiveReplicas) != 0 || !archivePolicyLive.Load() {
+				return
+			}
+			epoch := activePeers.Epoch()
+			derived, err := archivepolicy.Select(peer.ID(), append(activePeers.Peers(), peer.ID()), epoch)
+			if err != nil {
+				flags.observe.Logger().Warn("archive replica policy kept: the installed assignment derives none", "shardEpoch", epoch, "err", err)
+				return
+			}
+			encoded, err := derived.Encode()
+			if err != nil {
+				flags.observe.Logger().Error("archive replica policy kept: encoding the derived policy", "err", err)
+				return
+			}
+			switched, err := replicaPolicy.Switch(derived.Replicas, sha256.Sum256(encoded), encoded, epoch)
+			if err != nil {
+				flags.observe.Logger().Error("archive replica policy kept", "err", err)
+				return
+			}
+			if switched {
+				flags.observe.Logger().Info("archive replica policy switched to the installed assignment", "shardEpoch", epoch, "replicas", derived.Replicas)
+			}
+		}
+		// seedArchivePolicy, after the journal is open and before the first refresh: a policy a previous run adopted keeps its digest.
+		seedArchivePolicy := func(ctx context.Context) error {
+			if replicaPolicy == nil || len(flags.ArchiveReplicas) != 0 || !flags.ArchivePrune {
+				return nil
+			}
+			m, ok, err := journalStore.LoadArchiveMigration(ctx, journalCtx, limits)
+			if err != nil || !ok {
+				return err
+			}
+			persisted, err := archivepolicy.Decode(m.Policy)
+			if err != nil || persisted.Writer != peer.ID() {
+				return fmt.Errorf("%w: the persisted archive policy is not this node's", archivewiring.ErrConfig)
+			}
+			return replicaPolicy.Seed(persisted.Replicas, m.Digest, m.Policy, persisted.Epoch)
+		}
+		// An explicit pair is validated against the installed set; a derived policy is re-derived from it instead (deriveArchivePolicy, after
+		// each admission), so a retired replica never refuses a restart.
+		var explicitArchiveReplicas []libp2ppeer.ID
+		if len(flags.ArchiveReplicas) != 0 {
+			explicitArchiveReplicas = archiveReplicas
+		}
+		// deriveArchivePolicy runs after the admission ended the startup hold: it seeds a persisted policy and derives the installed one.
+		deriveArchivePolicy := func(ctx context.Context) error {
+			if err := seedArchivePolicy(ctx); err != nil {
+				return err
+			}
+			archivePolicyLive.Store(true)
+			refreshArchivePolicy()
+			return nil
 		}
 		restoringHandoffHistory := flags.TrustHistoryProfile2
 		var restoredHandoffTerminals []handoffTerminalCertificate
@@ -1042,6 +1111,7 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 						return err
 					}
 					flags.observe.Logger().Info("handoff activated", "rootEpoch", bundle.Body.Epoch)
+					refreshArchivePolicy()
 					return nil
 				}}
 			if archiveLocal != nil {
@@ -1107,6 +1177,7 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 				Activate:             q3Trust.ActivateQ3,
 				Log: func(epoch uint64) {
 					flags.observe.Logger().Info("handoff activated", "rootEpoch", epoch, "q3", true)
+					refreshArchivePolicy()
 				},
 			}
 			apply := installer.Apply
@@ -1176,11 +1247,18 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 			if archiveLocal == nil || !flags.ArchivePrune {
 				return nil
 			}
+			journalStore.SetLogger(flags.observe.Logger())
+			if archiveDigest != ([32]byte{}) {
+				// the derived policy of the installed assignment, adopted durably with its lineage before the frontier is authenticated
+				if _, e := archivewiring.EnableDerivedFrontier(ctx, journalStore, journalCtx, limits, archiveSubject, archiveHost, archiveTransportLimits, replicaPolicy); e != nil {
+					return fmt.Errorf("authenticating certified frontier: %w", e)
+				}
+				return nil
+			}
 			policy := frontier.Policy{Context: archiveSubject, Binding: archivewiring.CertifiedBinding{Context: journalCtx, Subject: archiveSubject}, Availability: archivewiring.ReplicaAvailability{Context: ctx, Host: archiveHost, Replicas: archiveReplicas, Limits: archiveTransportLimits}}
 			if e := setFrontierReplicas(&policy, archiveReplicas, archiveDigest); e != nil {
 				return e
 			}
-			journalStore.SetLogger(flags.observe.Logger())
 			if e := journalStore.EnableFrontier(ctx, journalCtx, limits, policy); e != nil {
 				return fmt.Errorf("authenticating certified frontier: %w", e)
 			}
@@ -1189,7 +1267,10 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 		if !flags.Restore {
 			// The persisted verified steps are replayed into the set (OnInstalled): the configured replicas are validated against the
 			// rebuilt set, and only then may serving start (the hold ends) and the frontier use them.
-			if err := admitArchivePeers(activePeers, archiveReplicas, archiveLocal != nil, flags.TrustHistoryProfile2); err != nil {
+			if err := admitArchivePeers(activePeers, explicitArchiveReplicas, archiveLocal != nil, flags.TrustHistoryProfile2); err != nil {
+				return err
+			}
+			if err := deriveArchivePolicy(ctx); err != nil {
 				return err
 			}
 			if err := enableArchiveFrontier(ctx); err != nil {
@@ -1211,7 +1292,10 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 				if !flags.TrustHistoryProfile2 {
 					// No handoff history to install: the installed set is the genesis one, and the replicas are validated against it
 					// before the archive replay.
-					return admitArchivePeers(activePeers, archiveReplicas, archiveLocal != nil, false)
+					if err := admitArchivePeers(activePeers, explicitArchiveReplicas, archiveLocal != nil, false); err != nil {
+						return err
+					}
+					return deriveArchivePolicy(ctx)
 				}
 				if err := peer.BootstrapConnect(ctx, flags.observe.Logger()); err != nil {
 					return fmt.Errorf("restore bootstrap connect: %w", err)
@@ -1221,7 +1305,10 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 				}
 				// Every step up to the pinned epoch is verified and installed: the set is rebuilt. The configured replicas are validated
 				// against it before the hold ends; a failed catch-up or validation never releases the hold.
-				if err := admitArchivePeers(activePeers, archiveReplicas, archiveLocal != nil, true); err != nil {
+				if err := admitArchivePeers(activePeers, explicitArchiveReplicas, archiveLocal != nil, true); err != nil {
+					return err
+				}
+				if err := deriveArchivePolicy(ctx); err != nil {
 					return err
 				}
 				if err := finishJoinerKey(signing); err != nil {
@@ -1239,7 +1326,7 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 					return fmt.Errorf("reading restore genesis identity: %w", genesisErr)
 				}
 				restorer := &archivewiring.ArchiveRestore{Journal: journalStore, Context: journalCtx, JournalLimits: limits,
-					Archive: archiveLocal, Subject: archiveSubject, Replicas: archiveReplicas, Host: archiveHost,
+					Archive: archiveLocal, Subject: archiveSubject, Replicas: readableArchiveReplicas(replicaPolicy, archiveReplicas), Host: archiveHost,
 					Limits: archiveTransportLimits, Adapter: executor.(*engineapi.Adapter), Genesis: genesis, TipUC: uc, TipTR: tr,
 					Log: flags.observe.Logger()}
 				return restorer.Restore(ctx)
@@ -1304,7 +1391,7 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 		var archiveCatchUp *archivewiring.CatchUp // a gap longer than one recovery is paged in from the archive (#769) once the frontier worker exists
 		if archiveLocal != nil {
 			source := &archivewiring.RecoverySource{Context: journalCtx, Subject: archiveSubject, Local: archiveLocal, Host: archiveHost,
-				Replicas: archiveReplicas, Limits: archiveTransportLimits, MaxBlocks: configuredadmission.DefaultRecoveryLimits().Blocks, Log: flags.observe.Logger()}
+				Replicas: archiveReplicas, Policy: replicaPolicy, Limits: archiveTransportLimits, MaxBlocks: configuredadmission.DefaultRecoveryLimits().Blocks, Log: flags.observe.Logger()}
 			archiveCatchUp = &archivewiring.CatchUp{Source: source}
 			coordinator.FetchArchive = func(ctx context.Context, after shardnode.BlockRef, target []byte) ([]shardnode.JournalFetchEntry, error) {
 				entries, fetchErr := source.FetchSuffix(ctx, after, target)
@@ -1331,7 +1418,7 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 			if e != nil {
 				return e
 			}
-			publisher = &archivewiring.Publisher{Journal: journalStore, Context: journalCtx, JournalLimits: limits, Archive: archiveLocal, Subject: archiveSubject, Host: archiveHost, Replicas: archiveReplicas, Limits: archiveTransportLimits, Log: flags.observe.Logger(), Metrics: metrics, ReceiptSource: executor.(*engineapi.Adapter)}
+			publisher = &archivewiring.Publisher{Journal: journalStore, Context: journalCtx, JournalLimits: limits, Archive: archiveLocal, Subject: archiveSubject, Host: archiveHost, Replicas: archiveReplicas, Policy: replicaPolicy, Limits: archiveTransportLimits, Log: flags.observe.Logger(), Metrics: metrics, ReceiptSource: executor.(*engineapi.Adapter)}
 			if flags.TrustHistoryProfile2 {
 				publisher.BundleVerifier = archivewiring.BundleAdmission(historicalTrust, node.ShardConfForEpoch)
 			}
@@ -1344,7 +1431,7 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 			go func() { defer close(archiveDone); _ = publisher.Run(archiveCtx) }()
 			defer func() { cancelArchive(); <-archiveDone; _ = metrics.Close() }()
 			if flags.ArchivePrune {
-				worker := &archivewiring.FrontierWorker{Journal: journalStore, Context: journalCtx, Limits: limits, Archive: archiveLocal, Subject: archiveSubject, Replicas: archiveReplicas, PolicyDigest: archiveDigest, Host: archiveHost, TransportLimits: archiveTransportLimits, Log: flags.observe.Logger(), Finalized: recoveryExecutor.Finalized}
+				worker := &archivewiring.FrontierWorker{Journal: journalStore, Context: journalCtx, Limits: limits, Archive: archiveLocal, Subject: archiveSubject, Replicas: archiveReplicas, PolicyDigest: archiveDigest, Policy: replicaPolicy, Host: archiveHost, TransportLimits: archiveTransportLimits, Log: flags.observe.Logger(), Finalized: recoveryExecutor.Finalized}
 				if archiveCatchUp != nil {
 					// without the frontier pruning the journal behind it, a catch-up would only fill the journal: it is wired only here
 					archiveCatchUp.Frontier = worker
@@ -1385,8 +1472,16 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 					authority.RootEpoch, authority.ShardEpoch, authority.ReservedRound = status.RootEpoch, status.ShardEpoch, status.ReservedRound
 				}
 			}
-			return archivewiring.ReadOperatorStatus(statusCtx, journalStore, journalCtx, limits,
-				archiveLocal, archiveSubject, archiveReplicas, rootEpoch, activated, progress, authority)
+			replicas := archiveReplicas
+			var policyReport *archivewiring.PolicyReport
+			if replicaPolicy != nil {
+				snap := replicaPolicy.Snapshot()
+				replicas, policyReport = snap.Replicas, archivewiring.PolicyReportOf(snap)
+			}
+			status, statusErr := archivewiring.ReadOperatorStatus(statusCtx, journalStore, journalCtx, limits,
+				archiveLocal, archiveSubject, replicas, rootEpoch, activated, progress, authority)
+			status.Policy = policyReport
+			return status, statusErr
 		}
 	}
 
@@ -1540,20 +1635,28 @@ func archiveFlagsValid(store, journal string, replicas []string) bool {
 // the next three after this node in circular peer-ID order, any two of which make a block durable) and the returned digest binds the frontier
 // records to that policy. An explicit pair keeps the previous two-replica behaviour and returns a zero digest. others is the shard's other
 // validators; the installed set is checked later (admitArchivePeers).
-func archiveReplicaSet(raws []string, self libp2ppeer.ID, others []libp2ppeer.ID, epoch uint64) ([]libp2ppeer.ID, [32]byte, error) {
+func archiveReplicaSet(raws []string, self libp2ppeer.ID, others []libp2ppeer.ID, epoch uint64) ([]libp2ppeer.ID, [32]byte, []byte, error) {
 	if len(raws) != 0 {
 		replicas, err := parseArchiveReplicas(raws, self)
-		return replicas, [32]byte{}, err
+		return replicas, [32]byte{}, nil, err
 	}
 	policy, err := archivepolicy.Select(self, append(slices.Clone(others), self), epoch)
 	if err != nil {
-		return nil, [32]byte{}, fmt.Errorf("%w: deriving archive replicas: %v", archivewiring.ErrConfig, err)
+		return nil, [32]byte{}, nil, fmt.Errorf("%w: deriving archive replicas: %v", archivewiring.ErrConfig, err)
 	}
-	digest, err := policy.Digest()
+	encoded, err := policy.Encode()
 	if err != nil {
-		return nil, [32]byte{}, fmt.Errorf("%w: archive policy: %v", archivewiring.ErrConfig, err)
+		return nil, [32]byte{}, nil, fmt.Errorf("%w: archive policy: %v", archivewiring.ErrConfig, err)
 	}
-	return policy.Replicas, digest, nil
+	return policy.Replicas, sha256.Sum256(encoded), encoded, nil
+}
+
+// readableArchiveReplicas is the replicas a restore reads from: the policy's current ones and its retained holders, else the configured ones.
+func readableArchiveReplicas(policy *archivewiring.ReplicaPolicy, configured []libp2ppeer.ID) []libp2ppeer.ID {
+	if policy == nil {
+		return configured
+	}
+	return policy.Snapshot().Readable()
 }
 
 // setFrontierReplicas names the replicas in the frontier policy: the eligible set bound to the derived policy digest, or the legacy pair.
