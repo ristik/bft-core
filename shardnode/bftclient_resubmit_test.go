@@ -3,6 +3,7 @@ package shardnode
 import (
 	"context"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -152,4 +153,42 @@ func TestTheConfiguredFeedAsksForAResendOnlyOnADuplicateOfTheHeldCertificate(t *
 		t.Fatal("a duplicate of the held certificate did not wake Run")
 	}
 	require.True(t, c.resubmitWanted)
+}
+
+// epochTrustStore is the client's trust store with an installed root epoch the test moves (a root activation).
+type epochTrustStore struct {
+	TrustBaseStore
+	installed *atomic.Uint64
+}
+
+func (s epochTrustStore) CurrentRootEpoch() (uint64, bool) { return s.installed.Load(), true }
+
+// #1036 (the T6 stall of the reverted timed resend): a request built on the frozen parent's certificate in the closing root epoch keeps
+// being re-sent on the duplicate answers of the blackout. Once the next root epoch is installed it is cancelled and never sent again, and
+// no new request is submitted on the closed epoch's certificate: the shard's first request of the new epoch builds on the activation's.
+func TestARequestBuiltBeforeARootActivationIsNeverSentAcrossIt(t *testing.T) {
+	ctx := context.Background()
+	f := newConfBindingFixture(t)
+	c, net := resubmitClient(t, f, BFTClientOptions{ResubmitMinInterval: time.Millisecond, MaxResubmits: 10})
+	built := f.ucMine.GetRootEpoch()
+	var installed atomic.Uint64
+	installed.Store(built)
+	c.trustBaseStore = epochTrustStore{TrustBaseStore: c.trustBaseStore, installed: &installed}
+	require.NoError(t, c.handleCertificationResponse(ctx, f.respond(f.ucMine)))
+	require.NoError(t, c.Submit(ctx, pendingRequest(f)))
+	time.Sleep(3 * time.Millisecond)
+	require.NoError(t, c.handleCertificationResponse(ctx, f.respond(f.ucMine)))
+	require.Len(t, net.sent(), 2, "re-sent within the closing epoch")
+
+	installed.Store(built + 1) // the root activation is installed; the shard has not yet received the activation's certificate
+	for i := 0; i < 5; i++ {
+		time.Sleep(3 * time.Millisecond)
+		require.NoError(t, c.handleCertificationResponse(ctx, f.respond(f.ucMine)))
+	}
+	require.Len(t, net.sent(), 2, "never re-sent across the activation")
+	c.mu.Lock()
+	require.Nil(t, c.outstanding, "the pending attempt is cancelled")
+	c.mu.Unlock()
+	require.ErrorIs(t, c.Submit(ctx, pendingRequest(f)), ErrRequestAcrossActivation, "nor submitted anew on the closed epoch's certificate")
+	require.Len(t, net.sent(), 2)
 }

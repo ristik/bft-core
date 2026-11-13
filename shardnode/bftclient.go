@@ -252,6 +252,32 @@ type outstandingRequest struct {
 	firstSent time.Time       // the first submission of this logical attempt: a re-send never changes it (lastSent does)
 	lastSent  time.Time
 	resent    int
+	// rootEpoch is the root epoch of the certificate the request was built on. Once a later root epoch is installed the request is one of
+	// the closed epoch (it lacks the transition the first block of the new one carries): it is cancelled, never sent again (#1036).
+	rootEpoch uint64
+}
+
+// ErrRequestAcrossActivation refuses a certification request built on a certificate of a root epoch before the installed one (#1036).
+var ErrRequestAcrossActivation = errors.New("shardnode: certification request built before the installed root activation")
+
+// installedRootEpoch is the root epoch this client's admission or trust store has installed, if it knows one.
+func (c *BFTClient) installedRootEpoch() (uint64, bool) {
+	c.mu.Lock()
+	admission := c.admission
+	c.mu.Unlock()
+	if admission != nil {
+		return admission.RootEpoch(), true
+	}
+	if store, ok := c.trustBaseStore.(interface{ CurrentRootEpoch() (uint64, bool) }); ok {
+		return store.CurrentRootEpoch()
+	}
+	return 0, false
+}
+
+// crossesActivation reports whether a request built on a certificate of root epoch built is now one of a closed epoch.
+func (c *BFTClient) crossesActivation(built uint64) bool {
+	installed, ok := c.installedRootEpoch()
+	return ok && installed > built
 }
 
 // deliveryAttempt identifies one certificate for retry purposes. Rounds are enough: a UCDuplicate
@@ -1401,6 +1427,9 @@ func (c *BFTClient) Submit(ctx context.Context, req *certification.BlockCertific
 	if luc == nil {
 		return errors.New("shardnode: no certificate received yet, cannot select root nodes to submit to")
 	}
+	if c.crossesActivation(luc.GetRootEpoch()) {
+		return fmt.Errorf("%w: built on a certificate of root epoch %d", ErrRequestAcrossActivation, luc.GetRootEpoch())
+	}
 	if err := c.sendRequest(ctx, req, luc); err != nil {
 		return err
 	}
@@ -1409,7 +1438,8 @@ func (c *BFTClient) Submit(ctx context.Context, req *certification.BlockCertific
 	c.mu.Lock()
 	c.submittedSinceHandshake = true
 	now := time.Now()
-	c.outstanding = &outstandingRequest{req: req, on: deliveryAttempt{partitionRound: luc.GetRoundNumber(), rootRound: luc.GetRootRoundNumber()}, firstSent: now, lastSent: now}
+	c.outstanding = &outstandingRequest{req: req, on: deliveryAttempt{partitionRound: luc.GetRoundNumber(), rootRound: luc.GetRootRoundNumber()}, firstSent: now, lastSent: now,
+		rootEpoch: luc.GetRootEpoch()}
 	c.mu.Unlock()
 	return nil
 }
@@ -1532,8 +1562,19 @@ func (c *BFTClient) resubmitPending(ctx context.Context, held *types.UnicityCert
 	if every == 0 {
 		every = DefaultResubmitMinInterval
 	}
+	installed, knows := c.installedRootEpoch()
 	c.mu.Lock()
 	o := c.outstanding
+	if o != nil && knows && installed > o.rootEpoch {
+		// built before the installed root activation: cancelled, never re-sent across it (#1036)
+		c.outstanding = nil
+		c.mu.Unlock()
+		if c.log != nil {
+			c.log.InfoContext(ctx, "pending certification request cancelled: built before the root activation",
+				slog.Uint64("builtInRootEpoch", o.rootEpoch), slog.Uint64("installedRootEpoch", installed))
+		}
+		return
+	}
 	if limit < 0 || o == nil || o.on != (deliveryAttempt{partitionRound: held.GetRoundNumber(), rootRound: held.GetRootRoundNumber()}) ||
 		o.resent >= limit || time.Since(o.lastSent) < every {
 		c.mu.Unlock()
