@@ -55,7 +55,7 @@ PORTS = {
     'agent': 28700,         # Mac 127.0.0.1:28700 (remote_joiner.py agent)               <-ssh -R- <sock-dir>/agent.sock
 }
 GENESIS_ENTITIES = (1, 2, 3, 4)
-STATES = ('registered', 'bonded', 'prepared', 'member', 'retiring')
+STATES = ('follower', 'registered', 'bonded', 'prepared', 'member', 'retiring')   # follower: known to the host, keeping up, not joining (the timer does not stand down)
 BOND_UNIT = 100 * 10 ** 18
 GAS = 2 * 10 ** 18
 NAME = re.compile(r'^handoff/[A-Za-z0-9][A-Za-z0-9._-]*$')
@@ -338,7 +338,7 @@ def register(generation, entity, sock_dir, public):
         raise ValueError(f'entity {entity} is registered with root {old.get("rootNodeId")}: another laptop identity (move {path} aside to start over)')
     info = {**old, 'entity': entity, 'rootNodeId': public['rootNodeId'], 'evmNodeId': public['evmNodeId'], 'accounts': public['accounts'],
             'token': public['token'], 'agentSocket': str(Path(sock_dir) / 'agent.sock'), 'sockDir': str(sock_dir)}
-    info.setdefault('state', 'registered')
+    info.setdefault('state', 'follower')   # `join` makes it 'registered' when the join starts; until then the unattended handoffs go on
     save_info(generation, info)
     return {k: v for k, v in info.items() if k != 'token'}
 
@@ -449,20 +449,26 @@ class Join:
         if r.state == 'member':
             say('already a member: nothing to do')
             return 0
-        if st.get('follower') is not True and r.state in ('registered', 'bonded'):
+        if r.state == 'follower':
+            if self.dry:
+                say('[dry-run] would start the join: state follower -> registered (the unattended timer stands down from here)')
+            else:
+                self.save(state='registered')
+                say('the join starts: state follower -> registered (the unattended timer stands down until the join ends)')
+        if st.get('follower') is not True and r.state in ('follower', 'registered', 'bonded'):
             raise RuntimeError('the laptop root does not report itself a follower: remote_joiner.py up, and check the tunnel')
         owner = r.info['accounts']['owner']
         # 1. funding: the bond unit and the gas of three transactions, from the operator account (--funder) or else the faucet account; the key stays on the host
-        need = BOND_UNIT + GAS if r.state in ('registered',) else GAS // 2
+        need = BOND_UNIT + GAS if r.state in ('follower', 'registered') else GAS // 2
         have = d.balance(owner)
         say(f'owner {owner}: {have / 1e18:.4f} UCT')
-        if have < need and r.state in ('registered', 'bonded'):
+        if have < need and r.state in ('follower', 'registered', 'bonded'):
             if self.dry:
                 say(f'[dry-run] would fund {owner} with {(need - have) / 1e18:.4f} UCT from the {"operator account " + str(self.funder) if self.funder else "faucet account"}')
             else:
                 d.fund(owner, need - have)
         # 2. register and bond, signed on the laptop (any time: an identity without a delegation is not eligible)
-        if r.state == 'registered':
+        if r.state in ('follower', 'registered'):
             ident = r.info.get('stakingId')
             if not ident:
                 if self.dry:

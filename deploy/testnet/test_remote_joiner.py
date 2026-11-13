@@ -190,7 +190,10 @@ class Registry(unittest.TestCase):
             self.assertEqual(os.stat(gen / 'handoff' / 'remote-joiners' / '5.json').st_mode & 0o777, 0o600)
             loaded = re_.load(gen)
             self.assertEqual(list(loaded), [5], 'the node-info file beside it is not an entity')
-            self.assertEqual((loaded[5].root_node_id, loaded[5].state, loaded[5].client.sock), ('R5', 'registered', '/s/agent.sock'))
+            self.assertEqual((loaded[5].root_node_id, loaded[5].state, loaded[5].client.sock), ('R5', 'follower', '/s/agent.sock'),
+                             'a registered laptop is a follower until its join starts')
+            import handoff_auto
+            self.assertNotIn('follower', handoff_auto.JOINING, 'the unattended timer keeps driving while the laptop only follows')
             with self.assertRaises(ValueError):
                 re_.register(gen, 5, '/s', dict(public, rootNodeId='OTHER', nodeInfo={'nodeId': 'OTHER'}))
             with self.assertRaises(ValueError):
