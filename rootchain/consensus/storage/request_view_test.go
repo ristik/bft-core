@@ -987,8 +987,11 @@ func TestContinuationKeepsAnUnchangedUnitShardResolvableAcrossRootIntervals(t *t
 	}
 	var keys [][]byte
 	for _, iv := range []interval{{fxActivate - 1, 3, fxBody0}, {fxActivate, 4, fxBody1}, {fxActivate + 4, 4, fxBody1}, {fxActivate + 10, 5, fxBody2}, {fxActivate + 15, 5, fxBody2}} {
+		// every root interval begins with the recertification of the shard: its requests build on that certificate (#1036)
+		ivSnap, err := NewRequestSnapshot(fxNetwork, crypto.SHA256, withRootEpoch(s.parent, iv.epoch), s.parentID, nil, anchor, c1, c2)
+		require.NoError(t, err)
 		for _, purpose := range []RequestPurpose{PurposeCertify, PurposeExecute, PurposeTimeout} {
-			v := s.mustResolve(snap, iv.round, iv.epoch, iv.body, purpose)
+			v := s.mustResolve(ivSnap, iv.round, iv.epoch, iv.body, purpose)
 			require.EqualValues(t, 0, v.ExpectedTR().Epoch, "the shard epoch does not move with a root interval")
 			require.EqualValues(t, 4, v.Context().TotalWeight(), "PolicyUnit: W=N")
 			require.EqualValues(t, 3, v.Context().Threshold(), "Q=floor(N/2)+1")
@@ -998,7 +1001,14 @@ func TestContinuationKeepsAnUnchangedUnitShardResolvableAcrossRootIntervals(t *t
 			require.NoError(t, err, "three signers of four")
 			require.Equal(t, v.ViewKey(), res.ViewKey)
 		}
-		keys = append(keys, s.mustResolve(snap, iv.round, iv.epoch, iv.body, PurposeCertify).AssignmentKey())
+		keys = append(keys, s.mustResolve(ivSnap, iv.round, iv.epoch, iv.body, PurposeCertify).AssignmentKey())
+		if iv.epoch > 3 {
+			// a request built before this interval's activation, on the certificate of the previous root epoch, is refused (#1036)
+			stale := s.mustResolve(NewRequestSnapshotMust(t, withRootEpoch(s.parent, iv.epoch-1), s.parentID, anchor, c1, c2), iv.round, iv.epoch, iv.body, PurposeCertify)
+			_, err := stale.VerifyIRChangeReq(quorumProof(s.request(stale, 0, 0, 1), s.request(stale, 1, 1, 1), s.request(stale, 2, 2, 1)), t2Rounds)
+			require.ErrorIs(t, err, ErrRequestBeforeActivation, "interval of root epoch %d", iv.epoch)
+			require.ErrorIs(t, stale.ValidRequest(s.request(stale, 0, 0, 1)), ErrStaleRequestContext)
+		}
 	}
 	require.NotEqual(t, keys[0], keys[1], "another root interval is another authorization")
 	require.Equal(t, keys[1], keys[2])
@@ -1028,7 +1038,7 @@ func TestContinuationKeepsAnUnchangedUnitShardResolvableAcrossRootIntervals(t *t
 func TestContinuationKeepsAWeightedAssignmentAndTheInstalledParentRule(t *testing.T) {
 	s := newScenario(t, []uint64{1, 1, 1, 1}, []uint64{6, 1, 1, 1}, nil)
 	cont := continuationOf(t, s.succ, 5, fxBody2, fxActivate+10)
-	inst := s.installed(3)
+	inst := withRootEpoch(s.installed(3), 5) // recertified by the first block of root epoch 5 (#1036)
 	snap, err := NewRequestSnapshot(fxNetwork, crypto.SHA256, inst, s.parentID, nil, s.anchor, s.succ, cont)
 	require.NoError(t, err)
 
@@ -1068,6 +1078,25 @@ func TestContinuationKeepsAWeightedAssignmentAndTheInstalledParentRule(t *testin
 	require.NoError(t, err)
 	_, err = s.resolve(badPre, fxActivate+12, 5, fxBody2, PurposeExecute)
 	require.ErrorIs(t, err, quorumweight.ErrRequestContext, "the original commitment, not a copy of a wrong one")
+}
+
+// withRootEpoch is a copy of the shard state whose last certificate was issued in the given root epoch.
+func withRootEpoch(si *ShardInfo, epoch uint64) *ShardInfo {
+	cp := *si
+	cr := *si.LastCR
+	seal := *cr.UC.UnicitySeal
+	seal.Epoch = epoch
+	cr.UC.UnicitySeal = &seal
+	cp.LastCR = &cr
+	return &cp
+}
+
+// NewRequestSnapshotMust is NewRequestSnapshot in the fixture network, failing the test on error.
+func NewRequestSnapshotMust(t *testing.T, parent *ShardInfo, parentID []byte, chain ...*RequestActivation) *RequestSnapshot {
+	t.Helper()
+	snap, err := NewRequestSnapshot(fxNetwork, crypto.SHA256, parent, parentID, nil, chain...)
+	require.NoError(t, err)
+	return snap
 }
 
 func (s *scenario) snapshotWith(parent *ShardInfo, chain ...*RequestActivation) *RequestSnapshot {
